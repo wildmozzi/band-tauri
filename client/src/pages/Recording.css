@@ -1,0 +1,321 @@
+/* ===== Recording Page ===== */
+.recording-page {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 60px 32px;
+}
+
+.recording-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 40px;
+}
+
+.recording-header h1 {
+  font-size: 2.5rem;
+  font-weight: 800;
+}
+
+.recording-header p {
+  color: var(--text-muted);
+  font-size: 1.1rem;
+}
+
+.recording-status-badge {
+  padding: 8px 16px;
+  background: rgba(141, 123, 255, 0.2);
+  border: 1px solid var(--accent);
+  border-radius: 16px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.recording-content {
+  display: grid;
+  grid-template-columns: 1fr 400px;
+  gap: 32px;
+}
+
+.recording-main {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.recording-controls-card,
+.recording-tips-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+}
+
+.recording-meta {
+  margin-bottom: 20px;
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 6px 16px;
+  border-radius: 16px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.status-pill.idle {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-muted);
+}
+
+.status-pill.recording {
+  background: rgba(248, 113, 113, 0.2);
+  color: var(--error);
+  animation: pulse 1.5s infinite;
+}
+
+.status-pill.preview {
+  background: rgba(74, 222, 128, 0.2);
+  color: var(--success);
+}
+
+.recording-meta p {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.recording-actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.rec-btn {
+  flex: 1;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: var(--bg-panel);
+  color: white;
+}
+
+.rec-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg-panel-strong);
+}
+
+.rec-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rec-btn.start:not(:disabled) {
+  background: linear-gradient(135deg, var(--success), #22c55e);
+  border: none;
+}
+
+.rec-btn.stop:not(:disabled) {
+  background: linear-gradient(135deg, var(--error), #dc2626);
+  border: none;
+}
+
+.rec-btn.reset {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.error-text {
+  padding: 12px;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid var(--error);
+  border-radius: 10px;
+  color: var(--error);
+  font-size: 0.9rem;
+}
+
+.waveform {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 80px;
+  gap: 2px;
+  margin-bottom: 20px;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 12px;
+}
+
+.wave-bar {
+  flex: 1;
+  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  border-radius: 2px;
+  transition: height 0.1s;
+}
+
+.preview-card {
+  padding: 20px;
+  background: rgba(141, 123, 255, 0.1);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+}
+
+.preview-card h3 {
+  margin-bottom: 16px;
+  font-size: 1.2rem;
+}
+
+.preview-card audio {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.download-btn {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  background: var(--accent);
+  color: white;
+  text-align: center;
+  text-decoration: none;
+  border-radius: 10px;
+  font-weight: 700;
+  transition: all 0.2s;
+  border: none;
+  cursor: pointer;
+}
+
+.download-btn:hover {
+  background: var(--accent-strong);
+  transform: translateY(-2px);
+}
+
+.recording-tips-card h3 {
+  margin-bottom: 16px;
+  font-size: 1.2rem;
+}
+
+.recording-tips-card ul {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.recording-tips-card li {
+  padding-left: 24px;
+  position: relative;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.recording-tips-card li::before {
+  content: '💡';
+  position: absolute;
+  left: 0;
+}
+
+.recording-sidebar {
+  display: flex;
+  flex-direction: column;
+}
+
+.take-board {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+  max-height: 800px;
+  overflow-y: auto;
+}
+
+.take-board-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.take-board-head h3 {
+  font-size: 1.3rem;
+}
+
+.take-count {
+  padding: 4px 12px;
+  background: rgba(141, 123, 255, 0.2);
+  border-radius: 12px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.empty-takes {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-muted);
+}
+
+.take-card {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.take-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.take-card-head strong {
+  font-size: 1.1rem;
+}
+
+.take-card-head small {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.take-card audio {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.take-download {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  text-align: center;
+  text-decoration: none;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  transition: all 0.2s;
+}
+
+.take-download:hover {
+  background: var(--accent);
+  color: white;
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .recording-content {
+    grid-template-columns: 1fr;
+  }
+
+  .recording-sidebar {
+    order: -1;
+  }
+}

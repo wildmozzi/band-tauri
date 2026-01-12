@@ -1,0 +1,242 @@
+/* 플로팅 미니 플레이어 - 오른쪽 아래 고정 */
+.floating-mini-player {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 1000;
+
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 16px;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+
+  cursor: pointer;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(10px);
+}
+
+.floating-mini-player:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 12px 40px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(99, 102, 241, 0.4) inset;
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+/* 상태 표시 */
+.mini-player-status {
+  display: flex;
+  align-items: center;
+}
+
+.status-indicator {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.status-indicator.live {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.15);
+  animation: pulse-live 2s infinite;
+}
+
+.status-indicator.connecting {
+  color: #facc15;
+  background: rgba(250, 204, 21, 0.15);
+}
+
+.status-indicator.idle {
+  color: #9ca3af;
+  background: rgba(156, 163, 175, 0.15);
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* 연주자 정보 */
+.mini-player-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.performers-preview {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.performer-icon {
+  font-size: 18px;
+  transition: transform 0.2s;
+}
+
+.performer-icon:hover {
+  transform: scale(1.2);
+}
+
+.more-performers {
+  font-size: 11px;
+  color: #9ca3af;
+  padding: 2px 6px;
+  background: rgba(156, 163, 175, 0.2);
+  border-radius: 10px;
+}
+
+.room-stats {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 컨트롤 버튼들 */
+.mini-player-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.floating-mini-player .control-btn {
+  width: 32px !important;
+  height: 32px !important;
+  min-width: unset !important;
+  padding: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.floating-mini-player .control-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.1);
+}
+
+.floating-mini-player .control-btn.mic {
+  background: rgba(74, 222, 128, 0.2);
+  position: relative;
+}
+
+.floating-mini-player .control-btn.mic:hover {
+  background: rgba(74, 222, 128, 0.4);
+}
+
+.floating-mini-player .control-btn.mic.muted {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.floating-mini-player .control-btn.mic.muted:hover {
+  background: rgba(239, 68, 68, 0.4);
+}
+
+/* 마이크 음소거 시 대각선 빨간 줄 */
+.floating-mini-player .control-btn.mic.muted::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 45%;
+  height: 0.5px;
+  background: #ef4444;
+  transform: translate(-50%, -50%) rotate(45deg);
+  border-radius: 1px;
+}
+
+.floating-mini-player .control-btn.mute {
+  background: rgba(74, 222, 128, 0.2);
+}
+
+.floating-mini-player .control-btn.mute:hover {
+  background: rgba(74, 222, 128, 0.4);
+}
+
+.floating-mini-player .control-btn.mute.muted {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.floating-mini-player .control-btn.mute.muted:hover {
+  background: rgba(239, 68, 68, 0.4);
+}
+
+.floating-mini-player .control-btn.exit {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.floating-mini-player .control-btn.exit:hover {
+  background: rgba(239, 68, 68, 0.4);
+}
+
+/* 클릭 힌트 */
+.mini-player-hint {
+  position: absolute;
+  bottom: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: #6b7280;
+  opacity: 0;
+  transition: opacity 0.2s;
+  white-space: nowrap;
+}
+
+.floating-mini-player:hover .mini-player-hint {
+  opacity: 1;
+}
+
+/* 반응형 - 모바일 */
+@media (max-width: 480px) {
+  .floating-mini-player {
+    bottom: 16px;
+    right: 16px;
+    left: 16px;
+    padding: 10px 14px;
+    border-radius: 12px;
+  }
+
+  .mini-player-info {
+    flex: 1;
+  }
+
+  .status-indicator {
+    font-size: 11px;
+    padding: 3px 6px;
+  }
+
+  .performer-icon {
+    font-size: 16px;
+  }
+
+  .floating-mini-player .control-btn {
+    width: 28px !important;
+    height: 28px !important;
+    font-size: 12px;
+  }
+}

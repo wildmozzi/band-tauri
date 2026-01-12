@@ -1,0 +1,18 @@
+# Environment variables
+.env
+.env.local
+
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# Logs
+*.log
+
+# Uploaded files
+uploads
+
+# SSL certificates (local dev)
+certs

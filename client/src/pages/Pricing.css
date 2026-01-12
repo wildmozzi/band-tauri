@@ -1,0 +1,369 @@
+/* Pricing Page Styles */
+.pricing-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.pricing-hero {
+  text-align: center;
+  margin-bottom: 4rem;
+}
+
+.pricing-hero .eyebrow {
+  color: #7b7bff;
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 1rem;
+}
+
+.pricing-hero h1 {
+  font-size: 3rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.pricing-hero .lead {
+  font-size: 1.25rem;
+  color: #a0a8b8;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* Pricing Plans */
+.pricing-plans {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+  gap: 2rem;
+  margin-bottom: 4rem;
+}
+
+.plan-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  padding: 2rem;
+  position: relative;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.plan-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 20px 40px rgba(123, 123, 255, 0.1);
+}
+
+.plan-card.recommended {
+  border-color: #7b7bff;
+  box-shadow: 0 0 30px rgba(123, 123, 255, 0.2);
+}
+
+.plan-badge {
+  position: absolute;
+  top: -10px;
+  right: 20px;
+  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  color: #050505;
+  padding: 0.5rem 1rem;
+  border-radius: 20px;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.plan-header {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.plan-header h3 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.plan-subtitle {
+  color: #a0a8b8;
+  margin-bottom: 1rem;
+}
+
+.plan-price {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.plan-price .price {
+  font-size: 2.5rem;
+  font-weight: 700;
+  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.plan-price .period {
+  color: #a0a8b8;
+  font-size: 1rem;
+}
+
+.plan-features {
+  margin-bottom: 2rem;
+}
+
+.feature-highlight h4,
+.feature-limitations h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+.feature-highlight ul,
+.feature-limitations ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.feature-highlight li,
+.feature-limitations li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.feature-highlight li:last-child,
+.feature-limitations li:last-child {
+  border-bottom: none;
+}
+
+.plan-button {
+  width: 100%;
+  padding: 1rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: 12px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  margin-bottom: 1rem;
+}
+
+.free-button {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f5f7ff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.free-button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.standard-button {
+  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  color: #050505;
+}
+
+.standard-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px rgba(123, 123, 255, 0.3);
+}
+
+.pro-button {
+  background: linear-gradient(120deg, #ff7ab8, #ffb347);
+  color: #050505;
+}
+
+.pro-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px rgba(255, 122, 184, 0.3);
+}
+
+.plan-recommendation {
+  text-align: center;
+  color: #a0a8b8;
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+/* Comparison Table */
+.comparison-table {
+  margin-bottom: 4rem;
+}
+
+.comparison-table h2 {
+  text-align: center;
+  margin-bottom: 2rem;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.table-container {
+  overflow-x: auto;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.comparison-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.comparison-table th,
+.comparison-table td {
+  padding: 1rem;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.comparison-table th {
+  background: rgba(255, 255, 255, 0.1);
+  font-weight: 600;
+  text-align: center;
+}
+
+.comparison-table td {
+  text-align: center;
+}
+
+.feature-name {
+  text-align: left !important;
+  font-weight: 500;
+}
+
+/* FAQ Section */
+.faq-section {
+  margin-bottom: 4rem;
+}
+
+.faq-section h2 {
+  text-align: center;
+  margin-bottom: 2rem;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.faq-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 2rem;
+}
+
+.faq-item {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 1.5rem;
+}
+
+.faq-item h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: #7b7bff;
+}
+
+.faq-item p {
+  color: #a0a8b8;
+  line-height: 1.6;
+}
+
+/* Getting Started */
+.getting-started {
+  text-align: center;
+}
+
+.getting-started h2 {
+  margin-bottom: 2rem;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.steps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 2rem;
+}
+
+.step {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 2rem;
+}
+
+.step-number {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  color: #050505;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  margin: 0 auto 1rem;
+}
+
+.step h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+.step p {
+  color: #a0a8b8;
+  line-height: 1.6;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .pricing-page {
+    padding: 1rem;
+  }
+
+  .pricing-hero h1 {
+    font-size: 2rem;
+  }
+
+  .pricing-plans {
+    grid-template-columns: 1fr;
+  }
+
+  .plan-price .price {
+    font-size: 2rem;
+  }
+}/* Cur
+rent Plan Styles */
+.plan-button.current-plan {
+  background: rgba(34, 197, 94, 0.2);
+  border: 2px solid #22c55e;
+  color: #22c55e;
+  cursor: default;
+}
+
+.plan-button.current-plan:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.plan-card.current-plan {
+  border-color: #22c55e;
+  box-shadow: 0 0 20px rgba(34, 197, 94, 0.2);
+}
+
+.plan-card.current-plan::before {
+  content: "현재 플랜";
+  position: absolute;
+  top: -10px;
+  left: 20px;
+  background: #22c55e;
+  color: #050505;
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+

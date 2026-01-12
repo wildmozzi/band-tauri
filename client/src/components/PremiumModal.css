@@ -1,0 +1,358 @@
+/* Premium Modal Styles */
+
+/* Plan Status Compact (Navigation) */
+.plan-status-compact {
+  display: flex;
+  align-items: center;
+}
+
+.plan-badge-compact {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: white;
+  white-space: nowrap;
+}
+
+/* Plan Status Card (Full) */
+.plan-status-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+
+.plan-status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.plan-status-header .plan-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-status-header h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.plan-badge {
+  padding: 2px 8px;
+  border-radius: 8px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: white;
+}
+
+.upgrade-link {
+  font-size: 0.85rem;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.upgrade-link:hover {
+  text-decoration: underline;
+}
+
+.plan-limits {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.limit-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.limit-label {
+  color: var(--text-muted);
+}
+
+.limit-value {
+  font-weight: 500;
+}
+
+.limit-item.warning .limit-value {
+  color: var(--warning);
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+.premium-modal {
+  background: #02040c;
+  border: 1px solid rgba(123, 123, 255, 0.3);
+  border-radius: 20px;
+  max-width: 500px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  position: relative;
+  box-shadow: 0 20px 40px rgba(123, 123, 255, 0.2);
+}
+
+.modal-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #f5f7ff;
+  font-size: 1.25rem;
+  transition: background 0.2s ease;
+}
+
+.modal-close:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.modal-header {
+  text-align: center;
+  padding: 2rem 2rem 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.premium-icon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+}
+
+.modal-header h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.feature-description {
+  color: #a0a8b8;
+  line-height: 1.6;
+}
+
+.feature-description strong {
+  color: #7b7bff;
+}
+
+.modal-content {
+  padding: 2rem;
+}
+
+/* Plan Selector */
+.plan-selector {
+  margin-bottom: 2rem;
+}
+
+.plan-tabs {
+  display: flex;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 4px;
+  margin-bottom: 1.5rem;
+}
+
+.plan-tab {
+  flex: 1;
+  padding: 0.75rem;
+  border: none;
+  background: transparent;
+  color: #a0a8b8;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-weight: 500;
+}
+
+.plan-tab.active {
+  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  color: #050505;
+  font-weight: 600;
+}
+
+.selected-plan-details {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 1.5rem;
+}
+
+.plan-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.plan-info h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.plan-price {
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+}
+
+.plan-price .price {
+  font-size: 1.5rem;
+  font-weight: 700;
+  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.plan-price .period {
+  color: #a0a8b8;
+  font-size: 0.875rem;
+}
+
+.plan-features h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: #f5f7ff;
+}
+
+.plan-features ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.plan-features li {
+  padding: 0.5rem 0;
+  color: #a0a8b8;
+  font-size: 0.875rem;
+}
+
+/* Modal Actions */
+.modal-actions {
+  margin-bottom: 2rem;
+}
+
+.upgrade-button {
+  width: 100%;
+  padding: 1rem;
+  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  color: #050505;
+  border: none;
+  border-radius: 12px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  margin-bottom: 1rem;
+}
+
+.upgrade-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px rgba(123, 123, 255, 0.3);
+}
+
+.view-all-plans {
+  display: block;
+  text-align: center;
+  color: #7b7bff;
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s ease;
+}
+
+.view-all-plans:hover {
+  color: #ff7ab8;
+}
+
+/* Modal Benefits */
+.modal-benefits {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding-top: 1.5rem;
+}
+
+.benefit-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.benefit-item:last-child {
+  margin-bottom: 0;
+}
+
+.benefit-icon {
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+.benefit-item strong {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+  color: #f5f7ff;
+}
+
+.benefit-item p {
+  color: #a0a8b8;
+  font-size: 0.875rem;
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .premium-modal {
+    margin: 1rem;
+    max-width: none;
+  }
+
+  .modal-header,
+  .modal-content {
+    padding: 1.5rem;
+  }
+
+  .plan-info {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .benefit-item {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+}
