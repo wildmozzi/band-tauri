@@ -33,7 +33,8 @@ export class MultiTrackPlayer {
   // 오디오 효과
   private masterGain: Tone.Gain | null = null
   private playbackRate: number = 1.0
-  private pitchShift: number = 0  // 반음 단위
+  private pitchShift: number = 0
+  private stemVolumes: Map<string, number> = new Map()
 
   // 진행률 콜백
   private progressCallback?: (progress: number, currentTime: number) => void
@@ -177,12 +178,14 @@ export class MultiTrackPlayer {
 
     console.log(`[startNewPlayback] audioPosition=${this.audioPosition}, playbackRate=${this.playbackRate}`)
 
+    // 모든 트랙이 정확히 같은 시각에 시작하도록 미래 시각을 미리 계산
+    const startAt = Tone.now() + 0.05
+
     // 모든 트랙의 소스 생성 및 재생
     this.tracks.forEach((track) => {
       if (!track.buffer || !track.gainNode) return
 
       // startOffset 위치부터 시작하도록 버퍼 slice
-      // GrainPlayer의 start(when, offset)이 제대로 동작하지 않아서 버퍼를 직접 자름
       const bufferToUse = startOffset > 0
         ? track.buffer.slice(startOffset)
         : track.buffer
@@ -196,20 +199,15 @@ export class MultiTrackPlayer {
         reverse: false
       })
 
-      // 생성 후 playbackRate 명시적 설정 (생성자에서 설정하면 적용 안 될 수 있음)
       source.playbackRate = this.playbackRate
-
-      // 음정 설정 (반음 → 센트 변환: 1반음 = 100센트)
       source.detune = this.pitchShift * 100
-
-      // GainNode에 연결
       source.connect(track.gainNode)
 
-      // 스템이 비활성화되어 있으면 볼륨 0
-      track.gainNode.gain.value = track.enabled ? 1.0 : 0.0
+      const vol = this.stemVolumes.get(track.name) ?? 1.0
+      track.gainNode.gain.value = track.enabled ? vol : 0.0
 
-      // 재생 시작 (버퍼가 이미 slice되어 있으므로 offset 불필요)
-      source.start(Tone.now())
+      // 모든 트랙 동일 시각 시작
+      source.start(startAt)
       track.source = source
     })
 
@@ -345,12 +343,34 @@ export class MultiTrackPlayer {
 
     track.enabled = !track.enabled
 
-    // 재생 중이면 즉시 반영
     if (track.gainNode) {
-      track.gainNode.gain.value = track.enabled ? 1.0 : 0.0
+      const vol = this.stemVolumes.get(stemName) ?? 1.0
+      track.gainNode.gain.value = track.enabled ? vol : 0.0
     }
 
     console.log(`[MultiTrackPlayer] Stem ${stemName} ${track.enabled ? 'enabled' : 'disabled'}`)
+  }
+
+  /**
+   * 스템 개별 볼륨 설정 (0.0 ~ 1.0)
+   */
+  setStemVolume(stemName: string, volume: number) {
+    const clamped = Math.max(0, Math.min(1, volume))
+    this.stemVolumes.set(stemName, clamped)
+    const track = this.tracks.get(stemName)
+    if (track?.gainNode && track.enabled) {
+      track.gainNode.gain.value = clamped
+    }
+  }
+
+  /**
+   * 마스터 볼륨 설정 (0.0 ~ 1.0)
+   */
+  setMasterVolume(volume: number) {
+    const clamped = Math.max(0, Math.min(1, volume))
+    if (this.masterGain) {
+      this.masterGain.gain.value = clamped
+    }
   }
 
   /**
@@ -369,24 +389,27 @@ export class MultiTrackPlayer {
     const clampedTempo = Math.max(0.5, Math.min(2.0, tempo))
 
     if (this.isPlaying) {
-      // 현재 재생 위치를 새로운 앵커로 저장 (기존 rate 기준)
+      // 현재 위치를 새 앵커로 저장
       this.audioPosition = this.getCurrentTime()
       this.lastPositionTime = Tone.now()
-
-      // rate 업데이트
       this.playbackRate = clampedTempo
 
-      // 재생 중인 모든 소스에 즉시 반영 (재시작 없이)
+      // 모든 소스에 동일한 오디오 시각에 rate 적용 (드리프트 방지)
+      const changeAt = Tone.now()
       this.tracks.forEach((track) => {
         if (track.source) {
-          track.source.playbackRate = clampedTempo
+          try {
+            track.source.playbackRate.setValueAtTime(clampedTempo, changeAt)
+          } catch {
+            track.source.playbackRate = clampedTempo
+          }
         }
       })
     } else {
       this.playbackRate = clampedTempo
     }
 
-    console.log(`[MultiTrackPlayer] Tempo set to ${clampedTempo}x (pitch preserved)`)
+    console.log(`[MultiTrackPlayer] Tempo set to ${clampedTempo}x`)
   }
 
   /**

@@ -163,8 +163,34 @@
 
 .stem-item {
   display: flex;
-  gap: 0.5rem;
-  align-items: stretch;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.stem-volume-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0 0.2rem;
+}
+
+.stem-volume-slider {
+  flex: 1;
+  height: 4px;
+  accent-color: #00d4ff;
+  cursor: pointer;
+}
+
+.stem-volume-slider:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.stem-volume-label {
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.5);
+  min-width: 2.8rem;
+  text-align: right;
 }
 
 .stem-button {
