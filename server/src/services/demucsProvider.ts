@@ -77,11 +77,9 @@ async function separateWithLocal(
       args.push('--overlap', String(options.overlap))
     }
 
-    // Python 3.11 사용 (CUDA 지원)
-    const pythonCmd = process.platform === 'win32' ? 'py' : 'python3'
-    const pythonArgs = process.platform === 'win32' ? ['-3.11', ...args] : args
+    const pythonCmd = process.env.PYTHON_PATH || (process.platform === 'win32' ? 'python' : 'python3')
 
-    const demucs = spawn(pythonCmd, pythonArgs)
+    const demucs = spawn(pythonCmd, args)
 
     let stdout = ''
     let stderr = ''

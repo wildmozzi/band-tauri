@@ -35,7 +35,8 @@ export async function separateAudioStems(mp3FilePath: string): Promise<Separatio
     const scriptPath = path.join(__dirname, '..', '..', 'demucs_separate.py')
 
     // 커스텀 Python 스크립트 실행 (soundfile 백엔드 사용)
-    const demucs = spawn('python', [
+    const pythonCmd = process.env.PYTHON_PATH || 'python'
+    const demucs = spawn(pythonCmd, [
       scriptPath,
       mp3FilePath,
       outputDir
