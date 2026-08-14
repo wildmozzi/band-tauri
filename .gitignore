@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# MCP config (contains auth tokens)
+.mcp.json
+
 # Dependencies
 node_modules
 
