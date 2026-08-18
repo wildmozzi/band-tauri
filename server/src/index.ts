@@ -1,5 +1,6 @@
 import 'dotenv/config';
 
+import cron from 'node-cron';
 import express from 'express';
 import cors from 'cors';
 import { createServer as createHttpServer } from 'http';
@@ -58,6 +59,36 @@ if (supabase) {
 	console.log('[DB] Supabase not configured - participant sync disabled');
 	console.log('[DB] Set SUPABASE_URL and SUPABASE_SERVICE_KEY to enable');
 }
+
+// 매일 새벽 3시 만료된 음원분리 파일 자동 정리
+cron.schedule('0 3 * * *', async () => {
+	if (!supabase) return;
+	try {
+		const { data: expired } = await supabase
+			.from('stem_separations')
+			.select('id, storage_folder')
+			.lt('expires_at', new Date().toISOString());
+
+		if (!expired || expired.length === 0) {
+			console.log('[Cleanup] 만료된 음원분리 결과 없음');
+			return;
+		}
+
+		const stemNames = ['vocals', 'drums', 'bass', 'piano', 'guitar', 'other'];
+		for (const sep of expired) {
+			if (sep.storage_folder) {
+				await supabase.storage.from('audio-stems').remove(stemNames.map(n => `${sep.storage_folder}/${n}.wav`));
+			}
+		}
+
+		const ids = expired.map((e: { id: string }) => e.id);
+		await supabase.from('stem_separations').delete().in('id', ids);
+
+		console.log(`[Cleanup] 만료된 음원분리 ${ids.length}개 삭제 완료`);
+	} catch (err) {
+		console.error('[Cleanup] 오류:', err);
+	}
+});
 
 // 방 참여자 수 업데이트 함수
 async function updateRoomParticipants(roomId: string) {

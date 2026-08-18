@@ -493,44 +493,4 @@ router.delete('/stem-separation/:id', async (req: Request, res: Response) => {
   }
 })
 
-/**
- * POST /api/music/cleanup-expired
- * 만료된 분리 결과 일괄 삭제 (Storage + DB)
- */
-router.post('/cleanup-expired', async (req: Request, res: Response) => {
-  try {
-    if (!supabaseAdmin) {
-      return res.status(503).json({ success: false, error: 'Supabase not configured' })
-    }
-
-    const { data: expired, error: fetchError } = await supabaseAdmin
-      .from('stem_separations')
-      .select('id, storage_folder')
-      .lt('expires_at', new Date().toISOString())
-
-    if (fetchError) {
-      return res.status(500).json({ success: false, error: fetchError.message })
-    }
-
-    if (!expired || expired.length === 0) {
-      return res.json({ success: true, deleted: 0, message: '만료된 분리 결과가 없습니다.' })
-    }
-
-    const stemNames = ['vocals', 'drums', 'bass', 'piano', 'guitar', 'other']
-    for (const sep of expired) {
-      if (sep.storage_folder) {
-        await supabaseAdmin.storage.from('audio-stems').remove(stemNames.map(n => `${sep.storage_folder}/${n}.wav`))
-      }
-    }
-
-    const ids = expired.map((e: { id: string }) => e.id)
-    await supabaseAdmin.from('stem_separations').delete().in('id', ids)
-
-    console.log(`[Cleanup] Deleted ${ids.length} expired separations`)
-    return res.json({ success: true, deleted: ids.length })
-  } catch (error) {
-    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
-  }
-})
-
 export default router
