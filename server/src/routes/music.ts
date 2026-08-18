@@ -427,6 +427,7 @@ router.get('/stem-history', async (req: Request, res: Response) => {
       .select('*')
       .eq('user_id', userId)
       .eq('status', 'completed')
+      .gt('expires_at', new Date().toISOString())
       .order('created_at', { ascending: false })
       .limit(50)
 
