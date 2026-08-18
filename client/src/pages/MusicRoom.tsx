@@ -53,6 +53,9 @@ export function MusicRoom() {
   const [masterVolume, setMasterVolume] = useState(100)
   const [stemVolumes, setStemVolumes] = useState<Record<string, number>>({})
 
+  // 인증 상태
+  const [isLoggedIn, setIsLoggedIn] = useState(false)
+
   // 히스토리 상태
   const [showHistory, setShowHistory] = useState(false)
   const [separationHistory, setSeparationHistory] = useState<StemSeparation[]>([])
@@ -65,6 +68,26 @@ export function MusicRoom() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const progressBarRef = useRef<HTMLDivElement>(null)
   const isDraggingRef = useRef(false)  // 드래그 상태 ref (콜백에서 참조용)
+
+  // 로그인 상태 감지
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null
+    import('../lib/supabaseClient').then(({ supabase }) => {
+      if (!supabase) return
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        setIsLoggedIn(!!session)
+      })
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        setIsLoggedIn(!!session)
+        if (!session) {
+          setShowHistory(false)
+          setSeparationHistory([])
+        }
+      })
+      unsubscribe = () => subscription.unsubscribe()
+    })
+    return () => { unsubscribe?.() }
+  }, [])
 
   // 컴포넌트 마운트 시 플레이어 초기화
   useEffect(() => {
@@ -525,8 +548,8 @@ export function MusicRoom() {
         )}
       </div>
 
-      {/* 히스토리 섹션 */}
-      <div className="history-section">
+      {/* 히스토리 섹션 - 로그인한 유저만 */}
+      {isLoggedIn && <div className="history-section">
         <button
           className="history-toggle-btn"
           onClick={handleToggleHistory}
@@ -584,7 +607,7 @@ export function MusicRoom() {
             )}
           </div>
         )}
-      </div>
+      </div>}
 
       {/* 세션 토글 버튼 */}
       {availableStems.length > 0 && (

@@ -418,18 +418,17 @@ router.get('/stem-history', async (req: Request, res: Response) => {
 
     const userId = await getUserIdFromToken(req.headers.authorization)
 
-    let query = supabaseAdmin
+    if (!userId) {
+      return res.status(401).json({ success: false, error: '로그인이 필요합니다.' })
+    }
+
+    const query = supabaseAdmin
       .from('stem_separations')
       .select('*')
+      .eq('user_id', userId)
       .eq('status', 'completed')
       .order('created_at', { ascending: false })
       .limit(50)
-
-    if (userId) {
-      query = query.eq('user_id', userId)
-    } else {
-      query = query.is('user_id', null)
-    }
 
     const { data, error } = await query
 
