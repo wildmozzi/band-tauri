@@ -204,7 +204,7 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
  */
 router.get('/file/:filename', (req: Request, res: Response) => {
   try {
-    const filename = req.params.filename
+    const filename = req.params['filename'] as string
     const filePath = path.join(__dirname, '../../uploads', filename)
 
     // 파일 존재 여부 확인
@@ -232,7 +232,7 @@ router.get('/file/:filename', (req: Request, res: Response) => {
  */
 router.delete('/file/:filename', (req: Request, res: Response) => {
   try {
-    const filename = req.params.filename
+    const filename = req.params['filename'] as string
     const filePath = path.join(__dirname, '../../uploads', filename)
 
     // 파일 존재 여부 확인
