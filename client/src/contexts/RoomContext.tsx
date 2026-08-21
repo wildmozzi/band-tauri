@@ -601,6 +601,13 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  // p2p-discovery 전송 시 내 주소를 포함 (양방향 NAT hole punching용)
+  const sendP2PDiscovery = (peerId: string) => {
+    const networkInfo = nativeNetworkInfoRef.current
+    const myAddr = networkInfo?.public_addr || networkInfo?.lan_addr || networkInfo?.local_addr || null
+    sendSignalMessage({ type: 'p2p-discovery', to: peerId, publicAddr: myAddr })
+  }
+
   const attachLocalTracks = (pc: RTCPeerConnection, stream?: MediaStream | null) => {
     // ref를 사용하여 항상 최신 localStream 사용
     const streamToUse = stream !== undefined ? stream : localStreamRef.current
@@ -711,7 +718,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       setRtcStatus('live')  // P2P로 연결됨
       // 피어에게 P2P discovery 전송 (아직 안 했으면)
       if (!tauriPeersRef.current.has(peerId)) {
-        sendSignalMessage({ type: 'p2p-discovery', to: peerId })
+        sendP2PDiscovery(peerId)
       }
       return
     }
@@ -768,7 +775,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       console.log('[RTC] Ignoring WebRTC offer - Tauri uses P2P UDP only:', peerId.slice(0, 8))
       // 피어에게 P2P discovery 전송
       if (!tauriPeersRef.current.has(peerId)) {
-        sendSignalMessage({ type: 'p2p-discovery', to: peerId })
+        sendP2PDiscovery(peerId)
       }
       return
     }
@@ -938,7 +945,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
         for (const peerId of currentPeers) {
           // 시그널링으로 피어의 public address 요청 필요
-          sendSignalMessage({ type: 'p2p-discovery', to: peerId })
+          sendP2PDiscovery(peerId)
         }
 
         return
@@ -1940,7 +1947,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
           if (nativeAudioActiveRef.current) {
             console.log('[Tauri] Sending P2P discovery to', peerList.length, 'peers')
             peerList.forEach((peerId) => {
-              sendSignalMessage({ type: 'p2p-discovery', to: peerId })
+              sendP2PDiscovery(peerId)
             })
           } else if (localStreamRef.current) {
             // 웹 앱이고 연주 중이면 WebRTC offer 전송
@@ -1976,7 +1983,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
           // Tauri 앱이고 연주 중이면 새 참여자에게 P2P discovery 전송
           if (nativeAudioActiveRef.current) {
             console.log('[Tauri] Sending P2P discovery to new participant:', participant.oderId?.slice(0, 8))
-            sendSignalMessage({ type: 'p2p-discovery', to: participant.oderId })
+            sendP2PDiscovery(participant.oderId)
           } else if (localStreamRef.current) {
             // 웹 앱이고 연주 중이면 WebRTC offer 전송
             console.log('[RTC] I have localStream, creating offer for new participant:', participant.oderId?.slice(0, 8))
@@ -2028,7 +2035,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
               // Tauri: P2P discovery 전송
               if (!tauriPeersRef.current.has(oderId)) {
                 console.log('[Tauri] New performer detected, sending P2P discovery:', oderId.slice(0, 8))
-                sendSignalMessage({ type: 'p2p-discovery', to: oderId })
+                sendP2PDiscovery(oderId)
               }
             } else if (!peerConnections.current.has(oderId)) {
               // 웹: WebRTC offer 전송
@@ -2054,7 +2061,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
           setJoinFeedback(`룸 입장 완료 · 동시 연결 ${peerList.length + 1}명`)
           if (nativeAudioActiveRef.current) {
             peerList.forEach((peerId) => {
-              sendSignalMessage({ type: 'p2p-discovery', to: peerId })
+              sendP2PDiscovery(peerId)
             })
           } else {
             peerList.forEach((peerId) => {
@@ -2069,7 +2076,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
           setPeers((prev) => (prev.includes(payload.peerId) ? prev : [...prev, payload.peerId]))
           // Tauri 앱이면 P2P discovery 전송
           if (nativeAudioActiveRef.current) {
-            sendSignalMessage({ type: 'p2p-discovery', to: payload.peerId })
+            sendP2PDiscovery(payload.peerId)
           }
           return
         }
@@ -2131,16 +2138,14 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
         // === Tauri P2P 피어 발견 ===
 
-        // P2P 발견 요청 수신 (내 address 전송)
+        // P2P 발견 요청 수신 (내 address 전송 + 상대 address로 역방향 연결)
         if (payload.type === 'p2p-discovery' && typeof payload.from === 'string') {
-          // p2p-discovery를 보내는 피어도 Tauri 앱임을 기록
           tauriPeersRef.current.add(payload.from)
-          console.log('[Tauri P2P] Peer sending discovery is Tauri:', payload.from.slice(0, 8))
+          console.log('[Tauri P2P] Received discovery from:', payload.from.slice(0, 8))
 
-          // Tauri 앱이고 네이티브 오디오 사용 중일 때만 응답
           const networkInfo = nativeNetworkInfoRef.current
           if (isTauri() && nativeAudioActiveRef.current && networkInfo) {
-            // 우선순위: public_addr > lan_addr > local_addr
+            // 내 주소를 상대에게 응답
             const addr = networkInfo.public_addr || networkInfo.lan_addr || networkInfo.local_addr
             if (addr && !addr.startsWith('0.0.0.0')) {
               sendSignalMessage({
@@ -2151,6 +2156,21 @@ export function RoomProvider({ children }: { children: ReactNode }) {
               console.log('[Tauri P2P] Sent discovery response to:', payload.from.slice(0, 8), 'addr:', addr)
             } else {
               console.warn('[Tauri P2P] No valid address to send:', networkInfo)
+            }
+
+            // 상대가 자신의 주소를 포함해서 보냈으면 역방향으로도 연결 (양방향 NAT hole punching)
+            if (payload.publicAddr && !p2pConnectingRef.current.has(payload.from)) {
+              p2pConnectingRef.current.add(payload.from)
+              console.log('[Tauri P2P] Bidirectional connect to:', payload.from.slice(0, 8), 'at', payload.publicAddr)
+              void (async () => {
+                try {
+                  await connectToPeer(payload.from, payload.publicAddr as string)
+                  console.log('[Tauri P2P] Bidirectional connect success:', payload.from.slice(0, 8))
+                } catch (err) {
+                  console.error('[Tauri P2P] Bidirectional connect failed:', err)
+                  p2pConnectingRef.current.delete(payload.from)
+                }
+              })()
             }
           }
           return
