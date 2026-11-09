@@ -1851,6 +1851,20 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     peersRef.current = peers
   }, [peers])
 
+  // 토큰 갱신/로그인 시 WS 서버에 재인증 (서버는 토큰 만료 후 재인증이 없으면 연결을 끊는다)
+  useEffect(() => {
+    if (!supabase) return
+    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      if ((event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') && session?.access_token) {
+        const ws = wsRef.current
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'auth', accessToken: session.access_token }))
+        }
+      }
+    })
+    return () => data.subscription.unsubscribe()
+  }, [])
+
   // WebSocket setup
   useEffect(() => {
     if (typeof window === 'undefined' || typeof WebSocket === 'undefined') {

@@ -165,4 +165,4 @@ export const subscriptionService = new SubscriptionService()
 // 주기적으로 만료된 구독 처리 (1시간마다)
 setInterval(() => {
   subscriptionService.processExpiredSubscriptions()
-}, 60 * 60 * 1000)
+}, 60 * 60 * 1000).unref()

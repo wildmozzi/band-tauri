@@ -3,7 +3,18 @@ import multer from 'multer'
 import * as path from 'path'
 import * as fs from 'fs'
 import { v4 as uuidv4 } from 'uuid'
-import { createClient } from '@supabase/supabase-js'
+import { supabaseAdmin } from '../lib/supabase'
+import { requireAuth, getUserIdFromRequest } from '../lib/auth'
+import { uploadLimiter } from '../lib/rateLimits'
+import {
+  UPLOAD_DIR,
+  ensureUploadDir,
+  resolveUploadPath,
+  recordUploadOwner,
+  getUploadOwner,
+  removeUploadOwner,
+  matchesFileSignature,
+} from '../lib/uploads'
 import { convertMp3ToMidi } from '../services/amtService'
 import { separateAudioWithProvider, currentProvider } from '../services/demucsProvider'
 import { convertPdfToMusicXml } from '../services/omrService'
@@ -20,28 +31,18 @@ function tryDecodeFilename(name: string): string {
   return name
 }
 
-const supabaseUrl = process.env.SUPABASE_URL || ''
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ''
-const supabaseAdmin = supabaseUrl && supabaseServiceKey
-  ? createClient(supabaseUrl, supabaseServiceKey)
-  : null
-
 if (supabaseAdmin) {
   console.log('[Music Routes] Supabase admin client initialized')
 } else {
   console.log('[Music Routes] Supabase not configured - stem storage disabled')
 }
 
-async function getUserIdFromToken(authHeader: string | string[] | undefined): Promise<string | null> {
-  const header = Array.isArray(authHeader) ? authHeader[0] : authHeader
-  if (!header?.startsWith('Bearer ') || !supabaseAdmin) return null
-
+function safeUnlink(p: string | null | undefined) {
+  if (!p) return
   try {
-    const token = header.substring(7)
-    const { data: { user } } = await supabaseAdmin.auth.getUser(token)
-    return user?.id || null
+    if (fs.existsSync(p)) fs.unlinkSync(p)
   } catch {
-    return null
+    // 무시
   }
 }
 
@@ -87,12 +88,8 @@ async function uploadStemsToStorage(
 // Multer 설정: 파일 저장 위치 및 파일명 설정
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, '../../uploads')
-    // uploads 디렉토리가 없으면 생성
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true })
-    }
-    cb(null, uploadDir)
+    ensureUploadDir()
+    cb(null, UPLOAD_DIR)
   },
   filename: (req, file, cb) => {
     // 한글 파일명 문제 해결: ASCII만 사용
@@ -143,8 +140,9 @@ const upload = multer({
  * POST /api/music/upload-score
  * 악보 파일 업로드 및 처리
  */
-router.post('/upload-score', upload.single('file'), async (req: Request, res: Response) => {
+router.post('/upload-score', uploadLimiter, requireAuth, upload.single('file'), async (req: Request, res: Response) => {
   let uploadedFilePath: string | null = null
+  const userId = res.locals.userId as string
 
   try {
     if (!req.file) {
@@ -160,8 +158,18 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
 
     console.log(`[Music Upload] 파일 수신: ${file.originalname} (${ext})`)
 
+    // 확장자만 믿지 않고 매직 바이트 확인
+    if (!matchesFileSignature(file.path, ext)) {
+      safeUnlink(uploadedFilePath)
+      return res.status(400).json({
+        success: false,
+        error: '파일 내용이 확장자와 일치하지 않습니다.'
+      })
+    }
+
     // XML 또는 MIDI 파일인 경우: 바로 성공 응답
     if (['.xml', '.musicxml', '.mid', '.midi'].includes(ext)) {
+      recordUploadOwner(file.filename, userId)
       return res.json({
         success: true,
         fileType: ext.includes('xml') ? 'xml' : 'midi',
@@ -191,6 +199,7 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
       }
 
       const xmlFileName = path.basename(omrResult.musicXmlPath)
+      recordUploadOwner(xmlFileName, userId)
 
       // 원본 PDF 파일 삭제
       if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
@@ -228,6 +237,8 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
       }
 
       const midiFileName = path.basename(conversionResult.midiPath)
+      recordUploadOwner(midiFileName, userId)
+      recordUploadOwner(file.filename, userId)
 
       return res.json({
         success: true,
@@ -267,10 +278,17 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
  * GET /api/music/file/:filename
  * 업로드된 파일 다운로드
  */
-router.get('/file/:filename', (req: Request, res: Response) => {
+router.get('/file/:filename', requireAuth, (req: Request, res: Response) => {
   try {
     const filename = req.params['filename'] as string
-    const filePath = path.join(__dirname, '../../uploads', filename)
+    const filePath = resolveUploadPath(filename)
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
+    }
+
+    if (getUploadOwner(filename) !== res.locals.userId) {
+      return res.status(403).json({ success: false, error: '파일에 접근할 권한이 없습니다.' })
+    }
 
     // 파일 존재 여부 확인
     if (!fs.existsSync(filePath)) {
@@ -280,8 +298,8 @@ router.get('/file/:filename', (req: Request, res: Response) => {
       })
     }
 
-    // 파일 전송
-    res.sendFile(filePath)
+    // 파일 전송 (root 고정: 업로드 디렉터리 밖으로 나갈 수 없음)
+    res.sendFile(filename, { root: UPLOAD_DIR, dotfiles: 'deny', headers: { 'Content-Disposition': 'attachment' } })
   } catch (error) {
     console.error('[Music Download] 오류:', error)
     return res.status(500).json({
@@ -295,10 +313,17 @@ router.get('/file/:filename', (req: Request, res: Response) => {
  * DELETE /api/music/file/:filename
  * 업로드된 파일 삭제
  */
-router.delete('/file/:filename', (req: Request, res: Response) => {
+router.delete('/file/:filename', requireAuth, (req: Request, res: Response) => {
   try {
     const filename = req.params['filename'] as string
-    const filePath = path.join(__dirname, '../../uploads', filename)
+    const filePath = resolveUploadPath(filename)
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
+    }
+
+    if (getUploadOwner(filename) !== res.locals.userId) {
+      return res.status(403).json({ success: false, error: '파일을 삭제할 권한이 없습니다.' })
+    }
 
     // 파일 존재 여부 확인
     if (!fs.existsSync(filePath)) {
@@ -310,6 +335,7 @@ router.delete('/file/:filename', (req: Request, res: Response) => {
 
     // 파일 삭제
     fs.unlinkSync(filePath)
+    removeUploadOwner(filename)
 
     return res.json({
       success: true,
@@ -328,7 +354,7 @@ router.delete('/file/:filename', (req: Request, res: Response) => {
  * POST /api/music/separate-stems
  * MP3 파일을 세션별로 분리 (vocals, drums, bass, other 등)
  */
-router.post('/separate-stems', upload.single('file'), async (req: Request, res: Response) => {
+router.post('/separate-stems', uploadLimiter, requireAuth, upload.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -351,14 +377,14 @@ router.post('/separate-stems', upload.single('file'), async (req: Request, res: 
       })
     }
 
+    if (!matchesFileSignature(file.path, ext)) {
+      safeUnlink(file.path)
+      return res.status(400).json({ success: false, error: '파일 내용이 MP3 형식이 아닙니다.' })
+    }
+
     console.log(`[Music Separate] 음원 분리 요청: ${originalFilename} (Provider: ${currentProvider})`)
 
-    const userId = await getUserIdFromToken(req.headers.authorization)
-
-    if (!userId) {
-      fs.unlinkSync(file.path)
-      return res.status(401).json({ success: false, error: '로그인이 필요합니다.' })
-    }
+    const userId = res.locals.userId as string
 
     const separationId = uuidv4()
 
@@ -487,7 +513,7 @@ router.get('/stem-history', async (req: Request, res: Response) => {
       return res.status(503).json({ success: false, error: 'Supabase not configured' })
     }
 
-    const userId = await getUserIdFromToken(req.headers.authorization)
+    const userId = await getUserIdFromRequest(req)
 
     if (!userId) {
       return res.status(401).json({ success: false, error: '로그인이 필요합니다.' })
@@ -525,7 +551,10 @@ router.delete('/stem-separation/:id', async (req: Request, res: Response) => {
     }
 
     const { id } = req.params
-    const userId = await getUserIdFromToken(req.headers.authorization)
+    const userId = await getUserIdFromRequest(req)
+    if (!userId) {
+      return res.status(401).json({ success: false, error: '로그인이 필요합니다.' })
+    }
 
     const { data: separation, error: fetchError } = await supabaseAdmin
       .from('stem_separations')
@@ -537,7 +566,7 @@ router.delete('/stem-separation/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: '분리 결과를 찾을 수 없습니다.' })
     }
 
-    if (separation.user_id && separation.user_id !== userId) {
+    if (separation.user_id !== userId) {
       return res.status(403).json({ success: false, error: '삭제 권한이 없습니다.' })
     }
 

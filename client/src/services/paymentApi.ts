@@ -1,3 +1,6 @@
+// 결제 API는 모두 Bearer 토큰 필요. userId는 서버가 토큰으로 결정한다(본문의 userId는 무시됨)
+import { authHeaders } from '../lib/authHeaders'
+
 // 자동 IP 감지: 'auto'면 현재 접속한 호스트 사용
 function getApiUrl(): string {
   const envUrl = import.meta.env.VITE_API_URL
@@ -54,6 +57,7 @@ class PaymentApi {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(await authHeaders()),
         },
         body: JSON.stringify(request),
       })
@@ -76,6 +80,7 @@ class PaymentApi {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(await authHeaders()),
         },
         body: JSON.stringify({
           paymentKey,
@@ -98,7 +103,9 @@ class PaymentApi {
   // 사용자 구독 정보 조회
   async getUserSubscription(userId: string): Promise<UserSubscription> {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/payment/subscription/${userId}`)
+      // 본인 구독만 조회 가능 (userId는 하위 호환용, 서버는 토큰의 사용자로 판정)
+      void userId
+      const response = await fetch(`${API_BASE_URL}/api/payment/subscription`, { headers: await authHeaders() })
       const data = await response.json()
       return data
     } catch {
@@ -117,6 +124,7 @@ class PaymentApi {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(await authHeaders()),
         },
         body: JSON.stringify({
           userId,

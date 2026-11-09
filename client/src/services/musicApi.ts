@@ -1,6 +1,7 @@
 /**
  * 음악 파일 업로드 및 관리 API 서비스
  */
+import { authHeaders } from '../lib/authHeaders'
 
 // 자동 IP 감지: 'auto'면 현재 접속한 호스트 사용
 function getApiUrl(): string {
@@ -39,7 +40,8 @@ export async function uploadMusicFile(file: File): Promise<UploadResponse> {
 
     const response = await fetch(`${API_BASE_URL}/api/music/upload-score`, {
       method: 'POST',
-      body: formData
+      body: formData,
+      headers: await authHeaders()
     })
 
     const data = await response.json()
@@ -64,7 +66,7 @@ export async function uploadMusicFile(file: File): Promise<UploadResponse> {
  * @returns Blob 데이터
  */
 export async function downloadMusicFile(fileName: string): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/api/music/file/${fileName}`)
+  const response = await fetch(`${API_BASE_URL}/api/music/file/${encodeURIComponent(fileName)}`, { headers: await authHeaders() })
 
   if (!response.ok) {
     throw new Error(`Download failed: ${response.status}`)
@@ -87,8 +89,9 @@ export function getMusicFileUrl(fileName: string): string {
  * @param fileName - 파일명
  */
 export async function deleteMusicFile(fileName: string): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}/api/music/file/${fileName}`, {
-    method: 'DELETE'
+  const response = await fetch(`${API_BASE_URL}/api/music/file/${encodeURIComponent(fileName)}`, {
+    method: 'DELETE',
+    headers: await authHeaders()
   })
 
   if (!response.ok) {

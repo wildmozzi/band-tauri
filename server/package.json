@@ -6,7 +6,8 @@
     "scripts": {
         "build": "node node_modules/typescript/bin/tsc -p .",
         "dev": "tsx src/index.ts",
-        "start": "node dist/index.js"
+        "start": "node dist/index.js",
+        "test": "node --import tsx --test --test-concurrency=1 \"test/**/*.test.ts\""
     },
     "keywords": [],
     "author": "",
@@ -23,6 +24,7 @@
         "cors": "^2.8.5",
         "dotenv": "^17.2.3",
         "express": "^5.2.1",
+        "express-rate-limit": "^8.7.3",
         "helmet": "^8.3.0",
         "multer": "^2.0.2",
         "node-cron": "^3.0.3",
