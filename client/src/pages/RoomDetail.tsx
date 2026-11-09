@@ -1391,6 +1391,16 @@ export function RoomDetail() {
                       </span>
                       <span className="quality-indicator">{hasTauriP2P ? '📡' : qualityInfo.icon}</span>
                     </div>
+                    {/* 음소거 버튼 (WebRTC 스트림) */}
+                    {hasWebRTCStream && (
+                      <button
+                        className={`performer-mute-btn ${(mixSettingsMap[oderId]?.muted) ? 'muted' : ''}`}
+                        onClick={() => setMixMuted(oderId, !(mixSettingsMap[oderId]?.muted))}
+                        title={(mixSettingsMap[oderId]?.muted) ? '음소거 해제' : '음소거'}
+                      >
+                        {(mixSettingsMap[oderId]?.muted) ? '🔇' : '🔊'}
+                      </button>
+                    )}
                     {/* 오디오 재생 (WebRTC 스트림이 있을 때만 - Tauri P2P는 네이티브에서 처리) */}
                     {hasWebRTCStream && (
                       <RemoteAudio
@@ -1411,6 +1421,14 @@ export function RoomDetail() {
               </div>
             )}
           </div>
+
+          {/* 방장: 승인 요청 알림 (참여 버튼 위에 표시) */}
+          {isHost && pendingRequests.length > 0 && (
+            <div className="pending-requests-alert" onClick={() => setShowPendingRequests(true)}>
+              <span className="alert-badge">{pendingRequests.length}</span>
+              <span>연주 참여 요청</span>
+            </div>
+          )}
 
           {/* 참여/관람 전환 버튼 */}
           <div className="participation-toggle">
@@ -1463,14 +1481,6 @@ export function RoomDetail() {
               <p className="approval-notice">이 방은 방장 승인이 필요합니다</p>
             )}
           </div>
-
-          {/* 방장: 승인 요청 알림 */}
-          {isHost && pendingRequests.length > 0 && (
-            <div className="pending-requests-alert" onClick={() => setShowPendingRequests(true)}>
-              <span className="alert-badge">{pendingRequests.length}</span>
-              <span>연주 참여 요청</span>
-            </div>
-          )}
         </aside>
 
         {/* 가운데: 믹서 */}

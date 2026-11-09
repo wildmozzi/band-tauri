@@ -17,13 +17,14 @@ const DEMUCS_API_URL = import.meta.env.VITE_DEMUCS_API_URL || 'http://localhost:
 
 export interface UploadResponse {
   success: boolean
-  fileType?: 'xml' | 'midi'
+  fileType?: 'xml' | 'midi' | 'pdf'
   fileName?: string
   originalName?: string
   filePath?: string
   message?: string
   converted?: boolean
   error?: string
+  warnings?: string[]
 }
 
 /**

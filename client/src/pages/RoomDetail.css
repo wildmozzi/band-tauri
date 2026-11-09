@@ -859,6 +859,27 @@
   color: var(--success);
 }
 
+/* 합주자 목록 음소거 버튼 */
+.performer-mute-btn {
+  padding: 4px 8px;
+  font-size: 0.9rem;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.performer-mute-btn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.performer-mute-btn.muted {
+  background: rgba(248, 113, 113, 0.2);
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
 /* 악기 변경 요청 버튼 */
 .change-instrument-btn {
   margin-top: 4px;

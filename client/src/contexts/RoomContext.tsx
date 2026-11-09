@@ -526,6 +526,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     // 오디오 노드가 있을 때만 측정 시작
     if (audioNodesRef.current.size > 0) {
       measureLevels()
+    } else {
+      // 오디오 노드가 없으면 레벨 초기화
+      setAudioLevels({})
+      setMasterLevel(0)
     }
 
     return () => {
@@ -743,21 +747,30 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   // pending ICE candidates 적용
   const applyPendingCandidates = async (peerId: string, pc: RTCPeerConnection) => {
     const pending = pendingIceCandidates.current.get(peerId)
-    if (pending && pending.length > 0) {
-      console.log('[RTC] Applying', pending.length, 'pending ICE candidates for:', peerId.slice(0, 8))
-      for (const candidate of pending) {
-        try {
-          // null이나 빈 candidate는 건너뛰기
-          if (candidate && candidate.candidate) {
-            await pc.addIceCandidate(new RTCIceCandidate(candidate))
-          }
-        } catch (err) {
-          // ICE candidate 에러는 무시 (이미 연결된 경우 발생할 수 있음)
-          console.warn('[RTC] Failed to add pending ICE candidate (may be stale):', err)
-        }
-      }
+    if (!pending || pending.length === 0) return
+
+    // 연결이 이미 완료/실패/종료된 경우 pending candidates 정리만
+    const iceState = pc.iceConnectionState
+    if (iceState === 'connected' || iceState === 'completed' ||
+        iceState === 'failed' || iceState === 'closed') {
+      console.log('[RTC] Skipping pending candidates - ICE already in state:', iceState, 'for:', peerId.slice(0, 8))
       pendingIceCandidates.current.delete(peerId)
+      return
     }
+
+    console.log('[RTC] Applying', pending.length, 'pending ICE candidates for:', peerId.slice(0, 8), 'iceState:', iceState)
+    for (const candidate of pending) {
+      try {
+        // null이나 빈 candidate는 건너뛰기
+        if (candidate && candidate.candidate) {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate))
+        }
+      } catch (err) {
+        // ICE candidate 에러는 무시 (이미 연결된 경우 발생할 수 있음)
+        console.warn('[RTC] Failed to add pending ICE candidate (may be stale):', err)
+      }
+    }
+    pendingIceCandidates.current.delete(peerId)
   }
 
   const handleRemoteOffer = async (peerId: string, offer: RTCSessionDescriptionInit) => {

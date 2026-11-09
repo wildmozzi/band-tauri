@@ -78,7 +78,7 @@ export function FileUpload({ onUploadSuccess, onUploadError }: FileUploadProps) 
           ref={fileInputRef}
           type="file"
           id="file-upload-input"
-          accept=".xml,.musicxml,.midi,.mid,.mp3"
+          accept=".xml,.musicxml,.midi,.mid,.mp3,.pdf"
           className="file-input"
           onChange={handleFileChange}
           disabled={isUploading}
@@ -95,7 +95,7 @@ export function FileUpload({ onUploadSuccess, onUploadError }: FileUploadProps) 
           ) : (
             <>
               <p>클릭하여 파일 선택</p>
-              <span className="file-types">MusicXML, MIDI, MP3</span>
+              <span className="file-types">MusicXML, MIDI, MP3, PDF</span>
             </>
           )}
         </label>
