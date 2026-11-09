@@ -53,8 +53,8 @@
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 대기 |
 | P3-4 | 거대 파일 분해(PostDetail, Rooms, EditPost, RoomDetail) | 파일당 ≤ 400줄 | 대기 |
 | P3-5 | 서버 route→service→repository 계층화, 구독 정보를 DB로(현재 메모리 Map) | 테스트 통과 | 대기 |
-| P3-6 | 음원분리 스템 WAV → Opus/OGG 저장(용량·트래픽 ~1/10), 기존 파일 마이그레이션 스크립트 | 업로드/재생 동작, 용량 비교 | 진행중(PR #2 리뷰 대기) |
-| P3-6a | **[사람]** 운영 반영 후: Safari(iOS·macOS) 실기기에서 히스토리 스템 재생 확인(iOS는 6스템 3분 곡 메모리/탭 종료 여부 포함), macOS 데스크톱(WKWebView) 스템 재생, fly 배포 이미지 크기 증가·`ffmpeg -encoders | grep libopus`·3분 6스템 인코딩 시간 기록, `cd server && npm run migrate:stems` 드라이런 결과 확인 후 `-- --apply` 실행 승인(원본 WAV 삭제) | 사용자 완료 보고 | 대기 (P3-6 main 배포) |
+| P3-6 | 음원분리 스템 WAV → Opus/OGG 저장(용량·트래픽 ~1/10), 기존 파일 마이그레이션 스크립트 | 업로드/재생 동작, 용량 비교 | 진행중(PR #2 리뷰 중; 3분 곡 31.7MB→3.8MB) |
+| P3-6a | **[사람]** 기존 WAV 스템 변환 실행(`npm run migrate:stems` 드라이런 확인 후 `-- --apply`, 원본 삭제) + Safari 실기기 재생 확인(iOS는 6스템 3분 곡 메모리/탭 종료 여부 포함) + macOS 데스크톱(WKWebView) 스템 재생 + fly 배포 이미지 크기 증가·libopus 인코더 포함 여부(`ffmpeg -encoders`)·3분 6스템 인코딩 시간 기록 | 사용자 승인 후 실행, 절감 용량 기록 | 대기 (P3-6 병합 후) |
 | P3-7 | 웹 E2E(Playwright 또는 ego-browser 시나리오): 로그인, 방 목록, 관람 입장, 커뮤니티 | CI 또는 루프에서 실행 | 대기 |
 | P3-8 | 공용 UI 컴포넌트/디자인 토큰 정리 | 중복 CSS 감소 | 대기 |
 
