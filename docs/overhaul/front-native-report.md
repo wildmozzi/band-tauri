@@ -10,7 +10,7 @@
 | `client/src/native/useNativeSession.ts` | 상태기계 액션 실행: `engine_start` → (start-performing) → `native-descriptor` 브로드캐스트, 수신 시 `engine_add_peer` + 미전송 피어에 `to` 회신, 이탈 시 `engine_remove_peer`, 정지 시 `native-leave` + `engine_stop`. 엔진 커맨드는 큐로 순서 보장. `engine_stats` 500ms 폴링 |
 | `client/src/native/mixBridge.ts` | `MixSource`(구독 → AudioWorklet 링버퍼(200ms, 60ms 프리버퍼, Blob URL 로드) → `MediaStreamAudioDestinationNode`, 참조 카운트) + `MixBroadcaster`(관람자별 sendonly PC, offer는 방송 담당만 보냄) |
 | `client/src/contexts/room/*` | RoomContext 분리: `useSignaling`(WS, auth 먼저, 큐, 재연결), `useChat`, `usePerformRequests`, `useViewerAudio`(관람 수신), `useWebAudioMixer`, `useRecording` |
-| `client/src/contexts/RoomContext.tsx` | 2,612줄 → 약 640줄. 훅 조합만 함. 방송 담당 선정/인계, 엔진 피어 gain·마스터 gain·모니터 적용 |
+| `client/src/contexts/RoomContext.tsx` | 2,612줄 → 약 750줄. 훅 조합만 함. 방송 담당 선정/인계, 엔진 피어 gain·마스터 gain·모니터 적용 |
 | `client/src/pages/RoomDetail.tsx` | 피어별 볼륨/뮤트(`engine_set_peer_gain`), 상태 배지(connecting/connected/reconnecting/failed + 실패 시 "직접 연결 불가 — 네트워크(대칭형 NAT) 문제"), RTT·지터·버퍼·손실·경로(LAN/인터넷), 내 estLatencyMs·xrun·입력 레벨, 방송 배지. 웹은 "연주는 데스크톱 앱에서" + `VITE_DESKTOP_DOWNLOAD_URL` 링크 |
 | `AudioSettings.tsx`, `AudioSettingsContext.tsx` | EngineConfig/DeviceInfo 기반 재작성: 입·출력 드라이버(ASIO/WASAPI 공유/독점), 장치, 버퍼, 프레임, 코덱, 모노/스테레오, 입력 채널, 지터 최소/최대, 테스트 모니터 + 레벨 미터, 프리셋. 1200B 초과 조합은 옵션 비활성 + `updateConfig` 거부 |
 | `FloatingMiniPlayer.tsx` | 마이크 뮤트 → 모니터 토글 |
