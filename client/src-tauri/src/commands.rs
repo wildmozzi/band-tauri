@@ -1,283 +1,194 @@
-//! Tauri Commands - Frontend API
+//! Tauri 커맨드 — 얇은 어댑터 (설계 문서 4절). 로직은 `engine`/`net`에 있다.
+//!
+//! 무거운 작업(장치 열기, STUN)은 `spawn_blocking`으로 UI 스레드 밖에서 수행한다.
+//! 장치 열거(`engine_list_devices`)는 기존 동작대로 동기 커맨드로 둔다(ASIO 주의사항은
+//! `engine/device.rs` 참고).
+//!
+//! `engine_subscribe_mix`는 JSON이 아닌 raw 바이트(`InvokeResponseBody::Raw`, f32 LE 인터리브)로 보낸다.
 
-use crate::audio::{self, AudioConfig, AudioDriver, Compression, Channels, MonoChannel, AudioDeviceInfo, AudioStats};
-use crate::network;
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-// ============================================================================
-// Types for Frontend
-// ============================================================================
+use parking_lot::Mutex;
+use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::State;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AudioSettings {
-    #[serde(default)]
-    pub driver: String,              // "Asio", "WasapiExclusive", "WasapiShared" (기본)
-    #[serde(default)]
-    pub input_driver: Option<String>,  // 입력 전용 드라이버 (None이면 driver 사용)
-    #[serde(default)]
-    pub output_driver: Option<String>, // 출력 전용 드라이버 (None이면 driver 사용)
-    #[serde(default)]
-    pub input_device: Option<String>,
-    #[serde(default)]
-    pub output_device: Option<String>,
-    #[serde(default = "default_sample_rate")]
-    pub sample_rate: u32,            // 44100, 48000
-    #[serde(default = "default_buffer_size")]
-    pub buffer_size: u32,            // 64, 128, 256, 512, 1024
-    #[serde(default)]
-    pub compression: String,         // "Uncompressed", "Opus"
-    #[serde(default)]
-    pub channels: String,            // "Mono", "Stereo"
-    #[serde(default)]
-    pub mono_channel: String,        // "Ch1", "Ch2" (모노일 때 사용할 입력 채널)
-    #[serde(default)]
-    pub stereo_swap: bool,           // 스테레오일 때 L/R 스왑
+use crate::engine::config::EngineConfig;
+use crate::engine::device::cpal_backend::CpalBackend;
+use crate::engine::device::{AudioBackend, DeviceInfo};
+use crate::engine::mixer::{clamp_gain, MixControls};
+use crate::engine::stats::EngineStats;
+use crate::engine::Engine;
+use crate::net::peer::LocalDescriptor;
+use crate::net::NetOptions;
+
+struct Inner {
+    engine: Mutex<Option<Engine>>,
+    controls: Arc<MixControls>,
+    backend: Arc<dyn AudioBackend>,
 }
 
-fn default_sample_rate() -> u32 { 48000 }
-fn default_buffer_size() -> u32 { 256 }
+#[derive(Clone)]
+pub struct EngineState(Arc<Inner>);
 
-fn parse_driver(s: &str) -> Option<AudioDriver> {
-    match s {
-        "Asio" => Some(AudioDriver::Asio),
-        "WasapiExclusive" => Some(AudioDriver::WasapiExclusive),
-        "WasapiShared" => Some(AudioDriver::WasapiShared),
-        _ => None,
-    }
-}
-
-impl Default for AudioSettings {
+impl Default for EngineState {
     fn default() -> Self {
-        Self {
-            driver: "WasapiShared".to_string(),
-            input_driver: None,
-            output_driver: None,
-            input_device: None,
-            output_device: None,
-            sample_rate: 48000,
-            buffer_size: 256,
-            compression: "Uncompressed".to_string(),
-            channels: "Mono".to_string(),
-            mono_channel: "Ch1".to_string(),
-            stereo_swap: false,
-        }
+        Self(Arc::new(Inner {
+            engine: Mutex::new(None),
+            controls: Arc::new(MixControls::default()),
+            backend: Arc::new(CpalBackend),
+        }))
     }
 }
 
-impl From<AudioSettings> for AudioConfig {
-    fn from(s: AudioSettings) -> Self {
-        let default_driver = parse_driver(&s.driver).unwrap_or(AudioDriver::WasapiShared);
-
-        AudioConfig {
-            driver: default_driver,
-            input_driver: s.input_driver.as_ref().and_then(|d| parse_driver(d)),
-            output_driver: s.output_driver.as_ref().and_then(|d| parse_driver(d)),
-            input_device: s.input_device,
-            output_device: s.output_device,
-            sample_rate: s.sample_rate,
-            buffer_size: s.buffer_size,
-            compression: match s.compression.as_str() {
-                "Opus" => Compression::Opus,
-                _ => Compression::Uncompressed,
-            },
-            channels: match s.channels.as_str() {
-                "Stereo" => Channels::Stereo,
-                _ => Channels::Mono,
-            },
-            mono_channel: match s.mono_channel.as_str() {
-                "Ch2" => MonoChannel::Ch2,
-                _ => MonoChannel::Ch1,
-            },
-            stereo_swap: s.stereo_swap,
-        }
+impl EngineState {
+    /// 실행 중인 엔진을 정지(모든 스레드 join).
+    pub fn shutdown(&self) {
+        let old = self.0.engine.lock().take();
+        drop(old);
     }
 }
 
-// ============================================================================
-// Audio Commands
-// ============================================================================
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| format!("작업 실패: {e}"))?
+}
 
-/// Start audio engine with settings
 #[tauri::command]
-pub async fn start_audio(settings: AudioSettings, peer_addr: Option<String>) -> Result<String, String> {
-    println!("[CMD] start_audio: {:?}", settings);
+pub fn engine_list_devices(state: State<'_, EngineState>) -> Result<Vec<DeviceInfo>, String> {
+    state.0.backend.list_devices()
+}
 
-    // Get socket from network
-    let socket = network::get_socket().map_err(|e| e.to_string())?;
+#[tauri::command]
+pub async fn engine_start(
+    state: State<'_, EngineState>,
+    config: EngineConfig,
+    peer_id: String,
+) -> Result<LocalDescriptor, String> {
+    let inner = state.0.clone();
+    blocking(move || {
+        let mut slot = inner.engine.lock();
+        // 기존 엔진(테스트 모드 포함) 정지 후 시작
+        drop(slot.take());
+        let engine = Engine::start(
+            config,
+            inner.backend.clone(),
+            inner.controls.clone(),
+            Some((peer_id, NetOptions::default())),
+        )?;
+        let desc = engine.descriptor().cloned().ok_or("descriptor 없음")?;
+        *slot = Some(engine);
+        Ok(desc)
+    })
+    .await
+}
 
-    // Convert settings to config
-    let config: AudioConfig = settings.into();
+#[tauri::command]
+pub async fn engine_stop(state: State<'_, EngineState>) -> Result<(), String> {
+    let inner = state.0.clone();
+    blocking(move || {
+        let old = inner.engine.lock().take();
+        drop(old);
+        Ok(())
+    })
+    .await
+}
 
-    // Start audio engine
-    audio::start_audio(config, socket).map_err(|e| e.to_string())?;
+#[tauri::command]
+pub async fn engine_test_start(state: State<'_, EngineState>, config: EngineConfig) -> Result<(), String> {
+    let inner = state.0.clone();
+    blocking(move || {
+        let mut slot = inner.engine.lock();
+        drop(slot.take());
+        inner.controls.monitor_enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        let engine = Engine::start(config, inner.backend.clone(), inner.controls.clone(), None)?;
+        *slot = Some(engine);
+        Ok(())
+    })
+    .await
+}
 
-    // Set peer if provided
-    if let Some(addr_str) = peer_addr {
-        if let Ok(addr) = addr_str.parse() {
-            audio::set_peer(addr);
+#[tauri::command]
+pub async fn engine_test_stop(state: State<'_, EngineState>) -> Result<(), String> {
+    let inner = state.0.clone();
+    blocking(move || {
+        let mut slot = inner.engine.lock();
+        if slot.as_ref().is_some_and(|e| !e.has_network()) {
+            drop(slot.take());
         }
-    }
-
-    Ok("Audio started".to_string())
+        Ok(())
+    })
+    .await
 }
 
-/// Stop audio engine
-#[tauri::command]
-pub async fn stop_audio() -> Result<String, String> {
-    println!("[CMD] stop_audio");
-    audio::stop_audio().map_err(|e| e.to_string())?;
-    Ok("Audio stopped".to_string())
-}
-
-/// Set peer address for audio transmission
-#[tauri::command]
-pub async fn set_audio_peer(addr: String) -> Result<String, String> {
-    println!("[CMD] set_audio_peer: {}", addr);
-    let peer_addr = addr.parse().map_err(|e| format!("Invalid address: {}", e))?;
-    audio::set_peer(peer_addr);
-    Ok(format!("Peer set to {}", addr))
-}
-
-/// Get audio statistics
-#[tauri::command]
-pub async fn get_audio_stats() -> Result<AudioStats, String> {
-    Ok(audio::get_stats())
-}
-
-/// Get available audio devices
-#[tauri::command]
-pub async fn get_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
-    println!("[CMD] get_audio_devices called");
-    let result = audio::get_audio_devices().map_err(|e| e.to_string());
-    println!("[CMD] get_audio_devices result: {:?}", result.as_ref().map(|v| v.len()));
-    result
-}
-
-/// Refresh audio device cache (re-enumerate ASIO devices)
-#[tauri::command]
-pub async fn refresh_audio_devices() -> Result<String, String> {
-    println!("[CMD] refresh_audio_devices called");
-    audio::refresh_audio_cache();
-    Ok("Audio cache refresh started".to_string())
-}
-
-/// Start test audio (input monitoring only, no network)
-#[tauri::command]
-pub async fn start_test_audio(settings: AudioSettings) -> Result<String, String> {
-    println!("[CMD] start_test_audio: {:?}", settings);
-    let config: AudioConfig = settings.into();
-    audio::start_test_audio(config).map_err(|e| e.to_string())?;
-    Ok("Test audio started".to_string())
-}
-
-/// Stop test audio
-#[tauri::command]
-pub async fn stop_test_audio() -> Result<String, String> {
-    println!("[CMD] stop_test_audio");
-    audio::stop_test_audio().map_err(|e| e.to_string())?;
-    Ok("Test audio stopped".to_string())
-}
-
-// ============================================================================
-// Network Commands
-// ============================================================================
-
-/// Initialize P2P network
-#[tauri::command]
-pub async fn init_network(my_id: String) -> Result<network::NetworkInfo, String> {
-    println!("[CMD] init_network: {}", my_id);
-    network::init_network(&my_id).map_err(|e| e.to_string())
-}
-
-/// Get network info
-#[tauri::command]
-pub async fn get_network_info() -> Result<network::NetworkInfo, String> {
-    network::get_info().map_err(|e| e.to_string())
-}
-
-/// Connect to peer
-#[tauri::command]
-pub async fn connect_to_peer(peer_id: String, addr: String) -> Result<String, String> {
-    println!("[CMD] connect_to_peer: {} at {}", peer_id, addr);
-
-    let peer_addr = network::connect_peer(&peer_id, &addr).map_err(|e| e.to_string())?;
-
-    // Also set audio peer
-    audio::set_peer(peer_addr);
-
-    Ok(format!("Connected to {} at {}", peer_id, addr))
-}
-
-/// Disconnect from peer
-#[tauri::command]
-pub async fn disconnect_peer(peer_id: String) -> Result<String, String> {
-    println!("[CMD] disconnect_peer: {}", peer_id);
-    network::disconnect_peer(&peer_id).map_err(|e| e.to_string())?;
-    Ok(format!("Disconnected from {}", peer_id))
-}
-
-/// Get peer latencies
-#[tauri::command]
-pub async fn get_peer_latencies() -> Result<Vec<network::PeerInfo>, String> {
-    network::get_peer_latencies().map_err(|e| e.to_string())
-}
-
-/// Shutdown network
-#[tauri::command]
-pub async fn shutdown_network() -> Result<String, String> {
-    println!("[CMD] shutdown_network");
-    network::shutdown().map_err(|e| e.to_string())?;
-    Ok("Network shutdown".to_string())
-}
-
-// ============================================================================
-// Legacy Commands (for backward compatibility)
-// ============================================================================
-
-#[tauri::command]
-pub async fn start_native_audio() -> Result<String, String> {
-    Ok("Use start_audio instead".to_string())
+fn with_engine<T>(state: &EngineState, f: impl FnOnce(&mut Engine) -> Result<T, String>) -> Result<T, String> {
+    let mut slot = state.0.engine.lock();
+    let engine = slot.as_mut().ok_or("엔진이 실행 중이 아닙니다")?;
+    f(engine)
 }
 
 #[tauri::command]
-pub async fn stop_native_audio() -> Result<String, String> {
-    stop_audio().await
+pub fn engine_add_peer(state: State<'_, EngineState>, peer_id: String, descriptor: LocalDescriptor) -> Result<(), String> {
+    with_engine(&state, |e| e.add_peer(peer_id, &descriptor))
 }
 
 #[tauri::command]
-pub async fn set_audio_settings(settings: AudioSettings) -> Result<String, String> {
-    println!("[CMD] set_audio_settings: {:?}", settings);
-    Ok("Settings received (restart audio to apply)".to_string())
+pub fn engine_remove_peer(state: State<'_, EngineState>, peer_id: String) -> Result<(), String> {
+    with_engine(&state, |e| e.remove_peer(&peer_id))
 }
 
 #[tauri::command]
-pub async fn set_monitoring(enabled: bool) -> Result<String, String> {
-    println!("[CMD] set_monitoring: {}", enabled);
-    audio::set_monitoring(enabled);
-    Ok(format!("Monitoring {}", if enabled { "enabled" } else { "disabled" }))
+pub fn engine_set_peer_gain(
+    state: State<'_, EngineState>,
+    peer_id: String,
+    gain: f32,
+    muted: bool,
+    pan: Option<f32>,
+) -> Result<(), String> {
+    with_engine(&state, |e| e.set_peer_gain(&peer_id, gain, muted, pan))
 }
 
 #[tauri::command]
-pub async fn get_monitoring() -> Result<bool, String> {
-    Ok(audio::get_monitoring())
+pub fn engine_set_input_muted(state: State<'_, EngineState>, muted: bool) -> Result<(), String> {
+    state.0.controls.input_muted.store(muted, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn set_monitoring_volume(_volume: u32) -> Result<String, String> {
-    Ok("Monitoring volume not implemented".to_string())
+pub fn engine_set_monitor(state: State<'_, EngineState>, enabled: bool, gain: f32) -> Result<(), String> {
+    let c = &state.0.controls;
+    c.monitor_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    c.monitor_gain.store(clamp_gain(gain));
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn get_monitoring_volume() -> Result<u32, String> {
-    Ok(0)
+pub fn engine_set_master_gain(state: State<'_, EngineState>, gain: f32) -> Result<(), String> {
+    state.0.controls.master_gain.store(clamp_gain(gain));
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn start_p2p_network(my_id: String, _signaling_url: String) -> Result<network::NetworkInfo, String> {
-    init_network(my_id).await
+pub fn engine_stats(state: State<'_, EngineState>) -> Result<EngineStats, String> {
+    Ok(match state.0.engine.lock().as_ref() {
+        Some(e) => e.stats(),
+        None => EngineStats::stopped(),
+    })
 }
 
 #[tauri::command]
-pub async fn stop_p2p_network() -> Result<String, String> {
-    shutdown_network().await
+pub fn engine_subscribe_mix(state: State<'_, EngineState>, on_chunk: Channel<InvokeResponseBody>) -> Result<(), String> {
+    with_engine(&state, |e| {
+        e.subscribe_mix(Box::new(move |bytes| {
+            if let Err(err) = on_chunk.send(InvokeResponseBody::Raw(bytes)) {
+                log::warn!("믹스 청크 전송 실패: {err}");
+            }
+        }))
+    })
+}
+
+#[tauri::command]
+pub fn engine_unsubscribe_mix(state: State<'_, EngineState>) -> Result<(), String> {
+    with_engine(&state, |e| {
+        e.unsubscribe_mix();
+        Ok(())
+    })
 }

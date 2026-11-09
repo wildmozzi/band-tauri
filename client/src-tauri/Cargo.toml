@@ -17,34 +17,33 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
+tauri-plugin-log = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+log = "0.4"
 
-# Audio processing (WASAPI + ASIO)
-cpal = { version = "0.15", features = ["asio"] }
+# Audio I/O (WASAPI 기본, ASIO는 `asio` 피처로 옵트인)
+cpal = "0.15"
 opus = "0.3"
-ringbuf = "0.3"  # Lock-free ring buffer for audio
+ringbuf = "0.4"
+rubato = "0.16"
 
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# Networking
-tokio-tungstenite = "0.21"
-
-# Error handling
-anyhow = "1"
-thiserror = "1"
+# Network / crypto
+chacha20poly1305 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+if-addrs = "0.13"
 
 # Utilities
-lazy_static = "1.4"
-rand = "0.8"
-crossbeam-channel = "0.5"  # Lock-free channels for audio threads
+parking_lot = "0.12"
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 # 릴리스 빌드에서는 devtools 비활성. 필요 시: cargo tauri build --features devtools
 devtools = ["tauri/devtools"]
+# ASIO 지원 (CPAL_ASIO_DIR에 Steinberg ASIO SDK 필요). 기본 빌드는 WASAPI만.
+asio = ["cpal/asio"]
 
 [profile.release]
 panic = "abort"
