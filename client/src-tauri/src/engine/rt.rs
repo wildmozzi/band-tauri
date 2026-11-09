@@ -19,6 +19,16 @@ const RT_CHUNK_FRAMES: usize = 256;
 /// 링 용량: 192kHz × 2ch × 0.25초. 장치 레이트와 무관하게 충분하다.
 pub const RING_CAPACITY: usize = 192_000 / 4 * 2;
 
+/// 제곱합 → 0..1 선형 RMS. 샘플이 없으면 0.
+#[inline]
+pub fn rms_of(sum_sq: f32, count: usize) -> f32 {
+    if count == 0 {
+        0.0
+    } else {
+        (sum_sq / count as f32).sqrt().min(1.0)
+    }
+}
+
 /// 장치 샘플 포맷 ↔ f32 변환.
 pub trait RtSample: Copy + Send + 'static {
     fn to_f32(self) -> f32;
@@ -146,7 +156,8 @@ impl InputRt {
         let frames = data.len() / device_channels;
         self.counters.in_cb_frames.store(frames as u32, Ordering::Relaxed);
         let ich = self.internal_channels;
-        let mut peak = 0.0f32;
+        let mut sum_sq = 0.0f32;
+        let mut count = 0usize;
         let mut overrun = false;
         let mut done = 0;
         while done < frames {
@@ -164,13 +175,15 @@ impl InputRt {
                     if let Some(s) = self.scratch.get_mut(i) {
                         *s = m;
                     }
-                    peak = peak.max(m.abs());
+                    sum_sq += m * m;
+                    count += 1;
                 } else {
                     if let Some(s) = self.scratch.get_mut(i * 2..i * 2 + 2) {
                         s[0] = a;
                         s[1] = b;
                     }
-                    peak = peak.max(a.abs()).max(b.abs());
+                    sum_sq += a * a + b * b;
+                    count += 2;
                 }
             }
             let len = (n * ich).min(self.scratch.len());
@@ -183,7 +196,8 @@ impl InputRt {
         if overrun {
             self.counters.xruns.fetch_add(1, Ordering::Relaxed);
         }
-        self.counters.input_level.store(peak);
+        // 레벨 = 0..1 선형 RMS (입력 뮤트와 무관하게 계속 갱신)
+        self.counters.input_level.store(rms_of(sum_sq, count));
     }
 }
 
@@ -204,7 +218,7 @@ impl OutputRt {
         }
         let frames = data.len() / device_channels;
         self.counters.out_cb_frames.store(frames as u32, Ordering::Relaxed);
-        let mut peak = 0.0f32;
+        let mut sum_sq = 0.0f32;
         let mut underrun = false;
         let mut consumed = 0u64;
         let mut done = 0;
@@ -220,7 +234,7 @@ impl OutputRt {
             for i in 0..n {
                 let l = self.scratch[i * 2];
                 let r = self.scratch[i * 2 + 1];
-                peak = peak.max(l.abs()).max(r.abs());
+                sum_sq += l * l + r * r;
                 let base = (done + i) * device_channels;
                 let Some(frame) = data.get_mut(base..base + device_channels) else {
                     break;
@@ -248,7 +262,7 @@ impl OutputRt {
             self.counters.xruns.fetch_add(1, Ordering::Relaxed);
         }
         self.counters.out_consumed.fetch_add(consumed, Ordering::Relaxed);
-        self.counters.output_level.store(peak);
+        self.counters.output_level.store(rms_of(sum_sq, frames * 2));
     }
 }
 
@@ -270,7 +284,8 @@ mod tests {
         let n = cons.pop_slice(&mut out);
         assert_eq!(n, 3, "모노는 1채널만 링에 들어감");
         assert!((out[0] - 0.5).abs() < 1e-6 && (out[1] + 0.5).abs() < 1e-6 && out[2] == 0.0);
-        assert!((counters.input_level.load() - 0.5).abs() < 1e-6);
+        // RMS([0.5, -0.5, 0]) = sqrt(0.5 / 3)
+        assert!((counters.input_level.load() - (0.5f32 / 3.0).sqrt()).abs() < 1e-6);
         assert_eq!(counters.in_cb_frames.load(Ordering::Relaxed), 3);
     }
 

@@ -23,6 +23,7 @@ pub fn run() {
             commands::engine_add_peer,
             commands::engine_remove_peer,
             commands::engine_set_peer_gain,
+            commands::engine_set_input_muted,
             commands::engine_set_monitor,
             commands::engine_set_master_gain,
             commands::engine_stats,

@@ -152,12 +152,16 @@ impl Worker {
         while self.in_rs.available() >= self.frame {
             let mut fb = std::mem::take(&mut self.frame_buf);
             self.in_rs.pop(&mut fb);
-            self.on_capture_frame(&fb);
+            self.on_capture_frame(&mut fb);
             self.frame_buf = fb;
         }
     }
 
-    fn on_capture_frame(&mut self, frame: &[f32]) {
+    fn on_capture_frame(&mut self, frame: &mut [f32]) {
+        // 입력 뮤트: 송신/모니터/탭 모두 무음. 패킷은 계속 보내 수신측 타이밍을 유지한다.
+        if self.p.controls.input_muted.load(Ordering::Relaxed) {
+            frame.fill(0.0);
+        }
         if let (Some(enc), Some(net)) = (self.encoder.as_mut(), self.p.net.as_ref()) {
             match enc.encode(frame, &mut self.payload) {
                 Ok(n) => net.send_audio(&self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt),
@@ -169,7 +173,7 @@ impl Worker {
         if self.ich == 2 {
             self.monitor_fifo.extend(frame.iter().copied());
         } else {
-            for &s in frame {
+            for &s in frame.iter() {
                 self.monitor_fifo.push_back(s);
                 self.monitor_fifo.push_back(s);
             }
@@ -232,10 +236,10 @@ impl Worker {
             let pb = &mut self.peer_buf;
             net.for_each_peer(|peer| {
                 peer.jitter.lock().pop(pb, now_us);
-                let g = peer.mix.effective_gain();
-                peer.mix.level.store(mixer::peak(pb));
-                mixer::add_stereo(bus, pb, g);
-                mixer::add_stereo(tap, pb, g);
+                let (gl, gr) = peer.mix.lr_gains();
+                peer.mix.level.store(mixer::rms(pb));
+                mixer::add_stereo_lr(bus, pb, gl, gr);
+                mixer::add_stereo_lr(tap, pb, gl, gr);
             });
         }
 

@@ -10,13 +10,20 @@ use super::stats::AtomicF32;
 pub struct PeerMixCtl {
     pub gain: AtomicF32,
     pub muted: AtomicBool,
-    /// 워커가 갱신하는 피어 레벨(피크).
+    /// -1(왼쪽)..1(오른쪽), 0=중앙.
+    pub pan: AtomicF32,
+    /// 워커가 갱신하는 피어 레벨(0..1 선형 RMS).
     pub level: AtomicF32,
 }
 
 impl Default for PeerMixCtl {
     fn default() -> Self {
-        Self { gain: AtomicF32::new(1.0), muted: AtomicBool::new(false), level: AtomicF32::new(0.0) }
+        Self {
+            gain: AtomicF32::new(1.0),
+            muted: AtomicBool::new(false),
+            pan: AtomicF32::new(0.0),
+            level: AtomicF32::new(0.0),
+        }
     }
 }
 
@@ -28,11 +35,46 @@ impl PeerMixCtl {
             self.gain.load()
         }
     }
+
+    /// gain·mute·pan을 반영한 (L, R) 게인.
+    pub fn lr_gains(&self) -> (f32, f32) {
+        let g = self.effective_gain();
+        let (l, r) = pan_gains(self.pan.load());
+        (g * l, g * r)
+    }
+}
+
+pub fn clamp_pan(p: f32) -> f32 {
+    if p.is_finite() {
+        p.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Equal-power 팬. L² + R² = 2로 일정하며 중앙(0)에서 (1, 1)이 되도록 √2로 정규화했다
+/// (팬을 쓰지 않는 기본 상태의 음량이 바뀌지 않게). 끝(±1)에서는 한쪽 √2, 반대쪽 0.
+pub fn pan_gains(pan: f32) -> (f32, f32) {
+    let theta = (clamp_pan(pan) + 1.0) * std::f32::consts::FRAC_PI_4;
+    (theta.cos() * std::f32::consts::SQRT_2, theta.sin() * std::f32::consts::SQRT_2)
+}
+
+/// 스테레오 버스에 스테레오 소스를 L/R 게인으로 더한다.
+pub fn add_stereo_lr(bus: &mut [f32], src: &[f32], gl: f32, gr: f32) {
+    if gl == 0.0 && gr == 0.0 {
+        return;
+    }
+    for (b, s) in bus.as_chunks_mut::<2>().0.iter_mut().zip(src.as_chunks::<2>().0) {
+        b[0] += s[0] * gl;
+        b[1] += s[1] * gr;
+    }
 }
 
 /// 엔진 전역 믹스 제어값. 엔진 재시작 간에도 유지된다.
 #[derive(Debug)]
 pub struct MixControls {
+    /// 내 입력 뮤트: 송신/모니터/믹스 구독에서 무음(레벨 미터는 계속).
+    pub input_muted: AtomicBool,
     pub monitor_enabled: AtomicBool,
     pub monitor_gain: AtomicF32,
     pub master_gain: AtomicF32,
@@ -41,6 +83,7 @@ pub struct MixControls {
 impl Default for MixControls {
     fn default() -> Self {
         Self {
+            input_muted: AtomicBool::new(false),
             monitor_enabled: AtomicBool::new(false),
             monitor_gain: AtomicF32::new(1.0),
             master_gain: AtomicF32::new(1.0),
@@ -110,8 +153,12 @@ pub fn soft_clip_buf(buf: &mut [f32]) {
     }
 }
 
-pub fn peak(buf: &[f32]) -> f32 {
-    buf.iter().fold(0.0f32, |m, x| m.max(x.abs()))
+/// 0..1 선형 RMS.
+pub fn rms(buf: &[f32]) -> f32 {
+    if buf.is_empty() {
+        return 0.0;
+    }
+    (buf.iter().map(|x| x * x).sum::<f32>() / buf.len() as f32).sqrt().min(1.0)
 }
 
 #[cfg(test)]
@@ -166,7 +213,34 @@ mod tests {
     }
 
     #[test]
-    fn peak_level() {
-        assert_eq!(peak(&[0.1, -0.7, 0.3]), 0.7);
+    fn rms_level() {
+        assert!((rms(&[0.5, -0.5, 0.5, -0.5]) - 0.5).abs() < 1e-6);
+        assert_eq!(rms(&[]), 0.0);
+        assert_eq!(rms(&[3.0, 3.0]), 1.0, "0..1로 제한");
+    }
+
+    #[test]
+    fn equal_power_pan() {
+        let (l, r) = pan_gains(0.0);
+        assert!((l - 1.0).abs() < 1e-6 && (r - 1.0).abs() < 1e-6, "중앙은 단위 게인");
+        let (l, r) = pan_gains(-1.0);
+        assert!((l - 2f32.sqrt()).abs() < 1e-6 && r.abs() < 1e-6);
+        let (l, r) = pan_gains(1.0);
+        assert!(l.abs() < 1e-6 && (r - 2f32.sqrt()).abs() < 1e-6);
+        for i in -10..=10 {
+            let (l, r) = pan_gains(i as f32 / 10.0);
+            assert!((l * l + r * r - 2.0).abs() < 1e-5, "파워 일정");
+        }
+        assert_eq!(pan_gains(f32::NAN), pan_gains(0.0));
+        assert_eq!(pan_gains(5.0), pan_gains(1.0));
+
+        let ctl = PeerMixCtl::default();
+        ctl.pan.store(1.0);
+        let mut bus = vec![0.0f32; 4];
+        let (gl, gr) = ctl.lr_gains();
+        add_stereo_lr(&mut bus, &[0.5, 0.5, 0.5, 0.5], gl, gr);
+        assert!(bus[0].abs() < 1e-6 && (bus[1] - 0.5 * 2f32.sqrt()).abs() < 1e-6);
+        ctl.muted.store(true, Ordering::Relaxed);
+        assert_eq!(ctl.lr_gains(), (0.0, 0.0));
     }
 }

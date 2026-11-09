@@ -173,6 +173,7 @@ impl Net {
             // 기존 gain/mute 유지
             peer.mix.gain.store(old.mix.gain.load());
             peer.mix.muted.store(old.mix.muted.load(Ordering::Relaxed), Ordering::Relaxed);
+            peer.mix.pan.store(old.mix.pan.load());
         }
         if peers.len() >= 5 {
             return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());

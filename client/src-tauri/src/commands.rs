@@ -3,6 +3,8 @@
 //! 무거운 작업(장치 열기, STUN)은 `spawn_blocking`으로 UI 스레드 밖에서 수행한다.
 //! 장치 열거(`engine_list_devices`)는 기존 동작대로 동기 커맨드로 둔다(ASIO 주의사항은
 //! `engine/device.rs` 참고).
+//!
+//! `engine_subscribe_mix`는 JSON이 아닌 raw 바이트(`InvokeResponseBody::Raw`, f32 LE 인터리브)로 보낸다.
 
 use std::sync::Arc;
 
@@ -134,8 +136,20 @@ pub fn engine_remove_peer(state: State<'_, EngineState>, peer_id: String) -> Res
 }
 
 #[tauri::command]
-pub fn engine_set_peer_gain(state: State<'_, EngineState>, peer_id: String, gain: f32, muted: bool) -> Result<(), String> {
-    with_engine(&state, |e| e.set_peer_gain(&peer_id, gain, muted))
+pub fn engine_set_peer_gain(
+    state: State<'_, EngineState>,
+    peer_id: String,
+    gain: f32,
+    muted: bool,
+    pan: Option<f32>,
+) -> Result<(), String> {
+    with_engine(&state, |e| e.set_peer_gain(&peer_id, gain, muted, pan))
+}
+
+#[tauri::command]
+pub fn engine_set_input_muted(state: State<'_, EngineState>, muted: bool) -> Result<(), String> {
+    state.0.controls.input_muted.store(muted, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 #[tauri::command]

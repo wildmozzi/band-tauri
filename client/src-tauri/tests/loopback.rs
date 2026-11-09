@@ -277,6 +277,84 @@ fn test_mode_monitor_passthrough() {
 }
 
 #[test]
+fn input_mute_silences_monitor_and_tap_but_keeps_meter() {
+    let controls = Arc::new(MixControls::default());
+    controls.monitor_enabled.store(true, Ordering::Relaxed);
+    controls.input_muted.store(true, Ordering::Relaxed);
+    let backend = sine_backend(0.0);
+    let sink = backend.sink.clone();
+    let mut e = Engine::start(config(), Arc::new(backend), controls.clone(), None).unwrap();
+    let tap_energy = Arc::new(parking_lot::Mutex::new((0usize, 0f64)));
+    let te = tap_energy.clone();
+    e.subscribe_mix(Box::new(move |bytes| {
+        // raw f32 LE 인터리브
+        assert_eq!(bytes.len() % 4, 0);
+        let mut g = te.lock();
+        for b in bytes.as_chunks::<4>().0 {
+            let v = f32::from_le_bytes(*b) as f64;
+            g.1 += v * v;
+        }
+        g.0 += bytes.len() / 4;
+    }))
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    let s = e.stats();
+    let muted_len = sink.lock().len();
+    let muted_rms = {
+        let out = sink.lock();
+        let tail = &out[muted_len.saturating_sub(24_000)..muted_len];
+        (tail.iter().map(|x| x * x).sum::<f32>() / tail.len().max(1) as f32).sqrt()
+    };
+    let (n, energy) = *tap_energy.lock();
+    // 뮤트 해제 후 다시 소리가 나야 한다
+    controls.input_muted.store(false, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(400));
+    e.stop();
+    let out = sink.lock().clone();
+    let tail = &out[out.len() - 24_000..];
+    let unmuted_rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt();
+    println!("입력 뮤트: 출력 rms {muted_rms:.4}, 탭 rms {:.4}, inputLevel {:.3} → 해제 후 rms {unmuted_rms:.3}", (energy / n.max(1) as f64).sqrt(), s.input_level);
+    assert!(muted_rms < 1e-4, "뮤트 중 모니터 출력은 무음");
+    assert!(n > 0 && energy < 1e-6, "뮤트 중 믹스 탭도 무음");
+    // 레벨 미터는 0..1 선형 RMS로 계속 표시: 0.5 진폭 사인 → ≈0.354
+    assert!((s.input_level - SINE_AMP / 2f32.sqrt()).abs() < 0.03, "inputLevel {}", s.input_level);
+    assert!(unmuted_rms > 0.3, "뮤트 해제 후 복귀");
+}
+
+#[test]
+fn peer_pan_and_levels() {
+    // A(사인) → B, B에서 A를 오른쪽 끝으로 팬
+    let a = Engine::start(config(), Arc::new(sine_backend(0.0)), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let backend_b = FakeBackend::silence(48_000);
+    let sink_b = backend_b.sink.clone();
+    let b = Engine::start(config(), Arc::new(backend_b), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let addr_a: SocketAddr = format!("127.0.0.1:{}", a.local_port().unwrap()).parse().unwrap();
+    let addr_b: SocketAddr = format!("127.0.0.1:{}", b.local_port().unwrap()).parse().unwrap();
+    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), addr_b)).unwrap();
+    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), addr_a)).unwrap();
+    assert!(wait_connected(&b, Duration::from_secs(5)));
+    b.set_peer_gain("alice", 1.0, false, Some(1.0)).unwrap();
+    std::thread::sleep(Duration::from_millis(700));
+    let st = b.stats();
+    let out = sink_b.lock().clone();
+    let tail = &out[out.len() - 48_000..];
+    let (mut l, mut r) = (0f32, 0f32);
+    for f in tail.as_chunks::<2>().0 {
+        l += f[0] * f[0];
+        r += f[1] * f[1];
+    }
+    let n = (tail.len() / 2) as f32;
+    let (l, r) = ((l / n).sqrt(), (r / n).sqrt());
+    let peer_level = st.peers[0].level;
+    println!("pan=+1: L rms {l:.4}, R rms {r:.4}, peer level {peer_level:.3}, outputLevel {:.3}", st.output_level);
+    assert!(l < 0.01, "오른쪽 끝 팬이면 왼쪽은 무음: {l}");
+    assert!(r > 0.4, "오른쪽은 √2 배: {r}");
+    assert!((0.0..=1.0).contains(&peer_level) && peer_level > 0.25, "피어 레벨은 0..1 RMS: {peer_level}");
+    assert!((0.0..=1.0).contains(&st.output_level));
+    assert!(b.set_peer_gain("nobody", 1.0, false, None).is_err());
+}
+
+#[test]
 fn rejects_bad_config_and_descriptor() {
     let controls = Arc::new(MixControls::default());
     let bad = EngineConfig { codec: CodecKind::Pcm16, channels: 2, input_channels: vec![0, 1], frame_ms: 10.0, ..config() };
