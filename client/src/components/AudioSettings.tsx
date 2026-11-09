@@ -1,612 +1,419 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
-import {
-  isTauri,
-  getAudioDevices,
-  getAudioStats,
-  startTestAudio,
-  stopTestAudio,
-  AudioDeviceInfo,
-  AudioStats,
-  AudioSettings as AudioSettingsType,
-  AudioDriver,
-  CompressionType,
-  ChannelType,
-  MonoChannelType,
-  DEFAULT_AUDIO_SETTINGS,
-  AUDIO_PRESETS,
-} from '../lib/tauri'
-import { supabase } from '../lib/supabaseClient'
-import { useAuth } from '../contexts/AuthContext'
+/**
+ * 네이티브 엔진 오디오 설정 화면 (EngineConfig / DeviceInfo, 설계 4절).
+ * 상태와 저장은 AudioSettingsContext가 맡고, 이 컴포넌트는 표시와 입력만 한다.
+ */
+import { useEffect } from 'react'
 import { useAudioSettings } from '../contexts/AudioSettingsContext'
+import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs } from '../native/engineApi'
+import {
+  BUFFER_OPTIONS,
+  DRIVER_OPTIONS,
+  ENGINE_PRESETS,
+  FRAME_OPTIONS,
+  JITTER_MAX_LIMIT_MS,
+  bufferMs,
+  estimatePayloadBytes,
+  isPayloadAllowed,
+  type EnginePresetId,
+} from '../native/engineConfig'
 import './AudioSettings.css'
 
 interface AudioSettingsProps {
   onClose?: () => void
   isModal?: boolean
-  onSettingsChange?: (settings: AudioSettingsType) => void
-  currentSettings?: AudioSettingsType
-  onInputTestChange?: (testing: boolean) => void // 입력 테스트 상태 변경 콜백
 }
 
-type PresetType = 'high-quality' | 'standard' | 'low-latency' | 'bandwidth-priority' | 'custom'
+const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || undefined
 
-export function AudioSettings({
-  onClose,
-  isModal = false,
-  onSettingsChange,
-  currentSettings,
-  onInputTestChange,
-}: AudioSettingsProps) {
-  const { user } = useAuth()
-  const { isInputTesting, setInputTesting } = useAudioSettings()
-  const [isNativeMode] = useState(() => isTauri())
-  const [devices, setDevices] = useState<AudioDeviceInfo[]>([])
-  const [stats, setStats] = useState<AudioStats | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [selectedPreset, setSelectedPreset] = useState<PresetType>('standard')
-  const [isSaving, setIsSaving] = useState(false)
-
-  // 설정 상태
-  const [settings, setSettings] = useState<AudioSettingsType>(
-    currentSettings || DEFAULT_AUDIO_SETTINGS
-  )
-
-  // Supabase에서 설정 로드
-  const loadSettingsFromDB = useCallback(async () => {
-    if (!supabase || !user?.id) return
-
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('audio_settings')
-        .eq('id', user.id)
-        .single()
-
-      if (error) throw error
-
-      if (data?.audio_settings) {
-        const dbSettings = data.audio_settings as AudioSettingsType
-        setSettings({ ...DEFAULT_AUDIO_SETTINGS, ...dbSettings })
-        console.log('[AudioSettings] Loaded from DB:', dbSettings)
-      }
-    } catch (err) {
-      console.error('[AudioSettings] Failed to load from DB:', err)
-    }
-  }, [user?.id])
-
-  // Supabase에 설정 저장
-  const saveSettingsToDB = useCallback(async (newSettings: AudioSettingsType) => {
-    if (!supabase || !user?.id) return
-
-    setIsSaving(true)
-    try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ audio_settings: newSettings })
-        .eq('id', user.id)
-
-      if (error) throw error
-      console.log('[AudioSettings] Saved to DB:', newSettings)
-    } catch (err) {
-      console.error('[AudioSettings] Failed to save to DB:', err)
-    } finally {
-      setIsSaving(false)
-    }
-  }, [user?.id])
-
-  // 장치 목록 및 설정 로드
-  useEffect(() => {
-    if (!isNativeMode) {
-      setIsLoading(false)
-      return
-    }
-
-    const init = async () => {
-      await loadDevices()
-      await loadSettingsFromDB()
-    }
-    init()
-
-    const interval = setInterval(loadStats, 1000)
-    return () => clearInterval(interval)
-  }, [isNativeMode, loadSettingsFromDB])
-
-  const loadDevices = async () => {
-    try {
-      setIsLoading(true)
-      setError(null)
-      const deviceList = await getAudioDevices()
-      setDevices(deviceList)
-      await loadStats()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '장치를 불러오는데 실패했습니다')
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  const loadStats = async () => {
-    try {
-      const audioStats = await getAudioStats()
-      setStats(audioStats)
-    } catch {
-      // Stats 로드 실패는 무시
-    }
-  }
-
-  // 입력 테스트 토글
-  const toggleInputTest = async () => {
-    try {
-      const newValue = !isInputTesting
-      if (newValue) {
-        // 테스트 시작 - 현재 설정으로 오디오 엔진 시작
-        await startTestAudio(settings)
-        console.log('[AudioSettings] Input test started with settings:', settings)
-      } else {
-        // 테스트 중지
-        await stopTestAudio()
-        console.log('[AudioSettings] Input test stopped')
-      }
-      setInputTesting(newValue)
-      onInputTestChange?.(newValue)  // 레거시 콜백
-    } catch (err) {
-      console.error('[AudioSettings] Failed to toggle input test:', err)
-    }
-  }
-
-  // 컴포넌트 언마운트 시 테스트 종료
-  useEffect(() => {
-    return () => {
-      if (isInputTesting) {
-        stopTestAudio().catch(() => {})
-        setInputTesting(false)
-        onInputTestChange?.(false)
-      }
-    }
-  }, [isInputTesting, setInputTesting, onInputTestChange])
-
-  // 선택한 드라이버에 해당하는 장치만 필터링
-  const driverMap: Record<string, string[]> = {
-    'Asio': ['ASIO'],
-    'WasapiExclusive': ['WASAPI'],
-    'WasapiShared': ['WASAPI'],
-  }
-
-  // 입력/출력에 각각 적용할 드라이버 결정
-  const inputDriverKey = settings.input_driver || settings.driver
-  const outputDriverKey = settings.output_driver || settings.driver
-  const allowedInputDrivers = driverMap[inputDriverKey] || ['WASAPI']
-  const allowedOutputDrivers = driverMap[outputDriverKey] || ['WASAPI']
-
-  const filteredInputDevices = useMemo(() => {
-    return devices.filter(d =>
-      d.is_input &&
-      d.name &&
-      d.name.trim() !== '' &&
-      allowedInputDrivers.includes(d.driver)
-    )
-  }, [devices, allowedInputDrivers])
-
-  const filteredOutputDevices = useMemo(() => {
-    return devices.filter(d =>
-      !d.is_input &&
-      d.name &&
-      d.name.trim() !== '' &&
-      allowedOutputDrivers.includes(d.driver)
-    )
-  }, [devices, allowedOutputDrivers])
-
-  // 설정 변경 핸들러
-  const updateSettings = (updates: Partial<AudioSettingsType>) => {
-    const newSettings = { ...settings, ...updates }
-    setSettings(newSettings)
-    setSelectedPreset('custom')
-    onSettingsChange?.(newSettings)
-    saveSettingsToDB(newSettings)
-  }
-
-  // 프리셋 적용
-  const applyPreset = (preset: PresetType) => {
-    setSelectedPreset(preset)
-    if (preset !== 'custom') {
-      const presetSettings = AUDIO_PRESETS[preset]
-      const newSettings = { ...settings, ...presetSettings }
-      setSettings(newSettings)
-      onSettingsChange?.(newSettings)
-      saveSettingsToDB(newSettings)
-    }
-  }
-
-  // 비 Tauri 환경
-  if (!isNativeMode) {
-    return (
-      <div className={`audio-settings ${isModal ? 'modal' : ''}`}>
-        <div className="audio-settings-content">
-          <h2>오디오 설정</h2>
-          <div className="native-only-notice">
-            <div className="notice-icon">🎵</div>
-            <h3>데스크톱 앱 전용 기능</h3>
-            <p>
-              네이티브 오디오 설정은 Band 데스크톱 앱에서만 사용 가능합니다.
-              <br />
-              ASIO/WASAPI 저지연 오디오를 사용하려면 앱을 설치해주세요.
-            </p>
-          </div>
-          {onClose && (
-            <div className="settings-actions">
-              <button onClick={onClose} className="btn-secondary">닫기</button>
-            </div>
-          )}
-        </div>
-      </div>
-    )
-  }
-
-  // 로딩 중
-  if (isLoading) {
-    return (
-      <div className={`audio-settings ${isModal ? 'modal' : ''}`}>
-        <div className="audio-settings-content">
-          <h2>오디오 설정</h2>
-          <div className="loading-state">
-            <div className="loading-spinner" />
-            <p>오디오 장치를 검색하는 중...</p>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // 에러
-  if (error) {
-    return (
-      <div className={`audio-settings ${isModal ? 'modal' : ''}`}>
-        <div className="audio-settings-content">
-          <h2>오디오 설정</h2>
-          <div className="error-state">
-            <div className="error-icon">⚠️</div>
-            <h3>오디오 장치 검색 실패</h3>
-            <p>{error}</p>
-            <button onClick={loadDevices} className="btn-primary">
-              다시 시도
-            </button>
-          </div>
-          {onClose && (
-            <div className="settings-actions">
-              <button onClick={onClose} className="btn-secondary">닫기</button>
-            </div>
-          )}
-        </div>
-      </div>
-    )
-  }
-
+function LevelMeter({ value, kind }: { value: number; kind: 'input' | 'output' }) {
+  const pct = Math.max(0, Math.min(100, value * 100))
   return (
+    <div className="level-meter">
+      <div className={`level-bar ${kind} ${pct > 90 ? 'clip' : ''}`} style={{ width: `${pct}%` }} />
+    </div>
+  )
+}
+
+export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) {
+  const {
+    isNativeMode,
+    inputDevices,
+    outputDevices,
+    selectedInputDevice,
+    config,
+    issues,
+    selectedPreset,
+    updateConfig,
+    applyPreset,
+    refreshDevices,
+    isLoading,
+    error,
+    isSaving,
+    migrated,
+    isTesting,
+    testStats,
+    testError,
+    startTest,
+    stopTest,
+    engineInUse,
+  } = useAudioSettings()
+
+  // 설정 화면을 닫으면 테스트 종료
+  useEffect(() => () => {
+    void stopTest()
+  }, [stopTest])
+
+  const wrap = (body: React.ReactNode) => (
     <div className={`audio-settings ${isModal ? 'modal' : ''}`}>
       {isModal && <div className="modal-backdrop" onClick={onClose} />}
       <div className="audio-settings-content">
         <div className="settings-header">
           <h2>오디오 설정</h2>
-          {onClose && (
-            <button onClick={onClose} className="close-btn">×</button>
-          )}
+          {onClose && <button onClick={onClose} className="close-btn">×</button>}
         </div>
-
-        {/* 음질 프리셋 */}
-        <section className="settings-section">
-          <h3>음질 프리셋</h3>
-          <div className="preset-grid">
-            {[
-              { id: 'high-quality', label: '고음질', icon: '🎵', desc: '48kHz / 비압축 / 스테레오' },
-              { id: 'standard', label: '표준', icon: '⚖️', desc: '48kHz / Opus / 모노' },
-              { id: 'low-latency', label: '초저지연', icon: '⚡', desc: '48kHz / 비압축 / 64 samples' },
-              { id: 'bandwidth-priority', label: '대역폭 우선', icon: '📶', desc: '44.1kHz / Opus / 모노' },
-              { id: 'custom', label: '사용자 정의', icon: '⚙️', desc: '직접 설정' },
-            ].map(preset => (
-              <button
-                key={preset.id}
-                className={`preset-btn ${selectedPreset === preset.id ? 'active' : ''}`}
-                onClick={() => applyPreset(preset.id as PresetType)}
-              >
-                <span className="preset-icon">{preset.icon}</span>
-                <span className="preset-label">{preset.label}</span>
-                <span className="preset-desc">{preset.desc}</span>
-              </button>
-            ))}
-          </div>
-        </section>
-
-        {/* 드라이버 선택 */}
-        <section className="settings-section">
-          <h3>오디오 드라이버</h3>
-          <div className="settings-row">
-            <label>
-              <input
-                type="checkbox"
-                checked={!!(settings.input_driver || settings.output_driver)}
-                onChange={(e) => {
-                  if (e.target.checked) {
-                    // 입/출력 분리 모드 활성화 - 기본 드라이버로 초기화
-                    updateSettings({
-                      input_driver: settings.driver,
-                      output_driver: settings.driver,
-                    })
-                  } else {
-                    // 입/출력 분리 모드 비활성화
-                    updateSettings({
-                      input_driver: null,
-                      output_driver: null,
-                    })
-                  }
-                }}
-              />
-              입력/출력 드라이버 분리 (예: ASIO 입력 + WASAPI 출력)
-            </label>
-          </div>
-
-          {/* 통합 드라이버 모드 */}
-          {!settings.input_driver && !settings.output_driver && (
-            <div className="driver-options">
-              {[
-                { id: 'Asio', label: 'ASIO', desc: '전문 오디오 인터페이스 (최저 지연)' },
-                { id: 'WasapiExclusive', label: 'WASAPI Exclusive', desc: '낮은 지연 (단독 사용)' },
-                { id: 'WasapiShared', label: 'WASAPI Shared', desc: '일반 사용 (다른 앱과 공유)' },
-              ].map(driver => (
-                <label key={driver.id} className="driver-option">
-                  <input
-                    type="radio"
-                    name="driver"
-                    checked={settings.driver === driver.id}
-                    onChange={() => updateSettings({ driver: driver.id as AudioDriver })}
-                  />
-                  <span className="driver-info">
-                    <span className="driver-label">{driver.label}</span>
-                    <span className="driver-desc">{driver.desc}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          )}
-
-          {/* 분리 드라이버 모드 */}
-          {(settings.input_driver || settings.output_driver) && (
-            <div className="split-driver-options">
-              <div className="driver-column">
-                <h4>입력 드라이버</h4>
-                {[
-                  { id: 'Asio', label: 'ASIO' },
-                  { id: 'WasapiExclusive', label: 'WASAPI Exclusive' },
-                  { id: 'WasapiShared', label: 'WASAPI Shared' },
-                ].map(driver => (
-                  <label key={driver.id} className="driver-option compact">
-                    <input
-                      type="radio"
-                      name="input_driver"
-                      checked={settings.input_driver === driver.id}
-                      onChange={() => updateSettings({ input_driver: driver.id as AudioDriver })}
-                    />
-                    <span className="driver-label">{driver.label}</span>
-                  </label>
-                ))}
-              </div>
-              <div className="driver-column">
-                <h4>출력 드라이버</h4>
-                {[
-                  { id: 'Asio', label: 'ASIO' },
-                  { id: 'WasapiExclusive', label: 'WASAPI Exclusive' },
-                  { id: 'WasapiShared', label: 'WASAPI Shared' },
-                ].map(driver => (
-                  <label key={driver.id} className="driver-option compact">
-                    <input
-                      type="radio"
-                      name="output_driver"
-                      checked={settings.output_driver === driver.id}
-                      onChange={() => updateSettings({ output_driver: driver.id as AudioDriver })}
-                    />
-                    <span className="driver-label">{driver.label}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-        </section>
-
-        {/* 입력 장치 선택 */}
-        <section className="settings-section">
-          <h3>입력 장치 (마이크/오디오 인터페이스)</h3>
-          <select
-            value={settings.input_device || ''}
-            onChange={(e) => updateSettings({ input_device: e.target.value || null })}
-            className="device-select"
-          >
-            <option value="">기본 장치</option>
-            {filteredInputDevices.map(device => (
-              <option key={device.id} value={device.name}>
-                {device.name} {device.is_default ? '(기본)' : ''}
-              </option>
-            ))}
-          </select>
-          <button onClick={loadDevices} className="refresh-btn">
-            새로고침
-          </button>
-        </section>
-
-        {/* 출력 장치 선택 */}
-        <section className="settings-section">
-          <h3>출력 장치 (스피커/헤드폰)</h3>
-          <select
-            value={settings.output_device || ''}
-            onChange={(e) => updateSettings({ output_device: e.target.value || null })}
-            className="device-select"
-          >
-            <option value="">기본 장치</option>
-            {filteredOutputDevices.map(device => (
-              <option key={device.id} value={device.name}>
-                {device.name} {device.is_default ? '(기본)' : ''}
-              </option>
-            ))}
-          </select>
-        </section>
-
-        {/* 입력 테스트 */}
-        <section className="settings-section">
-          <h3>입력 테스트</h3>
-          <div className="settings-row">
-            <label>내 마이크 소리 듣기</label>
-            <button
-              className={`toggle-btn ${isInputTesting ? 'active' : ''}`}
-              onClick={toggleInputTest}
-            >
-              {isInputTesting ? '테스트 중' : '꺼짐'}
-            </button>
-          </div>
-          <p className="setting-hint">
-            ※ 테스트 중에는 합주실 마이크 전송이 일시 중지됩니다.
-            <br />
-            ※ 설정을 닫으면 자동으로 테스트가 종료됩니다.
-          </p>
-        </section>
-
-        {/* 오디오 품질 설정 */}
-        <section className="settings-section">
-          <h3>오디오 품질</h3>
-          <div className="settings-row">
-            <label>샘플레이트</label>
-            <select
-              value={settings.sample_rate}
-              onChange={(e) => updateSettings({ sample_rate: Number(e.target.value) })}
-            >
-              <option value={44100}>44.1 kHz</option>
-              <option value={48000}>48 kHz</option>
-            </select>
-          </div>
-          <div className="settings-row">
-            <label>버퍼 크기</label>
-            <select
-              value={settings.buffer_size}
-              onChange={(e) => updateSettings({ buffer_size: Number(e.target.value) })}
-            >
-              <option value={64}>64 samples (~1.3ms)</option>
-              <option value={128}>128 samples (~2.7ms)</option>
-              <option value={256}>256 samples (~5.3ms)</option>
-              <option value={512}>512 samples (~10.7ms)</option>
-              <option value={1024}>1024 samples (~21.3ms)</option>
-            </select>
-          </div>
-          <div className="settings-row">
-            <label>압축</label>
-            <select
-              value={settings.compression}
-              onChange={(e) => updateSettings({ compression: e.target.value as CompressionType })}
-            >
-              <option value="Uncompressed">비압축 (최고 음질)</option>
-              <option value="Opus">Opus (낮은 대역폭)</option>
-            </select>
-          </div>
-          <div className="settings-row">
-            <label>채널</label>
-            <select
-              value={settings.channels}
-              onChange={(e) => updateSettings({ channels: e.target.value as ChannelType })}
-            >
-              <option value="Mono">모노</option>
-              <option value="Stereo">스테레오</option>
-            </select>
-          </div>
-
-          {/* 모노 채널 선택 (모노 모드일 때만 표시) */}
-          {settings.channels === 'Mono' && (
-            <div className="settings-row">
-              <label>모노 입력 채널</label>
-              <select
-                value={settings.mono_channel || 'Ch1'}
-                onChange={(e) => updateSettings({ mono_channel: e.target.value as MonoChannelType })}
-              >
-                <option value="Ch1">채널 1 (INPUT 1)</option>
-                <option value="Ch2">채널 2 (INPUT 2)</option>
-              </select>
-              <p className="setting-hint">
-                오디오 인터페이스의 어떤 입력을 사용할지 선택합니다.
-              </p>
-            </div>
-          )}
-
-          {/* 스테레오 L/R 스왑 (스테레오 모드일 때만 표시) */}
-          {settings.channels === 'Stereo' && (
-            <div className="settings-row">
-              <label>L/R 채널 스왑</label>
-              <button
-                className={`toggle-btn ${settings.stereo_swap ? 'active' : ''}`}
-                onClick={() => updateSettings({ stereo_swap: !settings.stereo_swap })}
-              >
-                {settings.stereo_swap ? '켜짐' : '꺼짐'}
-              </button>
-              <p className="setting-hint">
-                좌우 채널을 바꿉니다. (INPUT 1↔INPUT 2)
-              </p>
-            </div>
-          )}
-        </section>
-
-        {/* 현재 오디오 상태 */}
-        {stats && (
-          <section className="settings-section">
-            <h3>현재 상태</h3>
-            <div className="stats-grid">
-              <div className="stat-item">
-                <span className="stat-label">상태</span>
-                <span className={`stat-value ${stats.is_running ? 'running' : 'stopped'}`}>
-                  {stats.is_running ? '🟢 실행 중' : '🔴 정지'}
-                </span>
-              </div>
-              <div className="stat-item">
-                <span className="stat-label">드라이버</span>
-                <span className="stat-value">{stats.driver}</span>
-              </div>
-              <div className="stat-item">
-                <span className="stat-label">샘플레이트</span>
-                <span className="stat-value">{stats.sample_rate / 1000} kHz</span>
-              </div>
-              <div className="stat-item">
-                <span className="stat-label">버퍼</span>
-                <span className="stat-value">{stats.buffer_size} samples</span>
-              </div>
-              <div className="stat-item">
-                <span className="stat-label">입력 레벨</span>
-                <div className="level-meter">
-                  <div
-                    className="level-bar input"
-                    style={{ width: `${Math.min(stats.input_level * 100, 100)}%` }}
-                  />
-                </div>
-              </div>
-              <div className="stat-item">
-                <span className="stat-label">출력 레벨</span>
-                <div className="level-meter">
-                  <div
-                    className="level-bar output"
-                    style={{ width: `${Math.min(stats.output_level * 100, 100)}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {/* 저장 안내 */}
-        <div className="settings-footer">
-          <p className="auto-save-notice">
-            {isSaving ? '저장 중...' : '설정은 자동으로 저장됩니다'}
-          </p>
-          <p className="restart-notice">※ 설정 변경 시 방을 다시 입장해야 적용됩니다</p>
-          {onClose && (
-            <button onClick={onClose} className="btn-primary">
-              완료
-            </button>
-          )}
-        </div>
+        {body}
       </div>
     </div>
+  )
+
+  // 웹: 연주는 앱 전용
+  if (!isNativeMode) {
+    return wrap(
+      <>
+        <div className="native-only-notice">
+          <div className="notice-icon">🎵</div>
+          <h3>데스크톱 앱 전용 기능</h3>
+          <p>
+            연주와 오디오 장치 설정은 Band 데스크톱 앱에서만 할 수 있습니다.
+            <br />
+            웹에서는 합주를 관람(청취)할 수 있습니다.
+          </p>
+          {DESKTOP_DOWNLOAD_URL && (
+            <a href={DESKTOP_DOWNLOAD_URL} className="btn-primary" target="_blank" rel="noopener noreferrer">
+              데스크톱 앱 다운로드
+            </a>
+          )}
+        </div>
+        {onClose && (
+          <div className="settings-actions">
+            <button onClick={onClose} className="btn-secondary">닫기</button>
+          </div>
+        )}
+      </>,
+    )
+  }
+
+  if (isLoading) {
+    return wrap(
+      <div className="loading-state">
+        <div className="loading-spinner" />
+        <p>오디오 장치를 검색하는 중...</p>
+      </div>,
+    )
+  }
+
+  if (error) {
+    return wrap(
+      <div className="error-state">
+        <div className="error-icon">⚠️</div>
+        <h3>오디오 장치 검색 실패</h3>
+        <p>{error}</p>
+        <button onClick={() => void refreshDevices()} className="btn-primary">다시 시도</button>
+      </div>,
+    )
+  }
+
+  const payloadBytes = estimatePayloadBytes(config.codec, config.channels, config.frameMs, config.opusBitrate)
+  const deviceChannels = Math.max(1, selectedInputDevice?.channels ?? 2)
+  const channelOptions = Array.from({ length: deviceChannels }, (_, i) => i)
+  const allowed = (patch: { codec?: CodecKind; channels?: 1 | 2; frameMs?: FrameMs }) =>
+    isPayloadAllowed(patch.codec ?? config.codec, patch.channels ?? config.channels, patch.frameMs ?? config.frameMs, config.opusBitrate)
+
+  const testLatency = testStats?.estLatencyMs
+
+  return wrap(
+    <>
+      {migrated && (
+        <div className="settings-notice">
+          이전 버전의 오디오 설정을 새 엔진 형식으로 변환했습니다. 장치 선택을 확인해주세요.
+        </div>
+      )}
+
+      {/* 프리셋 */}
+      <section className="settings-section">
+        <h3>프리셋</h3>
+        <div className="preset-grid">
+          {(Object.keys(ENGINE_PRESETS) as EnginePresetId[]).map((id) => (
+            <button
+              key={id}
+              className={`preset-btn ${selectedPreset === id ? 'active' : ''}`}
+              onClick={() => applyPreset(id)}
+            >
+              <span className="preset-label">{ENGINE_PRESETS[id].label}</span>
+              <span className="preset-desc">{ENGINE_PRESETS[id].desc}</span>
+            </button>
+          ))}
+          <div className={`preset-btn static ${selectedPreset === null ? 'active' : ''}`}>
+            <span className="preset-label">사용자 정의</span>
+            <span className="preset-desc">아래에서 직접 설정</span>
+          </div>
+        </div>
+      </section>
+
+      {/* 드라이버 + 장치 */}
+      <section className="settings-section">
+        <h3>입력</h3>
+        <div className="settings-row">
+          <label htmlFor="input-driver">드라이버</label>
+          <select
+            id="input-driver"
+            value={config.inputDriver}
+            onChange={(e) => updateConfig({ inputDriver: e.target.value as DriverKind })}
+          >
+            {DRIVER_OPTIONS.map((d) => (
+              <option key={d.id} value={d.id}>{d.label}</option>
+            ))}
+          </select>
+        </div>
+        <p className="setting-hint">{DRIVER_OPTIONS.find((d) => d.id === config.inputDriver)?.desc}</p>
+        <div className="settings-row">
+          <label htmlFor="input-device">장치</label>
+          <select
+            id="input-device"
+            className="device-select"
+            value={config.inputDevice ?? ''}
+            onChange={(e) => updateConfig({ inputDevice: e.target.value || null })}
+          >
+            <option value="">기본 장치</option>
+            {inputDevices.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} ({d.channels}ch){d.isDefault ? ' · 기본' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+        {inputDevices.length === 0 && <p className="setting-hint">이 드라이버로 찾은 입력 장치가 없습니다.</p>}
+      </section>
+
+      <section className="settings-section">
+        <h3>출력</h3>
+        <div className="settings-row">
+          <label htmlFor="output-driver">드라이버</label>
+          <select
+            id="output-driver"
+            value={config.outputDriver}
+            onChange={(e) => updateConfig({ outputDriver: e.target.value as DriverKind })}
+          >
+            {DRIVER_OPTIONS.map((d) => (
+              <option key={d.id} value={d.id}>{d.label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="settings-row">
+          <label htmlFor="output-device">장치</label>
+          <select
+            id="output-device"
+            className="device-select"
+            value={config.outputDevice ?? ''}
+            onChange={(e) => updateConfig({ outputDevice: e.target.value || null })}
+          >
+            <option value="">기본 장치</option>
+            {outputDevices.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}{d.isDefault ? ' · 기본' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+        {config.inputDriver === 'asio' && config.outputDriver === 'asio' && (
+          <p className="setting-hint">ASIO는 입력과 출력을 같은 장치(드라이버)로 엽니다.</p>
+        )}
+        <button onClick={() => void refreshDevices()} className="refresh-btn">장치 새로고침</button>
+      </section>
+
+      {/* 엔진/네트워크 */}
+      <section className="settings-section">
+        <h3>엔진</h3>
+        <div className="settings-row">
+          <label htmlFor="buffer-size">장치 버퍼</label>
+          <select
+            id="buffer-size"
+            value={config.bufferSize}
+            onChange={(e) => updateConfig({ bufferSize: Number(e.target.value) })}
+          >
+            {BUFFER_OPTIONS.map((b) => (
+              <option key={b} value={b}>{b} samples (~{bufferMs(b)}ms)</option>
+            ))}
+          </select>
+        </div>
+        <div className="settings-row">
+          <label htmlFor="frame-ms">네트워크 프레임</label>
+          <select
+            id="frame-ms"
+            value={config.frameMs}
+            onChange={(e) => updateConfig({ frameMs: Number(e.target.value) as FrameMs })}
+          >
+            {FRAME_OPTIONS.map((f) => (
+              <option key={f} value={f} disabled={!allowed({ frameMs: f })}>
+                {f}ms{!allowed({ frameMs: f }) ? ' (이 코덱/채널에서 불가)' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="settings-row">
+          <label htmlFor="codec">코덱</label>
+          <select
+            id="codec"
+            value={config.codec}
+            onChange={(e) => updateConfig({ codec: e.target.value as CodecKind })}
+          >
+            <option value="opus" disabled={!allowed({ codec: 'opus' })}>Opus (압축, 대역폭 적음)</option>
+            <option value="pcm16" disabled={!allowed({ codec: 'pcm16' })}>
+              PCM16 (비압축, 코덱 지연 없음){!allowed({ codec: 'pcm16' }) ? ' — 현재 프레임에서 불가' : ''}
+            </option>
+          </select>
+        </div>
+        <div className="settings-row">
+          <label htmlFor="channels">채널</label>
+          <select
+            id="channels"
+            value={config.channels}
+            onChange={(e) => updateConfig({ channels: Number(e.target.value) === 2 ? 2 : 1 })}
+          >
+            <option value={1}>모노</option>
+            <option value={2} disabled={!allowed({ channels: 2 })}>
+              스테레오{!allowed({ channels: 2 }) ? ' — 현재 코덱/프레임에서 불가' : ''}
+            </option>
+          </select>
+        </div>
+        <p className={`setting-hint ${payloadBytes > MAX_PAYLOAD_BYTES ? 'error' : ''}`}>
+          패킷 페이로드 약 {payloadBytes}B / 최대 {MAX_PAYLOAD_BYTES}B
+          {config.codec === 'pcm16' && ' · PCM16 스테레오는 프레임 5ms 이하만 가능'}
+        </p>
+
+        {/* 입력 채널 선택 */}
+        {config.channels === 1 ? (
+          <div className="settings-row">
+            <label htmlFor="input-ch">입력 채널</label>
+            <select
+              id="input-ch"
+              value={config.inputChannels[0]}
+              onChange={(e) => updateConfig({ inputChannels: [Number(e.target.value)] })}
+            >
+              {channelOptions.map((ch) => <option key={ch} value={ch}>Ch{ch + 1}</option>)}
+            </select>
+          </div>
+        ) : (
+          <div className="settings-row">
+            <label>입력 채널 (L / R)</label>
+            <select
+              aria-label="왼쪽 입력 채널"
+              value={config.inputChannels[0]}
+              onChange={(e) => updateConfig({ inputChannels: [Number(e.target.value), config.inputChannels[1] ?? 1] })}
+            >
+              {channelOptions.map((ch) => <option key={ch} value={ch}>L: Ch{ch + 1}</option>)}
+            </select>
+            <select
+              aria-label="오른쪽 입력 채널"
+              value={config.inputChannels[1] ?? 1}
+              onChange={(e) => updateConfig({ inputChannels: [config.inputChannels[0], Number(e.target.value)] })}
+            >
+              {channelOptions.map((ch) => <option key={ch} value={ch}>R: Ch{ch + 1}</option>)}
+            </select>
+          </div>
+        )}
+      </section>
+
+      {/* 지터 버퍼 */}
+      <section className="settings-section">
+        <h3>지터 버퍼</h3>
+        <div className="settings-row">
+          <label htmlFor="jitter-min">최소 (0 = 자동)</label>
+          <input
+            id="jitter-min"
+            type="number"
+            min={0}
+            max={JITTER_MAX_LIMIT_MS}
+            step={5}
+            value={config.jitterMinMs ?? 0}
+            onChange={(e) => updateConfig({ jitterMinMs: Math.max(0, Number(e.target.value) || 0) })}
+          />
+          <span>ms</span>
+        </div>
+        <div className="settings-row">
+          <label htmlFor="jitter-max">최대</label>
+          <input
+            id="jitter-max"
+            type="number"
+            min={10}
+            max={JITTER_MAX_LIMIT_MS}
+            step={5}
+            value={config.jitterMaxMs ?? 80}
+            onChange={(e) => updateConfig({ jitterMaxMs: Math.max(0, Number(e.target.value) || 0) })}
+          />
+          <span>ms</span>
+        </div>
+        <p className="setting-hint">네트워크가 불안정하면 최대값을 올리고, 지연을 줄이려면 내리세요.</p>
+      </section>
+
+      {/* 테스트 모니터 */}
+      <section className="settings-section">
+        <h3>테스트 모니터</h3>
+        <div className="settings-row">
+          <label>내 입력 소리 듣기 (네트워크 없이)</label>
+          <button
+            className={`toggle-btn ${isTesting ? 'active' : ''}`}
+            onClick={() => void (isTesting ? stopTest() : startTest())}
+            disabled={engineInUse || (!isTesting && issues.length > 0)}
+          >
+            {isTesting ? '테스트 중 (끄기)' : '테스트 시작'}
+          </button>
+        </div>
+        {engineInUse && <p className="setting-hint">합주 중에는 테스트할 수 없습니다.</p>}
+        {testError && <p className="setting-hint error">{testError}</p>}
+        <div className="stats-grid">
+          <div className="stat-item">
+            <span className="stat-label">입력 레벨</span>
+            <LevelMeter value={isTesting ? testStats?.inputLevel ?? 0 : 0} kind="input" />
+          </div>
+          <div className="stat-item">
+            <span className="stat-label">출력 레벨</span>
+            <LevelMeter value={isTesting ? testStats?.outputLevel ?? 0 : 0} kind="output" />
+          </div>
+          {isTesting && testStats && (
+            <>
+              <div className="stat-item">
+                <span className="stat-label">로컬 처리 지연</span>
+                <span className="stat-value">{testLatency !== undefined ? `${testLatency.toFixed(1)}ms` : '--'}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">장치</span>
+                <span className="stat-value">{testStats.sampleRate / 1000}kHz · 버퍼 {testStats.deviceBuffer}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">xrun</span>
+                <span className={`stat-value ${testStats.xruns > 0 ? 'stopped' : 'running'}`}>{testStats.xruns}</span>
+              </div>
+            </>
+          )}
+        </div>
+        <p className="setting-hint">※ 설정을 바꾸거나 이 화면을 닫으면 테스트가 종료됩니다.</p>
+      </section>
+
+      {issues.length > 0 && (
+        <section className="settings-section">
+          <h3>설정 확인 필요</h3>
+          <ul className="settings-issues">
+            {issues.map((issue) => <li key={`${issue.field}-${issue.message}`}>{issue.message}</li>)}
+          </ul>
+        </section>
+      )}
+
+      <div className="settings-footer">
+        <p className="auto-save-notice">{isSaving ? '저장 중...' : '설정은 자동으로 저장됩니다'}</p>
+        <p className="restart-notice">※ 합주 중 바꾼 설정은 연주를 다시 시작하면 적용됩니다</p>
+        {onClose && <button onClick={onClose} className="btn-primary">완료</button>}
+      </div>
+    </>,
   )
 }

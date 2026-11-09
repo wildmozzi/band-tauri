@@ -1,0 +1,209 @@
+/**
+ * 네이티브 오디오 엔진 Tauri 커맨드 래퍼.
+ * 계약: docs/overhaul/native-engine-design.md 4절. 타입/커맨드 이름을 바꾸려면 설계 문서부터 바꾼다.
+ *
+ * 웹(비Tauri) 빌드에서도 이 파일은 import만으로 에러가 나지 않는다.
+ * `@tauri-apps/api/core`는 import 시점에 Tauri 전역을 건드리지 않고,
+ * 모든 커맨드는 `isNativeApp()` 가드 뒤에서만 invoke 한다.
+ */
+import { Channel, invoke as tauriInvoke, isTauri } from '@tauri-apps/api/core'
+
+// ============================================================================
+// 타입 (설계 4절)
+// ============================================================================
+
+export type DriverKind = 'asio' | 'wasapiShared' | 'wasapiExclusive'
+
+export interface DeviceInfo {
+  id: string
+  name: string
+  driver: DriverKind
+  isInput: boolean
+  isDefault: boolean
+  channels: number
+  sampleRates: number[]
+}
+
+export type FrameMs = 2.5 | 5 | 10
+export type CodecKind = 'opus' | 'pcm16'
+
+export interface EngineConfig {
+  inputDriver: DriverKind
+  outputDriver: DriverKind
+  /** DeviceInfo.id, null이면 기본 장치 */
+  inputDevice: string | null
+  outputDevice: string | null
+  /** 32..1024, 장치 요청값 */
+  bufferSize: number
+  frameMs: FrameMs
+  codec: CodecKind
+  channels: 1 | 2
+  /** 0-based 장치 입력 채널 */
+  inputChannels: [number] | [number, number]
+  opusBitrate?: number
+  jitterMinMs?: number
+  jitterMaxMs?: number
+  udpPort?: number
+}
+
+export interface Candidate {
+  kind: 'lan' | 'public'
+  addr: string
+}
+
+export interface LocalDescriptor {
+  ssrc: number
+  key: string
+  candidates: Candidate[]
+}
+
+export type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
+
+export interface PeerStats {
+  peerId: string
+  state: PeerState
+  path: 'lan' | 'public' | null
+  rttMs: number | null
+  jitterMs: number
+  bufferMs: number
+  lossPct: number
+  late: number
+  concealed: number
+  level: number
+}
+
+export interface EngineStats {
+  running: boolean
+  sampleRate: number
+  deviceBuffer: number
+  inputLevel: number
+  outputLevel: number
+  xruns: number
+  estLatencyMs: number
+  peers: PeerStats[]
+}
+
+// ============================================================================
+// 환경 감지
+// ============================================================================
+
+/** Tauri 데스크톱 앱에서 실행 중인지 (연주는 앱에서만 가능) */
+export function isNativeApp(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    return isTauri()
+  } catch {
+    return false
+  }
+}
+
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isNativeApp()) {
+    throw new Error(`네이티브 엔진은 데스크톱 앱에서만 사용할 수 있습니다 (${cmd})`)
+  }
+  return tauriInvoke<T>(cmd, args)
+}
+
+/** invoke 에러(Rust `Result<T, String>`의 Err)를 사람이 읽을 문자열로 */
+export function engineErrorMessage(err: unknown): string {
+  if (typeof err === 'string') return err
+  if (err instanceof Error) return err.message
+  try {
+    return JSON.stringify(err)
+  } catch {
+    return String(err)
+  }
+}
+
+// ============================================================================
+// 커맨드 (설계 4절 표)
+// ============================================================================
+
+export function engineListDevices(): Promise<DeviceInfo[]> {
+  return invoke<DeviceInfo[]>('engine_list_devices')
+}
+
+export function engineStart(config: EngineConfig, peerId: string): Promise<LocalDescriptor> {
+  return invoke<LocalDescriptor>('engine_start', { config, peerId })
+}
+
+export function engineStop(): Promise<null> {
+  return invoke<null>('engine_stop')
+}
+
+export function engineTestStart(config: EngineConfig): Promise<null> {
+  return invoke<null>('engine_test_start', { config })
+}
+
+export function engineTestStop(): Promise<null> {
+  return invoke<null>('engine_test_stop')
+}
+
+export function engineAddPeer(peerId: string, descriptor: LocalDescriptor): Promise<null> {
+  return invoke<null>('engine_add_peer', { peerId, descriptor })
+}
+
+export function engineRemovePeer(peerId: string): Promise<null> {
+  return invoke<null>('engine_remove_peer', { peerId })
+}
+
+export function engineSetPeerGain(peerId: string, gain: number, muted: boolean): Promise<null> {
+  return invoke<null>('engine_set_peer_gain', { peerId, gain, muted })
+}
+
+export function engineSetMonitor(enabled: boolean, gain: number): Promise<null> {
+  return invoke<null>('engine_set_monitor', { enabled, gain })
+}
+
+export function engineSetMasterGain(gain: number): Promise<null> {
+  return invoke<null>('engine_set_master_gain', { gain })
+}
+
+export function engineStats(): Promise<EngineStats> {
+  return invoke<EngineStats>('engine_stats')
+}
+
+/**
+ * 믹스 구독. 엔진이 20ms마다 48kHz stereo f32 인터리브 청크를 보낸다.
+ * Rust가 raw 바이트로 보내면 ArrayBuffer, JSON 배열로 보내면 number[]가 오므로 둘 다 Float32Array로 맞춘다.
+ */
+export async function engineSubscribeMix(onChunk: (samples: Float32Array) => void): Promise<void> {
+  const channel = new Channel<ArrayBuffer | number[]>()
+  channel.onmessage = (data) => {
+    const samples = toFloat32(data)
+    if (samples) onChunk(samples)
+  }
+  await invoke<null>('engine_subscribe_mix', { onChunk: channel })
+}
+
+export function engineUnsubscribeMix(): Promise<null> {
+  return invoke<null>('engine_unsubscribe_mix')
+}
+
+function toFloat32(data: unknown): Float32Array | null {
+  if (data instanceof ArrayBuffer) {
+    return data.byteLength % 4 === 0 ? new Float32Array(data) : null
+  }
+  if (ArrayBuffer.isView(data)) {
+    const view = data as ArrayBufferView
+    if (view.byteLength % 4 !== 0) return null
+    // 정렬되지 않은 뷰일 수 있으므로 복사
+    return new Float32Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength))
+  }
+  if (Array.isArray(data)) {
+    // Vec<u8> 직렬화(바이트 배열)
+    const bytes = Uint8Array.from(data as number[])
+    return bytes.byteLength % 4 === 0 ? new Float32Array(bytes.buffer) : null
+  }
+  return null
+}
+
+// ============================================================================
+// 상수
+// ============================================================================
+
+export const ENGINE_SAMPLE_RATE = 48000
+export const MIX_CHUNK_MS = 20
+export const MAX_PERFORMERS = 6
+/** 패킷 오디오 페이로드 상한 (설계 1.3) */
+export const MAX_PAYLOAD_BYTES = 1200

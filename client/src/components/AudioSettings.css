@@ -911,3 +911,36 @@
   margin-right: 8px;
   cursor: pointer;
 }
+
+/* ===== 네이티브 엔진 설정 ===== */
+.settings-notice {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(96, 165, 250, 0.12);
+  color: #93c5fd;
+  font-size: 0.85rem;
+}
+
+.preset-btn.static {
+  cursor: default;
+}
+
+.setting-hint.error,
+.settings-issues li {
+  color: #f87171;
+}
+
+.settings-issues {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.85rem;
+}
+
+.stat-item .level-bar.clip {
+  background: #f87171;
+}
+
+.settings-row select + select {
+  margin-left: 8px;
+}

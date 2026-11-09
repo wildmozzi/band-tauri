@@ -1,53 +1,10 @@
-import { useEffect, useState, useRef, memo, useCallback } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useRoom } from '../contexts/RoomContext'
 import { supabase } from '../lib/supabaseClient'
-import { isTauri, getPeerLatencies, setMonitoringVolume, getMonitoringVolume, PeerLatency } from '../lib/tauri'
+import { MAX_PERFORMERS, type PeerState, type PeerStats } from '../native/engineApi'
 import './RoomDetail.css'
-
-// 안정적인 RemoteAudio 컴포넌트 (re-render 방지)
-// 주의: 이 컴포넌트는 unregisterAudioStream을 cleanup에서 호출하지 않음
-// 오디오 노드 정리는 RoomContext의 remoteAudioMap 기반 useEffect에서 처리
-// (미니 플레이어 모드 진입 시 타이밍 문제 방지)
-const RemoteAudio = memo(function RemoteAudio({
-  oderId,
-  stream,
-  registerAudioStream
-}: {
-  oderId: string
-  stream: MediaStream
-  registerAudioStream: (peerId: string, stream: MediaStream) => void
-}) {
-  const audioRef = useRef<HTMLAudioElement>(null)
-
-  useEffect(() => {
-    const audio = audioRef.current
-    if (!audio) return
-
-    console.log('[RemoteAudio] Setting up audio for:', oderId.slice(0, 8))
-
-    // MediaStream을 Web Audio API에 연결 (볼륨/패닝 제어용)
-    registerAudioStream(oderId, stream)
-
-    // audio 요소는 muted로 설정 (Web Audio가 실제 출력 담당)
-    audio.muted = true
-    audio.srcObject = stream
-
-    // 재생 시도 (브라우저 정책 충족용, 실제 소리는 Web Audio에서 출력)
-    audio.play().catch((err) => {
-      console.log('[RemoteAudio] Play failed:', err.message)
-    })
-
-    // Cleanup: unregisterAudioStream은 호출하지 않음
-    // RoomContext의 useEffect에서 remoteAudioMap 기반으로 정리함
-    return () => {
-      console.log('[RemoteAudio] Cleanup (audio nodes managed by RoomContext):', oderId.slice(0, 8))
-    }
-  }, [oderId, stream, registerAudioStream])
-
-  return <audio ref={audioRef} playsInline style={{ display: 'none' }} />
-})
 
 // 악기 슬롯 타입
 interface InstrumentSlot {
@@ -86,6 +43,34 @@ const RTC_STATUS_TEXT: Record<string, string> = {
   error: '에러',
 }
 
+// 엔진 피어 연결 상태 배지
+const PEER_STATE_INFO: Record<PeerState, { label: string; className: string }> = {
+  connecting: { label: '연결 중', className: 'connecting' },
+  connected: { label: '연결됨', className: 'connected' },
+  reconnecting: { label: '재연결 중', className: 'reconnecting' },
+  failed: { label: '연결 실패', className: 'failed' },
+}
+
+const FAILED_PEER_HINT = '직접 연결 불가 — 네트워크(대칭형 NAT) 문제'
+const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || undefined
+
+function formatMs(v: number | null | undefined, digits = 0): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '--'
+  return `${v.toFixed(digits)}ms`
+}
+
+function peerStatsTitle(ps: PeerStats): string {
+  return [
+    `상태: ${PEER_STATE_INFO[ps.state]?.label ?? ps.state}`,
+    `경로: ${ps.path === 'lan' ? 'LAN' : ps.path === 'public' ? '인터넷' : '-'}`,
+    `RTT: ${formatMs(ps.rttMs)}`,
+    `지터: ${formatMs(ps.jitterMs, 1)}`,
+    `버퍼: ${formatMs(ps.bufferMs)}`,
+    `손실: ${ps.lossPct.toFixed(1)}%`,
+    `늦은 패킷: ${ps.late} · 은닉: ${ps.concealed}`,
+  ].join('\n')
+}
+
 const GENRES = [
   '록', '재즈', '블루스', '클래식', '팝', '힙합',
   '일렉트로닉', '포크', '메탈', '펑크', '레게', '기타'
@@ -117,14 +102,23 @@ export function RoomDetail() {
     joinRoom,
     rtcStatus,
     rtcError,
-    localStream,
     remoteAudioMap,
-    startLocalMic,
-    stopLocalMic,
-    localMuted,
-    toggleLocalMute,
     leaveRoom,
-    actualStreamSettings,
+    isRoomHost,
+    // 연주 (데스크톱 앱)
+    canPerform,
+    isPerforming,
+    performStarting,
+    startPerforming,
+    stopPerforming,
+    engineStats,
+    peerEngineStats,
+    isMonitoringEnabled,
+    monitorGain,
+    setMonitor,
+    broadcasterId,
+    isBroadcaster,
+    broadcastViewerCount,
     // 믹서
     mixSettingsMap,
     setMixVolume,
@@ -140,7 +134,6 @@ export function RoomDetail() {
     audioLevels,
     masterLevel,
     resumeAllAudioContexts,
-    registerAudioStream,
     // 채팅
     chatMessages,
     sendChatMessage,
@@ -148,7 +141,6 @@ export function RoomDetail() {
     // 악기
     peerInstruments,
     myInstrument,
-    setMyInstrument,
     // 네트워크 상태
     peerNetworkStats,
     // 연주 참여 요청
@@ -178,11 +170,6 @@ export function RoomDetail() {
     enterMiniPlayerMode,
     clearMiniPlayerMode,
     currentRoomId: contextRoomId,
-    // Tauri 네이티브 오디오
-    usingNativeAudio,
-    nativeNetworkInfo,
-    isMonitoringEnabled,
-    toggleMonitoring,
   } = useRoom()
 
   // 네트워크 품질 아이콘
@@ -196,9 +183,8 @@ export function RoomDetail() {
 
   const [room, setRoom] = useState<Room | null>(null)
   const [loading, setLoading] = useState(true)
-  // 연주자 상태: localStream/nativeAudio와 myInstrument가 있으면 연주자로 초기화 (미니 플레이어에서 돌아올 때)
-  const hasAudioStream = localStream || usingNativeAudio
-  const [isPerformer, setIsPerformer] = useState(() => !!(hasAudioStream && myInstrument))
+  // 연주자 여부는 엔진 상태에서 파생 (엔진 시작 실패 시 자동으로 관람자로 남는다)
+  const isPerformer = isPerforming
   const [showPendingRequests, setShowPendingRequests] = useState(false)
   const [showRoomInfo, setShowRoomInfo] = useState(false)
   const [showInstrumentSelect, setShowInstrumentSelect] = useState(false)
@@ -207,7 +193,6 @@ export function RoomDetail() {
   const [showInstrumentChangeModal, setShowInstrumentChangeModal] = useState(false)
   const [hostNickname, setHostNickname] = useState<string | null>(null)
   const [chatInput, setChatInput] = useState('')
-  const localPreviewRef = useRef<HTMLAudioElement | null>(null)
   const chatContainerRef = useRef<HTMLDivElement | null>(null)
   const hasJoinedRef = useRef(false)
   // 악기 변경 말풍선 위치 계산을 위한 refs
@@ -270,53 +255,11 @@ export function RoomDetail() {
   const [editCustomTag, setEditCustomTag] = useState('')
   const [settingsSaving, setSettingsSaving] = useState(false)
 
-  // P2P 레이턴시 상태
-  const [peerLatencies, setPeerLatencies] = useState<PeerLatency[]>([])
-  // 모니터링 볼륨 상태 (0-100)
-  const [monitoringVolume, setMonitoringVolumeState] = useState(100)
+  // 방장 여부 (UI 표시용. 실제 권한은 서버가 auth 토큰과 DB로 판정한다)
+  const isHost = isRoomHost || !!(user && room?.host_id === user.id)
 
-  // 방장 여부
-  const isHost = user && room?.host_id === user.id
-
-  // P2P 레이턴시 주기적 조회 (Tauri 앱에서만)
-  useEffect(() => {
-    if (!isTauri() || !usingNativeAudio) return
-
-    // 초기 모니터링 볼륨 로드
-    getMonitoringVolume().then(vol => {
-      setMonitoringVolumeState(vol)
-    }).catch(console.error)
-
-    // 레이턴시 주기적 조회
-    const interval = setInterval(async () => {
-      try {
-        const latencies = await getPeerLatencies()
-        setPeerLatencies(latencies)
-      } catch (e) {
-        // 무시
-      }
-    }, 1000)
-
-    return () => clearInterval(interval)
-  }, [usingNativeAudio])
-
-  // 모니터링 볼륨 변경 핸들러
-  const handleMonitoringVolumeChange = useCallback(async (volume: number) => {
-    setMonitoringVolumeState(volume)
-    if (isTauri()) {
-      try {
-        await setMonitoringVolume(volume)
-      } catch (e) {
-        console.error('Failed to set monitoring volume:', e)
-      }
-    }
-  }, [])
-
-  // 피어의 레이턴시 조회
-  const getPeerRtt = useCallback((peerId: string): number | null => {
-    const peer = peerLatencies.find(p => p.id === peerId)
-    return peer?.rtt_ms ?? null
-  }, [peerLatencies])
+  // 연주 시작 처리 중 / 결과
+  const [performBusy, setPerformBusy] = useState(false)
 
   // 각 악기별 사용 중인 슬롯 수 계산
   const getInstrumentUsage = (instrumentId: string) => {
@@ -449,12 +392,6 @@ export function RoomDetail() {
   }, [roomId])
 
 
-  useEffect(() => {
-    if (localPreviewRef.current) {
-      localPreviewRef.current.srcObject = localStream
-    }
-  }, [localStream])
-
   // 채팅 스크롤 자동 이동
   useEffect(() => {
     if (chatContainerRef.current) {
@@ -462,15 +399,27 @@ export function RoomDetail() {
     }
   }, [chatMessages])
 
-  // 연주자로 전환 요청 (악기 선택 모달 열기)
+  // 연주자로 전환 요청 (악기 선택 모달 열기) — 데스크톱 앱 전용
   const handleBecomePerformer = () => {
     if (!user) {
       navigate('/auth', { state: { from: `/rooms/${roomId}` } })
       return
     }
+    if (!canPerform) return
 
     // 악기 선택 모달 열기 (자유참여든 승인필요든 일단 악기 선택)
     setShowInstrumentSelect(true)
+  }
+
+  // 엔진 시작 → 성공해야 악기 설정/연주자 전환 (실패하면 관람자로 남음, 에러는 rtcError로 표시)
+  const beginPerforming = async (instrumentId: string) => {
+    if (performBusy) return
+    setPerformBusy(true)
+    try {
+      await startPerforming(instrumentId)
+    } finally {
+      setPerformBusy(false)
+    }
   }
 
   // 악기 선택 후 연주 시작 또는 요청
@@ -479,14 +428,7 @@ export function RoomDetail() {
 
     if (room?.free_join || isHost) {
       // 자유참여 또는 방장: 바로 연주 시작
-      setMyInstrument(instrumentId, isHost || false)
-      setIsPerformer(true)
-
-      try {
-        await startLocalMic()
-      } catch (error) {
-        console.error('Failed to start mic:', error)
-      }
+      await beginPerforming(instrumentId)
     } else {
       // 승인 필요: 방장에게 요청 전송
       requestPerform(instrumentId)
@@ -496,21 +438,13 @@ export function RoomDetail() {
   // 승인되면 연주 시작
   const handleStartAfterApproval = async () => {
     if (myRequestInstrument) {
-      setMyInstrument(myRequestInstrument, false)
-      setIsPerformer(true)
-
-      try {
-        await startLocalMic()
-      } catch (error) {
-        console.error('Failed to start mic:', error)
-      }
+      await beginPerforming(myRequestInstrument)
     }
   }
 
   // 관람자로 전환
   const handleBecomeViewer = () => {
-    stopLocalMic()
-    setIsPerformer(false)
+    void stopPerforming()
     // 요청 중이었다면 취소
     if (myRequestStatus === 'pending') {
       cancelRequest()
@@ -730,6 +664,12 @@ export function RoomDetail() {
   // 연주자가 없으면 항상 '대기', 있으면 실제 RTC 상태 표시
   const hasAnyPerformer = performerCount > 0
   const displayStatus = hasAnyPerformer ? rtcStatus : 'idle'
+  const roomFull = performerCount >= MAX_PERFORMERS
+  const broadcasterName = broadcasterId
+    ? (broadcasterId === clientId ? '나' : peerInstruments[broadcasterId]?.nickname ?? broadcasterId.slice(0, 4))
+    : null
+  // 관람자가 듣는 방송 믹스 스트림 (방송 담당자 하나)
+  const broadcastStreams = Object.keys(remoteAudioMap)
 
   if (loading) {
     return <div className="loading-state">합주실 정보를 불러오는 중...</div>
@@ -1278,19 +1218,33 @@ export function RoomDetail() {
           </div>
 
           <div className="performers-list" ref={performersListRef}>
-            {/* 내 오디오 (연주자일 경우) */}
+            {/* 내 채널 (연주자일 경우) */}
             {isPerformer && myInstrument && (
-              <div className={`performer-item me ${hasAudioStream ? 'active' : 'muted'}`}>
+              <div className="performer-item me active">
                 <div className="performer-avatar">
                   {isHost && <span className="host-crown">👑</span>}
                   <div className="avatar-circle">
                     <span>{INSTRUMENT_INFO[myInstrument]?.icon || '🎵'}</span>
                   </div>
-                  {hasAudioStream && <span className="live-indicator" />}
+                  <span className="live-indicator" />
                 </div>
                 <div className="performer-info">
-                  <span className="performer-name">{nickname} {isHost && '(방장)'}</span>
+                  <span className="performer-name">
+                    {nickname} {isHost && '(방장)'}
+                    {isBroadcaster && <span className="broadcast-badge" title={`관람자 ${broadcastViewerCount}명에게 믹스 송출 중`}>📡 방송</span>}
+                  </span>
                   <span className="performer-instrument">{INSTRUMENT_INFO[myInstrument]?.name || myInstrument}</span>
+                  {/* 내 로컬 처리 지연 / xrun */}
+                  <span className="engine-local-stats" title="로컬 처리 지연 = 입력 버퍼 + 프레임 + 출력 버퍼 (네트워크 제외)">
+                    처리 지연 {formatMs(engineStats?.estLatencyMs, 1)}
+                    {' · '}
+                    <span className={(engineStats?.xruns ?? 0) > 0 ? 'xrun-warn' : ''}>xrun {engineStats?.xruns ?? 0}</span>
+                  </span>
+                  <div className="level-meter mini">
+                    <div className="level-bar">
+                      <div className="level-fill" style={{ width: `${Math.min(100, (engineStats?.inputLevel ?? 0) * 100)}%` }} />
+                    </div>
+                  </div>
                   {/* 방장이 아닌 연주자: 악기 변경 요청 UI */}
                   {!isHost && myInstrumentChangeStatus === 'none' && (
                     <button
@@ -1318,49 +1272,40 @@ export function RoomDetail() {
                     </div>
                   )}
                 </div>
-                <button
-                  onClick={toggleLocalMute}
-                  className={`mic-toggle ${localMuted ? 'off' : 'on'}`}
-                  title={localMuted ? '마이크 켜기' : '마이크 끄기'}
-                >
-                  {localMuted ? '🔇' : '🎤'}
-                </button>
-                {/* 모니터링 토글 및 볼륨 (Tauri 네이티브 오디오 사용 시에만) */}
-                {usingNativeAudio && (
-                  <div className="monitoring-controls">
-                    <button
-                      onClick={toggleMonitoring}
-                      className={`monitor-toggle ${isMonitoringEnabled ? 'on' : 'off'}`}
-                      title={isMonitoringEnabled ? '모니터링 끄기 (내 소리 안 들림)' : '모니터링 켜기 (내 소리 들림)'}
-                    >
-                      {isMonitoringEnabled ? '🎧' : '🔕'}
-                    </button>
-                    {isMonitoringEnabled && (
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={monitoringVolume}
-                        onChange={(e) => handleMonitoringVolumeChange(Number(e.target.value))}
-                        className="monitoring-volume-slider"
-                        title={`모니터링 볼륨: ${monitoringVolume}%`}
-                      />
-                    )}
-                  </div>
-                )}
-                <audio ref={localPreviewRef} autoPlay muted playsInline />
+                {/* 모니터링 (내 소리 듣기) */}
+                <div className="monitoring-controls">
+                  <button
+                    onClick={() => setMonitor(!isMonitoringEnabled, monitorGain)}
+                    className={`monitor-toggle ${isMonitoringEnabled ? 'on' : 'off'}`}
+                    title={isMonitoringEnabled ? '모니터링 끄기 (내 소리 안 들림)' : '모니터링 켜기 (내 소리 들림)'}
+                  >
+                    {isMonitoringEnabled ? '🎧' : '🔕'}
+                  </button>
+                  {isMonitoringEnabled && (
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={monitorGain}
+                      onChange={(e) => setMonitor(true, Number(e.target.value))}
+                      className="monitoring-volume-slider"
+                      title={`모니터링 볼륨: ${Math.round(monitorGain * 100)}%`}
+                    />
+                  )}
+                </div>
               </div>
             )}
 
             {/* 다른 연주자들 (peerInstruments 기반) */}
             {remotePerformers.map(([oderId, peerInfo]) => {
               const instInfo = INSTRUMENT_INFO[peerInfo.instrument] || { icon: '🎵', name: peerInfo.instrument }
-              const netStats = peerNetworkStats[oderId]
-              const qualityInfo = QUALITY_ICONS[netStats?.quality || 'unknown']
-              // WebRTC 스트림 또는 Tauri P2P 연결 확인
-              const hasWebRTCStream = remoteAudioMap[oderId] !== undefined
-              const hasTauriP2P = nativeNetworkInfo?.connected_peers?.includes(oderId) ?? false
-              const isConnected = hasWebRTCStream || hasTauriP2P
+              // 내가 연주 중이면 엔진 피어 상태, 아니면(관람) 방송 담당 여부만 표시
+              const ps = isPerformer ? peerEngineStats[oderId] : undefined
+              const state: PeerState | null = isPerformer ? (ps?.state ?? 'connecting') : null
+              const stateInfo = state ? PEER_STATE_INFO[state] : null
+              const isActive = isPerformer ? state === 'connected' : true
+              const muted = mixSettingsMap[oderId]?.muted ?? false
 
               return (
                 <div
@@ -1368,46 +1313,44 @@ export function RoomDetail() {
                   className="performer-item-wrapper"
                   ref={(el) => { performerRefs.current[oderId] = el }}
                 >
-                  <div className={`performer-item ${isConnected ? 'active' : 'connecting'}`}>
+                  <div className={`performer-item ${isActive ? 'active' : 'connecting'}`}>
                     <div className="performer-avatar">
                       {peerInfo.isHost && <span className="host-crown">👑</span>}
                       <div className="avatar-circle">
                         <span>{instInfo.icon}</span>
                       </div>
-                      {isConnected && <span className="live-indicator" />}
+                      {isActive && <span className="live-indicator" />}
                     </div>
                     <div className="performer-info">
-                      <span className="performer-name">{peerInfo.nickname || `연주자 ${oderId.slice(0, 4)}`} {peerInfo.isHost && '(방장)'}</span>
-                      <span className="performer-instrument">{instInfo.name}{hasTauriP2P && ' (P2P)'}</span>
-                    </div>
-                    {/* 네트워크 상태 표시 */}
-                    <div className="performer-latency" title={`오디오 지연: ${hasTauriP2P ? (getPeerRtt(oderId) ?? '?') : (netStats?.audioLatency ?? '?')}ms | 지터: ${netStats?.jitter ?? '?'}ms | 품질: ${qualityInfo.label}`}>
-                      <span className="latency-value" style={{ color: hasTauriP2P ? '#4ade80' : qualityInfo.color }}>
-                        {isConnected
-                          ? (hasTauriP2P
-                              ? (getPeerRtt(oderId) != null ? `${getPeerRtt(oderId)}ms` : 'P2P')
-                              : (netStats?.audioLatency != null ? `${netStats.audioLatency}ms` : '--'))
-                          : '연결 중'}
+                      <span className="performer-name">
+                        {peerInfo.nickname || `연주자 ${oderId.slice(0, 4)}`} {peerInfo.isHost && '(방장)'}
+                        {broadcasterId === oderId && <span className="broadcast-badge" title="관람자에게 믹스를 송출하는 연주자">📡 방송</span>}
                       </span>
-                      <span className="quality-indicator">{hasTauriP2P ? '📡' : qualityInfo.icon}</span>
+                      <span className="performer-instrument">{instInfo.name}</span>
+                      {stateInfo && (
+                        <span className={`peer-state-badge ${stateInfo.className}`} title={ps ? peerStatsTitle(ps) : undefined}>
+                          {stateInfo.label}
+                          {ps?.path && <> · {ps.path === 'lan' ? 'LAN' : '인터넷'}</>}
+                        </span>
+                      )}
+                      {state === 'failed' && <span className="peer-failed-hint">{FAILED_PEER_HINT}</span>}
                     </div>
-                    {/* 음소거 버튼 (WebRTC 스트림) */}
-                    {hasWebRTCStream && (
-                      <button
-                        className={`performer-mute-btn ${(mixSettingsMap[oderId]?.muted) ? 'muted' : ''}`}
-                        onClick={() => setMixMuted(oderId, !(mixSettingsMap[oderId]?.muted))}
-                        title={(mixSettingsMap[oderId]?.muted) ? '음소거 해제' : '음소거'}
-                      >
-                        {(mixSettingsMap[oderId]?.muted) ? '🔇' : '🔊'}
-                      </button>
+                    {/* 네트워크 상태 (연주 중일 때만: 엔진 통계) */}
+                    {ps && state !== 'failed' && (
+                      <div className="performer-latency" title={peerStatsTitle(ps)}>
+                        <span className="latency-value">{formatMs(ps.rttMs)}</span>
+                        <span className="quality-indicator">{ps.lossPct >= 5 ? '🔴' : ps.lossPct >= 1 ? '🟡' : '🟢'}</span>
+                      </div>
                     )}
-                    {/* 오디오 재생 (WebRTC 스트림이 있을 때만 - Tauri P2P는 네이티브에서 처리) */}
-                    {hasWebRTCStream && (
-                      <RemoteAudio
-                        oderId={oderId}
-                        stream={remoteAudioMap[oderId]}
-                        registerAudioStream={registerAudioStream}
-                      />
+                    {/* 피어별 음소거 (엔진) */}
+                    {isPerformer && (
+                      <button
+                        className={`performer-mute-btn ${muted ? 'muted' : ''}`}
+                        onClick={() => setMixMuted(oderId, !muted)}
+                        title={muted ? '음소거 해제' : '음소거'}
+                      >
+                        {muted ? '🔇' : '🔊'}
+                      </button>
                     )}
                   </div>
                 </div>
@@ -1417,7 +1360,7 @@ export function RoomDetail() {
             {performerCount === 0 && (
               <div className="no-performers">
                 <p>아직 연주자가 없습니다</p>
-                <small>첫 번째 연주자가 되어보세요!</small>
+                <small>{canPerform ? '첫 번째 연주자가 되어보세요!' : '연주가 시작되면 여기에 표시됩니다'}</small>
               </div>
             )}
           </div>
@@ -1436,12 +1379,20 @@ export function RoomDetail() {
               <button onClick={handleBecomeViewer} className="toggle-btn viewer">
                 👀 관람자로 전환
               </button>
-            ) : !isTauri() ? (
-              /* 웹에서는 연주 참여 불가 */
+            ) : !canPerform ? (
+              /* 웹: 연주는 데스크톱 앱 전용 */
               <div className="web-notice">
-                <p>🖥️ 웹에서는 관람만 가능합니다</p>
-                <small>연주에 참여하려면 Band 앱을 설치해주세요</small>
-                <a href="/download" className="download-link">📥 앱 다운로드</a>
+                <p>🖥️ 연주는 데스크톱 앱에서</p>
+                <small>웹에서는 관람만 할 수 있습니다. 연주에 참여하려면 Band 데스크톱 앱을 설치해주세요.</small>
+                {DESKTOP_DOWNLOAD_URL ? (
+                  <a href={DESKTOP_DOWNLOAD_URL} className="download-link" target="_blank" rel="noopener noreferrer">📥 데스크톱 앱 다운로드</a>
+                ) : (
+                  <span className="download-link disabled">📥 다운로드 준비 중</span>
+                )}
+              </div>
+            ) : performBusy || performStarting ? (
+              <div className="request-status pending">
+                <p>⏳ 오디오 엔진 시작 중...</p>
               </div>
             ) : myRequestStatus === 'pending' ? (
               /* 승인 대기 중 */
@@ -1464,20 +1415,25 @@ export function RoomDetail() {
               /* 거절됨 */
               <div className="request-status rejected">
                 <p>❌ 요청이 거절되었습니다</p>
-                <button onClick={() => { cancelRequest(); }} className="toggle-btn performer">
+                <button onClick={() => { cancelRequest() }} className="toggle-btn performer">
                   🎤 다시 요청하기
                 </button>
               </div>
             ) : (
-              /* 기본 상태 (Tauri 앱에서만) */
+              /* 기본 상태 (데스크톱 앱) */
               <button
                 onClick={handleBecomePerformer}
                 className="toggle-btn performer"
+                disabled={roomFull}
+                title={roomFull ? `연주자는 최대 ${MAX_PERFORMERS}명입니다` : undefined}
               >
-                🎤 연주 참여하기
+                🎤 {roomFull ? `연주자 가득 참 (${MAX_PERFORMERS}명)` : '연주 참여하기'}
               </button>
             )}
-            {isTauri() && !room.free_join && !isHost && !isPerformer && myRequestStatus === 'none' && (
+            {canPerform && !isPerformer && rtcError && (
+              <p className="perform-error">{rtcError}</p>
+            )}
+            {canPerform && !room.free_join && !isHost && !isPerformer && myRequestStatus === 'none' && (
               <p className="approval-notice">이 방은 방장 승인이 필요합니다</p>
             )}
           </div>
@@ -1503,7 +1459,6 @@ export function RoomDetail() {
                   {masterMuted ? '🔇' : '🔊'}
                 </button>
               </div>
-              {/* 마스터 볼륨 */}
               <div className="master-control-row">
                 <label>볼륨</label>
                 <input
@@ -1516,20 +1471,21 @@ export function RoomDetail() {
                 />
                 <span>{masterMuted ? 'MUTE' : `${Math.round(masterVolume * 100)}%`}</span>
               </div>
-              {/* 마스터 패닝 */}
-              <div className="master-control-row">
-                <label>패닝</label>
-                <input
-                  type="range"
-                  min="-1"
-                  max="1"
-                  step="0.01"
-                  value={masterPan}
-                  onChange={(e) => setMasterPan(parseFloat(e.target.value))}
-                />
-                <span>{masterPan < 0 ? `L${Math.round(Math.abs(masterPan) * 100)}` : masterPan > 0 ? `R${Math.round(masterPan * 100)}` : 'C'}</span>
-              </div>
-              {/* 마스터 레벨 미터 */}
+              {/* 패닝은 웹 재생(관람)에서만. 엔진 믹서는 패닝이 없다 */}
+              {!isPerformer && (
+                <div className="master-control-row">
+                  <label>패닝</label>
+                  <input
+                    type="range"
+                    min="-1"
+                    max="1"
+                    step="0.01"
+                    value={masterPan}
+                    onChange={(e) => setMasterPan(parseFloat(e.target.value))}
+                  />
+                  <span>{masterPan < 0 ? `L${Math.round(Math.abs(masterPan) * 100)}` : masterPan > 0 ? `R${Math.round(masterPan * 100)}` : 'C'}</span>
+                </div>
+              )}
               <div className="level-meter master-level">
                 <div className="level-bar">
                   <div
@@ -1540,107 +1496,188 @@ export function RoomDetail() {
               </div>
             </div>
 
-            {/* 각 연주자별 믹서 */}
             <div className="mixer-channels">
-              {/* 내 오디오 */}
-              {isPerformer && hasAudioStream && myInstrument && (
-                <div className="mixer-channel me">
-                  <div className="channel-header">
-                    <span className="channel-icon">{INSTRUMENT_INFO[myInstrument]?.icon || '🎵'}</span>
-                    <span className="channel-name">나 (모니터)</span>
-                  </div>
-                  <div className="channel-info">
-                    {actualStreamSettings && (
-                      <span className="audio-info">
-                        {actualStreamSettings.sampleRate ? `${actualStreamSettings.sampleRate / 1000}kHz` : ''}
-                        {actualStreamSettings.channelCount === 1 ? ' 모노' : ' 스테레오'}
-                      </span>
-                    )}
-                  </div>
-                  {rtcError && <div className="channel-error">{rtcError}</div>}
-                </div>
-              )}
-
-              {/* 다른 연주자들 (오디오 스트림 또는 Tauri P2P 연결된 연주자만 믹서에 표시) */}
-              {remotePerformers
-                .filter(([oderId]) => remoteAudioMap[oderId] !== undefined || (nativeNetworkInfo?.connected_peers?.includes(oderId) ?? false))
-                .map(([oderId, peerInfo]) => {
-                const mix = mixSettingsMap[oderId] || { volume: 1, pan: 0, muted: false }
-                const instInfo = INSTRUMENT_INFO[peerInfo.instrument] || { icon: '🎵', name: peerInfo.instrument }
-                const netStats = peerNetworkStats[oderId]
-                const qualityInfo = QUALITY_ICONS[netStats?.quality || 'unknown']
-                const isTauriP2P = nativeNetworkInfo?.connected_peers?.includes(oderId) ?? false
-
-                return (
-                  <div key={oderId} className={`mixer-channel ${mix.muted ? 'muted' : ''}`}>
-                    <div className="channel-header">
-                      <span className="channel-icon">{instInfo.icon}</span>
-                      <span className="channel-name">{peerInfo.nickname || `연주자 ${oderId.slice(0, 4)}`}{isTauriP2P && ' (P2P)'}</span>
-                      <button
-                        className={`mute-btn ${mix.muted ? 'active' : ''}`}
-                        onClick={() => setMixMuted(oderId, !mix.muted)}
-                        disabled={isTauriP2P}
-                        title={isTauriP2P ? 'P2P 연결은 네이티브 오디오 사용' : ''}
-                      >
-                        {mix.muted ? '🔇' : '🔊'}
-                      </button>
-                    </div>
-                    {/* 네트워크 상태 표시 */}
-                    <div className="channel-latency">
-                      <span className="quality-dot" style={{ background: isTauriP2P ? '#4ade80' : qualityInfo.color }}></span>
-                      <span className="latency-text">
-                        {isTauriP2P ? 'P2P 직접 연결' : (netStats?.audioLatency != null ? `${netStats.audioLatency}ms` : '측정 중')}
-                        {!isTauriP2P && netStats?.jitter != null && <small> (지터: {netStats.jitter}ms)</small>}
-                      </span>
-                    </div>
-                    {/* 레벨 미터 */}
-                    <div className="channel-level">
-                      <div className="level-meter">
-                        <div className="level-bar">
-                          <div
-                            className={`level-fill ${(audioLevels[oderId] || 0) > 80 ? 'high' : (audioLevels[oderId] || 0) > 50 ? 'mid' : ''}`}
-                            style={{ width: `${audioLevels[oderId] || 0}%` }}
-                          />
+              {isPerformer ? (
+                <>
+                  {/* 내 채널 */}
+                  {myInstrument && (
+                    <div className="mixer-channel me">
+                      <div className="channel-header">
+                        <span className="channel-icon">{INSTRUMENT_INFO[myInstrument]?.icon || '🎵'}</span>
+                        <span className="channel-name">나 (모니터)</span>
+                      </div>
+                      <div className="channel-info">
+                        <span className="audio-info">
+                          {engineStats ? `${engineStats.sampleRate / 1000}kHz · 버퍼 ${engineStats.deviceBuffer}` : '엔진 상태 확인 중'}
+                        </span>
+                        <span className="audio-info">처리 지연 {formatMs(engineStats?.estLatencyMs, 1)} · xrun {engineStats?.xruns ?? 0}</span>
+                      </div>
+                      <div className="channel-level">
+                        <div className="level-meter">
+                          <div className="level-bar">
+                            <div className="level-fill" style={{ width: `${audioLevels[clientId ?? ''] ?? 0}%` }} />
+                          </div>
                         </div>
                       </div>
+                      {rtcError && <div className="channel-error">{rtcError}</div>}
                     </div>
-                    <div className="channel-controls">
-                      <div className="control-row">
-                        <label>볼륨</label>
-                        <input
-                          type="range"
-                          min="0"
-                          max="1"
-                          step="0.01"
-                          value={mix.volume}
-                          onChange={(e) => setMixVolume(oderId, parseFloat(e.target.value))}
-                          disabled={mix.muted}
-                        />
-                        <span>{Math.round(mix.volume * 100)}%</span>
-                      </div>
-                      <div className="control-row">
-                        <label>패닝</label>
-                        <input
-                          type="range"
-                          min="-1"
-                          max="1"
-                          step="0.01"
-                          value={mix.pan}
-                          onChange={(e) => setMixPan(oderId, parseFloat(e.target.value))}
-                          disabled={mix.muted}
-                        />
-                        <span>{mix.pan < 0 ? `L${Math.round(Math.abs(mix.pan) * 100)}` : mix.pan > 0 ? `R${Math.round(mix.pan * 100)}` : 'C'}</span>
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
+                  )}
 
-              {remotePerformers.filter(([oderId]) => remoteAudioMap[oderId] !== undefined || (nativeNetworkInfo?.connected_peers?.includes(oderId) ?? false)).length === 0 && !hasAudioStream && (
-                <div className="mixer-empty">
-                  <p>연주자가 없습니다</p>
-                  <small>연주자가 참여하면 여기서 볼륨을 조절할 수 있습니다</small>
-                </div>
+                  {/* 다른 연주자 채널 스트립 (엔진 피어별 gain/mute) */}
+                  {remotePerformers.map(([oderId, peerInfo]) => {
+                    const mix = mixSettingsMap[oderId] || { volume: 1, pan: 0, muted: false }
+                    const instInfo = INSTRUMENT_INFO[peerInfo.instrument] || { icon: '🎵', name: peerInfo.instrument }
+                    const ps = peerEngineStats[oderId]
+                    const state: PeerState = ps?.state ?? 'connecting'
+                    const level = audioLevels[oderId] || 0
+                    return (
+                      <div key={oderId} className={`mixer-channel ${mix.muted ? 'muted' : ''}`}>
+                        <div className="channel-header">
+                          <span className="channel-icon">{instInfo.icon}</span>
+                          <span className="channel-name">{peerInfo.nickname || `연주자 ${oderId.slice(0, 4)}`}</span>
+                          <button
+                            className={`mute-btn ${mix.muted ? 'active' : ''}`}
+                            onClick={() => setMixMuted(oderId, !mix.muted)}
+                            title={mix.muted ? '음소거 해제' : '음소거'}
+                          >
+                            {mix.muted ? '🔇' : '🔊'}
+                          </button>
+                        </div>
+                        <div className="channel-latency">
+                          <span className={`peer-state-badge ${PEER_STATE_INFO[state].className}`}>{PEER_STATE_INFO[state].label}</span>
+                          {state === 'failed' ? (
+                            <span className="peer-failed-hint">{FAILED_PEER_HINT}</span>
+                          ) : ps ? (
+                            <span className="latency-text engine-peer-stats" title={peerStatsTitle(ps)}>
+                              RTT {formatMs(ps.rttMs)} · 지터 {formatMs(ps.jitterMs, 1)} · 버퍼 {formatMs(ps.bufferMs)} · 손실 {ps.lossPct.toFixed(1)}%
+                              {' · '}{ps.path === 'lan' ? 'LAN' : ps.path === 'public' ? '인터넷' : '경로 탐색 중'}
+                            </span>
+                          ) : (
+                            <span className="latency-text">연결 정보 교환 중</span>
+                          )}
+                        </div>
+                        <div className="channel-level">
+                          <div className="level-meter">
+                            <div className="level-bar">
+                              <div
+                                className={`level-fill ${level > 80 ? 'high' : level > 50 ? 'mid' : ''}`}
+                                style={{ width: `${level}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                        <div className="channel-controls">
+                          <div className="control-row">
+                            <label>볼륨</label>
+                            <input
+                              type="range"
+                              min="0"
+                              max="1"
+                              step="0.01"
+                              value={mix.volume}
+                              onChange={(e) => setMixVolume(oderId, parseFloat(e.target.value))}
+                              disabled={mix.muted}
+                            />
+                            <span>{Math.round(mix.volume * 100)}%</span>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+
+                  {remotePerformers.length === 0 && (
+                    <div className="mixer-empty">
+                      <p>다른 연주자가 없습니다</p>
+                      <small>연주자가 참여하면 여기서 볼륨을 조절할 수 있습니다</small>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  {/* 관람: 방송 담당 연주자의 합주 믹스 */}
+                  {broadcastStreams.map((senderId) => {
+                    const mix = mixSettingsMap[senderId] || { volume: 1, pan: 0, muted: false }
+                    const netStats = peerNetworkStats[senderId]
+                    const qualityInfo = QUALITY_ICONS[netStats?.quality || 'unknown']
+                    const level = audioLevels[senderId] || 0
+                    return (
+                      <div key={senderId} className={`mixer-channel ${mix.muted ? 'muted' : ''}`}>
+                        <div className="channel-header">
+                          <span className="channel-icon">📡</span>
+                          <span className="channel-name">합주 믹스 {broadcasterName && `(${broadcasterName})`}</span>
+                          <button
+                            className={`mute-btn ${mix.muted ? 'active' : ''}`}
+                            onClick={() => setMixMuted(senderId, !mix.muted)}
+                            title={mix.muted ? '음소거 해제' : '음소거'}
+                          >
+                            {mix.muted ? '🔇' : '🔊'}
+                          </button>
+                        </div>
+                        <div className="channel-latency">
+                          <span className="quality-dot" style={{ background: qualityInfo.color }}></span>
+                          <span className="latency-text">
+                            {netStats?.audioLatency != null ? `${netStats.audioLatency}ms` : '측정 중'}
+                            {netStats?.jitter != null && <small> (지터: {netStats.jitter}ms)</small>}
+                          </span>
+                        </div>
+                        <div className="channel-level">
+                          <div className="level-meter">
+                            <div className="level-bar">
+                              <div
+                                className={`level-fill ${level > 80 ? 'high' : level > 50 ? 'mid' : ''}`}
+                                style={{ width: `${level}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                        <div className="channel-controls">
+                          <div className="control-row">
+                            <label>볼륨</label>
+                            <input
+                              type="range"
+                              min="0"
+                              max="1"
+                              step="0.01"
+                              value={mix.volume}
+                              onChange={(e) => setMixVolume(senderId, parseFloat(e.target.value))}
+                              disabled={mix.muted}
+                            />
+                            <span>{Math.round(mix.volume * 100)}%</span>
+                          </div>
+                          <div className="control-row">
+                            <label>패닝</label>
+                            <input
+                              type="range"
+                              min="-1"
+                              max="1"
+                              step="0.01"
+                              value={mix.pan}
+                              onChange={(e) => setMixPan(senderId, parseFloat(e.target.value))}
+                              disabled={mix.muted}
+                            />
+                            <span>{mix.pan < 0 ? `L${Math.round(Math.abs(mix.pan) * 100)}` : mix.pan > 0 ? `R${Math.round(mix.pan * 100)}` : 'C'}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })}
+
+                  {broadcastStreams.length === 0 && (
+                    <div className="mixer-empty">
+                      {hasAnyPerformer ? (
+                        <>
+                          <p>합주 방송에 연결 중...</p>
+                          <small>{rtcError ?? '방송 담당 연주자의 믹스를 기다리는 중입니다'}</small>
+                        </>
+                      ) : (
+                        <>
+                          <p>연주자가 없습니다</p>
+                          <small>연주가 시작되면 여기서 볼륨을 조절할 수 있습니다</small>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -1677,9 +1714,9 @@ export function RoomDetail() {
             <div className="viewer-guide">
               <p>👀 관람 모드</p>
               <small>
-                {isTauri()
+                {canPerform
                   ? '연주에 참여하려면 왼쪽에서 "연주 참여하기"를 클릭하세요'
-                  : '웹에서는 관람만 가능합니다. 연주 참여는 Band 앱을 이용해주세요.'}
+                  : '연주는 데스크톱 앱에서만 할 수 있습니다. 웹에서는 합주를 들을 수 있어요.'}
               </small>
             </div>
           )}
