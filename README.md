@@ -4,6 +4,7 @@
 
 - 연주자는 데스크톱 앱에서 연주한다(네이티브 오디오 엔진, UDP P2P).
 - 웹 사용자는 관람만 한다(WebRTC로 연주 믹스 수신).
+- 직접 UDP 연결이 안 되는 연주자(대칭형 NAT/LTE)는 **UDP 릴레이(Fly.io)** 를 거친다 → [docs/overhaul/relay-design.md](docs/overhaul/relay-design.md)
 - 설계 기준 문서: [docs/overhaul/native-engine-design.md](docs/overhaul/native-engine-design.md)
 
 > 이전의 `band`(웹 전용) 리포는 이 리포로 통합되었다.
@@ -22,6 +23,8 @@
 │   ├── src/routes/         /api/music, /api/payment
 │   ├── src/services/       wsService(시그널링), demucs, omr, payment 등
 │   ├── Dockerfile, fly.toml
+├── relay/                  UDP 릴레이 서버 (Rust, tokio). 암호문 그대로 중계, 시그널링이 발급한 토큰으로 인증
+│   ├── Dockerfile, fly.toml (fly-global-services UDP 바인드, 전용 IPv4 필요)
 ├── docs/                   설계 문서, DB 마이그레이션, 설정 가이드
 ├── .github/workflows/      deploy-server.yml (main 푸시 시 server/ → Fly.io)
 └── package.json            npm workspaces (client, server)
@@ -70,6 +73,8 @@ npm install            # 루트에서 실행하면 client, server 워크스페�
 | `TOSS_PAYMENTS_SECRET_KEY` | 결제 승인 → [docs/PAYMENT_SETUP.md](docs/PAYMENT_SETUP.md) |
 | `AUDIVERIS_BAT`, `JAVA_HOME` | PDF → MusicXML 변환(OMR) |
 | `AMT_API_URL`, `AMT_API_KEY` | MP3 → MIDI 변환(선택) |
+| `RELAY_SECRET`, `RELAY_ADDR` | UDP 릴레이 토큰 발급(선택). 비밀은 릴레이와 같은 값(≥32바이트), 주소는 `host:port`. 설정법 → [relay/README.md](relay/README.md) |
+| `RELAY_TOKEN_TTL_SEC` | 릴레이 토큰 수명(기본 600초) |
 
 서버는 `server/certs/cert.pem`, `key.pem`이 있으면 HTTPS/WSS로, 없으면 HTTP/WS로 뜬다.
 
