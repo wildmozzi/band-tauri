@@ -60,8 +60,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Install ffmpeg (stem Opus encoding tests)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: npm ci
       - run: npm run build
         working-directory: server
+      - name: Typecheck scripts
+        run: npx tsc -p scripts
+        working-directory: server
       - run: npm test
         working-directory: server
+        env:
+          STEM_TEST_REQUIRE_FFMPEG: "1"

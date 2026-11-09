@@ -18,6 +18,8 @@ import {
 import { convertMp3ToMidi } from '../services/amtService'
 import { separateAudioWithProvider, currentProvider } from '../services/demucsProvider'
 import { convertPdfToMusicXml } from '../services/omrService'
+import { prepareStemForUpload, CONTENT_TYPES, type PreparedStem, type StemFormat } from '../services/stemEncoder'
+import { STEM_BUCKET, stemStoragePaths } from '../lib/stemStorage'
 
 const router = express.Router()
 
@@ -52,33 +54,52 @@ async function uploadStemsToStorage(
   separationId: string
 ): Promise<Record<string, string>> {
   if (!supabaseAdmin) throw new Error('Supabase not configured')
+  const bucket = supabaseAdmin.storage.from(STEM_BUCKET)
 
   const folder = `${userId || 'anonymous'}/${separationId}`
   const urls: Record<string, string> = {}
 
+  const put = async (stemName: string, file: string, ext: StemFormat) => {
+    const storagePath = `${folder}/${stemName}.${ext}`
+    const { error } = await bucket.upload(storagePath, fs.readFileSync(file), {
+      contentType: CONTENT_TYPES[ext],
+      // 경로가 분리 ID별로 고유해 내용이 바뀌지 않는다 → 브라우저 캐시로 재로딩 트래픽 절감
+      cacheControl: '31536000',
+      upsert: true,
+    })
+    return { storagePath, error }
+  }
+
   for (const [stemName, localPath] of Object.entries(stems)) {
     if (!localPath || !fs.existsSync(localPath)) continue
 
+    let prepared: PreparedStem | null = null
     try {
-      const fileBuffer = fs.readFileSync(localPath)
-      const storagePath = `${folder}/${stemName}.wav`
+      prepared = await prepareStemForUpload(localPath)
+      let { storagePath, error: uploadError } = await put(stemName, prepared.path, prepared.ext)
 
-      const { error: uploadError } = await supabaseAdmin.storage
-        .from('audio-stems')
-        .upload(storagePath, fileBuffer, { contentType: 'audio/wav', upsert: true })
+      if (uploadError && prepared.ext === 'ogg') {
+        // 버킷 MIME 제한 등으로 ogg가 거부되면 WAV로라도 올린다
+        console.warn(`[Storage] ogg upload rejected for ${stemName}, falling back to wav:`, uploadError.message)
+        ;({ storagePath, error: uploadError } = await put(stemName, localPath, 'wav'))
+      }
 
       if (uploadError) {
         console.error(`[Storage] Upload failed for ${stemName}:`, uploadError)
         continue
       }
 
-      const { data } = supabaseAdmin.storage.from('audio-stems').getPublicUrl(storagePath)
+      const { data } = bucket.getPublicUrl(storagePath)
       urls[stemName] = data.publicUrl
 
-      fs.unlinkSync(localPath)
-      console.log(`[Storage] Uploaded ${stemName} to ${storagePath}`)
+      const before = fs.statSync(localPath).size
+      const after = prepared.ext === 'ogg' && fs.existsSync(prepared.path) ? fs.statSync(prepared.path).size : before
+      console.log(`[Storage] Uploaded ${stemName} to ${storagePath} (${before} → ${after} bytes)`)
     } catch (error) {
       console.error(`[Storage] Error uploading ${stemName}:`, error)
+    } finally {
+      safeUnlink(localPath)
+      if (prepared && prepared.path !== localPath) safeUnlink(prepared.path)
     }
   }
 
@@ -570,9 +591,14 @@ router.delete('/stem-separation/:id', async (req: Request, res: Response) => {
       return res.status(403).json({ success: false, error: '삭제 권한이 없습니다.' })
     }
 
-    const folder = separation.storage_folder
-    const stemNames = ['vocals', 'drums', 'bass', 'piano', 'guitar', 'other']
-    await supabaseAdmin.storage.from('audio-stems').remove(stemNames.map(n => `${folder}/${n}.wav`))
+    // .ogg(신규)와 .wav(이전 기록·폴백) 모두 삭제
+    const { error: removeError } = await supabaseAdmin.storage
+      .from(STEM_BUCKET)
+      .remove(stemStoragePaths(separation.storage_folder))
+    if (removeError) {
+      console.error(`[Delete] Storage 삭제 실패 (${id}):`, removeError.message)
+      return res.status(500).json({ success: false, error: '스템 파일 삭제에 실패했습니다.' })
+    }
 
     const { error: deleteError } = await supabaseAdmin.from('stem_separations').delete().eq('id', id)
 
