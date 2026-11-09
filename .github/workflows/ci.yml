@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, overhaul]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust engine (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: client/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/src-tauri
+      - name: Placeholder frontend dist (tauri::generate_context! 요구)
+        shell: bash
+        run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+
+  client:
+    name: Client (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        working-directory: client
+      - run: npm test
+        working-directory: client
+      - name: Lint (P3-1 전까지 비차단)
+        run: npm run lint
+        working-directory: client
+        continue-on-error: true
+
+  server:
+    name: Server (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        working-directory: server
+      - run: npm test
+        working-directory: server
