@@ -1,7 +1,8 @@
 import 'dotenv/config'
 
 import express from 'express'
-import cors from 'cors'
+import cors, { type CorsOptions } from 'cors'
+import helmet from 'helmet'
 import { createServer as createHttpServer } from 'http'
 import { createServer as createHttpsServer } from 'https'
 import { readFileSync, existsSync } from 'fs'
@@ -13,15 +14,36 @@ import { scheduleCleanup } from './services/cleanupService'
 
 const PORT = Number(process.env.PORT || 8080)
 
+// CORS 허용 도메인: CORS_ORIGINS (쉼표 구분). 예) https://band.vercel.app,https://localhost:5173
+// 미설정 시 모든 origin 허용(개발 호환) + 경고. 운영에서는 반드시 설정할 것.
+// Tauri 앱 origin(tauri://localhost, http(s)://tauri.localhost)은 항상 허용.
+const TAURI_ORIGINS = ['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost']
+const corsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+if (corsOrigins.length === 0) {
+  console.warn('[SECURITY] CORS_ORIGINS not set - allowing all origins')
+}
+const corsOrigin: CorsOptions['origin'] = corsOrigins.length === 0
+  ? true
+  : [...corsOrigins, ...TAURI_ORIGINS]
+
 // Express 앱 설정
 const app = express()
+app.disable('x-powered-by')
+app.set('trust proxy', 1) // fly.io 프록시 뒤에서 동작
+app.use(helmet({
+  // 업로드 파일(/uploads)을 다른 origin(웹/앱)에서 재생·표시할 수 있도록
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}))
 app.use(cors({
-  origin: '*',
+  origin: corsOrigin,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }))
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
+app.use(express.json({ limit: '1mb' }))
+app.use(express.urlencoded({ extended: true, limit: '1mb' }))
 app.use('/uploads', express.static('uploads'))
 
 // API 라우트

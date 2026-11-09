@@ -1,3 +1,28 @@
+# Band client (React + Vite + Tauri)
+
+## 개발 서버 HTTPS 인증서
+
+개발 서버(`npm run dev`, Tauri `devUrl`)는 HTTPS(`https://localhost:5173`)로 뜬다. 인증서 파일은 **커밋하지 않는다**.
+
+- `client/certs/key.pem`, `client/certs/cert.pem` 이 있으면 그 인증서를 사용한다.
+- 없으면 `@vitejs/plugin-basic-ssl`의 자체 서명 인증서로 자동 대체된다(브라우저 경고가 뜨며, Tauri WebView에서는 신뢰되지 않을 수 있음).
+
+신뢰되는 로컬 인증서는 [mkcert](https://github.com/FiloSottile/mkcert)로 만든다.
+
+```sh
+# 최초 1회: 로컬 CA 설치 (Windows: choco install mkcert / macOS: brew install mkcert)
+mkcert -install
+
+# client/ 에서 실행. LAN 테스트를 하려면 내 IP도 추가
+mkdir -p certs
+mkcert -key-file certs/key.pem -cert-file certs/cert.pem localhost 127.0.0.1 ::1 192.168.0.10
+```
+
+서버(`server/`)도 같은 방식이다. `server/certs/{cert,key}.pem`이 있으면 HTTPS/WSS로, 없으면 HTTP/WS로 기동한다.
+운영(fly.io)은 fly 프록시가 TLS를 종단하므로 인증서가 필요 없다.
+
+---
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

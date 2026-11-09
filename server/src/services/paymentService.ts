@@ -2,11 +2,16 @@ import axios from 'axios'
 import { PaymentRequest, PaymentResponse, PLAN_PRICES } from '../types/payment'
 
 // 토스페이먼츠 API 설정
-const TOSS_PAYMENTS_SECRET_KEY = process.env.TOSS_PAYMENTS_SECRET_KEY || 'test_sk_zXLkKEypNArWmo50nX3lmeaxYG5R'
+// 시크릿 키는 환경변수로만 받는다 (하드코딩 금지)
+const TOSS_PAYMENTS_SECRET_KEY = process.env.TOSS_PAYMENTS_SECRET_KEY || ''
+if (!TOSS_PAYMENTS_SECRET_KEY) {
+  console.warn('[PAYMENT] TOSS_PAYMENTS_SECRET_KEY가 설정되지 않았습니다 - 결제 승인/취소가 실패합니다')
+}
 const TOSS_PAYMENTS_BASE_URL = 'https://api.tosspayments.com/v1'
 
 export class PaymentService {
   private getAuthHeader() {
+    if (!TOSS_PAYMENTS_SECRET_KEY) throw new Error('TOSS_PAYMENTS_SECRET_KEY is not configured')
     const credentials = Buffer.from(`${TOSS_PAYMENTS_SECRET_KEY}:`).toString('base64')
     return `Basic ${credentials}`
   }

@@ -24,7 +24,20 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' blob: https://*.tosspayments.com",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: https://*.supabase.co https://band-server.fly.dev https://*.tosspayments.com http://localhost:* https://localhost:*",
+        "media-src": "'self' data: blob: mediastream: https://*.supabase.co https://band-server.fly.dev http://localhost:* https://localhost:*",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost https://*.supabase.co wss://*.supabase.co https://band-server.fly.dev wss://band-server.fly.dev https://*.tosspayments.com http://localhost:* https://localhost:* ws://localhost:* wss://localhost:* http://127.0.0.1:* ws://127.0.0.1:*",
+        "frame-src": "https://*.tosspayments.com",
+        "worker-src": "'self' blob:",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'self' https://*.tosspayments.com"
+      }
     }
   },
   "bundle": {

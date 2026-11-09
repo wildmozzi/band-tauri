@@ -22,22 +22,22 @@ BandSpace는 토스페이먼츠를 통한 구독 결제 시스템을 제공합�
 
 1. [토스페이먼츠 개발자센터](https://developers.tosspayments.com/)에서 계정 생성
 2. 테스트용 API 키 발급:
-   - 클라이언트 키: `test_ck_D5GePWvyJnrK0W0k6q8gLzN97Eoq`
-   - 시크릿 키: `test_sk_zXLkKEypNArWmo50nX3lmeaxYG5R`
+   - 클라이언트 키: `test_ck_...` (개발자센터에서 확인)
+   - 시크릿 키: `test_sk_...` (개발자센터에서 확인, **절대 커밋 금지**)
 
 ### 2. 환경변수 설정
 
 #### 클라이언트 (.env)
 ```bash
 VITE_API_URL=http://localhost:3001
-VITE_TOSS_PAYMENTS_CLIENT_KEY=test_ck_D5GePWvyJnrK0W0k6q8gLzN97Eoq
+VITE_TOSS_PAYMENTS_CLIENT_KEY=test_ck_your_client_key
 ```
 
 #### 서버 (.env)
 ```bash
 PORT=8080
 HTTP_PORT=3001
-TOSS_PAYMENTS_SECRET_KEY=test_sk_zXLkKEypNArWmo50nX3lmeaxYG5R
+TOSS_PAYMENTS_SECRET_KEY=test_sk_your_secret_key
 NODE_ENV=development
 ```
 
