@@ -128,12 +128,16 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 | `engine_test_stop` | — | `null` |
 | `engine_add_peer` | `{ peerId: string, descriptor: LocalDescriptor }` | `null` |
 | `engine_remove_peer` | `{ peerId: string }` | `null` |
-| `engine_set_peer_gain` | `{ peerId: string, gain: number, muted: boolean }` | `null` |
+| `engine_set_peer_gain` | `{ peerId: string, gain: number, muted: boolean, pan?: number }` | `null` — pan은 -1(왼쪽)..1(오른쪽), 기본 0, equal-power |
+| `engine_set_input_muted` | `{ muted: boolean }` | `null` — 내 입력을 송신/모니터/믹스 구독에서 무음 처리(레벨 미터는 계속 표시) |
 | `engine_set_monitor` | `{ enabled: boolean, gain: number }` | `null` |
 | `engine_set_master_gain` | `{ gain: number }` | `null` |
 | `engine_stats` | — | `EngineStats` |
 | `engine_subscribe_mix` | `{ onChunk: Channel<ArrayBuffer> }` | `null` — 20ms마다 48kHz stereo f32 인터리브 믹스(내 입력 포함) 전송. 관람자 브릿지용 |
 | `engine_unsubscribe_mix` | — | `null` |
+
+- 레벨 값(`inputLevel`, `outputLevel`, `PeerStats.level`)은 0..1 선형 RMS.
+- `engine_subscribe_mix` 채널은 JSON 배열이 아닌 **raw 바이트**(`tauri::ipc::InvokeResponseBody::Raw`, f32 LE 인터리브)로 보낸다.
 
 `estLatencyMs` = 입력 장치 버퍼 + 프레임 + 출력 링 수위 + 장치 출력 버퍼 (네트워크 제외, 로컬 처리 지연).
 
