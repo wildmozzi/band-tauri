@@ -198,3 +198,54 @@ describe('cleanupExpiredSeparations', () => {
     assert.deepEqual(f.deletedIds, [['b']])
   })
 })
+
+describe('encode limiter (M2: ffmpeg 동시 실행 제한)', () => {
+  it('runs at most n tasks at once, FIFO, and keeps going after failures', async () => {
+    const { createLimiter } = await import('../src/services/stemEncoder')
+    const limit = createLimiter(1)
+    let running = 0
+    let peak = 0
+    const order: number[] = []
+    const task = (i: number, fail = false) => limit(async () => {
+      running++; peak = Math.max(peak, running)
+      await new Promise(r => setTimeout(r, 5))
+      order.push(i)
+      running--
+      if (fail) throw new Error(`fail ${i}`)
+      return i
+    })
+    const results = await Promise.allSettled([task(0), task(1, true), task(2), task(3)])
+    assert.equal(peak, 1)
+    assert.deepEqual(order, [0, 1, 2, 3])
+    assert.deepEqual(results.map(r => r.status), ['fulfilled', 'rejected', 'fulfilled', 'fulfilled'])
+    assert.equal(limit.active, 0)
+    assert.equal(limit.pending, 0)
+  })
+
+  it('allows n concurrent when configured higher', async () => {
+    const { createLimiter } = await import('../src/services/stemEncoder')
+    const limit = createLimiter(2)
+    let running = 0
+    let peak = 0
+    await Promise.all([0, 1, 2, 3, 4].map(() => limit(async () => {
+      running++; peak = Math.max(peak, running)
+      await new Promise(r => setTimeout(r, 5))
+      running--
+    })))
+    assert.equal(peak, 2)
+  })
+
+  it('concurrent encodeToOpus calls are serialized by the shared limiter (default 1)', { skip: !hasFfmpeg && 'ffmpeg not available' }, async () => {
+    const { encodeLimiter } = await import('../src/services/stemEncoder')
+    const wavs = [0, 1, 2].map(i => { const p = path.join(dir, `q${i}.wav`); makeWav(p, 44100, 44100); return p })
+    let peak = 0
+    const poll = setInterval(() => { peak = Math.max(peak, encodeLimiter.active) }, 1)
+    try {
+      await Promise.all(wavs.map((w, i) => encodeToOpus(w, path.join(dir, `q${i}.ogg`))))
+    } finally {
+      clearInterval(poll)
+    }
+    assert.equal(peak, 1)
+    for (let i = 0; i < 3; i++) assert.ok(fs.statSync(path.join(dir, `q${i}.ogg`)).size > 0)
+  })
+})

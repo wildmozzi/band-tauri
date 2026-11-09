@@ -127,13 +127,25 @@ export async function decodeStemAudio(
     const isOgg = stemFormatOf(url) === 'ogg' || looksLikeOgg(bytes)
     if (!isOgg) throw nativeErr
     console.warn('[stemAudio] native Ogg Opus decode failed, using wasm decoder:', nativeErr)
-    const pcm = await fallback(new Uint8Array(bytes))
-    const length = pcm.channelData[0]?.length ?? 0
-    if (length === 0) throw nativeErr
-    const buf = ctx.createBuffer(pcm.channelData.length, length, pcm.sampleRate)
-    pcm.channelData.forEach((ch, i) => buf.copyToChannel(ch as Float32Array<ArrayBuffer>, i))
-    return buf
+    // 스템 6개를 동시에 wasm 디코딩하면 PCM(3분 스테레오 ≈ 69MB)+복사본이 한꺼번에 잡혀
+    // iOS Safari 탭이 죽을 수 있다 → 한 번에 하나씩, PCM을 AudioBuffer로 옮긴 뒤 다음으로
+    return serialFallback(async () => {
+      const pcm = await fallback(new Uint8Array(bytes))
+      const length = pcm.channelData[0]?.length ?? 0
+      if (length === 0) throw nativeErr
+      const buf = ctx.createBuffer(pcm.channelData.length, length, pcm.sampleRate)
+      pcm.channelData.forEach((ch, i) => buf.copyToChannel(ch as Float32Array<ArrayBuffer>, i))
+      return buf
+    })
   }
+}
+
+let fallbackChain: Promise<unknown> = Promise.resolve()
+/** wasm 폴백 디코딩 직렬화 (앞 작업 실패와 무관하게 다음 작업 진행) */
+function serialFallback<T>(fn: () => Promise<T>): Promise<T> {
+  const run = fallbackChain.then(fn, fn)
+  fallbackChain = run.catch(() => undefined)
+  return run
 }
 
 /** URL(또는 data URL)에서 스템을 받아 디코딩 */
@@ -150,4 +162,29 @@ export async function fetchAndDecodeStem(ctx: DecodeContext, url: string, fallba
     bytes = await res.arrayBuffer()
   }
   return decodeStemAudio(ctx, bytes, url, fallback)
+}
+
+/**
+ * Storage 공개 URL(cross-origin)의 스템을 파일로 저장할 Blob과 파일명.
+ * cross-origin `<a download>`는 브라우저가 무시하고 새 탭에서 재생해 버리며,
+ * Tauri에서는 새 창 요청이 무시될 수 있다 → fetch로 받아 blob: URL로 저장한다.
+ */
+export async function fetchStemForDownload(url: string, stemName: string): Promise<{ blob: Blob; fileName: string }> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`stem download failed: ${res.status}`)
+  const blob = await res.blob()
+  return { blob, fileName: `${stemName}.${stemFileExtension(url)}` }
+}
+
+/** Blob을 파일로 저장 (DOM 필요) */
+export function saveBlob(blob: Blob, fileName: string): void {
+  const href = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = href
+  a.download = fileName
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  // 일부 브라우저는 click 직후 revoke하면 저장이 취소된다
+  setTimeout(() => URL.revokeObjectURL(href), 10_000)
 }

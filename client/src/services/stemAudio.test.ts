@@ -8,6 +8,7 @@ import {
   fetchAndDecodeStem,
   readOggOpusTiming,
   wasmOggOpusDecoder,
+  fetchStemForDownload,
   type DecodeContext,
 } from './stemAudio'
 
@@ -150,5 +151,44 @@ describe('wasm Ogg Opus fallback on a real server-encoded fixture', () => {
 
   it('returns null timing for non-Ogg data', () => {
     expect(readOggOpusTiming(new TextEncoder().encode('RIFF....WAVE'))).toBeNull()
+  })
+})
+
+describe('wasm fallback serialization (iOS memory)', () => {
+  it('decodes fallback stems one at a time, and a failure does not block the next', async () => {
+    let running = 0
+    let peak = 0
+    const fallback = vi.fn(async () => {
+      running++; peak = Math.max(peak, running)
+      await new Promise(r => setTimeout(r, 5))
+      running--
+      return { channelData: [new Float32Array(2)], sampleRate: 48000 }
+    })
+    const failing = vi.fn(async () => { throw new Error('wasm boom') })
+    const c = ctx(async () => { throw new Error('native fail') })
+    const results = await Promise.allSettled([
+      decodeStemAudio(c, oggBytes(), OGG_URL, fallback),
+      decodeStemAudio(c, oggBytes(), OGG_URL, failing),
+      decodeStemAudio(c, oggBytes(), OGG_URL, fallback),
+      decodeStemAudio(c, oggBytes(), OGG_URL, fallback),
+    ])
+    expect(results.map(r => r.status)).toEqual(['fulfilled', 'rejected', 'fulfilled', 'fulfilled'])
+    expect(peak).toBe(1)
+  })
+})
+
+describe('fetchStemForDownload', () => {
+  it('fetches the cross-origin URL as a blob and names it by stored format', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new Uint8Array([1, 2, 3]), { status: 200 })))
+    const ogg = await fetchStemForDownload(OGG_URL, 'vocals')
+    expect(ogg.fileName).toBe('vocals.ogg')
+    expect(ogg.blob.size).toBe(3)
+    expect((await fetchStemForDownload(WAV_URL, 'drums')).fileName).toBe('drums.wav')
+    vi.unstubAllGlobals()
+  })
+  it('rejects on HTTP error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 403 })))
+    await expect(fetchStemForDownload(OGG_URL, 'vocals')).rejects.toThrow(/403/)
+    vi.unstubAllGlobals()
   })
 })

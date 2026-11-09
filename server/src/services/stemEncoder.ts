@@ -12,10 +12,56 @@
 
 import { spawn } from 'child_process'
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 
 export const OPUS_BITRATE = process.env.STEM_OPUS_BITRATE || '160k'
 const ENCODE_TIMEOUT_MS = 5 * 60 * 1000
+
+/**
+ * 같은 VM에서 실시간 시그널링(ws)이 돌므로 인코딩이 CPU를 독점하지 않게 한다.
+ * - 동시 ffmpeg 수 제한: STEM_ENCODE_CONCURRENCY (기본 1), 초과 요청은 FIFO 대기
+ * - 프로세스 우선순위 낮춤: STEM_ENCODE_NICE (기본 10, POSIX nice 값; Windows는 우선순위 클래스로 매핑)
+ * - libopus compression_level 5 (기본 10 대비 CPU 약 27%↓, 160k에서 크기 차이 0.1%; 8~9는 10과 출력이 같아 효과 없음), 스레드 1개
+ */
+const ENCODE_CONCURRENCY = Math.max(1, Number(process.env.STEM_ENCODE_CONCURRENCY) || 1)
+const ENCODE_NICE = Number.isFinite(Number(process.env.STEM_ENCODE_NICE)) && process.env.STEM_ENCODE_NICE !== ''
+  ? Number(process.env.STEM_ENCODE_NICE)
+  : 10
+const OPUS_COMPRESSION_LEVEL = process.env.STEM_OPUS_COMPRESSION_LEVEL || '5'
+
+export interface Limiter {
+  <T>(task: () => Promise<T>): Promise<T>
+  readonly active: number
+  readonly pending: number
+}
+
+/** 동시 실행 수를 n으로 제한하는 FIFO 세마포어 */
+export function createLimiter(n: number): Limiter {
+  const max = Math.max(1, Math.floor(n))
+  let active = 0
+  const queue: (() => void)[] = []
+  const run = (<T>(task: () => Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const start = () => {
+        active++
+        let p: Promise<T>
+        try { p = task() } catch (e) { p = Promise.reject(e) }
+        p.then(resolve, reject).finally(() => {
+          active--
+          queue.shift()?.()
+        })
+      }
+      if (active < max) start()
+      else queue.push(start)
+    })) as Limiter
+  Object.defineProperty(run, 'active', { get: () => active })
+  Object.defineProperty(run, 'pending', { get: () => queue.length })
+  return run
+}
+
+/** 프로세스 전역 인코딩 큐 (모든 요청이 공유) */
+export const encodeLimiter = createLimiter(ENCODE_CONCURRENCY)
 
 export type StemFormat = 'ogg' | 'wav'
 
@@ -42,7 +88,12 @@ export function ffmpegPath(): string {
  * 실패 시 reject (stderr 마지막 부분 포함).
  */
 export function encodeToOpus(inPath: string, outPath: string, opts?: { bitrate?: string; ffmpeg?: string }): Promise<void> {
+  return encodeLimiter(() => runFfmpegOpus(inPath, outPath, opts))
+}
+
+function runFfmpegOpus(inPath: string, outPath: string, opts?: { bitrate?: string; ffmpeg?: string }): Promise<void> {
   const args = [
+    '-threads', '1',
     '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-i', inPath,
     '-vn', '-map_metadata', '-1',
@@ -50,6 +101,7 @@ export function encodeToOpus(inPath: string, outPath: string, opts?: { bitrate?:
     '-b:a', opts?.bitrate || OPUS_BITRATE,
     '-vbr', 'on',
     '-application', 'audio',
+    '-compression_level', OPUS_COMPRESSION_LEVEL,
     '-ar', '48000',
     '-ac', '2',
     '-f', 'ogg',
@@ -70,6 +122,9 @@ export function encodeToOpus(inPath: string, outPath: string, opts?: { bitrate?:
       }
     }
     const proc = spawn(opts?.ffmpeg || ffmpegPath(), args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    if (proc.pid && ENCODE_NICE !== 0) {
+      try { os.setPriority(proc.pid, ENCODE_NICE) } catch { /* 권한 없음 등: 우선순위 그대로 진행 */ }
+    }
     const timer = setTimeout(() => {
       proc.kill('SIGKILL')
       done(new Error(`ffmpeg timeout after ${ENCODE_TIMEOUT_MS}ms`))
