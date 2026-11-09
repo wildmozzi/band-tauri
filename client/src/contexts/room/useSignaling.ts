@@ -67,6 +67,8 @@ export function useSignaling(handlers: SignalingHandlers): Signaling {
   const [clientId, setClientId] = useState<string | null>(null)
   const [authenticated, setAuthenticated] = useState<boolean | null>(null)
   const clientIdRef = useRef<string | null>(null)
+  /** 마지막으로 받은 clientId (연결이 끊겨도 유지). 재연결 시 resumeClientId로 보내 세션 재개를 요청 */
+  const lastClientIdRef = useRef<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const readyRef = useRef(false)
   const queueRef = useRef<SignalPayload[]>([])
@@ -127,6 +129,8 @@ export function useSignaling(handlers: SignalingHandlers): Signaling {
       setStatus('connecting')
       readyRef.current = false
       rejectedJoinRef.current = false
+      // 새 연결의 welcome이 덮어쓰기 전에 이전 clientId를 잡아둔다
+      const resumeClientId = lastClientIdRef.current
       const ws = new WebSocket(url)
       wsRef.current = ws
 
@@ -136,8 +140,11 @@ export function useSignaling(handlers: SignalingHandlers): Signaling {
         setStatus('connected')
         void getAccessToken().then((accessToken) => {
           if (disposed || wsRef.current !== ws) return
-          // auth는 큐를 거치지 않고 바로 보낸다
-          rawSend(ws, { type: 'auth', accessToken })
+          // auth는 큐를 거치지 않고 바로 보낸다.
+          // 로그인 상태면 이전 clientId로 세션 재개 요청 (서버가 같은 사용자 + 30초 이내일 때만 재개, welcome에 resumed:true)
+          rawSend(ws, accessToken && resumeClientId
+            ? { type: 'auth', accessToken, resumeClientId }
+            : { type: 'auth', accessToken })
           authTimer = setTimeout(() => {
             if (!readyRef.current) {
               console.warn('[WS] auth-result 없음 — 구 서버로 보고 진행')
@@ -185,6 +192,7 @@ export function useSignaling(handlers: SignalingHandlers): Signaling {
 
         if (payload.type === 'welcome' && typeof payload.clientId === 'string') {
           clientIdRef.current = payload.clientId
+          lastClientIdRef.current = payload.clientId
           setClientId(payload.clientId)
           handlersRef.current.onWelcome(payload.clientId)
           return
