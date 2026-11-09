@@ -20,6 +20,7 @@ RUN npm run build
 FROM node:22-alpine
 
 WORKDIR /app
+ENV NODE_ENV=production
 
 # Copy package files and install production dependencies only
 COPY package*.json ./

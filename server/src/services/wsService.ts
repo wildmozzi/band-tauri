@@ -1,18 +1,24 @@
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
+import type { IncomingMessage } from 'http'
 import { Server as HttpServer } from 'http'
 import { Server as HttpsServer } from 'https'
 import { v4 as uuidv4 } from 'uuid'
 import { SupabaseClient } from '@supabase/supabase-js'
+import { isInsecureDevMode } from '../lib/securityConfig'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
  *
- * 인증 흐름
+ * 인증
  * - 연결 직후 클라이언트는 `{ type: 'auth', accessToken }`을 보낸다. 서버가 Supabase로 검증해 userId를 결정한다.
  * - accessToken이 없거나 검증 실패 → 익명 관람자(연주 요청/연주 시작/네이티브 시그널링 불가).
  * - auth 전에 온 다른 메시지는 거부한다. AUTH_TIMEOUT_MS 안에 auth가 없으면 익명으로 진행한다(관람자 호환).
- * - isHost는 DB `rooms.host_id === userId`로 서버가 판정한다. 클라이언트가 보낸 isHost/userId/from은 무시한다.
- * - 중계 메시지에는 서버가 `from`(=송신자 client.id)을 붙인다.
+ * - 같은 사용자의 갱신 토큰으로 재인증할 수 있다. 토큰 만료 후 유예시간까지 재인증이 없으면 4001로 끊는다.
+ *
+ * 권한
+ * - isHost는 DB `rooms.host_id === userId`로 서버가 판정한다(방 정보는 짧게 캐시, 승인 계열 처리 때 재확인).
+ * - start-performing은 방장, free_join 방, 또는 방장이 승인한 사용자만 가능하다.
+ * - 클라이언트가 보낸 isHost/userId/from/isRejoin은 신뢰하지 않는다. 중계 시 서버가 `from`을 붙인다.
  */
 
 const MAX_MESSAGE_BYTES = 64 * 1024
@@ -20,25 +26,108 @@ const AUTH_TIMEOUT_MS = 5000
 const MAX_PENDING_MESSAGES = 100
 const MAX_ROOM_ID_LENGTH = 128
 const MAX_NICKNAME_LENGTH = 50
+const MAX_CHAT_LENGTH = 1000
+const ROOM_META_TTL_MS = 30_000
+const REJOIN_WINDOW_MS = 60_000
+const APPROVAL_GRACE_MS = 60_000
+const TOKEN_EXPIRY_GRACE_MS = 60_000
+const PARTICIPANT_UPDATE_DEBOUNCE_MS = 1000
 
+type Env = Record<string, string | undefined>
 type AuthState = 'pending' | 'verifying' | 'authenticated' | 'anonymous'
+
+export interface RoomMeta {
+  hostId: string | null
+  freeJoin: boolean
+}
+
+/** 외부 의존성 (테스트에서 교체 가능) */
+export interface WsDeps {
+  /** Supabase 등 인증/DB 백엔드가 설정되어 있는지 */
+  hasBackend: boolean
+  verifyToken: (token: string) => Promise<string | null>
+  /** 방 정보. 방이 없으면 null */
+  fetchRoomMeta: (roomId: string) => Promise<RoomMeta | null>
+  updateParticipants: (roomId: string, count: number) => Promise<void>
+}
+
+export interface WsLimits {
+  /** 일반 메시지 토큰 버킷 */
+  msgBurst: number
+  msgPerSec: number
+  /** chat 토큰 버킷 */
+  chatBurst: number
+  chatPerSec: number
+  /** join/leave 토큰 버킷 (DB 쓰기 증폭 방지) */
+  joinBurst: number
+  joinPerSec: number
+  /** IP당 동시 연결 수 */
+  maxConnectionsPerIp: number
+  /** 이만큼 메시지를 버리면 연결 종료 */
+  maxDropped: number
+  heartbeatMs: number
+}
+
+const DEFAULT_LIMITS: WsLimits = {
+  msgBurst: 40,
+  msgPerSec: 20,
+  chatBurst: 5,
+  chatPerSec: 2,
+  joinBurst: 5,
+  joinPerSec: 0.2,
+  maxConnectionsPerIp: 20,
+  maxDropped: 200,
+  heartbeatMs: 30_000,
+}
+
+export interface WsOptions {
+  deps?: Partial<WsDeps>
+  limits?: Partial<WsLimits>
+  env?: Env
+}
+
+class TokenBucket {
+  private tokens: number
+  private last = Date.now()
+  constructor(private capacity: number, private perSec: number) {
+    this.tokens = capacity
+  }
+  take(): boolean {
+    const now = Date.now()
+    this.tokens = Math.min(this.capacity, this.tokens + ((now - this.last) / 1000) * this.perSec)
+    this.last = now
+    if (this.tokens < 1) return false
+    this.tokens -= 1
+    return true
+  }
+}
 
 interface Client {
   id: string
   ws: WebSocket
+  ip: string
   roomId?: string
   nickname: string
   instrument?: string
   isPerforming: boolean
   isHost: boolean
-  /** 서버가 검증한 Supabase userId (익명이면 undefined) */
+  /** 서버가 검증한 userId (익명이면 undefined) */
   userId?: string
   authState: AuthState
+  /** 토큰 만료 시각(ms). 알 수 없으면 null */
+  tokenExp: number | null
+  expiryTimer?: ReturnType<typeof setTimeout>
   /** native-descriptor를 보낸 적 있음 (native-leave 허용 판단용) */
   nativeActive: boolean
   /** 메시지 순차 처리 체인 (비동기 auth/DB 조회 중 순서 보장) */
   chain: Promise<void>
   pending: number
+  isAlive: boolean
+  msgBucket: TokenBucket
+  chatBucket: TokenBucket
+  joinBucket: TokenBucket
+  dropped: number
+  lastRateLimitNotice: number
 }
 
 interface Participant {
@@ -65,11 +154,7 @@ interface InstrumentChangeRequest {
 }
 
 type Msg = Record<string, unknown> & { type: string }
-
-const rooms = new Map<string, Set<string>>()
-const clients = new Map<string, Client>()
-const performRequests = new Map<string, PerformRequest[]>()
-const instrumentChangeRequests = new Map<string, InstrumentChangeRequest[]>()
+type LeaveReason = 'leave' | 'move' | 'close' | 'duplicate'
 
 function send(ws: WebSocket, data: unknown) {
   if (ws.readyState === ws.OPEN) {
@@ -87,173 +172,343 @@ function sanitizeNickname(v: unknown): string | undefined {
   return trimmed || undefined
 }
 
-function isAuthenticated(client: Client): boolean {
-  return client.authState === 'authenticated' && !!client.userId
-}
-
-/** 연주자 = 연주 중이거나 방장 (네이티브 시그널링 허용 대상) */
-function isPerformer(client: Client): boolean {
-  return client.isPerforming || client.isHost
-}
-
-function getRoomParticipants(roomId: string): Participant[] {
-  const room = rooms.get(roomId)
-  if (!room) return []
-
-  const participants: Participant[] = []
-  for (const oderId of room) {
-    const client = clients.get(oderId)
-    if (client) {
-      participants.push({
-        oderId: client.id,
-        nickname: client.nickname,
-        instrument: client.instrument,
-        isPerforming: client.isPerforming,
-        isHost: client.isHost,
-      })
-    }
-  }
-  return participants
-}
-
-function broadcastToRoom(roomId: string, senderId: string, data: object) {
-  const room = rooms.get(roomId)
-  if (!room) return
-  for (const oderId of room) {
-    if (oderId === senderId) continue
-    const peer = clients.get(oderId)
-    if (peer) send(peer.ws, { ...data, oderId: senderId, from: senderId })
-  }
-}
-
-function findRoomHost(roomId: string): Client | null {
-  const room = rooms.get(roomId)
-  if (!room) return null
-  for (const oderId of room) {
-    const client = clients.get(oderId)
-    if (client?.isHost) return client
-  }
-  return null
-}
-
-/** 같은 방에 있는 대상 클라이언트만 반환 (방 밖 중계 차단) */
-function getRoomPeer(sender: Client, targetId: unknown): Client | null {
-  if (!sender.roomId || typeof targetId !== 'string' || targetId === sender.id) return null
-  const target = clients.get(targetId)
-  if (!target || target.roomId !== sender.roomId) return null
-  return target
-}
-
-async function updateRoomParticipants(roomId: string, supabase: SupabaseClient | null) {
-  if (!supabase) return
-  const room = rooms.get(roomId)
-  const count = room ? room.size : 0
+/** JWT의 exp(초)를 ms로. 검증은 하지 않는다(verifyToken 통과 후에만 사용) */
+export function jwtExpiryMs(token: string): number | null {
+  const parts = token.split('.')
+  if (parts.length !== 3) return null
   try {
-    const { error } = await supabase
-      .from('rooms')
-      .update({ current_participants: count })
-      .eq('id', roomId)
-    if (error) {
-      console.error('[DB] Failed to update participants:', error.message)
-    } else {
-      console.log(`[DB] Room ${roomId.slice(0, 8)} participants updated to ${count}`)
-    }
-  } catch (err) {
-    console.error('[DB] Exception updating participants:', err)
+    const payload = JSON.parse(Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'))
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : null
+  } catch {
+    return null
   }
 }
 
-async function isRoomHost(supabase: SupabaseClient, roomId: string, userId: string): Promise<boolean> {
-  try {
-    const { data, error } = await supabase
-      .from('rooms')
-      .select('host_id')
-      .eq('id', roomId)
-      .maybeSingle()
-    if (error) {
-      console.error('[DB] Failed to look up room host:', error.message)
-      return false
-    }
-    return !!data && data.host_id === userId
-  } catch (err) {
-    console.error('[DB] Exception looking up room host:', err)
-    return false
+function clientIp(req: IncomingMessage, env: Env): string {
+  // fly.io 프록시 뒤에서는 Fly-Client-IP가 실제 클라이언트 IP (fly 밖에서는 위조 가능하므로 사용 안 함)
+  if (env.FLY_APP_NAME) {
+    const h = req.headers['fly-client-ip']
+    const v = Array.isArray(h) ? h[0] : h
+    if (v) return v
+  }
+  return req.socket.remoteAddress || 'unknown'
+}
+
+function supabaseDeps(supabase: SupabaseClient | null): WsDeps {
+  return {
+    hasBackend: !!supabase,
+    verifyToken: async (token) => {
+      if (!supabase) return null
+      try {
+        const { data, error } = await supabase.auth.getUser(token)
+        return !error && data.user ? data.user.id : null
+      } catch (err) {
+        console.error('[AUTH] getUser failed:', err)
+        return null
+      }
+    },
+    fetchRoomMeta: async (roomId) => {
+      if (!supabase) return null
+      try {
+        const { data, error } = await supabase
+          .from('rooms')
+          .select('host_id, free_join')
+          .eq('id', roomId)
+          .maybeSingle()
+        if (error) {
+          console.error('[DB] Failed to look up room:', error.message)
+          return null
+        }
+        if (!data) return null
+        return { hostId: data.host_id ?? null, freeJoin: data.free_join !== false }
+      } catch (err) {
+        console.error('[DB] Exception looking up room:', err)
+        return null
+      }
+    },
+    updateParticipants: async (roomId, count) => {
+      if (!supabase) return
+      try {
+        const { error } = await supabase
+          .from('rooms')
+          .update({ current_participants: count })
+          .eq('id', roomId)
+        if (error) console.error('[DB] Failed to update participants:', error.message)
+      } catch (err) {
+        console.error('[DB] Exception updating participants:', err)
+      }
+    },
   }
 }
 
-function handleLeave(id: string, roomId: string, supabase: SupabaseClient | null) {
-  const set = rooms.get(roomId)
-  if (!set) return
+export function initializeWebSocket(
+  server: HttpServer | HttpsServer,
+  supabase: SupabaseClient | null,
+  options: WsOptions = {},
+): WebSocketServer {
+  const env = options.env ?? process.env
+  const deps: WsDeps = { ...supabaseDeps(supabase), ...options.deps }
+  const limits: WsLimits = { ...DEFAULT_LIMITS, ...options.limits }
 
-  set.delete(id)
-  console.log(`[LEAVE] Client ${id.slice(0, 8)} left room. Room size: ${set.size}`)
+  // 서버 인스턴스별 상태
+  const rooms = new Map<string, Set<string>>()
+  const clients = new Map<string, Client>()
+  const performRequests = new Map<string, PerformRequest[]>()
+  const instrumentChangeRequests = new Map<string, InstrumentChangeRequest[]>()
+  /** roomId → (userId → 만료 시각 | null=무기한). 방장 승인 기록 (H1) */
+  const approvals = new Map<string, Map<string, number | null>>()
+  /** roomId → (userId → 만료 시각). 연결이 끊긴 사용자 (서버 판정 rejoin, M1) */
+  const recentlyLeft = new Map<string, Map<string, number>>()
+  const roomMetaCache = new Map<string, { meta: RoomMeta | null; fetchedAt: number }>()
+  const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const connectionsPerIp = new Map<string, number>()
 
-  updateRoomParticipants(roomId, supabase)
-
-  const host = findRoomHost(roomId)
-
-  const requests = performRequests.get(roomId)
-  if (requests) {
-    const idx = requests.findIndex(r => r.oderId === id)
-    if (idx !== -1) {
-      requests.splice(idx, 1)
-      if (host) send(host.ws, { type: 'perform-request-cancelled', oderId: id })
-    }
-  }
-
-  const changeRequests = instrumentChangeRequests.get(roomId)
-  if (changeRequests) {
-    const idx = changeRequests.findIndex(r => r.oderId === id)
-    if (idx !== -1) {
-      changeRequests.splice(idx, 1)
-      if (host) send(host.ws, { type: 'instrument-change-request-cancelled', oderId: id })
-    }
-  }
-
-  for (const oderId of set) {
-    const peer = clients.get(oderId)
-    if (peer) send(peer.ws, { type: 'participant-left', oderId: id })
-  }
-
-  if (set.size === 0) {
-    rooms.delete(roomId)
-    performRequests.delete(roomId)
-    instrumentChangeRequests.delete(roomId)
-  }
-}
-
-export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: SupabaseClient | null): WebSocketServer {
   // maxPayload 초과 시 ws가 연결을 1009로 끊는다
   const wss = new WebSocketServer({ server, maxPayload: MAX_MESSAGE_BYTES })
 
-  // Supabase 미설정 + 비운영 환경: 토큰 검증이 불가능하므로 기존처럼 클라이언트 값을 신뢰 (로컬 개발 전용)
-  const insecureDevMode = !supabase && process.env.NODE_ENV !== 'production'
+  const insecureDevMode = isInsecureDevMode(deps.hasBackend, env)
   if (insecureDevMode) {
-    console.warn('[WS][SECURITY] Supabase not configured - INSECURE dev mode: client-sent userId/isHost are trusted. Never use in production.')
-  } else if (!supabase) {
-    console.warn('[WS][SECURITY] Supabase not configured in production - all clients are anonymous viewers.')
+    console.warn('[WS][SECURITY] INSECURE dev mode (NODE_ENV=development, ALLOW_INSECURE_WS=1, no Supabase): client-sent userId/isHost are trusted.')
+  } else if (!deps.hasBackend) {
+    console.warn('[WS][SECURITY] Supabase not configured - all clients are anonymous viewers.')
   }
+
+  // ---------- helpers ----------
+
+  const isAuthenticated = (c: Client) => c.authState === 'authenticated' && !!c.userId
+  /** 연주자 = 연주 중이거나 방장 */
+  const isPerformer = (c: Client) => c.isPerforming || c.isHost
+
+  function getRoomParticipants(roomId: string): Participant[] {
+    const room = rooms.get(roomId)
+    if (!room) return []
+    const participants: Participant[] = []
+    for (const oderId of room) {
+      const c = clients.get(oderId)
+      if (c) participants.push({ oderId: c.id, nickname: c.nickname, instrument: c.instrument, isPerforming: c.isPerforming, isHost: c.isHost })
+    }
+    return participants
+  }
+
+  function broadcastToRoom(roomId: string, senderId: string, data: object) {
+    const room = rooms.get(roomId)
+    if (!room) return
+    for (const oderId of room) {
+      if (oderId === senderId) continue
+      const peer = clients.get(oderId)
+      if (peer) send(peer.ws, { ...data, oderId: senderId, from: senderId })
+    }
+  }
+
+  function findRoomHost(roomId: string): Client | null {
+    for (const oderId of rooms.get(roomId) || []) {
+      const c = clients.get(oderId)
+      if (c?.isHost) return c
+    }
+    return null
+  }
+
+  /** 같은 방에 있는 대상만 반환 (방 밖 중계 차단) */
+  function getRoomPeer(sender: Client, targetId: unknown): Client | null {
+    if (!sender.roomId || typeof targetId !== 'string' || targetId === sender.id) return null
+    const target = clients.get(targetId)
+    if (!target || target.roomId !== sender.roomId) return null
+    return target
+  }
+
+  async function getRoomMeta(roomId: string, maxAgeMs = ROOM_META_TTL_MS): Promise<RoomMeta | null> {
+    const cached = roomMetaCache.get(roomId)
+    if (cached && Date.now() - cached.fetchedAt <= maxAgeMs) return cached.meta
+    const meta = await deps.fetchRoomMeta(roomId)
+    roomMetaCache.set(roomId, { meta, fetchedAt: Date.now() })
+    return meta
+  }
+
+  /** 방장 여부 재확인 (L2). 개발 모드에서는 join 때 값 유지 */
+  async function refreshHost(client: Client): Promise<boolean> {
+    if (!client.roomId || insecureDevMode) return client.isHost
+    if (!client.userId) {
+      client.isHost = false
+      return false
+    }
+    const meta = await getRoomMeta(client.roomId)
+    client.isHost = !!meta && meta.hostId === client.userId
+    return client.isHost
+  }
+
+  /** 참가자 수 DB 갱신 디바운스 (M3) */
+  function scheduleParticipantUpdate(roomId: string) {
+    if (!deps.hasBackend || participantTimers.has(roomId)) return
+    const t = setTimeout(() => {
+      participantTimers.delete(roomId)
+      void deps.updateParticipants(roomId, rooms.get(roomId)?.size ?? 0)
+    }, PARTICIPANT_UPDATE_DEBOUNCE_MS)
+    t.unref?.()
+    participantTimers.set(roomId, t)
+  }
+
+  function hasApproval(roomId: string, userId: string | undefined): boolean {
+    if (!userId) return false
+    const exp = approvals.get(roomId)?.get(userId)
+    if (exp === undefined) return false
+    if (exp === null || exp > Date.now()) return true
+    approvals.get(roomId)?.delete(userId)
+    return false
+  }
+
+  function setApproval(roomId: string, userId: string, expiresAt: number | null) {
+    if (!approvals.has(roomId)) approvals.set(roomId, new Map())
+    approvals.get(roomId)!.set(userId, expiresAt)
+  }
+
+  function clearApproval(roomId: string, userId: string | undefined) {
+    if (!userId) return
+    const m = approvals.get(roomId)
+    m?.delete(userId)
+    if (m && m.size === 0) approvals.delete(roomId)
+  }
+
+  function handleLeave(client: Client, roomId: string, reason: LeaveReason) {
+    const id = client.id
+    const set = rooms.get(roomId)
+    if (!set) return
+
+    set.delete(id)
+    console.log(`[LEAVE] Client ${id.slice(0, 8)} left room (${reason}). Room size: ${set.size}`)
+    scheduleParticipantUpdate(roomId)
+
+    // 승인 기록: 명시적 퇴장/방 이동은 즉시 삭제, 연결 끊김은 재접속 유예 후 만료, 중복 연결 정리는 유지
+    if (client.userId) {
+      if (reason === 'leave' || reason === 'move') clearApproval(roomId, client.userId)
+      else if (reason === 'close' && approvals.get(roomId)?.has(client.userId)) {
+        setApproval(roomId, client.userId, Date.now() + APPROVAL_GRACE_MS)
+      }
+      if (reason === 'close') {
+        if (!recentlyLeft.has(roomId)) recentlyLeft.set(roomId, new Map())
+        recentlyLeft.get(roomId)!.set(client.userId, Date.now() + REJOIN_WINDOW_MS)
+      }
+    }
+
+    const host = findRoomHost(roomId)
+
+    const requests = performRequests.get(roomId)
+    if (requests) {
+      const idx = requests.findIndex(r => r.oderId === id)
+      if (idx !== -1) {
+        requests.splice(idx, 1)
+        if (host) send(host.ws, { type: 'perform-request-cancelled', oderId: id })
+      }
+    }
+
+    const changeRequests = instrumentChangeRequests.get(roomId)
+    if (changeRequests) {
+      const idx = changeRequests.findIndex(r => r.oderId === id)
+      if (idx !== -1) {
+        changeRequests.splice(idx, 1)
+        if (host) send(host.ws, { type: 'instrument-change-request-cancelled', oderId: id })
+      }
+    }
+
+    for (const oderId of set) {
+      const peer = clients.get(oderId)
+      if (peer) send(peer.ws, { type: 'participant-left', oderId: id })
+    }
+
+    if (set.size === 0) {
+      rooms.delete(roomId)
+      performRequests.delete(roomId)
+      instrumentChangeRequests.delete(roomId)
+      roomMetaCache.delete(roomId)
+    }
+  }
+
+  function consumeRejoin(roomId: string, userId: string | undefined): boolean {
+    if (!userId) return false
+    const m = recentlyLeft.get(roomId)
+    const exp = m?.get(userId)
+    if (exp === undefined) return false
+    m!.delete(userId)
+    if (m!.size === 0) recentlyLeft.delete(roomId)
+    return exp > Date.now()
+  }
+
+  function scheduleExpiryCheck(client: Client) {
+    if (client.expiryTimer) clearTimeout(client.expiryTimer)
+    client.expiryTimer = undefined
+    if (client.tokenExp === null) return
+    const delay = Math.min(Math.max(client.tokenExp + TOKEN_EXPIRY_GRACE_MS - Date.now(), 0), 2 ** 31 - 1)
+    client.expiryTimer = setTimeout(() => {
+      if (client.tokenExp !== null && client.tokenExp + TOKEN_EXPIRY_GRACE_MS <= Date.now()) {
+        console.log(`[AUTH] ${client.id.slice(0, 8)} token expired - closing`)
+        client.ws.close(4001, 'Token expired')
+      }
+    }, delay)
+    client.expiryTimer.unref?.()
+  }
+
+  // ---------- heartbeat (L4) ----------
+
+  const heartbeat = setInterval(() => {
+    for (const c of clients.values()) {
+      if (!c.isAlive) {
+        console.log(`[WS] ${c.id.slice(0, 8)} heartbeat timeout - terminating`)
+        c.ws.terminate()
+        continue
+      }
+      c.isAlive = false
+      try {
+        c.ws.ping()
+      } catch {
+        // 무시
+      }
+    }
+  }, limits.heartbeatMs)
+  heartbeat.unref?.()
+
+  wss.on('close', () => {
+    clearInterval(heartbeat)
+    for (const t of participantTimers.values()) clearTimeout(t)
+  })
 
   wss.on('error', (err) => {
     console.error('[WS] server error:', err.message)
   })
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
+    const ip = clientIp(req, env)
+    const ipCount = (connectionsPerIp.get(ip) || 0) + 1
+    if (ipCount > limits.maxConnectionsPerIp) {
+      console.warn(`[WS] too many connections from ${ip}`)
+      ws.close(1008, 'Too many connections')
+      return
+    }
+    connectionsPerIp.set(ip, ipCount)
+
     const id = uuidv4()
     const client: Client = {
       id,
       ws,
+      ip,
       nickname: `User${id.slice(0, 4)}`,
       isPerforming: false,
       isHost: false,
       authState: 'pending',
+      tokenExp: null,
       nativeActive: false,
       chain: Promise.resolve(),
       pending: 0,
+      isAlive: true,
+      msgBucket: new TokenBucket(limits.msgBurst, limits.msgPerSec),
+      chatBucket: new TokenBucket(limits.chatBurst, limits.chatPerSec),
+      joinBucket: new TokenBucket(limits.joinBurst, limits.joinPerSec),
+      dropped: 0,
+      lastRateLimitNotice: 0,
     }
     clients.set(id, client)
     console.log(`[CONNECT] Client ${id.slice(0, 8)} connected. Total clients: ${clients.size}`)
     send(ws, { type: 'welcome', clientId: id })
+
+    ws.on('pong', () => { client.isAlive = true })
 
     // 5초 내 auth가 없으면 익명 관람자로 진행
     const authTimer = setTimeout(() => {
@@ -263,21 +518,42 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
         send(ws, { type: 'auth-result', authenticated: false })
       }
     }, AUTH_TIMEOUT_MS)
+    authTimer.unref?.()
+
+    const sendAuthResult = () => {
+      send(ws, { type: 'auth-result', authenticated: isAuthenticated(client) || (insecureDevMode && client.authState === 'authenticated'), userId: client.userId ?? null })
+    }
 
     const handleAuth = async (msg: Msg) => {
-      if (client.authState !== 'pending') return // 재인증은 무시
-      client.authState = 'verifying'
       const token = msg.accessToken
 
-      if (isNonEmptyString(token, 8192) && supabase) {
-        try {
-          const { data, error } = await supabase.auth.getUser(token)
-          if (!error && data.user) {
-            client.userId = data.user.id
-            client.authState = 'authenticated'
-          }
-        } catch (err) {
-          console.error('[AUTH] getUser failed:', err)
+      // 재인증 (L1): 같은 사용자의 갱신 토큰이면 만료 연장, 방 밖의 익명 연결은 로그인으로 승격
+      if (client.authState === 'authenticated' || client.authState === 'anonymous') {
+        if (insecureDevMode || !isNonEmptyString(token, 8192)) return
+        const uid = await deps.verifyToken(token)
+        if (!uid) return
+        if (client.authState === 'authenticated' && uid === client.userId) {
+          client.tokenExp = jwtExpiryMs(token)
+          scheduleExpiryCheck(client)
+        } else if (client.authState === 'anonymous' && !client.roomId) {
+          client.userId = uid
+          client.authState = 'authenticated'
+          client.tokenExp = jwtExpiryMs(token)
+          scheduleExpiryCheck(client)
+          console.log(`[AUTH] ${id.slice(0, 8)} upgraded to user ${uid.slice(0, 8)}`)
+        }
+        sendAuthResult()
+        return
+      }
+
+      client.authState = 'verifying'
+      if (isNonEmptyString(token, 8192) && deps.hasBackend) {
+        const uid = await deps.verifyToken(token)
+        if (uid) {
+          client.userId = uid
+          client.authState = 'authenticated'
+          client.tokenExp = jwtExpiryMs(token)
+          scheduleExpiryCheck(client)
         }
       } else if (insecureDevMode && isNonEmptyString(token, 8192)) {
         // 개발 모드: 검증 불가. userId는 join 시 클라이언트 값 사용
@@ -286,63 +562,69 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
 
       if (client.authState !== 'authenticated') client.authState = 'anonymous'
       console.log(`[AUTH] ${id.slice(0, 8)} ${client.authState}${client.userId ? ` user ${client.userId.slice(0, 8)}` : ''}`)
-      send(ws, { type: 'auth-result', authenticated: client.authState === 'authenticated', userId: client.userId ?? null })
+      sendAuthResult()
     }
 
     const handleJoin = async (msg: Msg) => {
       const roomId = msg.roomId
       if (!isNonEmptyString(roomId, MAX_ROOM_ID_LENGTH)) return
 
-      // 다른 방에 있었다면 먼저 퇴장 처리
-      if (client.roomId && client.roomId !== roomId) {
-        handleLeave(id, client.roomId, supabase)
-        client.isPerforming = false
-        client.instrument = undefined
-        client.nativeActive = false
-      }
-
-      const nickname = sanitizeNickname(msg.nickname)
-      if (nickname) client.nickname = nickname
-
-      // 개발 모드에서만 클라이언트 userId 사용 (운영에서는 auth로 확정된 값만)
+      // 개발 모드에서만 클라이언트 userId 사용 (그 외에는 auth로 확정된 값만)
       if (insecureDevMode && client.authState === 'authenticated' && !client.userId && isNonEmptyString(msg.userId, 128)) {
         client.userId = msg.userId
       }
 
-      // isHost는 서버 판정
-      if (client.userId && supabase) {
-        client.isHost = await isRoomHost(supabase, roomId, client.userId)
+      // 방 존재 확인 + 방장 판정 (백엔드가 있으면 DB 기준)
+      let isHost = false
+      if (deps.hasBackend) {
+        const meta = await getRoomMeta(roomId, 0)
+        if (!meta) {
+          send(ws, { type: 'error', code: 'room-not-found', message: '방을 찾을 수 없습니다.' })
+          return
+        }
+        isHost = !!client.userId && meta.hostId === client.userId
       } else if (insecureDevMode && client.authState === 'authenticated') {
-        client.isHost = msg.isHost === true
-      } else {
-        client.isHost = false
+        isHost = msg.isHost === true
       }
       // DB 조회 중 연결이 끊겼으면 중단
-      if (!clients.has(id)) return
+      if (clients.get(id) !== client) return
 
-      // 같은 userId 중복 연결 제거 (서버 확정 userId 기준)
+      // 다른 방에 있었다면 먼저 퇴장 처리
+      if (client.roomId && client.roomId !== roomId) {
+        handleLeave(client, client.roomId, 'move')
+        client.roomId = undefined
+        client.isPerforming = false
+        client.instrument = undefined
+        client.nativeActive = false
+      }
+      client.isHost = isHost
+
+      const nickname = sanitizeNickname(msg.nickname)
+      if (nickname) client.nickname = nickname
+
+      // 같은 userId 중복 연결 제거 (서버 확정 userId 기준) — 상태 정리까지 수행 (L3)
+      let replacedDuplicate = false
       if (client.userId) {
-        const room = rooms.get(roomId)
-        if (room) {
-          for (const existingId of room) {
-            if (existingId === id) continue
-            const existingClient = clients.get(existingId)
-            if (existingClient && existingClient.userId === client.userId) {
-              console.log(`[JOIN] Removing duplicate connection for userId ${client.userId.slice(0, 8)}: ${existingId.slice(0, 8)}`)
-              room.delete(existingId)
-              for (const peerId of room) {
-                const peer = clients.get(peerId)
-                if (peer && peerId !== id) send(peer.ws, { type: 'participant-left', oderId: existingId })
-              }
-              existingClient.roomId = undefined // close 핸들러에서 중복 퇴장 처리 방지
-              existingClient.ws.close(1000, 'Duplicate connection')
-              clients.delete(existingId)
-            }
+        for (const existingId of [...(rooms.get(roomId) || [])]) {
+          if (existingId === id) continue
+          const existing = clients.get(existingId)
+          if (existing && existing.userId === client.userId) {
+            console.log(`[JOIN] Removing duplicate connection for userId ${client.userId.slice(0, 8)}: ${existingId.slice(0, 8)}`)
+            handleLeave(existing, roomId, 'duplicate')
+            existing.roomId = undefined // close 핸들러에서 중복 퇴장 처리 방지
+            clients.delete(existingId)
+            existing.ws.close(1000, 'Duplicate connection')
+            replacedDuplicate = true
           }
         }
       }
 
-      const isRejoin = msg.isRejoin === true
+      // rejoin 여부는 서버가 판단: 같은 사용자가 직전에 이 방에서 끊겼거나 중복 연결을 대체한 경우만
+      const isRejoin = msg.isRejoin === true && (consumeRejoin(roomId, client.userId) || replacedDuplicate)
+      if (client.userId && approvals.get(roomId)?.has(client.userId) && hasApproval(roomId, client.userId)) {
+        setApproval(roomId, client.userId, null) // 재접속: 승인 유예 해제
+      }
+
       client.roomId = roomId
       if (!rooms.has(roomId)) rooms.set(roomId, new Set())
       rooms.get(roomId)!.add(id)
@@ -350,7 +632,7 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
       const participants = getRoomParticipants(roomId)
       console.log(`[${isRejoin ? 'REJOIN' : 'JOIN'}] Client ${id.slice(0, 8)} (${client.nickname}) joined room ${roomId.slice(0, 8)}. Room size: ${participants.length}${client.isHost ? ' [HOST]' : ''}${client.authState === 'anonymous' ? ' [ANON]' : ''}`)
 
-      updateRoomParticipants(roomId, supabase)
+      scheduleParticipantUpdate(roomId)
 
       if (!isRejoin) {
         broadcastToRoom(roomId, id, {
@@ -367,12 +649,19 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
       })
 
       if (client.isHost) {
-        const pendingRequests = performRequests.get(roomId) || []
-        for (const request of pendingRequests) send(ws, { type: 'perform-request-received', request })
-
-        const pendingInstrumentChanges = instrumentChangeRequests.get(roomId) || []
-        for (const request of pendingInstrumentChanges) send(ws, { type: 'instrument-change-request-received', request })
+        for (const request of performRequests.get(roomId) || []) send(ws, { type: 'perform-request-received', request })
+        for (const request of instrumentChangeRequests.get(roomId) || []) send(ws, { type: 'instrument-change-request-received', request })
       }
+    }
+
+    /** 연주 시작 허용 여부 (H1): 방장, free_join 방, 또는 방장이 승인한 사용자 */
+    const canStartPerforming = async (roomId: string): Promise<boolean> => {
+      if (!isAuthenticated(client) && !(insecureDevMode && client.authState === 'authenticated')) return false
+      if (insecureDevMode) return true
+      if (client.isHost) return true
+      if (hasApproval(roomId, client.userId)) return true
+      const meta = await getRoomMeta(roomId)
+      return !!meta && meta.freeJoin
     }
 
     const handleMessage = async (msg: Msg) => {
@@ -387,23 +676,27 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
         return
       }
 
-      const roomId = client.roomId
-
       if (msg.type === 'join') {
         await handleJoin(msg)
         return
       }
 
+      const roomId = client.roomId
+
       if (msg.type === 'start-performing' && roomId) {
-        if (!isAuthenticated(client)) {
+        if (!isAuthenticated(client) && !(insecureDevMode && client.authState === 'authenticated')) {
           send(ws, { type: 'error', code: 'login-required', message: '연주하려면 로그인이 필요합니다.' })
+          return
+        }
+        if (!(await canStartPerforming(roomId)) || client.roomId !== roomId) {
+          send(ws, { type: 'error', code: 'perform-not-approved', message: '방장의 승인이 필요합니다.' })
           return
         }
         client.isPerforming = true
         client.instrument = typeof msg.instrument === 'string' ? msg.instrument.slice(0, 50) : undefined
         const nickname = sanitizeNickname(msg.nickname)
         if (nickname) client.nickname = nickname
-        // 클라이언트 isHost는 무시 (join 시 서버가 판정)
+        // 클라이언트 isHost는 무시 (서버 판정)
         console.log(`[START-PERFORMING] ${id.slice(0, 8)} (${client.nickname}) started performing: ${client.instrument}, isHost: ${client.isHost}`)
         broadcastToRoom(roomId, id, { type: 'performer-updated', oderId: id, nickname: client.nickname, instrument: client.instrument, isPerforming: true, isHost: client.isHost })
         return
@@ -417,10 +710,10 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
         return
       }
 
-      // WebRTC 시그널링: 같은 방 안의 대상에게만 중계
+      // WebRTC 시그널링: 같은 방 안에서, 양쪽 중 한쪽 이상이 연주자일 때만 (M1)
       if (msg.type === 'offer' || msg.type === 'answer' || msg.type === 'ice-candidate') {
         const target = getRoomPeer(client, msg.to)
-        if (target) {
+        if (target && (isPerformer(client) || isPerformer(target))) {
           console.log(`[SIGNAL] ${msg.type} from ${id.slice(0, 8)} to ${target.id.slice(0, 8)}`)
           send(target.ws, { ...msg, from: id })
         }
@@ -458,9 +751,12 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
         return
       }
 
+      // 채팅: 서버가 필드를 새로 구성 (M4)
       if (msg.type === 'chat' && roomId) {
-        console.log(`[CHAT] from ${id.slice(0, 8)} in room ${roomId.slice(0, 8)}`)
-        broadcastToRoom(roomId, id, { ...msg, nickname: client.nickname })
+        if (typeof msg.message !== 'string') return
+        const message = msg.message.trim().slice(0, MAX_CHAT_LENGTH)
+        if (!message) return
+        broadcastToRoom(roomId, id, { type: 'chat', message, nickname: client.nickname, timestamp: Date.now() })
         return
       }
 
@@ -471,21 +767,24 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
         }
         if (!performRequests.has(roomId)) performRequests.set(roomId, [])
         const requests = performRequests.get(roomId)!
-        if (requests.find(r => r.oderId === id)) {
-          console.log(`[REQUEST-PERFORM] Duplicate request from ${id.slice(0, 8)}`)
-          return
-        }
+        if (requests.find(r => r.oderId === id)) return
         const request: PerformRequest = { oderId: id, nickname: client.nickname, instrument: msg.instrument, timestamp: Date.now() }
         requests.push(request)
         console.log(`[REQUEST-PERFORM] ${id.slice(0, 8)} (${client.nickname}) requested to perform: ${msg.instrument}`)
         const host = findRoomHost(roomId)
         if (host) send(host.ws, { type: 'perform-request-received', request })
-        else console.log(`[REQUEST-PERFORM] Host not in room, request queued for later`)
         send(ws, { type: 'perform-request-sent', instrument: msg.instrument })
         return
       }
 
-      if (msg.type === 'approve-perform' && roomId && client.isHost && typeof msg.targetId === 'string') {
+      // 승인 계열: 방장 여부를 다시 확인 (L2)
+      const isHostAction = ['approve-perform', 'reject-perform', 'approve-instrument-change', 'reject-instrument-change'].includes(msg.type)
+      if (isHostAction) {
+        if (!roomId || typeof msg.targetId !== 'string') return
+        if (!(await refreshHost(client)) || client.roomId !== roomId) return
+      }
+
+      if (msg.type === 'approve-perform' && roomId && typeof msg.targetId === 'string') {
         const requests = performRequests.get(roomId)
         const target = getRoomPeer(client, msg.targetId)
         if (!requests || !target) return
@@ -493,12 +792,13 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
         if (requestIndex === -1) return
         const request = requests[requestIndex]
         requests.splice(requestIndex, 1)
+        if (target.userId) setApproval(roomId, target.userId, null)
         console.log(`[APPROVE-PERFORM] Host approved ${target.id.slice(0, 8)} (${request.nickname}) for ${request.instrument}`)
         send(target.ws, { type: 'perform-request-approved', instrument: request.instrument })
         return
       }
 
-      if (msg.type === 'reject-perform' && roomId && client.isHost && typeof msg.targetId === 'string') {
+      if (msg.type === 'reject-perform' && roomId && typeof msg.targetId === 'string') {
         const requests = performRequests.get(roomId)
         if (!requests) return
         const requestIndex = requests.findIndex(r => r.oderId === msg.targetId)
@@ -519,7 +819,6 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
           const requestIndex = requests.findIndex(r => r.oderId === id)
           if (requestIndex !== -1) {
             requests.splice(requestIndex, 1)
-            console.log(`[CANCEL-REQUEST] ${id.slice(0, 8)} cancelled their perform request`)
             if (host) send(host.ws, { type: 'perform-request-cancelled', oderId: id })
           }
         }
@@ -529,20 +828,16 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
       if (msg.type === 'request-instrument-change' && roomId && client.isPerforming && isNonEmptyString(msg.newInstrument, 50)) {
         if (!instrumentChangeRequests.has(roomId)) instrumentChangeRequests.set(roomId, [])
         const requests = instrumentChangeRequests.get(roomId)!
-        if (requests.find(r => r.oderId === id)) {
-          console.log(`[INSTRUMENT-CHANGE] Duplicate request from ${id.slice(0, 8)}`)
-          return
-        }
+        if (requests.find(r => r.oderId === id)) return
         const request: InstrumentChangeRequest = { oderId: id, nickname: client.nickname, currentInstrument: client.instrument || '', newInstrument: msg.newInstrument, timestamp: Date.now() }
         requests.push(request)
-        console.log(`[INSTRUMENT-CHANGE] ${id.slice(0, 8)} (${client.nickname}) requested to change: ${client.instrument} -> ${msg.newInstrument}`)
         const host = findRoomHost(roomId)
         if (host) send(host.ws, { type: 'instrument-change-request-received', request })
         send(ws, { type: 'instrument-change-request-sent', newInstrument: msg.newInstrument })
         return
       }
 
-      if (msg.type === 'approve-instrument-change' && roomId && client.isHost && typeof msg.targetId === 'string') {
+      if (msg.type === 'approve-instrument-change' && roomId && typeof msg.targetId === 'string') {
         const requests = instrumentChangeRequests.get(roomId)
         const target = getRoomPeer(client, msg.targetId)
         if (!requests || !target) return
@@ -551,25 +846,20 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
         const request = requests[requestIndex]
         requests.splice(requestIndex, 1)
         target.instrument = request.newInstrument
-        console.log(`[APPROVE-INSTRUMENT-CHANGE] Host approved ${target.id.slice(0, 8)} instrument change to ${request.newInstrument}`)
         send(target.ws, { type: 'instrument-change-approved', newInstrument: request.newInstrument })
-        const room = rooms.get(roomId)
-        if (room) {
-          for (const oderId of room) {
-            const peer = clients.get(oderId)
-            if (peer && peer.id !== target.id) send(peer.ws, { type: 'participant-instrument-changed', oderId: target.id, instrument: request.newInstrument })
-          }
+        for (const oderId of rooms.get(roomId) || []) {
+          const peer = clients.get(oderId)
+          if (peer && peer.id !== target.id) send(peer.ws, { type: 'participant-instrument-changed', oderId: target.id, instrument: request.newInstrument })
         }
         return
       }
 
-      if (msg.type === 'reject-instrument-change' && roomId && client.isHost && typeof msg.targetId === 'string') {
+      if (msg.type === 'reject-instrument-change' && roomId && typeof msg.targetId === 'string') {
         const requests = instrumentChangeRequests.get(roomId)
         if (!requests) return
         const requestIndex = requests.findIndex(r => r.oderId === msg.targetId)
         if (requestIndex === -1) return
         requests.splice(requestIndex, 1)
-        console.log(`[REJECT-INSTRUMENT-CHANGE] Host rejected ${msg.targetId.slice(0, 8)} instrument change`)
         const target = getRoomPeer(client, msg.targetId)
         const reason = typeof msg.reason === 'string' ? msg.reason.slice(0, 200) : '방장이 악기 변경을 거절했습니다.'
         if (target) send(target.ws, { type: 'instrument-change-rejected', reason })
@@ -583,7 +873,6 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
           const requestIndex = requests.findIndex(r => r.oderId === id)
           if (requestIndex !== -1) {
             requests.splice(requestIndex, 1)
-            console.log(`[CANCEL-INSTRUMENT-CHANGE] ${id.slice(0, 8)} cancelled their instrument change request`)
             if (host) send(host.ws, { type: 'instrument-change-request-cancelled', oderId: id })
           }
         }
@@ -591,7 +880,7 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
       }
 
       if (msg.type === 'leave' && roomId) {
-        handleLeave(id, roomId, supabase)
+        handleLeave(client, roomId, 'leave')
         client.roomId = undefined
         client.isPerforming = false
         client.instrument = undefined
@@ -601,6 +890,27 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
       }
 
       // 알 수 없는 type은 무시
+    }
+
+    /** 메시지 rate limit (M3). 통과하면 true */
+    const allowMessage = (msg: Msg): boolean => {
+      let ok = client.msgBucket.take()
+      if (ok && msg.type === 'chat') ok = client.chatBucket.take()
+      if (ok && (msg.type === 'join' || msg.type === 'leave')) ok = client.joinBucket.take()
+      if (ok) return true
+
+      client.dropped++
+      if (client.dropped >= limits.maxDropped) {
+        console.warn(`[WS] ${id.slice(0, 8)} exceeded rate limit repeatedly - closing`)
+        ws.close(1008, 'Rate limit exceeded')
+        return false
+      }
+      const now = Date.now()
+      if (now - client.lastRateLimitNotice > 1000) {
+        client.lastRateLimitNotice = now
+        send(ws, { type: 'error', code: 'rate-limited', message: '메시지를 너무 많이 보냈습니다.', rejectedType: msg.type })
+      }
+      return false
     }
 
     ws.on('message', (raw: RawData, isBinary: boolean) => {
@@ -615,13 +925,15 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
         return // JSON 파싱 실패는 무시
       }
 
+      if (!allowMessage(msg)) return
+
       if (client.pending >= MAX_PENDING_MESSAGES) {
         console.warn(`[WS] ${id.slice(0, 8)} too many pending messages - closing`)
         ws.close(1008, 'Too many pending messages')
         return
       }
       client.pending++
-      // 메시지를 순차 처리 (auth 검증/호스트 조회 같은 비동기 작업 중에도 순서 유지)
+      // 메시지를 순차 처리 (auth 검증/DB 조회 같은 비동기 작업 중에도 순서 유지)
       client.chain = client.chain
         .then(() => (clients.get(id) === client ? handleMessage(msg) : undefined))
         .catch(err => console.error('[ERROR] Failed to handle message:', err))
@@ -635,11 +947,14 @@ export function initializeWebSocket(server: HttpServer | HttpsServer, supabase: 
 
     ws.on('close', () => {
       clearTimeout(authTimer)
+      if (client.expiryTimer) clearTimeout(client.expiryTimer)
+      const n = (connectionsPerIp.get(ip) || 1) - 1
+      if (n <= 0) connectionsPerIp.delete(ip)
+      else connectionsPerIp.set(ip, n)
+
       const roomId = client.roomId
-      console.log(`[DISCONNECT] Client ${id.slice(0, 8)} disconnected. roomId: ${roomId?.slice(0, 8) || 'none'}. Total clients: ${clients.size - 1}`)
-      if (roomId && rooms.has(roomId)) {
-        handleLeave(id, roomId, supabase)
-      }
+      console.log(`[DISCONNECT] Client ${id.slice(0, 8)} disconnected. roomId: ${roomId?.slice(0, 8) || 'none'}`)
+      if (roomId && rooms.has(roomId)) handleLeave(client, roomId, 'close')
       client.roomId = undefined
       if (clients.get(id) === client) clients.delete(id)
     })

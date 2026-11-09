@@ -2,9 +2,10 @@
   "$schema": "https://schemas.tauri.app/config/2/capability",
   "identifier": "default",
   "description": "Default capabilities for the app",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
-    "core:default",
-    "shell:allow-open"
+    "core:default"
   ]
 }
