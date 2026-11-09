@@ -31,6 +31,20 @@ if (supabaseAdmin) {
   console.log('[Music Routes] Supabase not configured - stem storage disabled')
 }
 
+const UPLOAD_DIR = path.resolve(__dirname, "../../uploads")
+
+/**
+ * 업로드 파일명 → 안전한 절대 경로. 경로 순회(../, 절대경로, 구분자)를 차단한다.
+ * 경로 구분자(/ \), NUL, 점으로 시작하는 이름, '..' 포함을 거부한다. 실패 시 null.
+ */
+function resolveUploadPath(filename: unknown): string | null {
+  if (typeof filename !== "string" || filename.length === 0 || filename.length > 255) return null
+  if (/[\/\\\0:]/.test(filename) || filename.startsWith(".") || filename.includes("..")) return null
+  const resolved = path.resolve(UPLOAD_DIR, filename)
+  if (path.dirname(resolved) !== UPLOAD_DIR) return null
+  return resolved
+}
+
 async function getUserIdFromToken(authHeader: string | string[] | undefined): Promise<string | null> {
   const header = Array.isArray(authHeader) ? authHeader[0] : authHeader
   if (!header?.startsWith('Bearer ') || !supabaseAdmin) return null
@@ -94,8 +108,9 @@ const storage = multer.diskStorage({
     cb(null, uploadDir)
   },
   filename: (req, file, cb) => {
-    // 파일명: timestamp_originalname
-    const uniqueName = `${Date.now()}_${file.originalname}`
+    // 파일명: timestamp_uuid.ext (원본 이름은 경로 순회 위험이 있어 저장 이름에 쓰지 않는다)
+    const ext = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '')
+    const uniqueName = `${Date.now()}_${uuidv4()}${ext}`
     cb(null, uniqueName)
   }
 })
@@ -204,8 +219,10 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
  */
 router.get('/file/:filename', (req: Request, res: Response) => {
   try {
-    const filename = req.params['filename'] as string
-    const filePath = path.join(__dirname, '../../uploads', filename)
+    const filePath = resolveUploadPath(req.params['filename'])
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
+    }
 
     // 파일 존재 여부 확인
     if (!fs.existsSync(filePath)) {
@@ -232,8 +249,10 @@ router.get('/file/:filename', (req: Request, res: Response) => {
  */
 router.delete('/file/:filename', (req: Request, res: Response) => {
   try {
-    const filename = req.params['filename'] as string
-    const filePath = path.join(__dirname, '../../uploads', filename)
+    const filePath = resolveUploadPath(req.params['filename'])
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
+    }
 
     // 파일 존재 여부 확인
     if (!fs.existsSync(filePath)) {
