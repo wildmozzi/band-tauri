@@ -721,6 +721,8 @@ export function initializeWebSocket(
         setApproval(roomId, client.userId, null) // 재접속: 승인 유예 해제
       }
 
+      // 이 clientId가 이미 방에 있었는지 (세션 재개 후 클라이언트의 rejoin은 같은 id라서 true)
+      const alreadyInRoom = rooms.get(roomId)?.has(id) ?? false
       client.roomId = roomId
       if (!rooms.has(roomId)) rooms.set(roomId, new Set())
       rooms.get(roomId)!.add(id)
@@ -730,10 +732,13 @@ export function initializeWebSocket(
 
       scheduleParticipantUpdate(roomId)
 
-      if (!isRejoin) {
+      // 새 clientId가 방에 들어오면 rejoin이어도 항상 알린다 (H1: 다른 클라이언트가 새 id를 peers/관람자 목록에 넣어야
+      // 방송 담당이 offer를 보낼 수 있다). rejoin 플래그는 UI 입장 알림 억제용으로만 함께 보낸다.
+      if (!alreadyInRoom) {
         broadcastToRoom(roomId, id, {
           type: 'participant-joined',
           participant: { oderId: id, nickname: client.nickname, instrument: client.instrument, isPerforming: client.isPerforming, isHost: client.isHost },
+          rejoin: isRejoin,
         })
       }
 

@@ -116,6 +116,8 @@ export function RoomDetail() {
     isMonitoringEnabled,
     monitorGain,
     setMonitor,
+    inputMuted,
+    toggleInputMuted,
     broadcasterId,
     isBroadcaster,
     broadcastViewerCount,
@@ -1272,6 +1274,14 @@ export function RoomDetail() {
                     </div>
                   )}
                 </div>
+                {/* 내 입력 뮤트 (engine_set_input_muted) */}
+                <button
+                  onClick={toggleInputMuted}
+                  className={`mic-toggle ${inputMuted ? 'off' : 'on'}`}
+                  title={inputMuted ? '마이크 켜기' : '마이크 끄기 (상대·관람자에게 무음)'}
+                >
+                  {inputMuted ? '🔇' : '🎤'}
+                </button>
                 {/* 모니터링 (내 소리 듣기) */}
                 <div className="monitoring-controls">
                   <button
@@ -1471,7 +1481,7 @@ export function RoomDetail() {
                 />
                 <span>{masterMuted ? 'MUTE' : `${Math.round(masterVolume * 100)}%`}</span>
               </div>
-              {/* 패닝은 웹 재생(관람)에서만. 엔진 믹서는 패닝이 없다 */}
+              {/* 마스터 패닝은 웹 재생(관람)에서만. 엔진은 피어별 pan만 있다 */}
               {!isPerformer && (
                 <div className="master-control-row">
                   <label>패닝</label>
@@ -1579,6 +1589,19 @@ export function RoomDetail() {
                               disabled={mix.muted}
                             />
                             <span>{Math.round(mix.volume * 100)}%</span>
+                          </div>
+                          <div className="control-row">
+                            <label>패닝</label>
+                            <input
+                              type="range"
+                              min="-1"
+                              max="1"
+                              step="0.01"
+                              value={mix.pan}
+                              onChange={(e) => setMixPan(oderId, parseFloat(e.target.value))}
+                              disabled={mix.muted}
+                            />
+                            <span>{mix.pan < 0 ? `L${Math.round(Math.abs(mix.pan) * 100)}` : mix.pan > 0 ? `R${Math.round(mix.pan * 100)}` : 'C'}</span>
                           </div>
                         </div>
                       </div>
