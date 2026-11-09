@@ -3,6 +3,7 @@ import { FileUpload } from '../components/FileUpload'
 import { ScoreDisplay } from '../components/ScoreDisplay'
 import { MusicPlayer, type InstrumentType } from '../services/MusicPlayer'
 import { getMusicFileUrl, type UploadResponse } from '../services/musicApi'
+import { convertMusicXmlToMidi, midiToUrl } from '../services/MusicXmlToMidi'
 import './Karaoke.css'
 
 /**
@@ -12,11 +13,12 @@ export function KaraokeVirtual() {
   // 상태 관리
   const [musicXmlUrl, setMusicXmlUrl] = useState<string>()
   const [midiUrl, setMidiUrl] = useState<string>()
-  const [instrument, setInstrument] = useState<InstrumentType>('piano')
+  const [instruments, setInstruments] = useState<InstrumentType[]>(['piano'])
   const [isPlaying, setIsPlaying] = useState(false)
   const [isPaused, setIsPaused] = useState(false)
   const [tempo, setTempo] = useState(120)
   const [progress, setProgress] = useState(0)
+  const [currentMeasure, setCurrentMeasure] = useState(0)
   const [currentFileName, setCurrentFileName] = useState<string>()
 
   // MusicPlayer 인스턴스 참조
@@ -26,9 +28,10 @@ export function KaraokeVirtual() {
   useEffect(() => {
     playerRef.current = new MusicPlayer()
 
-    // 진행률 콜백 등록
-    playerRef.current.onProgress((p) => {
+    // 진행률 콜백 등록 (진행률 + 마디 번호)
+    playerRef.current.onProgress((p, m) => {
       setProgress(p)
+      setCurrentMeasure(m)
     })
 
     return () => {
@@ -49,11 +52,35 @@ export function KaraokeVirtual() {
     setCurrentFileName(result.originalName)
 
     // 파일 타입에 따라 처리
-    if (result.fileType === 'xml') {
-      // MusicXML: 악보 표시
+    if (result.fileType === 'xml' || result.fileType === 'pdf') {
+      // MusicXML 또는 PDF → MusicXML: 악보 표시 + MIDI 변환
       const xmlUrl = getMusicFileUrl(result.fileName)
       setMusicXmlUrl(xmlUrl)
-      setMidiUrl(undefined)
+
+      // PDF 변환 경고 표시
+      const resultData = result
+      if (result.fileType === 'pdf' && resultData.warnings) {
+        console.warn('[KaraokeVirtual] PDF 변환 경고:', resultData.warnings)
+        // 필요시 사용자에게 알림 (선택사항)
+        // alert(`PDF 변환 완료: ${resultData.warnings.join(', ')}`)
+      }
+
+      // MusicXML → MIDI 변환
+      try {
+        console.log('[KaraokeVirtual] Converting MusicXML to MIDI...')
+        const midi = await convertMusicXmlToMidi(xmlUrl)
+        const convertedMidiUrl = midiToUrl(midi)
+        setMidiUrl(convertedMidiUrl)
+
+        // MIDI 로드
+        if (playerRef.current) {
+          await playerRef.current.loadMidiFromObject(midi)
+          console.log('[KaraokeVirtual] MIDI converted and loaded successfully')
+        }
+      } catch (error) {
+        console.error('[KaraokeVirtual] Failed to convert MusicXML:', error)
+        alert('MusicXML 변환 실패: ' + (error instanceof Error ? error.message : 'Unknown error'))
+      }
     } else if (result.fileType === 'midi') {
       // MIDI: 재생 준비
       const midiFileUrl = getMusicFileUrl(result.fileName)
@@ -107,14 +134,19 @@ export function KaraokeVirtual() {
     }
   }
 
-  // 악기 변경
-  const handleInstrumentChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newInstrument = e.target.value as InstrumentType
-    setInstrument(newInstrument)
+  // 악기 변경 (여러 개 선택 가능)
+  const toggleInstrument = (inst: InstrumentType) => {
+    setInstruments(prev => {
+      const has = prev.includes(inst)
+      const next = has ? prev.filter(i => i !== inst) : [...prev, inst]
+      const finalList = (next.length === 0 ? ['piano'] : next) as InstrumentType[]
 
-    if (playerRef.current) {
-      playerRef.current.setInstrument(newInstrument)
-    }
+      if (playerRef.current) {
+        playerRef.current.setInstruments(finalList)
+      }
+
+      return finalList
+    })
   }
 
   // 템포 변경
@@ -155,6 +187,7 @@ export function KaraokeVirtual() {
             <ScoreDisplay
               musicXmlUrl={musicXmlUrl}
               currentProgress={progress}
+              currentMeasure={currentMeasure}
               onError={(error) => {
                 console.error('[KaraokeVirtual] Score display error:', error)
                 alert('악보 표시 오류: ' + error.message)
@@ -172,16 +205,33 @@ export function KaraokeVirtual() {
         {/* 재생 컨트롤 */}
         <div className="player-controls">
           <div className="instrument-selector">
-            <label>악기 선택:</label>
-            <select
-              className="instrument-select"
-              value={instrument}
-              onChange={handleInstrumentChange}
-            >
-              <option value="piano">피아노</option>
-              <option value="guitar">기타</option>
-              <option value="drum">드럼</option>
-            </select>
+            <label>악기 선택 (복수 선택 가능):</label>
+            <div className="instrument-checkboxes">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={instruments.includes('piano')}
+                  onChange={() => toggleInstrument('piano')}
+                />
+                피아노
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={instruments.includes('guitar')}
+                  onChange={() => toggleInstrument('guitar')}
+                />
+                기타
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={instruments.includes('drum')}
+                  onChange={() => toggleInstrument('drum')}
+                />
+                드럼
+              </label>
+            </div>
           </div>
 
           <div className="playback-controls">

@@ -45,12 +45,11 @@ export function Home() {
       <header className="hero">
         <p className="eyebrow">SYNCROOM INSPIRED · WEB DEMO</p>
         <h1>
-          Yamaha Syncroom을 재해석한
           <br />
           초저지연 온라인 합주실
         </h1>
         <p className="lead">
-          BandSpace는 웹을 시작으로 데스크톱 · 모바일까지 확장되는 통합 합주 플랫폼입니다. 개인 녹음부터 커뮤니티,
+          IndigoMuse는 웹을 시작으로 데스크톱 · 모바일까지 확장되는 통합 합주 플랫폼입니다. 개인 녹음부터 커뮤니티,
           믹싱 실험까지 하나의 타임라인에서 이어집니다.
         </p>
         <div className="hero-actions">
