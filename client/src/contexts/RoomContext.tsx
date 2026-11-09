@@ -1233,7 +1233,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       setJoinFeedback('시그널링 서버에 연결 중입니다. 잠시 후 다시 시도해주세요.')
       return
     }
-    // userId를 포함하여 서버에서 중복 연결 처리 가능하도록
+    // isHost/userId는 서버가 무시함 (서버가 auth 토큰으로 userId, DB rooms.host_id로 isHost 판정)
     wsRef.current.send(JSON.stringify({
       type: 'join',
       roomId,
@@ -1855,10 +1855,26 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       const ws = new WebSocket(SIGNALING_URL)
       wsRef.current = ws
 
+      // 서버 인증: 연결 직후 첫 메시지로 Supabase access_token 전송 (없으면 익명 관람자)
+      // 서버는 auth 전에 온 다른 메시지를 거부하므로, 'connected' 상태와 재입장(join)은 auth 전송 이후로 미룬다
+      let resolveAuthSent: () => void = () => {}
+      const authSent = new Promise<void>((resolve) => { resolveAuthSent = resolve })
+
       ws.onopen = () => {
         console.log('[WS] Connected!')
-        if (isMounted) setSignalStatus('connected')
         reconnectAttempts = 0 // 연결 성공 시 재연결 시도 횟수 리셋
+        const tokenPromise: Promise<string | null> = supabase
+          ? supabase.auth.getSession().then(({ data }) => data.session?.access_token ?? null)
+          : Promise.resolve(null)
+        void tokenPromise
+          .catch(() => null)
+          .then((accessToken) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(accessToken ? { type: 'auth', accessToken } : { type: 'auth' }))
+              if (isMounted) setSignalStatus('connected')
+            }
+            resolveAuthSent()
+          })
       }
       ws.onerror = () => {
         // 서버 미실행 시 에러 로그 최소화
@@ -1901,14 +1917,18 @@ export function RoomProvider({ children }: { children: ReactNode }) {
             // 재연결 후 이전 방에 자동으로 다시 join
             if (currentRoomIdRef.current) {
               console.log('[WS] Reconnected, rejoining room:', currentRoomIdRef.current.slice(0, 8))
-              ws.send(JSON.stringify({
-                type: 'join',
-                roomId: currentRoomIdRef.current,
-                nickname: nicknameRef.current,
-                isHost: isHostRef.current,
-                userId: user?.id || null,
-                isRejoin: true
-              }))
+              void authSent.then(() => {
+                if (ws.readyState !== WebSocket.OPEN || !currentRoomIdRef.current) return
+                // isHost/userId는 서버가 무시함 (서버가 auth 토큰과 DB rooms.host_id로 판정)
+                ws.send(JSON.stringify({
+                  type: 'join',
+                  roomId: currentRoomIdRef.current,
+                  nickname: nicknameRef.current,
+                  isHost: isHostRef.current,
+                  userId: user?.id || null,
+                  isRejoin: true
+                }))
+              })
             }
             return
           }

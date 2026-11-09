@@ -1,6 +1,6 @@
 import { loadTossPayments } from '@tosspayments/payment-sdk'
 
-const CLIENT_KEY = import.meta.env.VITE_TOSS_PAYMENTS_CLIENT_KEY || 'test_ck_D5GePWvyJnrK0W0k6q8gLzN97Eoq'
+const CLIENT_KEY: string = import.meta.env.VITE_TOSS_PAYMENTS_CLIENT_KEY || ''
 
 export interface PaymentRequest {
   amount: number
@@ -17,6 +17,7 @@ class TossPaymentsService {
 
   async initialize() {
     if (!this.tossPayments) {
+      if (!CLIENT_KEY) throw new Error('VITE_TOSS_PAYMENTS_CLIENT_KEY가 설정되지 않았습니다')
       this.tossPayments = await loadTossPayments(CLIENT_KEY)
     }
     return this.tossPayments

@@ -26,3 +26,9 @@ Thumbs.db
 *.swp
 *.swo
 server/certs/
+
+# TLS 인증서/키 (mkcert 등으로 로컬 생성, 커밋 금지)
+*.pem
+*.key
+certs/
+certs_backup/

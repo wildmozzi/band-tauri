@@ -1,7 +1,11 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = 'https://agpgkzgkodudpnxzbhcv.supabase.co'
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFncGdremdrb2R1ZHBueHpiaGN2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI5OTk3MDAsImV4cCI6MjA3ODU3NTcwMH0.lIidV7ZNon9ygr9dfuClWNVDJ3w0jHw14UBpK0K4S3w'
+const supabaseUrl = process.env.SUPABASE_URL
+const supabaseKey = process.env.SUPABASE_ANON_KEY
+if (!supabaseUrl || !supabaseKey) {
+  console.error('❌ SUPABASE_URL, SUPABASE_ANON_KEY 환경변수가 필요합니다. (루트 .env.example 참고)')
+  process.exit(1)
+}
 
 const supabase = createClient(supabaseUrl, supabaseKey)
 
