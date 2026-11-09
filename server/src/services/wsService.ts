@@ -66,6 +66,10 @@ export interface WsLimits {
   /** 이만큼 메시지를 버리면 연결 종료 */
   maxDropped: number
   heartbeatMs: number
+  /** 방 하나의 최대 연주자 수 (설계: 최대 6명) */
+  maxPerformers: number
+  /** 인증된 사용자가 끊긴 뒤 세션을 재개할 수 있는 유예시간 (이 동안 방 참가자에게 leave를 보내지 않음) */
+  resumeGraceMs: number
 }
 
 const DEFAULT_LIMITS: WsLimits = {
@@ -77,6 +81,8 @@ const DEFAULT_LIMITS: WsLimits = {
   joinPerSec: 0.2,
   maxConnectionsPerIp: 20,
   maxDropped: 200,
+  maxPerformers: 6,
+  resumeGraceMs: 30_000,
   heartbeatMs: 30_000,
 }
 
@@ -128,6 +134,8 @@ interface Client {
   joinBucket: TokenBucket
   dropped: number
   lastRateLimitNotice: number
+  /** 끊긴 뒤 세션 재개 대기 중이면 유예 만료 타이머 */
+  suspendTimer?: ReturnType<typeof setTimeout>
 }
 
 interface Participant {
@@ -262,6 +270,20 @@ export function initializeWebSocket(
   const roomMetaCache = new Map<string, { meta: RoomMeta | null; fetchedAt: number }>()
   const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const connectionsPerIp = new Map<string, number>()
+  /** clientId → 연결이 끊겨 재개를 기다리는 클라이언트 (방/연주 상태 유지) */
+  const suspended = new Map<string, Client>()
+
+  /** 유예 중인 클라이언트를 최종 제거 (방 참가자에게 leave 전송) */
+  function finalizeSuspended(c: Client) {
+    if (c.suspendTimer) clearTimeout(c.suspendTimer)
+    c.suspendTimer = undefined
+    suspended.delete(c.id)
+    if (clients.get(c.id) !== c) return
+    console.log(`[RESUME] ${c.id.slice(0, 8)} grace period over - leaving`)
+    if (c.roomId && rooms.has(c.roomId)) handleLeave(c, c.roomId, 'close')
+    c.roomId = undefined
+    clients.delete(c.id)
+  }
 
   // maxPayload 초과 시 ws가 연결을 1009로 끊는다
   const wss = new WebSocketServer({ server, maxPayload: MAX_MESSAGE_BYTES })
@@ -450,6 +472,7 @@ export function initializeWebSocket(
 
   const heartbeat = setInterval(() => {
     for (const c of clients.values()) {
+      if (suspended.has(c.id)) continue // 이미 끊긴 연결 (재개 대기)
       if (!c.isAlive) {
         console.log(`[WS] ${c.id.slice(0, 8)} heartbeat timeout - terminating`)
         c.ws.terminate()
@@ -468,6 +491,7 @@ export function initializeWebSocket(
   wss.on('close', () => {
     clearInterval(heartbeat)
     for (const t of participantTimers.values()) clearTimeout(t)
+    for (const c of suspended.values()) if (c.suspendTimer) clearTimeout(c.suspendTimer)
   })
 
   wss.on('error', (err) => {
@@ -484,8 +508,9 @@ export function initializeWebSocket(
     }
     connectionsPerIp.set(ip, ipCount)
 
-    const id = uuidv4()
-    const client: Client = {
+    // 세션 재개 시 이전 Client로 교체되므로 let (모든 핸들러는 이 변수를 통해 현재 Client를 본다)
+    let id = uuidv4()
+    let client: Client = {
       id,
       ws,
       ip,
@@ -524,6 +549,56 @@ export function initializeWebSocket(
       send(ws, { type: 'auth-result', authenticated: isAuthenticated(client) || (insecureDevMode && client.authState === 'authenticated'), userId: client.userId ?? null })
     }
 
+    /** 현재 방 상태를 이 연결에 전송 (방장이면 대기 중인 요청도) */
+    const sendRoomState = (roomId: string) => {
+      const others = getRoomParticipants(roomId).filter(p => p.oderId !== id)
+      send(ws, {
+        type: 'room-state',
+        participants: others,
+        peerIds: others.map(p => p.oderId),
+        isHost: client.isHost,
+      })
+      if (client.isHost) {
+        for (const request of performRequests.get(roomId) || []) send(ws, { type: 'perform-request-received', request })
+        for (const request of instrumentChangeRequests.get(roomId) || []) send(ws, { type: 'instrument-change-request-received', request })
+      }
+    }
+
+    /**
+     * 세션 재개: 이 연결을 유예 중이던 이전 Client(clientId/방/연주 상태)에 붙인다.
+     * 방 참가자에게는 leave/joined를 보내지 않는다(그들 입장에서는 끊긴 적이 없음).
+     */
+    const resumeSession = (old: Client, token: string) => {
+      const temp = client
+      if (old.suspendTimer) clearTimeout(old.suspendTimer)
+      old.suspendTimer = undefined
+      suspended.delete(old.id)
+
+      old.ws = ws
+      old.ip = temp.ip
+      old.isAlive = true
+      // 이 연결에서 이미 큐에 쌓인 메시지 순서를 유지하기 위해 체인/카운터를 넘겨받는다
+      old.chain = temp.chain
+      old.pending = temp.pending
+      old.msgBucket = temp.msgBucket
+      old.chatBucket = temp.chatBucket
+      old.joinBucket = temp.joinBucket
+      old.dropped = 0
+      old.authState = 'authenticated'
+      old.tokenExp = jwtExpiryMs(token)
+
+      if (temp.expiryTimer) clearTimeout(temp.expiryTimer)
+      clients.delete(temp.id)
+      client = old
+      id = old.id
+      scheduleExpiryCheck(client)
+
+      console.log(`[RESUME] ${id.slice(0, 8)} resumed session (user ${client.userId?.slice(0, 8)}, room ${client.roomId?.slice(0, 8) || 'none'}, performing: ${client.isPerforming})`)
+      send(ws, { type: 'welcome', clientId: id, resumed: true })
+      send(ws, { type: 'auth-result', authenticated: true, userId: client.userId ?? null, resumed: true })
+      if (client.roomId && rooms.has(client.roomId)) sendRoomState(client.roomId)
+    }
+
     const handleAuth = async (msg: Msg) => {
       const token = msg.accessToken
 
@@ -549,6 +624,15 @@ export function initializeWebSocket(
       client.authState = 'verifying'
       if (isNonEmptyString(token, 8192) && deps.hasBackend) {
         const uid = await deps.verifyToken(token)
+        // 세션 재개: 이전 clientId의 주인이 같은 userId이고 유예시간 안(suspended에 남아 있음)일 때만
+        const resumeId = msg.resumeClientId
+        if (uid && isNonEmptyString(resumeId, 64)) {
+          const old = suspended.get(resumeId)
+          if (old && old.userId === uid && clients.get(old.id) === old) {
+            resumeSession(old, token)
+            return
+          }
+        }
         if (uid) {
           client.userId = uid
           client.authState = 'authenticated'
@@ -589,6 +673,15 @@ export function initializeWebSocket(
       // DB 조회 중 연결이 끊겼으면 중단
       if (clients.get(id) !== client) return
 
+      // 이미 이 방에 있음 (세션 재개 후 클라이언트의 rejoin 등): 상태만 다시 보내고 브로드캐스트 없음
+      if (client.roomId === roomId && rooms.get(roomId)?.has(id)) {
+        client.isHost = isHost
+        const nickname = sanitizeNickname(msg.nickname)
+        if (nickname) client.nickname = nickname
+        sendRoomState(roomId)
+        return
+      }
+
       // 다른 방에 있었다면 먼저 퇴장 처리
       if (client.roomId && client.roomId !== roomId) {
         handleLeave(client, client.roomId, 'move')
@@ -612,6 +705,9 @@ export function initializeWebSocket(
             console.log(`[JOIN] Removing duplicate connection for userId ${client.userId.slice(0, 8)}: ${existingId.slice(0, 8)}`)
             handleLeave(existing, roomId, 'duplicate')
             existing.roomId = undefined // close 핸들러에서 중복 퇴장 처리 방지
+            if (existing.suspendTimer) clearTimeout(existing.suspendTimer)
+            existing.suspendTimer = undefined
+            suspended.delete(existingId)
             clients.delete(existingId)
             existing.ws.close(1000, 'Duplicate connection')
             replacedDuplicate = true
@@ -641,17 +737,7 @@ export function initializeWebSocket(
         })
       }
 
-      send(ws, {
-        type: 'room-state',
-        participants: participants.filter(p => p.oderId !== id),
-        peerIds: participants.filter(p => p.oderId !== id).map(p => p.oderId),
-        isHost: client.isHost,
-      })
-
-      if (client.isHost) {
-        for (const request of performRequests.get(roomId) || []) send(ws, { type: 'perform-request-received', request })
-        for (const request of instrumentChangeRequests.get(roomId) || []) send(ws, { type: 'instrument-change-request-received', request })
-      }
+      sendRoomState(roomId)
     }
 
     /** 연주 시작 허용 여부 (H1): 방장, free_join 방, 또는 방장이 승인한 사용자 */
@@ -691,6 +777,17 @@ export function initializeWebSocket(
         if (!(await canStartPerforming(roomId)) || client.roomId !== roomId) {
           send(ws, { type: 'error', code: 'perform-not-approved', message: '방장의 승인이 필요합니다.' })
           return
+        }
+        // 연주자 수 제한 (이미 연주 중인 본인의 재전송은 허용)
+        if (!client.isPerforming) {
+          let performers = 0
+          for (const pid of rooms.get(roomId) || []) {
+            if (pid !== id && clients.get(pid)?.isPerforming) performers++
+          }
+          if (performers >= limits.maxPerformers) {
+            send(ws, { type: 'error', code: 'room-full-performers', message: `연주자는 최대 ${limits.maxPerformers}명입니다.` })
+            return
+          }
         }
         client.isPerforming = true
         client.instrument = typeof msg.instrument === 'string' ? msg.instrument.slice(0, 50) : undefined
@@ -952,11 +1049,25 @@ export function initializeWebSocket(
       if (n <= 0) connectionsPerIp.delete(ip)
       else connectionsPerIp.set(ip, n)
 
+      // 이미 다른 연결로 대체/정리된 Client (중복 연결 제거 등)
+      if (clients.get(id) !== client) return
+
       const roomId = client.roomId
       console.log(`[DISCONNECT] Client ${id.slice(0, 8)} disconnected. roomId: ${roomId?.slice(0, 8) || 'none'}`)
+
+      // 인증된 사용자가 방 안에서 끊김: 유예시간 동안 상태 유지 (참가자에게 leave 안 보냄)
+      if (roomId && rooms.has(roomId) && isAuthenticated(client) && limits.resumeGraceMs > 0) {
+        const c = client
+        suspended.set(c.id, c)
+        c.suspendTimer = setTimeout(() => finalizeSuspended(c), limits.resumeGraceMs)
+        c.suspendTimer.unref?.()
+        console.log(`[RESUME] ${c.id.slice(0, 8)} suspended for ${limits.resumeGraceMs}ms`)
+        return
+      }
+
       if (roomId && rooms.has(roomId)) handleLeave(client, roomId, 'close')
       client.roomId = undefined
-      if (clients.get(id) === client) clients.delete(id)
+      clients.delete(id)
     })
   })
 
