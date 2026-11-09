@@ -11,6 +11,13 @@ export interface ChatMessage {
 
 const MAX_MESSAGES = 500
 
+let chatSeq = 0
+/** 같은 ms에 두 메시지가 와도 React key가 겹치지 않는 id (L10) */
+export function makeChatId(senderId: string, timestamp: number): string {
+  chatSeq = (chatSeq + 1) % Number.MAX_SAFE_INTEGER
+  return `${senderId}-${timestamp}-${chatSeq}`
+}
+
 export function useChat(opts: {
   send: (p: SignalPayload) => void
   canSend: () => boolean
@@ -28,7 +35,7 @@ export function useChat(opts: {
     const timestamp = Date.now()
     send({ type: 'chat', message: text, nickname, timestamp })
     const me = getSelfId() ?? 'me'
-    append({ id: `${me}-${timestamp}`, peerId: me, nickname, message: text, timestamp })
+    append({ id: makeChatId(me, timestamp), peerId: me, nickname, message: text, timestamp })
   }, [send, canSend, getSelfId, nickname, append])
 
   /** chat 메시지면 처리하고 true. 발신자는 서버가 붙인 oderId만 쓴다 */
@@ -38,7 +45,7 @@ export function useChat(opts: {
     if (typeof senderId !== 'string' || typeof payload.message !== 'string') return true
     const timestamp = typeof payload.timestamp === 'number' ? payload.timestamp : Date.now()
     append({
-      id: `${senderId}-${timestamp}`,
+      id: makeChatId(senderId, timestamp),
       peerId: senderId,
       nickname: typeof payload.nickname === 'string' ? payload.nickname : `User ${senderId.slice(0, 4)}`,
       message: payload.message,

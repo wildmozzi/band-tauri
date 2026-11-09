@@ -63,3 +63,34 @@
 - 관람자 연결 실패 시 방송 담당이 5초마다 재시도한다. TURN이 없어 대칭형 NAT 관람자는 못 들을 수 있다.
 - 녹음: 앱 연주자는 엔진 믹스(`engine_subscribe_mix`)를 녹음 소스로 쓴다. 엔진이 구독을 하나만 허용해도 `MixSource`가 참조 카운트로 공유하므로 충돌은 없다.
 - 설정 저장은 600ms 디바운스로 DB에 쓴다. 로그인 전 로컬에서 바꾼 설정은 로그인 직후 DB 값으로 덮일 수 있다.
+
+---
+
+## 리뷰 수정 (front-native-review.md, overhaul a05a3f0 병합 후)
+
+| 항목 | 수정 | 테스트 |
+|---|---|---|
+| **H1** 재연결 관람자 미등록 | 서버 `handleJoin`: 방에 없던 clientId가 들어오면 rejoin이어도 항상 `participant-joined`(+`rejoin` 플래그)를 보낸다. 세션 재개로 같은 id가 다시 join하면 보내지 않는다. 클라이언트도 `performer-updated`/`offer`/`answer`/`ice-candidate`의 `from`이 `peers`에 없으면 추가(`withPeer`) | server `ws-session.test.ts` "H1" 3개, `roomState.test.ts` withPeer |
+| **H2** 시작 중 퇴장/끊김 → 고아 엔진 | 엔진 로직을 `native/performSession.ts`(React 비의존)로 옮김. start는 세대 토큰을 두고, engine_start·검사·확정을 한 큐 작업 안에서 처리. 끝났을 때 stop됐거나 roomId/clientId가 바뀌었으면 엔진을 닫고 실패 처리. `leaveRoom`은 roomId를 먼저 비운다 | `performSession.test.ts` H2 3개 |
+| **H3** 서버 거부 후에도 연주 중 | `perform-not-approved`/`room-full-performers`/`login-required` → 메시지 표시(서버 문구 우선) + 엔진 정지, stop-performing은 보내지 않음. 내 연주자 항목은 상태로 저장하지 않고 세션 상태에서 매번 합성(`mergeSelfPerformer`) → 롤백 즉시 방송 담당 계산에서 빠짐 | `performSession.test.ts` H3 5개, `roomState.test.ts` |
+| **M1** add_peer 실패 영구 단방향 | 실패한 descriptor를 보관하고 백오프(0.5/1/2/4/8초) 재시도. 피어가 나가면 중단 | `sessionLogic.test.ts`, `performSession.test.ts` |
+| **M2** 정원 초과 피어 영구 미연결 | 거부한 descriptor를 대기열에 두고 자리가 나면 add + 회신 | `sessionLogic.test.ts` M2 2개 |
+| **M3** 관람자 PC 협상 고착 | offer 후 15초 안에 connected가 안 되면 닫고 5초 resync에서 재offer | `mixBridge.test.ts` M3 2개 |
+| **M4** 엔진 재시작 후 방송 무음 | 엔진이 멈추면 `MixSource.invalidate()`(구독 해제, 기존 lease 무효)하고 엔진 믹스로 녹음 중이면 녹음 종료. 다음 acquire는 재구독 | `mixBridge.test.ts` M4 |
+| **M5** 참조 카운트 경쟁 | acquire가 lease를 돌려주고 release는 1회·세대 확인. 열기 끝에서 refs=0/무효화면 즉시 닫음. 방송 start는 세대 번호로 늦은 결과를 반납 | `mixBridge.test.ts` M5 3개 |
+| **M6** 순단마다 엔진 재시작 | WS 끊김 시 엔진 유지. `auth-result`/`welcome`의 `resumed`를 `useSignaling.onReady(id, resumed)`로 전달. resumed && 같은 id → 엔진 유지 + descriptor 재브로드캐스트, 아니면 새 id로 재시작. 35초 안에 재연결이 없으면 정지 | `performSession.test.ts` 재연결 5개, `sessionLogic.test.ts` 재개 시뮬레이션 |
+| (추가) 재개 시 놓친 descriptor 보완 | 상태기계 회신 규칙 변경: 처음 등록하는 descriptor에는 항상 회신(쌍당 최대 4메시지). 끊긴 동안 시작한 연주자도 reannounce를 받으면 자기 descriptor를 보내 준다 | `sessionLogic.test.ts` "세션 재개" 시뮬레이션 |
+| **M7** 계정 전환 시 설정 덮어쓰기 | `SettingsSaveGate`: 사용자 전환 시 dirty/loaded 초기화, 그 사용자 DB 로드 완료 전 저장 금지 | `settingsSync.test.ts` |
+| L1 StrictMode에서 DB 설정 미적용 | 취소된 로드는 loaded로 표시하지 않음 | `settingsSync.test.ts` |
+| L2 pan/입력 뮤트 | `engineSetPeerGain(..., pan)`, `engineSetInputMuted` 래퍼. 연주자 채널 스트립에 패닝, 내 채널에 마이크 뮤트 버튼. 뮤트는 재시작 후에도 유지 | `performSession.test.ts` L2 |
+| L3 저장값 검증 | opusBitrate 6k..510k 정수만, 지터 0..500 클램프, 모르는 형식은 migrated=false(DB 덮어쓰기 안 함) | `engineConfig.test.ts` L3 4개 |
+| L4 링버퍼 지연 고정/드리프트 | 120ms 초과 시 60ms로 한 번에 축소, ±20ms 벗어나면 블록당 1샘플 반복/건너뛰기. 링 로직을 순수 함수로 분리해 워크릿에 문자열로 삽입 | `mixBridge.test.ts` 링 5개(워크릿 소스 평가 포함) |
+| L5 addModule 실패 시 AudioContext 누수 | 실패 시 ctx.close() | (실 Web Audio 필요 — 그래프 생성 실패 전파만 테스트) |
+| L6 engine_start 큐 밖 | start도 같은 커맨드 큐 | `performSession.test.ts` L6 (동시 실행 1) |
+| L7 엔진 사망 미반영 | engine_stats.running=false 2회 연속이면 정지 + native-leave/stop-performing | `performSession.test.ts` L7 |
+| L8 테스트 시작 중 연주 시작 | `TestMonitorControl`: 시작 중 stop은 시작 완료 후 정지 | `settingsSync.test.ts` |
+| L9 resume 시 상한 검사 부정확 | 재시작은 controller가 이전 시작 옵션으로 수행(상한 검사 없음, 서버 상한이 최종 판정) — 수용 | — |
+| L10 채팅 id 충돌 | `makeChatId`에 순번 추가 | `roomState.test.ts` |
+
+결과: client `npm run build` 성공, `npx vitest run` 100/100, `npm run lint` 14 problems(작업 전과 동일, 모두 손대지 않은 파일). server `npm run build` 성공, `npm test` 66/66.
+남은 것: React 훅 배선(useSignaling.onReady, RoomContext)은 jsdom 없이 단위 테스트하지 않았다(로직은 컨트롤러/순수 함수로 옮겨 테스트). 실제 Tauri/WebView2 실행 검증은 사람 확인 필요.

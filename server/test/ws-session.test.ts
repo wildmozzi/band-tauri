@@ -181,3 +181,48 @@ describe('session resume', async () => {
     assert.ok(await peer.waitFor(m => m.type === 'participant-left' && m.oderId === oldId, 300))
   })
 })
+
+describe('H1: rejoin with a new clientId is announced', async () => {
+  const url = await startWs({ resumeGraceMs: 100 })
+
+  it('sends participant-joined (rejoin:true) when a user rejoins with a new id after the grace period', async () => {
+    const performer = await client(url)
+    await authJoin(performer, 'tok:h1perf', 'free')
+    performer.send({ type: 'start-performing', instrument: 'guitar' })
+    const viewer = await client(url)
+    await authJoin(viewer, 'tok:h1viewer', 'free')
+    const oldId = viewer.id
+
+    await terminate(viewer)
+    assert.ok(await performer.waitFor(m => m.type === 'participant-left' && m.oderId === oldId, 1500))
+
+    // 유예 만료 후 재접속: 새 id, 클라이언트는 isRejoin으로 join
+    const again = await client(url)
+    await authJoin(again, 'tok:h1viewer', 'free', { isRejoin: true })
+    assert.notEqual(again.id, oldId)
+    assert.ok(await performer.waitFor(m => m.type === 'participant-joined' && m.participant.oderId === again.id && m.rejoin === true),
+      'performer must learn the new viewer id so the broadcaster can offer to it')
+  })
+
+  it('does not re-announce a resumed session (same id) on rejoin', async () => {
+    const watcher = await client(url)
+    await authJoin(watcher, 'tok:h1w', 'free')
+    const a = await client(url)
+    await authJoin(a, 'tok:h1a', 'free')
+    const oldId = a.id
+    await terminate(a)
+    const a2 = await resume(url, 'tok:h1a', oldId)
+    a2.send({ type: 'join', roomId: 'free', isRejoin: true })
+    await a2.waitFor(m => m.type === 'room-state' && a2.inbox.filter(x => x.type === 'room-state').length >= 2)
+    await sleep(50)
+    assert.equal(watcher.inbox.filter(m => m.type === 'participant-joined' && m.participant.oderId === oldId).length, 1)
+  })
+
+  it('a first join is announced with rejoin:false', async () => {
+    const watcher = await client(url)
+    await authJoin(watcher, 'tok:h1x', 'free')
+    const b = await client(url)
+    await authJoin(b, 'tok:h1b', 'free')
+    assert.ok(await watcher.waitFor(m => m.type === 'participant-joined' && m.participant.oderId === b.id && m.rejoin === false))
+  })
+})

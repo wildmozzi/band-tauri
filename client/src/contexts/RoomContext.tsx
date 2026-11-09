@@ -2,7 +2,7 @@
  * 합주실 상태. 기능별 훅을 조합만 한다.
  *
  * - 시그널링 WS: room/useSignaling
- * - 연주(데스크톱 앱 전용): native/useNativeSession (UDP 풀메시) + native/mixBridge (관람자 방송)
+ * - 연주(데스크톱 앱 전용): native/performSession(useNativeSession) (UDP 풀메시) + native/mixBridge (관람자 방송)
  * - 관람(웹/앱 공통): room/useViewerAudio (방송 담당 연주자의 믹스를 WebRTC 수신 전용으로) + room/useWebAudioMixer
  * - 채팅/참여요청/녹음: room/useChat, room/usePerformRequests, room/useRecording
  *
@@ -22,6 +22,7 @@ import {
 import { useViewerAudio, type PeerNetworkStats, type RtcStatus } from './room/useViewerAudio'
 import { useWebAudioMixer, type MixSettings } from './room/useWebAudioMixer'
 import { useRecording, type Recording, type RecordingSource } from './room/useRecording'
+import { mergeSelfPerformer, withPeer, type PeerInstrument } from './room/roomState'
 import { useNativeSession } from '../native/useNativeSession'
 import { MixBroadcaster, MixSource } from '../native/mixBridge'
 import { computeViewers, selectBroadcaster } from '../native/sessionLogic'
@@ -35,14 +36,7 @@ import {
   type PeerStats,
 } from '../native/engineApi'
 
-export type { ChatMessage, InstrumentChangeRequest, MyRequestStatus, PerformRequest, PeerNetworkStats, RtcStatus, MixSettings, Recording, SignalStatus }
-
-export interface PeerInstrument {
-  peerId: string
-  instrument: string
-  nickname: string
-  isHost: boolean
-}
+export type { ChatMessage, InstrumentChangeRequest, MyRequestStatus, PerformRequest, PeerNetworkStats, RtcStatus, MixSettings, Recording, SignalStatus, PeerInstrument }
 
 interface ParticipantPayload {
   oderId: string
@@ -85,6 +79,9 @@ type RoomContextType = {
   isMonitoringEnabled: boolean
   monitorGain: number
   setMonitor: (enabled: boolean, gain: number) => void
+  /** 내 입력 뮤트 (engine_set_input_muted) */
+  inputMuted: boolean
+  toggleInputMuted: () => void
   /** 관람자에게 믹스를 보내는 연주자 */
   broadcasterId: string | null
   isBroadcaster: boolean
@@ -168,10 +165,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [peers, setPeers] = useState<string[]>([])
   const [joinFeedback, setJoinFeedback] = useState('')
   const [currentRoomId, setCurrentRoomId] = useState<string | null>(null)
-  const [peerInstruments, setPeerInstruments] = useState<Record<string, PeerInstrument>>({})
-  const [myInstrument, setMyInstrumentState] = useState<string | null>(null)
+  /** 원격 연주자만 (나는 연주 세션 상태에서 합쳐서 노출) */
+  const [remotePerformers, setRemotePerformers] = useState<Record<string, PeerInstrument>>({})
   const [isRoomHost, setIsRoomHost] = useState(false)
-  const [performError, setPerformError] = useState<string | null>(null)
+  const [localError, setLocalError] = useState<string | null>(null)
   const [isMonitoringEnabled, setIsMonitoringEnabled] = useState(false)
   const [monitorGain, setMonitorGain] = useState(1)
   const [broadcastViewerCount, setBroadcastViewerCount] = useState(0)
@@ -179,16 +176,13 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
   const currentRoomIdRef = useRef<string | null>(null)
   const myIsHostRef = useRef(false)
-  const myInstrumentRef = useRef<string | null>(null)
-  const peerInstrumentsRef = useRef(peerInstruments)
-  peerInstrumentsRef.current = peerInstruments
-  /** WS 재연결 후 연주를 다시 시작할 악기 */
-  const resumeInstrumentRef = useRef<string | null>(null)
+  const remotePerformersRef = useRef(remotePerformers)
+  remotePerformersRef.current = remotePerformers
   const isReturningToRoomRef = useRef(false)
 
   // 핸들러는 ref로 넘겨 WS 재연결 없이 최신 클로저를 쓴다
   const onMessageRef = useRef<(p: SignalPayload) => void>(() => {})
-  const onWelcomeRef = useRef<(id: string) => void>(() => {})
+  const onReadyRef = useRef<(id: string, resumed: boolean) => void>(() => {})
   const onClosedRef = useRef<() => void>(() => {})
 
   const buildJoinMessage = useCallback((isRejoin: boolean): SignalPayload | null => {
@@ -208,7 +202,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   buildJoinMessageRef.current = buildJoinMessage
 
   const signaling = useSignaling({
-    onWelcome: (id) => onWelcomeRef.current(id),
+    onReady: (id, resumed) => onReadyRef.current(id, resumed),
     onMessage: (p) => onMessageRef.current(p),
     onClosed: () => onClosedRef.current(),
     isInRoom: () => currentRoomIdRef.current !== null,
@@ -218,32 +212,37 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const clientId = signaling.clientId
   const getSelfId = useCallback(() => clientIdRef.current, [clientIdRef])
 
-  // --- 기능 훅 ---
-  const native = useNativeSession(send)
-  const nativeRef = useRef(native)
-  nativeRef.current = native
+  // --- 연주 세션 (엔진) ---
+  const { session, state: perf } = useNativeSession({
+    send,
+    getSelfId: () => clientIdRef.current,
+    getRoomId: () => currentRoomIdRef.current,
+    getOtherPerformers: () => Object.keys(remotePerformersRef.current).filter((id) => id !== clientIdRef.current),
+  })
+  const running = perf.phase === 'running'
+  const starting = perf.phase === 'starting'
 
+  // 연주 세션이 돌면 설정 화면의 테스트를 막는다
+  const { setEngineInUse } = audioSettings
+  useEffect(() => {
+    setEngineInUse(perf.phase !== 'idle')
+  }, [perf.phase, setEngineInUse])
+
+  // --- 기능 훅 ---
   const chat = useChat({ send, canSend: isOpen, getSelfId, nickname })
 
   const requests = usePerformRequests({
     send,
     canSend: isOpen,
-    onMyInstrumentChanged: (instrument) => {
-      myInstrumentRef.current = instrument
-      setMyInstrumentState(instrument)
-      const me = clientIdRef.current
-      if (me) {
-        setPeerInstruments((prev) => (prev[me] ? { ...prev, [me]: { ...prev[me], instrument } } : prev))
-      }
-    },
+    onMyInstrumentChanged: (instrument) => session.updateInstrument(instrument),
     onPeerInstrumentChanged: (peerId, instrument) => {
-      setPeerInstruments((prev) => (prev[peerId] ? { ...prev, [peerId]: { ...prev[peerId], instrument } } : prev))
+      setRemotePerformers((prev) => (prev[peerId] ? { ...prev, [peerId]: { ...prev[peerId], instrument } } : prev))
     },
   })
 
   const viewer = useViewerAudio({
     send,
-    isAllowedSender: (peerId) => peerId in peerInstrumentsRef.current,
+    isAllowedSender: (peerId) => peerId in remotePerformersRef.current,
   })
   const mixer = useWebAudioMixer(viewer.remoteAudioMap)
 
@@ -254,116 +253,97 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     broadcasterRef.current = new MixBroadcaster(mixSourceRef.current, send, setBroadcastViewerCount)
   }
 
+  /** 녹음이 엔진 믹스를 쓰는 중인지 (엔진 정지 시 녹음도 멈춘다: M4) */
+  const recordingFromEngineRef = useRef(false)
   const resolveRecordingSource = useCallback(async (): Promise<RecordingSource | null> => {
-    const source = mixSourceRef.current!
-    if (nativeRef.current.running) {
-      const stream = await source.acquire()
-      return { stream, release: () => source.release() }
+    if (session.getState().phase === 'running') {
+      const lease = await mixSourceRef.current!.acquire()
+      recordingFromEngineRef.current = true
+      return {
+        stream: lease.stream,
+        release: () => {
+          recordingFromEngineRef.current = false
+          lease.release()
+        },
+      }
     }
+    recordingFromEngineRef.current = false
     const stream = mixer.getRecordingStream()
     return stream ? { stream } : null
-  }, [mixer])
+  }, [mixer, session])
   const recording = useRecording(resolveRecordingSource)
 
+  // 엔진이 멈추면(정지/거부/재시작) 믹스 구독을 무효화하고 그 믹스로 녹음 중이면 녹음을 끝낸다 (M4)
+  const { stopRecording } = recording
+  useEffect(() => {
+    if (running) return
+    if (recordingFromEngineRef.current) stopRecording()
+    mixSourceRef.current!.invalidate()
+  }, [running, stopRecording])
+
   // --- 연주 시작/중단 ---
-  const removeSelfInstrument = useCallback(() => {
-    myInstrumentRef.current = null
-    setMyInstrumentState(null)
-    const me = clientIdRef.current
-    if (me) {
-      setPeerInstruments((prev) => {
-        if (!prev[me]) return prev
-        const next = { ...prev }
-        delete next[me]
-        return next
-      })
-    }
-  }, [clientIdRef])
-
-  const stopPerformingInternal = useCallback(async (notify: boolean) => {
-    broadcasterRef.current!.stop()
-    const wasRunning = nativeRef.current.running
-    await nativeRef.current.stop(notify)
-    if (notify && wasRunning && isOpen()) send({ type: 'stop-performing' })
-    removeSelfInstrument()
-    audioSettingsRef.current.setEngineInUse(false)
-  }, [isOpen, send, removeSelfInstrument])
-
-  const stopPerforming = useCallback(() => stopPerformingInternal(true), [stopPerformingInternal])
-
   const startPerforming = useCallback(async (instrument: string): Promise<boolean> => {
-    setPerformError(null)
+    setLocalError(null)
+    session.clearError()
     if (!isNativeApp()) {
-      setPerformError('연주는 데스크톱 앱에서만 할 수 있습니다.')
+      setLocalError('연주는 데스크톱 앱에서만 할 수 있습니다.')
       return false
     }
     const selfId = clientIdRef.current
     if (!selfId || !currentRoomIdRef.current) {
-      setPerformError('합주실에 연결되지 않았습니다.')
+      setLocalError('합주실에 연결되지 않았습니다.')
       return false
     }
-    if (nativeRef.current.running) return true
-    const others = Object.keys(peerInstrumentsRef.current).filter((id) => id !== selfId)
+    const others = Object.keys(remotePerformersRef.current).filter((id) => id !== selfId)
     if (others.length >= MAX_PERFORMERS) {
-      setPerformError(`연주자는 최대 ${MAX_PERFORMERS}명까지 참여할 수 있습니다.`)
+      setLocalError(`연주자는 최대 ${MAX_PERFORMERS}명까지 참여할 수 있습니다.`)
       return false
     }
     const settings = audioSettingsRef.current
     if (settings.issues.length > 0) {
-      setPerformError(`오디오 설정 오류: ${settings.issues[0].message}`)
+      setLocalError(`오디오 설정 오류: ${settings.issues[0].message}`)
       return false
     }
-
+    // 테스트 모니터가 시작 중이어도 끝난 뒤 정지된다 (L8)
     await settings.stopTest()
-    settings.setEngineInUse(true)
-    try {
-      await nativeRef.current.start(settings.config, selfId)
-    } catch (err) {
-      settings.setEngineInUse(false)
-      setPerformError(`오디오 엔진 시작 실패: ${engineErrorMessage(err)}`)
-      return false
+    const ok = await session.start({
+      instrument,
+      config: settings.config,
+      nickname: nicknameRef.current,
+      isHost: myIsHostRef.current,
+    })
+    if (ok) {
+      // 연주자는 관람 수신을 하지 않는다
+      viewer.closeAll()
+      requests.resetMyRequest()
     }
+    return ok
+  }, [clientIdRef, session, viewer, requests])
 
-    // 엔진이 뜬 뒤에 악기 설정 + 연주 시작 알림 (서버가 연주자로 인정해야 native-descriptor를 중계함)
-    myInstrumentRef.current = instrument
-    setMyInstrumentState(instrument)
-    send({ type: 'start-performing', instrument, nickname: nicknameRef.current, isHost: myIsHostRef.current })
-    setPeerInstruments((prev) => ({
-      ...prev,
-      [selfId]: { peerId: selfId, instrument, nickname: nicknameRef.current, isHost: myIsHostRef.current },
-    }))
-    nativeRef.current.announce(others)
-
-    // 연주자는 관람 수신을 하지 않는다
-    viewer.closeAll()
-    requests.resetMyRequest()
-    engineSetMonitor(isMonitoringEnabled, monitorGain).catch(() => {})
-    return true
-  }, [clientIdRef, send, viewer, requests, isMonitoringEnabled, monitorGain])
-
-  const startPerformingRef = useRef(startPerforming)
-  startPerformingRef.current = startPerforming
+  const stopPerforming = useCallback(async () => {
+    broadcasterRef.current!.stop()
+    await session.stop({ notify: true })
+  }, [session])
 
   // --- 시그널링 이벤트 ---
-  onWelcomeRef.current = () => {
-    // 재연결: 이전 방에 다시 입장 (auth 완료 후 전송됨)
+  onReadyRef.current = (id, resumed) => {
+    // 재연결: 이전 방에 다시 입장 (resumed면 서버는 이미 방에 있는 것으로 보고 상태만 다시 보낸다)
     const join = buildJoinMessageRef.current(true)
     if (join) send(join)
+    // resumed && 같은 id → 엔진 유지 + descriptor 재전송, 아니면 새 id로 엔진 재시작
+    void session.welcome(id, resumed)
   }
 
   onClosedRef.current = () => {
     setPeers([])
     viewer.closeAll()
-    // 새 연결은 clientId가 바뀌므로 엔진을 새 id로 다시 시작해야 한다
-    if (nativeRef.current.running) {
-      resumeInstrumentRef.current = currentRoomIdRef.current ? myInstrumentRef.current : null
-      void stopPerformingInternal(false)
-    }
+    // 엔진(UDP 메시)은 유지한다. 재연결/세션 재개 여부는 onReady에서 결정 (M6)
+    session.connectionLost()
   }
 
   const upsertPerformer = (p: ParticipantPayload) => {
-    if (!p.instrument) return
-    setPeerInstruments((prev) => ({
+    if (!p.instrument || p.oderId === clientIdRef.current) return
+    setRemotePerformers((prev) => ({
       ...prev,
       [p.oderId]: {
         peerId: p.oderId,
@@ -375,7 +355,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   }
 
   const removePerformer = (peerId: string) => {
-    setPeerInstruments((prev) => {
+    setRemotePerformers((prev) => {
       if (!prev[peerId]) return prev
       const next = { ...prev }
       delete next[peerId]
@@ -383,18 +363,27 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     })
   }
 
+  const ensurePeer = (peerId: string | null) => {
+    if (!peerId) return
+    setPeers((prev) => withPeer(prev, peerId, clientIdRef.current))
+  }
+
   onMessageRef.current = (p: SignalPayload) => {
     const self = clientIdRef.current
     const from = typeof p.from === 'string' ? p.from : null
     if (from && from === self) return
 
-    if (nativeRef.current.handleSignal(p)) return
+    // native-descriptor / native-leave / 연주 거부 에러(perform-not-approved, room-full-performers, login-required)
+    if (session.handleSignal(p)) {
+      if (p.type === 'error') broadcasterRef.current!.stop()
+      return
+    }
     if (chat.handleChatSignal(p)) return
     if (requests.handleRequestSignal(p)) return
 
     switch (p.type) {
       case 'room-state': {
-        const peerIds = Array.isArray(p.peerIds) ? (p.peerIds as unknown[]).filter((x): x is string => typeof x === 'string') : []
+        const peerIds = Array.isArray(p.peerIds) ? (p.peerIds as unknown[]).filter((x): x is string => typeof x === 'string' && x !== self) : []
         const participants = Array.isArray(p.participants) ? (p.participants as unknown[]).filter(isParticipant) : []
         if (typeof p.isHost === 'boolean') {
           myIsHostRef.current = p.isHost
@@ -404,7 +393,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         setJoinFeedback(`룸 입장 완료 · 동시 연결 ${peerIds.length + 1}명`)
         const map: Record<string, PeerInstrument> = {}
         for (const part of participants) {
-          if (part.isPerforming && part.instrument) {
+          if (part.isPerforming && part.instrument && part.oderId !== self) {
             map[part.oderId] = {
               peerId: part.oderId,
               instrument: part.instrument,
@@ -413,23 +402,17 @@ export function RoomProvider({ children }: { children: ReactNode }) {
             }
           }
         }
-        setPeerInstruments(map)
-        const resume = resumeInstrumentRef.current
-        resumeInstrumentRef.current = null
-        if (resume) {
-          // 상태 반영 후 재시작
-          setTimeout(() => void startPerformingRef.current(resume), 0)
-        }
+        setRemotePerformers(map)
         return
       }
 
       case 'participant-joined': {
         const part = p.participant
         if (!isParticipant(part)) return
-        setPeers((prev) => (prev.includes(part.oderId) ? prev : [...prev, part.oderId]))
+        ensurePeer(part.oderId)
         if (part.isPerforming && part.instrument) {
           upsertPerformer(part)
-          nativeRef.current.performerAppeared(part.oderId)
+          session.performerAppeared(part.oderId)
         }
         return
       }
@@ -439,7 +422,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         const id = p.oderId
         setPeers((prev) => prev.filter((x) => x !== id))
         removePerformer(id)
-        nativeRef.current.peerGone(id)
+        session.peerGone(id)
         viewer.closeFrom(id)
         requests.dropPeer(id)
         return
@@ -448,12 +431,13 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       case 'performer-updated': {
         if (typeof p.oderId !== 'string') return
         const id = p.oderId
+        ensurePeer(id)
         if (p.isPerforming === true && typeof p.instrument === 'string') {
           upsertPerformer({ oderId: id, nickname: p.nickname as string | undefined, instrument: p.instrument, isHost: p.isHost === true })
-          nativeRef.current.performerAppeared(id)
+          session.performerAppeared(id)
         } else {
           removePerformer(id)
-          nativeRef.current.peerGone(id)
+          session.peerGone(id)
           viewer.closeFrom(id)
         }
         return
@@ -461,17 +445,20 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
       case 'offer':
         // 관람자만 받는다. 앱 연주자는 엔진으로 듣는다.
-        if (from && p.offer && !nativeRef.current.running) {
+        ensurePeer(from)
+        if (from && p.offer && session.getState().phase === 'idle') {
           void viewer.handleOffer(from, p.offer as RTCSessionDescriptionInit)
         }
         return
 
       case 'answer':
+        ensurePeer(from)
         if (from && p.answer) void broadcasterRef.current!.handleAnswer(from, p.answer as RTCSessionDescriptionInit)
         return
 
       case 'ice-candidate': {
         if (!from || !p.candidate) return
+        ensurePeer(from)
         const candidate = p.candidate as RTCIceCandidateInit
         if (broadcasterRef.current!.hasPeer(from)) void broadcasterRef.current!.handleCandidate(from, candidate)
         else void viewer.handleCandidate(from, candidate)
@@ -479,12 +466,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       }
 
       case 'error':
-        if (p.code === 'login-required') {
-          setPerformError(typeof p.message === 'string' ? p.message : '로그인이 필요합니다.')
-          if (nativeRef.current.running) void stopPerformingInternal(false)
-        } else {
-          console.warn('[WS] 서버 에러:', p.code, p.message)
-        }
+        console.warn('[WS] 서버 에러:', p.code, p.message)
         return
     }
   }
@@ -506,41 +488,51 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
   const leaveRoom = useCallback(() => {
     send({ type: 'leave' })
+    // 방 id를 먼저 비워야 시작 중인 엔진이 완료 시 "퇴장함"을 보고 스스로 내려간다 (H2)
+    currentRoomIdRef.current = null
+    broadcasterRef.current!.stop()
     // leave가 participant-left로 전파되므로 native-leave/stop-performing은 따로 보내지 않는다
-    void stopPerformingInternal(false)
-    resumeInstrumentRef.current = null
+    void session.stop({ notify: false })
     viewer.closeAll()
     mixer.reset()
     recording.stopRecording()
     chat.clearChat()
     requests.resetAll()
-    currentRoomIdRef.current = null
     myIsHostRef.current = false
     setIsRoomHost(false)
     setCurrentRoomId(null)
     setPeers([])
-    setPeerInstruments({})
+    setRemotePerformers({})
     setJoinFeedback('')
-    setPerformError(null)
+    setLocalError(null)
     setIsMiniPlayerMode(false)
-  }, [send, stopPerformingInternal, viewer, mixer, recording, chat, requests])
+  }, [send, session, viewer, mixer, recording, chat, requests])
+
+  // --- 연주자 목록 (나 포함) ---
+  const peerInstruments = useMemo(() => mergeSelfPerformer(remotePerformers, {
+    id: clientId,
+    instrument: perf.instrument,
+    running,
+    nickname,
+    isHost: isRoomHost,
+  }), [remotePerformers, clientId, perf.instrument, running, nickname, isRoomHost])
 
   // --- 방송 담당 (관람자 브릿지) ---
   const performerIds = useMemo(() => Object.keys(peerInstruments), [peerInstruments])
   const broadcasterId = useMemo(() => selectBroadcaster(
-    Object.values(peerInstruments).map((pi) => ({ id: pi.peerId, isHost: pi.peerId === clientId ? isRoomHost : pi.isHost })),
-  ), [peerInstruments, clientId, isRoomHost])
+    Object.values(peerInstruments).map((pi) => ({ id: pi.peerId, isHost: pi.isHost })),
+  ), [peerInstruments])
   const viewers = useMemo(() => computeViewers(peers, performerIds, clientId), [peers, performerIds, clientId])
   const viewersRef = useRef(viewers)
   viewersRef.current = viewers
-  const isBroadcaster = native.running && broadcasterId !== null && broadcasterId === clientId
+  const isBroadcaster = running && broadcasterId !== null && broadcasterId === clientId
 
   useEffect(() => {
     const b = broadcasterRef.current!
     if (isBroadcaster) {
       b.start(viewersRef.current).catch((err) => {
         console.error('[MixBridge] 방송 시작 실패:', err)
-        setPerformError(`관람자 방송 시작 실패: ${engineErrorMessage(err)}`)
+        setLocalError(`관람자 방송 시작 실패: ${engineErrorMessage(err)}`)
       })
     } else {
       b.stop()
@@ -551,7 +543,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     if (isBroadcaster) broadcasterRef.current!.syncViewers(viewers)
   }, [isBroadcaster, viewers])
 
-  // 실패한 관람자 연결 재시도
+  // 실패/시간 초과한 관람자 연결 재시도
   useEffect(() => {
     if (!isBroadcaster) return
     const timer = setInterval(() => broadcasterRef.current!.syncViewers(viewersRef.current), BROADCAST_RESYNC_MS)
@@ -565,65 +557,77 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   // --- 엔진 믹서 적용 (연주 중) ---
   const { mixSettingsMap, masterVolume, masterMuted } = mixer
   const appliedGainRef = useRef<Record<string, string>>({})
-  const { running: nativeRunning, setPeerGain } = native
-  const enginePeerIds = useMemo(() => (native.stats?.peers ?? []).map((p) => p.peerId).join(','), [native.stats])
+  const enginePeerIds = useMemo(() => (perf.stats?.peers ?? []).map((p) => p.peerId).join(','), [perf.stats])
   useEffect(() => {
-    if (!nativeRunning) {
+    if (!running) {
       appliedGainRef.current = {}
       return
     }
     const enginePeers = new Set(enginePeerIds.split(',').filter(Boolean))
     for (const [peerId, s] of Object.entries(mixSettingsMap)) {
       if (!enginePeers.has(peerId)) continue
-      const key = `${s.volume}:${s.muted}`
+      const key = `${s.volume}:${s.muted}:${s.pan}`
       if (appliedGainRef.current[peerId] === key) continue
       appliedGainRef.current[peerId] = key
-      setPeerGain(peerId, s.volume, s.muted)
+      session.setPeerGain(peerId, s.volume, s.muted, s.pan)
     }
     // 엔진에서 빠진 피어는 다시 들어오면 재적용
     for (const peerId of Object.keys(appliedGainRef.current)) {
       if (!enginePeers.has(peerId)) delete appliedGainRef.current[peerId]
     }
-  }, [nativeRunning, setPeerGain, mixSettingsMap, enginePeerIds])
+  }, [running, session, mixSettingsMap, enginePeerIds])
 
   useEffect(() => {
-    if (!native.running) return
+    if (!running) return
     engineSetMasterGain(masterMuted ? 0 : masterVolume).catch(() => {})
-  }, [native.running, masterVolume, masterMuted])
+  }, [running, masterVolume, masterMuted])
+
+  // 엔진이 (재)시작되면 모니터 설정 적용
+  const monitorRef = useRef({ enabled: isMonitoringEnabled, gain: monitorGain })
+  monitorRef.current = { enabled: isMonitoringEnabled, gain: monitorGain }
+  useEffect(() => {
+    if (!running) return
+    engineSetMonitor(monitorRef.current.enabled, monitorRef.current.gain).catch(() => {})
+  }, [running])
 
   const setMonitor = useCallback((enabled: boolean, gain: number) => {
     const g = Math.max(0, Math.min(1, gain))
     setIsMonitoringEnabled(enabled)
     setMonitorGain(g)
-    if (nativeRef.current.running) {
+    if (session.getState().phase === 'running') {
       engineSetMonitor(enabled, g).catch((err) => console.warn('[Native] 모니터 설정 실패:', engineErrorMessage(err)))
     }
-  }, [])
+  }, [session])
+
+  const toggleInputMuted = useCallback(() => {
+    session.setInputMuted(!session.getState().inputMuted)
+  }, [session])
 
   // --- 표시용 파생 값 ---
   const peerEngineStats = useMemo(() => {
     const map: Record<string, PeerStats> = {}
-    for (const ps of native.stats?.peers ?? []) map[ps.peerId] = ps
+    for (const ps of perf.stats?.peers ?? []) map[ps.peerId] = ps
     return map
-  }, [native.stats])
+  }, [perf.stats])
 
   const audioLevels = useMemo(() => {
-    if (!native.running) return mixer.audioLevels
+    if (!running) return mixer.audioLevels
     const levels: Record<string, number> = {}
-    for (const ps of native.stats?.peers ?? []) levels[ps.peerId] = Math.min(100, Math.round(ps.level * 100))
-    if (clientId && native.stats) levels[clientId] = Math.min(100, Math.round(native.stats.inputLevel * 100))
+    for (const ps of perf.stats?.peers ?? []) levels[ps.peerId] = Math.min(100, Math.round(ps.level * 100))
+    if (clientId && perf.stats) levels[clientId] = Math.min(100, Math.round(perf.stats.inputLevel * 100))
     return levels
-  }, [native.running, native.stats, mixer.audioLevels, clientId])
+  }, [running, perf.stats, mixer.audioLevels, clientId])
 
-  const masterLevel = native.running
-    ? Math.min(100, Math.round((native.stats?.outputLevel ?? 0) * 100))
+  const masterLevel = running
+    ? Math.min(100, Math.round((perf.stats?.outputLevel ?? 0) * 100))
     : mixer.masterLevel
 
-  const rtcStatus: RtcStatus = native.running ? 'live'
-    : native.starting ? 'connecting'
-      : performError || native.error ? 'error'
+  const performError = localError ?? perf.error
+  const rtcStatus: RtcStatus = running ? 'live'
+    : starting ? 'connecting'
+      : performError ? 'error'
         : viewer.status
-  const rtcError = performError ?? native.error ?? viewer.error
+  const rtcError = performError ?? viewer.error
 
   const resumeAllAudioContexts = useCallback(() => {
     mixer.resume()
@@ -671,17 +675,19 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     isRoomHost,
 
     canPerform: isNativeApp(),
-    isPerforming: native.running && myInstrument !== null,
-    performStarting: native.starting,
+    isPerforming: running && perf.instrument !== null,
+    performStarting: starting,
     startPerforming,
     stopPerforming,
-    myInstrument,
+    myInstrument: perf.phase === 'idle' ? null : perf.instrument,
     peerInstruments,
-    engineStats: native.stats,
+    engineStats: perf.stats,
     peerEngineStats,
     isMonitoringEnabled,
     monitorGain,
     setMonitor,
+    inputMuted: perf.inputMuted,
+    toggleInputMuted,
     broadcasterId,
     isBroadcaster,
     broadcastViewerCount,

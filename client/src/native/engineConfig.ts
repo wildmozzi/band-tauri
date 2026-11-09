@@ -22,6 +22,13 @@ export const BUFFER_OPTIONS = [32, 64, 128, 256, 512, 1024]
 export const BUFFER_MIN = 32
 export const BUFFER_MAX = 1024
 export const JITTER_MAX_LIMIT_MS = 500
+export const OPUS_BITRATE_MIN = 6_000
+export const OPUS_BITRATE_MAX = 510_000
+
+/** Opus 비트레이트: 정수이고 6k..510k일 때만 유효 */
+export function isValidOpusBitrate(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= OPUS_BITRATE_MIN && v <= OPUS_BITRATE_MAX
+}
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   inputDriver: 'wasapiShared',
@@ -119,6 +126,9 @@ export function validateEngineConfig(config: EngineConfig, inputDevice?: DeviceI
   }
   if (inputDevice && config.inputChannels.some((ch) => ch >= inputDevice.channels)) {
     issues.push({ field: 'inputChannels', message: `입력 장치는 ${inputDevice.channels}채널까지만 지원합니다.` })
+  }
+  if (config.opusBitrate !== undefined && !isValidOpusBitrate(config.opusBitrate)) {
+    issues.push({ field: 'opusBitrate', message: `Opus 비트레이트는 ${OPUS_BITRATE_MIN}~${OPUS_BITRATE_MAX} 사이 정수여야 합니다.` })
   }
   if (!isPayloadAllowed(config.codec, config.channels, config.frameMs, config.opusBitrate)) {
     const bytes = estimatePayloadBytes(config.codec, config.channels, config.frameMs, config.opusBitrate)
@@ -231,12 +241,16 @@ function sanitizeEngineConfig(raw: Record<string, unknown>): EngineConfig {
     codec,
     channels,
     inputChannels,
-    jitterMinMs: Math.max(0, num(raw.jitterMinMs, d.jitterMinMs ?? 0)),
-    jitterMaxMs: Math.max(0, num(raw.jitterMaxMs, d.jitterMaxMs ?? 80)),
+    jitterMinMs: clampJitter(num(raw.jitterMinMs, d.jitterMinMs ?? 0)),
+    jitterMaxMs: clampJitter(num(raw.jitterMaxMs, d.jitterMaxMs ?? 80)),
   }
-  if (typeof raw.opusBitrate === 'number') config.opusBitrate = raw.opusBitrate
+  if (isValidOpusBitrate(raw.opusBitrate)) config.opusBitrate = raw.opusBitrate
   if (typeof raw.udpPort === 'number' && raw.udpPort > 0 && raw.udpPort < 65536) config.udpPort = raw.udpPort
   return fixPayload(config)
+}
+
+function clampJitter(v: number): number {
+  return Math.min(JITTER_MAX_LIMIT_MS, Math.max(0, Math.round(v)))
 }
 
 /** 1200B 초과 조합이면 프레임을 줄여서 맞춘다 */
@@ -283,7 +297,8 @@ export function parseStoredSettings(raw: unknown): { config: EngineConfig; migra
   if (isRecord(raw) && isLegacySettings(raw)) {
     return { config: migrateLegacySettings(raw), migrated: true }
   }
-  return { config: { ...DEFAULT_ENGINE_CONFIG }, migrated: raw != null }
+  // 모르는 형식(빈 객체, 미래 버전 등)은 기본값으로 쓰되 '변환됨'으로 보고하지 않는다 → DB를 덮어쓰지 않음
+  return { config: { ...DEFAULT_ENGINE_CONFIG }, migrated: false }
 }
 
 /** 버퍼 크기 → ms (48kHz 기준 표시용) */

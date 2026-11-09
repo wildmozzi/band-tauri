@@ -177,3 +177,31 @@ describe('tuneOpusSdp', () => {
     expect(tuneOpusSdp('v=0\r\n', { stereo: true })).toBe('v=0\r\n')
   })
 })
+
+describe('L3: 저장값 정리', () => {
+  it('opusBitrate는 6k..510k 정수만 받아들인다', () => {
+    for (const bad of [Number.NaN, -1, 1e9, 64000.5, '96000']) {
+      const { config } = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, opusBitrate: bad } })
+      expect(config.opusBitrate).toBeUndefined()
+    }
+    const { config } = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, opusBitrate: 128000 } })
+    expect(config.opusBitrate).toBe(128000)
+  })
+
+  it('검증도 잘못된 비트레이트를 잡는다', () => {
+    expect(validateEngineConfig({ ...DEFAULT_ENGINE_CONFIG, opusBitrate: 1e9 }).map((i) => i.field)).toContain('opusBitrate')
+  })
+
+  it('지터 값은 0..500으로 클램프', () => {
+    const { config } = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, jitterMinMs: -5, jitterMaxMs: 99999 } })
+    expect(config.jitterMinMs).toBe(0)
+    expect(config.jitterMaxMs).toBe(500)
+    expect(validateEngineConfig(config)).toEqual([])
+  })
+
+  it('모르는 형식(빈 객체, 미래 버전)은 기본값이지만 migrated=false → DB를 덮어쓰지 않음', () => {
+    expect(parseStoredSettings({}).migrated).toBe(false)
+    expect(parseStoredSettings({ version: 3, engine: { codec: 'flac' } }).migrated).toBe(false)
+    expect(parseStoredSettings('garbage').migrated).toBe(false)
+  })
+})
