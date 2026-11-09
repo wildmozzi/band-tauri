@@ -50,6 +50,8 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --locked -- --nocapture
+      - name: Docker build (push 없음)
+        run: docker build -t band-relay:ci .
 
   client:
     name: Client (build + test)

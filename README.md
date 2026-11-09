@@ -74,7 +74,7 @@ npm install            # 루트에서 실행하면 client, server 워크스페�
 | `AUDIVERIS_BAT`, `JAVA_HOME` | PDF → MusicXML 변환(OMR) |
 | `AMT_API_URL`, `AMT_API_KEY` | MP3 → MIDI 변환(선택) |
 | `RELAY_SECRET`, `RELAY_ADDR` | UDP 릴레이 토큰 발급(선택). 비밀은 릴레이와 같은 값(≥32바이트), 주소는 `host:port`. 설정법 → [relay/README.md](relay/README.md) |
-| `RELAY_TOKEN_TTL_SEC` | 릴레이 토큰 수명(기본 600초) |
+| `RELAY_TOKEN_TTL_SEC` | 릴레이 토큰 수명(기본 120초, 클라이언트가 만료 전 갱신) |
 
 서버는 `server/certs/cert.pem`, `key.pem`이 있으면 HTTPS/WSS로, 없으면 HTTP/WS로 뜬다.
 

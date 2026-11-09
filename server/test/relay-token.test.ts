@@ -2,6 +2,8 @@
  * UDP 릴레이 토큰: 서명/검증, Rust 릴레이(relay/src/token.rs)와의 바이트 호환, WS 발급 권한
  */
 import { describe, it, after } from 'node:test'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import assert from 'node:assert/strict'
 import { createServer, type Server } from 'http'
 import type { WebSocketServer } from 'ws'
@@ -13,7 +15,7 @@ const SECRET = 'relay-test-secret-0123456789abcdef!!'
 const NOW = 1_800_000_000
 
 describe('relay token format', () => {
-  const claims = { roomId: 'room-1', clientId: 'client-a', ssrc: 0xdeadbeef, expiresAt: NOW + 600 }
+  const claims = { roomId: 'room-1', memberId: 'client-a', ssrc: 0xdeadbeef, expiresAt: NOW + 600 }
 
   it('roundtrips', () => {
     const t = signRelayToken(claims, SECRET)
@@ -35,21 +37,22 @@ describe('relay token format', () => {
   it('validates claim ranges', () => {
     assert.throws(() => signRelayToken({ ...claims, roomId: '' }, SECRET))
     assert.throws(() => signRelayToken({ ...claims, roomId: 'x'.repeat(129) }, SECRET))
-    assert.throws(() => signRelayToken({ ...claims, clientId: 'x'.repeat(65) }, SECRET))
+    assert.throws(() => signRelayToken({ ...claims, memberId: 'x'.repeat(65) }, SECRET))
     assert.throws(() => signRelayToken({ ...claims, ssrc: 2 ** 32 }, SECRET))
     assert.throws(() => signRelayToken({ ...claims, ssrc: 1.5 }, SECRET))
   })
 
-  it('matches the Rust relay test vector byte-for-byte', () => {
-    const t = signRelayToken(
-      { roomId: 'room-abc', clientId: '11111111-2222-3333-4444-555555555555', ssrc: 0x01020304, expiresAt: 1_700_000_000 },
-      'band-relay-test-vector-secret-32bytes!!',
-    )
-    // relay/src/token.rs tests::TEST_VECTOR_HEX 와 동일해야 한다
-    assert.equal(
-      t.toString('hex'),
-      '01000000006553f1000102030408726f6f6d2d6162632431313131313131312d323232322d333333332d343434342d35353535353535353535353537cb2b9be3db194a0018849fd9df099457dbdc9f39aef51c5f621ba02d8f05b4',
-    )
+  it('matches the shared vectors with the Rust relay byte-for-byte', () => {
+    // relay/src/token.rs tests::cross_language_vectors 도 같은 파일을 읽는다
+    const fixture = JSON.parse(readFileSync(join(__dirname, '../../docs/overhaul/relay-token-vectors.json'), 'utf8'))
+    assert.ok(fixture.vectors.length >= 3)
+    for (const v of fixture.vectors) {
+      const claims = { roomId: v.roomId, memberId: v.memberId, ssrc: v.ssrc, expiresAt: v.expiresAt }
+      const t = signRelayToken(claims, v.secret)
+      assert.equal(t.toString('hex'), v.hex, v.name)
+      assert.deepEqual(verifyRelayToken(t, v.secret, v.expiresAt - 1), claims, `${v.name}: 만료 1초 전 유효`)
+      assert.equal(verifyRelayToken(t, v.secret, v.expiresAt), null, `${v.name}: 만료 시각에 무효`)
+    }
   })
 
   it('reads config from env only when complete', () => {
@@ -59,7 +62,7 @@ describe('relay token format', () => {
     assert.deepEqual(relayConfigFromEnv({ RELAY_SECRET: SECRET, RELAY_ADDR: 'relay.example:5000' }), {
       secret: SECRET,
       addr: 'relay.example:5000',
-      ttlSec: 600,
+      ttlSec: 120,
     })
     assert.equal(relayConfigFromEnv({ RELAY_SECRET: SECRET, RELAY_ADDR: 'r:1', RELAY_TOKEN_TTL_SEC: '120' })?.ttlSec, 120)
   })
@@ -104,7 +107,7 @@ after(async () => {
 describe('relay-token issuance over WS', async () => {
   const url = await startWs({ RELAY_SECRET: SECRET, RELAY_ADDR: 'relay.example:5000' })
 
-  it('issues a token bound to room, server clientId, and descriptor ssrc to a performer', async () => {
+  it('issues a token bound to room, verified userId, and descriptor ssrc to a performer', async () => {
     const host = await client(url)
     await authJoin(host, 'tok:host', 'free')
     host.send({ type: 'native-descriptor', descriptor: descriptor(0x1234abcd) })
@@ -113,8 +116,9 @@ describe('relay-token issuance over WS', async () => {
     assert.equal(msg.addr, 'relay.example:5000')
     assert.equal(msg.ssrc, 0x1234abcd)
     const claims = verifyRelayToken(Buffer.from(msg.token, 'base64url'), SECRET, Math.floor(Date.now() / 1000))
-    assert.deepEqual(claims, { roomId: 'free', clientId: host.id, ssrc: 0x1234abcd, expiresAt: msg.expiresAt })
-    assert.ok(msg.expiresAt > Date.now() / 1000 + 500)
+    assert.deepEqual(claims, { roomId: 'free', memberId: 'host', ssrc: 0x1234abcd, expiresAt: msg.expiresAt })
+    const left = msg.expiresAt - Date.now() / 1000
+    assert.ok(left > 100 && left <= 120, `짧은 TTL(120초): ${left}`)
 
     // 갱신 요청
     const before = host.inbox.filter(m => m.type === 'relay-token').length
@@ -155,6 +159,65 @@ describe('relay-token issuance over WS', async () => {
     assert.ok(await peer.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
     await sleep(50)
     assert.ok(!host.has(m => m.type === 'relay-token'))
+  })
+})
+
+describe('relay review fixes', async () => {
+  const url = await startWs({ RELAY_SECRET: SECRET, RELAY_ADDR: 'relay.example:5000' })
+  const tokens = (c: TestClient) => c.inbox.filter(m => m.type === 'relay-token')
+
+  it('M1: rejects a descriptor whose ssrc another user in the room already uses', async () => {
+    const host = await client(url)
+    const thief = await client(url)
+    await authJoin(host, 'tok:host', 'free')
+    await authJoin(thief, 'tok:thief', 'free')
+    thief.send({ type: 'start-performing', instrument: 'bass' })
+    await sleep(50)
+    host.send({ type: 'native-descriptor', descriptor: descriptor(0xabc) })
+    assert.ok(await host.waitFor(m => m.type === 'relay-token'))
+    thief.send({ type: 'native-descriptor', descriptor: descriptor(0xabc) })
+    assert.ok(await thief.waitFor(m => m.type === 'error' && m.code === 'ssrc-conflict'))
+    await sleep(50)
+    assert.equal(tokens(thief).length, 0)
+    assert.ok(!host.has(m => m.type === 'native-descriptor' && m.from === thief.id), '충돌 descriptor는 중계하지 않음')
+    // 다른 ssrc면 정상
+    thief.send({ type: 'native-descriptor', descriptor: descriptor(0xdef) })
+    assert.ok(await thief.waitFor(m => m.type === 'relay-token' && m.ssrc === 0xdef))
+  })
+
+  it('M2: stop-performing forgets ssrc so the token cannot be renewed', async () => {
+    const host = await client(url)
+    const p = await client(url)
+    await authJoin(host, 'tok:host', 'free')
+    await authJoin(p, 'tok:p9', 'free')
+    p.send({ type: 'start-performing', instrument: 'drums' })
+    await sleep(50)
+    p.send({ type: 'native-descriptor', descriptor: descriptor(0x999) })
+    assert.ok(await p.waitFor(m => m.type === 'relay-token'))
+    p.send({ type: 'stop-performing' })
+    await sleep(50)
+    p.send({ type: 'relay-token-request' })
+    await sleep(100)
+    assert.equal(tokens(p).length, 1)
+  })
+
+  it('M3: a reconnect without session resume gets a token with the same memberId', async () => {
+    const first = await client(url)
+    await authJoin(first, 'tok:host', 'free')
+    first.send({ type: 'native-descriptor', descriptor: descriptor(0x111) })
+    assert.ok(await first.waitFor(m => m.type === 'relay-token'))
+    first.ws.terminate()
+    await sleep(50)
+    const second = await client(url)
+    await authJoin(second, 'tok:host', 'free')
+    second.send({ type: 'native-descriptor', descriptor: descriptor(0x222) })
+    assert.ok(await second.waitFor(m => m.type === 'relay-token'))
+    const now = Math.floor(Date.now() / 1000)
+    const a = verifyRelayToken(Buffer.from(tokens(first)[0].token, 'base64url'), SECRET, now)
+    const b = verifyRelayToken(Buffer.from(tokens(second)[0].token, 'base64url'), SECRET, now)
+    assert.notEqual(first.id, second.id)
+    assert.equal(a?.memberId, 'host')
+    assert.equal(b?.memberId, 'host', '릴레이가 같은 멤버로 보고 이전 슬롯을 교체')
   })
 })
 

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use band_relay::packet::{self, write_relay_bind, write_relay_data, ACK_BYTES, TYPE_RELAY_BIND_ACK};
+use band_relay::packet::{self, ack_cookie, write_relay_bind, write_relay_data, ACK_BYTES, TYPE_RELAY_BIND_ACK};
 use band_relay::token::{self, Claims};
 use band_relay::{server, Limits, Relay, Stats};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,18 +24,26 @@ fn engine_pkt(ssrc: u32, seq: u32, payload: usize) -> Vec<u8> {
     p
 }
 
-async fn bind_client(sock: &UdpSocket, relay: std::net::SocketAddr, room: &str, client: &str, ssrc: u32) -> [u8; ACK_BYTES] {
-    let t = token::sign(SECRET, &Claims { expires_at: unix_now() + 600, ssrc, room, client });
+async fn send_bind(sock: &UdpSocket, relay: std::net::SocketAddr, t: &[u8], ssrc: u32, cookie: Option<&[u8; 16]>) -> [u8; ACK_BYTES] {
     let mut b = Vec::new();
-    write_relay_bind(ssrc, 1, 0xCAFE, &t, &mut b);
+    write_relay_bind(ssrc, 1, 0xCAFE, t, cookie, &mut b);
     sock.send_to(&b, relay).await.unwrap();
     let mut buf = [0u8; 64];
     let (n, from) = timeout(Duration::from_secs(2), sock.recv_from(&mut buf)).await.expect("ack 타임아웃").unwrap();
     assert_eq!(from, relay);
     assert_eq!(n, ACK_BYTES);
+    assert!(n < b.len(), "Ack가 요청보다 작아야 한다");
     let mut ack = [0u8; ACK_BYTES];
     ack.copy_from_slice(&buf[..n]);
     ack
+}
+
+/// RelayBind → CookieRequired → 쿠키 포함 RelayBind → Ok
+async fn bind_client(sock: &UdpSocket, relay: std::net::SocketAddr, room: &str, client: &str, ssrc: u32) -> [u8; ACK_BYTES] {
+    let t = token::sign(SECRET, &Claims { expires_at: unix_now() + 600, ssrc, room, client });
+    let first = send_bind(sock, relay, &t, ssrc, None).await;
+    assert_eq!(first[16], 3, "CookieRequired");
+    send_bind(sock, relay, &t, ssrc, Some(&ack_cookie(&first))).await
 }
 
 async fn start_relay(limits: Limits) -> (std::net::SocketAddr, Arc<Stats>) {
@@ -112,7 +120,7 @@ async fn unauthenticated_sender_gets_nothing() {
     // C가 위조 토큰으로 Bind
     let t = token::sign(b"not-the-secret-not-the-secret-not-the", &Claims { expires_at: unix_now() + 600, ssrc: 0xC, room: "room", client: "c" });
     let mut bind = Vec::new();
-    write_relay_bind(0xC, 1, 1, &t, &mut bind);
+    write_relay_bind(0xC, 1, 1, &t, None, &mut bind);
     c.send_to(&bind, relay).await.unwrap();
     // A(다른 방)가 B에게
     write_relay_data(0xB, &engine_pkt(0xA, 2, 60), &mut out);
@@ -165,4 +173,30 @@ async fn metrics_endpoint() {
         s.read_to_string(&mut resp).await.unwrap();
         assert!(resp.contains(expect), "{path}: {resp}");
     }
+}
+
+/// H1: 캡처한 Bind(쿠키 포함)를 다른 소켓에서 리플레이해도 등록이 옮겨지지 않는다
+#[tokio::test]
+async fn replay_from_other_address_does_not_hijack() {
+    let (relay, _stats) = start_relay(Limits::default()).await;
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let x = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let t = token::sign(SECRET, &Claims { expires_at: unix_now() + 600, ssrc: 0xA, room: "room", client: "client-a" });
+    let first = send_bind(&a, relay, &t, 0xA, None).await;
+    let cookie = ack_cookie(&first);
+    assert_eq!(send_bind(&a, relay, &t, 0xA, Some(&cookie)).await[16], 0);
+    bind_client(&b, relay, "room", "client-b", 0xB).await;
+
+    // 공격자 X가 A의 Bind(쿠키 포함)를 그대로 재전송 → 쿠키 요구만 받음
+    assert_eq!(send_bind(&x, relay, &t, 0xA, Some(&cookie)).await[16], 3);
+    // B → A 데이터는 여전히 A로
+    let mut out = Vec::new();
+    let pkt = engine_pkt(0xB, 1, 60);
+    write_relay_data(0xA, &pkt, &mut out);
+    b.send_to(&out, relay).await.unwrap();
+    let mut buf = [0u8; 2048];
+    let (n, _) = timeout(Duration::from_secs(2), a.recv_from(&mut buf)).await.expect("A 수신").unwrap();
+    assert_eq!(&buf[..n], &pkt[..]);
+    assert!(timeout(Duration::from_millis(200), x.recv_from(&mut buf)).await.is_err(), "X는 오디오를 받지 않는다");
 }

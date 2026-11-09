@@ -23,7 +23,8 @@ import { isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
  *
  * UDP 릴레이 (docs/overhaul/relay-design.md)
  * - RELAY_SECRET/RELAY_ADDR가 설정되면, 연주자가 native-descriptor(ssrc 포함)를 보낼 때 `relay-token`을 발급한다.
- * - `relay-token-request`로 갱신. 토큰 내용(roomId, clientId, ssrc)은 서버가 정한다.
+ * - `relay-token-request`로 갱신. 토큰 내용(roomId, memberId=userId, ssrc)은 서버가 정한다.
+ * - 같은 방에서 다른 사용자가 이미 쓰는 ssrc의 descriptor는 거부한다(`ssrc-conflict`).
  */
 
 const MAX_MESSAGE_BYTES = 64 * 1024
@@ -310,14 +311,26 @@ export function initializeWebSocket(
   const isPerformer = (c: Client) => c.isPerforming || c.isHost
 
   /**
-   * 릴레이 토큰 발급 (연주자 전용). roomId/clientId/ssrc는 서버가 아는 값만 쓴다.
-   * 연주를 그만둬도 이미 발급한 토큰은 만료(기본 10분)까지 유효하다 — 릴레이 등록은 30초 keepalive로만 유지된다.
+   * 릴레이 토큰 발급 (연주자 전용). roomId/memberId/ssrc는 서버가 아는 값만 쓴다.
+   * - memberId는 검증된 userId: 세션 재개 없이 재접속해도(새 clientId) 릴레이가 같은 멤버로 보고 이전 슬롯을 교체한다.
+   * - 회수 수단이 없으므로 수명을 짧게(기본 120초) 두고 클라이언트가 갱신한다. 릴레이 등록은 토큰 만료를 넘지 않는다.
    */
   function sendRelayToken(c: Client) {
-    if (!relayConfig || !c.roomId || c.nativeSsrc === undefined || !isPerformer(c)) return
+    if (!relayConfig || !c.roomId || !c.userId || c.nativeSsrc === undefined || !isPerformer(c)) return
     const expiresAt = Math.floor(Date.now() / 1000) + relayConfig.ttlSec
-    const token = signRelayToken({ roomId: c.roomId, clientId: c.id, ssrc: c.nativeSsrc, expiresAt }, relayConfig.secret)
+    const token = signRelayToken({ roomId: c.roomId, memberId: c.userId, ssrc: c.nativeSsrc, expiresAt }, relayConfig.secret)
     send(c.ws, { type: 'relay-token', token: token.toString('base64url'), addr: relayConfig.addr, ssrc: c.nativeSsrc, expiresAt })
+  }
+
+  /** 같은 방의 다른 사용자가 이 ssrc를 쓰고 있는지 (ssrc 선점·가로채기 방지) */
+  function ssrcTakenInRoom(c: Client, ssrc: number): boolean {
+    if (!c.roomId) return false
+    for (const peerId of rooms.get(c.roomId) || []) {
+      if (peerId === c.id) continue
+      const peer = clients.get(peerId)
+      if (peer && peer.nativeSsrc === ssrc && peer.userId !== c.userId) return true
+    }
+    return false
   }
 
   function getRoomParticipants(roomId: string): Participant[] {
@@ -822,6 +835,8 @@ export function initializeWebSocket(
       if (msg.type === 'stop-performing' && roomId) {
         client.isPerforming = false
         client.instrument = undefined
+        // 연주자가 아니게 되면 ssrc를 잊는다(토큰 갱신 불가 → 기존 토큰 만료와 함께 릴레이 슬롯 해제)
+        if (!isPerformer(client)) client.nativeSsrc = undefined
         console.log(`[STOP-PERFORMING] ${id.slice(0, 8)} (${client.nickname}) stopped performing`)
         broadcastToRoom(roomId, id, { type: 'performer-updated', oderId: id, nickname: client.nickname, instrument: undefined, isPerforming: false })
         return
@@ -842,8 +857,12 @@ export function initializeWebSocket(
         if (!roomId || !isAuthenticated(client) || !isPerformer(client)) return
         const descriptor = msg.descriptor
         if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) return
-        client.nativeActive = true
         const ssrc = (descriptor as Record<string, unknown>).ssrc
+        if (isValidSsrc(ssrc) && ssrcTakenInRoom(client, ssrc)) {
+          send(ws, { type: 'error', code: 'ssrc-conflict', message: '같은 방에서 이미 쓰는 ssrc입니다. 엔진을 다시 시작하세요.' })
+          return
+        }
+        client.nativeActive = true
         if (isValidSsrc(ssrc)) {
           client.nativeSsrc = ssrc
           sendRelayToken(client)

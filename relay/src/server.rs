@@ -17,7 +17,7 @@ fn unix_now() -> u64 {
 }
 
 /// UDP 릴레이 루프. 단일 태스크에서 수신→처리→송신을 순서대로 수행한다(패킷당 할당 없음).
-pub async fn run_udp(sock: UdpSocket, mut relay: Relay) -> std::io::Result<()> {
+pub async fn run_udp(sock: UdpSocket, mut relay: Relay) {
     let stats = relay.stats().clone();
     let mut buf = [0u8; RECV_BUF_BYTES];
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
@@ -32,7 +32,13 @@ pub async fn run_udp(sock: UdpSocket, mut relay: Relay) -> std::io::Result<()> {
                     Ok(v) => v,
                     // Windows: 이전 송신 대상이 ICMP port unreachable을 돌려주면 recv가 ConnectionReset을 낸다
                     Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
-                    Err(e) => return Err(e),
+                    // 그 밖의 데이터그램 단위 오류(Windows WSAEMSGSIZE 등)로 릴레이가 죽지 않게 세고 넘어간다.
+                    // 지속 오류일 때 바쁜 루프가 되지 않도록 잠깐 쉰다.
+                    Err(_) => {
+                        stats.recv_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        continue;
+                    }
                 };
                 let t0 = Instant::now();
                 let (to, out): (_, &[u8]) = match relay.handle(t0, now_unix, from, &buf[..n]) {

@@ -59,6 +59,35 @@ pub fn sign(secret: &[u8], claims: &Claims<'_>) -> Vec<u8> {
     out
 }
 
+/// `buf` 앞부분에 있는 토큰의 길이(구조만 확인, MAC 검증 없음). 토큰 뒤에 쿠키가 붙을 수 있으므로 길이를 구조로 계산한다.
+pub fn token_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() < MIN_TOKEN_BYTES || buf[0] != TOKEN_VERSION {
+        return None;
+    }
+    let room_len = buf[13] as usize;
+    if room_len == 0 || room_len > MAX_ROOM_BYTES || buf.len() < 15 + room_len {
+        return None;
+    }
+    let client_len = buf[14 + room_len] as usize;
+    if client_len == 0 || client_len > MAX_CLIENT_BYTES {
+        return None;
+    }
+    let len = 15 + room_len + client_len + MAC_BYTES;
+    (buf.len() >= len).then_some(len)
+}
+
+/// 검증 전 평문 필드 (사전 필터용, 신뢰하지 않는다): (expires_at, ssrc)
+pub fn peek(token: &[u8]) -> (u64, u32) {
+    let mut exp = [0u8; 8];
+    exp.copy_from_slice(&token[1..9]);
+    (u64::from_be_bytes(exp), u32::from_be_bytes([token[9], token[10], token[11], token[12]]))
+}
+
+/// 토큰 끝 32바이트 MAC
+pub fn mac_of(token: &[u8]) -> &[u8] {
+    &token[token.len() - MAC_BYTES..]
+}
+
 /// 토큰 검증: 구조 → MAC(상수 시간 비교) → 만료 순서. `now_unix`는 현재 unix 초.
 pub fn verify<'a>(secret: &[u8], token: &'a [u8], now_unix: u64) -> Result<Claims<'a>, TokenError> {
     if token.len() < MIN_TOKEN_BYTES || token.len() > MAX_TOKEN_BYTES || token[0] != TOKEN_VERSION {
@@ -147,21 +176,39 @@ mod tests {
         assert_eq!(verify(SECRET, &long, 0), Err(TokenError::Malformed));
     }
 
-    /// 시그널링 서버(server/test/relay-token.test.ts)와 같은 벡터. 두 구현이 바이트 단위로 일치해야 한다.
+    /// 시그널링 서버(server/test/relay-token.test.ts)와 공유하는 벡터 파일. 두 구현이 바이트 단위로 일치해야 한다.
     #[test]
-    fn cross_language_vector() {
-        let secret = b"band-relay-test-vector-secret-32bytes!!";
-        let c = Claims {
-            expires_at: 1_700_000_000,
-            ssrc: 0x01020304,
-            room: "room-abc",
-            client: "11111111-2222-3333-4444-555555555555",
-        };
-        let t = sign(secret, &c);
-        let hex: String = t.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, TEST_VECTOR_HEX);
-        assert_eq!(verify(secret, &t, 1_600_000_000), Ok(c));
+    fn cross_language_vectors() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../docs/overhaul/relay-token-vectors.json")).unwrap();
+        let vectors = fixture["vectors"].as_array().unwrap();
+        assert!(vectors.len() >= 3);
+        for v in vectors {
+            let name = v["name"].as_str().unwrap();
+            let secret = v["secret"].as_str().unwrap().as_bytes();
+            let c = Claims {
+                expires_at: v["expiresAt"].as_u64().unwrap(),
+                ssrc: v["ssrc"].as_u64().unwrap() as u32,
+                room: v["roomId"].as_str().unwrap(),
+                client: v["memberId"].as_str().unwrap(),
+            };
+            let t = sign(secret, &c);
+            let hex: String = t.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, v["hex"].as_str().unwrap(), "{name}");
+            assert_eq!(token_len(&t), Some(t.len()), "{name}");
+            assert_eq!(verify(secret, &t, c.expires_at - 1), Ok(c), "{name}: 만료 1초 전 유효");
+            assert_eq!(verify(secret, &t, c.expires_at), Err(TokenError::Expired), "{name}: 만료 시각에 무효");
+        }
     }
 
-    const TEST_VECTOR_HEX: &str = "01000000006553f1000102030408726f6f6d2d6162632431313131313131312d323232322d333333332d343434342d35353535353535353535353537cb2b9be3db194a0018849fd9df099457dbdc9f39aef51c5f621ba02d8f05b4";
+    #[test]
+    fn token_len_with_trailing_cookie() {
+        let t = sign(SECRET, &claims());
+        let mut with_cookie = t.clone();
+        with_cookie.extend_from_slice(&[7u8; 16]);
+        assert_eq!(token_len(&with_cookie), Some(t.len()));
+        assert_eq!(token_len(&t[..t.len() - 1]), None);
+        assert_eq!(peek(&t), (1_900_000_000, 0xDEADBEEF));
+        assert_eq!(mac_of(&t), &t[t.len() - 32..]);
+    }
 }

@@ -11,7 +11,7 @@ import { createHmac, timingSafeEqual } from 'crypto'
  * 13   1    room_len (1..=128)
  * 14   n    room_id (UTF-8)
  * ..   1    client_len (1..=64)
- * ..   m    client_id (UTF-8)
+ * ..   m    member_id (UTF-8, 서버가 검증한 userId)
  * ..   32   HMAC-SHA256(RELAY_SECRET, 앞의 모든 바이트)
  * ```
  * WS로는 base64url 문자열로 전달하고, 클라이언트는 디코드한 바이트를 RelayBind 패킷에 그대로 싣는다.
@@ -21,13 +21,13 @@ export const RELAY_TOKEN_VERSION = 1
 const MAC_BYTES = 32
 const MAX_ROOM_BYTES = 128
 const MAX_CLIENT_BYTES = 64
-/** 기본 토큰 수명. 만료 전에 `relay-token-request`로 갱신한다 */
-export const DEFAULT_RELAY_TOKEN_TTL_SEC = 600
+/** 기본 토큰 수명(짧게: 회수 대신 만료). 클라이언트는 expiresAt 30초 전에 `relay-token-request`로 갱신한다 */
+export const DEFAULT_RELAY_TOKEN_TTL_SEC = 120
 export const MIN_RELAY_SECRET_BYTES = 32
 
 export interface RelayTokenClaims {
   roomId: string
-  clientId: string
+  memberId: string
   ssrc: number
   /** unix 초 */
   expiresAt: number
@@ -46,9 +46,9 @@ export function isValidSsrc(v: unknown): v is number {
 
 export function signRelayToken(claims: RelayTokenClaims, secret: string): Buffer {
   const room = Buffer.from(claims.roomId, 'utf8')
-  const client = Buffer.from(claims.clientId, 'utf8')
+  const client = Buffer.from(claims.memberId, 'utf8')
   if (room.length < 1 || room.length > MAX_ROOM_BYTES) throw new Error('roomId length out of range')
-  if (client.length < 1 || client.length > MAX_CLIENT_BYTES) throw new Error('clientId length out of range')
+  if (client.length < 1 || client.length > MAX_CLIENT_BYTES) throw new Error('memberId length out of range')
   if (!isValidSsrc(claims.ssrc)) throw new Error('invalid ssrc')
   if (!Number.isInteger(claims.expiresAt) || claims.expiresAt < 0) throw new Error('invalid expiresAt')
 
@@ -81,7 +81,7 @@ export function verifyRelayToken(token: Buffer, secret: string, nowSec: number):
     expiresAt,
     ssrc: body.readUInt32BE(9),
     roomId: body.subarray(14, 14 + roomLen).toString('utf8'),
-    clientId: body.subarray(15 + roomLen, bodyLen).toString('utf8'),
+    memberId: body.subarray(15 + roomLen, bodyLen).toString('utf8'),
   }
 }
 

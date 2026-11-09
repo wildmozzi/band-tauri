@@ -32,11 +32,18 @@ RELAY_SECRET=$(openssl rand -hex 32) cargo run --release
 |---|---|---|
 | `RELAY_SECRET` | (필수, ≥32바이트) | 시그널링 서버와 공유하는 HMAC 키. 시크릿으로만 설정 |
 | `RELAY_BIND` | `0.0.0.0:5000` | UDP 바인드. fly.io에서는 `fly-global-services:5000` |
-| `RELAY_METRICS_BIND` | `0.0.0.0:9090` | `/metrics`, `/healthz`. 빈 문자열이면 끔 |
+| `RELAY_METRICS_BIND` | `0.0.0.0:9090` | `/metrics`, `/healthz`. 빈 문자열이면 끔. fly에서는 `[::]:9090`(6PN 듀얼스택) |
 | `RELAY_MAX_BPS` | `2000000` | 클라이언트당 bit/s 상한 |
 | `RELAY_MAX_PPS` | `2500` | 클라이언트당 packet/s 상한 |
-| `RELAY_MAX_BINDS_PER_SEC` | `2000` | 서버 전체 RelayBind 처리율 |
+| `RELAY_MAX_BINDS_PER_SEC` | `20000` | 신규/갱신 RelayBind 서버 전체 처리율 (keepalive 제외, 최후 방어선) |
+| `RELAY_MAX_BINDS_PER_SEC_PER_SUBNET` | `50` | 신규/갱신 RelayBind 출발 서브넷(/24, /64)당 처리율 |
+| `RELAY_MAX_REGISTRATIONS` | `20000` | 전체 등록 수 상한 (메모리 보호) |
 | `RELAY_STATS_LOG_SECS` | `60` | 요약 로그 주기, 0이면 끔 |
+
+## 용량 (추정)
+
+단일 태스크에서 패킷마다 `send_to` syscall 1회. shared-cpu-1x에서 대략 10만 pps 안팎으로 추정(미측정). 6인 방 전원이 릴레이를 쓰면 방당 최대 ≈12k pps → 그런 방 약 8~10개가 한계.
+알람 기준 제안: `relay_processing_seconds` p99 > 1ms 또는 CPU 70%. 넘으면 `SO_REUSEPORT` 다중 소켓/`sendmmsg`를 검토.
 
 ## 배포 (fly.io) — 사람 승인 후
 
@@ -52,4 +59,4 @@ fly deploy
 fly secrets set RELAY_SECRET=<같은 값> RELAY_ADDR=<전용 IPv4>:5000 -a band-server
 ```
 
-배포 후 확인: `fly logs -a band-relay`의 `[relay]` 요약 로그, fly 대시보드 메트릭(`/metrics`).
+배포 후 확인: `fly logs -a band-relay`의 `[relay]` 요약 로그, fly 대시보드 메트릭(`/metrics`), `fly checks list -a band-relay`(`/healthz` 헬스체크가 6PN으로 통과하는지 — [사람] 확인).

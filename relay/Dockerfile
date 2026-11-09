@@ -11,6 +11,6 @@ COPY --from=builder /src/target/release/band-relay /usr/local/bin/band-relay
 USER relay
 # fly.io UDP는 fly-global-services 주소에 바인드해야 한다 (fly.toml [env]에서 지정)
 ENV RELAY_BIND=0.0.0.0:5000 \
-    RELAY_METRICS_BIND=0.0.0.0:9090
+    RELAY_METRICS_BIND=[::]:9090
 EXPOSE 5000/udp 9090/tcp
 CMD ["band-relay"]

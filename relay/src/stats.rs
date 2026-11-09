@@ -60,7 +60,12 @@ pub struct Stats {
     pub forwarded_bytes: AtomicU64,
     pub bind_ok: AtomicU64,
     pub bind_rejected: AtomicU64,
+    /// 이미 등록된 주소의 같은 토큰 keepalive (HMAC·버킷 없이 처리)
+    pub bind_keepalive: AtomicU64,
+    /// 새 주소에 보낸 CookieRequired 응답
+    pub cookie_sent: AtomicU64,
     pub send_errors: AtomicU64,
+    pub recv_errors: AtomicU64,
     pub registrations: AtomicU64,
     pub rooms: AtomicU64,
     drops: [AtomicU64; 8],
@@ -116,7 +121,7 @@ impl Stats {
         let avg_us = if n > 0 { self.latency_sum_ns.load(Relaxed) as f64 / n as f64 / 1000.0 } else { 0.0 };
         let dropped: u64 = DropReason::ALL.iter().map(|&r| self.drops(r)).sum();
         format!(
-            "regs={} rooms={} rx={} fwd={} drop={} bind_ok={} bind_rej={} lat_avg={:.1}us lat_p99<={}us lat_max={}us",
+            "regs={} rooms={} rx={} fwd={} drop={} bind_ok={} bind_rej={} keepalive={} cookie={} lat_avg={:.1}us lat_p99<={}us lat_max={}us",
             self.registrations.load(Relaxed),
             self.rooms.load(Relaxed),
             self.rx_packets.load(Relaxed),
@@ -124,6 +129,8 @@ impl Stats {
             dropped,
             self.bind_ok.load(Relaxed),
             self.bind_rejected.load(Relaxed),
+            self.bind_keepalive.load(Relaxed),
+            self.cookie_sent.load(Relaxed),
             avg_us,
             self.latency_quantile_us(0.99).unwrap_or(0),
             self.latency_max_ns.load(Relaxed) / 1000,
@@ -141,8 +148,11 @@ impl Stats {
         counter("relay_forwarded_packets_total", "forwarded engine packets", "counter", self.forwarded_packets.load(Relaxed));
         counter("relay_forwarded_bytes_total", "forwarded bytes", "counter", self.forwarded_bytes.load(Relaxed));
         counter("relay_bind_ok_total", "accepted RelayBind", "counter", self.bind_ok.load(Relaxed));
-        counter("relay_bind_rejected_total", "valid token but room full / ssrc conflict", "counter", self.bind_rejected.load(Relaxed));
+        counter("relay_bind_rejected_total", "valid token but room/server full or ssrc conflict", "counter", self.bind_rejected.load(Relaxed));
+        counter("relay_bind_keepalive_total", "keepalive binds (fast path)", "counter", self.bind_keepalive.load(Relaxed));
+        counter("relay_cookie_sent_total", "CookieRequired replies to new addresses", "counter", self.cookie_sent.load(Relaxed));
         counter("relay_send_errors_total", "send_to failures", "counter", self.send_errors.load(Relaxed));
+        counter("relay_recv_errors_total", "recv_from failures (skipped)", "counter", self.recv_errors.load(Relaxed));
         counter("relay_registrations", "active registrations", "gauge", self.registrations.load(Relaxed));
         counter("relay_rooms", "active rooms", "gauge", self.rooms.load(Relaxed));
 
