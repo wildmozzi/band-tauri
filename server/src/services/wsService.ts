@@ -6,6 +6,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
 import { isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
+import { createRoomRepository, type RoomMeta, type RoomRepository } from '../repositories/roomRepository'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -42,10 +43,7 @@ const PARTICIPANT_UPDATE_DEBOUNCE_MS = 1000
 type Env = Record<string, string | undefined>
 type AuthState = 'pending' | 'verifying' | 'authenticated' | 'anonymous'
 
-export interface RoomMeta {
-  hostId: string | null
-  freeJoin: boolean
-}
+export type { RoomMeta }
 
 /** 외부 의존성 (테스트에서 교체 가능) */
 export interface WsDeps {
@@ -223,35 +221,28 @@ function supabaseDeps(supabase: SupabaseClient | null): WsDeps {
         return null
       }
     },
+    ...roomDeps(supabase ? createRoomRepository(supabase) : null),
+  }
+}
+
+/** rooms 테이블 접근 (repository). 오류는 로그 후 "방 없음"/무시로 처리 — 기존 동작 */
+function roomDeps(rooms: RoomRepository | null): Pick<WsDeps, 'fetchRoomMeta' | 'updateParticipants'> {
+  return {
     fetchRoomMeta: async (roomId) => {
-      if (!supabase) return null
+      if (!rooms) return null
       try {
-        const { data, error } = await supabase
-          .from('rooms')
-          .select('host_id, free_join')
-          .eq('id', roomId)
-          .maybeSingle()
-        if (error) {
-          console.error('[DB] Failed to look up room:', error.message)
-          return null
-        }
-        if (!data) return null
-        return { hostId: data.host_id ?? null, freeJoin: data.free_join !== false }
+        return await rooms.findMeta(roomId)
       } catch (err) {
-        console.error('[DB] Exception looking up room:', err)
+        console.error('[DB] Failed to look up room:', err instanceof Error ? err.message : err)
         return null
       }
     },
     updateParticipants: async (roomId, count) => {
-      if (!supabase) return
+      if (!rooms) return
       try {
-        const { error } = await supabase
-          .from('rooms')
-          .update({ current_participants: count })
-          .eq('id', roomId)
-        if (error) console.error('[DB] Failed to update participants:', error.message)
+        await rooms.updateParticipantCount(roomId, count)
       } catch (err) {
-        console.error('[DB] Exception updating participants:', err)
+        console.error('[DB] Failed to update participants:', err instanceof Error ? err.message : err)
       }
     },
   }

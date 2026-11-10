@@ -27,8 +27,12 @@ before(async () => {
     cancelled.push(paymentKey)
     return { success: true, paymentKey }
   }
+  // 구독 저장소는 DB 대신 메모리 목 (repository 계층 경계에서 교체)
+  const { SubscriptionService } = await import('../src/services/subscriptionService')
+  const { MemorySubscriptionRepository } = await import('./fakes/memorySubscriptionRepository')
+  const subscriptionService = new SubscriptionService(new MemorySubscriptionRepository(), paymentService)
   const { createApp } = await import('../src/app')
-  server = createApp().listen(0)
+  server = createApp({ subscriptionService }).listen(0)
   await new Promise(r => server.once('listening', r))
   url = `http://127.0.0.1:${(server.address() as { port: number }).port}`
 })
@@ -116,5 +120,24 @@ describe('cancel', () => {
   it('returns 404 without an active subscription', async () => {
     const r = await post('/api/payment/cancel', {}, bearer('nobody'))
     assert.equal(r.status, 404)
+  })
+})
+
+describe('idempotency', () => {
+  it('replaying the same confirm returns the existing subscription without charging again', async () => {
+    const first = await (await post('/api/payment/confirm', { paymentKey: 'pk_bob', orderId: 'o3', planType: 'standard' }, bearer('bob'))).json() as any
+    const calls = confirmed.length
+    const r = await post('/api/payment/confirm', { paymentKey: 'pk_bob', orderId: 'o3', planType: 'standard' }, bearer('bob'))
+    assert.equal(r.status, 200)
+    const again = await r.json() as any
+    assert.equal(again.subscription.id, first.subscription.id)
+    assert.equal(confirmed.length, calls, 'Toss confirm must not be called again')
+  })
+
+  it("rejects another user's paymentKey/orderId with 409 before calling Toss", async () => {
+    const calls = confirmed.length
+    const r = await post('/api/payment/confirm', { paymentKey: 'pk_bob', orderId: 'o-other', planType: 'standard' }, bearer('eve'))
+    assert.equal(r.status, 409)
+    assert.equal(confirmed.length, calls)
   })
 })
