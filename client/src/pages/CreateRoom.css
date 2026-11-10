@@ -19,7 +19,7 @@
 .create-room-header h1 {
   font-size: 2.5rem;
   margin-bottom: 12px;
-  background: linear-gradient(135deg, #fff, var(--accent-strong));
+  background: linear-gradient(135deg, var(--white), var(--accent-strong));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
@@ -30,9 +30,9 @@
 }
 
 .create-room-form {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--white-a03);
   border: 1px solid var(--border);
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   padding: 40px;
 }
 
@@ -44,7 +44,7 @@
   display: block;
   font-weight: 600;
   margin-bottom: 8px;
-  color: #fff;
+  color: var(--white);
 }
 
 .create-room-form .form-group input,
@@ -52,9 +52,9 @@
 .create-room-form .form-group textarea {
   width: 100%;
   padding: 14px 16px;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--black-a30);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: white;
   font-size: 1rem;
   transition: border-color 0.2s;
@@ -82,9 +82,9 @@
 
 .tag-btn {
   padding: 8px 16px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 1px solid var(--border);
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   color: var(--text-muted);
   font-size: 0.9rem;
   cursor: pointer;
@@ -92,7 +92,7 @@
 }
 
 .tag-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--white-a08);
   border-color: var(--accent);
 }
 
@@ -114,16 +114,16 @@
 
 .custom-tag-input button {
   padding: 12px 20px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .custom-tag-input button:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--white-a15);
 }
 
 .selected-tags {
@@ -137,8 +137,8 @@
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-  border-radius: 16px;
+  background: var(--gradient-accent);
+  border-radius: var(--radius-2xl);
   color: white;
   font-size: 0.85rem;
 }
@@ -155,12 +155,12 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   transition: background 0.2s;
 }
 
 .selected-tag button:hover {
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--black-a20);
 }
 
 /* Form Hint */
@@ -183,9 +183,9 @@
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--white-a03);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   transition: all 0.2s;
 }
 
@@ -215,9 +215,9 @@
   width: 32px;
   height: 32px;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  color: #fff;
+  border-radius: var(--radius-md);
+  background: var(--white-a05);
+  color: var(--white);
   font-size: 1.2rem;
   cursor: pointer;
   transition: all 0.2s;
@@ -244,8 +244,8 @@
   width: 28px;
   height: 28px;
   border: none;
-  border-radius: 6px;
-  background: rgba(248, 113, 113, 0.1);
+  border-radius: var(--radius-sm);
+  background: var(--red-400-a10);
   color: var(--error);
   font-size: 1.2rem;
   cursor: pointer;
@@ -253,7 +253,7 @@
 }
 
 .slot-remove:hover {
-  background: rgba(248, 113, 113, 0.2);
+  background: var(--red-400-a20);
 }
 
 .add-instrument select {
@@ -261,7 +261,7 @@
   padding: 12px 16px;
   background: var(--bg-input);
   border: 1px dashed var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   color: var(--text-muted);
   font-size: 0.9rem;
   cursor: pointer;
@@ -270,12 +270,12 @@
 
 .add-instrument select:hover {
   border-color: var(--accent);
-  color: #fff;
+  color: var(--white);
 }
 
 .add-instrument select option {
   background: var(--bg-panel);
-  color: #fff;
+  color: var(--white);
 }
 
 /* Toggle Switch */
@@ -284,8 +284,8 @@
   align-items: flex-start;
   gap: 16px;
   padding: 16px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 12px;
+  background: var(--white-a03);
+  border-radius: var(--radius-xl);
   border: 1px solid var(--border);
 }
 
@@ -306,7 +306,7 @@
   position: absolute;
   cursor: pointer;
   inset: 0;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border-radius: 28px;
   transition: 0.3s;
 }
@@ -318,8 +318,8 @@
   width: 22px;
   left: 3px;
   bottom: 3px;
-  background: #fff;
-  border-radius: 50%;
+  background: var(--white);
+  border-radius: var(--radius-round);
   transition: 0.3s;
 }
 
@@ -348,9 +348,9 @@
 
 .form-error {
   padding: 12px 16px;
-  background: rgba(248, 113, 113, 0.1);
+  background: var(--red-400-a10);
   border: 1px solid var(--error);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: var(--error);
   font-size: 0.9rem;
   margin-bottom: 16px;
@@ -366,7 +366,7 @@
 .btn-primary,
 .btn-secondary {
   padding: 14px 32px;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-weight: 600;
   font-size: 1rem;
   cursor: pointer;
@@ -374,14 +374,14 @@
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background: var(--gradient-accent);
   border: none;
   color: white;
 }
 
 .btn-primary:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(141, 123, 255, 0.4);
+  box-shadow: var(--shadow-glow-md);
 }
 
 .btn-primary:disabled {
@@ -390,13 +390,13 @@
 }
 
 .btn-secondary {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 1px solid var(--border);
   color: white;
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
 }
 
 .btn-secondary:disabled {
