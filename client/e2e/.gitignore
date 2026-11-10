@@ -1,0 +1,4 @@
+# E2E 빌드·결과물
+.dist/
+.results/
+.report/

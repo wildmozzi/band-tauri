@@ -351,6 +351,7 @@ export function Community() {
                               cursor: 'pointer',
                             }}
                             onClick={(e) => handleLike(post.id, e)}
+                            data-testid={`post-like-${post.id}`}
                           >
                             {post.liked_by_user ? '💖' : '❤️'} {post.likes_count}
                           </span>

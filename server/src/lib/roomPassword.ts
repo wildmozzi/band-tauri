@@ -165,6 +165,14 @@ export interface AttemptLimits {
   windowMs: number
 }
 
+/** 운영 기본값 (wsService가 쓰고, 웹 E2E의 시그널링 mock도 같은 값을 import한다) */
+export const DEFAULT_PASSWORD_ATTEMPT_LIMITS: AttemptLimits = {
+  maxFailures: 5,
+  maxFailuresPerIp: 20,
+  maxFailuresPerRoom: 100,
+  windowMs: 15 * 60_000,
+}
+
 interface Entry {
   count: number
   resetAt: number
