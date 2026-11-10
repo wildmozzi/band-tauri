@@ -75,7 +75,13 @@ impl EngineManager {
     /// 하드웨어 루프백 측정(설계 4절). 엔진 락은 작업을 꺼낼 때만 잡는다(측정 중에도 다른 커맨드가 돈다).
     /// 블로킹(반복당 약 0.7초)이므로 비UI 스레드에서 부른다.
     pub fn measure_loopback(&self, runs: u32) -> Result<LoopbackReport, String> {
-        let job = self.with_engine(|e| Ok(e.loopback_job()))?;
+        // 합주 중에는 거부한다: 측정 동안 장치 출력이 처프로 바뀌어 모니터·피어 소리가 끊긴다(PR #13 L5).
+        let job = self.with_engine(|e| {
+            if e.has_network() {
+                return Err("합주 중에는 루프백 측정을 할 수 없습니다. 연주를 멈추고 테스트 모드에서 재세요".to_string());
+            }
+            Ok(e.loopback_job())
+        })?;
         let (_g, cancel) = self.begin_measure()?;
         job.run(runs, &cancel)
     }

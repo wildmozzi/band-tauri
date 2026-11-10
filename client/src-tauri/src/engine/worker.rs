@@ -1077,7 +1077,7 @@ impl Worker {
             let Some(prod) = self.p.prods.get_mut(f.slot) else {
                 return;
             };
-            let ev = f.service(&mut peer.jitter.lock(), prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_ssrc == peer.ssrc));
+            let ev = f.service(&mut peer.jitter.lock(), prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == peer.id && p.peer_ssrc == peer.ssrc));
             fills += u64::from(ev.deadline_fill);
             skipped += ev.skipped_frames;
             urgent |= ev.urgent;

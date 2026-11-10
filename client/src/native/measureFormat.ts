@@ -27,6 +27,13 @@ export interface MeasureRow {
   hint?: string
 }
 
+/** 드라이버 보고값의 의미는 백엔드마다 다르다(ASIO는 변환기·안전 여유 포함, WASAPI GetStreamLatency는 대개 장치 주기·버퍼만). */
+function driverHint(backend: string): string | undefined {
+  if (backend.includes('Asio')) return 'ASIO ASIOGetLatencies: 드라이버가 변환기·안전 여유까지 보고해야 0에 가깝다'
+  if (backend.includes('wasapi')) return 'WASAPI GetStreamLatency는 변환기 지연을 포함하지 않아 실측보다 작은 게 보통이다'
+  return undefined
+}
+
 /** 루프백 결과 표: 왕복·추정 편도·드라이버 보고·estLatency·오차 */
 export function loopbackRows(r: LoopbackReport): MeasureRow[] {
   const oneWay = r.roundTripMs == null ? null : r.roundTripMs / 2
@@ -40,7 +47,11 @@ export function loopbackRows(r: LoopbackReport): MeasureRow[] {
       value: fmtMs(r.driverRoundTripMs),
       hint: r.driverRoundTripMs == null ? '이 백엔드는 보고하지 않음' : `입력 ${fmtMs(r.driverInputLatencyMs)} + 출력 ${fmtMs(r.driverOutputLatencyMs)}`,
     },
-    { label: '드라이버 보고 오차(실측 − 보고)', value: signed(r.driverErrorMs) },
+    {
+      label: '드라이버 보고 오차(실측 − 보고)',
+      value: signed(r.driverErrorMs),
+      hint: driverHint(r.backend),
+    },
     { label: 'estLatencyMs(엔진 추정)', value: fmtMs(r.estLatencyMs) },
     { label: '보정값(실측 − 장치 버퍼)', value: signed(r.offsetMs), hint: 'estLatencyMs에 없는 변환기·드라이버 안전 여유' },
     { label: '보정한 로컬 지연', value: fmtMs(r.correctedEstLatencyMs), hint: 'estLatencyMs + 보정값' },

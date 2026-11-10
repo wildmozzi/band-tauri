@@ -16,7 +16,7 @@ function ConnectionDiagram() {
       <rect x="8" y="20" width="304" height="50" rx="8" className="measure-diagram-box" />
       <text x="160" y="16" textAnchor="middle" className="measure-diagram-label">오디오 인터페이스</text>
       <circle cx="70" cy="45" r="11" className="measure-diagram-jack" />
-      <text x="70" y="84" textAnchor="middle" className="measure-diagram-label">입력 1 (Inst/Line)</text>
+      <text x="70" y="84" textAnchor="middle" className="measure-diagram-label">라인/악기 입력 (Solo: 입력 2)</text>
       <circle cx="250" cy="45" r="11" className="measure-diagram-jack" />
       <text x="250" y="84" textAnchor="middle" className="measure-diagram-label">출력 L (Line Out)</text>
       <path d="M250 34 C250 -6 70 -6 70 34" className="measure-diagram-cable" />
@@ -63,7 +63,11 @@ export function LatencyMeasurePanel() {
       <h3>지연 측정 (하드웨어 루프백)</h3>
       <ConnectionDiagram />
       <ol className="measure-steps">
-        <li>인터페이스 <b>출력(Line Out L 또는 헤드폰)</b>을 케이블로 <b>입력 1</b>에 연결하세요(위 그림). 케이블이 없으면 스피커 앞에 마이크를 두어도 됩니다.</li>
+        <li>인터페이스 <b>출력(Line Out L 또는 헤드폰)</b>을 케이블로 <b>라인/악기 입력</b>에 연결하세요(위 그림). Scarlett Solo는 앞면 <b>입력 2</b>(6.35mm, INST 끔)입니다. 케이블이 없으면 스피커 앞에 마이크를 두어도 됩니다.</li>
+        <li>
+          위 <b>입력 채널</b>을 연결한 단자로 맞추세요(Solo 입력 2 = <b>Ch2</b>). 측정은 첫 번째 입력 채널만 녹음합니다 — 지금은{' '}
+          <b>Ch{(config.inputChannels[0] ?? 0) + 1}</b>입니다.
+        </li>
         <li><b>직접 모니터(Direct Monitor)를 끄세요.</b> 켜져 있으면 입력이 출력으로 바로 돌아가 결과가 틀어집니다.</li>
         <li>입력 게인은 낮게, 출력 볼륨은 중간쯤에서 시작하세요. 측정 중 출력에서 짧은 "삑" 소리가 납니다.</li>
         <li>측정 동안 모니터·합주 소리는 나가지 않습니다(되먹임 방지).</li>

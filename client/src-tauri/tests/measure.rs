@@ -101,7 +101,8 @@ fn loopback_known_delay_within_half_ms() {
         let rt = rep.round_trip_ms.unwrap_or(f64::NAN);
         eprintln!("rate {rate} in {ib} out {ob}: 측정 {rt:.3}ms 기대 {expect:.3}ms {:?} {}", rep.verdict, rep.message);
         assert_eq!(rep.verdict, MeasureVerdict::Ok, "{rep:?}");
-        assert!((rt - expect).abs() <= 0.5, "왕복 {rt} 기대 {expect}: {rep:?}");
+        // 요구는 ±0.5ms. 정밀도 회귀를 잡으려고 더 좁게 본다(이 PC 실측 오차 ≤ 0.06ms, PR #13 L7d).
+        assert!((rt - expect).abs() <= 0.2, "왕복 {rt} 기대 {expect}: {rep:?}");
         assert_eq!(rep.detected_runs, 6);
         // 보정값 = 실측 − 장치 버퍼 왕복, 보정 estLatency = est + 보정값
         let buf_rt = (ib + ob) as f64 * 1000.0 / rate as f64;
@@ -156,6 +157,21 @@ fn loopback_rejects_mismatched_rates_and_concurrent_runs() {
     // 취소 뒤 다시 잴 수 있다(끝점 반환)
     let rep = e.loopback_job().run(1, &AtomicBool::new(false)).unwrap();
     assert_eq!(rep.verdict, MeasureVerdict::NoSignal);
+}
+
+#[test]
+fn loopback_refused_during_session() {
+    let _g = RT_LOCK.lock();
+    let m = band_lib::manager::EngineManager::new(Arc::new(FakeBackend::silence(48_000)), test_net());
+    m.start(config(128), "alice".into()).unwrap();
+    let err = m.measure_loopback(1).unwrap_err();
+    assert!(err.contains("합주"), "{err}");
+    m.stop();
+    // 테스트 모드에서는 된다
+    m.test_start(config(128)).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(m.measure_loopback(1).unwrap().verdict, MeasureVerdict::NoSignal);
+    m.stop();
 }
 
 // ============================================================================

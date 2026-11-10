@@ -368,6 +368,8 @@ impl LoopbackJob {
             })
             .map_err(|e| if e == CANCELLED { e } else { "입력 콜백이 돌지 않습니다(입력 장치 확인)".to_string() })?;
             let cap_start = self.sh.cap_start.load(Ordering::Relaxed);
+            // 콜백 크기는 기준 위치를 잡은 시점의 값을 쓴다(cpal WASAPI 공유처럼 가변이면 끝 값과 다를 수 있다, L7b).
+            let b_in = self.counters.in_cb_frames.load(Ordering::Relaxed) as f64;
             spin(&mut clock, PREROLL, cancel, &mut || drain(&mut ends.capture, &mut tmp, &mut cap))?;
             // 자극
             if ends.stim.vacant_len() < stim.len() {
@@ -380,6 +382,7 @@ impl LoopbackJob {
             })
             .map_err(|e| if e == CANCELLED { e } else { "출력 콜백이 돌지 않습니다(출력 장치 확인)".to_string() })?;
             let stim_start = self.sh.stim_start.load(Ordering::Relaxed);
+            let b_out = self.counters.out_cb_frames.load(Ordering::Relaxed) as f64;
             let listen = Duration::from_secs_f64(STIM_SECONDS + MAX_LOOPBACK_MS / 1000.0);
             spin(&mut clock, listen, cancel, &mut || drain(&mut ends.capture, &mut tmp, &mut cap))?;
             // 녹음 끝
@@ -389,8 +392,6 @@ impl LoopbackJob {
                 drain(&mut ends.capture, &mut tmp, &mut cap)
             });
             drain(&mut ends.capture, &mut tmp, &mut cap);
-            let b_in = self.counters.in_cb_frames.load(Ordering::Relaxed) as f64;
-            let b_out = self.counters.out_cb_frames.load(Ordering::Relaxed) as f64;
             out_runs.push(analyze_loopback(&cap, &stim, r, cap_start, stim_start, clock.e_in, clock.e_out, b_in, b_out));
             spin(&mut clock, RUN_GAP, cancel, &mut || drain(&mut ends.capture, &mut tmp, &mut cap))?;
         }
@@ -566,6 +567,8 @@ pub fn click_template() -> Vec<f32> {
 pub const CLICK_INTERVAL: u64 = 14_400;
 /// 이보다 긴 에코 왕복은 찾지 않는다(클릭 간격보다 짧아야 클릭이 섞이지 않는다).
 pub const MAX_ECHO_MS: f64 = 280.0;
+/// 상대가 보고하는 되돌리기 처리 지연 상한(µs). 넘으면 잘라 쓰고 불안정으로 표시한다.
+pub const MAX_PEER_ECHO_DELAY_US: u32 = 50_000;
 /// 에코 판정 문턱(코덱을 지나므로 루프백보다 낮게).
 pub const ECHO_MIN_RATIO: f32 = 8.0;
 pub const ECHO_MIN_COEFF: f32 = 0.3;
@@ -730,12 +733,8 @@ pub struct EchoJob {
 impl EchoJob {
     /// 상대 동의를 `wait`까지 기다린 뒤 `runs`회(1..=20) 클릭을 보내 왕복을 잰다. 블로킹.
     pub fn run(&self, runs: u32, wait: Duration, cancel: &AtomicBool) -> Result<EchoReport, String> {
-        {
-            let mut g = self.probe.lock();
-            if g.is_some() {
-                return Err("이미 에코 측정 중입니다".into());
-            }
-            *g = Some(EchoProbe::new(self.peer_id.clone(), self.peer_ssrc));
+        if self.probe.lock().is_some() {
+            return Err("이미 에코 측정 중입니다".into());
         }
         let res = self.run_inner(runs.clamp(1, 20), wait, cancel);
         // 정리: 요청을 거두고, 상대가 에코를 멈출 때까지 무음을 보낸 뒤 지터 버퍼를 상대 소리로 다시 맞춘다.
@@ -772,6 +771,9 @@ impl EchoJob {
             }
             self.sleep(Duration::from_millis(20), cancel)?;
         }
+        // 동의를 받은 뒤에야 상대에게 내 소리 대신 무음(+ 클릭)을 보낸다. 상대가 허용 여부를 고르는 동안에는
+        // 평소 소리를 듣는다(PR #13 L6). 동의 직후 잠깐은 내 실제 소리가 내게 되돌아오지만 나만 듣는다.
+        *self.probe.lock() = Some(EchoProbe::new(self.peer_id.clone(), self.peer_ssrc));
         // 이제 상대가 보내는 것은 되돌아온 내 무음 스트림이다. 이전(상대 소리) 도착 분포를 버리고 다시 채운다.
         self.net.restart_jitter(&self.peer_id)?;
         self.sleep(ECHO_SETTLE, cancel)?;
@@ -815,13 +817,25 @@ impl EchoJob {
         let vals: Vec<f64> = per.iter().flatten().copied().collect();
         let sum = summarize(&vals);
         let spread = sum.map(|(_, lo, hi, _)| hi - lo);
-        let verdict = verdict_with(per.len(), vals.len(), false, spread, ECHO_UNSTABLE_SPREAD_MS);
-        let peer_ms = delay_us as f64 / 1000.0;
+        let mut verdict = verdict_with(per.len(), vals.len(), false, spread, ECHO_UNSTABLE_SPREAD_MS);
+        // 상대 보고값은 인증된 상대가 정한 값이다. 되돌리기는 디코드 없이 바로 하므로 수 ms를 넘을 수 없다.
+        // 범위를 벗어나면 상한으로 자르고 불안정으로 표시한다(PR #13 L2).
+        let peer_bogus = delay_us > MAX_PEER_ECHO_DELAY_US;
+        if peer_bogus && verdict == MeasureVerdict::Ok {
+            verdict = MeasureVerdict::Unstable;
+        }
+        let peer_ms = delay_us.min(MAX_PEER_ECHO_DELAY_US) as f64 / 1000.0;
         let median = sum.map(|s| s.0);
         let one_way = median.map(|m| (m - peer_ms) / 2.0);
         let mouth = median.zip(rtt).map(|(m, r)| m - peer_ms - r as f64 / 2.0 + (self.input_buffer_ms + self.output_buffer_ms) as f64);
         let residual = median.zip(rtt).map(|(m, r)| m - peer_ms - r as f64 - self.frame_ms as f64 - jitter as f64);
         let message = match verdict {
+            _ if peer_bogus => format!(
+                "상대가 보고한 처리 지연({:.1}ms)이 비정상이라 {:.0}ms로 잘랐습니다. 상대 앱 버전을 확인하세요",
+                delay_us as f64 / 1000.0,
+                MAX_PEER_ECHO_DELAY_US as f64 / 1000.0
+            ),
+            // 에코는 클리핑 판정을 하지 않는다(verdict_with에 clipped=false).
             MeasureVerdict::Ok | MeasureVerdict::Clipped => format!(
                 "네트워크 포함 왕복 {:.1}ms, 편도 추정 {:.1}ms(클릭 {}/{}개)",
                 median.unwrap_or(0.0),

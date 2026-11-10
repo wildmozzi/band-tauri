@@ -68,6 +68,9 @@ describe('measureFormat', () => {
     expect(get('estLatencyMs')).toBe('5.17ms')
     expect(get('보정값')).toBe('+7.49ms')
     expect(get('판정')).toContain('정상')
+    expect(rows.find((r) => r.label.startsWith('드라이버 보고 오차'))?.hint).toContain('ASIOGetLatencies')
+    const w = loopbackRows({ ...loop, backend: 'wasapiExclusive' })
+    expect(w.find((r) => r.label.startsWith('드라이버 보고 오차'))?.hint).toContain('GetStreamLatency')
   })
 
   it('loopback without driver report and no signal', () => {

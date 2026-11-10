@@ -45,8 +45,12 @@ pub struct RelaySetting<'a> {
 /// 원격 피어 최대 수(본인 포함 6명).
 pub const MAX_PEERS: usize = 5;
 
-/// 같은 키의 피어를 교체할 때 Audio seq를 이만큼 건너뛴다(옛 객체로 비행 중인 송신과 nonce가 겹치지 않게).
-const AUDIO_SEQ_HANDOVER_GAP: u32 = 1 << 16;
+/// 같은 키의 피어를 다시 만들 때(교체·제거 후 재추가) Audio seq를 이만큼 건너뛴다. 옛 객체로 아직 진행 중인
+/// 송신(워커가 쥔 `Arc`, 수신 스레드의 에코 반사)이 기록 뒤에 쓰는 seq와 겹치지 않게 한다(2.5ms 프레임 약 164초분).
+pub const AUDIO_SEQ_HANDOVER_GAP: u32 = 1 << 16;
+
+/// 송신 키 식별자: 이 Net(키쌍·ssrc 고정)에서 A→B 키는 (상대 공개키, 상대 ssrc)로 정해진다(설계 2절 HKDF info).
+type TxKeyId = ([u8; crate::net::crypto::KEY_BYTES], u32);
 
 /// 네트워크 시작 옵션.
 #[derive(Debug, Clone)]
@@ -83,6 +87,10 @@ pub struct NetShared {
     keys: KeyPair,
     seq_ctrl: [AtomicU32; 6],
     peers: RwLock<Vec<Arc<Peer>>>,
+    /// 송신 키별 Audio seq 최고 수위(다음에 쓸 값). 피어를 제거·교체할 때 기록하고 Net 수명 내내 지우지 않는다.
+    /// 같은 키로 피어를 다시 만들면 여기서 이어 간다 → 같은 (키, nonce)가 세션 동안 반복되지 않는다(PR #13 H1).
+    /// 크기는 세션 중 만난 피어 descriptor 수 수준이다.
+    tx_seq_retired: Mutex<std::collections::HashMap<TxKeyId, u32>>,
     epoch: Instant,
     stop: AtomicBool,
     jitter_settings: JitterSettings,
@@ -161,6 +169,7 @@ impl Net {
             keys,
             seq_ctrl: Default::default(),
             peers: RwLock::new(Vec::new()),
+            tx_seq_retired: Mutex::new(std::collections::HashMap::new()),
             epoch: Instant::now(),
             stop: AtomicBool::new(false),
             jitter_settings,
@@ -217,9 +226,19 @@ impl Net {
             allow_loopback: self.shared.allow_loopback,
         };
         let peer = Arc::new(Peer::new(peer_id.clone(), desc, &setup, Instant::now())?);
+        let key = (peer.public_key, peer.ssrc);
         let mut peers = self.shared.peers.write();
-        if let Some(i) = peers.iter().position(|p| p.id == peer_id) {
+        let old_idx = peers.iter().position(|p| p.id == peer_id);
+        // 같은 송신 키를 쓰는 살아 있는 피어 객체가 둘이면 카운터가 둘이 되어 nonce가 겹친다 → 거부.
+        if peers.iter().any(|p| p.id != peer_id && (p.public_key, p.ssrc) == key) {
+            return Err("같은 키(descriptor)를 쓰는 다른 피어가 이미 있습니다".into());
+        }
+        if peers.len() - usize::from(old_idx.is_some()) >= MAX_PEERS {
+            return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
+        }
+        if let Some(i) = old_idx {
             let old = peers.remove(i);
+            self.shared.retire_tx_seq(&old);
             peer.mix.gain.store(old.mix.gain.load());
             peer.mix.muted.store(old.mix.muted.load(Ordering::Relaxed), Ordering::Relaxed);
             peer.mix.pan.store(old.mix.pan.load());
@@ -228,14 +247,11 @@ impl Net {
             if old.public_key == peer.public_key {
                 let old_conn = old.conn.lock();
                 peer.conn.lock().inherit_replay_window(&old_conn);
-                // 쌍별 키가 같으므로 Audio seq(nonce)를 이어 간다. 교체 직전에 옛 피어 객체로 보내는 패킷
-                // (수신 스레드의 에코 반사 등)과 겹치지 않게 넉넉히 건너뛴다.
-                let next = old.tx_seq.load(Ordering::Relaxed).wrapping_add(AUDIO_SEQ_HANDOVER_GAP);
-                peer.tx_seq.store(next, Ordering::Relaxed);
             }
         }
-        if peers.len() >= MAX_PEERS {
-            return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
+        // 이 키로 전에 보낸 적이 있으면(교체, 제거 후 재추가) 그 최고 수위 + 여유에서 이어 간다(PR #13 H1).
+        if let Some(&hw) = self.shared.tx_seq_retired.lock().get(&key) {
+            peer.tx_seq.store(hw.wrapping_add(AUDIO_SEQ_HANDOVER_GAP), Ordering::Relaxed);
         }
         peers.push(peer);
         Ok(())
@@ -248,6 +264,7 @@ impl Net {
         };
         match removed {
             Some(p) => {
+                self.shared.retire_tx_seq(&p);
                 self.shared.send_bye(&p);
                 true
             }
@@ -340,6 +357,15 @@ impl Drop for Net {
 impl NetShared {
     fn now_us32(&self) -> u32 {
         self.epoch.elapsed().as_micros() as u32
+    }
+
+    /// 피어 객체를 버릴 때 그 송신 키의 Audio seq 최고 수위를 기록한다(같은 키로 다시 만들면 이어 간다).
+    /// 기록 뒤에도 옛 객체로 보내는 패킷이 있을 수 있어 재생성 시 `AUDIO_SEQ_HANDOVER_GAP`을 더한다.
+    fn retire_tx_seq(&self, p: &Peer) {
+        let next = p.tx_seq.load(Ordering::Relaxed);
+        let mut m = self.tx_seq_retired.lock();
+        // 한 키의 seq는 시작점에서 단조 증가(u32 랩, 400pps에서 124일)하므로 마지막 기록이 곧 최고 수위다.
+        m.insert((p.public_key, p.ssrc), next);
     }
 
     fn next_ctrl_seq(&self, t: PacketType) -> u32 {
@@ -486,8 +512,16 @@ impl NetShared {
     /// 측정하는 쪽: 피어에게 에코를 요청/해제한다. 상태는 Ping에 실어 알리고, 바뀌면 바로 한 번 보낸다.
     pub fn set_echo_request(&self, peer_id: &str, on: bool) -> Result<(), String> {
         let p = self.peer_by_id(peer_id)?;
-        p.echo.lock().requesting = on;
-        self.send_ping(&p, Instant::now());
+        let now = Instant::now();
+        {
+            let mut e = p.echo.lock();
+            // 서로 동시에 에코하면 둘 다 상대 패킷만 되돌리고 자기 클릭은 보내지 않아 측정이 안 된다(PR #13 L1).
+            if on && e.reflecting(now) {
+                return Err("이 연주자의 에코 측정에 응답하는 중입니다. 끝난 뒤 다시 시도하세요".into());
+            }
+            e.requesting = on;
+        }
+        self.send_ping(&p, now);
         Ok(())
     }
 
@@ -500,6 +534,9 @@ impl NetShared {
             if enabled {
                 if !e.remote_requesting(now) {
                     return Err("상대가 에코 측정을 요청하지 않았습니다".into());
+                }
+                if e.requesting {
+                    return Err("내가 이 연주자를 측정하는 중이라 에코할 수 없습니다".into());
                 }
                 e.enabled = true;
                 e.ts_offset = None;
