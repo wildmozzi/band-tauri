@@ -1,32 +1,38 @@
 //! 피어별 적응형 지터 버퍼 + 드리프트 보정 + PLC (설계 문서 1.2절).
 //!
+//! ## 사용법(워커)
+//! 출력 콜백이 장치 버퍼를 소비하면 워커가 같은 양을 작은 청크로 연달아 `pop`한다(버스트).
+//! 버스트가 끝나면 `end_burst(now)`를 한 번 부른다. 깊이 측정·재생 시작·보정 판단은 모두
+//! `end_burst`에서만 한다. `now`는 워커가 깨어난 시각이 아니라 **출력 콜백 시각 추정치**
+//! (장치 클럭)다. 워커 기상 지연이 깊이 측정에 섞이면 제어가 발산한다(리뷰 M2/M4, CI 실패 원인).
+//!
 //! ## 깊이(depth)의 정의
-//! 버퍼 깊이는 "지금 재생되는 샘플이 이상적인(최소 지연) 도착 시점보다 얼마나 늦게 재생되는가"로
-//! 정의한다. 패킷 i의 전송 지연 `transit_i = arrival_i - ts_i`(샘플 단위)에 대해 최근 200개
-//! 중 최솟값을 `min_transit`로 두면,
+//! 패킷 i의 `transit_i = arrival_i - ts_i`(샘플)의 최근 200개 최솟값을 `min_transit`라 할 때
 //!
 //! ```text
-//! depth = now - ts(재생 위치) - min_transit
+//! depth = now - ts(다음에 꺼낼 샘플) - min_transit      (버스트 직후 측정)
 //! ```
 //!
-//! 이 값은 지터에 흔들리지 않는 실제 재생 지연(버퍼 지연)이며, 송신측 클럭 드리프트가 있으면
-//! 서서히 늘거나 준다. 이를 EWMA로 평활해 목표 깊이와 비교한다.
+//! 버스트 직후가 한 주기 중 가장 얕은 시점이므로, 깊이가 목표 이상이면 다음 버스트도 채워진다.
 //!
 //! ## 목표 깊이
-//! 상대 지연 `transit_i - min_transit`의 95퍼센타일(최근 200개)을 p95라 할 때
-//! `target = clamp(ceil(p95 / F) + 1, min_frames, max_frames) × F` (F = 패킷 프레임 길이).
-//! 재생 요청 단위(내 프레임)가 F보다 크면 그 차이만큼 더한다.
+//! 상대 지연 `transit - min_transit`의 95퍼센타일(최근 200개)을 p95라 할 때
+//! `target = clamp(ceil(p95 / F) + 1, min_frames, max_frames) × F` (F = 피어 패킷 프레임).
+//! 목표는 바로 올리되, 내리는 것은 더 낮은 후보가 2초 동안 유지될 때만 한다(목표 떨림 방지).
 //!
-//! ## 보정
-//! - 깊이 > 목표 + F/4 → 디코드한 프레임에서 1샘플 버림(크로스페이드 시프트)
-//! - 깊이 < 목표 - F/4 → 1샘플 삽입
-//! - 깊이 - 목표 ≥ 3F → 패킷(프레임) 단위로 버림
+//! ## 보정 (데드밴드 + 히스테리시스)
+//! 오차 `e = depth_ewma - target`에 대해
+//! - 대기 상태에서 `e > enter`면 버림 모드, `e < -enter`면 삽입 모드로 들어간다.
+//! - 버림/삽입 모드에서는 디코드한 패킷마다 1샘플을 버리거나 넣는다(프레임 전체에 걸친 램프).
+//! - `|e| < exit`가 되면 대기로 돌아간다. `enter = max(F/2, 1ms)`, `exit = max(F/8, 4샘플)`.
+//! - 실제로 쌓인 패킷이 목표보다 3F 이상 많고 e ≥ 3F이면 패킷 단위로 버린다. 버리는 패킷도
+//!   디코드해 디코더 상태를 유지하고, 다음 프레임과 짧게 크로스페이드한다.
 //!
 //! ## 손실/지연
 //! - 다음 seq가 없고 그 뒤 seq가 이미 있으면 손실로 보고 은닉(Opus: 다음 패킷 FEC → 없으면
 //!   PLC, PCM: 직전 프레임 페이드아웃 1회 후 무음) 후 seq 전진.
 //! - 다음 seq도 그 뒤도 없으면(언더런) 은닉 프레임을 끼워 넣되 seq는 전진하지 않는다. 늦게 온
-//!   패킷을 그대로 재생하므로 깊이가 자연스럽게 늘어난다. 일정 시간 이상 지속되면 재버퍼링.
+//!   패킷을 그대로 재생하므로 깊이가 늘어난다. 200ms 이상 지속되면 재버퍼링.
 //! - 이미 재생 지난 seq는 폐기하고 `late` 증가.
 
 use std::collections::VecDeque;
@@ -35,27 +41,28 @@ use super::codec::Decoder;
 use super::config::{frame_samples_from_code, INTERNAL_RATE, MAX_PAYLOAD_BYTES};
 use crate::net::packet::Header;
 
-/// 슬롯 링 크기: 2초 분량(최소 프레임 2.5ms 기준).
-const SLOT_COUNT: usize = 800;
+/// 슬롯 링 크기: 2의 거듭제곱(u32 seq 랩에서도 슬롯 충돌 없음, 리뷰 L1). 2.5ms 기준 2.56초.
+const SLOT_COUNT: usize = 1024;
+const SLOT_MASK: u32 = SLOT_COUNT as u32 - 1;
 /// 지연 통계 창 크기.
 const DELAY_WINDOW: usize = 200;
 /// p95/최솟값 재계산 주기(패킷 수).
 const STATS_EVERY: usize = 10;
-/// 깊이 EWMA 계수.
-const DEPTH_ALPHA: f64 = 0.02;
+/// 깊이 EWMA 계수(버스트당 1회 측정).
+const DEPTH_ALPHA: f64 = 0.05;
 /// 최대 패킷 프레임(10ms).
 const MAX_PKT_FRAME: usize = 480;
 /// 손실률 창: 최대 2000패킷(2.5ms × 5초).
 const LOSS_WINDOW_MAX: usize = 2000;
 /// 언더런 은닉이 이 시간(ms) 이상 지속되면 재버퍼링.
 const STARVE_RESET_MS: f64 = 200.0;
-/// 크로스페이드 시프트 램프 길이 상한.
-const SHIFT_RAMP_MAX: usize = 64;
+/// 목표를 내리기 전 유지 시간(ms).
+const TARGET_DECAY_MS: f64 = 2000.0;
+/// 패킷 단위 버림 시 크로스페이드 길이(샘플).
+const DROP_XFADE: usize = 48;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JitterSettings {
-    /// 재생 요청 단위(채널당 샘플, 내 frame_samples).
-    pub request_frames: usize,
     /// 0이면 자동.
     pub min_ms: f32,
     pub max_ms: f32,
@@ -77,6 +84,13 @@ pub struct JitterStats {
     pub rebuffers: u64,
 }
 
+impl JitterStats {
+    /// 샘플/프레임 보정 총 횟수.
+    pub fn corrections(&self) -> u64 {
+        self.samples_dropped + self.samples_inserted + self.dropped_frames
+    }
+}
+
 struct Slot {
     seq: u32,
     valid: bool,
@@ -94,13 +108,19 @@ enum State {
     Playing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Correction {
+    Idle,
+    Drop,
+    Insert,
+}
+
 pub struct JitterBuffer {
     settings: JitterSettings,
     slots: Vec<Slot>,
     state: State,
     next_seq: u32,
     has_stream: bool,
-    /// 마지막으로 본 최대 seq.
     highest: u32,
 
     decoder: Option<Decoder>,
@@ -110,6 +130,7 @@ pub struct JitterBuffer {
     fifo_end_ts: i64,
 
     // 타임스탬프 언랩
+    have_ts: bool,
     last_ts: u32,
     ts_ext_base: i64,
 
@@ -124,7 +145,14 @@ pub struct JitterBuffer {
     rfc_jitter: f64,
     last_transit: Option<i64>,
 
+    // 목표(프레임 수) 및 하향 히스테리시스
+    target_frames: f64,
+    lower_for_samples: f64,
+
     depth_ewma: Option<f64>,
+    correction: Correction,
+    drop_frames_pending: usize,
+    trimming: bool,
     pkt_frame: usize,
     pkt_channels: usize,
 
@@ -137,6 +165,9 @@ pub struct JitterBuffer {
     // 스크래치
     dec_buf: Vec<f32>,
     shift_buf: Vec<f32>,
+    xfade_buf: Vec<f32>,
+    xfade_len: usize,
+    xfade_ch: usize,
 
     // 손실 창
     loss_ring: Vec<bool>,
@@ -172,8 +203,9 @@ impl JitterBuffer {
             has_stream: false,
             highest: 0,
             decoder: None,
-            fifo: VecDeque::with_capacity((MAX_PKT_FRAME * 8 + settings.request_frames * 2) * 2),
+            fifo: VecDeque::with_capacity(MAX_PKT_FRAME * 16 * 2),
             fifo_end_ts: 0,
+            have_ts: false,
             last_ts: 0,
             ts_ext_base: 0,
             transits: [0; DELAY_WINDOW],
@@ -185,8 +217,13 @@ impl JitterBuffer {
             p95_rel: 0.0,
             rfc_jitter: 0.0,
             last_transit: None,
+            target_frames: 0.0,
+            lower_for_samples: 0.0,
             depth_ewma: None,
-            pkt_frame: settings.request_frames,
+            correction: Correction::Idle,
+            drop_frames_pending: 0,
+            trimming: false,
+            pkt_frame: 240,
             pkt_channels: 1,
             last_frame: vec![0.0; MAX_PKT_FRAME * 2],
             last_frame_valid: false,
@@ -194,6 +231,9 @@ impl JitterBuffer {
             starve_samples: 0,
             dec_buf: vec![0.0; MAX_PKT_FRAME * 2],
             shift_buf: vec![0.0; (MAX_PKT_FRAME + 1) * 2],
+            xfade_buf: vec![0.0; MAX_PKT_FRAME * 2],
+            xfade_len: 0,
+            xfade_ch: 0,
             loss_ring: vec![false; LOSS_WINDOW_MAX],
             loss_pos: 0,
             loss_len: 0,
@@ -211,13 +251,13 @@ impl JitterBuffer {
     }
 
     fn unwrap_ts(&mut self, ts: u32) -> i64 {
-        let d = ts.wrapping_sub(self.last_ts) as i32 as i64;
-        // 첫 패킷이면 그대로
-        if self.transit_count == 0 && self.last_transit.is_none() {
+        if !self.have_ts {
+            self.have_ts = true;
             self.last_ts = ts;
             self.ts_ext_base = ts as i64;
             return self.ts_ext_base;
         }
+        let d = ts.wrapping_sub(self.last_ts) as i32 as i64;
         let ext = self.ts_ext_base + d;
         if d > 0 {
             self.last_ts = ts;
@@ -232,7 +272,7 @@ impl JitterBuffer {
     }
 
     fn slot_index(seq: u32) -> usize {
-        seq as usize % SLOT_COUNT
+        (seq & SLOT_MASK) as usize
     }
 
     fn reset_stream(&mut self) {
@@ -243,9 +283,13 @@ impl JitterBuffer {
         self.has_stream = false;
         self.fifo.clear();
         self.depth_ewma = None;
+        self.correction = Correction::Idle;
+        self.drop_frames_pending = 0;
+        self.trimming = false;
         self.conceal_run = 0;
         self.starve_samples = 0;
         self.last_frame_valid = false;
+        self.xfade_len = 0;
     }
 
     /// 패킷 프레임 길이(샘플).
@@ -253,21 +297,51 @@ impl JitterBuffer {
         self.pkt_frame.max(1)
     }
 
-    pub fn target_samples(&self) -> f64 {
+    fn frame_limits(&self) -> (f64, f64) {
         let f = self.frame() as f64;
         let spm = Self::samples_per_ms();
-        let auto = (self.p95_rel / f).ceil() + 1.0;
         let min_f = if self.settings.min_ms > 0.0 {
             (self.settings.min_ms as f64 * spm / f).ceil().max(1.0)
         } else {
             1.0
         };
         let max_f = (self.settings.max_ms as f64 * spm / f).floor().max(min_f);
-        let frames = auto.clamp(min_f, max_f);
-        frames * f + self.settings.request_frames.saturating_sub(self.frame()) as f64
+        (min_f, max_f)
     }
 
-    /// 수신 패킷 삽입. `payload`는 복호화된 평문.
+    pub fn target_samples(&self) -> f64 {
+        let (min_f, max_f) = self.frame_limits();
+        self.target_frames.clamp(min_f, max_f) * self.frame() as f64
+    }
+
+    fn update_target(&mut self, elapsed_samples: f64) {
+        let f = self.frame() as f64;
+        let (min_f, max_f) = self.frame_limits();
+        // 프레임 경계 근처의 p95가 목표를 25↔30ms처럼 오가지 않도록 양자화에 히스테리시스(±F/4):
+        // 올릴 때는 p95가 현재 용량을 F/4 넘게 초과해야, 내릴 때는 F/4 넘게 밑돌아야 한다.
+        let h = f / 4.0;
+        let up = (((self.p95_rel - h).max(0.0) / f).ceil() + 1.0).clamp(min_f, max_f);
+        let down = (((self.p95_rel + h) / f).ceil() + 1.0).clamp(min_f, max_f);
+        if self.target_frames == 0.0 {
+            self.target_frames = ((self.p95_rel / f).ceil() + 1.0).clamp(min_f, max_f);
+            return;
+        }
+        if up > self.target_frames {
+            self.target_frames = up;
+            self.lower_for_samples = 0.0;
+        } else if down < self.target_frames {
+            let cand = down;
+            self.lower_for_samples += elapsed_samples;
+            if self.lower_for_samples >= TARGET_DECAY_MS * Self::samples_per_ms() {
+                self.target_frames = cand;
+                self.lower_for_samples = 0.0;
+            }
+        } else {
+            self.lower_for_samples = 0.0;
+        }
+    }
+
+    /// 수신 패킷 삽입. `payload`는 복호화된 평문. `now_us`는 수신 시각.
     pub fn insert(&mut self, hdr: &Header, payload: &[u8], now_us: u64) {
         let Some(frame) = frame_samples_from_code(hdr.frame_code) else {
             return;
@@ -280,8 +354,10 @@ impl JitterBuffer {
         if self.has_stream {
             let d = seq_diff(seq, self.next_seq);
             if d < 0 {
-                if self.state == State::Buffering && -d < (SLOT_COUNT / 4) as i32 {
-                    // 시작 직후 순서가 뒤바뀐 이전 패킷: 시작점을 당긴다.
+                // 버퍼링 중에는 순서가 뒤바뀐 직전 패킷만 시작점을 당긴다(재전송으로 크게
+                // 되돌리는 것을 막기 위해 목표 깊이 이내로 제한, 리뷰 L5).
+                let back_limit = (self.target_frames.max(1.0) as i32 + 1).min(16);
+                if self.state == State::Buffering && -d <= back_limit {
                     self.next_seq = seq;
                 } else {
                     self.stats.late += 1;
@@ -332,8 +408,10 @@ impl JitterBuffer {
         self.transit_count = (self.transit_count + 1).min(DELAY_WINDOW);
         self.since_stats += 1;
         if self.transit_count <= STATS_EVERY || self.since_stats >= STATS_EVERY {
+            let elapsed = self.since_stats as f64 * self.frame() as f64;
             self.since_stats = 0;
             self.recompute_delay_stats();
+            self.update_target(elapsed);
         } else if transit < self.min_transit {
             self.min_transit = transit;
         }
@@ -360,60 +438,113 @@ impl JitterBuffer {
     }
 
     /// 다음 seq의 시작 타임스탬프 기준 깊이(버퍼링 중 판단용).
-    fn depth_if_start(&mut self, now_us: u64) -> Option<f64> {
+    fn depth_if_start(&self, now_us: u64) -> Option<f64> {
         let slot = &self.slots[Self::slot_index(self.next_seq)];
         if !(slot.valid && slot.seq == self.next_seq) {
             return None;
         }
-        let ts = slot.ts;
-        let ts_ext = self.ts_ext(ts);
-        Some((Self::now_samples(now_us) - ts_ext - self.min_transit) as f64)
+        Some((Self::now_samples(now_us) - self.ts_ext(slot.ts) - self.min_transit) as f64)
     }
 
-    /// 스테레오 인터리브로 `out.len() / 2` 프레임을 채운다.
-    pub fn pop(&mut self, out: &mut [f32], now_us: u64) {
+    /// 실제로 받아 둔(또는 그 사이 빈) 샘플 수: 다음 seq부터 최고 seq까지 + FIFO.
+    fn queued_samples(&self) -> f64 {
+        let span = seq_diff(self.highest, self.next_seq) + 1;
+        span.max(0) as f64 * self.frame() as f64 + (self.fifo.len() / 2) as f64
+    }
+
+    /// 스테레오 인터리브로 `out.len() / 2` 프레임을 채운다. 버퍼링 중이면 무음.
+    pub fn pop(&mut self, out: &mut [f32]) {
         let need = out.len() / 2;
         if self.state == State::Buffering {
-            self.skip_missing_head();
-            let ready = match self.depth_if_start(now_us) {
-                Some(d) => d + need as f64 >= self.target_samples(),
-                None => false,
-            };
-            if !ready {
-                out.fill(0.0);
-                return;
-            }
-            self.state = State::Playing;
-            let slot = &self.slots[Self::slot_index(self.next_seq)];
-            let ts = slot.ts;
-            self.fifo_end_ts = self.ts_ext(ts);
-            self.fifo.clear();
-            self.depth_ewma = None;
-            self.conceal_run = 0;
-            self.starve_samples = 0;
+            out.fill(0.0);
+            return;
         }
-
         while self.fifo.len() / 2 < need {
             if !self.produce_packet() {
-                // 재버퍼링 진입
                 break;
             }
         }
-
         let avail = (self.fifo.len() / 2).min(need);
-        for (i, o) in out.iter_mut().enumerate().take(avail * 2) {
-            *o = self.fifo.get(i).copied().unwrap_or(0.0);
+        for (o, s) in out[..avail * 2].iter_mut().zip(self.fifo.drain(..avail * 2)) {
+            *o = s;
         }
-        self.fifo.drain(..avail * 2);
         out[avail * 2..].fill(0.0);
+    }
 
-        if self.state == State::Playing {
-            let d = self.depth_now(now_us);
-            self.depth_ewma = Some(match self.depth_ewma {
-                None => d,
-                Some(e) => e + (d - e) * DEPTH_ALPHA,
-            });
+    /// 출력 버스트 종료. `now_us`는 출력 콜백 시각 추정치(장치 클럭 기준).
+    pub fn end_burst(&mut self, now_us: u64) {
+        match self.state {
+            State::Buffering => self.try_start(now_us),
+            State::Playing => {
+                let d = self.depth_now(now_us);
+                let e = match self.depth_ewma {
+                    None => d,
+                    Some(e) => e + (d - e) * DEPTH_ALPHA,
+                };
+                self.depth_ewma = Some(e);
+                self.update_correction(e);
+            }
         }
+    }
+
+    fn update_correction(&mut self, ewma: f64) {
+        let f = self.frame() as f64;
+        let target = self.target_samples();
+        let err = ewma - target;
+        let enter = (f / 2.0).max(Self::samples_per_ms());
+        let exit = (f / 8.0).max(4.0);
+        self.correction = match self.correction {
+            Correction::Idle if err > enter => Correction::Drop,
+            Correction::Idle if err < -enter => Correction::Insert,
+            Correction::Drop if err <= exit => Correction::Idle,
+            Correction::Insert if err >= -exit => Correction::Idle,
+            c => c,
+        };
+        // 패킷 단위 버림(히스테리시스): 추정 깊이와 실제 쌓인 양이 모두 목표를 3F 이상 넘으면
+        // 시작하고, 둘 중 하나가 목표 + F 안으로 들어오면 멈춘다. 버스트당 최대 1패킷.
+        let queued_excess = self.queued_samples() - target;
+        if !self.trimming && err >= 3.0 * f && queued_excess >= 3.0 * f {
+            self.trimming = true;
+        } else if self.trimming && (err < f || queued_excess < f) {
+            self.trimming = false;
+        }
+        self.drop_frames_pending = usize::from(self.trimming);
+    }
+
+    /// 버퍼링 → 재생 전환. 시작 깊이를 목표에 정확히 맞춘다(초과분은 건너뜀).
+    fn try_start(&mut self, now_us: u64) {
+        self.skip_missing_head();
+        let target = self.target_samples();
+        let Some(depth) = self.depth_if_start(now_us) else {
+            return;
+        };
+        if depth < target {
+            return;
+        }
+        let f = self.frame();
+        let mut excess = depth - target;
+        // 통째로 건너뛸 수 있는 패킷(뒤 패킷이 이미 있는 경우만)
+        while excess >= f as f64 && self.slot_has(self.next_seq.wrapping_add(1)) {
+            let idx = Self::slot_index(self.next_seq);
+            self.slots[idx].valid = false;
+            self.next_seq = self.next_seq.wrapping_add(1);
+            excess -= f as f64;
+        }
+        let slot = &self.slots[Self::slot_index(self.next_seq)];
+        self.fifo_end_ts = self.ts_ext(slot.ts);
+        self.fifo.clear();
+        self.state = State::Playing;
+        self.correction = Correction::Idle;
+        self.drop_frames_pending = 0;
+        self.trimming = false;
+        self.conceal_run = 0;
+        self.starve_samples = 0;
+        // 첫 패킷의 앞부분을 잘라 깊이 = 목표
+        if self.produce_packet() {
+            let cut = (excess.round().max(0.0) as usize).min(self.fifo.len() / 2);
+            self.fifo.drain(..cut * 2);
+        }
+        self.depth_ewma = Some(self.depth_now(now_us));
     }
 
     /// 버퍼링 중 시작 seq가 없고 뒤 패킷이 있으면 처음 존재하는 seq로 시작점을 옮긴다.
@@ -445,8 +576,7 @@ impl JitterBuffer {
 
     fn push_loss(&mut self, lost: bool) {
         let win = ((5000.0 * Self::samples_per_ms()) as usize / self.frame()).clamp(1, LOSS_WINDOW_MAX);
-        if self.loss_len >= win {
-            // 가장 오래된 항목 제거
+        while self.loss_len >= win {
             let oldest = (self.loss_pos + LOSS_WINDOW_MAX - self.loss_len) % LOSS_WINDOW_MAX;
             if self.loss_ring[oldest] {
                 self.loss_lost -= 1;
@@ -461,28 +591,51 @@ impl JitterBuffer {
         }
     }
 
+    fn ensure_decoder(&mut self, opus: bool, ch: usize) {
+        if !self.decoder.as_ref().is_some_and(|d| d.matches(opus, ch)) {
+            self.decoder = Decoder::new(opus, ch).ok();
+        }
+    }
+
+    /// 패킷 단위 버림: 디코더 상태 유지를 위해 디코드하고, 다음 프레임과 크로스페이드할
+    /// 앞부분을 보관한다.
+    fn drop_one_packet(&mut self) {
+        let seq = self.next_seq;
+        let idx = Self::slot_index(seq);
+        if self.slot_has(seq) {
+            let (opus, stereo, len, pframe) = {
+                let s = &self.slots[idx];
+                (s.flags & 1 != 0, s.flags & 2 != 0, s.len, s.frame)
+            };
+            let ch = if stereo { 2 } else { 1 };
+            self.ensure_decoder(opus, ch);
+            let n = pframe * ch;
+            let ok = match self.decoder.as_mut() {
+                Some(d) => d.decode(&self.slots[idx].data[..len], &mut self.xfade_buf[..n]).unwrap_or(0) == pframe,
+                None => false,
+            };
+            if ok {
+                self.xfade_len = DROP_XFADE.min(pframe);
+                self.xfade_ch = ch;
+            }
+            self.slots[idx].valid = false;
+        }
+        self.next_seq = seq.wrapping_add(1);
+        self.stats.dropped_frames += 1;
+        let f = self.frame() as f64;
+        if let Some(e) = self.depth_ewma.as_mut() {
+            *e -= f;
+        }
+    }
+
     /// 패킷 하나만큼 FIFO에 생산. 재버퍼링으로 전환하면 false.
     fn produce_packet(&mut self) -> bool {
-        let f = self.frame();
-        let target = self.target_samples();
-
-        // 프레임 단위 버림: 깊이가 목표보다 3프레임 이상 크면
-        if let Some(e) = self.depth_ewma {
-            if e - target >= 3.0 * f as f64 && self.has_later_packet() {
-                let idx = Self::slot_index(self.next_seq);
-                let skipped_frame = if self.slots[idx].valid && self.slots[idx].seq == self.next_seq {
-                    self.slots[idx].valid = false;
-                    self.slots[idx].frame
-                } else {
-                    f
-                };
-                self.next_seq = self.next_seq.wrapping_add(1);
-                self.fifo_end_ts += skipped_frame as i64;
-                self.depth_ewma = Some(e - skipped_frame as f64);
-                self.stats.dropped_frames += 1;
-            }
+        if self.drop_frames_pending > 0 && self.has_later_packet() && self.slot_has(self.next_seq) {
+            self.drop_frames_pending -= 1;
+            self.drop_one_packet();
         }
 
+        let f = self.frame();
         let seq = self.next_seq;
         let idx = Self::slot_index(seq);
         let ch;
@@ -494,9 +647,7 @@ impl JitterBuffer {
                 (s.flags & 1 != 0, s.flags & 2 != 0, s.len, s.frame, s.ts)
             };
             ch = if stereo { 2 } else { 1 };
-            if !self.decoder.as_ref().is_some_and(|d| d.matches(opus, ch)) {
-                self.decoder = Decoder::new(opus, ch).ok();
-            }
+            self.ensure_decoder(opus, ch);
             let out = &mut self.dec_buf[..pframe * ch];
             let decoded = match self.decoder.as_mut() {
                 Some(d) => d.decode(&self.slots[idx].data[..len], out).unwrap_or(0),
@@ -505,6 +656,18 @@ impl JitterBuffer {
             if decoded != pframe {
                 out.fill(0.0);
             }
+            // 패킷 버림 직후: 버린 프레임 앞부분 → 새 프레임으로 크로스페이드
+            if self.xfade_len > 0 && self.xfade_ch == ch {
+                let l = self.xfade_len;
+                for i in 0..l {
+                    let w = (i + 1) as f32 / (l + 1) as f32;
+                    for c in 0..ch {
+                        let k = i * ch + c;
+                        out[k] = self.xfade_buf[k] * (1.0 - w) + out[k] * w;
+                    }
+                }
+            }
+            self.xfade_len = 0;
             frames = pframe;
             self.slots[idx].valid = false;
             self.next_seq = seq.wrapping_add(1);
@@ -522,7 +685,6 @@ impl JitterBuffer {
                 self.starve_samples += f;
                 if self.starve_samples as f64 > STARVE_RESET_MS * Self::samples_per_ms() {
                     self.stats.rebuffers += 1;
-                    // 다음 패킷이 오면 그 seq부터 다시 버퍼링
                     let keep_next = self.next_seq;
                     self.reset_stream();
                     self.has_stream = true;
@@ -538,8 +700,7 @@ impl JitterBuffer {
             if let Some(dec) = self.decoder.as_mut() {
                 if matches!(dec, Decoder::Opus { .. }) {
                     let next = seq.wrapping_add(1);
-                    let nidx = Self::slot_index(next);
-                    let ns = &self.slots[nidx];
+                    let ns = &self.slots[Self::slot_index(next)];
                     let r = if lost && ns.valid && ns.seq == next {
                         dec.decode_fec(&ns.data[..ns.len], out)
                     } else {
@@ -560,6 +721,7 @@ impl JitterBuffer {
                     out.fill(0.0);
                 }
             }
+            self.xfade_len = 0;
             self.conceal_run += 1;
             self.stats.concealed += 1;
             if lost {
@@ -570,37 +732,41 @@ impl JitterBuffer {
         }
         self.stats.produced += 1;
 
-        // 샘플 단위 드리프트 보정 (불감대 ±F/4)
-        let half = f as f64 / 4.0;
+        // 샘플 단위 드리프트 보정(모드가 켜져 있을 때만 패킷당 1샘플)
         let mut out_frames = frames;
         let mut use_shift = false;
-        if let Some(e) = self.depth_ewma {
-            if frames > 2 {
-                if e > target + half {
+        if frames > 2 {
+            match self.correction {
+                Correction::Drop => {
                     shift_one(&self.dec_buf[..frames * ch], ch, frames, &mut self.shift_buf, true);
                     out_frames = frames - 1;
                     use_shift = true;
                     self.stats.samples_dropped += 1;
-                    self.depth_ewma = Some(e - 1.0);
-                } else if e < target - half {
+                    if let Some(e) = self.depth_ewma.as_mut() {
+                        *e -= 1.0;
+                    }
+                }
+                Correction::Insert => {
                     shift_one(&self.dec_buf[..frames * ch], ch, frames, &mut self.shift_buf, false);
                     out_frames = frames + 1;
                     use_shift = true;
                     self.stats.samples_inserted += 1;
-                    self.depth_ewma = Some(e + 1.0);
+                    if let Some(e) = self.depth_ewma.as_mut() {
+                        *e += 1.0;
+                    }
                 }
+                Correction::Idle => {}
             }
         }
         let src: &[f32] = if use_shift { &self.shift_buf[..out_frames * ch] } else { &self.dec_buf[..out_frames * ch] };
-        // 스테레오로 FIFO에 적재. 보정으로 바뀐 길이는 재생 위치 계산에 반영된다
-        // (fifo_end_ts는 원래 프레임 끝 그대로 두므로 1샘플 버리면 재생 위치가 1 앞당겨짐).
-        for i in 0..out_frames {
-            if ch == 2 {
-                self.fifo.push_back(src[i * 2]);
-                self.fifo.push_back(src[i * 2 + 1]);
-            } else {
-                self.fifo.push_back(src[i]);
-                self.fifo.push_back(src[i]);
+        // 스테레오로 FIFO에 적재. fifo_end_ts는 원래 프레임 끝 그대로 두므로 1샘플 버리면
+        // 재생 위치가 1 앞당겨진다(깊이 -1).
+        if ch == 2 {
+            self.fifo.extend(src.iter().copied());
+        } else {
+            for &s in src {
+                self.fifo.push_back(s);
+                self.fifo.push_back(s);
             }
         }
         true
@@ -629,16 +795,16 @@ impl JitterBuffer {
     }
 }
 
-/// 1샘플 버림(`drop=true`) 또는 삽입. 프레임 중앙에서 짧은 램프로 읽기 위치를 ±1 시프트한다
-/// (선형 보간 크로스페이드). `dst`는 (frames±1)×ch 이상이어야 한다.
+/// 1샘플 버림(`drop=true`) 또는 삽입. 읽기 위치를 프레임 전체에 걸쳐 선형으로 ±1 시프트한다
+/// (선형 보간). 국소 피치 편차가 1/frames로 작다(240샘플이면 약 7센트, 리뷰 M2).
+/// `dst`는 (frames±1)×ch 이상이어야 한다. `frames > 2`.
 pub fn shift_one(src: &[f32], ch: usize, frames: usize, dst: &mut [f32], drop: bool) {
     let out_frames = if drop { frames - 1 } else { frames + 1 };
-    let ramp = (frames / 2).clamp(1, SHIFT_RAMP_MAX);
-    let p = ((frames - ramp) / 2) as f32;
-    let l = ramp as f32;
+    // 마지막 출력 샘플이 마지막 입력 샘플에 정확히 닿도록 램프 길이를 잡는다.
+    let l = if drop { (frames - 2) as f32 } else { frames as f32 };
     let last = (frames - 1) as f32;
     for j in 0..out_frames {
-        let r = ((j as f32 - p) / l).clamp(0.0, 1.0);
+        let r = (j as f32 / l).clamp(0.0, 1.0);
         let pos = if drop { j as f32 + r } else { j as f32 - r }.clamp(0.0, last);
         let i0 = pos.floor() as usize;
         let i1 = (i0 + 1).min(frames - 1);
@@ -700,74 +866,147 @@ mod tests {
         }
     }
 
-    struct SimResult {
-        stats: JitterStats,
-        /// (초, buffer_ms) 샘플
-        trace: Vec<(f64, f32)>,
-        silent_pops_after_start: usize,
-    }
-
-    /// 이벤트 시뮬레이션. 송신 클럭은 (1+drift_ppm)배 빠르게, 네트워크 지연은 base + U(0,jitter),
-    /// 손실 확률 loss. 수신측은 request 단위로 정확한 주기로 pop.
-    #[allow(clippy::too_many_arguments)]
-    fn simulate(
+    #[derive(Clone, Copy)]
+    struct Sim {
         codec: CodecKind,
+        /// 송신 패킷 프레임
         frame: usize,
-        request: usize,
+        /// 수신 장치 콜백(버스트) 크기
+        burst: usize,
+        /// 워커 pop 단위
+        chunk: usize,
         drift_ppm: f64,
         jitter_ms: f64,
         loss: f64,
         seconds: f64,
         seed: u64,
-    ) -> SimResult {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let mut jb = JitterBuffer::new(JitterSettings { request_frames: request, min_ms: 0.0, max_ms: 80.0 });
-        let mut tx = Sender::new(codec, frame, u32::MAX - 50, u32::MAX - 10_000);
-        let send_period_us = frame as f64 / 48000.0 * 1e6 / (1.0 + drift_ppm * 1e-6);
-        let pop_period_us = request as f64 / 48000.0 * 1e6;
+        /// 송신측 장치 콜백 크기(패킷이 이 단위로 몰려서 나감)
+        tx_burst: usize,
+    }
+
+    impl Default for Sim {
+        fn default() -> Self {
+            Self {
+                codec: CodecKind::Pcm16,
+                frame: 240,
+                burst: 240,
+                chunk: 64,
+                drift_ppm: 0.0,
+                jitter_ms: 0.0,
+                loss: 0.0,
+                seconds: 5.0,
+                seed: 1,
+                tx_burst: 0,
+            }
+        }
+    }
+
+    struct SimResult {
+        stats: JitterStats,
+        /// (초, buffer_ms)
+        trace: Vec<(f64, f32)>,
+        /// 시작 1초 이후 무음 청크 수
+        silent_chunks: usize,
+        /// 시작 1초 이후 보정 횟수
+        corrections_after_1s: u64,
+        /// 5초 시점 통계(정착 후 보정 방향 확인용)
+        stats_at_5s: JitterStats,
+        /// 인접 샘플 불연속 수(L 채널, 차 > 0.08)
+        discontinuities: usize,
+    }
+
+    /// 이벤트 시뮬레이션. 송신 클럭은 (1+drift_ppm)배 빠르고, 네트워크 지연은 base + U(0,jitter),
+    /// 손실 확률은 loss다. 수신측은 `burst`마다 `chunk` 단위로 연달아 pop한 뒤 `end_burst`를 부른다.
+    fn simulate(p: Sim) -> SimResult {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(p.seed);
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0 });
+        let mut tx = Sender::new(p.codec, p.frame, u32::MAX - 50, u32::MAX - 10_000);
+        let send_period_us = p.frame as f64 / 48000.0 * 1e6 / (1.0 + p.drift_ppm * 1e-6);
+        let burst_period_us = p.burst as f64 / 48000.0 * 1e6;
         let base_us = 3000.0;
 
-        // 미리 도착 이벤트 생성
         let mut arrivals: Vec<(f64, Header, Vec<u8>)> = Vec::new();
         let mut t = 0.0;
-        while t < seconds * 1e6 {
-            let (h, p) = tx.next();
-            if rng.gen::<f64>() >= loss {
-                let d = base_us + rng.gen::<f64>() * jitter_ms * 1000.0;
-                arrivals.push((t + d, h, p));
+        let mut k = 0u64;
+        while t < p.seconds * 1e6 {
+            let (h, pk) = tx.next();
+            // 송신측 장치 버스트: tx_burst마다 몰아서 나감
+            let send_t = if p.tx_burst > p.frame {
+                let per = (p.tx_burst / p.frame) as u64;
+                ((k / per + 1) * per) as f64 * send_period_us
+            } else {
+                t
+            };
+            if rng.gen::<f64>() >= p.loss {
+                let d = base_us + rng.gen::<f64>() * p.jitter_ms * 1000.0;
+                arrivals.push((send_t + d, h, pk));
             }
             t += send_period_us;
+            k += 1;
         }
         arrivals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-        let mut out = vec![0f32; request * 2];
+        let mut out = vec![0f32; p.chunk * 2];
         let mut ai = 0;
-        let mut pop_t = 0.0;
+        let mut bt = 0.0;
         let mut trace = Vec::new();
         let mut silent = 0;
         let mut started = false;
-        while pop_t < seconds * 1e6 {
-            while ai < arrivals.len() && arrivals[ai].0 <= pop_t {
-                let (at, h, p) = &arrivals[ai];
-                jb.insert(h, p, *at as u64);
+        let mut corr_at_1s = None;
+        let mut at_5s = None;
+        let mut prev = None::<f32>;
+        let mut disc = 0;
+        let mut next_trace = 0.0;
+        while bt < p.seconds * 1e6 {
+            while ai < arrivals.len() && arrivals[ai].0 <= bt {
+                let (at, h, pk) = &arrivals[ai];
+                jb.insert(h, pk, *at as u64);
                 ai += 1;
             }
-            jb.pop(&mut out, pop_t as u64);
+            let mut left = p.burst;
+            while left > 0 {
+                let n = left.min(p.chunk);
+                jb.pop(&mut out[..n * 2]);
+                if started && bt > 1e6 {
+                    if out[..n * 2].iter().all(|x| x.abs() < 1e-6) {
+                        silent += 1;
+                    }
+                    for fr in out[..n * 2].as_chunks::<2>().0 {
+                        if let Some(pv) = prev {
+                            if (fr[0] - pv).abs() > 0.08 {
+                                disc += 1;
+                            }
+                        }
+                        prev = Some(fr[0]);
+                    }
+                }
+                left -= n;
+            }
+            jb.end_burst(bt as u64);
             if jb.is_playing() {
                 started = true;
             }
-            if started && pop_t > 1e6 {
-                let e: f32 = out.iter().map(|x| x * x).sum();
-                if e < 1e-6 {
-                    silent += 1;
-                }
+            if bt >= 1e6 && corr_at_1s.is_none() {
+                corr_at_1s = Some(jb.stats().corrections());
             }
-            if (pop_t as u64) % 250_000 < pop_period_us as u64 {
-                trace.push((pop_t / 1e6, jb.stats().buffer_ms));
+            if bt >= 5e6 && at_5s.is_none() {
+                at_5s = Some(jb.stats());
             }
-            pop_t += pop_period_us;
+            if bt >= next_trace {
+                trace.push((bt / 1e6, jb.stats().buffer_ms));
+                next_trace += 250_000.0;
+            }
+            bt += burst_period_us;
         }
-        SimResult { stats: jb.stats(), trace, silent_pops_after_start: silent }
+        let stats = jb.stats();
+        SimResult {
+            corrections_after_1s: stats.corrections() - corr_at_1s.unwrap_or(0),
+            stats_at_5s: at_5s.unwrap_or_default(),
+            stats,
+            trace,
+            silent_chunks: silent,
+            discontinuities: disc,
+        }
     }
 
     fn mean_buffer(trace: &[(f64, f32)], from: f64, to: f64) -> f32 {
@@ -776,84 +1015,112 @@ mod tests {
     }
 
     #[test]
-    fn clean_network_low_latency() {
-        let r = simulate(CodecKind::Pcm16, 240, 240, 0.0, 0.0, 0.0, 5.0, 1);
+    fn clean_network_zero_concealment_and_zero_corrections() {
+        // 리뷰 매트릭스: 수신 장치 버퍼가 프레임보다 큰 경우 포함(M4), 드리프트 0이면 보정 0(M2)
+        for (frame, burst) in [(240, 128), (120, 480), (240, 480), (240, 1024), (480, 1024), (120, 1024), (480, 128)] {
+            let r = simulate(Sim { frame, burst, seconds: 6.0, ..Default::default() });
+            assert_eq!(r.stats.concealed, 0, "frame {frame} burst {burst}: {:?}", r.stats);
+            assert_eq!(r.stats.corrections(), 0, "드리프트 0이면 보정 0: frame {frame} burst {burst}: {:?}", r.stats);
+            assert_eq!(r.silent_chunks, 0);
+            assert_eq!(r.discontinuities, 0, "frame {frame} burst {burst}");
+            assert!(r.stats.buffer_ms < 12.0, "깨끗한 망은 지연이 작아야 함: {:?}", r.stats);
+        }
+    }
+
+    #[test]
+    fn sender_bursts_are_absorbed() {
+        // 송신측 장치 버퍼 480(10ms)마다 프레임 2.5ms 4개가 몰려 나가는 경우
+        let r = simulate(Sim { frame: 120, burst: 480, tx_burst: 480, seconds: 6.0, ..Default::default() });
         assert_eq!(r.stats.concealed, 0, "{:?}", r.stats);
-        assert_eq!(r.stats.late, 0);
-        assert!(r.stats.buffer_ms < 12.0, "깨끗한 망에서는 지연이 작아야 함: {:?}", r.stats);
-        assert_eq!(r.silent_pops_after_start, 0);
+        assert_eq!(r.corrections_after_1s, 0, "{:?}", r.stats);
+        assert_eq!(r.discontinuities, 0);
     }
 
     #[test]
     fn jitter_and_loss_opus() {
-        let r = simulate(CodecKind::Opus, 240, 240, 0.0, 20.0, 0.05, 20.0, 2);
+        let r = simulate(Sim {
+            codec: CodecKind::Opus,
+            jitter_ms: 20.0,
+            loss: 0.05,
+            seconds: 20.0,
+            seed: 2,
+            ..Default::default()
+        });
         let s = r.stats;
         let ratio = s.concealed as f64 / s.produced as f64;
-        assert!(ratio < 0.12, "은닉 비율 {ratio} {s:?}");
-        assert!((2.0..12.0).contains(&s.loss_pct), "손실률 추정 {s:?}");
+        assert!(ratio < 0.08, "은닉 비율 {ratio} {s:?}");
+        assert!((2.0..9.0).contains(&s.loss_pct), "손실률 추정 {s:?}");
         assert!(s.target_ms >= 15.0 && s.target_ms <= 35.0, "목표 깊이가 지터를 반영해야 함 {s:?}");
         let late = mean_buffer(&r.trace, 10.0, 20.0);
-        assert!((late - s.target_ms).abs() < 8.0, "깊이 {late} vs 목표 {}", s.target_ms);
+        assert!((late - s.target_ms).abs() < 4.0, "깊이 {late} vs 목표 {}", s.target_ms);
+        assert_eq!(s.dropped_frames, 0, "정상 상태에서 패킷 단위 버림 없음: {s:?}");
     }
 
     #[test]
     fn reordering_handled() {
-        // 지터 20ms에 2.5ms 프레임이면 순서가 많이 뒤바뀐다
-        let r = simulate(CodecKind::Pcm16, 120, 120, 0.0, 20.0, 0.0, 10.0, 3);
+        let r = simulate(Sim { frame: 120, burst: 128, jitter_ms: 20.0, seconds: 10.0, seed: 3, ..Default::default() });
         let ratio = r.stats.concealed as f64 / r.stats.produced as f64;
-        assert!(ratio < 0.05, "순서 뒤바뀜에서 은닉 비율 {ratio} {:?}", r.stats);
+        assert!(ratio < 0.03, "순서 뒤바뀜에서 은닉 비율 {ratio} {:?}", r.stats);
     }
 
-    fn drift_case(ppm: f64) {
-        let r = simulate(CodecKind::Pcm16, 240, 240, ppm, 5.0, 0.0, 60.0, 4);
+    fn drift_case(ppm: f64, burst: usize) {
+        let r = simulate(Sim { burst, drift_ppm: ppm, jitter_ms: 5.0, seconds: 60.0, seed: 4, ..Default::default() });
         let s = r.stats;
         let mid = mean_buffer(&r.trace, 20.0, 30.0);
         let end = mean_buffer(&r.trace, 50.0, 60.0);
-        println!("drift {ppm}ppm: target {:.2}ms mid {mid:.2}ms end {end:.2}ms stats {s:?}", s.target_ms);
-        assert!((end - s.target_ms).abs() < 3.0, "드리프트 {ppm}ppm에서 목표 근처 수렴: end={end} target={}", s.target_ms);
+        println!("drift {ppm}ppm burst {burst}: target {:.2}ms mid {mid:.2}ms end {end:.2}ms stats {s:?}", s.target_ms);
+        // 데드밴드(F/2 = 2.5ms) 안에서 수렴
+        assert!((end - s.target_ms).abs() < 3.0, "드리프트 {ppm}ppm: end={end} target={}", s.target_ms);
         assert!((end - mid).abs() < 2.0, "지연이 누적되면 안 됨: mid={mid} end={end}");
-        // 200ppm × 60s ≈ 576샘플. 시작 직후 목표까지 채우는 삽입이 섞이므로 방향별 하한만 본다.
+        // 200ppm × 60s ≈ 576샘플(불감대 안에 남는 몫 제외). 정착(5초) 이후에는 한 방향으로만
+        // 보정해야 한다(진동 없음). 시작 직후의 목표 재설정분은 제외.
+        let s5 = r.stats_at_5s;
+        let (dropped, inserted) = (s.samples_dropped - s5.samples_dropped, s.samples_inserted - s5.samples_inserted);
         if ppm > 0.0 {
-            assert!(s.samples_dropped + s.dropped_frames * 240 >= 250, "{s:?}");
+            assert!(dropped >= 300 && inserted == 0, "5초 이후 버림 {dropped} 삽입 {inserted}: {s:?}");
         } else {
-            assert!(s.samples_inserted >= 250, "{s:?}");
+            assert!(inserted >= 300 && dropped == 0, "5초 이후 삽입 {inserted} 버림 {dropped}: {s:?}");
         }
-        assert_eq!(r.silent_pops_after_start, 0, "드리프트 보정 중 끊김 없음");
+        assert_eq!(s.dropped_frames, 0, "{s:?}");
+        assert_eq!(r.silent_chunks, 0, "드리프트 보정 중 끊김 없음");
     }
 
     #[test]
     fn drift_plus_200ppm_converges() {
-        drift_case(200.0);
+        drift_case(200.0, 240);
+        drift_case(200.0, 1024);
     }
 
     #[test]
     fn drift_minus_200ppm_converges() {
-        drift_case(-200.0);
+        drift_case(-200.0, 240);
+        drift_case(-200.0, 1024);
     }
 
     #[test]
     fn mismatched_frame_sizes() {
-        // 피어는 2.5ms, 나는 10ms 단위로 꺼냄
-        let r = simulate(CodecKind::Opus, 120, 480, 0.0, 5.0, 0.0, 5.0, 5);
-        assert_eq!(r.silent_pops_after_start, 0, "{:?}", r.stats);
-        let r = simulate(CodecKind::Opus, 480, 120, 0.0, 5.0, 0.0, 5.0, 6);
-        assert_eq!(r.silent_pops_after_start, 0, "{:?}", r.stats);
+        let r = simulate(Sim { codec: CodecKind::Opus, frame: 120, burst: 480, jitter_ms: 5.0, ..Default::default() });
+        assert_eq!(r.silent_chunks, 0, "{:?}", r.stats);
+        let r = simulate(Sim { codec: CodecKind::Opus, frame: 480, burst: 128, jitter_ms: 5.0, seed: 6, ..Default::default() });
+        assert_eq!(r.silent_chunks, 0, "{:?}", r.stats);
     }
 
     #[test]
     fn late_packets_discarded() {
-        let mut jb = JitterBuffer::new(JitterSettings { request_frames: 240, min_ms: 0.0, max_ms: 80.0 });
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0 });
         let mut tx = Sender::new(CodecKind::Pcm16, 240, 10, 0);
         let pkts: Vec<_> = (0..20).map(|_| tx.next()).collect();
         let mut out = vec![0f32; 480];
         let mut t = 0u64;
         for (h, p) in pkts.iter().take(10) {
             jb.insert(h, p, t);
-            jb.pop(&mut out, t);
+            jb.pop(&mut out);
+            jb.end_burst(t);
             t += 5000;
         }
         for _ in 0..5 {
-            jb.pop(&mut out, t);
+            jb.pop(&mut out);
+            jb.end_burst(t);
             t += 5000;
         }
         let before = jb.stats().late;
@@ -862,19 +1129,29 @@ mod tests {
     }
 
     #[test]
+    fn replayed_old_packet_cannot_rewind_buffering() {
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0 });
+        let mut tx = Sender::new(CodecKind::Pcm16, 240, 1000, 0);
+        let pkts: Vec<_> = (0..300).map(|_| tx.next()).collect();
+        jb.insert(&pkts[250].0, &pkts[250].1, 0);
+        // 200개 이전 패킷 재전송 → 버퍼링 중이라도 시작점을 크게 되돌리지 않음
+        jb.insert(&pkts[50].0, &pkts[50].1, 10);
+        assert_eq!(jb.stats().late, 1);
+    }
+
+    #[test]
     fn pcm_concealment_fades_then_silence() {
-        let mut jb = JitterBuffer::new(JitterSettings { request_frames: 240, min_ms: 0.0, max_ms: 80.0 });
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0 });
         let mut tx = Sender::new(CodecKind::Pcm16, 240, 0, 0);
         let mut out = vec![0f32; 480];
         let mut t = 0u64;
-        // 정상 재생
         for _ in 0..20 {
             let (h, p) = tx.next();
             jb.insert(&h, &p, t);
-            jb.pop(&mut out, t);
+            jb.pop(&mut out);
+            jb.end_burst(t);
             t += 5000;
         }
-        // 3개 손실 후 다음 패킷 도착
         let lost: Vec<_> = (0..3).map(|_| tx.next()).collect();
         drop(lost);
         let (h, p) = tx.next();
@@ -882,7 +1159,8 @@ mod tests {
         let c0 = jb.stats().concealed;
         let mut energies = vec![];
         for _ in 0..6 {
-            jb.pop(&mut out, t);
+            jb.pop(&mut out);
+            jb.end_burst(t);
             energies.push(out.iter().map(|x| x * x).sum::<f32>());
             t += 5000;
             let (h, p) = tx.next();
@@ -893,20 +1171,69 @@ mod tests {
     }
 
     #[test]
+    fn backlog_is_trimmed_with_crossfade() {
+        // 1초 단절 후 몰려온 패킷(와이파이 버스트) → 패킷 단위 버림 + 크로스페이드, 클릭 없음
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0 });
+        let mut tx = Sender::new(CodecKind::Opus, 240, 0, 0);
+        let mut out = vec![0f32; 128 * 2];
+        let mut t = 0u64;
+        let mut prev = None::<f32>;
+        let mut max_step = 0f32;
+        let mut held: Vec<(Header, Vec<u8>)> = Vec::new();
+        let mut send_t = 0u64;
+        let mut burst_t = 0u64;
+        while t < 6_000_000 {
+            while send_t <= t {
+                let pkt = tx.next();
+                if (2_000_000..2_100_000).contains(&send_t) {
+                    held.push(pkt); // 100ms 동안 지연
+                } else {
+                    if send_t >= 2_100_000 && !held.is_empty() {
+                        for (h, p) in held.drain(..) {
+                            jb.insert(&h, &p, send_t + 3000);
+                        }
+                    }
+                    jb.insert(&pkt.0, &pkt.1, send_t + 3000);
+                }
+                send_t += 5000;
+            }
+            if t >= burst_t {
+                jb.pop(&mut out);
+                jb.end_burst(t);
+                if t > 1_000_000 {
+                    for fr in out.as_chunks::<2>().0 {
+                        if let Some(p) = prev {
+                            max_step = max_step.max((fr[0] - p).abs());
+                        }
+                        prev = Some(fr[0]);
+                    }
+                }
+                burst_t += 128 * 1_000_000 / 48_000;
+            }
+            t += 500;
+        }
+        let s = jb.stats();
+        println!("backlog: {s:?}, max step {max_step}");
+        assert!(s.dropped_frames > 0, "쌓인 지연은 패킷 단위로 줄여야 함: {s:?}");
+        assert!(s.buffer_ms < s.target_ms + 3.0, "복귀 후 목표 근처: {s:?}");
+    }
+
+    #[test]
     fn shift_one_lengths_and_continuity() {
         let src: Vec<f32> = (0..240).map(|i| i as f32).collect();
         let mut dst = vec![0f32; 241];
         shift_one(&src, 1, 240, &mut dst, true);
         assert_eq!(dst[0], 0.0);
-        assert!((dst[238] - 239.0).abs() < 1e-4);
+        assert!((dst[238] - 239.0).abs() < 1e-3);
         for w in dst[..239].windows(2) {
-            assert!(w[1] - w[0] >= 1.0 - 1e-4 && w[1] - w[0] <= 2.0 + 1e-4);
+            // 프레임 전체 램프: 간격이 1 + 1/238 근처로 고르게
+            assert!((w[1] - w[0] - 1.0).abs() < 0.01, "{}", w[1] - w[0]);
         }
         shift_one(&src, 1, 240, &mut dst, false);
         assert_eq!(dst[0], 0.0);
-        assert!((dst[240] - 239.0).abs() < 1e-4);
+        assert!((dst[240] - 239.0).abs() < 1e-3);
         for w in dst.windows(2) {
-            assert!(w[1] - w[0] >= -1e-4 && w[1] - w[0] <= 1.0 + 1e-4);
+            assert!((w[1] - w[0] - 1.0).abs() < 0.01);
         }
     }
 }
