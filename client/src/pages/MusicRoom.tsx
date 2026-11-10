@@ -29,7 +29,6 @@ const STEM_LABELS: Record<string, { icon: string; label: string }> = {
 export function MusicRoom() {
   // 상태 관리
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [_isUploading, setIsUploading] = useState(false)
   const [isSeparating, setIsSeparating] = useState(false)
   const [separatedStems, setSeparatedStems] = useState<SeparatedStems>({})
   const [availableStems, setAvailableStems] = useState<string[]>([])
@@ -135,7 +134,7 @@ export function MusicRoom() {
         const bytes = new Uint8Array([...name].map(c => c.charCodeAt(0) & 0xFF))
         const decoded = new TextDecoder('utf-8').decode(bytes)
         if (/[가-힣ᄀ-ᇿ㄰-㆏]/.test(decoded)) return decoded
-      } catch {}
+      } catch { /* UTF-8 디코딩 실패 시 원래 이름 사용 */ }
       return name
     }
     const history = await getStemHistory()
@@ -154,7 +153,6 @@ export function MusicRoom() {
       if (!confirmed) return
     }
 
-    setIsUploading(true)
     setIsSeparating(true)
     setUploadStatus('음원 분리 중... (시간이 걸릴 수 있습니다)')
 
@@ -204,7 +202,6 @@ export function MusicRoom() {
       setUploadStatus(`오류: ${error instanceof Error ? error.message : 'Unknown error'}`)
       alert(`음원 분리 실패: ${error instanceof Error ? error.message : 'Unknown error'}`)
     } finally {
-      setIsUploading(false)
       setIsSeparating(false)
     }
   }

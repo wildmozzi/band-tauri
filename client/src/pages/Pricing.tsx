@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
-import { useAuth } from '../contexts/AuthContext'
-import { usePremium } from '../contexts/PremiumContext'
+import { useAuth } from '../contexts/useAuth'
+import { usePremium } from '../contexts/usePremium'
 
 type PlanType = 'free' | 'standard' | 'pro'
 

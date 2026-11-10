@@ -6,7 +6,7 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { supabase } from '../lib/supabaseClient'
-import { useAuth } from './AuthContext'
+import { useAuth } from './useAuth'
 import {
   engineErrorMessage,
   engineListDevices,

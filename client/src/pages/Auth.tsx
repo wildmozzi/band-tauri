@@ -1,6 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { useAuth } from '../contexts/AuthContext'
+import { useAuth } from '../contexts/useAuth'
 
 interface SignUpData {
   email: string
@@ -194,7 +194,7 @@ export function Auth() {
                   <select
                     id="gender"
                     value={gender}
-                    onChange={(e) => setGender(e.target.value as any)}
+                    onChange={(e) => setGender(e.target.value as typeof gender)}
                     disabled={!isSupabaseReady}
                   >
                     <option value="prefer_not_to_say">선택 안 함</option>

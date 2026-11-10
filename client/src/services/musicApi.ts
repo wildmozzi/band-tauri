@@ -159,7 +159,7 @@ export async function separateAudioStems(
   const useBackend = import.meta.env.VITE_USE_BACKEND_DEMUCS === 'true'
 
   if (useBackend) {
-    return separateViaBackend(file, options)
+    return separateViaBackend(file)
   } else {
     return separateViaPythonAPI(file, options)
   }
@@ -214,8 +214,7 @@ async function separateViaPythonAPI(
  * Node.js 백엔드 경유 (배포용 - HuggingFace/Replicate 프로바이더 사용)
  */
 async function separateViaBackend(
-  file: File,
-  _options?: SeparationOptions
+  file: File
 ): Promise<SeparationResponse> {
   try {
     const formData = new FormData()

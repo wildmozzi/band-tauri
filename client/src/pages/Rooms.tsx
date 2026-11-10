@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../contexts/AuthContext'
+import { useAuth } from '../contexts/useAuth'
 import { supabase } from '../lib/supabaseClient'
 import { ROOM_FILTERS, type RoomStatus } from '../data/rooms'
 

@@ -1,0 +1,128 @@
+# 데스크톱 설치본 릴리스 (P2-1). 절차: docs/RELEASE.md
+#
+# v* 태그 push → Windows NSIS 설치본 빌드 + 업데이터 서명 + latest.json → draft 릴리스.
+# draft를 사람이 검토 후 Publish 해야 앱의 자동 업데이트(releases/latest/download/latest.json)가 새 버전을 본다.
+#
+# 서드파티 액션은 contents:write 토큰과 업데이터 개인키에 닿으므로 commit SHA로 고정한다(주석은 태그).
+name: Release (desktop)
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows NSIS 설치본
+    runs-on: windows-latest
+    env:
+      # 인증서 자체는 job env에 두지 않는다(npm ci·빌드 스크립트에 노출 방지). 존재 여부만.
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+      # 프런트엔드 빌드 env (vite가 번들에 박는 공개 값). repo variables 우선, 없으면 secrets
+      VITE_SIGNALING_URL: ${{ vars.VITE_SIGNALING_URL || secrets.VITE_SIGNALING_URL }}
+      VITE_API_URL: ${{ vars.VITE_API_URL || secrets.VITE_API_URL }}
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || secrets.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || secrets.VITE_SUPABASE_ANON_KEY }}
+      VITE_TOSS_PAYMENTS_CLIENT_KEY: ${{ vars.VITE_TOSS_PAYMENTS_CLIENT_KEY || secrets.VITE_TOSS_PAYMENTS_CLIENT_KEY }}
+      # 선택: 음원 분리 서버 (없으면 앱 기본값)
+      VITE_DEMUCS_API_URL: ${{ vars.VITE_DEMUCS_API_URL }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: 태그와 앱 버전 일치 확인
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: node scripts/bump-version.mjs --check "$env:REF_NAME"
+
+      # 값이 빠진 채 서명된 릴리스가 나가면 자동 업데이트로 고장 난 앱이 전 사용자에게 퍼진다.
+      - name: 필수 빌드 값 확인
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $missing = @()
+          foreach ($n in 'TAURI_SIGNING_PRIVATE_KEY', 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD',
+                         'VITE_SIGNALING_URL', 'VITE_API_URL', 'VITE_SUPABASE_URL',
+                         'VITE_SUPABASE_ANON_KEY', 'VITE_TOSS_PAYMENTS_CLIENT_KEY') {
+            $v = [Environment]::GetEnvironmentVariable($n)
+            if ([string]::IsNullOrWhiteSpace($v) -or $v.Trim() -eq 'auto') { $missing += $n }
+          }
+          if ($env:VITE_SIGNALING_URL -and $env:VITE_SIGNALING_URL -notmatch '^wss://') { $missing += 'VITE_SIGNALING_URL(wss:// 아님)' }
+          foreach ($n in 'VITE_API_URL', 'VITE_SUPABASE_URL') {
+            $v = [Environment]::GetEnvironmentVariable($n)
+            if ($v -and $v -notmatch '^https://') { $missing += "$n(https:// 아님)" }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "::error::릴리스에 필요한 값이 없거나 잘못됨: $($missing -join ', ') — docs/RELEASE.md 1절"
+            exit 1
+          }
+          Write-Host '필수 값 확인 완료'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: client/src-tauri
+
+      - run: npm ci
+
+      - name: Authenticode 인증서 가져오기 (시크릿이 있을 때만)
+        id: sign
+        if: env.HAS_WINDOWS_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          Remove-Item $pfx
+          $conf = Join-Path $env:RUNNER_TEMP 'tauri.signing.conf.json'
+          @{ bundle = @{ windows = @{
+              certificateThumbprint = $cert.Thumbprint
+              digestAlgorithm = 'sha256'
+              timestampUrl = $env:TIMESTAMP_URL
+          } } } | ConvertTo-Json -Depth 5 | Set-Content -Path $conf -Encoding utf8NoBOM
+          "args=--config $conf" >> $env:GITHUB_OUTPUT
+          Write-Host "코드 서명 인증서 사용: $($cert.Subject)"
+
+      - name: 코드 서명 없음 안내
+        if: env.HAS_WINDOWS_CERT != 'true'
+        run: echo "::warning::WINDOWS_CERTIFICATE 시크릿이 없어 Authenticode 서명 없이 빌드합니다 (SmartScreen 경고 발생, docs/RELEASE.md)."
+
+      - name: 빌드 + draft 릴리스
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 업데이터 서명 (minisign). 공개키는 tauri.conf.json plugins.updater.pubkey
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: client
+          tauriScript: npx tauri
+          args: --bundles nsis ${{ steps.sign.outputs.args }}
+          tagName: ${{ github.ref_name }}
+          releaseName: Band ${{ github.ref_name }}
+          releaseBody: |
+            Windows 설치본: `Band_*_x64-setup.exe`
+            기존 사용자는 앱이 자동으로 업데이트를 알립니다 (Publish 이후).
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true

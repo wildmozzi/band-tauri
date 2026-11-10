@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { useAuth } from '../contexts/AuthContext'
-import { usePremium } from '../contexts/PremiumContext'
+import { useAuth } from '../contexts/useAuth'
+import { usePremium } from '../contexts/usePremium'
 import { paymentApi } from '../services/paymentApi'
 
 const PLAN_INFO: Record<string, { name: string; price: number }> = {

@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import { PlanStatus } from '../components/PlanStatus'
 import { AdBanner } from '../components/AdBanner'
-import { useAuth } from '../contexts/AuthContext'
+import { useAuth } from '../contexts/useAuth'
 
 type FeaturePillar = {
   title: string

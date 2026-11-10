@@ -6,6 +6,7 @@ import { PremiumProvider } from './contexts/PremiumContext'
 import { Navigation } from './components/Navigation'
 import { FloatingMiniPlayer } from './components/FloatingMiniPlayer'
 import { PremiumModal } from './components/PremiumModal'
+import { UpdateNotice } from './components/UpdateNotice'
 import { Home } from './pages/Home'
 import { Auth } from './pages/Auth'
 import { Rooms } from './pages/Rooms'
@@ -24,7 +25,7 @@ import { PaymentSuccess } from './pages/PaymentSuccess'
 import { PaymentFail } from './pages/PaymentFail'
 import { Profile } from './pages/Profile'
 import { Karaoke } from './pages/Karaoke'
-import { usePremium } from './contexts/PremiumContext'
+import { usePremium } from './contexts/usePremium'
 import './App.css'
 import './pages/Pricing.css'
 import './components/PremiumModal.css'
@@ -64,6 +65,9 @@ function AppContent() {
 
       {/* 미니 플레이어 - 합주실에서 다른 페이지로 이동했을 때 표시 */}
       <FloatingMiniPlayer />
+
+      {/* 데스크톱 자동 업데이트 알림 (P2-1) */}
+      <UpdateNotice />
 
       <PremiumModal
         isOpen={premiumModal.isOpen}
