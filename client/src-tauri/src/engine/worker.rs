@@ -20,6 +20,7 @@ use super::codec::Encoder;
 use super::config::{frame_code_from_samples, EngineConfig, INTERNAL_RATE, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
 use super::device::StreamInfo;
 use super::jitter::{shift_one, JitterBuffer};
+use super::measure::EchoProbe;
 use super::mixer::MixControls;
 use super::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
 use super::rt::{SourceBank, SourceShared, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
@@ -569,6 +570,13 @@ impl PeerFeed {
         prod.occupied_len() / 2 + self.rs.available()
     }
 
+    /// 지금 소스 링 꼬리에 넣을 샘플의 재생(장치 쓰기) 예정 시각(µs, 워커 epoch). 링·리샘플러에 앞서 있는
+    /// 양만큼 다음 출력 콜백보다 뒤다. 에코 측정의 도착 시각으로 쓴다.
+    fn play_time_us(&self, prod: &HeapProd<f32>, t: &FeedTiming) -> f64 {
+        let ahead48 = t.dev_to_48(self.dev_ahead(prod) as f64) + self.rs.pending_input() as f64;
+        t.next_cb_us as f64 + ahead48 * 1e6 / INTERNAL_RATE as f64
+    }
+
     /// 48k 청크 하나를 리샘플해 소스 링에 넣는다. 링이 가득 차면 리샘플러에 남는다.
     fn push(&mut self, chunk: &[f32], prod: &mut HeapProd<f32>, tmp: &mut [f32]) {
         self.rs.push(chunk);
@@ -602,6 +610,7 @@ impl PeerFeed {
         consistent: &dyn Fn() -> bool,
         chunk: &mut [f32],
         tmp: &mut [f32],
+        mut probe: Option<&mut EchoProbe>,
     ) -> FeedEvents {
         let mut ev = FeedEvents::default();
         let chunk = &mut chunk[..OUT_CHUNK * 2];
@@ -645,6 +654,9 @@ impl PeerFeed {
                 break;
             }
             jb.pop(&mut chunk[..k * 2]);
+            if let Some(p) = probe.as_deref_mut() {
+                p.record(&chunk[..k * 2], self.play_time_us(prod, t));
+            }
             self.push(&chunk[..k * 2], prod, tmp);
         }
         // (2) 은닉은 마감 직전에만, 다음 콜백에 모자란 만큼만(+ 적응 여유)
@@ -658,6 +670,9 @@ impl PeerFeed {
                 let deficit = t.dev_to_48((need - self.dev_ahead(prod)) as f64).ceil() as usize;
                 let k = deficit.clamp(1, OUT_CHUNK);
                 jb.pop(&mut chunk[..k * 2]);
+                if let Some(p) = probe.as_deref_mut() {
+                    p.record(&chunk[..k * 2], self.play_time_us(prod, t));
+                }
                 self.push(&chunk[..k * 2], prod, tmp);
                 guard += 1;
             }
@@ -687,6 +702,8 @@ pub struct WorkerParams {
     pub stats: Arc<WorkerStats>,
     /// 지터 버퍼 수신 시각과 같은 기준(µs)의 시계.
     pub epoch: Instant,
+    /// 에코 측정(P1-1): 있으면 그 피어에게 내 입력 대신 무음 + 클릭을 보내고, 그 피어 소리의 재생 시각을 모은다.
+    pub probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
 }
 
 pub struct Worker {
@@ -697,6 +714,10 @@ pub struct Worker {
     /// 로컬(모니터) 소스: 48k → 장치 레이트.
     local_rs: StreamResampler,
     encoder: Option<Encoder>,
+    /// 에코 측정 대상 피어용 인코더(측정 중에만 있음). 다른 피어와 코덱 상태를 섞지 않는다.
+    alt_encoder: Option<Encoder>,
+    alt_frame: Vec<f32>,
+    alt_payload: Vec<u8>,
     flags: u8,
     frame_code: u8,
     ts: u32,
@@ -770,6 +791,9 @@ impl Worker {
             in_rs,
             local_rs,
             encoder,
+            alt_encoder: None,
+            alt_frame: vec![0.0; frame * ich],
+            alt_payload: vec![0u8; MAX_PAYLOAD_BYTES],
             flags,
             frame_code,
             ts: rand::random(),
@@ -938,10 +962,35 @@ impl Worker {
         }
     }
 
+    /// 에코 측정 대상 피어용 프레임(무음 + 클릭)을 만들어 인코드한다. 반환: (피어 id, 페이로드 길이).
+    fn probe_frame(&mut self) -> Option<(String, usize)> {
+        let now_us = self.p.epoch.elapsed().as_secs_f64() * 1e6;
+        let mut g = self.p.probe.lock();
+        let Some(pr) = g.as_mut() else {
+            self.alt_encoder = None;
+            return None;
+        };
+        if self.alt_encoder.is_none() {
+            match Encoder::new(self.p.cfg.codec, self.ich, self.p.cfg.opus_bitrate()) {
+                Ok(e) => self.alt_encoder = Some(e),
+                Err(e) => {
+                    log::warn!("에코 측정 인코더 생성 실패: {e}");
+                    return None;
+                }
+            }
+        }
+        pr.next_frame(&mut self.alt_frame, self.ich, now_us);
+        let enc = self.alt_encoder.as_mut()?;
+        let n = enc.encode(&self.alt_frame, &mut self.alt_payload).ok()?;
+        Some((pr.peer_id.clone(), n))
+    }
+
     fn on_capture_frame(&mut self, frame: &[f32]) {
+        let alt = if self.encoder.is_some() { self.probe_frame() } else { None };
         if let (Some(enc), Some(net)) = (self.encoder.as_mut(), self.p.net.as_ref()) {
+            let alt = alt.as_ref().map(|(id, n)| (id.as_str(), &self.alt_payload[..*n]));
             match enc.encode(frame, &mut self.payload) {
-                Ok(n) => net.send_audio(&self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt),
+                Ok(n) => net.send_audio(&self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt),
                 Err(e) => {
                     // 레이트 제한 로그(리뷰 L10)
                     if self.encode_errors.is_multiple_of(1000) {
@@ -1013,6 +1062,9 @@ impl Worker {
         let cb_seq = t.cb_seq;
         let consistent = move || cb_seq.is_some_and(|s| counters.out_cb_begin.load(Ordering::SeqCst) == s);
         let (mut fills, mut skipped, mut urgent) = (0u64, 0u64, false);
+        let probe = self.p.probe.clone();
+        let mut guard = probe.lock();
+        let mut tap = guard.as_mut().filter(|p| p.tap);
         net.for_each_peer(|peer| {
             let key = (peer as *const Peer as usize, peer.ssrc);
             let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) else {
@@ -1025,7 +1077,7 @@ impl Worker {
             let Some(prod) = self.p.prods.get_mut(f.slot) else {
                 return;
             };
-            let ev = f.service(&mut peer.jitter.lock(), prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp);
+            let ev = f.service(&mut peer.jitter.lock(), prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_ssrc == peer.ssrc));
             fills += u64::from(ev.deadline_fill);
             skipped += ev.skipped_frames;
             urgent |= ev.urgent;
@@ -1481,7 +1533,7 @@ mod tests {
             } else {
                 // 워커 반복(Worker::timing + service_peers와 같은 순서)
                 let timing = tracker.observe(&counters, t, p.out_buf, 48_000);
-                let ev = pf.service(&mut jb, &mut feed.prods[slot], &feed.bank.slots[slot], &timing, &|| true, &mut chunk, &mut tmp);
+                let ev = pf.service(&mut jb, &mut feed.prods[slot], &feed.bank.slots[slot], &timing, &|| true, &mut chunk, &mut tmp, None);
                 fills += u64::from(ev.deadline_fill);
                 res.skipped += ev.skipped_frames;
                 if t >= end_us / 2 && half_xruns.is_none() {

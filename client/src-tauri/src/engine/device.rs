@@ -75,6 +75,10 @@ pub struct StreamInfo {
     /// 장치에 설정된 주기(프레임). 0이면 알 수 없음(콜백 크기로 측정).
     pub in_period_frames: u32,
     pub out_period_frames: u32,
+    /// 드라이버가 보고한 입력/출력 지연(프레임, 장치 레이트). 0이면 알 수 없음.
+    /// ASIO는 `ASIOGetLatencies`, 자체 WASAPI는 `IAudioClient::GetStreamLatency`. 지연 측정 보고서에 쓴다.
+    pub in_reported_latency_frames: u32,
+    pub out_reported_latency_frames: u32,
 }
 
 impl StreamInfo {
@@ -183,6 +187,28 @@ pub mod cpal_backend {
     #[cfg(feature = "asio")]
     fn asio_host() -> Result<cpal::Host, String> {
         cpal::host_from_id(cpal::HostId::Asio).map_err(|e| format!("ASIO 호스트를 열 수 없습니다: {e}"))
+    }
+
+    /// `ASIOGetLatencies`(입력, 출력 프레임). asio-sys가 바인딩하지 않으므로 SDK 정적 라이브러리의
+    /// C++ 심볼을 직접 링크한다(asio-sys 바인딩과 같은 방식, `ASIOError ASIOGetLatencies(long*, long*)`).
+    /// 버퍼를 만든 뒤(스트림 생성 후)에만 의미가 있다.
+    #[cfg(all(feature = "asio", target_os = "windows", target_arch = "x86_64"))]
+    fn asio_latencies() -> Option<(u32, u32)> {
+        use std::os::raw::c_long;
+        unsafe extern "C" {
+            #[link_name = "\u{1}?ASIOGetLatencies@@YAJPEAJ0@Z"]
+            fn ASIOGetLatencies(input: *mut c_long, output: *mut c_long) -> c_long;
+        }
+        let (mut i, mut o): (c_long, c_long) = (0, 0);
+        // SAFETY: SDK 함수는 드라이버가 없으면 ASE_NotPresent를 돌려주고 두 값을 0으로 쓴다. 포인터는 지역 변수다.
+        let r = unsafe { ASIOGetLatencies(&mut i, &mut o) };
+        // ASE_OK = 0
+        (r == 0 && i >= 0 && o >= 0).then_some((i as u32, o as u32))
+    }
+
+    #[cfg(not(all(feature = "asio", target_os = "windows", target_arch = "x86_64")))]
+    fn asio_latencies() -> Option<(u32, u32)> {
+        None
     }
 
     #[cfg(not(feature = "asio"))]
@@ -351,6 +377,8 @@ pub mod cpal_backend {
             if any_asio {
                 ASIO_IN_USE.store(true, Ordering::SeqCst);
             }
+            // 드라이버 보고 지연: ASIO 듀플렉스만 알 수 있다(cpal WASAPI 공유는 알려 주지 않음).
+            let reported = if duplex_asio { asio_latencies().unwrap_or((0, 0)) } else { (0, 0) };
             log::info!(
                 "오디오 열림: in {} {}Hz {}ch {:?}, out {} {}Hz {}ch {:?}",
                 in_dev.name().unwrap_or_default(),
@@ -374,6 +402,8 @@ pub mod cpal_backend {
                 // cpal은 실제 주기를 알려 주지 않는다(WASAPI 공유는 요청과 무관하게 ≈10ms). 콜백 크기로 잰다.
                 in_period_frames: 0,
                 out_period_frames: 0,
+                in_reported_latency_frames: reported.0,
+                out_reported_latency_frames: reported.1,
             };
             Ok((info, Box::new(Streams { _input: input_stream, _output: output_stream, asio: any_asio })))
         }
@@ -665,6 +695,8 @@ pub mod fake {
         /// 출력 sink 첫 샘플의 절대 프레임 인덱스(원점 기준).
         /// sink 프레임 j의 재생 시각 = t0 + out_phase + (origin + j)/out_rate.
         pub sink_origin: Arc<AtomicU64>,
+        /// `StreamInfo`에 실을 "드라이버 보고 지연"(입력, 출력 프레임). 기본 (0, 0) = 알 수 없음.
+        pub reported_latency: (u32, u32),
     }
 
     impl FakeBackend {
@@ -691,6 +723,7 @@ pub mod fake {
                 exclusive: None,
                 t0: None,
                 sink_origin: Arc::new(AtomicU64::new(0)),
+                reported_latency: (0, 0),
             }
         }
 
@@ -896,6 +929,8 @@ pub mod fake {
                 out_backend: BackendKind::Fake,
                 in_period_frames: in_buf as u32,
                 out_period_frames: out_buf as u32,
+                in_reported_latency_frames: self.reported_latency.0,
+                out_reported_latency_frames: self.reported_latency.1,
             };
             Ok((info, Box::new(FakeGuard { stop, threads: vec![in_thread, out_thread], exclusive: self.exclusive.clone() })))
         }

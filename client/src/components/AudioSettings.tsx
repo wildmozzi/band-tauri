@@ -16,6 +16,7 @@ import {
   isPayloadAllowed,
   type EnginePresetId,
 } from '../native/engineConfig'
+import { LatencyMeasurePanel } from './LatencyMeasurePanel'
 import './AudioSettings.css'
 
 interface AudioSettingsProps {
@@ -399,6 +400,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
         </div>
         <p className="setting-hint">※ 설정을 바꾸거나 이 화면을 닫으면 테스트가 종료됩니다.</p>
       </section>
+
+      <LatencyMeasurePanel />
 
       {issues.length > 0 && (
         <section className="settings-section">

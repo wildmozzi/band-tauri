@@ -25,6 +25,7 @@ engine/codec.rs        Opus / PCM16 인코드·디코드
 engine/jitter.rs       피어별 적응형 지터 버퍼 + 드리프트 보정 + PLC
 engine/mixer.rs        피어별 gain/mute, 모니터, 마스터, 클리핑 방지(soft clip)
 engine/stats.rs        원자적 통계 (레벨, xrun, 피어별 RTT/지터/손실/버퍼)
+engine/measure.rs      지연 측정(P1-1): 하드웨어 루프백(처프·FFT 상호상관), 에코 피어 클릭 측정·분석
 net/mod.rs             UDP 소켓, 송수신 스레드
 net/packet.rs          패킷 직렬화/역직렬화 (아래 2절)
 net/crypto.rs          ChaCha20-Poly1305 패킷 암호화
@@ -117,7 +118,7 @@ off len 필드
     - 재전송(seq 창)
   - **막지 않는 것**: 시그널링 서버(또는 그 탈취자, TLS 종단)가 descriptor의 `key`를 자기 공개키로 바꿔치기하는 중간자 공격이다. 이 경우 복호화와 주입이 모두 가능하다.
   - **탐지 수단**: `engine_safety_code(peerId)`가 양쪽 공개키로 만든 안전 번호(SHA-256("band-sas-v1" ‖ 작은 키 ‖ 큰 키) → 5자리×4)를 돌려준다. 두 연주자가 음성 등 다른 채널로 같은 숫자를 확인하면 바꿔치기가 없었던 것이다. UI 표시와 사용자 장기 키 서명은 후속 백로그다.
-- 오디오는 피어마다 그 피어의 송신 키로 따로 암호화한다(seq는 공통, 키가 달라 nonce 재사용 아님).
+- 오디오는 피어마다 그 피어의 송신 키로 따로 암호화한다. **Audio seq는 피어별 카운터**다(P1-1: 에코 모드에서 되돌리는 패킷과 내 오디오가 같은 키·같은 seq를 쓰지 않게). 같은 공개키의 피어를 교체(재 `add_peer`)하면 seq를 2^16 건너뛰어 이어 간다(옛 객체로 비행 중인 송신과 nonce가 겹치지 않게).
 - Nonce(12B) = `sender_ssrc(4) || type(1) || 0(3) || seq(4)`. AAD = 헤더 18바이트.
 - 수신자는 `sender_ssrc`가 같은 피어들 중 복호화에 성공하는 피어로 판정한다(ssrc가 겹쳐도 다른 피어를 덮어쓰지 않음).
 - 복호화 실패, 모르는 ssrc, 송신 주소가 피어의 확정된 경로와 다른 Audio/Ping/Pong/Bye → **폐기**. Hello/HelloAck는 주소 무관하게 처리하되, 확정 경로가 아닌 주소의 Hello는 상태·생존 시각을 갱신하지 않는다(같은 주소에서 5회 연속이면 NAT 리바인딩으로 보고 경로 전환).
@@ -129,7 +130,11 @@ off len 필드
   - 릴레이 주소가 바뀌거나 해제되면 직전 릴레이 주소에서 온 Hello/HelloAck는 버린다(직접 경로로 오인 방지). 데이터는 위 2초 유예로 받는다.
   - 경로 종류(`via_relay`)는 인증되지 않은 출발 주소로 정한다. 경로상 공격자가 직접 Hello의 출발 주소를 릴레이로 바꿔 먼저 넣으면 강등시킬 수 있다. 직접 패킷을 버리는 것과 같은 효과라 새 공격력은 아니다(relay-design 4.1).
 - 제어 패킷(Hello~Bye)은 타입별로 이전보다 큰 seq만 받는다(재전송 방어). HelloAck는 피어당 50ms에 1회까지.
-- Hello/HelloAck 평문: `peer_id`(UTF-8, ≤64B). Ping/Pong 평문: 없음(헤더 timestamp 사용). Bye 평문: 없음.
+- Hello/HelloAck 평문: `peer_id`(UTF-8, ≤64B). Pong·Bye 평문: 없음. Ping 평문: 없음, 또는 **에코 제어 6바이트**(P1-1) `[0xEC, flags, delay_us(u32 BE)]`. RTT는 헤더 timestamp를 쓴다.
+  - flags bit0 `REQUEST`: 보낸 쪽이 받는 쪽에게 "내 오디오를 되돌려 달라"고 요청 중(측정 중). bit1 `ACTIVE`: 보낸 쪽이 받는 쪽의 오디오를 되돌리는 중, `delay_us` = 되돌리기 처리 지연(수신 → 송신 EWMA).
+  - 상태는 수준(level)으로 싣는다: Ping(500ms)마다 현재 플래그를 보내고, 바뀌면 바로 한 번 더 보낸다. 빈 평문 = 플래그 0(옛 엔진과 호환). 3초 넘게 갱신이 없으면 끝난 것으로 본다.
+  - 받는 쪽은 REQUEST가 없는 Ping을 받으면 에코 동의를 바로 거둔다(측정 끝 = 에코 끝).
+- **에코 모드**(P1-1, 4절 `engine_set_echo_mode`): 사용자가 동의했고 상대의 REQUEST가 살아 있는 동안, 수신 스레드는 그 피어의 Audio 평문을 **디코드 없이 그대로** 그 피어의 송신 키로 다시 봉인해 되돌린다(내 입력은 섞지 않음, 믹스와 별도). 헤더 flags·frame_code는 그대로, seq는 그 피어의 송신 seq, timestamp는 에코 시작 시 내 마지막 송신 timestamp에 이어지도록 오프셋을 더한다(상대 지터 버퍼가 시각 점프를 보지 않게). 그동안 그 피어에게 내 오디오는 보내지 않는다. 측정하는 쪽은 그동안 그 피어에게만 내 입력 대신 무음 + 클릭을 보낸다(다른 피어는 평소 소리). 릴레이 경로에서도 같다(타입 1·4만 쓴다).
 
 ## 3. 연결 수립 (홀펀칭)
 
@@ -180,9 +185,13 @@ interface EngineConfig {
 }
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
-interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number }
+interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean }
 interface RelayConfig { addr: string; token: string; expiresInSec?: number }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)
 interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean }
+type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
+interface LoopbackRun { roundTripMs: number | null; peakRatio: number; correlation: number; clipped: boolean; inverted: boolean; inputPeak: number }
+interface LoopbackReport { verdict: MeasureVerdict; message: string; runs: LoopbackRun[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; sampleRate: number; inputBufferFrames: number; outputBufferFrames: number; bufferRoundTripMs: number; driverInputLatencyMs: number | null; driverOutputLatencyMs: number | null; driverRoundTripMs: number | null; estLatencyMs: number; offsetMs: number | null; driverErrorMs: number | null; correctedEstLatencyMs: number | null; backend: string }
+interface EchoReport { verdict: MeasureVerdict; message: string; peerId: string; runs: (number | null)[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; peerEchoDelayMs: number; oneWayMs: number | null; networkRttMs: number | null; jitterBufferMs: number; frameMs: number; localLatencyMs: number; inputBufferMs: number; outputBufferMs: number; mouthToEarMs: number | null; residualMs: number | null; path: 'lan' | 'public' | 'relay' | null }
 interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; peers: PeerStats[]; relay: RelayStats | null }
 ```
 
@@ -204,6 +213,10 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 | `engine_stats` | — | `EngineStats` |
 | `engine_subscribe_mix` | `{ onChunk: Channel<ArrayBuffer> }` | `null` — 20ms마다 48kHz stereo f32 인터리브 믹스(내 입력 포함) 전송. 관람자 브릿지용 |
 | `engine_unsubscribe_mix` | — | `null` |
+| `engine_measure_loopback` | `{ runs?: number }` | `LoopbackReport` — 하드웨어 루프백 왕복(P1-1). 실행 중인 엔진(보통 테스트 모드)에서 `runs`회(기본 8, 1..=20, 반복당 약 0.7초). 측정 동안 장치 출력은 자극만 낸다(모니터·피어 소리 없음). 입·출력 레이트가 다르면 에러 |
+| `engine_set_echo_mode` | `{ peerId: string, enabled: boolean }` | `null` — 에코하는 쪽의 동의/해제. 켜기는 그 피어가 지금 요청 중(`PeerStats.echoRequested`)일 때만 된다(아니면 에러). 상대 요청이 끝나면 엔진이 스스로 끈다 |
+| `engine_measure_echo_peer` | `{ peerId: string, runs?: number, waitMs?: number }` | `EchoReport` — 측정하는 쪽. 그 피어에게 에코를 요청하고 동의를 `waitMs`(기본 30000, 최대 120000)까지 기다린 뒤 클릭 `runs`개(기본 8)로 잰다. 동의가 없으면 "수락하지 않았습니다" 에러 |
+| `engine_cancel_measure` | — | `null` — 진행 중인 측정 취소(진행 중인 측정 커맨드는 "취소" 에러로 끝난다) |
 
 - 레벨 값(`inputLevel`, `outputLevel`, `PeerStats.level`)은 0..1 선형 RMS.
 - `engine_subscribe_mix` 채널은 JSON 배열이 아닌 **raw 바이트**(`tauri::ipc::InvokeResponseBody::Raw`, f32 LE 인터리브)로 보낸다.
@@ -237,6 +250,19 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 `backend`: 실제로 열린 오디오 백엔드. `wasapiExclusive`(자체 독점) | `wasapiShared3`(자체 IAudioClient3 저지연 공유) | `cpalWasapi`(cpal 공유 폴백) | `cpalAsio` | `fake`(테스트). 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
 
 `engine_list_devices`의 자체 WASAPI 장치: 엔드포인트마다 `wasapiShared` 항목 1개(채널·레이트 = 믹스 포맷)와, 독점 지원 포맷이 있으면 `wasapiExclusive` 항목 1개(채널 = 지원 최대, 레이트 = 독점 지원 레이트)를 낸다. `id`는 둘 다 `wasapi::<장치 이름>`(cpal과 같은 형식)이다.
+
+**지연 측정(P1-1, `engine/measure.rs`, 절차는 docs/MEASURE.md)**
+- `LoopbackReport.roundTripMs` = 소프트웨어 패스스루(입력 → 바로 출력)의 아날로그 입력 → 아날로그 출력 지연. 업계 RTL 측정값과 같은 정의로, 이상적인 장치에서 입력 버퍼 + 출력 버퍼 + 변환기·드라이버 안전 여유다.
+  - 자극: 100ms 선형 처프(200Hz → min(12kHz, 0.45·레이트), 진폭 0.3). 출력 콜백이 모든 출력 채널에 쓰고, 입력 콜백이 라우팅된 첫 입력 채널을 녹음한다. 콜백은 사전 할당 SPSC 링(자극 0.25초·녹음 0.5초 @192kHz)과 원자값만 쓴다.
+  - 도착 위치는 FFT 상호상관 피크(포물선 보간)다. 입력·출력 프레임 카운터는 측정 스레드가 `벽시계 − 카운터/레이트`의 최솟값으로 같은 시간축에 놓는다. 출력 프레임 J의 쓰기 시각 = `e_out + (J + 출력 콜백 크기)/r`, 입력 프레임 I의 캡처 시각 = `e_in + I/r`이고, 왕복 = 캡처 − 쓰기 + 입력 콜백 크기/r.
+  - 판정: 피크/잡음 상관비 ≥ 10이고 정규화 상관 ≥ 0.2면 검출. 녹음 최대 진폭 ≥ 0.99면 클리핑. 검출 0회면 `noSignal`, 클리핑이 있으면 `clipped`, 검출이 절반 이하이거나 최대 − 최소 > 1ms면 `unstable`.
+  - `offsetMs`(보정값) = 실측 − (입력 버퍼 + 출력 버퍼). `estLatencyMs`에 없는 숨은 지연이다. `correctedEstLatencyMs` = `estLatencyMs` + 보정값.
+  - 드라이버 보고: ASIO는 `ASIOGetLatencies`(cpal ASIO 듀플렉스), 자체 WASAPI는 `IAudioClient::GetStreamLatency`, cpal WASAPI·가짜 장치는 null.
+- `EchoReport.roundTripMs` = 클릭이 프레임 시작에 놓인 시각부터, 되돌아온 클릭이 내 출력 소스 링에서 장치에 쓰일 예정 시각까지다. 프레임 + 망 왕복 + 상대 되돌리기 + 내 지터 버퍼(소스 링 포함)에 해당한다. 클릭 = 5ms 처프(500Hz → 9kHz), 300ms 간격(프레임 크기의 배수).
+  - `oneWayMs` = (왕복 − `peerEchoDelayMs`) / 2.
+  - `mouthToEarMs` = 왕복 − 상대 처리 − 핑 RTT/2 + 입력 버퍼 + 출력 버퍼 = 입력 버퍼 + 프레임 + 망 편도 + 지터 버퍼 + 출력 버퍼(GOAL 1절 입→귀, 상대도 같은 설정이라고 가정).
+  - `residualMs` = 왕복 − (프레임 + 핑 RTT + 상대 처리 + 지터 버퍼 평균)이다. 클릭이 놓인 입력 버스트 위상(≤ 입력 버퍼)만큼 흩어진다. 판정: 피크비 ≥ 8, 상관 ≥ 0.3, 흩어짐 > 5ms면 `unstable`.
+  - 에코가 시작·끝날 때 측정하는 쪽은 그 피어의 지터 버퍼를 처음부터 다시 채운다(스트림 성격이 바뀜). 측정 뒤 상대가 에코를 멈출 때까지(최대 4초) 그 피어에게 무음을 보낸다(내 실제 소리가 되돌아오지 않게).
 
 `PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제).
 

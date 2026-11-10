@@ -8,6 +8,7 @@ pub mod codec;
 pub mod config;
 pub mod device;
 pub mod jitter;
+pub mod measure;
 pub mod mixer;
 pub mod prio;
 pub mod resample;
@@ -32,6 +33,7 @@ use crate::net::{Net, NetOptions};
 use config::{EngineConfig, INTERNAL_RATE};
 use device::{AudioBackend, StreamInfo};
 use jitter::JitterSettings;
+use measure::{EchoJob, EchoProbe, LoopbackJob};
 use mixer::{clamp_gain, MixControls};
 use resample::StreamResampler;
 use rt::InputRt;
@@ -64,6 +66,11 @@ pub struct Engine {
     /// 출력 콜백이 장치 레이트로 채우는 믹스 탭 링의 소비자. 구독 중에는 탭 스레드가 가진다.
     tap_cons: Mutex<Option<HeapCons<f32>>>,
     tap_thread: Option<TapThread>,
+    /// 지연 측정(P1-1): RT 끝점 제어와 측정 스레드 쪽 링 끝점(측정 중에는 비어 있음).
+    measure_sh: Arc<rt::MeasureShared>,
+    measure_ends: Arc<Mutex<Option<rt::MeasureEnds>>>,
+    /// 에코 측정 상태(워커와 공유).
+    probe: Arc<Mutex<Option<EchoProbe>>>,
 }
 
 impl Engine {
@@ -89,9 +96,14 @@ impl Engine {
         cfg.validate()?;
         let counters = Arc::new(AudioCounters::default());
         let (in_prod, in_cons) = rt::input_ring();
-        let input = InputRt::new(in_prod, counters.clone(), &cfg.input_channels, cfg.channels as usize);
+        let mut input = InputRt::new(in_prod, counters.clone(), &cfg.input_channels, cfg.channels as usize);
         // 콜백 구동 믹스: 출력 콜백이 소스 링들에서 직접 꺼내 섞는다(P1-0).
-        let (output, feed) = rt::output_path(counters.clone(), controls.clone());
+        let (mut output, feed) = rt::output_path(counters.clone(), controls.clone());
+        // 지연 측정 끝점(링은 여기서 미리 할당, 콜백은 링 push/pop과 원자값만 쓴다)
+        let (measure_sh, m_in, m_out, measure_ends) = rt::measure_path();
+        input.attach_measure(m_in);
+        output.attach_measure(m_out);
+        let probe = Arc::new(Mutex::new(None));
 
         // 오디오 스레드: 스트림을 열고 정지 신호까지 소유한다(cpal::Stream은 !Send).
         let audio_stop = Arc::new(AtomicBool::new(false));
@@ -145,6 +157,9 @@ impl Engine {
             net: None,
             tap_cons: Mutex::new(Some(feed.tap)),
             tap_thread: None,
+            measure_sh,
+            measure_ends: Arc::new(Mutex::new(Some(measure_ends))),
+            probe: probe.clone(),
         };
 
         if cancelled() {
@@ -178,6 +193,7 @@ impl Engine {
             stop: engine.worker_stop.clone(),
             stats: engine.worker_stats.clone(),
             epoch,
+            probe,
         };
         // 초기화(리샘플러/인코더)는 여기서 해서 실패를 호출자에게 돌려준다(리뷰 M10).
         let worker = Worker::new(params)?;
@@ -277,6 +293,11 @@ impl Engine {
                     .map(|p| {
                         let conn = p.conn.lock().clone();
                         let js = p.jitter.lock().stats();
+                        let (echo_requested, echo_active, peer_echoing) = {
+                            let e = p.echo.lock();
+                            let now = Instant::now();
+                            (e.remote_requesting(now) && !e.enabled, e.reflecting(now), e.remote_echoing(now))
+                        };
                         PeerStats {
                             peer_id: p.id.clone(),
                             state: conn.state,
@@ -290,6 +311,9 @@ impl Engine {
                             level: p.mix.level.load(),
                             // 벽시계로 잰 버퍼 지연(소스 링 포함) + 장치 출력 버퍼: 클럭 추정과 독립적인 실제 재생 지연
                             playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + out_ms } else { 0.0 },
+                            echo_requested,
+                            echo_active,
+                            peer_echoing,
                         }
                     })
                     .collect()
@@ -316,6 +340,55 @@ impl Engine {
             peers,
             relay: self.net.as_ref().and_then(|n| n.relay_stats()),
         }
+    }
+
+    /// 하드웨어 루프백 측정 작업(설계 4절 `engine_measure_loopback`). 엔진 락 밖에서 `run`한다.
+    pub fn loopback_job(&self) -> LoopbackJob {
+        let s = self.stats();
+        LoopbackJob {
+            sh: self.measure_sh.clone(),
+            ends: self.measure_ends.clone(),
+            counters: self.counters.clone(),
+            info: self.info,
+            est_latency_ms: s.est_latency_ms,
+            backend: s.backend,
+        }
+    }
+
+    /// 에코 피어 측정 작업(측정하는 쪽, 설계 4절 `engine_measure_echo_peer`). 엔진 락 밖에서 `run`한다.
+    pub fn echo_job(&self, peer_id: &str) -> Result<EchoJob, String> {
+        let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.shared().clone();
+        let peer_ssrc = net.peer_ssrc(peer_id)?;
+        let (in_ms, out_ms) = self.buffer_ms();
+        Ok(EchoJob {
+            probe: self.probe.clone(),
+            net,
+            peer_id: peer_id.to_string(),
+            peer_ssrc,
+            frame_ms: self.cfg.frame_samples() as f32 * 1000.0 / INTERNAL_RATE as f32,
+            local_latency_ms: self.stats().est_latency_ms,
+            input_buffer_ms: in_ms,
+            output_buffer_ms: out_ms,
+        })
+    }
+
+    /// 에코하는 쪽: 피어의 에코 요청에 동의/해제(설계 4절 `engine_set_echo_mode`).
+    pub fn set_echo_mode(&self, peer_id: &str, enabled: bool) -> Result<(), String> {
+        self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.shared().set_echo_mode(peer_id, enabled)
+    }
+
+    /// (입력 버퍼, 출력 버퍼) ms — 실측 콜백 크기(아직 없으면 요청값).
+    fn buffer_ms(&self) -> (f32, f32) {
+        let c = &self.counters;
+        let in_buf = match c.in_cb_frames.load(Ordering::Relaxed) {
+            0 => self.info.buffer_frames,
+            n => n,
+        };
+        let out_buf = match c.out_cb_frames.load(Ordering::Relaxed) {
+            0 => self.info.buffer_frames,
+            n => n,
+        };
+        (in_buf as f32 / self.info.in_rate.max(1) as f32 * 1000.0, out_buf as f32 / self.info.out_rate.max(1) as f32 * 1000.0)
     }
 
     /// 열린 스트림 정보(백엔드, 레이트, 장치 주기).
