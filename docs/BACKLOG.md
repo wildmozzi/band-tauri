@@ -37,7 +37,7 @@
 
 | ID | 항목 | 완료 조건 | 상태 |
 |---|---|---|---|
-| P2-1 | 설치 파일 + Tauri updater(서명 키, 업데이트 서버/GitHub Releases) | 릴리스 워크플로로 설치본 생성, 업데이트 동작 | 대기 |
+| P2-1 | 설치 파일 + Tauri updater(서명 키, 업데이트 서버/GitHub Releases) | 릴리스 워크플로로 설치본 생성, 업데이트 동작 | 진행중(p2-release) |
 | P2-2 | **[사람]** 코드 서명 인증서 구매/등록(스마트 앱 컨트롤·SmartScreen 대응) | 서명된 설치본 | 대기 |
 | P2-3 | 공유 메트로놈(방장 기준, 각자 지연 보정한 클릭) | 2피어 시뮬레이션에서 클릭 정렬 오차 ≤ 2ms | 대기 |
 | P2-4 | 합주 녹음: 로컬 멀티트랙(내 입력 + 피어별) WAV/FLAC 저장 | 앱에서 녹음/내보내기 | 대기 |
@@ -48,7 +48,7 @@
 
 | ID | 항목 | 완료 조건 | 상태 |
 |---|---|---|---|
-| P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 대기 |
+| P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 진행중(p3-lint) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 대기 |
 | P3-4 | 거대 파일 분해(PostDetail, Rooms, EditPost, RoomDetail) | 파일당 ≤ 400줄 | 대기 |
