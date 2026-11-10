@@ -9,7 +9,7 @@
 | ID | 항목 | 완료 조건 | 상태 |
 |---|---|---|---|
 | P0-1 | Rust 엔진 재작성 완료 (설계 문서 4절 + 입력뮤트/패닝/raw 믹스) | cargo build/clippy/test 통과, 루프백 수치 보고 | 완료(bc201c2: 버퍼 26~28ms, 은닉 4.4%@손실5%) |
-| P0-2 | 엔진 코드 리뷰 + 지적사항 수정 | Critical/High 0 | 진행중(리뷰 High3/Med12 → ovh-engine 수정 중) |
+| P0-2 | 엔진 코드 리뷰 + 지적사항 수정 | Critical/High 0 | 진행중(PR #5 검증 리뷰; CI 녹색, 루프백 버퍼 26.5~31ms·은닉 ~4%·연속성 100%) |
 | P0-3 | 프론트 리뷰 지적사항 수정 + 세션 재개 시 descriptor 재전송 | 리뷰 Critical/High 0, vitest 통과 | 완료(0e62340: vitest 100, server 66) |
 | P0-4 | CI 워크플로(Windows Rust + Node) 녹색 | overhaul에서 CI 통과 | 진행중(CI 첫 실행) |
 | P0-5 | **[확인]** git 히스토리에서 비밀값 제거 + 전 브랜치 force push | 사용자 승인 후 실행, 협업자 재clone 안내 | 대기 (P0-1~4 후) |
