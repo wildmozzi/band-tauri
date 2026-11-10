@@ -48,7 +48,7 @@
 
 | ID | 항목 | 완료 조건 | 상태 |
 |---|---|---|---|
-| P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 대기 |
+| P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 진행(PR) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 대기 |
 | P3-4 | 거대 파일 분해(PostDetail, Rooms, EditPost, RoomDetail) | 파일당 ≤ 400줄 | 대기 |
