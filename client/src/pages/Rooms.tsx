@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { supabase } from '../lib/supabaseClient'
+import { parseRoomCode } from '../contexts/room/roomAccess'
 import { ROOM_FILTERS, type RoomStatus } from '../data/rooms'
 
 const GENRES = [
@@ -41,6 +42,8 @@ interface DbRoom {
   created_at: string
   free_join?: boolean
   instrument_slots?: InstrumentSlot[]
+  is_private?: boolean
+  has_password?: boolean
 }
 
 interface MyRoom extends DbRoom {
@@ -58,6 +61,7 @@ interface Room {
   tags: string[]
   instrumentSlots: InstrumentSlot[]
   freeJoin: boolean
+  hasPassword: boolean
 }
 
 export function Rooms() {
@@ -82,6 +86,9 @@ export function Rooms() {
 
   // 태그 확장 상태 (room id -> expanded)
   const [expandedTags, setExpandedTags] = useState<Set<string>>(new Set())
+  // 방 코드 / 초대 링크로 입장 (비공개 방)
+  const [roomCode, setRoomCode] = useState('')
+  const [roomCodeError, setRoomCodeError] = useState<string | null>(null)
 
   const { user } = useAuth()
   const navigate = useNavigate()
@@ -281,8 +288,8 @@ export function Rooms() {
 
         if (error) throw error
 
-        // DB 데이터를 UI 형식으로 변환
-        const formattedRooms: Room[] = (data as DbRoom[]).map((room) => ({
+        // DB 데이터를 UI 형식으로 변환. 비공개 방은 목록에서 뺀다 (남의 비공개 방은 RLS가 이미 숨기고, 내 비공개 방은 '내 합주실'에서)
+        const formattedRooms: Room[] = (data as DbRoom[]).filter((room) => room.is_private !== true).map((room) => ({
           id: room.id,
           title: room.title,
           vibe: room.description || '함께 음악을 만들어요',
@@ -293,6 +300,7 @@ export function Rooms() {
           tags: room.tags || [],
           instrumentSlots: room.instrument_slots || [],
           freeJoin: room.free_join ?? true,
+          hasPassword: room.has_password === true,
         }))
 
         setRooms(formattedRooms)
@@ -334,6 +342,18 @@ export function Rooms() {
       return
     }
     navigate(`/rooms/${roomId}`)
+  }
+
+  const handleJoinByCode = (e: React.FormEvent) => {
+    e.preventDefault()
+    const id = parseRoomCode(roomCode)
+    if (!id) {
+      setRoomCodeError('방 코드나 초대 링크를 확인해주세요.')
+      return
+    }
+    setRoomCodeError(null)
+    setRoomCode('')
+    navigate(`/rooms/${id}`)
   }
 
   const handleCreateRoom = () => {
@@ -398,7 +418,7 @@ export function Rooms() {
                     <div key={room.id} className="my-room-item">
                       <div className="my-room-info">
                         <div className="my-room-header">
-                          <h4>{room.title}</h4>
+                          <h4>{room.is_private && <span className="room-lock" title="비공개">🙈 </span>}{room.has_password && <span className="room-lock" title="비밀번호">🔒 </span>}{room.title}</h4>
                           <span className={`my-room-status ${room.status}`}>
                             {room.status === 'open' ? '열림' : room.status === 'recording' ? '녹음중' : '잠김'}
                           </span>
@@ -701,6 +721,18 @@ export function Rooms() {
         </div>
       </div>
 
+      <form className="room-code-join" onSubmit={handleJoinByCode}>
+        <input
+          type="text"
+          placeholder="방 코드 또는 초대 링크로 입장"
+          value={roomCode}
+          onChange={(e) => { setRoomCode(e.target.value); setRoomCodeError(null) }}
+          aria-label="방 코드 또는 초대 링크"
+        />
+        <button type="submit" disabled={!roomCode.trim()}>입장</button>
+        {roomCodeError && <span className="room-code-error">{roomCodeError}</span>}
+      </form>
+
       <div className="room-filters">
         {ROOM_FILTERS.map((filter) => (
           <button
@@ -732,7 +764,7 @@ export function Rooms() {
             >
               <div className="room-card-header">
                 <div className="room-info">
-                  <h3>{room.title}</h3>
+                  <h3>{room.hasPassword && <span className="room-lock" title="비밀번호 필요">🔒 </span>}{room.title}</h3>
                   <span className="room-genre">{room.genre}</span>
                 </div>
                 <span className={`status-badge ${room.status}`}>

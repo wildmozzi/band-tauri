@@ -4,6 +4,8 @@ import helmet from 'helmet'
 import musicRoutes from './routes/music'
 import { createPaymentRouter } from './routes/payment'
 import type { SubscriptionService } from './services/subscriptionService'
+import { createRoomsRouter } from './routes/rooms'
+import type { RoomService } from './services/roomService'
 import { resolveCorsOrigin } from './lib/securityConfig'
 import { apiLimiter, paymentLimiter } from './lib/rateLimits'
 import { UPLOAD_DIR } from './lib/uploads'
@@ -11,6 +13,8 @@ import { UPLOAD_DIR } from './lib/uploads'
 export interface AppOptions {
   /** 결제/구독 서비스 (테스트에서 저장소·결제대행 목 주입). 기본: Supabase 저장소 */
   subscriptionService?: SubscriptionService
+  /** 방 생성/비밀번호 서비스 (테스트에서 메모리 저장소 주입). 기본: Supabase */
+  roomService?: RoomService
 }
 
 /**
@@ -53,6 +57,7 @@ export function createApp(options: AppOptions = {}) {
   app.use('/api', apiLimiter)
   app.use('/api/music', musicRoutes)
   app.use('/api/payment', paymentLimiter, createPaymentRouter(options.subscriptionService))
+  app.use('/api/rooms', createRoomsRouter(options.roomService))
 
   // 헬스체크
   app.get('/health', (_req, res) => {

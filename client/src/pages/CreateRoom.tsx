@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
-import { supabase } from '../lib/supabaseClient'
+import { createRoom } from '../services/roomApi'
+import { validateRoomPasswordInput, ROOM_PASSWORD_MAX } from '../contexts/room/roomAccess'
 
 const GENRES = [
   '록', '재즈', '블루스', '클래식', '팝', '힙합',
@@ -40,6 +41,9 @@ export function CreateRoom() {
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [customTag, setCustomTag] = useState('')
   const [freeJoin, setFreeJoin] = useState(true)
+  const [isPrivate, setIsPrivate] = useState(false)
+  const [usePassword, setUsePassword] = useState(false)
+  const [password, setPassword] = useState('')
   const [instrumentSlots, setInstrumentSlots] = useState<InstrumentSlot[]>([
     { instrument: 'vocal', count: 1 },
     { instrument: 'guitar', count: 1 },
@@ -105,9 +109,12 @@ export function CreateRoom() {
       return
     }
 
-    if (!supabase) {
-      setError('데이터베이스에 연결할 수 없습니다.')
-      return
+    if (usePassword) {
+      const problem = validateRoomPasswordInput(password)
+      if (problem) {
+        setError(problem)
+        return
+      }
     }
 
     setLoading(true)
@@ -117,26 +124,21 @@ export function CreateRoom() {
       // 0개인 악기 슬롯은 제외
       const validSlots = instrumentSlots.filter(s => s.count > 0)
 
-      const { data, error: insertError } = await supabase
-        .from('rooms')
-        .insert({
-          title: title.trim(),
-          description: description.trim() || null,
-          host_id: user.id,
-          max_participants: maxParticipants,
-          genre: genre,
-          tags: selectedTags,
-          status: 'open',
-          free_join: freeJoin,
-          instrument_slots: validSlots
-        })
-        .select()
-        .single()
-
-      if (insertError) throw insertError
+      // 비밀번호는 서버가 해시해 저장한다 (방장 = 로그인 토큰의 사용자)
+      const room = await createRoom({
+        title: title.trim(),
+        description: description.trim() || null,
+        genre,
+        maxParticipants,
+        tags: selectedTags,
+        freeJoin,
+        isPrivate,
+        instrumentSlots: validSlots,
+        password: usePassword ? password : null,
+      })
 
       // 방 생성 성공 -> 방 상세 페이지로 이동
-      navigate(`/rooms/${data.id}`)
+      navigate(`/rooms/${room.id}`)
     } catch (err) {
       console.error('Room creation error:', err)
       setError(err instanceof Error ? err.message : '방 생성에 실패했습니다.')
@@ -327,6 +329,54 @@ export function CreateRoom() {
                 <span>{freeJoin ? '누구나 바로 연주자로 참여할 수 있습니다' : '방장이 승인해야 연주자로 참여할 수 있습니다'}</span>
               </div>
             </div>
+          </div>
+
+          {/* 공개 여부 */}
+          <div className="form-group">
+            <label>공개 여부</label>
+            <div className="toggle-option">
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={!isPrivate}
+                  onChange={(e) => setIsPrivate(!e.target.checked)}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+              <div className="toggle-label">
+                <strong>{isPrivate ? '비공개' : '공개'}</strong>
+                <span>{isPrivate ? '목록에 보이지 않습니다. 초대 링크나 방 코드로만 들어올 수 있습니다' : '합주실 목록에 표시됩니다'}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* 비밀번호 (선택) */}
+          <div className="form-group">
+            <label>비밀번호</label>
+            <div className="toggle-option">
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={usePassword}
+                  onChange={(e) => setUsePassword(e.target.checked)}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+              <div className="toggle-label">
+                <strong>{usePassword ? '비밀번호 사용' : '비밀번호 없음'}</strong>
+                <span>{usePassword ? '입장할 때 비밀번호를 물어봅니다 (방장은 제외)' : '링크를 아는 누구나 입장할 수 있습니다'}</span>
+              </div>
+            </div>
+            {usePassword && (
+              <input
+                type="password"
+                autoComplete="new-password"
+                placeholder="4~64자"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                maxLength={ROOM_PASSWORD_MAX}
+              />
+            )}
           </div>
 
           {error && <div className="form-error">{error}</div>}

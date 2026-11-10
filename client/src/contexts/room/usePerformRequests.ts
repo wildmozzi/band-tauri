@@ -1,16 +1,19 @@
 /**
  * 연주 참여 요청 / 악기 변경 요청 (방장 승인 흐름).
  * 승인·거절 판단은 서버가 한다(서버가 방장 여부를 판정). 클라이언트는 서버가 보낸 결과만 반영한다.
+ * 연주 참여 요청 상태는 performRequestState(순수 리듀서), 승인되면 onMyRequestApproved로 알린다(앱은 엔진 자동 시작).
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { SignalPayload } from './useSignaling'
+import {
+  initialPerformRequestState,
+  isPerformRequestSignal,
+  performRequestReducer,
+  type MyRequestStatus,
+  type PerformRequest,
+} from './performRequestState'
 
-export interface PerformRequest {
-  oderId: string
-  nickname: string
-  instrument: string
-  timestamp: number
-}
+export type { MyRequestStatus, PerformRequest }
 
 export interface InstrumentChangeRequest {
   oderId: string
@@ -18,13 +21,6 @@ export interface InstrumentChangeRequest {
   currentInstrument: string
   newInstrument: string
   timestamp: number
-}
-
-export type MyRequestStatus = 'none' | 'pending' | 'approved' | 'rejected'
-
-function isPerformRequest(v: unknown): v is PerformRequest {
-  const r = v as PerformRequest
-  return !!r && typeof r.oderId === 'string' && typeof r.instrument === 'string'
 }
 
 function isInstrumentChangeRequest(v: unknown): v is InstrumentChangeRequest {
@@ -39,15 +35,17 @@ export function usePerformRequests(opts: {
   onMyInstrumentChanged: (instrument: string) => void
   /** 다른 연주자의 악기 변경 */
   onPeerInstrumentChanged: (peerId: string, instrument: string) => void
+  /** 내 연주 참여 요청이 승인됨 (앱: 엔진 자동 시작) */
+  onMyRequestApproved?: (instrument: string | null) => void
 }) {
   const { send, canSend } = opts
   const callbacksRef = useRef(opts)
   callbacksRef.current = opts
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
 
-  const [pendingRequests, setPendingRequests] = useState<PerformRequest[]>([])
-  const [myRequestStatus, setMyRequestStatus] = useState<MyRequestStatus>('none')
-  const [myRequestInstrument, setMyRequestInstrument] = useState<string | null>(null)
+  const [perform, dispatch] = useReducer(performRequestReducer, initialPerformRequestState)
+  const myInstrumentRef = useRef<string | null>(null)
+  myInstrumentRef.current = perform.myInstrument
   const [pendingInstrumentChanges, setPendingInstrumentChanges] = useState<InstrumentChangeRequest[]>([])
   const [myInstrumentChangeStatus, setMyInstrumentChangeStatus] = useState<MyRequestStatus>('none')
   const [myNewInstrument, setMyNewInstrument] = useState<string | null>(null)
@@ -64,19 +62,26 @@ export function usePerformRequests(opts: {
   const requestPerform = useCallback((instrument: string) => {
     if (!canSend()) return
     send({ type: 'request-perform', instrument })
-    setMyRequestInstrument(instrument)
+    dispatch({ type: 'requested', instrument })
   }, [send, canSend])
 
   const cancelRequest = useCallback(() => {
     if (canSend()) send({ type: 'cancel-perform-request' })
-    setMyRequestStatus('none')
-    setMyRequestInstrument(null)
+    dispatch({ type: 'cancelled' })
   }, [send, canSend])
+
+  /** 거절 확인 (서버에는 보낼 것 없음) */
+  const dismissRejection = useCallback(() => {
+    dispatch({ type: 'cancelled' })
+  }, [])
 
   /** 승인 후 연주를 시작했으면 요청 상태 정리 */
   const resetMyRequest = useCallback(() => {
-    setMyRequestStatus('none')
-    setMyRequestInstrument(null)
+    dispatch({ type: 'started' })
+  }, [])
+
+  const dismissRequestNotice = useCallback(() => {
+    dispatch({ type: 'dismiss-notice' })
   }, [])
 
   const requestInstrumentChange = useCallback((newInstrument: string) => {
@@ -95,13 +100,14 @@ export function usePerformRequests(opts: {
   const approveRequest = useCallback((targetId: string) => {
     if (!canSend()) return
     send({ type: 'approve-perform', targetId })
-    setPendingRequests((prev) => prev.filter((r) => r.oderId !== targetId))
+    dispatch({ type: 'resolved', targetId })
   }, [send, canSend])
 
   const rejectRequest = useCallback((targetId: string, reason?: string) => {
     if (!canSend()) return
-    send({ type: 'reject-perform', targetId, reason })
-    setPendingRequests((prev) => prev.filter((r) => r.oderId !== targetId))
+    const trimmed = reason?.trim()
+    send({ type: 'reject-perform', targetId, ...(trimmed ? { reason: trimmed.slice(0, 200) } : {}) })
+    dispatch({ type: 'resolved', targetId })
   }, [send, canSend])
 
   const approveInstrumentChange = useCallback((targetId: string) => {
@@ -118,47 +124,27 @@ export function usePerformRequests(opts: {
 
   /** 참여자가 나가면 그 사람의 대기 요청 제거 */
   const dropPeer = useCallback((peerId: string) => {
-    setPendingRequests((prev) => prev.filter((r) => r.oderId !== peerId))
+    dispatch({ type: 'peer-left', peerId })
     setPendingInstrumentChanges((prev) => prev.filter((r) => r.oderId !== peerId))
   }, [])
 
   const resetAll = useCallback(() => {
-    setPendingRequests([])
+    dispatch({ type: 'reset' })
     setPendingInstrumentChanges([])
-    setMyRequestStatus('none')
-    setMyRequestInstrument(null)
     setMyInstrumentChangeStatus('none')
     setMyNewInstrument(null)
   }, [])
 
   const handleRequestSignal = useCallback((p: SignalPayload): boolean => {
+    if (isPerformRequestSignal(p.type)) {
+      dispatch({ type: 'signal', payload: p })
+      if (p.type === 'perform-request-approved') {
+        const instrument = typeof p.instrument === 'string' ? p.instrument : myInstrumentRef.current
+        callbacksRef.current.onMyRequestApproved?.(instrument)
+      }
+      return true
+    }
     switch (p.type) {
-      case 'perform-request-sent':
-        setMyRequestStatus('pending')
-        return true
-      case 'request-perform-error':
-        setMyRequestStatus('none')
-        setMyRequestInstrument(null)
-        return true
-      case 'perform-request-received':
-        if (isPerformRequest(p.request)) {
-          const req = p.request
-          setPendingRequests((prev) => (prev.some((r) => r.oderId === req.oderId) ? prev : [...prev, req]))
-        }
-        return true
-      case 'perform-request-cancelled':
-        if (typeof p.oderId === 'string') {
-          const id = p.oderId
-          setPendingRequests((prev) => prev.filter((r) => r.oderId !== id))
-        }
-        return true
-      case 'perform-request-approved':
-        setMyRequestStatus('approved')
-        if (typeof p.instrument === 'string') setMyRequestInstrument(p.instrument)
-        return true
-      case 'perform-request-rejected':
-        setMyRequestStatus('rejected')
-        return true
       case 'instrument-change-request-sent':
         setMyInstrumentChangeStatus('pending')
         return true
@@ -202,13 +188,18 @@ export function usePerformRequests(opts: {
   }, [later])
 
   return {
-    pendingRequests,
+    pendingRequests: perform.pendingRequests,
+    requestNotice: perform.notice,
+    dismissRequestNotice,
     approveRequest,
     rejectRequest,
-    myRequestStatus,
-    myRequestInstrument,
+    myRequestStatus: perform.myStatus,
+    myRequestInstrument: perform.myInstrument,
+    myRejectReason: perform.myRejectReason,
+    hostOnline: perform.hostOnline,
     requestPerform,
     cancelRequest,
+    dismissRejection,
     resetMyRequest,
     pendingInstrumentChanges,
     approveInstrumentChange,

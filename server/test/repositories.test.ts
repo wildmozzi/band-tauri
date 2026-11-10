@@ -57,10 +57,29 @@ describe('toRepositoryError', () => {
 })
 
 describe('roomRepository', () => {
-  it('findMeta maps host_id/free_join (free_join defaults to true)', async () => {
-    const m = mockSupabase(() => ok({ host_id: 'h', free_join: null }))
-    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: true })
-    assert.deepEqual(m.log[0], [['from', ['rooms']], ['select', ['host_id, free_join']], ['eq', ['id', 'r1']], ['maybeSingle', []]])
+  it('findMeta maps host_id/free_join/is_private + password hash (free_join defaults to true)', async () => {
+    const m = mockSupabase((calls) => calls[0][1][0] === 'room_secrets' ? ok({ password_hash: 'scrypt$h' }) : ok({ host_id: 'h', free_join: null, is_private: true }))
+    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: true, isPrivate: true, passwordHash: 'scrypt$h' })
+    assert.deepEqual(m.log[0], [['from', ['rooms']], ['select', ['host_id, free_join, is_private']], ['eq', ['id', 'r1']], ['maybeSingle', []]])
+    assert.deepEqual(m.log[1], [['from', ['room_secrets']], ['select', ['password_hash']], ['eq', ['room_id', 'r1']], ['maybeSingle', []]])
+  })
+  it('findMeta before migration 008: falls back without is_private, treats missing room_secrets as no password', async () => {
+    const m = mockSupabase((calls) => {
+      if (calls[0][1][0] === 'room_secrets') return err('no table', 'PGRST205')
+      return calls[1][1][0] === 'host_id, free_join, is_private' ? err('no column', '42703') : ok({ host_id: 'h', free_join: false })
+    })
+    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: false, isPrivate: false, passwordHash: null })
+  })
+  it('setPasswordHash upserts/deletes the secret and mirrors has_password', async () => {
+    const m = mockSupabase(() => ok(null))
+    const repo = createRoomRepository(m.client)
+    await repo.setPasswordHash('r1', 'scrypt$h')
+    assert.equal(m.log[0][0][1][0], 'room_secrets')
+    assert.equal(m.log[0][1][0], 'upsert')
+    assert.deepEqual(m.log[1], [['from', ['rooms']], ['update', [{ has_password: true }]], ['eq', ['id', 'r1']]])
+    await repo.setPasswordHash('r1', null)
+    assert.deepEqual(m.log[2], [['from', ['room_secrets']], ['delete', []], ['eq', ['room_id', 'r1']]])
+    assert.deepEqual(m.log[3], [['from', ['rooms']], ['update', [{ has_password: false }]], ['eq', ['id', 'r1']]])
   })
   it('findMeta: missing row → null, DB error → throws', async () => {
     assert.equal(await createRoomRepository(mockSupabase(() => ok(null)).client).findMeta('r1'), null)
