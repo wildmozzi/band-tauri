@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for the app","local":true,"windows":["main"],"permissions":["core:default","updater:default","process:allow-restart"]}}
+{"default":{"identifier":"default","description":"Default capabilities for the app","local":true,"windows":["main"],"permissions":["core:default","updater:allow-check","updater:allow-download","updater:allow-install","process:allow-restart"]}}

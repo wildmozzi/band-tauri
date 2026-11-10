@@ -6,6 +6,7 @@
  */
 import { useEffect, useState } from 'react'
 import { getVersion } from '@tauri-apps/api/app'
+import { useRoom } from '../contexts/RoomContext'
 import { appUpdater, isUpdaterAvailable, useUpdateStatus, type UpdateStatus } from '../native/updater'
 import './UpdateNotice.css'
 
@@ -22,9 +23,11 @@ function statusText(s: UpdateStatus): string {
     case 'upToDate':
       return '최신 버전입니다.'
     case 'available':
-      return `새 버전 ${s.version}이(가) 있습니다.`
+      return s.ready
+        ? `새 버전 ${s.version}을(를) 내려받았습니다. 설치하면 앱이 다시 시작됩니다.`
+        : `새 버전 ${s.version}이(가) 있습니다.`
     case 'deferred':
-      return `새 버전 ${s.version}이(가) 있습니다. 연주 중이라 설치를 미뤘습니다 — 연주를 마친 뒤 설치하세요.`
+      return `새 버전 ${s.version}이(가) 있습니다${s.ready ? '(내려받음)' : ''}. 연주 중이라 설치를 미뤘습니다 — 방을 나가면 다시 알려 드립니다.`
     case 'downloading':
       return s.total
         ? `내려받는 중… ${formatMb(s.downloaded)} / ${formatMb(s.total)} MB`
@@ -40,7 +43,7 @@ function InstallButton({ status }: { status: UpdateStatus }) {
   if (status.kind !== 'available' && status.kind !== 'deferred') return null
   return (
     <button type="button" className="update-btn primary" onClick={() => void appUpdater.installUpdate()}>
-      {status.kind === 'deferred' ? '다시 시도' : '지금 업데이트'}
+      {status.kind === 'deferred' ? '다시 시도' : status.ready ? '지금 설치' : '지금 업데이트'}
     </button>
   )
 }
@@ -48,6 +51,12 @@ function InstallButton({ status }: { status: UpdateStatus }) {
 /** 앱 루트에 한 번 마운트. 시작 시 1회 확인. */
 export function UpdateNotice() {
   const status = useUpdateStatus()
+  const { currentRoomId } = useRoom()
+
+  // 방에 있는 동안(엔진 시작 전 대기 포함)은 설치를 보류한다.
+  useEffect(() => {
+    appUpdater.setInRoom(currentRoomId !== null)
+  }, [currentRoomId])
 
   useEffect(() => {
     // dev(`tauri dev`)에서는 자동 확인하지 않는다 — 설정 화면 버튼으로만.

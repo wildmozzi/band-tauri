@@ -1,14 +1,26 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createUpdater, type DownloadEvent, type UpdateHandle, type UpdaterDeps } from './updater'
 
-function fakeUpdate(version = '0.2.0', events: DownloadEvent[] = []): UpdateHandle & { installed: number } {
-  const u = {
+interface FakeUpdate extends UpdateHandle {
+  downloads: number
+  installs: number
+  /** download 도중 실행할 훅 (예: 다운로드 중 엔진 시작) */
+  duringDownload?: () => void
+}
+
+function fakeUpdate(version = '0.2.0', events: DownloadEvent[] = []): FakeUpdate {
+  const u: FakeUpdate = {
     version,
     body: '변경 사항',
-    installed: 0,
-    async downloadAndInstall(onEvent?: (e: DownloadEvent) => void) {
+    downloads: 0,
+    installs: 0,
+    async download(onEvent) {
       events.forEach((e) => onEvent?.(e))
-      u.installed++
+      u.duringDownload?.()
+      u.downloads++
+    },
+    async install() {
+      u.installs++
     },
   }
   return u
@@ -40,7 +52,7 @@ describe('createUpdater', () => {
     expect(u.getStatus()).toEqual({ kind: 'error', message: 'offline' })
   })
 
-  it('엔진이 멈춰 있으면 available → 설치 시 진행률을 거쳐 설치 후 재시작', async () => {
+  it('엔진이 멈춰 있으면 available → 다운로드 진행률 → 설치 → 재시작', async () => {
     const update = fakeUpdate('0.2.0', [
       { event: 'Started', data: { contentLength: 200 } },
       { event: 'Progress', data: { chunkLength: 120 } },
@@ -56,15 +68,16 @@ describe('createUpdater', () => {
     })
 
     await u.checkForUpdate({ silent: true })
-    expect(u.getStatus()).toEqual({ kind: 'available', version: '0.2.0', notes: '변경 사항' })
+    expect(u.getStatus()).toEqual({ kind: 'available', version: '0.2.0', notes: '변경 사항', ready: false })
 
     await u.installUpdate()
-    expect(update.installed).toBe(1)
+    expect(update.downloads).toBe(1)
+    expect(update.installs).toBe(1)
     expect(d.relaunch).toHaveBeenCalledOnce()
-    expect(seen).toEqual(['available', 'dl:0/null', 'dl:0/200', 'dl:120/200', 'dl:200/200', 'installing', 'installing'])
+    expect(seen).toEqual(['available', 'dl:0/null', 'dl:0/200', 'dl:120/200', 'dl:200/200', 'installing'])
   })
 
-  it('연주 중이면 설치를 미루고 알림만 한다 (deferred), 연주가 끝나면 설치', async () => {
+  it('연주 중이면 다운로드도 설치도 하지 않고 알림만 한다 (deferred)', async () => {
     let running = true
     const update = fakeUpdate()
     const d = deps({ check: vi.fn(async () => update), isEngineRunning: vi.fn(async () => running) })
@@ -75,23 +88,93 @@ describe('createUpdater', () => {
 
     await u.installUpdate()
     expect(u.getStatus().kind).toBe('deferred')
-    expect(update.installed).toBe(0)
-    expect(d.relaunch).not.toHaveBeenCalled()
+    expect(update.downloads).toBe(0)
+    expect(update.installs).toBe(0)
 
     running = false
     await u.installUpdate()
-    expect(update.installed).toBe(1)
+    expect(update.installs).toBe(1)
     expect(d.relaunch).toHaveBeenCalledOnce()
   })
 
-  it('설치 실패는 error로 알린다', async () => {
+  it('다운로드 중 엔진이 시작되면 install을 호출하지 않고, 받은 패키지를 유지한다 (M1)', async () => {
+    let running = false
     const update = fakeUpdate()
-    update.downloadAndInstall = async () => Promise.reject('서명 검증 실패')
-    const d = deps({ check: vi.fn(async () => update) })
+    update.duringDownload = () => {
+      running = true
+    }
+    const d = deps({ check: vi.fn(async () => update), isEngineRunning: vi.fn(async () => running) })
     const u = createUpdater(d)
+
     await u.checkForUpdate()
     await u.installUpdate()
-    expect(u.getStatus()).toEqual({ kind: 'error', message: '업데이트 설치 실패: 서명 검증 실패' })
+    expect(update.downloads).toBe(1)
+    expect(update.installs).toBe(0)
+    expect(d.relaunch).not.toHaveBeenCalled()
+    expect(u.getStatus()).toMatchObject({ kind: 'deferred', ready: true })
+
+    // 연주 종료 후: 다시 받지 않고 바로 설치
+    running = false
+    await u.installUpdate()
+    expect(update.downloads).toBe(1)
+    expect(update.installs).toBe(1)
+  })
+
+  it('같은 버전을 다시 확인해도 받아 둔 패키지를 버리지 않는다', async () => {
+    let running = false
+    const first = fakeUpdate('0.2.0')
+    first.duringDownload = () => {
+      running = true
+    }
+    const second = fakeUpdate('0.2.0')
+    const check = vi.fn<UpdaterDeps['check']>().mockResolvedValueOnce(first).mockResolvedValueOnce(second)
+    const u = createUpdater(deps({ check, isEngineRunning: vi.fn(async () => running) }))
+
+    await u.checkForUpdate()
+    await u.installUpdate() // 다운로드 후 보류
+    running = false
+    await u.checkForUpdate()
+    expect(u.getStatus()).toMatchObject({ kind: 'available', ready: true })
+    await u.installUpdate()
+    expect(first.installs).toBe(1)
+    expect(second.downloads).toBe(0)
+  })
+
+  it('방에 있는 동안은 엔진 시작 전이라도 보류, 방을 나가면 다시 알린다 (L4)', async () => {
+    const update = fakeUpdate()
+    const u = createUpdater(deps({ check: vi.fn(async () => update) }))
+
+    u.setInRoom(true)
+    await u.checkForUpdate({ silent: true })
+    expect(u.getStatus().kind).toBe('deferred')
+    await u.installUpdate()
+    expect(update.downloads).toBe(0)
+
+    u.dismiss() // "나중에"
+    expect(u.getStatus().kind).toBe('idle')
+    u.setInRoom(false)
+    expect(u.getStatus()).toMatchObject({ kind: 'available', version: '0.2.0' })
+
+    // available 상태에서 방에 들어가면 deferred로 바뀐다
+    u.setInRoom(true)
+    expect(u.getStatus().kind).toBe('deferred')
+  })
+
+  it('다운로드 실패와 설치 실패는 각각 error로 알린다', async () => {
+    const bad = fakeUpdate()
+    bad.download = async () => Promise.reject('네트워크 끊김')
+    const u1 = createUpdater(deps({ check: vi.fn(async () => bad) }))
+    await u1.checkForUpdate()
+    await u1.installUpdate()
+    expect(u1.getStatus()).toEqual({ kind: 'error', message: '업데이트 다운로드 실패: 네트워크 끊김' })
+
+    const badInstall = fakeUpdate()
+    badInstall.install = async () => Promise.reject('서명 검증 실패')
+    const d = deps({ check: vi.fn(async () => badInstall) })
+    const u2 = createUpdater(d)
+    await u2.checkForUpdate()
+    await u2.installUpdate()
+    expect(u2.getStatus()).toEqual({ kind: 'error', message: '업데이트 설치 실패: 서명 검증 실패' })
     expect(d.relaunch).not.toHaveBeenCalled()
   })
 

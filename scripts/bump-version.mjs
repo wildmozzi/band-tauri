@@ -13,7 +13,7 @@
  *   node scripts/bump-version.mjs --check 0.2.0   # 모두 0.2.0인지 확인 (릴리스 태그 검증)
  */
 import { readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -33,10 +33,11 @@ function write(p, text, original) {
   writeFileSync(p, text.replace(/\r?\n/g, eol))
 }
 
-// Cargo.toml: [package] 섹션의 첫 version 줄
-const CARGO_TOML_RE = /(\[package\][^[]*?\nversion\s*=\s*")([^"]+)(")/
+// Cargo.toml: [package] 섹션의 첫 version 줄. 다음 섹션 헤더(줄 맨 앞 '[')를 넘어가지 않고,
+// 'authors = [...]'처럼 줄 중간의 '['는 허용한다.
+export const CARGO_TOML_RE = /(^\[package\][ \t]*\r?\n(?:(?!\[|version\s*=)[^\n]*\n)*?version\s*=\s*")([^"]+)(")/m
 // Cargo.lock: name = "band" 바로 다음 version 줄
-const CARGO_LOCK_RE = /(\nname = "band"\r?\nversion = ")([^"]+)(")/
+export const CARGO_LOCK_RE = /(\nname = "band"\r?\nversion = ")([^"]+)(")/
 
 function current() {
   const tauri = JSON.parse(read(P.tauriConf)).version
@@ -80,11 +81,14 @@ function setVersion(v) {
   }
 }
 
-function bump(v, part) {
-  const [maj, min, pat] = v.split('-')[0].split('.').map(Number)
-  if (part === 'major') return `${maj + 1}.0.0`
-  if (part === 'minor') return `${maj}.${min + 1}.0`
-  return `${maj}.${min}.${pat + 1}`
+/** semver 증가. 프리릴리스(x.y.z-rc.1)는 그 단계의 정식 버전으로 올린다 (0.2.0-rc.1 patch → 0.2.0). */
+export function bump(v, part) {
+  const dash = v.indexOf('-')
+  const pre = dash >= 0
+  const [maj, min, pat] = (pre ? v.slice(0, dash) : v).split('.').map(Number)
+  if (part === 'major') return pre && min === 0 && pat === 0 ? `${maj}.0.0` : `${maj + 1}.0.0`
+  if (part === 'minor') return pre && pat === 0 ? `${maj}.${min}.0` : `${maj}.${min + 1}.0`
+  return pre ? `${maj}.${min}.${pat}` : `${maj}.${min}.${pat + 1}`
 }
 
 function main(argv) {
@@ -92,8 +96,8 @@ function main(argv) {
   if (argv[0] === '--check') {
     const want = argv[1]?.replace(/^v/, '')
     const values = Object.values(cur)
-    const ok = values.every((x) => x === (want ?? values[0]))
-    for (const [k, x] of Object.entries(cur)) console.log(`${k.padEnd(28)} ${x}`)
+    const ok = values.every((x) => x !== undefined && x === (want ?? values[0]))
+    for (const [k, x] of Object.entries(cur)) console.log(`${k.padEnd(28)} ${x ?? '(버전 줄을 찾지 못함)'}`)
     if (!ok) {
       console.error(want ? `버전이 ${want}와(과) 일치하지 않습니다.` : '버전이 서로 다릅니다.')
       console.error('`node scripts/bump-version.mjs <버전>`으로 맞추세요.')
@@ -118,4 +122,5 @@ function main(argv) {
   console.log(`다음: git commit -am "chore: v${next}" && git tag v${next} && git push origin v${next}`)
 }
 
-main(process.argv.slice(2))
+// 테스트에서 import할 때는 실행하지 않는다
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) main(process.argv.slice(2))

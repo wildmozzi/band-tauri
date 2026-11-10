@@ -16,7 +16,8 @@ Windows 우선. 설치본은 NSIS(`Band_<버전>_x64-setup.exe`), 자동 업데�
 ### 앱 동작
 - 앱 시작 시 조용히 확인(오프라인·실패면 아무것도 띄우지 않음). 새 버전이 있으면 하단 배너 "지금 업데이트 / 나중에".
 - 설정 → 오디오 설정 화면 아래 **앱 업데이트** 섹션의 "업데이트 확인" 버튼으로 수동 확인.
-- **연주 중(엔진 동작 중, `engine_stats().running`)에는 설치하지 않고 알림만** 한다. 연주를 마친 뒤 "다시 시도".
+- **연주 중에는 설치하지 않고 알림만** 한다. 연주 중 = 엔진 동작 중(`engine_stats().running`, 테스트 모니터 포함) **또는 방 참여 중**(엔진 시작 전 대기 포함). 방을 나가면 보류된 업데이트를 다시 알린다("나중에"로 닫았어도).
+- 다운로드와 설치를 나눈다: `download()` → 연주 여부 **재확인** → `install()`. 다운로드 중에 연주를 시작하면 받은 패키지는 그대로 두고 보류하며, 나중에 다시 받지 않고 바로 설치한다. Windows의 `install()`은 NSIS를 띄우고 즉시 앱을 종료한다.
 - 설치는 NSIS `passive` 모드(진행 표시만, 질문 없음). 설치 프로그램이 앱을 종료하고 설치 후 다시 실행한다.
 - 다운로드한 설치본은 공개키로 서명을 검증한다. 서명이 맞지 않으면 설치하지 않는다.
 
@@ -66,9 +67,13 @@ git push origin v0.2.0
 ```
 
 1. 워크플로가 태그와 앱 버전이 같은지 먼저 확인한다(`bump-version.mjs --check`). 다르면 실패.
+   이어서 필수 값(`TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `VITE_SIGNALING_URL`(wss://), `VITE_API_URL`·`VITE_SUPABASE_URL`(https://), `VITE_SUPABASE_ANON_KEY`, `VITE_TOSS_PAYMENTS_CLIENT_KEY`)이 비었거나 `auto`면 실패한다. 값이 빠진 채 서명된 릴리스가 Publish되면 자동 업데이트로 고장 난 앱이 전 사용자에게 퍼지기 때문이다.
 2. windows-latest에서 NSIS 설치본 + `.sig` + `latest.json`을 만들어 **draft 릴리스**에 올린다.
 3. 사람이 draft를 내려받아 설치·실행 확인 후 **Publish**. Publish 전에는 `releases/latest`가 이전 버전을 가리키므로 기존 사용자에게 업데이트가 뜨지 않는다.
 4. prerelease로 Publish 하면 `latest`에 잡히지 않는다 — 베타 채널이 필요하면 엔드포인트를 따로 둔다(미구현).
+
+### 버전 스크립트 테스트
+`node --test scripts/` — semver 증가(프리릴리스 포함), Cargo.toml/Cargo.lock 정규식.
 
 ### 로컬 빌드
 ```powershell
@@ -85,6 +90,12 @@ npm run tauri build
 - `Band_0.1.0_x64-setup.exe`: **3,011,948 B (≈2.9 MB)** + `.sig` 412 B
 - 설치되는 `band.exe`: 7,393,280 B (≈7.1 MB, LTO·`opt-level="s"`·strip)
 - 업데이터 서명(`.sig`) 생성 확인. 설치·실행·업데이트 적용은 [사람] 검증 대상.
+
+## 변경 금지 / 주의
+- **NSIS `installMode: currentUser`를 바꾸지 않는다.** 바꾸면 설치 경로가 달라져 기존 설치본의 업데이트가 깨진다.
+- `@tauri-apps/cli`(npm)와 `tauri` 크레이트는 major.minor를 맞춘다(현재 2.12). 번들러·업데이터 아티팩트는 CLI가 만든다.
+- 릴리스 워크플로의 서드파티 액션은 commit SHA로 고정되어 있다. 올릴 때는 SHA를 확인해서 바꾼다.
+- Authenticode `.pfx`·비밀번호는 "인증서 가져오기" 단계의 env에만 들어간다(`npm ci`·빌드 스크립트에는 노출되지 않음). 단, 가져온 인증서는 러너의 사용자 인증서 저장소에 남아 이후 서명 단계(signtool)가 쓴다.
 
 ## 3. 코드 서명(Authenticode)과 SmartScreen — P2-2 [사람]
 
