@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use band_lib::engine::config::{CodecKind, EngineConfig, HEADER_BYTES, MAX_PACKET_BYTES};
 use band_lib::engine::device::fake::FakeBackend;
+use band_lib::engine::jitter as jitter_stats;
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::stats::PeerStateKind;
 use band_lib::engine::Engine;
@@ -51,6 +52,7 @@ fn test_net() -> NetOptions {
         gather_lan: false,
         extra_candidates: vec![],
         allow_loopback_candidates: true,
+        cancel: None,
     }
 }
 
@@ -389,30 +391,56 @@ fn link_matrix_clean_network_no_concealment_no_corrections() {
         bb.seed = 9;
         let (a, b, _p, sink_b) = connect_pair(config(buf, frame_ms), ba, bb, None);
         let start = sink_b.lock().len() / 2;
-        // 목표 깊이는 내릴 때 2초 유지를 요구하므로, 정착 후(4초~7초) 구간에서 보정을 센다.
-        std::thread::sleep(Duration::from_millis(4000));
-        let s1 = b.peer_jitter_stats()[0].1;
+        // 3초~9초를 0.25초 간격으로 관찰한다. 콜백 기상 지연(1ms)과 송신 버스트 때문에 p95가 프레임 경계를
+        // 넘나들면 목표가 한 단계 바뀔 수 있다(목표 재설정 → 정당한 보정). 이 테스트가 확인하는 것은
+        // "드리프트 0이면 목표가 고정된 동안 보정이 없다"는 것이므로, 목표가 바뀐 구간과 그 뒤 따라잡기
+        // 구간(목표 차이 ÷ 패킷당 최소 보정 속도 + 여유)은 세지 않는다(PR #5 M-1).
         std::thread::sleep(Duration::from_millis(3000));
-        let s2 = b.peer_jitter_stats()[0].1;
+        let mut snaps: Vec<(Instant, jitter_stats::JitterStats)> = Vec::new();
+        for _ in 0..24 {
+            snaps.push((Instant::now(), b.peer_jitter_stats()[0].1));
+            std::thread::sleep(Duration::from_millis(250));
+        }
         let xruns = b.stats().xruns;
         let snap = sink_b.lock().clone();
         drop(a);
         drop(b);
         let c = analyze(&snap, start + 48_000 * 3 / 2);
-        let corr = s2.corrections() - s1.corrections();
+        let (first, last) = (snaps[0].1, snaps[snaps.len() - 1].1);
+        let mut stable_corr = 0;
+        let mut stable_secs = 0.0;
+        let mut retarget_until: Option<Instant> = None;
+        for w in snaps.windows(2) {
+            let ((t0, s0), (t1, s1)) = (w[0], w[1]);
+            if (s1.target_ms - s0.target_ms).abs() > 0.01 {
+                // 목표가 바뀌었다: 깊이를 새 목표까지 옮기는 데 걸리는 시간(1샘플/패킷 기준) + 0.5초는 제외
+                let samples = ((s1.target_ms - s0.target_ms).abs() * 48.0) as f64;
+                let packets_per_s = 1000.0 / frame_ms as f64;
+                let catch_up = Duration::from_secs_f64(samples / packets_per_s + 0.5);
+                retarget_until = Some(t1 + catch_up);
+                continue;
+            }
+            if retarget_until.is_some_and(|u| t1 <= u) {
+                continue;
+            }
+            stable_corr += s1.corrections() - s0.corrections();
+            stable_secs += (t1 - t0).as_secs_f64();
+        }
         println!(
-            "LINK buf {buf} / {frame_ms}ms: 불연속 {} 무음 {}, concealed {} (4s 이후 {}), 보정(4~7s) {corr}, buffer {:.1}ms target {:.1}ms, xruns {xruns}",
+            "LINK buf {buf} / {frame_ms}ms: 불연속 {} 무음 {}, concealed(3~9s) {}, 목표 {:.1}→{:.1}ms, 목표 고정 {stable_secs:.1}s 동안 보정 {stable_corr}, 전체 보정 {}, buffer {:.1}ms, xruns {xruns}",
             c.discontinuities,
             c.silent_runs,
-            s2.concealed,
-            s2.concealed - s1.concealed,
-            s2.buffer_ms,
-            s2.target_ms
+            last.concealed - first.concealed,
+            first.target_ms,
+            last.target_ms,
+            last.corrections() - first.corrections(),
+            last.buffer_ms,
         );
+        assert!(stable_secs >= 3.0, "buf {buf} / {frame_ms}ms: 목표가 고정된 구간이 3초 이상 있어야 함({stable_secs:.1}s)");
+        assert_eq!(stable_corr, 0, "buf {buf} / {frame_ms}ms: 드리프트 0, 목표 고정 중 보정 {stable_corr}회");
         // 결정적 보장(정확히 0)은 단위 시뮬레이션(jitter::clean_network_zero_concealment_and_zero_corrections)이
         // 맡는다. 실시간 테스트는 스케줄러 지연 1회까지 허용한다(리뷰 M4 회귀는 5초에 6~8회였다).
-        assert!(s2.concealed - s1.concealed <= 1, "buf {buf} / {frame_ms}ms: 지터 없는 링크에서 은닉 {}", s2.concealed - s1.concealed);
-        assert!(corr <= 2, "buf {buf} / {frame_ms}ms: 드리프트 0에서 보정 {corr}회");
+        assert!(last.concealed - first.concealed <= 1, "buf {buf} / {frame_ms}ms: 지터 없는 링크에서 은닉 {}", last.concealed - first.concealed);
         assert_gaps_explained_by_xruns(&c, xruns, &format!("LINK buf {buf} / {frame_ms}ms"));
     }
 }
@@ -507,7 +535,7 @@ fn impulse_latency_matches_estimate() {
         let sink = backend.sink.clone();
         let mut e = Engine::start(config(buf, frame_ms), Arc::new(backend), controls, None).unwrap();
         std::thread::sleep(Duration::from_millis(3000));
-        let est = e.stats().est_latency_ms as f64;
+        let est = e.stats().monitor_latency_ms as f64;
         e.stop();
         let out = sink.lock().clone();
         // 출력의 임펄스 위치 j → 지연 = phase + j/rate − i/rate, i = k·PERIOD + 100
@@ -537,17 +565,79 @@ fn impulse_latency_matches_estimate() {
 #[test]
 fn device_lost_is_reported() {
     let _g = RT_LOCK.lock();
+    // 1) 비치명 스트림 에러만으로는 장치 분실이 아니다(콜백은 계속 돈다)
     let mut backend = FakeBackend::silence(48_000);
     backend.error_after = Some(Duration::from_millis(300));
     let mut e = Engine::start(config(128, 5.0), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
-    assert!(!e.stats().device_lost);
     std::thread::sleep(Duration::from_millis(700));
     let s = e.stats();
     e.stop();
-    assert!(s.device_lost, "{s:?}");
     assert_eq!(s.stream_errors, 1);
+    assert!(!s.device_lost && s.running, "{s:?}");
+
+    // 2) 콜백이 멈추면(장치 분리) deviceLost=true, running=false → 프론트의 기존 엔진 정지 감지가 동작(PR #5 M-2)
+    let mut backend = FakeBackend::silence(48_000);
+    backend.halt_after = Some(Duration::from_millis(400));
+    let mut e = Engine::start(config(128, 5.0), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
+    assert!(e.stats().running);
+    std::thread::sleep(Duration::from_millis(2000));
+    let s = e.stats();
+    e.stop();
+    assert!(s.device_lost, "{s:?}");
+    assert!(!s.running, "장치를 잃으면 running=false");
     let j = serde_json::to_string(&s).unwrap();
-    assert!(j.contains("\"deviceLost\":true") && j.contains("\"streamErrors\":1"));
+    assert!(j.contains("\"deviceLost\":true") && j.contains("\"running\":false"));
+}
+
+#[test]
+fn worker_init_failure_fails_start() {
+    let _g = RT_LOCK.lock();
+    // 장치가 지원 범위 밖 레이트를 보고하면 Worker::new가 실패하고 engine_start가 에러를 돌려준다(PR #5 L-6)
+    let backend = FakeBackend::new(4_000, Arc::new(|_, _, buf: &mut [f32]| buf.fill(0.0)));
+    let r = Engine::start(config(128, 5.0), Arc::new(backend), Arc::new(MixControls::default()), None);
+    let err = r.err().unwrap_or_default();
+    assert!(err.contains("레이트"), "{err}");
+}
+
+#[test]
+fn output_underruns_do_not_accumulate_latency() {
+    let _g = RT_LOCK.lock();
+    // PR #5 H-1 회귀: 수신측 출력 콜백이 1초마다 8ms 멈췄다 몰아서 따라잡는다(CPU 스파이크) → 매번 출력 언더런.
+    // 이전 구현은 소비 카운터 결손이 0.5ms/s로만 회복되어 실제 지연이 30초에 +54ms까지 몰래 늘었다.
+    let ba = sine_backend();
+    let mut bb = FakeBackend::silence(48_000);
+    bb.out_stall = Some((Duration::from_secs(1), Duration::from_millis(8)));
+    let (a, b, _p, _sink) = connect_pair(config(128, 5.0), ba, bb, None);
+    let mut trace = Vec::new();
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(500));
+        let s = b.stats();
+        let js = b.peer_jitter_stats()[0].1;
+        trace.push((t0.elapsed().as_secs_f64(), js.buffer_ms, js.wall_buffer_ms, s.peers[0].playout_ms, js.target_ms));
+    }
+    let st = b.stats();
+    let js = b.peer_jitter_stats()[0].1;
+    drop(a);
+    drop(b);
+    let mean = |from: f64, to: f64, f: fn(&(f64, f32, f32, f32, f32)) -> f32| {
+        let v: Vec<f32> = trace.iter().filter(|t| t.0 >= from && t.0 < to).map(f).collect();
+        v.iter().sum::<f32>() / v.len().max(1) as f32
+    };
+    let (wall_early, wall_late) = (mean(4.0, 8.0, |t| t.2), mean(15.0, 20.5, |t| t.2));
+    let (clk_late, play_late) = (mean(15.0, 20.5, |t| t.1), mean(15.0, 20.5, |t| t.3));
+    println!(
+        "출력 언더런 반복: xruns {}, 벽시계 버퍼 4~8s {wall_early:.1}ms → 15~20s {wall_late:.1}ms, 클럭 기준 bufferMs {clk_late:.1}ms, playoutMs {play_late:.1}ms, 목표 {:.1}ms, 순증 보정 {} 샘플",
+        st.xruns,
+        js.target_ms,
+        js.samples_inserted as i64 - js.samples_dropped as i64
+    );
+    assert!(st.xruns >= 10, "테스트가 언더런을 실제로 일으켜야 함: {}", st.xruns);
+    assert!((wall_late - wall_early).abs() < 3.0, "실제 지연 누적: {wall_early:.1} → {wall_late:.1}ms");
+    assert!((wall_late - js.target_ms).abs() < 5.0, "실제 지연이 목표 근처: {wall_late:.1} vs {:.1}", js.target_ms);
+    // 클럭 기준 깊이(bufferMs)와 벽시계 실측이 어긋나지 않아야 숨은 누적이 없다
+    assert!((clk_late - wall_late).abs() < 3.0, "bufferMs {clk_late:.1} vs 실측 {wall_late:.1}");
+    assert!(play_late > wall_late, "playoutMs는 출력 경로를 포함");
 }
 
 // ============================================================================
@@ -583,6 +673,38 @@ fn manager_stays_responsive_while_starting() {
     let r = starter.join().unwrap();
     assert!(r.is_err(), "취소되어야 함");
     assert!(!m.stats().running, "stop 이후 엔진이 남으면 안 됨");
+}
+
+#[test]
+fn stop_then_start_during_slow_start_is_serialized() {
+    let _g = RT_LOCK.lock();
+    // PR #5 M-4: 장치 열기가 느린 시작 중에 stop → 곧바로 start. 장치는 배타라 동시에 열면 실패한다.
+    // 새 시작은 이전 시작이 끝나 장치를 놓을 때까지 기다려야 하고, 결국 엔진이 하나 살아 있어야 한다.
+    let mut backend = FakeBackend::silence(48_000);
+    backend.open_delay = Duration::from_millis(1200);
+    backend.exclusive = Some(Arc::new(AtomicBool::new(false)));
+    let m = Arc::new(EngineManager::new(Arc::new(backend), test_net()));
+    let m1 = m.clone();
+    let first = std::thread::spawn(move || m1.start(config(128, 5.0), "me".into()));
+    std::thread::sleep(Duration::from_millis(200));
+    m.stop();
+    let m2 = m.clone();
+    let second = std::thread::spawn(move || m2.start(config(128, 5.0), "me".into()));
+    let r1 = first.join().unwrap();
+    let r2 = second.join().unwrap();
+    assert!(r1.is_err(), "첫 시작은 취소");
+    assert!(r2.is_ok(), "두 번째 시작은 장치 사용 중 없이 성공해야 함: {r2:?}");
+    assert!(m.stats().running);
+    // 연속 start 두 번(설정 변경 연타)도 마지막 하나만 남는다
+    let m3 = m.clone();
+    let a = std::thread::spawn(move || m3.start(config(256, 5.0), "me".into()));
+    std::thread::sleep(Duration::from_millis(100));
+    let m4 = m.clone();
+    let b = std::thread::spawn(move || m4.start(config(128, 2.5), "me".into()));
+    let (ra, rb) = (a.join().unwrap(), b.join().unwrap());
+    assert!(ra.is_err() && rb.is_ok(), "{ra:?} / {rb:?}");
+    assert!(m.stats().running);
+    m.stop();
 }
 
 #[test]
