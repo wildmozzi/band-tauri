@@ -55,7 +55,9 @@
 | P2-6a | **[결정]** 요금제표의 "비공개 방 = Standard 이상" 제한을 적용할지 (현재 미적용) | 사용자 결정 | 대기 |
 | P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 완료(#3) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
-| P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 진행중(p3-query 재개, WIP 105d031) |
+| P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 진행중(PR #12 리뷰; pages 직접 supabase 호출 13→0) |
+| P3-3a | **[사람]** 운영 DB에서 `supabase gen types` 실행 결과와 `client/src/lib/database.types.ts` 비교(profiles/rooms/post_likes 컬럼은 코드에서 추론) | 차이 없음 확인 | 대기 |
+| P3-3b | RoomDetail 직접 Supabase 호출(4)·contexts의 profiles 접근(11)을 query 훅으로 이전 | 직접 호출 0 | 대기 (P1-4b 병합 후) |
 | P3-4 | 거대 파일 분해(PostDetail, Rooms, EditPost, RoomDetail) | 파일당 ≤ 400줄 | 부분 완료(#7: PostDetail/Rooms/EditPost/CreatePost); RoomDetail 남음(엔진 연동 후) |
 | P3-5 | 서버 route→service→repository 계층화, 구독 정보를 DB로(현재 메모리 Map) | 테스트 통과 | 완료(#6, server 181 tests) |
 | P3-5a | **[확인]** 운영 Supabase에 `docs/migrations/007_subscriptions.sql` + `008_room_privacy.sql` + `009_payment_orders.sql` 실행 (배포 순서: 마이그레이션 007→008→009 → server → client) — **main 배포와 함께** 해야 함(미실행 시 운영 결제 API가 503) + 토스 테스트 키로 결제·취소·재시작 복구 검증(실패 응답도 멱등 키로 캐시되는지 확인) | 사용자 승인 후 실행 | 대기 (P3-5 병합 후) |
