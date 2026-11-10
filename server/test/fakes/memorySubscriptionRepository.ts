@@ -25,7 +25,7 @@ export class MemorySubscriptionRepository implements SubscriptionRepository {
     if (this.payments.some(p => p.paymentKey === intent.paymentKey || p.orderId === intent.orderId)) {
       throw new ConflictError('duplicate key', '23505')
     }
-    this.payments.push({ id: randomUUID(), ...intent, status: 'pending', subscriptionId: null, createdAt })
+    this.payments.push({ id: randomUUID(), ...intent, status: 'pending', subscriptionId: null, createdAt, updatedAt: createdAt })
   }
 
   async deletePendingPayment(orderId: string) {
@@ -35,8 +35,17 @@ export class MemorySubscriptionRepository implements SubscriptionRepository {
   async listPendingPayments(createdBefore: Date, limit: number) {
     return this.payments
       .filter(p => p.status === 'pending' && p.createdAt < createdBefore)
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
       .slice(0, limit)
+      .map(p => ({ ...p }))
+  }
+
+  async touchPendingPayment(orderId: string, now: Date) {
+    for (const p of this.payments) if (p.orderId === orderId && p.status === 'pending') p.updatedAt = now
+  }
+
+  async markPaymentForManualReview(orderId: string, now: Date) {
+    for (const p of this.payments) if (p.orderId === orderId && p.status === 'pending') { p.status = 'manual_review'; p.updatedAt = now }
   }
 
   async recordConfirmedPayment(input: RecordPaymentInput) {
@@ -67,6 +76,7 @@ export class MemorySubscriptionRepository implements SubscriptionRepository {
       status: 'confirmed',
       subscriptionId: sub.id,
       createdAt: new Date(),
+      updatedAt: new Date(),
     })
     return sub
   }

@@ -136,7 +136,7 @@ describe('subscriptionRepository (Supabase)', () => {
 
   it('pending payments: insert / delete only pending / list oldest first; duplicate → ConflictError', async () => {
     const before = new Date('2026-11-10T00:00:00Z')
-    const row = { id: 'p1', user_id: 'u1', order_id: 'o1', payment_key: 'pk1', plan_type: 'pro', amount: 6900, status: 'pending', subscription_id: null, created_at: '2026-11-09T00:00:00+00:00' }
+    const row = { id: 'p1', user_id: 'u1', order_id: 'o1', payment_key: 'pk1', plan_type: 'pro', amount: 6900, status: 'pending', subscription_id: null, created_at: '2026-11-09T00:00:00+00:00', updated_at: '2026-11-09T00:00:00+00:00' }
     const m = mockSupabase((calls) => (calls.some(([c]) => c === 'select') ? ok([row]) : ok(null)))
     const repo = createSupabaseSubscriptionRepository(m.client)
     await repo.createPendingPayment({ userId: 'u1', orderId: 'o1', paymentKey: 'pk1', planType: 'pro', amount: 6900 })
@@ -144,9 +144,14 @@ describe('subscriptionRepository (Supabase)', () => {
     const list = await repo.listPendingPayments(before, 10)
     assert.deepEqual(m.log[0], [['from', ['payments']], ['insert', [{ user_id: 'u1', order_id: 'o1', payment_key: 'pk1', plan_type: 'pro', amount: 6900, status: 'pending' }]]])
     assert.deepEqual(m.log[1], [['from', ['payments']], ['delete', []], ['eq', ['order_id', 'o1']], ['eq', ['status', 'pending']]])
-    assert.deepEqual(m.log[2], [['from', ['payments']], ['select', ['*']], ['eq', ['status', 'pending']], ['lt', ['created_at', before.toISOString()]], ['order', ['created_at', { ascending: true }]], ['limit', [10]]])
+    assert.deepEqual(m.log[2], [['from', ['payments']], ['select', ['*']], ['eq', ['status', 'pending']], ['lt', ['created_at', before.toISOString()]], ['order', ['updated_at', { ascending: true }]], ['limit', [10]]])
     assert.equal(list[0].status, 'pending')
     assert.ok(list[0].createdAt instanceof Date)
+
+    await repo.touchPendingPayment('o1', before)
+    await repo.markPaymentForManualReview('o1', before)
+    assert.deepEqual(m.log[3], [['from', ['payments']], ['update', [{ updated_at: before.toISOString() }]], ['eq', ['order_id', 'o1']], ['eq', ['status', 'pending']]])
+    assert.deepEqual(m.log[4], [['from', ['payments']], ['update', [{ status: 'manual_review', updated_at: before.toISOString() }]], ['eq', ['order_id', 'o1']], ['eq', ['status', 'pending']]])
 
     const dup = mockSupabase(() => err('duplicate key value', '23505'))
     await assert.rejects(createSupabaseSubscriptionRepository(dup.client).createPendingPayment({ userId: 'u1', orderId: 'o1', paymentKey: 'pk1', planType: 'pro', amount: 6900 }), ConflictError)

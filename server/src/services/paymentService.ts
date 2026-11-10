@@ -14,9 +14,11 @@ export const TOSS_TIMEOUT_MS = 15_000
 /**
  * 거절이 아니라 "결과를 알 수 없음"으로 봐야 하는 토스 에러 코드.
  * ALREADY_PROCESSED_PAYMENT: 이전 승인 요청이 실제로는 성공했을 수 있다(응답 유실 후 재시도).
+ * IDEMPOTENT_REQUEST_PROCESSING(409): 같은 멱등키의 승인이 아직 처리 중 (동시 confirm) — 거절이 아니다.
  */
 const UNCERTAIN_CODES = new Set([
   'ALREADY_PROCESSED_PAYMENT',
+  'IDEMPOTENT_REQUEST_PROCESSING',
   'PROVIDER_ERROR',
   'FAILED_INTERNAL_SYSTEM_PROCESSING',
   'FAILED_PAYMENT_INTERNAL_SYSTEM_PROCESSING',
@@ -73,7 +75,11 @@ export class PaymentService {
     }
   }
 
-  // 결제 취소
+  /**
+   * 결제 전액 취소. 이미 취소된 결제(ALREADY_CANCELED_PAYMENT)는 성공으로 본다 (응답 유실 후 재시도).
+   * 멱등키는 쓰지 않는다: 토스가 실패 응답까지 캐시하면 일시 오류 뒤 재시도가 막히고,
+   * 전액 취소는 두 번 보내도 두 번째가 ALREADY_CANCELED라 이중 환불이 없다.
+   */
   async cancelPayment(paymentKey: string, cancelReason: string): Promise<PaymentResponse> {
     try {
       const response = await axios.post(
@@ -84,7 +90,6 @@ export class PaymentService {
           headers: {
             'Authorization': this.getAuthHeader(),
             'Content-Type': 'application/json',
-            'Idempotency-Key': `cancel-${paymentKey}`,
           }
         }
       )
@@ -94,6 +99,10 @@ export class PaymentService {
         paymentKey: response.data.paymentKey
       }
     } catch (error: any) {
+      if (error.response?.data?.code === 'ALREADY_CANCELED_PAYMENT') {
+        console.warn(`[PAYMENT] 이미 취소된 결제 — 성공으로 처리 (paymentKey=${paymentKey})`)
+        return { success: true, paymentKey }
+      }
       console.error('Payment cancellation failed:', error.response?.data || error.message)
       return {
         success: false,

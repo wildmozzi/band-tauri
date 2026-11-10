@@ -23,6 +23,7 @@ describe('classifyTossError', () => {
     assert.equal(classifyTossError(httpErr(502)).outcome, 'unknown')
     assert.equal(classifyTossError(httpErr(400, 'ALREADY_PROCESSED_PAYMENT')).outcome, 'unknown')
     assert.equal(classifyTossError(httpErr(400, 'PROVIDER_ERROR')).outcome, 'unknown')
+    assert.equal(classifyTossError(httpErr(409, 'IDEMPOTENT_REQUEST_PROCESSING')).outcome, 'unknown', 'M3: concurrent confirm in progress is not a rejection')
     const r = classifyTossError(httpErr(400, 'REJECT_CARD_COMPANY'))
     assert.equal(r.outcome, 'rejected')
     assert.equal(r.code, 'REJECT_CARD_COMPANY')
@@ -39,6 +40,18 @@ describe('PaymentService (axios stubbed)', () => {
     assert.equal(seen.timeout, TOSS_TIMEOUT_MS)
     assert.equal(seen.headers['Idempotency-Key'], 'confirm-o1')
   })
+  it('L4: cancel has no Idempotency-Key and treats ALREADY_CANCELED_PAYMENT as success', async () => {
+    const { paymentService } = await import('../src/services/paymentService')
+    let seen: any
+    axios.post = (async (_u: string, _b: unknown, config: any) => { seen = config; throw httpErr(400, 'ALREADY_CANCELED_PAYMENT') }) as any
+    const r = await paymentService.cancelPayment('pk', 'reason')
+    assert.equal(r.success, true)
+    assert.equal(seen.headers['Idempotency-Key'], undefined)
+    assert.ok(seen.timeout > 0)
+    axios.post = (async () => { throw httpErr(400, 'NOT_CANCELABLE_PAYMENT') }) as any
+    assert.equal((await paymentService.cancelPayment('pk', 'reason')).success, false)
+  })
+
   it('confirm without a response → unknown (not a definitive failure)', async () => {
     const { paymentService } = await import('../src/services/paymentService')
     axios.post = (async () => { throw new Error('socket hang up') }) as any

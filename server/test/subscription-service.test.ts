@@ -84,12 +84,17 @@ describe('SubscriptionService.confirmPayment', () => {
     assert.equal(repo.payments[0].status, 'confirmed')
   })
 
-  it('Toss rejection → 400 with the gateway error, pending row removed', async () => {
+  it('Toss rejection → 400 with the gateway error; pending kept until the reconciler confirms it was not approved', async () => {
     const repo = new MemorySubscriptionRepository()
-    const { g } = gateway({ confirm: [{ success: false, outcome: 'rejected', error: 'toss says no' }] })
-    await assert.rejects(new SubscriptionService(repo, g, opts).confirmPayment('u1', 'pk1', 'o1', 'pro'),
+    const { g } = gateway({ confirm: [{ success: false, outcome: 'rejected', error: 'toss says no' }], lookup: done('o1', 6900, 'ABORTED') })
+    let now = new Date()
+    const svc = new SubscriptionService(repo, g, { ...opts, now: () => now })
+    await assert.rejects(svc.confirmPayment('u1', 'pk1', 'o1', 'pro'),
       (e: unknown) => e instanceof ServiceError && e.status === 400 && e.body.error === 'toss says no')
     assert.equal(repo.subscriptions.length, 0)
+    assert.equal(repo.payments[0].status, 'pending', 'request path never deletes pending on a rejection (M3)')
+    now = new Date(Date.now() + 5 * 60_000)
+    assert.equal((await svc.reconcilePendingPayments()).discarded, 1)
     assert.equal(repo.payments.length, 0)
   })
 
@@ -195,6 +200,51 @@ describe('H1: approval outcome unknown → verify by lookup', () => {
   })
 })
 
+describe('M3: concurrent confirm of the same order (IDEMPOTENT_REQUEST_PROCESSING)', () => {
+  it('second request while the first is still at Toss → 503 (not 400), pending kept, first one records', async () => {
+    const repo = new MemorySubscriptionRepository()
+    let releaseFirst!: () => void
+    const firstAtToss = new Promise<void>(r => { releaseFirst = r })
+    let calls = 0
+    const g: PaymentGateway = {
+      async confirmPayment(k, o) {
+        calls++
+        if (calls === 1) { await firstAtToss; return { success: true, outcome: 'approved', paymentKey: k, orderId: o } }
+        // 토스: 같은 멱등키의 요청이 처리 중
+        return { success: false, outcome: 'unknown', code: 'IDEMPOTENT_REQUEST_PROCESSING', error: '처리 중' }
+      },
+      async cancelPayment() { throw new Error('must not cancel') },
+      async lookupPayment() { return done('o1', 6900, 'IN_PROGRESS') },
+    }
+    const svc = new SubscriptionService(repo, g, opts)
+    const a = svc.confirmPayment('u1', 'pk1', 'o1', 'pro')
+    await new Promise(r => setImmediate(r)) // A가 pending을 만들고 토스에서 대기
+    assert.equal(repo.payments[0]?.status, 'pending')
+
+    await rejectsWith(svc.confirmPayment('u1', 'pk1', 'o1', 'pro'), 503)
+    assert.equal(repo.payments.length, 1)
+    assert.equal(repo.payments[0].status, 'pending', 'B must not delete the pending row A depends on')
+
+    releaseFirst()
+    const sub = await a
+    assert.equal(sub.status, 'active')
+    assert.equal(repo.payments[0].status, 'confirmed')
+    // B의 클라이언트 재시도는 이제 기존 구독을 받는다
+    assert.equal((await svc.confirmPayment('u1', 'pk1', 'o1', 'pro')).id, sub.id)
+  })
+
+  it('even if the gateway misclassifies the concurrent case as rejected, pending survives and A still records after a restart', async () => {
+    const repo = new MemorySubscriptionRepository()
+    const { g } = gateway({ confirm: [{ success: false, outcome: 'rejected', code: 'SOMETHING', error: 'x' }], lookup: done('o1', 6900) })
+    await repo.createPendingPayment({ userId: 'u1', orderId: 'o1', paymentKey: 'pk1', planType: 'pro', amount: 6900 }, new Date(Date.now() - 10 * 60_000))
+    const svc = new SubscriptionService(repo, g, opts)
+    await rejectsWith(svc.confirmPayment('u1', 'pk1', 'o1', 'pro'), 400)
+    // A가 승인받은 뒤 기록 전에 프로세스가 죽었다 → 재조정이 토스 조회(DONE)로 기록
+    assert.equal((await svc.reconcilePendingPayments()).recorded, 1)
+    assert.equal((await svc.getUserSubscription('u1')).planType, 'pro')
+  })
+})
+
 describe('after approval: DB failure handling (M1)', () => {
   it('first write committed but its response was lost, later attempts fail → re-check finds it, no refund', async () => {
     const { repo } = flakyRepo(99, () => new RepositoryError('connection reset'), true)
@@ -215,7 +265,7 @@ describe('after approval: DB failure handling (M1)', () => {
 
     now = new Date(Date.now() + 5 * 60_000)
     const r = await svc.reconcilePendingPayments()
-    assert.deepEqual(r, { recorded: 1, discarded: 0, unresolved: 0 })
+    assert.deepEqual(r, { recorded: 1, discarded: 0, unresolved: 0, manualReview: 0 })
     assert.equal((await svc.getUserSubscription('u1')).planType, 'pro')
   })
 
@@ -297,15 +347,48 @@ describe('reconcilePendingPayments (server restart recovery)', () => {
       },
     })
     const svc = new SubscriptionService(repo, g, opts)
-    assert.deepEqual(await svc.reconcilePendingPayments(), { recorded: 1, discarded: 2, unresolved: 1 })
+    assert.deepEqual(await svc.reconcilePendingPayments(), { recorded: 1, discarded: 2, unresolved: 1, manualReview: 0 })
     assert.ok(!calls.lookup.includes('pk-fresh'), 'rows younger than the min age are left to the in-flight request')
     assert.deepEqual(repo.payments.map(p => [p.orderId, p.status]).sort(), [
       ['o-done', 'confirmed'], ['o-err', 'pending'], ['o-fresh', 'pending'],
     ])
     assert.equal((await svc.getUserSubscription('u1')).planType, 'pro')
     // 다시 실행해도 같은 결제를 두 번 기록하지 않는다
-    assert.deepEqual(await svc.reconcilePendingPayments(), { recorded: 0, discarded: 0, unresolved: 1 })
+    assert.deepEqual(await svc.reconcilePendingPayments(), { recorded: 0, discarded: 0, unresolved: 1, manualReview: 0 })
     assert.equal(repo.subscriptions.length, 1)
+  })
+
+  it('L5: unresolved rows rotate to the back so they cannot starve newer rows past the limit', async () => {
+    const repo = new MemorySubscriptionRepository()
+    for (let i = 0; i < 3; i++) await seed(repo, `o-stuck${i}`, `pk-stuck${i}`, 30 * 60_000 - i)
+    await seed(repo, 'o-new', 'pk-new', 5 * 60_000)
+    const { g } = gateway({
+      lookup: (k) => k === 'pk-new'
+        ? { found: true, payment: { paymentKey: k, orderId: 'o-new', status: 'DONE', totalAmount: 6900 } }
+        : (() => { throw new Error('lookup down') })(),
+    })
+    let now = new Date()
+    const svc = new SubscriptionService(repo, g, { ...opts, now: () => now })
+    const limited = svc as unknown as { repo: MemorySubscriptionRepository }
+    const origList = limited.repo.listPendingPayments.bind(limited.repo)
+    limited.repo.listPendingPayments = (before, _limit) => origList(before, 3) // 상한 3으로 축소
+    assert.equal((await svc.reconcilePendingPayments()).recorded, 0, 'first run only sees the 3 stuck rows')
+    now = new Date(now.getTime() + 1000)
+    assert.equal((await svc.reconcilePendingPayments()).recorded, 1, 'stuck rows were pushed back, the new row gets its turn')
+  })
+
+  it('L5: rows unresolved for 24h move to manual_review (not retried forever, never cancelled)', async () => {
+    const repo = new MemorySubscriptionRepository()
+    await seed(repo, 'o-old', 'pk-old', 25 * 60 * 60_000)
+    const { g, calls } = gateway({ lookup: 'throw' })
+    const svc = new SubscriptionService(repo, g, opts)
+    assert.deepEqual(await svc.reconcilePendingPayments(), { recorded: 0, discarded: 0, unresolved: 1, manualReview: 1 })
+    assert.equal(repo.payments[0].status, 'manual_review')
+    assert.deepEqual(await svc.reconcilePendingPayments(), { recorded: 0, discarded: 0, unresolved: 0, manualReview: 0 })
+    assert.equal(calls.cancel.length, 0)
+    // 사용자가 같은 주문으로 재시도해도 결제를 다시 승인하거나 취소하지 않는다
+    await rejectsWith(svc.confirmPayment('u1', 'pk-old', 'o-old', 'pro'), 409)
+    assert.equal(calls.confirm.length, 0)
   })
 
   it('after reconcile, the client retry returns the recorded subscription', async () => {

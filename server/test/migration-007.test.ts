@@ -120,6 +120,13 @@ describe('migration 007 on real Postgres (PGlite)', () => {
     await rejectsCode(pending(U2, 'o-x', 'pk1'), '23505')
   })
 
+  it('manual_review row: allowed without a subscription, never auto-recorded (23505)', async () => {
+    await pending(U2, 'o-mr', 'pk-mr')
+    await asService(`UPDATE public.payments SET status = 'manual_review' WHERE order_id = 'o-mr'`)
+    await rejectsCode(record(U2, 'o-mr', 'pk-mr'), '23505')
+    await rejectsCode(asService(`UPDATE public.payments SET status = 'bogus' WHERE order_id = 'o-mr'`), '23514')
+  })
+
   it('confirmed payment must reference a subscription (CHECK)', async () => {
     await rejectsCode(asService(`INSERT INTO public.payments (user_id, order_id, payment_key, plan_type, amount, status) VALUES ($1, 'o-bad', 'pk-bad', 'pro', 6900, 'confirmed')`, [U1]), '23514')
   })

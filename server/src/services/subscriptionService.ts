@@ -46,7 +46,10 @@ export interface UserSubscriptionView {
 export interface ReconcileResult {
   recorded: number
   discarded: number
+  /** 이번 회차에 판정 못 한 행 (manualReview 포함) */
   unresolved: number
+  /** 그중 24h가 지나 manual_review로 뺀 행 */
+  manualReview: number
 }
 
 /** 토스 조회 결과 판정: approved(DONE) / not-approved(확정 실패·없음) / unknown(진행 중·조회 실패) */
@@ -56,8 +59,10 @@ const NOT_APPROVED_STATUSES = new Set(['CANCELED', 'PARTIAL_CANCELED', 'ABORTED'
 
 /** 이 시간보다 오래된 pending만 재조정한다 (진행 중인 요청과 겹치지 않게: 토스 타임아웃 + 재시도보다 길게) */
 export const RECONCILE_MIN_AGE_MS = 2 * 60_000
-/** 이보다 오래 미해결이면 CRITICAL 로그 */
+/** 이보다 오래 미해결이면 경고 로그 */
 const RECONCILE_ALERT_AGE_MS = 60 * 60_000
+/** 이보다 오래 미해결이면 manual_review로 빼고 CRITICAL 1회 */
+export const RECONCILE_GIVE_UP_AGE_MS = 24 * 60 * 60_000
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
@@ -113,7 +118,8 @@ export class SubscriptionService {
     const outcome = result.outcome ?? (result.success ? 'approved' : 'rejected')
 
     if (outcome === 'rejected') {
-      await this.discardPending(orderId)
+      // pending은 여기서 지우지 않는다: 분류가 틀렸거나 같은 주문의 다른 요청이 진행 중일 수 있으므로
+      // 토스 조회로 미승인이 확인될 때 재조정 작업이 지운다 (리뷰 M3)
       throw new ServiceError(400, { success: false, error: result.error ?? '결제 승인에 실패했습니다.' })
     }
     if (outcome === 'unknown') {
@@ -222,7 +228,7 @@ export class SubscriptionService {
   async reconcilePendingPayments(minAgeMs = RECONCILE_MIN_AGE_MS): Promise<ReconcileResult> {
     const now = this.now()
     const rows = await this.repo.listPendingPayments(new Date(now.getTime() - minAgeMs), 100)
-    const res: ReconcileResult = { recorded: 0, discarded: 0, unresolved: 0 }
+    const res: ReconcileResult = { recorded: 0, discarded: 0, unresolved: 0, manualReview: 0 }
     for (const row of rows) {
       const intent: PaymentIntent = { userId: row.userId, paymentKey: row.paymentKey, orderId: row.orderId, planType: row.planType, amount: row.amount }
       const verdict = await this.verifyWithToss(intent)
@@ -243,8 +249,21 @@ export class SubscriptionService {
         console.error(`[PAYMENT][RECONCILE] 처리 실패 (${ctxOf(intent)}):`, errMessage(err))
       }
       res.unresolved++
-      if (now.getTime() - row.createdAt.getTime() > RECONCILE_ALERT_AGE_MS) {
-        console.error(`[PAYMENT][CRITICAL] pending 결제가 오래 미해결 — 수동 확인 필요 (${ctxOf(intent)}, since ${row.createdAt.toISOString()})`)
+      const age = now.getTime() - row.createdAt.getTime()
+      try {
+        if (age > RECONCILE_GIVE_UP_AGE_MS) {
+          await this.repo.markPaymentForManualReview(row.orderId, now)
+          res.manualReview++
+          console.error(`[PAYMENT][CRITICAL] pending 결제 24h 미해결 → manual_review, 수동 확인 필요 (${ctxOf(intent)}, since ${row.createdAt.toISOString()})`)
+        } else {
+          // 순서를 뒤로 미뤄 다른 pending이 처리되게 한다 (limit에 막히지 않게)
+          await this.repo.touchPendingPayment(row.orderId, now)
+          if (age > RECONCILE_ALERT_AGE_MS) {
+            console.warn(`[PAYMENT][RECONCILE] pending 결제 1h+ 미해결 (${ctxOf(intent)}, since ${row.createdAt.toISOString()})`)
+          }
+        }
+      } catch (err) {
+        console.error(`[PAYMENT][RECONCILE] 보류 처리 실패 (${ctxOf(intent)}):`, errMessage(err))
       }
     }
     return res
@@ -382,7 +401,7 @@ const EXPIRY_INTERVAL_MS = 60 * 60_000
  */
 export function scheduleSubscriptionJobs(service: SubscriptionService = getDefaultSubscriptionService()) {
   const reconcile = () => service.reconcilePendingPayments().then(
-    (r) => { if (r.recorded || r.discarded || r.unresolved) console.log(`[PAYMENT][RECONCILE] recorded=${r.recorded} discarded=${r.discarded} unresolved=${r.unresolved}`) },
+    (r) => { if (r.recorded || r.discarded || r.unresolved) console.log(`[PAYMENT][RECONCILE] recorded=${r.recorded} discarded=${r.discarded} unresolved=${r.unresolved} manualReview=${r.manualReview}`) },
     (err) => console.error('[PAYMENT][RECONCILE] 실행 실패:', errMessage(err)),
   )
   setTimeout(reconcile, 10_000).unref()

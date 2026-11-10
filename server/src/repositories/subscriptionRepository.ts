@@ -33,9 +33,11 @@ export interface PaymentRecord {
   status: PaymentStatus
   subscriptionId: string | null
   createdAt: Date
+  updatedAt: Date
 }
 
-export type PaymentStatus = 'pending' | 'confirmed' | 'cancelled'
+/** manual_review: 재조정이 오래(24h) 판정하지 못해 수동 확인으로 뺀 결제 */
+export type PaymentStatus = 'pending' | 'manual_review' | 'confirmed' | 'cancelled'
 
 /** 결제 의도 (토스 승인 요청 전 pending 행) */
 export interface PaymentIntent {
@@ -57,8 +59,12 @@ export interface SubscriptionRepository {
   createPendingPayment(intent: PaymentIntent): Promise<void>
   /** pending 행 삭제 (승인 거절·미승인 확정·보상 취소 후). pending이 아니면 아무것도 안 함 */
   deletePendingPayment(orderId: string): Promise<void>
-  /** createdBefore보다 오래된 pending 행 (재조정용, 오래된 순) */
+  /** createdBefore보다 먼저 생긴 pending 행 (재조정용, 마지막 확인이 오래된 순) */
   listPendingPayments(createdBefore: Date, limit: number): Promise<PaymentRecord[]>
+  /** 판정 보류: updated_at을 갱신해 다음 회차 순서를 뒤로 미룬다 */
+  touchPendingPayment(orderId: string, now: Date): Promise<void>
+  /** pending → manual_review (오래 미해결) */
+  markPaymentForManualReview(orderId: string, now: Date): Promise<void>
   /**
    * 승인된 결제와 구독을 한 트랜잭션으로 기록한다 (pending 행이 있으면 confirmed로 전환).
    * 같은 사용자의 같은 결제가 이미 있으면 기존 구독을 돌려준다(멱등). 다른 사용자의 결제면 ConflictError.
@@ -99,6 +105,7 @@ interface PaymentRow {
   status: PaymentStatus
   subscription_id: string | null
   created_at: string
+  updated_at: string
 }
 
 export function subscriptionFromRow(r: SubscriptionRow): SubscriptionRecord {
@@ -127,6 +134,7 @@ function paymentFromRow(r: PaymentRow): PaymentRecord {
     status: r.status,
     subscriptionId: r.subscription_id,
     createdAt: new Date(r.created_at),
+    updatedAt: new Date(r.updated_at),
   }
 }
 
@@ -181,10 +189,22 @@ export function createSupabaseSubscriptionRepository(supabase: SupabaseClient): 
         .select('*')
         .eq('status', 'pending')
         .lt('created_at', createdBefore.toISOString())
-        .order('created_at', { ascending: true })
+        .order('updated_at', { ascending: true })
         .limit(limit)
       if (error) fail(error, 'payments.listPending')
       return ((data ?? []) as PaymentRow[]).map(paymentFromRow)
+    },
+
+    async touchPendingPayment(orderId, now) {
+      const { error } = await supabase.from('payments').update({ updated_at: now.toISOString() })
+        .eq('order_id', orderId).eq('status', 'pending')
+      if (error) fail(error, 'payments.touchPending')
+    },
+
+    async markPaymentForManualReview(orderId, now) {
+      const { error } = await supabase.from('payments').update({ status: 'manual_review', updated_at: now.toISOString() })
+        .eq('order_id', orderId).eq('status', 'pending')
+      if (error) fail(error, 'payments.markManualReview')
     },
 
     async recordConfirmedPayment(input) {
@@ -256,6 +276,8 @@ export function createUnavailableSubscriptionRepository(reason = 'Supabase가 �
     createPendingPayment: unavailable,
     deletePendingPayment: unavailable,
     listPendingPayments: unavailable,
+    touchPendingPayment: unavailable,
+    markPaymentForManualReview: unavailable,
     recordConfirmedPayment: unavailable,
     findSubscriptionById: unavailable,
     findActiveSubscription: unavailable,

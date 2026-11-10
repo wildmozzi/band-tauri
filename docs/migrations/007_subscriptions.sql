@@ -14,6 +14,7 @@
 --   - 결제+구독 기록, 취소는 각각 함수 하나(=한 트랜잭션)로 처리
 --   - 토스 승인 요청 전에 payments에 'pending' 행을 먼저 남긴다 → 승인 결과를 모르는 채
 --     서버가 죽어도 재조정 작업(서버 기동 시·주기)이 토스 조회로 기록하거나 정리한다
+--   - 오래(24h) 판정이 안 되는 pending은 'manual_review'로 빼 수동 확인 대상으로 남긴다
 -- =====================================================
 
 -- -----------------------------------------------------
@@ -52,7 +53,7 @@ CREATE TABLE IF NOT EXISTS public.payments (
   payment_key TEXT NOT NULL,
   plan_type TEXT NOT NULL CHECK (plan_type IN ('standard', 'pro')),
   amount INTEGER NOT NULL CHECK (amount >= 0),
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'cancelled')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'manual_review', 'confirmed', 'cancelled')),
   subscription_id UUID REFERENCES public.subscriptions(id) ON DELETE SET NULL,
   cancel_reason TEXT,
   cancelled_at TIMESTAMPTZ,
@@ -61,15 +62,16 @@ CREATE TABLE IF NOT EXISTS public.payments (
   CONSTRAINT payments_payment_key_key UNIQUE (payment_key),
   CONSTRAINT payments_order_id_key UNIQUE (order_id),
   -- 확정/취소된 결제는 반드시 구독과 연결
-  CHECK (status = 'pending' OR subscription_id IS NOT NULL)
+  CHECK (status IN ('pending', 'manual_review') OR subscription_id IS NOT NULL)
 );
 
 COMMENT ON TABLE public.payments IS '토스페이먼츠 승인 기록. payment_key/order_id 유니크 = 멱등성 키';
 
 CREATE INDEX IF NOT EXISTS idx_payments_user_id ON public.payments (user_id);
 CREATE INDEX IF NOT EXISTS idx_payments_subscription_id ON public.payments (subscription_id);
+-- 재조정은 마지막 확인(updated_at)이 오래된 순으로 돈다 (미해결 행이 앞을 막지 않게)
 CREATE INDEX IF NOT EXISTS idx_payments_pending
-  ON public.payments (created_at) WHERE status = 'pending';
+  ON public.payments (updated_at) WHERE status = 'pending';
 
 -- -----------------------------------------------------
 -- 3. RLS: 본인 행 SELECT만. 쓰기 정책 없음 → anon/authenticated는 쓰기 불가
