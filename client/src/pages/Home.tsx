@@ -18,7 +18,7 @@ const FEATURE_PILLARS: FeaturePillar[] = [
   {
     title: '데스크톱 앱 합주',
     description: `저지연 네이티브 오디오 엔진으로 최대 ${MAX_PERFORMERS}명이 함께 연주합니다.`,
-    details: 'Windows 데스크톱 앱 · ASIO/WASAPI · Opus 코덱',
+    details: 'Windows 데스크톱 앱 · WASAPI 독점 모드 저지연 출력 · Opus 코덱 (ASIO 지원 예정)',
     badge: 'Live Rooms',
   },
   {
@@ -70,7 +70,7 @@ export function Home() {
           </div>
           <div>
             <strong>Windows</strong>
-            <span>ASIO · WASAPI 지원</span>
+            <span>WASAPI 저지연(독점 모드) · ASIO 예정</span>
           </div>
         </div>
       </header>

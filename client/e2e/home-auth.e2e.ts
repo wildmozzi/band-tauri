@@ -25,7 +25,8 @@ test('로그인: 틀린 비밀번호는 오류, 맞는 비밀번호는 세션 �
   await page.getByPlaceholder('8자 이상 입력').fill(ALICE.password)
   await page.locator('form.auth-form').getByRole('button', { name: '로그인' }).click()
 
-  await expect(page).toHaveURL(/\/$/)
+  // 돌아갈 곳(state.from)이 없으면 합주실 목록으로 (PR #22 리뷰 L-2: 기본 복귀 경로 /rooms 유지)
+  await expect(page).toHaveURL(/\/rooms$/)
   await expect(page.locator('.user-email')).toHaveText(ALICE.email)
   await expect(page.getByRole('button', { name: '로그아웃' })).toBeVisible()
 

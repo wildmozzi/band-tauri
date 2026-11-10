@@ -164,7 +164,6 @@ export function Community() {
                       <div
                         style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}
                         className="community-post-actions"
-                        onClick={(e) => e.stopPropagation()}
                       >
                         {post.tags.length > 0 && post.tags.map((tag, idx) => (
                           <span
@@ -355,7 +354,6 @@ export function Community() {
                         <div
                           style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
                           className="community-post-actions"
-                        onClick={(e) => e.stopPropagation()}
                         >
                           <span
                             style={{
@@ -383,7 +381,6 @@ export function Community() {
                         <div
                           style={{ display: 'flex', gap: '6px', flexShrink: 0 }}
                           className="community-post-actions"
-                        onClick={(e) => e.stopPropagation()}
                         >
                           {post.tags.map((tag, idx) => (
                             <span

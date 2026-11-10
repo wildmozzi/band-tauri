@@ -177,6 +177,16 @@ describe('AuthProvider + Query 캐시 (P3-3d)', () => {
     expect(client.getQueryCache().find({ queryKey: ['profile', 'audioSettings', null] })).toBeUndefined()
   })
 
+  it('세션 복원(getUser)이 reject해도 loading이 풀리고 로그아웃 상태가 된다 (PR #22 리뷰 L-3)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    sb.client.auth.getUser.mockRejectedValueOnce(new Error('storage blocked'))
+    const { wrapper: Wrapper } = createQueryWrapper()
+    const view = render(<Wrapper><AuthProvider><Probe /></AuthProvider></Wrapper>)
+    await waitFor(() => expect(view.getByTestId('user').textContent).toBe('none'))
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
   it('같은 사용자의 토큰 갱신은 캐시를 유지한다', async () => {
     sb.state.user = { id: 'a' }
     const { client, wrapper: Wrapper } = createQueryWrapper()

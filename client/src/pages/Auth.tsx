@@ -33,7 +33,7 @@ export function Auth() {
   const navigate = useNavigate()
   const location = useLocation()
 
-  // 로그인 후(또는 이미 로그인돼 있으면) 돌아갈 곳: 보낸 화면이 준 앱 안 경로, 없으면 홈
+  // 로그인 후(또는 이미 로그인돼 있으면) 돌아갈 곳: 보낸 화면이 준 같은 출처 경로, 없으면 /rooms(이전 기본값)
   const redirectTo = safeRedirectPath((location.state as { from?: unknown } | null)?.from)
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {

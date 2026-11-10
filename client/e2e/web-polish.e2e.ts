@@ -45,6 +45,10 @@ test.describe('홈 문구 (③④)', () => {
     }
     await expect(page.locator('.hero-stats')).toContainText('최대 6명')
     await expect(page.locator('.hero-stats')).toContainText('웹 관람')
+    // 배포본은 WASAPI만 — ASIO는 옵트인 빌드라 '지원'으로 단정하지 않는다 (PR #22 리뷰 M-1)
+    await expect(body).not.toContainText(/ASIO\s*[·/]\s*WASAPI/)
+    await expect(body).not.toContainText(/ASIO 지원(?! 예정)/)
+    await expect(page.locator('.hero-stats')).toContainText('WASAPI 저지연(독점 모드) · ASIO 예정')
   })
 
   test('홈에 데스크톱 앱 다운로드 버튼 (VITE_DESKTOP_DOWNLOAD_URL)', async ({ page }) => {
@@ -124,13 +128,25 @@ test('방 만들기: 최대 인원은 관람 포함, 연주자는 최대 6명이
   await expect(select.locator('option').first()).toHaveText('2명 (모두 연주 가능)')
 })
 
-test('합주실: 채팅 입력창이 스크롤 없이 첫 화면에 보인다 (⑨)', async ({ page }) => {
+for (const viewport of [{ width: 1280, height: 720 }, { width: 1366, height: 600 }, { width: 1920, height: 1080 }]) {
+  test(`합주실: 채팅 입력창이 스크롤 없이 첫 화면에 보인다 (⑨) ${viewport.width}×${viewport.height}`, async ({ page }) => {
+    await page.setViewportSize(viewport)
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
+    const chat = page.locator('.chat-panel')
+    await expect(chat.getByPlaceholder('메시지 입력...')).toBeInViewport({ ratio: 1 })
+    await expect(chat.getByRole('button', { name: '전송' })).toBeInViewport({ ratio: 1 })
+    expect(await page.evaluate(() => window.scrollY)).toBe(0)
+  })
+}
+
+test('합주실: 1024px 이하(채팅 칸 숨김) 2열 배치도 화면 안에 맞는다 (⑨)', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 })
   await page.goto(`/rooms/${ROCK_ROOM.id}`)
   await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
-  const chat = page.locator('.chat-panel')
-  await expect(chat.getByPlaceholder('메시지 입력...')).toBeInViewport({ ratio: 1 })
-  await expect(chat.getByRole('button', { name: '전송' })).toBeInViewport({ ratio: 1 })
-  expect(await page.evaluate(() => window.scrollY)).toBe(0)
+  await expect(page.locator('.chat-panel')).toBeHidden()
+  const overflow = await page.evaluate(() => document.querySelector('.live-room')!.getBoundingClientRect().bottom - window.innerHeight)
+  expect(overflow).toBeLessThanOrEqual(1)
 })
 
 test.describe('결제 (⑩⑪)', () => {
