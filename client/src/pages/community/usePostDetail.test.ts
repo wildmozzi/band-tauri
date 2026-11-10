@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({
   getComments: vi.fn(),
   getTrendingTags: vi.fn(),
   deleteComment: vi.fn(),
+  deletePost: vi.fn(),
 }))
 const navigate = vi.hoisted(() => vi.fn())
 
@@ -15,6 +16,7 @@ vi.mock('../../services/communityApi', () => ({ communityApi: api }))
 vi.mock('react-router-dom', () => ({ useNavigate: () => navigate }))
 
 import { usePostDetail } from './usePostDetail'
+import { createQueryWrapper } from '../../test/queryWrapper'
 
 const post = (id: string, over: Partial<Post> = {}): Post => ({
   id, author_id: 'u', author_name: 'n', author_role: '', title: id, content: '', category: 'general',
@@ -42,7 +44,7 @@ describe('usePostDetail', () => {
     api.getPost.mockImplementation((id: string) => (id === 'A' ? postA.promise : Promise.resolve(post('B'))))
     api.getComments.mockImplementation((id: string) => (id === 'A' ? commentsA.promise : Promise.resolve([comment('b1')])))
 
-    const { result, rerender } = renderHook(({ id }) => usePostDetail(id, null), { initialProps: { id: 'A' } })
+    const { result, rerender } = renderHook(({ id }) => usePostDetail(id, null), { initialProps: { id: 'A' }, wrapper: createQueryWrapper().wrapper })
     rerender({ id: 'B' })
     await waitFor(() => expect(result.current.post?.id).toBe('B'))
 
@@ -61,12 +63,13 @@ describe('usePostDetail', () => {
     api.getComments.mockResolvedValue([comment('1', [comment('1a', [comment('1a-i')])]), comment('2')])
     api.deleteComment.mockResolvedValue(undefined)
 
-    const { result } = renderHook(() => usePostDetail('P', { id: 'u' }))
+    const { result } = renderHook(() => usePostDetail('P', { id: 'u' }), { wrapper: createQueryWrapper().wrapper })
     await waitFor(() => expect(result.current.comments).toHaveLength(2))
 
     await act(() => result.current.handleDeleteComment('1'))
 
-    expect(result.current.comments.map(c => c.id)).toEqual(['2'])
+    // 캐시 변경 알림은 다음 틱에 배치되므로 waitFor로 기다린다
+    await waitFor(() => expect(result.current.comments.map(c => c.id)).toEqual(['2']))
     expect(result.current.post?.comments_count).toBe(1)
   })
 
@@ -75,7 +78,7 @@ describe('usePostDetail', () => {
     api.getComments.mockResolvedValue([comment('1', [comment('1a')]), comment('2')])
     api.deleteComment.mockResolvedValue(undefined)
 
-    const { result } = renderHook(() => usePostDetail('P', { id: 'u' }))
+    const { result } = renderHook(() => usePostDetail('P', { id: 'u' }), { wrapper: createQueryWrapper().wrapper })
     await waitFor(() => expect(result.current.comments).toHaveLength(2))
 
     // 같은 렌더의 핸들러로 부모 → 자식을 연달아 삭제(렌더 사이 클로저가 갱신되지 않는 상황).
@@ -85,7 +88,26 @@ describe('usePostDetail', () => {
       await Promise.all([handleDeleteComment('1'), handleDeleteComment('1a')])
     })
 
-    expect(result.current.comments.map(c => c.id)).toEqual(['2'])
+    // 캐시 변경 알림은 다음 틱에 배치되므로 waitFor로 기다린다
+    await waitFor(() => expect(result.current.comments.map(c => c.id)).toEqual(['2']))
     expect(result.current.post?.comments_count).toBe(1)
+  })
+
+  it('글 삭제 뒤 리렌더가 있어도 지운 글·댓글을 다시 조회하지 않고 목록으로 한 번만 이동한다', async () => {
+    api.getPost.mockResolvedValue(post('P'))
+    api.getComments.mockResolvedValue([])
+    api.deletePost.mockResolvedValue(undefined)
+
+    const { result, rerender } = renderHook(() => usePostDetail('P', { id: 'u' }), { wrapper: createQueryWrapper().wrapper })
+    await waitFor(() => expect(result.current.post?.id).toBe('P'))
+
+    await act(() => result.current.deletePost())
+    rerender()
+    await act(async () => {})
+
+    expect(api.deletePost).toHaveBeenCalledWith('P')
+    expect(api.getPost).toHaveBeenCalledTimes(1)
+    expect(api.getComments).toHaveBeenCalledTimes(1)
+    expect(navigate.mock.calls).toEqual([['/community']])
   })
 })

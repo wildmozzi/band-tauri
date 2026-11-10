@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
-import { communityApi, type Post } from '../../services/communityApi'
+import { uploadPostImage } from '../../features/community/queries'
+import type { Post } from '../../services/communityApi'
 import { MAX_IMAGES, addUniqueTag, uploadSequentially, validateImageFiles } from './postLogic'
 
 interface SubmitOptions {
@@ -94,7 +95,7 @@ export function usePostForm() {
 
       const newImageUrls = await uploadSequentially(
         selectedFiles,
-        file => communityApi.uploadImage(file, opts.userId),
+        file => uploadPostImage(file, opts.userId),
         setUploadProgress,
       )
 

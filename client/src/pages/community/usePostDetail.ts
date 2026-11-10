@@ -1,98 +1,62 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { communityApi, type Comment, type Post } from '../../services/communityApi'
+import type { Comment } from '../../services/communityApi'
 import {
-  addReplyToTree,
-  countDeletedComments,
-  removeCommentFromTree,
-  updateCommentInTree,
-} from './postLogic'
+  forgetPost,
+  useAddCommentMutation,
+  useCommentsQuery,
+  useDeleteCommentMutation,
+  useDeletePostMutation,
+  usePostQuery,
+  useToggleLikeMutation,
+  useTrendingTagsQuery,
+  useUpdateCommentMutation,
+  type CommunityUser,
+} from '../../features/community/queries'
 
-type AuthUser = Parameters<typeof communityApi.addComment>[1]
+const EMPTY_COMMENTS: Comment[] = []
+const EMPTY_TAGS: { tag: string; count: number }[] = []
 
 /** 게시물 상세: 게시물·댓글·트렌딩 태그 조회와 좋아요/댓글/삭제 동작. */
-export function usePostDetail(postId: string | undefined, user: AuthUser | null) {
+export function usePostDetail(postId: string | undefined, user: CommunityUser | null) {
   const navigate = useNavigate()
-  const [post, setPost] = useState<Post | null>(null)
-  const [comments, setComments] = useState<Comment[]>([])
-  const [loading, setLoading] = useState(true)
-  const [trendingTags, setTrendingTags] = useState<{ tag: string; count: number }[]>([])
-  const [deleting, setDeleting] = useState(false)
+  const queryClient = useQueryClient()
   const userId = user?.id
 
-  // 비동기 콜백이 오래된 렌더의 comments를 보지 않도록 최신 트리를 ref로도 들고 있는다.
-  const commentsRef = useRef<Comment[]>([])
-  const applyComments = useCallback((update: (prev: Comment[]) => Comment[]) => {
-    const next = update(commentsRef.current)
-    commentsRef.current = next
-    setComments(next)
-  }, [])
+  // 키가 postId/userId 단위라 이전 요청의 늦은 응답은 현재 화면에 섞이지 않는다.
+  // 삭제한 글은 다시 조회하지 않는다(화면을 떠나기 전 리렌더가 있어도 지운 글을 재조회하지 않게)
+  const [deletedPostId, setDeletedPostId] = useState<string | null>(null)
+  const live = !postId || postId !== deletedPostId
+  const postQuery = usePostQuery(postId, userId, { enabled: live })
+  const commentsQuery = useCommentsQuery(postId, { enabled: live })
+  const trendingQuery = useTrendingTagsQuery(5)
 
-  // 게시물: postId/userId가 바뀌면 다시 조회하고, 이전 요청의 늦은 응답은 무시한다.
+  const toggleLike = useToggleLikeMutation()
+  const addCommentMutation = useAddCommentMutation()
+  const updateComment = useUpdateCommentMutation()
+  const deleteComment = useDeleteCommentMutation()
+  const deletePostMutation = useDeletePostMutation()
+
+  // 게시물이 없거나 불러오지 못하면 목록으로
   useEffect(() => {
-    if (!postId) return
-    let cancelled = false
-
-    const fetchPost = async () => {
-      try {
-        setLoading(true)
-        const data = await communityApi.getPost(postId, userId)
-        if (cancelled) return
-        if (!data) {
-          navigate('/community')
-          return
-        }
-        setPost(data)
-      } catch (error) {
-        if (cancelled) return
-        console.error('Failed to fetch post:', error)
-        navigate('/community')
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
+    if (postQuery.isError) {
+      console.error('Failed to fetch post:', postQuery.error)
+      navigate('/community')
+    } else if (postQuery.isSuccess && postQuery.data === null) {
+      navigate('/community')
     }
-
-    fetchPost()
-    return () => { cancelled = true }
-  }, [postId, userId, navigate])
-
-  // 댓글: postId 기준. 다른 게시물로 바뀌면 이전 응답은 버린다.
-  useEffect(() => {
-    if (!postId) return
-    let cancelled = false
-
-    const fetchComments = async () => {
-      try {
-        const data = await communityApi.getComments(postId)
-        if (!cancelled) applyComments(() => data)
-      } catch (error) {
-        if (!cancelled) console.error('Failed to fetch comments:', error)
-      }
-    }
-
-    fetchComments()
-    return () => { cancelled = true }
-  }, [postId, applyComments])
+  }, [postQuery.isError, postQuery.isSuccess, postQuery.data, postQuery.error, navigate])
 
   useEffect(() => {
-    let cancelled = false
+    if (commentsQuery.error) console.error('Failed to fetch comments:', commentsQuery.error)
+  }, [commentsQuery.error])
 
-    const fetchTrendingTags = async () => {
-      try {
-        const tags = await communityApi.getTrendingTags(5)
-        if (!cancelled) setTrendingTags(tags)
-      } catch (error) {
-        if (!cancelled) console.error('Failed to fetch trending tags:', error)
-      }
-    }
+  useEffect(() => {
+    if (trendingQuery.error) console.error('Failed to fetch trending tags:', trendingQuery.error)
+  }, [trendingQuery.error])
 
-    fetchTrendingTags()
-    return () => { cancelled = true }
-  }, [])
-
-  const bumpCommentCount = (delta: number) => {
-    setPost(prev => prev ? { ...prev, comments_count: Math.max(0, prev.comments_count + delta) } : null)
-  }
+  const post = postQuery.data ?? null
 
   const handleLike = async () => {
     if (!post || !user) {
@@ -101,8 +65,7 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
     }
 
     try {
-      const { liked, likesCount } = await communityApi.toggleLike(post.id, user.id)
-      setPost(prev => prev ? { ...prev, likes_count: likesCount, liked_by_user: liked } : null)
+      await toggleLike.mutateAsync({ postId: post.id, userId: user.id })
     } catch (error) {
       console.error('Failed to toggle like:', error)
     }
@@ -113,9 +76,7 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
     if (!user || !post) return false
 
     try {
-      const comment = await communityApi.addComment({ post_id: post.id, content }, user)
-      applyComments(prev => [...prev, comment])
-      bumpCommentCount(1)
+      await addCommentMutation.mutateAsync({ postId: post.id, content, user })
       return true
     } catch (error) {
       console.error('Failed to add comment:', error)
@@ -128,9 +89,7 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
     if (!user || !post) return
 
     try {
-      const reply = await communityApi.addComment({ post_id: post.id, content, parent_id: parentId }, user)
-      applyComments(prev => addReplyToTree(prev, parentId, reply))
-      bumpCommentCount(1)
+      await addCommentMutation.mutateAsync({ postId: post.id, content, parentId, user })
     } catch (error) {
       console.error('Failed to add reply:', error)
       alert('답글 작성에 실패했습니다.')
@@ -138,9 +97,9 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
   }
 
   const handleEditComment = async (commentId: string, content: string) => {
+    if (!postId) return
     try {
-      const updatedComment = await communityApi.updateComment(commentId, content)
-      applyComments(prev => updateCommentInTree(prev, commentId, updatedComment))
+      await updateComment.mutateAsync({ postId, commentId, content })
     } catch (error) {
       console.error('Failed to update comment:', error)
       alert('댓글 수정에 실패했습니다.')
@@ -148,12 +107,9 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
   }
 
   const handleDeleteComment = async (commentId: string) => {
+    if (!postId) return
     try {
-      await communityApi.deleteComment(commentId)
-      // 응답 시점의 최신 트리 기준으로 센다(연속 삭제 시 오래된 클로저 방지)
-      const deletedCount = countDeletedComments(commentsRef.current, commentId)
-      applyComments(prev => removeCommentFromTree(prev, commentId))
-      bumpCommentCount(-deletedCount)
+      await deleteComment.mutateAsync({ postId, commentId })
     } catch (error) {
       console.error('Failed to delete comment:', error)
       alert('댓글 삭제에 실패했습니다.')
@@ -164,23 +120,22 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
     if (!post) return
 
     try {
-      setDeleting(true)
-      await communityApi.deletePost(post.id)
+      await deletePostMutation.mutateAsync(post.id)
+      setDeletedPostId(post.id)
       navigate('/community')
+      forgetPost(queryClient, post.id)
     } catch (error) {
       console.error('Failed to delete post:', error)
       alert('게시물 삭제에 실패했습니다.')
-    } finally {
-      setDeleting(false)
     }
   }
 
   return {
     post,
-    comments,
-    loading,
-    trendingTags,
-    deleting,
+    comments: commentsQuery.data ?? EMPTY_COMMENTS,
+    loading: postQuery.isPending,
+    trendingTags: trendingQuery.data ?? EMPTY_TAGS,
+    deleting: deletePostMutation.isPending,
     handleLike,
     addComment,
     handleReply,

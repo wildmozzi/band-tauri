@@ -15,6 +15,7 @@ vi.mock('../../contexts/useAuth', () => ({
 
 import { CreatePost } from '../CreatePost'
 import { EditPost } from '../EditPost'
+import { createQueryWrapper } from '../../test/queryWrapper'
 
 const post: Post = {
   id: 'p1', author_id: 'u1', author_name: 'n', author_role: '', title: '원래 제목', content: '본문',
@@ -28,6 +29,7 @@ afterEach(() => {
 })
 
 function renderAt(path: string) {
+  const { wrapper } = createQueryWrapper()
   return render(
     <MemoryRouter initialEntries={[path]}>
       <Routes>
@@ -36,6 +38,7 @@ function renderAt(path: string) {
         <Route path="/auth" element={<div>AUTH PAGE</div>} />
       </Routes>
     </MemoryRouter>,
+    { wrapper },
   )
 }
 

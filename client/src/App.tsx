@@ -1,4 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { queryClient } from './lib/queryClient'
 import { AuthProvider } from './contexts/AuthContext'
 import { RoomProvider } from './contexts/RoomContext'
 import { AudioSettingsProvider } from './contexts/AudioSettingsContext'
@@ -81,17 +83,19 @@ function AppContent() {
 
 function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <PremiumProvider>
-          <AudioSettingsProvider>
-            <RoomProvider>
-              <AppContent />
-            </RoomProvider>
-          </AudioSettingsProvider>
-        </PremiumProvider>
-      </AuthProvider>
-    </BrowserRouter>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <PremiumProvider>
+            <AudioSettingsProvider>
+              <RoomProvider>
+                <AppContent />
+              </RoomProvider>
+            </AudioSettingsProvider>
+          </PremiumProvider>
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
   )
 }
 
