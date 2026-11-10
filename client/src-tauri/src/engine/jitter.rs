@@ -21,7 +21,7 @@
 //! 상대 지연 `rel = transit - min_transit`의 분위수(프로필 q, 균형 0.95)를 세 창으로 추정해 큰 값을 쓴다
 //! (모두 0.25ms 격자로 올림, `JitterTuning`):
 //! - **짧은 창**: 최근 200패킷 분위수. 오르면 바로 올리고, 더 낮은 후보가 `hold_ms` 동안 이어질 때만 내린다.
-//! - **버스트**: 최근 16패킷 중 2개 이상이 현재 추정 + max(F/2, 1ms)를 넘으면 그 최댓값까지 바로 올린다(짧은 창
+//! - **버스트**: 최근 16패킷 중 2개 이상이 현재 추정 + max(F/2, 1ms) × 프로필 배율을 넘으면 그 최댓값까지 바로 올린다(짧은 창
 //!   분위수는 창의 5%가 늦어야 움직인다). 버스트가 끝나고 `burst_hold_ms`가 지나면 없앤다. 절대 지연으로 기억하므로
 //!   경로가 바뀌어 최소 지연이 오르면 그만큼 줄어든다.
 //! - **긴 창**: 1초 블록마다 블록 분위수를 남기고 최근 `long_blocks`개 중 3번째로 큰 값. 반복되는 스파이크(와이파이
@@ -106,14 +106,17 @@ pub struct JitterTuning {
     pub quantile: f64,
     /// 목표에 더하는 여유(프레임 배수): 0.5 이하 0, 1 → 0.5F.
     pub pad_frames: f64,
-    /// 짧은 창 추정을 내리기 전 유지 시간(ms): 1s / 3s / 5s.
+    /// 짧은 창 추정을 내리기 전 유지 시간(ms): 1s / 2s / 5s(균형 = 이전 고정값 2s).
     pub hold_ms: f64,
-    /// 버스트 상향 유지 시간(ms, 마지막 버스트 패킷 이후): 0.5s / 3.25s / 6s.
+    /// 버스트 상향 유지 시간(ms, 마지막 버스트 패킷 이후): 0.5s / 2s / 6s.
     pub burst_hold_ms: f64,
     /// 긴 창 블록 수(1초 블록): 5 / 17 / 30.
     pub long_blocks: usize,
     /// 피어 적응 여유(언더런) 유지·상한 배율(워커 `PeerFeed`): 0.5 / 1 / 2.
     pub margin_scale: f64,
+    /// 버스트 판정 문턱 배율(`max(F/2, 1ms)`에 곱함): 1.5 / 1 / 0.5. 저지연은 분위수가 낮아 꼬리 패킷이 문턱을 자주
+    /// 넘으므로 문턱을 높여 진짜 스파이크에만 반응한다.
+    pub burst_scale: f64,
 }
 
 impl JitterTuning {
@@ -123,10 +126,11 @@ impl JitterTuning {
         Self {
             quantile,
             pad_frames: (p - 0.5).max(0.0),
-            hold_ms: 1000.0 + 4000.0 * p,
-            burst_hold_ms: 500.0 + 5500.0 * p,
+            hold_ms: if p <= 0.5 { 1000.0 + 2000.0 * p } else { 2000.0 + 6000.0 * (p - 0.5) },
+            burst_hold_ms: if p <= 0.5 { 500.0 + 3000.0 * p } else { 2000.0 + 8000.0 * (p - 0.5) },
             long_blocks: (5.0 + 25.0 * p).round() as usize,
             margin_scale: if p <= 0.5 { 0.5 + p } else { 1.0 + 2.0 * (p - 0.5) },
+            burst_scale: 1.5 - p,
         }
     }
 }
@@ -588,7 +592,7 @@ impl JitterBuffer {
         self.recent_rel[self.recent_pos] = rel;
         self.recent_pos = (self.recent_pos + 1) % BURST_WIN;
         let spm = Self::samples_per_ms();
-        let spike = (self.frame() as f64 / 2.0).max(spm);
+        let spike = (self.frame() as f64 / 2.0).max(spm) * self.tuning.burst_scale;
         let j = self.jitter_est();
         let n = self.transit_count.min(BURST_WIN);
         let over = self.recent_rel[..n].iter().filter(|&&r| r as f64 > j + spike).count();
@@ -1621,9 +1625,9 @@ mod tests {
 
     #[test]
     fn profile_tuning_and_runtime_change() {
-        // 균형(0.5)이 기본 계수: p95, 유지 3초. 저지연 → 안정으로 갈수록 분위수·유지 시간·긴 창이 커진다.
+        // 균형(0.5)이 기본 계수: p95, 유지 2초. 저지연 → 안정으로 갈수록 분위수·유지 시간·긴 창이 커진다.
         let (lo, mid, hi) = (JitterTuning::from_profile(0.0), JitterTuning::from_profile(0.5), JitterTuning::from_profile(1.0));
-        assert!((mid.quantile - 0.95).abs() < 1e-9 && (mid.hold_ms - 3000.0).abs() < 1e-9 && mid.pad_frames == 0.0);
+        assert!((mid.quantile - 0.95).abs() < 1e-9 && (mid.hold_ms - 2000.0).abs() < 1e-9 && mid.pad_frames == 0.0);
         assert!(lo.quantile < mid.quantile && mid.quantile < hi.quantile);
         assert!(lo.hold_ms < mid.hold_ms && mid.hold_ms < hi.hold_ms);
         assert!(lo.long_blocks < mid.long_blocks && mid.long_blocks < hi.long_blocks);
