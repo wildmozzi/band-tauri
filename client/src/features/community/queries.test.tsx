@@ -85,6 +85,122 @@ describe('community queries', () => {
     expect(client.getQueryData<Post>(communityKeys.post('p', null))!.liked_by_user).toBeUndefined()
   })
 
+  it('좋아요는 응답 전에 낙관적으로 +1 하고, 응답의 실제 개수로 덮는다', async () => {
+    let resolve!: (v: { liked: boolean; likesCount: number | null }) => void
+    api.toggleLike.mockReturnValue(new Promise(r => { resolve = r }))
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(communityKeys.postList(filters), [post('p', { likes_count: 4, liked_by_user: false })])
+    client.setQueryData(communityKeys.post('p', null), post('p', { likes_count: 4 }))
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+
+    let done!: Promise<unknown>
+    act(() => { done = result.current.mutateAsync({ postId: 'p', userId: 'u' }) })
+    await waitFor(() =>
+      expect(client.getQueryData<Post[]>(communityKeys.postList(filters))![0]).toMatchObject({ likes_count: 5, liked_by_user: true }),
+    )
+    expect(client.getQueryData<Post>(communityKeys.post('p', null))!.likes_count).toBe(5)
+
+    await act(async () => { resolve({ liked: true, likesCount: 9 }); await done })
+    expect(client.getQueryData<Post[]>(communityKeys.postList(filters))![0]).toMatchObject({ likes_count: 9, liked_by_user: true })
+    expect(client.getQueryData<Post>(communityKeys.post('p', null))!.likes_count).toBe(9)
+  })
+
+  it('좋아요 취소도 낙관적으로 -1 (0 아래로 내려가지 않음)', async () => {
+    let resolve!: (v: { liked: boolean; likesCount: number | null }) => void
+    api.toggleLike.mockReturnValue(new Promise(r => { resolve = r }))
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(communityKeys.post('p', 'u'), post('p', { likes_count: 1, liked_by_user: true }))
+    client.setQueryData(communityKeys.postList({ ...filters, userId: null }), [post('p', { likes_count: 0 })])
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+
+    let done!: Promise<unknown>
+    act(() => { done = result.current.mutateAsync({ postId: 'p', userId: 'u' }) })
+    await waitFor(() =>
+      expect(client.getQueryData<Post>(communityKeys.post('p', 'u'))).toMatchObject({ likes_count: 0, liked_by_user: false }),
+    )
+    expect(client.getQueryData<Post[]>(communityKeys.postList({ ...filters, userId: null }))![0].likes_count).toBe(0)
+    await act(async () => { resolve({ liked: false, likesCount: 0 }); await done })
+  })
+
+  it('좋아요 실패 시 낙관적 변경을 되돌린다', async () => {
+    api.toggleLike.mockRejectedValue(new Error('rls'))
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(communityKeys.postList(filters), [post('p', { likes_count: 4, liked_by_user: false })])
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+
+    await act(() => expect(result.current.mutateAsync({ postId: 'p', userId: 'u' })).rejects.toThrow('rls'))
+
+    expect(client.getQueryData<Post[]>(communityKeys.postList(filters))![0]).toMatchObject({ likes_count: 4, liked_by_user: false })
+  })
+
+  it('연타(좋아요→취소)는 서버 요청을 순서대로 보내고, 중간 응답으로 덮지 않고 마지막 응답이 최종 값이 된다', async () => {
+    const resolvers: Array<(v: { liked: boolean; likesCount: number | null }) => void> = []
+    api.toggleLike.mockImplementation(() => new Promise(r => { resolvers.push(r) }))
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(communityKeys.post('p', 'u'), post('p', { likes_count: 4, liked_by_user: false }))
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+    const read = () => client.getQueryData<Post>(communityKeys.post('p', 'u'))!
+
+    let first!: Promise<unknown>
+    let second!: Promise<unknown>
+    act(() => { first = result.current.mutateAsync({ postId: 'p', userId: 'u' }) })
+    await waitFor(() => expect(read()).toMatchObject({ likes_count: 5, liked_by_user: true }))
+    act(() => { second = result.current.mutateAsync({ postId: 'p', userId: 'u' }) })
+    await waitFor(() => expect(read()).toMatchObject({ likes_count: 4, liked_by_user: false }))
+    // 두 번째 요청은 첫 응답 전에는 서버로 가지 않는다
+    expect(api.toggleLike).toHaveBeenCalledTimes(1)
+
+    await act(async () => { resolvers[0]({ liked: true, likesCount: 5 }); await first })
+    expect(read()).toMatchObject({ likes_count: 4, liked_by_user: false })
+    await waitFor(() => expect(api.toggleLike).toHaveBeenCalledTimes(2))
+
+    await act(async () => { resolvers[1]({ liked: false, likesCount: 4 }); await second })
+    expect(read()).toMatchObject({ likes_count: 4, liked_by_user: false })
+  })
+
+  it('실패 시 자기 변경만 되돌리고 그사이 바뀐 댓글 수는 보존한다', async () => {
+    let reject!: (e: Error) => void
+    api.toggleLike.mockReturnValue(new Promise((_r, j) => { reject = j }))
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(communityKeys.post('p', 'u'), post('p', { likes_count: 4, liked_by_user: false, comments_count: 1 }))
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+
+    let done!: Promise<unknown>
+    act(() => { done = result.current.mutateAsync({ postId: 'p', userId: 'u' }).catch(() => undefined) })
+    await waitFor(() => expect(client.getQueryData<Post>(communityKeys.post('p', 'u'))!.likes_count).toBe(5))
+    client.setQueryData<Post>(communityKeys.post('p', 'u'), prev => ({ ...prev!, comments_count: 2 }))
+
+    await act(async () => { reject(new Error('net')); await done })
+    expect(client.getQueryData<Post>(communityKeys.post('p', 'u'))).toMatchObject({ likes_count: 4, liked_by_user: false, comments_count: 2 })
+  })
+
+  it('개수 조회 실패(likesCount null)면 낙관적 개수를 두고 그 글·목록을 재조회 대상으로 만든다', async () => {
+    api.toggleLike.mockResolvedValue({ liked: true, likesCount: null })
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(communityKeys.postList(filters), [post('p', { likes_count: 4, liked_by_user: false })])
+    client.setQueryData(communityKeys.post('p', 'u'), post('p', { likes_count: 4, liked_by_user: false }))
+    client.setQueryData(communityKeys.post('q', 'u'), post('q'))
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+
+    await act(() => result.current.mutateAsync({ postId: 'p', userId: 'u' }))
+
+    expect(client.getQueryData<Post[]>(communityKeys.postList(filters))![0]).toMatchObject({ likes_count: 5, liked_by_user: true })
+    expect(client.getQueryState(communityKeys.postList(filters))?.isInvalidated).toBe(true)
+    expect(client.getQueryState(communityKeys.post('p', 'u'))?.isInvalidated).toBe(true)
+    expect(client.getQueryState(communityKeys.post('q', 'u'))?.isInvalidated).toBe(false)
+  })
+
+  it('남의 글 좋아요: 응답 개수가 그대로 표시된다(0으로 덮이지 않음)', async () => {
+    api.toggleLike.mockResolvedValue({ liked: true, likesCount: 3 })
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(communityKeys.post('p', 'u'), post('p', { author_id: 'someone', likes_count: 2, liked_by_user: false }))
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+
+    await act(() => result.current.mutateAsync({ postId: 'p', userId: 'u' }))
+
+    expect(client.getQueryData<Post>(communityKeys.post('p', 'u'))).toMatchObject({ likes_count: 3, liked_by_user: true })
+  })
+
   it('글 작성은 목록과 인기 태그를 무효화한다', async () => {
     api.createPost.mockResolvedValue(post('new'))
     const { wrapper, client } = createQueryWrapper()
