@@ -6,7 +6,8 @@
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Json } from '../lib/database.types'
-import { supabase } from '../lib/supabaseClient'
+import { isSupabaseConfigured } from '../lib/supabaseClient'
+import { profileApi, useAudioSettingsQuery } from '../features/profile/queries'
 import { useAuth } from './useAuth'
 import {
   engineErrorMessage,
@@ -108,32 +109,35 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const configRef = useRef(config)
   configRef.current = config
 
-  // --- DB 로드 (로그인 사용자) ---
+  // --- DB 로드 (로그인 사용자, features/profile의 useAudioSettingsQuery) ---
   const userId = user?.id ?? null
+  const stored = useAudioSettingsQuery(userId)
+  const storedReady = stored.isSuccess
+  const storedData = stored.data
+  const storedError = stored.error
+  useEffect(() => {
+    if (storedError) console.warn('[AudioSettings] DB 설정 로드 실패:', storedError)
+  }, [storedError])
   useEffect(() => {
     const gate = gateRef.current
     gate.setUser(userId)
-    if (!userId || !supabase || !gate.shouldLoad(userId)) return
+    // 읽기 실패(행 없음 포함)면 loaded로 표시하지 않는다 → 그 사용자 동안 DB 저장 안 함
+    if (!userId || !isSupabaseConfigured() || !gate.shouldLoad(userId) || !storedReady) return
     let cancelled = false
     void (async () => {
       try {
-        const { data, error: dbError } = await supabase!
-          .from('profiles')
-          .select('audio_settings')
-          .eq('id', userId)
-          .single()
-        // 취소된 로드(StrictMode 이중 effect, 사용자 전환)는 loaded로 표시하지 않는다 → 다음 effect가 다시 읽음
-        if (cancelled || dbError) return
-        if (data?.audio_settings) {
-          const parsed = parseStoredSettings(data.audio_settings)
+        if (storedData) {
+          const parsed = parseStoredSettings(storedData)
           setConfig(parsed.config)
           saveLocal(parsed.config)
           if (parsed.migrated) {
             setMigrated(true)
-            await supabase!.from('profiles').update({ audio_settings: toStored(parsed.config) as unknown as Json }).eq('id', userId)
+            // 변환 저장 실패는 무시한다(다음 변경 때 다시 저장됨 — 기존 동작)
+            await profileApi.saveAudioSettings(userId, toStored(parsed.config) as unknown as Json).catch(() => {})
             console.log('[AudioSettings] 구형 오디오 설정을 새 형식으로 변환했습니다')
           }
         }
+        // 취소된 로드(StrictMode 이중 effect, 사용자 전환)는 loaded로 표시하지 않는다 → 다음 effect가 다시 적용
         if (!cancelled) gate.markLoaded(userId)
       } catch (err) {
         console.warn('[AudioSettings] DB 설정 로드 실패:', err)
@@ -142,23 +146,19 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true
     }
-  }, [userId])
+  }, [userId, storedReady, storedData])
 
   // --- 저장 (변경 시 디바운스) ---
   useEffect(() => {
     if (localDirtyRef.current) saveLocal(config)
     const gate = gateRef.current
     gate.setUser(userId)
-    if (!userId || !supabase || !gate.shouldSave(userId)) return
+    if (!userId || !isSupabaseConfigured() || !gate.shouldSave(userId)) return
     const timer = setTimeout(async () => {
       if (!gate.shouldSave(userId)) return
       setIsSaving(true)
       try {
-        const { error: dbError } = await supabase!
-          .from('profiles')
-          .update({ audio_settings: toStored(config) as unknown as Json })
-          .eq('id', userId)
-        if (dbError) throw dbError
+        await profileApi.saveAudioSettings(userId, toStored(config) as unknown as Json)
       } catch (err) {
         console.warn('[AudioSettings] DB 저장 실패:', err)
       } finally {

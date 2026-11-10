@@ -1,29 +1,34 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { User } from '@supabase/supabase-js'
-import { supabase } from '../lib/supabaseClient'
+import { isSupabaseConfigured } from '../lib/supabaseClient'
+import { authApi, useResetQueryCacheOnUserChange } from '../features/auth/queries'
+import { profileApi } from '../features/profile/queries'
 import { AuthContext, type AuthAlert, type SignUpData } from './useAuth'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
   const [alert, setAlert] = useState<AuthAlert | null>(null)
-  const isSupabaseReady = Boolean(supabase)
+  const isSupabaseReady = isSupabaseConfigured()
+
+  // 로그아웃·계정 전환 시 이전 사용자의 서버 상태(Query 캐시)를 비운다 (P3-3d)
+  useResetQueryCacheOnUserChange(user?.id ?? null, loading)
 
   useEffect(() => {
-    if (!supabase) {
+    if (!isSupabaseConfigured()) {
       setLoading(false)
       return
     }
 
     let mounted = true
-    void supabase.auth.getUser().then(({ data }) => {
+    void authApi.getUser().then((current) => {
       if (mounted) {
-        setUser(data.user ?? null)
+        setUser(current)
         setLoading(false)
       }
     })
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const unsubscribe = authApi.onAuthStateChange((session) => {
       setUser(session?.user ?? null)
       if (session) {
         setAlert({ type: 'success', message: '로그인되었습니다.' })
@@ -32,12 +37,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     return () => {
       mounted = false
-      listener?.subscription.unsubscribe()
+      unsubscribe()
     }
   }, [])
 
   const signUp = async (data: SignUpData) => {
-    if (!supabase) {
+    if (!isSupabaseConfigured()) {
       setAlert({ type: 'error', message: 'Supabase 환경변수를 설정한 뒤 다시 시도하세요.' })
       throw new Error('Supabase not configured')
     }
@@ -47,29 +52,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       // 1. 사용자 인증 생성 (metadata에 프로필 정보 포함)
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: data.email.trim(),
-        password: data.password,
-        options: {
-          data: {
-            name: data.name.trim(),
-            nickname: data.nickname.trim(),
-            birth_date: data.birthDate,
-            gender: data.gender,
-            phone: data.phone?.trim() || null,
-          },
-        },
+      const created = await authApi.signUp(data.email.trim(), data.password, {
+        name: data.name.trim(),
+        nickname: data.nickname.trim(),
+        birth_date: data.birthDate,
+        gender: data.gender,
+        phone: data.phone?.trim() || null,
       })
-
-      if (authError) throw authError
-      if (!authData.user) throw new Error('회원가입에 실패했습니다.')
 
       // 2. 인증 완료될 때까지 대기 (최대 2초)
       await new Promise((resolve) => setTimeout(resolve, 2000))
 
       // 3. 프로필 정보 저장
-      const { error: profileError } = await supabase.from('profiles').insert({
-        id: authData.user.id,
+      const profileError = await profileApi.createProfile({
+        id: created.id,
         email: data.email.trim(),
         name: data.name.trim(),
         nickname: data.nickname.trim(),
@@ -102,7 +98,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const signIn = async (email: string, password: string) => {
-    if (!supabase) {
+    if (!isSupabaseConfigured()) {
       setAlert({ type: 'error', message: 'Supabase 환경변수를 설정한 뒤 다시 시도하세요.' })
       throw new Error('Supabase not configured')
     }
@@ -111,11 +107,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAlert(null)
 
     try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email: email.trim(),
-        password,
-      })
-      if (error) throw error
+      await authApi.signIn(email.trim(), password)
       setAlert({ type: 'success', message: '로그인 성공' })
     } catch (error) {
       setAlert({
@@ -129,12 +121,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const signOut = async () => {
-    if (!supabase) return
+    if (!isSupabaseConfigured()) return
 
     setLoading(true)
     try {
-      const { error } = await supabase.auth.signOut()
-      if (error) throw error
+      await authApi.signOut()
       setAlert({ type: 'info', message: '로그아웃되었습니다.' })
     } catch (error) {
       setAlert({

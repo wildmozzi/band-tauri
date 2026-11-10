@@ -11,7 +11,7 @@ vi.mock('../../lib/supabaseClient', async () => {
   return { supabase: sb.mock.client, isSupabaseConfigured: () => true }
 })
 
-import { profileKeys, useProfileNicknameQuery, useSaveProfileMutation } from './queries'
+import { profileApi, profileKeys, useProfileNicknameQuery, useSaveProfileMutation } from './queries'
 
 const form = { nickname: '새닉', bio: '', instagram: '', youtube: '', twitter: '' }
 
@@ -76,5 +76,23 @@ describe('profile queries', () => {
 
     await expect(result.current.mutateAsync({ userId: 'u1', form })).rejects.toEqual({ message: 'auth' })
     expect(sb.mock!.client.from).not.toHaveBeenCalled()
+  })
+})
+
+describe('profileApi (contexts에서 옮긴 profiles 접근)', () => {
+  it('audio_settings 저장 실패는 throw', async () => {
+    sb.mock!.setResult('profiles', { error: { message: 'rls' } })
+    await expect(profileApi.saveAudioSettings('u1', { version: 2 })).rejects.toEqual({ message: 'rls' })
+    expect(argsOf(sb.mock!.calls[0], 'update')).toEqual([[{ audio_settings: { version: 2 } }]])
+    expect(argsOf(sb.mock!.calls[0], 'eq')).toEqual([['id', 'u1']])
+  })
+
+  it('가입 프로필 생성: 오류는 던지지 않고 돌려준다', async () => {
+    sb.mock!.setResult('profiles', { data: null })
+    await expect(profileApi.createProfile({ id: 'u1', nickname: 'n' })).resolves.toBeNull()
+    expect(argsOf(sb.mock!.calls[0], 'insert')).toEqual([[{ id: 'u1', nickname: 'n' }]])
+
+    sb.mock!.setResult('profiles', { error: { message: 'dup' } })
+    await expect(profileApi.createProfile({ id: 'u1' })).resolves.toEqual({ message: 'dup' })
   })
 })
