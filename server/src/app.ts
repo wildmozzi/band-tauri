@@ -2,13 +2,22 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import musicRoutes from './routes/music'
-import paymentRoutes from './routes/payment'
+import { createPaymentRouter } from './routes/payment'
+import type { SubscriptionService } from './services/subscriptionService'
 import { resolveCorsOrigin } from './lib/securityConfig'
 import { apiLimiter, paymentLimiter } from './lib/rateLimits'
 import { UPLOAD_DIR } from './lib/uploads'
 
-/** Express 앱 생성 (listen 없음 — index.ts와 테스트에서 사용) */
-export function createApp() {
+export interface AppOptions {
+  /** 결제/구독 서비스 (테스트에서 저장소·결제대행 목 주입). 기본: Supabase 저장소 */
+  subscriptionService?: SubscriptionService
+}
+
+/**
+ * Express 앱 생성 (listen 없음 — index.ts와 테스트에서 사용)
+ * 계층: routes(HTTP 입출력·검증) → services(업무 로직) → repositories(Supabase 접근)
+ */
+export function createApp(options: AppOptions = {}) {
   const cors_ = resolveCorsOrigin()
   if (cors_.mode === 'dev-all') {
     console.warn('[SECURITY] CORS_ORIGINS not set (development) - allowing all origins')
@@ -43,7 +52,7 @@ export function createApp() {
   // API 라우트
   app.use('/api', apiLimiter)
   app.use('/api/music', musicRoutes)
-  app.use('/api/payment', paymentLimiter, paymentRoutes)
+  app.use('/api/payment', paymentLimiter, createPaymentRouter(options.subscriptionService))
 
   // 헬스체크
   app.get('/health', (_req, res) => {
