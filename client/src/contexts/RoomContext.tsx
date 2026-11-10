@@ -83,6 +83,8 @@ type RoomContextType = {
   myInstrument: string | null
   peerInstruments: Record<string, PeerInstrument>
   engineStats: EngineStats | null
+  /** 마지막 engine_set_relay 실패 사유(없으면 null) */
+  relayError: string | null
   /** 엔진 피어 통계 (peerId → PeerStats) */
   peerEngineStats: Record<string, PeerStats>
   isMonitoringEnabled: boolean
@@ -769,6 +771,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     myInstrument: perf.phase === 'idle' ? null : perf.instrument,
     peerInstruments,
     engineStats: perf.stats,
+    relayError: perf.relayError ?? null,
     peerEngineStats,
     isMonitoringEnabled,
     monitorGain,

@@ -5,6 +5,9 @@
 //!   1초마다 당겨 보낸다(릴레이 재시작·NAT 재바인딩을 빨리 알아채고 쿠키 절차로 재등록).
 //! - 토큰 갱신: 프론트가 서버에서 새 토큰을 받아 `set_token`으로 넘긴다(같은 주소 → 쿠키 없이 갱신).
 //! - Ack가 3번 연속 없으면 `Unreachable`(계속 재시도). 토큰이 만료되면 `Expired`(새 토큰 전까지 송신 중지).
+//! - 만료는 로컬 벽시계가 아니라 **받은 시각 + 남은 수명**(`deadline`, 서버가 준 `expiresIn`)으로 판단한다
+//!   (PR #10 M1: 클라이언트 시계 오차). 서명·만료의 최종 판정은 릴레이가 한다.
+//! - 송신량을 약 1초 창으로 재서 릴레이 클라이언트당 상한(2Mbps, 2500pps)의 90%에 닿으면 `over_budget`(M4).
 //!
 //! 엔진 패킷의 AEAD는 바뀌지 않는다. RelayData 접두부 8바이트는 AAD에 포함하지 않는다.
 
@@ -42,6 +45,12 @@ pub const REJECT_RETRY: Duration = Duration::from_secs(5);
 pub const COOKIE_RESEND_MIN: Duration = Duration::from_millis(100);
 /// 연속 무응답 Bind가 이만큼이면 `Unreachable`.
 pub const UNREACHABLE_AFTER: u32 = 3;
+/// 릴레이 클라이언트당 송신 상한(relay/src/relay.rs `Limits::default`와 같게 유지).
+pub const RELAY_BUDGET_BPS: f32 = 2_000_000.0;
+pub const RELAY_BUDGET_PPS: f32 = 2_500.0;
+/// 상한의 이 비율을 넘으면 `over_budget`, `BUDGET_CLEAR` 아래로 내려가면 해제(깜박임 방지).
+pub const BUDGET_WARN: f32 = 0.9;
+pub const BUDGET_CLEAR: f32 = 0.8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +75,10 @@ pub struct RelayStats {
     pub addr: String,
     /// 이 엔진 ↔ 릴레이 왕복(ms, Bind/Ack EWMA).
     pub rtt_ms: Option<f32>,
+    /// 릴레이로 보내는 양(kbps, 최근 약 1초, RelayData 접두부 포함·UDP/IP 헤더 제외).
+    pub tx_kbps: f32,
+    /// 송신량이 릴레이 상한(2Mbps/2500pps)의 90%를 넘음: 릴레이가 패킷을 버리기 시작한다(PCM16 + 릴레이 피어 여럿).
+    pub over_budget: bool,
 }
 
 /// 검증된 릴레이 토큰(서명은 확인할 수 없다 — 구조, ssrc, 만료만 본다).
@@ -108,6 +121,16 @@ impl RelayToken {
     }
 }
 
+/// 토큰 만료 시각(단조 시계). 서버가 준 남은 수명(`expires_in`, 발급 시각 기준)이 있으면 받은 시각 + 그 값을 쓴다
+/// (클라이언트 시계 오차와 무관, M1). 없으면(옛 서버) 로컬 시계로 계산하되, 로컬 시계로 이미 만료면 None —
+/// 시계가 빠른 PC에서 멀쩡한 토큰을 버리지 않고 판정을 릴레이에 맡긴다.
+pub fn token_deadline(token: &RelayToken, expires_in: Option<Duration>, now: Instant, now_unix: u64) -> Option<Instant> {
+    match expires_in {
+        Some(d) => Some(now + d),
+        None => token.expires_at.checked_sub(now_unix).filter(|s| *s > 0).map(|s| now + Duration::from_secs(s)),
+    }
+}
+
 /// 릴레이 주소 검증: IPv4(소켓이 IPv4), 0.0.0.0/멀티캐스트/브로드캐스트/포트 0 거부, 루프백은 테스트 옵션에서만.
 pub fn validate_relay_addr(addr: &SocketAddr, allow_loopback: bool) -> Result<(), String> {
     match addr.ip() {
@@ -131,8 +154,12 @@ pub enum AckAction {
 
 #[derive(Debug, Clone)]
 pub struct RelayClient {
+    /// 프론트가 준 `host:port` 문자열(같은 문자열이면 DNS를 다시 풀지 않는다, M3).
+    pub host: String,
     pub addr: SocketAddr,
     token: RelayToken,
+    /// 토큰 만료 시각(단조 시계 — 받은 시각 + 남은 수명). None이면 만료 판정을 릴레이에 맡긴다.
+    deadline: Option<Instant>,
     cookie: Option<[u8; COOKIE_BYTES]>,
     pub state: RelayStateKind,
     /// 마지막 거절 상태 코드(1=RoomFull 2=SsrcConflict 4=ServerFull).
@@ -144,13 +171,17 @@ pub struct RelayClient {
     pub rtt_ms: Option<f32>,
     /// 릴레이가 관측한 내 출발 주소(STUN 보조 정보).
     pub observed: Option<SocketAddr>,
+    tx_kbps: f32,
+    over_budget: bool,
 }
 
 impl RelayClient {
-    pub fn new(addr: SocketAddr, token: RelayToken) -> Self {
+    pub fn new(host: String, addr: SocketAddr, token: RelayToken, deadline: Option<Instant>) -> Self {
         Self {
+            host,
             addr,
             token,
+            deadline,
             cookie: None,
             state: RelayStateKind::Binding,
             reject: None,
@@ -159,6 +190,8 @@ impl RelayClient {
             seq: rand::random(),
             rtt_ms: None,
             observed: None,
+            tx_kbps: 0.0,
+            over_budget: false,
         }
     }
 
@@ -167,8 +200,9 @@ impl RelayClient {
     }
 
     /// 새 토큰(갱신). 같은 주소면 등록을 유지한 채 다음 Bind에서 교체되고, 만료/거절 상태였으면 다시 등록한다.
-    pub fn set_token(&mut self, token: RelayToken) {
+    pub fn set_token(&mut self, token: RelayToken, deadline: Option<Instant>) {
         self.token = token;
+        self.deadline = deadline;
         self.last_bind = None; // 즉시 Bind
         if matches!(self.state, RelayStateKind::Expired | RelayStateKind::Rejected) {
             self.state = RelayStateKind::Binding;
@@ -181,12 +215,35 @@ impl RelayClient {
     }
 
     pub fn stats(&self) -> RelayStats {
-        RelayStats { state: self.state, addr: self.addr.to_string(), rtt_ms: self.rtt_ms }
+        RelayStats {
+            state: self.state,
+            addr: self.addr.to_string(),
+            rtt_ms: self.rtt_ms,
+            tx_kbps: self.tx_kbps,
+            over_budget: self.over_budget,
+        }
+    }
+
+    /// 최근 `elapsed` 동안 릴레이로 보낸 바이트·패킷 수를 반영한다(제어 스레드가 약 1초마다).
+    pub fn record_tx(&mut self, bytes: u64, packets: u64, elapsed: Duration) {
+        let secs = elapsed.as_secs_f32();
+        if secs <= 0.0 {
+            return;
+        }
+        let bps = bytes as f32 * 8.0 / secs;
+        let pps = packets as f32 / secs;
+        self.tx_kbps = bps / 1000.0;
+        let load = (bps / RELAY_BUDGET_BPS).max(pps / RELAY_BUDGET_PPS);
+        if load >= BUDGET_WARN {
+            self.over_budget = true;
+        } else if load < BUDGET_CLEAR {
+            self.over_budget = false;
+        }
     }
 
     /// 제어 틱. Bind를 보내야 하면 true. `probe`=릴레이 경로 피어가 조용함(빨리 확인).
-    pub fn tick(&mut self, now: Instant, now_unix: u64, probe: bool) -> bool {
-        if now_unix >= self.token.expires_at {
+    pub fn tick(&mut self, now: Instant, probe: bool) -> bool {
+        if self.deadline.is_some_and(|d| now >= d) {
             self.state = RelayStateKind::Expired;
             return false;
         }
@@ -195,11 +252,8 @@ impl RelayClient {
             RelayStateKind::Bound => KEEPALIVE_INTERVAL,
             RelayStateKind::Binding | RelayStateKind::Unreachable => BIND_RETRY,
             RelayStateKind::Rejected => REJECT_RETRY,
-            RelayStateKind::Expired => BIND_RETRY, // 위에서 걸러지지 않았으면 시계가 되돌아간 것
+            RelayStateKind::Expired => return false, // 새 토큰(set_token)을 기다린다
         };
-        if self.state == RelayStateKind::Expired {
-            self.state = RelayStateKind::Binding;
-        }
         let due = self.last_bind.is_none_or(|t| now.duration_since(t) >= interval);
         if due && self.unacked >= UNREACHABLE_AFTER && self.state != RelayStateKind::Rejected {
             self.state = RelayStateKind::Unreachable;
@@ -244,6 +298,7 @@ impl RelayClient {
         if self.seq.wrapping_sub(be(8)) >= 8 {
             return AckAction::None;
         }
+        let answered_latest = be(8) == self.seq && self.unacked > 0;
         self.unacked = 0;
         let rtt = now_us32.wrapping_sub(be(12)) as f32 / 1000.0;
         if (0.0..10_000.0).contains(&rtt) {
@@ -271,8 +326,9 @@ impl RelayClient {
                 if self.state != RelayStateKind::Rejected {
                     self.state = RelayStateKind::Binding;
                 }
-                if self.last_bind.is_none_or(|t| now.duration_since(t) >= COOKIE_RESEND_MIN) || self.unacked == 0 {
-                    // 직전 Bind에 대한 응답이므로 바로 다시 보낸다(쿠키 왕복 1회)
+                // 마지막 Bind에 대한 첫 응답이면 바로 다시 보낸다(쿠키 왕복 1회). 그 밖의(옛 seq·중복) 쿠키
+                // 요청에는 100ms에 한 번까지만 응답한다(PR #10 L1).
+                if answered_latest || self.last_bind.is_none_or(|t| now.duration_since(t) >= COOKIE_RESEND_MIN) {
                     AckAction::SendBind
                 } else {
                     AckAction::None
@@ -379,13 +435,13 @@ mod tests {
     fn bind_cookie_ok_flow() {
         let t0 = Instant::now();
         let tok = RelayToken::from_bytes(token_bytes(1_000, 7, "r", "m"), 7).unwrap();
-        let mut c = RelayClient::new("203.0.113.1:4000".parse().unwrap(), tok.clone());
-        assert!(c.tick(t0, 100, false));
+        let mut c = RelayClient::new("relay.test:4000".into(), "203.0.113.1:4000".parse().unwrap(), tok.clone(), None);
+        assert!(c.tick(t0, false));
         let mut out = [0u8; BIND_MAX_BYTES];
         let n = c.write_bind(t0, 7, 0, &mut out);
         assert_eq!(n, BIND_HEADER_BYTES + tok.bytes.len());
         assert_eq!(&out[..4], &[0x42, 0x4E, 1, 7]);
-        assert!(!c.tick(t0 + Duration::from_millis(100), 100, false), "재시도 간격 전");
+        assert!(!c.tick(t0 + Duration::from_millis(100), false), "재시도 간격 전");
 
         let a = ack(&out[..n], 3, [0xC0; 16]);
         assert_eq!(c.on_ack(&a, 7, t0, 0), AckAction::SendBind);
@@ -402,9 +458,9 @@ mod tests {
         assert_eq!(c.rtt_ms, Some(0.5));
         assert_eq!(c.observed, Some("203.0.113.7:5000".parse().unwrap()));
         // keepalive: 쿠키 없이, 10초 간격(조용한 릴레이 피어가 있으면 1초)
-        assert!(!c.tick(t0 + Duration::from_secs(5), 100, false));
-        assert!(c.tick(t0 + Duration::from_secs(5), 100, true));
-        assert!(c.tick(t0 + Duration::from_secs(10), 100, false));
+        assert!(!c.tick(t0 + Duration::from_secs(5), false));
+        assert!(c.tick(t0 + Duration::from_secs(5), true));
+        assert!(c.tick(t0 + Duration::from_secs(10), false));
         assert_eq!(c.write_bind(t0, 7, 0, &mut out), n, "등록 후에는 쿠키 없음");
     }
 
@@ -412,7 +468,7 @@ mod tests {
     fn ack_filters() {
         let t0 = Instant::now();
         let tok = RelayToken::from_bytes(token_bytes(1_000, 7, "r", "m"), 7).unwrap();
-        let mut c = RelayClient::new("203.0.113.1:4000".parse().unwrap(), tok);
+        let mut c = RelayClient::new("relay.test:4000".into(), "203.0.113.1:4000".parse().unwrap(), tok, None);
         let mut out = [0u8; BIND_MAX_BYTES];
         let n = c.write_bind(t0, 7, 0, &mut out);
         let good = ack(&out[..n], 0, [0; 16]);
@@ -432,30 +488,85 @@ mod tests {
     fn unreachable_rejected_expired_and_refresh() {
         let t0 = Instant::now();
         let tok = RelayToken::from_bytes(token_bytes(1_000, 7, "r", "m"), 7).unwrap();
-        let mut c = RelayClient::new("203.0.113.1:4000".parse().unwrap(), tok);
+        let mut c = RelayClient::new("relay.test:4000".into(), "203.0.113.1:4000".parse().unwrap(), tok, None);
         let mut out = [0u8; BIND_MAX_BYTES];
         let mut t = t0;
         for _ in 0..UNREACHABLE_AFTER {
-            assert!(c.tick(t, 100, false));
+            assert!(c.tick(t, false));
             c.write_bind(t, 7, 0, &mut out);
             t += BIND_RETRY;
         }
-        assert!(c.tick(t, 100, false));
+        assert!(c.tick(t, false));
         assert_eq!(c.state, RelayStateKind::Unreachable, "Ack 3회 없음");
         let n = c.write_bind(t, 7, 0, &mut out);
         c.on_ack(&ack(&out[..n], 1, [0; 16]), 7, t, 0);
         assert_eq!(c.state, RelayStateKind::Rejected);
         assert_eq!(c.reject, Some(1));
-        assert!(!c.tick(t + Duration::from_secs(1), 100, false), "거절 후 5초 간격");
-        assert!(c.tick(t + REJECT_RETRY, 100, false));
-        // 만료
-        assert!(!c.tick(t, 1_000, false));
+        assert!(!c.tick(t + Duration::from_secs(1), false), "거절 후 5초 간격");
+        assert!(c.tick(t + REJECT_RETRY, false));
+        // 만료: 받은 시각 + 남은 수명(deadline) 기준
+        let tok = RelayToken::from_bytes(token_bytes(1_000, 7, "r", "m"), 7).unwrap();
+        c.set_token(tok, Some(t + Duration::from_secs(30)));
+        assert!(c.tick(t + Duration::from_secs(29), false));
+        assert!(!c.tick(t + Duration::from_secs(30), false));
         assert_eq!(c.state, RelayStateKind::Expired);
         assert!(!c.ready());
+        assert!(!c.tick(t + Duration::from_secs(40), false), "만료 뒤에는 새 토큰 전까지 Bind 없음");
         // 새 토큰 → 즉시 재등록
-        c.set_token(RelayToken::from_bytes(token_bytes(2_000, 7, "r", "m"), 7).unwrap());
+        let t2 = t + Duration::from_secs(40);
+        c.set_token(RelayToken::from_bytes(token_bytes(2_000, 7, "r", "m"), 7).unwrap(), Some(t2 + Duration::from_secs(120)));
         assert_eq!(c.state, RelayStateKind::Binding);
-        assert!(c.tick(t, 1_000, false));
+        assert!(c.tick(t2, false));
+    }
+
+    #[test]
+    fn deadline_ignores_local_wall_clock_when_server_gives_expires_in() {
+        // M1: 로컬 시계가 토큰의 expiresAt보다 120초 넘게 빨라도(이미 만료로 보여도) 서버가 준 남은 수명을 쓴다
+        let now = Instant::now();
+        let tok = RelayToken::from_bytes(token_bytes(1_000, 7, "r", "m"), 7).unwrap();
+        let skewed_unix = 1_200;
+        assert_eq!(token_deadline(&tok, Some(Duration::from_secs(120)), now, skewed_unix), Some(now + Duration::from_secs(120)));
+        // 옛 서버(expiresIn 없음): 로컬 시계로 계산, 이미 만료로 보이면 판정을 릴레이에 맡긴다(None)
+        assert_eq!(token_deadline(&tok, None, now, skewed_unix), None);
+        assert_eq!(token_deadline(&tok, None, now, 900), Some(now + Duration::from_secs(100)));
+    }
+
+    #[test]
+    fn cookie_resend_rate_limited_for_stale_or_duplicate_requests() {
+        // L1: 마지막 Bind에 대한 첫 쿠키 요청에는 즉시, 중복·옛 seq 요청에는 100ms에 한 번만 응답
+        let t0 = Instant::now();
+        let tok = RelayToken::from_bytes(token_bytes(1_000, 7, "r", "m"), 7).unwrap();
+        let mut c = RelayClient::new("relay.test:4000".into(), "203.0.113.1:4000".parse().unwrap(), tok, None);
+        let mut out = [0u8; BIND_MAX_BYTES];
+        let n = c.write_bind(t0, 7, 0, &mut out);
+        let first = ack(&out[..n], 3, [0xC0; 16]);
+        assert_eq!(c.on_ack(&first, 7, t0, 0), AckAction::SendBind);
+        c.write_bind(t0, 7, 0, &mut out);
+        // 같은(이제 옛) seq의 쿠키 요청 반복 → 100ms 안에는 무시
+        assert_eq!(c.on_ack(&first, 7, t0 + Duration::from_millis(10), 0), AckAction::None);
+        assert_eq!(c.on_ack(&first, 7, t0 + COOKIE_RESEND_MIN, 0), AckAction::SendBind);
+    }
+
+    #[test]
+    fn tx_budget_warning_with_hysteresis() {
+        let tok = RelayToken::from_bytes(token_bytes(1_000, 7, "r", "m"), 7).unwrap();
+        let mut c = RelayClient::new("relay.test:4000".into(), "203.0.113.1:4000".parse().unwrap(), tok, None);
+        let s = Duration::from_secs(1);
+        // PCM16 mono 2.5ms 피어 1명: 282B × 400pps ≈ 0.9Mbps → 정상
+        c.record_tx(282 * 400, 400, s);
+        assert!(!c.stats().over_budget);
+        assert!((c.stats().tx_kbps - 902.4).abs() < 0.1);
+        // 피어 2명(PCM16 stereo): 522B × 800pps ≈ 3.3Mbps → 경고
+        c.record_tx(522 * 800, 800, s);
+        assert!(c.stats().over_budget);
+        // 85%(경고와 해제 사이)면 유지, 80% 아래면 해제
+        c.record_tx(212_500, 400, s);
+        assert!(c.stats().over_budget);
+        c.record_tx(150_000, 400, s);
+        assert!(!c.stats().over_budget);
+        // pps 상한(2500pps)도 본다
+        c.record_tx(100_000, 2_400, s);
+        assert!(c.stats().over_budget);
     }
 
     #[test]

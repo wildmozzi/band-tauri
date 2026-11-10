@@ -69,14 +69,20 @@ export interface RelayStats {
   addr: string
   /** 이 엔진 ↔ 릴레이 왕복(ms) */
   rttMs: number | null
+  /** 릴레이로 보내는 양(kbps, 최근 1초) */
+  txKbps: number
+  /** 릴레이 상한(2Mbps/2500pps)의 90% 초과: 릴레이가 패킷을 버리기 시작한다(PCM16 + 릴레이 피어 여럿) */
+  overBudget: boolean
 }
 
-/** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token */
+/** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token/expiresIn */
 export interface RelayConfig {
   /** 릴레이 host:port */
   addr: string
   /** base64url 토큰 (engine_start가 만든 ssrc에 묶임) */
   token: string
+  /** 토큰 남은 수명(초, 서버 발급 시각 기준). 엔진은 받은 시각 + 이 값으로 만료를 판단한다(시계 오차 무관) */
+  expiresInSec?: number
 }
 
 export interface PeerStats {

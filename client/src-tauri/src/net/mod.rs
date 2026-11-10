@@ -7,7 +7,7 @@ pub mod relay;
 pub mod stun;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -27,6 +27,19 @@ const SEND_BUF_BYTES: usize = DATA_PREFIX_BYTES + MAX_PACKET_BYTES;
 
 fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// `Net::set_relay` 인자(설계 4절 `engine_set_relay`).
+#[derive(Debug, Clone, Copy)]
+pub struct RelaySetting<'a> {
+    /// 프론트가 준 `host:port` 문자열(같은 문자열이면 해석한 주소를 유지).
+    pub host: &'a str,
+    /// 해석된 IPv4 주소.
+    pub addr: SocketAddr,
+    /// 서버가 준 base64url 토큰.
+    pub token: &'a str,
+    /// 토큰 남은 수명(서버 발급 시각 기준). 받은 시각 + 이 값이 만료 시각이다(M1).
+    pub expires_in: Option<Duration>,
 }
 
 /// 원격 피어 최대 수(본인 포함 6명).
@@ -76,6 +89,11 @@ pub struct NetShared {
     relay: Mutex<Option<RelayClient>>,
     /// 수신 경로에서 릴레이 패킷을 가르는 데 쓰는 릴레이 주소(`relay`와 함께 갱신).
     relay_addr: RwLock<Option<SocketAddr>>,
+    /// 직전 릴레이 주소(주소 변경·해제 뒤). 이 주소에서 온 Hello/HelloAck는 직접 경로로 오인하지 않게 버린다.
+    prev_relay: RwLock<Option<SocketAddr>>,
+    /// 릴레이로 보낸 바이트·패킷(대역 경고 M4, 제어 스레드가 약 1초마다 비운다).
+    relay_tx_bytes: AtomicU64,
+    relay_tx_packets: AtomicU64,
 }
 
 pub struct Net {
@@ -148,6 +166,9 @@ impl Net {
             allow_loopback: opts.allow_loopback_candidates,
             relay: Mutex::new(None),
             relay_addr: RwLock::new(None),
+            prev_relay: RwLock::new(None),
+            relay_tx_bytes: AtomicU64::new(0),
+            relay_tx_packets: AtomicU64::new(0),
         });
 
         let mut threads = Vec::new();
@@ -240,29 +261,48 @@ impl Net {
         Ok(crypto::safety_code(&self.shared.keys.public_bytes(), &peer.public_key))
     }
 
-    /// 릴레이 설정/갱신/해제(설계 4절 `engine_set_relay`). `addr`는 해석된 IPv4 주소, `token`은 서버가 준
-    /// base64url 토큰. 같은 주소면 등록을 유지한 채 토큰만 바꾼다(갱신). 토큰의 ssrc는 이 엔진의 ssrc와 같아야 한다.
-    pub fn set_relay(&self, relay: Option<(SocketAddr, &str)>) -> Result<(), String> {
-        let Some((addr, token)) = relay else {
-            *self.shared.relay.lock() = None;
-            *self.shared.relay_addr.write() = None;
+    /// 릴레이 설정/갱신/해제(설계 4절 `engine_set_relay`). 같은 주소면 등록을 유지한 채 토큰만 바꾼다(갱신).
+    /// 토큰의 ssrc는 이 엔진의 ssrc와 같아야 한다. 만료는 로컬 벽시계로 거부하지 않는다(M1, 판정은 릴레이).
+    /// 주소가 바뀌거나 해제되면 릴레이 경로 피어를 새 주소로 옮기거나(해제면) 다시 찾게 한다(M3).
+    pub fn set_relay(&self, relay: Option<RelaySetting<'_>>) -> Result<(), String> {
+        let now = Instant::now();
+        let Some(cfg) = relay else {
+            let old = self.shared.relay.lock().take().map(|c| c.addr);
+            if let Some(old) = old {
+                log::info!("릴레이 해제: {old}");
+                self.shared.move_relay(old, None, now);
+            }
             return Ok(());
         };
-        relay::validate_relay_addr(&addr, self.shared.allow_loopback)?;
-        let token = RelayToken::parse(token, self.shared.ssrc)?;
-        if unix_now() >= token.expires_at {
-            return Err("만료된 릴레이 토큰입니다".into());
-        }
-        let mut r = self.shared.relay.lock();
-        match r.as_mut() {
-            Some(c) if c.addr == addr => c.set_token(token),
-            _ => {
-                log::info!("릴레이 설정: {addr}");
-                *r = Some(RelayClient::new(addr, token));
-                *self.shared.relay_addr.write() = Some(addr);
+        relay::validate_relay_addr(&cfg.addr, self.shared.allow_loopback)?;
+        let token = RelayToken::parse(cfg.token, self.shared.ssrc)?;
+        let deadline = relay::token_deadline(&token, cfg.expires_in, now, unix_now());
+        let moved_from = {
+            let mut r = self.shared.relay.lock();
+            match r.as_mut() {
+                Some(c) if c.addr == cfg.addr => {
+                    c.host = cfg.host.to_string();
+                    c.set_token(token, deadline);
+                    return Ok(());
+                }
+                _ => {
+                    let old = r.as_ref().map(|c| c.addr);
+                    log::info!("릴레이 설정: {} ({})", cfg.addr, cfg.host);
+                    *r = Some(RelayClient::new(cfg.host.to_string(), cfg.addr, token, deadline));
+                    old
+                }
             }
+        };
+        match moved_from {
+            Some(old) => self.shared.move_relay(old, Some(cfg.addr), now),
+            None => *self.shared.relay_addr.write() = Some(cfg.addr),
         }
         Ok(())
+    }
+
+    /// 지금 릴레이가 `host` 문자열로 설정돼 있으면 그 주소.
+    pub fn relay_addr_for_host(&self, host: &str) -> Option<SocketAddr> {
+        self.shared.relay.lock().as_ref().filter(|c| c.host == host).map(|c| c.addr)
     }
 
     pub fn relay_stats(&self) -> Option<RelayStats> {
@@ -305,12 +345,24 @@ impl NetShared {
         *self.relay_addr.read()
     }
 
+    /// 릴레이 주소가 `old`에서 `new`로 바뀜(None = 해제). 릴레이 경로 피어는 새 주소로 옮기고(해제면 직접 경로를
+    /// 다시 찾게 하고), 옛 주소에서 비행 중인 패킷은 PATH_GRACE 동안 받는다. relay 락을 쥐지 않은 채 부른다.
+    fn move_relay(&self, old: SocketAddr, new: Option<SocketAddr>, now: Instant) {
+        *self.prev_relay.write() = Some(old);
+        *self.relay_addr.write() = new;
+        for p in self.peers.read().iter() {
+            p.conn.lock().relay_moved(old, new, now);
+        }
+    }
+
     /// `buf[DATA_PREFIX_BYTES..DATA_PREFIX_BYTES + n]`에 봉인된 엔진 패킷을 보낸다. `relay_dest`가 있으면
     /// RelayData(dest_ssrc) 접두부를 붙여 `to`(릴레이)로 보낸다. 접두부는 AAD 밖이다(relay-design 2.4).
     fn send_sealed(&self, buf: &mut [u8; SEND_BUF_BYTES], n: usize, to: SocketAddr, relay_dest: Option<u32>) {
         let out = match relay_dest {
             Some(dest) => {
                 relay::write_data_prefix(dest, &mut buf[..]);
+                self.relay_tx_bytes.fetch_add((DATA_PREFIX_BYTES + n) as u64, Ordering::Relaxed);
+                self.relay_tx_packets.fetch_add(1, Ordering::Relaxed);
                 &buf[..DATA_PREFIX_BYTES + n]
             }
             None => &buf[DATA_PREFIX_BYTES..DATA_PREFIX_BYTES + n],
@@ -443,17 +495,27 @@ impl NetShared {
                 if plain != peer.id.as_bytes() {
                     return;
                 }
+                // 직전 릴레이 주소에서 온 Hello/HelloAck는 직접 경로로 오인하지 않게 버린다(M3)
+                if !via_relay && *self.prev_relay.read() == Some(from) {
+                    return;
+                }
                 let is_ack = h.ptype == PacketType::HelloAck;
+                // HelloAck의 timestamp는 Hello의 것을 되돌려 준 값이다 → 그 경로의 왕복 시간(승격 판단, M2)
+                let ack_rtt = if is_ack {
+                    Some(self.now_us32().wrapping_sub(h.timestamp) as f32 / 1000.0).filter(|r| (0.0..10_000.0).contains(r))
+                } else {
+                    None
+                };
                 let ack = {
                     let mut c = peer.conn.lock();
-                    if c.on_handshake(from, is_ack, &peer.candidates, relay, now) == HandshakeOutcome::Ignored {
+                    if c.on_handshake_rtt(from, is_ack, &peer.candidates, relay, now, ack_rtt) == HandshakeOutcome::Ignored {
                         log::debug!("{}: 경로가 아닌 주소 {from}의 Hello(리바인딩/승격 대기)", peer.id);
                     }
                     !is_ack && c.ack_allowed(from, now)
                 };
-                // 무시된 Hello에도 응답해 상대가 우리 경로를 알 수 있게 한다(간격 제한).
+                // 무시된 Hello에도 응답해 상대가 우리 경로를 알 수 있게 한다(간격 제한). timestamp는 Hello의 값을 에코.
                 if ack {
-                    self.send_ctrl(&peer, PacketType::HelloAck, self.now_us32(), self.local_peer_id.as_bytes(), from, via_relay);
+                    self.send_ctrl(&peer, PacketType::HelloAck, h.timestamp, self.local_peer_id.as_bytes(), from, via_relay);
                 }
             }
             other => {
@@ -516,7 +578,11 @@ fn recv_loop(s: &NetShared) {
 /// 릴레이 경로 피어가 이 시간 넘게 조용하면 릴레이 keepalive를 당겨 보낸다(릴레이 재시작 감지).
 const RELAY_QUIET_PROBE: Duration = Duration::from_secs(1);
 
+/// 릴레이 송신량을 재는 창.
+const RELAY_RATE_WINDOW: Duration = Duration::from_secs(1);
+
 fn control_loop(s: &NetShared) {
+    let mut rate_since = Instant::now();
     while !s.stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         let peers = s.peers.read().clone();
@@ -526,10 +592,10 @@ fn control_loop(s: &NetShared) {
         };
         let mut relay_quiet = false;
         for p in &peers {
-            let (action, path, last_rx) = {
+            let (action, path, last_rx, failed) = {
                 let mut c = p.conn.lock();
                 let a = c.tick(now, relay_ready);
-                (a, c.path, c.last_rx)
+                (a, c.path, c.last_rx, c.state == PeerStateKind::Failed)
             };
             if action.hello_direct {
                 for addr in p.hello_targets(relay) {
@@ -542,14 +608,24 @@ fn control_loop(s: &NetShared) {
             if action.ping {
                 s.send_ctrl_on_path(p, PacketType::Ping, s.now_us32());
             }
-            if let Some((_, PathKind::Relay)) = path {
+            // Failed 피어(Bye 없이 사라짐)는 빼야 1초마다 Bind를 계속 보내지 않는다(PR #10 L3)
+            if let (Some((_, PathKind::Relay)), false) = (path, failed) {
                 relay_quiet |= last_rx.is_none_or(|t| now.duration_since(t) >= RELAY_QUIET_PROBE);
             }
         }
         {
             let mut r = s.relay.lock();
+            let elapsed = now.duration_since(rate_since);
+            if elapsed >= RELAY_RATE_WINDOW {
+                rate_since = now;
+                let bytes = s.relay_tx_bytes.swap(0, Ordering::Relaxed);
+                let packets = s.relay_tx_packets.swap(0, Ordering::Relaxed);
+                if let Some(c) = r.as_mut() {
+                    c.record_tx(bytes, packets, elapsed);
+                }
+            }
             if let Some(c) = r.as_mut() {
-                if c.tick(now, unix_now(), relay_quiet) {
+                if c.tick(now, relay_quiet) {
                     let mut out = [0u8; relay::BIND_MAX_BYTES];
                     let n = c.write_bind(now, s.ssrc, s.now_us32(), &mut out);
                     let _ = s.socket.send_to(&out[..n], c.addr);

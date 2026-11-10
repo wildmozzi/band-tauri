@@ -18,6 +18,7 @@ use crate::engine::device::DeviceInfo;
 use crate::engine::mixer::clamp_gain;
 use crate::engine::stats::EngineStats;
 use crate::manager::EngineManager;
+use crate::net::RelaySetting;
 use crate::net::peer::LocalDescriptor;
 use crate::net::NetOptions;
 
@@ -97,18 +98,28 @@ pub struct RelayArgs {
     pub addr: String,
     /// base64url 릴레이 토큰
     pub token: String,
+    /// 토큰 남은 수명(초, 서버 발급 시각 기준 = `expiresAt - serverNow`). 엔진은 받은 시각 + 이 값으로 만료를
+    /// 판단한다(클라이언트 시계 오차 무관, PR #10 M1). 없으면 로컬 시계로 계산.
+    #[serde(default)]
+    pub expires_in_sec: Option<u64>,
 }
 
 #[tauri::command]
 pub async fn engine_set_relay(state: State<'_, EngineState>, relay: Option<RelayArgs>) -> Result<(), String> {
     let m = state.0.clone();
-    // DNS 조회는 블로킹이므로 엔진 락 밖, 블로킹 스레드에서
+    // DNS 조회는 블로킹이므로 엔진 락 밖, 블로킹 스레드에서. 같은 host:port 문자열이면 처음 해석한 주소를
+    // 유지한다(토큰 갱신마다 다시 풀면 라운드로빈 A 레코드에서 릴레이가 바뀌어 끊긴다, M3).
     blocking(move || {
-        let resolved = match relay {
-            Some(r) => Some((crate::net::relay::resolve_relay_addr(&r.addr)?, r.token)),
-            None => None,
+        let Some(r) = relay else {
+            return m.with_engine(|e| e.set_relay(None));
         };
-        m.with_engine(|e| e.set_relay(resolved.as_ref().map(|(a, t)| (*a, t.as_str()))))
+        let known = m.with_engine(|e| Ok(e.relay_addr_for_host(&r.addr)))?;
+        let addr = match known {
+            Some(a) => a,
+            None => crate::net::relay::resolve_relay_addr(&r.addr)?,
+        };
+        let expires_in = r.expires_in_sec.map(std::time::Duration::from_secs);
+        m.with_engine(|e| e.set_relay(Some(RelaySetting { host: &r.addr, addr, token: &r.token, expires_in })))
     })
     .await
 }

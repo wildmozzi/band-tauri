@@ -122,6 +122,7 @@ export function RoomDetail() {
     startPerforming,
     stopPerforming,
     engineStats,
+    relayError,
     peerEngineStats,
     isMonitoringEnabled,
     monitorGain,
@@ -1519,7 +1520,7 @@ export function RoomDetail() {
               const isActive = isPerformer ? state === 'connected' : true
               const muted = mixSettingsMap[oderId]?.muted ?? false
               // 'failed'(릴레이까지 실패) 안내 또는 릴레이 경로 지연 안내
-              const pathHint = state ? peerPathHint(state, ps?.path, engineStats?.relay) : null
+              const pathHint = state ? peerPathHint(state, ps?.path, engineStats?.relay, relayError) : null
 
               return (
                 <div
@@ -1547,7 +1548,7 @@ export function RoomDetail() {
                           {ps?.path && <> · {pathLabel(ps.path)}</>}
                         </span>
                       )}
-                      {pathHint && <span className={state === 'failed' ? 'peer-failed-hint' : 'peer-relay-hint'}>{pathHint}</span>}
+                      {pathHint && <span className={state === 'failed' || engineStats?.relay?.overBudget ? 'peer-failed-hint' : 'peer-relay-hint'}>{pathHint}</span>}
                     </div>
                     {/* 네트워크 상태 (연주 중일 때만: 엔진 통계) */}
                     {ps && state !== 'failed' && (
@@ -1767,12 +1768,14 @@ export function RoomDetail() {
                         <div className="channel-latency">
                           <span className={`peer-state-badge ${PEER_STATE_INFO[state].className}`}>{PEER_STATE_INFO[state].label}</span>
                           {state === 'failed' ? (
-                            <span className="peer-failed-hint">{peerPathHint(state, ps?.path, engineStats?.relay)}</span>
+                            <span className="peer-failed-hint">{peerPathHint(state, ps?.path, engineStats?.relay, relayError)}</span>
                           ) : ps ? (
                             <span className="latency-text engine-peer-stats" title={peerStatsTitle(ps)}>
                               RTT {formatMs(ps.rttMs)} · 지터 {formatMs(ps.jitterMs, 1)} · 버퍼 {formatMs(ps.bufferMs)} · 손실 {ps.lossPct.toFixed(1)}%
                               {' · '}{pathLabel(ps.path) ?? '경로 탐색 중'}
-                              {ps.path === 'relay' && <span className="peer-relay-hint"> ({RELAY_PATH_HINT})</span>}
+                              {ps.path === 'relay' && (
+                                <span className={engineStats?.relay?.overBudget ? 'peer-failed-hint' : 'peer-relay-hint'}> ({peerPathHint(state, ps.path, engineStats?.relay)})</span>
+                              )}
                             </span>
                           ) : (
                             <span className="latency-text">연결 정보 교환 중</span>

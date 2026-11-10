@@ -36,6 +36,18 @@ pub const DIRECT_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 pub const FAILED_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 /// 경로를 바꾼 뒤 이전 경로로 오는 인증 패킷(비행 중)을 받아 주는 시간(무끊김 전환).
 pub const PATH_GRACE: Duration = Duration::from_secs(2);
+/// 릴레이 → 직접 승격 조건(PR #10 M2 히스테리시스): 같은 직접 주소에서 HelloAck(왕복 확인)가 이만큼, 간격
+/// `PROMOTE_MAX_GAP` 이하로 끊김 없이, `PROMOTE_STABLE` 이상 이어져야 한다(1초 탐색 → 약 2초).
+pub const PROMOTE_ACKS: u32 = 3;
+pub const PROMOTE_STABLE: Duration = Duration::from_secs(2);
+pub const PROMOTE_MAX_GAP: Duration = Duration::from_millis(1500);
+/// 직접 경로 RTT가 릴레이 경유 종단 RTT보다 이만큼 넘게 크면 승격하지 않는다(ms).
+pub const PROMOTE_RTT_MARGIN_MS: f32 = 10.0;
+/// 직접 → 릴레이 강등 뒤 승격을 미루는 최소 시간. 승격 후 `FLAP_WINDOW` 안에 다시 강등되면(플래핑) 두 배씩
+/// 늘려 `RELAY_HOLD_MAX`까지.
+pub const RELAY_HOLD_MIN: Duration = Duration::from_secs(5);
+pub const RELAY_HOLD_MAX: Duration = Duration::from_secs(60);
+pub const FLAP_WINDOW: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,6 +153,22 @@ pub struct ConnState {
     /// 상대가 Bye를 보냈다(더 탐색하지 않음).
     pub bye: bool,
     last_direct_probe: Option<Instant>,
+    /// 릴레이 경로 중 직접 주소의 연속 HelloAck(승격 히스테리시스).
+    direct_probe: Option<DirectProbe>,
+    /// 이 시각 전에는 직접 경로로 승격하지 않는다(강등 직후·플래핑).
+    pub promote_hold_until: Option<Instant>,
+    /// 최근 연속 플래핑 횟수(승격 후 FLAP_WINDOW 안에 강등).
+    pub flaps: u32,
+    last_promote: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectProbe {
+    addr: SocketAddr,
+    first: Instant,
+    last: Instant,
+    count: u32,
+    rtt_ms: Option<f32>,
 }
 
 /// Hello/HelloAck 처리 결과.
@@ -170,6 +198,63 @@ impl ConnState {
             prev_path: None,
             bye: false,
             last_direct_probe: None,
+            direct_probe: None,
+            promote_hold_until: None,
+            flaps: 0,
+            last_promote: None,
+        }
+    }
+
+    /// 직접 → 릴레이 강등: 승격을 잠시 미룬다(플래핑이면 점점 길게).
+    fn on_demote(&mut self, now: Instant) {
+        self.flaps = if self.last_promote.is_some_and(|t| now.duration_since(t) < FLAP_WINDOW) { self.flaps + 1 } else { 0 };
+        let hold = RELAY_HOLD_MIN.saturating_mul(1 << self.flaps.min(4)).min(RELAY_HOLD_MAX);
+        self.promote_hold_until = Some(now + hold);
+        self.direct_probe = None;
+    }
+
+    fn on_promote(&mut self, now: Instant) {
+        self.last_promote = Some(now);
+        self.direct_probe = None;
+    }
+
+    /// 릴레이 경로 중 직접 주소 `from`의 HelloAck. 승격 조건(연속 N회·안정 시간·RTT·강등 유예)을 채우면 true.
+    fn direct_ack_promotes(&mut self, from: SocketAddr, now: Instant, rtt: Option<f32>) -> bool {
+        let mut p = match self.direct_probe {
+            Some(p) if p.addr == from && now.duration_since(p.last) <= PROMOTE_MAX_GAP => DirectProbe { count: p.count + 1, last: now, ..p },
+            _ => DirectProbe { addr: from, first: now, last: now, count: 1, rtt_ms: None },
+        };
+        if let Some(r) = rtt {
+            p.rtt_ms = Some(p.rtt_ms.map_or(r, |x| x + (r - x) * 0.5));
+        }
+        self.direct_probe = Some(p);
+        let held = self.promote_hold_until.is_some_and(|t| now < t);
+        let rtt_ok = match (p.rtt_ms, self.rtt_ms) {
+            (Some(direct), Some(relay)) => direct <= relay + PROMOTE_RTT_MARGIN_MS,
+            _ => true,
+        };
+        p.count >= PROMOTE_ACKS && now.duration_since(p.first) >= PROMOTE_STABLE && !held && rtt_ok
+    }
+
+    /// 릴레이 주소가 `old` → `new`로 바뀜(None = 해제, M3). 릴레이 경로면 새 주소로 옮기고(해제면 경로를 비우고
+    /// 직접 경로를 다시 찾는다), 옛 주소에서 비행 중인 패킷은 PATH_GRACE 동안 받는다.
+    pub fn relay_moved(&mut self, old: SocketAddr, new: Option<SocketAddr>, now: Instant) {
+        if self.path != Some((old, PathKind::Relay)) {
+            if new.is_none() {
+                self.relay_confirmed = false;
+            }
+            return;
+        }
+        self.prev_path = Some((old, now));
+        match new {
+            Some(n) => self.path = Some((n, PathKind::Relay)),
+            None => {
+                self.path = None;
+                self.relay_confirmed = false;
+                if self.state == PeerStateKind::Connected {
+                    self.state = PeerStateKind::Reconnecting;
+                }
+            }
         }
     }
 
@@ -208,7 +293,8 @@ impl ConnState {
     /// Hello/HelloAck를 `from`에서 받음(리뷰 M6 규칙 + 릴레이, P1-4b).
     /// - 경로 없음 / 같은 경로 / public→LAN 승격 / 끊김 상태 → 경로 확정, Connected.
     /// - 릴레이(`from == relay`)로 왔다: 상대가 직접 경로로 우리 소리를 못 받는다는 뜻이므로 릴레이 경로로 바꾼다.
-    /// - 릴레이 경로인데 직접 주소: HelloAck(왕복 확인)면 직접 경로로 승격, Hello면 힌트만 남기고 무시.
+    /// - 릴레이 경로인데 직접 주소: HelloAck(왕복 확인)가 승격 조건(`direct_ack_promotes`: 연속 3회·2초 안정·
+    ///   RTT·강등 유예)을 채우면 직접 경로로 승격. 그 전까지(와 Hello)는 힌트만 남기고 무시.
     /// - Connected인데 다른 직접 주소 → 같은 주소에서 `REBIND_HELLOS`회 연속이면 전환, 아니면 무시.
     pub fn on_handshake(
         &mut self,
@@ -217,6 +303,19 @@ impl ConnState {
         cands: &[(SocketAddr, CandidateKind)],
         relay: Option<SocketAddr>,
         now: Instant,
+    ) -> HandshakeOutcome {
+        self.on_handshake_rtt(from, is_ack, cands, relay, now, None)
+    }
+
+    /// `on_handshake` + HelloAck로 잰 그 경로의 왕복 시간(`ack_rtt`, Hello timestamp 에코).
+    pub fn on_handshake_rtt(
+        &mut self,
+        from: SocketAddr,
+        is_ack: bool,
+        cands: &[(SocketAddr, CandidateKind)],
+        relay: Option<SocketAddr>,
+        now: Instant,
+        ack_rtt: Option<f32>,
     ) -> HandshakeOutcome {
         let via_relay = relay == Some(from);
         let kind = if via_relay {
@@ -234,10 +333,10 @@ impl ConnState {
             Some(_) if via_relay => true,
             Some(_) if matches!(self.state, PeerStateKind::Reconnecting | PeerStateKind::Failed) => true,
             Some((_, PathKind::Relay)) => {
-                if is_ack {
+                self.direct_hint = Some(from);
+                if is_ack && self.direct_ack_promotes(from, now, ack_rtt) {
                     true
                 } else {
-                    self.direct_hint = Some(from);
                     return HandshakeOutcome::Ignored;
                 }
             }
@@ -256,7 +355,20 @@ impl ConnState {
             }
         };
         if switch {
+            let old_kind = self.path_kind();
+            let probe_rtt = self.direct_probe.and_then(|p| p.rtt_ms);
+            match (old_kind, kind) {
+                (Some(PathKind::Lan | PathKind::Public), PathKind::Relay) => self.on_demote(now),
+                (Some(PathKind::Relay), PathKind::Lan | PathKind::Public) => self.on_promote(now),
+                _ => {}
+            }
+            if old_kind != Some(kind) {
+                // 경로 종류가 바뀌면 RTT도 그 경로 기준으로(이 HelloAck나 승격 탐색에서 잰 값, 없으면 핑으로 다시)
+                self.rtt_ms = ack_rtt.or(probe_rtt);
+            }
             self.set_path(from, kind, now);
+        } else if let (true, Some(r)) = (self.is_path(from), ack_rtt) {
+            self.on_rtt_sample(r);
         }
         self.state = PeerStateKind::Connected;
         self.bye = false;
@@ -274,6 +386,9 @@ impl ConnState {
             return true;
         }
         if self.path_kind() == Some(PathKind::Relay) && self.direct_hint == Some(from) {
+            // 상대가 자기 승격 조건을 채우고 직접 경로로 보내기 시작했다: 따라가지 않으면 소리가 끊기므로 유예와 무관하게
+            self.on_promote(now);
+            self.rtt_ms = None;
             self.set_path(from, direct_kind(from, cands), now);
             self.on_rx_from_path(now);
             return true;
@@ -675,12 +790,135 @@ mod tests {
         assert_eq!(c.on_handshake(lan, false, &cands(), relay(), t0), HandshakeOutcome::Ignored);
         assert_eq!(c.path_kind(), Some(PathKind::Relay));
         assert_eq!(c.direct_hint, Some(lan));
-        // HelloAck(내 Hello에 대한 응답 = 왕복 확인)면 승격
-        assert_eq!(c.on_handshake(lan, true, &cands(), relay(), t0), HandshakeOutcome::Accepted);
+        // HelloAck(왕복 확인)가 1초 간격으로 3번, 2초 이상 이어져야 승격(M2 히스테리시스)
+        assert_eq!(c.on_handshake(lan, true, &cands(), relay(), t0), HandshakeOutcome::Ignored);
+        assert_eq!(c.on_handshake(lan, true, &cands(), relay(), t0 + Duration::from_secs(1)), HandshakeOutcome::Ignored);
+        assert_eq!(c.path_kind(), Some(PathKind::Relay));
+        let tp = t0 + Duration::from_secs(2);
+        assert_eq!(c.on_handshake(lan, true, &cands(), relay(), tp), HandshakeOutcome::Accepted);
         assert_eq!(c.path, Some((lan, PathKind::Lan)));
         // 비행 중인 릴레이 패킷은 계속 받는다(무끊김), 생존은 경로 기준
-        assert!(c.accept_rx(r, &cands(), relay(), t0 + Duration::from_millis(10)));
-        assert!(!c.accept_rx("198.51.100.9:1".parse().unwrap(), &cands(), relay(), t0), "모르는 주소");
+        assert!(c.accept_rx(r, &cands(), relay(), tp + Duration::from_millis(10)));
+        assert!(!c.accept_rx("198.51.100.9:1".parse().unwrap(), &cands(), relay(), tp), "모르는 주소");
+    }
+
+    #[test]
+    fn promotion_requires_unbroken_acks_and_acceptable_rtt() {
+        let t0 = Instant::now();
+        let r: SocketAddr = RELAY.parse().unwrap();
+        let lan: SocketAddr = "192.168.0.5:4000".parse().unwrap();
+        let s = Duration::from_secs(1);
+        // 중간에 2초 끊기면(손실) 처음부터 다시 센다
+        let mut c = ConnState::new(t0);
+        c.on_handshake(r, false, &cands(), relay(), t0);
+        c.on_handshake(lan, true, &cands(), relay(), t0);
+        c.on_handshake(lan, true, &cands(), relay(), t0 + s);
+        assert_eq!(c.on_handshake(lan, true, &cands(), relay(), t0 + s * 3), HandshakeOutcome::Ignored, "간격 2초 → 리셋");
+        c.on_handshake(lan, true, &cands(), relay(), t0 + s * 4);
+        assert_eq!(c.on_handshake(lan, true, &cands(), relay(), t0 + s * 5), HandshakeOutcome::Accepted);
+        // 직접 RTT(80ms)가 릴레이 종단 RTT(40ms) + 10ms보다 크면 승격하지 않는다
+        let mut c = ConnState::new(t0);
+        c.on_handshake(r, false, &cands(), relay(), t0);
+        c.rtt_ms = Some(40.0);
+        for i in 0..5 {
+            assert_eq!(c.on_handshake_rtt(lan, true, &cands(), relay(), t0 + s * i, Some(80.0)), HandshakeOutcome::Ignored);
+        }
+        // 직접이 더 빠르면 승격하고, RTT는 직접 경로 값으로 바뀐다
+        let mut c = ConnState::new(t0);
+        c.on_handshake(r, false, &cands(), relay(), t0);
+        c.rtt_ms = Some(40.0);
+        for i in 0..2 {
+            c.on_handshake_rtt(lan, true, &cands(), relay(), t0 + s * i, Some(4.0));
+        }
+        assert_eq!(c.on_handshake_rtt(lan, true, &cands(), relay(), t0 + s * 2, Some(4.0)), HandshakeOutcome::Accepted);
+        assert_eq!(c.rtt_ms, Some(4.0));
+    }
+
+    /// 직접 경로 승격까지(1초 간격 HelloAck 3회). 승격 시각을 돌려준다.
+    fn promote(c: &mut ConnState, addr: SocketAddr, from: Instant) -> Instant {
+        let mut t = from;
+        for _ in 0..PROMOTE_ACKS {
+            c.on_handshake(addr, true, &cands(), relay(), t);
+            t += Duration::from_secs(1);
+        }
+        t - Duration::from_secs(1)
+    }
+
+    #[test]
+    fn demotion_holds_promotion_and_backs_off_on_flapping() {
+        let t0 = Instant::now();
+        let r: SocketAddr = RELAY.parse().unwrap();
+        let lan: SocketAddr = "192.168.0.5:4000".parse().unwrap();
+        let mut c = ConnState::new(t0);
+        c.on_handshake(lan, false, &cands(), relay(), t0);
+        // 처음 강등(직접 → 릴레이): 5초 동안 승격 보류
+        let td = t0 + Duration::from_secs(60);
+        c.on_handshake(r, false, &cands(), relay(), td);
+        assert_eq!(c.path_kind(), Some(PathKind::Relay));
+        assert_eq!(c.promote_hold_until, Some(td + RELAY_HOLD_MIN));
+        let tp = promote(&mut c, lan, td + Duration::from_secs(1));
+        assert_eq!(c.path_kind(), Some(PathKind::Relay), "유예 중에는 HelloAck가 이어져도 승격 안 함 ({tp:?})");
+        let tp = promote(&mut c, lan, td + RELAY_HOLD_MIN);
+        assert_eq!(c.path_kind(), Some(PathKind::Lan), "유예 뒤 승격");
+        // 승격 후 30초 안에 다시 강등(플래핑) → 유예 10초, 다음은 20초 … 최대 60초
+        let mut t = tp + Duration::from_secs(3);
+        let mut holds = vec![];
+        for _ in 0..5 {
+            c.on_handshake(r, false, &cands(), relay(), t);
+            holds.push(c.promote_hold_until.unwrap() - t);
+            let hold_end = c.promote_hold_until.unwrap();
+            let tp = promote(&mut c, lan, hold_end);
+            assert_eq!(c.path_kind(), Some(PathKind::Lan));
+            t = tp + Duration::from_secs(3);
+        }
+        let secs: Vec<u64> = holds.iter().map(|d| d.as_secs()).collect();
+        assert_eq!(secs, vec![10, 20, 40, 60, 60]);
+        // 승격이 30초 넘게 안정적이었으면 처음(5초)부터
+        let t_late = t + FLAP_WINDOW;
+        c.on_handshake(r, false, &cands(), relay(), t_late);
+        assert_eq!(c.promote_hold_until, Some(t_late + RELAY_HOLD_MIN));
+        assert_eq!(c.flaps, 0);
+    }
+
+    #[test]
+    fn follows_peer_promotion_even_during_hold() {
+        // 상대가 먼저 승격해 직접 경로로 보내면 유예 중이어도 따라간다(안 그러면 그 소리를 버린다)
+        let t0 = Instant::now();
+        let r: SocketAddr = RELAY.parse().unwrap();
+        let lan: SocketAddr = "192.168.0.5:4000".parse().unwrap();
+        let mut c = ConnState::new(t0);
+        c.on_handshake(lan, false, &cands(), relay(), t0);
+        c.on_handshake(r, false, &cands(), relay(), t0 + Duration::from_secs(1));
+        assert!(c.promote_hold_until.is_some());
+        c.on_handshake(lan, false, &cands(), relay(), t0 + Duration::from_secs(2));
+        assert!(c.accept_rx(lan, &cands(), relay(), t0 + Duration::from_secs(2)));
+        assert_eq!(c.path_kind(), Some(PathKind::Lan));
+    }
+
+    #[test]
+    fn relay_address_change_moves_relay_path() {
+        let t0 = Instant::now();
+        let r: SocketAddr = RELAY.parse().unwrap();
+        let r2: SocketAddr = "198.51.100.201:3478".parse().unwrap();
+        let mut c = ConnState::new(t0);
+        c.on_handshake(r, false, &cands(), relay(), t0);
+        c.relay_moved(r, Some(r2), t0);
+        assert_eq!(c.path, Some((r2, PathKind::Relay)), "새 릴레이로 바로 옮긴다(Reconnecting 없이)");
+        assert_eq!(c.state, PeerStateKind::Connected);
+        assert!(c.accept_rx(r2, &cands(), Some(r2), t0));
+        assert!(c.accept_rx(r, &cands(), Some(r2), t0 + Duration::from_secs(1)), "옛 릴레이의 비행 중 패킷");
+        // 해제: 경로를 비우고 직접 경로를 다시 찾는다
+        c.relay_moved(r2, None, t0);
+        assert_eq!(c.path, None);
+        assert_eq!(c.state, PeerStateKind::Reconnecting);
+        assert!(!c.relay_confirmed);
+        assert!(c.tick(t0 + Duration::from_millis(200), false).hello_direct);
+        // 직접 경로 피어는 그대로
+        let lan: SocketAddr = "192.168.0.5:4000".parse().unwrap();
+        let mut d = ConnState::new(t0);
+        d.on_handshake(lan, false, &cands(), relay(), t0);
+        d.relay_moved(r, Some(r2), t0);
+        assert_eq!(d.path, Some((lan, PathKind::Lan)));
     }
 
     #[test]

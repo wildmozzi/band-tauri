@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { EngineConfig, EngineStats, LocalDescriptor, RelayConfig } from './engineApi'
+import type { EngineConfig, EngineStats, LocalDescriptor, RelayConfig, RelayStats } from './engineApi'
 import { DEFAULT_ENGINE_CONFIG } from './engineConfig'
 import { PerformSession, performErrorFromCode, type EngineBackend, type SignalOut } from './performSession'
 
@@ -26,6 +26,9 @@ class FakeEngine implements EngineBackend {
   running = false
   ssrc = 1
   statsRunning = true
+  relayConfigs: RelayConfig[] = []
+  relayFail: string | null = null
+  relayStats: RelayStats | null = null
 
   private async track<T>(name: string, fn: () => Promise<T>): Promise<T> {
     this.calls.push(name)
@@ -68,7 +71,11 @@ class FakeEngine implements EngineBackend {
     return this.track(`remove:${peerId}`, async () => null)
   }
   setRelay(relay: RelayConfig | null) {
-    return this.track(`relay:${relay ? `${relay.addr}:${relay.token.slice(0, 4)}` : 'null'}`, async () => null)
+    return this.track(`relay:${relay ? `${relay.addr}:${relay.token.slice(0, 4)}` : 'null'}`, async () => {
+      if (relay) this.relayConfigs.push(relay)
+      if (this.relayFail) throw this.relayFail
+      return null
+    })
   }
   setPeerGain(peerId: string, gain: number, muted: boolean, pan?: number) {
     return this.track(`gain:${peerId}:${gain}:${muted}:${pan}`, async () => null)
@@ -77,7 +84,7 @@ class FakeEngine implements EngineBackend {
     return this.track(`mute:${muted}`, async () => null)
   }
   stats() {
-    return this.track('stats', async () => stats(this.statsRunning))
+    return this.track('stats', async () => ({ ...stats(this.statsRunning), relay: this.relayStats }))
   }
 }
 
@@ -354,14 +361,78 @@ describe('PerformSession 릴레이 토큰 (P1-4b)', () => {
     expect(engine.calls).toEqual(['start:me'])
   })
 
-  it('만료 30초 전에 relay-token-request, 응답이 없으면 다시 요청, 새 토큰이 오면 다시 예약', async () => {
+  it('PC 시계가 서버보다 5분 느려도 받은 시각 + expiresIn 기준으로 갱신을 예약하고, 엔진에 남은 수명을 넘긴다(M1)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(1_700_000_000_000))
+    try {
+      const { session, start, types, engine } = setup()
+      await start()
+      const serverNow = Math.floor(Date.now() / 1000) + 300 // 서버 시계가 5분 앞섬
+      session.handleSignal({ ...relayMsg(1, serverNow + 120), expiresIn: 120, serverNow })
+      await flush()
+      expect(engine.relayConfigs[0].expiresInSec).toBe(120)
+      // 만료 60초 전 = 받은 뒤 60초 (내 시계로 계산했다면 360초 뒤 → 이미 만료)
+      await vi.advanceTimersByTimeAsync(59_999)
+      expect(types()).not.toContain('relay-token-request')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(types().filter((t) => t === 'relay-token-request')).toHaveLength(1)
+      await session.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('엔진 릴레이가 expired/unreachable이면 바로 새 토큰을 요청(간격 제한)', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(1_700_000_000_000))
+    try {
+      const { session, start, types, engine } = setup()
+      await start()
+      session.handleSignal({ ...relayMsg(1, Math.floor(Date.now() / 1000) + 120), expiresIn: 120 })
+      const requests = () => types().filter((t) => t === 'relay-token-request').length
+      engine.relayStats = { state: 'bound', addr: '1.2.3.4:3478', rttMs: 20, txKbps: 100, overBudget: false }
+      await session.pollStats()
+      expect(requests()).toBe(0)
+      engine.relayStats = { ...engine.relayStats, state: 'unreachable' }
+      await session.pollStats()
+      expect(requests()).toBe(1)
+      await session.pollStats()
+      expect(requests()).toBe(1) // relayRetryMs(20ms) 안에는 한 번만
+      await vi.advanceTimersByTimeAsync(20)
+      expect(requests()).toBe(2) // 응답 없음 → 재시도 타이머
+      engine.relayStats = { ...engine.relayStats, state: 'rejected' }
+      await vi.advanceTimersByTimeAsync(5)
+      const before = requests()
+      await session.pollStats()
+      expect(requests()).toBe(before) // 거절(정원 등)은 새 토큰으로 풀리지 않는다
+      await session.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('engine_set_relay 실패 사유를 상태로 보관하고, 성공하면 지운다(L5)', async () => {
+    const { session, start, engine } = setup()
+    await start()
+    engine.relayFail = '허용되지 않는 릴레이 주소'
+    session.handleSignal({ ...relayMsg(1, Math.floor(Date.now() / 1000) + 120), expiresIn: 120 })
+    for (let i = 0; i < 3; i++) await flush()
+    expect(session.getState().relayError).toBe('허용되지 않는 릴레이 주소')
+    engine.relayFail = null
+    session.handleSignal({ ...relayMsg(1, Math.floor(Date.now() / 1000) + 120), expiresIn: 120 })
+    for (let i = 0; i < 3; i++) await flush()
+    expect(session.getState().relayError).toBeNull()
+    await session.stop()
+  })
+
+  it('만료 60초 전(짧은 수명이면 절반)에 relay-token-request, 응답이 없으면 다시 요청, 새 토큰이 오면 다시 예약', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(1_700_000_000_000))
     try {
       const { session, start, types } = setup()
       await start()
       const now = Math.floor(Date.now() / 1000)
-      session.handleSignal(relayMsg(1, now + 60))
+      session.handleSignal(relayMsg(1, now + 60)) // 옛 서버(expiresIn 없음): 내 시계로 60초 → 절반(30초) 지점
       await vi.advanceTimersByTimeAsync(29_999)
       expect(types()).not.toContain('relay-token-request')
       await vi.advanceTimersByTimeAsync(1)
@@ -370,7 +441,7 @@ describe('PerformSession 릴레이 토큰 (P1-4b)', () => {
       expect(types().filter((t) => t === 'relay-token-request')).toHaveLength(2)
       // 새 토큰 → 재시도 중단, 새 만료 기준으로 예약
       session.handleSignal(relayMsg(1, Math.floor(Date.now() / 1000) + 120))
-      await vi.advanceTimersByTimeAsync(60_000)
+      await vi.advanceTimersByTimeAsync(59_000) // 새 토큰 120초 → 60초 뒤 갱신
       expect(types().filter((t) => t === 'relay-token-request')).toHaveLength(2)
       // 정지하면 타이머도 멈춘다
       await session.stop()

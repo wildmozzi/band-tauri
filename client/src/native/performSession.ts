@@ -9,11 +9,12 @@
  *   재연결이 오래 안 되면 정지.
  * - engine_add_peer 실패는 백오프 재시도 (M1), engine_stats.running=false가 이어지면 정지 (L7)
  * - 모든 엔진 커맨드(start 포함)는 하나의 큐로 직렬화 (L6)
- * - 릴레이(P1-4b): 서버 relay-token(내 ssrc)이 오면 engine_set_relay, 만료 30초 전에 relay-token-request.
+ * - 릴레이(P1-4b): 서버 relay-token(내 ssrc)이 오면 engine_set_relay, 받은 시각 + expiresIn 기준 만료 60초 전에
+ *   relay-token-request. 엔진이 릴레이를 expired/unreachable로 보고하면 바로 다시 요청한다.
  *   서버가 ssrc-conflict를 보내면 엔진을 새 ssrc로 다시 시작한다.
  */
 import type { EngineConfig, EngineStats, LocalDescriptor, RelayConfig } from './engineApi'
-import { parseRelayToken, relayRefreshDelayMs } from './relayLogic'
+import { parseRelayToken, relayNeedsNewToken, relayRefreshDelayMs } from './relayLogic'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
 
 export interface EngineBackend {
@@ -48,6 +49,8 @@ export interface PerformState {
   error: string | null
   stats: EngineStats | null
   inputMuted: boolean
+  /** 마지막 engine_set_relay 실패 사유(성공하면 null). 'failed' 안내에서 "릴레이 서버 없음"과 구분한다 */
+  relayError?: string | null
 }
 
 export interface StartOptions {
@@ -99,6 +102,8 @@ export class PerformSession {
   /** 지금 엔진의 ssrc (relay-token 대조용) */
   private localSsrc: number | null = null
   private relayTimer: ReturnType<typeof setTimeout> | null = null
+  /** 마지막 relay-token-request 시각(ms) — 엔진 상태로 인한 즉시 요청의 간격 제한 */
+  private lastRelayRequestAt = -Infinity
   private deadStats = 0
   private readonly retryDelays: number[]
   private readonly reconnectTimeoutMs: number
@@ -206,7 +211,8 @@ export class PerformSession {
     this.clearReconnectTimer()
     this.clearRelayTimer()
     this.localSsrc = null
-    this.setState({ phase: 'idle', instrument: null, sessionId: null, stats: null, error })
+    this.lastRelayRequestAt = -Infinity
+    this.setState({ phase: 'idle', instrument: null, sessionId: null, stats: null, error, relayError: null })
     if (wasRunning) {
       if (notify) {
         this.env.send({ type: 'native-leave' })
@@ -322,9 +328,20 @@ export class PerformSession {
     // 이전 엔진(재시작 전 ssrc)에 대한 토큰은 버린다. 엔진도 ssrc를 다시 확인한다.
     if (this.state.phase !== 'running' || msg.ssrc !== this.localSsrc) return
     const gen = this.gen
-    this.enqueue(() => (gen === this.gen ? this.engine.setRelay({ addr: msg.addr, token: msg.token }) : Promise.resolve(null)))
-      .catch((err) => console.warn('[Native] 릴레이 설정 실패:', errorText(err)))
-    this.scheduleRelayRefresh(relayRefreshDelayMs(msg.expiresAt, Date.now()))
+    const config = { addr: msg.addr, token: msg.token, expiresInSec: msg.expiresIn }
+    this.enqueue(async () => {
+      if (gen !== this.gen) return null
+      try {
+        const r = await this.engine.setRelay(config)
+        if (gen === this.gen && this.state.relayError) this.setState({ relayError: null })
+        return r
+      } catch (err) {
+        if (gen === this.gen) this.setState({ relayError: errorText(err) })
+        throw err
+      }
+    }).catch((err) => console.warn('[Native] 릴레이 설정 실패:', errorText(err)))
+    // 내 시계가 아니라 받은 시각 + 남은 수명 기준(시계 오차, M1)
+    this.scheduleRelayRefresh(relayRefreshDelayMs(msg.expiresIn))
   }
 
   /** 갱신 요청 후 응답이 없으면(WS 순단 등) 다시 요청한다. 새 토큰이 오면 타이머가 다시 잡힌다 */
@@ -333,9 +350,25 @@ export class PerformSession {
     this.relayTimer = setTimeout(() => {
       this.relayTimer = null
       if (this.state.phase !== 'running') return
-      this.env.send({ type: 'relay-token-request' })
+      this.requestRelayToken()
       this.scheduleRelayRefresh(this.relayRetryMs)
     }, delayMs)
+  }
+
+  private requestRelayToken() {
+    this.lastRelayRequestAt = Date.now()
+    this.env.send({ type: 'relay-token-request' })
+  }
+
+  /**
+   * 엔진이 릴레이를 expired/unreachable로 보고하면(만료, 릴레이가 토큰을 거부해 응답 없음) 갱신 시각을 기다리지 않고
+   * 바로 새 토큰을 요청한다(relayRetryMs에 한 번까지). 응답이 없으면 기존 재시도 타이머가 이어 받는다.
+   */
+  private maybeRequestRelayTokenFor(stats: EngineStats) {
+    if (!relayNeedsNewToken(stats.relay)) return
+    if (Date.now() - this.lastRelayRequestAt < this.relayRetryMs) return
+    this.requestRelayToken()
+    this.scheduleRelayRefresh(this.relayRetryMs)
   }
 
   private clearRelayTimer() {
@@ -376,6 +409,7 @@ export class PerformSession {
     }
     this.deadStats = 0
     this.setState({ stats })
+    this.maybeRequestRelayTokenFor(stats)
   }
 
   dispose(): void {

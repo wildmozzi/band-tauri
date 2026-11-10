@@ -86,7 +86,7 @@ off len 필드
             (7=RelayBind 8=RelayData 9=RelayBindAck 예약 — UDP 릴레이, relay-design.md. 엔진의 다른 용도 금지)
 4   4   sender_ssrc (u32, 세션마다 랜덤)
 8   4   seq (u32, 타입별 독립 증가)
-12  4   timestamp (u32, 48kHz 샘플 클럭; Ping/Pong은 송신측 µs 하위 32비트)
+12  4   timestamp (u32, 48kHz 샘플 클럭; Hello/Ping은 송신측 µs 하위 32비트, HelloAck/Pong은 받은 Hello/Ping의 값을 되돌림)
 16  1   flags: bit0=opus(0이면 PCM16), bit1=stereo
 17  1   frame_samples / 120 (1,2,4)
 18  ..  암호문 (ChaCha20-Poly1305), 마지막 16바이트 = 태그
@@ -111,6 +111,8 @@ off len 필드
   - 릴레이 주소에서 온 엔진 패킷(1~6)은 릴레이가 접두부를 벗긴 원본이다. 같은 릴레이를 쓰는 피어는 출발 주소가 같으므로 `sender_ssrc` + 복호화 성공으로 피어를 가린다.
   - 그중 Hello/HelloAck는 릴레이 경로를 세운다. 그 밖의 패킷은 그 피어와 릴레이 경유 Hello/HelloAck가 오간 뒤(`relay_confirmed`)에만 받는다. 확정 경로가 직접이면 데이터만 받고 생존 시각은 갱신하지 않는다.
   - 경로를 바꾼 직후 2초 동안은 직전 경로로 온 인증 패킷도 받는다(비행 중 패킷, 무끊김 전환).
+  - 릴레이 주소가 바뀌거나 해제되면 직전 릴레이 주소에서 온 Hello/HelloAck는 버린다(직접 경로로 오인 방지). 데이터는 위 2초 유예로 받는다.
+  - 경로 종류(`via_relay`)는 인증되지 않은 출발 주소로 정한다. 경로상 공격자가 직접 Hello의 출발 주소를 릴레이로 바꿔 먼저 넣으면 강등시킬 수 있다. 직접 패킷을 버리는 것과 같은 효과라 새 공격력은 아니다(relay-design 4.1).
 - 제어 패킷(Hello~Bye)은 타입별로 이전보다 큰 seq만 받는다(재전송 방어). HelloAck는 피어당 50ms에 1회까지.
 - Hello/HelloAck 평문: `peer_id`(UTF-8, ≤64B). Ping/Pong 평문: 없음(헤더 timestamp 사용). Bye 평문: 없음.
 
@@ -124,15 +126,22 @@ off len 필드
 6. `engine_remove_peer` 또는 `engine_stop` 시 Bye 송신.
 7. **릴레이 폴백**(P1-4b, relay-design.md). TURN 대신 자체 UDP 릴레이를 쓴다.
    - 등록: 서버 `relay-token`을 받으면 프론트가 `engine_set_relay`를 부른다. 엔진은 RelayBind → CookieRequired → 쿠키 Bind → Ok로 등록하고 10초마다 keepalive한다. 릴레이 경로 피어가 1초 넘게 조용하면 keepalive를 1초마다 당겨 보낸다. 그래서 릴레이 재시작·NAT 재바인딩은 CookieRequired를 받아 곧바로 재등록된다. Ack가 3번 연속 없으면 `unreachable`(계속 재시도), 토큰이 만료되면 `expired`(새 토큰 전까지 Bind 중지).
+   - 토큰 만료는 로컬 벽시계가 아니라 **받은 시각 + `expiresInSec`**(서버 발급 시각 기준 남은 수명)으로 판단한다. 로컬 시계로 토큰을 거부하지 않는다. 시계가 어긋난 PC에서도 끊기지 않게 하려는 것이다(PR #10 M1). 서명·만료의 최종 판정은 릴레이가 한다. 릴레이는 만료 토큰을 조용히 버리므로 엔진에는 `unreachable`로 보인다. 프론트는 `expired`/`unreachable`이면 바로 새 토큰을 요청한다.
+   - 릴레이 주소는 프론트가 준 `host:port` 문자열이 같으면 처음 해석한 주소를 유지한다(토큰 갱신마다 DNS를 다시 풀지 않는다). 주소가 실제로 바뀌면 릴레이 경로 피어를 새 주소로 바로 옮긴다(Reconnecting 없이). 해제(`null`)면 경로를 비우고 직접 경로를 다시 찾는다(M3).
    - 경로 상태기계(피어별):
      - `Connecting` 1.5초 안에 직접 경로가 안 되고 릴레이가 등록돼 있으면, 직접 후보와 함께 **릴레이로도** Hello(RelayData)를 보낸다. 릴레이로 Hello/HelloAck가 오면 경로 = 릴레이(`path: 'relay'`).
      - `Connected`(직접)에서 1.5초 넘게 수신이 없으면 릴레이로도 Hello를 보낸다. `Reconnecting`·`Failed`에서도 직접·릴레이 Hello를 함께 보낸다(`Failed`는 2초 간격, Bye를 받은 피어는 제외).
      - 상대가 릴레이로 Hello/HelloAck를 보내면(상대가 직접 경로로 우리 패킷을 못 받는다는 뜻) 릴레이 경로로 바꾼다.
-     - 릴레이 경로에서도 직접 후보로 1초마다 Hello를 계속 보낸다. 직접 주소에서 **HelloAck**(왕복 확인)가 오면 직접 경로로 승격한다. 직접 주소의 Hello만 오면 그 주소를 기억해 두었다가, 그 주소에서 다른 인증 패킷(상대가 먼저 승격)이 오면 따라 승격한다.
-     - 경로 전환은 지터 버퍼·seq를 건드리지 않는다(무끊김).
-   - 릴레이 경로 송신은 피어마다 RelayData(dest_ssrc = 그 피어의 ssrc) + 원본 엔진 패킷이다. AEAD(쌍별 키, nonce/AAD)는 그대로이고 접두부 8바이트는 AAD 밖이다. Pong은 Ping이 온 경로로 돌려준다.
-   - `Failed`는 직접 연결과 릴레이가 모두 안 된 상태다. UI는 릴레이 상태(`EngineStats.relay`)에 따라 안내한다(릴레이 없음/닿지 않음/거절/만료/모두 실패).
-   - PCM16은 릴레이 대역 상한(클라이언트당 2 Mbps)을 넘을 수 있다. 릴레이 경로에서 Opus로 자동 전환하는 것은 후속 작업이다.
+     - 릴레이 경로에서도 직접 후보로 1초마다 Hello를 계속 보낸다. 직접 경로로 승격하는 조건은 다음과 같다(히스테리시스, PR #10 M2).
+       - 같은 직접 주소에서 **HelloAck**(왕복 확인)가 **3회**, 간격 1.5초 이하로 끊김 없이, **2초 이상** 이어진다. 간격이 1.5초를 넘으면 처음부터 다시 센다.
+       - HelloAck로 잰 직접 RTT가 릴레이 경유 종단 RTT + 10ms 이하다.
+       - 강등 유예가 지났다.
+     - 강등(직접 → 릴레이) 뒤에는 5초 동안 승격하지 않는다. 승격한 지 30초 안에 다시 강등되면(플래핑) 유예를 10·20·40·60초로 늘린다. 30초 넘게 안정적이었으면 5초로 돌아간다.
+     - 직접 주소의 Hello만 오면 그 주소를 기억해 둔다. 그 주소에서 다른 인증 패킷이 오면 따라 승격한다. 상대가 먼저 승격 조건을 채운 것이므로 유예와 무관하다(안 따라가면 그 소리를 버린다).
+     - 경로 전환은 지터 버퍼·seq를 건드리지 않는다(무끊김). 경로 종류가 바뀌면 `rttMs`는 새 경로 값(HelloAck 측정, 없으면 다음 핑)으로 바뀐다.
+   - 릴레이 경로 송신은 피어마다 RelayData(dest_ssrc = 그 피어의 ssrc) + 원본 엔진 패킷이다. AEAD(쌍별 키, nonce/AAD)는 그대로이고 접두부 8바이트는 AAD 밖이다. Pong은 Ping이 온 경로로 돌려준다. HelloAck는 Hello의 timestamp를 되돌려 경로별 RTT를 잰다.
+   - `Failed`는 직접 연결과 릴레이가 모두 안 된 상태다. UI는 릴레이 상태(`EngineStats.relay`)와 마지막 `engine_set_relay` 실패 사유로 안내한다(릴레이 없음/설정 실패/닿지 않음/거절/만료/모두 실패).
+   - PCM16은 릴레이 대역 상한(클라이언트당 2 Mbps·2500pps)을 넘을 수 있다. 예: PCM16 mono 2.5ms 피어 3명이면 약 2.7 Mbps, stereo 2.5ms 피어 2명이면 약 3.3 Mbps다. 엔진은 릴레이 송신량을 1초 창으로 재서 상한의 90%를 넘으면 `EngineStats.relay.overBudget = true`로 알리고, 80% 아래로 내려가면 해제한다. UI는 "릴레이 대역 초과 — 코덱을 Opus로 바꿔 주세요"를 띄운다. 릴레이 경로에서 Opus로 자동 전환하는 것은 후속 작업이다(코덱은 워커/오디오 경로 소관).
 
 ## 4. Tauri 커맨드 (`commands.rs`) — 프론트 계약
 
@@ -157,8 +166,8 @@ interface EngineConfig {
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
 interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number }
-interface RelayConfig { addr: string; token: string }        // 서버 relay-token의 addr(host:port)·token(base64url)
-interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null }
+interface RelayConfig { addr: string; token: string; expiresInSec?: number }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)
+interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean }
 interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; peers: PeerStats[]; relay: RelayStats | null }
 ```
 
@@ -170,7 +179,7 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 | `engine_test_start` | `{ config: EngineConfig }` | `null` (네트워크 없이 모니터만) |
 | `engine_test_stop` | — | `null` |
 | `engine_add_peer` | `{ peerId: string, descriptor: LocalDescriptor }` | `null` |
-| `engine_set_relay` | `{ relay: RelayConfig \| null }` | `null` — 릴레이 설정·토큰 갱신(같은 주소면 등록 유지), null이면 해제. 서버 `relay-token`을 받을 때마다 부른다. 토큰은 `engine_start`가 만든 ssrc에 묶이므로 `engine_start`/`engine_add_peer`의 인자가 아니다. 주소는 DNS 해석 후 IPv4만 쓴다. 토큰 구조·ssrc 불일치·만료는 에러 |
+| `engine_set_relay` | `{ relay: RelayConfig \| null }` | `null` — 릴레이 설정·토큰 갱신(같은 주소면 등록 유지), null이면 해제. 서버 `relay-token`을 받을 때마다 부른다. 토큰은 `engine_start`가 만든 ssrc에 묶이므로 `engine_start`/`engine_add_peer`의 인자가 아니다. 주소는 DNS 해석 후 IPv4만 쓰고, 같은 `addr` 문자열이면 처음 해석한 주소를 유지한다. 만료는 받은 시각 + `expiresInSec`로 판단한다(없으면 로컬 시계, 로컬 시계로는 거부하지 않음). 토큰 구조·ssrc 불일치는 에러 |
 | `engine_remove_peer` | `{ peerId: string }` | `null` |
 | `engine_set_peer_gain` | `{ peerId: string, gain: number, muted: boolean, pan?: number }` | `null` — pan은 -1(왼쪽)..1(오른쪽), 기본 0, equal-power |
 | `engine_set_input_muted` | `{ muted: boolean }` | `null` — 내 입력을 송신/모니터/믹스 구독에서 무음 처리(레벨 미터는 계속 표시) |
@@ -196,7 +205,7 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 
 `streamErrors`: cpal 에러 콜백 누적 횟수(비치명 포함, 정보용).
 
-`PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다.
+`PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제).
 
 ## 5. 시그널링 (WS 서버 `server/src/services/wsService.ts`)
 
@@ -221,7 +230,12 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 
 - 연주 시작(앱): `engine_start` → descriptor를 `native-descriptor`로 브로드캐스트. 새 연주자가 들어오거나 `native-descriptor`를 받으면 `engine_add_peer`, 아직 내 descriptor를 그 피어에게 안 보냈으면 `to`로 보낸다(양방향 동시 펀칭).
 - 연주자 이탈/`native-leave`/WS `leave` → `engine_remove_peer`.
-- `relay-token`(내 엔진 ssrc와 같을 때만) → `engine_set_relay({ addr, token })`. `expiresAt` 30초 전에 `relay-token-request`를 보내고, 응답이 없으면 10초마다 다시 요청한다. `error{code:'ssrc-conflict'}` → 엔진을 새 ssrc로 재시작한다(`native-leave` 없이). 로직은 `client/src/native/relayLogic.ts`·`performSession.ts`.
+- `relay-token { token, addr, ssrc, expiresAt, expiresIn, serverNow }`(내 엔진 ssrc와 같을 때만) → `engine_set_relay({ addr, token, expiresInSec })`.
+  - 남은 수명은 `expiresIn` → `expiresAt - serverNow` → (옛 서버) `expiresAt - 내 시계` 순으로 정한다. 내 PC 시계는 쓰지 않는다(M1).
+  - 받은 시각 + 남은 수명 기준 만료 60초 전(수명이 짧으면 절반 지점)에 `relay-token-request`를 보낸다. WS가 잠시 끊겨도 버틸 여유를 두려는 것이다(L4). 응답이 없으면 10초마다 다시 요청한다.
+  - `engine_stats.relay.state`가 `expired`/`unreachable`이면 바로 새 토큰을 요청한다(10초에 한 번까지). `rejected`(정원·ssrc 충돌)는 새 토큰으로 풀리지 않으므로 요청하지 않는다.
+  - `engine_set_relay` 실패 사유는 세션 상태(`relayError`)에 남겨 'failed' 안내에 쓴다(L5).
+  - WS 재연결 상한(35초)이 남은 여유(60초)보다 짧아, WS가 끊긴 동안에도 릴레이 경로가 토큰 만료로 끊기지 않는다. `error{code:'ssrc-conflict'}` → 엔진을 새 ssrc로 재시작한다(`native-leave` 없이). 로직은 `client/src/native/relayLogic.ts`·`performSession.ts`.
 - 관람자 브릿지: 방의 **방송 담당 연주자** = 호스트가 앱 연주자면 호스트, 아니면 연주자 중 `oderId` 사전순 최소. 이 앱만 `engine_subscribe_mix` → AudioWorklet → `MediaStreamAudioDestinationNode` → 웹 관람자와의 WebRTC(송신 전용)로 트랙 전송.
 - 웹(비Tauri)에서는 연주 참여 UI를 숨기고 "데스크톱 앱 다운로드" 안내.
 - Tauri 관련 코드는 `client/src/native/` 아래로 분리: `engineApi.ts`(커맨드 래퍼, 위 타입), `useNativeSession.ts`(시그널링↔엔진), `mixBridge.ts`(관람자 브릿지). `RoomContext.tsx`는 이 훅을 호출만 한다.
