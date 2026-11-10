@@ -22,7 +22,7 @@
 | ID | 항목 | 완료 조건 | 상태 |
 |---|---|---|---|
 | P1-0 | **자체 WASAPI 백엔드**(엔진 리뷰 H2): cpal 0.15는 WASAPI 공유모드 10ms 주기 고정·독점모드 미지원. `wasapi` 크레이트(또는 windows 크레이트 직접)로 이벤트 구동 독점 모드 + IAudioClient3 저지연 공유 모드(가능 시 2.67~3ms 주기)를 `AudioBackend` 트레이트 구현으로 추가, cpal은 폴백 | 독점/저지연 공유에서 장치 주기·estLatencyMs 실측 로그, 루프백 테스트 통과. **콜백 구동 믹스(또는 JIT 리필)로 출력 링 1버퍼 하한 제거 → ASIO 128/2.5ms estLatency ≤ 8ms**(현재 11.8ms, PR #5 M-5) | 완료(#11: ASIO 128/2.5 est 7.83ms, WASAPI 독점 실장치 7.50ms; **[사람]** USB 인터페이스 독점 청취·장치 분리·30분 xrun) |
-| P1-13 | **엔진 결함(P3-0에서 발견)**: 출력 언더런 후 PeerFeed.margin(M4)은 커지는데 지터 목표가 따라오지 않아 정상 상태에서도 은닉·마감 채움·보정 수백 회 반복. 재현: `engine::worker::tests::callback_mix_sim_margin_after_underrun_no_steady_concealment`(known-bug ignore). 수정 시 ignore 제거 + CI realtime 필터에 `callback_mix_early_callbacks_real_time` 복원 | 재현 테스트 통과, realtime 잡 녹색 | 진행중(PR #16 리뷰; 재현 (6,6,716)→(0,0,0), CI 5잡 녹색) |
+| P1-13 | **엔진 결함(P3-0에서 발견)**: 출력 언더런 후 PeerFeed.margin(M4)은 커지는데 지터 목표가 따라오지 않아 정상 상태에서도 은닉·마감 채움·보정 수백 회 반복. 재현: `engine::worker::tests::callback_mix_sim_margin_after_underrun_no_steady_concealment`(known-bug ignore). 수정 시 ignore 제거 + CI realtime 필터에 `callback_mix_early_callbacks_real_time` 복원 | 재현 테스트 통과, realtime 잡 녹색 | 완료(#16) |
 | P1-1 | **지연 측정 도구**: 에코 피어 모드(받은 오디오를 그대로 되돌려 보냄) + 클릭 왕복 측정 UI, 로컬 루프백(입력→출력 케이블) 측정 | 측정값이 설정 화면/방 화면에 표시, 측정 절차 문서 | 완료(#13; 실측은 P1-1a [사람]) |
 | P1-1b | PR #13 리뷰 Low: remove_peer 은퇴 처리를 write 락 안으로(잠재 경쟁), 중복 키 add 거부 악용 가용성 방해 대응 | 테스트 | 대기 |
 | P1-1a | **[사람]** Scarlett Solo 4세대 ASIO 실측(버퍼 32/64/128, ASIOGetLatencies 확인, 하드웨어 루프백) + 두 PC 실네트워크·릴레이 에코 측정 — 절차 docs/MEASURE.md | 결과를 백로그 완료 기록에 | 대기 |
@@ -31,7 +31,7 @@
 | P1-4 | **UDP 릴레이 서버**(fly.io UDP, 방 단위 토큰 인증, 암호문 그대로 중계) + 엔진 폴백 경로 | 홀펀칭 실패 시뮬레이션에서 릴레이로 연결, 지연 표시 | P1-4a 완료(#1), P1-4b 완료(#10); **[사람]** fly 전용 IPv4(유료), 실네트워크는 P1-4d |
 | P1-4c | 릴레이 경로 대역 초과 시 Opus 자동 전환(워커 코덱 전환) + RelayBind MAC(relay-design 4.1 등록 가로채기·경로 위장 대응) | 통합 테스트 | 대기 |
 | P1-4d | **[사람]** 실네트워크(대칭형 NAT/LTE) + 시계 오차 PC에서 릴레이 경유 10분 연주 확인 | 연결 성공·끊김 기록 | 대기 |
-| P1-5 | 지터 버퍼 자동 튜닝 고도화: 회선별 목표 깊이 학습, 급격한 지터 스파이크 대응, 사용자 "저지연↔안정" 슬라이더 | 시뮬레이션 손실 1%/지터 버스트에서 은닉 ≤1.5% & 버퍼 최소화 (참고: 위상 스윕 buf128 보정 116회는 p95 경계 넘는 정당한 목표 상향 — P1-13 보고) | 대기 |
+| P1-5 | 지터 버퍼 자동 튜닝 고도화: 회선별 목표 깊이 학습, 급격한 지터 스파이크 대응, 사용자 "저지연↔안정" 슬라이더 | 시뮬레이션 손실 1%/지터 버스트에서 은닉 ≤1.5% & 버퍼 최소화 (참고: 위상 스윕 buf128 보정 116회는 p95 경계 넘는 정당한 목표 상향 — P1-13 보고) (PR #16 리뷰 이월: M1 언더런 직후 은닉 검증 창·여유 스윕 범위, M2 드리프트 시 데드밴드만큼 깊이 하락 시험, M3 큰 버퍼에서 추가 지연 최대 +20ms·복귀 75s 단축) | 대기 |
 | P1-6 | 장시간 테스트 하네스: 6피어 60분 가속 시뮬레이션(드리프트, 손실, 재연결) CI 야간 잡 | 지표 리포트 자동 생성 | 대기 |
 | P1-7 | **[사람]** 실장비 검증 1차: 같은 LAN 2대, WASAPI 독점/ASIO, 측정 도구로 지연 기록 | 사용자 측정 결과 기록 | 대기 (P0, P1-1) |
 | P1-8 | **[사람]** 실네트워크 검증: 다른 집 2곳 이상, LTE 핫스팟 1곳(릴레이) | 연결 성공/지연/끊김 기록 | 대기 (P1-4) |
@@ -62,12 +62,14 @@
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 완료(#12; pages 직접 호출 13→0) |
 | P3-3a | **[사람]** 운영 DB에서 `supabase gen types` 실행 결과와 `client/src/lib/database.types.ts` 비교(profiles/rooms/post_likes 컬럼은 코드에서 추론, rooms.is_private/has_password는 008 적용 후 확인, posts.instrument 포함) | 차이 없음 확인 | 대기 |
 | P3-3b | RoomDetail 직접 Supabase 호출(4)·contexts의 profiles 접근(11)을 query 훅으로 이전 | 직접 호출 0 | 완료(#15; useSignaling 인증 호출 2개는 범위 밖) |
-| P3-3c | 기존 버그: 남의 글에 좋아요 시 RLS 때문에 likes_count가 0으로 표시(서버 함수/트리거로 집계) | 테스트 + 화면 확인 | 진행중(p3-likes) |
+| P3-3c | 기존 버그: 남의 글에 좋아요 시 RLS 때문에 likes_count가 0으로 표시(서버 함수/트리거로 집계) | 테스트 + 화면 확인 | 진행중(PR #17 리뷰) |
 | P3-3d | 로그아웃·계정 전환 시 queryClient 캐시 초기화 | 테스트 | 완료(#15) |
 | P3-4 | 거대 파일 분해(PostDetail, Rooms, EditPost, RoomDetail) | 파일당 ≤ 400줄 | 완료(#7, #15) |
 | P3-5 | 서버 route→service→repository 계층화, 구독 정보를 DB로(현재 메모리 Map) | 테스트 통과 | 완료(#6, server 181 tests) |
 | P3-5a | **[확인]** 운영 Supabase에 `docs/migrations/007_subscriptions.sql` + `008_room_privacy.sql` + `009_payment_orders.sql` 실행 (배포 순서: 마이그레이션 007→008→009 → server → client) — **main 배포와 함께** 해야 함(미실행 시 운영 결제 API가 503) + 토스 테스트 키로 결제·취소·재시작 복구 검증(실패 응답도 멱등 키로 캐시되는지 확인) | 사용자 승인 후 실행 | 대기 (P3-5 병합 후) |
 | P3-5b | 결제 orderId를 서버가 발급(사용자 바인딩) + 클라이언트가 결제 503을 "결제 확인 중" 화면으로 표시·재조회 | 테스트 + 결제 흐름 E2E | 완료(#8; 결제 E2E는 P3-5a [확인]) |
+| P3-5c | DB 함수 보강: 005 increment/decrement_participants의 search_path 고정 + anon EXECUTE 회수(PR #17에서 발견) — 새 마이그레이션 파일만 | PGlite 테스트 | 대기 |
+| P3-5d | **[확인]** 운영 Supabase에 `010_post_likes_count.sql` 실행(백업 후, P3-5a와 함께) | 실행 후 좋아요 수 확인 | 대기 |
 | P3-6 | 음원분리 스템 WAV → Opus/OGG 저장(용량·트래픽 ~1/10), 기존 파일 마이그레이션 스크립트 | 업로드/재생 동작, 용량 비교 | 완료(#2: 3분 곡 31.7MB→3.8MB) |
 | P3-6a | **[사람]** 기존 WAV 스템 변환 실행(`npm run migrate:stems` 드라이런 확인 후 `-- --apply`, 원본 삭제) + Safari 실기기 재생 확인(iOS는 6스템 3분 곡 메모리/탭 종료 여부 포함) + macOS 데스크톱(WKWebView) 스템 재생 + fly 배포 이미지 크기 증가·libopus 인코더 포함 여부(`ffmpeg -encoders`)·3분 6스템 인코딩 시간 기록 | 사용자 승인 후 실행, 절감 용량 기록 | 대기 (P3-6 병합 후) |
 | P3-4a | **[사람]** 합주실 실화면 확인: RoomDetail 분해(#15) 후 입장·연주·피어 믹서·관람 방송·측정 UI, 합주실에서 다른 탭 로그아웃 시 화면 유지 | 화면 확인 | 대기 |
