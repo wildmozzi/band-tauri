@@ -999,3 +999,43 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* 방 코드 / 초대 링크로 입장 (P2-6) */
+.room-code-join {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.room-code-join input {
+  flex: 1;
+  min-width: 200px;
+  max-width: 420px;
+  padding: 8px 14px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+}
+
+.room-code-join button {
+  padding: 8px 18px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.room-code-join button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.room-code-error {
+  color: var(--error, #f87171);
+  font-size: 0.85rem;
+}

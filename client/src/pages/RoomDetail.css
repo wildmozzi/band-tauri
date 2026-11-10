@@ -2885,3 +2885,177 @@
   cursor: default;
   pointer-events: none;
 }
+
+/* ===== P2-6: 비밀번호 입장 / 초대 / 연주 요청 알림 ===== */
+.room-password-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+  padding: 16px;
+}
+
+.room-password-card {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border);
+}
+
+.room-password-card h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.room-password-message {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.room-password-message.error {
+  color: var(--error);
+}
+
+.room-password-card input,
+.reject-reason-custom input,
+.edit-form-group input[type='password'] {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.2);
+  color: inherit;
+  font-size: 0.95rem;
+}
+
+.room-password-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.room-password-actions button {
+  padding: 8px 18px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.room-password-actions .btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.room-password-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.request-notice-toast,
+.copy-notice-toast {
+  position: fixed;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 32px);
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #1f2937;
+  border: 1px solid var(--warning);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 0.9rem;
+}
+
+.copy-notice-toast {
+  border-color: var(--success);
+}
+
+.request-notice-toast button {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--warning);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.request-notice-toast .close-btn {
+  border: none;
+  font-size: 1.1rem;
+  padding: 0 4px;
+}
+
+.invite-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.reject-reason-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  width: 100%;
+}
+
+.reject-reason-preset {
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.reject-reason-preset:hover {
+  border-color: var(--error);
+}
+
+.reject-reason-custom {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.reject-reason-custom input {
+  flex: 1;
+  min-width: 140px;
+}
+
+.request-status .request-hint {
+  font-size: 0.75rem;
+}
+
+.request-status .reject-reason {
+  color: inherit;
+}
+
+.password-mode-options {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.password-mode-options label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: normal;
+  cursor: pointer;
+}

@@ -49,7 +49,7 @@ export function MyRoomsModal({
                 <div key={room.id} className="my-room-item">
                   <div className="my-room-info">
                     <div className="my-room-header">
-                      <h4>{room.title}</h4>
+                      <h4>{room.is_private && <span className="room-lock" title="비공개">🙈 </span>}{room.has_password && <span className="room-lock" title="비밀번호">🔒 </span>}{room.title}</h4>
                       <span className={`my-room-status ${room.status}`}>
                         {myRoomStatusLabel(room.status)}
                       </span>

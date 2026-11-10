@@ -3,6 +3,7 @@ import {
   buildRoomUpdate,
   instrumentsNotInSlots,
   myRoomStatusLabel,
+  publicRooms,
   roomStatusLabel,
   setSlotCount,
   toRoom,
@@ -39,7 +40,12 @@ describe('toRoom', () => {
       tags: [],
       instrumentSlots: [],
       freeJoin: true,
+      hasPassword: false,
     })
+  })
+
+  it('비밀번호 방 표시 (P2-6)', () => {
+    expect(toRoom(dbRoom({ has_password: true })).hasPassword).toBe(true)
   })
 
   it('값이 있으면 그대로 옮긴다', () => {
@@ -119,5 +125,12 @@ describe('toggleSingleExpanded', () => {
     expect([...b]).toEqual(['b'])
     expect([...a]).toEqual(['a']) // 원본 불변
     expect(toggleSingleExpanded(b, 'b').size).toBe(0)
+  })
+})
+
+describe('publicRooms (P2-6)', () => {
+  it('비공개 방은 공개 목록에서 뺀다 (마이그레이션 전 행은 공개로 본다)', () => {
+    const rooms = [dbRoom({ id: 'a' }), dbRoom({ id: 'b', is_private: true }), dbRoom({ id: 'c', is_private: false })]
+    expect(publicRooms(rooms).map(r => r.id)).toEqual(['a', 'c'])
   })
 })

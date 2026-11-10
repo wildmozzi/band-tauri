@@ -7,6 +7,7 @@ import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
 import { isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
 import { createRoomRepository, type RoomMeta, type RoomRepository } from '../repositories/roomRepository'
+import { PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword, type ScryptGate } from '../lib/roomPassword'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -21,6 +22,14 @@ import { createRoomRepository, type RoomMeta, type RoomRepository } from '../rep
  * - isHost는 DB `rooms.host_id === userId`로 서버가 판정한다(방 정보는 짧게 캐시, 승인 계열 처리 때 재확인).
  * - start-performing은 방장, free_join 방, 또는 방장이 승인한 사용자만 가능하다.
  * - 클라이언트가 보낸 isHost/userId/from/isRejoin은 신뢰하지 않는다. 중계 시 서버가 `from`을 붙인다.
+ *
+ * 방 비밀번호 (P2-6)
+ * - room_secrets에 해시가 있는 방은 join에 `password`가 필요하다. 방장은 비밀번호 없이 입장한다.
+ * - 실패는 (방, 사용자) 5회 · (방, IPv4 또는 IPv6 /64) 20회 · (방 전체) 100회 / 15분으로 제한(`password-rate-limited`).
+ *   이미 그 방에 있는 연결(세션 재개)은 다시 묻지 않는다.
+ * - scrypt는 프로세스 공용 게이트로 동시 2개까지만 돌린다. 대기열이 차면 검증하지 않고 `password-busy`(시도 횟수 미차감).
+ * - rooms.has_password=true인데 해시가 없으면(생성/변경 중) 입장을 막는다(fail-closed).
+ * - 비공개 방은 목록(RLS)에서만 숨기고, 방 id(초대 링크/방 코드)를 아는 사람은 입장할 수 있다.
  *
  * UDP 릴레이 (docs/overhaul/relay-design.md)
  * - RELAY_SECRET/RELAY_ADDR가 설정되면, 연주자가 native-descriptor(ssrc 포함)를 보낼 때 `relay-token`을 발급한다.
@@ -74,6 +83,14 @@ export interface WsLimits {
   maxPerformers: number
   /** 인증된 사용자가 끊긴 뒤 세션을 재개할 수 있는 유예시간 (이 동안 방 참가자에게 leave를 보내지 않음) */
   resumeGraceMs: number
+  /** 방 비밀번호: (방, 사용자) 허용 실패 횟수 */
+  passwordMaxFailures: number
+  /** 방 비밀번호: (방, IP) 허용 실패 횟수 */
+  passwordMaxFailuresPerIp: number
+  /** 방 비밀번호: (방 전체) 허용 실패 횟수 */
+  passwordMaxFailuresPerRoom: number
+  /** 방 비밀번호 실패 기록 유지 시간 */
+  passwordWindowMs: number
 }
 
 const DEFAULT_LIMITS: WsLimits = {
@@ -88,9 +105,15 @@ const DEFAULT_LIMITS: WsLimits = {
   maxPerformers: 6,
   resumeGraceMs: 30_000,
   heartbeatMs: 30_000,
+  passwordMaxFailures: 5,
+  passwordMaxFailuresPerIp: 20,
+  passwordMaxFailuresPerRoom: 100,
+  passwordWindowMs: 15 * 60_000,
 }
 
 export interface WsOptions {
+  /** scrypt 동시 실행 게이트 (테스트 주입용, 기본: 프로세스 공용) */
+  scryptGate?: ScryptGate
   deps?: Partial<WsDeps>
   limits?: Partial<WsLimits>
   env?: Env
@@ -256,6 +279,7 @@ export function initializeWebSocket(
   const env = options.env ?? process.env
   const deps: WsDeps = { ...supabaseDeps(supabase), ...options.deps }
   const limits: WsLimits = { ...DEFAULT_LIMITS, ...options.limits }
+  const scryptGate = options.scryptGate ?? defaultScryptGate
   const relayConfig = relayConfigFromEnv(env)
 
   // 서버 인스턴스별 상태
@@ -272,6 +296,12 @@ export function initializeWebSocket(
   const connectionsPerIp = new Map<string, number>()
   /** clientId → 연결이 끊겨 재개를 기다리는 클라이언트 (방/연주 상태 유지) */
   const suspended = new Map<string, Client>()
+  const passwordLimiter = new PasswordAttemptLimiter({
+    maxFailures: limits.passwordMaxFailures,
+    maxFailuresPerIp: limits.passwordMaxFailuresPerIp,
+    maxFailuresPerRoom: limits.passwordMaxFailuresPerRoom,
+    windowMs: limits.passwordWindowMs,
+  })
 
   /** 유예 중인 클라이언트를 최종 제거 (방 참가자에게 leave 전송) */
   function finalizeSuspended(c: Client) {
@@ -672,6 +702,37 @@ export function initializeWebSocket(
       sendAuthResult()
     }
 
+    /** 방 비밀번호 검증 + 실패 횟수 제한. 통과하면 true, 아니면 에러를 보내고 false */
+    const checkRoomPassword = async (roomId: string, hash: string, password: unknown): Promise<boolean> => {
+      if (typeof password !== 'string' || password.length === 0) {
+        send(ws, { type: 'error', code: 'password-required', roomId, message: '비밀번호가 필요한 방입니다.' })
+        return false
+      }
+      // 익명은 IP(/64) 단위로 묶는다 (재접속·주소 회전으로 횟수를 초기화하지 못하게)
+      const subject = client.userId ? `u:${client.userId}` : `anon:${ipBucket(client.ip)}`
+      const attempt = passwordLimiter.begin(roomId, subject, client.ip)
+      if (!attempt.ok) {
+        send(ws, { type: 'error', code: 'password-rate-limited', roomId, retryAfterMs: attempt.retryAfterMs, message: '비밀번호를 너무 많이 틀렸습니다. 잠시 후 다시 시도하세요.' })
+        return false
+      }
+      let valid: boolean
+      try {
+        valid = await verifyRoomPassword(password, hash, scryptGate)
+      } catch (err) {
+        if (!(err instanceof ScryptBusyError)) throw err
+        passwordLimiter.cancelled(roomId, subject, client.ip)
+        send(ws, { type: 'error', code: 'password-busy', roomId, retryAfterMs: 2000, message: '서버가 혼잡합니다. 잠시 후 다시 시도하세요.' })
+        return false
+      }
+      if (valid) {
+        passwordLimiter.succeeded(roomId, subject, client.ip)
+        return true
+      }
+      console.warn(`[JOIN] ${id.slice(0, 8)} wrong password for room ${roomId.slice(0, 8)} (remaining ${attempt.remaining})`)
+      send(ws, { type: 'error', code: 'password-invalid', roomId, remainingAttempts: attempt.remaining, message: '비밀번호가 올바르지 않습니다.' })
+      return false
+    }
+
     const handleJoin = async (msg: Msg) => {
       const roomId = msg.roomId
       if (!isNonEmptyString(roomId, MAX_ROOM_ID_LENGTH)) return
@@ -683,6 +744,7 @@ export function initializeWebSocket(
 
       // 방 존재 확인 + 방장 판정 (백엔드가 있으면 DB 기준)
       let isHost = false
+      let passwordHash: string | null = null
       if (deps.hasBackend) {
         const meta = await getRoomMeta(roomId, 0)
         if (!meta) {
@@ -690,6 +752,12 @@ export function initializeWebSocket(
           return
         }
         isHost = !!client.userId && meta.hostId === client.userId
+        passwordHash = meta.passwordHash ?? null
+        // 비밀번호 방으로 표시됐는데 해시가 아직 없음(생성·변경 중): 방장 외 입장 보류 (fail-closed, 리뷰 L1)
+        if (meta.hasPassword && !passwordHash && !isHost) {
+          send(ws, { type: 'error', code: 'password-busy', roomId, retryAfterMs: 1000, message: '합주실을 준비 중입니다. 잠시 후 다시 시도하세요.' })
+          return
+        }
       } else if (insecureDevMode && client.authState === 'authenticated') {
         isHost = msg.isHost === true
       }
@@ -703,6 +771,12 @@ export function initializeWebSocket(
         if (nickname) client.nickname = nickname
         sendRoomState(roomId)
         return
+      }
+
+      // 비밀번호 방: 방장이 아니면 검증 (실패하면 지금 있는 방은 그대로 둔다)
+      if (passwordHash && !isHost) {
+        const ok = await checkRoomPassword(roomId, passwordHash, msg.password)
+        if (!ok || clients.get(id) !== client) return
       }
 
       // 다른 방에 있었다면 먼저 퇴장 처리
@@ -907,17 +981,24 @@ export function initializeWebSocket(
       if (msg.type === 'request-perform' && roomId && isNonEmptyString(msg.instrument, 50)) {
         if (!isAuthenticated(client)) {
           send(ws, { type: 'error', code: 'login-required', message: '연주 요청은 로그인이 필요합니다.' })
+          send(ws, { type: 'request-perform-error', code: 'login-required', message: '연주 요청은 로그인이 필요합니다.' })
           return
         }
         if (!performRequests.has(roomId)) performRequests.set(roomId, [])
         const requests = performRequests.get(roomId)!
-        if (requests.find(r => r.oderId === id)) return
+        const host = findRoomHost(roomId)
+        const existing = requests.find(r => r.oderId === id)
+        if (existing) {
+          // 재전송(화면 새로고침 등): 대기 상태만 다시 알려준다
+          send(ws, { type: 'perform-request-sent', instrument: existing.instrument, hostOnline: !!host })
+          return
+        }
         const request: PerformRequest = { oderId: id, nickname: client.nickname, instrument: msg.instrument, timestamp: Date.now() }
         requests.push(request)
         console.log(`[REQUEST-PERFORM] ${id.slice(0, 8)} (${client.nickname}) requested to perform: ${msg.instrument}`)
-        const host = findRoomHost(roomId)
         if (host) send(host.ws, { type: 'perform-request-received', request })
-        send(ws, { type: 'perform-request-sent', instrument: msg.instrument })
+        // hostOnline=false면 방장이 입장할 때 room-state와 함께 요청이 전달된다
+        send(ws, { type: 'perform-request-sent', instrument: msg.instrument, hostOnline: !!host })
         return
       }
 
@@ -951,8 +1032,8 @@ export function initializeWebSocket(
         requests.splice(requestIndex, 1)
         console.log(`[REJECT-PERFORM] Host rejected ${msg.targetId.slice(0, 8)} (${request.nickname})`)
         const target = getRoomPeer(client, msg.targetId)
-        const reason = typeof msg.reason === 'string' ? msg.reason.slice(0, 200) : '방장이 요청을 거절했습니다.'
-        if (target) send(target.ws, { type: 'perform-request-rejected', reason })
+        const reason = (typeof msg.reason === 'string' ? msg.reason.trim().slice(0, 200) : '') || '방장이 요청을 거절했습니다.'
+        if (target) send(target.ws, { type: 'perform-request-rejected', reason, instrument: request.instrument })
         return
       }
 

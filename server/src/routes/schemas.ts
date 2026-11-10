@@ -44,3 +44,29 @@ export const uploadFilenameParams = z.object({
 export const separationIdParams = z.object({
   id: z.string().uuid(),
 })
+
+/** 방 생성 (P2-6). host_id는 받지 않는다 — 토큰의 userId가 방장 */
+export const createRoomBody = z.object({
+  title: z.string().trim().min(1).max(100),
+  description: z.string().trim().max(500).nullish().transform(v => v || null),
+  genre: z.string().trim().max(30).nullish().transform(v => v || null),
+  maxParticipants: z.number().int().min(2).max(20).default(8),
+  tags: z.array(z.string().trim().min(1).max(20)).max(20).default([]),
+  freeJoin: z.boolean().default(true),
+  isPrivate: z.boolean().default(false),
+  instrumentSlots: z.array(z.object({
+    instrument: z.string().min(1).max(30),
+    count: z.number().int().min(0).max(10),
+  })).max(20).default([]).transform(slots => slots.filter(s => s.count > 0)),
+  /** 평문은 해시만 저장하고 버린다. 길이 검증은 service(validateRoomPassword) */
+  password: z.string().max(256).nullish(),
+})
+
+export const roomIdParams = z.object({
+  id: z.string().uuid(),
+})
+
+export const setRoomPasswordBody = z.object({
+  /** null 또는 빈 문자열 → 비밀번호 해제 */
+  password: z.string().max(256).nullable(),
+})
