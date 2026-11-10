@@ -81,6 +81,8 @@ export interface WsLimits {
   heartbeatMs: number
   /** 방 하나의 최대 연주자 수 (설계: 최대 6명) */
   maxPerformers: number
+  /** 방 하나의 최대 인원(관람 포함) 서버 상한. rooms.max_participants가 없거나 더 크면 이 값 (방 생성 스키마 최대 20) */
+  maxRoomParticipants: number
   /** 인증된 사용자가 끊긴 뒤 세션을 재개할 수 있는 유예시간 (이 동안 방 참가자에게 leave를 보내지 않음) */
   resumeGraceMs: number
   /** 방 비밀번호: (방, 사용자) 허용 실패 횟수 */
@@ -103,6 +105,7 @@ const DEFAULT_LIMITS: WsLimits = {
   maxConnectionsPerIp: 20,
   maxDropped: 200,
   maxPerformers: 6,
+  maxRoomParticipants: 20,
   resumeGraceMs: 30_000,
   heartbeatMs: 30_000,
   passwordMaxFailures: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailures,
@@ -400,6 +403,17 @@ export function initializeWebSocket(
     const target = clients.get(targetId)
     if (!target || target.roomId !== sender.roomId) return null
     return target
+  }
+
+  /** 방 정원 계산용 자리 수: 방 멤버(유예 중 세션 포함)에서 자기 자신과 같은 userId의 기존 연결(입장 시 대체됨)은 뺀다 */
+  function countRoomSeats(roomId: string, selfId: string, userId: string | undefined): number {
+    let n = 0
+    for (const pid of rooms.get(roomId) || []) {
+      if (pid === selfId) continue
+      if (userId && clients.get(pid)?.userId === userId) continue
+      n++
+    }
+    return n
   }
 
   async function getRoomMeta(roomId: string, maxAgeMs = ROOM_META_TTL_MS): Promise<RoomMeta | null> {
@@ -756,6 +770,7 @@ export function initializeWebSocket(
       // 방 존재 확인 + 방장 판정 (백엔드가 있으면 DB 기준)
       let isHost = false
       let passwordHash: string | null = null
+      let capacity = limits.maxRoomParticipants
       if (deps.hasBackend) {
         const meta = await getRoomMeta(roomId, 0)
         if (!meta) {
@@ -764,6 +779,7 @@ export function initializeWebSocket(
         }
         isHost = !!client.userId && meta.hostId === client.userId
         passwordHash = meta.passwordHash ?? null
+        if (meta.maxParticipants !== undefined) capacity = Math.min(capacity, meta.maxParticipants)
         // 비밀번호 방으로 표시됐는데 해시가 아직 없음(생성·변경 중): 방장 외 입장 보류 (fail-closed, 리뷰 L1)
         if (meta.hasPassword && !passwordHash && !isHost) {
           send(ws, { type: 'error', code: 'password-busy', roomId, retryAfterMs: 1000, message: '합주실을 준비 중입니다. 잠시 후 다시 시도하세요.' })
@@ -788,6 +804,15 @@ export function initializeWebSocket(
       if (passwordHash && !isHost) {
         const ok = await checkRoomPassword(roomId, passwordHash, msg.password)
         if (!ok || clients.get(id) !== client) return
+      }
+
+      // 정원(관람 포함, P3-12b): 방장은 항상 입장. 마지막 await 뒤부터 방에 추가할 때까지 동기 구간이라 동시 입장 경합이 없다.
+      // 유예 중인 세션은 rooms에 남아 자리를 유지하고, 같은 사용자의 기존 연결(아래에서 대체됨)은 새 자리로 세지 않는다.
+      // 실패해도 지금 있는 방은 그대로 둔다.
+      if (!isHost && countRoomSeats(roomId, id, client.userId) >= capacity) {
+        console.warn(`[JOIN] ${id.slice(0, 8)} rejected: room ${roomId.slice(0, 8)} full (${capacity})`)
+        send(ws, { type: 'error', code: 'room-full', roomId, maxParticipants: capacity, message: `합주실 정원(${capacity}명)이 가득 찼습니다.` })
+        return
       }
 
       // 다른 방에 있었다면 먼저 퇴장 처리

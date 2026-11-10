@@ -57,18 +57,18 @@ describe('toRepositoryError', () => {
 })
 
 describe('roomRepository', () => {
-  it('findMeta maps host_id/free_join/is_private + password hash (free_join defaults to true)', async () => {
-    const m = mockSupabase((calls) => calls[0][1][0] === 'room_secrets' ? ok({ password_hash: 'scrypt$h' }) : ok({ host_id: 'h', free_join: null, is_private: true, has_password: true }))
-    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: true, isPrivate: true, hasPassword: true, passwordHash: 'scrypt$h' })
-    assert.deepEqual(m.log[0], [['from', ['rooms']], ['select', ['host_id, free_join, is_private, has_password']], ['eq', ['id', 'r1']], ['maybeSingle', []]])
+  it('findMeta maps host_id/free_join/is_private/max_participants + password hash (free_join defaults to true)', async () => {
+    const m = mockSupabase((calls) => calls[0][1][0] === 'room_secrets' ? ok({ password_hash: 'scrypt$h' }) : ok({ host_id: 'h', free_join: null, is_private: true, has_password: true, max_participants: 4 }))
+    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: true, isPrivate: true, hasPassword: true, passwordHash: 'scrypt$h', maxParticipants: 4 })
+    assert.deepEqual(m.log[0], [['from', ['rooms']], ['select', ['host_id, free_join, is_private, has_password, max_participants']], ['eq', ['id', 'r1']], ['maybeSingle', []]])
     assert.deepEqual(m.log[1], [['from', ['room_secrets']], ['select', ['password_hash']], ['eq', ['room_id', 'r1']], ['maybeSingle', []]])
   })
   it('findMeta before migration 008: falls back without is_private, treats missing room_secrets as no password', async () => {
     const m = mockSupabase((calls) => {
       if (calls[0][1][0] === 'room_secrets') return err('no table', 'PGRST205')
-      return calls[1][1][0] === 'host_id, free_join, is_private, has_password' ? err('no column', '42703') : ok({ host_id: 'h', free_join: false })
+      return calls[1][1][0] === 'host_id, free_join, is_private, has_password, max_participants' ? err('no column', '42703') : ok({ host_id: 'h', free_join: false, max_participants: null })
     })
-    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: false, isPrivate: false, hasPassword: false, passwordHash: null })
+    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: false, isPrivate: false, hasPassword: false, passwordHash: null, maxParticipants: undefined })
   })
   it('setPasswordHash calls the transactional set_room_password RPC (review L2)', async () => {
     const m = mockSupabase(() => ok(null))

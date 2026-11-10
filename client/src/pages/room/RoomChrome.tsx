@@ -58,7 +58,7 @@ export function LiveHeader({
   )
 }
 
-/** 비밀번호 방 입장 (방장은 서버가 묻지 않는다) */
+/** 비밀번호 방 입장 (방장은 서버가 묻지 않는다). 정원 초과(room-full)는 안내와 목록 버튼만 */
 export function RoomPasswordGate({
   title,
   joinError,
@@ -75,6 +75,19 @@ export function RoomPasswordGate({
   onLeave: () => void
 }) {
   const locked = joinError.code === 'password-rate-limited'
+  if (joinError.code === 'room-full') {
+    return (
+      <div className="room-password-gate">
+        <div className="room-password-card">
+          <h2>{title}</h2>
+          <p className="room-password-message error" role="alert">{describeJoinError(joinError)}</p>
+          <div className="room-password-actions">
+            <button type="button" className="btn-secondary" onClick={onLeave}>목록으로</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="room-password-gate">
       <form className="room-password-card" onSubmit={onSubmit}>

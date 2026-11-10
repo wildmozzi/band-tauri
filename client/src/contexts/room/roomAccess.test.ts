@@ -58,8 +58,14 @@ describe('joinErrorFromSignal / describeJoinError', () => {
     expect(joinErrorFromSignal({ type: 'error', code: 'perform-not-approved' })).toBeNull()
     expect(joinErrorFromSignal({ type: 'chat', code: 'password-invalid' })).toBeNull()
     expect(joinErrorFromSignal({ type: 'error', code: 'password-invalid', roomId: ID, remainingAttempts: 2 })).toEqual({
-      code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null,
+      code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null, maxParticipants: null,
     })
+  })
+  it('정원 초과(room-full)를 해석하고 정원을 보여준다 (P3-12b)', () => {
+    const e = joinErrorFromSignal({ type: 'error', code: 'room-full', roomId: ID, maxParticipants: 4 })
+    expect(e).toMatchObject({ code: 'room-full', roomId: ID, maxParticipants: 4 })
+    expect(describeJoinError(e!)).toContain('4명')
+    expect(describeJoinError({ code: 'room-full', roomId: null, remainingAttempts: null, retryAfterMs: null })).toContain('정원')
   })
   it('남은 시도 횟수와 대기 시간을 보여준다', () => {
     expect(describeJoinError({ code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null })).toContain('2회')

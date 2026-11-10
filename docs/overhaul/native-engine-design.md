@@ -293,6 +293,10 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
   - 비밀번호는 6~64자(NFC 기준), scrypt N=2^14·r=8·p=5(16MiB/회).
   - 실패한 join은 지금 있는 방을 바꾸지 않는다. 이미 그 방에 있는 연결의 재 join(세션 재개)은 다시 묻지 않는다.
   - 비공개 방(`rooms.is_private`)은 목록(RLS)에서만 숨긴다. 방 id(초대 링크/방 코드)로는 `get_room(id)`로 조회·입장한다.
+- 방 정원(P3-12b): `join` 시 서버가 `rooms.max_participants`(관람 포함, 익명 포함. 값이 없거나 서버 상한 20보다 크면 20)를 강제한다. 초과면 `error` `room-full` `{ roomId, maxParticipants }`.
+  - 방장은 항상 입장. 세션 재개 유예 중인 연결은 자리를 유지하고(다른 사람이 그 자리로 못 들어옴), 같은 사용자의 새 연결은 기존 연결을 대체하므로 새 자리로 세지 않는다.
+  - 정원 검사와 방 추가 사이에 await가 없어 동시 입장 경합에서도 정원을 넘지 않는다(서버 인스턴스 1대 기준). 실패한 join은 지금 있는 방을 바꾸지 않는다.
+  - 연주자 상한 6은 `start-performing`에서 따로 강제한다(`room-full-performers`, 유예 중인 연주자 포함). join은 항상 관람으로 들어오므로 연주자 자리는 그때 센다.
 - 연주 참여 요청: `perform-request-sent` `{ instrument, hostOnline }`(같은 요청 재전송에도 다시 보냄), `perform-request-rejected` `{ reason, instrument }`(빈 사유는 기본 문구), 익명 요청에는 `request-perform-error` `{ code: 'login-required' }`도 보낸다. 승인(`perform-request-approved`)을 받은 앱은 바로 엔진을 시작한다(웹은 앱 안내).
 - 중계 시 서버가 `from`을 붙인다(클라이언트가 보낸 `from`은 무시).
 

@@ -32,18 +32,20 @@ export function validateRoomPasswordInput(raw: string): string | null {
   return null
 }
 
-export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited' | 'password-busy'
+export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited' | 'password-busy' | 'room-full'
 
 export interface JoinError {
   code: JoinErrorCode
   roomId: string | null
   remainingAttempts: number | null
   retryAfterMs: number | null
+  /** room-full: 서버가 적용한 정원(관람 포함) */
+  maxParticipants?: number | null
 }
 
-const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited', 'password-busy'])
+const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited', 'password-busy', 'room-full'])
 
-/** 서버 error 메시지 중 입장(비밀번호) 관련이면 JoinError로 */
+/** 서버 error 메시지 중 입장(비밀번호·정원) 관련이면 JoinError로 */
 export function joinErrorFromSignal(p: { type: string; [k: string]: unknown }): JoinError | null {
   if (p.type !== 'error' || typeof p.code !== 'string' || !JOIN_ERROR_CODES.has(p.code)) return null
   return {
@@ -51,6 +53,7 @@ export function joinErrorFromSignal(p: { type: string; [k: string]: unknown }): 
     roomId: typeof p.roomId === 'string' ? p.roomId : null,
     remainingAttempts: typeof p.remainingAttempts === 'number' ? p.remainingAttempts : null,
     retryAfterMs: typeof p.retryAfterMs === 'number' ? p.retryAfterMs : null,
+    maxParticipants: typeof p.maxParticipants === 'number' ? p.maxParticipants : null,
   }
 }
 
@@ -71,6 +74,10 @@ export function describeJoinError(e: JoinError): string {
         ? `비밀번호를 너무 많이 틀렸습니다. 약 ${min}분 뒤에 다시 시도하세요.`
         : '비밀번호를 너무 많이 틀렸습니다. 잠시 후 다시 시도하세요.'
     }
+    case 'room-full':
+      return e.maxParticipants
+        ? `합주실 정원(관람 포함 ${e.maxParticipants}명)이 가득 찼습니다. 잠시 후 다시 시도하세요.`
+        : '합주실 정원이 가득 찼습니다. 잠시 후 다시 시도하세요.'
   }
 }
 

@@ -64,6 +64,23 @@ test.describe('비밀번호 방 입장', () => {
   })
 })
 
+test.describe('정원 초과 (P3-12b)', () => {
+  test('정원이 차면 서버 room-full 안내와 목록 버튼만 보인다', async ({ page, mock }) => {
+    // ROCK_ROOM(max_participants 6)을 다른 참가자 6명으로 채운다
+    const others = Array.from({ length: ROCK_ROOM.max_participants }, (_, i) => ({ oderId: `full-${i}`, nickname: `관람${i}` }))
+    mock.signaling.setRoom(ROCK_ROOM.id, { participants: others })
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+
+    const card = page.locator('.room-password-card')
+    await expect(card.getByRole('alert')).toHaveText(`합주실 정원(관람 포함 ${ROCK_ROOM.max_participants}명)이 가득 찼습니다. 잠시 후 다시 시도하세요.`)
+    await expect(card.getByPlaceholder('합주실 비밀번호')).toHaveCount(0)
+    await expect(page.locator('.chat-panel')).toHaveCount(0)
+
+    await card.getByRole('button', { name: '목록으로' }).click()
+    await expect(page).toHaveURL(/\/rooms$/)
+  })
+})
+
 test.describe('관람자(웹)', () => {
   test('연주 UI 대신 데스크톱 앱 안내가 보이고, 채팅을 주고받는다', async ({ page, mock }) => {
     mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
