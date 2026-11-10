@@ -1,5 +1,6 @@
-import type { Tables, TablesInsert, TablesUpdate } from '../lib/database.types'
+import type { Tables, TablesInsert } from '../lib/database.types'
 import { supabase } from '../lib/supabaseClient'
+import { authHeaders } from '../lib/authHeaders'
 
 // Types
 export interface Post {
@@ -79,7 +80,8 @@ export function toPost(row: Tables<'posts'>, likedByUser?: boolean): Post {
     content: row.content,
     category: row.category ?? 'general',
     tags: row.tags ?? [],
-    images: row.images ?? [],
+    // 서버가 PUBLIC_API_URL 없이 저장한 조회 경로(상대)는 API 서버 기준으로 (웹 origin 기준이면 깨진다)
+    images: (row.images ?? []).map(u => (u.startsWith('/api/storage/post-images/') ? `${getApiUrl().replace(/\/+$/, '')}${u}` : u)),
     instrument: row.instrument ?? 'other',
     likes_count: row.likes_count ?? 0,
     comments_count: row.comments_count ?? 0,
@@ -147,6 +149,45 @@ const COMMENT_SELECT = `
 function requireClient() {
   if (!supabase) throw new Error('Supabase not configured')
   return supabase
+}
+
+function getApiUrl(): string {
+  const envUrl = import.meta.env.VITE_API_URL
+  if (!envUrl || envUrl === 'auto') {
+    return `${window.location.protocol}//${window.location.hostname}:8080`
+  }
+  return envUrl
+}
+
+/** 서버가 거절한 글 저장 (사용자에게 그대로 보여줄 문구). rejected: 저장할 수 없는 이미지와 이유 */
+export class PostSaveError extends Error {
+  constructor(message: string, readonly status: number, readonly rejected: { url: string; reason: string }[] = []) {
+    super(message)
+    this.name = 'PostSaveError'
+  }
+}
+
+async function callPostsApi(method: 'POST' | 'PUT', path: string, body: unknown, fetchImpl: typeof fetch): Promise<{ post: Tables<'posts'> }> {
+  let res: Response
+  try {
+    res = await fetchImpl(`${getApiUrl()}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify(body),
+    })
+  } catch {
+    throw new PostSaveError('서버에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.', 0)
+  }
+  const data = (await res.json().catch(() => ({}))) as {
+    success?: boolean; error?: string; post?: Tables<'posts'>; rejected?: { url: string; reason: string }[]
+  }
+  if (!res.ok || data.success === false || !data.post) {
+    const rejected = Array.isArray(data.rejected) ? data.rejected : []
+    const base = typeof data.error === 'string' ? data.error : `게시글 저장 실패 (${res.status})`
+    const detail = rejected.length ? ` (${[...new Set(rejected.map(r => r.reason))].join(', ')})` : ''
+    throw new PostSaveError(base + detail, res.status, rejected)
+  }
+  return { post: data.post }
 }
 
 // Posts API
@@ -223,60 +264,17 @@ export const communityApi = {
 
   // 이미지 업로드는 서버 서명 URL 경유 (services/storageApi.ts, P3-10). Supabase Storage에 직접 쓰지 않는다
 
-  // Create new post
-  async createPost(data: CreatePostData, user: { id: string; email?: string }): Promise<Post> {
-    const sb = requireClient()
-
-    // 프로필에서 닉네임 가져오기
-    const { data: profile } = await sb
-      .from('profiles')
-      .select('nickname')
-      .eq('id', user.id)
-      .single()
-
-    const authorName = profile?.nickname || getAuthorName(user.email)
-
-    const { data: post, error } = await sb
-      .from('posts')
-      .insert({
-        author_id: user.id,
-        author_name: authorName,
-        author_role: 'Session Member',
-        title: data.title,
-        content: data.content,
-        tags: data.tags ?? [],
-        images: data.images ?? [],
-        instrument: data.instrument ?? 'other',
-        category: data.category ?? 'general',
-      })
-      .select()
-      .single()
-
-    if (error) throw error
+  /**
+   * 글 작성·수정은 서버 API (P3-10d). 작성자는 서버가 토큰으로 정하고, 이미지는 서버가 검증 완료 업로드만
+   * 받아 조회 URL로 정규화한다(외부·미검증·남의 이미지는 422). posts를 직접 INSERT/UPDATE하지 않는다(마이그레이션 012).
+   */
+  async createPost(data: CreatePostData, fetchImpl: typeof fetch = fetch): Promise<Post> {
+    const { post } = await callPostsApi('POST', '/api/posts', data, fetchImpl)
     return toPost(post)
   },
 
-  // Update post
-  async updatePost(postId: string, data: UpdatePostData): Promise<Post> {
-    const sb = requireClient()
-
-    const updateData: TablesUpdate<'posts'> = {}
-    if (data.title !== undefined) updateData.title = data.title
-    if (data.content !== undefined) updateData.content = data.content
-    if (data.tags !== undefined) updateData.tags = data.tags
-    if (data.images !== undefined) updateData.images = data.images
-    if (data.instrument !== undefined) updateData.instrument = data.instrument
-    if (data.category !== undefined) updateData.category = data.category
-    updateData.updated_at = new Date().toISOString()
-
-    const { data: post, error } = await sb
-      .from('posts')
-      .update(updateData)
-      .eq('id', postId)
-      .select()
-      .single()
-
-    if (error) throw error
+  async updatePost(postId: string, data: UpdatePostData, fetchImpl: typeof fetch = fetch): Promise<Post> {
+    const { post } = await callPostsApi('PUT', `/api/posts/${encodeURIComponent(postId)}`, data, fetchImpl)
     return toPost(post)
   },
 

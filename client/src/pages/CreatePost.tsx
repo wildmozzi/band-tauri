@@ -34,7 +34,6 @@ export function CreatePost() {
             instrument: form.selectedInstrument,
             category: 'general',
           },
-          user,
         })
       },
       onSuccess: () => navigate('/community'),

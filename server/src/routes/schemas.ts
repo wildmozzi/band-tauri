@@ -86,3 +86,33 @@ export const postImageCompleteBody = z.object({
 export const postImageResolveBody = z.object({
   urls: z.array(z.string().min(1).max(2048)).max(20),
 })
+
+/** 게시글 (P3-10d). 서버가 작성자·이미지 참조를 정한다. 이미지 최대 5장(클라이언트 MAX_IMAGES) */
+export const POST_INSTRUMENTS = ['vocal', 'guitar', 'bass', 'keyboard', 'drums', 'other'] as const
+export const POST_CATEGORIES = ['session', 'collab', 'beta', 'feedback', 'general'] as const
+const postTitle = z.string().trim().min(1).max(200)
+const postContent = z.string().trim().min(1).max(20_000)
+const postTags = z.array(z.string().trim().min(1).max(50)).max(20)
+const postImages = z.array(z.string().min(1).max(2048)).max(5)
+
+export const createPostBody = z.object({
+  title: postTitle,
+  content: postContent,
+  tags: postTags.default([]),
+  images: postImages.default([]),
+  instrument: z.enum(POST_INSTRUMENTS).default('other'),
+  category: z.enum(POST_CATEGORIES).default('general'),
+})
+
+export const updatePostBody = z.object({
+  title: postTitle.optional(),
+  content: postContent.optional(),
+  tags: postTags.optional(),
+  images: postImages.optional(),
+  instrument: z.enum(POST_INSTRUMENTS).optional(),
+  category: z.enum(POST_CATEGORIES).optional(),
+})
+
+export const postIdParams = z.object({
+  id: z.string().uuid(),
+})
