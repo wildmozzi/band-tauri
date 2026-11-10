@@ -1,7 +1,7 @@
 {
   "name": "client",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,6 +17,8 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.81.1",
     "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.1",
     "@tonejs/midi": "^2.0.28",
     "@tosspayments/payment-sdk": "^1.9.2",
     "opensheetmusicdisplay": "^1.9.3",
