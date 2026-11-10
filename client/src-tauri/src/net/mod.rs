@@ -93,7 +93,8 @@ pub struct NetShared {
     tx_seq_retired: Mutex<std::collections::HashMap<TxKeyId, u32>>,
     epoch: Instant,
     stop: AtomicBool,
-    jitter_settings: JitterSettings,
+    /// 새 피어의 지터 버퍼 설정. 프로필은 실행 중에 바뀐다(`set_jitter_profile`).
+    jitter_settings: Mutex<JitterSettings>,
     allow_loopback: bool,
     /// UDP 릴레이 클라이언트(P1-4b). 토큰을 받기 전에는 None.
     relay: Mutex<Option<RelayClient>>,
@@ -172,7 +173,7 @@ impl Net {
             tx_seq_retired: Mutex::new(std::collections::HashMap::new()),
             epoch: Instant::now(),
             stop: AtomicBool::new(false),
-            jitter_settings,
+            jitter_settings: Mutex::new(jitter_settings),
             allow_loopback: opts.allow_loopback_candidates,
             relay: Mutex::new(None),
             relay_addr: RwLock::new(None),
@@ -222,7 +223,7 @@ impl Net {
         let setup = PeerSetup {
             keys: &self.shared.keys,
             my_ssrc: self.shared.ssrc,
-            jitter: self.shared.jitter_settings,
+            jitter: *self.shared.jitter_settings.lock(),
             allow_loopback: self.shared.allow_loopback,
         };
         let peer = Arc::new(Peer::new(peer_id.clone(), desc, &setup, Instant::now())?);
@@ -269,6 +270,14 @@ impl Net {
                 true
             }
             None => false,
+        }
+    }
+
+    /// 지터 버퍼 프로필 변경: 지금 있는 피어 모두와 이후 추가될 피어(P1-5).
+    pub fn set_jitter_profile(&self, profile: f32) {
+        self.shared.jitter_settings.lock().profile = profile;
+        for p in self.peers() {
+            p.jitter.lock().set_profile(profile);
         }
     }
 

@@ -83,6 +83,10 @@ pub struct PeerStats {
     pub rtt_ms: Option<f32>,
     pub jitter_ms: f32,
     pub buffer_ms: f32,
+    /// 지터 버퍼 목표 깊이(ms): 지터 추정 + 은닉 마감 여유 + 피어 적응 여유(언더런) + 프로필 여유(P1-5).
+    pub target_ms: f32,
+    /// 최근 5초 은닉 비율(%, 손실 + 늦은 패킷 + 언더런). GOAL 2절 "은닉 프레임 비율".
+    pub conceal_pct: f32,
     pub loss_pct: f32,
     pub late: u64,
     pub concealed: u64,
@@ -179,6 +183,8 @@ mod tests {
                 rtt_ms: None,
                 jitter_ms: 1.0,
                 buffer_ms: 2.0,
+                target_ms: 2.5,
+                conceal_pct: 0.0,
                 loss_pct: 0.0,
                 late: 0,
                 concealed: 0,
@@ -192,6 +198,7 @@ mod tests {
         };
         let j = serde_json::to_string(&s).unwrap();
         assert!(j.contains("\"echoRequested\":true") && j.contains("\"peerEchoing\":false"));
+        assert!(j.contains("\"targetMs\":2.5") && j.contains("\"concealPct\":0.0"));
         assert!(j.contains("\"estLatencyMs\""));
         assert!(j.contains("\"peerId\":\"a\""));
         assert!(j.contains("\"state\":\"connected\""));

@@ -1080,7 +1080,7 @@ mod tests {
                 Candidate { kind: CandidateKind::Public, addr: RELAY.into() },
             ],
         };
-        let setup = PeerSetup { keys: &keys, my_ssrc: 1, jitter: JitterSettings { min_ms: 0.0, max_ms: 80.0 }, allow_loopback: false };
+        let setup = PeerSetup { keys: &keys, my_ssrc: 1, jitter: JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }, allow_loopback: false };
         let p = Peer::new("p".into(), &desc, &setup, Instant::now()).unwrap();
         p.conn.lock().on_handshake(RELAY.parse().unwrap(), false, &p.candidates, relay(), Instant::now());
         assert_eq!(p.hello_targets(relay()), vec!["192.168.0.5:4000".parse::<SocketAddr>().unwrap()]);

@@ -43,6 +43,8 @@ export interface EngineConfig {
   opusBitrate?: number
   jitterMinMs?: number
   jitterMaxMs?: number
+  /** 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필, 기본 0.5(균형). 실행 중 변경은 engineSetJitterProfile */
+  jitterProfile?: number
   udpPort?: number
 }
 
@@ -93,6 +95,10 @@ export interface PeerStats {
   rttMs: number | null
   jitterMs: number
   bufferMs: number
+  /** 지터 버퍼 목표 깊이(ms): 지터 추정 + 은닉 마감 여유 + 언더런 여유 + 프로필 여유 */
+  targetMs?: number
+  /** 최근 5초 은닉 비율(%, 손실 + 늦은 패킷 + 언더런) */
+  concealPct?: number
   lossPct: number
   late: number
   concealed: number
@@ -316,6 +322,11 @@ export function engineSafetyCode(peerId: string): Promise<string> {
 
 export function engineSetMonitor(enabled: boolean, gain: number): Promise<null> {
   return invoke<null>('engine_set_monitor', { enabled, gain })
+}
+
+/** 지터 버퍼 프로필(0 저지연 ↔ 1 안정)을 실행 중에 바꾼다. 다음 시작에는 EngineConfig.jitterProfile을 쓴다 */
+export function engineSetJitterProfile(profile: number): Promise<null> {
+  return invoke<null>('engine_set_jitter_profile', { profile })
 }
 
 export function engineSetMasterGain(gain: number): Promise<null> {

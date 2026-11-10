@@ -46,6 +46,9 @@ pub struct EngineConfig {
     pub jitter_min_ms: Option<f32>,
     #[serde(default)]
     pub jitter_max_ms: Option<f32>,
+    /// 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필(P1-5). 없으면 0.5(균형).
+    #[serde(default)]
+    pub jitter_profile: Option<f32>,
     #[serde(default)]
     pub udp_port: Option<u16>,
 }
@@ -65,6 +68,7 @@ impl Default for EngineConfig {
             opus_bitrate: None,
             jitter_min_ms: None,
             jitter_max_ms: None,
+            jitter_profile: None,
             udp_port: None,
         }
     }
@@ -105,6 +109,10 @@ impl EngineConfig {
 
     pub fn jitter_max_ms(&self) -> f32 {
         self.jitter_max_ms.unwrap_or(80.0)
+    }
+
+    pub fn jitter_profile(&self) -> f32 {
+        self.jitter_profile.unwrap_or(0.5)
     }
 
     /// 이 설정에서 나올 수 있는 최대 페이로드 크기(바이트).
@@ -154,6 +162,10 @@ impl EngineConfig {
         if jmax < fm {
             return Err("jitterMaxMs는 frameMs 이상이어야 합니다".into());
         }
+        let jp = self.jitter_profile();
+        if !jp.is_finite() || !(0.0..=1.0).contains(&jp) {
+            return Err(format!("jitterProfile은 0..1 범위여야 합니다: {jp}"));
+        }
         let payload = self.max_payload_bytes();
         if payload > MAX_PAYLOAD_BYTES {
             return Err(format!(
@@ -172,6 +184,18 @@ mod tests {
     #[test]
     fn default_is_valid() {
         EngineConfig::default().validate().expect("기본 설정은 유효해야 함");
+    }
+
+    #[test]
+    fn jitter_profile_default_and_range() {
+        let c: EngineConfig = serde_json::from_str(&serde_json::to_string(&EngineConfig::default()).unwrap().replace(",\"jitterProfile\":null", "")).unwrap();
+        assert_eq!(c.jitter_profile(), 0.5, "없으면 균형");
+        for p in [0.0, 0.5, 1.0] {
+            EngineConfig { jitter_profile: Some(p), ..Default::default() }.validate().unwrap();
+        }
+        for p in [-0.1, 1.5, f32::NAN] {
+            assert!(EngineConfig { jitter_profile: Some(p), ..Default::default() }.validate().is_err(), "{p}");
+        }
     }
 
     #[test]

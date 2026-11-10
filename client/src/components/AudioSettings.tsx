@@ -2,18 +2,30 @@
  * 네이티브 엔진 오디오 설정 화면 (EngineConfig / DeviceInfo, 설계 4절).
  * 상태와 저장은 AudioSettingsContext가 맡고, 이 컴포넌트는 표시와 입력만 한다.
  */
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useAudioSettings } from '../contexts/AudioSettingsContext'
-import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs } from '../native/engineApi'
+import {
+  MAX_PAYLOAD_BYTES,
+  engineSetJitterProfile,
+  engineStats,
+  type CodecKind,
+  type DriverKind,
+  type FrameMs,
+  type PeerStats,
+} from '../native/engineApi'
 import {
   BUFFER_OPTIONS,
   DRIVER_OPTIONS,
   ENGINE_PRESETS,
   FRAME_OPTIONS,
   JITTER_MAX_LIMIT_MS,
+  JITTER_PROFILE_DEFAULT,
   bufferMs,
+  clampJitterProfile,
   estimatePayloadBytes,
+  formatPeerJitter,
   isPayloadAllowed,
+  jitterProfileLabel,
   type EnginePresetId,
 } from '../native/engineConfig'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
@@ -25,6 +37,35 @@ interface AudioSettingsProps {
 }
 
 const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || undefined
+
+const PEER_STATS_POLL_MS = 1000
+
+/** 합주 중(엔진 사용 중)일 때만 피어 통계를 1초마다 읽는다(지터 버퍼 상태 표시용). */
+function useLivePeerStats(enabled: boolean): PeerStats[] {
+  const [peers, setPeers] = useState<PeerStats[]>([])
+  useEffect(() => {
+    if (!enabled) {
+      setPeers([])
+      return
+    }
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const s = await engineStats()
+        if (!cancelled) setPeers(s.peers)
+      } catch {
+        // 엔진이 막 멈춘 경우 등: 다음 주기에 다시
+      }
+    }
+    void poll()
+    const timer = setInterval(() => void poll(), PEER_STATS_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [enabled])
+  return peers
+}
 
 function LevelMeter({ value, kind }: { value: number; kind: 'input' | 'output' }) {
   const pct = Math.max(0, Math.min(100, value * 100))
@@ -58,6 +99,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     stopTest,
     engineInUse,
   } = useAudioSettings()
+
+  const livePeers = useLivePeerStats(isNativeMode && engineInUse)
 
   // 설정 화면을 닫으면 테스트 종료
   useEffect(() => () => {
@@ -328,6 +371,38 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
       {/* 지터 버퍼 */}
       <section className="settings-section">
         <h3>지터 버퍼</h3>
+        <div className="settings-row">
+          <label htmlFor="jitter-profile">저지연 ↔ 안정</label>
+          <input
+            id="jitter-profile"
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={config.jitterProfile ?? JITTER_PROFILE_DEFAULT}
+            onChange={(e) => {
+              const p = clampJitterProfile(Number(e.target.value))
+              updateConfig({ jitterProfile: p })
+              // 합주 중이면 바로 적용(다음 시작에는 저장된 설정을 쓴다)
+              if (engineInUse) void engineSetJitterProfile(p).catch(() => undefined)
+            }}
+          />
+          <span>{jitterProfileLabel(config.jitterProfile ?? JITTER_PROFILE_DEFAULT)}</span>
+        </div>
+        <p className="setting-hint">
+          저지연: 버퍼를 최소로(가끔 끊김 감수) · 안정: 지터 스파이크에 여유를 더 오래 둠(지연 증가). 합주 중에도 바로 적용됩니다.
+        </p>
+        {engineInUse && (
+          <div className="stats-grid" aria-label="피어별 지터 버퍼 상태">
+            {livePeers.length === 0 && <p className="setting-hint">연결된 피어가 없습니다.</p>}
+            {livePeers.map((ps) => (
+              <div className="stat-item" key={ps.peerId}>
+                <span className="stat-label">{ps.peerId.slice(0, 8)}</span>
+                <span className="stat-value">{formatPeerJitter(ps)}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="settings-row">
           <label htmlFor="jitter-min">최소 (0 = 자동)</label>
           <input

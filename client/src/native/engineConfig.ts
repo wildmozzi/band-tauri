@@ -9,6 +9,7 @@ import {
   type DriverKind,
   type EngineConfig,
   type FrameMs,
+  type PeerStats,
 } from './engineApi'
 
 export const DRIVER_OPTIONS: { id: DriverKind; label: string; desc: string }[] = [
@@ -22,6 +23,8 @@ export const BUFFER_OPTIONS = [32, 64, 128, 256, 512, 1024]
 export const BUFFER_MIN = 32
 export const BUFFER_MAX = 1024
 export const JITTER_MAX_LIMIT_MS = 500
+/** 지터 버퍼 프로필 기본값(균형). 0 = 저지연, 1 = 안정 */
+export const JITTER_PROFILE_DEFAULT = 0.5
 export const OPUS_BITRATE_MIN = 6_000
 export const OPUS_BITRATE_MAX = 510_000
 
@@ -42,6 +45,27 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   inputChannels: [0],
   jitterMinMs: 0,
   jitterMaxMs: 80,
+  jitterProfile: JITTER_PROFILE_DEFAULT,
+}
+
+/** 프로필 값을 0..1(0.05 단위)로 맞춘다. 숫자가 아니면 기본값 */
+export function clampJitterProfile(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return JITTER_PROFILE_DEFAULT
+  return Math.round(Math.min(1, Math.max(0, v)) * 20) / 20
+}
+
+/** 슬라이더 옆 이름 */
+export function jitterProfileLabel(p: number): string {
+  if (p < 0.34) return '저지연'
+  if (p > 0.66) return '안정'
+  return '균형'
+}
+
+/** 피어 한 명의 지터 버퍼 상태 한 줄: "버퍼 5.3ms / 목표 5.3ms · 은닉 0.1%" */
+export function formatPeerJitter(ps: Pick<PeerStats, 'bufferMs' | 'targetMs' | 'concealPct'>): string {
+  const target = ps.targetMs !== undefined ? ` / 목표 ${ps.targetMs.toFixed(1)}ms` : ''
+  const conceal = ps.concealPct !== undefined ? ` · 은닉 ${ps.concealPct.toFixed(1)}%` : ''
+  return `버퍼 ${ps.bufferMs.toFixed(1)}ms${target}${conceal}`
 }
 
 export type EnginePresetId = 'ultraLow' | 'balanced' | 'stable'
@@ -144,6 +168,10 @@ export function validateEngineConfig(config: EngineConfig, inputDevice?: DeviceI
   } else if (jMin > 0 && jMin > jMax) {
     issues.push({ field: 'jitterMinMs', message: '지터 최소값이 최대값보다 큽니다.' })
   }
+  const jp = config.jitterProfile ?? JITTER_PROFILE_DEFAULT
+  if (!Number.isFinite(jp) || jp < 0 || jp > 1) {
+    issues.push({ field: 'jitterProfile', message: '지터 프로필은 0(저지연)~1(안정) 사이여야 합니다.' })
+  }
   return issues
 }
 
@@ -243,6 +271,7 @@ function sanitizeEngineConfig(raw: Record<string, unknown>): EngineConfig {
     inputChannels,
     jitterMinMs: clampJitter(num(raw.jitterMinMs, d.jitterMinMs ?? 0)),
     jitterMaxMs: clampJitter(num(raw.jitterMaxMs, d.jitterMaxMs ?? 80)),
+    jitterProfile: clampJitterProfile(raw.jitterProfile),
   }
   if (isValidOpusBitrate(raw.opusBitrate)) config.opusBitrate = raw.opusBitrate
   if (typeof raw.udpPort === 'number' && raw.udpPort > 0 && raw.udpPort < 65536) config.udpPort = raw.udpPort
