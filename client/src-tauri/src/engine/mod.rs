@@ -9,29 +9,30 @@ pub mod config;
 pub mod device;
 pub mod jitter;
 pub mod mixer;
+pub mod prio;
 pub mod resample;
 pub mod rt;
 pub mod stats;
 pub mod worker;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ringbuf::traits::{Consumer, Observer, Split};
 use ringbuf::HeapRb;
 
 use crate::net::peer::LocalDescriptor;
 use crate::net::{Net, NetOptions};
-use config::{EngineConfig, INTERNAL_RATE};
+use config::EngineConfig;
 use device::{AudioBackend, StreamInfo};
 use jitter::JitterSettings;
 use mixer::{clamp_gain, MixControls};
 use rt::{InputRt, OutputRt};
 use stats::{AudioCounters, EngineStats, PeerStats};
-use worker::{MixTap, WorkerParams};
+use worker::{MixTap, Worker, WorkerParams, WorkerStats};
 
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
 pub type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
@@ -49,7 +50,7 @@ pub struct Engine {
     info: StreamInfo,
     counters: Arc<AudioCounters>,
     controls: Arc<MixControls>,
-    out_fill: Arc<AtomicU64>,
+    worker_stats: Arc<WorkerStats>,
     worker_stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     audio_stop: Arc<AtomicBool>,
@@ -118,7 +119,7 @@ impl Engine {
             info,
             counters: counters.clone(),
             controls: controls.clone(),
-            out_fill: Arc::new(AtomicU64::new(0)),
+            worker_stats: Arc::new(WorkerStats::default()),
             worker_stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             audio_stop,
@@ -133,14 +134,11 @@ impl Engine {
             if let Some(p) = cfg.udp_port {
                 opts.port = p;
             }
-            let js = JitterSettings {
-                request_frames: cfg.frame_samples(),
-                min_ms: cfg.jitter_min_ms(),
-                max_ms: cfg.jitter_max_ms(),
-            };
+            let js = JitterSettings { min_ms: cfg.jitter_min_ms(), max_ms: cfg.jitter_max_ms() };
             engine.net = Some(Net::start(peer_id, &opts, js)?); // 실패 시 engine drop이 오디오 정리
         }
 
+        let epoch = engine.net.as_ref().map(|n| n.shared().epoch()).unwrap_or_else(Instant::now);
         let params = WorkerParams {
             cfg,
             info,
@@ -151,12 +149,15 @@ impl Engine {
             net: engine.net.as_ref().map(|n| n.shared().clone()),
             tap: engine.tap.clone(),
             stop: engine.worker_stop.clone(),
-            out_fill: engine.out_fill.clone(),
+            stats: engine.worker_stats.clone(),
+            epoch,
         };
+        // 초기화(리샘플러/인코더)는 여기서 해서 실패를 호출자에게 돌려준다(리뷰 M10).
+        let worker = Worker::new(params)?;
         engine.worker = Some(
             std::thread::Builder::new()
                 .name("band-worker".into())
-                .spawn(move || worker::run(params))
+                .spawn(move || worker.run())
                 .map_err(|e| format!("워커 스레드 생성 실패: {e}"))?,
         );
         log::info!("엔진 시작: {:?}", engine.info);
@@ -169,6 +170,10 @@ impl Engine {
 
     pub fn local_port(&self) -> Option<u16> {
         self.net.as_ref().map(|n| n.local_port())
+    }
+
+    pub fn config(&self) -> &EngineConfig {
+        &self.cfg
     }
 
     pub fn has_network(&self) -> bool {
@@ -208,11 +213,13 @@ impl Engine {
             0 => self.info.buffer_frames,
             n => n,
         };
-        let out_ring_frames = self.out_fill.load(Ordering::Relaxed) as f32 / 2.0;
+        // 로컬 처리 지연(첫 샘플 기준) = 입력 장치 버퍼 + 경로 점유량 시간평균(리샘플러·프레임
+        // 누적·로컬 FIFO·출력 링) + 장치 출력 버퍼. 장치 내부의 숨은 버퍼는 포함하지 않는다(리뷰 M12).
+        let occupancy_ms = self.worker_stats.occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0;
         let est = in_buf as f32 / self.info.in_rate as f32 * 1000.0
-            + self.cfg.frame_samples() as f32 / INTERNAL_RATE as f32 * 1000.0
-            + out_ring_frames / self.info.out_rate as f32 * 1000.0
+            + occupancy_ms
             + out_buf as f32 / self.info.out_rate as f32 * 1000.0;
+        let stream_errors = c.stream_errors.load(Ordering::Relaxed);
         let peers = self
             .net
             .as_ref()
@@ -246,8 +253,18 @@ impl Engine {
             output_level: c.output_level.load(),
             xruns: c.xruns.load(Ordering::Relaxed),
             est_latency_ms: est,
+            stream_errors,
+            device_lost: stream_errors > 0,
             peers,
         }
+    }
+
+    /// 로컬 입력 FIFO 보정/언더런 횟수(테스트/진단용).
+    pub fn local_path_stats(&self) -> (u64, u64) {
+        (
+            self.worker_stats.local_corrections.load(Ordering::Relaxed),
+            self.worker_stats.local_underruns.load(Ordering::Relaxed),
+        )
     }
 
     /// 상세 지터 통계(테스트/진단용).

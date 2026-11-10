@@ -79,6 +79,10 @@ pub struct EngineStats {
     pub output_level: f32,
     pub xruns: u64,
     pub est_latency_ms: f32,
+    /// 오디오 스트림 에러 누적 횟수(장치 분리 등, 리뷰 M9).
+    pub stream_errors: u32,
+    /// 스트림 에러가 한 번이라도 났으면 true. UI는 엔진 재시작을 안내한다.
+    pub device_lost: bool,
     pub peers: Vec<PeerStats>,
 }
 
@@ -92,6 +96,8 @@ impl EngineStats {
             output_level: 0.0,
             xruns: 0,
             est_latency_ms: 0.0,
+            stream_errors: 0,
+            device_lost: false,
             peers: Vec::new(),
         }
     }
