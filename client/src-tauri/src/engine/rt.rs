@@ -10,7 +10,7 @@
 //! 디코드·지터 제어·은닉은 워커(비RT)가 소스 링에 미리 넣는다(`worker.rs`, engine-notes "콜백 구동 믹스").
 //! 게인은 워커가 원자값으로 넣어 두고, 소스 레벨과 링 부족(언더런 프레임 수)은 콜백이 원자값으로 알린다.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
@@ -90,6 +90,145 @@ impl RtSample for u16 {
     const SILENCE: Self = 32768;
 }
 
+// ============================================================================
+// 지연 측정(P1-1) RT 끝점. 비RT 쪽 절차·분석은 `measure.rs`.
+// ============================================================================
+
+/// 측정 자극 링 용량(장치 레이트 모노 샘플): 192kHz에서 0.25초.
+pub const STIM_RING_CAPACITY: usize = 192_000 / 4;
+/// 측정 녹음 링 용량(장치 레이트 모노 샘플): 192kHz에서 0.5초. 측정 스레드가 계속 비운다.
+pub const CAPTURE_RING_CAPACITY: usize = 192_000 / 2;
+
+/// 측정 제어(측정 스레드 ↔ 입·출력 콜백). 모두 원자값이다.
+///
+/// 요청 번호(`*_req`)가 바뀌면 콜백이 그 콜백의 첫 프레임 위치(장치 프레임 카운터)를 `*_start`에 적고
+/// 같은 번호를 `*_ack`에 적는다. 측정 스레드는 ack를 보고 위치를 읽는다.
+#[derive(Debug, Default)]
+pub struct MeasureShared {
+    /// 켜져 있으면 출력 콜백이 믹스 대신 자극(없으면 무음)을 장치에 쓴다. 루프백 케이블에서 모니터·피어
+    /// 소리가 되먹임되지 않게 한다. 믹스 탭·소스 링 소비는 그대로다.
+    pub out_override: AtomicBool,
+    pub stim_req: AtomicU32,
+    pub stim_ack: AtomicU32,
+    /// 자극 첫 샘플의 출력 프레임 위치(`out_played_frames` 기준).
+    pub stim_start: AtomicU64,
+    /// 녹음 켜기/끄기 요청. `cap_on`을 먼저 쓰고 `cap_req`를 올린다.
+    pub cap_on: AtomicBool,
+    pub cap_req: AtomicU32,
+    pub cap_ack: AtomicU32,
+    /// 녹음 첫 샘플의 입력 프레임 위치(`in_captured_frames` 기준).
+    pub cap_start: AtomicU64,
+}
+
+/// 입력 콜백 쪽 측정 끝점: 라우팅된 첫 입력 채널(원본, 뮤트 무관)을 녹음 링에 넣는다.
+pub struct MeasureIn {
+    sh: Arc<MeasureShared>,
+    prod: HeapProd<f32>,
+    seen: u32,
+    recording: bool,
+    scratch: Box<[f32]>,
+}
+
+/// 출력 콜백 쪽 측정 끝점: 자극 링을 꺼내 모든 출력 채널에 쓴다.
+pub struct MeasureOut {
+    sh: Arc<MeasureShared>,
+    cons: HeapCons<f32>,
+    seen: u32,
+    playing: bool,
+    scratch: Box<[f32]>,
+}
+
+/// 측정 스레드 쪽 끝점: 자극 생산자, 녹음 소비자.
+pub struct MeasureEnds {
+    pub stim: HeapProd<f32>,
+    pub capture: HeapCons<f32>,
+}
+
+/// 측정 경로 생성(링은 여기서 미리 할당).
+pub fn measure_path() -> (Arc<MeasureShared>, MeasureIn, MeasureOut, MeasureEnds) {
+    let sh = Arc::new(MeasureShared::default());
+    let (sp, sc) = HeapRb::<f32>::new(STIM_RING_CAPACITY).split();
+    let (cp, cc) = HeapRb::<f32>::new(CAPTURE_RING_CAPACITY).split();
+    let input = MeasureIn {
+        sh: sh.clone(),
+        prod: cp,
+        seen: 0,
+        recording: false,
+        scratch: vec![0.0f32; RT_CHUNK_FRAMES].into_boxed_slice(),
+    };
+    let output = MeasureOut {
+        sh: sh.clone(),
+        cons: sc,
+        seen: 0,
+        playing: false,
+        scratch: vec![0.0f32; RT_CHUNK_FRAMES].into_boxed_slice(),
+    };
+    (sh, input, output, MeasureEnds { stim: sp, capture: cc })
+}
+
+impl MeasureIn {
+    /// RT: 콜백 시작. `before` = 이 콜백 첫 프레임의 입력 프레임 위치.
+    #[inline]
+    fn begin(&mut self, before: u64) {
+        let req = self.sh.cap_req.load(Ordering::Acquire);
+        if req != self.seen {
+            self.seen = req;
+            self.recording = self.sh.cap_on.load(Ordering::Acquire);
+            if self.recording {
+                self.sh.cap_start.store(before, Ordering::Relaxed);
+            }
+            self.sh.cap_ack.store(req, Ordering::Release);
+        }
+    }
+
+    #[inline]
+    fn put(&mut self, i: usize, v: f32) {
+        if self.recording {
+            if let Some(s) = self.scratch.get_mut(i) {
+                *s = v;
+            }
+        }
+    }
+
+    /// RT: 청크 `n`프레임을 녹음 링에 넣는다(가득 차면 버림 — 측정 스레드가 판정에서 거른다).
+    #[inline]
+    fn flush(&mut self, n: usize) {
+        if self.recording {
+            let n = n.min(self.scratch.len());
+            self.prod.push_slice(&self.scratch[..n]);
+        }
+    }
+}
+
+impl MeasureOut {
+    /// RT: 콜백 시작. `before` = 이 콜백 첫 프레임의 출력 프레임 위치.
+    #[inline]
+    fn begin(&mut self, before: u64) {
+        let req = self.sh.stim_req.load(Ordering::Acquire);
+        if req != self.seen {
+            self.seen = req;
+            self.playing = true;
+            self.sh.stim_start.store(before, Ordering::Relaxed);
+            self.sh.stim_ack.store(req, Ordering::Release);
+        }
+    }
+
+    /// RT: 이번 청크의 자극 `n`프레임(없으면 0). 요청을 본 뒤에만 꺼낸다(요청 전 링에 넣어 둔 자극의
+    /// 시작 위치가 기록되지 않은 채 재생되지 않게).
+    #[inline]
+    fn chunk(&mut self, n: usize) -> &[f32] {
+        let n = n.min(self.scratch.len());
+        let got = if self.playing { self.cons.pop_slice(&mut self.scratch[..n]) } else { 0 };
+        if got < n {
+            self.playing = false;
+            if let Some(rest) = self.scratch.get_mut(got..n) {
+                rest.fill(0.0);
+            }
+        }
+        &self.scratch[..n]
+    }
+}
+
 /// 입력 콜백 상태. 장치 샘플을 내부 채널(1/2)로 라우팅해 입력 링에 넣는다.
 pub struct InputRt {
     prod: HeapProd<f32>,
@@ -99,6 +238,7 @@ pub struct InputRt {
     route_len: usize,
     internal_channels: usize,
     scratch: Box<[f32]>,
+    measure: Option<MeasureIn>,
 }
 
 /// 출력 소스 슬롯 수: 0 = 로컬(모니터), 1.. = 피어(원격 최대 5명 + 교체 중인 슬롯 여유).
@@ -169,6 +309,7 @@ pub struct OutputRt {
     bus: Box<[f32]>,
     tap_bus: Box<[f32]>,
     level_acc: [f32; MAX_SOURCES],
+    measure: Option<MeasureOut>,
 }
 
 /// 입력 링(입력 콜백 → 워커).
@@ -197,8 +338,16 @@ pub fn output_path(counters: Arc<AudioCounters>, controls: Arc<MixControls>) -> 
         bus: vec![0.0f32; RT_CHUNK_FRAMES * 2].into_boxed_slice(),
         tap_bus: vec![0.0f32; RT_CHUNK_FRAMES * 2].into_boxed_slice(),
         level_acc: [0.0; MAX_SOURCES],
+        measure: None,
     };
     (rt, OutputFeed { prods, bank, tap: tap_c })
+}
+
+impl OutputRt {
+    /// 지연 측정 자극 끝점을 붙인다(엔진 시작 시, 장치를 열기 전).
+    pub fn attach_measure(&mut self, m: MeasureOut) {
+        self.measure = Some(m);
+    }
 }
 
 impl InputRt {
@@ -220,7 +369,13 @@ impl InputRt {
             route_len,
             internal_channels: internal_channels.clamp(1, 2),
             scratch: vec![0.0f32; RT_CHUNK_FRAMES * 2].into_boxed_slice(),
+            measure: None,
         }
+    }
+
+    /// 지연 측정 녹음 끝점을 붙인다(엔진 시작 시, 장치를 열기 전).
+    pub fn attach_measure(&mut self, m: MeasureIn) {
+        self.measure = Some(m);
     }
 
     /// 라우팅에 필요한 최소 장치 채널 수.
@@ -243,7 +398,10 @@ impl InputRt {
         }
         let frames = data.len() / device_channels;
         self.counters.in_cb_frames.store(frames as u32, Ordering::Relaxed);
-        self.counters.in_captured_frames.fetch_add(frames as u64, Ordering::Relaxed);
+        let before = self.counters.in_captured_frames.fetch_add(frames as u64, Ordering::Relaxed);
+        if let Some(m) = self.measure.as_mut() {
+            m.begin(before);
+        }
         let ich = self.internal_channels;
         let mut sum_sq = 0.0f32;
         let mut count = 0usize;
@@ -259,6 +417,9 @@ impl InputRt {
                 };
                 let a = Self::sample(frame, self.route[0]);
                 let b = if self.route_len == 2 { Self::sample(frame, self.route[1]) } else { a };
+                if let Some(m) = self.measure.as_mut() {
+                    m.put(i, a);
+                }
                 if ich == 1 {
                     let m = if self.route_len == 2 { (a + b) * 0.5 } else { a };
                     if let Some(s) = self.scratch.get_mut(i) {
@@ -282,6 +443,9 @@ impl InputRt {
             self.prod.push_slice(&self.scratch[..len_ok]);
             if len_ok < len {
                 overrun = true;
+            }
+            if let Some(m) = self.measure.as_mut() {
+                m.flush(n);
             }
             done += n;
         }
@@ -370,6 +534,12 @@ impl OutputRt {
         // 워커가 "콜백 도중/직후"에 읽은 링 점유량을 걸러내도록 시작·끝을 알린다(SeqCst: 링 인덱스 갱신과 순서 고정).
         self.counters.out_cb_begin.fetch_add(1, Ordering::SeqCst);
         self.counters.out_cb_frames.store(frames as u32, Ordering::Relaxed);
+        let before = self.counters.out_played_frames.load(Ordering::Relaxed);
+        let mut override_out = false;
+        if let Some(m) = self.measure.as_mut() {
+            m.begin(before);
+            override_out = m.sh.out_override.load(Ordering::Relaxed);
+        }
         let master = self.controls.master_gain.load();
         self.level_acc = [0.0; MAX_SOURCES];
         let mut sum_sq = 0.0f32;
@@ -387,7 +557,23 @@ impl OutputRt {
             for s in 0..MAX_SOURCES {
                 underrun |= self.mix_source(s, n);
             }
+            if override_out {
+                // 측정 중: 장치에는 자극만 쓴다(믹스는 탭으로만). 모든 출력 채널에 같은 값.
+                if let Some(m) = self.measure.as_mut() {
+                    let stim = m.chunk(n);
+                    for (i, &v) in stim.iter().enumerate() {
+                        let base = (done + i) * device_channels;
+                        if let Some(frame) = data.get_mut(base..base + device_channels) {
+                            frame.fill(T::from_f32(v));
+                        }
+                        sum_sq += v * v * 2.0;
+                    }
+                }
+            }
             for i in 0..n {
+                if override_out {
+                    break;
+                }
                 let (Some(&l), Some(&r)) = (self.bus.get(i * 2), self.bus.get(i * 2 + 1)) else {
                     break;
                 };

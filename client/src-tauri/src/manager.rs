@@ -11,6 +11,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::engine::config::EngineConfig;
+use crate::engine::measure::{EchoReport, LoopbackReport};
 use crate::engine::device::AudioBackend;
 use crate::engine::mixer::MixControls;
 use crate::engine::stats::EngineStats;
@@ -36,6 +37,17 @@ pub struct EngineManager {
     controls: Arc<MixControls>,
     backend: Arc<dyn AudioBackend>,
     net_options: NetOptions,
+    /// 진행 중인 측정(루프백/에코)의 취소 플래그. 한 번에 하나만 돈다.
+    measure: Mutex<Option<Arc<AtomicBool>>>,
+}
+
+/// 측정 진행 표시를 지우는 가드.
+struct MeasureGuard<'a>(&'a Mutex<Option<Arc<AtomicBool>>>);
+
+impl Drop for MeasureGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.lock() = None;
+    }
 }
 
 impl EngineManager {
@@ -46,6 +58,45 @@ impl EngineManager {
             controls: Arc::new(MixControls::default()),
             backend,
             net_options,
+            measure: Mutex::new(None),
+        }
+    }
+
+    fn begin_measure(&self) -> Result<(MeasureGuard<'_>, Arc<AtomicBool>), String> {
+        let mut m = self.measure.lock();
+        if m.is_some() {
+            return Err("이미 측정 중입니다".into());
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        *m = Some(cancel.clone());
+        Ok((MeasureGuard(&self.measure), cancel))
+    }
+
+    /// 하드웨어 루프백 측정(설계 4절). 엔진 락은 작업을 꺼낼 때만 잡는다(측정 중에도 다른 커맨드가 돈다).
+    /// 블로킹(반복당 약 0.7초)이므로 비UI 스레드에서 부른다.
+    pub fn measure_loopback(&self, runs: u32) -> Result<LoopbackReport, String> {
+        // 합주 중에는 거부한다: 측정 동안 장치 출력이 처프로 바뀌어 모니터·피어 소리가 끊긴다(PR #13 L5).
+        let job = self.with_engine(|e| {
+            if e.has_network() {
+                return Err("합주 중에는 루프백 측정을 할 수 없습니다. 연주를 멈추고 테스트 모드에서 재세요".to_string());
+            }
+            Ok(e.loopback_job())
+        })?;
+        let (_g, cancel) = self.begin_measure()?;
+        job.run(runs, &cancel)
+    }
+
+    /// 에코 피어 측정(측정하는 쪽). 상대 동의를 `wait`까지 기다린다. 블로킹.
+    pub fn measure_echo(&self, peer_id: &str, runs: u32, wait: std::time::Duration) -> Result<EchoReport, String> {
+        let job = self.with_engine(|e| e.echo_job(peer_id))?;
+        let (_g, cancel) = self.begin_measure()?;
+        job.run(runs, wait, &cancel)
+    }
+
+    /// 진행 중인 측정을 취소한다(없으면 아무것도 안 함).
+    pub fn cancel_measure(&self) {
+        if let Some(c) = self.measure.lock().as_ref() {
+            c.store(true, Ordering::SeqCst);
         }
     }
 

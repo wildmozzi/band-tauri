@@ -90,6 +90,12 @@ pub struct PeerStats {
     /// 실제 재생 지연(ms): 벽시계로 잰 버퍼 지연 + 출력 링 + 장치 출력 버퍼. 장치 클럭 추정과 독립적이라
     /// `bufferMs`와 차이가 벌어지면 숨은 지연 누적을 뜻한다(PR #5 H-1). 재생 전에는 0.
     pub playout_ms: f32,
+    /// 이 피어가 나에게 에코 측정을 요청 중이다(UI가 동의를 묻는다, P1-1).
+    pub echo_requested: bool,
+    /// 내가 이 피어의 오디오를 되돌려 보내는 중이다(동의함).
+    pub echo_active: bool,
+    /// 이 피어가 내 오디오를 되돌려 보내는 중이다(내 측정이 진행 중).
+    pub peer_echoing: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -178,10 +184,14 @@ mod tests {
                 concealed: 0,
                 level: 0.0,
                 playout_ms: 0.0,
+                echo_requested: true,
+                echo_active: false,
+                peer_echoing: false,
             }],
             ..EngineStats::stopped()
         };
         let j = serde_json::to_string(&s).unwrap();
+        assert!(j.contains("\"echoRequested\":true") && j.contains("\"peerEchoing\":false"));
         assert!(j.contains("\"estLatencyMs\""));
         assert!(j.contains("\"peerId\":\"a\""));
         assert!(j.contains("\"state\":\"connected\""));

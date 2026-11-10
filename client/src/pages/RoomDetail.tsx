@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/useAuth'
 import { useRoom } from '../contexts/RoomContext'
 import { supabase } from '../lib/supabaseClient'
 import { MAX_PERFORMERS, type PeerState, type PeerStats } from '../native/engineApi'
+import { EchoMeasure } from '../components/EchoMeasure'
 import { RELAY_PATH_HINT, pathLabel, peerPathHint } from '../native/relayLogic'
 import { fetchRoomById, setRoomPassword } from '../services/roomApi'
 import { describeJoinError, inviteLink, recallRoomPassword, validateRoomPasswordInput } from '../contexts/room/roomAccess'
@@ -1566,6 +1567,10 @@ export function RoomDetail() {
                       >
                         {muted ? '🔇' : '🔊'}
                       </button>
+                    )}
+                    {/* 피어 메뉴: 에코 측정(네트워크 포함 왕복, 상대 동의 필요) */}
+                    {isPerformer && (
+                      <EchoMeasure peerId={oderId} peerName={peerInfo.nickname || `연주자 ${oderId.slice(0, 4)}`} stats={ps} />
                     )}
                   </div>
                 </div>

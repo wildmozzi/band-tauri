@@ -33,6 +33,10 @@ pub fn run() {
             commands::engine_stats,
             commands::engine_subscribe_mix,
             commands::engine_unsubscribe_mix,
+            commands::engine_measure_loopback,
+            commands::engine_set_echo_mode,
+            commands::engine_measure_echo_peer,
+            commands::engine_cancel_measure,
         ])
         .setup(|_app| {
             // 자동 업데이트 (P2-1): 엔드포인트·공개키는 tauri.conf.json plugins.updater, 절차는 docs/RELEASE.md

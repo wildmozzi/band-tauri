@@ -13,6 +13,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
 use crate::engine::config::EngineConfig;
+use crate::engine::measure::{EchoReport, LoopbackReport};
 use crate::engine::device::system::SystemBackend;
 use crate::engine::device::DeviceInfo;
 use crate::engine::mixer::clamp_gain;
@@ -170,6 +171,41 @@ pub async fn engine_set_master_gain(state: State<'_, EngineState>, gain: f32) ->
 #[tauri::command]
 pub async fn engine_stats(state: State<'_, EngineState>) -> Result<EngineStats, String> {
     Ok(state.0.stats())
+}
+
+/// 하드웨어 루프백 지연 측정(P1-1). 실행 중인 엔진(보통 테스트 모드)에서 출력 → 입력 케이블로 왕복을 잰다.
+/// 측정 동안 장치 출력은 자극(처프)만 낸다. `runs` 기본 8(1..=20).
+#[tauri::command]
+pub async fn engine_measure_loopback(state: State<'_, EngineState>, runs: Option<u32>) -> Result<LoopbackReport, String> {
+    let m = state.0.clone();
+    blocking(move || m.measure_loopback(runs.unwrap_or(8))).await
+}
+
+/// 에코 모드 동의/해제(에코하는 쪽). 켜기는 그 피어가 에코를 요청 중일 때만 된다(양측 합의).
+#[tauri::command]
+pub async fn engine_set_echo_mode(state: State<'_, EngineState>, peer_id: String, enabled: bool) -> Result<(), String> {
+    state.0.with_engine(|e| e.set_echo_mode(&peer_id, enabled))
+}
+
+/// 에코 피어 측정(측정하는 쪽). 그 피어에게 에코를 요청하고 동의를 `waitMs`(기본 30000)까지 기다린 뒤
+/// 클릭 `runs`개(기본 8)로 네트워크 포함 왕복을 잰다.
+#[tauri::command]
+pub async fn engine_measure_echo_peer(
+    state: State<'_, EngineState>,
+    peer_id: String,
+    runs: Option<u32>,
+    wait_ms: Option<u64>,
+) -> Result<EchoReport, String> {
+    let m = state.0.clone();
+    let wait = std::time::Duration::from_millis(wait_ms.unwrap_or(30_000).min(120_000));
+    blocking(move || m.measure_echo(&peer_id, runs.unwrap_or(8), wait)).await
+}
+
+/// 진행 중인 측정 취소.
+#[tauri::command]
+pub async fn engine_cancel_measure(state: State<'_, EngineState>) -> Result<(), String> {
+    state.0.cancel_measure();
+    Ok(())
 }
 
 #[tauri::command]
