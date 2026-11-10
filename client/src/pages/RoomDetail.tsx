@@ -108,6 +108,7 @@ export function RoomDetail() {
     peers,
     joinRoom,
     joinError,
+    roomJoined,
     submitRoomPassword,
     rtcStatus,
     rtcError,
@@ -395,6 +396,8 @@ export function RoomDetail() {
   // 함수들을 ref로 저장 (의존성 문제 방지)
   const leaveRoomRef = useRef(leaveRoom)
   const enterMiniPlayerModeRef = useRef(enterMiniPlayerMode)
+  const roomJoinedRef = useRef(roomJoined)
+  roomJoinedRef.current = roomJoined
   useEffect(() => {
     leaveRoomRef.current = leaveRoom
     enterMiniPlayerModeRef.current = enterMiniPlayerMode
@@ -406,7 +409,12 @@ export function RoomDetail() {
 
     // cleanup: 컴포넌트 언마운트 시
     return () => {
-      if (hasJoinedRef.current) {
+      if (hasJoinedRef.current && !roomJoinedRef.current) {
+        // 서버가 아직 입장시키지 않음(비밀번호 화면 등): 미니 플레이어 대신 퇴장
+        console.log('[CLEANUP] Page leaving before join completed, leaving:', roomId.slice(0, 8))
+        hasJoinedRef.current = false
+        leaveRoomRef.current()
+      } else if (hasJoinedRef.current) {
         // hasJoinedRef는 유지 (미니 플레이어에서 돌아올 때 재사용)
         console.log('[CLEANUP] Page leaving, entering mini player mode:', roomId.slice(0, 8))
         // leaveRoom 대신 미니 플레이어 모드로 전환
@@ -1175,7 +1183,8 @@ export function RoomDetail() {
                 </div>
               )}
 
-              {/* 비밀번호 */}
+              {/* 비밀번호 (마이그레이션 008 이후) */}
+              {room.has_password !== undefined && (
               <div className="edit-form-group">
                 <label>비밀번호 {room.has_password ? '(설정됨)' : '(없음)'}</label>
                 <div className="password-mode-options">
@@ -1189,7 +1198,7 @@ export function RoomDetail() {
                   <input
                     type="password"
                     autoComplete="new-password"
-                    placeholder="4~64자"
+                    placeholder="6~64자"
                     value={editPassword}
                     onChange={(e) => setEditPassword(e.target.value)}
                     maxLength={64}
@@ -1197,6 +1206,7 @@ export function RoomDetail() {
                 )}
                 <small className="form-hint">이미 들어와 있는 참여자는 그대로 남습니다. 새로 들어오는 사람부터 적용됩니다.</small>
               </div>
+              )}
 
               <div className="edit-form-actions">
                 <button

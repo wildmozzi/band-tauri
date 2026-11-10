@@ -122,16 +122,72 @@ describe('migration 008: room_secrets', () => {
 })
 
 describe('migration 008: has_password is server-only', () => {
-  it('client inserts are forced to has_password=false', async () => {
-    const r = await as<{ has_password: boolean }>('authenticated', HOST,
-      `INSERT INTO public.rooms (title, host_id, has_password) VALUES ('fake', $1, true) RETURNING has_password`, [HOST])
-    assert.equal(r.rows[0].has_password, false)
-  })
 
   it('host updates cannot flip has_password but can change is_private', async () => {
     await as('authenticated', HOST, 'UPDATE public.rooms SET has_password = false, is_private = false WHERE id = $1', [PRIVATE_ROOM])
     const r = await as<{ has_password: boolean; is_private: boolean }>('service_role', null, 'SELECT has_password, is_private FROM public.rooms WHERE id = $1', [PRIVATE_ROOM])
     assert.equal(r.rows[0].has_password, true)
     assert.equal(r.rows[0].is_private, false)
+  })
+})
+
+describe('migration 008: rooms are created by the server only (review M2)', () => {
+  it('drops the 002 client insert policy', async () => {
+    const r = await db.query<{ policyname: string }>(`SELECT policyname FROM pg_policies WHERE tablename = 'rooms' ORDER BY policyname`)
+    const names = r.rows.map(x => x.policyname)
+    assert.ok(!names.includes('rooms_insert_authenticated'))
+    assert.ok(names.includes('rooms_select_visible'))
+  })
+
+  it('authenticated users cannot insert rooms directly, neither as themselves nor with a forged host_id', async () => {
+    await assert.rejects(as('authenticated', OTHER, `INSERT INTO public.rooms (title, host_id) VALUES ('mine', $1)`, [OTHER]), /row-level security/)
+    await assert.rejects(as('authenticated', OTHER, `INSERT INTO public.rooms (title, host_id) VALUES ('forged', $1)`, [HOST]), /row-level security/)
+    await assert.rejects(as('anon', null, `INSERT INTO public.rooms (title, host_id) VALUES ('anon', $1)`, [HOST]), /row-level security/)
+    const forged = await as<{ n: number }>('service_role', null, `SELECT count(*)::int AS n FROM public.rooms WHERE title IN ('mine', 'forged', 'anon')`)
+    assert.equal(forged.rows[0].n, 0)
+  })
+
+  it('the server (service_role) can insert, including has_password=true', async () => {
+    const r = await as<{ has_password: boolean }>('service_role', null,
+      `INSERT INTO public.rooms (title, host_id, has_password) VALUES ('server', $1, true) RETURNING has_password`, [HOST])
+    assert.equal(r.rows[0].has_password, true)
+  })
+
+  it('a host cannot hand host_id to someone else; other users cannot update at all', async () => {
+    await assert.rejects(as('authenticated', HOST, 'UPDATE public.rooms SET host_id = $1 WHERE id = $2', [OTHER, PUBLIC_ROOM]), /row-level security/)
+    await as('authenticated', OTHER, `UPDATE public.rooms SET title = 'hijack' WHERE id = $1`, [PUBLIC_ROOM])
+    const r = await as<{ host_id: string; title: string }>('service_role', null, 'SELECT host_id, title FROM public.rooms WHERE id = $1', [PUBLIC_ROOM])
+    assert.equal(r.rows[0].host_id, HOST)
+    assert.equal(r.rows[0].title, 'open')
+  })
+})
+
+describe('migration 008: set_room_password (review L2)', () => {
+  const ROOM = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+  before(async () => {
+    await as('service_role', null, `INSERT INTO public.rooms (id, title, host_id) VALUES ($1, 'pw', $2)`, [ROOM, HOST])
+  })
+
+  it('sets the secret and has_password together, then clears both', async () => {
+    await as('service_role', null, 'SELECT public.set_room_password($1, $2)', [ROOM, 'scrypt$a'])
+    let r = await as<{ has_password: boolean; password_hash: string | null }>('service_role', null,
+      'SELECT r.has_password, s.password_hash FROM public.rooms r LEFT JOIN public.room_secrets s ON s.room_id = r.id WHERE r.id = $1', [ROOM])
+    assert.deepEqual(r.rows[0], { has_password: true, password_hash: 'scrypt$a' })
+    await as('service_role', null, 'SELECT public.set_room_password($1, $2)', [ROOM, 'scrypt$b'])
+    await as('service_role', null, 'SELECT public.set_room_password($1, NULL)', [ROOM])
+    r = await as('service_role', null,
+      'SELECT r.has_password, s.password_hash FROM public.rooms r LEFT JOIN public.room_secrets s ON s.room_id = r.id WHERE r.id = $1', [ROOM])
+    assert.deepEqual(r.rows[0], { has_password: false, password_hash: null })
+  })
+
+  it('rolls back on failure (bad hash leaves has_password unchanged)', async () => {
+    await assert.rejects(as('service_role', null, 'SELECT public.set_room_password($1, $2)', [ROOM, 'plaintext']), /check constraint/)
+    const r = await as<{ has_password: boolean }>('service_role', null, 'SELECT has_password FROM public.rooms WHERE id = $1', [ROOM])
+    assert.equal(r.rows[0].has_password, false)
+  })
+
+  it('is not executable by clients', async () => {
+    await assert.rejects(as('authenticated', HOST, 'SELECT public.set_room_password($1, NULL)', [ROOM]), /permission denied/)
+    await assert.rejects(as('anon', null, 'SELECT public.set_room_password($1, NULL)', [ROOM]), /permission denied/)
   })
 })

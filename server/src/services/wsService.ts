@@ -7,7 +7,7 @@ import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
 import { isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
 import { createRoomRepository, type RoomMeta, type RoomRepository } from '../repositories/roomRepository'
-import { PasswordAttemptLimiter, verifyRoomPassword } from '../lib/roomPassword'
+import { PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword, type ScryptGate } from '../lib/roomPassword'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -25,7 +25,10 @@ import { PasswordAttemptLimiter, verifyRoomPassword } from '../lib/roomPassword'
  *
  * 방 비밀번호 (P2-6)
  * - room_secrets에 해시가 있는 방은 join에 `password`가 필요하다. 방장은 비밀번호 없이 입장한다.
- * - 실패는 (방, 사용자) 5회·(방, IP) 20회/15분으로 제한(`password-rate-limited`). 이미 그 방에 있는 연결(세션 재개)은 다시 묻지 않는다.
+ * - 실패는 (방, 사용자) 5회 · (방, IPv4 또는 IPv6 /64) 20회 · (방 전체) 100회 / 15분으로 제한(`password-rate-limited`).
+ *   이미 그 방에 있는 연결(세션 재개)은 다시 묻지 않는다.
+ * - scrypt는 프로세스 공용 게이트로 동시 2개까지만 돌린다. 대기열이 차면 검증하지 않고 `password-busy`(시도 횟수 미차감).
+ * - rooms.has_password=true인데 해시가 없으면(생성/변경 중) 입장을 막는다(fail-closed).
  * - 비공개 방은 목록(RLS)에서만 숨기고, 방 id(초대 링크/방 코드)를 아는 사람은 입장할 수 있다.
  *
  * UDP 릴레이 (docs/overhaul/relay-design.md)
@@ -84,6 +87,8 @@ export interface WsLimits {
   passwordMaxFailures: number
   /** 방 비밀번호: (방, IP) 허용 실패 횟수 */
   passwordMaxFailuresPerIp: number
+  /** 방 비밀번호: (방 전체) 허용 실패 횟수 */
+  passwordMaxFailuresPerRoom: number
   /** 방 비밀번호 실패 기록 유지 시간 */
   passwordWindowMs: number
 }
@@ -102,10 +107,13 @@ const DEFAULT_LIMITS: WsLimits = {
   heartbeatMs: 30_000,
   passwordMaxFailures: 5,
   passwordMaxFailuresPerIp: 20,
+  passwordMaxFailuresPerRoom: 100,
   passwordWindowMs: 15 * 60_000,
 }
 
 export interface WsOptions {
+  /** scrypt 동시 실행 게이트 (테스트 주입용, 기본: 프로세스 공용) */
+  scryptGate?: ScryptGate
   deps?: Partial<WsDeps>
   limits?: Partial<WsLimits>
   env?: Env
@@ -271,6 +279,7 @@ export function initializeWebSocket(
   const env = options.env ?? process.env
   const deps: WsDeps = { ...supabaseDeps(supabase), ...options.deps }
   const limits: WsLimits = { ...DEFAULT_LIMITS, ...options.limits }
+  const scryptGate = options.scryptGate ?? defaultScryptGate
   const relayConfig = relayConfigFromEnv(env)
 
   // 서버 인스턴스별 상태
@@ -290,6 +299,7 @@ export function initializeWebSocket(
   const passwordLimiter = new PasswordAttemptLimiter({
     maxFailures: limits.passwordMaxFailures,
     maxFailuresPerIp: limits.passwordMaxFailuresPerIp,
+    maxFailuresPerRoom: limits.passwordMaxFailuresPerRoom,
     windowMs: limits.passwordWindowMs,
   })
 
@@ -698,14 +708,23 @@ export function initializeWebSocket(
         send(ws, { type: 'error', code: 'password-required', roomId, message: '비밀번호가 필요한 방입니다.' })
         return false
       }
-      // 익명은 IP 단위로 묶는다 (재접속으로 횟수를 초기화하지 못하게)
-      const subject = client.userId ? `u:${client.userId}` : `anon:${client.ip}`
+      // 익명은 IP(/64) 단위로 묶는다 (재접속·주소 회전으로 횟수를 초기화하지 못하게)
+      const subject = client.userId ? `u:${client.userId}` : `anon:${ipBucket(client.ip)}`
       const attempt = passwordLimiter.begin(roomId, subject, client.ip)
       if (!attempt.ok) {
         send(ws, { type: 'error', code: 'password-rate-limited', roomId, retryAfterMs: attempt.retryAfterMs, message: '비밀번호를 너무 많이 틀렸습니다. 잠시 후 다시 시도하세요.' })
         return false
       }
-      if (await verifyRoomPassword(password, hash)) {
+      let valid: boolean
+      try {
+        valid = await verifyRoomPassword(password, hash, scryptGate)
+      } catch (err) {
+        if (!(err instanceof ScryptBusyError)) throw err
+        passwordLimiter.cancelled(roomId, subject, client.ip)
+        send(ws, { type: 'error', code: 'password-busy', roomId, retryAfterMs: 2000, message: '서버가 혼잡합니다. 잠시 후 다시 시도하세요.' })
+        return false
+      }
+      if (valid) {
         passwordLimiter.succeeded(roomId, subject, client.ip)
         return true
       }
@@ -734,6 +753,11 @@ export function initializeWebSocket(
         }
         isHost = !!client.userId && meta.hostId === client.userId
         passwordHash = meta.passwordHash ?? null
+        // 비밀번호 방으로 표시됐는데 해시가 아직 없음(생성·변경 중): 방장 외 입장 보류 (fail-closed, 리뷰 L1)
+        if (meta.hasPassword && !passwordHash && !isHost) {
+          send(ws, { type: 'error', code: 'password-busy', roomId, retryAfterMs: 1000, message: '합주실을 준비 중입니다. 잠시 후 다시 시도하세요.' })
+          return
+        }
       } else if (insecureDevMode && client.authState === 'authenticated') {
         isHost = msg.isHost === true
       }

@@ -64,6 +64,8 @@ type RoomContextType = {
   joinFeedback: string
   /** 비밀번호 관련 입장 실패 (없으면 null) */
   joinError: JoinError | null
+  /** 서버가 입장을 확인함(room-state 수신). 비밀번호 화면 등에서는 false */
+  roomJoined: boolean
   /** 비밀번호를 입력해 다시 입장 시도 */
   submitRoomPassword: (password: string) => void
   currentRoomId: string | null
@@ -181,6 +183,13 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [peers, setPeers] = useState<string[]>([])
   const [joinFeedback, setJoinFeedback] = useState('')
   const [joinError, setJoinError] = useState<JoinError | null>(null)
+  const [roomJoined, setRoomJoined] = useState(false)
+  /** password-busy 자동 재시도 */
+  const busyRetryRef = useRef<{ count: number; timer: ReturnType<typeof setTimeout> | null }>({ count: 0, timer: null })
+  const clearBusyRetry = () => {
+    if (busyRetryRef.current.timer) clearTimeout(busyRetryRef.current.timer)
+    busyRetryRef.current = { count: 0, timer: null }
+  }
   /** 비밀번호 방 입장용 (재연결 시 다시 보낸다) */
   const roomPasswordRef = useRef<string | null>(null)
   const [currentRoomId, setCurrentRoomId] = useState<string | null>(null)
@@ -414,9 +423,22 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       const roomId = currentRoomIdRef.current
       if (je.roomId && je.roomId !== roomId) return
       if (roomId && je.code === 'password-invalid') forgetRoomPassword(roomId)
-      if (je.code !== 'password-rate-limited') roomPasswordRef.current = null
+      if (je.code === 'password-required' || je.code === 'password-invalid') roomPasswordRef.current = null
       setJoinError(je)
       setJoinFeedback('')
+      setRoomJoined(false)
+      // 서버 혼잡/방 준비 중: 같은 비밀번호로 몇 번 자동 재시도
+      if (je.code === 'password-busy' && roomId && busyRetryRef.current.count < 5) {
+        const retry = busyRetryRef.current
+        retry.count++
+        if (retry.timer) clearTimeout(retry.timer)
+        retry.timer = setTimeout(() => {
+          retry.timer = null
+          if (currentRoomIdRef.current !== roomId) return
+          const join = buildJoinMessageRef.current(false)
+          if (join && isOpen()) send(join)
+        }, Math.min(Math.max(je.retryAfterMs ?? 1000, 500), 10_000))
+      }
       return
     }
 
@@ -430,6 +452,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         }
         setPeers(peerIds)
         setJoinError(null)
+        setRoomJoined(true)
+        clearBusyRetry()
         if (currentRoomIdRef.current && roomPasswordRef.current) rememberRoomPassword(currentRoomIdRef.current, roomPasswordRef.current)
         setJoinFeedback(`룸 입장 완료 · 동시 연결 ${peerIds.length + 1}명`)
         const map: Record<string, PeerInstrument> = {}
@@ -521,6 +545,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     currentRoomIdRef.current = roomId
     roomPasswordRef.current = password || null
     setJoinError(null)
+    setRoomJoined(false)
+    clearBusyRetry()
     myIsHostRef.current = isHost === true
     setIsRoomHost(isHost === true)
     setCurrentRoomId(roomId)
@@ -543,6 +569,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     send({ type: 'leave' })
     roomPasswordRef.current = null
     setJoinError(null)
+    setRoomJoined(false)
+    clearBusyRetry()
     // 방 id를 먼저 비워야 시작 중인 엔진이 완료 시 "퇴장함"을 보고 스스로 내려간다 (H2)
     currentRoomIdRef.current = null
     broadcasterRef.current!.stop()
@@ -726,6 +754,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     joinRoom,
     joinFeedback,
     joinError,
+    roomJoined,
     submitRoomPassword,
     currentRoomId,
     leaveRoom,

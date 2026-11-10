@@ -42,9 +42,12 @@ describe('inviteLink', () => {
 })
 
 describe('validateRoomPasswordInput', () => {
-  it('4~64자', () => {
-    expect(validateRoomPasswordInput('abc')).not.toBeNull()
-    expect(validateRoomPasswordInput('abcd')).toBeNull()
+  it('6~64자 (NFC 기준)', () => {
+    expect(validateRoomPasswordInput('abcde')).not.toBeNull()
+    expect(validateRoomPasswordInput('abcdef')).toBeNull()
+    // 한글 NFD(자모 분리)도 NFC 글자 수로 센다
+    expect(validateRoomPasswordInput('합주실비번이야'.normalize('NFD'))).toBeNull()
+    expect(validateRoomPasswordInput('합주실비번'.normalize('NFD'))).not.toBeNull()
     expect(validateRoomPasswordInput('x'.repeat(64))).toBeNull()
     expect(validateRoomPasswordInput('x'.repeat(65))).not.toBeNull()
   })
@@ -63,6 +66,8 @@ describe('joinErrorFromSignal / describeJoinError', () => {
     expect(describeJoinError({ code: 'password-rate-limited', roomId: ID, remainingAttempts: null, retryAfterMs: 125_000 })).toContain('3분')
     expect(describeJoinError({ code: 'password-rate-limited', roomId: ID, remainingAttempts: null, retryAfterMs: 1 })).toContain('1분')
     expect(describeJoinError({ code: 'password-required', roomId: null, remainingAttempts: null, retryAfterMs: null })).toContain('비밀번호')
+    expect(describeJoinError({ code: 'password-busy', roomId: null, remainingAttempts: null, retryAfterMs: 1000 })).toContain('다시 시도')
+    expect(joinErrorFromSignal({ type: 'error', code: 'password-busy', retryAfterMs: 2000 })?.retryAfterMs).toBe(2000)
   })
 })
 

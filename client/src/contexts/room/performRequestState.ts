@@ -25,6 +25,8 @@ export interface PerformRequestState {
   myRejectReason: string | null
   /** 요청 시점에 방장이 접속해 있었는지 (알 수 없으면 null) */
   hostOnline: boolean | null
+  /** 요청을 보냈고 아직 취소/종료하지 않음 (취소 후 늦게 온 sent 무시용) */
+  requestOutstanding: boolean
 }
 
 export const initialPerformRequestState: PerformRequestState = {
@@ -34,6 +36,7 @@ export const initialPerformRequestState: PerformRequestState = {
   myInstrument: null,
   myRejectReason: null,
   hostOnline: null,
+  requestOutstanding: false,
 }
 
 export type PerformRequestAction =
@@ -76,11 +79,13 @@ function withoutRequest(s: PerformRequestState, id: string): PerformRequestState
 }
 
 const clearMine = (s: PerformRequestState): PerformRequestState =>
-  ({ ...s, myStatus: 'none', myInstrument: null, myRejectReason: null, hostOnline: null })
+  ({ ...s, myStatus: 'none', myInstrument: null, myRejectReason: null, hostOnline: null, requestOutstanding: false })
 
 function reduceSignal(s: PerformRequestState, p: { type: string; [k: string]: unknown }): PerformRequestState {
   switch (p.type) {
     case 'perform-request-sent':
+      // 취소한 뒤 늦게 도착한 확인은 무시 (서버에서도 이미 취소됨)
+      if (!s.requestOutstanding) return s
       return {
         ...s,
         myStatus: 'pending',
@@ -109,6 +114,7 @@ function reduceSignal(s: PerformRequestState, p: { type: string; [k: string]: un
       return {
         ...s,
         myStatus: 'rejected',
+        requestOutstanding: false,
         myRejectReason: typeof p.reason === 'string' && p.reason.trim() ? p.reason.trim() : null,
       }
     default:
@@ -121,7 +127,7 @@ export function performRequestReducer(s: PerformRequestState, a: PerformRequestA
     case 'signal':
       return reduceSignal(s, a.payload)
     case 'requested':
-      return { ...s, myInstrument: a.instrument, myRejectReason: null }
+      return { ...s, myInstrument: a.instrument, myRejectReason: null, requestOutstanding: true }
     case 'cancelled':
     case 'started':
       return clearMine(s)

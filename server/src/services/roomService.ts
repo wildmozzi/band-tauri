@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '../lib/supabase'
-import { hashRoomPassword, validateRoomPassword } from '../lib/roomPassword'
+import { ScryptBusyError, hashRoomPassword, validateRoomPassword } from '../lib/roomPassword'
 import { createRoomRepository, type NewRoom, type RoomRepository, type RoomRow } from '../repositories/roomRepository'
 import { StoreUnavailableError } from '../repositories/errors'
 import { ServiceError } from './errors'
@@ -8,6 +8,8 @@ import { ServiceError } from './errors'
  * 방 생성 / 비밀번호 설정 (P2-6).
  * - 비밀번호는 서버에서 scrypt로 해시해 room_secrets에만 저장한다(평문 저장·로그 금지). rooms에는 has_password만.
  * - 방장(host_id)은 토큰으로 확정한 userId. 클라이언트가 보낸 host_id는 무시한다.
+ * - 비밀번호 방은 has_password=true로 만든 뒤 해시를 저장한다 → 그 사이에는 WS가 입장을 막는다(fail-closed).
+ * - scrypt 게이트가 가득 차면 503(잠시 후 다시).
  */
 export interface CreateRoomInput extends Omit<NewRoom, 'hostId'> {
   password?: string | null
@@ -26,6 +28,15 @@ export function createRoomService(rooms: RoomRepository | null): RoomService {
     return rooms
   }
 
+  const hash = async (password: string): Promise<string> => {
+    try {
+      return await hashRoomPassword(password)
+    } catch (err) {
+      if (err instanceof ScryptBusyError) throw new ServiceError(503, { success: false, error: '서버가 혼잡합니다. 잠시 후 다시 시도해 주세요.' })
+      throw err
+    }
+  }
+
   const checkPassword = (password: string) => {
     const problem = validateRoomPassword(password)
     if (problem) throw new ServiceError(400, { success: false, error: problem })
@@ -39,11 +50,11 @@ export function createRoomService(rooms: RoomRepository | null): RoomService {
       const pw = password ? password : null
       if (pw !== null) checkPassword(pw)
       // 해시를 먼저 만들어 두면 DB 쓰기 사이 간격이 짧아진다
-      const hash = pw !== null ? await hashRoomPassword(pw) : null
-      const created = await repo().create({ ...room, hostId: userId })
-      if (hash) {
+      const digest = pw !== null ? await hash(pw) : null
+      const created = await repo().create({ ...room, hostId: userId }, { hasPassword: digest !== null })
+      if (digest) {
         try {
-          await repo().setPasswordHash(created.id, hash)
+          await repo().setPasswordHash(created.id, digest)
         } catch (err) {
           // 비밀번호 없는 방이 열린 채 남지 않도록 되돌린다
           await repo().remove(created.id).catch((e) => console.error('[ROOMS] rollback failed:', e instanceof Error ? e.message : e))
@@ -60,7 +71,7 @@ export function createRoomService(rooms: RoomRepository | null): RoomService {
       if (meta.hostId !== userId) throw new ServiceError(403, { success: false, error: '방장만 비밀번호를 바꿀 수 있습니다.' })
       const pw = password ? password : null
       if (pw !== null) checkPassword(pw)
-      await repo().setPasswordHash(roomId, pw !== null ? await hashRoomPassword(pw) : null)
+      await repo().setPasswordHash(roomId, pw !== null ? await hash(pw) : null)
       return { hasPassword: pw !== null }
     },
   }

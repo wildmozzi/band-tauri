@@ -371,7 +371,7 @@ export function CreateRoom() {
               <input
                 type="password"
                 autoComplete="new-password"
-                placeholder="4~64자"
+                placeholder="6~64자"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 maxLength={ROOM_PASSWORD_MAX}

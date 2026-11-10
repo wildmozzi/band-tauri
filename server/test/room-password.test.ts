@@ -9,7 +9,19 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'http'
 import type { WebSocketServer } from 'ws'
 import { initializeWebSocket, type RoomMeta, type WsOptions } from '../src/services/wsService'
-import { hashRoomPassword, verifyRoomPassword, validateRoomPassword, PasswordAttemptLimiter } from '../src/lib/roomPassword'
+import {
+  hashRoomPassword,
+  verifyRoomPassword,
+  validateRoomPassword,
+  PasswordAttemptLimiter,
+  ScryptGate,
+  ScryptBusyError,
+  SCRYPT_PARAMS,
+  MAX_SCRYPT_MEMORY,
+  defaultScryptGate,
+  ipBucket,
+  scryptMemory,
+} from '../src/lib/roomPassword'
 import type { NewRoom, RoomRepository, RoomRow } from '../src/repositories/roomRepository'
 import { createRoomService } from '../src/services/roomService'
 import { authJoin, bearer, connect, sleep, testVerifier, type TestClient } from './helpers'
@@ -34,18 +46,102 @@ describe('room password hashing', () => {
     }
   })
 
-  it('validates length', () => {
-    assert.ok(validateRoomPassword('abc'))
-    assert.equal(validateRoomPassword('abcd'), null)
+  it('validates length (min 6, review M1)', () => {
+    assert.ok(validateRoomPassword('abcde'))
+    assert.equal(validateRoomPassword('abcdef'), null)
     assert.ok(validateRoomPassword('x'.repeat(65)))
     assert.ok(validateRoomPassword(1234))
+  })
+
+  it('normalizes to NFC so composed/decomposed Hangul match (review L5)', async () => {
+    const nfc = '합주실비번'.normalize('NFC')
+    const nfd = nfc.normalize('NFD')
+    assert.notEqual(nfc, nfd)
+    const hash = await hashRoomPassword(nfd)
+    assert.equal(await verifyRoomPassword(nfc, hash), true)
+  })
+})
+
+describe('scrypt memory bound (review H1)', () => {
+  it('default params use at most 16MiB per call (OWASP-equivalent N=2^14, r=8, p=5)', async () => {
+    assert.deepEqual(SCRYPT_PARAMS, { N: 1 << 14, r: 8, p: 5 })
+    assert.ok(scryptMemory(SCRYPT_PARAMS.N, SCRYPT_PARAMS.r) <= 16 * 1024 * 1024)
+    assert.match(await hashRoomPassword('abcdefgh'), /^scrypt\$16384\$8\$5\$/)
+  })
+
+  it('refuses stored hashes whose parameters would exceed the memory cap', async () => {
+    const tooBig = 'scrypt$' + (1 << 16) + '$8$1$c2FsdA$aGFzaA' // 64MiB
+    assert.ok(scryptMemory(1 << 16, 8) > MAX_SCRYPT_MEMORY)
+    assert.equal(await verifyRoomPassword('x', tooBig), false)
+  })
+
+  it('runs at most maxConcurrent at once and rejects immediately when the queue is full', async () => {
+    const gate = new ScryptGate(2, 3)
+    let release!: () => void
+    const blocker = new Promise<void>(r => { release = r })
+    const jobs = Array.from({ length: 5 }, () => gate.run(() => blocker))
+    await sleep(5)
+    assert.equal(gate.running, 2)
+    assert.equal(gate.pending, 3)
+    await assert.rejects(gate.run(async () => 1), ScryptBusyError)
+    release()
+    await Promise.all(jobs)
+    assert.equal(gate.peak, 2)
+    assert.equal(gate.running, 0)
+  })
+
+  it('20 concurrent verifications through the shared gate never run more than 2 scrypt at once', async () => {
+    const hash = await hashRoomPassword('concurrency')
+    const gate = new ScryptGate(2, 32)
+    const results = await Promise.all(Array.from({ length: 20 }, (_, i) => verifyRoomPassword(i % 2 ? 'concurrency' : 'nope-nope', hash, gate)))
+    assert.equal(results.filter(Boolean).length, 10)
+    assert.equal(gate.peak, 2)
+    assert.ok(defaultScryptGate.maxConcurrent <= 2)
+  })
+})
+
+describe('ipBucket (review M1)', () => {
+  it('groups IPv6 addresses by /64 and keeps IPv4 as is', () => {
+    assert.equal(ipBucket('203.0.113.7'), '203.0.113.7')
+    assert.equal(ipBucket('::ffff:203.0.113.7'), '203.0.113.7')
+    assert.equal(ipBucket('2001:db8:1:2:aaaa::1'), '2001:db8:1:2::/64')
+    assert.equal(ipBucket('2001:0db8:0001:0002:ffff:ffff:ffff:ffff'), '2001:db8:1:2::/64')
+    assert.equal(ipBucket('2001:db8::1'), '2001:db8:0:0::/64')
+    assert.equal(ipBucket('fe80::1%eth0'), 'fe80:0:0:0::/64')
+    assert.notEqual(ipBucket('2001:db8:1:3::1'), ipBucket('2001:db8:1:2::1'))
+    assert.equal(ipBucket('unknown'), 'unknown')
   })
 })
 
 describe('PasswordAttemptLimiter', () => {
+  it('counts IPv6 addresses in the same /64 together', () => {
+    const l = new PasswordAttemptLimiter({ maxFailures: 100, maxFailuresPerIp: 2, maxFailuresPerRoom: 1000, windowMs: 60_000 })
+    assert.equal(l.begin('r', 'u:a', '2001:db8:1:2::1').ok, true)
+    assert.equal(l.begin('r', 'u:b', '2001:db8:1:2::2').ok, true)
+    const locked = l.begin('r', 'u:c', '2001:db8:1:2:dead:beef::9')
+    assert.equal(locked.ok, false)
+    assert.equal(locked.ok === false && locked.scope, 'ip')
+    assert.equal(l.begin('r', 'u:c', '2001:db8:1:3::1').ok, true)
+  })
+
+  it('caps total failures per room across users and networks', () => {
+    const l = new PasswordAttemptLimiter({ maxFailures: 100, maxFailuresPerIp: 100, maxFailuresPerRoom: 3, windowMs: 60_000 })
+    for (let i = 0; i < 3; i++) assert.equal(l.begin('r', `u:${i}`, `198.51.100.${i}`).ok, true)
+    const locked = l.begin('r', 'u:x', '192.0.2.1')
+    assert.equal(locked.ok === false && locked.scope, 'room')
+    assert.equal(l.begin('other-room', 'u:x', '192.0.2.1').ok, true)
+  })
+
+  it('cancelled() refunds an attempt that was never verified', () => {
+    const l = new PasswordAttemptLimiter({ maxFailures: 1, maxFailuresPerIp: 1, maxFailuresPerRoom: 1, windowMs: 60_000 })
+    assert.equal(l.begin('r', 'u:a', 'ip').ok, true)
+    l.cancelled('r', 'u:a', 'ip')
+    assert.equal(l.begin('r', 'u:a', 'ip').ok, true)
+  })
+
   it('locks a user after maxFailures and resets after the window', () => {
     let now = 0
-    const l = new PasswordAttemptLimiter({ maxFailures: 3, maxFailuresPerIp: 100, windowMs: 1000 }, () => now)
+    const l = new PasswordAttemptLimiter({ maxFailures: 3, maxFailuresPerIp: 100, maxFailuresPerRoom: 1000, windowMs: 1000 }, () => now)
     assert.deepEqual(l.begin('r', 'u:a', 'ip1'), { ok: true, remaining: 2 })
     assert.deepEqual(l.begin('r', 'u:a', 'ip1'), { ok: true, remaining: 1 })
     assert.deepEqual(l.begin('r', 'u:a', 'ip1'), { ok: true, remaining: 0 })
@@ -59,7 +155,7 @@ describe('PasswordAttemptLimiter', () => {
   })
 
   it('limits per IP across users, and success refunds only that attempt', () => {
-    const l = new PasswordAttemptLimiter({ maxFailures: 10, maxFailuresPerIp: 2, windowMs: 60_000 })
+    const l = new PasswordAttemptLimiter({ maxFailures: 10, maxFailuresPerIp: 2, maxFailuresPerRoom: 1000, windowMs: 60_000 })
     assert.equal(l.begin('r', 'u:a', 'ip').ok, true)
     l.succeeded('r', 'u:a', 'ip')
     assert.equal(l.begin('r', 'u:b', 'ip').ok, true)
@@ -204,6 +300,33 @@ describe('WS join: room password', () => {
   })
 })
 
+describe('WS join: scrypt busy / fail-closed (review H1, L1)', () => {
+  it('rejects with password-busy without consuming an attempt when the scrypt queue is full', async () => {
+    ROOMS.busy = { hostId: 'host', freeJoin: true, passwordHash: await hashRoomPassword('busy-room') }
+    const gate = new ScryptGate(1, 0)
+    const url = await startWs({ ...backend({ passwordMaxFailures: 1 }), scryptGate: gate })
+    let release!: () => void
+    const occupied = gate.run(() => new Promise<void>(r => { release = r }))
+    const c = await client(url)
+    const r = await tryJoin(c, 'busy', 'busy-room', 'tok:busy-user')
+    assert.equal(r.code, 'password-busy')
+    assert.ok(r.retryAfterMs > 0)
+    release()
+    await occupied
+    // 시도 횟수가 차감되지 않았으므로 (한도 1) 맞는 비밀번호로 들어갈 수 있다
+    assert.equal((await tryJoin(c, 'busy', 'busy-room')).type, 'room-state')
+  })
+
+  it('holds non-host joins while has_password is set but the hash is not stored yet', async () => {
+    ROOMS.pending = { hostId: 'host', freeJoin: true, hasPassword: true, passwordHash: null }
+    const url = await startWs(backend())
+    const c = await client(url)
+    assert.equal((await tryJoin(c, 'pending', undefined, 'tok:early-bird')).code, 'password-busy')
+    const host = await client(url)
+    assert.equal((await tryJoin(host, 'pending', undefined, 'tok:host')).type, 'room-state')
+  })
+})
+
 describe('WS join: per-IP limit across accounts', () => {
   it('locks the IP after maxFailuresPerIp failures from different users', async () => {
     ROOMS.ipcheck = { hostId: 'host', freeJoin: true, passwordHash: await hashRoomPassword('right-one') }
@@ -268,16 +391,16 @@ class MemoryRoomRepository implements RoomRepository {
   async findMeta(roomId: string): Promise<RoomMeta | null> {
     const r = this.rooms.get(roomId)
     if (!r) return null
-    return { hostId: r.host_id, freeJoin: r.free_join !== false, isPrivate: r.is_private === true, passwordHash: this.secrets.get(roomId) ?? null }
+    return { hostId: r.host_id, freeJoin: r.free_join !== false, isPrivate: r.is_private === true, hasPassword: r.has_password === true, passwordHash: this.secrets.get(roomId) ?? null }
   }
   async updateParticipantCount() {}
   async resetAllParticipantCounts() {}
-  async create(room: NewRoom): Promise<RoomRow> {
+  async create(room: NewRoom, opts: { hasPassword?: boolean } = {}): Promise<RoomRow> {
     const id = `00000000-0000-4000-8000-${String(++this.seq).padStart(12, '0')}`
     const row: RoomRow = {
       id, host_id: room.hostId, title: room.title, description: room.description, genre: room.genre,
       max_participants: room.maxParticipants, tags: room.tags, free_join: room.freeJoin, is_private: room.isPrivate,
-      instrument_slots: room.instrumentSlots, has_password: false, status: 'open',
+      instrument_slots: room.instrumentSlots, has_password: opts.hasPassword === true, status: 'open',
     }
     this.rooms.set(id, row)
     return row
@@ -355,7 +478,7 @@ describe('room routes', () => {
     const before = repo.rooms.size
     repo.failSecretWrite = true
     try {
-      assert.equal((await req('POST', '/api/rooms', { title: 'x', password: 'abcd' }, bearer('alice'))).status, 500)
+      assert.equal((await req('POST', '/api/rooms', { title: 'x', password: 'abcdef' }, bearer('alice'))).status, 500)
     } finally {
       repo.failSecretWrite = false
     }

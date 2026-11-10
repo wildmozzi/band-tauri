@@ -38,6 +38,13 @@ describe('요청자 흐름', () => {
     expect(s).toMatchObject({ myStatus: 'pending', myInstrument: 'keyboard', myRejectReason: null, hostOnline: null })
   })
 
+  it('취소 후 늦게 온 perform-request-sent는 무시 (리뷰 L6)', () => {
+    const s = run({ type: 'requested', instrument: 'guitar' }, { type: 'cancelled' }, sig({ type: 'perform-request-sent', instrument: 'guitar' }))
+    expect(s.myStatus).toBe('none')
+    // 요청하지 않았는데 온 sent도 무시
+    expect(run(sig({ type: 'perform-request-sent' })).myStatus).toBe('none')
+  })
+
   it('빈 거절 사유는 null', () => {
     expect(run(sig({ type: 'perform-request-rejected', reason: '   ' })).myRejectReason).toBeNull()
     expect(run(sig({ type: 'perform-request-rejected' })).myRejectReason).toBeNull()
@@ -95,7 +102,7 @@ describe('방장 흐름', () => {
 
 describe('공통', () => {
   it('reset은 모두 초기화', () => {
-    const s = run(sig({ type: 'perform-request-received', request: req('a') }), sig({ type: 'perform-request-sent', hostOnline: true }))
+    const s = run(sig({ type: 'perform-request-received', request: req('a') }), { type: 'requested', instrument: 'bass' }, sig({ type: 'perform-request-sent', hostOnline: true }))
     expect(reduce(s, { type: 'reset' })).toEqual(init)
   })
 

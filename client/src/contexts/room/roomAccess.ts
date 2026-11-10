@@ -3,7 +3,7 @@
  * 비밀번호 검증과 실패 제한은 서버가 한다. 여기는 입력 해석·에러 표시·세션 내 비밀번호 기억만.
  */
 
-export const ROOM_PASSWORD_MIN = 4
+export const ROOM_PASSWORD_MIN = 6
 export const ROOM_PASSWORD_MAX = 64
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
@@ -24,14 +24,15 @@ export function inviteLink(roomId: string, webBase: string | undefined, origin: 
   return base ? `${base.replace(/\/+$/, '')}/rooms/${roomId}` : roomId
 }
 
-/** 방 비밀번호 입력 검증 (서버와 같은 규칙). 문제 없으면 null */
-export function validateRoomPasswordInput(password: string): string | null {
+/** 방 비밀번호 입력 검증 (서버와 같은 규칙: NFC 기준 6~64자). 문제 없으면 null */
+export function validateRoomPasswordInput(raw: string): string | null {
+  const password = raw.normalize('NFC')
   if (password.length < ROOM_PASSWORD_MIN) return `비밀번호는 ${ROOM_PASSWORD_MIN}자 이상이어야 합니다.`
   if (password.length > ROOM_PASSWORD_MAX) return `비밀번호는 ${ROOM_PASSWORD_MAX}자 이하여야 합니다.`
   return null
 }
 
-export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited'
+export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited' | 'password-busy'
 
 export interface JoinError {
   code: JoinErrorCode
@@ -40,7 +41,7 @@ export interface JoinError {
   retryAfterMs: number | null
 }
 
-const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited'])
+const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited', 'password-busy'])
 
 /** 서버 error 메시지 중 입장(비밀번호) 관련이면 JoinError로 */
 export function joinErrorFromSignal(p: { type: string; [k: string]: unknown }): JoinError | null {
@@ -62,6 +63,8 @@ export function describeJoinError(e: JoinError): string {
       return e.remainingAttempts !== null
         ? `비밀번호가 올바르지 않습니다. (남은 시도 ${e.remainingAttempts}회)`
         : '비밀번호가 올바르지 않습니다.'
+    case 'password-busy':
+      return '서버가 혼잡하거나 합주실을 준비 중입니다. 잠시 후 자동으로 다시 시도합니다.'
     case 'password-rate-limited': {
       const min = e.retryAfterMs !== null ? Math.max(1, Math.ceil(e.retryAfterMs / 60_000)) : null
       return min !== null
