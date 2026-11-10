@@ -79,17 +79,17 @@ describe('방 상세 query', () => {
     expect(sb.mock!.client.rpc).not.toHaveBeenCalled()
   })
 
-  it('참여자 수 동기화: rooms.current_participants를 쓰고 상세 캐시를 고치며 목록을 무효화한다', async () => {
-    sb.mock!.setResult('rooms', { data: null })
+  it('참여자 수 동기화: 서버가 기록한 값을 다시 읽어(쓰지 않음) 상세 캐시를 고치며 목록을 무효화한다', async () => {
+    sb.mock!.setResult('rpc:get_room', { data: [dbRow({ current_participants: 3 })] })
     const { wrapper, client } = createQueryWrapper()
     client.setQueryData(roomKeys.detail('r1'), detail())
     client.setQueryData(roomKeys.list(), [])
     const { result } = renderHook(() => useSyncParticipantsMutation(), { wrapper })
 
-    await act(() => result.current.mutateAsync({ roomId: 'r1', count: 3 }))
+    await act(() => result.current.mutateAsync({ roomId: 'r1' }))
 
-    expect(argsOf(sb.mock!.calls[0], 'update')).toEqual([[{ current_participants: 3 }]])
-    expect(argsOf(sb.mock!.calls[0], 'eq')).toEqual([['id', 'r1']])
+    expect(sb.mock!.client.rpc).toHaveBeenCalledWith('get_room', { p_room_id: 'r1' })
+    expect(sb.mock!.client.from).not.toHaveBeenCalled()
     expect(client.getQueryData<DetailRoom>(roomKeys.detail('r1'))?.current_participants).toBe(3)
     expect(client.getQueryState(roomKeys.list())?.isInvalidated).toBe(true)
   })
@@ -326,15 +326,15 @@ describe('useRoomHostActions', () => {
     expect(leaveRoom).not.toHaveBeenCalled()
   })
 
-  it('동기화: 피어 수 + 나', async () => {
-    sb.mock!.setResult('rooms', { data: null })
+  it('동기화: 서버가 기록한 참여자 수를 보여준다 (클라이언트는 쓰지 않는다)', async () => {
+    sb.mock!.setResult('rpc:get_room', { data: [dbRow({ current_participants: 4 })] })
     const { wrapper } = createQueryWrapper()
     const { result } = renderHook(
       () => useRoomHostActions({ roomId: 'r1', userId: 'h1', isHost: true, peerCount: 2, leaveRoom: vi.fn() }),
       { wrapper },
     )
     await act(() => result.current.handleSyncParticipants())
-    expect(argsOf(sb.mock!.calls[0], 'update')).toEqual([[{ current_participants: 3 }]])
-    expect(window.alert).toHaveBeenCalledWith('참여자 수가 3명으로 동기화되었습니다.')
+    expect(sb.mock!.client.from).not.toHaveBeenCalled()
+    expect(window.alert).toHaveBeenCalledWith('참여자 수가 4명으로 동기화되었습니다.')
   })
 })

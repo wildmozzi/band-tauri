@@ -17,17 +17,14 @@ export function useRoomHostActions(opts: {
   const syncParticipants = useSyncParticipantsMutation()
   const deleteRoom = useDeleteRoomMutation()
 
-  // 참여자 수 동기화 (방장만 가능)
+  // 참여자 수 동기화 (방장만 가능). 참여자 수는 서버가 WebSocket 접속 수로 기록한다 — 그 값을 다시 읽는다
   const handleSyncParticipants = async () => {
     if (!isHost || !roomId || !isSupabaseConfigured()) return
 
-    // 현재 WebSocket으로 연결된 실제 참여자 수 (peers + 나)
-    const actualCount = peerCount + 1
-
     try {
-      await syncParticipants.mutateAsync({ roomId, count: actualCount })
-      console.log(`[SYNC] Participant count synced to ${actualCount}`)
-      alert(`참여자 수가 ${actualCount}명으로 동기화되었습니다.`)
+      const count = await syncParticipants.mutateAsync({ roomId })
+      console.log(`[SYNC] Participant count from server: ${count} (connected peers + me: ${peerCount + 1})`)
+      alert(`참여자 수가 ${count}명으로 동기화되었습니다.`)
     } catch (err) {
       console.error('[SYNC] Failed to sync participants:', err)
       alert('참여자 수 동기화에 실패했습니다.')
