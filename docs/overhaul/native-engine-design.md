@@ -75,6 +75,7 @@ off len 필드
 0   2   magic = 0x42 0x4E ("BN")
 2   1   version = 1
 3   1   type: 1=Audio 2=Hello 3=HelloAck 4=Ping 5=Pong 6=Bye
+            (7=RelayBind 8=RelayData 9=RelayBindAck 예약 — UDP 릴레이, relay-design.md. 엔진의 다른 용도 금지)
 4   4   sender_ssrc (u32, 세션마다 랜덤)
 8   4   seq (u32, 타입별 독립 증가)
 12  4   timestamp (u32, 48kHz 샘플 클럭; Ping/Pong은 송신측 µs 하위 32비트)

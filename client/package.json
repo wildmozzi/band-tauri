@@ -19,6 +19,7 @@
     "@tauri-apps/api": "^2.12.4",
     "@tonejs/midi": "^2.0.28",
     "@tosspayments/payment-sdk": "^1.9.2",
+    "ogg-opus-decoder": "1.6.16",
     "opensheetmusicdisplay": "^1.9.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",

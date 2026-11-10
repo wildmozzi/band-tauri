@@ -1,0 +1,19 @@
+[package]
+name = "band-relay"
+version = "0.1.0"
+edition = "2021"
+description = "band-tauri UDP 릴레이 서버 (암호문 중계, 대칭형 NAT 폴백)"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "net", "time", "macros", "io-util", "signal"] }
+hmac = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "time", "macros", "io-util"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

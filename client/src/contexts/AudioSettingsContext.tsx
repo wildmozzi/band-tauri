@@ -30,6 +30,7 @@ import {
   type ConfigIssue,
   type EnginePresetId,
 } from '../native/engineConfig'
+import { SettingsSaveGate, TestMonitorControl } from '../native/settingsSync'
 
 const STORAGE_KEY = 'band_engine_config_v2'
 const SAVE_DEBOUNCE_MS = 600
@@ -100,15 +101,18 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const [testError, setTestError] = useState<string | null>(null)
   const [engineInUse, setEngineInUse] = useState(false)
 
-  const loadedFromDbRef = useRef<string | null>(null)
-  const dirtyRef = useRef(false)
-  const testingRef = useRef(false)
+  // 저장 게이트: 사용자 전환 시 초기화, 그 사용자의 DB 값을 읽기 전에는 저장하지 않음 (M7, L1)
+  const gateRef = useRef(new SettingsSaveGate())
+  const localDirtyRef = useRef(false)
+  const configRef = useRef(config)
+  configRef.current = config
 
   // --- DB 로드 (로그인 사용자) ---
+  const userId = user?.id ?? null
   useEffect(() => {
-    const userId = user?.id
-    if (!userId || !supabase || loadedFromDbRef.current === userId) return
-    loadedFromDbRef.current = userId
+    const gate = gateRef.current
+    gate.setUser(userId)
+    if (!userId || !supabase || !gate.shouldLoad(userId)) return
     let cancelled = false
     void (async () => {
       try {
@@ -117,16 +121,19 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
           .select('audio_settings')
           .eq('id', userId)
           .single()
-        if (cancelled || dbError || !data?.audio_settings) return
-        const parsed = parseStoredSettings(data.audio_settings)
-        setConfig(parsed.config)
-        saveLocal(parsed.config)
-        if (parsed.migrated) {
-          setMigrated(true)
-          // 변환 결과를 새 형식으로 저장
-          await supabase!.from('profiles').update({ audio_settings: toStored(parsed.config) }).eq('id', userId)
-          console.log('[AudioSettings] 구형 오디오 설정을 새 형식으로 변환했습니다')
+        // 취소된 로드(StrictMode 이중 effect, 사용자 전환)는 loaded로 표시하지 않는다 → 다음 effect가 다시 읽음
+        if (cancelled || dbError) return
+        if (data?.audio_settings) {
+          const parsed = parseStoredSettings(data.audio_settings)
+          setConfig(parsed.config)
+          saveLocal(parsed.config)
+          if (parsed.migrated) {
+            setMigrated(true)
+            await supabase!.from('profiles').update({ audio_settings: toStored(parsed.config) }).eq('id', userId)
+            console.log('[AudioSettings] 구형 오디오 설정을 새 형식으로 변환했습니다')
+          }
         }
+        if (!cancelled) gate.markLoaded(userId)
       } catch (err) {
         console.warn('[AudioSettings] DB 설정 로드 실패:', err)
       }
@@ -134,15 +141,16 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true
     }
-  }, [user?.id])
+  }, [userId])
 
   // --- 저장 (변경 시 디바운스) ---
   useEffect(() => {
-    if (!dirtyRef.current) return
-    saveLocal(config)
-    const userId = user?.id
-    if (!userId || !supabase) return
+    if (localDirtyRef.current) saveLocal(config)
+    const gate = gateRef.current
+    gate.setUser(userId)
+    if (!userId || !supabase || !gate.shouldSave(userId)) return
     const timer = setTimeout(async () => {
+      if (!gate.shouldSave(userId)) return
       setIsSaving(true)
       try {
         const { error: dbError } = await supabase!
@@ -157,7 +165,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       }
     }, SAVE_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [config, user?.id])
+  }, [config, userId])
 
   // --- 장치 ---
   const refreshDevices = useCallback(async () => {
@@ -195,20 +203,28 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const selectedPreset = useMemo(() => matchPreset(config), [config])
 
   // --- 테스트 모니터 ---
+  // 시작 중에 stop이 와도 시작이 끝난 뒤 정지 (L8: 합주 엔진 시작과 겹치지 않게)
+  const testControlRef = useRef<TestMonitorControl | null>(null)
+  if (!testControlRef.current) {
+    testControlRef.current = new TestMonitorControl({
+      start: () => engineTestStart(configRef.current),
+      stop: () => engineTestStop(),
+    })
+  }
+  const testControl = testControlRef.current
+
   const stopTest = useCallback(async () => {
-    if (!testingRef.current) return
-    testingRef.current = false
     setIsTesting(false)
     setTestStats(null)
     try {
-      await engineTestStop()
+      await testControl.stop()
     } catch (err) {
       console.warn('[AudioSettings] 테스트 정지 실패:', engineErrorMessage(err))
     }
-  }, [])
+  }, [testControl])
 
   const startTest = useCallback(async () => {
-    if (!isNativeMode || testingRef.current) return
+    if (!isNativeMode || testControl.isActive || testControl.isStarting) return
     if (engineInUse) {
       setTestError('합주 중에는 테스트할 수 없습니다. 연주를 멈춘 뒤 다시 시도하세요.')
       return
@@ -220,13 +236,12 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     }
     setTestError(null)
     try {
-      await engineTestStart(config)
-      testingRef.current = true
-      setIsTesting(true)
+      await testControl.start()
+      setIsTesting(testControl.isActive)
     } catch (err) {
       setTestError(engineErrorMessage(err))
     }
-  }, [isNativeMode, engineInUse, config, selectedInputDevice])
+  }, [isNativeMode, engineInUse, config, selectedInputDevice, testControl])
 
   useEffect(() => {
     if (!isTesting) return
@@ -252,11 +267,12 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
 
   // --- 설정 변경 ---
   const commit = useCallback((next: EngineConfig) => {
-    dirtyRef.current = true
+    localDirtyRef.current = true
+    gateRef.current.markEdited()
     setConfig(next)
     // 테스트 중 설정이 바뀌면 이전 설정의 테스트는 의미가 없으므로 중지
-    if (testingRef.current) void stopTest()
-  }, [stopTest])
+    if (testControl.isActive || testControl.isStarting) void stopTest()
+  }, [stopTest, testControl])
 
   const updateConfig = useCallback((patch: Partial<EngineConfig>): boolean => {
     const next: EngineConfig = { ...config, ...patch }

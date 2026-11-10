@@ -18,7 +18,7 @@ const desc = (ssrc: number): LocalDescriptor => ({
 const kinds = (actions: SessionAction[]) => actions.map((a) => a.kind + ('peerId' in a ? `:${a.peerId}` : ''))
 
 describe('NativeSignalMachine', () => {
-  it('시작하면 브로드캐스트하고, 그때 알던 연주자에게는 다시 보내지 않는다', () => {
+  it('시작하면 브로드캐스트하고, 그때 알던 연주자에게는 등장 알림으로 다시 보내지 않는다', () => {
     const m = new NativeSignalMachine()
     expect(kinds(m.started('A', desc(1), ['B', 'A']))).toEqual(['broadcast'])
     expect(m.hasSentTo('B')).toBe(true)
@@ -30,21 +30,23 @@ describe('NativeSignalMachine', () => {
     const m = new NativeSignalMachine()
     expect(m.descriptorReceived('B', desc(2))).toEqual([])
     expect(m.performerAppeared('B')).toEqual([])
+    expect(m.reannounce(['B'])).toEqual([])
   })
 
-  it('descriptor 수신 시 add_peer + 아직 안 보냈으면 to로 회신(한 번만)', () => {
+  it('descriptor 수신 시 add_peer + to 회신, 같은 descriptor 중복은 무시', () => {
     const m = new NativeSignalMachine()
     m.started('A', desc(1), [])
     expect(kinds(m.descriptorReceived('B', desc(2)))).toEqual(['addPeer:B', 'sendTo:B'])
-    // 같은 descriptor 중복 수신: 아무것도 안 함
     expect(m.descriptorReceived('B', desc(2))).toEqual([])
     expect(m.peers).toEqual(['B'])
   })
 
-  it('이미 브로드캐스트로 보낸 피어의 descriptor에는 회신하지 않는다', () => {
+  it('처음 받은 descriptor에는 이미 브로드캐스트로 보냈어도 회신한다 (상대가 내 것을 놓쳤을 수 있음)', () => {
     const m = new NativeSignalMachine()
     m.started('A', desc(1), ['B'])
-    expect(kinds(m.descriptorReceived('B', desc(2)))).toEqual(['addPeer:B'])
+    expect(kinds(m.descriptorReceived('B', desc(2)))).toEqual(['addPeer:B', 'sendTo:B'])
+    // 그 뒤 같은 descriptor 중복에는 회신하지 않는다
+    expect(m.descriptorReceived('B', desc(2))).toEqual([])
   })
 
   it('내 id로 온 것은 무시한다', () => {
@@ -68,7 +70,7 @@ describe('NativeSignalMachine', () => {
     expect(kinds(m.peerGone('B'))).toEqual(['removePeer:B'])
     expect(m.peerGone('B')).toEqual([])
     expect(kinds(m.performerAppeared('B'))).toEqual(['sendTo:B'])
-    expect(kinds(m.descriptorReceived('B', desc(4)))).toEqual(['addPeer:B'])
+    expect(kinds(m.descriptorReceived('B', desc(4)))).toEqual(['addPeer:B', 'sendTo:B'])
   })
 
   it('엔진에 등록하지 않은 피어의 이탈은 보냄 표시만 지운다', () => {
@@ -78,92 +80,156 @@ describe('NativeSignalMachine', () => {
     expect(m.hasSentTo('B')).toBe(false)
   })
 
-  it('최대 6명(원격 5명)을 넘으면 거부', () => {
+  it('M2: 정원 초과 피어는 대기했다가 자리가 나면 등록하고 회신한다', () => {
     const m = new NativeSignalMachine(6)
     m.started('A', desc(1), [])
     for (let i = 0; i < 5; i++) m.descriptorReceived(`P${i}`, desc(10 + i))
-    expect(m.descriptorReceived('P5', desc(99))).toEqual([{ kind: 'rejectPeer', peerId: 'P5', reason: 'room-full' }])
+    expect(m.descriptorReceived('X', desc(99))).toEqual([{ kind: 'rejectPeer', peerId: 'X', reason: 'room-full' }])
     expect(m.peers).toHaveLength(5)
+    expect(m.waitingPeers).toEqual(['X'])
+    // X가 재시작해 새 descriptor를 보내면 대기 descriptor 교체
+    m.descriptorReceived('X', desc(100))
+    expect(kinds(m.peerGone('P2'))).toEqual(['removePeer:P2', 'addPeer:X', 'sendTo:X'])
+    const add = m.peerGone('nobody')
+    expect(add).toEqual([])
+    expect(m.peers).toContain('X')
+    expect(m.waitingPeers).toEqual([])
   })
 
-  it('정지하면 상태를 비우고 add_peer 실패 시 다음 descriptor로 재시도한다', () => {
+  it('M2: 대기 중인 피어가 나가면 대기열에서 빠진다', () => {
+    const m = new NativeSignalMachine(2)
+    m.started('A', desc(1), [])
+    m.descriptorReceived('B', desc(2))
+    m.descriptorReceived('C', desc(3))
+    expect(m.waitingPeers).toEqual(['C'])
+    m.peerGone('C')
+    expect(kinds(m.peerGone('B'))).toEqual(['removePeer:B'])
+  })
+
+  it('M1: add_peer 실패 후 같은 descriptor로 재시도, 성공하면 재시도 없음', () => {
     const m = new NativeSignalMachine()
     m.started('A', desc(1), [])
     m.descriptorReceived('B', desc(2))
     m.addPeerFailed('B')
-    expect(kinds(m.descriptorReceived('B', desc(2)))).toEqual(['addPeer:B'])
+    expect(m.retryAddPeer('B')).toEqual([{ kind: 'addPeer', peerId: 'B', descriptor: desc(2) }])
+    expect(m.retryAddPeer('B')).toEqual([])
+    m.addPeerFailed('B')
+    m.addPeerSucceeded('B')
+    expect(m.retryAddPeer('B')).toEqual([])
+    // 나간 피어는 재시도하지 않는다
+    m.addPeerFailed('B')
+    m.peerGone('B')
+    expect(m.retryAddPeer('B')).toEqual([])
+  })
+
+  it('세션 재개: reannounce는 같은 descriptor를 다시 브로드캐스트한다', () => {
+    const m = new NativeSignalMachine()
+    m.started('A', desc(1), [])
+    m.descriptorReceived('B', desc(2))
+    expect(m.reannounce(['B', 'C'])).toEqual([{ kind: 'broadcast', descriptor: desc(1) }])
+    expect(m.peers).toEqual(['B'])
+    expect(m.performerAppeared('C')).toEqual([])
+  })
+
+  it('정지하면 상태를 비운다', () => {
+    const m = new NativeSignalMachine()
+    m.started('A', desc(1), [])
+    m.descriptorReceived('B', desc(2))
     m.stopped()
     expect(m.running).toBe(false)
     expect(m.peers).toEqual([])
   })
 })
 
-/**
- * 서버 중계를 흉내 낸 시뮬레이션: 연주자들이 임의 순서로 시작해도 모두 서로를 정확히 한 번씩 등록하고 메시지가 수렴하는지.
- * 서버 규칙: 브로드캐스트는 "그 시점 연주자" 전원에게, to는 대상이 연주자일 때만 중계.
- */
-function simulate(order: string[], performerVisibility: 'immediate' | 'delayed') {
-  const machines = new Map<string, NativeSignalMachine>()
-  const added = new Map<string, Map<string, number>>()
-  const performers = new Set<string>()
-  const queue: { to: string; from: string; descriptor: LocalDescriptor }[] = []
-  let messages = 0
+type Msg = { to: string; from: string; descriptor: LocalDescriptor }
 
-  const exec = (self: string, actions: SessionAction[]) => {
+/** 서버 중계 흉내: 브로드캐스트는 그 시점 연주자 전원(연결된 사람만), to는 대상이 연결된 연주자일 때만 */
+class Net {
+  machines = new Map<string, NativeSignalMachine>()
+  added = new Map<string, Map<string, number>>()
+  performers = new Set<string>()
+  offline = new Set<string>()
+  queue: Msg[] = []
+  messages = 0
+
+  exec(self: string, actions: SessionAction[]) {
     for (const a of actions) {
       if (a.kind === 'broadcast') {
-        for (const p of performers) if (p !== self) { queue.push({ to: p, from: self, descriptor: a.descriptor }); messages++ }
+        for (const p of this.performers) if (p !== self) this.deliver({ to: p, from: self, descriptor: a.descriptor })
       } else if (a.kind === 'sendTo') {
-        if (performers.has(a.peerId)) { queue.push({ to: a.peerId, from: self, descriptor: a.descriptor }); messages++ }
+        if (this.performers.has(a.peerId)) this.deliver({ to: a.peerId, from: self, descriptor: a.descriptor })
       } else if (a.kind === 'addPeer') {
-        const m = added.get(self)!
+        const m = this.added.get(self)!
         m.set(a.peerId, (m.get(a.peerId) ?? 0) + 1)
       } else if (a.kind === 'removePeer') {
-        added.get(self)!.delete(a.peerId)
+        this.added.get(self)!.delete(a.peerId)
       }
     }
   }
-  const drain = () => {
-    while (queue.length) {
-      const msg = queue.shift()!
-      exec(msg.to, machines.get(msg.to)!.descriptorReceived(msg.from, msg.descriptor))
+  deliver(msg: Msg) {
+    this.messages++
+    if (this.offline.has(msg.to) || this.offline.has(msg.from)) return // 끊긴 동안 유실
+    this.queue.push(msg)
+  }
+  drain() {
+    while (this.queue.length) {
+      const msg = this.queue.shift()!
+      this.exec(msg.to, this.machines.get(msg.to)!.descriptorReceived(msg.from, msg.descriptor))
     }
   }
-
-  order.forEach((id, i) => {
+  join(id: string, ssrc: number, visibility: 'immediate' | 'delayed') {
     const m = new NativeSignalMachine()
-    machines.set(id, m)
-    added.set(id, new Map())
-    const known = [...performers]
-    // 엔진 시작 → start-performing (서버가 연주자로 등록) → announce
-    performers.add(id)
-    if (performerVisibility === 'immediate') {
-      for (const other of known) exec(other, machines.get(other)!.performerAppeared(id))
+    this.machines.set(id, m)
+    this.added.set(id, new Map())
+    const known = [...this.performers]
+    this.performers.add(id)
+    const notify = () => {
+      for (const other of known) if (!this.offline.has(other)) this.exec(other, this.machines.get(other)!.performerAppeared(id))
     }
-    exec(id, m.started(id, desc(100 + i), known))
-    if (performerVisibility === 'delayed') {
-      drain()
-      for (const other of known) exec(other, machines.get(other)!.performerAppeared(id))
+    if (visibility === 'immediate') notify()
+    this.exec(id, m.started(id, desc(ssrc), known))
+    if (visibility === 'delayed') {
+      this.drain()
+      notify()
     }
-    drain()
-  })
-  return { added, messages }
+    this.drain()
+  }
+  fullMesh(ids: string[]) {
+    for (const id of ids) {
+      const peers = this.added.get(id)!
+      expect([...peers.keys()].sort()).toEqual(ids.filter((x) => x !== id).sort())
+      for (const count of peers.values()) expect(count).toBe(1)
+    }
+  }
 }
 
 describe('시그널링 시뮬레이션', () => {
   for (const visibility of ['immediate', 'delayed'] as const) {
     it(`6명이 순서대로 들어와도 풀메시가 완성된다 (${visibility})`, () => {
+      const net = new Net()
       const ids = ['C', 'A', 'F', 'B', 'E', 'D']
-      const { added, messages } = simulate(ids, visibility)
-      for (const id of ids) {
-        const peers = added.get(id)!
-        expect([...peers.keys()].sort()).toEqual(ids.filter((x) => x !== id).sort())
-        for (const count of peers.values()) expect(count).toBe(1)
-      }
-      // 쌍마다 최대 3개(브로드캐스트 + 회신 + 등장 알림) 이하로 수렴
-      expect(messages).toBeLessThanOrEqual(15 * 3)
+      ids.forEach((id, i) => net.join(id, 100 + i, visibility))
+      net.fullMesh(ids)
+      // 쌍마다 최대 4개(브로드캐스트·등장 알림 각 1 + 첫 등록 회신 각 1) 이하로 수렴
+      expect(net.messages).toBeLessThanOrEqual(15 * 4)
     })
   }
+
+  it('세션 재개: 내가 끊긴 동안 시작한 연주자와도 reannounce 후 연결된다', () => {
+    const net = new Net()
+    net.join('A', 1, 'immediate')
+    net.join('B', 2, 'immediate')
+    // B의 WS가 끊김 (서버는 재개 유예 동안 B를 연주자로 유지)
+    net.offline.add('B')
+    net.join('X', 3, 'immediate')
+    expect(net.added.get('X')!.has('B')).toBe(false)
+    expect(net.added.get('B')!.has('X')).toBe(false)
+    // 재개: B는 엔진을 유지한 채 descriptor 재전송
+    net.offline.delete('B')
+    net.exec('B', net.machines.get('B')!.reannounce(['A', 'X']))
+    net.drain()
+    net.fullMesh(['A', 'B', 'X'])
+  })
 })
 
 describe('selectBroadcaster', () => {

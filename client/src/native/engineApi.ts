@@ -147,8 +147,14 @@ export function engineRemovePeer(peerId: string): Promise<null> {
   return invoke<null>('engine_remove_peer', { peerId })
 }
 
-export function engineSetPeerGain(peerId: string, gain: number, muted: boolean): Promise<null> {
-  return invoke<null>('engine_set_peer_gain', { peerId, gain, muted })
+/** pan: -1(왼쪽)..1(오른쪽), equal-power. 생략하면 엔진 기본(0) */
+export function engineSetPeerGain(peerId: string, gain: number, muted: boolean, pan?: number): Promise<null> {
+  return invoke<null>('engine_set_peer_gain', pan === undefined ? { peerId, gain, muted } : { peerId, gain, muted, pan })
+}
+
+/** 내 입력을 송신/모니터/믹스 구독에서 무음 처리 (레벨 미터는 계속 표시) */
+export function engineSetInputMuted(muted: boolean): Promise<null> {
+  return invoke<null>('engine_set_input_muted', { muted })
 }
 
 export function engineSetMonitor(enabled: boolean, gain: number): Promise<null> {

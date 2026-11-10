@@ -40,8 +40,14 @@ async function getAccessToken(): Promise<string | null> {
 }
 
 export interface SignalingHandlers {
-  /** welcome 수신 (새 clientId). 재연결이면 여기서 rejoin을 보내면 된다(auth 완료 후 전송됨) */
-  onWelcome: (clientId: string) => void
+  /** welcome 수신 (clientId 갱신). 세션 재개 시에는 임시 id → 재개된 id 순으로 두 번 온다 */
+  onWelcome?: (clientId: string) => void
+  /**
+   * 연결당 한 번, 인증이 끝나 메시지를 보낼 수 있게 된 시점(auth-result 또는 구 서버 fallback).
+   * resumed=true면 서버가 이전 세션(같은 clientId, 방·연주 상태)을 이어 붙였다.
+   * 재연결이면 여기서 rejoin을 보낸다.
+   */
+  onReady?: (clientId: string, resumed: boolean) => void
   onMessage: (payload: SignalPayload) => void
   /** 연결 종료 (재연결 여부와 무관) */
   onClosed: () => void
@@ -115,6 +121,7 @@ export function useSignaling(handlers: SignalingHandlers): Signaling {
     let authTimer: ReturnType<typeof setTimeout> | null = null
     let attempts = 0
 
+    let resumed = false
     const markReady = (ws: WebSocket) => {
       if (readyRef.current) return
       readyRef.current = true
@@ -122,6 +129,8 @@ export function useSignaling(handlers: SignalingHandlers): Signaling {
       const queued = queueRef.current
       queueRef.current = []
       queued.forEach((p) => rawSend(ws, p))
+      const id = clientIdRef.current
+      if (id) handlersRef.current.onReady?.(id, resumed)
     }
 
     const connect = () => {
@@ -129,6 +138,7 @@ export function useSignaling(handlers: SignalingHandlers): Signaling {
       setStatus('connecting')
       readyRef.current = false
       rejectedJoinRef.current = false
+      resumed = false
       // 새 연결의 welcome이 덮어쓰기 전에 이전 clientId를 잡아둔다
       const resumeClientId = lastClientIdRef.current
       const ws = new WebSocket(url)
@@ -194,11 +204,13 @@ export function useSignaling(handlers: SignalingHandlers): Signaling {
           clientIdRef.current = payload.clientId
           lastClientIdRef.current = payload.clientId
           setClientId(payload.clientId)
-          handlersRef.current.onWelcome(payload.clientId)
+          if (payload.resumed === true) resumed = true
+          handlersRef.current.onWelcome?.(payload.clientId)
           return
         }
         if (payload.type === 'auth-result') {
           setAuthenticated(payload.authenticated === true)
+          if (payload.resumed === true) resumed = true
           const wasReady = readyRef.current
           markReady(ws)
           // fallback으로 먼저 보낸 join이 auth-required로 거부됐으면 다시 보낸다

@@ -1,0 +1,32 @@
+{
+  "description": "릴레이 토큰 교차 언어 벡터 (relay-design.md 3절). server/test/relay-token.test.ts와 relay/src/token.rs가 함께 읽는다. 각 벡터는 expiresAt-1에 유효, expiresAt에 만료.",
+  "vectors": [
+    {
+      "name": "ascii",
+      "secret": "band-relay-test-vector-secret-32bytes!!",
+      "roomId": "room-abc",
+      "memberId": "11111111-2222-3333-4444-555555555555",
+      "ssrc": 16909060,
+      "expiresAt": 1700000000,
+      "hex": "01000000006553f1000102030408726f6f6d2d6162632431313131313131312d323232322d333333332d343434342d35353535353535353535353537cb2b9be3db194a0018849fd9df099457dbdc9f39aef51c5f621ba02d8f05b4"
+    },
+    {
+      "name": "non-ascii room/member",
+      "secret": "비밀-키-테스트-벡터-0123456789abcdef",
+      "roomId": "합주방-🎸-1",
+      "memberId": "사용자-ユーザー",
+      "ssrc": 4294967295,
+      "expiresAt": 1,
+      "hex": "010000000000000001ffffffff10ed95a9eca3bcebb0a92df09f8eb82d3116ec82acec9aa9ec9e902de383a6e383bce382b6e383bcaa4e8a77a665ae5ddd9c9a87ecc8c70600482131fa87f2a0daaee3c26243f2c3"
+    },
+    {
+      "name": "max lengths (room 128B, member 64B)",
+      "secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "roomId": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+      "memberId": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+      "ssrc": 0,
+      "expiresAt": 18446744073709,
+      "hex": "01000010c6f7a0b5ed00000000807272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272727272406d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d79bdb0e73162bc7d1fbb08df375cd08b71e4ed42919267651bb358927b83aa80"
+    }
+  ]
+}
