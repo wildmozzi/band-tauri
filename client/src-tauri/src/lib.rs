@@ -13,6 +13,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
         .manage(commands::EngineState::default())
         .invoke_handler(tauri::generate_handler![
             commands::engine_list_devices,
@@ -31,6 +32,9 @@ pub fn run() {
             commands::engine_unsubscribe_mix,
         ])
         .setup(|_app| {
+            // 자동 업데이트 (P2-1): 엔드포인트·공개키는 tauri.conf.json plugins.updater, 절차는 docs/RELEASE.md
+            #[cfg(desktop)]
+            _app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             // ASIO Host는 여기서(백그라운드로) 미리 만들지 않는다 — engine/device.rs 참고.
             #[cfg(debug_assertions)]
             {
