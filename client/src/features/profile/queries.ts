@@ -93,12 +93,13 @@ export const profileApi = {
   },
 }
 
-/** profiles 테이블의 닉네임. enabled=false면 조회하지 않는다 */
-export function useProfileNicknameQuery(userId: string | undefined, enabled = true) {
+/** profiles 테이블의 닉네임. enabled=false면 조회하지 않는다. retry는 기본값(전역 1회)을 덮어쓸 때만 */
+export function useProfileNicknameQuery(userId: string | undefined, enabled = true, retry?: boolean | number) {
   return useQuery({
     queryKey: profileKeys.nickname(userId),
     queryFn: () => profileApi.getNickname(userId!),
     enabled: enabled && Boolean(userId) && isSupabaseConfigured(),
+    ...(retry !== undefined ? { retry } : {}),
   })
 }
 

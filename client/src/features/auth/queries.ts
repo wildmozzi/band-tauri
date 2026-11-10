@@ -7,9 +7,13 @@
  *   그 뒤 사용자 id가 바뀌면(로그아웃 A→없음, 로그인 없음→B, 계정 전환 A→B) 사용자별 서버 상태를 비운다:
  *     - mutation 캐시 비움
  *     - 비활성 쿼리 제거(이전 사용자의 내 방·좋아요 여부·프로필·오디오 설정 등)
- *     - 활성 쿼리는 resetQueries로 데이터를 버리고 새 세션으로 다시 읽음
- *   queryClient.clear()를 쓰지 않는 이유: 마운트된 useQuery 관찰자가 지워진 쿼리를 다시 읽지 않아
- *   화면이 다음 렌더까지 빈 채로 남는다. (RLS 결과가 사용자마다 다른 키 없는 쿼리 — 방 목록 등 — 도 함께 초기화된다)
+ *     - 활성 쿼리는 invalidateQueries로 데이터는 둔 채 새 세션으로 백그라운드 재조회
+ *       (진행 중인 조회는 취소하지 않는다 — 로그인 직후 새로 마운트된 쿼리의 이중 조회 방지)
+ *   사용자와 무관한 키(USER_AGNOSTIC_KEYS: 방 상세, 공개 방 목록)는 건드리지 않는다.
+ *     합주실에 있는 동안 다른 탭 로그아웃·세션 만료가 와도 라이브 화면이 로딩으로 바뀌거나 목록으로 튕기지 않게.
+ *     공개 목록은 publicRooms로 남의/내 비공개 방을 모두 거르므로 사용자별 차이가 화면에 나오지 않는다.
+ *   queryClient.clear()·resetQueries를 쓰지 않는 이유: clear는 마운트된 관찰자가 다시 읽지 않고,
+ *   reset은 활성 화면의 데이터를 버려 로딩 상태로 되돌린다.
  *   토큰 갱신(TOKEN_REFRESHED)처럼 같은 사용자의 user 객체만 바뀌면 초기화하지 않는다.
  */
 import { useEffect, useRef } from 'react'
@@ -74,9 +78,20 @@ export function shouldResetUserCache(prev: string | null | undefined, next: stri
 
 /** 사용자별 서버 상태 초기화 (규칙은 파일 상단) */
 export function resetUserScopedCache(qc: QueryClient): Promise<void> {
+  const userScoped = (query: { queryKey: readonly unknown[] }) => !isUserAgnosticKey(query.queryKey)
   qc.getMutationCache().clear()
-  qc.removeQueries({ type: 'inactive' })
-  return qc.resetQueries({ type: 'active' })
+  qc.removeQueries({ type: 'inactive', predicate: userScoped })
+  return qc.invalidateQueries({ type: 'active', predicate: userScoped }, { cancelRefetch: false })
+}
+
+/** 사용자와 무관해 계정이 바뀌어도 그대로 두는 쿼리 키 접두사 */
+export const USER_AGNOSTIC_KEYS: readonly (readonly unknown[])[] = [
+  ['rooms', 'detail'],
+  ['rooms', 'list'],
+]
+
+export function isUserAgnosticKey(queryKey: readonly unknown[]): boolean {
+  return USER_AGNOSTIC_KEYS.some(prefix => prefix.every((part, i) => queryKey[i] === part))
 }
 
 /** AuthProvider에서 호출: 사용자 id가 바뀌면 Query 캐시 초기화 */

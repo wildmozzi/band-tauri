@@ -17,7 +17,8 @@
  *   참여자 수 동기화 → 상세 캐시의 current_participants 직접 갱신 + 목록 무효화
  *   방 상세에서 삭제 → 위 '내 방 삭제' + 화면을 떠난 뒤 forgetRoomDetail로 상세 캐시 제거
  *                     (상세가 마운트된 채로 지우면 지운 방을 다시 조회한다)
- *   상세 조회 실패는 재시도하지 않는다(없는 방이면 바로 목록으로 — 기존 동작)
+ *   상세 조회 실패는 재시도하지 않는다(없는 방이면 바로 목록으로 — 기존 동작). 마운트마다 다시 확인(refetchOnMount: always)
+ *   사용자 전환(features/auth) 때 상세·공개 목록은 사용자와 무관해 초기화하지 않는다
  */
 import { useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
@@ -85,7 +86,7 @@ export const roomsApi = {
   /** 방 상세 (비공개 방 포함). 없으면 'room not found' 오류 */
   async getRoomDetail(roomId: string): Promise<DetailRoom> {
     const data = await fetchRoomById(roomId)
-    if (!data) throw new Error('room not found')
+    if (!data) throw new RoomNotFoundError(roomId)
     return normalizeDetailRoom(data)
   },
 
@@ -178,13 +179,27 @@ export function patchMyRoomCache(
 
 // ---------- 방 상세 (RoomDetail) ----------
 
-/** 방 상세. 실패는 재시도하지 않는다(없는 방 → 화면이 목록으로 이동) */
+/** 그 id의 방이 없음(삭제됨). 일시적 조회 실패와 구분해 화면이 목록으로 이동한다 */
+export class RoomNotFoundError extends Error {
+  constructor(roomId: string) {
+    super('room not found')
+    this.name = 'RoomNotFoundError'
+    this.roomId = roomId
+  }
+  roomId: string
+}
+
+/**
+ * 방 상세. 실패는 재시도하지 않는다(없는 방 → 화면이 목록으로 이동).
+ * 마운트할 때마다 다시 확인한다(미니 플레이어에서 돌아온 사이 삭제·수정된 방 반영 — 기존 동작). 캐시는 그동안 바로 보여준다
+ */
 export function useRoomDetailQuery(roomId: string | undefined) {
   return useQuery({
     queryKey: roomKeys.detail(roomId),
     queryFn: () => roomsApi.getRoomDetail(roomId!),
     enabled: Boolean(roomId) && isSupabaseConfigured(),
     retry: false,
+    refetchOnMount: 'always',
   })
 }
 

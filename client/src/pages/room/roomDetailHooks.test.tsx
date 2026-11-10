@@ -26,6 +26,7 @@ import type { DetailRoom } from './roomDetailModel'
 import { useRoomDetailData } from './useRoomDetailData'
 import { useRoomHostActions } from './useRoomHostActions'
 import { useRoomSettingsForm } from './useRoomSettingsForm'
+import { useResetQueryCacheOnUserChange } from '../../features/auth/queries'
 
 const dbRow = (over: Record<string, unknown> = {}) => ({
   id: 'r1', title: '방', description: null, host_id: 'h1', max_participants: 8, current_participants: 1,
@@ -135,6 +136,71 @@ describe('useRoomDetailData', () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith('/rooms'))
     expect(result.current.room).toBeNull()
     expect(result.current.loading).toBe(false)
+  })
+})
+
+describe('합주실에 있는 동안 사용자가 바뀔 때 (리뷰 M1)', () => {
+  it('다른 탭 로그아웃·세션 만료·계정 전환에도 방 화면이 로딩으로 바뀌거나 목록으로 이동하지 않는다', async () => {
+    sb.mock!.setResult('rpc:get_room', { data: [dbRow()] })
+    sb.mock!.setResult('profiles', { data: { nickname: '방장님' } })
+    const { wrapper } = createQueryWrapper()
+    const seen: { loading: boolean; room: boolean }[] = []
+    const { result, rerender } = renderHook(({ userId }) => {
+      useResetQueryCacheOnUserChange(userId, false)
+      const data = useRoomDetailData('r1')
+      seen.push({ loading: data.loading, room: data.room !== null })
+      return data
+    }, { wrapper, initialProps: { userId: 'u1' as string | null } })
+    await waitFor(() => expect(result.current.hostNickname).toBe('방장님'))
+    const rpcBefore = sb.mock!.client.rpc.mock.calls.length
+    seen.length = 0
+
+    rerender({ userId: null }) // 다른 탭에서 로그아웃 / refresh token 만료
+    rerender({ userId: 'u2' }) // 다른 계정으로 로그인
+    await act(async () => {})
+
+    expect(seen.every(s => s.room && !s.loading)).toBe(true)
+    expect(result.current.room?.id).toBe('r1')
+    expect(result.current.hostNickname).toBe('방장님')
+    expect(navigate).not.toHaveBeenCalled()
+    expect(sb.mock!.client.rpc.mock.calls.length).toBe(rpcBefore) // 방 상세는 다시 읽지도 않는다
+  })
+})
+
+describe('방 상세 재입장 (리뷰 L1)', () => {
+  it('캐시가 있어도 마운트하면 다시 확인하고, 그 사이 삭제됐으면 목록으로 이동한다', async () => {
+    sb.mock!.setResult('rpc:get_room', { data: [] })
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(roomKeys.detail('r1'), detail())
+    const { result } = renderHook(() => useRoomDetailData('r1'), { wrapper })
+
+    expect(result.current.room?.id).toBe('r1') // 캐시를 바로 보여주고
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith('/rooms'))
+    expect(sb.mock!.client.rpc).toHaveBeenCalledTimes(1)
+  })
+
+  it('일시적 조회 오류면 보던 방을 유지한다', async () => {
+    sb.mock!.setResult('rpc:get_room', { error: { message: 'no fn' } })
+    sb.mock!.setResult('rooms', { error: { message: 'network' } })
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(roomKeys.detail('r1'), detail())
+    const { result } = renderHook(() => useRoomDetailData('r1'), { wrapper })
+
+    await waitFor(() => expect(sb.mock!.calls.some(c => c.table === 'rooms')).toBe(true))
+    await act(async () => {})
+    expect(navigate).not.toHaveBeenCalled()
+    expect(result.current.room?.id).toBe('r1')
+  })
+
+  it('방장 닉네임 조회가 실패하면 재시도 없이 바로 알 수 없음 (리뷰 L3)', async () => {
+    sb.mock!.setResult('rpc:get_room', { data: [dbRow()] })
+    sb.mock!.setResult('profiles', { error: { message: 'rls' } })
+    const { wrapper, client } = createQueryWrapper()
+    client.setDefaultOptions({ queries: { ...client.getDefaultOptions().queries, retry: 1, retryDelay: 1000 } })
+    const { result } = renderHook(() => useRoomDetailData('r1'), { wrapper })
+
+    await waitFor(() => expect(result.current.hostNickname).toBe('알 수 없음'), { timeout: 500 })
+    expect(sb.mock!.calls.filter(c => c.table === 'profiles')).toHaveLength(1)
   })
 })
 

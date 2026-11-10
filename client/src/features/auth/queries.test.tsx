@@ -22,7 +22,7 @@ const sb = vi.hoisted(() => {
 })
 vi.mock('../../lib/supabaseClient', () => ({ supabase: sb.client, isSupabaseConfigured: () => true }))
 
-import { authApi, resetUserScopedCache, shouldResetUserCache, useResetQueryCacheOnUserChange } from './queries'
+import { authApi, isUserAgnosticKey, resetUserScopedCache, shouldResetUserCache, useResetQueryCacheOnUserChange } from './queries'
 import { AuthProvider } from '../../contexts/AuthContext'
 import { useAuth } from '../../contexts/useAuth'
 
@@ -49,21 +49,64 @@ describe('shouldResetUserCache', () => {
 })
 
 describe('resetUserScopedCache', () => {
-  it('비활성 쿼리는 지우고, 활성 쿼리는 데이터를 버리고 다시 읽으며, mutation 캐시를 비운다', async () => {
+  it('비활성 쿼리는 지우고, 활성 쿼리는 데이터를 둔 채 다시 읽으며(로딩으로 안 돌아감), mutation 캐시를 비운다', async () => {
     const { client, wrapper } = createQueryWrapper()
     client.setQueryData(['rooms', 'mine', 'a'], ['m1'])
     let n = 0
     const fetcher = vi.fn(async () => `v${++n}`)
-    const { result } = renderHook(() => useQuery({ queryKey: ['rooms', 'list'], queryFn: fetcher }), { wrapper })
+    const { result } = renderHook(() => useQuery({ queryKey: ['community', 'posts', {}], queryFn: fetcher }), { wrapper })
     await waitFor(() => expect(result.current.data).toBe('v1'))
     client.getMutationCache().build(client, { mutationFn: async () => 1 })
 
-    await act(() => resetUserScopedCache(client))
+    let reset!: Promise<void>
+    act(() => { reset = resetUserScopedCache(client) })
+    expect(result.current.data).toBe('v1') // invalidate: 데이터 유지
+    expect(result.current.isLoading).toBe(false)
+    await act(() => reset)
 
     expect(client.getQueryCache().find({ queryKey: ['rooms', 'mine', 'a'] })).toBeUndefined()
     await waitFor(() => expect(result.current.data).toBe('v2'))
     expect(fetcher).toHaveBeenCalledTimes(2)
     expect(client.getMutationCache().getAll()).toHaveLength(0)
+  })
+
+  it('사용자와 무관한 키(방 상세·공개 목록)는 활성이든 비활성이든 건드리지 않는다', async () => {
+    const { client, wrapper } = createQueryWrapper()
+    client.setQueryData(['rooms', 'detail', 'r2'], { id: 'r2' })
+    client.setQueryData(['rooms', 'list'], [])
+    const fetcher = vi.fn(async () => ({ id: 'r1' }))
+    const { result } = renderHook(() => useQuery({ queryKey: ['rooms', 'detail', 'r1'], queryFn: fetcher }), { wrapper })
+    await waitFor(() => expect(result.current.data).toEqual({ id: 'r1' }))
+
+    await act(() => resetUserScopedCache(client))
+
+    expect(client.getQueryData(['rooms', 'detail', 'r2'])).toEqual({ id: 'r2' })
+    expect(client.getQueryData(['rooms', 'list'])).toEqual([])
+    expect(client.getQueryState(['rooms', 'detail', 'r1'])?.isInvalidated).toBe(false)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('진행 중인 조회는 취소·재시작하지 않는다(로그인 직후 이중 조회 방지)', async () => {
+    const { client, wrapper } = createQueryWrapper()
+    let finish!: (v: string) => void
+    const fetcher = vi.fn(() => new Promise<string>(r => { finish = r }))
+    const { result } = renderHook(() => useQuery({ queryKey: ['profile', 'audioSettings', 'b'], queryFn: fetcher }), { wrapper })
+    await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1))
+
+    let reset!: Promise<void>
+    act(() => { reset = resetUserScopedCache(client) })
+    await act(async () => { finish('ok'); await reset })
+
+    await waitFor(() => expect(result.current.data).toBe('ok'))
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('isUserAgnosticKey', () => {
+    expect(isUserAgnosticKey(['rooms', 'detail', 'r1'])).toBe(true)
+    expect(isUserAgnosticKey(['rooms', 'list'])).toBe(true)
+    expect(isUserAgnosticKey(['rooms', 'mine', 'a'])).toBe(false)
+    expect(isUserAgnosticKey(['profile', 'nickname', 'a'])).toBe(false)
+    expect(isUserAgnosticKey(['rooms'])).toBe(false)
   })
 })
 
