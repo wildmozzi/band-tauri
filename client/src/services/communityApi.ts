@@ -55,6 +55,9 @@ export interface CreateCommentData {
   parent_id?: string
 }
 
+// profiles:author_id 조인 결과 (Supabase 생성 타입 도입 전까지의 수동 타입)
+type JoinedProfile = { nickname?: string; email?: string } | null
+
 // Helper to get author name from user
 const getAuthorName = (email: string | undefined): string => {
   return email?.split('@')[0] ?? 'User'
@@ -317,8 +320,8 @@ export const communityApi = {
       parent_id: comment.parent_id,
       created_at: comment.created_at,
       updated_at: comment.updated_at,
-      author_name: (comment.profiles as any)?.nickname ||
-                   getAuthorName((comment.profiles as any)?.email),
+      author_name: (comment.profiles as unknown as JoinedProfile)?.nickname ||
+                   getAuthorName((comment.profiles as unknown as JoinedProfile)?.email),
       replies: []
     }))
 
@@ -415,8 +418,8 @@ export const communityApi = {
       parent_id: comment.parent_id,
       created_at: comment.created_at,
       updated_at: comment.updated_at,
-      author_name: (comment.profiles as any)?.nickname ||
-                   getAuthorName((comment.profiles as any)?.email),
+      author_name: (comment.profiles as unknown as JoinedProfile)?.nickname ||
+                   getAuthorName((comment.profiles as unknown as JoinedProfile)?.email),
       replies: []
     }
   },

@@ -1,4 +1,4 @@
-import { loadTossPayments } from '@tosspayments/payment-sdk'
+import { loadTossPayments, type TossPaymentsInstance } from '@tosspayments/payment-sdk'
 
 const CLIENT_KEY: string = import.meta.env.VITE_TOSS_PAYMENTS_CLIENT_KEY || ''
 
@@ -13,7 +13,7 @@ export interface PaymentRequest {
 }
 
 class TossPaymentsService {
-  private tossPayments: any = null
+  private tossPayments: TossPaymentsInstance | null = null
 
   async initialize() {
     if (!this.tossPayments) {
@@ -24,7 +24,7 @@ class TossPaymentsService {
   }
 
   async requestPayment(request: PaymentRequest) {
-    const tossPayments: any = await this.initialize()
+    const tossPayments = await this.initialize()
     
     // 결제 방법을 지정하지 않으면 토스페이먼츠에서 결제 방법 선택 화면을 제공
     return tossPayments.requestPayment({

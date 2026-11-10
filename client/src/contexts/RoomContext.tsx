@@ -9,7 +9,7 @@
  * 결정사항(docs/overhaul/native-engine-design.md): 연주자는 앱 전용, 웹은 관람만. 앱 연주자끼리는 WebRTC를 쓰지 않는다.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useAuth } from './AuthContext'
+import { useAuth } from './useAuth'
 import { useAudioSettings } from './AudioSettingsContext'
 import { useSignaling, type SignalPayload, type SignalStatus } from './room/useSignaling'
 import { useChat, type ChatMessage } from './room/useChat'

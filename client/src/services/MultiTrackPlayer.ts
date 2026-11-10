@@ -384,7 +384,7 @@ export class MultiTrackPlayer {
         if (track.source) {
           try {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ;(track.source.playbackRate as any).setValueAtTime(clampedTempo, changeAt)
+            (track.source.playbackRate as any).setValueAtTime(clampedTempo, changeAt)
           } catch {
             track.source.playbackRate = clampedTempo
           }

@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import { useAuth } from '../contexts/AuthContext'
+import { useAuth } from '../contexts/useAuth'
 import { useRoom } from '../contexts/RoomContext'
 import { supabase } from '../lib/supabaseClient'
 import { MAX_PERFORMERS, type PeerState, type PeerStats } from '../native/engineApi'

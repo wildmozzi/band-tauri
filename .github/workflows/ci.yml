@@ -67,10 +67,9 @@ jobs:
         working-directory: client
       - run: npm test
         working-directory: client
-      - name: Lint (P3-1 전까지 비차단)
+      - name: Lint
         run: npm run lint
         working-directory: client
-        continue-on-error: true
 
   server:
     name: Server (build + test)
