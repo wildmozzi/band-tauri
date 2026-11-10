@@ -12,12 +12,15 @@
  *   글 수정      → 응답값으로 그 글의 상세(모든 userId, liked_by_user 유지)를 덮어쓰고 목록·인기 태그 무효화
  *   글 삭제      → 목록·인기 태그 무효화. 상세·댓글 캐시는 화면을 떠난 뒤 forgetPost로 제거
  *                  (상세가 마운트된 채로 지우면 지운 글을 다시 조회한다)
- *   좋아요 토글  → 응답값으로 목록·상세 캐시를 직접 갱신(재조회 없음).
- *                  likes_count는 모든 키에, liked_by_user는 키의 userId가 누른 사용자와 같은 캐시에만 쓴다
+ *   좋아요 토글  → 누르는 즉시 낙관적으로 ±1(누른 사용자의 좋아요 여부를 캐시에서 알 때), 응답의 실제 개수로
+ *                  목록·상세 캐시를 덮는다(재조회 없음). 실패하면 낙관적 변경을 되돌린다.
+ *                  응답에 개수가 없으면(post_likes 개수 조회 실패) 낙관적 값을 두고 그 글·목록을 무효화한다.
+ *                  likes_count는 모든 키에, liked_by_user는 키의 userId가 누른 사용자와 같은 캐시에만 쓴다.
+ *                  posts.likes_count/comments_count는 DB 트리거(migration 010)가 집계한다 — 클라이언트는 UPDATE하지 않는다
  *   댓글 작성/수정/삭제 → 응답값으로 댓글 트리를 직접 갱신하고, 상세·목록의 comments_count를 보정
  *     (삭제 개수는 응답 시점의 최신 캐시 트리로 센다 — 연속 삭제 시 오래된 클로저 방지)
  */
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, type QueryClient, type QueryKey } from '@tanstack/react-query'
 import {
   communityApi,
   type Comment,
@@ -176,17 +179,63 @@ export function forgetPost(qc: QueryClient, postId: string) {
   qc.removeQueries({ queryKey: communityKeys.comments(postId) })
 }
 
+/** userId 키 캐시에 기록된 그 사용자의 좋아요 여부. 캐시에 없으면 undefined */
+function cachedLiked(qc: QueryClient, postId: string, userId: string): boolean | undefined {
+  for (const [key, post] of qc.getQueriesData<Post | null>({ queryKey: communityKeys.postAll(postId) })) {
+    if (keyUserId(key) === userId && post?.liked_by_user !== undefined) return post.liked_by_user
+  }
+  for (const [key, list] of qc.getQueriesData<Post[]>({ queryKey: communityKeys.posts() })) {
+    if (keyUserId(key) !== userId) continue
+    const post = list?.find(p => p.id === postId)
+    if (post?.liked_by_user !== undefined) return post.liked_by_user
+  }
+  return undefined
+}
+
+type LikeSnapshot = Array<[QueryKey, unknown]>
+
 export function useToggleLikeMutation() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ postId, userId }: { postId: string; userId: string }) =>
       communityApi.toggleLike(postId, userId),
+    onMutate: async ({ postId, userId }): Promise<{ snapshot: LikeSnapshot }> => {
+      // 진행 중인 재조회가 낙관적 값을 덮지 않게 멈춘다
+      await Promise.all([
+        qc.cancelQueries({ queryKey: communityKeys.postAll(postId) }),
+        qc.cancelQueries({ queryKey: communityKeys.posts() }),
+      ])
+      const snapshot: LikeSnapshot = [
+        ...qc.getQueriesData({ queryKey: communityKeys.postAll(postId) }),
+        ...qc.getQueriesData({ queryKey: communityKeys.posts() }),
+      ]
+      const wasLiked = cachedLiked(qc, postId, userId)
+      if (wasLiked !== undefined) {
+        const delta = wasLiked ? -1 : 1
+        patchPostEverywhere(qc, postId, (post, keyUser) => ({
+          ...post,
+          likes_count: Math.max(0, post.likes_count + delta),
+          ...(keyUser === userId ? { liked_by_user: !wasLiked } : {}),
+        }))
+      }
+      return { snapshot }
+    },
+    onError: (_error, _vars, context) => {
+      for (const [key, data] of context?.snapshot ?? []) qc.setQueryData(key, data)
+    },
     onSuccess: ({ liked, likesCount }, { postId, userId }) => {
-      patchPostEverywhere(qc, postId, (post, keyUser) =>
-        keyUser === userId
-          ? { ...post, likes_count: likesCount, liked_by_user: liked }
-          : { ...post, likes_count: likesCount },
-      )
+      patchPostEverywhere(qc, postId, (post, keyUser) => ({
+        ...post,
+        likes_count: likesCount ?? post.likes_count,
+        ...(keyUser === userId ? { liked_by_user: liked } : {}),
+      }))
+      if (likesCount === null) {
+        // 개수 조회 실패: 낙관적 개수를 둔 채 다시 읽어 맞춘다
+        return Promise.all([
+          qc.invalidateQueries({ queryKey: communityKeys.postAll(postId) }),
+          qc.invalidateQueries({ queryKey: communityKeys.posts() }),
+        ])
+      }
     },
   })
 }
