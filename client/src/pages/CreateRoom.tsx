@@ -196,7 +196,7 @@ export function CreateRoom() {
             </div>
 
             <div className="form-group">
-              <label htmlFor="maxParticipants">최대 인원</label>
+              <label htmlFor="maxParticipants" title="방장·연주자·로그인 관람자를 합친 인원. 로그인하지 않은 관람자는 빈자리가 있을 때만 들어옵니다.">최대 인원(관람 포함)</label>
               <select
                 id="maxParticipants"
                 value={maxParticipants}

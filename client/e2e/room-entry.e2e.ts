@@ -65,7 +65,7 @@ test.describe('비밀번호 방 입장', () => {
 })
 
 test.describe('정원 초과 (P3-12b)', () => {
-  test('정원이 차면 서버 room-full 안내와 목록 버튼만 보인다', async ({ page, mock }) => {
+  test('정원이 차면 서버 room-full 안내와 다시 시도·목록 버튼만 보인다', async ({ page, mock }) => {
     // ROCK_ROOM(max_participants 6)을 다른 참가자 6명으로 채운다
     const others = Array.from({ length: ROCK_ROOM.max_participants }, (_, i) => ({ oderId: `full-${i}`, nickname: `관람${i}` }))
     mock.signaling.setRoom(ROCK_ROOM.id, { participants: others })
@@ -76,7 +76,11 @@ test.describe('정원 초과 (P3-12b)', () => {
     await expect(card.getByPlaceholder('합주실 비밀번호')).toHaveCount(0)
     await expect(page.locator('.chat-panel')).toHaveCount(0)
 
-    await card.getByRole('button', { name: '목록으로' }).click()
+    // 다시 시도: 아직 차 있으면 같은 안내가 다시 뜬다
+    await card.getByRole('button', { name: '다시 시도' }).click()
+    await expect(page.locator('.room-password-card').getByRole('alert')).toContainText('가득 찼습니다')
+
+    await page.locator('.room-password-card').getByRole('button', { name: '목록으로' }).click()
     await expect(page).toHaveURL(/\/rooms$/)
   })
 })

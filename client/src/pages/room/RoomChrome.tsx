@@ -58,13 +58,14 @@ export function LiveHeader({
   )
 }
 
-/** 비밀번호 방 입장 (방장은 서버가 묻지 않는다). 정원 초과(room-full)는 안내와 목록 버튼만 */
+/** 비밀번호 방 입장 (방장은 서버가 묻지 않는다). 정원 초과(room-full)는 안내와 다시 시도·목록 버튼만 */
 export function RoomPasswordGate({
   title,
   joinError,
   passwordInput,
   onPasswordInput,
   onSubmit,
+  onRetry,
   onLeave,
 }: {
   title: string
@@ -72,6 +73,7 @@ export function RoomPasswordGate({
   passwordInput: string
   onPasswordInput: (v: string) => void
   onSubmit: (e: React.FormEvent) => void
+  onRetry: () => void
   onLeave: () => void
 }) {
   const locked = joinError.code === 'password-rate-limited'
@@ -83,6 +85,7 @@ export function RoomPasswordGate({
           <p className="room-password-message error" role="alert">{describeJoinError(joinError)}</p>
           <div className="room-password-actions">
             <button type="button" className="btn-secondary" onClick={onLeave}>목록으로</button>
+            <button type="button" className="btn-primary" onClick={onRetry}>다시 시도</button>
           </div>
         </div>
       </div>

@@ -83,6 +83,10 @@ export interface WsLimits {
   maxPerformers: number
   /** 방 하나의 최대 인원(관람 포함) 서버 상한. rooms.max_participants가 없거나 더 크면 이 값 (방 생성 스키마 최대 20) */
   maxRoomParticipants: number
+  /** 방 하나에 들어올 수 있는 익명(로그인 안 한) 관람자 수 상한 (정원과 별도, PR #23 H1) */
+  maxAnonymousPerRoom: number
+  /** 같은 IP(/64)에서 한 방에 들어올 수 있는 익명 연결 수 (PR #23 H1) */
+  maxAnonymousPerIpPerRoom: number
   /** 인증된 사용자가 끊긴 뒤 세션을 재개할 수 있는 유예시간 (이 동안 방 참가자에게 leave를 보내지 않음) */
   resumeGraceMs: number
   /** 방 비밀번호: (방, 사용자) 허용 실패 횟수 */
@@ -106,6 +110,8 @@ const DEFAULT_LIMITS: WsLimits = {
   maxDropped: 200,
   maxPerformers: 6,
   maxRoomParticipants: 20,
+  maxAnonymousPerRoom: 10,
+  maxAnonymousPerIpPerRoom: 2,
   resumeGraceMs: 30_000,
   heartbeatMs: 30_000,
   passwordMaxFailures: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailures,
@@ -294,6 +300,8 @@ export function initializeWebSocket(
   const approvals = new Map<string, Map<string, number | null>>()
   /** roomId → (userId → 만료 시각). 연결이 끊긴 사용자 (서버 판정 rejoin, M1) */
   const recentlyLeft = new Map<string, Map<string, number>>()
+  /** roomId → (userId → 만료 시각). 유예 밖으로 끊긴 연주자·승인 보유자의 자리 예약: 이 동안 재입장은 정원 검사를 건너뛴다 (PR #23 M2) */
+  const seatHolds = new Map<string, Map<string, number>>()
   const roomMetaCache = new Map<string, { meta: RoomMeta | null; fetchedAt: number }>()
   const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const connectionsPerIp = new Map<string, number>()
@@ -405,15 +413,57 @@ export function initializeWebSocket(
     return target
   }
 
-  /** 방 정원 계산용 자리 수: 방 멤버(유예 중 세션 포함)에서 자기 자신과 같은 userId의 기존 연결(입장 시 대체됨)은 뺀다 */
-  function countRoomSeats(roomId: string, selfId: string, userId: string | undefined): number {
-    let n = 0
+  /**
+   * 방 정원 계산용 자리 수: 방 멤버(유예 중 세션 포함)에서 자기 자신과 같은 userId의 기존 연결(입장 시 대체됨)은 뺀다.
+   * members = 로그인 사용자(userId 있음), anonymous = 익명 관람자, anonymousFromIp = 그중 같은 IP(/64)에서 온 연결.
+   */
+  function countRoomSeats(roomId: string, self: Client): { total: number; members: number; anonymous: number; anonymousFromIp: number } {
+    const bucket = ipBucket(self.ip)
+    const seats = { total: 0, members: 0, anonymous: 0, anonymousFromIp: 0 }
     for (const pid of rooms.get(roomId) || []) {
-      if (pid === selfId) continue
-      if (userId && clients.get(pid)?.userId === userId) continue
-      n++
+      if (pid === self.id) continue
+      const c = clients.get(pid)
+      if (self.userId && c?.userId === self.userId) continue
+      seats.total++
+      if (c?.userId) seats.members++
+      else {
+        seats.anonymous++
+        if (c && ipBucket(c.ip) === bucket) seats.anonymousFromIp++
+      }
     }
-    return n
+    return seats
+  }
+
+  /**
+   * 정원 검사 (P3-12b, PR #23 H1). 통과하면 null, 아니면 거부 사유.
+   * - 로그인 사용자는 로그인 사용자 수로만 정원을 센다: 익명 관람자가 자리를 채워도 밴드 멤버·연주자는 막히지 않는다.
+   * - 익명 관람자는 빈자리가 있을 때만(전체 < 정원), 방별 익명 상한·IP당 방별 익명 상한 안에서 들어온다.
+   *   이미 있는 익명을 밀어내지 않으므로, 로그인 사용자가 뒤에 들어오면 전체 인원이 잠시 정원을 넘을 수 있다.
+   */
+  function checkCapacity(roomId: string, self: Client, capacity: number): 'room-full' | 'anonymous-limit' | null {
+    const seats = countRoomSeats(roomId, self)
+    if (self.userId) return seats.members >= capacity ? 'room-full' : null
+    if (seats.total >= capacity) return 'room-full'
+    if (seats.anonymous >= limits.maxAnonymousPerRoom || seats.anonymousFromIp >= limits.maxAnonymousPerIpPerRoom) return 'anonymous-limit'
+    return null
+  }
+
+  /** 자리 예약(유예 밖 재입장 우선권)이 살아 있는지. 확인만 하고 지우지 않는다 */
+  function hasSeatHold(roomId: string, userId: string | undefined): boolean {
+    if (!userId) return false
+    const m = seatHolds.get(roomId)
+    const exp = m?.get(userId)
+    if (exp === undefined) return false
+    if (exp > Date.now()) return true
+    clearSeatHold(roomId, userId)
+    return false
+  }
+
+  function clearSeatHold(roomId: string, userId: string | undefined) {
+    if (!userId) return
+    const m = seatHolds.get(roomId)
+    m?.delete(userId)
+    if (m && m.size === 0) seatHolds.delete(roomId)
   }
 
   async function getRoomMeta(roomId: string, maxAgeMs = ROOM_META_TTL_MS): Promise<RoomMeta | null> {
@@ -479,9 +529,16 @@ export function initializeWebSocket(
 
     // 승인 기록: 명시적 퇴장/방 이동은 즉시 삭제, 연결 끊김은 재접속 유예 후 만료, 중복 연결 정리는 유지
     if (client.userId) {
-      if (reason === 'leave' || reason === 'move') clearApproval(roomId, client.userId)
-      else if (reason === 'close' && approvals.get(roomId)?.has(client.userId)) {
+      if (reason === 'leave' || reason === 'move') {
+        clearApproval(roomId, client.userId)
+        clearSeatHold(roomId, client.userId)
+      } else if (reason === 'close' && approvals.get(roomId)?.has(client.userId)) {
         setApproval(roomId, client.userId, Date.now() + APPROVAL_GRACE_MS)
+      }
+      // 연주 중이었거나 승인을 가진 사용자가 끊기면 승인 유예와 같은 시간 동안 자리를 예약한다 (PR #23 M2)
+      if (reason === 'close' && (client.isPerforming || approvals.get(roomId)?.has(client.userId))) {
+        if (!seatHolds.has(roomId)) seatHolds.set(roomId, new Map())
+        seatHolds.get(roomId)!.set(client.userId, Date.now() + APPROVAL_GRACE_MS)
       }
       if (reason === 'close') {
         if (!recentlyLeft.has(roomId)) recentlyLeft.set(roomId, new Map())
@@ -549,6 +606,11 @@ export function initializeWebSocket(
   // ---------- heartbeat (L4) ----------
 
   const heartbeat = setInterval(() => {
+    const now = Date.now()
+    for (const [roomId, holds] of seatHolds) {
+      for (const [uid, exp] of holds) if (exp <= now) holds.delete(uid)
+      if (holds.size === 0) seatHolds.delete(roomId)
+    }
     for (const c of clients.values()) {
       if (suspended.has(c.id)) continue // 이미 끊긴 연결 (재개 대기)
       if (!c.isAlive) {
@@ -808,12 +870,19 @@ export function initializeWebSocket(
 
       // 정원(관람 포함, P3-12b): 방장은 항상 입장. 마지막 await 뒤부터 방에 추가할 때까지 동기 구간이라 동시 입장 경합이 없다.
       // 유예 중인 세션은 rooms에 남아 자리를 유지하고, 같은 사용자의 기존 연결(아래에서 대체됨)은 새 자리로 세지 않는다.
+      // 승인 보유자·자리 예약(유예 밖으로 끊긴 연주자, M2)은 정원 검사를 건너뛴다. 로그인 사용자가 익명보다 우선이다(H1).
       // 실패해도 지금 있는 방은 그대로 둔다.
-      if (!isHost && countRoomSeats(roomId, id, client.userId) >= capacity) {
-        console.warn(`[JOIN] ${id.slice(0, 8)} rejected: room ${roomId.slice(0, 8)} full (${capacity})`)
-        send(ws, { type: 'error', code: 'room-full', roomId, maxParticipants: capacity, message: `합주실 정원(${capacity}명)이 가득 찼습니다.` })
+      const reserved = hasApproval(roomId, client.userId) || hasSeatHold(roomId, client.userId)
+      const rejected = isHost || reserved ? null : checkCapacity(roomId, client, capacity)
+      if (rejected) {
+        console.warn(`[JOIN] ${id.slice(0, 8)} rejected: room ${roomId.slice(0, 8)} ${rejected} (${capacity})`)
+        const message = rejected === 'room-full'
+          ? `합주실 정원(${capacity}명)이 가득 찼습니다.`
+          : '로그인하지 않은 관람자 자리가 가득 찼습니다. 로그인하면 입장할 수 있습니다.'
+        send(ws, { type: 'error', code: 'room-full', reason: rejected, roomId, maxParticipants: capacity, message })
         return
       }
+      clearSeatHold(roomId, client.userId)
 
       // 다른 방에 있었다면 먼저 퇴장 처리
       if (client.roomId && client.roomId !== roomId) {

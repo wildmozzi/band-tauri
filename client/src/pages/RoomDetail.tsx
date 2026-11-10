@@ -37,6 +37,7 @@ export function RoomDetail() {
     peers,
     joinError,
     submitRoomPassword,
+    retryJoin,
     rtcStatus,
     leaveRoom,
     isRoomHost,
@@ -167,6 +168,7 @@ export function RoomDetail() {
         passwordInput={passwordInput}
         onPasswordInput={setPasswordInput}
         onSubmit={handleSubmitPassword}
+        onRetry={retryJoin}
         onLeave={handleLeave}
       />
     )
