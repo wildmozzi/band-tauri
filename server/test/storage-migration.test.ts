@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  migrate, parseArgs, planCopy, rewritePostImages, rewriteStemRow, supabaseKeyFromUrl, contentTypeOf,
+  migrate, parseArgs, isRoutableImageKey, planCopy, rewritePostImages, rewriteStemRow, supabaseKeyFromUrl, contentTypeOf,
   type MigrationDb, type StemRowForMigration,
 } from '../scripts/migrate-storage'
 import { STEM_REF_PREFIX } from '../src/lib/stemStorage'
@@ -57,8 +57,16 @@ describe('pure helpers', () => {
   })
   it('rewritePostImages keeps unknown/unverified URLs', () => {
     const view = (k: string) => `https://api/i/${k}`
-    assert.deepEqual(rewritePostImages([`${SB}/post-images/u/1.png`, 'https://other/x.png', `${SB}/post-images/u/2.png`], new Set(['u/1.png']), view),
-      ['https://api/i/u/1.png', 'https://other/x.png', `${SB}/post-images/u/2.png`])
+    assert.deepEqual(rewritePostImages([`${SB}/post-images/u/1700000000000-a1.png`, 'https://other/x.png', `${SB}/post-images/u/2.png`], new Set(['u/1700000000000-a1.png']), view),
+      ['https://api/i/u/1700000000000-a1.png', 'https://other/x.png', `${SB}/post-images/u/2.png`])
+  })
+  it('M3: rewritePostImages leaves keys the view route cannot serve (and reports them)', () => {
+    const view = (k: string) => `https://api/i/${k}`
+    const bad = 'u/sub/1700000000000-a.png' // 중첩 경로: /:owner/:file 라우트로 열 수 없음
+    const seen: string[] = []
+    assert.equal(rewritePostImages([`${SB}/post-images/${bad}`], new Set([bad]), view, k => seen.push(k)), null)
+    assert.deepEqual(seen, [bad])
+    assert.equal(isRoutableImageKey('u/1700000000000-k3j2h1.my photo'), true)
     assert.equal(rewritePostImages(['https://other/x.png'], new Set(), view), null)
   })
   it('contentTypeOf', () => {
@@ -73,12 +81,12 @@ function world() {
   const dst = { 'audio-stems': memoryStorage('audio-stems'), 'post-images': memoryStorage('post-images') }
   src['audio-stems'].objects.set('u/s/vocals.ogg', { body: Buffer.from('vvvv') })
   src['audio-stems'].objects.set('u/s/drums.wav', { body: Buffer.from('dd') })
-  src['post-images'].objects.set('u/1.png', { body: Buffer.from('png1') })
+  src['post-images'].objects.set('u/1700000000000-a1.png', { body: Buffer.from('png1') })
   const stemRows: StemRowForMigration[] = [{
     id: 's', storage_folder: 'u/s',
     vocals_url: `${SB}/audio-stems/u/s/vocals.ogg`, drums_url: `${SB}/audio-stems/u/s/drums.wav`,
   }]
-  const posts = [{ id: 'p', images: [`${SB}/post-images/u/1.png`, 'https://keep.example/x.png'] as string[] | null }]
+  const posts = [{ id: 'p', images: [`${SB}/post-images/u/1700000000000-a1.png`, 'https://keep.example/x.png'] as string[] | null }]
   const updates: string[] = []
   const db: MigrationDb = {
     listStemRows: async () => stemRows.map(r => ({ ...r })),
@@ -128,7 +136,7 @@ describe('migrate()', () => {
     assert.equal(w.dst['audio-stems'].objects.get('u/s/vocals.ogg')!.contentType, 'audio/ogg')
     assert.equal(w.stemRows[0].vocals_url, `${STEM_REF_PREFIX}u/s/vocals.ogg`)
     assert.equal(w.stemRows[0].drums_url, `${STEM_REF_PREFIX}u/s/drums.wav`)
-    assert.deepEqual(w.posts[0].images, ['https://api.example/api/storage/post-images/u/1.png', 'https://keep.example/x.png'])
+    assert.deepEqual(w.posts[0].images, ['https://api.example/api/storage/post-images/u/1700000000000-a1.png', 'https://keep.example/x.png'])
     assert.equal(w.src['audio-stems'].objects.size, 2, 'source untouched without --delete-source')
     assert.ok(reports.every(r => r.failed.length === 0 && r.deleted === 0))
 
@@ -161,11 +169,60 @@ describe('migrate()', () => {
     assert.equal(w.src['audio-stems'].objects.size, 0, 'stems bucket was fine → deleted')
   })
 
+  it('H2: --delete-source keeps every source object the DB still points at (0-row race, unparsable refs, new refs)', async () => {
+    const w = world()
+    // 해석 못 하는 참조: 폴더 밖·다른 확장자 (rewriteStemRow가 바꾸지 못함)
+    w.src['audio-stems'].objects.set('u/s/vocals.opus', { body: Buffer.from('oo') })
+    w.stemRows.push({ id: 't', storage_folder: 'u/OTHER', other_url: `${SB}/audio-stems/u/s/vocals.opus` })
+    // 경합: 갱신 직전에 사용자가 글을 고쳐 조건부 갱신이 0행
+    const realUpdate = w.deps.db.updatePostImages
+    w.deps.db.updatePostImages = async (id, before, images) => {
+      w.posts[0].images = [...before, 'https://keep.example/new.png']
+      return realUpdate(id, before, images)
+    }
+    const reports = await migrate(parseArgs(['--apply', '--delete-source']), w.deps)
+    const stems = reports.find(r => r.bucket === 'audio-stems')!
+    const imgs = reports.find(r => r.bucket === 'post-images')!
+
+    assert.ok(w.src['audio-stems'].objects.has('u/s/vocals.opus'), 'unparsable ref keeps its source')
+    assert.ok(!w.src['audio-stems'].objects.has('u/s/vocals.ogg'), 'rewritten stem source deleted')
+    assert.equal(stems.keptReferenced, 1)
+    assert.equal(imgs.dbSkipped, 1)
+    assert.ok(w.src['post-images'].objects.has('u/1700000000000-a1.png'), 'post still points at Supabase → source kept')
+    assert.equal(imgs.deleted, 0)
+  })
+
+  it('H2: deletion is skipped when the DB re-check fails', async () => {
+    const w = world()
+    let calls = 0
+    const realList = w.deps.db.listStemRows
+    w.deps.db.listStemRows = async () => {
+      if (++calls > 1) throw new Error('db down')
+      return realList()
+    }
+    const [stems] = await migrate(parseArgs(['--apply', '--delete-source', '--bucket', 'audio-stems']), w.deps)
+    assert.equal(stems.deleted, 0)
+    assert.match(stems.deleteSkippedReason ?? '', /재확인 실패/)
+    assert.equal(w.src['audio-stems'].objects.size, 2)
+  })
+
+  it('M3: images the view route cannot serve stay on Supabase and are not deleted', async () => {
+    const w = world()
+    const bad = 'u/sub/1700000000000-x.png'
+    w.src['post-images'].objects.set(bad, { body: Buffer.from('p') })
+    w.posts.push({ id: 'q', images: [`${SB}/post-images/${bad}`] })
+    const [imgs] = await migrate(parseArgs(['--apply', '--delete-source', '--bucket', 'post-images']), w.deps)
+    assert.deepEqual(imgs.unroutable, [bad])
+    assert.equal(w.posts[1].images![0], `${SB}/post-images/${bad}`)
+    assert.ok(w.src['post-images'].objects.has(bad))
+    assert.ok(!w.src['post-images'].objects.has('u/1700000000000-a1.png'), 'the routable, rewritten one is deleted')
+  })
+
   it('without an image view URL, images are copied but posts are not rewritten nor sources deleted', async () => {
     const w = world()
     const reports = await migrate(parseArgs(['--apply', '--delete-source', '--bucket', 'post-images']), { ...w.deps, imageViewUrl: null })
     assert.equal(w.dst['post-images'].objects.size, 1)
-    assert.equal(w.posts[0].images![0], `${SB}/post-images/u/1.png`)
+    assert.equal(w.posts[0].images![0], `${SB}/post-images/u/1700000000000-a1.png`)
     assert.equal(reports[0].deleted, 0)
   })
 })

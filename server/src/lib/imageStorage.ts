@@ -29,8 +29,14 @@ export const POST_IMAGE_VIEW_TTL_SEC = 60 * 60
 export const POST_IMAGE_ROUTE = '/api/storage/post-images'
 
 const OWNER_RE = /^[A-Za-z0-9-]{1,64}$/
-/** 조회 허용 파일명: 신규(서버 생성)와 이전 클라이언트 생성 이름(`${ms}-${random}.${원본 확장자}`) 모두 */
+/** 조회 허용 파일명 (영숫자 시작, 영숫자·.·_·-) — 서버 생성 이름 포함 */
 const FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+/**
+ * 예전 클라이언트가 만든 이름: `${Date.now()}-${Math.random().toString(36).substring(2)}.${file.name.split('.').pop()}`
+ * 확장자 자리는 원본 파일명의 마지막 '.' 뒤라 '.'는 없지만 공백·한글·+·( 등이 올 수 있다(확장자 없는 파일이면 파일명 전체).
+ * '/', '\', '.', 제어문자만 막는다 → 점 세그먼트·경로 구분자가 생길 수 없다
+ */
+const LEGACY_FILE_RE = /^\d{10,16}-[0-9a-z]{1,16}\.[^./\\\u0000-\u001f\u007f]{1,100}$/
 
 export function isPostImageOwner(userId: string): boolean {
   return OWNER_RE.test(userId)
@@ -44,7 +50,8 @@ export function newPostImageKey(userId: string, type: PostImageType, now: Date =
 /** 조회 경로 파라미터 → key. 형식이 아니면 null (경로 순회·다른 접두사 차단) */
 export function postImageKeyFromParams(owner: unknown, file: unknown): string | null {
   if (typeof owner !== 'string' || typeof file !== 'string') return null
-  if (!OWNER_RE.test(owner) || !FILE_RE.test(file) || file.includes('..')) return null
+  if (!OWNER_RE.test(owner) || file.includes('..')) return null
+  if (!FILE_RE.test(file) && !LEGACY_FILE_RE.test(file)) return null
   return `${owner}/${file}`
 }
 
@@ -54,4 +61,9 @@ export function postImageViewUrl(storage: StorageAdapter, key: string, publicApi
   if (pub) return pub
   const base = (publicApiUrl ?? '').trim().replace(/\/+$/, '')
   return `${base}${POST_IMAGE_ROUTE}/${key.split('/').map(encodeURIComponent).join('/')}`
+}
+
+/** 서버가 발급한 형식의 key인지 (`${userId}/${ms}-${uuid}.${jpg|png|webp|gif}`) */
+export function isServerPostImageKey(key: string): boolean {
+  return /^[A-Za-z0-9-]{1,64}\/\d{10,16}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp|gif)$/.test(key)
 }

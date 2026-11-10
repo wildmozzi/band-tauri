@@ -22,7 +22,8 @@ function contract(name: string, make: () => StorageAdapter) {
       await a.put('u2/s9/bass.wav', Buffer.from('x'))
 
       assert.equal((await a.get('u1/s1/vocals.ogg'))?.toString(), 'abc')
-      assert.deepEqual(await a.head('u1/s1/drums.ogg'), { size: 5 })
+      assert.equal((await a.head('u1/s1/drums.ogg'))?.size, 5)
+      assert.equal((await a.head('u1/s1/drums.ogg'))?.contentType, 'audio/ogg')
       assert.equal(await a.get('u1/s1/missing.ogg'), null)
       assert.equal(await a.head('u1/s1/missing.ogg'), null)
 
@@ -35,7 +36,7 @@ function contract(name: string, make: () => StorageAdapter) {
       // 없는 key가 섞여 있어도 성공
       await a.delete(['u1/s1/vocals.ogg', 'u1/s1/vocals.wav', 'u1/s1/nope.ogg'])
       assert.equal(await a.head('u1/s1/vocals.ogg'), null)
-      assert.deepEqual(await a.head('u1/s1/drums.ogg'), { size: 5 })
+      assert.equal((await a.head('u1/s1/drums.ogg'))?.size, 5)
       await a.delete([])
     })
 
@@ -219,11 +220,11 @@ describe('SupabaseStorageAdapter specifics', () => {
     assert.equal((await a.list('big')).length, 1005)
   })
 
-  it('signed upload URL expiry is capped at the Supabase fixed 2h', async () => {
+  it('signed upload URL reports the real Supabase expiry (fixed 2h, M2)', async () => {
     const t = new Date('2026-01-01T00:00:00Z')
     const a = createSupabaseStorageAdapter(fakeSupabaseStorage().client, 'post-images', { now: () => t })
     const put = await a.signedPutUrl('u/p.png', { contentType: 'image/png', contentLength: 1, expiresInSec: 600 })
-    assert.equal(put.expiresAt, '2026-01-01T00:10:00.000Z')
+    assert.equal(put.expiresAt, '2026-01-01T02:00:00.000Z')
     assert.match(put.url, /\/object\/upload\/sign\/post-images\/u\/p\.png\?token=/)
   })
 })

@@ -19,7 +19,7 @@ export function memoryStorage(bucket: LogicalBucket, opts: { driver?: StorageDri
     async head(key) {
       assertSafeKey(key)
       const o = objects.get(key)
-      return o ? { size: o.body.length } : null
+      return o ? { size: o.body.length, contentType: o.contentType } : null
     },
     async signedGetUrl(key, ttl) {
       assertSafeKey(key)

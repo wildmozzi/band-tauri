@@ -23,7 +23,13 @@ function row(over: Partial<StemSeparationRow> = {}): StemSeparationRow {
   }
 }
 
-function setup(opts: { rows?: StemSeparationRow[]; expired?: { id: string; storage_folder: string | null }[]; publicBase?: string; failDelete?: boolean } = {}) {
+function setup(opts: {
+  rows?: StemSeparationRow[]
+  expired?: { id: string; storage_folder: string | null }[]
+  publicBase?: string
+  failDelete?: boolean
+  legacy?: ReturnType<typeof memoryStorage>
+} = {}) {
   const mem = memoryStorage('audio-stems', { publicBase: opts.publicBase, failDelete: opts.failDelete })
   const inserted: unknown[] = []
   const deletedIds: string[][] = []
@@ -38,6 +44,7 @@ function setup(opts: { rows?: StemSeparationRow[]; expired?: { id: string; stora
       deleteByIds: async ids => { deletedIds.push(ids) },
     },
     storage: mem.adapter,
+    legacy: opts.legacy?.adapter ?? null,
   }
   return { svc: new StemSeparationService(repos, () => new Date(), 3600), mem, inserted, deletedIds }
 }
@@ -86,33 +93,65 @@ describe('StemSeparationService + StorageAdapter', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  it('signStems / listHistory return signed GET URLs with the configured expiry', async () => {
+  it('signStems / listHistory sign storage:// refs with the current store and expiry', async () => {
     const { svc, mem } = setup({
       rows: [row({
         vocals_url: `${STEM_REF_PREFIX}u1/sep1/vocals.ogg`,
-        drums_url: `${SB}/u1/sep1/drums.wav`,
         bass_url: 'https://elsewhere.example/bass.wav', // 알 수 없는 외부 URL: 그대로 (하위 호환)
-        piano_url: `${STEM_REF_PREFIX}u2/other/piano.ogg`, // 폴더 밖: 서명 안 함, http가 아니므로 null
+        piano_url: `${STEM_REF_PREFIX}u2/other/piano.ogg`, // 폴더 밖: 서명 안 함 → null
       })],
     })
     const [h] = await svc.listHistory('u1')
     assert.equal(h.vocals_url, 'https://signed.test/audio-stems/u1/sep1/vocals.ogg?ttl=3600')
-    assert.equal(h.drums_url, 'https://signed.test/audio-stems/u1/sep1/drums.wav?ttl=3600')
     assert.equal(h.bass_url, 'https://elsewhere.example/bass.wav')
     assert.equal(h.piano_url, null)
     assert.equal(h.guitar_url, null)
-    assert.deepEqual(mem.calls.filter(c => c.op === 'signGet').map(c => (c.arg as string[])[0]), ['u1/sep1/vocals.ogg', 'u1/sep1/drums.wav'])
+    assert.deepEqual(mem.calls.filter(c => c.op === 'signGet').map(c => (c.arg as string[])[0]), ['u1/sep1/vocals.ogg'])
 
     assert.deepEqual(await svc.signStems({ other: `${STEM_REF_PREFIX}u1/sep1/other.ogg` }, 'u1/sep1'), {
       other: 'https://signed.test/audio-stems/u1/sep1/other.ogg?ttl=3600',
     })
   })
 
-  it('signing failure falls back to the legacy public URL, never to a raw storage ref', async () => {
+  it('H1: with STORAGE_DRIVER=s3, not-yet-migrated Supabase URLs are read from Supabase, never signed as R2 keys', async () => {
+    // 현재 저장소 = 비공개 S3(공개 URL 없음), legacy = Supabase 공개 버킷
+    const legacy = memoryStorage('audio-stems', { driver: 'supabase', publicBase: 'https://x.supabase.co/storage/v1/object/public' })
+    const { svc, mem } = setup({
+      legacy,
+      rows: [row({ drums_url: `${SB}/u1/sep1/drums.wav`, vocals_url: `${STEM_REF_PREFIX}u1/sep1/vocals.ogg` })],
+    })
+    const [h] = await svc.listHistory('u1')
+    assert.equal(h.drums_url, `${SB}/u1/sep1/drums.wav`, 'Supabase public URL unchanged (cacheable, served by Supabase)')
+    assert.equal(h.vocals_url, 'https://signed.test/audio-stems/u1/sep1/vocals.ogg?ttl=3600', 'migrated ref signed by R2')
+    assert.deepEqual(mem.calls.filter(c => c.op === 'signGet').map(c => (c.arg as string[])[0]), ['u1/sep1/vocals.ogg'])
+    assert.equal(legacy.calls.filter(c => c.op === 'signGet').length, 0)
+  })
+
+  it('H1: Supabase URLs are signed by Supabase (not R2) when the legacy bucket is private', async () => {
+    const legacy = memoryStorage('audio-stems', { driver: 'supabase' }) // 공개 URL 없음 = 비공개
+    const { svc, mem } = setup({ legacy })
+    assert.equal(await svc.signStemRef(`${SB}/u1/sep1/drums.wav`, 'u1/sep1'), 'https://signed.test/audio-stems/u1/sep1/drums.wav?ttl=3600')
+    assert.equal(legacy.calls.filter(c => c.op === 'signGet').length, 1)
+    assert.equal(mem.calls.filter(c => c.op === 'signGet').length, 0)
+    // 폴더 밖 Supabase URL은 서명하지 않고 그대로 (기존 공개 URL 동작)
+    assert.equal(await svc.signStemRef(`${SB}/u2/x/drums.wav`, 'u1/sep1'), `${SB}/u2/x/drums.wav`)
+    assert.equal(legacy.calls.filter(c => c.op === 'signGet').length, 1)
+  })
+
+  it('M1: on the supabase driver (public bucket) stems keep their stable public URL — no per-request signing', async () => {
+    const pub = 'https://x.supabase.co/storage/v1/object/public'
+    const { svc, mem } = setup({ publicBase: pub, legacy: memoryStorage('audio-stems', { driver: 'supabase', publicBase: pub }) })
+    const url = `${SB}/u1/sep1/vocals.ogg`
+    assert.equal(await svc.signStemRef(url, 'u1/sep1'), url)
+    assert.equal(await svc.signStemRef(url, 'u1/sep1'), url)
+    assert.equal(mem.calls.filter(c => c.op === 'signGet').length, 0)
+  })
+
+  it('signing failure of a storage:// ref yields null (never the raw ref)', async () => {
     const { svc, mem } = setup()
     mem.adapter.signedGetUrl = async () => { throw new Error('down') }
-    assert.equal(await svc.signStemRef(`${SB}/u1/sep1/vocals.wav`, 'u1/sep1'), `${SB}/u1/sep1/vocals.wav`)
     assert.equal(await svc.signStemRef(`${STEM_REF_PREFIX}u1/sep1/vocals.ogg`, 'u1/sep1'), null)
+    assert.equal(await svc.signStemRef('ftp://x/vocals.ogg', 'u1/sep1'), null)
   })
 
   it('deleteSeparation deletes .ogg/.wav keys through the adapter', async () => {

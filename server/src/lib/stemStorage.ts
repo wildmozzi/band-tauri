@@ -80,3 +80,13 @@ export function stemKeyFromRef(ref: string, folder: string): string | null {
   if (!m || !(STEM_NAMES as readonly string[]).includes(m[1]) || !(STEM_EXTENSIONS as readonly string[]).includes(m[2])) return null
   return key
 }
+
+/** Supabase Storage 객체 URL인지 (공개·서명, 버킷 무관): 경로가 `/storage/v1/object/`로 시작 */
+export function isSupabaseStorageUrl(url: string): boolean {
+  try {
+    const u = new URL(url)
+    return (u.protocol === 'https:' || u.protocol === 'http:') && u.pathname.startsWith('/storage/v1/object/')
+  } catch {
+    return false
+  }
+}

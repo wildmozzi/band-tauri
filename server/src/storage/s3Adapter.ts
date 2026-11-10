@@ -115,7 +115,7 @@ export function createS3StorageAdapter(
     async head(key) {
       try {
         const out = await client.send(new HeadObjectCommand({ Bucket: cfg.bucket, Key: full(key) }))
-        return { size: out.ContentLength ?? 0 }
+        return { size: out.ContentLength ?? 0, contentType: out.ContentType }
       } catch (e) {
         if (e instanceof StorageError) throw e
         if (isNotFound(e)) return null

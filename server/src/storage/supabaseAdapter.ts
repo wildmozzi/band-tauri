@@ -77,8 +77,8 @@ export function createSupabaseStorageAdapter(
       if (error) throw new StorageError(`head ${bucket}/${key}: ${error.message}`, error)
       const hit = (data ?? []).find(it => it.name === name && it.id !== null)
       if (!hit) return null
-      const size = (hit.metadata as { size?: number } | null)?.size
-      return { size: typeof size === 'number' ? size : 0 }
+      const meta = hit.metadata as { size?: number; mimetype?: string } | null
+      return { size: typeof meta?.size === 'number' ? meta.size : 0, contentType: meta?.mimetype }
     },
 
     async signedGetUrl(key, expiresInSec) {
@@ -92,12 +92,13 @@ export function createSupabaseStorageAdapter(
       assertSafeKey(key)
       const { data, error } = await b().createSignedUploadUrl(key)
       if (error || !data) throw new StorageError(`sign put ${bucket}/${key}: ${error?.message ?? 'no data'}`, error)
-      const ttl = Math.min(putOpts.expiresInSec, SUPABASE_SIGNED_UPLOAD_TTL_SEC)
       return {
         url: data.signedUrl,
         method: 'PUT',
         headers: { 'Content-Type': putOpts.contentType, 'x-upsert': 'false' },
-        expiresAt: new Date(now().getTime() + ttl * 1000).toISOString(),
+        // Supabase 서명 업로드 URL은 요청값과 무관하게 2시간 유효 — 실제 값을 알린다.
+        // 크기·MIME은 토큰에 묶이지 않으므로 업로드 후 서버 검증(/complete)과 버킷 file_size_limit·allowed_mime_types로 막는다
+        expiresAt: new Date(now().getTime() + SUPABASE_SIGNED_UPLOAD_TTL_SEC * 1000).toISOString(),
       }
     },
 

@@ -76,3 +76,8 @@ export const postImageUploadBody = z.object({
   contentType: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
   size: z.number().int().positive(),
 })
+
+/** 게시글 이미지 업로드 완료 확인 (P3-10 리뷰 M2) */
+export const postImageCompleteBody = z.object({
+  key: z.string().min(1).max(200),
+})

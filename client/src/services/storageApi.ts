@@ -1,5 +1,5 @@
 /**
- * 파일 저장소 API (P3-10). 게시글 이미지는 서버가 발급한 서명 PUT URL로 올린다
+ * 파일 저장소 API (P3-10). 게시글 이미지는 서버가 발급한 서명 PUT URL로 올리고, 서버 확인(/complete)을 거친다
  * (클라이언트가 Supabase Storage에 직접 쓰지 않는다 — 저장소는 서버 설정 STORAGE_DRIVER로 바뀐다).
  */
 import { authHeaders } from '../lib/authHeaders'
@@ -59,5 +59,16 @@ export async function uploadPostImage(file: File, fetchImpl: typeof fetch = fetc
   const put = await fetchImpl(data.upload.url, { method: data.upload.method, headers: data.upload.headers, body: file })
   if (!put.ok) throw new Error(`이미지 업로드 실패 (${put.status})`)
 
-  return absoluteImageUrl(data.url, apiBase)
+  // 서버가 올라간 파일의 크기·형식·내용을 확인한다 (실패하면 서버가 지움)
+  const done = await fetchImpl(`${apiBase}/api/storage/post-images/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    body: JSON.stringify({ key: data.key }),
+  })
+  const doneData = (await done.json().catch(() => ({}))) as { success?: boolean; url?: string; error?: string }
+  if (!done.ok || !doneData.success) {
+    throw new Error(doneData.error || `이미지 확인 실패 (${done.status})`)
+  }
+
+  return absoluteImageUrl(doneData.url || data.url, apiBase)
 }

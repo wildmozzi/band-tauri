@@ -32,7 +32,7 @@ export interface SignedPutRequest {
   method: 'PUT'
   /** PUT에 반드시 같이 보낼 헤더 (서명에 포함된 값과 같아야 한다) */
   headers: Record<string, string>
-  /** 만료 시각 (ISO) */
+  /** 실제 만료 시각 (ISO). Supabase는 요청값과 무관하게 2시간 */
   expiresAt: string
 }
 
@@ -50,8 +50,8 @@ export interface StorageAdapter {
   put(key: string, body: Buffer, opts?: PutOptions): Promise<void>
   /** 내용 전체. 없으면 null */
   get(key: string): Promise<Buffer | null>
-  /** 크기. 없으면 null */
-  head(key: string): Promise<{ size: number } | null>
+  /** 크기·저장된 Content-Type. 없으면 null */
+  head(key: string): Promise<{ size: number; contentType?: string } | null>
   /** 만료가 있는 서명 GET URL */
   signedGetUrl(key: string, expiresInSec: number): Promise<string>
   /** 클라이언트가 직접 올릴 서명 PUT URL */

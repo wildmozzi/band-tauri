@@ -2,7 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { supabaseAdmin } from '../lib/supabase'
-import { STEM_NAMES, STEM_REF_PREFIX, stemKeyFromRef, stemStoragePaths } from '../lib/stemStorage'
+import { STEM_NAMES, STEM_REF_PREFIX, isSupabaseStorageUrl, stemKeyFromRef, stemStoragePaths } from '../lib/stemStorage'
 import { safeUnlink, tryDecodeFilename } from '../lib/files'
 import {
   createStemSeparationRepository,
@@ -19,6 +19,8 @@ import { ServiceError } from './errors'
 export interface StemRepos {
   separations: StemSeparationRepository
   storage: StorageAdapter
+  /** Supabase Storage URL 참조(이전 전 기록)를 읽는 어댑터. 없거나 공개 버킷이면 공개 URL을 그대로 쓴다 */
+  legacy?: StorageAdapter | null
 }
 
 /** storage 생략 시 env 기본 저장소(STORAGE_DRIVER), 그것도 없으면 이 Supabase의 Storage */
@@ -26,6 +28,7 @@ export function stemReposFor(supabase: SupabaseClient, storage?: StorageAdapter 
   return {
     separations: createStemSeparationRepository(supabase),
     storage: storage ?? getDefaultStorage('audio-stems') ?? createSupabaseStorageAdapter(supabase, 'audio-stems'),
+    legacy: createSupabaseStorageAdapter(supabase, 'audio-stems'),
   }
 }
 
@@ -149,28 +152,48 @@ export class StemSeparationService {
     }
   }
 
-  /** 사용자의 미만료 완료 기록 (최근순 50개), 스템 URL은 서명 GET URL. DB 오류는 throw */
+  /** 사용자의 미만료 완료 기록 (최근순 50개), 스템 URL은 signStemRef 규칙. DB 오류는 throw */
   async listHistory(userId: string): Promise<StemSeparationRow[]> {
     const rows = await this.need().separations.listCompletedByUser(userId, this.now(), HISTORY_LIMIT)
     return Promise.all(rows.map(r => this.withSignedUrls(r)))
   }
 
   /**
-   * DB 참조 하나 → 클라이언트용 서명 GET URL.
-   * 폴더 밖·알 수 없는 형식은 서명하지 않는다: http(s)면 그대로(하위 호환), 아니면 null.
-   * 서명 실패도 같은 규칙 (공개 URL이면 그대로 써도 재생은 된다).
+   * DB 참조 하나 → 클라이언트용 URL. 참조가 가리키는 저장소에서 읽는다 (하이브리드 읽기, 이전 중에도 안전):
+   *   - `storage://audio-stems/<key>` → 현재 저장소(STORAGE_DRIVER)의 서명 GET URL. 폴더 밖 key·서명 실패는 null
+   *   - Supabase Storage URL → Supabase에서. 공개 버킷이면 공개 URL 그대로(브라우저 캐시 유지·egress 절감),
+   *     legacy 어댑터가 비공개 버킷이면 Supabase 서명 URL. 드라이버가 s3여도 R2 key로 바꾸지 않는다
+   *     (이전 스크립트가 DB를 storage:// 로 바꾸는 순간 R2로 넘어간다)
+   *   - 그 밖의 http(s) URL(S3_PUBLIC_BASE_URL 공개 URL, 외부) → 그대로
    */
   async signStemRef(ref: string | null, folder: string): Promise<string | null> {
     if (!ref) return null
-    const passthrough = /^https?:\/\//i.test(ref) ? ref : null
-    const key = stemKeyFromRef(ref, folder)
-    if (!key) return passthrough
-    try {
-      return await this.need().storage.signedGetUrl(key, this.urlTtlSec)
-    } catch (e) {
-      console.error(`[Storage] 스템 URL 서명 실패 (${key}):`, (e as Error).message)
-      return passthrough
+    const { storage, legacy } = this.need()
+
+    if (ref.startsWith(STEM_REF_PREFIX)) {
+      const key = stemKeyFromRef(ref, folder)
+      if (!key) return null
+      try {
+        return await storage.signedGetUrl(key, this.urlTtlSec)
+      } catch (e) {
+        console.error(`[Storage] 스템 URL 서명 실패 (${key}):`, (e as Error).message)
+        return null
+      }
     }
+
+    if (!/^https?:\/\//i.test(ref)) return null
+
+    if (legacy && isSupabaseStorageUrl(ref)) {
+      const key = stemKeyFromRef(ref, folder)
+      if (key && legacy.publicUrl(key) === null) {
+        try {
+          return await legacy.signedGetUrl(key, this.urlTtlSec)
+        } catch (e) {
+          console.error(`[Storage] Supabase 스템 URL 서명 실패 (${key}):`, (e as Error).message)
+        }
+      }
+    }
+    return ref
   }
 
   /** uploadStems 결과(참조) → 서명 URL */

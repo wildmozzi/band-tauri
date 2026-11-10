@@ -53,12 +53,15 @@ describe('uploadPostImage', () => {
           upload: { url: 'https://acc.r2.cloudflarestorage.com/b/post-images/u1/1-abc.png?X-Amz-Signature=s', method: 'PUT', headers: { 'Content-Type': 'image/png' }, expiresAt: '' },
         })
       }
+      if (String(url).endsWith('/api/storage/post-images/complete')) {
+        return json(200, { success: true, key: 'u1/1-abc.png', url: '/api/storage/post-images/u1/1-abc.png' })
+      }
       return new Response(null, { status: 200 })
     })
     const file = png(8)
     const url = await uploadPostImage(file, fetchImpl as unknown as typeof fetch)
 
-    expect(calls).toHaveLength(2)
+    expect(calls).toHaveLength(3)
     expect(calls[0].url).toBe('https://api.example/api/storage/post-images/upload-url')
     expect(calls[0].init?.method).toBe('POST')
     expect((calls[0].init?.headers as Record<string, string>).Authorization).toBe('Bearer tok')
@@ -67,6 +70,9 @@ describe('uploadPostImage', () => {
     expect(calls[1].init?.method).toBe('PUT')
     expect(calls[1].init?.headers).toEqual({ 'Content-Type': 'image/png' })
     expect(calls[1].init?.body).toBe(file)
+    // 업로드 뒤 서버 확인
+    expect(calls[2].url).toBe('https://api.example/api/storage/post-images/complete')
+    expect(JSON.parse(String(calls[2].init?.body))).toEqual({ key: 'u1/1-abc.png' })
     expect(url).toMatch(/^https?:\/\/.+\/api\/storage\/post-images\/u1\/1-abc\.png$/)
   })
 
@@ -79,6 +85,16 @@ describe('uploadPostImage', () => {
         ? json(200, { success: true, key: 'k', url: 'https://cdn/x.png', upload: { url: 'https://store/x', method: 'PUT', headers: {}, expiresAt: '' } })
         : new Response(null, { status: 403 }))
     await expect(uploadPostImage(png(), putFails as unknown as typeof fetch)).rejects.toThrow('403')
+  })
+
+  it('fails when the server rejects the uploaded file after the PUT', async () => {
+    const rejected = vi.fn(async (url: RequestInfo | URL) => {
+      const u = String(url)
+      if (u.endsWith('/upload-url')) return json(200, { success: true, key: 'k', url: 'https://cdn/x.png', upload: { url: 'https://store/x', method: 'PUT', headers: {}, expiresAt: '' } })
+      if (u.endsWith('/complete')) return json(422, { success: false, error: '이미지 내용이 형식과 일치하지 않습니다.' })
+      return new Response(null, { status: 200 })
+    })
+    await expect(uploadPostImage(png(), rejected as unknown as typeof fetch)).rejects.toThrow('일치하지 않습니다')
   })
 
   it('does not call the server for invalid files', async () => {

@@ -17,13 +17,15 @@
  *   2) DB: 검증된 객체를 가리키는 Supabase 공개 URL만 바꾼다 (조건부 갱신: 계획 시점 값 그대로일 때만)
  *      stem_separations.*_url → S3 공개 URL 또는 `storage://audio-stems/<key>` (서버가 서명 URL로 바꿔 내려줌)
  *      posts.images[]         → S3 공개 URL 또는 `${PUBLIC_API_URL}/api/storage/post-images/<key>`
- *   3) --delete-source: 검증된 원본만, 그리고 그 버킷의 DB 갱신이 모두 성공했을 때만 지운다
+ *   3) --delete-source: 검증된 원본 중 삭제 직전 DB를 다시 읽어 아무 행도 원본 URL로 가리키지 않는 것만 지운다
+ *      (그 버킷의 DB 갱신 실패가 있거나 재확인이 실패하면 하나도 지우지 않는다)
+ *   새 조회 URL로 열 수 없는 예전 이미지 key는 DB를 바꾸지 않고 원본을 남긴다 (리포트에 표시)
  * 재실행해도 안전하다 (복사·갱신 모두 멱등). 서버를 STORAGE_DRIVER=s3로 바꾼 뒤 실행해야 이전 중 새 업로드가 원본에 쌓이지 않는다.
  */
 import * as dotenv from 'dotenv'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { STEM_NAMES, STEM_REF_PREFIX, stemKeyFromRef } from '../src/lib/stemStorage'
-import { POST_IMAGE_ROUTE } from '../src/lib/imageStorage'
+import { POST_IMAGE_ROUTE, postImageKeyFromParams } from '../src/lib/imageStorage'
 import { readStorageConfig } from '../src/storage/config'
 import { createS3StorageAdapter } from '../src/storage/s3Adapter'
 import { createSupabaseStorageAdapter } from '../src/storage/supabaseAdapter'
@@ -118,12 +120,30 @@ export function rewriteStemRow(row: StemRowForMigration, verified: Set<string>, 
   return update
 }
 
-/** 게시글 이미지 URL 배열의 갱신값. 바뀐 게 없으면 null */
-export function rewritePostImages(images: string[], verified: Set<string>, viewUrl: (key: string) => string): string[] | null {
+/** 이미지 key가 서버 조회 라우트(/api/storage/post-images/:owner/:file)로 열리는지 */
+export function isRoutableImageKey(key: string): boolean {
+  const i = key.indexOf('/')
+  return i > 0 && postImageKeyFromParams(key.slice(0, i), key.slice(i + 1)) === key
+}
+
+/**
+ * 게시글 이미지 URL 배열의 갱신값. 바뀐 게 없으면 null.
+ * 새 URL로 열 수 없는 key(조회 라우트 화이트리스트 밖)는 바꾸지 않는다 → 원본 Supabase URL 유지(삭제에서도 빠짐)
+ */
+export function rewritePostImages(
+  images: string[],
+  verified: Set<string>,
+  viewUrl: (key: string) => string,
+  onUnroutable: (key: string) => void = () => {},
+): string[] | null {
   let changed = false
   const out = images.map(u => {
     const key = supabaseKeyFromUrl(u, 'post-images')
     if (!key || !verified.has(key)) return u
+    if (!isRoutableImageKey(key)) {
+      onUnroutable(key)
+      return u
+    }
     changed = true
     return viewUrl(key)
   })
@@ -161,6 +181,12 @@ export interface BucketReport {
   dbPlanned: number
   dbUpdated: number
   dbFailed: number
+  /** 조건부 갱신이 0행 (그 사이 바뀜·삭제) */
+  dbSkipped: number
+  /** 새 조회 URL로 열 수 없어 갱신하지 않은 이미지 key */
+  unroutable: string[]
+  /** 삭제 직전 DB 재확인에서 아직 원본(Supabase)을 가리켜 남긴 key 수 */
+  keptReferenced: number
   deleted: number
   deleteSkippedReason: string | null
 }
@@ -196,6 +222,9 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
       dbPlanned: 0,
       dbUpdated: 0,
       dbFailed: 0,
+      dbSkipped: 0,
+      unroutable: [],
+      keptReferenced: 0,
       deleted: 0,
       deleteSkippedReason: null,
     }
@@ -237,7 +266,10 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
         try {
           const n = await deps.db.updateStemRow(row.id, before, update)
           if (n > 0) r.dbUpdated++
-          else log(`  · stem_separations ${row.id}: 그 사이 바뀌거나 삭제됨, 건너뜀`)
+          else {
+            r.dbSkipped++
+            log(`  · stem_separations ${row.id}: 그 사이 바뀌거나 삭제됨, 건너뜀`)
+          }
         } catch (e) {
           r.dbFailed++
           log(`  ✗ stem_separations ${row.id}: ${(e as Error).message}`)
@@ -250,21 +282,29 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
     } else {
       for (const p of await deps.db.listPosts()) {
         const images = p.images ?? []
-        const next = rewritePostImages(images, wouldVerify, deps.imageViewUrl)
+        const next = rewritePostImages(images, wouldVerify, deps.imageViewUrl, k => {
+          if (!r.unroutable.includes(k)) r.unroutable.push(k)
+        })
         if (!next) continue
         r.dbPlanned++
         if (!args.apply) continue
         try {
           const n = await deps.db.updatePostImages(p.id, images, next)
           if (n > 0) r.dbUpdated++
-          else log(`  · posts ${p.id}: 그 사이 바뀌거나 삭제됨, 건너뜀`)
+          else {
+            r.dbSkipped++
+            log(`  · posts ${p.id}: 그 사이 바뀌거나 삭제됨, 건너뜀`)
+          }
         } catch (e) {
           r.dbFailed++
           log(`  ✗ posts ${p.id}: ${(e as Error).message}`)
         }
       }
     }
-    log(`[${bucket}] 복사 ${r.copied}개, 실패 ${r.failed.length}개, 검증됨 ${r.verified}개 · DB 갱신 ${args.apply ? `${r.dbUpdated}/${r.dbPlanned} (실패 ${r.dbFailed})` : `대상 ${r.dbPlanned}행`}`)
+    log(`[${bucket}] 복사 ${r.copied}개, 실패 ${r.failed.length}개, 검증됨 ${r.verified}개 · DB 갱신 ${args.apply ? `${r.dbUpdated}/${r.dbPlanned} (실패 ${r.dbFailed}, 경합 건너뜀 ${r.dbSkipped})` : `대상 ${r.dbPlanned}행`}`)
+    if (r.unroutable.length > 0) {
+      log(`  ! 새 조회 URL로 열 수 없는 이미지 ${r.unroutable.length}개는 Supabase URL 유지·원본 보존: ${r.unroutable.slice(0, 5).join(', ')}${r.unroutable.length > 5 ? ' …' : ''}`)
+    }
 
     // 3) 원본 삭제 (명시적으로만)
     if (args.apply && args.deleteSource) {
@@ -272,7 +312,19 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
         r.deleteSkippedReason ??= 'DB 갱신 실패가 있어 원본 삭제를 건너뜀'
         log(`  ! ${r.deleteSkippedReason}`)
       } else {
-        const keys = [...verified]
+        // 삭제 직전 DB를 다시 읽어, 아직 원본(Supabase URL)을 가리키는 key는 절대 지우지 않는다.
+        // (조건부 갱신 0행, 해석 못 한 참조, 이전 중 예전 클라이언트가 새로 저장한 참조 모두 여기서 걸러진다)
+        let referenced: Set<string>
+        try {
+          referenced = await sourceReferencedKeys(bucket, deps.db)
+        } catch (e) {
+          r.deleteSkippedReason = `DB 재확인 실패로 원본 삭제를 건너뜀: ${(e as Error).message}`
+          log(`  ! ${r.deleteSkippedReason}`)
+          continue
+        }
+        const keys = [...verified].filter(k => !referenced.has(k))
+        r.keptReferenced = verified.size - keys.length
+        if (r.keptReferenced > 0) log(`  · 아직 DB가 원본을 가리키는 ${r.keptReferenced}개는 남김`)
         for (let i = 0; i < keys.length; i += 100) {
           try {
             await src.delete(keys.slice(i, i + 100))
@@ -286,6 +338,28 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
     }
   }
   return reports
+}
+
+/** DB가 지금 원본(Supabase ${bucket}) URL로 가리키는 모든 key (폴더·확장자와 무관하게) */
+export async function sourceReferencedKeys(bucket: LogicalBucket, db: MigrationDb): Promise<Set<string>> {
+  const out = new Set<string>()
+  if (bucket === 'audio-stems') {
+    for (const row of await db.listStemRows()) {
+      for (const [col, v] of Object.entries(row)) {
+        if (!col.endsWith('_url') || typeof v !== 'string') continue
+        const k = supabaseKeyFromUrl(v, bucket)
+        if (k) out.add(k)
+      }
+    }
+  } else {
+    for (const p of await db.listPosts()) {
+      for (const u of p.images ?? []) {
+        const k = supabaseKeyFromUrl(u, bucket)
+        if (k) out.add(k)
+      }
+    }
+  }
+  return out
 }
 
 export function supabaseMigrationDb(sb: SupabaseClient): MigrationDb {

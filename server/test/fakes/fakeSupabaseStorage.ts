@@ -23,7 +23,7 @@ export function fakeSupabaseStorage() {
       },
       async list(dir: string, o: { limit?: number; offset?: number; search?: string } = {}) {
         const root = dir ? `${dir}/` : ''
-        const entries = new Map<string, { name: string; id: string | null; metadata: { size: number } | null }>()
+        const entries = new Map<string, { name: string; id: string | null; metadata: { size: number; mimetype?: string } | null }>()
         for (const [k, v] of m) {
           if (!k.startsWith(root)) continue
           const rest = k.slice(root.length)
@@ -32,7 +32,7 @@ export function fakeSupabaseStorage() {
             const name = rest.slice(0, slash)
             entries.set(name, { name, id: null, metadata: null })
           } else {
-            entries.set(rest, { name: rest, id: `id-${k}`, metadata: { size: v.body.length } })
+            entries.set(rest, { name: rest, id: `id-${k}`, metadata: { size: v.body.length, mimetype: v.contentType } })
           }
         }
         let all = [...entries.values()].sort((a, b) => a.name.localeCompare(b.name))
