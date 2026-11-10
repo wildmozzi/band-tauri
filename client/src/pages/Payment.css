@@ -590,11 +590,19 @@
   transition: all 0.3s ease;
 }
 
+button.primary-action,
+button.secondary-action {
+  font: inherit;
+  cursor: pointer;
+}
+
 button.primary-action {
   border: none;
-  font: inherit;
   font-weight: 600;
-  cursor: pointer;
+}
+
+button.secondary-action {
+  font-weight: 500;
 }
 
 .primary-action:hover {

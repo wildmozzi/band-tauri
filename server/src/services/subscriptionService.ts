@@ -25,6 +25,13 @@ export interface PaymentGateway {
   lookupPayment(paymentKey: string): Promise<TossPaymentLookup>
 }
 
+export interface ConfirmOptions {
+  /** 결제 금액 (서버 발급 주문의 금액). 없으면 서버 가격표 */
+  amount?: number
+  /** pending 결제 행이 기록된 직후(토스 승인 전) 호출 */
+  onPendingRecorded?: () => Promise<void>
+}
+
 export interface SubscriptionServiceOptions {
   /** DB 기록 재시도 간격(ms). 길이 = 재시도 횟수 */
   retryDelaysMs?: number[]
@@ -83,6 +90,8 @@ const PENDING_MESSAGE = '결제 결과를 확인하고 있습니다. 잠시 후 
 export class SubscriptionService {
   private readonly retryDelaysMs: number[]
   private readonly now: () => Date
+  /** 주문 조회가 촉발한 재조정의 마지막 시각 (orderId → ms) */
+  private readonly orderRechecks = new Map<string, number>()
 
   constructor(
     private readonly repo: SubscriptionRepository,
@@ -94,8 +103,14 @@ export class SubscriptionService {
   }
 
   /** 결제 승인 → 구독 기록. 실패는 ServiceError / StoreUnavailableError로 throw */
-  async confirmPayment(userId: string, paymentKey: string, orderId: string, planType: PaidPlan): Promise<SubscriptionRecord> {
-    const intent: PaymentIntent = { userId, paymentKey, orderId, planType, amount: PLAN_PRICES[planType] }
+  async confirmPayment(
+    userId: string,
+    paymentKey: string,
+    orderId: string,
+    planType: PaidPlan,
+    opts: ConfirmOptions = {},
+  ): Promise<SubscriptionRecord> {
+    const intent: PaymentIntent = { userId, paymentKey, orderId, planType, amount: opts.amount ?? PLAN_PRICES[planType] }
 
     // 1) 멱등성 확인 + pending 행 (겸 저장소 확인: 테이블이 없으면 여기서 503 — 승인 전에 막는다)
     let existing = await this.findRecorded(intent)
@@ -115,6 +130,16 @@ export class SubscriptionService {
       throw new ServiceError(409, { success: false, error: '이미 처리된 결제입니다.' })
     }
     // none(방금 pending 생성) 또는 pending(이전 요청의 응답 유실 후 재시도)
+
+    // pending 행이 생긴 "뒤에" 호출자에게 알린다 (주문의 confirm 시도 표시 — 리뷰 #8 M2).
+    // 실패해도 승인 흐름은 막지 않는다: 표시가 없으면 주문 상태가 created로 보여 클라이언트가 confirm을 다시 보낼 뿐이다(멱등)
+    if (opts.onPendingRecorded) {
+      try {
+        await opts.onPendingRecorded()
+      } catch (err) {
+        console.error(`[PAYMENT] confirm 시도 표시 실패 — 승인은 계속 (orderId=${orderId}):`, errMessage(err))
+      }
+    }
 
     // 2) 토스 승인 (토스가 실제 주문 금액과 대조하므로 불일치하면 승인 실패)
     const result = await this.gateway.confirmPayment(paymentKey, orderId, intent.amount)
@@ -300,6 +325,13 @@ export class SubscriptionService {
     const now = this.now().getTime()
     if (now - row.createdAt.getTime() < RECONCILE_MIN_AGE_MS) return row
     if (row.updatedAt.getTime() > row.createdAt.getTime() && now - row.updatedAt.getTime() < ORDER_RECHECK_INTERVAL_MS) return row
+    // touch가 실패해도 간격이 지켜지도록 프로세스 메모리에도 기록 (리뷰 #8 L4)
+    const last = this.orderRechecks.get(orderId)
+    if (last !== undefined && now - last < ORDER_RECHECK_INTERVAL_MS) return row
+    this.orderRechecks.set(orderId, now)
+    if (this.orderRechecks.size > 1000) {
+      for (const [k, t] of this.orderRechecks) if (now - t >= ORDER_RECHECK_INTERVAL_MS) this.orderRechecks.delete(k)
+    }
     await this.reconcileRow(row, this.now())
     return this.repo.findPaymentByOrderId(orderId)
   }

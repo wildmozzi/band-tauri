@@ -60,7 +60,7 @@ export function createApp(options: AppOptions = {}) {
     : null
   app.use('/api', limit ?? apiLimiter)
   app.use('/api/music', musicRoutes)
-  app.use('/api/payment', limit ?? paymentLimiter,createPaymentRouter(options.subscriptionService, options.paymentOrderService))
+  app.use('/api/payment', limit ?? paymentLimiter, createPaymentRouter(options.subscriptionService, options.paymentOrderService))
 
   // 헬스체크
   app.get('/health', (_req, res) => {

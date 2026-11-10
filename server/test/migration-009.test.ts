@@ -20,6 +20,8 @@ const SUPABASE_STUB = `
   CREATE ROLE authenticated NOLOGIN;
   CREATE ROLE service_role NOLOGIN BYPASSRLS;
   CREATE SCHEMA auth;
+  CREATE TABLE auth.users (id UUID PRIMARY KEY);
+  INSERT INTO auth.users (id) VALUES ('${U1}'), ('${U2}');
   CREATE FUNCTION auth.uid() RETURNS UUID LANGUAGE sql STABLE AS
     $$ SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
   GRANT USAGE ON SCHEMA auth TO anon, authenticated, service_role;
@@ -89,5 +91,31 @@ describe('migration 009 payment_orders (PGlite)', () => {
       `INSERT INTO public.payment_orders (order_id, user_id, plan_type, amount, expires_at) VALUES ('ord_client_made', '${U1}', 'pro', 1, NOW() + interval '1 day')`), '42501')
     await rejectsCode(as('authenticated', U1, `UPDATE public.payment_orders SET amount = 1`), '42501')
     await rejectsCode(as('authenticated', U1, `DELETE FROM public.payment_orders`), '42501')
+  })
+
+  it('user_id must reference auth.users (FK), and orders are removed with the user', async () => {
+    const U3 = '33333333-3333-4333-8333-333333333333'
+    await rejectsCode(insert('ord_no_such_user', U3), '23503')
+    await db.query(`INSERT INTO auth.users (id) VALUES ($1)`, [U3])
+    await insert('ord_user_three', U3)
+    await db.query(`DELETE FROM auth.users WHERE id = $1`, [U3])
+    assert.equal((await db.query(`SELECT 1 FROM public.payment_orders WHERE user_id = $1`, [U3])).rows.length, 0)
+  })
+
+  it('stale cleanup index exists and the cleanup query removes only unattempted, long-expired orders', async () => {
+    const idx = await db.query<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'payment_orders'`)
+    assert.ok(idx.rows.some(r => r.indexname === 'idx_payment_orders_stale'))
+    // created_at을 과거로 둬야 CHECK(expires_at > created_at)를 통과한다
+    const old = (id: string) => as('service_role', null,
+      `INSERT INTO public.payment_orders (order_id, user_id, plan_type, amount, created_at, expires_at)
+       VALUES ($1, $2, 'pro', 6900, NOW() - interval '3 days', NOW() - interval '2 days')`, [id, U2])
+    await old('ord_stale_unattempted')
+    await old('ord_stale_attempted')
+    await as('service_role', null, `UPDATE public.payment_orders SET confirm_attempted_at = NOW() - interval '2 days' WHERE order_id = 'ord_stale_attempted'`)
+    // paymentOrderRepository.deleteStaleOrders와 같은 조건
+    await as('service_role', null, `DELETE FROM public.payment_orders WHERE confirm_attempted_at IS NULL AND expires_at < NOW() - interval '1 day'`)
+    const left = (await db.query<{ order_id: string }>(`SELECT order_id FROM public.payment_orders WHERE order_id LIKE 'ord_stale_%'`)).rows.map(r => r.order_id)
+    assert.deepEqual(left, ['ord_stale_attempted'])
+    assert.ok((await db.query(`SELECT 1 FROM public.payment_orders WHERE order_id = 'ord_aaaaaaaaaaaa'`)).rows.length === 1, 'live orders kept')
   })
 })

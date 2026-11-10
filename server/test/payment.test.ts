@@ -107,6 +107,13 @@ describe('orders', () => {
     assert.equal(orderRepo.orders.find(x => x.orderId === o.orderId)?.userId, 'alice')
   })
 
+  it('per-user issue limit → 429 (review #8 M1)', async () => {
+    for (let i = 0; i < 5; i++) await newOrder('flood', 'pro')
+    const r = await post('/api/payment/orders', { planType: 'pro' }, bearer('flood'))
+    assert.equal(r.status, 429)
+    assert.equal(((await r.json()) as any).success, false)
+  })
+
   it('rejects free/unknown plans', async () => {
     for (const planType of ['free', 'enterprise', undefined]) {
       const r = await post('/api/payment/orders', { planType }, bearer('alice'))

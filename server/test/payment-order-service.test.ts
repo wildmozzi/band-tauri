@@ -4,13 +4,20 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { SubscriptionService, RECONCILE_MIN_AGE_MS, type PaymentGateway } from '../src/services/subscriptionService'
-import { PaymentOrderService, ORDER_TTL_MS, generateOrderId } from '../src/services/paymentOrderService'
+import {
+  PaymentOrderService, ORDER_TTL_MS, ORDER_RETENTION_MS, MAX_OPEN_ORDERS, MAX_ORDERS_PER_MINUTE, generateOrderId,
+} from '../src/services/paymentOrderService'
+import { RepositoryError } from '../src/repositories/errors'
+import { PLAN_PRICES } from '../src/types/payment'
 import { ServiceError } from '../src/services/errors'
 import type { PaymentResponse, TossPaymentLookup } from '../src/types/payment'
 import { MemorySubscriptionRepository } from './fakes/memorySubscriptionRepository'
 import { MemoryPaymentOrderRepository } from './fakes/memoryPaymentOrderRepository'
 
-function setup(confirm: PaymentResponse = { success: true, outcome: 'approved' }) {
+function setup(initialConfirm: PaymentResponse = { success: true, outcome: 'approved' }) {
+  let confirm = initialConfirm
+  /** 토스 승인 호출 중에 실행 (경쟁 재현용) */
+  let onConfirm: (() => Promise<void>) | null = null
   // 메모리 저장소의 created_at은 실제 시각이므로 시계도 실제 시각에서 시작한다
   let now = new Date()
   const start = now.getTime()
@@ -19,7 +26,11 @@ function setup(confirm: PaymentResponse = { success: true, outcome: 'approved' }
   let lookup: TossPaymentLookup | 'throw' = 'throw'
   const confirms: [string, string, number][] = []
   const g: PaymentGateway = {
-    async confirmPayment(k, o, a) { confirms.push([k, o, a]); return confirm },
+    async confirmPayment(k, o, a) {
+      confirms.push([k, o, a])
+      if (onConfirm) await onConfirm()
+      return confirm
+    },
     async cancelPayment(k) { return { success: true, paymentKey: k } },
     async lookupPayment(k) {
       lookups.push(k)
@@ -35,6 +46,8 @@ function setup(confirm: PaymentResponse = { success: true, outcome: 'approved' }
     svc, subRepo, orderRepo, confirms, lookups, start,
     advance: (ms: number) => { now = new Date(now.getTime() + ms) },
     setLookup: (l: TossPaymentLookup | 'throw') => { lookup = l },
+    setConfirm: (c: PaymentResponse) => { confirm = c },
+    setOnConfirm: (f: (() => Promise<void>) | null) => { onConfirm = f },
   }
 }
 
@@ -115,5 +128,128 @@ describe('PaymentOrderService', () => {
     const st = await t.svc.getOrderStatus('u1', o.orderId)
     assert.equal(st.status, 'paid')
     assert.equal(st.subscription?.planType, 'pro')
+  })
+})
+
+describe('리뷰 #8 M1: 사용자당 주문 발급 제한 + 만료 주문 정리', () => {
+  it(`more than ${MAX_ORDERS_PER_MINUTE} orders per minute → 429, allowed again after a minute; other users unaffected`, async () => {
+    const t = setup()
+    for (let i = 0; i < MAX_ORDERS_PER_MINUTE; i++) await t.svc.createOrder('u1', 'pro')
+    await rejectsWith(t.svc.createOrder('u1', 'pro'), 429)
+    await t.svc.createOrder('u2', 'pro')
+    t.advance(60_001)
+    await t.svc.createOrder('u1', 'pro')
+  })
+
+  it(`more than ${MAX_OPEN_ORDERS} open (unexpired, unattempted) orders → 429; attempted/expired ones don't count`, async () => {
+    const t = setup()
+    const ids: string[] = []
+    for (let i = 0; i < MAX_OPEN_ORDERS; i++) {
+      ids.push((await t.svc.createOrder('u1', 'standard')).orderId)
+      t.advance(61_000) // 분당 제한은 피한다
+    }
+    await rejectsWith(t.svc.createOrder('u1', 'standard'), 429)
+    // 하나를 결제 시도하면 미결에서 빠진다
+    await t.svc.confirm('u1', { paymentKey: 'pk1', orderId: ids[0], planType: 'standard', amount: 2900 })
+    await t.svc.createOrder('u1', 'standard')
+    await rejectsWith(t.svc.createOrder('u1', 'standard'), 429)
+    // 만료되면 다시 발급 가능
+    t.advance(ORDER_TTL_MS)
+    await t.svc.createOrder('u1', 'standard')
+  })
+
+  it('cleanup removes only unattempted orders expired for over 24h', async () => {
+    const t = setup()
+    const stale = await t.svc.createOrder('u1', 'pro')
+    const attempted = await t.svc.createOrder('u1', 'pro')
+    await t.svc.confirm('u1', { paymentKey: 'pk1', orderId: attempted.orderId, planType: 'pro', amount: 6900 })
+    t.advance(ORDER_TTL_MS + ORDER_RETENTION_MS + 1)
+    const fresh = await t.svc.createOrder('u1', 'pro')
+    assert.equal(await t.svc.cleanupStaleOrders(), 1)
+    const left = t.orderRepo.orders.map(o => o.orderId)
+    assert.ok(!left.includes(stale.orderId))
+    assert.ok(left.includes(attempted.orderId), 'attempted orders are kept for status lookups')
+    assert.ok(left.includes(fresh.orderId))
+  })
+})
+
+describe('리뷰 #8 M2: confirm 시도 표시는 pending 결제 행 뒤에 → failed 오판 없음', () => {
+  it('transient DB error before the pending row → order stays created (not failed) and a retry succeeds', async () => {
+    const t = setup()
+    const o = await t.svc.createOrder('u1', 'pro')
+    const orig = t.subRepo.createPendingPayment.bind(t.subRepo)
+    t.subRepo.createPendingPayment = async () => { throw new RepositoryError('connection reset') }
+    await assert.rejects(t.svc.confirm('u1', { paymentKey: 'pk1', orderId: o.orderId, planType: 'pro', amount: 6900 }), RepositoryError)
+    assert.equal(t.confirms.length, 0, 'Toss not called')
+    assert.equal(t.orderRepo.orders[0].confirmAttemptedAt, null)
+    assert.equal((await t.svc.getOrderStatus('u1', o.orderId)).status, 'created')
+    t.subRepo.createPendingPayment = orig
+    await t.svc.confirm('u1', { paymentKey: 'pk1', orderId: o.orderId, planType: 'pro', amount: 6900 })
+    assert.equal((await t.svc.getOrderStatus('u1', o.orderId)).status, 'paid')
+  })
+
+  it('status polled while confirm is in flight (after the pending row) → processing, never failed', async () => {
+    const t = setup()
+    const o = await t.svc.createOrder('u1', 'pro')
+    const seen: string[] = []
+    t.setOnConfirm(async () => {
+      seen.push((await t.svc.getOrderStatus('u1', o.orderId)).status)
+      assert.ok(t.orderRepo.orders[0].confirmAttemptedAt, 'attempt marked before Toss is called')
+    })
+    await t.svc.confirm('u1', { paymentKey: 'pk1', orderId: o.orderId, planType: 'pro', amount: 6900 })
+    assert.deepEqual(seen, ['processing'])
+  })
+
+  it('pending row exists but the attempt mark fails → payment still proceeds', async () => {
+    const t = setup()
+    const o = await t.svc.createOrder('u1', 'pro')
+    t.orderRepo.markConfirmAttempted = async () => { throw new RepositoryError('timeout') }
+    await t.svc.confirm('u1', { paymentKey: 'pk1', orderId: o.orderId, planType: 'pro', amount: 6900 })
+    assert.equal((await t.svc.getOrderStatus('u1', o.orderId)).status, 'paid')
+  })
+
+  it('conflicting paymentKey (409) does not mark the order as attempted', async () => {
+    const t = setup()
+    const a = await t.svc.createOrder('u1', 'pro')
+    await t.svc.confirm('u1', { paymentKey: 'pk1', orderId: a.orderId, planType: 'pro', amount: 6900 })
+    const b = await t.svc.createOrder('u2', 'pro')
+    await rejectsWith(t.svc.confirm('u2', { paymentKey: 'pk1', orderId: b.orderId, planType: 'pro', amount: 6900 }), 409)
+    assert.equal((await t.svc.getOrderStatus('u2', b.orderId)).status, 'created')
+  })
+})
+
+describe('리뷰 #8 L3/L4', () => {
+  it('price table change: blocks new payments, but a retry of an in-flight payment uses the order amount', async () => {
+    const t = setup({ success: false, outcome: 'unknown', error: 'timeout' })
+    const inflight = await t.svc.createOrder('u1', 'pro')
+    const fresh = await t.svc.createOrder('u1', 'pro')
+    await rejectsWith(t.svc.confirm('u1', { paymentKey: 'pk1', orderId: inflight.orderId, planType: 'pro', amount: 6900 }), 503)
+    const orig = PLAN_PRICES.pro
+    PLAN_PRICES.pro = 7900
+    try {
+      await rejectsWith(t.svc.confirm('u1', { paymentKey: 'pk2', orderId: fresh.orderId, planType: 'pro', amount: 6900 }), 400)
+      t.setConfirm({ success: true, outcome: 'approved' })
+      const sub = await t.svc.confirm('u1', { paymentKey: 'pk1', orderId: inflight.orderId, planType: 'pro', amount: 6900 })
+      assert.equal(sub.amount, 6900)
+      assert.deepEqual(t.confirms.at(-1), ['pk1', inflight.orderId, 6900])
+    } finally {
+      PLAN_PRICES.pro = orig
+    }
+  })
+
+  it('poll-triggered recheck stays rate-limited even if touching the pending row fails', async () => {
+    const t = setup({ success: false, outcome: 'unknown', error: 'timeout' })
+    const o = await t.svc.createOrder('u1', 'pro')
+    await rejectsWith(t.svc.confirm('u1', { paymentKey: 'pk1', orderId: o.orderId, planType: 'pro', amount: 6900 }), 503)
+    t.subRepo.touchPendingPayment = async () => { throw new RepositoryError('touch failed') }
+    t.advance(RECONCILE_MIN_AGE_MS + 1)
+    const base = t.lookups.length
+    await t.svc.getOrderStatus('u1', o.orderId)
+    await t.svc.getOrderStatus('u1', o.orderId)
+    await t.svc.getOrderStatus('u1', o.orderId)
+    assert.equal(t.lookups.length, base + 1)
+    t.advance(30_000)
+    await t.svc.getOrderStatus('u1', o.orderId)
+    assert.equal(t.lookups.length, base + 2)
   })
 })

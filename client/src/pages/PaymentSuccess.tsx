@@ -5,7 +5,7 @@ import { usePremium } from '../contexts/usePremium'
 import { paymentApi } from '../services/paymentApi'
 import {
   loadChecking,
-  pollOrder,
+  recheckOrder,
   runPaymentFlow,
   type ConfirmParams,
   type KeyValueStorage,
@@ -82,7 +82,7 @@ export function PaymentSuccess() {
       isCancelled: () => cancelled,
     }
 
-    const run = recheck > 0 ? pollOrder(params, deps) : runPaymentFlow(params, deps)
+    const run = recheck > 0 ? recheckOrder(params, deps) : runPaymentFlow(params, deps)
     run.then((r) => {
       if (cancelled || r.kind === 'aborted') return
       if (r.kind === 'paid') setUserPlanRef.current(r.planType)
@@ -119,6 +119,30 @@ export function PaymentSuccess() {
           <h2>결제 확인 중</h2>
           <p>결제 결과를 확인하고 있습니다. 최대 몇 분 걸릴 수 있습니다.</p>
           <p>이 화면을 새로고침하거나 닫아도 결제는 안전하게 처리되며, 중복 결제되지 않습니다.</p>
+        </div>
+      </div>
+    )
+  }
+
+  // 로그인 만료: 확인 상태는 저장돼 있으므로 로그인 후 이 화면으로 돌아오면 이어서 확인한다
+  if (result?.kind === 'unauthorized') {
+    return (
+      <div className="payment-success-page">
+        <div className="success-container">
+          <h1>로그인이 필요합니다</h1>
+          <p>결제 확인 중 로그인이 만료되었습니다. 다시 로그인한 뒤 결제 결과를 확인해 주세요. 중복 결제되지 않으니 다시 결제하지 마세요.</p>
+          <div className="action-buttons">
+            <Link to="/auth" state={{ from: '/payment/success' }} className="primary-action">
+              로그인하기
+            </Link>
+            <button
+              type="button"
+              className="secondary-action"
+              onClick={() => { setPhase('checking'); setRecheck(n => n + 1) }}
+            >
+              다시 확인하기
+            </button>
+          </div>
         </div>
       </div>
     )

@@ -18,4 +18,18 @@ export class MemoryPaymentOrderRepository implements PaymentOrderRepository {
   async markConfirmAttempted(orderId: string, at: Date) {
     for (const o of this.orders) if (o.orderId === orderId && !o.confirmAttemptedAt) o.confirmAttemptedAt = at
   }
+
+  async countOrdersCreatedSince(userId: string, since: Date) {
+    return this.orders.filter(o => o.userId === userId && o.createdAt >= since).length
+  }
+
+  async countOpenOrders(userId: string, now: Date) {
+    return this.orders.filter(o => o.userId === userId && !o.confirmAttemptedAt && o.expiresAt > now).length
+  }
+
+  async deleteStaleOrders(before: Date) {
+    const n = this.orders.length
+    this.orders = this.orders.filter(o => !(!o.confirmAttemptedAt && o.expiresAt < before))
+    return n - this.orders.length
+  }
 }

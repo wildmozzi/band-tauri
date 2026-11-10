@@ -33,6 +33,12 @@ export interface PaymentOrderRepository {
   findOrder(orderId: string): Promise<PaymentOrderRecord | null>
   /** confirm 시도 시각 기록 (이미 있으면 유지) */
   markConfirmAttempted(orderId: string, at: Date): Promise<void>
+  /** 사용자의 since 이후 생성 주문 수 (발급 속도 제한) */
+  countOrdersCreatedSince(userId: string, since: Date): Promise<number>
+  /** 사용자의 미결 주문 수: 만료 전이고 confirm 시도가 없는 주문 */
+  countOpenOrders(userId: string, now: Date): Promise<number>
+  /** before 이전에 만료됐고 confirm 시도가 없는 주문 삭제. 지운 개수 */
+  deleteStaleOrders(before: Date): Promise<number>
 }
 
 interface PaymentOrderRow {
@@ -92,6 +98,35 @@ export function createSupabasePaymentOrderRepository(supabase: SupabaseClient): 
         .is('confirm_attempted_at', null)
       if (error) fail(error, 'payment_orders.markConfirmAttempted')
     },
+
+    async countOrdersCreatedSince(userId, since) {
+      const { count, error } = await supabase.from('payment_orders')
+        .select('order_id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .gte('created_at', since.toISOString())
+      if (error) fail(error, 'payment_orders.countRecent')
+      return count ?? 0
+    },
+
+    async countOpenOrders(userId, now) {
+      const { count, error } = await supabase.from('payment_orders')
+        .select('order_id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .is('confirm_attempted_at', null)
+        .gt('expires_at', now.toISOString())
+      if (error) fail(error, 'payment_orders.countOpen')
+      return count ?? 0
+    },
+
+    async deleteStaleOrders(before) {
+      const { data, error } = await supabase.from('payment_orders')
+        .delete()
+        .is('confirm_attempted_at', null)
+        .lt('expires_at', before.toISOString())
+        .select('order_id')
+      if (error) fail(error, 'payment_orders.deleteStale')
+      return (data ?? []).length
+    },
   }
 }
 
@@ -101,5 +136,12 @@ export function createUnavailablePaymentOrderRepository(reason = 'Supabase가 �
     console.error(`[DB][PAYMENT] 주문 저장소를 사용할 수 없습니다: ${reason}`)
     throw new StoreUnavailableError(reason)
   }
-  return { createOrder: unavailable, findOrder: unavailable, markConfirmAttempted: unavailable }
+  return {
+    createOrder: unavailable,
+    findOrder: unavailable,
+    markConfirmAttempted: unavailable,
+    countOrdersCreatedSince: unavailable,
+    countOpenOrders: unavailable,
+    deleteStaleOrders: unavailable,
+  }
 }

@@ -14,6 +14,12 @@ import type { SubscriptionService } from './subscriptionService'
 
 /** 주문 유효 시간: 이 안에 토스 결제를 마치고 confirm해야 한다 */
 export const ORDER_TTL_MS = 30 * 60_000
+/** 사용자당 분당 주문 발급 수 상한 */
+export const MAX_ORDERS_PER_MINUTE = 5
+/** 사용자당 동시 미결 주문(만료 전·confirm 시도 없음) 상한 */
+export const MAX_OPEN_ORDERS = 10
+/** 미시도 주문은 만료 후 이 기간이 지나면 지운다 */
+export const ORDER_RETENTION_MS = 24 * 60 * 60_000
 
 /**
  * 주문 상태 (GET /orders/:orderId, 클라이언트 계약)
@@ -86,6 +92,15 @@ export class PaymentOrderService {
 
   async createOrder(userId: string, planType: PaidPlan): Promise<OrderView> {
     const createdAt = this.now()
+    // 사용자당 발급 제한 (리뷰 #8 M1): 분당 발급 수, 동시 미결 주문 수
+    const [recent, open] = await Promise.all([
+      this.orders.countOrdersCreatedSince(userId, new Date(createdAt.getTime() - 60_000)),
+      this.orders.countOpenOrders(userId, createdAt),
+    ])
+    if (recent >= MAX_ORDERS_PER_MINUTE || open >= MAX_OPEN_ORDERS) {
+      console.warn(`[PAYMENT] 주문 발급 제한 (userId=${userId} recent=${recent} open=${open})`)
+      throw new ServiceError(429, { success: false, error: '결제 요청이 너무 많습니다. 잠시 후 다시 시도해 주세요.' })
+    }
     const order = {
       orderId: this.newOrderId(),
       userId,
@@ -113,16 +128,23 @@ export class PaymentOrderService {
 
   async confirm(userId: string, input: ConfirmInput): Promise<SubscriptionRecord> {
     const order = await this.ownOrder(userId, input.orderId)
-    if (order.planType !== input.planType || order.amount !== input.amount || order.amount !== PLAN_PRICES[order.planType]) {
+    const payment = await this.subscriptions.findPaymentForOrder(order.orderId)
+    // 금액의 기준은 주문 금액이다. 가격표 대조는 아직 결제 기록이 없을 때만 (가격 변경 직후 503 재시도를 막지 않게, 리뷰 #8 L3)
+    const priceChanged = !payment && order.amount !== PLAN_PRICES[order.planType]
+    if (order.planType !== input.planType || order.amount !== input.amount || priceChanged) {
       console.warn(`[PAYMENT] 주문 불일치 거부 (userId=${userId} orderId=${order.orderId} order=${order.planType}/${order.amount} req=${input.planType}/${input.amount})`)
       throw new ServiceError(400, { success: false, error: '주문 정보와 결제 정보가 일치하지 않습니다.' })
     }
-    const payment = await this.subscriptions.findPaymentForOrder(order.orderId)
     if (!payment && order.expiresAt.getTime() <= this.now().getTime()) {
       throw new ServiceError(410, { success: false, error: '주문이 만료되었습니다. 결제를 처음부터 다시 진행해 주세요.' })
     }
-    if (!order.confirmAttemptedAt) await this.orders.markConfirmAttempted(order.orderId, this.now())
-    return this.subscriptions.confirmPayment(userId, input.paymentKey, order.orderId, order.planType)
+    // confirm 시도 표시는 pending 결제 행이 기록된 뒤에 한다 (리뷰 #8 M2).
+    // 그래서 "시도 표시 있음 + 결제 행 없음"은 결제 행이 있다가 지워진 경우(거절·미승인·보상 취소)뿐이다 → failed.
+    // 표시 전에 DB 오류가 나면 상태는 created로 남아 클라이언트가 confirm을 다시 보낸다(멱등).
+    return this.subscriptions.confirmPayment(userId, input.paymentKey, order.orderId, order.planType, {
+      amount: order.amount,
+      onPendingRecorded: order.confirmAttemptedAt ? undefined : () => this.orders.markConfirmAttempted(order.orderId, this.now()),
+    })
   }
 
   async getOrderStatus(userId: string, orderId: string): Promise<OrderStatusView> {
@@ -143,10 +165,28 @@ export class PaymentOrderService {
       if (payment.status === 'cancelled') return { ...view, status: 'cancelled' }
       return { ...view, status: 'processing' } // pending / manual_review
     }
+    // 시도 표시는 pending 행 기록 뒤에만 남으므로, 표시가 있는데 행이 없으면 행이 지워진 것 = 실패 확정
     if (order.confirmAttemptedAt) return { ...view, status: 'failed' }
     if (order.expiresAt.getTime() <= this.now().getTime()) return { ...view, status: 'expired' }
     return { ...view, status: 'created' }
   }
+
+  /** 만료 후 ORDER_RETENTION_MS가 지난 미시도 주문 삭제 (시도한 주문은 결제 상태 조회용으로 남김) */
+  async cleanupStaleOrders(): Promise<number> {
+    return this.orders.deleteStaleOrders(new Date(this.now().getTime() - ORDER_RETENTION_MS))
+  }
+}
+
+const ORDER_CLEANUP_INTERVAL_MS = 60 * 60_000
+
+/** 주기 작업 (index.ts): 미결 만료 주문 정리 1시간마다 */
+export function scheduleOrderJobs(service: PaymentOrderService) {
+  setInterval(() => {
+    service.cleanupStaleOrders().then(
+      (n) => { if (n > 0) console.log(`[PAYMENT] 만료 주문 ${n}건 정리`) },
+      (err) => console.error('[PAYMENT] 만료 주문 정리 실패:', err instanceof Error ? err.message : String(err)),
+    )
+  }, ORDER_CLEANUP_INTERVAL_MS).unref()
 }
 
 /** 운영 기본 인스턴스: Supabase 미설정이면 주문 API가 503 */

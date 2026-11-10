@@ -76,7 +76,7 @@ npm run dev
 
 ### 결제 관련 API
 (모두 `Authorization: Bearer <Supabase access token>` 필요, `/plans` 제외. DB 마이그레이션 007·009 필요)
-- `POST /api/payment/orders` `{ planType }` - 결제 주문 발급. 서버가 orderId·금액(서버 가격표)·만료(30분)를 정하고 사용자에 묶는다. 토스 결제창은 이 orderId로만 연다
+- `POST /api/payment/orders` `{ planType }` - 결제 주문 발급. 서버가 orderId·금액(서버 가격표)·만료(30분)를 정하고 사용자에 묶는다. 토스 결제창은 이 orderId로만 연다. 사용자당 분당 5개·동시 미결 10개를 넘으면 429. 결제 시도 없이 만료된 주문은 만료 24시간 뒤 서버가 지운다
 - `GET /api/payment/orders/:orderId` - 본인 주문 상태 (`created | processing | paid | failed | cancelled | expired`). 남의 주문·없는 주문은 404
 - `POST /api/payment/confirm` `{ paymentKey, orderId, amount, planType }` - 결제 승인. 본인 주문이고 플랜·금액이 주문과 같을 때만 진행 (없는/남의 주문 404, 불일치 400, 만료 410). 503이면 결과 미확정 → 클라이언트는 '결제 확인 중' 화면에서 주문 상태를 지수 백오프로 조회
 - `POST /api/payment/cancel` - 결제 취소

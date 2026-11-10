@@ -60,6 +60,8 @@ export type PaymentFlowResult =
   | { kind: 'timeout' }
   /** 화면을 떠나 중단됨 */
   | { kind: 'aborted' }
+  /** 로그인 만료(401/403) — 다시 로그인한 뒤 확인. 저장 상태는 유지 */
+  | { kind: 'unauthorized' }
 
 /** 조회 간격: 2s → 4s → 8s → 15s → 30s(이후 반복). 결제 API 분당 30회 제한보다 충분히 낮다 */
 export const POLL_DELAYS_MS = [2_000, 4_000, 8_000, 15_000, 30_000]
@@ -77,10 +79,16 @@ export function isUncertainConfirm(httpStatus: number): boolean {
 }
 
 export interface CheckingState extends ConfirmParams {
+  /** 이번 확인 창의 시작 시각 — 새로고침해도 유지되어 대기 한도가 늘어나지 않는다 (리뷰 #8 L1) */
   startedAt: number
+  /** 이번 확인 창에서 confirm을 이미 다시 보냈는지 (새로고침해도 유지) */
+  resent?: boolean
 }
 
-export function loadChecking(storage: KeyValueStorage | null | undefined): CheckingState | null {
+/** 이보다 오래된 저장 상태는 버린다 (토스 승인 유효시간·주문 만료보다 충분히 길게) */
+export const CHECKING_STATE_MAX_AGE_MS = 24 * 60 * 60_000
+
+export function loadChecking(storage: KeyValueStorage | null | undefined, now: number = Date.now()): CheckingState | null {
   if (!storage) return null
   try {
     const raw = storage.getItem(CHECKING_STORAGE_KEY)
@@ -88,7 +96,12 @@ export function loadChecking(storage: KeyValueStorage | null | undefined): Check
     const s = JSON.parse(raw) as Partial<CheckingState>
     if (typeof s.orderId !== 'string' || typeof s.paymentKey !== 'string' || typeof s.amount !== 'number' ||
       (s.planType !== 'standard' && s.planType !== 'pro')) return null
-    return { orderId: s.orderId, paymentKey: s.paymentKey, amount: s.amount, planType: s.planType, startedAt: Number(s.startedAt) || 0 }
+    const startedAt = Number(s.startedAt) || 0
+    if (now - startedAt > CHECKING_STATE_MAX_AGE_MS) {
+      clearChecking(storage)
+      return null
+    }
+    return { orderId: s.orderId, paymentKey: s.paymentKey, amount: s.amount, planType: s.planType, startedAt, resent: s.resent === true }
   } catch {
     return null
   }
@@ -102,6 +115,9 @@ export function clearChecking(storage: KeyValueStorage | null | undefined) {
   try { storage?.removeItem(CHECKING_STORAGE_KEY) } catch { /* 무시 */ }
 }
 
+const pickParams = (s: ConfirmParams): ConfirmParams =>
+  ({ paymentKey: s.paymentKey, orderId: s.orderId, amount: s.amount, planType: s.planType })
+
 const STATUS_MESSAGES: Record<'failed' | 'cancelled' | 'expired', string> = {
   failed: '결제가 완료되지 않았습니다. 다시 시도해 주세요.',
   cancelled: '결제가 취소되었습니다.',
@@ -110,22 +126,22 @@ const STATUS_MESSAGES: Record<'failed' | 'cancelled' | 'expired', string> = {
 
 /**
  * 결제 승인 → (필요하면) 결과 조회.
- * 같은 주문의 '확인 중' 상태가 저장돼 있으면(새로고침) confirm을 다시 보내지 않고 조회부터 한다.
+ * 같은 주문의 '확인 중' 상태가 저장돼 있으면(새로고침) confirm을 다시 보내지 않고, 저장된 대기 한도 안에서 조회를 이어간다.
  */
 export async function runPaymentFlow(params: ConfirmParams, deps: PaymentFlowDeps): Promise<PaymentFlowResult> {
-  const saved = loadChecking(deps.storage)
+  const saved = loadChecking(deps.storage, deps.now())
   if (saved && saved.orderId === params.orderId) {
     deps.onChecking?.()
     return pollOrder(saved, deps)
   }
 
-  const r = await deps.confirm(params)
+  const r = await deps.confirm(pickParams(params))
   if (r.success) {
     clearChecking(deps.storage)
     return { kind: 'paid', planType: params.planType }
   }
   if (isUncertainConfirm(r.httpStatus)) {
-    const state: CheckingState = { ...params, startedAt: deps.now() }
+    const state: CheckingState = { ...pickParams(params), startedAt: deps.now() }
     saveChecking(deps.storage, state)
     deps.onChecking?.()
     return pollOrder(state, deps)
@@ -133,22 +149,30 @@ export async function runPaymentFlow(params: ConfirmParams, deps: PaymentFlowDep
   return { kind: 'failed', error: r.error || '결제 승인에 실패했습니다.' }
 }
 
+/** '다시 확인': 새 확인 창(대기 한도·재전송 1회)을 열고 조회한다 */
+export async function recheckOrder(params: ConfirmParams, deps: PaymentFlowDeps): Promise<PaymentFlowResult> {
+  const state: CheckingState = { ...pickParams(params), startedAt: deps.now(), resent: false }
+  saveChecking(deps.storage, state)
+  return pollOrder(state, deps)
+}
+
 /**
- * 주문 상태를 지수 백오프로 조회해 최종 결과를 기다린다 (최대 MAX_CHECK_MS).
+ * 주문 상태를 지수 백오프로 조회해 최종 결과를 기다린다 (확인 창 시작부터 MAX_CHECK_MS, 최소 1회는 조회).
  * - paid/failed/cancelled/expired → 저장 상태를 지우고 결과 반환
  * - processing → 계속
- * - created(서버가 confirm을 받지 못함: 요청 유실) → confirm을 한 번 다시 보낸다 (서버 멱등)
+ * - created(서버가 confirm을 받지 못함: 요청 유실·DB 일시 오류) → 확인 창마다 confirm을 한 번 다시 보낸다 (서버 멱등)
+ * - 401/403(로그인 만료) → 중단, 저장 상태 유지 (리뷰 #8 L2)
  * - 조회 자체 실패(네트워크·5xx·429) → 계속, 404(주문 없음) → 실패
- * 시간 초과면 저장 상태를 남겨 둔다 (다시 확인·새로고침 시 이어서 조회)
+ * 시간 초과면 저장 상태를 남겨 둔다 (다시 확인 시 이어서 조회)
  */
-export async function pollOrder(state: ConfirmParams, deps: PaymentFlowDeps): Promise<PaymentFlowResult> {
-  const deadline = deps.now() + MAX_CHECK_MS
-  let resentConfirm = false
-  for (let attempt = 0; deps.now() < deadline; attempt++) {
+export async function pollOrder(state: CheckingState, deps: PaymentFlowDeps): Promise<PaymentFlowResult> {
+  const deadline = state.startedAt + MAX_CHECK_MS
+  for (let attempt = 0; attempt === 0 || deps.now() < deadline; attempt++) {
     await deps.sleep(pollDelay(attempt))
     if (deps.isCancelled?.()) return { kind: 'aborted' }
 
     const s = await deps.getStatus(state.orderId)
+    if (s.httpStatus === 401 || s.httpStatus === 403) return { kind: 'unauthorized' }
     if (s.httpStatus === 404) {
       clearChecking(deps.storage)
       return { kind: 'failed', error: s.error || '주문을 찾을 수 없습니다.' }
@@ -165,13 +189,15 @@ export async function pollOrder(state: ConfirmParams, deps: PaymentFlowDeps): Pr
         clearChecking(deps.storage)
         return { kind: 'failed', error: STATUS_MESSAGES[s.status] }
       case 'created': {
-        if (resentConfirm) break
-        resentConfirm = true
-        const c = await deps.confirm(state)
+        if (state.resent) break
+        state = { ...state, resent: true }
+        saveChecking(deps.storage, state)
+        const c = await deps.confirm(pickParams(state))
         if (c.success) {
           clearChecking(deps.storage)
           return { kind: 'paid', planType: state.planType }
         }
+        if (c.httpStatus === 401 || c.httpStatus === 403) return { kind: 'unauthorized' }
         if (!isUncertainConfirm(c.httpStatus)) {
           clearChecking(deps.storage)
           return { kind: 'failed', error: c.error || '결제 승인에 실패했습니다.' }

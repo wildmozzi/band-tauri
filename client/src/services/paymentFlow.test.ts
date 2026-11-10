@@ -7,6 +7,8 @@ import {
   loadChecking,
   pollDelay,
   pollOrder,
+  recheckOrder,
+  CHECKING_STATE_MAX_AGE_MS,
   runPaymentFlow,
   type ConfirmOutcome,
   type ConfirmParams,
@@ -14,6 +16,9 @@ import {
   type OrderStatusResult,
   type PaymentFlowDeps,
 } from './paymentFlow'
+
+/** 하네스 시계의 시작 시각 */
+const T0 = 1_000_000
 
 const PARAMS: ConfirmParams = { paymentKey: 'pk_1', orderId: 'ord_0123456789abcdef', amount: 6900, planType: 'pro' }
 
@@ -30,7 +35,7 @@ function harness(opts: {
   statuses?: (OrderStatusResult | ((t: number) => OrderStatusResult))[]
   storage?: MemoryStorage
 }) {
-  let t = 1_000_000
+  let t = T0
   const sleeps: number[] = []
   const confirms: ConfirmParams[] = []
   const statusCalls: string[] = []
@@ -53,7 +58,7 @@ function harness(opts: {
     storage,
     onChecking: () => { checking++ },
   }
-  return { deps, sleeps, confirms, statusCalls, storage, checkingCount: () => checking }
+  return { deps, sleeps, confirms, statusCalls, storage, checkingCount: () => checking, now: () => t }
 }
 
 describe('backoff', () => {
@@ -112,7 +117,7 @@ describe('runPaymentFlow', () => {
     const h = harness({
       storage,
       confirm: [{ httpStatus: 503, success: false }],
-      statuses: [() => { seen = loadChecking(storage); return { httpStatus: 200, status: 'paid' } }],
+      statuses: [() => { seen = loadChecking(storage, T0); return { httpStatus: 200, status: 'paid' } }],
     })
     await runPaymentFlow(PARAMS, h.deps)
     expect(seen).toMatchObject(PARAMS)
@@ -126,7 +131,7 @@ describe('runPaymentFlow', () => {
 
   it('reload while checking: restores and polls without re-sending confirm', async () => {
     const storage = new MemoryStorage()
-    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: 1 }))
+    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 }))
     const h = harness({ storage, statuses: [{ httpStatus: 200, status: 'processing' }, { httpStatus: 200, status: 'paid' }] })
     expect(await runPaymentFlow(PARAMS, h.deps)).toEqual({ kind: 'paid', planType: 'pro' })
     expect(h.confirms).toHaveLength(0)
@@ -136,7 +141,7 @@ describe('runPaymentFlow', () => {
 
   it('stored state for a different order is ignored (new payment confirms normally)', async () => {
     const storage = new MemoryStorage()
-    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, orderId: 'ord_other_order_1', startedAt: 1 }))
+    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, orderId: 'ord_other_order_1', startedAt: T0 }))
     const h = harness({ storage })
     expect((await runPaymentFlow(PARAMS, h.deps)).kind).toBe('paid')
     expect(h.confirms).toHaveLength(1)
@@ -156,9 +161,9 @@ describe('pollOrder final states', () => {
   for (const [status, msg] of [['failed', '완료되지 않았습니다'], ['cancelled', '취소'], ['expired', '만료']] as const) {
     it(`${status} → failed with a message, state cleared`, async () => {
       const storage = new MemoryStorage()
-      storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: 1 }))
+      storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 }))
       const h = harness({ storage, statuses: [{ httpStatus: 200, status }] })
-      const r = await pollOrder(PARAMS, h.deps)
+      const r = await pollOrder({ ...PARAMS, startedAt: T0 }, h.deps)
       expect(r.kind).toBe('failed')
       expect(r.kind === 'failed' && r.error).toContain(msg)
       expect(storage.getItem(CHECKING_STORAGE_KEY)).toBeNull()
@@ -167,7 +172,7 @@ describe('pollOrder final states', () => {
 
   it('404 (not my order / unknown) → failed', async () => {
     const h = harness({ statuses: [{ httpStatus: 404, error: '주문을 찾을 수 없습니다.' }] })
-    expect(await pollOrder(PARAMS, h.deps)).toEqual({ kind: 'failed', error: '주문을 찾을 수 없습니다.' })
+    expect(await pollOrder({ ...PARAMS, startedAt: T0 }, h.deps)).toEqual({ kind: 'failed', error: '주문을 찾을 수 없습니다.' })
   })
 
   it('created (server never received confirm) → re-sends confirm once', async () => {
@@ -175,15 +180,15 @@ describe('pollOrder final states', () => {
       confirm: [{ httpStatus: 200, success: true }],
       statuses: [{ httpStatus: 200, status: 'created' }],
     })
-    expect(await pollOrder(PARAMS, h.deps)).toEqual({ kind: 'paid', planType: 'pro' })
+    expect(await pollOrder({ ...PARAMS, startedAt: T0 }, h.deps)).toEqual({ kind: 'paid', planType: 'pro' })
     expect(h.confirms).toEqual([PARAMS])
   })
 
   it('times out after MAX_CHECK_MS but keeps the state for a later re-check', async () => {
     const storage = new MemoryStorage()
-    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: 1 }))
+    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 }))
     const h = harness({ storage })
-    expect(await pollOrder(PARAMS, h.deps)).toEqual({ kind: 'timeout' })
+    expect(await pollOrder({ ...PARAMS, startedAt: T0 }, h.deps)).toEqual({ kind: 'timeout' })
     const waited = h.sleeps.reduce((a, b) => a + b, 0)
     expect(waited).toBeGreaterThanOrEqual(MAX_CHECK_MS)
     expect(waited).toBeLessThan(MAX_CHECK_MS + 30_001)
@@ -195,7 +200,80 @@ describe('pollOrder final states', () => {
     let left = false
     h.deps.isCancelled = () => left
     h.deps.sleep = async () => { left = true }
-    expect(await pollOrder(PARAMS, h.deps)).toEqual({ kind: 'aborted' })
+    expect(await pollOrder({ ...PARAMS, startedAt: T0 }, h.deps)).toEqual({ kind: 'aborted' })
     expect(h.statusCalls).toEqual([])
   })
+})
+
+describe('리뷰 #8 L1: 새로고침해도 대기 한도·재전송 횟수 유지', () => {
+  it('reload restores the original deadline instead of starting a new 10-minute window', async () => {
+    const storage = new MemoryStorage()
+    // 9분 30초 전에 시작한 확인 창
+    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 - 9.5 * 60_000 }))
+    const h = harness({ storage })
+    expect(await runPaymentFlow(PARAMS, h.deps)).toEqual({ kind: 'timeout' })
+    // 남은 30초 + 마지막 간격(최대 30초) 안에 끝난다 (새 10분 창이 아님)
+    expect(h.sleeps.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(30_000 + 30_000)
+    expect(h.confirms).toHaveLength(0)
+  })
+
+  it('reload after the deadline still checks once (a late result is shown)', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 - 60 * 60_000 }))
+    const h = harness({ storage, statuses: [{ httpStatus: 200, status: 'paid' }] })
+    expect((await runPaymentFlow(PARAMS, h.deps)).kind).toBe('paid')
+    expect(h.statusCalls).toHaveLength(1)
+  })
+
+  it('confirm re-send is persisted: a reload does not re-send again in the same window', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 }))
+    const first = harness({ storage, confirm: [{ httpStatus: 503, success: false }], statuses: [{ httpStatus: 200, status: 'created' }] })
+    let calls = 0
+    first.deps.isCancelled = () => ++calls > 3 // 몇 번 조회 후 "새로고침"
+    await runPaymentFlow(PARAMS, first.deps)
+    expect(first.confirms).toHaveLength(1)
+    expect(loadChecking(storage, T0)?.resent).toBe(true)
+
+    const second = harness({ storage, statuses: [{ httpStatus: 200, status: 'created' }, { httpStatus: 200, status: 'paid' }] })
+    expect((await runPaymentFlow(PARAMS, second.deps)).kind).toBe('paid')
+    expect(second.confirms).toHaveLength(0)
+  })
+
+  it('"다시 확인" opens a fresh window (new deadline, one more re-send allowed)', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 - 60 * 60_000, resent: true }))
+    const h = harness({ storage, statuses: [{ httpStatus: 200, status: 'created' }], confirm: [{ httpStatus: 200, success: true }] })
+    expect((await recheckOrder(PARAMS, h.deps)).kind).toBe('paid')
+    expect(h.confirms).toEqual([PARAMS])
+  })
+
+  it('stored state older than 24h is discarded', () => {
+    const s = new MemoryStorage()
+    s.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 }))
+    expect(loadChecking(s, T0 + CHECKING_STATE_MAX_AGE_MS - 1)).not.toBeNull()
+    expect(loadChecking(s, T0 + CHECKING_STATE_MAX_AGE_MS + 1)).toBeNull()
+    expect(s.getItem(CHECKING_STORAGE_KEY)).toBeNull()
+  })
+
+  it('confirm requests carry only the confirm fields (no stored metadata)', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 }))
+    const h = harness({ storage, statuses: [{ httpStatus: 200, status: 'created' }] })
+    await runPaymentFlow(PARAMS, h.deps)
+    expect(h.confirms[0]).toEqual(PARAMS)
+  })
+})
+
+describe('리뷰 #8 L2: 폴링 중 401/403이면 중단', () => {
+  for (const code of [401, 403]) {
+    it(`${code} → unauthorized immediately, checking state kept for after login`, async () => {
+      const storage = new MemoryStorage()
+      storage.setItem(CHECKING_STORAGE_KEY, JSON.stringify({ ...PARAMS, startedAt: T0 }))
+      const h = harness({ storage, statuses: [{ httpStatus: 200, status: 'processing' }, { httpStatus: code }] })
+      expect(await runPaymentFlow(PARAMS, h.deps)).toEqual({ kind: 'unauthorized' })
+      expect(h.statusCalls).toHaveLength(2)
+      expect(loadChecking(storage, T0)).toMatchObject(PARAMS)
+    })
+  }
 })
