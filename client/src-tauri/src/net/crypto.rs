@@ -52,6 +52,25 @@ impl KeyPair {
     }
 }
 
+/// 안전 번호(SAS): SHA-256("band-sas-v1" ‖ 작은 공개키 ‖ 큰 공개키)의 앞 10바이트를 5자리 숫자 4묶음으로.
+/// 순서와 무관하므로 양쪽이 같은 값을 얻는다. 시그널링 서버가 descriptor의 키를 바꿔치기하면 두 사람의
+/// 값이 달라진다(PR #5 M-3).
+pub fn safety_code(a: &[u8; KEY_BYTES], b: &[u8; KEY_BYTES]) -> String {
+    use sha2::Digest;
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let mut h = sha2::Sha256::new();
+    h.update(b"band-sas-v1");
+    h.update(lo);
+    h.update(hi);
+    let d = h.finalize();
+    let mut groups = Vec::with_capacity(4);
+    for i in 0..4 {
+        let v = u32::from_be_bytes([0, d[i * 3], d[i * 3 + 1], d[i * 3 + 2]]) % 100_000;
+        groups.push(format!("{v:05}"));
+    }
+    groups.join(" ")
+}
+
 /// 방향별 키: info = "pair" || 송신자 공개키 || 송신자 ssrc || 수신자 공개키 || 수신자 ssrc
 fn derive_key(
     shared: &[u8; 32],
@@ -211,6 +230,19 @@ mod tests {
         let n = c_tx_to_b.seal(&h, b"forged", &mut buf).unwrap();
         let mut p = buf[..n].to_vec();
         assert!(b_rx.open(&h, &mut p).is_none(), "C가 A를 사칭한 패킷은 거부");
+    }
+
+    #[test]
+    fn safety_code_symmetric_and_detects_swap() {
+        let (a, b, m) = (KeyPair::generate(), KeyPair::generate(), KeyPair::generate());
+        let ab = safety_code(&a.public_bytes(), &b.public_bytes());
+        assert_eq!(ab, safety_code(&b.public_bytes(), &a.public_bytes()), "양쪽이 같은 값");
+        assert_eq!(ab.len(), 23);
+        // 서버가 A↔B 사이에 자기 키(M)를 끼우면 A는 (A,M), B는 (M,B)를 본다 → 다름
+        let a_sees = safety_code(&a.public_bytes(), &m.public_bytes());
+        let b_sees = safety_code(&m.public_bytes(), &b.public_bytes());
+        assert_ne!(a_sees, b_sees);
+        assert_ne!(a_sees, ab);
     }
 
     #[test]

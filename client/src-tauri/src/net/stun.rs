@@ -62,24 +62,49 @@ pub fn parse_response(buf: &[u8], txn_id: &[u8; 12]) -> Option<SocketAddr> {
 
 /// 여러 STUN 서버에 동시에 질의한다(리뷰 L7). 응답은 트랜잭션 ID와 출발지(서버 주소)를
 /// 모두 확인한다. 전체 대기는 `timeout` 한 번이다. 수신 스레드 시작 전에만 호출한다.
-pub fn query_many(socket: &UdpSocket, servers: &[String], timeout: Duration) -> Vec<(String, SocketAddr)> {
-    let mut pending: Vec<(String, SocketAddr, [u8; 12])> = Vec::new();
+pub fn query_many(
+    socket: &UdpSocket,
+    servers: &[String],
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Vec<(String, SocketAddr)> {
+    let started = Instant::now();
+    let deadline = started + timeout;
+    // DNS 해석도 서버별 스레드로 동시에, 전체 timeout 안에서만 기다린다(PR #5 L-5: 오프라인에서
+    // 직렬 DNS 타임아웃만큼 시작이 늘어나지 않게). 늦게 끝난 해석 스레드는 결과를 버리고 스스로 끝난다.
+    let (tx, rx) = std::sync::mpsc::channel::<(String, Option<SocketAddr>)>();
     for s in servers {
-        if let Some(addr) = s.to_socket_addrs().ok().and_then(|mut it| it.find(|a| a.is_ipv4())) {
-            let txn: [u8; 12] = rand::random();
-            if socket.send_to(&build_request(&txn), addr).is_ok() {
-                pending.push((s.clone(), addr, txn));
+        let (tx, s) = (tx.clone(), s.clone());
+        let spawned = std::thread::Builder::new().name("band-stun-dns".into()).spawn(move || {
+            let addr = s.to_socket_addrs().ok().and_then(|mut it| it.find(|a| a.is_ipv4()));
+            let _ = tx.send((s, addr));
+        });
+        if spawned.is_err() {
+            log::warn!("STUN DNS 스레드 생성 실패");
+        }
+    }
+    drop(tx);
+    let mut pending: Vec<(String, SocketAddr, [u8; 12])> = Vec::new();
+    for _ in 0..servers.len() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok((s, Some(addr))) => {
+                let txn: [u8; 12] = rand::random();
+                if socket.send_to(&build_request(&txn), addr).is_ok() {
+                    pending.push((s, addr, txn));
+                }
             }
+            Ok((s, None)) => log::warn!("STUN 서버 {s} 이름 해석 실패"),
+            Err(_) => break,
         }
     }
     let mut found = Vec::new();
-    let deadline = Instant::now() + timeout;
-    let resend_at = Instant::now() + timeout / 2;
+    let resend_at = started + timeout / 2;
     let mut resent = false;
     let mut buf = [0u8; 512];
     while !pending.is_empty() {
         let now = Instant::now();
-        if now >= deadline {
+        if now >= deadline || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst)) {
             break;
         }
         if !resent && now >= resend_at {
@@ -185,7 +210,7 @@ mod tests {
         });
         let servers = vec![srv_addr.to_string(), dead.local_addr().unwrap().to_string()];
         let t0 = Instant::now();
-        let got = query_many(&client, &servers, Duration::from_millis(600));
+        let got = query_many(&client, &servers, Duration::from_millis(600), None);
         t.join().unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].1, "203.0.113.5:40000".parse().unwrap());

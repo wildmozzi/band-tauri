@@ -34,6 +34,8 @@ pub struct NetOptions {
     pub extra_candidates: Vec<Candidate>,
     /// 원격 descriptor의 루프백 후보 허용(테스트 전용, 기본 false).
     pub allow_loopback_candidates: bool,
+    /// 켜지면 STUN 대기를 일찍 끝낸다(시작 취소, PR #5 M-4).
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for NetOptions {
@@ -44,6 +46,7 @@ impl Default for NetOptions {
             gather_lan: true,
             extra_candidates: Vec::new(),
             allow_loopback_candidates: false,
+            cancel: None,
         }
     }
 }
@@ -102,7 +105,7 @@ impl Net {
         }
         // 두 서버에 동시에 질의(전체 1.5초 상한)
         let servers: Vec<String> = opts.stun_servers.iter().take(2).cloned().collect();
-        for (server, a) in stun::query_many(&socket, &servers, Duration::from_millis(1500)) {
+        for (server, a) in stun::query_many(&socket, &servers, Duration::from_millis(1500), opts.cancel.as_deref()) {
             let s = a.to_string();
             log::info!("STUN {server}: 공인 주소 {s}");
             if !candidates.iter().any(|c| c.addr == s) {
@@ -183,6 +186,12 @@ impl Net {
             peer.mix.gain.store(old.mix.gain.load());
             peer.mix.muted.store(old.mix.muted.load(Ordering::Relaxed), Ordering::Relaxed);
             peer.mix.pan.store(old.mix.pan.load());
+            // 같은 세션(같은 공개키)이면 제어 패킷 재전송 창을 이어받는다. 새 키(상대 재시작)면 seq가
+            // 처음부터 다시 시작하므로 이어받지 않는다(PR #5 L-2).
+            if old.public_key == peer.public_key {
+                let old_conn = old.conn.lock();
+                peer.conn.lock().inherit_replay_window(&old_conn);
+            }
         }
         if peers.len() >= MAX_PEERS {
             return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
@@ -207,6 +216,13 @@ impl Net {
 
     pub fn peers(&self) -> Vec<Arc<Peer>> {
         self.shared.peers.read().clone()
+    }
+
+    /// 피어와의 안전 번호(SAS). 양쪽 공개키로 계산하므로 두 사람이 같은 값을 보면 키가 바꿔치기되지
+    /// 않은 것이다(시그널링 서버 중간자 탐지, PR #5 M-3).
+    pub fn safety_code(&self, peer_id: &str) -> Result<String, String> {
+        let peer = self.peers().into_iter().find(|p| p.id == peer_id).ok_or("알 수 없는 피어")?;
+        Ok(crypto::safety_code(&self.shared.keys.public_bytes(), &peer.public_key))
     }
 
     pub fn stop(&mut self) {
@@ -327,7 +343,7 @@ impl NetShared {
                     if c.on_handshake(from, &peer.candidates, now) == HandshakeOutcome::Ignored {
                         log::debug!("{}: 경로가 아닌 주소 {from}의 Hello(리바인딩 대기)", peer.id);
                     }
-                    h.ptype == PacketType::Hello && c.ack_allowed(now)
+                    h.ptype == PacketType::Hello && c.ack_allowed(from, now)
                 };
                 // 무시된 Hello에도 응답해 상대가 우리 경로를 알 수 있게 한다(간격 제한).
                 if ack {

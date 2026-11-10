@@ -114,7 +114,8 @@ pub struct ConnState {
     pub last_rx: Option<Instant>,
     pub last_hello: Option<Instant>,
     pub last_ping: Option<Instant>,
-    pub last_ack: Option<Instant>,
+    /// 주소별 마지막 HelloAck 시각(PR #5 L-4: 두 후보 경로가 서로를 굶기지 않게 주소 단위로 제한).
+    pub last_acks: Vec<(SocketAddr, Instant)>,
     pub rtt_ms: Option<f32>,
     /// 경로가 아닌 주소에서 연속으로 온 인증된 Hello (주소, 횟수).
     pub rebind: Option<(SocketAddr, u32)>,
@@ -140,11 +141,16 @@ impl ConnState {
             last_rx: None,
             last_hello: None,
             last_ping: None,
-            last_ack: None,
+            last_acks: Vec::new(),
             rtt_ms: None,
             rebind: None,
             ctrl_seq: [None; 6],
         }
+    }
+
+    /// 같은 세션(같은 키)의 피어를 다시 추가할 때 재전송 창을 이어받는다(PR #5 L-2).
+    pub fn inherit_replay_window(&mut self, old: &ConnState) {
+        self.ctrl_seq = old.ctrl_seq;
     }
 
     /// 제어 패킷 seq가 이전보다 새로우면 기록하고 true. 재전송(같거나 옛 seq)은 false.
@@ -197,17 +203,29 @@ impl ConnState {
         HandshakeOutcome::Accepted
     }
 
-    /// HelloAck를 보내도 되는지(간격 제한).
-    pub fn ack_allowed(&mut self, now: Instant) -> bool {
-        if self.last_ack.is_some_and(|t| now.duration_since(t) < HELLO_ACK_MIN_INTERVAL) {
-            return false;
+    /// `to`로 HelloAck를 보내도 되는지(주소별 간격 제한). 기억하는 주소는 후보 수만큼으로 제한한다.
+    pub fn ack_allowed(&mut self, to: SocketAddr, now: Instant) -> bool {
+        if let Some(e) = self.last_acks.iter_mut().find(|(a, _)| *a == to) {
+            if now.duration_since(e.1) < HELLO_ACK_MIN_INTERVAL {
+                return false;
+            }
+            e.1 = now;
+            return true;
         }
-        self.last_ack = Some(now);
+        if self.last_acks.len() >= MAX_CANDIDATES + 2 {
+            // 가장 오래된 항목을 교체
+            if let Some(i) = self.last_acks.iter().enumerate().min_by_key(|(_, (_, t))| *t).map(|(i, _)| i) {
+                self.last_acks.swap_remove(i);
+            }
+        }
+        self.last_acks.push((to, now));
         true
     }
 
-    /// 확정 경로에서 인증된 패킷 수신.
+    /// 확정 경로에서 인증된 패킷 수신. 경로가 살아 있으므로 리바인딩 카운트를 지운다(PR #5 L-3:
+    /// "연속 5회"가 Ping/Audio에 끼어든 Hello로 누적되지 않게).
     pub fn on_rx_from_path(&mut self, now: Instant) {
+        self.rebind = None;
         self.last_rx = Some(now);
         if self.state == PeerStateKind::Reconnecting {
             self.state = PeerStateKind::Connected;
@@ -430,9 +448,44 @@ mod tests {
     fn hello_ack_rate_limited() {
         let t0 = Instant::now();
         let mut c = ConnState::new(t0);
-        assert!(c.ack_allowed(t0));
-        assert!(!c.ack_allowed(t0 + Duration::from_millis(10)));
-        assert!(c.ack_allowed(t0 + Duration::from_millis(60)));
+        let (a, b): (SocketAddr, SocketAddr) = ("192.168.0.5:4000".parse().unwrap(), "203.0.113.9:5000".parse().unwrap());
+        assert!(c.ack_allowed(a, t0));
+        assert!(!c.ack_allowed(a, t0 + Duration::from_millis(10)));
+        // 다른 주소(두 번째 후보 경로)는 굶지 않는다(PR #5 L-4)
+        assert!(c.ack_allowed(b, t0 + Duration::from_millis(10)));
+        assert!(c.ack_allowed(a, t0 + Duration::from_millis(60)));
+        // 주소 수가 많아도 기억 공간은 제한된다
+        for i in 0..50u16 {
+            c.ack_allowed(SocketAddr::from(([198, 51, 100, 1], 1000 + i)), t0);
+        }
+        assert!(c.last_acks.len() <= MAX_CANDIDATES + 2);
+    }
+
+    #[test]
+    fn rebind_count_reset_by_path_traffic() {
+        // PR #5 L-3: 경로에서 Ping/Audio가 오면 리바인딩 카운트가 지워져 "연속 5회"가 유지된다
+        let t0 = Instant::now();
+        let mut c = ConnState::new(t0);
+        let old: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+        let new: SocketAddr = "203.0.113.9:6000".parse().unwrap();
+        c.on_handshake(old, &cands(), t0);
+        for _ in 0..REBIND_HELLOS - 1 {
+            c.on_handshake(new, &cands(), t0);
+            c.on_rx_from_path(t0);
+        }
+        assert_eq!(c.on_handshake(new, &cands(), t0), HandshakeOutcome::Ignored, "누적이 아니라 연속이어야 함");
+        assert_eq!(c.path.unwrap().0, old);
+    }
+
+    #[test]
+    fn replay_window_inherited() {
+        let t0 = Instant::now();
+        let mut old = ConnState::new(t0);
+        assert!(old.accept_ctrl_seq(PacketType::Bye, 100));
+        let mut fresh = ConnState::new(t0);
+        fresh.inherit_replay_window(&old);
+        assert!(!fresh.accept_ctrl_seq(PacketType::Bye, 100), "재추가 전에 캡처한 Bye 재전송 거부(PR #5 L-2)");
+        assert!(fresh.accept_ctrl_seq(PacketType::Bye, 101));
     }
 
     #[test]
