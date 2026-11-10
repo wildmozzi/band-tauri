@@ -81,6 +81,8 @@ const LONG_BLOCKS_MAX: usize = 32;
 const BLOCK_SAMPLES_MAX: usize = 1024;
 /// 긴 창 추정: 최근 블록 분위수 중 이 순위(1 = 최댓값). 버스트 하나는 블록 2개까지 걸치므로 3.
 const LONG_RANK: usize = 3;
+/// 경로 변경(지연 급감)으로 통계를 다시 모은 뒤, 옛 경로로 늦게 오는 패킷을 통계에서 빼는 시간(µs).
+const PATH_GRACE_US: u64 = 200_000;
 /// 재생 시작 직후 목표에 min(1프레임, 2.5ms)을 더해 두는 시간(µs).
 const START_PAD_US: u64 = 1_000_000;
 /// 패킷 단위 버림 시 크로스페이드 길이(샘플).
@@ -312,6 +314,8 @@ pub struct JitterBuffer {
     /// 아직 못 본 첫 콜백들에서 소스 링이 모자라지 않게 한다. 끝나면 `chase`로 목표까지 내려간다.
     start_pad: f64,
     start_pad_until_us: u64,
+    /// 경로 변경 유예 끝 시각(µs, `PATH_GRACE_US`).
+    path_reset_until_us: u64,
 
     stats: JitterStats,
 }
@@ -395,6 +399,7 @@ impl JitterBuffer {
             conceal: RateRing::new(LOSS_WINDOW_MAX),
             start_pad: 0.0,
             start_pad_until_us: 0,
+            path_reset_until_us: 0,
             stats: JitterStats::default(),
         }
     }
@@ -695,6 +700,18 @@ impl JitterBuffer {
     fn record_delay(&mut self, ts: u32, now_us: u64) {
         let ts_ext = self.unwrap_ts(ts);
         let transit = Self::now_samples(now_us) - ts_ext;
+        // 경로 변경(릴레이 → 직접 승격 등)으로 지연이 한 번에 크게 줄면 이전 경로의 도착 지연이 모두 "늦은" 표본이
+        // 되어 창이 빠질 때까지(+ hold) 목표가 옛 경로 지연만큼 남는다. 최소 지연보다 max(5ms, F) 넘게 이르면
+        // 지연 통계를 새 경로부터 다시 모은다(깊이 초과분은 패킷 단위 버림이 걷어 낸다). 지터가 큰 회선에서 잘못
+        // 걸리지 않도록 문턱은 현재 지터 폭(분위수)보다도 크고, 창에 표본이 50개 이상일 때만 본다.
+        let step = (5.0 * Self::samples_per_ms()).max(self.frame() as f64).max(self.q_rel) as i64;
+        if self.transit_count >= 50 && transit < self.min_transit - step {
+            self.reset_delay_stats();
+            self.path_reset_until_us = now_us + PATH_GRACE_US;
+        } else if now_us < self.path_reset_until_us && transit > self.min_transit + step {
+            // 경로 변경 직후 옛 경로로 오던(이미 보낸) 패킷: 새 경로 통계에 넣지 않는다.
+            return;
+        }
         if let Some(prev) = self.last_transit {
             let d = (transit - prev).abs() as f64;
             self.rfc_jitter += (d - self.rfc_jitter) / 16.0;
@@ -714,6 +731,21 @@ impl JitterBuffer {
         self.detect_burst(transit, now_us);
         self.push_block(transit, now_us);
         self.after_target_change();
+    }
+
+    fn reset_delay_stats(&mut self) {
+        self.transit_count = 0;
+        self.transit_pos = 0;
+        self.since_stats = 0;
+        self.last_transit = None;
+        self.short_cap = -1.0;
+        self.short_lower_since = None;
+        self.burst_abs = None;
+        self.recent_rel = [0; BURST_WIN];
+        self.block_rel.clear();
+        self.block_start_us = None;
+        self.block_count = 0;
+        self.long_cap = 0.0;
     }
 
     fn recompute_delay_stats(&mut self) {
@@ -1611,6 +1643,25 @@ mod tests {
         jb.set_profile(0.0);
         let low = jb.target_samples();
         assert!(low < bal && bal < stable, "목표 저지연 {low} < 균형 {bal} < 안정 {stable}");
+    }
+
+    #[test]
+    fn path_step_down_resets_delay_stats() {
+        // 릴레이 → 직접 승격처럼 지연이 18ms 한 번에 줄면 옛 경로 표본을 버리고 목표가 바로 새 경로 기준으로 내려간다.
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+        jb.set_consumer_lead(72.0);
+        let mut tx = Sender::new(CodecKind::Pcm16, 240, 0, 0);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        for k in 0..600u64 {
+            let (h, p) = tx.next();
+            // 전환 직후 20ms 동안 옛 경로로 보낸 패킷 4개가 새 경로 패킷 사이에 섞여 도착한다.
+            let delay = if k < 400 || (402..406).contains(&k) { 21_000 } else { 3000 } + rng.gen_range(0..500);
+            jb.insert(&h, &p, k * 5000 + delay);
+            if k == 399 {
+                assert!(jb.stats().target_ms < 6.0, "전제: 안정 회선 목표 {:?}", jb.stats());
+            }
+        }
+        assert!(jb.stats().target_ms < 6.0, "승격 1초 뒤 목표가 옛 경로 지연(18ms)을 끌지 않음: {:?}", jb.stats());
     }
 
     #[test]
