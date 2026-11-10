@@ -1,3 +1,4 @@
+import type { Tables, TablesInsert, TablesUpdate } from '../lib/database.types'
 import { supabase } from '../lib/supabaseClient'
 
 // Types
@@ -55,12 +56,96 @@ export interface CreateCommentData {
   parent_id?: string
 }
 
-// profiles:author_id 조인 결과 (Supabase 생성 타입 도입 전까지의 수동 타입)
-type JoinedProfile = { nickname?: string; email?: string } | null
+// profiles:author_id 조인 결과 (comments.author_id → profiles.id, 다대일)
+type JoinedProfile = { nickname: string | null; email: string | null } | null
 
 // Helper to get author name from user
-const getAuthorName = (email: string | undefined): string => {
+const getAuthorName = (email: string | null | undefined): string => {
   return email?.split('@')[0] ?? 'User'
+}
+
+const joinedAuthorName = (profile: JoinedProfile): string =>
+  profile?.nickname || getAuthorName(profile?.email)
+
+/** posts 행 → 화면용 Post. null 컬럼은 insert 기본값과 같은 값으로 채운다. */
+export function toPost(row: Tables<'posts'>, likedByUser?: boolean): Post {
+  const post: Post = {
+    id: row.id,
+    author_id: row.author_id,
+    author_name: row.author_name ?? '',
+    author_role: row.author_role ?? '',
+    title: row.title,
+    content: row.content,
+    category: row.category ?? 'general',
+    tags: row.tags ?? [],
+    images: row.images ?? [],
+    instrument: row.instrument ?? 'other',
+    likes_count: row.likes_count ?? 0,
+    comments_count: row.comments_count ?? 0,
+    created_at: row.created_at ?? '',
+  }
+  if (likedByUser !== undefined) post.liked_by_user = likedByUser
+  return post
+}
+
+type CommentRow = Pick<
+  Tables<'comments'>,
+  'id' | 'post_id' | 'author_id' | 'content' | 'parent_id' | 'created_at' | 'updated_at'
+>
+
+/** comments 행 → 화면용 Comment (replies는 빈 배열) */
+export function toComment(row: CommentRow, authorName: string): Comment {
+  return {
+    id: row.id,
+    post_id: row.post_id,
+    author_id: row.author_id,
+    content: row.content,
+    parent_id: row.parent_id,
+    created_at: row.created_at ?? '',
+    updated_at: row.updated_at ?? undefined,
+    author_name: authorName,
+    replies: [],
+  }
+}
+
+/** 평면 댓글 목록 → parent_id 기준 트리 (부모가 없는 답글은 버린다) */
+export function buildCommentTree(allComments: Comment[]): Comment[] {
+  const commentMap = new Map<string, Comment>()
+  const rootComments: Comment[] = []
+
+  allComments.forEach(comment => {
+    commentMap.set(comment.id, comment)
+  })
+
+  allComments.forEach(comment => {
+    if (comment.parent_id) {
+      const parent = commentMap.get(comment.parent_id)
+      if (parent) {
+        parent.replies = parent.replies || []
+        parent.replies.push(comment)
+      }
+    } else {
+      rootComments.push(comment)
+    }
+  })
+
+  return rootComments
+}
+
+const COMMENT_SELECT = `
+        id,
+        post_id,
+        author_id,
+        content,
+        parent_id,
+        created_at,
+        updated_at,
+        profiles:author_id (nickname, email)
+      ` as const
+
+function requireClient() {
+  if (!supabase) throw new Error('Supabase not configured')
+  return supabase
 }
 
 // Posts API
@@ -71,9 +156,9 @@ export const communityApi = {
     tag?: string
     userId?: string
   }): Promise<Post[]> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    let query = supabase
+    let query = sb
       .from('posts')
       .select('*')
       .order('created_at', { ascending: false })
@@ -92,27 +177,24 @@ export const communityApi = {
 
     // If user is logged in, check which posts they've liked
     if (options?.userId && data) {
-      const { data: likes } = await supabase
+      const { data: likes } = await sb
         .from('post_likes')
         .select('post_id')
         .eq('user_id', options.userId)
 
       const likedPostIds = new Set(likes?.map(l => l.post_id) ?? [])
 
-      return data.map(post => ({
-        ...post,
-        liked_by_user: likedPostIds.has(post.id)
-      }))
+      return data.map(post => toPost(post, likedPostIds.has(post.id)))
     }
 
-    return data ?? []
+    return (data ?? []).map(post => toPost(post))
   },
 
   // Get single post by ID
   async getPost(postId: string, userId?: string): Promise<Post | null> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    const { data, error } = await supabase
+    const { data, error } = await sb
       .from('posts')
       .select('*')
       .eq('id', postId)
@@ -125,33 +207,33 @@ export const communityApi = {
 
     // Check if user has liked this post
     if (userId && data) {
-      const { data: like } = await supabase
+      const { data: like } = await sb
         .from('post_likes')
         .select('id')
         .eq('post_id', postId)
         .eq('user_id', userId)
         .maybeSingle()
 
-      return { ...data, liked_by_user: !!like }
+      return toPost(data, !!like)
     }
 
-    return data
+    return toPost(data)
   },
 
   // Upload image to Supabase Storage
   async uploadImage(file: File, userId: string): Promise<string> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
     const fileExt = file.name.split('.').pop()
     const fileName = `${userId}/${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
 
-    const { error: uploadError } = await supabase.storage
+    const { error: uploadError } = await sb.storage
       .from('post-images')
       .upload(fileName, file)
 
     if (uploadError) throw uploadError
 
-    const { data } = supabase.storage
+    const { data } = sb.storage
       .from('post-images')
       .getPublicUrl(fileName)
 
@@ -160,22 +242,22 @@ export const communityApi = {
 
   // Delete image from Supabase Storage
   async deleteImage(imageUrl: string): Promise<void> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
     // Extract file path from URL
     const urlParts = imageUrl.split('/post-images/')
     if (urlParts.length < 2) return
 
     const filePath = urlParts[1]
-    await supabase.storage.from('post-images').remove([filePath])
+    await sb.storage.from('post-images').remove([filePath])
   },
 
   // Create new post
   async createPost(data: CreatePostData, user: { id: string; email?: string }): Promise<Post> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
     // 프로필에서 닉네임 가져오기
-    const { data: profile } = await supabase
+    const { data: profile } = await sb
       .from('profiles')
       .select('nickname')
       .eq('id', user.id)
@@ -183,7 +265,7 @@ export const communityApi = {
 
     const authorName = profile?.nickname || getAuthorName(user.email)
 
-    const { data: post, error } = await supabase
+    const { data: post, error } = await sb
       .from('posts')
       .insert({
         author_id: user.id,
@@ -200,14 +282,14 @@ export const communityApi = {
       .single()
 
     if (error) throw error
-    return post
+    return toPost(post)
   },
 
   // Update post
   async updatePost(postId: string, data: UpdatePostData): Promise<Post> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    const updateData: Record<string, unknown> = {}
+    const updateData: TablesUpdate<'posts'> = {}
     if (data.title !== undefined) updateData.title = data.title
     if (data.content !== undefined) updateData.content = data.content
     if (data.tags !== undefined) updateData.tags = data.tags
@@ -216,7 +298,7 @@ export const communityApi = {
     if (data.category !== undefined) updateData.category = data.category
     updateData.updated_at = new Date().toISOString()
 
-    const { data: post, error } = await supabase
+    const { data: post, error } = await sb
       .from('posts')
       .update(updateData)
       .eq('id', postId)
@@ -224,14 +306,14 @@ export const communityApi = {
       .single()
 
     if (error) throw error
-    return post
+    return toPost(post)
   },
 
   // Delete post
   async deletePost(postId: string): Promise<void> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    const { error } = await supabase
+    const { error } = await sb
       .from('posts')
       .delete()
       .eq('id', postId)
@@ -241,10 +323,10 @@ export const communityApi = {
 
   // Toggle like on post
   async toggleLike(postId: string, userId: string): Promise<{ liked: boolean; likesCount: number }> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
     // Check if already liked
-    const { data: existingLike } = await supabase
+    const { data: existingLike } = await sb
       .from('post_likes')
       .select('id')
       .eq('post_id', postId)
@@ -253,107 +335,57 @@ export const communityApi = {
 
     if (existingLike) {
       // Unlike
-      const { error } = await supabase
+      const { error } = await sb
         .from('post_likes')
         .delete()
         .eq('post_id', postId)
         .eq('user_id', userId)
 
       if (error) throw error
-
-      // Update likes_count in posts table
-      const { data: post } = await supabase
-        .from('posts')
-        .update({ likes_count: await this.getLikesCount(postId) })
-        .eq('id', postId)
-        .select('likes_count')
-        .single()
-
-      return { liked: false, likesCount: post?.likes_count ?? 0 }
     } else {
       // Like
-      const { error } = await supabase
+      const { error } = await sb
         .from('post_likes')
         .insert({ post_id: postId, user_id: userId })
 
       if (error) throw error
-
-      // Update likes_count in posts table
-      const { data: post } = await supabase
-        .from('posts')
-        .update({ likes_count: await this.getLikesCount(postId) })
-        .eq('id', postId)
-        .select('likes_count')
-        .single()
-
-      return { liked: true, likesCount: post?.likes_count ?? 0 }
     }
+
+    // Update likes_count in posts table
+    const { data: post } = await sb
+      .from('posts')
+      .update({ likes_count: await communityApi.getLikesCount(postId) })
+      .eq('id', postId)
+      .select('likes_count')
+      .single()
+
+    return { liked: !existingLike, likesCount: post?.likes_count ?? 0 }
   },
 
   // Get comments for a post (with nested replies)
   async getComments(postId: string): Promise<Comment[]> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    const { data, error } = await supabase
+    const { data, error } = await sb
       .from('comments')
-      .select(`
-        id,
-        post_id,
-        author_id,
-        content,
-        parent_id,
-        created_at,
-        updated_at,
-        profiles:author_id (nickname, email)
-      `)
+      .select(COMMENT_SELECT)
       .eq('post_id', postId)
       .order('created_at', { ascending: true })
 
     if (error) throw error
 
-    // Map to include author_name
-    const allComments: Comment[] = (data ?? []).map(comment => ({
-      id: comment.id,
-      post_id: comment.post_id,
-      author_id: comment.author_id,
-      content: comment.content,
-      parent_id: comment.parent_id,
-      created_at: comment.created_at,
-      updated_at: comment.updated_at,
-      author_name: (comment.profiles as unknown as JoinedProfile)?.nickname ||
-                   getAuthorName((comment.profiles as unknown as JoinedProfile)?.email),
-      replies: []
-    }))
-
-    // Build nested structure
-    const commentMap = new Map<string, Comment>()
-    const rootComments: Comment[] = []
-
-    allComments.forEach(comment => {
-      commentMap.set(comment.id, comment)
-    })
-
-    allComments.forEach(comment => {
-      if (comment.parent_id) {
-        const parent = commentMap.get(comment.parent_id)
-        if (parent) {
-          parent.replies = parent.replies || []
-          parent.replies.push(comment)
-        }
-      } else {
-        rootComments.push(comment)
-      }
-    })
-
-    return rootComments
+    // Map to include author_name, then build nested structure
+    return buildCommentTree(
+      (data ?? []).map(comment => toComment(comment, joinedAuthorName(comment.profiles))),
+    )
   },
 
   // Add comment to post (or reply to a comment)
   async addComment(data: CreateCommentData, user: { id: string; email?: string }): Promise<Comment> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
     // 프로필에서 닉네임 가져오기
-    const { data: profile } = await supabase
+    const { data: profile } = await sb
       .from('profiles')
       .select('nickname')
       .eq('id', user.id)
@@ -361,7 +393,7 @@ export const communityApi = {
 
     const authorName = profile?.nickname || getAuthorName(user.email)
 
-    const insertData: Record<string, unknown> = {
+    const insertData: TablesInsert<'comments'> = {
       post_id: data.post_id,
       author_id: user.id,
       content: data.content,
@@ -370,7 +402,7 @@ export const communityApi = {
       insertData.parent_id = data.parent_id
     }
 
-    const { data: comment, error } = await supabase
+    const { data: comment, error } = await sb
       .from('comments')
       .insert(insertData)
       .select()
@@ -378,57 +410,33 @@ export const communityApi = {
 
     if (error) throw error
 
-    return {
-      ...comment,
-      author_name: authorName,
-      replies: []
-    }
+    return toComment(comment, authorName)
   },
 
   // Update comment
   async updateComment(commentId: string, content: string): Promise<Comment> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    const { data: comment, error } = await supabase
+    const { data: comment, error } = await sb
       .from('comments')
       .update({
         content,
         updated_at: new Date().toISOString()
       })
       .eq('id', commentId)
-      .select(`
-        id,
-        post_id,
-        author_id,
-        content,
-        parent_id,
-        created_at,
-        updated_at,
-        profiles:author_id (nickname, email)
-      `)
+      .select(COMMENT_SELECT)
       .single()
 
     if (error) throw error
 
-    return {
-      id: comment.id,
-      post_id: comment.post_id,
-      author_id: comment.author_id,
-      content: comment.content,
-      parent_id: comment.parent_id,
-      created_at: comment.created_at,
-      updated_at: comment.updated_at,
-      author_name: (comment.profiles as unknown as JoinedProfile)?.nickname ||
-                   getAuthorName((comment.profiles as unknown as JoinedProfile)?.email),
-      replies: []
-    }
+    return toComment(comment, joinedAuthorName(comment.profiles))
   },
 
   // Delete comment
   async deleteComment(commentId: string): Promise<void> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    const { error } = await supabase
+    const { error } = await sb
       .from('comments')
       .delete()
       .eq('id', commentId)
@@ -438,9 +446,9 @@ export const communityApi = {
 
   // Get likes count for a post
   async getLikesCount(postId: string): Promise<number> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    const { count, error } = await supabase
+    const { count, error } = await sb
       .from('post_likes')
       .select('*', { count: 'exact', head: true })
       .eq('post_id', postId)
@@ -451,9 +459,9 @@ export const communityApi = {
 
   // Get trending tags
   async getTrendingTags(limit: number = 5): Promise<{ tag: string; count: number }[]> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    const { data: posts } = await supabase
+    const { data: posts } = await sb
       .from('posts')
       .select('tags')
 
@@ -462,7 +470,7 @@ export const communityApi = {
     // Count tag occurrences
     const tagCounts: Record<string, number> = {}
     posts.forEach(post => {
-      (post.tags ?? []).forEach((tag: string) => {
+      (post.tags ?? []).forEach(tag => {
         tagCounts[tag] = (tagCounts[tag] ?? 0) + 1
       })
     })
@@ -476,9 +484,9 @@ export const communityApi = {
 
   // Get users who liked a post
   async getLikedUsers(postId: string): Promise<string[]> {
-    if (!supabase) throw new Error('Supabase not configured')
+    const sb = requireClient()
 
-    const { data, error } = await supabase
+    const { data, error } = await sb
       .from('post_likes')
       .select('user_id')
       .eq('post_id', postId)
