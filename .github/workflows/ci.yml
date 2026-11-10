@@ -136,6 +136,68 @@ jobs:
         run: npm run lint
         working-directory: client
 
+  e2e:
+    # 웹(비 Tauri) E2E: Playwright + chromium. Supabase(Auth/REST/Realtime)·서버 API·시그널링 WS·토스 SDK는
+    # 전부 브라우저 안에서 가로챈다(client/e2e/mocks). 운영 DB에 접속하지 않고 비밀값도 쓰지 않는다.
+    # 가짜 엔드포인트로 따로 빌드한 앱(client/e2e/vite.config.ts)을 vite preview로 띄운다. 실패 시 trace·스크린샷을 올린다.
+    name: Web E2E (Playwright, chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - uses: actions/setup-node@v4
+        timeout-minutes: 5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+        timeout-minutes: 8
+        working-directory: .
+      - name: Playwright version
+        id: pw
+        timeout-minutes: 1
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Restore Playwright browsers
+        id: pw-cache
+        timeout-minutes: 3
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: Install chromium (+ OS deps)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        run: npx playwright install --with-deps chromium
+      - name: Install OS deps (브라우저 캐시 적중)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 10
+        run: npx playwright install-deps chromium
+      - name: Typecheck e2e
+        timeout-minutes: 3
+        run: npm run e2e:typecheck
+      - name: E2E
+        timeout-minutes: 10
+        run: npm run e2e
+      # 성공해도 올린다: CI는 retries 1이라 첫 시도 실패 → 재시도 통과(flaky)면 잡이 녹색이다.
+      # trace는 실패한 시도만 남으므로(retain-on-failure) flaky 증거가 이 아티팩트에 남는다. 전부 통과면 리포트만(작음)
+      - name: Upload Playwright report + traces
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            client/e2e/.results/
+            client/e2e/.report/
+          retention-days: 7
+          if-no-files-found: ignore
+          # 결과 디렉터리 이름이 '.'으로 시작한다(.results/.report) — v4.4부터 숨김 파일은 기본 제외
+          include-hidden-files: true
+
   server:
     name: Server (build + test)
     runs-on: ubuntu-latest

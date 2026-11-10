@@ -23,7 +23,6 @@ export function CreatePost() {
     if (!form.validate()) return
 
     await form.submit({
-      userId: user.id,
       savingMessage: '게시물 작성 중...',
       save: async (imageUrls) => {
         await createPost.mutateAsync({

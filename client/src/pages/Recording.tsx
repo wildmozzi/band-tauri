@@ -181,7 +181,7 @@ export function Recording() {
                 <h3>녹음 미리듣기</h3>
                 <audio controls src={recordingUrl} />
                 <div className="preview-actions">
-                  <a download="bandspace-sketch.webm" href={recordingUrl} className="download-btn">
+                  <a download="indigomuse-sketch.webm" href={recordingUrl} className="download-btn">
                     💾 로컬 저장
                   </a>
                   <button

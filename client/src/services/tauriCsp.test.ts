@@ -16,3 +16,14 @@ describe('tauri.conf.json CSP', () => {
     })
   }
 })
+
+/** P3-10: 저장소를 R2로 바꾸면 스템 다운로드·이미지 표시·이미지 업로드(PUT)가 R2 서명 URL로 간다 */
+describe('tauri.conf.json CSP allows the S3-compatible store (R2)', () => {
+  for (const key of ['csp', 'devCsp'] as const) {
+    for (const dir of ['img-src', 'media-src', 'connect-src']) {
+      it(`${key} ${dir} includes R2`, () => {
+        expect((conf.app.security[key][dir] as string).split(/\s+/)).toContain('https://*.r2.cloudflarestorage.com')
+      })
+    }
+  }
+})

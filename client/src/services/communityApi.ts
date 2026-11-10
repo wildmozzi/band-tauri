@@ -57,7 +57,8 @@ export interface CreateCommentData {
 }
 
 // profiles:author_id 조인 결과 (comments.author_id → profiles.id, 다대일)
-type JoinedProfile = { nickname: string | null; email: string | null } | null
+// profiles는 공개 컬럼(id·nickname·audio_settings·avatar_url·created_at·updated_at)만 읽을 수 있다 (011). email 등은 임베드하지 말 것
+type JoinedProfile = { nickname: string | null } | null
 
 // Helper to get author name from user
 const getAuthorName = (email: string | null | undefined): string => {
@@ -65,7 +66,7 @@ const getAuthorName = (email: string | null | undefined): string => {
 }
 
 const joinedAuthorName = (profile: JoinedProfile): string =>
-  profile?.nickname || getAuthorName(profile?.email)
+  profile?.nickname || getAuthorName(null)
 
 /** posts 행 → 화면용 Post. null 컬럼은 insert 기본값과 같은 값으로 채운다. */
 export function toPost(row: Tables<'posts'>, likedByUser?: boolean): Post {
@@ -140,7 +141,7 @@ const COMMENT_SELECT = `
         parent_id,
         created_at,
         updated_at,
-        profiles:author_id (nickname, email)
+        profiles:author_id (nickname)
       ` as const
 
 function requireClient() {
@@ -220,37 +221,7 @@ export const communityApi = {
     return toPost(data)
   },
 
-  // Upload image to Supabase Storage
-  async uploadImage(file: File, userId: string): Promise<string> {
-    const sb = requireClient()
-
-    const fileExt = file.name.split('.').pop()
-    const fileName = `${userId}/${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
-
-    const { error: uploadError } = await sb.storage
-      .from('post-images')
-      .upload(fileName, file)
-
-    if (uploadError) throw uploadError
-
-    const { data } = sb.storage
-      .from('post-images')
-      .getPublicUrl(fileName)
-
-    return data.publicUrl
-  },
-
-  // Delete image from Supabase Storage
-  async deleteImage(imageUrl: string): Promise<void> {
-    const sb = requireClient()
-
-    // Extract file path from URL
-    const urlParts = imageUrl.split('/post-images/')
-    if (urlParts.length < 2) return
-
-    const filePath = urlParts[1]
-    await sb.storage.from('post-images').remove([filePath])
-  },
+  // 이미지 업로드는 서버 서명 URL 경유 (services/storageApi.ts, P3-10). Supabase Storage에 직접 쓰지 않는다
 
   // Create new post
   async createPost(data: CreatePostData, user: { id: string; email?: string }): Promise<Post> {
@@ -321,20 +292,25 @@ export const communityApi = {
     if (error) throw error
   },
 
-  // Toggle like on post
-  async toggleLike(postId: string, userId: string): Promise<{ liked: boolean; likesCount: number }> {
+  /**
+   * 좋아요 토글. posts.likes_count는 DB 트리거(migration 010)가 집계하므로 여기서 UPDATE하지 않는다
+   * (RLS상 작성자만 posts를 UPDATE할 수 있어, 남의 글에서는 0행 갱신 → 0 표시 버그가 났다).
+   * likesCount는 post_likes를 직접 세어 돌려준다 — 010 적용 전 운영에서도 맞는 값.
+   * 개수 조회가 실패하면 null(호출 측이 낙관적 값을 유지하고 재조회한다).
+   */
+  async toggleLike(postId: string, userId: string): Promise<{ liked: boolean; likesCount: number | null }> {
     const sb = requireClient()
 
-    // Check if already liked
-    const { data: existingLike } = await sb
+    const { data: existingLike, error: checkError } = await sb
       .from('post_likes')
       .select('id')
       .eq('post_id', postId)
       .eq('user_id', userId)
       .maybeSingle()
 
+    if (checkError) throw checkError
+
     if (existingLike) {
-      // Unlike
       const { error } = await sb
         .from('post_likes')
         .delete()
@@ -343,23 +319,22 @@ export const communityApi = {
 
       if (error) throw error
     } else {
-      // Like
       const { error } = await sb
         .from('post_likes')
         .insert({ post_id: postId, user_id: userId })
 
-      if (error) throw error
+      // 23505: 다른 탭·연타로 이미 좋아요됨 (010의 UNIQUE) — 결과는 '좋아요'로 같다
+      if (error && error.code !== '23505') throw error
     }
 
-    // Update likes_count in posts table
-    const { data: post } = await sb
-      .from('posts')
-      .update({ likes_count: await communityApi.getLikesCount(postId) })
-      .eq('id', postId)
-      .select('likes_count')
-      .single()
+    let likesCount: number | null
+    try {
+      likesCount = await communityApi.getLikesCount(postId)
+    } catch {
+      likesCount = null
+    }
 
-    return { liked: !existingLike, likesCount: post?.likes_count ?? 0 }
+    return { liked: !existingLike, likesCount }
   },
 
   // Get comments for a post (with nested replies)

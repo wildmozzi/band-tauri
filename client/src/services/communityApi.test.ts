@@ -53,39 +53,63 @@ describe('communityApi', () => {
     expect(posts[0].liked_by_user).toBeUndefined()
   })
 
-  it('toggleLike: 좋아요가 없으면 insert 후 개수를 다시 세어 posts.likes_count를 갱신한다', async () => {
+  it('toggleLike: 좋아요가 없으면 insert하고 post_likes 개수를 돌려준다 — posts는 UPDATE하지 않는다(남의 글 0 표시 버그)', async () => {
     sb.mock!.setResult('post_likes', call =>
       has(call, 'maybeSingle') ? { data: null } : has(call, 'insert') ? { data: null } : { count: 5 },
     )
-    sb.mock!.setResult('posts', { data: { likes_count: 5 } })
 
     expect(await communityApi.toggleLike('p', 'u')).toEqual({ liked: true, likesCount: 5 })
 
     const insert = sb.mock!.calls.find(c => has(c, 'insert'))!
     expect(argsOf(insert, 'insert')).toEqual([[{ post_id: 'p', user_id: 'u' }]])
-    const update = sb.mock!.calls.find(c => c.table === 'posts')!
-    expect(argsOf(update, 'update')).toEqual([[{ likes_count: 5 }]])
-    expect(argsOf(update, 'eq')).toEqual([['id', 'p']])
+    const count = sb.mock!.calls[sb.mock!.calls.length - 1]
+    expect(argsOf(count, 'select')).toEqual([['*', { count: 'exact', head: true }]])
+    expect(argsOf(count, 'eq')).toEqual([['post_id', 'p']])
+    expect(sb.mock!.calls.some(c => c.table === 'posts')).toBe(false)
   })
 
   it('toggleLike: 이미 좋아요면 (post_id, user_id)로 delete한다', async () => {
     sb.mock!.setResult('post_likes', call =>
       has(call, 'maybeSingle') ? { data: { id: 'l1' } } : has(call, 'delete') ? { data: null } : { count: 2 },
     )
-    sb.mock!.setResult('posts', { data: { likes_count: 2 } })
 
     expect(await communityApi.toggleLike('p', 'u')).toEqual({ liked: false, likesCount: 2 })
 
     const del = sb.mock!.calls.find(c => has(c, 'delete'))!
     expect(argsOf(del, 'eq')).toEqual([['post_id', 'p'], ['user_id', 'u']])
     expect(sb.mock!.calls.some(c => has(c, 'insert'))).toBe(false)
+    expect(sb.mock!.calls.some(c => c.table === 'posts')).toBe(false)
   })
 
-  it('getComments: 프로필 조인으로 작성자 이름을 정하고 답글을 트리로 묶는다', async () => {
+  it('toggleLike: 중복 좋아요(23505)는 좋아요 성공으로 본다', async () => {
+    sb.mock!.setResult('post_likes', call =>
+      has(call, 'maybeSingle') ? { data: null } : has(call, 'insert') ? { error: { code: '23505' } } : { count: 3 },
+    )
+
+    expect(await communityApi.toggleLike('p', 'u')).toEqual({ liked: true, likesCount: 3 })
+  })
+
+  it('toggleLike: 다른 insert 오류는 던진다', async () => {
+    sb.mock!.setResult('post_likes', call =>
+      has(call, 'maybeSingle') ? { data: null } : { error: { code: '42501', message: 'rls' } },
+    )
+
+    await expect(communityApi.toggleLike('p', 'u')).rejects.toMatchObject({ code: '42501' })
+  })
+
+  it('toggleLike: 개수 조회가 실패하면 likesCount는 null(호출 측이 재조회)', async () => {
+    sb.mock!.setResult('post_likes', call =>
+      has(call, 'maybeSingle') ? { data: null } : has(call, 'insert') ? { data: null } : { error: { message: 'timeout' } },
+    )
+
+    expect(await communityApi.toggleLike('p', 'u')).toEqual({ liked: true, likesCount: null })
+  })
+
+  it('getComments: 프로필 닉네임 조인(없으면 User)으로 작성자 이름을 정하고 답글을 트리로 묶는다', async () => {
     sb.mock!.setResult('comments', {
       data: [
-        { id: '1', post_id: 'p', author_id: 'a', content: 'x', parent_id: null, created_at: 't1', updated_at: null, profiles: { nickname: '닉', email: 'a@x.com' } },
-        { id: '1a', post_id: 'p', author_id: 'b', content: 'y', parent_id: '1', created_at: 't2', updated_at: 't3', profiles: { nickname: null, email: 'bob@x.com' } },
+        { id: '1', post_id: 'p', author_id: 'a', content: 'x', parent_id: null, created_at: 't1', updated_at: null, profiles: { nickname: '닉' } },
+        { id: '1a', post_id: 'p', author_id: 'b', content: 'y', parent_id: '1', created_at: 't2', updated_at: 't3', profiles: { nickname: null } },
         { id: '2', post_id: 'p', author_id: 'c', content: 'z', parent_id: null, created_at: null, updated_at: null, profiles: null },
       ],
     })
@@ -94,7 +118,9 @@ describe('communityApi', () => {
 
     expect(argsOf(sb.mock!.calls[0], 'eq')).toEqual([['post_id', 'p']])
     expect(tree.map(c => [c.id, c.author_name])).toEqual([['1', '닉'], ['2', 'User']])
-    expect(tree[0].replies!.map(c => [c.id, c.author_name, c.updated_at])).toEqual([['1a', 'bob', 't3']])
+    expect(tree[0].replies!.map(c => [c.id, c.author_name, c.updated_at])).toEqual([['1a', 'User', 't3']])
+    // 011 이후 profiles.email은 클라이언트가 읽을 수 없다 — 임베드는 nickname만
+    expect(argsOf(sb.mock!.calls[0], 'select')[0][0]).toContain('profiles:author_id (nickname)')
     expect(tree[1].created_at).toBe('')
   })
 })

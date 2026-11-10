@@ -12,8 +12,12 @@
  *   글 수정      → 응답값으로 그 글의 상세(모든 userId, liked_by_user 유지)를 덮어쓰고 목록·인기 태그 무효화
  *   글 삭제      → 목록·인기 태그 무효화. 상세·댓글 캐시는 화면을 떠난 뒤 forgetPost로 제거
  *                  (상세가 마운트된 채로 지우면 지운 글을 다시 조회한다)
- *   좋아요 토글  → 응답값으로 목록·상세 캐시를 직접 갱신(재조회 없음).
- *                  likes_count는 모든 키에, liked_by_user는 키의 userId가 누른 사용자와 같은 캐시에만 쓴다
+ *   좋아요 토글  → 누르는 즉시 낙관적으로 ±1(누른 사용자의 좋아요 여부를 캐시에서 알 때), 응답의 실제 개수로
+ *                  목록·상세 캐시를 덮는다(재조회 없음). 실패하면 자기 낙관적 변경만 되돌린다.
+ *                  서버 요청은 scope로 직렬화되고, 같은 글에 뒤 요청이 대기 중이면 앞 응답은 캐시를 덮지 않는다(연타).
+ *                  응답에 개수가 없으면(post_likes 개수 조회 실패) 낙관적 값을 두고 그 글·목록을 무효화한다.
+ *                  likes_count는 모든 키에, liked_by_user는 키의 userId가 누른 사용자와 같은 캐시에만 쓴다.
+ *                  posts.likes_count/comments_count는 DB 트리거(migration 010)가 집계한다 — 클라이언트는 UPDATE하지 않는다
  *   댓글 작성/수정/삭제 → 응답값으로 댓글 트리를 직접 갱신하고, 상세·목록의 comments_count를 보정
  *     (삭제 개수는 응답 시점의 최신 캐시 트리로 센다 — 연속 삭제 시 오래된 클로저 방지)
  */
@@ -25,6 +29,7 @@ import {
   type Post,
   type UpdatePostData,
 } from '../../services/communityApi'
+import { resolvePostImages, uploadPostImage as uploadImageViaServer } from '../../services/storageApi'
 import {
   addReplyToTree,
   countDeletedComments,
@@ -138,11 +143,16 @@ export function useTrendingTagsQuery(limit = 5) {
 
 // ---------- 글 ----------
 
+/** 저장 직전 이미지 URL을 서버 규칙으로 정규화 (검증 완료만, 이전된 예전 URL은 새 URL로) */
+async function withResolvedImages<T extends { images?: string[] }>(data: T): Promise<T> {
+  return data.images === undefined ? data : { ...data, images: await resolvePostImages(data.images) }
+}
+
 export function useCreatePostMutation() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ data, user }: { data: CreatePostData; user: CommunityUser }) =>
-      communityApi.createPost(data, user),
+    mutationFn: async ({ data, user }: { data: CreatePostData; user: CommunityUser }) =>
+      communityApi.createPost(await withResolvedImages(data), user),
     onSuccess: () => invalidatePostLists(qc),
   })
 }
@@ -150,8 +160,8 @@ export function useCreatePostMutation() {
 export function useUpdatePostMutation() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ postId, data }: { postId: string; data: UpdatePostData }) =>
-      communityApi.updatePost(postId, data),
+    mutationFn: async ({ postId, data }: { postId: string; data: UpdatePostData }) =>
+      communityApi.updatePost(postId, await withResolvedImages(data)),
     onSuccess: (updated, { postId }) => {
       // 응답 본문으로 상세를 바로 맞춘다(돌아갔을 때 이전 본문이 보이지 않게, EditPost 쿼리 재조회 대기 없음)
       qc.setQueriesData<Post | null>({ queryKey: communityKeys.postAll(postId) }, prev =>
@@ -176,24 +186,92 @@ export function forgetPost(qc: QueryClient, postId: string) {
   qc.removeQueries({ queryKey: communityKeys.comments(postId) })
 }
 
+/** userId 키 캐시에 기록된 그 사용자의 좋아요 여부. 캐시에 없으면 undefined */
+function cachedLiked(qc: QueryClient, postId: string, userId: string): boolean | undefined {
+  for (const [key, post] of qc.getQueriesData<Post | null>({ queryKey: communityKeys.postAll(postId) })) {
+    if (keyUserId(key) === userId && post?.liked_by_user !== undefined) return post.liked_by_user
+  }
+  for (const [key, list] of qc.getQueriesData<Post[]>({ queryKey: communityKeys.posts() })) {
+    if (keyUserId(key) !== userId) continue
+    const post = list?.find(p => p.id === postId)
+    if (post?.liked_by_user !== undefined) return post.liked_by_user
+  }
+  return undefined
+}
+
+type LikeVars = { postId: string; userId: string }
+/** onMutate가 캐시에 적용한 낙관적 변경 (실패 시 이것만 되돌린다) */
+type LikeContext = { wasLiked: boolean | undefined }
+
+const LIKE_MUTATION_KEY = [...communityKeys.all, 'toggleLike'] as const
+
+/** 같은 글에 진행 중인 좋아요 mutation 수 (onSuccess/onError 시점에는 자기 자신 포함) */
+function pendingLikes(qc: QueryClient, postId: string): number {
+  return qc.getMutationCache().findAll({
+    mutationKey: LIKE_MUTATION_KEY,
+    status: 'pending',
+    predicate: m => (m.state.variables as LikeVars | undefined)?.postId === postId,
+  }).length
+}
+
+function applyLikeDelta(qc: QueryClient, postId: string, userId: string, liked: boolean, delta: number) {
+  patchPostEverywhere(qc, postId, (post, keyUser) => ({
+    ...post,
+    likes_count: Math.max(0, post.likes_count + delta),
+    ...(keyUser === userId ? { liked_by_user: liked } : {}),
+  }))
+}
+
 export function useToggleLikeMutation() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ postId, userId }: { postId: string; userId: string }) =>
-      communityApi.toggleLike(postId, userId),
+    mutationKey: LIKE_MUTATION_KEY,
+    // 연타해도 서버 요청은 순서대로 하나씩 (존재 확인→insert/delete 경합 방지). onMutate(낙관적 반영)는 즉시 실행된다
+    scope: { id: 'community-like' },
+    mutationFn: ({ postId, userId }: LikeVars) => communityApi.toggleLike(postId, userId),
+    onMutate: async ({ postId, userId }): Promise<LikeContext> => {
+      // 진행 중인 재조회가 낙관적 값을 덮지 않게 멈춘다
+      await Promise.all([
+        qc.cancelQueries({ queryKey: communityKeys.postAll(postId) }),
+        qc.cancelQueries({ queryKey: communityKeys.posts() }),
+      ])
+      // 앞선 연타의 낙관적 값까지 반영된 캐시 기준으로 뒤집는다
+      const wasLiked = cachedLiked(qc, postId, userId)
+      if (wasLiked !== undefined) applyLikeDelta(qc, postId, userId, !wasLiked, wasLiked ? -1 : 1)
+      return { wasLiked }
+    },
+    onError: (_error, { postId, userId }, context) => {
+      // 뒤에 대기 중인 같은 글 요청이 있으면 그 응답이 최종 값을 쓴다
+      if (pendingLikes(qc, postId) > 1) return
+      // 자기 낙관적 변경만 되돌린다 (그사이 바뀐 댓글 수 등은 보존)
+      const wasLiked = context?.wasLiked
+      if (wasLiked !== undefined) applyLikeDelta(qc, postId, userId, wasLiked, wasLiked ? 1 : -1)
+    },
     onSuccess: ({ liked, likesCount }, { postId, userId }) => {
-      patchPostEverywhere(qc, postId, (post, keyUser) =>
-        keyUser === userId
-          ? { ...post, likes_count: likesCount, liked_by_user: liked }
-          : { ...post, likes_count: likesCount },
-      )
+      // 뒤에 대기 중인 같은 글 요청이 있으면 중간 결과로 덮지 않는다(깜빡임 방지)
+      if (pendingLikes(qc, postId) > 1) return
+      patchPostEverywhere(qc, postId, (post, keyUser) => ({
+        ...post,
+        likes_count: likesCount ?? post.likes_count,
+        ...(keyUser === userId ? { liked_by_user: liked } : {}),
+      }))
+      if (likesCount === null) {
+        // 개수 조회 실패: 낙관적 개수를 둔 채 다시 읽어 맞춘다
+        return Promise.all([
+          qc.invalidateQueries({ queryKey: communityKeys.postAll(postId) }),
+          qc.invalidateQueries({ queryKey: communityKeys.posts() }),
+        ])
+      }
     },
   })
 }
 
-/** 게시물 이미지 업로드 (Storage). 캐시는 건드리지 않는다 — 글 저장 mutation이 무효화한다 */
-export function uploadPostImage(file: File, userId: string): Promise<string> {
-  return communityApi.uploadImage(file, userId)
+/**
+ * 게시물 이미지 업로드 (서버 발급 서명 URL → 저장소). 게시글에 저장할 조회 URL을 돌려준다.
+ * 캐시는 건드리지 않는다 — 글 저장 mutation이 무효화한다
+ */
+export function uploadPostImage(file: File): Promise<string> {
+  return uploadImageViaServer(file)
 }
 
 // ---------- 댓글 ----------

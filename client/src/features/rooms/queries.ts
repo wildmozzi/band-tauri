@@ -14,7 +14,8 @@
  *   내 방 삭제   → 내 방 캐시에서 제거 + 목록 무효화
  *   내 방 수정   → 내 방 캐시에 패치 적용 + 목록 무효화
  *   방 상세 설정 저장(RoomDetail) → 위 '내 방 수정' + 비밀번호(서버 API)까지 성공한 뒤 patchRoomDetailCache로 상세 갱신
- *   참여자 수 동기화 → 상세 캐시의 current_participants 직접 갱신 + 목록 무효화
+ *   참여자 수 새로고침 → 서버가 기록한 current_participants를 다시 읽어 상세 캐시 갱신 + 목록 무효화
+ *                     (참여자 수는 서버(WebSocket 접속 수)만 쓴다. 클라이언트 UPDATE는 DB가 무시한다 — 011)
  *   방 상세에서 삭제 → 위 '내 방 삭제' + 화면을 떠난 뒤 forgetRoomDetail로 상세 캐시 제거
  *                     (상세가 마운트된 채로 지우면 지운 방을 다시 조회한다)
  *   상세 조회 실패는 재시도하지 않는다(없는 방이면 바로 목록으로 — 기존 동작). 마운트마다 다시 확인(refetchOnMount: always)
@@ -90,13 +91,10 @@ export const roomsApi = {
     return normalizeDetailRoom(data)
   },
 
-  /** 참여자 수 기록 (방장 화면의 '참여자 수 동기화') */
-  async setParticipantCount(roomId: string, count: number): Promise<void> {
-    const { error } = await requireClient()
-      .from('rooms')
-      .update({ current_participants: count })
-      .eq('id', roomId)
-    if (error) throw error
+  /** 서버가 기록한 참여자 수 (방장 화면의 '참여자 수 새로고침'). 없는 방이면 RoomNotFoundError */
+  async getParticipantCount(roomId: string): Promise<number> {
+    const room = await roomsApi.getRoomDetail(roomId)
+    return room.current_participants ?? 0
   },
 
   /** rooms 테이블 변경 구독. 반환값을 호출하면 해제 */
@@ -215,8 +213,8 @@ export function forgetRoomDetail(qc: QueryClient, roomId: string) {
 export function useSyncParticipantsMutation() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ roomId, count }: { roomId: string; count: number }) => roomsApi.setParticipantCount(roomId, count),
-    onSuccess: (_void, { roomId, count }) => {
+    mutationFn: ({ roomId }: { roomId: string }) => roomsApi.getParticipantCount(roomId),
+    onSuccess: (count, { roomId }) => {
       patchRoomDetailCache(qc, roomId, { current_participants: count })
       return qc.invalidateQueries({ queryKey: roomKeys.list() })
     },
