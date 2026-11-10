@@ -933,6 +933,24 @@ mod tests {
         assert!(run.clipped);
     }
 
+    /// 잡음 섞인 루프백 녹음(SNR 약 15dB)에서도 계산된 왕복이 ±0.1ms 안이다(실시간 테스트의 결정적 짝).
+    #[test]
+    fn noisy_loopback_detects_within_tolerance() {
+        use rand::{Rng, SeedableRng};
+        let r = 48_000.0;
+        let stim = chirp(48_000, 0.1, 200.0, 12_000.0, 0.3, 0.005);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let mut cap: Vec<f32> = (0..30_000).map(|_| rng.gen_range(-0.05f32..0.05)).collect();
+        let k = 1128 + 360 - 500;
+        for (i, v) in stim.iter().enumerate() {
+            cap[k + i] += *v;
+        }
+        let run = analyze_loopback(&cap, &stim, r, 500, 1000, 0.0, 0.0, 128.0, 128.0);
+        let rt = run.round_trip_ms.expect("검출");
+        assert!((rt - (7.5 + 128.0 / 48.0)).abs() < 0.1, "{rt}");
+        assert!(!run.clipped && run.peak_ratio >= MIN_RATIO);
+    }
+
     #[test]
     fn verdicts() {
         assert_eq!(verdict_of(5, 0, false, None), MeasureVerdict::NoSignal);

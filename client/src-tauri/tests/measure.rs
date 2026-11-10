@@ -1,4 +1,10 @@
 //! 지연 측정 도구(P1-1) 통합 테스트: 가짜 장치 하드웨어 루프백, 신호 판정, 에코 피어(고정 지연 프록시).
+//!
+//! 두 단계(P3-0, tests/loopback.rs와 같은 규칙):
+//! - **결정적**(기본 `cargo test`): 판정 종류, 거부·취소·동의 흐름, 에코 자동 종료처럼 벽시계 품질 임계가 없는 검사.
+//! - **실시간**(`#[ignore = "realtime: ..."]`): 실제 스레드·실제 시계로 측정 정확도(ms 오차, 흩어짐 판정)를 재는 검사.
+//!   CI `realtime` 잡이 하나씩 3회까지 돌린다. ignore 사유에 같은 계산을 합성 신호로 검증하는 결정적 짝을 적었다.
+//!   로컬: `cargo test --test measure -- --ignored --test-threads 1`.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -88,6 +94,7 @@ fn measure(backend: FakeBackend, buffer: u32, runs: u32) -> LoopbackReport {
 }
 
 #[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::tests::{loopback_math_matches_time_model, xcorr_finds_known_offset_with_subsample_precision, noisy_loopback_detects_within_tolerance}"]
 fn loopback_known_delay_within_half_ms() {
     let _g = RT_LOCK.lock();
     // (레이트, 입력 버퍼, 출력 버퍼, 출력 위상 µs, 기상 지터 µs)
@@ -129,15 +136,25 @@ fn loopback_noise_clipping_and_no_signal_verdicts() {
     // 잡음만(케이블 없음): 미검출
     let rep = measure(mk(Loop { delay_s: 0.0075, gain: 1.0, noise: 0.3, connected: false }), 128, 3);
     assert_eq!(rep.verdict, MeasureVerdict::NoSignal, "{rep:?}");
-    // 케이블 + 잡음(SNR 약 15dB): 정상 검출, ±0.5ms
+    // 케이블 + 잡음(SNR 약 15dB): 검출된다(값의 정확도·흩어짐 판정은 실시간 테스트 `loopback_with_noise_within_half_ms`).
     let rep = measure(mk(Loop { delay_s: 0.0075, gain: 1.0, noise: 0.05, connected: true }), 128, 3);
-    let expect = 7.5 + 128.0 / 48.0;
-    assert_eq!(rep.verdict, MeasureVerdict::Ok, "{rep:?}");
-    assert!((rep.round_trip_ms.unwrap() - expect).abs() <= 0.5, "{rep:?}");
+    assert!(rep.detected_runs > 0 && rep.round_trip_ms.is_some(), "{rep:?}");
+    assert!(matches!(rep.verdict, MeasureVerdict::Ok | MeasureVerdict::Unstable), "{rep:?}");
     // 게인 과다: 클리핑 판정(값은 참고로 남음)
     let rep = measure(mk(Loop { delay_s: 0.0075, gain: 4.0, noise: 0.0, connected: true }), 128, 3);
     assert_eq!(rep.verdict, MeasureVerdict::Clipped, "{rep:?}");
     assert!(rep.runs.iter().all(|r| r.clipped));
+}
+
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::tests::noisy_loopback_detects_within_tolerance"]
+fn loopback_with_noise_within_half_ms() {
+    let _g = RT_LOCK.lock();
+    let b = loopback_backend(48_000, 128, 128, 0, 0, Loop { delay_s: 0.0075, gain: 1.0, noise: 0.05, connected: true });
+    let rep = measure(b, 128, 3);
+    let expect = 7.5 + 128.0 / 48.0;
+    assert_eq!(rep.verdict, MeasureVerdict::Ok, "{rep:?}");
+    assert!((rep.round_trip_ms.unwrap() - expect).abs() <= 0.5, "{rep:?}");
 }
 
 #[test]
@@ -325,7 +342,18 @@ fn echo_once(one_way: Duration) -> band_lib::engine::measure::EchoReport {
     rep
 }
 
+/// 결정적: 동의 → 측정 → 자동 종료 흐름과 클릭 검출(정확도·흩어짐 판정은 실시간 짝에서).
 #[test]
+fn echo_flow_consent_measure_auto_stop() {
+    let _g = RT_LOCK.lock();
+    let r = echo_once(Duration::from_millis(5));
+    assert!(r.detected_runs >= 1, "{r:?}");
+    assert!(r.round_trip_ms.is_some_and(|v| v > 10.0), "왕복은 최소 프록시 왕복 10ms보다 길다: {r:?}");
+    assert!(r.peer_echo_delay_ms < 50.0, "{r:?}");
+}
+
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::tests::echo_probe_emits_frame_aligned_clicks_and_detects_them(클릭 송신·검출 시각 계산), echo_flow_consent_measure_auto_stop(흐름)"]
 fn echo_round_trip_reflects_proxy_delay() {
     let _g = RT_LOCK.lock();
     let near = echo_once(Duration::from_millis(5));
