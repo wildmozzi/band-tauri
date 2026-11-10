@@ -51,7 +51,7 @@
 | P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 완료(#3) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 대기 |
-| P3-4 | 거대 파일 분해(PostDetail, Rooms, EditPost, RoomDetail) | 파일당 ≤ 400줄 | 대기 |
+| P3-4 | 거대 파일 분해(PostDetail, Rooms, EditPost, RoomDetail) | 파일당 ≤ 400줄 | 진행중(p3-split: PostDetail/Rooms/EditPost/CreatePost; RoomDetail은 엔진 연동 후) |
 | P3-5 | 서버 route→service→repository 계층화, 구독 정보를 DB로(현재 메모리 Map) | 테스트 통과 | 진행중(PR #6 리뷰; server 105→147 tests) |
 | P3-5a | **[확인]** 운영 Supabase에 `docs/migrations/007_subscriptions.sql` 실행 — **main 배포와 함께** 해야 함(미실행 시 운영 결제 API가 503) | 사용자 승인 후 실행 | 대기 (P3-5 병합 후) |
 | P3-6 | 음원분리 스템 WAV → Opus/OGG 저장(용량·트래픽 ~1/10), 기존 파일 마이그레이션 스크립트 | 업로드/재생 동작, 용량 비교 | 완료(#2: 3분 곡 31.7MB→3.8MB) |
