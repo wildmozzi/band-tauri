@@ -221,37 +221,7 @@ export const communityApi = {
     return toPost(data)
   },
 
-  // Upload image to Supabase Storage
-  async uploadImage(file: File, userId: string): Promise<string> {
-    const sb = requireClient()
-
-    const fileExt = file.name.split('.').pop()
-    const fileName = `${userId}/${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
-
-    const { error: uploadError } = await sb.storage
-      .from('post-images')
-      .upload(fileName, file)
-
-    if (uploadError) throw uploadError
-
-    const { data } = sb.storage
-      .from('post-images')
-      .getPublicUrl(fileName)
-
-    return data.publicUrl
-  },
-
-  // Delete image from Supabase Storage
-  async deleteImage(imageUrl: string): Promise<void> {
-    const sb = requireClient()
-
-    // Extract file path from URL
-    const urlParts = imageUrl.split('/post-images/')
-    if (urlParts.length < 2) return
-
-    const filePath = urlParts[1]
-    await sb.storage.from('post-images').remove([filePath])
-  },
+  // 이미지 업로드는 서버 서명 URL 경유 (services/storageApi.ts, P3-10). Supabase Storage에 직접 쓰지 않는다
 
   // Create new post
   async createPost(data: CreatePostData, user: { id: string; email?: string }): Promise<Post> {

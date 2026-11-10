@@ -29,6 +29,7 @@ import {
   type Post,
   type UpdatePostData,
 } from '../../services/communityApi'
+import { uploadPostImage as uploadImageViaServer } from '../../services/storageApi'
 import {
   addReplyToTree,
   countDeletedComments,
@@ -260,9 +261,12 @@ export function useToggleLikeMutation() {
   })
 }
 
-/** 게시물 이미지 업로드 (Storage). 캐시는 건드리지 않는다 — 글 저장 mutation이 무효화한다 */
-export function uploadPostImage(file: File, userId: string): Promise<string> {
-  return communityApi.uploadImage(file, userId)
+/**
+ * 게시물 이미지 업로드 (서버 발급 서명 URL → 저장소). 게시글에 저장할 조회 URL을 돌려준다.
+ * 캐시는 건드리지 않는다 — 글 저장 mutation이 무효화한다
+ */
+export function uploadPostImage(file: File): Promise<string> {
+  return uploadImageViaServer(file)
 }
 
 // ---------- 댓글 ----------

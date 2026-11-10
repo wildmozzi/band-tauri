@@ -2,30 +2,40 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { supabaseAdmin } from '../lib/supabase'
-import { stemStoragePaths } from '../lib/stemStorage'
+import { STEM_NAMES, STEM_REF_PREFIX, stemKeyFromRef, stemStoragePaths } from '../lib/stemStorage'
 import { safeUnlink, tryDecodeFilename } from '../lib/files'
 import {
   createStemSeparationRepository,
-  createStemStorageRepository,
   type NewStemSeparation,
   type StemSeparationRepository,
   type StemSeparationRow,
-  type StemStorageRepository,
 } from '../repositories/stemSeparationRepository'
+import { getDefaultStorage } from '../storage/config'
+import { createSupabaseStorageAdapter } from '../storage/supabaseAdapter'
+import type { StorageAdapter } from '../storage/types'
 import { prepareStemForUpload, CONTENT_TYPES, type PreparedStem, type StemFormat } from './stemEncoder'
 import { ServiceError } from './errors'
 
 export interface StemRepos {
   separations: StemSeparationRepository
-  storage: StemStorageRepository
+  storage: StorageAdapter
 }
 
-export function stemReposFor(supabase: SupabaseClient): StemRepos {
+/** storage 생략 시 env 기본 저장소(STORAGE_DRIVER), 그것도 없으면 이 Supabase의 Storage */
+export function stemReposFor(supabase: SupabaseClient, storage?: StorageAdapter | null): StemRepos {
   return {
     separations: createStemSeparationRepository(supabase),
-    storage: createStemStorageRepository(supabase),
+    storage: storage ?? getDefaultStorage('audio-stems') ?? createSupabaseStorageAdapter(supabase, 'audio-stems'),
   }
 }
+
+/** 스템 다운로드 서명 URL 유효기간 (기본 12시간). 클라이언트 히스토리 캐시(1시간)보다 충분히 길게 */
+export function stemUrlTtlSec(env: Record<string, string | undefined> = process.env): number {
+  const n = Number(env.STEM_URL_TTL_SEC)
+  return Number.isFinite(n) && n >= 300 ? Math.min(Math.floor(n), 7 * 24 * 3600) : 12 * 3600
+}
+
+const STEM_URL_COLUMNS = STEM_NAMES.map(n => `${n}_url` as const)
 
 const HISTORY_LIMIT = 50
 
@@ -36,7 +46,11 @@ const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
  * repos가 null이면 Supabase 미설정 (available=false).
  */
 export class StemSeparationService {
-  constructor(private readonly repos: StemRepos | null, private readonly now: () => Date = () => new Date()) {}
+  constructor(
+    private readonly repos: StemRepos | null,
+    private readonly now: () => Date = () => new Date(),
+    private readonly urlTtlSec: number = stemUrlTtlSec(),
+  ) {}
 
   get available(): boolean {
     return this.repos !== null
@@ -47,7 +61,11 @@ export class StemSeparationService {
     return this.repos
   }
 
-  /** 로컬 스템 파일을 (Opus로 압축해) Storage에 올리고 공개 URL을 돌려준다. 로컬 파일은 지운다 */
+  /**
+   * 로컬 스템 파일을 (Opus로 압축해) 저장소에 올리고 DB에 저장할 참조를 돌려준다. 로컬 파일은 지운다.
+   * 참조 = 공개 URL(Supabase 공개 버킷·S3_PUBLIC_BASE_URL) 또는 `storage://audio-stems/<key>`.
+   * 클라이언트에 줄 때는 signStems/withSignedUrls로 서명 GET URL로 바꾼다.
+   */
   async uploadStems(stems: Record<string, string>, userId: string | null, separationId: string): Promise<Record<string, string>> {
     const { storage } = this.need()
     const folder = `${userId || 'anonymous'}/${separationId}`
@@ -55,8 +73,16 @@ export class StemSeparationService {
 
     const put = async (stemName: string, file: string, ext: StemFormat) => {
       const storagePath = `${folder}/${stemName}.${ext}`
-      const { error } = await storage.upload(storagePath, fs.readFileSync(file), CONTENT_TYPES[ext])
-      return { storagePath, error }
+      try {
+        await storage.put(storagePath, fs.readFileSync(file), {
+          contentType: CONTENT_TYPES[ext],
+          // 경로가 분리 ID별로 고유해 내용이 바뀌지 않는다 → 브라우저 캐시로 재로딩 트래픽 절감
+          cacheMaxAgeSec: 31536000,
+        })
+        return { storagePath, error: null }
+      } catch (e) {
+        return { storagePath, error: { message: (e as Error).message } }
+      }
     }
 
     for (const [stemName, localPath] of Object.entries(stems)) {
@@ -78,7 +104,7 @@ export class StemSeparationService {
           continue
         }
 
-        urls[stemName] = storage.publicUrl(storagePath)
+        urls[stemName] = storage.publicUrl(storagePath) ?? `${STEM_REF_PREFIX}${storagePath}`
 
         const before = fs.statSync(localPath).size
         const after = prepared.ext === 'ogg' && fs.existsSync(prepared.path) ? fs.statSync(prepared.path).size : before
@@ -123,12 +149,49 @@ export class StemSeparationService {
     }
   }
 
-  /** 사용자의 미만료 완료 기록 (최근순 50개). DB 오류는 throw */
+  /** 사용자의 미만료 완료 기록 (최근순 50개), 스템 URL은 서명 GET URL. DB 오류는 throw */
   async listHistory(userId: string): Promise<StemSeparationRow[]> {
-    return this.need().separations.listCompletedByUser(userId, this.now(), HISTORY_LIMIT)
+    const rows = await this.need().separations.listCompletedByUser(userId, this.now(), HISTORY_LIMIT)
+    return Promise.all(rows.map(r => this.withSignedUrls(r)))
   }
 
-  /** 본인 기록만 삭제 (Storage .ogg/.wav + DB 행) */
+  /**
+   * DB 참조 하나 → 클라이언트용 서명 GET URL.
+   * 폴더 밖·알 수 없는 형식은 서명하지 않는다: http(s)면 그대로(하위 호환), 아니면 null.
+   * 서명 실패도 같은 규칙 (공개 URL이면 그대로 써도 재생은 된다).
+   */
+  async signStemRef(ref: string | null, folder: string): Promise<string | null> {
+    if (!ref) return null
+    const passthrough = /^https?:\/\//i.test(ref) ? ref : null
+    const key = stemKeyFromRef(ref, folder)
+    if (!key) return passthrough
+    try {
+      return await this.need().storage.signedGetUrl(key, this.urlTtlSec)
+    } catch (e) {
+      console.error(`[Storage] 스템 URL 서명 실패 (${key}):`, (e as Error).message)
+      return passthrough
+    }
+  }
+
+  /** uploadStems 결과(참조) → 서명 URL */
+  async signStems(refs: Record<string, string>, folder: string): Promise<Record<string, string>> {
+    const out: Record<string, string> = {}
+    for (const [name, ref] of Object.entries(refs)) {
+      const url = await this.signStemRef(ref, folder)
+      if (url) out[name] = url
+    }
+    return out
+  }
+
+  async withSignedUrls(row: StemSeparationRow): Promise<StemSeparationRow> {
+    const out = { ...row }
+    for (const col of STEM_URL_COLUMNS) {
+      out[col] = await this.signStemRef(row[col], row.storage_folder)
+    }
+    return out
+  }
+
+  /** 본인 기록만 삭제 (저장소 .ogg/.wav + DB 행) */
   async deleteSeparation(userId: string, id: string): Promise<void> {
     const { separations, storage } = this.need()
     const separation = await separations.findById(id)
@@ -141,7 +204,7 @@ export class StemSeparationService {
 
     // .ogg(신규)와 .wav(이전 기록·폴백) 모두 삭제
     try {
-      await storage.remove(stemStoragePaths(separation.storage_folder))
+      await storage.delete(stemStoragePaths(separation.storage_folder))
     } catch (removeError) {
       console.error(`[Delete] Storage 삭제 실패 (${id}):`, (removeError as Error).message)
       throw new ServiceError(500, { success: false, error: '스템 파일 삭제에 실패했습니다.' })
@@ -175,7 +238,7 @@ export class StemSeparationService {
     for (const sep of expired) {
       if (sep.storage_folder) {
         try {
-          await storage.remove(stemStoragePaths(sep.storage_folder))
+          await storage.delete(stemStoragePaths(sep.storage_folder))
         } catch (rmError) {
           // 파일을 못 지웠는데 레코드를 지우면 고아 파일이 남아 용량을 계속 먹는다 → 다음 회차에 재시도
           console.error(`[Cleanup] Storage 삭제 실패 (${sep.id}):`, (rmError as Error).message)

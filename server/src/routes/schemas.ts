@@ -70,3 +70,9 @@ export const setRoomPasswordBody = z.object({
   /** null 또는 빈 문자열 → 비밀번호 해제 */
   password: z.string().max(256).nullable(),
 })
+
+/** 게시글 이미지 서명 업로드 URL 요청 (P3-10). 크기·MIME은 서버 상한으로 검증, key는 서버가 정한다 */
+export const postImageUploadBody = z.object({
+  contentType: z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/gif']),
+  size: z.number().int().positive(),
+})
