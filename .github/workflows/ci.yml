@@ -32,6 +32,27 @@ jobs:
       - name: Test
         run: cargo test
 
+  relay:
+    name: Relay (clippy + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: relay
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked -- --nocapture
+      - name: Docker build (push 없음)
+        run: docker build -t band-relay:ci .
+
   client:
     name: Client (build + test)
     runs-on: ubuntu-latest

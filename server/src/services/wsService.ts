@@ -5,6 +5,7 @@ import { Server as HttpsServer } from 'https'
 import { v4 as uuidv4 } from 'uuid'
 import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
+import { isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -19,6 +20,11 @@ import { isInsecureDevMode } from '../lib/securityConfig'
  * - isHost는 DB `rooms.host_id === userId`로 서버가 판정한다(방 정보는 짧게 캐시, 승인 계열 처리 때 재확인).
  * - start-performing은 방장, free_join 방, 또는 방장이 승인한 사용자만 가능하다.
  * - 클라이언트가 보낸 isHost/userId/from/isRejoin은 신뢰하지 않는다. 중계 시 서버가 `from`을 붙인다.
+ *
+ * UDP 릴레이 (docs/overhaul/relay-design.md)
+ * - RELAY_SECRET/RELAY_ADDR가 설정되면, 연주자가 native-descriptor(ssrc 포함)를 보낼 때 `relay-token`을 발급한다.
+ * - `relay-token-request`로 갱신. 토큰 내용(roomId, memberId=userId, ssrc)은 서버가 정한다.
+ * - 같은 방에서 다른 사용자가 이미 쓰는 ssrc의 descriptor는 거부한다(`ssrc-conflict`).
  */
 
 const MAX_MESSAGE_BYTES = 64 * 1024
@@ -125,6 +131,8 @@ interface Client {
   expiryTimer?: ReturnType<typeof setTimeout>
   /** native-descriptor를 보낸 적 있음 (native-leave 허용 판단용) */
   nativeActive: boolean
+  /** 마지막 native-descriptor의 ssrc (릴레이 토큰 발급용) */
+  nativeSsrc?: number
   /** 메시지 순차 처리 체인 (비동기 auth/DB 조회 중 순서 보장) */
   chain: Promise<void>
   pending: number
@@ -257,6 +265,7 @@ export function initializeWebSocket(
   const env = options.env ?? process.env
   const deps: WsDeps = { ...supabaseDeps(supabase), ...options.deps }
   const limits: WsLimits = { ...DEFAULT_LIMITS, ...options.limits }
+  const relayConfig = relayConfigFromEnv(env)
 
   // 서버 인스턴스별 상태
   const rooms = new Map<string, Set<string>>()
@@ -300,6 +309,29 @@ export function initializeWebSocket(
   const isAuthenticated = (c: Client) => c.authState === 'authenticated' && !!c.userId
   /** 연주자 = 연주 중이거나 방장 */
   const isPerformer = (c: Client) => c.isPerforming || c.isHost
+
+  /**
+   * 릴레이 토큰 발급 (연주자 전용). roomId/memberId/ssrc는 서버가 아는 값만 쓴다.
+   * - memberId는 검증된 userId: 세션 재개 없이 재접속해도(새 clientId) 릴레이가 같은 멤버로 보고 이전 슬롯을 교체한다.
+   * - 회수 수단이 없으므로 수명을 짧게(기본 120초) 두고 클라이언트가 갱신한다. 릴레이 등록은 토큰 만료를 넘지 않는다.
+   */
+  function sendRelayToken(c: Client) {
+    if (!relayConfig || !c.roomId || !c.userId || c.nativeSsrc === undefined || !isPerformer(c)) return
+    const expiresAt = Math.floor(Date.now() / 1000) + relayConfig.ttlSec
+    const token = signRelayToken({ roomId: c.roomId, memberId: c.userId, ssrc: c.nativeSsrc, expiresAt }, relayConfig.secret)
+    send(c.ws, { type: 'relay-token', token: token.toString('base64url'), addr: relayConfig.addr, ssrc: c.nativeSsrc, expiresAt })
+  }
+
+  /** 같은 방의 다른 사용자가 이 ssrc를 쓰고 있는지 (ssrc 선점·가로채기 방지) */
+  function ssrcTakenInRoom(c: Client, ssrc: number): boolean {
+    if (!c.roomId) return false
+    for (const peerId of rooms.get(c.roomId) || []) {
+      if (peerId === c.id) continue
+      const peer = clients.get(peerId)
+      if (peer && peer.nativeSsrc === ssrc && peer.userId !== c.userId) return true
+    }
+    return false
+  }
 
   function getRoomParticipants(roomId: string): Participant[] {
     const room = rooms.get(roomId)
@@ -689,6 +721,7 @@ export function initializeWebSocket(
         client.isPerforming = false
         client.instrument = undefined
         client.nativeActive = false
+        client.nativeSsrc = undefined
       }
       client.isHost = isHost
 
@@ -807,6 +840,8 @@ export function initializeWebSocket(
       if (msg.type === 'stop-performing' && roomId) {
         client.isPerforming = false
         client.instrument = undefined
+        // 연주자가 아니게 되면 ssrc를 잊는다(토큰 갱신 불가 → 기존 토큰 만료와 함께 릴레이 슬롯 해제)
+        if (!isPerformer(client)) client.nativeSsrc = undefined
         console.log(`[STOP-PERFORMING] ${id.slice(0, 8)} (${client.nickname}) stopped performing`)
         broadcastToRoom(roomId, id, { type: 'performer-updated', oderId: id, nickname: client.nickname, instrument: undefined, isPerforming: false })
         return
@@ -827,7 +862,16 @@ export function initializeWebSocket(
         if (!roomId || !isAuthenticated(client) || !isPerformer(client)) return
         const descriptor = msg.descriptor
         if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) return
+        const ssrc = (descriptor as Record<string, unknown>).ssrc
+        if (isValidSsrc(ssrc) && ssrcTakenInRoom(client, ssrc)) {
+          send(ws, { type: 'error', code: 'ssrc-conflict', message: '같은 방에서 이미 쓰는 ssrc입니다. 엔진을 다시 시작하세요.' })
+          return
+        }
         client.nativeActive = true
+        if (isValidSsrc(ssrc)) {
+          client.nativeSsrc = ssrc
+          sendRelayToken(client)
+        }
         const out = { type: 'native-descriptor', from: id, descriptor }
         if (msg.to !== undefined) {
           const target = getRoomPeer(client, msg.to)
@@ -842,9 +886,16 @@ export function initializeWebSocket(
         return
       }
 
+      if (msg.type === 'relay-token-request') {
+        if (!roomId || !isAuthenticated(client) || !isPerformer(client)) return
+        sendRelayToken(client)
+        return
+      }
+
       if (msg.type === 'native-leave') {
         if (!roomId || !isAuthenticated(client) || !(isPerformer(client) || client.nativeActive)) return
         client.nativeActive = false
+        client.nativeSsrc = undefined
         for (const peerId of rooms.get(roomId) || []) {
           if (peerId === id) continue
           const peer = clients.get(peerId)
