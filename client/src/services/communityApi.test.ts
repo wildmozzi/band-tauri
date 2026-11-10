@@ -161,6 +161,14 @@ describe('communityApi 글 작성·수정 (P3-10d: 서버 API)', () => {
     expect(err.status).toBe(422)
     expect(err.message).toBe('저장할 수 없는 이미지가 있습니다. (이 서비스에 올린 이미지만 붙일 수 있습니다.)')
     expect(err.rejected).toHaveLength(1)
+    // 400: 필드별 이유를 보여 준다 (PR #25 M2)
+    const invalid = vi.fn(async () => json(400, { success: false, error: '입력값이 올바르지 않습니다.', issues: [
+      { field: 'title', message: '제목은(는) 최대 200자까지입니다.' }, { field: 'instrument', message: '악기: 선택할 수 없는 값입니다.' },
+    ] }))
+    const err400 = await communityApi.updatePost('p', { title: 'x' }, invalid as unknown as typeof fetch).catch(e => e)
+    expect(err400).toBeInstanceOf(PostSaveError)
+    expect(err400.message).toBe('입력값이 올바르지 않습니다. (제목은(는) 최대 200자까지입니다., 악기: 선택할 수 없는 값입니다.)')
+    expect(err400.issues).toHaveLength(2)
     const down = vi.fn(async () => { throw new TypeError('fetch failed') })
     await expect(communityApi.updatePost('p', {}, down as unknown as typeof fetch)).rejects.toThrow('서버에 연결할 수 없습니다')
   })

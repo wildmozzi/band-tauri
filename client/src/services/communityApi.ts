@@ -161,7 +161,13 @@ function getApiUrl(): string {
 
 /** 서버가 거절한 글 저장 (사용자에게 그대로 보여줄 문구). rejected: 저장할 수 없는 이미지와 이유 */
 export class PostSaveError extends Error {
-  constructor(message: string, readonly status: number, readonly rejected: { url: string; reason: string }[] = []) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly rejected: { url: string; reason: string }[] = [],
+    /** 400: 필드별 이유 (PR #25 M2) */
+    readonly issues: { field: string; message: string }[] = [],
+  ) {
     super(message)
     this.name = 'PostSaveError'
   }
@@ -180,12 +186,15 @@ async function callPostsApi(method: 'POST' | 'PUT', path: string, body: unknown,
   }
   const data = (await res.json().catch(() => ({}))) as {
     success?: boolean; error?: string; post?: Tables<'posts'>; rejected?: { url: string; reason: string }[]
+    issues?: { field: string; message: string }[]
   }
   if (!res.ok || data.success === false || !data.post) {
     const rejected = Array.isArray(data.rejected) ? data.rejected : []
+    const issues = Array.isArray(data.issues) ? data.issues.filter(i => typeof i?.message === 'string') : []
     const base = typeof data.error === 'string' ? data.error : `게시글 저장 실패 (${res.status})`
-    const detail = rejected.length ? ` (${[...new Set(rejected.map(r => r.reason))].join(', ')})` : ''
-    throw new PostSaveError(base + detail, res.status, rejected)
+    const reasons = [...new Set([...rejected.map(r => r.reason), ...issues.map(i => i.message)])]
+    const detail = reasons.length ? ` (${reasons.join(', ')})` : ''
+    throw new PostSaveError(base + detail, res.status, rejected, issues)
   }
   return { post: data.post }
 }

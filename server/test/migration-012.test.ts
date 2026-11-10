@@ -224,7 +224,10 @@ describe('migration 012: server postRepository works as service_role', () => {
     assert.deepEqual(row.images, ['https://api.test/api/storage/post-images/x/1.png'])
     assert.equal(row.likes_count, 0)
 
-    assert.deepEqual(await repo.findForEdit(row.id), { authorId: ALICE, images: ['https://api.test/api/storage/post-images/x/1.png'] })
+    assert.deepEqual(await repo.findForEdit(row.id), {
+      authorId: ALICE, images: ['https://api.test/api/storage/post-images/x/1.png'],
+      title: 'srv', content: 'c', tags: ['jam'], instrument: 'guitar', category: 'general',
+    })
     assert.equal(await repo.findForEdit('99999999-9999-4999-8999-999999999999'), null)
 
     const updated = await repo.update(row.id, ALICE, { title: 'edited', images: [] })

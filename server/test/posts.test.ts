@@ -26,7 +26,12 @@ function memoryPosts() {
   const repo: PostRepository = {
     async findForEdit(id) {
       const r = rows.get(id)
-      return r ? { authorId: r.author_id, images: r.images ?? [] } : null
+      return r
+        ? {
+            authorId: r.author_id, images: r.images ?? [], title: r.title as string, content: r.content as string,
+            tags: (r.tags as string[] | null) ?? [], instrument: r.instrument as string, category: r.category as string,
+          }
+        : null
     },
     async displayName(userId) {
       return userId === ALICE ? 'alice' : 'User'
@@ -120,7 +125,7 @@ describe('POST/PUT /api/posts', () => {
       [postImageViewUrl(mem.adapter, pendingKey), '업로드가 확인되지 않은'], // 업로드했지만 /complete 안 거침
       [postImageViewUrl(mem.adapter, newPostImageKey(ALICE, 'image/png')), '업로드가 확인되지 않은'], // 없는 key
       [bobs.url, '본인이 올린 이미지만'],
-      [postImageViewUrl(mem.adapter, legacyStyleKey), '본인이 올린 이미지만'],
+      [postImageViewUrl(mem.adapter, legacyStyleKey), '이 형식의 이미지는 다시 붙일 수 없습니다'],
       ['https://api.test/api/storage/post-images/..%2F..%2Fsecret', '잘못된 이미지 경로'],
     ]
     for (const [url, reason] of forged) {
@@ -145,6 +150,45 @@ describe('POST/PUT /api/posts', () => {
     ]
     for (const body of bad) assert.equal((await req(s.url, 'POST', '', body, bearer(ALICE))).status, 400, JSON.stringify(body))
     assert.equal((await req(s.url, 'PUT', '/not-a-uuid', { title: 't' }, bearer(ALICE))).status, 400)
+    // 400에는 필드별 이유가 담긴다 (PR #25 M2)
+    const res = await req(s.url, 'POST', '', { title: 'x'.repeat(201), content: 'c', instrument: 'kazoo' }, bearer(ALICE))
+    const body = await res.json() as { issues: { field: string; message: string }[] }
+    assert.deepEqual(body.issues.map(i => i.field).sort(), ['instrument', 'title'])
+    assert.ok(body.issues.find(i => i.field === 'title')!.message.includes('200자'))
+  })
+
+  it('legacy posts that break the new rules stay editable: unchanged old values pass, new values follow the rules (PR #25 M2)', async () => {
+    const oldImages = Array.from({ length: 7 }, (_, i) => `https://cdn.example/legacy-${i}.png`)
+    const oldTags = Array.from({ length: 22 }, (_, i) => (i === 0 ? 'x'.repeat(60) : `tag${i}`))
+    const legacy = await posts.repo.insert({
+      authorId: ALICE, authorName: 'alice', authorRole: 'Session Member', title: 'T'.repeat(250), content: 'c',
+      tags: oldTags, images: oldImages, instrument: 'Guitar', category: 'general',
+    })
+    // EditPost는 모든 필드를 보낸다: 내용만 바꿔도 통과
+    const ok = await req(s.url, 'PUT', `/${legacy.id}`, {
+      title: 'T'.repeat(250), content: 'edited', tags: oldTags, images: oldImages, instrument: 'Guitar', category: 'general',
+    }, bearer(ALICE))
+    assert.equal(ok.status, 200)
+    const row = posts.rows.get(legacy.id)!
+    assert.equal(row.content, 'edited')
+    assert.equal(row.title, 'T'.repeat(250))
+    assert.equal(row.instrument, 'Guitar')
+    assert.deepEqual(row.images, oldImages)
+    // 줄이는 건 된다 (태그 하나 빼기, 이미지 하나 빼기)
+    const shrink = await req(s.url, 'PUT', `/${legacy.id}`, { tags: oldTags.slice(1), images: oldImages.slice(1) }, bearer(ALICE))
+    assert.equal(shrink.status, 200)
+
+    // 바꾼 값은 새 규칙: 너무 긴 새 제목·목록 밖 새 악기·새 긴 태그 → 400 + 필드별 이유, 아무것도 쓰지 않음
+    const bad = await req(s.url, 'PUT', `/${legacy.id}`, {
+      title: 'U'.repeat(201), instrument: 'kazoo', tags: [...oldTags.slice(1), 'y'.repeat(51)],
+    }, bearer(ALICE))
+    assert.equal(bad.status, 400)
+    const { issues } = await bad.json() as { issues: { field: string; message: string }[] }
+    assert.deepEqual(issues.map(i => i.field).sort(), ['instrument', 'tags', 'title'])
+    assert.equal(posts.rows.get(legacy.id)!.title, 'T'.repeat(250))
+    // 이미지 개수는 기존 개수를 넘을 수 없다
+    const more = await req(s.url, 'PUT', `/${legacy.id}`, { images: [...oldImages, 'https://cdn.example/new.png'] }, bearer(ALICE))
+    assert.equal(more.status, 400)
   })
 
   it('rejects edits by someone other than the author (403) and unknown posts (404)', async () => {

@@ -4,7 +4,7 @@ import { requireAuth } from '../lib/auth'
 import { StoreUnavailableError } from '../repositories/errors'
 import { ServiceError } from '../services/errors'
 import type { PostService } from '../services/postService'
-import { createPostBody, postIdParams, updatePostBody } from './schemas'
+import { createPostBody, postFieldIssues, postIdParams, updatePostBody } from './schemas'
 
 /**
  * 게시글 쓰기 API (P3-10d) — 작성자는 토큰의 userId, 이미지는 검증 완료 업로드만(PostService).
@@ -42,7 +42,7 @@ export function createPostsRouter(service: PostService, opts: { rateLimits?: boo
   router.post('/', async (req, res) => {
     const parsed = createPostBody.safeParse(req.body ?? {})
     if (!parsed.success) {
-      res.status(400).json({ success: false, error: '입력값이 올바르지 않습니다.' })
+      res.status(400).json({ success: false, error: '입력값이 올바르지 않습니다.', issues: postFieldIssues(parsed.error) })
       return
     }
     try {
@@ -59,7 +59,7 @@ export function createPostsRouter(service: PostService, opts: { rateLimits?: boo
     const params = postIdParams.safeParse(req.params)
     const body = updatePostBody.safeParse(req.body ?? {})
     if (!params.success || !body.success) {
-      res.status(400).json({ success: false, error: '입력값이 올바르지 않습니다.' })
+      res.status(400).json({ success: false, error: '입력값이 올바르지 않습니다.', issues: body.success ? [] : postFieldIssues(body.error) })
       return
     }
     try {

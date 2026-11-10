@@ -25,10 +25,21 @@ export interface PostPatch {
   category?: string
 }
 
+/** 수정 전 현재 값 (권한·기존 이미지 확인, 바뀌지 않은 예전 값 허용 — PR #25 M2) */
+export interface PostEditSnapshot {
+  authorId: string
+  images: string[]
+  title?: string | null
+  content?: string | null
+  tags?: string[] | null
+  instrument?: string | null
+  category?: string | null
+}
+
 /** posts 쓰기 (P3-10d). 서버 service_role로만 쓴다 — 클라이언트 직접 INSERT/UPDATE는 마이그레이션 012가 막는다 */
 export interface PostRepository {
   /** 수정 권한·기존 이미지 확인용. 없으면 null */
-  findForEdit(postId: string): Promise<{ authorId: string; images: string[] } | null>
+  findForEdit(postId: string): Promise<PostEditSnapshot | null>
   /** 작성자 표시 이름: profiles.nickname → 이메일 앞부분 → 'User' (예전 클라이언트와 같은 규칙) */
   displayName(userId: string): Promise<string>
   insert(post: NewPost): Promise<PostRow>
@@ -39,11 +50,26 @@ export interface PostRepository {
 export function createPostRepository(supabase: SupabaseClient): PostRepository {
   return {
     async findForEdit(postId) {
-      const { data, error } = await supabase.from('posts').select('author_id, images').eq('id', postId).maybeSingle()
+      const { data, error } = await supabase
+        .from('posts')
+        .select('author_id, images, title, content, tags, instrument, category')
+        .eq('id', postId)
+        .maybeSingle()
       if (error) throw toRepositoryError(error, 'posts.findForEdit')
       if (!data) return null
-      const row = data as { author_id: string; images: string[] | null }
-      return { authorId: row.author_id, images: row.images ?? [] }
+      const row = data as {
+        author_id: string; images: string[] | null; title: string | null; content: string | null
+        tags: string[] | null; instrument: string | null; category: string | null
+      }
+      return {
+        authorId: row.author_id,
+        images: row.images ?? [],
+        title: row.title,
+        content: row.content,
+        tags: row.tags ?? [],
+        instrument: row.instrument,
+        category: row.category,
+      }
     },
 
     async displayName(userId) {
