@@ -1,6 +1,8 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
+import { SERVICE_NAME } from '../lib/brand'
+import { safeRedirectPath } from '../lib/redirect'
 
 interface SignUpData {
   email: string
@@ -31,7 +33,8 @@ export function Auth() {
   const navigate = useNavigate()
   const location = useLocation()
 
-  const from = (location.state as { from?: string })?.from || '/rooms'
+  // 로그인 후(또는 이미 로그인돼 있으면) 돌아갈 곳: 보낸 화면이 준 앱 안 경로, 없으면 홈
+  const redirectTo = safeRedirectPath((location.state as { from?: unknown } | null)?.from)
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -84,25 +87,25 @@ export function Auth() {
       // 로그인
       try {
         await signIn(email, password)
-        navigate(from, { replace: true })
+        navigate(redirectTo, { replace: true })
       } catch (error) {
         // 에러는 AuthContext에서 처리됨
       }
     }
   }
 
-  // 이미 로그인된 경우 홈으로 리다이렉트
+  // 이미 로그인된 경우 돌아갈 곳으로 (예: /payment?plan=… 에서 보낸 경우 결제 화면으로 — P3-12 ⑩)
   useEffect(() => {
     if (user) {
-      navigate('/', { replace: true })
+      navigate(redirectTo, { replace: true })
     }
-  }, [user, navigate])
+  }, [user, navigate, redirectTo])
 
   return (
     <div className="auth-page">
       <div className="auth-container">
         <div className="auth-header">
-          <h1>BandSpace</h1>
+          <h1>{SERVICE_NAME}</h1>
           <p>음악가들을 위한 온라인 합주 플랫폼</p>
         </div>
 
@@ -166,7 +169,7 @@ export function Auth() {
               <input
                 id="email"
                 type="email"
-                placeholder="you@bandspace.com"
+                placeholder="you@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required

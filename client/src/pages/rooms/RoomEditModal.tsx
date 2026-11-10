@@ -1,5 +1,5 @@
 import type { RoomEditorState } from './useRoomEditor'
-import { COMMON_TAGS, GENRES, MAX_PARTICIPANT_OPTIONS, MAX_SLOT_COUNT, findInstrument } from './roomModel'
+import { COMMON_TAGS, GENRES, MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, MAX_SLOT_COUNT, findInstrument, maxParticipantsOptionLabel } from './roomModel'
 
 /** "합주실 설정" 모달. editor.editingRoom이 있을 때만 렌더한다. */
 export function RoomEditModal({ editor }: { editor: RoomEditorState }) {
@@ -53,16 +53,18 @@ export function RoomEditModal({ editor }: { editor: RoomEditorState }) {
             </div>
 
             <div className="edit-form-group">
-              <label htmlFor="edit-max">최대 인원</label>
+              <label htmlFor="edit-max">{MAX_PARTICIPANTS_LABEL}</label>
               <select
                 id="edit-max"
                 value={editor.editMaxParticipants}
+                aria-describedby="edit-max-hint"
                 onChange={(e) => editor.setEditMaxParticipants(Number(e.target.value))}
               >
                 {MAX_PARTICIPANT_OPTIONS.map(n => (
-                  <option key={n} value={n}>{n}명</option>
+                  <option key={n} value={n}>{maxParticipantsOptionLabel(n)}</option>
                 ))}
               </select>
+              <small id="edit-max-hint" className="form-hint">{MAX_PARTICIPANTS_HINT}</small>
             </div>
           </div>
 

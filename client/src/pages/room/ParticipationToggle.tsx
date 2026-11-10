@@ -1,6 +1,7 @@
 import { useRoom } from '../../contexts/RoomContext'
 import { MAX_PERFORMERS } from '../../native/engineApi'
-import { DESKTOP_DOWNLOAD_URL, INSTRUMENT_INFO } from './roomDetailModel'
+import { DesktopDownloadButton } from '../../components/DesktopDownloadButton'
+import { INSTRUMENT_INFO } from './roomDetailModel'
 
 /** 참여/관람 전환 버튼과 연주 요청 상태 (웹은 데스크톱 앱 안내) */
 export function ParticipationToggle({
@@ -44,12 +45,8 @@ export function ParticipationToggle({
         /* 웹: 연주는 데스크톱 앱 전용 */
         <div className="web-notice">
           <p>🖥️ 연주는 데스크톱 앱에서</p>
-          <small>웹에서는 관람만 할 수 있습니다. 연주에 참여하려면 Band 데스크톱 앱을 설치해주세요.</small>
-          {DESKTOP_DOWNLOAD_URL ? (
-            <a href={DESKTOP_DOWNLOAD_URL} className="download-link" target="_blank" rel="noopener noreferrer">📥 데스크톱 앱 다운로드</a>
-          ) : (
-            <span className="download-link disabled">📥 다운로드 준비 중</span>
-          )}
+          <small>웹에서는 관람만 할 수 있습니다. 연주에 참여하려면 데스크톱 앱을 설치해주세요.</small>
+          <DesktopDownloadButton />
         </div>
       ) : performBusy || performStarting ? (
         <div className="request-status pending">

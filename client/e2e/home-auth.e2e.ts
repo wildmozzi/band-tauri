@@ -3,7 +3,7 @@ import { expect, test } from './test'
 
 test('홈 화면이 렌더되고 합주실로 이동할 수 있다', async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: '초저지연 온라인 합주실' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1, name: '온라인 합주실' })).toBeVisible()
   await expect(page.getByRole('link', { name: '로그인' })).toBeVisible()
 
   await page.getByRole('link', { name: '합주실 열기' }).click()
@@ -16,7 +16,7 @@ test('로그인: 틀린 비밀번호는 오류, 맞는 비밀번호는 세션 �
   consoleErrors.allow(/Failed to load resource: the server responded with a status of 400.*\/auth\/v1\/token/)
 
   await page.goto('/auth')
-  await page.getByPlaceholder('you@bandspace.com').fill(ALICE.email)
+  await page.getByPlaceholder('you@example.com').fill(ALICE.email)
   await page.getByPlaceholder('8자 이상 입력').fill('wrong-password')
   await page.locator('form.auth-form').getByRole('button', { name: '로그인' }).click()
   await expect(page.getByText('Invalid login credentials')).toBeVisible()

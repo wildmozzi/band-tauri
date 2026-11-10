@@ -1,4 +1,4 @@
-import { AVAILABLE_INSTRUMENTS, COMMON_TAGS, GENRES, MAX_PARTICIPANT_OPTIONS } from '../rooms/roomModel'
+import { AVAILABLE_INSTRUMENTS, COMMON_TAGS, GENRES, MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from '../rooms/roomModel'
 import type { DetailRoom } from './roomDetailModel'
 import type { RoomSettingsForm } from './useRoomSettingsForm'
 
@@ -54,16 +54,18 @@ export function RoomSettingsModal({ room, form }: { room: DetailRoom; form: Room
             </div>
 
             <div className="edit-form-group">
-              <label htmlFor="edit-max">최대 인원</label>
+              <label htmlFor="edit-max">{MAX_PARTICIPANTS_LABEL}</label>
               <select
                 id="edit-max"
                 value={form.editMaxParticipants}
+                aria-describedby="edit-max-hint"
                 onChange={(e) => form.setEditMaxParticipants(Number(e.target.value))}
               >
                 {MAX_PARTICIPANT_OPTIONS.map(n => (
-                  <option key={n} value={n}>{n}명</option>
+                  <option key={n} value={n}>{maxParticipantsOptionLabel(n)}</option>
                 ))}
               </select>
+              <small id="edit-max-hint" className="form-hint">{MAX_PARTICIPANTS_HINT}</small>
             </div>
           </div>
 

@@ -1383,6 +1383,8 @@
 }
 
 .web-notice .download-link {
+  border: none;
+  font: inherit;
   display: inline-block;
   padding: 10px 20px;
   background: var(--primary);
@@ -3058,4 +3060,47 @@
   gap: 4px;
   font-weight: normal;
   cursor: pointer;
+}
+
+/* ===== P3-12 ⑨: 합주실을 내비게이션 아래 남은 화면 한 장에 맞춘다 (채팅 입력창이 스크롤 없이 보이게) =====
+   --app-nav-height는 Navigation이 실제 높이로 채운다. 768px 이하(세로 쌓기)는 기존 배치를 쓴다.
+   App.css에도 같은 .live-room 규칙이 있어(나중에 로드됨) 선택자를 한 단계 구체적으로 쓴다. */
+@media (min-width: 769px) {
+  .app-content > .live-room {
+    height: calc(100vh - var(--app-nav-height, 80px));
+    height: calc(100dvh - var(--app-nav-height, 80px));
+    min-height: 480px;
+  }
+
+  .live-room > .live-header {
+    flex-shrink: 0;
+  }
+
+  .live-room > .live-body {
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .live-room .performers-panel,
+  .live-room .mixer-panel,
+  .live-room .main-stage,
+  .live-room .info-panel,
+  .live-room .chat-panel {
+    height: auto;
+    min-height: 0;
+  }
+
+  .live-room .chat-messages {
+    min-height: 0;
+  }
+}
+
+/* 좁은 채팅 칸에서 전송 버튼 글자가 줄바꿈되지 않게, 입력창은 칸 안에서 줄어들게 */
+.live-room .chat-send-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.live-room .chat-input {
+  min-width: 0;
 }
