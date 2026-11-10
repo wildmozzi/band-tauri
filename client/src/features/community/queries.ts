@@ -29,6 +29,7 @@ import {
   type Post,
   type UpdatePostData,
 } from '../../services/communityApi'
+import { resolvePostImages, uploadPostImage as uploadImageViaServer } from '../../services/storageApi'
 import {
   addReplyToTree,
   countDeletedComments,
@@ -142,11 +143,16 @@ export function useTrendingTagsQuery(limit = 5) {
 
 // ---------- 글 ----------
 
+/** 저장 직전 이미지 URL을 서버 규칙으로 정규화 (검증 완료만, 이전된 예전 URL은 새 URL로) */
+async function withResolvedImages<T extends { images?: string[] }>(data: T): Promise<T> {
+  return data.images === undefined ? data : { ...data, images: await resolvePostImages(data.images) }
+}
+
 export function useCreatePostMutation() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ data, user }: { data: CreatePostData; user: CommunityUser }) =>
-      communityApi.createPost(data, user),
+    mutationFn: async ({ data, user }: { data: CreatePostData; user: CommunityUser }) =>
+      communityApi.createPost(await withResolvedImages(data), user),
     onSuccess: () => invalidatePostLists(qc),
   })
 }
@@ -154,8 +160,8 @@ export function useCreatePostMutation() {
 export function useUpdatePostMutation() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ postId, data }: { postId: string; data: UpdatePostData }) =>
-      communityApi.updatePost(postId, data),
+    mutationFn: async ({ postId, data }: { postId: string; data: UpdatePostData }) =>
+      communityApi.updatePost(postId, await withResolvedImages(data)),
     onSuccess: (updated, { postId }) => {
       // 응답 본문으로 상세를 바로 맞춘다(돌아갔을 때 이전 본문이 보이지 않게, EditPost 쿼리 재조회 대기 없음)
       qc.setQueriesData<Post | null>({ queryKey: communityKeys.postAll(postId) }, prev =>
@@ -260,9 +266,12 @@ export function useToggleLikeMutation() {
   })
 }
 
-/** 게시물 이미지 업로드 (Storage). 캐시는 건드리지 않는다 — 글 저장 mutation이 무효화한다 */
-export function uploadPostImage(file: File, userId: string): Promise<string> {
-  return communityApi.uploadImage(file, userId)
+/**
+ * 게시물 이미지 업로드 (서버 발급 서명 URL → 저장소). 게시글에 저장할 조회 URL을 돌려준다.
+ * 캐시는 건드리지 않는다 — 글 저장 mutation이 무효화한다
+ */
+export function uploadPostImage(file: File): Promise<string> {
+  return uploadImageViaServer(file)
 }
 
 // ---------- 댓글 ----------

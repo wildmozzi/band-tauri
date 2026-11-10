@@ -1,5 +1,4 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { STEM_BUCKET } from '../lib/stemStorage'
 import { RepositoryError, toRepositoryError } from './errors'
 
 /** stem_separations 행 (006_stem_separations.sql) */
@@ -90,38 +89,6 @@ export function createStemSeparationRepository(supabase: SupabaseClient): StemSe
     async deleteByIds(ids) {
       const { error } = await table().delete().in('id', ids)
       if (error) throw new RepositoryError(error.message, error.code)
-    },
-  }
-}
-
-/** 스템 파일 Storage 버킷 접근 */
-export interface StemStorageRepository {
-  upload(path: string, body: Buffer, contentType: string): Promise<{ error: { message: string } | null }>
-  publicUrl(path: string): string
-  /** 실패 시 RepositoryError throw */
-  remove(paths: string[]): Promise<void>
-}
-
-export function createStemStorageRepository(supabase: SupabaseClient): StemStorageRepository {
-  const bucket = () => supabase.storage.from(STEM_BUCKET)
-  return {
-    async upload(path, body, contentType) {
-      const { error } = await bucket().upload(path, body, {
-        contentType,
-        // 경로가 분리 ID별로 고유해 내용이 바뀌지 않는다 → 브라우저 캐시로 재로딩 트래픽 절감
-        cacheControl: '31536000',
-        upsert: true,
-      })
-      return { error: error ? { message: error.message } : null }
-    },
-
-    publicUrl(path) {
-      return bucket().getPublicUrl(path).data.publicUrl
-    },
-
-    async remove(paths) {
-      const { error } = await bucket().remove(paths)
-      if (error) throw new RepositoryError(error.message)
     },
   }
 }

@@ -4,7 +4,6 @@ import type { Post } from '../../services/communityApi'
 import { MAX_IMAGES, addUniqueTag, uploadSequentially, validateImageFiles } from './postLogic'
 
 interface SubmitOptions {
-  userId: string
   /** 이미지 업로드 후 저장 단계에 표시할 문구 */
   savingMessage: string
   /** 새로 업로드한 이미지 URL을 받아 게시물을 저장한다 */
@@ -95,7 +94,7 @@ export function usePostForm() {
 
       const newImageUrls = await uploadSequentially(
         selectedFiles,
-        file => uploadPostImage(file, opts.userId),
+        file => uploadPostImage(file),
         setUploadProgress,
       )
 

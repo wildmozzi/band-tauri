@@ -24,7 +24,8 @@ import { separationIdParams, uploadFilenameParams } from './schemas'
 
 /**
  * 악보/음원 API — HTTP 입출력과 입력 검증만.
- * 음원분리 결과 저장·조회·삭제는 StemSeparationService → stem_separations / Storage repository.
+ * 음원분리 결과 저장·조회·삭제는 StemSeparationService → stem_separations repository / StorageAdapter.
+ * 스템 다운로드 URL은 서명 GET URL(만료 STEM_URL_TTL_SEC)로 내려준다.
  */
 const router = express.Router()
 const stems = getDefaultStemSeparationService()
@@ -365,11 +366,14 @@ router.post('/separate-stems', uploadLimiter, requireAuth, upload.single('file')
       console.warn('[Music Separate] Supabase 미설정 - 로컬 파일로 반환 (히스토리 저장 안 됨)')
     } else {
       try {
-        const stemUrls = await stems.uploadStems(
+        // DB에는 저장소 참조, 응답에는 서명 GET URL (P3-10)
+        const storageFolder = `${userId || 'anonymous'}/${separationId}`
+        const stemRefs = await stems.uploadStems(
           separationResult.stems as Record<string, string>,
           userId,
           separationId
         )
+        const stemUrls = await stems.signStems(stemRefs, storageFolder)
 
         const recordFilename = await stems.resolveRecordFilename(userId, originalFilename)
 
@@ -378,13 +382,13 @@ router.post('/separate-stems', uploadLimiter, requireAuth, upload.single('file')
           user_id: userId,
           original_filename: recordFilename,
           original_file_size: file.size,
-          storage_folder: `${userId || 'anonymous'}/${separationId}`,
-          vocals_url: stemUrls.vocals || null,
-          drums_url: stemUrls.drums || null,
-          bass_url: stemUrls.bass || null,
-          piano_url: stemUrls.piano || null,
-          guitar_url: stemUrls.guitar || null,
-          other_url: stemUrls.other || null,
+          storage_folder: storageFolder,
+          vocals_url: stemRefs.vocals || null,
+          drums_url: stemRefs.drums || null,
+          bass_url: stemRefs.bass || null,
+          piano_url: stemRefs.piano || null,
+          guitar_url: stemRefs.guitar || null,
+          other_url: stemRefs.other || null,
           status: 'completed'
         })
 
