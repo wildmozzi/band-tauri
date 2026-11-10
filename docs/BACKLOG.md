@@ -68,7 +68,7 @@
 | P3-5 | 서버 route→service→repository 계층화, 구독 정보를 DB로(현재 메모리 Map) | 테스트 통과 | 완료(#6, server 181 tests) |
 | P3-5a | **[확인]** 운영 Supabase에 `docs/migrations/007_subscriptions.sql` + `008_room_privacy.sql` + `009_payment_orders.sql` 실행 (배포 순서: 마이그레이션 007→008→009 → server → client) — **main 배포와 함께** 해야 함(미실행 시 운영 결제 API가 503) + 토스 테스트 키로 결제·취소·재시작 복구 검증(실패 응답도 멱등 키로 캐시되는지 확인) | 사용자 승인 후 실행 | 대기 (P3-5 병합 후) |
 | P3-5b | 결제 orderId를 서버가 발급(사용자 바인딩) + 클라이언트가 결제 503을 "결제 확인 중" 화면으로 표시·재조회 | 테스트 + 결제 흐름 E2E | 완료(#8; 결제 E2E는 P3-5a [확인]) |
-| P3-5c | DB 함수 보강: 005 increment/decrement_participants의 search_path 고정 + anon EXECUTE 회수(PR #17에서 발견) — 새 마이그레이션 파일만 | PGlite 테스트 | 진행중(PR #18 보안 리뷰) |
+| P3-5c | DB 함수 보강: 005 increment/decrement_participants의 search_path 고정 + anon EXECUTE 회수(PR #17에서 발견) — 새 마이그레이션 파일만 | PGlite 테스트 | 완료(#18; 운영 반영은 P3-5e) |
 | P3-5d | **[확인]** 운영 Supabase에 `010_post_likes_count.sql` 실행(백업 후, P3-5a와 함께) | 실행 후 좋아요 수 확인 | 대기 |
 | P3-5e | **[확인·우선]** 운영 DB에 `011_harden_functions.sql` 실행 — **현재 운영에서 anon이 profiles의 이메일·전화·생년월일을 조회 가능, 방 참가자 수 변경 가능, stem_separations 삽입 가능**(PR #18에서 발견). **순서 주의: 새 클라이언트(band-tauri) 배포 후 실행** — 구버전 웹(band-web)은 댓글 조회가 profiles.email을 읽어 011 적용 즉시 깨짐(PR #18 리뷰 H1). 001~010 적용 후 실행, 이후 008/010 추가 적용 시 011 재실행. README 확인 쿼리 3개로 검증 | 운영에서 anon 조회 차단 확인 | 대기 (PR #18 병합 후) |
 | P1-1c | (메모) ego-browser 웹 점검 남은 것: 로그인 후 쓰기 흐름(방 생성·비밀번호 방·비공개 방·글·좋아요·댓글·프로필) — 테스트 데이터 [TEST] 표시 후 삭제. 발견: 탭 제목 "Vite + React + TS", BandSpace/IndigoMuse 이름 혼재, 홈 문구 사실과 다름(18ms·3지역·LA 리전·SYNCROOM 명시), 데스크톱 다운로드 링크 없음 | 화면 점검 완료 | 완료(2026-11-10 ego-browser: 로그인 포함 합주실 생성·채팅·설정·삭제, 글 작성·좋아요·댓글 작성·수정·삭제, 관람 입장, 화면 순회 — 테스트 데이터 모두 삭제, 발견 사항은 P3-12) |
