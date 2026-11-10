@@ -4,13 +4,15 @@ import { requireAuth } from '../lib/auth'
 import { StoreUnavailableError } from '../repositories/errors'
 import { ServiceError } from '../services/errors'
 import { getDefaultSubscriptionService, type SubscriptionService } from '../services/subscriptionService'
-import { cancelPaymentBody, changePlanBody, confirmPaymentBody } from './schemas'
+import { createDefaultPaymentOrderService, type PaymentOrderService } from '../services/paymentOrderService'
+import { cancelPaymentBody, changePlanBody, confirmPaymentBody, createOrderBody, orderIdParams } from './schemas'
 
 /**
  * 결제/구독 API (H2) — HTTP 입출력과 입력 검증만. 업무 로직은 SubscriptionService.
  * - /plans 를 제외한 모든 라우트는 Authorization: Bearer <Supabase access token> 필수
  * - userId는 서버가 토큰으로 결정한다. body/URL의 userId는 무시한다.
- * - 결제 금액은 서버의 PLAN_PRICES로만 결정한다(body의 amount는 무시).
+ * - orderId는 서버가 발급한다(POST /orders). confirm은 본인 주문이고 플랜·금액이 주문과 같을 때만 진행한다.
+ * - 결제 금액은 서버의 PLAN_PRICES로만 결정한다(body의 amount는 주문과 대조만 한다).
  * - 결제 저장소(DB)를 쓸 수 없으면 503.
  */
 
@@ -60,7 +62,10 @@ function sendServiceError(res: Response, error: unknown): boolean {
   return false
 }
 
-export function createPaymentRouter(service: SubscriptionService = getDefaultSubscriptionService()) {
+export function createPaymentRouter(
+  service: SubscriptionService = getDefaultSubscriptionService(),
+  orders: PaymentOrderService = createDefaultPaymentOrderService(service),
+) {
   const router = Router()
 
   // 플랜 정보 조회 (공개)
@@ -71,7 +76,39 @@ export function createPaymentRouter(service: SubscriptionService = getDefaultSub
   // 이하 전부 인증 필요
   router.use(requireAuth)
 
-  // 결제 승인
+  // 결제 주문 발급: orderId·금액은 서버가 정한다. 클라이언트는 이 orderId로만 토스 결제창을 연다
+  router.post('/orders', async (req, res) => {
+    const parsed = createOrderBody.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return res.status(400).json({ success: false, error: '유효하지 않은 플랜입니다.' })
+    }
+    try {
+      const order = await orders.createOrder(res.locals.userId as string, parsed.data.planType)
+      res.status(201).json({ success: true, order })
+    } catch (error) {
+      if (sendServiceError(res, error)) return
+      console.error('Order creation error:', error)
+      res.status(500).json({ success: false, error: '주문 생성 중 오류가 발생했습니다.' })
+    }
+  })
+
+  // 주문 상태 조회 ('결제 확인 중' 화면이 폴링). 본인 주문만, 남의 주문·없는 주문은 404
+  router.get('/orders/:orderId', async (req, res) => {
+    const parsed = orderIdParams.safeParse(req.params)
+    if (!parsed.success) {
+      return res.status(404).json({ success: false, error: '주문을 찾을 수 없습니다.' })
+    }
+    try {
+      const order = await orders.getOrderStatus(res.locals.userId as string, parsed.data.orderId)
+      res.json({ success: true, order })
+    } catch (error) {
+      if (sendServiceError(res, error)) return
+      console.error('Order status error:', error)
+      res.status(500).json({ success: false, error: '주문 상태 조회 중 오류가 발생했습니다.' })
+    }
+  })
+
+  // 결제 승인: 서버 발급 주문만
   router.post('/confirm', async (req, res) => {
     const parsed = confirmPaymentBody.safeParse(req.body ?? {})
     if (!parsed.success) {
@@ -81,8 +118,7 @@ export function createPaymentRouter(service: SubscriptionService = getDefaultSub
       })
     }
     try {
-      const { paymentKey, orderId, planType } = parsed.data
-      const subscription = await service.confirmPayment(res.locals.userId as string, paymentKey, orderId, planType)
+      const subscription = await orders.confirm(res.locals.userId as string, parsed.data)
       res.json({
         success: true,
         subscription: {

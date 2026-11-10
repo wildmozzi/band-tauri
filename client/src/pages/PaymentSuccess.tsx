@@ -1,87 +1,104 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { usePremium } from '../contexts/usePremium'
 import { paymentApi } from '../services/paymentApi'
+import {
+  loadChecking,
+  pollOrder,
+  runPaymentFlow,
+  type ConfirmParams,
+  type KeyValueStorage,
+  type PaymentFlowDeps,
+  type PaymentFlowResult,
+} from '../services/paymentFlow'
 
 const PLAN_INFO: Record<string, { name: string; price: number }> = {
   standard: { name: 'Standard 플랜', price: 2900 },
   pro: { name: 'Pro 플랜', price: 6900 }
 }
 
-export function PaymentSuccess() {
-  const { user } = useAuth()
-  const { setUserPlan } = usePremium()
-  const [searchParams] = useSearchParams()
-  const [isProcessing, setIsProcessing] = useState(true)
-  const [paymentResult, setPaymentResult] = useState<{
-    success: boolean
-    planType?: string
-    planName?: string
-    price?: number
-    error?: string
-  }>({ success: false })
+/** localStorage 접근이 막힌 환경(프라이빗 모드 등)이면 null — 새로고침 복원만 포기한다 */
+function browserStorage(): KeyValueStorage | null {
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
+}
 
-  // URL 파라미터에서 결제 정보 추출
+/**
+ * confirming: 승인 요청 중 / checking: 결과 미확정(503) → 주문 상태 조회 중 / done: 결과 확정 또는 확인 지연
+ */
+type Phase = 'confirming' | 'checking' | 'done'
+
+export function PaymentSuccess() {
+  const { user, loading: authLoading } = useAuth()
+  const { setUserPlan } = usePremium()
+  const setUserPlanRef = useRef(setUserPlan)
+  setUserPlanRef.current = setUserPlan
+  const [searchParams] = useSearchParams()
+  const [phase, setPhase] = useState<Phase>('confirming')
+  const [result, setResult] = useState<PaymentFlowResult | null>(null)
+  /** '다시 확인' 횟수 — 0이면 승인부터, 이후는 상태 조회만 */
+  const [recheck, setRecheck] = useState(0)
+
+  // 토스 successUrl 파라미터 (paymentKey·orderId·amount는 토스가 붙인다)
   const paymentKey = searchParams.get('paymentKey')
   const orderId = searchParams.get('orderId')
   const amount = searchParams.get('amount')
   const planType = searchParams.get('planType')
 
+  // URL 우선, 없으면 저장된 '결제 확인 중' 상태로 복원
+  const params = useMemo<ConfirmParams | null>(() => {
+    const n = Number(amount)
+    if (paymentKey && orderId && amount && Number.isInteger(n) && (planType === 'standard' || planType === 'pro')) {
+      return { paymentKey, orderId, amount: n, planType }
+    }
+    return loadChecking(browserStorage())
+  }, [paymentKey, orderId, amount, planType])
+
+  const userId = user?.id ?? null
+
   useEffect(() => {
-    const processPayment = async () => {
-      if (!paymentKey || !orderId || !amount || !planType || !user) {
-        setPaymentResult({
-          success: false,
-          error: '결제 정보가 올바르지 않습니다.'
-        })
-        setIsProcessing(false)
-        return
-      }
-
-      try {
-        // 서버에 결제 승인 요청
-        const result = await paymentApi.confirmPayment({
-          paymentKey,
-          orderId,
-          amount: parseInt(amount),
-          userId: user.id,
-          planType: planType as 'standard' | 'pro'
-        })
-
-        if (result.success && result.subscription) {
-          // 결제 성공 - 사용자 플랜 업데이트
-          setUserPlan(planType as 'standard' | 'pro')
-          
-          const planInfo = PLAN_INFO[planType]
-          setPaymentResult({
-            success: true,
-            planType,
-            planName: planInfo.name,
-            price: planInfo.price
-          })
-        } else {
-          setPaymentResult({
-            success: false,
-            error: result.error || '결제 승인에 실패했습니다.'
-          })
-        }
-      } catch (error) {
-        console.error('Payment processing error:', error)
-        setPaymentResult({
-          success: false,
-          error: '결제 처리 중 오류가 발생했습니다.'
-        })
-      } finally {
-        setIsProcessing(false)
-      }
+    if (authLoading) return
+    if (!params || !userId) {
+      setResult({ kind: 'failed', error: userId ? '결제 정보가 올바르지 않습니다.' : '로그인이 필요합니다. 로그인 후 다시 확인해 주세요.' })
+      setPhase('done')
+      return
     }
 
-    processPayment()
-  }, [paymentKey, orderId, amount, planType, user, setUserPlan])
+    let cancelled = false
+    const deps: PaymentFlowDeps = {
+      confirm: async (p) => {
+        const r = await paymentApi.confirmPayment(p)
+        return { httpStatus: r.httpStatus ?? 0, success: r.success, error: r.error }
+      },
+      getStatus: (id) => paymentApi.getOrderStatus(id),
+      sleep: (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+      now: () => Date.now(),
+      storage: browserStorage(),
+      onChecking: () => { if (!cancelled) setPhase('checking') },
+      isCancelled: () => cancelled,
+    }
 
-  // 로딩 중
-  if (isProcessing) {
+    const run = recheck > 0 ? pollOrder(params, deps) : runPaymentFlow(params, deps)
+    run.then((r) => {
+      if (cancelled || r.kind === 'aborted') return
+      if (r.kind === 'paid') setUserPlanRef.current(r.planType)
+      setResult(r)
+      setPhase('done')
+    }).catch((error) => {
+      if (cancelled) return
+      console.error('Payment processing error:', error)
+      setResult({ kind: 'failed', error: '결제 처리 중 오류가 발생했습니다.' })
+      setPhase('done')
+    })
+    return () => { cancelled = true }
+  }, [params, userId, authLoading, recheck])
+
+  // 승인 요청 중
+  if (phase === 'confirming') {
     return (
       <div className="payment-success-page">
         <div className="success-container">
@@ -93,14 +110,52 @@ export function PaymentSuccess() {
     )
   }
 
+  // 결과 미확정 → 주문 상태 조회 중
+  if (phase === 'checking') {
+    return (
+      <div className="payment-success-page">
+        <div className="success-container" role="status" aria-live="polite">
+          <div className="loading-spinner"></div>
+          <h2>결제 확인 중</h2>
+          <p>결제 결과를 확인하고 있습니다. 최대 몇 분 걸릴 수 있습니다.</p>
+          <p>이 화면을 새로고침하거나 닫아도 결제는 안전하게 처리되며, 중복 결제되지 않습니다.</p>
+        </div>
+      </div>
+    )
+  }
+
+  // 확인 지연: 서버 재조정 작업이 마무리한다
+  if (result?.kind === 'timeout') {
+    return (
+      <div className="payment-success-page">
+        <div className="success-container">
+          <h1>결제 확인이 지연되고 있습니다</h1>
+          <p>결제가 완료됐다면 잠시 후 구독에 자동으로 반영됩니다. 중복 결제되지 않으니 다시 결제하지 마세요.</p>
+          <div className="action-buttons">
+            <button
+              type="button"
+              className="primary-action"
+              onClick={() => { setPhase('checking'); setRecheck(n => n + 1) }}
+            >
+              다시 확인하기
+            </button>
+            <Link to="/profile" className="secondary-action">
+              내 구독 확인
+            </Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // 결제 실패
-  if (!paymentResult.success) {
+  if (result?.kind !== 'paid') {
     return (
       <div className="payment-success-page">
         <div className="success-container">
           <div className="error-icon">❌</div>
           <h1>결제 처리에 실패했습니다</h1>
-          <p className="error-message">{paymentResult.error}</p>
+          <p className="error-message">{result?.kind === 'failed' ? result.error : '결제 처리 중 오류가 발생했습니다.'}</p>
           <div className="action-buttons">
             <Link to="/pricing" className="primary-action">
               다시 시도하기
@@ -112,6 +167,12 @@ export function PaymentSuccess() {
         </div>
       </div>
     )
+  }
+
+  const paymentResult = {
+    planType: result.planType,
+    planName: PLAN_INFO[result.planType].name,
+    price: PLAN_INFO[result.planType].price,
   }
 
   return (

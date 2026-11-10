@@ -6,6 +6,7 @@ import {
   createUnavailableSubscriptionRepository,
   type PaidPlan,
   type PaymentIntent,
+  type PaymentRecord,
   type SubscriptionRecord,
   type SubscriptionRepository,
 } from '../repositories/subscriptionRepository'
@@ -63,6 +64,8 @@ export const RECONCILE_MIN_AGE_MS = 2 * 60_000
 const RECONCILE_ALERT_AGE_MS = 60 * 60_000
 /** 이보다 오래 미해결이면 manual_review로 빼고 CRITICAL 1회 */
 export const RECONCILE_GIVE_UP_AGE_MS = 24 * 60 * 60_000
+/** 주문 상태 조회가 트리거하는 재조정의 최소 간격 (같은 결제를 토스에 너무 자주 묻지 않게) */
+export const ORDER_RECHECK_INTERVAL_MS = 30_000
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
@@ -230,43 +233,75 @@ export class SubscriptionService {
     const rows = await this.repo.listPendingPayments(new Date(now.getTime() - minAgeMs), 100)
     const res: ReconcileResult = { recorded: 0, discarded: 0, unresolved: 0, manualReview: 0 }
     for (const row of rows) {
-      const intent: PaymentIntent = { userId: row.userId, paymentKey: row.paymentKey, orderId: row.orderId, planType: row.planType, amount: row.amount }
-      const verdict = await this.verifyWithToss(intent)
-      try {
-        if (verdict === 'approved') {
-          await this.repo.recordConfirmedPayment({ ...intent, periodDays: SUBSCRIPTION_PERIOD_DAYS })
-          console.log(`[PAYMENT][RECONCILE] 승인 확인 → 구독 기록 (${ctxOf(intent)})`)
-          res.recorded++
-          continue
-        }
-        if (verdict === 'not-approved') {
-          await this.repo.deletePendingPayment(row.orderId)
-          console.log(`[PAYMENT][RECONCILE] 미승인 → pending 삭제 (orderId=${row.orderId})`)
-          res.discarded++
-          continue
-        }
-      } catch (err) {
-        console.error(`[PAYMENT][RECONCILE] 처리 실패 (${ctxOf(intent)}):`, errMessage(err))
-      }
-      res.unresolved++
-      const age = now.getTime() - row.createdAt.getTime()
-      try {
-        if (age > RECONCILE_GIVE_UP_AGE_MS) {
-          await this.repo.markPaymentForManualReview(row.orderId, now)
-          res.manualReview++
-          console.error(`[PAYMENT][CRITICAL] pending 결제 24h 미해결 → manual_review, 수동 확인 필요 (${ctxOf(intent)}, since ${row.createdAt.toISOString()})`)
-        } else {
-          // 순서를 뒤로 미뤄 다른 pending이 처리되게 한다 (limit에 막히지 않게)
-          await this.repo.touchPendingPayment(row.orderId, now)
-          if (age > RECONCILE_ALERT_AGE_MS) {
-            console.warn(`[PAYMENT][RECONCILE] pending 결제 1h+ 미해결 (${ctxOf(intent)}, since ${row.createdAt.toISOString()})`)
-          }
-        }
-      } catch (err) {
-        console.error(`[PAYMENT][RECONCILE] 보류 처리 실패 (${ctxOf(intent)}):`, errMessage(err))
+      const r = await this.reconcileRow(row, now)
+      if (r === 'recorded') res.recorded++
+      else if (r === 'discarded') res.discarded++
+      else {
+        res.unresolved++
+        if (r === 'manual_review') res.manualReview++
       }
     }
     return res
+  }
+
+  /** pending 행 하나 재조정 (주기 작업과 주문 상태 조회가 공유) */
+  private async reconcileRow(row: PaymentRecord, now: Date): Promise<'recorded' | 'discarded' | 'unresolved' | 'manual_review'> {
+    const intent: PaymentIntent = { userId: row.userId, paymentKey: row.paymentKey, orderId: row.orderId, planType: row.planType, amount: row.amount }
+    const verdict = await this.verifyWithToss(intent)
+    try {
+      if (verdict === 'approved') {
+        await this.repo.recordConfirmedPayment({ ...intent, periodDays: SUBSCRIPTION_PERIOD_DAYS })
+        console.log(`[PAYMENT][RECONCILE] 승인 확인 → 구독 기록 (${ctxOf(intent)})`)
+        return 'recorded'
+      }
+      if (verdict === 'not-approved') {
+        await this.repo.deletePendingPayment(row.orderId)
+        console.log(`[PAYMENT][RECONCILE] 미승인 → pending 삭제 (orderId=${row.orderId})`)
+        return 'discarded'
+      }
+    } catch (err) {
+      console.error(`[PAYMENT][RECONCILE] 처리 실패 (${ctxOf(intent)}):`, errMessage(err))
+    }
+    const age = now.getTime() - row.createdAt.getTime()
+    try {
+      if (age > RECONCILE_GIVE_UP_AGE_MS) {
+        await this.repo.markPaymentForManualReview(row.orderId, now)
+        console.error(`[PAYMENT][CRITICAL] pending 결제 24h 미해결 → manual_review, 수동 확인 필요 (${ctxOf(intent)}, since ${row.createdAt.toISOString()})`)
+        return 'manual_review'
+      }
+      // 순서를 뒤로 미뤄 다른 pending이 처리되게 한다 (limit에 막히지 않게)
+      await this.repo.touchPendingPayment(row.orderId, now)
+      if (age > RECONCILE_ALERT_AGE_MS) {
+        console.warn(`[PAYMENT][RECONCILE] pending 결제 1h+ 미해결 (${ctxOf(intent)}, since ${row.createdAt.toISOString()})`)
+      }
+    } catch (err) {
+      console.error(`[PAYMENT][RECONCILE] 보류 처리 실패 (${ctxOf(intent)}):`, errMessage(err))
+    }
+    return 'unresolved'
+  }
+
+  async findSubscription(id: string): Promise<SubscriptionRecord | null> {
+    return this.repo.findSubscriptionById(id)
+  }
+
+  /** 주문의 결제 기록 (없으면 null) */
+  async findPaymentForOrder(orderId: string): Promise<PaymentRecord | null> {
+    return this.repo.findPaymentByOrderId(orderId)
+  }
+
+  /**
+   * 주문 상태 조회 시 앞당겨 재조정 (주기 작업을 기다리지 않게).
+   * 진행 중인 confirm과 겹치지 않게 RECONCILE_MIN_AGE_MS보다 오래된 pending만,
+   * 토스 조회 폭주를 막기 위해 마지막 확인(updated_at)에서 ORDER_RECHECK_INTERVAL_MS가 지난 것만.
+   */
+  async reconcileOrderPayment(orderId: string): Promise<PaymentRecord | null> {
+    const row = await this.repo.findPaymentByOrderId(orderId)
+    if (!row || row.status !== 'pending') return row
+    const now = this.now().getTime()
+    if (now - row.createdAt.getTime() < RECONCILE_MIN_AGE_MS) return row
+    if (row.updatedAt.getTime() > row.createdAt.getTime() && now - row.updatedAt.getTime() < ORDER_RECHECK_INTERVAL_MS) return row
+    await this.reconcileRow(row, this.now())
+    return this.repo.findPaymentByOrderId(orderId)
   }
 
   /**

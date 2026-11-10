@@ -37,24 +37,7 @@ class TossPaymentsService {
       failUrl: request.failUrl,
     })
   }
-
-  generateOrderId(userId: string, planType: string): string {
-    // userId를 안전한 형태로 변환 (영문, 숫자만)
-    const safeUserId = userId.replace(/[^a-zA-Z0-9]/g, '').substring(0, 8) || 'user'
-    const timestamp = Date.now().toString().slice(-8) // 마지막 8자리만
-    const random = Math.random().toString(36).substring(2, 6) // 4자리 랜덤
-    
-    // orderId 생성 (영문, 숫자, -, _ 만 사용, 6-64자)
-    const orderId = `order-${safeUserId}-${planType}-${timestamp}-${random}`
-    
-    // 길이 검증 (6-64자)
-    if (orderId.length < 6 || orderId.length > 64) {
-      // 길이가 맞지 않으면 더 간단한 형태로 생성
-      return `order-${timestamp}-${random}`
-    }
-    
-    return orderId
-  }
+  // orderId는 클라이언트가 만들지 않는다: paymentApi.createOrder로 서버에서 발급받는다 (P3-5b)
 }
 
 export const tossPaymentsService = new TossPaymentsService()

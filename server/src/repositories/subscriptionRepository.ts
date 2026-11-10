@@ -55,6 +55,8 @@ export interface RecordPaymentInput extends PaymentIntent {
 export interface SubscriptionRepository {
   /** paymentKey 또는 orderId가 같은 결제 기록 (멱등성 확인용) */
   findPaymentsByKeyOrOrder(paymentKey: string, orderId: string): Promise<PaymentRecord[]>
+  /** orderId의 결제 기록 (주문 상태 조회용, order_id 유니크) */
+  findPaymentByOrderId(orderId: string): Promise<PaymentRecord | null>
   /** 토스 승인 요청 전 pending 행 기록. paymentKey/orderId가 이미 있으면 ConflictError */
   createPendingPayment(intent: PaymentIntent): Promise<void>
   /** pending 행 삭제 (승인 거절·미승인 확정·보상 취소 후). pending이 아니면 아무것도 안 함 */
@@ -166,6 +168,12 @@ export function createSupabaseSubscriptionRepository(supabase: SupabaseClient): 
       return [...seen.values()]
     },
 
+    async findPaymentByOrderId(orderId) {
+      const { data, error } = await supabase.from('payments').select('*').eq('order_id', orderId).maybeSingle()
+      if (error) fail(error, 'payments.findByOrderId')
+      return data ? paymentFromRow(data as PaymentRow) : null
+    },
+
     async createPendingPayment(intent) {
       const { error } = await supabase.from('payments').insert({
         user_id: intent.userId,
@@ -273,6 +281,7 @@ export function createUnavailableSubscriptionRepository(reason = 'Supabase가 �
   }
   return {
     findPaymentsByKeyOrOrder: unavailable,
+    findPaymentByOrderId: unavailable,
     createPendingPayment: unavailable,
     deletePendingPayment: unavailable,
     listPendingPayments: unavailable,

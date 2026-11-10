@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { tossPaymentsService } from '../services/tossPayments'
+import { paymentApi } from '../services/paymentApi'
 
 interface PlanInfo {
   name: string
@@ -79,18 +80,21 @@ export function Payment() {
     setIsProcessing(true)
 
     try {
-      // 주문 ID 생성
-      const orderId = tossPaymentsService.generateOrderId(user.id, planType)
-      console.log('Generated orderId:', orderId, 'Length:', orderId.length)
+      // 주문은 서버가 발급한다 (orderId·금액 = 서버 가격표, 30분 유효)
+      const created = await paymentApi.createOrder(planType)
+      if (!created.success || !created.order) {
+        throw new Error(created.error || '주문 생성에 실패했습니다. 다시 시도해주세요.')
+      }
+      const { orderId, amount } = created.order
 
-      // 결제 요청 데이터
+      // 결제 요청 데이터 (토스가 successUrl에 paymentKey·orderId·amount를 붙여 돌려준다)
       const paymentRequest = {
-        amount: plan.price,
+        amount,
         orderId,
         orderName: `BandSpace ${planType} Plan`,
         customerName: user.email?.split('@')[0] || 'user', // 이메일의 @ 앞부분 사용
         customerEmail: user.email || '',
-        successUrl: `${window.location.origin}/payment/success?orderId=${orderId}&planType=${planType}`,
+        successUrl: `${window.location.origin}/payment/success?planType=${planType}`,
         failUrl: `${window.location.origin}/payment/fail`
       }
 
