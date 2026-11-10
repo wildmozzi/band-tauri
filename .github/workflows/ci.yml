@@ -9,86 +9,195 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# 모든 잡·스텝에 timeout-minutes를 둔다(P3-0): 네트워크(apt, crates.io, npm)가 멈춰도 잡이 6시간 기본값까지
+# 매달리지 않고 빨리 실패하게 한다. 값은 정상 소요의 약 2~3배.
+
 jobs:
   rust:
+    # 결정적 테스트만 돈다: 단위 테스트(가상 시간 시뮬레이션 포함) + 벽시계 품질 임계가 없는 통합 테스트.
+    # 실패하면 재시도 없이 실패 = 회귀로 본다.
     name: Rust engine (Windows)
     runs-on: windows-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: client/src-tauri
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
         with:
           workspaces: client/src-tauri
       - name: Placeholder frontend dist (tauri::generate_context! 요구)
+        timeout-minutes: 1
         shell: bash
         run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
       - name: Clippy
+        timeout-minutes: 20
         run: cargo clippy --all-targets -- -D warnings
-      - name: Test
+      - name: Test (결정적)
+        timeout-minutes: 20
         run: cargo test
+
+  realtime:
+    # 벽시계 의존 통합 테스트(`#[ignore = "realtime: ..."]`)만 돈다. 가짜 장치를 실제 스레드·실제 시계로 돌려
+    # 은닉·끊김·지연 임계를 재므로 러너 스케줄링에 흔들린다. 각 테스트는 별도 프로세스에서 하나씩(동시 실행 없음)
+    # 돌고, 실패하면 최대 2번 더(총 3회) 재시도한다. 3회 모두 실패하면 잡이 실패한다(continue-on-error 아님).
+    # 재시도 끝에 통과한 테스트는 nextest 요약에 FLAKY로 남는다.
+    # 판별: 같은 시나리오의 결정적 짝(engine::worker::tests::callback_mix_sim_mirrors_realtime_* 등)이 `rust` 잡에
+    # 있다. 짝이 녹색인데 여기만 실패하면 실행 환경, 짝도 실패하면 엔진 회귀다.
+    name: Rust realtime (Windows, 3회 재시도)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: client/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
+        with:
+          workspaces: client/src-tauri
+          key: realtime
+      - uses: taiki-e/install-action@v2
+        timeout-minutes: 5
+        with:
+          tool: cargo-nextest
+      - name: Placeholder frontend dist (tauri::generate_context! 요구)
+        timeout-minutes: 1
+        shell: bash
+        run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
+      - name: Build tests
+        timeout-minutes: 20
+        run: cargo nextest run --no-run
+      - name: Realtime tests (직렬, 3회까지)
+        timeout-minutes: 20
+        run: cargo nextest run --test loopback --run-ignored only --retries 2 --test-threads 1 --no-fail-fast --success-output final --failure-output immediate-final
 
   relay:
     name: Relay (clippy + test)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: relay
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
         with:
           workspaces: relay
       - name: Clippy
+        timeout-minutes: 10
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
+        timeout-minutes: 10
         run: cargo test --locked -- --nocapture
       - name: Docker build (push 없음)
+        timeout-minutes: 10
         run: docker build -t band-relay:ci .
 
   client:
     name: Client (build + test)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 5
       - uses: actions/setup-node@v4
+        timeout-minutes: 5
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+        timeout-minutes: 8
       - run: npm run build
+        timeout-minutes: 8
         working-directory: client
       - run: npm test
+        timeout-minutes: 8
         working-directory: client
       - name: Lint
+        timeout-minutes: 5
         run: npm run lint
         working-directory: client
 
   server:
     name: Server (build + test)
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # 고정 버전 정적 ffmpeg(libopus 포함, GPL 빌드). 버전을 바꾸면 캐시 키도 바뀐다.
+      FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz
+      FFMPEG_DIR: ${{ github.workspace }}/.ffmpeg
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 5
       - uses: actions/setup-node@v4
+        timeout-minutes: 5
         with:
           node-version: 22
           cache: npm
-      - name: Install ffmpeg (stem Opus encoding tests)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      # ffmpeg 설치(stem Opus 인코딩 테스트). apt-get이 50분 멈춘 사례가 있어 순서를 바꿨다:
+      # 1) 캐시된 정적 바이너리 → 2) 정적 바이너리 다운로드(재시도·시간 제한) → 3) apt(재시도·시간 제한).
+      - name: Restore ffmpeg cache
+        id: ffmpeg-cache
+        timeout-minutes: 3
+        uses: actions/cache@v4
+        with:
+          path: .ffmpeg
+          key: ffmpeg-btbn-n7.1-linux64-gpl-v1
+      - name: Download static ffmpeg
+        id: ffmpeg-static
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          mkdir -p "$FFMPEG_DIR"
+          curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 -o /tmp/ffmpeg.tar.xz "$FFMPEG_URL"
+          tar -xJf /tmp/ffmpeg.tar.xz -C "$FFMPEG_DIR" --strip-components=2 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'
+          "$FFMPEG_DIR/ffmpeg" -hide_banner -encoders | grep -q libopus
+      - name: Install ffmpeg via apt (fallback)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true' && steps.ffmpeg-static.outcome != 'success'
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          rm -rf "$FFMPEG_DIR"
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60"
+          timeout 180 sudo apt-get $APT update
+          timeout 300 sudo apt-get $APT install -y --no-install-recommends ffmpeg
+      - name: Put ffmpeg on PATH
+        timeout-minutes: 1
+        run: |
+          if [ -x "$FFMPEG_DIR/ffmpeg" ]; then echo "$FFMPEG_DIR" >> "$GITHUB_PATH"; fi
+      - name: Check ffmpeg
+        timeout-minutes: 1
+        run: ffmpeg -hide_banner -version | head -1 && ffmpeg -hide_banner -encoders | grep libopus
       - run: npm ci
+        timeout-minutes: 8
       - run: npm run build
+        timeout-minutes: 5
         working-directory: server
       - name: Typecheck scripts
+        timeout-minutes: 5
         run: npx tsc -p scripts
         working-directory: server
       - run: npm test
+        timeout-minutes: 10
         working-directory: server
         env:
           STEM_TEST_REQUIRE_FFMPEG: "1"
