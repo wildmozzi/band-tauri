@@ -21,6 +21,7 @@
 //! 상대 지연 `transit - min_transit`의 95퍼센타일(최근 200개)을 p95라 할 때
 //! `target = clamp(ceil(p95 / F) + 1, min_frames, max_frames) × F` (F = 피어 패킷 프레임).
 //! 목표는 바로 올리되, 내리는 것은 더 낮은 후보가 2초 동안 유지될 때만 한다(목표 떨림 방지).
+//! 여기에 소비자(워커)가 요구하는 추가 깊이(`set_extra_target`, 피어 적응 여유 M4)를 더한 것이 최종 목표다.
 //!
 //! ## 보정 (데드밴드 + 히스테리시스)
 //! 오차 `e = depth_ewma - target`에 대해
@@ -154,6 +155,8 @@ pub struct JitterBuffer {
     // 목표(프레임 수) 및 하향 히스테리시스
     target_frames: f64,
     lower_for_samples: f64,
+    /// 소비자가 요구하는 추가 깊이(샘플, 48k). 목표 = 지터 목표 + 이 값(P1-13).
+    extra_target: f64,
 
     depth_ewma: Option<f64>,
     /// 이미 꺼냈지만 아직 재생되지 않은 샘플 수(48k). 콜백 구동 믹스에서 소스 링·리샘플러에 있는 양.
@@ -232,6 +235,7 @@ impl JitterBuffer {
             last_transit: None,
             target_frames: 0.0,
             lower_for_samples: 0.0,
+            extra_target: 0.0,
             depth_ewma: None,
             ahead: 0.0,
             correction: Correction::Idle,
@@ -329,9 +333,18 @@ impl JitterBuffer {
         (min_f, max_f)
     }
 
+    /// 목표 깊이(샘플) = 지터 목표(프레임 양자화) + 소비자 추가 깊이(`set_extra_target`). 합은 `max_ms`를 넘지 않는다.
     pub fn target_samples(&self) -> f64 {
         let (min_f, max_f) = self.frame_limits();
-        self.target_frames.clamp(min_f, max_f) * self.frame() as f64
+        let f = self.frame() as f64;
+        (self.target_frames.clamp(min_f, max_f) * f + self.extra_target).min(max_f * f)
+    }
+
+    /// 소비자(워커)가 요구하는 추가 깊이(샘플, 48k). 피어 적응 여유(M4)만큼 은닉 마감을 앞당기고 더 미리
+    /// 채우면 깊이도 그만큼 커야 마감에 실제 패킷이 와 있다(P1-13). 목표가 하나이므로 깊이 제어(보정)와 은닉
+    /// 판단이 같은 목표 지연을 본다. 값이 바뀌면 목표가 바로 바뀌고 깊이는 보정 램프로 따라간다.
+    pub fn set_extra_target(&mut self, samples: f64) {
+        self.extra_target = samples.max(0.0);
     }
 
     fn update_target(&mut self, elapsed_samples: f64) {
