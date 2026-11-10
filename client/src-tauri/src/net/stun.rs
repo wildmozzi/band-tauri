@@ -60,6 +60,50 @@ pub fn parse_response(buf: &[u8], txn_id: &[u8; 12]) -> Option<SocketAddr> {
     mapped
 }
 
+/// 여러 STUN 서버에 동시에 질의한다(리뷰 L7). 응답은 트랜잭션 ID와 출발지(서버 주소)를
+/// 모두 확인한다. 전체 대기는 `timeout` 한 번이다. 수신 스레드 시작 전에만 호출한다.
+pub fn query_many(socket: &UdpSocket, servers: &[String], timeout: Duration) -> Vec<(String, SocketAddr)> {
+    let mut pending: Vec<(String, SocketAddr, [u8; 12])> = Vec::new();
+    for s in servers {
+        if let Some(addr) = s.to_socket_addrs().ok().and_then(|mut it| it.find(|a| a.is_ipv4())) {
+            let txn: [u8; 12] = rand::random();
+            if socket.send_to(&build_request(&txn), addr).is_ok() {
+                pending.push((s.clone(), addr, txn));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    let deadline = Instant::now() + timeout;
+    let resend_at = Instant::now() + timeout / 2;
+    let mut resent = false;
+    let mut buf = [0u8; 512];
+    while !pending.is_empty() {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        if !resent && now >= resend_at {
+            resent = true;
+            for (_, addr, txn) in &pending {
+                let _ = socket.send_to(&build_request(txn), *addr);
+            }
+        }
+        let left = deadline.saturating_duration_since(now).min(Duration::from_millis(100));
+        if socket.set_read_timeout(Some(left.max(Duration::from_millis(1)))).is_err() {
+            break;
+        }
+        if let Ok((n, src)) = socket.recv_from(&mut buf) {
+            if let Some(i) = pending.iter().position(|(_, addr, txn)| *addr == src && parse_response(&buf[..n], txn).is_some()) {
+                let (name, _, txn) = pending.swap_remove(i);
+                if let Some(a) = parse_response(&buf[..n], &txn) {
+                    found.push((name, a));
+                }
+            }
+        }
+    }
+    found
+}
+
 /// 소켓으로 STUN 서버에 질의. 수신 스레드 시작 전에만 호출한다(소켓 타임아웃을 바꾼다).
 pub fn query(socket: &UdpSocket, server: &str, timeout: Duration) -> Option<SocketAddr> {
     let server_addr = server.to_socket_addrs().ok()?.find(|a| a.is_ipv4())?;
@@ -110,6 +154,43 @@ mod tests {
         assert_eq!(parse_response(&r, &[8u8; 12]), None);
         // 잘린 패킷
         assert_eq!(parse_response(&r[..25], &txn), None);
+    }
+
+    #[test]
+    fn query_many_parallel_with_source_check() {
+        // 로컬 가짜 STUN 서버 2개(하나는 응답 없음) + 다른 주소에서 보낸 위조 응답
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let srv = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let dead = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let forger = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let srv_addr = srv.local_addr().unwrap();
+        let client_addr = client.local_addr().unwrap();
+        let t = std::thread::spawn(move || {
+            let mut b = [0u8; 64];
+            let (n, from) = srv.recv_from(&mut b).unwrap();
+            assert_eq!(n, 20);
+            let mut txn = [0u8; 12];
+            txn.copy_from_slice(&b[8..20]);
+            let mut r = vec![0x01, 0x01, 0x00, 0x0c];
+            r.extend_from_slice(&MAGIC_COOKIE);
+            r.extend_from_slice(&txn);
+            let port = 40000u16 ^ 0x2112;
+            r.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0x00, 0x01]);
+            r.extend_from_slice(&port.to_be_bytes());
+            r.extend_from_slice(&[203u8 ^ 0x21, 0x12, 113 ^ 0xa4, 5 ^ 0x42]);
+            // 같은 내용을 다른 주소(forger)에서 먼저 보낸다 → 출발지 불일치로 무시되어야 함
+            forger.send_to(&r, from).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            srv.send_to(&r, from).unwrap();
+        });
+        let servers = vec![srv_addr.to_string(), dead.local_addr().unwrap().to_string()];
+        let t0 = Instant::now();
+        let got = query_many(&client, &servers, Duration::from_millis(600));
+        t.join().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1, "203.0.113.5:40000".parse().unwrap());
+        assert!(t0.elapsed() < Duration::from_millis(900), "직렬 대기 없음");
+        let _ = client_addr;
     }
 
     #[test]

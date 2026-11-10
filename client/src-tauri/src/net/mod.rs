@@ -15,11 +15,13 @@ use parking_lot::RwLock;
 
 use crate::engine::config::{MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
 use crate::engine::jitter::JitterSettings;
-use crypto::PacketCipher;
+use crate::engine::stats::PeerStateKind;
+use crypto::KeyPair;
 use packet::{Header, PacketType};
-use peer::{Candidate, CandidateKind, LocalDescriptor, Peer, TickAction};
+use peer::{Candidate, CandidateKind, HandshakeOutcome, LocalDescriptor, Peer, PeerSetup, TickAction};
 
-pub use peer::LocalDescriptor as Descriptor;
+/// 원격 피어 최대 수(본인 포함 6명).
+pub const MAX_PEERS: usize = 5;
 
 /// 네트워크 시작 옵션.
 #[derive(Debug, Clone)]
@@ -30,6 +32,8 @@ pub struct NetOptions {
     pub gather_lan: bool,
     /// 추가 후보(테스트용: 루프백 등).
     pub extra_candidates: Vec<Candidate>,
+    /// 원격 descriptor의 루프백 후보 허용(테스트 전용, 기본 false).
+    pub allow_loopback_candidates: bool,
 }
 
 impl Default for NetOptions {
@@ -39,6 +43,7 @@ impl Default for NetOptions {
             stun_servers: stun::DEFAULT_STUN_SERVERS.iter().map(|s| s.to_string()).collect(),
             gather_lan: true,
             extra_candidates: Vec::new(),
+            allow_loopback_candidates: false,
         }
     }
 }
@@ -47,13 +52,14 @@ pub struct NetShared {
     socket: UdpSocket,
     pub local_peer_id: String,
     pub ssrc: u32,
-    tx: PacketCipher,
+    keys: KeyPair,
     seq_audio: AtomicU32,
     seq_ctrl: [AtomicU32; 6],
     peers: RwLock<Vec<Arc<Peer>>>,
     epoch: Instant,
     stop: AtomicBool,
     jitter_settings: JitterSettings,
+    allow_loopback: bool,
 }
 
 pub struct Net {
@@ -94,51 +100,51 @@ impl Net {
                 candidates.push(Candidate { kind: CandidateKind::Lan, addr: SocketAddr::from((ip, port)).to_string() });
             }
         }
-        for server in opts.stun_servers.iter().take(2) {
-            match stun::query(&socket, server, Duration::from_millis(1500)) {
-                Some(a) => {
-                    let s = a.to_string();
-                    log::info!("STUN {server}: 공인 주소 {s}");
-                    if !candidates.iter().any(|c| c.addr == s) {
-                        candidates.push(Candidate { kind: CandidateKind::Public, addr: s });
-                    }
-                }
-                None => log::warn!("STUN {server} 응답 없음"),
+        // 두 서버에 동시에 질의(전체 1.5초 상한)
+        let servers: Vec<String> = opts.stun_servers.iter().take(2).cloned().collect();
+        for (server, a) in stun::query_many(&socket, &servers, Duration::from_millis(1500)) {
+            let s = a.to_string();
+            log::info!("STUN {server}: 공인 주소 {s}");
+            if !candidates.iter().any(|c| c.addr == s) {
+                candidates.push(Candidate { kind: CandidateKind::Public, addr: s });
             }
         }
         candidates.extend(opts.extra_candidates.iter().cloned());
+        candidates.truncate(peer::MAX_CANDIDATES);
         socket
             .set_read_timeout(Some(Duration::from_millis(20)))
             .map_err(|e| format!("소켓 설정 실패: {e}"))?;
 
-        let key = PacketCipher::random_key();
+        let keys = KeyPair::generate();
         let ssrc: u32 = rand::random();
+        let descriptor = LocalDescriptor { ssrc, key: LocalDescriptor::encode_key(&keys.public_bytes()), candidates };
         let shared = Arc::new(NetShared {
             socket,
             local_peer_id,
             ssrc,
-            tx: PacketCipher::new(&key),
+            keys,
             seq_audio: AtomicU32::new(rand::random()),
             seq_ctrl: Default::default(),
             peers: RwLock::new(Vec::new()),
             epoch: Instant::now(),
             stop: AtomicBool::new(false),
             jitter_settings,
+            allow_loopback: opts.allow_loopback_candidates,
         });
-        let descriptor = LocalDescriptor { ssrc, key: LocalDescriptor::encode_key(&key), candidates };
 
         let mut threads = Vec::new();
         let s = shared.clone();
         threads.push(
             std::thread::Builder::new()
                 .name("band-net-recv".into())
-                .spawn(move || recv_loop(&s))
+                .spawn(move || {
+                    let _prio = crate::engine::prio::promote_current_thread();
+                    recv_loop(&s)
+                })
                 .map_err(|e| format!("수신 스레드 생성 실패: {e}"))?,
         );
         let s = shared.clone();
-        let spawn_ctrl = std::thread::Builder::new()
-            .name("band-net-ctrl".into())
-            .spawn(move || control_loop(&s));
+        let spawn_ctrl = std::thread::Builder::new().name("band-net-ctrl".into()).spawn(move || control_loop(&s));
         match spawn_ctrl {
             Ok(h) => threads.push(h),
             Err(e) => {
@@ -161,21 +167,24 @@ impl Net {
         self.shared.socket.local_addr().map(|a| a.port()).unwrap_or(0)
     }
 
+    /// 피어 추가. 같은 peerId는 교체(재접속, gain/pan/mute 유지). 다른 peerId와 ssrc가 겹쳐도
+    /// 기존 피어를 지우지 않는다 — 수신 시 쌍별 키로 구분한다(리뷰 M7).
     pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor) -> Result<(), String> {
-        if desc.ssrc == self.shared.ssrc {
-            return Err("자기 자신의 descriptor입니다".into());
-        }
-        let peer = Arc::new(Peer::new(peer_id.clone(), desc, self.shared.jitter_settings, Instant::now())?);
+        let setup = PeerSetup {
+            keys: &self.shared.keys,
+            my_ssrc: self.shared.ssrc,
+            jitter: self.shared.jitter_settings,
+            allow_loopback: self.shared.allow_loopback,
+        };
+        let peer = Arc::new(Peer::new(peer_id.clone(), desc, &setup, Instant::now())?);
         let mut peers = self.shared.peers.write();
-        // 같은 peerId 또는 같은 ssrc는 교체(재접속)
-        if let Some(i) = peers.iter().position(|p| p.id == peer_id || p.ssrc == desc.ssrc) {
+        if let Some(i) = peers.iter().position(|p| p.id == peer_id) {
             let old = peers.remove(i);
-            // 기존 gain/mute 유지
             peer.mix.gain.store(old.mix.gain.load());
             peer.mix.muted.store(old.mix.muted.load(Ordering::Relaxed), Ordering::Relaxed);
             peer.mix.pan.store(old.mix.pan.load());
         }
-        if peers.len() >= 5 {
+        if peers.len() >= MAX_PEERS {
             return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
         }
         peers.push(peer);
@@ -232,10 +241,10 @@ impl NetShared {
         self.seq_ctrl[(t as usize - 1).min(5)].fetch_add(1, Ordering::Relaxed)
     }
 
-    fn send_ctrl(&self, t: PacketType, timestamp: u32, plaintext: &[u8], to: SocketAddr) {
+    fn send_ctrl(&self, p: &Peer, t: PacketType, timestamp: u32, plaintext: &[u8], to: SocketAddr) {
         let h = Header { ptype: t, ssrc: self.ssrc, seq: self.next_ctrl_seq(t), timestamp, flags: 0, frame_code: 0 };
         let mut buf = [0u8; MAX_PACKET_BYTES];
-        if let Some(n) = self.tx.seal(&h, plaintext, &mut buf) {
+        if let Some(n) = p.tx.seal(&h, plaintext, &mut buf) {
             let _ = self.socket.send_to(&buf[..n], to);
         }
     }
@@ -243,11 +252,12 @@ impl NetShared {
     fn send_bye(&self, p: &Peer) {
         let path = p.conn.lock().path;
         if let Some((addr, _)) = path {
-            self.send_ctrl(PacketType::Bye, self.now_us32(), &[], addr);
+            self.send_ctrl(p, PacketType::Bye, self.now_us32(), &[], addr);
         }
     }
 
-    /// 오디오 페이로드를 한 번 암호화해 연결된 모든 피어에게 보낸다.
+    /// 오디오 페이로드를 연결된 피어마다 그 피어의 송신 키로 암호화해 보낸다.
+    /// seq는 모든 피어에 같은 값을 쓴다(키가 달라 nonce 재사용이 아니다).
     /// `buf`는 호출자가 사전 할당한 MAX_PACKET_BYTES 버퍼.
     pub fn send_audio(&self, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8]) {
         if payload.len() > MAX_PAYLOAD_BYTES {
@@ -265,16 +275,15 @@ impl NetShared {
             flags,
             frame_code,
         };
-        let Some(n) = self.tx.seal(&h, payload, buf) else {
-            return;
-        };
         for p in peers.iter() {
             let target = {
                 let c = p.conn.lock();
                 if c.can_send_audio() { c.path.map(|(a, _)| a) } else { None }
             };
             if let Some(addr) = target {
-                let _ = self.socket.send_to(&buf[..n], addr);
+                if let Some(n) = p.tx.seal(&h, payload, buf) {
+                    let _ = self.socket.send_to(&buf[..n], addr);
+                }
             }
         }
     }
@@ -285,30 +294,44 @@ impl NetShared {
         }
     }
 
+    /// 헤더의 ssrc를 쓰는 피어들 중 복호화에 성공한 피어를 찾는다(실패 시 버퍼 불변).
+    fn open_from_peers(&self, h: &Header, buf: &mut [u8]) -> Option<(Arc<Peer>, std::ops::Range<usize>)> {
+        let peers = self.peers.read();
+        for p in peers.iter().filter(|p| p.ssrc == h.ssrc) {
+            if let Some(r) = p.rx.open(h, buf) {
+                return Some((p.clone(), r));
+            }
+        }
+        None
+    }
+
     fn handle_packet(&self, buf: &mut [u8], from: SocketAddr) {
         let Some(h) = Header::parse(buf) else {
             return;
         };
-        let peer = {
-            let peers = self.peers.read();
-            match peers.iter().find(|p| p.ssrc == h.ssrc) {
-                Some(p) => p.clone(),
-                None => return,
-            }
-        };
-        let Some(range) = peer.rx.open(&h, buf) else {
+        let Some((peer, range)) = self.open_from_peers(&h, buf) else {
             return;
         };
         let now = Instant::now();
         let plain = &buf[range];
+        if h.ptype != PacketType::Audio && !peer.conn.lock().accept_ctrl_seq(h.ptype, h.seq) {
+            return; // 재전송된 제어 패킷(리뷰 L5)
+        }
         match h.ptype {
             PacketType::Hello | PacketType::HelloAck => {
                 if plain != peer.id.as_bytes() {
                     return;
                 }
-                peer.conn.lock().on_handshake(from, &peer.candidates, now);
-                if h.ptype == PacketType::Hello {
-                    self.send_ctrl(PacketType::HelloAck, self.now_us32(), self.local_peer_id.as_bytes(), from);
+                let ack = {
+                    let mut c = peer.conn.lock();
+                    if c.on_handshake(from, &peer.candidates, now) == HandshakeOutcome::Ignored {
+                        log::debug!("{}: 경로가 아닌 주소 {from}의 Hello(리바인딩 대기)", peer.id);
+                    }
+                    h.ptype == PacketType::Hello && c.ack_allowed(now)
+                };
+                // 무시된 Hello에도 응답해 상대가 우리 경로를 알 수 있게 한다(간격 제한).
+                if ack {
+                    self.send_ctrl(&peer, PacketType::HelloAck, self.now_us32(), self.local_peer_id.as_bytes(), from);
                 }
             }
             other => {
@@ -324,14 +347,14 @@ impl NetShared {
                             c.on_rtt_sample(rtt_us as f32 / 1000.0);
                         }
                         PacketType::Bye => {
-                            c.state = crate::engine::stats::PeerStateKind::Failed;
+                            c.state = PeerStateKind::Failed;
                             c.path = None;
                         }
                         _ => {}
                     }
                 }
                 match other {
-                    PacketType::Ping => self.send_ctrl(PacketType::Pong, h.timestamp, &[], from),
+                    PacketType::Ping => self.send_ctrl(&peer, PacketType::Pong, h.timestamp, &[], from),
                     PacketType::Audio => {
                         let now_us = now.duration_since(self.epoch).as_micros() as u64;
                         peer.jitter.lock().insert(&h, plain, now_us);
@@ -376,13 +399,13 @@ fn control_loop(s: &NetShared) {
             match action {
                 TickAction::Hello => {
                     for addr in p.hello_targets() {
-                        s.send_ctrl(PacketType::Hello, s.now_us32(), s.local_peer_id.as_bytes(), addr);
+                        s.send_ctrl(p, PacketType::Hello, s.now_us32(), s.local_peer_id.as_bytes(), addr);
                     }
                 }
                 TickAction::Ping => {
                     let path = p.conn.lock().path;
                     if let Some((addr, _)) = path {
-                        s.send_ctrl(PacketType::Ping, s.now_us32(), &[], addr);
+                        s.send_ctrl(p, PacketType::Ping, s.now_us32(), &[], addr);
                     }
                 }
                 TickAction::None => {}

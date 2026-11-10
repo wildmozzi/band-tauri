@@ -33,9 +33,17 @@ chacha20poly1305 = "0.10"
 rand = "0.8"
 base64 = "0.22"
 if-addrs = "0.13"
+# 피어 쌍별 키 합의 (X25519 ECDH + HKDF-SHA256)
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"
+sha2 = "0.10"
 
 # Utilities
 parking_lot = "0.12"
+
+[target.'cfg(windows)'.dependencies]
+# 워커/수신 스레드 MMCSS("Pro Audio") 등록
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [features]
 default = ["custom-protocol"]
