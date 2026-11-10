@@ -23,6 +23,7 @@ import { useViewerAudio, type PeerNetworkStats, type RtcStatus } from './room/us
 import { useWebAudioMixer, type MixSettings } from './room/useWebAudioMixer'
 import { useRecording, type Recording, type RecordingSource } from './room/useRecording'
 import { mergeSelfPerformer, withPeer, type PeerInstrument } from './room/roomState'
+import { forgetRoomPassword, joinErrorFromSignal, rememberRoomPassword, type JoinError } from './room/roomAccess'
 import { useNativeSession } from '../native/useNativeSession'
 import { MixBroadcaster, MixSource } from '../native/mixBridge'
 import { computeViewers, selectBroadcaster } from '../native/sessionLogic'
@@ -36,6 +37,7 @@ import {
   type PeerStats,
 } from '../native/engineApi'
 
+export type { JoinError }
 export type { ChatMessage, InstrumentChangeRequest, MyRequestStatus, PerformRequest, PeerNetworkStats, RtcStatus, MixSettings, Recording, SignalStatus, PeerInstrument }
 
 interface ParticipantPayload {
@@ -57,8 +59,15 @@ type RoomContextType = {
   signalStatus: SignalStatus
   clientId: string | null
   peers: string[]
-  joinRoom: (roomId: string, isHost?: boolean) => void
+  /** password: 비밀번호 방이면 입력값(세션 동안 기억) */
+  joinRoom: (roomId: string, isHost?: boolean, password?: string | null) => void
   joinFeedback: string
+  /** 비밀번호 관련 입장 실패 (없으면 null) */
+  joinError: JoinError | null
+  /** 서버가 입장을 확인함(room-state 수신). 비밀번호 화면 등에서는 false */
+  roomJoined: boolean
+  /** 비밀번호를 입력해 다시 입장 시도 */
+  submitRoomPassword: (password: string) => void
   currentRoomId: string | null
   leaveRoom: () => void
   /** 서버가 판정한 내 방장 여부 (구 서버면 joinRoom 인자) */
@@ -115,12 +124,21 @@ type RoomContextType = {
 
   // 연주 참여 요청
   pendingRequests: PerformRequest[]
+  /** 방장: 새로 들어온 요청 알림 */
+  requestNotice: PerformRequest | null
+  dismissRequestNotice: () => void
   approveRequest: (oderId: string) => void
   rejectRequest: (oderId: string, reason?: string) => void
   myRequestStatus: MyRequestStatus
   myRequestInstrument: string | null
+  /** 거절 사유 */
+  myRejectReason: string | null
+  /** 요청 당시 방장 접속 여부 (모르면 null) */
+  hostOnline: boolean | null
   requestPerform: (instrument: string) => void
   cancelRequest: () => void
+  /** 거절 확인 후 기본 상태로 */
+  dismissRejection: () => void
 
   // 악기 변경 요청
   pendingInstrumentChanges: InstrumentChangeRequest[]
@@ -164,6 +182,16 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   // --- 방 상태 ---
   const [peers, setPeers] = useState<string[]>([])
   const [joinFeedback, setJoinFeedback] = useState('')
+  const [joinError, setJoinError] = useState<JoinError | null>(null)
+  const [roomJoined, setRoomJoined] = useState(false)
+  /** password-busy 자동 재시도 */
+  const busyRetryRef = useRef<{ count: number; timer: ReturnType<typeof setTimeout> | null }>({ count: 0, timer: null })
+  const clearBusyRetry = () => {
+    if (busyRetryRef.current.timer) clearTimeout(busyRetryRef.current.timer)
+    busyRetryRef.current = { count: 0, timer: null }
+  }
+  /** 비밀번호 방 입장용 (재연결 시 다시 보낸다) */
+  const roomPasswordRef = useRef<string | null>(null)
   const [currentRoomId, setCurrentRoomId] = useState<string | null>(null)
   /** 원격 연주자만 (나는 연주 세션 상태에서 합쳐서 노출) */
   const [remotePerformers, setRemotePerformers] = useState<Record<string, PeerInstrument>>({})
@@ -195,6 +223,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       nickname: nicknameRef.current,
       isHost: myIsHostRef.current,
       userId: user?.id ?? null,
+      ...(roomPasswordRef.current ? { password: roomPasswordRef.current } : {}),
       ...(isRejoin ? { isRejoin: true } : {}),
     }
   }, [user?.id])
@@ -231,9 +260,15 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   // --- 기능 훅 ---
   const chat = useChat({ send, canSend: isOpen, getSelfId, nickname })
 
+  // 승인되면 앱은 바로 엔진을 시작한다 (startPerforming은 아래에서 정의되므로 ref로)
+  const startPerformingRef = useRef<(instrument: string) => Promise<boolean>>(async () => false)
   const requests = usePerformRequests({
     send,
     canSend: isOpen,
+    onMyRequestApproved: (instrument) => {
+      if (!instrument || !isNativeApp() || session.getState().phase !== 'idle') return
+      void startPerformingRef.current(instrument)
+    },
     onMyInstrumentChanged: (instrument) => session.updateInstrument(instrument),
     onPeerInstrumentChanged: (peerId, instrument) => {
       setRemotePerformers((prev) => (prev[peerId] ? { ...prev, [peerId]: { ...prev[peerId], instrument } } : prev))
@@ -319,6 +354,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     }
     return ok
   }, [clientIdRef, session, viewer, requests])
+  startPerformingRef.current = startPerforming
 
   const stopPerforming = useCallback(async () => {
     broadcasterRef.current!.stop()
@@ -381,6 +417,31 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     if (chat.handleChatSignal(p)) return
     if (requests.handleRequestSignal(p)) return
 
+    // 비밀번호 방 입장 실패
+    const je = joinErrorFromSignal(p)
+    if (je) {
+      const roomId = currentRoomIdRef.current
+      if (je.roomId && je.roomId !== roomId) return
+      if (roomId && je.code === 'password-invalid') forgetRoomPassword(roomId)
+      if (je.code === 'password-required' || je.code === 'password-invalid') roomPasswordRef.current = null
+      setJoinError(je)
+      setJoinFeedback('')
+      setRoomJoined(false)
+      // 서버 혼잡/방 준비 중: 같은 비밀번호로 몇 번 자동 재시도
+      if (je.code === 'password-busy' && roomId && busyRetryRef.current.count < 5) {
+        const retry = busyRetryRef.current
+        retry.count++
+        if (retry.timer) clearTimeout(retry.timer)
+        retry.timer = setTimeout(() => {
+          retry.timer = null
+          if (currentRoomIdRef.current !== roomId) return
+          const join = buildJoinMessageRef.current(false)
+          if (join && isOpen()) send(join)
+        }, Math.min(Math.max(je.retryAfterMs ?? 1000, 500), 10_000))
+      }
+      return
+    }
+
     switch (p.type) {
       case 'room-state': {
         const peerIds = Array.isArray(p.peerIds) ? (p.peerIds as unknown[]).filter((x): x is string => typeof x === 'string' && x !== self) : []
@@ -390,6 +451,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
           setIsRoomHost(p.isHost)
         }
         setPeers(peerIds)
+        setJoinError(null)
+        setRoomJoined(true)
+        clearBusyRetry()
+        if (currentRoomIdRef.current && roomPasswordRef.current) rememberRoomPassword(currentRoomIdRef.current, roomPasswordRef.current)
         setJoinFeedback(`룸 입장 완료 · 동시 연결 ${peerIds.length + 1}명`)
         const map: Record<string, PeerInstrument> = {}
         for (const part of participants) {
@@ -472,12 +537,16 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   }
 
   // --- 방 입장/퇴장 ---
-  const joinRoom = useCallback((roomId: string, isHost?: boolean) => {
+  const joinRoom = useCallback((roomId: string, isHost?: boolean, password?: string | null) => {
     if (!isOpen()) {
       setJoinFeedback('시그널링 서버에 연결 중입니다. 잠시 후 다시 시도해주세요.')
       return
     }
     currentRoomIdRef.current = roomId
+    roomPasswordRef.current = password || null
+    setJoinError(null)
+    setRoomJoined(false)
+    clearBusyRetry()
     myIsHostRef.current = isHost === true
     setIsRoomHost(isHost === true)
     setCurrentRoomId(roomId)
@@ -486,8 +555,22 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     setJoinFeedback('룸 입장 시도 중...')
   }, [isOpen, send])
 
+  const submitRoomPassword = useCallback((password: string) => {
+    const roomId = currentRoomIdRef.current
+    if (!roomId || !password) return
+    roomPasswordRef.current = password
+    setJoinError(null)
+    const join = buildJoinMessageRef.current(false)
+    if (join && isOpen()) send(join)
+    setJoinFeedback('룸 입장 시도 중...')
+  }, [isOpen, send])
+
   const leaveRoom = useCallback(() => {
     send({ type: 'leave' })
+    roomPasswordRef.current = null
+    setJoinError(null)
+    setRoomJoined(false)
+    clearBusyRetry()
     // 방 id를 먼저 비워야 시작 중인 엔진이 완료 시 "퇴장함"을 보고 스스로 내려간다 (H2)
     currentRoomIdRef.current = null
     broadcasterRef.current!.stop()
@@ -670,6 +753,9 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     peers,
     joinRoom,
     joinFeedback,
+    joinError,
+    roomJoined,
+    submitRoomPassword,
     currentRoomId,
     leaveRoom,
     isRoomHost,
@@ -716,12 +802,17 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     nickname,
 
     pendingRequests: requests.pendingRequests,
+    requestNotice: requests.requestNotice,
+    dismissRequestNotice: requests.dismissRequestNotice,
     approveRequest: requests.approveRequest,
     rejectRequest: requests.rejectRequest,
     myRequestStatus: requests.myRequestStatus,
     myRequestInstrument: requests.myRequestInstrument,
+    myRejectReason: requests.myRejectReason,
+    hostOnline: requests.hostOnline,
     requestPerform: requests.requestPerform,
     cancelRequest: requests.cancelRequest,
+    dismissRejection: requests.dismissRejection,
 
     pendingInstrumentChanges: requests.pendingInstrumentChanges,
     approveInstrumentChange: requests.approveInstrumentChange,

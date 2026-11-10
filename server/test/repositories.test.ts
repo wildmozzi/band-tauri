@@ -57,14 +57,50 @@ describe('toRepositoryError', () => {
 })
 
 describe('roomRepository', () => {
-  it('findMeta maps host_id/free_join (free_join defaults to true)', async () => {
-    const m = mockSupabase(() => ok({ host_id: 'h', free_join: null }))
-    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: true })
-    assert.deepEqual(m.log[0], [['from', ['rooms']], ['select', ['host_id, free_join']], ['eq', ['id', 'r1']], ['maybeSingle', []]])
+  it('findMeta maps host_id/free_join/is_private + password hash (free_join defaults to true)', async () => {
+    const m = mockSupabase((calls) => calls[0][1][0] === 'room_secrets' ? ok({ password_hash: 'scrypt$h' }) : ok({ host_id: 'h', free_join: null, is_private: true, has_password: true }))
+    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: true, isPrivate: true, hasPassword: true, passwordHash: 'scrypt$h' })
+    assert.deepEqual(m.log[0], [['from', ['rooms']], ['select', ['host_id, free_join, is_private, has_password']], ['eq', ['id', 'r1']], ['maybeSingle', []]])
+    assert.deepEqual(m.log[1], [['from', ['room_secrets']], ['select', ['password_hash']], ['eq', ['room_id', 'r1']], ['maybeSingle', []]])
   })
-  it('findMeta: missing row → null, DB error → throws', async () => {
-    assert.equal(await createRoomRepository(mockSupabase(() => ok(null)).client).findMeta('r1'), null)
-    await assert.rejects(createRoomRepository(mockSupabase(() => err('boom')).client).findMeta('r1'), RepositoryError)
+  it('findMeta before migration 008: falls back without is_private, treats missing room_secrets as no password', async () => {
+    const m = mockSupabase((calls) => {
+      if (calls[0][1][0] === 'room_secrets') return err('no table', 'PGRST205')
+      return calls[1][1][0] === 'host_id, free_join, is_private, has_password' ? err('no column', '42703') : ok({ host_id: 'h', free_join: false })
+    })
+    assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: false, isPrivate: false, hasPassword: false, passwordHash: null })
+  })
+  it('setPasswordHash calls the transactional set_room_password RPC (review L2)', async () => {
+    const m = mockSupabase(() => ok(null))
+    const repo = createRoomRepository(m.client)
+    await repo.setPasswordHash('r1', 'scrypt$h')
+    await repo.setPasswordHash('r1', null)
+    assert.deepEqual(m.log[0], [['rpc', ['set_room_password', { p_room_id: 'r1', p_hash: 'scrypt$h' }]]])
+    assert.deepEqual(m.log[1], [['rpc', ['set_room_password', { p_room_id: 'r1', p_hash: null }]]])
+    await assert.rejects(createRoomRepository(mockSupabase(() => err('nope', 'PGRST202')).client).setPasswordHash('r1', null), StoreUnavailableError)
+  })
+  const NEW_ROOM = {
+    hostId: 'h', title: 't', description: null, genre: null, maxParticipants: 8, tags: [], freeJoin: true, isPrivate: false, instrumentSlots: [],
+  }
+  it('create inserts is_private/has_password (has_password=true for password rooms, review L1)', async () => {
+    const m = mockSupabase(() => ok({ id: 'r1', host_id: 'h' }))
+    await createRoomRepository(m.client).create(NEW_ROOM, { hasPassword: true })
+    const insert = m.log[0].find(c => c[0] === 'insert')![1][0] as Record<string, unknown>
+    assert.equal(insert.has_password, true)
+    assert.equal(insert.is_private, false)
+    assert.equal(insert.host_id, 'h')
+  })
+  it('create before migration 008: public rooms fall back to the old columns, private/password rooms → StoreUnavailable (review M3)', async () => {
+    const respond = (calls: [string, unknown[]][]) => {
+      const row = calls.find(c => c[0] === 'insert')![1][0] as Record<string, unknown>
+      return 'is_private' in row ? err('no column', 'PGRST204') : ok({ id: 'r1', host_id: 'h' })
+    }
+    const m = mockSupabase(respond)
+    assert.equal((await createRoomRepository(m.client).create(NEW_ROOM)).id, 'r1')
+    assert.equal(m.log.length, 2)
+    assert.ok(!('has_password' in (m.log[1].find(c => c[0] === 'insert')![1][0] as object)))
+    await assert.rejects(createRoomRepository(mockSupabase(respond).client).create({ ...NEW_ROOM, isPrivate: true }), StoreUnavailableError)
+    await assert.rejects(createRoomRepository(mockSupabase(respond).client).create(NEW_ROOM, { hasPassword: true }), StoreUnavailableError)
   })
   it('updateParticipantCount / resetAllParticipantCounts query shape', async () => {
     const m = mockSupabase(() => ok(null))

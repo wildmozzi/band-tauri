@@ -4,6 +4,9 @@ import { useAuth } from '../contexts/useAuth'
 import { useRoom } from '../contexts/RoomContext'
 import { supabase } from '../lib/supabaseClient'
 import { MAX_PERFORMERS, type PeerState, type PeerStats } from '../native/engineApi'
+import { fetchRoomById, setRoomPassword } from '../services/roomApi'
+import { describeJoinError, inviteLink, recallRoomPassword, validateRoomPasswordInput } from '../contexts/room/roomAccess'
+import { REJECT_REASON_PRESETS } from '../contexts/room/performRequestState'
 import './RoomDetail.css'
 
 // 악기 슬롯 타입
@@ -24,6 +27,9 @@ interface Room {
   tags: string[]
   free_join: boolean
   instrument_slots: InstrumentSlot[]
+  /** 마이그레이션 008 전이면 undefined */
+  is_private?: boolean
+  has_password?: boolean
 }
 
 // 악기 정보 (아이콘, 이름)
@@ -53,6 +59,7 @@ const PEER_STATE_INFO: Record<PeerState, { label: string; className: string }> =
 
 const FAILED_PEER_HINT = '직접 연결 불가 — 네트워크(대칭형 NAT) 문제'
 const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || undefined
+const PUBLIC_WEB_URL: string | undefined = import.meta.env.VITE_PUBLIC_WEB_URL || undefined
 
 function formatMs(v: number | null | undefined, digits = 0): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return '--'
@@ -100,6 +107,9 @@ export function RoomDetail() {
     clientId,
     peers,
     joinRoom,
+    joinError,
+    roomJoined,
+    submitRoomPassword,
     rtcStatus,
     rtcError,
     remoteAudioMap,
@@ -147,12 +157,17 @@ export function RoomDetail() {
     peerNetworkStats,
     // 연주 참여 요청
     pendingRequests,
+    requestNotice,
+    dismissRequestNotice,
     approveRequest,
     rejectRequest,
     myRequestStatus,
     myRequestInstrument,
+    myRejectReason,
+    hostOnline,
     requestPerform,
     cancelRequest,
+    dismissRejection,
     // 악기 변경 요청
     pendingInstrumentChanges,
     approveInstrumentChange,
@@ -194,6 +209,13 @@ export function RoomDetail() {
   const [showRecordings, setShowRecordings] = useState(false)
   const [showInstrumentChangeModal, setShowInstrumentChangeModal] = useState(false)
   const [hostNickname, setHostNickname] = useState<string | null>(null)
+  // 비밀번호 입장
+  const [passwordInput, setPasswordInput] = useState('')
+  // 초대 링크/방 코드 복사 결과
+  const [copyNotice, setCopyNotice] = useState<string | null>(null)
+  // 방장: 거절 사유 입력 중인 요청
+  const [rejectingId, setRejectingId] = useState<string | null>(null)
+  const [rejectReason, setRejectReason] = useState('')
   const [chatInput, setChatInput] = useState('')
   const chatContainerRef = useRef<HTMLDivElement | null>(null)
   const hasJoinedRef = useRef(false)
@@ -255,6 +277,10 @@ export function RoomDetail() {
   const [editInstrumentSlots, setEditInstrumentSlots] = useState<InstrumentSlot[]>([])
   const [editTags, setEditTags] = useState<string[]>([])
   const [editCustomTag, setEditCustomTag] = useState('')
+  const [editIsPrivate, setEditIsPrivate] = useState(false)
+  /** 비밀번호: 그대로 / 새로 설정 / 해제 */
+  const [editPasswordMode, setEditPasswordMode] = useState<'keep' | 'set' | 'clear'>('keep')
+  const [editPassword, setEditPassword] = useState('')
   const [settingsSaving, setSettingsSaving] = useState(false)
 
   // 방장 여부 (UI 표시용. 실제 권한은 서버가 auth 토큰과 DB로 판정한다)
@@ -277,13 +303,9 @@ export function RoomDetail() {
       }
 
       try {
-        const { data, error } = await supabase
-          .from('rooms')
-          .select('*')
-          .eq('id', roomId)
-          .single()
-
-        if (error) throw error
+        // 비공개 방도 id(초대 링크/방 코드)로는 조회된다
+        const data = await fetchRoomById(roomId) as unknown as Room | null
+        if (!data) throw new Error('room not found')
         // 기본 악기 슬롯 설정
         const defaultSlots: InstrumentSlot[] = [
           { instrument: 'vocal', count: 1 },
@@ -364,7 +386,8 @@ export function RoomDetail() {
       hasJoinedRef.current = true
       // isHost를 여기서 다시 계산 (최신 user 상태 반영)
       const hostFlag = user && room.host_id === user.id
-      joinRoom(roomId, hostFlag || false)
+      // 비밀번호 방: 이번 세션에서 입력했던 비밀번호로 먼저 시도 (틀리면 서버가 다시 묻는다)
+      joinRoom(roomId, hostFlag || false, hostFlag ? null : recallRoomPassword(roomId))
       console.log('[ROOM] Joining room with isHost:', hostFlag, 'user:', user?.id, 'host_id:', room.host_id)
       // 참여자 수 동기화는 room-state 수신 후 peers 변경 시 자동으로 처리됨
     }
@@ -373,6 +396,8 @@ export function RoomDetail() {
   // 함수들을 ref로 저장 (의존성 문제 방지)
   const leaveRoomRef = useRef(leaveRoom)
   const enterMiniPlayerModeRef = useRef(enterMiniPlayerMode)
+  const roomJoinedRef = useRef(roomJoined)
+  roomJoinedRef.current = roomJoined
   useEffect(() => {
     leaveRoomRef.current = leaveRoom
     enterMiniPlayerModeRef.current = enterMiniPlayerMode
@@ -384,7 +409,12 @@ export function RoomDetail() {
 
     // cleanup: 컴포넌트 언마운트 시
     return () => {
-      if (hasJoinedRef.current) {
+      if (hasJoinedRef.current && !roomJoinedRef.current) {
+        // 서버가 아직 입장시키지 않음(비밀번호 화면 등): 미니 플레이어 대신 퇴장
+        console.log('[CLEANUP] Page leaving before join completed, leaving:', roomId.slice(0, 8))
+        hasJoinedRef.current = false
+        leaveRoomRef.current()
+      } else if (hasJoinedRef.current) {
         // hasJoinedRef는 유지 (미니 플레이어에서 돌아올 때 재사용)
         console.log('[CLEANUP] Page leaving, entering mini player mode:', roomId.slice(0, 8))
         // leaveRoom 대신 미니 플레이어 모드로 전환
@@ -453,6 +483,34 @@ export function RoomDetail() {
     }
   }
 
+  // 비밀번호 입력 후 입장
+  const handleSubmitPassword = (e: React.FormEvent) => {
+    e.preventDefault()
+    const pw = passwordInput
+    if (!pw) return
+    submitRoomPassword(pw)
+    setPasswordInput('')
+  }
+
+  // 초대 링크 / 방 코드 복사
+  const copyText = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopyNotice(`${label}를 복사했습니다`)
+    } catch {
+      window.prompt(`${label}를 복사하세요`, text)
+      setCopyNotice(null)
+    }
+    window.setTimeout(() => setCopyNotice(null), 2000)
+  }
+
+  // 방장: 요청 거절 (사유 선택)
+  const confirmReject = (targetId: string, reason: string) => {
+    rejectRequest(targetId, reason)
+    setRejectingId(null)
+    setRejectReason('')
+  }
+
   // 퇴장
   const handleLeave = () => {
     leaveRoom()
@@ -519,6 +577,9 @@ export function RoomDetail() {
     setEditInstrumentSlots([...room.instrument_slots])
     setEditTags([...(room.tags || [])])
     setEditCustomTag('')
+    setEditIsPrivate(room.is_private === true)
+    setEditPasswordMode('keep')
+    setEditPassword('')
     setShowRoomSettings(true)
   }
 
@@ -565,6 +626,13 @@ export function RoomDetail() {
       alert('방 제목을 입력하세요.')
       return
     }
+    if (editPasswordMode === 'set') {
+      const problem = validateRoomPasswordInput(editPassword)
+      if (problem) {
+        alert(problem)
+        return
+      }
+    }
 
     setSettingsSaving(true)
 
@@ -580,12 +648,20 @@ export function RoomDetail() {
           max_participants: editMaxParticipants,
           free_join: editFreeJoin,
           instrument_slots: validSlots,
-          tags: editTags
+          tags: editTags,
+          // 마이그레이션 008 전(컬럼 없음)에는 보내지 않는다
+          ...(room?.is_private !== undefined ? { is_private: editIsPrivate } : {}),
         })
         .eq('id', roomId)
         .eq('host_id', user!.id)
 
       if (error) throw error
+
+      // 비밀번호는 서버가 해시해 저장한다
+      let hasPassword = room?.has_password
+      if (editPasswordMode !== 'keep') {
+        hasPassword = await setRoomPassword(roomId, editPasswordMode === 'set' ? editPassword : null)
+      }
 
       // 로컬 상태 업데이트
       setRoom(prev => prev ? {
@@ -596,13 +672,15 @@ export function RoomDetail() {
         max_participants: editMaxParticipants,
         free_join: editFreeJoin,
         instrument_slots: validSlots,
-        tags: editTags
+        tags: editTags,
+        ...(prev.is_private !== undefined ? { is_private: editIsPrivate } : {}),
+        has_password: hasPassword,
       } : null)
 
       setShowRoomSettings(false)
     } catch (err) {
       console.error('Failed to update room settings:', err)
-      alert('설정 저장에 실패했습니다.')
+      alert(err instanceof Error && err.message ? `설정 저장에 실패했습니다: ${err.message}` : '설정 저장에 실패했습니다.')
     } finally {
       setSettingsSaving(false)
     }
@@ -699,8 +777,46 @@ export function RoomDetail() {
     )
   }
 
+  // 비밀번호 방 입장 (방장은 서버가 묻지 않는다)
+  if (joinError) {
+    const locked = joinError.code === 'password-rate-limited'
+    return (
+      <div className="room-password-gate">
+        <form className="room-password-card" onSubmit={handleSubmitPassword}>
+          <h2>🔒 {room.title}</h2>
+          <p className={`room-password-message ${joinError.code === 'password-required' ? '' : 'error'}`}>
+            {describeJoinError(joinError)}
+          </p>
+          <input
+            type="password"
+            autoFocus
+            autoComplete="off"
+            placeholder="합주실 비밀번호"
+            value={passwordInput}
+            onChange={(e) => setPasswordInput(e.target.value)}
+            maxLength={64}
+            disabled={locked}
+          />
+          <div className="room-password-actions">
+            <button type="button" className="btn-secondary" onClick={handleLeave}>목록으로</button>
+            <button type="submit" className="btn-primary" disabled={locked || !passwordInput}>입장</button>
+          </div>
+        </form>
+      </div>
+    )
+  }
+
   return (
     <div className="live-room" onClick={resumeAllAudioContexts}>
+      {/* 방장: 새 연주 참여 요청 알림 */}
+      {isHost && requestNotice && !showPendingRequests && (
+        <div className="request-notice-toast" role="status">
+          <span>🎫 <strong>{requestNotice.nickname}</strong>님이 {INSTRUMENT_INFO[requestNotice.instrument]?.name || requestNotice.instrument} 연주를 요청했습니다</span>
+          <button onClick={(e) => { e.stopPropagation(); dismissRequestNotice(); setShowPendingRequests(true) }}>확인</button>
+          <button className="close-btn" aria-label="닫기" onClick={(e) => { e.stopPropagation(); dismissRequestNotice() }}>×</button>
+        </div>
+      )}
+      {copyNotice && <div className="copy-notice-toast" role="status">{copyNotice}</div>}
       {/* 방 정보 모달 */}
       {showRoomInfo && (
         <div className="room-info-modal">
@@ -723,6 +839,22 @@ export function RoomDetail() {
                 <div className="info-row"><span>🎵 장르</span><strong>{room.genre || '기타'}</strong></div>
                 <div className="info-row"><span>🚪 참여 방식</span><strong>{room.free_join ? '자유 참여' : '승인 필요'}</strong></div>
                 <div className="info-row"><span>👥 현재 인원</span><strong>{peers.length + 1} / {room.max_participants}명</strong></div>
+                <div className="info-row"><span>👁️ 공개 여부</span><strong>{room.is_private ? '비공개 (초대 링크로만 입장)' : '공개'}</strong></div>
+                {room.has_password && <div className="info-row"><span>🔒 비밀번호</span><strong>설정됨</strong></div>}
+              </div>
+
+              {/* 초대 */}
+              <div className="info-section">
+                <h4>초대</h4>
+                <div className="invite-actions">
+                  <button className="sync-btn" onClick={() => void copyText(inviteLink(room.id, PUBLIC_WEB_URL, window.location.origin), '초대 링크')}>
+                    🔗 초대 링크 복사
+                  </button>
+                  <button className="sync-btn" onClick={() => void copyText(room.id, '방 코드')}>
+                    #️⃣ 방 코드 복사
+                  </button>
+                </div>
+                {room.has_password && <small className="form-hint">비밀번호는 링크에 포함되지 않습니다. 따로 알려주세요.</small>}
               </div>
 
               {/* 태그 */}
@@ -799,20 +931,44 @@ export function RoomDetail() {
                             <span className="request-instrument">{instInfo.name} 연주 희망</span>
                           </div>
                         </div>
-                        <div className="request-actions">
-                          <button
-                            onClick={() => approveRequest(request.oderId)}
-                            className="approve-btn"
-                          >
-                            ✓ 승인
-                          </button>
-                          <button
-                            onClick={() => rejectRequest(request.oderId)}
-                            className="reject-btn"
-                          >
-                            ✗ 거절
-                          </button>
-                        </div>
+                        {rejectingId === request.oderId ? (
+                          <div className="reject-reason-picker">
+                            {REJECT_REASON_PRESETS.map(preset => (
+                              <button key={preset} className="reject-reason-preset" onClick={() => confirmReject(request.oderId, preset)}>
+                                {preset}
+                              </button>
+                            ))}
+                            <form
+                              className="reject-reason-custom"
+                              onSubmit={(e) => { e.preventDefault(); confirmReject(request.oderId, rejectReason) }}
+                            >
+                              <input
+                                type="text"
+                                placeholder="직접 입력 (선택)"
+                                value={rejectReason}
+                                onChange={(e) => setRejectReason(e.target.value)}
+                                maxLength={200}
+                              />
+                              <button type="submit" className="reject-btn">거절</button>
+                              <button type="button" className="cancel-request-btn" onClick={() => { setRejectingId(null); setRejectReason('') }}>취소</button>
+                            </form>
+                          </div>
+                        ) : (
+                          <div className="request-actions">
+                            <button
+                              onClick={() => approveRequest(request.oderId)}
+                              className="approve-btn"
+                            >
+                              ✓ 승인
+                            </button>
+                            <button
+                              onClick={() => { setRejectingId(request.oderId); setRejectReason('') }}
+                              className="reject-btn"
+                            >
+                              ✗ 거절
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )
                   })}
@@ -1005,6 +1161,52 @@ export function RoomDetail() {
                   </div>
                 </div>
               </div>
+
+              {/* 공개 여부 (마이그레이션 008 이후) */}
+              {room.is_private !== undefined && (
+                <div className="edit-form-group">
+                  <label>공개 여부</label>
+                  <div className="edit-toggle-option">
+                    <label className="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={!editIsPrivate}
+                        onChange={(e) => setEditIsPrivate(!e.target.checked)}
+                      />
+                      <span className="toggle-slider"></span>
+                    </label>
+                    <div className="toggle-label">
+                      <strong>{editIsPrivate ? '비공개' : '공개'}</strong>
+                      <span>{editIsPrivate ? '목록에 보이지 않습니다. 초대 링크/방 코드로만 들어올 수 있습니다' : '합주실 목록에 표시됩니다'}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 비밀번호 (마이그레이션 008 이후) */}
+              {room.has_password !== undefined && (
+              <div className="edit-form-group">
+                <label>비밀번호 {room.has_password ? '(설정됨)' : '(없음)'}</label>
+                <div className="password-mode-options">
+                  <label><input type="radio" checked={editPasswordMode === 'keep'} onChange={() => setEditPasswordMode('keep')} /> 그대로</label>
+                  <label><input type="radio" checked={editPasswordMode === 'set'} onChange={() => setEditPasswordMode('set')} /> {room.has_password ? '변경' : '설정'}</label>
+                  {room.has_password && (
+                    <label><input type="radio" checked={editPasswordMode === 'clear'} onChange={() => setEditPasswordMode('clear')} /> 해제</label>
+                  )}
+                </div>
+                {editPasswordMode === 'set' && (
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    placeholder="6~64자"
+                    value={editPassword}
+                    onChange={(e) => setEditPassword(e.target.value)}
+                    maxLength={64}
+                  />
+                )}
+                <small className="form-hint">이미 들어와 있는 참여자는 그대로 남습니다. 새로 들어오는 사람부터 적용됩니다.</small>
+              </div>
+              )}
 
               <div className="edit-form-actions">
                 <button
@@ -1407,8 +1609,13 @@ export function RoomDetail() {
             ) : myRequestStatus === 'pending' ? (
               /* 승인 대기 중 */
               <div className="request-status pending">
-                <p>⏳ 승인 대기 중...</p>
+                <p>⏳ 방장 승인 대기 중...</p>
                 <small>{INSTRUMENT_INFO[myRequestInstrument || '']?.name || myRequestInstrument} 연주 요청</small>
+                <small className="request-hint">
+                  {hostOnline === false
+                    ? '방장이 지금 접속해 있지 않습니다. 방장이 들어오면 요청이 전달됩니다.'
+                    : '승인되면 오디오 엔진이 자동으로 시작됩니다.'}
+                </small>
                 <button onClick={cancelRequest} className="cancel-request-btn">
                   요청 취소
                 </button>
@@ -1417,6 +1624,7 @@ export function RoomDetail() {
               /* 승인됨 - 연주 시작 가능 */
               <div className="request-status approved">
                 <p>✅ 승인되었습니다!</p>
+                {rtcError && <small>엔진을 자동으로 시작하지 못했습니다. 설정을 확인한 뒤 다시 시도하세요.</small>}
                 <button onClick={handleStartAfterApproval} className="toggle-btn performer">
                   🎤 연주 시작하기
                 </button>
@@ -1425,7 +1633,8 @@ export function RoomDetail() {
               /* 거절됨 */
               <div className="request-status rejected">
                 <p>❌ 요청이 거절되었습니다</p>
-                <button onClick={() => { cancelRequest() }} className="toggle-btn performer">
+                {myRejectReason && <small className="reject-reason">사유: {myRejectReason}</small>}
+                <button onClick={dismissRejection} className="toggle-btn performer">
                   🎤 다시 요청하기
                 </button>
               </div>

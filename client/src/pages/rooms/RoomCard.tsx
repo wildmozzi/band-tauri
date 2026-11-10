@@ -17,7 +17,7 @@ export function RoomCard({ room, tagsExpanded, onToggleTags, onClick }: RoomCard
     >
       <div className="room-card-header">
         <div className="room-info">
-          <h3>{room.title}</h3>
+          <h3>{room.hasPassword && <span className="room-lock" title="비밀번호 필요">🔒 </span>}{room.title}</h3>
           <span className="room-genre">{room.genre}</span>
         </div>
         <span className={`status-badge ${room.status}`}>

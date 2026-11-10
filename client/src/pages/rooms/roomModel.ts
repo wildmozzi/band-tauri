@@ -42,6 +42,9 @@ export interface DbRoom {
   created_at: string
   free_join?: boolean
   instrument_slots?: InstrumentSlot[]
+  /** 마이그레이션 008 (P2-6). 전이면 undefined */
+  is_private?: boolean
+  has_password?: boolean
 }
 
 /** 내가 만든 방(DbRoom과 동일) */
@@ -58,6 +61,8 @@ export interface Room {
   tags: string[]
   instrumentSlots: InstrumentSlot[]
   freeJoin: boolean
+  /** 입장 시 비밀번호 필요 */
+  hasPassword: boolean
 }
 
 /** 기존 방에 악기 구성이 없을 때 설정 모달의 기본값 */
@@ -82,7 +87,16 @@ export function toRoom(room: DbRoom): Room {
     tags: room.tags || [],
     instrumentSlots: room.instrument_slots || [],
     freeJoin: room.free_join ?? true,
+    hasPassword: room.has_password === true,
   }
+}
+
+/**
+ * 공개 목록에 보일 방만. 남의 비공개 방은 RLS가 이미 숨기고,
+ * 내 비공개 방(RLS상 보임)은 '내 합주실'에서만 보여준다.
+ */
+export function publicRooms(rooms: DbRoom[]): DbRoom[] {
+  return rooms.filter(room => room.is_private !== true)
 }
 
 export function formatDate(dateString: string) {

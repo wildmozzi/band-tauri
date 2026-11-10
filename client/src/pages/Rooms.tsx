@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
+import { parseRoomCode } from '../contexts/room/roomAccess'
 import { ROOM_FILTERS, type RoomStatus } from '../data/rooms'
 import { MyRoomsModal } from './rooms/MyRoomsModal'
 import { RoomCard } from './rooms/RoomCard'
@@ -18,6 +19,9 @@ export function Rooms() {
   const editor = useRoomEditor(user?.id, patchMyRoom)
   const { expandedTags, toggleTagsExpanded } = useExpandedTags()
   const [showMyRooms, setShowMyRooms] = useState(false)
+  // 방 코드 / 초대 링크로 입장 (비공개 방)
+  const [roomCode, setRoomCode] = useState('')
+  const [roomCodeError, setRoomCodeError] = useState<string | null>(null)
 
   // 내 방 모달 열기
   const handleOpenMyRooms = () => {
@@ -36,6 +40,18 @@ export function Rooms() {
       return
     }
     navigate(`/rooms/${roomId}`)
+  }
+
+  const handleJoinByCode = (e: React.FormEvent) => {
+    e.preventDefault()
+    const id = parseRoomCode(roomCode)
+    if (!id) {
+      setRoomCodeError('방 코드나 초대 링크를 확인해주세요.')
+      return
+    }
+    setRoomCodeError(null)
+    setRoomCode('')
+    navigate(`/rooms/${id}`)
   }
 
   const handleCreateRoom = () => {
@@ -80,6 +96,18 @@ export function Rooms() {
           </button>
         </div>
       </div>
+
+      <form className="room-code-join" onSubmit={handleJoinByCode}>
+        <input
+          type="text"
+          placeholder="방 코드 또는 초대 링크로 입장"
+          value={roomCode}
+          onChange={(e) => { setRoomCode(e.target.value); setRoomCodeError(null) }}
+          aria-label="방 코드 또는 초대 링크"
+        />
+        <button type="submit" disabled={!roomCode.trim()}>입장</button>
+        {roomCodeError && <span className="room-code-error">{roomCodeError}</span>}
+      </form>
 
       <div className="room-filters">
         {ROOM_FILTERS.map((filter) => (

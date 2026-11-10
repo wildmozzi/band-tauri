@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../../lib/supabaseClient'
 import { ROOM_FILTERS } from '../../data/rooms'
-import { toRoom, type DbRoom, type Room } from './roomModel'
+import { publicRooms, toRoom, type DbRoom, type Room } from './roomModel'
 
-/** 전체 합주실 목록(실시간 갱신) + 장르 필터. */
+/** 공개 합주실 목록(실시간 갱신, 비공개 방 제외) + 장르 필터. */
 export function useRoomList() {
   const [rooms, setRooms] = useState<Room[]>([])
   const [loading, setLoading] = useState(true)
@@ -23,7 +23,7 @@ export function useRoomList() {
           .order('created_at', { ascending: false })
 
         if (error) throw error
-        setRooms((data as DbRoom[]).map(toRoom))
+        setRooms(publicRooms(data as DbRoom[]).map(toRoom))
       } catch (err) {
         console.error('Failed to fetch rooms:', err)
       } finally {
