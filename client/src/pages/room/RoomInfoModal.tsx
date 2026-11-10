@@ -99,7 +99,7 @@ export function RoomInfoModal({
           {isHost && (
             <div className="host-actions">
               <button onClick={onSyncParticipants} className="sync-btn">
-                🔄 참여자 수 동기화
+                🔄 참여자 수 새로고침
               </button>
               <button onClick={onDeleteRoom} className="delete-room-btn">
                 🗑️ 합주실 삭제
