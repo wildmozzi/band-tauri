@@ -7,7 +7,7 @@ import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
 import { isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
 import { createRoomRepository, type RoomMeta, type RoomRepository } from '../repositories/roomRepository'
-import { PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword, type ScryptGate } from '../lib/roomPassword'
+import { DEFAULT_PASSWORD_ATTEMPT_LIMITS, PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword, type ScryptGate } from '../lib/roomPassword'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -105,10 +105,10 @@ const DEFAULT_LIMITS: WsLimits = {
   maxPerformers: 6,
   resumeGraceMs: 30_000,
   heartbeatMs: 30_000,
-  passwordMaxFailures: 5,
-  passwordMaxFailuresPerIp: 20,
-  passwordMaxFailuresPerRoom: 100,
-  passwordWindowMs: 15 * 60_000,
+  passwordMaxFailures: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailures,
+  passwordMaxFailuresPerIp: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailuresPerIp,
+  passwordMaxFailuresPerRoom: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailuresPerRoom,
+  passwordWindowMs: DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs,
 }
 
 export interface WsOptions {

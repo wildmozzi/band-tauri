@@ -182,8 +182,10 @@ jobs:
       - name: E2E
         timeout-minutes: 10
         run: npm run e2e
+      # 성공해도 올린다: CI는 retries 1이라 첫 시도 실패 → 재시도 통과(flaky)면 잡이 녹색이다.
+      # trace는 실패한 시도만 남으므로(retain-on-failure) flaky 증거가 이 아티팩트에 남는다. 전부 통과면 리포트만(작음)
       - name: Upload Playwright report + traces
-        if: failure()
+        if: ${{ !cancelled() }}
         timeout-minutes: 5
         uses: actions/upload-artifact@v4
         with:

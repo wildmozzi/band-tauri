@@ -29,17 +29,22 @@ test.describe('비밀번호 방 입장', () => {
     expect(joins).toEqual([null, 'wrong-pass', JAZZ_ROOM_PASSWORD])
   })
 
-  test('실패 제한에 걸리면 입력이 막히고 대기 시간을 안내한다', async ({ page }) => {
+  // 서버(PasswordAttemptLimiter) 의미: 5번째 오답은 '남은 시도 0회'(입력은 열려 있음), 6번째 시도에서 잠금.
+  // 잠금은 비밀번호 검증 전에 판정하므로 6번째에 맞는 비밀번호를 넣어도 막힌다.
+  test('실패 제한: 남은 시도 0회 다음 시도에서 잠기고, 맞는 비밀번호도 막힌다', async ({ page }) => {
     await page.goto(`/rooms/${JAZZ_ROOM.id}`)
     const gate = page.locator('.room-password-card')
     const input = gate.getByPlaceholder('합주실 비밀번호')
 
-    for (const remaining of [4, 3, 2, 1]) {
+    for (const remaining of [4, 3, 2, 1, 0]) {
       await input.fill(`wrong-${remaining}`)
       await gate.getByRole('button', { name: '입장' }).click()
-      await expect(gate).toContainText(`남은 시도 ${remaining}회`)
+      await expect(gate).toContainText(`비밀번호가 올바르지 않습니다. (남은 시도 ${remaining}회)`)
     }
-    await input.fill('wrong-last')
+    // 0회 화면에서도 아직 입력할 수 있다 (현재 앱·서버 동작)
+    await expect(input).toBeEnabled()
+
+    await input.fill(JAZZ_ROOM_PASSWORD)
     await gate.getByRole('button', { name: '입장' }).click()
 
     await expect(gate).toContainText('비밀번호를 너무 많이 틀렸습니다. 약 15분 뒤에 다시 시도하세요.')

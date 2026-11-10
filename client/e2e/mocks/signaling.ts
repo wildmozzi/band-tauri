@@ -5,9 +5,20 @@
  *        → 통과하면 room-state{participants, peerIds, isHost}
  *   chat → 기록만(서버는 보낸 사람에게 되돌려주지 않는다). 원격 채팅은 pushChat으로 주입
  * 방장 판정은 서버처럼 토큰의 사용자와 DB(rooms.host_id)로 한다.
+ *
+ * 비밀번호 실패 제한은 서버 코드(server/src/lib/roomPassword.ts의 PasswordAttemptLimiter와 운영 기본값)를
+ * 그대로 import해 쓴다 — mock이 서버와 다른 시점에 잠그지 않게(리뷰 #19 M1).
+ *   서버 의미: 시도를 먼저 세고 remaining = max - count. 5번째 오답은 password-invalid{remainingAttempts: 0},
+ *   6번째 시도에서 password-rate-limited.
+ * 처리하지 않는 메시지 타입은 위반으로 기록한다(앱이 새 메시지를 보내기 시작하면 테스트가 알게).
  */
 import type { BrowserContext, WebSocketRoute } from '@playwright/test'
+import {
+  DEFAULT_PASSWORD_ATTEMPT_LIMITS,
+  PasswordAttemptLimiter,
+} from '../../../server/src/lib/roomPassword'
 import { SIGNALING_URL } from '../env'
+import type { Violations } from './http'
 import type { MemoryPostgrest } from './postgrest'
 import { userFromToken } from './supabase'
 
@@ -21,14 +32,21 @@ export interface Participant {
 
 export interface FakeRoomConfig {
   password?: string
-  /** 비밀번호 실패 허용 횟수 (서버 기본 5) */
+  /** (방, 사용자) 비밀번호 실패 허용 횟수 — 기본은 서버 운영값 */
   maxAttempts?: number
   participants?: Participant[]
 }
 
 export type SignalMessage = Record<string, unknown> & { type: string }
 
-export const RATE_LIMIT_RETRY_MS = 15 * 60_000
+/** 서버 운영값과 같은 잠금 시간 */
+export const RATE_LIMIT_RETRY_MS = DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs
+
+/** 이 mock이 처리하는 클라이언트 → 서버 메시지 */
+const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat'])
+
+/** 브라우저 연결의 가짜 IP (서버는 익명 사용자를 IP 단위로 센다) */
+const FAKE_IP = '203.0.113.10'
 
 interface Conn {
   ws: WebSocketRoute
@@ -42,13 +60,14 @@ export class FakeSignaling {
   readonly received: SignalMessage[] = []
   private conns: Conn[] = []
   private rooms = new Map<string, FakeRoomConfig>()
-  private failures = new Map<string, number>()
+  private limiters = new Map<string, PasswordAttemptLimiter>()
   private seq = 0
 
-  constructor(private readonly db: MemoryPostgrest) {}
+  constructor(private readonly db: MemoryPostgrest, private readonly violations: Violations) {}
 
   setRoom(roomId: string, config: FakeRoomConfig) {
     this.rooms.set(roomId, config)
+    this.limiters.delete(roomId)
   }
 
   /** type이 같은 받은 메시지 */
@@ -73,6 +92,16 @@ export class FakeSignaling {
     c.ws.send(JSON.stringify(msg))
   }
 
+  private limiter(roomId: string): PasswordAttemptLimiter {
+    let l = this.limiters.get(roomId)
+    if (!l) {
+      const max = this.rooms.get(roomId)?.maxAttempts
+      l = new PasswordAttemptLimiter(max === undefined ? DEFAULT_PASSWORD_ATTEMPT_LIMITS : { ...DEFAULT_PASSWORD_ATTEMPT_LIMITS, maxFailures: max })
+      this.limiters.set(roomId, l)
+    }
+    return l
+  }
+
   private accept(ws: WebSocketRoute) {
     const conn: Conn = { ws, clientId: `e2e-client-${++this.seq}`, userId: null, roomId: null }
     this.conns.push(conn)
@@ -94,6 +123,10 @@ export class FakeSignaling {
   }
 
   private handle(conn: Conn, msg: SignalMessage) {
+    if (!HANDLED_TYPES.has(msg.type)) {
+      this.violations.push(`시그널링 mock 미처리 메시지: ${msg.type}`)
+      return
+    }
     switch (msg.type) {
       case 'auth': {
         const user = userFromToken(typeof msg.accessToken === 'string' ? msg.accessToken : undefined)
@@ -107,9 +140,31 @@ export class FakeSignaling {
         conn.roomId = null
         return
       default:
-        // chat 등: 기록만 (received)
+        // chat: 기록만 (received)
         return
     }
+  }
+
+  /** wsService.checkRoomPassword와 같은 순서·응답 */
+  private checkPassword(conn: Conn, roomId: string, expected: string, password: unknown): boolean {
+    if (typeof password !== 'string' || password.length === 0) {
+      this.send(conn, { type: 'error', code: 'password-required', roomId, message: '비밀번호가 필요한 방입니다.' })
+      return false
+    }
+    const subject = conn.userId ? `u:${conn.userId}` : `anon:${FAKE_IP}`
+    const limiter = this.limiter(roomId)
+    const attempt = limiter.begin(roomId, subject, FAKE_IP)
+    if (!attempt.ok) {
+      this.send(conn, { type: 'error', code: 'password-rate-limited', roomId, retryAfterMs: attempt.retryAfterMs, message: '비밀번호를 너무 많이 틀렸습니다. 잠시 후 다시 시도하세요.' })
+      return false
+    }
+    // 서버는 NFC 정규화 후 해시 비교
+    if (password.normalize('NFC') === expected.normalize('NFC')) {
+      limiter.succeeded(roomId, subject, FAKE_IP)
+      return true
+    }
+    this.send(conn, { type: 'error', code: 'password-invalid', roomId, remainingAttempts: attempt.remaining, message: '비밀번호가 올바르지 않습니다.' })
+    return false
   }
 
   private join(conn: Conn, msg: SignalMessage) {
@@ -118,24 +173,7 @@ export class FakeSignaling {
     const config = this.rooms.get(roomId) ?? {}
     const isHost = conn.userId !== null && room?.host_id === conn.userId
 
-    if (config.password && !isHost) {
-      const max = config.maxAttempts ?? 5
-      const failed = this.failures.get(roomId) ?? 0
-      if (failed >= max) {
-        return this.send(conn, { type: 'error', code: 'password-rate-limited', roomId, retryAfterMs: RATE_LIMIT_RETRY_MS, message: '비밀번호를 너무 많이 틀렸습니다.' })
-      }
-      if (typeof msg.password !== 'string' || msg.password === '') {
-        return this.send(conn, { type: 'error', code: 'password-required', roomId, message: '비밀번호가 필요한 방입니다.' })
-      }
-      if (msg.password !== config.password) {
-        const now = failed + 1
-        this.failures.set(roomId, now)
-        if (now >= max) {
-          return this.send(conn, { type: 'error', code: 'password-rate-limited', roomId, retryAfterMs: RATE_LIMIT_RETRY_MS, message: '비밀번호를 너무 많이 틀렸습니다.' })
-        }
-        return this.send(conn, { type: 'error', code: 'password-invalid', roomId, remainingAttempts: max - now, message: '비밀번호가 올바르지 않습니다.' })
-      }
-    }
+    if (config.password && !isHost && !this.checkPassword(conn, roomId, config.password, msg.password)) return
 
     conn.roomId = roomId
     const participants = config.participants ?? []

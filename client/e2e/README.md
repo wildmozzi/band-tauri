@@ -17,8 +17,12 @@ npm run e2e:typecheck
   - `api.ts` 서버 HTTP API (`mock.api.on('POST /api/...', handler)`로 테스트마다 덮어쓰기)
   - `signaling.ts` 시그널링 WS (welcome → auth-result → join/room-state, 비밀번호 실패·제한, 채팅)
   - `index.ts` 토스 SDK 스텁, **guard**: 앱·mock 호스트 밖으로 나가는 HTTP/WS는 차단하고 테스트를 실패시킨다
-- `build-safety.e2e.ts`: 빌드 산출물에 `*.supabase.co`·`fly.dev`가 없는지 확인 (guard와 이중 방어)
+- `build-safety.e2e.ts`: 빌드 산출물에 가짜 env 값이 모두 있고, 운영 흔적(`*.supabase.co`, `fly.dev`, `vercel.app`, JWT 형태 키, 토스 실키)이 없는지 확인 (guard와 이중 방어)
 - 포트 47173 고정, `reuseExistingServer: false` — 다른 워크트리의 서버(실제 env 빌드)에 붙지 않게.
+
+## 한계
+- **RLS 미구현**: 메모리 PostgREST는 Authorization을 보지 않는다. DB 권한 거부(남의 댓글 수정 등)는 E2E가 보장하지 않는다 — server/test의 마이그레이션 테스트와 개발용 DB E2E 모드에서 다룬다.
+- 시그널링 비밀번호 실패 제한은 서버 코드(`server/src/lib/roomPassword.ts`의 `PasswordAttemptLimiter`·운영 기본값)를 그대로 import한다. 그 밖의 시그널링 의미(승인 요청·WebRTC 등)는 구현하지 않으며, 모르는 메시지 타입은 위반으로 실패한다.
 
 ## 테스트 작성
 - `import { test, expect } from './test'` — 자동 fixture가 테스트 끝에 **콘솔 에러 0**과 **mock 위반 0**을 검사한다.

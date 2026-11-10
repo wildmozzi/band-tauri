@@ -67,7 +67,7 @@ export async function installMocks(context: BrowserContext): Promise<MockBackend
   await supabase.install(context)
   const api = new FakeApi(violations)
   await api.install(context)
-  const signaling = new FakeSignaling(supabase.db)
+  const signaling = new FakeSignaling(supabase.db, violations)
   await signaling.install(context)
   await context.route(
     url => url.host === TOSS_SCRIPT_HOST,

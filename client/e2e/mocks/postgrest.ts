@@ -3,6 +3,11 @@
  * 지원: select(컬럼 목록, `*`, 다대일 임베드 `alias:fk(cols)`), eq/neq/is/in/cs 필터, order, limit,
  *       insert/update/delete + return=representation, single()/maybeSingle(), count=exact(HEAD).
  * 모르는 문법이 오면 UnsupportedQuery를 던진다 → 호출부가 400으로 답하고 테스트를 실패시킨다(조용히 틀린 데이터를 주지 않게).
+ *
+ * 한계 — RLS 미구현: 요청의 Authorization을 보지 않으므로 누구든 어떤 행이든 읽고 쓸 수 있다.
+ *   DB 권한(작성자만 수정·삭제, post_likes.user_id = auth.uid() 등)은 E2E가 보장하지 않는다.
+ *   권한은 server/test의 마이그레이션 테스트가 맡고, 실제 RLS를 거치는 E2E는 개발용 DB E2E 모드(별도 항목)에서 다룬다.
+ *   여기서 검증하는 '권한'은 화면 수준(버튼 노출)과 시그널링 비밀번호뿐이다.
  */
 import { randomUUID } from 'node:crypto'
 import type { Row, Tables } from '../fixtures'
@@ -203,12 +208,16 @@ export class MemoryPostgrest {
     const path = req.url.pathname.replace(/^\/rest\/v1\//, '')
     const [first, second] = path.split('/')
     const headers: Record<string, string> = { 'Content-Type': 'application/json; charset=utf-8' }
+    const wantsObject = (req.headers['accept'] ?? '').includes('vnd.pgrst.object')
 
     if (first === 'rpc') {
       this.log.push({ method: req.method, table: `rpc/${second}`, url: req.url.href })
       const fn = this.rpcs[second]
       if (!fn) throw new UnsupportedQuery(`없는 rpc: ${second}`)
-      return { status: 200, headers, body: fn((req.body ?? {}) as Row) }
+      const out = fn((req.body ?? {}) as Row)
+      // .rpc().single()/maybeSingle(): 집합 반환 함수면 테이블과 같은 규칙, 스칼라·객체 반환이면 그대로
+      if (wantsObject && Array.isArray(out)) return shapeRows(out as Row[], true, 200, headers)
+      return { status: 200, headers, body: out }
     }
 
     const tableName = decodeURIComponent(first)
@@ -218,7 +227,6 @@ export class MemoryPostgrest {
     const match = (r: Row) => filters.every(f => f(r))
     const select = req.url.searchParams.get('select')
     const prefer = req.headers['prefer'] ?? ''
-    const wantsObject = (req.headers['accept'] ?? '').includes('vnd.pgrst.object')
     const representation = prefer.includes('return=representation')
 
     let result: Row[]
@@ -277,21 +285,24 @@ export class MemoryPostgrest {
         throw new UnsupportedQuery(`메서드: ${req.method}`)
     }
 
-    if (wantsObject) {
-      if (result.length !== 1) {
-        return {
-          status: 406,
-          headers,
-          body: {
-            code: 'PGRST116',
-            details: `The result contains ${result.length} rows`,
-            hint: null,
-            message: 'JSON object requested, multiple (or no) rows returned',
-          },
-        }
-      }
-      return { status, headers, body: result[0] }
-    }
-    return { status, headers, body: result }
+    return shapeRows(result, wantsObject, status, headers)
   }
+}
+
+/** Accept: application/vnd.pgrst.object+json(single/maybeSingle)이면 정확히 1행일 때만 객체, 아니면 406 PGRST116 */
+function shapeRows(rows: Row[], wantsObject: boolean, status: number, headers: Record<string, string>): PgResponse {
+  if (!wantsObject) return { status, headers, body: rows }
+  if (rows.length !== 1) {
+    return {
+      status: 406,
+      headers,
+      body: {
+        code: 'PGRST116',
+        details: `The result contains ${rows.length} rows`,
+        hint: null,
+        message: 'JSON object requested, multiple (or no) rows returned',
+      },
+    }
+  }
+  return { status, headers, body: rows[0] }
 }
