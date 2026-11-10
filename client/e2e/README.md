@@ -18,7 +18,7 @@ npm run e2e:typecheck
   - `signaling.ts` 시그널링 WS (welcome → auth-result → join/room-state, 비밀번호 실패·제한, 채팅)
   - `index.ts` 토스 SDK 스텁, **guard**: 앱·mock 호스트 밖으로 나가는 HTTP/WS는 차단하고 테스트를 실패시킨다
 - `build-safety.e2e.ts`: 빌드 산출물에 가짜 env 값이 모두 있고, 운영 흔적(`*.supabase.co`, `fly.dev`, `vercel.app`, JWT 형태 키, 토스 실키)이 없는지 확인 (guard와 이중 방어)
-- 포트 47173 고정, `reuseExistingServer: false` — 다른 워크트리의 서버(실제 env 빌드)에 붙지 않게.
+- 포트 47173(기본), `reuseExistingServer: false` — 다른 워크트리의 서버(실제 env 빌드)에 붙지 않게. 여러 워크트리에서 동시에 돌리면 `E2E_PORT=47183 npm run e2e`처럼 포트를 나눈다.
 
 ## 한계
 - **RLS 미구현**: 메모리 PostgREST는 Authorization을 보지 않는다. DB 권한 거부(남의 댓글 수정 등)는 E2E가 보장하지 않는다 — server/test의 마이그레이션 테스트와 개발용 DB E2E 모드에서 다룬다.
@@ -31,3 +31,9 @@ npm run e2e:typecheck
 - 고정 데이터는 `fixtures/` (테스트마다 새 DB 사본). 상태 확인은 `mock.supabase.db.table('posts')`, `mock.api.calls`, `mock.signaling.received`.
 - 파일 이름은 `*.e2e.ts` (vitest가 `*.test.ts`/`*.spec.ts`를 집어 가므로).
 - 셀렉터는 역할·텍스트 우선, 부족하면 최소한의 `data-testid`만 앱에 추가한다.
+
+## 시각 회귀 (`visual.e2e.ts`)
+- 주요 화면 6개(홈, 합주실 목록, 합주실 상세 관람, 커뮤니티 목록, 글 상세, 404)를 `toHaveScreenshot`으로 비교한다. 1280×800, fullPage, 시계 고정.
+- 임계: `maxDiffPixelRatio: 0.001`(다른 픽셀 0.1% 이하), 픽셀 색 허용 `threshold` 0.2(기본) — 안티앨리어싱만 흡수.
+- 기준 이미지: `__screenshots__/visual.e2e.ts/<이름>-<platform>.png`. 폰트 렌더링이 OS마다 달라 linux(CI)·win32(로컬)를 따로 둔다.
+- 화면을 **일부러** 바꾸면 `npm run e2e -- visual --update-snapshots`로 win32 기준을 갱신하고, linux 기준은 CI 아티팩트(`playwright-*`)의 `*-actual.png`로 교체한다. PR 본문에 이유를 적는다.

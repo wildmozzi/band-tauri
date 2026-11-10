@@ -10,6 +10,8 @@ export default defineConfig({
   testDir: './e2e',
   testMatch: '**/*.e2e.ts',
   outputDir: './e2e/.results',
+  // 시각 회귀 기준 이미지(visual.e2e.ts). 폰트 렌더링이 OS마다 달라 플랫폼별 파일(CI=linux, 로컬=win32)
+  snapshotPathTemplate: '{testDir}/__screenshots__/{testFilePath}/{arg}-{platform}{ext}',
   timeout: 30_000,
   expect: { timeout: 7_000 },
   fullyParallel: true,
