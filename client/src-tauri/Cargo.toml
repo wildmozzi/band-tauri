@@ -45,6 +45,17 @@ tauri-plugin-process = "2"
 [target.'cfg(windows)'.dependencies]
 # 워커/수신 스레드 MMCSS("Pro Audio") 등록
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+# 자체 WASAPI 백엔드(독점 이벤트 모드, IAudioClient3 저지연 공유 모드). 0.62는 Tauri가 이미 쓰는 버전이다.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
 
 [features]
 default = ["custom-protocol"]

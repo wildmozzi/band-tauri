@@ -1,52 +1,51 @@
 //! 엔진 워커(비RT 스레드 1개, 설계 문서 1.1절).
 //!
 //! - 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신
-//! - 출력: 출력 콜백이 소비한 만큼 `OUT_CHUNK` 단위로 지터 버퍼/로컬 FIFO에서 꺼내 믹스 →
-//!   (리샘플) → 출력 링. 출력 생산 단위는 네트워크 프레임과 무관하다(리뷰 M1).
-//! - 한 번의 리필(버스트)이 끝나면 지터 버퍼와 로컬 FIFO에 `end_burst`를 알린다. 이때 쓰는
-//!   시각은 워커 기상 시각이 아니라 `DeviceClock`이 추정한 출력 콜백 시각이다.
-//!
-//! 출력 링 수위는 "워커가 넣은 누적 샘플 − 출력 콜백이 소비한 누적 샘플(원자 카운터)"이다.
+//! - 출력(콜백 구동 믹스, P1-0): 믹스는 출력 콜백이 한다(`rt.rs`). 워커는 소스(로컬 1 + 피어별)마다
+//!   디코드된 PCM을 소스 링에 공급한다.
+//!   - 피어: 받은 데이터는 미리 꺼내 두고, 은닉(PLC)은 출력 콜백 마감 직전에만 한다(`PeerFeed`).
+//!     출력 콜백이 돌 때마다 지터 버퍼 깊이를 **재생 위치**(소스 링 머리) 기준으로 잰다.
+//!   - 로컬(모니터·탭): 콜백이 소비한 만큼 `OUT_CHUNK` 단위로 로컬 FIFO에서 꺼내 다시 채운다.
+//! - 깊이 측정 시각은 워커 기상 시각이 아니라 `DeviceClock`이 추정한 출력 콜백 시각이다.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
-use ringbuf::traits::{Consumer, Producer};
+use ringbuf::traits::{Consumer, Observer, Producer};
 use ringbuf::{HeapCons, HeapProd};
 
 use super::codec::Encoder;
 use super::config::{frame_code_from_samples, EngineConfig, INTERNAL_RATE, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
 use super::device::StreamInfo;
-use super::jitter::shift_one;
-use super::mixer::{self, MixControls};
+use super::jitter::{shift_one, JitterBuffer};
+use super::mixer::MixControls;
 use super::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
+use super::rt::{SourceBank, SourceShared, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
 use super::stats::AudioCounters;
 use crate::net::packet::{FLAG_OPUS, FLAG_STEREO};
+use crate::net::peer::Peer;
 use crate::net::NetShared;
 
 /// 워커 폴링 주기. Windows에서도 std::thread::sleep은 고해상도 타이머를 쓴다.
 const POLL: Duration = Duration::from_micros(500);
+/// 피어 은닉 마감이 가까울 때의 폴링 주기.
+const FINE_POLL: Duration = Duration::from_micros(150);
 /// 출력 생산 단위(48kHz 프레임). 1.33ms.
 pub const OUT_CHUNK: usize = 64;
-
-/// 믹스 탭(관람자 브릿지용) 공유 지점. 워커가 48k 스테레오 믹스를 밀어 넣는다.
-#[derive(Default)]
-pub struct MixTap {
-    pub prod: Mutex<Option<HeapProd<f32>>>,
-}
 
 /// 워커 → 엔진 통계 공유값.
 #[derive(Debug, Default)]
 pub struct WorkerStats {
-    /// 모니터 경로 점유량 시간평균(µs): 입력 리샘플러 + 로컬 FIFO + 출력 리샘플러 + 출력 링.
+    /// 모니터 경로 점유량 시간평균(µs): 입력 리샘플러 + 로컬 FIFO + 로컬 리샘플러 + 로컬 소스 링.
     pub monitor_occupancy_us: AtomicU64,
-    /// 출력 경로 점유량 시간평균(µs): 출력 리샘플러 + 출력 링.
-    pub output_occupancy_us: AtomicU64,
     pub local_corrections: AtomicU64,
     pub local_underruns: AtomicU64,
+    /// 피어 소스를 출력 콜백 마감 직전에 은닉으로 채운 횟수(패킷이 마감까지 안 옴).
+    pub deadline_fills: AtomicU64,
+    /// 피어 소스 링이 모자라 콜백이 0을 채우고, 그만큼 스트림을 건너뛴 장치 프레임 누적(워커 마감 놓침).
+    pub skipped_frames: AtomicU64,
     /// 입력 또는 출력 콜백이 1초 넘게 멈췄다(장치 분리 등). 다시 돌면 false.
     pub device_stalled: AtomicBool,
 }
@@ -433,6 +432,244 @@ impl Default for LocalFifo {
 }
 
 // ============================================================================
+// 콜백 구동 믹스: 피어 소스 공급(PeerFeed)
+// ============================================================================
+
+/// 출력 콜백 마감 여유(µs): 다음 콜백 예상 시각보다 이만큼 앞에서 은닉을 결정한다.
+/// 워커 폴링(0.5ms)과 Windows 기상 지연을 덮는다. 지터 목표(`ceil(p95/F)+1`프레임)의 +1프레임(≥ 2.5ms)이
+/// 이 여유보다 커서 정상 상태에서는 마감 전에 실제 패킷이 이미 와 있다(engine-notes "콜백 구동 믹스").
+pub const DEADLINE_GUARD_US: u64 = 1500;
+
+/// 출력 콜백 타이밍(워커가 매 반복 계산).
+#[derive(Debug, Clone, Copy)]
+pub struct FeedTiming {
+    /// 지난 반복 이후 출력 콜백이 돌았다(이번 반복에서 깊이를 잰다).
+    pub new_callback: bool,
+    /// 마지막 출력 콜백 시각 추정치(장치 클럭, µs).
+    pub dev_now_us: u64,
+    /// 워커가 실제로 깨어난 시각(µs).
+    pub wall_us: u64,
+    /// 다음 출력 콜백 예상 시각(µs).
+    pub next_cb_us: u64,
+    /// 다음 콜백이 꺼낼 장치 프레임 수.
+    pub out_burst: usize,
+    pub out_rate: u32,
+    /// 이 타이밍을 만들 때의 출력 콜백 시작 횟수. 콜백 도중이었으면 `None`(이번 반복은 판단하지 않음).
+    pub cb_seq: Option<u64>,
+}
+
+impl FeedTiming {
+    fn dev_to_48(&self, frames: f64) -> f64 {
+        frames * INTERNAL_RATE as f64 / self.out_rate.max(1) as f64
+    }
+
+    fn chunk_dev(&self) -> usize {
+        (OUT_CHUNK * self.out_rate as usize).div_ceil(INTERNAL_RATE as usize)
+    }
+}
+
+/// 출력 콜백 관찰기: 재생 프레임 카운터로 콜백 시각을 추정하고(`DeviceClock`) 반복마다 `FeedTiming`을 만든다.
+pub struct CallbackTracker {
+    clock: DeviceClock,
+    cb_played: u64,
+    dev_now_us: u64,
+}
+
+impl CallbackTracker {
+    pub fn new(out_rate: u32) -> Self {
+        Self { clock: DeviceClock::new(out_rate), cb_played: 0, dev_now_us: 0 }
+    }
+
+    /// 장치 클럭은 재생 프레임 수(언더런 포함)로 추정한다(PR #5 H-1).
+    pub fn observe(&mut self, c: &AudioCounters, wall_us: u64, out_burst: usize, out_rate: u32) -> FeedTiming {
+        let begin = c.out_cb_begin.load(Ordering::SeqCst);
+        let played = c.out_played_frames.load(Ordering::SeqCst);
+        // 콜백 도중이면(시작 ≠ 끝) 재생 카운터와 링 점유량이 어긋날 수 있으므로 다음 반복으로 미룬다.
+        let cb_seq = (c.out_cb_end.load(Ordering::SeqCst) == begin).then_some(begin);
+        let new_callback = cb_seq.is_some() && played != self.cb_played && played > 0;
+        if new_callback {
+            self.cb_played = played;
+            self.dev_now_us = self.clock.update(wall_us, played);
+        }
+        let out_rate = out_rate.max(1);
+        let next_cb_us = if self.dev_now_us == 0 {
+            0
+        } else {
+            self.dev_now_us + out_burst as u64 * 1_000_000 / out_rate as u64
+        };
+        FeedTiming { new_callback, dev_now_us: self.dev_now_us, wall_us, next_cb_us, out_burst, out_rate, cb_seq }
+    }
+}
+
+/// `PeerFeed::service` 한 번의 결과(진단용).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FeedEvents {
+    /// 마감에 쫓겨 은닉으로 채웠다.
+    pub deadline_fill: bool,
+    /// 콜백이 0으로 채워 건너뛴 장치 프레임.
+    pub skipped_frames: u64,
+    /// 링이 다음 콜백에 모자라고 은닉 마감이 한 폴링 주기 안이다. 워커는 짧게 자서 마감을 놓치지 않는다.
+    pub urgent: bool,
+}
+
+/// 피어 하나의 출력 소스: 소스 링 슬롯 + 48k → 장치 레이트 리샘플러.
+///
+/// 규칙(설계 근거는 engine-notes "콜백 구동 믹스"):
+/// 1. **실제 데이터는 미리**: 지터 버퍼가 은닉 없이 꺼낼 수 있으면(`can_pop_real`) 소스 링을
+///    `다음 콜백 소비량 + 2청크`까지 채운다. 나머지는 지터 버퍼에 남겨 패킷 단위 버림이 동작하게 한다.
+/// 2. **은닉은 마감 직전에만**: 링이 다음 콜백 소비량보다 적고 데이터가 없으면, 다음 콜백 예상 시각
+///    − `DEADLINE_GUARD_US`가 지난 뒤에만 `pop`(PLC)한다. 늦게 오는 패킷을 마지막까지 기다린다.
+/// 3. **깊이는 재생 위치 기준**: 콜백이 돌 때마다 `end_burst(콜백 시각, 벽시계, 링 점유량)`.
+///    그래서 소스 링에 머무는 시간이 지터 버퍼 깊이(`bufferMs`)에 포함되고 목표로 제어된다.
+///    믹스된 출력 링이 따로 없으므로 장치 버퍼 1개만큼의 하한이 사라진다.
+/// 4. **언더런 때 지연을 쌓지 않음**: 콜백이 링 부족으로 0을 채운 프레임 수만큼 스트림을 건너뛴다.
+/// 5. **적응 여유**(PR #11 M4): 언더런이 나면 피어별 여유(`margin`)를 청크 하나씩 늘린다(최대 다음 콜백
+///    소비량). 여유만큼 선행량 상한·부족 판정·은닉 마감을 앞당겨, 워커 기상이 늦거나 콜백이 격자보다 이르게
+///    오는 환경에서 같은 언더런이 반복되지 않게 한다. `MARGIN_DECAY_US` 동안 언더런이 없으면 청크씩 줄인다.
+///    여유는 소스 링(재생 위치 앞)에 있으므로 `bufferMs`에 포함되고 지연 회계는 그대로다. 언더런이 없으면 0.
+pub struct PeerFeed {
+    slot: usize,
+    key: (usize, u32),
+    rs: StreamResampler,
+    seen_underrun: u64,
+    seen: bool,
+    /// 적응 여유(장치 프레임).
+    margin: usize,
+    /// 마지막 여유 변경(증가 또는 감소) 시각(µs).
+    margin_at_us: u64,
+}
+
+/// 언더런 없이 이 시간이 지나면 피어 여유를 청크 하나 줄인다.
+const MARGIN_DECAY_US: u64 = 10_000_000;
+
+impl PeerFeed {
+    pub fn new(slot: usize, key: (usize, u32), out_rate: u32, shared: &SourceShared) -> Result<Self, String> {
+        Ok(Self {
+            slot,
+            key,
+            rs: StreamResampler::new(INTERNAL_RATE, out_rate, 2)?,
+            seen_underrun: shared.underrun_frames.load(Ordering::Relaxed),
+            seen: true,
+            margin: 0,
+            margin_at_us: 0,
+        })
+    }
+
+    /// 현재 적응 여유(장치 프레임, 진단·테스트용).
+    pub fn margin(&self) -> usize {
+        self.margin
+    }
+
+    pub fn slot(&self) -> usize {
+        self.slot
+    }
+
+    /// 링 + 리샘플러 출력에 있는 장치 프레임.
+    fn dev_ahead(&self, prod: &HeapProd<f32>) -> usize {
+        prod.occupied_len() / 2 + self.rs.available()
+    }
+
+    /// 48k 청크 하나를 리샘플해 소스 링에 넣는다. 링이 가득 차면 리샘플러에 남는다.
+    fn push(&mut self, chunk: &[f32], prod: &mut HeapProd<f32>, tmp: &mut [f32]) {
+        self.rs.push(chunk);
+        self.drain_rs(prod, tmp);
+    }
+
+    fn drain_rs(&mut self, prod: &mut HeapProd<f32>, tmp: &mut [f32]) {
+        loop {
+            let room = (prod.vacant_len() / 2).min(tmp.len() / 2);
+            if room == 0 {
+                break;
+            }
+            let n = self.rs.pop(&mut tmp[..room * 2]);
+            if n == 0 {
+                break;
+            }
+            prod.push_slice(&tmp[..n * 2]);
+        }
+    }
+
+    /// 한 반복분 처리. `consistent()`는 `t`를 만든 뒤 링 점유량을 읽을 때까지 출력 콜백이 돌지 않았는지
+    /// 확인한다. 돌았다면(링은 이미 비었는데 마감 시각은 이전 콜백 기준) 깊이 측정과 마감 판단을 이번
+    /// 반복에서 하지 않는다. 이 검사가 없으면 한 주기 이르게 은닉했다(위상에 따라 수 초에 수 회).
+    #[allow(clippy::too_many_arguments)]
+    pub fn service(
+        &mut self,
+        jb: &mut JitterBuffer,
+        prod: &mut HeapProd<f32>,
+        sh: &SourceShared,
+        t: &FeedTiming,
+        consistent: &dyn Fn() -> bool,
+        chunk: &mut [f32],
+        tmp: &mut [f32],
+    ) -> FeedEvents {
+        let mut ev = FeedEvents::default();
+        let chunk = &mut chunk[..OUT_CHUNK * 2];
+        self.drain_rs(prod, tmp);
+        if t.new_callback {
+            // (4) 콜백이 모자라 0을 채운 만큼 스트림을 건너뛴다. 안 하면 그만큼 재생이 영구히 늦어진다.
+            let u = sh.underrun_frames.load(Ordering::Relaxed);
+            let d = u.saturating_sub(self.seen_underrun);
+            self.seen_underrun = u;
+            if d > 0 && jb.is_playing() {
+                let mut left = t.dev_to_48(d as f64).round() as usize;
+                while left > 0 {
+                    let k = left.min(OUT_CHUNK);
+                    jb.pop(&mut chunk[..k * 2]);
+                    left -= k;
+                }
+                ev.skipped_frames = d;
+                self.margin = (self.margin + t.chunk_dev()).min(t.out_burst);
+                self.margin_at_us = t.wall_us;
+            } else if self.margin > 0 && t.wall_us.saturating_sub(self.margin_at_us) > MARGIN_DECAY_US {
+                self.margin = self.margin.saturating_sub(t.chunk_dev());
+                self.margin_at_us = t.wall_us;
+            }
+            // (3) 재생 위치 기준 깊이: 링·리샘플러에 있는 양(재생 위치가 그만큼 과거)을 넘긴다.
+            let ahead = t.dev_to_48(self.dev_ahead(prod) as f64) + self.rs.pending_input() as f64;
+            if consistent() {
+                jb.end_burst(t.dev_now_us, t.wall_us, ahead);
+            }
+        }
+        if !jb.is_playing() {
+            sh.playing.store(false, Ordering::Relaxed);
+            return ev;
+        }
+        // (1) 실제 데이터는 미리
+        // 패킷 꼬리(< 청크)까지 정확히 꺼낸다. 청크 단위로만 꺼내면 실제 데이터가 FIFO에 남아 있는데도
+        // 마감에 은닉이 끼었다(위상에 따라 수 초에 수 회).
+        let lead_cap = t.out_burst + 2 * t.chunk_dev() + self.margin;
+        while self.dev_ahead(prod) < lead_cap && prod.vacant_len() >= OUT_CHUNK * 4 {
+            let k = jb.real_frames().min(OUT_CHUNK);
+            if k == 0 {
+                break;
+            }
+            jb.pop(&mut chunk[..k * 2]);
+            self.push(&chunk[..k * 2], prod, tmp);
+        }
+        // (2) 은닉은 마감 직전에만, 다음 콜백에 모자란 만큼만(+ 적응 여유)
+        let need = t.out_burst + self.margin;
+        let guard_us = DEADLINE_GUARD_US + self.margin as u64 * 1_000_000 / t.out_rate.max(1) as u64;
+        let short = self.dev_ahead(prod) < need;
+        if short && t.wall_us + guard_us >= t.next_cb_us && consistent() {
+            ev.deadline_fill = true;
+            let mut guard = 0;
+            while self.dev_ahead(prod) < need && guard < 64 && jb.is_playing() {
+                let deficit = t.dev_to_48((need - self.dev_ahead(prod)) as f64).ceil() as usize;
+                let k = deficit.clamp(1, OUT_CHUNK);
+                jb.pop(&mut chunk[..k * 2]);
+                self.push(&chunk[..k * 2], prod, tmp);
+                guard += 1;
+            }
+        } else if short && t.wall_us + guard_us + POLL.as_micros() as u64 >= t.next_cb_us {
+            ev.urgent = true;
+        }
+        sh.playing.store(true, Ordering::Relaxed);
+        ev
+    }
+}
+
+// ============================================================================
 // 워커
 // ============================================================================
 
@@ -440,11 +677,12 @@ pub struct WorkerParams {
     pub cfg: EngineConfig,
     pub info: StreamInfo,
     pub in_cons: HeapCons<f32>,
-    pub out_prod: HeapProd<f32>,
+    /// 소스 링 생산자(슬롯별)와 공유 상태. 믹스 탭 소비자는 엔진이 가진다.
+    pub prods: Vec<HeapProd<f32>>,
+    pub bank: Arc<SourceBank>,
     pub counters: Arc<AudioCounters>,
     pub controls: Arc<MixControls>,
     pub net: Option<Arc<NetShared>>,
-    pub tap: Arc<MixTap>,
     pub stop: Arc<AtomicBool>,
     pub stats: Arc<WorkerStats>,
     /// 지터 버퍼 수신 시각과 같은 기준(µs)의 시계.
@@ -456,14 +694,15 @@ pub struct Worker {
     frame: usize,
     ich: usize,
     in_rs: StreamResampler,
-    out_rs: StreamResampler,
+    /// 로컬(모니터) 소스: 48k → 장치 레이트.
+    local_rs: StreamResampler,
     encoder: Option<Encoder>,
     flags: u8,
     frame_code: u8,
     ts: u32,
-    produced_out: u64,
-    clock: DeviceClock,
+    tracker: CallbackTracker,
     local: LocalFifo,
+    feeds: Vec<PeerFeed>,
     in_tmp: Vec<f32>,
     /// 48k 입력 블록(리샘플 직후, 내부 채널).
     in48_buf: Vec<f32>,
@@ -474,14 +713,11 @@ pub struct Worker {
     payload: Vec<u8>,
     pkt: Vec<u8>,
     local_buf: Vec<f32>,
-    bus: Vec<f32>,
-    tap_bus: Vec<f32>,
-    peer_buf: Vec<f32>,
+    chunk_buf: Vec<f32>,
     out_tmp: Vec<f32>,
     reported_errors: u32,
     encode_errors: u64,
     monitor_ewma_us: f64,
-    output_ewma_us: f64,
     safety: u64,
     seen_xruns: u64,
     last_xrun: Duration,
@@ -489,6 +725,7 @@ pub struct Worker {
     last_played_at: Duration,
     last_captured: u64,
     last_captured_at: Duration,
+    slot_full_logged: bool,
 }
 
 /// 지원하는 장치 레이트 범위.
@@ -505,8 +742,11 @@ impl Worker {
                 return Err(format!("지원하지 않는 {what} 장치 레이트: {r}Hz"));
             }
         }
+        if p.prods.len() != MAX_SOURCES {
+            return Err("소스 링 수가 맞지 않습니다".into());
+        }
         let in_rs = StreamResampler::new(p.info.in_rate, INTERNAL_RATE, ich)?;
-        let out_rs = StreamResampler::new(INTERNAL_RATE, p.info.out_rate, 2)?;
+        let local_rs = StreamResampler::new(INTERNAL_RATE, p.info.out_rate, 2)?;
         let encoder = if p.net.is_some() {
             Some(Encoder::new(p.cfg.codec, ich, p.cfg.opus_bitrate())?)
         } else {
@@ -520,19 +760,22 @@ impl Worker {
             flags |= FLAG_STEREO;
         }
         let frame_code = frame_code_from_samples(frame).ok_or("잘못된 프레임 크기")?;
-        let clock = DeviceClock::new(p.info.out_rate);
+        // 로컬 소스는 항상 켜져 있다(모니터 꺼짐 = 버스 게인 0, 탭에는 계속 나감).
+        let local_slot = &p.bank.slots[LOCAL_SOURCE];
+        local_slot.set_gains((0.0, 0.0), (1.0, 1.0));
+        local_slot.state.store(SLOT_ACTIVE, Ordering::Release);
         Ok(Self {
             frame,
             ich,
             in_rs,
-            out_rs,
+            local_rs,
             encoder,
             flags,
             frame_code,
             ts: rand::random(),
-            produced_out: 0,
-            clock,
+            tracker: CallbackTracker::new(p.info.out_rate),
             local: LocalFifo::new(),
+            feeds: Vec::with_capacity(MAX_SOURCES),
             in_tmp: vec![0.0; 4096],
             in48_buf: vec![0.0; 2048 * ich],
             cap_acc: VecDeque::with_capacity((frame + 4096) * ich),
@@ -541,14 +784,11 @@ impl Worker {
             payload: vec![0u8; MAX_PAYLOAD_BYTES],
             pkt: vec![0u8; MAX_PACKET_BYTES],
             local_buf: vec![0.0; OUT_CHUNK * 2],
-            bus: vec![0.0; OUT_CHUNK * 2],
-            tap_bus: vec![0.0; OUT_CHUNK * 2],
-            peer_buf: vec![0.0; OUT_CHUNK * 2],
+            chunk_buf: vec![0.0; OUT_CHUNK * 2],
             out_tmp: vec![0.0; 8192],
             reported_errors: 0,
             encode_errors: 0,
             monitor_ewma_us: 0.0,
-            output_ewma_us: 0.0,
             safety: 0,
             seen_xruns: 0,
             last_xrun: Duration::ZERO,
@@ -556,6 +796,7 @@ impl Worker {
             last_played_at: Duration::ZERO,
             last_captured: 0,
             last_captured_at: Duration::ZERO,
+            slot_full_logged: false,
             p,
         })
     }
@@ -566,7 +807,9 @@ impl Worker {
         while !self.p.stop.load(Ordering::Relaxed) {
             self.reconfigure_local();
             self.pump_input();
-            self.pump_output();
+            let timing = self.timing();
+            let urgent = self.service_peers(&timing);
+            self.service_local();
             self.track_occupancy();
             self.watch_device();
             let errs = self.p.counters.stream_errors.load(Ordering::Relaxed);
@@ -574,7 +817,14 @@ impl Worker {
                 log::warn!("오디오 스트림 에러 누적 {}회(장치 분리 등)", errs);
                 self.reported_errors = errs;
             }
-            std::thread::sleep(POLL);
+            // 은닉 마감이 가까우면 짧게 잔다(Windows 고해상도 타이머라도 0.5ms 폴링은 마감을 넘길 수 있다).
+            std::thread::sleep(if urgent { FINE_POLL } else { POLL });
+        }
+        // 정지: 피어 슬롯을 닫는다(콜백이 아직 돌면 남은 소리를 버린다).
+        for f in self.feeds.drain(..) {
+            let sh = &self.p.bank.slots[f.slot];
+            sh.playing.store(false, Ordering::Relaxed);
+            sh.state.store(SLOT_DRAIN, Ordering::Release);
         }
         log::info!("워커 종료");
     }
@@ -593,7 +843,10 @@ impl Worker {
 
     fn out_burst_dev(&self) -> u64 {
         match self.p.counters.out_cb_frames.load(Ordering::Relaxed) {
-            0 => self.p.info.buffer_frames as u64,
+            0 => match self.p.info.out_period_frames {
+                0 => self.p.info.buffer_frames as u64,
+                n => n as u64,
+            },
             n => n as u64,
         }
     }
@@ -701,12 +954,92 @@ impl Worker {
         self.ts = self.ts.wrapping_add(self.frame as u32);
     }
 
-    fn ring_fill(&self) -> u64 {
-        let consumed = self.p.counters.out_consumed.load(Ordering::Relaxed);
-        self.produced_out.saturating_sub(consumed)
+    fn timing(&mut self) -> FeedTiming {
+        let wall_us = self.p.epoch.elapsed().as_micros() as u64;
+        let out_burst = self.out_burst_dev() as usize;
+        self.tracker.observe(&self.p.counters, wall_us, out_burst, self.p.info.out_rate)
     }
 
-    /// xrun이 나면 출력 링 여유를 청크 하나씩 늘리고(최대 장치 버퍼 1개), 10초 동안 없으면 줄인다.
+    /// 피어 목록과 소스 슬롯을 맞춘다(새 피어에 빈 슬롯 배정, 사라진 피어 슬롯 해제).
+    fn sync_peer_slots(&mut self, net: &NetShared) {
+        for f in &mut self.feeds {
+            f.seen = false;
+        }
+        let out_rate = self.p.info.out_rate;
+        net.for_each_peer(|peer| {
+            let key = (peer as *const Peer as usize, peer.ssrc);
+            if let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) {
+                f.seen = true;
+                return;
+            }
+            let used = |s: usize| self.feeds.iter().any(|f| f.slot == s);
+            let free = (1..MAX_SOURCES)
+                .find(|&s| !used(s) && self.p.bank.slots[s].state.load(Ordering::Acquire) == SLOT_FREE);
+            let Some(slot) = free else {
+                if !self.slot_full_logged {
+                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", peer.id);
+                    self.slot_full_logged = true;
+                }
+                return;
+            };
+            let sh = &self.p.bank.slots[slot];
+            match PeerFeed::new(slot, key, out_rate, sh) {
+                Ok(f) => {
+                    sh.playing.store(false, Ordering::Relaxed);
+                    sh.state.store(SLOT_ACTIVE, Ordering::Release);
+                    self.feeds.push(f);
+                }
+                Err(e) => log::error!("피어 출력 소스 생성 실패: {e}"),
+            }
+        });
+        let bank = &self.p.bank;
+        self.feeds.retain(|f| {
+            if !f.seen {
+                let sh = &bank.slots[f.slot];
+                sh.playing.store(false, Ordering::Relaxed);
+                sh.state.store(SLOT_DRAIN, Ordering::Release);
+            }
+            f.seen
+        });
+    }
+
+    /// 반환: 은닉 마감이 가까운 피어가 있다(짧게 자야 함).
+    fn service_peers(&mut self, t: &FeedTiming) -> bool {
+        let Some(net) = self.p.net.clone() else {
+            return false;
+        };
+        self.sync_peer_slots(&net);
+        let counters = self.p.counters.clone();
+        let cb_seq = t.cb_seq;
+        let consistent = move || cb_seq.is_some_and(|s| counters.out_cb_begin.load(Ordering::SeqCst) == s);
+        let (mut fills, mut skipped, mut urgent) = (0u64, 0u64, false);
+        net.for_each_peer(|peer| {
+            let key = (peer as *const Peer as usize, peer.ssrc);
+            let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) else {
+                return;
+            };
+            let sh = &self.p.bank.slots[f.slot];
+            let g = peer.mix.lr_gains();
+            sh.set_gains(g, g);
+            peer.mix.level.store(sh.level.load());
+            let Some(prod) = self.p.prods.get_mut(f.slot) else {
+                return;
+            };
+            let ev = f.service(&mut peer.jitter.lock(), prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp);
+            fills += u64::from(ev.deadline_fill);
+            skipped += ev.skipped_frames;
+            urgent |= ev.urgent;
+        });
+        if fills > 0 {
+            self.p.stats.deadline_fills.fetch_add(fills, Ordering::Relaxed);
+        }
+        if skipped > 0 {
+            self.p.stats.skipped_frames.fetch_add(skipped, Ordering::Relaxed);
+        }
+        urgent
+    }
+
+    /// xrun이 나면 로컬 소스 여유를 청크 하나씩 늘리고(최대 장치 버퍼 1개), 10초 동안 없으면 줄인다.
     /// 콜백 간격이 들쭉날쭉하거나 워커 스케줄링이 늦는 환경(느린 CI 러너 포함)에 적응한다.
     fn adapt_safety(&mut self, chunk_dev: u64) {
         let xruns = self.p.counters.xruns.load(Ordering::Relaxed);
@@ -721,93 +1054,53 @@ impl Worker {
         }
     }
 
-    fn pump_output(&mut self) {
-        // 목표 수위 = 장치 출력 버퍼 1개 + 출력 청크 1개 + 적응 여유 (장치 레이트, 스테레오 샘플)
+    /// 로컬(모니터 + 탭) 소스. 로컬 FIFO가 입·출력 클럭 차를 흡수하고 자기 수위를 제어하므로, 소스 링은
+    /// 콜백이 소비한 만큼 "장치 버퍼 1개 + 청크 + 적응 여유"로 다시 채운다(모니터 경로는 GOAL 지표 밖).
+    fn service_local(&mut self) {
+        let ctl = &self.p.controls;
+        let mon = if ctl.monitor_enabled.load(Ordering::Relaxed) { ctl.monitor_gain.load() } else { 0.0 };
+        let sh = &self.p.bank.slots[LOCAL_SOURCE];
+        sh.set_gains((mon, mon), (1.0, 1.0));
         let chunk_dev = (OUT_CHUNK as u64 * self.p.info.out_rate as u64).div_ceil(INTERNAL_RATE as u64);
         self.adapt_safety(chunk_dev);
-        let target = (self.out_burst_dev() + chunk_dev + self.safety) * 2;
-        if self.ring_fill() >= target {
+        let target = self.out_burst_dev() + chunk_dev + self.safety;
+        let fill = |w: &Self| (w.p.prods[LOCAL_SOURCE].occupied_len() / 2 + w.local_rs.available()) as u64;
+        if fill(self) >= target {
             return;
         }
-        // 장치 클럭은 재생 프레임 수(언더런 포함)로 추정한다(PR #5 H-1).
-        let played_frames = self.p.counters.out_played_frames.load(Ordering::Relaxed);
-        let wall_us = self.p.epoch.elapsed().as_micros() as u64;
-        let dev_now = self.clock.update(wall_us, played_frames);
         // 한 번에 너무 많이 만들지 않도록 상한(장치 버퍼 4개분)
         let max_chunks = ((self.out_burst_dev() * 4) / chunk_dev.max(1) + 2) as usize;
         let mut produced = 0;
-        while self.ring_fill() < target && produced < max_chunks {
-            self.produce_chunk();
+        while fill(self) < target && produced < max_chunks {
+            self.local.pull(&mut self.local_buf);
+            self.local_rs.push(&self.local_buf);
+            let prod = &mut self.p.prods[LOCAL_SOURCE];
+            loop {
+                let room = (prod.vacant_len() / 2).min(self.out_tmp.len() / 2);
+                let n = if room == 0 { 0 } else { self.local_rs.pop(&mut self.out_tmp[..room * 2]) };
+                if n == 0 {
+                    break;
+                }
+                prod.push_slice(&self.out_tmp[..n * 2]);
+            }
             produced += 1;
         }
         if produced > 0 {
-            if let Some(net) = self.p.net.as_ref() {
-                net.for_each_peer(|peer| peer.jitter.lock().end_burst(dev_now, wall_us));
-            }
             self.local.end_burst();
+            self.p.bank.slots[LOCAL_SOURCE].playing.store(true, Ordering::Relaxed);
             self.p.stats.local_corrections.store(self.local.corrections, Ordering::Relaxed);
             self.p.stats.local_underruns.store(self.local.underruns, Ordering::Relaxed);
         }
     }
 
-    fn produce_chunk(&mut self) {
-        self.bus.fill(0.0);
-        self.tap_bus.fill(0.0);
-
-        // 로컬 입력(모니터 + 탭)
-        self.local.pull(&mut self.local_buf);
-        let ctl = &self.p.controls;
-        if ctl.monitor_enabled.load(Ordering::Relaxed) {
-            mixer::add_stereo(&mut self.bus, &self.local_buf, ctl.monitor_gain.load());
-        }
-        mixer::add_stereo(&mut self.tap_bus, &self.local_buf, 1.0);
-
-        // 피어
-        if let Some(net) = self.p.net.as_ref() {
-            let bus = &mut self.bus;
-            let tap = &mut self.tap_bus;
-            let pb = &mut self.peer_buf;
-            net.for_each_peer(|peer| {
-                peer.jitter.lock().pop(pb);
-                let (gl, gr) = peer.mix.lr_gains();
-                peer.mix.level.store(mixer::rms(pb));
-                mixer::add_stereo_lr(bus, pb, gl, gr);
-                mixer::add_stereo_lr(tap, pb, gl, gr);
-            });
-        }
-
-        mixer::scale(&mut self.bus, ctl.master_gain.load());
-        mixer::soft_clip_buf(&mut self.bus);
-
-        // 믹스 탭
-        if let Some(mut guard) = self.p.tap.prod.try_lock() {
-            if let Some(prod) = guard.as_mut() {
-                mixer::soft_clip_buf(&mut self.tap_bus);
-                let _ = prod.push_slice(&self.tap_bus);
-            }
-        }
-
-        self.out_rs.push(&self.bus);
-        loop {
-            let frames = self.out_rs.pop(&mut self.out_tmp);
-            if frames == 0 {
-                break;
-            }
-            let pushed = self.p.out_prod.push_slice(&self.out_tmp[..frames * 2]);
-            self.produced_out += pushed as u64;
-        }
-    }
-
-    /// 로컬 경로 점유량(시간) 이동 평균(리뷰 M12).
+    /// 모니터 경로 점유량(시간) 이동 평균(리뷰 M12).
     fn track_occupancy(&mut self) {
         let in48 = (self.in_rs.available() + self.local.frames()) as f64;
-        let out_ring = self.ring_fill() as f64 / 2.0 + self.out_rs.available() as f64;
-        let out_us = out_ring * 1e6 / self.p.info.out_rate.max(1) as f64;
+        let local_dev = (self.p.prods[LOCAL_SOURCE].occupied_len() / 2 + self.local_rs.available()) as f64;
+        let out_us = local_dev * 1e6 / self.p.info.out_rate.max(1) as f64;
         let mon_us = in48 * 1e6 / INTERNAL_RATE as f64 + out_us;
         self.monitor_ewma_us += (mon_us - self.monitor_ewma_us) * 0.01;
-        self.output_ewma_us += (out_us - self.output_ewma_us) * 0.01;
         self.p.stats.monitor_occupancy_us.store(self.monitor_ewma_us as u64, Ordering::Relaxed);
-        self.p.stats.output_occupancy_us.store(self.output_ewma_us as u64, Ordering::Relaxed);
     }
 }
 
@@ -1040,6 +1333,313 @@ mod tests {
                 );
                 assert!(f.frames() < f.cap_frames());
             }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // 콜백 구동 믹스 결정적 시뮬레이션(P1-0): 송신 장치 → 패킷 → 지터 버퍼 → PeerFeed(워커) → OutputRt(콜백)
+    // ------------------------------------------------------------------------
+
+    use crate::engine::codec::Encoder as SimEncoder;
+    use crate::engine::config::CodecKind;
+    use crate::engine::jitter::{JitterSettings, JitterStats};
+    use crate::engine::rt::output_path;
+    use crate::net::packet::{Header, PacketType};
+
+    struct FeedSim {
+        in_buf: usize,
+        out_buf: usize,
+        frame: usize,
+        out_phase_us: u64,
+        seconds: f64,
+        /// (주기 µs, 멈춤 µs): 출력 콜백이 멈췄다가 몰아서 따라잡는다.
+        out_stall: Option<(u64, u64)>,
+        /// 워커 기상 지연 상한(µs).
+        worker_jitter_us: u64,
+        /// 출력 콜백이 격자보다 0..이 값(µs) 이르게 온다(실장비 WASAPI 독점 프로브: 최대 ≈1.7ms 이름, M3).
+        out_early_us: u64,
+        /// 망 지연 지터 상한(µs, 기본 0.1ms).
+        net_jitter_us: u64,
+        /// 패킷 손실 확률(0..1).
+        loss: f64,
+        seed: u64,
+    }
+
+    struct FeedSimResult {
+        js: JitterStats,
+        /// 실행 끝의 피어 적응 여유(장치 프레임).
+        margin: usize,
+        /// 전반/후반 xrun 수(적응 효과 확인용).
+        xruns_halves: (u64, u64),
+        /// 4초 이후(지연 통계 창이 찬 뒤) 구간의 (은닉, 마감 채움, 보정) 증가량
+        steady: (u64, u64, u64),
+        skipped: u64,
+        xruns: u64,
+        /// (시각 s, 벽시계 버퍼 ms)
+        wall_trace: Vec<(f64, f32)>,
+        /// 출력 L 채널(불연속 검사용, 2초 이후)
+        out: Vec<f32>,
+    }
+
+    fn run_feed_sim(p: FeedSim) -> FeedSimResult {
+        const RATE: f64 = 48_000.0;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(p.seed);
+        let counters = Arc::new(AudioCounters::default());
+        let controls = Arc::new(MixControls::default());
+        let (mut rt, mut feed) = output_path(counters.clone(), controls);
+        let slot = 1;
+        let sh = &feed.bank.slots[slot];
+        sh.set_gains((1.0, 1.0), (1.0, 1.0));
+        sh.state.store(SLOT_ACTIVE, Ordering::Release);
+        let mut pf = PeerFeed::new(slot, (0, 0), 48_000, sh).unwrap();
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0 });
+        let mut tracker = CallbackTracker::new(48_000);
+        let mut enc = SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap();
+        let fcode = frame_code_from_samples(p.frame).unwrap();
+        let mut chunk = vec![0f32; OUT_CHUNK * 2];
+        let mut tmp = vec![0f32; 8192];
+        let mut dev = vec![0f32; p.out_buf * 2];
+        let mut payload = vec![0u8; MAX_PAYLOAD_BYTES];
+
+        // 송신 상태
+        let (mut seq, mut ts, mut acc, mut phase) = (7u32, 1000u32, 0usize, 0.0f64);
+        let mut pending: Vec<(u64, Header, Vec<u8>)> = Vec::new();
+        let in_period = p.in_buf as f64 / RATE * 1e6;
+        let out_period = p.out_buf as f64 / RATE * 1e6;
+        let (mut k_in, mut k_out) = (1u64, 0u64);
+        let mut t_w = 0u64;
+        let end_us = (p.seconds * 1e6) as u64;
+        let mut res = FeedSimResult {
+            js: JitterStats::default(),
+            margin: 0,
+            xruns_halves: (0, 0),
+            steady: (0, 0, 0),
+            skipped: 0,
+            xruns: 0,
+            wall_trace: Vec::new(),
+            out: Vec::new(),
+        };
+        let mut half_xruns: Option<u64> = None;
+        let mut base: Option<(JitterStats, u64)> = None;
+        let mut fills = 0u64;
+        let mut next_trace = 2_000_000u64;
+        // 출력 콜백 k의 예정 시각(멈춤 구간에 걸리면 구간 끝으로 밀림 → 몰아서 따라잡음).
+        // 이른 콜백: k마다 결정적 의사난수로 0..out_early_us만큼 앞당긴다(순서는 유지: 이름 < 주기).
+        let out_due = |k: u64| -> u64 {
+            let early = if p.out_early_us > 0 {
+                let h = (k ^ p.seed).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                (h >> 11) % p.out_early_us.min(out_period as u64 * 9 / 10)
+            } else {
+                0
+            };
+            let nominal = (p.out_phase_us + (k as f64 * out_period) as u64).saturating_sub(early);
+            match p.out_stall {
+                Some((every, len)) if nominal % every < len && nominal > every => nominal - nominal % every + len,
+                _ => nominal,
+            }
+        };
+        loop {
+            let t_in = (k_in as f64 * in_period) as u64;
+            let t_out = out_due(k_out);
+            let t_arr = pending.iter().map(|x| x.0).min().unwrap_or(u64::MAX);
+            let t = t_in.min(t_out).min(t_arr).min(t_w);
+            if t > end_us {
+                break;
+            }
+            if t == t_arr {
+                let i = pending.iter().position(|x| x.0 == t).unwrap();
+                let (_, h, pl) = pending.swap_remove(i);
+                jb.insert(&h, &pl, t);
+            } else if t == t_in {
+                // 입력 콜백: in_buf 샘플 캡처 → 프레임이 차면 패킷(망 지연 0.2ms + 0..0.1ms)
+                acc += p.in_buf;
+                while acc >= p.frame {
+                    let pcm: Vec<f32> = (0..p.frame)
+                        .map(|_| {
+                            let v = (phase * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5;
+                            phase = (phase + 440.0 / RATE).fract();
+                            v
+                        })
+                        .collect();
+                    let n = enc.encode(&pcm, &mut payload).unwrap();
+                    let h = Header { ptype: PacketType::Audio, ssrc: 1, seq, timestamp: ts, flags: 0, frame_code: fcode };
+                    let delay = 200 + rng.gen_range(0..p.net_jitter_us.max(100));
+                    if !(p.loss > 0.0 && rng.gen_bool(p.loss)) {
+                        pending.push((t + delay, h, payload[..n].to_vec()));
+                    }
+                    seq = seq.wrapping_add(1);
+                    ts = ts.wrapping_add(p.frame as u32);
+                    acc -= p.frame;
+                }
+                k_in += 1;
+            } else if t == t_out {
+                rt.process(&mut dev, 2);
+                if t >= 2_000_000 {
+                    res.out.extend(dev.as_chunks::<2>().0.iter().map(|f| f[0]));
+                }
+                k_out += 1;
+            } else {
+                // 워커 반복(Worker::timing + service_peers와 같은 순서)
+                let timing = tracker.observe(&counters, t, p.out_buf, 48_000);
+                let ev = pf.service(&mut jb, &mut feed.prods[slot], &feed.bank.slots[slot], &timing, &|| true, &mut chunk, &mut tmp);
+                fills += u64::from(ev.deadline_fill);
+                res.skipped += ev.skipped_frames;
+                if t >= end_us / 2 && half_xruns.is_none() {
+                    half_xruns = Some(counters.xruns.load(Ordering::Relaxed));
+                }
+                if t >= 4_000_000 && base.is_none() {
+                    base = Some((jb.stats(), fills));
+                }
+                if t >= next_trace {
+                    res.wall_trace.push((t as f64 / 1e6, jb.stats().wall_buffer_ms));
+                    next_trace += 500_000;
+                }
+                t_w = t + 500 + if p.worker_jitter_us > 0 { rng.gen_range(0..p.worker_jitter_us) } else { 0 };
+            }
+        }
+        res.js = jb.stats();
+        let (b, f) = base.unwrap_or_default();
+        res.steady = (res.js.concealed - b.concealed, fills - f, res.js.corrections() - b.corrections());
+        res.xruns = counters.xruns.load(Ordering::Relaxed);
+        let h = half_xruns.unwrap_or(res.xruns);
+        res.xruns_halves = (h, res.xruns - h);
+        res.margin = pf.margin();
+        res
+    }
+
+    fn discontinuities(x: &[f32]) -> usize {
+        x.windows(2).filter(|w| (w[1] - w[0]).abs() > 0.08).count()
+    }
+
+    #[test]
+    fn callback_mix_sim_phase_and_buffer_matrix() {
+        // 위상이 다른 입·출력(송신 입력 버퍼 ≠ 수신 출력 버퍼, 출력 위상 0..9ms), 워커 기상 지연 0..0.8ms.
+        // 지터 없는 링크: 정착 후 은닉·마감 채움·보정 0, 출력 불연속 0, xrun 0.
+        for (in_buf, out_buf, frame) in [(128, 128, 120), (480, 480, 120), (128, 480, 240), (480, 128, 120), (256, 1024, 240), (1024, 64, 480)] {
+            for phase in [0u64, 1300, 4700, 9100] {
+                let r = run_feed_sim(FeedSim {
+                    in_buf,
+                    out_buf,
+                    frame,
+                    out_phase_us: phase,
+                    seconds: 10.0,
+                    out_stall: None,
+                    worker_jitter_us: 800,
+                    out_early_us: 0,
+                    net_jitter_us: 0,
+                    loss: 0.0,
+                    seed: phase + in_buf as u64,
+                });
+                let d = discontinuities(&r.out);
+                println!(
+                    "sim in {in_buf} out {out_buf} F {frame} 위상 {phase}: 정착 후 은닉/마감/보정 {:?}, buffer {:.2}/{:.2}ms wall {:.2}ms, 불연속 {d}, xruns {}",
+                    r.steady, r.js.buffer_ms, r.js.target_ms, r.js.wall_buffer_ms, r.xruns
+                );
+                assert_eq!(r.steady, (0, 0, 0), "in {in_buf} out {out_buf} F {frame} 위상 {phase}");
+                assert_eq!(d, 0, "in {in_buf} out {out_buf} F {frame} 위상 {phase}: 불연속");
+                assert_eq!(r.xruns, 0, "in {in_buf} out {out_buf} F {frame} 위상 {phase}: xrun");
+                assert!(r.out.len() > 48_000 * 5);
+            }
+        }
+    }
+
+    #[test]
+    fn callback_mix_sim_output_stalls_do_not_accumulate_latency() {
+        // 출력 콜백이 1초마다 8ms 멈췄다 몰아서 따라잡는다 → 소스 링이 모자라 콜백이 0을 채운다(언더런).
+        // 그만큼 스트림을 건너뛰지 않으면 매번 재생이 늦어져 지연이 쌓인다(초당 수 ms).
+        for out_buf in [128usize, 256] {
+            let r = run_feed_sim(FeedSim {
+                in_buf: 128,
+                out_buf,
+                frame: 240,
+                out_phase_us: 700,
+                seconds: 20.0,
+                out_stall: Some((1_000_000, 8_000)),
+                worker_jitter_us: 300,
+                out_early_us: 0,
+                net_jitter_us: 0,
+                loss: 0.0,
+                seed: 5,
+            });
+            let mean = |a: f64, b: f64| {
+                let v: Vec<f32> = r.wall_trace.iter().filter(|x| x.0 >= a && x.0 < b).map(|x| x.1).collect();
+                v.iter().sum::<f32>() / v.len().max(1) as f32
+            };
+            let (early, late) = (mean(3.0, 7.0), mean(15.0, 20.0));
+            println!(
+                "sim stall out {out_buf}: xruns {}, 건너뜀 {} 프레임, 벽시계 버퍼 3~7s {early:.2}ms → 15~20s {late:.2}ms, 목표 {:.2}ms, 은닉 {}, 정착 후 보정 {}",
+                r.xruns, r.skipped, r.js.target_ms, r.js.concealed, r.steady.2
+            );
+            // 멈춤이 실제로 언더런을 일으킨다. 첫 언더런 뒤에는 피어 적응 여유(M4)가 늘어 같은 멈춤의 일부를 흡수한다.
+            assert!(r.xruns >= 3, "멈춤이 실제로 언더런을 일으켜야 함: {}", r.xruns);
+            assert!(r.margin > 0, "언더런 뒤 적응 여유가 늘어야 함");
+            assert!(r.skipped > 0, "언더런만큼 건너뛰어야 함");
+            // 건너뛰기가 타이밍을 바로 되돌리므로 깊이 보정(샘플 버림)이 필요 없다. 건너뛰지 않으면 매 멈춤마다
+            // 늦어진 만큼을 패킷당 1~2샘플씩 버려 되돌린다(보정 수백 회, 버퍼는 목표 위로 치우침).
+            assert_eq!(r.steady.2, 0, "언더런 뒤 보정이 필요 없어야 함");
+            assert!((late - early).abs() < 1.5, "지연 누적: {early:.2} → {late:.2}ms");
+            assert!((late - r.js.target_ms).abs() < 3.0, "버퍼가 목표 근처: {late:.2} vs {:.2}", r.js.target_ms);
+        }
+    }
+
+    #[test]
+    fn callback_mix_sim_early_callbacks_no_premature_concealment() {
+        // 실장비 WASAPI 독점처럼 출력 콜백이 격자보다 최대 1.7ms 이르게 온다(PR #11 M3). 망 지터 없는 링크:
+        // 실제 데이터가 선행량(다음 콜백 + 2청크)으로 미리 있으므로 정착 후 은닉·마감 채움·보정 0, 불연속 0.
+        for (in_buf, out_buf, frame) in [(128, 128, 120), (128, 144, 120), (96, 144, 240), (480, 480, 240)] {
+            for phase in [0u64, 2100] {
+                let r = run_feed_sim(FeedSim {
+                    in_buf,
+                    out_buf,
+                    frame,
+                    out_phase_us: phase,
+                    seconds: 10.0,
+                    out_stall: None,
+                    worker_jitter_us: 600,
+                    out_early_us: 1700,
+                    net_jitter_us: 0,
+                    loss: 0.0,
+                    seed: 11 + phase + out_buf as u64,
+                });
+                let d = discontinuities(&r.out);
+                println!(
+                    "sim early in {in_buf} out {out_buf} F {frame} 위상 {phase}: 정착 후 은닉/마감/보정 {:?}, 건너뜀 {}, xruns {}, 여유 {}, buffer {:.2}/{:.2}ms, 불연속 {d}",
+                    r.steady, r.skipped, r.xruns, r.margin, r.js.buffer_ms, r.js.target_ms
+                );
+                assert_eq!(r.steady, (0, 0, 0), "in {in_buf} out {out_buf} 위상 {phase}");
+                assert_eq!(d, 0, "in {in_buf} out {out_buf} 위상 {phase}: 불연속");
+                assert_eq!(r.xruns, 0, "in {in_buf} out {out_buf} 위상 {phase}: xrun");
+            }
+        }
+    }
+
+    #[test]
+    fn callback_mix_sim_early_callbacks_with_loss_conceal_without_zero_fill() {
+        // 이른 콜백(최대 1.7ms) + 손실 5%(PR #11 M3): 빠진 패킷은 은닉 마감(다음 콜백 예상 − 1.5ms)에 PLC로
+        // 채운다. 콜백이 마감보다 이르게 와도 선행량(다음 콜백 + 2청크)이 남아 있어야 하므로 0 채움(언더런)·
+        // 건너뛰기가 없어야 하고, 적응 여유(M4)도 늘지 않는다(기본 상태 지연 불변). 은닉은 손실만큼 생긴다.
+        for out_buf in [128usize, 144] {
+            let r = run_feed_sim(FeedSim {
+                in_buf: 128,
+                out_buf,
+                frame: 120,
+                out_phase_us: 900,
+                seconds: 30.0,
+                out_stall: None,
+                worker_jitter_us: 600,
+                out_early_us: 1700,
+                net_jitter_us: 0,
+                loss: 0.05,
+                seed: 3 + out_buf as u64,
+            });
+            println!(
+                "sim early+loss out {out_buf}: xruns 전반 {} / 후반 {}, 건너뜀 {}, 여유 {}프레임, 은닉 {}, buffer {:.2}/{:.2}ms wall {:.2}ms",
+                r.xruns_halves.0, r.xruns_halves.1, r.skipped, r.margin, r.js.concealed, r.js.buffer_ms, r.js.target_ms, r.js.wall_buffer_ms
+            );
+            assert!(r.js.concealed > 0, "손실이 은닉되어야 함");
+            assert_eq!((r.xruns, r.skipped), (0, 0), "이른 콜백에 0 채움 없음");
+            assert_eq!(r.margin, 0, "언더런이 없으면 여유도 0");
+            assert!((r.js.wall_buffer_ms - r.js.target_ms).abs() < 4.0, "버퍼가 목표 근처");
         }
     }
 }
