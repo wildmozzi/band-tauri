@@ -3,7 +3,6 @@ import multer from 'multer'
 import * as path from 'path'
 import * as fs from 'fs'
 import { v4 as uuidv4 } from 'uuid'
-import { supabaseAdmin } from '../lib/supabase'
 import { requireAuth, getUserIdFromRequest } from '../lib/auth'
 import { uploadLimiter } from '../lib/rateLimits'
 import {
@@ -15,95 +14,35 @@ import {
   removeUploadOwner,
   matchesFileSignature,
 } from '../lib/uploads'
+import { safeUnlink, tryDecodeFilename } from '../lib/files'
 import { convertMp3ToMidi } from '../services/amtService'
 import { separateAudioWithProvider, currentProvider } from '../services/demucsProvider'
 import { convertPdfToMusicXml } from '../services/omrService'
-import { prepareStemForUpload, CONTENT_TYPES, type PreparedStem, type StemFormat } from '../services/stemEncoder'
-import { STEM_BUCKET, stemStoragePaths } from '../lib/stemStorage'
+import { ServiceError } from '../services/errors'
+import { getDefaultStemSeparationService } from '../services/stemSeparationService'
+import { separationIdParams, uploadFilenameParams } from './schemas'
 
+/**
+ * 악보/음원 API — HTTP 입출력과 입력 검증만.
+ * 음원분리 결과 저장·조회·삭제는 StemSeparationService → stem_separations / Storage repository.
+ */
 const router = express.Router()
+const stems = getDefaultStemSeparationService()
 
-// Multer이 latin1로 파일명을 읽는 경우 UTF-8로 변환 (이미 한글이면 그대로)
-function tryDecodeFilename(name: string): string {
-  if (/[가-힣ᄀ-ᇿ㄰-㆏]/.test(name)) return name
-  try {
-    const decoded = Buffer.from(name, 'latin1').toString('utf8')
-    if (/[가-힣ᄀ-ᇿ㄰-㆏]/.test(decoded)) return decoded
-  } catch {}
-  return name
-}
-
-if (supabaseAdmin) {
+if (stems.available) {
   console.log('[Music Routes] Supabase admin client initialized')
 } else {
   console.log('[Music Routes] Supabase not configured - stem storage disabled')
 }
 
-function safeUnlink(p: string | null | undefined) {
-  if (!p) return
-  try {
-    if (fs.existsSync(p)) fs.unlinkSync(p)
-  } catch {
-    // 무시
+/** 파일명 파라미터 검증. 실패 시 400 응답 후 null */
+function parseFilename(req: Request, res: Response): string | null {
+  const parsed = uploadFilenameParams.safeParse(req.params)
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
+    return null
   }
-}
-
-async function uploadStemsToStorage(
-  stems: Record<string, string>,
-  userId: string | null,
-  separationId: string
-): Promise<Record<string, string>> {
-  if (!supabaseAdmin) throw new Error('Supabase not configured')
-  const bucket = supabaseAdmin.storage.from(STEM_BUCKET)
-
-  const folder = `${userId || 'anonymous'}/${separationId}`
-  const urls: Record<string, string> = {}
-
-  const put = async (stemName: string, file: string, ext: StemFormat) => {
-    const storagePath = `${folder}/${stemName}.${ext}`
-    const { error } = await bucket.upload(storagePath, fs.readFileSync(file), {
-      contentType: CONTENT_TYPES[ext],
-      // 경로가 분리 ID별로 고유해 내용이 바뀌지 않는다 → 브라우저 캐시로 재로딩 트래픽 절감
-      cacheControl: '31536000',
-      upsert: true,
-    })
-    return { storagePath, error }
-  }
-
-  for (const [stemName, localPath] of Object.entries(stems)) {
-    if (!localPath || !fs.existsSync(localPath)) continue
-
-    let prepared: PreparedStem | null = null
-    try {
-      prepared = await prepareStemForUpload(localPath)
-      let { storagePath, error: uploadError } = await put(stemName, prepared.path, prepared.ext)
-
-      if (uploadError && prepared.ext === 'ogg') {
-        // 버킷 MIME 제한 등으로 ogg가 거부되면 WAV로라도 올린다
-        console.warn(`[Storage] ogg upload rejected for ${stemName}, falling back to wav:`, uploadError.message)
-        ;({ storagePath, error: uploadError } = await put(stemName, localPath, 'wav'))
-      }
-
-      if (uploadError) {
-        console.error(`[Storage] Upload failed for ${stemName}:`, uploadError)
-        continue
-      }
-
-      const { data } = bucket.getPublicUrl(storagePath)
-      urls[stemName] = data.publicUrl
-
-      const before = fs.statSync(localPath).size
-      const after = prepared.ext === 'ogg' && fs.existsSync(prepared.path) ? fs.statSync(prepared.path).size : before
-      console.log(`[Storage] Uploaded ${stemName} to ${storagePath} (${before} → ${after} bytes)`)
-    } catch (error) {
-      console.error(`[Storage] Error uploading ${stemName}:`, error)
-    } finally {
-      safeUnlink(localPath)
-      if (prepared && prepared.path !== localPath) safeUnlink(prepared.path)
-    }
-  }
-
-  return urls
+  return parsed.data.filename
 }
 
 // Multer 설정: 파일 저장 위치 및 파일명 설정
@@ -301,7 +240,8 @@ router.post('/upload-score', uploadLimiter, requireAuth, upload.single('file'), 
  */
 router.get('/file/:filename', requireAuth, (req: Request, res: Response) => {
   try {
-    const filename = req.params['filename'] as string
+    const filename = parseFilename(req, res)
+    if (filename === null) return
     const filePath = resolveUploadPath(filename)
     if (!filePath) {
       return res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
@@ -336,7 +276,8 @@ router.get('/file/:filename', requireAuth, (req: Request, res: Response) => {
  */
 router.delete('/file/:filename', requireAuth, (req: Request, res: Response) => {
   try {
-    const filename = req.params['filename'] as string
+    const filename = parseFilename(req, res)
+    if (filename === null) return
     const filePath = resolveUploadPath(filename)
     if (!filePath) {
       return res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
@@ -420,69 +361,32 @@ router.post('/separate-stems', uploadLimiter, requireAuth, upload.single('file')
     }
 
     // Supabase가 설정되어 있으면 Storage에 업로드하고 DB에 저장
-    if (!supabaseAdmin) {
+    if (!stems.available) {
       console.warn('[Music Separate] Supabase 미설정 - 로컬 파일로 반환 (히스토리 저장 안 됨)')
-    }
-    if (supabaseAdmin) {
+    } else {
       try {
-        const stemUrls = await uploadStemsToStorage(
+        const stemUrls = await stems.uploadStems(
           separationResult.stems as Record<string, string>,
           userId,
           separationId
         )
 
-        // 중복 파일명 처리: 같은 이름의 미만료 기록이 있으면 (2), (3)... 붙임
-        let recordFilename = originalFilename
-        try {
-          const baseExt = path.extname(originalFilename)
-          const baseName = path.basename(originalFilename, baseExt)
-          let dupQuery = supabaseAdmin
-            .from('stem_separations')
-            .select('original_filename')
-            .gt('expires_at', new Date().toISOString())
-            .ilike('original_filename', `${baseName}%`)
-          if (userId) {
-            dupQuery = dupQuery.eq('user_id', userId)
-          } else {
-            dupQuery = dupQuery.is('user_id', null)
-          }
-          const { data: existing } = await dupQuery
+        const recordFilename = await stems.resolveRecordFilename(userId, originalFilename)
 
-          const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-          const duplicates = (existing || []).filter(r => {
-            const n = tryDecodeFilename(r.original_filename)
-            if (n === originalFilename) return true
-            return new RegExp(`^${escapeRegex(baseName)} \\(\\d+\\)${escapeRegex(baseExt)}$`).test(n)
-          })
-          if (duplicates.length > 0) {
-            recordFilename = `${baseName} (${duplicates.length + 1})${baseExt}`
-          }
-        } catch (dupErr) {
-          console.warn('[DB] 중복 파일명 체크 실패, 원본 파일명 사용:', dupErr)
-        }
-
-        const { error: dbError } = await supabaseAdmin
-          .from('stem_separations')
-          .insert({
-            id: separationId,
-            user_id: userId,
-            original_filename: recordFilename,
-            original_file_size: file.size,
-            storage_folder: `${userId || 'anonymous'}/${separationId}`,
-            vocals_url: stemUrls.vocals || null,
-            drums_url: stemUrls.drums || null,
-            bass_url: stemUrls.bass || null,
-            piano_url: stemUrls.piano || null,
-            guitar_url: stemUrls.guitar || null,
-            other_url: stemUrls.other || null,
-            status: 'completed'
-          })
-
-        if (dbError) {
-          console.error('[DB] Failed to save separation record:', dbError)
-        } else {
-          console.log(`[DB] Separation record saved: ${separationId} as "${recordFilename}"`)
-        }
+        await stems.saveRecord({
+          id: separationId,
+          user_id: userId,
+          original_filename: recordFilename,
+          original_file_size: file.size,
+          storage_folder: `${userId || 'anonymous'}/${separationId}`,
+          vocals_url: stemUrls.vocals || null,
+          drums_url: stemUrls.drums || null,
+          bass_url: stemUrls.bass || null,
+          piano_url: stemUrls.piano || null,
+          guitar_url: stemUrls.guitar || null,
+          other_url: stemUrls.other || null,
+          status: 'completed'
+        })
 
         if (fs.existsSync(file.path)) fs.unlinkSync(file.path)
 
@@ -530,7 +434,7 @@ router.post('/separate-stems', uploadLimiter, requireAuth, upload.single('file')
  */
 router.get('/stem-history', async (req: Request, res: Response) => {
   try {
-    if (!supabaseAdmin) {
+    if (!stems.available) {
       return res.status(503).json({ success: false, error: 'Supabase not configured' })
     }
 
@@ -540,22 +444,8 @@ router.get('/stem-history', async (req: Request, res: Response) => {
       return res.status(401).json({ success: false, error: '로그인이 필요합니다.' })
     }
 
-    const query = supabaseAdmin
-      .from('stem_separations')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('status', 'completed')
-      .gt('expires_at', new Date().toISOString())
-      .order('created_at', { ascending: false })
-      .limit(50)
-
-    const { data, error } = await query
-
-    if (error) {
-      return res.status(500).json({ success: false, error: error.message })
-    }
-
-    return res.json({ success: true, separations: data || [] })
+    const separations = await stems.listHistory(userId)
+    return res.json({ success: true, separations })
   } catch (error) {
     return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
   }
@@ -567,48 +457,25 @@ router.get('/stem-history', async (req: Request, res: Response) => {
  */
 router.delete('/stem-separation/:id', async (req: Request, res: Response) => {
   try {
-    if (!supabaseAdmin) {
+    if (!stems.available) {
       return res.status(503).json({ success: false, error: 'Supabase not configured' })
     }
 
-    const { id } = req.params
     const userId = await getUserIdFromRequest(req)
     if (!userId) {
       return res.status(401).json({ success: false, error: '로그인이 필요합니다.' })
     }
 
-    const { data: separation, error: fetchError } = await supabaseAdmin
-      .from('stem_separations')
-      .select('*')
-      .eq('id', id)
-      .single()
-
-    if (fetchError || !separation) {
+    // 형식이 틀린 id는 DB에 없는 것과 같다 (기존 동작: 조회 실패 → 404)
+    const parsed = separationIdParams.safeParse(req.params)
+    if (!parsed.success) {
       return res.status(404).json({ success: false, error: '분리 결과를 찾을 수 없습니다.' })
     }
 
-    if (separation.user_id !== userId) {
-      return res.status(403).json({ success: false, error: '삭제 권한이 없습니다.' })
-    }
-
-    // .ogg(신규)와 .wav(이전 기록·폴백) 모두 삭제
-    const { error: removeError } = await supabaseAdmin.storage
-      .from(STEM_BUCKET)
-      .remove(stemStoragePaths(separation.storage_folder))
-    if (removeError) {
-      console.error(`[Delete] Storage 삭제 실패 (${id}):`, removeError.message)
-      return res.status(500).json({ success: false, error: '스템 파일 삭제에 실패했습니다.' })
-    }
-
-    const { error: deleteError } = await supabaseAdmin.from('stem_separations').delete().eq('id', id)
-
-    if (deleteError) {
-      return res.status(500).json({ success: false, error: deleteError.message })
-    }
-
-    console.log(`[Delete] Separation deleted: ${id}`)
+    await stems.deleteSeparation(userId, parsed.data.id)
     return res.json({ success: true, message: '분리 결과가 삭제되었습니다.' })
   } catch (error) {
+    if (error instanceof ServiceError) return res.status(error.status).json(error.body)
     return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
   }
 })

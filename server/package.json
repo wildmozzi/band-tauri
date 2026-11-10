@@ -31,7 +31,8 @@
         "node-cron": "^3.0.3",
         "typescript": "^5.9.2",
         "uuid": "^13.0.0",
-        "ws": "^8.18.3"
+        "ws": "^8.18.3",
+        "zod": "^3.25.76"
     },
     "devDependencies": {
         "@types/node-cron": "^3.0.11",
