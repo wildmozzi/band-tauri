@@ -38,6 +38,14 @@ export function createSupabaseMock() {
 
   const client = {
     from: vi.fn((table: string) => builder(table)),
+    /** rpc(fn) 결과는 setResult('rpc:<fn>', ...)로 정한다 */
+    rpc: vi.fn(async (fn: string, args?: unknown) => {
+      const call: Call = { table: `rpc:${fn}`, chain: [['rpc', [args]]] }
+      calls.push(call)
+      const r = results.get(call.table)
+      const v = typeof r === 'function' ? r(call) : r
+      return { data: v?.data ?? null, error: v?.error ?? null }
+    }),
     channel: vi.fn(() => channel),
     removeChannel: vi.fn(),
     auth: { updateUser: vi.fn(async () => ({ data: {}, error: null as unknown })) },

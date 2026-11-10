@@ -1,28 +1,37 @@
 /**
- * 합주실 목록·내 방 서버 상태 (TanStack Query). 화면/페이지 훅은 Supabase를 직접 부르지 않는다.
- * 방 생성·비밀번호는 서버 API(services/roomApi.ts) 경유, 방 상세(RoomDetail)는 이 계층 밖이다.
+ * 합주실 목록·내 방·방 상세 서버 상태 (TanStack Query). 화면/페이지 훅은 Supabase를 직접 부르지 않는다.
+ * 방 생성·비밀번호는 서버 API(services/roomApi.ts) 경유. 방 상세 조회는 roomApi.fetchRoomById(get_room RPC).
  *
  * 쿼리 키
- *   ['rooms', 'list']          공개 합주실 목록 (DB 행 전체, 화면에서 publicRooms/toRoom 변환)
- *   ['rooms', 'mine', userId]  내가 만든 방
+ *   ['rooms', 'list']            공개 합주실 목록 (DB 행 전체, 화면에서 publicRooms/toRoom 변환)
+ *   ['rooms', 'mine', userId]    내가 만든 방
+ *   ['rooms', 'detail', roomId]  방 상세 (RoomDetail, 기본값을 채운 DetailRoom). 비공개 방도 id로 조회된다
  *
  * 무효화 규칙
- *   rooms 테이블 실시간 변경 → 목록·내 방 모두 무효화(구독은 useRoomsQuery가 켜져 있는 동안만).
- *     내 방이 비활성(모달 닫힘)이면 stale 표시만 하므로 요청은 늘지 않는다
+ *   rooms 테이블 실시간 변경 → 목록·내 방·상세 모두 무효화(구독은 useRoomsQuery가 켜져 있는 동안만).
+ *     비활성 쿼리(닫힌 모달, 떠난 상세)는 stale 표시만 하므로 요청은 늘지 않는다
  *   내 방 모달 열기 → 열 때마다 서버에서 다시 읽는다(첫 열기 포함)
  *   내 방 삭제   → 내 방 캐시에서 제거 + 목록 무효화
  *   내 방 수정   → 내 방 캐시에 패치 적용 + 목록 무효화
+ *   방 상세 설정 저장(RoomDetail) → 위 '내 방 수정' + 비밀번호(서버 API)까지 성공한 뒤 patchRoomDetailCache로 상세 갱신
+ *   참여자 수 동기화 → 상세 캐시의 current_participants 직접 갱신 + 목록 무효화
+ *   방 상세에서 삭제 → 위 '내 방 삭제' + 화면을 떠난 뒤 forgetRoomDetail로 상세 캐시 제거
+ *                     (상세가 마운트된 채로 지우면 지운 방을 다시 조회한다)
+ *   상세 조회 실패는 재시도하지 않는다(없는 방이면 바로 목록으로 — 기존 동작)
  */
 import { useEffect } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import type { TablesUpdate } from '../../lib/database.types'
 import { isSupabaseConfigured, supabase } from '../../lib/supabaseClient'
+import { fetchRoomById } from '../../services/roomApi'
 import type { DbRoom, MyRoom } from '../../pages/rooms/roomModel'
+import { normalizeDetailRoom, type DetailRoom } from '../../pages/room/roomDetailModel'
 
 export const roomKeys = {
   all: ['rooms'] as const,
   list: () => [...roomKeys.all, 'list'] as const,
   mine: (userId: string | null | undefined) => [...roomKeys.all, 'mine', userId ?? null] as const,
+  detail: (roomId: string | null | undefined) => [...roomKeys.all, 'detail', roomId ?? null] as const,
 }
 
 function requireClient() {
@@ -70,6 +79,22 @@ export const roomsApi = {
       .update(update)
       .eq('id', roomId)
       .eq('host_id', userId)
+    if (error) throw error
+  },
+
+  /** 방 상세 (비공개 방 포함). 없으면 'room not found' 오류 */
+  async getRoomDetail(roomId: string): Promise<DetailRoom> {
+    const data = await fetchRoomById(roomId)
+    if (!data) throw new Error('room not found')
+    return normalizeDetailRoom(data)
+  },
+
+  /** 참여자 수 기록 (방장 화면의 '참여자 수 동기화') */
+  async setParticipantCount(roomId: string, count: number): Promise<void> {
+    const { error } = await requireClient()
+      .from('rooms')
+      .update({ current_participants: count })
+      .eq('id', roomId)
     if (error) throw error
   },
 
@@ -149,4 +174,36 @@ export function patchMyRoomCache(
   qc.setQueryData<MyRoom[]>(roomKeys.mine(userId), prev =>
     prev?.map(r => (r.id === roomId ? { ...r, ...patch } : r)),
   )
+}
+
+// ---------- 방 상세 (RoomDetail) ----------
+
+/** 방 상세. 실패는 재시도하지 않는다(없는 방 → 화면이 목록으로 이동) */
+export function useRoomDetailQuery(roomId: string | undefined) {
+  return useQuery({
+    queryKey: roomKeys.detail(roomId),
+    queryFn: () => roomsApi.getRoomDetail(roomId!),
+    enabled: Boolean(roomId) && isSupabaseConfigured(),
+    retry: false,
+  })
+}
+
+export function patchRoomDetailCache(qc: QueryClient, roomId: string, patch: Partial<DetailRoom>) {
+  qc.setQueryData<DetailRoom>(roomKeys.detail(roomId), prev => (prev ? { ...prev, ...patch } : prev))
+}
+
+/** 삭제한 방의 상세 캐시 제거. 상세 화면을 떠난 뒤(navigate 뒤)에 부른다 */
+export function forgetRoomDetail(qc: QueryClient, roomId: string) {
+  qc.removeQueries({ queryKey: roomKeys.detail(roomId) })
+}
+
+export function useSyncParticipantsMutation() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ roomId, count }: { roomId: string; count: number }) => roomsApi.setParticipantCount(roomId, count),
+    onSuccess: (_void, { roomId, count }) => {
+      patchRoomDetailCache(qc, roomId, { current_participants: count })
+      return qc.invalidateQueries({ queryKey: roomKeys.list() })
+    },
+  })
 }
