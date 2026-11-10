@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod engine;
+pub mod manager;
 pub mod net;
 
 use tauri::Manager;
