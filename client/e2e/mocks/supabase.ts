@@ -73,6 +73,25 @@ export class FakeSupabase {
     })
   }
 
+  private holds: { method: string; table: string; released: Promise<void>; waiting: number }[] = []
+
+  /**
+   * (method, table) REST 요청을 release() 전까지 붙잡는다 — 서버 응답 전 화면(낙관적 업데이트)을 검사할 때.
+   * 붙잡힌 요청은 DB에 아직 반영되지 않는다. waiting()은 지금까지 붙잡힌 요청 수.
+   */
+  hold(method: string, table: string): { release: () => void; waiting: () => number } {
+    let release!: () => void
+    const entry = { method, table, released: new Promise<void>(r => (release = r)), waiting: 0 }
+    this.holds.push(entry)
+    return {
+      release: () => {
+        this.holds = this.holds.filter(h => h !== entry)
+        release()
+      },
+      waiting: () => entry.waiting,
+    }
+  }
+
   async install(context: BrowserContext) {
     const host = new URL(SUPABASE_URL).host
     await context.route(url => url.host === host, route => this.handleHttp(route))
@@ -86,6 +105,12 @@ export class FakeSupabase {
     try {
       if (url.pathname.startsWith('/auth/v1/')) return await this.handleAuth(route, url)
       if (url.pathname.startsWith('/rest/v1/')) {
+        const table = url.pathname.replace('/rest/v1/', '')
+        const hold = this.holds.find(h => h.method === req.method() && h.table === table)
+        if (hold) {
+          hold.waiting++
+          await hold.released
+        }
         const res = this.db.handle({
           method: req.method(),
           url,

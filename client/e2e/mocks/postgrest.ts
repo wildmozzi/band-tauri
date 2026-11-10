@@ -22,8 +22,16 @@ function withDefaults(table: string, row: Row): Row {
   const base: Row = { id: randomUUID(), created_at: now }
   if (table === 'comments') base.updated_at = now
   if (table === 'posts') Object.assign(base, { likes_count: 0, comments_count: 0, updated_at: null })
-  return { ...base, ...row }
+  const out = { ...base, ...row }
+  // posts_guard_counters (migration 010): 사용자는 집계 컬럼을 쓸 수 없다 — INSERT는 0
+  if (table === 'posts') Object.assign(out, { likes_count: 0, comments_count: 0 })
+  return out
 }
+
+/** 집계 트리거 (migration 010): post_likes·comments 행 수 변화 → posts.likes_count/comments_count ±1 */
+const COUNTER_TRIGGERS: Record<string, string> = { post_likes: 'likes_count', comments: 'comments_count' }
+/** 사용자가 UPDATE해도 바뀌지 않는 posts 컬럼 (posts_guard_counters) */
+const GUARDED_POST_COLUMNS = ['likes_count', 'comments_count']
 
 export interface PgRequest {
   method: string
@@ -184,6 +192,13 @@ export class MemoryPostgrest {
     return out
   }
 
+  private bumpCounter(table: string, row: Row, delta: number) {
+    const column = COUNTER_TRIGGERS[table]
+    if (!column) return
+    const post = this.table('posts').find(p => p.id === row.post_id)
+    if (post) post[column] = Math.max(0, Number(post[column] ?? 0) + delta)
+  }
+
   handle(req: PgRequest): PgResponse {
     const path = req.url.pathname.replace(/^\/rest\/v1\//, '')
     const [first, second] = path.split('/')
@@ -225,14 +240,25 @@ export class MemoryPostgrest {
       case 'POST': {
         const input = Array.isArray(req.body) ? req.body : [req.body]
         const inserted = (input as Row[]).map(r => withDefaults(tableName, r))
+        // post_likes (post_id, user_id) UNIQUE (migration 010)
+        if (tableName === 'post_likes' && inserted.some(n => rows.some(r => r.post_id === n.post_id && r.user_id === n.user_id))) {
+          return {
+            status: 409,
+            headers,
+            body: { code: '23505', details: null, hint: null, message: 'duplicate key value violates unique constraint "post_likes_post_id_user_id_key"' },
+          }
+        }
         rows.push(...inserted)
+        for (const r of inserted) this.bumpCounter(tableName, r, +1)
         status = 201
         if (!representation) return { status: 201, headers }
         result = inserted.map(r => this.project(tableName, r, select))
         break
       }
       case 'PATCH': {
-        const patch = (req.body ?? {}) as Row
+        const patch = { ...((req.body ?? {}) as Row) }
+        if (tableName === 'posts') for (const c of GUARDED_POST_COLUMNS) delete patch[c]
+        if ('post_id' in patch && COUNTER_TRIGGERS[tableName]) throw new UnsupportedQuery(`${tableName}.post_id 변경`)
         const updated = rows.filter(match)
         for (const r of updated) Object.assign(r, patch)
         if (!representation) return { status: 204, headers }
@@ -242,6 +268,7 @@ export class MemoryPostgrest {
       case 'DELETE': {
         const removed = rows.filter(match)
         this.tables[tableName] = rows.filter(r => !match(r))
+        for (const r of removed) this.bumpCounter(tableName, r, -1)
         if (!representation) return { status: 204, headers }
         result = removed.map(r => this.project(tableName, r, select))
         break
