@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod engine;
+pub mod manager;
 pub mod net;
 
 use tauri::Manager;
@@ -25,6 +26,7 @@ pub fn run() {
             commands::engine_remove_peer,
             commands::engine_set_peer_gain,
             commands::engine_set_input_muted,
+            commands::engine_safety_code,
             commands::engine_set_monitor,
             commands::engine_set_master_gain,
             commands::engine_stats,

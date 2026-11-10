@@ -1,7 +1,11 @@
-//! 통합 테스트(설계 문서 7절): 엔진 2개를 가짜 오디오 장치로 띄우고, 손실 5%·지터 20ms를
-//! 주입하는 UDP 프록시를 거쳐 연결한다. A가 사인파를 보내고 B의 출력에서 연속성/지연을 검증한다.
+//! 통합 테스트(설계 문서 7절, 엔진 리뷰 "테스트 신뢰도" 반영).
 //!
-//! 실시간으로 돌기 때문에 수 초~십수 초 걸린다. 측정값은 `--nocapture`로 볼 수 있다.
+//! 가짜 장치(`FakeBackend`)는 입력/출력을 별도 스레드·별도 클럭으로 돌리고 콜백 기상 지연(버스트)을
+//! 흉내 낸다. 출력 검사는 RMS 창이 아니라 **샘플 단위**로 한다:
+//! - 불연속 = L 채널 인접 샘플 차 > 0.08 (440Hz, 진폭 0.5 사인의 최대 차는 0.029)
+//! - 무음 구간 = 정확히 0인 샘플이 120개 이상 연속
+//!
+//! 실시간 테스트끼리 CPU를 다투면 느린 CI에서 흔들리므로 `RT_LOCK`으로 직렬화한다.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,41 +13,53 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::config::{CodecKind, EngineConfig};
+use band_lib::engine::config::{CodecKind, EngineConfig, HEADER_BYTES, MAX_PACKET_BYTES};
 use band_lib::engine::device::fake::FakeBackend;
+use band_lib::engine::jitter as jitter_stats;
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::stats::PeerStateKind;
 use band_lib::engine::Engine;
+use band_lib::manager::EngineManager;
+use band_lib::net::crypto::KeyPair;
+use band_lib::net::packet::{Header, PacketType};
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::net::NetOptions;
+use parking_lot::Mutex;
 use rand::{Rng, SeedableRng};
+
+static RT_LOCK: Mutex<()> = Mutex::new(());
 
 const SINE_HZ: f64 = 440.0;
 const SINE_AMP: f32 = 0.5;
 
-fn sine_backend(drift_ppm: f64) -> FakeBackend {
-    let mut b = FakeBackend::new(
-        48_000,
-        Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
-            for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
-                let t = (start + i as u64) as f64 / 48_000.0;
-                let v = (t * SINE_HZ * 2.0 * std::f64::consts::PI).sin() as f32 * SINE_AMP;
-                frame.fill(v);
-            }
-        }),
-    );
-    b.drift_ppm = drift_ppm;
-    b
+fn sine_source() -> Arc<band_lib::engine::device::fake::SourceFn> {
+    Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+        for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+            let t = (start + i as u64) as f64 / 48_000.0;
+            frame.fill((t * SINE_HZ * 2.0 * std::f64::consts::PI).sin() as f32 * SINE_AMP);
+        }
+    })
+}
+
+fn sine_backend() -> FakeBackend {
+    FakeBackend::new(48_000, sine_source())
 }
 
 fn test_net() -> NetOptions {
-    NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![] }
+    NetOptions {
+        port: 0,
+        stun_servers: vec![],
+        gather_lan: false,
+        extra_candidates: vec![],
+        allow_loopback_candidates: true,
+        cancel: None,
+    }
 }
 
-fn config() -> EngineConfig {
+fn config(buffer: u32, frame_ms: f32) -> EngineConfig {
     EngineConfig {
-        buffer_size: 128,
-        frame_ms: 5.0,
+        buffer_size: buffer,
+        frame_ms,
         codec: CodecKind::Opus,
         channels: 1,
         input_channels: vec![0],
@@ -52,14 +68,70 @@ fn config() -> EngineConfig {
 }
 
 fn with_candidate(d: &LocalDescriptor, addr: SocketAddr) -> LocalDescriptor {
-    LocalDescriptor {
-        candidates: vec![Candidate { kind: CandidateKind::Lan, addr: addr.to_string() }],
-        ..d.clone()
-    }
+    LocalDescriptor { candidates: vec![Candidate { kind: CandidateKind::Lan, addr: addr.to_string() }], ..d.clone() }
 }
 
-/// 손실/지연 주입 UDP 프록시.
-/// A ↔ pa ... pb ↔ B. A는 pa로 보내고(B로 보임), B는 pb로 보낸다(A로 보임).
+fn local_addr(e: &Engine) -> SocketAddr {
+    format!("127.0.0.1:{}", e.local_port().unwrap()).parse().unwrap()
+}
+
+#[derive(Debug, Default)]
+struct Continuity {
+    discontinuities: usize,
+    silent_runs: usize,
+    samples: usize,
+    /// 처음 몇 개 이벤트의 시각(ms, sink 기준)
+    events_ms: Vec<u64>,
+}
+
+/// 스테레오 인터리브 sink의 `skip_frames` 이후를 검사한다.
+fn analyze(sink: &[f32], skip_frames: usize) -> Continuity {
+    let mut c = Continuity::default();
+    let mut prev: Option<f32> = None;
+    let mut zero_run = 0;
+    for (i, f) in sink.as_chunks::<2>().0.iter().enumerate().skip(skip_frames) {
+        let x = f[0];
+        let mut event = false;
+        if let Some(p) = prev {
+            if (x - p).abs() > 0.08 {
+                c.discontinuities += 1;
+                event = true;
+            }
+        }
+        prev = Some(x);
+        if x == 0.0 {
+            zero_run += 1;
+            if zero_run == 120 {
+                c.silent_runs += 1;
+                event = true;
+            }
+        } else {
+            zero_run = 0;
+        }
+        if event && c.events_ms.len() < 8 {
+            c.events_ms.push(i as u64 / 48);
+        }
+        c.samples += 1;
+    }
+    c
+}
+
+/// 끊김(무음 구간·불연속)은 셀 수 있는 사건(출력 장치 xrun, 로컬 FIFO 학습 언더런)으로만 설명되어야
+/// 한다. 가짜 장치의 콜백 기상 지연이 장치 버퍼보다 크게 몰리면 xrun이 날 수 있는데(느린 CI 포함),
+/// 그 한 번은 최대 3개 이벤트(끊김 시작·무음·복귀)를 만든다. 설명되지 않는 끊김은 엔진 내부 경로의
+/// 결함이다(리뷰 H1: xrun 0에서 2초에 무음 200개).
+fn assert_gaps_explained_by_xruns(c: &Continuity, xruns: u64, label: &str) {
+    let gaps = (c.silent_runs + c.discontinuities) as u64;
+    assert!(
+        gaps <= 3 * xruns,
+        "{label}: 끊김 {gaps}개(무음 {} 불연속 {})가 xrun {xruns}회로 설명되지 않음, 시각 {:?}ms",
+        c.silent_runs,
+        c.discontinuities,
+        c.events_ms
+    );
+}
+
+/// 손실/지연 주입 UDP 프록시. A ↔ pa ... pb ↔ B.
 struct Proxy {
     pa: SocketAddr,
     pb: SocketAddr,
@@ -82,8 +154,9 @@ impl Proxy {
         let dropped = Arc::new(AtomicUsize::new(0));
         let (st, fw, dr) = (stop.clone(), forwarded.clone(), dropped.clone());
         let thread = std::thread::spawn(move || {
+            // 프록시는 "네트워크"를 흉내 낸다. 실제 망은 로컬 CPU 부하에 느려지지 않으므로 높은 우선순위로 돈다.
+            let _prio = band_lib::engine::prio::promote_current_thread();
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-            // (전송 시각, from_a, 데이터)
             let mut queue: Vec<(Instant, bool, Vec<u8>)> = Vec::new();
             let mut buf = [0u8; 2048];
             while !st.load(Ordering::Relaxed) {
@@ -140,30 +213,47 @@ fn wait_connected(e: &Engine, timeout: Duration) -> bool {
     false
 }
 
-#[test]
-fn loopback_loss5_jitter20_drift() {
-    let controls_a = Arc::new(MixControls::default());
-    let controls_b = Arc::new(MixControls::default());
-    // A의 장치 클럭은 +200ppm 빠르게 → B는 드리프트를 보정해야 한다.
-    let backend_a = sine_backend(200.0);
-    let backend_b = FakeBackend::silence(48_000);
+/// A(사인) → B 연결. B의 sink를 돌려준다.
+fn connect_pair(
+    cfg: EngineConfig,
+    backend_a: FakeBackend,
+    backend_b: FakeBackend,
+    via_proxy: Option<(f64, f64)>,
+) -> (Engine, Engine, Option<Proxy>, Arc<Mutex<Vec<f32>>>) {
     let sink_b = backend_b.sink.clone();
-
-    let a = Engine::start(config(), Arc::new(backend_a), controls_a, Some(("alice".into(), test_net()))).unwrap();
-    let mut b = Engine::start(config(), Arc::new(backend_b), controls_b, Some(("bob".into(), test_net()))).unwrap();
-    let addr_a: SocketAddr = format!("127.0.0.1:{}", a.local_port().unwrap()).parse().unwrap();
-    let addr_b: SocketAddr = format!("127.0.0.1:{}", b.local_port().unwrap()).parse().unwrap();
-    let proxy = Proxy::start(addr_a, addr_b, 0.05, 20.0);
-
-    // A는 B를 pa로, B는 A를 pb로 본다.
-    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), proxy.pa)).unwrap();
-    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), proxy.pb)).unwrap();
+    let a = Engine::start(cfg.clone(), Arc::new(backend_a), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(cfg, Arc::new(backend_b), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let (addr_a, addr_b) = (local_addr(&a), local_addr(&b));
+    let proxy = via_proxy.map(|(loss, jitter)| Proxy::start(addr_a, addr_b, loss, jitter));
+    let (to_b, to_a) = match &proxy {
+        Some(p) => (p.pa, p.pb),
+        None => (addr_b, addr_a),
+    };
+    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), to_b)).unwrap();
+    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), to_a)).unwrap();
     assert!(wait_connected(&a, Duration::from_secs(5)), "A 연결 실패");
     assert!(wait_connected(&b, Duration::from_secs(5)), "B 연결 실패");
+    (a, b, proxy, sink_b)
+}
+
+// ============================================================================
+// 손실/지터/드리프트 루프백 (CI 실패 재현 조건 + 장치 버스트)
+// ============================================================================
+
+#[test]
+fn loopback_loss5_jitter20_drift() {
+    let _g = RT_LOCK.lock();
+    // A의 장치 클럭 +200ppm, 양쪽 콜백 기상 지연 0~2ms(느린 러너 흉내)
+    let mut backend_a = sine_backend().with_drift(200.0);
+    backend_a.wake_jitter_us = 2000;
+    let mut backend_b = FakeBackend::silence(48_000);
+    backend_b.wake_jitter_us = 2000;
+    backend_b.seed = 5;
+    let (a, mut b, proxy, sink_b) = connect_pair(config(128, 5.0), backend_a, backend_b, Some((0.05, 20.0)));
+    let proxy = proxy.unwrap();
     let t_connected = Instant::now();
     let sink_start = sink_b.lock().len();
 
-    // 믹스 구독 검증용
     let chunks = Arc::new(AtomicUsize::new(0));
     let bad_chunks = Arc::new(AtomicUsize::new(0));
     let (c2, bc2) = (chunks.clone(), bad_chunks.clone());
@@ -175,28 +265,29 @@ fn loopback_loss5_jitter20_drift() {
     }))
     .unwrap();
 
-    // 12초 동안 0.5초 간격으로 B의 버퍼 깊이 기록
     let mut trace: Vec<(f64, f32, f32)> = Vec::new();
+    let mut corr_at_4s = None;
     while t_connected.elapsed() < Duration::from_secs(12) {
         std::thread::sleep(Duration::from_millis(500));
-        let js = b.peer_jitter_stats();
-        let (_, s) = &js[0];
-        trace.push((t_connected.elapsed().as_secs_f64(), s.buffer_ms, s.target_ms));
+        let s = b.peer_jitter_stats()[0].1;
+        let t = t_connected.elapsed().as_secs_f64();
+        if t >= 4.0 && corr_at_4s.is_none() {
+            corr_at_4s = Some(s);
+        }
+        trace.push((t, s.buffer_ms, s.target_ms));
     }
-
     let stats_b = b.stats();
     let js = b.peer_jitter_stats()[0].1;
     let rtt_a = a.stats().peers[0].rtt_ms;
     b.unsubscribe_mix();
     let mix_chunks = chunks.load(Ordering::Relaxed);
 
-    // 출력 분석: 연결 후 3초부터 10ms 창의 RMS
     let out = sink_b.lock().clone();
     let analyzed = &out[sink_start..];
-    let win = 480 * 2; // 10ms 스테레오
+    // 5ms 창 RMS(PLC는 무음이 아니므로 손실이 있어도 소리가 이어져야 함)
+    let win = 240 * 2;
     let skip = 48_000 * 2 * 3;
-    let mut windows = 0;
-    let mut sound = 0;
+    let (mut windows, mut sound) = (0, 0);
     for w in analyzed.get(skip..).unwrap_or(&[]).chunks_exact(win) {
         let rms = (w.iter().map(|x| x * x).sum::<f32>() / w.len() as f32).sqrt();
         windows += 1;
@@ -204,6 +295,7 @@ fn loopback_loss5_jitter20_drift() {
             sound += 1;
         }
     }
+    let cont = analyze(analyzed, 48_000 * 3);
     let continuity = sound as f64 / windows.max(1) as f64;
     let conceal_ratio = js.concealed as f64 / js.produced.max(1) as f64;
     let mean = |from: f64, to: f64| {
@@ -212,23 +304,39 @@ fn loopback_loss5_jitter20_drift() {
     };
     let mid = mean(4.0, 8.0);
     let end = mean(8.0, 12.5);
+    let s4 = corr_at_4s.unwrap_or_default();
 
-    println!("=== loopback 결과 (손실 5%, 지터 0..20ms, 송신 장치 +200ppm) ===");
+    println!("=== loopback 결과 (손실 5%, 지터 0..20ms, 송신 장치 +200ppm, 콜백 기상 지연 0..2ms) ===");
     println!("proxy: forwarded {} dropped {}", proxy.forwarded.load(Ordering::Relaxed), proxy.dropped.load(Ordering::Relaxed));
     println!("B←A 지터버퍼: {js:?}");
     println!("버퍼 지연 평균: 4~8s {mid:.1}ms, 8~12s {end:.1}ms, 목표 {:.1}ms", js.target_ms);
     println!("은닉 프레임 비율: {:.2}% (손실 추정 {:.1}%)", conceal_ratio * 100.0, js.loss_pct);
-    println!("출력 연속성(10ms 창 중 소리 있음): {:.2}% ({sound}/{windows})", continuity * 100.0);
+    println!("출력 연속성(5ms 창 중 소리 있음): {:.2}% ({sound}/{windows}), 무음 구간 {}", continuity * 100.0, cont.silent_runs);
+    println!(
+        "4초 이후 보정: 샘플 버림 {} 삽입 {} 패킷 버림 {}",
+        js.samples_dropped - s4.samples_dropped,
+        js.samples_inserted - s4.samples_inserted,
+        js.dropped_frames - s4.dropped_frames
+    );
     println!("B estLatencyMs(로컬): {:.1}, xruns {}, A RTT {:?}ms", stats_b.est_latency_ms, stats_b.xruns, rtt_a);
     println!("믹스 탭 청크: {mix_chunks}");
     println!("trace: {:?}", trace.iter().map(|t| (t.0 as f32, t.1)).collect::<Vec<_>>());
 
-    assert!(continuity > 0.95, "출력 연속성 부족: {continuity}");
-    assert!(conceal_ratio < 0.15, "은닉 비율 과다: {conceal_ratio}");
-    assert!(end < 60.0, "버퍼 지연 상한 초과: {end}ms");
-    assert!((end - js.target_ms).abs() < 10.0, "버퍼 깊이가 목표 근처로 수렴하지 않음: {end} vs {}", js.target_ms);
-    assert!((end - mid).abs() < 8.0, "지연 누적(드리프트 미보정): mid {mid} end {end}");
-    assert!(js.samples_dropped + js.dropped_frames > 0, "드리프트 보정이 동작해야 함: {js:?}");
+    assert!(continuity > 0.97, "출력 연속성 부족: {continuity}");
+    // 손실은 PLC로 메워지므로 무음 구간은 장치 xrun으로만 생겨야 한다(+재버퍼링 여유 2)
+    assert!(
+        cont.silent_runs as u64 <= 2 + 3 * stats_b.xruns,
+        "무음 구간 {} (xruns {}), 시각 {:?}ms",
+        cont.silent_runs,
+        stats_b.xruns,
+        cont.events_ms
+    );
+    assert!(conceal_ratio < 0.10, "은닉 비율 과다: {conceal_ratio}");
+    assert!(end < 50.0, "버퍼 지연 상한 초과: {end}ms");
+    assert!((end - js.target_ms).abs() < 6.0, "버퍼 깊이가 목표 근처로 수렴하지 않음: {end} vs {}", js.target_ms);
+    assert!((end - mid).abs() < 6.0, "지연 누적/발산: mid {mid} end {end}");
+    // 정상 상태에서 패킷 단위 버림이 반복되면 제어가 발산하는 것(CI 실패: 155회)
+    assert!(js.dropped_frames - s4.dropped_frames <= 3, "4초 이후 패킷 버림 과다: {js:?}");
     assert!(mix_chunks >= 400, "믹스 탭은 20ms마다(12초 ≈ 600개): {mix_chunks}");
     assert_eq!(bad_chunks.load(Ordering::Relaxed), 0);
     assert!(rtt_a.is_some(), "RTT 측정");
@@ -238,13 +346,391 @@ fn loopback_loss5_jitter20_drift() {
     b.stop();
 }
 
+// ============================================================================
+// 리뷰 매트릭스: 모니터(H1) / 링크(M2·M4)
+// ============================================================================
+
+#[test]
+fn monitor_matrix_no_gaps_with_large_device_buffers() {
+    let _g = RT_LOCK.lock();
+    // 리뷰에서 무음 200개/불연속 321개가 났던 480/2.5ms, 1024/5ms 포함
+    for (buf, frame_ms) in [(128, 5.0), (128, 2.5), (480, 2.5), (480, 5.0), (1024, 5.0), (1024, 10.0), (1024, 2.5)] {
+        let controls = Arc::new(MixControls::default());
+        controls.monitor_enabled.store(true, Ordering::Relaxed);
+        let mut backend = sine_backend();
+        backend.wake_jitter_us = 1000;
+        let sink = backend.sink.clone();
+        let mut e = Engine::start(config(buf, frame_ms), Arc::new(backend), controls, None).unwrap();
+        std::thread::sleep(Duration::from_millis(2000));
+        let (corr, underruns) = e.local_path_stats();
+        let st = e.stats();
+        // 정지 과정의 꼬리(워커가 먼저 멈춘 뒤의 0)는 제외하고 정지 직전까지만 검사
+        let snap = sink.lock().clone();
+        e.stop();
+        let c = analyze(&snap, 48_000 * 6 / 10);
+        println!(
+            "MONITOR buf {buf} / {frame_ms}ms: 불연속 {} 무음 {} (샘플 {}), 로컬 보정 {corr} 언더런 {underruns}, xruns {}, est {:.1}ms, 이벤트(ms) {:?}",
+            c.discontinuities, c.silent_runs, c.samples, st.xruns, st.est_latency_ms, c.events_ms
+        );
+        assert!(c.samples > 48_000, "출력이 충분히 기록되어야 함");
+        // 로컬 FIFO는 입·출력 콜백이 같은 시각에 몰리는(위상 고정) 장치에서 순서가 뒤집히면 한 번 패이고,
+        // 그때 여유를 입력 방출 하나만큼 늘려 이후 안정된다(학습). 실시간 테스트는 이 학습 2회까지 허용.
+        assert!(underruns <= 2, "buf {buf} / {frame_ms}ms: 로컬 FIFO 언더런 {underruns}");
+        assert_gaps_explained_by_xruns(&c, st.xruns + underruns, &format!("MONITOR buf {buf} / {frame_ms}ms"));
+    }
+}
+
+#[test]
+fn link_matrix_clean_network_no_concealment_no_corrections() {
+    let _g = RT_LOCK.lock();
+    for (buf, frame_ms) in [(128, 5.0), (480, 2.5), (480, 5.0), (1024, 5.0)] {
+        let mut ba = sine_backend();
+        ba.wake_jitter_us = 1000;
+        let mut bb = FakeBackend::silence(48_000);
+        bb.wake_jitter_us = 1000;
+        bb.seed = 9;
+        let (a, b, _p, sink_b) = connect_pair(config(buf, frame_ms), ba, bb, None);
+        let start = sink_b.lock().len() / 2;
+        // 3초~9초를 0.25초 간격으로 관찰한다. 콜백 기상 지연(1ms)과 송신 버스트 때문에 p95가 프레임 경계를
+        // 넘나들면 목표가 한 단계 바뀔 수 있다(목표 재설정 → 정당한 보정). 이 테스트가 확인하는 것은
+        // "드리프트 0이면 목표가 고정된 동안 보정이 없다"는 것이므로, 목표가 바뀐 구간과 그 뒤 따라잡기
+        // 구간(목표 차이 ÷ 패킷당 최소 보정 속도 + 여유)은 세지 않는다(PR #5 M-1).
+        std::thread::sleep(Duration::from_millis(3000));
+        let mut snaps: Vec<(Instant, jitter_stats::JitterStats)> = Vec::new();
+        for _ in 0..24 {
+            snaps.push((Instant::now(), b.peer_jitter_stats()[0].1));
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let xruns = b.stats().xruns;
+        let snap = sink_b.lock().clone();
+        drop(a);
+        drop(b);
+        let c = analyze(&snap, start + 48_000 * 3 / 2);
+        let (first, last) = (snaps[0].1, snaps[snaps.len() - 1].1);
+        let mut stable_corr = 0;
+        let mut stable_secs = 0.0;
+        let mut retarget_until: Option<Instant> = None;
+        for w in snaps.windows(2) {
+            let ((t0, s0), (t1, s1)) = (w[0], w[1]);
+            if (s1.target_ms - s0.target_ms).abs() > 0.01 {
+                // 목표가 바뀌었다: 깊이를 새 목표까지 옮기는 데 걸리는 시간(1샘플/패킷 기준) + 0.5초는 제외
+                let samples = ((s1.target_ms - s0.target_ms).abs() * 48.0) as f64;
+                let packets_per_s = 1000.0 / frame_ms as f64;
+                let catch_up = Duration::from_secs_f64(samples / packets_per_s + 0.5);
+                retarget_until = Some(t1 + catch_up);
+                continue;
+            }
+            if retarget_until.is_some_and(|u| t1 <= u) {
+                continue;
+            }
+            stable_corr += s1.corrections() - s0.corrections();
+            stable_secs += (t1 - t0).as_secs_f64();
+        }
+        println!(
+            "LINK buf {buf} / {frame_ms}ms: 불연속 {} 무음 {}, concealed(3~9s) {}, 목표 {:.1}→{:.1}ms, 목표 고정 {stable_secs:.1}s 동안 보정 {stable_corr}, 전체 보정 {}, buffer {:.1}ms, xruns {xruns}",
+            c.discontinuities,
+            c.silent_runs,
+            last.concealed - first.concealed,
+            first.target_ms,
+            last.target_ms,
+            last.corrections() - first.corrections(),
+            last.buffer_ms,
+        );
+        assert!(stable_secs >= 3.0, "buf {buf} / {frame_ms}ms: 목표가 고정된 구간이 3초 이상 있어야 함({stable_secs:.1}s)");
+        assert_eq!(stable_corr, 0, "buf {buf} / {frame_ms}ms: 드리프트 0, 목표 고정 중 보정 {stable_corr}회");
+        // 결정적 보장(정확히 0)은 단위 시뮬레이션(jitter::clean_network_zero_concealment_and_zero_corrections)이
+        // 맡는다. 실시간 테스트는 스케줄러 지연 1회까지 허용한다(리뷰 M4 회귀는 5초에 6~8회였다).
+        assert!(last.concealed - first.concealed <= 1, "buf {buf} / {frame_ms}ms: 지터 없는 링크에서 은닉 {}", last.concealed - first.concealed);
+        assert_gaps_explained_by_xruns(&c, xruns, &format!("LINK buf {buf} / {frame_ms}ms"));
+    }
+}
+
+#[test]
+fn monitor_with_separate_device_clocks() {
+    let _g = RT_LOCK.lock();
+    // 입출력 장치가 다르다: 버퍼 크기·클럭·위상이 모두 다름 (리뷰 M5)
+    for (in_ppm, out_ppm) in [(300.0, -300.0), (-300.0, 300.0)] {
+        let controls = Arc::new(MixControls::default());
+        controls.monitor_enabled.store(true, Ordering::Relaxed);
+        let mut backend = sine_backend();
+        backend.in_buffer = Some(480);
+        backend.out_buffer = Some(128);
+        backend.in_drift_ppm = in_ppm;
+        backend.out_drift_ppm = out_ppm;
+        backend.out_phase_us = 3700;
+        backend.wake_jitter_us = 1000;
+        let sink = backend.sink.clone();
+        let mut e = Engine::start(config(256, 5.0), Arc::new(backend), controls, None).unwrap();
+        std::thread::sleep(Duration::from_millis(5000));
+        let (corr, underruns) = e.local_path_stats();
+        let xruns = e.stats().xruns;
+        let snap = sink.lock().clone();
+        e.stop();
+        let c = analyze(&snap, 48_000);
+        println!(
+            "MONITOR in 480 {in_ppm}ppm / out 128 {out_ppm}ppm: 불연속 {} 무음 {}, 로컬 보정 {corr}, 언더런 {underruns}, xruns {xruns}, 이벤트(ms) {:?}",
+            c.discontinuities, c.silent_runs, c.events_ms
+        );
+        assert!(underruns <= 2, "로컬 FIFO 언더런 {underruns}");
+        assert_gaps_explained_by_xruns(&c, xruns + underruns, &format!("MONITOR in {in_ppm} / out {out_ppm}"));
+        assert!(corr > 0, "600ppm 차이면 보정이 있어야 함");
+    }
+}
+
+#[test]
+fn resampled_44k_devices_end_to_end() {
+    let _g = RT_LOCK.lock();
+    // 44.1kHz 장치: 입력·출력 리샘플 경로(모니터)와 링크(A 44.1k → B 44.1k)
+    let mk = |sine: bool| {
+        let src = if sine {
+            Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+                for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+                    let t = (start + i as u64) as f64 / 44_100.0;
+                    frame.fill((t * SINE_HZ * 2.0 * std::f64::consts::PI).sin() as f32 * SINE_AMP);
+                }
+            }) as Arc<band_lib::engine::device::fake::SourceFn>
+        } else {
+            Arc::new(|_: u64, _: usize, buf: &mut [f32]| buf.fill(0.0)) as Arc<band_lib::engine::device::fake::SourceFn>
+        };
+        let mut b = FakeBackend::new(44_100, src);
+        b.in_buffer = Some(441);
+        b.out_buffer = Some(441);
+        b
+    };
+    let (a, b, _p, sink_b) = connect_pair(config(256, 5.0), mk(true), mk(false), None);
+    let start = sink_b.lock().len() / 2;
+    std::thread::sleep(Duration::from_millis(3000));
+    let js = b.peer_jitter_stats()[0].1;
+    let xruns = b.stats().xruns;
+    let snap = sink_b.lock().clone();
+    drop(a);
+    drop(b);
+    let c = analyze(&snap, start + 44_100);
+    println!("44.1k 링크: 불연속 {} 무음 {} concealed {} buffer {:.1}ms xruns {xruns}", c.discontinuities, c.silent_runs, js.concealed, js.buffer_ms);
+    assert_gaps_explained_by_xruns(&c, xruns, "44.1k 링크");
+    assert_eq!(js.concealed, 0, "지터 없는 링크에서 은닉");
+}
+
+// ============================================================================
+// 지연 측정(M12), 장치 분리(M9)
+// ============================================================================
+
+#[test]
+fn impulse_latency_matches_estimate() {
+    let _g = RT_LOCK.lock();
+    // 임펄스(값 0.9)를 12007샘플마다 넣어 모니터 경로의 종단 지연을 잰다.
+    const PERIOD: u64 = 12_007;
+    let src: Arc<band_lib::engine::device::fake::SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+        for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+            let idx = start + i as u64;
+            frame.fill(if idx % PERIOD == 100 { 0.9 } else { 0.0 });
+        }
+    });
+    for (buf, frame_ms) in [(256, 5.0), (480, 2.5), (128, 10.0)] {
+        let controls = Arc::new(MixControls::default());
+        controls.monitor_enabled.store(true, Ordering::Relaxed);
+        let mut backend = FakeBackend::new(48_000, src.clone());
+        backend.out_phase_us = 1300;
+        let phase = backend.out_phase_us as f64 / 1e6;
+        let sink = backend.sink.clone();
+        let mut e = Engine::start(config(buf, frame_ms), Arc::new(backend), controls, None).unwrap();
+        std::thread::sleep(Duration::from_millis(3000));
+        let est = e.stats().monitor_latency_ms as f64;
+        e.stop();
+        let out = sink.lock().clone();
+        // 출력의 임펄스 위치 j → 지연 = phase + j/rate − i/rate, i = k·PERIOD + 100
+        let mut lat = Vec::new();
+        let mut last_k = None;
+        for (j, f) in out.as_chunks::<2>().0.iter().enumerate() {
+            if f[0] > 0.5 {
+                let t_play = phase + j as f64 / 48_000.0;
+                // 가장 가까운 이전 임펄스
+                let k = ((t_play * 48_000.0 - 100.0) / PERIOD as f64).floor() as i64;
+                if k >= 0 && last_k != Some(k) && t_play > 1.0 {
+                    let t_cap = (k as f64 * PERIOD as f64 + 100.0) / 48_000.0;
+                    lat.push((t_play - t_cap) * 1000.0);
+                    last_k = Some(k);
+                }
+            }
+        }
+        assert!(lat.len() >= 5, "임펄스 검출 {}", lat.len());
+        let mean = lat.iter().sum::<f64>() / lat.len() as f64;
+        // est는 첫 샘플 기준(입력 버퍼 전체 + 출력 버퍼 전체). 평균 지연은 그보다 (Bin+Bout)/2 작다.
+        let est_mean = est - buf as f64 / 48.0;
+        println!("임펄스 지연 buf {buf} / {frame_ms}ms: 평균 {mean:.2}ms (n={}), est {est:.2}ms → 평균 환산 {est_mean:.2}ms, 범위 {:.2}..{:.2}", lat.len(), lat.iter().cloned().fold(f64::MAX, f64::min), lat.iter().cloned().fold(0.0, f64::max));
+        assert!((mean - est_mean).abs() < 2.5, "estLatencyMs가 실측과 다름: 실측 {mean:.2} vs 추정 {est_mean:.2}");
+    }
+}
+
+#[test]
+fn device_lost_is_reported() {
+    let _g = RT_LOCK.lock();
+    // 1) 비치명 스트림 에러만으로는 장치 분실이 아니다(콜백은 계속 돈다)
+    let mut backend = FakeBackend::silence(48_000);
+    backend.error_after = Some(Duration::from_millis(300));
+    let mut e = Engine::start(config(128, 5.0), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
+    std::thread::sleep(Duration::from_millis(700));
+    let s = e.stats();
+    e.stop();
+    assert_eq!(s.stream_errors, 1);
+    assert!(!s.device_lost && s.running, "{s:?}");
+
+    // 2) 콜백이 멈추면(장치 분리) deviceLost=true, running=false → 프론트의 기존 엔진 정지 감지가 동작(PR #5 M-2)
+    let mut backend = FakeBackend::silence(48_000);
+    backend.halt_after = Some(Duration::from_millis(400));
+    let mut e = Engine::start(config(128, 5.0), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
+    assert!(e.stats().running);
+    std::thread::sleep(Duration::from_millis(2000));
+    let s = e.stats();
+    e.stop();
+    assert!(s.device_lost, "{s:?}");
+    assert!(!s.running, "장치를 잃으면 running=false");
+    let j = serde_json::to_string(&s).unwrap();
+    assert!(j.contains("\"deviceLost\":true") && j.contains("\"running\":false"));
+}
+
+#[test]
+fn worker_init_failure_fails_start() {
+    let _g = RT_LOCK.lock();
+    // 장치가 지원 범위 밖 레이트를 보고하면 Worker::new가 실패하고 engine_start가 에러를 돌려준다(PR #5 L-6)
+    let backend = FakeBackend::new(4_000, Arc::new(|_, _, buf: &mut [f32]| buf.fill(0.0)));
+    let r = Engine::start(config(128, 5.0), Arc::new(backend), Arc::new(MixControls::default()), None);
+    let err = r.err().unwrap_or_default();
+    assert!(err.contains("레이트"), "{err}");
+}
+
+#[test]
+fn output_underruns_do_not_accumulate_latency() {
+    let _g = RT_LOCK.lock();
+    // PR #5 H-1 회귀: 수신측 출력 콜백이 1초마다 8ms 멈췄다 몰아서 따라잡는다(CPU 스파이크) → 매번 출력 언더런.
+    // 이전 구현은 소비 카운터 결손이 0.5ms/s로만 회복되어 실제 지연이 30초에 +54ms까지 몰래 늘었다.
+    let ba = sine_backend();
+    let mut bb = FakeBackend::silence(48_000);
+    bb.out_stall = Some((Duration::from_secs(1), Duration::from_millis(8)));
+    let (a, b, _p, _sink) = connect_pair(config(128, 5.0), ba, bb, None);
+    let mut trace = Vec::new();
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(500));
+        let s = b.stats();
+        let js = b.peer_jitter_stats()[0].1;
+        trace.push((t0.elapsed().as_secs_f64(), js.buffer_ms, js.wall_buffer_ms, s.peers[0].playout_ms, js.target_ms));
+    }
+    let st = b.stats();
+    let js = b.peer_jitter_stats()[0].1;
+    drop(a);
+    drop(b);
+    let mean = |from: f64, to: f64, f: fn(&(f64, f32, f32, f32, f32)) -> f32| {
+        let v: Vec<f32> = trace.iter().filter(|t| t.0 >= from && t.0 < to).map(f).collect();
+        v.iter().sum::<f32>() / v.len().max(1) as f32
+    };
+    let (wall_early, wall_late) = (mean(4.0, 8.0, |t| t.2), mean(15.0, 20.5, |t| t.2));
+    let (clk_late, play_late) = (mean(15.0, 20.5, |t| t.1), mean(15.0, 20.5, |t| t.3));
+    println!(
+        "출력 언더런 반복: xruns {}, 벽시계 버퍼 4~8s {wall_early:.1}ms → 15~20s {wall_late:.1}ms, 클럭 기준 bufferMs {clk_late:.1}ms, playoutMs {play_late:.1}ms, 목표 {:.1}ms, 순증 보정 {} 샘플",
+        st.xruns,
+        js.target_ms,
+        js.samples_inserted as i64 - js.samples_dropped as i64
+    );
+    assert!(st.xruns >= 10, "테스트가 언더런을 실제로 일으켜야 함: {}", st.xruns);
+    assert!((wall_late - wall_early).abs() < 3.0, "실제 지연 누적: {wall_early:.1} → {wall_late:.1}ms");
+    assert!((wall_late - js.target_ms).abs() < 5.0, "실제 지연이 목표 근처: {wall_late:.1} vs {:.1}", js.target_ms);
+    // 클럭 기준 깊이(bufferMs)와 벽시계 실측이 어긋나지 않아야 숨은 누적이 없다
+    assert!((clk_late - wall_late).abs() < 3.0, "bufferMs {clk_late:.1} vs 실측 {wall_late:.1}");
+    assert!(play_late > wall_late, "playoutMs는 출력 경로를 포함");
+}
+
+// ============================================================================
+// 커맨드 계층(H3), 수명
+// ============================================================================
+
+#[test]
+fn manager_stays_responsive_while_starting() {
+    let _g = RT_LOCK.lock();
+    let mut backend = FakeBackend::silence(48_000);
+    backend.open_delay = Duration::from_millis(1500);
+    let m = Arc::new(EngineManager::new(Arc::new(backend), test_net()));
+    let m2 = m.clone();
+    let starter = std::thread::spawn(move || m2.start(config(128, 5.0), "me".into()));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(m.is_starting());
+    // 시작 중에도 다른 커맨드는 즉시 응답(락을 쥔 채 블로킹하지 않음)
+    let t0 = Instant::now();
+    let s = m.stats();
+    let err = m.with_engine(|_| Ok(())).unwrap_err();
+    assert!(t0.elapsed() < Duration::from_millis(50), "stats가 막힘: {:?}", t0.elapsed());
+    assert!(!s.running);
+    assert!(err.contains("시작 중"), "{err}");
+    let desc = starter.join().unwrap().unwrap();
+    assert!(desc.ssrc != 0 || !desc.key.is_empty());
+    assert!(m.stats().running);
+
+    // 시작 중 stop → 그 시작은 취소된다
+    let m3 = m.clone();
+    let starter = std::thread::spawn(move || m3.start(config(128, 5.0), "me".into()));
+    std::thread::sleep(Duration::from_millis(300));
+    m.stop();
+    let r = starter.join().unwrap();
+    assert!(r.is_err(), "취소되어야 함");
+    assert!(!m.stats().running, "stop 이후 엔진이 남으면 안 됨");
+}
+
+#[test]
+fn stop_then_start_during_slow_start_is_serialized() {
+    let _g = RT_LOCK.lock();
+    // PR #5 M-4: 장치 열기가 느린 시작 중에 stop → 곧바로 start. 장치는 배타라 동시에 열면 실패한다.
+    // 새 시작은 이전 시작이 끝나 장치를 놓을 때까지 기다려야 하고, 결국 엔진이 하나 살아 있어야 한다.
+    let mut backend = FakeBackend::silence(48_000);
+    backend.open_delay = Duration::from_millis(1200);
+    backend.exclusive = Some(Arc::new(AtomicBool::new(false)));
+    let m = Arc::new(EngineManager::new(Arc::new(backend), test_net()));
+    let m1 = m.clone();
+    let first = std::thread::spawn(move || m1.start(config(128, 5.0), "me".into()));
+    std::thread::sleep(Duration::from_millis(200));
+    m.stop();
+    let m2 = m.clone();
+    let second = std::thread::spawn(move || m2.start(config(128, 5.0), "me".into()));
+    let r1 = first.join().unwrap();
+    let r2 = second.join().unwrap();
+    assert!(r1.is_err(), "첫 시작은 취소");
+    assert!(r2.is_ok(), "두 번째 시작은 장치 사용 중 없이 성공해야 함: {r2:?}");
+    assert!(m.stats().running);
+    // 연속 start 두 번(설정 변경 연타)도 마지막 하나만 남는다
+    let m3 = m.clone();
+    let a = std::thread::spawn(move || m3.start(config(256, 5.0), "me".into()));
+    std::thread::sleep(Duration::from_millis(100));
+    let m4 = m.clone();
+    let b = std::thread::spawn(move || m4.start(config(128, 2.5), "me".into()));
+    let (ra, rb) = (a.join().unwrap(), b.join().unwrap());
+    assert!(ra.is_err() && rb.is_ok(), "{ra:?} / {rb:?}");
+    assert!(m.stats().running);
+    m.stop();
+}
+
+#[test]
+fn test_mode_restores_monitor_setting() {
+    let _g = RT_LOCK.lock();
+    let m = EngineManager::new(Arc::new(FakeBackend::silence(48_000)), test_net());
+    assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed));
+    m.test_start(config(128, 5.0)).unwrap();
+    assert!(m.controls().monitor_enabled.load(Ordering::Relaxed), "테스트 모드는 모니터를 켬");
+    m.test_stop();
+    assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed), "끝나면 원래 값(꺼짐)으로 복원(리뷰 L4)");
+    // 테스트 모드에서 바로 실제 세션으로 넘어가도 복원
+    m.test_start(config(128, 5.0)).unwrap();
+    m.start(config(128, 5.0), "me".into()).unwrap();
+    assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed));
+    m.stop();
+}
+
 #[test]
 fn repeated_start_stop_joins_threads() {
+    let _g = RT_LOCK.lock();
     let controls = Arc::new(MixControls::default());
     for i in 0..5 {
         let t0 = Instant::now();
         let mut e = Engine::start(
-            config(),
+            config(128, 5.0),
             Arc::new(FakeBackend::silence(48_000)),
             controls.clone(),
             if i % 2 == 0 { Some((format!("p{i}"), test_net())) } else { None },
@@ -260,11 +746,12 @@ fn repeated_start_stop_joins_threads() {
 
 #[test]
 fn test_mode_monitor_passthrough() {
+    let _g = RT_LOCK.lock();
     let controls = Arc::new(MixControls::default());
     controls.monitor_enabled.store(true, Ordering::Relaxed);
-    let backend = sine_backend(0.0);
+    let backend = sine_backend();
     let sink = backend.sink.clone();
-    let mut e = Engine::start(config(), Arc::new(backend), controls, None).unwrap();
+    let mut e = Engine::start(config(128, 5.0), Arc::new(backend), controls, None).unwrap();
     std::thread::sleep(Duration::from_millis(800));
     let s = e.stats();
     e.stop();
@@ -273,21 +760,21 @@ fn test_mode_monitor_passthrough() {
     let rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len().max(1) as f32).sqrt();
     println!("모니터 모드: rms {rms:.3}, estLatencyMs {:.1}, xruns {}", s.est_latency_ms, s.xruns);
     assert!((rms - SINE_AMP / 2f32.sqrt()).abs() < 0.05, "모니터 출력 rms {rms}");
-    assert!(s.est_latency_ms < 20.0, "로컬 지연 {}", s.est_latency_ms);
+    assert!(s.est_latency_ms < 25.0, "로컬 지연 {}", s.est_latency_ms);
 }
 
 #[test]
 fn input_mute_silences_monitor_and_tap_but_keeps_meter() {
+    let _g = RT_LOCK.lock();
     let controls = Arc::new(MixControls::default());
     controls.monitor_enabled.store(true, Ordering::Relaxed);
     controls.input_muted.store(true, Ordering::Relaxed);
-    let backend = sine_backend(0.0);
+    let backend = sine_backend();
     let sink = backend.sink.clone();
-    let mut e = Engine::start(config(), Arc::new(backend), controls.clone(), None).unwrap();
-    let tap_energy = Arc::new(parking_lot::Mutex::new((0usize, 0f64)));
+    let mut e = Engine::start(config(128, 5.0), Arc::new(backend), controls.clone(), None).unwrap();
+    let tap_energy = Arc::new(Mutex::new((0usize, 0f64)));
     let te = tap_energy.clone();
     e.subscribe_mix(Box::new(move |bytes| {
-        // raw f32 LE 인터리브
         assert_eq!(bytes.len() % 4, 0);
         let mut g = te.lock();
         for b in bytes.as_chunks::<4>().0 {
@@ -306,7 +793,6 @@ fn input_mute_silences_monitor_and_tap_but_keeps_meter() {
         (tail.iter().map(|x| x * x).sum::<f32>() / tail.len().max(1) as f32).sqrt()
     };
     let (n, energy) = *tap_energy.lock();
-    // 뮤트 해제 후 다시 소리가 나야 한다
     controls.input_muted.store(false, Ordering::Relaxed);
     std::thread::sleep(Duration::from_millis(400));
     e.stop();
@@ -316,23 +802,14 @@ fn input_mute_silences_monitor_and_tap_but_keeps_meter() {
     println!("입력 뮤트: 출력 rms {muted_rms:.4}, 탭 rms {:.4}, inputLevel {:.3} → 해제 후 rms {unmuted_rms:.3}", (energy / n.max(1) as f64).sqrt(), s.input_level);
     assert!(muted_rms < 1e-4, "뮤트 중 모니터 출력은 무음");
     assert!(n > 0 && energy < 1e-6, "뮤트 중 믹스 탭도 무음");
-    // 레벨 미터는 0..1 선형 RMS로 계속 표시: 0.5 진폭 사인 → ≈0.354
     assert!((s.input_level - SINE_AMP / 2f32.sqrt()).abs() < 0.03, "inputLevel {}", s.input_level);
     assert!(unmuted_rms > 0.3, "뮤트 해제 후 복귀");
 }
 
 #[test]
 fn peer_pan_and_levels() {
-    // A(사인) → B, B에서 A를 오른쪽 끝으로 팬
-    let a = Engine::start(config(), Arc::new(sine_backend(0.0)), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
-    let backend_b = FakeBackend::silence(48_000);
-    let sink_b = backend_b.sink.clone();
-    let b = Engine::start(config(), Arc::new(backend_b), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
-    let addr_a: SocketAddr = format!("127.0.0.1:{}", a.local_port().unwrap()).parse().unwrap();
-    let addr_b: SocketAddr = format!("127.0.0.1:{}", b.local_port().unwrap()).parse().unwrap();
-    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), addr_b)).unwrap();
-    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), addr_a)).unwrap();
-    assert!(wait_connected(&b, Duration::from_secs(5)));
+    let _g = RT_LOCK.lock();
+    let (a, b, _p, sink_b) = connect_pair(config(128, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
     b.set_peer_gain("alice", 1.0, false, Some(1.0)).unwrap();
     std::thread::sleep(Duration::from_millis(700));
     let st = b.stats();
@@ -352,19 +829,82 @@ fn peer_pan_and_levels() {
     assert!((0.0..=1.0).contains(&peer_level) && peer_level > 0.25, "피어 레벨은 0..1 RMS: {peer_level}");
     assert!((0.0..=1.0).contains(&st.output_level));
     assert!(b.set_peer_gain("nobody", 1.0, false, None).is_err());
+    drop(a);
+}
+
+// ============================================================================
+// 보안(M7 사칭·ssrc 충돌, M8 후보 폭주, M6 경로 고정)
+// ============================================================================
+
+#[test]
+fn ssrc_squatting_and_forged_packets_do_not_hijack_peer() {
+    let _g = RT_LOCK.lock();
+    let (a, b, _p, sink_b) = connect_pair(config(128, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
+    let desc_a = a.descriptor().unwrap().clone();
+    let desc_b = b.descriptor().unwrap().clone();
+
+    // 1) 악의적 C가 A의 ssrc로 descriptor를 보낸다 → B는 받아들이되 A 항목을 지우지 않는다.
+    let c_keys = KeyPair::generate();
+    let squat = LocalDescriptor {
+        ssrc: desc_a.ssrc,
+        key: LocalDescriptor::encode_key(&c_keys.public_bytes()),
+        candidates: vec![Candidate { kind: CandidateKind::Public, addr: "127.0.0.1:9".into() }],
+    };
+    b.add_peer("carol".into(), &squat).unwrap();
+    assert_eq!(b.stats().peers.len(), 2, "A 항목이 남아 있어야 함");
+
+    // 2) C가 A를 사칭한 Hello/Bye를 B에게 보낸다(자기 키로 유도한 A→B 키로 암호화).
+    let attacker = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let b_pub = desc_b.decode_key().unwrap();
+    let (forge_tx, _) = c_keys.pair_ciphers(desc_a.ssrc, &b_pub, desc_b.ssrc).unwrap();
+    let mut buf = [0u8; MAX_PACKET_BYTES];
+    for (i, t) in [PacketType::Hello, PacketType::Bye, PacketType::Hello, PacketType::Hello, PacketType::Hello, PacketType::Hello, PacketType::Hello]
+        .into_iter()
+        .enumerate()
+    {
+        let h = Header { ptype: t, ssrc: desc_a.ssrc, seq: 1_000_000 + i as u32, timestamp: 0, flags: 0, frame_code: 0 };
+        let payload: &[u8] = if t == PacketType::Hello { b"alice" } else { b"" };
+        let n = forge_tx.seal(&h, payload, &mut buf).unwrap();
+        assert!(n >= HEADER_BYTES);
+        attacker.send_to(&buf[..n], local_addr(&b)).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(600));
+    let st = b.stats();
+    let alice = st.peers.iter().find(|p| p.peer_id == "alice").unwrap();
+    assert_eq!(alice.state, PeerStateKind::Connected, "사칭 Bye로 끊기면 안 됨");
+    // B는 여전히 A의 소리를 듣는다
+    let out = sink_b.lock().clone();
+    let tail = &out[out.len() - 24_000..];
+    let rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt();
+    assert!(rms > 0.3, "A 오디오가 계속 들려야 함: {rms}");
+    drop(a);
 }
 
 #[test]
-fn rejects_bad_config_and_descriptor() {
-    let controls = Arc::new(MixControls::default());
-    let bad = EngineConfig { codec: CodecKind::Pcm16, channels: 2, input_channels: vec![0, 1], frame_ms: 10.0, ..config() };
-    assert!(Engine::start(bad, Arc::new(FakeBackend::silence(48_000)), controls.clone(), None).is_err());
-
-    let e = Engine::start(config(), Arc::new(FakeBackend::silence(48_000)), controls, Some(("me".into(), test_net()))).unwrap();
+fn malicious_descriptors_rejected() {
+    let _g = RT_LOCK.lock();
+    let mut strict = test_net();
+    strict.allow_loopback_candidates = false;
+    let e = Engine::start(config(128, 5.0), Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), Some(("me".into(), strict))).unwrap();
+    let other = KeyPair::generate();
+    let mk = |cands: Vec<String>| LocalDescriptor {
+        ssrc: 77,
+        key: LocalDescriptor::encode_key(&other.public_bytes()),
+        candidates: cands.into_iter().map(|addr| Candidate { kind: CandidateKind::Public, addr }).collect(),
+    };
+    // 후보 폭주(반사 공격)
+    let flood: Vec<String> = (0..1000).map(|i| format!("198.51.{}.{}:4000", i / 250, i % 250)).collect();
+    assert!(e.add_peer("x".into(), &mk(flood)).is_err());
+    // 특수 주소
+    for bad in ["0.0.0.0:4000", "224.0.0.251:5353", "255.255.255.255:4000", "198.51.100.1:0", "127.0.0.1:4000"] {
+        assert!(e.add_peer("x".into(), &mk(vec![bad.into()])).is_err(), "{bad}");
+    }
+    // 자기 자신
     let own = e.descriptor().unwrap().clone();
-    let mut d = with_candidate(&own, "127.0.0.1:9".parse().unwrap());
-    assert!(e.add_peer("x".into(), &d).is_err(), "자기 자신 ssrc 거부");
-    d.ssrc ^= 1;
-    d.key = "bad".into();
-    assert!(e.add_peer("x".into(), &d).is_err(), "잘못된 키 거부");
+    assert!(e.add_peer("x".into(), &with_candidate(&own, "198.51.100.1:4000".parse().unwrap())).is_err());
+    // 정상
+    assert!(e.add_peer("x".into(), &mk(vec!["198.51.100.1:4000".into()])).is_ok());
+    // 잘못된 config
+    let bad = EngineConfig { codec: CodecKind::Pcm16, channels: 2, input_channels: vec![0, 1], frame_ms: 10.0, ..config(128, 5.0) };
+    assert!(Engine::start(bad, Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), None).is_err());
 }

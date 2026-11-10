@@ -70,16 +70,26 @@ export interface PeerStats {
   late: number
   concealed: number
   level: number
+  /** 실제 재생 지연(ms): 벽시계로 잰 버퍼 지연 + 출력 링 + 장치 출력 버퍼. bufferMs와 크게 벌어지면 숨은 지연 누적 */
+  playoutMs?: number
 }
 
 export interface EngineStats {
+  /** 오디오 장치를 잃으면(콜백 정지) false */
   running: boolean
   sampleRate: number
   deviceBuffer: number
   inputLevel: number
   outputLevel: number
   xruns: number
+  /** 로컬 처리 지연(GOAL 1절 정의: 입력 버퍼+프레임+출력 링+출력 버퍼) */
   estLatencyMs: number
+  /** 모니터 경로(내 입력 → 내 출력) 지연 */
+  monitorLatencyMs?: number
+  /** 오디오 스트림 에러 누적(비치명 포함) */
+  streamErrors?: number
+  /** 장치 콜백이 1초 넘게 멈춤(장치 분리 등). true면 running=false */
+  deviceLost?: boolean
   peers: PeerStats[]
 }
 
@@ -155,6 +165,14 @@ export function engineSetPeerGain(peerId: string, gain: number, muted: boolean, 
 /** 내 입력을 송신/모니터/믹스 구독에서 무음 처리 (레벨 미터는 계속 표시) */
 export function engineSetInputMuted(muted: boolean): Promise<null> {
   return invoke<null>('engine_set_input_muted', { muted })
+}
+
+/**
+ * 피어와의 안전 번호("12345 67890 ..."). 두 연주자가 같은 숫자를 보면 시그널링 서버가
+ * 암호 키를 바꿔치기하지 않은 것이다(키 확인용, 표시 UI는 별도 작업).
+ */
+export function engineSafetyCode(peerId: string): Promise<string> {
+  return invoke<string>('engine_safety_code', { peerId })
 }
 
 export function engineSetMonitor(enabled: boolean, gain: number): Promise<null> {

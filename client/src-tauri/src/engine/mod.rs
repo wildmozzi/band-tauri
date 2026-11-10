@@ -9,29 +9,30 @@ pub mod config;
 pub mod device;
 pub mod jitter;
 pub mod mixer;
+pub mod prio;
 pub mod resample;
 pub mod rt;
 pub mod stats;
 pub mod worker;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ringbuf::traits::{Consumer, Observer, Split};
 use ringbuf::HeapRb;
 
 use crate::net::peer::LocalDescriptor;
 use crate::net::{Net, NetOptions};
-use config::{EngineConfig, INTERNAL_RATE};
+use config::EngineConfig;
 use device::{AudioBackend, StreamInfo};
 use jitter::JitterSettings;
 use mixer::{clamp_gain, MixControls};
 use rt::{InputRt, OutputRt};
 use stats::{AudioCounters, EngineStats, PeerStats};
-use worker::{MixTap, WorkerParams};
+use worker::{MixTap, Worker, WorkerParams, WorkerStats};
 
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
 pub type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
@@ -49,7 +50,7 @@ pub struct Engine {
     info: StreamInfo,
     counters: Arc<AudioCounters>,
     controls: Arc<MixControls>,
-    out_fill: Arc<AtomicU64>,
+    worker_stats: Arc<WorkerStats>,
     worker_stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     audio_stop: Arc<AtomicBool>,
@@ -67,6 +68,18 @@ impl Engine {
         controls: Arc<MixControls>,
         network: Option<(String, NetOptions)>,
     ) -> Result<Engine, String> {
+        Self::start_cancellable(cfg, backend, controls, network, None)
+    }
+
+    /// `cancel`이 켜지면 단계 사이(장치 열기 후, STUN 중)에서 일찍 포기한다. 이미 연 장치는 닫고 돌아온다.
+    pub fn start_cancellable(
+        cfg: EngineConfig,
+        backend: Arc<dyn AudioBackend>,
+        controls: Arc<MixControls>,
+        network: Option<(String, NetOptions)>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Engine, String> {
+        let cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
         cfg.validate()?;
         let counters = Arc::new(AudioCounters::default());
         let (in_prod, in_cons) = rt::input_ring();
@@ -118,7 +131,7 @@ impl Engine {
             info,
             counters: counters.clone(),
             controls: controls.clone(),
-            out_fill: Arc::new(AtomicU64::new(0)),
+            worker_stats: Arc::new(WorkerStats::default()),
             worker_stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             audio_stop,
@@ -128,19 +141,25 @@ impl Engine {
             tap_thread: None,
         };
 
+        if cancelled() {
+            return Err("엔진 시작이 취소되었습니다".into()); // engine drop이 오디오 정리
+        }
         if let Some((peer_id, opts)) = network {
             let mut opts = opts;
             if let Some(p) = cfg.udp_port {
                 opts.port = p;
             }
-            let js = JitterSettings {
-                request_frames: cfg.frame_samples(),
-                min_ms: cfg.jitter_min_ms(),
-                max_ms: cfg.jitter_max_ms(),
-            };
+            if opts.cancel.is_none() {
+                opts.cancel = cancel.clone();
+            }
+            let js = JitterSettings { min_ms: cfg.jitter_min_ms(), max_ms: cfg.jitter_max_ms() };
             engine.net = Some(Net::start(peer_id, &opts, js)?); // 실패 시 engine drop이 오디오 정리
         }
+        if cancelled() {
+            return Err("엔진 시작이 취소되었습니다".into());
+        }
 
+        let epoch = engine.net.as_ref().map(|n| n.shared().epoch()).unwrap_or_else(Instant::now);
         let params = WorkerParams {
             cfg,
             info,
@@ -151,12 +170,15 @@ impl Engine {
             net: engine.net.as_ref().map(|n| n.shared().clone()),
             tap: engine.tap.clone(),
             stop: engine.worker_stop.clone(),
-            out_fill: engine.out_fill.clone(),
+            stats: engine.worker_stats.clone(),
+            epoch,
         };
+        // 초기화(리샘플러/인코더)는 여기서 해서 실패를 호출자에게 돌려준다(리뷰 M10).
+        let worker = Worker::new(params)?;
         engine.worker = Some(
             std::thread::Builder::new()
                 .name("band-worker".into())
-                .spawn(move || worker::run(params))
+                .spawn(move || worker.run())
                 .map_err(|e| format!("워커 스레드 생성 실패: {e}"))?,
         );
         log::info!("엔진 시작: {:?}", engine.info);
@@ -169,6 +191,10 @@ impl Engine {
 
     pub fn local_port(&self) -> Option<u16> {
         self.net.as_ref().map(|n| n.local_port())
+    }
+
+    pub fn config(&self) -> &EngineConfig {
+        &self.cfg
     }
 
     pub fn has_network(&self) -> bool {
@@ -208,11 +234,17 @@ impl Engine {
             0 => self.info.buffer_frames,
             n => n,
         };
-        let out_ring_frames = self.out_fill.load(Ordering::Relaxed) as f32 / 2.0;
-        let est = in_buf as f32 / self.info.in_rate as f32 * 1000.0
-            + self.cfg.frame_samples() as f32 / INTERNAL_RATE as f32 * 1000.0
-            + out_ring_frames / self.info.out_rate as f32 * 1000.0
-            + out_buf as f32 / self.info.out_rate as f32 * 1000.0;
+        let in_ms = in_buf as f32 / self.info.in_rate as f32 * 1000.0;
+        let out_ms = out_buf as f32 / self.info.out_rate as f32 * 1000.0;
+        let frame_ms = self.cfg.frame_samples() as f32 / config::INTERNAL_RATE as f32 * 1000.0;
+        let ws = &self.worker_stats;
+        let output_path_ms = ws.output_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0;
+        // GOAL 1절 정의: 입력 장치 버퍼 + 프레임 + 출력 링(시간평균) + 장치 출력 버퍼(네트워크 경로의 로컬 몫, 첫 샘플 기준).
+        let est = in_ms + frame_ms + output_path_ms + out_ms;
+        // 모니터 경로(내 소리 → 내 귀): 입력 버퍼 + 로컬 FIFO·출력 링 점유량 시간평균 + 출력 버퍼(임펄스 실측으로 검증).
+        let monitor = in_ms + ws.monitor_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0 + out_ms;
+        let stream_errors = c.stream_errors.load(Ordering::Relaxed);
+        let device_lost = ws.device_stalled.load(Ordering::Relaxed);
         let peers = self
             .net
             .as_ref()
@@ -233,21 +265,41 @@ impl Engine {
                             late: js.late,
                             concealed: js.concealed,
                             level: p.mix.level.load(),
+                            // 벽시계로 잰 버퍼 지연 + 출력 경로(링 + 장치 버퍼): 클럭 추정과 독립적인 실제 재생 지연
+                            playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + output_path_ms + out_ms } else { 0.0 },
                         }
                     })
                     .collect()
             })
             .unwrap_or_default();
         EngineStats {
-            running: true,
+            // 장치를 잃으면 false: 프론트의 기존 "엔진 정지" 감지(running=false 연속)가 그대로 동작한다(PR #5 M-2).
+            running: !device_lost,
             sample_rate: self.info.out_rate,
             device_buffer: out_buf,
             input_level: c.input_level.load(),
             output_level: c.output_level.load(),
             xruns: c.xruns.load(Ordering::Relaxed),
             est_latency_ms: est,
+            monitor_latency_ms: monitor,
+            stream_errors,
+            device_lost,
             peers,
         }
+    }
+
+    /// 피어와의 키 확인용 안전 번호(SAS). 양쪽이 같은 값을 보면 시그널링 서버가 키를 바꿔치기하지 않은 것이다.
+    pub fn safety_code(&self, peer_id: &str) -> Result<String, String> {
+        let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
+        net.safety_code(peer_id)
+    }
+
+    /// 로컬 입력 FIFO 보정/언더런 횟수(테스트/진단용).
+    pub fn local_path_stats(&self) -> (u64, u64) {
+        (
+            self.worker_stats.local_corrections.load(Ordering::Relaxed),
+            self.worker_stats.local_underruns.load(Ordering::Relaxed),
+        )
     }
 
     /// 상세 지터 통계(테스트/진단용).

@@ -7,9 +7,8 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use ringbuf::traits::{Consumer, Producer};
+use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
-use ringbuf::traits::Split;
 
 use super::stats::AudioCounters;
 
@@ -155,6 +154,7 @@ impl InputRt {
         }
         let frames = data.len() / device_channels;
         self.counters.in_cb_frames.store(frames as u32, Ordering::Relaxed);
+        self.counters.in_captured_frames.fetch_add(frames as u64, Ordering::Relaxed);
         let ich = self.internal_channels;
         let mut sum_sq = 0.0f32;
         let mut count = 0usize;
@@ -187,8 +187,11 @@ impl InputRt {
                 }
             }
             let len = (n * ich).min(self.scratch.len());
-            let pushed = self.prod.push_slice(&self.scratch[..len]);
-            if pushed < len {
+            // 오버런 시 프레임 단위로만 기록한다. 부분 기록하면 스테레오 L/R이 영구히 뒤바뀐다(리뷰 L3).
+            let room = self.prod.vacant_len() / ich * ich;
+            let len_ok = len.min(room);
+            self.prod.push_slice(&self.scratch[..len_ok]);
+            if len_ok < len {
                 overrun = true;
             }
             done += n;
@@ -228,7 +231,20 @@ impl OutputRt {
             let got = self.cons.pop_slice(&mut self.scratch[..want]);
             consumed += got as u64;
             if got < want {
-                self.scratch[got..want].fill(0.0);
+                // 받은 꼬리를 짧게 페이드아웃해 클릭을 줄인다(리뷰 L9). got은 스테레오 짝수.
+                let got = got & !1;
+                let fade = (got / 2).min(32);
+                for k in 0..fade {
+                    let g = (fade - k) as f32 / (fade + 1) as f32;
+                    let idx = got - (fade - k) * 2;
+                    if let Some(s) = self.scratch.get_mut(idx..idx + 2) {
+                        s[0] *= g;
+                        s[1] *= g;
+                    }
+                }
+                if let Some(rest) = self.scratch.get_mut(got..want) {
+                    rest.fill(0.0);
+                }
                 underrun = true;
             }
             for i in 0..n {
@@ -262,6 +278,7 @@ impl OutputRt {
             self.counters.xruns.fetch_add(1, Ordering::Relaxed);
         }
         self.counters.out_consumed.fetch_add(consumed, Ordering::Relaxed);
+        self.counters.out_played_frames.fetch_add(frames as u64, Ordering::Relaxed);
         self.counters.output_level.store(rms_of(sum_sq, frames * 2));
     }
 }
@@ -269,7 +286,6 @@ impl OutputRt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ringbuf::traits::Observer;
 
     #[test]
     fn input_routing_mono_from_ch2() {
@@ -308,6 +324,26 @@ mod tests {
     }
 
     #[test]
+    fn input_overrun_keeps_stereo_alignment() {
+        let (prod, mut cons) = input_ring();
+        let counters = Arc::new(AudioCounters::default());
+        let mut rt = InputRt::new(prod, counters.clone(), &[0, 1], 2);
+        // 링을 L=0.1, R=0.9 프레임으로 넘치게 채운다
+        let frame = [0.1f32, 0.9];
+        let block: Vec<f32> = frame.iter().copied().cycle().take(2 * 257).collect();
+        for _ in 0..(RING_CAPACITY / block.len() + 4) {
+            rt.process(&block, 2);
+        }
+        assert!(counters.xruns.load(Ordering::Relaxed) > 0, "오버런 발생");
+        assert_eq!(cons.occupied_len(), RING_CAPACITY);
+        // 빈자리를 홀수(3)로 만든 뒤 다시 넘치게 → 한 프레임(2샘플)만 기록되어야 한다
+        let mut three = [0f32; 3];
+        cons.pop_slice(&mut three);
+        rt.process(&block, 2);
+        assert_eq!(cons.occupied_len(), RING_CAPACITY - 1, "부분 프레임을 쓰면 안 됨");
+    }
+
+    #[test]
     fn output_underrun_fills_zero_and_counts() {
         let (mut prod, cons) = output_ring();
         let counters = Arc::new(AudioCounters::default());
@@ -325,7 +361,17 @@ mod tests {
         prod.push_slice(&[0.25f32; 10]);
         rt.process(&mut dev, 2);
         assert_eq!(counters.xruns.load(Ordering::Relaxed), 1);
-        assert_eq!(&dev[..10], &[0.25; 10]);
+        // 장치 재생 시간은 언더런과 무관하게 콜백 프레임 수만큼 흐른다(PR #5 H-1)
+        assert_eq!(counters.out_played_frames.load(Ordering::Relaxed), 3 * 600);
+        assert!(counters.out_consumed.load(Ordering::Relaxed) < 3 * 600 * 2);
+        // 받은 5프레임은 페이드아웃(단조 감소, 0보다 큼), 나머지는 0
+        for f in 0..5 {
+            assert_eq!(dev[f * 2], dev[f * 2 + 1]);
+            assert!(dev[f * 2] > 0.0 && dev[f * 2] < 0.25);
+            if f > 0 {
+                assert!(dev[f * 2] < dev[(f - 1) * 2]);
+            }
+        }
         assert!(dev[10..].iter().all(|&x| x == 0.0));
         assert_eq!(prod.occupied_len(), 0);
     }
