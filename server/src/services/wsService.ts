@@ -335,12 +335,23 @@ export function initializeWebSocket(
    * 릴레이 토큰 발급 (연주자 전용). roomId/memberId/ssrc는 서버가 아는 값만 쓴다.
    * - memberId는 검증된 userId: 세션 재개 없이 재접속해도(새 clientId) 릴레이가 같은 멤버로 보고 이전 슬롯을 교체한다.
    * - 회수 수단이 없으므로 수명을 짧게(기본 120초) 두고 클라이언트가 갱신한다. 릴레이 등록은 토큰 만료를 넘지 않는다.
+   * - expiresIn(남은 수명, 초)·serverNow를 함께 보낸다: 클라이언트는 자기 시계가 아니라 받은 시각 + expiresIn으로
+   *   만료·갱신을 판단한다(시계가 어긋난 PC에서 토큰이 주기적으로 끊기지 않게, PR #10 M1).
    */
   function sendRelayToken(c: Client) {
     if (!relayConfig || !c.roomId || !c.userId || c.nativeSsrc === undefined || !isPerformer(c)) return
-    const expiresAt = Math.floor(Date.now() / 1000) + relayConfig.ttlSec
+    const serverNow = Math.floor(Date.now() / 1000)
+    const expiresAt = serverNow + relayConfig.ttlSec
     const token = signRelayToken({ roomId: c.roomId, memberId: c.userId, ssrc: c.nativeSsrc, expiresAt }, relayConfig.secret)
-    send(c.ws, { type: 'relay-token', token: token.toString('base64url'), addr: relayConfig.addr, ssrc: c.nativeSsrc, expiresAt })
+    send(c.ws, {
+      type: 'relay-token',
+      token: token.toString('base64url'),
+      addr: relayConfig.addr,
+      ssrc: c.nativeSsrc,
+      expiresAt,
+      expiresIn: relayConfig.ttlSec,
+      serverNow,
+    })
   }
 
   /** 같은 방의 다른 사용자가 이 ssrc를 쓰고 있는지 (ssrc 선점·가로채기 방지) */

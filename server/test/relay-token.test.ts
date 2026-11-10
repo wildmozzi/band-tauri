@@ -119,6 +119,9 @@ describe('relay-token issuance over WS', async () => {
     assert.deepEqual(claims, { roomId: 'free', memberId: 'host', ssrc: 0x1234abcd, expiresAt: msg.expiresAt })
     const left = msg.expiresAt - Date.now() / 1000
     assert.ok(left > 100 && left <= 120, `짧은 TTL(120초): ${left}`)
+    // 클라이언트 시계와 무관한 상대 만료(PR #10 M1)
+    assert.equal(msg.expiresIn, 120)
+    assert.equal(msg.expiresAt - msg.serverNow, 120)
 
     // 갱신 요청
     const before = host.inbox.filter(m => m.type === 'relay-token').length

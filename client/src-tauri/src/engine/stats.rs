@@ -70,6 +70,8 @@ pub enum PeerStateKind {
 pub enum PathKind {
     Lan,
     Public,
+    /// UDP 릴레이 경유(서버 경유 — 지연 증가). relay-design.md, P1-4b.
+    Relay,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,6 +122,8 @@ pub struct EngineStats {
     /// `cpalWasapi` | `cpalAsio` | `fake`. 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
     pub backend: String,
     pub peers: Vec<PeerStats>,
+    /// 릴레이 등록 상태(릴레이를 설정하지 않았으면 null).
+    pub relay: Option<crate::net::relay::RelayStats>,
 }
 
 impl EngineStats {
@@ -142,6 +146,7 @@ impl EngineStats {
             device_period_ms: 0.0,
             backend: String::new(),
             peers: Vec::new(),
+            relay: None,
         }
     }
 }
@@ -182,6 +187,8 @@ mod tests {
         assert!(j.contains("\"state\":\"connected\""));
         assert!(j.contains("\"path\":\"lan\""));
         assert!(j.contains("\"rttMs\":null"));
+        assert!(j.contains("\"relay\":null"));
+        assert_eq!(serde_json::to_string(&PathKind::Relay).unwrap(), "\"relay\"");
         assert!(j.contains("\"devicePeriodMs\":0.0") && j.contains("\"backend\":\"\"") && j.contains("\"inputDiscontinuities\":0") && j.contains("\"streamFailed\":false"), "{j}");
     }
 }

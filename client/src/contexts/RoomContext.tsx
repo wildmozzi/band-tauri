@@ -83,6 +83,8 @@ type RoomContextType = {
   myInstrument: string | null
   peerInstruments: Record<string, PeerInstrument>
   engineStats: EngineStats | null
+  /** 마지막 engine_set_relay 실패 사유(없으면 null) */
+  relayError: string | null
   /** 엔진 피어 통계 (peerId → PeerStats) */
   peerEngineStats: Record<string, PeerStats>
   isMonitoringEnabled: boolean
@@ -409,9 +411,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     const from = typeof p.from === 'string' ? p.from : null
     if (from && from === self) return
 
-    // native-descriptor / native-leave / 연주 거부 에러(perform-not-approved, room-full-performers, login-required)
+    // native-descriptor / native-leave / relay-token / 연주 거부 에러(perform-not-approved, room-full-performers,
+    // login-required) / ssrc-conflict(엔진 재시작만 — 연주 거부가 아니므로 방송은 유지)
     if (session.handleSignal(p)) {
-      if (p.type === 'error') broadcasterRef.current!.stop()
+      if (p.type === 'error' && p.code !== 'ssrc-conflict') broadcasterRef.current!.stop()
       return
     }
     if (chat.handleChatSignal(p)) return
@@ -768,6 +771,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     myInstrument: perf.phase === 'idle' ? null : perf.instrument,
     peerInstruments,
     engineStats: perf.stats,
+    relayError: perf.relayError ?? null,
     peerEngineStats,
     isMonitoringEnabled,
     monitorGain,

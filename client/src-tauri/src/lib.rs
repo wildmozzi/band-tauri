@@ -24,6 +24,7 @@ pub fn run() {
             commands::engine_test_stop,
             commands::engine_add_peer,
             commands::engine_remove_peer,
+            commands::engine_set_relay,
             commands::engine_set_peer_gain,
             commands::engine_set_input_muted,
             commands::engine_safety_code,

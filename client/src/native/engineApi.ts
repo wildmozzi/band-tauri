@@ -58,11 +58,38 @@ export interface LocalDescriptor {
 }
 
 export type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
+export type PeerPath = 'lan' | 'public' | 'relay'
+
+/** 릴레이 등록 상태 (relay-design.md, P1-4b) */
+export type RelayState = 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'
+
+export interface RelayStats {
+  state: RelayState
+  /** 해석된 릴레이 주소 ip:port */
+  addr: string
+  /** 이 엔진 ↔ 릴레이 왕복(ms) */
+  rttMs: number | null
+  /** 릴레이로 보내는 양(kbps, 최근 1초) */
+  txKbps: number
+  /** 릴레이 상한(2Mbps/2500pps)의 90% 초과: 릴레이가 패킷을 버리기 시작한다(PCM16 + 릴레이 피어 여럿) */
+  overBudget: boolean
+}
+
+/** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token/expiresIn */
+export interface RelayConfig {
+  /** 릴레이 host:port */
+  addr: string
+  /** base64url 토큰 (engine_start가 만든 ssrc에 묶임) */
+  token: string
+  /** 토큰 남은 수명(초, 서버 발급 시각 기준). 엔진은 받은 시각 + 이 값으로 만료를 판단한다(시계 오차 무관) */
+  expiresInSec?: number
+}
 
 export interface PeerStats {
   peerId: string
   state: PeerState
-  path: 'lan' | 'public' | null
+  /** 'relay' = UDP 릴레이(서버 경유 — 지연 증가). 직접 경로가 열리면 엔진이 자동으로 승격한다 */
+  path: PeerPath | null
   rttMs: number | null
   jitterMs: number
   bufferMs: number
@@ -112,6 +139,8 @@ export interface EngineStats {
   /** 실제로 열린 오디오 백엔드(`AudioBackendKind`, 입·출력이 다르면 `입력/출력`). 정지 상태면 빈 문자열 */
   backend?: string
   peers: PeerStats[]
+  /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
+  relay?: RelayStats | null
 }
 
 // ============================================================================
@@ -172,6 +201,14 @@ export function engineTestStop(): Promise<null> {
 
 export function engineAddPeer(peerId: string, descriptor: LocalDescriptor): Promise<null> {
   return invoke<null>('engine_add_peer', { peerId, descriptor })
+}
+
+/**
+ * 릴레이 설정/토큰 갱신(서버 relay-token을 받을 때마다), null이면 해제.
+ * 토큰은 engine_start가 만든 ssrc에 묶이므로 시작 인자가 아니라 별도 커맨드다(설계 4절).
+ */
+export function engineSetRelay(relay: RelayConfig | null): Promise<null> {
+  return invoke<null>('engine_set_relay', { relay })
 }
 
 export function engineRemovePeer(peerId: string): Promise<null> {

@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   engineAddPeer,
   engineRemovePeer,
+  engineSetRelay,
   engineSetInputMuted,
   engineSetPeerGain,
   engineStart,
@@ -21,6 +22,7 @@ export const tauriEngineBackend: EngineBackend = {
   start: engineStart,
   stop: engineStop,
   addPeer: engineAddPeer,
+  setRelay: engineSetRelay,
   removePeer: engineRemovePeer,
   setPeerGain: engineSetPeerGain,
   setInputMuted: engineSetInputMuted,

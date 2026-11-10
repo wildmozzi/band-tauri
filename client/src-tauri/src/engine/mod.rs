@@ -211,6 +211,16 @@ impl Engine {
         self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.add_peer(peer_id, desc)
     }
 
+    /// 릴레이 설정/토큰 갱신/해제(설계 4절 `engine_set_relay`, relay-design.md).
+    pub fn set_relay(&self, relay: Option<crate::net::RelaySetting<'_>>) -> Result<(), String> {
+        self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.set_relay(relay)
+    }
+
+    /// 지금 릴레이가 `host`(host:port 문자열)로 설정돼 있으면 그때 해석한 주소(DNS를 다시 풀지 않는다, M3).
+    pub fn relay_addr_for_host(&self, host: &str) -> Option<std::net::SocketAddr> {
+        self.net.as_ref().and_then(|n| n.relay_addr_for_host(host))
+    }
+
     pub fn remove_peer(&self, peer_id: &str) -> Result<(), String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
         net.remove_peer(peer_id);
@@ -304,6 +314,7 @@ impl Engine {
             device_period_ms,
             backend: self.info.backend_label(),
             peers,
+            relay: self.net.as_ref().and_then(|n| n.relay_stats()),
         }
     }
 
