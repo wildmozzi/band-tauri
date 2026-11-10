@@ -12,7 +12,7 @@
 | P0-2 | 엔진 코드 리뷰 + 지적사항 수정 | Critical/High 0 | 완료(#5: 버퍼 30/30ms·은닉 4.08%·연속성 100%, 언더런 누적 상한 +4.7ms) |
 | P0-3 | 프론트 리뷰 지적사항 수정 + 세션 재개 시 descriptor 재전송 | 리뷰 Critical/High 0, vitest 통과 | 완료(0e62340: vitest 100, server 66) |
 | P0-4 | CI 워크플로(Windows Rust + Node) 녹색 | overhaul에서 CI 통과 | 완료(Client/Server/Relay/Rust 4잡, lint 필수) |
-| P0-5 | **[확인]** git 히스토리에서 비밀값 제거 + 전 브랜치 force push | 사용자 승인 후 실행, 협업자 재clone 안내 | 대기 (P0-1~4 후) |
+| P0-5 | **[확인]** git 히스토리에서 비밀값 제거 + 전 브랜치 force push | 사용자 승인 후 실행, 협업자 재clone 안내 | 취소(사용자 결정 2026-11-10: DB 비밀번호 교체 완료, 리포 개인 계정 비공개 이전 → force push 위험 대비 실익 낮음) |
 | P0-6 | overhaul → develop 반영, 이후 PR 기반 개발 전환 | develop = overhaul | 대기 (P0-5) |
 | P0-7 | **[사람]** 노출 키 교체: Supabase service_role/anon/DB 비밀번호, 토스 시크릿, band 리포의 .env/.mcp.json 키 | 사용자 완료 보고 | 사람 확인 |
 | P0-8 | **[사람]** fly secrets(SUPABASE_URL, SUPABASE_SERVICE_KEY, TOSS_PAYMENTS_SECRET_KEY, CORS_ORIGINS=https://indigomuse.art) 설정 + indigomuse.art Vercel 프로젝트를 **wildmozzi/band-tauri**(Root=client, Git 연동)로 재연결 → 전환 후 band-web을 Vercel에서 분리·비공개/아카이브 | 운영 전환 체크리스트(P3-5a와 동시) | 사람 확인 |
@@ -55,7 +55,7 @@
 
 | ID | 항목 | 완료 조건 | 상태 |
 |---|---|---|---|
-| P2-6a | **[결정]** 요금제표의 "비공개 방 = Standard 이상" 제한을 적용할지 (현재 미적용) | 사용자 결정 | 대기 |
+| P2-6a | **[결정]** 요금제표의 "비공개 방 = Standard 이상" 제한을 적용할지 (현재 미적용) | 사용자 결정 | 결정(2026-11-10): 무료 플랜도 비공개 방 허용, 요금제 제한은 추후 — 현 구현 유지 |
 | P3-0 | CI 안정화: `callback_mix_early_callbacks_real_time` 타이밍 불안정 테스트 결정화, CI 단계 타임아웃(ffmpeg apt 설치가 50분 멈춘 사례) + apt 캐시/재시도 | CI 연속 녹색 | 완료(#14) |
 | P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 완료(#3) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
