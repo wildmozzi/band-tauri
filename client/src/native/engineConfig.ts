@@ -61,11 +61,12 @@ export function jitterProfileLabel(p: number): string {
   return '균형'
 }
 
-/** 피어 한 명의 지터 버퍼 상태 한 줄: "버퍼 5.3ms / 목표 5.3ms · 은닉 0.1%" */
-export function formatPeerJitter(ps: Pick<PeerStats, 'bufferMs' | 'targetMs' | 'concealPct'>): string {
+/** 피어 한 명의 지터 버퍼 상태 한 줄: "버퍼 5.3ms / 목표 5.3ms · 은닉 0.1% · 보정 2%" (옛 엔진은 일부 필드가 없을 수 있음) */
+export function formatPeerJitter(ps: Pick<PeerStats, 'bufferMs'> & Partial<Pick<PeerStats, 'targetMs' | 'concealPct' | 'corrTimePct'>>): string {
   const target = ps.targetMs !== undefined ? ` / 목표 ${ps.targetMs.toFixed(1)}ms` : ''
   const conceal = ps.concealPct !== undefined ? ` · 은닉 ${ps.concealPct.toFixed(1)}%` : ''
-  return `버퍼 ${ps.bufferMs.toFixed(1)}ms${target}${conceal}`
+  const corr = ps.corrTimePct !== undefined ? ` · 보정 ${ps.corrTimePct.toFixed(0)}%` : ''
+  return `버퍼 ${ps.bufferMs.toFixed(1)}ms${target}${conceal}${corr}`
 }
 
 export type EnginePresetId = 'ultraLow' | 'balanced' | 'stable'
@@ -193,11 +194,15 @@ export function matchPreset(config: EngineConfig): EnginePresetId | null {
   return null
 }
 
+/** 프리셋이 정하는 지터 프로필(PR #20 L2). 프리셋 일치 판정(matchPreset)에는 쓰지 않는다(슬라이더로 따로 조절). */
+export const PRESET_JITTER_PROFILE: Record<EnginePresetId, number> = { ultraLow: 0, balanced: 0.5, stable: 1 }
+
 export function applyPreset(config: EngineConfig, preset: EnginePresetId, inputDevice?: DeviceInfo | null): EngineConfig {
   const fields = ENGINE_PRESETS[preset].fields
   return {
     ...config,
     ...fields,
+    jitterProfile: PRESET_JITTER_PROFILE[preset],
     inputChannels: normalizeInputChannels(fields.channels, config.inputChannels, inputDevice?.channels),
   }
 }

@@ -231,6 +231,11 @@ describe('P1-5: 지터 프로필(저지연 ↔ 안정)', () => {
     expect(validateEngineConfig({ ...DEFAULT_ENGINE_CONFIG, jitterProfile: 1.5 }).map((i) => i.field)).toContain('jitterProfile')
     expect(validateEngineConfig({ ...DEFAULT_ENGINE_CONFIG, jitterProfile: 0 })).toEqual([])
   })
+  it('프리셋은 프로필을 정한다: 초저지연 0, 균형 0.5, 안정 1', () => {
+    expect(applyPreset(DEFAULT_ENGINE_CONFIG, 'ultraLow').jitterProfile).toBe(0)
+    expect(applyPreset(DEFAULT_ENGINE_CONFIG, 'balanced').jitterProfile).toBe(0.5)
+    expect(applyPreset(DEFAULT_ENGINE_CONFIG, 'stable').jitterProfile).toBe(1)
+  })
   it('프로필은 프리셋 일치 판정에 영향을 주지 않는다', () => {
     const c = applyPreset(DEFAULT_ENGINE_CONFIG, 'balanced')
     expect(matchPreset({ ...c, jitterProfile: 0.9 })).toBe('balanced')
@@ -240,6 +245,7 @@ describe('P1-5: 지터 프로필(저지연 ↔ 안정)', () => {
     expect(jitterProfileLabel(0.5)).toBe('균형')
     expect(jitterProfileLabel(1)).toBe('안정')
     expect(formatPeerJitter({ bufferMs: 5.31, targetMs: 5.25, concealPct: 0.12 })).toBe('버퍼 5.3ms / 목표 5.3ms · 은닉 0.1%')
+    expect(formatPeerJitter({ bufferMs: 5.31, targetMs: 5.25, concealPct: 0.12, corrTimePct: 8.4 })).toBe('버퍼 5.3ms / 목표 5.3ms · 은닉 0.1% · 보정 8%')
     expect(formatPeerJitter({ bufferMs: 5 })).toBe('버퍼 5.0ms')
   })
 })

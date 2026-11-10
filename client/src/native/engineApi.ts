@@ -96,9 +96,13 @@ export interface PeerStats {
   jitterMs: number
   bufferMs: number
   /** 지터 버퍼 목표 깊이(ms): 지터 추정 + 은닉 마감 여유 + 언더런 여유 + 프로필 여유 */
-  targetMs?: number
+  targetMs: number
   /** 최근 5초 은닉 비율(%, 손실 + 늦은 패킷 + 언더런) */
-  concealPct?: number
+  concealPct: number
+  /** 최근 5초 중 깊이 보정(샘플 버림·삽입) 모드였던 패킷 비율(%) */
+  corrTimePct: number
+  /** 깊이 보정의 최대 국소 피치 편차(센트, 재생 시작 이후). 상한 약 4.3센트 */
+  maxCorrCents: number
   lossPct: number
   late: number
   concealed: number

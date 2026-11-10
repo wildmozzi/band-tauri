@@ -27,11 +27,22 @@ pub(super) struct NetPeer {
     pub spikes: Vec<(u64, u64, u64)>,
     pub profile: f32,
     pub seed: u64,
+    /// 망 지터 분포. 균등은 U(0, net_jitter_us), 지수는 평균 net_jitter_us, 파레토는 척도 net_jitter_us·α 2.5(꼬리 김).
+    pub dist: JitDist,
+    /// 경로 변경(µs 시각, 그 전 추가 지연 µs, 그 뒤 지터 µs): 릴레이(느리고 안정) → 직접(빠르고 다른 지터) 승격.
+    pub switch: Option<(u64, u64, u64)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum JitDist {
+    Uniform,
+    Exp,
+    Pareto,
 }
 
 impl NetPeer {
     pub fn new(frame: usize, seed: u64) -> Self {
-        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed }
+        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None }
     }
 }
 
@@ -79,6 +90,8 @@ pub(super) struct PeerOut {
     /// 1초 블록별 실제 도착 지연 p95(ms, 블록 최솟값 기준).
     pub block_p95: Vec<(f64, f32)>,
     pub margin: usize,
+    /// 정착 후 5초마다 본 `corr_time_pct`(최근 5초 보정 모드 비율).
+    pub corr_pcts: Vec<f32>,
 }
 
 impl PeerOut {
@@ -97,6 +110,13 @@ impl PeerOut {
         let c = self.js.concealed - self.js_settle.concealed;
         let p = self.js.produced - self.js_settle.produced;
         c as f64 * 100.0 / p.max(1) as f64
+    }
+    /// 정착 후 보정 모드 시간 비율(%): 100ms 표본 중 보정 샘플 수가 늘어난 표본의 비율이 아니라, 엔진 통계(최근 5초)의 평균.
+    pub fn corr_time_pct(&self) -> f64 {
+        if self.corr_pcts.is_empty() {
+            return 0.0;
+        }
+        self.corr_pcts.iter().map(|&x| x as f64).sum::<f64>() / self.corr_pcts.len() as f64
     }
     pub fn corrections(&self) -> u64 {
         self.js.corrections() - self.js_settle.corrections()
@@ -260,7 +280,17 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                 let nb = tx.enc.encode(&pcm, &mut payload).unwrap();
                 let h = Header { ptype: PacketType::Audio, ssrc: 1 + pi as u32, seq: tx.seq, timestamp: tx.ts, flags: 0, frame_code: tx.fcode };
                 let spike: u64 = np.spikes.iter().filter(|s| t >= s.0 && t < s.0 + s.1).map(|s| s.2).sum();
-                let delay = 200 + tx.rng.gen_range(0..np.net_jitter_us.max(100)) + spike;
+                let (path_extra, jit_us) = match np.switch {
+                    Some((ts, extra, _)) if t < ts => (extra, np.net_jitter_us),
+                    Some((_, _, after)) => (0, after),
+                    None => (0, np.net_jitter_us),
+                };
+                let jitter = match np.dist {
+                    JitDist::Uniform => tx.rng.gen_range(0..jit_us.max(100)),
+                    JitDist::Exp => (-(1.0 - tx.rng.gen::<f64>()).ln() * jit_us as f64) as u64,
+                    JitDist::Pareto => (jit_us as f64 * 1.5 * ((1.0 - tx.rng.gen::<f64>()).powf(-1.0 / 2.5) - 1.0)).min(200_000.0) as u64,
+                };
+                let delay = 200 + jitter + spike + path_extra;
                 if !(np.loss > 0.0 && tx.rng.gen_bool(np.loss)) {
                     pending.push((t + delay, pi, h, payload[..nb].to_vec()));
                 }
@@ -301,6 +331,9 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     if jbs[i].is_playing() {
                         let s = jbs[i].stats();
                         outs[i].trace.push((t as f64 / 1e6, s.buffer_ms, s.target_ms));
+                        if t >= p.settle_us && (t - p.settle_us) % 5_000_000 < 100_000 && t > p.settle_us + 4_900_000 {
+                            outs[i].corr_pcts.push(s.corr_time_pct);
+                        }
                     }
                 }
                 next_trace += 100_000;
@@ -324,12 +357,15 @@ fn ms(frame: usize) -> f32 {
 fn report(label: &str, p: &PeerOut, frame: usize, a: f64, b: f64) -> (f32, f32) {
     let (buf, p95) = (p.median_buffer(a, b), p.median_p95(a, b));
     println!(
-        "TUNE {label}: bufferMs 중앙값 {buf:.2} (1F+p95 = {:.2}), 목표 {:.2}, p95 {p95:.2}ms, 은닉 {:.2}% (손실 {:.1}%), 보정 {}, 여유 {}",
+        "TUNE {label}: bufferMs 중앙값 {buf:.2} (1F+p95 = {:.2}), 목표 {:.2}, p95 {p95:.2}ms, 은닉 {:.2}% (손실 {:.1}%), 보정 {}, 보정 시간 {:.1}%, 최대 {:.1}센트, 늦은 패킷 버림 {}, 여유 {}",
         ms(frame) + p95,
         p.js.target_ms,
         p.conceal_pct(),
         p.js.loss_pct,
         p.corrections(),
+        p.corr_time_pct(),
+        p.js.max_corr_cents,
+        p.js.late_dropped,
         p.margin
     );
     (buf, p95)
@@ -368,6 +404,8 @@ fn tune_loss_1pct_concealment_within_goal() {
         let p = &r.peers[0];
         report(&format!("손실 1% F {frame} 지터 {jitter_us}µs"), p, frame, 5.0, 60.0);
         assert!(p.conceal_pct() <= 1.5, "F {frame} 지터 {jitter_us}: 은닉 {:.2}%", p.conceal_pct());
+        // PR #20 H1: 깊이 보정의 국소 피치 편차는 비율 상한(0.25% ≈ 4.3센트)을 넘지 않는다.
+        assert!(p.js.max_corr_cents <= 4.4, "F {frame}: 최대 {:.1}센트", p.js.max_corr_cents);
     }
 }
 
@@ -474,11 +512,34 @@ fn tune_margin_with_drift_no_steady_concealment() {
     assert!(learned >= 4, "여유 학습이 일어나야 함(전제): {learned}");
 }
 
+/// PR #20 M1: 꼬리가 긴 지터(지수 평균 2ms, 파레토)에서 버스트 감지가 상시 발화하지 않아야 한다(목표가 창 최댓값으로
+/// 끌려가지 않음). 프로필별 bufferMs·은닉·버스트 감지 횟수.
+#[test]
+fn tune_long_tail_jitter() {
+    for dist in [JitDist::Exp, JitDist::Pareto] {
+        let mut rows = Vec::new();
+        for profile in [0.0f32, 0.5, 1.0] {
+            let mut np = NetPeer::new(120, 91);
+            np.net_jitter_us = 2000;
+            np.dist = dist;
+            np.profile = profile;
+            let r = run_multi(&MultiSim::new(40.0, vec![np]));
+            let p = &r.peers[0];
+            let (buf, _) = report(&format!("꼬리 {dist:?} 프로필 {profile}"), p, 120, 5.0, 40.0);
+            let bursts = p.js.burst_events - p.js_settle.burst_events;
+            println!("TUNE 꼬리 {dist:?} 프로필 {profile}: 정착 후 버스트 감지 {bursts}회/35s");
+            rows.push((buf, p.conceal_pct(), bursts));
+        }
+        assert!(rows[0].0 <= rows[1].0 && rows[1].0 <= rows[2].0, "{dist:?}: 지연 저지연 ≤ 균형 ≤ 안정: {rows:?}");
+        assert!(rows[1].2 <= 10, "{dist:?}: 균형 프로필 버스트 감지가 상시 발화: {rows:?}");
+    }
+}
+
 /// 프로필(저지연 0 ↔ 균형 0.5 ↔ 안정 1): 같은 회선에서 지연은 오르고 은닉은 내려간다.
 #[test]
 fn tune_profile_tradeoff() {
     let mut rows = Vec::new();
-    for profile in [0.0f32, 0.5, 1.0] {
+    for profile in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
         let mut np = NetPeer::new(120, 77);
         np.net_jitter_us = 8000;
         np.loss = 0.01;
@@ -489,6 +550,36 @@ fn tune_profile_tradeoff() {
         let (buf, _) = report(&format!("프로필 {profile}"), p, 120, 5.0, 40.0);
         rows.push((buf, p.conceal_pct()));
     }
-    assert!(rows[0].0 < rows[1].0 && rows[1].0 < rows[2].0, "지연은 저지연 < 균형 < 안정: {rows:?}");
-    assert!(rows[0].1 >= rows[1].1 && rows[1].1 >= rows[2].1, "은닉은 저지연 ≥ 균형 ≥ 안정: {rows:?}");
+    for w in rows.windows(2) {
+        assert!(w[0].0 <= w[1].0 + 0.05, "지연은 프로필을 따라 오른다: {rows:?}");
+        assert!(w[0].1 + 0.05 >= w[1].1, "은닉은 프로필을 따라 내려간다: {rows:?}");
+    }
+    assert!(rows[0].0 < rows[4].0 && rows[0].1 > rows[4].1, "양 끝은 분명히 달라야 함: {rows:?}");
+    // PR #20 M4: 한 칸(0.25)에 지연이 두 배 넘게 뛰지 않는다(이전: 0.5 → 1에서 11.75 → 32.69ms).
+    for w in rows.windows(2) {
+        assert!(w[1].0 <= 2.0 * w[0].0, "프로필 한 칸에 지연 절벽: {rows:?}");
+    }
+}
+
+/// PR #20 M2: 릴레이(+20ms, 지터 1ms) → 직접(지터 8ms) 승격. 경로 변경 리셋 뒤 목표가 바닥으로 떨어지면 새 경로의 큰
+/// 지터에서 은닉이 연달아 났다. 전환 후 2초 은닉과 6초 뒤 버퍼.
+#[test]
+fn tune_path_switch_to_jittery_direct() {
+    for frame in [120usize, 240] {
+        let mut np = NetPeer::new(frame, 61);
+        np.net_jitter_us = 1000;
+        np.switch = Some((10_000_000, 20_000, 8000));
+        let r = run_multi(&MultiSim::new(20.0, vec![np]));
+        let p = &r.peers[0];
+        let c2 = p.conceal_between(10_000_000, 12_000_000);
+        let after = p.median_buffer(16.0, 20.0);
+        println!(
+            "TUNE 경로 전환 F {frame}: 전환 전 버퍼 {:.2}ms, 전환 후 2초 은닉 이벤트 {c2}, 16~20s 버퍼 {after:.2}ms / 목표 {:.2}ms, 은닉 {:.2}%",
+            p.median_buffer(5.0, 10.0),
+            p.js.target_ms,
+            p.conceal_pct()
+        );
+        assert!(after < 20.0, "F {frame}: 옛 경로 지연을 끌지 않음: {after:.2}");
+        assert!(c2 <= 6, "F {frame}: 전환 직후 은닉 {c2}");
+    }
 }

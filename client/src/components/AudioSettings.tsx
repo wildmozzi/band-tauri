@@ -2,7 +2,7 @@
  * 네이티브 엔진 오디오 설정 화면 (EngineConfig / DeviceInfo, 설계 4절).
  * 상태와 저장은 AudioSettingsContext가 맡고, 이 컴포넌트는 표시와 입력만 한다.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAudioSettings } from '../contexts/AudioSettingsContext'
 import {
   MAX_PAYLOAD_BYTES,
@@ -39,6 +39,7 @@ interface AudioSettingsProps {
 const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || undefined
 
 const PEER_STATS_POLL_MS = 1000
+const PROFILE_APPLY_DEBOUNCE_MS = 200
 
 /** 합주 중(엔진 사용 중)일 때만 피어 통계를 1초마다 읽는다(지터 버퍼 상태 표시용). */
 function useLivePeerStats(enabled: boolean): PeerStats[] {
@@ -101,6 +102,18 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
   } = useAudioSettings()
 
   const livePeers = useLivePeerStats(isNativeMode && engineInUse)
+  // 슬라이더 드래그 중에는 표시만 바꾸고, 엔진 적용(IPC)은 마지막 값으로 200ms 뒤 한 번만(PR #20 M3).
+  const profileTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (profileTimer.current) clearTimeout(profileTimer.current)
+  }, [])
+  const scheduleProfileApply = (p: number) => {
+    if (profileTimer.current) clearTimeout(profileTimer.current)
+    profileTimer.current = setTimeout(() => {
+      profileTimer.current = null
+      void engineSetJitterProfile(p).catch(() => undefined)
+    }, PROFILE_APPLY_DEBOUNCE_MS)
+  }
 
   // 설정 화면을 닫으면 테스트 종료
   useEffect(() => () => {
@@ -383,14 +396,14 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             onChange={(e) => {
               const p = clampJitterProfile(Number(e.target.value))
               updateConfig({ jitterProfile: p })
-              // 합주 중이면 바로 적용(다음 시작에는 저장된 설정을 쓴다)
-              if (engineInUse) void engineSetJitterProfile(p).catch(() => undefined)
+              // 합주 중이면 적용(디바운스). 다음 시작에는 저장된 설정을 쓴다
+              if (engineInUse) scheduleProfileApply(p)
             }}
           />
           <span>{jitterProfileLabel(config.jitterProfile ?? JITTER_PROFILE_DEFAULT)}</span>
         </div>
         <p className="setting-hint">
-          저지연: 버퍼를 최소로(가끔 끊김 감수) · 안정: 지터 스파이크에 여유를 더 오래 둠(지연 증가). 합주 중에도 바로 적용됩니다.
+          저지연: 버퍼를 최소로(가끔 끊김 감수) · 안정: 지터 스파이크에 여유를 더 오래 두고 반복되는 스파이크도 일부 덮음(회선에 따라 지연이 크게 늘 수 있음). 합주 중에도 바로 적용됩니다.
         </p>
         {engineInUse && (
           <div className="stats-grid" aria-label="피어별 지터 버퍼 상태">

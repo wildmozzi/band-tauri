@@ -317,6 +317,8 @@ impl Engine {
                             buffer_ms: js.buffer_ms,
                             target_ms: js.target_ms,
                             conceal_pct: js.conceal_pct,
+                            corr_time_pct: js.corr_time_pct,
+                            max_corr_cents: js.max_corr_cents,
                             loss_pct: js.loss_pct,
                             late: js.late,
                             concealed: js.concealed,

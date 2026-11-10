@@ -80,18 +80,18 @@ net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/
 - 도착 간격 지터를 RFC 3550 방식 EWMA로 추정 + 최근 N(=200)개 지연의 95퍼센타일.
 - **지터 추정 `j`**(P1-5, 0.25ms 격자로 올림): 상대 지연 `rel = transit − min_transit`의 분위수 q(프로필, 균형 0.95)를 세 창으로 보고 큰 값을 쓴다.
   - 짧은 창: 최근 200패킷 분위수. 오르면 바로, 더 낮은 후보(한 격자 히스테리시스)가 `hold`(균형 2초) 이어질 때만 내린다.
-  - 버스트: 최근 16패킷 중 2개가 `j + max(frame/2, 1ms) × 배율`을 넘으면 그 최댓값까지 바로 올린다(짧은 창 분위수는 창의 5%가 늦어야 움직인다). 버스트 수준의 패킷이 끝나고 `burst_hold`(균형 2초)가 지나면 없앤다. 절대 지연으로 기억해 최소 지연이 오르면(경로 변경) 그만큼 줄어든다.
-  - 긴 창: 1초 블록마다 블록 분위수를 남기고 최근 `long_blocks`(균형 17)개 중 3번째로 큰 값. 반복되는 스파이크에서 목표를 내렸다 다시 은닉하는 순환을 막는다. 버스트 한 번(블록 2개 이하)은 무시된다.
-- **경로 변경**: 최소 지연보다 max(5ms, frame, 지터 폭) 넘게 이른 패킷이 오면(릴레이 → 직접 승격 등) 지연 통계를 새 경로부터 다시 모으고, 200ms 동안 옛 경로로 늦게 오는 패킷은 통계에서 뺀다.
+  - 버스트: 최근 4패킷 중 3개가 `max(j, 짧은 창 p99) + max(frame/2, 1ms) × 배율`을 넘으면(시간 군집) 그 최댓값까지 바로 올린다(짧은 창 분위수는 창의 5%가 늦어야 움직인다). 꼬리가 긴 지터에서는 따로 오는 꼬리 패킷이 많아 군집·p99 기준이 없으면 상시 발화했다(PR #20 M1). 최근 16패킷 중 3개가 버스트 수준 근처인 동안 유지하고, 그 뒤 `burst_hold`(균형 2초)가 지나면 없앤다. 절대 지연으로 기억해 최소 지연이 오르면(경로 변경) 그만큼 줄어든다.
+  - 긴 창: 1초 블록마다 블록 분위수를 남기고, 최근 `long_blocks`(5 / 12 / 20)개 중 `max(3, ceil(블록 수/6))`번째로 큰 값을 본다. 짧은 창 너머 초과분의 `long_weight`(0.25 이하 0, 균형 1/6, 안정 1/2)만 반영한다. 반복되는 스파이크에서 목표를 내렸다 다시 은닉하는 순환을 줄인다. 버스트 한 번(블록 2개 이하)은 무시된다. 스파이크 시작은 어차피 은닉되므로 전부 덮으면 은닉 이득은 작고 지연은 스파이크 높이만큼 는다(PR #20 M4).
+- **경로 변경**: 창 표본이 50개 이상일 때 최소 지연보다 max(5ms, frame, 지터 폭) 넘게 이른 패킷이 오면(릴레이 → 직접 승격 등), 절대 지연에 묶인 통계(transit 창, 버스트 수준, 현재 블록)만 버린다. 짧은 창 추정과 긴 창 블록은 상대 지터라 남기고, 짧은 창 추정은 정상 hold로 내려간다. 200ms 동안 리셋 전 문턱보다 늦은 패킷(옛 경로로 오던 것)은 통계에서 뺀다(PR #20 M2). 송신 ts가 앞으로 뛰는 경우에도 같은 경로를 탄다.
 - **최종 목표** = `j + lead + 삽입 진입 문턱 + pad`, 상·하한 `jitter_max_ms`·`jitter_min_ms`(0 = 없음).
   - `lead`: 워커가 알린 은닉 판단 요구 깊이(`set_consumer_lead` = 마감 여유 1.5ms + 2·피어 여유, 1.1절, P1-13). 전부 더한다(이전: `max(0, lead − 3·frame/4)` — 프레임 양자화 여분을 빼던 방식).
   - 삽입 진입 문턱 `clamp(frame/8, 0.25ms, 1ms)`: 깊이는 드리프트로 이 문턱만큼 목표 밑에 머물 수 있으므로 더해 둔다. 그래서 깊이 ≥ `j + lead`가 항상 지켜진다(PR #16 M2).
   - `pad`: 프로필 여유 `max(0, profile − 0.5) × frame`. 재생 시작 직후 1초 동안은 `min(frame, 2.5ms)`를 더한다(출력 콜백 시각 추정이 이른 콜백을 아직 못 본 첫 콜백들).
   - 이전 공식 `(ceil(p95/frame) + 1) × frame`은 안정 회선에서 GOAL 1절(`bufferMs` 중앙값 ≤ 1프레임 + p95)을 1프레임 가까이 넘었다.
   - 깊이 보정·재생 시작·`targetMs` 통계 모두 이 하나의 목표를 쓴다. 목표가 내려가거나 `lead`가 바뀐 직후에는 데드밴드 안 오차도 해제 문턱까지 보정한다(`chase`).
-- **프로필**(`jitter_profile` 0..1, 기본 0.5; 0 저지연 · 0.5 균형 · 1 안정): 분위수 0.90 / 0.95 / 0.99, pad 0 / 0 / 0.5frame, hold 1 / 2 / 5초, burst_hold 0.5 / 2 / 6초, 버스트 문턱 배율 1.5 / 1 / 0.5, 긴 창 5 / 17 / 30블록, 피어 여유 배율(상한·유지 시간) 0.5 / 1 / 2. 그 사이는 선형. `engine_set_jitter_profile`로 실행 중에 바꿀 수 있다.
+- **프로필**(`jitter_profile` 0..1, 기본 0.5; 0 저지연 · 0.5 균형 · 1 안정): 분위수 0.90 / 0.95 / 0.99, pad 0 / 0 / 0.5frame, hold 1 / 2 / 4초, burst_hold 0.5 / 2 / 4초, 버스트 문턱 배율 1.5 / 1 / 0.5, 긴 창 5 / 12 / 20블록·반영 0 / 1/6 / 1/2, 피어 여유 배율(상한·유지 시간) 0.5 / 1 / 2. 그 사이는 선형. `engine_set_jitter_profile`로 실행 중에 바꿀 수 있다. 같은 값이면 무시하고, 짧은 창 추정은 오를 때만 바로 바뀌며 내려가는 쪽은 hold를 거친다(M3). 프리셋은 프로필을 정한다(초저지연 0, 균형 0.5, 안정 1).
 - **깊이 측정**: `깊이 = now − ts(다음 재생 샘플) − min_transit`. "다음 재생 샘플"은 소스 링의 머리(이미 꺼냈지만 재생 전인 양을 포함)다. 출력 콜백마다 1회, 출력 콜백 시각(장치 클럭)으로 측정해 EWMA한다. 재생 시작 시 깊이를 목표에 정확히 맞춘다(초과분 건너뜀).
-- **드리프트/깊이 보정(데드밴드 + 히스테리시스, 비대칭)**: 오차가 +clamp(frame/2, 1ms, 2.5ms)를 넘으면 버림 모드, −clamp(frame/8, 0.25ms, 1ms)를 넘으면 삽입 모드로 들어가 디코드한 패킷마다 1샘플(오차가 1프레임을 넘으면 2샘플)을 버리거나 넣는다(프레임 전체 램프). 오차가 각 진입 문턱의 1/4(최소 4샘플) 안으로 들어오면 멈춘다. 드리프트 0이면 보정 0회다. 추정 깊이와 실제 쌓인 양이 모두 목표를 3프레임 이상 넘으면 패킷 단위로 버리기 시작해 1프레임 안으로 들어오면 멈춘다(버린 패킷도 디코드해 디코더 상태를 유지하고 다음 프레임과 크로스페이드). 결과적으로 지연이 누적되지 않는다.
+- **드리프트/깊이 보정(데드밴드 + 히스테리시스, 비대칭)**: 오차가 +clamp(frame/2, 1ms, 2.5ms)를 넘으면 버림 모드, −clamp(frame/8, 0.25ms, 1ms)를 넘으면 삽입 모드로 들어간다. 보정은 패킷 경계를 넘어 이어지는 분수 읽기 위치 리샘플러(선형 보간)로 하며, 읽기 간격 1 ± 0.25%(최대 약 4.3센트, 지속음 피치 JND 5–10센트 아래)로 속도를 제한한다(PR #20 H1: 이전에는 패킷마다 1–2샘플이라 2.5ms 프레임에서 14–29센트). 버림 오차가 진입 문턱의 1/8, 삽입 오차가 1/4(최소 4샘플) 안으로 들어오면 멈추고, 읽기 위상이 정수가 될 때까지 같은 방향으로 이어 간 뒤 원 샘플을 그대로 낸다. **늦은 패킷 손실 처리**: 언더런 은닉(seq 전진 없음) 뒤 늦게 온 패킷을 꺼낼 때(ts가 은닉한 만큼 되감김) 그만큼 늘어날 깊이가 목표보다 frame/2 이상 깊으면, 그 패킷은 재생하지 않고 디코드만 해서 버린다(크로스페이드, NetEQ류). 은닉은 이미 났으므로 은닉률은 그대로이고, +1프레임 깊이를 샘플 버림으로 되돌리는 구간이 없어진다. 드리프트 0이면 보정 0회다. 추정 깊이와 실제 쌓인 양이 모두 목표를 3프레임 이상 넘으면 패킷 단위로 버리기 시작해 1프레임 안으로 들어오면 멈춘다(버린 패킷도 디코드해 디코더 상태를 유지하고 다음 프레임과 크로스페이드). 결과적으로 지연이 누적되지 않는다.
 - 손실: Opus는 디코더 PLC(`decode(None)`), 다음 패킷이 있으면 FEC 사용. PCM은 직전 프레임 페이드아웃 반복 1회 후 무음.
 - 늦게 온 패킷(이미 재생 지난 seq)은 폐기하고 `late` 카운트.
 - 통계: `buffer_ms`, `target_ms`, `jitter_ms`, `loss_pct`(최근 5초), `conceal_pct`(최근 5초 은닉 프레임 비율), `late`, `concealed`.
@@ -207,7 +207,7 @@ interface EngineConfig {
 }
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
-interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean }
+interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean }
 interface RelayConfig { addr: string; token: string; expiresInSec?: number }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)
 interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean }
 type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
@@ -242,7 +242,7 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 | `engine_cancel_measure` | — | `null` — 진행 중인 측정 취소(진행 중인 측정 커맨드는 "취소" 에러로 끝난다) |
 
 - 레벨 값(`inputLevel`, `outputLevel`, `PeerStats.level`)은 0..1 선형 RMS.
-- `PeerStats.targetMs` = 지터 버퍼 목표 깊이(1.2절 최종 목표). `bufferMs`가 이 값을 따라간다. `concealPct` = 최근 5초 은닉 프레임 / 생산 프레임(%, 손실 + 늦은 패킷 + 언더런, GOAL 2절 지표).
+- `PeerStats.targetMs` = 지터 버퍼 목표 깊이(1.2절 최종 목표). `bufferMs`가 이 값을 따라간다. `concealPct` = 최근 5초 은닉 프레임 / 생산 프레임(%, 손실 + 늦은 패킷 + 언더런, GOAL 2절 지표). `corrTimePct` = 최근 5초 중 깊이 보정(샘플 버림·삽입) 모드였던 패킷 비율(%), `maxCorrCents` = 재생 시작 이후 보정의 최대 국소 피치 편차(센트, 상한 약 4.3).
 - `engine_subscribe_mix` 채널은 JSON 배열이 아닌 **raw 바이트**(`tauri::ipc::InvokeResponseBody::Raw`, f32 LE 인터리브)로 보낸다.
 
 `estLatencyMs`(GOAL 1절 정의) = 입력 장치 버퍼 + 프레임 + 출력 링 + 장치 출력 버퍼. 네트워크를 제외한, 네트워크 경로 중 내 쪽의 로컬 처리 지연이며 첫 샘플 기준이다. 장치 내부의 숨은 버퍼(WASAPI 공유 모드 엔진 버퍼 등)는 포함하지 않는다.

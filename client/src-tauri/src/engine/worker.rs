@@ -689,7 +689,7 @@ impl PeerFeed {
         // 유효 여유(PR #16 M1, P1-5): 여유가 늘면 목표가 2·여유만큼 깊어지는데, 0 채움으로 남긴 양이 모자라면 나머지는
         // 삽입 램프(수백 ms)로 채운다. 그동안 늘어난 여유를 마감·채울 양에 그대로 쓰면 깊이가 아직 없어 마감 채움(은닉)이
         // 났다. 깊이 부족분 s의 절반만큼 여유를 덜 써서 `깊이 ≥ 지터 + 1.5ms + 2·유효 여유`를 유지한다.
-        let short48 = (-jb.depth_error()).max(0.0);
+        let short48 = jb.depth_shortfall();
         let short_dev = (short48 / 2.0 * t.out_rate as f64 / INTERNAL_RATE as f64).ceil() as usize;
         let m_eff = self.margin.saturating_sub(short_dev);
         let lead_cap = t.out_burst + 2 * t.chunk_dev() + m_eff;
@@ -1726,7 +1726,9 @@ mod tests {
             // (P1-13, `expected_extra_ms`) 그 깊이는 0 채움으로 이미 늦어진 만큼을 건너뛰지 않고 남겨 만든다. 남길 0 채움이
             // 모자랄 때만 삽입 보정으로 채우므로 보정 총량은 늘어난 목표(샘플)를 넘지 않는다.
             let extra_ms = expected_extra_ms(r.margin);
-            assert!(r.steady.2 as f32 <= extra_ms * 48.0 + 1.0, "보정 {}은 늘어난 목표 {extra_ms:.2}ms를 넘지 않아야 함", r.steady.2);
+            // 비율 상한 램프(PR #20 H1)는 보정이 끝날 때 위상을 정수로 맞추며 몇 샘플 넘칠 수 있다(그만큼 반대로 되돌림).
+            // 그 몫으로 0.5ms(24샘플)를 더 허용한다.
+            assert!(r.steady.2 as f32 <= extra_ms * 48.0 + 24.0, "보정 {}은 늘어난 목표 {extra_ms:.2}ms(+0.5ms)를 넘지 않아야 함", r.steady.2);
             assert!((r.js.lead_ms - 1.5 - extra_ms).abs() < 0.01, "lead = 1.5ms + 2·여유(계약): {:.2}", r.js.lead_ms);
             // 지연은 쌓이지 않는다: 기본 목표(멈춤 없는 같은 링크)는 그대로이고 늘어난 것은 여유분뿐이다.
             let base = reference_target_ms(p);
