@@ -80,6 +80,7 @@ jobs:
     timeout-minutes: 45
     defaults:
       run:
+        shell: bash
         working-directory: client/src-tauri
     steps:
       - uses: actions/checkout@v4
@@ -111,6 +112,7 @@ jobs:
     timeout-minutes: 45
     defaults:
       run:
+        shell: bash
         working-directory: client/src-tauri
     steps:
       - uses: actions/checkout@v4
@@ -142,6 +144,7 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
+        shell: bash
         working-directory: relay
     steps:
       - uses: actions/checkout@v4
@@ -198,6 +201,7 @@ jobs:
     timeout-minutes: 25
     defaults:
       run:
+        shell: bash
         working-directory: client
     steps:
       - uses: actions/checkout@v4
