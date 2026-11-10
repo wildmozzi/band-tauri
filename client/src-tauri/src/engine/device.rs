@@ -505,6 +505,12 @@ pub mod fake {
         pub sink: Arc<Mutex<Vec<f32>>>,
         pub record_output: bool,
         pub seed: u64,
+        /// (주기, 멈춤): 출력 콜백 스레드가 주기마다 멈췄다가 몰아서 따라잡는다 → 출력 언더런 유발.
+        pub out_stall: Option<(Duration, Duration)>,
+        /// 이 시간 뒤 입력·출력 콜백이 멈춘다(장치 분리 흉내).
+        pub halt_after: Option<Duration>,
+        /// 공유하면 동시에 한 번만 열 수 있다(배타 장치 흉내).
+        pub exclusive: Option<Arc<AtomicBool>>,
     }
 
     impl FakeBackend {
@@ -525,6 +531,9 @@ pub mod fake {
                 sink: Arc::new(Mutex::new(Vec::new())),
                 record_output: true,
                 seed: 1,
+                out_stall: None,
+                halt_after: None,
+                exclusive: None,
             }
         }
 
@@ -543,6 +552,7 @@ pub mod fake {
     struct FakeGuard {
         stop: Arc<AtomicBool>,
         threads: Vec<std::thread::JoinHandle<()>>,
+        exclusive: Option<Arc<AtomicBool>>,
     }
 
     impl Drop for FakeGuard {
@@ -551,29 +561,46 @@ pub mod fake {
             for t in self.threads.drain(..) {
                 let _ = t.join();
             }
+            if let Some(ex) = &self.exclusive {
+                ex.store(false, Ordering::SeqCst);
+            }
         }
     }
 
     /// `t0 + offset + period·(k + first)`에 `f(k)`를 부르는 실시간 루프.
     /// 기상 지연은 `jitter_us` 이내 난수이며, 늦어지면 다음 호출들이 몰려서(버스트) 따라잡는다.
-    #[allow(clippy::too_many_arguments)]
-    fn clocked_loop(
-        stop: Arc<AtomicBool>,
+    struct LoopCfg {
         t0: Instant,
         offset: Duration,
         period: f64,
         first: u64,
         jitter_us: u64,
         seed: u64,
-        mut f: impl FnMut(u64),
-    ) {
+        /// (주기, 멈춤): 주기마다 콜백 스레드가 이만큼 멈췄다가 몰아서 따라잡는다(CPU 스파이크 흉내).
+        stall: Option<(Duration, Duration)>,
+        /// 이 시간 뒤 콜백을 더 부르지 않는다(장치 분리 흉내).
+        halt_after: Option<Duration>,
+    }
+
+    fn clocked_loop(stop: Arc<AtomicBool>, c: LoopCfg, mut f: impl FnMut(u64)) {
         // 실제 장치 콜백 스레드(cpal WASAPI/ASIO)는 시간 임계 우선순위로 돈다. 가짜도 같게 둔다.
         let _prio = crate::engine::prio::promote_current_thread();
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(c.seed);
         let mut k: u64 = 0;
+        let mut next_stall = c.stall.map(|(every, _)| every);
         while !stop.load(Ordering::Relaxed) {
-            let jitter = if jitter_us > 0 { Duration::from_micros(rng.gen_range(0..jitter_us)) } else { Duration::ZERO };
-            let due = t0 + offset + Duration::from_secs_f64(period * (k + first) as f64) + jitter;
+            if c.halt_after.is_some_and(|h| c.t0.elapsed() >= h) {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            if let (Some(at), Some((every, len))) = (next_stall, c.stall) {
+                if c.t0.elapsed() >= at {
+                    std::thread::sleep(len);
+                    next_stall = Some(at + every);
+                }
+            }
+            let jitter = if c.jitter_us > 0 { Duration::from_micros(rng.gen_range(0..c.jitter_us)) } else { Duration::ZERO };
+            let due = c.t0 + c.offset + Duration::from_secs_f64(c.period * (k + c.first) as f64) + jitter;
             let now = Instant::now();
             if due > now {
                 std::thread::sleep(due - now);
@@ -607,6 +634,12 @@ pub mod fake {
             if input.required_device_channels() > self.channels {
                 return Err("가짜 장치 채널 부족".into());
             }
+            // 배타 장치 흉내: 이미 열려 있으면 실패(ASIO 드라이버 1개, WASAPI 배타, 고정 포트와 같은 성질)
+            if let Some(ex) = &self.exclusive {
+                if ex.swap(true, Ordering::SeqCst) {
+                    return Err("장치가 이미 사용 중입니다".into());
+                }
+            }
             std::thread::sleep(self.open_delay);
             let stop = Arc::new(AtomicBool::new(false));
             let ch = self.channels;
@@ -623,7 +656,17 @@ pub mod fake {
                     let mut buf = vec![0f32; in_buf * ch];
                     let seed = me.seed;
                     // 입력 콜백 k는 블록 [k, k+1)×in_buf의 캡처가 끝난 t0 + (k+1)·period에 불린다.
-                    clocked_loop(st, t0, Duration::ZERO, in_period, 1, me.wake_jitter_us, seed, |k| {
+                    let lc = LoopCfg {
+                        t0,
+                        offset: Duration::ZERO,
+                        period: in_period,
+                        first: 1,
+                        jitter_us: me.wake_jitter_us,
+                        seed,
+                        stall: None,
+                        halt_after: me.halt_after,
+                    };
+                    clocked_loop(st, lc, |k| {
                         (me.source)(k * in_buf as u64, ch, &mut buf);
                         input.process(&buf, ch);
                     });
@@ -639,7 +682,17 @@ pub mod fake {
                 let phase = Duration::from_micros(me.out_phase_us);
                 let seed = me.seed.wrapping_add(17);
                 // 출력 콜백 k는 t0 + phase + k·period에 불려 재생 구간 [k, k+1)×out_buf를 채운다.
-                clocked_loop(st, t0, phase, out_period, 0, me.wake_jitter_us, seed, |_k| {
+                let lc = LoopCfg {
+                    t0,
+                    offset: phase,
+                    period: out_period,
+                    first: 0,
+                    jitter_us: me.wake_jitter_us,
+                    seed,
+                    stall: me.out_stall,
+                    halt_after: me.halt_after,
+                };
+                clocked_loop(st, lc, |_k| {
                     output.process(&mut buf, ch);
                     if me.record_output {
                         me.sink.lock().extend_from_slice(&buf);
@@ -665,7 +718,7 @@ pub mod fake {
                 out_channels: ch,
                 buffer_frames: cfg.buffer_size,
             };
-            Ok((info, Box::new(FakeGuard { stop, threads: vec![in_thread, out_thread] })))
+            Ok((info, Box::new(FakeGuard { stop, threads: vec![in_thread, out_thread], exclusive: self.exclusive.clone() })))
         }
     }
 }

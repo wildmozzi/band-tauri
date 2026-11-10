@@ -5,7 +5,7 @@
 //! - 세대 번호로 시작 중에 들어온 `stop`/다른 `start`를 처리한다. 늦게 끝난 시작은 버린다.
 //! - 테스트 모드는 시작할 때 모니터를 켜고, 끝나면 원래 값으로 되돌린다(리뷰 L4).
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -24,10 +24,15 @@ struct Slot {
     generation: u64,
     starting: bool,
     monitor_before_test: Option<bool>,
+    /// 진행 중인 시작의 취소 플래그.
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 pub struct EngineManager {
     slot: Mutex<Slot>,
+    /// 시작(장치 열기~설치)을 직렬화한다. 이전 시작이 장치·포트를 놓기 전에 새 시작이 같은 장치를
+    /// 열지 않게 한다(PR #5 M-4). 슬롯 락과 달리 블로킹 작업 동안 쥔다(다른 커맨드는 막지 않음).
+    start_lock: Mutex<()>,
     controls: Arc<MixControls>,
     backend: Arc<dyn AudioBackend>,
     net_options: NetOptions,
@@ -35,7 +40,13 @@ pub struct EngineManager {
 
 impl EngineManager {
     pub fn new(backend: Arc<dyn AudioBackend>, net_options: NetOptions) -> Self {
-        Self { slot: Mutex::new(Slot::default()), controls: Arc::new(MixControls::default()), backend, net_options }
+        Self {
+            slot: Mutex::new(Slot::default()),
+            start_lock: Mutex::new(()),
+            controls: Arc::new(MixControls::default()),
+            backend,
+            net_options,
+        }
     }
 
     pub fn controls(&self) -> &Arc<MixControls> {
@@ -63,10 +74,15 @@ impl EngineManager {
     }
 
     fn start_inner(&self, config: EngineConfig, peer_id: Option<String>) -> Result<LocalDescriptor, String> {
+        let cancel = Arc::new(AtomicBool::new(false));
         let (gen, old) = {
             let mut s = self.slot.lock();
             s.generation += 1;
             s.starting = true;
+            // 진행 중인 이전 시작은 취소(장치 열기 뒤·STUN 중에 일찍 포기하고 장치를 놓는다)
+            if let Some(c) = s.cancel.replace(cancel.clone()) {
+                c.store(true, Ordering::SeqCst);
+            }
             if peer_id.is_some() {
                 self.restore_monitor(&mut s);
             } else {
@@ -77,18 +93,27 @@ impl EngineManager {
             }
             (s.generation, s.engine.take())
         };
-        drop(old); // 락 밖에서 정지(join)
+        drop(old); // 슬롯 락 밖에서 정지(join)
+
+        // 이전 시작이 끝나(그리고 취소된 결과를 버려 장치를 놓을 때까지) 기다린다.
+        let _serial = self.start_lock.lock();
+        if self.slot.lock().generation != gen {
+            return Err("엔진 시작이 취소되었습니다".into());
+        }
 
         let network = peer_id.map(|id| (id, self.net_options.clone()));
-        let result = Engine::start(config, self.backend.clone(), self.controls.clone(), network);
+        let result = Engine::start_cancellable(config, self.backend.clone(), self.controls.clone(), network, Some(cancel));
 
         let mut s = self.slot.lock();
         if s.generation != gen {
             drop(s);
-            drop(result); // 그 사이 stop/start가 들어왔다: 이 결과는 버린다(락 밖에서 정지)
+            // 그 사이 stop/start가 들어왔다: 이 결과는 버린다. start_lock을 쥔 채 정지하므로
+            // 다음 시작은 장치가 닫힌 뒤에 연다.
+            drop(result);
             return Err("엔진 시작이 취소되었습니다".into());
         }
         s.starting = false;
+        s.cancel = None;
         let engine = result?;
         let desc = engine.descriptor().cloned().unwrap_or(LocalDescriptor {
             ssrc: 0,
@@ -105,6 +130,9 @@ impl EngineManager {
             let mut s = self.slot.lock();
             s.generation += 1;
             s.starting = false;
+            if let Some(c) = s.cancel.take() {
+                c.store(true, Ordering::SeqCst);
+            }
             self.restore_monitor(&mut s);
             s.engine.take()
         };

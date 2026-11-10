@@ -104,6 +104,12 @@ pub async fn engine_set_peer_gain(
     state.0.with_engine(|e| e.set_peer_gain(&peer_id, gain, muted, pan))
 }
 
+/// 피어와의 안전 번호(5자리×4). 두 연주자가 같은 숫자를 보면 시그널링 서버가 키를 바꿔치기하지 않은 것이다.
+#[tauri::command]
+pub async fn engine_safety_code(state: State<'_, EngineState>, peer_id: String) -> Result<String, String> {
+    state.0.with_engine(|e| e.safety_code(&peer_id))
+}
+
 #[tauri::command]
 pub async fn engine_set_input_muted(state: State<'_, EngineState>, muted: bool) -> Result<(), String> {
     state.0.controls().input_muted.store(muted, Ordering::Relaxed);
