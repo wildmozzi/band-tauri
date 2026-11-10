@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
-import { communityApi } from '../services/communityApi'
+import { useCreatePostMutation } from '../features/community/queries'
 import { PostForm } from './community/PostForm'
 import { usePostForm } from './community/usePostForm'
 
@@ -9,6 +9,7 @@ export function CreatePost() {
   const navigate = useNavigate()
   const { user } = useAuth()
   const form = usePostForm()
+  const createPost = useCreatePostMutation()
 
   // 렌더 중 navigate 대신 effect에서 이동
   useEffect(() => {
@@ -25,14 +26,17 @@ export function CreatePost() {
       userId: user.id,
       savingMessage: '게시물 작성 중...',
       save: async (imageUrls) => {
-        await communityApi.createPost({
-          title: form.title.trim(),
-          content: form.content.trim(),
-          tags: form.tags,
-          images: imageUrls,
-          instrument: form.selectedInstrument,
-          category: 'general',
-        }, user)
+        await createPost.mutateAsync({
+          data: {
+            title: form.title.trim(),
+            content: form.content.trim(),
+            tags: form.tags,
+            images: imageUrls,
+            instrument: form.selectedInstrument,
+            category: 'general',
+          },
+          user,
+        })
       },
       onSuccess: () => navigate('/community'),
       logLabel: 'Failed to create post:',

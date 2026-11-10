@@ -220,17 +220,7 @@ async function separateViaBackend(
     const formData = new FormData()
     formData.append('file', file)
 
-    const { supabase } = await import('../lib/supabaseClient')
-    let authToken: string | null = null
-    if (supabase) {
-      const { data: { session } } = await supabase.auth.getSession()
-      authToken = session?.access_token || null
-    }
-
-    const headers: HeadersInit = {}
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`
-    }
+    const headers: HeadersInit = await authHeaders()
 
     const response = await fetch(`${API_BASE_URL}/api/music/separate-stems`, {
       method: 'POST',
@@ -312,17 +302,7 @@ export function getAvailableStemsFromSeparation(separation: StemSeparation): str
 
 export async function getStemHistory(): Promise<StemSeparation[]> {
   try {
-    const { supabase } = await import('../lib/supabaseClient')
-    let authToken: string | null = null
-    if (supabase) {
-      const { data: { session } } = await supabase.auth.getSession()
-      authToken = session?.access_token || null
-    }
-
-    const headers: HeadersInit = {}
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`
-    }
+    const headers: HeadersInit = await authHeaders()
 
     const response = await fetch(`${API_BASE_URL}/api/music/stem-history`, { headers })
     const data = await response.json()
@@ -340,17 +320,7 @@ export async function getStemHistory(): Promise<StemSeparation[]> {
 
 export async function deleteStemSeparation(separationId: string): Promise<boolean> {
   try {
-    const { supabase } = await import('../lib/supabaseClient')
-    let authToken: string | null = null
-    if (supabase) {
-      const { data: { session } } = await supabase.auth.getSession()
-      authToken = session?.access_token || null
-    }
-
-    const headers: HeadersInit = {}
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`
-    }
+    const headers: HeadersInit = await authHeaders()
 
     const response = await fetch(`${API_BASE_URL}/api/music/stem-separation/${separationId}`, {
       method: 'DELETE',

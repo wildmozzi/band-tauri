@@ -16,7 +16,6 @@
  *     (삭제 개수는 응답 시점의 최신 캐시 트리로 센다 — 연속 삭제 시 오래된 클로저 방지)
  */
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { isSupabaseConfigured } from '../../lib/supabaseClient'
 import {
   communityApi,
   type Comment,
@@ -94,12 +93,13 @@ export function usePostsQuery(filters: PostListFilters) {
 export function usePostQuery(
   postId: string | undefined,
   userId: string | null | undefined,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; staleTime?: number } = {},
 ) {
   return useQuery({
     queryKey: communityKeys.post(postId ?? '', userId),
     queryFn: () => communityApi.getPost(postId!, userId ?? undefined),
     enabled: Boolean(postId) && (options.enabled ?? true),
+    ...(options.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
   })
 }
 
@@ -115,7 +115,6 @@ export function useTrendingTagsQuery(limit = 5) {
   return useQuery({
     queryKey: communityKeys.trendingTags(limit),
     queryFn: () => communityApi.getTrendingTags(limit),
-    enabled: isSupabaseConfigured(),
   })
 }
 
