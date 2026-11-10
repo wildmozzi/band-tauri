@@ -55,10 +55,10 @@ export interface CreateCommentData {
   parent_id?: string
 }
 
-// Helper to get author name from user
 // profiles:author_id 조인 결과 (Supabase 생성 타입 도입 전까지의 수동 타입)
 type JoinedProfile = { nickname?: string; email?: string } | null
 
+// Helper to get author name from user
 const getAuthorName = (email: string | undefined): string => {
   return email?.split('@')[0] ?? 'User'
 }

@@ -26,7 +26,7 @@
     "security": {
       "csp": {
         "default-src": "'self'",
-        "script-src": "'self' blob: https://*.tosspayments.com",
+        "script-src": "'self' blob: 'wasm-unsafe-eval' https://*.tosspayments.com",
         "style-src": "'self' 'unsafe-inline'",
         "img-src": "'self' data: blob: https://*.supabase.co https://band-server.fly.dev https://*.tosspayments.com",
         "media-src": "'self' data: blob: mediastream: https://*.supabase.co https://band-server.fly.dev",
@@ -40,7 +40,7 @@
       },
       "devCsp": {
         "default-src": "'self'",
-        "script-src": "'self' blob: https://*.tosspayments.com",
+        "script-src": "'self' blob: 'wasm-unsafe-eval' https://*.tosspayments.com",
         "style-src": "'self' 'unsafe-inline'",
         "img-src": "'self' data: blob: https://*.supabase.co https://band-server.fly.dev https://*.tosspayments.com http://localhost:* https://localhost:*",
         "media-src": "'self' data: blob: mediastream: https://*.supabase.co https://band-server.fly.dev http://localhost:* https://localhost:*",

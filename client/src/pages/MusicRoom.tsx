@@ -10,6 +10,7 @@ import {
   type StemSeparation
 } from '../services/musicApi'
 import { MultiTrackPlayer } from '../services/MultiTrackPlayer'
+import { stemFileExtension, fetchStemForDownload, saveBlob } from '../services/stemAudio'
 import './MusicRoom.css'
 
 // 스템 이름 한글 매핑
@@ -358,7 +359,7 @@ export function MusicRoom() {
     if (stemData.startsWith('data:')) {
       const [header, base64Data] = stemData.split(',')
       const mimeType = header.match(/data:(.*);/)?.[1] || 'audio/wav'
-      const extension = mimeType.includes('wav') ? 'wav' : 'mp3'
+      const extension = stemFileExtension(stemData)
 
       // base64를 Blob으로 변환
       const byteCharacters = atob(base64Data)
@@ -378,6 +379,14 @@ export function MusicRoom() {
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
+    } else if (/^https?:\/\//.test(stemData)) {
+      // Storage 공개 URL (.ogg 또는 이전 기록 .wav): cross-origin이라 <a download>가 무시되므로 blob으로 받아 저장
+      fetchStemForDownload(stemData, stemName)
+        .then(({ blob, fileName }) => saveBlob(blob, fileName))
+        .catch((err) => {
+          console.error('[MusicRoom] stem download failed:', err)
+          setUploadStatus('스템 다운로드에 실패했습니다.')
+        })
     } else {
       // 파일 경로인 경우
       const fileName = stemData.split(/[/\\]/).pop() || `${stemName}.wav`

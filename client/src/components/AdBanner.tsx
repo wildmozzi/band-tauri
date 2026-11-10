@@ -4,7 +4,7 @@ interface AdBannerProps {
 }
 
 // props(position, compact)는 광고 재활성화 시 아래 주석 코드에서 사용한다
-export const AdBanner: (props: AdBannerProps) => null = () => {
+export const AdBanner: (props: AdBannerProps) => JSX.Element | null = () => {
   // 광고 기능은 현재 비활성화
   return null
 

@@ -98,4 +98,3 @@ export function PremiumProvider({ children }: PremiumProviderProps) {
     </PremiumContext.Provider>
   )
 }
-

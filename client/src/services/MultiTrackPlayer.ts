@@ -1,5 +1,6 @@
 import * as Tone from 'tone'
 import { getMusicFileUrl } from './musicApi'
+import { fetchAndDecodeStem, type DecodeContext } from './stemAudio'
 
 export interface StemTrack {
   name: string
@@ -84,27 +85,10 @@ export class MultiTrackPlayer {
         : getMusicFileUrl(stemUrl)
 
       try {
-        // Tone.js Buffer로 로드
+        // .ogg(Opus)/.wav/data URL 공통: 네이티브 디코딩, 실패 시 Ogg면 wasm 폴백(Safari)
         const buffer = new Tone.ToneAudioBuffer()
-
-        if (stemUrl.startsWith('data:')) {
-          // base64 data URL을 ArrayBuffer로 변환 후 로드
-          const base64Data = stemUrl.split(',')[1]
-          const binaryString = atob(base64Data)
-          const bytes = new Uint8Array(binaryString.length)
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i)
-          }
-          const arrayBuffer = bytes.buffer
-
-          // AudioContext를 사용하여 디코딩
-          const audioContext = Tone.getContext().rawContext
-          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0))
-          buffer.set(audioBuffer)
-        } else {
-          // URL에서 직접 로드
-          await buffer.load(url)
-        }
+        const audioContext = Tone.getContext().rawContext as unknown as DecodeContext
+        buffer.set(await fetchAndDecodeStem(audioContext, url))
 
         // GainNode 생성 (개별 볼륨 제어용)
         const gainNode = new Tone.Gain(1.0)
