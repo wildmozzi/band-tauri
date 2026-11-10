@@ -89,6 +89,37 @@ async function as<T>(role: Role, sub: string | null, sql: string, params: unknow
   }
 }
 
+/** 011이 anon/authenticated에 여는 profiles 컬럼 (마이그레이션 본문에서 읽는다) */
+function publicProfileColumns(): string[] {
+  const m = MIGRATION.match(/column_name IN \(([^)]*)\)/)
+  assert.ok(m, '011 public column list not found')
+  return m[1].split(',').map(s => s.trim().replace(/'/g, ''))
+}
+
+/**
+ * client/src·server/src(테스트 제외)에서 profiles 를 읽는 컬럼을 모은다.
+ *   .from('profiles').select('a, b')  /  PostgREST 임베드 profiles(a, b) · profiles:fk (a, b) · profiles!fk(a, b)
+ * '*' 도 그대로 담겨 공개 목록에 없으므로 실패한다.
+ */
+function appProfileColumns(): Set<string> {
+  const root = join(__dirname, '..', '..')
+  const cols = new Set<string>()
+  for (const base of ['client/src', 'server/src']) {
+    const dir = join(root, base)
+    for (const rel of readdirSync(dir, { recursive: true }) as string[]) {
+      if (!/\.(ts|tsx)$/.test(rel) || /\.test\.tsx?$/.test(rel) || /database\.types\.ts$/.test(rel)) continue
+      const src = readFileSync(join(dir, rel), 'utf8')
+      const lists: string[] = []
+      for (const m of src.matchAll(/\.from\(\s*['"`]profiles['"`]\s*\)\s*\.select\(\s*['"`]([^'"`]*)['"`]/g)) lists.push(m[1])
+      for (const m of src.matchAll(/\bprofiles(?::\w+)?(?:!\w+)?\s*\(\s*([^)'"`]*)\)/g)) lists.push(m[1])
+      for (const list of lists) {
+        for (const c of list.split(',').map(s => s.trim()).filter(Boolean)) cols.add(c)
+      }
+    }
+  }
+  return cols
+}
+
 const count = async (roomId = ROOM) =>
   (await db.query<{ n: number }>('SELECT current_participants AS n FROM public.rooms WHERE id = $1', [roomId])).rows[0]?.n
 
@@ -148,10 +179,11 @@ describe('migration 011: function privileges', () => {
     }
   })
 
-  it('participant RPCs are no longer SECURITY DEFINER', async () => {
+  it('server-only RPCs are no longer SECURITY DEFINER', async () => {
     const r = await db.query<{ proname: string; prosecdef: boolean }>(
-      `SELECT proname, prosecdef FROM pg_proc WHERE proname IN ('increment_participants', 'decrement_participants') ORDER BY 1`)
+      `SELECT proname, prosecdef FROM pg_proc WHERE proname IN ('increment_participants', 'decrement_participants', 'cleanup_expired_stem_separations') ORDER BY 1`)
     assert.deepEqual(r.rows, [
+      { proname: 'cleanup_expired_stem_separations', prosecdef: false },
       { proname: 'decrement_participants', prosecdef: false },
       { proname: 'increment_participants', prosecdef: false },
     ])
@@ -258,6 +290,37 @@ describe('migration 011: RLS regression', () => {
     await assert.rejects(as('anon', null, `SELECT id FROM public.profiles WHERE email LIKE 'host%'`), /permission denied/)
     const server = await as<{ email: string }>('service_role', null, 'SELECT email FROM public.profiles WHERE id = $1', [HOST])
     assert.equal(server.rows[0].email, 'host@example.com')
+  })
+
+  it('profiles: every column the app reads (client/server source, incl. PostgREST embeds) is in the 011 public list', async () => {
+    const used = appProfileColumns()
+    assert.ok(used.has('nickname'), `extractor found nothing: ${[...used]}`)
+    const allowed = publicProfileColumns()
+    for (const col of used) {
+      assert.ok(allowed.includes(col), `app reads profiles.${col} but 011 does not grant it (would be 42501 permission denied)`)
+    }
+  })
+
+  it('profiles: the app queries run as anon/authenticated after 011 (comment author embed, host nickname, own settings)', async () => {
+    const cols = [...appProfileColumns()].join(', ')
+    for (const [role, sub] of [['anon', null], ['authenticated', OTHER]] as const) {
+      const r = await as(role, sub, `SELECT ${cols} FROM public.profiles WHERE id = $1`, [HOST])
+      assert.equal(r.rows.length, 1)
+    }
+    // communityApi COMMENT_SELECT 의 profiles:author_id (nickname) 임베드와 같은 조인
+    const POST = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+    await db.query(`INSERT INTO public.posts (id, author_id, title, content) VALUES ($1, $2, 't', 'c')`, [POST, HOST])
+    await as('authenticated', OTHER, `INSERT INTO public.comments (post_id, author_id, content) VALUES ($1, $2, 'hi')`, [POST, OTHER])
+    const embed = `SELECT c.id, c.post_id, c.author_id, c.content, c.parent_id, c.created_at, c.updated_at, p.nickname
+                     FROM public.comments c LEFT JOIN public.profiles p ON p.id = c.author_id WHERE c.post_id = $1`
+    const anon = await as<{ nickname: string }>('anon', null, embed, [POST])
+    const expected = (await db.query<{ nickname: string }>('SELECT nickname FROM public.profiles WHERE id = $1', [OTHER])).rows[0].nickname
+    assert.deepEqual(anon.rows.map(r => r.nickname), [expected])
+    // PR #18 리뷰 H1: 예전 임베드(nickname, email)는 011 이후 요청 전체가 거부된다 → 구버전 클라이언트가 사라진 뒤 011 실행
+    await assert.rejects(
+      as('authenticated', OTHER, `SELECT c.id, p.nickname, p.email FROM public.comments c LEFT JOIN public.profiles p ON p.id = c.author_id`),
+      /permission denied/,
+    )
   })
 
   it('profiles: sign-up insert still works for the user themselves', async () => {
@@ -375,5 +438,57 @@ describe('migration 011: server repositories still work as service_role', () => 
     assert.equal(sub.status, 'active')
     assert.equal(await repo.cancelSubscription(sub.id, { paymentCancelled: true, reason: 'test' }), true)
     assert.equal(await repo.cancelSubscription(sub.id, { paymentCancelled: true, reason: 'test' }), false)
+  })
+})
+
+describe('migration 011 on production as of 001~006 (008 not applied yet)', () => {
+  let old: PGlite
+
+  async function asOld<T>(role: Role, sub: string | null, sql: string, params: unknown[] = []) {
+    await old.query(`SELECT set_config('request.jwt.claim.sub', $1, false)`, [sub ?? ''])
+    await old.exec(`SET ROLE ${role}`)
+    try {
+      return await old.query<T>(sql, params)
+    } finally {
+      await old.exec('RESET ROLE')
+    }
+  }
+
+  before(async () => {
+    old = new PGlite()
+    await old.exec(STUB)
+    for (const f of BEFORE_011.filter(f => Number(f.slice(0, 3)) <= 6)) await old.exec(readFileSync(join(DIR, f), 'utf8'))
+    await old.exec(MIGRATION)
+    await old.exec(MIGRATION)
+    await old.query(`INSERT INTO public.rooms (id, title, host_id, current_participants) VALUES ($1, 'jam', $2, 2)`, [ROOM, HOST])
+  })
+
+  after(async () => {
+    await old?.close()
+  })
+
+  it('client room INSERT (002 policy still present) cannot choose current_participants (review M1)', async () => {
+    const id = 'abababab-abab-4bab-8bab-abababababab'
+    await asOld('authenticated', HOST, `INSERT INTO public.rooms (id, title, host_id, current_participants) VALUES ($1, 'fake', $2, 999)`, [id, HOST])
+    const r = await old.query<{ n: number }>('SELECT current_participants AS n FROM public.rooms WHERE id = $1', [id])
+    assert.equal(r.rows[0].n, 0)
+  })
+
+  it('client UPDATE is ignored, server INSERT/UPDATE keep their value', async () => {
+    await asOld('authenticated', HOST, 'UPDATE public.rooms SET current_participants = 99 WHERE id = $1', [ROOM])
+    const r = await old.query<{ n: number }>('SELECT current_participants AS n FROM public.rooms WHERE id = $1', [ROOM])
+    assert.equal(r.rows[0].n, 2)
+    const id = 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd'
+    await asOld('service_role', null, `INSERT INTO public.rooms (id, title, host_id, current_participants) VALUES ($1, 'srv', $2, 3)`, [id, HOST])
+    const s = await old.query<{ n: number }>('SELECT current_participants AS n FROM public.rooms WHERE id = $1', [id])
+    assert.equal(s.rows[0].n, 3)
+  })
+
+  it('participant RPCs are server-only and missing 007~010 functions are skipped', async () => {
+    await assert.rejects(asOld('anon', null, 'SELECT public.increment_participants($1)', [ROOM]), /permission denied/)
+    const r = await old.query<{ fn: string }>(`
+      SELECT p.oid::regprocedure::text AS fn FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = 'public' AND (has_function_privilege('anon', p.oid, 'EXECUTE') OR has_function_privilege('authenticated', p.oid, 'EXECUTE'))`)
+    assert.deepEqual(r.rows, [])
   })
 })

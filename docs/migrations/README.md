@@ -68,6 +68,23 @@ SELECT 'messages', COUNT(*) FROM messages;
 `011_harden_functions.sql` — **운영 실행은 사람 승인 후**. 001~010 다음에 실행한다. 재실행 안전하며,
 앞선 마이그레이션(예: 008, 010)을 011 뒤에 실행했다면 011을 한 번 더 실행한다(새로 만든 함수의 기본 권한 회수).
 
+### ⚠️ 운영 실행 순서 (반드시 이 순서)
+
+011은 `profiles`의 email·phone 등을 클라이언트에서 읽지 못하게 한다. 예전 클라이언트는 댓글 조회·수정에서
+`profiles:author_id (nickname, email)`를 임베드하므로, **011을 먼저 실행하면 그 클라이언트의 댓글 기능이 전부
+`42501 permission denied`로 실패한다** (PR #18 리뷰 H1).
+
+1. [ ] 새 클라이언트 배포: 데스크톱(Tauri) 업데이트와 웹 관람 빌드, **indigomuse.art의 band-web 구버전 포함**
+2. [ ] 구버전 데스크톱이 충분히 사라질 때까지 기다린다 (자동 업데이트 적용 확인)
+3. [ ] 007~010 중 아직 운영에 없는 것을 실행한다
+4. [ ] 011을 실행한다. 3을 011 뒤에 했다면 011을 다시 실행한다
+5. [ ] 아래 확인 쿼리 1·2·3을 실행한다
+
+규칙:
+- 새 함수는 아래 템플릿대로 `FROM PUBLIC, anon, authenticated`로 권한을 회수한다
+- 클라이언트가 `profiles`의 새 컬럼을 읽게 되면 **같은 PR의 마이그레이션에서 `GRANT SELECT (컬럼) ON public.profiles TO anon, authenticated`도 한다**.
+  공개 목록 밖 컬럼은 기본 비공개다. `server/test/migration-011.test.ts`가 client/server 소스의 profiles 조회 컬럼을 공개 목록과 대조해 빠뜨리면 실패한다
+
 Supabase는 public에 새로 만든 함수·테이블에 anon/authenticated 권한을 **기본으로** 준다.
 `REVOKE ... FROM PUBLIC`만으로는 회수되지 않으므로 새 함수는 항상 아래 형태로 권한을 정한다:
 
@@ -82,12 +99,12 @@ GRANT EXECUTE ON FUNCTION public.f(...) TO service_role;  -- 클라이언트가 
 | 대상 | 발견 | 조치 |
 |---|---|---|
 | `increment/decrement_participants` (005) | SECURITY DEFINER + search_path 미고정 + anon/authenticated EXECUTE → 누구나 아무 방 인원 수 조작 | INVOKER 전환, 인자 검증(NULL·없는 방 → 오류, 0 미만 금지), service_role만 |
-| `cleanup_expired_stem_separations` (006) | SECURITY DEFINER, authenticated EXECUTE | service_role만, search_path 고정 |
+| `cleanup_expired_stem_separations` (006) | SECURITY DEFINER, authenticated EXECUTE | INVOKER 전환, service_role만, search_path 고정 |
 | `record_confirmed_payment`, `cancel_subscription` (007), `set_room_password` (008) | 권한은 서버 전용으로 맞음, search_path에 pg_temp 미고정 | search_path 고정, 권한 재확인 |
 | `get_room` (008) | 의도된 공개 RPC (초대 링크) | search_path 고정, anon/authenticated 유지 |
 | 트리거 함수 (`update_updated_at_column`, `rooms_guard_has_password`, 010 집계·가드) | 기본 권한으로 직접 EXECUTE 가능, 일부 search_path 미고정 | search_path 고정, 직접 EXECUTE 회수(트리거 동작은 그대로) |
-| `rooms.current_participants` | 방장이 클라이언트에서 임의 값 UPDATE 가능 | 트리거로 서버(service_role)만 변경, 음수 금지 CHECK. 클라이언트 '동기화'는 서버 값을 다시 읽음 |
-| `profiles` | SELECT USING(true) → email·phone·birth_date·gender·name이 anon에게 공개 | 행 공개 유지(방장 닉네임), 컬럼 단위 SELECT: id·nickname·audio_settings·avatar_url·created_at·updated_at만 |
+| `rooms.current_participants` | 방장이 클라이언트에서 임의 값 UPDATE 가능. 008 미적용 운영에서는 클라이언트 방 INSERT로도 임의 값 | 트리거(BEFORE INSERT OR UPDATE)로 서버(service_role)만 변경(클라이언트 INSERT는 0), 음수 금지 CHECK. 방장 버튼은 '참여자 수 새로고침'(서버 값 다시 읽기) |
+| `profiles` | SELECT USING(true) → email·phone·birth_date·gender·name이 anon에게 공개 | 행 공개 유지(방장·댓글 작성자 닉네임), 컬럼 단위 SELECT: id·nickname·audio_settings·avatar_url·created_at·updated_at만. 댓글 임베드는 nickname만 읽도록 클라이언트 수정 |
 | `stem_separations` | INSERT WITH CHECK(true) → anon도 임의 user_id로 삽입, user_id NULL 행이 모두에게 보임 | INSERT 정책·권한 제거(서버만), SELECT 본인 행만 |
 | `messages` | 수신자 UPDATE가 행 전체 허용 → 내용·sender_id 위조 | 수신자는 `is_read` 컬럼만 UPDATE |
 | `post_likes` | 대시보드에서 만든 테이블, RLS 보장 없음 | RLS 활성, 정책이 없을 때만 010과 같은 기본 정책 |

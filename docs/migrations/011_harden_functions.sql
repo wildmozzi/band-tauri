@@ -84,6 +84,8 @@ $$;
 -- -----------------------------------------------------
 -- 2. rooms.current_participants: 서버(service_role)만 변경, 음수 금지
 --    서버(wsService)는 소켓 수로 갱신한다. 방장 클라이언트의 직접 UPDATE는 오류 없이 무시된다(기존 값 유지)
+--    INSERT도 막는다: 008 미적용 운영에는 002의 rooms_insert_authenticated 정책이 남아 클라이언트가 방을 직접 만들 수 있다
+--    → 클라이언트 INSERT의 current_participants는 0으로 고정 (PR #18 리뷰 M1)
 -- -----------------------------------------------------
 CREATE OR REPLACE FUNCTION public.rooms_guard_server_columns()
 RETURNS TRIGGER
@@ -92,7 +94,11 @@ SET search_path = public, pg_temp
 AS $$
 BEGIN
   IF current_user IN ('anon', 'authenticated') THEN
-    NEW.current_participants := OLD.current_participants;
+    IF TG_OP = 'INSERT' THEN
+      NEW.current_participants := 0;
+    ELSE
+      NEW.current_participants := OLD.current_participants;
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -100,7 +106,7 @@ $$;
 
 DROP TRIGGER IF EXISTS rooms_guard_server_columns ON public.rooms;
 CREATE TRIGGER rooms_guard_server_columns
-  BEFORE UPDATE ON public.rooms
+  BEFORE INSERT OR UPDATE ON public.rooms
   FOR EACH ROW EXECUTE FUNCTION public.rooms_guard_server_columns();
 
 UPDATE public.rooms SET current_participants = 0 WHERE current_participants < 0;
@@ -157,13 +163,20 @@ BEGIN
       EXECUTE format('REVOKE ALL ON FUNCTION %s FROM service_role', r.sig);
     END IF;
   END LOOP;
+
+  -- 서버만 실행하므로 SECURITY DEFINER가 필요 없다 (service_role은 RLS 우회) — 권한 상승 경로 제거 (리뷰 I1)
+  IF to_regprocedure('public.cleanup_expired_stem_separations()') IS NOT NULL THEN
+    ALTER FUNCTION public.cleanup_expired_stem_separations() SECURITY INVOKER;
+  END IF;
 END $$;
 
 -- -----------------------------------------------------
 -- 4. profiles: 행은 계속 공개(방 상세의 방장 닉네임 등), 민감 컬럼(email·phone·birth_date·gender·name)은 비공개
 --    RLS는 행 단위라 컬럼을 숨길 수 없다 → 테이블 SELECT 권한을 회수하고 공개 컬럼에만 컬럼 단위로 다시 준다.
 --    공개 목록에 없는 컬럼(이후 추가되는 컬럼 포함)은 기본 비공개다. 서버(service_role)는 전체를 본다.
---    클라이언트가 읽는 컬럼: nickname(본인·방장), audio_settings(본인) — 둘 다 공개 목록에 있다.
+--    클라이언트가 읽는 컬럼: nickname(본인·방장·댓글 작성자 임베드), audio_settings(본인) — 공개 목록에 있다.
+--    server/test/migration-011.test.ts가 client/server 소스의 profiles 조회 컬럼을 뽑아 이 목록과 대조한다.
+--    운영 순서: 이 목록 밖 컬럼(email 등)을 읽던 구버전 클라이언트가 사라진 뒤 011을 실행한다 (README).
 --    본인 email 등은 클라이언트가 auth user/user_metadata에서 읽는다.
 -- -----------------------------------------------------
 DO $$

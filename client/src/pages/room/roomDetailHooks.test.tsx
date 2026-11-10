@@ -335,6 +335,6 @@ describe('useRoomHostActions', () => {
     )
     await act(() => result.current.handleSyncParticipants())
     expect(sb.mock!.client.from).not.toHaveBeenCalled()
-    expect(window.alert).toHaveBeenCalledWith('참여자 수가 4명으로 동기화되었습니다.')
+    expect(window.alert).toHaveBeenCalledWith('서버 기준 참여자 수: 4명')
   })
 })

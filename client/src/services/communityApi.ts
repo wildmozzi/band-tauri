@@ -57,7 +57,8 @@ export interface CreateCommentData {
 }
 
 // profiles:author_id 조인 결과 (comments.author_id → profiles.id, 다대일)
-type JoinedProfile = { nickname: string | null; email: string | null } | null
+// profiles는 공개 컬럼(id·nickname·audio_settings·avatar_url·created_at·updated_at)만 읽을 수 있다 (011). email 등은 임베드하지 말 것
+type JoinedProfile = { nickname: string | null } | null
 
 // Helper to get author name from user
 const getAuthorName = (email: string | null | undefined): string => {
@@ -65,7 +66,7 @@ const getAuthorName = (email: string | null | undefined): string => {
 }
 
 const joinedAuthorName = (profile: JoinedProfile): string =>
-  profile?.nickname || getAuthorName(profile?.email)
+  profile?.nickname || getAuthorName(null)
 
 /** posts 행 → 화면용 Post. null 컬럼은 insert 기본값과 같은 값으로 채운다. */
 export function toPost(row: Tables<'posts'>, likedByUser?: boolean): Post {
@@ -140,7 +141,7 @@ const COMMENT_SELECT = `
         parent_id,
         created_at,
         updated_at,
-        profiles:author_id (nickname, email)
+        profiles:author_id (nickname)
       ` as const
 
 function requireClient() {

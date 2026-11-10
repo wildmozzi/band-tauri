@@ -81,11 +81,11 @@ describe('communityApi', () => {
     expect(sb.mock!.calls.some(c => has(c, 'insert'))).toBe(false)
   })
 
-  it('getComments: 프로필 조인으로 작성자 이름을 정하고 답글을 트리로 묶는다', async () => {
+  it('getComments: 프로필 닉네임 조인(없으면 User)으로 작성자 이름을 정하고 답글을 트리로 묶는다', async () => {
     sb.mock!.setResult('comments', {
       data: [
-        { id: '1', post_id: 'p', author_id: 'a', content: 'x', parent_id: null, created_at: 't1', updated_at: null, profiles: { nickname: '닉', email: 'a@x.com' } },
-        { id: '1a', post_id: 'p', author_id: 'b', content: 'y', parent_id: '1', created_at: 't2', updated_at: 't3', profiles: { nickname: null, email: 'bob@x.com' } },
+        { id: '1', post_id: 'p', author_id: 'a', content: 'x', parent_id: null, created_at: 't1', updated_at: null, profiles: { nickname: '닉' } },
+        { id: '1a', post_id: 'p', author_id: 'b', content: 'y', parent_id: '1', created_at: 't2', updated_at: 't3', profiles: { nickname: null } },
         { id: '2', post_id: 'p', author_id: 'c', content: 'z', parent_id: null, created_at: null, updated_at: null, profiles: null },
       ],
     })
@@ -94,7 +94,9 @@ describe('communityApi', () => {
 
     expect(argsOf(sb.mock!.calls[0], 'eq')).toEqual([['post_id', 'p']])
     expect(tree.map(c => [c.id, c.author_name])).toEqual([['1', '닉'], ['2', 'User']])
-    expect(tree[0].replies!.map(c => [c.id, c.author_name, c.updated_at])).toEqual([['1a', 'bob', 't3']])
+    expect(tree[0].replies!.map(c => [c.id, c.author_name, c.updated_at])).toEqual([['1a', 'User', 't3']])
+    // 011 이후 profiles.email은 클라이언트가 읽을 수 없다 — 임베드는 nickname만
+    expect(argsOf(sb.mock!.calls[0], 'select')[0][0]).toContain('profiles:author_id (nickname)')
     expect(tree[1].created_at).toBe('')
   })
 })

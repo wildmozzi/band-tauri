@@ -14,7 +14,7 @@
  *   내 방 삭제   → 내 방 캐시에서 제거 + 목록 무효화
  *   내 방 수정   → 내 방 캐시에 패치 적용 + 목록 무효화
  *   방 상세 설정 저장(RoomDetail) → 위 '내 방 수정' + 비밀번호(서버 API)까지 성공한 뒤 patchRoomDetailCache로 상세 갱신
- *   참여자 수 동기화 → 서버가 기록한 current_participants를 다시 읽어 상세 캐시 갱신 + 목록 무효화
+ *   참여자 수 새로고침 → 서버가 기록한 current_participants를 다시 읽어 상세 캐시 갱신 + 목록 무효화
  *                     (참여자 수는 서버(WebSocket 접속 수)만 쓴다. 클라이언트 UPDATE는 DB가 무시한다 — 011)
  *   방 상세에서 삭제 → 위 '내 방 삭제' + 화면을 떠난 뒤 forgetRoomDetail로 상세 캐시 제거
  *                     (상세가 마운트된 채로 지우면 지운 방을 다시 조회한다)
@@ -91,7 +91,7 @@ export const roomsApi = {
     return normalizeDetailRoom(data)
   },
 
-  /** 서버가 기록한 참여자 수 (방장 화면의 '참여자 수 동기화'). 없는 방이면 RoomNotFoundError */
+  /** 서버가 기록한 참여자 수 (방장 화면의 '참여자 수 새로고침'). 없는 방이면 RoomNotFoundError */
   async getParticipantCount(roomId: string): Promise<number> {
     const room = await roomsApi.getRoomDetail(roomId)
     return room.current_participants ?? 0
