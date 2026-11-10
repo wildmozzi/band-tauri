@@ -4,7 +4,6 @@ import { CommentItem } from './CommentItem'
 import { formatRelativeTime } from './postLogic'
 
 interface CommentSectionProps {
-  postId: string
   comments: Comment[]
   user: { id: string; email?: string } | null
   /** 최상위 댓글 작성. 성공 시 true */
@@ -15,7 +14,7 @@ interface CommentSectionProps {
 }
 
 /** 댓글 입력 폼 + 댓글 목록. */
-export function CommentSection({ postId, comments, user, onAdd, onReply, onEdit, onDelete }: CommentSectionProps) {
+export function CommentSection({ comments, user, onAdd, onReply, onEdit, onDelete }: CommentSectionProps) {
   const [newComment, setNewComment] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -98,7 +97,6 @@ export function CommentSection({ postId, comments, user, onAdd, onReply, onEdit,
                 key={comment.id}
                 comment={comment}
                 user={user}
-                postId={postId}
                 onReply={onReply}
                 onEdit={onEdit}
                 onDelete={onDelete}

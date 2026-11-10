@@ -8,6 +8,7 @@ import {
   formatRelativeTime,
   removeCommentFromTree,
   updateCommentInTree,
+  uploadSequentially,
   validateImageFiles,
 } from './postLogic'
 
@@ -89,10 +90,47 @@ describe('댓글 트리 조작', () => {
     expect(next[0].replies?.[0].replies).toEqual([])
   })
 
-  it('countDeletedComments: 본인 + 직속 답글 수, 없으면 0', () => {
-    expect(countDeletedComments(tree(), '1')).toBe(2)
+  it('countDeletedComments: 본인 + 모든 하위 답글(cascade로 함께 삭제), 없으면 0', () => {
+    expect(countDeletedComments(tree(), '1')).toBe(3)
     expect(countDeletedComments(tree(), '1a')).toBe(2)
+    expect(countDeletedComments(tree(), '1a-i')).toBe(1)
     expect(countDeletedComments(tree(), '2')).toBe(1)
     expect(countDeletedComments(tree(), 'nope')).toBe(0)
+  })
+
+  it('countDeletedComments: 형제 하위 트리를 모두 더한다', () => {
+    const wide = [c('r', [c('a', [c('a1'), c('a2')]), c('b', [c('b1')])])]
+    expect(countDeletedComments(wide, 'r')).toBe(6)
+  })
+})
+
+describe('uploadSequentially', () => {
+  it('순서대로 업로드하고 진행 문구를 알린다', async () => {
+    const calls: string[] = []
+    const progress: string[] = []
+    const urls = await uploadSequentially(
+      ['a', 'b'],
+      async f => { calls.push(f); return `url-${f}` },
+      m => progress.push(m),
+    )
+    expect(urls).toEqual(['url-a', 'url-b'])
+    expect(calls).toEqual(['a', 'b'])
+    expect(progress).toEqual(['이미지 업로드 중...', '이미지 업로드 중... (1/2)', '이미지 업로드 중... (2/2)'])
+  })
+
+  it('파일이 없으면 진행 문구 없이 빈 배열', async () => {
+    const progress: string[] = []
+    expect(await uploadSequentially([], async () => 'x', m => progress.push(m))).toEqual([])
+    expect(progress).toEqual([])
+  })
+
+  it('실패하면 이후 파일은 올리지 않고 throw', async () => {
+    const calls: string[] = []
+    await expect(uploadSequentially(
+      ['a', 'b'],
+      async f => { calls.push(f); throw new Error('boom') },
+      () => {},
+    )).rejects.toThrow('boom')
+    expect(calls).toEqual(['a'])
   })
 })

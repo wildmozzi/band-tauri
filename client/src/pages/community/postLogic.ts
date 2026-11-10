@@ -41,6 +41,25 @@ export function addUniqueTag(tags: string[], input: string): string[] | null {
   return [...tags, tag]
 }
 
+/**
+ * 파일을 순서대로 하나씩 업로드하고 URL을 같은 순서로 돌려준다.
+ * 진행 문구는 시작 시 한 번, 파일마다 "(i/n)"으로 알린다. 실패하면 그대로 throw.
+ */
+export async function uploadSequentially<F>(
+  files: F[],
+  upload: (file: F) => Promise<string>,
+  onProgress: (message: string) => void,
+): Promise<string[]> {
+  const urls: string[] = []
+  if (files.length === 0) return urls
+  onProgress('이미지 업로드 중...')
+  for (let i = 0; i < files.length; i++) {
+    onProgress(`이미지 업로드 중... (${i + 1}/${files.length})`)
+    urls.push(await upload(files[i]))
+  }
+  return urls
+}
+
 export function formatRelativeTime(iso: string, now: number = Date.now()) {
   const diff = now - new Date(iso).getTime()
   const minutes = Math.max(0, Math.round(diff / 60000))
@@ -91,11 +110,19 @@ export function removeCommentFromTree(comments: Comment[], commentId: string): C
     }))
 }
 
-/** 삭제로 사라지는 댓글 수(본인 + 직속 답글 수). 기존 화면 동작과 같은 계산. */
+/** 본인과 모든 하위 답글 수 */
+function countSubtree(comment: Comment): number {
+  return 1 + (comment.replies || []).reduce((sum, reply) => sum + countSubtree(reply), 0)
+}
+
+/**
+ * 삭제로 사라지는 댓글 수. DB가 parent_id ON DELETE CASCADE라
+ * 손자 이하 답글까지 함께 지워지므로 하위 트리 전체를 센다.
+ */
 export function countDeletedComments(comments: Comment[], targetId: string): number {
   for (const comment of comments) {
     if (comment.id === targetId) {
-      return 1 + (comment.replies?.length || 0)
+      return countSubtree(comment)
     }
     if (comment.replies) {
       const count = countDeletedComments(comment.replies, targetId)

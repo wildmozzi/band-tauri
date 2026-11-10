@@ -5,7 +5,6 @@ import type { Comment } from '../../services/communityApi'
 interface CommentItemProps {
   comment: Comment
   user: { id: string; email?: string } | null
-  postId: string
   depth?: number
   onReply: (parentId: string, content: string) => Promise<void>
   onEdit: (commentId: string, content: string) => Promise<void>
@@ -13,7 +12,7 @@ interface CommentItemProps {
   formatTime: (iso: string) => string
 }
 
-export function CommentItem({ comment, user, postId, depth = 0, onReply, onEdit, onDelete, formatTime }: CommentItemProps) {
+export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelete, formatTime }: CommentItemProps) {
   const [isReplying, setIsReplying] = useState(false)
   const [replyContent, setReplyContent] = useState('')
   const [isEditing, setIsEditing] = useState(false)
@@ -293,7 +292,6 @@ export function CommentItem({ comment, user, postId, depth = 0, onReply, onEdit,
               key={reply.id}
               comment={reply}
               user={user}
-              postId={postId}
               depth={depth + 1}
               onReply={onReply}
               onEdit={onEdit}

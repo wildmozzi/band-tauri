@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { communityApi, type Post } from '../../services/communityApi'
-import { MAX_IMAGES, addUniqueTag, validateImageFiles } from './postLogic'
+import { MAX_IMAGES, addUniqueTag, uploadSequentially, validateImageFiles } from './postLogic'
 
 interface SubmitOptions {
   userId: string
@@ -92,15 +92,11 @@ export function usePostForm() {
     try {
       setSubmitting(true)
 
-      const newImageUrls: string[] = []
-      if (selectedFiles.length > 0) {
-        setUploadProgress('이미지 업로드 중...')
-        for (let i = 0; i < selectedFiles.length; i++) {
-          setUploadProgress(`이미지 업로드 중... (${i + 1}/${selectedFiles.length})`)
-          const url = await communityApi.uploadImage(selectedFiles[i], opts.userId)
-          newImageUrls.push(url)
-        }
-      }
+      const newImageUrls = await uploadSequentially(
+        selectedFiles,
+        file => communityApi.uploadImage(file, opts.userId),
+        setUploadProgress,
+      )
 
       setUploadProgress(opts.savingMessage)
       await opts.save(newImageUrls)

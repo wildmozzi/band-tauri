@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { communityApi } from '../services/communityApi'
@@ -9,10 +10,12 @@ export function CreatePost() {
   const { user } = useAuth()
   const form = usePostForm()
 
-  if (!user) {
-    navigate('/auth', { state: { from: '/community/create' } })
-    return null
-  }
+  // 렌더 중 navigate 대신 effect에서 이동
+  useEffect(() => {
+    if (!user) navigate('/auth', { state: { from: '/community/create' } })
+  }, [user, navigate])
+
+  if (!user) return null
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

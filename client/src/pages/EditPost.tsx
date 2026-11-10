@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { communityApi, type Post } from '../services/communityApi'
@@ -14,43 +14,54 @@ export function EditPost() {
   const [loading, setLoading] = useState(true)
   const [originalPost, setOriginalPost] = useState<Post | null>(null)
 
-  const fetchPost = useCallback(async () => {
-    if (!postId) return
-
-    try {
-      setLoading(true)
-      const data = await communityApi.getPost(postId)
-      if (!data) {
-        alert('게시물을 찾을 수 없습니다.')
-        navigate('/community')
-        return
-      }
-
-      // Check if current user is the author
-      if (user && data.author_id !== user.id) {
-        alert('수정 권한이 없습니다.')
-        navigate(`/community/${postId}`)
-        return
-      }
-
-      setOriginalPost(data)
-      loadPost(data)
-    } catch (error) {
-      console.error('Failed to fetch post:', error)
-      alert('게시물을 불러오는데 실패했습니다.')
-      navigate('/community')
-    } finally {
-      setLoading(false)
-    }
-  }, [postId, user, navigate, loadPost])
+  const userId = user?.id
+  // 폼을 채운 "사용자:게시물" 키. 같은 키면 다시 불러오지 않는다. auth가 같은 사용자의 새 user 객체를
+  // 내보내도(토큰 갱신 등) 편집 중 입력이 덮이지 않고, 사용자가 실제로 바뀌면 권한을 다시 확인한다.
+  const loadedKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (!user) {
+    if (!userId) {
       navigate('/auth', { state: { from: `/community/edit/${postId}` } })
       return
     }
+    const loadKey = `${userId}:${postId}`
+    if (!postId || loadedKeyRef.current === loadKey) return
+    let cancelled = false
+
+    const fetchPost = async () => {
+      try {
+        setLoading(true)
+        const data = await communityApi.getPost(postId)
+        if (cancelled) return
+        if (!data) {
+          alert('게시물을 찾을 수 없습니다.')
+          navigate('/community')
+          return
+        }
+
+        // Check if current user is the author
+        if (data.author_id !== userId) {
+          alert('수정 권한이 없습니다.')
+          navigate(`/community/${postId}`)
+          return
+        }
+
+        loadedKeyRef.current = loadKey
+        setOriginalPost(data)
+        loadPost(data)
+      } catch (error) {
+        if (cancelled) return
+        console.error('Failed to fetch post:', error)
+        alert('게시물을 불러오는데 실패했습니다.')
+        navigate('/community')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
     fetchPost()
-  }, [user, postId, fetchPost, navigate])
+    return () => { cancelled = true }
+  }, [userId, postId, navigate, loadPost])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

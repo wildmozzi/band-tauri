@@ -88,7 +88,6 @@ export function PostDetail() {
               onLike={handleLike}
             />
             <CommentSection
-              postId={post.id}
               comments={comments}
               user={user}
               onAdd={addComment}

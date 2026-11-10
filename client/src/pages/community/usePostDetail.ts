@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { communityApi, type Comment, type Post } from '../../services/communityApi'
 import {
@@ -20,50 +20,75 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
   const [deleting, setDeleting] = useState(false)
   const userId = user?.id
 
-  const fetchPost = useCallback(async () => {
-    if (!postId) return
-
-    try {
-      setLoading(true)
-      const data = await communityApi.getPost(postId, userId)
-      if (!data) {
-        navigate('/community')
-        return
-      }
-      setPost(data)
-    } catch (error) {
-      console.error('Failed to fetch post:', error)
-      navigate('/community')
-    } finally {
-      setLoading(false)
-    }
-  }, [postId, userId, navigate])
-
-  const fetchComments = useCallback(async () => {
-    if (!postId) return
-
-    try {
-      const data = await communityApi.getComments(postId)
-      setComments(data)
-    } catch (error) {
-      console.error('Failed to fetch comments:', error)
-    }
-  }, [postId])
-
-  const fetchTrendingTags = useCallback(async () => {
-    try {
-      const tags = await communityApi.getTrendingTags(5)
-      setTrendingTags(tags)
-    } catch (error) {
-      console.error('Failed to fetch trending tags:', error)
-    }
+  // 비동기 콜백이 오래된 렌더의 comments를 보지 않도록 최신 트리를 ref로도 들고 있는다.
+  const commentsRef = useRef<Comment[]>([])
+  const applyComments = useCallback((update: (prev: Comment[]) => Comment[]) => {
+    const next = update(commentsRef.current)
+    commentsRef.current = next
+    setComments(next)
   }, [])
 
+  // 게시물: postId/userId가 바뀌면 다시 조회하고, 이전 요청의 늦은 응답은 무시한다.
   useEffect(() => {
+    if (!postId) return
+    let cancelled = false
+
+    const fetchPost = async () => {
+      try {
+        setLoading(true)
+        const data = await communityApi.getPost(postId, userId)
+        if (cancelled) return
+        if (!data) {
+          navigate('/community')
+          return
+        }
+        setPost(data)
+      } catch (error) {
+        if (cancelled) return
+        console.error('Failed to fetch post:', error)
+        navigate('/community')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
     fetchPost()
+    return () => { cancelled = true }
+  }, [postId, userId, navigate])
+
+  // 댓글: postId 기준. 다른 게시물로 바뀌면 이전 응답은 버린다.
+  useEffect(() => {
+    if (!postId) return
+    let cancelled = false
+
+    const fetchComments = async () => {
+      try {
+        const data = await communityApi.getComments(postId)
+        if (!cancelled) applyComments(() => data)
+      } catch (error) {
+        if (!cancelled) console.error('Failed to fetch comments:', error)
+      }
+    }
+
     fetchComments()
+    return () => { cancelled = true }
+  }, [postId, applyComments])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const fetchTrendingTags = async () => {
+      try {
+        const tags = await communityApi.getTrendingTags(5)
+        if (!cancelled) setTrendingTags(tags)
+      } catch (error) {
+        if (!cancelled) console.error('Failed to fetch trending tags:', error)
+      }
+    }
+
     fetchTrendingTags()
-  }, [fetchPost, fetchComments, fetchTrendingTags])
+    return () => { cancelled = true }
+  }, [])
 
   const bumpCommentCount = (delta: number) => {
     setPost(prev => prev ? { ...prev, comments_count: Math.max(0, prev.comments_count + delta) } : null)
@@ -89,7 +114,7 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
 
     try {
       const comment = await communityApi.addComment({ post_id: post.id, content }, user)
-      setComments(prev => [...prev, comment])
+      applyComments(prev => [...prev, comment])
       bumpCommentCount(1)
       return true
     } catch (error) {
@@ -104,7 +129,7 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
 
     try {
       const reply = await communityApi.addComment({ post_id: post.id, content, parent_id: parentId }, user)
-      setComments(prev => addReplyToTree(prev, parentId, reply))
+      applyComments(prev => addReplyToTree(prev, parentId, reply))
       bumpCommentCount(1)
     } catch (error) {
       console.error('Failed to add reply:', error)
@@ -115,7 +140,7 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
   const handleEditComment = async (commentId: string, content: string) => {
     try {
       const updatedComment = await communityApi.updateComment(commentId, content)
-      setComments(prev => updateCommentInTree(prev, commentId, updatedComment))
+      applyComments(prev => updateCommentInTree(prev, commentId, updatedComment))
     } catch (error) {
       console.error('Failed to update comment:', error)
       alert('댓글 수정에 실패했습니다.')
@@ -125,8 +150,10 @@ export function usePostDetail(postId: string | undefined, user: AuthUser | null)
   const handleDeleteComment = async (commentId: string) => {
     try {
       await communityApi.deleteComment(commentId)
-      setComments(prev => removeCommentFromTree(prev, commentId))
-      bumpCommentCount(-countDeletedComments(comments, commentId))
+      // 응답 시점의 최신 트리 기준으로 센다(연속 삭제 시 오래된 클로저 방지)
+      const deletedCount = countDeletedComments(commentsRef.current, commentId)
+      applyComments(prev => removeCommentFromTree(prev, commentId))
+      bumpCommentCount(-deletedCount)
     } catch (error) {
       console.error('Failed to delete comment:', error)
       alert('댓글 삭제에 실패했습니다.')
