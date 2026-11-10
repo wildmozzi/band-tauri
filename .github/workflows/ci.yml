@@ -9,6 +9,12 @@ on:
   push:
     branches: [develop, overhaul]
 
+# 최소 권한: 체크아웃(contents), 변경 파일 목록(paths-filter → pull-requests), 아티팩트 업로드(actions).
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
