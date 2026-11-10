@@ -61,13 +61,13 @@ net/stun.rs            STUN (기존 파서 이식)
   - 크기는 입력 방출 패턴(주기 lcm(입력 버퍼, 리샘플 청크))에서 산정한다.
   - 입·출력 장치 클럭 차는 수위 제어(1샘플 단위, 최대 500ppm)로 흡수한다.
   - 언더런 때 늘린 여유는 10초 무사고마다 되돌린다.
-- 입력 또는 출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화(호출 실패)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 스트림 에러(cpal 에러 콜백, WASAPI 호출 실패)는 `streamErrors`로 센다.
+- 입력 또는 출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화 HRESULT(`AUDCLNT_E_DEVICE_INVALIDATED`, `AUDCLNT_E_SERVICE_NOT_RUNNING`, `AUDCLNT_E_RESOURCES_INVALIDATED`)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 그 밖의 WASAPI 호출 실패는 일시 오류로 보고 `streamErrors`만 올린 뒤 다음 이벤트를 기다린다. 같은 방향이 연속 4회 실패하면 그 스트림을 재시작(Stop/Reset/Start, `streamRestarts`)하고, 성공 없이 재시작이 3회 이어지거나 연속 50회 실패하면 `streamFailed=true`, `running=false`로 멈춘다.
 - 워커, net 수신, 자체 WASAPI 스레드는 MMCSS "Pro Audio"(실패 시 높은 우선순위)로 등록하고 FTZ/DAZ를 켠다.
 - **오디오 백엔드 선택**(`SystemBackend`):
   - `asio`(입·출력 중 하나라도) → cpal ASIO(`asio` 피처).
-  - `wasapiExclusive` → 자체 WASAPI 이벤트 구동 독점, 장치 최소 주기. 포맷은 독점 지원 포맷 중 48kHz 우선, 없으면 44.1kHz(리샘플), 그다음 96/88.2kHz. 샘플 형식 f32 → 정수 32(유효 32/24) → 16비트.
+  - `wasapiExclusive` → 자체 WASAPI 이벤트 구동 독점, 장치 최소 주기. 포맷은 독점 지원 포맷 중 48kHz 우선, 없으면 44.1kHz(리샘플), 그다음 96/88.2kHz. 샘플 형식 f32 → 정수 32(유효 32/24, 24-in-32) → 24비트 패킹(3바이트) → 16비트. 채널 마스크는 믹스 포맷 마스크(채널 수가 같을 때) → 기본 마스크(1·2채널) 또는 DIRECTOUT(3채널 이상) 순으로 시도한다.
   - `wasapiShared` → 자체 WASAPI `IAudioClient3::InitializeSharedAudioStream`, 엔진이 허용하는 최소 주기(장치에 따라 2~10ms), 믹스 포맷.
-  - 자체 백엔드가 실패하면 독점을 저지연 공유로 바꿔 한 번 더 열고, 그래도 실패하면 cpal WASAPI 공유(≈10ms)로 연다. 실제 백엔드와 주기는 `EngineStats.backend`/`devicePeriodMs`로 보인다.
+  - 자체 백엔드가 실패하면 (독점, 독점) → (독점, 저지연 공유) → (저지연 공유, 독점) → (저지연 공유, 저지연 공유) 순으로 다시 열고(한쪽만 다른 앱이 쥐고 있어도 다른 쪽 독점 유지), 그래도 실패하면 cpal WASAPI 공유(≈10ms)로 연다. 실제 백엔드와 주기는 `EngineStats.backend`/`devicePeriodMs`로 보인다.
   - 자체 WASAPI는 입·출력을 한 스레드에서 처리해 같은 장치 듀플렉스에서 캡처→렌더 순서를 고정한다.
 - ASIO는 입력·출력을 같은 장치에서 열고(듀플렉스), 사용자가 선택한 ASIO 드라이버 이름을 존중한다. 이름이 없으면 기본 장치. 채널 수는 장치 지원 범위에서 선택하고, 입력 채널 선택(Ch1..ChN)을 지원한다.
 
@@ -156,7 +156,7 @@ interface EngineConfig {
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
 interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | null; rttMs: number | null; jitterMs: number; bufferMs: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; devicePeriodMs: number; backend: string; peers: PeerStats[] }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; peers: PeerStats[] }
 ```
 
 | 커맨드 | 인자 | 반환 |
@@ -194,7 +194,15 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 - 입력 또는 출력 콜백이 1초 넘게 멈추면 켜지고, 콜백이 다시 돌면 꺼진다.
 - 자체 WASAPI 백엔드는 장치 무효화(WASAPI 호출 실패)와, 기본 장치로 연 방향의 기본 장치 변경도 바로 알린다. 이 경우 엔진을 다시 시작할 때까지 켜져 있다(다시 시작하면 새 기본 장치로 열린다).
 
-`streamErrors`: 스트림 에러 누적 횟수(cpal 에러 콜백, 자체 WASAPI 호출 실패; 비치명 포함, 정보용).
+`streamErrors`: 스트림 에러 누적 횟수(cpal 에러 콜백, 자체 WASAPI 호출 실패; 재시도로 넘어간 일시 오류 포함, 정보용).
+
+`streamFailed`: 스트림이 복구되지 않는 오류로 멈췄다(자체 WASAPI: 치명 HRESULT, 또는 재시작을 반복해도 실패). 장치는 남아 있을 수 있다(`deviceLost`와 구분). 이때 `running`은 false다.
+
+`streamRestarts`: 일시 오류가 반복되어 자체 WASAPI 스트림을 재시작한 횟수.
+
+`inputDiscontinuities`: 캡처 패킷의 `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` 횟수(장치가 데이터를 버림 = 입력 오버런). `xruns`에도 더한다. 스트림 시작·재시작 직후 첫 패킷은 세지 않는다. 자체 WASAPI만 센다.
+
+`inputSilentPackets`: 장치가 `AUDCLNT_BUFFERFLAGS_SILENT`로 표시한 캡처 패킷 수(자체 WASAPI).
 
 `devicePeriodMs`: 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기(독점: 버퍼 = 주기, 저지연 공유: 엔진 주기), cpal·가짜 장치는 실측 콜백 크기다.
 

@@ -577,15 +577,10 @@ pub mod system {
         ) -> Result<(StreamInfo, Box<dyn Any>), String> {
             #[cfg(windows)]
             let (input, output) = {
-                use crate::engine::wasapi::{open_engine_streams, ShareMode};
+                use crate::engine::wasapi::{fallback_modes, open_engine_streams};
                 let mut rts = (input, output);
                 if let (Some(mi), Some(mo)) = (mode_of(cfg.input_driver), mode_of(cfg.output_driver)) {
-                    let shared = |m: ShareMode| if m == ShareMode::Exclusive { ShareMode::Shared3 } else { m };
-                    let mut attempts = vec![(mi, mo)];
-                    if (shared(mi), shared(mo)) != (mi, mo) {
-                        attempts.push((shared(mi), shared(mo)));
-                    }
-                    for modes in attempts {
+                    for modes in fallback_modes(mi, mo) {
                         match open_engine_streams(cfg, modes, rts.0, rts.1, counters.clone()) {
                             Ok(ok) => return Ok(ok),
                             Err(f) => {
@@ -647,6 +642,9 @@ pub mod fake {
         pub out_phase_us: u64,
         /// 콜백마다 0..이 값(µs) 사이로 늦게 깨어난다. 다음 콜백은 원래 일정으로 따라잡는다.
         pub wake_jitter_us: u64,
+        /// 출력 콜백이 격자보다 0..이 값(µs) **이르게** 불린다(실장비 WASAPI 독점 프로브의 이른 콜백, PR #11 M3).
+        /// `wake_jitter_us`와 합치면 격자 기준 ± 지터. 재생 시각(sink 모델)은 격자 그대로다.
+        pub out_early_us: u64,
         pub open_delay: Duration,
         /// 이 시간 뒤 스트림 에러 1회 보고(장치 분리 흉내).
         pub error_after: Option<Duration>,
@@ -681,6 +679,7 @@ pub mod fake {
                 out_drift_ppm: 0.0,
                 out_phase_us: 0,
                 wake_jitter_us: 0,
+                out_early_us: 0,
                 open_delay: Duration::ZERO,
                 error_after: None,
                 source,
@@ -733,6 +732,8 @@ pub mod fake {
         period: f64,
         first: u64,
         jitter_us: u64,
+        /// 0..이 값(µs)만큼 이르게 부른다.
+        early_us: u64,
         seed: u64,
         /// (주기, 멈춤): 주기마다 콜백 스레드가 이만큼 멈췄다가 몰아서 따라잡는다(CPU 스파이크 흉내).
         stall: Option<(Duration, Duration)>,
@@ -758,7 +759,9 @@ pub mod fake {
                 }
             }
             let jitter = if c.jitter_us > 0 { Duration::from_micros(rng.gen_range(0..c.jitter_us)) } else { Duration::ZERO };
-            let due = c.t0 + c.offset + Duration::from_secs_f64(c.period * (k + c.first) as f64) + jitter;
+            let early = if c.early_us > 0 { Duration::from_micros(rng.gen_range(0..c.early_us)) } else { Duration::ZERO };
+            let grid = c.t0 + c.offset + Duration::from_secs_f64(c.period * (k + c.first) as f64);
+            let due = grid.checked_sub(early).unwrap_or(grid) + jitter;
             let now = Instant::now();
             if due > now {
                 std::thread::sleep(due - now);
@@ -830,6 +833,7 @@ pub mod fake {
                         period: in_period,
                         first: 1 + k0,
                         jitter_us: me.wake_jitter_us,
+                        early_us: 0,
                         seed,
                         stall: None,
                         halt_after: me.halt_after,
@@ -858,6 +862,7 @@ pub mod fake {
                     period: out_period,
                     first: k0,
                     jitter_us: me.wake_jitter_us,
+                    early_us: me.out_early_us,
                     seed,
                     stall: me.out_stall,
                     halt_after: me.halt_after,

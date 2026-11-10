@@ -46,6 +46,14 @@ pub struct AudioCounters {
     pub stream_errors: AtomicU32,
     /// 백엔드가 장치 분실(분리·무효화·기본 장치 변경)을 직접 알렸다. 콜백 정지 감지(1초)보다 빠르다.
     pub device_lost: AtomicBool,
+    /// 스트림이 복구되지 않는 오류로 멈췄다(치명 HRESULT, 재시작을 반복해도 실패). 장치는 남아 있을 수 있다.
+    pub stream_failed: AtomicBool,
+    /// 일시 오류가 반복되어 스트림을 재시작한 횟수(자체 WASAPI).
+    pub stream_restarts: AtomicU32,
+    /// 캡처 패킷의 DATA_DISCONTINUITY(장치가 데이터를 버림 = 입력 오버런, `xruns`에도 더함). 시작 직후 첫 패킷 제외.
+    pub input_discontinuities: AtomicU64,
+    /// 장치가 SILENT로 표시한 캡처 패킷 수.
+    pub input_silent_packets: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -98,6 +106,14 @@ pub struct EngineStats {
     pub stream_errors: u32,
     /// 장치를 잃었다(콜백 1초 정지, 또는 백엔드의 분리·기본 장치 변경 통지). 이때 `running`은 false.
     pub device_lost: bool,
+    /// 스트림이 복구되지 않는 오류로 멈췄다(재시작 반복 실패, 치명 오류). 이때 `running`은 false.
+    pub stream_failed: bool,
+    /// 일시 오류 반복으로 스트림을 재시작한 횟수(자체 WASAPI).
+    pub stream_restarts: u32,
+    /// 캡처 DATA_DISCONTINUITY 횟수(입력 오버런, `xruns`에도 포함). 자체 WASAPI만 센다.
+    pub input_discontinuities: u64,
+    /// 장치가 SILENT로 표시한 캡처 패킷 수(자체 WASAPI).
+    pub input_silent_packets: u64,
     /// 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기, cpal·가짜 장치는 실측 콜백 크기.
     pub device_period_ms: f32,
     /// 실제로 열린 오디오 백엔드: `wasapiExclusive` | `wasapiShared3`(IAudioClient3 저지연 공유) |
@@ -119,6 +135,10 @@ impl EngineStats {
             monitor_latency_ms: 0.0,
             stream_errors: 0,
             device_lost: false,
+            stream_failed: false,
+            stream_restarts: 0,
+            input_discontinuities: 0,
+            input_silent_packets: 0,
             device_period_ms: 0.0,
             backend: String::new(),
             peers: Vec::new(),
@@ -162,6 +182,6 @@ mod tests {
         assert!(j.contains("\"state\":\"connected\""));
         assert!(j.contains("\"path\":\"lan\""));
         assert!(j.contains("\"rttMs\":null"));
-        assert!(j.contains("\"devicePeriodMs\":0.0") && j.contains("\"backend\":\"\""), "{j}");
+        assert!(j.contains("\"devicePeriodMs\":0.0") && j.contains("\"backend\":\"\"") && j.contains("\"inputDiscontinuities\":0") && j.contains("\"streamFailed\":false"), "{j}");
     }
 }

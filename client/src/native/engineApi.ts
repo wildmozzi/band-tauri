@@ -99,6 +99,14 @@ export interface EngineStats {
   streamErrors?: number
   /** 장치를 잃음(콜백 1초 정지, 장치 분리·무효화, 기본 장치 변경). true면 running=false */
   deviceLost?: boolean
+  /** 스트림이 복구되지 않는 오류로 멈춤(치명 오류, 재시작 반복 실패). 장치는 남아 있을 수 있다. true면 running=false */
+  streamFailed?: boolean
+  /** 일시 오류 반복으로 자체 WASAPI 스트림을 재시작한 횟수 */
+  streamRestarts?: number
+  /** 캡처 DATA_DISCONTINUITY 횟수(입력 오버런, xruns에도 포함). 자체 WASAPI만 센다 */
+  inputDiscontinuities?: number
+  /** 장치가 SILENT로 표시한 캡처 패킷 수(자체 WASAPI) */
+  inputSilentPackets?: number
   /** 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기, cpal은 실측 콜백 크기 */
   devicePeriodMs?: number
   /** 실제로 열린 오디오 백엔드(`AudioBackendKind`, 입·출력이 다르면 `입력/출력`). 정지 상태면 빈 문자열 */

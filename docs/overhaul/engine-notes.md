@@ -254,14 +254,15 @@ GOAL 1절 정의(`estLatencyMs` = 입력 버퍼 + 프레임 + 출력 링 + 출�
 
 ### 자체 WASAPI 백엔드 (`engine/wasapi.rs`)
 
-- **독점**: 이벤트 구동, `GetDevicePeriod` 최소 주기. 포맷은 독점 지원 포맷 중 48k → 44.1k → 96k → 88.2k, f32 → 정수 32(유효 32/24) → 16비트, 채널은 믹스 포맷 채널 → 2 → 필요 채널 순이다. `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED`면 장치가 준 크기로 주기를 다시 계산해 새 클라이언트로 재초기화한다.
+- **독점**: 이벤트 구동, `GetDevicePeriod` 최소 주기. 포맷은 독점 지원 포맷 중 48k → 44.1k → 96k → 88.2k, f32 → 정수 32(유효 32/24) → 24비트 패킹 → 16비트, 채널은 믹스 포맷 채널 → 2 → 필요 채널, 채널 마스크는 믹스 마스크 → 기본/DIRECTOUT 순이다. `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED`면 실패한 클라이언트를 해제한 뒤 장치가 준 크기로 주기를 다시 계산해 새 클라이언트로 재초기화한다. 최소 주기를 거절하면(`AUDCLNT_E_INVALID_DEVICE_PERIOD`/`ENDPOINT_CREATE_FAILED`) 기본 주기로 한 번 더 독점을 시도한다.
 - **저지연 공유**: `IAudioClient3::GetSharedModeEnginePeriod`의 최소값으로 `InitializeSharedAudioStream`, 믹스 포맷 그대로. 렌더는 이벤트마다 한 주기만 채워 장치 큐를 한 주기 근처로 둔다.
 - **스레드**: 입·출력을 한 스레드(MMCSS "Pro Audio")에서 이벤트 두 개로 처리한다. 둘 다 신호면 캡처가 먼저다(같은 장치 듀플렉스에서 입력→출력 순서 고정). COM 객체는 이 스레드에서 만들고 해제한다.
-- **RT 규칙**: 루프에서 하는 일은 WASAPI 호출과 대기, 그리고 `InputRt`/`OutputRt::process`뿐이다(할당·락·로그 없음, 오류는 반환 후 로그). 무음 캡처 패킷용 0 버퍼는 시작 전에 할당한다.
-- **장치 분실**: 루프의 WASAPI 호출 실패(`AUDCLNT_E_DEVICE_INVALIDATED` 등) → 스트림 중단, `streamErrors` + `deviceLost`.
+- **RT 규칙**: 루프에서 하는 일은 WASAPI 호출과 대기, 그리고 `InputRt`/`OutputRt::process`뿐이다(할당·락·로그 없음, 오류는 반환 후 로그). 변환 버퍼(무음 패킷 0, 24비트 패킹 변환)와 MMCSS 등록은 스트림 시작 전에 끝낸다. 열기 로그는 받는 쪽 스레드가 남긴다.
+- **오류 분류**(PR #11 H1): 장치 무효화 HRESULT → `deviceLost`. `E_OUTOFMEMORY` → `streamFailed`. 그 밖은 일시 오류: `streamErrors`만 올리고 다음 이벤트에 다시 시도, 같은 방향 연속 4회면 그 스트림 재시작(`streamRestarts`), 성공 없이 재시작 3회 또는 연속 50회면 `streamFailed`. 정책 루프(`drive_loop`)를 장치 I/O(`LoopIo`)와 분리해 가짜 HRESULT 시퀀스로 단위 테스트한다. 이벤트가 100ms 동안 없으면 `GetCurrentPadding`으로 무효화를 확인한다(이벤트가 멈춘 비기본 장치 분리).
+- **캡처 플래그**(M2): DATA_DISCONTINUITY → `inputDiscontinuities` + `xruns`(시작 직후 첫 패킷 제외), SILENT → `inputSilentPackets`. 무음 패킷이 변환 버퍼보다 크면 나눠 넘겨 프레임 수를 보존한다.
   - 기본 장치로 연 방향은 감시 스레드가 0.5초마다 기본 장치 ID를 비교해, 바뀌면 `deviceLost`를 켠다.
   - `deviceLost`면 `running=false`라 프론트의 기존 정지 감지가 동작한다. 다시 시작하면 새 기본 장치로 열린다.
-- **폴백**: `SystemBackend`가 자체 백엔드 실패 시 독점 → 저지연 공유 → cpal 순으로 다시 연다(RT 상태를 돌려받아 재사용). 실제 백엔드는 `EngineStats.backend`로 보인다.
+- **폴백**: `SystemBackend`가 자체 백엔드 실패 시 (독점, 독점) → (독점, 공유) → (공유, 독점) → (공유, 공유) → cpal 순으로 다시 연다(RT 상태를 돌려받아 재사용). 실제 백엔드는 `EngineStats.backend`로 보인다. 열기가 10초 시간 초과로 포기되면 스레드는 스트림을 시작하지 않는다.
 - **장치 목록**: 엔드포인트마다 `wasapiShared` 1개 + 독점 지원 시 `wasapiExclusive` 1개. id는 cpal과 같은 `wasapi::<이름>`이라 저장된 설정이 그대로 맞는다.
 
 ### `wasapi_probe` 실행 결과(이 PC, 무음 출력, 5초씩)
@@ -294,6 +295,27 @@ GOAL 1절 정의(`estLatencyMs` = 입력 버퍼 + 프레임 + 출력 링 + 출�
 
 - 독점은 기본 주기(10ms)가 아니라 최소 주기로 연다. 기본 주기로 열면 15ms를 넘는다(마지막 줄).
 - 장치 최소 주기가 5ms를 넘는 장치는 독점에서도 15ms를 못 낼 수 있다. 이 경우 `devicePeriodMs`로 드러난다.
+
+### PR #11 리뷰 반영
+
+- **H1 HRESULT 분류**: 위 "오류 분류". 회귀 테스트 `wasapi::tests`의 `single_transient_error_keeps_running`(일시 오류 1회 뒤 계속 서비스), `repeated_errors_restart_stream_then_recover`, `persistent_errors_become_fatal_after_restarts`, `device_invalidated_is_device_lost_immediately`, `stalled_events_surface_invalidation` 등 11개.
+- **M1 USB 인터페이스 포맷**: 24비트 패킹(`SampleKind::I24`, RT에서 미리 할당한 f32 버퍼로 변환)과 채널 마스크 협상. 단위 테스트: 24-in-32·패킹 24 파싱/마스크 왕복, 변환 기지값·부호 확장·클립·왕복 오차 ≤ 0.5 LSB, 24-in-32와 같은 스케일. 실제 USB 인터페이스 독점 열기는 [사람].
+- **M2**: `inputDiscontinuities`/`inputSilentPackets`(위 "캡처 플래그"), 프로브 리포트에도 출력. 프로브는 `GetStreamLatency`도 출력한다(주기 밖 드라이버 지연, estLatencyMs에 없음).
+- **M3 이른 콜백**: 가짜 장치 `out_early_us`(격자보다 0..N µs 이르게), 결정적 시뮬레이션 `out_early_us`·`loss`.
+  - `callback_mix_sim_early_callbacks_no_premature_concealment`: 이른 콜백 최대 1.7ms, 4조합 × 2위상, 정착 후 은닉·마감 채움·보정 0, 불연속 0, xrun 0.
+  - `callback_mix_sim_early_callbacks_with_loss_conceal_without_zero_fill`: 이른 콜백 + 손실 5%, 30초. 손실은 PLC로 은닉(600여 회), 0 채움·건너뛰기 0, 적응 여유 0.
+  - `callback_mix_early_callbacks_real_time`(실시간 루프백, 출력 144/128, 이른 0..1.7ms + 늦은 0..0.5ms): 은닉 0, 마감 채움 0, 건너뜀 0, 불연속 0.
+  - 이른 콜백이 은닉 마감(다음 콜백 − 1.5ms)보다 먼저 와도 선행량(다음 콜백 + 2청크)이 이미 링에 있어 0 채움이 나지 않는다.
+  - **실장비 피어 경로**(`wasapi_probe` 새 절: 실제 장치 B ← 가짜 A 무음 입력, 127.0.0.1, Opus 모노 2.5ms, 피어 뮤트 + 마스터 0 = 무음, 5초):
+    - 독점: `backend wasapiExclusive`, devicePeriodMs 3.00, est 7.50ms, 은닉 0, 마감 채움 0, 건너뜀 0, xrun 0, bufferMs 7.06, playoutMs 9.98.
+    - 저지연 공유: `backend wasapiShared3`, devicePeriodMs 10.00, est 14.50ms, 은닉 0, 마감 채움 0, 건너뜀 0, xrun 0, bufferMs 7.49, playoutMs 17.35.
+    - 지터·손실 없는 로컬 링크라 마감 경로가 실제 장치 콜백 타이밍에서 0 채움 없이 도는 것까지 확인한 것이다. 실제 망·실청취는 [사람].
+  - 같은 프로브에서 독점 출력 콜백 간격은 p1 2.796 / p99 3.190 / 최대 3.317ms(공칭 3.00), `GetStreamLatency` 독점 3.00ms(출력)·2.00ms(입력), 공유 0. DATA_DISCONTINUITY·SILENT·일시 오류·재시작 모두 0.
+  - 이 PC 스피커(Realtek)는 독점에서 24비트 패킹(I24/24)도 지원한다고 답한다(`IsFormatSupported`). 탐색 순서상 24-in-32가 먼저라 실제로는 I32로 열리므로, I24 변환 경로는 단위 테스트로만 확인했다 [사람: 24 패킹만 받는 USB 인터페이스].
+- **M4 피어 적응 여유**: `PeerFeed`에 피어별 `margin`(언더런마다 +1청크, 최대 다음 콜백 소비량, 10초 무사고마다 −1청크). 선행량 상한, 부족 판정, 은닉 마감을 여유만큼 앞당긴다. 여유는 재생 위치 앞(소스 링)이라 `bufferMs`에 포함된다. 언더런이 없으면 0이라 기본 지연은 그대로다. `callback_mix_sim_output_stalls_do_not_accumulate_latency`에서 1초마다 8ms 멈춤의 언더런이 20초에 10회 이상(이전 단언 기준) → 3~4회로 줄었다(여유 > 0 단언).
+- **루프백**(손실 5%, 지터 0..20ms, +200ppm, Opus 모노 5ms, 버퍼 128, 5회): 은닉 4.78 / 4.54 / 4.29 / 4.66 / 4.74%(평균 4.60%, 손실 추정 4.3~5.2%로 회마다 은닉 ≈ 손실), 연속성 99.94~100%(첫 회만 무음 창 1), 버퍼 25.9~30.6ms, B xrun 2~3, 건너뜀 0~154프레임. P1-0 머리 060541d(13회 평균 4.45%, 최대 4.83%) 범위 안이고 평균은 0.15%p 높다(기준 커밋은 4.07%). A안(마감 여유 미추가) 결정대로 지터 목표는 바꾸지 않았다.
+- **Low**: L1(타임아웃 시 상태 확인), L2(정렬 재시도 전 해제, 기본 주기 재시도), L3(한 방향 독점 유지 폴백), L4(시간 초과 후 시작 금지), L5(MMCSS·할당 시작 전, 로그 이동), L6(무음 패킷 분할) 반영.
+  - L7(공유/독점 같은 id, 사용 중 목록에서 독점 항목 사라짐, 요청 샘플레이트 무시), L8(게인 원자값 4개 찢어짐), L9(출력 정지 시 DRAIN 슬롯 고갈)은 영향이 작아 기록만 한다.
 
 ### 미검증 [사람]
 

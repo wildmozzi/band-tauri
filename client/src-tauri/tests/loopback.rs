@@ -1053,6 +1053,52 @@ fn callback_mix_phase_sweep_no_premature_concealment() {
 }
 
 #[test]
+fn callback_mix_early_callbacks_real_time() {
+    let _g = RT_LOCK.lock();
+    // 실장비 WASAPI 독점 프로브에서 출력 콜백은 격자보다 최대 ≈1.7ms 이르게 왔다(PR #11 M3: 간격 p1 2.3ms,
+    // 최소 1.25~1.5ms, 공칭 3ms). 가짜 장치 출력에 이른 콜백(0..1.7ms) + 늦은 기상(0..0.5ms)을 주고,
+    // 피어 경로(마감 직전 은닉)가 0 채움·조기 은닉 없이 도는지 본다.
+    for (out_buf, phase_us) in [(144usize, 0u64), (144, 1800), (128, 900)] {
+        let mut ba = sine_backend();
+        ba.wake_jitter_us = 500;
+        ba.in_buffer = Some(96);
+        let mut bb = FakeBackend::silence(48_000);
+        bb.wake_jitter_us = 500;
+        bb.out_early_us = 1700;
+        bb.out_buffer = Some(out_buf);
+        bb.seed = 21;
+        bb.out_phase_us = phase_us;
+        let (a, b, _p, sink_b) = connect_pair(config(128, 2.5), ba, bb, None);
+        std::thread::sleep(Duration::from_millis(1500));
+        let j0 = b.peer_jitter_stats()[0].1;
+        let f0 = b.feed_stats();
+        let start = sink_b.lock().len() / 2;
+        std::thread::sleep(Duration::from_millis(3000));
+        let js = b.peer_jitter_stats()[0].1;
+        let f1 = b.feed_stats();
+        let st = b.stats();
+        let snap = sink_b.lock().clone();
+        drop(a);
+        drop(b);
+        let c = analyze(&snap, start);
+        let (conc, fills, skipped) = (js.concealed - j0.concealed, f1.0 - f0.0, f1.1 - f0.1);
+        println!(
+            "EARLY-CB out {out_buf} 위상 {phase_us}µs: 은닉 {conc}, 마감 채움 {fills}, 건너뜀 {skipped}, buffer {:.2}/{:.2}ms, est {:.2}ms, 불연속 {} 무음 {}, xruns {}",
+            js.buffer_ms,
+            js.target_ms,
+            st.est_latency_ms,
+            c.discontinuities,
+            c.silent_runs,
+            st.xruns
+        );
+        // 실시간 테스트는 스케줄러 지연 1회까지 허용(link_matrix와 같은 기준)
+        assert!(conc <= 1, "out {out_buf} 위상 {phase_us}: 은닉 {conc}");
+        assert!(fills <= 1, "out {out_buf} 위상 {phase_us}: 마감 채움 {fills}");
+        assert_gaps_explained_by_xruns(&c, st.xruns, &format!("EARLY-CB out {out_buf} 위상 {phase_us}"));
+    }
+}
+
+#[test]
 fn est_latency_budget_table() {
     let _g = RT_LOCK.lock();
     // GOAL 1절 estLatencyMs = 입력 장치 버퍼 + 프레임 + 출력 링 + 출력 장치 버퍼. 콜백 구동 믹스에는 출력 링이 없다.

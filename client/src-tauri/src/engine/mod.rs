@@ -252,6 +252,7 @@ impl Engine {
         let monitor = in_ms + ws.monitor_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0 + out_ms;
         let stream_errors = c.stream_errors.load(Ordering::Relaxed);
         let device_lost = ws.device_stalled.load(Ordering::Relaxed) || c.device_lost.load(Ordering::Relaxed);
+        let stream_failed = c.stream_failed.load(Ordering::Relaxed);
         let period_frames = match self.info.out_period_frames {
             0 => out_buf,
             n => n,
@@ -286,7 +287,7 @@ impl Engine {
             .unwrap_or_default();
         EngineStats {
             // 장치를 잃으면 false: 프론트의 기존 "엔진 정지" 감지(running=false 연속)가 그대로 동작한다(PR #5 M-2).
-            running: !device_lost,
+            running: !device_lost && !stream_failed,
             sample_rate: self.info.out_rate,
             device_buffer: out_buf,
             input_level: c.input_level.load(),
@@ -296,6 +297,10 @@ impl Engine {
             monitor_latency_ms: monitor,
             stream_errors,
             device_lost,
+            stream_failed,
+            stream_restarts: c.stream_restarts.load(Ordering::Relaxed),
+            input_discontinuities: c.input_discontinuities.load(Ordering::Relaxed),
+            input_silent_packets: c.input_silent_packets.load(Ordering::Relaxed),
             device_period_ms,
             backend: self.info.backend_label(),
             peers,
