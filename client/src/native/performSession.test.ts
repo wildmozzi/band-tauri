@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import type { EngineConfig, EngineStats, LocalDescriptor } from './engineApi'
+import { describe, expect, it, vi } from 'vitest'
+import type { EngineConfig, EngineStats, LocalDescriptor, RelayConfig } from './engineApi'
 import { DEFAULT_ENGINE_CONFIG } from './engineConfig'
 import { PerformSession, performErrorFromCode, type EngineBackend, type SignalOut } from './performSession'
 
@@ -67,6 +67,9 @@ class FakeEngine implements EngineBackend {
   removePeer(peerId: string) {
     return this.track(`remove:${peerId}`, async () => null)
   }
+  setRelay(relay: RelayConfig | null) {
+    return this.track(`relay:${relay ? `${relay.addr}:${relay.token.slice(0, 4)}` : 'null'}`, async () => null)
+  }
   setPeerGain(peerId: string, gain: number, muted: boolean, pan?: number) {
     return this.track(`gain:${peerId}:${gain}:${muted}:${pan}`, async () => null)
   }
@@ -87,7 +90,7 @@ function setup(opts: { others?: string[] } = {}) {
     getSelfId: () => env.selfId,
     getRoomId: () => env.roomId,
     getOtherPerformers: () => env.others,
-  }, { retryDelaysMs: [5, 5, 5], reconnectTimeoutMs: 30, deadStatsThreshold: 2 })
+  }, { retryDelaysMs: [5, 5, 5], reconnectTimeoutMs: 30, deadStatsThreshold: 2, relayRetryMs: 20 })
   const start = () => session.start({ instrument: 'guitar', config: DEFAULT_ENGINE_CONFIG, nickname: 'n', isHost: false })
   const types = () => sent.map((m) => m.type + ('to' in m ? `>${m.to}` : ''))
   return { engine, sent, env, session, start, types }
@@ -324,5 +327,72 @@ describe('PerformSession 피어/엔진 상태', () => {
     const { session, engine } = setup()
     session.handleSignal({ type: 'native-descriptor', from: 'B', descriptor: desc(5) })
     expect(engine.calls).toEqual([])
+  })
+})
+
+describe('PerformSession 릴레이 토큰 (P1-4b)', () => {
+  const token = 'A'.repeat(70)
+  const relayMsg = (ssrc: number, expiresAt: number, t = token) => ({ type: 'relay-token', token: t, addr: 'relay.example.com:3478', ssrc, expiresAt })
+
+  it('내 ssrc의 relay-token → engine_set_relay(addr, token)', async () => {
+    const { session, start, engine } = setup()
+    await start() // ssrc 1
+    expect(session.handleSignal(relayMsg(1, Math.floor(Date.now() / 1000) + 120))).toBe(true)
+    await flush()
+    expect(engine.calls).toEqual(['start:me', 'relay:relay.example.com:3478:AAAA'])
+  })
+
+  it('다른 ssrc(재시작 전 엔진)·잘못된 형식·연주 전 토큰은 무시', async () => {
+    const { session, start, engine } = setup()
+    const exp = Math.floor(Date.now() / 1000) + 120
+    expect(session.handleSignal(relayMsg(1, exp))).toBe(true) // 시작 전
+    await start()
+    session.handleSignal(relayMsg(99, exp))
+    session.handleSignal(relayMsg(1, exp, 'short'))
+    session.handleSignal({ type: 'relay-token', token, addr: 'no-port', ssrc: 1, expiresAt: exp })
+    await flush()
+    expect(engine.calls).toEqual(['start:me'])
+  })
+
+  it('만료 30초 전에 relay-token-request, 응답이 없으면 다시 요청, 새 토큰이 오면 다시 예약', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(1_700_000_000_000))
+    try {
+      const { session, start, types } = setup()
+      await start()
+      const now = Math.floor(Date.now() / 1000)
+      session.handleSignal(relayMsg(1, now + 60))
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(types()).not.toContain('relay-token-request')
+      await vi.advanceTimersByTimeAsync(1)
+      expect(types().filter((t) => t === 'relay-token-request')).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(20) // relayRetryMs
+      expect(types().filter((t) => t === 'relay-token-request')).toHaveLength(2)
+      // 새 토큰 → 재시도 중단, 새 만료 기준으로 예약
+      session.handleSignal(relayMsg(1, Math.floor(Date.now() / 1000) + 120))
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(types().filter((t) => t === 'relay-token-request')).toHaveLength(2)
+      // 정지하면 타이머도 멈춘다
+      await session.stop()
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(types().filter((t) => t === 'relay-token-request')).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ssrc-conflict → 엔진을 새 ssrc로 재시작(native-leave 없이), 연주 상태 유지', async () => {
+    const { session, start, engine, types } = setup()
+    await start()
+    expect(session.handleSignal({ type: 'error', code: 'ssrc-conflict', message: 'x' })).toBe(true)
+    for (let i = 0; i < 5; i++) await flush()
+    expect(engine.calls).toEqual(['start:me', 'stop', 'start:me'])
+    expect(session.getState().phase).toBe('running')
+    expect(types()).not.toContain('native-leave')
+    // 새 엔진(ssrc 2)의 토큰만 받는다
+    session.handleSignal(relayMsg(1, Math.floor(Date.now() / 1000) + 120))
+    session.handleSignal(relayMsg(2, Math.floor(Date.now() / 1000) + 120))
+    await flush()
+    expect(engine.calls.filter((c) => c.startsWith('relay:'))).toHaveLength(1)
   })
 })

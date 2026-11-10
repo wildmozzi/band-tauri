@@ -205,6 +205,11 @@ impl Engine {
         self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.add_peer(peer_id, desc)
     }
 
+    /// 릴레이 설정/토큰 갱신/해제(설계 4절 `engine_set_relay`, relay-design.md). `addr`는 해석된 주소.
+    pub fn set_relay(&self, relay: Option<(std::net::SocketAddr, &str)>) -> Result<(), String> {
+        self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.set_relay(relay)
+    }
+
     pub fn remove_peer(&self, peer_id: &str) -> Result<(), String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
         net.remove_peer(peer_id);
@@ -285,6 +290,7 @@ impl Engine {
             stream_errors,
             device_lost,
             peers,
+            relay: self.net.as_ref().and_then(|n| n.relay_stats()),
         }
     }
 

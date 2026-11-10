@@ -57,6 +57,8 @@ pub enum PeerStateKind {
 pub enum PathKind {
     Lan,
     Public,
+    /// UDP 릴레이 경유(서버 경유 — 지연 증가). relay-design.md, P1-4b.
+    Relay,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +96,8 @@ pub struct EngineStats {
     /// 스트림 에러가 한 번이라도 났으면 true. UI는 엔진 재시작을 안내한다.
     pub device_lost: bool,
     pub peers: Vec<PeerStats>,
+    /// 릴레이 등록 상태(릴레이를 설정하지 않았으면 null).
+    pub relay: Option<crate::net::relay::RelayStats>,
 }
 
 impl EngineStats {
@@ -110,6 +114,7 @@ impl EngineStats {
             stream_errors: 0,
             device_lost: false,
             peers: Vec::new(),
+            relay: None,
         }
     }
 }
@@ -150,5 +155,7 @@ mod tests {
         assert!(j.contains("\"state\":\"connected\""));
         assert!(j.contains("\"path\":\"lan\""));
         assert!(j.contains("\"rttMs\":null"));
+        assert!(j.contains("\"relay\":null"));
+        assert_eq!(serde_json::to_string(&PathKind::Relay).unwrap(), "\"relay\"");
     }
 }

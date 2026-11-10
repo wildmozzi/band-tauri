@@ -2849,6 +2849,15 @@
   color: #f87171;
 }
 
+/* 릴레이 경유(서버 경유 — 지연 증가) 안내 */
+.performer-info .peer-relay-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.7rem;
+  color: #fb923c;
+}
+.engine-peer-stats .peer-relay-hint { color: #fb923c; }
+
 .engine-local-stats {
   display: block;
   font-size: 0.7rem;

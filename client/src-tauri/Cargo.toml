@@ -46,6 +46,11 @@ tauri-plugin-process = "2"
 # 워커/수신 스레드 MMCSS("Pro Audio") 등록
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
+[dev-dependencies]
+# 릴레이 폴백 통합 테스트(tests/relay.rs): 실제 릴레이를 같은 프로세스에서 띄운다
+band-relay = { path = "../../relay" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time"] }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

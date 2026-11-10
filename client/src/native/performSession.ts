@@ -9,14 +9,19 @@
  *   재연결이 오래 안 되면 정지.
  * - engine_add_peer 실패는 백오프 재시도 (M1), engine_stats.running=false가 이어지면 정지 (L7)
  * - 모든 엔진 커맨드(start 포함)는 하나의 큐로 직렬화 (L6)
+ * - 릴레이(P1-4b): 서버 relay-token(내 ssrc)이 오면 engine_set_relay, 만료 30초 전에 relay-token-request.
+ *   서버가 ssrc-conflict를 보내면 엔진을 새 ssrc로 다시 시작한다.
  */
-import type { EngineConfig, EngineStats, LocalDescriptor } from './engineApi'
+import type { EngineConfig, EngineStats, LocalDescriptor, RelayConfig } from './engineApi'
+import { parseRelayToken, relayRefreshDelayMs } from './relayLogic'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
 
 export interface EngineBackend {
   start(config: EngineConfig, peerId: string): Promise<LocalDescriptor>
   stop(): Promise<unknown>
   addPeer(peerId: string, descriptor: LocalDescriptor): Promise<unknown>
+  /** 릴레이 설정/토큰 갱신 (engine_set_relay) */
+  setRelay(relay: RelayConfig | null): Promise<unknown>
   removePeer(peerId: string): Promise<unknown>
   setPeerGain(peerId: string, gain: number, muted: boolean, pan?: number): Promise<unknown>
   setInputMuted(muted: boolean): Promise<unknown>
@@ -59,6 +64,8 @@ export interface PerformSessionOptions {
   reconnectTimeoutMs?: number
   /** engine_stats.running=false가 몇 번 연속이면 엔진이 죽은 것으로 볼지 */
   deadStatsThreshold?: number
+  /** relay-token-request에 응답이 없을 때 다시 요청하는 간격 */
+  relayRetryMs?: number
 }
 
 /** 서버 에러 코드 → 사용자 메시지. 연주 상태 롤백 대상이면 rollback=true */
@@ -89,15 +96,20 @@ export class PerformSession {
   private retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private retryAttempts = new Map<string, number>()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  /** 지금 엔진의 ssrc (relay-token 대조용) */
+  private localSsrc: number | null = null
+  private relayTimer: ReturnType<typeof setTimeout> | null = null
   private deadStats = 0
   private readonly retryDelays: number[]
   private readonly reconnectTimeoutMs: number
   private readonly deadStatsThreshold: number
+  private readonly relayRetryMs: number
 
   constructor(private readonly engine: EngineBackend, private readonly env: SessionEnv, opts: PerformSessionOptions = {}) {
     this.retryDelays = opts.retryDelaysMs ?? DEFAULT_RETRY_DELAYS
     this.reconnectTimeoutMs = opts.reconnectTimeoutMs ?? 35_000
     this.deadStatsThreshold = opts.deadStatsThreshold ?? 2
+    this.relayRetryMs = opts.relayRetryMs ?? 10_000
   }
 
   // ---------------------------------------------------------------- 상태
@@ -170,6 +182,7 @@ export class PerformSession {
       }
 
       this.deadStats = 0
+      this.localSsrc = descriptor.ssrc
       this.setState({ phase: 'running' })
       // 엔진이 뜬 뒤에 연주 시작 알림 → descriptor 브로드캐스트 (서버가 연주자로 인정해야 중계함)
       this.env.send({ type: 'start-performing', instrument: opts.instrument, nickname: opts.nickname, isHost: opts.isHost })
@@ -191,6 +204,8 @@ export class PerformSession {
     this.machine.stopped()
     this.clearRetries()
     this.clearReconnectTimer()
+    this.clearRelayTimer()
+    this.localSsrc = null
     this.setState({ phase: 'idle', instrument: null, sessionId: null, stats: null, error })
     if (wasRunning) {
       if (notify) {
@@ -227,6 +242,15 @@ export class PerformSession {
     }
     if (payload.type === 'native-leave') {
       if (from) this.peerGone(from)
+      return true
+    }
+    if (payload.type === 'relay-token') {
+      this.relayTokenReceived(payload)
+      return true
+    }
+    if (payload.type === 'error' && payload.code === 'ssrc-conflict') {
+      // 같은 방 다른 연주자가 내 ssrc를 쓴다: 서버는 descriptor를 중계하지 않았다 → 새 ssrc로 재시작
+      if (this.state.phase === 'running') void this.restart()
       return true
     }
     if (payload.type === 'error') {
@@ -277,9 +301,46 @@ export class PerformSession {
       this.runActions(this.machine.reannounce(this.env.getOtherPerformers()))
       return
     }
+    await this.restart()
+  }
+
+  /** 서버 쪽 세션은 그대로 두고 엔진만 새로 시작(새 clientId 또는 새 ssrc) */
+  private async restart(): Promise<void> {
     const last = this.lastStart
     await this.stop({ notify: false })
     if (last) await this.start(last)
+  }
+
+  // ---------------------------------------------------------------- 릴레이 (P1-4b)
+
+  private relayTokenReceived(payload: Record<string, unknown>): void {
+    const msg = parseRelayToken(payload)
+    if (!msg) {
+      console.warn('[Native] 잘못된 relay-token 무시')
+      return
+    }
+    // 이전 엔진(재시작 전 ssrc)에 대한 토큰은 버린다. 엔진도 ssrc를 다시 확인한다.
+    if (this.state.phase !== 'running' || msg.ssrc !== this.localSsrc) return
+    const gen = this.gen
+    this.enqueue(() => (gen === this.gen ? this.engine.setRelay({ addr: msg.addr, token: msg.token }) : Promise.resolve(null)))
+      .catch((err) => console.warn('[Native] 릴레이 설정 실패:', errorText(err)))
+    this.scheduleRelayRefresh(relayRefreshDelayMs(msg.expiresAt, Date.now()))
+  }
+
+  /** 갱신 요청 후 응답이 없으면(WS 순단 등) 다시 요청한다. 새 토큰이 오면 타이머가 다시 잡힌다 */
+  private scheduleRelayRefresh(delayMs: number) {
+    this.clearRelayTimer()
+    this.relayTimer = setTimeout(() => {
+      this.relayTimer = null
+      if (this.state.phase !== 'running') return
+      this.env.send({ type: 'relay-token-request' })
+      this.scheduleRelayRefresh(this.relayRetryMs)
+    }, delayMs)
+  }
+
+  private clearRelayTimer() {
+    if (this.relayTimer) clearTimeout(this.relayTimer)
+    this.relayTimer = null
   }
 
   // ---------------------------------------------------------------- 엔진 제어
@@ -320,6 +381,7 @@ export class PerformSession {
   dispose(): void {
     this.clearRetries()
     this.clearReconnectTimer()
+    this.clearRelayTimer()
     if (this.state.phase !== 'idle') void this.stop({ notify: true })
   }
 

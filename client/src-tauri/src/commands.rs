@@ -88,6 +88,31 @@ pub async fn engine_add_peer(state: State<'_, EngineState>, peer_id: String, des
     state.0.with_engine(|e| e.add_peer(peer_id, &descriptor))
 }
 
+/// 릴레이 설정(설계 4절). 서버의 `relay-token { token, addr }`을 받을 때마다(최초·갱신) 부른다. `null`이면 해제.
+/// 토큰은 `engine_start`가 만든 ssrc에 묶이므로 시작 인자가 아니라 별도 커맨드다.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayArgs {
+    /// 릴레이 `host:port`(DNS 이름 가능, IPv4로 해석)
+    pub addr: String,
+    /// base64url 릴레이 토큰
+    pub token: String,
+}
+
+#[tauri::command]
+pub async fn engine_set_relay(state: State<'_, EngineState>, relay: Option<RelayArgs>) -> Result<(), String> {
+    let m = state.0.clone();
+    // DNS 조회는 블로킹이므로 엔진 락 밖, 블로킹 스레드에서
+    blocking(move || {
+        let resolved = match relay {
+            Some(r) => Some((crate::net::relay::resolve_relay_addr(&r.addr)?, r.token)),
+            None => None,
+        };
+        m.with_engine(|e| e.set_relay(resolved.as_ref().map(|(a, t)| (*a, t.as_str()))))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn engine_remove_peer(state: State<'_, EngineState>, peer_id: String) -> Result<(), String> {
     state.0.with_engine(|e| e.remove_peer(&peer_id))

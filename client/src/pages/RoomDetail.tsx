@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/useAuth'
 import { useRoom } from '../contexts/RoomContext'
 import { supabase } from '../lib/supabaseClient'
 import { MAX_PERFORMERS, type PeerState, type PeerStats } from '../native/engineApi'
+import { RELAY_PATH_HINT, pathLabel, peerPathHint } from '../native/relayLogic'
 import './RoomDetail.css'
 
 // 악기 슬롯 타입
@@ -51,7 +52,6 @@ const PEER_STATE_INFO: Record<PeerState, { label: string; className: string }> =
   failed: { label: '연결 실패', className: 'failed' },
 }
 
-const FAILED_PEER_HINT = '직접 연결 불가 — 네트워크(대칭형 NAT) 문제'
 const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || undefined
 
 function formatMs(v: number | null | undefined, digits = 0): string {
@@ -62,7 +62,7 @@ function formatMs(v: number | null | undefined, digits = 0): string {
 function peerStatsTitle(ps: PeerStats): string {
   return [
     `상태: ${PEER_STATE_INFO[ps.state]?.label ?? ps.state}`,
-    `경로: ${ps.path === 'lan' ? 'LAN' : ps.path === 'public' ? '인터넷' : '-'}`,
+    `경로: ${pathLabel(ps.path) ?? '-'}${ps.path === 'relay' ? ` (${RELAY_PATH_HINT})` : ''}`,
     `RTT: ${formatMs(ps.rttMs)}`,
     `지터: ${formatMs(ps.jitterMs, 1)}`,
     `버퍼: ${formatMs(ps.bufferMs)}`,
@@ -1316,6 +1316,8 @@ export function RoomDetail() {
               const stateInfo = state ? PEER_STATE_INFO[state] : null
               const isActive = isPerformer ? state === 'connected' : true
               const muted = mixSettingsMap[oderId]?.muted ?? false
+              // 'failed'(릴레이까지 실패) 안내 또는 릴레이 경로 지연 안내
+              const pathHint = state ? peerPathHint(state, ps?.path, engineStats?.relay) : null
 
               return (
                 <div
@@ -1340,10 +1342,10 @@ export function RoomDetail() {
                       {stateInfo && (
                         <span className={`peer-state-badge ${stateInfo.className}`} title={ps ? peerStatsTitle(ps) : undefined}>
                           {stateInfo.label}
-                          {ps?.path && <> · {ps.path === 'lan' ? 'LAN' : '인터넷'}</>}
+                          {ps?.path && <> · {pathLabel(ps.path)}</>}
                         </span>
                       )}
-                      {state === 'failed' && <span className="peer-failed-hint">{FAILED_PEER_HINT}</span>}
+                      {pathHint && <span className={state === 'failed' ? 'peer-failed-hint' : 'peer-relay-hint'}>{pathHint}</span>}
                     </div>
                     {/* 네트워크 상태 (연주 중일 때만: 엔진 통계) */}
                     {ps && state !== 'failed' && (
@@ -1556,11 +1558,12 @@ export function RoomDetail() {
                         <div className="channel-latency">
                           <span className={`peer-state-badge ${PEER_STATE_INFO[state].className}`}>{PEER_STATE_INFO[state].label}</span>
                           {state === 'failed' ? (
-                            <span className="peer-failed-hint">{FAILED_PEER_HINT}</span>
+                            <span className="peer-failed-hint">{peerPathHint(state, ps?.path, engineStats?.relay)}</span>
                           ) : ps ? (
                             <span className="latency-text engine-peer-stats" title={peerStatsTitle(ps)}>
                               RTT {formatMs(ps.rttMs)} · 지터 {formatMs(ps.jitterMs, 1)} · 버퍼 {formatMs(ps.bufferMs)} · 손실 {ps.lossPct.toFixed(1)}%
-                              {' · '}{ps.path === 'lan' ? 'LAN' : ps.path === 'public' ? '인터넷' : '경로 탐색 중'}
+                              {' · '}{pathLabel(ps.path) ?? '경로 탐색 중'}
+                              {ps.path === 'relay' && <span className="peer-relay-hint"> ({RELAY_PATH_HINT})</span>}
                             </span>
                           ) : (
                             <span className="latency-text">연결 정보 교환 중</span>
