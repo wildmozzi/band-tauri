@@ -1,0 +1,148 @@
+// 합주실 목록/내 합주실/설정 모달에서 쓰는 타입·상수·순수 함수.
+import type { RoomStatus } from '../../data/rooms'
+
+export const GENRES = [
+  '록', '재즈', '블루스', '클래식', '팝', '힙합',
+  '일렉트로닉', '포크', '메탈', '펑크', '레게', '기타'
+]
+
+export const COMMON_TAGS = [
+  '초보환영', '경력자', '세션구함', '정기모임',
+  '즉흥연주', '커버곡', '자작곡', '녹음가능'
+]
+
+export const AVAILABLE_INSTRUMENTS = [
+  { id: 'vocal', name: '보컬', icon: '🎤' },
+  { id: 'guitar', name: '기타', icon: '🎸' },
+  { id: 'bass', name: '베이스', icon: '🎸' },
+  { id: 'keyboard', name: '건반', icon: '🎹' },
+  { id: 'drums', name: '드럼', icon: '🥁' },
+  { id: 'other', name: '기타 악기', icon: '🎵' },
+]
+
+export const MAX_PARTICIPANT_OPTIONS = [2, 4, 6, 8, 10, 12, 16, 20]
+
+export const MAX_SLOT_COUNT = 10
+
+export interface InstrumentSlot {
+  instrument: string
+  count: number
+}
+
+export interface DbRoom {
+  id: string
+  title: string
+  description: string | null
+  host_id: string
+  max_participants: number
+  current_participants: number
+  status: string
+  genre: string | null
+  tags: string[]
+  created_at: string
+  free_join?: boolean
+  instrument_slots?: InstrumentSlot[]
+}
+
+/** 내가 만든 방(DbRoom과 동일) */
+export type MyRoom = DbRoom
+
+export interface Room {
+  id: string
+  title: string
+  vibe: string
+  genre: string
+  musicians: number
+  capacity: number
+  status: RoomStatus
+  tags: string[]
+  instrumentSlots: InstrumentSlot[]
+  freeJoin: boolean
+}
+
+/** 기존 방에 악기 구성이 없을 때 설정 모달의 기본값 */
+export const DEFAULT_EDIT_SLOTS: InstrumentSlot[] = [
+  { instrument: 'vocal', count: 1 },
+  { instrument: 'guitar', count: 1 },
+  { instrument: 'bass', count: 1 },
+  { instrument: 'keyboard', count: 1 },
+  { instrument: 'drums', count: 1 },
+]
+
+/** DB 행을 목록 카드용 형식으로 변환 */
+export function toRoom(room: DbRoom): Room {
+  return {
+    id: room.id,
+    title: room.title,
+    vibe: room.description || '함께 음악을 만들어요',
+    genre: room.genre || '기타',
+    musicians: room.current_participants,
+    capacity: room.max_participants,
+    status: room.status as RoomStatus,
+    tags: room.tags || [],
+    instrumentSlots: room.instrument_slots || [],
+    freeJoin: room.free_join ?? true,
+  }
+}
+
+export function formatDate(dateString: string) {
+  const date = new Date(dateString)
+  return date.toLocaleDateString('ko-KR', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+export function findInstrument(id: string) {
+  return AVAILABLE_INSTRUMENTS.find(i => i.id === id)
+}
+
+export function toggleTag(tags: string[], tag: string): string[] {
+  return tags.includes(tag) ? tags.filter(t => t !== tag) : [...tags, tag]
+}
+
+/** 해당 악기 슬롯 수를 0..MAX_SLOT_COUNT로 잘라 설정 */
+export function setSlotCount(slots: InstrumentSlot[], instrument: string, count: number): InstrumentSlot[] {
+  return slots.map(slot =>
+    slot.instrument === instrument
+      ? { ...slot, count: Math.max(0, Math.min(MAX_SLOT_COUNT, count)) }
+      : slot
+  )
+}
+
+/** 아직 슬롯에 없는 악기 목록 */
+export function instrumentsNotInSlots(slots: InstrumentSlot[]) {
+  return AVAILABLE_INSTRUMENTS.filter(inst => !slots.find(s => s.instrument === inst.id))
+}
+
+export function totalSlotCount(slots: InstrumentSlot[]) {
+  return slots.reduce((sum, s) => sum + s.count, 0)
+}
+
+export interface RoomEditFields {
+  title: string
+  description: string
+  genre: string
+  maxParticipants: number
+  freeJoin: boolean
+  tags: string[]
+  instrumentSlots: InstrumentSlot[]
+}
+
+/** 설정 모달 입력 → rooms 테이블 update 페이로드(0개 슬롯 제외, 공백 정리) */
+export function buildRoomUpdate(fields: RoomEditFields) {
+  return {
+    title: fields.title.trim(),
+    description: fields.description.trim() || null,
+    genre: fields.genre,
+    max_participants: fields.maxParticipants,
+    free_join: fields.freeJoin,
+    tags: fields.tags,
+    instrument_slots: fields.instrumentSlots.filter(s => s.count > 0),
+  }
+}
+
+export function roomStatusLabel(status: string) {
+  return status === 'open' ? '입장 가능' : status === 'recording' ? '녹음 중' : '잠김'
+}
+
+export function myRoomStatusLabel(status: string) {
+  return status === 'open' ? '열림' : status === 'recording' ? '녹음중' : '잠김'
+}
