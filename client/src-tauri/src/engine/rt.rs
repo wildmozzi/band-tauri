@@ -154,6 +154,7 @@ impl InputRt {
         }
         let frames = data.len() / device_channels;
         self.counters.in_cb_frames.store(frames as u32, Ordering::Relaxed);
+        self.counters.in_captured_frames.fetch_add(frames as u64, Ordering::Relaxed);
         let ich = self.internal_channels;
         let mut sum_sq = 0.0f32;
         let mut count = 0usize;
@@ -277,6 +278,7 @@ impl OutputRt {
             self.counters.xruns.fetch_add(1, Ordering::Relaxed);
         }
         self.counters.out_consumed.fetch_add(consumed, Ordering::Relaxed);
+        self.counters.out_played_frames.fetch_add(frames as u64, Ordering::Relaxed);
         self.counters.output_level.store(rms_of(sum_sq, frames * 2));
     }
 }
@@ -359,6 +361,9 @@ mod tests {
         prod.push_slice(&[0.25f32; 10]);
         rt.process(&mut dev, 2);
         assert_eq!(counters.xruns.load(Ordering::Relaxed), 1);
+        // 장치 재생 시간은 언더런과 무관하게 콜백 프레임 수만큼 흐른다(PR #5 H-1)
+        assert_eq!(counters.out_played_frames.load(Ordering::Relaxed), 3 * 600);
+        assert!(counters.out_consumed.load(Ordering::Relaxed) < 3 * 600 * 2);
         // 받은 5프레임은 페이드아웃(단조 감소, 0보다 큼), 나머지는 0
         for f in 0..5 {
             assert_eq!(dev[f * 2], dev[f * 2 + 1]);

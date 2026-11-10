@@ -68,6 +68,18 @@ impl Engine {
         controls: Arc<MixControls>,
         network: Option<(String, NetOptions)>,
     ) -> Result<Engine, String> {
+        Self::start_cancellable(cfg, backend, controls, network, None)
+    }
+
+    /// `cancel`이 켜지면 단계 사이(장치 열기 후, STUN 중)에서 일찍 포기한다. 이미 연 장치는 닫고 돌아온다.
+    pub fn start_cancellable(
+        cfg: EngineConfig,
+        backend: Arc<dyn AudioBackend>,
+        controls: Arc<MixControls>,
+        network: Option<(String, NetOptions)>,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<Engine, String> {
+        let cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
         cfg.validate()?;
         let counters = Arc::new(AudioCounters::default());
         let (in_prod, in_cons) = rt::input_ring();
@@ -129,13 +141,22 @@ impl Engine {
             tap_thread: None,
         };
 
+        if cancelled() {
+            return Err("엔진 시작이 취소되었습니다".into()); // engine drop이 오디오 정리
+        }
         if let Some((peer_id, opts)) = network {
             let mut opts = opts;
             if let Some(p) = cfg.udp_port {
                 opts.port = p;
             }
+            if opts.cancel.is_none() {
+                opts.cancel = cancel.clone();
+            }
             let js = JitterSettings { min_ms: cfg.jitter_min_ms(), max_ms: cfg.jitter_max_ms() };
             engine.net = Some(Net::start(peer_id, &opts, js)?); // 실패 시 engine drop이 오디오 정리
+        }
+        if cancelled() {
+            return Err("엔진 시작이 취소되었습니다".into());
         }
 
         let epoch = engine.net.as_ref().map(|n| n.shared().epoch()).unwrap_or_else(Instant::now);
@@ -213,13 +234,17 @@ impl Engine {
             0 => self.info.buffer_frames,
             n => n,
         };
-        // 로컬 처리 지연(첫 샘플 기준) = 입력 장치 버퍼 + 경로 점유량 시간평균(리샘플러·프레임
-        // 누적·로컬 FIFO·출력 링) + 장치 출력 버퍼. 장치 내부의 숨은 버퍼는 포함하지 않는다(리뷰 M12).
-        let occupancy_ms = self.worker_stats.occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0;
-        let est = in_buf as f32 / self.info.in_rate as f32 * 1000.0
-            + occupancy_ms
-            + out_buf as f32 / self.info.out_rate as f32 * 1000.0;
+        let in_ms = in_buf as f32 / self.info.in_rate as f32 * 1000.0;
+        let out_ms = out_buf as f32 / self.info.out_rate as f32 * 1000.0;
+        let frame_ms = self.cfg.frame_samples() as f32 / config::INTERNAL_RATE as f32 * 1000.0;
+        let ws = &self.worker_stats;
+        let output_path_ms = ws.output_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0;
+        // GOAL 1절 정의: 입력 장치 버퍼 + 프레임 + 출력 링(시간평균) + 장치 출력 버퍼(네트워크 경로의 로컬 몫, 첫 샘플 기준).
+        let est = in_ms + frame_ms + output_path_ms + out_ms;
+        // 모니터 경로(내 소리 → 내 귀): 입력 버퍼 + 로컬 FIFO·출력 링 점유량 시간평균 + 출력 버퍼(임펄스 실측으로 검증).
+        let monitor = in_ms + ws.monitor_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0 + out_ms;
         let stream_errors = c.stream_errors.load(Ordering::Relaxed);
+        let device_lost = ws.device_stalled.load(Ordering::Relaxed);
         let peers = self
             .net
             .as_ref()
@@ -240,23 +265,33 @@ impl Engine {
                             late: js.late,
                             concealed: js.concealed,
                             level: p.mix.level.load(),
+                            // 벽시계로 잰 버퍼 지연 + 출력 경로(링 + 장치 버퍼): 클럭 추정과 독립적인 실제 재생 지연
+                            playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + output_path_ms + out_ms } else { 0.0 },
                         }
                     })
                     .collect()
             })
             .unwrap_or_default();
         EngineStats {
-            running: true,
+            // 장치를 잃으면 false: 프론트의 기존 "엔진 정지" 감지(running=false 연속)가 그대로 동작한다(PR #5 M-2).
+            running: !device_lost,
             sample_rate: self.info.out_rate,
             device_buffer: out_buf,
             input_level: c.input_level.load(),
             output_level: c.output_level.load(),
             xruns: c.xruns.load(Ordering::Relaxed),
             est_latency_ms: est,
+            monitor_latency_ms: monitor,
             stream_errors,
-            device_lost: stream_errors > 0,
+            device_lost,
             peers,
         }
+    }
+
+    /// 피어와의 키 확인용 안전 번호(SAS). 양쪽이 같은 값을 보면 시그널링 서버가 키를 바꿔치기하지 않은 것이다.
+    pub fn safety_code(&self, peer_id: &str) -> Result<String, String> {
+        let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
+        net.safety_code(peer_id)
     }
 
     /// 로컬 입력 FIFO 보정/언더런 횟수(테스트/진단용).

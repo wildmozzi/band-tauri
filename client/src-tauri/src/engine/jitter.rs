@@ -2,7 +2,7 @@
 //!
 //! ## 사용법(워커)
 //! 출력 콜백이 장치 버퍼를 소비하면 워커가 같은 양을 작은 청크로 연달아 `pop`한다(버스트).
-//! 버스트가 끝나면 `end_burst(now)`를 한 번 부른다. 깊이 측정·재생 시작·보정 판단은 모두
+//! 버스트가 끝나면 `end_burst(now, wall)`를 한 번 부른다. 깊이 측정·재생 시작·보정 판단은 모두
 //! `end_burst`에서만 한다. `now`는 워커가 깨어난 시각이 아니라 **출력 콜백 시각 추정치**
 //! (장치 클럭)다. 워커 기상 지연이 깊이 측정에 섞이면 제어가 발산한다(리뷰 M2/M4, CI 실패 원인).
 //!
@@ -60,6 +60,8 @@ const STARVE_RESET_MS: f64 = 200.0;
 const TARGET_DECAY_MS: f64 = 2000.0;
 /// 패킷 단위 버림 시 크로스페이드 길이(샘플).
 const DROP_XFADE: usize = 48;
+/// 벽시계 깊이 최솟값 버킷 길이(µs). 보고값은 직전+현재 버킷의 최솟값(0.5~1초).
+const WALL_BUCKET_US: u64 = 500_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JitterSettings {
@@ -82,6 +84,8 @@ pub struct JitterStats {
     pub samples_dropped: u64,
     pub samples_inserted: u64,
     pub rebuffers: u64,
+    /// 벽시계로 잰 실제 버퍼 지연(최근 0.5~1초 최솟값, ms). 장치 클럭 추정과 독립적이다.
+    pub wall_buffer_ms: f32,
 }
 
 impl JitterStats {
@@ -153,6 +157,10 @@ pub struct JitterBuffer {
     correction: Correction,
     drop_frames_pending: usize,
     trimming: bool,
+    corr_step: i32,
+    wall_bucket_start: u64,
+    wall_cur_min: f64,
+    wall_prev_min: f64,
     pkt_frame: usize,
     pkt_channels: usize,
 
@@ -223,6 +231,10 @@ impl JitterBuffer {
             correction: Correction::Idle,
             drop_frames_pending: 0,
             trimming: false,
+            corr_step: 1,
+            wall_bucket_start: 0,
+            wall_cur_min: f64::INFINITY,
+            wall_prev_min: f64::INFINITY,
             pkt_frame: 240,
             pkt_channels: 1,
             last_frame: vec![0.0; MAX_PKT_FRAME * 2],
@@ -230,7 +242,7 @@ impl JitterBuffer {
             conceal_run: 0,
             starve_samples: 0,
             dec_buf: vec![0.0; MAX_PKT_FRAME * 2],
-            shift_buf: vec![0.0; (MAX_PKT_FRAME + 1) * 2],
+            shift_buf: vec![0.0; (MAX_PKT_FRAME + 4) * 2],
             xfade_buf: vec![0.0; MAX_PKT_FRAME * 2],
             xfade_len: 0,
             xfade_ch: 0,
@@ -279,6 +291,8 @@ impl JitterBuffer {
         for s in &mut self.slots {
             s.valid = false;
         }
+        self.wall_cur_min = f64::INFINITY;
+        self.wall_prev_min = f64::INFINITY;
         self.state = State::Buffering;
         self.has_stream = false;
         self.fifo.clear();
@@ -472,10 +486,20 @@ impl JitterBuffer {
     }
 
     /// 출력 버스트 종료. `now_us`는 출력 콜백 시각 추정치(장치 클럭 기준).
-    pub fn end_burst(&mut self, now_us: u64) {
+    /// `wall_us`는 워커가 실제로 깨어난 벽시계 시각이다. 이것으로 잰 깊이는 기상 지연만큼 크게 나오므로,
+    /// 1초 창의 최솟값이 장치 클럭 추정과 **독립적인** 실제 재생 지연이 된다(PR #5 H-1: 클럭 추정이
+    /// 틀려 지연이 몰래 늘어나는 경우를 통계로 드러낸다).
+    pub fn end_burst(&mut self, now_us: u64, wall_us: u64) {
         match self.state {
             State::Buffering => self.try_start(now_us),
             State::Playing => {
+                let dw = self.depth_now(wall_us);
+                if wall_us.saturating_sub(self.wall_bucket_start) >= WALL_BUCKET_US {
+                    self.wall_prev_min = self.wall_cur_min;
+                    self.wall_cur_min = f64::INFINITY;
+                    self.wall_bucket_start = wall_us;
+                }
+                self.wall_cur_min = self.wall_cur_min.min(dw);
                 let d = self.depth_now(now_us);
                 let e = match self.depth_ewma {
                     None => d,
@@ -491,8 +515,13 @@ impl JitterBuffer {
         let f = self.frame() as f64;
         let target = self.target_samples();
         let err = ewma - target;
-        let enter = (f / 2.0).max(Self::samples_per_ms());
-        let exit = (f / 8.0).max(4.0);
+        // 데드밴드: F/2를 1ms~2.5ms로 제한(10ms 프레임에서 목표 ±5ms까지 머물지 않게, PR #5 L-1)
+        let spm = Self::samples_per_ms();
+        let enter = (f / 2.0).clamp(spm, 2.5 * spm);
+        let exit = (enter / 4.0).max(4.0);
+        // 오차가 한 프레임을 넘으면(목표 상향 직후 등) 패킷당 2샘플로 빨리 따라간다(PR #5 M-1).
+        // 국소 피치 편차는 2/F(240샘플이면 약 14센트), 오차가 1프레임 안으로 들어오면 1샘플로 돌아온다.
+        self.corr_step = if err.abs() > f { 2 } else { 1 };
         self.correction = match self.correction {
             Correction::Idle if err > enter => Correction::Drop,
             Correction::Idle if err < -enter => Correction::Insert,
@@ -735,24 +764,25 @@ impl JitterBuffer {
         // 샘플 단위 드리프트 보정(모드가 켜져 있을 때만 패킷당 1샘플)
         let mut out_frames = frames;
         let mut use_shift = false;
-        if frames > 2 {
+        let step = self.corr_step.max(1);
+        if frames > step as usize + 2 {
             match self.correction {
                 Correction::Drop => {
-                    shift_one(&self.dec_buf[..frames * ch], ch, frames, &mut self.shift_buf, true);
-                    out_frames = frames - 1;
+                    shift_n(&self.dec_buf[..frames * ch], ch, frames, &mut self.shift_buf, -step);
+                    out_frames = frames - step as usize;
                     use_shift = true;
-                    self.stats.samples_dropped += 1;
+                    self.stats.samples_dropped += step as u64;
                     if let Some(e) = self.depth_ewma.as_mut() {
-                        *e -= 1.0;
+                        *e -= step as f64;
                     }
                 }
                 Correction::Insert => {
-                    shift_one(&self.dec_buf[..frames * ch], ch, frames, &mut self.shift_buf, false);
-                    out_frames = frames + 1;
+                    shift_n(&self.dec_buf[..frames * ch], ch, frames, &mut self.shift_buf, step);
+                    out_frames = frames + step as usize;
                     use_shift = true;
-                    self.stats.samples_inserted += 1;
+                    self.stats.samples_inserted += step as u64;
                     if let Some(e) = self.depth_ewma.as_mut() {
-                        *e += 1.0;
+                        *e += step as f64;
                     }
                 }
                 Correction::Idle => {}
@@ -781,6 +811,8 @@ impl JitterBuffer {
             0.0
         };
         s.target_ms = self.target_samples() as f32 / spm;
+        let wall = self.wall_cur_min.min(self.wall_prev_min);
+        s.wall_buffer_ms = if self.state == State::Playing && wall.is_finite() { wall as f32 / spm } else { 0.0 };
         s.jitter_ms = self.rfc_jitter as f32 / spm;
         s.loss_pct = if self.loss_len > 0 {
             self.loss_lost as f32 * 100.0 / self.loss_len as f32
@@ -799,12 +831,21 @@ impl JitterBuffer {
 /// (선형 보간). 국소 피치 편차가 1/frames로 작다(240샘플이면 약 7센트, 리뷰 M2).
 /// `dst`는 (frames±1)×ch 이상이어야 한다. `frames > 2`.
 pub fn shift_one(src: &[f32], ch: usize, frames: usize, dst: &mut [f32], drop: bool) {
-    let out_frames = if drop { frames - 1 } else { frames + 1 };
+    shift_n(src, ch, frames, dst, if drop { -1 } else { 1 });
+}
+
+/// `delta`샘플만큼 늘이거나(+) 줄인다(−). 출력 길이 = frames + delta. 읽기 위치를 프레임 전체에 걸쳐
+/// 선형으로 |delta|만큼 시프트한다. 국소 피치 편차는 |delta|/frames. `frames > |delta| + 1`.
+pub fn shift_n(src: &[f32], ch: usize, frames: usize, dst: &mut [f32], delta: i32) {
+    let n = delta.unsigned_abs() as usize;
+    let drop = delta < 0;
+    let out_frames = if drop { frames - n } else { frames + n };
     // 마지막 출력 샘플이 마지막 입력 샘플에 정확히 닿도록 램프 길이를 잡는다.
-    let l = if drop { (frames - 2) as f32 } else { frames as f32 };
+    let l = if drop { (frames - n - 1) as f32 } else { (frames + n - 1) as f32 };
     let last = (frames - 1) as f32;
+    let nf = n as f32;
     for j in 0..out_frames {
-        let r = (j as f32 / l).clamp(0.0, 1.0);
+        let r = (j as f32 / l).clamp(0.0, 1.0) * nf;
         let pos = if drop { j as f32 + r } else { j as f32 - r }.clamp(0.0, last);
         let i0 = pos.floor() as usize;
         let i1 = (i0 + 1).min(frames - 1);
@@ -982,7 +1023,7 @@ mod tests {
                 }
                 left -= n;
             }
-            jb.end_burst(bt as u64);
+            jb.end_burst(bt as u64, bt as u64);
             if jb.is_playing() {
                 started = true;
             }
@@ -1115,12 +1156,12 @@ mod tests {
         for (h, p) in pkts.iter().take(10) {
             jb.insert(h, p, t);
             jb.pop(&mut out);
-            jb.end_burst(t);
+            jb.end_burst(t, t);
             t += 5000;
         }
         for _ in 0..5 {
             jb.pop(&mut out);
-            jb.end_burst(t);
+            jb.end_burst(t, t);
             t += 5000;
         }
         let before = jb.stats().late;
@@ -1149,7 +1190,7 @@ mod tests {
             let (h, p) = tx.next();
             jb.insert(&h, &p, t);
             jb.pop(&mut out);
-            jb.end_burst(t);
+            jb.end_burst(t, t);
             t += 5000;
         }
         let lost: Vec<_> = (0..3).map(|_| tx.next()).collect();
@@ -1160,7 +1201,7 @@ mod tests {
         let mut energies = vec![];
         for _ in 0..6 {
             jb.pop(&mut out);
-            jb.end_burst(t);
+            jb.end_burst(t, t);
             energies.push(out.iter().map(|x| x * x).sum::<f32>());
             t += 5000;
             let (h, p) = tx.next();
@@ -1199,7 +1240,7 @@ mod tests {
             }
             if t >= burst_t {
                 jb.pop(&mut out);
-                jb.end_burst(t);
+                jb.end_burst(t, t);
                 if t > 1_000_000 {
                     for fr in out.as_chunks::<2>().0 {
                         if let Some(p) = prev {

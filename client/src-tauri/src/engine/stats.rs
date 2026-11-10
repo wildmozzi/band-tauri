@@ -34,7 +34,12 @@ pub struct AudioCounters {
     pub out_cb_frames: AtomicU32,
     /// 출력 콜백이 출력 링에서 소비한 누적 샘플 수(인터리브 스테레오 기준).
     pub out_consumed: AtomicU64,
-    /// cpal 에러 콜백 호출 횟수(장치 분리 등). 워커가 로그로 남긴다.
+    /// 출력 콜백이 장치에 내보낸 누적 프레임 수(언더런으로 0을 채운 부분 포함 = 장치 재생 시간).
+    /// 장치 클럭 추정에는 이것을 쓴다. `out_consumed`는 언더런 때 덜 늘어 재생 시간보다 뒤처진다(PR #5 H-1).
+    pub out_played_frames: AtomicU64,
+    /// 입력 콜백이 받은 누적 프레임 수(장치 분리 감지용).
+    pub in_captured_frames: AtomicU64,
+    /// cpal 에러 콜백 호출 횟수(비치명 에러 포함). 워커가 로그로 남긴다.
     pub stream_errors: AtomicU32,
 }
 
@@ -67,6 +72,9 @@ pub struct PeerStats {
     pub late: u64,
     pub concealed: u64,
     pub level: f32,
+    /// 실제 재생 지연(ms): 벽시계로 잰 버퍼 지연 + 출력 링 + 장치 출력 버퍼. 장치 클럭 추정과 독립적이라
+    /// `bufferMs`와 차이가 벌어지면 숨은 지연 누적을 뜻한다(PR #5 H-1). 재생 전에는 0.
+    pub playout_ms: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,6 +87,8 @@ pub struct EngineStats {
     pub output_level: f32,
     pub xruns: u64,
     pub est_latency_ms: f32,
+    /// 모니터 경로(내 입력 → 내 출력) 지연(ms), 첫 샘플 기준.
+    pub monitor_latency_ms: f32,
     /// 오디오 스트림 에러 누적 횟수(장치 분리 등, 리뷰 M9).
     pub stream_errors: u32,
     /// 스트림 에러가 한 번이라도 났으면 true. UI는 엔진 재시작을 안내한다.
@@ -96,6 +106,7 @@ impl EngineStats {
             output_level: 0.0,
             xruns: 0,
             est_latency_ms: 0.0,
+            monitor_latency_ms: 0.0,
             stream_errors: 0,
             device_lost: false,
             peers: Vec::new(),
@@ -129,6 +140,7 @@ mod tests {
                 late: 0,
                 concealed: 0,
                 level: 0.0,
+                playout_ms: 0.0,
             }],
             ..EngineStats::stopped()
         };
