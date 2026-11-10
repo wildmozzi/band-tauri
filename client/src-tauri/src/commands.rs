@@ -13,7 +13,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
 use crate::engine::config::EngineConfig;
-use crate::engine::device::cpal_backend::CpalBackend;
+use crate::engine::device::system::SystemBackend;
 use crate::engine::device::DeviceInfo;
 use crate::engine::mixer::clamp_gain;
 use crate::engine::stats::EngineStats;
@@ -27,7 +27,8 @@ pub struct EngineState(Arc<EngineManager>);
 
 impl Default for EngineState {
     fn default() -> Self {
-        Self(Arc::new(EngineManager::new(Arc::new(CpalBackend), NetOptions::default())))
+        // 자체 WASAPI(독점·저지연 공유) 우선, 실패 시 cpal(P1-0)
+        Self(Arc::new(EngineManager::new(Arc::new(SystemBackend::new()), NetOptions::default())))
     }
 }
 

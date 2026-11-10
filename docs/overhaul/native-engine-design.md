@@ -17,8 +17,9 @@ lib.rs                 Tauri 빌더, 커맨드 등록
 commands.rs            Tauri 커맨드 (얇은 어댑터, 로직 없음)
 engine/mod.rs          Engine: 시작/정지, 스레드 소유, 공개 API
 engine/config.rs       EngineConfig, 검증
-engine/device.rs       cpal 호스트/장치 열거와 스트림 생성 (ASIO 싱글톤 우회 유지)
-engine/rt.rs           실시간 콜백 (입력 → SPSC 링, 출력 ← SPSC 링). 할당/락/시스템콜/로그 금지
+engine/device.rs       AudioBackend 트레이트, SystemBackend(자체 WASAPI 우선 → cpal 폴백), cpal 백엔드(ASIO 싱글톤 우회 유지), 가짜 장치
+engine/wasapi.rs       자체 WASAPI 백엔드(Windows): 이벤트 구동 독점, IAudioClient3 저지연 공유, 장치 열거, 프로브
+engine/rt.rs           실시간 콜백 (입력 → SPSC 링, 출력: 소스 링들을 꺼내 섞음). 할당/락/시스템콜/로그 금지
 engine/resample.rs     장치 레이트 ↔ 내부 48kHz 변환 (rubato, 비RT 스레드에서 실행)
 engine/codec.rs        Opus / PCM16 인코드·디코드
 engine/jitter.rs       피어별 적응형 지터 버퍼 + 드리프트 보정 + PLC
@@ -36,16 +37,24 @@ net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/
 
 | 스레드 | 하는 일 | 금지 |
 |---|---|---|
-| cpal 입력 콜백 (RT) | 장치 샘플 → 채널 라우팅 → `f32` SPSC 링(사전할당)에 push, 레벨 원자값 갱신 | 할당, 락, 시스템콜, println |
-| cpal 출력 콜백 (RT) | 출력 SPSC 링에서 pop → 장치 포맷/채널 수로 기록. 부족하면 0 채우고 xrun 카운트 원자 증가 | 동일 |
-| engine 워커 (비RT, 1개) | 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신. 지터 버퍼에서 프레임 꺼내 믹스 → (리샘플) → 출력 링을 목표 수위로 유지 | — |
+| 입력 콜백 (RT) | 장치 샘플 → 채널 라우팅 → `f32` SPSC 링(사전할당)에 push, 레벨 원자값 갱신 | 할당, 락, 시스템콜, println |
+| 출력 콜백 (RT) | **콜백 구동 믹스**: 소스 링(로컬 1개 + 피어별 1개, 사전할당 SPSC)에서 필요한 프레임만큼 꺼내 게인·팬(원자값)을 곱해 섞고, 마스터·soft clip 후 장치 포맷/채널 수로 기록. 믹스 탭 링에도 쓴다. 재생 중인 소스가 모자라면 0을 채우고 소스별 언더런 프레임과 xrun을 원자 증가 | 동일 |
+| engine 워커 (비RT, 1개) | 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신. 피어마다 지터 버퍼에서 디코드한 PCM을 (리샘플해) 그 피어의 소스 링에 공급하고, 로컬 FIFO에서 로컬 소스 링을 채운다 | — |
 | net 수신 스레드 | recv → 복호화/검증 → 피어별 지터 버퍼에 삽입(피어별 `Mutex`는 비RT 스레드끼리만 공유하므로 허용) | — |
 | net 제어 스레드 | 홀펀칭, keepalive(1초), ping/pong(500ms), 타임아웃(5초) | — |
+| WASAPI 스레드 (자체 백엔드, RT) | 입·출력 이벤트를 한 스레드에서 대기(MMCSS "Pro Audio"). 캡처를 먼저 처리하고 렌더. `GetBuffer`/`ReleaseBuffer` 사이에서 입력/출력 콜백 함수(위 두 줄)를 부른다 | 우리 코드는 위와 같음. WASAPI 호출·대기는 예외 |
 
 - 내부 처리 레이트는 **항상 48000Hz**, 내부 포맷 `f32`.
 - 네트워크 **프레임 크기**: `frame_ms` ∈ {2.5, 5, 10} → 120/240/480 샘플. 장치 버퍼 크기와 **독립**.
-- 출력 링 목표 수위 = 장치 버퍼 1개 + 출력 청크(64샘플) 1개 + 적응 여유(xrun 시 청크씩 증가, 최대 장치 버퍼 1개, 10초 무사고 시 감소). 출력 생산 단위는 네트워크 프레임과 **독립**인 64샘플 청크다. 워커는 출력 콜백이 소비한 만큼 채운다(콜백은 원자 카운터로 소비량을 알림, 워커는 ≤1ms 폴링).
-- 한 번의 리필(버스트)이 끝나면 워커는 지터 버퍼와 로컬 FIFO에 버스트 종료를 알린다. 이때 시각은 워커 기상 시각이 아니라 **출력 콜백 시각 추정치**다.
+- **콜백 구동 믹스(P1-0)**: 믹스된 출력 링이 없다. 그래서 "출력 링 ≈ 장치 버퍼 1개" 지연이 사라진다(ASIO 128/2.5ms에서 `estLatencyMs` 11.8 → 7.83ms, 종단 지연 실측 16.95 → 12.95ms).
+  - 피어 소스: 워커는 지터 버퍼가 **받은 데이터로** 꺼낼 수 있는 만큼(`real_frames`) 소스 링을 `다음 콜백 소비량 + 2청크(64샘플)`까지 미리 채운다. 데이터가 없으면 **다음 출력 콜백 예상 시각 − 1.5ms**가 지난 뒤에만 은닉(PLC)으로 모자란 만큼 채운다. 나머지 패킷은 지터 버퍼에 남아 패킷 단위 버림이 그대로 동작한다.
+  - 지터 버퍼 깊이는 출력 콜백마다 **재생 위치(소스 링 머리)** 기준으로 잰다. 소스 링에 머무는 시간은 `bufferMs`에 포함되어 같은 목표로 제어된다.
+  - 워커는 출력 콜백 시작/끝 카운터가 같고, 링 점유량을 읽은 뒤에도 바뀌지 않았을 때만 깊이 측정·마감 판단을 한다. 콜백 직후의 링 점유량을 이전 콜백의 마감 시각과 짝지으면 한 주기 이르게 은닉한다.
+  - 콜백이 링 부족으로 0을 채우면(워커 마감 놓침, 콜백 몰림) 그 프레임 수만큼 워커가 스트림을 건너뛴다. 그래서 재생 시각이 장치 시각에 붙어 있고 언더런마다 지연이 쌓이지 않는다.
+  - 로컬 소스(모니터·탭): 로컬 FIFO가 입·출력 클럭 차를 흡수하므로, 소스 링은 콜백이 소비한 만큼 `장치 버퍼 1개 + 청크 + 적응 여유`(xrun 시 청크씩 증가, 최대 장치 버퍼 1개, 10초 무사고 시 감소)로 다시 채운다. 모니터 경로는 GOAL 지표 밖이다.
+  - 게인·팬·뮤트·모니터 설정은 워커가 소스별 원자값으로 넣고, 소스 레벨은 콜백이 원자값으로 알린다. 피어가 빠지면 슬롯을 `DRAIN`으로 바꾸고, 콜백이 남은 샘플을 버린 뒤 비운다.
+  - 출력 레이트가 48kHz가 아니면 워커가 소스마다 48k → 장치 레이트로 리샘플해 넣는다. 믹스 탭은 장치 레이트로 나오고 탭 스레드가 48kHz로 되돌린다.
+- 깊이 측정과 로컬 FIFO 판단에 쓰는 시각은 워커 기상 시각이 아니라 **출력 콜백 시각 추정치**다.
   - 추정의 입력은 출력 콜백이 장치에 내보낸 누적 프레임 수(`out_played_frames`, 언더런으로 0을 채운 부분 포함)다.
   - 추정치 = 최근 2초 창(0.5초 버킷 4개)에서 본 `벽시계 − 재생 프레임/레이트`의 최솟값 + 재생 프레임 시각이다.
   - 소비 샘플 수를 쓰면 언더런마다 재생 시간보다 영구히 뒤처져 실제 지연이 몰래 쌓인다(PR #5 리뷰 H-1).
@@ -53,8 +62,14 @@ net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/
   - 크기는 입력 방출 패턴(주기 lcm(입력 버퍼, 리샘플 청크))에서 산정한다.
   - 입·출력 장치 클럭 차는 수위 제어(1샘플 단위, 최대 500ppm)로 흡수한다.
   - 언더런 때 늘린 여유는 10초 무사고마다 되돌린다.
-- 입력 또는 출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. cpal 에러 콜백(비치명 포함)은 `streamErrors`로만 센다.
-- 워커와 net 수신 스레드는 MMCSS "Pro Audio"(실패 시 높은 우선순위)로 등록하고 FTZ/DAZ를 켠다.
+- 입력 또는 출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화 HRESULT(`AUDCLNT_E_DEVICE_INVALIDATED`, `AUDCLNT_E_SERVICE_NOT_RUNNING`, `AUDCLNT_E_RESOURCES_INVALIDATED`)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 그 밖의 WASAPI 호출 실패는 일시 오류로 보고 `streamErrors`만 올린 뒤 다음 이벤트를 기다린다. 같은 방향이 연속 4회 실패하면 그 스트림을 재시작(Stop/Reset/Start, `streamRestarts`)하고, 성공 없이 재시작이 3회 이어지거나 연속 50회 실패하면 `streamFailed=true`, `running=false`로 멈춘다.
+- 워커, net 수신, 자체 WASAPI 스레드는 MMCSS "Pro Audio"(실패 시 높은 우선순위)로 등록하고 FTZ/DAZ를 켠다.
+- **오디오 백엔드 선택**(`SystemBackend`):
+  - `asio`(입·출력 중 하나라도) → cpal ASIO(`asio` 피처).
+  - `wasapiExclusive` → 자체 WASAPI 이벤트 구동 독점, 장치 최소 주기. 포맷은 독점 지원 포맷 중 48kHz 우선, 없으면 44.1kHz(리샘플), 그다음 96/88.2kHz. 샘플 형식 f32 → 정수 32(유효 32/24, 24-in-32) → 24비트 패킹(3바이트) → 16비트. 채널 마스크는 믹스 포맷 마스크(채널 수가 같을 때) → 기본 마스크(1·2채널) 또는 DIRECTOUT(3채널 이상) 순으로 시도한다.
+  - `wasapiShared` → 자체 WASAPI `IAudioClient3::InitializeSharedAudioStream`, 엔진이 허용하는 최소 주기(장치에 따라 2~10ms), 믹스 포맷.
+  - 자체 백엔드가 실패하면 (독점, 독점) → (독점, 저지연 공유) → (저지연 공유, 독점) → (저지연 공유, 저지연 공유) 순으로 다시 열고(한쪽만 다른 앱이 쥐고 있어도 다른 쪽 독점 유지), 그래도 실패하면 cpal WASAPI 공유(≈10ms)로 연다. 실제 백엔드와 주기는 `EngineStats.backend`/`devicePeriodMs`로 보인다.
+  - 자체 WASAPI는 입·출력을 한 스레드에서 처리해 같은 장치 듀플렉스에서 캡처→렌더 순서를 고정한다.
 - ASIO는 입력·출력을 같은 장치에서 열고(듀플렉스), 사용자가 선택한 ASIO 드라이버 이름을 존중한다. 이름이 없으면 기본 장치. 채널 수는 장치 지원 범위에서 선택하고, 입력 채널 선택(Ch1..ChN)을 지원한다.
 
 ### 1.2 지터 버퍼 (`engine/jitter.rs`)
@@ -62,7 +77,7 @@ net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/
 - 키: 패킷 `seq`(u32). 프레임 슬롯 링(1024슬롯, `seq & 1023`; 2.5ms 기준 2.56초).
 - 도착 간격 지터를 RFC 3550 방식 EWMA로 추정 + 최근 N(=200)개 지연의 95퍼센타일.
 - 목표 깊이 = clamp(ceil(p95_jitter / frame) + 1, min_frames, max_frames). 사용자 설정 `jitter_min_ms`(기본 0=자동), 상한 `jitter_max_ms`(기본 80). 프레임 경계에서 떨지 않도록 양자화에 ±frame/4 히스테리시스를 두고, 목표를 내리는 것은 더 낮은 값이 2초 유지될 때만 한다.
-- **깊이 측정**: `깊이 = now − ts(다음 재생 샘플) − min_transit`. 출력 버스트 종료 시 1회, 출력 콜백 시각(장치 클럭)으로 측정해 EWMA한다. 재생 시작 시 깊이를 목표에 정확히 맞춘다(초과분 건너뜀).
+- **깊이 측정**: `깊이 = now − ts(다음 재생 샘플) − min_transit`. "다음 재생 샘플"은 소스 링의 머리(이미 꺼냈지만 재생 전인 양을 포함)다. 출력 콜백마다 1회, 출력 콜백 시각(장치 클럭)으로 측정해 EWMA한다. 재생 시작 시 깊이를 목표에 정확히 맞춘다(초과분 건너뜀).
 - **드리프트/깊이 보정(데드밴드 + 히스테리시스)**: 오차가 +clamp(frame/2, 1ms, 2.5ms)를 넘으면 버림 모드, 반대면 삽입 모드로 들어가 디코드한 패킷마다 1샘플(오차가 1프레임을 넘으면 2샘플)을 버리거나 넣는다(프레임 전체 램프). 오차가 진입 문턱의 1/4 안으로 들어오면 멈춘다. 드리프트 0이면 보정 0회다. 추정 깊이와 실제 쌓인 양이 모두 목표를 3프레임 이상 넘으면 패킷 단위로 버리기 시작해 1프레임 안으로 들어오면 멈춘다(버린 패킷도 디코드해 디코더 상태를 유지하고 다음 프레임과 크로스페이드). 결과적으로 지연이 누적되지 않는다.
 - 손실: Opus는 디코더 PLC(`decode(None)`), 다음 패킷이 있으면 FEC 사용. PCM은 직전 프레임 페이드아웃 반복 1회 후 무음.
 - 늦게 온 패킷(이미 재생 지난 seq)은 폐기하고 `late` 카운트.
@@ -168,7 +183,7 @@ type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
 interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number }
 interface RelayConfig { addr: string; token: string; expiresInSec?: number }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)
 interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; peers: PeerStats[]; relay: RelayStats | null }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; peers: PeerStats[]; relay: RelayStats | null }
 ```
 
 | 커맨드 | 인자 | 반환 |
@@ -193,17 +208,35 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 - 레벨 값(`inputLevel`, `outputLevel`, `PeerStats.level`)은 0..1 선형 RMS.
 - `engine_subscribe_mix` 채널은 JSON 배열이 아닌 **raw 바이트**(`tauri::ipc::InvokeResponseBody::Raw`, f32 LE 인터리브)로 보낸다.
 
-`estLatencyMs`(GOAL 1절 정의) = 입력 장치 버퍼 + 프레임 + 출력 경로 점유량 시간평균(출력 리샘플러·출력 링) + 장치 출력 버퍼. 네트워크를 제외한, 네트워크 경로 중 내 쪽의 로컬 처리 지연이며 첫 샘플 기준이다. 장치 내부의 숨은 버퍼(WASAPI 공유 모드 엔진 버퍼 등)는 포함하지 않는다.
+`estLatencyMs`(GOAL 1절 정의) = 입력 장치 버퍼 + 프레임 + 출력 링 + 장치 출력 버퍼. 네트워크를 제외한, 네트워크 경로 중 내 쪽의 로컬 처리 지연이며 첫 샘플 기준이다. 장치 내부의 숨은 버퍼(WASAPI 공유 모드 엔진 버퍼 등)는 포함하지 않는다.
+- 콜백 구동 믹스(1.1절)에는 믹스된 출력 링이 없으므로 출력 링 항은 0이다. 출력 콜백이 꺼내는 피어 소스 링은 지터 버퍼 깊이(`bufferMs`)에 포함되어 목표로 제어된다. 그래서 입→귀 지연 = 송신측 `estLatencyMs`의 입력+프레임 몫 + 망 + 수신측 `bufferMs` + 수신측 출력 버퍼다. 공유 클럭 종단 실측이 `estLatencyMs + bufferMs + 1ms`를 넘지 않음을 통합 테스트로 확인한다.
+- 장치 버퍼 값은 실측 콜백 크기를 쓴다.
 
-`monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·출력 링) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
+`monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·로컬 소스 링) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
 
-`PeerStats.playoutMs` = 벽시계로 잰 버퍼 지연(최근 0.5~1초 최솟값) + 출력 링 + 장치 출력 버퍼.
+`PeerStats.playoutMs` = 벽시계로 잰 버퍼 지연(소스 링 포함, 최근 0.5~1초 최솟값) + 장치 출력 버퍼.
 - 장치 클럭 추정과 독립적이다. 그래서 `bufferMs`(클럭 추정 기준 목표 제어값)와 비교하면 숨은 지연 누적을 탐지할 수 있다.
 - 재생 전에는 0이다.
 
-`deviceLost`: 입력 또는 출력 콜백이 1초 넘게 멈췄다(장치 분리 등). 이때 `running`은 false다. 그래서 프론트의 "running=false 연속 → 엔진 정지" 감지가 그대로 동작한다. 콜백이 다시 돌면 둘 다 원래대로 돌아온다. 자동 재열기는 아직 없다.
+`deviceLost`: 장치를 잃었다. 이때 `running`은 false다. 그래서 프론트의 "running=false 연속 → 엔진 정지" 감지가 그대로 동작한다. 자동 재열기는 아직 없다.
+- 입력 또는 출력 콜백이 1초 넘게 멈추면 켜지고, 콜백이 다시 돌면 꺼진다.
+- 자체 WASAPI 백엔드는 장치 무효화(WASAPI 호출 실패)와, 기본 장치로 연 방향의 기본 장치 변경도 바로 알린다. 이 경우 엔진을 다시 시작할 때까지 켜져 있다(다시 시작하면 새 기본 장치로 열린다).
 
-`streamErrors`: cpal 에러 콜백 누적 횟수(비치명 포함, 정보용).
+`streamErrors`: 스트림 에러 누적 횟수(cpal 에러 콜백, 자체 WASAPI 호출 실패; 재시도로 넘어간 일시 오류 포함, 정보용).
+
+`streamFailed`: 스트림이 복구되지 않는 오류로 멈췄다(자체 WASAPI: 치명 HRESULT, 또는 재시작을 반복해도 실패). 장치는 남아 있을 수 있다(`deviceLost`와 구분). 이때 `running`은 false다.
+
+`streamRestarts`: 일시 오류가 반복되어 자체 WASAPI 스트림을 재시작한 횟수.
+
+`inputDiscontinuities`: 캡처 패킷의 `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` 횟수(장치가 데이터를 버림 = 입력 오버런). `xruns`에도 더한다. 스트림 시작·재시작 직후 첫 패킷은 세지 않는다. 자체 WASAPI만 센다.
+
+`inputSilentPackets`: 장치가 `AUDCLNT_BUFFERFLAGS_SILENT`로 표시한 캡처 패킷 수(자체 WASAPI).
+
+`devicePeriodMs`: 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기(독점: 버퍼 = 주기, 저지연 공유: 엔진 주기), cpal·가짜 장치는 실측 콜백 크기다.
+
+`backend`: 실제로 열린 오디오 백엔드. `wasapiExclusive`(자체 독점) | `wasapiShared3`(자체 IAudioClient3 저지연 공유) | `cpalWasapi`(cpal 공유 폴백) | `cpalAsio` | `fake`(테스트). 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
+
+`engine_list_devices`의 자체 WASAPI 장치: 엔드포인트마다 `wasapiShared` 항목 1개(채널·레이트 = 믹스 포맷)와, 독점 지원 포맷이 있으면 `wasapiExclusive` 항목 1개(채널 = 지원 최대, 레이트 = 독점 지원 레이트)를 낸다. `id`는 둘 다 `wasapi::<장치 이름>`(cpal과 같은 형식)이다.
 
 `PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제).
 

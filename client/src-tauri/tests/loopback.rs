@@ -318,7 +318,12 @@ fn loopback_loss5_jitter20_drift() {
         js.samples_inserted - s4.samples_inserted,
         js.dropped_frames - s4.dropped_frames
     );
-    println!("B estLatencyMs(로컬): {:.1}, xruns {}, A RTT {:?}ms", stats_b.est_latency_ms, stats_b.xruns, rtt_a);
+    let (fills, skipped) = b.feed_stats();
+    let (_, local_underruns) = b.local_path_stats();
+    println!(
+        "B estLatencyMs(로컬): {:.1}, xruns {} (피어 마감 채움 {fills}, 콜백 언더런으로 건너뜀 {skipped}프레임, 로컬 FIFO 언더런 {local_underruns}), A RTT {:?}ms",
+        stats_b.est_latency_ms, stats_b.xruns, rtt_a
+    );
     println!("믹스 탭 청크: {mix_chunks}");
     println!("trace: {:?}", trace.iter().map(|t| (t.0 as f32, t.1)).collect::<Vec<_>>());
 
@@ -501,12 +506,13 @@ fn resampled_44k_devices_end_to_end() {
     let start = sink_b.lock().len() / 2;
     std::thread::sleep(Duration::from_millis(3000));
     let js = b.peer_jitter_stats()[0].1;
+    let fs = b.feed_stats();
     let xruns = b.stats().xruns;
     let snap = sink_b.lock().clone();
     drop(a);
     drop(b);
     let c = analyze(&snap, start + 44_100);
-    println!("44.1k 링크: 불연속 {} 무음 {} concealed {} buffer {:.1}ms xruns {xruns}", c.discontinuities, c.silent_runs, js.concealed, js.buffer_ms);
+    println!("44.1k 링크: 불연속 {} 무음 {} concealed {} buffer {:.1}ms xruns {xruns}, 마감 채움/건너뜀 {:?}", c.discontinuities, c.silent_runs, js.concealed, js.buffer_ms, fs);
     assert_gaps_explained_by_xruns(&c, xruns, "44.1k 링크");
     assert_eq!(js.concealed, 0, "지터 없는 링크에서 은닉");
 }
@@ -560,6 +566,93 @@ fn impulse_latency_matches_estimate() {
         println!("임펄스 지연 buf {buf} / {frame_ms}ms: 평균 {mean:.2}ms (n={}), est {est:.2}ms → 평균 환산 {est_mean:.2}ms, 범위 {:.2}..{:.2}", lat.len(), lat.iter().cloned().fold(f64::MAX, f64::min), lat.iter().cloned().fold(0.0, f64::max));
         assert!((mean - est_mean).abs() < 2.5, "estLatencyMs가 실측과 다름: 실측 {mean:.2} vs 추정 {est_mean:.2}");
     }
+}
+
+/// A(입력 임펄스) → B(출력) 종단 간 지연을 공유 클럭으로 잰다. 반환: (지연 목록 ms, A stats, B stats, B 지터 통계).
+fn link_impulse_latency(
+    cfg: EngineConfig,
+    seconds: u64,
+) -> (Vec<f64>, band_lib::engine::stats::EngineStats, band_lib::engine::stats::EngineStats, jitter_stats::JitterStats) {
+    const PERIOD: u64 = 9_601; // 0.2초, 장치 버퍼·프레임과 서로소
+    let src: Arc<band_lib::engine::device::fake::SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+        for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+            frame.fill(if (start + i as u64) % PERIOD == 100 { 0.9 } else { 0.0 });
+        }
+    });
+    let t0 = Instant::now();
+    let mut ba = FakeBackend::new(48_000, src);
+    ba.t0 = Some(t0);
+    ba.wake_jitter_us = 300;
+    let mut bb = FakeBackend::silence(48_000);
+    bb.t0 = Some(t0);
+    bb.out_phase_us = 700;
+    bb.wake_jitter_us = 300;
+    bb.seed = 3;
+    let phase = bb.out_phase_us as f64 / 1e6;
+    let origin = bb.sink_origin.clone();
+    let (a, b, _p, sink_b) = connect_pair(cfg, ba, bb, None);
+    std::thread::sleep(Duration::from_secs(seconds));
+    let (sa, sb) = (a.stats(), b.stats());
+    let js = b.peer_jitter_stats()[0].1;
+    let out = sink_b.lock().clone();
+    drop(a);
+    drop(b);
+    let origin = origin.load(Ordering::SeqCst) as f64;
+    let mut lat = Vec::new();
+    let mut last_k = None;
+    for (j, f) in out.as_chunks::<2>().0.iter().enumerate() {
+        if f[0] > 0.5 {
+            let t_play = phase + (origin + j as f64) / 48_000.0;
+            let k = ((t_play * 48_000.0 - 100.0) / PERIOD as f64).floor() as i64;
+            // 연결·버퍼링 안정화 뒤(3초 이후)만
+            if k >= 0 && last_k != Some(k) && t_play > 3.0 {
+                let t_cap = (k as f64 * PERIOD as f64 + 100.0) / 48_000.0;
+                lat.push((t_play - t_cap) * 1000.0);
+                last_k = Some(k);
+            }
+        }
+    }
+    (lat, sa, sb, js)
+}
+
+#[test]
+fn link_end_to_end_latency_128_2_5ms() {
+    let _g = RT_LOCK.lock();
+    // GOAL 1절 ASIO 기준 설정(128샘플 / 2.5ms 프레임)을 가짜 장치로. PCM16이라 임펄스가 코덱에 뭉개지지 않는다.
+    let cfg = EngineConfig { codec: CodecKind::Pcm16, ..config(128, 2.5) };
+    let (lat, sa, sb, js) = link_impulse_latency(cfg, 8);
+    assert!(lat.len() >= 10, "임펄스 검출 {}", lat.len());
+    let mean = lat.iter().sum::<f64>() / lat.len() as f64;
+    let (lo, hi) = (lat.iter().cloned().fold(f64::MAX, f64::min), lat.iter().cloned().fold(0.0, f64::max));
+    println!(
+        "종단 지연 128/2.5ms: 평균 {mean:.2}ms (범위 {lo:.2}..{hi:.2}, n={}), A estLatencyMs {:.2}, B estLatencyMs {:.2}, B bufferMs {:.2} (목표 {:.2}), B playoutMs {:.2}, B concealed {}, xruns A {} B {}",
+        lat.len(),
+        sa.est_latency_ms,
+        sb.est_latency_ms,
+        js.buffer_ms,
+        js.target_ms,
+        sb.peers[0].playout_ms,
+        js.concealed,
+        sa.xruns,
+        sb.xruns
+    );
+    // GOAL 1절: ASIO 128샘플 / 2.5ms 프레임에서 estLatencyMs ≤ 8ms(입력 2.67 + 프레임 2.5 + 출력 2.67 = 7.83).
+    // 콜백 구동 믹스 전에는 출력 링(≈ 장치 버퍼 + 청크) 때문에 11.8ms였다.
+    assert!(sb.est_latency_ms <= 8.0, "estLatencyMs {:.2} > 8", sb.est_latency_ms);
+    assert!(sb.device_period_ms > 2.6 && sb.device_period_ms < 2.7, "devicePeriodMs {}", sb.device_period_ms);
+    assert_eq!(sb.backend, "fake");
+    // 지연이 통계 밖으로 숨지 않는다: 실측 종단 지연(공유 클럭) ≤ estLatencyMs(송신 입력+프레임, 수신 출력)
+    // + bufferMs(소스 링 포함 수신 버퍼) + 1ms(루프백 망·스케줄링). 소스 링이 bufferMs 밖에 있으면 이 검사가 깨진다.
+    assert!(
+        mean <= sb.est_latency_ms as f64 + js.buffer_ms as f64 + 1.0,
+        "종단 지연 {mean:.2}ms > est {:.2} + bufferMs {:.2} + 1",
+        sb.est_latency_ms,
+        js.buffer_ms
+    );
+    // playoutMs(벽시계 버퍼 + 출력 버퍼)는 종단 지연의 수신측 몫이다: 종단 − playout = 송신측(입력 대기 + 프레임) 이하.
+    let send_side = mean - sb.peers[0].playout_ms as f64;
+    assert!(send_side > 0.0 && send_side <= 2.67 + 2.5 + 1.0, "송신측 몫 {send_side:.2}ms");
+    assert!(js.concealed <= 1, "지터 없는 링크에서 은닉 {}", js.concealed);
 }
 
 #[test]
@@ -907,4 +1000,150 @@ fn malicious_descriptors_rejected() {
     // 잘못된 config
     let bad = EngineConfig { codec: CodecKind::Pcm16, channels: 2, input_channels: vec![0, 1], frame_ms: 10.0, ..config(128, 5.0) };
     assert!(Engine::start(bad, Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), None).is_err());
+}
+
+// ============================================================================
+// 콜백 구동 믹스(P1-0) 회귀
+// ============================================================================
+
+#[test]
+fn callback_mix_phase_sweep_no_premature_concealment() {
+    let _g = RT_LOCK.lock();
+    // 송신 입력과 수신 출력의 위상을 바꿔 가며 지터 없는 링크에서 은닉·마감 채움·보정이 0인지 본다.
+    // 회귀 대상 두 가지(engine-notes "콜백 구동 믹스"):
+    // 1) 청크(64) 단위로만 꺼내 FIFO에 남은 패킷 꼬리를 못 써서 마감에 은닉
+    // 2) 워커가 콜백 직전 타이밍과 콜백 직후 링 점유량을 짝지어 한 주기 이르게 은닉
+    // 수정 전에는 위상에 따라 3초에 1~13회 은닉 + 수백~천여 회 보정이 났다.
+    for (buf, frame_ms) in [(480u32, 2.5f32), (441, 5.0), (128, 2.5)] {
+        for phase_us in [0u64, 3000, 7500] {
+            let mut ba = sine_backend();
+            ba.wake_jitter_us = 1000;
+            let mut bb = FakeBackend::silence(48_000);
+            bb.wake_jitter_us = 1000;
+            bb.seed = 9;
+            bb.out_phase_us = phase_us;
+            let (a, b, _p, sink_b) = connect_pair(config(buf, frame_ms), ba, bb, None);
+            std::thread::sleep(Duration::from_millis(1500));
+            let j0 = b.peer_jitter_stats()[0].1;
+            let f0 = b.feed_stats();
+            let start = sink_b.lock().len() / 2;
+            std::thread::sleep(Duration::from_millis(2500));
+            let js = b.peer_jitter_stats()[0].1;
+            let f1 = b.feed_stats();
+            let xruns = b.stats().xruns;
+            let snap = sink_b.lock().clone();
+            drop(a);
+            drop(b);
+            let c = analyze(&snap, start);
+            let (conc, fills, corr) = (js.concealed - j0.concealed, f1.0 - f0.0, js.corrections() - j0.corrections());
+            println!(
+                "CB-MIX buf {buf} / {frame_ms}ms, 출력 위상 {phase_us}µs: 은닉 {conc}, 마감 채움 {fills}, 건너뜀 {}, 보정 {corr}, buffer {:.2}/{:.2}ms, 불연속 {} 무음 {}, xruns {xruns}",
+                f1.1 - f0.1,
+                js.buffer_ms,
+                js.target_ms,
+                c.discontinuities,
+                c.silent_runs
+            );
+            // 실시간 테스트는 스케줄러 지연 1회까지 허용(link_matrix와 같은 기준)
+            assert!(conc <= 1, "buf {buf} / {frame_ms}ms 위상 {phase_us}: 은닉 {conc}");
+            assert!(fills <= 1, "buf {buf} / {frame_ms}ms 위상 {phase_us}: 마감 채움 {fills}");
+            assert_gaps_explained_by_xruns(&c, xruns, &format!("CB-MIX buf {buf} / {frame_ms}ms 위상 {phase_us}"));
+        }
+    }
+}
+
+#[test]
+fn callback_mix_early_callbacks_real_time() {
+    let _g = RT_LOCK.lock();
+    // 실장비 WASAPI 독점 프로브에서 출력 콜백은 격자보다 최대 ≈1.7ms 이르게 왔다(PR #11 M3: 간격 p1 2.3ms,
+    // 최소 1.25~1.5ms, 공칭 3ms). 가짜 장치 출력에 이른 콜백(0..1.7ms) + 늦은 기상(0..0.5ms)을 주고,
+    // 피어 경로(마감 직전 은닉)가 0 채움·조기 은닉 없이 도는지 본다.
+    for (out_buf, phase_us) in [(144usize, 0u64), (144, 1800), (128, 900)] {
+        let mut ba = sine_backend();
+        ba.wake_jitter_us = 500;
+        ba.in_buffer = Some(96);
+        let mut bb = FakeBackend::silence(48_000);
+        bb.wake_jitter_us = 500;
+        bb.out_early_us = 1700;
+        bb.out_buffer = Some(out_buf);
+        bb.seed = 21;
+        bb.out_phase_us = phase_us;
+        let (a, b, _p, sink_b) = connect_pair(config(128, 2.5), ba, bb, None);
+        std::thread::sleep(Duration::from_millis(1500));
+        let j0 = b.peer_jitter_stats()[0].1;
+        let f0 = b.feed_stats();
+        let start = sink_b.lock().len() / 2;
+        std::thread::sleep(Duration::from_millis(3000));
+        let js = b.peer_jitter_stats()[0].1;
+        let f1 = b.feed_stats();
+        let st = b.stats();
+        let snap = sink_b.lock().clone();
+        drop(a);
+        drop(b);
+        let c = analyze(&snap, start);
+        let (conc, fills, skipped) = (js.concealed - j0.concealed, f1.0 - f0.0, f1.1 - f0.1);
+        println!(
+            "EARLY-CB out {out_buf} 위상 {phase_us}µs: 은닉 {conc}, 마감 채움 {fills}, 건너뜀 {skipped}, buffer {:.2}/{:.2}ms, est {:.2}ms, 불연속 {} 무음 {}, xruns {}",
+            js.buffer_ms,
+            js.target_ms,
+            st.est_latency_ms,
+            c.discontinuities,
+            c.silent_runs,
+            st.xruns
+        );
+        // 실시간 테스트는 스케줄러 지연 1회까지 허용(link_matrix와 같은 기준)
+        assert!(conc <= 1, "out {out_buf} 위상 {phase_us}: 은닉 {conc}");
+        assert!(fills <= 1, "out {out_buf} 위상 {phase_us}: 마감 채움 {fills}");
+        assert_gaps_explained_by_xruns(&c, st.xruns, &format!("EARLY-CB out {out_buf} 위상 {phase_us}"));
+    }
+}
+
+#[test]
+fn est_latency_budget_table() {
+    let _g = RT_LOCK.lock();
+    // GOAL 1절 estLatencyMs = 입력 장치 버퍼 + 프레임 + 출력 링 + 출력 장치 버퍼. 콜백 구동 믹스에는 출력 링이 없다.
+    // 장치 주기는 가짜 장치로 흉내 낸다: ASIO 128, WASAPI 독점 최소 주기(이 PC 실측: 입력 96 = 2.0ms, 출력 144 = 3.0ms;
+    // 일반적인 3ms = 144), IAudioClient3 저지연 공유(최소 주기 128 = 2.67ms 가정), 독점 기본 주기 10ms(참고).
+    struct Row {
+        label: &'static str,
+        in_buf: usize,
+        out_buf: usize,
+        frame_ms: f32,
+        goal_ms: Option<f32>,
+    }
+    let rows = [
+        Row { label: "ASIO 128 / 2.5ms", in_buf: 128, out_buf: 128, frame_ms: 2.5, goal_ms: Some(8.0) },
+        Row { label: "ASIO 128 / 5ms", in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: None },
+        Row { label: "WASAPI 독점 최소 3ms(144) / 2.5ms", in_buf: 144, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0) },
+        Row { label: "WASAPI 독점 최소 3ms(144) / 5ms", in_buf: 144, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0) },
+        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 2.5ms", in_buf: 96, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0) },
+        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 5ms", in_buf: 96, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0) },
+        Row { label: "IAudioClient3 공유 2.67ms(128) / 5ms", in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: Some(30.0) },
+        Row { label: "(참고) 독점 기본 주기 10ms(480) / 5ms", in_buf: 480, out_buf: 480, frame_ms: 5.0, goal_ms: None },
+    ];
+    println!("| 설정 | 입력 | 프레임 | 출력 링 | 출력 | estLatencyMs | 목표 |");
+    println!("|---|---|---|---|---|---|---|");
+    for r in rows {
+        let mut backend = FakeBackend::silence(48_000);
+        backend.in_buffer = Some(r.in_buf);
+        backend.out_buffer = Some(r.out_buf);
+        let mut e = Engine::start(config(r.in_buf as u32, r.frame_ms), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+        let s = e.stats();
+        e.stop();
+        let (i, o) = (r.in_buf as f32 / 48.0, r.out_buf as f32 / 48.0);
+        let calc = i + r.frame_ms + o;
+        println!(
+            "| {} | {i:.2} | {:.2} | 0 | {o:.2} | **{:.2}** (계산 {calc:.2}) | {} |",
+            r.label,
+            r.frame_ms,
+            s.est_latency_ms,
+            r.goal_ms.map(|g| format!("≤ {g}")).unwrap_or_else(|| "—".into())
+        );
+        assert!((s.est_latency_ms - calc).abs() < 0.05, "{}: 실측 콜백 크기 기반 est {:.2} ≠ 계산 {calc:.2}", r.label, s.est_latency_ms);
+        assert!((s.device_period_ms - o).abs() < 0.05, "{}: devicePeriodMs {}", r.label, s.device_period_ms);
+        if let Some(g) = r.goal_ms {
+            assert!(s.est_latency_ms <= g, "{}: estLatencyMs {:.2} > {g}", r.label, s.est_latency_ms);
+        }
+    }
 }
