@@ -31,9 +31,11 @@
         "node-cron": "^3.0.3",
         "typescript": "^5.9.2",
         "uuid": "^13.0.0",
-        "ws": "^8.18.3"
+        "ws": "^8.18.3",
+        "zod": "^3.25.76"
     },
     "devDependencies": {
+        "@electric-sql/pglite": "^0.5.16",
         "@types/node-cron": "^3.0.11",
         "ts-node": "^10.9.2",
         "tsx": "^4.23.12"
