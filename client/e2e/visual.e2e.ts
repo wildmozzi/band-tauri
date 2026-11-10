@@ -6,7 +6,8 @@
  *   CI는 linux, 로컬 개발은 win32)
  * - 임계: 픽셀 비율 0.1%(maxDiffPixelRatio 0.001), 픽셀 색 차이 허용 threshold 0.2(Playwright 기본) —
  *   안티앨리어싱 잡음만 흡수하고 색·간격·레이아웃 변화는 잡는다.
- * - 상대 시간('n일 전')이 고정되게 브라우저 시계를 고정하고, 애니메이션·캐럿은 끈다(toHaveScreenshot 기본).
+ * - 상대 시간('n일 전')이 고정되게 브라우저 시계를, 게스트 닉네임(Guest+난수)이 고정되게 Math.random을 고정하고,
+ *   애니메이션·캐럿은 끈다(toHaveScreenshot 기본).
  * - 화면을 일부러 바꾼 PR은 `npm run e2e -- visual --update-snapshots`로 기준을 갱신하고 PR에 이유를 적는다
  *   (linux 기준은 CI 아티팩트의 *-actual.png로 갱신).
  */
@@ -21,6 +22,14 @@ test.use({ viewport: { width: 1280, height: 800 } })
 
 test.beforeEach(async ({ page }) => {
   await page.clock.setFixedTime(FIXED_NOW)
+  // 게스트 닉네임(Guest+난수) 등 화면에 찍히는 난수를 고정한다 (Park–Miller LCG)
+  await page.addInitScript(() => {
+    let seed = 42
+    Math.random = () => {
+      seed = (seed * 16807) % 2147483647
+      return (seed - 1) / 2147483646
+    }
+  })
 })
 
 /** 웹폰트·이미지 로딩이 끝난 뒤 찍는다 */
