@@ -14,6 +14,8 @@
 - server: `npm run build`, `npm test`(node:test)
 - 데스크톱 실행: 루트에서 `npm run dev:tauri`
 
+- 디스크: Orca 작업자 워크트리(`%USERPROFILE%\orca\workspaces\band-tauri\*`)는 상위 `.cargo/config.toml`로 Rust 빌드 산출물을 `C:/Users/jwshin/.cargo-target/band-tauri` 하나에 공유한다. 워크트리 안에 `target/`을 따로 만들지 말 것(`CARGO_TARGET_DIR`을 덮어쓰지 말 것).
+
 ## 코드 규칙
 - `engine/rt.rs`와 cpal 콜백 경로: 할당·락·시스템콜·로그·panic 금지. 사전할당 SPSC 링과 원자값만.
 - 엔진 인터페이스(패킷 포맷, Tauri 커맨드)는 설계 문서가 계약이다. 바꾸면 설계 문서도 같은 PR에서 갱신.
