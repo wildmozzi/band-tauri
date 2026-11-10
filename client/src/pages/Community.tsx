@@ -1,8 +1,9 @@
-import { useState, useMemo, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useState, useMemo, useEffect, type ReactNode } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { usePostsQuery, useToggleLikeMutation, useTrendingTagsQuery } from '../features/community/queries'
 import type { Post } from '../services/communityApi'
+import './community/communityList.css'
 
 // 사용 가능한 악기 목록
 const INSTRUMENTS = [
@@ -24,6 +25,20 @@ function formatRelativeTime(iso: string) {
   if (hours < 24) return `${hours}시간 전`
   const days = Math.round(hours / 24)
   return `${days}일 전`
+}
+
+/**
+ * 글 상세 링크 (P3-12 ⑤). 카드 전체를 덮는 링크(::after)라 카드 어디를 눌러도 이동하고,
+ * 실제 <a>라서 새 탭 열기·키보드 이동이 된다. 제목이 있으면 제목이, 없으면 본문 요약이 링크다
+ * (hidden이면 링크 없이 글자만 — 카드당 링크 하나).
+ */
+function PostLink({ postId, hidden = false, children }: { postId: string; hidden?: boolean; children: ReactNode }) {
+  if (hidden) return <>{children}</>
+  return (
+    <Link to={`/community/${postId}`} className="community-post-link">
+      {children}
+    </Link>
+  )
 }
 
 export function Community() {
@@ -72,10 +87,6 @@ export function Community() {
     }
   }
 
-  const handlePostClick = (postId: string) => {
-    navigate(`/community/${postId}`)
-  }
-
   const handleTagClick = (tag: string) => {
     setSelectedTag(selectedTag === tag ? null : tag)
   }
@@ -117,7 +128,7 @@ export function Community() {
                   <article
                     key={post.id}
                     style={cardStyle}
-                    onClick={() => handlePostClick(post.id)}
+                    className="community-post-card"
                     onMouseOver={(e) => {
                       e.currentTarget.style.borderColor = 'rgba(141, 123, 255, 0.4)'
                       e.currentTarget.style.transform = 'translateY(-2px)'
@@ -135,11 +146,13 @@ export function Community() {
                         <div style={{ flex: 1 }}>
                           {post.title && (
                             <div style={{ fontSize: '16px', fontWeight: '600', marginBottom: '4px' }}>
-                              {post.title}
+                              <PostLink postId={post.id}>{post.title}</PostLink>
                             </div>
                           )}
                           <div style={{ fontSize: '14px', fontWeight: '400', marginBottom: '4px', color: 'rgba(255, 255, 255, 0.85)' }}>
-                            {post.content.length > 60 ? `${post.content.slice(0, 60)}...` : post.content}
+                            <PostLink postId={post.id} hidden={!!post.title}>
+                              {post.content.length > 60 ? `${post.content.slice(0, 60)}...` : post.content}
+                            </PostLink>
                           </div>
                           <div style={{ fontSize: '13px', color: 'rgba(255, 255, 255, 0.5)' }}>
                             <span style={{ fontWeight: '600', color: 'rgba(255, 255, 255, 0.7)' }}>{post.author_name}</span>
@@ -150,7 +163,7 @@ export function Community() {
                       </div>
                       <div
                         style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}
-                        onClick={(e) => e.stopPropagation()}
+                        className="community-post-actions"
                       >
                         {post.tags.length > 0 && post.tags.map((tag, idx) => (
                           <span
@@ -304,7 +317,7 @@ export function Community() {
                   <article
                     key={post.id}
                     style={cardStyle}
-                    onClick={() => handlePostClick(post.id)}
+                    className="community-post-card"
                     onMouseOver={(e) => {
                       e.currentTarget.style.borderColor = 'rgba(141, 123, 255, 0.4)'
                       e.currentTarget.style.transform = 'translateY(-2px)'
@@ -330,15 +343,17 @@ export function Community() {
                         </div>
                         {post.title && (
                           <div style={{ fontSize: '16px', fontWeight: '600', marginBottom: '6px' }}>
-                            {post.title}
+                            <PostLink postId={post.id}>{post.title}</PostLink>
                           </div>
                         )}
                         <p style={{ fontSize: '14px', margin: '0 0 8px 0', lineHeight: '1.5', color: 'rgba(255, 255, 255, 0.85)' }}>
-                          {post.content.length > 100 ? `${post.content.slice(0, 100)}...` : post.content}
+                          <PostLink postId={post.id} hidden={!!post.title}>
+                            {post.content.length > 100 ? `${post.content.slice(0, 100)}...` : post.content}
+                          </PostLink>
                         </p>
                         <div
                           style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-                          onClick={(e) => e.stopPropagation()}
+                          className="community-post-actions"
                         >
                           <span
                             style={{
@@ -365,7 +380,7 @@ export function Community() {
                       {post.tags.length > 0 && (
                         <div
                           style={{ display: 'flex', gap: '6px', flexShrink: 0 }}
-                          onClick={(e) => e.stopPropagation()}
+                          className="community-post-actions"
                         >
                           {post.tags.map((tag, idx) => (
                             <span

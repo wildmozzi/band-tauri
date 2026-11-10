@@ -17,14 +17,13 @@ import {
   type EnginePresetId,
 } from '../native/engineConfig'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
+import { DesktopDownloadButton } from './DesktopDownloadButton'
 import './AudioSettings.css'
 
 interface AudioSettingsProps {
   onClose?: () => void
   isModal?: boolean
 }
-
-const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || undefined
 
 function LevelMeter({ value, kind }: { value: number; kind: 'input' | 'output' }) {
   const pct = Math.max(0, Math.min(100, value * 100))
@@ -85,15 +84,11 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           <div className="notice-icon">🎵</div>
           <h3>데스크톱 앱 전용 기능</h3>
           <p>
-            연주와 오디오 장치 설정은 Band 데스크톱 앱에서만 할 수 있습니다.
+            연주와 오디오 장치 설정은 데스크톱 앱에서만 할 수 있습니다.
             <br />
             웹에서는 합주를 관람(청취)할 수 있습니다.
           </p>
-          {DESKTOP_DOWNLOAD_URL && (
-            <a href={DESKTOP_DOWNLOAD_URL} className="btn-primary" target="_blank" rel="noopener noreferrer">
-              데스크톱 앱 다운로드
-            </a>
-          )}
+          <DesktopDownloadButton className="btn-primary" />
         </div>
         {onClose && (
           <div className="settings-actions">
