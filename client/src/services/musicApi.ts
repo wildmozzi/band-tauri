@@ -220,17 +220,7 @@ async function separateViaBackend(
     const formData = new FormData()
     formData.append('file', file)
 
-    const { supabase } = await import('../lib/supabaseClient')
-    let authToken: string | null = null
-    if (supabase) {
-      const { data: { session } } = await supabase.auth.getSession()
-      authToken = session?.access_token || null
-    }
-
-    const headers: HeadersInit = {}
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`
-    }
+    const headers: HeadersInit = await authHeaders()
 
     const response = await fetch(`${API_BASE_URL}/api/music/separate-stems`, {
       method: 'POST',
@@ -310,28 +300,24 @@ export function getAvailableStemsFromSeparation(separation: StemSeparation): str
     .map(([name]) => name)
 }
 
+/** 분리 히스토리. 실패하면 throw (캐시 계층용 — 실패를 빈 목록으로 저장하지 않게) */
+export async function fetchStemHistory(): Promise<StemSeparation[]> {
+  const headers: HeadersInit = await authHeaders()
+
+  const response = await fetch(`${API_BASE_URL}/api/music/stem-history`, { headers })
+  const data = await response.json()
+
+  if (!response.ok) {
+    throw new Error(data.error || 'Failed to fetch history')
+  }
+
+  return data.separations || []
+}
+
+/** 분리 히스토리. 실패하면 로그를 남기고 빈 목록 */
 export async function getStemHistory(): Promise<StemSeparation[]> {
   try {
-    const { supabase } = await import('../lib/supabaseClient')
-    let authToken: string | null = null
-    if (supabase) {
-      const { data: { session } } = await supabase.auth.getSession()
-      authToken = session?.access_token || null
-    }
-
-    const headers: HeadersInit = {}
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`
-    }
-
-    const response = await fetch(`${API_BASE_URL}/api/music/stem-history`, { headers })
-    const data = await response.json()
-
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to fetch history')
-    }
-
-    return data.separations || []
+    return await fetchStemHistory()
   } catch (error) {
     console.error('Failed to fetch stem history:', error)
     return []
@@ -340,17 +326,7 @@ export async function getStemHistory(): Promise<StemSeparation[]> {
 
 export async function deleteStemSeparation(separationId: string): Promise<boolean> {
   try {
-    const { supabase } = await import('../lib/supabaseClient')
-    let authToken: string | null = null
-    if (supabase) {
-      const { data: { session } } = await supabase.auth.getSession()
-      authToken = session?.access_token || null
-    }
-
-    const headers: HeadersInit = {}
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`
-    }
+    const headers: HeadersInit = await authHeaders()
 
     const response = await fetch(`${API_BASE_URL}/api/music/stem-separation/${separationId}`, {
       method: 'DELETE',

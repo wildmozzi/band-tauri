@@ -1,7 +1,8 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
-import { communityApi, type Post } from '../services/communityApi'
+import { usePostsQuery, useToggleLikeMutation, useTrendingTagsQuery } from '../features/community/queries'
+import type { Post } from '../services/communityApi'
 
 // 사용 가능한 악기 목록
 const INSTRUMENTS = [
@@ -28,46 +29,24 @@ function formatRelativeTime(iso: string) {
 export function Community() {
   const navigate = useNavigate()
   const { user } = useAuth()
-  const [posts, setPosts] = useState<Post[]>([])
-  const [loading, setLoading] = useState(true)
   const [selectedInstrument, setSelectedInstrument] = useState('all')
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
-  const [trendingTags, setTrendingTags] = useState<{ tag: string; count: number }[]>([])
 
-  // Fetch posts from database
-  const fetchPosts = useCallback(async () => {
-    try {
-      setLoading(true)
-      const data = await communityApi.getPosts({
-        instrument: selectedInstrument,
-        tag: selectedTag ?? undefined,
-        userId: user?.id
-      })
-      setPosts(data)
-    } catch (error) {
-      console.error('Failed to fetch posts:', error)
-    } finally {
-      setLoading(false)
-    }
-  }, [selectedInstrument, selectedTag, user?.id])
-
-  // Fetch trending tags
-  const fetchTrendingTags = useCallback(async () => {
-    try {
-      const tags = await communityApi.getTrendingTags(5)
-      setTrendingTags(tags)
-    } catch (error) {
-      console.error('Failed to fetch trending tags:', error)
-    }
-  }, [])
+  // 글 목록·인기 태그 (features/community/queries)
+  const postsQuery = usePostsQuery({ instrument: selectedInstrument, tag: selectedTag, userId: user?.id ?? null })
+  const trendingQuery = useTrendingTagsQuery(5)
+  const toggleLike = useToggleLikeMutation()
+  const posts: Post[] = useMemo(() => postsQuery.data ?? [], [postsQuery.data])
+  const loading = postsQuery.isPending
+  const trendingTags = trendingQuery.data ?? []
 
   useEffect(() => {
-    fetchPosts()
-  }, [fetchPosts])
+    if (postsQuery.error) console.error('Failed to fetch posts:', postsQuery.error)
+  }, [postsQuery.error])
 
   useEffect(() => {
-    fetchTrendingTags()
-  }, [fetchTrendingTags])
+    if (trendingQuery.error) console.error('Failed to fetch trending tags:', trendingQuery.error)
+  }, [trendingQuery.error])
 
   // 인기 게시물 (좋아요 10개 이상, 좋아요 많은 순)
   const popularPosts = useMemo(() => {
@@ -86,19 +65,8 @@ export function Community() {
     }
 
     try {
-      const { liked, likesCount } = await communityApi.toggleLike(postId, user.id)
-
-      // Update local state
-      setPosts(prev => prev.map(post => {
-        if (post.id === postId) {
-          return {
-            ...post,
-            likes_count: likesCount,
-            liked_by_user: liked
-          }
-        }
-        return post
-      }))
+      // 응답값으로 목록·상세 캐시를 갱신한다
+      await toggleLike.mutateAsync({ postId, userId: user.id })
     } catch (error) {
       console.error('Failed to toggle like:', error)
     }

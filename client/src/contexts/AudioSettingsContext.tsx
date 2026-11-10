@@ -5,6 +5,7 @@
  * - 웹(비Tauri)에서는 장치 조회/테스트를 하지 않는다(연주는 앱 전용).
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import type { Json } from '../lib/database.types'
 import { supabase } from '../lib/supabaseClient'
 import { useAuth } from './useAuth'
 import {
@@ -129,7 +130,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
           saveLocal(parsed.config)
           if (parsed.migrated) {
             setMigrated(true)
-            await supabase!.from('profiles').update({ audio_settings: toStored(parsed.config) }).eq('id', userId)
+            await supabase!.from('profiles').update({ audio_settings: toStored(parsed.config) as unknown as Json }).eq('id', userId)
             console.log('[AudioSettings] 구형 오디오 설정을 새 형식으로 변환했습니다')
           }
         }
@@ -155,7 +156,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       try {
         const { error: dbError } = await supabase!
           .from('profiles')
-          .update({ audio_settings: toStored(config) })
+          .update({ audio_settings: toStored(config) as unknown as Json })
           .eq('id', userId)
         if (dbError) throw dbError
       } catch (err) {

@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { supabase } from '../../lib/supabaseClient'
+import { isSupabaseConfigured } from '../../lib/supabaseClient'
+import { useUpdateRoomMutation } from '../../features/rooms/queries'
 import {
   DEFAULT_EDIT_SLOTS,
   buildRoomUpdate,
@@ -23,6 +24,7 @@ export function useRoomEditor(userId: string | undefined, onSaved: (roomId: stri
   const [editCustomTag, setEditCustomTag] = useState('')
   const [editInstrumentSlots, setEditInstrumentSlots] = useState<InstrumentSlot[]>([])
   const [editSaving, setEditSaving] = useState(false)
+  const updateRoom = useUpdateRoomMutation()
 
   const openEditor = (room: MyRoom) => {
     setEditingRoom(room)
@@ -65,7 +67,7 @@ export function useRoomEditor(userId: string | undefined, onSaved: (roomId: stri
   }
 
   const handleSave = async () => {
-    if (!supabase || !userId || !editingRoom) return
+    if (!isSupabaseConfigured() || !userId || !editingRoom) return
 
     if (!editTitle.trim()) {
       alert('방 제목을 입력하세요.')
@@ -84,13 +86,7 @@ export function useRoomEditor(userId: string | undefined, onSaved: (roomId: stri
         instrumentSlots: editInstrumentSlots,
       })
 
-      const { error } = await supabase
-        .from('rooms')
-        .update(update)
-        .eq('id', editingRoom.id)
-        .eq('host_id', userId)
-
-      if (error) throw error
+      await updateRoom.mutateAsync({ roomId: editingRoom.id, userId, update })
 
       onSaved(editingRoom.id, update)
       setEditingRoom(null)

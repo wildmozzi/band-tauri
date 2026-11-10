@@ -1,11 +1,18 @@
 import { useState, useEffect, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '../contexts/useAuth'
+import {
+  clearStemHistory,
+  fetchFreshStemHistory,
+  invalidateStemHistory,
+  useDeleteStemSeparationMutation,
+  useStemHistoryQuery,
+} from '../features/stems/queries'
 import {
   separateAudioStems,
   getMusicFileUrl,
-  getStemHistory,
   getStemsFromSeparation,
   getAvailableStemsFromSeparation,
-  deleteStemSeparation,
   type SeparatedStems,
   type StemSeparation
 } from '../services/musicApi'
@@ -53,13 +60,18 @@ export function MusicRoom() {
   const [masterVolume, setMasterVolume] = useState(100)
   const [stemVolumes, setStemVolumes] = useState<Record<string, number>>({})
 
-  // 인증 상태
-  const [isLoggedIn, setIsLoggedIn] = useState(false)
+  // 인증 상태 (AuthContext)
+  const { user } = useAuth()
+  const userId = user?.id ?? null
+  const isLoggedIn = Boolean(user)
+  const queryClient = useQueryClient()
 
-  // 히스토리 상태
+  // 히스토리 상태 (features/stems/queries)
   const [showHistory, setShowHistory] = useState(false)
-  const [separationHistory, setSeparationHistory] = useState<StemSeparation[]>([])
-  const [loadingHistory, setLoadingHistory] = useState(false)
+  const historyQuery = useStemHistoryQuery(userId, showHistory && isLoggedIn)
+  const separationHistory: StemSeparation[] = historyQuery.data ?? []
+  const loadingHistory = historyQuery.isFetching
+  const deleteSeparation = useDeleteStemSeparationMutation(userId)
   const [currentSeparationId, setCurrentSeparationId] = useState<string | null>(null)
   const [loadingStemsFromHistory, setLoadingStemsFromHistory] = useState(false)
 
@@ -69,25 +81,12 @@ export function MusicRoom() {
   const progressBarRef = useRef<HTMLDivElement>(null)
   const isDraggingRef = useRef(false)  // 드래그 상태 ref (콜백에서 참조용)
 
-  // 로그인 상태 감지
+  // 로그아웃하면 히스토리를 닫고 비운다
   useEffect(() => {
-    let unsubscribe: (() => void) | null = null
-    import('../lib/supabaseClient').then(({ supabase }) => {
-      if (!supabase) return
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        setIsLoggedIn(!!session)
-      })
-      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-        setIsLoggedIn(!!session)
-        if (!session) {
-          setShowHistory(false)
-          setSeparationHistory([])
-        }
-      })
-      unsubscribe = () => subscription.unsubscribe()
-    })
-    return () => { unsubscribe?.() }
-  }, [])
+    if (isLoggedIn) return
+    setShowHistory(false)
+    clearStemHistory(queryClient)
+  }, [isLoggedIn, queryClient])
 
   // 컴포넌트 마운트 시 플레이어 초기화
   useEffect(() => {
@@ -137,7 +136,7 @@ export function MusicRoom() {
       } catch { /* UTF-8 디코딩 실패 시 원래 이름 사용 */ }
       return name
     }
-    const history = await getStemHistory()
+    const history = await fetchFreshStemHistory(queryClient, userId)
     const now = new Date()
     const uploadBaseName = selectedFile.name.replace(/ \(\d+\)(\.[^.]+)$/, '$1')
     const hasDuplicate = history.some(h => {
@@ -173,6 +172,8 @@ export function MusicRoom() {
       console.log('[MusicRoom] Separation success:', result, 'stems:', stemKeys)
 
       setSeparatedStems(result.stems)
+      // 새 분리 기록이 생겼으니 히스토리를 다시 읽게 한다
+      void invalidateStemHistory(queryClient, userId)
       setAvailableStems(result.availableStems || Object.keys(result.stems))
 
       // 초기 스템 상태 설정 (모두 활성화)
@@ -403,22 +404,16 @@ export function MusicRoom() {
 
   // 히스토리 로드
   const loadHistory = async () => {
-    setLoadingHistory(true)
-    try {
-      const history = await getStemHistory()
-      setSeparationHistory(history)
-    } catch (error) {
-      console.error('Failed to load history:', error)
-    } finally {
-      setLoadingHistory(false)
-    }
+    const { error } = await historyQuery.refetch()
+    if (error) console.error('Failed to load history:', error)
   }
 
   // 히스토리 토글
   const handleToggleHistory = () => {
     const newShowHistory = !showHistory
     setShowHistory(newShowHistory)
-    if (newShowHistory && separationHistory.length === 0) {
+    // 처음 열 때는 쿼리가 켜지면서 조회한다. 이미 읽었는데 비어 있으면 다시 읽는다(기존 동작)
+    if (newShowHistory && historyQuery.isFetched && separationHistory.length === 0) {
       loadHistory()
     }
   }
@@ -488,9 +483,8 @@ export function MusicRoom() {
     if (!confirm('이 분리 결과를 삭제하시겠습니까?')) return
 
     try {
-      const success = await deleteStemSeparation(separationId)
+      const success = await deleteSeparation.mutateAsync(separationId)
       if (success) {
-        setSeparationHistory(prev => prev.filter(s => s.id !== separationId))
         if (currentSeparationId === separationId) setCurrentSeparationId(null)
       } else {
         alert('삭제 실패')

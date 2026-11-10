@@ -1410,6 +1410,9 @@ mod tests {
         worker_jitter_us: u64,
         /// 출력 콜백이 격자보다 0..이 값(µs) 이르게 온다(실장비 WASAPI 독점 프로브: 최대 ≈1.7ms 이름, M3).
         out_early_us: u64,
+        /// 입력·출력 장치 콜백이 0..이 값(µs) 늦게 깨어난다(가짜 장치 `wake_jitter_us`와 같은 모델:
+        /// 다음 콜백은 원래 격자로 따라잡는다).
+        dev_late_us: u64,
         /// 망 지연 지터 상한(µs, 기본 0.1ms).
         net_jitter_us: u64,
         /// 패킷 손실 확률(0..1).
@@ -1477,21 +1480,26 @@ mod tests {
         let mut next_trace = 2_000_000u64;
         // 출력 콜백 k의 예정 시각(멈춤 구간에 걸리면 구간 끝으로 밀림 → 몰아서 따라잡음).
         // 이른 콜백: k마다 결정적 의사난수로 0..out_early_us만큼 앞당긴다(순서는 유지: 이름 < 주기).
+        // 콜백 k의 결정적 의사난수 0..max(µs). salt로 출력 이름/출력 늦음/입력 늦음을 서로 독립으로 만든다.
+        // (salt 0은 기존 이른 콜백 수열을 그대로 유지한다.)
+        let jit = |k: u64, salt: u64, max: u64| -> u64 {
+            if max == 0 {
+                return 0;
+            }
+            let h = (k ^ p.seed ^ salt).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            (h >> 11) % max
+        };
         let out_due = |k: u64| -> u64 {
-            let early = if p.out_early_us > 0 {
-                let h = (k ^ p.seed).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                (h >> 11) % p.out_early_us.min(out_period as u64 * 9 / 10)
-            } else {
-                0
-            };
-            let nominal = (p.out_phase_us + (k as f64 * out_period) as u64).saturating_sub(early);
+            let early = jit(k, 0, p.out_early_us.min(out_period as u64 * 9 / 10));
+            let late = jit(k, 0x5A5A_0000_0000, p.dev_late_us);
+            let nominal = (p.out_phase_us + (k as f64 * out_period) as u64).saturating_sub(early) + late;
             match p.out_stall {
                 Some((every, len)) if nominal % every < len && nominal > every => nominal - nominal % every + len,
                 _ => nominal,
             }
         };
         loop {
-            let t_in = (k_in as f64 * in_period) as u64;
+            let t_in = (k_in as f64 * in_period) as u64 + jit(k_in, 0xA5A5_0000_0000, p.dev_late_us.min(in_period as u64 * 9 / 10));
             let t_out = out_due(k_out);
             let t_arr = pending.iter().map(|x| x.0).min().unwrap_or(u64::MAX);
             let t = t_in.min(t_out).min(t_arr).min(t_w);
@@ -1546,7 +1554,9 @@ mod tests {
                     res.wall_trace.push((t as f64 / 1e6, jb.stats().wall_buffer_ms));
                     next_trace += 500_000;
                 }
-                t_w = t + 500 + if p.worker_jitter_us > 0 { rng.gen_range(0..p.worker_jitter_us) } else { 0 };
+                // Worker::run과 같은 폴링: 은닉 마감이 가까우면(urgent) FINE_POLL, 아니면 POLL. 여기에 기상 지연.
+                let poll = if ev.urgent { FINE_POLL } else { POLL }.as_micros() as u64;
+                t_w = t + poll + if p.worker_jitter_us > 0 { rng.gen_range(0..p.worker_jitter_us) } else { 0 };
             }
         }
         res.js = jb.stats();
@@ -1578,6 +1588,7 @@ mod tests {
                     out_stall: None,
                     worker_jitter_us: 800,
                     out_early_us: 0,
+                    dev_late_us: 0,
                     net_jitter_us: 0,
                     loss: 0.0,
                     seed: phase + in_buf as u64,
@@ -1609,6 +1620,7 @@ mod tests {
                 out_stall: Some((1_000_000, 8_000)),
                 worker_jitter_us: 300,
                 out_early_us: 0,
+                dev_late_us: 0,
                 net_jitter_us: 0,
                 loss: 0.0,
                 seed: 5,
@@ -1649,6 +1661,7 @@ mod tests {
                     out_stall: None,
                     worker_jitter_us: 600,
                     out_early_us: 1700,
+                    dev_late_us: 0,
                     net_jitter_us: 0,
                     loss: 0.0,
                     seed: 11 + phase + out_buf as u64,
@@ -1680,6 +1693,7 @@ mod tests {
                 out_stall: None,
                 worker_jitter_us: 600,
                 out_early_us: 1700,
+                dev_late_us: 0,
                 net_jitter_us: 0,
                 loss: 0.05,
                 seed: 3 + out_buf as u64,
@@ -1693,5 +1707,107 @@ mod tests {
             assert_eq!(r.margin, 0, "언더런이 없으면 여유도 0");
             assert!((r.js.wall_buffer_ms - r.js.target_ms).abs() < 4.0, "버퍼가 목표 근처");
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // 실시간 통합 테스트(tests/loopback.rs, `#[ignore]` + CI realtime 잡)의 결정적 짝.
+    // 같은 장치 버퍼·프레임·위상·이른 콜백·기상 지연을 가상 시간으로 돌린다. 스케줄러가 끼어들 수 없으므로
+    // 허용치 없이 정확히 0을 요구한다: 이 테스트가 깨지면 엔진 회귀이고, 이 테스트가 녹색인데 실시간 짝만
+    // 깨지면 실행 환경(러너 스케줄링)이 원인이다(P3-0).
+    // ------------------------------------------------------------------------
+
+    /// `with_corrections`: 정착 후 깊이 보정도 0이어야 하는가. 입력 장치 기상 지연(최대 1ms)이 크면 패킷 도착 p95가
+    /// 프레임 경계를 넘나들어 목표가 다시 학습되고(정당한 보정, link_matrix 주석 참고) 실시간 짝도 보정은 세지 않는다.
+    fn assert_clean_link(r: &FeedSimResult, label: &str, with_corrections: bool) {
+        let d = discontinuities(&r.out);
+        println!(
+            "{label}: 정착 후 은닉/마감/보정 {:?}, 건너뜀 {}, xruns {}, 여유 {}, buffer {:.2}/{:.2}ms wall {:.2}ms, 불연속 {d}",
+            r.steady, r.skipped, r.xruns, r.margin, r.js.buffer_ms, r.js.target_ms, r.js.wall_buffer_ms
+        );
+        assert_eq!((r.steady.0, r.steady.1), (0, 0), "{label}: 정착 후 은닉/마감 채움");
+        if with_corrections {
+            assert_eq!(r.steady.2, 0, "{label}: 정착 후 보정");
+        }
+        assert_eq!(d, 0, "{label}: 불연속");
+        assert_eq!(r.xruns, 0, "{label}: xrun");
+        assert!(r.out.len() > 48_000 * 5, "{label}: 출력 기록 부족");
+    }
+
+    #[test]
+    fn callback_mix_sim_mirrors_realtime_phase_sweep() {
+        // 짝: tests/loopback.rs callback_mix_phase_sweep_no_premature_concealment
+        // (buf, frame_ms) ∈ {(480, 2.5), (441, 5), (128, 2.5)} × 출력 위상 {0, 3, 7.5ms}, 장치 기상 지연 0..1ms.
+        for (buf, frame) in [(480usize, 120usize), (441, 240), (128, 120)] {
+            for phase in [0u64, 3000, 7500] {
+                let r = run_feed_sim(FeedSim {
+                    in_buf: buf,
+                    out_buf: buf,
+                    frame,
+                    out_phase_us: phase,
+                    seconds: 10.0,
+                    out_stall: None,
+                    worker_jitter_us: 800,
+                    out_early_us: 0,
+                    dev_late_us: 1000,
+                    net_jitter_us: 0,
+                    loss: 0.0,
+                    seed: 9 + phase,
+                });
+                assert_clean_link(&r, &format!("sim≡RT 위상 스윕 buf {buf} F {frame} 위상 {phase}"), false);
+            }
+        }
+    }
+
+    #[test]
+    fn callback_mix_sim_mirrors_realtime_early_callbacks() {
+        // 짝: tests/loopback.rs callback_mix_early_callbacks_real_time
+        // 송신 입력 96, 수신 출력 144/128, 프레임 2.5ms, 출력 이른 콜백 0..1.7ms + 늦은 기상 0..0.5ms.
+        for (out_buf, phase) in [(144usize, 0u64), (144, 1800), (128, 900)] {
+            let r = run_feed_sim(FeedSim {
+                in_buf: 96,
+                out_buf,
+                frame: 120,
+                out_phase_us: phase,
+                seconds: 10.0,
+                out_stall: None,
+                worker_jitter_us: 600,
+                out_early_us: 1700,
+                dev_late_us: 500,
+                net_jitter_us: 0,
+                loss: 0.0,
+                seed: 21 + phase,
+            });
+            assert_clean_link(&r, &format!("sim≡RT 이른 콜백 out {out_buf} 위상 {phase}"), true);
+        }
+    }
+
+    #[test]
+    #[ignore = "known-bug(P3-0 발견): 언더런 뒤 적응 여유(M4)가 지터 목표에 반영되지 않아 정착 후 은닉·마감 채움·보정이 반복된다. 엔진 수정 PR에서 ignore를 지운다"]
+    fn callback_mix_sim_margin_after_underrun_no_steady_concealment() {
+        // 실시간 짝(callback_mix_early_callbacks_real_time, out 144 / 위상 1.8ms)이 CI와 로컬에서 간헐 실패하던 원인의
+        // 결정적 재현. 이른 콜백(0..1.7ms) + 워커 기상 지연 0..1.3ms → 언더런 1회 → 여유 +64프레임. 그 뒤
+        // need·lead_cap·은닉 마감은 여유만큼 앞당겨지지만 지터 버퍼 목표(5ms)는 그대로라, 마감에 실제 데이터가 없어
+        // 은닉(마감 채움)하고 깊이 보정이 수백 회 따라붙는다(수정 전: 정착 후 은닉/마감/보정 (6, 6, 716)).
+        // 기대: 언더런 1회는 허용(환경), 그 뒤 정착 구간은 지터 없는 링크답게 은닉·마감 채움 0.
+        let r = run_feed_sim(FeedSim {
+            in_buf: 96,
+            out_buf: 144,
+            frame: 120,
+            out_phase_us: 1800,
+            seconds: 10.0,
+            out_stall: None,
+            worker_jitter_us: 1300,
+            out_early_us: 1700,
+            dev_late_us: 500,
+            net_jitter_us: 0,
+            loss: 0.0,
+            seed: 21 + 1800,
+        });
+        println!(
+            "여유 후 정착: 은닉/마감/보정 {:?}, 건너뜀 {}, xruns {}, 여유 {}, buffer {:.2}/{:.2}ms",
+            r.steady, r.skipped, r.xruns, r.margin, r.js.buffer_ms, r.js.target_ms
+        );
+        assert!(r.xruns >= 1 && r.margin > 0, "전제: 언더런이 나서 여유가 늘어야 함");
+        assert_eq!((r.steady.0, r.steady.1), (0, 0), "여유가 늘어난 뒤 정착 구간 은닉/마감 채움");
     }
 }
