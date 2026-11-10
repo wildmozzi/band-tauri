@@ -1,4 +1,5 @@
 import {
+  CopyObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
   HeadObjectCommand,
@@ -109,6 +110,33 @@ export function createS3StorageAdapter(
         if (e instanceof StorageError) throw e
         if (isNotFound(e)) return null
         throw new StorageError(`get ${bucket}/${key}: ${msg(e)}`, e)
+      }
+    },
+
+    async getRange(key, start, endInclusive) {
+      try {
+        const out = await client.send(new GetObjectCommand({ Bucket: cfg.bucket, Key: full(key), Range: `bytes=${start}-${endInclusive}` }))
+        if (!out.Body) return Buffer.alloc(0)
+        const buf = Buffer.from(await out.Body.transformToByteArray())
+        // Range를 무시하고 전체를 준 저장소 대비
+        return buf.subarray(0, endInclusive - start + 1)
+      } catch (e) {
+        if (e instanceof StorageError) throw e
+        if (isNotFound(e)) return null
+        throw new StorageError(`getRange ${bucket}/${key}: ${msg(e)}`, e)
+      }
+    },
+
+    async copy(fromKey, toKey) {
+      const src = full(fromKey)
+      try {
+        await client.send(new CopyObjectCommand({
+          Bucket: cfg.bucket,
+          Key: full(toKey),
+          CopySource: `${cfg.bucket}/${src.split('/').map(encodeURIComponent).join('/')}`,
+        }))
+      } catch (e) {
+        throw new StorageError(`copy ${bucket}/${fromKey} → ${toKey}: ${msg(e)}`, e)
       }
     },
 

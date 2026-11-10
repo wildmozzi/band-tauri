@@ -40,6 +40,19 @@ function contract(name: string, make: () => StorageAdapter) {
       await a.delete([])
     })
 
+    it('getRange reads only the requested prefix; copy duplicates within the bucket', async () => {
+      const a = make()
+      await a.put('r/s/big.ogg', Buffer.concat([Buffer.from('OggS'), Buffer.alloc(50_000, 1)]), { contentType: 'audio/ogg' })
+      const head = await a.getRange('r/s/big.ogg', 0, 15)
+      assert.equal(head?.length, 16)
+      assert.equal(head?.subarray(0, 4).toString(), 'OggS')
+      assert.equal(await a.getRange('r/s/none.ogg', 0, 15), null)
+      await a.copy('r/s/big.ogg', 'r/t/big.ogg')
+      assert.equal((await a.head('r/t/big.ogg'))?.size, 50_004)
+      assert.ok(await a.head('r/s/big.ogg'), 'source kept')
+      await assert.rejects(a.copy('r/s/big.ogg', '../x'))
+    })
+
     it('put overwrites', async () => {
       const a = make()
       await a.put('k/over.png', Buffer.from('one'))
@@ -105,7 +118,10 @@ contract('S3Adapter (fake S3 server)', () => {
   return createS3StorageAdapter(cfgOf(s3), 'audio-stems')
 })
 
-contract('SupabaseStorageAdapter (fake client)', () => createSupabaseStorageAdapter(fakeSupabaseStorage().client, 'audio-stems'))
+contract('SupabaseStorageAdapter (fake client)', () => {
+  const f = fakeSupabaseStorage()
+  return createSupabaseStorageAdapter(f.client, 'audio-stems', { fetch: f.fetch })
+})
 
 describe('S3Adapter specifics', () => {
   it('stores objects under the logical bucket prefix with content-type and cache-control', async () => {

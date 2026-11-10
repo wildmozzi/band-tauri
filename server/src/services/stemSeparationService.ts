@@ -232,6 +232,7 @@ export class StemSeparationService {
       console.error(`[Delete] Storage 삭제 실패 (${id}):`, (removeError as Error).message)
       throw new ServiceError(500, { success: false, error: '스템 파일 삭제에 실패했습니다.' })
     }
+    await this.deleteLegacyCopies(separation.storage_folder, id)
 
     try {
       await separations.deleteById(id)
@@ -239,6 +240,20 @@ export class StemSeparationService {
       throw new ServiceError(500, { success: false, error: (deleteError as Error).message })
     }
     console.log(`[Delete] Separation deleted: ${id}`)
+  }
+
+  /**
+   * 현재 저장소가 Supabase가 아니면(s3) 이전 전 Supabase 원본도 지운다 (리뷰2 L2: 공개 원본이 남지 않게,
+   * 나중에 이전 스크립트가 R2로 되살리지 않게). 실패는 로그만 — 행 삭제를 막지 않는다
+   */
+  private async deleteLegacyCopies(folder: string, id: string): Promise<void> {
+    const { storage, legacy } = this.need()
+    if (!legacy || legacy === storage || storage.driver === 'supabase') return
+    try {
+      await legacy.delete(stemStoragePaths(folder))
+    } catch (e) {
+      console.warn(`[Delete] Supabase 원본 삭제 실패 (${id}):`, (e as Error).message)
+    }
   }
 
   /** 만료된 음원분리 결과의 Storage 파일(.ogg/.wav 모두)과 DB 레코드를 지운다. 지운 개수 */
@@ -267,6 +282,7 @@ export class StemSeparationService {
           console.error(`[Cleanup] Storage 삭제 실패 (${sep.id}):`, (rmError as Error).message)
           continue
         }
+        await this.deleteLegacyCopies(sep.storage_folder, sep.id)
       }
       ids.push(sep.id)
     }

@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  migrate, parseArgs, isRoutableImageKey, planCopy, rewritePostImages, rewriteStemRow, supabaseKeyFromUrl, contentTypeOf,
+  migrate, parseArgs, isRoutableImageKey, planCopy, rewritePostImages, rewriteStemRow, supabaseKeyFromUrl, supabaseKeyFromAnyUrl, contentTypeOf,
   type MigrationDb, type StemRowForMigration,
 } from '../scripts/migrate-storage'
 import { STEM_REF_PREFIX } from '../src/lib/stemStorage'
@@ -88,6 +88,8 @@ function world() {
   }]
   const posts = [{ id: 'p', images: [`${SB}/post-images/u/1700000000000-a1.png`, 'https://keep.example/x.png'] as string[] | null }]
   const updates: string[] = []
+  const recheckCalls: string[] = []
+  const hooks: { beforeRecheck?: (bucket: LogicalBucket, key: string) => void } = {}
   const db: MigrationDb = {
     listStemRows: async () => stemRows.map(r => ({ ...r })),
     async updateStemRow(id, before, update) {
@@ -105,6 +107,14 @@ function world() {
       updates.push(`post:${id}`)
       return 1
     },
+    async isSourceKeyReferenced(bucket, key) {
+      hooks.beforeRecheck?.(bucket, key)
+      recheckCalls.push(`${bucket}:${key}`)
+      const urls = bucket === 'audio-stems'
+        ? stemRows.flatMap(r => Object.entries(r).filter(([c, v]) => c.endsWith('_url') && typeof v === 'string').map(([, v]) => v as string))
+        : posts.flatMap(p => p.images ?? [])
+      return urls.some(u => supabaseKeyFromAnyUrl(u, bucket) === key)
+    },
   }
   const deps = {
     source: (b: LogicalBucket) => src[b].adapter,
@@ -113,7 +123,7 @@ function world() {
     imageViewUrl: (k: string) => `https://api.example/api/storage/post-images/${k}`,
     log: () => {},
   }
-  return { src, dst, stemRows, posts, updates, deps }
+  return { src, dst, stemRows, posts, updates, deps, recheckCalls, hooks }
 }
 
 describe('migrate()', () => {
@@ -216,6 +226,44 @@ describe('migrate()', () => {
     assert.equal(w.posts[1].images![0], `${SB}/post-images/${bad}`)
     assert.ok(w.src['post-images'].objects.has(bad))
     assert.ok(!w.src['post-images'].objects.has('u/1700000000000-a1.png'), 'the routable, rewritten one is deleted')
+  })
+
+  it('M1: a stale edit form re-saves the old Supabase URL after its source was deleted → re-run maps it to the copy', async () => {
+    const w = world()
+    await migrate(parseArgs(['--apply', '--delete-source']), w.deps)
+    assert.equal(w.src['post-images'].objects.size, 0, 'source deleted')
+    // 오래된 편집 폼이 예전 URL을 다시 저장
+    w.posts[0].images = [`${SB}/post-images/u/1700000000000-a1.png`]
+    w.stemRows[0].vocals_url = `${SB}/audio-stems/u/s/vocals.ogg`
+    const again = await migrate(parseArgs(['--apply']), w.deps)
+    assert.deepEqual(w.posts[0].images, ['https://api.example/api/storage/post-images/u/1700000000000-a1.png'])
+    assert.equal(w.stemRows[0].vocals_url, `${STEM_REF_PREFIX}u/s/vocals.ogg`)
+    assert.ok(again.every(r => r.dbUpdated === 1))
+  })
+
+  it('M2: a reference that appears between the full re-scan and the delete is caught by the per-key recheck', async () => {
+    const w = world()
+    // 전체 재확인이 끝난 뒤, 그 key를 지우기 직전에 다른 게시글이 예전 URL을 저장
+    w.hooks.beforeRecheck = (bucket, key) => {
+      if (bucket === 'post-images' && key === 'u/1700000000000-a1.png') w.posts.push({ id: 'late', images: [`${SB}/post-images/${key}`] })
+    }
+    const reports = await migrate(parseArgs(['--apply', '--delete-source']), w.deps)
+    const img = reports.find(r => r.bucket === 'post-images')!
+    assert.ok(w.src['post-images'].objects.has('u/1700000000000-a1.png'))
+    assert.equal(img.deleted, 0)
+    assert.equal(img.keptReferenced, 1)
+    assert.ok(w.recheckCalls.includes('post-images:u/1700000000000-a1.png'))
+  })
+
+  it('L1: signed/authenticated/render Supabase URL forms count as references', async () => {
+    assert.equal(supabaseKeyFromAnyUrl('https://x.supabase.co/storage/v1/object/sign/post-images/u/a.png?token=t', 'post-images'), 'u/a.png')
+    assert.equal(supabaseKeyFromAnyUrl('https://x.supabase.co/storage/v1/render/image/public/post-images/u/a.png?width=100', 'post-images'), 'u/a.png')
+    assert.equal(supabaseKeyFromAnyUrl('https://x.supabase.co/storage/v1/object/authenticated/audio-stems/u/s/v.ogg', 'audio-stems'), 'u/s/v.ogg')
+    assert.equal(supabaseKeyFromAnyUrl('https://x.supabase.co/storage/v1/object/public/audio-stems/u/s/v.ogg', 'post-images'), null)
+    const w = world()
+    w.posts[0].images = ['https://x.supabase.co/storage/v1/object/sign/post-images/u/1700000000000-a1.png?token=t']
+    await migrate(parseArgs(['--apply', '--delete-source', '--bucket', 'post-images']), w.deps)
+    assert.ok(w.src['post-images'].objects.has('u/1700000000000-a1.png'), 'signed-URL reference keeps the source')
   })
 
   it('without an image view URL, images are copied but posts are not rewritten nor sources deleted', async () => {

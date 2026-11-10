@@ -73,11 +73,11 @@ describe('POST /api/storage/post-images/upload-url (memory store)', () => {
     assert.match(j.key, new RegExp(`^${UID}/\\d+-[0-9a-f-]{36}\\.webp$`))
     assert.equal(j.upload.method, 'PUT')
     const [key, opts] = mem.calls.find(c => c.op === 'signPut')!.arg as [string, { contentType: string; contentLength: number }]
-    assert.equal(key, j.key)
+    // 미검증 업로드는 pending/ 에만 쓸 수 있고, 조회 URL은 /complete 검증 뒤에만 준다 (리뷰2 M3)
+    assert.equal(key, `pending/${j.key}`)
     assert.equal(opts.contentType, 'image/webp')
     assert.equal(opts.contentLength, POST_IMAGE_MAX_BYTES)
-    // 공개 URL 없는 저장소 → 서버 리다이렉트 경로
-    assert.equal(j.url, `/api/storage/post-images/${j.key}`)
+    assert.equal(j.url, undefined)
   })
 
   it('refuses a user id that cannot be a path segment', async () => {
@@ -155,19 +155,33 @@ describe('end to end with a fake S3 store', () => {
     setTokenVerifier()
   })
 
-  it('upload with the issued URL, then view through the redirect; a bigger body is refused', async () => {
-    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4])
+  it('upload to pending → /complete (Range read, move) → view through the redirect; a bigger body is refused', async () => {
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(4096, 7)])
     const r = await post(s.url, { contentType: 'image/png', size: png.length }, bearer(UID))
-    const j = await r.json() as { key: string; url: string; upload: { url: string; headers: Record<string, string> } }
+    const j = await r.json() as { key: string; upload: { url: string; headers: Record<string, string> } }
 
     const tooBig = await fetch(j.upload.url, { method: 'PUT', headers: j.upload.headers, body: Buffer.concat([png, png]) })
     assert.equal(tooBig.status, 403)
 
     const put = await fetch(j.upload.url, { method: 'PUT', headers: j.upload.headers, body: png })
     assert.equal(put.status, 200)
-    assert.ok(s3.objects.has(`post-images/${j.key}`))
+    assert.ok(s3.objects.has(`post-images/pending/${j.key}`))
+    // 검증 전에는 조회 라우트로 볼 수 없다
+    assert.equal((await fetch(`${s.url}/api/storage/post-images/${j.key}`)).status, 404)
 
-    const view = await fetch(`${s.url}${j.url}`)
+    const before = s3.bytesServed()
+    const done = await fetch(`${s.url}/api/storage/post-images/complete`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...bearer(UID) }, body: JSON.stringify({ key: j.key }),
+    })
+    assert.equal(done.status, 200)
+    const after = s3.bytesServed()
+    assert.equal(after.full - before.full, 0, '/complete must not download the whole object (M4)')
+    assert.ok(after.range - before.range <= 16)
+    assert.ok(s3.objects.has(`post-images/${j.key}`))
+    assert.ok(!s3.objects.has(`post-images/pending/${j.key}`))
+
+    const { url } = await done.json() as { url: string }
+    const view = await fetch(`${s.url}${url}`)
     assert.equal(view.status, 200)
     assert.deepEqual(Buffer.from(await view.arrayBuffer()), png)
   })

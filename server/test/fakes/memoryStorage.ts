@@ -14,7 +14,22 @@ export function memoryStorage(bucket: LogicalBucket, opts: { driver?: StorageDri
     },
     async get(key) {
       assertSafeKey(key)
+      calls.push({ op: 'get', arg: key })
       return objects.get(key)?.body ?? null
+    },
+    async getRange(key, start, end) {
+      assertSafeKey(key)
+      calls.push({ op: 'getRange', arg: [key, start, end] })
+      const o = objects.get(key)
+      return o ? o.body.subarray(start, end + 1) : null
+    },
+    async copy(from, to) {
+      assertSafeKey(from)
+      assertSafeKey(to)
+      calls.push({ op: 'copy', arg: [from, to] })
+      const o = objects.get(from)
+      if (!o) throw new Error('copy: source missing')
+      objects.set(to, { ...o })
     },
     async head(key) {
       assertSafeKey(key)

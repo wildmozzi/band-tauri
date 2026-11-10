@@ -17,10 +17,12 @@
  *   2) DB: 검증된 객체를 가리키는 Supabase 공개 URL만 바꾼다 (조건부 갱신: 계획 시점 값 그대로일 때만)
  *      stem_separations.*_url → S3 공개 URL 또는 `storage://audio-stems/<key>` (서버가 서명 URL로 바꿔 내려줌)
  *      posts.images[]         → S3 공개 URL 또는 `${PUBLIC_API_URL}/api/storage/post-images/<key>`
- *   3) --delete-source: 검증된 원본 중 삭제 직전 DB를 다시 읽어 아무 행도 원본 URL로 가리키지 않는 것만 지운다
+ *   3) --delete-source: 검증된 원본 중 삭제 직전 DB를 다시 읽어(keyset 전체 조회 + key마다 재확인)
+ *      아무 행도 원본 URL로 가리키지 않는 것만 지운다
  *      (그 버킷의 DB 갱신 실패가 있거나 재확인이 실패하면 하나도 지우지 않는다)
  *   새 조회 URL로 열 수 없는 예전 이미지 key는 DB를 바꾸지 않고 원본을 남긴다 (리포트에 표시)
- * 재실행해도 안전하다 (복사·갱신 모두 멱등). 서버를 STORAGE_DRIVER=s3로 바꾼 뒤 실행해야 이전 중 새 업로드가 원본에 쌓이지 않는다.
+ * 재실행해도 안전하다 (복사·갱신 모두 멱등). 원본이 지워진 뒤 예전 URL이 다시 저장된 행도 재실행하면
+ * 대상에 남은 사본의 새 URL로 바뀐다 (대상에만 있는 key 매핑). 서버를 STORAGE_DRIVER=s3로 바꾼 뒤 실행해야 이전 중 새 업로드가 원본에 쌓이지 않는다.
  */
 import * as dotenv from 'dotenv'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
@@ -100,6 +102,26 @@ export function supabaseKeyFromUrl(url: string, bucket: LogicalBucket): string |
   }
 }
 
+/**
+ * Supabase Storage URL의 모든 형태(public/sign/authenticated, render/image) → 그 버킷 key.
+ * 삭제 판단(참조 확인)용 — 넓게 잡는다 (리뷰2 L1)
+ */
+export function supabaseKeyFromAnyUrl(url: string, bucket: LogicalBucket): string | null {
+  let pathname: string
+  try {
+    pathname = new URL(url).pathname
+  } catch {
+    return null
+  }
+  const m = new RegExp('/storage/v1/(?:object|render/image)/(?:public|sign|authenticated)/' + bucket + '/(.+)$').exec(pathname)
+  if (!m) return null
+  try {
+    return m[1].split('/').map(decodeURIComponent).join('/')
+  } catch {
+    return null
+  }
+}
+
 export interface StemRowForMigration {
   id: string
   storage_folder: string
@@ -158,6 +180,12 @@ export interface MigrationDb {
   listPosts(): Promise<{ id: string; images: string[] | null }[]>
   /** images가 계획 시점 값 그대로일 때만 갱신. 갱신된 행 수 */
   updatePostImages(id: string, before: string[], images: string[]): Promise<number>
+  /**
+   * 원본 key 하나를 지금 DB가 (Supabase URL로) 가리키는지 — 삭제 직전 key 단위 재확인 (리뷰2 M2).
+   * knownUrls: 이번 실행에서 그 key를 가리키던 것으로 본 URL 문자열들 (정확 일치 검사용).
+   * 확신할 수 없으면 true(지우지 않음)
+   */
+  isSourceKeyReferenced(bucket: LogicalBucket, key: string, knownUrls: string[]): Promise<boolean>
 }
 
 export interface MigrationDeps {
@@ -205,10 +233,15 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
   for (const bucket of args.buckets) {
     const src = deps.source(bucket)
     const dst = deps.target(bucket)
-    let objects = await src.list('')
+    const sourceAll = await src.list('')
+    let objects = sourceAll
     if (args.limit !== null) objects = objects.slice(0, args.limit)
 
     const targetSizes = new Map((await dst.list('')).map(o => [o.key, o.size] as const))
+    // 원본은 이미 지워졌고 대상에만 있는 key (예: 삭제 뒤 오래된 편집 폼이 예전 URL을 다시 저장, 리뷰2 M1)
+    // → 그 key를 가리키는 Supabase URL도 다시 새 URL로 바꿔 재실행으로 수렴시킨다
+    const sourceKeys = new Set(sourceAll.map(o => o.key))
+    const targetOnly = [...targetSizes.keys()].filter(k => !sourceKeys.has(k))
     const plan = planCopy(objects, targetSizes)
     const r: BucketReport = {
       bucket,
@@ -252,11 +285,20 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
     }
     r.verified = verified.size
     // 드라이런의 DB 계획은 "복사가 모두 성공한다면" 기준
-    const wouldVerify = args.apply ? verified : new Set(objects.map(o => o.key))
+    const wouldVerify = new Set([...(args.apply ? verified : objects.map(o => o.key)), ...targetOnly])
+    if (targetOnly.length > 0) log(`  · 원본 없이 대상에만 있는 ${targetOnly.length}개: 이를 가리키는 예전 URL도 새 URL로 바꿈`)
 
     // 2) DB URL 갱신
+    const seenUrls = new Map<string, Set<string>>()
+    const see = (u: string) => {
+      const k = supabaseKeyFromAnyUrl(u, bucket)
+      if (!k) return
+      if (!seenUrls.has(k)) seenUrls.set(k, new Set())
+      seenUrls.get(k)!.add(u)
+    }
     if (bucket === 'audio-stems') {
       for (const row of await deps.db.listStemRows()) {
+        for (const [col, v] of Object.entries(row)) if (col.endsWith('_url') && typeof v === 'string') see(v)
         const update = rewriteStemRow(row, wouldVerify, dst)
         if (Object.keys(update).length === 0) continue
         r.dbPlanned++
@@ -282,6 +324,7 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
     } else {
       for (const p of await deps.db.listPosts()) {
         const images = p.images ?? []
+        images.forEach(see)
         const next = rewritePostImages(images, wouldVerify, deps.imageViewUrl, k => {
           if (!r.unroutable.includes(k)) r.unroutable.push(k)
         })
@@ -314,7 +357,7 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
       } else {
         // 삭제 직전 DB를 다시 읽어, 아직 원본(Supabase URL)을 가리키는 key는 절대 지우지 않는다.
         // (조건부 갱신 0행, 해석 못 한 참조, 이전 중 예전 클라이언트가 새로 저장한 참조 모두 여기서 걸러진다)
-        let referenced: Set<string>
+        let referenced: { keys: Set<string>; urls: Map<string, Set<string>> }
         try {
           referenced = await sourceReferencedKeys(bucket, deps.db)
         } catch (e) {
@@ -322,17 +365,30 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
           log(`  ! ${r.deleteSkippedReason}`)
           continue
         }
-        const keys = [...verified].filter(k => !referenced.has(k))
-        r.keptReferenced = verified.size - keys.length
-        if (r.keptReferenced > 0) log(`  · 아직 DB가 원본을 가리키는 ${r.keptReferenced}개는 남김`)
-        for (let i = 0; i < keys.length; i += 100) {
+        const deletable = [...verified].filter(k => sourceKeys.has(k) && !referenced.keys.has(k))
+        r.keptReferenced = [...verified].filter(k => referenced.keys.has(k)).length
+        // key마다 삭제 직전에 한 번 더 확인 (전체 조회와 삭제 사이에 생긴 참조 보호, 리뷰2 M2)
+        for (const k of deletable) {
+          let still: boolean
           try {
-            await src.delete(keys.slice(i, i + 100))
-            r.deleted += Math.min(100, keys.length - i)
+            still = await deps.db.isSourceKeyReferenced(bucket, k, [...(referenced.urls.get(k) ?? []), ...(seenUrls.get(k) ?? [])])
           } catch (e) {
-            log(`  ✗ 원본 삭제 실패: ${(e as Error).message}`)
+            log(`  ! ${k}: 재확인 실패로 남김 (${(e as Error).message})`)
+            r.keptReferenced++
+            continue
+          }
+          if (still) {
+            r.keptReferenced++
+            continue
+          }
+          try {
+            await src.delete([k])
+            r.deleted++
+          } catch (e) {
+            log(`  ✗ 원본 삭제 실패 ${k}: ${(e as Error).message}`)
           }
         }
+        if (r.keptReferenced > 0) log(`  · 아직 DB가 원본을 가리키는 ${r.keptReferenced}개는 남김`)
         log(`[${bucket}] 원본 ${r.deleted}개 삭제`)
       }
     }
@@ -340,39 +396,76 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
   return reports
 }
 
-/** DB가 지금 원본(Supabase ${bucket}) URL로 가리키는 모든 key (폴더·확장자와 무관하게) */
-export async function sourceReferencedKeys(bucket: LogicalBucket, db: MigrationDb): Promise<Set<string>> {
-  const out = new Set<string>()
+/** DB가 지금 원본(Supabase) URL로 가리키는 모든 key와 그 URL들 (폴더·확장자·URL 형태와 무관하게) */
+export async function sourceReferencedKeys(bucket: LogicalBucket, db: MigrationDb): Promise<{ keys: Set<string>; urls: Map<string, Set<string>> }> {
+  const keys = new Set<string>()
+  const urls = new Map<string, Set<string>>()
+  const add = (u: string) => {
+    const k = supabaseKeyFromAnyUrl(u, bucket)
+    if (!k) return
+    keys.add(k)
+    if (!urls.has(k)) urls.set(k, new Set())
+    urls.get(k)!.add(u)
+  }
   if (bucket === 'audio-stems') {
     for (const row of await db.listStemRows()) {
-      for (const [col, v] of Object.entries(row)) {
-        if (!col.endsWith('_url') || typeof v !== 'string') continue
-        const k = supabaseKeyFromUrl(v, bucket)
-        if (k) out.add(k)
-      }
+      for (const [col, v] of Object.entries(row)) if (col.endsWith('_url') && typeof v === 'string') add(v)
     }
   } else {
-    for (const p of await db.listPosts()) {
-      for (const u of p.images ?? []) {
-        const k = supabaseKeyFromUrl(u, bucket)
-        if (k) out.add(k)
-      }
-    }
+    for (const p of await db.listPosts()) (p.images ?? []).forEach(add)
   }
-  return out
+  return { keys, urls }
 }
 
-export function supabaseMigrationDb(sb: SupabaseClient): MigrationDb {
-  const cols = ['id', 'storage_folder', ...STEM_NAMES.map(n => `${n}_url`)].join(', ')
+/** PostgREST like/or 필터에 그대로 넣어도 안전한 key (그 밖은 재확인 불가 → 지우지 않음) */
+const FILTER_SAFE_KEY = new RegExp('^[A-Za-z0-9/._-]+$')
+
+/** keyset(id 커서) 페이지네이션: 조회 중 행이 삭제돼도 뒤 행을 건너뛰지 않는다 (offset은 당겨져 건너뜀, 리뷰2 M2) */
+async function selectAllByKeyset<T extends { id: string }>(
+  page: (after: string | null) => PromiseLike<{ data: unknown; error: { message: string } | null }>,
+  label: string,
+): Promise<T[]> {
+  const out: T[] = []
+  let last: string | null = null
+  for (;;) {
+    const { data, error } = await page(last)
+    if (error) throw new Error(`${label} select: ${error.message}`)
+    const rows = (data ?? []) as T[]
+    out.push(...rows)
+    if (rows.length < 1000) return out
+    last = rows[rows.length - 1].id
+  }
+}
+
+export function supabaseMigrationDb(sb: SupabaseClient, supabaseUrl = process.env.SUPABASE_URL ?? ''): MigrationDb {
+  const stemCols = STEM_NAMES.map(n => `${n}_url`)
+  const cols = ['id', 'storage_folder', ...stemCols].join(', ')
+  let base = supabaseUrl.trim()
+  while (base.endsWith('/')) base = base.slice(0, -1)
   return {
     async listStemRows() {
-      const out: StemRowForMigration[] = []
-      for (let from = 0; ; from += 1000) {
-        const { data, error } = await sb.from('stem_separations').select(cols).order('id').range(from, from + 999)
-        if (error) throw new Error(`stem_separations select: ${error.message}`)
-        out.push(...((data ?? []) as unknown as StemRowForMigration[]))
-        if (!data || data.length < 1000) return out
+      return selectAllByKeyset<StemRowForMigration>(after => {
+        let q = sb.from('stem_separations').select(cols).order('id').limit(1000)
+        if (after !== null) q = q.gt('id', after)
+        return q
+      }, 'stem_separations')
+    },
+    async isSourceKeyReferenced(bucket, key, knownUrls) {
+      if (!FILTER_SAFE_KEY.test(key)) return true
+      if (bucket === 'audio-stems') {
+        // 어떤 형태의 Supabase URL이든 /audio-stems/<key> 를 포함하는 값 (_ 는 LIKE 와일드카드라 더 넓게 잡힘 — 안전 쪽)
+        const or = stemCols.map(c => `${c}.like.*/${bucket}/${key}*`).join(',')
+        const { data, error } = await sb.from('stem_separations').select('id').or(or).limit(1)
+        if (error) throw new Error(error.message)
+        return (data ?? []).length > 0
       }
+      const candidates = new Set(knownUrls)
+      if (base) {
+        for (const kind of ['public', 'sign', 'authenticated']) candidates.add(`${base}/storage/v1/object/${kind}/${bucket}/${key}`)
+      }
+      const { data, error } = await sb.from('posts').select('id').overlaps('images', [...candidates]).limit(1)
+      if (error) throw new Error(error.message)
+      return (data ?? []).length > 0
     },
     async updateStemRow(id, before, update) {
       let q = sb.from('stem_separations').update(update).eq('id', id)
@@ -382,13 +475,11 @@ export function supabaseMigrationDb(sb: SupabaseClient): MigrationDb {
       return data?.length ?? 0
     },
     async listPosts() {
-      const out: { id: string; images: string[] | null }[] = []
-      for (let from = 0; ; from += 1000) {
-        const { data, error } = await sb.from('posts').select('id, images').order('id').range(from, from + 999)
-        if (error) throw new Error(`posts select: ${error.message}`)
-        out.push(...((data ?? []) as { id: string; images: string[] | null }[]))
-        if (!data || data.length < 1000) return out
-      }
+      return selectAllByKeyset<{ id: string; images: string[] | null }>(after => {
+        let q = sb.from('posts').select('id, images').order('id').limit(1000)
+        if (after !== null) q = q.gt('id', after)
+        return q
+      }, 'posts')
     },
     async updatePostImages(id, before, images) {
       // 배열 비교 조건 대신: 갱신 직전 다시 읽어 같을 때만 (작은 경합 창은 남는다 — 재실행으로 수렴)

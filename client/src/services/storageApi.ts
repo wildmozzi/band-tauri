@@ -20,7 +20,6 @@ interface UploadUrlResponse {
   success: boolean
   error?: string
   key: string
-  url: string
   upload: { url: string; method: 'PUT'; headers: Record<string, string>; expiresAt: string }
 }
 
@@ -52,7 +51,7 @@ export async function uploadPostImage(file: File, fetchImpl: typeof fetch = fetc
     body: JSON.stringify({ contentType: file.type, size: file.size }),
   })
   const data = (await res.json().catch(() => ({}))) as Partial<UploadUrlResponse>
-  if (!res.ok || !data.success || !data.upload || !data.url) {
+  if (!res.ok || !data.success || !data.upload || !data.key) {
     throw new Error(data.error || `이미지 업로드 URL 발급 실패 (${res.status})`)
   }
 
@@ -70,5 +69,27 @@ export async function uploadPostImage(file: File, fetchImpl: typeof fetch = fetc
     throw new Error(doneData.error || `이미지 확인 실패 (${done.status})`)
   }
 
-  return absoluteImageUrl(doneData.url || data.url, apiBase)
+  if (!doneData.url) throw new Error('이미지 확인 응답에 URL이 없습니다.')
+  return absoluteImageUrl(doneData.url, apiBase)
+}
+
+/**
+ * 게시글 저장 직전 이미지 URL을 서버 규칙으로 정규화한다 (P3-10 리뷰2 M1·M3).
+ * - 검증 완료 이미지만 남고, 이전된 예전 Supabase URL은 새 URL로 바뀐다(오래된 편집 폼 보호)
+ * - 원본이 없거나 미검증인 이미지는 빠진다(경고 로그)
+ */
+export async function resolvePostImages(urls: string[], fetchImpl: typeof fetch = fetch): Promise<string[]> {
+  if (urls.length === 0) return urls
+  const apiBase = getApiUrl()
+  const res = await fetchImpl(`${apiBase}/api/storage/post-images/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+    body: JSON.stringify({ urls }),
+  })
+  const data = (await res.json().catch(() => ({}))) as { success?: boolean; urls?: string[]; rejected?: { url: string; reason: string }[]; error?: string }
+  if (!res.ok || !data.success || !Array.isArray(data.urls)) {
+    throw new Error(data.error || `이미지 확인 실패 (${res.status})`)
+  }
+  if (data.rejected?.length) console.warn('[storage] 저장하지 않는 이미지:', data.rejected)
+  return data.urls.map(u => absoluteImageUrl(u, apiBase))
 }

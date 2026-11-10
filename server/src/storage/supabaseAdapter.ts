@@ -26,10 +26,11 @@ function splitKey(key: string): { dir: string; name: string } {
 export function createSupabaseStorageAdapter(
   supabase: StorageClient,
   bucket: LogicalBucket,
-  opts: { publicBucket?: boolean; now?: () => Date } = {},
+  opts: { publicBucket?: boolean; now?: () => Date; fetch?: typeof fetch } = {},
 ): StorageAdapter {
   const publicBucket = opts.publicBucket ?? true
   const now = opts.now ?? (() => new Date())
+  const fetchImpl = opts.fetch ?? fetch
   const b = () => supabase.storage.from(bucket)
 
   const listDir = async (dir: string): Promise<{ name: string; id: string | null; size: number }[]> => {
@@ -68,6 +69,42 @@ export function createSupabaseStorageAdapter(
         throw new StorageError(`get ${bucket}/${key}: ${error.message}`, error)
       }
       return Buffer.from(await data.arrayBuffer())
+    },
+
+    async getRange(key, start, endInclusive) {
+      assertSafeKey(key)
+      // supabase-js download는 Range를 못 준다 → 짧은 서명 URL에 Range 요청, 필요한 만큼만 읽고 끊는다
+      const { data, error } = await b().createSignedUrl(key, 60)
+      if (error || !data) {
+        if (isNotFound(error)) return null
+        throw new StorageError(`getRange sign ${bucket}/${key}: ${error?.message ?? 'no data'}`, error)
+      }
+      const want = endInclusive - start + 1
+      const res = await fetchImpl(data.signedUrl, { headers: { Range: `bytes=${start}-${endInclusive}` } })
+      if (res.status === 404 || res.status === 400) return null
+      if (!res.ok) throw new StorageError(`getRange ${bucket}/${key}: HTTP ${res.status}`)
+      const out: Buffer[] = []
+      let got = 0
+      const reader = res.body?.getReader()
+      if (!reader) return Buffer.alloc(0)
+      try {
+        while (got < want) {
+          const { done, value } = await reader.read()
+          if (done || !value) break
+          out.push(Buffer.from(value))
+          got += value.length
+        }
+      } finally {
+        await reader.cancel().catch(() => {})
+      }
+      return Buffer.concat(out).subarray(0, want)
+    },
+
+    async copy(fromKey, toKey) {
+      assertSafeKey(fromKey)
+      assertSafeKey(toKey)
+      const { error } = await b().copy(fromKey, toKey)
+      if (error) throw new StorageError(`copy ${bucket}/${fromKey} → ${toKey}: ${error.message}`, error)
     },
 
     async head(key) {

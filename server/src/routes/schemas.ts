@@ -81,3 +81,8 @@ export const postImageUploadBody = z.object({
 export const postImageCompleteBody = z.object({
   key: z.string().min(1).max(200),
 })
+
+/** 게시글 저장 전 이미지 URL 정규화 (리뷰2 M1·M3). 게시글 이미지는 최대 5장이지만 여유를 둔다 */
+export const postImageResolveBody = z.object({
+  urls: z.array(z.string().min(1).max(2048)).max(20),
+})

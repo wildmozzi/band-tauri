@@ -49,11 +49,30 @@ export function fakeSupabaseStorage() {
       getPublicUrl(path: string) {
         return { data: { publicUrl: `https://sb.test/storage/v1/object/public/${bucket}/${path}` } }
       },
+      async copy(from: string, to: string) {
+        const o = m.get(from)
+        if (!o) return { data: null, error: notFound }
+        if (m.has(to)) return { data: null, error: { message: 'The resource already exists', status: 409 } }
+        m.set(to, { ...o })
+        return { data: { path: to }, error: null }
+      },
       async remove(paths: string[]) {
         for (const p of paths) m.delete(p)
         return { data: [], error: null }
       },
     }
   }
-  return { client: { storage: { from } } as any, buckets, bucketOf }
+  /** createSignedUrl이 준 URL을 Range 포함해 서빙하는 fetch (getRange 테스트용) */
+  const served = { bytes: 0 }
+  const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const u = new URL(String(input))
+    const m = /^\/storage\/v1\/object\/sign\/([^/]+)\/(.+)$/.exec(u.pathname)
+    const o = m ? bucketOf(m[1]).get(decodeURIComponent(m[2])) : undefined
+    if (!o) return new Response('not found', { status: 400 })
+    const r = /^bytes=(\d+)-(\d+)$/.exec(String((init?.headers as Record<string, string> | undefined)?.Range ?? ''))
+    const body = r ? o.body.subarray(Number(r[1]), Number(r[2]) + 1) : o.body
+    served.bytes += body.length
+    return new Response(new Uint8Array(body), { status: r ? 206 : 200 })
+  }) as typeof fetch
+  return { client: { storage: { from } } as any, buckets, bucketOf, fetch: fakeFetch, served }
 }

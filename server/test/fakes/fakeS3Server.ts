@@ -25,6 +25,8 @@ export interface FakeS3 {
   secretAccessKey: string
   region: string
   objects: Map<string, FakeObject>
+  /** GET으로 내보낸 바이트 (전체 / Range) */
+  bytesServed(): { full: number; range: number }
   /** 요청 로그 (method + 경로 + 결과 상태) */
   log: { method: string; path: string; status: number; presigned: boolean }[]
   close(): Promise<void>
@@ -73,6 +75,8 @@ export async function startFakeS3(opts: { bucket?: string; pageSize?: number; no
   const now = opts.now ?? (() => new Date())
   const objects = new Map<string, FakeObject>()
   const log: FakeS3['log'] = []
+  let fullBytesServed = 0
+  let rangeBytesServed = 0
   const signer = new SignatureV4({ service: 's3', region, credentials: { accessKeyId, secretAccessKey }, sha256: Sha256, uriEscapePath: false })
 
   const send = (res: ServerResponse, status: number, body = '', headers: Record<string, string> = {}) => {
@@ -152,6 +156,19 @@ export async function startFakeS3(opts: { bucket?: string; pageSize?: number; no
       return error(res, 404, 'NoSuchBucket')
     }
 
+    if (req.method === 'PUT' && key && req.headers['x-amz-copy-source']) {
+      const srcPath = decodeURIComponent(String(req.headers['x-amz-copy-source'])).replace(/^\//, '')
+      const srcKey = srcPath.startsWith(`${bucket}/`) ? srcPath.slice(bucket.length + 1) : null
+      const src = srcKey ? objects.get(srcKey) : undefined
+      if (!src) {
+        done(404)
+        return error(res, 404, 'NoSuchKey')
+      }
+      objects.set(key, { ...src, body: Buffer.from(src.body) })
+      done(200)
+      return send(res, 200, '<?xml version="1.0" encoding="UTF-8"?><CopyObjectResult><ETag>"x"</ETag></CopyObjectResult>')
+    }
+
     if (req.method === 'PUT' && key) {
       const declared = req.headers['content-length']
       if (declared !== undefined && Number(declared) !== body.length) {
@@ -177,6 +194,19 @@ export async function startFakeS3(opts: { bucket?: string; pageSize?: number; no
         }
         return error(res, 404, 'NoSuchKey')
       }
+      const range = /^bytes=(\d+)-(\d+)$/.exec(String(req.headers.range ?? ''))
+      if (range && req.method === 'GET') {
+        const part = o.body.subarray(Number(range[1]), Number(range[2]) + 1)
+        rangeBytesServed += part.length
+        done(206)
+        res.writeHead(206, {
+          'content-type': o.contentType ?? 'application/octet-stream',
+          'content-length': String(part.length),
+          'content-range': `bytes ${range[1]}-${Number(range[1]) + part.length - 1}/${o.body.length}`,
+        })
+        return res.end(part)
+      }
+      if (req.method === 'GET') fullBytesServed += o.body.length
       done(200)
       res.writeHead(200, {
         'content-type': o.contentType ?? 'application/octet-stream',
@@ -230,6 +260,7 @@ export async function startFakeS3(opts: { bucket?: string; pageSize?: number; no
     region,
     objects,
     log,
+    bytesServed: () => ({ full: fullBytesServed, range: rangeBytesServed }),
     close: () => new Promise<void>(r => server.close(() => r())),
   }
 }

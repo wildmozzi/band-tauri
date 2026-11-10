@@ -58,6 +58,10 @@ export interface StorageAdapter {
   signedPutUrl(key: string, opts: SignedPutOptions): Promise<SignedPutRequest>
   /** 공개 URL (공개 버킷/공개 도메인일 때만). 없으면 null */
   publicUrl(key: string): string | null
+  /** 앞부분 바이트만 (start..endInclusive). 없으면 null. 전체를 받지 않는다(egress 절감) */
+  getRange(key: string, start: number, endInclusive: number): Promise<Buffer | null>
+  /** 같은 버킷 안 복사 (덮어쓰기). 실패 시 StorageError */
+  copy(fromKey: string, toKey: string): Promise<void>
   /** 여러 key 삭제. 없는 key는 무시. 실패 시 StorageError */
   delete(keys: string[]): Promise<void>
   /** prefix 아래 모든 객체 (재귀) */

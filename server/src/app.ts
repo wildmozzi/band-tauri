@@ -12,6 +12,8 @@ import { apiLimiter, paymentLimiter } from './lib/rateLimits'
 import { UPLOAD_DIR } from './lib/uploads'
 import { createStorageRouter } from './routes/storage'
 import { getDefaultStorage } from './storage/config'
+import { createSupabaseStorageAdapter } from './storage/supabaseAdapter'
+import { supabaseAdmin } from './lib/supabase'
 import type { StorageAdapter } from './storage/types'
 import type { UploadQuota } from './services/postImageService'
 
@@ -26,6 +28,10 @@ export interface AppOptions {
   imageStorage?: StorageAdapter | null
   /** 이미지 업로드 사용자별 상한 (테스트 주입). 기본: 24h 100개·200MB */
   imageUploadQuota?: UploadQuota
+  /** 예전 Supabase 이미지 원본 확인용 (테스트 주입). 기본: Supabase post-images */
+  legacyImageStorage?: StorageAdapter | null
+  /** /complete·/resolve 사용자별 분당 상한 (테스트 주입) */
+  imagePerUserPerMinute?: number
   /** 테스트에서만 false (한 IP에서 많은 요청을 보낸다). 기본: 켬 */
   rateLimits?: boolean
 }
@@ -76,7 +82,14 @@ export function createApp(options: AppOptions = {}) {
   app.use('/api/rooms', createRoomsRouter(options.roomService))
   app.use('/api/storage', createStorageRouter(
     options.imageStorage !== undefined ? options.imageStorage : getDefaultStorage('post-images'),
-    { rateLimits: options.rateLimits, quota: options.imageUploadQuota },
+    {
+      rateLimits: options.rateLimits,
+      quota: options.imageUploadQuota,
+      legacyImages: options.legacyImageStorage !== undefined
+        ? options.legacyImageStorage
+        : supabaseAdmin ? createSupabaseStorageAdapter(supabaseAdmin, 'post-images') : null,
+      perUserPerMinute: options.imagePerUserPerMinute,
+    },
   ))
 
   // 헬스체크

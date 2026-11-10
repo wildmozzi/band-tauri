@@ -8,13 +8,15 @@ import { createApp } from '../src/app'
 import { setTokenVerifier } from '../src/lib/auth'
 import { POST_IMAGE_MAX_BYTES, postImageKeyFromParams } from '../src/lib/imageStorage'
 import {
-  UploadQuota, cleanupOrphanPostImages, postImageKeyFromAnyUrl, uploadedAtOfKey, verifyPostImageUpload,
+  UploadQuota, VerifiedKeys, cleanupOrphanPostImages, postImageKeyFromAnyUrl, uploadedAtOfKey, verifyPostImageUpload,
 } from '../src/services/postImageService'
 import { bearer, testVerifier } from './helpers'
 import { memoryStorage } from './fakes/memoryStorage'
 
 const UID = '11111111-2222-3333-4444-555555555555'
 const KEY = `${UID}/1700000000000-0f0e0d0c-0b0a-4908-8706-050403020100.png`
+const KEY2 = `${UID}/1700000000001-1f0e0d0c-0b0a-4908-8706-050403020100.png`
+const KEY3 = `${UID}/1700000000002-2f0e0d0c-0b0a-4908-8706-050403020100.png`
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13])
 
 describe('M3: legacy client file names are viewable', () => {
@@ -28,14 +30,34 @@ describe('M3: legacy client file names are viewable', () => {
   })
 })
 
-describe('M2: verifyPostImageUpload', () => {
-  it('accepts a real image of the declared type in the caller\'s folder', async () => {
+describe('verifyPostImageUpload (pending → verified)', () => {
+  const P = `pending/${KEY}`
+
+  it('accepts a real image of the declared type, moves it out of pending, reads only the first bytes (M4)', async () => {
     const m = memoryStorage('post-images')
-    await m.adapter.put(KEY, PNG, { contentType: 'image/png' })
+    await m.adapter.put(P, Buffer.concat([PNG, Buffer.alloc(100_000)]), { contentType: 'image/png' })
     assert.deepEqual(await verifyPostImageUpload(m.adapter, UID, KEY), { ok: true })
+    assert.ok(m.objects.has(KEY))
+    assert.ok(!m.objects.has(P))
+    assert.equal(m.calls.filter(c => c.op === 'get').length, 0, 'never downloads the whole object')
+    const ranges = m.calls.filter(c => c.op === 'getRange').map(c => c.arg as [string, number, number])
+    assert.deepEqual(ranges, [[P, 0, 15]])
   })
 
-  it('deletes uploads whose content, stored type or size does not match (Supabase signed PUT cannot enforce them)', async () => {
+  it('repeated /complete for a verified key does not touch storage again (cache), or only HEADs it (restart)', async () => {
+    const m = memoryStorage('post-images')
+    await m.adapter.put(P, PNG, { contentType: 'image/png' })
+    const cache = new VerifiedKeys()
+    assert.ok((await verifyPostImageUpload(m.adapter, UID, KEY, cache)).ok)
+    const n = m.calls.length
+    for (let i = 0; i < 5; i++) assert.ok((await verifyPostImageUpload(m.adapter, UID, KEY, cache)).ok)
+    assert.equal(m.calls.length, n, 'cached: no storage calls')
+    // 캐시 없음(재시작): pending 없음 + 최종 경로 HEAD로 성공, 내용은 안 읽음
+    assert.ok((await verifyPostImageUpload(m.adapter, UID, KEY, new VerifiedKeys())).ok)
+    assert.equal(m.calls.slice(n).filter(c => c.op === 'getRange' || c.op === 'get').length, 0)
+  })
+
+  it('deletes pending uploads whose content, stored type or size does not match (Supabase signed PUT cannot enforce them)', async () => {
     const cases: [Buffer, string, RegExp][] = [
       [Buffer.from('<html><script>alert(1)</script>'), 'image/png', /내용/],
       [PNG, 'text/html', /형식/],
@@ -43,21 +65,22 @@ describe('M2: verifyPostImageUpload', () => {
     ]
     for (const [body, type, msg] of cases) {
       const m = memoryStorage('post-images')
-      await m.adapter.put(KEY, body, { contentType: type })
+      await m.adapter.put(P, body, { contentType: type })
       const r = await verifyPostImageUpload(m.adapter, UID, KEY)
       assert.ok(!r.ok && r.status === 422 && msg.test(r.error) && r.deleted, `${type} ${body.length}`)
-      assert.equal(m.objects.has(KEY), false)
+      assert.equal(m.objects.size, 0, 'nothing reaches the final path')
     }
   })
 
   it('refuses keys outside the caller\'s folder or not in server format (and does not delete them)', async () => {
     const m = memoryStorage('post-images')
     const other = KEY.replace(UID, 'someone-else')
-    await m.adapter.put(other, Buffer.from('x'))
+    await m.adapter.put(`pending/${other}`, PNG, { contentType: 'image/png' })
     const r = await verifyPostImageUpload(m.adapter, UID, other)
     assert.ok(!r.ok && r.status === 400)
-    assert.ok(m.objects.has(other))
+    assert.ok(m.objects.has(`pending/${other}`))
     assert.ok(!(await verifyPostImageUpload(m.adapter, UID, `${UID}/../x.png`)).ok)
+    assert.ok(!(await verifyPostImageUpload(m.adapter, UID, `pending/${KEY}`)).ok)
     const missing = await verifyPostImageUpload(m.adapter, UID, KEY)
     assert.ok(!missing.ok && missing.status === 404)
   })
@@ -77,13 +100,20 @@ describe('M4: per-user upload quota', () => {
   })
 })
 
-describe('routes: upload-url quota + complete', () => {
+describe('routes: upload-url quota + complete + resolve', () => {
   const m = memoryStorage('post-images')
+  const legacy = memoryStorage('post-images', { driver: 'supabase', publicBase: 'https://x.supabase.co/storage/v1/object/public' })
   let server: Server
   let url = ''
   before(async () => {
     setTokenVerifier(testVerifier)
-    server = createApp({ imageStorage: m.adapter, rateLimits: false, imageUploadQuota: new UploadQuota({ maxCount: 1, maxBytes: 100 }) }).listen(0)
+    server = createApp({
+      imageStorage: m.adapter,
+      legacyImageStorage: legacy.adapter,
+      rateLimits: false,
+      imagePerUserPerMinute: 8,
+      imageUploadQuota: new UploadQuota({ maxCount: 1, maxBytes: 100 }),
+    }).listen(0)
     await new Promise(r => server.once('listening', r))
     url = `http://127.0.0.1:${(server.address() as { port: number }).port}`
   })
@@ -104,16 +134,54 @@ describe('routes: upload-url quota + complete', () => {
     const anon = await fetch(`${url}/api/storage/post-images/complete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"key":"x"}' })
     assert.equal(anon.status, 401)
 
-    await m.adapter.put(KEY, PNG, { contentType: 'image/png' })
+    await m.adapter.put(`pending/${KEY}`, PNG, { contentType: 'image/png' })
     const ok = await post('complete', { key: KEY })
     assert.equal(ok.status, 200)
     assert.equal(((await ok.json()) as { url: string }).url, `/api/storage/post-images/${KEY}`)
 
-    await m.adapter.put(KEY, Buffer.from('GIF89a-not-png'), { contentType: 'image/png' })
-    assert.equal((await post('complete', { key: KEY })).status, 422)
-    assert.equal(m.objects.has(KEY), false)
+    await m.adapter.put(`pending/${KEY2}`, Buffer.from('GIF89a-not-png'), { contentType: 'image/png' })
+    assert.equal((await post('complete', { key: KEY2 })).status, 422)
+    assert.equal(m.objects.has(`pending/${KEY2}`), false)
+    assert.equal(m.objects.has(KEY2), false)
 
     assert.equal((await post('complete', { key: KEY }, 'intruder')).status, 400)
+  })
+
+  it('resolve (M1·M3): keeps verified images, maps migrated Supabase URLs, rejects pending/unknown/deleted', async () => {
+    const SBP = 'https://x.supabase.co/storage/v1/object/public/post-images'
+    const migrated = `${UID}/1600000000000-old1.png` // 원본 삭제됨, 대상(R2)에만 사본
+    const notYet = `${UID}/1600000000001-old2.png` // 아직 Supabase에만
+    const gone = `${UID}/1600000000002-old3.png` // 어디에도 없음
+    await m.adapter.put(migrated, PNG)
+    await legacy.adapter.put(notYet, PNG)
+    await m.adapter.put(`pending/${KEY3}`, PNG, { contentType: 'image/png' })
+
+    const r = await post('resolve', {
+      urls: [
+        `/api/storage/post-images/${KEY}`, // 검증 완료
+        `${SBP}/${migrated}`,
+        `${SBP}/${notYet}`,
+        `${SBP}/${gone}`,
+        `${SBP}/pending/${KEY3}`, // 미검증
+        `/api/storage/post-images/${KEY3}`, // 미검증 key를 최종 경로처럼 주장
+        'https://elsewhere.example/x.png',
+      ],
+    })
+    assert.equal(r.status, 200)
+    const j = await r.json() as { urls: string[]; rejected: { url: string }[] }
+    assert.deepEqual(j.urls, [
+      `/api/storage/post-images/${KEY}`,
+      `/api/storage/post-images/${migrated}`,
+      `${SBP}/${notYet}`,
+      'https://elsewhere.example/x.png',
+    ])
+    assert.deepEqual(j.rejected.map(x => x.url), [`${SBP}/${gone}`, `${SBP}/pending/${KEY3}`, `/api/storage/post-images/${KEY3}`])
+  })
+
+  it('per-user limit on complete/resolve (M4)', async () => {
+    let last = 200
+    for (let i = 0; i < 12 && last !== 429; i++) last = (await post('complete', { key: KEY }, 'limited-user')).status
+    assert.equal(last, 429)
   })
 })
 
