@@ -7,7 +7,8 @@ import { createApp } from './app'
 import { supabaseAdmin as supabase } from './lib/supabase'
 import { initializeWebSocket } from './services/wsService'
 import { scheduleCleanup } from './services/cleanupService'
-import { scheduleSubscriptionJobs } from './services/subscriptionService'
+import { getDefaultSubscriptionService, scheduleSubscriptionJobs } from './services/subscriptionService'
+import { createDefaultPaymentOrderService, scheduleOrderJobs } from './services/paymentOrderService'
 import { createRoomRepository } from './repositories/roomRepository'
 
 const PORT = Number(process.env.PORT || 8080)
@@ -24,6 +25,7 @@ if (supabase) {
     )
   scheduleCleanup(supabase)
   scheduleSubscriptionJobs()
+  scheduleOrderJobs(createDefaultPaymentOrderService(getDefaultSubscriptionService()))
 } else {
   console.log('[DB] Supabase not configured - participant sync disabled')
   console.log('[DB] Set SUPABASE_URL and SUPABASE_SERVICE_KEY to enable')
