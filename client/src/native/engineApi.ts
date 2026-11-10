@@ -70,9 +70,18 @@ export interface PeerStats {
   late: number
   concealed: number
   level: number
-  /** 실제 재생 지연(ms): 벽시계로 잰 버퍼 지연 + 출력 링 + 장치 출력 버퍼. bufferMs와 크게 벌어지면 숨은 지연 누적 */
+  /** 실제 재생 지연(ms): 벽시계로 잰 버퍼 지연(소스 링 포함) + 장치 출력 버퍼. bufferMs와 크게 벌어지면 숨은 지연 누적 */
   playoutMs?: number
 }
+
+/**
+ * 실제로 열린 오디오 백엔드. 입·출력이 다르면 `입력/출력`(예: `wasapiExclusive/wasapiShared3`).
+ * - `wasapiExclusive`: 자체 WASAPI 독점(이벤트 구동, 장치 최소 주기)
+ * - `wasapiShared3`: 자체 WASAPI IAudioClient3 저지연 공유
+ * - `cpalWasapi`: cpal 공유 모드(≈10ms, 자체 백엔드를 못 열었을 때의 폴백)
+ * - `cpalAsio`, `fake`(테스트)
+ */
+export type AudioBackendKind = 'wasapiExclusive' | 'wasapiShared3' | 'cpalWasapi' | 'cpalAsio' | 'fake'
 
 export interface EngineStats {
   /** 오디오 장치를 잃으면(콜백 정지) false */
@@ -82,14 +91,18 @@ export interface EngineStats {
   inputLevel: number
   outputLevel: number
   xruns: number
-  /** 로컬 처리 지연(GOAL 1절 정의: 입력 버퍼+프레임+출력 링+출력 버퍼) */
+  /** 로컬 처리 지연(GOAL 1절 정의: 입력 버퍼+프레임+출력 링+출력 버퍼). 콜백 구동 믹스라 출력 링은 0 */
   estLatencyMs: number
   /** 모니터 경로(내 입력 → 내 출력) 지연 */
   monitorLatencyMs?: number
   /** 오디오 스트림 에러 누적(비치명 포함) */
   streamErrors?: number
-  /** 장치 콜백이 1초 넘게 멈춤(장치 분리 등). true면 running=false */
+  /** 장치를 잃음(콜백 1초 정지, 장치 분리·무효화, 기본 장치 변경). true면 running=false */
   deviceLost?: boolean
+  /** 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기, cpal은 실측 콜백 크기 */
+  devicePeriodMs?: number
+  /** 실제로 열린 오디오 백엔드(`AudioBackendKind`, 입·출력이 다르면 `입력/출력`). 정지 상태면 빈 문자열 */
+  backend?: string
   peers: PeerStats[]
 }
 

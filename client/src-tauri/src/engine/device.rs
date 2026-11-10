@@ -34,6 +34,33 @@ pub struct DeviceInfo {
     pub sample_rates: Vec<u32>,
 }
 
+/// 실제로 열린 오디오 백엔드.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    /// 자체 WASAPI 이벤트 구동 독점 모드.
+    WasapiExclusive,
+    /// 자체 WASAPI `IAudioClient3` 저지연 공유 모드.
+    WasapiShared3,
+    /// cpal WASAPI(공유 모드, 보통 10ms 주기).
+    CpalWasapi,
+    /// cpal ASIO.
+    CpalAsio,
+    /// 테스트용 가짜 장치.
+    Fake,
+}
+
+impl BackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackendKind::WasapiExclusive => "wasapiExclusive",
+            BackendKind::WasapiShared3 => "wasapiShared3",
+            BackendKind::CpalWasapi => "cpalWasapi",
+            BackendKind::CpalAsio => "cpalAsio",
+            BackendKind::Fake => "fake",
+        }
+    }
+}
+
 /// 열린 스트림 정보.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamInfo {
@@ -43,6 +70,22 @@ pub struct StreamInfo {
     pub out_channels: usize,
     /// 요청한 장치 버퍼 크기(프레임). 실제 크기는 콜백 길이로 측정한다.
     pub buffer_frames: u32,
+    pub in_backend: BackendKind,
+    pub out_backend: BackendKind,
+    /// 장치에 설정된 주기(프레임). 0이면 알 수 없음(콜백 크기로 측정).
+    pub in_period_frames: u32,
+    pub out_period_frames: u32,
+}
+
+impl StreamInfo {
+    /// `EngineStats.backend` 문자열: 입·출력이 같으면 하나, 다르면 `입력/출력`.
+    pub fn backend_label(&self) -> String {
+        if self.in_backend == self.out_backend {
+            self.out_backend.as_str().to_string()
+        } else {
+            format!("{}/{}", self.in_backend.as_str(), self.out_backend.as_str())
+        }
+    }
 }
 
 /// 오디오 장치 백엔드. cpal 구현과 테스트용 가짜 구현이 있다.
@@ -319,12 +362,18 @@ pub mod cpal_backend {
                 out_ch,
                 out_sel.format
             );
+            let kind = |d: DriverKind| if d == DriverKind::Asio { BackendKind::CpalAsio } else { BackendKind::CpalWasapi };
             let info = StreamInfo {
                 in_rate: in_sel.config.sample_rate.0,
                 out_rate: out_sel.config.sample_rate.0,
                 in_channels: in_ch,
                 out_channels: out_ch,
                 buffer_frames: cfg.buffer_size,
+                in_backend: kind(cfg.input_driver),
+                out_backend: kind(cfg.output_driver),
+                // cpal은 실제 주기를 알려 주지 않는다(WASAPI 공유는 요청과 무관하게 ≈10ms). 콜백 크기로 잰다.
+                in_period_frames: 0,
+                out_period_frames: 0,
             };
             Ok((info, Box::new(Streams { _input: input_stream, _output: output_stream, asio: any_asio })))
         }
@@ -457,6 +506,107 @@ pub mod cpal_backend {
 }
 
 // ============================================================================
+// 시스템 백엔드: 자체 WASAPI 우선, cpal 폴백 (P1-0)
+// ============================================================================
+
+pub mod system {
+    //! 드라이버 선택 규칙:
+    //! - `asio`(입·출력 중 하나라도) → cpal(ASIO 피처).
+    //! - `wasapiExclusive` → 자체 WASAPI 독점(이벤트 구동, 장치 최소 주기).
+    //! - `wasapiShared` → 자체 WASAPI `IAudioClient3` 저지연 공유.
+    //! - 자체 백엔드가 실패하면: 독점을 저지연 공유로 바꿔 한 번 더, 그래도 안 되면 cpal(공유, ≈10ms).
+    //!   실제로 열린 백엔드는 `EngineStats.backend`로 보인다.
+    //! - Windows가 아니면 cpal만 쓴다.
+
+    use super::cpal_backend::CpalBackend;
+    use super::*;
+
+    pub struct SystemBackend {
+        cpal: CpalBackend,
+    }
+
+    impl Default for SystemBackend {
+        fn default() -> Self {
+            Self { cpal: CpalBackend }
+        }
+    }
+
+    impl SystemBackend {
+        pub fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    #[cfg(windows)]
+    fn mode_of(d: DriverKind) -> Option<crate::engine::wasapi::ShareMode> {
+        use crate::engine::wasapi::ShareMode;
+        match d {
+            DriverKind::WasapiExclusive => Some(ShareMode::Exclusive),
+            DriverKind::WasapiShared => Some(ShareMode::Shared3),
+            DriverKind::Asio => None,
+        }
+    }
+
+    impl AudioBackend for SystemBackend {
+        fn list_devices(&self) -> Result<Vec<DeviceInfo>, String> {
+            #[cfg(windows)]
+            {
+                match crate::engine::wasapi::enumerate_endpoints() {
+                    Ok(eps) => {
+                        let mut out = crate::engine::wasapi::device_infos(&eps);
+                        // ASIO 장치는 cpal에서(피처가 있을 때만 나온다)
+                        if cfg!(feature = "asio") {
+                            if let Ok(all) = self.cpal.list_devices() {
+                                out.extend(all.into_iter().filter(|d| d.driver == DriverKind::Asio));
+                            }
+                        }
+                        return Ok(out);
+                    }
+                    Err(e) => log::warn!("자체 WASAPI 열거 실패, cpal로 대신합니다: {e}"),
+                }
+            }
+            self.cpal.list_devices()
+        }
+
+        fn open(
+            &self,
+            cfg: &EngineConfig,
+            input: InputRt,
+            output: OutputRt,
+            counters: Arc<AudioCounters>,
+        ) -> Result<(StreamInfo, Box<dyn Any>), String> {
+            #[cfg(windows)]
+            let (input, output) = {
+                use crate::engine::wasapi::{open_engine_streams, ShareMode};
+                let mut rts = (input, output);
+                if let (Some(mi), Some(mo)) = (mode_of(cfg.input_driver), mode_of(cfg.output_driver)) {
+                    let shared = |m: ShareMode| if m == ShareMode::Exclusive { ShareMode::Shared3 } else { m };
+                    let mut attempts = vec![(mi, mo)];
+                    if (shared(mi), shared(mo)) != (mi, mo) {
+                        attempts.push((shared(mi), shared(mo)));
+                    }
+                    for modes in attempts {
+                        match open_engine_streams(cfg, modes, rts.0, rts.1, counters.clone()) {
+                            Ok(ok) => return Ok(ok),
+                            Err(f) => {
+                                log::warn!("자체 WASAPI {modes:?} 열기 실패: {}", f.message);
+                                match f.rts {
+                                    Some(r) => rts = *r,
+                                    None => return Err(f.message),
+                                }
+                            }
+                        }
+                    }
+                    log::warn!("자체 WASAPI를 열 수 없어 cpal(공유 모드)로 엽니다");
+                }
+                rts
+            };
+            self.cpal.open(cfg, input, output, counters)
+        }
+    }
+}
+
+// ============================================================================
 // 가짜 장치 (테스트/통합 테스트용)
 // ============================================================================
 
@@ -475,7 +625,7 @@ pub mod fake {
     use super::*;
     use parking_lot::Mutex;
     use rand::{Rng, SeedableRng};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::time::{Duration, Instant};
 
     /// 입력 신호 생성기: (절대 프레임 인덱스, 채널 수, 인터리브 버퍼).
@@ -511,6 +661,12 @@ pub mod fake {
         pub halt_after: Option<Duration>,
         /// 공유하면 동시에 한 번만 열 수 있다(배타 장치 흉내).
         pub exclusive: Option<Arc<AtomicBool>>,
+        /// 클럭 원점. 두 가짜 장치가 같은 원점을 쓰면 입력 인덱스와 출력 인덱스로 종단 간 지연을 잴 수 있다.
+        /// None이면 열 때의 시각. 원점이 과거면 콜백은 현재 시각에 해당하는 인덱스부터 시작한다.
+        pub t0: Option<Instant>,
+        /// 출력 sink 첫 샘플의 절대 프레임 인덱스(원점 기준).
+        /// sink 프레임 j의 재생 시각 = t0 + out_phase + (origin + j)/out_rate.
+        pub sink_origin: Arc<AtomicU64>,
     }
 
     impl FakeBackend {
@@ -534,6 +690,8 @@ pub mod fake {
                 out_stall: None,
                 halt_after: None,
                 exclusive: None,
+                t0: None,
+                sink_origin: Arc::new(AtomicU64::new(0)),
             }
         }
 
@@ -645,7 +803,16 @@ pub mod fake {
             let ch = self.channels;
             let in_buf = self.in_buffer.unwrap_or(cfg.buffer_size as usize).max(1);
             let out_buf = self.out_buffer.unwrap_or(cfg.buffer_size as usize).max(1);
-            let t0 = Instant::now();
+            let t0 = self.t0.unwrap_or_else(Instant::now);
+            // 원점이 과거면 지금 시각에 해당하는 콜백 인덱스부터 시작한다(밀린 콜백을 몰아서 부르지 않음).
+            let start_k = move |period: f64, offset: f64| -> u64 {
+                let el = t0.elapsed().as_secs_f64() - offset;
+                if el <= 0.0 {
+                    0
+                } else {
+                    (el / period).ceil() as u64
+                }
+            };
 
             let me = self.clone();
             let st = stop.clone();
@@ -655,19 +822,20 @@ pub mod fake {
                 .spawn(move || {
                     let mut buf = vec![0f32; in_buf * ch];
                     let seed = me.seed;
+                    let k0 = start_k(in_period, 0.0);
                     // 입력 콜백 k는 블록 [k, k+1)×in_buf의 캡처가 끝난 t0 + (k+1)·period에 불린다.
                     let lc = LoopCfg {
                         t0,
                         offset: Duration::ZERO,
                         period: in_period,
-                        first: 1,
+                        first: 1 + k0,
                         jitter_us: me.wake_jitter_us,
                         seed,
                         stall: None,
                         halt_after: me.halt_after,
                     };
                     clocked_loop(st, lc, |k| {
-                        (me.source)(k * in_buf as u64, ch, &mut buf);
+                        (me.source)((k + k0) * in_buf as u64, ch, &mut buf);
                         input.process(&buf, ch);
                     });
                 })
@@ -681,12 +849,14 @@ pub mod fake {
                 let mut errored = false;
                 let phase = Duration::from_micros(me.out_phase_us);
                 let seed = me.seed.wrapping_add(17);
+                let k0 = start_k(out_period, phase.as_secs_f64());
+                me.sink_origin.store(k0 * out_buf as u64, Ordering::SeqCst);
                 // 출력 콜백 k는 t0 + phase + k·period에 불려 재생 구간 [k, k+1)×out_buf를 채운다.
                 let lc = LoopCfg {
                     t0,
                     offset: phase,
                     period: out_period,
-                    first: 0,
+                    first: k0,
                     jitter_us: me.wake_jitter_us,
                     seed,
                     stall: me.out_stall,
@@ -717,6 +887,10 @@ pub mod fake {
                 in_channels: ch,
                 out_channels: ch,
                 buffer_frames: cfg.buffer_size,
+                in_backend: BackendKind::Fake,
+                out_backend: BackendKind::Fake,
+                in_period_frames: in_buf as u32,
+                out_period_frames: out_buf as u32,
             };
             Ok((info, Box::new(FakeGuard { stop, threads: vec![in_thread, out_thread], exclusive: self.exclusive.clone() })))
         }
@@ -747,10 +921,11 @@ mod tests {
     #[test]
     fn asio_unsupported_without_feature() {
         use super::cpal_backend::CpalBackend;
-        use crate::engine::rt::{input_ring, output_ring};
+        use crate::engine::mixer::MixControls;
+        use crate::engine::rt::{input_ring, output_path};
         let counters = Arc::new(AudioCounters::default());
         let (p, _c) = input_ring();
-        let (_p2, c2) = output_ring();
+        let (out_rt, _feed) = output_path(counters.clone(), Arc::new(MixControls::default()));
         let cfg = EngineConfig {
             input_driver: DriverKind::Asio,
             output_driver: DriverKind::Asio,
@@ -759,7 +934,7 @@ mod tests {
         let r = CpalBackend.open(
             &cfg,
             InputRt::new(p, counters.clone(), &[0], 1),
-            OutputRt::new(c2, counters.clone()),
+            out_rt,
             counters,
         );
         let err = r.expect_err("ASIO는 실패해야 함");

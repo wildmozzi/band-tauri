@@ -1,6 +1,6 @@
 //! 원자적 통계와 프론트로 나가는 통계 타입 (설계 문서 4절).
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use serde::Serialize;
 
@@ -32,15 +32,20 @@ pub struct AudioCounters {
     /// 마지막 입력 콜백 프레임 수(장치 버퍼 크기 추정).
     pub in_cb_frames: AtomicU32,
     pub out_cb_frames: AtomicU32,
-    /// 출력 콜백이 출력 링에서 소비한 누적 샘플 수(인터리브 스테레오 기준).
-    pub out_consumed: AtomicU64,
     /// 출력 콜백이 장치에 내보낸 누적 프레임 수(언더런으로 0을 채운 부분 포함 = 장치 재생 시간).
-    /// 장치 클럭 추정에는 이것을 쓴다. `out_consumed`는 언더런 때 덜 늘어 재생 시간보다 뒤처진다(PR #5 H-1).
+    /// 장치 클럭 추정에는 이것을 쓴다. 소비 샘플 수는 언더런 때 덜 늘어 재생 시간보다 뒤처진다(PR #5 H-1).
     pub out_played_frames: AtomicU64,
+    /// 출력 콜백 시작/끝 횟수. 워커는 둘이 같고 그 사이 바뀌지 않았을 때만(콜백이 돌지 않는 동안 읽은)
+    /// 소스 링 점유량으로 깊이 측정·마감 판단을 한다. 콜백이 링을 비운 직후 이전 마감 시각과 짝지으면
+    /// 한 주기 이르게 은닉했다.
+    pub out_cb_begin: AtomicU64,
+    pub out_cb_end: AtomicU64,
     /// 입력 콜백이 받은 누적 프레임 수(장치 분리 감지용).
     pub in_captured_frames: AtomicU64,
-    /// cpal 에러 콜백 호출 횟수(비치명 에러 포함). 워커가 로그로 남긴다.
+    /// 스트림 에러 횟수(cpal 에러 콜백, 자체 WASAPI 호출 실패; 비치명 포함). 워커가 로그로 남긴다.
     pub stream_errors: AtomicU32,
+    /// 백엔드가 장치 분실(분리·무효화·기본 장치 변경)을 직접 알렸다. 콜백 정지 감지(1초)보다 빠르다.
+    pub device_lost: AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -91,8 +96,13 @@ pub struct EngineStats {
     pub monitor_latency_ms: f32,
     /// 오디오 스트림 에러 누적 횟수(장치 분리 등, 리뷰 M9).
     pub stream_errors: u32,
-    /// 스트림 에러가 한 번이라도 났으면 true. UI는 엔진 재시작을 안내한다.
+    /// 장치를 잃었다(콜백 1초 정지, 또는 백엔드의 분리·기본 장치 변경 통지). 이때 `running`은 false.
     pub device_lost: bool,
+    /// 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기, cpal·가짜 장치는 실측 콜백 크기.
+    pub device_period_ms: f32,
+    /// 실제로 열린 오디오 백엔드: `wasapiExclusive` | `wasapiShared3`(IAudioClient3 저지연 공유) |
+    /// `cpalWasapi` | `cpalAsio` | `fake`. 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
+    pub backend: String,
     pub peers: Vec<PeerStats>,
 }
 
@@ -109,6 +119,8 @@ impl EngineStats {
             monitor_latency_ms: 0.0,
             stream_errors: 0,
             device_lost: false,
+            device_period_ms: 0.0,
+            backend: String::new(),
             peers: Vec::new(),
         }
     }
@@ -150,5 +162,6 @@ mod tests {
         assert!(j.contains("\"state\":\"connected\""));
         assert!(j.contains("\"path\":\"lan\""));
         assert!(j.contains("\"rttMs\":null"));
+        assert!(j.contains("\"devicePeriodMs\":0.0") && j.contains("\"backend\":\"\""), "{j}");
     }
 }
