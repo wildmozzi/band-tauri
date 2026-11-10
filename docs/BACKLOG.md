@@ -42,18 +42,19 @@
 | P2-3 | 공유 메트로놈(방장 기준, 각자 지연 보정한 클릭) | 2피어 시뮬레이션에서 클릭 정렬 오차 ≤ 2ms | 대기 |
 | P2-4 | 합주 녹음: 로컬 멀티트랙(내 입력 + 피어별) WAV/FLAC 저장 | 앱에서 녹음/내보내기 | 대기 |
 | P2-5 | 로그/진단 내보내기(엔진 통계 타임라인 + 설정) | 버튼 하나로 zip | 대기 |
-| P2-6 | 방 비밀번호/비공개 방, 연주 참여 승인 UX 정리 | E2E | 진행중(p2-rooms) |
+| P2-6 | 방 비밀번호/비공개 방, 연주 참여 승인 UX 정리 | E2E | 진행중(PR #9 충돌 해결 중; server 215, client 150) |
 
 ## P3 — 구조 개선 / 비용
 
 | ID | 항목 | 완료 조건 | 상태 |
 |---|---|---|---|
+| P2-6a | **[결정]** 요금제표의 "비공개 방 = Standard 이상" 제한을 적용할지 (현재 미적용) | 사용자 결정 | 대기 |
 | P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 완료(#3) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 대기 |
 | P3-4 | 거대 파일 분해(PostDetail, Rooms, EditPost, RoomDetail) | 파일당 ≤ 400줄 | 부분 완료(#7: PostDetail/Rooms/EditPost/CreatePost); RoomDetail 남음(엔진 연동 후) |
 | P3-5 | 서버 route→service→repository 계층화, 구독 정보를 DB로(현재 메모리 Map) | 테스트 통과 | 완료(#6, server 181 tests) |
-| P3-5a | **[확인]** 운영 Supabase에 `docs/migrations/007_subscriptions.sql` + `009_payment_orders.sql` 실행 — **main 배포와 함께** 해야 함(미실행 시 운영 결제 API가 503) + 토스 테스트 키로 결제·취소·재시작 복구 검증(실패 응답도 멱등 키로 캐시되는지 확인) | 사용자 승인 후 실행 | 대기 (P3-5 병합 후) |
+| P3-5a | **[확인]** 운영 Supabase에 `docs/migrations/007_subscriptions.sql` + `008_room_privacy.sql` + `009_payment_orders.sql` 실행 — **main 배포와 함께** 해야 함(미실행 시 운영 결제 API가 503) + 토스 테스트 키로 결제·취소·재시작 복구 검증(실패 응답도 멱등 키로 캐시되는지 확인) | 사용자 승인 후 실행 | 대기 (P3-5 병합 후) |
 | P3-5b | 결제 orderId를 서버가 발급(사용자 바인딩) + 클라이언트가 결제 503을 "결제 확인 중" 화면으로 표시·재조회 | 테스트 + 결제 흐름 E2E | 진행중(PR #8 리뷰; server 205, client 146) |
 | P3-6 | 음원분리 스템 WAV → Opus/OGG 저장(용량·트래픽 ~1/10), 기존 파일 마이그레이션 스크립트 | 업로드/재생 동작, 용량 비교 | 완료(#2: 3분 곡 31.7MB→3.8MB) |
 | P3-6a | **[사람]** 기존 WAV 스템 변환 실행(`npm run migrate:stems` 드라이런 확인 후 `-- --apply`, 원본 삭제) + Safari 실기기 재생 확인(iOS는 6스템 3분 곡 메모리/탭 종료 여부 포함) + macOS 데스크톱(WKWebView) 스템 재생 + fly 배포 이미지 크기 증가·libopus 인코더 포함 여부(`ffmpeg -encoders`)·3분 6스템 인코딩 시간 기록 | 사용자 승인 후 실행, 절감 용량 기록 | 대기 (P3-6 병합 후) |
