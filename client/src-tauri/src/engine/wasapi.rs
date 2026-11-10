@@ -1254,6 +1254,8 @@ pub fn open_engine_streams(
             out_backend: modes.1.backend(),
             in_period_frames: i.period_frames,
             out_period_frames: o.period_frames,
+            in_reported_latency_frames: (i.stream_latency_ms() * i.format.rate as f64 / 1000.0).round() as u32,
+            out_reported_latency_frames: (o.stream_latency_ms() * o.format.rate as f64 / 1000.0).round() as u32,
         };
         // 기본 장치로 연 방향은 감시한다(기본 장치가 바뀌면 deviceLost).
         let watch = [

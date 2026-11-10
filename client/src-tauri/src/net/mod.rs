@@ -45,6 +45,13 @@ pub struct RelaySetting<'a> {
 /// 원격 피어 최대 수(본인 포함 6명).
 pub const MAX_PEERS: usize = 5;
 
+/// 같은 키의 피어를 다시 만들 때(교체·제거 후 재추가) Audio seq를 이만큼 건너뛴다. 옛 객체로 아직 진행 중인
+/// 송신(워커가 쥔 `Arc`, 수신 스레드의 에코 반사)이 기록 뒤에 쓰는 seq와 겹치지 않게 한다(2.5ms 프레임 약 164초분).
+pub const AUDIO_SEQ_HANDOVER_GAP: u32 = 1 << 16;
+
+/// 송신 키 식별자: 이 Net(키쌍·ssrc 고정)에서 A→B 키는 (상대 공개키, 상대 ssrc)로 정해진다(설계 2절 HKDF info).
+type TxKeyId = ([u8; crate::net::crypto::KEY_BYTES], u32);
+
 /// 네트워크 시작 옵션.
 #[derive(Debug, Clone)]
 pub struct NetOptions {
@@ -78,9 +85,12 @@ pub struct NetShared {
     pub local_peer_id: String,
     pub ssrc: u32,
     keys: KeyPair,
-    seq_audio: AtomicU32,
     seq_ctrl: [AtomicU32; 6],
     peers: RwLock<Vec<Arc<Peer>>>,
+    /// 송신 키별 Audio seq 최고 수위(다음에 쓸 값). 피어를 제거·교체할 때 기록하고 Net 수명 내내 지우지 않는다.
+    /// 같은 키로 피어를 다시 만들면 여기서 이어 간다 → 같은 (키, nonce)가 세션 동안 반복되지 않는다(PR #13 H1).
+    /// 크기는 세션 중 만난 피어 descriptor 수 수준이다.
+    tx_seq_retired: Mutex<std::collections::HashMap<TxKeyId, u32>>,
     epoch: Instant,
     stop: AtomicBool,
     jitter_settings: JitterSettings,
@@ -157,9 +167,9 @@ impl Net {
             local_peer_id,
             ssrc,
             keys,
-            seq_audio: AtomicU32::new(rand::random()),
             seq_ctrl: Default::default(),
             peers: RwLock::new(Vec::new()),
+            tx_seq_retired: Mutex::new(std::collections::HashMap::new()),
             epoch: Instant::now(),
             stop: AtomicBool::new(false),
             jitter_settings,
@@ -216,9 +226,19 @@ impl Net {
             allow_loopback: self.shared.allow_loopback,
         };
         let peer = Arc::new(Peer::new(peer_id.clone(), desc, &setup, Instant::now())?);
+        let key = (peer.public_key, peer.ssrc);
         let mut peers = self.shared.peers.write();
-        if let Some(i) = peers.iter().position(|p| p.id == peer_id) {
+        let old_idx = peers.iter().position(|p| p.id == peer_id);
+        // 같은 송신 키를 쓰는 살아 있는 피어 객체가 둘이면 카운터가 둘이 되어 nonce가 겹친다 → 거부.
+        if peers.iter().any(|p| p.id != peer_id && (p.public_key, p.ssrc) == key) {
+            return Err("같은 키(descriptor)를 쓰는 다른 피어가 이미 있습니다".into());
+        }
+        if peers.len() - usize::from(old_idx.is_some()) >= MAX_PEERS {
+            return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
+        }
+        if let Some(i) = old_idx {
             let old = peers.remove(i);
+            self.shared.retire_tx_seq(&old);
             peer.mix.gain.store(old.mix.gain.load());
             peer.mix.muted.store(old.mix.muted.load(Ordering::Relaxed), Ordering::Relaxed);
             peer.mix.pan.store(old.mix.pan.load());
@@ -229,8 +249,9 @@ impl Net {
                 peer.conn.lock().inherit_replay_window(&old_conn);
             }
         }
-        if peers.len() >= MAX_PEERS {
-            return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
+        // 이 키로 전에 보낸 적이 있으면(교체, 제거 후 재추가) 그 최고 수위 + 여유에서 이어 간다(PR #13 H1).
+        if let Some(&hw) = self.shared.tx_seq_retired.lock().get(&key) {
+            peer.tx_seq.store(hw.wrapping_add(AUDIO_SEQ_HANDOVER_GAP), Ordering::Relaxed);
         }
         peers.push(peer);
         Ok(())
@@ -243,6 +264,7 @@ impl Net {
         };
         match removed {
             Some(p) => {
+                self.shared.retire_tx_seq(&p);
                 self.shared.send_bye(&p);
                 true
             }
@@ -337,6 +359,15 @@ impl NetShared {
         self.epoch.elapsed().as_micros() as u32
     }
 
+    /// 피어 객체를 버릴 때 그 송신 키의 Audio seq 최고 수위를 기록한다(같은 키로 다시 만들면 이어 간다).
+    /// 기록 뒤에도 옛 객체로 보내는 패킷이 있을 수 있어 재생성 시 `AUDIO_SEQ_HANDOVER_GAP`을 더한다.
+    fn retire_tx_seq(&self, p: &Peer) {
+        let next = p.tx_seq.load(Ordering::Relaxed);
+        let mut m = self.tx_seq_retired.lock();
+        // 한 키의 seq는 시작점에서 단조 증가(u32 랩, 400pps에서 124일)하므로 마지막 기록이 곧 최고 수위다.
+        m.insert((p.public_key, p.ssrc), next);
+    }
+
     fn next_ctrl_seq(&self, t: PacketType) -> u32 {
         self.seq_ctrl[(t as usize - 1).min(5)].fetch_add(1, Ordering::Relaxed)
     }
@@ -380,57 +411,175 @@ impl NetShared {
     }
 
     /// 확정 경로로 제어 패킷(Ping/Bye) 송신.
-    fn send_ctrl_on_path(&self, p: &Peer, t: PacketType, timestamp: u32) {
+    fn send_ctrl_on_path(&self, p: &Peer, t: PacketType, timestamp: u32, plaintext: &[u8]) {
         let path = p.conn.lock().path;
         if let Some((addr, kind)) = path {
-            self.send_ctrl(p, t, timestamp, &[], addr, kind == PathKind::Relay);
+            self.send_ctrl(p, t, timestamp, plaintext, addr, kind == PathKind::Relay);
         }
     }
 
     fn send_bye(&self, p: &Peer) {
-        self.send_ctrl_on_path(p, PacketType::Bye, self.now_us32());
+        self.send_ctrl_on_path(p, PacketType::Bye, self.now_us32(), &[]);
     }
 
-    /// 오디오 페이로드를 연결된 피어마다 그 피어의 송신 키로 암호화해 보낸다.
-    /// seq는 모든 피어에 같은 값을 쓴다(키가 달라 nonce 재사용이 아니다).
+    /// Ping 송신(에코 상태가 있으면 평문에 싣는다, 설계 2절).
+    fn send_ping(&self, p: &Peer, now: Instant) {
+        let payload = p.echo.lock().ping_payload(now);
+        self.send_ctrl_on_path(p, PacketType::Ping, self.now_us32(), payload.as_ref().map_or(&[][..], |b| &b[..]));
+    }
+
+    /// 피어 하나에 Audio 패킷 송신. seq는 피어별 카운터다(에코로 되돌리는 패킷과 nonce가 겹치지 않게).
+    #[allow(clippy::too_many_arguments)]
+    fn send_audio_to(&self, p: &Peer, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8], rbuf: &mut [u8; SEND_BUF_BYTES]) {
+        let target = {
+            let c = p.conn.lock();
+            if c.can_send_audio() { c.path } else { None }
+        };
+        let Some((addr, kind)) = target else {
+            return;
+        };
+        let h = Header {
+            ptype: PacketType::Audio,
+            ssrc: self.ssrc,
+            seq: p.tx_seq.fetch_add(1, Ordering::Relaxed),
+            timestamp,
+            flags,
+            frame_code,
+        };
+        p.tx_last_ts.store(timestamp, Ordering::Relaxed);
+        if kind == PathKind::Relay {
+            if let Some(n) = p.tx.seal(&h, payload, &mut rbuf[DATA_PREFIX_BYTES..]) {
+                self.send_sealed(rbuf, n, addr, Some(p.ssrc));
+            }
+        } else if let Some(n) = p.tx.seal(&h, payload, buf) {
+            let _ = self.socket.send_to(&buf[..n], addr);
+        }
+    }
+
+    /// 오디오 페이로드를 연결된 피어마다 그 피어의 송신 키로 암호화해 보낸다(seq는 피어별).
+    /// `alt = Some((peer_id, payload))`면 그 피어에게만 다른 페이로드(에코 측정 클릭 스트림)를 보낸다.
+    /// 내가 에코로 되돌리고 있는 피어에게는 내 오디오를 보내지 않는다(되돌린 패킷만 간다).
     /// `buf`는 호출자가 사전 할당한 MAX_PACKET_BYTES 버퍼(직접 경로용). 릴레이 경로는 접두부 자리가 있는
     /// 스택 버퍼를 쓴다(피어마다 RelayData를 따로 보낸다 — 릴레이에는 팬아웃이 없다).
-    pub fn send_audio(&self, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8]) {
-        if payload.len() > MAX_PAYLOAD_BYTES {
+    pub fn send_audio(&self, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8], alt: Option<(&str, &[u8])>) {
+        if payload.len() > MAX_PAYLOAD_BYTES || alt.is_some_and(|(_, a)| a.len() > MAX_PAYLOAD_BYTES) {
             return;
         }
         let peers = self.peers.read();
         if peers.is_empty() {
             return;
         }
-        let h = Header {
-            ptype: PacketType::Audio,
-            ssrc: self.ssrc,
-            seq: self.seq_audio.fetch_add(1, Ordering::Relaxed),
-            timestamp,
-            flags,
-            frame_code,
-        };
+        let now = Instant::now();
         let mut rbuf = [0u8; SEND_BUF_BYTES];
         for p in peers.iter() {
-            let target = {
-                let c = p.conn.lock();
-                if c.can_send_audio() { c.path } else { None }
+            if p.echo.lock().reflecting(now) {
+                continue;
+            }
+            let pl = match alt {
+                Some((id, a)) if id == p.id => a,
+                _ => payload,
             };
-            match target {
-                Some((addr, PathKind::Relay)) => {
-                    if let Some(n) = p.tx.seal(&h, payload, &mut rbuf[DATA_PREFIX_BYTES..]) {
-                        self.send_sealed(&mut rbuf, n, addr, Some(p.ssrc));
-                    }
+            self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf);
+        }
+    }
+
+    /// 에코 모드: 피어가 보낸 Audio 평문을 그대로(디코드 없이) 그 피어에게 되돌린다. 타임스탬프는 내 송신
+    /// 스트림에 이어지게 바꾼다(상대 지터 버퍼가 시각 점프를 보지 않게). 자기 입력은 섞지 않는다.
+    fn reflect_audio(&self, p: &Peer, h: &Header, plain: &[u8], received: Instant) {
+        let frame = crate::engine::config::frame_samples_from_code(h.frame_code).unwrap_or(0) as u32;
+        let ts = {
+            let mut e = p.echo.lock();
+            if !e.reflecting(received) {
+                return;
+            }
+            let off = *e
+                .ts_offset
+                .get_or_insert_with(|| p.tx_last_ts.load(Ordering::Relaxed).wrapping_add(frame).wrapping_sub(h.timestamp));
+            h.timestamp.wrapping_add(off)
+        };
+        let mut buf = [0u8; MAX_PACKET_BYTES];
+        let mut rbuf = [0u8; SEND_BUF_BYTES];
+        self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf);
+        let us = received.elapsed().as_secs_f32() * 1e6;
+        let mut e = p.echo.lock();
+        e.reflect_us += (us - e.reflect_us) * 0.05;
+    }
+
+    fn peer_by_id(&self, peer_id: &str) -> Result<Arc<Peer>, String> {
+        self.peers.read().iter().find(|p| p.id == peer_id).cloned().ok_or_else(|| "알 수 없는 피어".to_string())
+    }
+
+    /// 측정하는 쪽: 피어에게 에코를 요청/해제한다. 상태는 Ping에 실어 알리고, 바뀌면 바로 한 번 보낸다.
+    pub fn set_echo_request(&self, peer_id: &str, on: bool) -> Result<(), String> {
+        let p = self.peer_by_id(peer_id)?;
+        let now = Instant::now();
+        {
+            let mut e = p.echo.lock();
+            // 서로 동시에 에코하면 둘 다 상대 패킷만 되돌리고 자기 클릭은 보내지 않아 측정이 안 된다(PR #13 L1).
+            if on && e.reflecting(now) {
+                return Err("이 연주자의 에코 측정에 응답하는 중입니다. 끝난 뒤 다시 시도하세요".into());
+            }
+            e.requesting = on;
+        }
+        self.send_ping(&p, now);
+        Ok(())
+    }
+
+    /// 에코하는 쪽: 피어의 요청에 동의(켜기)/해제. 피어가 요청 중일 때만 켤 수 있다(양측 합의).
+    pub fn set_echo_mode(&self, peer_id: &str, enabled: bool) -> Result<(), String> {
+        let p = self.peer_by_id(peer_id)?;
+        let now = Instant::now();
+        {
+            let mut e = p.echo.lock();
+            if enabled {
+                if !e.remote_requesting(now) {
+                    return Err("상대가 에코 측정을 요청하지 않았습니다".into());
                 }
-                Some((addr, _)) => {
-                    if let Some(n) = p.tx.seal(&h, payload, buf) {
-                        let _ = self.socket.send_to(&buf[..n], addr);
-                    }
+                if e.requesting {
+                    return Err("내가 이 연주자를 측정하는 중이라 에코할 수 없습니다".into());
                 }
-                None => {}
+                e.enabled = true;
+                e.ts_offset = None;
+            } else {
+                e.stop_reflecting();
             }
         }
+        self.send_ping(&p, now);
+        Ok(())
+    }
+
+    /// (피어가 나를 에코 중인가, 피어가 보고한 처리 지연 µs).
+    pub fn remote_echo(&self, peer_id: &str) -> Result<(bool, u32), String> {
+        let p = self.peer_by_id(peer_id)?;
+        let e = p.echo.lock();
+        Ok((e.remote_echoing(Instant::now()), e.remote_delay_us))
+    }
+
+    /// 그 피어의 지터 버퍼를 처음부터 다시 채운다(에코 시작/끝에서 스트림이 바뀔 때).
+    pub fn restart_jitter(&self, peer_id: &str) -> Result<(), String> {
+        let p = self.peer_by_id(peer_id)?;
+        p.jitter.lock().restart();
+        Ok(())
+    }
+
+    pub fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
+        self.peer_by_id(peer_id).ok().and_then(|p| p.conn.lock().rtt_ms)
+    }
+
+    pub fn peer_path(&self, peer_id: &str) -> Option<PathKind> {
+        self.peer_by_id(peer_id).ok().and_then(|p| p.conn.lock().path.map(|(_, k)| k))
+    }
+
+    /// 그 피어의 지터 버퍼 깊이(`bufferMs`, 재생 중일 때만).
+    pub fn peer_buffer_ms(&self, peer_id: &str) -> Option<f32> {
+        let p = self.peer_by_id(peer_id).ok()?;
+        let j = p.jitter.lock();
+        j.is_playing().then(|| j.stats().buffer_ms)
+    }
+
+    /// 피어 id → ssrc.
+    pub fn peer_ssrc(&self, peer_id: &str) -> Result<u32, String> {
+        self.peer_by_id(peer_id).map(|p| p.ssrc)
     }
 
     pub fn for_each_peer(&self, mut f: impl FnMut(&Peer)) {
@@ -539,10 +688,15 @@ impl NetShared {
                 }
                 match other {
                     // Pong은 Ping이 온 길로 돌려준다(경로 전환 중에도 RTT가 끊기지 않게)
-                    PacketType::Ping => self.send_ctrl(&peer, PacketType::Pong, h.timestamp, &[], from, via_relay),
+                    PacketType::Ping => {
+                        peer.echo.lock().on_ping(plain, now);
+                        self.send_ctrl(&peer, PacketType::Pong, h.timestamp, &[], from, via_relay);
+                    }
                     PacketType::Audio => {
                         let now_us = now.duration_since(self.epoch).as_micros() as u64;
                         peer.jitter.lock().insert(&h, plain, now_us);
+                        // 에코 모드(동의함): 받은 그대로 되돌린다(믹스와 별도 경로).
+                        self.reflect_audio(&peer, &h, plain, now);
                     }
                     _ => {}
                 }
@@ -605,8 +759,9 @@ fn control_loop(s: &NetShared) {
             if let (true, Some(r)) = (action.hello_relay, relay) {
                 s.send_ctrl(p, PacketType::Hello, s.now_us32(), s.local_peer_id.as_bytes(), r, true);
             }
+            p.echo.lock().expire(now);
             if action.ping {
-                s.send_ctrl_on_path(p, PacketType::Ping, s.now_us32());
+                s.send_ping(p, now);
             }
             // Failed 피어(Bye 없이 사라짐)는 빼야 1초마다 Bind를 계속 보내지 않는다(PR #10 L3)
             if let (Some((_, PathKind::Relay)), false) = (path, failed) {

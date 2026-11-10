@@ -293,6 +293,14 @@ impl JitterBuffer {
         (seq & SLOT_MASK) as usize
     }
 
+    /// 지연 통계까지 모두 버리고 처음부터 다시 채운다(누적 통계 카운터는 유지). 같은 피어의 스트림 성격이
+    /// 바뀔 때(에코 측정 시작/끝: 상대 오디오 ↔ 되돌아온 내 오디오) 이전 도착 시각 분포를 섞지 않으려고 쓴다.
+    pub fn restart(&mut self) {
+        let stats = self.stats;
+        *self = Self::new(self.settings);
+        self.stats = stats;
+    }
+
     fn reset_stream(&mut self) {
         for s in &mut self.slots {
             s.valid = false;

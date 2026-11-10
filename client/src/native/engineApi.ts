@@ -99,6 +99,87 @@ export interface PeerStats {
   level: number
   /** 실제 재생 지연(ms): 벽시계로 잰 버퍼 지연(소스 링 포함) + 장치 출력 버퍼. bufferMs와 크게 벌어지면 숨은 지연 누적 */
   playoutMs?: number
+  /** 이 피어가 나에게 에코 측정을 요청 중(동의를 물어야 함) */
+  echoRequested?: boolean
+  /** 내가 이 피어의 소리를 되돌려 보내는 중(동의함) */
+  echoActive?: boolean
+  /** 이 피어가 내 소리를 되돌려 보내는 중(내 에코 측정 진행 중) */
+  peerEchoing?: boolean
+}
+
+// ============================================================================
+// 지연 측정 (P1-1, 설계 문서 4절)
+// ============================================================================
+
+/** ok: 정상, noSignal: 신호 미검출, clipped: 입력 클리핑, unstable: 검출 부족·흩어짐 큼 */
+export type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
+
+export interface LoopbackRun {
+  roundTripMs: number | null
+  peakRatio: number
+  correlation: number
+  clipped: boolean
+  inverted: boolean
+  inputPeak: number
+}
+
+/** `engine_measure_loopback` 결과(하드웨어 루프백 왕복) */
+export interface LoopbackReport {
+  verdict: MeasureVerdict
+  message: string
+  runs: LoopbackRun[]
+  detectedRuns: number
+  /** 실측 왕복(아날로그 출력 → 입력, 소프트웨어 패스스루 기준) 중앙값·최소·최대·표준편차 */
+  roundTripMs: number | null
+  minMs: number | null
+  maxMs: number | null
+  stdDevMs: number | null
+  sampleRate: number
+  inputBufferFrames: number
+  outputBufferFrames: number
+  /** 입력 버퍼 + 출력 버퍼 */
+  bufferRoundTripMs: number
+  /** 드라이버 보고(ASIO ASIOGetLatencies, 자체 WASAPI GetStreamLatency). 모르면 null */
+  driverInputLatencyMs: number | null
+  driverOutputLatencyMs: number | null
+  driverRoundTripMs: number | null
+  estLatencyMs: number
+  /** 보정값 = 실측 − (입력 버퍼 + 출력 버퍼): estLatencyMs에 없는 숨은 지연 */
+  offsetMs: number | null
+  /** 실측 − 드라이버 보고 */
+  driverErrorMs: number | null
+  /** estLatencyMs + 보정값 */
+  correctedEstLatencyMs: number | null
+  backend: string
+}
+
+/** `engine_measure_echo_peer` 결과(네트워크 포함 왕복) */
+export interface EchoReport {
+  verdict: MeasureVerdict
+  message: string
+  peerId: string
+  runs: (number | null)[]
+  detectedRuns: number
+  /** 프레임 + 망 왕복 + 상대 되돌리기 + 내 지터 버퍼 */
+  roundTripMs: number | null
+  minMs: number | null
+  maxMs: number | null
+  stdDevMs: number | null
+  /** 상대가 보고한 로컬 처리 지연(되돌리기) */
+  peerEchoDelayMs: number
+  /** (왕복 − 상대 처리) / 2 */
+  oneWayMs: number | null
+  networkRttMs: number | null
+  jitterBufferMs: number
+  frameMs: number
+  localLatencyMs: number
+  inputBufferMs: number
+  outputBufferMs: number
+  /** 입→귀 추정 = 왕복 − 상대 처리 − 핑/2 + 입력 버퍼 + 출력 버퍼 */
+  mouthToEarMs: number | null
+  /** 왕복 − (프레임 + 핑 + 상대 처리 + 지터 버퍼): 0에 가까우면 통계가 맞음 */
+  residualMs: number | null
+  path: PeerPath | null
 }
 
 /**
@@ -249,6 +330,32 @@ export function engineStats(): Promise<EngineStats> {
  * 믹스 구독. 엔진이 20ms마다 48kHz stereo f32 인터리브 청크를 보낸다.
  * Rust가 raw 바이트로 보내면 ArrayBuffer, JSON 배열로 보내면 number[]가 오므로 둘 다 Float32Array로 맞춘다.
  */
+/**
+ * 하드웨어 루프백 지연 측정. 엔진이 실행 중이어야 한다(보통 테스트 모드). 측정 동안 출력은 처프만 낸다.
+ * 반복당 약 0.7초 걸린다.
+ */
+export function engineMeasureLoopback(runs?: number): Promise<LoopbackReport> {
+  return invoke<LoopbackReport>('engine_measure_loopback', runs === undefined ? {} : { runs })
+}
+
+/** 에코 모드 동의/해제(에코하는 쪽). 그 피어가 요청 중일 때만 켤 수 있다 */
+export function engineSetEchoMode(peerId: string, enabled: boolean): Promise<null> {
+  return invoke<null>('engine_set_echo_mode', { peerId, enabled })
+}
+
+/** 에코 피어 측정(측정하는 쪽). 상대 동의를 waitMs(기본 30초)까지 기다린다 */
+export function engineMeasureEchoPeer(peerId: string, runs?: number, waitMs?: number): Promise<EchoReport> {
+  const args: Record<string, unknown> = { peerId }
+  if (runs !== undefined) args.runs = runs
+  if (waitMs !== undefined) args.waitMs = waitMs
+  return invoke<EchoReport>('engine_measure_echo_peer', args)
+}
+
+/** 진행 중인 측정 취소 */
+export function engineCancelMeasure(): Promise<null> {
+  return invoke<null>('engine_cancel_measure')
+}
+
 export async function engineSubscribeMix(onChunk: (samples: Float32Array) => void): Promise<void> {
   const channel = new Channel<ArrayBuffer | number[]>()
   channel.onmessage = (data) => {
