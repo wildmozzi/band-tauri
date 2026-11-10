@@ -1,10 +1,12 @@
 //! 피어별 적응형 지터 버퍼 + 드리프트 보정 + PLC (설계 문서 1.2절).
 //!
-//! ## 사용법(워커)
-//! 출력 콜백이 장치 버퍼를 소비하면 워커가 같은 양을 작은 청크로 연달아 `pop`한다(버스트).
-//! 버스트가 끝나면 `end_burst(now, wall)`를 한 번 부른다. 깊이 측정·재생 시작·보정 판단은 모두
-//! `end_burst`에서만 한다. `now`는 워커가 깨어난 시각이 아니라 **출력 콜백 시각 추정치**
-//! (장치 클럭)다. 워커 기상 지연이 깊이 측정에 섞이면 제어가 발산한다(리뷰 M2/M4, CI 실패 원인).
+//! ## 사용법(워커, 콜백 구동 믹스)
+//! 워커는 받은 데이터로 꺼낼 수 있으면(`can_pop_real`) 작은 청크로 미리 `pop`해 피어의 소스 링에
+//! 넣고, 데이터가 없으면 출력 콜백 마감 직전에만 `pop`(은닉)한다. 출력 콜백이 돌 때마다
+//! `end_burst(now, wall, ahead)`를 한 번 부른다. 깊이 측정·재생 시작·보정 판단은 모두 `end_burst`에서만
+//! 한다. `now`는 워커가 깨어난 시각이 아니라 **출력 콜백 시각 추정치**(장치 클럭)다. 워커 기상 지연이
+//! 깊이 측정에 섞이면 제어가 발산한다(리뷰 M2/M4, CI 실패 원인). `ahead`는 이미 꺼냈지만 재생 전인
+//! 양(소스 링)이며, 깊이는 실제 재생 위치를 기준으로 잰다.
 //!
 //! ## 깊이(depth)의 정의
 //! 패킷 i의 `transit_i = arrival_i - ts_i`(샘플)의 최근 200개 최솟값을 `min_transit`라 할 때
@@ -154,6 +156,9 @@ pub struct JitterBuffer {
     lower_for_samples: f64,
 
     depth_ewma: Option<f64>,
+    /// 이미 꺼냈지만 아직 재생되지 않은 샘플 수(48k). 콜백 구동 믹스에서 소스 링·리샘플러에 있는 양.
+    /// 깊이는 실제 재생 위치(소스 링의 머리)를 기준으로 잰다.
+    ahead: f64,
     correction: Correction,
     drop_frames_pending: usize,
     trimming: bool,
@@ -228,6 +233,7 @@ impl JitterBuffer {
             target_frames: 0.0,
             lower_for_samples: 0.0,
             depth_ewma: None,
+            ahead: 0.0,
             correction: Correction::Idle,
             drop_frames_pending: 0,
             trimming: false,
@@ -445,19 +451,38 @@ impl JitterBuffer {
         self.min_transit = min;
     }
 
-    /// 현재 재생 위치 기준 깊이(샘플).
+    /// 현재 재생 위치 기준 깊이(샘플). 재생 위치(소스 링 머리)의 ts = 다음에 꺼낼 샘플의 ts − 이미
+    /// 꺼냈지만 재생 전인 양(`ahead`). 링에 있는 샘플이 더 오래되었으므로 깊이는 그만큼 크다.
     fn depth_now(&self, now_us: u64) -> f64 {
-        let play_ts = self.fifo_end_ts - (self.fifo.len() / 2) as i64;
-        (Self::now_samples(now_us) - play_ts - self.min_transit) as f64
+        let next_ts = self.fifo_end_ts - (self.fifo.len() / 2) as i64;
+        (Self::now_samples(now_us) - next_ts - self.min_transit) as f64 + self.ahead
     }
 
-    /// 다음 seq의 시작 타임스탬프 기준 깊이(버퍼링 중 판단용).
+    /// 다음 seq의 시작 타임스탬프 기준 깊이(버퍼링 중 판단용). 소스 링에 이전 스트림이 남아 있으면
+    /// 그만큼 늦게 재생되므로 깊이에 더한다.
     fn depth_if_start(&self, now_us: u64) -> Option<f64> {
         let slot = &self.slots[Self::slot_index(self.next_seq)];
         if !(slot.valid && slot.seq == self.next_seq) {
             return None;
         }
-        Some((Self::now_samples(now_us) - self.ts_ext(slot.ts) - self.min_transit) as f64)
+        Some((Self::now_samples(now_us) - self.ts_ext(slot.ts) - self.min_transit) as f64 + self.ahead)
+    }
+
+    /// 은닉 없이(실제 받은 데이터로만) 지금 꺼낼 수 있는 프레임 수(최소 보장치). 콜백 구동 믹스에서 워커는
+    /// 이만큼만 미리 꺼내고, 은닉은 출력 콜백 마감 직전에만 한다(늦게 오는 패킷을 기다림).
+    /// FIFO에 남은 패킷 꼬리도 포함한다: 청크 단위로만 꺼내면 꼬리(< 청크)가 남아 마감에 은닉이 끼었다.
+    pub fn real_frames(&self) -> usize {
+        if self.state != State::Playing {
+            return 0;
+        }
+        let fifo = self.fifo.len() / 2;
+        // 다음 패킷이 있으면 패킷 하나(보정으로 최대 2샘플 줄어듦)를 더 꺼낼 수 있다. 패킷 단위 버림이
+        // 걸려 있으면 그다음 패킷까지 있어야 은닉이 끼지 않는다.
+        if self.slot_has(self.next_seq) && (self.drop_frames_pending == 0 || self.slot_has(self.next_seq.wrapping_add(1))) {
+            fifo + self.slots[Self::slot_index(self.next_seq)].frame.saturating_sub(2)
+        } else {
+            fifo
+        }
     }
 
     /// 실제로 받아 둔(또는 그 사이 빈) 샘플 수: 다음 seq부터 최고 seq까지 + FIFO.
@@ -489,7 +514,12 @@ impl JitterBuffer {
     /// `wall_us`는 워커가 실제로 깨어난 벽시계 시각이다. 이것으로 잰 깊이는 기상 지연만큼 크게 나오므로,
     /// 1초 창의 최솟값이 장치 클럭 추정과 **독립적인** 실제 재생 지연이 된다(PR #5 H-1: 클럭 추정이
     /// 틀려 지연이 몰래 늘어나는 경우를 통계로 드러낸다).
-    pub fn end_burst(&mut self, now_us: u64, wall_us: u64) {
+    ///
+    /// `ahead`: 이미 꺼냈지만 아직 재생되지 않은 샘플 수(48k 환산). 콜백 구동 믹스에서는 소스 링과
+    /// 출력 리샘플러에 있는 양이다. 깊이는 실제 재생 위치를 기준으로 재므로 이것을 뺀다. 그래서
+    /// `bufferMs`는 소스 링까지 포함한 수신측 버퍼 지연이다.
+    pub fn end_burst(&mut self, now_us: u64, wall_us: u64, ahead: f64) {
+        self.ahead = ahead.max(0.0);
         match self.state {
             State::Buffering => self.try_start(now_us),
             State::Playing => {
@@ -1023,7 +1053,7 @@ mod tests {
                 }
                 left -= n;
             }
-            jb.end_burst(bt as u64, bt as u64);
+            jb.end_burst(bt as u64, bt as u64, 0.0);
             if jb.is_playing() {
                 started = true;
             }
@@ -1156,12 +1186,12 @@ mod tests {
         for (h, p) in pkts.iter().take(10) {
             jb.insert(h, p, t);
             jb.pop(&mut out);
-            jb.end_burst(t, t);
+            jb.end_burst(t, t, 0.0);
             t += 5000;
         }
         for _ in 0..5 {
             jb.pop(&mut out);
-            jb.end_burst(t, t);
+            jb.end_burst(t, t, 0.0);
             t += 5000;
         }
         let before = jb.stats().late;
@@ -1190,7 +1220,7 @@ mod tests {
             let (h, p) = tx.next();
             jb.insert(&h, &p, t);
             jb.pop(&mut out);
-            jb.end_burst(t, t);
+            jb.end_burst(t, t, 0.0);
             t += 5000;
         }
         let lost: Vec<_> = (0..3).map(|_| tx.next()).collect();
@@ -1201,7 +1231,7 @@ mod tests {
         let mut energies = vec![];
         for _ in 0..6 {
             jb.pop(&mut out);
-            jb.end_burst(t, t);
+            jb.end_burst(t, t, 0.0);
             energies.push(out.iter().map(|x| x * x).sum::<f32>());
             t += 5000;
             let (h, p) = tx.next();
@@ -1240,7 +1270,7 @@ mod tests {
             }
             if t >= burst_t {
                 jb.pop(&mut out);
-                jb.end_burst(t, t);
+                jb.end_burst(t, t, 0.0);
                 if t > 1_000_000 {
                     for fr in out.as_chunks::<2>().0 {
                         if let Some(p) = prev {

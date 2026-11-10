@@ -13,6 +13,8 @@ pub mod prio;
 pub mod resample;
 pub mod rt;
 pub mod stats;
+#[cfg(windows)]
+pub mod wasapi;
 pub mod worker;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,18 +23,20 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use ringbuf::traits::{Consumer, Observer, Split};
-use ringbuf::HeapRb;
+use parking_lot::Mutex;
+use ringbuf::traits::Consumer;
+use ringbuf::HeapCons;
 
 use crate::net::peer::LocalDescriptor;
 use crate::net::{Net, NetOptions};
-use config::EngineConfig;
+use config::{EngineConfig, INTERNAL_RATE};
 use device::{AudioBackend, StreamInfo};
 use jitter::JitterSettings;
 use mixer::{clamp_gain, MixControls};
-use rt::{InputRt, OutputRt};
+use resample::StreamResampler;
+use rt::InputRt;
 use stats::{AudioCounters, EngineStats, PeerStats};
-use worker::{MixTap, Worker, WorkerParams, WorkerStats};
+use worker::{Worker, WorkerParams, WorkerStats};
 
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
 pub type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
@@ -42,7 +46,8 @@ pub const MIX_CHUNK_FRAMES: usize = 960;
 
 struct TapThread {
     stop: Arc<AtomicBool>,
-    handle: JoinHandle<()>,
+    /// 끝나면 탭 링 소비자를 돌려준다(다음 구독에서 다시 씀).
+    handle: JoinHandle<HeapCons<f32>>,
 }
 
 pub struct Engine {
@@ -56,7 +61,8 @@ pub struct Engine {
     audio_stop: Arc<AtomicBool>,
     audio: Option<JoinHandle<()>>,
     net: Option<Net>,
-    tap: Arc<MixTap>,
+    /// 출력 콜백이 장치 레이트로 채우는 믹스 탭 링의 소비자. 구독 중에는 탭 스레드가 가진다.
+    tap_cons: Mutex<Option<HeapCons<f32>>>,
     tap_thread: Option<TapThread>,
 }
 
@@ -83,9 +89,9 @@ impl Engine {
         cfg.validate()?;
         let counters = Arc::new(AudioCounters::default());
         let (in_prod, in_cons) = rt::input_ring();
-        let (out_prod, out_cons) = rt::output_ring();
         let input = InputRt::new(in_prod, counters.clone(), &cfg.input_channels, cfg.channels as usize);
-        let output = OutputRt::new(out_cons, counters.clone());
+        // 콜백 구동 믹스: 출력 콜백이 소스 링들에서 직접 꺼내 섞는다(P1-0).
+        let (output, feed) = rt::output_path(counters.clone(), controls.clone());
 
         // 오디오 스레드: 스트림을 열고 정지 신호까지 소유한다(cpal::Stream은 !Send).
         let audio_stop = Arc::new(AtomicBool::new(false));
@@ -137,7 +143,7 @@ impl Engine {
             audio_stop,
             audio: Some(audio),
             net: None,
-            tap: Arc::new(MixTap::default()),
+            tap_cons: Mutex::new(Some(feed.tap)),
             tap_thread: None,
         };
 
@@ -164,11 +170,11 @@ impl Engine {
             cfg,
             info,
             in_cons,
-            out_prod,
+            prods: feed.prods,
+            bank: feed.bank,
             counters,
             controls,
             net: engine.net.as_ref().map(|n| n.shared().clone()),
-            tap: engine.tap.clone(),
             stop: engine.worker_stop.clone(),
             stats: engine.worker_stats.clone(),
             epoch,
@@ -238,13 +244,20 @@ impl Engine {
         let out_ms = out_buf as f32 / self.info.out_rate as f32 * 1000.0;
         let frame_ms = self.cfg.frame_samples() as f32 / config::INTERNAL_RATE as f32 * 1000.0;
         let ws = &self.worker_stats;
-        let output_path_ms = ws.output_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0;
-        // GOAL 1절 정의: 입력 장치 버퍼 + 프레임 + 출력 링(시간평균) + 장치 출력 버퍼(네트워크 경로의 로컬 몫, 첫 샘플 기준).
-        let est = in_ms + frame_ms + output_path_ms + out_ms;
-        // 모니터 경로(내 소리 → 내 귀): 입력 버퍼 + 로컬 FIFO·출력 링 점유량 시간평균 + 출력 버퍼(임펄스 실측으로 검증).
+        // GOAL 1절 정의: 입력 장치 버퍼 + 프레임 + 출력 링 + 장치 출력 버퍼(네트워크 경로의 로컬 몫, 첫 샘플 기준).
+        // 콜백 구동 믹스(P1-0)에는 믹스된 출력 링이 없다. 출력 콜백이 피어 소스 링에서 바로 꺼내고,
+        // 소스 링에 머무는 시간은 지터 버퍼 깊이(`PeerStats.bufferMs`)에 포함되어 목표로 제어된다.
+        let est = in_ms + frame_ms + out_ms;
+        // 모니터 경로(내 소리 → 내 귀): 입력 버퍼 + 로컬 FIFO·로컬 소스 링 점유량 시간평균 + 출력 버퍼(임펄스 실측으로 검증).
         let monitor = in_ms + ws.monitor_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0 + out_ms;
         let stream_errors = c.stream_errors.load(Ordering::Relaxed);
-        let device_lost = ws.device_stalled.load(Ordering::Relaxed);
+        let device_lost = ws.device_stalled.load(Ordering::Relaxed) || c.device_lost.load(Ordering::Relaxed);
+        let stream_failed = c.stream_failed.load(Ordering::Relaxed);
+        let period_frames = match self.info.out_period_frames {
+            0 => out_buf,
+            n => n,
+        };
+        let device_period_ms = period_frames as f32 / self.info.out_rate.max(1) as f32 * 1000.0;
         let peers = self
             .net
             .as_ref()
@@ -265,8 +278,8 @@ impl Engine {
                             late: js.late,
                             concealed: js.concealed,
                             level: p.mix.level.load(),
-                            // 벽시계로 잰 버퍼 지연 + 출력 경로(링 + 장치 버퍼): 클럭 추정과 독립적인 실제 재생 지연
-                            playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + output_path_ms + out_ms } else { 0.0 },
+                            // 벽시계로 잰 버퍼 지연(소스 링 포함) + 장치 출력 버퍼: 클럭 추정과 독립적인 실제 재생 지연
+                            playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + out_ms } else { 0.0 },
                         }
                     })
                     .collect()
@@ -274,7 +287,7 @@ impl Engine {
             .unwrap_or_default();
         EngineStats {
             // 장치를 잃으면 false: 프론트의 기존 "엔진 정지" 감지(running=false 연속)가 그대로 동작한다(PR #5 M-2).
-            running: !device_lost,
+            running: !device_lost && !stream_failed,
             sample_rate: self.info.out_rate,
             device_buffer: out_buf,
             input_level: c.input_level.load(),
@@ -284,8 +297,27 @@ impl Engine {
             monitor_latency_ms: monitor,
             stream_errors,
             device_lost,
+            stream_failed,
+            stream_restarts: c.stream_restarts.load(Ordering::Relaxed),
+            input_discontinuities: c.input_discontinuities.load(Ordering::Relaxed),
+            input_silent_packets: c.input_silent_packets.load(Ordering::Relaxed),
+            device_period_ms,
+            backend: self.info.backend_label(),
             peers,
         }
+    }
+
+    /// 열린 스트림 정보(백엔드, 레이트, 장치 주기).
+    pub fn stream_info(&self) -> StreamInfo {
+        self.info
+    }
+
+    /// 콜백 구동 믹스 진단: (마감 직전 은닉 횟수, 콜백 언더런으로 건너뛴 장치 프레임).
+    pub fn feed_stats(&self) -> (u64, u64) {
+        (
+            self.worker_stats.deadline_fills.load(Ordering::Relaxed),
+            self.worker_stats.skipped_frames.load(Ordering::Relaxed),
+        )
     }
 
     /// 피어와의 키 확인용 안전 번호(SAS). 양쪽이 같은 값을 보면 시그널링 서버가 키를 바꿔치기하지 않은 것이다.
@@ -311,39 +343,56 @@ impl Engine {
     }
 
     /// 믹스 구독. 20ms마다 콜백 호출. 기존 구독은 교체된다.
+    /// 출력 콜백은 장치 레이트로 탭 링을 채운다. 탭 스레드가 48kHz로 리샘플(장치가 48k면 그대로)해
+    /// 20ms 청크로 보낸다.
     pub fn subscribe_mix(&mut self, mut cb: MixCallback) -> Result<(), String> {
         self.unsubscribe_mix();
-        let (prod, mut cons) = HeapRb::<f32>::new(MIX_CHUNK_FRAMES * 2 * 25).split();
-        *self.tap.prod.lock() = Some(prod);
+        let mut cons = self.tap_cons.lock().take().ok_or("믹스 탭을 쓸 수 없습니다")?;
+        let mut rs = match StreamResampler::new(self.info.out_rate, INTERNAL_RATE, 2) {
+            Ok(r) => r,
+            Err(e) => {
+                *self.tap_cons.lock() = Some(cons);
+                return Err(e);
+            }
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let st = stop.clone();
-        let handle = std::thread::Builder::new()
-            .name("band-mix-tap".into())
-            .spawn(move || {
-                let mut chunk = vec![0f32; MIX_CHUNK_FRAMES * 2];
-                while !st.load(Ordering::Relaxed) {
-                    while cons.occupied_len() >= chunk.len() {
-                        let n = cons.pop_slice(&mut chunk);
-                        let mut bytes = Vec::with_capacity(n * 4);
-                        for s in &chunk[..n] {
-                            bytes.extend_from_slice(&s.to_le_bytes());
-                        }
-                        cb(bytes);
+        let spawned = std::thread::Builder::new().name("band-mix-tap".into()).spawn(move || {
+            // 구독 전 쌓인(가득 찬) 오래된 믹스는 버린다.
+            cons.clear();
+            let mut tmp = vec![0f32; 8192];
+            let mut chunk = vec![0f32; MIX_CHUNK_FRAMES * 2];
+            while !st.load(Ordering::Relaxed) {
+                loop {
+                    let n = cons.pop_slice(&mut tmp) & !1;
+                    if n == 0 {
+                        break;
                     }
-                    std::thread::sleep(Duration::from_millis(5));
+                    rs.push(&tmp[..n]);
                 }
-            })
-            .map_err(|e| format!("믹스 탭 스레드 생성 실패: {e}"))?;
+                while rs.available() >= MIX_CHUNK_FRAMES {
+                    let n = rs.pop(&mut chunk) * 2;
+                    let mut bytes = Vec::with_capacity(n * 4);
+                    for s in &chunk[..n] {
+                        bytes.extend_from_slice(&s.to_le_bytes());
+                    }
+                    cb(bytes);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cons
+        });
+        let handle = spawned.map_err(|e| format!("믹스 탭 스레드 생성 실패: {e}"))?;
         self.tap_thread = Some(TapThread { stop, handle });
         Ok(())
     }
 
     pub fn unsubscribe_mix(&mut self) {
-        *self.tap.prod.lock() = None;
         if let Some(t) = self.tap_thread.take() {
             t.stop.store(true, Ordering::SeqCst);
-            if t.handle.join().is_err() {
-                log::error!("믹스 탭 스레드 패닉");
+            match t.handle.join() {
+                Ok(cons) => *self.tap_cons.lock() = Some(cons),
+                Err(_) => log::error!("믹스 탭 스레드 패닉"),
             }
         }
     }

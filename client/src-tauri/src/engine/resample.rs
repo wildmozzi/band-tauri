@@ -73,6 +73,11 @@ impl StreamResampler {
         }
     }
 
+    /// 청크가 차기를 기다리는 입력 프레임 수(아직 변환되지 않음).
+    pub fn pending_input(&self) -> usize {
+        if self.inner.is_some() { self.in_fill } else { 0 }
+    }
+
     /// 꺼낼 수 있는 출력 프레임 수.
     pub fn available(&self) -> usize {
         self.out.len() / self.channels
