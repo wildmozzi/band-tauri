@@ -21,6 +21,11 @@ export class MemorySubscriptionRepository implements SubscriptionRepository {
     return this.payments.filter(p => p.paymentKey === paymentKey || p.orderId === orderId)
   }
 
+  async findPaymentByOrderId(orderId: string) {
+    const p = this.payments.find(p => p.orderId === orderId)
+    return p ? { ...p } : null
+  }
+
   async createPendingPayment(intent: PaymentIntent, createdAt = new Date()) {
     if (this.payments.some(p => p.paymentKey === intent.paymentKey || p.orderId === intent.orderId)) {
       throw new ConflictError('duplicate key', '23505')

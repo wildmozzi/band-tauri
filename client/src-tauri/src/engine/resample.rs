@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
 
 /// 리샘플러 입력 청크(프레임). 작을수록 지연이 짧다(48 = 1ms@48k).
-const CHUNK: usize = 48;
+pub const CHUNK: usize = 48;
 
 pub struct StreamResampler {
     channels: usize,

@@ -6,6 +6,7 @@ import { createPaymentRouter } from './routes/payment'
 import type { SubscriptionService } from './services/subscriptionService'
 import { createRoomsRouter } from './routes/rooms'
 import type { RoomService } from './services/roomService'
+import type { PaymentOrderService } from './services/paymentOrderService'
 import { resolveCorsOrigin } from './lib/securityConfig'
 import { apiLimiter, paymentLimiter } from './lib/rateLimits'
 import { UPLOAD_DIR } from './lib/uploads'
@@ -15,6 +16,10 @@ export interface AppOptions {
   subscriptionService?: SubscriptionService
   /** 방 생성/비밀번호 서비스 (테스트에서 메모리 저장소 주입). 기본: Supabase */
   roomService?: RoomService
+  /** 결제 주문 서비스 (테스트에서 주문 저장소 목 주입). 기본: Supabase 저장소 + subscriptionService */
+  paymentOrderService?: PaymentOrderService
+  /** 테스트에서만 false (한 IP에서 많은 요청을 보낸다). 기본: 켬 */
+  rateLimits?: boolean
 }
 
 /**
@@ -54,9 +59,12 @@ export function createApp(options: AppOptions = {}) {
   }))
 
   // API 라우트
-  app.use('/api', apiLimiter)
+  const limit = options.rateLimits === false
+    ? (_req: express.Request, _res: express.Response, next: express.NextFunction) => next()
+    : null
+  app.use('/api', limit ?? apiLimiter)
   app.use('/api/music', musicRoutes)
-  app.use('/api/payment', paymentLimiter, createPaymentRouter(options.subscriptionService))
+  app.use('/api/payment', limit ?? paymentLimiter, createPaymentRouter(options.subscriptionService, options.paymentOrderService))
   app.use('/api/rooms', createRoomsRouter(options.roomService))
 
   // 헬스체크

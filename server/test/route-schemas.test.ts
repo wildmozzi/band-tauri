@@ -6,16 +6,24 @@ import assert from 'node:assert/strict'
 import { cancelPaymentBody, changePlanBody, confirmPaymentBody, separationIdParams, uploadFilenameParams } from '../src/routes/schemas'
 
 describe('route schemas', () => {
-  it('confirm: requires short strings and a paid plan; strips userId/amount', () => {
-    const ok = confirmPaymentBody.safeParse({ paymentKey: 'pk', orderId: 'o', planType: 'pro', amount: 1, userId: 'victim' })
+  it('confirm: requires a server-format orderId, a paid plan and an integer amount; strips userId', () => {
+    const ok = confirmPaymentBody.safeParse({ paymentKey: 'pk', orderId: 'ord_0123456789', planType: 'pro', amount: 6900, userId: 'victim' })
     assert.ok(ok.success)
-    assert.deepEqual(ok.data, { paymentKey: 'pk', orderId: 'o', planType: 'pro' })
+    assert.deepEqual(ok.data, { paymentKey: 'pk', orderId: 'ord_0123456789', planType: 'pro', amount: 6900 })
+    const base = { paymentKey: 'pk', orderId: 'ord_0123456789', planType: 'pro', amount: 6900 }
     for (const bad of [
-      { paymentKey: '', orderId: 'o', planType: 'pro' },
-      { paymentKey: 'x'.repeat(201), orderId: 'o', planType: 'pro' },
-      { paymentKey: 123, orderId: 'o', planType: 'pro' },
-      { paymentKey: 'pk', orderId: 'o', planType: 'free' },
-      { paymentKey: 'pk', orderId: 'o' },
+      { ...base, paymentKey: '' },
+      { ...base, paymentKey: 'x'.repeat(201) },
+      { ...base, paymentKey: 123 },
+      { ...base, planType: 'free' },
+      { paymentKey: 'pk', orderId: 'ord_0123456789', amount: 6900 },
+      { ...base, orderId: 'o' },
+      { ...base, orderId: 'x'.repeat(65) },
+      { ...base, orderId: 'ord/../../x' },
+      { ...base, amount: undefined },
+      { ...base, amount: '6900' },
+      { ...base, amount: 6900.5 },
+      { ...base, amount: 0 },
     ]) assert.equal(confirmPaymentBody.safeParse(bad).success, false, JSON.stringify(bad).slice(0, 60))
   })
 

@@ -35,9 +35,14 @@ const post = (path: string, body: unknown) =>
 
 describe('payment API without subscription store', () => {
   it('confirm → 503 and Toss is never called', async () => {
-    const r = await post('/api/payment/confirm', { paymentKey: 'pk', orderId: 'o1', planType: 'pro' })
+    const r = await post('/api/payment/confirm', { paymentKey: 'pk', orderId: 'ord_0123456789', planType: 'pro', amount: 6900 })
     assert.equal(r.status, 503)
     assert.equal(((await r.json()) as any).success, false)
+    assert.equal(tossCalls, 0)
+  })
+  it('order issue / order status → 503', async () => {
+    assert.equal((await post('/api/payment/orders', { planType: 'pro' })).status, 503)
+    assert.equal((await fetch(`${url}/api/payment/orders/ord_0123456789`, { headers: bearer('alice') })).status, 503)
     assert.equal(tossCalls, 0)
   })
   it('cancel / change-plan / subscription → 503', async () => {

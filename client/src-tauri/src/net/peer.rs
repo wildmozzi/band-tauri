@@ -1,6 +1,6 @@
 //! 피어 테이블, 홀펀칭 상태기계, keepalive, RTT (설계 문서 3절).
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,7 +8,8 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::crypto::{PacketCipher, KEY_BYTES};
+use super::crypto::{KeyPair, PacketCipher, KEY_BYTES};
+use super::packet::PacketType;
 use crate::engine::jitter::{JitterBuffer, JitterSettings};
 use crate::engine::mixer::PeerMixCtl;
 use crate::engine::stats::{PathKind, PeerStateKind};
@@ -16,10 +17,15 @@ use crate::engine::stats::{PathKind, PeerStateKind};
 pub const HELLO_INTERVAL: Duration = Duration::from_millis(100);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PING_INTERVAL: Duration = Duration::from_millis(500);
-pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 pub const LOST_AFTER: Duration = Duration::from_secs(5);
 pub const FAIL_AFTER: Duration = Duration::from_secs(15);
 pub const MAX_PEER_ID_BYTES: usize = 64;
+/// descriptor 후보 수 상한(리뷰 M8: Hello 반사 폭주 방지).
+pub const MAX_CANDIDATES: usize = 8;
+/// 확정 경로가 아닌 같은 주소에서 인증된 Hello가 이만큼 연속으로 오면 경로를 옮긴다(NAT 리바인딩).
+pub const REBIND_HELLOS: u32 = 5;
+/// HelloAck 최소 간격(리뷰 L6: 재전송 Hello로 인한 반사 제한).
+pub const HELLO_ACK_MIN_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,8 +45,29 @@ pub struct Candidate {
 #[serde(rename_all = "camelCase")]
 pub struct LocalDescriptor {
     pub ssrc: u32,
+    /// X25519 공개키(base64, 32바이트).
     pub key: String,
     pub candidates: Vec<Candidate>,
+}
+
+/// 후보 주소 검증(리뷰 M8). 0.0.0.0, 멀티캐스트, 브로드캐스트, 포트 0, IPv6(소켓이 IPv4),
+/// 그리고 (허용하지 않으면) 루프백을 거부한다.
+pub fn validate_candidate(addr: &SocketAddr, allow_loopback: bool) -> Result<(), String> {
+    if addr.port() == 0 {
+        return Err(format!("후보 포트 0: {addr}"));
+    }
+    match addr.ip() {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast() {
+                return Err(format!("허용되지 않는 후보 주소: {addr}"));
+            }
+            if v4.is_loopback() && !allow_loopback {
+                return Err(format!("루프백 후보는 허용되지 않음: {addr}"));
+            }
+            Ok(())
+        }
+        IpAddr::V6(_) => Err(format!("IPv6 후보는 지원하지 않음: {addr}")),
+    }
 }
 
 impl LocalDescriptor {
@@ -55,12 +82,28 @@ impl LocalDescriptor {
         base64::engine::general_purpose::STANDARD.encode(key)
     }
 
-    pub fn parsed_candidates(&self) -> Vec<(SocketAddr, CandidateKind)> {
-        self.candidates
-            .iter()
-            .filter_map(|c| c.addr.parse::<SocketAddr>().ok().map(|a| (a, c.kind)))
-            .collect()
+    /// 후보 파싱과 검증. 상한 초과나 잘못된 주소가 있으면 descriptor 전체를 거부한다.
+    pub fn validated_candidates(&self, allow_loopback: bool) -> Result<Vec<(SocketAddr, CandidateKind)>, String> {
+        if self.candidates.len() > MAX_CANDIDATES {
+            return Err(format!("후보가 너무 많습니다({}개 > {MAX_CANDIDATES})", self.candidates.len()));
+        }
+        let mut out = Vec::with_capacity(self.candidates.len());
+        for c in &self.candidates {
+            let a: SocketAddr = c.addr.parse().map_err(|_| format!("잘못된 후보 주소: {}", c.addr))?;
+            validate_candidate(&a, allow_loopback)?;
+            if !out.iter().any(|(x, _)| *x == a) {
+                out.push((a, c.kind));
+            }
+        }
+        if out.is_empty() {
+            return Err("descriptor에 유효한 후보 주소가 없습니다".into());
+        }
+        Ok(out)
     }
+}
+
+fn seq_newer(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) > 0
 }
 
 #[derive(Debug, Clone)]
@@ -71,7 +114,22 @@ pub struct ConnState {
     pub last_rx: Option<Instant>,
     pub last_hello: Option<Instant>,
     pub last_ping: Option<Instant>,
+    /// 주소별 마지막 HelloAck 시각(PR #5 L-4: 두 후보 경로가 서로를 굶기지 않게 주소 단위로 제한).
+    pub last_acks: Vec<(SocketAddr, Instant)>,
     pub rtt_ms: Option<f32>,
+    /// 경로가 아닌 주소에서 연속으로 온 인증된 Hello (주소, 횟수).
+    pub rebind: Option<(SocketAddr, u32)>,
+    /// 제어 패킷 타입별 최대 seq (재전송 방어, 리뷰 L5).
+    ctrl_seq: [Option<u32>; 6],
+}
+
+/// Hello/HelloAck 처리 결과.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeOutcome {
+    /// 경로 확정/유지 또는 전환.
+    Accepted,
+    /// 확정 경로가 아닌 주소: 상태·last_rx는 건드리지 않는다.
+    Ignored,
 }
 
 impl ConnState {
@@ -83,32 +141,91 @@ impl ConnState {
             last_rx: None,
             last_hello: None,
             last_ping: None,
+            last_acks: Vec::new(),
             rtt_ms: None,
+            rebind: None,
+            ctrl_seq: [None; 6],
         }
     }
 
-    /// Hello/HelloAck를 `from`에서 받음. 경로 확정(LAN 우선) 후 Connected.
-    pub fn on_handshake(&mut self, from: SocketAddr, cands: &[(SocketAddr, CandidateKind)], now: Instant) {
+    /// 같은 세션(같은 키)의 피어를 다시 추가할 때 재전송 창을 이어받는다(PR #5 L-2).
+    pub fn inherit_replay_window(&mut self, old: &ConnState) {
+        self.ctrl_seq = old.ctrl_seq;
+    }
+
+    /// 제어 패킷 seq가 이전보다 새로우면 기록하고 true. 재전송(같거나 옛 seq)은 false.
+    pub fn accept_ctrl_seq(&mut self, t: PacketType, seq: u32) -> bool {
+        let slot = &mut self.ctrl_seq[(t as usize - 1).min(5)];
+        match *slot {
+            Some(m) if !seq_newer(seq, m) => false,
+            _ => {
+                *slot = Some(seq);
+                true
+            }
+        }
+    }
+
+    /// Hello/HelloAck를 `from`에서 받음(리뷰 M6 규칙).
+    /// - 경로 없음 / 같은 경로 / public→LAN 승격 / 끊김 상태 → 경로 확정, Connected.
+    /// - Connected인데 다른 주소 → 같은 주소에서 `REBIND_HELLOS`회 연속이면 전환, 아니면 무시.
+    pub fn on_handshake(&mut self, from: SocketAddr, cands: &[(SocketAddr, CandidateKind)], now: Instant) -> HandshakeOutcome {
         let kind = match cands.iter().find(|(a, _)| *a == from) {
             Some((_, CandidateKind::Lan)) => PathKind::Lan,
             _ => PathKind::Public,
         };
-        let replace = match self.path {
+        let switch = match self.path {
             None => true,
-            Some((addr, _)) if addr == from => false,
+            Some((addr, _)) if addr == from => {
+                self.rebind = None;
+                false
+            }
             Some((_, PathKind::Public)) if kind == PathKind::Lan => true,
-            // 끊김 상태에서는 새로 응답한 주소로 갈아탄다
-            Some(_) => matches!(self.state, PeerStateKind::Reconnecting | PeerStateKind::Failed),
+            Some(_) if matches!(self.state, PeerStateKind::Reconnecting | PeerStateKind::Failed) => true,
+            Some(_) => {
+                let count = match self.rebind {
+                    Some((a, n)) if a == from => n + 1,
+                    _ => 1,
+                };
+                self.rebind = Some((from, count));
+                if count >= REBIND_HELLOS {
+                    true
+                } else {
+                    return HandshakeOutcome::Ignored;
+                }
+            }
         };
-        if replace {
+        if switch {
             self.path = Some((from, kind));
+            self.rebind = None;
         }
         self.state = PeerStateKind::Connected;
         self.last_rx = Some(now);
+        HandshakeOutcome::Accepted
     }
 
-    /// 확정 경로에서 인증된 패킷 수신.
+    /// `to`로 HelloAck를 보내도 되는지(주소별 간격 제한). 기억하는 주소는 후보 수만큼으로 제한한다.
+    pub fn ack_allowed(&mut self, to: SocketAddr, now: Instant) -> bool {
+        if let Some(e) = self.last_acks.iter_mut().find(|(a, _)| *a == to) {
+            if now.duration_since(e.1) < HELLO_ACK_MIN_INTERVAL {
+                return false;
+            }
+            e.1 = now;
+            return true;
+        }
+        if self.last_acks.len() >= MAX_CANDIDATES + 2 {
+            // 가장 오래된 항목을 교체
+            if let Some(i) = self.last_acks.iter().enumerate().min_by_key(|(_, (_, t))| *t).map(|(i, _)| i) {
+                self.last_acks.swap_remove(i);
+            }
+        }
+        self.last_acks.push((to, now));
+        true
+    }
+
+    /// 확정 경로에서 인증된 패킷 수신. 경로가 살아 있으므로 리바인딩 카운트를 지운다(PR #5 L-3:
+    /// "연속 5회"가 Ping/Audio에 끼어든 Hello로 누적되지 않게).
     pub fn on_rx_from_path(&mut self, now: Instant) {
+        self.rebind = None;
         self.last_rx = Some(now);
         if self.state == PeerStateKind::Reconnecting {
             self.state = PeerStateKind::Connected;
@@ -190,6 +307,10 @@ pub enum TickAction {
 pub struct Peer {
     pub id: String,
     pub ssrc: u32,
+    pub public_key: [u8; KEY_BYTES],
+    /// 내 → 피어 송신 암호기.
+    pub tx: PacketCipher,
+    /// 피어 → 나 수신 암호기.
     pub rx: PacketCipher,
     pub candidates: Vec<(SocketAddr, CandidateKind)>,
     pub conn: Mutex<ConnState>,
@@ -197,35 +318,47 @@ pub struct Peer {
     pub mix: Arc<PeerMixCtl>,
 }
 
+pub struct PeerSetup<'a> {
+    pub keys: &'a KeyPair,
+    pub my_ssrc: u32,
+    pub jitter: JitterSettings,
+    pub allow_loopback: bool,
+}
+
 impl Peer {
-    pub fn new(id: String, desc: &LocalDescriptor, jitter: JitterSettings, now: Instant) -> Result<Self, String> {
+    pub fn new(id: String, desc: &LocalDescriptor, setup: &PeerSetup<'_>, now: Instant) -> Result<Self, String> {
         if id.is_empty() || id.len() > MAX_PEER_ID_BYTES {
             return Err("peerId는 1..64바이트여야 합니다".into());
         }
-        let key = desc.decode_key()?;
-        let candidates = desc.parsed_candidates();
-        if candidates.is_empty() {
-            return Err("descriptor에 유효한 후보 주소가 없습니다".into());
+        let public_key = desc.decode_key()?;
+        if public_key == setup.keys.public_bytes() {
+            return Err("자기 자신의 descriptor입니다".into());
         }
+        let candidates = desc.validated_candidates(setup.allow_loopback)?;
+        let (tx, rx) = setup.keys.pair_ciphers(setup.my_ssrc, &public_key, desc.ssrc)?;
         Ok(Self {
             id,
             ssrc: desc.ssrc,
-            rx: PacketCipher::new(&key),
+            public_key,
+            tx,
+            rx,
             candidates,
             conn: Mutex::new(ConnState::new(now)),
-            jitter: Mutex::new(JitterBuffer::new(jitter)),
+            jitter: Mutex::new(JitterBuffer::new(setup.jitter)),
             mix: Arc::new(PeerMixCtl::default()),
         })
     }
 
-    /// Hello를 보낼 주소들: 모든 후보 + (다르면) 현재 경로.
+    /// Hello를 보낼 주소들: 모든 후보 + (다르면) 현재 경로 + 리바인딩 후보 주소. 최대 10개.
     pub fn hello_targets(&self) -> Vec<SocketAddr> {
         let mut v: Vec<SocketAddr> = self.candidates.iter().map(|(a, _)| *a).collect();
-        if let Some((p, _)) = self.conn.lock().path {
-            if !v.contains(&p) {
-                v.push(p);
+        let c = self.conn.lock();
+        for extra in [c.path.map(|(a, _)| a), c.rebind.map(|(a, _)| a)].into_iter().flatten() {
+            if !v.contains(&extra) {
+                v.push(extra);
             }
         }
+        v.truncate(MAX_CANDIDATES + 2);
         v
     }
 }
@@ -251,12 +384,108 @@ mod tests {
         c.on_handshake("192.168.0.5:4000".parse().unwrap(), &cands(), t0);
         assert_eq!(c.path.unwrap().1, PathKind::Lan);
         // LAN 확정 후 public 응답은 무시
-        c.on_handshake("203.0.113.9:5000".parse().unwrap(), &cands(), t0);
+        assert_eq!(c.on_handshake("203.0.113.9:5000".parse().unwrap(), &cands(), t0), HandshakeOutcome::Ignored);
         assert_eq!(c.path.unwrap().1, PathKind::Lan);
         // 후보에 없는 주소(peer-reflexive)는 public 취급
         let mut c = ConnState::new(t0);
         c.on_handshake("198.51.100.1:7".parse().unwrap(), &cands(), t0);
         assert_eq!(c.path.unwrap().1, PathKind::Public);
+    }
+
+    #[test]
+    fn hello_from_other_address_does_not_refresh_liveness() {
+        // 리뷰 M6: 경로가 아닌 주소의 Hello는 last_rx/상태를 갱신하지 않는다
+        let t0 = Instant::now();
+        let mut c = ConnState::new(t0);
+        let path: SocketAddr = "192.168.0.5:4000".parse().unwrap();
+        let other: SocketAddr = "198.51.100.1:7".parse().unwrap();
+        c.on_handshake(path, &cands(), t0);
+        let t1 = t0 + Duration::from_secs(3);
+        assert_eq!(c.on_handshake(other, &cands(), t1), HandshakeOutcome::Ignored);
+        assert_eq!(c.last_rx, Some(t0), "last_rx 유지");
+        // 5초가 지나면 끊김으로 판정되어야 한다(가짜 Hello로 살아 있는 척 불가)
+        c.tick(t0 + Duration::from_secs(5));
+        assert_eq!(c.state, PeerStateKind::Reconnecting);
+    }
+
+    #[test]
+    fn nat_rebinding_switches_after_consecutive_hellos() {
+        let t0 = Instant::now();
+        let mut c = ConnState::new(t0);
+        let old: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+        let new: SocketAddr = "203.0.113.9:6000".parse().unwrap();
+        c.on_handshake(old, &cands(), t0);
+        for i in 1..REBIND_HELLOS {
+            assert_eq!(c.on_handshake(new, &cands(), t0), HandshakeOutcome::Ignored, "{i}");
+        }
+        assert_eq!(c.on_handshake(new, &cands(), t0), HandshakeOutcome::Accepted);
+        assert_eq!(c.path.unwrap().0, new);
+        // 중간에 원래 경로에서 오면 카운트 초기화
+        let mut c = ConnState::new(t0);
+        c.on_handshake(old, &cands(), t0);
+        for _ in 0..REBIND_HELLOS - 1 {
+            c.on_handshake(new, &cands(), t0);
+        }
+        c.on_handshake(old, &cands(), t0);
+        assert_eq!(c.on_handshake(new, &cands(), t0), HandshakeOutcome::Ignored);
+    }
+
+    #[test]
+    fn ctrl_replay_rejected() {
+        let mut c = ConnState::new(Instant::now());
+        assert!(c.accept_ctrl_seq(PacketType::Bye, 10));
+        assert!(!c.accept_ctrl_seq(PacketType::Bye, 10), "같은 seq 재전송");
+        assert!(!c.accept_ctrl_seq(PacketType::Bye, 3), "옛 seq");
+        assert!(c.accept_ctrl_seq(PacketType::Bye, 11));
+        assert!(c.accept_ctrl_seq(PacketType::Ping, 3), "타입별 독립");
+        // u32 랩
+        let mut c = ConnState::new(Instant::now());
+        assert!(c.accept_ctrl_seq(PacketType::Hello, u32::MAX));
+        assert!(c.accept_ctrl_seq(PacketType::Hello, 0));
+    }
+
+    #[test]
+    fn hello_ack_rate_limited() {
+        let t0 = Instant::now();
+        let mut c = ConnState::new(t0);
+        let (a, b): (SocketAddr, SocketAddr) = ("192.168.0.5:4000".parse().unwrap(), "203.0.113.9:5000".parse().unwrap());
+        assert!(c.ack_allowed(a, t0));
+        assert!(!c.ack_allowed(a, t0 + Duration::from_millis(10)));
+        // 다른 주소(두 번째 후보 경로)는 굶지 않는다(PR #5 L-4)
+        assert!(c.ack_allowed(b, t0 + Duration::from_millis(10)));
+        assert!(c.ack_allowed(a, t0 + Duration::from_millis(60)));
+        // 주소 수가 많아도 기억 공간은 제한된다
+        for i in 0..50u16 {
+            c.ack_allowed(SocketAddr::from(([198, 51, 100, 1], 1000 + i)), t0);
+        }
+        assert!(c.last_acks.len() <= MAX_CANDIDATES + 2);
+    }
+
+    #[test]
+    fn rebind_count_reset_by_path_traffic() {
+        // PR #5 L-3: 경로에서 Ping/Audio가 오면 리바인딩 카운트가 지워져 "연속 5회"가 유지된다
+        let t0 = Instant::now();
+        let mut c = ConnState::new(t0);
+        let old: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+        let new: SocketAddr = "203.0.113.9:6000".parse().unwrap();
+        c.on_handshake(old, &cands(), t0);
+        for _ in 0..REBIND_HELLOS - 1 {
+            c.on_handshake(new, &cands(), t0);
+            c.on_rx_from_path(t0);
+        }
+        assert_eq!(c.on_handshake(new, &cands(), t0), HandshakeOutcome::Ignored, "누적이 아니라 연속이어야 함");
+        assert_eq!(c.path.unwrap().0, old);
+    }
+
+    #[test]
+    fn replay_window_inherited() {
+        let t0 = Instant::now();
+        let mut old = ConnState::new(t0);
+        assert!(old.accept_ctrl_seq(PacketType::Bye, 100));
+        let mut fresh = ConnState::new(t0);
+        fresh.inherit_replay_window(&old);
+        assert!(!fresh.accept_ctrl_seq(PacketType::Bye, 100), "재추가 전에 캡처한 Bye 재전송 거부(PR #5 L-2)");
+        assert!(fresh.accept_ctrl_seq(PacketType::Bye, 101));
     }
 
     #[test]
@@ -311,5 +540,25 @@ mod tests {
         let back: LocalDescriptor = serde_json::from_str(&j).unwrap();
         assert_eq!(back.decode_key().unwrap(), key);
         assert!(LocalDescriptor { key: "AAAA".into(), ..d }.decode_key().is_err());
+    }
+
+    #[test]
+    fn candidate_validation() {
+        let mk = |addrs: &[&str]| LocalDescriptor {
+            ssrc: 1,
+            key: LocalDescriptor::encode_key(&[1u8; 32]),
+            candidates: addrs.iter().map(|a| Candidate { kind: CandidateKind::Public, addr: a.to_string() }).collect(),
+        };
+        assert!(mk(&["203.0.113.1:5000"]).validated_candidates(false).is_ok());
+        for bad in ["0.0.0.0:5000", "224.0.0.1:5000", "255.255.255.255:5000", "203.0.113.1:0", "[::1]:5000", "nope"] {
+            assert!(mk(&[bad]).validated_candidates(false).is_err(), "{bad}");
+        }
+        assert!(mk(&["127.0.0.1:5000"]).validated_candidates(false).is_err());
+        assert!(mk(&["127.0.0.1:5000"]).validated_candidates(true).is_ok());
+        let many: Vec<String> = (0..9).map(|i| format!("203.0.113.{i}:5000")).collect();
+        let refs: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        assert!(mk(&refs).validated_candidates(false).is_err(), "후보 9개는 거부");
+        // 중복 제거
+        assert_eq!(mk(&["203.0.113.1:5000", "203.0.113.1:5000"]).validated_candidates(false).unwrap().len(), 1);
     }
 }

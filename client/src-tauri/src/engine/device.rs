@@ -267,7 +267,15 @@ pub mod cpal_backend {
             let in_sel = select_config(&in_dev, true, cfg.input_driver, required_in, cfg.buffer_size)?;
             let mut out_sel = select_config(&out_dev, false, cfg.output_driver, 1, cfg.buffer_size)?;
             if duplex_asio && out_sel.config.sample_rate != in_sel.config.sample_rate {
-                // 듀플렉스는 같은 레이트여야 한다
+                // 듀플렉스는 같은 레이트여야 한다. 출력이 그 레이트를 지원하는지 다시 확인한다(리뷰 L8).
+                let r = in_sel.config.sample_rate.0;
+                let ok = out_dev
+                    .supported_output_configs()
+                    .map(|mut it| it.any(|c| c.min_sample_rate().0 <= r && r <= c.max_sample_rate().0))
+                    .unwrap_or(false);
+                if !ok {
+                    return Err(format!("ASIO 출력이 입력 레이트 {r}Hz를 지원하지 않습니다"));
+                }
                 out_sel.config.sample_rate = in_sel.config.sample_rate;
             }
             if (in_sel.config.channels as usize) < required_in {
@@ -360,6 +368,7 @@ pub mod cpal_backend {
         let mut channels = def.channels();
         let mut format = def.sample_format();
         let mut rate = def.sample_rate().0;
+        let mut buf_support = *def.buffer_size();
         match driver {
             DriverKind::Asio => {
                 // 필요한 채널 이상 지원하는 설정 중 48k를 우선, 채널 수는 필요한 만큼(최소 2)
@@ -374,6 +383,7 @@ pub mod cpal_backend {
                 if let Some(r) = pick {
                     channels = r.channels();
                     format = r.sample_format();
+                    buf_support = *r.buffer_size();
                     rate = if r.min_sample_rate().0 <= INTERNAL_RATE && INTERNAL_RATE <= r.max_sample_rate().0 {
                         INTERNAL_RATE
                     } else {
@@ -392,13 +402,21 @@ pub mod cpal_backend {
             }
         }
         Ok(Selected {
-            config: StreamConfig {
-                channels,
-                sample_rate: cpal::SampleRate(rate),
-                buffer_size: cpal::BufferSize::Fixed(buffer),
-            },
+            config: StreamConfig { channels, sample_rate: cpal::SampleRate(rate), buffer_size: buffer_request(&buf_support, buffer) },
             format,
         })
+    }
+
+    /// 드라이버가 보고한 범위 안이면 `Fixed`, 밖이면 `Default`(드라이버 선호 크기).
+    /// cpal 0.15 ASIO는 `Fixed`를 그대로 `ASIOCreateBuffers`에 넘겨, 범위 밖 값이면 시작이 실패한다(리뷰 L8).
+    fn buffer_request(support: &cpal::SupportedBufferSize, buffer: u32) -> cpal::BufferSize {
+        match support {
+            cpal::SupportedBufferSize::Range { min, max } if buffer < *min || buffer > *max => {
+                log::warn!("버퍼 {buffer}는 장치 범위 {min}..{max} 밖이라 장치 기본 크기를 씁니다");
+                cpal::BufferSize::Default
+            }
+            _ => cpal::BufferSize::Fixed(buffer),
+        }
     }
 
     fn build_in<T: SizedSample + RtSample>(
@@ -444,10 +462,19 @@ pub mod cpal_backend {
 
 pub mod fake {
     //! 실제 장치 없이 엔진 전체를 돌리기 위한 가짜 오디오 장치.
-    //! 전용 스레드가 실시간 속도(드리프트 ppm 반영)로 입력/출력 콜백을 호출한다.
+    //!
+    //! 실제 장치처럼 입력과 출력을 **별도 스레드**에서 각자의 클럭으로 호출한다(리뷰 "테스트 신뢰도" 1):
+    //! - 입력/출력 버퍼 크기, 레이트, 클럭 오차(ppm)를 따로 줄 수 있다.
+    //! - 출력 시작 위상(`out_phase_us`)과 콜백 기상 지연(`wake_jitter_us`, 늦으면 따라잡으며
+    //!   몰아서 호출 = 버스트)을 흉내 낸다.
+    //! - 열기 지연(`open_delay`)과 스트림 에러 주입(`error_after`)을 지원한다.
+    //!
+    //! 시간 모델: 입력 샘플 i는 `t0 + i/in_rate`에 캡처되고, 출력 샘플 j(=sink 인덱스/채널)는
+    //! `t0 + out_phase + j/out_rate`에 재생된다. 따라서 임펄스 지연 = out_phase + j/out_rate − i/in_rate.
 
     use super::*;
     use parking_lot::Mutex;
+    use rand::{Rng, SeedableRng};
     use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
 
@@ -456,37 +483,130 @@ pub mod fake {
 
     #[derive(Clone)]
     pub struct FakeBackend {
-        pub rate: u32,
+        pub in_rate: u32,
+        pub out_rate: u32,
         pub channels: usize,
+        /// 입력 콜백 크기. None이면 설정의 bufferSize.
+        pub in_buffer: Option<usize>,
+        /// 출력 콜백 크기. None이면 설정의 bufferSize.
+        pub out_buffer: Option<usize>,
         /// 장치 클럭 오차(ppm). 양수면 실제보다 빠르게 돈다.
-        pub drift_ppm: f64,
+        pub in_drift_ppm: f64,
+        pub out_drift_ppm: f64,
+        /// 출력 스레드 시작 지연(µs).
+        pub out_phase_us: u64,
+        /// 콜백마다 0..이 값(µs) 사이로 늦게 깨어난다. 다음 콜백은 원래 일정으로 따라잡는다.
+        pub wake_jitter_us: u64,
+        pub open_delay: Duration,
+        /// 이 시간 뒤 스트림 에러 1회 보고(장치 분리 흉내).
+        pub error_after: Option<Duration>,
         pub source: Arc<SourceFn>,
         /// 출력 콜백이 기록한 샘플(인터리브, `channels`채널).
         pub sink: Arc<Mutex<Vec<f32>>>,
         pub record_output: bool,
+        pub seed: u64,
+        /// (주기, 멈춤): 출력 콜백 스레드가 주기마다 멈췄다가 몰아서 따라잡는다 → 출력 언더런 유발.
+        pub out_stall: Option<(Duration, Duration)>,
+        /// 이 시간 뒤 입력·출력 콜백이 멈춘다(장치 분리 흉내).
+        pub halt_after: Option<Duration>,
+        /// 공유하면 동시에 한 번만 열 수 있다(배타 장치 흉내).
+        pub exclusive: Option<Arc<AtomicBool>>,
     }
 
     impl FakeBackend {
         pub fn new(rate: u32, source: Arc<SourceFn>) -> Self {
-            Self { rate, channels: 2, drift_ppm: 0.0, source, sink: Arc::new(Mutex::new(Vec::new())), record_output: true }
+            Self {
+                in_rate: rate,
+                out_rate: rate,
+                channels: 2,
+                in_buffer: None,
+                out_buffer: None,
+                in_drift_ppm: 0.0,
+                out_drift_ppm: 0.0,
+                out_phase_us: 0,
+                wake_jitter_us: 0,
+                open_delay: Duration::ZERO,
+                error_after: None,
+                source,
+                sink: Arc::new(Mutex::new(Vec::new())),
+                record_output: true,
+                seed: 1,
+                out_stall: None,
+                halt_after: None,
+                exclusive: None,
+            }
         }
 
         pub fn silence(rate: u32) -> Self {
             Self::new(rate, Arc::new(|_, _, buf: &mut [f32]| buf.fill(0.0)))
         }
+
+        /// 입출력 모두 같은 클럭 오차(같은 장치의 듀플렉스).
+        pub fn with_drift(mut self, ppm: f64) -> Self {
+            self.in_drift_ppm = ppm;
+            self.out_drift_ppm = ppm;
+            self
+        }
     }
 
     struct FakeGuard {
         stop: Arc<AtomicBool>,
-        thread: Option<std::thread::JoinHandle<()>>,
+        threads: Vec<std::thread::JoinHandle<()>>,
+        exclusive: Option<Arc<AtomicBool>>,
     }
 
     impl Drop for FakeGuard {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
-            if let Some(t) = self.thread.take() {
+            for t in self.threads.drain(..) {
                 let _ = t.join();
             }
+            if let Some(ex) = &self.exclusive {
+                ex.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// `t0 + offset + period·(k + first)`에 `f(k)`를 부르는 실시간 루프.
+    /// 기상 지연은 `jitter_us` 이내 난수이며, 늦어지면 다음 호출들이 몰려서(버스트) 따라잡는다.
+    struct LoopCfg {
+        t0: Instant,
+        offset: Duration,
+        period: f64,
+        first: u64,
+        jitter_us: u64,
+        seed: u64,
+        /// (주기, 멈춤): 주기마다 콜백 스레드가 이만큼 멈췄다가 몰아서 따라잡는다(CPU 스파이크 흉내).
+        stall: Option<(Duration, Duration)>,
+        /// 이 시간 뒤 콜백을 더 부르지 않는다(장치 분리 흉내).
+        halt_after: Option<Duration>,
+    }
+
+    fn clocked_loop(stop: Arc<AtomicBool>, c: LoopCfg, mut f: impl FnMut(u64)) {
+        // 실제 장치 콜백 스레드(cpal WASAPI/ASIO)는 시간 임계 우선순위로 돈다. 가짜도 같게 둔다.
+        let _prio = crate::engine::prio::promote_current_thread();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(c.seed);
+        let mut k: u64 = 0;
+        let mut next_stall = c.stall.map(|(every, _)| every);
+        while !stop.load(Ordering::Relaxed) {
+            if c.halt_after.is_some_and(|h| c.t0.elapsed() >= h) {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            if let (Some(at), Some((every, len))) = (next_stall, c.stall) {
+                if c.t0.elapsed() >= at {
+                    std::thread::sleep(len);
+                    next_stall = Some(at + every);
+                }
+            }
+            let jitter = if c.jitter_us > 0 { Duration::from_micros(rng.gen_range(0..c.jitter_us)) } else { Duration::ZERO };
+            let due = c.t0 + c.offset + Duration::from_secs_f64(c.period * (k + c.first) as f64) + jitter;
+            let now = Instant::now();
+            if due > now {
+                std::thread::sleep(due - now);
+            }
+            f(k);
+            k += 1;
         }
     }
 
@@ -499,7 +619,7 @@ pub mod fake {
                 is_input,
                 is_default: true,
                 channels: self.channels as u16,
-                sample_rates: vec![self.rate],
+                sample_rates: vec![if is_input { self.in_rate } else { self.out_rate }],
             };
             Ok(vec![mk(true), mk(false)])
         }
@@ -509,48 +629,96 @@ pub mod fake {
             cfg: &EngineConfig,
             mut input: InputRt,
             mut output: OutputRt,
-            _counters: Arc<AudioCounters>,
+            counters: Arc<AudioCounters>,
         ) -> Result<(StreamInfo, Box<dyn Any>), String> {
             if input.required_device_channels() > self.channels {
                 return Err("가짜 장치 채널 부족".into());
             }
+            // 배타 장치 흉내: 이미 열려 있으면 실패(ASIO 드라이버 1개, WASAPI 배타, 고정 포트와 같은 성질)
+            if let Some(ex) = &self.exclusive {
+                if ex.swap(true, Ordering::SeqCst) {
+                    return Err("장치가 이미 사용 중입니다".into());
+                }
+            }
+            std::thread::sleep(self.open_delay);
             let stop = Arc::new(AtomicBool::new(false));
+            let ch = self.channels;
+            let in_buf = self.in_buffer.unwrap_or(cfg.buffer_size as usize).max(1);
+            let out_buf = self.out_buffer.unwrap_or(cfg.buffer_size as usize).max(1);
+            let t0 = Instant::now();
+
             let me = self.clone();
-            let buffer = cfg.buffer_size as usize;
             let st = stop.clone();
-            let thread = std::thread::Builder::new()
-                .name("band-fake-audio".into())
+            let in_period = in_buf as f64 / me.in_rate as f64 / (1.0 + me.in_drift_ppm * 1e-6);
+            let in_thread = std::thread::Builder::new()
+                .name("band-fake-in".into())
                 .spawn(move || {
-                    let ch = me.channels;
-                    let mut inbuf = vec![0f32; buffer * ch];
-                    let mut outbuf = vec![0f32; buffer * ch];
-                    let period = buffer as f64 / me.rate as f64 / (1.0 + me.drift_ppm * 1e-6);
-                    let t0 = Instant::now();
-                    let mut k: u64 = 0;
-                    while !st.load(Ordering::Relaxed) {
-                        (me.source)(k * buffer as u64, ch, &mut inbuf);
-                        input.process(&inbuf, ch);
-                        output.process(&mut outbuf, ch);
-                        if me.record_output {
-                            me.sink.lock().extend_from_slice(&outbuf);
-                        }
-                        k += 1;
-                        let due = t0 + Duration::from_secs_f64(period * k as f64);
-                        let now = Instant::now();
-                        if due > now {
-                            std::thread::sleep(due - now);
-                        }
-                    }
+                    let mut buf = vec![0f32; in_buf * ch];
+                    let seed = me.seed;
+                    // 입력 콜백 k는 블록 [k, k+1)×in_buf의 캡처가 끝난 t0 + (k+1)·period에 불린다.
+                    let lc = LoopCfg {
+                        t0,
+                        offset: Duration::ZERO,
+                        period: in_period,
+                        first: 1,
+                        jitter_us: me.wake_jitter_us,
+                        seed,
+                        stall: None,
+                        halt_after: me.halt_after,
+                    };
+                    clocked_loop(st, lc, |k| {
+                        (me.source)(k * in_buf as u64, ch, &mut buf);
+                        input.process(&buf, ch);
+                    });
                 })
-                .map_err(|e| format!("가짜 오디오 스레드 생성 실패: {e}"))?;
+                .map_err(|e| format!("가짜 입력 스레드 생성 실패: {e}"))?;
+
+            let me = self.clone();
+            let st = stop.clone();
+            let out_period = out_buf as f64 / me.out_rate as f64 / (1.0 + me.out_drift_ppm * 1e-6);
+            let spawn_out = std::thread::Builder::new().name("band-fake-out".into()).spawn(move || {
+                let mut buf = vec![0f32; out_buf * ch];
+                let mut errored = false;
+                let phase = Duration::from_micros(me.out_phase_us);
+                let seed = me.seed.wrapping_add(17);
+                // 출력 콜백 k는 t0 + phase + k·period에 불려 재생 구간 [k, k+1)×out_buf를 채운다.
+                let lc = LoopCfg {
+                    t0,
+                    offset: phase,
+                    period: out_period,
+                    first: 0,
+                    jitter_us: me.wake_jitter_us,
+                    seed,
+                    stall: me.out_stall,
+                    halt_after: me.halt_after,
+                };
+                clocked_loop(st, lc, |_k| {
+                    output.process(&mut buf, ch);
+                    if me.record_output {
+                        me.sink.lock().extend_from_slice(&buf);
+                    }
+                    if !errored && me.error_after.is_some_and(|d| t0.elapsed() >= d) {
+                        errored = true;
+                        counters.stream_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            });
+            let out_thread = match spawn_out {
+                Ok(t) => t,
+                Err(e) => {
+                    stop.store(true, Ordering::SeqCst);
+                    let _ = in_thread.join();
+                    return Err(format!("가짜 출력 스레드 생성 실패: {e}"));
+                }
+            };
             let info = StreamInfo {
-                in_rate: self.rate,
-                out_rate: self.rate,
-                in_channels: self.channels,
-                out_channels: self.channels,
+                in_rate: self.in_rate,
+                out_rate: self.out_rate,
+                in_channels: ch,
+                out_channels: ch,
                 buffer_frames: cfg.buffer_size,
             };
-            Ok((info, Box::new(FakeGuard { stop, thread: Some(thread) })))
+            Ok((info, Box::new(FakeGuard { stop, threads: vec![in_thread, out_thread], exclusive: self.exclusive.clone() })))
         }
     }
 }
