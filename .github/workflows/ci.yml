@@ -45,7 +45,8 @@ jobs:
         run: cargo test
 
   realtime:
-    # 벽시계 의존 통합 테스트(`#[ignore = "realtime: ..."]`)만 돈다. 가짜 장치를 실제 스레드·실제 시계로 돌려
+    # 벽시계 의존 통합 테스트(tests/*.rs의 `#[ignore = "realtime: ..."]`)만 돈다. 단위 테스트의 ignore(known-bug 재현)는
+    # `kind(test)` 필터로 제외한다. 가짜 장치를 실제 스레드·실제 시계로 돌려
     # 은닉·끊김·지연 임계를 재므로 러너 스케줄링에 흔들린다. 각 테스트는 별도 프로세스에서 하나씩(동시 실행 없음)
     # 돌고, 실패하면 최대 2번 더(총 3회) 재시도한다. 3회 모두 실패하면 잡이 실패한다(continue-on-error 아님).
     # 재시도 끝에 통과한 테스트는 nextest 요약에 FLAKY로 남는다.
@@ -80,7 +81,7 @@ jobs:
         run: cargo nextest run --no-run
       - name: Realtime tests (직렬, 3회까지)
         timeout-minutes: 20
-        run: cargo nextest run --test loopback --run-ignored only --retries 2 --test-threads 1 --no-fail-fast --success-output final --failure-output immediate-final
+        run: cargo nextest run -E 'kind(test)' --run-ignored only --retries 2 --test-threads 1 --no-fail-fast --success-output final --failure-output immediate-final
 
   relay:
     name: Relay (clippy + test)
