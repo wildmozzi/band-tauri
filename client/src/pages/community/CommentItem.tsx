@@ -59,6 +59,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
   return (
     <div style={{ marginLeft: depth > 0 ? '24px' : '0' }}>
       <div
+        data-testid="comment"
         style={{
           padding: '16px',
           background: depth > 0 ? 'rgba(141, 123, 255, 0.05)' : 'rgba(0, 0, 0, 0.25)',

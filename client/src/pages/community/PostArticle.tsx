@@ -132,6 +132,7 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
       >
         <button
           onClick={onLike}
+          data-testid="post-like-button"
           style={{
             background: 'transparent',
             border: 'none',
