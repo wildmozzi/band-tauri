@@ -36,6 +36,17 @@ describe('profile queries', () => {
     expect(argsOf(sb.mock!.calls[0], 'eq')).toEqual([['id', 'u1']])
   })
 
+  it('profiles 행이 없으면 오류 없이 null (maybeSingle, 재시도 없음)', async () => {
+    sb.mock!.setResult('profiles', { data: null })
+    const { wrapper } = createQueryWrapper()
+    const { result } = renderHook(() => useProfileNicknameQuery('u1'), { wrapper })
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(result.current.data).toBeNull()
+    expect(argsOf(sb.mock!.calls[0], 'maybeSingle')).toHaveLength(1)
+    expect(sb.mock!.calls).toHaveLength(1)
+  })
+
   it('저장: 메타데이터 갱신 후 profiles 갱신, 닉네임 캐시를 바꾼다', async () => {
     sb.mock!.setResult('profiles', { data: null })
     const { wrapper, client } = createQueryWrapper()

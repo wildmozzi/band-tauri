@@ -5,13 +5,24 @@
  *   ['stems', 'history', userId]  내 분리 기록
  *
  * 무효화 규칙
- *   히스토리는 명시적으로만 다시 읽는다(staleTime Infinity): 새로고침 버튼, 분리 성공 후 무효화
+ *   히스토리는 명시적으로만 다시 읽는다(staleTime Infinity): 새로고침 버튼, 분리 성공 후 무효화.
+ *     조회 실패는 throw로 남겨(빈 목록 성공으로 캐시하지 않음) 다음에 열 때 다시 읽는다
  *   삭제 성공 → 캐시에서 제거
  *   로그아웃 → 히스토리 캐시 제거(clearStemHistory)
- *   업로드 전 중복 검사는 fetchFreshStemHistory로 항상 서버 최신값을 읽는다
+ *   업로드 전 중복 검사는 fetchFreshStemHistory로 항상 서버 최신값을 읽는다.
+ *     실패하면 캐시를 그대로 두고 캐시값(없으면 빈 목록)으로 검사한다
  */
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { deleteStemSeparation, getStemHistory, type StemSeparation } from '../../services/musicApi'
+import { deleteStemSeparation, fetchStemHistory, type StemSeparation } from '../../services/musicApi'
+
+async function loadStemHistory(): Promise<StemSeparation[]> {
+  try {
+    return await fetchStemHistory()
+  } catch (error) {
+    console.error('Failed to fetch stem history:', error)
+    throw error
+  }
+}
 
 export const stemKeys = {
   all: ['stems'] as const,
@@ -21,15 +32,22 @@ export const stemKeys = {
 export function useStemHistoryQuery(userId: string | null | undefined, enabled: boolean) {
   return useQuery({
     queryKey: stemKeys.history(userId),
-    queryFn: getStemHistory,
+    queryFn: loadStemHistory,
     enabled,
     staleTime: Infinity,
+    retry: false, // 기존과 같이 1회만 요청(새로고침 버튼으로 재시도)
   })
 }
 
 /** 캐시와 무관하게 서버에서 다시 읽고 캐시도 갱신한다 */
-export function fetchFreshStemHistory(qc: QueryClient, userId: string | null | undefined): Promise<StemSeparation[]> {
-  return qc.fetchQuery({ queryKey: stemKeys.history(userId), queryFn: getStemHistory, staleTime: 0 })
+export async function fetchFreshStemHistory(qc: QueryClient, userId: string | null | undefined): Promise<StemSeparation[]> {
+  const key = stemKeys.history(userId)
+  try {
+    return await qc.fetchQuery({ queryKey: key, queryFn: loadStemHistory, staleTime: 0, retry: false })
+  } catch {
+    // 실패해도 캐시 데이터는 유지된다(fetchQuery는 오류 시 data를 덮지 않음)
+    return qc.getQueryData<StemSeparation[]>(key) ?? []
+  }
 }
 
 export function invalidateStemHistory(qc: QueryClient, userId: string | null | undefined) {

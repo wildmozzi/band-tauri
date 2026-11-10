@@ -12,6 +12,7 @@ vi.mock('../../lib/supabaseClient', async () => {
   return { supabase: sb.mock.client, isSupabaseConfigured: () => true }
 })
 
+import { useMyRooms } from '../../pages/rooms/useMyRooms'
 import { roomKeys, useDeleteRoomMutation, useMyRoomsQuery, useRoomsQuery, useUpdateRoomMutation } from './queries'
 
 const room = (id: string, over: Partial<DbRoom> = {}): DbRoom => ({
@@ -40,6 +41,32 @@ describe('rooms queries', () => {
 
     unmount()
     expect(sb.mock!.client.removeChannel).toHaveBeenCalledTimes(1)
+  })
+
+  it('실시간 변경은 비활성인 내 방 캐시도 stale로 만든다(재요청은 없음)', async () => {
+    sb.mock!.setResult('rooms', { data: [room('a')] })
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(roomKeys.mine('u1'), [room('m1')])
+    const { result } = renderHook(() => useRoomsQuery(), { wrapper })
+    await waitFor(() => expect(result.current.data).toHaveLength(1))
+    const before = sb.mock!.calls.length
+
+    act(() => sb.mock!.emitChange())
+
+    expect(client.getQueryState(roomKeys.mine('u1'))?.isInvalidated).toBe(true)
+    await waitFor(() => expect(sb.mock!.calls.length).toBe(before + 1)) // 목록만 다시 읽음
+  })
+
+  it('내 방 모달을 처음 열 때 캐시가 fresh여도 서버에서 다시 읽는다', async () => {
+    sb.mock!.setResult('rooms', { data: [room('server')] })
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(roomKeys.mine('u1'), [room('cached')])
+    const { result } = renderHook(() => useMyRooms('u1'), { wrapper })
+    expect(result.current.myRooms.map(r => r.id)).toEqual(['cached'])
+
+    await act(() => result.current.fetchMyRooms())
+
+    await waitFor(() => expect(result.current.myRooms.map(r => r.id)).toEqual(['server']))
   })
 
   it('내 방은 enabled가 될 때 host_id로 조회한다', async () => {

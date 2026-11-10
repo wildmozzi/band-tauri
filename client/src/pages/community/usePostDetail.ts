@@ -1,7 +1,9 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import type { Comment } from '../../services/communityApi'
 import {
+  forgetPost,
   useAddCommentMutation,
   useCommentsQuery,
   useDeleteCommentMutation,
@@ -19,11 +21,15 @@ const EMPTY_TAGS: { tag: string; count: number }[] = []
 /** 게시물 상세: 게시물·댓글·트렌딩 태그 조회와 좋아요/댓글/삭제 동작. */
 export function usePostDetail(postId: string | undefined, user: CommunityUser | null) {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const userId = user?.id
 
   // 키가 postId/userId 단위라 이전 요청의 늦은 응답은 현재 화면에 섞이지 않는다.
-  const postQuery = usePostQuery(postId, userId)
-  const commentsQuery = useCommentsQuery(postId)
+  // 삭제한 글은 다시 조회하지 않는다(화면을 떠나기 전 리렌더가 있어도 지운 글을 재조회하지 않게)
+  const [deletedPostId, setDeletedPostId] = useState<string | null>(null)
+  const live = !postId || postId !== deletedPostId
+  const postQuery = usePostQuery(postId, userId, { enabled: live })
+  const commentsQuery = useCommentsQuery(postId, { enabled: live })
   const trendingQuery = useTrendingTagsQuery(5)
 
   const toggleLike = useToggleLikeMutation()
@@ -115,7 +121,9 @@ export function usePostDetail(postId: string | undefined, user: CommunityUser | 
 
     try {
       await deletePostMutation.mutateAsync(post.id)
+      setDeletedPostId(post.id)
       navigate('/community')
+      forgetPost(queryClient, post.id)
     } catch (error) {
       console.error('Failed to delete post:', error)
       alert('게시물 삭제에 실패했습니다.')

@@ -9,9 +9,11 @@
  *
  * 무효화 규칙
  *   글 작성      → 목록·인기 태그 무효화
- *   글 수정      → 그 글의 상세(모든 userId)·목록·인기 태그 무효화
- *   글 삭제      → 그 글의 상세·댓글 캐시 제거, 목록·인기 태그 무효화
- *   좋아요 토글  → 응답값으로 목록·상세 캐시를 직접 갱신(재조회 없음)
+ *   글 수정      → 응답값으로 그 글의 상세(모든 userId, liked_by_user 유지)를 덮어쓰고 목록·인기 태그 무효화
+ *   글 삭제      → 목록·인기 태그 무효화. 상세·댓글 캐시는 화면을 떠난 뒤 forgetPost로 제거
+ *                  (상세가 마운트된 채로 지우면 지운 글을 다시 조회한다)
+ *   좋아요 토글  → 응답값으로 목록·상세 캐시를 직접 갱신(재조회 없음).
+ *                  likes_count는 모든 키에, liked_by_user는 키의 userId가 누른 사용자와 같은 캐시에만 쓴다
  *   댓글 작성/수정/삭제 → 응답값으로 댓글 트리를 직접 갱신하고, 상세·목록의 comments_count를 보정
  *     (삭제 개수는 응답 시점의 최신 캐시 트리로 센다 — 연속 삭제 시 오래된 클로저 방지)
  */
@@ -51,13 +53,29 @@ export const communityKeys = {
 
 // ---------- 캐시 보정 헬퍼 ----------
 
-function patchPostEverywhere(qc: QueryClient, postId: string, patch: (post: Post) => Post) {
-  qc.setQueriesData<Post | null>({ queryKey: communityKeys.postAll(postId) }, prev =>
-    prev ? patch(prev) : prev,
-  )
-  qc.setQueriesData<Post[]>({ queryKey: communityKeys.posts() }, prev =>
-    prev?.map(post => (post.id === postId ? patch(post) : post)),
-  )
+/** 목록·상세 쿼리 키에 들어 있는 사용자(좋아요 여부의 주인). 키 모양은 communityKeys 참고 */
+function keyUserId(queryKey: readonly unknown[]): string | null {
+  const last = queryKey[queryKey.length - 1]
+  if (last && typeof last === 'object' && 'userId' in last) {
+    return (last as { userId: string | null }).userId ?? null
+  }
+  return null
+}
+
+/** postId 글을 모든 목록·상세 캐시에서 고친다. patch는 그 캐시 키의 userId를 받는다 */
+function patchPostEverywhere(
+  qc: QueryClient,
+  postId: string,
+  patch: (post: Post, keyUser: string | null) => Post,
+) {
+  for (const [key, prev] of qc.getQueriesData<Post | null>({ queryKey: communityKeys.postAll(postId) })) {
+    if (prev) qc.setQueryData(key, patch(prev, keyUserId(key)))
+  }
+  for (const [key, prev] of qc.getQueriesData<Post[]>({ queryKey: communityKeys.posts() })) {
+    if (!prev) continue
+    const user = keyUserId(key)
+    qc.setQueryData(key, prev.map(post => (post.id === postId ? patch(post, user) : post)))
+  }
 }
 
 function bumpCommentCount(qc: QueryClient, postId: string, delta: number) {
@@ -103,11 +121,11 @@ export function usePostQuery(
   })
 }
 
-export function useCommentsQuery(postId: string | undefined) {
+export function useCommentsQuery(postId: string | undefined, options: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: communityKeys.comments(postId ?? ''),
     queryFn: () => communityApi.getComments(postId!),
-    enabled: Boolean(postId),
+    enabled: Boolean(postId) && (options.enabled ?? true),
   })
 }
 
@@ -134,11 +152,13 @@ export function useUpdatePostMutation() {
   return useMutation({
     mutationFn: ({ postId, data }: { postId: string; data: UpdatePostData }) =>
       communityApi.updatePost(postId, data),
-    onSuccess: (_post, { postId }) =>
-      Promise.all([
-        qc.invalidateQueries({ queryKey: communityKeys.postAll(postId) }),
-        invalidatePostLists(qc),
-      ]),
+    onSuccess: (updated, { postId }) => {
+      // 응답 본문으로 상세를 바로 맞춘다(돌아갔을 때 이전 본문이 보이지 않게, EditPost 쿼리 재조회 대기 없음)
+      qc.setQueriesData<Post | null>({ queryKey: communityKeys.postAll(postId) }, prev =>
+        prev ? { ...updated, ...(prev.liked_by_user !== undefined ? { liked_by_user: prev.liked_by_user } : {}) } : prev,
+      )
+      return invalidatePostLists(qc)
+    },
   })
 }
 
@@ -146,12 +166,14 @@ export function useDeletePostMutation() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (postId: string) => communityApi.deletePost(postId),
-    onSuccess: (_void, postId) => {
-      qc.removeQueries({ queryKey: communityKeys.postAll(postId) })
-      qc.removeQueries({ queryKey: communityKeys.comments(postId) })
-      return invalidatePostLists(qc)
-    },
+    onSuccess: () => invalidatePostLists(qc),
   })
+}
+
+/** 삭제한 글의 상세·댓글 캐시 제거. 상세 화면을 떠난 뒤(navigate 뒤)에 부른다 */
+export function forgetPost(qc: QueryClient, postId: string) {
+  qc.removeQueries({ queryKey: communityKeys.postAll(postId) })
+  qc.removeQueries({ queryKey: communityKeys.comments(postId) })
 }
 
 export function useToggleLikeMutation() {
@@ -159,8 +181,12 @@ export function useToggleLikeMutation() {
   return useMutation({
     mutationFn: ({ postId, userId }: { postId: string; userId: string }) =>
       communityApi.toggleLike(postId, userId),
-    onSuccess: ({ liked, likesCount }, { postId }) => {
-      patchPostEverywhere(qc, postId, post => ({ ...post, likes_count: likesCount, liked_by_user: liked }))
+    onSuccess: ({ liked, likesCount }, { postId, userId }) => {
+      patchPostEverywhere(qc, postId, (post, keyUser) =>
+        keyUser === userId
+          ? { ...post, likes_count: likesCount, liked_by_user: liked }
+          : { ...post, likes_count: likesCount },
+      )
     },
   })
 }

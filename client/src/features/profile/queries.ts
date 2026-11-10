@@ -30,13 +30,13 @@ export interface ProfileForm {
 }
 
 export const profileApi = {
-  /** profiles.nickname (없으면 null) */
+  /** profiles.nickname (행이 없거나 비어 있으면 null — 행 없음은 오류가 아니라 재시도하지 않는다) */
   async getNickname(userId: string): Promise<string | null> {
     const { data, error } = await requireClient()
       .from('profiles')
       .select('nickname')
       .eq('id', userId)
-      .single()
+      .maybeSingle()
     if (error) throw error
     return data?.nickname ?? null
   },

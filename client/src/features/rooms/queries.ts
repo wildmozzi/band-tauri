@@ -7,7 +7,9 @@
  *   ['rooms', 'mine', userId]  내가 만든 방
  *
  * 무효화 규칙
- *   rooms 테이블 실시간 변경 → 목록 무효화(구독은 useRoomsQuery가 켜져 있는 동안만)
+ *   rooms 테이블 실시간 변경 → 목록·내 방 모두 무효화(구독은 useRoomsQuery가 켜져 있는 동안만).
+ *     내 방이 비활성(모달 닫힘)이면 stale 표시만 하므로 요청은 늘지 않는다
+ *   내 방 모달 열기 → 열 때마다 서버에서 다시 읽는다(첫 열기 포함)
  *   내 방 삭제   → 내 방 캐시에서 제거 + 목록 무효화
  *   내 방 수정   → 내 방 캐시에 패치 적용 + 목록 무효화
  */
@@ -95,7 +97,8 @@ export function useRoomsQuery() {
   useEffect(() => {
     if (!enabled) return
     return roomsApi.subscribeRoomChanges(() => {
-      void qc.invalidateQueries({ queryKey: roomKeys.list() })
+      // RoomDetail(이 계층 밖)의 수정·삭제도 실시간으로 들어오므로 내 방까지 무효화한다
+      void qc.invalidateQueries({ queryKey: roomKeys.all })
     })
   }, [enabled, qc])
 

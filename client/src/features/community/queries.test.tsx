@@ -18,6 +18,7 @@ vi.mock('../../services/communityApi', () => ({ communityApi: api }))
 
 import {
   communityKeys,
+  forgetPost,
   useAddCommentMutation,
   useCreatePostMutation,
   useDeletePostMutation,
@@ -62,6 +63,28 @@ describe('community queries', () => {
     expect(api.getPosts).not.toHaveBeenCalled()
   })
 
+  it('좋아요 여부는 누른 사용자의 키에만 쓰고, 다른 사용자·비로그인 키는 개수만 바뀐다', async () => {
+    api.toggleLike.mockResolvedValue({ liked: true, likesCount: 3 })
+    const { wrapper, client } = createQueryWrapper()
+    const anon = { ...filters, userId: null }
+    const other = { ...filters, userId: 'a' }
+    client.setQueryData(communityKeys.postList(filters), [post('p')])
+    client.setQueryData(communityKeys.postList(anon), [post('p')])
+    client.setQueryData(communityKeys.postList(other), [post('p', { liked_by_user: false })])
+    client.setQueryData(communityKeys.post('p', 'a'), post('p', { liked_by_user: false }))
+    client.setQueryData(communityKeys.post('p', null), post('p'))
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+
+    await act(() => result.current.mutateAsync({ postId: 'p', userId: 'u' }))
+
+    expect(client.getQueryData<Post[]>(communityKeys.postList(filters))![0].liked_by_user).toBe(true)
+    expect(client.getQueryData<Post[]>(communityKeys.postList(anon))![0]).toMatchObject({ likes_count: 3 })
+    expect(client.getQueryData<Post[]>(communityKeys.postList(anon))![0].liked_by_user).toBeUndefined()
+    expect(client.getQueryData<Post[]>(communityKeys.postList(other))![0]).toMatchObject({ likes_count: 3, liked_by_user: false })
+    expect(client.getQueryData<Post>(communityKeys.post('p', 'a'))).toMatchObject({ likes_count: 3, liked_by_user: false })
+    expect(client.getQueryData<Post>(communityKeys.post('p', null))!.liked_by_user).toBeUndefined()
+  })
+
   it('글 작성은 목록과 인기 태그를 무효화한다', async () => {
     api.createPost.mockResolvedValue(post('new'))
     const { wrapper, client } = createQueryWrapper()
@@ -75,28 +98,34 @@ describe('community queries', () => {
     expect(client.getQueryState(communityKeys.trendingTags(5))?.isInvalidated).toBe(true)
   })
 
-  it('글 수정은 모든 사용자 키의 상세를 무효화한다', async () => {
-    api.updatePost.mockResolvedValue(post('p'))
+  it('글 수정은 응답으로 모든 사용자 키의 상세를 덮어쓰고(좋아요 여부 유지) 목록을 무효화한다', async () => {
+    api.updatePost.mockResolvedValue(post('p', { title: '새 제목' }))
     const { wrapper, client } = createQueryWrapper()
     client.setQueryData(communityKeys.post('p', null), post('p'))
-    client.setQueryData(communityKeys.post('p', 'u'), post('p'))
+    client.setQueryData(communityKeys.post('p', 'u'), post('p', { liked_by_user: true }))
+    client.setQueryData(communityKeys.postList(filters), [post('p')])
     const { result } = renderHook(() => useUpdatePostMutation(), { wrapper })
 
-    await act(() => result.current.mutateAsync({ postId: 'p', data: { title: 'x' } }))
+    await act(() => result.current.mutateAsync({ postId: 'p', data: { title: '새 제목' } }))
 
-    expect(client.getQueryState(communityKeys.post('p', null))?.isInvalidated).toBe(true)
-    expect(client.getQueryState(communityKeys.post('p', 'u'))?.isInvalidated).toBe(true)
+    expect(client.getQueryData<Post>(communityKeys.post('p', null))!.title).toBe('새 제목')
+    expect(client.getQueryData<Post>(communityKeys.post('p', 'u'))).toMatchObject({ title: '새 제목', liked_by_user: true })
+    expect(client.getQueryState(communityKeys.post('p', 'u'))?.isInvalidated).toBe(false)
+    expect(client.getQueryState(communityKeys.postList(filters))?.isInvalidated).toBe(true)
   })
 
-  it('글 삭제는 상세·댓글 캐시를 지운다', async () => {
+  it('글 삭제는 목록을 무효화하고, forgetPost가 상세·댓글 캐시를 지운다', async () => {
     api.deletePost.mockResolvedValue(undefined)
     const { wrapper, client } = createQueryWrapper()
     client.setQueryData(communityKeys.post('p', 'u'), post('p'))
     client.setQueryData(communityKeys.comments('p'), [comment('1')])
+    client.setQueryData(communityKeys.postList(filters), [post('p')])
     const { result } = renderHook(() => useDeletePostMutation(), { wrapper })
 
     await act(() => result.current.mutateAsync('p'))
+    expect(client.getQueryState(communityKeys.postList(filters))?.isInvalidated).toBe(true)
 
+    forgetPost(client, 'p')
     expect(client.getQueryData(communityKeys.post('p', 'u'))).toBeUndefined()
     expect(client.getQueryData(communityKeys.comments('p'))).toBeUndefined()
   })

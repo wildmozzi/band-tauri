@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { isSupabaseConfigured } from '../../lib/supabaseClient'
-import { patchMyRoomCache, useDeleteRoomMutation, useMyRoomsQuery } from '../../features/rooms/queries'
+import { patchMyRoomCache, roomKeys, useDeleteRoomMutation, useMyRoomsQuery } from '../../features/rooms/queries'
 import type { MyRoom } from './roomModel'
 
 const EMPTY: MyRoom[] = []
@@ -22,11 +22,13 @@ export function useMyRooms(userId: string | undefined) {
   const fetchMyRooms = useCallback(async () => {
     if (!isSupabaseConfigured() || !userId) return
     if (!requested) {
-      setRequested(true) // 쿼리가 켜지면서 조회
+      // 첫 열기: 캐시가 fresh여도(다른 화면에서 채워졌을 수 있음) stale로 만들어 켜지자마자 조회하게 한다
+      await qc.invalidateQueries({ queryKey: roomKeys.mine(userId), refetchType: 'none' })
+      setRequested(true)
       return
     }
     await refetch()
-  }, [userId, requested, refetch])
+  }, [qc, userId, requested, refetch])
 
   const deleteMyRoom = async (roomId: string) => {
     if (!isSupabaseConfigured() || !userId) return

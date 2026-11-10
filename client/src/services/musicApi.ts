@@ -300,18 +300,24 @@ export function getAvailableStemsFromSeparation(separation: StemSeparation): str
     .map(([name]) => name)
 }
 
+/** 분리 히스토리. 실패하면 throw (캐시 계층용 — 실패를 빈 목록으로 저장하지 않게) */
+export async function fetchStemHistory(): Promise<StemSeparation[]> {
+  const headers: HeadersInit = await authHeaders()
+
+  const response = await fetch(`${API_BASE_URL}/api/music/stem-history`, { headers })
+  const data = await response.json()
+
+  if (!response.ok) {
+    throw new Error(data.error || 'Failed to fetch history')
+  }
+
+  return data.separations || []
+}
+
+/** 분리 히스토리. 실패하면 로그를 남기고 빈 목록 */
 export async function getStemHistory(): Promise<StemSeparation[]> {
   try {
-    const headers: HeadersInit = await authHeaders()
-
-    const response = await fetch(`${API_BASE_URL}/api/music/stem-history`, { headers })
-    const data = await response.json()
-
-    if (!response.ok) {
-      throw new Error(data.error || 'Failed to fetch history')
-    }
-
-    return data.separations || []
+    return await fetchStemHistory()
   } catch (error) {
     console.error('Failed to fetch stem history:', error)
     return []

@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({
   getComments: vi.fn(),
   getTrendingTags: vi.fn(),
   deleteComment: vi.fn(),
+  deletePost: vi.fn(),
 }))
 const navigate = vi.hoisted(() => vi.fn())
 
@@ -90,5 +91,23 @@ describe('usePostDetail', () => {
     // 캐시 변경 알림은 다음 틱에 배치되므로 waitFor로 기다린다
     await waitFor(() => expect(result.current.comments.map(c => c.id)).toEqual(['2']))
     expect(result.current.post?.comments_count).toBe(1)
+  })
+
+  it('글 삭제 뒤 리렌더가 있어도 지운 글·댓글을 다시 조회하지 않고 목록으로 한 번만 이동한다', async () => {
+    api.getPost.mockResolvedValue(post('P'))
+    api.getComments.mockResolvedValue([])
+    api.deletePost.mockResolvedValue(undefined)
+
+    const { result, rerender } = renderHook(() => usePostDetail('P', { id: 'u' }), { wrapper: createQueryWrapper().wrapper })
+    await waitFor(() => expect(result.current.post?.id).toBe('P'))
+
+    await act(() => result.current.deletePost())
+    rerender()
+    await act(async () => {})
+
+    expect(api.deletePost).toHaveBeenCalledWith('P')
+    expect(api.getPost).toHaveBeenCalledTimes(1)
+    expect(api.getComments).toHaveBeenCalledTimes(1)
+    expect(navigate.mock.calls).toEqual([['/community']])
   })
 })

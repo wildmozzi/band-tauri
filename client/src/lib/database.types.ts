@@ -9,6 +9,12 @@
  *  - posts.author_name / author_role / instrument 컬럼 (클라이언트가 insert·filter에 사용)
  * 운영 DB와 대조하려면 사람이 `supabase gen types typescript --project-id <id>`로 생성해 diff를 본다.
  *
+ * 보수적으로 둔 것(운영 대조 전까지):
+ *  - rooms의 추정 컬럼(max_participants/current_participants/status/tags/created_at)은 nullable.
+ *  - rooms.is_private / has_password는 008에서 NOT NULL로 추가되지만, 운영에 008이 아직 실행되지 않았을 수 있어
+ *    Row에서 optional + nullable(`?: boolean | null`)로 둔다(컬럼이 없으면 런타임 undefined).
+ *    이 두 컬럼으로 서버 필터(.eq('is_private', ...))를 걸면 008 전 운영에서 400이 난다 — 읽은 값으로만 분기할 것.
+ *
  * 생성기와 다른 점(의도적):
  *  - rooms.instrument_slots는 JSONB지만 앱 계약 형태(InstrumentSlotJson[])로 좁혔다.
  *    interface 값은 Json 인덱스 시그니처에 대입되지 않아서, 수정 금지 파일(RoomDetail)이 그대로 컴파일되게 한다.
@@ -77,16 +83,18 @@ export type Database = {
           title: string
           description: string | null
           host_id: string
-          max_participants: number
-          current_participants: number
-          status: string
+          max_participants: number | null
+          current_participants: number | null
+          status: string | null
           genre: string | null
-          tags: string[]
+          tags: string[] | null
           free_join: boolean | null
           instrument_slots: InstrumentSlotJson[] | null
-          is_private: boolean
-          has_password: boolean
-          created_at: string
+          /** 008. 008 실행 전 운영에는 컬럼이 없다(undefined) */
+          is_private?: boolean | null
+          /** 008. 서버만 변경(트리거). 008 실행 전 운영에는 컬럼이 없다 */
+          has_password?: boolean | null
+          created_at: string | null
           updated_at: string | null
         }
         Insert: {
@@ -94,16 +102,16 @@ export type Database = {
           title: string
           description?: string | null
           host_id: string
-          max_participants?: number
-          current_participants?: number
-          status?: string
+          max_participants?: number | null
+          current_participants?: number | null
+          status?: string | null
           genre?: string | null
-          tags?: string[]
+          tags?: string[] | null
           free_join?: boolean | null
           instrument_slots?: InstrumentSlotJson[] | null
-          is_private?: boolean
-          has_password?: boolean
-          created_at?: string
+          is_private?: boolean | null
+          has_password?: boolean | null
+          created_at?: string | null
           updated_at?: string | null
         }
         Update: {
@@ -111,16 +119,16 @@ export type Database = {
           title?: string
           description?: string | null
           host_id?: string
-          max_participants?: number
-          current_participants?: number
-          status?: string
+          max_participants?: number | null
+          current_participants?: number | null
+          status?: string | null
           genre?: string | null
-          tags?: string[]
+          tags?: string[] | null
           free_join?: boolean | null
           instrument_slots?: InstrumentSlotJson[] | null
-          is_private?: boolean
-          has_password?: boolean
-          created_at?: string
+          is_private?: boolean | null
+          has_password?: boolean | null
+          created_at?: string | null
           updated_at?: string | null
         }
         Relationships: [

@@ -72,7 +72,7 @@ export function toPost(row: Tables<'posts'>, likedByUser?: boolean): Post {
   const post: Post = {
     id: row.id,
     author_id: row.author_id,
-    author_name: row.author_name ?? '',
+    author_name: row.author_name ?? 'User', // getAuthorName의 대체값과 같게
     author_role: row.author_role ?? '',
     title: row.title,
     content: row.content,
