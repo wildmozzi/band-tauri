@@ -19,6 +19,7 @@ before(async () => {
   const gateway = {
     confirmPayment: async () => { tossCalls++; return { success: true } },
     cancelPayment: async () => { tossCalls++; return { success: true } },
+    lookupPayment: async () => { tossCalls++; return { found: false as const } },
   }
   const subscriptionService = new SubscriptionService(createUnavailableSubscriptionRepository('test'), gateway)
   const { createApp } = await import('../src/app')

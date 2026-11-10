@@ -7,7 +7,7 @@ import { createApp } from './app'
 import { supabaseAdmin as supabase } from './lib/supabase'
 import { initializeWebSocket } from './services/wsService'
 import { scheduleCleanup } from './services/cleanupService'
-import { scheduleSubscriptionExpiry } from './services/subscriptionService'
+import { scheduleSubscriptionJobs } from './services/subscriptionService'
 import { createRoomRepository } from './repositories/roomRepository'
 
 const PORT = Number(process.env.PORT || 8080)
@@ -23,7 +23,7 @@ if (supabase) {
       (err) => console.error('[DB] Failed to reset participants:', err instanceof Error ? err.message : err),
     )
   scheduleCleanup(supabase)
-  scheduleSubscriptionExpiry()
+  scheduleSubscriptionJobs()
 } else {
   console.log('[DB] Supabase not configured - participant sync disabled')
   console.log('[DB] Set SUPABASE_URL and SUPABASE_SERVICE_KEY to enable')
