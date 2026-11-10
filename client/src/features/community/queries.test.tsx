@@ -133,6 +133,47 @@ describe('community queries', () => {
     expect(client.getQueryData<Post[]>(communityKeys.postList(filters))![0]).toMatchObject({ likes_count: 4, liked_by_user: false })
   })
 
+  it('연타(좋아요→취소)는 서버 요청을 순서대로 보내고, 중간 응답으로 덮지 않고 마지막 응답이 최종 값이 된다', async () => {
+    const resolvers: Array<(v: { liked: boolean; likesCount: number | null }) => void> = []
+    api.toggleLike.mockImplementation(() => new Promise(r => { resolvers.push(r) }))
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(communityKeys.post('p', 'u'), post('p', { likes_count: 4, liked_by_user: false }))
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+    const read = () => client.getQueryData<Post>(communityKeys.post('p', 'u'))!
+
+    let first!: Promise<unknown>
+    let second!: Promise<unknown>
+    act(() => { first = result.current.mutateAsync({ postId: 'p', userId: 'u' }) })
+    await waitFor(() => expect(read()).toMatchObject({ likes_count: 5, liked_by_user: true }))
+    act(() => { second = result.current.mutateAsync({ postId: 'p', userId: 'u' }) })
+    await waitFor(() => expect(read()).toMatchObject({ likes_count: 4, liked_by_user: false }))
+    // 두 번째 요청은 첫 응답 전에는 서버로 가지 않는다
+    expect(api.toggleLike).toHaveBeenCalledTimes(1)
+
+    await act(async () => { resolvers[0]({ liked: true, likesCount: 5 }); await first })
+    expect(read()).toMatchObject({ likes_count: 4, liked_by_user: false })
+    await waitFor(() => expect(api.toggleLike).toHaveBeenCalledTimes(2))
+
+    await act(async () => { resolvers[1]({ liked: false, likesCount: 4 }); await second })
+    expect(read()).toMatchObject({ likes_count: 4, liked_by_user: false })
+  })
+
+  it('실패 시 자기 변경만 되돌리고 그사이 바뀐 댓글 수는 보존한다', async () => {
+    let reject!: (e: Error) => void
+    api.toggleLike.mockReturnValue(new Promise((_r, j) => { reject = j }))
+    const { wrapper, client } = createQueryWrapper()
+    client.setQueryData(communityKeys.post('p', 'u'), post('p', { likes_count: 4, liked_by_user: false, comments_count: 1 }))
+    const { result } = renderHook(() => useToggleLikeMutation(), { wrapper })
+
+    let done!: Promise<unknown>
+    act(() => { done = result.current.mutateAsync({ postId: 'p', userId: 'u' }).catch(() => undefined) })
+    await waitFor(() => expect(client.getQueryData<Post>(communityKeys.post('p', 'u'))!.likes_count).toBe(5))
+    client.setQueryData<Post>(communityKeys.post('p', 'u'), prev => ({ ...prev!, comments_count: 2 }))
+
+    await act(async () => { reject(new Error('net')); await done })
+    expect(client.getQueryData<Post>(communityKeys.post('p', 'u'))).toMatchObject({ likes_count: 4, liked_by_user: false, comments_count: 2 })
+  })
+
   it('개수 조회 실패(likesCount null)면 낙관적 개수를 두고 그 글·목록을 재조회 대상으로 만든다', async () => {
     api.toggleLike.mockResolvedValue({ liked: true, likesCount: null })
     const { wrapper, client } = createQueryWrapper()

@@ -14,18 +14,52 @@
 --   2) post_likes / comments 의 INSERT·DELETE(·post_id 변경) 트리거가 posts 집계 컬럼을 ±1 한다.
 --      SECURITY DEFINER(소유자 권한, RLS 우회) + search_path 고정.
 --      ±1 UPDATE는 posts 행 잠금 아래 최신 값에 적용되므로 동시 좋아요/취소에도 유실이 없다.
---   3) 사용자(anon/authenticated)가 posts 를 UPDATE 해도 집계 컬럼은 바뀌지 않게 한다
---      (작성자의 임의 조작 방지. 이전 클라이언트의 likes_count UPDATE는 오류 없이 무시된다)
+--   3) 사용자(anon/authenticated)는 집계 컬럼을 쓸 수 없다
+--      INSERT: 0으로 강제 (임의 집계값 주입 차단)
+--      UPDATE: 이전 값 유지 (작성자의 임의 조작 방지. 이전 클라이언트의 likes_count UPDATE는 오류 없이 무시된다)
 --   4) 기존 likes_count / comments_count 를 실제 행 수로 1회 재계산
 --
+-- 실행 전 점검 (운영 절차는 README.md "010" 참고):
+--   post_likes 는 001~009 밖(대시보드)에서 만든 테이블이라 운영에 이미 집계 트리거가 있을 수 있다.
+--   있으면 이 트리거와 겹쳐 좋아요 1번에 +2가 된다. 아래 0단계 가드가 알려진 트리거 외의 사용자 트리거를
+--   발견하면 RAISE EXCEPTION으로 중단한다(전체 롤백). 직접 확인하려면:
+--     SELECT tgrelid::regclass, tgname, tgfoid::regproc FROM pg_trigger
+--     WHERE tgrelid IN (to_regclass('public.post_likes'), to_regclass('public.comments'), to_regclass('public.posts'))
+--       AND NOT tgisinternal;
+--
 -- 재실행 안전: IF NOT EXISTS / CREATE OR REPLACE / DROP TRIGGER IF EXISTS, 재계산은 멱등.
--- 전체를 한 트랜잭션으로 실행한다. 트리거 생성이 post_likes/comments 에 잠금을 잡으므로
--- 트리거 생성과 재계산 사이에 들어온 좋아요/댓글이 누락되지 않는다(커밋까지 대기).
+-- 전체를 한 트랜잭션으로 실행하고 posts → post_likes → comments 순으로 쓰기를 막는 잠금을 먼저 잡는다
+-- (글 삭제 CASCADE와 같은 순서). 중복 제거~UNIQUE 생성, 트리거 생성~재계산 사이에 들어온 쓰기는
+-- 커밋까지 대기한다. 잠금을 5초 안에 못 잡으면 실패(롤백) — 다시 실행하면 된다.
 -- 참고: posts 의 update_posts_updated_at 트리거 때문에 집계 갱신도 posts.updated_at 을 바꾼다
 --       (클라이언트는 글 updated_at 을 표시하지 않는다).
 -- =====================================================
 
 BEGIN;
+
+SET LOCAL lock_timeout = '5s';
+
+-- -----------------------------------------------------
+-- 0. 사전 가드: 기존 사용자 트리거가 있으면 중단 (이중 집계 방지)
+--    허용: 001의 update_comments_updated_at, 이 마이그레이션의 트리거(재실행)
+-- -----------------------------------------------------
+DO $$
+DECLARE
+  found TEXT;
+BEGIN
+  SELECT string_agg(format('%s.%s -> %s', t.tgrelid::regclass, t.tgname, t.tgfoid::regproc), ', ')
+    INTO found
+    FROM pg_trigger t
+    WHERE t.tgrelid IN (to_regclass('public.post_likes'), to_regclass('public.comments'))
+      AND NOT t.tgisinternal
+      AND t.tgname NOT IN ('post_likes_sync_count', 'comments_sync_count', 'update_comments_updated_at');
+  IF found IS NOT NULL THEN
+    RAISE EXCEPTION '010 중단: post_likes/comments 에 알 수 없는 트리거가 있습니다(이중 집계 위험): %', found
+      USING HINT = '집계 트리거라면 DROP TRIGGER 후 다시 실행하고, 무관한 트리거라면 이 가드의 허용 목록에 추가하세요. docs/migrations/README.md 010 절차 참고.';
+  END IF;
+END $$;
+
+LOCK TABLE public.posts IN SHARE ROW EXCLUSIVE MODE;
 
 -- -----------------------------------------------------
 -- 1. post_likes 테이블 보장 (운영에는 이미 있다. 없을 때만 만든다)
@@ -36,6 +70,10 @@ CREATE TABLE IF NOT EXISTS public.post_likes (
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- 중복 제거~UNIQUE 생성~트리거 생성~재계산 동안 좋아요/댓글 쓰기를 막는다
+LOCK TABLE public.post_likes IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE public.comments IN SHARE ROW EXCLUSIVE MODE;
 
 ALTER TABLE public.post_likes ENABLE ROW LEVEL SECURITY;
 
@@ -127,9 +165,9 @@ BEGIN
 END;
 $$;
 
--- 트리거 함수는 직접 호출할 일이 없다
-REVOKE ALL ON FUNCTION public.post_likes_sync_count() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.comments_sync_count() FROM PUBLIC;
+-- 트리거 함수는 직접 호출할 일이 없다 (Supabase는 public 함수에 anon/authenticated EXECUTE를 직접 부여하므로 명시)
+REVOKE ALL ON FUNCTION public.post_likes_sync_count() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.comments_sync_count() FROM PUBLIC, anon, authenticated;
 
 DROP TRIGGER IF EXISTS post_likes_sync_count ON public.post_likes;
 CREATE TRIGGER post_likes_sync_count
@@ -144,7 +182,7 @@ CREATE TRIGGER comments_sync_count
   EXECUTE FUNCTION public.comments_sync_count();
 
 -- -----------------------------------------------------
--- 3. 사용자는 집계 컬럼을 바꿀 수 없다
+-- 3. 사용자는 집계 컬럼을 쓸 수 없다 (INSERT는 0, UPDATE는 이전 값)
 --    집계 트리거(SECURITY DEFINER)의 UPDATE는 current_user가 함수 소유자라 통과한다.
 -- -----------------------------------------------------
 CREATE OR REPLACE FUNCTION public.posts_guard_counters()
@@ -154,16 +192,23 @@ SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF current_user IN ('anon', 'authenticated') THEN
-    NEW.likes_count := OLD.likes_count;
-    NEW.comments_count := OLD.comments_count;
+    IF TG_OP = 'INSERT' THEN
+      NEW.likes_count := 0;
+      NEW.comments_count := 0;
+    ELSE
+      NEW.likes_count := OLD.likes_count;
+      NEW.comments_count := OLD.comments_count;
+    END IF;
   END IF;
   RETURN NEW;
 END;
 $$;
 
+REVOKE ALL ON FUNCTION public.posts_guard_counters() FROM PUBLIC, anon, authenticated;
+
 DROP TRIGGER IF EXISTS posts_guard_counters ON public.posts;
 CREATE TRIGGER posts_guard_counters
-  BEFORE UPDATE ON public.posts
+  BEFORE INSERT OR UPDATE ON public.posts
   FOR EACH ROW
   EXECUTE FUNCTION public.posts_guard_counters();
 

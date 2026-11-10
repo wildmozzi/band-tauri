@@ -227,6 +227,25 @@ describe('migration 010: counters are not user-writable', () => {
     assert.equal((await counts()).likes_count, 4)
   })
 
+  it('an authenticated INSERT cannot inject counter values (forced to 0), and later likes count from 0', async () => {
+    const id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+    await as('authenticated', AUTHOR,
+      `INSERT INTO public.posts (id, author_id, title, content, likes_count, comments_count) VALUES ($1, $2, 't', 'c', 9999, 777)`, [id, AUTHOR])
+    assert.deepEqual(await counts(id), { likes_count: 0, comments_count: 0, likes: 0, comments: 0 })
+    await like(OTHER, id)
+    assert.deepEqual(await counts(id), { likes_count: 1, comments_count: 0, likes: 1, comments: 0 })
+  })
+
+  it('anon/authenticated have no EXECUTE on the trigger functions', async () => {
+    const r = await db.query<{ fn: string; anon: boolean; auth: boolean }>(
+      `SELECT p.proname AS fn,
+         has_function_privilege('anon', p.oid, 'EXECUTE') AS anon,
+         has_function_privilege('authenticated', p.oid, 'EXECUTE') AS auth
+       FROM pg_proc p WHERE p.proname IN ('post_likes_sync_count', 'comments_sync_count', 'posts_guard_counters')`)
+    assert.equal(r.rows.length, 3)
+    for (const row of r.rows) assert.deepEqual([row.anon, row.auth], [false, false], row.fn)
+  })
+
   it('trigger functions are SECURITY DEFINER with a fixed search_path', async () => {
     const r = await db.query<{ proname: string; prosecdef: boolean; proconfig: string[] | null }>(
       `SELECT proname, prosecdef, proconfig FROM pg_proc
@@ -235,6 +254,35 @@ describe('migration 010: counters are not user-writable', () => {
     for (const row of r.rows) {
       assert.equal(row.prosecdef, true, row.proname)
       assert.ok(row.proconfig?.some(c => c.startsWith('search_path=')), row.proname)
+    }
+  })
+})
+
+describe('migration 010: pre-existing counter trigger guard', () => {
+  it('aborts (and rolls back everything) when post_likes already has an unknown trigger', async () => {
+    const other = new PGlite()
+    try {
+      await other.exec(STUB)
+      await other.exec(`
+        CREATE FUNCTION public.update_post_likes_count() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        BEGIN UPDATE public.posts SET likes_count = likes_count + 1 WHERE id = NEW.post_id; RETURN NULL; END $$;
+        CREATE TRIGGER on_post_like AFTER INSERT ON public.post_likes
+          FOR EACH ROW EXECUTE FUNCTION public.update_post_likes_count();
+      `)
+      await assert.rejects(other.exec(MIGRATION), /010 중단.*on_post_like/)
+      // 트랜잭션 롤백: 010의 트리거·함수가 남지 않는다
+      await other.exec('ROLLBACK').catch(() => undefined)
+      const left = await other.query(
+        `SELECT 1 FROM pg_trigger WHERE tgname IN ('post_likes_sync_count', 'comments_sync_count', 'posts_guard_counters')`)
+      assert.equal(left.rows.length, 0)
+
+      // 기존 트리거를 정리하면 적용된다
+      await other.exec('DROP TRIGGER on_post_like ON public.post_likes')
+      await other.exec(MIGRATION)
+      const applied = await other.query(`SELECT 1 FROM pg_trigger WHERE tgname = 'post_likes_sync_count'`)
+      assert.equal(applied.rows.length, 1)
+    } finally {
+      await other.close()
     }
   })
 })
