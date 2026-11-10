@@ -1073,7 +1073,7 @@ fn callback_mix_phase_sweep_no_premature_concealment() {
 }
 
 #[test]
-#[ignore = "realtime: 결정적 짝 engine::worker::tests::callback_mix_sim_mirrors_realtime_early_callbacks, 알려진 결함 재현 engine::worker::tests::callback_mix_sim_margin_after_underrun_no_steady_concealment. 결함 수정 전까지 CI realtime 잡에서도 제외(ci.yml)"]
+#[ignore = "realtime: 결정적 짝 engine::worker::tests::{callback_mix_sim_mirrors_realtime_early_callbacks, callback_mix_sim_margin_after_underrun_no_steady_concealment, callback_mix_sim_margin_sweep_no_concealment_after_underrun}"]
 fn callback_mix_early_callbacks_real_time() {
     let _g = RT_LOCK.lock();
     // 실장비 WASAPI 독점 프로브에서 출력 콜백은 격자보다 최대 ≈1.7ms 이르게 왔다(PR #11 M3: 간격 p1 2.3ms,

@@ -556,6 +556,15 @@ impl PeerFeed {
         })
     }
 
+    /// 은닉 판단에 필요한 p95 너머 깊이(샘플, 48k)를 지터 버퍼에 알린다(`JitterBuffer::set_consumer_lead`, P1-13).
+    /// 여유는 두 번 쓰인다: 은닉 마감을 여유만큼 앞당기고(`guard_us`), 그 마감에 다음 콜백 소비량보다 여유만큼 더
+    /// 채운다(`need`). 마감 시각에 실제 패킷이 와 있으려면 재생 위치 기준 깊이가 `p95 + DEADLINE_GUARD + 2·여유`
+    /// 이상이어야 한다(engine-notes "콜백 구동 믹스"의 필요 조건에 여유를 넣은 것). 1배만 반영하면 결정적 스윕에서
+    /// 언더런 수 초 뒤 은닉이 남았다.
+    fn consumer_lead(&self, t: &FeedTiming) -> f64 {
+        DEADLINE_GUARD_US as f64 * INTERNAL_RATE as f64 / 1e6 + t.dev_to_48(2.0 * self.margin as f64)
+    }
+
     /// 현재 적응 여유(장치 프레임, 진단·테스트용).
     pub fn margin(&self) -> usize {
         self.margin
@@ -621,19 +630,28 @@ impl PeerFeed {
             let d = u.saturating_sub(self.seen_underrun);
             self.seen_underrun = u;
             if d > 0 && jb.is_playing() {
-                let mut left = t.dev_to_48(d as f64).round() as usize;
+                // (5) 여유가 늘면 지터 목표도 깊어진다(`consumer_lead`). 0 채움이 이미 재생을 d만큼 늦췄으므로,
+                // 늘어난 목표만큼은 건너뛰지 않고 남겨 두면 보정(삽입 램프) 없이 바로 새 목표 깊이가 된다.
+                let before = jb.extra_target();
+                self.margin = (self.margin + t.chunk_dev()).min(t.out_burst);
+                self.margin_at_us = t.wall_us;
+                jb.set_consumer_lead(self.consumer_lead(t));
+                let d48 = t.dev_to_48(d as f64);
+                let skip = (d48 - (jb.extra_target() - before)).max(0.0).round();
+                // 건너뛰지 않고 남긴 만큼 깊이가 바로 커진다. 깊이 추정에도 바로 반영해 삽입 보정이 끼지 않게 한다.
+                jb.shift_depth(d48 - skip);
+                let mut left = skip as usize;
                 while left > 0 {
                     let k = left.min(OUT_CHUNK);
                     jb.pop(&mut chunk[..k * 2]);
                     left -= k;
                 }
                 ev.skipped_frames = d;
-                self.margin = (self.margin + t.chunk_dev()).min(t.out_burst);
-                self.margin_at_us = t.wall_us;
             } else if self.margin > 0 && t.wall_us.saturating_sub(self.margin_at_us) > MARGIN_DECAY_US {
                 self.margin = self.margin.saturating_sub(t.chunk_dev());
                 self.margin_at_us = t.wall_us;
             }
+            jb.set_consumer_lead(self.consumer_lead(t));
             // (3) 재생 위치 기준 깊이: 링·리샘플러에 있는 양(재생 위치가 그만큼 과거)을 넘긴다.
             let ahead = t.dev_to_48(self.dev_ahead(prod) as f64) + self.rs.pending_input() as f64;
             if consistent() {
@@ -1404,8 +1422,8 @@ mod tests {
         frame: usize,
         out_phase_us: u64,
         seconds: f64,
-        /// (주기 µs, 멈춤 µs): 출력 콜백이 멈췄다가 몰아서 따라잡는다.
-        out_stall: Option<(u64, u64)>,
+        /// (주기 µs, 멈춤 µs, 끝 µs): 출력 콜백이 멈췄다가 몰아서 따라잡는다. 끝 시각 이후에는 멈추지 않는다.
+        out_stall: Option<(u64, u64, u64)>,
         /// 워커 기상 지연 상한(µs).
         worker_jitter_us: u64,
         /// 출력 콜백이 격자보다 0..이 값(µs) 이르게 온다(실장비 WASAPI 독점 프로브: 최대 ≈1.7ms 이름, M3).
@@ -1432,6 +1450,11 @@ mod tests {
         xruns: u64,
         /// (시각 s, 벽시계 버퍼 ms)
         wall_trace: Vec<(f64, f32)>,
+        /// 4초(정착 구간 시작) 시점의 목표(ms).
+        base_target_ms: f32,
+        /// 이벤트 시각(µs): 은닉(지터 버퍼 concealed 증가), xrun(0 채움 콜백).
+        conceal_us: Vec<u64>,
+        xrun_us: Vec<u64>,
         /// 출력 L 채널(불연속 검사용, 2초 이후)
         out: Vec<f32>,
     }
@@ -1471,12 +1494,16 @@ mod tests {
             steady: (0, 0, 0),
             skipped: 0,
             xruns: 0,
+            base_target_ms: 0.0,
+            conceal_us: Vec::new(),
+            xrun_us: Vec::new(),
             wall_trace: Vec::new(),
             out: Vec::new(),
         };
         let mut half_xruns: Option<u64> = None;
         let mut base: Option<(JitterStats, u64)> = None;
         let mut fills = 0u64;
+        let mut seen_ev = (0u64, 0u64);
         let mut next_trace = 2_000_000u64;
         // 출력 콜백 k의 예정 시각(멈춤 구간에 걸리면 구간 끝으로 밀림 → 몰아서 따라잡음).
         // 이른 콜백: k마다 결정적 의사난수로 0..out_early_us만큼 앞당긴다(순서는 유지: 이름 < 주기).
@@ -1494,7 +1521,7 @@ mod tests {
             let late = jit(k, 0x5A5A_0000_0000, p.dev_late_us);
             let nominal = (p.out_phase_us + (k as f64 * out_period) as u64).saturating_sub(early) + late;
             match p.out_stall {
-                Some((every, len)) if nominal % every < len && nominal > every => nominal - nominal % every + len,
+                Some((every, len, until)) if nominal % every < len && nominal > every && nominal < until => nominal - nominal % every + len,
                 _ => nominal,
             }
         };
@@ -1544,6 +1571,14 @@ mod tests {
                 let ev = pf.service(&mut jb, &mut feed.prods[slot], &feed.bank.slots[slot], &timing, &|| true, &mut chunk, &mut tmp, None);
                 fills += u64::from(ev.deadline_fill);
                 res.skipped += ev.skipped_frames;
+                let (c_now, x_now) = (jb.stats().concealed, counters.xruns.load(Ordering::Relaxed));
+                if c_now > seen_ev.0 {
+                    res.conceal_us.push(t);
+                }
+                if x_now > seen_ev.1 {
+                    res.xrun_us.push(t);
+                }
+                seen_ev = (c_now, x_now);
                 if t >= end_us / 2 && half_xruns.is_none() {
                     half_xruns = Some(counters.xruns.load(Ordering::Relaxed));
                 }
@@ -1562,11 +1597,18 @@ mod tests {
         res.js = jb.stats();
         let (b, f) = base.unwrap_or_default();
         res.steady = (res.js.concealed - b.concealed, fills - f, res.js.corrections() - b.corrections());
+        res.base_target_ms = b.target_ms;
         res.xruns = counters.xruns.load(Ordering::Relaxed);
         let h = half_xruns.unwrap_or(res.xruns);
         res.xruns_halves = (h, res.xruns - h);
         res.margin = pf.margin();
         res
+    }
+
+    /// 피어 여유 `margin`(48k 장치 프레임)과 패킷 프레임 `frame`에서 기대하는 지터 목표 추가분(ms, P1-13):
+    /// `max(0, 마감 여유 1.5ms + 2·여유 − 3F/4)`.
+    fn expected_extra_ms(margin: usize, frame: usize) -> f32 {
+        (1.5 + 2.0 * margin as f32 / 48.0 - 0.75 * frame as f32 / 48.0).max(0.0)
     }
 
     fn discontinuities(x: &[f32]) -> usize {
@@ -1617,7 +1659,7 @@ mod tests {
                 frame: 240,
                 out_phase_us: 700,
                 seconds: 20.0,
-                out_stall: Some((1_000_000, 8_000)),
+                out_stall: Some((1_000_000, 8_000, u64::MAX)),
                 worker_jitter_us: 300,
                 out_early_us: 0,
                 dev_late_us: 0,
@@ -1638,10 +1680,15 @@ mod tests {
             assert!(r.xruns >= 3, "멈춤이 실제로 언더런을 일으켜야 함: {}", r.xruns);
             assert!(r.margin > 0, "언더런 뒤 적응 여유가 늘어야 함");
             assert!(r.skipped > 0, "언더런만큼 건너뛰어야 함");
-            // 건너뛰기가 타이밍을 바로 되돌리므로 깊이 보정(샘플 버림)이 필요 없다. 건너뛰지 않으면 매 멈춤마다
-            // 늦어진 만큼을 패킷당 1~2샘플씩 버려 되돌린다(보정 수백 회, 버퍼는 목표 위로 치우침).
-            assert_eq!(r.steady.2, 0, "언더런 뒤 보정이 필요 없어야 함");
-            assert!((late - early).abs() < 1.5, "지연 누적: {early:.2} → {late:.2}ms");
+            // 건너뛰기가 타이밍을 바로 되돌리므로 버림 보정이 필요 없다. 건너뛰지 않으면 매 멈춤마다 늦어진 만큼을
+            // 패킷당 1~2샘플씩 버려 되돌린다(보정 수백 회, 버퍼는 목표 위로 치우침). 여유가 늘면 목표도 깊어지는데
+            // (P1-13, `expected_extra_ms`) 그 깊이는 0 채움으로 이미 늦어진 만큼을 건너뛰지 않고 남겨 만든다. 남길 0 채움이
+            // 모자랄 때만 삽입 보정으로 채우므로 보정 총량은 늘어난 목표(샘플)를 넘지 않는다.
+            let extra_ms = expected_extra_ms(r.margin, 240);
+            assert!(r.steady.2 as f32 <= extra_ms * 48.0 + 1.0, "보정 {}은 늘어난 목표 {extra_ms:.2}ms를 넘지 않아야 함", r.steady.2);
+            // 지연은 쌓이지 않는다: 기본 지터 목표는 그대로(10ms)이고 늘어난 것은 여유분뿐이다.
+            assert!((r.js.target_ms - extra_ms - 10.0).abs() < 0.01, "기본 지터 목표 불변: {:.2} − 여유 {extra_ms:.2}", r.js.target_ms);
+            assert!(late - early < extra_ms + 1.5, "지연 누적: {early:.2} → {late:.2}ms (여유 {extra_ms:.2}ms)");
             assert!((late - r.js.target_ms).abs() < 3.0, "버퍼가 목표 근처: {late:.2} vs {:.2}", r.js.target_ms);
         }
     }
@@ -1721,8 +1768,8 @@ mod tests {
     fn assert_clean_link(r: &FeedSimResult, label: &str, with_corrections: bool) {
         let d = discontinuities(&r.out);
         println!(
-            "{label}: 정착 후 은닉/마감/보정 {:?}, 건너뜀 {}, xruns {}, 여유 {}, buffer {:.2}/{:.2}ms wall {:.2}ms, 불연속 {d}",
-            r.steady, r.skipped, r.xruns, r.margin, r.js.buffer_ms, r.js.target_ms, r.js.wall_buffer_ms
+            "{label}: 정착 후 은닉/마감/보정 {:?}, 건너뜀 {}, xruns {}, 여유 {}, buffer {:.2}/{:.2}ms(4s 목표 {:.2}) wall {:.2}ms, 불연속 {d}",
+            r.steady, r.skipped, r.xruns, r.margin, r.js.buffer_ms, r.js.target_ms, r.base_target_ms, r.js.wall_buffer_ms
         );
         assert_eq!((r.steady.0, r.steady.1), (0, 0), "{label}: 정착 후 은닉/마감 채움");
         if with_corrections {
@@ -1782,13 +1829,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "known-bug(P3-0 발견): 언더런 뒤 적응 여유(M4)가 지터 목표에 반영되지 않아 정착 후 은닉·마감 채움·보정이 반복된다. 엔진 수정 PR에서 ignore를 지운다"]
     fn callback_mix_sim_margin_after_underrun_no_steady_concealment() {
-        // 실시간 짝(callback_mix_early_callbacks_real_time, out 144 / 위상 1.8ms)이 CI와 로컬에서 간헐 실패하던 원인의
-        // 결정적 재현. 이른 콜백(0..1.7ms) + 워커 기상 지연 0..1.3ms → 언더런 1회 → 여유 +64프레임. 그 뒤
-        // need·lead_cap·은닉 마감은 여유만큼 앞당겨지지만 지터 버퍼 목표(5ms)는 그대로라, 마감에 실제 데이터가 없어
-        // 은닉(마감 채움)하고 깊이 보정이 수백 회 따라붙는다(수정 전: 정착 후 은닉/마감/보정 (6, 6, 716)).
-        // 기대: 언더런 1회는 허용(환경), 그 뒤 정착 구간은 지터 없는 링크답게 은닉·마감 채움 0.
+        // P1-13 회귀(P3-0에서 발견): 실시간 짝(callback_mix_early_callbacks_real_time, out 144 / 위상 1.8ms)이 CI와
+        // 로컬에서 간헐 실패하던 원인의 결정적 재현. 이른 콜백(0..1.7ms) + 워커 기상 지연 0..1.3ms → 언더런 1회 →
+        // 여유 +64프레임. 여유만큼 need·lead_cap·은닉 마감을 앞당기는데 지터 목표가 그대로면 마감에 실제 데이터가
+        // 없어 은닉(마감 채움)하고 깊이 보정이 수백 회 따라붙었다(수정 전: 정착 후 은닉/마감/보정 (6, 6, 716),
+        // buffer 5.28/5.00ms). 수정: 지터 목표에 여유를 반영(`PeerFeed::consumer_lead`).
         let r = run_feed_sim(FeedSim {
             in_buf: 96,
             out_buf: 144,
@@ -1804,10 +1850,111 @@ mod tests {
             seed: 21 + 1800,
         });
         println!(
-            "여유 후 정착: 은닉/마감/보정 {:?}, 건너뜀 {}, xruns {}, 여유 {}, buffer {:.2}/{:.2}ms",
-            r.steady, r.skipped, r.xruns, r.margin, r.js.buffer_ms, r.js.target_ms
+            "여유 후 정착: 은닉/마감/보정 {:?}, 건너뜀 {}, xruns {}, 여유 {}, buffer {:.2}/{:.2}ms, 은닉 시각 {:?}, xrun 시각 {:?}",
+            r.steady, r.skipped, r.xruns, r.margin, r.js.buffer_ms, r.js.target_ms, r.conceal_us, r.xrun_us
         );
         assert!(r.xruns >= 1 && r.margin > 0, "전제: 언더런이 나서 여유가 늘어야 함");
         assert_eq!((r.steady.0, r.steady.1), (0, 0), "여유가 늘어난 뒤 정착 구간 은닉/마감 채움");
+        let extra_ms = expected_extra_ms(r.margin, 120);
+        assert!((r.js.target_ms - extra_ms - 5.0).abs() < 0.01, "목표 = 기본 지터 목표 5ms + 여유분: {:.2}", r.js.target_ms);
+        assert!((r.js.wall_buffer_ms - r.js.target_ms).abs() < 2.0, "버퍼가 새 목표를 따라감: {:.2}/{:.2}", r.js.wall_buffer_ms, r.js.target_ms);
+    }
+
+    /// 언더런 순간(그 콜백의 은닉)을 빼고, 언더런 뒤 `settle_us`가 지난 다음에 일어난 은닉 수.
+    fn concealments_after_underruns(r: &FeedSimResult, settle_us: u64) -> usize {
+        r.conceal_us
+            .iter()
+            .filter(|&&c| c >= 2_000_000 && !r.xrun_us.iter().any(|&x| c + 1_000 >= x && c < x + settle_us))
+            .count()
+    }
+
+    #[test]
+    fn callback_mix_sim_margin_sweep_no_concealment_after_underrun() {
+        // P1-13: 위 재현을 위상·워커 기상 지연·시드로 넓혀 본다. 언더런이 나서 여유가 는 실행마다, 언더런 순간을
+        // 빼면(여유 학습 자체는 허용) 은닉이 0이어야 한다. 목표에 여유를 1배만 더하면 64실행 중 여러 실행에서
+        // 언더런 수 초 뒤에 은닉이 났다(마감이 여유만큼 앞당겨지고 채울 양도 여유만큼 커서 2배가 필요).
+        let (mut runs, mut learned) = (0, 0);
+        for out_buf in [144usize, 128] {
+            for phase in [0u64, 900, 1800, 2500] {
+                for wj in [1300u64, 1700] {
+                    for seed in 0..4u64 {
+                        let r = run_feed_sim(FeedSim {
+                            in_buf: 96,
+                            out_buf,
+                            frame: 120,
+                            out_phase_us: phase,
+                            seconds: 10.0,
+                            out_stall: None,
+                            worker_jitter_us: wj,
+                            out_early_us: 1700,
+                            dev_late_us: 500,
+                            net_jitter_us: 0,
+                            loss: 0.0,
+                            seed: seed * 1000 + phase + wj,
+                        });
+                        runs += 1;
+                        let label = format!("out {out_buf} 위상 {phase} 기상 {wj} 시드 {seed}");
+                        if r.margin > 0 {
+                            learned += 1;
+                            let late = concealments_after_underruns(&r, 200_000);
+                            println!(
+                                "{label}: 여유 {}, xruns {}, 은닉 시각 {:?}, xrun 시각 {:?}, 정착 후 {:?}, buffer {:.2}/{:.2}ms",
+                                r.margin, r.xruns, r.conceal_us, r.xrun_us, r.steady, r.js.buffer_ms, r.js.target_ms
+                            );
+                            assert_eq!(late, 0, "{label}: 언더런 뒤 은닉");
+                        } else {
+                            assert_eq!(r.steady.0, 0, "{label}: 언더런 없는 실행의 정착 후 은닉 (시각 {:?})", r.conceal_us);
+                        }
+                    }
+                }
+            }
+        }
+        println!("여유 스윕: {runs}실행 중 여유 학습 {learned}");
+        assert!(learned >= 10, "스윕이 여유 학습을 충분히 일으켜야 함: {learned}");
+    }
+
+    #[test]
+    fn callback_mix_sim_margin_decays_back_to_base_latency() {
+        // P1-13: 여유가 목표에 들어가므로 지연이 영구히 커지면 안 된다. 처음 6초 동안만 1초마다 8ms 멈춤(언더런)을
+        // 주고 그 뒤 멈춤을 없앤다. 10초마다 여유가 청크씩 줄어(MARGIN_DECAY_US) 여유 0, 목표 = 기본 지터 목표,
+        // 벽시계 버퍼도 원래 수준으로 돌아와야 한다. 내려오는 동안 은닉·불연속·xrun 없음.
+        for out_buf in [128usize, 256] {
+            let r = run_feed_sim(FeedSim {
+                in_buf: 128,
+                out_buf,
+                frame: 240,
+                out_phase_us: 700,
+                seconds: 50.0,
+                out_stall: Some((1_000_000, 8_000, 6_000_000)),
+                worker_jitter_us: 300,
+                out_early_us: 0,
+                dev_late_us: 0,
+                net_jitter_us: 0,
+                loss: 0.0,
+                seed: 5,
+            });
+            let mean = |a: f64, b: f64| {
+                let v: Vec<f32> = r.wall_trace.iter().filter(|x| x.0 >= a && x.0 < b).map(|x| x.1).collect();
+                v.iter().sum::<f32>() / v.len().max(1) as f32
+            };
+            let (peak, end) = (mean(6.5, 9.0), mean(45.0, 50.0));
+            let last_xrun = r.xrun_us.last().copied().unwrap_or(0);
+            let conc_after = r.conceal_us.iter().filter(|&&c| c > last_xrun + 1_000).count();
+            let d = discontinuities(&r.out[(7 * 48_000).min(r.out.len())..]);
+            println!(
+                "여유 감소 out {out_buf}: xruns {} (마지막 {:.2}s), 여유 {}, 버퍼 6.5~9s {peak:.2}ms → 45~50s {end:.2}ms, 목표 {:.2}ms, 마지막 xrun 뒤 은닉 {conc_after}, 7s 이후 불연속 {d}",
+                r.xruns,
+                last_xrun as f64 / 1e6,
+                r.margin,
+                r.js.target_ms,
+            );
+            assert!(r.xruns >= 2 && last_xrun < 6_100_000, "언더런은 멈춤 구간에만: {:?}", r.xrun_us);
+            assert!(peak > 10.0 + 2.0, "멈춤 구간 뒤에는 여유만큼 지연이 커져 있어야 함(전제): {peak:.2}");
+            assert_eq!(r.margin, 0, "언더런이 사라지면 여유도 0으로");
+            assert!((r.js.target_ms - 10.0).abs() < 0.01, "목표가 기본 지터 목표로 복귀: {:.2}", r.js.target_ms);
+            assert!((end - 10.0).abs() < 1.5, "벽시계 버퍼가 원래 수준으로 복귀: {end:.2}");
+            assert_eq!(conc_after, 0, "여유가 줄어드는 동안 은닉");
+            assert_eq!(d, 0, "여유가 줄어드는 동안 불연속");
+        }
     }
 }

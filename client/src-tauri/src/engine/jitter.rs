@@ -21,6 +21,8 @@
 //! 상대 지연 `transit - min_transit`의 95퍼센타일(최근 200개)을 p95라 할 때
 //! `target = clamp(ceil(p95 / F) + 1, min_frames, max_frames) × F` (F = 피어 패킷 프레임).
 //! 목표는 바로 올리되, 내리는 것은 더 낮은 후보가 2초 동안 유지될 때만 한다(목표 떨림 방지).
+//! 여기에 소비자(워커)의 요구 깊이(`set_consumer_lead`: 은닉 마감 여유 + 피어 적응 여유 M4) 중 지터 목표의
+//! 여분(≥ 3F/4)을 넘는 만큼(`extra_target`)을 더한 것이 최종 목표다(P1-13).
 //!
 //! ## 보정 (데드밴드 + 히스테리시스)
 //! 오차 `e = depth_ewma - target`에 대해
@@ -154,6 +156,10 @@ pub struct JitterBuffer {
     // 목표(프레임 수) 및 하향 히스테리시스
     target_frames: f64,
     lower_for_samples: f64,
+    /// 소비자가 은닉 판단 시각에 p95 너머로 요구하는 깊이(샘플, 48k, `set_consumer_lead`, P1-13).
+    consumer_lead: f64,
+    /// 소비자 요구로 목표가 바뀐 뒤 해제 문턱까지 보정 중(데드밴드 무시).
+    chase: bool,
 
     depth_ewma: Option<f64>,
     /// 이미 꺼냈지만 아직 재생되지 않은 샘플 수(48k). 콜백 구동 믹스에서 소스 링·리샘플러에 있는 양.
@@ -232,6 +238,8 @@ impl JitterBuffer {
             last_transit: None,
             target_frames: 0.0,
             lower_for_samples: 0.0,
+            consumer_lead: 0.0,
+            chase: false,
             depth_ewma: None,
             ahead: 0.0,
             correction: Correction::Idle,
@@ -337,9 +345,40 @@ impl JitterBuffer {
         (min_f, max_f)
     }
 
+    /// 목표 깊이(샘플) = 지터 목표(프레임 양자화) + 소비자 추가 깊이(`extra_target`). 합은 `max_ms`를 넘지 않는다.
     pub fn target_samples(&self) -> f64 {
         let (min_f, max_f) = self.frame_limits();
-        self.target_frames.clamp(min_f, max_f) * self.frame() as f64
+        let f = self.frame() as f64;
+        (self.target_frames.clamp(min_f, max_f) * f + self.extra_target()).min(max_f * f)
+    }
+
+    /// 소비자(워커)가 은닉 판단 시각에 p95 지연 너머로 요구하는 깊이(샘플, 48k): 은닉 마감 여유 + 피어 적응
+    /// 여유(M4)만큼 앞당긴 마감과 더 채우는 양(P1-13). 목표가 하나이므로 깊이 제어(보정)·재생 시작·은닉 판단이
+    /// 같은 목표 지연을 본다. 값이 바뀌어 목표가 바뀌면 깊이는 보정 램프로 따라간다. 이때는 데드밴드 안의
+    /// 오차도 해제 문턱까지 보정한다(`chase`): 여유가 데드밴드보다 작게 줄면 깊이가 내려오지 않아 지연이 남았다.
+    pub fn set_consumer_lead(&mut self, samples: f64) {
+        let before = self.extra_target();
+        self.consumer_lead = samples.max(0.0);
+        if self.extra_target() != before {
+            self.chase = true;
+        }
+    }
+
+    /// 소비자가 재생 위치를 `samples`만큼 옮겼음을 알린다(깊이 추정에 바로 반영). 워커가 언더런 뒤 건너뛰기를
+    /// 늘어난 목표만큼 덜 하면 깊이가 그만큼 즉시 커진다. EWMA가 이를 천천히 따라가는 동안 오차를 잘못 읽어
+    /// 삽입 보정이 끼지 않게 한다.
+    pub fn shift_depth(&mut self, samples: f64) {
+        if let Some(e) = self.depth_ewma.as_mut() {
+            *e += samples;
+        }
+    }
+
+    /// 소비자 요구를 채우려고 지터 목표에 더하는 깊이(샘플). 지터 목표는 양자화 히스테리시스(±F/4) 때문에
+    /// 항상 `p95 + 3F/4` 이상이다(`update_target`: 올림 후보 `ceil((p95 − F/4)/F) + 1` 프레임). 그래서 그 여분을
+    /// 넘는 만큼만 더한다: `max(0, lead − 3F/4)`. 여유가 0이면 lead = 마감 여유 1.5ms ≤ 3F/4(F ≥ 2.5ms)라 0이고
+    /// 기본 지연은 그대로다. p95가 아니라 F로만 정하므로 지터 통계가 흔들려도 목표가 떨지 않는다.
+    pub fn extra_target(&self) -> f64 {
+        (self.consumer_lead - 0.75 * self.frame() as f64).max(0.0)
     }
 
     fn update_target(&mut self, elapsed_samples: f64) {
@@ -560,6 +599,11 @@ impl JitterBuffer {
         // 오차가 한 프레임을 넘으면(목표 상향 직후 등) 패킷당 2샘플로 빨리 따라간다(PR #5 M-1).
         // 국소 피치 편차는 2/F(240샘플이면 약 14센트), 오차가 1프레임 안으로 들어오면 1샘플로 돌아온다.
         self.corr_step = if err.abs() > f { 2 } else { 1 };
+        // 소비자 요구로 목표가 바뀐 직후에는 해제 문턱 밖의 오차부터 따라간다(P1-13, `set_consumer_lead`).
+        if self.chase && err.abs() <= exit {
+            self.chase = false;
+        }
+        let enter = if self.chase { exit } else { enter };
         self.correction = match self.correction {
             Correction::Idle if err > enter => Correction::Drop,
             Correction::Idle if err < -enter => Correction::Insert,
