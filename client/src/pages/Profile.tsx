@@ -9,6 +9,7 @@ import {
   useUpdateUserMetadataMutation,
 } from '../features/profile/queries'
 import './Profile.css'
+import { Button } from '../components/ui/Button'
 
 type ProfileTab = 'info' | 'follow' | 'plan' | 'theme' | 'support'
 
@@ -296,17 +297,17 @@ export function Profile() {
 
                 <div className="detail-actions">
                   {!isEditing ? (
-                    <button className="btn-primary" onClick={() => setIsEditing(true)}>
+                    <Button onClick={() => setIsEditing(true)}>
                       수정하기
-                    </button>
+                    </Button>
                   ) : (
                     <>
-                      <button className="btn-secondary" onClick={handleCancel} disabled={isSaving}>
+                      <Button variant="secondary" onClick={handleCancel} disabled={isSaving}>
                         취소
-                      </button>
-                      <button className="btn-primary" onClick={handleSave} disabled={isSaving}>
+                      </Button>
+                      <Button onClick={handleSave} disabled={isSaving}>
                         {isSaving ? '저장 중...' : '저장'}
-                      </button>
+                      </Button>
                     </>
                   )}
                 </div>
@@ -372,12 +373,9 @@ export function Profile() {
                 </div>
 
                 <div className="plan-actions">
-                  <button
-                    className="btn-primary"
-                    onClick={() => navigate('/pricing')}
-                  >
+                  <Button onClick={() => navigate('/pricing')}>
                     {userPlan === 'free' ? '요금제 업그레이드' : '요금제 변경'}
-                  </button>
+                  </Button>
                 </div>
               </div>
 
@@ -396,12 +394,9 @@ export function Profile() {
                     <span className="info-label">결제 수단</span>
                     <span className="info-value">등록된 결제 수단 없음</span>
                   </div>
-                  <button
-                    className="btn-secondary"
-                    onClick={() => navigate('/pricing')}
-                  >
+                  <Button variant="secondary" onClick={() => navigate('/pricing')}>
                     결제 수단 관리
-                  </button>
+                  </Button>
                 </div>
               )}
             </div>
