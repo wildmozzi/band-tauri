@@ -2,7 +2,8 @@
 //!
 //! - 결정적: 가짜 장치 두 엔진(A 사인 → B)을 루프백 UDP로 잇고 B에서 녹음한다. 트랙 구성·길이 정렬·피어 소리·
 //!   통계 필드·엔진 정지 시 마무리를 본다(벽시계 품질 임계 없음).
-//! - 실시간(`#[ignore]`): 같은 링크에서 녹음 끈 구간과 켠 구간의 버퍼 지연·은닉·xrun을 비교한다(PR 본문 수치).
+//! - 실시간(`#[ignore]`): 같은 링크에서 녹음 끈 창과 켠 창을 교대로(ABBA) 재서 버퍼 지연·은닉·xrun을 비교한다
+//!   (PR 본문 수치). 판정 규칙(`judge`)은 결정적 테스트로 따로 검사한다.
 //!   로컬 실행: `cargo test --test record -- --ignored --nocapture --test-threads 1`.
 
 use std::net::SocketAddr;
@@ -160,23 +161,101 @@ fn records_local_and_peer_tracks_aligned() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 한 구간(`secs`초) 관찰. 반환: (평균 bufferMs, 은닉 프레임, xrun, 생산 프레임).
-fn window(b: &Engine, secs: u64) -> (f32, u64, u64, u64) {
+/// 한 측정 창의 관찰값.
+#[derive(Clone, Copy, Debug)]
+struct Window {
+    /// 창 동안 4Hz로 읽은 bufferMs 평균
+    buf_ms: f32,
+    concealed: u64,
+    xruns: u64,
+    produced: u64,
+}
+
+/// 한 창(`ms`밀리초) 관찰.
+fn window(b: &Engine, ms: u64) -> Window {
     let s0 = b.stats();
     let j0 = b.peer_jitter_stats()[0].1;
     let mut buf = 0.0;
-    let n = secs * 4;
+    let n = (ms / 250).max(1);
     for _ in 0..n {
         std::thread::sleep(Duration::from_millis(250));
         buf += b.stats().peers[0].buffer_ms;
     }
     let s1 = b.stats();
     let j1 = b.peer_jitter_stats()[0].1;
-    (buf / n as f32, j1.concealed - j0.concealed, s1.xruns - s0.xruns, j1.produced - j0.produced)
+    Window { buf_ms: buf / n as f32, concealed: j1.concealed - j0.concealed, xruns: s1.xruns - s0.xruns, produced: j1.produced - j0.produced }
 }
 
+fn median(mut v: Vec<f32>) -> f32 {
+    v.sort_by(f32::total_cmp);
+    let n = v.len();
+    if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
+}
+
+/// xrun·은닉이 생긴 창 수: 켬 쪽이 끔 쪽보다 이만큼까지 많아도 통과(러너 한두 번의 끊김).
+const BAD_WINDOW_SLACK: usize = 2;
+
+/// 녹음 켬/끔 판정 (P3-0d). 같은 링크에서 끔·켬 창을 ABBA로 교대해 잰 값을 받는다.
+///
+/// 호스티드 windows 러너에서는 링크의 버퍼 지연이 수 초에 걸쳐 1~2ms 떠다니고 xrun이 한 창에 몰려(3개) 나온다
+/// (#49 실패 로그). 끔 8초 → 켬 8초를 한 번 비교하면 그 흔들림이 한쪽에만 떨어질 때 실패했다. 그래서
+/// - 버퍼 지연: 켬 창 중앙값 − 끔 창 중앙값. 허용치는 반 프레임(`frame_ms/2`, 최소 1ms) — 녹음이 RT 경로를
+///   방해해 지터 버퍼가 한 프레임이라도 늘면(켬 창마다 +`frame_ms`) 잡힌다.
+/// - xrun·은닉: 개수 합이 아니라 "생긴 창 수". 러너 한 번의 몰림은 창 하나만 더럽힌다. 켬 쪽 창 수가 끔 쪽보다
+///   [`BAD_WINDOW_SLACK`]개 넘게 많으면 실패 — 녹음이 계속 방해하면 켬 창 대부분에서 생기므로 잡힌다.
+fn judge(frame_ms: f32, off: &[Window], on: &[Window]) -> Result<(), String> {
+    let tol = (frame_ms / 2.0).max(1.0);
+    let d = median(on.iter().map(|w| w.buf_ms).collect()) - median(off.iter().map(|w| w.buf_ms).collect());
+    if d.abs() > tol {
+        return Err(format!("녹음 중 버퍼 지연 변화(중앙값) {d:+.2}ms > 허용 {tol:.2}ms"));
+    }
+    type Count = fn(&Window) -> u64;
+    let checks: [(&str, Count); 2] = [("xrun", |w| w.xruns), ("은닉", |w| w.concealed)];
+    for (what, f) in checks {
+        let bad = |ws: &[Window]| ws.iter().filter(|w| f(w) > 0).count();
+        let (b_off, b_on) = (bad(off), bad(on));
+        if b_on > b_off + BAD_WINDOW_SLACK {
+            return Err(format!("녹음 중 {what} 생긴 창 증가: 끔 {b_off}/{} → 켬 {b_on}/{}", off.len(), on.len()));
+        }
+    }
+    Ok(())
+}
+
+fn win(buf_ms: f32, concealed: u64, xruns: u64) -> Window {
+    Window { buf_ms, concealed, xruns, produced: 800 }
+}
+
+/// 판정 규칙의 결정적 검사: #49에서 본 러너 흔들림은 통과, 녹음이 실제로 지연·은닉·xrun을 늘리는 경우는 실패.
 #[test]
-#[ignore = "realtime: 녹음 켬/끔 비교(PR 수치). 결정적 짝 engine::record::tests::*, records_local_and_peer_tracks_aligned"]
+fn record_compare_judge_tolerates_runner_noise_but_catches_regressions() {
+    // #49 실패 로그 수치를 6쌍 교대 창에 흩뿌린 꼴: 버퍼가 6→10ms로 떠다니고 xrun 3개가 한 창에 몰림
+    let off = [win(5.9, 1, 0), win(7.4, 0, 3), win(10.3, 0, 0), win(8.4, 0, 0), win(9.9, 0, 1), win(6.0, 0, 0)];
+    let on = [win(6.7, 0, 3), win(7.6, 0, 0), win(9.4, 0, 0), win(10.5, 1, 1), win(9.0, 0, 0), win(6.3, 0, 0)];
+    assert_eq!(judge(2.5, &off, &on), Ok(()));
+    assert_eq!(judge(5.0, &off, &on), Ok(()));
+    // 한 창 몰림(러너 한 번 끊김)은 통과
+    let quiet = [win(6.0, 0, 0); 6];
+    let burst = [win(6.0, 4, 3), win(6.0, 0, 0), win(6.0, 0, 0), win(6.0, 0, 0), win(6.0, 0, 0), win(6.0, 0, 0)];
+    assert_eq!(judge(2.5, &quiet, &burst), Ok(()));
+
+    // 녹음이 지터 버퍼를 한 프레임 키움(켬 창마다 +frame_ms)
+    for frame_ms in [2.5f32, 5.0] {
+        let worse: Vec<_> = off.iter().map(|x| win(x.buf_ms + frame_ms, x.concealed, x.xruns)).collect();
+        assert!(judge(frame_ms, &off, &worse).unwrap_err().contains("버퍼 지연"), "{frame_ms}");
+    }
+    // 켬 창 대부분(4/6)에서 xrun / 은닉 — 창마다 한두 개뿐이어도 잡힌다
+    let xr = [win(6.0, 0, 1), win(6.0, 0, 2), win(6.0, 0, 1), win(6.0, 0, 0), win(6.0, 0, 1), win(6.0, 0, 0)];
+    assert!(judge(2.5, &quiet, &xr).unwrap_err().contains("xrun"));
+    let cc = [win(6.0, 1, 0), win(6.0, 2, 0), win(6.0, 0, 0), win(6.0, 1, 0), win(6.0, 3, 0), win(6.0, 0, 0)];
+    assert!(judge(2.5, &quiet, &cc).unwrap_err().contains("은닉"));
+}
+
+/// 교대 쌍 수와 창 길이. 6쌍 × 2초 × 2 = 링크당 24초 측정 (예전 끔 8초 + 켬 8초).
+const PAIRS: usize = 6;
+const WINDOW_MS: u64 = 2_000;
+
+#[test]
+#[ignore = "realtime: 녹음 켬/끔 비교(PR 수치). 결정적 짝 engine::record::tests::*, records_local_and_peer_tracks_aligned, record_compare_judge_*"]
 fn recording_does_not_change_buffer_concealment_or_xruns() {
     let _g = RT_LOCK.lock();
     // FLAC(P2-4a)은 쓰기 스레드에서 인코딩하므로 CPU를 더 쓴다 — 128 버퍼에서 같은 기준으로 본다.
@@ -188,36 +267,50 @@ fn recording_does_not_change_buffer_concealment_or_xruns() {
         bb.seed = 9;
         let (a, b) = pair(config(buf, frame_ms), ba, bb);
         std::thread::sleep(Duration::from_secs(3));
-        let off = window(&b, 8);
         let dir = tmp(&format!("rt-{buf}-{fmt:?}"));
-        b.record_start(RecordOptions { include_mix: true, format: fmt, ..Default::default() }, &dir).unwrap();
-        let on = window(&b, 8);
-        let sum = b.recorder().lock().stop().unwrap();
-        let frames = b.peer_jitter_stats()[0].1;
+        let (mut off, mut on) = (Vec::new(), Vec::new());
+        let (mut rec_secs, mut rec_bytes, mut dropped) = (0.0, 0u64, 0u64);
+        // ABBA(끔·켬, 켬·끔, …): 링크가 천천히 떠다녀도(드리프트) 양쪽에 고르게 나뉜다
+        for i in 0..PAIRS {
+            for recording in if i % 2 == 0 { [false, true] } else { [true, false] } {
+                if !recording {
+                    off.push(window(&b, WINDOW_MS));
+                    continue;
+                }
+                b.record_start(RecordOptions { include_mix: true, format: fmt, ..Default::default() }, &dir).unwrap();
+                on.push(window(&b, WINDOW_MS));
+                let sum = b.recorder().lock().stop().unwrap();
+                assert!(sum.error.is_none(), "{:?}", sum.error);
+                rec_secs += sum.duration_sec;
+                rec_bytes += sum.bytes;
+                dropped += sum.dropped_frames;
+            }
+        }
+        let late = b.peer_jitter_stats()[0].1.late;
         let est = b.stats().est_latency_ms;
         drop(b);
         drop(a);
         std::fs::remove_dir_all(&dir).ok();
+        let line = |ws: &[Window]| {
+            let (c, p) = (ws.iter().map(|w| w.concealed).sum::<u64>(), ws.iter().map(|w| w.produced).sum::<u64>());
+            format!(
+                "buffer 중앙값 {:.2}ms [{}] 은닉 {c} ({:.2}%) xrun {} [은닉/xrun {}]",
+                median(ws.iter().map(|w| w.buf_ms).collect()),
+                ws.iter().map(|w| format!("{:.1}", w.buf_ms)).collect::<Vec<_>>().join(" "),
+                c as f64 / p.max(1) as f64 * 100.0,
+                ws.iter().map(|w| w.xruns).sum::<u64>(),
+                ws.iter().map(|w| format!("{}/{}", w.concealed, w.xruns)).collect::<Vec<_>>().join(" "),
+            )
+        };
         println!(
-            "REC {fmt:?} buf {buf} / {frame_ms}ms (estLatency {est:.2}ms): 끔 buffer {:.2}ms 은닉 {} ({:.2}%) xrun {} | 켬 buffer {:.2}ms 은닉 {} ({:.2}%) xrun {} | 녹음 {:.2}s {}트랙 {}B 버림 {}프레임 (late {})",
-            off.0,
-            off.1,
-            off.1 as f64 / off.3.max(1) as f64 * 100.0,
-            off.2,
-            on.0,
-            on.1,
-            on.1 as f64 / on.3.max(1) as f64 * 100.0,
-            on.2,
-            sum.duration_sec,
-            sum.tracks.len(),
-            sum.bytes,
-            sum.dropped_frames,
-            frames.late,
+            "REC {fmt:?} buf {buf} / {frame_ms}ms (estLatency {est:.2}ms, {PAIRS}쌍 × {WINDOW_MS}ms ABBA): 끔 {} | 켬 {} | 녹음 {rec_secs:.2}s {rec_bytes}B 버림 {dropped}프레임 (late {late})",
+            line(&off),
+            line(&on),
         );
-        assert_eq!(sum.dropped_frames, 0, "녹음 링 넘침");
-        assert!(on.2 <= off.2 + 1, "녹음 중 xrun 증가: {} → {}", off.2, on.2);
-        assert!(on.1 <= off.1 + 2, "녹음 중 은닉 증가: {} → {}", off.1, on.1);
-        assert!((on.0 - off.0).abs() < 1.0, "녹음 중 버퍼 지연 변화: {:.2} → {:.2}ms", off.0, on.0);
+        assert_eq!(dropped, 0, "녹음 링 넘침");
+        if let Err(e) = judge(frame_ms, &off, &on) {
+            panic!("buf {buf} / {frame_ms}ms: {e}");
+        }
     }
 }
 
