@@ -2,7 +2,7 @@ name: CI
 
 # 실행 위치: 이 리포 전용 self-hosted runner(개발 PC, Windows, 라벨 band-tauri).
 # GitHub 호스티드 러너는 비공개 리포 무료 시간(월 2,000분, Windows 2배)을 다 써서 2026-11-10에 멈췄다(P3-0b).
-# 러너가 하나라 잡은 차례로 돈다. 바뀐 경로에 해당하는 잡만 돌려 시간을 아낀다(push to overhaul/develop은 전부).
+# 러너 2대(jw-pc-band, jw-pc-band-2)가 잡을 나눠 돈다. 바뀐 경로에 해당하는 잡만 돌려 시간을 아낀다(push to overhaul/develop은 전부).
 
 on:
   pull_request:
@@ -24,9 +24,9 @@ defaults:
     shell: bash
 
 env:
-  # 작업자 워크트리 공유 target(C:/Users/jwshin/.cargo-target/band-tauri)과 잠금을 나누지 않도록 CI 전용 폴더를 쓴다.
-  # self-hosted라 잡 사이에 남아 있어 별도 캐시 액션이 필요 없다.
-  CARGO_TARGET_DIR: C:/Users/jwshin/.cargo-target/ci
+  # Rust 빌드 산출물 위치(CARGO_TARGET_DIR)는 러너마다 다르게 각 러너 폴더의 .env에서 정한다
+  # (C:actions-runner.env → .cargo-target/ci, C:actions-runner-2.env → .cargo-target/ci-2).
+  # 러너 2대가 같은 폴더를 쓰면 cargo 잠금으로 서로 기다린다. 작업자 워크트리 공유 target과도 분리.
   CARGO_TERM_COLOR: always
 
 # 모든 잡·스텝에 timeout-minutes를 둔다(P3-0). 값은 정상 소요의 약 2~3배.
