@@ -229,6 +229,45 @@ body {
   background: rgba(141, 123, 255, 0.1);
 }
 
+.primary-cta,
+.ghost-cta {
+  font-family: inherit;
+}
+
+.primary-cta:disabled,
+.ghost-cta:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* ===== 404 (P3-12 ⑦) ===== */
+.not-found-page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 96px 20px;
+  text-align: center;
+}
+
+.not-found-page h1 {
+  font-size: 2rem;
+  margin-bottom: 16px;
+}
+
+.not-found-page p {
+  color: var(--text-muted);
+  margin-bottom: 32px;
+  word-break: break-all;
+}
+
+.not-found-actions {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
 .hero-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

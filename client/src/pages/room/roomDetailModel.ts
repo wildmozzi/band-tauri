@@ -62,7 +62,6 @@ export const QUALITY_ICONS: Record<string, { icon: string; color: string; label:
   unknown: { icon: '⚪', color: '#9ca3af', label: '측정 중' },
 }
 
-export const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL || undefined
 export const PUBLIC_WEB_URL: string | undefined = import.meta.env.VITE_PUBLIC_WEB_URL || undefined
 
 export function formatMs(v: number | null | undefined, digits = 0): string {

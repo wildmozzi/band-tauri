@@ -1,4 +1,5 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { useEffect } from 'react'
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClient } from './lib/queryClient'
 import { AuthProvider } from './contexts/AuthContext'
@@ -27,17 +28,30 @@ import { PaymentSuccess } from './pages/PaymentSuccess'
 import { PaymentFail } from './pages/PaymentFail'
 import { Profile } from './pages/Profile'
 import { Karaoke } from './pages/Karaoke'
+import { NotFound } from './pages/NotFound'
+import { pageTitleFor } from './lib/pageTitle'
+import { SERVICE_NAME } from './lib/brand'
 import { usePremium } from './contexts/usePremium'
 import './App.css'
 import './pages/Pricing.css'
 import './components/PremiumModal.css'
 import './pages/Payment.css'
 
+/** 라우트가 바뀔 때마다 탭 제목을 'IndigoMuse — <화면>'으로 맞춘다 (P3-12 ①) */
+function DocumentTitle() {
+  const { pathname } = useLocation()
+  useEffect(() => {
+    document.title = pageTitleFor(pathname)
+  }, [pathname])
+  return null
+}
+
 function AppContent() {
   const { premiumModal, closePremiumModal } = usePremium()
 
   return (
     <div className="app">
+      <DocumentTitle />
       <Navigation />
       <main className="app-content">
         <Routes>
@@ -59,10 +73,11 @@ function AppContent() {
           <Route path="/payment/success" element={<PaymentSuccess />} />
           <Route path="/payment/fail" element={<PaymentFail />} />
           <Route path="/profile" element={<Profile />} />
+          <Route path="*" element={<NotFound />} />
         </Routes>
       </main>
       <footer className="app-footer">
-        <p>BandSpace · Syncroom-inspired 데모. 데스크톱 / 모바일 확장을 준비 중입니다.</p>
+        <p>{SERVICE_NAME} · 연주는 데스크톱 앱에서, 관람은 웹에서.</p>
       </footer>
 
       {/* 미니 플레이어 - 합주실에서 다른 페이지로 이동했을 때 표시 */}
