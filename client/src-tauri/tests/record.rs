@@ -79,11 +79,12 @@ fn tmp(tag: &str) -> PathBuf {
     d
 }
 
-/// 24비트 스테레오 WAV(헤더 80바이트)의 L 채널.
+/// 24비트 스테레오 WAV의 L 채널(표준 파서 hound로 읽음 — EXTENSIBLE 헤더 확인을 겸한다, PR #47 L3).
 fn read_left(path: &Path) -> Vec<f32> {
-    let b = std::fs::read(path).unwrap();
-    assert_eq!(&b[0..4], b"RIFF");
-    b[80..].as_chunks::<6>().0.iter().map(|c| (i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8) as f32 / 8_388_607.0).collect()
+    let mut r = hound::WavReader::open(path).unwrap();
+    assert_eq!((r.spec().channels, r.spec().bits_per_sample), (2, 24));
+    let s: Vec<i32> = r.samples::<i32>().map(|v| v.unwrap()).collect();
+    s.iter().step_by(2).map(|&v| v as f32 / 8_388_607.0).collect()
 }
 
 #[test]
@@ -118,7 +119,7 @@ fn records_local_and_peer_tracks_aligned() {
     let folder = PathBuf::from(&sum.folder);
     let file = |k: TrackKind| folder.join(&sum.tracks.iter().find(|t| t.kind == k).unwrap().file);
     let peer = sum.tracks.iter().find(|t| t.kind == TrackKind::Peer).unwrap();
-    assert_eq!(peer.peer_id.as_deref(), Some("alice"));
+    assert_eq!(peer.peer_id.as_deref(), Some(band_lib::diag::mask::pseudonymize("alice").as_str()), "피어 id는 가명(PR #62 L5)");
     assert!(peer.file.ends_with("앨리스.wav"), "{}", peer.file);
 
     let me = read_left(&file(TrackKind::Local));
@@ -532,5 +533,223 @@ fn record_toggle_adds_no_xruns_at_start_or_stop() {
         std::fs::remove_dir_all(&dir).ok();
         assert!(n_rec <= n_ctl + 1, "녹음 시작·정지 직후 xrun {n_rec}개(대조 경계 창 {n_ctl}개): {ev:?} / {edges:?}");
         assert!(a_rec <= a_ctl + 2, "녹음 켬/끔 구간 xrun 증가: {a_ctl} → {a_rec}");
+    }
+}
+
+// ---- 은닉 마커 위치 정확도(PR #62 L1) ----
+
+/// 위치 부호 신호의 주기(프레임). 송신 프레임 n의 값은 `-0.8 + 1.6 × (n mod P) / P`(톱니)라, 받은 샘플 값만으로 그 샘플이
+/// 송신 몇 번째 프레임(mod P)인지 안다. 한 프레임 간격은 PCM16 약 11 LSB라 양자화(±0.1프레임)에 묻히지 않는다.
+const RAMP_PERIOD: usize = 4800;
+
+fn ramp_value(n: u64) -> f32 {
+    (-0.8 + 1.6 * (n % RAMP_PERIOD as u64) as f64 / RAMP_PERIOD as f64) as f32
+}
+
+fn ramp_backend() -> FakeBackend {
+    FakeBackend::new(
+        48_000,
+        Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+            for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+                frame.fill(ramp_value(start + i as u64));
+            }
+        }),
+    )
+}
+
+/// 녹음된 톱니에서 송신 순서가 깨진 구간(= 은닉·0 채움·버림 크로스페이드)을 찾는다. 반환: [시작, 끝) 프레임 구간.
+///
+/// 샘플 i의 오프셋 `off(i) = idx(v_i) − i (mod P)`는 원 신호가 그대로 이어지는 동안 일정하다(지연이 일정하므로). 지터
+/// 버퍼의 비율 보정(최대 ±0.25%)은 오프셋을 천천히 움직이므로 직전 정상 샘플과 1프레임 안이면 정상으로 본다. 은닉은
+/// 직전 패킷을 페이드한 복사(오프셋이 패킷 길이만큼 어긋나고 값도 줄어듦)나 무음이라 정상이 아니다. 패킷을 버리면 오프셋이
+/// 한 번 뛰고 그 뒤로 다시 일정하다 — 뒤 `LOCK`프레임이 새 오프셋에 1프레임 안으로 모두 맞으면 거기서 새로 잡는다.
+/// 짧은 깨짐(톱니 끝 보간 등, `MIN`프레임 미만)은 버리고, `MIN` 안으로 붙은 구간은 합친다.
+fn broken_spans(v: &[f32]) -> Vec<(usize, usize)> {
+    const TOL: f64 = 1.0;
+    const LOCK: usize = 48;
+    const MIN: usize = 16;
+    let p = RAMP_PERIOD as f64;
+    let off = |i: usize| ((v[i] as f64 + 0.8) / 1.6 * p - i as f64).rem_euclid(p);
+    let dist = |a: f64, b: f64| {
+        let d = (a - b).rem_euclid(p);
+        d.min(p - d)
+    };
+    let mut bad = vec![false; v.len()];
+    let mut cur: Option<f64> = None;
+    for (i, b) in bad.iter_mut().enumerate() {
+        let o = off(i);
+        if cur.is_some_and(|c| dist(o, c) <= TOL) {
+            cur = Some(o);
+            continue;
+        }
+        if i + LOCK <= v.len() && (i..i + LOCK).all(|k| dist(off(k), o) <= TOL) {
+            cur = Some(o);
+            continue;
+        }
+        *b = true;
+    }
+    let mut spans: Vec<(usize, usize)> = vec![];
+    let mut i = 0;
+    while i < v.len() {
+        if !bad[i] {
+            i += 1;
+            continue;
+        }
+        let s = i;
+        while i < v.len() && bad[i] {
+            i += 1;
+        }
+        match spans.last_mut() {
+            Some(last) if s - last.1 < MIN => last.1 = i,
+            _ => spans.push((s, i)),
+        }
+    }
+    spans.retain(|&(s, e)| e - s >= MIN);
+    spans
+}
+
+/// 탐지기 자체의 결정적 검사: 알려진 자리에 은닉(직전 240프레임 페이드 복사, 그리고 페이드 + 무음)·패킷 버림(오프셋
+/// 점프 + 48프레임 크로스페이드)·느린 비율 보정을 넣은 톱니에서 정확히 그 구간만 찾는다.
+#[test]
+fn broken_spans_finds_known_concealment() {
+    let fs = 240usize;
+    let mut v: Vec<f32> = vec![];
+    let mut n = 1234u64; // 송신 위치(녹음과의 오프셋)
+    let push_run = |v: &mut Vec<f32>, n: &mut u64, len: usize| {
+        for _ in 0..len {
+            v.push(ramp_value(*n));
+            *n += 1;
+        }
+    };
+    let fade_last = |v: &mut Vec<f32>| {
+        let last: Vec<f32> = v[v.len() - fs..].to_vec();
+        for (k, s) in last.iter().enumerate() {
+            v.push(s * (1.0 - k as f32 / fs as f32));
+        }
+    };
+    push_run(&mut v, &mut n, 3000);
+    // 은닉 1: 패킷 하나 손실 → 직전 패킷 페이드 복사, 그 자리의 송신 프레임은 건너뛴다
+    let conceal1 = v.len();
+    fade_last(&mut v);
+    n += fs as u64;
+    push_run(&mut v, &mut n, 5000);
+    // 은닉 2: 두 패킷 연속 손실 → 페이드 복사 + 무음
+    let conceal2 = v.len();
+    fade_last(&mut v);
+    v.extend(std::iter::repeat_n(0.0, fs));
+    n += 2 * fs as u64;
+    push_run(&mut v, &mut n, 4000);
+    // 패킷 버림: 송신 240프레임을 건너뛰며 48프레임 크로스페이드
+    let dropped = v.len();
+    for k in 0..48u64 {
+        let w = k as f32 / 48.0;
+        v.push(ramp_value(n + k) * (1.0 - w) + ramp_value(n + fs as u64 + k) * w);
+    }
+    n += fs as u64 + 48;
+    push_run(&mut v, &mut n, 3000);
+    // 비율 보정(0.25% 늘이기, 선형 보간) 2000프레임 — 깨짐이 아니다(톱니 끝 보간 튐은 짧아서 버려진다)
+    let mut pos = n as f64;
+    for _ in 0..2000 {
+        let (a, f) = (pos.floor() as u64, pos.fract() as f32);
+        v.push(ramp_value(a) * (1.0 - f) + ramp_value(a + 1) * f);
+        pos += 1.0 - 0.0025;
+    }
+    n = pos.round() as u64;
+    push_run(&mut v, &mut n, 3000);
+    let q: Vec<f32> = v.iter().map(|&x| (x * 32767.0).round() / 32767.0).collect(); // PCM16 양자화
+    let spans = broken_spans(&q);
+    assert_eq!(spans.len(), 3, "{spans:?}");
+    let near = |(s, e): (usize, usize), (s0, e0): (usize, usize)| s.abs_diff(s0) <= 2 && e.abs_diff(e0) <= 2;
+    assert!(near(spans[0], (conceal1, conceal1 + fs)), "{spans:?} vs {conceal1}");
+    assert!(near(spans[1], (conceal2, conceal2 + 2 * fs)), "{spans:?} vs {conceal2}");
+    assert!(spans[2].0.abs_diff(dropped) <= 2 && spans[2].1 <= dropped + 48 + 2, "{spans:?} vs {dropped}");
+}
+
+/// PR #62 L1: 은닉 마커 위치를 녹음 파일의 실제 은닉 위치와 대조한다. A는 위치 부호 톱니를 PCM16(코덱 손실 없음, 은닉 =
+/// 직전 패킷 페이드 + 무음)으로 보내고, A → B 패킷을 60개마다 1개 버린다(결정적 손실). B 녹음의 피어 트랙에서 톱니가
+/// 깨진 구간(`broken_spans`)을 실제 은닉 위치로 보고, `markers.json`의 `conceal` 마커 `start`/`end`와의 차이 분포를 낸다.
+///
+/// 판정: 짝지은 마커의 시작·끝 오차가 모두 `accuracyFrames`(10ms) 안, 마커의 90% 이상이 실제 구간과 짝지어진다.
+/// 오차 원인(워커가 읽는 사이 진행 중인 콜백의 소비, 한 반복에 여러 패킷)이 스레드 시각에 달려 ignore다.
+#[test]
+#[ignore = "realtime: 손실 프록시 루프백 + 위치 부호 톱니(PR 수치). 결정적 짝 broken_spans_finds_known_concealment, engine::record::tests::markers_sidecar_maps_events_to_tracks"]
+fn concealment_marker_positions_match_recorded_concealment() {
+    let _g = RT_LOCK.lock();
+    for buf in [256u32, 128] {
+        let mut cfg = config(buf, 5.0);
+        cfg.codec = CodecKind::Pcm16;
+        let a = Engine::start(cfg.clone(), Arc::new(ramp_backend()), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+        let b = Engine::start(cfg, Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // 60개마다 1개(약 1.7%): 수신 손실 피드백의 Opus 자동 전환 문턱(`LOSS_ENTER_PCT` 2%) 아래라 끝까지 PCM16이다.
+        // 25개마다(4%)면 약 2초 뒤 Opus로 바뀌어 톱니가 코덱에 뭉개지고 깨짐 탐지가 안 된다.
+        let (to_b, to_a, stop) = lossy_proxy(local_addr(&a), local_addr(&b), 60, armed.clone());
+        a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), to_b)).unwrap();
+        b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), to_a)).unwrap();
+        assert!(wait_connected(&a) && wait_connected(&b), "연결 실패");
+        std::thread::sleep(Duration::from_millis(1000));
+        armed.store(true, std::sync::atomic::Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(500));
+        let dir = tmp(&format!("conceal-pos-{buf}"));
+        b.record_start(RecordOptions::default(), &dir).unwrap();
+        std::thread::sleep(Duration::from_secs(10));
+        let sum = b.recorder().lock().stop().unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let folder = PathBuf::from(&sum.folder);
+        let peer_file = folder.join(&sum.tracks.iter().find(|t| t.kind == TrackKind::Peer).expect("피어 트랙").file);
+        let left = read_left(&peer_file);
+        let mj: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("markers.json")).unwrap()).unwrap();
+        let acc = mj["accuracyFrames"].as_i64().unwrap();
+        let peer = mj["tracks"].as_array().unwrap().iter().find(|t| t["kind"] == "peer").unwrap().clone();
+        // 녹음 앞(피어 소리가 나오기 전 + 0.1초)과 끝 0.1초 경계는 빼고 본다
+        let first = left.iter().position(|v| v.abs() > 1e-3).unwrap_or(0) as i64;
+        let (lo, hi) = (first + 4800, left.len() as i64 - 4800);
+        let inside = |&(s, _): &(i64, i64)| s > lo && s < hi;
+        let conceal: Vec<(i64, i64)> = peer["markers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["kind"] == "conceal")
+            .map(|m| (m["start"].as_i64().unwrap(), m["end"].as_i64().unwrap()))
+            .filter(inside)
+            .collect();
+        let real: Vec<(i64, i64)> = broken_spans(&left).into_iter().map(|(s, e)| (s as i64, e as i64)).filter(inside).collect();
+        // 마커마다 시작이 가장 가까운 실제 구간과 짝짓는다(손실 간격 약 300ms라 짝이 겹치지 않음)
+        let (mut ds, mut de, mut unmatched) = (vec![], vec![], 0);
+        for &(ms, me) in &conceal {
+            match real.iter().min_by_key(|&&(s, _)| (s - ms).abs()) {
+                Some(&(s, e)) if (s - ms).abs() <= 2400 => {
+                    ds.push(ms - s);
+                    de.push(me - e);
+                }
+                _ => unmatched += 1,
+            }
+        }
+        let stat = |v: &[i64]| {
+            let mut a = v.to_vec();
+            a.sort();
+            let mean = a.iter().sum::<i64>() as f64 / a.len().max(1) as f64;
+            let q = |p: f64| a.get(((a.len().max(1) - 1) as f64 * p).round() as usize).copied().unwrap_or(0);
+            let abs = a.iter().map(|x| x.abs()).max().unwrap_or(0);
+            (mean, q(0.0), q(0.5), q(0.95), q(1.0), abs)
+        };
+        let (sm, s0, s5, s95, s1, sabs) = stat(&ds);
+        let (em, e0, e5, e95, e1, eabs) = stat(&de);
+        println!(
+            "buf {buf}/5ms PCM16: 녹음 {:.2}s, 실제 깨짐 구간 {}, conceal 마커 {}, 짝 {} (못 찾음 {unmatched}), 잃은 이벤트 {}, accuracyFrames {acc}\n  시작 오차(마커 − 실제, 프레임): 평균 {sm:.1} 최소 {s0} 중앙 {s5} p95 {s95} 최대 {s1} |최대| {sabs} ({:.2}ms)\n  끝 오차: 평균 {em:.1} 최소 {e0} 중앙 {e5} p95 {e95} 최대 {e1} |최대| {eabs} ({:.2}ms)\n  시작 오차 전부: {ds:?}",
+            sum.duration_sec,
+            real.len(),
+            conceal.len(),
+            ds.len(),
+            mj["lostEvents"],
+            sabs as f64 / 48.0,
+            eabs as f64 / 48.0,
+        );
+        assert!(conceal.len() >= 20, "은닉 마커가 너무 적다: {}", conceal.len());
+        assert!(ds.len() * 10 >= conceal.len() * 9, "짝지은 마커 {} / {}", ds.len(), conceal.len());
+        assert!(sabs <= acc && eabs <= acc, "마커 위치 오차가 accuracyFrames({acc})를 넘음: 시작 {sabs}, 끝 {eabs}");
+        drop(b);
+        drop(a);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

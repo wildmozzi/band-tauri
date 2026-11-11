@@ -77,6 +77,8 @@ md-5 = "0.10"
 # 릴레이 폴백 통합 테스트(tests/relay.rs): 실제 릴레이를 같은 프로세스에서 띄운다
 band-relay = { path = "../../relay" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time"] }
+# 녹음 WAV(EXTENSIBLE 헤더)를 표준 파서로 다시 읽어 확인(PR #47 L3)
+hound = "3.5"
 
 [features]
 default = ["custom-protocol"]
