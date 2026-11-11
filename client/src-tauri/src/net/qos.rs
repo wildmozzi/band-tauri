@@ -27,9 +27,11 @@ pub enum QosMarking {
     /// 아직 송신 목적지가 없다(Windows: 플로 대기).
     #[default]
     Pending,
-    /// EF(46)를 OS에 지정했다(비Windows `IP_TOS` 성공, Windows는 모든 플로에 `QOSSetOutgoingDSCPValue` 성공).
+    /// EF(46)를 OS에 지정했다(비Windows `IP_TOS` 성공, Windows는 걸린 플로 모두 `QOSSetOutgoingDSCPValue` 성공).
+    /// Windows에서 플로 추가 자체에 실패한 목적지가 있으면 `failed`로 따로 알린다(부분 실패).
     Ef,
-    /// Windows: qWAVE 트래픽 유형 Voice 플로만 있다(DSCP 직접 지정 실패 — 보통 권한 부족). 실제 표시값은 OS 정책.
+    /// Windows: 걸린 플로 중 DSCP 직접 지정에 실패한 것이 있다(보통 권한 부족) — 그 플로는 트래픽 유형 Voice의
+    /// OS 기본 표시에 맡긴다. 실제 표시값은 OS 정책.
     Voice,
     /// 표시를 걸지 못했다(qWAVE 없음/실패, `IP_TOS`는 Windows가 무시).
     None,
@@ -50,22 +52,42 @@ pub struct QosStats {
     pub ef_flows: u32,
     /// 플로 추가에 실패한 목적지 수(재시도하지 않음, 목적지가 바뀌면 새로 시도).
     pub failed: u32,
-    /// 마지막 실패 사유(없으면 null).
+    /// 지금 남아 있는 실패 사유(없으면 null): 소켓·핸들 단계 실패, 또는 현재 목적지 중 플로 추가/DSCP 지정에
+    /// 실패한 것의 사유. 실패한 목적지가 빠지면 함께 지워진다(이력 아님).
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[cfg_attr(not(windows), allow(dead_code))]
 struct Flow {
     /// qWAVE 플로 id(추가 실패면 None).
     id: Option<u32>,
     ef: bool,
+    /// 이 목적지의 실패 사유(플로 추가 또는 DSCP 지정).
+    err: Option<String>,
+}
+
+/// Windows 플로 집계 → 마킹 요약(리뷰 L2: 걸린 플로가 모두 EF면 추가 실패가 섞여도 `Ef`, 부분 실패는 `failed`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn classify(qwave: bool, dests: usize, flows: u32, ef_flows: u32) -> QosMarking {
+    if !qwave {
+        QosMarking::None
+    } else if dests == 0 {
+        QosMarking::Pending
+    } else if flows == 0 {
+        QosMarking::None
+    } else if ef_flows == flows {
+        QosMarking::Ef
+    } else {
+        QosMarking::Voice
+    }
 }
 
 pub struct Qos {
     ip_tos: bool,
     flows: HashMap<SocketAddr, Flow>,
-    last_error: Option<String>,
+    /// 소켓·핸들 단계의 실패(엔진 수명 동안 유지).
+    base_error: Option<String>,
     #[cfg(windows)]
     win: Option<win::Qwave>,
 }
@@ -73,12 +95,12 @@ pub struct Qos {
 impl Qos {
     /// 소켓에 `IP_TOS`를 걸고(Windows는 qWAVE 핸들도 연다). 어떤 실패도 엔진을 멈추지 않는다.
     pub fn new(socket: &UdpSocket) -> Self {
-        let mut last_error = None;
+        let mut base_error = None;
         let ip_tos = match socket2::SockRef::from(socket).set_tos_v4(TOS_EF) {
             Ok(()) => true,
             Err(e) => {
                 log::warn!("IP_TOS(EF) 설정 실패: {e}");
-                last_error = Some(format!("IP_TOS: {e}"));
+                base_error = Some(format!("IP_TOS: {e}"));
                 false
             }
         };
@@ -87,14 +109,14 @@ impl Qos {
             Ok(w) => Some(w),
             Err(e) => {
                 log::warn!("qWAVE 핸들 실패: {e}");
-                last_error = Some(e);
+                base_error = Some(e);
                 None
             }
         };
         Self {
             ip_tos,
             flows: HashMap::new(),
-            last_error,
+            base_error,
             #[cfg(windows)]
             win,
         }
@@ -103,8 +125,8 @@ impl Qos {
     /// 지금 오디오를 보내는 목적지 집합에 플로를 맞춘다(없는 것 추가, 빠진 것 제거). 바뀌면 true.
     pub fn sync(&mut self, dests: &[SocketAddr]) -> bool {
         let mut changed = false;
-        let stale: Vec<SocketAddr> = self.flows.keys().filter(|a| !dests.contains(a)).copied().collect();
-        for a in stale {
+        // 빠진 목적지만 골라 지운다(매 틱 할당 없음: 대부분 틱은 바뀐 것이 없다)
+        while let Some(&a) = self.flows.keys().find(|a| !dests.contains(a)) {
             if let Some(f) = self.flows.remove(&a) {
                 self.remove_flow(f);
                 changed = true;
@@ -124,28 +146,26 @@ impl Qos {
     #[cfg(windows)]
     fn add_flow(&mut self, a: SocketAddr) -> Flow {
         let Some(w) = self.win.as_ref() else {
-            return Flow { id: None, ef: false };
+            return Flow { id: None, ef: false, err: None };
         };
         match w.add(a) {
             Ok(id) => match w.set_dscp(id, DSCP_EF) {
-                Ok(()) => Flow { id: Some(id), ef: true },
+                Ok(()) => Flow { id: Some(id), ef: true, err: None },
                 Err(e) => {
                     log::info!("qWAVE DSCP 46 지정 실패({a}): {e} — 트래픽 유형 Voice 기본 표시로 둔다");
-                    self.last_error = Some(e);
-                    Flow { id: Some(id), ef: false }
+                    Flow { id: Some(id), ef: false, err: Some(e) }
                 }
             },
             Err(e) => {
                 log::warn!("qWAVE 플로 추가 실패({a}): {e}");
-                self.last_error = Some(e);
-                Flow { id: None, ef: false }
+                Flow { id: None, ef: false, err: Some(e) }
             }
         }
     }
 
     #[cfg(not(windows))]
     fn add_flow(&mut self, _a: SocketAddr) -> Flow {
-        Flow { id: None, ef: false }
+        Flow { id: None, ef: false, err: None }
     }
 
     #[cfg(windows)]
@@ -164,23 +184,15 @@ impl Qos {
             let flows = self.flows.values().filter(|f| f.id.is_some()).count() as u32;
             let ef_flows = self.flows.values().filter(|f| f.ef).count() as u32;
             let failed = self.flows.values().filter(|f| f.id.is_none()).count() as u32;
-            let m = if self.win.is_none() {
-                QosMarking::None
-            } else if self.flows.is_empty() {
-                QosMarking::Pending
-            } else if flows == 0 {
-                QosMarking::None
-            } else if ef_flows == flows && failed == 0 {
-                QosMarking::Ef
-            } else {
-                QosMarking::Voice
-            };
+            let m = classify(self.win.is_some(), self.flows.len(), flows, ef_flows);
             (self.win.is_some(), m, flows, ef_flows, failed)
         };
         // 비Windows는 IP_TOS만으로 표시된다(플로 개념 없음).
         #[cfg(not(windows))]
         let (qwave, marking, flows, ef_flows, failed) = (false, if self.ip_tos { QosMarking::Ef } else { QosMarking::None }, 0, 0, 0);
-        QosStats { marking, ip_tos: self.ip_tos, qwave, flows, ef_flows, failed, last_error: self.last_error.clone() }
+        // 지금 남은 실패만(리뷰 L1): 실패한 목적지가 빠지면 사유도 사라진다.
+        let last_error = self.base_error.clone().or_else(|| self.flows.values().find_map(|f| f.err.clone()));
+        QosStats { marking, ip_tos: self.ip_tos, qwave, flows, ef_flows, failed, last_error }
     }
 }
 
@@ -296,8 +308,10 @@ mod tests {
     #[test]
     fn sync_tracks_destination_set_and_never_fails_engine() {
         let s = sock();
-        let peer_a = sock().local_addr().unwrap();
-        let peer_b = sock().local_addr().unwrap();
+        // 목적지 소켓을 테스트 동안 살려 둔다(바로 닫으면 OS가 같은 포트를 다시 줘 두 목적지가 같아질 수 있다)
+        let (sa, sb) = (sock(), sock());
+        let peer_a = sa.local_addr().unwrap();
+        let peer_b = sb.local_addr().unwrap();
         let mut q = Qos::new(&s);
         assert!(!q.sync(&[]));
         assert!(q.sync(&[peer_a, peer_b]));
@@ -330,6 +344,31 @@ mod tests {
         let mut q = Qos::new(&s);
         q.sync(&["192.0.2.1:50000".parse().unwrap(), "192.0.2.2:50000".parse().unwrap()]);
         println!("qos stats (routed): {:?}", q.stats());
+    }
+
+    #[test]
+    fn classify_mixed_states() {
+        // 리뷰 L2: 걸린 플로가 모두 EF면 추가 실패가 섞여도 Ef(부분 실패는 failed로), EF 아닌 플로가 있으면 Voice
+        assert_eq!(classify(false, 2, 0, 0), QosMarking::None);
+        assert_eq!(classify(true, 0, 0, 0), QosMarking::Pending);
+        assert_eq!(classify(true, 2, 0, 0), QosMarking::None);
+        assert_eq!(classify(true, 2, 2, 2), QosMarking::Ef);
+        assert_eq!(classify(true, 3, 2, 2), QosMarking::Ef, "1곳 추가 실패 + 나머지 EF");
+        assert_eq!(classify(true, 2, 2, 1), QosMarking::Voice);
+        assert_eq!(classify(true, 2, 2, 0), QosMarking::Voice);
+    }
+
+    #[test]
+    fn last_error_clears_when_failed_destination_leaves() {
+        // 리뷰 L1: 목적지 실패 사유는 그 목적지가 남아 있는 동안만 보인다(이력 아님)
+        let s = sock();
+        let mut q = Qos::new(&s);
+        let a: SocketAddr = "192.0.2.1:50000".parse().unwrap();
+        q.flows.insert(a, Flow { id: None, ef: false, err: Some("테스트 실패".into()) });
+        assert_eq!(q.stats().last_error.as_deref(), q.base_error.as_deref().or(Some("테스트 실패")));
+        assert!(q.sync(&[]));
+        assert!(q.flows.is_empty());
+        assert_eq!(q.stats().last_error, q.base_error, "목적지가 빠지면 그 사유도 사라진다");
     }
 
     #[test]

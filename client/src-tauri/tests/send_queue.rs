@@ -4,7 +4,8 @@
 //! - 한 프레임을 5명에게 연달아 보내는 버스트 폭(첫 send_to 시작 → 마지막 완료)을 재서 페이싱 필요 여부의
 //!   근거로 쓴다(설계 3절 "송신 페이싱"). 수치는 `--nocapture`로 출력된다.
 //!
-//! `cargo test --test send_queue -- --nocapture`
+//! 벽시계·실스레드 측정이라 기본 스위트에서 빼고 CI `realtime` 잡(nextest `--run-ignored only --retries 2`)에서 돈다(리뷰 L4).
+//! 로컬: `cargo test --test send_queue -- --ignored --nocapture`.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +29,7 @@ fn quantile(v: &mut [f64], p: f64) -> f64 {
 }
 
 #[test]
+#[ignore = "realtime: 결정적 짝 net::txlat::tests::{quantiles_and_window_reset, rotate_race_does_not_zero_quantiles}, engine::worker::tests::batched_frames_share_pass_start_for_send_queue"]
 fn full_mesh_send_queue_latency_and_burst() {
     let opts = NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
     let net = Net::start("me".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0 }).unwrap();

@@ -183,9 +183,9 @@ off len 필드
      - **IPv4만**: 소켓을 `0.0.0.0`에 바인드하고 후보도 IPv4뿐이라 `IPV6_TCLASS`는 다루지 않는다. IPv6 경로를 추가하면 함께 넣어야 한다.
      - 표시가 실제 회선에서 유지되는지(공유기·ISP가 지우는지)와 Wi-Fi WMM 큐 효과는 **[사람 확인]**: 상대 PC(또는 미러 포트)에서 Wireshark로 IP 헤더 DS 필드를 본다. 송신 PC의 캡처에는 qWAVE 표시가 안 보였다는 보고가 있어 판단 근거로 쓰지 않는다.
    - **송신 페이싱 — 넣지 않는다**(측정 근거). 한 프레임을 피어들에게 간격 없이 연달아 보낸다.
-     - 루프백 5피어·Opus stereo 2.5ms(73바이트) 실측(`tests/send_queue.rs`, Windows): 암호화 없는 `send_to` 5회 버스트 p50 76µs · p99 326µs. 디버그 빌드 엔진 경로(암호화 포함) 버스트 p50 646µs · p99 1.45ms이고 대부분 최적화되지 않은 ChaCha20-Poly1305 몫이다(릴리스 빌드는 재지 않음).
+     - 루프백 5피어·Opus stereo 2.5ms(73바이트) 실측(`tests/send_queue.rs`, realtime 잡, Windows): 암호화 없는 `send_to` 5회 버스트 p50 76µs · p99 326µs. 디버그 빌드 엔진 경로(암호화 포함) 버스트 p50 646µs · p99 1.45ms이고 대부분 최적화되지 않은 ChaCha20-Poly1305 몫이다(릴리스 빌드는 재지 않음).
      - 한 프레임 버스트는 5 × (73 + 28) ≈ 0.5KB다. 업로드 10Mbps에서도 직렬화 0.4ms로 프레임 주기(2.5ms) 안에 끝나고, 페이싱해도 평균 송출률·직렬화 시간은 같다. 반대로 피어 사이에 간격 δ를 두면 마지막 피어가 (N−1)·δ만큼 늦어진다(δ = 2.5ms/5면 +2ms). 지연을 늘리지 않는다는 조건과 맞지 않는다.
-   - **송신 큐 지연**: 워커가 캡처 프레임을 다 모은 시각(인코딩 전)부터 각 피어의 `send_to`가 돌아온 시각까지를 패킷마다 잰다(에코 반사 패킷 제외). 기록은 원자 덧셈뿐이다(1µs 칸 0..16µs, 그 위는 2의 거듭제곱마다 8칸, 상대 오차 ≤ 12.5%). 제어 스레드가 2초마다 창을 비워 p50/p99/최대를 `EngineStats.sendQueue`에 둔다. 인코딩 시간과 앞선 피어들의 송신 시간이 포함된다.
+   - **송신 큐 지연**: 워커 패스가 입력 링을 비우기 직전 시각부터 각 피어의 `send_to`가 돌아온 시각까지를 패킷마다 잰다(에코 반사 패킷 제외). 한 패스에서 프레임 여러 개가 완성되면(장치 버퍼 > 프레임, 예: 10ms 장치 / 2.5ms 프레임 → 4개) 모두 그 패스 시작 시각을 쓴다. 그래서 뒤 프레임은 앞 프레임의 인코딩·송신을 기다린 시간까지 포함한다(PR #37 리뷰 M1). 패스 전에 링에서 폴링을 기다린 시간(최대 `POLL` 0.5ms)은 포함하지 않는다. 기록은 원자 덧셈뿐이다(1µs 칸 0..16µs, 그 위는 2의 거듭제곱마다 8칸, 상대 오차 ≤ 12.5%). 창 회전과 기록이 겹치면 칸과 최대값이 서로 다른 창으로 갈 수 있다. 그래서 최대값은 가장 높은 비지 않은 칸의 하한 아래로 내리지 않는다. 제어 스레드가 2초마다 창을 비워 p50/p99/최대를 `EngineStats.sendQueue`에 둔다. 인코딩 시간과 앞선 피어들의 송신 시간이 포함된다.
 
 ## 4. Tauri 커맨드 (`commands.rs`) — 프론트 계약
 
@@ -293,9 +293,9 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 
 `PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제).
 
-`qos`(P1-3, 3절 8): 오디오 UDP DSCP 마킹 상태. 네트워크가 없으면 null. `marking`: `ef`(EF 46을 OS에 지정 — 비Windows `IP_TOS`, Windows는 모든 플로에 `QOSSetFlow` 성공) | `voice`(Windows qWAVE 트래픽 유형 Voice 플로만, DSCP 직접 지정 실패 — 보통 권한 부족) | `pending`(Windows, 아직 송신 목적지 없음) | `none`(표시 못 함). `ipTos`: `IP_TOS` setsockopt 성공(Windows는 성공해도 무시될 수 있다). `qwave`: qWAVE 핸들 획득. `flows`/`efFlows`/`failed`: 플로가 걸린 목적지 수 / 그중 DSCP 46 성공 수 / 플로 추가 실패 수(Windows만, 그 밖에는 0). `lastError`: 마지막 실패 사유.
+`qos`(P1-3, 3절 8): 오디오 UDP DSCP 마킹 상태. 네트워크가 없으면 null. `marking`: `ef`(EF 46을 OS에 지정 — 비Windows `IP_TOS`, Windows는 걸린 플로 모두 `QOSSetFlow` 성공) | `voice`(Windows, 걸린 플로 중 DSCP 직접 지정 실패가 있음 — 보통 권한 부족, 그 플로는 트래픽 유형 Voice. `ef`도 플로 추가 실패 목적지가 섞이면 `failed`로 알림) | `pending`(Windows, 아직 송신 목적지 없음) | `none`(표시 못 함). `ipTos`: `IP_TOS` setsockopt 성공(Windows는 성공해도 무시될 수 있다). `qwave`: qWAVE 핸들 획득. `flows`/`efFlows`/`failed`: 플로가 걸린 목적지 수 / 그중 DSCP 46 성공 수 / 플로 추가 실패 수(Windows만, 그 밖에는 0). `lastError`: 지금 남은 실패 사유(소켓·핸들 단계 실패, 또는 현재 목적지 중 실패한 것). 실패한 목적지가 빠지면 지워진다(이력 아님).
 
-`sendQueue`(P1-3): 송신 큐 지연(프레임 생성 → 피어별 `send_to` 완료), 직전 2초 창의 `p50Ms`/`p99Ms`/`maxMs`와 잰 패킷 수 `packets`. 송신이 없던 창이면 `packets = 0`이고 나머지는 0이다. 네트워크가 없으면 null.
+`sendQueue`(P1-3): 송신 큐 지연(워커 패스 시작 → 피어별 `send_to` 완료, 3절 8), 직전 2초 창의 `p50Ms`/`p99Ms`/`maxMs`와 잰 패킷 수 `packets`. 송신이 없던 창이면 `packets = 0`이고 나머지는 0이다. 네트워크가 없으면 null.
 
 ## 5. 시그널링 (WS 서버 `server/src/services/wsService.ts`)
 

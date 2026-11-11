@@ -1,4 +1,4 @@
-//! 송신 큐 지연 히스토그램(P1-3): 캡처 프레임 생성(워커가 프레임을 모은 시각) → 피어별 `send_to` 완료까지.
+//! 송신 큐 지연 히스토그램(P1-3): 워커 패스 시작(입력 링을 비우기 직전) → 피어별 `send_to` 완료까지.
 //!
 //! 기록(`record`)은 워커 스레드의 송신 경로에서 원자 덧셈 두 번뿐이다(락·할당 없음). 제어 스레드가
 //! `WINDOW`마다 `rotate`로 현재 창을 비워 p50/p99/최대를 계산해 둔다. 통계 조회는 그 스냅샷을 읽는다.
@@ -25,6 +25,16 @@ fn bucket_of(us: u64) -> usize {
     let e = 63 - us.leading_zeros() as usize; // us >= 16 → e >= 4
     let sub = ((us >> (e - 3)) & (SUB as u64 - 1)) as usize;
     (LINEAR + (e - 4) * SUB + sub).min(BUCKETS - 1)
+}
+
+/// 칸의 하한(µs).
+fn bucket_lower(i: usize) -> u64 {
+    if i < LINEAR {
+        return i as u64;
+    }
+    let e = (i - LINEAR) / SUB + 4;
+    let sub = (i - LINEAR) % SUB;
+    (1u64 << e) + sub as u64 * (1u64 << (e - 3))
 }
 
 /// 칸의 대표값(µs): 칸 하한 + 폭/2.
@@ -85,7 +95,10 @@ impl SendLatency {
             *c = b.swap(0, Ordering::Relaxed);
             total += *c as u64;
         }
-        let max_us = self.max_us.swap(0, Ordering::Relaxed);
+        // 창 경계 경합(리뷰 L3): `record`의 칸 증가와 `fetch_max` 사이에 회전하면 칸은 이번 창, 최대값은 다음 창으로
+        // 갈 수 있다(또는 그 반대). 그래서 실측 최대가 가장 높은 비지 않은 칸의 하한보다 작으면 하한으로 올린다.
+        let top = counts.iter().rposition(|&c| c > 0).map_or(0, bucket_lower);
+        let max_us = self.max_us.swap(0, Ordering::Relaxed).max(top);
         let q = |p: f64| -> f32 {
             // 순위 ceil(p·N)번째 표본이 든 칸
             let rank = ((p * total as f64).ceil() as u64).max(1);
@@ -149,6 +162,21 @@ mod tests {
         // 다음 창은 비어 있다
         let e = h.rotate();
         assert_eq!(e, SendQueueStats::default());
+    }
+
+    #[test]
+    fn rotate_race_does_not_zero_quantiles() {
+        // 리뷰 L3: 칸 증가는 이번 창에, fetch_max는 회전 뒤(다음 창)에 들어간 경우를 흉내 낸다
+        let h = SendLatency::new();
+        h.buckets[bucket_of(3000)].fetch_add(1, Ordering::Relaxed);
+        let s = h.rotate();
+        assert_eq!(s.packets, 1);
+        assert!(s.p50_ms >= 2.6 && s.p99_ms >= 2.6 && s.max_ms >= 2.6, "칸 하한 아래로 깎이지 않음: {s:?}");
+        assert!(s.p50_ms <= s.max_ms && s.p99_ms <= s.max_ms, "{s:?}");
+        for i in 0..BUCKETS {
+            assert!(bucket_lower(i) as f64 <= bucket_value(i), "{i}");
+            assert_eq!(bucket_of(bucket_lower(i)), i, "{i}");
+        }
     }
 
     #[test]
