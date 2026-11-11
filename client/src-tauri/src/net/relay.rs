@@ -92,13 +92,26 @@ pub struct RelayStats {
 }
 
 /// 검증된 릴레이 토큰(서명은 확인할 수 없다 — 구조, ssrc, 만료만 본다).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RelayToken {
     pub bytes: Vec<u8>,
     pub expires_at: u64,
     pub ssrc: u32,
     /// 이 토큰의 Bind MAC 키(서버 `relay-token.bindKey`, 2.1.1). None이면 MAC 없이 Bind.
     pub bind_key: Option<[u8; BIND_KEY_BYTES]>,
+}
+
+/// `{:?}`로 찍혀도 bindKey(비밀)와 토큰 바이트가 로그·진단에 들어가지 않게 가린다(PR #40 리뷰 L1).
+/// 진단 마스킹은 `[12, 34, …]` 같은 바이트 배열 표기를 가리지 못한다.
+impl std::fmt::Debug for RelayToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayToken")
+            .field("len", &self.bytes.len())
+            .field("expires_at", &self.expires_at)
+            .field("ssrc", &format_args!("{:08x}", self.ssrc))
+            .field("bind_key", &self.bind_key.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl RelayToken {
@@ -496,6 +509,13 @@ mod tests {
         assert!(checked >= 3);
         assert!(parse_bind_key("short").is_err());
         assert!(parse_bind_key(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 31])).is_err());
+    }
+
+    #[test]
+    fn debug_redacts_bind_key_and_token_bytes() {
+        let tok = RelayToken { bytes: vec![0xAB; 60], expires_at: 1, ssrc: 0x1234, bind_key: Some([0x5A; BIND_KEY_BYTES]) };
+        let s = format!("{tok:?}");
+        assert!(s.contains("<redacted>") && !s.contains("90") && !s.contains("171"), "{s}");
     }
 
     #[test]
