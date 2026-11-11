@@ -21,6 +21,7 @@ use super::config::{frame_code_from_samples, EngineConfig, INTERNAL_RATE, MAX_PA
 use super::device::StreamInfo;
 use super::jitter::{shift_one, JitterBuffer};
 use super::measure::EchoProbe;
+use super::metronome::{BeatScheduler, MetronomeCtl, MetronomePlan, OutClock};
 use super::mixer::MixControls;
 use super::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
 use super::rt::{SourceBank, SourceShared, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
@@ -454,6 +455,8 @@ pub struct FeedTiming {
     pub next_cb_us: u64,
     /// 다음 콜백이 꺼낼 장치 프레임 수.
     pub out_burst: usize,
+    /// `dev_now_us`에 대응하는 누적 재생 프레임(그 콜백 끝).
+    pub played: u64,
     pub out_rate: u32,
     /// 이 타이밍을 만들 때의 출력 콜백 시작 횟수. 콜백 도중이었으면 `None`(이번 반복은 판단하지 않음).
     pub cb_seq: Option<u64>,
@@ -498,7 +501,7 @@ impl CallbackTracker {
         } else {
             self.dev_now_us + out_burst as u64 * 1_000_000 / out_rate as u64
         };
-        FeedTiming { new_callback, dev_now_us: self.dev_now_us, wall_us, next_cb_us, out_burst, out_rate, cb_seq }
+        FeedTiming { new_callback, dev_now_us: self.dev_now_us, wall_us, next_cb_us, out_burst, played: self.cb_played, out_rate, cb_seq }
     }
 }
 
@@ -722,10 +725,16 @@ pub struct WorkerParams {
     pub epoch: Instant,
     /// 에코 측정(P1-1): 있으면 그 피어에게 내 입력 대신 무음 + 클릭을 보내고, 그 피어 소리의 재생 시각을 모은다.
     pub probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
+    /// 공유 메트로놈 계획·상태(P2-3).
+    pub metronome: Arc<MetronomeCtl>,
 }
 
 pub struct Worker {
     p: WorkerParams,
+    beats: BeatScheduler,
+    metro_plan: (u64, MetronomePlan),
+    metro_stats_at: u64,
+    metro_stats_gen: u64,
     frame: usize,
     ich: usize,
     in_rs: StreamResampler,
@@ -839,6 +848,10 @@ impl Worker {
             last_captured: 0,
             last_captured_at: Duration::ZERO,
             slot_full_logged: false,
+            beats: BeatScheduler::new(),
+            metro_plan: (0, MetronomePlan::default()),
+            metro_stats_at: 0,
+            metro_stats_gen: 0,
             p,
         })
     }
@@ -850,6 +863,7 @@ impl Worker {
             self.reconfigure_local();
             self.pump_input();
             let timing = self.timing();
+            self.service_metronome(&timing);
             let urgent = self.service_peers(&timing);
             self.service_local();
             self.track_occupancy();
@@ -1025,6 +1039,45 @@ impl Worker {
         let wall_us = self.p.epoch.elapsed().as_micros() as u64;
         let out_burst = self.out_burst_dev() as usize;
         self.tracker.observe(&self.p.counters, wall_us, out_burst, self.p.info.out_rate)
+    }
+
+    /// 공유 메트로놈(P2-3): 다음 클릭 프레임을 올리고(시계 추정이 바뀌면 다시 맞춤), 상태를 0.1초마다 알린다.
+    fn service_metronome(&mut self, t: &FeedTiming) {
+        if t.cb_seq.is_none() {
+            return; // 콜백 도중: 재생 카운터와 시각이 어긋날 수 있다
+        }
+        {
+            let p = self.p.metronome.plan.lock();
+            if p.0 != self.metro_plan.0 {
+                self.metro_plan = p.clone();
+            }
+        }
+        let (gen, plan) = (self.metro_plan.0, &self.metro_plan.1);
+        let est = match (&plan.ref_peer_id, self.p.net.as_ref()) {
+            (Some(id), Some(net)) if plan.running => net.peer_clock(id, t.wall_us),
+            _ => None,
+        };
+        let offset = match &plan.ref_peer_id {
+            None => Some(0.0),
+            Some(_) => est.map(|e| e.offset_us),
+        };
+        let clock = OutClock { dev_now_us: t.dev_now_us as f64, played: t.played, rate: t.out_rate as f64, burst: t.out_burst as u64 };
+        let beat = self.beats.tick(gen, plan, offset, &clock, &self.p.metronome.click);
+        if t.wall_us.saturating_sub(self.metro_stats_at) >= 100_000 || gen != self.metro_stats_gen {
+            self.metro_stats_at = t.wall_us;
+            self.metro_stats_gen = gen;
+            let mut s = self.p.metronome.stats.lock();
+            s.running = plan.running;
+            s.synced = offset.is_some();
+            s.bpm = plan.bpm;
+            s.beats_per_bar = plan.beats_per_bar;
+            s.start_us = plan.start_us;
+            s.ref_peer_id.clone_from(&plan.ref_peer_id);
+            s.clock_offset_ms = offset.map(|o| o / 1000.0);
+            s.clock_rtt_ms = est.map(|e| e.rtt_us / 1000.0);
+            s.drift_ppm = est.map(|e| e.drift_ppm);
+            s.beat = beat;
+        }
     }
 
     /// 피어 목록과 소스 슬롯을 맞춘다(새 피어에 빈 슬롯 배정, 사라진 피어 슬롯 해제).

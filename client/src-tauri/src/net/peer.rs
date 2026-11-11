@@ -649,6 +649,8 @@ pub struct Peer {
     /// 이 피어로 마지막에 보낸 Audio 타임스탬프(에코 시작 시 타임스탬프를 이어 붙이는 데 쓴다).
     pub tx_last_ts: AtomicU32,
     pub echo: Mutex<EchoState>,
+    /// 이 피어 시계와 내 시계의 오프셋 추정(P2-3, Pong 평문의 응답자 시계로 갱신).
+    pub clock: Mutex<super::clock::ClockSync>,
 }
 
 pub struct PeerSetup<'a> {
@@ -682,6 +684,7 @@ impl Peer {
             tx_seq: AtomicU32::new(rand::random()),
             tx_last_ts: AtomicU32::new(0),
             echo: Mutex::new(EchoState::default()),
+            clock: Mutex::new(super::clock::ClockSync::new()),
         })
     }
 

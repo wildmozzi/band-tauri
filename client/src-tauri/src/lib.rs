@@ -30,6 +30,8 @@ pub fn run() {
             commands::engine_safety_code,
             commands::engine_set_monitor,
             commands::engine_set_master_gain,
+            commands::engine_set_metronome,
+            commands::engine_set_metronome_gain,
             commands::engine_stats,
             commands::engine_subscribe_mix,
             commands::engine_unsubscribe_mix,

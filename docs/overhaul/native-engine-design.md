@@ -26,7 +26,9 @@ engine/jitter.rs       피어별 적응형 지터 버퍼 + 드리프트 보정 +
 engine/mixer.rs        피어별 gain/mute, 모니터, 마스터, 클리핑 방지(soft clip)
 engine/stats.rs        원자적 통계 (레벨, xrun, 피어별 RTT/지터/손실/버퍼)
 engine/measure.rs      지연 측정(P1-1): 하드웨어 루프백(처프·FFT 상호상관), 에코 피어 클릭 측정·분석
+engine/metronome.rs    공유 메트로놈(P2-3): 계획·검증, 박 스케줄러(워커), 클릭 생성기(출력 콜백, 1.4절)
 net/mod.rs             UDP 소켓, 송수신 스레드
+net/clock.rs           피어 시계 오프셋 추정(P2-3): Ping/Pong NTP식 표본, 버킷 최소 RTT + 가중 직선(드리프트)
 net/packet.rs          패킷 직렬화/역직렬화 (아래 2절)
 net/crypto.rs          ChaCha20-Poly1305 패킷 암호화
 net/peer.rs            피어 테이블, 홀펀칭 상태기계, keepalive, RTT
@@ -39,7 +41,7 @@ net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/
 | 스레드 | 하는 일 | 금지 |
 |---|---|---|
 | 입력 콜백 (RT) | 장치 샘플 → 채널 라우팅 → `f32` SPSC 링(사전할당)에 push, 레벨 원자값 갱신 | 할당, 락, 시스템콜, println |
-| 출력 콜백 (RT) | **콜백 구동 믹스**: 소스 링(로컬 1개 + 피어별 1개, 사전할당 SPSC)에서 필요한 프레임만큼 꺼내 게인·팬(원자값)을 곱해 섞고, 마스터·soft clip 후 장치 포맷/채널 수로 기록. 믹스 탭 링에도 쓴다. 재생 중인 소스가 모자라면 0을 채우고 소스별 언더런 프레임과 xrun을 원자 증가 | 동일 |
+| 출력 콜백 (RT) | **콜백 구동 믹스**: 소스 링(로컬 1개 + 피어별 1개, 사전할당 SPSC)에서 필요한 프레임만큼 꺼내 게인·팬(원자값)을 곱해 섞고, 마스터·soft clip 후 장치 포맷/채널 수로 기록. 메트로놈 클릭(1.4절)은 장치 출력에만 더한다. 믹스 탭 링에도 쓴다(클릭 없음). 재생 중인 소스가 모자라면 0을 채우고 소스별 언더런 프레임과 xrun을 원자 증가 | 동일 |
 | engine 워커 (비RT, 1개) | 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신. 피어마다 지터 버퍼에서 디코드한 PCM을 (리샘플해) 그 피어의 소스 링에 공급하고, 로컬 FIFO에서 로컬 소스 링을 채운다 | — |
 | net 수신 스레드 | recv → 복호화/검증 → 피어별 지터 버퍼에 삽입(피어별 `Mutex`는 비RT 스레드끼리만 공유하므로 허용) | — |
 | net 제어 스레드 | 홀펀칭, keepalive(1초), ping/pong(500ms), 타임아웃(5초) | — |
@@ -92,6 +94,49 @@ net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/
 - PCM16: 리틀엔디안 인터리브. **모노 설정이면 1채널만 보낸다**(복제 금지).
 - 패킷 페이로드가 1200바이트를 넘지 않게 한다(PCM16 stereo 10ms = 1920B → 금지 조합. config 검증에서 거부하거나 PCM은 frame ≤5ms로 제한).
 
+### 1.4 공유 메트로놈 (P2-3, `engine/metronome.rs`, `net/clock.rs`)
+
+방장이 BPM·박자·시작을 정하고, 연주자마다 엔진이 **로컬에서** 클릭을 만든다(클릭 오디오는 네트워크로 보내지 않는다).
+
+**무엇에 맞추나 — 모두의 귀에 같은 절대 시각(공통 시간축)**
+- 박 k는 기준 시계(방장 엔진 시계)의 `startUs + k·60/bpm`이다. 각 엔진은 그 시각에 클릭이 **자기 귀에 닿도록** 내보낸다.
+- 버린 대안은 "방장 소리가 내 귀에 닿는 시각에 맞춤"이다. 이 방식이면 따르는 쪽은 방장 소리와 딱 맞는다. 대신 그 연주가 방장에게는 **왕복**(입→귀 × 2, 국내 25~50ms)만큼 늦게 들린다. 방장이 늘 끌려가고, 따르는 사람끼리도 방장과의 거리 차만큼 어긋난다.
+- 공통 시간축이면 모든 쌍이 서로를 **편도**(입→귀, GOAL 목표 ≤ 25/40ms)만큼만 늦게 듣는다. 이 어긋남은 대칭이고, 누구도 다른 사람을 따라가지 않는다. 클릭이 박의 유일한 기준이라 템포가 끌리지 않는다. 그래서 GOAL의 "박자를 맞춰 합주"에 맞는 쪽으로 이것을 택했다.
+- 남는 편도 지연은 메트로놈으로 없앨 수 없는 물리 지연이다. GOAL 1절 입→귀 목표가 그 상한이다.
+
+**시간축 추정**(`net/clock.rs`)
+- 엔진 시계 = Net epoch부터의 µs(`now_us`, 지터 버퍼·워커와 같은 시계)다. 네트워크 없는 엔진은 엔진 시작 시각이 기준이다.
+- Pong 평문에 응답자 시계를 싣는다(2절). 표본은 `offset = r − (t0+t3)/2`, `rtt = t3 − t0`다(Ping 500ms마다).
+- 2초 버킷마다 RTT 최소 표본 하나만 남긴다(최근 16초). 그 점들로 가중 최소제곱 직선을 맞춘다(기울기 = 드리프트, ±1000ppm 제한).
+  - 가중치 = 1/(1 + ((rtt − 근처 ±4초 최소 rtt)/0.5ms)²)이다. 큐잉이 섞인 표본의 영향을 줄인다.
+  - 기준을 "근처 최소"로 잡는 이유: 경로가 바뀌어 RTT 수준이 달라져도 새 구간 표본이 무시되지 않게 하려는 것이다.
+- 대칭 RTT 변화는 오프셋을 바꾸지 않는다. **한 방향만** 바뀐 지연(경로 비대칭)은 원리상 관측할 수 없다. 오차는 비대칭/2이고, 시계 동기화의 알려진 한계다.
+- 따르는 쪽은 방장 피어와만 동기한다(풀메시라 모든 연주자가 방장과 직접 연결돼 있다).
+
+**클릭 프레임**(워커, `BeatScheduler`)
+- 기준 시각 → 내 시계: `t_local = t_ref − offset`(방장은 offset 0).
+- 내 시계 → 장치 프레임: 워커의 출력 콜백 시각 추정(`DeviceClock`, 1.1절)을 쓴다.
+  - 콜백은 프레임 [b, b+n)을 `m + (b+n)/r`에 쓰고, 그 버퍼는 장치 출력 버퍼 1개(n) 뒤에 울린다.
+  - 따라서 귀 시각(J) = `m + (J + 2n)/r`이다. `estLatencyMs`의 "장치 출력 버퍼" 항과 같은 가정이다.
+- 워커는 다음 클릭 하나를 `ClickShared::next`(원자 u64 = `프레임 << 1 | 강박`)에 올린다(CAS). 콜백이 가져가면 다음 박을 올린다.
+  - 시계 추정이 바뀌면 올려 둔 클릭을 다시 맞춘다. 단 옛 위치와 새 위치가 모두 `재생 프레임 + 콜백 2개 + 2ms` 너머일 때만이다. 콜백과 경합해도 클릭이 사라지거나 두 번 울리지 않는다.
+  - 이미 지난 박(늦게 받은 시작, 새 BPM)은 건너뛰고 다음 박부터 낸다. 강박 = 마디 첫 박(k mod 박자 = 0).
+  - 시간축이 없으면(기준 피어 표본 없음, `synced=false`) 클릭을 내지 않는다.
+- 같은 계획을 다시 받으면(세대 번호) 올려 둔 클릭을 거두고 처음부터 다시 맞춘다.
+
+**클릭 생성**(출력 콜백, `ClickRt`)
+- 파형: 48kHz로 미리 계산한 30ms 사인 버스트(강박 1760Hz·0.6, 약박 1100Hz·0.45, 1ms 상승 + 6ms 감쇠)다. 장치 레이트로는 보폭 `48000/레이트`(원자값)와 선형 보간으로 읽는다.
+- 콜백 시작에 `next`를 한 번 읽는다. 이번 콜백 범위에 걸리면 CAS로 가져가 그 프레임부터 샘플 정확도로 울린다.
+  - 이미 지났으면 파형 남은 부분부터 울리고(남은 부분의 시각은 정확), 다 지났으면 버린다. 둘 다 `lateClicks`로 센다.
+  - 할당·락·시스템콜·로그 없음.
+- 섞는 곳: 버스(게인·팬 적용 후) + 클릭 × 클릭 볼륨 → 마스터 → soft clip → 장치.
+  - **믹스 탭(관람 방송·녹음)과 측정 자극에는 들어가지 않는다**(설정 없음, 항상 제외).
+- 클릭 볼륨·뮤트는 로컬 전용이다(`engine_set_metronome_gain`, 기본 0.8). `MixControls`에 있어 엔진 재시작 간에도 유지된다.
+
+**정확도**(`tests/metronome.rs`, 가상 시간 2피어 시뮬레이션, 실제 `OutputRt`·`CallbackTracker`·`ClockSync`·`BeatScheduler` 사용)
+- 시스템 시계 ±200ppm, 장치 클럭 별도 어긋남, 서로 다른 레이트·버퍼(48k/128 ↔ 44.1k/441, 96k/256), 편도 큐잉 지수분포, 대칭 RTT 계단(3 → 15 → 4ms) 조건에서 같은 박의 귀 도착 시각 차 **최대 0.84ms**(수락 기준 ≤ 2ms)다. 늦은 클릭 0, 믹스 탭 클릭 0이다.
+- 시뮬레이션이 덮지 않는 것: 장치·드라이버의 숨은 출력 지연(장치 출력 버퍼 밖)과 경로 비대칭. 피어마다 다르면 그만큼 어긋난다. 숨은 지연은 루프백 측정 `offsetMs`로 보정할 수 있다(후속). 실장비 2대 청취 확인은 [사람] 항목이다.
+
 ## 2. 패킷 포맷 (`net/packet.rs`)
 
 모든 패킷은 이 헤더를 가진다(빅엔디안).
@@ -139,7 +184,9 @@ off len 필드
   - 릴레이 주소가 바뀌거나 해제되면 직전 릴레이 주소에서 온 Hello/HelloAck는 버린다(직접 경로로 오인 방지). 데이터는 위 2초 유예로 받는다.
   - 경로 종류(`via_relay`)는 인증되지 않은 출발 주소로 정한다. 경로상 공격자가 직접 Hello의 출발 주소를 릴레이로 바꿔 먼저 넣으면 강등시킬 수 있다. 직접 패킷을 버리는 것과 같은 효과라 새 공격력은 아니다(relay-design 4.1).
 - 제어 패킷(Hello~Bye)은 타입별로 이전보다 큰 seq만 받는다(재전송 방어). HelloAck는 피어당 50ms에 1회까지.
-- Hello/HelloAck 평문: `peer_id`(UTF-8, ≤64B). Pong·Bye 평문: 없음. Ping 평문: 없음, 또는 **에코 제어 6바이트**(P1-1) `[0xEC, flags, delay_us(u32 BE)]`. RTT는 헤더 timestamp를 쓴다.
+- Hello/HelloAck 평문: `peer_id`(UTF-8, ≤64B). Bye 평문: 없음.
+- **Pong 평문**(P2-3): `[0xC1, now_us(u64 BE)]` 9바이트다. 응답자가 Pong을 보낼 때의 엔진 시계(µs, Net epoch 기준)이고, 받는 쪽이 시계 오프셋 표본을 만든다(1.4절). 빈 평문(옛 엔진)이나 다른 형식이면 표본만 건너뛴다(RTT는 그대로). 옛 엔진은 Pong 평문을 보지 않으므로 호환된다.
+- Ping 평문: 없음, 또는 **에코 제어 6바이트**(P1-1) `[0xEC, flags, delay_us(u32 BE)]`. RTT는 헤더 timestamp를 쓴다.
   - flags bit0 `REQUEST`: 보낸 쪽이 받는 쪽에게 "내 오디오를 되돌려 달라"고 요청 중(측정 중). bit1 `ACTIVE`: 보낸 쪽이 받는 쪽의 오디오를 되돌리는 중, `delay_us` = 되돌리기 처리 지연(수신 → 송신 EWMA).
   - 상태는 수준(level)으로 싣는다: Ping(500ms)마다 현재 플래그를 보내고, 바뀌면 바로 한 번 더 보낸다. 빈 평문 = 플래그 0(옛 엔진과 호환). 3초 넘게 갱신이 없으면 끝난 것으로 본다.
   - 받는 쪽은 REQUEST가 없는 Ping을 받으면 에코 동의를 바로 거둔다(측정 끝 = 에코 끝).
@@ -203,7 +250,10 @@ type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
 interface LoopbackRun { roundTripMs: number | null; peakRatio: number; correlation: number; clipped: boolean; inverted: boolean; inputPeak: number }
 interface LoopbackReport { verdict: MeasureVerdict; message: string; runs: LoopbackRun[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; sampleRate: number; inputBufferFrames: number; outputBufferFrames: number; bufferRoundTripMs: number; driverInputLatencyMs: number | null; driverOutputLatencyMs: number | null; driverRoundTripMs: number | null; estLatencyMs: number; offsetMs: number | null; driverErrorMs: number | null; correctedEstLatencyMs: number | null; backend: string }
 interface EchoReport { verdict: MeasureVerdict; message: string; peerId: string; runs: (number | null)[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; peerEchoDelayMs: number; oneWayMs: number | null; networkRttMs: number | null; jitterBufferMs: number; frameMs: number; localLatencyMs: number; inputBufferMs: number; outputBufferMs: number; mouthToEarMs: number | null; residualMs: number | null; path: 'lan' | 'public' | 'relay' | null }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; peers: PeerStats[]; relay: RelayStats | null }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats }
+interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
+interface MetronomePlan { running: boolean; bpm: number; beatsPerBar: number; startUs: number; refPeerId: string | null }
+interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number }
 ```
 
 | 커맨드 | 인자 | 반환 |
@@ -221,6 +271,8 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 | `engine_safety_code` | `{ peerId: string }` | `string` — 그 피어와의 안전 번호("12345 67890 13579 24680"). 양쪽이 같으면 키 바꿔치기 없음(2절 신뢰 가정) |
 | `engine_set_monitor` | `{ enabled: boolean, gain: number }` | `null` |
 | `engine_set_master_gain` | `{ gain: number }` | `null` |
+| `engine_set_metronome` | `{ metronome: MetronomeConfig }` | `MetronomePlan` — 공유 메트로놈(P2-3, 1.4절). 방장은 `refPeerId` 없이 부른다(`startUs`를 비우면 지금 + 300ms, 반환한 `startUs`를 방에 알린다). 다른 연주자는 `refPeerId` = 방장 엔진 peerId, `startUs` = 방장이 알린 값으로 부른다(그때 `startUs` 필수). 기준 피어가 아직 없거나 시계 표본이 없으면 `synced=false`로 기다린다. 네트워크 없는 엔진(테스트 모드)은 `refPeerId` 없이만 된다(혼자 연습). 다시 부르면 새 계획으로 바로 바뀐다 |
+| `engine_set_metronome_gain` | `{ gain: number, muted: boolean }` | `null` — 클릭 볼륨(0..4, 기본 0.8)·뮤트. 내 장치 출력에만 적용(믹스 탭·방송·녹음에는 클릭이 없음), 엔진 재시작 간 유지 |
 | `engine_stats` | — | `EngineStats` |
 | `engine_subscribe_mix` | `{ onChunk: Channel<ArrayBuffer> }` | `null` — 20ms마다 48kHz stereo f32 인터리브 믹스(내 입력 포함) 전송. 관람자 브릿지용 |
 | `engine_unsubscribe_mix` | — | `null` |
@@ -235,6 +287,8 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 `estLatencyMs`(GOAL 1절 정의) = 입력 장치 버퍼 + 프레임 + 출력 링 + 장치 출력 버퍼. 네트워크를 제외한, 네트워크 경로 중 내 쪽의 로컬 처리 지연이며 첫 샘플 기준이다. 장치 내부의 숨은 버퍼(WASAPI 공유 모드 엔진 버퍼 등)는 포함하지 않는다.
 - 콜백 구동 믹스(1.1절)에는 믹스된 출력 링이 없으므로 출력 링 항은 0이다. 출력 콜백이 꺼내는 피어 소스 링은 지터 버퍼 깊이(`bufferMs`)에 포함되어 목표로 제어된다. 그래서 입→귀 지연 = 송신측 `estLatencyMs`의 입력+프레임 몫 + 망 + 수신측 `bufferMs` + 수신측 출력 버퍼다. 공유 클럭 종단 실측이 `estLatencyMs + bufferMs + 1ms`를 넘지 않음을 통합 테스트로 확인한다.
 - 장치 버퍼 값은 실측 콜백 크기를 쓴다.
+
+`EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`(엔진 수명 누적). 워커가 0.1초마다 갱신한다.
 
 `monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·로컬 소스 링) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
 

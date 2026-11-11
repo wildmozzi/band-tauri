@@ -222,6 +222,44 @@ export interface EngineStats {
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
+  /** 공유 메트로놈 상태(P2-3). 옛 엔진이면 없음 */
+  metronome?: MetronomeStats
+}
+
+/**
+ * 공유 메트로놈 계획(P2-3, 설계 1.4절). 방장은 refPeerId 없이 부르고(startUs를 비우면 지금 + 300ms),
+ * 다른 연주자는 방장 엔진 peerId와 방장이 알린 startUs로 부른다. startUs는 기준 엔진 시계(µs).
+ */
+export interface MetronomeConfig {
+  running: boolean
+  /** 20..300 */
+  bpm: number
+  /** 1..16 */
+  beatsPerBar: number
+  startUs?: number | null
+  refPeerId?: string | null
+}
+
+/** `engine_set_metronome`이 적용한 계획. 방장은 이 값을 방에 알린다. */
+export interface MetronomePlan {
+  running: boolean
+  bpm: number
+  beatsPerBar: number
+  startUs: number
+  refPeerId: string | null
+}
+
+export interface MetronomeStats extends MetronomePlan {
+  /** 시간축이 잡힘(방장이거나 기준 피어 시계 표본 있음). false면 클릭을 내지 않는다 */
+  synced: boolean
+  /** 기준 피어 시계 − 내 시계(ms). 방장이면 0 */
+  clockOffsetMs: number | null
+  clockRttMs: number | null
+  driftPpm: number | null
+  /** 마지막으로 예약한 박 번호(0부터) */
+  beat: number | null
+  clicks: number
+  lateClicks: number
 }
 
 // ============================================================================
@@ -320,6 +358,16 @@ export function engineSetMonitor(enabled: boolean, gain: number): Promise<null> 
 
 export function engineSetMasterGain(gain: number): Promise<null> {
   return invoke<null>('engine_set_master_gain', { gain })
+}
+
+/** 공유 메트로놈 계획 적용(P2-3). 적용된 계획을 돌려준다 */
+export function engineSetMetronome(metronome: MetronomeConfig): Promise<MetronomePlan> {
+  return invoke<MetronomePlan>('engine_set_metronome', { metronome })
+}
+
+/** 메트로놈 클릭 볼륨(0..4)·뮤트. 로컬 전용(내 귀에만), 엔진 재시작 간 유지 */
+export function engineSetMetronomeGain(gain: number, muted: boolean): Promise<null> {
+  return invoke<null>('engine_set_metronome_gain', { gain, muted })
 }
 
 export function engineStats(): Promise<EngineStats> {
