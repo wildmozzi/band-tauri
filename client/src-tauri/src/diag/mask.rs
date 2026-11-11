@@ -3,7 +3,11 @@
 //! - IP: 대역만 남긴다. IPv4는 앞 두 옥텟(`203.0.x.x`), IPv6는 앞 두 그룹(`2001:db8:x::`). 포트는 남긴다.
 //! - 이메일 → `<email>`, JWT → `<jwt>`, 32자 이상 base64/hex 덩어리(토큰·키·쿠키) → `<redacted>`.
 //! - UUID·피어 id → `id-xxxxxxxx`(SHA-256 앞 4바이트). 같은 id는 같은 값이라 여러 사람의 내보내기를 맞춰 볼 수 있다.
-//! - Windows 사용자 폴더(`C:\Users\<이름>`) → `C:\Users\<user>`.
+//! - 사용자 폴더 이름(`C:\Users\<이름>`, `/Users/<이름>`, `/home/<이름>`) → `<user>`. 이름은 다음 경로 구분자나
+//!   줄 끝까지라 공백이 든 이름(`John Smith`)도 통째로 가린다.
+//!
+//! 가명은 솔트 없는 짧은 해시라, 후보 id 목록이 있으면 되돌릴 수 있다(같은 방 참가자는 서로의 id를 안다).
+//! 목적은 받는 사람이 id를 바로 읽지 못하게 하면서 여러 내보내기를 맞춰 보는 것이지, 되돌릴 수 없게 하는 것이 아니다.
 
 use std::sync::OnceLock;
 
@@ -38,13 +42,15 @@ static IPV4: OnceLock<Regex> = OnceLock::new();
 pub fn mask_text(s: &str) -> String {
     let s = re(&JWT, r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*").replace_all(s, "<jwt>");
     let s = re(&EMAIL, r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}").replace_all(&s, "<email>");
-    let s = re(&USER_DIR, r"(?i)([A-Z]:[\\/]+Users[\\/]+)[^\\/\s:*?\x22<>|]+").replace_all(&s, "${1}<user>");
+    // Windows는 대소문자 무시, macOS/Linux 홈은 정확히. 이름은 다음 구분자·줄바꿈·파일명 금지 문자까지(공백 포함).
+    let s = re(&USER_DIR, r"((?i:[A-Z]:[\\/]+Users[\\/]+)|/Users/|/home/)[^\\/\r\n:*?\x22<>|]+")
+        .replace_all(&s, "${1}<user>");
     let s = re(&UUID, r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
         .replace_all(&s, |c: &Captures| pseudonymize(&c[0].to_ascii_lowercase()));
     let s = re(&LONG_TOKEN, r"[A-Za-z0-9_+/-]{32,}={0,2}").replace_all(&s, |c: &Captures| {
         let t = &c[0];
         // 숫자와 문자가 섞인 덩어리만(긴 식별자·경로 조각은 둔다)
-        if t.bytes().any(|b| b.is_ascii_digit()) && t.bytes().any(|b| b.is_ascii_alphabetic()) {
+        if mixed(t) && !looks_like_path(t) {
             "<redacted>".to_string()
         } else {
             t.to_string()
@@ -62,6 +68,18 @@ pub fn mask_text(s: &str) -> String {
     });
     let s = re(&IPV4, r"\b(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b").replace_all(&s, "$1.$2.x.x");
     s.into_owned()
+}
+
+fn mixed(t: &str) -> bool {
+    t.bytes().any(|b| b.is_ascii_digit()) && t.bytes().any(|b| b.is_ascii_alphabetic())
+}
+
+/// `/a/band-tauri/cache_2026`처럼 경로 조각인지. 표준 base64(`/` 포함)에는 `-`·`_`가 없고 base64url에는 `/`가 없으므로
+/// `/`가 2개 이상이면서 `-`나 `_`가 함께 있으면 토큰 하나가 아니다. 단 조각 하나라도 토큰처럼 길면(16자 이상, 숫자+문자) 가린다.
+fn looks_like_path(t: &str) -> bool {
+    t.matches('/').count() >= 2
+        && t.contains(['-', '_'])
+        && !t.split(['/', '-', '_']).any(|seg| seg.len() >= 16 && mixed(seg))
 }
 
 #[cfg(test)]
@@ -115,6 +133,51 @@ mod tests {
         assert_eq!(pseudonymize("a"), pseudonymize("a"));
         assert_ne!(pseudonymize("a"), pseudonymize("b"));
         assert_eq!(pseudonymize("a").len(), 11);
+    }
+
+    #[test]
+    fn user_dir_with_spaces_and_unix_homes() {
+        assert_eq!(mask_text(r"C:\Users\John Smith\AppData\Roaming\x"), r"C:\Users\<user>\AppData\Roaming\x");
+        // 줄 끝의 경로(뒤에 구분자 없음)도 이름 전체를 가리고, 다음 줄은 그대로
+        assert_eq!(mask_text("dir=C:\\Users\\John Smith\nnext"), "dir=C:\\Users\\<user>\nnext");
+        assert_eq!(mask_text("/Users/jane doe/Library/Logs/x.log"), "/Users/<user>/Library/Logs/x.log");
+        assert_eq!(mask_text("/home/jdoe/.local/share/x"), "/home/<user>/.local/share/x");
+    }
+
+    #[test]
+    fn path_fragments_kept_but_tokens_redacted() {
+        let p = "/AppData/Roaming/band-tauri/cache_2026/x";
+        assert_eq!(mask_text(p), p);
+        let p2 = "open /var/lib/band-tauri/session_2026_11_11/cache01 ok";
+        assert_eq!(mask_text(p2), p2);
+        // 표준 base64 키(`/` 여러 개)는 계속 가린다
+        assert_eq!(mask_text("key=q83v/EjRWeJ0SNFZ4k/BI0VniQEjRWeJASNFZ4kBI0Vng="), "key=<redacted>");
+        // 경로처럼 보여도 토큰 같은 긴 조각이 있으면 가린다
+        assert_eq!(mask_text("/a/b-c/q83vEjRWeJ0SNFZ4kBI0VniQEjRWe"), "<redacted>");
+    }
+
+    /// 실제 로그 형식(tauri-plugin-log 기본 포맷) 회귀 테스트.
+    #[test]
+    fn real_log_lines() {
+        // net/mod.rs `릴레이 설정: {addr} ({host})`
+        assert_eq!(
+            mask_text("[2026-11-11][12:34:56][band_lib::net][INFO] 릴레이 설정: 203.0.113.45:3479 (relay.example.com)"),
+            "[2026-11-11][12:34:56][band_lib::net][INFO] 릴레이 설정: 203.0.x.x:3479 (relay.example.com)"
+        );
+        // engine/worker.rs `출력 소스 슬롯이 부족합니다(피어 {id})`
+        let id = "8a1f0c2e-1111-2222-3333-444455556666";
+        assert_eq!(
+            mask_text(&format!("[2026-11-11][12:34:57][band_lib::engine::worker][WARN] 출력 소스 슬롯이 부족합니다(피어 {id})")),
+            format!(
+                "[2026-11-11][12:34:57][band_lib::engine::worker][WARN] 출력 소스 슬롯이 부족합니다(피어 {})",
+                pseudonymize(id)
+            )
+        );
+        // 로그 폴더 경로(공백 든 사용자 이름)
+        assert_eq!(
+            mask_text(r"[2026-11-11][12:35:00][band_lib][INFO] 로그: C:\Users\John Smith\AppData\Roaming\com.band.app\logs\band.log"),
+            r"[2026-11-11][12:35:00][band_lib][INFO] 로그: C:\Users\<user>\AppData\Roaming\com.band.app\logs\band.log"
+        );
     }
 
     #[test]

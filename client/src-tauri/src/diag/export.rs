@@ -10,7 +10,7 @@
 //! ```
 
 use std::io::{Cursor, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use zip::write::SimpleFileOptions;
@@ -34,14 +34,16 @@ meta.json       앱 버전, OS 종류·버전, 내보낸 시각, 타임라인 �
 engine.json     엔진 설정(버퍼·프레임·코덱·지터 범위), 마지막 엔진 통계, 오디오 장치 목록(이름·드라이버·채널·레이트)
 timeline.jsonl  1초 간격 엔진 통계(최근 최대 60분): 백엔드·장치 버퍼·지연·xrun·스트림 오류,
                 피어별 경로(lan/public/relay)·RTT·지터·버퍼·재생 지연·손실·늦음·은닉(누적)
+                session 값이 바뀐 곳은 엔진 재시작이라 누적 값이 0부터 다시 셉니다.
 logs/           최근 앱 로그(마스킹됨)
 
 넣지 않거나 가린 것
 - 로그인 토큰·릴레이 토큰·암호화 키·JWT: 넣지 않음 / 로그에서 <jwt>, <redacted>로 가림
 - 이메일: <email>로 가림
-- 사용자·피어 id(UUID): id-xxxxxxxx 가명(같은 id는 같은 값)
+- 사용자·피어 id(UUID): id-xxxxxxxx 가명(같은 id는 같은 값). 짧은 해시라 후보 id를 아는 사람은
+  되돌릴 수 있습니다(같은 방 참가자끼리는 서로의 id를 압니다). 완전한 익명화는 아닙니다.
 - IP 주소: 대역만(IPv4 a.b.x.x, IPv6 앞 두 그룹), 포트는 남김
-- Windows 사용자 폴더 이름: <user>
+- 사용자 폴더 이름(Windows C:\\Users, macOS /Users, Linux /home): <user>
 - 방 이름·채팅·닉네임: 엔진 자료에 없음
 주의: 오디오 장치 이름은 그대로 들어갑니다(블루투스 장치 이름에 사람 이름이 있을 수 있음).
 ";
@@ -194,27 +196,59 @@ pub fn build(
     let current = manager.snapshot();
     let logs = log_dir.map(|d| collect_logs(d, LOG_BUDGET_BYTES)).unwrap_or_default();
     let os = OsInfo::current();
-    diag.with_timeline(|tl, last_config, _| {
-        let meta = Meta {
-            format: 1,
-            app,
-            os,
-            exported_at: now_ms,
-            exported_at_iso: iso_utc(now_ms),
-            timeline: TimelineInfo::of(tl),
-        };
-        let engine = EngineInfo {
-            active: current.is_some(),
-            last_stats: match &current {
-                Some(c) => Some(Sample::from_stats(now_ms, c.network, &c.stats)),
-                None => tl.last().cloned(),
-            },
-            config: current.map(|c| c.config).or_else(|| last_config.cloned()),
-            devices,
-            devices_error,
-        };
-        Bundle::new(meta, engine, tl, logs).to_zip()
-    })
+    // 타임라인 락 안에서는 필요한 값만 꺼내고, 압축(로그 최대 2MB)은 락 밖에서 한다(기록 스레드를 막지 않게).
+    let (timeline_info, timeline_jsonl, last_sample, last_config) = diag.with_timeline(|tl, last_config, _| {
+        (TimelineInfo::of(tl), to_jsonl(tl), tl.last().cloned(), last_config.cloned())
+    });
+    let meta = Meta {
+        format: 1,
+        app,
+        os,
+        exported_at: now_ms,
+        exported_at_iso: iso_utc(now_ms),
+        timeline: timeline_info,
+    };
+    let engine = EngineInfo {
+        active: current.is_some(),
+        last_stats: match &current {
+            Some(c) => Some(Sample::from_stats(now_ms, c.network, c.session, &c.stats)),
+            None => last_sample,
+        },
+        config: current.map(|c| c.config).or(last_config),
+        devices,
+        devices_error,
+    };
+    Bundle { meta, engine, timeline_jsonl, logs }.to_zip()
+}
+
+/// 저장 대화상자가 돌려준 경로를 실제로 쓸 경로로. 확장자가 `.zip`이 아니면 `.zip`으로 바꾸는데,
+/// 대화상자는 바뀐 이름의 덮어쓰기를 확인하지 않았으므로 그 파일이 이미 있으면 `-1`, `-2`… 를 붙인다.
+pub fn target_path(picked: PathBuf) -> PathBuf {
+    if picked.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")) {
+        return picked; // 대화상자가 덮어쓰기를 확인했다
+    }
+    let mut path = picked;
+    path.set_extension("zip");
+    if !path.exists() {
+        return path;
+    }
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    (1..1000)
+        .map(|i| path.with_file_name(format!("{stem}-{i}.zip")))
+        .find(|p| !p.exists())
+        .unwrap_or(path)
+}
+
+/// 같은 폴더의 임시 파일에 쓴 뒤 이름을 바꾼다(쓰다 실패해도 잘린 zip이 남지 않게).
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".part");
+    let tmp = PathBuf::from(tmp);
+    let result = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// zip 안 파일 이름: 경로 구분자·상위 경로 없이.
@@ -358,6 +392,40 @@ mod tests {
     }
 
     #[test]
+    fn target_path_never_overwrites_unconfirmed_zip() {
+        let dir = std::env::temp_dir().join(format!("band-diag-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 사용자가 .zip을 골랐으면(대화상자가 덮어쓰기 확인) 그대로
+        assert_eq!(target_path(dir.join("a.zip")), dir.join("a.zip"));
+        // 확장자를 바꾼 이름이 비어 있으면 그 이름
+        assert_eq!(target_path(dir.join("report.txt")), dir.join("report.zip"));
+        assert_eq!(target_path(dir.join("report")), dir.join("report.zip"));
+        // 이미 있으면 접미사
+        std::fs::write(dir.join("report.zip"), b"old").unwrap();
+        std::fs::write(dir.join("report-1.zip"), b"old").unwrap();
+        let p = target_path(dir.join("report.txt"));
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(p, dir.join("report-2.zip"));
+    }
+
+    #[test]
+    fn write_atomic_replaces_and_leaves_no_part_file() {
+        let dir = std::env::temp_dir().join(format!("band-diag-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("x.zip");
+        std::fs::write(&p, b"old").unwrap();
+        write_atomic(&p, b"new").unwrap();
+        let body = std::fs::read(&p).unwrap();
+        let part_left = dir.join("x.zip.part").exists();
+        // 폴더가 없으면 실패하고 임시 파일도 없다
+        let missing = dir.join("nope").join("y.zip");
+        assert!(write_atomic(&missing, b"z").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(body, b"new");
+        assert!(!part_left);
+    }
+
+    #[test]
     fn collect_logs_missing_dir_is_empty() {
         assert!(collect_logs(Path::new("Z:/definitely/not/here"), 100).is_empty());
     }
@@ -367,8 +435,8 @@ mod tests {
         let mut tl = Timeline::new(10);
         let mut s = EngineStats::stopped();
         s.running = true;
-        tl.push(Sample::from_stats(1_000, true, &s));
-        tl.push(Sample::stopped(2_000));
+        tl.push(Sample::from_stats(1_000, true, 1, &s));
+        tl.push(Sample::stopped(2_000, true, 1));
         let engine = EngineInfo {
             active: false,
             config: Some(EngineConfig::default()),

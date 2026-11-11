@@ -256,6 +256,7 @@ pub async fn engine_unsubscribe_mix(state: State<'_, EngineState>) -> Result<(),
 #[tauri::command]
 pub async fn diag_export(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     engine: State<'_, EngineState>,
     diag: State<'_, DiagState>,
 ) -> Result<Option<String>, String> {
@@ -264,10 +265,16 @@ pub async fn diag_export(
     let m = engine.0.clone();
     let d = diag.0.clone();
     blocking(move || {
+        // 설정·믹서 헤더 두 곳에서 동시에 눌러도 대화상자는 하나만
+        let Some(_busy) = d.begin_export() else {
+            return Err("이미 진단을 내보내는 중입니다".into());
+        };
         let now = crate::diag::now_ms();
         let Some(picked) = app
             .dialog()
             .file()
+            // 부모 창에 모달로 붙인다(없으면 Windows에서 앱 뒤나 작업 표시줄에 따로 뜰 수 있다)
+            .set_parent(&window)
             .set_title("진단 내보내기")
             .set_file_name(crate::diag::export::default_file_name(now))
             .add_filter("zip", &["zip"])
@@ -275,15 +282,12 @@ pub async fn diag_export(
         else {
             return Ok(None);
         };
-        let mut path = picked.into_path().map_err(|e| format!("저장 경로 오류: {e}"))?;
-        if !path.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")) {
-            path.set_extension("zip");
-        }
+        let path = crate::diag::export::target_path(picked.into_path().map_err(|e| format!("저장 경로 오류: {e}"))?);
         let info = app.package_info();
         let app_info = crate::diag::export::AppInfo { name: info.name.clone(), version: info.version.to_string() };
         let log_dir = app.path().app_log_dir().ok();
         let bytes = crate::diag::export::build(&m, &d, app_info, log_dir.as_deref(), now)?;
-        std::fs::write(&path, bytes).map_err(|e| format!("진단 파일 저장 실패: {e}"))?;
+        crate::diag::export::write_atomic(&path, &bytes).map_err(|e| format!("진단 파일 저장 실패: {e}"))?;
         log::info!("진단 내보내기 완료");
         Ok(Some(path.to_string_lossy().into_owned()))
     })

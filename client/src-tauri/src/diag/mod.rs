@@ -24,12 +24,16 @@ pub struct Snapshot {
     pub config: EngineConfig,
     /// 합주(네트워크) 세션인지
     pub network: bool,
+    /// 엔진 세션 번호(`EngineManager` generation, 시작·정지마다 증가)
+    pub session: u64,
 }
 
 struct Inner {
     timeline: Timeline,
     /// 직전 기록 때 엔진이 있었는지(정지 표시 샘플을 한 번만 넣기 위해)
     was_active: bool,
+    /// 직전 샘플의 (network, session) — 정지 표시 샘플에 그대로 쓴다
+    last_session: (bool, u64),
     /// 현재 또는 마지막 세션의 설정
     last_config: Option<EngineConfig>,
 }
@@ -38,6 +42,17 @@ pub struct Diagnostics {
     inner: Mutex<Inner>,
     stop: AtomicBool,
     wake: (Mutex<()>, Condvar),
+    /// 내보내기 진행 중(대화상자가 두 개 열리지 않게)
+    busy: AtomicBool,
+}
+
+/// 내보내기 진행 표시. 떨어지면 다시 내보낼 수 있다.
+pub struct ExportGuard<'a>(&'a AtomicBool);
+
+impl Drop for ExportGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl Default for Diagnostics {
@@ -49,7 +64,13 @@ impl Default for Diagnostics {
 impl Diagnostics {
     pub fn new(capacity: usize) -> Self {
         Self {
-            inner: Mutex::new(Inner { timeline: Timeline::new(capacity), was_active: false, last_config: None }),
+            inner: Mutex::new(Inner {
+                timeline: Timeline::new(capacity),
+                was_active: false,
+                last_session: (false, 0),
+                last_config: None,
+            }),
+            busy: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             wake: (Mutex::new(()), Condvar::new()),
         }
@@ -61,16 +82,26 @@ impl Diagnostics {
         let mut g = self.inner.lock();
         match snap {
             Some(s) => {
-                g.timeline.push(Sample::from_stats(now_ms, s.network, &s.stats));
+                g.timeline.push(Sample::from_stats(now_ms, s.network, s.session, &s.stats));
                 g.last_config = Some(s.config);
+                g.last_session = (s.network, s.session);
                 g.was_active = true;
             }
             None if g.was_active => {
-                g.timeline.push(Sample::stopped(now_ms));
+                let (network, session) = g.last_session;
+                g.timeline.push(Sample::stopped(now_ms, network, session));
                 g.was_active = false;
             }
             None => {}
         }
+    }
+
+    /// 내보내기를 시작한다. 이미 진행 중이면 `None`.
+    pub fn begin_export(&self) -> Option<ExportGuard<'_>> {
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| ExportGuard(&self.busy))
     }
 
     /// 내보내기용으로 현재 내용을 읽는다.
@@ -113,7 +144,29 @@ mod tests {
     fn snap(running: bool) -> Snapshot {
         let mut stats = EngineStats::stopped();
         stats.running = running;
-        Snapshot { stats, config: EngineConfig::default(), network: true }
+        Snapshot { stats, config: EngineConfig::default(), network: true, session: 7 }
+    }
+
+    #[test]
+    fn session_marks_fast_restart_and_stop_keeps_network() {
+        let d = Diagnostics::new(10);
+        d.record(1, Some(snap(true)));
+        // 1초 안에 재시작: 정지 표시는 없지만 session이 바뀐다
+        d.record(2, Some(Snapshot { session: 9, ..snap(true) }));
+        d.record(3, None);
+        d.with_timeline(|tl, _, _| {
+            let v: Vec<_> = tl.iter().map(|s| (s.t, s.session, s.network, s.running)).collect();
+            assert_eq!(v, vec![(1, 7, true, true), (2, 9, true, true), (3, 9, true, false)]);
+        });
+    }
+
+    #[test]
+    fn export_guard_is_exclusive() {
+        let d = Diagnostics::new(1);
+        let g = d.begin_export().expect("첫 내보내기");
+        assert!(d.begin_export().is_none(), "진행 중이면 거절");
+        drop(g);
+        assert!(d.begin_export().is_some(), "끝나면 다시 가능");
     }
 
     #[test]
@@ -126,7 +179,8 @@ mod tests {
         d.record(5, None); // 계속 없음: 기록 안 함
         d.with_timeline(|tl, cfg, active| {
             let ts: Vec<_> = tl.iter().map(|s| (s.t, s.running, s.network)).collect();
-            assert_eq!(ts, vec![(2, true, true), (3, false, true), (4, false, false)]);
+            // 정지 표시 샘플도 끝난 세션의 network 값을 유지한다
+            assert_eq!(ts, vec![(2, true, true), (3, false, true), (4, false, true)]);
             assert!(cfg.is_some(), "마지막 세션 설정은 정지 뒤에도 남는다");
             assert!(!active);
         });

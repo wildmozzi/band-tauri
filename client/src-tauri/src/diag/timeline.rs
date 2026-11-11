@@ -103,8 +103,11 @@ pub struct Sample {
     /// 유닉스 시각(ms, UTC)
     pub t: u64,
     pub running: bool,
-    /// 합주(네트워크) 세션이면 true, 테스트 모드면 false
+    /// 합주(네트워크) 세션이면 true, 테스트 모드면 false. 정지 표시 샘플은 직전 세션 값을 유지한다.
     pub network: bool,
+    /// 엔진 세션 번호(시작마다 바뀜). 값이 바뀐 곳이 엔진 재시작 경계라, 누적 카운터(`xruns`, `late`, `concealed`)가
+    /// 거기서 0부터 다시 센다. 1초 안에 재시작해 정지 표시 샘플이 없어도 경계가 보인다.
+    pub session: u64,
     pub backend: String,
     pub sample_rate: u32,
     pub device_buffer: u32,
@@ -127,11 +130,12 @@ pub struct Sample {
 
 impl Sample {
     /// 엔진 통계에서 샘플을 만든다(피어 id·릴레이 주소 마스킹).
-    pub fn from_stats(t: u64, network: bool, s: &EngineStats) -> Self {
+    pub fn from_stats(t: u64, network: bool, session: u64, s: &EngineStats) -> Self {
         Self {
             t,
             running: s.running,
             network,
+            session,
             backend: s.backend.clone(),
             sample_rate: s.sample_rate,
             device_buffer: s.device_buffer,
@@ -176,9 +180,9 @@ impl Sample {
         }
     }
 
-    /// 엔진이 없어진(정지) 시점 표시용 샘플.
-    pub fn stopped(t: u64) -> Self {
-        Self::from_stats(t, false, &EngineStats::stopped())
+    /// 엔진이 없어진(정지) 시점 표시용 샘플. `network`·`session`은 방금 끝난 세션 값이다.
+    pub fn stopped(t: u64, network: bool, session: u64) -> Self {
+        Self::from_stats(t, network, session, &EngineStats::stopped())
     }
 }
 
@@ -264,7 +268,7 @@ mod tests {
 
     #[test]
     fn sample_masks_peer_and_relay() {
-        let s = Sample::from_stats(1_000, true, &stats_with_peer());
+        let s = Sample::from_stats(1_000, true, 1, &stats_with_peer());
         assert_eq!(s.peers.len(), 1);
         assert!(!s.peers[0].peer.contains("8a1f0c2e"));
         assert!(s.peers[0].peer.starts_with("id-"));
@@ -278,9 +282,9 @@ mod tests {
     #[test]
     fn jsonl_is_one_line_per_sample_in_order() {
         let mut tl = Timeline::new(2);
-        tl.push(Sample::stopped(1));
-        tl.push(Sample::from_stats(2, true, &stats_with_peer()));
-        tl.push(Sample::stopped(3));
+        tl.push(Sample::stopped(1, false, 0));
+        tl.push(Sample::from_stats(2, true, 1, &stats_with_peer()));
+        tl.push(Sample::stopped(3, true, 1));
         let text = to_jsonl(&tl);
         let lines: Vec<_> = text.lines().collect();
         assert_eq!(lines.len(), 2);
