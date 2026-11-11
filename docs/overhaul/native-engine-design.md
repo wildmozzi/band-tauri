@@ -485,12 +485,20 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 연주 참여 요청: `perform-request-sent` `{ instrument, hostOnline }`(같은 요청 재전송에도 다시 보냄), `perform-request-rejected` `{ reason, instrument }`(빈 사유는 기본 문구), 익명 요청에는 `request-perform-error` `{ code: 'login-required' }`도 보낸다. 승인(`perform-request-approved`)을 받은 앱은 바로 엔진을 시작한다(웹은 앱 안내).
 - 중계 시 서버가 `from`을 붙인다(클라이언트가 보낸 `from`은 무시).
 - **공유 메트로놈**(P2-3, 1.4절): `metronome` `{ state: { running, bpm, beatsPerBar, startUs } }`.
-  - 서버 검증: 보낸 사람이 인증된 연주자이고, 엔진을 켰고(`native-descriptor`를 보낸 상태), **방장**이어야 한다. 방장 여부는 DB `rooms.host_id`로 다시 확인한다(`refreshHost`).
+  - 서버 검증: 보낸 사람이 인증된 연주자이고, 엔진을 켰고(`native-descriptor`를 보낸 상태), **방장**이어야 한다. 방장 여부는 DB `rooms.host_id`로 다시 확인한다(방 정보 캐시 최대 2초, PR #53 M1). DB 조회가 실패하면 마지막으로 읽은 값으로 권한만 판단하고 이양 판단(정지)은 하지 않는다.
   - 값 범위는 bpm 20..300, beatsPerBar 정수 1..16, startUs 0..2^53이다.
   - 실패하면 보낸 사람에게 `error` `{ code: 'metronome-host-only' | 'metronome-invalid' }`를 보낸다.
   - 통과하면 같은 방의 다른 연주자에게 `metronome { from, state }`로 중계한다(관람자 제외). `from` = 방장 clientId = 방장 엔진 peerId다.
-  - 서버는 방마다 켜진 상태 하나를 기억한다. 연주자가 `native-descriptor`를 보내면(엔진 시작·재시작, 늦은 입장) 그 연주자에게 현재 상태를 다시 보낸다.
-  - 상태는 `running=false`, 방장 `native-leave`, 방장 퇴장, 방이 빌 때 지운다. 방장 엔진 시계가 사라지면 `startUs`가 무의미해지기 때문이다.
+  - 서버는 방마다 켜진 상태 하나를 기억한다(켠 연결 clientId + 그때의 DB 방장 userId). 연주자가 `native-descriptor`를 보내면(엔진 시작·재시작, 늦은 입장) 그 연주자에게 현재 상태를 다시 보낸다.
+    - 다시 보내기 전에 켠 사용자가 아직 DB 방장인지 확인한다(방 정보 캐시 최대 2초). DB 조회가 실패하면 판단을 미루고 보낸다(일시 장애로 합주를 끊지 않음). 서버의 방 조회는 "방 없음"(null)과 "조회 실패"(예외)를 구분하며 실패는 캐시하지 않는다(PR #53 H1). 같은 방의 동시 조회는 하나로 합친다.
+  - 상태는 `running=false`, 방장 `native-leave`, 방장 엔진 재시작(새 ssrc), 방장 퇴장(세션 재개 유예가 끝난 최종 퇴장 포함), 방이 빌 때 지운다. 방장 엔진 시계가 사라지면 `startUs`가 무의미해지기 때문이다.
+  - **방장 WS 끊김(세션 재개 유예 중)**: 유지하고 계속 다시 보낸다. 클릭 시각은 방장 엔진 시계 기준이고 엔진·P2P 시계 동기화는 WS와 무관하다. 유예가 끝나면 퇴장과 같다.
+  - **방장 이양**(PR #36 L1, DB `rooms.host_id`가 메트로놈을 켠 사용자와 달라짐): **정지**한다. 옛 방장 엔진 시계가 기준으로 남아 있어 따라갈 수는 있지만, 옛 방장은 더 이상 끄거나 바꿀 수 없고 새 방장 화면과 어긋나므로 멈추고 새 방장이 새로 켜게 한다.
+    - 서버가 이양을 아는 시점: 재전송 전 확인, 누군가의 `join`(DB를 새로 읽음), 옛 방장이 보낸 `metronome`이 방장 확인에 실패할 때.
+    - 그때 다른 연주자에게 `metronome { from: 옛 방장, state: { ..., running: false } }`, 옛 방장에게 `error { code: 'metronome-host-only', message: '방장이 바뀌어 메트로놈을 껐습니다.' }`를 보낸다(옛 방장 앱은 기준 클릭을 끈다). 옛 방장이 세션 재개 유예 중이면 재개할 때 보낸다(PR #53 L2).
+    - 조작 권한은 따로 넘기지 않는다. `metronome`마다 DB로 방장을 다시 확인하므로(캐시 최대 2초) 새 방장은 엔진을 켜면 곧바로 조작할 수 있고 옛 방장은 곧바로 막힌다. 새 방장이 켜면 그 상태가 덮어쓰고 옛 방장도 따르는 쪽이 된다.
+    - 개발 모드(DB 없음)는 방장을 확인할 수 없어 이양 검사를 하지 않는다.
+    - 알려진 한계: 이양 감지는 위 이벤트에 기대므로 조용한 방(입장·엔진 재시작·옛 방장 조작이 없음)에서는 늦어질 수 있다. 이양 기능을 만들 때 그 경로에서 바로 정지를 부른다.
 
 ## 6. 프론트 흐름
 
@@ -507,6 +515,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 다른 연주자: `metronome { from, state }` → `engine_set_metronome({ ...state, refPeerId: from })`. 엔진이 뜨기 전에 받았으면 시작 뒤 적용한다.
   - 방장이 사라지면(`native-leave`·퇴장·연주 중단) 끈다. `metronome-host-only`/`metronome-invalid` 에러를 받으면 내 클릭도 끄고 안내한다(방송은 유지).
   - 클릭 볼륨·뮤트는 각자 `engine_set_metronome_gain`이다. 클릭은 방송·녹음(믹스 탭)에 들어가지 않는다.
+    - 사용자별로 localStorage(`band.metronomeGain.<userId|guest>`, `{ volume 0..1, muted }`)에 저장해 방을 다시 들어와도·앱을 다시 켜도 유지한다(PR #36 L5). 앱 시작·로그인 사용자 변경 때 저장값을 화면과 엔진에 한 번 밀어 넣어 둘이 어긋나지 않게 한다. 저장소가 막혔거나 값이 깨졌으면 기본값(0.8, 소리 켬)으로 동작한다.
 - 합주 녹음(P2-4, `client/src/native/recordLogic.ts`, UI `pages/room/NativeRecordingControl.tsx`, 믹서 패널 아래): 앱 연주자는 엔진 멀티트랙 녹음을 쓴다(관람자는 기존 방송 믹스 MediaRecorder).
   - 시작: `engine_record_start({ name: "YYYY-MM-DD HH.MM.SS 방 제목"(지역 시각), localName: "나", trackNames: { oderId: 닉네임 }, includeMix })`. 엔진 peerId가 `oderId`라 그대로 트랙 이름 키가 된다. 엔진이 꺼져 있으면 버튼을 막는다. 녹음 중에 연주자 목록(닉네임)이 바뀌면 `engine_record_set_track_names`로 더한다(녹음 중 들어온 연주자도 닉네임 트랙, PR #49 M1).
   - 상태는 `engine_stats.recording`(시간·용량·트랙 수, `droppedFrames`/`error` 경고). 시작 응답(`RecordStats`)으로 다음 폴링 전에도 녹음 중으로 보이고, 정지한 세션 폴더의 늦은 폴링 응답은 무시한다(PR #49 M2). 정지는 `engine_record_stop` 요약을 보여 준다. 내가 정지하지 않았는데 `recording`이 사라지면(엔진 정지) 엔진이 이미 마무리했다고 알린다.

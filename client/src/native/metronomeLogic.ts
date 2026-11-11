@@ -72,3 +72,64 @@ export function metronomeErrorFromCode(code: unknown, serverMessage?: unknown): 
   if (code === 'metronome-invalid') return msg ?? '메트로놈 설정이 올바르지 않습니다.'
   return null
 }
+
+/** 내 클릭 볼륨·뮤트(로컬 전용). 방을 다시 들어와도·앱을 다시 켜도 유지한다(PR #36 L5) */
+export interface MetronomeGainPrefs {
+  volume: number
+  muted: boolean
+}
+
+/** localStorage 부분집합(테스트 주입용) */
+export type MetronomePrefsStorage = Pick<Storage, 'getItem' | 'setItem'>
+
+const METRONOME_GAIN_KEY_PREFIX = 'band.metronomeGain.'
+
+/** 사용자별 저장 키. 로그인 전이면 'guest' */
+export function metronomeGainKey(userId: string | null | undefined): string {
+  return METRONOME_GAIN_KEY_PREFIX + (userId || 'guest')
+}
+
+export function defaultMetronomeGainPrefs(): MetronomeGainPrefs {
+  return { volume: DEFAULT_METRONOME_VOLUME, muted: false }
+}
+
+/** UI 슬라이더 범위(0..1)로 자른다. 숫자가 아니면 기본값 */
+export function clampMetronomeVolume(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return DEFAULT_METRONOME_VOLUME
+  return Math.max(0, Math.min(1, v))
+}
+
+/** 저장값 읽기. 저장소가 없거나(프라이빗 모드 등) 깨졌으면 기본값 — 실패해도 동작한다 */
+export function loadMetronomeGain(storage: MetronomePrefsStorage | null, userId: string | null | undefined): MetronomeGainPrefs {
+  if (!storage) return defaultMetronomeGainPrefs()
+  try {
+    const raw = storage.getItem(metronomeGainKey(userId))
+    if (!raw) return defaultMetronomeGainPrefs()
+    const v = JSON.parse(raw) as unknown
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return defaultMetronomeGainPrefs()
+    const { volume, muted } = v as Record<string, unknown>
+    return { volume: clampMetronomeVolume(volume), muted: muted === true }
+  } catch {
+    return defaultMetronomeGainPrefs()
+  }
+}
+
+/** 저장. 실패(용량·차단)는 무시하고 false */
+export function saveMetronomeGain(storage: MetronomePrefsStorage | null, userId: string | null | undefined, prefs: MetronomeGainPrefs): boolean {
+  if (!storage) return false
+  try {
+    storage.setItem(metronomeGainKey(userId), JSON.stringify({ volume: clampMetronomeVolume(prefs.volume), muted: prefs.muted === true }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 브라우저 localStorage. 접근이 막힌 환경이면 null */
+export function browserMetronomePrefsStorage(): MetronomePrefsStorage | null {
+  try {
+    return typeof window !== 'undefined' ? window.localStorage : null
+  } catch {
+    return null
+  }
+}

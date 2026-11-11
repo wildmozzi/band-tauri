@@ -42,7 +42,7 @@
 | P1-9 | ASIO 빌드 경로: CI에서 ASIO SDK 주입(시크릿/캐시) 빌드 + 피처 플래그 배포본 | **[사람]** SDK 제공 후 CI 녹색 | **로컬 ASIO 빌드 성공**(SDK 2.3.4, clippy/test 통과). CI 주입은 SDK 재배포 금지 조항 검토 후 보류 |
 | P1-11 | **ASIO 1급 지원**: 실제 Focusrite Scarlett Solo 4세대(ASIO)에서 스트림 열기·버퍼 협상(32/64/128)·ASIOGetLatencies 반영·kAsioResetRequest 처리·채널 선택, 필요 시 cpal 대신 자체 ASIO 백엔드 | 실장치 측정 로그, estLatency·종단 지연 | 대기 (**[사람]** 장치 연결) |
 | P1-12 | **[사람]** Steinberg ASIO SDK 라이선스 계약서 체결(비공개 상용 배포 전 필수, SDK 2.3.4 이중 라이선스) | 계약 완료 | 대기 |
-| P1-10 | CPU/할당 프로파일링: 6피어 믹스 시 워커 CPU, RT 콜백 실행시간 히스토그램 통계 노출 | 통계 UI + 수치 | 진행중(작업자 p1-cpuprof) |
+| P1-10 | CPU/할당 프로파일링: 6피어 믹스 시 워커 CPU, RT 콜백 실행시간 히스토그램 통계 노출 | 통계 UI + 수치 | 리뷰 반영중(PR #54 H1: 워커 CPU% GetThreadTimes 15.6ms 틱 오차 → QueryThreadCycleTime/바쁜 시간; 재측정 Opus 2.5ms 3.79%) |
 
 ## P2 — 제품 완성도 (GOAL 4)
 
@@ -51,7 +51,10 @@
 | P2-1 | 설치 파일 + Tauri updater(서명 키, 업데이트 서버/GitHub Releases) | 릴리스 워크플로로 설치본 생성, 업데이트 동작 | 완료(#4, 설치본 ~3MB; **[사람]** 서명 시크릿 등록·첫 릴리스 검증) |
 | P2-2 | **[사람]** 코드 서명 인증서 구매/등록(스마트 앱 컨트롤·SmartScreen 대응) | 서명된 설치본 | 대기 |
 | P2-3 | 공유 메트로놈(방장 기준, 각자 지연 보정한 클릭) | 2피어 시뮬레이션에서 클릭 정렬 오차 ≤ 2ms | 완료(PR #34 엔진·#36 UI·시그널링, 2026-11-11; **[사람]** 실장비 2대 클릭 시각 차 측정·청취) |
-| P2-3a | 메트로놈 후속: 출력 지연 미보고 장치는 루프백 offsetMs로 보정(#34 M2(a)), refClockUnsupported 처리(L4)·L6, 방장 이양 시 메트로놈 인계(#36 L1), 클릭 볼륨 영속(L5) | 테스트 | 화면·서버 리뷰중(PR #53 — 방장 이양 감지 시 메트로놈 정지, 클릭 볼륨·뮤트 영속); 엔진 부분(#34 M2(a) 루프백 offsetMs 보정, L4 refClockUnsupported, L6) 대기 |
+| P2-3a | 메트로놈 후속: 출력 지연 미보고 장치는 루프백 offsetMs로 보정(#34 M2(a)), refClockUnsupported 처리(L4)·L6, 방장 이양 시 메트로놈 인계(#36 L1), 클릭 볼륨 영속(L5) | 테스트 | 화면·서버 완료(PR #53, 2026-11-11); 엔진 부분(#34 M2(a) 루프백 offsetMs 보정, L4 refClockUnsupported, L6) 대기 |
+| P2-3b | 방장 이양 기능을 앱에 만들 때 서버에서 dropMetronomeIfHostChanged 호출(지금은 DB 직접 변경만 → 조용한 방에서 감지 지연, #53 L1) | 서버 테스트 | 대기 (이양 기능 구현 시) |
+| P1-12a | 실장비 합주 테스트 가이드 `docs/TEST-SESSION.md` — PC 2대 한 세션으로 [사람] 확인 항목 묶어 진행 | 문서 | 리뷰 완료(PR #55 docs/TEST-SESSION.md, CI 대기 — 운영 서버가 main이라 로컬 서버·로컬 릴레이로 진행, 운영 Supabase 쓰기 고지) |
+| P1-12b | 2대 테스트 마찰 제거(#55 가이드의 우회 절차 없애기): auto 시그널링 ws/wss 불일치, 개발 빌드에서 LAN 사설 IP 서버 허용(dev CSP), threadPriority·qos·CPU 진단 UI 표시 → 이후 TEST-SESSION.md 간소화 | e2e | 진행중(작업자 p1-testfriction) |
 | P2-4 | 합주 녹음: 로컬 멀티트랙(내 입력 + 피어별) WAV/FLAC 저장 | 앱에서 녹음/내보내기 | 리뷰 반영 완료(PR #47·#49, CI 대기; **[사람]** 실장비 1시간 녹음·DAW 정렬·RF64 열기·클릭 미포함 청취) |
 | P2-4a | 녹음 후속: FLAC 저장, 은닉(PLC) 구간 마커 사이드카 | 테스트 | 대기 (P2-4 병합 후) |
 | P2-5 | 로그/진단 내보내기(엔진 통계 타임라인 + 설정) | 버튼 하나로 zip | 완료(PR #32, 2026-11-11; **[사람]** 실제 앱에서 내보내기 대화상자·연속 클릭·zip 로그 마스킹 확인) |
@@ -64,7 +67,7 @@
 | P2-6a | **[결정]** 요금제표의 "비공개 방 = Standard 이상" 제한을 적용할지 (현재 미적용) | 사용자 결정 | 결정(2026-11-10): 무료 플랜도 비공개 방 허용, 요금제 제한은 추후 — 현 구현 유지 |
 | P3-0 | CI 안정화: `callback_mix_early_callbacks_real_time` 타이밍 불안정 테스트 결정화, CI 단계 타임아웃(ffmpeg apt 설치가 50분 멈춘 사례) + apt 캐시/재시도 | CI 연속 녹색 | 완료(#14) |
 | P3-0a | CI 불안정 테스트: `tests/loopback.rs` `input_mute_silences_monitor_and_tap_but_keeps_meter`가 벽시계 sleep(600/400ms)에 의존하는데 결정적 잡에서 실행되어 느린 러너에서 실패(PR #22 CI, 클라이언트 전용 PR). 가상 시계 결정적 짝 + realtime 분류, 결정적 잡에 벽시계 sleep 사용 테스트가 남아 있는지 전수 점검 | 결정적 잡에 sleep 의존 0 | 완료(PR #39, 2026-11-11) |
-| P3-0d | 테스트 후속: #39 M1 relay 재시작·주소 변경 결정적 통합 짝, #39 L1~L4(소리 창 검사·에코 동의 단언·stun 무한 대기·collect 개수), #42 L2 동시 제거·추가 스트레스 테스트의 회귀 감지력, 서버 결제 테스트 `poll-triggered recheck stays rate-limited…` 간헐 실패(호스티드 ubuntu, #36 CI) 원인, 진단 타임라인에 #20 지터 지표(targetMs·concealPct 등) 기록, **통합 검증**: 여러 PR 연속 병합 뒤 overhaul workflow_dispatch로 조합 확인(#20·#32 조합 컴파일 실패 사례 → #44) | CI | 대기 |
+| P3-0d | 테스트 후속: #39 M1 relay 재시작·주소 변경 결정적 통합 짝, #39 L1~L4(소리 창 검사·에코 동의 단언·stun 무한 대기·collect 개수), #42 L2 동시 제거·추가 스트레스 테스트의 회귀 감지력, 서버 결제 테스트 `poll-triggered recheck stays rate-limited…` 간헐 실패(호스티드 ubuntu, #36 CI) 원인, 진단 타임라인에 #20 지터 지표(targetMs·concealPct 등) 기록, **통합 검증**: 여러 PR 연속 병합 뒤 overhaul workflow_dispatch로 조합 확인(#20·#32 조합 컴파일 실패 사례 → #44) | CI, **호스티드 windows 실시간 잡에서 tests/record.rs recording_does_not_change_buffer_concealment_or_xruns 3회 연속 실패**(#49, #47에서는 통과) — 녹음 켬/끔 비교를 상대 허용치·반복 측정으로 | 대기 |
 | P3-0b | **[결정·긴급]** GitHub Actions 사용 한도 초과로 CI 전면 중단(2026-11-10 20시경). 선택: ① 결제/지출 한도 상향 ② 리포 공개 전환(공개 리포는 Actions 무료) ③ 이 PC에 self-hosted runner(무료, PC 자원 사용) ④ CI 비용 절감(엔진 경로 변경 시에만 Windows 잡, realtime은 야간/수동, 문서 변경은 CI 생략) — ④는 어느 선택과도 병행 권장 | CI 재가동 | 완료(#26: self-hosted runner jw-pc-band, 7잡 녹색; **[사람]** runner를 Windows 서비스로 등록해야 재부팅·세션 종료 후에도 유지) |
 | P3-0c | 리포 공개 전환(사용자 승인 2026-11-11): ① 비밀값 검사(gitleaks 전체 기록 — 실제 비밀 없음: Supabase anon(공개용)·토스 문서 샘플 키·mkcert localhost 개발 인증서·LAN 자체서명 인증서) ② CI를 GitHub 호스티드로 복귀(공개 리포에서 self-hosted 금지) ③ 포크 PR 워크플로 승인 정책 ④ 공개 전환 ⑤ self-hosted 러너 중지 | 공개 후 호스티드 CI 녹색 | 완료(2026-11-11: 공개 전환, 외부 기여자 PR 전부 승인 필요, 호스티드 CI(#38), self-hosted 러너 2대 중지·등록 해제) |
 | P3-8a | (P3-8 후속) 미정의 CSS 변수 7개(--primary 등) 정리, 남은 모달 3개(Premium/AudioSettings/EchoMeasure) 공용 Modal로, TSX 인라인 색 209곳 토큰화, px 간격 → --space-* | 시각 회귀 통과 | 완료(PR #30, 2026-11-11; **[사람]** 데스크톱 합주실 화면 확인) |
