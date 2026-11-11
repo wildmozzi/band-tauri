@@ -1221,7 +1221,8 @@ pub fn open_engine_streams(
         let _com = ComGuard::init();
         // MMCSS 등록과 변환 버퍼 할당은 스트림 시작 전에 끝낸다. 독점 2~3ms 주기에서는 시작 뒤에 하면
         // 첫 이벤트를 놓쳐 시작 글리치가 난다(L5).
-        let _prio = super::prio::promote_current_thread();
+        let prio = super::prio::promote_current_thread();
+        c.audio_thread.store(prio.status());
         let mut scratch = vec![0f32; SCRATCH_SAMPLES];
         let (mut input, mut output) = (input, output);
         let opened = (|| {
@@ -1240,6 +1241,9 @@ pub fn open_engine_streams(
         let (i, o) = match opened {
             Ok(x) => x,
             Err(message) => {
+                // 이 스레드는 곧 끝나고 MMCSS 등록도 풀린다. 다음 시도(다른 모드 또는 cpal 폴백)가 다시 적기 전까지
+                // 오디오 스레드는 우리가 관리하지 않는 상태다(리뷰 M1). send보다 먼저 적어 받는 쪽이 이 값을 본다.
+                c.audio_thread.store(super::prio::ThreadPriority::Unmanaged);
                 let _ = tx.send(Err(OpenFailure { message, rts: Some(Box::new((input, output))) }));
                 return;
             }
@@ -1820,6 +1824,31 @@ mod tests {
         assert_eq!(channel_candidates(2, 1), vec![2, 1]);
         assert_eq!(channel_candidates(8, 4), vec![8, 4]);
         assert_eq!(channel_candidates(2, 4), vec![4]);
+    }
+
+    #[test]
+    fn failed_open_resets_audio_priority_to_unmanaged() {
+        // 리뷰 M1: 열기 실패 후 cpal로 폴백하면 오디오 스레드 상태가 mmcss로 남으면 안 된다.
+        use crate::engine::mixer::MixControls;
+        use crate::engine::prio::ThreadPriority;
+        use crate::engine::rt::{input_ring, output_path};
+        let counters = Arc::new(AudioCounters::default());
+        let (p, _c) = input_ring();
+        let (out_rt, _feed) = output_path(counters.clone(), Arc::new(MixControls::default()));
+        let cfg = EngineConfig {
+            input_device: Some("없는-장치-band-test".into()),
+            ..Default::default()
+        };
+        let r = open_engine_streams(
+            &cfg,
+            (ShareMode::Shared3, ShareMode::Shared3),
+            InputRt::new(p, counters.clone(), &[0], 1),
+            out_rt,
+            counters.clone(),
+        );
+        let Err(f) = r else { panic!("없는 장치는 열기에 실패해야 함") };
+        assert!(f.rts.is_some(), "폴백할 수 있게 RT를 돌려줘야 함: {}", f.message);
+        assert_eq!(counters.audio_thread.load(), ThreadPriority::Unmanaged);
     }
 
     #[test]
