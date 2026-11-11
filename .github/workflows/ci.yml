@@ -313,7 +313,11 @@ jobs:
       - name: Playwright version
         id: pw
         timeout-minutes: 1
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+          # 러너 이미지 OS(ubuntu24 등). OS 의존 패키지 캐시 키에 쓴다
+          echo "image=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "runner image: ${ImageOS:-?} ${ImageVersion:-?}"
       - name: Restore Playwright browsers
         id: pw-cache
         timeout-minutes: 3
@@ -321,14 +325,79 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
-      - name: Install chromium (+ OS deps)
+      # 브라우저 바이너리는 Playwright CDN에서 받는다(apt 무관). OS 의존 패키지는 아래에서 따로 설치한다.
+      - name: Install chromium
         if: steps.pw-cache.outputs.cache-hit != 'true'
         timeout-minutes: 10
-        run: npx playwright install --with-deps chromium
-      - name: Install OS deps (브라우저 캐시 적중)
-        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install chromium
+      # OS 의존 패키지(P3-0e): 우분투 apt 미러 장애(azure.archive.ubuntu.com DNS 실패)로 install-deps가 멈추면 E2E가
+      # 전부 막혔다. 실패를 허용하면(#73) 한국어 폰트(fonts-wqy-zenhei — install-deps가 까는 유일한 한글 글꼴)가 빠져
+      # 시각 회귀가 두부 글자로 실패한다. 그래서 install-deps가 실제로 받은 .deb를 캐시해 두고 dpkg로 오프라인 설치한다.
+      # - 같은 패키지·같은 버전이 깔리므로 렌더링이 apt 경로와 같다 → linux 기준 이미지를 바꿀 필요가 없다.
+      # - 캐시 미적중(Playwright 버전·러너 OS가 바뀜) 또는 오프라인 설치 실패면 apt 경로(install-deps, 재시도·시간 제한).
+      # - 캐시 범위: PR은 자기 PR·base 브랜치(overhaul)·기본 브랜치(main) 캐시를 읽는다. overhaul에서 수동 실행하면 채워진다.
+      - name: Restore OS deps (.deb 캐시)
+        id: deps-cache
+        timeout-minutes: 3
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/pw-osdeps
+          key: pw-osdeps-${{ steps.pw.outputs.image }}-${{ steps.pw.outputs.version }}-v1
+      - name: Install OS deps (캐시, 오프라인)
+        id: deps-offline
+        if: steps.deps-cache.outputs.cache-hit == 'true'
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          # 이미 깔린 패키지는 건드리지 않는다(이미지가 더 새 버전을 갖고 있으면 내리지 않게)
+          todo=()
+          for deb in "$HOME"/.cache/pw-osdeps/*.deb; do
+            pkg=$(dpkg-deb -f "$deb" Package)
+            if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -qx 'install ok installed'; then
+              echo "이미 설치됨: $pkg"
+            else
+              todo+=("$deb")
+            fi
+          done
+          echo "캐시에서 설치: ${#todo[@]}개"
+          if (( ${#todo[@]} )); then sudo dpkg -i "${todo[@]}"; fi
+      - name: Install OS deps (apt)
+        id: deps-apt
+        if: steps.deps-cache.outputs.cache-hit != 'true' || steps.deps-offline.outcome == 'failure'
         timeout-minutes: 10
-        run: npx playwright install-deps chromium
+        run: |
+          set -euo pipefail
+          # install-deps가 부르는 apt-get에 재시도·시간 제한을 주고, 받은 .deb를 지우지 않게 한다(아래에서 캐시)
+          printf '%s\n' 'Acquire::Retries "3";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' \
+            'DPkg::Lock::Timeout "60";' 'APT::Keep-Downloaded-Packages "true";' \
+            | sudo tee /etc/apt/apt.conf.d/99pw-osdeps >/dev/null
+          sudo rm -f /etc/apt/apt.conf.d/docker-clean
+          sudo rm -f /var/cache/apt/archives/*.deb
+          npx playwright install-deps chromium
+          dir="$HOME/.cache/pw-osdeps"
+          rm -rf "$dir" && mkdir -p "$dir"
+          cp /var/cache/apt/archives/*.deb "$dir"/ 2>/dev/null || true
+          n=$(find "$dir" -name '*.deb' | wc -l)
+          echo "캐시할 .deb: $n개" && ls "$dir"
+          echo "debs=$n" >> "$GITHUB_OUTPUT"
+      - name: Save OS deps (.deb 캐시)
+        if: steps.deps-cache.outputs.cache-hit != 'true' && steps.deps-apt.outcome == 'success' && steps.deps-apt.outputs.debs != '0'
+        timeout-minutes: 3
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/pw-osdeps
+          key: ${{ steps.deps-cache.outputs.cache-primary-key }}
+      # 어느 경로든 한글 글꼴이 없으면 여기서 바로 실패한다(시각 회귀가 두부 글자로 실패하는 것보다 원인이 분명하다).
+      # linux 기준 이미지는 이 글꼴(WenQuanYi Zen Hei)로 렌더링됐다.
+      - name: Check Korean font
+        timeout-minutes: 1
+        run: |
+          f=/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc
+          if [ ! -f "$f" ]; then echo "::error::한글 글꼴 없음: $f (fonts-wqy-zenhei)"; exit 1; fi
+          dpkg-query -W fonts-wqy-zenhei
+          if command -v fc-match >/dev/null; then fc-match 'sans-serif:lang=ko'; fi
       - name: Typecheck e2e
         timeout-minutes: 3
         run: npm run e2e:typecheck
