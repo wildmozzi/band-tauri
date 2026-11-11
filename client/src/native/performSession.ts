@@ -13,7 +13,17 @@
  *   relay-token-request. 엔진이 릴레이를 expired/unreachable로 보고하면 바로 다시 요청한다.
  *   서버가 ssrc-conflict를 보내면 엔진을 새 ssrc로 다시 시작한다.
  */
-import type { EngineConfig, EngineStats, LocalDescriptor, RelayConfig } from './engineApi'
+import type { EngineConfig, EngineStats, LocalDescriptor, MetronomeConfig, MetronomePlan, RelayConfig } from './engineApi'
+import {
+  clampBeats,
+  clampBpm,
+  followConfig,
+  metronomeErrorFromCode,
+  parseMetronomeSignal,
+  stoppedConfig,
+  type MetronomeSignalState,
+  type MetronomeView,
+} from './metronomeLogic'
 import { parseRelayToken, relayNeedsNewToken, relayRefreshDelayMs } from './relayLogic'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
 
@@ -26,6 +36,8 @@ export interface EngineBackend {
   removePeer(peerId: string): Promise<unknown>
   setPeerGain(peerId: string, gain: number, muted: boolean, pan?: number): Promise<unknown>
   setInputMuted(muted: boolean): Promise<unknown>
+  /** 공유 메트로놈 계획 (engine_set_metronome, P2-3) */
+  setMetronome(config: MetronomeConfig): Promise<MetronomePlan>
   stats(): Promise<EngineStats>
 }
 
@@ -51,6 +63,8 @@ export interface PerformState {
   inputMuted: boolean
   /** 마지막 engine_set_relay 실패 사유(성공하면 null). 'failed' 안내에서 "릴레이 서버 없음"과 구분한다 */
   relayError?: string | null
+  /** 공유 메트로놈(P2-3). 켜진 적 없거나 엔진이 꺼지면 null */
+  metronome?: MetronomeView | null
 }
 
 export interface StartOptions {
@@ -105,6 +119,8 @@ export class PerformSession {
   /** 마지막 relay-token-request 시각(ms) — 엔진 상태로 인한 즉시 요청의 간격 제한 */
   private lastRelayRequestAt = -Infinity
   private deadStats = 0
+  /** 따르는 방장 메트로놈(from = 방장 엔진 peerId) */
+  private remoteMetronome: { from: string; state: MetronomeSignalState } | null = null
   private readonly retryDelays: number[]
   private readonly reconnectTimeoutMs: number
   private readonly deadStatsThreshold: number
@@ -193,6 +209,8 @@ export class PerformSession {
       this.env.send({ type: 'start-performing', instrument: opts.instrument, nickname: opts.nickname, isHost: opts.isHost })
       this.runActions(this.machine.started(selfId, descriptor, this.env.getOtherPerformers()))
       if (this.state.inputMuted) this.enqueue(() => this.engine.setInputMuted(true)).catch(() => {})
+      // 엔진이 뜨기 전에 받은 방장 메트로놈이 있으면 적용(서버도 descriptor를 받으면 다시 보내 준다)
+      if (this.remoteMetronome) this.applyRemoteMetronome()
       return true
     })
   }
@@ -212,7 +230,9 @@ export class PerformSession {
     this.clearRelayTimer()
     this.localSsrc = null
     this.lastRelayRequestAt = -Infinity
-    this.setState({ phase: 'idle', instrument: null, sessionId: null, stats: null, error, relayError: null })
+    // 연주자가 아니면 서버가 메트로놈을 보내지 않으므로 잊는다(다시 시작하면 서버가 현재 상태를 보내 준다)
+    this.remoteMetronome = null
+    this.setState({ phase: 'idle', instrument: null, sessionId: null, stats: null, error, relayError: null, metronome: null })
     if (wasRunning) {
       if (notify) {
         this.env.send({ type: 'native-leave' })
@@ -254,6 +274,25 @@ export class PerformSession {
       this.relayTokenReceived(payload)
       return true
     }
+    if (payload.type === 'metronome') {
+      this.metronomeReceived(payload)
+      return true
+    }
+    if (payload.type === 'error') {
+      const metroError = metronomeErrorFromCode(payload.code, payload.message)
+      if (metroError) {
+        // 서버가 내 메트로놈을 받지 않았다: 내 클릭도 끈다(방 안에서 나만 울리지 않게)
+        const m = this.state.metronome
+        if (m && m.leaderId === null) {
+          this.setState({ metronome: null })
+          if (this.state.phase === 'running') {
+            this.enqueue(() => this.engine.setMetronome(stoppedConfig(m.bpm, m.beatsPerBar))).catch(() => {})
+          }
+        }
+        this.setState({ error: metroError })
+        return true
+      }
+    }
     if (payload.type === 'error' && payload.code === 'ssrc-conflict') {
       // 같은 방 다른 연주자가 내 ssrc를 쓴다: 서버는 descriptor를 중계하지 않았다 → 새 ssrc로 재시작
       if (this.state.phase === 'running') void this.restart()
@@ -280,6 +319,15 @@ export class PerformSession {
 
   peerGone(peerId: string): void {
     this.clearRetry(peerId)
+    // 방장(메트로놈 기준)이 사라지면 시각 기준이 없다 → 멈춤
+    if (this.remoteMetronome?.from === peerId) {
+      const { state } = this.remoteMetronome
+      this.remoteMetronome = null
+      this.setState({ metronome: null })
+      if (this.state.phase === 'running') {
+        this.enqueue(() => this.engine.setMetronome(stoppedConfig(state.bpm, state.beatsPerBar))).catch(() => {})
+      }
+    }
     this.runActions(this.machine.peerGone(peerId))
   }
 
@@ -313,8 +361,17 @@ export class PerformSession {
   /** 서버 쪽 세션은 그대로 두고 엔진만 새로 시작(새 clientId 또는 새 ssrc) */
   private async restart(): Promise<void> {
     const last = this.lastStart
+    // 방장이 켠 메트로놈: startUs는 엔진 시계 기준이라 새 엔진에서는 의미가 없다(PR #36 M1).
+    // 먼저 정지를 알리고(따르는 쪽이 옛 startUs로 계속 돌지 않게), 새 엔진이 뜨면 같은 BPM·박자로 새 박 0을 알린다.
+    const m = this.state.metronome
+    const hosted = m && m.leaderId === null && m.running ? { bpm: m.bpm, beatsPerBar: m.beatsPerBar } : null
+    if (hosted) {
+      this.env.send({ type: 'metronome', state: { running: false, bpm: hosted.bpm, beatsPerBar: hosted.beatsPerBar, startUs: 0 } })
+    }
     await this.stop({ notify: false })
-    if (last) await this.start(last)
+    if (!last) return
+    const ok = await this.start(last)
+    if (ok && hosted) await this.setHostMetronome(true, hosted.bpm, hosted.beatsPerBar)
   }
 
   // ---------------------------------------------------------------- 릴레이 (P1-4b)
@@ -387,6 +444,53 @@ export class PerformSession {
     this.setState({ inputMuted: muted })
     if (this.state.phase !== 'running') return
     this.enqueue(() => this.engine.setInputMuted(muted)).catch((err) => console.warn('[Native] 입력 뮤트 실패:', errorText(err)))
+  }
+
+  // ---------------------------------------------------------------- 공유 메트로놈 (P2-3)
+
+  private metronomeReceived(payload: Record<string, unknown>): void {
+    const msg = parseMetronomeSignal(payload)
+    if (!msg) {
+      console.warn('[Native] 잘못된 metronome 무시')
+      return
+    }
+    this.remoteMetronome = msg
+    this.setState({
+      metronome: msg.state.running ? { running: true, bpm: msg.state.bpm, beatsPerBar: msg.state.beatsPerBar, leaderId: msg.from } : null,
+    })
+    if (this.state.phase === 'running') this.applyRemoteMetronome()
+  }
+
+  private applyRemoteMetronome(): void {
+    const m = this.remoteMetronome
+    if (!m) return
+    const gen = this.gen
+    this.enqueue(async () => {
+      if (gen !== this.gen) return null
+      return this.engine.setMetronome(followConfig(m.from, m.state))
+    }).catch((err) => console.warn('[Native] 메트로놈 적용 실패:', errorText(err)))
+  }
+
+  /**
+   * 방장: 메트로놈 시작(또는 BPM·박자 변경 = 새 박 0으로 다시 시작)·정지. 엔진이 정한 startUs를 방에 알린다.
+   * 서버가 방장 여부를 DB로 확인한다(아니면 metronome-host-only 에러 → 내 클릭도 끈다).
+   */
+  async setHostMetronome(running: boolean, bpm: number, beatsPerBar: number): Promise<boolean> {
+    if (this.state.phase !== 'running') return false
+    const gen = this.gen
+    const config: MetronomeConfig = { running, bpm: clampBpm(bpm), beatsPerBar: clampBeats(beatsPerBar) }
+    let plan: MetronomePlan
+    try {
+      plan = await this.enqueue(() => this.engine.setMetronome(config))
+    } catch (err) {
+      if (gen === this.gen) this.setState({ error: `메트로놈 설정 실패: ${errorText(err)}` })
+      return false
+    }
+    if (gen !== this.gen) return false
+    this.remoteMetronome = null
+    this.setState({ metronome: running ? { running, bpm: plan.bpm, beatsPerBar: plan.beatsPerBar, leaderId: null } : null })
+    this.env.send({ type: 'metronome', state: { running: plan.running, bpm: plan.bpm, beatsPerBar: plan.beatsPerBar, startUs: plan.startUs } })
+    return true
   }
 
   /** 주기 호출(500ms). engine_stats.running=false가 이어지면 엔진이 죽은 것으로 보고 정지 (L7) */

@@ -392,6 +392,13 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 연주자 상한 6은 `start-performing`에서 따로 강제한다(`room-full-performers`, 유예 중인 연주자 포함). join은 항상 관람으로 들어오므로 연주자 자리는 그때 센다.
 - 연주 참여 요청: `perform-request-sent` `{ instrument, hostOnline }`(같은 요청 재전송에도 다시 보냄), `perform-request-rejected` `{ reason, instrument }`(빈 사유는 기본 문구), 익명 요청에는 `request-perform-error` `{ code: 'login-required' }`도 보낸다. 승인(`perform-request-approved`)을 받은 앱은 바로 엔진을 시작한다(웹은 앱 안내).
 - 중계 시 서버가 `from`을 붙인다(클라이언트가 보낸 `from`은 무시).
+- **공유 메트로놈**(P2-3, 1.4절): `metronome` `{ state: { running, bpm, beatsPerBar, startUs } }`.
+  - 서버 검증: 보낸 사람이 인증된 연주자이고, 엔진을 켰고(`native-descriptor`를 보낸 상태), **방장**이어야 한다. 방장 여부는 DB `rooms.host_id`로 다시 확인한다(`refreshHost`).
+  - 값 범위는 bpm 20..300, beatsPerBar 정수 1..16, startUs 0..2^53이다.
+  - 실패하면 보낸 사람에게 `error` `{ code: 'metronome-host-only' | 'metronome-invalid' }`를 보낸다.
+  - 통과하면 같은 방의 다른 연주자에게 `metronome { from, state }`로 중계한다(관람자 제외). `from` = 방장 clientId = 방장 엔진 peerId다.
+  - 서버는 방마다 켜진 상태 하나를 기억한다. 연주자가 `native-descriptor`를 보내면(엔진 시작·재시작, 늦은 입장) 그 연주자에게 현재 상태를 다시 보낸다.
+  - 상태는 `running=false`, 방장 `native-leave`, 방장 퇴장, 방이 빌 때 지운다. 방장 엔진 시계가 사라지면 `startUs`가 무의미해지기 때문이다.
 
 ## 6. 프론트 흐름
 
@@ -403,6 +410,11 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - `engine_stats.relay.state`가 `expired`/`unreachable`이면 바로 새 토큰을 요청한다(10초에 한 번까지). `rejected`(정원·ssrc 충돌)는 새 토큰으로 풀리지 않으므로 요청하지 않는다.
   - `engine_set_relay` 실패 사유는 세션 상태(`relayError`)에 남겨 'failed' 안내에 쓴다(L5).
   - WS 재연결 상한(35초)이 남은 여유(60초)보다 짧아, WS가 끊긴 동안에도 릴레이 경로가 토큰 만료로 끊기지 않는다. `error{code:'ssrc-conflict'}` → 엔진을 새 ssrc로 재시작한다(`native-leave` 없이). 로직은 `client/src/native/relayLogic.ts`·`performSession.ts`.
+- 공유 메트로놈(P2-3, `client/src/native/metronomeLogic.ts`·`performSession.ts`, UI `pages/room/MetronomePanel.tsx`):
+  - 방장(엔진 실행 중): `engine_set_metronome({ running, bpm, beatsPerBar })` → 반환된 `startUs`로 `metronome`을 보낸다. BPM·박자 변경은 새 박 0으로 다시 시작한다.
+  - 다른 연주자: `metronome { from, state }` → `engine_set_metronome({ ...state, refPeerId: from })`. 엔진이 뜨기 전에 받았으면 시작 뒤 적용한다.
+  - 방장이 사라지면(`native-leave`·퇴장·연주 중단) 끈다. `metronome-host-only`/`metronome-invalid` 에러를 받으면 내 클릭도 끄고 안내한다(방송은 유지).
+  - 클릭 볼륨·뮤트는 각자 `engine_set_metronome_gain`이다. 클릭은 방송·녹음(믹스 탭)에 들어가지 않는다.
 - 관람자 브릿지: 방의 **방송 담당 연주자** = 호스트가 앱 연주자면 호스트, 아니면 연주자 중 `oderId` 사전순 최소. 이 앱만 `engine_subscribe_mix` → AudioWorklet → `MediaStreamAudioDestinationNode` → 웹 관람자와의 WebRTC(송신 전용)로 트랙 전송.
 - 웹(비Tauri)에서는 연주 참여 UI를 숨기고 "데스크톱 앱 다운로드" 안내.
 - Tauri 관련 코드는 `client/src/native/` 아래로 분리: `engineApi.ts`(커맨드 래퍼, 위 타입), `useNativeSession.ts`(시그널링↔엔진), `mixBridge.ts`(관람자 브릿지). `RoomContext.tsx`는 이 훅을 호출만 한다.
