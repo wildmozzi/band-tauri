@@ -1,7 +1,8 @@
 /**
  * UDP 릴레이 연동 (relay-design.md 1·3.1절, P1-4b) — React/Tauri 비의존 로직.
  *
- * - 서버 `relay-token { token, addr, ssrc, expiresAt, expiresIn, serverNow }` → 내 엔진 ssrc와 같을 때만 engine_set_relay.
+ * - 서버 `relay-token { token, bindKey, addr, ssrc, expiresAt, expiresIn, serverNow }` → 내 엔진 ssrc와 같을 때만 engine_set_relay.
+ *   `bindKey`(토큰별 Bind MAC 키, relay-design 2.1.1)가 있으면 엔진이 RelayBind에 MAC을 붙인다(옛 서버는 없음).
  * - 만료·갱신은 내 PC 시계가 아니라 **받은 시각 + expiresIn**으로 판단한다(시계 오차, PR #10 M1).
  *   만료 60초 전(수명의 절반 이하)에 `relay-token-request`로 갱신한다 — WS가 잠시 끊겨도 버틸 여유(L4).
  * - 엔진이 릴레이를 `expired`/`unreachable`로 보고하면(토큰 거부 포함) 곧바로 새 토큰을 요청한다.
@@ -25,6 +26,8 @@ export const RELAY_REFRESH_MIN_MS = 5_000
 const MAX_EXPIRES_IN_SEC = 24 * 3600
 
 const BASE64URL = /^[A-Za-z0-9_-]+={0,2}$/
+/** 32바이트 base64url(패딩 유무 무관) */
+const BIND_KEY = /^[A-Za-z0-9_-]{43}=?$/
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 
@@ -33,8 +36,9 @@ const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFin
  * 남은 수명은 expiresIn → (expiresAt - serverNow) → (expiresAt - 내 시계, 옛 서버) 순으로 정한다.
  */
 export function parseRelayToken(payload: Record<string, unknown>, nowMs: number = Date.now()): RelayTokenMessage | null {
-  const { token, addr, ssrc, expiresAt, expiresIn, serverNow } = payload
+  const { token, bindKey, addr, ssrc, expiresAt, expiresIn, serverNow } = payload
   if (typeof token !== 'string' || token.length < 60 || token.length > 400 || !BASE64URL.test(token)) return null
+  if (bindKey !== undefined && (typeof bindKey !== 'string' || !BIND_KEY.test(bindKey))) return null
   if (typeof addr !== 'string' || addr.length === 0 || addr.length > 255 || !/:\d{1,5}$/.test(addr)) return null
   if (typeof ssrc !== 'number' || !Number.isInteger(ssrc) || ssrc < 0 || ssrc > 0xffffffff) return null
   if (!isNum(expiresAt) || expiresAt <= 0) return null
@@ -43,7 +47,7 @@ export function parseRelayToken(payload: Record<string, unknown>, nowMs: number 
   else if (isNum(serverNow) && serverNow > 0) left = expiresAt - serverNow
   else left = expiresAt - nowMs / 1000
   left = Math.min(MAX_EXPIRES_IN_SEC, Math.max(0, Math.floor(left)))
-  return { token, addr, ssrc, expiresAt, expiresIn: left, expiresInSec: left }
+  return { token, addr, ssrc, expiresAt, expiresIn: left, expiresInSec: left, ...(bindKey !== undefined ? { bindKey } : {}) }
 }
 
 /** 받은 지금부터 갱신 요청까지 기다릴 시간(ms). 만료 60초 전, 짧은 수명이면 절반 지점 */

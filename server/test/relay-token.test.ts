@@ -8,8 +8,8 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'http'
 import type { WebSocketServer } from 'ws'
 import { initializeWebSocket, type RoomMeta } from '../src/services/wsService'
-import { relayConfigFromEnv, signRelayToken, verifyRelayToken } from '../src/services/relayToken'
-import { authJoin, connect, sleep, testVerifier, type TestClient } from './helpers'
+import { deriveRelayBindKey, relayConfigFromEnv, signRelayToken, verifyRelayToken } from '../src/services/relayToken'
+import { authJoin, connect, engineKey, sleep, testVerifier, type TestClient } from './helpers'
 
 const SECRET = 'relay-test-secret-0123456789abcdef!!'
 const NOW = 1_800_000_000
@@ -52,6 +52,7 @@ describe('relay token format', () => {
       assert.equal(t.toString('hex'), v.hex, v.name)
       assert.deepEqual(verifyRelayToken(t, v.secret, v.expiresAt - 1), claims, `${v.name}: 만료 1초 전 유효`)
       assert.equal(verifyRelayToken(t, v.secret, v.expiresAt), null, `${v.name}: 만료 시각에 무효`)
+      assert.equal(deriveRelayBindKey(t, v.secret).toString('hex'), v.bindKeyHex, `${v.name}: bind key`)
     }
   })
 
@@ -94,7 +95,7 @@ async function client(url: string) {
   return c
 }
 
-const descriptor = (ssrc: number) => ({ ssrc, key: 'AAAA', candidates: [] })
+const descriptor = (ssrc: number) => ({ ssrc, key: engineKey(ssrc), candidates: [] })
 
 after(async () => {
   for (const c of openClients) c.ws.terminate()
@@ -117,6 +118,9 @@ describe('relay-token issuance over WS', async () => {
     assert.equal(msg.ssrc, 0x1234abcd)
     const claims = verifyRelayToken(Buffer.from(msg.token, 'base64url'), SECRET, Math.floor(Date.now() / 1000))
     assert.deepEqual(claims, { roomId: 'free', memberId: 'host', ssrc: 0x1234abcd, expiresAt: msg.expiresAt })
+    // Bind MAC 키(2.1.1): 그 토큰에서 파생, 32바이트
+    assert.equal(msg.bindKey, deriveRelayBindKey(Buffer.from(msg.token, 'base64url'), SECRET).toString('base64url'))
+    assert.equal(Buffer.from(msg.bindKey, 'base64url').length, 32)
     const left = msg.expiresAt - Date.now() / 1000
     assert.ok(left > 100 && left <= 120, `짧은 TTL(120초): ${left}`)
     // 클라이언트 시계와 무관한 상대 만료(PR #10 M1)
@@ -151,16 +155,17 @@ describe('relay-token issuance over WS', async () => {
     assert.ok(!anon.has(m => m.type === 'relay-token'))
   })
 
-  it('ignores invalid ssrc but still relays the descriptor', async () => {
+  it('rejects a descriptor with invalid ssrc (descriptor-invalid): no relay, no token (PR #48 M1)', async () => {
     const host = await client(url)
     const peer = await client(url)
     await authJoin(host, 'tok:host', 'free')
     await authJoin(peer, 'tok:p2', 'free')
     peer.send({ type: 'start-performing', instrument: 'bass' })
     await sleep(50)
-    host.send({ type: 'native-descriptor', descriptor: { ssrc: -1, key: 'AAAA', candidates: [] } })
-    assert.ok(await peer.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+    host.send({ type: 'native-descriptor', descriptor: { ssrc: -1, key: engineKey(200), candidates: [] } })
+    assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'descriptor-invalid'))
     await sleep(50)
+    assert.ok(!peer.has(m => m.type === 'native-descriptor' && m.from === host.id))
     assert.ok(!host.has(m => m.type === 'relay-token'))
   })
 })
@@ -178,7 +183,7 @@ describe('relay review fixes', async () => {
     await sleep(50)
     host.send({ type: 'native-descriptor', descriptor: descriptor(0xabc) })
     assert.ok(await host.waitFor(m => m.type === 'relay-token'))
-    thief.send({ type: 'native-descriptor', descriptor: descriptor(0xabc) })
+    thief.send({ type: 'native-descriptor', descriptor: { ...descriptor(0xabc), key: engineKey(77) } })
     assert.ok(await thief.waitFor(m => m.type === 'error' && m.code === 'ssrc-conflict'))
     await sleep(50)
     assert.equal(tokens(thief).length, 0)

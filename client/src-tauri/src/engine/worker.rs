@@ -832,6 +832,21 @@ pub struct Worker {
     slot_full_logged: bool,
 }
 
+/// `acc`에서 `frame.len()` 샘플짜리 프레임을 가능한 만큼 꺼내 `f(프레임, 시작 시각)`에 넘긴다. 한 패스에서 나온
+/// 프레임은 모두 같은 `pass_at`을 받는다(리뷰 M1: 프레임마다 `now()`를 찍으면 앞 프레임 뒤에서 기다린 시간이 빠진다).
+fn drain_frames(acc: &mut VecDeque<f32>, frame: &mut [f32], pass_at: Instant, mut f: impl FnMut(&[f32], Instant)) -> usize {
+    let n = frame.len();
+    let mut count = 0;
+    while n > 0 && acc.len() >= n {
+        for (d, s) in frame.iter_mut().zip(acc.drain(..n)) {
+            *d = s;
+        }
+        f(frame, pass_at);
+        count += 1;
+    }
+    count
+}
+
 /// 지원하는 장치 레이트 범위.
 const MIN_DEVICE_RATE: u32 = 8_000;
 const MAX_DEVICE_RATE: u32 = 384_000;
@@ -997,6 +1012,10 @@ impl Worker {
     }
 
     fn pump_input(&mut self) {
+        // 송신 큐 지연의 시작점(P1-3, 리뷰 M1): 이 패스에서 링을 비우기 직전 시각. 이번 패스에서 완성되는 프레임은
+        // 모두 이 시각을 쓴다 — 같은 패스의 뒤 프레임은 앞 프레임의 인코딩·송신을 기다린 시간까지 포함된다.
+        // (cap_acc에 남는 것은 프레임 미만이므로, 여기서 나가는 프레임의 마지막 샘플은 모두 이번 패스에 들어왔다.)
+        let pass_at = Instant::now();
         loop {
             let n = self.p.in_cons.pop_slice(&mut self.in_tmp);
             if n == 0 {
@@ -1023,15 +1042,11 @@ impl Worker {
             self.cap_acc.extend(block.iter().copied());
             self.in48_buf = buf;
         }
-        let n = self.frame * self.ich;
-        while self.cap_acc.len() >= n {
-            let mut fb = std::mem::take(&mut self.frame_buf);
-            for (d, s) in fb.iter_mut().zip(self.cap_acc.drain(..n)) {
-                *d = s;
-            }
-            self.on_capture_frame(&fb);
-            self.frame_buf = fb;
-        }
+        let mut fb = std::mem::take(&mut self.frame_buf);
+        let mut acc = std::mem::take(&mut self.cap_acc);
+        drain_frames(&mut acc, &mut fb, pass_at, |f, at| self.on_capture_frame(f, at));
+        self.cap_acc = acc;
+        self.frame_buf = fb;
     }
 
     fn push_local(&mut self, block: &[f32]) {
@@ -1073,12 +1088,13 @@ impl Worker {
         Some((pr.peer_id.clone(), n))
     }
 
-    fn on_capture_frame(&mut self, frame: &[f32]) {
+    /// `frame_at`: 송신 큐 지연의 시작점(이 프레임을 꺼낸 워커 패스의 시작 시각, `pump_input`).
+    fn on_capture_frame(&mut self, frame: &[f32], frame_at: Instant) {
         let alt = if self.encoder.is_some() { self.probe_frame() } else { None };
         if let (Some(enc), Some(net)) = (self.encoder.as_mut(), self.p.net.as_ref()) {
             let alt = alt.as_ref().map(|(id, n)| (id.as_str(), &self.alt_payload[..*n]));
             match enc.encode(frame, &mut self.payload) {
-                Ok(n) => net.send_audio(&self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt),
+                Ok(n) => net.send_audio_timed(frame_at, &self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt),
                 Err(e) => {
                     // 레이트 제한 로그(리뷰 L10)
                     if self.encode_errors.is_multiple_of(1000) {
@@ -1295,6 +1311,30 @@ mod tune_sim;
 mod tests {
     use super::*;
     use rand::{Rng, SeedableRng};
+
+    #[test]
+    fn batched_frames_share_pass_start_for_send_queue() {
+        // 리뷰 M1: 한 패스에서 4프레임(10ms 장치 버퍼 / 2.5ms 프레임)이 나오면 k번째 프레임의 시작점은 패스 시작이어야
+        // 한다. 프레임마다 now()를 찍던 이전 구현은 앞 프레임 처리(여기선 프레임당 2ms 이상)를 빼서 과소 보고했다.
+        let frame = 4;
+        let mut acc: VecDeque<f32> = (0..frame * 4 + 3).map(|i| i as f32).collect();
+        let mut fb = vec![0.0; frame];
+        let pass_at = Instant::now();
+        let mut seen = Vec::new();
+        let n = drain_frames(&mut acc, &mut fb, pass_at, |f, at| {
+            seen.push((f[0], at));
+            // 인코딩+송신 비용 흉내(sleep은 하한만 보장하므로 아래 단정은 결정적이다)
+            std::thread::sleep(Duration::from_millis(2));
+        });
+        assert_eq!(n, 4);
+        assert_eq!(acc.len(), 3, "프레임 미만 나머지는 다음 패스로");
+        for (k, (first, at)) in seen.iter().enumerate() {
+            assert_eq!(*first, (k * frame) as f32, "프레임 순서");
+            assert_eq!(*at, pass_at, "프레임 {k}의 시작점은 패스 시작");
+        }
+        // 마지막 프레임의 기록 지연은 앞 3프레임 처리분(≥ 6ms)을 포함한다
+        assert!(seen[3].1.elapsed() >= Duration::from_millis(6));
+    }
 
     #[test]
     fn device_clock_ignores_wake_latency() {

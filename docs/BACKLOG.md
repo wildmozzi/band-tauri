@@ -25,12 +25,12 @@
 | P1-13 | **엔진 결함(P3-0에서 발견)**: 출력 언더런 후 PeerFeed.margin(M4)은 커지는데 지터 목표가 따라오지 않아 정상 상태에서도 은닉·마감 채움·보정 수백 회 반복. 재현: `engine::worker::tests::callback_mix_sim_margin_after_underrun_no_steady_concealment`(known-bug ignore). 수정 시 ignore 제거 + CI realtime 필터에 `callback_mix_early_callbacks_real_time` 복원 | 재현 테스트 통과, realtime 잡 녹색 | 완료(#16) |
 | P1-1 | **지연 측정 도구**: 에코 피어 모드(받은 오디오를 그대로 되돌려 보냄) + 클릭 왕복 측정 UI, 로컬 루프백(입력→출력 케이블) 측정 | 측정값이 설정 화면/방 화면에 표시, 측정 절차 문서 | 완료(#13; 실측은 P1-1a [사람]) |
 | P1-1b | PR #13 리뷰 Low: remove_peer 은퇴 처리를 write 락 안으로(잠재 경쟁), 중복 키 add 거부 악용 가용성 방해 대응 | 테스트 | 완료(PR #42, 2026-11-11) |
-| P1-1c | 서버가 native-descriptor의 공개키를 JWT 신원(userId)에 묶어 다른 사용자가 같은 키로 선점·위장하지 못하게(근본 차단, PR #42 후속) | 서버 테스트 | 리뷰 반영 완료(PR #48 — ssrc·candidates 검증·재구성, CI 대기) |
+| P1-1c | 서버가 native-descriptor의 공개키를 JWT 신원(userId)에 묶어 다른 사용자가 같은 키로 선점·위장하지 못하게(근본 차단, PR #42 후속) | 서버 테스트 | 완료(PR #48, 2026-11-11) |
 | P1-1a | **[사람]** Scarlett Solo 4세대 ASIO 실측(버퍼 32/64/128, ASIOGetLatencies 확인, 하드웨어 루프백) + 두 PC 실네트워크·릴레이 에코 측정 — 절차 docs/MEASURE.md | 결과를 백로그 완료 기록에 | 대기 |
 | P1-2 | Windows 실시간 스레드 우선순위: 엔진 워커/수신 스레드에 MMCSS "Pro Audio" 등록, 타이머 해상도 1ms | 루프백 테스트 지터 감소 수치 | 완료(PR #31, 2026-11-11 — 부하 시 xrun 수천→0, bufferMs 24~32→7ms대; **[사람]** 실장비에서 threadPriority=mmcss 확인) |
-| P1-3 | UDP 송신 DSCP EF 마킹 + 패킷 페이싱, 송신 큐 지연 측정 | 테스트 + 수치 | 리뷰 완료·#31과 충돌 재해결(PR #37, CI 대기) |
+| P1-3 | UDP 송신 DSCP EF 마킹 + 패킷 페이싱, 송신 큐 지연 측정 | 테스트 + 수치 | 완료(PR #37, 2026-11-11; **[사람]** 다른 PC Wireshark로 DS 필드 확인) |
 | P1-4 | **UDP 릴레이 서버**(fly.io UDP, 방 단위 토큰 인증, 암호문 그대로 중계) + 엔진 폴백 경로 | 홀펀칭 실패 시뮬레이션에서 릴레이로 연결, 지연 표시 | P1-4a 완료(#1), P1-4b 완료(#10); **[사람]** fly 전용 IPv4(유료), 실네트워크는 P1-4d |
-| P1-4c | 릴레이 경로 대역 초과 시 Opus 자동 전환(워커 코덱 전환) + RelayBind MAC(relay-design 4.1 등록 가로채기·경로 위장 대응) | 통합 테스트 | 리뷰 반영 완료(PR #40·#43, CI 대기; 후속: MAC 필수 토큰(상태 없는 강제), 다른 제어 타입 seq 소모 순서, peerPathHint에 txCodecAuto) |
+| P1-4c | 릴레이 경로 대역 초과 시 Opus 자동 전환(워커 코덱 전환) + RelayBind MAC(relay-design 4.1 등록 가로채기·경로 위장 대응) | 통합 테스트 | ① 완료(PR #40 RelayBind MAC, 2026-11-11) · ② PR #43 overhaul 재병합 중; **[사람]** 운영 배포 순서 릴레이→서버→앱, 구버전 소멸 후 RELAY_REQUIRE_BIND_MAC=1 |
 | P1-4e | 수신 손실 피드백 기반 코덱 전환(릴레이 외 직접 경로 포함, #43 후속) | 시뮬레이션 | 대기 |
 | P1-4d | **[사람]** 실네트워크(대칭형 NAT/LTE) + 시계 오차 PC에서 릴레이 경유 10분 연주 확인 | 연결 성공·끊김 기록 | 대기 |
 | P1-5 | 지터 버퍼 자동 튜닝 고도화: 회선별 목표 깊이 학습, 급격한 지터 스파이크 대응, 사용자 "저지연↔안정" 슬라이더 | 시뮬레이션 손실 1%/지터 버스트에서 은닉 ≤1.5% & 버퍼 최소화 (참고: 위상 스윕 buf128 보정 116회는 p95 경계 넘는 정당한 목표 상향 — P1-13 보고) (PR #16 리뷰 이월: M1 언더런 직후 은닉 검증 창·여유 스윕 범위, M2 드리프트 시 데드밴드만큼 깊이 하락 시험, M3 큰 버퍼에서 추가 지연 최대 +20ms·복귀 75s 단축) | 완료(PR #20, 2026-11-11) |
@@ -50,7 +50,7 @@
 | P2-2 | **[사람]** 코드 서명 인증서 구매/등록(스마트 앱 컨트롤·SmartScreen 대응) | 서명된 설치본 | 대기 |
 | P2-3 | 공유 메트로놈(방장 기준, 각자 지연 보정한 클릭) | 2피어 시뮬레이션에서 클릭 정렬 오차 ≤ 2ms | 완료(PR #34 엔진·#36 UI·시그널링, 2026-11-11; **[사람]** 실장비 2대 클릭 시각 차 측정·청취) |
 | P2-3a | 메트로놈 후속: 출력 지연 미보고 장치는 루프백 offsetMs로 보정(#34 M2(a)), refClockUnsupported 처리(L4)·L6, 방장 이양 시 메트로놈 인계(#36 L1), 클릭 볼륨 영속(L5) | 테스트 | 대기 (P2-3 병합 후) |
-| P2-4 | 합주 녹음: 로컬 멀티트랙(내 입력 + 피어별) WAV/FLAC 저장 | 앱에서 녹음/내보내기 | 리뷰중(PR #47 엔진 — 녹음 중 bufferMs·은닉·xrun 변화 없음, 버림 0; #49 UI; **[사람]** 실장비 1시간 녹음 droppedFrames 0·DAW 정렬·RF64 열기·클릭 미포함 청취) |
+| P2-4 | 합주 녹음: 로컬 멀티트랙(내 입력 + 피어별) WAV/FLAC 저장 | 앱에서 녹음/내보내기 | 리뷰 반영 완료(PR #47·#49, CI 대기; **[사람]** 실장비 1시간 녹음·DAW 정렬·RF64 열기·클릭 미포함 청취) |
 | P2-4a | 녹음 후속: FLAC 저장, 은닉(PLC) 구간 마커 사이드카 | 테스트 | 대기 (P2-4 병합 후) |
 | P2-5 | 로그/진단 내보내기(엔진 통계 타임라인 + 설정) | 버튼 하나로 zip | 완료(PR #32, 2026-11-11; **[사람]** 실제 앱에서 내보내기 대화상자·연속 클릭·zip 로그 마스킹 확인) |
 | P2-6 | 방 비밀번호/비공개 방, 연주 참여 승인 UX 정리 | E2E | 완료(#9; 실화면 확인 [사람]) |
@@ -64,7 +64,7 @@
 | P3-0a | CI 불안정 테스트: `tests/loopback.rs` `input_mute_silences_monitor_and_tap_but_keeps_meter`가 벽시계 sleep(600/400ms)에 의존하는데 결정적 잡에서 실행되어 느린 러너에서 실패(PR #22 CI, 클라이언트 전용 PR). 가상 시계 결정적 짝 + realtime 분류, 결정적 잡에 벽시계 sleep 사용 테스트가 남아 있는지 전수 점검 | 결정적 잡에 sleep 의존 0 | 완료(PR #39, 2026-11-11) |
 | P3-0d | 테스트 후속: #39 M1 relay 재시작·주소 변경 결정적 통합 짝, #39 L1~L4(소리 창 검사·에코 동의 단언·stun 무한 대기·collect 개수), #42 L2 동시 제거·추가 스트레스 테스트의 회귀 감지력, 서버 결제 테스트 `poll-triggered recheck stays rate-limited…` 간헐 실패(호스티드 ubuntu, #36 CI) 원인, 진단 타임라인에 #20 지터 지표(targetMs·concealPct 등) 기록, **통합 검증**: 여러 PR 연속 병합 뒤 overhaul workflow_dispatch로 조합 확인(#20·#32 조합 컴파일 실패 사례 → #44) | CI | 대기 |
 | P3-0b | **[결정·긴급]** GitHub Actions 사용 한도 초과로 CI 전면 중단(2026-11-10 20시경). 선택: ① 결제/지출 한도 상향 ② 리포 공개 전환(공개 리포는 Actions 무료) ③ 이 PC에 self-hosted runner(무료, PC 자원 사용) ④ CI 비용 절감(엔진 경로 변경 시에만 Windows 잡, realtime은 야간/수동, 문서 변경은 CI 생략) — ④는 어느 선택과도 병행 권장 | CI 재가동 | 완료(#26: self-hosted runner jw-pc-band, 7잡 녹색; **[사람]** runner를 Windows 서비스로 등록해야 재부팅·세션 종료 후에도 유지) |
-| P3-0c | 리포 공개 전환(사용자 승인 2026-11-11): ① 비밀값 검사(gitleaks 전체 기록 — 실제 비밀 없음: Supabase anon(공개용)·토스 문서 샘플 키·mkcert localhost 개발 인증서·LAN 자체서명 인증서) ② CI를 GitHub 호스티드로 복귀(공개 리포에서 self-hosted 금지) ③ 포크 PR 워크플로 승인 정책 ④ 공개 전환 ⑤ self-hosted 러너 중지 | 공개 후 호스티드 CI 녹색 | 완료(2026-11-11: 공개 전환, 외부 기여자 PR 전부 승인 필요, PR #38 호스티드 CI 병합 — 전체 약 14분 병렬, self-hosted 러너 2대 중지·시작 스크립트 비활성(C:actions-runnerand-tauri-runners.cmd.disabled); **[사람·선택]** 러너 등록 해제 `config.cmd remove`, C:actions-runner* 폴더 정리) |
+| P3-0c | 리포 공개 전환(사용자 승인 2026-11-11): ① 비밀값 검사(gitleaks 전체 기록 — 실제 비밀 없음: Supabase anon(공개용)·토스 문서 샘플 키·mkcert localhost 개발 인증서·LAN 자체서명 인증서) ② CI를 GitHub 호스티드로 복귀(공개 리포에서 self-hosted 금지) ③ 포크 PR 워크플로 승인 정책 ④ 공개 전환 ⑤ self-hosted 러너 중지 | 공개 후 호스티드 CI 녹색 | 완료(2026-11-11: 공개 전환, 외부 기여자 PR 전부 승인 필요, 호스티드 CI(#38), self-hosted 러너 2대 중지·등록 해제) |
 | P3-8a | (P3-8 후속) 미정의 CSS 변수 7개(--primary 등) 정리, 남은 모달 3개(Premium/AudioSettings/EchoMeasure) 공용 Modal로, TSX 인라인 색 209곳 토큰화, px 간격 → --space-* | 시각 회귀 통과 | 완료(PR #30, 2026-11-11; **[사람]** 데스크톱 합주실 화면 확인) |
 | P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 완료(#3) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
@@ -87,7 +87,8 @@
 | P3-7 | 웹 E2E(Playwright 또는 ego-browser 시나리오): 로그인, 방 목록, 관람 입장, 커뮤니티 | CI 또는 루프에서 실행 | 완료(#19; RLS 검증은 P3-11) |
 | P3-8 | 공용 UI 컴포넌트/디자인 토큰 정리 | 중복 CSS 감소 (PR #22 후속 Nit 포함: pageTitle 경로 표와 App 라우트 정의 단일화, App.css .live-room 중복 정리) | 완료(PR #24, 2026-11-11) |
 | P3-12 | **웹 점검 발견 사항 정리**(ego-browser, 2026-11-10): ① 탭 제목 "Vite + React + TS" → 서비스명 ② BandSpace/IndigoMuse 이름 통일(결정 필요 시 [결정]으로 묻기 — 기본은 IndigoMuse) ③ 홈 문구 사실과 다름(평균 왕복 18ms·KR/JP/US 3지역·서울/도쿄/LA 리전·20ms 이하·SYNCROOM 명시) → 측정 전에는 사실만 ④ 웹 관람 안내에 데스크톱 다운로드 버튼(VITE_DESKTOP_DOWNLOAD_URL, 비면 '준비 중') ⑤ 커뮤니티 목록 항목이 링크가 아닌 div 클릭(새 탭·접근성 불가) → <a>/<Link> ⑥ /profile, /payment(파라미터 없음)에서 렌더 중 navigate() 경고 → effect로 ⑦ 404 페이지 없음(없는 경로에서 빈 화면) ⑧ 방 최대 인원 선택지 2~20명 vs 연주자 최대 6명 — 관람 포함 의미인지 UI 문구 명확화 ⑨ 합주실 채팅 입력창이 첫 화면 아래(스크롤 필요) ⑩ [버그] 로그인 상태로 /payment?plan= 직접 진입 시 /auth를 거쳐 /로 튕김(E2E test.fixme — 고치면 fixme 해제) ⑪ 결제 약관 체크박스 display:none으로 접근성 없음 | lint/test + ego-browser 재점검 | 완료(#22) |
-| P3-12a | **[결정]** 서비스 문의 메일(현재 support@bandspace.com 표기)과 요금제 문구('최대 8명' 등)를 무엇으로 할지, 데스크톱 앱 이름(tauri productName 'Band')을 IndigoMuse로 바꿀지 | 사용자 결정 | 대기 |
+| P3-12a | **[결정]** 서비스 문의 메일(현재 support@bandspace.com 표기)과 요금제 문구('최대 8명' 등)를 무엇으로 할지, 데스크톱 앱 이름(tauri productName 'Band')을 IndigoMuse로 바꿀지 | 사용자 결정 | 리뷰중(PR #51 — 요금제 문구를 실제와 일치: 서버·클라이언트에 요금제 게이트 0개(유료 전용 기능 없음), 미구현 혜택 13종 "준비 중" 분리·삭제, 문의 메일 VITE_SUPPORT_EMAIL) |
+| P3-12e | **[결정]** 유료 요금제(Standard ₩2,900·Pro ₩6,900) 판매를 계속할지 — 지금 유료로만 열리는 기능이 하나도 없음(PR #51 조사). 계속하면 실제 유료 기능(게이트) 구현 필요, 아니면 결제 화면 숨김. **[버그]** Pricing의 무료 전환 버튼이 localStorage만 바꾸고 서버 구독 해지를 부르지 않음(결제 로직 — 승인 후 수정). **[사람]** 운영 VITE_SUPPORT_EMAIL 설정, "7일 환불 보장" 등 결제·환불 고지 문구 법적 검토 | 결정 | 대기 |
 | P3-12b | 방 max_participants를 서버가 강제(입장 시 정원 초과 거부) — 현재 클라이언트 표시만 | 서버 테스트 | 완료(PR #23, 2026-11-11; **[사람]** 데스크톱에서 정원 초과 재입장 시 엔진 해제 확인) |
 | P3-12c | ego-browser 웹 재점검(PR #22 반영분) — 로컬 서버+빌드로 홈·합주실·커뮤니티·결제·404 화면 확인 | 화면 점검 | 완료(PR #41, 2026-11-11 — High 2·Medium 9·Low 11 중 CSS·aria로 고칠 것 반영, 기록 docs/reviews/2026-11-11-web-recheck.md) |
 | P3-12d | 웹 재점검 후속(#41): import 안 되는 사문화 페이지 CSS 7개(~2,600줄) 삭제, 합주실 상세 모바일 연주자 패널 잘림, 대비 토큰·word-break keep-all, 결제 완료/실패 직접 진입 문구, 방 만들기 토글 3개 label 연결 | e2e·시각 회귀 | 완료(PR #45, 2026-11-11) |

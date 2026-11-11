@@ -85,15 +85,15 @@ describe('SubscriptionService.confirmPayment', () => {
   })
 
   it('Toss rejection → 400 with the gateway error; pending kept until the reconciler confirms it was not approved', async () => {
-    const repo = new MemorySubscriptionRepository()
-    const { g } = gateway({ confirm: [{ success: false, outcome: 'rejected', error: 'toss says no' }], lookup: done('o1', 6900, 'ABORTED') })
     let now = new Date()
+    const repo = new MemorySubscriptionRepository(() => now)
+    const { g } = gateway({ confirm: [{ success: false, outcome: 'rejected', error: 'toss says no' }], lookup: done('o1', 6900, 'ABORTED') })
     const svc = new SubscriptionService(repo, g, { ...opts, now: () => now })
     await assert.rejects(svc.confirmPayment('u1', 'pk1', 'o1', 'pro'),
       (e: unknown) => e instanceof ServiceError && e.status === 400 && e.body.error === 'toss says no')
     assert.equal(repo.subscriptions.length, 0)
     assert.equal(repo.payments[0].status, 'pending', 'request path never deletes pending on a rejection (M3)')
-    now = new Date(Date.now() + 5 * 60_000)
+    now = new Date(now.getTime() + 5 * 60_000)
     assert.equal((await svc.reconcilePendingPayments()).discarded, 1)
     assert.equal(repo.payments.length, 0)
   })
@@ -263,7 +263,7 @@ describe('after approval: DB failure handling (M1)', () => {
     assert.equal(gw.calls.cancel.length, 0)
     assert.equal(repo.payments[0].status, 'pending')
 
-    now = new Date(Date.now() + 5 * 60_000)
+    now = new Date(now.getTime() + 5 * 60_000)
     const r = await svc.reconcilePendingPayments()
     assert.deepEqual(r, { recorded: 1, discarded: 0, unresolved: 0, manualReview: 0 })
     assert.equal((await svc.getUserSubscription('u1')).planType, 'pro')
@@ -456,7 +456,7 @@ describe('SubscriptionService.cancelPayment', () => {
 describe('SubscriptionService queries', () => {
   it('free user view / downgrade / expiry', async () => {
     let now = new Date('2026-01-01T00:00:00Z')
-    const repo = new MemorySubscriptionRepository()
+    const repo = new MemorySubscriptionRepository(() => now)
     const svc = new SubscriptionService(repo, gateway().g, { ...opts, now: () => now })
     assert.deepEqual(await svc.getUserSubscription('u1'), { id: 'u1', planType: 'free', subscription: null })
 
@@ -471,7 +471,7 @@ describe('SubscriptionService queries', () => {
     assert.equal(repo.payments[0].status, 'confirmed', 'downgrade does not refund (existing behavior)')
 
     await svc.confirmPayment('u1', 'pk2', 'o2', 'pro')
-    now = new Date(Date.now() + 31 * 86_400_000)
+    now = new Date(now.getTime() + 31 * 86_400_000)
     assert.equal((await svc.getUserSubscription('u1')).planType, 'free', 'expired by end_date')
     assert.equal(await svc.expireDueSubscriptions(), 1)
   })

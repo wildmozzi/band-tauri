@@ -35,9 +35,12 @@ chacha20poly1305 = "0.10"
 rand = "0.8"
 base64 = "0.22"
 if-addrs = "0.13"
+# 오디오 소켓 IP_TOS(DSCP EF) 설정(P1-3). Cargo.lock에 이미 있는 버전이다.
+socket2 = "0.6"
 # 피어 쌍별 키 합의 (X25519 ECDH + HKDF-SHA256)
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
 
 # Utilities
@@ -50,7 +53,8 @@ regex = "1"
 
 [target.'cfg(windows)'.dependencies]
 # 워커/수신 스레드 MMCSS("Pro Audio") 등록, 엔진 실행 중 타이머 해상도 1ms(timeBeginPeriod)
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading"] }
+# + 오디오 소켓 DSCP 마킹(qWAVE, P1-3)
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading", "Win32_NetworkManagement_QoS", "Win32_Networking_WinSock", "Win32_System_IO"] }
 # 자체 WASAPI 백엔드(독점 이벤트 모드, IAudioClient3 저지연 공유 모드). 0.62는 Tauri가 이미 쓰는 버전이다.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
