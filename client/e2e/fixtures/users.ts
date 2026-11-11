@@ -5,6 +5,9 @@ export interface FixtureUser {
   password: string
   nickname: string
   name: string
+  /** Auth user_metadata에 들어가는 프로필 값 (프로필 화면 초기값 검사용) */
+  bio?: string
+  instagram?: string
 }
 
 export const ALICE: FixtureUser = {
@@ -13,6 +16,8 @@ export const ALICE: FixtureUser = {
   password: 'alice-password-1',
   nickname: '앨리스기타',
   name: '앨리스',
+  bio: '주말마다 합주하는 기타리스트',
+  instagram: 'alice_e2e_guitar',
 }
 
 export const BOB: FixtureUser = {

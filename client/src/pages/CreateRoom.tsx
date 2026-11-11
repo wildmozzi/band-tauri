@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { useAuth } from '../contexts/useAuth'
+import { useNavigate } from 'react-router-dom'
+import { useRequireAuth } from '../features/auth/useRequireAuth'
 import { MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from './rooms/roomModel'
 import { createRoom } from '../services/roomApi'
 import { validateRoomPasswordInput, ROOM_PASSWORD_MAX } from '../contexts/room/roomAccess'
@@ -34,7 +34,7 @@ interface InstrumentSlot {
 }
 
 export function CreateRoom() {
-  const { user, loading: authLoading } = useAuth()
+  const { gate } = useRequireAuth()
   const navigate = useNavigate()
 
   const [title, setTitle] = useState('')
@@ -57,11 +57,8 @@ export function CreateRoom() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // 로그인 안 되어 있으면 로그인 페이지로 (렌더 중 navigate() 대신 <Navigate>, 세션 복원 중엔 기다림 — P3-12 ⑥)
-  if (!user) {
-    if (authLoading) return null
-    return <Navigate to="/auth" replace state={{ from: '/rooms/create' }} />
-  }
+  // 로그인 안 되어 있으면 로그인 페이지로 (세션 복원 중엔 기다림 — P3-12 ⑥, P3-10f 공통 가드)
+  if (gate) return gate
 
   const handleTagToggle = (tag: string) => {
     setSelectedTags(prev =>

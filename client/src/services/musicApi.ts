@@ -1,18 +1,10 @@
 /**
  * 음악 파일 업로드 및 관리 API 서비스
  */
+import { getApiUrl } from '../lib/apiUrl'
 import { authHeaders } from '../lib/authHeaders'
 
-// 자동 IP 감지: 'auto'면 현재 접속한 호스트 사용
-function getApiUrl(): string {
-  const envUrl = import.meta.env.VITE_API_URL
-  if (!envUrl || envUrl === 'auto') {
-    const protocol = window.location.protocol
-    const host = window.location.hostname
-    return `${protocol}//${host}:8080`
-  }
-  return envUrl
-}
+// VITE_API_URL 또는 (auto) 현재 호스트:8080 — lib/apiUrl
 const API_BASE_URL = getApiUrl()
 const DEMUCS_API_URL = import.meta.env.VITE_DEMUCS_API_URL || 'http://localhost:8000'
 

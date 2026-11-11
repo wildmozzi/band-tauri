@@ -78,6 +78,9 @@ pub struct MixControls {
     pub monitor_enabled: AtomicBool,
     pub monitor_gain: AtomicF32,
     pub master_gain: AtomicF32,
+    /// 메트로놈 클릭 볼륨·뮤트(P2-3, 로컬 전용).
+    pub click_gain: AtomicF32,
+    pub click_muted: AtomicBool,
 }
 
 impl Default for MixControls {
@@ -87,6 +90,8 @@ impl Default for MixControls {
             monitor_enabled: AtomicBool::new(false),
             monitor_gain: AtomicF32::new(1.0),
             master_gain: AtomicF32::new(1.0),
+            click_gain: AtomicF32::new(super::metronome::DEFAULT_CLICK_GAIN),
+            click_muted: AtomicBool::new(false),
         }
     }
 }

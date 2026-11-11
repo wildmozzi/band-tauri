@@ -11,6 +11,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../../lib/supabaseClient'
+import { getSignalingUrl } from '../../lib/apiUrl'
 
 export type SignalStatus = 'idle' | 'connecting' | 'connected' | 'error'
 export type SignalPayload = Record<string, unknown> & { type: string }
@@ -19,15 +20,8 @@ const AUTH_FALLBACK_MS = 2000
 const MAX_RECONNECT = 3
 const RECONNECT_DELAY_MS = 2000
 
-/** 'auto'면 현재 접속한 호스트의 8080 포트 */
-export function getSignalingUrl(): string {
-  const envUrl = import.meta.env.VITE_SIGNALING_URL
-  if (!envUrl || envUrl === 'auto') {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${protocol}//${window.location.hostname}:8080`
-  }
-  return envUrl
-}
+/** 'auto'면 현재 접속한 호스트의 8080 포트 (lib/apiUrl과 같은 규칙) */
+export { getSignalingUrl }
 
 async function getAccessToken(): Promise<string | null> {
   if (!supabase) return null

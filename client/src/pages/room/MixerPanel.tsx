@@ -2,6 +2,7 @@ import type { PeerInstrument } from '../../contexts/RoomContext'
 import { useRoom } from '../../contexts/RoomContext'
 import { BroadcastMixerChannel, MyMixerChannel, PeerMixerChannel } from './MixerChannels'
 import { DEFAULT_MIX, formatDuration, formatPan, levelClass } from './roomDetailModel'
+import { DiagnosticsExport } from '../../components/DiagnosticsExport'
 
 /** 마스터 볼륨·음소거·패닝(관람만)·레벨 */
 function MixerMaster({ isPerformer }: { isPerformer: boolean }) {
@@ -127,6 +128,8 @@ export function MixerPanel({
       <div className="panel-header">
         <h2>🎚️ 개인 믹서</h2>
         <span className="mixer-hint">내가 듣는 소리 조절</span>
+        {/* 끊김·지연 진단 자료(P2-5): 데스크톱 앱에서만 */}
+        <DiagnosticsExport compact />
       </div>
 
       <div className="mixer-content">

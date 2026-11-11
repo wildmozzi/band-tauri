@@ -1,5 +1,5 @@
 import { InstrumentBadges, TagOverflow } from './RoomTags'
-import { formatDate, myRoomStatusLabel, type MyRoom } from './roomModel'
+import { effectiveRoomCapacity, formatDate, myRoomStatusLabel, type MyRoom } from './roomModel'
 import { Modal } from '../../components/ui/Modal'
 
 interface MyRoomsModalProps {
@@ -54,7 +54,7 @@ export function MyRoomsModal({
                 <div className="my-room-meta">
                   <span className="my-room-genre">{room.genre || '기타'}</span>
                   <span className="my-room-participants">
-                    {room.current_participants}/{room.max_participants}명
+                    {room.current_participants}/{effectiveRoomCapacity(room.max_participants)}명
                   </span>
                   <span className="my-room-date">{formatDate(room.created_at)}</span>
                 </div>
