@@ -220,6 +220,11 @@ impl Net {
 
     /// 피어 추가. 같은 peerId는 교체(재접속, gain/pan/mute 유지). 다른 peerId와 ssrc가 겹쳐도
     /// 기존 피어를 지우지 않는다 — 수신 시 쌍별 키로 구분한다(리뷰 M7).
+    ///
+    /// 다른 peerId가 같은 키(공개키·ssrc)를 써도 거부하지 않는다(P1-1b). 거부하면 남의 descriptor를 복사해
+    /// 먼저 보낸 사람이 진짜 주인의 추가를 막을 수 있다(선점에 의한 가용성 방해). 대신 같은 키의 살아 있는
+    /// 항목들은 **송신 카운터 하나를 같이 쓰고**(nonce 유일성 유지), 수신은 키 주인이 인증된 Hello에 싣는 자기 id로
+    /// 가린다(`open_from_peers`). 개인키가 없는 선점자 항목은 핸드셰이크를 마칠 수 없어 연결되지 않는다.
     pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor) -> Result<(), String> {
         let setup = PeerSetup {
             keys: &self.shared.keys,
@@ -227,14 +232,10 @@ impl Net {
             jitter: *self.shared.jitter_settings.lock(),
             allow_loopback: self.shared.allow_loopback,
         };
-        let peer = Arc::new(Peer::new(peer_id.clone(), desc, &setup, Instant::now())?);
+        let mut peer = Peer::new(peer_id.clone(), desc, &setup, Instant::now())?;
         let key = (peer.public_key, peer.ssrc);
         let mut peers = self.shared.peers.write();
         let old_idx = peers.iter().position(|p| p.id == peer_id);
-        // 같은 송신 키를 쓰는 살아 있는 피어 객체가 둘이면 카운터가 둘이 되어 nonce가 겹친다 → 거부.
-        if peers.iter().any(|p| p.id != peer_id && (p.public_key, p.ssrc) == key) {
-            return Err("같은 키(descriptor)를 쓰는 다른 피어가 이미 있습니다".into());
-        }
         if peers.len() - usize::from(old_idx.is_some()) >= MAX_PEERS {
             return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
         }
@@ -251,22 +252,30 @@ impl Net {
                 peer.conn.lock().inherit_replay_window(&old_conn);
             }
         }
-        // 이 키로 전에 보낸 적이 있으면(교체, 제거 후 재추가) 그 최고 수위 + 여유에서 이어 간다(PR #13 H1).
-        if let Some(&hw) = self.shared.tx_seq_retired.lock().get(&key) {
+        // 송신 카운터(PR #13 H1, P1-1b): 같은 키의 살아 있는 다른 항목이 있으면 그 카운터를 같이 쓴다(카운터가
+        // 둘이 되면 nonce가 겹친다). 없고 이 키로 전에 보낸 적이 있으면(교체, 제거 후 재추가) 그 최고 수위 + 여유에서 이어 간다.
+        if let Some(live) = peers.iter().find(|p| (p.public_key, p.ssrc) == key) {
+            peer.tx_seq = live.tx_seq.clone();
+        } else if let Some(&hw) = self.shared.tx_seq_retired.lock().get(&key) {
             peer.tx_seq.store(hw.wrapping_add(AUDIO_SEQ_HANDOVER_GAP), Ordering::Relaxed);
         }
-        peers.push(peer);
+        peers.push(Arc::new(peer));
         Ok(())
     }
 
     pub fn remove_peer(&self, peer_id: &str) -> bool {
         let removed = {
             let mut peers = self.shared.peers.write();
-            peers.iter().position(|p| p.id == peer_id).map(|i| peers.remove(i))
+            let removed = peers.iter().position(|p| p.id == peer_id).map(|i| peers.remove(i));
+            // 수위 기록은 목록에서 빼는 것과 같은 write 락 안에서 한다(P1-1b, PR #13 리뷰 Low). 락을 놓은 뒤 기록하면
+            // 그 사이 같은 키의 add_peer가 옛 수위(또는 기록 없음)에서 시작해 이 객체가 이미 쓴 seq를 다시 쓸 수 있다.
+            if let Some(p) = &removed {
+                self.shared.retire_tx_seq(p);
+            }
+            removed
         };
         match removed {
             Some(p) => {
-                self.shared.retire_tx_seq(&p);
                 self.shared.send_bye(&p);
                 true
             }
@@ -604,14 +613,23 @@ impl NetShared {
     }
 
     /// 헤더의 ssrc를 쓰는 피어들 중 복호화에 성공한 피어를 찾는다(실패 시 버퍼 불변).
+    ///
+    /// 같은 키(공개키·ssrc)를 쓰는 항목이 여럿이면(다른 피어가 남의 descriptor를 복사해 선점, P1-1b) 복호화로는
+    /// 가릴 수 없다. 키 주인만 만들 수 있는 인증된 Hello/HelloAck에는 보낸 쪽 id가 실리므로 그 id의 항목으로,
+    /// 그 밖의 패킷은 핸드셰이크로 경로가 선 항목으로 보낸다. 그런 항목이 없으면 처음 찾은 항목(기존 동작).
     fn open_from_peers(&self, h: &Header, buf: &mut [u8]) -> Option<(Arc<Peer>, std::ops::Range<usize>)> {
         let peers = self.peers.read();
-        for p in peers.iter().filter(|p| p.ssrc == h.ssrc) {
-            if let Some(r) = p.rx.open(h, buf) {
-                return Some((p.clone(), r));
-            }
+        let (first, r) = peers.iter().filter(|p| p.ssrc == h.ssrc).find_map(|p| p.rx.open(h, buf).map(|r| (p, r)))?;
+        let same_key = |q: &&Arc<Peer>| q.ssrc == first.ssrc && q.public_key == first.public_key;
+        if peers.iter().filter(same_key).nth(1).is_none() {
+            return Some((first.clone(), r));
         }
-        None
+        let plain = &buf[r.clone()];
+        let owner = match h.ptype {
+            PacketType::Hello | PacketType::HelloAck => peers.iter().filter(same_key).find(|q| q.id.as_bytes() == plain),
+            _ => peers.iter().filter(same_key).find(|q| q.conn.lock().path.is_some()),
+        };
+        Some((owner.unwrap_or(first).clone(), r))
     }
 
     /// 릴레이 주소에서 온 RelayBindAck 처리. 쿠키 요청이면 즉시 다시 Bind.

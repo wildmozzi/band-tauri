@@ -181,41 +181,47 @@ mod tests {
         assert_eq!(parse_response(&r[..25], &txn), None);
     }
 
+    /// `txn`에 대한 XOR-MAPPED-ADDRESS 응답(IPv4).
+    fn response(txn: &[u8], ip: [u8; 4], port: u16) -> Vec<u8> {
+        let mut r = vec![0x01, 0x01, 0x00, 0x0c];
+        r.extend_from_slice(&MAGIC_COOKIE);
+        r.extend_from_slice(txn);
+        r.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0x00, 0x01]);
+        r.extend_from_slice(&(port ^ 0x2112).to_be_bytes());
+        r.extend_from_slice(&[ip[0] ^ 0x21, ip[1] ^ 0x12, ip[2] ^ 0xa4, ip[3] ^ 0x42]);
+        r
+    }
+
+    /// 결정적(P3-0a): 서버 둘에 동시에 묻고, 다른 주소(forger)에서 먼저 온 위조 응답은 출발지 불일치로 버린다.
+    /// 두 서버가 모두 답하므로 query_many는 마감 전에 돌아오고, 판정에 벽시계가 없다(timeout은 행 감지 상한).
+    /// "응답 없는 서버가 있어도 직렬로 기다리지 않는다"는 벽시계 성질이라 실시간 통합 테스트
+    /// `tests/stun.rs::query_many_does_not_wait_serially`가 본다.
     #[test]
     fn query_many_parallel_with_source_check() {
-        // 로컬 가짜 STUN 서버 2개(하나는 응답 없음) + 다른 주소에서 보낸 위조 응답
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         let srv = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let dead = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let srv2 = UdpSocket::bind("127.0.0.1:0").unwrap();
         let forger = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let srv_addr = srv.local_addr().unwrap();
-        let client_addr = client.local_addr().unwrap();
+        let servers = vec![srv.local_addr().unwrap().to_string(), srv2.local_addr().unwrap().to_string()];
         let t = std::thread::spawn(move || {
             let mut b = [0u8; 64];
+            // 두 요청이 모두 나간 뒤에 답한다(병렬 송신 확인 — 직렬이라면 첫 응답 전에는 두 번째 요청이 오지 않는다).
             let (n, from) = srv.recv_from(&mut b).unwrap();
             assert_eq!(n, 20);
-            let mut txn = [0u8; 12];
-            txn.copy_from_slice(&b[8..20]);
-            let mut r = vec![0x01, 0x01, 0x00, 0x0c];
-            r.extend_from_slice(&MAGIC_COOKIE);
-            r.extend_from_slice(&txn);
-            let port = 40000u16 ^ 0x2112;
-            r.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0x00, 0x01]);
-            r.extend_from_slice(&port.to_be_bytes());
-            r.extend_from_slice(&[203u8 ^ 0x21, 0x12, 113 ^ 0xa4, 5 ^ 0x42]);
-            // 같은 내용을 다른 주소(forger)에서 먼저 보낸다 → 출발지 불일치로 무시되어야 함
-            forger.send_to(&r, from).unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-            srv.send_to(&r, from).unwrap();
+            let txn: [u8; 12] = b[8..20].try_into().unwrap();
+            let (n2, from2) = srv2.recv_from(&mut b).unwrap();
+            assert_eq!((n2, from2), (20, from));
+            let txn2: [u8; 12] = b[8..20].try_into().unwrap();
+            // 같은 트랜잭션의 다른 값을 다른 주소(forger)에서 먼저 보낸다 → 출발지 불일치로 무시되어야 함
+            forger.send_to(&response(&txn, [6, 6, 6, 6], 666), from).unwrap();
+            srv.send_to(&response(&txn, [203, 0, 113, 5], 40000), from).unwrap();
+            srv2.send_to(&response(&txn2, [203, 0, 113, 6], 40001), from).unwrap();
         });
-        let servers = vec![srv_addr.to_string(), dead.local_addr().unwrap().to_string()];
-        let t0 = Instant::now();
-        let got = query_many(&client, &servers, Duration::from_millis(600), None);
+        let got = query_many(&client, &servers, Duration::from_secs(20), None);
         t.join().unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].1, "203.0.113.5:40000".parse().unwrap());
-        assert!(t0.elapsed() < Duration::from_millis(900), "직렬 대기 없음");
-        let _ = client_addr;
+        let mut addrs: Vec<SocketAddr> = got.iter().map(|g| g.1).collect();
+        addrs.sort();
+        assert_eq!(addrs, vec!["203.0.113.5:40000".parse().unwrap(), "203.0.113.6:40001".parse().unwrap()], "{got:?}");
     }
 
     #[test]

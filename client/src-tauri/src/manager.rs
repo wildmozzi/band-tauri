@@ -208,6 +208,11 @@ impl EngineManager {
         self.slot.lock().starting
     }
 
+    /// start/stop이 불릴 때마다 오르는 세대. 테스트가 "다음 start가 이전 시작을 취소했다"를 벽시계 없이 기다리는 데 쓴다.
+    pub fn start_generation(&self) -> u64 {
+        self.slot.lock().generation
+    }
+
     pub fn with_engine<T>(&self, f: impl FnOnce(&mut Engine) -> Result<T, String>) -> Result<T, String> {
         let mut s = self.slot.lock();
         if s.starting && s.engine.is_none() {
