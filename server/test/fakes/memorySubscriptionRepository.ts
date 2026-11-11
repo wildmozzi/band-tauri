@@ -17,6 +17,12 @@ export class MemorySubscriptionRepository implements SubscriptionRepository {
   subscriptions: SubscriptionRecord[] = []
   payments: PaymentRecord[] = []
 
+  /**
+   * DB now()에 해당하는 시계. 서비스에 가상 시계를 주입하는 테스트는 같은 시계를 넘겨야 한다 —
+   * 실제 시각으로 찍으면 created_at과 가상 시계 사이에 실행 지연(수 ms)이 끼어 경계값 비교가 흔들린다.
+   */
+  constructor(private readonly now: () => Date = () => new Date()) {}
+
   async findPaymentsByKeyOrOrder(paymentKey: string, orderId: string) {
     return this.payments.filter(p => p.paymentKey === paymentKey || p.orderId === orderId)
   }
@@ -26,7 +32,7 @@ export class MemorySubscriptionRepository implements SubscriptionRepository {
     return p ? { ...p } : null
   }
 
-  async createPendingPayment(intent: PaymentIntent, createdAt = new Date()) {
+  async createPendingPayment(intent: PaymentIntent, createdAt = this.now()) {
     if (this.payments.some(p => p.paymentKey === intent.paymentKey || p.orderId === intent.orderId)) {
       throw new ConflictError('duplicate key', '23505')
     }
@@ -80,14 +86,14 @@ export class MemorySubscriptionRepository implements SubscriptionRepository {
       amount: input.amount,
       status: 'confirmed',
       subscriptionId: sub.id,
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: this.now(),
+      updatedAt: this.now(),
     })
     return sub
   }
 
   private newSubscription(input: RecordPaymentInput): SubscriptionRecord {
-    const now = new Date()
+    const now = this.now()
     const sub: SubscriptionRecord = {
       id: randomUUID(),
       userId: input.userId,
