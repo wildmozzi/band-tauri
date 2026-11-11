@@ -462,6 +462,10 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 다른 연주자: `metronome { from, state }` → `engine_set_metronome({ ...state, refPeerId: from })`. 엔진이 뜨기 전에 받았으면 시작 뒤 적용한다.
   - 방장이 사라지면(`native-leave`·퇴장·연주 중단) 끈다. `metronome-host-only`/`metronome-invalid` 에러를 받으면 내 클릭도 끄고 안내한다(방송은 유지).
   - 클릭 볼륨·뮤트는 각자 `engine_set_metronome_gain`이다. 클릭은 방송·녹음(믹스 탭)에 들어가지 않는다.
+- 합주 녹음(P2-4, `client/src/native/recordLogic.ts`, UI `pages/room/NativeRecordingControl.tsx`, 믹서 패널 아래): 앱 연주자는 엔진 멀티트랙 녹음을 쓴다(관람자는 기존 방송 믹스 MediaRecorder).
+  - 시작: `engine_record_start({ name: "YYYY-MM-DD HH.MM.SS 방 제목"(지역 시각), localName: "나", trackNames: { oderId: 닉네임 }, includeMix })`. 엔진 peerId가 `oderId`라 그대로 트랙 이름 키가 된다. 엔진이 꺼져 있으면 버튼을 막는다.
+  - 상태는 `engine_stats.recording`(시간·용량·트랙 수, `droppedFrames`/`error` 경고). 정지는 `engine_record_stop` 요약을 보여 준다. 내가 정지하지 않았는데 `recording`이 사라지면(엔진 정지) 엔진이 이미 마무리했다고 알린다.
+  - 저장 폴더는 `engine_record_folder`로 보여 주고 `engine_record_pick_folder`로 바꾼다(녹음 중에는 바꿀 수 없음).
 - 관람자 브릿지: 방의 **방송 담당 연주자** = 호스트가 앱 연주자면 호스트, 아니면 연주자 중 `oderId` 사전순 최소. 이 앱만 `engine_subscribe_mix` → AudioWorklet → `MediaStreamAudioDestinationNode` → 웹 관람자와의 WebRTC(송신 전용)로 트랙 전송.
 - 웹(비Tauri)에서는 연주 참여 UI를 숨기고 "데스크톱 앱 다운로드" 안내.
 - Tauri 관련 코드는 `client/src/native/` 아래로 분리: `engineApi.ts`(커맨드 래퍼, 위 타입), `useNativeSession.ts`(시그널링↔엔진), `mixBridge.ts`(관람자 브릿지). `RoomContext.tsx`는 이 훅을 호출만 한다.

@@ -1885,6 +1885,59 @@
   background: var(--violet-500-a25);
 }
 
+.recordings-list-btn:disabled,
+.recording-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 엔진 멀티트랙 녹음(P2-4) */
+.recording-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.recording-folder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  min-width: 0;
+}
+
+.recording-folder-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.recording-warning {
+  margin: 8px 0 0;
+  font-size: 0.8rem;
+  color: var(--warning);
+}
+
+.recording-notice {
+  margin: 8px 0 0;
+  font-size: 0.8rem;
+  color: var(--color-text);
+  word-break: break-all;
+}
+
+.recording-hint {
+  margin: 6px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
 /* Recordings Modal */
 .recordings-modal {
   position: fixed;
