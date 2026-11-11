@@ -12,6 +12,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
@@ -404,6 +405,8 @@ impl InputRt {
         if device_channels == 0 {
             return;
         }
+        // 실행시간 측정(P1-10): QPC 읽기, 사용자 모드·비블로킹(`cpuprof` 모듈 문서).
+        let t0 = Instant::now();
         let frames = data.len() / device_channels;
         self.counters.in_cb_frames.store(frames as u32, Ordering::Relaxed);
         let before = self.counters.in_captured_frames.fetch_add(frames as u64, Ordering::Relaxed);
@@ -462,6 +465,7 @@ impl InputRt {
         }
         // 레벨 = 0..1 선형 RMS (입력 뮤트와 무관하게 계속 갱신)
         self.counters.input_level.store(rms_of(sum_sq, count));
+        self.counters.rt_timing.record_in(t0.elapsed());
     }
 }
 
@@ -538,6 +542,7 @@ impl OutputRt {
         if device_channels == 0 {
             return;
         }
+        let t0 = Instant::now();
         let frames = data.len() / device_channels;
         // 워커가 "콜백 도중/직후"에 읽은 링 점유량을 걸러내도록 시작·끝을 알린다(SeqCst: 링 인덱스 갱신과 순서 고정).
         self.counters.out_cb_begin.fetch_add(1, Ordering::SeqCst);
@@ -636,6 +641,7 @@ impl OutputRt {
         self.counters.out_played_frames.fetch_add(frames as u64, Ordering::Relaxed);
         self.counters.output_level.store(rms_of(sum_sq, frames * 2));
         self.counters.out_cb_end.fetch_add(1, Ordering::SeqCst);
+        self.counters.rt_timing.record_out(t0.elapsed());
     }
 }
 

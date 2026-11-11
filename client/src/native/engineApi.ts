@@ -114,6 +114,26 @@ export interface SendQueueStats {
   packets: number
 }
 
+/**
+ * CPU 통계(P1-10), 직전 2초 창. %는 코어 1개 = 100.
+ * 콜백 실행시간은 출력 콜백(믹스) 1회 기준이고, 사용률은 입력+출력 콜백 실행시간 합 / 창 길이다.
+ */
+export interface CpuStats {
+  /** 워커 스레드 CPU(%). Windows가 아니거나 첫 창 전이면 null */
+  workerPct: number | null
+  callbackLoadPct: number
+  callbackP50Us: number
+  callbackP99Us: number
+  callbackMaxUs: number
+  /** 출력 콜백 p99 / 장치 출력 주기(%). 100에 가까우면 마감을 놓친다 */
+  callbackP99PeriodPct: number
+  inputCallbackMaxUs: number
+  /** 창 안 출력 콜백 수(0이면 콜백 값 무시) */
+  callbacks: number
+  /** 창 길이(ms). 0이면 아직 첫 창 전 */
+  windowMs: number
+}
+
 /** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token/expiresIn */
 export interface RelayConfig {
   /** 릴레이 host:port */
@@ -279,6 +299,8 @@ export interface EngineStats {
   sendQueue?: SendQueueStats | null
   /** 공유 메트로놈 상태(P2-3). 옛 엔진이면 없음 */
   metronome?: MetronomeStats
+  /** 워커 CPU·RT 콜백 실행시간(P1-10). 옛 엔진이면 없음 */
+  cpu?: CpuStats
 }
 
 /**

@@ -5,6 +5,8 @@ import {
   INSTRUMENT_INFO,
   PEER_STATE_INFO,
   QUALITY_ICONS,
+  cpuTitle,
+  formatCpu,
   formatMs,
   formatPan,
   instrumentInfo,
@@ -105,6 +107,9 @@ export function MyMixerChannel({
           {engineStats ? `${engineStats.sampleRate / 1000}kHz · 버퍼 ${engineStats.deviceBuffer}` : '엔진 상태 확인 중'}
         </span>
         <span className="audio-info">처리 지연 {formatMs(engineStats?.estLatencyMs, 1)} · xrun {engineStats?.xruns ?? 0}</span>
+        {engineStats?.cpu && formatCpu(engineStats.cpu) && (
+          <span className="audio-info" title={cpuTitle(engineStats.cpu)}>{formatCpu(engineStats.cpu)}</span>
+        )}
       </div>
       <div className="channel-level">
         <div className="level-meter">

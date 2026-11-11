@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { PeerStats } from '../../native/engineApi'
 import {
+  cpuTitle,
+  formatCpu,
   formatDuration,
   formatMs,
   formatPan,
@@ -27,6 +29,26 @@ const stats = (over: Partial<PeerStats> = {}): PeerStats => ({
 } as PeerStats)
 
 describe('roomDetailModel', () => {
+  it('formatCpu/cpuTitle: 첫 창 전·옛 엔진은 숨기고, 워커·콜백 사용률·p99를 보인다', () => {
+    const cpu = {
+      workerPct: 3.14,
+      callbackLoadPct: 0.81,
+      callbackP50Us: 20.2,
+      callbackP99Us: 41.6,
+      callbackMaxUs: 120,
+      callbackP99PeriodPct: 1.6,
+      inputCallbackMaxUs: 9,
+      callbacks: 750,
+      windowMs: 2000,
+    }
+    expect(formatCpu(undefined)).toBeNull()
+    expect(formatCpu({ ...cpu, windowMs: 0 })).toBeNull()
+    expect(formatCpu(cpu)).toBe('CPU 워커 3.1% · 콜백 0.8% (p99 42µs)')
+    expect(formatCpu({ ...cpu, workerPct: null, callbacks: 0 })).toBe('CPU 워커 -- · 콜백 0.8%')
+    expect(cpuTitle(cpu)).toContain('20/42/120µs')
+    expect(cpuTitle({ ...cpu, workerPct: null })).toContain('측정 불가')
+  })
+
   it('formatMs: 유한값만 ms로, 나머지는 --', () => {
     expect(formatMs(12.44)).toBe('12ms')
     expect(formatMs(1.26, 1)).toBe('1.3ms')

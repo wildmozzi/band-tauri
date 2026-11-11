@@ -1,0 +1,150 @@
+//! RT 콜백 경로 무할당 보증(P1-10, CLAUDE.md "rt.rs: 할당 금지").
+//!
+//! 이 테스트 바이너리 전용 카운팅 글로벌 할당자로, 지금 스레드가 "콜백 안"이라고 표시한 동안의 할당·재할당만 센다
+//! (다른 스레드나 준비 단계 할당은 세지 않는다). 입력·출력 콜백을 모든 경로가 돌게(소스 8개 활성, 언더런·DRAIN,
+//! 측정 녹음·자극·출력 대체, 메트로놈 클릭, 믹스 탭 가득 참, 실행시간 기록) 여러 번 부르고 할당 0을 단언한다.
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use band_lib::engine::metronome::ClickShared;
+use band_lib::engine::mixer::MixControls;
+use band_lib::engine::rt::{self, InputRt, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN};
+use band_lib::engine::stats::AudioCounters;
+use ringbuf::traits::{Consumer, Producer};
+
+struct Counting;
+
+static ALLOCS: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    // const 초기화·Drop 없는 Cell이라 접근해도 할당하지 않는다(할당자 안에서 써도 재귀 없음).
+    static IN_RT: Cell<bool> = const { Cell::new(false) };
+}
+
+fn note() {
+    if IN_RT.with(|f| f.get()) {
+        ALLOCS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        note();
+        unsafe { System.alloc(l) }
+    }
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        note();
+        unsafe { System.alloc_zeroed(l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        note();
+        unsafe { System.realloc(p, l, n) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        note();
+        unsafe { System.dealloc(p, l) }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
+/// `f`를 "콜백 안"으로 표시하고 돌린다. 그동안 이 스레드의 할당 수를 돌려준다.
+fn rt_allocs(f: impl FnOnce()) -> u64 {
+    let before = ALLOCS.load(Ordering::Relaxed);
+    IN_RT.with(|x| x.set(true));
+    f();
+    IN_RT.with(|x| x.set(false));
+    ALLOCS.load(Ordering::Relaxed) - before
+}
+
+#[test]
+fn counting_allocator_detects_allocation() {
+    // 자기 검증: 표시 구간 안의 할당은 실제로 잡힌다
+    let n = rt_allocs(|| {
+        let v = std::hint::black_box(vec![1u8; 64]);
+        drop(v);
+    });
+    assert!(n >= 1, "카운터가 할당을 못 봄");
+}
+
+#[test]
+fn rt_callbacks_do_not_allocate() {
+    let counters = Arc::new(AudioCounters::default());
+    let controls = Arc::new(MixControls::default());
+    // 입력: 스테레오 라우팅(장치 4채널 중 1,2), 측정 녹음 켬
+    let (in_prod, mut in_cons) = rt::input_ring();
+    let mut input = InputRt::new(in_prod, counters.clone(), &[1, 2], 2);
+    let (msh, m_in, m_out, mut ends) = rt::measure_path();
+    input.attach_measure(m_in);
+    // 출력: 소스 8개 + 측정 자극 + 메트로놈 클릭
+    let (mut output, mut feed) = rt::output_path(counters.clone(), controls.clone());
+    output.attach_measure(m_out);
+    let click = Arc::new(ClickShared::default());
+    output.attach_click(band_lib::engine::metronome::ClickRt::new(click.clone()));
+    for (i, sh) in feed.bank.slots.iter().enumerate() {
+        sh.set_gains((0.5, 0.4), (0.3, 0.2));
+        sh.playing.store(i != LOCAL_SOURCE, Ordering::Relaxed);
+        sh.state.store(SLOT_ACTIVE, Ordering::Release);
+    }
+
+    let in_buf: Vec<f32> = (0..4 * 480).map(|i| ((i as f32) * 0.01).sin() * 0.3).collect();
+    let in_i16: Vec<i16> = vec![1000; 4 * 480];
+    let mut out_f32 = vec![0f32; 2 * 600]; // 600프레임 > 내부 청크(256)
+    let mut out_i16 = vec![0i16; 4 * 128];
+    let src = vec![0.25f32; 2 * 600];
+    let stim = vec![0.5f32; 2000];
+
+    let mut total = 0;
+    for round in 0..40u32 {
+        // 준비(콜백 밖, 할당 허용): 소스 링 일부만 채워 언더런 경로도 탄다
+        for (s, p) in feed.prods.iter_mut().enumerate() {
+            let n = if (round + s as u32).is_multiple_of(3) { 100 } else { src.len() };
+            p.push_slice(&src[..n]);
+        }
+        match round {
+            5 => {
+                msh.cap_on.store(true, Ordering::Release);
+                msh.cap_req.fetch_add(1, Ordering::Release);
+            }
+            10 => {
+                ends.stim.push_slice(&stim);
+                msh.out_override.store(true, Ordering::Relaxed);
+                msh.stim_req.fetch_add(1, Ordering::Release);
+            }
+            20 => {
+                msh.out_override.store(false, Ordering::Relaxed);
+                msh.cap_on.store(false, Ordering::Release);
+                msh.cap_req.fetch_add(1, Ordering::Release);
+            }
+            30 => feed.bank.slots[MAX_SOURCES - 1].state.store(SLOT_DRAIN, Ordering::Release),
+            _ => {}
+        }
+        // 다음 콜백 범위 안의 클릭(강박)
+        let played = counters.out_played_frames.load(Ordering::Relaxed);
+        click.next.store(((played + 10) << 1) | (round as u64 & 1), Ordering::Release);
+
+        total += rt_allocs(|| {
+            input.process(&in_buf, 4);
+            input.process(&in_i16, 4);
+            output.process(&mut out_f32, 2);
+            output.process(&mut out_i16, 4);
+        });
+
+        // 소비자(콜백 밖): 입력 링·녹음 링은 비워 두고, 믹스 탭은 일부러 비우지 않아 가득 찬 경로도 탄다
+        let mut sink = vec![0f32; 8192];
+        while in_cons.pop_slice(&mut sink) > 0 {}
+        while ends.capture.pop_slice(&mut sink) > 0 {}
+    }
+    assert_eq!(total, 0, "RT 콜백 경로에서 할당 {total}회");
+    // 경로가 실제로 돌았는지(공회전 방지)
+    assert!(counters.xruns.load(Ordering::Relaxed) > 0, "언더런 경로");
+    assert!(click.clicks.load(Ordering::Relaxed) > 0, "클릭 경로");
+    assert_eq!(msh.stim_ack.load(Ordering::Relaxed), 1, "자극 경로");
+    assert!(msh.cap_ack.load(Ordering::Relaxed) >= 2, "녹음 경로");
+    let w = counters.rt_timing.take(std::time::Duration::from_secs(1));
+    assert_eq!(w.callbacks, 80, "실행시간 기록 경로: {w:?}");
+}
