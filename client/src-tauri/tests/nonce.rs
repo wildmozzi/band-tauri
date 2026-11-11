@@ -140,9 +140,9 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
     assert_eq!(n, 80, "LAN 40 + 릴레이 경로 40을 모두 검사해야 한다");
     total += n;
 
-    // 4) 같은 키를 다른 id로 동시에 추가하면 카운터가 둘이 되므로 거부
-    let err = net.add_peer("bob-2".into(), &fake.desc()).unwrap_err();
-    assert!(err.contains("같은 키"), "{err}");
+    // 4) 같은 키를 다른 id로 추가해도 거부하지 않고 송신 카운터를 같이 쓴다(P1-1b, 자세한 검사는 tests/peer_key.rs).
+    net.add_peer("bob-2".into(), &fake.desc()).unwrap();
+    assert!(net.remove_peer("bob-2"));
 
     // 5) 에코 반사: 상대가 요청 Ping과 Audio를 보내면 수신 스레드가 같은 카운터로 되돌린다
     force_path(&net, fake.addr(), PathKind::Lan);
