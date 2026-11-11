@@ -195,19 +195,24 @@ fn median(mut v: Vec<f32>) -> f32 {
 /// xrun·은닉이 생긴 창 수: 켬 쪽이 끔 쪽보다 이만큼까지 많아도 통과(러너 한두 번의 끊김).
 const BAD_WINDOW_SLACK: usize = 2;
 
-/// 녹음 켬/끔 판정 (P3-0d). 같은 링크에서 끔·켬 창을 ABBA로 교대해 잰 값을 받는다.
+/// 녹음 켬/끔 판정 (P3-0d). 같은 링크에서 끔·켬 창을 ABBA로 교대해 잰 값을 받는다. `off[i]`와 `on[i]`는 같은 쌍
+/// (붙어 있는 두 창)이다.
 ///
 /// 호스티드 windows 러너에서는 링크의 버퍼 지연이 수 초에 걸쳐 1~2ms 떠다니고 xrun이 한 창에 몰려(3개) 나온다
 /// (#49 실패 로그). 끔 8초 → 켬 8초를 한 번 비교하면 그 흔들림이 한쪽에만 떨어질 때 실패했다. 그래서
-/// - 버퍼 지연: 켬 창 중앙값 − 끔 창 중앙값. 허용치는 반 프레임(`frame_ms/2`, 최소 1ms) — 녹음이 RT 경로를
-///   방해해 지터 버퍼가 한 프레임이라도 늘면(켬 창마다 +`frame_ms`) 잡힌다.
+/// - 버퍼 지연: 쌍마다 켬 − 끔 차이를 내고 그 중앙값을 본다. 허용치는 반 프레임(`frame_ms/2`, 최소 1ms) — 녹음이 RT
+///   경로를 방해해 지터 버퍼가 한 프레임이라도 늘면(켬 창마다 +`frame_ms`) 모든 쌍 차이가 +`frame_ms`라 잡힌다.
+///   양쪽 중앙값끼리 빼던 이전 식은 러너 끊김(xrun 몰림) 뒤 버퍼가 몇 초에 걸쳐 내려오는 동안(창 4~5개) 켬 창이 하나
+///   더 걸리면 실패했다(#64 CI: 끔 [5.7 8.3 8.3 5.8 5.8 5.9] / 켬 [9.0 8.5 8.3 6.2 5.7 5.8] → +1.42ms). 쌍 차이는 붙은
+///   두 창이 같은 수준을 함께 겪으므로 그런 느린 이동이 상쇄되고, 끊김이 한 쌍 안에서 갈린 경우는 중앙값이 버린다.
 /// - xrun·은닉: 개수 합이 아니라 "생긴 창 수". 러너 한 번의 몰림은 창 하나만 더럽힌다. 켬 쪽 창 수가 끔 쪽보다
 ///   [`BAD_WINDOW_SLACK`]개 넘게 많으면 실패 — 녹음이 계속 방해하면 켬 창 대부분에서 생기므로 잡힌다.
 fn judge(frame_ms: f32, off: &[Window], on: &[Window]) -> Result<(), String> {
+    assert_eq!(off.len(), on.len(), "ABBA 쌍");
     let tol = (frame_ms / 2.0).max(1.0);
-    let d = median(on.iter().map(|w| w.buf_ms).collect()) - median(off.iter().map(|w| w.buf_ms).collect());
+    let d = median(off.iter().zip(on).map(|(f, n)| n.buf_ms - f.buf_ms).collect());
     if d.abs() > tol {
-        return Err(format!("녹음 중 버퍼 지연 변화(중앙값) {d:+.2}ms > 허용 {tol:.2}ms"));
+        return Err(format!("녹음 중 버퍼 지연 변화(쌍 차이 중앙값) {d:+.2}ms > 허용 {tol:.2}ms"));
     }
     type Count = fn(&Window) -> u64;
     let checks: [(&str, Count); 2] = [("xrun", |w| w.xruns), ("은닉", |w| w.concealed)];
@@ -237,6 +242,14 @@ fn record_compare_judge_tolerates_runner_noise_but_catches_regressions() {
     let quiet = [win(6.0, 0, 0); 6];
     let burst = [win(6.0, 4, 3), win(6.0, 0, 0), win(6.0, 0, 0), win(6.0, 0, 0), win(6.0, 0, 0), win(6.0, 0, 0)];
     assert_eq!(judge(2.5, &quiet, &burst), Ok(()));
+    // #64 CI(Flac 128/2.5ms): 러너 끊김(켬 첫 창 xrun 3·은닉 2) 뒤 버퍼가 8~9ms로 올랐다가 창 4~5개에 걸쳐 내려옴.
+    // 양쪽 중앙값 차이는 +1.42ms(허용 1.25 초과)였지만 붙은 쌍끼리는 같은 수준이라 통과해야 한다.
+    let off = [win(5.7, 0, 0), win(8.3, 0, 0), win(8.3, 0, 0), win(5.8, 0, 0), win(5.8, 0, 0), win(5.9, 0, 0)];
+    let on = [win(9.0, 2, 3), win(8.5, 0, 0), win(8.3, 0, 0), win(6.2, 0, 0), win(5.7, 0, 0), win(5.8, 0, 0)];
+    assert_eq!(judge(2.5, &off, &on), Ok(()));
+    // 같은 흔들림 위에서도 녹음이 버퍼를 한 프레임 키우면 잡힌다
+    let worse: Vec<_> = on.iter().map(|x| win(x.buf_ms + 2.5, x.concealed, x.xruns)).collect();
+    assert!(judge(2.5, &off, &worse).unwrap_err().contains("버퍼 지연"));
 
     // 녹음이 지터 버퍼를 한 프레임 키움(켬 창마다 +frame_ms)
     for frame_ms in [2.5f32, 5.0] {
@@ -248,6 +261,16 @@ fn record_compare_judge_tolerates_runner_noise_but_catches_regressions() {
     assert!(judge(2.5, &quiet, &xr).unwrap_err().contains("xrun"));
     let cc = [win(6.0, 1, 0), win(6.0, 2, 0), win(6.0, 0, 0), win(6.0, 1, 0), win(6.0, 3, 0), win(6.0, 0, 0)];
     assert!(judge(2.5, &quiet, &cc).unwrap_err().contains("은닉"));
+}
+
+/// 수신 쪽 가짜 장치의 기상 지터 시드. 고정 시드(예전 9)는 녹음과 무관한 xrun을 엔진 시작 뒤 같은 시각(약 19~22초)에 내고,
+/// 그 시각이 ABBA 순서상 늘 켬 창에 떨어져 "녹음 중 xrun"처럼 보였다(PR #67 조사). 회차마다 시드를 바꾸면 그런 xrun은
+/// 끔·켬 어느 창에나 같은 확률로 떨어지고, 판정(생긴 창 수 + 여유)은 그대로 녹음 탓 증가만 잡는다. 재현은
+/// `BAND_FAKE_SEED=<출력된 시드>`.
+fn run_seed() -> u64 {
+    std::env::var("BAND_FAKE_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(9, |d| d.as_nanos() as u64)
+    })
 }
 
 /// 교대 쌍 수와 창 길이. 6쌍 × 2초 × 2 = 링크당 24초 측정 (예전 끔 8초 + 켬 8초).
@@ -264,7 +287,8 @@ fn recording_does_not_change_buffer_concealment_or_xruns() {
         ba.wake_jitter_us = 1000;
         let mut bb = FakeBackend::silence(48_000);
         bb.wake_jitter_us = 1000;
-        bb.seed = 9;
+        let seed = run_seed();
+        bb.seed = seed;
         let (a, b) = pair(config(buf, frame_ms), ba, bb);
         std::thread::sleep(Duration::from_secs(3));
         let dir = tmp(&format!("rt-{buf}-{fmt:?}"));
@@ -303,13 +327,13 @@ fn recording_does_not_change_buffer_concealment_or_xruns() {
             )
         };
         println!(
-            "REC {fmt:?} buf {buf} / {frame_ms}ms (estLatency {est:.2}ms, {PAIRS}쌍 × {WINDOW_MS}ms ABBA): 끔 {} | 켬 {} | 녹음 {rec_secs:.2}s {rec_bytes}B 버림 {dropped}프레임 (late {late})",
+            "REC {fmt:?} buf {buf} / {frame_ms}ms (estLatency {est:.2}ms, seed {seed}, {PAIRS}쌍 × {WINDOW_MS}ms ABBA): 끔 {} | 켬 {} | 녹음 {rec_secs:.2}s {rec_bytes}B 버림 {dropped}프레임 (late {late})",
             line(&off),
             line(&on),
         );
         assert_eq!(dropped, 0, "녹음 링 넘침");
         if let Err(e) = judge(frame_ms, &off, &on) {
-            panic!("buf {buf} / {frame_ms}ms: {e}");
+            panic!("buf {buf} / {frame_ms}ms (seed {seed}): {e}");
         }
     }
 }
@@ -369,8 +393,13 @@ fn concealment_markers_follow_jitter_counter() {
     let j0 = b.peer_jitter_stats()[0].1;
     b.record_start(RecordOptions::default(), &dir).unwrap();
     std::thread::sleep(Duration::from_secs(4));
-    let sum = b.recorder().lock().stop().unwrap();
+    // 카운터 끝은 마커 수집이 꺼지는 순간(정지 1단계 `begin_stop`)에 읽는다. 예전에는 `stop()`(마무리 포함)이 끝난 뒤에
+    // 읽어서, 느린 러너에서 마무리가 수백 ms 걸리면(PR #67: 448ms) 그동안 125ms마다 나는 은닉이 카운터에만 쌓였다
+    // (#65 CI: 마커 32 vs 카운터 37). 마무리는 앱(`engine_record_stop`)과 같이 recorder 락 밖에서 한다.
+    let job = b.recorder().lock().begin_stop().unwrap();
     let j1 = b.peer_jitter_stats()[0].1;
+    let sum = job.finish().unwrap();
+    b.recorder().lock().reclaim();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let folder = PathBuf::from(&sum.folder);
     let mj: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("markers.json")).unwrap()).unwrap();
@@ -422,6 +451,9 @@ fn record_toggle_adds_no_xruns_at_start_or_stop() {
         ba.wake_jitter_us = 1000;
         let mut bb = FakeBackend::silence(48_000);
         bb.wake_jitter_us = 1000;
+        // 시드는 9로 고정한다(위 ABBA 비교와 달리): 이 판정은 경계 창 xrun 0개를 요구하므로, 시드를 바꾸면 녹음과 무관한
+        // 가짜 장치 xrun이 경계 창에 떨어질 수 있다. seed 9의 xrun(약 19.8초)은 이 시각표에서 경계 창 밖에 떨어진다(PR #67,
+        // P3-0d 로컬 5회: 모두 경계 창 0, 녹음 주기 안 1개 — 주기 합 판정의 여유 2 안).
         bb.seed = 9;
         let (a, b) = pair(config(128, 2.5), ba, bb);
         let b = Arc::new(b);
