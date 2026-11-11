@@ -60,6 +60,25 @@ describe('useRequireAuth', () => {
     expect(screen.getByText('AUTH from=/payment?plan=pro#x')).toBeTruthy()
   })
 
+  it('쿼리가 허용 문자 밖이면 경로만 살려 from으로 넘긴다', () => {
+    auth.loading = false
+    renderAt('/payment?plan=[pro]')
+    expect(screen.getByText('AUTH from=/payment')).toBeTruthy()
+  })
+
+  it('wrapChecking으로 확인 중 표시를 페이지 레이아웃으로 감싼다', () => {
+    function Wrapped() {
+      const { gate } = useRequireAuth({ wrapChecking: c => <section data-testid="wrap">{c}</section> })
+      return gate ?? <div>PAGE</div>
+    }
+    render(
+      <MemoryRouter initialEntries={['/payment?plan=pro']}>
+        <Wrapped />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('wrap').textContent).toContain('로그인 상태를 확인하는 중')
+  })
+
   it('사용자가 있으면 loading이어도(로그아웃 처리 중 등) 페이지를 유지한다', () => {
     auth.user = { id: 'u1' }
     auth.loading = true

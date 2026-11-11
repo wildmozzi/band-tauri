@@ -5,9 +5,10 @@
 ```sh
 cd client
 npx playwright install chromium   # 처음 한 번
-npm run e2e                       # 빌드(e2e/vite.config.ts) → vite preview(127.0.0.1:<빈 포트>) → 테스트
+npm run e2e                       # e2e:build(e2e/vite.config.ts, 포트 무관) → 빈 포트 선택 → vite preview → 테스트
 E2E_PORT=47173 npm run e2e        # 포트 지정 (bash. PowerShell은 $env:E2E_PORT='47173')
 npm run e2e -- --ui               # 디버깅
+npm run e2e:build && npx playwright test e2e/auth-guard.e2e.ts   # playwright 직접 실행은 빌드가 먼저 있어야 한다(없으면 바로 실패, 오래된 빌드 주의)
 npm run e2e:typecheck
 ```
 
@@ -22,6 +23,7 @@ npm run e2e:typecheck
 - 포트: 실행마다 OS가 준 빈 포트(`port.ts`, 환경변수 `E2E_PORT`로 덮어쓰기). 여러 워크트리·CI self-hosted runner가
   같은 PC에서 동시에 돌려도 겹치지 않는다. `strictPort` + `reuseExistingServer: false` — 포트를 못 잡으면 다른 포트로 넘어가거나
   다른 워크트리의 서버(실제 env 빌드)에 붙지 않고 실패한다.
+  빌드는 포트를 고르기 전에 끝내므로 "빈 포트 확인 → 바인딩" 틈은 vite preview 기동 시간뿐이다(선택된 포트는 실행 첫 줄 `[e2e] 미리보기 포트 …`).
   같은 워크트리에서 두 실행을 겹치면 빌드 산출물(`e2e/.dist`)·결과 폴더를 공유하므로 권장하지 않는다.
 
 ## 한계

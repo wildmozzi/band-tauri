@@ -40,7 +40,12 @@ export function authUserJson(user: FixtureUser) {
     email: user.email,
     email_confirmed_at: '2026-01-01T00:00:00.000Z',
     app_metadata: { provider: 'email', providers: ['email'] },
-    user_metadata: { nickname: user.nickname, name: user.name },
+    user_metadata: {
+      nickname: user.nickname,
+      name: user.name,
+      ...(user.bio ? { bio: user.bio } : {}),
+      ...(user.instagram ? { instagram: user.instagram } : {}),
+    },
     identities: [],
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',

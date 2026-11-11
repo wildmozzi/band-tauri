@@ -57,6 +57,21 @@ for (const route of ROUTES) {
   })
 }
 
+// 리뷰 L2: 프로필 화면 상태(bio·SNS)는 user에서 초기값을 받는다. 세션 복원 전에 화면을 만들면 빈 값으로 굳는다
+test('로그인 상태로 /profile 직접 진입·새로고침하면 자기소개·SNS가 계정 값으로 채워진다', async ({ page, mock }) => {
+  await mock.loginAs(ALICE)
+  const bio = page.getByPlaceholder('자신을 소개해주세요')
+  const instagram = page.getByPlaceholder('Instagram 사용자명')
+
+  await page.goto('/profile')
+  await expect(bio).toHaveValue(ALICE.bio!)
+  await expect(instagram).toHaveValue(ALICE.instagram!)
+
+  await page.reload()
+  await expect(bio).toHaveValue(ALICE.bio!)
+  await expect(instagram).toHaveValue(ALICE.instagram!)
+})
+
 test('세션 확인이 끝나기 전에는 /auth로 보내지 않는다 (사용자 조회를 붙잡아도 글쓰기 화면 유지)', async ({ page, mock }) => {
   await mock.loginAs(ALICE)
   const held = mock.supabase.holdAuthUser()

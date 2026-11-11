@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactElement } from 'react'
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom'
 import { useRequireAuth } from '../features/auth/useRequireAuth'
 import { tossPaymentsService } from '../services/tossPayments'
@@ -43,8 +43,11 @@ const PLAN_INFO: Record<string, PlanInfo> = {
   }
 }
 
+/** 로그인 확인 중에도 결제 화면 배경·레이아웃을 유지한다 */
+const inPaymentPage = (checking: ReactElement) => <div className="payment-page">{checking}</div>
+
 export function Payment() {
-  const { user, gate } = useRequireAuth()
+  const { user, gate } = useRequireAuth({ wrapChecking: inPaymentPage })
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
 

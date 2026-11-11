@@ -23,12 +23,22 @@ export type RequireAuthResult =
   | { user: User; gate: null }
   | { user: null; gate: ReactElement }
 
-export function useRequireAuth(): RequireAuthResult {
+export interface RequireAuthOptions {
+  /** 확인 중 표시를 페이지 레이아웃으로 감쌀 때 (예: 결제 화면 배경 유지) */
+  wrapChecking?: (checking: ReactElement) => ReactElement
+}
+
+export function useRequireAuth({ wrapChecking }: RequireAuthOptions = {}): RequireAuthResult {
   const { user, loading } = useAuth()
   const location = useLocation()
 
   if (user) return { user, gate: null }
-  if (loading) return { user: null, gate: <AuthChecking /> }
-  const from = safeRedirectPath(`${location.pathname}${location.search}${location.hash}`, '/')
+  if (loading) {
+    const checking = <AuthChecking />
+    return { user: null, gate: wrapChecking ? wrapChecking(checking) : checking }
+  }
+  // 쿼리·해시가 허용 문자 밖이면 경로만이라도 살리고, 그것도 안 되면 Auth 기본값(/rooms)과 같은 곳으로
+  const pathOnly = safeRedirectPath(location.pathname, '/rooms')
+  const from = safeRedirectPath(`${location.pathname}${location.search}${location.hash}`, pathOnly)
   return { user: null, gate: <Navigate to="/auth" replace state={{ from }} /> }
 }

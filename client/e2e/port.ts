@@ -8,8 +8,9 @@
  * - `E2E_PORT=<n>` 으로 덮어쓸 수 있다(디버깅·방화벽 예외 등). 잘못된 값이면 바로 실패한다.
  * - vite preview는 strictPort라 그 포트를 못 쓰면 다른 포트로 넘어가지 않고 실패하며,
  *   playwright.config의 reuseExistingServer: false라 이미 떠 있는 남의 서버에 붙지도 않는다.
- * - 한계: 빈 포트를 확인한 뒤 vite가 바인딩하기까지 아주 짧은 틈이 있다. 그 사이 다른 프로세스가 같은 포트를 잡으면
- *   (OS가 방금 반납된 포트를 곧바로 다시 주는 경우는 드물다) strictPort 때문에 조용히 엉뚱한 서버에 붙지 않고 실패로 드러난다.
+ * - 한계: 빈 포트를 확인한 뒤 vite preview가 바인딩하기까지 틈이 있다. 빌드는 포트 선택 전에 끝내므로(npm run e2e =
+ *   e2e:build → playwright test, server.ts) 틈은 preview 기동 시간(보통 1초 안팎)뿐이다. 그 사이 같은 PC의 다른 프로세스가
+ *   같은 포트를 잡으면 strictPort 때문에 엉뚱한 서버에 붙지 않고 실패로 드러난다(선택된 포트는 실행 첫 줄에 로그).
  */
 import { execFileSync } from 'node:child_process'
 
