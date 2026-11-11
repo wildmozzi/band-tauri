@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { useAuth } from '../contexts/useAuth'
 import { usePostQuery, useUpdatePostMutation } from '../features/community/queries'
+import { useRequireAuth } from '../features/auth/useRequireAuth'
 import type { Post } from '../services/communityApi'
 import { PostForm } from './community/PostForm'
 import { usePostForm } from './community/usePostForm'
@@ -9,7 +9,8 @@ import { usePostForm } from './community/usePostForm'
 export function EditPost() {
   const { postId } = useParams<{ postId: string }>()
   const navigate = useNavigate()
-  const { user } = useAuth()
+  // 세션 복원이 끝난 뒤에만 /auth로 보낸다 (직접 진입·새로고침 시 튕기지 않게 — P3-10f)
+  const { user, gate } = useRequireAuth()
   const form = usePostForm()
   const { loadPost } = form
   const [originalPost, setOriginalPost] = useState<Post | null>(null)
@@ -24,10 +25,7 @@ export function EditPost() {
   const loadedKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (!userId) {
-      navigate('/auth', { state: { from: `/community/edit/${postId}` } })
-      return
-    }
+    if (!userId) return // 로그인 확인·이동은 useRequireAuth가 한다
     const loadKey = `${userId}:${postId}`
     if (!postId || loadedKeyRef.current === loadKey || isFetching) return
 
@@ -85,6 +83,8 @@ export function EditPost() {
       failMessage: '게시물 수정에 실패했습니다. 다시 시도해주세요.',
     })
   }
+
+  if (gate) return gate
 
   if (loading) {
     return (

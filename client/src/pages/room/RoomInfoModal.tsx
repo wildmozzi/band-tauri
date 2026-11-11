@@ -1,6 +1,7 @@
 import { inviteLink } from '../../contexts/room/roomAccess'
 import { PUBLIC_WEB_URL, instrumentInfo, type DetailRoom } from './roomDetailModel'
 import { Modal } from '../../components/ui/Modal'
+import { effectiveRoomCapacity } from '../rooms/roomModel'
 
 /** "방 정보" 모달: 기본 정보, 초대 링크, 태그, 악기 구성, 방장 버튼 */
 export function RoomInfoModal({
@@ -37,7 +38,7 @@ export function RoomInfoModal({
         <div className="info-row"><span>👑 방장</span><strong>{hostNickname || '...'}</strong></div>
         <div className="info-row"><span>🎵 장르</span><strong>{room.genre || '기타'}</strong></div>
         <div className="info-row"><span>🚪 참여 방식</span><strong>{room.free_join ? '자유 참여' : '승인 필요'}</strong></div>
-        <div className="info-row"><span>👥 현재 인원</span><strong>{participantCount} / {room.max_participants}명</strong></div>
+        <div className="info-row"><span>👥 현재 인원</span><strong>{participantCount} / {effectiveRoomCapacity(room.max_participants)}명</strong></div>
         <div className="info-row"><span>👁️ 공개 여부</span><strong>{room.is_private ? '비공개 (초대 링크로만 입장)' : '공개'}</strong></div>
         {room.has_password && <div className="info-row"><span>🔒 비밀번호</span><strong>설정됨</strong></div>}
       </div>

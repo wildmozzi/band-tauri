@@ -5,7 +5,8 @@
  *   2) Supabase(Auth/REST/Realtime), 서버 API, 시그널링 WS, 토스 SDK 스크립트
  */
 import type { BrowserContext } from '@playwright/test'
-import { E2E_BASE_URL, MOCKED_HOSTS, SUPABASE_STORAGE_KEY, TOSS_SCRIPT_HOST } from '../env'
+import { MOCKED_HOSTS, SUPABASE_STORAGE_KEY, TOSS_SCRIPT_HOST } from '../env'
+import { E2E_BASE_URL } from '../server'
 import { seedTables, type FixtureUser } from '../fixtures'
 import { FakeApi } from './api'
 import type { Violations } from './http'

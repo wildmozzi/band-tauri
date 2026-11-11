@@ -43,6 +43,8 @@ export interface EngineConfig {
   opusBitrate?: number
   jitterMinMs?: number
   jitterMaxMs?: number
+  /** 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필, 기본 0.5(균형). 실행 중 변경은 engineSetJitterProfile */
+  jitterProfile?: number
   udpPort?: number
 }
 
@@ -93,6 +95,14 @@ export interface PeerStats {
   rttMs: number | null
   jitterMs: number
   bufferMs: number
+  /** 지터 버퍼 목표 깊이(ms): 지터 추정 + 은닉 마감 여유 + 언더런 여유 + 프로필 여유 */
+  targetMs: number
+  /** 최근 5초 은닉 비율(%, 손실 + 늦은 패킷 + 언더런) */
+  concealPct: number
+  /** 최근 5초 중 깊이 보정(샘플 버림·삽입) 모드였던 패킷 비율(%) */
+  corrTimePct: number
+  /** 깊이 보정의 최대 국소 피치 편차(센트, 재생 시작 이후). 상한 약 4.3센트 */
+  maxCorrCents: number
   lossPct: number
   late: number
   concealed: number
@@ -360,6 +370,11 @@ export function engineSetMonitor(enabled: boolean, gain: number): Promise<null> 
   return invoke<null>('engine_set_monitor', { enabled, gain })
 }
 
+/** 지터 버퍼 프로필(0 저지연 ↔ 1 안정)을 실행 중에 바꾼다. 다음 시작에는 EngineConfig.jitterProfile을 쓴다 */
+export function engineSetJitterProfile(profile: number): Promise<null> {
+  return invoke<null>('engine_set_jitter_profile', { profile })
+}
+
 export function engineSetMasterGain(gain: number): Promise<null> {
   return invoke<null>('engine_set_master_gain', { gain })
 }
@@ -419,6 +434,14 @@ export async function engineSubscribeMix(onChunk: (samples: Float32Array) => voi
 
 export function engineUnsubscribeMix(): Promise<null> {
   return invoke<null>('engine_unsubscribe_mix')
+}
+
+/**
+ * 진단 내보내기(P2-5): 저장 대화상자를 열고 진단 zip(엔진 통계 타임라인·설정·장치·앱/OS 정보·마스킹된 로그)을 쓴다.
+ * 저장한 경로, 취소하면 null.
+ */
+export function diagExport(): Promise<string | null> {
+  return invoke<string | null>('diag_export')
 }
 
 function toFloat32(data: unknown): Float32Array | null {

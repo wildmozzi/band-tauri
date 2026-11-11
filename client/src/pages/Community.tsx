@@ -109,7 +109,7 @@ export function Community() {
         <p style={{ color: 'rgba(255, 255, 255, 0.6)', fontSize: '16px' }}>세션 파트너와 아이디어 공유</p>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: '24px' }}>
+      <div className="community-feed-grid">
         <div>
           {/* 인기 게시물 섹션 */}
           <div style={{ marginBottom: '24px' }}>

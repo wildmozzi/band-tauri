@@ -1,4 +1,4 @@
-import { Router, type Response } from 'express'
+import { Router, type NextFunction, type Request, type Response } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { requireAuth } from '../lib/auth'
 import { StoreUnavailableError } from '../repositories/errors'
@@ -13,6 +13,22 @@ import { createPostBody, postFieldIssues, postIdParams, updatePostBody } from '.
  * 조회·삭제·좋아요·댓글은 기존대로 클라이언트가 Supabase(RLS)로 한다.
  */
 
+/**
+ * 사용자별 글쓰기 상한 (P3-10g, PR #25 L4). requireAuth 뒤에서 토큰 userId로 센다 — IP를 바꿔도 같은 계정이면 막힌다.
+ * 메모리 저장(express-rate-limit 기본 MemoryStore)이라 서버 재시작 시 초기화되고, 서버를 여러 대로 늘리면
+ * 인스턴스마다 따로 센다(실효 상한 = 값 × 인스턴스 수). 스케일 아웃 시 Redis 등 공유 저장소로 바꿔야 한다.
+ */
+export interface PostUserLimits {
+  /** 글 작성: 사용자당 분당 (기본 5) */
+  createPerMinute: number
+  /** 글 작성: 사용자당 24시간 (기본 50) */
+  createPerDay: number
+  /** 글 수정: 사용자당 분당 (기본 30) */
+  editPerMinute: number
+}
+
+export const DEFAULT_POST_USER_LIMITS: PostUserLimits = { createPerMinute: 5, createPerDay: 50, editPerMinute: 30 }
+
 function sendServiceError(res: Response, error: unknown): boolean {
   if (error instanceof ServiceError) {
     res.status(error.status).json(error.body)
@@ -25,8 +41,16 @@ function sendServiceError(res: Response, error: unknown): boolean {
   return false
 }
 
-export function createPostsRouter(service: PostService, opts: { rateLimits?: boolean } = {}) {
+export function createPostsRouter(
+  service: PostService,
+  opts: {
+    rateLimits?: boolean
+    /** 사용자별 상한. 생략하면 rateLimits가 false가 아닐 때 DEFAULT_POST_USER_LIMITS, 테스트는 값을 넣어 켠다 */
+    userLimits?: Partial<PostUserLimits>
+  } = {},
+) {
   const router = Router()
+  const limitMessage = { success: false, error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' }
   if (opts.rateLimits !== false) {
     // 글쓰기·수정: IP당 분당 20회 (이미지 확인이 저장소 HEAD를 부른다)
     router.use(rateLimit({
@@ -34,12 +58,28 @@ export function createPostsRouter(service: PostService, opts: { rateLimits?: boo
       limit: 20,
       standardHeaders: 'draft-7',
       legacyHeaders: false,
-      message: { success: false, error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
+      message: limitMessage,
     }))
   }
   router.use(requireAuth)
 
-  router.post('/', async (req, res) => {
+  const passthrough = (_req: Request, _res: Response, next: NextFunction) => next()
+  const userLimitsOn = opts.rateLimits !== false || opts.userLimits !== undefined
+  const limits: PostUserLimits = { ...DEFAULT_POST_USER_LIMITS, ...opts.userLimits }
+  const perUser = (name: string, windowMs: number, limit: number) => userLimitsOn
+    ? rateLimit({
+      windowMs,
+      limit,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      message: { success: false, error: '글을 너무 자주 쓰고 있습니다. 잠시 후 다시 시도해주세요.' },
+      keyGenerator: (_req, res) => `${name}:${String(res.locals.userId)}`,
+    })
+    : passthrough
+  const createLimits = [perUser('pc-m', 60_000, limits.createPerMinute), perUser('pc-d', 24 * 60 * 60_000, limits.createPerDay)]
+  const editLimit = perUser('pe-m', 60_000, limits.editPerMinute)
+
+  router.post('/', ...createLimits, async (req, res) => {
     const parsed = createPostBody.safeParse(req.body ?? {})
     if (!parsed.success) {
       res.status(400).json({ success: false, error: '입력값이 올바르지 않습니다.', issues: postFieldIssues(parsed.error) })
@@ -55,7 +95,7 @@ export function createPostsRouter(service: PostService, opts: { rateLimits?: boo
     }
   })
 
-  router.put('/:id', async (req, res) => {
+  router.put('/:id', editLimit, async (req, res) => {
     const params = postIdParams.safeParse(req.params)
     const body = updatePostBody.safeParse(req.body ?? {})
     if (!params.success || !body.success) {

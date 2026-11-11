@@ -79,6 +79,28 @@ export const PENDING_PREFIX = 'pending/'
 export const pendingKeyOf = (key: string) => `${PENDING_PREFIX}${key}`
 export const isPendingKey = (key: string) => key.startsWith(PENDING_PREFIX)
 
+/**
+ * 게시글 이미지 "검증 기록" 확인 — 검증 기록은 **최종 경로(`<key>`)의 객체 자체**다 (P3-10g, PR #25 M1 후속).
+ *
+ * 왜 별도 기록(DB 행·객체 메타데이터)이 아닌가:
+ *  - 클라이언트는 서명 URL로 `pending/<key>`에만 쓸 수 있고, 최종 경로로 옮기는 것(copy)은 `/complete` 검증을 통과한
+ *    서버뿐이다. 그래서 "최종 경로에 있음 = 서버가 검증함"이 성립한다 — 저장소 하나로 원자적이고 인스턴스 간 공유된다.
+ *  - DB 행은 저장소와 따로 놀아(삭제·이전·고아 정리) 둘을 맞추는 일이 생기고, 메타데이터는 드라이버마다
+ *    (Supabase Storage / S3 CopyObject) 지원 방식이 달라 같은 규칙을 보장하기 어렵다.
+ *
+ * 전제 (깨지면 이 함수는 "검증됨"이 아니라 "존재함"만 뜻한다):
+ *  - s3 드라이버: 클라이언트에 쓰기 자격이 없다(서명 PUT은 pending/ key로만 발급) → 항상 성립
+ *  - supabase 드라이버: post-images 버킷의 클라이언트 INSERT/UPDATE 정책이 없어야 한다(P3-10b,
+ *    docs/migrations/README.md 012 체크리스트 5단계). 정책이 남아 있는 동안은 본인 폴더에 직접 올린 파일도 통과한다
+ *
+ * `verified` 캐시는 `/complete` 재호출용(저장소 접근 생략)이다. 게시글 저장(checkPostImages·resolve)은 고아 정리로
+ * 지워졌을 수 있어 항상 저장소를 본다.
+ */
+export async function hasVerifiedPostImage(storage: StorageAdapter, key: string): Promise<boolean> {
+  if (isPendingKey(key)) return false
+  return (await storage.head(key)) !== null
+}
+
 /** 검증 통과 key 캐시 (재호출은 저장소를 읽지 않는다, 리뷰2 M4). 메모리, 상한 있음 */
 export class VerifiedKeys {
   private readonly set = new Set<string>()
@@ -116,7 +138,7 @@ export async function verifyPostImageUpload(
   const head = await storage.head(pending)
   if (!head) {
     // 이미 옮겨진 key (다른 인스턴스·재시작 뒤 재호출)
-    if (await storage.head(key)) {
+    if (await hasVerifiedPostImage(storage, key)) {
       verified.add(key)
       return { ok: true }
     }
@@ -187,7 +209,7 @@ export async function resolvePostImageUrl(
       ? { input, ok: true, url: input, changed: false }
       : { input, ok: false, reason: '이미지 원본이 없습니다.' }
   }
-  if (await stores.images.head(key)) {
+  if (await hasVerifiedPostImage(stores.images, key)) {
     const url = stores.viewUrl(key)
     return { input, ok: true, url, changed: url !== input }
   }

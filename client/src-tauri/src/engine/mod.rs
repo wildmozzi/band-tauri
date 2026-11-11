@@ -184,7 +184,7 @@ impl Engine {
             if opts.cancel.is_none() {
                 opts.cancel = cancel.clone();
             }
-            let js = JitterSettings { min_ms: cfg.jitter_min_ms(), max_ms: cfg.jitter_max_ms() };
+            let js = JitterSettings { min_ms: cfg.jitter_min_ms(), max_ms: cfg.jitter_max_ms(), profile: cfg.jitter_profile() };
             engine.net = Some(Net::start(peer_id, &opts, js)?); // 실패 시 engine drop이 오디오 정리
         }
         if cancelled() {
@@ -265,6 +265,16 @@ impl Engine {
         Ok(())
     }
 
+    /// 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필을 실행 중에 바꾼다(모든 피어 + 이후 추가될 피어, P1-5).
+    pub fn set_jitter_profile(&self, profile: f32) -> Result<(), String> {
+        if !profile.is_finite() || !(0.0..=1.0).contains(&profile) {
+            return Err(format!("jitterProfile은 0..1 범위여야 합니다: {profile}"));
+        }
+        let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
+        net.set_jitter_profile(profile);
+        Ok(())
+    }
+
     pub fn controls(&self) -> &Arc<MixControls> {
         &self.controls
     }
@@ -333,6 +343,10 @@ impl Engine {
                             rtt_ms: conn.rtt_ms,
                             jitter_ms: js.jitter_ms,
                             buffer_ms: js.buffer_ms,
+                            target_ms: js.target_ms,
+                            conceal_pct: js.conceal_pct,
+                            corr_time_pct: js.corr_time_pct,
+                            max_corr_cents: js.max_corr_cents,
                             loss_pct: js.loss_pct,
                             late: js.late,
                             concealed: js.concealed,

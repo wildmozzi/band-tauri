@@ -4,6 +4,7 @@ import { useUpdateRoomMutation } from '../../features/rooms/queries'
 import {
   DEFAULT_EDIT_SLOTS,
   buildRoomUpdate,
+  effectiveRoomCapacity,
   instrumentsNotInSlots,
   setSlotCount,
   toggleTag,
@@ -31,7 +32,7 @@ export function useRoomEditor(userId: string | undefined, onSaved: (roomId: stri
     setEditTitle(room.title)
     setEditDescription(room.description || '')
     setEditGenre(room.genre || '기타')
-    setEditMaxParticipants(room.max_participants)
+    setEditMaxParticipants(effectiveRoomCapacity(room.max_participants))
     setEditFreeJoin(room.free_join ?? true)
     setEditTags(room.tags || [])
     setEditCustomTag('')

@@ -68,7 +68,7 @@ export function PostDetail() {
         ← 목록으로
       </button>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: '24px' }}>
+      <div className="community-feed-grid">
         {/* 메인 콘텐츠 */}
         <div>
           {/* 메인 카드 */}
