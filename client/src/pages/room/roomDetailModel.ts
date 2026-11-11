@@ -81,6 +81,7 @@ export function formatCpu(cpu: CpuStats | null | undefined): string | null {
 export function cpuTitle(cpu: CpuStats): string {
   return [
     `워커 스레드 CPU: ${cpu.workerPct == null ? '측정 불가' : `${cpu.workerPct.toFixed(2)}%`} (코어 1개 = 100%)`,
+    '  ※ 오디오 워커 스레드만입니다. 앱 전체 CPU가 아닙니다(작업 관리자 참고).',
     `오디오 콜백 사용률: ${cpu.callbackLoadPct.toFixed(2)}% (입력+출력 실행시간 / 창)`,
     `출력 콜백 p50/p99/최대: ${Math.round(cpu.callbackP50Us)}/${Math.round(cpu.callbackP99Us)}/${Math.round(cpu.callbackMaxUs)}µs`,
     `p99 / 장치 주기: ${cpu.callbackP99PeriodPct.toFixed(1)}%`,

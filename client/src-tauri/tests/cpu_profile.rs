@@ -1,7 +1,8 @@
 //! 6인 풀메시 CPU 측정(P1-10, GOAL 2절 "6인 풀메시 60분, CPU ≤ 15%(4코어 기준)").
 //!
 //! 한 프로세스에 가짜 장치(사인 입력) 엔진 6개를 띄우고 127.0.0.1로 풀메시 연결한다(각 엔진 = 자신 + 원격 5명).
-//! 엔진마다 `EngineStats.cpu`(워커 CPU%, RT 콜백 사용률·p99)를 읽고, 프로세스 전체 CPU 시간 / 6으로
+//! 엔진마다 `EngineStats.cpu`(워커 CPU%, RT 콜백 사용률·p99)를 읽고, 프로세스 전체 CPU(`QueryProcessCycleTime`
+//! 증분 / TSC 증분) / 6으로
 //! 연주자 1명 몫(워커 + 네트워크 수신·제어 + 가짜 장치 스레드)을 낸다. 수치 판정 없이 표만 출력한다(측정 도구).
 //!
 //! 실행(수치는 release 기준이 의미 있다):
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use band_lib::engine::config::{CodecKind, EngineConfig};
-use band_lib::engine::cpuprof::{process_cpu_time, CpuStats};
+use band_lib::engine::cpuprof::{cycle_pct, process_cycles, tsc_now, CpuStats};
 use band_lib::engine::device::fake::FakeBackend;
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::stats::PeerStateKind;
@@ -86,15 +87,12 @@ fn run(codec: CodecKind, frame_ms: f32) -> Row {
     }
     // 예열(지터 버퍼 수렴) 후 창을 한 번 회전해 기준을 맞춘다
     std::thread::sleep(Duration::from_secs(3));
-    for e in &engines {
-        let _ = e.stats();
-    }
-    let p0 = process_cpu_time().unwrap_or_default();
-    let w0 = Instant::now();
+    // 창 회전과 xrun 기준(연결·예열 구간 제외)
+    let x0: u64 = engines.iter().map(|e| e.stats().xruns).sum();
+    let (p0, k0) = (process_cycles(), tsc_now());
     std::thread::sleep(MEASURE);
     let stats: Vec<_> = engines.iter().map(|e| e.stats()).collect();
-    let wall = w0.elapsed();
-    let p1 = process_cpu_time().unwrap_or_default();
+    let (p1, k1) = (process_cycles(), tsc_now());
     let cpus: Vec<CpuStats> = stats.iter().map(|s| s.cpu).collect();
     for c in &cpus {
         assert!(c.window_ms >= MEASURE.as_millis() as f32 * 0.9, "창 회전: {c:?}");
@@ -108,9 +106,10 @@ fn run(codec: CodecKind, frame_ms: f32) -> Row {
         worker_max: workers.iter().cloned().fold(0.0, f32::max),
         load_avg: cpus.iter().map(|c| c.callback_load_pct).sum::<f32>() / PEERS as f32,
         p99_max: cpus.iter().map(|c| c.callback_p99_us).fold(0.0, f32::max),
-        per_node_pct: ((p1 - p0).as_secs_f64() / wall.as_secs_f64() * 100.0 / PEERS as f64) as f32,
+        per_node_pct: cycle_pct(p1, p0, k1, k0).unwrap_or(f32::NAN) / PEERS as f32,
         conceal_max: stats.iter().flat_map(|s| s.peers.iter().map(|p| p.conceal_pct)).fold(0.0, f32::max),
-        xruns: stats.iter().map(|s| s.xruns).sum(),
+        // 측정 창 안의 xrun만(연결·예열 구간 제외, 리뷰 L1)
+        xruns: stats.iter().map(|s| s.xruns).sum::<u64>().saturating_sub(x0),
     };
     for mut e in engines {
         e.stop();
@@ -137,7 +136,7 @@ fn six_peer_full_mesh_cpu() {
         .map(|(c, f)| run(c, f))
         .collect();
     println!();
-    println!("| 구성(128샘플 버퍼, 모노) | 워커 CPU 내 엔진 / 평균 / 최대 (%, 1코어) | 콜백 사용률 평균 (%) | 콜백 p50 / p99 / 최대 (µs, 내 엔진) | p99/주기 (%) | 6피어 최악 p99 (µs) | 연주자 1명 몫 프로세스 CPU (%, 1코어 → 4코어 기준) | 최대 은닉 (%) | xrun |");
+    println!("| 구성(128샘플 버퍼, 모노) | 워커 CPU 내 엔진 / 평균 / 최대 (%, 1코어) | 콜백 사용률 평균 (%) | 콜백 p50 / p99 / 최대 (µs, 내 엔진) | p99/주기 (%) | 6피어 최악 p99 (µs) | 연주자 1명 몫 프로세스 CPU (%, 1코어 → 4코어 기준) | 최대 은닉 (%) | xrun(측정 창, 6엔진 합) |");
     println!("|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
         println!(

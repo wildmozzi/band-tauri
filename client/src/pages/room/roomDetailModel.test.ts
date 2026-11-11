@@ -47,6 +47,7 @@ describe('roomDetailModel', () => {
     expect(formatCpu({ ...cpu, workerPct: null, callbacks: 0 })).toBe('CPU 워커 -- · 콜백 0.8%')
     expect(cpuTitle(cpu)).toContain('20/42/120µs')
     expect(cpuTitle({ ...cpu, workerPct: null })).toContain('측정 불가')
+    expect(cpuTitle(cpu)).toContain('앱 전체 CPU가 아닙니다')
   })
 
   it('formatMs: 유한값만 ms로, 나머지는 --', () => {

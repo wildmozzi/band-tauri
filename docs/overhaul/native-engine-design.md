@@ -399,12 +399,13 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 `sendQueue`(P1-3): 송신 큐 지연(워커 패스 시작 → 피어별 `send_to` 완료, 3절 8), 직전 2초 창의 `p50Ms`/`p99Ms`/`maxMs`와 잰 패킷 수 `packets`. 송신이 없던 창이면 `packets = 0`이고 나머지는 0이다. 네트워크가 없으면 null.
 
 `cpu`(P1-10, `engine/cpuprof.rs`): GOAL 2절 "CPU ≤ 15%" 측정 수단. %는 모두 코어 1개 = 100이다(4코어 기준 전체 비율은 ÷4).
-- `workerPct`: 워커 스레드 누적 CPU 시간(`GetThreadTimes` 커널+사용자, 비RT인 `stats` 호출에서 읽음)의 창 증분 / 창 길이. Windows가 아니거나 워커가 없으면 null.
+- `workerPct`: 워커 스레드 누적 사이클(`QueryThreadCycleTime`, 비RT인 `stats` 호출에서 읽음)의 창 증분 / 같은 창의 TSC 증분(`RDTSC`). Windows는 스레드 사이클을 문맥 전환 때 TSC로 재므로 둘은 같은 단위이고 주파수 환산이 필요 없다. `GetThreadTimes`는 클럭 틱(15.625ms) 샘플링이라 잠들었다 짧게 일하는 워커에서 ±50% 틀려 쓰지 않는다(PR #54 리뷰 H1, 단위 테스트 `cycles_track_sleepy_busy_thread`가 실제 바쁜 시간 대비 ±20%를 고정). 워커 스레드만이다(net 수신·제어 스레드, UI 제외 — 앱 전체 CPU가 아님). Windows x64가 아니거나 워커가 없으면 null.
 - RT 콜백: 입·출력 콜백(`InputRt`/`OutputRt::process`)이 시작·끝에서 `Instant::now()`(Windows = `QueryPerformanceCounter`)를 읽어 실행시간을 원자 칸에 더한다(할당·락 없음, 칸은 `sendQueue`와 같음). 불변 TSC 기기에서 QPC는 커널 진입 없이 사용자 모드에서 TSC를 읽으므로(vDSO와 같은 종류, 1회 수십 ns) 1.1절 RT 금지 대상(막히는 호출)이 아니다. 백엔드의 `GetBuffer`/`ReleaseBuffer`·포맷 변환은 포함하지 않는다.
   - `callbackLoadPct`: 입력+출력 콜백 실행시간 합 / 창 길이.
   - `callbackP50Us`/`callbackP99Us`/`callbackMaxUs`: 출력 콜백(믹스) 1회 실행시간. `callbackP99PeriodPct` = p99 / 장치 출력 주기(`devicePeriodMs`) — 100에 가까우면 마감을 놓친다. `inputCallbackMaxUs`: 입력 콜백 최대. `callbacks`: 창 안 출력 콜백 수.
 - 창: `stats` 호출 시 직전 회전에서 2초 이상 지났으면 칸을 비워 새 값을 내고, 아니면 직전 값을 돌려준다. `windowMs`가 실제 창 길이다(통계를 오래 읽지 않으면 길어짐). 첫 창 전이면 `windowMs = 0`이고 값은 0/null.
-- 무할당 보증: `tests/rt_alloc.rs`가 테스트 전용 카운팅 글로벌 할당자로 입·출력 콜백의 모든 경로(소스 8개·언더런·DRAIN·측정·클릭·탭 가득 참)에서 할당 0을 단언한다. 6인 풀메시 측정 도구: `tests/cpu_profile.rs`(`--ignored`, release).
+- 무할당 보증: `tests/rt_alloc.rs`가 테스트 전용 카운팅 글로벌 할당자로 `rt.rs`의 `InputRt`/`OutputRt::process` 경로(소스 8개·언더런·DRAIN·측정·클릭·탭 가득 참)에서 할당 0을 단언한다. 백엔드 쪽(cpal 데이터 콜백 클로저, 자체 WASAPI 루프의 `GetBuffer`↔`process` 사이 포맷 변환, 가짜 장치)은 범위 밖이다. 6인 풀메시 측정 도구: `tests/cpu_profile.rs`(`--ignored`, release, 프로세스 CPU는 `QueryProcessCycleTime`/TSC, xrun은 측정 창 안 증분).
+
 **진단 내보내기(P2-5, `diag/`)**
 - 기록: `band-diag` 스레드가 1초마다 `EngineManager::snapshot()`(엔진 슬롯 락 안에서 `Engine::stats()`, UI의 `engine_stats`와 같은 경로)으로 샘플을 링 버퍼(3600개 = 60분)에 넣는다. 엔진이 없으면 기록하지 않고, 엔진이 사라진 순간 `running:false` 정지 표시 샘플을 한 번 넣는다. RT 콜백 경로에는 아무것도 추가하지 않는다.
 - 샘플(JSONL 한 줄): `t`(유닉스 ms), `running`, `network`(합주/테스트, 정지 표시 샘플은 끝난 세션 값), `session`(`EngineManager` generation — 값이 바뀐 곳이 엔진 재시작 경계로, 누적 카운터가 0부터 다시 센다), `EngineStats`의 장치·지연·xrun·스트림 오류 값, `peers[]`(`peer` 가명, `state`, `path`, `rttMs`, `jitterMs`, `bufferMs`, `playoutMs`, `lossPct`, `late`·`concealed` 누적, `level`, 에코 상태, `txCodec`·`txCodecAuto`), `relay`(주소는 대역만, `autoOpus` 포함).

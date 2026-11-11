@@ -178,7 +178,7 @@ impl Engine {
             timer: Some(timer),
             metronome: metronome.clone(),
             epoch: Instant::now(),
-            cpu: Mutex::new(cpuprof::CpuSampler::new(Instant::now())),
+            cpu: Mutex::new(cpuprof::CpuSampler::new(Instant::now(), cpuprof::tsc_now())),
         };
         // 48kHz 클릭 파형을 장치 레이트로 읽는 보폭
         metronome.click.step.store(INTERNAL_RATE as f32 / info.out_rate.max(1) as f32);
@@ -332,8 +332,8 @@ impl Engine {
             n => n,
         };
         let device_period_ms = period_frames as f32 / self.info.out_rate.max(1) as f32 * 1000.0;
-        let worker_cpu = self.worker.as_ref().and_then(cpuprof::thread_cpu_time);
-        let cpu = self.cpu.lock().sample(Instant::now(), &c.rt_timing, worker_cpu, device_period_ms * 1000.0);
+        let worker_cycles = self.worker.as_ref().and_then(cpuprof::thread_cycles);
+        let cpu = self.cpu.lock().sample(Instant::now(), &c.rt_timing, cpuprof::tsc_now(), worker_cycles, device_period_ms * 1000.0);
         let peers = self
             .net
             .as_ref()

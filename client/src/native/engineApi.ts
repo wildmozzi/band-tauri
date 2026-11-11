@@ -121,7 +121,7 @@ export interface SendQueueStats {
  * 콜백 실행시간은 출력 콜백(믹스) 1회 기준이고, 사용률은 입력+출력 콜백 실행시간 합 / 창 길이다.
  */
 export interface CpuStats {
-  /** 워커 스레드 CPU(%). Windows가 아니거나 첫 창 전이면 null */
+  /** 워커 스레드 CPU(%, 스레드 사이클 / TSC). 앱 전체 CPU 아님. Windows x64가 아니거나 첫 창 전이면 null */
   workerPct: number | null
   callbackLoadPct: number
   callbackP50Us: number
