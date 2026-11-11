@@ -11,6 +11,7 @@
 //! | `RELAY_MAX_BINDS_PER_SEC_PER_SUBNET` | 50 | 신규/갱신 RelayBind 출발 서브넷(/24, /64)당 처리율 |
 //! | `RELAY_MAX_REGISTRATIONS` | 20000 | 전체 등록 수 상한 |
 //! | `RELAY_STATS_LOG_SECS` | 60 | 통계 로그 주기 (0이면 끔) |
+//! | `RELAY_REQUIRE_BIND_MAC` | 0 | 1이면 MAC 없는 신규/갱신 RelayBind 거부(구버전 클라이언트가 사라진 뒤, relay-design 2.1.1) |
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +40,7 @@ async fn main() -> std::io::Result<()> {
         max_binds_per_sec: env_or("RELAY_MAX_BINDS_PER_SEC", defaults.max_binds_per_sec),
         max_binds_per_sec_per_subnet: env_or("RELAY_MAX_BINDS_PER_SEC_PER_SUBNET", defaults.max_binds_per_sec_per_subnet),
         max_registrations: env_or("RELAY_MAX_REGISTRATIONS", defaults.max_registrations),
+        require_bind_mac: matches!(std::env::var("RELAY_REQUIRE_BIND_MAC").as_deref().map(str::trim), Ok("1" | "true")),
         ..defaults
     };
     let bind = std::env::var("RELAY_BIND").unwrap_or_else(|_| "0.0.0.0:5000".into());

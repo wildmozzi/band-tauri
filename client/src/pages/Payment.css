@@ -861,3 +861,26 @@ Payment Fail Page */
   color: var(--red-500);
   margin-bottom: 2rem;
 }
+/* P3-12a: 요금제 기능 목록 — 지금 되는 것 / 준비 중을 구분 */
+.plan-notice {
+  margin: 0 0 1rem;
+  color: var(--neutral-400);
+  font-size: 0.875rem;
+}
+
+.plan-feature-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1.5rem;
+  display: grid;
+  gap: 0.5rem;
+  text-align: left;
+}
+
+.plan-feature-list.planned li {
+  color: var(--neutral-400);
+}
+
+.plan-features ul + h4 {
+  margin-top: 1rem;
+}

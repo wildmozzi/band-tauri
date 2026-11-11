@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
+import { SupportContact } from '../components/SupportContact'
 
 export function PaymentFail() {
   const [searchParams] = useSearchParams()
@@ -100,17 +101,7 @@ export function PaymentFail() {
             </Link>
           </div>
 
-          <div className="support-info">
-            <h4>📞 도움이 필요하신가요?</h4>
-            <p>
-              결제 관련 문의는 
-              <a href="mailto:support@bandspace.com"> support@bandspace.com</a>으로 
-              연락주세요.
-            </p>
-            <p className="support-hours">
-              고객센터 운영시간: 평일 09:00 - 18:00
-            </p>
-          </div>
+          <SupportContact />
         </div>
       </div>
     </div>

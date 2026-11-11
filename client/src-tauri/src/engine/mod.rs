@@ -400,6 +400,8 @@ impl Engine {
             },
             peers,
             relay: self.net.as_ref().and_then(|n| n.relay_stats()),
+            qos: self.net.as_ref().map(|n| n.qos_stats()),
+            send_queue: self.net.as_ref().map(|n| n.send_queue_stats()),
             metronome: self.metronome.stats(),
             // 녹음 락은 짧게만 잡힌다(정지의 기다리는 단계는 락 밖). 정지를 시작하면 null.
             recording: self.recorder.lock().stats(),

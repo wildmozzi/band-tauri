@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { Modal } from './ui'
+import { PLANNED_NOTICE, plannedFeaturesFor } from '../lib/planFeatures'
 
 interface PremiumModalProps {
   isOpen: boolean
@@ -22,28 +23,11 @@ export function PremiumModal({ isOpen, onClose, feature, requiredPlan }: Premium
       name: 'Standard',
       price: '₩2,900',
       period: '/월',
-      features: [
-        '합주실 생성 (최대 6명)',
-        '비공개 방 생성',
-        '클라우드 저장 (30일)',
-        '녹음 파일 다운로드',
-        'Mix Lab 기본 기능',
-        '프로필 꾸미기'
-      ]
     },
     pro: {
       name: 'Pro',
       price: '₩6,900',
       period: '/월',
-      features: [
-        '합주실 생성 (최대 8명)',
-        '자동 믹싱 기능',
-        '클라우드 저장 무제한',
-        'Mix Lab 고급 기능',
-        '합주실 예약',
-        '팀/밴드 관리',
-        '세션 히스토리'
-      ]
     }
   }
 
@@ -101,10 +85,16 @@ export function PremiumModal({ isOpen, onClose, feature, requiredPlan }: Premium
           </div>
 
           <div className="plan-features">
+            {/* P3-12a: 유료 전용 기능은 아직 없다 — 준비 중 기능을 판매 중인 혜택처럼 보이지 않는다 */}
             <h4>포함된 기능:</h4>
             <ul>
-              {planDetails[selectedPlan].features.map((feature, index) => (
-                <li key={index}>✅ {feature}</li>
+              <li>✅ 무료 플랜의 모든 기능</li>
+            </ul>
+            <h4>준비 중:</h4>
+            <p>{PLANNED_NOTICE}</p>
+            <ul>
+              {plannedFeaturesFor(selectedPlan).map(f => (
+                <li key={f}>⏳ {f}</li>
               ))}
             </ul>
           </div>
@@ -133,13 +123,6 @@ export function PremiumModal({ isOpen, onClose, feature, requiredPlan }: Premium
           <div>
             <strong>데이터 보장</strong>
             <p>기존 녹음 파일과 설정 유지</p>
-          </div>
-        </div>
-        <div className="benefit-item">
-          <span className="benefit-icon">🔒</span>
-          <div>
-            <strong>7일 환불 보장</strong>
-            <p>만족하지 않으면 전액 환불</p>
           </div>
         </div>
       </div>

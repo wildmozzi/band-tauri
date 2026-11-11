@@ -82,6 +82,25 @@ pub fn write_relay_bind(ssrc: u32, seq: u32, timestamp: u32, token: &[u8], cooki
     }
 }
 
+/// RelayBind flags(offset 16) bit0: 끝에 Bind MAC 16B가 붙어 있다 (relay-design 2.1.1). 그 밖의 비트는 0이어야 한다.
+pub const BIND_FLAG_MAC: u8 = 0x01;
+
+/// MAC 붙은 RelayBind 생성: `write_relay_bind` + flags=MAC + `HMAC(bind_key, 앞의 모든 바이트)[..16]`.
+pub fn write_relay_bind_mac(
+    ssrc: u32,
+    seq: u32,
+    timestamp: u32,
+    token: &[u8],
+    cookie: Option<&[u8; COOKIE_BYTES]>,
+    bind_key: &[u8; crate::token::BIND_KEY_BYTES],
+    out: &mut Vec<u8>,
+) {
+    write_relay_bind(ssrc, seq, timestamp, token, cookie, out);
+    out[16] = BIND_FLAG_MAC;
+    let mac = crate::token::bind_mac(bind_key, out);
+    out.extend_from_slice(&mac);
+}
+
 /// Ack의 쿠키 필드
 pub fn ack_cookie(ack: &[u8]) -> [u8; COOKIE_BYTES] {
     let mut c = [0u8; COOKIE_BYTES];

@@ -14,6 +14,8 @@
 //! - 릴레이 주소 변경 → 릴레이 경로 피어가 새 주소로 바로 옮긴다.
 //! - 토큰 만료 전 갱신 → 같은 주소 갱신으로 등록이 이어진다. 만료(받은 시각 + 남은 수명) → Expired.
 //! - 릴레이 주소가 아닌 곳에서 온 RelayBindAck(type 9)는 무시한다.
+//! - 릴레이는 Bind MAC을 요구한다(2.1.1). 엔진은 서버가 준 bindKey로 MAC을 붙여 등록한다.
+//! - 직접 Hello의 출발 주소를 릴레이로 위장해도 경로 태그(AAD)로 걸러 릴레이 경로가 서지 않는다(4.1).
 //!
 //! ## 두 단계(P3-0a, tests/loopback.rs와 같은 규칙)
 //! - **결정적**(기본 `cargo test`): `relay_fallback_then_promotion_flow`(폴백·승격·강등 흐름),
@@ -91,7 +93,14 @@ fn relay_token(e: &Engine, member: &str, ttl_secs: u64) -> String {
 /// 프론트가 하듯 `engine_set_relay({ addr, token, expiresInSec })`. host 문자열은 주소 그대로.
 fn set_relay(e: &Engine, addr: SocketAddr, token: &str, expires_in: Option<u64>) -> Result<(), String> {
     let host = addr.to_string();
-    e.set_relay(Some(RelaySetting { host: &host, addr, token, expires_in: expires_in.map(Duration::from_secs) }))
+    let key = bind_key_for(token);
+    e.set_relay(Some(RelaySetting { host: &host, addr, token, expires_in: expires_in.map(Duration::from_secs), bind_key: Some(&key) }))
+}
+
+/// 시그널링 서버가 `relay-token.bindKey`로 내려주는 토큰별 Bind MAC 키(relay-design 2.1.1)
+fn bind_key_for(token_b64: &str) -> String {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token_b64).unwrap();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token::bind_key(SECRET, &raw))
 }
 
 // ---------------------------------------------------------------------------- 릴레이 서버
@@ -116,7 +125,8 @@ impl RelayServer {
         let sock = self.rt.block_on(tokio::net::UdpSocket::bind(addr)).expect("릴레이 바인드");
         self.addr = sock.local_addr().unwrap();
         self.stats = Arc::new(Stats::default());
-        let relay = Relay::new(SECRET.to_vec(), Limits::default(), self.stats.clone());
+        // Bind MAC 필수(relay-design 2.1.1): 엔진이 서버가 준 bindKey로 MAC을 붙이는지 모든 테스트에서 확인한다
+        let relay = Relay::new(SECRET.to_vec(), Limits { require_bind_mac: true, ..Limits::default() }, self.stats.clone());
         self.task = Some(self.rt.spawn(server::run_udp(sock, relay)));
     }
 
@@ -744,6 +754,51 @@ fn expired_token_without_refresh_stops_binding() {
     assert!(wait_relay_state(&p.a, RelayStateKind::Unreachable, Duration::from_secs(4)), "릴레이가 만료 토큰을 버림: {:?}", p.a.stats().relay);
     // 남의 ssrc 토큰은 받지 않는다
     assert!(set_relay(&p.a, p.link_a.pa, &relay_token(&p.b, "user-bob", 600), Some(600)).is_err());
+}
+
+/// 경로 종류 위장(relay-design 4.1): 경로상 공격자가 B의 직접 Hello를 잡아 출발 주소를 A의 릴레이 주소로 바꿔
+/// 넣어도, Hello 헤더(AAD)의 경로 태그가 '직접'이라 A는 릴레이 경로를 세우지 않는다. 같은 Hello를 직접 주소에서
+/// 보내면 받는다(대조군).
+#[test]
+fn hello_with_spoofed_relay_source_is_rejected() {
+    let _g = RT_LOCK.lock();
+    let start = |id: &str| Engine::start(config(), Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), Some((id.into(), test_net()))).unwrap();
+    let (a, b) = (start("alice"), start("bob"));
+    let fake_relay = UdpSocket::bind("127.0.0.1:0").unwrap(); // A가 아는 릴레이 주소(공격자가 출발지로 위장)
+    let tap = UdpSocket::bind("127.0.0.1:0").unwrap(); // B가 A로 보내는 직접 Hello가 여기로 온다(경로상 관찰)
+    let hole = UdpSocket::bind("127.0.0.1:0").unwrap(); // A가 아는 B 후보: 아무것도 돌려주지 않는다
+    tap.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    set_relay(&a, fake_relay.local_addr().unwrap(), &relay_token(&a, "user-alice", 600), Some(600)).unwrap();
+    let cand = |d: &LocalDescriptor, addr: SocketAddr| LocalDescriptor {
+        candidates: vec![Candidate { kind: CandidateKind::Lan, addr: addr.to_string() }],
+        ..d.clone()
+    };
+    a.add_peer("bob".into(), &cand(b.descriptor().unwrap(), hole.local_addr().unwrap())).unwrap();
+    b.add_peer("alice".into(), &cand(a.descriptor().unwrap(), tap.local_addr().unwrap())).unwrap();
+    let mut buf = [0u8; 2048];
+    let mut capture = || loop {
+        let (n, _) = tap.recv_from(&mut buf).expect("B의 직접 Hello");
+        if buf[3] == 2 {
+            assert_eq!(buf[16], 0x80, "직접 Hello에는 '직접' 경로 태그");
+            return buf[..n].to_vec();
+        }
+    };
+    let mut hello = Vec::new();
+    for _ in 0..5 {
+        hello = capture();
+        fake_relay.send_to(&hello, local_addr(&a)).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(peer_path(&a).and_then(|s| s.1), None, "위장한 릴레이 출발 Hello로 경로가 서면 안 된다: {:?}", peer_path(&a));
+    // 위장본을 **먼저** 넣은 바로 그 Hello(같은 seq)를 직접 주소(tap)에서 늦게 넣어도 받아야 한다:
+    // 태그 불일치 Hello가 제어 seq를 소모하면 진짜 Hello가 재전송으로 버려진다(PR #40 리뷰 M1).
+    tap.send_to(&hello, local_addr(&a)).unwrap();
+    let t0 = Instant::now();
+    while peer_path(&a).and_then(|s| s.1).is_none() && t0.elapsed() < Duration::from_secs(1) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let path = peer_path(&a).and_then(|s| s.1);
+    assert!(matches!(path, Some(PathKind::Lan | PathKind::Public)), "직접 Hello는 받는다: {path:?}");
 }
 
 /// 릴레이 주소가 아닌 곳에서 온 RelayBindAck(type 9)는 무시한다(수신 주소 규칙의 NetShared 수준 회귀 테스트).

@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
 import { ROOM_CAPACITY_MAX } from '../lib/roomCapacity'
-import { isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
+import { deriveRelayBindKey, isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
 import { createRoomRepository, type RoomMeta, type RoomRepository } from '../repositories/roomRepository'
 import { DEFAULT_PASSWORD_ATTEMPT_LIMITS, PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword, type ScryptGate } from '../lib/roomPassword'
 
@@ -36,6 +36,15 @@ import { DEFAULT_PASSWORD_ATTEMPT_LIMITS, PasswordAttemptLimiter, ScryptBusyErro
  * - RELAY_SECRET/RELAY_ADDR가 설정되면, 연주자가 native-descriptor(ssrc 포함)를 보낼 때 `relay-token`을 발급한다.
  * - `relay-token-request`로 갱신. 토큰 내용(roomId, memberId=userId, ssrc)은 서버가 정한다.
  * - 같은 방에서 다른 사용자가 이미 쓰는 ssrc의 descriptor는 거부한다(`ssrc-conflict`).
+ *
+ * 엔진 공개키 바인딩 (P1-1c)
+ * - descriptor의 `key`(X25519 공개키, 표준 base64 32바이트)는 보낸 연결(clientId)과 JWT userId에 묶인다.
+ *   형식이 틀리면(키, ssrc 정수 범위, candidates 개수·원소 형식) `descriptor-invalid`, 같은 방의 다른 userId가 이미 쓰는 키면 `key-conflict`로 거부하고 중계하지 않는다.
+ * - 바인딩은 Client.nativeKey 하나뿐이다(연결당 키 1개 → 메모리 상한 = 연결 수 상한). 같은 사용자가 새 키를 보내면
+ *   (엔진 재시작) 덮어쓰고, native-leave·퇴장·방 이동·연결 최종 종료(유예 만료, 중복 연결 정리) 때 사라진다.
+ *   세션 재개 유예 중에는 바인딩을 유지한다(그 사이 다른 사람이 키를 가로채지 못하게).
+ * - 중계하는 descriptor는 서버가 아는 필드(ssrc, key, candidates 원소의 {kind, addr}까지)만 검증해 다시 구성하고 `from`은 서버가 붙인다.
+ * - 한계: 서버 인스턴스 1대 가정(P3-10g 정원과 같음). 여러 대로 늘리면 방 단위 상태(바인딩·정원·승인)를 공유 저장소로 옮겨야 한다.
  */
 
 const MAX_MESSAGE_BYTES = 64 * 1024
@@ -49,6 +58,14 @@ const REJOIN_WINDOW_MS = 60_000
 const APPROVAL_GRACE_MS = 60_000
 const TOKEN_EXPIRY_GRACE_MS = 60_000
 const PARTICIPANT_UPDATE_DEBOUNCE_MS = 1000
+/** X25519 공개키 길이(바이트). descriptor.key는 이것의 표준 base64(패딩 포함 44자) */
+const ENGINE_KEY_BYTES = 32
+const ENGINE_KEY_B64_RE = /^[A-Za-z0-9+/]{43}=$/
+/** descriptor 후보 개수 상한(엔진 net/peer.rs MAX_CANDIDATES와 같음) */
+export const MAX_ENGINE_CANDIDATES = 8
+/** 후보 주소 형식: IPv4 `a.b.c.d:port`만(엔진 소켓은 IPv4, 받는 쪽 엔진도 IPv6를 거부한다) */
+const CANDIDATE_ADDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/
+const CANDIDATE_ADDR_MAX = 21 // '255.255.255.255:65535'
 
 type Env = Record<string, string | undefined>
 type AuthState = 'pending' | 'verifying' | 'authenticated' | 'anonymous'
@@ -164,6 +181,8 @@ interface Client {
   nativeActive: boolean
   /** 마지막 native-descriptor의 ssrc (릴레이 토큰 발급용) */
   nativeSsrc?: number
+  /** 마지막 native-descriptor의 엔진 공개키 (같은 방 안에서 이 연결·userId에 묶임, P1-1c) */
+  nativeKey?: string
   /** 메시지 순차 처리 체인 (비동기 auth/DB 조회 중 순서 보장) */
   chain: Promise<void>
   pending: number
@@ -221,6 +240,47 @@ export function parseMetronomeState(v: unknown): MetronomeState | null {
   return { running, bpm, beatsPerBar, startUs }
 }
 type LeaveReason = 'leave' | 'move' | 'close' | 'duplicate'
+
+/**
+ * descriptor.key 검증: 표준 base64(패딩 포함), 디코딩하면 정확히 32바이트(X25519 공개키).
+ * 엔진(net/peer.rs)은 STANDARD로 인코딩한다. 비정규 표기(마지막 문자의 남는 비트)로 같은 키를 다른 문자열로
+ * 보내 바인딩을 우회하지 못하게, 다시 인코딩한 값과 같아야 통과한다. 통과하면 키 문자열, 아니면 null.
+ */
+export function parseEngineKey(v: unknown): string | null {
+  if (typeof v !== 'string' || !ENGINE_KEY_B64_RE.test(v)) return null
+  const raw = Buffer.from(v, 'base64')
+  if (raw.length !== ENGINE_KEY_BYTES || raw.toString('base64') !== v) return null
+  return v
+}
+
+export interface EngineCandidate { kind: 'lan' | 'public'; addr: string }
+
+/**
+ * descriptor.candidates 검증과 재구성(PR #48 M1): 배열, 최대 MAX_ENGINE_CANDIDATES개, 각 원소는
+ * `{ kind: 'lan'|'public', addr: 'IPv4:port' }`. 원소의 다른 필드는 버리고 아는 필드만 새로 만든다.
+ * 옥텟 0..255, 포트 1..65535, 선행 0 표기는 거부(같은 주소를 다른 문자열로 보내지 못하게).
+ * 0.0.0.0·멀티캐스트·루프백 같은 의미 검사는 받는 쪽 엔진(validate_candidate)이 한다(루프백은 테스트 옵션으로 허용될 수 있음).
+ * 하나라도 틀리면 null.
+ */
+export function parseCandidates(v: unknown): EngineCandidate[] | null {
+  if (!Array.isArray(v) || v.length > MAX_ENGINE_CANDIDATES) return null
+  const out: EngineCandidate[] = []
+  for (const item of v) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+    const { kind, addr } = item as Record<string, unknown>
+    if (kind !== 'lan' && kind !== 'public') return null
+    if (typeof addr !== 'string' || addr.length > CANDIDATE_ADDR_MAX) return null
+    const m = CANDIDATE_ADDR_RE.exec(addr)
+    if (!m) return null
+    const parts = m.slice(1)
+    if (parts.some(p => p.length > 1 && p.startsWith('0'))) return null
+    const nums = parts.map(Number)
+    if (nums.slice(0, 4).some(n => n > 255)) return null
+    if (nums[4] < 1 || nums[4] > 65535) return null
+    out.push({ kind, addr })
+  }
+  return out
+}
 
 function send(ws: WebSocket, data: unknown) {
   if (ws.readyState === ws.OPEN) {
@@ -360,6 +420,13 @@ export function initializeWebSocket(
 
   // ---------- helpers ----------
 
+  /** 엔진 상태(descriptor 바인딩) 정리: native-leave·퇴장·방 이동 */
+  function clearNative(c: Client) {
+    c.nativeActive = false
+    c.nativeSsrc = undefined
+    c.nativeKey = undefined
+  }
+
   const isAuthenticated = (c: Client) => c.authState === 'authenticated' && !!c.userId
   /** 연주자 = 연주 중이거나 방장 */
   const isPerformer = (c: Client) => c.isPerforming || c.isHost
@@ -370,6 +437,7 @@ export function initializeWebSocket(
    * - 회수 수단이 없으므로 수명을 짧게(기본 120초) 두고 클라이언트가 갱신한다. 릴레이 등록은 토큰 만료를 넘지 않는다.
    * - expiresIn(남은 수명, 초)·serverNow를 함께 보낸다: 클라이언트는 자기 시계가 아니라 받은 시각 + expiresIn으로
    *   만료·갱신을 판단한다(시계가 어긋난 PC에서 토큰이 주기적으로 끊기지 않게, PR #10 M1).
+   * - bindKey: 토큰별 Bind MAC 키(relay-design 2.1.1). TLS로만 전달되어 경로상 공격자의 등록 가로채기를 막는다.
    */
   function sendRelayToken(c: Client) {
     if (!relayConfig || !c.roomId || !c.userId || c.nativeSsrc === undefined || !isPerformer(c)) return
@@ -379,6 +447,7 @@ export function initializeWebSocket(
     send(c.ws, {
       type: 'relay-token',
       token: token.toString('base64url'),
+      bindKey: deriveRelayBindKey(token, relayConfig.secret).toString('base64url'),
       addr: relayConfig.addr,
       ssrc: c.nativeSsrc,
       expiresAt,
@@ -394,6 +463,20 @@ export function initializeWebSocket(
       if (peerId === c.id) continue
       const peer = clients.get(peerId)
       if (peer && peer.nativeSsrc === ssrc && peer.userId !== c.userId) return true
+    }
+    return false
+  }
+
+  /**
+   * 같은 방의 다른 사용자(JWT userId 기준)가 이 엔진 공개키를 쓰고 있는지 (P1-1c: 공개키 위장·선점 방지).
+   * 세션 재개 유예 중인 연결도 방에 남아 있으므로 그 키는 계속 보호된다. 같은 userId(재접속·엔진 재시작)는 허용.
+   */
+  function keyTakenInRoom(c: Client, key: string): boolean {
+    if (!c.roomId) return false
+    for (const peerId of rooms.get(c.roomId) || []) {
+      if (peerId === c.id) continue
+      const peer = clients.get(peerId)
+      if (peer && peer.nativeKey === key && peer.userId !== c.userId) return true
     }
     return false
   }
@@ -915,8 +998,7 @@ export function initializeWebSocket(
         client.roomId = undefined
         client.isPerforming = false
         client.instrument = undefined
-        client.nativeActive = false
-        client.nativeSsrc = undefined
+        clearNative(client)
       }
       client.isHost = isHost
 
@@ -1057,21 +1139,35 @@ export function initializeWebSocket(
         if (!roomId || !isAuthenticated(client) || !isPerformer(client)) return
         const descriptor = msg.descriptor
         if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) return
-        const ssrc = (descriptor as Record<string, unknown>).ssrc
-        if (isValidSsrc(ssrc) && ssrcTakenInRoom(client, ssrc)) {
+        const d = descriptor as Record<string, unknown>
+        // 서버가 아는 필드(ssrc, key, candidates)를 모두 검증하고 그 값만으로 다시 구성한다(PR #48 M1)
+        const key = parseEngineKey(d.key)
+        const ssrc = d.ssrc
+        const candidates = parseCandidates(d.candidates)
+        if (!key || !isValidSsrc(ssrc) || !candidates) {
+          send(ws, { type: 'error', code: 'descriptor-invalid', message: '엔진 연결 정보가 올바르지 않습니다.' })
+          return
+        }
+        if (keyTakenInRoom(client, key)) {
+          // 같은 방의 다른 사용자가 이미 이 공개키로 등록했다: 위장·선점 시도. 중계하지 않는다.
+          // 정상 클라이언트가 이걸 받으면(키를 먼저 빼앗긴 경우) 엔진을 새 키로 다시 시작한다.
+          console.warn(`[NATIVE] key-conflict from ${id.slice(0, 8)} in room ${roomId.slice(0, 8)}`)
+          send(ws, { type: 'error', code: 'key-conflict', message: '같은 방의 다른 사용자가 이미 쓰는 엔진 키입니다.' })
+          return
+        }
+        if (ssrcTakenInRoom(client, ssrc)) {
           send(ws, { type: 'error', code: 'ssrc-conflict', message: '같은 방에서 이미 쓰는 ssrc입니다. 엔진을 다시 시작하세요.' })
           return
         }
         const prevSsrc = client.nativeSsrc
         client.nativeActive = true
-        if (isValidSsrc(ssrc)) {
-          client.nativeSsrc = ssrc
-          sendRelayToken(client)
-        }
+        client.nativeKey = key // 같은 사용자의 새 키(엔진 재시작)는 옛 바인딩을 덮어쓴다
+        client.nativeSsrc = ssrc
+        sendRelayToken(client)
         // 방장 엔진이 native-leave 없이 새로 떴다(ssrc가 바뀜, 예: ssrc-conflict 재시작): 메트로놈 startUs는 옛 엔진 시계
         // 기준이라 무의미하다 → 지우고 연주자들에게 정지를 알린다(PR #36 M1). 같은 엔진의 재알림(WS 재개·회신)은 ssrc가 같다.
         const hostMetro = metronomes.get(roomId)
-        if (hostMetro && hostMetro.hostId === id && prevSsrc !== undefined && isValidSsrc(ssrc) && ssrc !== prevSsrc) {
+        if (hostMetro && hostMetro.hostId === id && prevSsrc !== undefined && ssrc !== prevSsrc) {
           metronomes.delete(roomId)
           const stopped = { type: 'metronome', from: id, state: { ...hostMetro.state, running: false } }
           for (const peerId of rooms.get(roomId) || []) {
@@ -1085,7 +1181,8 @@ export function initializeWebSocket(
         if (metro && metro.hostId !== id && clients.get(metro.hostId)?.roomId === roomId) {
           send(ws, { type: 'metronome', from: metro.hostId, state: metro.state })
         }
-        const out = { type: 'native-descriptor', from: id, descriptor }
+        // 서버가 아는 필드만 다시 구성한다(클라이언트가 descriptor 안에 넣은 from/userId 등은 버림). from은 서버의 clientId
+        const out = { type: 'native-descriptor', from: id, descriptor: { ssrc, key, candidates } }
         if (msg.to !== undefined) {
           const target = getRoomPeer(client, msg.to)
           if (target && isPerformer(target)) send(target.ws, out)
@@ -1129,8 +1226,7 @@ export function initializeWebSocket(
 
       if (msg.type === 'native-leave') {
         if (!roomId || !isAuthenticated(client) || !(isPerformer(client) || client.nativeActive)) return
-        client.nativeActive = false
-        client.nativeSsrc = undefined
+        clearNative(client)
         // 방장 엔진이 내려가면 메트로놈도 끝난다(따르는 쪽은 native-leave를 받아 스스로 멈춘다)
         if (metronomes.get(roomId)?.hostId === id) metronomes.delete(roomId)
         for (const peerId of rooms.get(roomId) || []) {
@@ -1282,7 +1378,7 @@ export function initializeWebSocket(
         client.isPerforming = false
         client.instrument = undefined
         client.isHost = false
-        client.nativeActive = false
+        clearNative(client)
         return
       }
 
