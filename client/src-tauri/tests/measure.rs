@@ -441,8 +441,19 @@ fn echo_flow_consent_measure_auto_stop() {
 #[ignore = "realtime: 결정적 짝 engine::measure::tests::echo_probe_emits_frame_aligned_clicks_and_detects_them(클릭 송신·검출 시각 계산), echo_flow_consent_measure_auto_stop(흐름)"]
 fn echo_round_trip_reflects_proxy_delay() {
     let _g = RT_LOCK.lock();
-    let near = echo_once(Duration::from_millis(5));
-    let far = echo_once(Duration::from_millis(25));
+    // 판정이 Unstable이면 한 번 다시 잰다(앱도 "다시 재세요"라고 안내한다). 호스티드 러너에서 6회 중 한 회차만 ~4ms 일찍
+    // 잡혀 흩어짐이 5.1~5.8ms로 상한(`ECHO_UNSTABLE_SPREAD_MS` 5ms)을 넘는 일이 최근 CI 17회 중 4회 있었다(나머지 회차는
+    // 1~3ms, 왕복 차·편도 차는 통과). 두 번 연속 Unstable이거나 검출이 모자라면 그대로 실패한다.
+    let measure = |one_way_ms: u64| {
+        let r = echo_once(Duration::from_millis(one_way_ms));
+        if r.verdict == MeasureVerdict::Unstable && r.detected_runs >= 5 {
+            eprintln!("에코 재측정(편도 {one_way_ms}ms, 첫 측정 Unstable): {:?}", r.runs);
+            return echo_once(Duration::from_millis(one_way_ms));
+        }
+        r
+    };
+    let near = measure(5);
+    let far = measure(25);
     for r in [&near, &far] {
         eprintln!(
             "에코: 왕복 {:?} 편도 {:?} 핑 {:?} 지터 {} 상대 {:.3} 잔차 {:?} 입→귀 {:?} {:?}",
