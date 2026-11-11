@@ -1349,25 +1349,26 @@ impl Worker {
                 return;
             };
             let mut jb = peer.jitter.lock();
-            let before = marking.then(|| jb.stats());
+            let before = marking.then(|| jb.mark_counters());
             let ev = f.service(&mut jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == peer.id && p.peer_ssrc == peer.ssrc));
-            if let Some(b) = before {
+            if let Some((c0, d0)) = before {
                 // 녹음 마커(P2-4a): 이번 반복에 은닉·버림이 늘었으면, 방금 링에 넣은 꼬리(= 다음 콜백 시작 + 선행량)의
-                // 출력 타임라인 위치로 기록한다. 링 선행량 추정이라 대략 ±1 콜백 정확도다.
-                let a = jb.stats();
-                let to_dev = |n48: u64| (n48 * t.out_rate as u64 / INTERNAL_RATE as u64) as u32;
+                // 출력 타임라인 위치로 기록한다. 링 선행량 추정이라 대략 ±1 콜백으로 추정한다(위치 대조 측정은 아직 없음).
+                let (c1, d1) = jb.mark_counters();
+                let to_dev = |n48: u64| n48 * t.out_rate as u64 / INTERNAL_RATE as u64;
                 let fs = jb.frame_samples() as u64;
                 let tail = played.load(Ordering::Relaxed) + f.dev_ahead(prod) as u64;
-                let mark = |kind, frames: u32, span: bool| {
-                    let start = if span { tail.saturating_sub(u64::from(frames)) } else { tail };
+                let mark = |kind, frames: u64, span: bool| {
+                    let start = if span { tail.saturating_sub(frames) } else { tail };
                     marks.push(MarkEvent { ssrc: peer.ssrc, kind, start, frames });
                 };
-                if a.concealed > b.concealed {
-                    mark(MarkKind::Conceal, to_dev((a.concealed - b.concealed) * fs), true);
+                if c1 > c0 {
+                    mark(MarkKind::Conceal, to_dev((c1 - c0) * fs), true);
                 }
-                let dropped = (a.dropped_frames - b.dropped_frames) * fs;
+                // `skipped_frames`는 이미 장치 프레임이다
+                let dropped = d1.saturating_sub(d0) * fs;
                 if dropped > 0 || ev.skipped_frames > 0 {
-                    mark(MarkKind::Drop, to_dev(dropped) + ev.skipped_frames as u32, false);
+                    mark(MarkKind::Drop, to_dev(dropped) + ev.skipped_frames, false);
                 }
             }
             drop(jb);

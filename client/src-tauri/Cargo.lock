@@ -187,6 +187,7 @@ dependencies = [
  "hmac",
  "if-addrs",
  "log",
+ "md-5",
  "opus",
  "parking_lot",
  "rand",

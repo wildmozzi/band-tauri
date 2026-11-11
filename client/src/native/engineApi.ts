@@ -389,7 +389,9 @@ export interface RecordMarkersFile {
   mergeGapFrames: number
   accuracyFrames: number
   lostEvents: number
-  tracks: { file: string; name: string; kind: RecordTrack['kind']; peerId: string | null; markers: RecordMarker[] }[]
+  /** 트랙·종류별 구간 상한(1만)을 넘어 세기만 한 이벤트 수. 옛 엔진에는 없다. */
+  overflowEvents?: number
+  tracks:{ file: string; name: string; kind: RecordTrack['kind']; peerId: string | null; markers: RecordMarker[] }[]
 }
 
 /**

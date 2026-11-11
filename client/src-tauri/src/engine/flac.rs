@@ -294,12 +294,15 @@ mod tests {
         assert_eq!(info.samples, Some(total_frames));
         assert_eq!(info.max_block_size, BLOCK_FRAMES as u16);
         assert!(info.min_frame_size.is_some() && info.max_frame_size.is_some());
-        assert_ne!(info.md5sum, [0; 16]);
         assert_eq!(s.len() as u64, total_frames * 2);
         let mut want: Vec<i32> = sig.iter().map(|&v| q24(v)).collect();
         want.extend([8_388_607, 0]);
         want.extend([0; 20]);
         assert_eq!(s, want);
+        // claxon은 MD5를 검증하지 않으므로 규격대로(인터리브 샘플을 3바이트 LE로) 따로 계산해 비교한다(PR #62 L2).
+        let pcm: Vec<u8> = want.iter().flat_map(|&v| v.to_le_bytes().into_iter().take(3)).collect();
+        let md5: [u8; 16] = <md5::Md5 as md5::Digest>::digest(&pcm).into();
+        assert_eq!(info.md5sum, md5, "STREAMINFO MD5 = 디코드한 PCM의 MD5");
         // 사인파는 WAV 24보다 확실히 작다
         assert!(size < total_frames * 6 * 3 / 4, "{size}");
         std::fs::remove_dir_all(&dir).ok();

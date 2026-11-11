@@ -79,7 +79,7 @@ pub struct MarkEvent {
     pub ssrc: u32,
     pub kind: MarkKind,
     pub start: u64,
-    pub frames: u32,
+    pub frames: u64,
 }
 
 /// 워커 → 녹음 쓰기 스레드 마커 큐. 녹음 중에만 켜지고, 시작할 때 용량을 미리 잡는다. 워커는 `try_lock`으로
@@ -360,11 +360,78 @@ pub struct MarkersFile {
     pub accuracy_frames: u64,
     /// 큐가 가득 차 잃은 워커 이벤트 수.
     pub lost_events: u64,
+    /// 트랙·종류별 구간 상한(`MARK_TRACK_CAP`)을 넘어 구간으로 남기지 못하고 세기만 한 이벤트 수(PR #62 M2).
+    pub overflow_events: u64,
     pub tracks: Vec<MarkerTrack>,
+}
+
+/// 트랙·종류별로 남기는 구간 상한. 넘으면 이벤트 수만 `overflowEvents`에 센다(긴 녹음 내내 끊기는 경우 메모리 상한).
+/// 100ms 안의 이벤트는 바로 합치므로, 이만큼 차려면 100ms 넘게 떨어진 끊김이 1만 번 있어야 한다.
+const MARK_TRACK_CAP: usize = 10_000;
+
+/// 합치는 중인 구간 하나(절대 타임라인 위치).
+#[derive(Debug, Clone, Copy)]
+struct MarkIv {
+    kind: MarkKind,
+    start: u64,
+    end: u64,
+    frames: u64,
+    events: u32,
+}
+
+/// 트랙 하나의 마커 누적(PR #62 M2). 종류마다 열린 구간 하나를 두고 들어오는 대로 합치며, `gap` 넘게 떨어지면 닫는다.
+/// 메모리는 이벤트 수가 아니라 구간 수에 비례하고 `MARK_TRACK_CAP`으로 막힌다.
+#[derive(Debug, Default)]
+struct MarkAcc {
+    open: [Option<MarkIv>; 3],
+    closed: Vec<MarkIv>,
+    /// 종류별 닫힌 구간 수(상한 판정용).
+    count: [usize; 3],
+    overflow: u64,
+}
+
+impl MarkAcc {
+    fn add(&mut self, kind: MarkKind, start: u64, frames: u64, gap: u64) {
+        let span = if kind == MarkKind::Drop { 0 } else { frames };
+        let end = start.saturating_add(span);
+        let k = kind as usize;
+        if let Some(o) = &mut self.open[k] {
+            // 열린 구간과 `gap` 안에서 겹치면(순서가 조금 뒤바뀐 것 포함) 늘린다
+            if start <= o.end.saturating_add(gap) && end.saturating_add(gap) >= o.start {
+                o.start = o.start.min(start);
+                o.end = o.end.max(end);
+                o.frames = o.frames.saturating_add(frames);
+                o.events = o.events.saturating_add(1);
+                return;
+            }
+        }
+        if let Some(done) = self.open[k].take() {
+            self.close(done);
+        }
+        self.open[k] = Some(MarkIv { kind, start, end, frames, events: 1 });
+    }
+
+    fn close(&mut self, iv: MarkIv) {
+        let k = iv.kind as usize;
+        if self.count[k] < MARK_TRACK_CAP {
+            self.count[k] += 1;
+            self.closed.push(iv);
+        } else {
+            self.overflow += u64::from(iv.events);
+        }
+    }
+
+    fn intervals(&self) -> impl Iterator<Item = &MarkIv> {
+        self.closed.iter().chain(self.open.iter().flatten())
+    }
 }
 
 /// 같은 종류 이벤트를 이만큼(초) 안이면 한 구간으로 합친다.
 const MARK_MERGE_SEC: f64 = 0.1;
+
+fn mark_gap(rate: u32) -> u64 {
+    (rate as f64 * MARK_MERGE_SEC) as u64
+}
 /// 워커 이벤트 위치 오차(초, 대략): 소스 링·리샘플러 선행량 추정과 콜백 경계.
 const MARK_ACCURACY_SEC: f64 = 0.01;
 
@@ -418,32 +485,31 @@ impl TrackWriter {
     }
 }
 
-/// 마커 이벤트(트랙 키, 절대 타임라인 위치)를 트랙별 구간으로 합친다. `origin`은 녹음 첫 블록 위치, `end`는 녹음 길이.
-fn merge_marks(events: &[(TrackKey, MarkKind, u64, u64)], key: &TrackKey, origin: u64, end: u64, rate: u32) -> Vec<RecordMarker> {
-    let gap = (rate as f64 * MARK_MERGE_SEC) as u64;
-    let mut v: Vec<(MarkKind, u64, u64, u64)> = events
-        .iter()
-        .filter(|e| &e.0 == key)
-        .filter_map(|&(_, kind, pos, frames)| {
-            let span = if kind == MarkKind::Drop { 0 } else { frames };
+/// 트랙 하나의 누적 구간(절대 타임라인 위치)을 녹음 기준 구간으로 자르고 다시 합친다(순서가 뒤바뀌어 따로 닫힌 것 정리).
+/// `origin`은 녹음 첫 블록 위치, `end`는 녹음 길이.
+fn merge_marks(acc: &MarkAcc, origin: u64, end: u64, rate: u32) -> Vec<RecordMarker> {
+    let gap = mark_gap(rate);
+    let mut v: Vec<MarkIv> = acc
+        .intervals()
+        .filter_map(|iv| {
             // 녹음 앞(시작 전 이벤트)은 녹음 안으로 자르고, 녹음 뒤는 버린다.
-            let s = pos.saturating_sub(origin);
-            let e = (pos + span).saturating_sub(origin).min(end);
-            (s < end).then_some((kind, s, e.max(s), frames))
+            let s = iv.start.saturating_sub(origin);
+            let e = iv.end.saturating_sub(origin).min(end);
+            (s < end).then_some(MarkIv { start: s, end: e.max(s), ..*iv })
         })
         .collect();
-    v.sort_by_key(|x| (x.1, x.0 as u8));
+    v.sort_by_key(|x| (x.start, x.kind as u8));
     let mut out: Vec<RecordMarker> = Vec::new();
-    for (kind, s, e, frames) in v {
-        if let Some(m) = out.iter_mut().rev().find(|m| m.kind == kind) {
-            if s <= m.end + gap {
-                m.end = m.end.max(e);
-                m.frames += frames;
-                m.events += 1;
+    for iv in v {
+        if let Some(m) = out.iter_mut().rev().find(|m| m.kind == iv.kind) {
+            if iv.start <= m.end + gap {
+                m.end = m.end.max(iv.end);
+                m.frames = m.frames.saturating_add(iv.frames);
+                m.events = m.events.saturating_add(iv.events);
                 continue;
             }
         }
-        out.push(RecordMarker { kind, start: s, end: e, start_sec: 0.0, end_sec: 0.0, frames, events: 1 });
+        out.push(RecordMarker { kind: iv.kind, start: iv.start, end: iv.end, start_sec: 0.0, end_sec: 0.0, frames: iv.frames, events: iv.events });
     }
     out.sort_by_key(|m| (m.start, m.kind as u8));
     let r = rate.max(1) as f64;
@@ -683,8 +749,10 @@ struct Writer {
     /// 워커 마커 큐와 바꿔 쓰는 버퍼(용량 `MARK_CAP`).
     sink: Arc<MarkSink>,
     mark_swap: Vec<MarkEvent>,
-    /// 모은 마커(트랙 키, 종류, 절대 타임라인 위치, 프레임).
-    marks: Vec<(TrackKey, MarkKind, u64, u64)>,
+    /// 트랙 키별 마커 누적(들어오는 대로 합침, PR #62 M2).
+    marks: Vec<(TrackKey, MarkAcc)>,
+    /// ssrc → `marks` 인덱스(이벤트마다 트랙 키를 만들지 않게).
+    mark_ssrc: HashMap<u32, usize>,
 }
 
 impl Writer {
@@ -723,6 +791,7 @@ impl Writer {
             sink,
             mark_swap: Vec::with_capacity(MARK_CAP),
             marks: Vec::new(),
+            mark_ssrc: HashMap::new(),
         }
     }
 
@@ -742,11 +811,35 @@ impl Writer {
         }
         let evs = std::mem::take(&mut self.mark_swap);
         for e in &evs {
-            let key = self.peer_key(e.ssrc);
-            self.marks.push((key, e.kind, e.start, u64::from(e.frames)));
+            let i = self.mark_peer(e.ssrc);
+            self.add_mark(i, e.kind, e.start, e.frames);
         }
         self.mark_swap = evs;
         self.mark_swap.clear();
+    }
+
+    /// 트랙 키의 마커 누적 인덱스(없으면 만든다). 트랙은 몇 개뿐이라 선형 탐색.
+    fn mark_slot(&mut self, key: TrackKey) -> usize {
+        if let Some(i) = self.marks.iter().position(|(k, _)| *k == key) {
+            return i;
+        }
+        self.marks.push((key, MarkAcc::default()));
+        self.marks.len() - 1
+    }
+
+    /// 피어 ssrc의 마커 누적 인덱스. 트랙 키(peerId)는 ssrc마다 처음 한 번만 정한다.
+    fn mark_peer(&mut self, ssrc: u32) -> usize {
+        if let Some(&i) = self.mark_ssrc.get(&ssrc) {
+            return i;
+        }
+        let i = self.mark_slot(self.peer_key(ssrc));
+        self.mark_ssrc.insert(ssrc, i);
+        i
+    }
+
+    fn add_mark(&mut self, i: usize, kind: MarkKind, start: u64, frames: u64) {
+        let gap = mark_gap(self.rate);
+        self.marks[i].1.add(kind, start, frames, gap);
     }
 
     fn run(mut self, stop: &AtomicBool) -> RecordSummary {
@@ -792,8 +885,8 @@ impl Writer {
                 // 언더런 마커(P2-4a): 콜백이 이 청크 끝에서 0으로 채운 만큼
                 let short = u64::from(b.short[slot]).min(b.frames as u64);
                 if short > 0 {
-                    let k = if slot == LOCAL_SOURCE { TrackKey::Local } else { self.peer_key(b.occ[slot]) };
-                    self.marks.push((k, MarkKind::Underrun, b.pos + b.frames as u64 - short, short));
+                    let i = if slot == LOCAL_SOURCE { self.mark_slot(TrackKey::Local) } else { self.mark_peer(b.occ[slot]) };
+                    self.add_mark(i, MarkKind::Underrun, b.pos + b.frames as u64 - short, short);
                 }
             }
             if b.mix {
@@ -933,15 +1026,19 @@ impl Writer {
                 name: t.meta.name.clone(),
                 kind: t.meta.kind,
                 peer_id: t.meta.peer_id.clone(),
-                markers: if t.key == TrackKey::Mix { Vec::new() } else { merge_marks(&self.marks, &t.key, origin, end, self.rate) },
+                markers: match self.marks.iter().find(|(k, _)| *k == t.key) {
+                    Some((_, acc)) if t.key != TrackKey::Mix => merge_marks(acc, origin, end, self.rate),
+                    _ => Vec::new(),
+                },
             })
             .collect();
         let count = tracks.iter().map(|t| t.markers.len() as u32).sum();
         let file = MarkersFile {
             sample_rate: self.rate,
-            merge_gap_frames: (self.rate as f64 * MARK_MERGE_SEC) as u64,
+            merge_gap_frames: mark_gap(self.rate),
             accuracy_frames: (self.rate as f64 * MARK_ACCURACY_SEC) as u64,
             lost_events: self.sink.lost.load(Ordering::Relaxed),
+            overflow_events: self.marks.iter().map(|(_, a)| a.overflow).sum(),
             tracks,
         };
         let name = "markers.json";
@@ -1370,6 +1467,7 @@ mod tests {
         let j: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("markers.json")).unwrap()).unwrap();
         assert_eq!(j["sampleRate"], 48_000);
         assert_eq!(j["lostEvents"], 0);
+        assert_eq!(j["overflowEvents"], 0);
         let track = |file: &str| j["tracks"].as_array().unwrap().iter().find(|t| t["file"] == file).cloned().unwrap_or_else(|| panic!("{file}: {j}"));
         let ms = |t: &serde_json::Value| -> Vec<(String, u64, u64, u64, u64)> {
             t["markers"]
@@ -1393,6 +1491,39 @@ mod tests {
         assert!(ms(&track("00-mix.wav")).is_empty(), "믹스 트랙에는 마커가 없다");
         assert_eq!(sum.markers, 6);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PR #62 M2: 마커는 들어오는 대로 합쳐 메모리가 이벤트 수가 아니라 구간 수에 비례하고, 구간은 상한에서 멈춘다.
+    #[test]
+    fn mark_acc_merges_online_and_caps() {
+        let gap = mark_gap(48_000);
+        let mut a = MarkAcc::default();
+        // 1시간 내내 128프레임 청크마다 언더런(135만 이벤트) → 열린 구간 하나
+        let n = 48_000u64 * 3600 / 128;
+        for k in 0..n {
+            a.add(MarkKind::Underrun, k * 128 + 100, 28, gap);
+        }
+        assert!(a.closed.is_empty() && a.closed.capacity() == 0, "닫힌 구간이 쌓이지 않는다");
+        let m = merge_marks(&a, 0, n * 128, 48_000);
+        assert_eq!(m.len(), 1);
+        assert_eq!((m[0].start, m[0].end, m[0].frames, u64::from(m[0].events)), (100, (n - 1) * 128 + 128, n * 28, n));
+        // 순서가 조금 뒤바뀐 이벤트도 열린 구간에 합친다
+        let mut b = MarkAcc::default();
+        b.add(MarkKind::Conceal, 10_000, 480, gap);
+        b.add(MarkKind::Conceal, 9_000, 480, gap);
+        b.add(MarkKind::Drop, 9_500, 960, gap);
+        assert_eq!(b.closed.len(), 0);
+        let m = merge_marks(&b, 0, 1 << 30, 48_000);
+        assert_eq!(m.iter().map(|m| (m.kind, m.start, m.end, m.events)).collect::<Vec<_>>(), vec![(MarkKind::Conceal, 9_000, 10_480, 2), (MarkKind::Drop, 9_500, 9_500, 1)]);
+        // 100ms 넘게 떨어진 끊김이 상한보다 많으면 상한까지만 구간으로 남기고 나머지는 센다
+        let mut c = MarkAcc::default();
+        let extra = 25u64;
+        for k in 0..(MARK_TRACK_CAP as u64 + 1 + extra) {
+            c.add(MarkKind::Conceal, k * gap * 3, 480, gap);
+        }
+        assert_eq!(c.closed.len(), MARK_TRACK_CAP);
+        assert_eq!(c.overflow, extra);
+        assert_eq!(merge_marks(&c, 0, u64::MAX, 48_000).len(), MARK_TRACK_CAP + 1, "닫힌 상한 + 열린 하나");
     }
 
     /// PR #47 L4: 락 밖에서 마무리 중인 정지가 있으면 `waiter`가 그것이 끝날 때까지 기다린다.

@@ -72,6 +72,8 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 # FLAC 녹음 파일을 표준 디코더로 다시 읽어 비교(P2-4a)
 claxon = "0.4"
+# FLAC STREAMINFO MD5를 인코더와 따로 계산해 비교(PR #62 L2). flacenc가 이미 쓰는 크레이트다.
+md-5 = "0.10"
 # 릴레이 폴백 통합 테스트(tests/relay.rs): 실제 릴레이를 같은 프로세스에서 띄운다
 band-relay = { path = "../../relay" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time"] }
@@ -83,6 +85,18 @@ custom-protocol = ["tauri/custom-protocol"]
 devtools = ["tauri/devtools"]
 # ASIO 지원 (CPAL_ASIO_DIR에 Steinberg ASIO SDK 필요). 기본 빌드는 WASAPI만.
 asio = ["cpal/asio"]
+
+# 디버그 빌드(dev:tauri)에서도 FLAC 녹음 인코딩이 실시간을 넉넉히 넘도록 인코더와 그 해시·CRC만 최적화한다(PR #62 M1).
+# opt-level 0이면 30초 스테레오 24비트 인코딩이 실시간 4배뿐이라 9트랙(소스 8 + 믹스) 녹음이 링을 넘친다.
+# 디버그 정보 설정(워크트리 공유 .cargo/config.toml의 profile.dev)과는 키가 겹치지 않는다.
+[profile.dev.package.flacenc]
+opt-level = 3
+
+[profile.dev.package.md-5]
+opt-level = 3
+
+[profile.dev.package.crc]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

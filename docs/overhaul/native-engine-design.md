@@ -214,13 +214,16 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
   - STREAMINFO(총 샘플·프레임 크기 범위·MD5)는 마무리할 때 제자리에서 확정한다. 쓰는 동안에는 인코딩한 바이트를 1MB 또는 5초마다 내리고 그때 총 샘플 수를 고쳐 쓴다(MD5 0 = 계산 안 함) — 앱이 죽어도 그때까지는 표준 디코더로 읽힌다. 총 길이 제한은 2^36 샘플(48k에서 약 16일)이라 RF64 같은 전환이 없다.
   - 쓰기 실패(디스크 가득): 마지막으로 다 쓴 1MB 묶음의 끝(프레임 경계)을 기억해 두고, 파일을 거기서 자른 뒤 STREAMINFO 총 샘플 수를 그만큼으로 고친다(MD5 0, 프레임 크기 범위 0 = 모름). WAV의 PR #47 M1과 같은 원칙.
   - 속도: 30초 스테레오 24비트(사인 + 잡음) 인코딩 0.61초 = 실시간 약 49배(릴리스 빌드, `engine::flac::tests::flac_encode_speed`). 최대 9트랙(소스 8 + 믹스)도 쓰기 스레드 하나로 5배 넘게 여유가 있고, 넘치면 녹음 링(3초)이 받는다. 크기는 잡음 섞인 사인에서 WAV 24의 약 73%, 실제 연주는 보통 절반 안팎.
+  - 디버그 빌드(`npm run dev:tauri`): 의존 크레이트가 opt-level 0이면 같은 측정이 실시간 4배뿐이라 9트랙이면 링이 넘친다. 그래서 `Cargo.toml`에 `[profile.dev.package.{flacenc,md-5,crc}] opt-level = 3`을 둔다(PR #62 M1). 그 뒤 디버그 측정은 0.30초 = 실시간 약 100배(릴리스는 opt-level "s"라 49배).
 
 **마커 사이드카**(`markers.json`, P2-4a): 녹음 뒤 끊김 구간을 찾을 수 있게 트랙마다 은닉·버림·언더런 구간을 녹음 시작 기준 프레임(= 트랙 파일 샘플 위치)으로 남긴다.
 - `underrun`: 출력 콜백이 소스 링 부족으로 0을 채운 곳. 청크 머리 `short`로 오므로 위치가 정확하다(RT는 머리 칸만 채움 — 원자값·할당 없음). 로컬 트랙에도 생길 수 있다.
-- `conceal`: 지터 버퍼 은닉(손실 PLC·FEC, 늦은 패킷 자리 언더런 은닉). 워커가 녹음 중에만(`MarkSink.active()`) 피어마다 `service` 앞뒤의 `JitterStats.concealed` 증가분(× 패킷 길이 → 장치 프레임)을 재고, 방금 링에 넣은 꼬리 위치(`out_played_frames` + 소스 링·리샘플러 선행량)를 끝으로 기록한다. 선행량 추정이라 대략 ±1 콜백(`accuracyFrames`, 10ms로 표기) 정확도다. 지터 알고리즘(`jitter.rs`)은 바꾸지 않았다(읽기만).
+- `conceal`: 지터 버퍼 은닉(손실 PLC·FEC, 늦은 패킷 자리 언더런 은닉). 워커가 녹음 중에만(`MarkSink.active()`) 피어마다 `service` 앞뒤의 `JitterStats.concealed` 증가분(× 패킷 길이 → 장치 프레임)을 재고, 방금 링에 넣은 꼬리 위치(`out_played_frames` + 소스 링·리샘플러 선행량)를 끝으로 기록한다. 선행량 추정이라 정확도는 대략 ±1 콜백으로 **추정**한다(`accuracyFrames`, 10ms로 표기). 녹음 파일의 실제 은닉 위치와 대조해 잰 값은 아직 없다(오차 원인: 워커가 읽는 사이 진행 중인 콜백의 소비, 리샘플러 대기분, 한 반복에 여러 패킷). 카운터는 `JitterBuffer::mark_counters()`(누적 은닉·버림 카운터만, 표시용 계산 없음)로 읽는다. 지터 알고리즘은 바꾸지 않았다.
 - `drop`: 지연을 줄이려 버린 패킷 프레임(`JitterStats.dropped_frames` 증가분)과 출력 언더런 뒤 스트림 건너뛰기(`skipped_frames`). 길이 없는 지점이라 `start = end`, `frames`에 버린 양.
 - 전달: 워커 → `MarkSink`(녹음 시작 때 용량 1024를 미리 잡은 `Vec`을 `try_lock`으로 넣기만, 가득 차거나 잠겨 있으면 버리고 `lostEvents`만 올림 — 워커 쪽 할당 없음) → 쓰기 스레드가 20ms마다 버퍼를 통째로 바꿔 가져간다. ssrc → peerId는 트랙 이름과 같은 resolver로 정한다.
-- 정지 때 트랙별로 같은 종류를 100ms 안이면 한 구간으로 합치고(`frames`·`events`는 합), 녹음 앞 이벤트는 0으로 자르고 녹음 끝 뒤는 버린다. 믹스 트랙에는 마커가 없다. 형식: `{ sampleRate, mergeGapFrames, accuracyFrames, lostEvents, tracks: [{ file, name, kind, peerId, markers: [{ kind, start, end, startSec, endSec, frames, events }] }] }`. `RecordSummary.markers`(구간 수)·`markersFile`로 요약에도 남는다.
+- 합치기: 쓰기 스레드가 이벤트를 받는 대로 트랙·종류별 열린 구간 하나에 합치고(100ms 안이면 늘림, 넘으면 닫음), 메모리는 이벤트 수가 아니라 구간 수에 비례한다(PR #62 M2 — 입력이 끊긴 채 1시간이면 이벤트가 135만 개). 닫힌 구간은 트랙·종류마다 1만 개(`MARK_TRACK_CAP`)까지만 두고, 넘으면 이벤트 수만 `overflowEvents`에 센다. ssrc → 트랙 키는 ssrc마다 한 번만 정한다(이벤트마다 문자열 할당 없음).
+- 정지 때 트랙별로 구간을 녹음 기준으로 자르고 다시 합친다(`frames`·`events`는 합, 녹음 앞은 0으로 자르고 녹음 끝 뒤는 버림). 믹스 트랙에는 마커가 없다. 형식: `{ sampleRate, mergeGapFrames, accuracyFrames, lostEvents, overflowEvents, tracks: [{ file, name, kind, peerId, markers: [{ kind, start, end, startSec, endSec, frames, events }] }] }`. `RecordSummary.markers`(구간 수)·`markersFile`로 요약에도 남는다.
+- 개인정보: `peerId`는 사용자 id 원문이다. `session.json`의 `RecordTrack.peerId`와 같은 값이라 새로 노출되는 것은 아니고, 네트워크 식별자(ssrc·IP)는 넣지 않는다. 녹음 폴더는 공유되기 쉬우므로 두 사이드카를 가명(해시)으로 바꿀지는 후속 과제다.
 
 **저장 폴더**: 폴더는 Rust 폴더 대화상자(`engine_record_pick_folder`)로만 정한다(프론트가 임의 경로를 넘기지 않음, `diag_export`와 같은 원칙). 고른 폴더는 앱 설정 폴더 `recording.json`에 남고, 고른 적이 없으면 음악 폴더/`Band Recordings`다. 세션 폴더 이름은 `RecordOptions.name`(Windows 금지 문자 → `_`, 예약 이름 앞에 `_`, 60자) 또는 `band-rec-<UTC 시각>Z`이고, 같은 이름이 있으면 ` (2)`를 붙인다.
 
@@ -376,7 +379,7 @@ interface RecordStats { folder: string; format: RecordFormat; sampleRate: number
 interface RecordTrack { kind: 'local' | 'peer' | 'mix'; name: string; file: string; peerId: string | null }
 interface RecordSummary { folder: string; format: RecordFormat; sampleRate: number; channels: number; durationSec: number; bytes: number; droppedFrames: number; startedAtMs: number; tracks: RecordTrack[]; error: string | null; markers: number; markersFile: string | null }  // markers·markersFile: P2-4a(1.5절 "마커 사이드카")
 interface RecordMarker { kind: 'conceal' | 'drop' | 'underrun'; start: number; end: number; startSec: number; endSec: number; frames: number; events: number }  // markers.json 구간(녹음 시작 기준 프레임)
-interface RecordMarkersFile { sampleRate: number; mergeGapFrames: number; accuracyFrames: number; lostEvents: number; tracks: { file: string; name: string; kind: RecordTrack['kind']; peerId: string | null; markers: RecordMarker[] }[] }
+interface RecordMarkersFile { sampleRate: number; mergeGapFrames: number; accuracyFrames: number; lostEvents: number; overflowEvents?: number; tracks: { file: string; name: string; kind: RecordTrack['kind']; peerId: string | null; markers: RecordMarker[] }[] }
 interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
 interface MetronomePlan { running: boolean; bpm: number; beatsPerBar: number; startUs: number; refPeerId: string | null }
 interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; outputLatencyMs: number | null; outputLatencySource: 'driver' | 'loopback' | null; refClockUnsupported: boolean; clockExtrapolationMs: number | null }
