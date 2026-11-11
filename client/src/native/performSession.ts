@@ -361,8 +361,17 @@ export class PerformSession {
   /** 서버 쪽 세션은 그대로 두고 엔진만 새로 시작(새 clientId 또는 새 ssrc) */
   private async restart(): Promise<void> {
     const last = this.lastStart
+    // 방장이 켠 메트로놈: startUs는 엔진 시계 기준이라 새 엔진에서는 의미가 없다(PR #36 M1).
+    // 먼저 정지를 알리고(따르는 쪽이 옛 startUs로 계속 돌지 않게), 새 엔진이 뜨면 같은 BPM·박자로 새 박 0을 알린다.
+    const m = this.state.metronome
+    const hosted = m && m.leaderId === null && m.running ? { bpm: m.bpm, beatsPerBar: m.beatsPerBar } : null
+    if (hosted) {
+      this.env.send({ type: 'metronome', state: { running: false, bpm: hosted.bpm, beatsPerBar: hosted.beatsPerBar, startUs: 0 } })
+    }
     await this.stop({ notify: false })
-    if (last) await this.start(last)
+    if (!last) return
+    const ok = await this.start(last)
+    if (ok && hosted) await this.setHostMetronome(true, hosted.bpm, hosted.beatsPerBar)
   }
 
   // ---------------------------------------------------------------- 릴레이 (P1-4b)

@@ -14,27 +14,43 @@ import {
  * 공유 메트로놈(P2-3). 방장은 BPM·박자·시작/정지, 모든 연주자는 내 클릭 볼륨·뮤트.
  * 클릭은 각자 엔진이 지연을 보정해 로컬에서 만든다(네트워크로 보내지 않음, 방송·녹음에도 없음).
  */
+/** 따르기 시작 후 이 시간 안에 시계가 안 맞으면 실패 안내 */
+const SYNC_TIMEOUT_MS = 5000
+
 export function MetronomePanel({ isHost }: { isHost: boolean }) {
-  const { metronome, setHostMetronome, metronomeVolume, metronomeMuted, setMetronomeVolume, engineStats } = useRoom()
-  const [bpm, setBpm] = useState(DEFAULT_METRONOME_BPM)
+  const { metronome, setHostMetronome, metronomeVolume, metronomeMuted, setMetronomeVolume, engineStats, isPerforming } = useRoom()
+  // 입력 중에는 문자열로 두고(빈 칸 = 0이 상태로 들어가지 않게), 적용·blur 때 범위로 자른다(PR #36 L4)
+  const [bpmText, setBpmText] = useState(String(DEFAULT_METRONOME_BPM))
+  const bpmValid = bpmText.trim() !== '' && Number.isFinite(Number(bpmText))
+  const bpm = bpmValid ? clampBpm(Number(bpmText)) : (metronome?.bpm ?? DEFAULT_METRONOME_BPM)
   const [beats, setBeats] = useState(DEFAULT_METRONOME_BEATS)
   const [busy, setBusy] = useState(false)
   const running = metronome?.running ?? false
   const following = running && metronome?.leaderId != null
   const synced = engineStats?.metronome?.synced ?? false
+  // 따르기 시작한 뒤 한참 지나도 시계 표본이 없으면(옛 엔진 방장·연결 문제) 안내를 바꾼다(PR #36 L2)
+  const [syncTimedOut, setSyncTimedOut] = useState(false)
+  const waitingSync = following && !synced
+  useEffect(() => {
+    setSyncTimedOut(false)
+    if (!waitingSync) return
+    const t = setTimeout(() => setSyncTimedOut(true), SYNC_TIMEOUT_MS)
+    return () => clearTimeout(t)
+  }, [waitingSync])
 
   // 따르는 쪽: 방장 설정을 그대로 보여 준다
   useEffect(() => {
     if (metronome) {
-      setBpm(metronome.bpm)
+      setBpmText(String(metronome.bpm))
       setBeats(metronome.beatsPerBar)
     }
   }, [metronome])
 
-  const apply = async (on: boolean, nextBpm = bpm, nextBeats = beats) => {
+  const apply = async (on: boolean) => {
     setBusy(true)
+    setBpmText(String(bpm))
     try {
-      await setHostMetronome(on, clampBpm(nextBpm), clampBeats(nextBeats))
+      await setHostMetronome(on, bpm, clampBeats(beats))
     } finally {
       setBusy(false)
     }
@@ -42,8 +58,10 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
 
   const status = !running
     ? '꺼짐'
-    : following && !synced
-      ? '방장 시계 맞추는 중…'
+    : waitingSync
+      ? syncTimedOut
+        ? '방장과 시계를 맞추지 못했습니다(연결·앱 버전 확인)'
+        : '방장 시계 맞추는 중…'
       : `${metronome?.bpm ?? bpm} BPM · ${metronome?.beatsPerBar ?? beats}박`
 
   return (
@@ -64,9 +82,9 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
               type="number"
               min={METRONOME_MIN_BPM}
               max={METRONOME_MAX_BPM}
-              value={bpm}
-              onChange={(e) => setBpm(Number(e.target.value))}
-              onBlur={() => setBpm((v) => clampBpm(v))}
+              value={bpmText}
+              onChange={(e) => setBpmText(e.target.value)}
+              onBlur={() => setBpmText(String(bpm))}
             />
           </label>
           <label className="metronome-field">
@@ -78,11 +96,12 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
             </select>
           </label>
           {running && (bpm !== metronome?.bpm || beats !== metronome?.beatsPerBar) && (
-            <button className="metronome-btn" disabled={busy} onClick={() => void apply(true)}>적용</button>
+            <button className="metronome-btn" disabled={busy || !isPerforming} onClick={() => void apply(true)}>적용</button>
           )}
           <button
             className={`metronome-btn ${running ? 'stop' : 'start'}`}
-            disabled={busy}
+            disabled={busy || !isPerforming}
+            title={isPerforming ? undefined : '엔진이 켜진 뒤에 조작할 수 있습니다'}
             onClick={() => void apply(!running)}
           >
             {running ? '정지' : '시작'}

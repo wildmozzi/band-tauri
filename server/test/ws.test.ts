@@ -271,6 +271,40 @@ describe('P2-3: shared metronome signaling (host verified by DB)', async () => {
     assert.ok(!member.has(m => m.type === 'metronome'))
   })
 
+  it('clears the host metronome and relays a stop when the host engine restarts without native-leave (#36 M1)', async () => {
+    const host = await client(url)
+    const member = await client(url)
+    await authJoin(host, 'tok:host', 'free')
+    await authJoin(member, 'tok:metroMember3', 'free')
+    host.send({ type: 'start-performing', instrument: 'drums' })
+    member.send({ type: 'start-performing', instrument: 'drums' })
+    assert.ok(await host.waitFor(m => m.type === 'performer-updated' && m.oderId === member.id))
+    member.send({ type: 'native-descriptor', descriptor: desc(22) })
+    host.send({ type: 'native-descriptor', descriptor: desc(21) })
+    assert.ok(await member.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+    host.send({ type: 'metronome', state })
+    assert.ok(await member.waitFor(m => m.type === 'metronome' && (m.state as typeof state).running))
+
+    // 같은 엔진의 재알림(같은 ssrc, WS 재개·회신)은 메트로놈을 건드리지 않는다
+    member.inbox.length = 0
+    host.send({ type: 'native-descriptor', descriptor: desc(21) })
+    assert.ok(await member.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+    await sleep(50)
+    assert.ok(!member.has(m => m.type === 'metronome'))
+
+    // 새 ssrc = 엔진 재시작 → 정지 중계, 늦게 띄운 엔진에도 옛 상태를 다시 보내지 않는다
+    host.send({ type: 'native-descriptor', descriptor: desc(23) })
+    assert.ok(await member.waitFor(m => m.type === 'metronome' && m.from === host.id && (m.state as typeof state).running === false))
+    member.inbox.length = 0
+    member.send({ type: 'native-descriptor', descriptor: desc(22) })
+    await sleep(100)
+    assert.ok(!member.has(m => m.type === 'metronome'))
+
+    // 방장이 새 엔진 기준 startUs로 다시 시작하면 그 값이 중계된다
+    host.send({ type: 'metronome', state: { ...state, startUs: 42 } })
+    assert.ok(await member.waitFor(m => m.type === 'metronome' && (m.state as typeof state).startUs === 42))
+  })
+
   it('rejects metronome before the host engine is running', async () => {
     const host = await client(url)
     const member = await client(url)

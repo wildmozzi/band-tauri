@@ -1061,10 +1061,23 @@ export function initializeWebSocket(
           send(ws, { type: 'error', code: 'ssrc-conflict', message: '같은 방에서 이미 쓰는 ssrc입니다. 엔진을 다시 시작하세요.' })
           return
         }
+        const prevSsrc = client.nativeSsrc
         client.nativeActive = true
         if (isValidSsrc(ssrc)) {
           client.nativeSsrc = ssrc
           sendRelayToken(client)
+        }
+        // 방장 엔진이 native-leave 없이 새로 떴다(ssrc가 바뀜, 예: ssrc-conflict 재시작): 메트로놈 startUs는 옛 엔진 시계
+        // 기준이라 무의미하다 → 지우고 연주자들에게 정지를 알린다(PR #36 M1). 같은 엔진의 재알림(WS 재개·회신)은 ssrc가 같다.
+        const hostMetro = metronomes.get(roomId)
+        if (hostMetro && hostMetro.hostId === id && prevSsrc !== undefined && isValidSsrc(ssrc) && ssrc !== prevSsrc) {
+          metronomes.delete(roomId)
+          const stopped = { type: 'metronome', from: id, state: { ...hostMetro.state, running: false } }
+          for (const peerId of rooms.get(roomId) || []) {
+            if (peerId === id) continue
+            const peer = clients.get(peerId)
+            if (peer && isPerformer(peer)) send(peer.ws, stopped)
+          }
         }
         // 엔진이 (다시) 떴다: 방장이 켠 메트로놈이 있으면 지금 상태를 알려 준다(늦게 들어온 연주자, 엔진 재시작)
         const metro = metronomes.get(roomId)
