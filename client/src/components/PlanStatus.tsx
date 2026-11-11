@@ -12,17 +12,17 @@ export function PlanStatus({ showUpgrade = true, compact = false }: PlanStatusPr
   const planInfo = {
     free: {
       name: '무료 플랜',
-      color: '#6b7280',
+      color: 'var(--gray-500)',
       badge: '체험용',
     },
     standard: {
       name: 'Standard',
-      color: '#7b7bff',
+      color: 'var(--indigo-400)',
       badge: '추천',
     },
     pro: {
       name: 'Pro',
-      color: '#ff7ab8',
+      color: 'var(--pink-400)',
       badge: '프리미엄',
     },
   }

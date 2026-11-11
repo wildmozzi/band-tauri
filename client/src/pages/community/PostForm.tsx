@@ -13,7 +13,7 @@ interface PostFormProps {
   splitImageSections?: boolean
 }
 
-const labelStyle: React.CSSProperties = { display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px' }
+const labelStyle: React.CSSProperties = { display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: 'var(--space-2)' }
 
 /** 게시물 작성/수정 공용 폼(페이지 레이아웃 포함). */
 export function PostForm({
@@ -28,17 +28,17 @@ export function PostForm({
   const { submitting, uploadProgress } = form
 
   return (
-    <div style={{ maxWidth: '900px', margin: '0 auto', padding: '24px' }}>
+    <div style={{ maxWidth: '900px', margin: '0 auto', padding: 'var(--space-6)' }}>
       <button
         onClick={onCancel}
         style={{
           background: 'transparent',
-          border: '1px solid rgba(255, 255, 255, 0.15)',
-          color: 'rgba(255, 255, 255, 0.7)',
-          padding: '8px 16px',
-          borderRadius: '6px',
+          border: '1px solid var(--white-a15)',
+          color: 'var(--white-a70)',
+          padding: 'var(--space-2) var(--space-4)',
+          borderRadius: 'var(--radius-sm)',
           cursor: 'pointer',
-          marginBottom: '24px',
+          marginBottom: 'var(--space-6)',
           fontSize: '14px',
         }}
       >
@@ -47,17 +47,17 @@ export function PostForm({
 
       <div
         style={{
-          background: 'rgba(18, 22, 45, 0.8)',
-          border: '1px solid rgba(255, 255, 255, 0.1)',
-          borderRadius: '12px',
+          background: 'var(--panel-strong-a80)',
+          border: '1px solid var(--white-a10)',
+          borderRadius: 'var(--radius-xl)',
           padding: '28px',
         }}
       >
-        <h1 style={{ fontSize: '24px', fontWeight: '700', marginBottom: '24px' }}>{heading}</h1>
+        <h1 style={{ fontSize: '24px', fontWeight: '700', marginBottom: 'var(--space-6)' }}>{heading}</h1>
 
         <form onSubmit={onSubmit}>
           {/* 제목 */}
-          <div style={{ marginBottom: '20px' }}>
+          <div style={{ marginBottom: 'var(--space-5)' }}>
             <label style={labelStyle}>
               제목 *
             </label>
@@ -68,11 +68,11 @@ export function PostForm({
               placeholder="게시물 제목을 입력하세요"
               style={{
                 width: '100%',
-                padding: '12px',
-                borderRadius: '8px',
-                border: '1px solid rgba(255, 255, 255, 0.15)',
-                background: 'rgba(0, 0, 0, 0.3)',
-                color: '#fff',
+                padding: 'var(--space-3)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--white-a15)',
+                background: 'var(--black-a30)',
+                color: 'var(--white)',
                 fontSize: '14px',
                 fontFamily: 'inherit',
               }}
@@ -81,11 +81,11 @@ export function PostForm({
           </div>
 
           {/* 악기 선택 */}
-          <div style={{ marginBottom: '20px' }}>
+          <div style={{ marginBottom: 'var(--space-5)' }}>
             <label style={labelStyle}>
               악기
             </label>
-            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
               {POST_INSTRUMENTS.map((instrument) => (
                 <button
                   key={instrument.id}
@@ -93,14 +93,14 @@ export function PostForm({
                   onClick={() => form.setSelectedInstrument(instrument.id)}
                   style={{
                     background: form.selectedInstrument === instrument.id
-                      ? 'linear-gradient(135deg, #8d7bff, #a89fff)'
-                      : 'rgba(18, 22, 45, 0.8)',
+                      ? 'linear-gradient(135deg, var(--accent), var(--violet-300))'
+                      : 'var(--panel-strong-a80)',
                     border: form.selectedInstrument === instrument.id
-                      ? '1px solid rgba(141, 123, 255, 0.5)'
-                      : '1px solid rgba(255, 255, 255, 0.1)',
-                    color: '#fff',
-                    padding: '8px 16px',
-                    borderRadius: '8px',
+                      ? '1px solid var(--violet-500-a50)'
+                      : '1px solid var(--white-a10)',
+                    color: 'var(--white)',
+                    padding: 'var(--space-2) var(--space-4)',
+                    borderRadius: 'var(--radius-md)',
                     cursor: 'pointer',
                     fontSize: '14px',
                     fontWeight: '500',
@@ -117,7 +117,7 @@ export function PostForm({
           </div>
 
           {/* 내용 */}
-          <div style={{ marginBottom: '20px' }}>
+          <div style={{ marginBottom: 'var(--space-5)' }}>
             <label style={labelStyle}>
               내용 *
             </label>
@@ -128,11 +128,11 @@ export function PostForm({
               rows={10}
               style={{
                 width: '100%',
-                padding: '12px',
-                borderRadius: '8px',
-                border: '1px solid rgba(255, 255, 255, 0.15)',
-                background: 'rgba(0, 0, 0, 0.3)',
-                color: '#fff',
+                padding: 'var(--space-3)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--white-a15)',
+                background: 'var(--black-a30)',
+                color: 'var(--white)',
                 fontSize: '14px',
                 resize: 'vertical',
                 fontFamily: 'inherit',
@@ -142,11 +142,11 @@ export function PostForm({
           </div>
 
           {/* 태그 */}
-          <div style={{ marginBottom: '20px' }}>
+          <div style={{ marginBottom: 'var(--space-5)' }}>
             <label style={labelStyle}>
               태그
             </label>
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+            <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
               <input
                 type="text"
                 value={form.tagInput}
@@ -155,11 +155,11 @@ export function PostForm({
                 placeholder="태그 입력 후 추가 버튼 클릭"
                 style={{
                   flex: 1,
-                  padding: '8px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
-                  background: 'rgba(0, 0, 0, 0.3)',
-                  color: '#fff',
+                  padding: 'var(--space-2) var(--space-3)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--white-a15)',
+                  background: 'var(--black-a30)',
+                  color: 'var(--white)',
                   fontSize: '14px',
                 }}
               />
@@ -167,11 +167,11 @@ export function PostForm({
                 type="button"
                 onClick={form.handleAddTag}
                 style={{
-                  padding: '8px 16px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(141, 123, 255, 0.3)',
-                  background: 'rgba(141, 123, 255, 0.2)',
-                  color: '#a89fff',
+                  padding: 'var(--space-2) var(--space-4)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--violet-500-a30)',
+                  background: 'var(--violet-500-a20)',
+                  color: 'var(--violet-300)',
                   cursor: 'pointer',
                   fontSize: '14px',
                   fontWeight: '600',
@@ -181,7 +181,7 @@ export function PostForm({
               </button>
             </div>
             {form.tags.length > 0 && (
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
                 {form.tags.map((tag, idx) => (
                   <span
                     key={idx}
@@ -189,13 +189,13 @@ export function PostForm({
                       display: 'inline-flex',
                       alignItems: 'center',
                       gap: '6px',
-                      background: 'rgba(141, 123, 255, 0.2)',
-                      color: '#a89fff',
-                      padding: '4px 10px',
-                      borderRadius: '6px',
+                      background: 'var(--violet-500-a20)',
+                      color: 'var(--violet-300)',
+                      padding: 'var(--space-1) 10px',
+                      borderRadius: 'var(--radius-sm)',
                       fontSize: '13px',
                       fontWeight: '500',
-                      border: '1px solid rgba(141, 123, 255, 0.3)',
+                      border: '1px solid var(--violet-500-a30)',
                     }}
                   >
                     #{tag}
@@ -205,7 +205,7 @@ export function PostForm({
                       style={{
                         background: 'none',
                         border: 'none',
-                        color: '#a89fff',
+                        color: 'var(--violet-300)',
                         cursor: 'pointer',
                         fontSize: '16px',
                         padding: 0,
@@ -224,9 +224,9 @@ export function PostForm({
           <PostImagePicker form={form} splitSections={splitImageSections} labelStyle={labelStyle} />
 
           {/* 제출 버튼 */}
-          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end', alignItems: 'center' }}>
             {uploadProgress && (
-              <span style={{ fontSize: '14px', color: 'rgba(255, 255, 255, 0.6)' }}>
+              <span style={{ fontSize: '14px', color: 'var(--white-a60)' }}>
                 {uploadProgress}
               </span>
             )}
@@ -234,11 +234,11 @@ export function PostForm({
               type="button"
               onClick={onCancel}
               style={{
-                padding: '10px 20px',
-                borderRadius: '8px',
-                border: '1px solid rgba(255, 255, 255, 0.15)',
+                padding: '10px var(--space-5)',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--white-a15)',
                 background: 'transparent',
-                color: 'rgba(255, 255, 255, 0.7)',
+                color: 'var(--white-a70)',
                 cursor: 'pointer',
                 fontSize: '14px',
                 fontWeight: '600',
@@ -250,11 +250,11 @@ export function PostForm({
               type="submit"
               disabled={submitting}
               style={{
-                padding: '10px 20px',
-                borderRadius: '8px',
+                padding: '10px var(--space-5)',
+                borderRadius: 'var(--radius-md)',
                 border: 'none',
-                background: submitting ? 'rgba(141, 123, 255, 0.5)' : 'linear-gradient(135deg, #8d7bff, #a89fff)',
-                color: '#fff',
+                background: submitting ? 'var(--violet-500-a50)' : 'linear-gradient(135deg, var(--accent), var(--violet-300))',
+                color: 'var(--white)',
                 cursor: submitting ? 'not-allowed' : 'pointer',
                 fontSize: '14px',
                 fontWeight: '600',

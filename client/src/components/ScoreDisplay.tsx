@@ -532,22 +532,22 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
               display: 'flex',
               gap: '10px',
               alignItems: 'center',
-              background: 'rgba(255, 255, 255, 0.95)',
-              padding: '10px 16px',
-              borderRadius: '8px',
-              boxShadow: '0 2px 12px rgba(0,0,0,0.15)',
-              border: '1px solid #ddd',
+              background: 'var(--white-a95)',
+              padding: '10px var(--space-4)',
+              borderRadius: 'var(--radius-md)',
+              boxShadow: '0 2px 12px var(--black-a15)',
+              border: '1px solid var(--neutral-250)',
             }}
           >
             <button
               onClick={handlePrevPage}
               disabled={currentPage === 0}
               style={{
-                padding: '8px 16px',
+                padding: 'var(--space-2) var(--space-4)',
                 border: 'none',
-                borderRadius: '6px',
-                background: currentPage === 0 ? '#e0e0e0' : '#007bff',
-                color: currentPage === 0 ? '#999' : 'white',
+                borderRadius: 'var(--radius-sm)',
+                background: currentPage === 0 ? 'var(--neutral-200)' : 'var(--blue-500)',
+                color: currentPage === 0 ? 'var(--neutral-450)' : 'var(--white)',
                 cursor: currentPage === 0 ? 'not-allowed' : 'pointer',
                 fontSize: '14px',
                 fontWeight: '500',
@@ -568,11 +568,11 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
               onClick={handleNextPage}
               disabled={currentPage === totalPages - 1}
               style={{
-                padding: '8px 16px',
+                padding: 'var(--space-2) var(--space-4)',
                 border: 'none',
-                borderRadius: '6px',
-                background: currentPage === totalPages - 1 ? '#e0e0e0' : '#007bff',
-                color: currentPage === totalPages - 1 ? '#999' : 'white',
+                borderRadius: 'var(--radius-sm)',
+                background: currentPage === totalPages - 1 ? 'var(--neutral-200)' : 'var(--blue-500)',
+                color: currentPage === totalPages - 1 ? 'var(--neutral-450)' : 'var(--white)',
                 cursor: currentPage === totalPages - 1 ? 'not-allowed' : 'pointer',
                 fontSize: '14px',
                 fontWeight: '500',
@@ -594,8 +594,8 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
           minHeight: totalPages > 1 ? `${pageHeight}px` : 'auto',
           maxHeight: totalPages > 1 ? `${pageHeight}px` : 'none',
           overflow: totalPages > 1 ? 'hidden' : 'auto',
-          background: 'white',
-          borderRadius: '8px',
+          background: 'var(--white)',
+          borderRadius: 'var(--radius-md)',
           padding: '1rem',
           position: 'relative',
         }}
