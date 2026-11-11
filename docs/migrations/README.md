@@ -202,6 +202,21 @@ posts INSERT/UPDATE 정책과 권한을 없앤다. 조회·삭제·좋아요·�
 3. [ ] 확인: 파일 끝 확인 쿼리 — 제약 1행, 범위 밖 0행
 4. [ ] 구버전 클라이언트가 범위 밖 값으로 방 설정을 저장하면 이제 DB가 거부한다(UI 선택지는 원래 2~20이라 정상 경로는 영향 없음)
 
+### (선택) 기존 글 작성자 이름에서 이메일 앞부분 지우기 (P3-10g)
+
+P3-10g부터 서버는 닉네임이 없으면 `posts.author_name`을 `'User'`로 저장한다(이메일 앞부분을 공개하지 않음).
+그 전(예전 클라이언트·P3-10d 서버)에 이메일 앞부분으로 저장된 행은 남아 있다. **운영 실행은 사람 승인 후**, SQL Editor(`postgres`)에서:
+```sql
+-- 대상 수 확인
+SELECT count(*) FROM public.posts p JOIN auth.users u ON u.id = p.author_id
+ WHERE p.author_name = split_part(u.email, '@', 1);
+-- 닉네임(없으면 'User')으로 교체. posts updated_at 트리거가 있으면 수정 시각이 바뀐다
+UPDATE public.posts p
+   SET author_name = COALESCE(NULLIF(trim(pr.nickname), ''), 'User')
+  FROM auth.users u LEFT JOIN public.profiles pr ON pr.id = u.id
+ WHERE u.id = p.author_id AND p.author_name = split_part(u.email, '@', 1);
+```
+
 ## 🔄 롤백 (필요시)
 
 마이그레이션을 되돌려야 하는 경우:
