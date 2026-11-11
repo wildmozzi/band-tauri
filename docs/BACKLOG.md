@@ -51,7 +51,7 @@
 | P2-1 | 설치 파일 + Tauri updater(서명 키, 업데이트 서버/GitHub Releases) | 릴리스 워크플로로 설치본 생성, 업데이트 동작 | 완료(#4, 설치본 ~3MB; **[사람]** 서명 시크릿 등록·첫 릴리스 검증) |
 | P2-2 | **[사람]** 코드 서명 인증서 구매/등록(스마트 앱 컨트롤·SmartScreen 대응) | 서명된 설치본 | 대기 |
 | P2-3 | 공유 메트로놈(방장 기준, 각자 지연 보정한 클릭) | 2피어 시뮬레이션에서 클릭 정렬 오차 ≤ 2ms | 완료(PR #34 엔진·#36 UI·시그널링, 2026-11-11; **[사람]** 실장비 2대 클릭 시각 차 측정·청취) |
-| P2-3a | 메트로놈 후속: 출력 지연 미보고 장치는 루프백 offsetMs로 보정(#34 M2(a)), refClockUnsupported 처리(L4)·L6, 방장 이양 시 메트로놈 인계(#36 L1), 클릭 볼륨 영속(L5) | 테스트 | 화면·서버 완료(PR #53) · 엔진 부분 진행중(작업자 p2-metro-eng) |
+| P2-3a | 메트로놈 후속: 출력 지연 미보고 장치는 루프백 offsetMs로 보정(#34 M2(a)), refClockUnsupported 처리(L4)·L6, 방장 이양 시 메트로놈 인계(#36 L1), 클릭 볼륨 영속(L5) | 테스트 | 화면·서버 완료(PR #53) · 엔진 PR #57 리뷰 대기(출력 지연 미보고 장치를 루프백 offsetMs로 보정: 대칭 10.1→0.29ms, 양쪽 미보고 8.3→0.58ms; refClockUnsupported, clockExtrapolationMs; 후속: UI 장치별 offset 저장·안내, **[사람]** 비대칭 실측) |
 | P2-3b | 방장 이양 기능을 앱에 만들 때 서버에서 dropMetronomeIfHostChanged 호출(지금은 DB 직접 변경만 → 조용한 방에서 감지 지연, #53 L1) | 서버 테스트 | 대기 (이양 기능 구현 시) |
 | P1-12a | 실장비 합주 테스트 가이드 `docs/TEST-SESSION.md` — PC 2대 한 세션으로 [사람] 확인 항목 묶어 진행 | 문서 | 완료(PR #55 docs/TEST-SESSION.md, 2026-11-11) |
 | P1-12b | 2대 테스트 마찰 제거(#55 가이드의 우회 절차 없애기): auto 시그널링 ws/wss 불일치, 개발 빌드에서 LAN 사설 IP 서버 허용(dev CSP), threadPriority·qos·CPU 진단 UI 표시 → 이후 TEST-SESSION.md 간소화 | e2e | 리뷰중(PR #56 — Vite 개발 프록시로 auto ws/wss·LAN 서버 해결(운영 빌드·CSP 무변경), 개발 서버 주소 설정, 진단 줄; 병합 후 TEST-SESSION.md 간소화) |
