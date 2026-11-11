@@ -413,6 +413,11 @@ impl Engine {
         self.recorder.lock().start(opts, dir, resolve, crate::diag::now_ms())
     }
 
+    /// 녹음 중 피어 트랙 이름 추가(늦게 들어온 연주자, 1.5절).
+    pub fn record_set_track_names(&self, names: std::collections::HashMap<String, String>) -> Result<(), String> {
+        self.recorder.lock().set_track_names(names)
+    }
+
     /// 녹음 제어 핸들. 정지(콜백 반환 대기 + 파일 마무리, 최대 수 초)는 엔진 락 밖에서 이것으로 한다.
     pub fn recorder(&self) -> Arc<Mutex<record::Recorder>> {
         self.recorder.clone()

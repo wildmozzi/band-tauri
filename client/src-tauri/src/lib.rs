@@ -51,6 +51,7 @@ pub fn run() {
             commands::engine_record_pick_folder,
             commands::engine_record_start,
             commands::engine_record_stop,
+            commands::engine_record_set_track_names,
             commands::diag_export,
         ])
         .setup(|_app| {

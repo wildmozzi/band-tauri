@@ -183,7 +183,7 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 - 정지: 제어 쪽이 `detach`를 켜면 콜백이 다음 주기 시작에 녹음 끝점을 반환 링으로 돌려준다(링 해제도 비RT). 1초 안에 안 돌아오면(장치 정지) 쓰기 스레드는 남은 것을 비우고 닫는다. 그 끝점이 돌아오기 전에는 새 녹음을 시작하지 않는다(에러).
 
 **쓰기 스레드**(`band-record`, 20ms마다)
-- 블록 순서대로 슬롯별 샘플을 꺼내 트랙에 쓴다. 트랙은 처음 나타날 때 만든다. 피어 이름은 ssrc → peerId(지금 피어 테이블, 없으면 이미 빠진 피어의 ssrc 기록 `NetShared::peer_id_for_ssrc` — 블록을 늦게 비워도 떠난 피어가 `ssrc-…` 트랙으로 갈라지지 않음, PR #47 M3) → `trackNames[peerId]`(없으면 peerId 앞 8자). 파일 이름 `NN-이름.wav`, 믹스는 `00-mix.wav`.
+- 블록 순서대로 슬롯별 샘플을 꺼내 트랙에 쓴다. 트랙은 처음 나타날 때 만든다. 피어 이름은 ssrc → peerId(지금 피어 테이블, 없으면 이미 빠진 피어의 ssrc 기록 `NetShared::peer_id_for_ssrc` — 블록을 늦게 비워도 떠난 피어가 `ssrc-…` 트랙으로 갈라지지 않음, PR #47 M3) → `trackNames[peerId]`(없으면 peerId 앞 8자). 녹음 중에 `engine_record_set_track_names`로 이름을 더할 수 있고, 이름 없이 만든 피어 트랙은 정지 때(파일을 닫은 뒤) `NN-새이름.wav`로 바꾼다(같은 이름 파일이 있거나 실패하면 그대로). 파일 이름 `NN-이름.wav`, 믹스는 `00-mix.wav`.
 - 트랙 파일을 **만들지** 못하면(백신·인덱서의 순간 잠금, 이름 문제 등) `error`에 그 파일을 남기고 **그 트랙만** 뺀다(다시 시도하지 않음). 나머지 트랙은 계속 쓴다(PR #47 M2).
 - **쓰기** 실패(디스크 가득 등)면 `error`를 남기고 모든 파일을 닫은 뒤 이후 블록은 버리기만 한다(콜백에는 영향 없음). 닫을 때 버퍼에 남은(못 쓴) 데이터는 버리고, 디스크에 실제로 있는 프레임(프레임 경계로 내림)으로 헤더 크기를 고친 뒤 파일을 그 길이로 자른다(헤더 덮어쓰기는 새 공간이 필요 없음, PR #47 M1).
 - 정지 시 모든 트랙을 같은 길이로 맞추고, 세션 폴더에 `session.json`(= `RecordSummary`)을 쓴다.
@@ -198,7 +198,7 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 
 **저장 폴더**: 폴더는 Rust 폴더 대화상자(`engine_record_pick_folder`)로만 정한다(프론트가 임의 경로를 넘기지 않음, `diag_export`와 같은 원칙). 고른 폴더는 앱 설정 폴더 `recording.json`에 남고, 고른 적이 없으면 음악 폴더/`Band Recordings`다. 세션 폴더 이름은 `RecordOptions.name`(Windows 금지 문자 → `_`, 예약 이름 앞에 `_`, 60자) 또는 `band-rec-<UTC 시각>Z`이고, 같은 이름이 있으면 ` (2)`를 붙인다.
 
-**검증**: `engine::record::tests`(타임라인 정렬·늦은 피어 무음·버린 청크·핸드오프 반환), `engine::wav::tests`(헤더·RF64·디스크 가득 후 헤더 = 실제 프레임), `engine::record::tests::one_track_create_failure_keeps_others`, `tests/peer_key.rs` `removed_peer_ssrc_still_resolves`, `tests/record.rs`(가짜 장치 두 엔진 실녹음, 엔진 정지 시 마무리). 실시간 비교(`recording_does_not_change_buffer_concealment_or_xruns`, ignore): 녹음(믹스 포함, float) 켬/끔 8초씩 — 128/2.5ms에서 bufferMs 5.88 → 6.10ms, 은닉 0 → 0, xrun 0 → 0, 버림 0. 256/5ms에서 8.18 → 8.24ms, 0 → 0, 0 → 0, 버림 0.
+**검증**: `engine::record::tests`(타임라인 정렬·늦은 피어 무음·버린 청크·핸드오프 반환), `engine::wav::tests`(헤더·RF64·디스크 가득 후 헤더 = 실제 프레임), `engine::record::tests::one_track_create_failure_keeps_others`·`late_track_names_apply`, `tests/peer_key.rs` `removed_peer_ssrc_still_resolves`, `tests/record.rs`(가짜 장치 두 엔진 실녹음, 엔진 정지 시 마무리). 실시간 비교(`recording_does_not_change_buffer_concealment_or_xruns`, ignore): 녹음(믹스 포함, float) 켬/끔 8초씩 — 128/2.5ms에서 bufferMs 5.88 → 6.10ms, 은닉 0 → 0, xrun 0 → 0, 버림 0. 256/5ms에서 8.18 → 8.24ms, 0 → 0, 0 → 0, 버림 0.
 
 ## 2. 패킷 포맷 (`net/packet.rs`)
 
@@ -351,6 +351,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_record_pick_folder` | — | `string \| null` — 폴더 대화상자(호출한 창에 모달). 고른 폴더를 앱 설정에 남기고 돌려준다. 취소하면 `null`. 경로는 프론트가 넘기지 않는다 |
 | `engine_record_start` | `{ options?: RecordOptions }` | `RecordStats` — 합주 녹음 시작(P2-4, 1.5절). 실행 중인 엔진(합주·테스트 모드)에서. 저장 폴더 아래 세션 폴더를 만든다. 이미 녹음 중이거나 이전 녹음 끝점이 아직 안 돌아왔으면 에러 |
 | `engine_record_stop` | — | `RecordSummary` — 녹음 정지. 콜백 반환(최대 1초)·파일 마무리를 엔진 락 밖에서 기다린다. 녹음 중이 아니면 에러. 엔진이 멈추면 녹음은 자동으로 마무리된다(요약은 `session.json`에만) |
+| `engine_record_set_track_names` | `{ trackNames: Record<string, string> }` | `null` — 녹음 중 피어 트랙 이름(peerId → 표시 이름)을 더한다(녹음 중에 들어온 연주자, PR #49 M1). 이후 만드는 트랙은 이 이름을 쓰고, 이름 없이(peerId 앞 8자) 만든 트랙은 정지 때 파일 이름을 바꾼다. 녹음 중이 아니면 에러. 1.5절 |
 | `engine_subscribe_mix` | `{ onChunk: Channel<ArrayBuffer> }` | `null` — 20ms마다 48kHz stereo f32 인터리브 믹스(내 입력 포함) 전송. 관람자 브릿지용 |
 | `engine_unsubscribe_mix` | — | `null` |
 | `engine_measure_loopback` | `{ runs?: number }` | `LoopbackReport` — 하드웨어 루프백 왕복(P1-1). 실행 중인 엔진(보통 테스트 모드)에서 `runs`회(기본 8, 1..=20, 반복당 약 0.7초). 측정 동안 장치 출력은 자극만 낸다(모니터·피어 소리 없음). 입·출력 레이트가 다르면 에러, 네트워크 세션 중(합주 중)이면 에러 |
