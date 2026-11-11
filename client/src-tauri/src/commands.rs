@@ -214,6 +214,13 @@ pub async fn engine_set_metronome_gain(state: State<'_, EngineState>, gain: f32,
     Ok(())
 }
 
+/// 메트로놈 숨은 출력 지연 보정용 루프백 보정값(PR #34 M2(a)). `offsetMs` = `engine_measure_loopback` 결과의 `offsetMs`.
+/// 루프백 측정이 정상이면 엔진이 자동으로 기억하므로, 앱이 저장해 둔 값을 다시 넣거나 끌 때(null) 쓴다.
+#[tauri::command]
+pub async fn engine_set_loopback_offset(state: State<'_, EngineState>, offset_ms: Option<f64>) -> Result<(), String> {
+    state.0.set_loopback_offset(offset_ms)
+}
+
 #[tauri::command]
 pub async fn engine_stats(state: State<'_, EngineState>) -> Result<EngineStats, String> {
     Ok(state.0.stats())

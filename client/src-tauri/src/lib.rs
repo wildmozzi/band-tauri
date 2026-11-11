@@ -40,6 +40,7 @@ pub fn run() {
             commands::engine_set_master_gain,
             commands::engine_set_metronome,
             commands::engine_set_metronome_gain,
+            commands::engine_set_loopback_offset,
             commands::engine_stats,
             commands::engine_subscribe_mix,
             commands::engine_unsubscribe_mix,

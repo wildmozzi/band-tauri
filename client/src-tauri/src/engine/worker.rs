@@ -21,7 +21,7 @@ use super::config::{frame_code_from_samples, CodecKind, EngineConfig, INTERNAL_R
 use super::device::StreamInfo;
 use super::jitter::{shift_one, JitterBuffer};
 use super::measure::EchoProbe;
-use super::metronome::{hidden_out_latency_us, BeatScheduler, MetronomeCtl, MetronomePlan, OutClock};
+use super::metronome::{choose_hidden_out, hidden_out_latency_us, measured_hidden_out_us, BeatScheduler, MetronomeCtl, MetronomePlan, OutClock};
 use super::mixer::MixControls;
 use super::record::{MarkEvent, MarkKind, MarkSink};
 use super::relay_codec::{pcm_relay_load, PolicyInputs, RelayCodecPolicy};
@@ -1238,8 +1238,19 @@ impl Worker {
             Some(_) => est.map(|e| e.offset_us),
         };
         let rate = t.out_rate as f64;
-        let hidden = hidden_out_latency_us(self.p.info.out_reported_latency_frames, t.out_burst as u64, rate);
-        let clock = OutClock { dev_now_us: t.dev_now_us as f64, played: t.played, rate, burst: t.out_burst as u64, extra_out_us: hidden.unwrap_or(0.0) };
+        let info = &self.p.info;
+        let driver = hidden_out_latency_us(info.out_reported_latency_frames, t.out_burst as u64, rate);
+        // 드라이버가 출력 지연을 알려 주지 않으면 루프백 보정값으로(PR #34 M2(a)). 입력 쪽 보고가 있으면 그만큼 뺀다.
+        let loopback = (*self.p.metronome.loopback_offset_ms.lock()).map(|o| {
+            let in_burst = match self.p.counters.in_cb_frames.load(Ordering::Relaxed) {
+                0 => info.buffer_frames,
+                n => n,
+            };
+            measured_hidden_out_us(o, hidden_out_latency_us(info.in_reported_latency_frames, in_burst as u64, info.in_rate as f64))
+        });
+        let hidden = choose_hidden_out(driver, loopback);
+        let extra_out_us = hidden.map_or(0.0, |h| h.0);
+        let clock = OutClock { dev_now_us: t.dev_now_us as f64, played: t.played, rate, burst: t.out_burst as u64, extra_out_us };
         let beat = self.beats.tick(gen, plan, offset, &clock, &self.p.metronome.click);
         if t.wall_us.saturating_sub(self.metro_stats_at) >= 100_000 || gen != self.metro_stats_gen {
             self.metro_stats_at = t.wall_us;
@@ -1255,7 +1266,13 @@ impl Worker {
             s.clock_rtt_ms = est.map(|e| e.rtt_us / 1000.0);
             s.drift_ppm = est.map(|e| e.drift_ppm);
             s.beat = beat;
-            s.output_latency_ms = hidden.map(|h| h / 1000.0);
+            s.output_latency_ms = hidden.map(|h| h.0 / 1000.0);
+            s.output_latency_source = hidden.map(|h| h.1);
+            s.ref_clock_unsupported = match (&plan.ref_peer_id, self.p.net.as_ref()) {
+                (Some(id), Some(net)) if plan.running && est.is_none() => net.peer_clock_unsupported(id),
+                _ => false,
+            };
+            s.clock_extrapolation_ms = est.map(|e| e.extrapolation_us / 1000.0);
         }
     }
 

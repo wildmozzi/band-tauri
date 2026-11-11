@@ -403,7 +403,10 @@ pub struct JitterBuffer {
     starve_samples: usize,
     /// 아직 seq와 짝지어지지 않은 언더런 은닉 프레임 수(P1-6a). 언더런 은닉은 seq를 유지한 채 재생 타임라인을
     /// F만큼 소비한다. 그 seq가 결국 손실로 판정되면(뒤 패킷 도착) 이미 낸 언더런 은닉이 그 자리를 메운 것이므로
-    /// 손실 은닉을 또 만들지 않고 seq만 넘긴다(이중 은닉 제거). 실제 패킷을 꺼내면(늦게 와서 재생 또는 H1 버림) 0.
+    /// 손실 은닉을 또 만들지 않고 seq만 넘긴다(이중 은닉 제거, `settle_underrun_debt`). 실제 패킷을 재생하면 0
+    /// (되감긴 타임라인은 샘플 보정이 되돌린다), 패킷을 버리면(H1 늦은 패킷·trimming) 1 줄어든다.
+    /// 단위는 프레임 수이고 스킵은 seq 단위다: 언더런 중에 송신 프레임 크기가 바뀌면(2.5 ↔ 5ms) 그 차이만큼
+    /// 타임라인이 어긋나며, 이 어긋남은 깊이 보정(샘플 단위)이 흡수한다(드물고 작다, PR #58 L3).
     underrun_debt: usize,
 
     // 스크래치
@@ -1132,7 +1135,7 @@ impl JitterBuffer {
                 self.xfade_ch = ch;
             }
             self.slots[idx].valid = false;
-            // 늦게 온 패킷을 버리면(H1) 앞서 낸 언더런 은닉이 그 자리를 메운 것이다.
+            // 늦게 온 패킷을 버리면(H1 또는 trimming) 앞서 낸 언더런 은닉이 그 자리를 메운 것이다.
             self.underrun_debt = self.underrun_debt.saturating_sub(1);
         }
         self.next_seq = seq.wrapping_add(1);
@@ -1142,13 +1145,12 @@ impl JitterBuffer {
         }
     }
 
-    /// 패킷 하나만큼 FIFO에 생산. 재버퍼링으로 전환하면 false.
-    fn produce_packet(&mut self) -> bool {
-        // 이중 은닉 제거(P1-6a): 언더런 은닉(seq k 유지)을 낸 뒤 k 없이 뒤 패킷이 도착해 k가 손실로 판정되면, 그
-        // 언더런 은닉이 이미 k의 재생 구간을 메웠다(타임라인 F 소비). 손실 은닉을 한 번 더 만들면 손실 1건에 2프레임이
-        // 나가고 깊이가 +1F 늘어 샘플 버림으로 되돌려야 했다. 그래서 언더런 은닉을 k의 손실 은닉으로 재해석하고 seq만
-        // 넘긴다(새 프레임·깊이 변화 없음). 늦은 패킷을 버리는 H1(`late_dropped`)의 짝이다. k가 나중에 도착하면
-        // `insert`에서 `late`로 세고 지연 통계에는 그대로 반영된다.
+    /// 이중 은닉 제거(P1-6a): 언더런 은닉(seq k 유지)을 낸 뒤 k 없이 뒤 패킷이 도착해 k가 손실로 판정되면, 그
+    /// 언더런 은닉이 이미 k의 재생 구간을 메웠다(타임라인 F 소비). 손실 은닉을 한 번 더 만들면 손실 1건에 2프레임이
+    /// 나가고 깊이가 +1F 늘어 샘플 버림으로 되돌려야 했다. 그래서 언더런 은닉을 k의 손실 은닉으로 재해석하고 seq만
+    /// 넘긴다(새 프레임·깊이 변화 없음). 늦은 패킷을 버리는 H1(`late_dropped`)의 짝이다. k가 나중에 도착하면
+    /// `insert`에서 `late`로 세고 지연 통계에는 그대로 반영된다.
+    fn settle_underrun_debt(&mut self) {
         while self.state == State::Playing
             && self.underrun_debt > 0
             && !self.slot_has(self.next_seq)
@@ -1159,6 +1161,11 @@ impl JitterBuffer {
             self.stats.concealed_loss += 1;
             self.push_loss(true);
         }
+    }
+
+    /// 패킷 하나만큼 FIFO에 생산. 재버퍼링으로 전환하면 false.
+    fn produce_packet(&mut self) -> bool {
+        self.settle_underrun_debt();
         // 늦은 패킷을 손실로(H1, NetEQ류): 언더런 은닉이 이미 그 자리를 채워 깊이가 늘었고 지금 목표보다 F/2 이상 깊으면,
         // 늦게 온 패킷을 재생하지 않고 버린다(디코드해 디코더 상태 유지 + 크로스페이드). 은닉은 이미 났으므로 은닉률은
         // 그대로이고, 늘어난 1F를 샘플 버림 램프로 되돌리는 구간(피치 편차)이 없어진다.
@@ -1182,6 +1189,9 @@ impl JitterBuffer {
             self.drop_one_packet();
             self.stats.dropped_frames += 1;
         }
+        // 버림(H1·trimming) 뒤 다음 seq가 비어 있고 debt가 남았으면 그 빈 자리도 이미 언더런 은닉이 메웠다
+        // (PR #58 L1: 맨 앞에서만 정산하면 드물게 손실 은닉 1프레임 + 깊이 +1F가 더 생겼다).
+        self.settle_underrun_debt();
 
         let f = self.frame();
         let seq = self.next_seq;
@@ -1778,6 +1788,133 @@ mod tests {
                 assert_eq!(s.samples_dropped, s_before.samples_dropped, "{s:?}");
                 assert_eq!(s.dropped_frames + s.late_dropped, s_before.dropped_frames + s_before.late_dropped);
                 assert!((jb.depth_error() - depth_before).abs() < 1.0, "깊이 {depth_before} → {}", jb.depth_error());
+            }
+        }
+    }
+
+    /// `underrun_debt` 경계 사례(PR #58 M1)의 결과: 사건 틱부터 끝까지의 통계 변화.
+    #[derive(Debug)]
+    struct DebtOut {
+        concealed: u64,
+        loss: u64,
+        late: u64,
+        late_dropped: u64,
+        dropped_frames: u64,
+        samples_dropped: u64,
+        rebuffers: u64,
+        debt: usize,
+        depth_change: f64,
+    }
+
+    /// 5ms 프레임, 틱(5ms)마다 insert → pop 1프레임 → end_burst. 패킷 i는 보통 틱 i에 도착하고, `arrive(i)`가
+    /// Some(틱)이면 그 틱에, None이면 손실이다. 사건은 틱 `EV`부터. `hook`은 사건 틱마다 pop 직전에 불린다.
+    const EV: usize = 40;
+    fn debt_case(codec: CodecKind, seq0: u32, arrive: &dyn Fn(usize) -> Option<usize>, hook: &mut dyn FnMut(usize, &mut JitterBuffer)) -> DebtOut {
+        const N: usize = 90;
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+        let mut tx = Sender::new(codec, 240, seq0, 0);
+        let pkts: Vec<_> = (0..N).map(|_| tx.next()).collect();
+        let mut by_tick: Vec<Vec<usize>> = vec![Vec::new(); N + 1];
+        for i in 0..N {
+            if let Some(t) = arrive(i) {
+                by_tick[t.min(N)].push(i);
+            }
+        }
+        let mut out = vec![0f32; 480];
+        let (mut s0, mut d0) = (JitterStats::default(), 0.0);
+        for (tick, arrivals) in by_tick.iter().enumerate().take(N) {
+            if tick == EV {
+                s0 = jb.stats();
+                d0 = jb.depth_error();
+            }
+            for &i in arrivals {
+                jb.insert(&pkts[i].0, &pkts[i].1, tick as u64 * 5000);
+            }
+            if tick >= EV {
+                hook(tick, &mut jb);
+            }
+            jb.pop(&mut out);
+            jb.end_burst(tick as u64 * 5000, tick as u64 * 5000, 0.0);
+            let s = jb.stats();
+            assert!(s.concealed_loss <= s.concealed, "{s:?}");
+        }
+        assert!(jb.is_playing());
+        let s = jb.stats();
+        DebtOut {
+            concealed: s.concealed - s0.concealed,
+            loss: s.concealed_loss - s0.concealed_loss,
+            late: s.late - s0.late,
+            late_dropped: s.late_dropped - s0.late_dropped,
+            dropped_frames: s.dropped_frames - s0.dropped_frames,
+            samples_dropped: s.samples_dropped - s0.samples_dropped,
+            rebuffers: s.rebuffers - s0.rebuffers,
+            debt: jb.underrun_debt,
+            depth_change: jb.depth_error() - d0,
+        }
+    }
+
+    /// PR #58 M1: 언더런 은닉 재해석(`underrun_debt`)의 경계 사례. PCM·Opus × seq 랩어라운드 여부로 같은 결과여야 한다.
+    /// 마지막 패킷은 마지막 틱에 도착하므로 끝에 꼬리 언더런은 없다.
+    #[test]
+    fn underrun_debt_edge_cases() {
+        let k = EV;
+        for codec in [CodecKind::Pcm16, CodecKind::Opus] {
+            // 사건 seq가 u32::MAX → 0을 넘어가도록(랩어라운드) 또는 평범한 시작값.
+            for seq0 in [100u32, u32::MAX - k as u32 - 1] {
+                let ctx = format!("{codec:?} seq0 {seq0}");
+                let none = &mut |_: usize, _: &mut JitterBuffer| {};
+                // 1. 버스트: k..k+2 손실, k+3이 1틱 늦음 → 언더런 은닉 3 = 손실 3, 새 은닉·샘플 버림 없음.
+                let r = debt_case(codec, seq0, &|i| match i {
+                    _ if (k..k + 3).contains(&i) => None,
+                    _ if i == k + 3 => Some(k + 4),
+                    _ => Some(i),
+                }, none);
+                assert_eq!((r.concealed, r.loss, r.samples_dropped, r.dropped_frames + r.late_dropped), (3, 3, 0, 0), "버스트 {ctx}: {r:?}");
+                assert!(r.depth_change.abs() < 1.0, "버스트 {ctx}: {r:?}");
+                // 2. k,k+1 손실, k+2가 2틱 늦음: 타임라인이 이미 3F를 소비했으므로 k+2도 손실로 세고 도착하면 `late`.
+                let r = debt_case(codec, seq0, &|i| match i {
+                    _ if i == k || i == k + 1 => None,
+                    _ if i == k + 2 => Some(k + 4),
+                    _ => Some(i),
+                }, none);
+                assert_eq!((r.concealed, r.loss, r.late, r.samples_dropped), (3, 3, 1, 0), "k+2 늦음 {ctx}: {r:?}");
+                // 3. debt > 빈 seq: k 손실, k+1·k+2가 늦게(k+3 틱에 k+3과 함께) 도착. 언더런 2번(debt 2, 빈 seq는 k 하나)
+                //    중 1번은 k의 손실로 정산하고, 늦은 k+1을 버리면(H1) 나머지가 정산되어 k+2를 재생한다. 누수 없음.
+                let r = debt_case(codec, seq0, &|i| match i {
+                    _ if i == k => None,
+                    _ if i == k + 1 || i == k + 2 => Some(k + 3),
+                    _ => Some(i),
+                }, none);
+                assert_eq!((r.concealed, r.loss, r.late_dropped, r.debt, r.rebuffers), (2, 1, 1, 0, 0), "debt > 빈 seq {ctx}: {r:?}");
+                assert!(r.depth_change.abs() < 1.0, "debt > 빈 seq {ctx}: {r:?}");
+                // 4. 재버퍼 전 단절 150ms(30패킷 손실): 은닉 = 손실 = 30, 패킷 단위 버림·샘플 버림 없음(이전: 은닉 58).
+                let r = debt_case(codec, seq0, &|i| if (k..k + 30).contains(&i) { None } else { Some(i) }, none);
+                assert_eq!((r.concealed, r.loss, r.dropped_frames, r.samples_dropped, r.rebuffers), (30, 30, 0, 0, 0), "150ms 단절 {ctx}: {r:?}");
+                assert!(r.depth_change.abs() < 1.0, "150ms 단절 {ctx}: {r:?}");
+                // 5. 재정렬: 1틱 뒤바뀜은 버퍼 깊이가 흡수한다. k가 k+1보다 2틱 늦으면 k는 마감에 손실 은닉 1(언더런
+                //    아님, debt 0)이고 도착하면 `late`.
+                let r = debt_case(codec, seq0, &|i| match i {
+                    _ if i == k => Some(k + 1),
+                    _ if i == k + 1 => Some(k),
+                    _ => Some(i),
+                }, none);
+                assert_eq!((r.concealed, r.loss, r.late), (0, 0, 0), "재정렬 1틱 {ctx}: {r:?}");
+                let r = debt_case(codec, seq0, &|i| if i == k { Some(k + 2) } else { Some(i) }, none);
+                assert_eq!((r.concealed, r.loss, r.late, r.debt, r.samples_dropped), (1, 1, 1, 0, 0), "재정렬 2틱 {ctx}: {r:?}");
+                // 6. trimming 버림 뒤 남은 debt(PR #58 L1): k가 늦어 언더런 2번(debt 2). k+3 틱에 k·k+2·k+3이 오고
+                //    k+1은 손실. 그 틱에 패킷 단위 버림이 걸려 있으면 k를 버린 뒤(debt 1) 빈 k+1은 남은 debt로 정산해야
+                //    한다 — 새 손실 은닉 프레임을 만들지 않는다(정산이 맨 앞에만 있으면 은닉 3).
+                let r = debt_case(codec, seq0, &|i| match i {
+                    _ if i == k || i == k + 2 => Some(k + 3),
+                    _ if i == k + 1 => None,
+                    _ => Some(i),
+                }, &mut |tick, jb| {
+                    if tick == k + 3 {
+                        assert_eq!(jb.underrun_debt, 2);
+                        jb.drop_frames_pending = 1;
+                    }
+                });
+                assert_eq!((r.concealed, r.loss, r.dropped_frames, r.debt), (2, 1, 1, 0), "trimming 뒤 debt {ctx}: {r:?}");
             }
         }
     }

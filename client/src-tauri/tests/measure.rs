@@ -224,6 +224,57 @@ fn loopback_refused_during_session() {
     m.stop();
 }
 
+#[test]
+fn loopback_offset_carries_to_session_engine_on_same_device() {
+    // PR #34 M2(a): 테스트 모드에서 넣은(또는 잰) 루프백 보정값이 같은 장치 구성의 합주 엔진 메트로놈에 이어진다.
+    use band_lib::engine::metronome::OutputLatencySource;
+    let _g = RT_LOCK.lock();
+    let backend = FakeBackend::silence(48_000); // 드라이버 보고 지연 없음(cpal WASAPI처럼)
+    let m = band_lib::manager::EngineManager::new(Arc::new(backend), test_net());
+    let metro = |m: &band_lib::manager::EngineManager| m.stats().metronome;
+    let wait_src = |m: &band_lib::manager::EngineManager, want: Option<OutputLatencySource>| {
+        wait_until(HANG, || metro(m).output_latency_source == want)
+    };
+    // 엔진이 없으면 거부
+    assert!(m.set_loopback_offset(Some(12.0)).is_err());
+    m.test_start(config(128)).unwrap();
+    assert!(wait_src(&m, None), "처음에는 보정 안 됨");
+    assert!(m.set_loopback_offset(Some(f64::NAN)).is_err());
+    m.set_loopback_offset(Some(12.0)).unwrap();
+    assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
+    assert_eq!(metro(&m).output_latency_ms, Some(6.0), "입력 쪽 보고가 없으면 반");
+    // 같은 장치로 합주 시작 → 이어서 적용
+    m.start(config(128), "alice".into()).unwrap();
+    assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
+    assert_eq!(metro(&m).output_latency_ms, Some(6.0));
+    m.stop();
+    // 다른 장치 구성이면 적용하지 않는다
+    let other = EngineConfig { output_device: Some("wasapi::다른 장치".into()), ..config(128) };
+    m.start(other, "alice".into()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(metro(&m).output_latency_source, None);
+    m.stop();
+    // 버퍼 크기가 다르면 적용하지 않는다(숨은 지연이 버퍼에 따라 바뀔 수 있음, PR #57 M1)
+    m.start(config(512), "alice".into()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(metro(&m).output_latency_source, None, "다른 버퍼에 옛 보정값 적용");
+    m.stop();
+    // 다시 원래 버퍼면 적용된다(키는 버퍼만 달랐음)
+    m.start(config(128), "alice".into()).unwrap();
+    assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
+    m.stop();
+    // 해제하면 같은 장치에서도 쓰지 않는다
+    m.test_start(config(128)).unwrap();
+    assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
+    m.set_loopback_offset(None).unwrap();
+    assert!(wait_src(&m, None));
+    m.stop();
+    m.start(config(128), "alice".into()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(metro(&m).output_latency_source, None);
+    m.stop();
+}
+
 // ============================================================================
 // 에코 피어
 // ============================================================================
