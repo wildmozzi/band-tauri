@@ -132,14 +132,31 @@ fn records_local_and_peer_tracks_aligned() {
     let peak = pa.iter().fold(0f32, |m, &v| m.max(v.abs()));
     assert!(peak > 0.4 && peak < 0.6, "피어 트랙 피크 {peak}");
     assert!(folder.join("session.json").exists());
+    // 마커 사이드카(P2-4a): 트랙마다 항목이 있다(가짜 장치·로컬 네트워크라 구간은 보통 0개)
+    assert_eq!(sum.markers_file.as_deref(), Some("markers.json"));
+    let mj: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("markers.json")).unwrap()).unwrap();
+    assert_eq!(mj["tracks"].as_array().map(|t| t.len()), Some(sum.tracks.len()));
 
-    // 엔진 정지가 진행 중인 녹음을 마무리한다
-    b.record_start(RecordOptions { format: RecordFormat::WavF32, ..Default::default() }, &dir).unwrap();
+    // 엔진 정지가 진행 중인 녹음을 마무리한다(FLAC: 엔진 정지 경로에서도 STREAMINFO가 확정돼 표준 디코더로 열린다)
+    b.record_start(RecordOptions { format: RecordFormat::Flac, ..Default::default() }, &dir).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     drop(b);
     drop(a);
     let sessions = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.path().join("session.json").exists()).count();
     assert_eq!(sessions, 2, "정지로 마무리된 두 번째 세션");
+    let flacs: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .flat_map(|e| std::fs::read_dir(e.path()).unwrap().filter_map(|f| f.ok()).map(|f| f.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "flac"))
+        .collect();
+    assert!(!flacs.is_empty());
+    for p in &flacs {
+        let mut r = claxon::FlacReader::open(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        let total = r.streaminfo().samples.expect("총 샘플 수 확정");
+        assert!(total > 0, "{}", p.display());
+        assert_eq!(r.samples().count() as u64, total * 2, "{}", p.display());
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -162,7 +179,8 @@ fn window(b: &Engine, secs: u64) -> (f32, u64, u64, u64) {
 #[ignore = "realtime: 녹음 켬/끔 비교(PR 수치). 결정적 짝 engine::record::tests::*, records_local_and_peer_tracks_aligned"]
 fn recording_does_not_change_buffer_concealment_or_xruns() {
     let _g = RT_LOCK.lock();
-    for (buf, frame_ms) in [(128u32, 2.5f32), (256, 5.0)] {
+    // FLAC(P2-4a)은 쓰기 스레드에서 인코딩하므로 CPU를 더 쓴다 — 128 버퍼에서 같은 기준으로 본다.
+    for (buf, frame_ms, fmt) in [(128u32, 2.5f32, RecordFormat::WavF32), (256, 5.0, RecordFormat::WavF32), (128, 2.5, RecordFormat::Flac)] {
         let mut ba = sine_backend();
         ba.wake_jitter_us = 1000;
         let mut bb = FakeBackend::silence(48_000);
@@ -171,8 +189,8 @@ fn recording_does_not_change_buffer_concealment_or_xruns() {
         let (a, b) = pair(config(buf, frame_ms), ba, bb);
         std::thread::sleep(Duration::from_secs(3));
         let off = window(&b, 8);
-        let dir = tmp(&format!("rt-{buf}"));
-        b.record_start(RecordOptions { include_mix: true, format: RecordFormat::WavF32, ..Default::default() }, &dir).unwrap();
+        let dir = tmp(&format!("rt-{buf}-{fmt:?}"));
+        b.record_start(RecordOptions { include_mix: true, format: fmt, ..Default::default() }, &dir).unwrap();
         let on = window(&b, 8);
         let sum = b.recorder().lock().stop().unwrap();
         let frames = b.peer_jitter_stats()[0].1;
@@ -181,7 +199,7 @@ fn recording_does_not_change_buffer_concealment_or_xruns() {
         drop(a);
         std::fs::remove_dir_all(&dir).ok();
         println!(
-            "REC buf {buf} / {frame_ms}ms (estLatency {est:.2}ms): 끔 buffer {:.2}ms 은닉 {} ({:.2}%) xrun {} | 켬 buffer {:.2}ms 은닉 {} ({:.2}%) xrun {} | 녹음 {:.2}s {}트랙 {}B 버림 {}프레임 (late {})",
+            "REC {fmt:?} buf {buf} / {frame_ms}ms (estLatency {est:.2}ms): 끔 buffer {:.2}ms 은닉 {} ({:.2}%) xrun {} | 켬 buffer {:.2}ms 은닉 {} ({:.2}%) xrun {} | 녹음 {:.2}s {}트랙 {}B 버림 {}프레임 (late {})",
             off.0,
             off.1,
             off.1 as f64 / off.3.max(1) as f64 * 100.0,
@@ -201,4 +219,93 @@ fn recording_does_not_change_buffer_concealment_or_xruns() {
         assert!(on.1 <= off.1 + 2, "녹음 중 은닉 증가: {} → {}", off.1, on.1);
         assert!((on.0 - off.0).abs() < 1.0, "녹음 중 버퍼 지연 변화: {:.2} → {:.2}ms", off.0, on.0);
     }
+}
+
+/// `armed`가 켜진 뒤 A → B 방향 패킷을 `every`개마다 하나씩 버리는 UDP 프록시(결정적 손실). 반환: (A가 B로 보낼 주소, B가 A로 보낼 주소, 정지 플래그).
+fn lossy_proxy(a: SocketAddr, b: SocketAddr, every: usize, armed: Arc<std::sync::atomic::AtomicBool>) -> (SocketAddr, SocketAddr, Arc<std::sync::atomic::AtomicBool>) {
+    use std::net::UdpSocket;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let sa = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let sb = UdpSocket::bind("127.0.0.1:0").unwrap();
+    sa.set_nonblocking(true).unwrap();
+    sb.set_nonblocking(true).unwrap();
+    let (pa, pb) = (sa.local_addr().unwrap(), sb.local_addr().unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let st = stop.clone();
+    let ar = armed;
+    std::thread::spawn(move || {
+        let _prio = band_lib::engine::prio::promote_current_thread();
+        let mut buf = [0u8; 2048];
+        let mut k = 0usize;
+        while !st.load(Ordering::Relaxed) {
+            while let Ok((n, _)) = sa.recv_from(&mut buf) {
+                k += 1;
+                // 연결 수립 뒤(`armed`)에만 버린다
+                if ar.load(Ordering::Relaxed) && k.is_multiple_of(every) {
+                    continue;
+                }
+                let _ = sb.send_to(&buf[..n], b);
+            }
+            while let Ok((n, _)) = sb.recv_from(&mut buf) {
+                let _ = sa.send_to(&buf[..n], a);
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    });
+    (pa, pb, stop)
+}
+
+/// 워커 은닉 마커(P2-4a): A → B 패킷을 주기적으로 잃게 하고 B에서 녹음하면, 피어 트랙 `conceal` 마커의 프레임 합이
+/// 지터 버퍼 은닉 카운터 증가분(× 패킷 길이)과 같고, 마커는 녹음 길이 안에 고르게 퍼져 있다.
+#[test]
+#[ignore = "realtime: 손실 프록시 루프백. 결정적 짝 engine::record::tests::markers_sidecar_maps_events_to_tracks"]
+fn concealment_markers_follow_jitter_counter() {
+    let _g = RT_LOCK.lock();
+    let cfg = config(256, 5.0);
+    let a = Engine::start(cfg.clone(), Arc::new(sine_backend()), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(cfg, Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (to_b, to_a, stop) = lossy_proxy(local_addr(&a), local_addr(&b), 25, armed.clone());
+    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), to_b)).unwrap();
+    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), to_a)).unwrap();
+    assert!(wait_connected(&a) && wait_connected(&b), "연결 실패");
+    std::thread::sleep(Duration::from_millis(1000));
+    armed.store(true, std::sync::atomic::Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(500));
+    let dir = tmp("conceal");
+    let j0 = b.peer_jitter_stats()[0].1;
+    b.record_start(RecordOptions::default(), &dir).unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    let sum = b.recorder().lock().stop().unwrap();
+    let j1 = b.peer_jitter_stats()[0].1;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let folder = PathBuf::from(&sum.folder);
+    let mj: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("markers.json")).unwrap()).unwrap();
+    let peer = mj["tracks"].as_array().unwrap().iter().find(|t| t["kind"] == "peer").expect("피어 트랙").clone();
+    let ms = peer["markers"].as_array().unwrap();
+    let conceal: Vec<_> = ms.iter().filter(|m| m["kind"] == "conceal").collect();
+    let frames: u64 = conceal.iter().map(|m| m["frames"].as_u64().unwrap()).sum();
+    let events: u64 = conceal.iter().map(|m| m["events"].as_u64().unwrap()).sum();
+    let fs = 240u64; // 5ms @ 48k
+    println!(
+        "은닉 패킷 {} (녹음 전후 카운터), 마커 구간 {} / 이벤트 {} / 프레임 {} (= {} 패킷), 녹음 {:.2}s, 잃은 이벤트 {}",
+        j1.concealed - j0.concealed,
+        conceal.len(),
+        events,
+        frames,
+        frames / fs,
+        sum.duration_sec,
+        mj["lostEvents"]
+    );
+    assert!(!conceal.is_empty(), "손실이 있는데 은닉 마커가 없다: {mj}");
+    // 녹음 시작·정지 경계의 몇 패킷 차이만 허용
+    let counted = j1.concealed - j0.concealed;
+    assert!((frames / fs).abs_diff(counted) <= 4, "마커 {} 패킷 vs 카운터 {counted}", frames / fs);
+    let end = (sum.duration_sec * 48_000.0) as u64;
+    assert!(conceal.iter().all(|m| m["end"].as_u64().unwrap() <= end));
+    // 25개마다 1개 손실(5ms 패킷 → 125ms마다) → 100ms 병합 간격보다 넓으니 구간이 여럿
+    assert!(conceal.len() >= 10, "{}", conceal.len());
+    drop(b);
+    drop(a);
+    std::fs::remove_dir_all(&dir).ok();
 }

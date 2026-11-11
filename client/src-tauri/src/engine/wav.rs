@@ -21,12 +21,22 @@ pub enum RecordFormat {
     Wav24,
     /// 32비트 IEEE float(클리핑 없이 원본 그대로).
     WavF32,
+    /// FLAC 24비트 무손실(`flac.rs`, P2-4a). 샘플 값은 `Wav24`와 같고 파일은 보통 절반 안팎.
+    Flac,
 }
 
 impl RecordFormat {
+    /// 트랙 파일 확장자.
+    pub fn extension(self) -> &'static str {
+        match self {
+            RecordFormat::Flac => "flac",
+            RecordFormat::Wav24 | RecordFormat::WavF32 => "wav",
+        }
+    }
+
     pub fn bytes_per_sample(self) -> u16 {
         match self {
-            RecordFormat::Wav24 => 3,
+            RecordFormat::Wav24 | RecordFormat::Flac => 3,
             RecordFormat::WavF32 => 4,
         }
     }
@@ -143,7 +153,8 @@ impl<F: Write + Seek> WavWriter<F> {
     pub fn write(&mut self, samples: &[f32]) -> std::io::Result<()> {
         self.buf.clear();
         match self.fmt {
-            RecordFormat::Wav24 => {
+            // Flac은 `flac.rs`가 쓴다(여기 오면 24비트 PCM으로).
+            RecordFormat::Wav24 | RecordFormat::Flac => {
                 self.buf.reserve(samples.len() * 3);
                 for &v in samples {
                     let v = if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };

@@ -1359,6 +1359,12 @@ impl JitterBuffer {
         true
     }
 
+    /// 녹음 마커용 누적 카운터만(은닉 패킷 수, 버린 패킷 수). `stats()`의 표시용 계산을 건너뛴다(PR #62 L3).
+    #[inline]
+    pub fn mark_counters(&self) -> (u64, u64) {
+        (self.stats.concealed, self.stats.dropped_frames)
+    }
+
     pub fn stats(&self) -> JitterStats {
         let spm = Self::samples_per_ms() as f32;
         let mut s = self.stats;
