@@ -33,6 +33,17 @@ describe('parseRelayToken', () => {
     expect(parseRelayToken({ ...base, expiresIn: 1e9, serverNow: 1_700_000_100 }, skewedNow)?.expiresIn).toBe(20)
   })
 
+  it('bindKey(2.1.1)가 있으면 그대로 넘기고, 형식이 틀리면 null', () => {
+    const base = { token, addr: '1.2.3.4:3478', ssrc: 1, expiresAt: 1, expiresIn: 120 }
+    const bindKey = 'dsPT7PwIjk-PvXGuvL37EQcCgsdLqHGzNu7BaF_9QbE'
+    expect(parseRelayToken({ ...base, bindKey })?.bindKey).toBe(bindKey)
+    expect(parseRelayToken({ ...base, bindKey: `${bindKey}=` })?.bindKey).toBe(`${bindKey}=`)
+    expect(parseRelayToken(base)).not.toHaveProperty('bindKey')
+    expect(parseRelayToken({ ...base, bindKey: 'short' })).toBeNull()
+    expect(parseRelayToken({ ...base, bindKey: `${bindKey.slice(1)}+` })).toBeNull()
+    expect(parseRelayToken({ ...base, bindKey: 1 })).toBeNull()
+  })
+
   it('형식이 틀리면 null', () => {
     const ok = { token, addr: '1.2.3.4:3478', ssrc: 1, expiresAt: 1 }
     expect(parseRelayToken(ok)).not.toBeNull()

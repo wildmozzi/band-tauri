@@ -18,6 +18,10 @@ body {
   margin: 0;
   min-height: 100vh;
   background-color: var(--ink-950);
+  /* 한국어는 어절 단위로 줄바꿈("실패했습니/다" 같은 글자 단위 줄바꿈 방지). 칸보다 긴 한 덩어리(URL·메일)는
+     overflow-wrap으로 끊는다. 채팅 본문처럼 사용자 입력은 화면별 규칙(word-break: break-word)이 이긴다 (P3-12d) */
+  word-break: keep-all;
+  overflow-wrap: anywhere; /* 띄어쓰기 없는 긴 제목이 flex·grid에서 가로로 넘치지 않게(break-word는 min-content 계산에 반영 안 됨) */
 }
 
 a {

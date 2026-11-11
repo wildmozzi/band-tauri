@@ -9,13 +9,19 @@
 //!   (PR #10 M1: 클라이언트 시계 오차). 서명·만료의 최종 판정은 릴레이가 한다.
 //! - 송신량을 약 1초 창으로 재서 릴레이 클라이언트당 상한(2Mbps, 2500pps)의 90%에 닿으면 `over_budget`(M4).
 //!
+//! - Bind MAC(2.1.1): 서버가 토큰과 함께 WS(TLS)로 준 토큰별 키(`bindKey`)로 RelayBind 끝에
+//!   `HMAC-SHA256(bindKey, 앞의 모든 바이트)[..16]`을 붙이고 flags bit0을 켠다. 쿠키까지 덮으므로 경로상 공격자가
+//!   캡처한 토큰으로 자기 주소에서 쿠키 왕복을 해도 등록을 가로챌 수 없다. 키가 없으면(옛 서버) MAC 없이 보낸다.
+//!
 //! 엔진 패킷의 AEAD는 바뀌지 않는다. RelayData 접두부 8바이트는 AAD에 포함하지 않는다.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use hmac::{Hmac, Mac};
 use serde::Serialize;
+use sha2::Sha256;
 
 use super::packet::{MAGIC, VERSION};
 
@@ -26,12 +32,16 @@ pub const TYPE_RELAY_BIND_ACK: u8 = 9;
 pub const DATA_PREFIX_BYTES: usize = 8;
 pub const BIND_HEADER_BYTES: usize = 18;
 pub const COOKIE_BYTES: usize = 16;
+/// RelayBind flags bit0: 끝에 Bind MAC 16B (relay-design 2.1.1)
+pub const BIND_FLAG_MAC: u8 = 0x01;
+pub const BIND_MAC_BYTES: usize = 16;
+pub const BIND_KEY_BYTES: usize = 32;
 pub const ACK_BYTES: usize = 50;
 pub const TOKEN_MIN_BYTES: usize = 49;
 pub const TOKEN_MAX_BYTES: usize = 257;
 const TOKEN_MAC_BYTES: usize = 32;
-/// RelayBind 최대 길이(헤더 + 최대 토큰 + 쿠키).
-pub const BIND_MAX_BYTES: usize = BIND_HEADER_BYTES + TOKEN_MAX_BYTES + COOKIE_BYTES;
+/// RelayBind 최대 길이(헤더 + 최대 토큰 + 쿠키 + MAC).
+pub const BIND_MAX_BYTES: usize = BIND_HEADER_BYTES + TOKEN_MAX_BYTES + COOKIE_BYTES + BIND_MAC_BYTES;
 
 /// 등록 후 keepalive 간격(계약 2.1).
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
@@ -84,11 +94,26 @@ pub struct RelayStats {
 }
 
 /// 검증된 릴레이 토큰(서명은 확인할 수 없다 — 구조, ssrc, 만료만 본다).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RelayToken {
     pub bytes: Vec<u8>,
     pub expires_at: u64,
     pub ssrc: u32,
+    /// 이 토큰의 Bind MAC 키(서버 `relay-token.bindKey`, 2.1.1). None이면 MAC 없이 Bind.
+    pub bind_key: Option<[u8; BIND_KEY_BYTES]>,
+}
+
+/// `{:?}`로 찍혀도 bindKey(비밀)와 토큰 바이트가 로그·진단에 들어가지 않게 가린다(PR #40 리뷰 L1).
+/// 진단 마스킹은 `[12, 34, …]` 같은 바이트 배열 표기를 가리지 못한다.
+impl std::fmt::Debug for RelayToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayToken")
+            .field("len", &self.bytes.len())
+            .field("expires_at", &self.expires_at)
+            .field("ssrc", &format_args!("{:08x}", self.ssrc))
+            .field("bind_key", &self.bind_key.map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl RelayToken {
@@ -119,8 +144,26 @@ impl RelayToken {
         if ssrc != my_ssrc {
             return Err(format!("릴레이 토큰의 ssrc({ssrc:08x})가 엔진 ssrc({my_ssrc:08x})와 다릅니다"));
         }
-        Ok(Self { bytes, expires_at, ssrc })
+        Ok(Self { bytes, expires_at, ssrc, bind_key: None })
     }
+}
+
+/// 서버가 준 Bind MAC 키(base64url, 패딩 유무 무관, 32바이트).
+pub fn parse_bind_key(b64: &str) -> Result<[u8; BIND_KEY_BYTES], String> {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(b64.trim().trim_end_matches('='))
+        .map_err(|e| format!("릴레이 bindKey base64 오류: {e}"))?;
+    raw.try_into().map_err(|_| "릴레이 bindKey는 32바이트여야 합니다".to_string())
+}
+
+/// `HMAC-SHA256(key, msg)[..16]`
+fn bind_mac(key: &[u8; BIND_KEY_BYTES], msg: &[u8]) -> [u8; BIND_MAC_BYTES] {
+    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("32B 키");
+    m.update(msg);
+    let full = m.finalize().into_bytes();
+    let mut out = [0u8; BIND_MAC_BYTES];
+    out.copy_from_slice(&full[..BIND_MAC_BYTES]);
+    out
 }
 
 /// 토큰 만료 시각(단조 시계). 서버가 준 남은 수명(`expires_in`, 발급 시각 기준)이 있으면 받은 시각 + 그 값을 쓴다
@@ -290,6 +333,12 @@ impl RelayClient {
             out[n..n + COOKIE_BYTES].copy_from_slice(&c);
             n += COOKIE_BYTES;
         }
+        if let Some(key) = &self.token.bind_key {
+            out[16] = BIND_FLAG_MAC;
+            let mac = bind_mac(key, &out[..n]);
+            out[n..n + BIND_MAC_BYTES].copy_from_slice(&mac);
+            n += BIND_MAC_BYTES;
+        }
         n
     }
 
@@ -437,6 +486,44 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "벡터가 하나도 확인되지 않음");
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// 공용 벡터(relay-token-vectors.json)의 MAC 붙은 RelayBind를 바이트 단위로 같게 만든다(서버 키 파생·릴레이 검증과 일치).
+    #[test]
+    fn bind_mac_matches_shared_vectors() {
+        let json: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../docs/overhaul/relay-token-vectors.json")).unwrap();
+        let t0 = Instant::now();
+        let mut checked = 0;
+        for v in json["vectors"].as_array().expect("벡터 배열") {
+            let name = v["name"].as_str().unwrap();
+            let ssrc = v["ssrc"].as_u64().unwrap() as u32;
+            let mut tok = RelayToken::from_bytes(unhex(v["hex"].as_str().unwrap()), ssrc).unwrap();
+            let key_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(unhex(v["bindKeyHex"].as_str().unwrap()));
+            tok.bind_key = Some(parse_bind_key(&key_b64).unwrap());
+            let b = &v["bind"];
+            let mut c = RelayClient::new("relay.test:4000".into(), "203.0.113.1:4000".parse().unwrap(), tok, None);
+            c.seq = (b["seq"].as_u64().unwrap() as u32).wrapping_sub(1); // write_bind가 1 올린다
+            c.cookie = b["cookieHex"].as_str().map(|h| unhex(h).try_into().unwrap());
+            let mut out = [0u8; BIND_MAX_BYTES];
+            let n = c.write_bind(t0, ssrc, b["timestamp"].as_u64().unwrap() as u32, &mut out);
+            assert_eq!(out[..n], unhex(b["hex"].as_str().unwrap())[..], "{name}");
+            checked += 1;
+        }
+        assert!(checked >= 3);
+        assert!(parse_bind_key("short").is_err());
+        assert!(parse_bind_key(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 31])).is_err());
+    }
+
+    #[test]
+    fn debug_redacts_bind_key_and_token_bytes() {
+        let tok = RelayToken { bytes: vec![0xAB; 60], expires_at: 1, ssrc: 0x1234, bind_key: Some([0x5A; BIND_KEY_BYTES]) };
+        let s = format!("{tok:?}");
+        assert!(s.contains("<redacted>") && !s.contains("90") && !s.contains("171"), "{s}");
     }
 
     #[test]

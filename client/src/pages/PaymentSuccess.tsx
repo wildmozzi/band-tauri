@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { usePremium } from '../contexts/usePremium'
 import { paymentApi } from '../services/paymentApi'
@@ -38,6 +38,7 @@ export function PaymentSuccess() {
   const setUserPlanRef = useRef(setUserPlan)
   setUserPlanRef.current = setUserPlan
   const [searchParams] = useSearchParams()
+  const location = useLocation()
   const [phase, setPhase] = useState<Phase>('confirming')
   const [result, setResult] = useState<PaymentFlowResult | null>(null)
   /** '다시 확인' 횟수 — 0이면 승인부터, 이후는 상태 조회만 */
@@ -96,6 +97,46 @@ export function PaymentSuccess() {
     })
     return () => { cancelled = true }
   }, [params, userId, authLoading, recheck])
+
+  // 직접 진입: 확인할 결제 정보(토스가 붙이는 URL 파라미터, 저장된 '결제 확인 중' 상태)가 없다 (P3-12d)
+  if (!params) {
+    return (
+      <div className="payment-success-page">
+        <div className="success-container">
+          <h1>확인할 결제 정보가 없습니다</h1>
+          <p>이 화면은 결제를 마친 뒤 자동으로 열립니다. 구독 상태는 내 프로필에서 확인할 수 있습니다.</p>
+          <div className="action-buttons">
+            <Link to="/pricing" className="primary-action">
+              요금제 보기
+            </Link>
+            <Link to="/profile" className="secondary-action">
+              내 구독 확인
+            </Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // 결제 정보는 있는데 로그인하지 않음: 실패가 아니라 로그인 안내 (로그인 후 이 주소로 돌아와 이어서 확인)
+  if (!authLoading && !userId) {
+    return (
+      <div className="payment-success-page">
+        <div className="success-container">
+          <h1>로그인이 필요합니다</h1>
+          <p>결제 결과를 확인하려면 로그인해 주세요. 중복 결제되지 않으니 다시 결제하지 마세요.</p>
+          <div className="action-buttons">
+            <Link to="/auth" state={{ from: location.pathname + location.search }} className="primary-action">
+              로그인하기
+            </Link>
+            <Link to="/" className="secondary-action">
+              홈으로 가기
+            </Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   // 승인 요청 중
   if (phase === 'confirming') {

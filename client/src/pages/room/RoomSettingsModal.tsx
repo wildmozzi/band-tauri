@@ -170,6 +170,8 @@ export function RoomSettingsModal({ room, form }: { room: DetailRoom; form: Room
           <label className="toggle-switch">
             <input
               type="checkbox"
+              role="switch"
+              aria-label="자유 참여"
               checked={editFreeJoin}
               onChange={(e) => form.setEditFreeJoin(e.target.checked)}
             />
@@ -190,6 +192,8 @@ export function RoomSettingsModal({ room, form }: { room: DetailRoom; form: Room
             <label className="toggle-switch">
               <input
                 type="checkbox"
+                role="switch"
+                aria-label="합주실 목록에 공개"
                 checked={!editIsPrivate}
                 onChange={(e) => form.setEditIsPrivate(!e.target.checked)}
               />

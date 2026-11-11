@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'http'
 import type { WebSocketServer } from 'ws'
 import { initializeWebSocket, type RoomMeta } from '../src/services/wsService'
-import { relayConfigFromEnv, signRelayToken, verifyRelayToken } from '../src/services/relayToken'
+import { deriveRelayBindKey, relayConfigFromEnv, signRelayToken, verifyRelayToken } from '../src/services/relayToken'
 import { authJoin, connect, sleep, testVerifier, type TestClient } from './helpers'
 
 const SECRET = 'relay-test-secret-0123456789abcdef!!'
@@ -52,6 +52,7 @@ describe('relay token format', () => {
       assert.equal(t.toString('hex'), v.hex, v.name)
       assert.deepEqual(verifyRelayToken(t, v.secret, v.expiresAt - 1), claims, `${v.name}: 만료 1초 전 유효`)
       assert.equal(verifyRelayToken(t, v.secret, v.expiresAt), null, `${v.name}: 만료 시각에 무효`)
+      assert.equal(deriveRelayBindKey(t, v.secret).toString('hex'), v.bindKeyHex, `${v.name}: bind key`)
     }
   })
 
@@ -117,6 +118,9 @@ describe('relay-token issuance over WS', async () => {
     assert.equal(msg.ssrc, 0x1234abcd)
     const claims = verifyRelayToken(Buffer.from(msg.token, 'base64url'), SECRET, Math.floor(Date.now() / 1000))
     assert.deepEqual(claims, { roomId: 'free', memberId: 'host', ssrc: 0x1234abcd, expiresAt: msg.expiresAt })
+    // Bind MAC 키(2.1.1): 그 토큰에서 파생, 32바이트
+    assert.equal(msg.bindKey, deriveRelayBindKey(Buffer.from(msg.token, 'base64url'), SECRET).toString('base64url'))
+    assert.equal(Buffer.from(msg.bindKey, 'base64url').length, 32)
     const left = msg.expiresAt - Date.now() / 1000
     assert.ok(left > 100 && left <= 120, `짧은 TTL(120초): ${left}`)
     // 클라이언트 시계와 무관한 상대 만료(PR #10 M1)

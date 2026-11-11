@@ -686,7 +686,8 @@
   background: var(--violet-500-a20);
   border-radius: var(--radius-xl);
   font-size: 0.75rem;
-  color: var(--accent);
+  /* --accent 글자는 반투명 보라 배경 위에서 4.12:1 → 더 밝은 보라 (P3-12d) */
+  color: var(--violet-300);
 }
 
 .viewer-count {
@@ -762,7 +763,7 @@
 }
 
 .performer-count {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--white);
   padding: 2px 8px;
   border-radius: var(--radius-lg);
@@ -2084,7 +2085,7 @@
 
 .error-state button {
   padding: 10px 24px;
-  background: var(--accent);
+  background: var(--accent-fill);
   border: none;
   border-radius: var(--radius-md);
   color: var(--white);
@@ -2528,7 +2529,7 @@
 
 .chat-send-btn {
   padding: 10px 16px;
-  background: var(--accent);
+  background: var(--accent-fill);
   border: none;
   border-radius: var(--radius-md);
   color: var(--white);
@@ -2951,7 +2952,7 @@
 }
 
 .room-password-actions .btn-primary {
-  background: var(--accent);
+  background: var(--accent-fill);
   border-color: var(--accent);
   color: var(--white);
 }
@@ -3223,4 +3224,18 @@
 .live-meta > *,
 .header-btn {
   white-space: nowrap;
+}
+
+/* 좁은 화면(세로 쌓기)에서 연주자 패널이 max-height 200px에 갇혀, 데스크톱 앱 안내(참여 토글)가
+   연주자 목록을 덮고 카드 윗부분만 보이던 문제 (P3-12d, 리뷰 M8).
+   패널은 내용 높이만큼 늘리고, 연주자가 많을 때만 목록 안에서 스크롤한다. */
+@media (max-width: 768px) {
+  .live-room .performers-panel {
+    max-height: none;
+  }
+
+  .live-room .performers-list {
+    flex: none;
+    max-height: 320px;
+  }
 }

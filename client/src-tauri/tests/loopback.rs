@@ -765,6 +765,11 @@ fn link_end_to_end_latency_128_2_5ms() {
         sa.xruns,
         sb.xruns
     );
+    // 송신 큐 지연(P1-3): 워커 경로(프레임 생성 → PCM16 인코딩 → 암호화 → send_to)가 통계로 나온다
+    let sq = sa.send_queue.expect("네트워크가 있으면 sendQueue가 있다");
+    println!("A sendQueue: p50 {:.3}ms p99 {:.3}ms max {:.3}ms ({}패킷), A qos {:?}", sq.p50_ms, sq.p99_ms, sq.max_ms, sq.packets, sa.qos);
+    assert!(sq.packets > 0 && sq.p50_ms < 2.5, "{sq:?}");
+    assert!(sa.qos.as_ref().is_some_and(|q| q.ip_tos), "{:?}", sa.qos);
     // GOAL 1절: ASIO 128샘플 / 2.5ms 프레임에서 estLatencyMs ≤ 8ms(입력 2.67 + 프레임 2.5 + 출력 2.67 = 7.83).
     // 콜백 구동 믹스 전에는 출력 링(≈ 장치 버퍼 + 청크) 때문에 11.8ms였다.
     assert!(sb.est_latency_ms <= 8.0, "estLatencyMs {:.2} > 8", sb.est_latency_ms);
@@ -1326,4 +1331,136 @@ fn est_latency_budget_table() {
             assert!(s.est_latency_ms <= g, "{}: estLatencyMs {:.2} > {g}", r.label, s.est_latency_ms);
         }
     }
+}
+
+// ============================================================================
+// 스레드 우선순위(P1-2): MMCSS 등록 노출, 타이머 짝, 적용 전/후 측정
+// ============================================================================
+
+#[test]
+fn thread_priority_reported_and_timer_released_on_stop() {
+    use band_lib::engine::prio::ThreadPriority;
+    let _g = RT_LOCK.lock();
+    for _ in 0..3 {
+        let (mut a, b, _p, _sink) = connect_pair(config(480, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
+        // 워커·수신 스레드는 시작 직후 우선순위를 적는다
+        let t0 = Instant::now();
+        let mut tp = a.stats().thread_priority;
+        while (tp.worker == ThreadPriority::Unmanaged || tp.net_recv == ThreadPriority::Unmanaged) && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+            tp = a.stats().thread_priority;
+        }
+        println!("threadPriority: {tp:?}");
+        if cfg!(windows) {
+            for p in [tp.worker, tp.net_recv] {
+                assert!(matches!(p, ThreadPriority::Mmcss | ThreadPriority::Elevated | ThreadPriority::Failed), "{tp:?}");
+            }
+            assert!(tp.timer_1ms, "Windows 엔진 실행 중에는 1ms 타이머를 쥔다");
+        } else {
+            assert_eq!(tp.worker, ThreadPriority::Unsupported);
+            assert!(!tp.timer_1ms);
+        }
+        // 가짜 장치는 우리가 관리하지 않는 장치 스레드로 보고된다
+        assert_eq!(tp.audio, ThreadPriority::Unmanaged);
+        let json = serde_json::to_value(a.stats()).unwrap();
+        assert!(json["threadPriority"]["timer1ms"].is_boolean());
+        // stop을 두 번 불러도 안전(타이머 짝은 prio 단위 테스트가 검증)
+        a.stop();
+        a.stop();
+        drop(b);
+    }
+}
+
+/// 적용 전/후 비교: 엔진 스레드 승격(MMCSS, 1ms 타이머)을 끔/MMCSS만/타이머만/둘 다로 바꿔 같은 링크를 돌린다.
+/// 지표: 워커와 같은 방식으로 승격된 프로브 스레드의 FINE_POLL(150µs) 수면 초과량, B의 은닉·마감 채움·건너뜀,
+/// 지터버퍼 지연/지터. 부하 단계는 논리 코어 수만큼 바쁜 스레드(보통 우선순위)를 돌린다.
+/// 실행: `cargo test --release --test loopback rt_priority_before_after -- --ignored --nocapture`
+#[test]
+#[ignore = "realtime: 측정용(임계 없음). 결정적 짝 engine::prio::tests"]
+fn rt_priority_before_after() {
+    use band_lib::engine::prio;
+    let _g = RT_LOCK.lock();
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    println!("| 부하 | 승격 | 프로브 수면 초과 p50/p99/max (µs) | 은닉/s | 마감 채움 | 건너뜀(프레임) | bufferMs 평균 | jitterMs | xruns B |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+    for load in [false, true] {
+        for _round in 0..2 {
+            for (mmcss, timer) in [(false, false), (true, false), (false, true), (true, true)] {
+                prio::set_engine_promotion_parts(mmcss, timer);
+                let stop_load = Arc::new(AtomicBool::new(false));
+                let hogs: Vec<_> = (0..if load { cores } else { 0 })
+                    .map(|_| {
+                        let s = stop_load.clone();
+                        std::thread::spawn(move || {
+                            let mut x = 0u64;
+                            while !s.load(Ordering::Relaxed) {
+                                x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+                            }
+                        })
+                    })
+                    .collect();
+                let mut ba = sine_backend();
+                ba.wake_jitter_us = 0;
+                let bb = FakeBackend::silence(48_000);
+                let (a, b, _p, _sink) = connect_pair(config(128, 2.5), ba, bb, None);
+                // 프로브: 워커와 같은 승격 경로 + 같은 수면 길이
+                let stop_probe = Arc::new(AtomicBool::new(false));
+                let sp = stop_probe.clone();
+                let probe = std::thread::spawn(move || {
+                    let slot = prio::PrioSlot::default();
+                    let _g = prio::promote_engine_thread(&slot);
+                    let mut over = Vec::with_capacity(100_000);
+                    while !sp.load(Ordering::Relaxed) {
+                        let t = Instant::now();
+                        std::thread::sleep(Duration::from_micros(150));
+                        over.push(t.elapsed().as_micros().saturating_sub(150) as u64);
+                    }
+                    over
+                });
+                std::thread::sleep(Duration::from_secs(2));
+                let s0 = b.peer_jitter_stats()[0].1;
+                let f0 = b.feed_stats();
+                let x0 = b.stats().xruns;
+                let mut buf_sum = 0.0;
+                let n = 40;
+                for _ in 0..n {
+                    std::thread::sleep(Duration::from_millis(250));
+                    buf_sum += b.peer_jitter_stats()[0].1.buffer_ms as f64;
+                }
+                let s1 = b.peer_jitter_stats()[0].1;
+                let f1 = b.feed_stats();
+                let x1 = b.stats().xruns;
+                stop_probe.store(true, Ordering::Relaxed);
+                let mut over = probe.join().unwrap();
+                drop(a);
+                drop(b);
+                stop_load.store(true, Ordering::Relaxed);
+                for h in hogs {
+                    let _ = h.join();
+                }
+                over.sort_unstable();
+                let pct = |q: f64| over[((over.len() - 1) as f64 * q) as usize];
+                println!(
+                    "| {} | {} | {}/{}/{} | {:.2} | {} | {} | {:.2} | {:.2} | {} |",
+                    if load { format!("{cores}코어 점유") } else { "없음".into() },
+                    match (mmcss, timer) {
+                        (false, false) => "끔",
+                        (true, false) => "MMCSS만",
+                        (false, true) => "타이머만",
+                        (true, true) => "둘 다",
+                    },
+                    pct(0.5),
+                    pct(0.99),
+                    over[over.len() - 1],
+                    (s1.concealed - s0.concealed) as f64 / (n as f64 * 0.25),
+                    f1.0 - f0.0,
+                    f1.1 - f0.1,
+                    buf_sum / n as f64,
+                    s1.jitter_ms,
+                    x1 - x0,
+                );
+            }
+        }
+    }
+    prio::set_engine_promotion(true);
 }

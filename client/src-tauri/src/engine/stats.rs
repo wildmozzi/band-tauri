@@ -54,6 +54,8 @@ pub struct AudioCounters {
     pub input_discontinuities: AtomicU64,
     /// 장치가 SILENT로 표시한 캡처 패킷 수.
     pub input_silent_packets: AtomicU64,
+    /// 오디오 I/O 스레드의 우선순위 설정 결과(자체 WASAPI가 적는다; cpal·가짜 장치는 `Unmanaged`).
+    pub audio_thread: crate::engine::prio::PrioSlot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -139,9 +141,15 @@ pub struct EngineStats {
     /// 실제로 열린 오디오 백엔드: `wasapiExclusive` | `wasapiShared3`(IAudioClient3 저지연 공유) |
     /// `cpalWasapi` | `cpalAsio` | `fake`. 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
     pub backend: String,
+    /// 엔진 스레드의 MMCSS 등록 결과와 1ms 타이머 해상도 여부(P1-2).
+    pub thread_priority: crate::engine::prio::ThreadPriorityStats,
     pub peers: Vec<PeerStats>,
     /// 릴레이 등록 상태(릴레이를 설정하지 않았으면 null).
     pub relay: Option<crate::net::relay::RelayStats>,
+    /// 오디오 UDP DSCP 마킹 상태(P1-3, 네트워크 미시작이면 null).
+    pub qos: Option<crate::net::qos::QosStats>,
+    /// 송신 큐 지연: 프레임 생성(인코딩 전) → 피어별 send_to 완료, 직전 2초 창(P1-3, 네트워크 미시작이면 null).
+    pub send_queue: Option<crate::net::txlat::SendQueueStats>,
     /// 공유 메트로놈 상태(P2-3).
     pub metronome: super::metronome::MetronomeStats,
 }
@@ -165,8 +173,11 @@ impl EngineStats {
             input_silent_packets: 0,
             device_period_ms: 0.0,
             backend: String::new(),
+            thread_priority: crate::engine::prio::ThreadPriorityStats::stopped(),
             peers: Vec::new(),
             relay: None,
+            qos: None,
+            send_queue: None,
             metronome: Default::default(),
         }
     }
@@ -221,7 +232,7 @@ mod tests {
         assert!(j.contains("\"state\":\"connected\""));
         assert!(j.contains("\"path\":\"lan\""));
         assert!(j.contains("\"rttMs\":null"));
-        assert!(j.contains("\"relay\":null"));
+        assert!(j.contains("\"relay\":null") && j.contains("\"qos\":null") && j.contains("\"sendQueue\":null"), "{j}");
         assert_eq!(serde_json::to_string(&PathKind::Relay).unwrap(), "\"relay\"");
         assert!(j.contains("\"devicePeriodMs\":0.0") && j.contains("\"backend\":\"\"") && j.contains("\"inputDiscontinuities\":0") && j.contains("\"streamFailed\":false"), "{j}");
     }

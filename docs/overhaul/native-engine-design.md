@@ -35,6 +35,8 @@ net/crypto.rs          ChaCha20-Poly1305 패킷 암호화
 net/peer.rs            피어 테이블, 홀펀칭 상태기계, keepalive, RTT
 net/stun.rs            STUN (기존 파서 이식)
 net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/토큰 갱신, relay-design.md)
+net/qos.rs             오디오 UDP DSCP EF 마킹(IP_TOS, Windows qWAVE), 3절 8
+net/txlat.rs           송신 큐 지연 히스토그램(프레임 생성 → send_to 완료), 3절 8
 diag/mod.rs            진단(P2-5): 1초 간격 엔진 통계 타임라인 기록 스레드(최근 60분 링 버퍼)
 diag/timeline.rs       링 버퍼, 샘플 형식(JSONL)
 diag/mask.rs           개인정보 마스킹(IP 대역, 이메일, 토큰, id 가명, 사용자 폴더)
@@ -47,9 +49,9 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 |---|---|---|
 | 입력 콜백 (RT) | 장치 샘플 → 채널 라우팅 → `f32` SPSC 링(사전할당)에 push, 레벨 원자값 갱신 | 할당, 락, 시스템콜, println |
 | 출력 콜백 (RT) | **콜백 구동 믹스**: 소스 링(로컬 1개 + 피어별 1개, 사전할당 SPSC)에서 필요한 프레임만큼 꺼내 게인·팬(원자값)을 곱해 섞고, 마스터·soft clip 후 장치 포맷/채널 수로 기록. 메트로놈 클릭(1.4절)은 장치 출력에만 더한다. 믹스 탭 링에도 쓴다(클릭 없음). 재생 중인 소스가 모자라면 0을 채우고 소스별 언더런 프레임과 xrun을 원자 증가 | 동일 |
-| engine 워커 (비RT, 1개) | 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신. 피어마다 지터 버퍼에서 디코드한 PCM을 (리샘플해) 그 피어의 소스 링에 공급하고, 로컬 FIFO에서 로컬 소스 링을 채운다 | — |
+| engine 워커 (비RT, 1개) | 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신(send_to 완료마다 송신 큐 지연을 원자 히스토그램에 기록, 3절 8). 피어마다 지터 버퍼에서 디코드한 PCM을 (리샘플해) 그 피어의 소스 링에 공급하고, 로컬 FIFO에서 로컬 소스 링을 채운다 | — |
 | net 수신 스레드 | recv → 복호화/검증 → 피어별 지터 버퍼에 삽입(피어별 `Mutex`는 비RT 스레드끼리만 공유하므로 허용) | — |
-| net 제어 스레드 | 홀펀칭, keepalive(1초), ping/pong(500ms), 타임아웃(5초) | — |
+| net 제어 스레드 | 홀펀칭, keepalive(1초), ping/pong(500ms), 타임아웃(5초), DSCP 마킹 플로 동기화(qWAVE 시스템 호출), 송신 큐 지연 창 회전(2초) | — |
 | WASAPI 스레드 (자체 백엔드, RT) | 입·출력 이벤트를 한 스레드에서 대기(MMCSS "Pro Audio"). 캡처를 먼저 처리하고 렌더. `GetBuffer`/`ReleaseBuffer` 사이에서 입력/출력 콜백 함수(위 두 줄)를 부른다 | 우리 코드는 위와 같음. WASAPI 호출·대기는 예외 |
 
 - 내부 처리 레이트는 **항상 48000Hz**, 내부 포맷 `f32`.
@@ -72,7 +74,10 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
   - 입·출력 장치 클럭 차는 수위 제어(1샘플 단위, 최대 500ppm)로 흡수한다.
   - 언더런 때 늘린 여유는 10초 무사고마다 되돌린다.
 - 입력 또는 출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화 HRESULT(`AUDCLNT_E_DEVICE_INVALIDATED`, `AUDCLNT_E_SERVICE_NOT_RUNNING`, `AUDCLNT_E_RESOURCES_INVALIDATED`)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 그 밖의 WASAPI 호출 실패는 일시 오류로 보고 `streamErrors`만 올린 뒤 다음 이벤트를 기다린다. 같은 방향이 연속 4회 실패하면 그 스트림을 재시작(Stop/Reset/Start, `streamRestarts`)하고, 성공 없이 재시작이 3회 이어지거나 연속 50회 실패하면 `streamFailed=true`, `running=false`로 멈춘다.
-- 워커, net 수신, 자체 WASAPI 스레드는 MMCSS "Pro Audio"(실패 시 높은 우선순위)로 등록하고 FTZ/DAZ를 켠다.
+- 워커, net 수신, 자체 WASAPI 스레드는 스레드 시작 시 MMCSS "Pro Audio"에 등록하고(`AvSetMmThreadCharacteristicsW` + `AvSetMmThreadPriority(HIGH)`, 스레드 종료 시 `AvRevertMmThreadCharacteristics`) FTZ/DAZ를 켠다. 등록이 실패하면 `THREAD_PRIORITY_HIGHEST`로 대신하고, 그것도 실패하면 기본 우선순위로 계속 돈다. 결과는 로그와 `EngineStats.threadPriority`에 남는다(P1-2).
+  - cpal WASAPI 콜백 스레드는 cpal(0.15)이 `THREAD_PRIORITY_TIME_CRITICAL`로 올리고, ASIO 콜백 스레드는 드라이버가 관리한다. RT 콜백 안에서는 시스템콜을 하지 않으므로 우리가 따로 등록하지 않는다(`threadPriority.audio = unmanaged`). cpal은 자체 WASAPI가 실패했을 때의 폴백이다.
+  - 엔진이 도는 동안(`Engine::start` ~ `stop`) 시스템 타이머 해상도를 1ms로 쥔다(`timeBeginPeriod(1)`/`timeEndPeriod(1)`). 프로세스 안 참조 카운트로 감싸 처음 쥘 때만 begin, 마지막에 놓을 때만 end를 부르므로 반복 시작·정지와 중첩 엔진에도 짝이 맞는다. begin이 실패하면 end를 부르지 않는다.
+  - Windows 외 플랫폼은 no-op(`unsupported`).
 - **오디오 백엔드 선택**(`SystemBackend`):
   - `asio`(입·출력 중 하나라도) → cpal ASIO(`asio` 피처).
   - `wasapiExclusive` → 자체 WASAPI 이벤트 구동 독점, 장치 최소 주기. 포맷은 독점 지원 포맷 중 48kHz 우선, 없으면 44.1kHz(리샘플), 그다음 96/88.2kHz. 샘플 형식 f32 → 정수 32(유효 32/24, 24-in-32) → 24비트 패킹(3바이트) → 16비트. 채널 마스크는 믹스 포맷 마스크(채널 수가 같을 때) → 기본 마스크(1·2채널) 또는 DIRECTOUT(3채널 이상) 순으로 시도한다.
@@ -174,7 +179,8 @@ off len 필드
 4   4   sender_ssrc (u32, 세션마다 랜덤)
 8   4   seq (u32, 타입별 독립 증가)
 12  4   timestamp (u32, 48kHz 샘플 클럭; Hello/Ping은 송신측 µs 하위 32비트, HelloAck/Pong은 받은 Hello/Ping의 값을 되돌림)
-16  1   flags: bit0=opus(0이면 PCM16), bit1=stereo
+16  1   flags: Audio bit0=opus(0이면 PCM16), bit1=stereo
+            Hello/HelloAck bit7=경로 태그 있음, bit6=릴레이(RelayData)로 보냄 (P1-4c, relay-design 2.4·4.1). 그 밖의 타입은 0
 17  1   frame_samples / 120 (1,2,4)
 18  ..  암호문 (ChaCha20-Poly1305), 마지막 16바이트 = 태그
 ```
@@ -207,8 +213,8 @@ off len 필드
   - 그중 Hello/HelloAck는 릴레이 경로를 세운다. 그 밖의 패킷은 그 피어와 릴레이 경유 Hello/HelloAck가 오간 뒤(`relay_confirmed`)에만 받는다. 확정 경로가 직접이면 데이터만 받고 생존 시각은 갱신하지 않는다.
   - 경로를 바꾼 직후 2초 동안은 직전 경로로 온 인증 패킷도 받는다(비행 중 패킷, 무끊김 전환).
   - 릴레이 주소가 바뀌거나 해제되면 직전 릴레이 주소에서 온 Hello/HelloAck는 버린다(직접 경로로 오인 방지). 데이터는 위 2초 유예로 받는다.
-  - 경로 종류(`via_relay`)는 인증되지 않은 출발 주소로 정한다. 경로상 공격자가 직접 Hello의 출발 주소를 릴레이로 바꿔 먼저 넣으면 강등시킬 수 있다. 직접 패킷을 버리는 것과 같은 효과라 새 공격력은 아니다(relay-design 4.1).
-- 제어 패킷(Hello~Bye)은 타입별로 이전보다 큰 seq만 받는다(재전송 방어). HelloAck는 피어당 50ms에 1회까지.
+  - 경로 종류(`via_relay`)는 출발 주소로 정하되, Hello/HelloAck는 헤더(AAD)의 경로 태그와 맞아야 받는다(P1-4c). 그래서 경로상 공격자가 직접 Hello의 출발 주소를 릴레이로 바꿔 넣어도 릴레이 경로가 서지 않는다. 태그 없는 Hello(옛 엔진)는 출발 주소만으로 판단한다(relay-design 4.1). Hello/HelloAck는 송신마다 새 seq를 쓰므로 직접·릴레이로 같은 Hello를 따로 봉인해도 nonce가 겹치지 않는다.
+- 제어 패킷(Hello~Bye)은 타입별로 이전보다 큰 seq만 받는다(재전송 방어). HelloAck는 피어당 50ms에 1회까지. Hello/HelloAck는 평문 id·직전 릴레이 주소·경로 태그 검사를 seq 수락 **전에** 한다(걸러질 패킷이 seq를 소모해 진짜 Hello를 막지 않게).
 - Hello/HelloAck 평문: `peer_id`(UTF-8, ≤64B). Bye 평문: 없음.
 - **Pong 평문**(P2-3): `[0xC1, now_us(u64 BE)]` 9바이트다. 응답자가 Pong을 보낼 때의 엔진 시계(µs, Net epoch 기준)이고, 받는 쪽이 시계 오프셋 표본을 만든다(1.4절). 빈 평문(옛 엔진)이나 다른 형식이면 표본만 건너뛴다(RTT는 그대로). 옛 엔진은 Pong 평문을 보지 않으므로 호환된다.
 - Ping 평문: 없음, 또는 **에코 제어 6바이트**(P1-1) `[0xEC, flags, delay_us(u32 BE)]`. RTT는 헤더 timestamp를 쓴다.
@@ -228,7 +234,7 @@ off len 필드
 5. `Connected`: 1초 keepalive(Ping), 500ms 간격 RTT 측정(EWMA). 5초 무응답 → `Reconnecting`(다시 Hello) → 15초 → `Failed`.
 6. `engine_remove_peer` 또는 `engine_stop` 시 Bye 송신.
 7. **릴레이 폴백**(P1-4b, relay-design.md). TURN 대신 자체 UDP 릴레이를 쓴다.
-   - 등록: 서버 `relay-token`을 받으면 프론트가 `engine_set_relay`를 부른다. 엔진은 RelayBind → CookieRequired → 쿠키 Bind → Ok로 등록하고 10초마다 keepalive한다. 릴레이 경로 피어가 1초 넘게 조용하면 keepalive를 1초마다 당겨 보낸다. 그래서 릴레이 재시작·NAT 재바인딩은 CookieRequired를 받아 곧바로 재등록된다. Ack가 3번 연속 없으면 `unreachable`(계속 재시도), 토큰이 만료되면 `expired`(새 토큰 전까지 Bind 중지).
+   - 등록: 서버 `relay-token`을 받으면 프론트가 `engine_set_relay`를 부른다. 엔진은 RelayBind → CookieRequired → 쿠키 Bind → Ok로 등록하고 10초마다 keepalive한다. `bindKey`가 있으면 모든 Bind 끝에 Bind MAC을 붙인다(relay-design 2.1.1, 등록 가로채기 방지). 릴레이 경로 피어가 1초 넘게 조용하면 keepalive를 1초마다 당겨 보낸다. 그래서 릴레이 재시작·NAT 재바인딩은 CookieRequired를 받아 곧바로 재등록된다. Ack가 3번 연속 없으면 `unreachable`(계속 재시도), 토큰이 만료되면 `expired`(새 토큰 전까지 Bind 중지).
    - 토큰 만료는 로컬 벽시계가 아니라 **받은 시각 + `expiresInSec`**(서버 발급 시각 기준 남은 수명)으로 판단한다. 로컬 시계로 토큰을 거부하지 않는다. 시계가 어긋난 PC에서도 끊기지 않게 하려는 것이다(PR #10 M1). 서명·만료의 최종 판정은 릴레이가 한다. 릴레이는 만료 토큰을 조용히 버리므로 엔진에는 `unreachable`로 보인다. 프론트는 `expired`/`unreachable`이면 바로 새 토큰을 요청한다.
    - 릴레이 주소는 프론트가 준 `host:port` 문자열이 같으면 처음 해석한 주소를 유지한다(토큰 갱신마다 DNS를 다시 풀지 않는다). 주소가 실제로 바뀌면 릴레이 경로 피어를 새 주소로 바로 옮긴다(Reconnecting 없이). 해제(`null`)면 경로를 비우고 직접 경로를 다시 찾는다(M3).
    - 경로 상태기계(피어별):
@@ -254,6 +260,17 @@ off len 필드
      - 에코 측정 중 측정 대상 피어에게 가는 클릭 스트림은 릴레이 경로여도 설정 코덱(PCM16)으로 보낸다(수 초, 한 명).
      - 상태: `PeerStats.txCodec`(그 피어에게 마지막으로 보낸 코덱)·`txCodecAuto`, `EngineStats.relay.autoOpus`. UI는 릴레이 경로 피어에 "서버 경유 — 대역 절약을 위해 Opus로 자동 전환"을 띄우고, 그래도 `overBudget`이면 "릴레이 대역 초과" 경고를 띄운다.
      - 받는 쪽 손실 피드백(측정 가용 대역)은 아직 없다. 릴레이가 조용히 버리는 것은 송신 측에서 알 수 없으므로, 예상 부하와 송신량 측정만 쓴다.
+8. **QoS 마킹·송신 페이싱·송신 큐 지연**(P1-3, `net/qos.rs`, `net/txlat.rs`).
+   - **DSCP EF(46)**: 엔진 소켓 하나(오디오·제어·릴레이 공용)에 `IP_TOS = 0xB8`을 건다. 리눅스·macOS는 이것으로 표시된다. Windows는 이 호출이 성공해도 기본 정책상 무시하므로 qWAVE(QoS2)를 쓴다.
+     - 제어 스레드가 매 틱(20ms) 송신 목적지 집합(확정된 직접 경로 피어 + 릴레이 주소)을 모아, 목적지마다 `QOSAddSocketToFlow(QOSTrafficTypeVoice, QOS_NON_ADAPTIVE_FLOW)`로 플로를 만들고 `QOSSetFlow(QOSSetOutgoingDSCPValue, 46)`을 시도한다. 빠진 목적지의 플로는 `QOSRemoveSocketFromFlow`로 지운다. 송신 경로(워커)는 qWAVE를 부르지 않는다.
+     - DSCP 직접 지정은 관리자(또는 Network Configuration Operators) 권한이 필요하다. 일반 사용자는 `ERROR_ACCESS_DENIED`(5)로 실패하고, 플로는 트래픽 유형 Voice로 남는다(`marking: 'voice'`, 실제 표시값은 OS 정책). 루프백 목적지는 qWAVE가 거부한다(`ERROR_NOT_FOUND` 1168). 어떤 실패도 엔진을 멈추지 않으며, 실패한 목적지는 집합에서 빠졌다 다시 들어올 때까지 재시도하지 않는다.
+     - 결과는 `EngineStats.qos`(4절). 관리자 없이 EF를 쓰려면 정책 기반 QoS(그룹 정책/`New-NetQosPolicy -AppPathNameMatchCondition band.exe -DSCPAction 46`, 설치 시 관리자 1회)가 대안이다 — 아직 하지 않음.
+     - **IPv4만**: 소켓을 `0.0.0.0`에 바인드하고 후보도 IPv4뿐이라 `IPV6_TCLASS`는 다루지 않는다. IPv6 경로를 추가하면 함께 넣어야 한다.
+     - 표시가 실제 회선에서 유지되는지(공유기·ISP가 지우는지)와 Wi-Fi WMM 큐 효과는 **[사람 확인]**: 상대 PC(또는 미러 포트)에서 Wireshark로 IP 헤더 DS 필드를 본다. 송신 PC의 캡처에는 qWAVE 표시가 안 보였다는 보고가 있어 판단 근거로 쓰지 않는다.
+   - **송신 페이싱 — 넣지 않는다**(측정 근거). 한 프레임을 피어들에게 간격 없이 연달아 보낸다.
+     - 루프백 5피어·Opus stereo 2.5ms(73바이트) 실측(`tests/send_queue.rs`, realtime 잡, Windows): 암호화 없는 `send_to` 5회 버스트 p50 76µs · p99 326µs. 디버그 빌드 엔진 경로(암호화 포함) 버스트 p50 646µs · p99 1.45ms이고 대부분 최적화되지 않은 ChaCha20-Poly1305 몫이다(릴리스 빌드는 재지 않음).
+     - 한 프레임 버스트는 5 × (73 + 28) ≈ 0.5KB다. 업로드 10Mbps에서도 직렬화 0.4ms로 프레임 주기(2.5ms) 안에 끝나고, 페이싱해도 평균 송출률·직렬화 시간은 같다. 반대로 피어 사이에 간격 δ를 두면 마지막 피어가 (N−1)·δ만큼 늦어진다(δ = 2.5ms/5면 +2ms). 지연을 늘리지 않는다는 조건과 맞지 않는다.
+   - **송신 큐 지연**: 워커 패스가 입력 링을 비우기 직전 시각부터 각 피어의 `send_to`가 돌아온 시각까지를 패킷마다 잰다(에코 반사 패킷 제외). 한 패스에서 프레임 여러 개가 완성되면(장치 버퍼 > 프레임, 예: 10ms 장치 / 2.5ms 프레임 → 4개) 모두 그 패스 시작 시각을 쓴다. 그래서 뒤 프레임은 앞 프레임의 인코딩·송신을 기다린 시간까지 포함한다(PR #37 리뷰 M1). 패스 전에 링에서 폴링을 기다린 시간(최대 `POLL` 0.5ms)은 포함하지 않는다. 기록은 원자 덧셈뿐이다(1µs 칸 0..16µs, 그 위는 2의 거듭제곱마다 8칸, 상대 오차 ≤ 12.5%). 창 회전과 기록이 겹치면 칸과 최대값이 서로 다른 창으로 갈 수 있다. 그래서 최대값은 가장 높은 비지 않은 칸의 하한 아래로 내리지 않는다. 제어 스레드가 2초마다 창을 비워 p50/p99/최대를 `EngineStats.sendQueue`에 둔다. 인코딩 시간과 앞선 피어들의 송신 시간이 포함된다.
 
 ## 4. Tauri 커맨드 (`commands.rs`) — 프론트 계약
 
@@ -279,13 +296,18 @@ interface EngineConfig {
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
 interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean; txCodec: 'opus' | 'pcm16' | null; txCodecAuto: boolean }
-interface RelayConfig { addr: string; token: string; expiresInSec?: number }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)
+interface RelayConfig { addr: string; token: string; expiresInSec?: number; bindKey?: string }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)·bindKey(Bind MAC 키, base64url 32B, relay-design 2.1.1)
 interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean; autoOpus: boolean }
 type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
 interface LoopbackRun { roundTripMs: number | null; peakRatio: number; correlation: number; clipped: boolean; inverted: boolean; inputPeak: number }
 interface LoopbackReport { verdict: MeasureVerdict; message: string; runs: LoopbackRun[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; sampleRate: number; inputBufferFrames: number; outputBufferFrames: number; bufferRoundTripMs: number; driverInputLatencyMs: number | null; driverOutputLatencyMs: number | null; driverRoundTripMs: number | null; estLatencyMs: number; offsetMs: number | null; driverErrorMs: number | null; correctedEstLatencyMs: number | null; backend: string }
 interface EchoReport { verdict: MeasureVerdict; message: string; peerId: string; runs: (number | null)[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; peerEchoDelayMs: number; oneWayMs: number | null; networkRttMs: number | null; jitterBufferMs: number; frameMs: number; localLatencyMs: number; inputBufferMs: number; outputBufferMs: number; mouthToEarMs: number | null; residualMs: number | null; path: 'lan' | 'public' | 'relay' | null }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats }
+type QosMarking = 'pending' | 'ef' | 'voice' | 'none'
+interface QosStats { marking: QosMarking; ipTos: boolean; qwave: boolean; flows: number; efFlows: number; failed: number; lastError: string | null }
+interface SendQueueStats { p50Ms: number; p99Ms: number; maxMs: number; packets: number }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null }
+type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
+interface ThreadPriorityStats { worker: ThreadPriority; netRecv: ThreadPriority; audio: ThreadPriority; timer1ms: boolean }
 interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
 interface MetronomePlan { running: boolean; bpm: number; beatsPerBar: number; startUs: number; refPeerId: string | null }
 interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; outputLatencyMs: number | null }
@@ -299,7 +321,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_test_start` | `{ config: EngineConfig }` | `null` (네트워크 없이 모니터만) |
 | `engine_test_stop` | — | `null` |
 | `engine_add_peer` | `{ peerId: string, descriptor: LocalDescriptor }` | `null` |
-| `engine_set_relay` | `{ relay: RelayConfig \| null }` | `null` — 릴레이 설정·토큰 갱신(같은 주소면 등록 유지), null이면 해제. 서버 `relay-token`을 받을 때마다 부른다. 토큰은 `engine_start`가 만든 ssrc에 묶이므로 `engine_start`/`engine_add_peer`의 인자가 아니다. 주소는 DNS 해석 후 IPv4만 쓰고, 같은 `addr` 문자열이면 처음 해석한 주소를 유지한다. 만료는 받은 시각 + `expiresInSec`로 판단한다(없으면 로컬 시계, 로컬 시계로는 거부하지 않음). 토큰 구조·ssrc 불일치는 에러 |
+| `engine_set_relay` | `{ relay: RelayConfig \| null }` | `null` — 릴레이 설정·토큰 갱신(같은 주소면 등록 유지), null이면 해제. 서버 `relay-token`을 받을 때마다 부른다. 토큰은 `engine_start`가 만든 ssrc에 묶이므로 `engine_start`/`engine_add_peer`의 인자가 아니다. 주소는 DNS 해석 후 IPv4만 쓰고, 같은 `addr` 문자열이면 처음 해석한 주소를 유지한다. 만료는 받은 시각 + `expiresInSec`로 판단한다(없으면 로컬 시계, 로컬 시계로는 거부하지 않음). 토큰 구조·ssrc 불일치, `bindKey`가 32바이트 base64url이 아니면 에러 |
 | `engine_remove_peer` | `{ peerId: string }` | `null` |
 | `engine_set_peer_gain` | `{ peerId: string, gain: number, muted: boolean, pan?: number }` | `null` — pan은 -1(왼쪽)..1(오른쪽), 기본 0, equal-power |
 | `engine_set_jitter_profile` | `{ profile: number }` | `null` — 지터 버퍼 프로필(0..1)을 실행 중인 모든 피어와 이후 추가될 피어에 적용(1.2절). 다음 `engine_start`는 `EngineConfig.jitterProfile`을 쓴다. 범위 밖이면 에러 |
@@ -350,6 +372,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 `devicePeriodMs`: 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기(독점: 버퍼 = 주기, 저지연 공유: 엔진 주기), cpal·가짜 장치는 실측 콜백 크기다.
 
+`threadPriority`: 스레드 우선순위 설정 결과(P1-2, 1.1절). `worker`·`netRecv`·`audio`(오디오 I/O 스레드) 각각 `mmcss`(MMCSS "Pro Audio" 등록) | `elevated`(MMCSS 실패, `THREAD_PRIORITY_HIGHEST`) | `failed`(둘 다 실패, 기본 우선순위) | `unmanaged`(우리가 설정하지 않음: 네트워크 없음, cpal·ASIO·가짜 장치) | `disabled`(측정용으로 끔) | `unsupported`(Windows 아님). `timer1ms`: 엔진이 1ms 타이머 해상도를 쥐고 있다. 정지 상태면 모두 `unmanaged`/false.
+
 `backend`: 실제로 열린 오디오 백엔드. `wasapiExclusive`(자체 독점) | `wasapiShared3`(자체 IAudioClient3 저지연 공유) | `cpalWasapi`(cpal 공유 폴백) | `cpalAsio` | `fake`(테스트). 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
 
 `engine_list_devices`의 자체 WASAPI 장치: 엔드포인트마다 `wasapiShared` 항목 1개(채널·레이트 = 믹스 포맷)와, 독점 지원 포맷이 있으면 `wasapiExclusive` 항목 1개(채널 = 지원 최대, 레이트 = 독점 지원 레이트)를 낸다. `id`는 둘 다 `wasapi::<장치 이름>`(cpal과 같은 형식)이다.
@@ -369,6 +393,9 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 `PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제). `autoOpus`는 PCM16 설정에서 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중이라는 뜻이다(3절 7). `PeerStats.txCodec`은 그 피어에게 마지막으로 보낸 내 소리의 코덱이고, `txCodecAuto`는 그것이 자동 전환한 Opus라는 뜻이다. TS 래퍼(`engineApi.ts`)는 `autoOpus`·`txCodec`·`txCodecAuto`를 optional로 둔다(이 필드가 없는 옛 엔진 빌드와 함께 쓸 때).
 
+`qos`(P1-3, 3절 8): 오디오 UDP DSCP 마킹 상태. 네트워크가 없으면 null. `marking`: `ef`(EF 46을 OS에 지정 — 비Windows `IP_TOS`, Windows는 걸린 플로 모두 `QOSSetFlow` 성공) | `voice`(Windows, 걸린 플로 중 DSCP 직접 지정 실패가 있음 — 보통 권한 부족, 그 플로는 트래픽 유형 Voice. `ef`도 플로 추가 실패 목적지가 섞이면 `failed`로 알림) | `pending`(Windows, 아직 송신 목적지 없음) | `none`(표시 못 함). `ipTos`: `IP_TOS` setsockopt 성공(Windows는 성공해도 무시될 수 있다). `qwave`: qWAVE 핸들 획득. `flows`/`efFlows`/`failed`: 플로가 걸린 목적지 수 / 그중 DSCP 46 성공 수 / 플로 추가 실패 수(Windows만, 그 밖에는 0). `lastError`: 지금 남은 실패 사유(소켓·핸들 단계 실패, 또는 현재 목적지 중 실패한 것). 실패한 목적지가 빠지면 지워진다(이력 아님).
+
+`sendQueue`(P1-3): 송신 큐 지연(워커 패스 시작 → 피어별 `send_to` 완료, 3절 8), 직전 2초 창의 `p50Ms`/`p99Ms`/`maxMs`와 잰 패킷 수 `packets`. 송신이 없던 창이면 `packets = 0`이고 나머지는 0이다. 네트워크가 없으면 null.
 **진단 내보내기(P2-5, `diag/`)**
 - 기록: `band-diag` 스레드가 1초마다 `EngineManager::snapshot()`(엔진 슬롯 락 안에서 `Engine::stats()`, UI의 `engine_stats`와 같은 경로)으로 샘플을 링 버퍼(3600개 = 60분)에 넣는다. 엔진이 없으면 기록하지 않고, 엔진이 사라진 순간 `running:false` 정지 표시 샘플을 한 번 넣는다. RT 콜백 경로에는 아무것도 추가하지 않는다.
 - 샘플(JSONL 한 줄): `t`(유닉스 ms), `running`, `network`(합주/테스트, 정지 표시 샘플은 끝난 세션 값), `session`(`EngineManager` generation — 값이 바뀐 곳이 엔진 재시작 경계로, 누적 카운터가 0부터 다시 센다), `EngineStats`의 장치·지연·xrun·스트림 오류 값, `peers[]`(`peer` 가명, `state`, `path`, `rttMs`, `jitterMs`, `bufferMs`, `playoutMs`, `lossPct`, `late`·`concealed` 누적, `level`, 에코 상태, `txCodec`·`txCodecAuto`), `relay`(주소는 대역만, `autoOpus` 포함).
@@ -414,7 +441,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 - 연주 시작(앱): `engine_start` → descriptor를 `native-descriptor`로 브로드캐스트. 새 연주자가 들어오거나 `native-descriptor`를 받으면 `engine_add_peer`, 아직 내 descriptor를 그 피어에게 안 보냈으면 `to`로 보낸다(양방향 동시 펀칭).
 - 연주자 이탈/`native-leave`/WS `leave` → `engine_remove_peer`.
-- `relay-token { token, addr, ssrc, expiresAt, expiresIn, serverNow }`(내 엔진 ssrc와 같을 때만) → `engine_set_relay({ addr, token, expiresInSec })`.
+- `relay-token { token, bindKey, addr, ssrc, expiresAt, expiresIn, serverNow }`(내 엔진 ssrc와 같을 때만) → `engine_set_relay({ addr, token, expiresInSec, bindKey })`. `bindKey`는 옛 서버면 없다.
   - 남은 수명은 `expiresIn` → `expiresAt - serverNow` → (옛 서버) `expiresAt - 내 시계` 순으로 정한다. 내 PC 시계는 쓰지 않는다(M1).
   - 받은 시각 + 남은 수명 기준 만료 60초 전(수명이 짧으면 절반 지점)에 `relay-token-request`를 보낸다. WS가 잠시 끊겨도 버틸 여유를 두려는 것이다(L4). 응답이 없으면 10초마다 다시 요청한다.
   - `engine_stats.relay.state`가 `expired`/`unreachable`이면 바로 새 토큰을 요청한다(10초에 한 번까지). `rejected`(정원·ssrc 충돌)는 새 토큰으로 풀리지 않으므로 요청하지 않는다.
