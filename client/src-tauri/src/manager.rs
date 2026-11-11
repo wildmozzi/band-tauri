@@ -217,6 +217,16 @@ impl EngineManager {
         f(engine)
     }
 
+    /// 진단 기록용(P2-5): 엔진이 있으면 통계·설정·네트워크 여부. 슬롯 락은 `stats()`만큼만 잡는다.
+    pub fn snapshot(&self) -> Option<crate::diag::Snapshot> {
+        let s = self.slot.lock();
+        s.engine.as_ref().map(|e| crate::diag::Snapshot {
+            stats: e.stats(),
+            config: e.config().clone(),
+            network: e.has_network(),
+        })
+    }
+
     pub fn stats(&self) -> EngineStats {
         match self.slot.lock().engine.as_ref() {
             Some(e) => e.stats(),

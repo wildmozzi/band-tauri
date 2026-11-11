@@ -43,6 +43,10 @@ sha2 = "0.10"
 # Utilities
 parking_lot = "0.12"
 tauri-plugin-process = "2"
+# 진단 내보내기(P2-5): 저장 위치 대화상자, zip 작성, 로그 마스킹
+tauri-plugin-dialog = "2"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+regex = "1"
 
 [target.'cfg(windows)'.dependencies]
 # 워커/수신 스레드 MMCSS("Pro Audio") 등록

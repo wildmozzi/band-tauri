@@ -18,6 +18,7 @@ import {
 } from '../native/engineConfig'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
 import { DesktopDownloadButton } from './DesktopDownloadButton'
+import { DiagnosticsExport } from './DiagnosticsExport'
 import './AudioSettings.css'
 
 interface AudioSettingsProps {
@@ -397,6 +398,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
       </section>
 
       <LatencyMeasurePanel />
+
+      <DiagnosticsExport />
 
       {issues.length > 0 && (
         <section className="settings-section">
