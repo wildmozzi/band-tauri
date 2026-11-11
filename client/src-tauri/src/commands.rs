@@ -148,6 +148,12 @@ pub async fn engine_safety_code(state: State<'_, EngineState>, peer_id: String) 
     state.0.with_engine(|e| e.safety_code(&peer_id))
 }
 
+/// 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필을 실행 중에 바꾼다(P1-5). 다음 `engine_start`에는 `EngineConfig.jitterProfile`을 쓴다.
+#[tauri::command]
+pub async fn engine_set_jitter_profile(state: State<'_, EngineState>, profile: f32) -> Result<(), String> {
+    state.0.with_engine(|e| e.set_jitter_profile(profile))
+}
+
 #[tauri::command]
 pub async fn engine_set_input_muted(state: State<'_, EngineState>, muted: bool) -> Result<(), String> {
     state.0.controls().input_muted.store(muted, Ordering::Relaxed);

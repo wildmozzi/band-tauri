@@ -27,6 +27,7 @@ pub fn run() {
             commands::engine_set_relay,
             commands::engine_set_peer_gain,
             commands::engine_set_input_muted,
+            commands::engine_set_jitter_profile,
             commands::engine_safety_code,
             commands::engine_set_monitor,
             commands::engine_set_master_gain,
