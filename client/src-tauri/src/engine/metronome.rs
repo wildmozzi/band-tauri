@@ -32,6 +32,11 @@ pub const CLICK_LEN: usize = 1440;
 pub const DEFAULT_CLICK_GAIN: f32 = 0.8;
 /// 올려 둔 클릭의 제 시각이 이만큼(초) 넘게 지났다고 다시 계산되면(콜백 공백 뒤) 울리지 않고 건너뛴다.
 const STALE_SKIP_S: f64 = 0.005;
+/// 루프백 보정값 `offsetMs`로 받을 수 있는 범위(ms). 측정 오차로 음수가 나올 수 있다.
+pub const MIN_LOOPBACK_OFFSET_MS: f64 = -50.0;
+pub const MAX_LOOPBACK_OFFSET_MS: f64 = 200.0;
+/// 루프백에서 구한 숨은 출력 지연 상한(µs).
+const MAX_MEASURED_HIDDEN_OUT_US: f64 = 100_000.0;
 
 fn encode(frame: u64, accent: bool) -> u64 {
     (frame << 1) | accent as u64
@@ -237,9 +242,52 @@ pub struct MetronomeStats {
     pub late_clicks: u64,
     /// 콜백 공백 뒤 제 시각이 지나 건너뛴 클릭 수.
     pub skipped_clicks: u64,
-    /// 클릭 시각에 반영한 숨은 출력 지연(ms, 드라이버 보고 출력 지연 − 콜백 크기).
-    /// null = 드라이버가 알려 주지 않아 보정 안 됨(cpal WASAPI 등). UI가 "출력 지연 보정 안 됨"을 안내할 수 있다.
+    /// 클릭 시각에 반영한 숨은 출력 지연(ms). 출처는 `output_latency_source`.
+    /// null = 드라이버 보고도 루프백 측정도 없어 보정 안 됨(cpal WASAPI 등). UI가 "루프백 측정으로 보정"을 안내할 수 있다.
     pub output_latency_ms: Option<f64>,
+    /// `output_latency_ms`의 출처(드라이버 보고 / 루프백 측정). null = 보정 안 됨.
+    pub output_latency_source: Option<OutputLatencySource>,
+    /// 기준 피어가 Pong에 시계를 싣지 않는 옛 엔진이다(PR #34 L4). 이 계획으로는 `synced`가 영원히 false다.
+    pub ref_clock_unsupported: bool,
+    /// 시계 추정 직선의 무게중심에서 지금까지의 외삽 거리(ms, PR #34 L6). 기울기 오차 × 이 거리가 오프셋 오차가 된다.
+    pub clock_extrapolation_ms: Option<f64>,
+}
+
+/// 숨은 출력 지연 보정의 출처.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutputLatencySource {
+    /// 드라이버 보고 출력 지연 − 콜백 크기(ASIO `ASIOGetLatencies`, 자체 WASAPI `GetStreamLatency`).
+    Driver,
+    /// 루프백 측정 보정값(`offsetMs`)에서 나눈 출력 쪽 몫(`measured_hidden_out_us`).
+    Loopback,
+}
+
+/// 루프백 측정 보정값 `offset_ms`(= 실측 왕복 − 입력 버퍼 − 출력 버퍼 = 숨은 입력 + 숨은 출력)에서
+/// 숨은 출력 지연(µs)을 나눈다(PR #34 M2(a)).
+/// - 드라이버가 입력 쪽 지연만 알려 주면(`hidden_in_us`) 그것을 뺀 나머지.
+/// - 아니면 반씩(입·출력 대칭 가정: 변환기·WASAPI 엔진 주기·USB 안전 여유는 보통 양방향에 비슷하게 있다).
+///   비대칭이면 (숨은 출력 − 숨은 입력)/2만큼 남는다(설계 1.4절).
+///
+/// 0..100ms로 자른다.
+pub fn measured_hidden_out_us(offset_ms: f64, hidden_in_us: Option<f64>) -> f64 {
+    let total = offset_ms * 1000.0;
+    let out = match hidden_in_us {
+        Some(h) => total - h,
+        None => total * 0.5,
+    };
+    if out.is_finite() {
+        out.clamp(0.0, MAX_MEASURED_HIDDEN_OUT_US)
+    } else {
+        0.0
+    }
+}
+
+/// 숨은 출력 지연 선택: 드라이버 보고가 있으면 그것(직접 출력 쪽 값), 없으면 루프백 측정에서 나눈 값.
+pub fn choose_hidden_out(driver_us: Option<f64>, loopback_us: Option<f64>) -> Option<(f64, OutputLatencySource)> {
+    driver_us
+        .map(|h| (h, OutputLatencySource::Driver))
+        .or_else(|| loopback_us.map(|h| (h, OutputLatencySource::Loopback)))
 }
 
 /// 커맨드 ↔ 워커 공유: 계획(세대 번호와 함께)과 워커가 쓰는 상태.
@@ -248,9 +296,22 @@ pub struct MetronomeCtl {
     pub plan: Mutex<(u64, MetronomePlan)>,
     pub stats: Mutex<MetronomeStats>,
     pub click: Arc<ClickShared>,
+    /// 이 장치 구성의 루프백 보정값 `offsetMs`(PR #34 M2(a)). 드라이버가 출력 지연을 보고하지 않을 때 쓴다.
+    pub loopback_offset_ms: Mutex<Option<f64>>,
 }
 
 impl MetronomeCtl {
+    /// 루프백 보정값 설정·해제. 범위 밖이면 거부한다.
+    pub fn set_loopback_offset(&self, offset_ms: Option<f64>) -> Result<(), String> {
+        if let Some(o) = offset_ms {
+            if !o.is_finite() || !(MIN_LOOPBACK_OFFSET_MS..=MAX_LOOPBACK_OFFSET_MS).contains(&o) {
+                return Err(format!("offsetMs는 {MIN_LOOPBACK_OFFSET_MS}..{MAX_LOOPBACK_OFFSET_MS}ms여야 합니다"));
+            }
+        }
+        *self.loopback_offset_ms.lock() = offset_ms;
+        Ok(())
+    }
+
     pub fn set_plan(&self, plan: MetronomePlan) {
         let mut p = self.plan.lock();
         p.0 += 1;
@@ -544,6 +605,29 @@ mod tests {
         // 같은 귀 시각에 울리려면 숨은 지연만큼 이른 프레임에 써야 한다
         assert!((c0.frame_for(t) - c1.frame_for(t) - 352.0).abs() < 1e-6);
         assert!((c1.ear_time_us(c1.frame_for(t)) - t).abs() < 1e-6);
+    }
+
+    #[test]
+    fn loopback_offset_splits_into_output_share() {
+        // PR #34 M2(a): offset = 숨은 입력 + 숨은 출력
+        assert_eq!(measured_hidden_out_us(20.0, None), 10_000.0, "입력 쪽 모르면 반");
+        assert_eq!(measured_hidden_out_us(20.0, Some(4_000.0)), 16_000.0, "입력 쪽을 알면 뺀 나머지");
+        assert_eq!(measured_hidden_out_us(-3.0, None), 0.0, "음수(측정 오차)는 0");
+        assert_eq!(measured_hidden_out_us(20.0, Some(25_000.0)), 0.0);
+        assert_eq!(measured_hidden_out_us(1000.0, None), MAX_MEASURED_HIDDEN_OUT_US);
+        assert_eq!(measured_hidden_out_us(f64::NAN, None), 0.0);
+        // 드라이버 보고가 우선, 없으면 루프백, 둘 다 없으면 보정 안 함
+        assert_eq!(choose_hidden_out(Some(1.0), Some(2.0)), Some((1.0, OutputLatencySource::Driver)));
+        assert_eq!(choose_hidden_out(None, Some(2.0)), Some((2.0, OutputLatencySource::Loopback)));
+        assert_eq!(choose_hidden_out(None, None), None);
+        // 커맨드 범위 검사
+        let ctl = MetronomeCtl::default();
+        assert!(ctl.set_loopback_offset(Some(f64::INFINITY)).is_err());
+        assert!(ctl.set_loopback_offset(Some(500.0)).is_err());
+        assert!(ctl.set_loopback_offset(Some(7.5)).is_ok());
+        assert_eq!(*ctl.loopback_offset_ms.lock(), Some(7.5));
+        assert!(ctl.set_loopback_offset(None).is_ok());
+        assert_eq!(*ctl.loopback_offset_ms.lock(), None);
     }
 
     #[test]

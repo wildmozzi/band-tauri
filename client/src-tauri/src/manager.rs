@@ -11,7 +11,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::engine::config::EngineConfig;
-use crate::engine::measure::{EchoReport, LoopbackReport};
+use crate::engine::measure::{EchoReport, LoopbackReport, MeasureVerdict};
+use crate::engine::metronome::{MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OFFSET_MS};
 use crate::engine::device::AudioBackend;
 use crate::engine::mixer::MixControls;
 use crate::engine::stats::EngineStats;
@@ -39,6 +40,9 @@ pub struct EngineManager {
     net_options: NetOptions,
     /// 진행 중인 측정(루프백/에코)의 취소 플래그. 한 번에 하나만 돈다.
     measure: Mutex<Option<Arc<AtomicBool>>>,
+    /// 마지막 루프백 보정값(`Engine::device_key`, `offsetMs`). 테스트 모드에서 잰 값을 같은 장치 구성의
+    /// 합주 엔진에도 적용한다(메트로놈 숨은 출력 지연 보정, PR #34 M2(a)). 장치 구성이 바뀌면 쓰지 않는다.
+    loopback_cal: Mutex<Option<(String, f64)>>,
 }
 
 /// 측정 진행 표시를 지우는 가드.
@@ -59,6 +63,7 @@ impl EngineManager {
             backend,
             net_options,
             measure: Mutex::new(None),
+            loopback_cal: Mutex::new(None),
         }
     }
 
@@ -76,14 +81,36 @@ impl EngineManager {
     /// 블로킹(반복당 약 0.7초)이므로 비UI 스레드에서 부른다.
     pub fn measure_loopback(&self, runs: u32) -> Result<LoopbackReport, String> {
         // 합주 중에는 거부한다: 측정 동안 장치 출력이 처프로 바뀌어 모니터·피어 소리가 끊긴다(PR #13 L5).
-        let job = self.with_engine(|e| {
+        let (job, key) = self.with_engine(|e| {
             if e.has_network() {
                 return Err("합주 중에는 루프백 측정을 할 수 없습니다. 연주를 멈추고 테스트 모드에서 재세요".to_string());
             }
-            Ok(e.loopback_job())
+            Ok((e.loopback_job(), e.device_key()))
         })?;
         let (_g, cancel) = self.begin_measure()?;
-        job.run(runs, &cancel)
+        let report = job.run(runs, &cancel)?;
+        // 판정이 정상이면 보정값을 이 장치 구성의 메트로놈 출력 지연 보정으로 기억·적용한다(PR #34 M2(a)).
+        // 범위(−50..200ms) 밖이면 잘라서 "부분 보정"으로 쓰지 않고 기억하지 않는다 — `engine_set_loopback_offset`이
+        // 같은 값을 거부하는 것과 맞춘다(PR #57 L1). 실패·범위 밖이면 이전 값이 그대로 남는다.
+        if let (MeasureVerdict::Ok, Some(o)) = (report.verdict, report.offset_ms) {
+            if !(MIN_LOOPBACK_OFFSET_MS..=MAX_LOOPBACK_OFFSET_MS).contains(&o) {
+                return Ok(report);
+            }
+            *self.loopback_cal.lock() = Some((key.clone(), o));
+            let _ = self.with_engine(|e| if e.device_key() == key { e.set_loopback_offset(Some(o)) } else { Ok(()) });
+        }
+        Ok(report)
+    }
+
+    /// 루프백 보정값 직접 설정·해제(설계 4절 `engine_set_loopback_offset`). 실행 중인 엔진의 장치 구성에 묶어 기억한다.
+    /// 앱이 장치별로 저장해 둔 값을 다시 넣거나(앱 재시작), 사용자가 보정을 끌 때(None) 쓴다.
+    pub fn set_loopback_offset(&self, offset_ms: Option<f64>) -> Result<(), String> {
+        let key = self.with_engine(|e| {
+            e.set_loopback_offset(offset_ms)?;
+            Ok(e.device_key())
+        })?;
+        *self.loopback_cal.lock() = offset_ms.map(|o| (key, o));
+        Ok(())
     }
 
     /// 에코 피어 측정(측정하는 쪽). 상대 동의를 `wait`까지 기다린다. 블로킹.
@@ -166,6 +193,12 @@ impl EngineManager {
         s.starting = false;
         s.cancel = None;
         let engine = result?;
+        // 같은 장치 구성에서 잰 루프백 보정값이 있으면 메트로놈 출력 지연 보정에 쓴다(PR #34 M2(a))
+        if let Some((key, o)) = self.loopback_cal.lock().clone() {
+            if engine.device_key() == key {
+                let _ = engine.set_loopback_offset(Some(o));
+            }
+        }
         let desc = engine.descriptor().cloned().unwrap_or(LocalDescriptor {
             ssrc: 0,
             key: String::new(),

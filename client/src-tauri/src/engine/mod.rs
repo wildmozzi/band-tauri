@@ -312,6 +312,31 @@ impl Engine {
         Ok(plan)
     }
 
+    /// 루프백 보정값(`offsetMs`)으로 메트로놈 클릭의 숨은 출력 지연을 보정한다(PR #34 M2(a)). None이면 해제.
+    /// 드라이버가 출력 지연을 보고하는 장치에서는 드라이버 값이 우선이다(`MetronomeStats.outputLatencySource`).
+    pub fn set_loopback_offset(&self, offset_ms: Option<f64>) -> Result<(), String> {
+        self.metronome.set_loopback_offset(offset_ms)
+    }
+
+    /// 숨은 지연 보정값이 유효한 장치 구성 키(설계 1.4절). 숨은 지연(실측 − 콜백 크기)에 영향을 주는 값을 모두 넣는다:
+    /// 드라이버·실제 백엔드(자체 WASAPI/cpal 폴백)·실제로 연 장치(기본 장치면 그때 고른 장치)·요청 버퍼 크기·in/out 레이트.
+    /// 버퍼를 바꾸면 엔드포인트 버퍼·드라이버 여유가 달라질 수 있어 다시 재야 한다(PR #57 M1).
+    pub fn device_key(&self) -> String {
+        let (c, i) = (&self.cfg, &self.info);
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{:016x}|{:016x}|{}|{}|{}",
+            c.input_driver,
+            c.output_driver,
+            i.in_backend,
+            i.out_backend,
+            i.in_device_tag,
+            i.out_device_tag,
+            c.buffer_size,
+            i.in_rate,
+            i.out_rate
+        )
+    }
+
     pub fn stats(&self) -> EngineStats {
         let c = &self.counters;
         let in_buf = match c.in_cb_frames.load(Ordering::Relaxed) {

@@ -133,6 +133,9 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
   - 가중치 = 1/(1 + ((rtt − 근처 ±4초 최소 rtt)/0.5ms)²)이다. 큐잉이 섞인 표본의 영향을 줄인다.
   - 기준을 "근처 최소"로 잡는 이유: 경로가 바뀌어 RTT 수준이 달라져도 새 구간 표본이 무시되지 않게 하려는 것이다.
 - 대칭 RTT 변화는 오프셋을 바꾸지 않는다. **한 방향만** 바뀐 지연(경로 비대칭)은 원리상 관측할 수 없다. 오차는 비대칭/2이고, 시계 동기화의 알려진 한계다.
+- 오프셋은 직선의 무게중심(가중 평균 표본 시각, 16초 창에서 보통 약 8초 전)에서 지금까지 외삽한다. 기울기 오차 × 이 거리가 오프셋 오차가 되므로 거리를 `clockExtrapolationMs`로 알린다(PR #34 L6).
+  - 최근 버킷 가중을 키우는 안(반감기 8초)은 시뮬레이션에서 평균 치우침(드리프트 −200/+200ppm 시나리오 +0.55ms)이 그대로이고 최악 오차만 늘어(0.70 → 0.78ms, 0.55 → 0.64ms) 택하지 않았다. 그 치우침은 외삽보다 `DeviceClock`의 명목 레이트 가정 쪽이다.
+- **옛 엔진 기준 피어**(PR #34 L4): 시계 없는 Pong(빈 평문)을 6번(약 3초) 받는 동안 시계 표본이 하나도 없으면 상대가 시계를 싣지 않는 옛 엔진으로 보고 `refClockUnsupported = true`를 낸다. 이 계획으로는 `synced`가 계속 false이므로 UI가 "방장 앱 업데이트 필요"를 안내한다. 시계 표본이 하나라도 오면 false다.
 - 따르는 쪽은 방장 피어와만 동기한다(풀메시라 모든 연주자가 방장과 직접 연결돼 있다).
 
 **클릭 프레임**(워커, `BeatScheduler`)
@@ -140,7 +143,14 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 - 내 시계 → 장치 프레임: 워커의 출력 콜백 시각 추정(`DeviceClock`, 1.1절)을 쓴다.
   - 콜백은 프레임 [b, b+n)을 `m + (b+n)/r`에 쓰고, 그 버퍼는 장치 출력 버퍼 1개(n) 뒤에 울린다.
   - 따라서 귀 시각(J) = `m + (J + 2n)/r + h`이다. `estLatencyMs`의 "장치 출력 버퍼" 항과 같은 가정에 숨은 출력 지연 h를 더한다.
-  - **숨은 출력 지연 h**(PR #34 M2): 드라이버 보고 출력 지연(`StreamInfo.out_reported_latency_frames`: ASIO `ASIOGetLatencies`, 자체 WASAPI `GetStreamLatency`) − 콜백 크기(이미 버퍼 1개를 넣었으므로)를 0 이상으로 자른 값이다. WASAPI 공유 엔진 주기·드라이버 안전 오프셋·USB 내부 버퍼가 여기 들어간다. 드라이버가 알려 주지 않으면(cpal WASAPI 등) h = 0이고 `outputLatencyMs = null`로 "보정 안 됨"을 알린다. 이때 피어 간 숨은 지연 차가 그대로 정렬 오차가 된다(보고가 없으면 루프백 측정 `offsetMs`로 보정하는 것이 후속이다).
+  - **숨은 출력 지연 h**(PR #34 M2): 드라이버 보고 출력 지연(`StreamInfo.out_reported_latency_frames`: ASIO `ASIOGetLatencies`, 자체 WASAPI `GetStreamLatency`) − 콜백 크기(이미 버퍼 1개를 넣었으므로)를 0 이상으로 자른 값이다. WASAPI 공유 엔진 주기·드라이버 안전 오프셋·USB 내부 버퍼가 여기 들어간다. 드라이버가 알려 주지 않으면(cpal WASAPI 등) 아래 루프백 보정값을 쓴다. 둘 다 없으면 h = 0이고 `outputLatencyMs = null`로 "보정 안 됨"을 알린다(피어 간 숨은 지연 차가 그대로 정렬 오차가 된다).
+  - **루프백 보정값으로 보정**(PR #34 M2(a), `measured_hidden_out_us`): 루프백 측정의 `offsetMs`(= 실측 왕복 − 입력 버퍼 − 출력 버퍼)는 숨은 입력 + 숨은 출력이다. 출력 쪽 몫은 드라이버가 입력 지연만 보고하면 그 숨은 입력(보고 − 입력 콜백 크기)을 뺀 나머지, 아니면 **반**(입·출력 대칭 가정: 변환기·WASAPI 엔진 주기·USB 안전 여유는 보통 양방향에 비슷하게 있다)이다. 0..100ms로 자른다. 비대칭이면 (숨은 출력 − 숨은 입력)/2가 남는다.
+  - 드라이버 출력 보고가 있으면 그것이 우선이다(출력 쪽을 직접 알려 주므로). 출처는 `outputLatencySource`(`driver` | `loopback` | null).
+  - 값의 수명: 루프백 측정이 정상(`verdict = ok`)이면 `EngineManager`가 그 장치 구성(`Engine::device_key`)에 묶어 기억하고, 같은 구성으로 시작하는 엔진(테스트 모드에서 재고 합주를 시작하는 흐름)에 적용한다. 장치 구성이 다르면 쓰지 않는다.
+  - 장치 구성 키(PR #57 M1·L4): 드라이버, 실제 백엔드(자체 WASAPI/cpal 폴백), 실제로 연 입출력 장치(기본 장치로 열었으면 그때 고른 장치 — OS 기본 장치가 바뀌면 다른 키), 요청 버퍼 크기, in/out 레이트. 버퍼를 넣는 이유: 보고 없는 장치(cpal WASAPI)는 엔드포인트 버퍼 − 콜백 크기 몫이 숨은 출력에 들어가고, 드라이버 안전 여유도 버퍼에 따라 다를 수 있다. 앱이 값을 저장할 때도 같은 구성(장치·버퍼·레이트)별로 저장한다.
+  - 범위(−50..200ms) 밖의 측정값은 잘라 쓰지 않고 기억하지 않는다(`engine_set_loopback_offset`이 거부하는 것과 같음). 측정이 실패하거나 범위 밖이면 이전 값이 그대로 남는다. 기억 슬롯은 1개(마지막 구성과 값)다.
+  - 앱 재시작 뒤에는 앱이 저장해 둔 값을 `engine_set_loopback_offset`으로 다시 넣는다(엔진 시작 뒤에만 가능, null = 키와 무관하게 슬롯 해제).
+  - 워커만 읽는다(뮤텍스, 반복마다). 출력 콜백 경로는 바뀌지 않는다(클릭 프레임 계산만 이동).
   - **콜백 공백**(PR #34 M3): `DeviceClock`은 2초 창 최솟값 외에 0.15초 짧은 창 최솟값을 본다. 짧은 창 전체가 긴 창보다 3ms 넘게 떠 있으면 공백(장치 일시 중단·스트림 재시작·긴 xrun)으로 보고 창을 리셋한다. 공백 뒤 0.15~0.3초 안에 재수렴한다(이전에는 최대 2초 동안 공백만큼 늦은 클릭). 워커 기상 지연 스파이크는 같은 짧은 창의 다른 관측이 최솟값을 끌어내려 리셋을 일으키지 않는다.
 - 워커는 다음 클릭 하나를 `ClickShared::next`(원자 u64 = `프레임 << 1 | 강박`)에 올린다(CAS). 콜백이 가져가면 다음 박을 올린다.
   - 시계 추정이 바뀌면 올려 둔 클릭을 다시 맞춘다. 단 옛 위치와 새 위치가 모두 `재생 프레임 + 콜백 2개 + 2ms` 너머일 때만이다. 콜백과 경합해도 클릭이 사라지거나 두 번 울리지 않는다.
@@ -165,8 +175,10 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
   - 한쪽만 공칭 ±1ms 균등 + 44.1k 441/440 버스트 교대: **최대 1.29ms**, 평균 +0.86ms. `DeviceClock`이 가장 이른 콜백을 기준으로 삼아 대칭 지터의 진폭만큼 치우친다(최악 경우). 지터가 ±2ms를 넘는 장치에서는 2ms를 넘을 수 있다(그때는 최소제곱 직선 추정을 검토).
   - 이벤트 구동 콜백의 현실적 모양(공칭보다 이르지 않고 0~2ms 늦음, 양쪽): **최대 0.55ms**.
 - 숨은 출력 지연(M2): 한쪽 10ms, 드라이버 보고 → **최대 0.14ms**. 보고 없음 → 평균 +9.97ms(그대로 어긋남, 위 한계).
+  - 보고 없음 + 루프백 보정값(M2(a), 측정 오차 +0.3ms 포함): 숨은 입력 10ms(대칭) → **최대 0.29ms**. 숨은 입력 8ms(약한 비대칭) → **최대 0.96ms**(평균 +0.82ms). 숨은 입력 2ms(강한 비대칭) → 최대 3.96ms(평균 +3.82ms, (출력 − 입력)/2 한계, 보정 안 함 +10ms보다는 작다).
+  - 두 피어 모두 보고 없음(숨은 4+4ms ↔ 12+12ms, 48k/256 ↔ 44.1k/441): 보정 안 함 평균 +7.88ms → 각자 루프백 보정 **최대 0.58ms**.
 - 콜백 공백(M3): 따르는 쪽 장치 300ms 정지 후 재개 → 재개 0.6초 뒤부터 **최대 0.51ms**, 공백 중 클릭 1개 건너뜀.
-- 시뮬레이션이 덮지 않는 것: 드라이버가 보고하지 않는 숨은 출력 지연과 경로 비대칭. 피어마다 다르면 그만큼 어긋난다. 실장비 2대 청취 확인은 [사람] 항목이다.
+- 시뮬레이션이 덮지 않는 것: 드라이버 보고도 루프백 보정값도 없는 숨은 출력 지연, 입·출력 숨은 지연의 실제 비대칭 크기, 경로 비대칭. 피어마다 다르면 그만큼 어긋난다. 실장비 2대 청취 확인은 [사람] 항목이다.
 
 ### 1.5 합주 녹음 (P2-4, `engine/record.rs`, `engine/wav.rs`)
 
@@ -353,7 +365,7 @@ interface RecordTrack { kind: 'local' | 'peer' | 'mix'; name: string; file: stri
 interface RecordSummary { folder: string; format: RecordFormat; sampleRate: number; channels: number; durationSec: number; bytes: number; droppedFrames: number; startedAtMs: number; tracks: RecordTrack[]; error: string | null }
 interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
 interface MetronomePlan { running: boolean; bpm: number; beatsPerBar: number; startUs: number; refPeerId: string | null }
-interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; outputLatencyMs: number | null }
+interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; outputLatencyMs: number | null; outputLatencySource: 'driver' | 'loopback' | null; refClockUnsupported: boolean; clockExtrapolationMs: number | null }
 ```
 
 | 커맨드 | 인자 | 반환 |
@@ -374,6 +386,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_set_master_gain` | `{ gain: number }` | `null` |
 | `engine_set_metronome` | `{ metronome: MetronomeConfig }` | `MetronomePlan` — 공유 메트로놈(P2-3, 1.4절). 방장은 `refPeerId` 없이 부른다(`startUs`를 비우면 지금 + 300ms, 반환한 `startUs`를 방에 알린다). 다른 연주자는 `refPeerId` = 방장 엔진 peerId, `startUs` = 방장이 알린 값으로 부른다(그때 `startUs` 필수). 기준 피어가 아직 없거나 시계 표본이 없으면 `synced=false`로 기다린다. 네트워크 없는 엔진(테스트 모드)은 `refPeerId` 없이만 된다(혼자 연습). 다시 부르면 새 계획으로 바로 바뀐다 |
 | `engine_set_metronome_gain` | `{ gain: number, muted: boolean }` | `null` — 클릭 볼륨(0..4, 기본 0.8)·뮤트. 내 장치 출력에만 적용(믹스 탭·방송·녹음에는 클릭이 없음), 엔진 재시작 간 유지 |
+| `engine_set_loopback_offset` | `{ offsetMs: number \| null }` | `null` — 메트로놈 숨은 출력 지연 보정용 루프백 보정값(PR #34 M2(a), 1.4절). `offsetMs` = `engine_measure_loopback` 결과의 `offsetMs`(-50..200, 밖이면 오류). 실행 중인 엔진에 적용하고(엔진이 없으면 오류) 그 장치 구성(1.4절 키)에 묶어 기억한다(같은 구성으로 다시 시작하는 엔진에도 적용). null = 해제. 루프백 측정이 `ok`면 엔진이 같은 일을 자동으로 하므로, 앱 재시작 뒤 저장값을 다시 넣거나 끌 때 쓴다. 드라이버가 출력 지연을 보고하면 드라이버 값이 우선 |
 | `engine_stats` | — | `EngineStats` |
 | `engine_record_folder` | — | `string` — 현재 녹음 저장 폴더(고른 폴더, 없으면 음악 폴더/`Band Recordings`). 1.5절 |
 | `engine_record_pick_folder` | — | `string \| null` — 폴더 대화상자(호출한 창에 모달). 고른 폴더를 앱 설정에 남기고 돌려준다. 취소하면 `null`. 경로는 프론트가 넘기지 않는다 |
@@ -382,7 +395,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_record_set_track_names` | `{ trackNames: Record<string, string> }` | `null` — 녹음 중 피어 트랙 이름(peerId → 표시 이름)을 더한다(녹음 중에 들어온 연주자, PR #49 M1). 이후 만드는 트랙은 이 이름을 쓰고, 이름 없이(peerId 앞 8자) 만든 트랙은 정지 때 파일 이름을 바꾼다. 녹음 중이 아니면 에러. 1.5절 |
 | `engine_subscribe_mix` | `{ onChunk: Channel<ArrayBuffer> }` | `null` — 20ms마다 48kHz stereo f32 인터리브 믹스(내 입력 포함) 전송. 관람자 브릿지용 |
 | `engine_unsubscribe_mix` | — | `null` |
-| `engine_measure_loopback` | `{ runs?: number }` | `LoopbackReport` — 하드웨어 루프백 왕복(P1-1). 실행 중인 엔진(보통 테스트 모드)에서 `runs`회(기본 8, 1..=20, 반복당 약 0.7초). 측정 동안 장치 출력은 자극만 낸다(모니터·피어 소리 없음). 입·출력 레이트가 다르면 에러, 네트워크 세션 중(합주 중)이면 에러 |
+| `engine_measure_loopback` | `{ runs?: number }` | `LoopbackReport` — 하드웨어 루프백 왕복(P1-1). 실행 중인 엔진(보통 테스트 모드)에서 `runs`회(기본 8, 1..=20, 반복당 약 0.7초). 측정 동안 장치 출력은 자극만 낸다(모니터·피어 소리 없음). 입·출력 레이트가 다르면 에러, 네트워크 세션 중(합주 중)이면 에러. 판정이 `ok`이고 `offsetMs`가 −50..200이면 그 장치 구성의 메트로놈 출력 지연 보정으로 기억한다(`engine_set_loopback_offset`, 1.4절) |
 | `engine_set_echo_mode` | `{ peerId: string, enabled: boolean }` | `null` — 에코하는 쪽의 동의/해제. 켜기는 그 피어가 지금 요청 중(`PeerStats.echoRequested`)일 때만 된다(아니면 에러). 상대 요청이 끝나면 엔진이 스스로 끈다 |
 | `engine_measure_echo_peer` | `{ peerId: string, runs?: number, waitMs?: number }` | `EchoReport` — 측정하는 쪽. 그 피어에게 에코를 요청하고 동의를 `waitMs`(기본 30000, 최대 120000)까지 기다린 뒤 클릭 `runs`개(기본 8)로 잰다. 동의가 없으면 "수락하지 않았습니다" 에러 |
 | `engine_cancel_measure` | — | `null` — 진행 중인 측정 취소(진행 중인 측정 커맨드는 "취소" 에러로 끝난다) |
@@ -396,7 +409,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 콜백 구동 믹스(1.1절)에는 믹스된 출력 링이 없으므로 출력 링 항은 0이다. 출력 콜백이 꺼내는 피어 소스 링은 지터 버퍼 깊이(`bufferMs`)에 포함되어 목표로 제어된다. 그래서 입→귀 지연 = 송신측 `estLatencyMs`의 입력+프레임 몫 + 망 + 수신측 `bufferMs` + 수신측 출력 버퍼다. 공유 클럭 종단 실측이 `estLatencyMs + bufferMs + 1ms`를 넘지 않음을 통합 테스트로 확인한다.
 - 장치 버퍼 값은 실측 콜백 크기를 쓴다.
 
-`EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`·`skippedClicks`(엔진 수명 누적, 1.4절), `outputLatencyMs`(클릭 시각에 반영한 숨은 출력 지연, null = 드라이버 보고 없음·보정 안 됨). 워커가 0.1초마다 갱신한다.
+`EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`·`skippedClicks`(엔진 수명 누적, 1.4절), `outputLatencyMs`(클릭 시각에 반영한 숨은 출력 지연, null = 드라이버 보고·루프백 보정값 모두 없어 보정 안 됨)·`outputLatencySource`(`driver` | `loopback` | null), `refClockUnsupported`(기준 피어가 시계를 싣지 않는 옛 엔진, 1.4절), `clockExtrapolationMs`(시계 추정 외삽 거리, 진단용). 워커가 0.1초마다 갱신한다.
 
 `EngineStats.recording`(P2-4): 녹음 중이 아니면(또는 정지·마무리 중이면) null. `durationSec` = 녹음 타임라인 길이(쓴 블록 기준), `bytes` = 지금까지 쓴 오디오 바이트(모든 트랙, 헤더 제외), `tracks` = 만든 트랙 수, `droppedFrames` = 녹음 링이 모자라 버린 프레임(녹음 품질 지표, 0이 정상), `error` = 실패 메시지(트랙 생성 실패면 그 트랙만 빠지고 계속, 쓰기 실패면 그 뒤로 저장 안 됨, 1.5절).
 
