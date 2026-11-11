@@ -318,6 +318,9 @@ export function CreateRoom() {
               <label className="toggle-switch">
                 <input
                   type="checkbox"
+                  role="switch"
+                  aria-label="자유 참여"
+                  aria-describedby="toggle-free-join-desc"
                   checked={freeJoin}
                   onChange={(e) => setFreeJoin(e.target.checked)}
                 />
@@ -325,7 +328,7 @@ export function CreateRoom() {
               </label>
               <div className="toggle-label">
                 <strong>{freeJoin ? '자유 참여' : '승인 필요'}</strong>
-                <span>{freeJoin ? '누구나 바로 연주자로 참여할 수 있습니다' : '방장이 승인해야 연주자로 참여할 수 있습니다'}</span>
+                <span id="toggle-free-join-desc">{freeJoin ? '누구나 바로 연주자로 참여할 수 있습니다' : '방장이 승인해야 연주자로 참여할 수 있습니다'}</span>
               </div>
             </div>
           </div>
@@ -337,6 +340,9 @@ export function CreateRoom() {
               <label className="toggle-switch">
                 <input
                   type="checkbox"
+                  role="switch"
+                  aria-label="합주실 목록에 공개"
+                  aria-describedby="toggle-public-desc"
                   checked={!isPrivate}
                   onChange={(e) => setIsPrivate(!e.target.checked)}
                 />
@@ -344,7 +350,7 @@ export function CreateRoom() {
               </label>
               <div className="toggle-label">
                 <strong>{isPrivate ? '비공개' : '공개'}</strong>
-                <span>{isPrivate ? '목록에 보이지 않습니다. 초대 링크나 방 코드로만 들어올 수 있습니다' : '합주실 목록에 표시됩니다'}</span>
+                <span id="toggle-public-desc">{isPrivate ? '목록에 보이지 않습니다. 초대 링크나 방 코드로만 들어올 수 있습니다' : '합주실 목록에 표시됩니다'}</span>
               </div>
             </div>
           </div>
@@ -356,6 +362,9 @@ export function CreateRoom() {
               <label className="toggle-switch">
                 <input
                   type="checkbox"
+                  role="switch"
+                  aria-label="비밀번호 사용"
+                  aria-describedby="toggle-password-desc"
                   checked={usePassword}
                   onChange={(e) => setUsePassword(e.target.checked)}
                 />
@@ -363,13 +372,14 @@ export function CreateRoom() {
               </label>
               <div className="toggle-label">
                 <strong>{usePassword ? '비밀번호 사용' : '비밀번호 없음'}</strong>
-                <span>{usePassword ? '입장할 때 비밀번호를 물어봅니다 (방장은 제외)' : '링크를 아는 누구나 입장할 수 있습니다'}</span>
+                <span id="toggle-password-desc">{usePassword ? '입장할 때 비밀번호를 물어봅니다 (방장은 제외)' : '링크를 아는 누구나 입장할 수 있습니다'}</span>
               </div>
             </div>
             {usePassword && (
               <input
                 type="password"
                 autoComplete="new-password"
+                aria-label="합주실 비밀번호"
                 placeholder="6~64자"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

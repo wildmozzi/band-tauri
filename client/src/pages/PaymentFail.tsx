@@ -8,10 +8,13 @@ export function PaymentFail() {
   const message = searchParams.get('message')
   const orderId = searchParams.get('orderId')
 
+  // 토스 failUrl이 붙이는 정보가 하나도 없으면 직접 진입이다 (P3-12d)
+  const hasFailInfo = Boolean(code || message || orderId)
+
   useEffect(() => {
-    // 결제 실패 로그 기록
-    console.error('Payment failed:', { code, message, orderId })
-  }, [code, message, orderId])
+    // 결제 실패 기록 — 사용자 취소·카드 거절 같은 예상된 결과라 error가 아닌 warn (P3-12d)
+    if (hasFailInfo) console.warn('Payment failed:', { code, message, orderId })
+  }, [hasFailInfo, code, message, orderId])
 
   const getErrorMessage = () => {
     switch (code) {
@@ -34,6 +37,29 @@ export function PaymentFail() {
       default:
         return message || '결제 처리 중 오류가 발생했습니다.'
     }
+  }
+
+  if (!hasFailInfo) {
+    return (
+      <div className="payment-fail-page">
+        <div className="fail-container">
+          <div className="fail-content">
+            <h1>표시할 결제 실패 정보가 없습니다</h1>
+            <p className="fail-message">
+              이 화면은 결제가 실패하거나 취소됐을 때 자동으로 열립니다. 요금제를 다시 보려면 아래 버튼을 눌러 주세요.
+            </p>
+            <div className="action-buttons">
+              <Link to="/pricing" className="primary-action">
+                요금제 보기
+              </Link>
+              <Link to="/" className="secondary-action">
+                홈으로 가기
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (

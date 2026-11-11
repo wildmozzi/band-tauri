@@ -127,7 +127,7 @@ fn squat_after_connect_does_not_hijack() {
 // ============================================================================
 
 fn net() -> Net {
-    Net::start("alice".into(), &test_net(), JitterSettings { min_ms: 0.0, max_ms: 80.0 }).unwrap()
+    Net::start("alice".into(), &test_net(), JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }).unwrap()
 }
 
 /// 상대 역할(원시 소켓): Net이 보낸 Audio 헤더의 seq를 모은다.
