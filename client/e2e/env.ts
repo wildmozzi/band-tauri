@@ -4,7 +4,10 @@
  *
  * 운영 Supabase 프로젝트는 하나뿐이다 — E2E는 어떤 경우에도 실제 Supabase/서버/결제에 닿으면 안 된다.
  */
-export const E2E_PORT = 47173
+import { resolveE2EPort } from './port'
+
+/** 실행마다 빈 포트(또는 환경변수 E2E_PORT) — port.ts 참고 */
+export const E2E_PORT = resolveE2EPort()
 export const E2E_BASE_URL = `http://127.0.0.1:${E2E_PORT}`
 
 export const SUPABASE_URL = 'http://supabase.e2e.test'

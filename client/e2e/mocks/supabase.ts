@@ -9,6 +9,8 @@ import { MemoryPostgrest, UnsupportedQuery } from './postgrest'
 import { corsHeaders, fulfillJson, fulfillPreflight, type Violations } from './http'
 
 const TOKEN_TTL_S = 24 * 3600
+/** hold() 키: REST 테이블 이름과 겹치지 않는 가짜 이름 */
+const AUTH_USER_HOLD = 'auth:user'
 
 function b64url(value: unknown): string {
   return Buffer.from(JSON.stringify(value)).toString('base64url')
@@ -92,6 +94,11 @@ export class FakeSupabase {
     }
   }
 
+  /** GET /auth/v1/user(세션 복원 시 사용자 조회)를 release() 전까지 붙잡는다 — 인증 확인 중 화면을 검사할 때 */
+  holdAuthUser(): { release: () => void; waiting: () => number } {
+    return this.hold('GET', AUTH_USER_HOLD)
+  }
+
   async install(context: BrowserContext) {
     const host = new URL(SUPABASE_URL).host
     await context.route(url => url.host === host, route => this.handleHttp(route))
@@ -154,6 +161,11 @@ export class FakeSupabase {
       return fulfillJson(route, 200, sessionJson(user))
     }
     if (path === 'user' && req.method() === 'GET') {
+      const hold = this.holds.find(h => h.method === 'GET' && h.table === AUTH_USER_HOLD)
+      if (hold) {
+        hold.waiting++
+        await hold.released
+      }
       const user = userFromToken(bearer(route))
       if (!user) return fulfillJson(route, 401, { code: 401, error_code: 'bad_jwt', msg: 'invalid JWT' })
       return fulfillJson(route, 200, authUserJson(user))

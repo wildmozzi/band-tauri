@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom'
-import { useAuth } from '../contexts/useAuth'
+import { useRequireAuth } from '../features/auth/useRequireAuth'
 import { tossPaymentsService } from '../services/tossPayments'
 import { paymentApi } from '../services/paymentApi'
 import { SERVICE_NAME } from '../lib/brand'
@@ -44,7 +44,7 @@ const PLAN_INFO: Record<string, PlanInfo> = {
 }
 
 export function Payment() {
-  const { user, loading } = useAuth()
+  const { user, gate } = useRequireAuth()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
 
@@ -58,17 +58,8 @@ export function Payment() {
   }
 
   // 로그인 체크: 세션 복원이 끝난 뒤에만 판단한다. 복원 전(user=null)에 /auth로 보내면
-  // 로그인 상태로 결제 URL을 직접 열었을 때 결제 화면에 도달하지 못한다 (P3-12 ⑩)
-  if (loading) {
-    return (
-      <div className="payment-page">
-        <p className="payment-auth-checking" role="status">로그인 상태를 확인하는 중...</p>
-      </div>
-    )
-  }
-  if (!user) {
-    return <Navigate to="/auth" replace state={{ from: `/payment?plan=${planType}` }} />
-  }
+  // 로그인 상태로 결제 URL을 직접 열었을 때 결제 화면에 도달하지 못한다 (P3-12 ⑩, 공통 가드 P3-10f)
+  if (gate) return gate
 
   const plan = PLAN_INFO[planType]
 

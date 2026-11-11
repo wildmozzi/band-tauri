@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
-import { useAuth } from '../contexts/useAuth'
+import type { User } from '@supabase/supabase-js'
 import { usePremium } from '../contexts/usePremium'
-import { Navigate, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
+import { useRequireAuth } from '../features/auth/useRequireAuth'
 import { isSupabaseConfigured } from '../lib/supabaseClient'
 import {
   useProfileNicknameQuery,
@@ -12,8 +13,17 @@ import './Profile.css'
 
 type ProfileTab = 'info' | 'follow' | 'plan' | 'theme' | 'support'
 
+/**
+ * 로그인 확인이 끝난 뒤에만 프로필 화면을 만든다 (P3-10f 공통 가드).
+ * 화면 상태(bio·SNS·사진)의 초기값이 user에서 오므로, 세션 복원 전(user=null)에 만들어 두면 빈 값으로 굳는다.
+ */
 export function Profile() {
-  const { user, loading } = useAuth()
+  const { user, gate } = useRequireAuth()
+  if (gate) return gate
+  return <ProfileContent key={user.id} user={user} />
+}
+
+function ProfileContent({ user }: { user: User }) {
   const { userPlan } = usePremium()
   const navigate = useNavigate()
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -54,12 +64,6 @@ export function Profile() {
     // user_metadata도 업데이트
     syncMetadata({ nickname: profileNickname })
   }, [metadataNickname, profileNickname, syncMetadata])
-
-  // 렌더 중 navigate() 대신 <Navigate> (P3-12 ⑥). 세션 복원 중에는 기다린다(새로고침 시 /auth로 튕기지 않게)
-  if (!user) {
-    if (loading) return null
-    return <Navigate to="/auth" replace state={{ from: '/profile' }} />
-  }
 
   const handlePhotoClick = () => {
     fileInputRef.current?.click()

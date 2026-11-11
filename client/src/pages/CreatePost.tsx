@@ -1,22 +1,17 @@
-import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAuth } from '../contexts/useAuth'
 import { useCreatePostMutation } from '../features/community/queries'
+import { useRequireAuth } from '../features/auth/useRequireAuth'
 import { PostForm } from './community/PostForm'
 import { usePostForm } from './community/usePostForm'
 
 export function CreatePost() {
   const navigate = useNavigate()
-  const { user } = useAuth()
+  // 세션 복원이 끝난 뒤에만 /auth로 보낸다 (직접 진입·새로고침 시 튕기지 않게 — P3-10f)
+  const { user, gate } = useRequireAuth()
   const form = usePostForm()
   const createPost = useCreatePostMutation()
 
-  // 렌더 중 navigate 대신 effect에서 이동
-  useEffect(() => {
-    if (!user) navigate('/auth', { state: { from: '/community/create' } })
-  }, [user, navigate])
-
-  if (!user) return null
+  if (gate) return gate
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
