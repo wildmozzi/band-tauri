@@ -32,7 +32,7 @@ fn quantile(v: &mut [f64], p: f64) -> f64 {
 #[ignore = "realtime: 결정적 짝 net::txlat::tests::{quantiles_and_window_reset, rotate_race_does_not_zero_quantiles}, engine::worker::tests::batched_frames_share_pass_start_for_send_queue"]
 fn full_mesh_send_queue_latency_and_burst() {
     let opts = NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
-    let net = Net::start("me".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0 }).unwrap();
+    let net = Net::start("me".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }).unwrap();
 
     // 원격 피어 5명: 받은 패킷은 별도 스레드가 비운다(수신 버퍼가 차서 송신 측 동작이 바뀌지 않게).
     let stop = Arc::new(AtomicBool::new(false));

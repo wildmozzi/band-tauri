@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ROOM_CAPACITY_MAX, ROOM_CAPACITY_MIN } from '../lib/roomCapacity'
 
 /**
  * 라우트 입력 스키마 (zod). 알 수 없는 키(body의 userId, amount 등)는 버린다 —
@@ -50,7 +51,7 @@ export const createRoomBody = z.object({
   title: z.string().trim().min(1).max(100),
   description: z.string().trim().max(500).nullish().transform(v => v || null),
   genre: z.string().trim().max(30).nullish().transform(v => v || null),
-  maxParticipants: z.number().int().min(2).max(20).default(8),
+  maxParticipants: z.number().int().min(ROOM_CAPACITY_MIN).max(ROOM_CAPACITY_MAX).default(8),
   tags: z.array(z.string().trim().min(1).max(20)).max(20).default([]),
   freeJoin: z.boolean().default(true),
   isPrivate: z.boolean().default(false),

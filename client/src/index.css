@@ -428,3 +428,11 @@ d Banner Styles */
     font-size: 0.8rem;
   }
 }
+/*
+ * 키보드 포커스 표시 (P3-12c): 어두운 배경에서 브라우저 기본 포커스 링(검은 색 계열)이 거의 보이지 않는다.
+ * :where()라 명시도가 0 — 화면별로 따로 정한 포커스 스타일이 있으면 그쪽이 이긴다.
+ */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

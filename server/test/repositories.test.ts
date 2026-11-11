@@ -71,6 +71,12 @@ describe('roomRepository', () => {
     })
     assert.deepEqual(await createRoomRepository(m.client).findMeta('r1'), { hostId: 'h', freeJoin: false, isPrivate: false, hasPassword: false, passwordHash: null, maxParticipants: undefined })
   })
+  it('findMeta ignores max_participants outside 2~20 (pre-013 rows) → server cap only; 1 → 2 (P3-10g)', async () => {
+    for (const [raw, expected] of [[2, 2], [20, 20], [1, 2], [0, undefined], [-5, undefined], [21, undefined], [50, undefined], [7.5, undefined]] as const) {
+      const m = mockSupabase((calls) => calls[0][1][0] === 'room_secrets' ? ok(null) : ok({ host_id: 'h', free_join: true, max_participants: raw }))
+      assert.equal((await createRoomRepository(m.client).findMeta('r1'))?.maxParticipants, expected, `raw=${raw}`)
+    }
+  })
   it('setPasswordHash calls the transactional set_room_password RPC (review L2)', async () => {
     const m = mockSupabase(() => ok(null))
     const repo = createRoomRepository(m.client)

@@ -432,10 +432,14 @@ fn link_matrix_clean_network_no_concealment_no_corrections() {
         for w in snaps.windows(2) {
             let ((t0, s0), (t1, s1)) = (w[0], w[1]);
             if (s1.target_ms - s0.target_ms).abs() > 0.01 {
-                // 목표가 바뀌었다: 깊이를 새 목표까지 옮기는 데 걸리는 시간(1샘플/패킷 기준) + 0.5초는 제외
+                // 목표가 바뀌었다: 깊이를 새 목표까지 옮기는 데 걸리는 시간 + 0.5초는 제외한다.
+                // 따라잡는 시간은 엔진 사양(보정 속도 상한 `jitter::MAX_CORR_RATE` = 0.25%, PR #20 H1)에서 그대로 계산하고,
+                // 보정이 끝날 때 위상 정리(최대 1패킷)를 위해 1프레임을 더한다. 이전 식(패킷당 1샘플)은 상한 이전의 보정 속도였다.
+                // 단언(목표 고정 중 보정 0)과 0.5초 여유는 그대로다. 사양 변경 근거: 국소 피치 편차 14.5 → 4.3센트, 지터 회선 보정
+                // 시간 51.6 → 15.7%, 은닉 1.11 → 1.21%(engine-notes "PR #20 리뷰 반영"). 따라잡기가 무한히 느려지는 회귀는
+                // `link_target_change_converges`가 상한으로 잡는다.
                 let samples = ((s1.target_ms - s0.target_ms).abs() * 48.0) as f64;
-                let packets_per_s = 1000.0 / frame_ms as f64;
-                let catch_up = Duration::from_secs_f64(samples / packets_per_s + 0.5);
+                let catch_up = Duration::from_secs_f64(jitter_stats::correction_catch_up_secs(samples) + frame_ms as f64 / 1000.0 + 0.5);
                 retarget_until = Some(t1 + catch_up);
                 continue;
             }
@@ -462,6 +466,64 @@ fn link_matrix_clean_network_no_concealment_no_corrections() {
         assert!(last.concealed - first.concealed <= 1, "buf {buf} / {frame_ms}ms: 지터 없는 링크에서 은닉 {}", last.concealed - first.concealed);
         assert_gaps_explained_by_xruns(&c, xruns, &format!("LINK buf {buf} / {frame_ms}ms"));
     }
+}
+
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::jitter::tests::target_change_converges_within_rate_bound"]
+fn link_target_change_converges() {
+    let _g = RT_LOCK.lock();
+    // PR #20: 보정 속도에 상한(0.25%)을 둔 대신, 목표가 바뀐 뒤 깊이가 새 목표로 수렴하는 시간에 상한을 단언한다.
+    // 상한 = 엔진 상수로 계산한 이론값(`correction_catch_up_secs`) × 1.2 + 1프레임 + 관찰 주기(50ms). 프로필 균형 → 안정으로
+    // 바꾸면 목표가 오르고(pad 0.5F + 분위수), 다시 균형으로 바꾸면 hold 뒤 내려간다. 따라잡기가 느려지는 회귀를 잡는다.
+    let frame_ms = 5.0f32;
+    let mut ba = sine_backend();
+    ba.wake_jitter_us = 500;
+    let mut bb = FakeBackend::silence(48_000);
+    bb.wake_jitter_us = 500;
+    bb.seed = 9;
+    let (a, b, _p, _sink_b) = connect_pair(config(128, frame_ms), ba, bb, None);
+    std::thread::sleep(Duration::from_millis(3000));
+    let (exit_drop, exit_ins) = jitter_stats::correction_exit_ms(240);
+    let poll = Duration::from_millis(50);
+    // `target0`는 프로필을 바꾸기 직전 목표, `t0`는 바꾼 시각.
+    let measure = |b: &Engine, label: &str, target0: f32, t0: Instant| -> (f64, f64, f64) {
+        // 목표가 정해질 때까지(설정 직후 바로 바뀌거나 다음 통계 갱신에서 바뀜) 잠깐 본다.
+        std::thread::sleep(Duration::from_millis(300));
+        let mut target;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let converged = loop {
+            let s = b.peer_jitter_stats()[0].1;
+            let err = s.buffer_ms - s.target_ms;
+            target = s.target_ms;
+            if err <= exit_drop as f32 + 0.05 && err >= -(exit_ins as f32) - 0.05 {
+                break t0.elapsed().as_secs_f64();
+            }
+            assert!(Instant::now() < deadline, "{label}: 15초 안에 수렴하지 않음: {s:?}");
+            std::thread::sleep(poll);
+        };
+        let diff = (target - target0) as f64;
+        println!("TARGET-CHANGE {label}: 목표 {target0:.2} → {target:.2}ms, 수렴 {converged:.2}s");
+        (diff, converged, target as f64)
+    };
+    let before = b.peer_jitter_stats()[0].1.target_ms;
+    let t_set = Instant::now();
+    b.set_jitter_profile(1.0).unwrap();
+    let (diff_up, t_up, _) = measure(&b, "균형→안정", before, t_set);
+    // 내려가는 쪽: 안정 → 균형. pad(0.5F)는 바로 빠지고 깊이는 chase로 따라 내려간다(짧은 창 분위수 몫은 hold 뒤에 내려가므로
+    // 이 측정 창 밖이다).
+    let before = b.peer_jitter_stats()[0].1.target_ms;
+    let t_set = Instant::now();
+    b.set_jitter_profile(0.5).unwrap();
+    let (diff_down, t_down, _) = measure(&b, "안정→균형", before, t_set);
+    drop(a);
+    drop(b);
+    let frame_s = frame_ms as f64 / 1000.0;
+    let slack = poll.as_secs_f64() + 0.3; // 관찰 주기 + 목표 확정 대기(위 300ms)
+    let bound = |diff: f64| jitter_stats::correction_catch_up_secs(diff * 48.0) * 1.2 + frame_s + slack;
+    assert!(diff_up > 1.0, "전제: 안정 프로필로 목표가 1ms 넘게 올라야 함({diff_up:.2})");
+    assert!(t_up <= bound(diff_up), "상향 수렴 {t_up:.2}s > 상한 {:.2}s", bound(diff_up));
+    assert!(diff_down < -1.0, "전제: 균형으로 돌아가면 목표가 1ms 넘게 내려가야 함({diff_down:.2})");
+    assert!(t_down <= bound(diff_down), "하향 수렴 {t_down:.2}s > 상한 {:.2}s", bound(diff_down));
 }
 
 #[test]

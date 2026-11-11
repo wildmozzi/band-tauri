@@ -9,6 +9,7 @@ pub mod config;
 pub mod device;
 pub mod jitter;
 pub mod measure;
+pub mod metronome;
 pub mod mixer;
 pub mod prio;
 pub mod resample;
@@ -71,6 +72,10 @@ pub struct Engine {
     measure_ends: Arc<Mutex<Option<rt::MeasureEnds>>>,
     /// 에코 측정 상태(워커와 공유).
     probe: Arc<Mutex<Option<EchoProbe>>>,
+    /// 공유 메트로놈(P2-3): 계획·상태(워커와 공유).
+    metronome: Arc<metronome::MetronomeCtl>,
+    /// 엔진 시계 기준(Net epoch, 없으면 시작 시각). 메트로놈 `startUs`의 기준이다.
+    epoch: Instant,
 }
 
 impl Engine {
@@ -103,6 +108,8 @@ impl Engine {
         let (measure_sh, m_in, m_out, measure_ends) = rt::measure_path();
         input.attach_measure(m_in);
         output.attach_measure(m_out);
+        let metronome = Arc::new(metronome::MetronomeCtl::default());
+        output.attach_click(metronome::ClickRt::new(metronome.click.clone()));
         let probe = Arc::new(Mutex::new(None));
 
         // 오디오 스레드: 스트림을 열고 정지 신호까지 소유한다(cpal::Stream은 !Send).
@@ -160,7 +167,11 @@ impl Engine {
             measure_sh,
             measure_ends: Arc::new(Mutex::new(Some(measure_ends))),
             probe: probe.clone(),
+            metronome: metronome.clone(),
+            epoch: Instant::now(),
         };
+        // 48kHz 클릭 파형을 장치 레이트로 읽는 보폭
+        metronome.click.step.store(INTERNAL_RATE as f32 / info.out_rate.max(1) as f32);
 
         if cancelled() {
             return Err("엔진 시작이 취소되었습니다".into()); // engine drop이 오디오 정리
@@ -173,14 +184,15 @@ impl Engine {
             if opts.cancel.is_none() {
                 opts.cancel = cancel.clone();
             }
-            let js = JitterSettings { min_ms: cfg.jitter_min_ms(), max_ms: cfg.jitter_max_ms() };
+            let js = JitterSettings { min_ms: cfg.jitter_min_ms(), max_ms: cfg.jitter_max_ms(), profile: cfg.jitter_profile() };
             engine.net = Some(Net::start(peer_id, &opts, js)?); // 실패 시 engine drop이 오디오 정리
         }
         if cancelled() {
             return Err("엔진 시작이 취소되었습니다".into());
         }
 
-        let epoch = engine.net.as_ref().map(|n| n.shared().epoch()).unwrap_or_else(Instant::now);
+        let epoch = engine.net.as_ref().map(|n| n.shared().epoch()).unwrap_or(engine.epoch);
+        engine.epoch = epoch;
         let params = WorkerParams {
             cfg,
             info,
@@ -194,6 +206,7 @@ impl Engine {
             stats: engine.worker_stats.clone(),
             epoch,
             probe,
+            metronome,
         };
         // 초기화(리샘플러/인코더)는 여기서 해서 실패를 호출자에게 돌려준다(리뷰 M10).
         let worker = Worker::new(params)?;
@@ -252,8 +265,33 @@ impl Engine {
         Ok(())
     }
 
+    /// 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필을 실행 중에 바꾼다(모든 피어 + 이후 추가될 피어, P1-5).
+    pub fn set_jitter_profile(&self, profile: f32) -> Result<(), String> {
+        if !profile.is_finite() || !(0.0..=1.0).contains(&profile) {
+            return Err(format!("jitterProfile은 0..1 범위여야 합니다: {profile}"));
+        }
+        let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
+        net.set_jitter_profile(profile);
+        Ok(())
+    }
+
     pub fn controls(&self) -> &Arc<MixControls> {
         &self.controls
+    }
+
+    /// 엔진 시계(µs). 메트로놈 `startUs`와 Pong 시계 표본의 기준.
+    pub fn now_us(&self) -> f64 {
+        self.epoch.elapsed().as_micros() as f64
+    }
+
+    /// 공유 메트로놈 계획 적용(설계 4절 `engine_set_metronome`). 적용된 계획을 돌려준다.
+    pub fn set_metronome(&self, c: metronome::MetronomeConfig) -> Result<metronome::MetronomePlan, String> {
+        if c.ref_peer_id.as_deref().is_some_and(|s| !s.is_empty()) && self.net.is_none() {
+            return Err("네트워크 없이 시작된 엔진은 다른 피어를 따를 수 없습니다".into());
+        }
+        let plan = metronome::MetronomePlan::from_config(c, self.now_us())?;
+        self.metronome.set_plan(plan.clone());
+        Ok(plan)
     }
 
     pub fn stats(&self) -> EngineStats {
@@ -305,6 +343,10 @@ impl Engine {
                             rtt_ms: conn.rtt_ms,
                             jitter_ms: js.jitter_ms,
                             buffer_ms: js.buffer_ms,
+                            target_ms: js.target_ms,
+                            conceal_pct: js.conceal_pct,
+                            corr_time_pct: js.corr_time_pct,
+                            max_corr_cents: js.max_corr_cents,
                             loss_pct: js.loss_pct,
                             late: js.late,
                             concealed: js.concealed,
@@ -341,6 +383,7 @@ impl Engine {
             relay: self.net.as_ref().and_then(|n| n.relay_stats()),
             qos: self.net.as_ref().map(|n| n.qos_stats()),
             send_queue: self.net.as_ref().map(|n| n.send_queue_stats()),
+            metronome: self.metronome.stats(),
         }
     }
 

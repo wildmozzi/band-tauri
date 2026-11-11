@@ -16,7 +16,7 @@ import { createSupabaseStorageAdapter } from './storage/supabaseAdapter'
 import { supabaseAdmin } from './lib/supabase'
 import type { StorageAdapter } from './storage/types'
 import type { UploadQuota } from './services/postImageService'
-import { createPostsRouter } from './routes/posts'
+import { createPostsRouter, type PostUserLimits } from './routes/posts'
 import { createPostService } from './services/postService'
 import { createPostRepository, type PostRepository } from './repositories/postRepository'
 
@@ -35,6 +35,8 @@ export interface AppOptions {
   legacyImageStorage?: StorageAdapter | null
   /** /complete·/resolve 사용자별 분당 상한 (테스트 주입) */
   imagePerUserPerMinute?: number
+  /** 게시글 작성·수정 사용자별 상한 (테스트 주입 — rateLimits: false여도 넣으면 켜짐). 기본: DEFAULT_POST_USER_LIMITS */
+  postUserLimits?: Partial<PostUserLimits>
   /** 게시글 쓰기 저장소 (테스트에서 메모리 주입). 기본: Supabase service_role */
   postRepository?: PostRepository | null
   /** 테스트에서만 false (한 IP에서 많은 요청을 보낸다). 기본: 켬 */
@@ -91,7 +93,7 @@ export function createApp(options: AppOptions = {}) {
       options.postRepository !== undefined ? options.postRepository : supabaseAdmin ? createPostRepository(supabaseAdmin) : null,
       imageStorage,
     ),
-    { rateLimits: options.rateLimits },
+    { rateLimits: options.rateLimits, userLimits: options.postUserLimits },
   ))
   app.use('/api/storage', createStorageRouter(
     imageStorage,

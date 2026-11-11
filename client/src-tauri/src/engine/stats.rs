@@ -83,6 +83,14 @@ pub struct PeerStats {
     pub rtt_ms: Option<f32>,
     pub jitter_ms: f32,
     pub buffer_ms: f32,
+    /// 지터 버퍼 목표 깊이(ms): 지터 추정 + 은닉 마감 여유 + 피어 적응 여유(언더런) + 프로필 여유(P1-5).
+    pub target_ms: f32,
+    /// 최근 5초 은닉 비율(%, 손실 + 늦은 패킷 + 언더런). GOAL 2절 "은닉 프레임 비율".
+    pub conceal_pct: f32,
+    /// 최근 5초 중 깊이 보정(샘플 버림·삽입) 모드였던 패킷 비율(%, PR #20 H1).
+    pub corr_time_pct: f32,
+    /// 깊이 보정의 최대 국소 피치 편차(센트, 재생 시작 이후). 비율 상한 0.25%라 약 4.3센트 이하.
+    pub max_corr_cents: f32,
     pub loss_pct: f32,
     pub late: u64,
     pub concealed: u64,
@@ -134,6 +142,8 @@ pub struct EngineStats {
     pub qos: Option<crate::net::qos::QosStats>,
     /// 송신 큐 지연: 프레임 생성(인코딩 전) → 피어별 send_to 완료, 직전 2초 창(P1-3, 네트워크 미시작이면 null).
     pub send_queue: Option<crate::net::txlat::SendQueueStats>,
+    /// 공유 메트로놈 상태(P2-3).
+    pub metronome: super::metronome::MetronomeStats,
 }
 
 impl EngineStats {
@@ -159,6 +169,7 @@ impl EngineStats {
             relay: None,
             qos: None,
             send_queue: None,
+            metronome: Default::default(),
         }
     }
 }
@@ -185,6 +196,10 @@ mod tests {
                 rtt_ms: None,
                 jitter_ms: 1.0,
                 buffer_ms: 2.0,
+                target_ms: 2.5,
+                conceal_pct: 0.0,
+                corr_time_pct: 1.5,
+                max_corr_cents: 4.3,
                 loss_pct: 0.0,
                 late: 0,
                 concealed: 0,
@@ -198,6 +213,8 @@ mod tests {
         };
         let j = serde_json::to_string(&s).unwrap();
         assert!(j.contains("\"echoRequested\":true") && j.contains("\"peerEchoing\":false"));
+        assert!(j.contains("\"targetMs\":2.5") && j.contains("\"concealPct\":0.0"));
+        assert!(j.contains("\"corrTimePct\":1.5") && j.contains("\"maxCorrCents\":4.3"));
         assert!(j.contains("\"estLatencyMs\""));
         assert!(j.contains("\"peerId\":\"a\""));
         assert!(j.contains("\"state\":\"connected\""));

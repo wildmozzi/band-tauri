@@ -212,7 +212,7 @@ describe('migration 012: server postRepository works as service_role', () => {
   it('insert / findForEdit / update (author-scoped) / displayName', async () => {
     const repo = createPostRepository(pgliteSupabase())
     assert.equal(await repo.displayName(ALICE), 'alice')
-    assert.equal(await repo.displayName(BOB), 'bob.k') // 닉네임 없으면 이메일 앞부분
+    assert.equal(await repo.displayName(BOB), 'User') // 닉네임 없으면 'User' — 이메일 앞부분을 공개하지 않는다 (P3-10g)
 
     const row = await repo.insert({
       authorId: ALICE, authorName: 'alice', authorRole: 'Session Member', title: 'srv', content: 'c',

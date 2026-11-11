@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { toRepositoryError, StoreUnavailableError } from './errors'
+import { parseRoomCapacity } from '../lib/roomCapacity'
 
 export interface RoomMeta {
   hostId: string | null
@@ -89,7 +90,7 @@ export function createRoomRepository(supabase: SupabaseClient): RoomRepository {
         isPrivate: row.is_private === true,
         hasPassword: row.has_password === true,
         passwordHash: await findPasswordHash(roomId),
-        maxParticipants: typeof max === 'number' && Number.isInteger(max) && max > 0 ? max : undefined,
+        maxParticipants: parseRoomCapacity(max),
       }
     },
 

@@ -1,5 +1,5 @@
 import type { RoomEditorState } from './useRoomEditor'
-import { COMMON_TAGS, GENRES, MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, MAX_SLOT_COUNT, findInstrument, maxParticipantsOptionLabel } from './roomModel'
+import { COMMON_TAGS, GENRES, maxParticipantOptionsFor, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, MAX_SLOT_COUNT, findInstrument, maxParticipantsOptionLabel } from './roomModel'
 import { Modal } from '../../components/ui/Modal'
 import { Field } from '../../components/ui/Field'
 
@@ -52,7 +52,7 @@ export function RoomEditModal({ editor }: { editor: RoomEditorState }) {
             aria-describedby="edit-max-hint"
             onChange={(e) => editor.setEditMaxParticipants(Number(e.target.value))}
           >
-            {MAX_PARTICIPANT_OPTIONS.map(n => (
+            {maxParticipantOptionsFor(editor.editMaxParticipants).map(n => (
               <option key={n} value={n}>{maxParticipantsOptionLabel(n)}</option>
             ))}
           </select>

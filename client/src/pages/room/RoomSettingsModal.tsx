@@ -1,4 +1,4 @@
-import { AVAILABLE_INSTRUMENTS, COMMON_TAGS, GENRES, MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from '../rooms/roomModel'
+import { AVAILABLE_INSTRUMENTS, COMMON_TAGS, GENRES, maxParticipantOptionsFor, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from '../rooms/roomModel'
 import type { DetailRoom } from './roomDetailModel'
 import type { RoomSettingsForm } from './useRoomSettingsForm'
 import { Modal } from '../../components/ui/Modal'
@@ -53,7 +53,7 @@ export function RoomSettingsModal({ room, form }: { room: DetailRoom; form: Room
             aria-describedby="edit-max-hint"
             onChange={(e) => form.setEditMaxParticipants(Number(e.target.value))}
           >
-            {MAX_PARTICIPANT_OPTIONS.map(n => (
+            {maxParticipantOptionsFor(form.editMaxParticipants).map(n => (
               <option key={n} value={n}>{maxParticipantsOptionLabel(n)}</option>
             ))}
           </select>

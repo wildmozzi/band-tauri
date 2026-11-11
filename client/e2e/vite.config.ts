@@ -8,7 +8,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
-import { E2E_PORT, E2E_VITE_ENV } from './env'
+import { E2E_VITE_ENV } from './env'
+import { E2E_PORT_ENV, parsePort } from './port'
 
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url))
 
@@ -18,7 +19,17 @@ for (const key of Object.keys(process.env)) {
 }
 Object.assign(process.env, E2E_VITE_ENV)
 
-export default defineConfig({
+/**
+ * 빌드는 포트와 무관하다(포트를 고르지 않는다). 미리보기 포트는 Playwright(server.ts)가 고른 E2E_PORT를
+ * webServer env로 받아 쓴다 — 없으면 다른 포트로 넘어가지 않고 실패한다.
+ */
+function previewPort(): number {
+  const value = process.env[E2E_PORT_ENV]
+  if (!value) throw new Error(`e2e 미리보기는 ${E2E_PORT_ENV}가 필요합니다 — 'npm run e2e'(playwright가 빈 포트를 골라 넘김)로 실행하세요`)
+  return parsePort(value, `환경변수 ${E2E_PORT_ENV}`)
+}
+
+export default defineConfig(({ isPreview }) => ({
   root: here('..'),
   plugins: [react()],
   envDir: here('./no-env'),
@@ -29,7 +40,7 @@ export default defineConfig({
   },
   preview: {
     host: '127.0.0.1',
-    port: E2E_PORT,
+    port: isPreview ? previewPort() : undefined,
     strictPort: true,
   },
-})
+}))
