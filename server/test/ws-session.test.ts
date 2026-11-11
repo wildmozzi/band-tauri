@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'http'
 import type { WebSocketServer } from 'ws'
 import { initializeWebSocket, type RoomMeta, type WsOptions } from '../src/services/wsService'
-import { authJoin, connect, sleep, testVerifier, type TestClient } from './helpers'
+import { authJoin, connect, engineKey, sleep, testVerifier, type TestClient } from './helpers'
 
 const ROOMS: Record<string, RoomMeta> = {
   free: { hostId: 'host', freeJoin: true },
@@ -119,7 +119,7 @@ describe('session resume', async () => {
     // 연주 상태 유지: 연주자 전용 메시지가 이전 id로 중계된다
     peer.send({ type: 'start-performing', instrument: 'bass' })
     await a2.waitFor(m => m.type === 'performer-updated' && m.oderId === peer.id)
-    a2.send({ type: 'native-descriptor', descriptor: { ssrc: 7 } })
+    a2.send({ type: 'native-descriptor', descriptor: { ssrc: 7, key: engineKey(7), candidates: [] } })
     assert.ok(await peer.waitFor(m => m.type === 'native-descriptor' && m.from === oldId))
 
     // 새로 들어온 사람에게도 이전 id로 연주 중으로 보인다

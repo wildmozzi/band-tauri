@@ -9,7 +9,7 @@ import { createServer, type Server } from 'http'
 import type { WebSocketServer } from 'ws'
 import { initializeWebSocket, type RoomMeta } from '../src/services/wsService'
 import { deriveRelayBindKey, relayConfigFromEnv, signRelayToken, verifyRelayToken } from '../src/services/relayToken'
-import { authJoin, connect, sleep, testVerifier, type TestClient } from './helpers'
+import { authJoin, connect, engineKey, sleep, testVerifier, type TestClient } from './helpers'
 
 const SECRET = 'relay-test-secret-0123456789abcdef!!'
 const NOW = 1_800_000_000
@@ -95,7 +95,7 @@ async function client(url: string) {
   return c
 }
 
-const descriptor = (ssrc: number) => ({ ssrc, key: 'AAAA', candidates: [] })
+const descriptor = (ssrc: number) => ({ ssrc, key: engineKey(ssrc), candidates: [] })
 
 after(async () => {
   for (const c of openClients) c.ws.terminate()
@@ -155,16 +155,17 @@ describe('relay-token issuance over WS', async () => {
     assert.ok(!anon.has(m => m.type === 'relay-token'))
   })
 
-  it('ignores invalid ssrc but still relays the descriptor', async () => {
+  it('rejects a descriptor with invalid ssrc (descriptor-invalid): no relay, no token (PR #48 M1)', async () => {
     const host = await client(url)
     const peer = await client(url)
     await authJoin(host, 'tok:host', 'free')
     await authJoin(peer, 'tok:p2', 'free')
     peer.send({ type: 'start-performing', instrument: 'bass' })
     await sleep(50)
-    host.send({ type: 'native-descriptor', descriptor: { ssrc: -1, key: 'AAAA', candidates: [] } })
-    assert.ok(await peer.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+    host.send({ type: 'native-descriptor', descriptor: { ssrc: -1, key: engineKey(200), candidates: [] } })
+    assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'descriptor-invalid'))
     await sleep(50)
+    assert.ok(!peer.has(m => m.type === 'native-descriptor' && m.from === host.id))
     assert.ok(!host.has(m => m.type === 'relay-token'))
   })
 })
@@ -182,7 +183,7 @@ describe('relay review fixes', async () => {
     await sleep(50)
     host.send({ type: 'native-descriptor', descriptor: descriptor(0xabc) })
     assert.ok(await host.waitFor(m => m.type === 'relay-token'))
-    thief.send({ type: 'native-descriptor', descriptor: descriptor(0xabc) })
+    thief.send({ type: 'native-descriptor', descriptor: { ...descriptor(0xabc), key: engineKey(77) } })
     assert.ok(await thief.waitFor(m => m.type === 'error' && m.code === 'ssrc-conflict'))
     await sleep(50)
     assert.equal(tokens(thief).length, 0)

@@ -186,7 +186,7 @@ off len 필드
 
 - AEAD 키(**피어 쌍별**): 각 엔진은 세션 시작 시 X25519 키쌍을 만들고 descriptor의 `key`로 **공개키**(base64 32B)를 알린다. 송신자 S→수신자 R 키 = HKDF-SHA256(salt `"band-native-v1"`, ikm = X25519(S, R) 공유 비밀, info = `"pair" ‖ pub_S ‖ ssrc_S ‖ pub_R ‖ ssrc_R`)의 32B. 같은 방의 제3자는 다른 연주자를 사칭할 수 없다. 저위수(비기여) 공개키는 거부한다.
 - **신뢰 가정(위협 모델)**:
-  - 공개키는 시그널링 서버(WS, `native-descriptor` 중계)를 통해 교환되며 별도 인증이 없다. 따라서 종단 간 기밀성·무결성은 **시그널링 서버가 정직하다**는 가정 아래에서만 성립한다.
+  - 공개키는 시그널링 서버(WS, `native-descriptor` 중계)를 통해 교환되며 별도 인증이 없다. 따라서 종단 간 기밀성·무결성은 **시그널링 서버가 정직하다**는 가정 아래에서만 성립한다. 서버는 같은 방에서 한 공개키를 한 JWT 사용자에게만 묶어(5절 `key-conflict`) 다른 사용자가 남의 공개키로 descriptor를 보내 위장·선점하지 못하게 한다.
   - **막는 것**:
     - 같은 방 다른 연주자의 사칭과 주입(쌍별 키)
     - 경로상 관찰자의 도청·변조(AEAD)
@@ -400,6 +400,12 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - `isHost`는 서버가 DB `rooms` 테이블의 호스트 컬럼과 `userId`로 판정. 클라이언트가 보낸 `isHost`/`userId`는 무시.
 - 신규 메시지(같은 방 연주자에게만 중계):
   - `native-descriptor` `{ to?: string, descriptor: LocalDescriptor }` — `to` 없으면 같은 방 다른 연주자 전원. 서버는 송신자가 그 방의 연주자일 때만 중계.
+    - **공개키 바인딩(P1-1c)**: 서버는 `descriptor.key`를 보낸 연결(clientId)과 JWT `userId`에 묶는다(방 단위). 거부하면 중계하지 않고 보낸 사람에게 `error`:
+      - `descriptor-invalid` — `key`가 표준 base64(패딩 포함 44자)로 정확히 32바이트가 아니거나 비정규 표기, `ssrc`가 0..2^32-1 정수가 아님, 또는 `candidates`가 배열이 아니거나 8개 초과이거나 원소가 `{ kind: 'lan'|'public', addr: 'IPv4:port' }`(옥텟 0..255, 포트 1..65535, 선행 0 없음, 21자 이하)가 아님. 서버가 중계하지 않아 아무와도 연결되지 않으므로 앱은 엔진을 정지(연주자 자리도 내려놓음)하고 다시 시작하라고 안내한다.
+      - `key-conflict` — 같은 방의 **다른 userId**가 이미 그 키를 쓰고 있음(위장·선점). 앱은 엔진을 새 키로 재시작하고 안내한다(30초 안에 또 오면 정지). 같은 userId(재접속·WS 재개·엔진 재시작)는 허용한다.
+      - `ssrc-conflict` — 같은 방 다른 userId가 같은 ssrc를 씀(릴레이). 앱은 엔진을 재시작한다.
+    - 바인딩은 연결당 키 1개(새 descriptor가 덮어씀)이고 native-leave·퇴장·방 이동·연결 최종 종료 때 풀린다. 세션 재개 유예 중에는 유지한다. 서버 인스턴스 1대 가정(정원과 같음).
+    - 중계하는 descriptor는 서버가 검증한 `{ ssrc, key, candidates: [{ kind, addr }] }`만 다시 구성하고(후보 원소의 다른 필드도 버림) `from`은 서버가 붙인다. 0.0.0.0·멀티캐스트·루프백 같은 주소 의미 검사는 받는 쪽 엔진이 한다.
   - `native-leave` `{}` — 엔진 정지 알림.
 - 기존 `p2p-discovery`, `p2p-discovery-response`는 삭제.
 - 방 비밀번호(P2-6): `join` `{ roomId, nickname?, password? }`. 해시가 `room_secrets`(마이그레이션 008)에 있는 방은 방장 외에 `password`가 필요하다. 실패 시 `error`:
