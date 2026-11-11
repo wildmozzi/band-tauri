@@ -77,6 +77,43 @@ export interface RelayStats {
   overBudget: boolean
 }
 
+/**
+ * 오디오 UDP DSCP 마킹 상태(P1-3, 설계 3절 "QoS 마킹").
+ * - 'ef': EF(46)를 OS에 지정함(비Windows IP_TOS, Windows는 걸린 플로 모두 qWAVE QOSSetFlow 성공 — 관리자 권한 필요).
+ *   플로 추가에 실패한 목적지가 섞여 있으면 `failed`로 따로 알린다
+ * - 'voice': Windows, 걸린 플로 중 DSCP 직접 지정에 실패한 것이 있음(보통 권한 부족 — 그 플로는 트래픽 유형 Voice, 표시값은 OS 정책)
+ * - 'pending': 아직 송신 목적지 없음 / 'none': 표시 못 함(엔진은 그대로 동작)
+ */
+export type QosMarking = 'pending' | 'ef' | 'voice' | 'none'
+
+export interface QosStats {
+  marking: QosMarking
+  /** IP_TOS=0xB8 setsockopt 성공(Windows는 성공해도 무시될 수 있다) */
+  ipTos: boolean
+  /** qWAVE 핸들을 얻음(Windows만) */
+  qwave: boolean
+  /** qWAVE 플로가 걸린 송신 목적지 수(직접 경로 피어 + 릴레이) */
+  flows: number
+  /** 그중 DSCP 46 지정에 성공한 수 */
+  efFlows: number
+  /** 플로 추가 실패 목적지 수(예: 루프백 목적지는 qWAVE가 거부) */
+  failed: number
+  /** 지금 남은 실패 사유(소켓·핸들 실패 또는 현재 목적지의 실패). 실패한 목적지가 빠지면 지워진다 */
+  lastError: string | null
+}
+
+/**
+ * 송신 큐 지연: 워커 패스 시작(입력 링을 비우기 직전) → 피어별 send_to 완료, 직전 2초 창(P1-3).
+ * 같은 패스에서 나온 프레임은 앞 프레임의 인코딩·송신을 기다린 시간까지 포함한다(장치 버퍼 > 프레임일 때)
+ */
+export interface SendQueueStats {
+  p50Ms: number
+  p99Ms: number
+  maxMs: number
+  /** 창에서 잰 오디오 패킷 수(0이면 송신 없음 — 값 무시) */
+  packets: number
+}
+
 /** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token/expiresIn */
 export interface RelayConfig {
   /** 릴레이 host:port */
@@ -234,6 +271,10 @@ export interface EngineStats {
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
+  /** 오디오 UDP DSCP 마킹 상태. 네트워크 미시작이면 null */
+  qos?: QosStats | null
+  /** 송신 큐 지연(직전 2초 창). 네트워크 미시작이면 null */
+  sendQueue?: SendQueueStats | null
   /** 공유 메트로놈 상태(P2-3). 옛 엔진이면 없음 */
   metronome?: MetronomeStats
 }

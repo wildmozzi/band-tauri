@@ -34,6 +34,8 @@ net/crypto.rs          ChaCha20-Poly1305 패킷 암호화
 net/peer.rs            피어 테이블, 홀펀칭 상태기계, keepalive, RTT
 net/stun.rs            STUN (기존 파서 이식)
 net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/토큰 갱신, relay-design.md)
+net/qos.rs             오디오 UDP DSCP EF 마킹(IP_TOS, Windows qWAVE), 3절 8
+net/txlat.rs           송신 큐 지연 히스토그램(프레임 생성 → send_to 완료), 3절 8
 diag/mod.rs            진단(P2-5): 1초 간격 엔진 통계 타임라인 기록 스레드(최근 60분 링 버퍼)
 diag/timeline.rs       링 버퍼, 샘플 형식(JSONL)
 diag/mask.rs           개인정보 마스킹(IP 대역, 이메일, 토큰, id 가명, 사용자 폴더)
@@ -46,9 +48,9 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 |---|---|---|
 | 입력 콜백 (RT) | 장치 샘플 → 채널 라우팅 → `f32` SPSC 링(사전할당)에 push, 레벨 원자값 갱신 | 할당, 락, 시스템콜, println |
 | 출력 콜백 (RT) | **콜백 구동 믹스**: 소스 링(로컬 1개 + 피어별 1개, 사전할당 SPSC)에서 필요한 프레임만큼 꺼내 게인·팬(원자값)을 곱해 섞고, 마스터·soft clip 후 장치 포맷/채널 수로 기록. 메트로놈 클릭(1.4절)은 장치 출력에만 더한다. 믹스 탭 링에도 쓴다(클릭 없음). 재생 중인 소스가 모자라면 0을 채우고 소스별 언더런 프레임과 xrun을 원자 증가 | 동일 |
-| engine 워커 (비RT, 1개) | 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신. 피어마다 지터 버퍼에서 디코드한 PCM을 (리샘플해) 그 피어의 소스 링에 공급하고, 로컬 FIFO에서 로컬 소스 링을 채운다 | — |
+| engine 워커 (비RT, 1개) | 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신(send_to 완료마다 송신 큐 지연을 원자 히스토그램에 기록, 3절 8). 피어마다 지터 버퍼에서 디코드한 PCM을 (리샘플해) 그 피어의 소스 링에 공급하고, 로컬 FIFO에서 로컬 소스 링을 채운다 | — |
 | net 수신 스레드 | recv → 복호화/검증 → 피어별 지터 버퍼에 삽입(피어별 `Mutex`는 비RT 스레드끼리만 공유하므로 허용) | — |
-| net 제어 스레드 | 홀펀칭, keepalive(1초), ping/pong(500ms), 타임아웃(5초) | — |
+| net 제어 스레드 | 홀펀칭, keepalive(1초), ping/pong(500ms), 타임아웃(5초), DSCP 마킹 플로 동기화(qWAVE 시스템 호출), 송신 큐 지연 창 회전(2초) | — |
 | WASAPI 스레드 (자체 백엔드, RT) | 입·출력 이벤트를 한 스레드에서 대기(MMCSS "Pro Audio"). 캡처를 먼저 처리하고 렌더. `GetBuffer`/`ReleaseBuffer` 사이에서 입력/출력 콜백 함수(위 두 줄)를 부른다 | 우리 코드는 위와 같음. WASAPI 호출·대기는 예외 |
 
 - 내부 처리 레이트는 **항상 48000Hz**, 내부 포맷 `f32`.
@@ -247,6 +249,17 @@ off len 필드
    - 릴레이 경로 송신은 피어마다 RelayData(dest_ssrc = 그 피어의 ssrc) + 원본 엔진 패킷이다. AEAD(쌍별 키, nonce/AAD)는 그대로이고 접두부 8바이트는 AAD 밖이다. Pong은 Ping이 온 경로로 돌려준다. HelloAck는 Hello의 timestamp를 되돌려 경로별 RTT를 잰다.
    - `Failed`는 직접 연결과 릴레이가 모두 안 된 상태다. UI는 릴레이 상태(`EngineStats.relay`)와 마지막 `engine_set_relay` 실패 사유로 안내한다(릴레이 없음/설정 실패/닿지 않음/거절/만료/모두 실패).
    - PCM16은 릴레이 대역 상한(클라이언트당 2 Mbps·2500pps)을 넘을 수 있다. 예: PCM16 mono 2.5ms 피어 3명이면 약 2.7 Mbps, stereo 2.5ms 피어 2명이면 약 3.3 Mbps다. 엔진은 릴레이 송신량을 1초 창으로 재서 상한의 90%를 넘으면 `EngineStats.relay.overBudget = true`로 알리고, 80% 아래로 내려가면 해제한다. UI는 "릴레이 대역 초과 — 코덱을 Opus로 바꿔 주세요"를 띄운다. 릴레이 경로에서 Opus로 자동 전환하는 것은 후속 작업이다(코덱은 워커/오디오 경로 소관).
+8. **QoS 마킹·송신 페이싱·송신 큐 지연**(P1-3, `net/qos.rs`, `net/txlat.rs`).
+   - **DSCP EF(46)**: 엔진 소켓 하나(오디오·제어·릴레이 공용)에 `IP_TOS = 0xB8`을 건다. 리눅스·macOS는 이것으로 표시된다. Windows는 이 호출이 성공해도 기본 정책상 무시하므로 qWAVE(QoS2)를 쓴다.
+     - 제어 스레드가 매 틱(20ms) 송신 목적지 집합(확정된 직접 경로 피어 + 릴레이 주소)을 모아, 목적지마다 `QOSAddSocketToFlow(QOSTrafficTypeVoice, QOS_NON_ADAPTIVE_FLOW)`로 플로를 만들고 `QOSSetFlow(QOSSetOutgoingDSCPValue, 46)`을 시도한다. 빠진 목적지의 플로는 `QOSRemoveSocketFromFlow`로 지운다. 송신 경로(워커)는 qWAVE를 부르지 않는다.
+     - DSCP 직접 지정은 관리자(또는 Network Configuration Operators) 권한이 필요하다. 일반 사용자는 `ERROR_ACCESS_DENIED`(5)로 실패하고, 플로는 트래픽 유형 Voice로 남는다(`marking: 'voice'`, 실제 표시값은 OS 정책). 루프백 목적지는 qWAVE가 거부한다(`ERROR_NOT_FOUND` 1168). 어떤 실패도 엔진을 멈추지 않으며, 실패한 목적지는 집합에서 빠졌다 다시 들어올 때까지 재시도하지 않는다.
+     - 결과는 `EngineStats.qos`(4절). 관리자 없이 EF를 쓰려면 정책 기반 QoS(그룹 정책/`New-NetQosPolicy -AppPathNameMatchCondition band.exe -DSCPAction 46`, 설치 시 관리자 1회)가 대안이다 — 아직 하지 않음.
+     - **IPv4만**: 소켓을 `0.0.0.0`에 바인드하고 후보도 IPv4뿐이라 `IPV6_TCLASS`는 다루지 않는다. IPv6 경로를 추가하면 함께 넣어야 한다.
+     - 표시가 실제 회선에서 유지되는지(공유기·ISP가 지우는지)와 Wi-Fi WMM 큐 효과는 **[사람 확인]**: 상대 PC(또는 미러 포트)에서 Wireshark로 IP 헤더 DS 필드를 본다. 송신 PC의 캡처에는 qWAVE 표시가 안 보였다는 보고가 있어 판단 근거로 쓰지 않는다.
+   - **송신 페이싱 — 넣지 않는다**(측정 근거). 한 프레임을 피어들에게 간격 없이 연달아 보낸다.
+     - 루프백 5피어·Opus stereo 2.5ms(73바이트) 실측(`tests/send_queue.rs`, realtime 잡, Windows): 암호화 없는 `send_to` 5회 버스트 p50 76µs · p99 326µs. 디버그 빌드 엔진 경로(암호화 포함) 버스트 p50 646µs · p99 1.45ms이고 대부분 최적화되지 않은 ChaCha20-Poly1305 몫이다(릴리스 빌드는 재지 않음).
+     - 한 프레임 버스트는 5 × (73 + 28) ≈ 0.5KB다. 업로드 10Mbps에서도 직렬화 0.4ms로 프레임 주기(2.5ms) 안에 끝나고, 페이싱해도 평균 송출률·직렬화 시간은 같다. 반대로 피어 사이에 간격 δ를 두면 마지막 피어가 (N−1)·δ만큼 늦어진다(δ = 2.5ms/5면 +2ms). 지연을 늘리지 않는다는 조건과 맞지 않는다.
+   - **송신 큐 지연**: 워커 패스가 입력 링을 비우기 직전 시각부터 각 피어의 `send_to`가 돌아온 시각까지를 패킷마다 잰다(에코 반사 패킷 제외). 한 패스에서 프레임 여러 개가 완성되면(장치 버퍼 > 프레임, 예: 10ms 장치 / 2.5ms 프레임 → 4개) 모두 그 패스 시작 시각을 쓴다. 그래서 뒤 프레임은 앞 프레임의 인코딩·송신을 기다린 시간까지 포함한다(PR #37 리뷰 M1). 패스 전에 링에서 폴링을 기다린 시간(최대 `POLL` 0.5ms)은 포함하지 않는다. 기록은 원자 덧셈뿐이다(1µs 칸 0..16µs, 그 위는 2의 거듭제곱마다 8칸, 상대 오차 ≤ 12.5%). 창 회전과 기록이 겹치면 칸과 최대값이 서로 다른 창으로 갈 수 있다. 그래서 최대값은 가장 높은 비지 않은 칸의 하한 아래로 내리지 않는다. 제어 스레드가 2초마다 창을 비워 p50/p99/최대를 `EngineStats.sendQueue`에 둔다. 인코딩 시간과 앞선 피어들의 송신 시간이 포함된다.
 
 ## 4. Tauri 커맨드 (`commands.rs`) — 프론트 계약
 
@@ -278,7 +291,10 @@ type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
 interface LoopbackRun { roundTripMs: number | null; peakRatio: number; correlation: number; clipped: boolean; inverted: boolean; inputPeak: number }
 interface LoopbackReport { verdict: MeasureVerdict; message: string; runs: LoopbackRun[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; sampleRate: number; inputBufferFrames: number; outputBufferFrames: number; bufferRoundTripMs: number; driverInputLatencyMs: number | null; driverOutputLatencyMs: number | null; driverRoundTripMs: number | null; estLatencyMs: number; offsetMs: number | null; driverErrorMs: number | null; correctedEstLatencyMs: number | null; backend: string }
 interface EchoReport { verdict: MeasureVerdict; message: string; peerId: string; runs: (number | null)[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; peerEchoDelayMs: number; oneWayMs: number | null; networkRttMs: number | null; jitterBufferMs: number; frameMs: number; localLatencyMs: number; inputBufferMs: number; outputBufferMs: number; mouthToEarMs: number | null; residualMs: number | null; path: 'lan' | 'public' | 'relay' | null }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats }
+type QosMarking = 'pending' | 'ef' | 'voice' | 'none'
+interface QosStats { marking: QosMarking; ipTos: boolean; qwave: boolean; flows: number; efFlows: number; failed: number; lastError: string | null }
+interface SendQueueStats { p50Ms: number; p99Ms: number; maxMs: number; packets: number }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null }
 type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
 interface ThreadPriorityStats { worker: ThreadPriority; netRecv: ThreadPriority; audio: ThreadPriority; timer1ms: boolean }
 interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
@@ -366,6 +382,9 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 `PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제).
 
+`qos`(P1-3, 3절 8): 오디오 UDP DSCP 마킹 상태. 네트워크가 없으면 null. `marking`: `ef`(EF 46을 OS에 지정 — 비Windows `IP_TOS`, Windows는 걸린 플로 모두 `QOSSetFlow` 성공) | `voice`(Windows, 걸린 플로 중 DSCP 직접 지정 실패가 있음 — 보통 권한 부족, 그 플로는 트래픽 유형 Voice. `ef`도 플로 추가 실패 목적지가 섞이면 `failed`로 알림) | `pending`(Windows, 아직 송신 목적지 없음) | `none`(표시 못 함). `ipTos`: `IP_TOS` setsockopt 성공(Windows는 성공해도 무시될 수 있다). `qwave`: qWAVE 핸들 획득. `flows`/`efFlows`/`failed`: 플로가 걸린 목적지 수 / 그중 DSCP 46 성공 수 / 플로 추가 실패 수(Windows만, 그 밖에는 0). `lastError`: 지금 남은 실패 사유(소켓·핸들 단계 실패, 또는 현재 목적지 중 실패한 것). 실패한 목적지가 빠지면 지워진다(이력 아님).
+
+`sendQueue`(P1-3): 송신 큐 지연(워커 패스 시작 → 피어별 `send_to` 완료, 3절 8), 직전 2초 창의 `p50Ms`/`p99Ms`/`maxMs`와 잰 패킷 수 `packets`. 송신이 없던 창이면 `packets = 0`이고 나머지는 0이다. 네트워크가 없으면 null.
 **진단 내보내기(P2-5, `diag/`)**
 - 기록: `band-diag` 스레드가 1초마다 `EngineManager::snapshot()`(엔진 슬롯 락 안에서 `Engine::stats()`, UI의 `engine_stats`와 같은 경로)으로 샘플을 링 버퍼(3600개 = 60분)에 넣는다. 엔진이 없으면 기록하지 않고, 엔진이 사라진 순간 `running:false` 정지 표시 샘플을 한 번 넣는다. RT 콜백 경로에는 아무것도 추가하지 않는다.
 - 샘플(JSONL 한 줄): `t`(유닉스 ms), `running`, `network`(합주/테스트, 정지 표시 샘플은 끝난 세션 값), `session`(`EngineManager` generation — 값이 바뀐 곳이 엔진 재시작 경계로, 누적 카운터가 0부터 다시 센다), `EngineStats`의 장치·지연·xrun·스트림 오류 값, `peers[]`(`peer` 가명, `state`, `path`, `rttMs`, `jitterMs`, `bufferMs`, `playoutMs`, `lossPct`, `late`·`concealed` 누적, `level`, 에코 상태), `relay`(주소는 대역만).

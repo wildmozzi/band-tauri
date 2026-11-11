@@ -4,8 +4,10 @@ pub mod clock;
 pub mod crypto;
 pub mod packet;
 pub mod peer;
+pub mod qos;
 pub mod relay;
 pub mod stun;
+pub mod txlat;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -108,6 +110,10 @@ pub struct NetShared {
     /// 릴레이로 보낸 바이트·패킷(대역 경고 M4, 제어 스레드가 약 1초마다 비운다).
     relay_tx_bytes: AtomicU64,
     relay_tx_packets: AtomicU64,
+    /// 송신 큐 지연(프레임 생성 → send_to 완료, P1-3). 워커가 기록, 제어 스레드가 창을 돌린다.
+    send_latency: txlat::SendLatency,
+    /// DSCP 마킹 상태(제어 스레드가 바뀔 때 갱신).
+    qos_stats: Mutex<qos::QosStats>,
 }
 
 pub struct Net {
@@ -183,6 +189,8 @@ impl Net {
             prev_relay: RwLock::new(None),
             relay_tx_bytes: AtomicU64::new(0),
             relay_tx_packets: AtomicU64::new(0),
+            send_latency: txlat::SendLatency::new(),
+            qos_stats: Mutex::new(qos::QosStats::default()),
             recv_prio: Default::default(),
         });
 
@@ -353,6 +361,16 @@ impl Net {
         self.shared.relay.lock().as_ref().map(|c| c.stats())
     }
 
+    /// DSCP 마킹 상태(`EngineStats.qos`).
+    pub fn qos_stats(&self) -> qos::QosStats {
+        self.shared.qos_stats.lock().clone()
+    }
+
+    /// 직전 창의 송신 큐 지연(`EngineStats.sendQueue`).
+    pub fn send_queue_stats(&self) -> txlat::SendQueueStats {
+        self.shared.send_latency.last()
+    }
+
     pub fn stop(&mut self) {
         if self.shared.stop.swap(true, Ordering::SeqCst) {
             return;
@@ -451,8 +469,9 @@ impl NetShared {
     }
 
     /// 피어 하나에 Audio 패킷 송신. seq는 피어별 카운터다(에코로 되돌리는 패킷과 nonce가 겹치지 않게).
+    /// `frame_at`이 있으면 send_to 완료까지의 지연을 송신 큐 지연 히스토그램에 기록한다(에코 반사는 제외).
     #[allow(clippy::too_many_arguments)]
-    fn send_audio_to(&self, p: &Peer, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8], rbuf: &mut [u8; SEND_BUF_BYTES]) {
+    fn send_audio_to(&self, p: &Peer, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8], rbuf: &mut [u8; SEND_BUF_BYTES], frame_at: Option<Instant>) {
         let target = {
             let c = p.conn.lock();
             if c.can_send_audio() { c.path } else { None }
@@ -476,6 +495,9 @@ impl NetShared {
         } else if let Some(n) = p.tx.seal(&h, payload, buf) {
             let _ = self.socket.send_to(&buf[..n], addr);
         }
+        if let Some(t0) = frame_at {
+            self.send_latency.record(t0.elapsed());
+        }
     }
 
     /// 오디오 페이로드를 연결된 피어마다 그 피어의 송신 키로 암호화해 보낸다(seq는 피어별).
@@ -484,6 +506,14 @@ impl NetShared {
     /// `buf`는 호출자가 사전 할당한 MAX_PACKET_BYTES 버퍼(직접 경로용). 릴레이 경로는 접두부 자리가 있는
     /// 스택 버퍼를 쓴다(피어마다 RelayData를 따로 보낸다 — 릴레이에는 팬아웃이 없다).
     pub fn send_audio(&self, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8], alt: Option<(&str, &[u8])>) {
+        self.send_audio_timed(Instant::now(), payload, flags, frame_code, timestamp, buf, alt)
+    }
+
+    /// `send_audio`와 같고, `frame_at`(캡처 프레임이 다 모인 시각, 인코딩 전)부터 각 피어 send_to 완료까지를
+    /// 송신 큐 지연으로 잰다(P1-3, `EngineStats.sendQueue`). 피어에게는 이 프레임을 간격 없이 연달아 보낸다
+    /// (페이싱 없음 — 설계 3절 "송신 페이싱" 측정 근거).
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_audio_timed(&self, frame_at: Instant, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8], alt: Option<(&str, &[u8])>) {
         if payload.len() > MAX_PAYLOAD_BYTES || alt.is_some_and(|(_, a)| a.len() > MAX_PAYLOAD_BYTES) {
             return;
         }
@@ -501,7 +531,7 @@ impl NetShared {
                 Some((id, a)) if id == p.id => a,
                 _ => payload,
             };
-            self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf);
+            self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, Some(frame_at));
         }
     }
 
@@ -521,7 +551,7 @@ impl NetShared {
         };
         let mut buf = [0u8; MAX_PACKET_BYTES];
         let mut rbuf = [0u8; SEND_BUF_BYTES];
-        self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf);
+        self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf, None);
         let us = received.elapsed().as_secs_f32() * 1e6;
         let mut e = p.echo.lock();
         e.reflect_us += (us - e.reflect_us) * 0.05;
@@ -800,6 +830,11 @@ const RELAY_RATE_WINDOW: Duration = Duration::from_secs(1);
 
 fn control_loop(s: &NetShared) {
     let mut rate_since = Instant::now();
+    let mut lat_since = rate_since;
+    // DSCP 마킹: qWAVE 플로 추가·제거는 시스템 호출이라 송신 경로가 아니라 여기서 한다(P1-3).
+    let mut qos = qos::Qos::new(&s.socket);
+    *s.qos_stats.lock() = qos.stats();
+    let mut qos_dests: Vec<SocketAddr> = Vec::with_capacity(MAX_PEERS + 1);
     while !s.stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         let peers = s.peers.read().clone();
@@ -807,6 +842,22 @@ fn control_loop(s: &NetShared) {
             let r = s.relay.lock();
             (r.as_ref().is_some_and(|c| c.ready()), r.as_ref().map(|c| c.addr))
         };
+        qos_dests.clear();
+        qos_dests.extend(relay);
+        for p in &peers {
+            if let Some((addr, kind)) = p.conn.lock().path {
+                if kind != PathKind::Relay && !qos_dests.contains(&addr) {
+                    qos_dests.push(addr);
+                }
+            }
+        }
+        if qos.sync(&qos_dests) {
+            *s.qos_stats.lock() = qos.stats();
+        }
+        if now.duration_since(lat_since) >= txlat::WINDOW {
+            lat_since = now;
+            s.send_latency.rotate();
+        }
         let mut relay_quiet = false;
         for p in &peers {
             let (action, path, last_rx, failed) = {
