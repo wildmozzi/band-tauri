@@ -25,12 +25,14 @@ import { useRecording, type Recording, type RecordingSource } from './room/useRe
 import { mergeSelfPerformer, withPeer, type PeerInstrument } from './room/roomState'
 import { forgetRoomPassword, joinErrorFromSignal, rememberRoomPassword, type JoinError } from './room/roomAccess'
 import { useNativeSession } from '../native/useNativeSession'
+import { DEFAULT_METRONOME_VOLUME, metronomeErrorFromCode, type MetronomeView } from '../native/metronomeLogic'
 import { MixBroadcaster, MixSource } from '../native/mixBridge'
 import { computeViewers, selectBroadcaster } from '../native/sessionLogic'
 import {
   MAX_PERFORMERS,
   engineErrorMessage,
   engineSetMasterGain,
+  engineSetMetronomeGain,
   engineSetMonitor,
   isNativeApp,
   type EngineStats,
@@ -93,6 +95,14 @@ type RoomContextType = {
   /** 내 입력 뮤트 (engine_set_input_muted) */
   inputMuted: boolean
   toggleInputMuted: () => void
+  /** 공유 메트로놈(P2-3). 꺼져 있으면 null. leaderId=null이면 내가 기준(방장) */
+  metronome: MetronomeView | null
+  /** 방장: 시작(또는 BPM·박자 변경)·정지. 엔진이 돌 때만 */
+  setHostMetronome: (running: boolean, bpm: number, beatsPerBar: number) => Promise<boolean>
+  /** 내 클릭 볼륨(0..1)·뮤트 — 내 귀에만, 방송·녹음에는 클릭이 없다 */
+  metronomeVolume: number
+  metronomeMuted: boolean
+  setMetronomeVolume: (volume: number, muted: boolean) => void
   /** 관람자에게 믹스를 보내는 연주자 */
   broadcasterId: string | null
   isBroadcaster: boolean
@@ -201,6 +211,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [localError, setLocalError] = useState<string | null>(null)
   const [isMonitoringEnabled, setIsMonitoringEnabled] = useState(false)
   const [monitorGain, setMonitorGain] = useState(1)
+  const [metronomeVolume, setMetronomeVolumeState] = useState(DEFAULT_METRONOME_VOLUME)
+  const [metronomeMuted, setMetronomeMutedState] = useState(false)
   const [broadcastViewerCount, setBroadcastViewerCount] = useState(0)
   const [isMiniPlayerMode, setIsMiniPlayerMode] = useState(false)
 
@@ -414,7 +426,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     // native-descriptor / native-leave / relay-token / 연주 거부 에러(perform-not-approved, room-full-performers,
     // login-required) / ssrc-conflict(엔진 재시작만 — 연주 거부가 아니므로 방송은 유지)
     if (session.handleSignal(p)) {
-      if (p.type === 'error' && p.code !== 'ssrc-conflict') broadcasterRef.current!.stop()
+      // 연주 거부 에러만 방송을 멈춘다(ssrc-conflict는 엔진 재시작, 메트로놈 에러는 메트로놈만)
+      if (p.type === 'error' && p.code !== 'ssrc-conflict' && !metronomeErrorFromCode(p.code)) broadcasterRef.current!.stop()
       return
     }
     if (chat.handleChatSignal(p)) return
@@ -689,6 +702,21 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     session.setInputMuted(!session.getState().inputMuted)
   }, [session])
 
+  const setHostMetronome = useCallback(
+    (on: boolean, bpm: number, beatsPerBar: number) => session.setHostMetronome(on, bpm, beatsPerBar),
+    [session],
+  )
+
+  const setMetronomeVolume = useCallback((volume: number, muted: boolean) => {
+    const v = Math.max(0, Math.min(1, volume))
+    setMetronomeVolumeState(v)
+    setMetronomeMutedState(muted)
+    // 엔진 제어값은 엔진 재시작 간에도 유지되므로 연주 중이 아니어도 보낸다(앱에서만)
+    if (isNativeApp()) {
+      engineSetMetronomeGain(v, muted).catch((err) => console.warn('[Native] 메트로놈 볼륨 실패:', engineErrorMessage(err)))
+    }
+  }, [])
+
   // --- 표시용 파생 값 ---
   const peerEngineStats = useMemo(() => {
     const map: Record<string, PeerStats> = {}
@@ -778,6 +806,11 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     setMonitor,
     inputMuted: perf.inputMuted,
     toggleInputMuted,
+    metronome: running ? (perf.metronome ?? null) : null,
+    setHostMetronome,
+    metronomeVolume,
+    metronomeMuted,
+    setMetronomeVolume,
     broadcasterId,
     isBroadcaster,
     broadcastViewerCount,
