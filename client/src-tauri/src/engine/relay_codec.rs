@@ -9,6 +9,9 @@
 //!   예상보다 낮은 경우(운영 env로 낮춘 경우 등)를 잡는다 — 이때는 그 시점의 예상 부하를 "넘은 부하"로 기억한다.
 //! - 끄기(히스테리시스): 예상 PCM 부하가 `min(80%, 0.85 × 넘은 부하)` 아래로 `hold` 동안 이어지면 PCM16으로
 //!   돌아간다. Opus로 보내는 동안의 측정값은 PCM 부하를 말해 주지 않으므로 복귀 판단에는 예상만 쓴다.
+//! - 재진입(측정으로 켜진 적이 있을 때): 복귀한 뒤 `LEARNED_TRIP_TTL` 동안은 그때 "넘은 부하"를 기억해,
+//!   예상 PCM 부하가 그 값에 다시 닿으면 측정을 기다리지 않고 바로 켠다. 측정 창(1초) 동안 릴레이가 PCM을
+//!   버리는 손실이 재진입마다 반복되지 않게 한다.
 //! - 플래핑: 복귀한 지 30초 안에 다시 켜지면 `hold`를 두 배로(10 → 20 → 40 → 80 → 120초). PCM으로 60초 넘게
 //!   안정하면 10초로 돌아간다.
 
@@ -23,6 +26,9 @@ pub const HOLD_MAX: Duration = Duration::from_secs(120);
 pub const FLAP_WINDOW: Duration = Duration::from_secs(30);
 /// PCM으로 이만큼 안정하면 `hold`를 최소로 되돌린다.
 pub const STABLE_RESET: Duration = Duration::from_secs(60);
+/// 측정으로 켜진 "넘은 부하"를 복귀 뒤 이만큼 기억한다(재진입 때 측정 없이 바로 켠다).
+/// 낮은 한도는 대개 운영 설정이라 오래 유지되지만, 일시적 원인이었을 수도 있어 무기한 기억하지는 않는다.
+pub const LEARNED_TRIP_TTL: Duration = Duration::from_secs(300);
 /// 측정으로 켜진 경우, 복귀 문턱 = 넘은 부하 × 이 값(측정 한도가 예상보다 낮을 때).
 const MEASURED_EXIT_RATIO: f32 = 0.85;
 
@@ -57,13 +63,15 @@ pub struct RelayCodecPolicy {
     below_since: Option<Instant>,
     hold: Duration,
     last_exit: Option<Instant>,
+    /// 측정으로 켜졌던 "넘은 부하"(예상 PCM 부하). 복귀 뒤 `LEARNED_TRIP_TTL` 동안 재진입 문턱으로 쓴다.
+    learned_trip: Option<f32>,
     /// 켜진 횟수(진단용).
     pub switches: u64,
 }
 
 impl Default for RelayCodecPolicy {
     fn default() -> Self {
-        Self { active: false, trip_load: BUDGET_WARN, below_since: None, hold: HOLD_MIN, last_exit: None, switches: 0 }
+        Self { active: false, trip_load: BUDGET_WARN, below_since: None, hold: HOLD_MIN, last_exit: None, learned_trip: None, switches: 0 }
     }
 }
 
@@ -93,10 +101,24 @@ impl RelayCodecPolicy {
             if self.last_exit.is_some_and(|t| now.duration_since(t) >= STABLE_RESET) {
                 self.hold = HOLD_MIN;
             }
+            if self.last_exit.is_some_and(|t| now.duration_since(t) >= LEARNED_TRIP_TTL) {
+                self.learned_trip = None;
+            }
             let predicted = i.predicted_pcm_load >= BUDGET_WARN;
-            if i.relay_peers > 0 && (predicted || i.measured_over) {
-                // 측정으로 켜졌으면(예상은 아직 90% 미만) 그때의 예상 부하가 실제 한도에 닿은 부하다
-                self.trip_load = if predicted { BUDGET_WARN } else { i.predicted_pcm_load.max(0.05) };
+            // 같은 피어 수·프레임이면 같은 값이 나오므로 부동소수 오차만 허용한다
+            let learned = self.learned_trip.filter(|&t| i.predicted_pcm_load >= t * 0.999);
+            if i.relay_peers > 0 && (predicted || learned.is_some() || i.measured_over) {
+                self.trip_load = if predicted {
+                    BUDGET_WARN
+                } else if let Some(t) = learned {
+                    // 기억한 한도로 재진입(측정 없이)
+                    t
+                } else {
+                    // 측정으로 켜졌으면(예상은 아직 90% 미만) 그때의 예상 부하가 실제 한도에 닿은 부하다
+                    let t = i.predicted_pcm_load.max(0.05);
+                    self.learned_trip = Some(t);
+                    t
+                };
                 if self.last_exit.is_some_and(|t| now.duration_since(t) < FLAP_WINDOW) {
                     self.hold = (self.hold * 2).min(HOLD_MAX);
                 }
@@ -181,6 +203,26 @@ mod tests {
         assert!(p.active());
         assert_eq!(p.update(t0 + Duration::from_secs(31), inputs(0, false)), None);
         assert_eq!(p.update(t0 + Duration::from_secs(41), inputs(0, false)), Some(false), "릴레이 피어가 없으면 복귀");
+        // 복귀 뒤 같은 부하로 재진입: 측정(overBudget)을 기다리지 않고 바로 켠다(1초 폐기 반복 방지)
+        let t1 = t0 + Duration::from_secs(100);
+        assert_eq!(p.update(t1, inputs(1, false)), Some(true), "기억한 한도로 즉시 재진입");
+        assert!((p.exit_threshold() - thr).abs() < 1e-6, "복귀 문턱도 기억한 한도 기준");
+    }
+
+    #[test]
+    fn learned_trip_expires_after_ttl() {
+        let t0 = Instant::now();
+        let mut p = RelayCodecPolicy::default();
+        assert_eq!(p.update(t0, inputs(1, true)), Some(true));
+        p.update(t0 + Duration::from_secs(1), inputs(0, false));
+        let exit = t0 + Duration::from_secs(12);
+        assert_eq!(p.update(exit, inputs(0, false)), Some(false));
+        // 피어 0명이면 기억이 있어도 켜지 않는다
+        assert_eq!(p.update(exit + Duration::from_secs(1), inputs(0, false)), None);
+        // 기억 만료 뒤에는 예상(45%)만으로 켜지지 않고 다시 측정을 기다린다
+        assert_eq!(p.update(exit + LEARNED_TRIP_TTL, inputs(1, false)), None);
+        assert!(!p.active());
+        assert_eq!(p.update(exit + LEARNED_TRIP_TTL, inputs(1, true)), Some(true), "측정 초과면 다시 켜진다");
     }
 
     #[test]

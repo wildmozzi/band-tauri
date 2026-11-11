@@ -505,7 +505,7 @@ impl NetShared {
             })
             .count();
         drop(peers);
-        let over = self.relay.lock().as_ref().is_some_and(|c| c.stats().over_budget);
+        let over = self.relay.lock().as_ref().is_some_and(|c| c.over_budget());
         (n, over)
     }
 
@@ -548,6 +548,8 @@ impl NetShared {
                 continue;
             }
             let (pl, ra) = match alt {
+                // 에코 측정 클릭 스트림은 측정 대상 한 명에게 수 초만 가고 코덱을 바꾸면 측정이 흐트러지므로,
+                // 그 피어가 릴레이 경로여도 설정 코덱(PCM16) 그대로 보낸다(그동안 상한을 잠깐 넘을 수 있다).
                 Some((id, a)) if id == p.id => (a, None),
                 _ => (payload, relay_alt),
             };

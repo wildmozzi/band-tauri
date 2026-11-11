@@ -216,6 +216,11 @@ impl RelayClient {
         self.state == RelayStateKind::Bound
     }
 
+    /// 측정 송신량이 상한의 90%를 넘음(`stats()`와 달리 할당 없이 — 워커 루프가 200ms마다 읽는다).
+    pub fn over_budget(&self) -> bool {
+        self.over_budget
+    }
+
     pub fn stats(&self) -> RelayStats {
         RelayStats {
             state: self.state,
