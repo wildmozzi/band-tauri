@@ -4,6 +4,8 @@ import { useRequireAuth } from '../features/auth/useRequireAuth'
 import { MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from './rooms/roomModel'
 import { createRoom } from '../services/roomApi'
 import { validateRoomPasswordInput, ROOM_PASSWORD_MAX } from '../contexts/room/roomAccess'
+import { Field } from '../components/ui/Field'
+import { Button } from '../components/ui/Button'
 
 const GENRES = [
   '록', '재즈', '블루스', '클래식', '팝', '힙합',
@@ -154,8 +156,7 @@ export function CreateRoom() {
         </div>
 
         <form onSubmit={handleSubmit} className="create-room-form">
-          <div className="form-group">
-            <label htmlFor="title">방 제목 *</label>
+          <Field id="title" label="방 제목 *">
             <input
               id="title"
               type="text"
@@ -165,10 +166,9 @@ export function CreateRoom() {
               maxLength={100}
               required
             />
-          </div>
+          </Field>
 
-          <div className="form-group">
-            <label htmlFor="description">설명</label>
+          <Field id="description" label="설명">
             <textarea
               id="description"
               placeholder="어떤 합주를 하고 싶으신가요? (선택사항)"
@@ -177,11 +177,10 @@ export function CreateRoom() {
               rows={4}
               maxLength={500}
             />
-          </div>
+          </Field>
 
           <div className="form-row">
-            <div className="form-group">
-              <label htmlFor="genre">장르</label>
+            <Field id="genre" label="장르">
               <select
                 id="genre"
                 value={genre}
@@ -191,7 +190,7 @@ export function CreateRoom() {
                   <option key={g} value={g}>{g}</option>
                 ))}
               </select>
-            </div>
+            </Field>
 
             <div className="form-group">
               <label htmlFor="maxParticipants">{MAX_PARTICIPANTS_LABEL}</label>
@@ -382,21 +381,12 @@ export function CreateRoom() {
           {error && <div className="form-error">{error}</div>}
 
           <div className="form-actions">
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => navigate('/rooms')}
-              disabled={loading}
-            >
+            <Button variant="secondary" onClick={() => navigate('/rooms')} disabled={loading}>
               취소
-            </button>
-            <button
-              type="submit"
-              className="btn-primary"
-              disabled={loading}
-            >
+            </Button>
+            <Button type="submit" disabled={loading}>
               {loading ? '생성 중...' : '합주실 만들기'}
-            </button>
+            </Button>
           </div>
         </form>
       </div>

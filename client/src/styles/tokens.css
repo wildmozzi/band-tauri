@@ -1,0 +1,249 @@
+/**
+ * 디자인 토큰 (P3-8) — 색·간격·라운드·그림자·폰트를 한곳에 둔다. 앱에서 가장 먼저 로드된다(main.tsx).
+ *
+ * 세 층:
+ *  1. 팔레트(--white, --violet-500, --white-a10 …): 실제 값. 이름의 -aNN은 불투명도 NN%.
+ *     기존 CSS의 하드코딩 색을 **값이 정확히 같은** 토큰으로만 치환했다(화면 변화 0 — e2e/visual.e2e.ts로 확인).
+ *  2. 의미 토큰(--bg-app, --accent, --color-text …): 화면 코드는 가능하면 이쪽을 쓴다.
+ *  3. 크기 토큰(--space-*, --radius-*, --shadow-*, --font-*).
+ *
+ * 주의: 기존 CSS가 참조하지만 정의된 적 없는 변수(--primary, --text, --text-secondary, --bg-input,
+ * --bg-elevated, --primary-dark, --dark-bg)는 일부러 여기서도 정의하지 않는다. 정의하면 지금 화면이 바뀐다
+ * (지금은 해당 선언이 무효라 상속값/초기값으로 그려진다). 고칠 때는 화면을 확인하고 시각 회귀 기준을 갱신할 것.
+ */
+:root {
+  /* ===== 1. 팔레트 ===== */
+
+  /* white */
+  --white: #ffffff;
+  --white-a02: rgba(255, 255, 255, 0.02);
+  --white-a03: rgba(255, 255, 255, 0.03);
+  --white-a04: rgba(255, 255, 255, 0.04);
+  --white-a05: rgba(255, 255, 255, 0.05);
+  --white-a06: rgba(255, 255, 255, 0.06);
+  --white-a08: rgba(255, 255, 255, 0.08);
+  --white-a10: rgba(255, 255, 255, 0.1);
+  --white-a12: rgba(255, 255, 255, 0.12);
+  --white-a15: rgba(255, 255, 255, 0.15);
+  --white-a20: rgba(255, 255, 255, 0.2);
+  --white-a30: rgba(255, 255, 255, 0.3);
+  --white-a40: rgba(255, 255, 255, 0.4);
+  --white-a50: rgba(255, 255, 255, 0.5);
+  --white-a60: rgba(255, 255, 255, 0.6);
+  --white-a70: rgba(255, 255, 255, 0.7);
+  --white-a80: rgba(255, 255, 255, 0.8);
+  --white-a90: rgba(255, 255, 255, 0.9);
+
+  /* black */
+  --black: #000000;
+  --black-a20: rgba(0, 0, 0, 0.2);
+  --black-a30: rgba(0, 0, 0, 0.3);
+  --black-a40: rgba(0, 0, 0, 0.4);
+  --black-a50: rgba(0, 0, 0, 0.5);
+  --black-a70: rgba(0, 0, 0, 0.7);
+  --black-a80: rgba(0, 0, 0, 0.8);
+
+  /* neutral-50 */
+  --neutral-50: #f5f7ff;
+
+  /* neutral-400 */
+  --neutral-400: #a0a8b8;
+
+  /* neutral-950 */
+  --neutral-950: #050505;
+
+  /* ink-950 */
+  --ink-950: #02040c;
+
+  /* panel */
+  --panel-a60: rgba(10, 13, 30, 0.6);
+
+  /* panel-strong */
+  --panel-strong-a95: rgba(18, 22, 45, 0.95);
+
+  /* navy-700 */
+  --navy-700: #16213e;
+
+  /* navy-750 */
+  --navy-750: #1a1d2e;
+
+  /* navy-800 */
+  --navy-800: #1a1a2e;
+
+  /* gray-400 */
+  --gray-400: #9ca3af;
+  --gray-400-a15: rgba(156, 163, 175, 0.15);
+
+  /* gray-450 */
+  --gray-450: #888888;
+
+  /* gray-500 */
+  --gray-500: #6b7280;
+
+  /* slate-400 */
+  --slate-400: #94a3b8;
+
+  /* violet */
+  --violet-300: #a89fff;
+  --violet-500: #8d7bff;
+  --violet-500-a05: rgba(141, 123, 255, 0.05);
+  --violet-500-a08: rgba(141, 123, 255, 0.08);
+  --violet-500-a10: rgba(141, 123, 255, 0.1);
+  --violet-500-a15: rgba(141, 123, 255, 0.15);
+  --violet-500-a20: rgba(141, 123, 255, 0.2);
+  --violet-500-a25: rgba(141, 123, 255, 0.25);
+  --violet-500-a30: rgba(141, 123, 255, 0.3);
+  --violet-500-a40: rgba(141, 123, 255, 0.4);
+  --violet-500-a60: rgba(141, 123, 255, 0.6);
+
+  /* indigo-400 */
+  --indigo-400: #7b7bff;
+  --indigo-400-a10: rgba(123, 123, 255, 0.1);
+  --indigo-400-a20: rgba(123, 123, 255, 0.2);
+  --indigo-400-a30: rgba(123, 123, 255, 0.3);
+  --indigo-400-a40: rgba(123, 123, 255, 0.4);
+
+  /* indigo-500 */
+  --indigo-500-a10: rgba(99, 102, 241, 0.1);
+  --indigo-500-a30: rgba(99, 102, 241, 0.3);
+  --indigo-500-a40: rgba(99, 102, 241, 0.4);
+
+  /* pink-400 */
+  --pink-400: #ff7ab8;
+  --pink-400-a10: rgba(255, 122, 184, 0.1);
+  --pink-400-a20: rgba(255, 122, 184, 0.2);
+  --pink-400-a30: rgba(255, 122, 184, 0.3);
+
+  /* cyan-400 */
+  --cyan-400: #00d4ff;
+  --cyan-400-a05: rgba(0, 212, 255, 0.05);
+  --cyan-400-a10: rgba(0, 212, 255, 0.1);
+  --cyan-400-a20: rgba(0, 212, 255, 0.2);
+  --cyan-400-a30: rgba(0, 212, 255, 0.3);
+  --cyan-400-a40: rgba(0, 212, 255, 0.4);
+
+  /* sky-500 */
+  --sky-500: #0099ff;
+
+  /* blue-400 */
+  --blue-400: #60a5fa;
+
+  /* green-400 */
+  --green-400: #4ade80;
+  --green-400-a10: rgba(74, 222, 128, 0.1);
+  --green-400-a15: rgba(74, 222, 128, 0.15);
+  --green-400-a20: rgba(74, 222, 128, 0.2);
+  --green-400-a30: rgba(74, 222, 128, 0.3);
+  --green-400-a40: rgba(74, 222, 128, 0.4);
+
+  /* green-500 */
+  --green-500: #22c55e;
+  --green-500-a20: rgba(34, 197, 94, 0.2);
+
+  /* mint-400 */
+  --mint-400: #00ff88;
+  --mint-400-a10: rgba(0, 255, 136, 0.1);
+  --mint-400-a30: rgba(0, 255, 136, 0.3);
+
+  /* yellow-400 */
+  --yellow-400: #facc15;
+  --yellow-400-a10: rgba(250, 204, 21, 0.1);
+  --yellow-400-a15: rgba(250, 204, 21, 0.15);
+  --yellow-400-a20: rgba(250, 204, 21, 0.2);
+  --yellow-400-a30: rgba(250, 204, 21, 0.3);
+
+  /* amber-400 */
+  --amber-400: #fbbf24;
+
+  /* orange-400 */
+  --orange-400: #fb923c;
+
+  /* red-400 */
+  --red-400: #f87171;
+  --red-400-a10: rgba(248, 113, 113, 0.1);
+  --red-400-a15: rgba(248, 113, 113, 0.15);
+  --red-400-a20: rgba(248, 113, 113, 0.2);
+  --red-400-a30: rgba(248, 113, 113, 0.3);
+  --red-400-a40: rgba(248, 113, 113, 0.4);
+
+  /* red-500 */
+  --red-500: #ef4444;
+  --red-500-a20: rgba(239, 68, 68, 0.2);
+  --red-500-a40: rgba(239, 68, 68, 0.4);
+
+  /* red-600 */
+  --red-600: #dc2626;
+
+  /* red-alert */
+  --red-alert: #ff4444;
+  --red-alert-a10: rgba(255, 68, 68, 0.1);
+  --red-alert-a30: rgba(255, 68, 68, 0.3);
+
+  /* rose-500 */
+  --rose-500: #ff4757;
+  --rose-500-a30: rgba(255, 71, 87, 0.3);
+
+  /* ===== 2. 의미 토큰 ===== */
+  --bg-app: var(--ink-950);
+  --bg-panel: rgba(10, 13, 30, 0.85);
+  --bg-panel-strong: rgba(18, 22, 45, 0.95);
+  --border: var(--white-a08);
+  --text-muted: rgba(244, 247, 255, 0.65);
+  --accent: var(--violet-500);
+  --accent-strong: var(--pink-400);
+  --success: var(--green-400);
+  --warning: var(--yellow-400);
+  --error: var(--red-400);
+
+  --color-text: var(--neutral-50);
+  --color-text-subtle: var(--neutral-400);
+  --color-on-accent: var(--neutral-950);
+  --color-surface: var(--white-a05);
+  --color-surface-hover: var(--white-a10);
+  --color-border: var(--white-a10);
+  --color-overlay: var(--black-a70);
+
+  /* 그라디언트 */
+  --gradient-brand: linear-gradient(120deg, var(--indigo-400), var(--pink-400));
+  --gradient-accent: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  --gradient-violet: linear-gradient(135deg, var(--violet-500) 0%, var(--violet-300) 100%);
+  --gradient-cyan: linear-gradient(135deg, var(--cyan-400), var(--sky-500));
+  --gradient-success: linear-gradient(135deg, var(--success), var(--green-500));
+
+  /* ===== 3. 크기 ===== */
+  /* 간격 (4px 단위) — 새 컴포넌트(components/ui)부터 쓴다. 기존 CSS의 px 간격은 아직 치환하지 않았다 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* 라운드 */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-pill: 20px;
+  --radius-round: 50%;
+
+  /* 그림자 */
+  --shadow-md: 0 4px 16px var(--black-a30);
+  --shadow-lg: 0 12px 30px var(--black-a30);
+  --shadow-glow-sm: 0 4px 12px var(--violet-500-a40);
+  --shadow-glow-md: 0 8px 20px var(--violet-500-a40);
+  --shadow-glow-lg: 0 12px 24px var(--violet-500-a40);
+  --shadow-glow-cyan: 0 4px 12px var(--cyan-400-a40);
+  --shadow-glow-success: 0 8px 20px var(--green-400-a40);
+  --shadow-brand: 0 10px 20px var(--indigo-400-a30);
+
+  /* 폰트 */
+  --font-sans: 'Space Grotesk', 'Pretendard Variable', 'Spoqa Han Sans Neo', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: monospace;
+}

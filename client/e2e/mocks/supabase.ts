@@ -80,15 +80,19 @@ export class FakeSupabase {
     })
   }
 
-  private holds: { method: string; table: string; released: Promise<void>; waiting: number }[] = []
+  private holds: { method: string; table: string; released: Promise<void>; waiting: number; onArrive: () => void }[] = []
 
   /**
    * (method, table) REST 요청을 release() 전까지 붙잡는다 — 서버 응답 전 화면(낙관적 업데이트)을 검사할 때.
    * 붙잡힌 요청은 DB에 아직 반영되지 않는다. waiting()은 지금까지 붙잡힌 요청 수.
+   * arrived()는 첫 요청이 붙잡히면 끝난다 — 클릭 직후 요청이 mock에 닿기 전에 waiting()을 동기로 보면 경합이라
+   * (PR #25: 좋아요 테스트 flaky) 반드시 이걸 기다린 뒤에 검사한다.
    */
-  hold(method: string, table: string): { release: () => void; waiting: () => number } {
+  hold(method: string, table: string): { release: () => void; waiting: () => number; arrived: () => Promise<void> } {
     let release!: () => void
-    const entry = { method, table, released: new Promise<void>(r => (release = r)), waiting: 0 }
+    let onArrive!: () => void
+    const arrived = new Promise<void>(r => (onArrive = r))
+    const entry = { method, table, released: new Promise<void>(r => (release = r)), waiting: 0, onArrive }
     this.holds.push(entry)
     return {
       release: () => {
@@ -96,6 +100,7 @@ export class FakeSupabase {
         release()
       },
       waiting: () => entry.waiting,
+      arrived: () => arrived,
     }
   }
 
@@ -121,6 +126,7 @@ export class FakeSupabase {
         const hold = this.holds.find(h => h.method === req.method() && h.table === table)
         if (hold) {
           hold.waiting++
+          hold.onArrive()
           await hold.released
         }
         const res = this.db.handle({

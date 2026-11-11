@@ -6,6 +6,7 @@ import type { BrowserContext, Route } from '@playwright/test'
 import { API_URL } from '../env'
 import { STEM_HISTORY } from '../fixtures'
 import { fulfillJson, fulfillPreflight, type Violations } from './http'
+import type { MemoryPostgrest } from './postgrest'
 import { userFromToken } from './supabase'
 
 export interface ApiCall {
@@ -23,7 +24,47 @@ export class FakeApi {
   readonly calls: ApiCall[] = []
   private handlers = new Map<string, ApiHandler>()
 
-  constructor(private readonly violations: Violations) {
+  constructor(private readonly violations: Violations, private readonly db: MemoryPostgrest) {
+    // 게시글 작성·수정 (P3-10d, server/src/routes/posts.ts의 응답 형태). 작성자는 토큰 사용자,
+    // 이미지는 본인 폴더의 서버 조회 URL만(실제 검증 규칙은 server/test/posts.test.ts가 본다)
+    const ownImage = (userId: string, url: string) => url.startsWith(`${API_URL}/api/storage/post-images/${userId}/`)
+    this.on('POST /api/posts', (call, route) => {
+      if (!call.userId) return fulfillJson(route, 401, { success: false, error: '로그인이 필요합니다.' })
+      const body = call.body as { title: string; content: string; tags?: string[]; images?: string[]; instrument?: string; category?: string }
+      const images = body.images ?? []
+      const rejected = images.filter(u => !ownImage(call.userId!, u)).map(url => ({ url, reason: '이 서비스에 올린 이미지만 붙일 수 있습니다.' }))
+      if (rejected.length) return fulfillJson(route, 422, { success: false, error: '저장할 수 없는 이미지가 있습니다.', rejected })
+      const profile = this.db.table('profiles').find(p => p.id === call.userId)
+      const post = {
+        id: `e2e-post-${this.db.table('posts').length + 1}`,
+        author_id: call.userId,
+        author_name: (profile?.nickname as string | undefined) ?? 'User',
+        author_role: 'Session Member',
+        title: body.title.trim(),
+        content: body.content.trim(),
+        category: body.category ?? 'general',
+        instrument: body.instrument ?? 'other',
+        tags: body.tags ?? [],
+        images,
+        likes_count: 0,
+        comments_count: 0,
+        views_count: 0,
+        created_at: new Date().toISOString(),
+        updated_at: null,
+      }
+      this.db.table('posts').unshift(post)
+      return fulfillJson(route, 201, { success: true, post })
+    })
+    this.on('PUT /api/posts/*', (call, route) => {
+      if (!call.userId) return fulfillJson(route, 401, { success: false, error: '로그인이 필요합니다.' })
+      const id = decodeURIComponent(call.path.slice('/api/posts/'.length))
+      const post = this.db.table('posts').find(p => p.id === id)
+      if (!post) return fulfillJson(route, 404, { success: false, error: '게시글을 찾을 수 없습니다.' })
+      if (post.author_id !== call.userId) return fulfillJson(route, 403, { success: false, error: '작성자만 수정할 수 있습니다.' })
+      Object.assign(post, call.body as object, { updated_at: new Date().toISOString() })
+      return fulfillJson(route, 200, { success: true, post })
+    })
+
     // 기본 응답들
     this.on('GET /api/payment/subscription', (call, route) =>
       call.userId

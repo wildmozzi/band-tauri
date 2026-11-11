@@ -11,7 +11,7 @@
 }
 
 .pricing-hero .eyebrow {
-  color: #7b7bff;
+  color: var(--indigo-400);
   font-size: 0.875rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -23,7 +23,7 @@
   font-size: 3rem;
   font-weight: 700;
   margin-bottom: 1rem;
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  background: var(--gradient-brand);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -31,7 +31,7 @@
 
 .pricing-hero .lead {
   font-size: 1.25rem;
-  color: #a0a8b8;
+  color: var(--neutral-400);
   max-width: 600px;
   margin: 0 auto;
 }
@@ -45,9 +45,9 @@
 }
 
 .plan-card {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 20px;
+  background: var(--white-a05);
+  border: 1px solid var(--white-a10);
+  border-radius: var(--radius-pill);
   padding: 2rem;
   position: relative;
   transition: transform 0.3s ease, box-shadow 0.3s ease;
@@ -55,22 +55,22 @@
 
 .plan-card:hover {
   transform: translateY(-5px);
-  box-shadow: 0 20px 40px rgba(123, 123, 255, 0.1);
+  box-shadow: 0 20px 40px var(--indigo-400-a10);
 }
 
 .plan-card.recommended {
-  border-color: #7b7bff;
-  box-shadow: 0 0 30px rgba(123, 123, 255, 0.2);
+  border-color: var(--indigo-400);
+  box-shadow: 0 0 30px var(--indigo-400-a20);
 }
 
 .plan-badge {
   position: absolute;
   top: -10px;
   right: 20px;
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
-  color: #050505;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
   padding: 0.5rem 1rem;
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   font-size: 0.875rem;
   font-weight: 600;
 }
@@ -87,7 +87,7 @@
 }
 
 .plan-subtitle {
-  color: #a0a8b8;
+  color: var(--neutral-400);
   margin-bottom: 1rem;
 }
 
@@ -101,14 +101,14 @@
 .plan-price .price {
   font-size: 2.5rem;
   font-weight: 700;
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  background: var(--gradient-brand);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
 .plan-price .period {
-  color: #a0a8b8;
+  color: var(--neutral-400);
   font-size: 1rem;
 }
 
@@ -133,7 +133,7 @@
 .feature-highlight li,
 .feature-limitations li {
   padding: 0.5rem 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--white-a10);
 }
 
 .feature-highlight li:last-child,
@@ -146,7 +146,7 @@
   padding: 1rem;
   font-size: 1rem;
   font-weight: 600;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   border: none;
   cursor: pointer;
   transition: all 0.3s ease;
@@ -154,38 +154,38 @@
 }
 
 .free-button {
-  background: rgba(255, 255, 255, 0.1);
-  color: #f5f7ff;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: var(--white-a10);
+  color: var(--neutral-50);
+  border: 1px solid var(--white-a20);
 }
 
 .free-button:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--white-a15);
 }
 
 .standard-button {
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
-  color: #050505;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
 }
 
 .standard-button:hover {
   transform: translateY(-2px);
-  box-shadow: 0 10px 20px rgba(123, 123, 255, 0.3);
+  box-shadow: var(--shadow-brand);
 }
 
 .pro-button {
-  background: linear-gradient(120deg, #ff7ab8, #ffb347);
-  color: #050505;
+  background: linear-gradient(120deg, var(--pink-400), #ffb347);
+  color: var(--neutral-950);
 }
 
 .pro-button:hover {
   transform: translateY(-2px);
-  box-shadow: 0 10px 20px rgba(255, 122, 184, 0.3);
+  box-shadow: 0 10px 20px var(--pink-400-a30);
 }
 
 .plan-recommendation {
   text-align: center;
-  color: #a0a8b8;
+  color: var(--neutral-400);
   font-size: 0.875rem;
   margin: 0;
 }
@@ -204,8 +204,8 @@
 
 .table-container {
   overflow-x: auto;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-xl);
+  background: var(--white-a05);
 }
 
 .comparison-table table {
@@ -217,11 +217,11 @@
 .comparison-table td {
   padding: 1rem;
   text-align: left;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--white-a10);
 }
 
 .comparison-table th {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   font-weight: 600;
   text-align: center;
 }
@@ -254,8 +254,8 @@
 }
 
 .faq-item {
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
+  background: var(--white-a05);
+  border-radius: var(--radius-xl);
   padding: 1.5rem;
 }
 
@@ -263,11 +263,11 @@
   font-size: 1.125rem;
   font-weight: 600;
   margin-bottom: 1rem;
-  color: #7b7bff;
+  color: var(--indigo-400);
 }
 
 .faq-item p {
-  color: #a0a8b8;
+  color: var(--neutral-400);
   line-height: 1.6;
 }
 
@@ -289,17 +289,17 @@
 }
 
 .step {
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
+  background: var(--white-a05);
+  border-radius: var(--radius-xl);
   padding: 2rem;
 }
 
 .step-number {
   width: 40px;
   height: 40px;
-  border-radius: 50%;
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
-  color: #050505;
+  border-radius: var(--radius-round);
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -314,7 +314,7 @@
 }
 
 .step p {
-  color: #a0a8b8;
+  color: var(--neutral-400);
   line-height: 1.6;
 }
 
@@ -338,9 +338,9 @@
 }/* Cur
 rent Plan Styles */
 .plan-button.current-plan {
-  background: rgba(34, 197, 94, 0.2);
-  border: 2px solid #22c55e;
-  color: #22c55e;
+  background: var(--green-500-a20);
+  border: 2px solid var(--green-500);
+  color: var(--green-500);
   cursor: default;
 }
 
@@ -350,8 +350,8 @@ rent Plan Styles */
 }
 
 .plan-card.current-plan {
-  border-color: #22c55e;
-  box-shadow: 0 0 20px rgba(34, 197, 94, 0.2);
+  border-color: var(--green-500);
+  box-shadow: 0 0 20px var(--green-500-a20);
 }
 
 .plan-card.current-plan::before {
@@ -359,10 +359,10 @@ rent Plan Styles */
   position: absolute;
   top: -10px;
   left: 20px;
-  background: #22c55e;
-  color: #050505;
+  background: var(--green-500);
+  color: var(--neutral-950);
   padding: 0.25rem 0.75rem;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 0.75rem;
   font-weight: 600;
 }

@@ -66,7 +66,7 @@ export async function installMocks(context: BrowserContext): Promise<MockBackend
   // 2) mock들
   const supabase = new FakeSupabase(seedTables(), violations)
   await supabase.install(context)
-  const api = new FakeApi(violations)
+  const api = new FakeApi(violations, supabase.db)
   await api.install(context)
   const signaling = new FakeSignaling(supabase.db, violations)
   await signaling.install(context)

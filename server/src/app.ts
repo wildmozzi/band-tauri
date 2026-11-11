@@ -16,6 +16,9 @@ import { createSupabaseStorageAdapter } from './storage/supabaseAdapter'
 import { supabaseAdmin } from './lib/supabase'
 import type { StorageAdapter } from './storage/types'
 import type { UploadQuota } from './services/postImageService'
+import { createPostsRouter } from './routes/posts'
+import { createPostService } from './services/postService'
+import { createPostRepository, type PostRepository } from './repositories/postRepository'
 
 export interface AppOptions {
   /** 결제/구독 서비스 (테스트에서 저장소·결제대행 목 주입). 기본: Supabase 저장소 */
@@ -32,6 +35,8 @@ export interface AppOptions {
   legacyImageStorage?: StorageAdapter | null
   /** /complete·/resolve 사용자별 분당 상한 (테스트 주입) */
   imagePerUserPerMinute?: number
+  /** 게시글 쓰기 저장소 (테스트에서 메모리 주입). 기본: Supabase service_role */
+  postRepository?: PostRepository | null
   /** 테스트에서만 false (한 IP에서 많은 요청을 보낸다). 기본: 켬 */
   rateLimits?: boolean
 }
@@ -80,8 +85,16 @@ export function createApp(options: AppOptions = {}) {
   app.use('/api/music', musicRoutes)
   app.use('/api/payment', limit ?? paymentLimiter, createPaymentRouter(options.subscriptionService, options.paymentOrderService))
   app.use('/api/rooms', createRoomsRouter(options.roomService))
+  const imageStorage = options.imageStorage !== undefined ? options.imageStorage : getDefaultStorage('post-images')
+  app.use('/api/posts', createPostsRouter(
+    createPostService(
+      options.postRepository !== undefined ? options.postRepository : supabaseAdmin ? createPostRepository(supabaseAdmin) : null,
+      imageStorage,
+    ),
+    { rateLimits: options.rateLimits },
+  ))
   app.use('/api/storage', createStorageRouter(
-    options.imageStorage !== undefined ? options.imageStorage : getDefaultStorage('post-images'),
+    imageStorage,
     {
       rateLimits: options.rateLimits,
       quota: options.imageUploadQuota,

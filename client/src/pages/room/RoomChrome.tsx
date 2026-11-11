@@ -4,6 +4,8 @@ import type { InstrumentChangeRequest, JoinError, RtcStatus } from '../../contex
 import { describeJoinError } from '../../contexts/room/roomAccess'
 import { INSTRUMENT_INFO, RTC_STATUS_TEXT, type DetailRoom } from './roomDetailModel'
 import type { BubblePositions } from './useBubblePositions'
+import { Badge } from '../../components/ui/Badge'
+import { Button } from '../../components/ui/Button'
 
 /** 상단 헤더: 제목, 상태 배지, 인원, 방장, 정보/설정/나가기 */
 export function LiveHeader({
@@ -32,10 +34,10 @@ export function LiveHeader({
         <div className="live-title-area">
           <h1>{room.title}</h1>
           <div className="live-meta">
-            <span className={`live-badge ${displayStatus}`}>
+            <Badge kind="live-badge" tone={displayStatus}>
               {displayStatus === 'live' ? '● LIVE' : RTC_STATUS_TEXT[displayStatus]}
-            </span>
-            <span className="genre-badge">{room.genre || '기타'}</span>
+            </Badge>
+            <Badge kind="genre-badge">{room.genre || '기타'}</Badge>
             <span className="viewer-count">👁 {participantCount}명</span>
             <span className="host-info">👑 {hostNickname || '...'}</span>
           </div>
@@ -93,8 +95,8 @@ export function RoomPasswordGate({
           disabled={locked}
         />
         <div className="room-password-actions">
-          <button type="button" className="btn-secondary" onClick={onLeave}>목록으로</button>
-          <button type="submit" className="btn-primary" disabled={locked || !passwordInput}>입장</button>
+          <Button variant="secondary" onClick={onLeave}>목록으로</Button>
+          <Button type="submit" disabled={locked || !passwordInput}>입장</Button>
         </div>
       </form>
     </div>

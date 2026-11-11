@@ -26,7 +26,7 @@
 
 .create-room-btn {
   padding: 12px 24px;
-  background: linear-gradient(135deg, var(--success), #22c55e);
+  background: var(--gradient-success);
   border: none;
   border-radius: 24px;
   color: white;
@@ -38,7 +38,7 @@
 
 .create-room-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(74, 222, 128, 0.4);
+  box-shadow: var(--shadow-glow-success);
 }
 
 .room-filters {
@@ -50,9 +50,9 @@
 
 .filter-chip {
   padding: 8px 20px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 1px solid var(--border);
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   color: var(--text-muted);
   font-weight: 600;
   cursor: pointer;
@@ -80,7 +80,7 @@
 .room-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 24px;
   cursor: pointer;
   transition: all 0.3s;
@@ -93,7 +93,7 @@
   background: var(--bg-panel-strong);
   border-color: var(--accent);
   transform: translateY(-4px);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-lg);
 }
 
 .room-card-header {
@@ -116,24 +116,24 @@
 
 .status-badge {
   padding: 4px 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 0.75rem;
   font-weight: 700;
   white-space: nowrap;
 }
 
 .status-badge.open {
-  background: rgba(74, 222, 128, 0.2);
+  background: var(--green-400-a20);
   color: var(--success);
 }
 
 .status-badge.recording {
-  background: rgba(250, 204, 21, 0.2);
+  background: var(--yellow-400-a20);
   color: var(--warning);
 }
 
 .status-badge.locked {
-  background: rgba(248, 113, 113, 0.2);
+  background: var(--red-400-a20);
   color: var(--error);
 }
 
@@ -177,7 +177,7 @@
   padding: 10px;
   background: transparent;
   border: 1px solid var(--accent);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: var(--accent);
   font-weight: 700;
   cursor: pointer;
@@ -199,14 +199,14 @@
 
 .room-card-tag {
   padding: 3px 10px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
+  background: var(--white-a05);
+  border-radius: var(--radius-xl);
   font-size: 0.75rem;
   color: var(--text-muted);
 }
 
 .room-card-tag.more {
-  background: rgba(141, 123, 255, 0.1);
+  background: var(--violet-500-a10);
   color: var(--accent);
 }
 
@@ -217,7 +217,7 @@
 }
 
 .room-card-tag.more.clickable:hover {
-  background: rgba(141, 123, 255, 0.25);
+  background: var(--violet-500-a25);
 }
 
 /* Tags Popup */
@@ -228,14 +228,14 @@
   transform: translateX(-50%);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 8px;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   min-width: 150px;
   max-width: 250px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-md);
   z-index: 100;
 }
 
@@ -251,8 +251,8 @@
 
 .popup-tag {
   padding: 4px 8px;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 6px;
+  background: var(--white-a08);
+  border-radius: var(--radius-sm);
   font-size: 0.75rem;
   color: var(--text-secondary);
   white-space: nowrap;
@@ -276,13 +276,13 @@
   align-items: center;
   gap: 4px;
   padding: 4px 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
+  background: var(--white-a05);
+  border-radius: var(--radius-md);
   font-size: 1rem;
 }
 
 .room-card:hover .room-card-inst {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--white-a08);
 }
 
 .inst-slot-count {
@@ -304,7 +304,7 @@
   padding: 32px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
 }
 
 .login-prompt a {
@@ -333,9 +333,9 @@
 
 .my-rooms-btn {
   padding: 12px 20px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: white;
   font-size: 0.95rem;
   font-weight: 600;
@@ -344,7 +344,7 @@
 }
 
 .my-rooms-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border-color: var(--accent);
 }
 
@@ -360,13 +360,13 @@
 .my-rooms-modal > .modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--black-a70);
 }
 
 .my-rooms-modal .modal-content {
   position: relative;
   background: var(--bg-panel);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   width: 90%;
   max-width: 480px;
   max-height: 80vh;
@@ -386,9 +386,9 @@
 
 .create-room-btn-small {
   padding: 10px 20px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background: var(--gradient-accent);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   font-size: 0.9rem;
   font-weight: 600;
@@ -398,7 +398,7 @@
 
 .create-room-btn-small:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 20px rgba(141, 123, 255, 0.4);
+  box-shadow: var(--shadow-glow-md);
 }
 
 .my-rooms-list {
@@ -413,15 +413,15 @@
   align-items: flex-start;
   gap: 16px;
   padding: 16px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--white-a03);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   transition: all 0.2s;
 }
 
 .my-room-item:hover {
   border-color: var(--accent);
-  background: rgba(141, 123, 255, 0.05);
+  background: var(--violet-500-a05);
 }
 
 .my-room-info {
@@ -448,23 +448,23 @@
 .my-room-status {
   flex-shrink: 0;
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   font-size: 0.7rem;
   font-weight: 600;
 }
 
 .my-room-status.open {
-  background: rgba(74, 222, 128, 0.2);
+  background: var(--green-400-a20);
   color: var(--success);
 }
 
 .my-room-status.recording {
-  background: rgba(248, 113, 113, 0.2);
+  background: var(--red-400-a20);
   color: var(--error);
 }
 
 .my-room-status.locked {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   color: var(--text-muted);
 }
 
@@ -489,9 +489,9 @@
 
 .my-room-genre {
   padding: 2px 8px;
-  background: rgba(141, 123, 255, 0.15);
+  background: var(--violet-500-a15);
   color: var(--accent);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
 }
 
 .my-room-participants {
@@ -512,14 +512,14 @@
 
 .my-room-tag {
   padding: 2px 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 6px;
+  background: var(--white-a05);
+  border-radius: var(--radius-sm);
   font-size: 0.75rem;
   color: var(--text-muted);
 }
 
 .my-room-tag.more {
-  background: rgba(141, 123, 255, 0.1);
+  background: var(--violet-500-a10);
   color: var(--accent);
 }
 
@@ -530,7 +530,7 @@
 }
 
 .my-room-tag.more.clickable:hover {
-  background: rgba(141, 123, 255, 0.25);
+  background: var(--violet-500-a25);
 }
 
 .my-room-instruments {
@@ -545,8 +545,8 @@
   align-items: center;
   gap: 4px;
   padding: 3px 8px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
+  background: var(--white-a05);
+  border-radius: var(--radius-md);
   font-size: 0.8rem;
 }
 
@@ -567,7 +567,7 @@
   padding: 8px 16px;
   background: var(--accent);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   font-size: 0.85rem;
   font-weight: 600;
@@ -581,9 +581,9 @@
 
 .my-room-edit-btn {
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   font-size: 0.85rem;
   font-weight: 600;
@@ -592,15 +592,15 @@
 }
 
 .my-room-edit-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border-color: var(--accent);
 }
 
 .my-room-delete-btn {
   padding: 8px 12px;
-  background: rgba(248, 113, 113, 0.1);
-  border: 1px solid rgba(248, 113, 113, 0.3);
-  border-radius: 8px;
+  background: var(--red-400-a10);
+  border: 1px solid var(--red-400-a30);
+  border-radius: var(--radius-md);
   color: var(--error);
   font-size: 0.85rem;
   font-weight: 600;
@@ -609,7 +609,7 @@
 }
 
 .my-room-delete-btn:hover {
-  background: rgba(248, 113, 113, 0.2);
+  background: var(--red-400-a20);
   border-color: var(--error);
 }
 
@@ -626,13 +626,13 @@
 .room-edit-modal > .modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.8);
+  background: var(--black-a80);
 }
 
 .room-edit-modal .modal-content {
   position: relative;
   background: var(--bg-panel);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   width: 90%;
   max-width: 550px;
   max-height: 90vh;
@@ -664,9 +664,9 @@
 .edit-form-group select {
   width: 100%;
   padding: 12px;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--black-a30);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   font-size: 0.95rem;
   transition: border-color 0.2s;
@@ -695,8 +695,8 @@
   align-items: center;
   gap: 12px;
   padding: 12px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 8px;
+  background: var(--black-a20);
+  border-radius: var(--radius-md);
 }
 
 .edit-toggle-option .toggle-label {
@@ -723,9 +723,9 @@
 .edit-cancel-btn {
   flex: 1;
   padding: 12px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   font-size: 0.95rem;
   font-weight: 600;
@@ -734,15 +734,15 @@
 }
 
 .edit-cancel-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
 }
 
 .edit-save-btn {
   flex: 1;
   padding: 12px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background: var(--gradient-accent);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   font-size: 0.95rem;
   font-weight: 600;
@@ -752,7 +752,7 @@
 
 .edit-save-btn:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(141, 123, 255, 0.4);
+  box-shadow: var(--shadow-glow-sm);
 }
 
 .edit-cancel-btn:disabled,
@@ -771,9 +771,9 @@
 
 .edit-tag-btn {
   padding: 6px 14px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   color: var(--text-muted);
   font-size: 0.85rem;
   cursor: pointer;
@@ -786,7 +786,7 @@
 }
 
 .edit-tag-btn.active {
-  background: rgba(141, 123, 255, 0.2);
+  background: var(--violet-500-a20);
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -800,9 +800,9 @@
 .edit-custom-tag-input input {
   flex: 1;
   padding: 10px 12px;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--black-a30);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   font-size: 0.9rem;
 }
@@ -816,7 +816,7 @@
   padding: 10px 16px;
   background: var(--accent);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   font-size: 0.85rem;
   font-weight: 600;
@@ -839,8 +839,8 @@
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  background: rgba(141, 123, 255, 0.15);
-  border-radius: 12px;
+  background: var(--violet-500-a15);
+  border-radius: var(--radius-xl);
   font-size: 0.85rem;
   color: var(--accent);
 }
@@ -880,9 +880,9 @@
   align-items: center;
   gap: 12px;
   padding: 12px;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--black-a20);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
 }
 
 .edit-slot-icon {
@@ -905,8 +905,8 @@
   width: 28px;
   height: 28px;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-sm);
+  background: var(--white-a05);
   color: white;
   font-size: 1rem;
   cursor: pointer;
@@ -933,8 +933,8 @@
   width: 28px;
   height: 28px;
   border: none;
-  border-radius: 6px;
-  background: rgba(248, 113, 113, 0.1);
+  border-radius: var(--radius-sm);
+  background: var(--red-400-a10);
   color: var(--error);
   font-size: 1.1rem;
   cursor: pointer;
@@ -942,15 +942,15 @@
 }
 
 .edit-slot-remove:hover {
-  background: rgba(248, 113, 113, 0.2);
+  background: var(--red-400-a20);
 }
 
 .edit-add-instrument select {
   width: 100%;
   padding: 10px 12px;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--black-a30);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: white;
   font-size: 0.9rem;
   cursor: pointer;
@@ -1014,17 +1014,17 @@
   min-width: 200px;
   max-width: 420px;
   padding: 8px 14px;
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   color: inherit;
 }
 
 .room-code-join button {
   padding: 8px 18px;
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--white-a08);
   color: inherit;
   font-weight: 600;
   cursor: pointer;
@@ -1036,6 +1036,6 @@
 }
 
 .room-code-error {
-  color: var(--error, #f87171);
+  color: var(--error, var(--red-400));
   font-size: 0.85rem;
 }

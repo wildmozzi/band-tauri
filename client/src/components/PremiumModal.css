@@ -8,7 +8,7 @@
 
 .plan-badge-compact {
   padding: 4px 10px;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 0.75rem;
   font-weight: 600;
   color: white;
@@ -19,7 +19,7 @@
 .plan-status-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   padding: 16px;
 }
 
@@ -44,7 +44,7 @@
 
 .plan-badge {
   padding: 2px 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 0.7rem;
   font-weight: 600;
   color: white;
@@ -92,7 +92,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.8);
+  background: var(--black-a80);
   backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
@@ -102,43 +102,43 @@
 }
 
 .premium-modal {
-  background: #02040c;
-  border: 1px solid rgba(123, 123, 255, 0.3);
-  border-radius: 20px;
+  background: var(--ink-950);
+  border: 1px solid var(--indigo-400-a30);
+  border-radius: var(--radius-pill);
   max-width: 500px;
   width: 100%;
   max-height: 90vh;
   overflow-y: auto;
   position: relative;
-  box-shadow: 0 20px 40px rgba(123, 123, 255, 0.2);
+  box-shadow: 0 20px 40px var(--indigo-400-a20);
 }
 
 .modal-close {
   position: absolute;
   top: 1rem;
   right: 1rem;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border: none;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   width: 32px;
   height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  color: #f5f7ff;
+  color: var(--neutral-50);
   font-size: 1.25rem;
   transition: background 0.2s ease;
 }
 
 .modal-close:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--white-a20);
 }
 
 .modal-header {
   text-align: center;
   padding: 2rem 2rem 1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--white-a10);
 }
 
 .premium-icon {
@@ -150,19 +150,19 @@
   font-size: 1.5rem;
   font-weight: 700;
   margin-bottom: 1rem;
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  background: var(--gradient-brand);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
 .feature-description {
-  color: #a0a8b8;
+  color: var(--neutral-400);
   line-height: 1.6;
 }
 
 .feature-description strong {
-  color: #7b7bff;
+  color: var(--indigo-400);
 }
 
 .modal-content {
@@ -176,8 +176,8 @@
 
 .plan-tabs {
   display: flex;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
+  background: var(--white-a05);
+  border-radius: var(--radius-xl);
   padding: 4px;
   margin-bottom: 1.5rem;
 }
@@ -187,22 +187,22 @@
   padding: 0.75rem;
   border: none;
   background: transparent;
-  color: #a0a8b8;
-  border-radius: 8px;
+  color: var(--neutral-400);
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: all 0.2s ease;
   font-weight: 500;
 }
 
 .plan-tab.active {
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
-  color: #050505;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
   font-weight: 600;
 }
 
 .selected-plan-details {
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
+  background: var(--white-a05);
+  border-radius: var(--radius-xl);
   padding: 1.5rem;
 }
 
@@ -212,7 +212,7 @@
   align-items: center;
   margin-bottom: 1.5rem;
   padding-bottom: 1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--white-a10);
 }
 
 .plan-info h3 {
@@ -230,14 +230,14 @@
 .plan-price .price {
   font-size: 1.5rem;
   font-weight: 700;
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
+  background: var(--gradient-brand);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
 .plan-price .period {
-  color: #a0a8b8;
+  color: var(--neutral-400);
   font-size: 0.875rem;
 }
 
@@ -245,7 +245,7 @@
   font-size: 1rem;
   font-weight: 600;
   margin-bottom: 1rem;
-  color: #f5f7ff;
+  color: var(--neutral-50);
 }
 
 .plan-features ul {
@@ -256,7 +256,7 @@
 
 .plan-features li {
   padding: 0.5rem 0;
-  color: #a0a8b8;
+  color: var(--neutral-400);
   font-size: 0.875rem;
 }
 
@@ -268,10 +268,10 @@
 .upgrade-button {
   width: 100%;
   padding: 1rem;
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
-  color: #050505;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
   border: none;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
@@ -281,25 +281,25 @@
 
 .upgrade-button:hover {
   transform: translateY(-2px);
-  box-shadow: 0 10px 20px rgba(123, 123, 255, 0.3);
+  box-shadow: var(--shadow-brand);
 }
 
 .view-all-plans {
   display: block;
   text-align: center;
-  color: #7b7bff;
+  color: var(--indigo-400);
   text-decoration: none;
   font-weight: 500;
   transition: color 0.2s ease;
 }
 
 .view-all-plans:hover {
-  color: #ff7ab8;
+  color: var(--pink-400);
 }
 
 /* Modal Benefits */
 .modal-benefits {
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--white-a10);
   padding-top: 1.5rem;
 }
 
@@ -323,11 +323,11 @@
   display: block;
   font-weight: 600;
   margin-bottom: 0.25rem;
-  color: #f5f7ff;
+  color: var(--neutral-50);
 }
 
 .benefit-item p {
-  color: #a0a8b8;
+  color: var(--neutral-400);
   font-size: 0.875rem;
   margin: 0;
   line-height: 1.4;

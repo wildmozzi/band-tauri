@@ -7,7 +7,7 @@ import { usePostForm } from './community/usePostForm'
 export function CreatePost() {
   const navigate = useNavigate()
   // 세션 복원이 끝난 뒤에만 /auth로 보낸다 (직접 진입·새로고침 시 튕기지 않게 — P3-10f)
-  const { user, gate } = useRequireAuth()
+  const { gate } = useRequireAuth()
   const form = usePostForm()
   const createPost = useCreatePostMutation()
 
@@ -29,7 +29,6 @@ export function CreatePost() {
             instrument: form.selectedInstrument,
             category: 'general',
           },
-          user,
         })
       },
       onSuccess: () => navigate('/community'),
