@@ -190,7 +190,7 @@ fn force_path(net: &Net, id: &str, addr: SocketAddr) {
 fn send(net: &Net, n: usize) {
     let mut buf = vec![0u8; 1500];
     for i in 0..n {
-        net.shared().send_audio(&[i as u8; 40], 0, 1, (i * 120) as u32, &mut buf, None);
+        net.shared().send_audio(&[i as u8; 40], 0, 1, (i * 120) as u32, &mut buf, None, None);
     }
 }
 

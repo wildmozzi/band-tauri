@@ -112,6 +112,8 @@ pub struct NetShared {
     /// 릴레이로 보낸 바이트·패킷(대역 경고 M4, 제어 스레드가 약 1초마다 비운다).
     relay_tx_bytes: AtomicU64,
     relay_tx_packets: AtomicU64,
+    /// 워커가 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중(P1-4c, `RelayStats.autoOpus`).
+    relay_auto_opus: AtomicBool,
     /// 송신 큐 지연(프레임 생성 → send_to 완료, P1-3). 워커가 기록, 제어 스레드가 창을 돌린다.
     send_latency: txlat::SendLatency,
     /// DSCP 마킹 상태(제어 스레드가 바뀔 때 갱신).
@@ -191,6 +193,7 @@ impl Net {
             prev_relay: RwLock::new(None),
             relay_tx_bytes: AtomicU64::new(0),
             relay_tx_packets: AtomicU64::new(0),
+            relay_auto_opus: AtomicBool::new(false),
             send_latency: txlat::SendLatency::new(),
             qos_stats: Mutex::new(qos::QosStats::default()),
             recv_prio: Default::default(),
@@ -363,7 +366,8 @@ impl Net {
     }
 
     pub fn relay_stats(&self) -> Option<RelayStats> {
-        self.shared.relay.lock().as_ref().map(|c| c.stats())
+        let auto_opus = self.shared.relay_auto_opus.load(Ordering::Relaxed);
+        self.shared.relay.lock().as_ref().map(|c| RelayStats { auto_opus, ..c.stats() })
     }
 
     /// DSCP 마킹 상태(`EngineStats.qos`).
@@ -477,15 +481,30 @@ impl NetShared {
     }
 
     /// 피어 하나에 Audio 패킷 송신. seq는 피어별 카운터다(에코로 되돌리는 패킷과 nonce가 겹치지 않게).
+    /// `relay_alt = Some((payload, flags))`면 그 피어의 경로가 릴레이일 때 그것을 보낸다(Opus 자동 전환, P1-4c).
+    /// 보냈으면 실제로 쓴 flags를 돌려준다.
     /// `frame_at`이 있으면 send_to 완료까지의 지연을 송신 큐 지연 히스토그램에 기록한다(에코 반사는 제외).
     #[allow(clippy::too_many_arguments)]
-    fn send_audio_to(&self, p: &Peer, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8], rbuf: &mut [u8; SEND_BUF_BYTES], frame_at: Option<Instant>) {
+    fn send_audio_to(
+        &self,
+        p: &Peer,
+        payload: &[u8],
+        flags: u8,
+        frame_code: u8,
+        timestamp: u32,
+        buf: &mut [u8],
+        rbuf: &mut [u8; SEND_BUF_BYTES],
+        relay_alt: Option<(&[u8], u8)>,
+        frame_at: Option<Instant>,
+    ) -> Option<u8> {
         let target = {
             let c = p.conn.lock();
             if c.can_send_audio() { c.path } else { None }
         };
-        let Some((addr, kind)) = target else {
-            return;
+        let (addr, kind) = target?;
+        let (payload, flags) = match relay_alt {
+            Some(alt) if kind == PathKind::Relay => alt,
+            _ => (payload, flags),
         };
         let h = Header {
             ptype: PacketType::Audio,
@@ -506,6 +525,27 @@ impl NetShared {
         if let Some(t0) = frame_at {
             self.send_latency.record(t0.elapsed());
         }
+        Some(flags)
+    }
+
+    /// 지금 오디오를 릴레이로 보내는 피어 수와, 릴레이 송신량이 상한의 90%를 넘었는지(Opus 자동 전환 입력, P1-4c).
+    pub fn relay_audio_load(&self) -> (usize, bool) {
+        let peers = self.peers.read();
+        let n = peers
+            .iter()
+            .filter(|p| {
+                let c = p.conn.lock();
+                c.can_send_audio() && c.path.is_some_and(|(_, k)| k == PathKind::Relay)
+            })
+            .count();
+        drop(peers);
+        let over = self.relay.lock().as_ref().is_some_and(|c| c.over_budget());
+        (n, over)
+    }
+
+    /// 워커의 Opus 자동 전환 상태(`RelayStats.autoOpus`).
+    pub fn set_relay_auto_opus(&self, on: bool) {
+        self.relay_auto_opus.store(on, Ordering::Relaxed);
     }
 
     /// 오디오 페이로드를 연결된 피어마다 그 피어의 송신 키로 암호화해 보낸다(seq는 피어별).
@@ -513,16 +553,40 @@ impl NetShared {
     /// 내가 에코로 되돌리고 있는 피어에게는 내 오디오를 보내지 않는다(되돌린 패킷만 간다).
     /// `buf`는 호출자가 사전 할당한 MAX_PACKET_BYTES 버퍼(직접 경로용). 릴레이 경로는 접두부 자리가 있는
     /// 스택 버퍼를 쓴다(피어마다 RelayData를 따로 보낸다 — 릴레이에는 팬아웃이 없다).
-    pub fn send_audio(&self, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8], alt: Option<(&str, &[u8])>) {
-        self.send_audio_timed(Instant::now(), payload, flags, frame_code, timestamp, buf, alt)
+    /// `relay_alt = Some((payload, flags))`면 릴레이 경로 피어에게는 그것(릴레이 대역용 Opus)을 보낸다(P1-4c).
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_audio(
+        &self,
+        payload: &[u8],
+        flags: u8,
+        frame_code: u8,
+        timestamp: u32,
+        buf: &mut [u8],
+        alt: Option<(&str, &[u8])>,
+        relay_alt: Option<(&[u8], u8)>,
+    ) {
+        self.send_audio_timed(Instant::now(), payload, flags, frame_code, timestamp, buf, alt, relay_alt)
     }
 
     /// `send_audio`와 같고, `frame_at`(캡처 프레임이 다 모인 시각, 인코딩 전)부터 각 피어 send_to 완료까지를
     /// 송신 큐 지연으로 잰다(P1-3, `EngineStats.sendQueue`). 피어에게는 이 프레임을 간격 없이 연달아 보낸다
     /// (페이싱 없음 — 설계 3절 "송신 페이싱" 측정 근거).
     #[allow(clippy::too_many_arguments)]
-    pub fn send_audio_timed(&self, frame_at: Instant, payload: &[u8], flags: u8, frame_code: u8, timestamp: u32, buf: &mut [u8], alt: Option<(&str, &[u8])>) {
-        if payload.len() > MAX_PAYLOAD_BYTES || alt.is_some_and(|(_, a)| a.len() > MAX_PAYLOAD_BYTES) {
+    pub fn send_audio_timed(
+        &self,
+        frame_at: Instant,
+        payload: &[u8],
+        flags: u8,
+        frame_code: u8,
+        timestamp: u32,
+        buf: &mut [u8],
+        alt: Option<(&str, &[u8])>,
+        relay_alt: Option<(&[u8], u8)>,
+    ) {
+        if payload.len() > MAX_PAYLOAD_BYTES
+            || alt.is_some_and(|(_, a)| a.len() > MAX_PAYLOAD_BYTES)
+            || relay_alt.is_some_and(|(a, _)| a.len() > MAX_PAYLOAD_BYTES)
+        {
             return;
         }
         let peers = self.peers.read();
@@ -535,11 +599,19 @@ impl NetShared {
             if p.echo.lock().reflecting(now) {
                 continue;
             }
-            let pl = match alt {
-                Some((id, a)) if id == p.id => a,
-                _ => payload,
+            let (pl, ra) = match alt {
+                // 에코 측정 클릭 스트림은 측정 대상 한 명에게 수 초만 가고 코덱을 바꾸면 측정이 흐트러지므로,
+                // 그 피어가 릴레이 경로여도 설정 코덱(PCM16) 그대로 보낸다(그동안 상한을 잠깐 넘을 수 있다).
+                Some((id, a)) if id == p.id => (a, None),
+                _ => (payload, relay_alt),
             };
-            self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, Some(frame_at));
+            if let Some(f) = self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, ra, Some(frame_at)) {
+                let auto = ra.is_some_and(|(_, rf)| rf == f && rf != flags);
+                let code = peer::TX_CODEC_SENT
+                    | if f & packet::FLAG_OPUS != 0 { peer::TX_CODEC_OPUS } else { 0 }
+                    | if auto { peer::TX_CODEC_AUTO } else { 0 };
+                p.tx_codec.store(code, Ordering::Relaxed);
+            }
         }
     }
 
@@ -559,7 +631,7 @@ impl NetShared {
         };
         let mut buf = [0u8; MAX_PACKET_BYTES];
         let mut rbuf = [0u8; SEND_BUF_BYTES];
-        self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf, None);
+        self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf, None, None);
         let us = received.elapsed().as_secs_f32() * 1e6;
         let mut e = p.echo.lock();
         e.reflect_us += (us - e.reflect_us) * 0.05;
