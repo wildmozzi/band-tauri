@@ -54,6 +54,8 @@ pub struct RecBlock {
 pub struct RecordRtShared {
     /// 녹음 링이 모자라 버린 프레임(녹음 품질 지표). 그 자리는 무음으로 채워진다.
     pub dropped_frames: AtomicU64,
+    /// 콜백이 이 녹음 끝점을 돌려줬다(그 뒤로는 링에 쓰지 않음). 쓰기 스레드는 이것을 보고 남은 것을 비운다.
+    pub detached: AtomicBool,
 }
 
 /// 출력 콜백이 쓰는 녹음 끝점(녹음 하나당 하나).
@@ -123,7 +125,10 @@ impl RecordPortRt {
         }
         if self.detach.load(Ordering::Acquire) {
             if let Some(r) = self.active.take() {
+                // 지난 콜백까지 넣은 것이 전부다(Release: 링 기록이 먼저 보인다)
+                r.shared.detached.store(true, Ordering::Release);
                 if let Err(r) = self.outbox.try_push(r) {
+                    r.shared.detached.store(false, Ordering::Release);
                     self.active = Some(r);
                 }
             }
@@ -175,17 +180,9 @@ impl RecordPortCtl {
         Ok(())
     }
 
-    /// 콜백에 정지를 요청하고 끝점이 돌아올 때까지 `wait`까지 기다린다. 반환: 돌아왔다.
-    fn detach(&mut self, wait: Duration) -> bool {
+    /// 콜백에 정지를 요청한다(다음 주기 시작에 끝점을 돌려준다). 기다리지 않는다.
+    fn request_detach(&self) {
         self.detach.store(true, Ordering::Release);
-        let t0 = Instant::now();
-        while !self.reclaim() {
-            if t0.elapsed() >= wait {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        true
     }
 }
 
@@ -272,6 +269,29 @@ struct Session {
     handle: JoinHandle<RecordSummary>,
 }
 
+/// 정지 중인 녹음. [`StopJob::finish`]가 콜백 반환(최대 1초)과 쓰기 스레드 마무리를 기다린다.
+pub struct StopJob {
+    s: Session,
+}
+
+impl StopJob {
+    pub fn finish(self) -> Result<RecordSummary, String> {
+        let s = self.s;
+        let t0 = Instant::now();
+        while !s.rt_shared.detached.load(Ordering::Acquire) {
+            if t0.elapsed() >= DETACH_WAIT {
+                log::warn!("녹음 정지: 출력 콜백이 응답하지 않아 남은 링을 비우고 닫습니다");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        s.stop.store(true, Ordering::Release);
+        let summary = s.handle.join().map_err(|_| "녹음 스레드 패닉".to_string())?;
+        log::info!("녹음 정지: {:.1}초, {}트랙, 버림 {}프레임", summary.duration_sec, summary.tracks.len(), summary.dropped_frames);
+        Ok(summary)
+    }
+}
+
 /// 엔진이 가진 녹음 제어(핸드오프 + 쓰기 스레드).
 pub struct Recorder {
     port: RecordPortCtl,
@@ -316,7 +336,7 @@ impl Recorder {
         let handle = match handle {
             Ok(h) => h,
             Err(e) => {
-                self.port.detach(DETACH_WAIT);
+                self.port.request_detach();
                 return Err(format!("녹음 스레드 생성 실패: {e}"));
             }
         };
@@ -325,16 +345,24 @@ impl Recorder {
         self.stats().ok_or_else(|| "녹음 상태 없음".to_string())
     }
 
-    /// 녹음 정지: 콜백에서 끝점을 돌려받고(최대 1초), 쓰기 스레드가 남은 것을 비워 파일을 닫을 때까지 기다린다.
-    pub fn stop(&mut self) -> Result<RecordSummary, String> {
+    /// 정지 1단계(빠름, 락 안에서): 세션을 떼고 콜백에 반환을 요청한다. 이때부터 `stats()`는 None.
+    /// 2단계 [`StopJob::finish`]는 락 밖에서, 3단계 [`Recorder::reclaim`]은 다시 짧게 락을 잡고 한다.
+    pub fn begin_stop(&mut self) -> Result<StopJob, String> {
         let s = self.session.take().ok_or("녹음 중이 아닙니다")?;
-        if !self.port.detach(DETACH_WAIT) {
-            log::warn!("녹음 정지: 출력 콜백이 응답하지 않아 남은 링을 비우고 닫습니다");
-        }
-        s.stop.store(true, Ordering::Release);
-        let summary = s.handle.join().map_err(|_| "녹음 스레드 패닉".to_string())?;
-        log::info!("녹음 정지: {:.1}초, {}트랙, 버림 {}프레임", summary.duration_sec, summary.tracks.len(), summary.dropped_frames);
-        Ok(summary)
+        self.port.request_detach();
+        Ok(StopJob { s })
+    }
+
+    /// 콜백이 돌려준 녹음 끝점(링)을 거둬 해제한다.
+    pub fn reclaim(&mut self) {
+        self.port.reclaim();
+    }
+
+    /// 세 단계를 한 번에(락을 오래 잡아도 되는 곳·테스트용).
+    pub fn stop(&mut self) -> Result<RecordSummary, String> {
+        let r = self.begin_stop()?.finish();
+        self.reclaim();
+        r
     }
 
     pub fn stats(&self) -> Option<RecordStats> {

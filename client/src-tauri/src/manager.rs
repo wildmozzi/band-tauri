@@ -234,8 +234,10 @@ impl EngineManager {
     /// 녹음 정지. 콜백 반환 대기·파일 마무리는 엔진 락 밖에서 한다(그동안 다른 커맨드가 막히지 않음). 블로킹.
     pub fn record_stop(&self) -> Result<crate::engine::record::RecordSummary, String> {
         let rec = self.with_engine(|e| Ok(e.recorder()))?;
-        let mut r = rec.lock();
-        r.stop()
+        let job = rec.lock().begin_stop()?;
+        let r = job.finish();
+        rec.lock().reclaim();
+        r
     }
 
     /// 진단 기록용(P2-5): 엔진이 있으면 통계·설정·네트워크 여부. 슬롯 락은 `stats()`만큼만 잡는다.

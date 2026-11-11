@@ -390,8 +390,8 @@ impl Engine {
             peers,
             relay: self.net.as_ref().and_then(|n| n.relay_stats()),
             metronome: self.metronome.stats(),
-            // 정지 중(파일 마무리)에는 잠겨 있으므로 기다리지 않고 null
-            recording: self.recorder.try_lock().and_then(|r| r.stats()),
+            // 녹음 락은 짧게만 잡힌다(정지의 기다리는 단계는 락 밖). 정지를 시작하면 null.
+            recording: self.recorder.lock().stats(),
         }
     }
 
