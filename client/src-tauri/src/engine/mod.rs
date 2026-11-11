@@ -409,17 +409,7 @@ impl Engine {
     /// 녹음 시작(P2-4): `dir` 아래 세션 폴더에 트랙별 WAV를 쓴다.
     pub fn record_start(&self, opts: record::RecordOptions, dir: &std::path::Path) -> Result<record::RecordStats, String> {
         let net = self.net.as_ref().map(|n| n.shared().clone());
-        let resolve: record::PeerResolver = Box::new(move |ssrc| {
-            let mut id = None;
-            if let Some(n) = net.as_ref() {
-                n.for_each_peer(|p| {
-                    if p.ssrc == ssrc {
-                        id = Some(p.id.clone());
-                    }
-                });
-            }
-            id
-        });
+        let resolve: record::PeerResolver = Box::new(move |ssrc| net.as_ref().and_then(|n| n.peer_id_for_ssrc(ssrc)));
         self.recorder.lock().start(opts, dir, resolve, crate::diag::now_ms())
     }
 
