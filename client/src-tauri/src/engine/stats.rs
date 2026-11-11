@@ -152,6 +152,8 @@ pub struct EngineStats {
     pub send_queue: Option<crate::net::txlat::SendQueueStats>,
     /// 공유 메트로놈 상태(P2-3).
     pub metronome: super::metronome::MetronomeStats,
+    /// 합주 녹음 상태(P2-4). 녹음 중이 아니면 null.
+    pub recording: Option<super::record::RecordStats>,
 }
 
 impl EngineStats {
@@ -179,6 +181,7 @@ impl EngineStats {
             qos: None,
             send_queue: None,
             metronome: Default::default(),
+            recording: None,
         }
     }
 }

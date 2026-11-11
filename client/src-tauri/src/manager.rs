@@ -222,6 +222,29 @@ impl EngineManager {
         f(engine)
     }
 
+    /// 녹음 시작(P2-4). 실행 중인 엔진(합주·테스트 모드)에서.
+    pub fn record_start(
+        &self,
+        opts: crate::engine::record::RecordOptions,
+        dir: &std::path::Path,
+    ) -> Result<crate::engine::record::RecordStats, String> {
+        self.with_engine(|e| e.record_start(opts, dir))
+    }
+
+    /// 녹음 중 피어 트랙 이름 추가(peerId → 표시 이름).
+    pub fn record_set_track_names(&self, names: std::collections::HashMap<String, String>) -> Result<(), String> {
+        self.with_engine(|e| e.record_set_track_names(names))
+    }
+
+    /// 녹음 정지. 콜백 반환 대기·파일 마무리는 엔진 락 밖에서 한다(그동안 다른 커맨드가 막히지 않음). 블로킹.
+    pub fn record_stop(&self) -> Result<crate::engine::record::RecordSummary, String> {
+        let rec = self.with_engine(|e| Ok(e.recorder()))?;
+        let job = rec.lock().begin_stop()?;
+        let r = job.finish();
+        rec.lock().reclaim();
+        r
+    }
+
     /// 진단 기록용(P2-5): 엔진이 있으면 통계·설정·네트워크 여부. 슬롯 락은 `stats()`만큼만 잡는다.
     pub fn snapshot(&self) -> Option<crate::diag::Snapshot> {
         let s = self.slot.lock();

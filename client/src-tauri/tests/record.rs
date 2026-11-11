@@ -1,0 +1,204 @@
+//! 합주 녹음 통합 테스트(P2-4, 설계 문서 1.5절).
+//!
+//! - 결정적: 가짜 장치 두 엔진(A 사인 → B)을 루프백 UDP로 잇고 B에서 녹음한다. 트랙 구성·길이 정렬·피어 소리·
+//!   통계 필드·엔진 정지 시 마무리를 본다(벽시계 품질 임계 없음).
+//! - 실시간(`#[ignore]`): 같은 링크에서 녹음 끈 구간과 켠 구간의 버퍼 지연·은닉·xrun을 비교한다(PR 본문 수치).
+//!   로컬 실행: `cargo test --test record -- --ignored --nocapture --test-threads 1`.
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use band_lib::engine::config::{CodecKind, EngineConfig};
+use band_lib::engine::device::fake::FakeBackend;
+use band_lib::engine::mixer::MixControls;
+use band_lib::engine::record::{RecordOptions, TrackKind};
+use band_lib::engine::stats::PeerStateKind;
+use band_lib::engine::wav::RecordFormat;
+use band_lib::engine::Engine;
+use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::net::NetOptions;
+use parking_lot::Mutex;
+
+static RT_LOCK: Mutex<()> = Mutex::new(());
+
+fn sine_backend() -> FakeBackend {
+    FakeBackend::new(
+        48_000,
+        Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+            for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+                let t = (start + i as u64) as f64 / 48_000.0;
+                frame.fill((t * 440.0 * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5);
+            }
+        }),
+    )
+}
+
+fn test_net() -> NetOptions {
+    NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None }
+}
+
+fn config(buffer: u32, frame_ms: f32) -> EngineConfig {
+    EngineConfig { buffer_size: buffer, frame_ms, codec: CodecKind::Opus, channels: 1, input_channels: vec![0], ..Default::default() }
+}
+
+fn local_addr(e: &Engine) -> SocketAddr {
+    format!("127.0.0.1:{}", e.local_port().unwrap()).parse().unwrap()
+}
+
+fn with_candidate(d: &LocalDescriptor, addr: SocketAddr) -> LocalDescriptor {
+    LocalDescriptor { candidates: vec![Candidate { kind: CandidateKind::Lan, addr: addr.to_string() }], ..d.clone() }
+}
+
+fn wait_connected(e: &Engine) -> bool {
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(5) {
+        let s = e.stats();
+        if !s.peers.is_empty() && s.peers.iter().all(|p| p.state == PeerStateKind::Connected) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+fn pair(cfg: EngineConfig, ba: FakeBackend, bb: FakeBackend) -> (Engine, Engine) {
+    let a = Engine::start(cfg.clone(), Arc::new(ba), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(cfg, Arc::new(bb), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), local_addr(&b))).unwrap();
+    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), local_addr(&a))).unwrap();
+    assert!(wait_connected(&a) && wait_connected(&b), "연결 실패");
+    (a, b)
+}
+
+fn tmp(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("band-rec-it-{tag}-{}", std::process::id()));
+    std::fs::remove_dir_all(&d).ok();
+    d
+}
+
+/// 24비트 스테레오 WAV(헤더 80바이트)의 L 채널.
+fn read_left(path: &Path) -> Vec<f32> {
+    let b = std::fs::read(path).unwrap();
+    assert_eq!(&b[0..4], b"RIFF");
+    b[80..].as_chunks::<6>().0.iter().map(|c| (i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8) as f32 / 8_388_607.0).collect()
+}
+
+#[test]
+fn records_local_and_peer_tracks_aligned() {
+    let _g = RT_LOCK.lock();
+    let (a, b) = pair(config(256, 5.0), sine_backend(), FakeBackend::silence(48_000));
+    std::thread::sleep(Duration::from_millis(500));
+    let dir = tmp("pair");
+    let opts = RecordOptions {
+        include_mix: true,
+        name: Some("합주 테스트".into()),
+        local_name: Some("나".into()),
+        track_names: [("alice".to_string(), "앨리스".to_string())].into(),
+        ..Default::default()
+    };
+    let st = b.record_start(opts, &dir).unwrap();
+    assert!(st.folder.ends_with("합주 테스트"));
+    assert!(b.record_start(RecordOptions::default(), &dir).is_err(), "중복 시작 거부");
+    std::thread::sleep(Duration::from_millis(1500));
+    let live = b.stats().recording.expect("녹음 통계");
+    assert!(live.duration_sec > 1.0, "{live:?}");
+    assert!(live.bytes > 0 && live.tracks == 3, "{live:?}");
+    assert_eq!(live.dropped_frames, 0);
+
+    let sum = b.recorder().lock().stop().unwrap();
+    assert!(b.stats().recording.is_none());
+    assert!(sum.error.is_none(), "{:?}", sum.error);
+    assert_eq!(sum.dropped_frames, 0);
+    assert_eq!(sum.sample_rate, 48_000);
+    let kinds: Vec<_> = sum.tracks.iter().map(|t| t.kind).collect();
+    assert!(kinds.contains(&TrackKind::Local) && kinds.contains(&TrackKind::Peer) && kinds.contains(&TrackKind::Mix), "{kinds:?}");
+    let folder = PathBuf::from(&sum.folder);
+    let file = |k: TrackKind| folder.join(&sum.tracks.iter().find(|t| t.kind == k).unwrap().file);
+    let peer = sum.tracks.iter().find(|t| t.kind == TrackKind::Peer).unwrap();
+    assert_eq!(peer.peer_id.as_deref(), Some("alice"));
+    assert!(peer.file.ends_with("앨리스.wav"), "{}", peer.file);
+
+    let me = read_left(&file(TrackKind::Local));
+    let pa = read_left(&file(TrackKind::Peer));
+    let mix = read_left(&file(TrackKind::Mix));
+    assert_eq!(me.len(), pa.len(), "트랙 길이가 같다");
+    assert_eq!(me.len(), mix.len());
+    assert!((me.len() as f64 / 48_000.0 - sum.duration_sec).abs() < 1e-6);
+    assert!(sum.duration_sec > 1.2, "{}", sum.duration_sec);
+    // B 입력은 무음, 피어(A 사인 0.5)는 소리가 있다
+    assert!(me.iter().all(|&v| v.abs() < 1e-6));
+    let peak = pa.iter().fold(0f32, |m, &v| m.max(v.abs()));
+    assert!(peak > 0.4 && peak < 0.6, "피어 트랙 피크 {peak}");
+    assert!(folder.join("session.json").exists());
+
+    // 엔진 정지가 진행 중인 녹음을 마무리한다
+    b.record_start(RecordOptions { format: RecordFormat::WavF32, ..Default::default() }, &dir).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    drop(b);
+    drop(a);
+    let sessions = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.path().join("session.json").exists()).count();
+    assert_eq!(sessions, 2, "정지로 마무리된 두 번째 세션");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// 한 구간(`secs`초) 관찰. 반환: (평균 bufferMs, 은닉 프레임, xrun, 생산 프레임).
+fn window(b: &Engine, secs: u64) -> (f32, u64, u64, u64) {
+    let s0 = b.stats();
+    let j0 = b.peer_jitter_stats()[0].1;
+    let mut buf = 0.0;
+    let n = secs * 4;
+    for _ in 0..n {
+        std::thread::sleep(Duration::from_millis(250));
+        buf += b.stats().peers[0].buffer_ms;
+    }
+    let s1 = b.stats();
+    let j1 = b.peer_jitter_stats()[0].1;
+    (buf / n as f32, j1.concealed - j0.concealed, s1.xruns - s0.xruns, j1.produced - j0.produced)
+}
+
+#[test]
+#[ignore = "realtime: 녹음 켬/끔 비교(PR 수치). 결정적 짝 engine::record::tests::*, records_local_and_peer_tracks_aligned"]
+fn recording_does_not_change_buffer_concealment_or_xruns() {
+    let _g = RT_LOCK.lock();
+    for (buf, frame_ms) in [(128u32, 2.5f32), (256, 5.0)] {
+        let mut ba = sine_backend();
+        ba.wake_jitter_us = 1000;
+        let mut bb = FakeBackend::silence(48_000);
+        bb.wake_jitter_us = 1000;
+        bb.seed = 9;
+        let (a, b) = pair(config(buf, frame_ms), ba, bb);
+        std::thread::sleep(Duration::from_secs(3));
+        let off = window(&b, 8);
+        let dir = tmp(&format!("rt-{buf}"));
+        b.record_start(RecordOptions { include_mix: true, format: RecordFormat::WavF32, ..Default::default() }, &dir).unwrap();
+        let on = window(&b, 8);
+        let sum = b.recorder().lock().stop().unwrap();
+        let frames = b.peer_jitter_stats()[0].1;
+        let est = b.stats().est_latency_ms;
+        drop(b);
+        drop(a);
+        std::fs::remove_dir_all(&dir).ok();
+        println!(
+            "REC buf {buf} / {frame_ms}ms (estLatency {est:.2}ms): 끔 buffer {:.2}ms 은닉 {} ({:.2}%) xrun {} | 켬 buffer {:.2}ms 은닉 {} ({:.2}%) xrun {} | 녹음 {:.2}s {}트랙 {}B 버림 {}프레임 (late {})",
+            off.0,
+            off.1,
+            off.1 as f64 / off.3.max(1) as f64 * 100.0,
+            off.2,
+            on.0,
+            on.1,
+            on.1 as f64 / on.3.max(1) as f64 * 100.0,
+            on.2,
+            sum.duration_sec,
+            sum.tracks.len(),
+            sum.bytes,
+            sum.dropped_frames,
+            frames.late,
+        );
+        assert_eq!(sum.dropped_frames, 0, "녹음 링 넘침");
+        assert!(on.2 <= off.2 + 1, "녹음 중 xrun 증가: {} → {}", off.2, on.2);
+        assert!(on.1 <= off.1 + 2, "녹음 중 은닉 증가: {} → {}", off.1, on.1);
+        assert!((on.0 - off.0).abs() < 1.0, "녹음 중 버퍼 지연 변화: {:.2} → {:.2}ms", off.0, on.0);
+    }
+}

@@ -19,6 +19,7 @@ use crate::engine::device::system::SystemBackend;
 use crate::engine::device::DeviceInfo;
 use crate::engine::metronome::{MetronomeConfig, MetronomePlan};
 use crate::engine::mixer::clamp_gain;
+use crate::engine::record::{RecordOptions, RecordStats, RecordSummary};
 use crate::engine::stats::EngineStats;
 use crate::manager::EngineManager;
 use crate::net::RelaySetting;
@@ -318,4 +319,106 @@ pub async fn diag_export(
         Ok(Some(path.to_string_lossy().into_owned()))
     })
     .await
+}
+
+/// 녹음 저장 폴더(P2-4). 사용자가 고른 폴더는 앱 설정 폴더의 `recording.json`에 남는다.
+/// 경로는 Rust 쪽 폴더 대화상자에서만 정한다(프론트가 임의 경로를 넘길 수 없다, `diag_export`와 같은 원칙).
+#[derive(Clone, Default)]
+pub struct RecordDirState(Arc<parking_lot::Mutex<Option<std::path::PathBuf>>>);
+
+const RECORD_DIR_FILE: &str = "recording.json";
+
+fn record_dir_file(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path().app_config_dir().ok().map(|d| d.join(RECORD_DIR_FILE))
+}
+
+/// 현재 녹음 폴더: 고른 폴더 → 저장된 폴더 → 기본(음악 폴더/Band Recordings).
+fn current_record_dir(app: &tauri::AppHandle, dirs: &RecordDirState) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    if let Some(p) = dirs.0.lock().clone() {
+        return Ok(p);
+    }
+    let saved = record_dir_file(app)
+        .and_then(|f| std::fs::read(f).ok())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("folder").and_then(|x| x.as_str()).map(std::path::PathBuf::from))
+        .filter(|p| p.is_absolute());
+    if let Some(p) = saved {
+        *dirs.0.lock() = Some(p.clone());
+        return Ok(p);
+    }
+    let base = app.path().audio_dir().or_else(|_| app.path().document_dir()).map_err(|e| format!("기본 녹음 폴더를 찾을 수 없습니다: {e}"))?;
+    Ok(base.join("Band Recordings"))
+}
+
+/// 현재 녹음 저장 폴더(고르지 않았으면 기본 폴더).
+#[tauri::command]
+pub async fn engine_record_folder(app: tauri::AppHandle, dirs: State<'_, RecordDirState>) -> Result<String, String> {
+    current_record_dir(&app, &dirs).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// 녹음 저장 폴더 고르기(폴더 대화상자). 취소하면 `null`.
+#[tauri::command]
+pub async fn engine_record_pick_folder(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    dirs: State<'_, RecordDirState>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let dirs = dirs.inner().clone();
+    blocking(move || {
+        let cur = current_record_dir(&app, &dirs).ok();
+        let mut dlg = app.dialog().file().set_parent(&window).set_title("녹음 저장 폴더");
+        if let Some(c) = cur.as_ref().filter(|c| c.is_dir()) {
+            dlg = dlg.set_directory(c);
+        }
+        let Some(picked) = dlg.blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|e| format!("폴더 경로 오류: {e}"))?;
+        *dirs.0.lock() = Some(path.clone());
+        if let Some(f) = record_dir_file(&app) {
+            let saved = f
+                .parent()
+                .map(std::fs::create_dir_all)
+                .unwrap_or(Ok(()))
+                .and_then(|_| std::fs::write(&f, serde_json::json!({ "folder": path }).to_string()));
+            if let Err(e) = saved {
+                log::warn!("녹음 폴더 설정 저장 실패: {e}");
+            }
+        }
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+}
+
+/// 녹음 시작(P2-4). 현재 녹음 폴더 아래 세션 폴더에 트랙별 WAV(내 입력, 피어별, 선택: 믹스)를 쓴다.
+#[tauri::command]
+pub async fn engine_record_start(
+    app: tauri::AppHandle,
+    state: State<'_, EngineState>,
+    dirs: State<'_, RecordDirState>,
+    options: Option<RecordOptions>,
+) -> Result<RecordStats, String> {
+    let dir = current_record_dir(&app, &dirs)?;
+    let m = state.0.clone();
+    blocking(move || m.record_start(options.unwrap_or_default(), &dir)).await
+}
+
+/// 녹음 중 피어 트랙 이름 추가(peerId → 표시 이름). 녹음 중에 들어온 연주자 트랙도 닉네임으로 저장된다.
+#[tauri::command]
+pub async fn engine_record_set_track_names(
+    state: State<'_, EngineState>,
+    track_names: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let m = state.0.clone();
+    blocking(move || m.record_set_track_names(track_names)).await
+}
+
+/// 녹음 정지. 파일을 마무리하고 요약(세션 폴더의 `session.json`과 같은 내용)을 돌려준다.
+#[tauri::command]
+pub async fn engine_record_stop(state: State<'_, EngineState>) -> Result<RecordSummary, String> {
+    let m = state.0.clone();
+    blocking(move || m.record_stop()).await
 }
