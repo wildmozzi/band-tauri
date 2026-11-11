@@ -36,11 +36,11 @@ after(async () => {
 })
 
 describe('migration 013: rooms.max_participants 2~20', () => {
-  it('clamps existing out-of-range rows to the server cap (20) and keeps valid/NULL rows', async () => {
+  it('clamps existing out-of-range rows (1 → 2, others → server cap 20) and keeps valid/NULL rows', async () => {
     const res = await db.query<{ title: string; max_participants: number | null }>('SELECT title, max_participants FROM public.rooms ORDER BY id')
     assert.deepEqual(
       Object.fromEntries(res.rows.map(r => [r.title, r.max_participants])),
-      { ok8: 8, ok2: 2, ok20: 20, big: 20, zero: 20, neg: 20, one: 20, null: null },
+      { ok8: 8, ok2: 2, ok20: 20, big: 20, zero: 20, neg: 20, one: 2, null: null },
     )
   })
 

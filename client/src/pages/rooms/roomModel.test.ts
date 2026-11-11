@@ -164,7 +164,8 @@ describe('room capacity range (P3-10g)', () => {
   it('effectiveRoomCapacity maps out-of-range/missing DB values to the server cap', () => {
     expect(effectiveRoomCapacity(8)).toBe(8)
     expect(effectiveRoomCapacity(2)).toBe(2)
-    for (const v of [0, 1, -3, 21, 50, 7.5, null, undefined]) expect(effectiveRoomCapacity(v)).toBe(20)
+    expect(effectiveRoomCapacity(1)).toBe(2)
+    for (const v of [0, -3, 21, 50, 7.5, null, undefined]) expect(effectiveRoomCapacity(v)).toBe(20)
   })
 
   it('maxParticipantOptionsFor keeps a valid non-default current value selectable', () => {

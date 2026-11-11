@@ -11,7 +11,9 @@
 --
 -- 기존 행 처리 (CHECK 추가 전 1회, 멱등):
 --   - 21 이상 → 20 (서버가 이미 20으로 강제하던 값 — 실제 동작은 그대로)
---   - 2 미만(0·음수·1) → 20 (서버가 이미 20 상한만 적용하던 값 — 기존 입장 동작을 바꾸지 않는다)
+--   - 1 → 2 (이전 서버는 정원 1로 강제했다. 1은 CHECK 밖이라 가장 가까운 유효값 2로 올린다 — 정원이 1명 늘어나는 동작 변경.
+--            20으로 넓히면 '혼자/소수' 의도의 방이 20명 방이 되므로 2를 고른다. 서버 parseRoomCapacity도 1 → 2)
+--   - 0·음수 → 20 (서버가 이미 20 상한만 적용하던 값 — 기존 입장 동작 그대로)
 --   - NULL 은 그대로 둔다(CHECK는 NULL을 통과시킨다). 서버는 NULL을 "상한 20"으로 본다.
 --
 -- 재실행 안전: UPDATE는 범위 밖 행만 건드리고, 제약은 없을 때만 추가한다.
@@ -23,9 +25,13 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 
 UPDATE public.rooms
+   SET max_participants = 2
+ WHERE max_participants = 1;
+
+UPDATE public.rooms
    SET max_participants = 20
  WHERE max_participants IS NOT NULL
-   AND (max_participants > 20 OR max_participants < 2);
+   AND (max_participants > 20 OR max_participants < 1);
 
 DO $$
 BEGIN

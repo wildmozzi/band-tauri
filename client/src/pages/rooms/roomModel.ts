@@ -36,9 +36,11 @@ export const MAX_PARTICIPANT_OPTIONS: readonly number[] = [2, 4, 6, 8, 10, 12, 1
  * (서버 parseRoomCapacity와 같은 규칙) — 목록이 '3/50명'처럼 서버와 다른 정원을 보이지 않게.
  */
 export function effectiveRoomCapacity(value: number | null | undefined): number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= ROOM_CAPACITY_MIN && value <= ROOM_CAPACITY_MAX
-    ? value
-    : ROOM_CAPACITY_MAX
+  if (typeof value !== 'number' || !Number.isInteger(value)) return ROOM_CAPACITY_MAX
+  if (value >= ROOM_CAPACITY_MIN && value <= ROOM_CAPACITY_MAX) return value
+  // 1 → 2: 013 전 '정원 1' 방을 20으로 넓히지 않는다(서버 parseRoomCapacity·마이그레이션 013과 같음)
+  if (value >= 1 && value < ROOM_CAPACITY_MIN) return ROOM_CAPACITY_MIN
+  return ROOM_CAPACITY_MAX
 }
 
 /** 편집 선택지: 기본 선택지에 없는 현재 값(예: 3)도 그대로 고를 수 있게 넣는다 */
