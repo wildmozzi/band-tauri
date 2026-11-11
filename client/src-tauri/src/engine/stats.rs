@@ -138,6 +138,8 @@ pub struct EngineStats {
     pub peers: Vec<PeerStats>,
     /// 릴레이 등록 상태(릴레이를 설정하지 않았으면 null).
     pub relay: Option<crate::net::relay::RelayStats>,
+    /// 공유 메트로놈 상태(P2-3).
+    pub metronome: super::metronome::MetronomeStats,
 }
 
 impl EngineStats {
@@ -161,6 +163,7 @@ impl EngineStats {
             backend: String::new(),
             peers: Vec::new(),
             relay: None,
+            metronome: Default::default(),
         }
     }
 }

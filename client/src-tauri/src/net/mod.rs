@@ -1,5 +1,6 @@
 //! UDP 소켓과 송수신/제어 스레드 (설계 문서 1.1, 2, 3절).
 
+pub mod clock;
 pub mod crypto;
 pub mod packet;
 pub mod peer;
@@ -571,6 +572,11 @@ impl NetShared {
         Ok(())
     }
 
+    /// 그 피어 시계 − 내 시계 추정(P2-3). `at_us` = 내 시계(`now_us`). 피어가 없거나 표본이 없으면 None.
+    pub fn peer_clock(&self, peer_id: &str, at_us: u64) -> Option<clock::ClockEstimate> {
+        self.peer_by_id(peer_id).ok().and_then(|p| p.clock.lock().estimate(at_us as f64))
+    }
+
     pub fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
         self.peer_by_id(peer_id).ok().and_then(|p| p.conn.lock().rtt_ms)
     }
@@ -684,8 +690,14 @@ impl NetShared {
                     }
                     match other {
                         PacketType::Pong => {
-                            let rtt_us = self.now_us32().wrapping_sub(h.timestamp);
+                            let t3 = self.now_us();
+                            let rtt_us = (t3 as u32).wrapping_sub(h.timestamp);
                             c.on_rtt_sample(rtt_us as f32 / 1000.0);
+                            // 시계 표본(P2-3): Pong 평문 = [CLOCK_TAG, 응답자 시계 u64 BE]. 빈 평문(옛 엔진)은 건너뛴다.
+                            if let Some(remote) = parse_clock_payload(plain) {
+                                let t0 = t3.saturating_sub(rtt_us as u64);
+                                peer.clock.lock().on_sample(t0 as f64, t3 as f64, remote as f64);
+                            }
                         }
                         PacketType::Bye => {
                             c.state = PeerStateKind::Failed;
@@ -699,7 +711,8 @@ impl NetShared {
                     // Pong은 Ping이 온 길로 돌려준다(경로 전환 중에도 RTT가 끊기지 않게)
                     PacketType::Ping => {
                         peer.echo.lock().on_ping(plain, now);
-                        self.send_ctrl(&peer, PacketType::Pong, h.timestamp, &[], from, via_relay);
+                        let clock = clock_payload(self.now_us());
+                        self.send_ctrl(&peer, PacketType::Pong, h.timestamp, &clock, from, via_relay);
                     }
                     PacketType::Audio => {
                         let now_us = now.duration_since(self.epoch).as_micros() as u64;
@@ -720,6 +733,26 @@ impl NetShared {
 
     pub fn epoch(&self) -> Instant {
         self.epoch
+    }
+}
+
+/// Pong 평문의 시계 태그(P2-3, 설계 2절). 평문 = `[CLOCK_TAG, now_us(u64 BE)]`(9바이트).
+pub const CLOCK_TAG: u8 = 0xC1;
+pub const CLOCK_PAYLOAD_BYTES: usize = 9;
+
+/// Pong 평문: 응답자 시계(µs, Net epoch 기준).
+pub fn clock_payload(now_us: u64) -> [u8; CLOCK_PAYLOAD_BYTES] {
+    let mut b = [0u8; CLOCK_PAYLOAD_BYTES];
+    b[0] = CLOCK_TAG;
+    b[1..].copy_from_slice(&now_us.to_be_bytes());
+    b
+}
+
+/// Pong 평문에서 응답자 시계. 빈 평문(옛 엔진)이나 모르는 형식이면 None.
+pub fn parse_clock_payload(plain: &[u8]) -> Option<u64> {
+    match plain {
+        [CLOCK_TAG, rest @ ..] => <[u8; 8]>::try_from(rest).ok().map(u64::from_be_bytes),
+        _ => None,
     }
 }
 

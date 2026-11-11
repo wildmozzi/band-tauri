@@ -17,6 +17,7 @@ use crate::engine::config::EngineConfig;
 use crate::engine::measure::{EchoReport, LoopbackReport};
 use crate::engine::device::system::SystemBackend;
 use crate::engine::device::DeviceInfo;
+use crate::engine::metronome::{MetronomeConfig, MetronomePlan};
 use crate::engine::mixer::clamp_gain;
 use crate::engine::stats::EngineStats;
 use crate::manager::EngineManager;
@@ -190,6 +191,22 @@ pub async fn engine_set_monitor(state: State<'_, EngineState>, enabled: bool, ga
 #[tauri::command]
 pub async fn engine_set_master_gain(state: State<'_, EngineState>, gain: f32) -> Result<(), String> {
     state.0.controls().master_gain.store(clamp_gain(gain));
+    Ok(())
+}
+
+/// 공유 메트로놈 계획(P2-3). 방장은 `refPeerId` 없이(시작 시각을 비우면 지금 + 300ms), 다른 연주자는
+/// 방장 엔진 peerId와 방장이 알린 `startUs`로 부른다. 적용된 계획을 돌려준다(방장은 이것을 방에 알린다).
+#[tauri::command]
+pub async fn engine_set_metronome(state: State<'_, EngineState>, metronome: MetronomeConfig) -> Result<MetronomePlan, String> {
+    state.0.with_engine(|e| e.set_metronome(metronome))
+}
+
+/// 메트로놈 클릭 볼륨·뮤트(로컬 전용, 엔진 재시작 간 유지).
+#[tauri::command]
+pub async fn engine_set_metronome_gain(state: State<'_, EngineState>, gain: f32, muted: bool) -> Result<(), String> {
+    let c = state.0.controls();
+    c.click_gain.store(clamp_gain(gain));
+    c.click_muted.store(muted, Ordering::Relaxed);
     Ok(())
 }
 
