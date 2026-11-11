@@ -23,7 +23,7 @@ import { useViewerAudio, type PeerNetworkStats, type RtcStatus } from './room/us
 import { useWebAudioMixer, type MixSettings } from './room/useWebAudioMixer'
 import { useRecording, type Recording, type RecordingSource } from './room/useRecording'
 import { mergeSelfPerformer, withPeer, type PeerInstrument } from './room/roomState'
-import { forgetRoomPassword, joinErrorFromSignal, rememberRoomPassword, type JoinError } from './room/roomAccess'
+import { forgetRoomPassword, joinErrorFromSignal, joinErrorStopsSession, rememberRoomPassword, type JoinError } from './room/roomAccess'
 import { useNativeSession } from '../native/useNativeSession'
 import { DEFAULT_METRONOME_VOLUME, metronomeErrorFromCode, type MetronomeView } from '../native/metronomeLogic'
 import { MixBroadcaster, MixSource } from '../native/mixBridge'
@@ -70,6 +70,8 @@ type RoomContextType = {
   roomJoined: boolean
   /** 비밀번호를 입력해 다시 입장 시도 */
   submitRoomPassword: (password: string) => void
+  /** 거부된 입장(정원 초과 등)을 다시 시도 */
+  retryJoin: () => void
   currentRoomId: string | null
   leaveRoom: () => void
   /** 서버가 판정한 내 방장 여부 (구 서버면 joinRoom 인자) */
@@ -196,6 +198,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [joinFeedback, setJoinFeedback] = useState('')
   const [joinError, setJoinError] = useState<JoinError | null>(null)
   const [roomJoined, setRoomJoined] = useState(false)
+  /** 재연결 후 보낸 rejoin의 응답(room-state 또는 입장 거부)을 기다리는 중 (PR #23 M3) */
+  const rejoiningRef = useRef(false)
   /** password-busy 자동 재시도 */
   const busyRetryRef = useRef<{ count: number; timer: ReturnType<typeof setTimeout> | null }>({ count: 0, timer: null })
   const clearBusyRetry = () => {
@@ -379,6 +383,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   onReadyRef.current = (id, resumed) => {
     // 재연결: 이전 방에 다시 입장 (resumed면 서버는 이미 방에 있는 것으로 보고 상태만 다시 보낸다)
     const join = buildJoinMessageRef.current(true)
+    rejoiningRef.current = !!join
     if (join) send(join)
     // resumed && 같은 id → 엔진 유지 + descriptor 재전송, 아니면 새 id로 엔진 재시작
     void session.welcome(id, resumed)
@@ -440,7 +445,14 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       if (je.roomId && je.roomId !== roomId) return
       if (roomId && je.code === 'password-invalid') forgetRoomPassword(roomId)
       if (je.code === 'password-required' || je.code === 'password-invalid') roomPasswordRef.current = null
-      setJoinError(je)
+      const rejoining = rejoiningRef.current
+      if (je.code !== 'password-busy') rejoiningRef.current = false
+      // 방 밖으로 밀려났다: 엔진·방송을 멈춘다 (서버는 방 밖 연결의 연주 메시지를 거부한다)
+      if (joinErrorStopsSession(je, rejoining)) {
+        broadcasterRef.current!.stop()
+        void session.stop({ notify: false })
+      }
+      setJoinError(rejoining ? { ...je, afterReconnect: true } : je)
       setJoinFeedback('')
       setRoomJoined(false)
       // 서버 혼잡/방 준비 중: 같은 비밀번호로 몇 번 자동 재시도
@@ -460,6 +472,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
     switch (p.type) {
       case 'room-state': {
+        rejoiningRef.current = false
         const peerIds = Array.isArray(p.peerIds) ? (p.peerIds as unknown[]).filter((x): x is string => typeof x === 'string' && x !== self) : []
         const participants = Array.isArray(p.participants) ? (p.participants as unknown[]).filter(isParticipant) : []
         if (typeof p.isHost === 'boolean') {
@@ -560,6 +573,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     }
     currentRoomIdRef.current = roomId
     roomPasswordRef.current = password || null
+    rejoiningRef.current = false
     setJoinError(null)
     setRoomJoined(false)
     clearBusyRetry()
@@ -578,6 +592,19 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     setJoinError(null)
     const join = buildJoinMessageRef.current(false)
     if (join && isOpen()) send(join)
+    setJoinFeedback('룸 입장 시도 중...')
+  }, [isOpen, send])
+
+  /** 정원 초과 등으로 거부된 입장을 같은 조건으로 다시 시도 (PR #23 L3) */
+  const retryJoin = useCallback(() => {
+    if (!currentRoomIdRef.current) return
+    if (!isOpen()) {
+      setJoinFeedback('시그널링 서버에 연결 중입니다. 잠시 후 다시 시도해주세요.')
+      return
+    }
+    setJoinError(null)
+    const join = buildJoinMessageRef.current(false)
+    if (join) send(join)
     setJoinFeedback('룸 입장 시도 중...')
   }, [isOpen, send])
 
@@ -787,6 +814,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     joinError,
     roomJoined,
     submitRoomPassword,
+    retryJoin,
     currentRoomId,
     leaveRoom,
     isRoomHost,

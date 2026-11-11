@@ -2,6 +2,7 @@
  * 가짜 시그널링 서버 (server/src/services/wsService.ts의 메시지 순서를 따른다).
  *   연결 → welcome{clientId} → (클라이언트 auth) → auth-result{authenticated}
  *   join → 비밀번호 방이면 password-required / password-invalid{remainingAttempts} / password-rate-limited{retryAfterMs}
+ *        → 정원(rooms.max_participants, 관람 포함, 서버 상한 20)이 찼으면 room-full{maxParticipants} (방장은 예외, P3-12b)
  *        → 통과하면 room-state{participants, peerIds, isHost}
  *   chat → 기록만(서버는 보낸 사람에게 되돌려주지 않는다). 원격 채팅은 pushChat으로 주입
  * 방장 판정은 서버처럼 토큰의 사용자와 DB(rooms.host_id)로 한다.
@@ -175,8 +176,14 @@ export class FakeSignaling {
 
     if (config.password && !isHost && !this.checkPassword(conn, roomId, config.password, msg.password)) return
 
-    conn.roomId = roomId
     const participants = config.participants ?? []
+    const max = typeof room?.max_participants === 'number' ? Math.min(room.max_participants, 20) : 20
+    if (!isHost && participants.length >= max) {
+      this.send(conn, { type: 'error', code: 'room-full', roomId, maxParticipants: max, message: `합주실 정원(${max}명)이 가득 찼습니다.` })
+      return
+    }
+
+    conn.roomId = roomId
     this.send(conn, {
       type: 'room-state',
       participants,

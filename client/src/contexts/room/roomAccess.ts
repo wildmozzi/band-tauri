@@ -32,18 +32,34 @@ export function validateRoomPasswordInput(raw: string): string | null {
   return null
 }
 
-export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited' | 'password-busy'
+export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited' | 'password-busy' | 'room-full'
 
 export interface JoinError {
   code: JoinErrorCode
   roomId: string | null
   remainingAttempts: number | null
   retryAfterMs: number | null
+  /** room-full: 서버가 적용한 정원(관람 포함) */
+  maxParticipants?: number | null
+  /** room-full: 'room-full'(정원) | 'anonymous-limit'(로그인하지 않은 관람자 상한) */
+  reason?: string | null
+  /** 재연결 중 다시 입장하다 거부됨 (끊긴 사이 자리를 잃음, PR #23 M3) */
+  afterReconnect?: boolean
 }
 
-const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited', 'password-busy'])
+/**
+ * 입장 거부 시 연주 세션(엔진·방송)을 멈춰야 하는지 (PR #23 M3).
+ * 방 밖으로 밀려나면 서버가 연주 메시지를 거부하므로 엔진을 띄워 둘 이유가 없다.
+ * room-full은 항상, 재연결 중 거부는 자동 재시도하는 password-busy 말고 모두.
+ */
+export function joinErrorStopsSession(e: JoinError, rejoining: boolean): boolean {
+  if (e.code === 'room-full') return true
+  return rejoining && e.code !== 'password-busy'
+}
 
-/** 서버 error 메시지 중 입장(비밀번호) 관련이면 JoinError로 */
+const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited', 'password-busy', 'room-full'])
+
+/** 서버 error 메시지 중 입장(비밀번호·정원) 관련이면 JoinError로 */
 export function joinErrorFromSignal(p: { type: string; [k: string]: unknown }): JoinError | null {
   if (p.type !== 'error' || typeof p.code !== 'string' || !JOIN_ERROR_CODES.has(p.code)) return null
   return {
@@ -51,6 +67,8 @@ export function joinErrorFromSignal(p: { type: string; [k: string]: unknown }): 
     roomId: typeof p.roomId === 'string' ? p.roomId : null,
     remainingAttempts: typeof p.remainingAttempts === 'number' ? p.remainingAttempts : null,
     retryAfterMs: typeof p.retryAfterMs === 'number' ? p.retryAfterMs : null,
+    maxParticipants: typeof p.maxParticipants === 'number' ? p.maxParticipants : null,
+    reason: typeof p.reason === 'string' ? p.reason : null,
   }
 }
 
@@ -70,6 +88,15 @@ export function describeJoinError(e: JoinError): string {
       return min !== null
         ? `비밀번호를 너무 많이 틀렸습니다. 약 ${min}분 뒤에 다시 시도하세요.`
         : '비밀번호를 너무 많이 틀렸습니다. 잠시 후 다시 시도하세요.'
+    }
+    case 'room-full': {
+      const lost = e.afterReconnect ? '연결이 끊긴 사이 자리를 잃었습니다. ' : ''
+      if (e.reason === 'anonymous-limit') {
+        return `${lost}로그인하지 않은 관람자 자리가 가득 찼습니다. 로그인하면 입장할 수 있습니다.`
+      }
+      return e.maxParticipants
+        ? `${lost}합주실 정원(관람 포함 ${e.maxParticipants}명)이 가득 찼습니다. 잠시 후 다시 시도하세요.`
+        : `${lost}합주실 정원이 가득 찼습니다. 잠시 후 다시 시도하세요.`
     }
   }
 }

@@ -291,8 +291,8 @@ describe('PerformSession 피어/엔진 상태', () => {
     await start()
     engine.addPeerFailures = 2
     session.handleSignal({ type: 'native-descriptor', from: 'B', descriptor: desc(50) })
-    await sleep(60)
-    expect(engine.calls.filter((c) => c === 'add:B')).toHaveLength(3)
+    // 백오프 타이머는 실시간이라 CI 부하에서 60ms 고정 대기는 간헐 실패했다 — 조건이 맞을 때까지 기다린다.
+    await vi.waitFor(() => expect(engine.calls.filter((c) => c === 'add:B')).toHaveLength(3), { timeout: 3000, interval: 10 })
     expect(session.peers).toEqual(['B'])
   })
 

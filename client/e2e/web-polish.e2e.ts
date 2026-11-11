@@ -123,7 +123,7 @@ test('방 만들기: 최대 인원은 관람 포함, 연주자는 최대 6명이
   await mock.loginAs(ALICE)
   await page.goto('/rooms/create')
   const select = page.getByLabel('최대 인원 (관람 포함)')
-  await expect(select).toHaveAccessibleDescription('연주자는 최대 6명이고, 나머지 인원은 관람으로 입장합니다.')
+  await expect(select).toHaveAccessibleDescription('연주자는 최대 6명이고, 나머지 인원은 관람으로 입장합니다. 로그인하지 않은 관람자는 빈자리가 있을 때만 들어옵니다.')
   await expect(select.locator('option:checked')).toHaveText('8명 (연주 6 + 관람 2)')
   await expect(select.locator('option').first()).toHaveText('2명 (모두 연주 가능)')
 })
