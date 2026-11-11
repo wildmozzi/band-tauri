@@ -114,6 +114,8 @@ pub(super) struct Sample {
     pub tgt: f32,
     pub playing: bool,
     pub concealed: u64,
+    /// 누적 손실 은닉(나머지는 언더런 은닉).
+    pub concealed_loss: u64,
     pub produced: u64,
 }
 
@@ -372,7 +374,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                 for i in 0..n {
                     let s = jbs[i].stats();
                     let playing = jbs[i].is_playing();
-                    outs[i].samples.push(Sample { t: t as f64 / 1e6, buf: s.buffer_ms, tgt: s.target_ms, playing, concealed: s.concealed, produced: s.produced });
+                    outs[i].samples.push(Sample { t: t as f64 / 1e6, buf: s.buffer_ms, tgt: s.target_ms, playing, concealed: s.concealed, concealed_loss: s.concealed_loss, produced: s.produced });
                     if playing {
                         outs[i].trace.push((t as f64 / 1e6, s.buffer_ms, s.target_ms));
                         if t >= p.settle_us && (t - p.settle_us) % 5_000_000 < 100_000 && t > p.settle_us + 4_900_000 {

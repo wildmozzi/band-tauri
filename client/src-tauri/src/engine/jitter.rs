@@ -264,6 +264,9 @@ pub struct JitterStats {
     pub loss_pct: f32,
     pub late: u64,
     pub concealed: u64,
+    /// 은닉 중 손실 은닉(다음 패킷이 이미 있어 seq를 넘긴 것 — Opus면 FEC/PLC). 나머지(`concealed - concealed_loss`)는
+    /// 언더런 은닉(seq 유지, 깊이 +1F). 측정용(P1-6 리포트)이며 Tauri `PeerStats`에는 노출하지 않는다.
+    pub concealed_loss: u64,
     /// 생산된 패킷 프레임 수(정상 디코드 + 은닉).
     pub produced: u64,
     pub dropped_frames: u64,
@@ -1249,6 +1252,7 @@ impl JitterBuffer {
             let win = self.rate_window();
             self.conceal.push(true, win);
             if lost {
+                self.stats.concealed_loss += 1;
                 self.next_seq = seq.wrapping_add(1);
                 self.push_loss(true);
             }

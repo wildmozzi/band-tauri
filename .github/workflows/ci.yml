@@ -148,11 +148,13 @@ jobs:
       run:
         shell: bash
         working-directory: client/src-tauri
-    env:
-      SIM_REPORT_DIR: ${{ runner.temp }}/sim-report
+    # SIM_REPORT_DIR는 step 단위로 둔다. job-level env에서는 runner 컨텍스트를 쓸 수 없다(쓰면 워크플로 전체가 무효).
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
+        with:
+          # schedule은 기본 브랜치(main)의 워크플로로 돈다. 야간에는 개발 흐름(develop) 코드를 잰다.
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         timeout-minutes: 5
       - uses: Swatinem/rust-cache@v2
@@ -168,10 +170,14 @@ jobs:
       - name: Long sim (60분)
         timeout-minutes: 50
         run: cargo test --lib long_sim_6peers_60min -- --ignored --nocapture
+        env:
+          SIM_REPORT_DIR: ${{ runner.temp }}/sim-report
       - name: Job summary
         if: ${{ !cancelled() }}
         timeout-minutes: 1
         run: cat "$SIM_REPORT_DIR/sim-report-long-60min.md" >> "$GITHUB_STEP_SUMMARY" || true
+        env:
+          SIM_REPORT_DIR: ${{ runner.temp }}/sim-report
       - name: Upload sim report
         if: ${{ !cancelled() }}
         timeout-minutes: 5
