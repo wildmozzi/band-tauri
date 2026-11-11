@@ -49,6 +49,8 @@ pub struct WorkerStats {
     pub skipped_frames: AtomicU64,
     /// 입력 또는 출력 콜백이 1초 넘게 멈췄다(장치 분리 등). 다시 돌면 false.
     pub device_stalled: AtomicBool,
+    /// 워커 스레드 우선순위 설정 결과(P1-2).
+    pub thread_prio: super::prio::PrioSlot,
 }
 
 /// 콜백이 이 시간 동안 멈추면 장치를 잃은 것으로 본다.
@@ -844,7 +846,7 @@ impl Worker {
     }
 
     pub fn run(mut self) {
-        let _prio = super::prio::promote_current_thread();
+        let _prio = super::prio::promote_engine_thread(&self.p.stats.thread_prio);
         log::info!("워커 시작: frame {} ch {}", self.frame, self.ich);
         while !self.p.stop.load(Ordering::Relaxed) {
             self.reconfigure_local();

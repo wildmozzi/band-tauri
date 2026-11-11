@@ -219,9 +219,22 @@ export interface EngineStats {
   devicePeriodMs?: number
   /** 실제로 열린 오디오 백엔드(`AudioBackendKind`, 입·출력이 다르면 `입력/출력`). 정지 상태면 빈 문자열 */
   backend?: string
+  /** 스레드 우선순위 설정 결과(MMCSS 등록 여부, 1ms 타이머) */
+  threadPriority?: ThreadPriorityStats
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
+}
+
+/** 엔진 스레드 우선순위 설정 결과(설계 문서 4절 `threadPriority`) */
+export type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
+
+export interface ThreadPriorityStats {
+  worker: ThreadPriority
+  netRecv: ThreadPriority
+  /** 오디오 I/O 스레드. 자체 WASAPI만 등록하고 cpal·ASIO는 unmanaged(백엔드가 관리) */
+  audio: ThreadPriority
+  timer1ms: boolean
 }
 
 // ============================================================================

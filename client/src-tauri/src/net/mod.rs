@@ -93,6 +93,8 @@ pub struct NetShared {
     tx_seq_retired: Mutex<std::collections::HashMap<TxKeyId, u32>>,
     epoch: Instant,
     stop: AtomicBool,
+    /// 수신 스레드 우선순위 설정 결과(P1-2).
+    pub recv_prio: crate::engine::prio::PrioSlot,
     jitter_settings: JitterSettings,
     allow_loopback: bool,
     /// UDP 릴레이 클라이언트(P1-4b). 토큰을 받기 전에는 None.
@@ -179,6 +181,7 @@ impl Net {
             prev_relay: RwLock::new(None),
             relay_tx_bytes: AtomicU64::new(0),
             relay_tx_packets: AtomicU64::new(0),
+            recv_prio: Default::default(),
         });
 
         let mut threads = Vec::new();
@@ -187,7 +190,7 @@ impl Net {
             std::thread::Builder::new()
                 .name("band-net-recv".into())
                 .spawn(move || {
-                    let _prio = crate::engine::prio::promote_current_thread();
+                    let _prio = crate::engine::prio::promote_engine_thread(&s.recv_prio);
                     recv_loop(&s)
                 })
                 .map_err(|e| format!("수신 스레드 생성 실패: {e}"))?,

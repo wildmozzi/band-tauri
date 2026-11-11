@@ -1221,7 +1221,8 @@ pub fn open_engine_streams(
         let _com = ComGuard::init();
         // MMCSS 등록과 변환 버퍼 할당은 스트림 시작 전에 끝낸다. 독점 2~3ms 주기에서는 시작 뒤에 하면
         // 첫 이벤트를 놓쳐 시작 글리치가 난다(L5).
-        let _prio = super::prio::promote_current_thread();
+        let prio = super::prio::promote_current_thread();
+        c.audio_thread.store(prio.status());
         let mut scratch = vec![0f32; SCRATCH_SAMPLES];
         let (mut input, mut output) = (input, output);
         let opened = (|| {

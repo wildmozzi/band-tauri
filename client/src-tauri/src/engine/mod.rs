@@ -71,6 +71,8 @@ pub struct Engine {
     measure_ends: Arc<Mutex<Option<rt::MeasureEnds>>>,
     /// 에코 측정 상태(워커와 공유).
     probe: Arc<Mutex<Option<EchoProbe>>>,
+    /// 엔진 수명 동안 쥐는 1ms 타이머 해상도(P1-2). `stop`에서 놓는다.
+    timer: Option<prio::TimerResolution>,
 }
 
 impl Engine {
@@ -94,6 +96,8 @@ impl Engine {
     ) -> Result<Engine, String> {
         let cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
         cfg.validate()?;
+        // 시작이 중간에 실패하면 drop으로 놓인다(Engine으로 옮긴 뒤에는 stop이 놓는다).
+        let timer = prio::TimerResolution::acquire();
         let counters = Arc::new(AudioCounters::default());
         let (in_prod, in_cons) = rt::input_ring();
         let mut input = InputRt::new(in_prod, counters.clone(), &cfg.input_channels, cfg.channels as usize);
@@ -160,6 +164,7 @@ impl Engine {
             measure_sh,
             measure_ends: Arc::new(Mutex::new(Some(measure_ends))),
             probe: probe.clone(),
+            timer: Some(timer),
         };
 
         if cancelled() {
@@ -337,6 +342,12 @@ impl Engine {
             input_silent_packets: c.input_silent_packets.load(Ordering::Relaxed),
             device_period_ms,
             backend: self.info.backend_label(),
+            thread_priority: prio::ThreadPriorityStats {
+                worker: ws.thread_prio.load(),
+                net_recv: self.net.as_ref().map(|n| n.shared().recv_prio.load()).unwrap_or(prio::ThreadPriority::Unmanaged),
+                audio: c.audio_thread.load(),
+                timer_1ms: self.timer.as_ref().is_some_and(|t| t.active()),
+            },
             peers,
             relay: self.net.as_ref().and_then(|n| n.relay_stats()),
         }
@@ -499,6 +510,8 @@ impl Engine {
                 log::error!("오디오 스레드 패닉");
             }
         }
+        // 모든 스레드가 끝난 뒤 타이머 해상도를 놓는다. take로 여러 번 불러도 timeEndPeriod는 한 번이다.
+        drop(self.timer.take());
     }
 }
 
