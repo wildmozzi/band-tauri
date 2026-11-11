@@ -87,6 +87,12 @@ fn rt_callbacks_do_not_allocate() {
     output.attach_measure(m_out);
     let click = Arc::new(ClickShared::default());
     output.attach_click(band_lib::engine::metronome::ClickRt::new(click.clone()));
+    // 녹음(P2-4b): 콜백이 녹음 끝점을 받고(시작), 청크마다 링에 쓰고, 정지 요청에 돌려주는 경로
+    let (rec_rt, rec_ctl) = band_lib::engine::record::record_port();
+    output.attach_record(rec_rt);
+    let mut recorder = band_lib::engine::record::Recorder::new(rec_ctl, 48_000);
+    let rec_dir = std::env::temp_dir().join(format!("band-rt-alloc-rec-{}", std::process::id()));
+    let mut stops = Vec::new();
     for (i, sh) in feed.bank.slots.iter().enumerate() {
         sh.set_gains((0.5, 0.4), (0.3, 0.2));
         sh.playing.store(i != LOCAL_SOURCE, Ordering::Relaxed);
@@ -122,6 +128,11 @@ fn rt_callbacks_do_not_allocate() {
                 msh.cap_on.store(false, Ordering::Release);
                 msh.cap_req.fetch_add(1, Ordering::Release);
             }
+            // 녹음 켬/끔 두 번(시작·정지 직후 콜백이 표시 구간 안에 든다)
+            2 | 22 => {
+                recorder.start(Default::default(), &rec_dir, Box::new(|_| None), 0).unwrap();
+            }
+            15 | 35 => stops.push(recorder.begin_stop().unwrap()),
             30 => feed.bank.slots[MAX_SOURCES - 1].state.store(SLOT_DRAIN, Ordering::Release),
             _ => {}
         }
@@ -141,7 +152,16 @@ fn rt_callbacks_do_not_allocate() {
         while in_cons.pop_slice(&mut sink) > 0 {}
         while ends.capture.pop_slice(&mut sink) > 0 {}
     }
+    // 정지 마무리(콜백이 끝점을 돌려준 뒤라 바로 끝난다)와 링 해제는 콜백 밖에서
+    let recs: Vec<_> = stops.into_iter().map(|j| j.finish().unwrap()).collect();
+    recorder.reclaim();
+    std::fs::remove_dir_all(&rec_dir).ok();
     assert_eq!(total, 0, "RT 콜백 경로에서 할당 {total}회");
+    // 녹음 경로가 실제로 돌았다(두 번 모두 트랙이 생기고 길이가 있음, 버림 없음)
+    assert_eq!(recs.len(), 2);
+    for r in &recs {
+        assert!(r.duration_sec > 0.0 && !r.tracks.is_empty() && r.dropped_frames == 0, "녹음 경로: {r:?}");
+    }
     // 경로가 실제로 돌았는지(공회전 방지)
     assert!(counters.xruns.load(Ordering::Relaxed) > 0, "언더런 경로");
     assert!(click.clicks.load(Ordering::Relaxed) > 0, "클릭 경로");

@@ -309,3 +309,98 @@ fn concealment_markers_follow_jitter_counter() {
     drop(a);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 녹음 켬/끔 순간 xrun(P2-4b). 같은 링크에서 1초 주기 20회를 ABBA(대조·녹음, 녹음·대조, …)로 교대한다. 녹음 주기는
+/// 400ms 뒤 녹음 시작, 600ms 뒤 정지. 대조 주기는 같은 박자에 아무것도 하지 않는다. xrun 시각을 1ms 간격으로 잡아
+/// 시작·정지 시각과 대조한다. 판정: 녹음 시작·정지 직후 창(앞 5ms ~ 호출이 끝난 뒤 50ms)에 든 xrun이 0개, 녹음 주기
+/// xrun 합이 대조 주기 합 + 2 이하(PR #64 판정과 같은 여유).
+///
+/// 배경: PR #64 ABBA 비교에서 128/2.5ms 켬 창 하나에 xrun이 늘 1개 나왔다. 원인은 녹음이 아니라 가짜 장치의 고정 시드
+/// 기상 지터(`bb.seed = 9`)였다 — 녹음을 전혀 켜지 않아도 엔진 시작 약 22초 뒤 같은 시각에 xrun 1개가 나고(시드를 바꾸면
+/// 시각이 옮겨감), 그 시각이 ABBA 순서상 늘 켬 창에 떨어졌다. 녹음 시작·정지 순간에 몰린 xrun은 없었다(PR 본문 수치).
+#[test]
+#[ignore = "realtime: 녹음 켬/끔 반복 xrun 시각 대조(PR 수치). 결정적 짝 tests/rt_alloc.rs rt_callbacks_do_not_allocate(녹음 핸드오프 무할당), engine::record::tests::prefaulted_rings_start_empty"]
+fn record_toggle_adds_no_xruns_at_start_or_stop() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let _g = RT_LOCK.lock();
+    const CYCLES: usize = 10;
+    for fmt in [RecordFormat::WavF32, RecordFormat::Flac] {
+        let mut ba = sine_backend();
+        ba.wake_jitter_us = 1000;
+        let mut bb = FakeBackend::silence(48_000);
+        bb.wake_jitter_us = 1000;
+        bb.seed = 9;
+        let (a, b) = pair(config(128, 2.5), ba, bb);
+        let b = Arc::new(b);
+        std::thread::sleep(Duration::from_secs(2));
+        let t0 = Instant::now();
+        let ms = move || t0.elapsed().as_secs_f64() * 1000.0;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (bm, st) = (b.clone(), stop.clone());
+        let mon = std::thread::spawn(move || {
+            let mut ev = vec![];
+            let mut last = bm.stats().xruns;
+            while !st.load(Ordering::Relaxed) {
+                let x = bm.stats().xruns;
+                if x != last {
+                    ev.push((ms(), x - last));
+                    last = x;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            ev
+        });
+        let dir = tmp(&format!("toggle-{fmt:?}"));
+        // 시작·정지 경계 (호출 전, 호출 끝, 녹음 주기인가)와 주기 구간 (시작, 끝, 녹음 주기인가)
+        let mut edges: Vec<(f64, f64, bool)> = vec![];
+        let mut cycles: Vec<(f64, f64, bool)> = vec![];
+        let mut start_ms: Vec<f64> = vec![];
+        let mut stop_ms: Vec<f64> = vec![];
+        for i in 0..CYCLES * 2 {
+            // ABBA: 링크·가짜 장치 지터가 천천히 떠다녀도 양쪽에 고르게 나뉜다
+            let rec = matches!(i % 4, 1 | 2);
+            let c0 = ms();
+            std::thread::sleep(Duration::from_millis(400));
+            let s = ms();
+            if rec {
+                b.record_start(RecordOptions { include_mix: true, format: fmt, ..Default::default() }, &dir).unwrap();
+                start_ms.push(ms() - s);
+            }
+            edges.push((s, ms(), rec));
+            std::thread::sleep(Duration::from_millis(600));
+            let s = ms();
+            if rec {
+                // 앱(`engine_record_stop`)과 같은 3단계: 마무리는 recorder 락 밖에서. 락을 쥔 채 마무리하면 감시 스레드의
+                // `stats()`가 그동안 막혀 그 사이 xrun이 정지 끝 시각으로 찍힌다(측정 편향).
+                let job = b.recorder().lock().begin_stop().unwrap();
+                let sum = job.finish().unwrap();
+                b.recorder().lock().reclaim();
+                assert_eq!(sum.dropped_frames, 0, "녹음 링 넘침");
+                stop_ms.push(ms() - s);
+            }
+            edges.push((s, ms(), rec));
+            cycles.push((c0, ms(), rec));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        stop.store(true, Ordering::Relaxed);
+        let ev = mon.join().unwrap();
+        let near = |rec: bool| -> u64 {
+            ev.iter().filter(|(t, _)| edges.iter().any(|&(s, e, r)| r == rec && *t >= s - 5.0 && *t <= e + 50.0)).map(|e| e.1).sum()
+        };
+        // 정지 직후 50ms는 다음 주기로 넘어갈 수 있으나 경계 창 판정이 따로 본다
+        let total = |rec: bool| -> u64 { ev.iter().filter(|(t, _)| cycles.iter().any(|&(s, e, r)| r == rec && *t >= s && *t < e)).map(|e| e.1).sum() };
+        let (n_ctl, n_rec, a_ctl, a_rec) = (near(false), near(true), total(false), total(true));
+        let max = |v: &[f64]| v.iter().cloned().fold(0.0, f64::max);
+        println!(
+            "TOGGLE {fmt:?} 128/2.5ms {CYCLES}+{CYCLES}회 ABBA: 대조(녹음 없음) xrun {a_ctl} (경계 창 {n_ctl}) | 녹음 켬/끔 xrun {a_rec} (경계 창 {n_rec}) | 시작 호출 최대 {:.2}ms, 정지 호출 최대 {:.2}ms | xrun 시각 {:?}",
+            max(&start_ms),
+            max(&stop_ms),
+            ev.iter().map(|e| e.0.round() as i64).collect::<Vec<_>>()
+        );
+        drop(b);
+        drop(a);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(n_rec, 0, "녹음 시작·정지 직후 xrun {n_rec}개: {ev:?} / {edges:?}");
+        assert!(a_rec <= a_ctl + 2, "녹음 켬/끔 구간 xrun 증가: {a_ctl} → {a_rec}");
+    }
+}
