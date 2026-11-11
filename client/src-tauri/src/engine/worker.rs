@@ -1409,6 +1409,10 @@ impl Worker {
 mod tune_sim;
 
 #[cfg(test)]
+#[path = "worker_long_sim.rs"]
+mod long_sim;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rand::{Rng, SeedableRng};
