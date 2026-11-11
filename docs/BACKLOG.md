@@ -55,7 +55,7 @@
 | P2-2 | **[사람]** 코드 서명 인증서 구매/등록(스마트 앱 컨트롤·SmartScreen 대응) | 서명된 설치본 | 대기 |
 | P2-3 | 공유 메트로놈(방장 기준, 각자 지연 보정한 클릭) | 2피어 시뮬레이션에서 클릭 정렬 오차 ≤ 2ms | 완료(PR #34 엔진·#36 UI·시그널링, 2026-11-11; **[사람]** 실장비 2대 클릭 시각 차 측정·청취) |
 | P2-3a | 메트로놈 후속: 출력 지연 미보고 장치는 루프백 offsetMs로 보정(#34 M2(a)), refClockUnsupported 처리(L4)·L6, 방장 이양 시 메트로놈 인계(#36 L1), 클릭 볼륨 영속(L5) | 테스트 | 완료(PR #53 화면·서버, #57 엔진 — 출력 지연 미보고 장치 루프백 보정, 2026-11-11; 후속: UI 장치별 offset 저장·안내, **[사람]** 비대칭 실측) |
-| P2-3c | 메트로놈 보정 UI(#57 후속): outputLatencySource·값 표시, 미보고 장치 루프백 측정 안내·링크, 측정 결과 엔진 적용·장치별 재적용 확인, TEST-SESSION.md 3.5절 | e2e | 리뷰 완료(PR #70 — 보정 상태 줄·측정 열기, 장치 구성 키별 localStorage 저장·엔진 시작 시 재적용; CI 대기; **[사람]** TEST-SESSION 3.5-8 실장비 확인; 후속: refClockUnsupported 안내 문구) |
+| P2-3c | 메트로놈 보정 UI(#57 후속): outputLatencySource·값 표시, 미보고 장치 루프백 측정 안내·링크, 측정 결과 엔진 적용·장치별 재적용 확인, TEST-SESSION.md 3.5절 | e2e | 완료(PR #70, 2026-11-11; **[사람]** TEST-SESSION 3.5-8 실장비 확인; 후속: refClockUnsupported 안내 문구) |
 | P2-3b | 방장 이양 기능을 앱에 만들 때 서버에서 dropMetronomeIfHostChanged 호출(지금은 DB 직접 변경만 → 조용한 방에서 감지 지연, #53 L1) | 서버 테스트 | 대기 (이양 기능 구현 시) |
 | P1-12a | 실장비 합주 테스트 가이드 `docs/TEST-SESSION.md` — PC 2대 한 세션으로 [사람] 확인 항목 묶어 진행 | 문서 | 완료(PR #55 docs/TEST-SESSION.md, 2026-11-11) |
 | P1-12b | 2대 테스트 마찰 제거(#55 가이드의 우회 절차 없애기): auto 시그널링 ws/wss 불일치, 개발 빌드에서 LAN 사설 IP 서버 허용(dev CSP), threadPriority·qos·CPU 진단 UI 표시 → 이후 TEST-SESSION.md 간소화 | e2e | 완료(PR #56, 2026-11-11; **[사람]** 실장비 2대 확인; 8080 외 포트는 server .env PORT/BAND_DEV_PROXY_PORTS로 허용) |
