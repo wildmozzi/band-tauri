@@ -35,48 +35,48 @@ export function PostDetail() {
 
   if (loading) {
     return (
-      <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px', textAlign: 'center' }}>
-        <p style={{ color: 'rgba(255, 255, 255, 0.5)' }}>로딩 중...</p>
+      <div style={{ maxWidth: '1400px', margin: '0 auto', padding: 'var(--space-6)', textAlign: 'center' }}>
+        <p style={{ color: 'var(--white-a50)' }}>로딩 중...</p>
       </div>
     )
   }
 
   if (!post) {
     return (
-      <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px', textAlign: 'center' }}>
-        <p style={{ color: 'rgba(255, 255, 255, 0.5)' }}>게시물을 찾을 수 없습니다.</p>
+      <div style={{ maxWidth: '1400px', margin: '0 auto', padding: 'var(--space-6)', textAlign: 'center' }}>
+        <p style={{ color: 'var(--white-a50)' }}>게시물을 찾을 수 없습니다.</p>
       </div>
     )
   }
 
   return (
-    <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px' }}>
+    <div style={{ maxWidth: '1400px', margin: '0 auto', padding: 'var(--space-6)' }}>
       {/* 뒤로가기 버튼 */}
       <button
         onClick={() => navigate('/community')}
         style={{
           background: 'transparent',
-          border: '1px solid rgba(255, 255, 255, 0.15)',
-          color: 'rgba(255, 255, 255, 0.7)',
-          padding: '8px 16px',
-          borderRadius: '6px',
+          border: '1px solid var(--white-a15)',
+          color: 'var(--white-a70)',
+          padding: 'var(--space-2) var(--space-4)',
+          borderRadius: 'var(--radius-sm)',
           cursor: 'pointer',
-          marginBottom: '24px',
+          marginBottom: 'var(--space-6)',
           fontSize: '14px',
         }}
       >
         ← 목록으로
       </button>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: '24px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 'var(--space-6)' }}>
         {/* 메인 콘텐츠 */}
         <div>
           {/* 메인 카드 */}
           <div
             style={{
-              background: 'rgba(18, 22, 45, 0.8)',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              borderRadius: '12px',
+              background: 'var(--panel-strong-a80)',
+              border: '1px solid var(--white-a10)',
+              borderRadius: 'var(--radius-xl)',
               overflow: 'hidden',
             }}
           >

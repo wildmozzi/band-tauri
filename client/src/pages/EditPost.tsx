@@ -88,8 +88,8 @@ export function EditPost() {
 
   if (loading) {
     return (
-      <div style={{ maxWidth: '900px', margin: '0 auto', padding: '24px', textAlign: 'center' }}>
-        <p style={{ color: 'rgba(255, 255, 255, 0.5)' }}>로딩 중...</p>
+      <div style={{ maxWidth: '900px', margin: '0 auto', padding: 'var(--space-6)', textAlign: 'center' }}>
+        <p style={{ color: 'var(--white-a50)' }}>로딩 중...</p>
       </div>
     )
   }
