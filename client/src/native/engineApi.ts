@@ -384,6 +384,14 @@ export function engineUnsubscribeMix(): Promise<null> {
   return invoke<null>('engine_unsubscribe_mix')
 }
 
+/**
+ * 진단 내보내기(P2-5): 저장 대화상자를 열고 진단 zip(엔진 통계 타임라인·설정·장치·앱/OS 정보·마스킹된 로그)을 쓴다.
+ * 저장한 경로, 취소하면 null.
+ */
+export function diagExport(): Promise<string | null> {
+  return invoke<string | null>('diag_export')
+}
+
 function toFloat32(data: unknown): Float32Array | null {
   if (data instanceof ArrayBuffer) {
     return data.byteLength % 4 === 0 ? new Float32Array(data) : null

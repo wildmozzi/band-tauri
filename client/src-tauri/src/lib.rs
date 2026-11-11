@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod diag;
 pub mod engine;
 pub mod manager;
 pub mod net;
@@ -11,11 +12,16 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
+                // 진단 내보내기(P2-5)에 담을 만큼 남긴다(기본 40KB·1개는 몇 분 분량뿐)
+                .max_file_size(1_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(2))
                 .build(),
         )
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(commands::EngineState::default())
+        .manage(commands::DiagState::default())
         .invoke_handler(tauri::generate_handler![
             commands::engine_list_devices,
             commands::engine_start,
@@ -38,8 +44,14 @@ pub fn run() {
             commands::engine_set_echo_mode,
             commands::engine_measure_echo_peer,
             commands::engine_cancel_measure,
+            commands::diag_export,
         ])
         .setup(|_app| {
+            // 엔진 통계 타임라인 기록(P2-5): 1초 간격, 최근 60분
+            let engine = _app.state::<commands::EngineState>().manager();
+            if let Err(e) = _app.state::<commands::DiagState>().spawn_recorder(engine) {
+                log::warn!("진단 기록 스레드 시작 실패: {e}");
+            }
             // 자동 업데이트 (P2-1): 엔드포인트·공개키는 tauri.conf.json plugins.updater, 절차는 docs/RELEASE.md
             #[cfg(desktop)]
             _app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -57,6 +69,7 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 // 종료 시 Bye 송신과 스레드 join
+                app.state::<commands::DiagState>().shutdown();
                 app.state::<commands::EngineState>().shutdown();
             }
         });

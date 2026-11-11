@@ -32,6 +32,10 @@ net/crypto.rs          ChaCha20-Poly1305 패킷 암호화
 net/peer.rs            피어 테이블, 홀펀칭 상태기계, keepalive, RTT
 net/stun.rs            STUN (기존 파서 이식)
 net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/토큰 갱신, relay-design.md)
+diag/mod.rs            진단(P2-5): 1초 간격 엔진 통계 타임라인 기록 스레드(최근 60분 링 버퍼)
+diag/timeline.rs       링 버퍼, 샘플 형식(JSONL)
+diag/mask.rs           개인정보 마스킹(IP 대역, 이메일, 토큰, id 가명, 사용자 폴더)
+diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 ```
 
 ### 1.1 스레드 모델
@@ -240,6 +244,7 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
 | `engine_set_echo_mode` | `{ peerId: string, enabled: boolean }` | `null` — 에코하는 쪽의 동의/해제. 켜기는 그 피어가 지금 요청 중(`PeerStats.echoRequested`)일 때만 된다(아니면 에러). 상대 요청이 끝나면 엔진이 스스로 끈다 |
 | `engine_measure_echo_peer` | `{ peerId: string, runs?: number, waitMs?: number }` | `EchoReport` — 측정하는 쪽. 그 피어에게 에코를 요청하고 동의를 `waitMs`(기본 30000, 최대 120000)까지 기다린 뒤 클릭 `runs`개(기본 8)로 잰다. 동의가 없으면 "수락하지 않았습니다" 에러 |
 | `engine_cancel_measure` | — | `null` — 진행 중인 측정 취소(진행 중인 측정 커맨드는 "취소" 에러로 끝난다) |
+| `diag_export` | — | `string | null` — 진단 내보내기(P2-5). Rust 쪽 저장 대화상자(zip 필터)를 열고 고른 경로에 진단 zip을 쓴 뒤 그 경로를 돌려준다. 취소하면 `null`. 경로는 프론트가 넘기지 않는다(임의 경로 쓰기 방지). 대화상자는 호출한 창에 모달로 붙고, 진행 중에 다시 부르면 "이미 진단을 내보내는 중입니다" 에러 |
 
 - 레벨 값(`inputLevel`, `outputLevel`, `PeerStats.level`)은 0..1 선형 RMS.
 - `PeerStats.targetMs` = 지터 버퍼 목표 깊이(1.2절 최종 목표). `bufferMs`가 이 값을 따라간다. `concealPct` = 최근 5초 은닉 프레임 / 생산 프레임(%, 손실 + 늦은 패킷 + 언더런, GOAL 2절 지표). `corrTimePct` = 최근 5초 중 깊이 보정(샘플 버림·삽입) 모드였던 패킷 비율(%), `maxCorrCents` = 재생 시작 이후 보정의 최대 국소 피치 편차(센트, 상한 약 4.3).
@@ -289,6 +294,14 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
   - 에코가 시작·끝날 때 측정하는 쪽은 그 피어의 지터 버퍼를 처음부터 다시 채운다(스트림 성격이 바뀜). 측정 뒤 상대가 에코를 멈출 때까지(최대 4초) 그 피어에게 무음을 보낸다(내 실제 소리가 되돌아오지 않게).
 
 `PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제).
+
+**진단 내보내기(P2-5, `diag/`)**
+- 기록: `band-diag` 스레드가 1초마다 `EngineManager::snapshot()`(엔진 슬롯 락 안에서 `Engine::stats()`, UI의 `engine_stats`와 같은 경로)으로 샘플을 링 버퍼(3600개 = 60분)에 넣는다. 엔진이 없으면 기록하지 않고, 엔진이 사라진 순간 `running:false` 정지 표시 샘플을 한 번 넣는다. RT 콜백 경로에는 아무것도 추가하지 않는다.
+- 샘플(JSONL 한 줄): `t`(유닉스 ms), `running`, `network`(합주/테스트, 정지 표시 샘플은 끝난 세션 값), `session`(`EngineManager` generation — 값이 바뀐 곳이 엔진 재시작 경계로, 누적 카운터가 0부터 다시 센다), `EngineStats`의 장치·지연·xrun·스트림 오류 값, `peers[]`(`peer` 가명, `state`, `path`, `rttMs`, `jitterMs`, `bufferMs`, `playoutMs`, `lossPct`, `late`·`concealed` 누적, `level`, 에코 상태), `relay`(주소는 대역만).
+- zip: `README.txt`, `meta.json`(앱 이름·버전, OS 종류·아키텍처·버전, 내보낸 시각, 타임라인 범위), `engine.json`(현재 또는 마지막 세션 `EngineConfig`, 마지막 샘플, `engine_list_devices` 결과), `timeline.jsonl`, `logs/*.log`(앱 로그 끝부분 최대 2MB, 마스킹).
+- 마스킹: IPv4 앞 두 옥텟(`a.b.x.x`)·IPv6 앞 두 그룹, 이메일·JWT·32자 이상 토큰 덩어리 제거, UUID·피어 id는 `id-` + SHA-256 앞 8 hex(같은 id는 같은 값, 솔트 없는 짧은 해시라 후보 id를 알면 되돌릴 수 있음 — 익명화가 아니라 가명), 사용자 폴더 이름(`C:\Users\<이름>`, `/Users/<이름>`, `/home/<이름>`, 공백 포함 다음 구분자까지) 제거. 32자 이상 덩어리라도 `/` 2개 이상과 `-`·`_`가 함께 있는 경로 조각은 남긴다(조각 하나가 16자 이상 숫자+문자면 가림). 오디오 장치 이름은 진단에 필요해 그대로 둔다.
+- 저장: 확장자를 `.zip`으로 바꾼 이름이 이미 있으면 `-1`, `-2`…를 붙인다(대화상자가 덮어쓰기를 확인하지 않은 파일). 같은 폴더의 `.part` 임시 파일에 쓴 뒤 이름을 바꾼다. zip 압축은 타임라인 락 밖에서 한다.
+- 앱 로그(`tauri-plugin-log` LogDir)는 파일당 1MB, 회전 파일 2개까지 남긴다.
 
 ## 5. 시그널링 (WS 서버 `server/src/services/wsService.ts`)
 
