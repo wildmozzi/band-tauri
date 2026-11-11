@@ -61,36 +61,36 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
       <div
         data-testid="comment"
         style={{
-          padding: '16px',
-          background: depth > 0 ? 'rgba(141, 123, 255, 0.05)' : 'rgba(0, 0, 0, 0.25)',
-          borderRadius: '8px',
-          border: `1px solid ${depth > 0 ? 'rgba(141, 123, 255, 0.15)' : 'rgba(255, 255, 255, 0.05)'}`,
-          marginBottom: '8px',
+          padding: 'var(--space-4)',
+          background: depth > 0 ? 'var(--violet-500-a05)' : 'var(--black-a25)',
+          borderRadius: 'var(--radius-md)',
+          border: `1px solid ${depth > 0 ? 'var(--violet-500-a15)' : 'var(--white-a05)'}`,
+          marginBottom: 'var(--space-2)',
         }}
       >
         {/* 댓글 헤더 */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
           <div style={{ fontSize: '14px' }}>
-            <span style={{ fontWeight: '600', color: 'rgba(255, 255, 255, 0.9)' }}>
+            <span style={{ fontWeight: '600', color: 'var(--white-a90)' }}>
               {comment.author_name}
             </span>
-            <span style={{ color: 'rgba(255, 255, 255, 0.4)', fontSize: '13px', marginLeft: '8px' }}>
+            <span style={{ color: 'var(--white-a40)', fontSize: '13px', marginLeft: 'var(--space-2)' }}>
               {formatTime(comment.created_at)}
               {comment.updated_at && comment.updated_at !== comment.created_at && (
-                <span style={{ marginLeft: '4px' }}>(수정됨)</span>
+                <span style={{ marginLeft: 'var(--space-1)' }}>(수정됨)</span>
               )}
             </span>
           </div>
           {isAuthor && !isEditing && (
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button
                 onClick={() => setIsEditing(true)}
                 style={{
-                  padding: '4px 8px',
-                  borderRadius: '4px',
+                  padding: 'var(--space-1) var(--space-2)',
+                  borderRadius: 'var(--radius-xs)',
                   border: 'none',
-                  background: 'rgba(141, 123, 255, 0.2)',
-                  color: '#a89fff',
+                  background: 'var(--violet-500-a20)',
+                  color: 'var(--violet-300)',
                   cursor: 'pointer',
                   fontSize: '12px',
                 }}
@@ -100,11 +100,11 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
               <button
                 onClick={() => setShowDeleteConfirm(true)}
                 style={{
-                  padding: '4px 8px',
-                  borderRadius: '4px',
+                  padding: 'var(--space-1) var(--space-2)',
+                  borderRadius: 'var(--radius-xs)',
                   border: 'none',
-                  background: 'rgba(255, 100, 100, 0.2)',
-                  color: '#ff6464',
+                  background: 'var(--coral-400-a20)',
+                  color: 'var(--coral-400)',
                   cursor: 'pointer',
                   fontSize: '12px',
                 }}
@@ -125,26 +125,26 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
               style={{
                 width: '100%',
                 padding: '10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(141, 123, 255, 0.3)',
-                background: 'rgba(0, 0, 0, 0.3)',
-                color: '#fff',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--violet-500-a30)',
+                background: 'var(--black-a30)',
+                color: 'var(--white)',
                 fontSize: '14px',
                 resize: 'vertical',
-                marginBottom: '8px',
+                marginBottom: 'var(--space-2)',
                 fontFamily: 'inherit',
               }}
             />
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button
                 onClick={handleSubmitEdit}
                 disabled={!editContent.trim() || submitting}
                 style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
+                  padding: '6px var(--space-3)',
+                  borderRadius: 'var(--radius-sm)',
                   border: 'none',
-                  background: editContent.trim() && !submitting ? '#8d7bff' : 'rgba(141, 123, 255, 0.3)',
-                  color: '#fff',
+                  background: editContent.trim() && !submitting ? 'var(--accent)' : 'var(--violet-500-a30)',
+                  color: 'var(--white)',
                   cursor: editContent.trim() && !submitting ? 'pointer' : 'not-allowed',
                   fontSize: '13px',
                   fontWeight: '600',
@@ -158,11 +158,11 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
                   setEditContent(comment.content)
                 }}
                 style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  padding: '6px var(--space-3)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--white-a15)',
                   background: 'transparent',
-                  color: 'rgba(255, 255, 255, 0.7)',
+                  color: 'var(--white-a70)',
                   cursor: 'pointer',
                   fontSize: '13px',
                 }}
@@ -172,7 +172,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
             </div>
           </div>
         ) : (
-          <p style={{ margin: 0, lineHeight: '1.6', fontSize: '15px', color: 'rgba(255, 255, 255, 0.85)' }}>
+          <p style={{ margin: 0, lineHeight: '1.6', fontSize: '15px', color: 'var(--white-a85)' }}>
             {comment.content}
           </p>
         )}
@@ -183,11 +183,11 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
             onClick={() => setIsReplying(!isReplying)}
             style={{
               marginTop: '10px',
-              padding: '4px 10px',
-              borderRadius: '4px',
+              padding: 'var(--space-1) 10px',
+              borderRadius: 'var(--radius-xs)',
               border: 'none',
               background: 'transparent',
-              color: 'rgba(141, 123, 255, 0.8)',
+              color: 'var(--violet-500-a80)',
               cursor: 'pointer',
               fontSize: '13px',
               fontWeight: '500',
@@ -199,7 +199,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
 
         {/* 답글 입력 폼 */}
         {isReplying && (
-          <div style={{ marginTop: '12px' }}>
+          <div style={{ marginTop: 'var(--space-3)' }}>
             <textarea
               value={replyContent}
               onChange={(e) => setReplyContent(e.target.value)}
@@ -208,13 +208,13 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
               style={{
                 width: '100%',
                 padding: '10px',
-                borderRadius: '6px',
-                border: '1px solid rgba(141, 123, 255, 0.3)',
-                background: 'rgba(0, 0, 0, 0.3)',
-                color: '#fff',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--violet-500-a30)',
+                background: 'var(--black-a30)',
+                color: 'var(--white)',
                 fontSize: '14px',
                 resize: 'vertical',
-                marginBottom: '8px',
+                marginBottom: 'var(--space-2)',
                 fontFamily: 'inherit',
               }}
             />
@@ -222,11 +222,11 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
               onClick={handleSubmitReply}
               disabled={!replyContent.trim() || submitting}
               style={{
-                padding: '6px 12px',
-                borderRadius: '6px',
+                padding: '6px var(--space-3)',
+                borderRadius: 'var(--radius-sm)',
                 border: 'none',
-                background: replyContent.trim() && !submitting ? '#8d7bff' : 'rgba(141, 123, 255, 0.3)',
-                color: '#fff',
+                background: replyContent.trim() && !submitting ? 'var(--accent)' : 'var(--violet-500-a30)',
+                color: 'var(--white)',
                 cursor: replyContent.trim() && !submitting ? 'pointer' : 'not-allowed',
                 fontSize: '13px',
                 fontWeight: '600',
@@ -240,25 +240,25 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
         {/* 삭제 확인 */}
         {showDeleteConfirm && (
           <div style={{
-            marginTop: '12px',
-            padding: '12px',
-            background: 'rgba(255, 100, 100, 0.1)',
-            borderRadius: '6px',
-            border: '1px solid rgba(255, 100, 100, 0.3)',
+            marginTop: 'var(--space-3)',
+            padding: 'var(--space-3)',
+            background: 'var(--coral-400-a10)',
+            borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--coral-400-a30)',
           }}>
-            <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: 'rgba(255, 255, 255, 0.8)' }}>
+            <p style={{ margin: '0 0 10px 0', fontSize: '14px', color: 'var(--white-a80)' }}>
               정말 이 댓글을 삭제하시겠습니까?
             </p>
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button
                 onClick={handleDelete}
                 disabled={submitting}
                 style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
+                  padding: '6px var(--space-3)',
+                  borderRadius: 'var(--radius-sm)',
                   border: 'none',
-                  background: submitting ? 'rgba(255, 100, 100, 0.5)' : '#ff6464',
-                  color: '#fff',
+                  background: submitting ? 'var(--coral-400-a50)' : 'var(--coral-400)',
+                  color: 'var(--white)',
                   cursor: submitting ? 'not-allowed' : 'pointer',
                   fontSize: '13px',
                   fontWeight: '600',
@@ -269,11 +269,11 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
               <button
                 onClick={() => setShowDeleteConfirm(false)}
                 style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  padding: '6px var(--space-3)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--white-a15)',
                   background: 'transparent',
-                  color: 'rgba(255, 255, 255, 0.7)',
+                  color: 'var(--white-a70)',
                   cursor: 'pointer',
                   fontSize: '13px',
                 }}
@@ -287,7 +287,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
 
       {/* 대댓글 렌더링 */}
       {comment.replies && comment.replies.length > 0 && (
-        <div style={{ marginTop: '4px' }}>
+        <div style={{ marginTop: 'var(--space-1)' }}>
           {comment.replies.map((reply) => (
             <CommentItem
               key={reply.id}

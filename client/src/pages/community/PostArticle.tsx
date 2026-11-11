@@ -18,12 +18,12 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
       {/* 헤더: 제목과 태그 */}
       <div
         style={{
-          padding: '24px 28px',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-          background: 'rgba(0, 0, 0, 0.2)',
+          padding: 'var(--space-6) 28px',
+          borderBottom: '1px solid var(--white-a08)',
+          background: 'var(--black-a20)',
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--space-4)' }}>
           <h1 style={{ fontSize: '28px', fontWeight: '700', margin: 0, flex: 1, lineHeight: '1.3' }}>
             {post.title || post.content}
           </h1>
@@ -34,13 +34,13 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
                   key={idx}
                   style={{
                     display: 'inline-block',
-                    background: 'rgba(141, 123, 255, 0.15)',
-                    color: '#a89fff',
-                    padding: '4px 10px',
-                    borderRadius: '6px',
+                    background: 'var(--violet-500-a15)',
+                    color: 'var(--violet-300)',
+                    padding: 'var(--space-1) 10px',
+                    borderRadius: 'var(--radius-sm)',
                     fontSize: '13px',
                     fontWeight: '500',
-                    border: '1px solid rgba(141, 123, 255, 0.3)',
+                    border: '1px solid var(--violet-500-a30)',
                   }}
                 >
                   #{tag}
@@ -51,25 +51,25 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
         </div>
 
         {/* 작성자 정보 및 수정/삭제 버튼 */}
-        <div style={{ marginTop: '12px', fontSize: '14px', color: 'rgba(255, 255, 255, 0.6)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ marginTop: 'var(--space-3)', fontSize: '14px', color: 'var(--white-a60)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <span style={{ fontSize: '18px', marginRight: '8px' }}>
+            <span style={{ fontSize: '18px', marginRight: 'var(--space-2)' }}>
               {DETAIL_INSTRUMENTS.find(i => i.id === post.instrument)?.icon}
             </span>
-            <span style={{ fontWeight: '600', color: 'rgba(255, 255, 255, 0.85)' }}>{post.author_name}</span>
+            <span style={{ fontWeight: '600', color: 'var(--white-a85)' }}>{post.author_name}</span>
             <span style={{ margin: '0 6px' }}>·</span>
             <span>{formatRelativeTime(post.created_at)}</span>
           </div>
           {isAuthor && (
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button
                 onClick={onEdit}
                 style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(141, 123, 255, 0.3)',
-                  background: 'rgba(141, 123, 255, 0.1)',
-                  color: '#a89fff',
+                  padding: '6px var(--space-3)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--violet-500-a30)',
+                  background: 'var(--violet-500-a10)',
+                  color: 'var(--violet-300)',
                   cursor: 'pointer',
                   fontSize: '13px',
                   fontWeight: '500',
@@ -80,11 +80,11 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
               <button
                 onClick={onDelete}
                 style={{
-                  padding: '6px 12px',
-                  borderRadius: '6px',
-                  border: '1px solid rgba(255, 100, 100, 0.3)',
-                  background: 'rgba(255, 100, 100, 0.1)',
-                  color: '#ff6464',
+                  padding: '6px var(--space-3)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--coral-400-a30)',
+                  background: 'var(--coral-400-a10)',
+                  color: 'var(--coral-400)',
                   cursor: 'pointer',
                   fontSize: '13px',
                   fontWeight: '500',
@@ -103,7 +103,7 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
 
         {/* 이미지 갤러리 */}
         {post.images && post.images.length > 0 && (
-          <div style={{ marginTop: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ marginTop: 'var(--space-5)', display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
             {post.images.map((imageUrl, idx) => (
               <img
                 key={idx}
@@ -111,8 +111,8 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
                 alt={`첨부 이미지 ${idx + 1}`}
                 style={{
                   maxWidth: '100%',
-                  borderRadius: '8px',
-                  border: '1px solid rgba(255, 255, 255, 0.1)',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--white-a10)',
                 }}
               />
             ))}
@@ -123,9 +123,9 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
       {/* 좋아요 */}
       <div
         style={{
-          padding: '20px 28px',
-          borderTop: '1px solid rgba(255, 255, 255, 0.08)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
+          padding: 'var(--space-5) 28px',
+          borderTop: '1px solid var(--white-a08)',
+          borderBottom: '1px solid var(--white-a08)',
           display: 'flex',
           justifyContent: 'center',
         }}
@@ -139,13 +139,13 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
-            gap: '8px',
-            padding: '8px 16px',
-            borderRadius: '20px',
+            gap: 'var(--space-2)',
+            padding: 'var(--space-2) var(--space-4)',
+            borderRadius: 'var(--radius-pill)',
             transition: 'all 0.2s',
           }}
           onMouseOver={(e) => {
-            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'
+            e.currentTarget.style.background = 'var(--white-a05)'
             e.currentTarget.style.transform = 'scale(1.05)'
           }}
           onMouseOut={(e) => {
@@ -159,7 +159,7 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
           <span style={{
             fontSize: '16px',
             fontWeight: '600',
-            color: post.liked_by_user ? '#ff7ab8' : 'rgba(255, 255, 255, 0.7)'
+            color: post.liked_by_user ? 'var(--pink-400)' : 'var(--white-a70)'
           }}>
             {post.likes_count}
           </span>

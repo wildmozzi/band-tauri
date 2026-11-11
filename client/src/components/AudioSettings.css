@@ -754,6 +754,13 @@
   line-height: 1.6;
 }
 
+/* 다운로드 버튼(인라인 a)의 패딩이 위 안내문 줄을 덮지 않게 블록으로 띄운다 (P3-12c) */
+.native-only-notice .btn-primary {
+  display: inline-block;
+  margin-top: 20px;
+  text-decoration: none;
+}
+
 /* Error State */
 .error-state {
   text-align: center;
