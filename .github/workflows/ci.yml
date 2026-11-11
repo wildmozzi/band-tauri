@@ -1,13 +1,19 @@
 name: CI
 
-# 실행 위치: 이 리포 전용 self-hosted runner(개발 PC, Windows, 라벨 band-tauri).
-# GitHub 호스티드 러너는 비공개 리포 무료 시간(월 2,000분, Windows 2배)을 다 써서 2026-11-10에 멈췄다(P3-0b).
-# 러너 2대(jw-pc-band, jw-pc-band-2)가 잡을 나눠 돈다. 바뀐 경로에 해당하는 잡만 돌려 시간을 아낀다(push to overhaul/develop은 전부).
+# 실행 위치: GitHub 호스티드 러너(P3-0c). 리포가 공개라 호스티드 러너는 무료·무제한이다.
+# self-hosted runner는 쓰지 않는다 — 공개 리포에서는 외부 포크 PR이 러너 PC에서 임의 코드를 실행할 수 있다.
+# Rust 엔진·realtime은 windows-latest(타깃 OS), 나머지는 ubuntu-latest(빠름).
+# PR은 바뀐 경로에 해당하는 잡만 돈다. develop push·수동 실행(workflow_dispatch)은 전부 돈다.
+# overhaul push는 돌지 않는다 — overhaul에는 PR CI를 통과한 것만 들어오고 문서 커밋이 잦다. 필요하면 수동 실행.
+#
+# 외부 포크 PR 안전: pull_request_target을 쓰지 않는다. 이 워크플로는 secrets를 하나도 참조하지 않는다
+# (github.token은 포크 PR에서 읽기 전용으로 자동 강등된다). 비밀값이 필요한 스텝을 여기 넣지 말 것.
 
 on:
   pull_request:
   push:
-    branches: [develop, overhaul]
+    branches: [develop]
+  workflow_dispatch:
 
 # 최소 권한: 체크아웃(contents), 변경 파일 목록(paths-filter → pull-requests), 아티팩트 업로드(actions).
 permissions:
@@ -24,27 +30,31 @@ defaults:
     shell: bash
 
 env:
-  # Rust 빌드 산출물 위치(CARGO_TARGET_DIR)는 러너마다 다르게 각 러너 폴더의 .env에서 정한다
-  # (C:actions-runner.env → .cargo-target/ci, C:actions-runner-2.env → .cargo-target/ci-2).
-  # 러너 2대가 같은 폴더를 쓰면 cargo 잠금으로 서로 기다린다. 작업자 워크트리 공유 target과도 분리.
   CARGO_TERM_COLOR: always
+  # CI는 매번 새로 빌드한다: 증분 빌드 산출물은 rust-cache 크기만 키운다.
+  CARGO_INCREMENTAL: 0
+  # 디버그 정보는 줄 번호만(패닉 백트레이스용) — 링크 시간·캐시 크기를 줄인다.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
-# 모든 잡·스텝에 timeout-minutes를 둔다(P3-0). 값은 정상 소요의 약 2~3배.
+# 모든 잡·스텝에 timeout-minutes를 둔다(P3-0): 네트워크(apt, crates.io, npm)가 멈춰도 잡이 6시간 기본값까지
+# 매달리지 않고 빨리 실패하게 한다. 값은 정상 소요의 약 2~3배.
 
 jobs:
   changes:
     name: Changed paths
-    runs-on: [self-hosted, band-tauri]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
+    # PR이 아니면(develop push, workflow_dispatch) 필터 없이 전부 돈다.
     outputs:
-      engine: ${{ github.event_name == 'push' || steps.f.outputs.engine == 'true' }}
-      relay: ${{ github.event_name == 'push' || steps.f.outputs.relay == 'true' }}
-      client: ${{ github.event_name == 'push' || steps.f.outputs.client == 'true' }}
-      server: ${{ github.event_name == 'push' || steps.f.outputs.server == 'true' }}
+      engine: ${{ github.event_name != 'pull_request' || steps.f.outputs.engine == 'true' }}
+      relay: ${{ github.event_name != 'pull_request' || steps.f.outputs.relay == 'true' }}
+      client: ${{ github.event_name != 'pull_request' || steps.f.outputs.client == 'true' }}
+      server: ${{ github.event_name != 'pull_request' || steps.f.outputs.server == 'true' }}
     steps:
-      - uses: actions/checkout@v4
-        timeout-minutes: 5
+      # PR에서는 paths-filter가 API로 변경 파일 목록을 읽는다(체크아웃 불필요).
       - uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
         id: f
         timeout-minutes: 3
         with:
@@ -76,7 +86,7 @@ jobs:
     name: Rust engine (Windows)
     needs: changes
     if: needs.changes.outputs.engine == 'true'
-    runs-on: [self-hosted, band-tauri]
+    runs-on: windows-latest
     timeout-minutes: 45
     defaults:
       run:
@@ -85,14 +95,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
-      - name: Toolchain PATH (rustup, CMake)
-        timeout-minutes: 1
-        run: |
-          echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$LOCALAPPDATA/Microsoft/WinGet/Packages/Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe/cmake-4.4.4-windows-x86_64/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
+        with:
+          workspaces: client/src-tauri
       - name: Placeholder frontend dist (tauri::generate_context! 요구)
         timeout-minutes: 1
-        run: mkdir -p ../dist && { [ -f ../dist/index.html ] || echo '<!doctype html>' > ../dist/index.html; }
+        run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
       - name: Clippy
         timeout-minutes: 20
         run: cargo clippy --all-targets -- -D warnings
@@ -102,13 +115,14 @@ jobs:
 
   realtime:
     # 벽시계 의존 통합 테스트(tests/*.rs의 `#[ignore = "realtime: ..."]`)만 돈다. 단위 테스트의 ignore(known-bug 재현)는
-    # `kind(test)` 필터로 제외한다. 각 테스트는 별도 프로세스에서 하나씩 돌고, 실패하면 최대 2번 더(총 3회) 재시도한다.
+    # `kind(test)` 필터로 제외한다. 가짜 장치를 실제 스레드·실제 시계로 돌려 은닉·끊김·지연 임계를 재므로
+    # 러너 스케줄링에 흔들린다. 각 테스트는 별도 프로세스에서 하나씩 돌고, 실패하면 최대 2번 더(총 3회) 재시도한다.
+    # 3회 모두 실패하면 잡이 실패한다. 재시도 끝에 통과한 테스트는 nextest 요약에 FLAKY로 남는다.
     # 판별: 같은 시나리오의 결정적 짝이 `rust` 잡에 있다. 짝이 녹색인데 여기만 실패하면 실행 환경, 짝도 실패하면 엔진 회귀다.
-    # 주의: self-hosted(개발 PC)는 작업자 빌드와 CPU를 나눠 쓴다 — 실패 시 PC 부하도 확인할 것.
     name: Rust realtime (Windows, 3회 재시도)
     needs: [changes, rust]
     if: needs.changes.outputs.engine == 'true'
-    runs-on: [self-hosted, band-tauri]
+    runs-on: windows-latest
     timeout-minutes: 45
     defaults:
       run:
@@ -117,18 +131,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
-      - name: Toolchain PATH (rustup, CMake)
-        timeout-minutes: 1
-        run: |
-          echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
-          echo "$LOCALAPPDATA/Microsoft/WinGet/Packages/Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe/cmake-4.4.4-windows-x86_64/bin" >> "$GITHUB_PATH"
-      # install-action은 pwsh(PowerShell 7)가 필요해 개발 PC에서 실패한다 — 없을 때만 1회 설치(self-hosted라 이후 유지).
-      - name: Ensure cargo-nextest
-        timeout-minutes: 15
-        run: command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
+        with:
+          workspaces: client/src-tauri
+          key: realtime
+      - uses: taiki-e/install-action@v2
+        timeout-minutes: 5
+        with:
+          tool: cargo-nextest
       - name: Placeholder frontend dist (tauri::generate_context! 요구)
         timeout-minutes: 1
-        run: mkdir -p ../dist && { [ -f ../dist/index.html ] || echo '<!doctype html>' > ../dist/index.html; }
+        run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
       - name: Build tests
         timeout-minutes: 20
         run: cargo nextest run --no-run
@@ -140,7 +156,7 @@ jobs:
     name: Relay (clippy + test)
     needs: changes
     if: needs.changes.outputs.relay == 'true'
-    runs-on: [self-hosted, band-tauri]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
       run:
@@ -149,26 +165,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
-      - name: Toolchain PATH (rustup)
-        timeout-minutes: 1
-        run: echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
+        with:
+          workspaces: relay
       - name: Clippy
         timeout-minutes: 10
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
         timeout-minutes: 10
         run: cargo test --locked -- --nocapture
-      # Docker 빌드: 개발 PC에 Docker가 없으면 건너뛴다(릴리스 전 수동 확인 — BACKLOG P3-0b 메모).
-      - name: Docker build (push 없음, Docker 있을 때만)
+      - name: Docker build (push 없음)
         timeout-minutes: 10
-        run: |
-          if command -v docker >/dev/null 2>&1; then docker build -t band-relay:ci .; else echo "docker 없음 — 건너뜀"; fi
+        run: docker build -t band-relay:ci .
 
   client:
     name: Client (build + test)
     needs: changes
     if: needs.changes.outputs.client == 'true'
-    runs-on: [self-hosted, band-tauri]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -194,10 +213,12 @@ jobs:
   e2e:
     # 웹(비 Tauri) E2E: Playwright + chromium. Supabase(Auth/REST/Realtime)·서버 API·시그널링 WS·토스 SDK는
     # 전부 브라우저 안에서 가로챈다(client/e2e/mocks). 운영 DB에 접속하지 않고 비밀값도 쓰지 않는다.
+    # 가짜 엔드포인트로 따로 빌드한 앱(client/e2e/vite.config.ts)을 vite preview로 띄운다. 실패 시 trace·스크린샷을 올린다.
+    # 시각 회귀는 ubuntu에서 *-linux.png 스냅샷과 비교한다(client/e2e/__screenshots__, 경로 규칙은 playwright.config.ts).
     name: Web E2E (Playwright, chromium)
     needs: changes
     if: needs.changes.outputs.client == 'true' || needs.changes.outputs.server == 'true'
-    runs-on: [self-hosted, band-tauri]
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     defaults:
       run:
@@ -214,16 +235,34 @@ jobs:
       - run: npm ci
         timeout-minutes: 8
         working-directory: .
-      # self-hosted: 브라우저는 %LOCALAPPDATA%\ms-playwright에 남아 있어 이미 있으면 바로 끝난다.
-      - name: Install chromium
+      - name: Playwright version
+        id: pw
+        timeout-minutes: 1
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Restore Playwright browsers
+        id: pw-cache
+        timeout-minutes: 3
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: Install chromium (+ OS deps)
+        if: steps.pw-cache.outputs.cache-hit != 'true'
         timeout-minutes: 10
-        run: npx playwright install chromium
+        run: npx playwright install --with-deps chromium
+      - name: Install OS deps (브라우저 캐시 적중)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 10
+        run: npx playwright install-deps chromium
       - name: Typecheck e2e
         timeout-minutes: 3
         run: npm run e2e:typecheck
       - name: E2E
         timeout-minutes: 10
         run: npm run e2e
+      # 성공해도 올린다: CI는 retries 1이라 첫 시도 실패 → 재시도 통과(flaky)면 잡이 녹색이다.
+      # trace는 실패한 시도만 남으므로(retain-on-failure) flaky 증거가 이 아티팩트에 남는다.
+      # 시각 회귀가 실패하면 실제 스크린샷(*-actual.png)도 여기 남는다 — linux 스냅샷 갱신에 쓴다.
       - name: Upload Playwright report + traces
         if: ${{ !cancelled() }}
         timeout-minutes: 5
@@ -235,14 +274,17 @@ jobs:
             client/e2e/.report/
           retention-days: 7
           if-no-files-found: ignore
+          # 결과 디렉터리 이름이 '.'으로 시작한다(.results/.report) — v4.4부터 숨김 파일은 기본 제외
           include-hidden-files: true
 
   server:
     name: Server (build + test)
     needs: changes
     if: needs.changes.outputs.server == 'true'
-    runs-on: [self-hosted, band-tauri]
+    runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      FFMPEG_DIR: ${{ github.workspace }}/.ffmpeg
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
@@ -251,13 +293,48 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      # ffmpeg(libopus 포함)는 개발 PC에 winget(Gyan.FFmpeg)으로 설치돼 있다. 찾아서 PATH에 올린다.
-      - name: Put ffmpeg on PATH
-        timeout-minutes: 2
+      # ffmpeg 설치(stem Opus 인코딩 테스트). apt-get이 50분 멈춘 사례가 있어 순서를 바꿨다:
+      # 1) 캐시된 정적 바이너리 → 2) 정적 바이너리 다운로드(재시도·시간 제한) → 3) apt(재시도·시간 제한).
+      - name: Restore ffmpeg cache
+        id: ffmpeg-cache
+        timeout-minutes: 3
+        uses: actions/cache@v4
+        with:
+          path: .ffmpeg
+          # BtbN 정적 빌드(GPL, libopus 포함). 릴리스 브랜치(n7.1 → n8.1 …)가 돌아가며 사라지므로 파일 이름을
+          # 고정하지 않고, 캐시가 없을 때만 latest 릴리스에서 가장 오래된 유지 브랜치를 고른다. 키를 바꾸면 새로 받는다.
+          key: ffmpeg-btbn-linux64-gpl-v2
+      - name: Download static ffmpeg
+        id: ffmpeg-static
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 4
+        env:
+          # 공개 릴리스 조회용 자동 토큰(리포 secret 아님, 포크 PR에서는 읽기 전용).
+          GH_TOKEN: ${{ github.token }}
         run: |
-          d=$(ls -d "$LOCALAPPDATA"/Microsoft/WinGet/Packages/Gyan.FFmpeg*/ffmpeg-*/bin 2>/dev/null | sort -V | tail -1)
-          if [ -z "$d" ]; then echo "ffmpeg 없음 — winget install Gyan.FFmpeg 필요"; exit 1; fi
-          echo "$d" >> "$GITHUB_PATH"
+          set -euo pipefail
+          mkdir -p "$FFMPEG_DIR"
+          asset=$(gh release view latest -R BtbN/FFmpeg-Builds --json assets -q '.assets[].name' \
+            | grep -E '^ffmpeg-n[0-9.]+-latest-linux64-gpl-[0-9.]+\.tar\.xz$' | sort -V | head -1)
+          echo "asset: $asset"
+          curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 -o /tmp/ffmpeg.tar.xz \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$asset"
+          tar -xJf /tmp/ffmpeg.tar.xz -C "$FFMPEG_DIR" --strip-components=2 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'
+          "$FFMPEG_DIR/ffmpeg" -hide_banner -encoders | grep -q libopus
+      - name: Install ffmpeg via apt (fallback)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true' && steps.ffmpeg-static.outcome != 'success'
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          rm -rf "$FFMPEG_DIR"
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60"
+          timeout 180 sudo apt-get $APT update
+          timeout 300 sudo apt-get $APT install -y --no-install-recommends ffmpeg
+      - name: Put ffmpeg on PATH
+        timeout-minutes: 1
+        run: |
+          if [ -x "$FFMPEG_DIR/ffmpeg" ]; then echo "$FFMPEG_DIR" >> "$GITHUB_PATH"; fi
       - name: Check ffmpeg
         timeout-minutes: 1
         run: ffmpeg -hide_banner -version | head -1 && ffmpeg -hide_banner -encoders | grep libopus
