@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
+import { MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from './rooms/roomModel'
 import { createRoom } from '../services/roomApi'
 import { validateRoomPasswordInput, ROOM_PASSWORD_MAX } from '../contexts/room/roomAccess'
 
@@ -31,7 +32,7 @@ interface InstrumentSlot {
 }
 
 export function CreateRoom() {
-  const { user } = useAuth()
+  const { user, loading: authLoading } = useAuth()
   const navigate = useNavigate()
 
   const [title, setTitle] = useState('')
@@ -54,10 +55,10 @@ export function CreateRoom() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // 로그인 안 되어 있으면 로그인 페이지로
+  // 로그인 안 되어 있으면 로그인 페이지로 (렌더 중 navigate() 대신 <Navigate>, 세션 복원 중엔 기다림 — P3-12 ⑥)
   if (!user) {
-    navigate('/auth', { state: { from: '/rooms/create' } })
-    return null
+    if (authLoading) return null
+    return <Navigate to="/auth" replace state={{ from: '/rooms/create' }} />
   }
 
   const handleTagToggle = (tag: string) => {
@@ -196,18 +197,20 @@ export function CreateRoom() {
             </div>
 
             <div className="form-group">
-              <label htmlFor="maxParticipants" title="방장·연주자·로그인 관람자를 합친 인원. 로그인하지 않은 관람자는 빈자리가 있을 때만 들어옵니다.">최대 인원(관람 포함)</label>
+              <label htmlFor="maxParticipants">{MAX_PARTICIPANTS_LABEL}</label>
               <select
                 id="maxParticipants"
                 value={maxParticipants}
                 onChange={(e) => setMaxParticipants(Number(e.target.value))}
+                aria-describedby="maxParticipants-hint"
               >
-                {[2, 4, 6, 8, 10, 12, 16, 20].map(n => (
+                {MAX_PARTICIPANT_OPTIONS.map(n => (
                   <option key={n} value={n}>
-                    {n}명
+                    {maxParticipantsOptionLabel(n)}
                   </option>
                 ))}
               </select>
+              <small id="maxParticipants-hint" className="form-hint">{MAX_PARTICIPANTS_HINT}</small>
             </div>
           </div>
 

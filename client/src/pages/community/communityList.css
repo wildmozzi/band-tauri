@@ -1,0 +1,31 @@
+/* 커뮤니티 목록 카드: 제목 링크가 카드 전체를 덮는다 (stretched link — P3-12 ⑤) */
+.community-post-card {
+  position: relative;
+}
+
+.community-post-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.community-post-link::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+}
+
+.community-post-link:focus-visible {
+  outline: none;
+}
+
+.community-post-card:has(.community-post-link:focus-visible) {
+  outline: 2px solid rgba(141, 123, 255, 0.8);
+  outline-offset: 2px;
+}
+
+/* 좋아요·태그는 링크 위에 올라와 따로 눌린다 */
+.community-post-actions {
+  position: relative;
+  z-index: 1;
+}

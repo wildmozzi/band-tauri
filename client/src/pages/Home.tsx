@@ -2,6 +2,9 @@ import { Link } from 'react-router-dom'
 import { PlanStatus } from '../components/PlanStatus'
 import { AdBanner } from '../components/AdBanner'
 import { useAuth } from '../contexts/useAuth'
+import { DesktopDownloadButton } from '../components/DesktopDownloadButton'
+import { SERVICE_NAME } from '../lib/brand'
+import { MAX_PERFORMERS } from '../native/engineApi'
 
 type FeaturePillar = {
   title: string
@@ -10,30 +13,31 @@ type FeaturePillar = {
   badge: string
 }
 
+// 사실만 적는다 (P3-12 ③): 측정되지 않은 지연 수치·리전·경쟁사명은 쓰지 않는다
 const FEATURE_PILLARS: FeaturePillar[] = [
   {
-    title: '초저지연 합주',
-    description: '다중 엣지 시그널링 + UDP 가속으로 20ms 이하 지연을 유지합니다.',
-    details: '서울 · 도쿄 · LA 리전에 동시 배포된 네트워크 스택',
+    title: '데스크톱 앱 합주',
+    description: `저지연 네이티브 오디오 엔진으로 최대 ${MAX_PERFORMERS}명이 함께 연주합니다.`,
+    details: 'Windows 데스크톱 앱 · WASAPI 독점 모드 저지연 출력 · Opus 코덱 (ASIO 지원 예정)',
     badge: 'Live Rooms',
   },
   {
-    title: '개인 레코딩 스튜디오',
-    description: '브라우저에서 바로 아이디어를 캡처하고 스템을 정리하세요.',
-    details: 'Web Audio 기반 멀티트랙, WAV/MP3 내보내기 로드맵',
-    badge: 'Creator',
+    title: '웹 관람',
+    description: '설치 없이 브라우저에서 합주를 듣고 채팅으로 참여합니다.',
+    details: '연주 참여는 데스크톱 앱에서',
+    badge: 'Watch',
   },
   {
     title: '커뮤니티 피드',
-    description: '합주 파트너를 찾고 프로젝트를 공유하며 루프를 교환합니다.',
-    details: '멤버십 · 오픈 세션 · 비공개 팀 기능',
+    description: '합주 파트너를 찾고 프로젝트를 공유합니다.',
+    details: '악기별 게시판 · 태그 · 좋아요 · 댓글',
     badge: 'Community',
   },
   {
-    title: '믹스 랩',
-    description: '레벨/팬/FX를 조정해 실시간으로 믹스를 스케치하세요.',
-    details: 'AI 기반 밸런스 제안과 매치드 리퍼런스 계획',
-    badge: 'Mix Lab',
+    title: '녹음 · 믹스 랩',
+    description: '브라우저에서 아이디어를 녹음하고 레벨/팬을 조정해 믹스를 스케치합니다.',
+    details: '웹 녹음 · Mix Lab',
+    badge: 'Creator',
   },
 ]
 
@@ -43,35 +47,30 @@ export function Home() {
   return (
     <div className="home-page">
       <header className="hero">
-        <p className="eyebrow">SYNCROOM INSPIRED · WEB DEMO</p>
-        <h1>
-          <br />
-          초저지연 온라인 합주실
-        </h1>
+        <p className="eyebrow">{SERVICE_NAME}</p>
+        <h1>온라인 합주실</h1>
         <p className="lead">
-          IndigoMuse는 웹을 시작으로 데스크톱 · 모바일까지 확장되는 통합 합주 플랫폼입니다. 개인 녹음부터 커뮤니티,
-          믹싱 실험까지 하나의 타임라인에서 이어집니다.
+          연주는 저지연 오디오 엔진을 갖춘 데스크톱 앱에서 최대 {MAX_PERFORMERS}명이 함께, 관람과 채팅은 웹에서 설치 없이.
+          커뮤니티와 녹음·믹스 도구도 함께 씁니다.
         </p>
         <div className="hero-actions">
           <Link to="/rooms" className="primary-cta">
             합주실 열기
           </Link>
-          <a href="#roadmap" className="ghost-cta">
-            제품 로드맵
-          </a>
+          <DesktopDownloadButton className="ghost-cta" />
         </div>
         <div className="hero-stats">
           <div>
-            <strong>18 ms</strong>
-            <span>평균 왕복 지연</span>
+            <strong>최대 {MAX_PERFORMERS}명</strong>
+            <span>동시 연주 (데스크톱 앱)</span>
           </div>
           <div>
-            <strong>3 지역</strong>
-            <span>KR · JP · US 엣지</span>
+            <strong>웹 관람</strong>
+            <span>설치 없이 듣기 · 채팅</span>
           </div>
           <div>
-            <strong>256 kbps</strong>
-            <span>양방향 오디오</span>
+            <strong>Windows</strong>
+            <span>WASAPI 저지연(독점 모드) · ASIO 예정</span>
           </div>
         </div>
       </header>
@@ -90,40 +89,25 @@ export function Home() {
           ))}
         </section>
 
-        <section id="roadmap" className="panel roadmap-section">
+        <section id="how-it-works" className="panel roadmap-section">
           <div className="section-head">
             <div>
-              <p className="eyebrow">Roadmap</p>
-              <h2>웹 → 데스크톱 → 모바일까지 확장</h2>
+              <p className="eyebrow">How it works</p>
+              <h2>연주는 데스크톱, 관람은 웹</h2>
             </div>
           </div>
           <div className="roadmap-grid">
             <article className="roadmap-card">
-              <h3>Web Beta</h3>
-              <p>합주실 · 개인 녹음 · 커뮤니티 피드를 하나의 앱으로 통합합니다.</p>
-              <ul>
-                <li>WebRTC 기반 저지연 오디오</li>
-                <li>세션 프리셋 / 샘플 공유</li>
-                <li>믹스 랩 & 루프 스토리지</li>
-              </ul>
+              <h3>1. 합주실 찾기</h3>
+              <p>공개 합주실을 둘러보거나 방을 만들어 초대 링크를 공유합니다.</p>
             </article>
             <article className="roadmap-card">
-              <h3>Desktop Studio</h3>
-              <p>Electron + 네이티브 오디오 드라이버 연동으로 96kHz까지 확장.</p>
-              <ul>
-                <li>ASIO / Core Audio Bridge</li>
-                <li>오프라인 프로젝트 · 로컬 캐시</li>
-                <li>멀티 모니터 믹스 콘솔</li>
-              </ul>
+              <h3>2. 데스크톱 앱으로 연주</h3>
+              <p>데스크톱 앱에서 오디오 장치를 고르고 연주에 참여합니다. 연주자는 방마다 최대 {MAX_PERFORMERS}명입니다.</p>
             </article>
             <article className="roadmap-card">
-              <h3>Mobile Companion</h3>
-              <p>외부 인터페이스 없이도 아이디어 캡처 및 커뮤니티 업데이트 지원.</p>
-              <ul>
-                <li>iOS / Android 네이티브 모듈</li>
-                <li>Low-power Monitoring</li>
-                <li>세션 알림 · DM</li>
-              </ul>
+              <h3>3. 웹에서 관람</h3>
+              <p>앱이 없어도 웹에서 합주를 듣고 채팅할 수 있습니다.</p>
             </article>
           </div>
         </section>

@@ -275,11 +275,31 @@
   justify-content: flex-end;
 }
 
-.agreement-checkbox input[type="checkbox"] {
-  display: none;
+.agreement-checkbox {
+  position: relative;
 }
 
-.checkmark {
+/* 실제 체크박스는 시각적으로만 숨긴다 (display:none이면 키보드·스크린리더가 못 쓴다 — P3-12 ⑪) */
+.agreement-checkbox input[type="checkbox"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  opacity: 0;
+}
+
+.agreement-checkbox input[type="checkbox"]:focus-visible + .checkmark {
+  outline: 2px solid #7b7bff;
+  outline-offset: 2px;
+}
+
+.agreement-checkbox .checkmark {
   width: 18px;
   height: 18px;
   border: 2px solid rgba(255, 255, 255, 0.3);
@@ -292,7 +312,7 @@
   margin-top: 1px;
 }
 
-.checkmark:hover {
+.agreement-checkbox .checkmark:hover {
   border-color: rgba(123, 123, 255, 0.6);
   background: rgba(123, 123, 255, 0.1);
 }
@@ -463,7 +483,8 @@
   margin-bottom: 2rem;
 }
 
-.checkmark {
+/* 결제 완료 화면의 큰 체크 표시 — 약관 체크박스(.agreement-checkbox .checkmark)와 이름이 같아 범위를 좁힌다 */
+.success-icon .checkmark {
   width: 20px;
   height: 20px;
   border-radius: 50%;

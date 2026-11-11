@@ -23,7 +23,7 @@ test.describe('결제', () => {
     )
 
     await mock.loginAs(ALICE)
-    // 요금제 화면에서 진입 (직접 URL 진입은 아래 fixme 참고)
+    // 요금제 화면에서 진입 (직접 URL 진입은 아래 테스트)
     await page.goto('/pricing')
     await expect(page.locator('.user-email')).toHaveText(ALICE.email)
     await page.locator('.standard-button').click()
@@ -31,7 +31,7 @@ test.describe('결제', () => {
     await expect(page.getByRole('heading', { name: '결제하기' })).toBeVisible()
     const pay = page.locator('.payment-submit-btn')
     await expect(pay).toBeDisabled()
-    // 실제 체크박스는 display:none — 사용자가 누르는 체크 표시를 누른다
+    // 사용자가 누르는 체크 표시(label 안)를 누른다 — 실제 체크박스는 시각적으로만 숨김 (P3-12 ⑪)
     await page.locator('.agreement-checkbox .checkmark').click()
     await expect(page.locator('.agreement-checkbox input[type=checkbox]')).toBeChecked()
     await pay.click()
@@ -63,12 +63,13 @@ test.describe('결제', () => {
     ])
   })
 
-  // 알려진 버그(앱 동작 변경은 이 PR 범위 밖): 로그인 상태로 /payment?plan=… 을 새로 열면 인증 확인 전(user=null)에
-  // Payment가 /auth로 보내고, Auth는 로그인돼 있으면 from 대신 '/'로 보낸다 → 결제 화면에 도달하지 못한다.
-  test.fixme('로그인 상태에서 결제 URL을 직접 열면 결제 화면이 보인다', async ({ page, mock }) => {
+  // P3-12 ⑩: 예전에는 세션 복원 전(user=null)에 Payment가 /auth로 보내고, Auth가 from 대신 '/'로 보내 결제 화면에 도달하지 못했다
+  test('로그인 상태에서 결제 URL을 직접 열면 결제 화면이 보인다', async ({ page, mock }) => {
     await mock.loginAs(ALICE)
     await page.goto('/payment?plan=standard')
     await expect(page.getByRole('heading', { name: '결제하기' })).toBeVisible()
+    await expect(page.locator('.user-email')).toHaveText(ALICE.email)
+    await expect(page).toHaveURL(/\/payment\?plan=standard$/)
   })
 })
 

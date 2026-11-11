@@ -10,6 +10,7 @@ import { createStemSeparationRepository } from '../src/repositories/stemSeparati
 import { ConflictError, RepositoryError, StoreUnavailableError, toRepositoryError } from '../src/repositories/errors'
 import { StemSeparationService } from '../src/services/stemSeparationService'
 import { ServiceError } from '../src/services/errors'
+import { memoryStorage } from './fakes/memoryStorage'
 
 type Result = { data: unknown; error: { message: string; code?: string } | null }
 
@@ -232,10 +233,10 @@ describe('StemSeparationService (repository mocks)', () => {
       listExpired: async () => [],
       deleteByIds: async () => {},
     }
+    const mem = memoryStorage('audio-stems')
     const storage = {
-      upload: async () => ({ error: null }),
-      publicUrl: (p: string) => `https://cdn/${p}`,
-      remove: async (paths: string[]) => { removed.push(paths); if (opts.removeFails) throw new RepositoryError('rm failed') },
+      ...mem.adapter,
+      delete: async (paths: string[]) => { removed.push(paths); if (opts.removeFails) throw new RepositoryError('rm failed') },
     }
     return { repos: { separations, storage }, removed, deleted }
   }

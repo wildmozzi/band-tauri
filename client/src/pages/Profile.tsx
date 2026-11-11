@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useAuth } from '../contexts/useAuth'
 import { usePremium } from '../contexts/usePremium'
-import { useNavigate } from 'react-router-dom'
+import { Navigate, useNavigate } from 'react-router-dom'
 import { isSupabaseConfigured } from '../lib/supabaseClient'
 import {
   useProfileNicknameQuery,
@@ -13,7 +13,7 @@ import './Profile.css'
 type ProfileTab = 'info' | 'follow' | 'plan' | 'theme' | 'support'
 
 export function Profile() {
-  const { user } = useAuth()
+  const { user, loading } = useAuth()
   const { userPlan } = usePremium()
   const navigate = useNavigate()
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -55,9 +55,10 @@ export function Profile() {
     syncMetadata({ nickname: profileNickname })
   }, [metadataNickname, profileNickname, syncMetadata])
 
+  // 렌더 중 navigate() 대신 <Navigate> (P3-12 ⑥). 세션 복원 중에는 기다린다(새로고침 시 /auth로 튕기지 않게)
   if (!user) {
-    navigate('/auth')
-    return null
+    if (loading) return null
+    return <Navigate to="/auth" replace state={{ from: '/profile' }} />
   }
 
   const handlePhotoClick = () => {

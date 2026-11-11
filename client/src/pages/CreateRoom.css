@@ -419,3 +419,8 @@
     width: 100%;
   }
 }
+
+/* 최대 인원 안내 문구가 붙어도 옆 칸(장르) 선택 상자가 늘어나지 않게 (P3-12 ⑧) */
+.create-room-form .form-row {
+  align-items: start;
+}

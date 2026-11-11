@@ -1,5 +1,6 @@
 // 합주실 목록/내 합주실/설정 모달에서 쓰는 타입·상수·순수 함수.
 import type { RoomStatus } from '../../data/rooms'
+import { MAX_PERFORMERS } from '../../native/engineApi'
 
 export const GENRES = [
   '록', '재즈', '블루스', '클래식', '팝', '힙합',
@@ -21,6 +22,17 @@ export const AVAILABLE_INSTRUMENTS = [
 ]
 
 export const MAX_PARTICIPANT_OPTIONS = [2, 4, 6, 8, 10, 12, 16, 20]
+
+/** 방 최대 인원은 관람자를 포함한 정원이다. 동시 연주자는 이와 별개로 최대 MAX_PERFORMERS명 (P3-12 ⑧) */
+export const MAX_PARTICIPANTS_LABEL = '최대 인원 (관람 포함)'
+export const MAX_PARTICIPANTS_HINT = `연주자는 최대 ${MAX_PERFORMERS}명이고, 나머지 인원은 관람으로 입장합니다. 로그인하지 않은 관람자는 빈자리가 있을 때만 들어옵니다.`
+
+/** 선택지 표시: 연주 가능 인원을 함께 보여 준다 (예: '8명 (연주 6 + 관람 2)') */
+export function maxParticipantsOptionLabel(n: number): string {
+  const performers = Math.min(n, MAX_PERFORMERS)
+  const viewers = n - performers
+  return viewers > 0 ? `${n}명 (연주 ${performers} + 관람 ${viewers})` : `${n}명 (모두 연주 가능)`
+}
 
 export const MAX_SLOT_COUNT = 10
 

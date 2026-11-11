@@ -21,12 +21,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     let mounted = true
-    void authApi.getUser().then((current) => {
-      if (mounted) {
-        setUser(current)
-        setLoading(false)
-      }
-    })
+    // getUser가 reject해도(저장소 접근 오류 등) loading을 풀어야 한다 — 결제·프로필이 복원 완료를 기다린다
+    void authApi
+      .getUser()
+      .then((current) => {
+        if (mounted) setUser(current)
+      })
+      .catch((error) => {
+        console.warn('[auth] 세션 복원 실패 — 로그아웃 상태로 진행:', error)
+        if (mounted) setUser(null)
+      })
+      .finally(() => {
+        if (mounted) setLoading(false)
+      })
 
     const unsubscribe = authApi.onAuthStateChange((session) => {
       setUser(session?.user ?? null)

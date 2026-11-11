@@ -67,7 +67,6 @@ export function EditPost() {
     if (!postId || !user) return
 
     await form.submit({
-      userId: user.id,
       savingMessage: '게시물 수정 중...',
       save: async (newImageUrls) => {
         await updatePost.mutateAsync({

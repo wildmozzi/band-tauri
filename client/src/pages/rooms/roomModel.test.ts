@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   buildRoomUpdate,
   instrumentsNotInSlots,
+  MAX_PARTICIPANTS_HINT,
+  maxParticipantsOptionLabel,
   myRoomStatusLabel,
   publicRooms,
   roomStatusLabel,
@@ -132,5 +134,15 @@ describe('publicRooms (P2-6)', () => {
   it('비공개 방은 공개 목록에서 뺀다 (마이그레이션 전 행은 공개로 본다)', () => {
     const rooms = [dbRoom({ id: 'a' }), dbRoom({ id: 'b', is_private: true }), dbRoom({ id: 'c', is_private: false })]
     expect(publicRooms(rooms).map(r => r.id)).toEqual(['a', 'c'])
+  })
+})
+
+describe('최대 인원 문구 (P3-12 ⑧)', () => {
+  it('관람 포함 정원과 연주자 최대 6명을 함께 보여 준다', () => {
+    expect(maxParticipantsOptionLabel(2)).toBe('2명 (모두 연주 가능)')
+    expect(maxParticipantsOptionLabel(6)).toBe('6명 (모두 연주 가능)')
+    expect(maxParticipantsOptionLabel(8)).toBe('8명 (연주 6 + 관람 2)')
+    expect(maxParticipantsOptionLabel(20)).toBe('20명 (연주 6 + 관람 14)')
+    expect(MAX_PARTICIPANTS_HINT).toContain('연주자는 최대 6명')
   })
 })

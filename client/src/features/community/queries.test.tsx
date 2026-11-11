@@ -15,6 +15,8 @@ const api = vi.hoisted(() => ({
   getTrendingTags: vi.fn(),
 }))
 vi.mock('../../services/communityApi', () => ({ communityApi: api }))
+const storage = vi.hoisted(() => ({ resolvePostImages: vi.fn(), uploadPostImage: vi.fn() }))
+vi.mock('../../services/storageApi', () => storage)
 
 import {
   communityKeys,
@@ -199,6 +201,26 @@ describe('community queries', () => {
     await act(() => result.current.mutateAsync({ postId: 'p', userId: 'u' }))
 
     expect(client.getQueryData<Post>(communityKeys.post('p', 'u'))).toMatchObject({ likes_count: 3, liked_by_user: true })
+  })
+
+  it('글 저장 전 이미지 URL을 서버 규칙으로 정규화한다 (P3-10 리뷰2 M1·M3: 이전된 예전 URL 매핑, 미검증 제외)', async () => {
+    storage.resolvePostImages.mockResolvedValue(['https://api/new.png'])
+    api.createPost.mockResolvedValue(post('new'))
+    api.updatePost.mockResolvedValue(post('p'))
+    const { wrapper } = createQueryWrapper()
+    const create = renderHook(() => useCreatePostMutation(), { wrapper })
+    await act(() => create.result.current.mutateAsync({ data: { title: 't', content: 'c', images: ['https://x.supabase.co/old.png', 'pending'] }, user: { id: 'u' } }))
+    expect(storage.resolvePostImages).toHaveBeenCalledWith(['https://x.supabase.co/old.png', 'pending'])
+    expect(api.createPost.mock.lastCall![0].images).toEqual(['https://api/new.png'])
+
+    const update = renderHook(() => useUpdatePostMutation(), { wrapper })
+    await act(() => update.result.current.mutateAsync({ postId: 'p', data: { images: ['https://x.supabase.co/old.png'] } }))
+    expect(api.updatePost.mock.lastCall![1].images).toEqual(['https://api/new.png'])
+
+    // 이미지가 없는 수정은 서버를 부르지 않는다
+    storage.resolvePostImages.mockClear()
+    await act(() => update.result.current.mutateAsync({ postId: 'p', data: { title: 'x' } }))
+    expect(storage.resolvePostImages).not.toHaveBeenCalled()
   })
 
   it('글 작성은 목록과 인기 태그를 무효화한다', async () => {
