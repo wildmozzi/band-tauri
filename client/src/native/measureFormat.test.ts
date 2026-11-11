@@ -34,10 +34,14 @@ const echo: EchoReport = {
   peerId: 'bob',
   runs: [24.5, null, 24.7],
   detectedRuns: 2,
+  usedRuns: 2,
+  excludedRuns: 0,
+  outlierIndex: null,
   roundTripMs: 24.6,
   minMs: 24.5,
   maxMs: 24.7,
   stdDevMs: 0.1,
+  spreadMs: 0.2,
   peerEchoDelayMs: 0.1,
   oneWayMs: 12.25,
   networkRttMs: 11.9,
@@ -100,5 +104,25 @@ describe('measureFormat', () => {
     expect(echoBacklogLine(echo, { at: '2026-11-10T09:00:00Z', peerName: '드럼' })).toBe(
       '[실측 2026-11-10] 에코 드럼(lan): 왕복 24.6ms, 편도 12.3ms, 입→귀 23.8ms, 핑 11.9ms, 지터 버퍼 6.9ms — 정상',
     )
+    expect(rows[0].value).not.toContain('제외')
+    expect(rows[0].hint).toContain('흩어짐 0.2ms')
+  })
+
+  it('echo with one excluded outlier marks the click', () => {
+    const r: EchoReport = {
+      ...echo,
+      runs: [24.5, 24.7, 19.0, 24.6, 24.8],
+      detectedRuns: 5,
+      usedRuns: 4,
+      excludedRuns: 1,
+      outlierIndex: 2,
+      spreadMs: 0.3,
+    }
+    const rows = echoRows(r)
+    expect(rows[0].value).toBe('정상 (클릭 5/5개, 튄 값 1개 제외)')
+    expect(rows[1].hint).toContain('사용 4개')
+    const t = echoText(r, { at: '2026-11-10T09:00:00Z' })
+    expect(t).toContain('3. 19.00ms (튄 값, 통계 제외)')
+    expect(t).not.toContain('2. 24.70ms (튄')
   })
 })
