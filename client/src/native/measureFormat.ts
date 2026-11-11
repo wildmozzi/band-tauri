@@ -60,9 +60,18 @@ export function loopbackRows(r: LoopbackReport): MeasureRow[] {
 
 /** 에코 결과 표: 네트워크 포함 왕복, 편도 추정, 분해(내 로컬·망 RTT·지터 버퍼) */
 export function echoRows(r: EchoReport): MeasureRow[] {
+  const excluded = r.excludedRuns > 0 ? `, 튄 값 ${r.excludedRuns}개 제외` : ''
   return [
-    { label: '판정', value: `${VERDICT_LABEL[r.verdict]} (클릭 ${r.detectedRuns}/${r.runs.length}개)` },
-    { label: '네트워크 포함 왕복(중앙값)', value: fmtMs(r.roundTripMs, 1), hint: `최소 ${fmtMs(r.minMs, 1)} · 최대 ${fmtMs(r.maxMs, 1)} · 표준편차 ${fmtMs(r.stdDevMs)}` },
+    {
+      label: '판정',
+      value: `${VERDICT_LABEL[r.verdict]} (클릭 ${r.detectedRuns}/${r.runs.length}개${excluded})`,
+      hint: `흩어짐 ${fmtMs(r.spreadMs, 1)} (5ms 넘으면 불안정, 한 번 튄 값 1개는 빼고 봄)`,
+    },
+    {
+      label: '네트워크 포함 왕복(중앙값)',
+      value: fmtMs(r.roundTripMs, 1),
+      hint: `최소 ${fmtMs(r.minMs, 1)} · 최대 ${fmtMs(r.maxMs, 1)} · 표준편차 ${fmtMs(r.stdDevMs)} · 사용 ${r.usedRuns}개`,
+    },
     { label: '상대 처리 지연(보고)', value: fmtMs(r.peerEchoDelayMs, 3) },
     { label: '편도 추정((왕복 − 상대 처리) ÷ 2)', value: fmtMs(r.oneWayMs, 1) },
     { label: '입→귀 추정', value: fmtMs(r.mouthToEarMs, 1), hint: '입력 버퍼 + 프레임 + 망 편도 + 지터 버퍼 + 출력 버퍼' },
@@ -107,7 +116,7 @@ export function echoText(r: EchoReport, ctx: MeasureContext & { peerName?: strin
     ctx.device ? `장치: ${ctx.device}` : null,
     `메시지: ${r.message}`,
   ].filter(Boolean)
-  const runs = r.runs.map((v, i) => `  ${i + 1}. ${v == null ? '미검출' : fmtMs(v, 2)}`)
+  const runs = r.runs.map((v, i) => `  ${i + 1}. ${v == null ? '미검출' : fmtMs(v, 2)}${i === r.outlierIndex ? ' (튄 값, 통계 제외)' : ''}`)
   return `${head.join('\n')}\n\n${rowsText(echoRows(r))}\n\n클릭:\n${runs.join('\n')}\n\n백로그 기록: ${echoBacklogLine(r, ctx)}\n`
 }
 

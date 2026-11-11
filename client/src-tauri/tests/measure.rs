@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use band_lib::engine::config::{CodecKind, EngineConfig};
 use band_lib::engine::device::fake::{FakeBackend, SourceFn};
-use band_lib::engine::measure::{LoopbackReport, MeasureVerdict};
+use band_lib::engine::measure::{LoopbackReport, MeasureVerdict, ECHO_UNSTABLE_SPREAD_MS};
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::stats::PeerStateKind;
 use band_lib::engine::Engine;
@@ -441,9 +441,10 @@ fn echo_flow_consent_measure_auto_stop() {
 #[ignore = "realtime: 결정적 짝 engine::measure::tests::echo_probe_emits_frame_aligned_clicks_and_detects_them(클릭 송신·검출 시각 계산), echo_flow_consent_measure_auto_stop(흐름)"]
 fn echo_round_trip_reflects_proxy_delay() {
     let _g = RT_LOCK.lock();
-    // 판정이 Unstable이면 한 번 다시 잰다(앱도 "다시 재세요"라고 안내한다). 호스티드 러너에서 6회 중 한 회차만 ~4ms 일찍
-    // 잡혀 흩어짐이 5.1~5.8ms로 상한(`ECHO_UNSTABLE_SPREAD_MS` 5ms)을 넘는 일이 최근 CI 17회 중 4회 있었다(나머지 회차는
-    // 1~3ms, 왕복 차·편도 차는 통과). 두 번 연속 Unstable이거나 검출이 모자라면 그대로 실패한다.
+    // 호스티드 러너에서 6회 중 한 회차만 ~4ms 일찍 잡혀 흩어짐이 5.1~5.8ms로 상한(`ECHO_UNSTABLE_SPREAD_MS` 5ms)을 넘는
+    // 일이 CI 17회 중 4회 있었다(PR #71). P1-13부터 판정이 단일 이상치를 빼고 보므로(`echo_summary`, 결정적 짝
+    // `engine::measure::tests::echo_single_outlier_is_excluded`) 이 모양은 Ok다. 그래도 Unstable이면 한 번 다시 잰다(앱도
+    // "다시 재세요"라고 안내한다). 두 번 연속 Unstable이거나 검출이 모자라면 그대로 실패한다.
     let measure = |one_way_ms: u64| {
         let r = echo_once(Duration::from_millis(one_way_ms));
         if r.verdict == MeasureVerdict::Unstable && r.detected_runs >= 5 {
@@ -461,6 +462,8 @@ fn echo_round_trip_reflects_proxy_delay() {
         );
         assert_eq!(r.verdict, MeasureVerdict::Ok, "{r:?}");
         assert!(r.detected_runs >= 5, "{r:?}");
+        assert!(r.excluded_runs <= 1 && r.used_runs + r.excluded_runs == r.detected_runs, "{r:?}");
+        assert!(r.spread_ms.is_some_and(|s| s <= ECHO_UNSTABLE_SPREAD_MS), "{r:?}");
         assert!(r.peer_echo_delay_ms < 1.0, "되돌리기는 디코드 없이 바로: {r:?}");
         // 왕복 = 프레임 + 망 왕복 + 상대 처리 + 지터 버퍼(± 측정 오차)
         // 잔차에는 클릭이 놓인 입력 버스트 위상(≤ 입력 버퍼)과 지터 버퍼 평균·순간값 차이가 남는다.

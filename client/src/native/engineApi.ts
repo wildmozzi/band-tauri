@@ -242,11 +242,19 @@ export interface EchoReport {
   peerId: string
   runs: (number | null)[]
   detectedRuns: number
-  /** 프레임 + 망 왕복 + 상대 되돌리기 + 내 지터 버퍼 */
+  /** 통계·판정에 쓴 클릭 수(= 검출 − 제외) */
+  usedRuns: number
+  /** 단일 이상치(한 번 튄 클릭)로 뺀 수, 0 또는 1 */
+  excludedRuns: number
+  /** 뺀 클릭의 runs 인덱스 */
+  outlierIndex: number | null
+  /** 프레임 + 망 왕복 + 상대 되돌리기 + 내 지터 버퍼. 중앙값·최소·최대·표준편차는 뺀 클릭 제외 */
   roundTripMs: number | null
   minMs: number | null
   maxMs: number | null
   stdDevMs: number | null
+  /** 판정에 쓴 흩어짐(최대 − 최소). 5ms 넘으면 unstable */
+  spreadMs: number | null
   /** 상대가 보고한 로컬 처리 지연(되돌리기) */
   peerEchoDelayMs: number
   /** (왕복 − 상대 처리) / 2 */

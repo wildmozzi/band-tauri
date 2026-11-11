@@ -161,7 +161,7 @@ pub fn summarize(v: &[f64]) -> Option<(f64, f64, f64, f64)> {
     let mut s = v.to_vec();
     s.sort_by(|a, b| a.total_cmp(b));
     let n = s.len();
-    let median = if n % 2 == 1 { s[n / 2] } else { (s[n / 2 - 1] + s[n / 2]) / 2.0 };
+    let median = median_sorted(&s);
     let mean = s.iter().sum::<f64>() / n as f64;
     let var = s.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n as f64;
     Some((median, s[0], s[n - 1], var.sqrt()))
@@ -184,8 +184,119 @@ pub enum MeasureVerdict {
 /// 루프백: 반복 간 차이(최대 − 최소)가 이보다 크면 불안정.
 pub const UNSTABLE_SPREAD_MS: f64 = 1.0;
 /// 에코: 클릭마다 입력 버스트 위상(≤ 입력 버퍼)과 지터 버퍼 보정(데드밴드 ≤ 프레임/2)이 달라 깨끗한 회선에서도
-/// 2~3ms 흩어진다. 이보다 크면 불안정.
+/// 2~3ms 흩어진다. 이보다 크면 불안정. 흩어짐은 단일 이상치(`single_outlier`)를 뺀 값으로 잰다.
 pub const ECHO_UNSTABLE_SPREAD_MS: f64 = 5.0;
+/// 에코 이상치 제외: 검출이 이만큼 이상일 때만 1개를 뺄 수 있다(뺀 뒤에도 4개 이상이 남아 중앙값·흩어짐이 의미 있게).
+pub const ECHO_OUTLIER_MIN_RUNS: usize = 5;
+
+/// 정렬된 비어 있지 않은 슬라이스의 중앙값.
+fn median_sorted(s: &[f64]) -> f64 {
+    let n = s.len();
+    if n % 2 == 1 {
+        s[n / 2]
+    } else {
+        (s[n / 2 - 1] + s[n / 2]) / 2.0
+    }
+}
+
+/// 단일 이상치 찾기(에코, 상하위 1개 제외). 검출값 `v`가 `ECHO_OUTLIER_MIN_RUNS`개 이상이고 전체 흩어짐(최대 −
+/// 최소)이 `ECHO_UNSTABLE_SPREAD_MS`를 넘을 때, 최솟값과 최댓값 중 빼면 흩어짐이 더 작아지는 쪽 하나를 빼 본다.
+/// 남은 값의 흩어짐이 상한 안이면 그 인덱스(`v` 기준)를 돌려준다. 그래서
+/// - 깨끗한 측정(흩어짐 ≤ 상한)에서는 아무것도 빼지 않는다(판정을 바꾸지 않는 제외는 하지 않음).
+/// - 많아야 1개만 뺀다. 둘 이상 튀거나 전체가 넓게 흩어지면 하나를 빼도 상한을 넘으므로 그대로 불안정이다.
+///
+/// MAD(3σ) 기준은 표본 6~8개에서 너무 엄격했다: 실시간 측정에서 나머지 흩어짐 2.9ms·한 값만 2.75ms 낮게 튄
+/// `[65.05, 59.39, 63.96, 62.14, 64.66, 62.23]`이 3·1.4826·MAD = 4.85ms 기준을 못 넘어 불안정으로 남았다.
+pub fn single_outlier(v: &[f64]) -> Option<usize> {
+    if v.len() < ECHO_OUTLIER_MIN_RUNS {
+        return None;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.total_cmp(b));
+    let n = s.len();
+    if s[n - 1] - s[0] <= ECHO_UNSTABLE_SPREAD_MS {
+        return None;
+    }
+    // 최솟값을 빼면 흩어짐 = s[n-1] − s[1], 최댓값을 빼면 s[n-2] − s[0].
+    let (drop_low, rest_spread) = if s[n - 1] - s[1] <= s[n - 2] - s[0] { (true, s[n - 1] - s[1]) } else { (false, s[n - 2] - s[0]) };
+    if rest_spread > ECHO_UNSTABLE_SPREAD_MS {
+        return None;
+    }
+    let target = if drop_low { s[0] } else { s[n - 1] };
+    v.iter().position(|&x| x == target)
+}
+
+/// 에코 클릭 결과 요약(판정 포함, 상대 보고값 검사 전).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EchoSummary {
+    pub verdict: MeasureVerdict,
+    /// 보낸 클릭 수.
+    pub runs: usize,
+    /// 검출된 클릭 수.
+    pub detected: usize,
+    /// 통계·판정에 쓴 클릭 수(= 검출 − 제외).
+    pub used: usize,
+    /// 이상치로 뺀 클릭의 인덱스(클릭 순서 기준).
+    pub outlier: Option<usize>,
+    /// 쓴 값의 (중앙값, 최소, 최대, 표준편차).
+    pub stats: Option<(f64, f64, f64, f64)>,
+    /// 판정에 쓴 흩어짐(쓴 값의 최대 − 최소).
+    pub spread: Option<f64>,
+}
+
+/// 클릭별 왕복(None = 미검출)을 요약·판정한다. 단일 이상치(`single_outlier`)는 빼고 본다. 과반 조건도 뺀 뒤의
+/// 개수(`used`)로 본다 — 이상치는 유효한 측정이 아니다.
+pub fn echo_summary(per: &[Option<f64>]) -> EchoSummary {
+    let idx: Vec<usize> = per.iter().enumerate().filter_map(|(i, v)| v.map(|_| i)).collect();
+    let vals: Vec<f64> = per.iter().flatten().copied().collect();
+    let out = single_outlier(&vals);
+    let kept: Vec<f64> = vals.iter().enumerate().filter(|&(i, _)| Some(i) != out).map(|(_, &x)| x).collect();
+    let stats = summarize(&kept);
+    let spread = stats.map(|(_, lo, hi, _)| hi - lo);
+    EchoSummary {
+        verdict: verdict_with(per.len(), kept.len(), false, spread, ECHO_UNSTABLE_SPREAD_MS),
+        runs: per.len(),
+        detected: vals.len(),
+        used: kept.len(),
+        outlier: out.map(|k| idx[k]),
+        stats,
+        spread,
+    }
+}
+
+/// 에코 판정 메시지(UI에 그대로 보인다). `Unstable`은 원인(검출 부족 / 흩어짐)을 나눠 다시 재라고 안내한다.
+pub fn echo_message(s: &EchoSummary, one_way: Option<f64>, peer_bogus_delay_us: Option<u32>) -> String {
+    let excl = if s.outlier.is_some() { ", 튄 값 1개 제외" } else { "" };
+    if let Some(d) = peer_bogus_delay_us {
+        return format!(
+            "상대가 보고한 처리 지연({:.1}ms)이 비정상이라 {:.0}ms로 잘랐습니다. 상대 앱 버전을 확인하세요",
+            d as f64 / 1000.0,
+            MAX_PEER_ECHO_DELAY_US as f64 / 1000.0
+        );
+    }
+    match s.verdict {
+        // 에코는 클리핑 판정을 하지 않는다(verdict_with에 clipped=false).
+        MeasureVerdict::Ok | MeasureVerdict::Clipped => format!(
+            "네트워크 포함 왕복 {:.1}ms, 편도 추정 {:.1}ms(클릭 {}/{}개{excl})",
+            s.stats.map_or(0.0, |t| t.0),
+            one_way.unwrap_or(0.0),
+            s.detected,
+            s.runs
+        ),
+        MeasureVerdict::NoSignal => "돌아온 클릭을 찾지 못했습니다. 상대 연결 상태(손실)를 확인하고 다시 재세요".into(),
+        MeasureVerdict::Unstable if s.used * 2 <= s.runs => format!(
+            "결과가 불안정합니다: 돌아온 클릭이 절반 이하입니다(검출 {}/{}개{excl}). 손실이 많을 수 있습니다. 연결 상태를 확인하고 다시 재세요",
+            s.detected, s.runs
+        ),
+        MeasureVerdict::Unstable => format!(
+            "결과가 불안정합니다: 클릭 간 흩어짐 {:.1}ms > {:.0}ms(검출 {}/{}개{excl}). 회선 지터가 큽니다. 잠시 뒤 다시 재고, 계속되면 유선 연결로 바꾸거나 다른 네트워크 사용을 줄이세요",
+            s.spread.unwrap_or(0.0),
+            ECHO_UNSTABLE_SPREAD_MS,
+            s.detected,
+            s.runs
+        ),
+    }
+}
 
 fn verdict_of(runs: usize, detected: usize, clipped: bool, spread: Option<f64>) -> MeasureVerdict {
     verdict_with(runs, detected, clipped, spread, UNSTABLE_SPREAD_MS)
@@ -692,11 +803,20 @@ pub struct EchoReport {
     /// 클릭마다 왕복(ms), 못 찾으면 null.
     pub runs: Vec<Option<f64>>,
     pub detected_runs: u32,
+    /// 통계·판정에 쓴 클릭 수(= 검출 − 제외).
+    pub used_runs: u32,
+    /// 단일 이상치로 뺀 클릭 수(0 또는 1, `single_outlier`).
+    pub excluded_runs: u32,
+    /// 뺀 클릭의 `runs` 인덱스.
+    pub outlier_index: Option<u32>,
     /// 네트워크 포함 왕복 중앙값(ms): 프레임 + 망 왕복 + 상대 되돌리기 + 내 지터 버퍼(소스 링 포함).
+    /// 중앙값·최소·최대·표준편차는 뺀 클릭을 제외한 값이다.
     pub round_trip_ms: Option<f64>,
     pub min_ms: Option<f64>,
     pub max_ms: Option<f64>,
     pub std_dev_ms: Option<f64>,
+    /// 판정에 쓴 흩어짐(최대 − 최소, ms). `ECHO_UNSTABLE_SPREAD_MS`보다 크면 불안정.
+    pub spread_ms: Option<f64>,
     /// 상대가 보고한 로컬 처리 지연(되돌리기, ms).
     pub peer_echo_delay_ms: f64,
     /// 편도 추정 = (왕복 − 상대 처리 지연) / 2.
@@ -814,10 +934,8 @@ impl EchoJob {
         jitter: f32,
         path: Option<crate::engine::stats::PathKind>,
     ) -> EchoReport {
-        let vals: Vec<f64> = per.iter().flatten().copied().collect();
-        let sum = summarize(&vals);
-        let spread = sum.map(|(_, lo, hi, _)| hi - lo);
-        let mut verdict = verdict_with(per.len(), vals.len(), false, spread, ECHO_UNSTABLE_SPREAD_MS);
+        let s = echo_summary(&per);
+        let mut verdict = s.verdict;
         // 상대 보고값은 인증된 상대가 정한 값이다. 되돌리기는 디코드 없이 바로 하므로 수 ms를 넘을 수 없다.
         // 범위를 벗어나면 상한으로 자르고 불안정으로 표시한다(PR #13 L2).
         let peer_bogus = delay_us > MAX_PEER_ECHO_DELAY_US;
@@ -825,41 +943,25 @@ impl EchoJob {
             verdict = MeasureVerdict::Unstable;
         }
         let peer_ms = delay_us.min(MAX_PEER_ECHO_DELAY_US) as f64 / 1000.0;
+        let sum = s.stats;
         let median = sum.map(|s| s.0);
         let one_way = median.map(|m| (m - peer_ms) / 2.0);
         let mouth = median.zip(rtt).map(|(m, r)| m - peer_ms - r as f64 / 2.0 + (self.input_buffer_ms + self.output_buffer_ms) as f64);
         let residual = median.zip(rtt).map(|(m, r)| m - peer_ms - r as f64 - self.frame_ms as f64 - jitter as f64);
-        let message = match verdict {
-            _ if peer_bogus => format!(
-                "상대가 보고한 처리 지연({:.1}ms)이 비정상이라 {:.0}ms로 잘랐습니다. 상대 앱 버전을 확인하세요",
-                delay_us as f64 / 1000.0,
-                MAX_PEER_ECHO_DELAY_US as f64 / 1000.0
-            ),
-            // 에코는 클리핑 판정을 하지 않는다(verdict_with에 clipped=false).
-            MeasureVerdict::Ok | MeasureVerdict::Clipped => format!(
-                "네트워크 포함 왕복 {:.1}ms, 편도 추정 {:.1}ms(클릭 {}/{}개)",
-                median.unwrap_or(0.0),
-                one_way.unwrap_or(0.0),
-                vals.len(),
-                per.len()
-            ),
-            MeasureVerdict::NoSignal => "돌아온 클릭을 찾지 못했습니다. 상대 연결 상태(손실)를 확인하고 다시 재세요".into(),
-            MeasureVerdict::Unstable => format!(
-                "결과가 불안정합니다(검출 {}/{}개, 흩어짐 {:.1}ms). 회선이 불안정할 수 있습니다",
-                vals.len(),
-                per.len(),
-                spread.unwrap_or(0.0)
-            ),
-        };
+        let message = echo_message(&s, one_way, peer_bogus.then_some(delay_us));
         EchoReport {
             verdict,
             message,
             peer_id: self.peer_id.clone(),
-            detected_runs: vals.len() as u32,
+            detected_runs: s.detected as u32,
+            used_runs: s.used as u32,
+            excluded_runs: (s.detected - s.used) as u32,
+            outlier_index: s.outlier.map(|i| i as u32),
             round_trip_ms: median,
             min_ms: sum.map(|s| s.1),
             max_ms: sum.map(|s| s.2),
             std_dev_ms: sum.map(|s| s.3),
+            spread_ms: s.spread,
             peer_echo_delay_ms: peer_ms,
             one_way_ms: one_way,
             network_rtt_ms: rtt,
@@ -960,6 +1062,72 @@ mod tests {
         assert_eq!(verdict_of(6, 3, false, Some(0.1)), MeasureVerdict::Unstable);
         assert_eq!(summarize(&[3.0, 1.0, 2.0]).unwrap().0, 2.0);
         assert_eq!(summarize(&[1.0, 2.0, 3.0, 4.0]).unwrap().0, 2.5);
+    }
+
+    fn some(v: &[f64]) -> Vec<Option<f64>> {
+        v.iter().map(|&x| Some(x)).collect()
+    }
+
+    /// 한 회차만 튄 측정(PR #71 CI: 6회 중 1회 ~4ms 일찍, 나머지 흩어짐 1~3ms)은 그 1개를 빼고 정상이다.
+    #[test]
+    fn echo_single_outlier_is_excluded() {
+        // 호스티드 CI 실패 모양: 나머지 흩어짐 3ms, 한 회차 4ms 이른 값 → 전체 흩어짐 7ms(예전 판정 Unstable)
+        let per = some(&[30.0, 30.6, 31.2, 26.0, 31.8, 33.0]);
+        let s = echo_summary(&per);
+        assert_eq!(s.verdict, MeasureVerdict::Ok, "{s:?}");
+        assert_eq!((s.detected, s.used, s.outlier), (6, 5, Some(3)));
+        assert!((s.spread.unwrap() - 3.0).abs() < 1e-9, "{s:?}");
+        assert!((s.stats.unwrap().0 - 31.2).abs() < 1e-9, "중앙값은 남은 값 기준: {s:?}");
+        // 늦게 튄 값(위쪽), 미검출이 섞여도 인덱스는 클릭 순서 기준
+        let mut per = some(&[40.0, 41.0, 40.5, 41.5, 40.2, 52.0, 40.8]);
+        per.insert(1, None);
+        let s = echo_summary(&per);
+        assert_eq!(s.verdict, MeasureVerdict::Ok, "{s:?}");
+        assert_eq!((s.runs, s.detected, s.used, s.outlier), (8, 7, 6, Some(6)));
+        assert!(per[6] == Some(52.0));
+        let m = echo_message(&s, Some(20.0), None);
+        assert!(m.contains("클릭 7/8개, 튄 값 1개 제외"), "{m}");
+        // 실시간 측정(P1-13, 편도 25ms 프록시)에서 그대로 나온 모양: 나머지 2.9ms, 한 값만 2.75ms 낮음 → 전체 5.66ms
+        let s = echo_summary(&some(&[65.05, 59.39, 63.96, 62.14, 64.66, 62.23]));
+        assert_eq!((s.verdict, s.outlier), (MeasureVerdict::Ok, Some(1)), "{s:?}");
+        assert!((s.spread.unwrap() - 2.91).abs() < 1e-9, "{s:?}");
+    }
+
+    /// 실제로 흔들리는 회선(분산 큼, 또는 2개 이상 튐)은 여전히 불안정이고, 안내 문구가 다시 재라고 말한다.
+    #[test]
+    fn echo_real_instability_stays_unstable() {
+        // 넓게 고른 분산: 하나를 빼도 흩어짐 > 5ms
+        let s = echo_summary(&some(&[15.0, 18.0, 21.0, 24.0, 27.0, 20.0, 23.0, 17.0]));
+        assert_eq!(s.verdict, MeasureVerdict::Unstable, "{s:?}");
+        assert_eq!(s.outlier, None, "고른 분산에서 이상치를 고르면 안 됨: {s:?}");
+        let m = echo_message(&s, None, None);
+        assert!(m.contains("흩어짐") && m.contains("다시 재"), "{m}");
+        // 두 회차가 양쪽으로 튐: 하나만 빼므로 남은 흩어짐이 크다
+        let s = echo_summary(&some(&[20.0, 20.5, 21.0, 21.2, 20.8, 21.4, 14.0, 28.0]));
+        assert_eq!(s.verdict, MeasureVerdict::Unstable, "{s:?}");
+        assert!(s.spread.unwrap() > ECHO_UNSTABLE_SPREAD_MS, "{s:?}");
+        // 같은 쪽으로 두 회차가 튐(이봉): 이상치 하나로 볼 수 없다
+        let s = echo_summary(&some(&[20.0, 20.5, 21.0, 20.2, 20.8, 27.0, 27.5]));
+        assert_eq!(s.verdict, MeasureVerdict::Unstable, "{s:?}");
+        // 검출이 적으면(5개 미만) 빼지 않는다
+        let s = echo_summary(&[Some(20.0), Some(21.0), Some(20.5), Some(30.0), None, None]);
+        assert_eq!((s.outlier, s.verdict), (None, MeasureVerdict::Unstable), "{s:?}");
+        // 과반 조건은 뺀 뒤의 개수로: 8개 중 5개 검출, 1개 튐 → 사용 4개 ≤ 절반
+        let s = echo_summary(&[Some(20.0), Some(20.4), Some(20.8), Some(21.0), Some(35.0), None, None, None]);
+        assert_eq!((s.used, s.verdict), (4, MeasureVerdict::Unstable), "{s:?}");
+        let m = echo_message(&s, None, None);
+        assert!(m.contains("절반 이하") && m.contains("다시 재"), "{m}");
+    }
+
+    /// 깨끗한 측정은 아무것도 빼지 않는다(전체 흩어짐이 상한 안이면 다른 값과 2ms 떨어진 값도 그대로 둔다).
+    #[test]
+    fn echo_clean_run_excludes_nothing() {
+        let s = echo_summary(&some(&[30.0, 30.1, 30.05, 30.0, 30.1, 32.0, 30.05, 30.0]));
+        assert_eq!((s.outlier, s.used, s.verdict), (None, 8, MeasureVerdict::Ok), "{s:?}");
+        assert!(!echo_message(&s, Some(15.0), None).contains("제외"));
+        let s = echo_summary(&[None; 8]);
+        assert_eq!((s.verdict, s.used, s.stats), (MeasureVerdict::NoSignal, 0, None));
+        assert!(single_outlier(&[]).is_none());
     }
 
     #[test]
