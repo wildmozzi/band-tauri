@@ -191,6 +191,24 @@ describe('POST/PUT /api/posts', () => {
     assert.equal(more.status, 400)
   })
 
+  it('existing images match by key: a relative stored path sent back absolutized stays editable even if the file is gone (PR #25 L2)', async () => {
+    const goneKey = newPostImageKey(ALICE, 'image/png') // 저장소에 없음 (정리·이전으로 사라짐)
+    const relative = `/api/storage/post-images/${goneKey}` // PUBLIC_API_URL 없이 저장된 값
+    const created = await posts.repo.insert({
+      authorId: ALICE, authorName: 'alice', authorRole: 'Session Member', title: 't', content: 'c',
+      tags: [], images: [relative], instrument: 'other', category: 'general',
+    })
+    // 클라이언트 toPost가 절대 URL로 바꿔 폼에 넣고 그대로 돌려보낸다 → 422가 아니라 원래 저장값 유지
+    const absolutized = `https://api.example${relative}`
+    const res = await req(s.url, 'PUT', `/${created.id}`, { content: 'edited', images: [absolutized] }, bearer(ALICE))
+    assert.equal(res.status, 200)
+    assert.deepEqual(posts.rows.get(created.id)!.images, [relative])
+    // 같은 key를 다른 호스트로 보내도 클라이언트 URL은 저장되지 않는다
+    const swapped = await req(s.url, 'PUT', `/${created.id}`, { images: [`https://evil.test/post-images/${goneKey}`] }, bearer(ALICE))
+    assert.equal(swapped.status, 200)
+    assert.deepEqual(posts.rows.get(created.id)!.images, [relative])
+  })
+
   it('rejects edits by someone other than the author (403) and unknown posts (404)', async () => {
     const created = await (await req(s.url, 'POST', '', { title: 'mine', content: 'c' }, bearer(ALICE))).json() as { post: PostRow }
     const res = await req(s.url, 'PUT', `/${created.post.id}`, { title: 'pwned', images: [] }, bearer(BOB))
