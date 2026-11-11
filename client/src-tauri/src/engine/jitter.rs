@@ -264,8 +264,9 @@ pub struct JitterStats {
     pub loss_pct: f32,
     pub late: u64,
     pub concealed: u64,
-    /// 은닉 중 손실 은닉(다음 패킷이 이미 있어 seq를 넘긴 것 — Opus면 FEC/PLC). 나머지(`concealed - concealed_loss`)는
-    /// 언더런 은닉(seq 유지, 깊이 +1F). 측정용(P1-6 리포트)이며 Tauri `PeerStats`에는 노출하지 않는다.
+    /// 은닉 중 손실 은닉(다음 패킷이 이미 있어 seq를 넘긴 것 — Opus면 FEC/PLC). 언더런 은닉을 낸 seq가 뒤에 손실로
+    /// 판정되면 그 언더런 은닉도 손실 은닉으로 다시 센다(P1-6a). 나머지(`concealed - concealed_loss`)는 끝내 늦게 온
+    /// 패킷 자리의 언더런 은닉(seq 유지, 깊이 +1F). 측정용(P1-6 리포트)이며 Tauri `PeerStats`에는 노출하지 않는다.
     pub concealed_loss: u64,
     /// 생산된 패킷 프레임 수(정상 디코드 + 은닉).
     pub produced: u64,
@@ -400,6 +401,10 @@ pub struct JitterBuffer {
     last_frame_valid: bool,
     conceal_run: usize,
     starve_samples: usize,
+    /// 아직 seq와 짝지어지지 않은 언더런 은닉 프레임 수(P1-6a). 언더런 은닉은 seq를 유지한 채 재생 타임라인을
+    /// F만큼 소비한다. 그 seq가 결국 손실로 판정되면(뒤 패킷 도착) 이미 낸 언더런 은닉이 그 자리를 메운 것이므로
+    /// 손실 은닉을 또 만들지 않고 seq만 넘긴다(이중 은닉 제거). 실제 패킷을 꺼내면(늦게 와서 재생 또는 H1 버림) 0.
+    underrun_debt: usize,
 
     // 스크래치
     dec_buf: Vec<f32>,
@@ -496,6 +501,7 @@ impl JitterBuffer {
             last_frame_valid: false,
             conceal_run: 0,
             starve_samples: 0,
+            underrun_debt: 0,
             dec_buf: vec![0.0; MAX_PKT_FRAME * 2],
             shift_buf: vec![0.0; (MAX_PKT_FRAME + 4) * 2],
             xfade_buf: vec![0.0; MAX_PKT_FRAME * 2],
@@ -568,6 +574,7 @@ impl JitterBuffer {
         self.trimming = false;
         self.conceal_run = 0;
         self.starve_samples = 0;
+        self.underrun_debt = 0;
         self.last_frame_valid = false;
         self.xfade_len = 0;
     }
@@ -1051,6 +1058,7 @@ impl JitterBuffer {
         self.trimming = false;
         self.conceal_run = 0;
         self.starve_samples = 0;
+        self.underrun_debt = 0;
         // 첫 패킷의 앞부분을 잘라 깊이 = 목표
         if self.produce_packet() {
             let cut = (excess.round().max(0.0) as usize).min(self.fifo.len() / 2);
@@ -1124,6 +1132,8 @@ impl JitterBuffer {
                 self.xfade_ch = ch;
             }
             self.slots[idx].valid = false;
+            // 늦게 온 패킷을 버리면(H1) 앞서 낸 언더런 은닉이 그 자리를 메운 것이다.
+            self.underrun_debt = self.underrun_debt.saturating_sub(1);
         }
         self.next_seq = seq.wrapping_add(1);
         let f = self.frame() as f64;
@@ -1134,6 +1144,21 @@ impl JitterBuffer {
 
     /// 패킷 하나만큼 FIFO에 생산. 재버퍼링으로 전환하면 false.
     fn produce_packet(&mut self) -> bool {
+        // 이중 은닉 제거(P1-6a): 언더런 은닉(seq k 유지)을 낸 뒤 k 없이 뒤 패킷이 도착해 k가 손실로 판정되면, 그
+        // 언더런 은닉이 이미 k의 재생 구간을 메웠다(타임라인 F 소비). 손실 은닉을 한 번 더 만들면 손실 1건에 2프레임이
+        // 나가고 깊이가 +1F 늘어 샘플 버림으로 되돌려야 했다. 그래서 언더런 은닉을 k의 손실 은닉으로 재해석하고 seq만
+        // 넘긴다(새 프레임·깊이 변화 없음). 늦은 패킷을 버리는 H1(`late_dropped`)의 짝이다. k가 나중에 도착하면
+        // `insert`에서 `late`로 세고 지연 통계에는 그대로 반영된다.
+        while self.state == State::Playing
+            && self.underrun_debt > 0
+            && !self.slot_has(self.next_seq)
+            && self.has_later_packet()
+        {
+            self.underrun_debt -= 1;
+            self.next_seq = self.next_seq.wrapping_add(1);
+            self.stats.concealed_loss += 1;
+            self.push_loss(true);
+        }
         // 늦은 패킷을 손실로(H1, NetEQ류): 언더런 은닉이 이미 그 자리를 채워 깊이가 늘었고 지금 목표보다 F/2 이상 깊으면,
         // 늦게 온 패킷을 재생하지 않고 버린다(디코드해 디코더 상태 유지 + 크로스페이드). 은닉은 이미 났으므로 은닉률은
         // 그대로이고, 늘어난 1F를 샘플 버림 램프로 되돌리는 구간(피치 편차)이 없어진다.
@@ -1200,6 +1225,8 @@ impl JitterBuffer {
             self.pkt_channels = ch;
             self.conceal_run = 0;
             self.starve_samples = 0;
+            // 늦게 온 패킷을 재생하면 타임라인이 되감기고(깊이 +debt·F) 그 몫은 샘플 보정이 되돌린다.
+            self.underrun_debt = 0;
             self.push_loss(false);
             let win = self.rate_window();
             self.conceal.push(false, win);
@@ -1255,6 +1282,8 @@ impl JitterBuffer {
                 self.stats.concealed_loss += 1;
                 self.next_seq = seq.wrapping_add(1);
                 self.push_loss(true);
+            } else {
+                self.underrun_debt += 1;
             }
             self.fifo_end_ts += frames as i64;
         }
@@ -1705,6 +1734,52 @@ mod tests {
         let before = jb.stats().late;
         jb.insert(&pkts[0].0, &pkts[0].1, t);
         assert_eq!(jb.stats().late, before + 1);
+    }
+
+    /// P1-6a: 손실된 k의 마감에 k+1이 아직 없으면 언더런 은닉 1프레임만 나가고, k+1이 도착하면 그 은닉을 k의 손실
+    /// 은닉으로 재해석한다(손실 1건 = 은닉 1프레임, 깊이 증가 없음). k가 손실이 아니라 늦게 오면 언더런 은닉으로 남는다.
+    #[test]
+    fn loss_after_underrun_is_concealed_once() {
+        // (k를 잃음, k를 k+1과 함께 늦게 보냄)
+        for late_k in [false, true] {
+            let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+            let mut tx = Sender::new(CodecKind::Pcm16, 240, 100, 0);
+            let pkts: Vec<_> = (0..60).map(|_| tx.next()).collect();
+            let mut out = vec![0f32; 480];
+            let mut t = 0u64;
+            let k = 30;
+            let mut depth_before = 0.0;
+            let mut s_before = JitterStats::default();
+            for (i, (h, p)) in pkts.iter().enumerate() {
+                // k와 k+1이 한 틱씩 늦어 k의 마감에는 뒤 패킷이 없다(언더런 은닉). k+1은 k+2와 함께 도착한다.
+                if i == k {
+                    depth_before = jb.depth_error();
+                    s_before = jb.stats();
+                } else if i == k + 1 {
+                } else {
+                    if i == k + 2 {
+                        if late_k {
+                            jb.insert(&pkts[k].0, &pkts[k].1, t);
+                        }
+                        jb.insert(&pkts[k + 1].0, &pkts[k + 1].1, t);
+                    }
+                    jb.insert(h, p, t);
+                }
+                jb.pop(&mut out);
+                jb.end_burst(t, t, 0.0);
+                t += 5000;
+            }
+            let s = jb.stats();
+            assert!(jb.is_playing());
+            assert_eq!(s.concealed - s_before.concealed, 1, "late_k {late_k}: {s:?}");
+            assert_eq!(s.concealed_loss - s_before.concealed_loss, u64::from(!late_k), "late_k {late_k}: {s:?}");
+            if !late_k {
+                // 손실이면 타임라인이 그대로라 깊이가 늘지 않는다(이전에는 은닉 2프레임 + 깊이 +1F).
+                assert_eq!(s.samples_dropped, s_before.samples_dropped, "{s:?}");
+                assert_eq!(s.dropped_frames + s.late_dropped, s_before.dropped_frames + s_before.late_dropped);
+                assert!((jb.depth_error() - depth_before).abs() < 1.0, "깊이 {depth_before} → {}", jb.depth_error());
+            }
+        }
     }
 
     #[test]

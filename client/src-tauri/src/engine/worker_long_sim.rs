@@ -98,29 +98,13 @@ impl Known {
     }
 }
 
-// 기준값 = P1-6 측정값(2026-11-11, 손실/언더런 분리·히스테리시스 반영 후). 고치는 PR에서 갱신하거나 지운다.
+// 기준값 = P1-6a 측정값(2026-11-11, 이중 은닉 제거 후). 고치는 PR에서 갱신하거나 지운다.
+// P1-6a(손실 뒤 언더런 은닉 재해석)로 #2·#5의 은닉·언더런·띠 밖 미달과 #1 5분 띠 밖 미달이 해소되어 지정을 지웠다.
 const TOL_PCT: f64 = 0.3;
-const TOL_BAND: f64 = 5.0;
 /// #1: 지수(꼬리 긴) 지터에서 목표(분위수 0.95 + 여유)를 넘는 늦은 패킷이 그대로 은닉된다. 손실 0일 때도 약 0.9% (P1-6b).
 const TAIL: &str = "꼬리 긴 지터의 늦은 패킷 은닉(손실 0에서도 ~0.9%, P1-6b)";
-/// #2·#5: 손실된 패킷 k의 은닉 마감에 k+1이 아직 없으면 언더런 은닉(seq 유지) 뒤 k+1 도착 시 k를 또 은닉 — 손실 1건에 2프레임 (P1-6a).
-const DOUBLE: &str = "손실 직후 언더런 은닉 + 손실 은닉 이중 계산(P1-6a)";
-// #1은 언더런 몫이 0.2%로 예산 안이다 — 초과분은 손실 몫(1.75%, 실제 손실 0.5%)의 늦은 패킷이다.
-const KNOWN_1: &[Known] = &[
-    Known { metric: Metric::Conceal, short: Some(1.93), long: Some(1.95), tol: TOL_PCT, why: TAIL },
-    // 5분 버전만 10% 경계를 살짝 넘는다(60분 7.1%).
-    Known { metric: Metric::BandPct, short: Some(10.76), long: None, tol: TOL_BAND, why: "꼬리 긴 지터·계단 구간의 목표 흔들림(5분 버전만, P1-6b)" },
-];
-const KNOWN_2: &[Known] = &[
-    Known { metric: Metric::Conceal, short: Some(2.16), long: Some(2.21), tol: TOL_PCT, why: DOUBLE },
-    Known { metric: Metric::Underrun, short: Some(0.70), long: Some(0.71), tol: TOL_PCT, why: DOUBLE },
-    Known { metric: Metric::BandPct, short: Some(50.4), long: Some(53.9), tol: TOL_BAND, why: "이중 은닉으로 깊이 +1F가 잦아 bufferMs가 목표 +3ms 근처에 머문다(P1-6a)" },
-];
-const KNOWN_5: &[Known] = &[
-    Known { metric: Metric::Conceal, short: Some(2.75), long: Some(2.69), tol: TOL_PCT, why: DOUBLE },
-    Known { metric: Metric::Underrun, short: Some(0.75), long: Some(0.70), tol: TOL_PCT, why: DOUBLE },
-    Known { metric: Metric::BandPct, short: Some(30.6), long: Some(28.9), tol: TOL_BAND, why: "이중 은닉으로 깊이 +1F가 잦다(P1-6a)" },
-];
+// #1은 언더런 몫이 0.15~0.17%로 예산 안이다 — 초과분은 손실 몫(1.77%, 실제 손실 0.5%)의 늦은 패킷이다.
+const KNOWN_1: &[Known] = &[Known { metric: Metric::Conceal, short: Some(1.94), long: Some(1.93), tol: TOL_PCT, why: TAIL }];
 
 struct Spec {
     np: NetPeer,
@@ -154,7 +138,7 @@ fn scenario(seconds: f64) -> Vec<Spec> {
     np.net_jitter_us = 3000;
     np.loss = 0.003;
     np.burst = Some((0.004, 1.0 / 3.0));
-    v.push(Spec { np, rule: LossRule::ActualPlus, known: KNOWN_2 });
+    v.push(Spec { np, rule: LossRule::ActualPlus, known: &[] });
     // #3 UDP 5초 단절 두 번(50%, 85%), 2.5ms 프레임, 손실 1%, 지터 5ms, −120ppm.
     let mut np = NetPeer::new(120, 1004);
     np.drift_ppm = -120.0;
@@ -179,7 +163,7 @@ fn scenario(seconds: f64) -> Vec<Spec> {
     np.burst = Some((0.0025, 0.5));
     np.outages = vec![(at(0.25), 5 * SEC)];
     np.steps = vec![(at(0.70), 0, 8000), (at(0.80), 0, 2000)];
-    v.push(Spec { np, rule: LossRule::ActualPlus, known: KNOWN_5 });
+    v.push(Spec { np, rule: LossRule::ActualPlus, known: &[] });
     v
 }
 
