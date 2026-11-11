@@ -22,6 +22,7 @@ engine/wasapi.rs       자체 WASAPI 백엔드(Windows): 이벤트 구동 독점
 engine/rt.rs           실시간 콜백 (입력 → SPSC 링, 출력: 소스 링들을 꺼내 섞음). 할당/락/시스템콜/로그 금지
 engine/resample.rs     장치 레이트 ↔ 내부 48kHz 변환 (rubato, 비RT 스레드에서 실행)
 engine/codec.rs        Opus / PCM16 인코드·디코드
+engine/relay_codec.rs  릴레이 경로 Opus 자동 전환 정책(P1-4c, 3절 7)
 engine/jitter.rs       피어별 적응형 지터 버퍼 + 드리프트 보정 + PLC
 engine/mixer.rs        피어별 gain/mute, 모니터, 마스터, 클리핑 방지(soft clip)
 engine/stats.rs        원자적 통계 (레벨, xrun, 피어별 RTT/지터/손실/버퍼)
@@ -172,7 +173,14 @@ off len 필드
      - 경로 전환은 지터 버퍼·seq를 건드리지 않는다(무끊김). 경로 종류가 바뀌면 `rttMs`는 새 경로 값(HelloAck 측정, 없으면 다음 핑)으로 바뀐다.
    - 릴레이 경로 송신은 피어마다 RelayData(dest_ssrc = 그 피어의 ssrc) + 원본 엔진 패킷이다. AEAD(쌍별 키, nonce/AAD)는 그대로이고 접두부 8바이트는 AAD 밖이다. Pong은 Ping이 온 경로로 돌려준다. HelloAck는 Hello의 timestamp를 되돌려 경로별 RTT를 잰다.
    - `Failed`는 직접 연결과 릴레이가 모두 안 된 상태다. UI는 릴레이 상태(`EngineStats.relay`)와 마지막 `engine_set_relay` 실패 사유로 안내한다(릴레이 없음/설정 실패/닿지 않음/거절/만료/모두 실패).
-   - PCM16은 릴레이 대역 상한(클라이언트당 2 Mbps·2500pps)을 넘을 수 있다. 예: PCM16 mono 2.5ms 피어 3명이면 약 2.7 Mbps, stereo 2.5ms 피어 2명이면 약 3.3 Mbps다. 엔진은 릴레이 송신량을 1초 창으로 재서 상한의 90%를 넘으면 `EngineStats.relay.overBudget = true`로 알리고, 80% 아래로 내려가면 해제한다. UI는 "릴레이 대역 초과 — 코덱을 Opus로 바꿔 주세요"를 띄운다. 릴레이 경로에서 Opus로 자동 전환하는 것은 후속 작업이다(코덱은 워커/오디오 경로 소관).
+   - PCM16은 릴레이 대역 상한(클라이언트당 2 Mbps·2500pps)을 넘을 수 있다. 예: PCM16 mono 2.5ms 피어 3명이면 약 2.7 Mbps, stereo 2.5ms 피어 2명이면 약 3.3 Mbps다. 엔진은 릴레이 송신량을 1초 창으로 재서 상한의 90%를 넘으면 `EngineStats.relay.overBudget = true`로 알리고, 80% 아래로 내려가면 해제한다.
+   - **Opus 자동 전환**(P1-4c, `engine/relay_codec.rs`): 설정 코덱이 PCM16이면 워커가 릴레이 대역용 Opus 인코더(설정 비트레이트, 같은 채널)를 시작 때 만들어 둔다. 200ms마다 정책을 본다.
+     - 켜기(즉시): 오디오를 릴레이로 보내는 피어가 있고, 예상 PCM 부하(릴레이 피어 수 × (접두부 8 + 헤더 18 + PCM 페이로드 + 태그 16)B × 프레임률, 2 Mbps·2500pps 대비)가 90% 이상이거나 측정 `overBudget`이 켜졌다. 예상으로 켜지므로 릴레이가 버리기 전에 바뀐다. 측정으로 켜졌으면(운영 한도가 더 낮음) 그때의 예상 부하를 넘은 부하로 기억한다.
+     - 켜진 동안 **릴레이 경로 피어에게만** 같은 프레임의 Opus 패킷(flags=opus)을 보낸다. 직접 경로 피어는 PCM16을 그대로 받는다. 경로가 바뀌면 다음 프레임부터 그 경로의 코덱을 쓴다. 받는 쪽 지터 버퍼는 패킷 flags로 디코더를 바꾸고, seq는 그대로 이어지므로 손실·은닉이 생기지 않는다.
+     - 전환 순간: 인코더 상태를 초기화한 뒤 직전 프레임으로 한 번 예열(출력 버림)하고 보낸다. 첫 패킷이 Opus 알고리즘 지연(2.5ms)만큼 0으로 시작하지 않는다. 남는 것은 2.5ms 위상 이동 한 번이다.
+     - 끄기(히스테리시스): 예상 PCM 부하가 `min(80%, 0.85 × 넘은 부하)` 아래로 hold(10초) 동안 이어지면 PCM16으로 돌아간다. 복귀한 지 30초 안에 다시 켜지면 hold를 두 배로 늘린다(최대 120초). 60초 안정하면 10초로 돌아간다.
+     - 상태: `PeerStats.txCodec`(그 피어에게 마지막으로 보낸 코덱)·`txCodecAuto`, `EngineStats.relay.autoOpus`. UI는 릴레이 경로 피어에 "서버 경유 — 대역 절약을 위해 Opus로 자동 전환"을 띄우고, 그래도 `overBudget`이면 "릴레이 대역 초과" 경고를 띄운다.
+     - 받는 쪽 손실 피드백(측정 가용 대역)은 아직 없다. 릴레이가 조용히 버리는 것은 송신 측에서 알 수 없으므로, 예상 부하와 송신량 측정만 쓴다.
 
 ## 4. Tauri 커맨드 (`commands.rs`) — 프론트 계약
 
@@ -196,9 +204,9 @@ interface EngineConfig {
 }
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
-interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean }
+interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean; txCodec: 'opus' | 'pcm16' | null; txCodecAuto: boolean }
 interface RelayConfig { addr: string; token: string; expiresInSec?: number }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)
-interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean }
+interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean; autoOpus: boolean }
 type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
 interface LoopbackRun { roundTripMs: number | null; peakRatio: number; correlation: number; clipped: boolean; inverted: boolean; inputPeak: number }
 interface LoopbackReport { verdict: MeasureVerdict; message: string; runs: LoopbackRun[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; sampleRate: number; inputBufferFrames: number; outputBufferFrames: number; bufferRoundTripMs: number; driverInputLatencyMs: number | null; driverOutputLatencyMs: number | null; driverRoundTripMs: number | null; estLatencyMs: number; offsetMs: number | null; driverErrorMs: number | null; correctedEstLatencyMs: number | null; backend: string }
@@ -275,7 +283,7 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
   - `residualMs` = 왕복 − (프레임 + 핑 RTT + 상대 처리 + 지터 버퍼 평균)이다. 클릭이 놓인 입력 버스트 위상(≤ 입력 버퍼)만큼 흩어진다. 판정: 피크비 ≥ 8, 상관 ≥ 0.3, 흩어짐 > 5ms면 `unstable`.
   - 에코가 시작·끝날 때 측정하는 쪽은 그 피어의 지터 버퍼를 처음부터 다시 채운다(스트림 성격이 바뀜). 측정 뒤 상대가 에코를 멈출 때까지(최대 4초) 그 피어에게 무음을 보낸다(내 실제 소리가 되돌아오지 않게).
 
-`PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제).
+`PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제). `autoOpus`는 PCM16 설정에서 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중이라는 뜻이다(3절 7). `PeerStats.txCodec`은 그 피어에게 마지막으로 보낸 내 소리의 코덱이고, `txCodecAuto`는 그것이 자동 전환한 Opus라는 뜻이다.
 
 ## 5. 시그널링 (WS 서버 `server/src/services/wsService.ts`)
 

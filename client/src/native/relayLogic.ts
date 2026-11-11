@@ -72,6 +72,8 @@ export function pathLabel(path: PeerPath | null | undefined): string | null {
 
 /** 경로가 릴레이일 때 보여줄 안내 */
 export const RELAY_PATH_HINT = '서버 경유 — 지연 증가'
+/** PCM16 설정에서 릴레이 대역 때문에 엔진이 릴레이 피어에게 Opus로 자동 전환함(P1-4c) */
+export const RELAY_AUTO_OPUS_HINT = '서버 경유 — 대역 절약을 위해 Opus로 자동 전환'
 /** 릴레이 대역 상한 근접(PCM16 + 릴레이 피어 여럿) */
 export const RELAY_OVER_BUDGET_HINT = '릴레이 대역 초과 — 소리가 끊길 수 있습니다. 코덱을 Opus로 바꿔 주세요'
 
@@ -104,6 +106,9 @@ export function peerPathHint(
   relayError?: string | null,
 ): string | null {
   if (state === 'failed') return failedPeerHint(relay, relayError)
-  if (path === 'relay') return relay?.overBudget ? RELAY_OVER_BUDGET_HINT : RELAY_PATH_HINT
+  if (path === 'relay') {
+    if (relay?.overBudget) return RELAY_OVER_BUDGET_HINT
+    return relay?.autoOpus ? RELAY_AUTO_OPUS_HINT : RELAY_PATH_HINT
+  }
   return null
 }

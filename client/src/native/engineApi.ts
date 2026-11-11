@@ -73,6 +73,8 @@ export interface RelayStats {
   txKbps: number
   /** 릴레이 상한(2Mbps/2500pps)의 90% 초과: 릴레이가 패킷을 버리기 시작한다(PCM16 + 릴레이 피어 여럿) */
   overBudget: boolean
+  /** 코덱이 PCM16인데 릴레이 대역(상한의 90%)에 닿아 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중(P1-4c) */
+  autoOpus?: boolean
 }
 
 /** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token/expiresIn */
@@ -105,6 +107,10 @@ export interface PeerStats {
   echoActive?: boolean
   /** 이 피어가 내 소리를 되돌려 보내는 중(내 에코 측정 진행 중) */
   peerEchoing?: boolean
+  /** 이 피어에게 마지막으로 보낸 내 소리의 코덱(아직 안 보냈으면 null) */
+  txCodec?: CodecKind | null
+  /** txCodec이 릴레이 대역 때문에 자동 전환한 Opus다(P1-4c) */
+  txCodecAuto?: boolean
 }
 
 // ============================================================================

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  RELAY_AUTO_OPUS_HINT,
   RELAY_OVER_BUDGET_HINT,
   RELAY_PATH_HINT,
   RELAY_REFRESH_MIN_MS,
@@ -84,6 +85,9 @@ describe('경로 표시', () => {
 
   it('릴레이 대역 초과면 경고(M4)', () => {
     expect(peerPathHint('connected', 'relay', { ...bound, overBudget: true })).toBe(RELAY_OVER_BUDGET_HINT)
+    // P1-4c: 엔진이 Opus로 자동 전환해 상한 아래로 내려오면 그 사실을 알린다
+    expect(peerPathHint('connected', 'relay', { ...bound, autoOpus: true })).toBe(RELAY_AUTO_OPUS_HINT)
+    expect(peerPathHint('connected', 'lan', { ...bound, autoOpus: true })).toBeNull()
     expect(peerPathHint('connected', 'lan', { ...bound, overBudget: true })).toBeNull()
   })
 
