@@ -21,7 +21,30 @@ export const AVAILABLE_INSTRUMENTS = [
   { id: 'other', name: '기타 악기', icon: '🎵' },
 ]
 
-export const MAX_PARTICIPANT_OPTIONS = [2, 4, 6, 8, 10, 12, 16, 20]
+/**
+ * 정원(관람 포함) 범위. 서버 server/src/lib/roomCapacity.ts(방 생성 스키마·WS 상한)와
+ * DB CHECK(docs/migrations/013)와 같다. 바꾸면 세 곳을 함께 바꾼다.
+ */
+export const ROOM_CAPACITY_MIN = 2
+export const ROOM_CAPACITY_MAX = 20
+
+export const MAX_PARTICIPANT_OPTIONS: readonly number[] = [2, 4, 6, 8, 10, 12, 16, 20]
+  .filter(n => n >= ROOM_CAPACITY_MIN && n <= ROOM_CAPACITY_MAX)
+
+/**
+ * DB 값 → 표시·편집용 정원. 범위 밖·없음(013 전 기존 행)은 서버가 실제로 쓰는 상한(20)으로 본다
+ * (서버 parseRoomCapacity와 같은 규칙) — 목록이 '3/50명'처럼 서버와 다른 정원을 보이지 않게.
+ */
+export function effectiveRoomCapacity(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= ROOM_CAPACITY_MIN && value <= ROOM_CAPACITY_MAX
+    ? value
+    : ROOM_CAPACITY_MAX
+}
+
+/** 편집 선택지: 기본 선택지에 없는 현재 값(예: 3)도 그대로 고를 수 있게 넣는다 */
+export function maxParticipantOptionsFor(current: number): readonly number[] {
+  return MAX_PARTICIPANT_OPTIONS.includes(current) ? MAX_PARTICIPANT_OPTIONS : [...MAX_PARTICIPANT_OPTIONS, current].sort((a, b) => a - b)
+}
 
 /** 방 최대 인원은 관람자를 포함한 정원이다. 동시 연주자는 이와 별개로 최대 MAX_PERFORMERS명 (P3-12 ⑧) */
 export const MAX_PARTICIPANTS_LABEL = '최대 인원 (관람 포함)'
@@ -94,7 +117,7 @@ export function toRoom(room: DbRoom): Room {
     vibe: room.description || '함께 음악을 만들어요',
     genre: room.genre || '기타',
     musicians: room.current_participants,
-    capacity: room.max_participants,
+    capacity: effectiveRoomCapacity(room.max_participants),
     status: room.status as RoomStatus,
     tags: room.tags || [],
     instrumentSlots: room.instrument_slots || [],
@@ -158,7 +181,7 @@ export function buildRoomUpdate(fields: RoomEditFields) {
     title: fields.title.trim(),
     description: fields.description.trim() || null,
     genre: fields.genre,
-    max_participants: fields.maxParticipants,
+    max_participants: effectiveRoomCapacity(fields.maxParticipants),
     free_join: fields.freeJoin,
     tags: fields.tags,
     instrument_slots: fields.instrumentSlots.filter(s => s.count > 0),
