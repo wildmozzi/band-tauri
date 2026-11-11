@@ -32,6 +32,7 @@ import { LatencyMeasurePanel } from './LatencyMeasurePanel'
 import { DesktopDownloadButton } from './DesktopDownloadButton'
 import { Modal } from './ui'
 import { DiagnosticsExport } from './DiagnosticsExport'
+import { DevServerSettingsSection } from './DevServerSettings'
 import './AudioSettings.css'
 
 interface AudioSettingsProps {
@@ -499,6 +500,10 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
       <LatencyMeasurePanel />
 
       <DiagnosticsExport />
+
+      {/* 개발 실행 전용(P1-12d): 🎛️ 모달에서 바로 개발 서버를 바꾼다(/settings/audio 페이지는 자체 섹션을 그린다).
+          운영 빌드에서는 import.meta.env.DEV가 false로 접혀 컴포넌트째 빠진다(PR #56 L1) */}
+      {import.meta.env.DEV && isModal && <DevServerSettingsSection />}
 
       {issues.length > 0 && (
         <section className="settings-section">
