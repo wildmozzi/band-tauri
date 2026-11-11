@@ -55,7 +55,8 @@
 | P2-3b | 방장 이양 기능을 앱에 만들 때 서버에서 dropMetronomeIfHostChanged 호출(지금은 DB 직접 변경만 → 조용한 방에서 감지 지연, #53 L1) | 서버 테스트 | 대기 (이양 기능 구현 시) |
 | P1-12a | 실장비 합주 테스트 가이드 `docs/TEST-SESSION.md` — PC 2대 한 세션으로 [사람] 확인 항목 묶어 진행 | 문서 | 완료(PR #55 docs/TEST-SESSION.md, 2026-11-11) |
 | P1-12b | 2대 테스트 마찰 제거(#55 가이드의 우회 절차 없애기): auto 시그널링 ws/wss 불일치, 개발 빌드에서 LAN 사설 IP 서버 허용(dev CSP), threadPriority·qos·CPU 진단 UI 표시 → 이후 TEST-SESSION.md 간소화 | e2e | 완료(PR #56, 2026-11-11; **[사람]** 실장비 2대 확인; 8080 외 포트는 server .env PORT/BAND_DEV_PROXY_PORTS로 허용) |
-| P1-12c | TEST-SESSION.md 간소화 — #56으로 필요 없어진 우회(ws:// 지정, netsh portproxy, devtools engine_stats)를 개발 서버 주소 설정·진단 줄 절차로 교체(바꿀 절 목록은 PR #56 본문) | 문서 | 대기 |
+| P1-12c | TEST-SESSION.md 간소화 — #56으로 필요 없어진 우회(ws:// 지정, netsh portproxy, devtools engine_stats)를 개발 서버 주소 설정·진단 줄 절차로 교체(바꿀 절 목록은 PR #56 본문) | 문서 | 리뷰 완료(PR #59, CI 대기) |
+| P1-12d | 개발 서버 설정 페이지(/settings/audio) 진입 링크(개발 실행에서만) → 가이드의 devtools 단계 제거 | e2e | 진행중(작업자 p1-devlink) |
 | P2-4 | 합주 녹음: 로컬 멀티트랙(내 입력 + 피어별) WAV/FLAC 저장 | 앱에서 녹음/내보내기 | 완료(PR #47 엔진·#49 UI, 2026-11-11; **[사람]** 실장비 1시간 녹음 droppedFrames 0·DAW 정렬·RF64 열기·클릭 미포함 청취; 후속 P2-4a) |
 | P2-4a | 녹음 후속: FLAC 저장, 은닉(PLC) 구간 마커 사이드카 | 테스트 | 대기 (P2-4 병합 후) |
 | P2-5 | 로그/진단 내보내기(엔진 통계 타임라인 + 설정) | 버튼 하나로 zip | 완료(PR #32, 2026-11-11; **[사람]** 실제 앱에서 내보내기 대화상자·연속 클릭·zip 로그 마스킹 확인) |
