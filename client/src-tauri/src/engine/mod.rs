@@ -339,6 +339,8 @@ impl Engine {
             backend: self.info.backend_label(),
             peers,
             relay: self.net.as_ref().and_then(|n| n.relay_stats()),
+            qos: self.net.as_ref().map(|n| n.qos_stats()),
+            send_queue: self.net.as_ref().map(|n| n.send_queue_stats()),
         }
     }
 

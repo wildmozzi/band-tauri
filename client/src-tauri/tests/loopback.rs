@@ -654,6 +654,11 @@ fn link_end_to_end_latency_128_2_5ms() {
         sa.xruns,
         sb.xruns
     );
+    // 송신 큐 지연(P1-3): 워커 경로(프레임 생성 → PCM16 인코딩 → 암호화 → send_to)가 통계로 나온다
+    let sq = sa.send_queue.expect("네트워크가 있으면 sendQueue가 있다");
+    println!("A sendQueue: p50 {:.3}ms p99 {:.3}ms max {:.3}ms ({}패킷), A qos {:?}", sq.p50_ms, sq.p99_ms, sq.max_ms, sq.packets, sa.qos);
+    assert!(sq.packets > 0 && sq.p50_ms < 2.5, "{sq:?}");
+    assert!(sa.qos.as_ref().is_some_and(|q| q.ip_tos), "{:?}", sa.qos);
     // GOAL 1절: ASIO 128샘플 / 2.5ms 프레임에서 estLatencyMs ≤ 8ms(입력 2.67 + 프레임 2.5 + 출력 2.67 = 7.83).
     // 콜백 구동 믹스 전에는 출력 링(≈ 장치 버퍼 + 청크) 때문에 11.8ms였다.
     assert!(sb.est_latency_ms <= 8.0, "estLatencyMs {:.2} > 8", sb.est_latency_ms);

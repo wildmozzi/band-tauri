@@ -1004,11 +1004,13 @@ impl Worker {
     }
 
     fn on_capture_frame(&mut self, frame: &[f32]) {
+        // 송신 큐 지연의 시작점: 프레임이 다 모인 시각(인코딩 전, P1-3)
+        let frame_at = Instant::now();
         let alt = if self.encoder.is_some() { self.probe_frame() } else { None };
         if let (Some(enc), Some(net)) = (self.encoder.as_mut(), self.p.net.as_ref()) {
             let alt = alt.as_ref().map(|(id, n)| (id.as_str(), &self.alt_payload[..*n]));
             match enc.encode(frame, &mut self.payload) {
-                Ok(n) => net.send_audio(&self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt),
+                Ok(n) => net.send_audio_timed(frame_at, &self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt),
                 Err(e) => {
                     // 레이트 제한 로그(리뷰 L10)
                     if self.encode_errors.is_multiple_of(1000) {

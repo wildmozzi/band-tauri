@@ -75,6 +75,38 @@ export interface RelayStats {
   overBudget: boolean
 }
 
+/**
+ * 오디오 UDP DSCP 마킹 상태(P1-3, 설계 3절 "QoS 마킹").
+ * - 'ef': EF(46)를 OS에 지정함(비Windows IP_TOS, Windows는 qWAVE QOSSetFlow 성공 — 관리자 권한 필요)
+ * - 'voice': Windows qWAVE 트래픽 유형 Voice 플로만(DSCP 직접 지정은 권한 부족으로 실패, 표시값은 OS 정책)
+ * - 'pending': 아직 송신 목적지 없음 / 'none': 표시 못 함(엔진은 그대로 동작)
+ */
+export type QosMarking = 'pending' | 'ef' | 'voice' | 'none'
+
+export interface QosStats {
+  marking: QosMarking
+  /** IP_TOS=0xB8 setsockopt 성공(Windows는 성공해도 무시될 수 있다) */
+  ipTos: boolean
+  /** qWAVE 핸들을 얻음(Windows만) */
+  qwave: boolean
+  /** qWAVE 플로가 걸린 송신 목적지 수(직접 경로 피어 + 릴레이) */
+  flows: number
+  /** 그중 DSCP 46 지정에 성공한 수 */
+  efFlows: number
+  /** 플로 추가 실패 목적지 수(예: 루프백 목적지는 qWAVE가 거부) */
+  failed: number
+  lastError: string | null
+}
+
+/** 송신 큐 지연: 캡처 프레임 생성(인코딩 전) → 피어별 send_to 완료, 직전 2초 창(P1-3) */
+export interface SendQueueStats {
+  p50Ms: number
+  p99Ms: number
+  maxMs: number
+  /** 창에서 잰 오디오 패킷 수(0이면 송신 없음 — 값 무시) */
+  packets: number
+}
+
 /** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token/expiresIn */
 export interface RelayConfig {
   /** 릴레이 host:port */
@@ -222,6 +254,10 @@ export interface EngineStats {
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
+  /** 오디오 UDP DSCP 마킹 상태. 네트워크 미시작이면 null */
+  qos?: QosStats | null
+  /** 송신 큐 지연(직전 2초 창). 네트워크 미시작이면 null */
+  sendQueue?: SendQueueStats | null
 }
 
 // ============================================================================

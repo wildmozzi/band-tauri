@@ -130,6 +130,10 @@ pub struct EngineStats {
     pub peers: Vec<PeerStats>,
     /// 릴레이 등록 상태(릴레이를 설정하지 않았으면 null).
     pub relay: Option<crate::net::relay::RelayStats>,
+    /// 오디오 UDP DSCP 마킹 상태(P1-3, 네트워크 미시작이면 null).
+    pub qos: Option<crate::net::qos::QosStats>,
+    /// 송신 큐 지연: 프레임 생성(인코딩 전) → 피어별 send_to 완료, 직전 2초 창(P1-3, 네트워크 미시작이면 null).
+    pub send_queue: Option<crate::net::txlat::SendQueueStats>,
 }
 
 impl EngineStats {
@@ -153,6 +157,8 @@ impl EngineStats {
             backend: String::new(),
             peers: Vec::new(),
             relay: None,
+            qos: None,
+            send_queue: None,
         }
     }
 }
@@ -197,7 +203,7 @@ mod tests {
         assert!(j.contains("\"state\":\"connected\""));
         assert!(j.contains("\"path\":\"lan\""));
         assert!(j.contains("\"rttMs\":null"));
-        assert!(j.contains("\"relay\":null"));
+        assert!(j.contains("\"relay\":null") && j.contains("\"qos\":null") && j.contains("\"sendQueue\":null"), "{j}");
         assert_eq!(serde_json::to_string(&PathKind::Relay).unwrap(), "\"relay\"");
         assert!(j.contains("\"devicePeriodMs\":0.0") && j.contains("\"backend\":\"\"") && j.contains("\"inputDiscontinuities\":0") && j.contains("\"streamFailed\":false"), "{j}");
     }
