@@ -293,6 +293,13 @@ interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: numb
   - 비밀번호는 6~64자(NFC 기준), scrypt N=2^14·r=8·p=5(16MiB/회).
   - 실패한 join은 지금 있는 방을 바꾸지 않는다. 이미 그 방에 있는 연결의 재 join(세션 재개)은 다시 묻지 않는다.
   - 비공개 방(`rooms.is_private`)은 목록(RLS)에서만 숨긴다. 방 id(초대 링크/방 코드)로는 `get_room(id)`로 조회·입장한다.
+- 방 정원(P3-12b): `join` 시 서버가 `rooms.max_participants`(관람 포함. 값이 없거나 서버 상한 20보다 크면 20)를 강제한다. 초과면 `error` `room-full` `{ roomId, maxParticipants, reason }`(`reason`: `room-full` | `anonymous-limit`). UI 라벨은 "최대 인원 (관람 포함)"(`roomModel.MAX_PARTICIPANTS_LABEL`).
+  - 로그인 사용자 우선(PR #23 H1): 로그인 사용자(방장·연주자·로그인 관람자)는 로그인 사용자 수로만 정원을 센다. 익명 관람자는 전체 인원 < 정원일 때만, 방별 익명 상한(`maxAnonymousPerRoom`, 기본 10)과 IP(/64)당 방별 익명 연결 상한(`maxAnonymousPerIpPerRoom`, 기본 2) 안에서 들어온다(넘으면 `reason: anonymous-limit`). 이미 있는 익명은 밀어내지 않으므로 로그인 사용자가 뒤에 들어오면 전체 인원이 잠시 정원을 넘을 수 있다(익명이 나가면 다시 정원 안으로).
+  - 승인 보유자와 자리 예약은 정원 검사를 건너뛴다(PR #23 M2): 연주 중이거나 승인을 가진 로그인 사용자가 끊겨 세션 재개 유예(30초)가 지나도 승인 유예와 같은 60초 동안 자리를 예약한다. 그 안에 새 연결로 다시 들어오면 방이 차 있어도 입장하고 예약은 사라진다. 명시적 퇴장·방 이동은 예약을 지운다.
+  - 클라이언트: 재연결 rejoin이 `room-full`이면(또는 rejoin이 다른 이유로 거부되면) 엔진·방송을 멈추고 "연결이 끊긴 사이 자리를 잃었습니다"로 안내한다. 정원 화면에는 다시 시도 버튼이 있다.
+  - 방장은 항상 입장(정원 밖 — 비방장이 정원을 다 채운 뒤 방장이 들어오면 정원+1). 세션 재개 유예 중인 연결은 자리를 유지하고(다른 사람이 그 자리로 못 들어옴), 같은 사용자의 새 연결은 기존 연결을 대체하므로 새 자리로 세지 않는다.
+  - 정원 검사와 방 추가 사이에 await가 없어 동시 입장 경합에서도 정원을 넘지 않는다(서버 인스턴스 1대 기준). 실패한 join은 지금 있는 방을 바꾸지 않는다.
+  - 연주자 상한 6은 `start-performing`에서 따로 강제한다(`room-full-performers`, 유예 중인 연주자 포함). join은 항상 관람으로 들어오므로 연주자 자리는 그때 센다.
 - 연주 참여 요청: `perform-request-sent` `{ instrument, hostOnline }`(같은 요청 재전송에도 다시 보냄), `perform-request-rejected` `{ reason, instrument }`(빈 사유는 기본 문구), 익명 요청에는 `request-perform-error` `{ code: 'login-required' }`도 보낸다. 승인(`perform-request-approved`)을 받은 앱은 바로 엔진을 시작한다(웹은 앱 안내).
 - 중계 시 서버가 `from`을 붙인다(클라이언트가 보낸 `from`은 무시).
 

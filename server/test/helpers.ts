@@ -28,8 +28,8 @@ export interface TestClient {
   close: () => void
 }
 
-export async function connect(url: string): Promise<TestClient> {
-  const ws = new WebSocket(url)
+export async function connect(url: string, headers?: Record<string, string>): Promise<TestClient> {
+  const ws = new WebSocket(url, headers ? { headers } : undefined)
   const inbox: any[] = []
   const c: TestClient = {
     ws,

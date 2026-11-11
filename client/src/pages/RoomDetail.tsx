@@ -37,6 +37,7 @@ export function RoomDetail() {
     peers,
     joinError,
     submitRoomPassword,
+    retryJoin,
     rtcStatus,
     leaveRoom,
     isRoomHost,
@@ -158,7 +159,7 @@ export function RoomDetail() {
     )
   }
 
-  // 비밀번호 방 입장 (방장은 서버가 묻지 않는다)
+  // 비밀번호 방 입장 (방장은 서버가 묻지 않는다) / 정원 초과 안내
   if (joinError) {
     return (
       <RoomPasswordGate
@@ -167,6 +168,7 @@ export function RoomDetail() {
         passwordInput={passwordInput}
         onPasswordInput={setPasswordInput}
         onSubmit={handleSubmitPassword}
+        onRetry={retryJoin}
         onLeave={handleLeave}
       />
     )
