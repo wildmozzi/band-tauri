@@ -271,6 +271,36 @@ impl RecordPortCtl {
     }
 }
 
+type Rings = (HeapProd<f32>, HeapCons<f32>, HeapProd<RecBlock>, HeapCons<RecBlock>);
+
+/// 녹음 링(샘플·청크 머리)을 할당한다(비RT, 녹음 시작 때). `prefault`면 콜백에 넘기기 전에 모든 칸을 한 번 써서
+/// 페이지를 미리 들여 둔다(P2-4b). `HeapRb`는 초기화하지 않은 큰 블록이라 OS가 페이지를 처음 쓰는 순간에야 붙인다 —
+/// 안 하면 첫 몇 초 동안 출력 콜백이 링에 쓸 때마다 커널 페이지 폴트(0으로 채운 페이지 할당)를 RT 스레드에서 겪는다.
+fn alloc_rings(rate: u32, prefault: bool) -> Rings {
+    let frames_cap = rate as usize * RING_SECONDS;
+    let (mut s_p, mut s_c) = HeapRb::<f32>::new(frames_cap * 2 * (MAX_SOURCES + 1)).split();
+    let (mut b_p, mut b_c) = HeapRb::<RecBlock>::new(frames_cap / MIN_CHUNK_FRAMES + 16).split();
+    if prefault {
+        touch_all(&mut s_p, &mut s_c);
+        touch_all(&mut b_p, &mut b_c);
+    }
+    (s_p, s_c, b_p, b_c)
+}
+
+/// 링 전체를 기본값으로 한 바퀴 채우고 바로 버린다(모든 페이지를 건드림). 끝나면 링은 다시 비어 있다.
+fn touch_all<T: Copy + Default>(p: &mut HeapProd<T>, c: &mut HeapCons<T>) {
+    let fill = [T::default(); 1024];
+    let mut left = p.capacity().get();
+    while left > 0 {
+        let k = p.push_slice(&fill[..left.min(fill.len())]);
+        c.skip(k);
+        if k == 0 {
+            break;
+        }
+        left -= k;
+    }
+}
+
 /// `engine_record_start` 옵션.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -630,9 +660,7 @@ impl Recorder {
         std::fs::create_dir_all(dir).map_err(|e| format!("녹음 폴더를 만들 수 없습니다: {e}"))?;
         let folder = unique_dir(dir, &base).map_err(|e| format!("녹음 폴더를 만들 수 없습니다: {e}"))?;
 
-        let frames_cap = rate as usize * RING_SECONDS;
-        let (s_p, s_c) = HeapRb::<f32>::new(frames_cap * 2 * (MAX_SOURCES + 1)).split();
-        let (b_p, b_c) = HeapRb::<RecBlock>::new(frames_cap / MIN_CHUNK_FRAMES + 16).split();
+        let (s_p, s_c, b_p, b_c) = alloc_rings(rate, true);
         let rt_shared = Arc::new(RecordRtShared::default());
         let rt = RecordRt { samples: s_p, blocks: b_p, include_mix: opts.include_mix, shared: rt_shared.clone(), cur: RecBlock::default(), open: false };
         if let Err(e) = self.port.attach(rt) {
@@ -1374,6 +1402,62 @@ mod tests {
         let (sum, _) = stop_with_rt(&mut rec, port_rt);
         assert_eq!(sum.dropped_frames, dropped);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P2-4b: 미리 건드린 링은 비어 있고(가득 빈 자리) 그대로 RT 쓰기·쓰기 스레드 읽기에 쓸 수 있다.
+    #[test]
+    fn prefaulted_rings_start_empty() {
+        let (mut s_p, mut s_c, mut b_p, mut b_c) = alloc_rings(100, true);
+        assert_eq!(s_p.vacant_len(), s_p.capacity().get());
+        assert_eq!(s_c.occupied_len(), 0);
+        assert_eq!(b_p.vacant_len(), b_p.capacity().get());
+        assert_eq!(b_c.occupied_len(), 0);
+        let data: Vec<f32> = (0..64).map(|i| i as f32).collect();
+        assert_eq!(s_p.push_slice(&data), 64);
+        let mut out = [0f32; 64];
+        assert_eq!(s_c.pop_slice(&mut out), 64);
+        assert_eq!(&out[..], &data[..]);
+        assert!(b_p.try_push(RecBlock { pos: 7, frames: 3, ..Default::default() }).is_ok());
+        assert_eq!(b_c.try_pop().map(|b| (b.pos, b.frames)), Some((7, 3)));
+    }
+
+    /// P2-4b 측정: 출력 콜백이 녹음 링에 쓰는 비용 — 새로 할당한 링(첫 바퀴 = 페이지 폴트) vs 미리 건드린 링.
+    /// 48k, 128프레임 청크, 슬롯 2개 + 믹스, 링 한 바퀴 넘게. `cargo test --release --lib prefault_rt_write_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "측정(벽시계)"]
+    fn prefault_rt_write_cost() {
+        for prefault in [false, true, false, true] {
+            let t_alloc = Instant::now();
+            let (s_p, mut s_c, b_p, mut b_c) = alloc_rings(48_000, prefault);
+            let alloc_ms = t_alloc.elapsed().as_secs_f64() * 1e3;
+            let shared = Arc::new(RecordRtShared::default());
+            let mut r = RecordRt { samples: s_p, blocks: b_p, include_mix: true, shared: shared.clone(), cur: RecBlock::default(), open: false };
+            let n = 128usize;
+            let data = vec![0.1f32; n * 2];
+            let chunks = s_c.capacity().get() / (n * 2 * 3) + 200;
+            let (mut total, mut max) = (Duration::ZERO, Duration::ZERO);
+            let mut over_20us = 0;
+            for k in 0..chunks {
+                let t = Instant::now();
+                r.begin(k as u64 * n as u64, n);
+                r.source(0, 0, &data, 0);
+                r.source(1, 7, &data, 0);
+                r.finish(&data);
+                let d = t.elapsed();
+                total += d;
+                max = max.max(d);
+                over_20us += usize::from(d > Duration::from_micros(20));
+                s_c.skip(s_c.occupied_len());
+                b_c.skip(b_c.occupied_len());
+            }
+            assert_eq!(shared.dropped_frames.load(Ordering::Relaxed), 0);
+            println!(
+                "prefault={prefault}: 준비 {alloc_ms:.2}ms, 청크 {chunks}개 RT 쓰기 합 {:.2}ms 평균 {:.2}us 최대 {:.1}us, 20us 넘은 청크 {over_20us}",
+                total.as_secs_f64() * 1e3,
+                total.as_secs_f64() * 1e6 / chunks as f64,
+                max.as_secs_f64() * 1e6
+            );
+        }
     }
 
     /// P2-4a: FLAC 녹음 — 트랙 파일이 `.flac`이고 표준 디코더(claxon)로 열리며, 타임라인 정렬(늦은 피어 앞 무음)과

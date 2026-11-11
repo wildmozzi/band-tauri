@@ -198,7 +198,7 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 - 파일 레이트 = 출력 장치 레이트(48k가 아니어도 리샘플하지 않음), 2채널(모노 설정이면 L=R).
 
 **RT 경로(출력 콜백)**
-- 녹음 링(샘플 f32, 청크 머리 `RecBlock`)은 **녹음을 시작할 때** 비RT에서 할당한다(3초 × 장치 레이트 × 2ch × (소스 8 + 믹스 1), 48k에서 약 10MB). 용량 1 핸드오프 링으로 콜백에 넘긴다.
+- 녹음 링(샘플 f32, 청크 머리 `RecBlock`)은 **녹음을 시작할 때** 비RT에서 할당한다(3초 × 장치 레이트 × 2ch × (소스 8 + 믹스 1), 48k에서 약 10MB). 넘기기 전에 링 전체를 한 바퀴 0으로 채웠다 버려 **페이지를 미리 들인다**(P2-4b — `HeapRb`는 초기화하지 않은 큰 블록이라 OS가 처음 쓰는 순간에 페이지를 붙이므로, 안 하면 첫 몇 초 동안 콜백이 링에 쓸 때마다 RT 스레드에서 페이지 폴트가 난다. 시작 호출이 약 3ms 늘어난다). 용량 1 핸드오프 링으로 콜백에 넘긴다.
 - 콜백은 주기 시작에 핸드오프를 한 번 본다(`try_pop`). 청크마다 최악의 경우(모든 슬롯 + 믹스)만큼 자리가 있을 때만 그 청크를 쓰고, 없으면 청크를 통째로 버리고 `droppedFrames`만 올린다(머리가 없으니 쓰기 스레드가 무음으로 채움 → 타임라인 유지). 할당·락·시스템콜·로그 없음.
 - 슬롯 점유자는 `SourceShared.occupant`(피어 ssrc, 로컬 0)다. 워커가 슬롯을 `ACTIVE`로 바꾸기 전에 넣는다.
 - 정지: 제어 쪽이 `detach`를 켜면 콜백이 다음 주기 시작에 녹음 끝점을 반환 링으로 돌려준다(링 해제도 비RT). 1초 안에 안 돌아오면(장치 정지) 쓰기 스레드는 남은 것을 비우고 닫는다. 그 끝점이 돌아오기 전에는 새 녹음을 시작하지 않는다(에러).
@@ -235,6 +235,7 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 
 **검증**: `engine::record::tests`(타임라인 정렬·늦은 피어 무음·버린 청크·핸드오프 반환), `engine::wav::tests`(헤더·RF64·디스크 가득 후 헤더 = 실제 프레임), `engine::record::tests::one_track_create_failure_keeps_others`·`late_track_names_apply`, `tests/peer_key.rs` `removed_peer_ssrc_still_resolves`, `tests/record.rs`(가짜 장치 두 엔진 실녹음, 엔진 정지 시 마무리). 실시간 비교(`recording_does_not_change_buffer_concealment_or_xruns`, ignore): 녹음(믹스 포함, float) 켬/끔 8초씩 — 128/2.5ms에서 bufferMs 5.88 → 6.10ms, 은닉 0 → 0, xrun 0 → 0, 버림 0. 256/5ms에서 8.18 → 8.24ms, 0 → 0, 0 → 0, 버림 0.
 - P2-4a: `engine::flac::tests`(claxon으로 디코드해 24비트 양자화 값과 정확히 같음·빈 파일·디스크 가득 뒤 프레임 경계로 잘림), `engine::record::tests::flac_tracks_decode_and_align`·`markers_sidecar_maps_events_to_tracks`·`waiter_waits_for_inflight_stop`, `tests/record.rs`(엔진 정지로 마무리한 FLAC 세션을 claxon으로 디코드, `markers.json` 트랙 수). 실시간(ignore): `concealment_markers_follow_jitter_counter` — A → B 패킷 25개마다 1개 손실, 4초 녹음에서 지터 은닉 카운터 33패킷 vs `conceal` 마커 32구간·32패킷(경계 1패킷 차), 잃은 이벤트 0. 녹음 켬/끔 비교에 FLAC 추가: 128/2.5ms에서 bufferMs 5.98 → 6.08ms, 은닉 0 → 0, xrun 1 → 0, 버림 0(WAV float 같은 실행: 6.13 → 6.27ms, 0 → 0, 0 → 0; 256/5ms 8.70 → 8.96ms, 0 → 0, 0 → 0).
+- P2-4b(녹음 켬/끔 순간 xrun): PR #64에서 128/2.5ms 켬 창 하나에 xrun 1개가 늘 나온 것은 녹음 탓이 아니었다 — 가짜 장치 기상 지터의 **고정 시드**(`bb.seed = 9`) 때문에 녹음을 전혀 켜지 않아도 엔진 시작 약 22초 뒤 같은 시각에 xrun 1개가 나고(시드를 바꾸면 시각이 옮겨감), 그 시각이 ABBA 순서상 켬 창에 떨어졌다. 실시간(ignore) `record_toggle_adds_no_xruns_at_start_or_stop`: 같은 링크에서 1초 주기 20회를 ABBA로(녹음 주기 = 400ms 뒤 시작, 600ms 뒤 정지 / 대조 주기 = 아무것도 안 함) 돌리며 xrun 시각을 1ms 간격으로 잡아 시작·정지 직후 창(−5ms ~ 호출 끝 + 50ms)과 대조한다. 판정: 경계 창 xrun 0, 녹음 주기 xrun ≤ 대조 + 2. 정지는 앱과 같은 3단계(마무리를 recorder 락 밖에서)로 한다 — 락을 쥔 채 마무리하면 감시 스레드의 `stats()`가 막혀 그 사이 xrun이 정지 끝 시각으로 찍힌다. 결과(WAV float·FLAC, 3회씩): 경계 창 xrun 0, 녹음 주기 xrun 합 0, 대조 주기 합 2. 미리 들이기 전 코드도 같은 측정에서 경계 창 0(녹음 주기 1, 대조 5)이라, 미리 들이기는 재현된 xrun의 수정이 아니라 RT 위생 보강이다: 링 첫 바퀴 RT 쓰기 비용(48k, 128프레임 청크, 슬롯 2 + 믹스) 청크당 평균 0.61~0.85µs·최대 52µs → 0.27~0.32µs·최대 12.7µs(`engine::record::tests::prefault_rt_write_cost`, ignore). 녹음 끝점 받기·쓰기·돌려주기 RT 경로의 무할당은 `tests/rt_alloc.rs`가 본다(켬/끔 2회).
 
 ## 2. 패킷 포맷 (`net/packet.rs`)
 
