@@ -2,6 +2,8 @@ import { defineConfig, type PluginOption } from 'vite'
 import react from '@vitejs/plugin-react'
 import basicSsl from '@vitejs/plugin-basic-ssl'
 import fs from 'fs'
+import { fileURLToPath } from 'url'
+import { bandServerProxy } from './vite/bandServerProxy'
 
 // 개발 서버 HTTPS
 // - client/certs/{key,cert}.pem 이 있으면 그 인증서를 사용 (mkcert 권장, README 참고)
@@ -11,7 +13,9 @@ const keyPath = './certs/key.pem'
 const certPath = './certs/cert.pem'
 const hasLocalCert = fs.existsSync(keyPath) && fs.existsSync(certPath)
 
-const plugins: PluginOption[] = [react()]
+// 개발 실행에서 VITE_*_URL=auto면 앱이 이 개발 서버의 /__band_server/... 로 서버에 붙는다(P1-12b, vite/bandServerProxy)
+const serverDir = fileURLToPath(new URL('../server', import.meta.url))
+const plugins: PluginOption[] = [react(), bandServerProxy(serverDir)]
 if (!hasLocalCert) plugins.push(basicSsl())
 
 // https://vitejs.dev/config/

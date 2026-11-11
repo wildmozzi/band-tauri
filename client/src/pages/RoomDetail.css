@@ -3239,3 +3239,8 @@
     max-height: 320px;
   }
 }
+
+/* 진단 줄 경고(P1-12b): 스레드 우선순위 등록 실패 등 */
+.mixer-channel .diag-warn {
+  color: var(--warning);
+}
