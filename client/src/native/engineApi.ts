@@ -234,6 +234,62 @@ export interface EngineStats {
   relay?: RelayStats | null
   /** 공유 메트로놈 상태(P2-3). 옛 엔진이면 없음 */
   metronome?: MetronomeStats
+  /** 합주 녹음 상태(P2-4). 녹음 중이 아니면 null, 옛 엔진이면 없음 */
+  recording?: RecordStats | null
+}
+
+/** 녹음 샘플 형식: 24비트 정수 PCM(기본) | 32비트 float */
+export type RecordFormat = 'wav24' | 'wavF32'
+
+/** `engine_record_start` 옵션(설계 1.5절). 모두 선택 */
+export interface RecordOptions {
+  format?: RecordFormat
+  /** 믹스 트랙(내가 들은 피어 게인·팬 + 내 입력, 클릭 없음)도 저장 */
+  includeMix?: boolean
+  /** 세션 폴더 이름(파일 이름에 못 쓰는 문자는 `_`). 없으면 `band-rec-<UTC 시각>` */
+  name?: string
+  /** 내 입력 트랙 이름(기본 "me") */
+  localName?: string
+  /** 피어별 트랙 이름(engine peerId → 표시 이름). 없으면 peerId 앞 8자 */
+  trackNames?: Record<string, string>
+}
+
+export interface RecordStats {
+  /** 세션 폴더(절대 경로) */
+  folder: string
+  format: RecordFormat
+  /** 파일 샘플레이트 = 출력 장치 레이트 */
+  sampleRate: number
+  durationSec: number
+  /** 지금까지 쓴 오디오 바이트(모든 트랙) */
+  bytes: number
+  tracks: number
+  /** 녹음 링이 모자라 버린 프레임(그 자리는 무음, 녹음 품질 지표) */
+  droppedFrames: number
+  /** 쓰기 실패(디스크 가득 등). 있으면 그 뒤로는 저장되지 않는다 */
+  error: string | null
+}
+
+export interface RecordTrack {
+  kind: 'local' | 'peer' | 'mix'
+  name: string
+  /** 세션 폴더 안 파일 이름 */
+  file: string
+  peerId: string | null
+}
+
+/** `engine_record_stop` 반환(세션 폴더 `session.json`과 같은 내용) */
+export interface RecordSummary {
+  folder: string
+  format: RecordFormat
+  sampleRate: number
+  channels: number
+  durationSec: number
+  bytes: number
+  droppedFrames: number
+  startedAtMs: number
+  tracks: RecordTrack[]
+  error: string | null
 }
 
 /**
@@ -442,6 +498,26 @@ export function engineUnsubscribeMix(): Promise<null> {
  */
 export function diagExport(): Promise<string | null> {
   return invoke<string | null>('diag_export')
+}
+
+/** 현재 녹음 저장 폴더(고르지 않았으면 기본: 음악 폴더/Band Recordings) */
+export function engineRecordFolder(): Promise<string> {
+  return invoke<string>('engine_record_folder')
+}
+
+/** 녹음 저장 폴더 고르기(폴더 대화상자, 선택은 앱 설정에 남는다). 취소하면 null */
+export function engineRecordPickFolder(): Promise<string | null> {
+  return invoke<string | null>('engine_record_pick_folder')
+}
+
+/** 녹음 시작(P2-4): 저장 폴더 아래 세션 폴더에 트랙별 WAV(내 입력, 피어별, 선택: 믹스) */
+export function engineRecordStart(options?: RecordOptions): Promise<RecordStats> {
+  return invoke<RecordStats>('engine_record_start', { options: options ?? null })
+}
+
+/** 녹음 정지: 파일을 마무리하고 요약을 돌려준다 */
+export function engineRecordStop(): Promise<RecordSummary> {
+  return invoke<RecordSummary>('engine_record_stop')
 }
 
 function toFloat32(data: unknown): Float32Array | null {

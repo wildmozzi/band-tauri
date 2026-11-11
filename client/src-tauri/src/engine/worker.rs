@@ -1163,6 +1163,7 @@ impl Worker {
             match PeerFeed::new(slot, key, out_rate, sh) {
                 Ok(f) => {
                     sh.playing.store(false, Ordering::Relaxed);
+                    sh.occupant.store(peer.ssrc, Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
                     sh.state.store(SLOT_ACTIVE, Ordering::Release);
                     self.feeds.push(f);
                 }
