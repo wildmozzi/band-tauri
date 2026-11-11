@@ -1,7 +1,7 @@
 //! 피어 테이블, 홀펀칭 상태기계, keepalive, RTT (설계 문서 3절).
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU8};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -649,10 +649,17 @@ pub struct Peer {
     pub tx_seq: Arc<AtomicU32>,
     /// 이 피어로 마지막에 보낸 Audio 타임스탬프(에코 시작 시 타임스탬프를 이어 붙이는 데 쓴다).
     pub tx_last_ts: AtomicU32,
+    /// 이 피어로 마지막에 보낸 내 오디오의 코덱(`TX_CODEC_*` 비트, 0 = 아직 안 보냄). PeerStats.txCodec.
+    pub tx_codec: AtomicU8,
     pub echo: Mutex<EchoState>,
     /// 이 피어 시계와 내 시계의 오프셋 추정(P2-3, Pong 평문의 응답자 시계로 갱신).
     pub clock: Mutex<super::clock::ClockSync>,
 }
+
+/// `Peer::tx_codec` 비트: 보낸 적 있음 / Opus / 릴레이 대역 때문에 자동 전환한 Opus(P1-4c)
+pub const TX_CODEC_SENT: u8 = 0x80;
+pub const TX_CODEC_OPUS: u8 = 0x01;
+pub const TX_CODEC_AUTO: u8 = 0x02;
 
 pub struct PeerSetup<'a> {
     pub keys: &'a KeyPair,
@@ -684,6 +691,7 @@ impl Peer {
             mix: Arc::new(PeerMixCtl::default()),
             tx_seq: Arc::new(AtomicU32::new(rand::random())),
             tx_last_ts: AtomicU32::new(0),
+            tx_codec: AtomicU8::new(0),
             echo: Mutex::new(EchoState::default()),
             clock: Mutex::new(super::clock::ClockSync::new()),
         })

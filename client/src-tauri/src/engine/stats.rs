@@ -108,6 +108,10 @@ pub struct PeerStats {
     pub echo_active: bool,
     /// 이 피어가 내 오디오를 되돌려 보내는 중이다(내 측정이 진행 중).
     pub peer_echoing: bool,
+    /// 이 피어에게 마지막으로 보낸 내 오디오의 코덱(아직 안 보냈으면 null). 릴레이 대역 때문에 PCM16 대신
+    /// Opus로 보내면 'opus'이고 `txCodecAuto`가 true다(P1-4c).
+    pub tx_codec: Option<super::config::CodecKind>,
+    pub tx_codec_auto: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -218,11 +222,14 @@ mod tests {
                 echo_requested: true,
                 echo_active: false,
                 peer_echoing: false,
+                tx_codec: Some(crate::engine::config::CodecKind::Opus),
+                tx_codec_auto: true,
             }],
             ..EngineStats::stopped()
         };
         let j = serde_json::to_string(&s).unwrap();
         assert!(j.contains("\"echoRequested\":true") && j.contains("\"peerEchoing\":false"));
+        assert!(j.contains("\"txCodec\":\"opus\"") && j.contains("\"txCodecAuto\":true"), "{j}");
         assert!(j.contains("\"targetMs\":2.5") && j.contains("\"concealPct\":0.0"));
         assert!(j.contains("\"corrTimePct\":1.5") && j.contains("\"maxCorrCents\":4.3"));
         assert!(j.contains("\"estLatencyMs\""));
