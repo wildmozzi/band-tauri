@@ -6,6 +6,7 @@
 
 pub mod codec;
 pub mod config;
+pub mod cpuprof;
 pub mod device;
 pub mod jitter;
 pub mod measure;
@@ -81,6 +82,8 @@ pub struct Engine {
     metronome: Arc<metronome::MetronomeCtl>,
     /// 엔진 시계 기준(Net epoch, 없으면 시작 시각). 메트로놈 `startUs`의 기준이다.
     epoch: Instant,
+    /// CPU 통계 창 회전(P1-10). `stats`가 2초마다 RT 콜백 히스토그램을 비우고 워커 CPU 증분을 잰다.
+    cpu: Mutex<cpuprof::CpuSampler>,
     /// 합주 녹음(P2-4). 정지(파일 마무리)는 엔진 락 밖에서 할 수 있게 따로 잠근다.
     recorder: Arc<Mutex<record::Recorder>>,
 }
@@ -182,6 +185,7 @@ impl Engine {
             timer: Some(timer),
             metronome: metronome.clone(),
             epoch: Instant::now(),
+            cpu: Mutex::new(cpuprof::CpuSampler::new(Instant::now(), cpuprof::tsc_now())),
             recorder: Arc::new(Mutex::new(record::Recorder::new(rec_ctl, info.out_rate))),
         };
         // 48kHz 클릭 파형을 장치 레이트로 읽는 보폭
@@ -336,6 +340,8 @@ impl Engine {
             n => n,
         };
         let device_period_ms = period_frames as f32 / self.info.out_rate.max(1) as f32 * 1000.0;
+        let worker_cycles = self.worker.as_ref().and_then(cpuprof::thread_cycles);
+        let cpu = self.cpu.lock().sample(Instant::now(), &c.rt_timing, cpuprof::tsc_now(), worker_cycles, device_period_ms * 1000.0);
         let peers = self
             .net
             .as_ref()
@@ -412,6 +418,7 @@ impl Engine {
             qos: self.net.as_ref().map(|n| n.qos_stats()),
             send_queue: self.net.as_ref().map(|n| n.send_queue_stats()),
             metronome: self.metronome.stats(),
+            cpu,
             // 녹음 락은 짧게만 잡힌다(정지의 기다리는 단계는 락 밖). 정지를 시작하면 null.
             recording: self.recorder.lock().stats(),
         }

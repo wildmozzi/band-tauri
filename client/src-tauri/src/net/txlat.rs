@@ -18,7 +18,7 @@ const SUB: usize = 8;
 const OCTAVES: usize = 17;
 pub const BUCKETS: usize = LINEAR + OCTAVES * SUB;
 
-fn bucket_of(us: u64) -> usize {
+pub(crate) fn bucket_of(us: u64) -> usize {
     if us < LINEAR as u64 {
         return us as usize;
     }
@@ -28,7 +28,7 @@ fn bucket_of(us: u64) -> usize {
 }
 
 /// 칸의 하한(µs).
-fn bucket_lower(i: usize) -> u64 {
+pub(crate) fn bucket_lower(i: usize) -> u64 {
     if i < LINEAR {
         return i as u64;
     }
@@ -38,7 +38,7 @@ fn bucket_lower(i: usize) -> u64 {
 }
 
 /// 칸의 대표값(µs): 칸 하한 + 폭/2.
-fn bucket_value(i: usize) -> f64 {
+pub(crate) fn bucket_value(i: usize) -> f64 {
     if i < LINEAR {
         return i as f64 + 0.5;
     }
@@ -60,6 +60,23 @@ pub struct SendQueueStats {
     pub max_ms: f32,
     /// 직전 창에 잰 오디오 패킷 수(0이면 위 값은 의미 없음).
     pub packets: u32,
+}
+
+/// 칸 개수 배열의 `p` 분위수(µs): 순위 ceil(p·N)번째 표본이 든 칸의 대표값이되 실측 최대 `max_us`를 넘지 않는다.
+/// `total = 0`이면 0. RT 콜백 실행시간 히스토그램(`engine::cpuprof`)도 같은 칸을 쓴다.
+pub(crate) fn quantile_us(counts: &[u32], total: u64, max_us: f64, p: f64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    let rank = ((p * total as f64).ceil() as u64).max(1);
+    let mut acc = 0u64;
+    for (i, &c) in counts.iter().enumerate() {
+        acc += c as u64;
+        if acc >= rank {
+            return bucket_value(i).min(max_us);
+        }
+    }
+    0.0
 }
 
 pub struct SendLatency {
@@ -99,19 +116,7 @@ impl SendLatency {
         // 갈 수 있다(또는 그 반대). 그래서 실측 최대가 가장 높은 비지 않은 칸의 하한보다 작으면 하한으로 올린다.
         let top = counts.iter().rposition(|&c| c > 0).map_or(0, bucket_lower);
         let max_us = self.max_us.swap(0, Ordering::Relaxed).max(top);
-        let q = |p: f64| -> f32 {
-            // 순위 ceil(p·N)번째 표본이 든 칸
-            let rank = ((p * total as f64).ceil() as u64).max(1);
-            let mut acc = 0u64;
-            for (i, &c) in counts.iter().enumerate() {
-                acc += c as u64;
-                if acc >= rank {
-                    // 칸 대표값이 실측 최대를 넘지 않게
-                    return (bucket_value(i).min(max_us as f64) / 1000.0) as f32;
-                }
-            }
-            0.0
-        };
+        let q = |p: f64| -> f32 { (quantile_us(&counts, total, max_us as f64, p) / 1000.0) as f32 };
         let s = if total == 0 {
             SendQueueStats::default()
         } else {
