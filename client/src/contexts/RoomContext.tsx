@@ -430,7 +430,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     if (from && from === self) return
 
     // native-descriptor / native-leave / relay-token / 연주 거부 에러(perform-not-approved, room-full-performers,
-    // login-required) / ssrc-conflict·key-conflict(엔진 재시작만)·descriptor-invalid(안내만) — 연주 거부가 아니므로 방송은 유지
+    // login-required) / ssrc-conflict·key-conflict(엔진 재시작만)·descriptor-invalid(엔진 정지·안내) — 연주 거부가 아니므로 방송은 유지
     if (session.handleSignal(p)) {
       // 연주 거부 에러만 방송을 멈춘다(descriptor 거부는 엔진만, 메트로놈 에러는 메트로놈만)
       if (p.type === 'error' && !isEngineDescriptorErrorCode(p.code) && !metronomeErrorFromCode(p.code)) broadcasterRef.current!.stop()

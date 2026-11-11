@@ -151,7 +151,7 @@ describe('relay-token issuance over WS', async () => {
     assert.ok(!anon.has(m => m.type === 'relay-token'))
   })
 
-  it('ignores invalid ssrc but still relays the descriptor', async () => {
+  it('rejects a descriptor with invalid ssrc (descriptor-invalid): no relay, no token (PR #48 M1)', async () => {
     const host = await client(url)
     const peer = await client(url)
     await authJoin(host, 'tok:host', 'free')
@@ -159,8 +159,9 @@ describe('relay-token issuance over WS', async () => {
     peer.send({ type: 'start-performing', instrument: 'bass' })
     await sleep(50)
     host.send({ type: 'native-descriptor', descriptor: { ssrc: -1, key: engineKey(200), candidates: [] } })
-    assert.ok(await peer.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+    assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'descriptor-invalid'))
     await sleep(50)
+    assert.ok(!peer.has(m => m.type === 'native-descriptor' && m.from === host.id))
     assert.ok(!host.has(m => m.type === 'relay-token'))
   })
 })

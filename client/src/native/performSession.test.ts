@@ -501,13 +501,40 @@ describe('PerformSession 릴레이 토큰 (P1-4b)', () => {
     expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(2)
   })
 
-  it('descriptor-invalid → 엔진은 그대로, 안내만', async () => {
+  it('key-conflict 반복 판정은 사용자가 다시 시작하면 초기화된다(PR #48 L2)', async () => {
     const { session, start, engine } = setup()
     await start()
+    session.handleSignal({ type: 'error', code: 'key-conflict' })
+    for (let i = 0; i < 5; i++) await flush()
+    expect(session.getState().phase).toBe('running')
+
+    // 사용자가 직접 정지했다가 30초 안에 다시 시작: 새 세션의 첫 충돌은 '반복'이 아니다 → 재시작
+    await session.stop()
+    expect(await start()).toBe(true)
+    session.handleSignal({ type: 'error', code: 'key-conflict' })
+    for (let i = 0; i < 5; i++) await flush()
+    expect(session.getState().phase).toBe('running')
+    expect(session.getState().error).toBe(KEY_CONFLICT_MESSAGE)
+    expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(4)
+  })
+
+  it('descriptor-invalid → 엔진을 정지하고(연주자 자리도 내려놓음) 안내(PR #48 L3)', async () => {
+    const { session, start, engine, types } = setup()
+    await start()
+    expect(session.handleSignal({ type: 'error', code: 'descriptor-invalid' })).toBe(true)
+    for (let i = 0; i < 5; i++) await flush()
+    expect(engine.calls).toEqual(['start:me', 'stop'])
+    expect(session.getState().phase).toBe('idle')
+    expect(session.getState().error).toBe(DESCRIPTOR_INVALID_MESSAGE)
+    expect(types()).toContain('native-leave')
+    expect(types()).toContain('stop-performing')
+  })
+
+  it('descriptor-invalid를 idle에서 받으면 안내만', async () => {
+    const { session, engine } = setup()
     expect(session.handleSignal({ type: 'error', code: 'descriptor-invalid' })).toBe(true)
     await flush()
-    expect(engine.calls).toEqual(['start:me'])
-    expect(session.getState().phase).toBe('running')
+    expect(engine.calls).toEqual([])
     expect(session.getState().error).toBe(DESCRIPTOR_INVALID_MESSAGE)
   })
 

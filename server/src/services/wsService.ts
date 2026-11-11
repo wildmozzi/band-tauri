@@ -39,11 +39,11 @@ import { DEFAULT_PASSWORD_ATTEMPT_LIMITS, PasswordAttemptLimiter, ScryptBusyErro
  *
  * 엔진 공개키 바인딩 (P1-1c)
  * - descriptor의 `key`(X25519 공개키, 표준 base64 32바이트)는 보낸 연결(clientId)과 JWT userId에 묶인다.
- *   형식이 틀리면 `descriptor-invalid`, 같은 방의 다른 userId가 이미 쓰는 키면 `key-conflict`로 거부하고 중계하지 않는다.
+ *   형식이 틀리면(키, ssrc 정수 범위, candidates 개수·원소 형식) `descriptor-invalid`, 같은 방의 다른 userId가 이미 쓰는 키면 `key-conflict`로 거부하고 중계하지 않는다.
  * - 바인딩은 Client.nativeKey 하나뿐이다(연결당 키 1개 → 메모리 상한 = 연결 수 상한). 같은 사용자가 새 키를 보내면
  *   (엔진 재시작) 덮어쓰고, native-leave·퇴장·방 이동·연결 최종 종료(유예 만료, 중복 연결 정리) 때 사라진다.
  *   세션 재개 유예 중에는 바인딩을 유지한다(그 사이 다른 사람이 키를 가로채지 못하게).
- * - 중계하는 descriptor는 서버가 아는 필드(ssrc, key, candidates)만 다시 구성하고 `from`은 서버가 붙인다.
+ * - 중계하는 descriptor는 서버가 아는 필드(ssrc, key, candidates 원소의 {kind, addr}까지)만 검증해 다시 구성하고 `from`은 서버가 붙인다.
  * - 한계: 서버 인스턴스 1대 가정(P3-10g 정원과 같음). 여러 대로 늘리면 방 단위 상태(바인딩·정원·승인)를 공유 저장소로 옮겨야 한다.
  */
 
@@ -61,6 +61,11 @@ const PARTICIPANT_UPDATE_DEBOUNCE_MS = 1000
 /** X25519 공개키 길이(바이트). descriptor.key는 이것의 표준 base64(패딩 포함 44자) */
 const ENGINE_KEY_BYTES = 32
 const ENGINE_KEY_B64_RE = /^[A-Za-z0-9+/]{43}=$/
+/** descriptor 후보 개수 상한(엔진 net/peer.rs MAX_CANDIDATES와 같음) */
+export const MAX_ENGINE_CANDIDATES = 8
+/** 후보 주소 형식: IPv4 `a.b.c.d:port`만(엔진 소켓은 IPv4, 받는 쪽 엔진도 IPv6를 거부한다) */
+const CANDIDATE_ADDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/
+const CANDIDATE_ADDR_MAX = 21 // '255.255.255.255:65535'
 
 type Env = Record<string, string | undefined>
 type AuthState = 'pending' | 'verifying' | 'authenticated' | 'anonymous'
@@ -246,6 +251,35 @@ export function parseEngineKey(v: unknown): string | null {
   const raw = Buffer.from(v, 'base64')
   if (raw.length !== ENGINE_KEY_BYTES || raw.toString('base64') !== v) return null
   return v
+}
+
+export interface EngineCandidate { kind: 'lan' | 'public'; addr: string }
+
+/**
+ * descriptor.candidates 검증과 재구성(PR #48 M1): 배열, 최대 MAX_ENGINE_CANDIDATES개, 각 원소는
+ * `{ kind: 'lan'|'public', addr: 'IPv4:port' }`. 원소의 다른 필드는 버리고 아는 필드만 새로 만든다.
+ * 옥텟 0..255, 포트 1..65535, 선행 0 표기는 거부(같은 주소를 다른 문자열로 보내지 못하게).
+ * 0.0.0.0·멀티캐스트·루프백 같은 의미 검사는 받는 쪽 엔진(validate_candidate)이 한다(루프백은 테스트 옵션으로 허용될 수 있음).
+ * 하나라도 틀리면 null.
+ */
+export function parseCandidates(v: unknown): EngineCandidate[] | null {
+  if (!Array.isArray(v) || v.length > MAX_ENGINE_CANDIDATES) return null
+  const out: EngineCandidate[] = []
+  for (const item of v) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+    const { kind, addr } = item as Record<string, unknown>
+    if (kind !== 'lan' && kind !== 'public') return null
+    if (typeof addr !== 'string' || addr.length > CANDIDATE_ADDR_MAX) return null
+    const m = CANDIDATE_ADDR_RE.exec(addr)
+    if (!m) return null
+    const parts = m.slice(1)
+    if (parts.some(p => p.length > 1 && p.startsWith('0'))) return null
+    const nums = parts.map(Number)
+    if (nums.slice(0, 4).some(n => n > 255)) return null
+    if (nums[4] < 1 || nums[4] > 65535) return null
+    out.push({ kind, addr })
+  }
+  return out
 }
 
 function send(ws: WebSocket, data: unknown) {
@@ -1104,8 +1138,11 @@ export function initializeWebSocket(
         const descriptor = msg.descriptor
         if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) return
         const d = descriptor as Record<string, unknown>
+        // 서버가 아는 필드(ssrc, key, candidates)를 모두 검증하고 그 값만으로 다시 구성한다(PR #48 M1)
         const key = parseEngineKey(d.key)
-        if (!key) {
+        const ssrc = d.ssrc
+        const candidates = parseCandidates(d.candidates)
+        if (!key || !isValidSsrc(ssrc) || !candidates) {
           send(ws, { type: 'error', code: 'descriptor-invalid', message: '엔진 연결 정보가 올바르지 않습니다.' })
           return
         }
@@ -1116,22 +1153,19 @@ export function initializeWebSocket(
           send(ws, { type: 'error', code: 'key-conflict', message: '같은 방의 다른 사용자가 이미 쓰는 엔진 키입니다.' })
           return
         }
-        const ssrc = d.ssrc
-        if (isValidSsrc(ssrc) && ssrcTakenInRoom(client, ssrc)) {
+        if (ssrcTakenInRoom(client, ssrc)) {
           send(ws, { type: 'error', code: 'ssrc-conflict', message: '같은 방에서 이미 쓰는 ssrc입니다. 엔진을 다시 시작하세요.' })
           return
         }
         const prevSsrc = client.nativeSsrc
         client.nativeActive = true
         client.nativeKey = key // 같은 사용자의 새 키(엔진 재시작)는 옛 바인딩을 덮어쓴다
-        if (isValidSsrc(ssrc)) {
-          client.nativeSsrc = ssrc
-          sendRelayToken(client)
-        }
+        client.nativeSsrc = ssrc
+        sendRelayToken(client)
         // 방장 엔진이 native-leave 없이 새로 떴다(ssrc가 바뀜, 예: ssrc-conflict 재시작): 메트로놈 startUs는 옛 엔진 시계
         // 기준이라 무의미하다 → 지우고 연주자들에게 정지를 알린다(PR #36 M1). 같은 엔진의 재알림(WS 재개·회신)은 ssrc가 같다.
         const hostMetro = metronomes.get(roomId)
-        if (hostMetro && hostMetro.hostId === id && prevSsrc !== undefined && isValidSsrc(ssrc) && ssrc !== prevSsrc) {
+        if (hostMetro && hostMetro.hostId === id && prevSsrc !== undefined && ssrc !== prevSsrc) {
           metronomes.delete(roomId)
           const stopped = { type: 'metronome', from: id, state: { ...hostMetro.state, running: false } }
           for (const peerId of rooms.get(roomId) || []) {
@@ -1146,7 +1180,7 @@ export function initializeWebSocket(
           send(ws, { type: 'metronome', from: metro.hostId, state: metro.state })
         }
         // 서버가 아는 필드만 다시 구성한다(클라이언트가 descriptor 안에 넣은 from/userId 등은 버림). from은 서버의 clientId
-        const out = { type: 'native-descriptor', from: id, descriptor: { ssrc: d.ssrc, key, candidates: d.candidates } }
+        const out = { type: 'native-descriptor', from: id, descriptor: { ssrc, key, candidates } }
         if (msg.to !== undefined) {
           const target = getRoomPeer(client, msg.to)
           if (target && isPerformer(target)) send(target.ws, out)
