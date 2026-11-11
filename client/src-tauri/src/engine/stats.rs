@@ -56,6 +56,8 @@ pub struct AudioCounters {
     pub input_silent_packets: AtomicU64,
     /// 오디오 I/O 스레드의 우선순위 설정 결과(자체 WASAPI가 적는다; cpal·가짜 장치는 `Unmanaged`).
     pub audio_thread: crate::engine::prio::PrioSlot,
+    /// 입·출력 콜백 실행시간 히스토그램(P1-10). 콜백은 원자 덧셈만 한다.
+    pub rt_timing: crate::engine::cpuprof::RtTiming,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -152,6 +154,8 @@ pub struct EngineStats {
     pub send_queue: Option<crate::net::txlat::SendQueueStats>,
     /// 공유 메트로놈 상태(P2-3).
     pub metronome: super::metronome::MetronomeStats,
+    /// 워커 CPU%, RT 콜백 사용률·실행시간 분위수(직전 2초 창, P1-10).
+    pub cpu: super::cpuprof::CpuStats,
     /// 합주 녹음 상태(P2-4). 녹음 중이 아니면 null.
     pub recording: Option<super::record::RecordStats>,
 }
@@ -181,6 +185,7 @@ impl EngineStats {
             qos: None,
             send_queue: None,
             metronome: Default::default(),
+            cpu: Default::default(),
             recording: None,
         }
     }
@@ -237,6 +242,7 @@ mod tests {
         assert!(j.contains("\"rttMs\":null"));
         assert!(j.contains("\"relay\":null") && j.contains("\"qos\":null") && j.contains("\"sendQueue\":null"), "{j}");
         assert_eq!(serde_json::to_string(&PathKind::Relay).unwrap(), "\"relay\"");
+        assert!(j.contains("\"cpu\":{\"workerPct\":null"), "{j}");
         assert!(j.contains("\"devicePeriodMs\":0.0") && j.contains("\"backend\":\"\"") && j.contains("\"inputDiscontinuities\":0") && j.contains("\"streamFailed\":false"), "{j}");
     }
 }

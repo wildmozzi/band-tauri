@@ -1,5 +1,5 @@
 // 합주실 상세(RoomDetail) 화면의 타입·상수·순수 함수.
-import type { PeerState, PeerStats } from '../../native/engineApi'
+import type { CpuStats, PeerState, PeerStats } from '../../native/engineApi'
 import { RELAY_PATH_HINT, pathLabel } from '../../native/relayLogic'
 import { DEFAULT_EDIT_SLOTS, type InstrumentSlot } from '../rooms/roomModel'
 
@@ -67,6 +67,27 @@ export const PUBLIC_WEB_URL: string | undefined = import.meta.env.VITE_PUBLIC_WE
 export function formatMs(v: number | null | undefined, digits = 0): string {
   if (v === null || v === undefined || !Number.isFinite(v)) return '--'
   return `${v.toFixed(digits)}ms`
+}
+
+/** 진단 한 줄: "CPU 워커 3.1% · 콜백 0.8% (p99 42µs)". 첫 창 전·옛 엔진이면 null */
+export function formatCpu(cpu: CpuStats | null | undefined): string | null {
+  if (!cpu || !(cpu.windowMs > 0)) return null
+  const worker = cpu.workerPct == null ? '--' : `${cpu.workerPct.toFixed(1)}%`
+  const cb = cpu.callbacks > 0 ? ` (p99 ${Math.round(cpu.callbackP99Us)}µs)` : ''
+  return `CPU 워커 ${worker} · 콜백 ${cpu.callbackLoadPct.toFixed(1)}%${cb}`
+}
+
+/** 진단 툴팁: 콜백 분위수와 장치 주기 대비 비율 */
+export function cpuTitle(cpu: CpuStats): string {
+  return [
+    `워커 스레드 CPU: ${cpu.workerPct == null ? '측정 불가' : `${cpu.workerPct.toFixed(2)}%`} (코어 1개 = 100%)`,
+    '  ※ 오디오 워커 스레드만입니다. 앱 전체 CPU가 아닙니다(작업 관리자 참고).',
+    `오디오 콜백 사용률: ${cpu.callbackLoadPct.toFixed(2)}% (입력+출력 실행시간 / 창)`,
+    `출력 콜백 p50/p99/최대: ${Math.round(cpu.callbackP50Us)}/${Math.round(cpu.callbackP99Us)}/${Math.round(cpu.callbackMaxUs)}µs`,
+    `p99 / 장치 주기: ${cpu.callbackP99PeriodPct.toFixed(1)}%`,
+    `입력 콜백 최대: ${Math.round(cpu.inputCallbackMaxUs)}µs`,
+    `창: ${(cpu.windowMs / 1000).toFixed(1)}초, 콜백 ${cpu.callbacks}회`,
+  ].join('\n')
 }
 
 export function peerStatsTitle(ps: PeerStats): string {

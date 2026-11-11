@@ -1,0 +1,14 @@
+/* 개발 서버 설정(P1-12b): 업데이트 섹션(.update-settings) 모양을 그대로 쓰고 입력 칸만 */
+.dev-server-settings .update-settings-row {
+  flex-wrap: wrap;
+}
+
+.dev-server-settings input {
+  flex: 1;
+  min-width: 160px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  background: var(--bg-input, transparent);
+  color: inherit;
+}

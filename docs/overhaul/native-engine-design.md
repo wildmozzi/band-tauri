@@ -49,8 +49,8 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 
 | 스레드 | 하는 일 | 금지 |
 |---|---|---|
-| 입력 콜백 (RT) | 장치 샘플 → 채널 라우팅 → `f32` SPSC 링(사전할당)에 push, 레벨 원자값 갱신 | 할당, 락, 시스템콜, println |
-| 출력 콜백 (RT) | **콜백 구동 믹스**: 소스 링(로컬 1개 + 피어별 1개, 사전할당 SPSC)에서 필요한 프레임만큼 꺼내 게인·팬(원자값)을 곱해 섞고, 마스터·soft clip 후 장치 포맷/채널 수로 기록. 메트로놈 클릭(1.4절)은 장치 출력에만 더한다. 믹스 탭 링에도 쓴다(클릭 없음). 녹음 중이면 소스별 샘플(게인 전)과 탭 버스를 녹음 링에도 쓴다(1.5절). 재생 중인 소스가 모자라면 0을 채우고 소스별 언더런 프레임과 xrun을 원자 증가 | 동일 |
+| 입력 콜백 (RT) | 장치 샘플 → 채널 라우팅 → `f32` SPSC 링(사전할당)에 push, 레벨 원자값 갱신. 시작·끝 시각(`Instant::now` = QPC)으로 실행시간을 원자 칸에 기록(P1-10) | 할당, 락, 시스템콜, println |
+| 출력 콜백 (RT) | **콜백 구동 믹스**: 소스 링(로컬 1개 + 피어별 1개, 사전할당 SPSC)에서 필요한 프레임만큼 꺼내 게인·팬(원자값)을 곱해 섞고, 마스터·soft clip 후 장치 포맷/채널 수로 기록. 메트로놈 클릭(1.4절)은 장치 출력에만 더한다. 믹스 탭 링에도 쓴다(클릭 없음). 녹음 중이면 소스별 샘플(게인 전)과 탭 버스를 녹음 링에도 쓴다(1.5절). 재생 중인 소스가 모자라면 0을 채우고 소스별 언더런 프레임과 xrun을 원자 증가. 실행시간을 원자 히스토그램에 기록(P1-10) | 동일 |
 | engine 워커 (비RT, 1개) | 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신(send_to 완료마다 송신 큐 지연을 원자 히스토그램에 기록, 3절 8). 피어마다 지터 버퍼에서 디코드한 PCM을 (리샘플해) 그 피어의 소스 링에 공급하고, 로컬 FIFO에서 로컬 소스 링을 채운다 | — |
 | net 수신 스레드 | recv → 복호화/검증 → 피어별 지터 버퍼에 삽입(피어별 `Mutex`는 비RT 스레드끼리만 공유하므로 허용) | — |
 | net 제어 스레드 | 홀펀칭, keepalive(1초), ping/pong(500ms), 타임아웃(5초), DSCP 마킹 플로 동기화(qWAVE 시스템 호출), 송신 큐 지연 창 회전(2초) | — |
@@ -351,7 +351,8 @@ interface EchoReport { verdict: MeasureVerdict; message: string; peerId: string;
 type QosMarking = 'pending' | 'ef' | 'voice' | 'none'
 interface QosStats { marking: QosMarking; ipTos: boolean; qwave: boolean; flows: number; efFlows: number; failed: number; lastError: string | null }
 interface SendQueueStats { p50Ms: number; p99Ms: number; maxMs: number; packets: number }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null; recording: RecordStats | null }
+interface CpuStats { workerPct: number | null; callbackLoadPct: number; callbackP50Us: number; callbackP99Us: number; callbackMaxUs: number; callbackP99PeriodPct: number; inputCallbackMaxUs: number; callbacks: number; windowMs: number }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null; recording: RecordStats | null; cpu: CpuStats }
 type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
 interface ThreadPriorityStats { worker: ThreadPriority; netRecv: ThreadPriority; audio: ThreadPriority; timer1ms: boolean }
 type RecordFormat = 'wav24' | 'wavF32'
@@ -455,6 +456,15 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 `qos`(P1-3, 3절 8): 오디오 UDP DSCP 마킹 상태. 네트워크가 없으면 null. `marking`: `ef`(EF 46을 OS에 지정 — 비Windows `IP_TOS`, Windows는 걸린 플로 모두 `QOSSetFlow` 성공) | `voice`(Windows, 걸린 플로 중 DSCP 직접 지정 실패가 있음 — 보통 권한 부족, 그 플로는 트래픽 유형 Voice. `ef`도 플로 추가 실패 목적지가 섞이면 `failed`로 알림) | `pending`(Windows, 아직 송신 목적지 없음) | `none`(표시 못 함). `ipTos`: `IP_TOS` setsockopt 성공(Windows는 성공해도 무시될 수 있다). `qwave`: qWAVE 핸들 획득. `flows`/`efFlows`/`failed`: 플로가 걸린 목적지 수 / 그중 DSCP 46 성공 수 / 플로 추가 실패 수(Windows만, 그 밖에는 0). `lastError`: 지금 남은 실패 사유(소켓·핸들 단계 실패, 또는 현재 목적지 중 실패한 것). 실패한 목적지가 빠지면 지워진다(이력 아님).
 
 `sendQueue`(P1-3): 송신 큐 지연(워커 패스 시작 → 피어별 `send_to` 완료, 3절 8), 직전 2초 창의 `p50Ms`/`p99Ms`/`maxMs`와 잰 패킷 수 `packets`. 송신이 없던 창이면 `packets = 0`이고 나머지는 0이다. 네트워크가 없으면 null.
+
+`cpu`(P1-10, `engine/cpuprof.rs`): GOAL 2절 "CPU ≤ 15%" 측정 수단. %는 모두 코어 1개 = 100이다(4코어 기준 전체 비율은 ÷4).
+- `workerPct`: 워커 스레드 누적 사이클(`QueryThreadCycleTime`, 비RT인 `stats` 호출에서 읽음)의 창 증분 / 같은 창의 TSC 증분(`RDTSC`). Windows는 스레드 사이클을 문맥 전환 때 TSC로 재므로 둘은 같은 단위이고 주파수 환산이 필요 없다. `GetThreadTimes`는 클럭 틱(15.625ms) 샘플링이라 잠들었다 짧게 일하는 워커에서 ±50% 틀려 쓰지 않는다(PR #54 리뷰 H1, 단위 테스트 `cycles_track_sleepy_busy_thread`가 실제 바쁜 시간 대비 ±20%를 고정). 워커 스레드만이다(net 수신·제어 스레드, UI 제외 — 앱 전체 CPU가 아님). Windows x64가 아니거나 워커가 없으면 null.
+- RT 콜백: 입·출력 콜백(`InputRt`/`OutputRt::process`)이 시작·끝에서 `Instant::now()`(Windows = `QueryPerformanceCounter`)를 읽어 실행시간을 원자 칸에 더한다(할당·락 없음, 칸은 `sendQueue`와 같음). 불변 TSC 기기에서 QPC는 커널 진입 없이 사용자 모드에서 TSC를 읽으므로(vDSO와 같은 종류, 1회 수십 ns) 1.1절 RT 금지 대상(막히는 호출)이 아니다. 백엔드의 `GetBuffer`/`ReleaseBuffer`·포맷 변환은 포함하지 않는다.
+  - `callbackLoadPct`: 입력+출력 콜백 실행시간 합 / 창 길이.
+  - `callbackP50Us`/`callbackP99Us`/`callbackMaxUs`: 출력 콜백(믹스) 1회 실행시간. `callbackP99PeriodPct` = p99 / 장치 출력 주기(`devicePeriodMs`) — 100에 가까우면 마감을 놓친다. `inputCallbackMaxUs`: 입력 콜백 최대. `callbacks`: 창 안 출력 콜백 수.
+- 창: `stats` 호출 시 직전 회전에서 2초 이상 지났으면 칸을 비워 새 값을 내고, 아니면 직전 값을 돌려준다. `windowMs`가 실제 창 길이다(통계를 오래 읽지 않으면 길어짐). 첫 창 전이면 `windowMs = 0`이고 값은 0/null.
+- 무할당 보증: `tests/rt_alloc.rs`가 테스트 전용 카운팅 글로벌 할당자로 `rt.rs`의 `InputRt`/`OutputRt::process` 경로(소스 8개·언더런·DRAIN·측정·클릭·탭 가득 참)에서 할당 0을 단언한다. 백엔드 쪽(cpal 데이터 콜백 클로저, 자체 WASAPI 루프의 `GetBuffer`↔`process` 사이 포맷 변환, 가짜 장치)은 범위 밖이다. 6인 풀메시 측정 도구: `tests/cpu_profile.rs`(`--ignored`, release, 프로세스 CPU는 `QueryProcessCycleTime`/TSC, xrun은 측정 창 안 증분).
+
 **진단 내보내기(P2-5, `diag/`)**
 - 기록: `band-diag` 스레드가 1초마다 `EngineManager::snapshot()`(엔진 슬롯 락 안에서 `Engine::stats()`, UI의 `engine_stats`와 같은 경로)으로 샘플을 링 버퍼(3600개 = 60분)에 넣는다. 엔진이 없으면 기록하지 않고, 엔진이 사라진 순간 `running:false` 정지 표시 샘플을 한 번 넣는다. RT 콜백 경로에는 아무것도 추가하지 않는다.
 - 샘플(JSONL 한 줄): `t`(유닉스 ms), `running`, `network`(합주/테스트, 정지 표시 샘플은 끝난 세션 값), `session`(`EngineManager` generation — 값이 바뀐 곳이 엔진 재시작 경계로, 누적 카운터가 0부터 다시 센다), `EngineStats`의 장치·지연·xrun·스트림 오류 값, `peers[]`(`peer` 가명, `state`, `path`, `rttMs`, `jitterMs`, `bufferMs`, `playoutMs`, `lossPct`, `late`·`concealed` 누적, `level`, 에코 상태, `txCodec`·`txCodecAuto`), `relay`(주소는 대역만, `autoOpus` 포함).
