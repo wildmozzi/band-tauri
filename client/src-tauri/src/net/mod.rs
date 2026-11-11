@@ -705,6 +705,11 @@ impl NetShared {
         self.peer_by_id(peer_id).ok().and_then(|p| p.clock.lock().estimate(at_us as f64))
     }
 
+    /// 그 피어가 Pong에 시계를 싣지 않는 엔진(옛 버전)으로 보이는지(PR #34 L4, `ClockSync::unsupported`).
+    pub fn peer_clock_unsupported(&self, peer_id: &str) -> bool {
+        self.peer_by_id(peer_id).ok().is_some_and(|p| p.clock.lock().unsupported())
+    }
+
     pub fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
         self.peer_by_id(peer_id).ok().and_then(|p| p.conn.lock().rtt_ms)
     }
@@ -850,6 +855,8 @@ impl NetShared {
                             if let Some(remote) = parse_clock_payload(plain) {
                                 let t0 = t3.saturating_sub(rtt_us as u64);
                                 peer.clock.lock().on_sample(t0 as f64, t3 as f64, remote as f64);
+                            } else {
+                                peer.clock.lock().on_plain_pong();
                             }
                         }
                         PacketType::Bye => {

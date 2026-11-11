@@ -1,16 +1,12 @@
 # 실장비 합주 테스트 세션 가이드
 
-PC 2대로 **한 번의 테스트 세션**에서 백로그의 **[사람]** 확인 항목을 최대한 많이 끝내기 위한 가이드다. 버튼 이름과 화면 문구는 overhaul 브랜치 코드(2026-11-11, `e611cff`)에서 그대로 옮겼다.
+PC 2대로 **한 번의 테스트 세션**에서 백로그의 **[사람]** 확인 항목을 최대한 많이 끝내기 위한 가이드다. 버튼 이름과 화면 문구는 overhaul 브랜치 코드(2026-11-11, `1b2b095` — #47·#49 녹음, #54 CPU, #56 개발 서버 프록시·진단 줄 포함)에서 그대로 옮겼다.
 
 - **1부: 같은 LAN**(약 90분). 같은 공유기에 두 PC를 연결한다.
 - **2부: 다른 네트워크**(약 40분). PC B를 휴대폰 LTE 핫스팟이나 다른 집 인터넷으로 옮긴다.
 - 결과는 맨 아래 **8절 결과 기록표**에 적는다. 진단 zip 파일과 측정 결과 텍스트도 함께 보낸다.
 
 표기 규칙
-- **[병합 후]**: 아직 overhaul에 병합되지 않은 PR의 기능이다. 테스트 당일 `git pull` 뒤에 화면에 그 기능이 없으면 그 단계는 건너뛰고 기록표에 "미병합"이라고 적는다.
-  - 녹음: PR #47(엔진)·#49(화면)
-  - CPU 표시: PR #54
-  - 장시간 시뮬레이션: PR #52 (CI 전용이라 이 세션과는 무관)
 - **(선택)**: 장비나 조건이 있을 때만 한다.
 - `PC A` = 서버를 띄우고 방을 만드는 PC(방장). `PC B` = 손님 PC.
 
@@ -22,7 +18,7 @@ PC 2대로 **한 번의 테스트 세션**에서 백로그의 **[사람]** 확�
 |---|---|---|
 | 시그널링 서버 | 운영(`band-server.fly.dev`)은 `main` 브랜치다. overhaul 이전 버전이라 새 엔진의 메시지(`native-descriptor`, 릴레이 토큰, 메트로놈)를 모른다. | **PC A에서 로컬 서버**를 띄우고 두 PC가 모두 그 서버에 붙는다. |
 | UDP 릴레이 | 운영에 배포되지 않았다(fly 전용 IPv4가 유료라 보류). | 2부에서만, PC A에서 로컬 릴레이를 띄운다(4절, 선택). |
-| client `.env` | `VITE_SIGNALING_URL=auto`. 데스크톱 개발 화면은 `https://localhost:5173`이라 `auto`가 **`wss://localhost:8080`**이 된다. 그런데 로컬 서버는 인증서가 없으면 `ws://`(평문)로 뜬다. | 실행할 때 환경 변수로 `ws://localhost:8080`을 지정한다. `.env` 파일은 고치지 않는다(2.2절). |
+| client `.env` | `VITE_SIGNALING_URL=auto`, `VITE_API_URL=auto`. 개발 실행에서 `auto`는 앱 자신의 개발 서버(Vite, `https://localhost:5173/__band_server/…`)를 거쳐 서버에 붙는다. Vite가 인증서 유무에 맞춰 `ws://`/`wss://`로 넘긴다. | **아무것도 바꾸지 않는다.** `.env` 그대로 실행한다. 다른 PC의 서버는 설정 화면의 **개발 서버** 칸으로 고른다(2.3절). |
 | DB·로그인 | client와 server의 `.env`가 모두 **운영 Supabase 프로젝트**를 가리킨다. 개발용 DB(P3-11)는 아직 없다. | 운영 DB에 아래 쓰기가 생긴다. |
 
 **운영 DB에 생기는 쓰기**(알고 진행할 것)
@@ -74,19 +70,18 @@ npm install
 
 ```powershell
 cd C:\dev\devdev\band-tauri
-$env:VITE_SIGNALING_URL = 'ws://localhost:8080'
-$env:VITE_API_URL = 'http://localhost:8080'
 npm run dev:tauri
 ```
 
-- 환경 변수는 이 PowerShell 창에서만 적용된다. Vite는 `.env` 파일보다 이미 설정된 환경 변수를 우선한다. 창을 새로 열면 두 줄을 다시 입력한다.
+- 환경 변수는 따로 주지 않는다. 예전 가이드대로 이 창에서 `$env:VITE_SIGNALING_URL`/`$env:VITE_API_URL`을 넣은 적이 있으면 **PowerShell 창을 새로 연다**(직접 지정한 주소는 `.env`보다 우선하고 개발 서버 프록시를 건너뛴다).
 - 터미널에 `HTTP + WS server listening on port 8080`이 보이고 잠시 뒤 앱 창이 뜬다.
 - **Windows 보안 경고(방화벽)** 창이 `node.exe`와 `band.exe`에 대해 각각 뜨면, **개인 네트워크와 공용 네트워크를 모두 체크**하고 **액세스 허용**을 누른다. 거부하면 PC B가 서버에 붙지 못하거나 오디오 직접 연결이 실패한다(9절).
 - PC A의 LAN IP를 확인한다: `ipconfig` → 사용 중인 어댑터의 `IPv4 주소`(예: `192.168.0.10`). 이 값을 **A_IP**라고 부른다.
+- 8080이 아닌 포트로 서버를 띄우려면 `server\.env`의 `PORT`를 바꾼다. 같은 PC의 개발 서버는 이 값을 읽어 자동으로 허용한다. 다른 PC(PC B)에서는 앱을 실행하기 전에 같은 창에서 `$env:BAND_DEV_PROXY_PORTS = '<포트>'`를 넣고(쉼표로 여러 개), 2.3절의 **개발 서버** 칸에 `<A_IP>:<포트>`를 넣는다. PC A도 **개발 서버** 칸에 `localhost:<포트>`를 넣는다(기본값은 `localhost:8080`).
 
 ### 2.3 PC B (손님 앱)
 
-PC B는 PC A의 서버를 써야 한다. 그런데 개발용 앱은 보안 정책(CSP와 https 화면의 평문 연결 차단) 때문에 `localhost`에만 평문 WebSocket으로 붙을 수 있다. 그래서 Windows 포트 프록시로 **PC B의 `localhost:8080`을 PC A로 넘긴다**.
+PC B는 PC A의 서버를 써야 한다. PC B 앱의 개발 서버(Vite)가 **설정 화면의 "개발 서버" 주소**로 요청을 넘기므로, 그 칸에 A_IP만 넣으면 된다. 포트 프록시(netsh)나 환경 변수는 필요 없다.
 
 1. 코드 받기:
    ```powershell
@@ -96,24 +91,21 @@ PC B는 PC A의 서버를 써야 한다. 그런데 개발용 앱은 보안 정�
    npm install
    ```
 2. PC A의 `client\.env`를 USB 등으로 복사해 PC B의 `band-tauri\client\.env`에 둔다. Supabase 주소와 공개용 anon 키만 들어 있다. `server\.env`(서비스 키)는 **복사하지 않는다**. PC B에서는 서버를 띄우지 않는다.
-3. **관리자 권한** PowerShell(시작 → PowerShell 마우스 오른쪽 → 관리자로 실행)에서:
-   ```powershell
-   netsh interface portproxy add v4tov4 listenaddress=127.0.0.1 listenport=8080 connectaddress=<A_IP> connectport=8080
-   ```
-4. 확인: PC B의 브라우저에서 `http://localhost:8080/health`를 열면 응답이 와야 한다. 안 오면 PC A 방화벽(2.2절)과 A_IP를 확인한다.
-5. 앱 실행(일반 PowerShell). **`npm run dev:tauri`가 아니라 `npm run tauri:dev`**를 쓴다. `dev:tauri`는 서버도 띄우는데, 서버가 8080 포트를 놓고 포트 프록시와 충돌하면 앱까지 같이 꺼진다.
+3. 확인: PC B의 브라우저에서 `http://<A_IP>:8080/health`를 열면 응답이 와야 한다. 안 오면 PC A 방화벽(2.2절, `node.exe` 허용 = TCP 8080)과 A_IP를 확인한다.
+4. 앱 실행(일반 PowerShell). PC B에는 `server\.env`가 없으므로 서버 없이 앱만 띄우는 `npm run tauri:dev`를 쓴다(`server\.env`가 있는 PC라면 `npm run dev:tauri`도 된다 — 앱은 개발 서버 칸에 넣은 대상만 쓴다).
    ```powershell
    cd band-tauri
-   $env:VITE_SIGNALING_URL = 'ws://localhost:8080'
-   $env:VITE_API_URL = 'http://localhost:8080'
    npm run tauri:dev
    ```
-6. `band.exe` 방화벽 경고가 뜨면 개인·공용 모두 허용한다.
+5. `band.exe` 방화벽 경고가 뜨면 개인·공용 모두 허용한다.
+6. **개발 서버 주소 넣기**: 상단 🎛️(오디오 설정) 버튼을 눌러 뜨는 창의 맨 아래 **개발 서버 (개발 실행 전용)** 칸에서(`/settings/audio` 페이지에도 같은 칸이 있다):
+   - **개발 서버 주소** 입력란에 `<A_IP>:8080`(예: `192.168.0.10:8080`)을 넣고 **저장 후 새로고침**을 누른다.
+   - 새로고침 뒤 `지금 연결: http://192.168.0.10:8080 · 시그널링 wss://localhost:5173/__band_server/http/192.168.0.10:8080`처럼 보이면 된다.
+   - `localhost 또는 사설 IP(10.x, 172.16~31.x, 192.168.x)와 포트만 입력하세요.` 가 뜨면 입력값을 고친다. 도메인과 공인 IP는 받지 않는다.
+   - PC A 서버가 인증서(`server\certs`)로 `wss://`를 쓰면 `https://<A_IP>:8080`처럼 앞에 `https://`를 붙인다.
+   - 주소는 이 PC에 저장되어 앱을 다시 켜도 유지된다. 화면 위쪽 메뉴의 **합주실**로 돌아간다.
 
-테스트가 끝나면 PC B에서 포트 프록시를 지운다(관리자 PowerShell):
-```powershell
-netsh interface portproxy delete v4tov4 listenaddress=127.0.0.1 listenport=8080
-```
+테스트가 끝나면 PC B에서 같은 페이지의 **기본값**을 눌러 되돌리고(`localhost:8080`), 두 PC 모두 앱과 개발 서버를 끈다(`Ctrl+C`). 개발 서버는 LAN에 열려 있어, 켜 둔 동안 같은 LAN의 기기가 이 PC를 거쳐 사설망의 서버 포트에 닿을 수 있다.
 
 ### 2.4 로그인과 오디오 설정 (두 PC 각각)
 
@@ -152,8 +144,13 @@ netsh interface portproxy delete v4tov4 listenaddress=127.0.0.1 listenport=8080
 | 위치 | 표시 | 뜻 | 좋은 값 |
 |---|---|---|---|
 | **나 (모니터)** 채널 | `48kHz · 버퍼 128` | 실제 장치 샘플레이트·버퍼 | |
+| | `백엔드 wasapiExclusive` | 실제로 열린 오디오 백엔드. `wasapiExclusive`(자체 독점) / `wasapiShared3`(저지연 공유) / `cpalWasapi`(공유 폴백) / `cpalAsio`. 입력과 출력이 다르면 `입력/출력` | 고른 드라이버와 같을 것 |
+| | `우선순위 워커 MMCSS · 수신 MMCSS · 오디오 MMCSS` | **P1-2 확인 항목.** 워커·네트워크 수신·오디오 I/O 스레드의 우선순위. `MMCSS`(MMCSS "Pro Audio" 등록) / `백엔드`(cpal·ASIO가 관리) / `상향` / `실패` / `꺼짐` / `미지원`. 하나라도 `실패`면 경고 색 | 워커·수신 = `MMCSS`. 오디오는 자체 WASAPI면 `MMCSS`, cpal·ASIO면 `백엔드` |
+| | 위 줄에 마우스를 올리면 | 스레드별 원래 값과 **`1ms 타이머: 켬`** | `1ms 타이머: 켬` |
+| | `QoS EF 2/2` | **P1-3.** DSCP 46(EF) 표시. `QoS EF n/m`(성공, 플로 m개 중 n개) / `QoS Voice n/m(관리자 권한 필요)`(일반 사용자 실행에서는 이것이 정상) / `QoS 대기(송신 목적지 없음)` / `QoS 표시 불가`. 실패가 있으면 뒤에 `· 실패 N` | 일반 실행 `Voice`, 관리자 실행 `EF` |
+| | 위 줄에 마우스를 올리면 | `마킹`, `IP_TOS 설정`, `qWAVE 핸들`, `플로: …`, `마지막 오류` | |
 | | `처리 지연 X ms · xrun N` | `estLatencyMs`(입력 버퍼 + 프레임 + 출력 버퍼, 네트워크 제외)와 오디오 끊김(xrun) 누적 횟수 | WASAPI 독점 ≤ 15ms, ASIO ≤ 8ms. xrun은 30분 동안 0 |
-| | **[병합 후 #54]** `CPU 워커 x% · 콜백 y% (p99 zµs)` | 엔진 워커 스레드 CPU(코어 1개 = 100%), 오디오 콜백 사용률, 콜백 실행시간 p99 | 3.7절 |
+| | `CPU 워커 x% · 콜백 y% (p99 zµs)` | 엔진 워커 스레드 CPU(코어 1개 = 100%), 오디오 콜백 사용률, 출력 콜백 실행시간 p99 | 3.7절 |
 | 상대 채널 | 배지 **연결 중 / 연결됨 / 재연결 중 / 연결 실패** | 엔진 피어 상태 | 연결됨 |
 | | `RTT 2ms · 지터 0.3ms · 버퍼 6ms · 손실 0.0% · LAN` | 왕복 시간, 수신 지터, 지터 버퍼 깊이(`bufferMs`), 손실률, **경로** | 같은 LAN이면 경로 **LAN**, RTT ≤ 2ms, 손실 0% |
 | | 마우스를 올리면 | 상태·경로·RTT·지터·버퍼·손실·**늦은 패킷·은닉** 누적 | 은닉이 계속 늘지 않을 것 |
@@ -162,22 +159,18 @@ netsh interface portproxy delete v4tov4 listenaddress=127.0.0.1 listenport=8080
 
 **은닉률과 목표 버퍼**: 합주 중에 🎛️ 오디오 설정을 열면 **지터 버퍼** 칸에 피어별로 `버퍼 6.0ms / 목표 6.0ms · 은닉 0.0% · 보정 1%`가 보인다. 은닉은 최근 5초 동안 끊긴 소리를 메운 비율이다. 목표는 GOAL 2절 기준 ≤ 1.5%다. 이 창을 열어 두어도 합주는 계속된다.
 
-**화면에 없는 값**(스레드 우선순위·QoS·백엔드·메트로놈 동기): 앱 화면에서 마우스 오른쪽 → **검사**(또는 `Ctrl+Shift+I`)로 개발자 도구를 열고 **Console** 탭에 아래를 붙여 넣는다. 처음 붙여 넣을 때 경고가 뜨면 안내대로 `allow pasting`을 입력한 뒤 다시 붙여 넣는다.
+백엔드·우선순위·QoS 정보는 진단 zip의 `logs/*.log`에도 남는다(`스레드 band-worker: MMCSS "Pro Audio" 등록`, `스레드 band-net-recv: …`).
+
+**아직 화면에 없는 값**(메트로놈 동기 3.5절, 릴레이 4절, 송신 큐, 피어별 송신 코덱): 개발자 도구(앱 화면에서 마우스 오른쪽 → **검사**(또는 `Ctrl+Shift+I`) → **Console** 탭, 처음 붙여 넣을 때 경고가 뜨면 `allow pasting` 입력 후 다시)에 아래를 붙여 넣는다.
 
 ```js
-const s = await window.__TAURI__.core.invoke('engine_stats'); JSON.stringify({ backend: s.backend, devicePeriodMs: s.devicePeriodMs, threadPriority: s.threadPriority, qos: s.qos, sendQueue: s.sendQueue, relay: s.relay, metronome: s.metronome, cpu: s.cpu, peers: s.peers.map(p => ({ state: p.state, path: p.path, rttMs: p.rttMs, bufferMs: p.bufferMs, targetMs: p.targetMs, concealPct: p.concealPct, lossPct: p.lossPct, txCodec: p.txCodec, txCodecAuto: p.txCodecAuto })) }, null, 1)
+const s = await window.__TAURI__.core.invoke('engine_stats'); JSON.stringify({ sendQueue: s.sendQueue, relay: s.relay, metronome: s.metronome, peers: s.peers.map(p => ({ state: p.state, path: p.path, txCodec: p.txCodec, txCodecAuto: p.txCodecAuto })) }, null, 1)
 ```
 
-읽는 법:
-- `backend`: `wasapiExclusive`(자체 독점) / `wasapiShared3`(저지연 공유) / `cpalWasapi`(공유 폴백) / `cpalAsio`. 입력과 출력이 다르면 `입력/출력`으로 나온다.
-- `threadPriority`: **P1-2 확인 항목**. `worker`와 `netRecv`가 **`mmcss`**여야 한다. `audio`는 자체 WASAPI면 `mmcss`, cpal·ASIO면 `unmanaged`가 정상이다. `timer1ms: true`. `elevated`나 `failed`가 나오면 기록한다.
-- `qos.marking`: `ef`(DSCP 46 지정 성공) / `voice`(관리자 권한이 없어 트래픽 유형 Voice로만 표시, 일반 사용자 실행에서는 이것이 정상) / `pending` / `none`.
 - `sendQueue.p99Ms`: 송신 큐 지연. 1ms 미만이면 정상이다.
-- `cpu`: [병합 후 #54]. 병합 전에는 `undefined`다.
+- `metronome`, `relay`, `txCodec`은 3.5절·4절에서 읽는다.
 
-같은 정보는 진단 zip의 `logs/*.log`에도 남는다(`스레드 band-worker: MMCSS "Pro Audio" 등록`, `스레드 band-net-recv: …`).
-
-**기록**: 1분 동안 지켜본 뒤 RTT, 버퍼, 목표, 은닉, 손실, 처리 지연, xrun, backend, threadPriority, qos.marking을 기록표에 적는다. 프리셋 **균형**과 **초저지연** 각각 적는다. 프리셋을 바꾸면 "합주 중 바꾼 설정은 연주를 다시 시작하면 적용"되므로 **👀 관람자로 전환** → **🎤 연주 참여하기**로 엔진을 다시 켠다.
+**기록**: 1분 동안 지켜본 뒤 RTT, 버퍼, 목표, 은닉, 손실, 처리 지연, xrun, 백엔드, 우선순위 줄(+ 1ms 타이머), QoS 줄을 기록표에 적는다. 프리셋 **균형**과 **초저지연** 각각 적는다. 프리셋을 바꾸면 "합주 중 바꾼 설정은 연주를 다시 시작하면 적용"되므로 **👀 관람자로 전환** → **🎤 연주 참여하기**로 엔진을 다시 켠다.
 
 ### 3.3 (선택) 하드웨어 루프백 — ASIO·Scarlett (P1-1a, P1-0, P1-11)
 
@@ -187,7 +180,6 @@ const s = await window.__TAURI__.core.invoke('engine_stats'); JSON.stringify({ b
 - ASIO를 쓰려면 ASIO 피처로 빌드해야 한다. PC A에서 2.2절 대신 아래처럼 실행한다. 서버는 다른 창에서 `npm run dev:server`로 따로 띄운다.
   ```powershell
   $env:CPAL_ASIO_DIR = 'C:\경로\asiosdk_2.3.4'   # ASIO SDK 폴더
-  $env:VITE_SIGNALING_URL = 'ws://localhost:8080'; $env:VITE_API_URL = 'http://localhost:8080'
   cd client; npx tauri dev --features asio
   ```
 - 버퍼 32 / 64 / 128(ASIO)과 WASAPI 독점 1회의 결과에서 "백로그 기록" 줄을 기록표에 붙인다.
@@ -217,13 +209,13 @@ const s = await window.__TAURI__.core.invoke('engine_stats'); JSON.stringify({ b
 6. 방장이 **BPM**을 `120`으로 바꾸고 **적용** → PC B도 따라 바뀌는지 본다. **정지** → 양쪽 클릭이 멈추는지 본다.
 7. **클릭 볼륨 영속**(P2-3a): PC B에서 클릭 볼륨 슬라이더를 30% 정도로 내리고 🔔를 눌러 🔇로 만든다. 방에서 나갔다 들어오고, 앱을 껐다 켠다. 볼륨과 뮤트가 그대로인지 본다. 계정별로 저장된다(`band.metronomeGain.<사용자>`).
 
-### 3.6 [병합 후 #47·#49] 합주 녹음 (P2-4)
+### 3.6 합주 녹음 (P2-4)
 
-1. 메트로놈을 켠 상태로 둔다. 녹음에 클릭이 **들어가지 않아야** 한다.
-2. 개인 믹서 아래 녹음 칸에서 📁 저장 폴더를 확인한다. 기본값은 `음악\Band Recordings`다. **폴더 변경**으로 다른 폴더를 고를 수 있다.
+1. 메트로놈을 켠 상태로 둔다. 녹음에 클릭이 **들어가지 않아야** 한다(녹음 칸 아래 안내: "내 입력과 연주자별 소리를 따로 WAV로 저장합니다(같은 타임라인, 메트로놈 클릭 제외).").
+2. 개인 믹서 아래 녹음 칸에서 📁 저장 폴더를 확인한다. 기본값은 `음악\Band Recordings`다. **폴더 변경**으로 다른 폴더를 고를 수 있다. 엔진이 꺼져 있으면 녹음 버튼이 눌리지 않는다("엔진이 켜진 뒤에 녹음할 수 있습니다").
 3. **믹스도 저장**을 체크하고 **⏺️ 멀티트랙 녹음**을 누른다. `🔴 0:12 · 4.1 MB · 3트랙`처럼 시간·용량·트랙 수가 올라간다.
 4. 서로 연주를 1~2분 한다. 중간에 PC B가 잠깐 **👀 관람자로 전환** → 다시 **연주 참여하기**를 하면 같은 트랙에 이어 써지는지도 볼 수 있다.
-5. **⏹️ 녹음 정지** → `저장됨 · 3트랙 · 1:30 · 45.0 MB · <폴더>`가 뜬다. "디스크가 느려 …ms를 무음으로 채웠습니다" 경고가 떴다면 기록한다.
+5. **⏹️ 녹음 정지** → `저장됨 · 3트랙 · 1:30 · 45.0 MB · <폴더>`가 뜬다. "디스크가 느려 …ms를 무음으로 채웠습니다", "저장 실패: …", "일부 저장 실패: …" 경고가 떴다면 그대로 기록한다. 엔진이 먼저 꺼지면 "녹음이 끝났습니다(엔진 정지) · <폴더>"가 뜬다.
 6. 폴더 확인: `YYYY-MM-DD HH.MM.SS [TEST] 실장비 테스트` 폴더 안에 `00-mix.wav`, `01-나.wav`, `02-<상대 닉네임>.wav`, `session.json`이 있어야 한다.
 7. DAW나 Audacity에 모든 트랙을 0초 위치에 올린다.
    - 트랙 길이가 모두 같은지 본다.
@@ -232,11 +224,11 @@ const s = await window.__TAURI__.core.invoke('engine_stats'); JSON.stringify({ b
    - **메트로놈 클릭이 어느 트랙에도 없는지** 청취한다.
 8. (선택) 1시간 녹음: 합주를 1시간 이어 가며 녹음하고, 정지 후 경고가 없는지와 xrun이 늘지 않았는지 본다. 4GB가 넘는 RF64 파일 열기는 3시간 이상 걸리므로 이번 세션에서는 하지 않는다.
 
-### 3.7 [병합 후 #54] CPU 기록 (P1-10)
+### 3.7 CPU 기록 (P1-10)
 
-- 합주 중 **나 (모니터)** 채널의 `CPU 워커 x% · 콜백 y% (p99 zµs)`를 기록한다. 마우스를 올리면 상세가 보인다(p99 / 장치 주기 %).
+- 합주 중 **나 (모니터)** 채널의 `CPU 워커 x% · 콜백 y% (p99 zµs)`를 기록한다. 마우스를 올리면 상세가 보인다: `워커 스레드 CPU`, `오디오 콜백 사용률`, `출력 콜백 p50/p99/최대`, `p99 / 장치 주기`, `입력 콜백 최대`, `창: …초, 콜백 …회`. 워커 값은 "오디오 워커 스레드만입니다. 앱 전체 CPU가 아닙니다".
 - 같은 시각 **작업 관리자 → 세부 정보**에서 `band.exe`의 CPU %를 적는다.
-- 주의: `npm run tauri:dev`는 **디버그 빌드**라 암호화·Opus가 최적화되지 않아 CPU가 실제보다 크게 나온다. 정확히 재려면 엔진을 끄고 `cd client; npx tauri dev --release`로 다시 실행해서 잰다(첫 빌드 수 분). 릴리스 실행에서는 개발자 도구가 열리지 않는다.
+- 주의: `npm run dev:tauri`/`tauri:dev`는 **디버그 빌드**라 암호화·Opus가 최적화되지 않아 CPU가 실제보다 크게 나온다. 정확히 재려면 앱을 끄고 `cd client; npx tauri dev --release`로 다시 실행해서 잰다(첫 빌드 수 분, PC A는 서버를 다른 창에서 `npm run dev:server`로). 릴리스 실행에서는 개발자 도구가 열리지 않지만, 진단 줄은 화면에 그대로 보이고 2.3절의 개발 서버 주소도 저장된 값이 유지된다.
 - 2인 기준 값이다. GOAL의 6인 판정은 2대로는 할 수 없으니 "2인"이라고 적는다.
 
 ### 3.8 일시 단절과 복구 (GOAL 2절)
@@ -270,7 +262,7 @@ const s = await window.__TAURI__.core.invoke('engine_stats'); JSON.stringify({ b
 
 1. PC B에 Wireshark를 설치하고 사용 중인 어댑터로 캡처를 시작한다. 필터는 `udp && ip.src == <A_IP>`.
 2. 합주 중 패킷 하나를 골라 **Internet Protocol → Differentiated Services Field**를 본다. `DSCP: EF (46)`이면 표시가 유지된 것이다. `CS0`(0)이면 지워졌거나 표시되지 않은 것이다.
-3. PC A의 `qos.marking`(3.2절)과 함께 적는다. 일반 권한 실행은 `voice`가 정상이고 이때 실제 DS 값은 OS 정책에 따른다. 관리자 권한 PowerShell에서 앱을 실행하면 `ef`가 될 수 있다(선택 비교).
+3. PC A의 **QoS 줄**(3.2절, 예: `QoS Voice 1/1(관리자 권한 필요)`)과 함께 적는다. 일반 권한 실행은 `Voice`가 정상이고 이때 실제 DS 값은 OS 정책에 따른다. 관리자 권한 PowerShell에서 앱을 실행하면 `ef`가 될 수 있다(선택 비교).
 4. 송신 PC(A) 자신의 캡처에는 표시가 안 보인다는 보고가 있다. 반드시 **받는 PC(B)** 에서 본다.
 
 ---
@@ -279,18 +271,20 @@ const s = await window.__TAURI__.core.invoke('engine_stats'); JSON.stringify({ b
 
 PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에 연결하는 것이 가장 쉽다. PC B가 다른 네트워크에 있으면 2.3절의 `A_IP`(LAN 주소)로는 서버에 닿지 않는다. 그래서 PC A의 서버를 인터넷에 열어야 한다.
 
+**개발 서버** 칸은 보안상 localhost와 사설 IP만 받는다(공인 IP 입력은 거부). 그래서 2부에서만 PC B의 Windows 포트 프록시로 **PC B의 `localhost:8080`을 A_PUB로 넘기고**, 개발 서버 칸은 **기본값**(`localhost:8080`)으로 둔다. PC B는 2.3절대로 `npm run tauri:dev`로 실행해 8080 포트가 비어 있어야 한다.
+
 ### 4.1 PC A 서버를 인터넷에 열기 (테스트 동안만)
 
 1. PC A의 공인 IP를 확인한다: 브라우저에서 "내 IP"를 검색하거나 PowerShell에서 `curl.exe https://ifconfig.me`. 이 값이 **A_PUB**이다.
 2. 공유기 관리 화면(ipTIME이면 보통 `192.168.0.1`)의 **포트 포워드**에 다음 규칙을 추가한다:
    - TCP **8080** → A_IP:8080 (시그널링 서버)
    - (4.2절 릴레이를 쓸 때) UDP **5000** → A_IP:5000
-3. PC B(관리자 PowerShell)에서 포트 프록시를 공인 주소로 바꾼다:
+3. PC B에서 **관리자 권한** PowerShell(시작 → PowerShell 마우스 오른쪽 → 관리자로 실행)을 열고 포트 프록시를 추가한다:
    ```powershell
-   netsh interface portproxy delete v4tov4 listenaddress=127.0.0.1 listenport=8080
    netsh interface portproxy add v4tov4 listenaddress=127.0.0.1 listenport=8080 connectaddress=<A_PUB> connectport=8080
    ```
-4. PC B 브라우저에서 `http://localhost:8080/health`를 다시 확인한다.
+4. PC B 브라우저에서 `http://localhost:8080/health`를 열어 응답을 확인한다.
+5. PC B 앱의 🎛️ 오디오 설정 창 맨 아래(2.3절 6번) **개발 서버** 칸에서 **기본값**을 누른다. `지금 연결: http://localhost:8080`이 되면 된다.
 
 ⚠️ 개발 서버(운영 DB의 서비스 키를 가진 서버)가 테스트하는 동안 인터넷에 열린다. 모든 요청은 로그인 토큰으로 인증되지만, **테스트가 끝나면 바로 포트 포워드 규칙을 지운다**.
 
@@ -313,14 +307,13 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
    cd C:\dev\devdev\band-tauri
    $env:RELAY_SECRET = Get-Clipboard
    $env:RELAY_ADDR = '<A_PUB>:5000'
-   $env:VITE_SIGNALING_URL = 'ws://localhost:8080'; $env:VITE_API_URL = 'http://localhost:8080'
    npm run dev:tauri
    ```
-4. 한계: PC A 자신도 `A_PUB:5000`으로 릴레이에 붙는다. 공유기가 **NAT 루프백(헤어핀)** 을 지원해야 한다(ipTIME 등 대부분 지원). 지원하지 않으면 PC A의 릴레이 상태가 `unreachable`이 되고 릴레이 경로가 성립하지 않는다. 개발자 도구 `relay.state`로 확인한다(`bound` = 등록됨).
+4. 한계: PC A 자신도 `A_PUB:5000`으로 릴레이에 붙는다. 공유기가 **NAT 루프백(헤어핀)** 을 지원해야 한다(ipTIME 등 대부분 지원). 지원하지 않으면 PC A의 릴레이 상태가 `unreachable`이 되고 릴레이 경로가 성립하지 않는다. 릴레이 상태는 아직 화면에 없으니 개발자 도구 명령(3.2절)의 `relay.state`로 확인한다(`bound` = 등록됨).
 
 ### 4.3 다른 네트워크에서 연결
 
-1. PC B를 LTE 핫스팟에 연결하고, 앱이 꺼졌으면 2.3절 5번으로 다시 실행해 방에 다시 들어간다.
+1. PC B를 LTE 핫스팟에 연결하고(4.1절 3~5번을 이 상태에서 확인), 앱이 꺼졌으면 2.3절 4번으로 다시 실행해 방에 다시 들어간다.
 2. 두 PC 모두 **🎤 연주 참여하기**.
 3. 상대 채널의 경로를 본다:
    - **인터넷**: 홀펀칭으로 직접 연결됐다(콘형 NAT).
@@ -347,7 +340,11 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
 
 1. 두 PC에서 진단 내보내기(3.10절).
 2. PC A 공유기에서 포트 포워드 규칙(TCP 8080, UDP 5000)을 **삭제**한다.
-3. PC B 포트 프록시를 삭제한다(2.3절 끝).
+3. PC B 포트 프록시를 삭제한다(관리자 PowerShell):
+   ```powershell
+   netsh interface portproxy delete v4tov4 listenaddress=127.0.0.1 listenport=8080
+   ```
+   PC B의 **개발 서버** 칸은 **기본값** 그대로 두고, 두 PC의 앱·개발 서버를 끈다(2.3절 끝).
 4. 릴레이 창을 `Ctrl+C`로 끈다. 시계를 바꿨다면 자동 시간 설정을 다시 켠다.
 5. 방장이 합주실의 **ℹ️ 정보** → **🗑️ 합주실 삭제**로 `[TEST]` 방을 지운다.
 
@@ -361,7 +358,7 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
 | 0:20 | 3.1 방·입장, 3.2 진단 줄(균형) |
 | 0:35 | 3.4 에코 측정, 프리셋 초저지연으로 3.2·3.4 반복 |
 | 0:50 | 3.5 메트로놈 |
-| 1:05 | 3.6 녹음 [병합 후], 3.7 CPU [병합 후] |
+| 1:05 | 3.6 녹음, 3.7 CPU |
 | 1:15 | 3.8 단절, 3.10 진단 내보내기 |
 | 1:25 | (선택) 3.3 루프백·ASIO, 3.11 Wireshark, 3.9 30분 |
 | 1:30 | 4절 다른 네트워크(포트 포워드, 릴레이, 10분 연주, 단절) |
@@ -379,10 +376,11 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
 | 연주 참여 / 관람 전환 | 합주실 왼쪽 **🎤 연주 참여하기** / **👀 관람자로 전환** |
 | 에코 측정 | 왼쪽 연주자 목록, 상대 행의 **📏** |
 | 메트로놈 | 왼쪽 연주자 패널 아래 **메트로놈** |
-| 진단 줄 | 오른쪽 **🎚️ 개인 믹서**의 각 채널 |
+| 개발 서버 주소(PC B) | 상단 🎛️ 오디오 설정 창 맨 아래 **개발 서버 (개발 실행 전용)**(또는 `/settings/audio`, 2.3절) |
+| 진단 줄(백엔드·우선순위·QoS·처리 지연·CPU) | 오른쪽 **🎚️ 개인 믹서**의 **나 (모니터)** 채널. 상대 채널에는 RTT·지터·버퍼·손실·경로 |
 | 진단 내보내기 | 개인 믹서 제목 줄 **🩺 진단 내보내기**, 🎛️ 아래쪽 |
-| 녹음 [병합 후] | 개인 믹서 아래 **⏺️ 멀티트랙 녹음** |
-| 숨은 통계 | 마우스 오른쪽 → 검사 → Console(3.2절 명령) |
+| 녹음 | 개인 믹서 아래 **⏺️ 멀티트랙 녹음** |
+| 아직 화면에 없는 값(메트로놈 동기·릴레이·송신 큐) | 마우스 오른쪽 → 검사 → Console(3.2절 명령) |
 
 ---
 
@@ -392,9 +390,12 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
 
 | 증상 | 확인 순서 |
 |---|---|
-| 로그인은 되는데 방에 들어가면 계속 연결 중이거나 채팅·연주자 목록이 안 뜸 | ① 2.2·2.3절 환경 변수 두 줄을 같은 창에서 입력했는가(`auto`로 실행하면 `wss://`로 붙으려다 실패한다) ② PC A 터미널에 서버가 떠 있는가 ③ PC B `http://localhost:8080/health` 응답 ④ PC A `node.exe` 방화벽 허용 |
-| PC B에서 `/health`가 안 열림 | ① `netsh interface portproxy show all`로 규칙 확인 ② A_IP가 맞는가(PC A `ipconfig`) ③ PC A 방화벽 ④ 2부라면 공유기 포트 포워드와 A_PUB |
-| PC B에서 앱 실행 직후 꺼짐, `EADDRINUSE :8080` | `npm run dev:tauri`로 실행했다. `npm run tauri:dev`로 실행한다 |
+| 로그인은 되는데 방에 들어가면 계속 연결 중이거나 채팅·연주자 목록이 안 뜸 | ① PC A 터미널에 서버가 떠 있는가 ② 🎛️ 오디오 설정 창의 **개발 서버** 칸 `지금 연결:` 주소가 맞는가(PC A = `http://localhost:8080`, PC B = `http://<A_IP>:8080`, 2부 PC B = `http://localhost:8080` + 포트 프록시) ③ PC B 브라우저에서 `http://<A_IP>:8080/health` 응답 ④ PC A `node.exe` 방화벽 허용 ⑤ 실행한 창에 예전 `$env:VITE_SIGNALING_URL`/`$env:VITE_API_URL`이 남아 있지 않은가(새 창에서 다시 실행) |
+| **개발 서버** 칸이 페이지에 없음 | `VITE_SIGNALING_URL`·`VITE_API_URL`을 둘 다 직접 지정했거나(새 창에서 다시 실행) 개발 실행이 아니다(설치본·`vite build`). |
+| `개발 서버 프록시: http://… 연결 실패 (…)` | 대상 서버에 닿지 않는다. 대상 주소·포트, PC A 서버와 방화벽을 확인한다 |
+| PC B에서 `/health`가 안 열림 | ① A_IP가 맞는가(PC A `ipconfig`) ② PC A 방화벽 ③ 2부라면 `netsh interface portproxy show all`로 규칙 확인, 공유기 포트 포워드와 A_PUB |
+| PC B에서 앱 실행 직후 꺼짐 | `npm run dev:tauri`는 서버와 앱을 함께 띄워, 서버가 시작에 실패하면(`server\.env` 없음, 2부 포트 프록시와 8080 충돌 `EADDRINUSE :8080`) 앱까지 같이 끈다. PC B는 `npm run tauri:dev`로 실행한다 |
+| 8080이 아닌 포트로 서버를 띄웠는데 연결 안 됨 | 다른 PC의 개발 서버는 허용된 포트로만 넘긴다. PC B 실행 창에 `$env:BAND_DEV_PROXY_PORTS = '<포트>'`를 넣고 다시 실행한다(2.2절) |
 | 상대 배지가 계속 **연결 중** → **연결 실패** | ① 두 PC의 `band.exe` 방화벽 허용(공용 포함). 거부했다면 **Windows 보안 → 방화벽 및 네트워크 보호 → 방화벽에서 앱 허용**에서 band 항목을 체크 ② 같은 LAN인데 실패하면 공유기 "AP 격리/게스트 Wi-Fi" 해제 ③ 2부라면 4.2절 릴레이 |
 | **연결 실패** 옆 문구 | "직접 연결 불가 — 네트워크(대칭형 NAT) 문제, 릴레이 서버 없음" = 릴레이를 켜지 않았다(4.2절). "연결 불가 — 직접 연결과 릴레이 모두 실패" = 릴레이가 닿지 않는다(UDP 5000 포워드, 헤어핀). "릴레이 설정 실패(…)" = 괄호 안 사유를 적는다 |
 | **연주 참여하기**가 승인 대기에서 멈춤 | 방장이 승인 버튼을 눌렀는가. "방장이 지금 접속해 있지 않습니다"면 PC A가 방에 있는지 확인 |
@@ -431,24 +432,23 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
 | Windows 버전 | | |
 | CPU / 코어 수 | | |
 | 오디오 장치(입력 / 출력) | | |
-| 드라이버(ASIO / WASAPI 독점 / 공유), 실제 `backend` | | |
+| 드라이버(ASIO / WASAPI 독점 / 공유), 진단 줄 `백엔드 …` | | |
 | 네트워크(유선 / Wi-Fi / LTE) | | |
-| 병합 여부: #47·#49 녹음 / #54 CPU | | |
 
 **백로그 [사람] 항목별 체크**
 
 | ID | 확인 내용 | 단계 | 결과(✅ / ❌ / 못 함) | 수치·메모 |
 |---|---|---|---|---|
 | P1-7 | 같은 LAN 2대 연결, 지연 기록 | 3.2, 3.4 | | 경로 LAN? RTT __ms · 버퍼 __ms · 목표 __ms · 은닉 __% · 처리 지연 __ms · xrun __ · 에코 입→귀(3회 중앙값) __ms — 균형 / 초저지연 각각 |
-| P1-2 | `threadPriority` worker·netRecv = mmcss, timer1ms | 3.2 | | worker __ · netRecv __ · audio __ · timer1ms __ |
-| P1-3 | 받는 PC Wireshark DS 필드 | 3.11 | | qos.marking __ · DSCP __ (일반 / 관리자 실행) |
+| P1-2 | 진단 줄 `우선순위` 워커·수신 = MMCSS, 툴팁 `1ms 타이머: 켬` | 3.2 | | 워커 __ · 수신 __ · 오디오 __ · 1ms 타이머 __ |
+| P1-3 | 받는 PC Wireshark DS 필드 | 3.11 | | QoS 줄 __ · DSCP __ (일반 / 관리자 실행) |
 | P1-0 | USB 인터페이스 WASAPI 독점 청취, 장치 분리, 30분 xrun | 3.3, 3.9 | | 청취 __ · 분리 시 동작 __ · 30분 xrun __ |
 | P1-1a | (선택) ASIO 버퍼 32/64/128 루프백 + 실네트워크·릴레이 에코 | 3.3, 4.3 | | "백로그 기록" 줄 붙이기 |
 | P1-11 | (선택) Scarlett ASIO 스트림 열기·버퍼 협상·채널 선택 | 3.3 | | |
 | P2-3 | 메트로놈 2대 같은 박(≤ 2ms), 청취 | 3.5 | | 차이 __ms(측정 방법: 귀 / 녹음) · synced __ · clockRttMs __ · outputLatencyMs __ · lateClicks __ |
 | P2-3a | 클릭 볼륨·뮤트가 재입장·앱 재시작 뒤 유지 | 3.5-7 | | |
-| P2-4 | [병합 후] 녹음 시작·정지, 트랙별 WAV·session.json, DAW 정렬, 클릭 미포함, (선택) 1시간 | 3.6 | | 트랙 수 __ · 길이 같음 __ · 정렬 __ · 클릭 없음 __ · 경고 __ |
-| P1-10 | [병합 후] 진단 줄 CPU + 작업 관리자 CPU(2인) | 3.7 | | 워커 __% · 콜백 __% · p99 __µs · band.exe __% (디버그 / 릴리스) |
+| P2-4 | 녹음 시작·정지, 트랙별 WAV·session.json, DAW 정렬, 클릭 미포함, (선택) 1시간 | 3.6 | | 트랙 수 __ · 길이 같음 __ · 정렬 __ · 클릭 없음 __ · 경고 __ |
+| P1-10 | 진단 줄 CPU + 작업 관리자 CPU(2인) | 3.7 | | 워커 __% · 콜백 __% · p99 __µs · band.exe __% (디버그 / 릴리스) |
 | P2-5 | 내보내기 대화상자, 연속 클릭, 취소, zip 내용, 마스킹 | 3.10 | | IP 대역만 __ · 이메일·JWT 없음 __ · 사용자 폴더 가림 __ |
 | GOAL 2 | 일시 단절 5초·20초 뒤 자동 복구 | 3.8, 4.3-7 | | 복구까지 __초(LAN) / __초(LTE) · 소리 복귀 __ |
 | P1-8 | 다른 네트워크(LTE 핫스팟 / 다른 집) 연결·지연·끊김 | 4.3 | | 경로 __ · RTT __ms · 에코 입→귀 __ms · 은닉 __% |

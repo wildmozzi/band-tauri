@@ -39,3 +39,12 @@ test('E2E 빌드에는 가짜 env 값만 들어 있다', () => {
     expect(js.match(re)?.[0] ?? null, `번들에 ${name}`).toBeNull()
   }
 })
+
+test('운영 빌드에는 개발 서버 설정(개발 실행 전용)이 빠져 있다', () => {
+  const js = bundleJs()
+  // 양성 대조: 같은 화면(🎛️ 오디오 설정)의 한글 문구는 번들에 그대로 남는다(문자열 이스케이프로 빠진 척하는 것 방지)
+  expect(js.includes('오디오 설정')).toBe(true)
+  // import.meta.env.DEV로 감싼 /settings/audio·🎛️ 모달의 개발 서버 칸(P1-12b·P1-12d)
+  expect(js.includes('개발 실행 전용')).toBe(false)
+  expect(js.includes('개발 서버 주소')).toBe(false)
+})

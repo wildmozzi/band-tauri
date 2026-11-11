@@ -25,6 +25,9 @@ const WEIGHT_SCALE_US: f64 = 500.0;
 const LOCAL_US: f64 = 4_000_000.0;
 /// 표본 RTT 상한(µs). 넘으면 버린다. 경로 비대칭으로 오프셋이 끌릴 수 있는 폭(RTT/2)도 이것으로 묶인다(PR #34 L5).
 const MAX_RTT_US: f64 = 500_000.0;
+/// 시계 없는 Pong(옛 엔진)이 이만큼 오고 시계 표본이 하나도 없으면 상대가 시계를 싣지 않는 엔진으로 본다(PR #34 L4).
+/// Ping 500ms 간격이면 약 3초.
+const PLAIN_PONGS_UNSUPPORTED: u64 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Sample {
@@ -44,6 +47,9 @@ pub struct ClockEstimate {
     pub rtt_us: f64,
     /// 추정 드리프트(상대 시계가 내 시계보다 빠른 비율, ppm). 기울기를 쓰지 못하면 0.
     pub drift_ppm: f64,
+    /// 직선 무게중심(가중 평균 표본 시각)에서 요청 시각까지의 외삽 거리(µs, PR #34 L6).
+    /// 기울기 오차 × 이 거리만큼 오프셋이 어긋난다(예: 50ppm × 5초 = 0.25ms).
+    pub extrapolation_us: f64,
 }
 
 /// 피어 하나의 시계 오프셋 추정기.
@@ -54,6 +60,8 @@ pub struct ClockSync {
     /// 지난 버킷 최소 표본(최근이 앞).
     prev: [Option<Sample>; BUCKETS],
     samples: u64,
+    /// 시계가 없는 Pong(옛 엔진) 수.
+    plain_pongs: u64,
 }
 
 impl ClockSync {
@@ -64,6 +72,17 @@ impl ClockSync {
     /// 지금까지 받은 표본 수.
     pub fn samples(&self) -> u64 {
         self.samples
+    }
+
+    /// 시계를 싣지 않은 Pong(옛 엔진, 빈 평문)을 받았다.
+    pub fn on_plain_pong(&mut self) {
+        self.plain_pongs = self.plain_pongs.saturating_add(1);
+    }
+
+    /// 상대가 Pong에 시계를 싣지 않는 엔진(옛 버전)으로 보인다: 시계 없는 Pong이 여러 번 왔고 시계 표본은 하나도 없다.
+    /// 이때 따르는 쪽 메트로놈은 영원히 `synced=false`이므로 UI가 "방장 앱이 메트로놈 동기화를 지원하지 않음"을 안내한다.
+    pub fn unsupported(&self) -> bool {
+        self.samples == 0 && self.plain_pongs >= PLAIN_PONGS_UNSUPPORTED
     }
 
     /// Ping/Pong 표본 하나. `t0_us`/`t3_us` = 내 시계의 Ping 송신·Pong 수신, `remote_us` = 상대 시계.
@@ -137,7 +156,12 @@ impl ClockSync {
                 slope = (num / den).clamp(-MAX_DRIFT_PPM * 1e-6, MAX_DRIFT_PPM * 1e-6);
             }
         }
-        Some(ClockEstimate { offset_us: o_mean + slope * (at_us - t_mean), rtt_us: rtt_min, drift_ppm: slope * 1e6 })
+        Some(ClockEstimate {
+            offset_us: o_mean + slope * (at_us - t_mean),
+            rtt_us: rtt_min,
+            drift_ppm: slope * 1e6,
+            extrapolation_us: at_us - t_mean,
+        })
     }
 }
 
@@ -212,6 +236,34 @@ mod tests {
         let one_way = |t: f64| if t < 20e6 { 5000.0 } else if t < 60e6 { 20_000.0 } else { 3000.0 };
         let (_, worst) = run(150.0, 777.0, one_way, 1000.0, 100.0);
         assert!(worst < 500.0, "최악 오차 {worst}µs");
+    }
+
+    #[test]
+    fn old_engine_pongs_mark_unsupported() {
+        // PR #34 L4: 시계 없는 Pong만 오면 몇 초 뒤 "지원 안 함", 시계 표본이 하나라도 있으면 아님
+        let mut c = ClockSync::new();
+        for _ in 0..PLAIN_PONGS_UNSUPPORTED - 1 {
+            c.on_plain_pong();
+        }
+        assert!(!c.unsupported(), "너무 이르게 판단하지 않는다");
+        c.on_plain_pong();
+        assert!(c.unsupported());
+        c.on_sample(0.0, 2000.0, 5000.0);
+        assert!(!c.unsupported(), "시계 표본이 오면 지원");
+        // 아무 Pong도 없으면(연결 전) 지원 안 함으로 보지 않는다
+        assert!(!ClockSync::new().unsupported());
+    }
+
+    #[test]
+    fn reports_extrapolation_distance() {
+        // PR #34 L6: 직선 무게중심(16초 창, 가중 균등이면 약 8초 전)에서 요청 시각까지의 거리를 알린다.
+        // (최근 가중을 키우는 안은 시뮬레이션에서 최악 오차만 늘고 평균 치우침은 그대로라 택하지 않음, 설계 1.4절)
+        let (c, _) = run(0.0, 0.0, |_| 5000.0, 0.0, 60.0);
+        let e = c.estimate(60e6).unwrap();
+        assert!(e.extrapolation_us > 6e6 && e.extrapolation_us < 10e6, "외삽 거리 {}µs", e.extrapolation_us);
+        // 요청 시각이 미래로 갈수록 그만큼 늘어난다
+        let later = c.estimate(61e6).unwrap();
+        assert!((later.extrapolation_us - e.extrapolation_us - 1e6).abs() < 1.0);
     }
 
     #[test]
