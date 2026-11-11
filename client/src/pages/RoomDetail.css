@@ -888,14 +888,14 @@
   background: rgba(99, 102, 241, 0.2);
   border: 1px solid var(--indigo-500-a40);
   border-radius: var(--radius-lg);
-  color: var(--primary);
+  color: var(--accent);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .change-instrument-btn:hover {
   background: var(--indigo-500-a30);
-  border-color: var(--primary);
+  border-color: var(--accent);
 }
 
 /* 내 악기 변경 요청 상태 */
@@ -995,12 +995,12 @@
 
 /* 악기 옵션 - 현재 선택된 악기 표시 */
 .instrument-option.current {
-  border-color: var(--primary);
+  border-color: var(--accent);
   background: var(--indigo-500-a10);
 }
 
 .inst-slots.current {
-  background: var(--primary);
+  background: var(--accent);
   color: white;
 }
 
@@ -1179,7 +1179,7 @@
 }
 
 .monitor-toggle.on {
-  background: var(--primary);
+  background: var(--accent);
   color: var(--white);
 }
 
@@ -1219,7 +1219,7 @@
   width: 12px;
   height: 12px;
   border-radius: var(--radius-round);
-  background: var(--primary);
+  background: var(--accent);
   cursor: pointer;
   transition: transform 0.2s;
 }
@@ -1232,7 +1232,7 @@
   width: 12px;
   height: 12px;
   border-radius: var(--radius-round);
-  background: var(--primary);
+  background: var(--accent);
   border: none;
   cursor: pointer;
 }
@@ -1367,13 +1367,13 @@
   padding: 20px;
   border-radius: var(--radius-lg);
   background: var(--indigo-500-a10);
-  border: 1px solid var(--primary);
+  border: 1px solid var(--accent);
 }
 
 .web-notice p {
   font-weight: 600;
   margin-bottom: 8px;
-  color: var(--primary);
+  color: var(--accent);
 }
 
 .web-notice small {
@@ -1387,7 +1387,7 @@
   font: inherit;
   display: inline-block;
   padding: 10px 20px;
-  background: var(--primary);
+  background: var(--accent);
   color: var(--white);
   text-decoration: none;
   border-radius: var(--radius-md);
@@ -1396,7 +1396,7 @@
 }
 
 .web-notice .download-link:hover {
-  background: var(--primary-dark);
+  background: var(--indigo-400);
   transform: translateY(-2px);
 }
 
@@ -1743,7 +1743,7 @@
   font-size: 1.2rem;
   font-weight: 600;
   margin-bottom: 8px;
-  color: var(--text);
+  color: var(--color-text);
 }
 
 .info-title-section .room-description {
@@ -1801,7 +1801,7 @@
 
 .info-inst-name {
   font-size: 0.85rem;
-  color: var(--text);
+  color: var(--color-text);
 }
 
 .info-inst-slots {
@@ -1842,7 +1842,7 @@
   background: var(--white-a10);
   border: none;
   border-radius: var(--radius-md);
-  color: var(--text);
+  color: var(--color-text);
   font-size: 0.9rem;
   cursor: pointer;
   transition: all 0.2s;
@@ -2150,7 +2150,7 @@
   width: 40px;
   flex-shrink: 0;
   font-size: 0.75rem;
-  color: var(--text-secondary);
+  color: var(--color-text-subtle);
 }
 
 .master-control-row input[type="range"] {
@@ -2335,7 +2335,7 @@
 
 .channel-latency .latency-text {
   font-family: 'Monaco', 'Consolas', monospace;
-  color: var(--text-secondary);
+  color: var(--color-text-subtle);
 }
 
 .channel-latency .latency-text small {
@@ -2434,7 +2434,7 @@
 }
 
 .nickname-input {
-  background: var(--bg-input);
+  background: var(--color-surface);
   border: 1px solid var(--accent);
   border-radius: var(--radius-xs);
   padding: 4px 8px;
@@ -2508,7 +2508,7 @@
 
 .chat-input {
   flex: 1;
-  background: var(--bg-input);
+  background: var(--color-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 10px 14px;
@@ -3103,4 +3103,124 @@
 
 .live-room .chat-input {
   min-width: 0;
+}
+
+/* ===== 공유 메트로놈 (P2-3) ===== */
+.metronome-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.metronome-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.metronome-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--white-a30);
+}
+
+.metronome-dot.on {
+  background: var(--success);
+}
+
+.metronome-title {
+  font-weight: 600;
+}
+
+.metronome-status {
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--color-text-subtle);
+  font-size: 0.85em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metronome-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.metronome-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-text-subtle);
+  font-size: 0.85em;
+}
+
+.metronome-field input,
+.metronome-field select {
+  width: 64px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--black-a30);
+  color: var(--color-text);
+}
+
+.metronome-btn {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.metronome-btn.start {
+  border-color: transparent;
+  background: var(--gradient-accent);
+  color: var(--color-on-accent);
+}
+
+.metronome-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.metronome-mute {
+  padding: 0 var(--space-1);
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 1.1em;
+}
+
+.metronome-volume {
+  flex: 1;
+  min-width: 80px;
+  max-width: 160px;
+}
+
+.metronome-hint {
+  margin: 0;
+  color: var(--color-text-subtle);
+  font-size: 0.85em;
+}
+/* 좁은 화면에서 상태 배지·헤더 버튼 글자가 한 글자씩 줄바꿈되지 않게 (P3-12c) */
+.live-meta {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.live-meta > *,
+.header-btn {
+  white-space: nowrap;
 }

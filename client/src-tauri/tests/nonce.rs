@@ -13,10 +13,13 @@ use band_lib::engine::stats::{PathKind, PeerStateKind};
 use band_lib::net::crypto::KeyPair;
 use band_lib::net::packet::{Header, PacketType};
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor, ECHO_FLAG_REQUEST, ECHO_TAG};
-use band_lib::net::relay::DATA_PREFIX_BYTES;
+use band_lib::net::relay::{DATA_PREFIX_BYTES, TYPE_RELAY_DATA};
 use band_lib::net::{Net, NetOptions, AUDIO_SEQ_HANDOVER_GAP};
 
 const PEER: &str = "bob";
+
+/// 대기 상한(행 감지용). 판정은 받은 개수로 한다.
+const HANG: Duration = Duration::from_secs(20);
 
 fn net() -> Net {
     let opts = NetOptions {
@@ -27,7 +30,7 @@ fn net() -> Net {
         allow_loopback_candidates: true,
         cancel: None,
     };
-    Net::start("alice".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0 }).unwrap()
+    Net::start("alice".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }).unwrap()
 }
 
 /// 상대 역할: 키쌍, ssrc, 소켓.
@@ -57,14 +60,19 @@ impl Fake {
         }
     }
 
-    /// 지금까지 받은 Net의 Audio 패킷 seq를 `seen`에 넣는다. 반환: 새로 본 개수, 중복 개수.
+    /// Net의 Audio 패킷을 `want`개 받을 때까지(상한 `HANG`, 행 감지용) seq를 `seen`에 넣는다. 반환: 새로 본 개수, 중복 개수.
+    /// 고정 sleep 뒤 "지금까지 온 것"을 읽던 방식은 느린 러너에서 덜 받고 끝날 수 있어 개수로 기다린다(P3-0a).
     /// 키마다 seq가 이전 최대값 뒤에서 이어지는지(`last`)도 본다: 재추가가 새 난수에서 시작하면 실패한다.
-    fn collect(&self, relay: bool, seen: &mut HashSet<([u8; 32], u32, u32)>) -> (usize, usize) {
+    fn collect(&self, relay: bool, seen: &mut HashSet<([u8; 32], u32, u32)>, want: usize) -> (usize, usize) {
         let (mut new, mut dup) = (0, 0);
         let mut last = self.last.get();
         let mut buf = [0u8; 2048];
-        while let Ok(n) = self.sock.recv(&mut buf) {
-            let body = if relay && n > DATA_PREFIX_BYTES && buf[0] != 0x42 { &buf[DATA_PREFIX_BYTES..n] } else { &buf[..n] };
+        let t0 = Instant::now();
+        while new + dup < want && t0.elapsed() < HANG {
+            let Ok(n) = self.sock.recv(&mut buf) else { continue };
+            // 릴레이 경로는 RelayData 접두(MAGIC·버전·type 8·목적지 ssrc)를 벗긴다. 접두와 패킷 헤더는 둘 다 MAGIC으로
+            // 시작하므로 type 바이트로 구분한다(P3-0a: 예전 `buf[0] != 0x42` 조건은 항상 거짓이라 릴레이 경로 nonce를 못 봤다).
+            let body = if relay && n > DATA_PREFIX_BYTES && buf[3] == TYPE_RELAY_DATA { &buf[DATA_PREFIX_BYTES..n] } else { &buf[..n] };
             let Some(h) = Header::parse(body) else { continue };
             if h.ptype != PacketType::Audio {
                 continue;
@@ -115,8 +123,7 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
         net.add_peer(PEER.into(), &fake.desc()).unwrap();
         force_path(&net, fake.addr(), PathKind::Lan);
         send(&net, 40);
-        std::thread::sleep(Duration::from_millis(30));
-        let (n, d) = fake.collect(false, &mut seen);
+        let (n, d) = fake.collect(false, &mut seen, 40);
         assert_eq!(d, 0, "제거 후 재추가에서 nonce 중복");
         total += n;
         assert!(net.remove_peer(PEER));
@@ -128,14 +135,14 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
     net.add_peer(PEER.into(), &fake.desc()).unwrap();
     force_path(&net, fake.addr(), PathKind::Relay);
     send(&net, 40);
-    std::thread::sleep(Duration::from_millis(30));
-    let (n, d) = fake.collect(true, &mut seen);
+    let (n, d) = fake.collect(true, &mut seen, 80);
     assert_eq!(d, 0, "교체·릴레이 경로에서 nonce 중복");
+    assert_eq!(n, 80, "LAN 40 + 릴레이 경로 40을 모두 검사해야 한다");
     total += n;
 
-    // 4) 같은 키를 다른 id로 동시에 추가하면 카운터가 둘이 되므로 거부
-    let err = net.add_peer("bob-2".into(), &fake.desc()).unwrap_err();
-    assert!(err.contains("같은 키"), "{err}");
+    // 4) 같은 키를 다른 id로 추가해도 거부하지 않고 송신 카운터를 같이 쓴다(P1-1b, 자세한 검사는 tests/peer_key.rs).
+    net.add_peer("bob-2".into(), &fake.desc()).unwrap();
+    assert!(net.remove_peer("bob-2"));
 
     // 5) 에코 반사: 상대가 요청 Ping과 Audio를 보내면 수신 스레드가 같은 카운터로 되돌린다
     force_path(&net, fake.addr(), PathKind::Lan);
@@ -150,7 +157,7 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
     seal_send(PacketType::Ping, 1, 0, &[ECHO_TAG, ECHO_FLAG_REQUEST, 0, 0, 0, 0]);
     let t0 = Instant::now();
     while net.shared().set_echo_mode(PEER, true).is_err() {
-        assert!(t0.elapsed() < Duration::from_secs(2), "요청 Ping이 처리되지 않음");
+        assert!(t0.elapsed() < HANG, "요청 Ping이 처리되지 않음");
         std::thread::sleep(Duration::from_millis(5));
     }
     // 에코하는 동안 같은 상대에게 측정 요청은 거부(양방향 동시 에코 방지, L1)
@@ -159,8 +166,7 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
         seal_send(PacketType::Audio, 1000 + i, i * 120, &[7u8; 40]);
         send(&net, 1); // 반사 중인 피어에게는 내 오디오를 보내지 않는다(카운터를 쓰지 않음)
     }
-    std::thread::sleep(Duration::from_millis(50));
-    let (n, d) = fake.collect(false, &mut seen);
+    let (n, d) = fake.collect(false, &mut seen, 30);
     assert_eq!(d, 0, "에코 반사에서 nonce 중복");
     assert!(n >= 25, "반사 패킷 {n}");
     total += n;
@@ -169,8 +175,7 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
     net.add_peer(PEER.into(), &fake.desc()).unwrap();
     force_path(&net, fake.addr(), PathKind::Lan);
     send(&net, 40);
-    std::thread::sleep(Duration::from_millis(30));
-    let (n, d) = fake.collect(false, &mut seen);
+    let (n, d) = fake.collect(false, &mut seen, 40);
     assert_eq!(d, 0, "반사 뒤 재추가에서 nonce 중복");
     total += n;
 
@@ -181,11 +186,10 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
         net.add_peer(PEER.into(), &fake2.desc()).unwrap();
         force_path(&net, fake2.addr(), PathKind::Lan);
         send(&net, 40);
-        std::thread::sleep(Duration::from_millis(30));
-        let (n, d) = fake2.collect(false, &mut seen);
+        let (n, d) = fake2.collect(false, &mut seen, 40);
         assert_eq!(d, 0, "새 키에서 nonce 중복");
         total += n;
         assert!(net.remove_peer(PEER));
     }
-    assert!(total >= 440, "수집한 패킷 {total}");
+    assert!(total >= 505, "수집한 패킷 {total}");
 }

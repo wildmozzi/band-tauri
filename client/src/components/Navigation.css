@@ -124,12 +124,42 @@
 }
 
 /* Responsive Navigation */
+/*
+ * 좁은 화면: 메뉴를 숨기면 합주실·커뮤니티로 갈 길이 없어(P3-12c) 두 번째 줄에 가로 스크롤 메뉴로 둔다.
+ * 로그인 메뉴는 세로로 쌓지 않고(index.css .user-menu 세로 배치를 덮는다) 이메일은 프로필 화면에서만 보인다.
+ */
 @media (max-width: 768px) {
-  .nav-links {
-    display: none;
+  .top-nav {
+    padding: 12px 16px;
+    flex-wrap: wrap;
+    row-gap: 8px;
   }
 
-  .top-nav {
-    padding: 16px 20px;
+  .top-nav .nav-links {
+    display: flex;
+    order: 3;
+    width: 100%;
+    gap: 20px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 4px 2px 6px;
+  }
+
+  .top-nav .nav-links a {
+    white-space: nowrap;
+  }
+
+  .top-nav .nav-actions {
+    gap: 10px;
+  }
+
+  .top-nav .user-menu {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .top-nav .user-email {
+    display: none;
   }
 }

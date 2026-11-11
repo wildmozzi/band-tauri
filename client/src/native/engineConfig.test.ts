@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_ENGINE_CONFIG,
   ENGINE_PRESETS,
+  JITTER_PROFILE_DEFAULT,
   applyPreset,
+  clampJitterProfile,
   estimatePayloadBytes,
+  formatPeerJitter,
+  jitterProfileLabel,
   isPayloadAllowed,
   matchPreset,
   migrateLegacySettings,
@@ -203,5 +207,45 @@ describe('L3: 저장값 정리', () => {
     expect(parseStoredSettings({}).migrated).toBe(false)
     expect(parseStoredSettings({ version: 3, engine: { codec: 'flac' } }).migrated).toBe(false)
     expect(parseStoredSettings('garbage').migrated).toBe(false)
+  })
+})
+
+describe('P1-5: 지터 프로필(저지연 ↔ 안정)', () => {
+  it('기본값은 균형 0.5', () => {
+    expect(DEFAULT_ENGINE_CONFIG.jitterProfile).toBe(JITTER_PROFILE_DEFAULT)
+    expect(JITTER_PROFILE_DEFAULT).toBe(0.5)
+  })
+  it('0..1로 클램프하고 0.05 단위로 맞춘다. 숫자가 아니면 기본값', () => {
+    expect(clampJitterProfile(-1)).toBe(0)
+    expect(clampJitterProfile(2)).toBe(1)
+    expect(clampJitterProfile(0.33)).toBe(0.35)
+    expect(clampJitterProfile(Number.NaN)).toBe(0.5)
+    expect(clampJitterProfile('1')).toBe(0.5)
+  })
+  it('저장값 파싱: 없거나 잘못되면 균형, 범위 밖은 클램프', () => {
+    expect(parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, jitterProfile: undefined } }).config.jitterProfile).toBe(0.5)
+    expect(parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, jitterProfile: 7 } }).config.jitterProfile).toBe(1)
+    expect(parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, jitterProfile: 0.2 } }).config.jitterProfile).toBe(0.2)
+  })
+  it('검증: 범위 밖이면 jitterProfile 이슈', () => {
+    expect(validateEngineConfig({ ...DEFAULT_ENGINE_CONFIG, jitterProfile: 1.5 }).map((i) => i.field)).toContain('jitterProfile')
+    expect(validateEngineConfig({ ...DEFAULT_ENGINE_CONFIG, jitterProfile: 0 })).toEqual([])
+  })
+  it('프리셋은 프로필을 정한다: 초저지연 0, 균형 0.5, 안정 1', () => {
+    expect(applyPreset(DEFAULT_ENGINE_CONFIG, 'ultraLow').jitterProfile).toBe(0)
+    expect(applyPreset(DEFAULT_ENGINE_CONFIG, 'balanced').jitterProfile).toBe(0.5)
+    expect(applyPreset(DEFAULT_ENGINE_CONFIG, 'stable').jitterProfile).toBe(1)
+  })
+  it('프로필은 프리셋 일치 판정에 영향을 주지 않는다', () => {
+    const c = applyPreset(DEFAULT_ENGINE_CONFIG, 'balanced')
+    expect(matchPreset({ ...c, jitterProfile: 0.9 })).toBe('balanced')
+  })
+  it('이름과 피어 상태 한 줄', () => {
+    expect(jitterProfileLabel(0)).toBe('저지연')
+    expect(jitterProfileLabel(0.5)).toBe('균형')
+    expect(jitterProfileLabel(1)).toBe('안정')
+    expect(formatPeerJitter({ bufferMs: 5.31, targetMs: 5.25, concealPct: 0.12 })).toBe('버퍼 5.3ms / 목표 5.3ms · 은닉 0.1%')
+    expect(formatPeerJitter({ bufferMs: 5.31, targetMs: 5.25, concealPct: 0.12, corrTimePct: 8.4 })).toBe('버퍼 5.3ms / 목표 5.3ms · 은닉 0.1% · 보정 8%')
+    expect(formatPeerJitter({ bufferMs: 5 })).toBe('버퍼 5.0ms')
   })
 })

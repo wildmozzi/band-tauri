@@ -2,27 +2,71 @@
  * 네이티브 엔진 오디오 설정 화면 (EngineConfig / DeviceInfo, 설계 4절).
  * 상태와 저장은 AudioSettingsContext가 맡고, 이 컴포넌트는 표시와 입력만 한다.
  */
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAudioSettings } from '../contexts/AudioSettingsContext'
-import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs } from '../native/engineApi'
+import {
+  MAX_PAYLOAD_BYTES,
+  engineSetJitterProfile,
+  engineStats,
+  type CodecKind,
+  type DriverKind,
+  type FrameMs,
+  type PeerStats,
+} from '../native/engineApi'
 import {
   BUFFER_OPTIONS,
   DRIVER_OPTIONS,
   ENGINE_PRESETS,
   FRAME_OPTIONS,
   JITTER_MAX_LIMIT_MS,
+  JITTER_PROFILE_DEFAULT,
   bufferMs,
+  clampJitterProfile,
   estimatePayloadBytes,
+  formatPeerJitter,
   isPayloadAllowed,
+  jitterProfileLabel,
   type EnginePresetId,
 } from '../native/engineConfig'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
 import { DesktopDownloadButton } from './DesktopDownloadButton'
+import { Modal } from './ui'
+import { DiagnosticsExport } from './DiagnosticsExport'
 import './AudioSettings.css'
 
 interface AudioSettingsProps {
   onClose?: () => void
   isModal?: boolean
+}
+
+const PEER_STATS_POLL_MS = 1000
+const PROFILE_APPLY_DEBOUNCE_MS = 200
+
+/** 합주 중(엔진 사용 중)일 때만 피어 통계를 1초마다 읽는다(지터 버퍼 상태 표시용). */
+function useLivePeerStats(enabled: boolean): PeerStats[] {
+  const [peers, setPeers] = useState<PeerStats[]>([])
+  useEffect(() => {
+    if (!enabled) {
+      setPeers([])
+      return
+    }
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const s = await engineStats()
+        if (!cancelled) setPeers(s.peers)
+      } catch {
+        // 엔진이 막 멈춘 경우 등: 다음 주기에 다시
+      }
+    }
+    void poll()
+    const timer = setInterval(() => void poll(), PEER_STATS_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [enabled])
+  return peers
 }
 
 function LevelMeter({ value, kind }: { value: number; kind: 'input' | 'output' }) {
@@ -58,23 +102,47 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     engineInUse,
   } = useAudioSettings()
 
+  const livePeers = useLivePeerStats(isNativeMode && engineInUse)
+  // 슬라이더 드래그 중에는 표시만 바꾸고, 엔진 적용(IPC)은 마지막 값으로 200ms 뒤 한 번만(PR #20 M3).
+  const profileTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (profileTimer.current) clearTimeout(profileTimer.current)
+  }, [])
+  const scheduleProfileApply = (p: number) => {
+    if (profileTimer.current) clearTimeout(profileTimer.current)
+    profileTimer.current = setTimeout(() => {
+      profileTimer.current = null
+      void engineSetJitterProfile(p).catch(() => undefined)
+    }, PROFILE_APPLY_DEBOUNCE_MS)
+  }
+
   // 설정 화면을 닫으면 테스트 종료
   useEffect(() => () => {
     void stopTest()
   }, [stopTest])
 
-  const wrap = (body: React.ReactNode) => (
-    <div className={`audio-settings ${isModal ? 'modal' : ''}`}>
-      {isModal && <div className="modal-backdrop" onClick={onClose} />}
-      <div className="audio-settings-content">
-        <div className="settings-header">
-          <h2>오디오 설정</h2>
-          {onClose && <button onClick={onClose} className="close-btn">×</button>}
-        </div>
+  const wrap = (body: React.ReactNode) =>
+    isModal && onClose ? (
+      // 모달: 공용 Modal(포커스 트랩·Esc·포커스 복귀). 클래스는 기존 오디오 설정 CSS 그대로
+      <Modal
+        className="audio-settings modal"
+        title="오디오 설정"
+        onClose={onClose}
+        classNames={{ content: 'audio-settings-content', header: 'settings-header', body: 'audio-settings-body' }}
+      >
         {body}
+      </Modal>
+    ) : (
+      <div className="audio-settings">
+        <div className="audio-settings-content">
+          <div className="settings-header">
+            <h2>오디오 설정</h2>
+            {onClose && <button onClick={onClose} className="close-btn">×</button>}
+          </div>
+          {body}
+        </div>
       </div>
-    </div>
-  )
+    )
 
   // 웹: 연주는 앱 전용
   if (!isNativeMode) {
@@ -324,6 +392,38 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
       <section className="settings-section">
         <h3>지터 버퍼</h3>
         <div className="settings-row">
+          <label htmlFor="jitter-profile">저지연 ↔ 안정</label>
+          <input
+            id="jitter-profile"
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={config.jitterProfile ?? JITTER_PROFILE_DEFAULT}
+            onChange={(e) => {
+              const p = clampJitterProfile(Number(e.target.value))
+              updateConfig({ jitterProfile: p })
+              // 합주 중이면 적용(디바운스). 다음 시작에는 저장된 설정을 쓴다
+              if (engineInUse) scheduleProfileApply(p)
+            }}
+          />
+          <span>{jitterProfileLabel(config.jitterProfile ?? JITTER_PROFILE_DEFAULT)}</span>
+        </div>
+        <p className="setting-hint">
+          저지연: 버퍼를 최소로(가끔 끊김 감수) · 안정: 지터 스파이크에 여유를 더 오래 두고 반복되는 스파이크도 일부 덮음(회선에 따라 지연이 크게 늘 수 있음). 합주 중에도 바로 적용됩니다.
+        </p>
+        {engineInUse && (
+          <div className="stats-grid" aria-label="피어별 지터 버퍼 상태">
+            {livePeers.length === 0 && <p className="setting-hint">연결된 피어가 없습니다.</p>}
+            {livePeers.map((ps) => (
+              <div className="stat-item" key={ps.peerId}>
+                <span className="stat-label">{ps.peerId.slice(0, 8)}</span>
+                <span className="stat-value">{formatPeerJitter(ps)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="settings-row">
           <label htmlFor="jitter-min">최소 (0 = 자동)</label>
           <input
             id="jitter-min"
@@ -397,6 +497,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
       </section>
 
       <LatencyMeasurePanel />
+
+      <DiagnosticsExport />
 
       {issues.length > 0 && (
         <section className="settings-section">

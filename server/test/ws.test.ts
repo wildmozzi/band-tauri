@@ -218,3 +218,101 @@ describe('M3: per-IP connection limit', async () => {
     assert.equal(code, 1008)
   })
 })
+
+describe('P2-3: shared metronome signaling (host verified by DB)', async () => {
+  const url = await startWs(backend())
+  const desc = (ssrc: number) => ({ ssrc, key: 'AAAA', candidates: [] })
+  const state = { running: true, bpm: 120, beatsPerBar: 4, startUs: 1_500_000 }
+
+  it('relays only the host’s valid metronome to performers and replays it to late engines', async () => {
+    const host = await client(url)
+    const member = await client(url)
+    const viewer = await client(url)
+    await authJoin(host, 'tok:host', 'free')
+    await authJoin(member, 'tok:metroMember', 'free', { isHost: true, userId: 'host' })
+    await authJoin(viewer, 'tok:metroViewer', 'free')
+    host.send({ type: 'start-performing', instrument: 'drums' })
+    member.send({ type: 'start-performing', instrument: 'drums' })
+    assert.ok(await host.waitFor(m => m.type === 'performer-updated' && m.oderId === member.id))
+    member.send({ type: 'native-descriptor', descriptor: desc(12) })
+    host.send({ type: 'native-descriptor', descriptor: desc(11) })
+    assert.ok(await member.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+
+    // 방장이 아니면(클라이언트가 isHost/userId를 보내도) 거부, 중계 없음
+    member.send({ type: 'metronome', state })
+    assert.ok(await member.waitFor(m => m.type === 'error' && m.code === 'metronome-host-only'))
+    // 범위 밖 값은 거부
+    host.send({ type: 'metronome', state: { ...state, bpm: 1000 } })
+    assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'metronome-invalid'))
+    await sleep(50)
+    assert.ok(!host.has(m => m.type === 'metronome'))
+    assert.ok(!member.has(m => m.type === 'metronome'))
+
+    host.send({ type: 'metronome', state, from: 'spoofed' })
+    const got = await member.waitFor(m => m.type === 'metronome')
+    assert.ok(got)
+    const msg = member.inbox.find(m => m.type === 'metronome')!
+    assert.equal(msg.from, host.id)
+    assert.deepEqual(msg.state, state)
+    await sleep(50)
+    assert.ok(!viewer.has(m => m.type === 'metronome'), '관람자에게는 보내지 않음')
+
+    // 엔진을 다시 띄운(descriptor를 다시 보낸) 연주자에게 현재 상태를 다시 알려 준다
+    member.inbox.length = 0
+    member.send({ type: 'native-descriptor', descriptor: desc(12) })
+    assert.ok(await member.waitFor(m => m.type === 'metronome' && m.from === host.id && (m.state as typeof state).startUs === state.startUs))
+
+    // 방장 엔진이 내려가면 상태를 지운다
+    host.send({ type: 'native-leave' })
+    assert.ok(await member.waitFor(m => m.type === 'native-leave' && m.from === host.id))
+    member.inbox.length = 0
+    member.send({ type: 'native-descriptor', descriptor: desc(12) })
+    await sleep(100)
+    assert.ok(!member.has(m => m.type === 'metronome'))
+  })
+
+  it('clears the host metronome and relays a stop when the host engine restarts without native-leave (#36 M1)', async () => {
+    const host = await client(url)
+    const member = await client(url)
+    await authJoin(host, 'tok:host', 'free')
+    await authJoin(member, 'tok:metroMember3', 'free')
+    host.send({ type: 'start-performing', instrument: 'drums' })
+    member.send({ type: 'start-performing', instrument: 'drums' })
+    assert.ok(await host.waitFor(m => m.type === 'performer-updated' && m.oderId === member.id))
+    member.send({ type: 'native-descriptor', descriptor: desc(22) })
+    host.send({ type: 'native-descriptor', descriptor: desc(21) })
+    assert.ok(await member.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+    host.send({ type: 'metronome', state })
+    assert.ok(await member.waitFor(m => m.type === 'metronome' && (m.state as typeof state).running))
+
+    // 같은 엔진의 재알림(같은 ssrc, WS 재개·회신)은 메트로놈을 건드리지 않는다
+    member.inbox.length = 0
+    host.send({ type: 'native-descriptor', descriptor: desc(21) })
+    assert.ok(await member.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+    await sleep(50)
+    assert.ok(!member.has(m => m.type === 'metronome'))
+
+    // 새 ssrc = 엔진 재시작 → 정지 중계, 늦게 띄운 엔진에도 옛 상태를 다시 보내지 않는다
+    host.send({ type: 'native-descriptor', descriptor: desc(23) })
+    assert.ok(await member.waitFor(m => m.type === 'metronome' && m.from === host.id && (m.state as typeof state).running === false))
+    member.inbox.length = 0
+    member.send({ type: 'native-descriptor', descriptor: desc(22) })
+    await sleep(100)
+    assert.ok(!member.has(m => m.type === 'metronome'))
+
+    // 방장이 새 엔진 기준 startUs로 다시 시작하면 그 값이 중계된다
+    host.send({ type: 'metronome', state: { ...state, startUs: 42 } })
+    assert.ok(await member.waitFor(m => m.type === 'metronome' && (m.state as typeof state).startUs === 42))
+  })
+
+  it('rejects metronome before the host engine is running', async () => {
+    const host = await client(url)
+    const member = await client(url)
+    await authJoin(host, 'tok:host', 'locked')
+    await authJoin(member, 'tok:metroMember2', 'locked')
+    host.send({ type: 'start-performing', instrument: 'drums' })
+    host.send({ type: 'metronome', state })
+    await sleep(100)
+    assert.ok(!member.has(m => m.type === 'metronome'))
+  })
+})
