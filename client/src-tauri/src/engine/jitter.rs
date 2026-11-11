@@ -72,7 +72,7 @@ const LOSS_WINDOW_MAX: usize = 2000;
 /// 언더런 은닉이 이 시간(ms) 이상 지속되면 재버퍼링.
 const STARVE_RESET_MS: f64 = 200.0;
 /// 목표 격자(샘플, 0.25ms). 짧은·버스트·긴 창 추정을 이 단위로 올림한다.
-const TARGET_GRID: f64 = 12.0;
+pub const TARGET_GRID: f64 = 12.0;
 /// 버스트 감지 창(패킷)과 그 안에서 필요한 초과 패킷 수.
 const BURST_WIN: usize = 16;
 const BURST_COUNT: usize = 3;
@@ -317,6 +317,10 @@ pub struct JitterStats {
     /// 측정용(P1-6c, PR #65 리뷰 M1·L3). Tauri `PeerStats`에는 노출하지 않는다.
     pub tail_adjusts: u64,
     pub tail_resets: u64,
+    /// 깊이·지터 추정의 기준인 최소 transit(샘플, 절대값이라 두 시점의 차이만 의미가 있다). 목표의 절대 수준은
+    /// `min_transit + target`이다: 창의 가장 이른 표본이 빠져 min이 오르면 깊이는 바로 줄고 짧은 창 추정은 hold로
+    /// 남아 절대 목표가 오른다(보정으로 따라감). 측정용(P3-0d, `link_matrix`). Tauri `PeerStats`에는 노출하지 않는다.
+    pub min_transit: i64,
 }
 
 impl JitterStats {
@@ -1586,6 +1590,7 @@ impl JitterBuffer {
         s.corr_time_pct = self.corr_ring.pct();
         s.max_corr_cents = self.max_corr_cents;
         s.tail_ms = self.tail_extra as f32 / spm;
+        s.min_transit = self.min_transit;
         s
     }
 

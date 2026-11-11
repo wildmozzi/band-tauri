@@ -451,7 +451,13 @@ fn monitor_matrix_no_gaps_with_large_device_buffers() {
 #[ignore = "realtime: 결정적 짝 engine::jitter::tests::clean_network_zero_concealment_and_zero_corrections, engine::worker::tests::callback_mix_sim_phase_and_buffer_matrix"]
 fn link_matrix_clean_network_no_concealment_no_corrections() {
     let _g = RT_LOCK.lock();
-    for (buf, frame_ms) in [(128, 5.0), (480, 2.5), (480, 5.0), (1024, 5.0)] {
+    // (장치 버퍼, 프레임, 목표 고정 중 보정 0 판정). 1024 / 5ms는 송신이 21.3ms마다 4~5패킷으로 몰려 최소 transit 후보가
+    // 버스트당 하나(프레임 경계가 콜백 끝과 맞는 패킷)뿐이고, 콜백 기상 지연(1ms) 때문에 창의 가장 이른 표본이 들고 날 때마다
+    // 기준 min이 0.5초에 ~1ms씩 오르내린다(P3-0d 실측: 6초에 −1.25 ~ +1.17ms). 깊이는 min 기준이라 바로 따라 움직이고 짧은 창
+    // 추정은 hold(2초)로 남으므로, 목표(상대)가 그대로인 동안에도 절대 목표(min + 목표)가 움직여 보정이 생긴다. 그래서 이
+    // 조합은 "보정은 절대 목표가 움직인 만큼만"으로 본다(아래). 결정적 짝(기상 지연 없는 256/1024 시뮬레이션)은 보정 0이다.
+    let cases: [(u32, f32, bool); 4] = [(128, 5.0, true), (480, 2.5, true), (480, 5.0, true), (1024, 5.0, false)];
+    for (buf, frame_ms, strict) in cases {
         let mut ba = sine_backend();
         ba.wake_jitter_us = 1000;
         let mut bb = FakeBackend::silence(48_000);
@@ -478,8 +484,12 @@ fn link_matrix_clean_network_no_concealment_no_corrections() {
         let mut stable_corr = 0;
         let mut stable_secs = 0.0;
         let mut retarget_until: Option<Instant> = None;
+        // 절대 목표(샘플) = 최소 transit + 목표. 관찰 구간에서 움직인 경로 길이(오르내림 합)를 함께 잰다.
+        let abs_of = |s: &jitter_stats::JitterStats| s.min_transit as f64 + s.target_ms as f64 * 48.0;
+        let mut abs_path = 0.0;
         for w in snaps.windows(2) {
             let ((t0, s0), (t1, s1)) = (w[0], w[1]);
+            abs_path += (abs_of(&s1) - abs_of(&s0)).abs();
             if (s1.target_ms - s0.target_ms).abs() > 0.01 {
                 // 목표가 바뀌었다: 깊이를 새 목표까지 옮기는 데 걸리는 시간 + 0.5초는 제외한다.
                 // 따라잡는 시간은 엔진 사양(보정 속도 상한 `jitter::MAX_CORR_RATE` = 0.25%, PR #20 H1)에서 그대로 계산하고,
@@ -498,18 +508,30 @@ fn link_matrix_clean_network_no_concealment_no_corrections() {
             stable_corr += s1.corrections() - s0.corrections();
             stable_secs += (t1 - t0).as_secs_f64();
         }
+        let corr = last.corrections() - first.corrections();
         println!(
-            "LINK buf {buf} / {frame_ms}ms: 불연속 {} 무음 {}, concealed(3~9s) {}, 목표 {:.1}→{:.1}ms, 목표 고정 {stable_secs:.1}s 동안 보정 {stable_corr}, 전체 보정 {}, buffer {:.1}ms, xruns {xruns}",
+            "LINK buf {buf} / {frame_ms}ms: 불연속 {} 무음 {}, concealed(3~9s) {}, 목표 {:.1}→{:.1}ms, 목표 고정 {stable_secs:.1}s 동안 보정 {stable_corr}, 전체 보정 {corr}(절대 목표 이동 {:.0}샘플, min {:+.2}ms, 최대 {:.1}센트), buffer {:.1}ms, xruns {xruns}",
             c.discontinuities,
             c.silent_runs,
             last.concealed - first.concealed,
             first.target_ms,
             last.target_ms,
-            last.corrections() - first.corrections(),
+            abs_path,
+            (last.min_transit - first.min_transit) as f64 / 48.0,
+            last.max_corr_cents,
             last.buffer_ms,
         );
-        assert!(stable_secs >= 3.0, "buf {buf} / {frame_ms}ms: 목표가 고정된 구간이 3초 이상 있어야 함({stable_secs:.1}s)");
-        assert_eq!(stable_corr, 0, "buf {buf} / {frame_ms}ms: 드리프트 0, 목표 고정 중 보정 {stable_corr}회");
+        if strict {
+            assert!(stable_secs >= 3.0, "buf {buf} / {frame_ms}ms: 목표가 고정된 구간이 3초 이상 있어야 함({stable_secs:.1}s)");
+            assert_eq!(stable_corr, 0, "buf {buf} / {frame_ms}ms: 드리프트 0, 목표 고정 중 보정 {stable_corr}회");
+        } else {
+            // 드리프트 0이면 깊이를 옮길 이유는 기준(절대 목표)의 이동뿐이다: 보정량은 관찰 구간의 절대 목표 경로 길이를 넘지
+            // 않는다(+ 관찰 시작 전 이동의 따라잡기 몫 1격자). 리뷰 M4류 회귀(목표·기준이 그대로인데 계속 보정)는 이 상한을 넘는다.
+            let bound = abs_path + jitter_stats::TARGET_GRID;
+            assert!(corr as f64 <= bound, "buf {buf} / {frame_ms}ms: 보정 {corr}샘플이 절대 목표 이동 {abs_path:.0}샘플(+격자)로 설명되지 않음");
+        }
+        // 보정은 속도 상한 리샘플러로만 한다(국소 피치 ≤ 4.3센트, 지속음 JND 5~10센트 아래).
+        assert!(last.max_corr_cents <= 4.4, "buf {buf} / {frame_ms}ms: 보정 피치 {:.1}센트", last.max_corr_cents);
         // 결정적 보장(정확히 0)은 단위 시뮬레이션(jitter::clean_network_zero_concealment_and_zero_corrections)이
         // 맡는다. 실시간 테스트는 스케줄러 지연 1회까지 허용한다(리뷰 M4 회귀는 5초에 6~8회였다).
         assert!(last.concealed - first.concealed <= 1, "buf {buf} / {frame_ms}ms: 지터 없는 링크에서 은닉 {}", last.concealed - first.concealed);

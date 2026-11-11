@@ -54,6 +54,13 @@ pub const MAX_PEERS: usize = 5;
 /// 송신(워커가 쥔 `Arc`, 수신 스레드의 에코 반사)이 기록 뒤에 쓰는 seq와 겹치지 않게 한다(2.5ms 프레임 약 164초분).
 pub const AUDIO_SEQ_HANDOVER_GAP: u32 = 1 << 16;
 
+/// 수신 소켓의 읽기 타임아웃. 정지는 타임아웃이 아니라 자기 주소로 보내는 깨움 데이터그램으로 알린다(`Net::stop`).
+/// Windows에서 `SO_RCVTIMEO`가 만료되는 순간 도착한 데이터그램이 사라진다(MS 문서: 타임아웃 뒤 소켓 상태는
+/// "불확정"). 이전 값 20ms는 패킷 간격(장치 버퍼 1024 = 21.3ms마다 4~5개 몰아 송신)과 겹쳐 깨끗한 루프백에서도
+/// 수 초에 1~12개를 잃었다(P3-0d, `link_matrix` 1024/5ms 은닉). 연결 중에는 오디오·ping(500ms)이 끊이지 않으므로
+/// 1초 타임아웃은 만료되지 않는다. 깨움이 실패해도 정지는 이 시간 안에 끝난다.
+const RECV_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// 송신 키 식별자: 이 Net(키쌍·ssrc 고정)에서 A→B 키는 (상대 공개키, 상대 ssrc)로 정해진다(설계 2절 HKDF info).
 type TxKeyId = ([u8; crate::net::crypto::KEY_BYTES], u32);
 
@@ -173,7 +180,7 @@ impl Net {
         candidates.extend(opts.extra_candidates.iter().cloned());
         candidates.truncate(peer::MAX_CANDIDATES);
         socket
-            .set_read_timeout(Some(Duration::from_millis(20)))
+            .set_read_timeout(Some(RECV_TIMEOUT))
             .map_err(|e| format!("소켓 설정 실패: {e}"))?;
 
         let keys = KeyPair::generate();
@@ -220,6 +227,7 @@ impl Net {
             Ok(h) => threads.push(h),
             Err(e) => {
                 shared.stop.store(true, Ordering::Relaxed);
+                let _ = shared.socket.send_to(&[], (Ipv4Addr::LOCALHOST, port));
                 for t in threads {
                     let _ = t.join();
                 }
@@ -392,6 +400,8 @@ impl Net {
         for p in &peers {
             self.shared.send_bye(p);
         }
+        // 수신 스레드를 깨운다(빈 데이터그램은 헤더 파싱에서 버려지고, 루프는 정지 플래그를 보고 끝난다).
+        let _ = self.shared.socket.send_to(&[], (Ipv4Addr::LOCALHOST, self.local_port()));
         for t in self.threads.drain(..) {
             if t.join().is_err() {
                 log::error!("네트워크 스레드 패닉");
