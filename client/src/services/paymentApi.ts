@@ -1,17 +1,9 @@
 // 결제 API는 모두 Bearer 토큰 필요. userId는 서버가 토큰으로 결정한다(본문의 userId는 무시됨)
+import { getApiUrl } from '../lib/apiUrl'
 import { authHeaders } from '../lib/authHeaders'
 import type { OrderStatus, OrderStatusResult } from './paymentFlow'
 
-// 자동 IP 감지: 'auto'면 현재 접속한 호스트 사용
-function getApiUrl(): string {
-  const envUrl = import.meta.env.VITE_API_URL
-  if (!envUrl || envUrl === 'auto') {
-    const protocol = window.location.protocol
-    const host = window.location.hostname
-    return `${protocol}//${host}:8080`
-  }
-  return envUrl
-}
+// VITE_API_URL 또는 (auto) 현재 호스트:8080 — lib/apiUrl
 const API_BASE_URL = getApiUrl()
 
 /** orderId는 createOrder로 서버에서 받은 것. amount는 토스 successUrl의 금액(서버가 주문 금액과 대조) */

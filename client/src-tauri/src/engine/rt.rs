@@ -310,6 +310,8 @@ pub struct OutputRt {
     tap_bus: Box<[f32]>,
     level_acc: [f32; MAX_SOURCES],
     measure: Option<MeasureOut>,
+    /// 공유 메트로놈 클릭(P2-3). 장치 출력에만 섞고 믹스 탭에는 넣지 않는다.
+    click: Option<super::metronome::ClickRt>,
 }
 
 /// 입력 링(입력 콜백 → 워커).
@@ -339,6 +341,7 @@ pub fn output_path(counters: Arc<AudioCounters>, controls: Arc<MixControls>) -> 
         tap_bus: vec![0.0f32; RT_CHUNK_FRAMES * 2].into_boxed_slice(),
         level_acc: [0.0; MAX_SOURCES],
         measure: None,
+        click: None,
     };
     (rt, OutputFeed { prods, bank, tap: tap_c })
 }
@@ -347,6 +350,11 @@ impl OutputRt {
     /// 지연 측정 자극 끝점을 붙인다(엔진 시작 시, 장치를 열기 전).
     pub fn attach_measure(&mut self, m: MeasureOut) {
         self.measure = Some(m);
+    }
+
+    /// 메트로놈 클릭 생성기를 붙인다(엔진 시작 시, 장치를 열기 전).
+    pub fn attach_click(&mut self, c: super::metronome::ClickRt) {
+        self.click = Some(c);
     }
 }
 
@@ -541,6 +549,10 @@ impl OutputRt {
             override_out = m.sh.out_override.load(Ordering::Relaxed);
         }
         let master = self.controls.master_gain.load();
+        let click_gain = if self.controls.click_muted.load(Ordering::Relaxed) { 0.0 } else { self.controls.click_gain.load() };
+        if let Some(c) = self.click.as_mut() {
+            c.begin(before, frames, !override_out);
+        }
         self.level_acc = [0.0; MAX_SOURCES];
         let mut sum_sq = 0.0f32;
         let mut underrun = false;
@@ -577,8 +589,14 @@ impl OutputRt {
                 let (Some(&l), Some(&r)) = (self.bus.get(i * 2), self.bus.get(i * 2 + 1)) else {
                     break;
                 };
-                let l = soft_clip(l * master);
-                let r = soft_clip(r * master);
+                // 클릭은 장치 출력에만(탭 버스와 별개). 게인 0이어도 파형 위치는 진행한다.
+                // 의도: 클릭도 마스터 게인을 타고, 출력 레벨(`outputLevel`)은 장치로 나가는 소리 그대로라 클릭이 포함된다.
+                let click = match self.click.as_mut() {
+                    Some(c) => c.sample(done + i) * click_gain,
+                    None => 0.0,
+                };
+                let l = soft_clip((l + click) * master);
+                let r = soft_clip((r + click) * master);
                 sum_sq += l * l + r * r;
                 let base = (done + i) * device_channels;
                 let Some(frame) = data.get_mut(base..base + device_channels) else {

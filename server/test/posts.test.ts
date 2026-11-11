@@ -191,6 +191,24 @@ describe('POST/PUT /api/posts', () => {
     assert.equal(more.status, 400)
   })
 
+  it('existing images match by key: a relative stored path sent back absolutized stays editable even if the file is gone (PR #25 L2)', async () => {
+    const goneKey = newPostImageKey(ALICE, 'image/png') // 저장소에 없음 (정리·이전으로 사라짐)
+    const relative = `/api/storage/post-images/${goneKey}` // PUBLIC_API_URL 없이 저장된 값
+    const created = await posts.repo.insert({
+      authorId: ALICE, authorName: 'alice', authorRole: 'Session Member', title: 't', content: 'c',
+      tags: [], images: [relative], instrument: 'other', category: 'general',
+    })
+    // 클라이언트 toPost가 절대 URL로 바꿔 폼에 넣고 그대로 돌려보낸다 → 422가 아니라 원래 저장값 유지
+    const absolutized = `https://api.example${relative}`
+    const res = await req(s.url, 'PUT', `/${created.id}`, { content: 'edited', images: [absolutized] }, bearer(ALICE))
+    assert.equal(res.status, 200)
+    assert.deepEqual(posts.rows.get(created.id)!.images, [relative])
+    // 같은 key를 다른 호스트로 보내도 클라이언트 URL은 저장되지 않는다
+    const swapped = await req(s.url, 'PUT', `/${created.id}`, { images: [`https://evil.test/post-images/${goneKey}`] }, bearer(ALICE))
+    assert.equal(swapped.status, 200)
+    assert.deepEqual(posts.rows.get(created.id)!.images, [relative])
+  })
+
   it('rejects edits by someone other than the author (403) and unknown posts (404)', async () => {
     const created = await (await req(s.url, 'POST', '', { title: 'mine', content: 'c' }, bearer(ALICE))).json() as { post: PostRow }
     const res = await req(s.url, 'PUT', `/${created.post.id}`, { title: 'pwned', images: [] }, bearer(BOB))
@@ -260,5 +278,46 @@ describe('POST /api/posts without backends', () => {
     assert.equal((await req(s.url, 'POST', '', { title: 't', content: 'c' }, bearer(ALICE))).status, 201)
     const res = await req(s.url, 'POST', '', { title: 't', content: 'c', images: [`https://api.test/api/storage/post-images/${newPostImageKey(ALICE, 'image/png')}`] }, bearer(ALICE))
     assert.equal(res.status, 503)
+  })
+})
+
+describe('per-user post write limits (P3-10g, PR #25 L4)', () => {
+  let server: Server
+  let url: string
+  const posts = memoryPosts()
+  before(async () => {
+    setTokenVerifier(testVerifier)
+    server = createApp({
+      imageStorage: null, postRepository: posts.repo, rateLimits: false,
+      postUserLimits: { createPerMinute: 2, createPerDay: 3, editPerMinute: 2 },
+    }).listen(0)
+    await new Promise(r => server.once('listening', r))
+    url = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+  })
+  after(() => {
+    server.close()
+    setTokenVerifier()
+  })
+
+  it('limits each user by token (not IP) and leaves other users alone', async () => {
+    // 같은 사용자가 IP(X-Forwarded-For)를 바꿔도 같은 상한
+    const statuses: number[] = []
+    for (let i = 0; i < 3; i++) {
+      statuses.push((await req(url, 'POST', '', { title: `t${i}`, content: 'c' }, { ...bearer(ALICE), 'X-Forwarded-For': `10.0.0.${i}` })).status)
+    }
+    assert.deepEqual(statuses, [201, 201, 429])
+    const limited = await req(url, 'POST', '', { title: 'x', content: 'c' }, bearer(ALICE))
+    assert.equal(limited.status, 429)
+    assert.match(((await limited.json()) as { error: string }).error, /너무 자주/)
+    assert.equal(posts.rows.size, 2)
+    // 다른 사용자는 영향 없음
+    assert.equal((await req(url, 'POST', '', { title: 'b', content: 'c' }, bearer(BOB))).status, 201)
+  })
+
+  it('limits edits per user separately from creates', async () => {
+    const [id] = [...posts.rows.values()].filter(r => r.author_id === BOB).map(r => r.id)
+    const statuses: number[] = []
+    for (let i = 0; i < 3; i++) statuses.push((await req(url, 'PUT', `/${id}`, { content: `c${i}` }, bearer(BOB))).status)
+    assert.deepEqual(statuses, [200, 200, 429])
   })
 })

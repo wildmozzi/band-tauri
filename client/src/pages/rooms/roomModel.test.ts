@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildRoomUpdate,
+  effectiveRoomCapacity,
+  MAX_PARTICIPANT_OPTIONS,
+  maxParticipantOptionsFor,
+  ROOM_CAPACITY_MAX,
+  ROOM_CAPACITY_MIN,
   instrumentsNotInSlots,
   MAX_PARTICIPANTS_HINT,
   maxParticipantsOptionLabel,
@@ -144,5 +149,38 @@ describe('최대 인원 문구 (P3-12 ⑧)', () => {
     expect(maxParticipantsOptionLabel(8)).toBe('8명 (연주 6 + 관람 2)')
     expect(maxParticipantsOptionLabel(20)).toBe('20명 (연주 6 + 관람 14)')
     expect(MAX_PARTICIPANTS_HINT).toContain('연주자는 최대 6명')
+  })
+})
+
+describe('room capacity range (P3-10g)', () => {
+  it('options stay within the server/DB range 2~20', () => {
+    expect(ROOM_CAPACITY_MIN).toBe(2)
+    expect(ROOM_CAPACITY_MAX).toBe(20)
+    expect(MAX_PARTICIPANT_OPTIONS.every(n => n >= 2 && n <= 20)).toBe(true)
+    expect(MAX_PARTICIPANT_OPTIONS[0]).toBe(2)
+    expect(MAX_PARTICIPANT_OPTIONS[MAX_PARTICIPANT_OPTIONS.length - 1]).toBe(20)
+  })
+
+  it('effectiveRoomCapacity maps out-of-range/missing DB values to the server cap', () => {
+    expect(effectiveRoomCapacity(8)).toBe(8)
+    expect(effectiveRoomCapacity(2)).toBe(2)
+    expect(effectiveRoomCapacity(1)).toBe(2)
+    for (const v of [0, -3, 21, 50, 7.5, null, undefined]) expect(effectiveRoomCapacity(v)).toBe(20)
+  })
+
+  it('maxParticipantOptionsFor keeps a valid non-default current value selectable', () => {
+    expect(maxParticipantOptionsFor(8)).toBe(MAX_PARTICIPANT_OPTIONS)
+    expect(maxParticipantOptionsFor(3)).toEqual([2, 3, 4, 6, 8, 10, 12, 16, 20])
+  })
+
+  it('buildRoomUpdate never writes an out-of-range capacity', () => {
+    const base = { title: 't', description: '', genre: '록', freeJoin: true, tags: [], instrumentSlots: [] }
+    expect(buildRoomUpdate({ ...base, maxParticipants: 50 }).max_participants).toBe(20)
+    expect(buildRoomUpdate({ ...base, maxParticipants: 6 }).max_participants).toBe(6)
+  })
+
+  it('toRoom shows the effective capacity', () => {
+    const row = { id: 'r', title: 't', description: null, genre: null, current_participants: 3, max_participants: 50, status: 'open', tags: null, instrument_slots: null } as unknown as Parameters<typeof toRoom>[0]
+    expect(toRoom(row).capacity).toBe(20)
   })
 })

@@ -27,7 +27,7 @@ fn net() -> Net {
         allow_loopback_candidates: true,
         cancel: None,
     };
-    Net::start("alice".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0 }).unwrap()
+    Net::start("alice".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }).unwrap()
 }
 
 /// 상대 역할: 키쌍, ssrc, 소켓.

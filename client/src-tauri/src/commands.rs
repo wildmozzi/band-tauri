@@ -12,10 +12,12 @@ use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
+use crate::diag::Diagnostics;
 use crate::engine::config::EngineConfig;
 use crate::engine::measure::{EchoReport, LoopbackReport};
 use crate::engine::device::system::SystemBackend;
 use crate::engine::device::DeviceInfo;
+use crate::engine::metronome::{MetronomeConfig, MetronomePlan};
 use crate::engine::mixer::clamp_gain;
 use crate::engine::stats::EngineStats;
 use crate::manager::EngineManager;
@@ -37,6 +39,24 @@ impl EngineState {
     /// 실행 중인 엔진을 정지(모든 스레드 join).
     pub fn shutdown(&self) {
         self.0.stop();
+    }
+
+    pub fn manager(&self) -> Arc<EngineManager> {
+        self.0.clone()
+    }
+}
+
+/// 진단 타임라인(P2-5). 기록 스레드는 `lib.rs` setup에서 띄운다.
+#[derive(Clone, Default)]
+pub struct DiagState(Arc<Diagnostics>);
+
+impl DiagState {
+    pub fn spawn_recorder(&self, engine: Arc<EngineManager>) -> std::io::Result<()> {
+        self.0.spawn_recorder(engine).map(|_| ())
+    }
+
+    pub fn shutdown(&self) {
+        self.0.shutdown();
     }
 }
 
@@ -148,6 +168,12 @@ pub async fn engine_safety_code(state: State<'_, EngineState>, peer_id: String) 
     state.0.with_engine(|e| e.safety_code(&peer_id))
 }
 
+/// 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필을 실행 중에 바꾼다(P1-5). 다음 `engine_start`에는 `EngineConfig.jitterProfile`을 쓴다.
+#[tauri::command]
+pub async fn engine_set_jitter_profile(state: State<'_, EngineState>, profile: f32) -> Result<(), String> {
+    state.0.with_engine(|e| e.set_jitter_profile(profile))
+}
+
 #[tauri::command]
 pub async fn engine_set_input_muted(state: State<'_, EngineState>, muted: bool) -> Result<(), String> {
     state.0.controls().input_muted.store(muted, Ordering::Relaxed);
@@ -165,6 +191,22 @@ pub async fn engine_set_monitor(state: State<'_, EngineState>, enabled: bool, ga
 #[tauri::command]
 pub async fn engine_set_master_gain(state: State<'_, EngineState>, gain: f32) -> Result<(), String> {
     state.0.controls().master_gain.store(clamp_gain(gain));
+    Ok(())
+}
+
+/// 공유 메트로놈 계획(P2-3). 방장은 `refPeerId` 없이(시작 시각을 비우면 지금 + 300ms), 다른 연주자는
+/// 방장 엔진 peerId와 방장이 알린 `startUs`로 부른다. 적용된 계획을 돌려준다(방장은 이것을 방에 알린다).
+#[tauri::command]
+pub async fn engine_set_metronome(state: State<'_, EngineState>, metronome: MetronomeConfig) -> Result<MetronomePlan, String> {
+    state.0.with_engine(|e| e.set_metronome(metronome))
+}
+
+/// 메트로놈 클릭 볼륨·뮤트(로컬 전용, 엔진 재시작 간 유지).
+#[tauri::command]
+pub async fn engine_set_metronome_gain(state: State<'_, EngineState>, gain: f32, muted: bool) -> Result<(), String> {
+    let c = state.0.controls();
+    c.click_gain.store(clamp_gain(gain));
+    c.click_muted.store(muted, Ordering::Relaxed);
     Ok(())
 }
 
@@ -228,6 +270,49 @@ pub async fn engine_unsubscribe_mix(state: State<'_, EngineState>) -> Result<(),
             e.unsubscribe_mix();
             Ok(())
         })
+    })
+    .await
+}
+
+/// 진단 내보내기(P2-5). 저장 대화상자(zip)를 열고, 고른 경로에 진단 zip을 쓴다. 취소하면 `null`.
+/// 경로는 Rust 쪽 대화상자에서만 정한다(프론트가 임의 경로를 넘길 수 없다). 내용·마스킹은 `diag::export`.
+#[tauri::command]
+pub async fn diag_export(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    engine: State<'_, EngineState>,
+    diag: State<'_, DiagState>,
+) -> Result<Option<String>, String> {
+    use tauri::Manager;
+    use tauri_plugin_dialog::DialogExt;
+    let m = engine.0.clone();
+    let d = diag.0.clone();
+    blocking(move || {
+        // 설정·믹서 헤더 두 곳에서 동시에 눌러도 대화상자는 하나만
+        let Some(_busy) = d.begin_export() else {
+            return Err("이미 진단을 내보내는 중입니다".into());
+        };
+        let now = crate::diag::now_ms();
+        let Some(picked) = app
+            .dialog()
+            .file()
+            // 부모 창에 모달로 붙인다(없으면 Windows에서 앱 뒤나 작업 표시줄에 따로 뜰 수 있다)
+            .set_parent(&window)
+            .set_title("진단 내보내기")
+            .set_file_name(crate::diag::export::default_file_name(now))
+            .add_filter("zip", &["zip"])
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let path = crate::diag::export::target_path(picked.into_path().map_err(|e| format!("저장 경로 오류: {e}"))?);
+        let info = app.package_info();
+        let app_info = crate::diag::export::AppInfo { name: info.name.clone(), version: info.version.to_string() };
+        let log_dir = app.path().app_log_dir().ok();
+        let bytes = crate::diag::export::build(&m, &d, app_info, log_dir.as_deref(), now)?;
+        crate::diag::export::write_atomic(&path, &bytes).map_err(|e| format!("진단 파일 저장 실패: {e}"))?;
+        log::info!("진단 내보내기 완료");
+        Ok(Some(path.to_string_lossy().into_owned()))
     })
     .await
 }
