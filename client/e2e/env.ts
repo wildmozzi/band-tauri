@@ -4,7 +4,8 @@
  *
  * 운영 Supabase 프로젝트는 하나뿐이다 — E2E는 어떤 경우에도 실제 Supabase/서버/결제에 닿으면 안 된다.
  */
-export const E2E_PORT = 47173
+/** 기본 47173. 여러 워크트리에서 동시에 돌릴 때는 E2E_PORT로 겹치지 않게 바꾼다 (같은 포트의 남의 서버에 붙지 않도록) */
+export const E2E_PORT = Number(process.env.E2E_PORT) || 47173
 export const E2E_BASE_URL = `http://127.0.0.1:${E2E_PORT}`
 
 export const SUPABASE_URL = 'http://supabase.e2e.test'

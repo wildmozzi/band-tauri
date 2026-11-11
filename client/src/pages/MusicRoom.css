@@ -7,14 +7,14 @@
 
 /* 업로드 섹션 */
 .music-room-upload {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   padding: 2rem;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--white-a10);
 }
 
 .music-room-upload h2 {
-  color: #fff;
+  color: var(--white);
   margin-bottom: 1.5rem;
   font-size: 1.5rem;
 }
@@ -34,10 +34,10 @@
   flex: 1;
   min-width: 200px;
   padding: 1rem;
-  background: rgba(255, 255, 255, 0.1);
-  border: 2px dashed rgba(255, 255, 255, 0.3);
-  border-radius: 8px;
-  color: #fff;
+  background: var(--white-a10);
+  border: 2px dashed var(--white-a30);
+  border-radius: var(--radius-md);
+  color: var(--white);
   text-align: center;
   cursor: pointer;
   transition: all 0.3s ease;
@@ -47,16 +47,16 @@
 }
 
 .file-select-btn:hover {
-  border-color: #00d4ff;
-  background: rgba(0, 212, 255, 0.05);
+  border-color: var(--cyan-400);
+  background: var(--cyan-400-a05);
 }
 
 .upload-btn {
   padding: 1rem 2rem;
-  background: linear-gradient(135deg, #00d4ff, #0099ff);
+  background: var(--gradient-cyan);
   color: white;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
@@ -66,7 +66,7 @@
 
 .upload-btn:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 212, 255, 0.4);
+  box-shadow: var(--shadow-glow-cyan);
 }
 
 .upload-btn:disabled {
@@ -77,30 +77,30 @@
 .upload-status {
   margin-top: 1rem;
   padding: 1rem;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   gap: 0.5rem;
 }
 
 .upload-status.processing {
-  background: rgba(0, 212, 255, 0.1);
-  border: 1px solid rgba(0, 212, 255, 0.3);
-  color: #00d4ff;
+  background: var(--cyan-400-a10);
+  border: 1px solid var(--cyan-400-a30);
+  color: var(--cyan-400);
 }
 
 .upload-status.success {
-  background: rgba(0, 255, 136, 0.1);
-  border: 1px solid rgba(0, 255, 136, 0.3);
-  color: #00ff88;
+  background: var(--mint-400-a10);
+  border: 1px solid var(--mint-400-a30);
+  color: var(--mint-400);
 }
 
 .spinner {
   width: 20px;
   height: 20px;
-  border: 2px solid rgba(0, 212, 255, 0.3);
-  border-top-color: #00d4ff;
-  border-radius: 50%;
+  border: 2px solid var(--cyan-400-a30);
+  border-top-color: var(--cyan-400);
+  border-radius: var(--radius-round);
   animation: spin 1s linear infinite;
 }
 
@@ -110,10 +110,10 @@
 
 /* 세션 섹션 */
 .stems-section {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   padding: 2rem;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--white-a10);
 }
 
 .stems-header {
@@ -126,17 +126,17 @@
 }
 
 .stems-section h2 {
-  color: #fff;
+  color: var(--white);
   font-size: 1.5rem;
   margin: 0;
 }
 
 .download-all-btn {
   padding: 0.75rem 1.5rem;
-  background: linear-gradient(135deg, #00d4ff, #0099ff);
+  background: var(--gradient-cyan);
   color: white;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
@@ -146,11 +146,11 @@
 
 .download-all-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 212, 255, 0.4);
+  box-shadow: var(--shadow-glow-cyan);
 }
 
 .stems-hint {
-  color: #888;
+  color: var(--gray-450);
   margin-bottom: 1.5rem;
   font-size: 0.95rem;
 }
@@ -177,7 +177,7 @@
 .stem-volume-slider {
   flex: 1;
   height: 4px;
-  accent-color: #00d4ff;
+  accent-color: var(--cyan-400);
   cursor: pointer;
 }
 
@@ -188,7 +188,7 @@
 
 .stem-volume-label {
   font-size: 0.7rem;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--white-a50);
   min-width: 2.8rem;
   text-align: right;
 }
@@ -199,9 +199,9 @@
   align-items: center;
   gap: 0.5rem;
   padding: 1.5rem;
-  background: rgba(255, 255, 255, 0.05);
-  border: 2px solid rgba(255, 255, 255, 0.2);
-  border-radius: 12px;
+  background: var(--white-a05);
+  border: 2px solid var(--white-a20);
+  border-radius: var(--radius-xl);
   cursor: pointer;
   transition: all 0.3s ease;
   position: relative;
@@ -210,10 +210,10 @@
 
 .download-stem-btn {
   padding: 0.5rem;
-  background: rgba(0, 212, 255, 0.1);
-  border: 1px solid rgba(0, 212, 255, 0.3);
-  border-radius: 8px;
-  color: #00d4ff;
+  background: var(--cyan-400-a10);
+  border: 1px solid var(--cyan-400-a30);
+  border-radius: var(--radius-md);
+  color: var(--cyan-400);
   font-size: 1.5rem;
   cursor: pointer;
   transition: all 0.3s ease;
@@ -224,9 +224,9 @@
 }
 
 .download-stem-btn:hover {
-  background: rgba(0, 212, 255, 0.2);
+  background: var(--cyan-400-a20);
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 212, 255, 0.3);
+  box-shadow: 0 4px 12px var(--cyan-400-a30);
 }
 
 .download-icon::before {
@@ -236,17 +236,17 @@
 
 .stem-button:hover {
   transform: translateY(-4px);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 6px 20px var(--black-a30);
 }
 
 .stem-button.active {
-  background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(0, 153, 255, 0.2));
-  border-color: #00d4ff;
+  background: linear-gradient(135deg, var(--cyan-400-a20), rgba(0, 153, 255, 0.2));
+  border-color: var(--cyan-400);
 }
 
 .stem-button.muted {
-  background: rgba(255, 68, 68, 0.1);
-  border-color: rgba(255, 68, 68, 0.3);
+  background: var(--red-alert-a10);
+  border-color: var(--red-alert-a30);
   opacity: 0.6;
 }
 
@@ -255,7 +255,7 @@
 }
 
 .stem-label {
-  color: #fff;
+  color: var(--white);
   font-weight: 600;
   font-size: 1rem;
   text-align: center;
@@ -263,32 +263,32 @@
 
 .stem-status {
   padding: 0.25rem 0.75rem;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 0.75rem;
   font-weight: 700;
   text-transform: uppercase;
 }
 
 .stem-button.active .stem-status {
-  background: #00d4ff;
-  color: #000;
+  background: var(--cyan-400);
+  color: var(--black);
 }
 
 .stem-button.muted .stem-status {
-  background: #ff4444;
-  color: #fff;
+  background: var(--red-alert);
+  color: var(--white);
 }
 
 /* 플레이어 섹션 */
 .player-section {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   padding: 2rem;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--white-a10);
 }
 
 .player-section h2 {
-  color: #fff;
+  color: var(--white);
   margin-bottom: 1.5rem;
   font-size: 1.5rem;
 }
@@ -303,10 +303,10 @@
 
 .control-btn {
   padding: 1rem 2rem;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  color: #fff;
+  background: var(--white-a10);
+  border: 1px solid var(--white-a20);
+  border-radius: var(--radius-md);
+  color: var(--white);
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
@@ -315,7 +315,7 @@
 }
 
 .control-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--white-a20);
   transform: translateY(-2px);
 }
 
@@ -325,7 +325,7 @@
 }
 
 .control-btn.play:not(:disabled) {
-  background: linear-gradient(135deg, #00d4ff, #0099ff);
+  background: var(--gradient-cyan);
 }
 
 .progress-section {
@@ -335,8 +335,8 @@
 .progress-bar {
   width: 100%;
   height: 8px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
+  background: var(--white-a10);
+  border-radius: var(--radius-xs);
   overflow: hidden;
   margin-bottom: 0.5rem;
 }
@@ -349,7 +349,7 @@
 .progress-bar.clickable:hover,
 .progress-bar.clickable.dragging {
   height: 12px;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--white-a15);
 }
 
 .progress-bar.clickable.dragging {
@@ -358,8 +358,8 @@
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #00d4ff, #0099ff);
-  border-radius: 4px;
+  background: linear-gradient(90deg, var(--cyan-400), var(--sky-500));
+  border-radius: var(--radius-xs);
   transition: width 0.1s linear;
 }
 
@@ -371,7 +371,7 @@
 .time-display {
   display: flex;
   justify-content: space-between;
-  color: #888;
+  color: var(--gray-450);
   font-size: 0.9rem;
 }
 
@@ -382,7 +382,7 @@
 .control-group label {
   display: flex;
   justify-content: space-between;
-  color: #fff;
+  color: var(--white);
   font-weight: 600;
   margin-bottom: 0.5rem;
 }
@@ -390,7 +390,7 @@
 .control-slider {
   width: 100%;
   height: 6px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border-radius: 3px;
   outline: none;
   -webkit-appearance: none;
@@ -402,16 +402,16 @@
   appearance: none;
   width: 18px;
   height: 18px;
-  background: #00d4ff;
-  border-radius: 50%;
+  background: var(--cyan-400);
+  border-radius: var(--radius-round);
   cursor: pointer;
 }
 
 .control-slider::-moz-range-thumb {
   width: 18px;
   height: 18px;
-  background: #00d4ff;
-  border-radius: 50%;
+  background: var(--cyan-400);
+  border-radius: var(--radius-round);
   cursor: pointer;
   border: none;
 }
@@ -422,7 +422,7 @@
 }
 
 .control-note {
-  color: #888;
+  color: var(--gray-450);
   font-size: 0.85rem;
   margin-top: 0.5rem;
   font-style: italic;
@@ -430,19 +430,19 @@
 
 /* 히스토리 섹션 */
 .history-section {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   padding: 1.5rem;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--white-a10);
 }
 
 .history-toggle-btn {
   width: 100%;
   padding: 1rem;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  color: #fff;
+  background: var(--white-a10);
+  border: 1px solid var(--white-a20);
+  border-radius: var(--radius-md);
+  color: var(--white);
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
@@ -450,13 +450,13 @@
 }
 
 .history-toggle-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--white-a15);
 }
 
 .history-panel {
   margin-top: 1rem;
   padding-top: 1rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--white-a10);
 }
 
 .history-header {
@@ -467,24 +467,24 @@
 }
 
 .history-header h3 {
-  color: #fff;
+  color: var(--white);
   margin: 0;
   font-size: 1.2rem;
 }
 
 .history-refresh-btn {
   padding: 0.5rem 1rem;
-  background: rgba(0, 212, 255, 0.1);
-  border: 1px solid rgba(0, 212, 255, 0.3);
-  border-radius: 6px;
-  color: #00d4ff;
+  background: var(--cyan-400-a10);
+  border: 1px solid var(--cyan-400-a30);
+  border-radius: var(--radius-sm);
+  color: var(--cyan-400);
   font-size: 0.9rem;
   cursor: pointer;
   transition: all 0.3s ease;
 }
 
 .history-refresh-btn:hover:not(:disabled) {
-  background: rgba(0, 212, 255, 0.2);
+  background: var(--cyan-400-a20);
 }
 
 .history-refresh-btn:disabled {
@@ -496,12 +496,12 @@
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  color: #888;
+  color: var(--gray-450);
   padding: 1rem 0;
 }
 
 .history-empty {
-  color: #888;
+  color: var(--gray-450);
   text-align: center;
   padding: 2rem 0;
 }
@@ -522,21 +522,21 @@
   justify-content: space-between;
   align-items: center;
   padding: 1rem;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
+  background: var(--white-a05);
+  border: 1px solid var(--white-a10);
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: all 0.3s ease;
 }
 
 .history-item:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(0, 212, 255, 0.3);
+  background: var(--white-a10);
+  border-color: var(--cyan-400-a30);
 }
 
 .history-item.current {
-  background: rgba(0, 212, 255, 0.1);
-  border-color: #00d4ff;
+  background: var(--cyan-400-a10);
+  border-color: var(--cyan-400);
 }
 
 .history-item-info {
@@ -548,7 +548,7 @@
 }
 
 .history-filename {
-  color: #fff;
+  color: var(--white);
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -556,7 +556,7 @@
 }
 
 .history-date {
-  color: #888;
+  color: var(--gray-450);
   font-size: 0.85rem;
 }
 
@@ -573,9 +573,9 @@
 
 .history-load-btn {
   padding: 0.5rem 1rem;
-  background: linear-gradient(135deg, #00d4ff, #0099ff);
+  background: var(--gradient-cyan);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: white;
   font-size: 0.85rem;
   font-weight: 600;
@@ -585,15 +585,15 @@
 
 .history-load-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(0, 212, 255, 0.4);
+  box-shadow: 0 2px 8px var(--cyan-400-a40);
 }
 
 .history-delete-btn {
   padding: 0.5rem 1rem;
-  background: rgba(255, 68, 68, 0.1);
-  border: 1px solid rgba(255, 68, 68, 0.3);
-  border-radius: 6px;
-  color: #ff4444;
+  background: var(--red-alert-a10);
+  border: 1px solid var(--red-alert-a30);
+  border-radius: var(--radius-sm);
+  color: var(--red-alert);
   font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;

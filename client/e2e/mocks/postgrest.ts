@@ -229,6 +229,11 @@ export class MemoryPostgrest {
     const prefer = req.headers['prefer'] ?? ''
     const representation = prefer.includes('return=representation')
 
+    // 마이그레이션 012 (P3-10d): 클라이언트는 posts를 INSERT/UPDATE할 수 없다 — 글 작성·수정은 서버 API(/api/posts)
+    if (tableName === 'posts' && (req.method === 'POST' || req.method === 'PATCH')) {
+      return { status: 403, headers, body: { code: '42501', details: null, hint: null, message: 'permission denied for table posts' } }
+    }
+
     let result: Row[]
     let status = 200
     switch (req.method) {

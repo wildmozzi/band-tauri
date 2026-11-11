@@ -12,12 +12,12 @@
 
 .karaoke-header h1 {
   font-size: 2.5rem;
-  color: #fff;
+  color: var(--white);
   margin-bottom: 0.5rem;
 }
 
 .karaoke-subtitle {
-  color: #888;
+  color: var(--gray-450);
   font-size: 1.1rem;
 }
 
@@ -26,7 +26,7 @@
   display: flex;
   gap: 1rem;
   margin-bottom: 2rem;
-  border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 2px solid var(--white-a10);
 }
 
 .tab-button {
@@ -34,7 +34,7 @@
   background: transparent;
   border: none;
   border-bottom: 3px solid transparent;
-  color: #888;
+  color: var(--gray-450);
   font-size: 1.1rem;
   font-weight: 600;
   cursor: pointer;
@@ -44,14 +44,14 @@
 }
 
 .tab-button:hover {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.05);
+  color: var(--white);
+  background: var(--white-a05);
 }
 
 .tab-button.active {
-  color: #00d4ff;
-  border-bottom-color: #00d4ff;
-  background: rgba(0, 212, 255, 0.05);
+  color: var(--cyan-400);
+  border-bottom-color: var(--cyan-400);
+  background: var(--cyan-400-a05);
 }
 
 .karaoke-tab-content {
@@ -66,14 +66,14 @@
 
 /* Upload Section */
 .upload-section {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   padding: 2rem;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--white-a10);
 }
 
 .upload-section h2 {
-  color: #fff;
+  color: var(--white);
   margin-bottom: 1.5rem;
   font-size: 1.5rem;
 }
@@ -92,16 +92,16 @@
   align-items: center;
   justify-content: center;
   padding: 3rem 2rem;
-  border: 2px dashed rgba(255, 255, 255, 0.3);
-  border-radius: 8px;
+  border: 2px dashed var(--white-a30);
+  border-radius: var(--radius-md);
   cursor: pointer;
   transition: all 0.3s ease;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--white-a02);
 }
 
 .file-label:hover {
-  border-color: #00d4ff;
-  background: rgba(0, 212, 255, 0.05);
+  border-color: var(--cyan-400);
+  background: var(--cyan-400-a05);
 }
 
 .upload-icon {
@@ -110,26 +110,26 @@
 }
 
 .file-label p {
-  color: #fff;
+  color: var(--white);
   font-size: 1.1rem;
   margin-bottom: 0.5rem;
 }
 
 .file-types {
-  color: #888;
+  color: var(--gray-450);
   font-size: 0.9rem;
 }
 
 .status-message {
   padding: 1rem;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   margin-bottom: 1rem;
   text-align: center;
 }
 
 .status-message.processing {
-  background: rgba(0, 212, 255, 0.1);
-  border: 1px solid rgba(0, 212, 255, 0.3);
+  background: var(--cyan-400-a10);
+  border: 1px solid var(--cyan-400-a30);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -137,23 +137,23 @@
 }
 
 .status-message.success {
-  background: rgba(0, 255, 136, 0.1);
-  border: 1px solid rgba(0, 255, 136, 0.3);
-  color: #00ff88;
+  background: var(--mint-400-a10);
+  border: 1px solid var(--mint-400-a30);
+  color: var(--mint-400);
 }
 
 .status-message.error {
-  background: rgba(255, 68, 68, 0.1);
-  border: 1px solid rgba(255, 68, 68, 0.3);
-  color: #ff4444;
+  background: var(--red-alert-a10);
+  border: 1px solid var(--red-alert-a30);
+  color: var(--red-alert);
 }
 
 .spinner {
   width: 20px;
   height: 20px;
-  border: 2px solid rgba(0, 212, 255, 0.3);
-  border-top-color: #00d4ff;
-  border-radius: 50%;
+  border: 2px solid var(--cyan-400-a30);
+  border-top-color: var(--cyan-400);
+  border-radius: var(--radius-round);
   animation: spin 1s linear infinite;
 }
 
@@ -164,10 +164,10 @@
 .upload-button {
   width: 100%;
   padding: 1rem;
-  background: linear-gradient(135deg, #00d4ff, #0099ff);
+  background: var(--gradient-cyan);
   color: white;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 1.1rem;
   font-weight: 600;
   cursor: pointer;
@@ -176,7 +176,7 @@
 
 .upload-button:hover:not(:disabled) {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 212, 255, 0.4);
+  box-shadow: var(--shadow-glow-cyan);
 }
 
 .upload-button:disabled {
@@ -194,14 +194,14 @@
 }
 
 .file-name {
-  color: #fff;
+  color: var(--white);
   font-weight: 600;
   margin-bottom: 0.5rem;
   word-break: break-all;
 }
 
 .file-size {
-  color: #888;
+  color: var(--gray-450);
   font-size: 0.9rem;
 }
 
@@ -213,10 +213,10 @@
 .clear-button {
   flex: 1;
   padding: 1rem;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   color: white;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
+  border: 1px solid var(--white-a20);
+  border-radius: var(--radius-md);
   font-size: 1.1rem;
   font-weight: 600;
   cursor: pointer;
@@ -224,47 +224,47 @@
 }
 
 .clear-button:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--white-a15);
 }
 
 /* Current File Info */
 .current-file-info {
   margin-top: 1.5rem;
   padding: 1rem;
-  background: rgba(0, 212, 255, 0.05);
-  border: 1px solid rgba(0, 212, 255, 0.2);
-  border-radius: 8px;
+  background: var(--cyan-400-a05);
+  border: 1px solid var(--cyan-400-a20);
+  border-radius: var(--radius-md);
 }
 
 .info-label {
-  color: #888;
+  color: var(--gray-450);
   font-size: 0.9rem;
   margin-bottom: 0.25rem;
 }
 
 .info-value {
-  color: #00d4ff;
+  color: var(--cyan-400);
   font-weight: 600;
   word-break: break-all;
 }
 
 /* Player Section */
 .player-section {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   padding: 2rem;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--white-a10);
 }
 
 .player-section h2 {
-  color: #fff;
+  color: var(--white);
   margin-bottom: 1.5rem;
   font-size: 1.5rem;
 }
 
 .score-display {
-  background: rgba(255, 255, 255, 0.9);
-  border-radius: 8px;
+  background: var(--white-a90);
+  border-radius: var(--radius-md);
   padding: 3rem;
   margin-bottom: 2rem;
   min-height: 400px;
@@ -292,17 +292,17 @@
 }
 
 .instrument-selector label {
-  color: #fff;
+  color: var(--white);
   font-weight: 600;
 }
 
 .instrument-select {
   flex: 1;
   padding: 0.75rem;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 6px;
-  color: #fff;
+  background: var(--white-a10);
+  border: 1px solid var(--white-a20);
+  border-radius: var(--radius-sm);
+  color: var(--white);
   font-size: 1rem;
   cursor: pointer;
 }
@@ -319,17 +319,17 @@
 
 .control-btn {
   padding: 0.75rem 1.5rem;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 6px;
-  color: #fff;
+  background: var(--white-a10);
+  border: 1px solid var(--white-a20);
+  border-radius: var(--radius-sm);
+  color: var(--white);
   font-size: 1rem;
   cursor: pointer;
   transition: all 0.3s ease;
 }
 
 .control-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--white-a20);
   transform: translateY(-2px);
 }
 
@@ -342,16 +342,16 @@
 .progress-bar {
   width: 100%;
   height: 8px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
+  background: var(--white-a10);
+  border-radius: var(--radius-xs);
   overflow: hidden;
   margin: 1rem 0;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #00d4ff, #0099ff);
-  border-radius: 4px;
+  background: linear-gradient(90deg, var(--cyan-400), var(--sky-500));
+  border-radius: var(--radius-xs);
   transition: width 0.1s linear;
 }
 
@@ -362,7 +362,7 @@
 }
 
 .tempo-control label {
-  color: #fff;
+  color: var(--white);
   font-weight: 600;
   display: flex;
   justify-content: space-between;
@@ -371,7 +371,7 @@
 .tempo-slider {
   width: 100%;
   height: 6px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border-radius: 3px;
   outline: none;
   -webkit-appearance: none;
@@ -382,16 +382,16 @@
   appearance: none;
   width: 18px;
   height: 18px;
-  background: #00d4ff;
-  border-radius: 50%;
+  background: var(--cyan-400);
+  border-radius: var(--radius-round);
   cursor: pointer;
 }
 
 .tempo-slider::-moz-range-thumb {
   width: 18px;
   height: 18px;
-  background: #00d4ff;
-  border-radius: 50%;
+  background: var(--cyan-400);
+  border-radius: var(--radius-round);
   cursor: pointer;
   border: none;
 }

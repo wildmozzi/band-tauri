@@ -26,7 +26,7 @@
   font-weight: 800;
   line-height: 1.2;
   margin-bottom: 24px;
-  background: linear-gradient(135deg, #fff, rgba(255, 255, 255, 0.7));
+  background: linear-gradient(135deg, var(--white), var(--white-a70));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -62,13 +62,13 @@
 }
 
 .primary-cta {
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background: var(--gradient-accent);
   color: white;
 }
 
 .primary-cta:hover {
   transform: translateY(-2px);
-  box-shadow: 0 12px 24px rgba(141, 123, 255, 0.4);
+  box-shadow: var(--shadow-glow-lg);
 }
 
 .ghost-cta {
@@ -79,7 +79,7 @@
 
 .ghost-cta:hover {
   border-color: var(--accent);
-  background: rgba(141, 123, 255, 0.1);
+  background: var(--violet-500-a10);
 }
 
 .hero-stats {
@@ -99,7 +99,7 @@
 .hero-stats strong {
   font-size: 2rem;
   font-weight: 800;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background: var(--gradient-accent);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -123,7 +123,7 @@
 .feature-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 32px;
   transition: all 0.3s;
 }
@@ -137,9 +137,9 @@
 .pill {
   display: inline-block;
   padding: 4px 12px;
-  background: rgba(141, 123, 255, 0.2);
+  background: var(--violet-500-a20);
   border: 1px solid var(--accent);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 0.75rem;
   font-weight: 600;
   color: var(--accent);
@@ -158,7 +158,7 @@
 }
 
 .feature-card small {
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--white-a50);
   font-size: 0.85rem;
 }
 
@@ -187,7 +187,7 @@
 .roadmap-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 32px;
 }
 
@@ -213,7 +213,7 @@
 .roadmap-card li {
   padding-left: 20px;
   position: relative;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--white-a80);
   font-size: 0.95rem;
 }
 

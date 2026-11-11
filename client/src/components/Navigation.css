@@ -9,7 +9,7 @@
   justify-content: space-between;
   gap: 24px;
   backdrop-filter: blur(12px);
-  background: rgba(10, 13, 30, 0.6);
+  background: var(--panel-a60);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
@@ -26,7 +26,7 @@
 .brand span {
   font-weight: 700;
   font-size: 1.25rem;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background: var(--gradient-accent);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -45,7 +45,7 @@
 }
 
 .nav-links a {
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--white-a80);
   text-decoration: none;
   font-weight: 500;
   font-size: 0.95rem;
@@ -91,9 +91,9 @@
 
 .nav-cta {
   padding: 8px 20px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  background: var(--gradient-accent);
   border: none;
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   color: white;
   font-weight: 600;
   cursor: pointer;
@@ -104,7 +104,7 @@
 
 .nav-cta:hover {
   transform: translateY(-1px);
-  box-shadow: 0 8px 20px rgba(141, 123, 255, 0.4);
+  box-shadow: var(--shadow-glow-md);
 }
 
 .nav-settings {
@@ -114,13 +114,13 @@
   font-size: 1.2rem;
   cursor: pointer;
   padding: 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   transition: all 0.2s;
 }
 
 .nav-settings:hover {
   color: white;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
 }
 
 /* Responsive Navigation */

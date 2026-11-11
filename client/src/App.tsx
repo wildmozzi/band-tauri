@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom'
+import { BrowserRouter, useLocation, useRoutes } from 'react-router-dom'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClient } from './lib/queryClient'
 import { AuthProvider } from './contexts/AuthContext'
@@ -10,25 +10,7 @@ import { Navigation } from './components/Navigation'
 import { FloatingMiniPlayer } from './components/FloatingMiniPlayer'
 import { PremiumModal } from './components/PremiumModal'
 import { UpdateNotice } from './components/UpdateNotice'
-import { Home } from './pages/Home'
-import { Auth } from './pages/Auth'
-import { Rooms } from './pages/Rooms'
-import { CreateRoom } from './pages/CreateRoom'
-import { RoomDetail } from './pages/RoomDetail'
-import { Recording } from './pages/Recording'
-import { MixLab } from './pages/MixLab'
-import { Community } from './pages/Community'
-import { CreatePost } from './pages/CreatePost'
-import { PostDetail } from './pages/PostDetail'
-import { EditPost } from './pages/EditPost'
-import { AudioSettingsPage } from './pages/AudioSettingsPage'
-import { Pricing } from './pages/Pricing'
-import { Payment } from './pages/Payment'
-import { PaymentSuccess } from './pages/PaymentSuccess'
-import { PaymentFail } from './pages/PaymentFail'
-import { Profile } from './pages/Profile'
-import { Karaoke } from './pages/Karaoke'
-import { NotFound } from './pages/NotFound'
+import { APP_ROUTES } from './routes'
 import { pageTitleFor } from './lib/pageTitle'
 import { SERVICE_NAME } from './lib/brand'
 import { usePremium } from './contexts/usePremium'
@@ -48,33 +30,15 @@ function DocumentTitle() {
 
 function AppContent() {
   const { premiumModal, closePremiumModal } = usePremium()
+  // 라우트 정의는 routeTable.ts(경로·제목) + routes.tsx(화면) 한곳 (P3-8)
+  const routes = useRoutes(APP_ROUTES)
 
   return (
     <div className="app">
       <DocumentTitle />
       <Navigation />
       <main className="app-content">
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/auth" element={<Auth />} />
-          <Route path="/rooms" element={<Rooms />} />
-          <Route path="/rooms/create" element={<CreateRoom />} />
-          <Route path="/rooms/:roomId" element={<RoomDetail />} />
-          <Route path="/recording" element={<Recording />} />
-          <Route path="/mix" element={<MixLab />} />
-          <Route path="/community" element={<Community />} />
-          <Route path="/community/create" element={<CreatePost />} />
-          <Route path="/community/:postId" element={<PostDetail />} />
-          <Route path="/community/edit/:postId" element={<EditPost />} />
-          <Route path="/karaoke" element={<Karaoke />} />
-          <Route path="/settings/audio" element={<AudioSettingsPage />} />
-          <Route path="/pricing" element={<Pricing />} />
-          <Route path="/payment" element={<Payment />} />
-          <Route path="/payment/success" element={<PaymentSuccess />} />
-          <Route path="/payment/fail" element={<PaymentFail />} />
-          <Route path="/profile" element={<Profile />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
+        {routes}
       </main>
       <footer className="app-footer">
         <p>{SERVICE_NAME} · 연주는 데스크톱 앱에서, 관람은 웹에서.</p>

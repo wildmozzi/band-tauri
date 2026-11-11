@@ -158,7 +158,8 @@ describe('M2: insecureDevMode requires development + ALLOW_INSECURE_WS=1', async
 })
 
 describe('M1/M4/M3: rejoin, signaling roles, chat, rate limit', async () => {
-  const url = await startWs(backend({ chatBurst: 3, chatPerSec: 0.01 }))
+  // 테스트 클라이언트는 모두 127.0.0.1: IP당 방별 익명 상한(PR #23 H1)은 room-capacity 테스트에서 따로 본다
+  const url = await startWs(backend({ chatBurst: 3, chatPerSec: 0.01, maxAnonymousPerIpPerRoom: 100 }))
 
   it('a fake isRejoin still announces the participant', async () => {
     const watcher = await client(url)

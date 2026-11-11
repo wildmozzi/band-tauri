@@ -5,12 +5,11 @@
 }
 
 :root {
-  font-family: 'Space Grotesk', 'Pretendard Variable', 'Spoqa Han Sans Neo', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
-    sans-serif;
+  font-family: var(--font-sans);
   line-height: 1.5;
   font-weight: 400;
-  color: #f5f7ff;
-  background-color: #02040c;
+  color: var(--neutral-50);
+  background-color: var(--ink-950);
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
@@ -18,7 +17,7 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background-color: #02040c;
+  background-color: var(--ink-950);
 }
 
 a {
@@ -32,8 +31,8 @@ button {
   font-size: 1rem;
   font-weight: 600;
   font-family: inherit;
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
-  color: #050505;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
   cursor: pointer;
   transition: transform 0.2s ease, opacity 0.2s ease;
 }
@@ -49,12 +48,12 @@ button:hover {
 /* Premium Badge Styles */
 .premium-badge {
   display: inline-block;
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
-  color: #050505;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
   font-size: 0.75rem;
   font-weight: 600;
   padding: 0.25rem 0.5rem;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   margin-left: 0.5rem;
   vertical-align: middle;
 }
@@ -67,7 +66,7 @@ select:disabled {
 }
 
 .mix-control input:disabled {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
 }
 
 .mix-control label {
@@ -78,9 +77,9 @@ select:disabled {
 }/* Plan
  Status Styles */
 .plan-status-card {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
+  background: var(--white-a05);
+  border: 1px solid var(--white-a10);
+  border-radius: var(--radius-xl);
   padding: 1.5rem;
   margin-bottom: 1rem;
 }
@@ -100,30 +99,30 @@ select:disabled {
 
 .plan-badge {
   padding: 0.25rem 0.75rem;
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   font-size: 0.75rem;
   font-weight: 600;
-  color: #050505;
+  color: var(--neutral-950);
 }
 
 .plan-badge-compact {
   padding: 0.25rem 0.5rem;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 0.75rem;
   font-weight: 600;
-  color: #050505;
+  color: var(--neutral-950);
   transition: all 0.2s ease;
 }
 
 .upgrade-link {
-  color: #7b7bff;
+  color: var(--indigo-400);
   text-decoration: none;
   font-weight: 500;
   font-size: 0.875rem;
 }
 
 .upgrade-link:hover {
-  color: #ff7ab8;
+  color: var(--pink-400);
 }
 
 .plan-limits {
@@ -136,7 +135,7 @@ select:disabled {
   justify-content: space-between;
   align-items: center;
   padding: 0.5rem 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--white-a10);
 }
 
 .limit-item:last-child {
@@ -144,17 +143,17 @@ select:disabled {
 }
 
 .limit-item.warning {
-  color: #fbbf24;
+  color: var(--amber-400);
 }
 
 .limit-label {
-  color: #a0a8b8;
+  color: var(--neutral-400);
   font-size: 0.875rem;
 }
 
 .limit-value {
   font-weight: 500;
-  color: #f5f7ff;
+  color: var(--neutral-50);
 }
 
 
@@ -179,26 +178,26 @@ select:disabled {
 .feature-restriction {
   background: rgba(255, 193, 7, 0.1);
   border: 1px solid rgba(255, 193, 7, 0.3);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 0.75rem;
   margin-top: 0.5rem;
   font-size: 0.875rem;
-  color: #fbbf24;
+  color: var(--amber-400);
 }
 
 .feature-info {
   background: rgba(59, 130, 246, 0.1);
   border: 1px solid rgba(59, 130, 246, 0.3);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 0.75rem;
   margin-top: 0.5rem;
   font-size: 0.875rem;
-  color: #60a5fa;
+  color: var(--blue-400);
 }
 
 .plan-limit-info {
   font-size: 0.75rem;
-  color: #a0a8b8;
+  color: var(--neutral-400);
   font-weight: normal;
   margin-left: 0.5rem;
 }
@@ -232,7 +231,7 @@ select:disabled {
 .take-share.disabled {
   opacity: 0.6;
   cursor: not-allowed;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
 }
 
 .cloud-save-btn.disabled:hover,
@@ -267,7 +266,7 @@ select:disabled {
 
 .plan-status-compact:hover .plan-badge-compact {
   transform: scale(1.05);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 2px 8px var(--black-a20);
 }
 
 /* Responsive */
@@ -290,9 +289,9 @@ select:disabled {
 }/* A
 d Banner Styles */
 .ad-banner {
-  background: linear-gradient(135deg, rgba(123, 123, 255, 0.1), rgba(255, 122, 184, 0.1));
-  border: 1px solid rgba(123, 123, 255, 0.3);
-  border-radius: 12px;
+  background: linear-gradient(135deg, var(--indigo-400-a10), var(--pink-400-a10));
+  border: 1px solid var(--indigo-400-a30);
+  border-radius: var(--radius-xl);
   padding: 1.5rem;
   margin: 2rem 0;
   position: relative;
@@ -306,7 +305,7 @@ d Banner Styles */
   left: 0;
   right: 0;
   height: 3px;
-  background: linear-gradient(90deg, #7b7bff, #ff7ab8);
+  background: linear-gradient(90deg, var(--indigo-400), var(--pink-400));
 }
 
 .ad-banner.compact {
@@ -327,10 +326,10 @@ d Banner Styles */
 }
 
 .ad-label {
-  background: rgba(123, 123, 255, 0.2);
-  color: #7b7bff;
+  background: var(--indigo-400-a20);
+  color: var(--indigo-400);
   padding: 0.25rem 0.5rem;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   font-size: 0.75rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -346,12 +345,12 @@ d Banner Styles */
   margin: 0 0 0.5rem 0;
   font-size: 1.125rem;
   font-weight: 600;
-  color: #f5f7ff;
+  color: var(--neutral-50);
 }
 
 .ad-text p {
   margin: 0;
-  color: #a0a8b8;
+  color: var(--neutral-400);
   font-size: 0.875rem;
   line-height: 1.4;
 }
@@ -361,10 +360,10 @@ d Banner Styles */
 }
 
 .ad-cta {
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
-  color: #050505;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
   padding: 0.75rem 1.5rem;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   text-decoration: none;
   font-weight: 600;
   font-size: 0.875rem;
@@ -374,14 +373,14 @@ d Banner Styles */
 
 .ad-cta:hover {
   transform: translateY(-2px);
-  box-shadow: 0 8px 16px rgba(123, 123, 255, 0.3);
+  box-shadow: 0 8px 16px var(--indigo-400-a30);
 }
 
 .ad-cta-compact {
-  background: linear-gradient(120deg, #7b7bff, #ff7ab8);
-  color: #050505;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
   padding: 0.5rem 1rem;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   text-decoration: none;
   font-weight: 600;
   font-size: 0.75rem;
@@ -390,7 +389,7 @@ d Banner Styles */
 
 .ad-cta-compact:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 8px rgba(123, 123, 255, 0.3);
+  box-shadow: 0 4px 8px var(--indigo-400-a30);
 }
 
 /* Ad Banner Positions */

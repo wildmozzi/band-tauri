@@ -5,7 +5,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--black-a50);
   z-index: 999;
   animation: fadeIn 0.2s ease;
 }
@@ -13,13 +13,13 @@
 .profile-card {
   position: fixed;
   width: 320px;
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-  border-radius: 16px;
+  background: linear-gradient(135deg, var(--navy-800) 0%, var(--navy-700) 100%);
+  border-radius: var(--radius-2xl);
   padding: 1.5rem;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 8px 32px var(--black-a30);
   z-index: 1000;
   animation: slideIn 0.3s ease;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--white-a10);
 }
 
 @keyframes slideIn {
@@ -39,7 +39,7 @@
   right: 1rem;
   background: transparent;
   border: none;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--white-a60);
   font-size: 1.5rem;
   cursor: pointer;
   width: 32px;
@@ -47,13 +47,13 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   transition: all 0.2s ease;
 }
 
 .profile-card-close:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: #fff;
+  background: var(--white-a10);
+  color: var(--white);
 }
 
 .profile-card-header {
@@ -66,9 +66,9 @@
 .profile-card-photo {
   width: 60px;
   height: 60px;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   overflow: hidden;
-  background: linear-gradient(135deg, #8d7bff 0%, #a89fff 100%);
+  background: var(--gradient-violet);
   flex-shrink: 0;
 }
 
@@ -95,7 +95,7 @@
 .profile-card-info h3 {
   margin: 0 0 0.25rem;
   font-size: 1.1rem;
-  color: #fff;
+  color: var(--white);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -104,7 +104,7 @@
 .profile-card-email {
   margin: 0;
   font-size: 0.85rem;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--white-a60);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -113,13 +113,13 @@
 .profile-card-bio {
   margin-bottom: 1rem;
   padding: 1rem;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
+  background: var(--white-a05);
+  border-radius: var(--radius-md);
 }
 
 .profile-card-bio p {
   margin: 0;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--white-a80);
   font-size: 0.9rem;
   line-height: 1.5;
 }
@@ -134,7 +134,7 @@
   flex: 1;
   padding: 0.75rem;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 0.95rem;
   font-weight: 600;
   cursor: pointer;
@@ -142,31 +142,31 @@
 }
 
 .follow-btn {
-  background: linear-gradient(135deg, #8d7bff 0%, #a89fff 100%);
-  color: #fff;
+  background: var(--gradient-violet);
+  color: var(--white);
 }
 
 .follow-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(141, 123, 255, 0.4);
+  box-shadow: var(--shadow-glow-sm);
 }
 
 .follow-btn.following {
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: var(--white-a10);
+  border: 1px solid var(--white-a30);
 }
 
 .follow-btn.following:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--white-a20);
 }
 
 .report-btn {
   background: rgba(255, 71, 87, 0.2);
-  color: #ff4757;
-  border: 1px solid rgba(255, 71, 87, 0.3);
+  color: var(--rose-500);
+  border: 1px solid var(--rose-500-a30);
 }
 
 .report-btn:hover {
-  background: rgba(255, 71, 87, 0.3);
+  background: var(--rose-500-a30);
   transform: translateY(-2px);
 }

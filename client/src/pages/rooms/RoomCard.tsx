@@ -1,6 +1,8 @@
 import type { RoomStatus } from '../../data/rooms'
 import { InstrumentBadges, TagOverflow } from './RoomTags'
 import { roomStatusLabel, type Room } from './roomModel'
+import { Badge } from '../../components/ui/Badge'
+import { Card } from '../../components/ui/Card'
 
 interface RoomCardProps {
   room: Room
@@ -11,7 +13,8 @@ interface RoomCardProps {
 
 export function RoomCard({ room, tagsExpanded, onToggleTags, onClick }: RoomCardProps) {
   return (
-    <article
+    <Card
+      as="article"
       className={`room-card ${room.status}`}
       onClick={() => onClick(room.id, room.status)}
     >
@@ -20,9 +23,9 @@ export function RoomCard({ room, tagsExpanded, onToggleTags, onClick }: RoomCard
           <h3>{room.hasPassword && <span className="room-lock" title="비밀번호 필요">🔒 </span>}{room.title}</h3>
           <span className="room-genre">{room.genre}</span>
         </div>
-        <span className={`status-badge ${room.status}`}>
+        <Badge kind="status-badge" tone={room.status}>
           {roomStatusLabel(room.status)}
-        </span>
+        </Badge>
       </div>
 
       <p className="room-vibe">{room.vibe}</p>
@@ -67,6 +70,6 @@ export function RoomCard({ room, tagsExpanded, onToggleTags, onClick }: RoomCard
           {room.status === 'locked' ? '🔒 초대 필요' : '입장하기 →'}
         </button>
       </div>
-    </article>
+    </Card>
   )
 }

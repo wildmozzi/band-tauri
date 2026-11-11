@@ -8,12 +8,12 @@
 }
 
 .measure-diagram-box {
-  fill: rgba(255, 255, 255, 0.04);
+  fill: var(--white-a04);
   stroke: var(--border);
 }
 
 .measure-diagram-jack {
-  fill: rgba(0, 0, 0, 0.4);
+  fill: var(--black-a40);
   stroke: var(--accent);
   stroke-width: 2;
 }
@@ -55,10 +55,10 @@
 
 .measure-controls select {
   padding: 6px 8px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   color: inherit;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
 }
 
 .measure-error {
@@ -70,9 +70,9 @@
 .measure-result {
   margin-top: 14px;
   padding: 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--white-a03);
 }
 
 .measure-result.verdict-ok {
@@ -133,8 +133,8 @@
 .echo-measure-btn {
   padding: 4px 6px;
   border: none;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-sm);
+  background: var(--white-a06);
   cursor: pointer;
 }
 
@@ -150,17 +150,17 @@
   gap: 6px;
   margin-top: 6px;
   padding: 6px 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-size: 0.8rem;
-  background: rgba(141, 123, 255, 0.15);
+  background: var(--violet-500-a15);
 }
 
 .echo-consent button,
 .echo-active button {
   padding: 3px 8px;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--white-a08);
   color: inherit;
   cursor: pointer;
 }
