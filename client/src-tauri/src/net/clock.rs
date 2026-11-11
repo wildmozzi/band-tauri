@@ -23,8 +23,8 @@ const MAX_DRIFT_PPM: f64 = 1000.0;
 const WEIGHT_SCALE_US: f64 = 500.0;
 /// 가중치 기준(근처 최소 RTT)을 찾는 시간 폭(µs, 앞뒤).
 const LOCAL_US: f64 = 4_000_000.0;
-/// 표본 RTT 상한(µs). 넘으면 버린다.
-const MAX_RTT_US: f64 = 2_000_000.0;
+/// 표본 RTT 상한(µs). 넘으면 버린다. 경로 비대칭으로 오프셋이 끌릴 수 있는 폭(RTT/2)도 이것으로 묶인다(PR #34 L5).
+const MAX_RTT_US: f64 = 500_000.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Sample {

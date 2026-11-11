@@ -551,7 +551,7 @@ impl OutputRt {
         let master = self.controls.master_gain.load();
         let click_gain = if self.controls.click_muted.load(Ordering::Relaxed) { 0.0 } else { self.controls.click_gain.load() };
         if let Some(c) = self.click.as_mut() {
-            c.begin(before, frames);
+            c.begin(before, frames, !override_out);
         }
         self.level_acc = [0.0; MAX_SOURCES];
         let mut sum_sq = 0.0f32;
@@ -590,6 +590,7 @@ impl OutputRt {
                     break;
                 };
                 // 클릭은 장치 출력에만(탭 버스와 별개). 게인 0이어도 파형 위치는 진행한다.
+                // 의도: 클릭도 마스터 게인을 타고, 출력 레벨(`outputLevel`)은 장치로 나가는 소리 그대로라 클릭이 포함된다.
                 let click = match self.click.as_mut() {
                     Some(c) => c.sample(done + i) * click_gain,
                     None => 0.0,

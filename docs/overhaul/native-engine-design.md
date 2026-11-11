@@ -117,10 +117,13 @@ net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/
 - 기준 시각 → 내 시계: `t_local = t_ref − offset`(방장은 offset 0).
 - 내 시계 → 장치 프레임: 워커의 출력 콜백 시각 추정(`DeviceClock`, 1.1절)을 쓴다.
   - 콜백은 프레임 [b, b+n)을 `m + (b+n)/r`에 쓰고, 그 버퍼는 장치 출력 버퍼 1개(n) 뒤에 울린다.
-  - 따라서 귀 시각(J) = `m + (J + 2n)/r`이다. `estLatencyMs`의 "장치 출력 버퍼" 항과 같은 가정이다.
+  - 따라서 귀 시각(J) = `m + (J + 2n)/r + h`이다. `estLatencyMs`의 "장치 출력 버퍼" 항과 같은 가정에 숨은 출력 지연 h를 더한다.
+  - **숨은 출력 지연 h**(PR #34 M2): 드라이버 보고 출력 지연(`StreamInfo.out_reported_latency_frames`: ASIO `ASIOGetLatencies`, 자체 WASAPI `GetStreamLatency`) − 콜백 크기(이미 버퍼 1개를 넣었으므로)를 0 이상으로 자른 값이다. WASAPI 공유 엔진 주기·드라이버 안전 오프셋·USB 내부 버퍼가 여기 들어간다. 드라이버가 알려 주지 않으면(cpal WASAPI 등) h = 0이고 `outputLatencyMs = null`로 "보정 안 됨"을 알린다. 이때 피어 간 숨은 지연 차가 그대로 정렬 오차가 된다(보고가 없으면 루프백 측정 `offsetMs`로 보정하는 것이 후속이다).
+  - **콜백 공백**(PR #34 M3): `DeviceClock`은 2초 창 최솟값 외에 0.15초 짧은 창 최솟값을 본다. 짧은 창 전체가 긴 창보다 3ms 넘게 떠 있으면 공백(장치 일시 중단·스트림 재시작·긴 xrun)으로 보고 창을 리셋한다. 공백 뒤 0.15~0.3초 안에 재수렴한다(이전에는 최대 2초 동안 공백만큼 늦은 클릭). 워커 기상 지연 스파이크는 같은 짧은 창의 다른 관측이 최솟값을 끌어내려 리셋을 일으키지 않는다.
 - 워커는 다음 클릭 하나를 `ClickShared::next`(원자 u64 = `프레임 << 1 | 강박`)에 올린다(CAS). 콜백이 가져가면 다음 박을 올린다.
   - 시계 추정이 바뀌면 올려 둔 클릭을 다시 맞춘다. 단 옛 위치와 새 위치가 모두 `재생 프레임 + 콜백 2개 + 2ms` 너머일 때만이다. 콜백과 경합해도 클릭이 사라지거나 두 번 울리지 않는다.
   - 이미 지난 박(늦게 받은 시작, 새 BPM)은 건너뛰고 다음 박부터 낸다. 강박 = 마디 첫 박(k mod 박자 = 0).
+  - 올려 둔 클릭의 제 시각이 다시 계산해 보니 이미 5ms 넘게 지났으면(콜백 공백 뒤) 울리지 않고 거둔 뒤 다음 박을 올린다(`skippedClicks`).
   - 시간축이 없으면(기준 피어 표본 없음, `synced=false`) 클릭을 내지 않는다.
 - 같은 계획을 다시 받으면(세대 번호) 올려 둔 클릭을 거두고 처음부터 다시 맞춘다.
 
@@ -128,14 +131,20 @@ net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/
 - 파형: 48kHz로 미리 계산한 30ms 사인 버스트(강박 1760Hz·0.6, 약박 1100Hz·0.45, 1ms 상승 + 6ms 감쇠)다. 장치 레이트로는 보폭 `48000/레이트`(원자값)와 선형 보간으로 읽는다.
 - 콜백 시작에 `next`를 한 번 읽는다. 이번 콜백 범위에 걸리면 CAS로 가져가 그 프레임부터 샘플 정확도로 울린다.
   - 이미 지났으면 파형 남은 부분부터 울리고(남은 부분의 시각은 정확), 다 지났으면 버린다. 둘 다 `lateClicks`로 센다.
+  - 루프백 측정 자극이 장치 출력을 대신하는 동안에는 걸린 클릭을 소비만 하고 `clicks`에 세지 않는다.
   - 할당·락·시스템콜·로그 없음.
-- 섞는 곳: 버스(게인·팬 적용 후) + 클릭 × 클릭 볼륨 → 마스터 → soft clip → 장치.
+- 섞는 곳: 버스(게인·팬 적용 후) + 클릭 × 클릭 볼륨 → 마스터 → soft clip → 장치. 클릭도 마스터 게인을 타고(마스터 0이면 클릭도 안 들림), `outputLevel`은 장치로 나가는 소리라 클릭이 포함된다(의도).
   - **믹스 탭(관람 방송·녹음)과 측정 자극에는 들어가지 않는다**(설정 없음, 항상 제외).
 - 클릭 볼륨·뮤트는 로컬 전용이다(`engine_set_metronome_gain`, 기본 0.8). `MixControls`에 있어 엔진 재시작 간에도 유지된다.
 
 **정확도**(`tests/metronome.rs`, 가상 시간 2피어 시뮬레이션, 실제 `OutputRt`·`CallbackTracker`·`ClockSync`·`BeatScheduler` 사용)
 - 시스템 시계 ±200ppm, 장치 클럭 별도 어긋남, 서로 다른 레이트·버퍼(48k/128 ↔ 44.1k/441, 96k/256), 편도 큐잉 지수분포, 대칭 RTT 계단(3 → 15 → 4ms) 조건에서 같은 박의 귀 도착 시각 차 **최대 0.84ms**(수락 기준 ≤ 2ms)다. 늦은 클릭 0, 믹스 탭 클릭 0이다.
-- 시뮬레이션이 덮지 않는 것: 장치·드라이버의 숨은 출력 지연(장치 출력 버퍼 밖)과 경로 비대칭. 피어마다 다르면 그만큼 어긋난다. 숨은 지연은 루프백 측정 `offsetMs`로 보정할 수 있다(후속). 실장비 2대 청취 확인은 [사람] 항목이다.
+- 콜백 지터(PR #34 M1): 장치 프레임 시계는 하드웨어가 정하고 콜백만 공칭 시각에서 흔들린다.
+  - 한쪽만 공칭 ±1ms 균등 + 44.1k 441/440 버스트 교대: **최대 1.29ms**, 평균 +0.86ms. `DeviceClock`이 가장 이른 콜백을 기준으로 삼아 대칭 지터의 진폭만큼 치우친다(최악 경우). 지터가 ±2ms를 넘는 장치에서는 2ms를 넘을 수 있다(그때는 최소제곱 직선 추정을 검토).
+  - 이벤트 구동 콜백의 현실적 모양(공칭보다 이르지 않고 0~2ms 늦음, 양쪽): **최대 0.55ms**.
+- 숨은 출력 지연(M2): 한쪽 10ms, 드라이버 보고 → **최대 0.14ms**. 보고 없음 → 평균 +9.97ms(그대로 어긋남, 위 한계).
+- 콜백 공백(M3): 따르는 쪽 장치 300ms 정지 후 재개 → 재개 0.6초 뒤부터 **최대 0.51ms**, 공백 중 클릭 1개 건너뜀.
+- 시뮬레이션이 덮지 않는 것: 드라이버가 보고하지 않는 숨은 출력 지연과 경로 비대칭. 피어마다 다르면 그만큼 어긋난다. 실장비 2대 청취 확인은 [사람] 항목이다.
 
 ## 2. 패킷 포맷 (`net/packet.rs`)
 
@@ -253,7 +262,7 @@ interface EchoReport { verdict: MeasureVerdict; message: string; peerId: string;
 interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats }
 interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
 interface MetronomePlan { running: boolean; bpm: number; beatsPerBar: number; startUs: number; refPeerId: string | null }
-interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number }
+interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; outputLatencyMs: number | null }
 ```
 
 | 커맨드 | 인자 | 반환 |
@@ -288,7 +297,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 콜백 구동 믹스(1.1절)에는 믹스된 출력 링이 없으므로 출력 링 항은 0이다. 출력 콜백이 꺼내는 피어 소스 링은 지터 버퍼 깊이(`bufferMs`)에 포함되어 목표로 제어된다. 그래서 입→귀 지연 = 송신측 `estLatencyMs`의 입력+프레임 몫 + 망 + 수신측 `bufferMs` + 수신측 출력 버퍼다. 공유 클럭 종단 실측이 `estLatencyMs + bufferMs + 1ms`를 넘지 않음을 통합 테스트로 확인한다.
 - 장치 버퍼 값은 실측 콜백 크기를 쓴다.
 
-`EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`(엔진 수명 누적). 워커가 0.1초마다 갱신한다.
+`EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`·`skippedClicks`(엔진 수명 누적, 1.4절), `outputLatencyMs`(클릭 시각에 반영한 숨은 출력 지연, null = 드라이버 보고 없음·보정 안 됨). 워커가 0.1초마다 갱신한다.
 
 `monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·로컬 소스 링) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
 
