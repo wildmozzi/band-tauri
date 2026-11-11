@@ -31,6 +31,12 @@ pub(super) struct NetPeer {
     pub dist: JitDist,
     /// 경로 변경(µs 시각, 그 전 추가 지연 µs, 그 뒤 지터 µs): 릴레이(느리고 안정) → 직접(빠르고 다른 지터) 승격.
     pub switch: Option<(u64, u64, u64)>,
+    /// 버스트 손실(Gilbert–Elliott, 패킷마다 전이): (좋음→나쁨 확률, 나쁨→좋음 확률). 나쁨 상태의 패킷은 모두 잃는다. `loss`와 별개.
+    pub burst: Option<(f64, f64)>,
+    /// UDP 단절(시작 µs, 길이 µs): 이 구간에 보낸 패킷은 하나도 도착하지 않는다(P1-6).
+    pub outages: Vec<(u64, u64)>,
+    /// 망 조건 계단 변화(시각 µs, 추가 지연 µs, 지터 µs): 그 시각부터 기본 지연과 지터를 바꾼다(RTT 계단). `switch`보다 우선.
+    pub steps: Vec<(u64, u64, u64)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -42,7 +48,7 @@ pub(super) enum JitDist {
 
 impl NetPeer {
     pub fn new(frame: usize, seed: u64) -> Self {
-        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None }
+        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new() }
     }
 }
 
@@ -92,6 +98,23 @@ pub(super) struct PeerOut {
     pub margin: usize,
     /// 정착 후 5초마다 본 `corr_time_pct`(최근 5초 보정 모드 비율).
     pub corr_pcts: Vec<f32>,
+    /// 100ms마다 표본(재생 여부와 무관, P1-6 장시간 지표).
+    pub samples: Vec<Sample>,
+    /// 송신 패킷 수, 망 손실(무작위+버스트) 수, 단절로 잃은 수.
+    pub tx_sent: u64,
+    pub tx_lost: u64,
+    pub tx_outage: u64,
+}
+
+/// 100ms 표본: 시각(s), bufferMs, targetMs, 재생 중 여부, 누적 은닉·생산 프레임.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Sample {
+    pub t: f64,
+    pub buf: f32,
+    pub tgt: f32,
+    pub playing: bool,
+    pub concealed: u64,
+    pub produced: u64,
 }
 
 impl PeerOut {
@@ -165,6 +188,8 @@ struct TxState {
     /// 현재 1초 블록의 transit(µs) 목록과 블록 번호.
     block: Vec<f64>,
     block_no: u64,
+    /// Gilbert–Elliott 나쁨 상태.
+    ge_bad: bool,
 }
 
 pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
@@ -197,6 +222,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             fcode: frame_code_from_samples(np.frame).unwrap(),
             block: Vec::new(),
             block_no: 0,
+            ge_bad: false,
         });
     }
     let mut tracker = CallbackTracker::new(48_000);
@@ -280,18 +306,34 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                 let nb = tx.enc.encode(&pcm, &mut payload).unwrap();
                 let h = Header { ptype: PacketType::Audio, ssrc: 1 + pi as u32, seq: tx.seq, timestamp: tx.ts, flags: 0, frame_code: tx.fcode };
                 let spike: u64 = np.spikes.iter().filter(|s| t >= s.0 && t < s.0 + s.1).map(|s| s.2).sum();
-                let (path_extra, jit_us) = match np.switch {
+                let (mut path_extra, mut jit_us) = match np.switch {
                     Some((ts, extra, _)) if t < ts => (extra, np.net_jitter_us),
                     Some((_, _, after)) => (0, after),
                     None => (0, np.net_jitter_us),
                 };
+                if let Some(&(_, extra, j)) = np.steps.iter().rev().find(|s| t >= s.0) {
+                    (path_extra, jit_us) = (extra, j);
+                }
                 let jitter = match np.dist {
                     JitDist::Uniform => tx.rng.gen_range(0..jit_us.max(100)),
                     JitDist::Exp => (-(1.0 - tx.rng.gen::<f64>()).ln() * jit_us as f64) as u64,
                     JitDist::Pareto => (jit_us as f64 * 1.5 * ((1.0 - tx.rng.gen::<f64>()).powf(-1.0 / 2.5) - 1.0)).min(200_000.0) as u64,
                 };
                 let delay = 200 + jitter + spike + path_extra;
-                if !(np.loss > 0.0 && tx.rng.gen_bool(np.loss)) {
+                // 기존 시나리오의 난수 순서를 바꾸지 않도록 새 조건(버스트·단절)은 쓸 때만 난수를 뽑는다.
+                let mut lost = np.loss > 0.0 && tx.rng.gen_bool(np.loss);
+                if let Some((p_gb, p_bg)) = np.burst {
+                    tx.ge_bad = if tx.ge_bad { !tx.rng.gen_bool(p_bg) } else { tx.rng.gen_bool(p_gb) };
+                    lost |= tx.ge_bad;
+                }
+                let cut = np.outages.iter().any(|o| t >= o.0 && t < o.0 + o.1);
+                let o = &mut outs[pi];
+                o.tx_sent += 1;
+                if cut {
+                    o.tx_outage += 1;
+                } else if lost {
+                    o.tx_lost += 1;
+                } else {
                     pending.push((t + delay, pi, h, payload[..nb].to_vec()));
                 }
                 tx.seq = tx.seq.wrapping_add(1);
@@ -328,8 +370,10 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             }
             if t >= next_trace {
                 for i in 0..n {
-                    if jbs[i].is_playing() {
-                        let s = jbs[i].stats();
+                    let s = jbs[i].stats();
+                    let playing = jbs[i].is_playing();
+                    outs[i].samples.push(Sample { t: t as f64 / 1e6, buf: s.buffer_ms, tgt: s.target_ms, playing, concealed: s.concealed, produced: s.produced });
+                    if playing {
                         outs[i].trace.push((t as f64 / 1e6, s.buffer_ms, s.target_ms));
                         if t >= p.settle_us && (t - p.settle_us) % 5_000_000 < 100_000 && t > p.settle_us + 4_900_000 {
                             outs[i].corr_pcts.push(s.corr_time_pct);

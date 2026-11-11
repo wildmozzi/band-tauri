@@ -14,6 +14,15 @@ on:
   push:
     branches: [develop]
   workflow_dispatch:
+    inputs:
+      long_sim:
+        description: '장시간 시뮬레이션(6피어 60분, long-sim 잡)도 돌린다'
+        type: boolean
+        default: false
+  # 야간(P1-6): 장시간 시뮬레이션만 돈다(나머지 잡은 changes 잡이 건너뛰어 같이 빠진다). 03:30 KST.
+  # GitHub schedule은 기본 브랜치(main)의 워크플로·코드로만 돈다 — main에 병합된 뒤부터 동작한다.
+  schedule:
+    - cron: '30 18 * * *'
 
 # 최소 권한: 체크아웃(contents), 변경 파일 목록(paths-filter → pull-requests), 아티팩트 업로드(actions).
 permissions:
@@ -45,6 +54,8 @@ jobs:
     name: Changed paths
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # 야간 schedule에서는 건너뛴다 → 이 잡에 needs로 걸린 잡도 모두 건너뛴다(long-sim만 돈다).
+    if: github.event_name != 'schedule'
     # PR이 아니면(develop push, workflow_dispatch) 필터 없이 전부 돈다.
     outputs:
       engine: ${{ github.event_name != 'pull_request' || steps.f.outputs.engine == 'true' }}
@@ -112,6 +123,64 @@ jobs:
       - name: Test (결정적)
         timeout-minutes: 20
         run: cargo test
+        env:
+          # 장시간 시뮬레이션 짧은 버전(6피어 5분, P1-6)의 리포트 위치
+          SIM_REPORT_DIR: ${{ runner.temp }}/sim-report
+      - name: Upload sim report (실패 시)
+        if: failure()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-report-short-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sim-report/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  long-sim:
+    # 장시간 시뮬레이션(P1-6): 6피어 풀메시 60분 가상 시간(결정적, 디버그 빌드 로컬 약 8분 — 러너는 더 느릴 수 있다). GOAL 1·2절 수치를 자동 판정해
+    # Markdown·JSON 리포트를 남긴다. 야간 schedule과 수동 실행(long_sim 입력)에서만 돈다.
+    # 리포트는 성공해도 올린다(추세 비교용). 실패 = GOAL 미달 또는 알려진 미달의 악화.
+    name: Long sim (6피어 60분, Windows)
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.long_sim)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: client/src-tauri
+    env:
+      SIM_REPORT_DIR: ${{ runner.temp }}/sim-report
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
+        with:
+          workspaces: client/src-tauri
+      - name: Placeholder frontend dist (tauri::generate_context! 요구)
+        timeout-minutes: 1
+        run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
+      - name: Build tests
+        timeout-minutes: 20
+        run: cargo test --lib --no-run
+      - name: Long sim (60분)
+        timeout-minutes: 50
+        run: cargo test --lib long_sim_6peers_60min -- --ignored --nocapture
+      - name: Job summary
+        if: ${{ !cancelled() }}
+        timeout-minutes: 1
+        run: cat "$SIM_REPORT_DIR/sim-report-long-60min.md" >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Upload sim report
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-report-long-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sim-report/
+          retention-days: 30
+          if-no-files-found: warn
 
   realtime:
     # 벽시계 의존 통합 테스트(tests/*.rs의 `#[ignore = "realtime: ..."]`)만 돈다. 단위 테스트의 ignore(known-bug 재현)는
