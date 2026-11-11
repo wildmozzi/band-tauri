@@ -58,8 +58,10 @@ enum Metric {
     Underrun,
     /// ±3ms 띠 밖 총 시간 비율(%).
     BandPct,
-    /// GOAL 1절 지터 버퍼 추가 지연: 첫 창 bufferMs 중앙값(ms), 한도 1프레임 + p95 지터(P1-6c, PR #63 리뷰 M2).
+    /// GOAL 1절 지터 버퍼 추가 지연: 첫 창 bufferMs 중앙값(ms), 한도 1프레임 + 첫 창 p95 지터(P1-6c, PR #63 리뷰 M2).
     GoalDelay,
+    /// 같은 판정을 마지막 창에(PR #65 리뷰 M3): `tail_extra`처럼 시간이 지나며 움직이는 상태가 세션 끝에 쌓인 지연을 잡는다.
+    GoalDelayLast,
 }
 
 impl Metric {
@@ -69,12 +71,13 @@ impl Metric {
             Metric::Underrun => "언더런 은닉",
             Metric::BandPct => "±3ms 밖 비율",
             Metric::GoalDelay => "1절 지터 버퍼 지연(첫 창 bufferMs)",
+            Metric::GoalDelayLast => "1절 지터 버퍼 지연(마지막 창 bufferMs)",
         }
     }
     /// (값 단위, 허용폭 단위).
     fn unit(self) -> (&'static str, &'static str) {
         match self {
-            Metric::GoalDelay => ("ms", "ms"),
+            Metric::GoalDelay | Metric::GoalDelayLast => ("ms", "ms"),
             _ => ("%", "%p"),
         }
     }
@@ -111,7 +114,7 @@ impl Known {
 // 기준값은 측정값으로 넣고, 고치는 PR에서 갱신하거나 지운다. 지금은 알려진 미달이 없다.
 // - P1-6a(손실 뒤 언더런 은닉 재해석): #2·#5의 은닉·언더런·띠 밖 미달과 #1 5분 띠 밖 미달 해소.
 // - P1-6b(늦은 패킷 예산 `tail_extra`): #1 꼬리 긴 지터의 은닉 미달(1.94% / 1.93%) 해소.
-// 새 미달을 known으로 넘길 때 tol은 0.3%p를 쓴다(래칫 문턱). `GoalDelay`(ms)는 0.1ms를 쓴다.
+// 새 미달을 known으로 넘길 때 tol은 0.3%p를 쓴다(래칫 문턱). `GoalDelay`·`GoalDelayLast`(ms)는 0.1ms를 쓴다.
 
 struct Spec {
     np: NetPeer,
@@ -214,7 +217,17 @@ struct PeerResult {
     buf_med: f32,
     buf_p95: f32,
     tgt_med: f32,
+    /// 첫·마지막 창 p95 지터(ms): 1초 블록 상대 지연 p95의 중앙값, 사건 구간에 걸친 블록 제외.
     p95_jit: f32,
+    p95_last: f32,
+    /// 첫 창 목표 구성 중앙값(ms): 지터 추정, 소비자 여유(lead), 삽입 문턱 + 여유(목표 − 나머지 셋), 늦은 패킷 예산 여유.
+    tgt_first: f32,
+    jit_first: f32,
+    lead_first: f32,
+    tail_first: f32,
+    /// `tail_extra` 조정 횟수, 초기화 횟수(정착 후, PR #65 리뷰 L3).
+    tail_adjusts: u64,
+    tail_resets: u64,
     /// ±3ms 밖(재생 안 함 포함) 최장 연속 시간(히스테리시스 BAND_GAP_S)과 그 시작(s), 총 시간(s), 총 비율(%).
     band_max_s: f64,
     band_max_at: f64,
@@ -259,12 +272,17 @@ impl PeerResult {
     fn goal_delay_limit(&self) -> f32 {
         self.frame_ms + self.p95_jit
     }
+    /// 마지막 창 한도(ms): 1프레임 + 마지막 창 p95 지터.
+    fn goal_delay_limit_last(&self) -> f32 {
+        self.frame_ms + self.p95_last
+    }
     fn value(&self, m: Metric) -> f64 {
         match m {
             Metric::Conceal => self.conceal_pct,
             Metric::Underrun => self.conceal_underrun_pct,
             Metric::BandPct => self.band_pct,
             Metric::GoalDelay => self.buf_first as f64,
+            Metric::GoalDelayLast => self.buf_last as f64,
         }
     }
     fn limit(&self, m: Metric) -> f64 {
@@ -273,6 +291,7 @@ impl PeerResult {
             Metric::Underrun => UNDERRUN_MAX_PCT,
             Metric::BandPct => BAND_PCT_MAX,
             Metric::GoalDelay => self.goal_delay_limit() as f64,
+            Metric::GoalDelayLast => self.goal_delay_limit_last() as f64,
         }
     }
     fn ok(&self, m: Metric) -> bool {
@@ -368,7 +387,15 @@ fn analyze(np: &NetPeer, rule: LossRule, known: &'static [Known], p: &PeerOut, s
     let buf_last = in_win(seconds - win, seconds + 1.0, &|s| s.buf);
     let off_first = in_win(SETTLE_S, SETTLE_S + win, &|s| s.buf - s.tgt);
     let off_last = in_win(seconds - win, seconds + 1.0, &|s| s.buf - s.tgt);
-    let p95_jit = p.median_p95(SETTLE_S, SETTLE_S + win);
+    // p95 지터: 1초 블록 [b, b+1)이 사건 구간에 걸치면 뺀다(bufferMs 쪽 `quiet`와 같은 구간, PR #65 리뷰 M3).
+    let quiet_blk = |b: f64| !event_x.iter().any(|&(x0, x1)| b + 1.0 > x0 && b < x1);
+    let p95_in = |a: f64, b: f64| quantile(p.block_p95.iter().filter(|x| x.0 >= a && x.0 < b && quiet_blk(x.0)).map(|x| x.1).collect(), 0.5);
+    let p95_jit = p95_in(SETTLE_S, SETTLE_S + win);
+    let p95_last = p95_in(seconds - win, seconds + 1.0);
+    let tgt_first = in_win(SETTLE_S, SETTLE_S + win, &|s| s.tgt);
+    let jit_first = in_win(SETTLE_S, SETTLE_S + win, &|s| s.jit);
+    let lead_first = in_win(SETTLE_S, SETTLE_S + win, &|s| s.lead);
+    let tail_first = in_win(SETTLE_S, SETTLE_S + win, &|s| s.tail);
 
     PeerResult {
         desc: describe(np),
@@ -377,6 +404,13 @@ fn analyze(np: &NetPeer, rule: LossRule, known: &'static [Known], p: &PeerOut, s
         buf_p95,
         tgt_med,
         p95_jit,
+        p95_last,
+        tgt_first,
+        jit_first,
+        lead_first,
+        tail_first,
+        tail_adjusts: p.js.tail_adjusts - p.js_settle.tail_adjusts,
+        tail_resets: p.js.tail_resets - p.js_settle.tail_resets,
         band_max_s,
         band_max_at,
         band_total_s,
@@ -486,7 +520,7 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
     // fails: 테스트 실패(새 미달·악화·래칫). known: 알려진 미달(기준값 안). resolved: 알려진 미달이 풀리거나 크게 개선(실패에도 포함).
     let (mut fails, mut known, mut resolved) = (Vec::new(), Vec::new(), Vec::new());
     let mut peer_verdict = Vec::new();
-    let metrics = [Metric::Conceal, Metric::Underrun, Metric::BandPct, Metric::GoalDelay];
+    let metrics = [Metric::Conceal, Metric::Underrun, Metric::BandPct, Metric::GoalDelay, Metric::GoalDelayLast];
     for (i, r) in res.iter().enumerate() {
         let mut vs: Vec<Verdict> = metrics.iter().map(|&m| judge_metric(i, r, m, seconds, &mut fails, &mut known, &mut resolved)).collect();
         if !r.band_ok() {
@@ -524,6 +558,7 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
     let accum_worst = worst(&|r| r.accum().abs() as f64);
     // 1절 지터 버퍼 지연: 한도 대비 여유가 가장 작은 피어(음수 = 초과).
     let delay_slack_worst = res.iter().map(|r| r.goal_delay_limit() - r.buf_first).fold(f32::INFINITY, f32::min);
+    let delay_slack_last_worst = res.iter().map(|r| r.goal_delay_limit_last() - r.buf_last).fold(f32::INFINITY, f32::min);
     let overall = fails.is_empty();
     let goal_all = overall && known.is_empty();
     let all_ok = |m: Metric| res.iter().all(|r| r.ok(m));
@@ -548,6 +583,7 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
     let _ = writeln!(md, "| 1절 지연 누적: ±3ms 밖 총 시간 비율 | ≤ {BAND_PCT_MAX:.0}% | {band_pct_worst:.1}% | {} |", pf(all_ok(Metric::BandPct)));
     let _ = writeln!(md, "| 1절 지연 누적: 처음/마지막 창 bufferMs 중앙값 차이(사건 구간 제외) | ≤ {ACCUM_MAX_MS:.1}ms | {accum_worst:.2}ms | {} |", pf(res.iter().all(|r| r.accum_ok())));
     let _ = writeln!(md, "| 1절 지터 버퍼 추가 지연: 첫 창 bufferMs 중앙값 ≤ 1F + p95 지터(사건 구간 제외) | 여유 ≥ 0ms | 여유 {delay_slack_worst:.2}ms | {} |", pf(all_ok(Metric::GoalDelay)));
+    let _ = writeln!(md, "| 1절 지터 버퍼 추가 지연: 마지막 창 bufferMs 중앙값 ≤ 1F + 마지막 창 p95 지터(사건 구간 제외) | 여유 ≥ 0ms | 여유 {delay_slack_last_worst:.2}ms | {} |", pf(all_ok(Metric::GoalDelayLast)));
     let _ = writeln!(md, "| 2절 은닉 비율(무작위 손실 ≤ 1% 회선, 평시) | ≤ {CONCEAL_GOAL_PCT}% | {conc_worst:.2}% | {} |", pf(goal_conc.iter().all(|r| r.ok(Metric::Conceal))));
     let _ = writeln!(md, "| 2절 은닉 비율(버스트·2% 회선, 평시): 실제 손실 + 0.5%p 이내 | 피어별 | 아래 표 | {} |", pf(other_ok));
     let _ = writeln!(md, "| 2절 언더런 은닉 비율(평시, 전 회선): 은닉 한도 − 손실 몫 | ≤ {UNDERRUN_MAX_PCT}% | {under_worst:.2}% | {} |", pf(all_ok(Metric::Underrun)));
@@ -585,15 +621,25 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
         );
     }
     let _ = writeln!(md, "\n## 참고(판정 외)\n");
-    let _ = writeln!(md, "| # | 첫 창 bufferMs vs 1F + p95 지터 (GOAL 1절, 위에서 판정) | 재버퍼 | 늦은 패킷 버림 | 샘플 보정 횟수 | 최대 보정 피치 |\n|---|---|---|---|---|---|");
+    let _ = writeln!(md, "| # | 첫 창 bufferMs vs 1F + p95 지터 (GOAL 1절, 위에서 판정) | 마지막 창 (판정) | 첫 창 목표 = 지터 추정 + lead + 문턱·여유 + tail | tail 조정 / 초기화 | 재버퍼 | 늦은 패킷 버림 | 샘플 보정 횟수 | 최대 보정 피치 |\n|---|---|---|---|---|---|---|---|---|");
     for (i, r) in res.iter().enumerate() {
         let _ = writeln!(
             md,
-            "| {i} | {:.2} vs {:.2} ({}, 여유 {:+.2}ms) | {} | {} | {} | {:.1}센트 |",
+            "| {i} | {:.2} vs {:.2} ({}, 여유 {:+.2}ms) | {:.2} vs {:.2} ({:+.2}ms) | {:.2} = {:.2} + {:.2} + {:.2} + {:.2} | {} / {} | {} | {} | {} | {:.1}센트 |",
             r.buf_first,
             r.goal_delay_limit(),
             if r.ok(Metric::GoalDelay) { "충족" } else { "초과" },
             r.goal_delay_limit() - r.buf_first,
+            r.buf_last,
+            r.goal_delay_limit_last(),
+            r.goal_delay_limit_last() - r.buf_last,
+            r.tgt_first,
+            r.jit_first,
+            r.lead_first,
+            r.tgt_first - r.jit_first - r.lead_first - r.tail_first,
+            r.tail_first,
+            r.tail_adjusts,
+            r.tail_resets,
             r.rebuffers,
             r.late_dropped,
             r.corrections,
@@ -644,7 +690,9 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
                 "recoveries": r.recoveries.iter().map(|(e, x)| json!({ "outageEndS": e, "recoverS": x })).collect::<Vec<_>>(),
                 "recoverPass": r.recover_ok(),
                 "accumulation": { "firstWindowBufferMs": r.buf_first, "lastWindowBufferMs": r.buf_last, "deltaMs": r.accum(), "offsetFirstMs": r.off_first, "offsetLastMs": r.off_last, "pass": r.accum_ok() },
-                "goalDelay": { "bufferMs": r.buf_first, "oneFramePlusP95Ms": r.goal_delay_limit(), "within": r.ok(Metric::GoalDelay) },
+                "goalDelay": { "bufferMs": r.buf_first, "oneFramePlusP95Ms": r.goal_delay_limit(), "within": r.ok(Metric::GoalDelay), "lastBufferMs": r.buf_last, "lastOneFramePlusP95Ms": r.goal_delay_limit_last(), "lastWithin": r.ok(Metric::GoalDelayLast) },
+                "targetFirst": { "targetMs": r.tgt_first, "jitterEstMs": r.jit_first, "leadMs": r.lead_first, "tailMs": r.tail_first },
+                "tail": { "adjusts": r.tail_adjusts, "resets": r.tail_resets },
                 "known": r.known.iter().filter(|k| k.base(seconds).is_some()).map(|k| json!({ "metric": format!("{:?}", k.metric), "base": k.base(seconds), "tol": k.tol, "why": k.why })).collect::<Vec<_>>(),
                 "verdict": peer_verdict[i],
                 "rebuffers": r.rebuffers,
