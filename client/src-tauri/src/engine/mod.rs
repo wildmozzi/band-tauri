@@ -308,6 +308,26 @@ impl Engine {
         Ok(plan)
     }
 
+    /// 루프백 보정값(`offsetMs`)으로 메트로놈 클릭의 숨은 출력 지연을 보정한다(PR #34 M2(a)). None이면 해제.
+    /// 드라이버가 출력 지연을 보고하는 장치에서는 드라이버 값이 우선이다(`MetronomeStats.outputLatencySource`).
+    pub fn set_loopback_offset(&self, offset_ms: Option<f64>) -> Result<(), String> {
+        self.metronome.set_loopback_offset(offset_ms)
+    }
+
+    /// 숨은 지연 보정값이 유효한 장치 구성 키: 드라이버·장치·레이트가 같아야 같은 값이다.
+    pub fn device_key(&self) -> String {
+        let c = &self.cfg;
+        format!(
+            "{:?}|{:?}|{}|{}|{}|{}",
+            c.input_driver,
+            c.output_driver,
+            c.input_device.as_deref().unwrap_or(""),
+            c.output_device.as_deref().unwrap_or(""),
+            self.info.in_rate,
+            self.info.out_rate
+        )
+    }
+
     pub fn stats(&self) -> EngineStats {
         let c = &self.counters;
         let in_buf = match c.in_cb_frames.load(Ordering::Relaxed) {

@@ -9,7 +9,8 @@
 //!   프레임 [b, b+n)을 쓰는 콜백의 공칭 시각은 원점 + b/레이트(직전 버퍼가 울리기 시작할 때)이고,
 //!   실제 콜백은 공칭 + 콜백 지터에 불린다(PR #34 M1). 버스트 크기가 교대로 바뀔 수 있다(44.1k의 440/441).
 //! - 콜백 공백(PR #34 M3): 장치가 g만큼 멈추면 원점이 g 뒤로 밀린다(그 사이 콜백·재생 없음).
-//! - 숨은 출력 지연(PR #34 M2): 드라이버가 보고하면 `OutClock::extra_out_us`로 보정한다.
+//! - 숨은 출력 지연(PR #34 M2): 드라이버가 보고하면 그 값, 보고가 없으면 루프백 보정값(숨은 입력 + 숨은 출력)을
+//!   `measured_hidden_out_us`로 나눈 값을 `OutClock::extra_out_us`로 보정한다(M2(a)).
 //! - 워커는 0.5~1.2ms마다 깨어 콜백 카운터를 본다(기상 지연 포함).
 //! - 따르는 쪽이 500ms마다 방장에게 Ping, 편도 = 기본 + 지수 큐잉(방향별 독립).
 //! - 정렬 오차 = 같은 박의 두 피어 클릭이 귀에 닿는 참 시각 차.
@@ -18,7 +19,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use band_lib::engine::metronome::{BeatScheduler, ClickRt, ClickShared, MetronomePlan, OutClock};
+use band_lib::engine::metronome::{measured_hidden_out_us, BeatScheduler, ClickRt, ClickShared, MetronomePlan, OutClock};
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::rt::{output_path, OutputRt};
 use band_lib::engine::stats::AudioCounters;
@@ -55,9 +56,20 @@ struct PeerSpec {
     alt_burst: bool,
     /// 콜백 공백: (시작 참 시각, 길이) µs.
     gap: Option<(f64, f64)>,
-    /// 버퍼 1개 너머의 숨은 출력 지연(µs)과 드라이버가 그것을 보고하는지.
+    /// 버퍼 1개 너머의 숨은 출력 지연(µs)과 그 보정 방법.
     hidden_out_us: f64,
-    reports_hidden: bool,
+    comp: Comp,
+}
+
+/// 숨은 출력 지연 보정 방법.
+#[derive(Clone, Copy)]
+enum Comp {
+    /// 보정 안 함(드라이버 보고·루프백 측정 없음).
+    None,
+    /// 드라이버가 출력 지연을 보고(그 값 그대로).
+    Driver,
+    /// 드라이버 보고 없음 + 루프백 보정값(PR #34 M2(a)): 그 장치의 숨은 입력 지연과 측정 오차(µs).
+    Loopback { hidden_in_us: f64, measure_err_us: f64 },
 }
 
 #[derive(Clone, Copy)]
@@ -182,7 +194,14 @@ impl SimPeer {
         if t.cb_seq.is_none() {
             return;
         }
-        let extra_out_us = if self.spec.reports_hidden { self.spec.hidden_out_us } else { 0.0 };
+        let extra_out_us = match self.spec.comp {
+            Comp::None => 0.0,
+            Comp::Driver => self.spec.hidden_out_us,
+            // 루프백이 재는 보정값 = 숨은 입력 + 숨은 출력(+ 측정 오차). 엔진과 같은 함수로 출력 몫을 나눈다.
+            Comp::Loopback { hidden_in_us, measure_err_us } => {
+                measured_hidden_out_us((hidden_in_us + self.spec.hidden_out_us + measure_err_us) / 1000.0, None)
+            }
+        };
         let clock = OutClock { dev_now_us: t.dev_now_us as f64, played: t.played, rate: t.out_rate as f64, burst: t.out_burst as u64, extra_out_us };
         self.sched.tick(1, plan, offset, &clock, &self.click);
     }
@@ -301,7 +320,7 @@ fn spec(sys_ppm: f64, sys_offset_us: f64, rate: u32, dev_ppm: f64, buffer: usize
         alt_burst: false,
         gap: None,
         hidden_out_us: 0.0,
-        reports_hidden: false,
+        comp: Comp::None,
     }
 }
 
@@ -413,10 +432,10 @@ fn two_peers_align_within_2ms_with_callback_jitter() {
 #[test]
 fn hidden_output_latency_is_compensated_when_reported() {
     // PR #34 M2: 따르는 쪽 장치에 버퍼 1개 너머 10ms 숨은 출력 지연(WASAPI 공유 엔진 주기 등).
-    let sc = |reports: bool| {
+    let sc = |comp: Comp| {
         let mut follower = spec(0.0, 3e6, 48_000, 0.0, 128, 1234.0);
         follower.hidden_out_us = 10_000.0;
-        follower.reports_hidden = reports;
+        follower.comp = comp;
         Scenario {
             host: spec(0.0, 5e9, 48_000, 0.0, 128, 0.0),
             follower,
@@ -427,11 +446,53 @@ fn hidden_output_latency_is_compensated_when_reported() {
             exclude: None,
         }
     };
-    let _ = check("숨은 출력 지연 10ms, 드라이버 보고 → 보정", &sc(true));
-    // 보고하지 않으면(cpal WASAPI) 그 지연이 그대로 정렬 오차가 된다: 한계로 문서화하고 통계로 알린다
-    let o = run(&sc(false));
+    let _ = check("숨은 출력 지연 10ms, 드라이버 보고 → 보정", &sc(Comp::Driver));
+    // 보고하지 않고 루프백 측정도 없으면(cpal WASAPI) 그 지연이 그대로 정렬 오차가 된다: 통계로 알린다
+    let o = run(&sc(Comp::None));
     report("숨은 출력 지연 10ms, 보고 없음(보정 안 됨)", &o);
     assert!((o.mean_err_ms - 10.0).abs() < 1.0, "보정 안 되면 +10ms 어긋남: {:+.3}", o.mean_err_ms);
+    // PR #34 M2(a): 보고 없음 + 루프백 보정값(숨은 입력 + 숨은 출력)을 반으로 나눠 출력 쪽에 반영.
+    // 측정 오차 0.3ms(루프백 σ 수준)를 더한다.
+    let o = check(
+        "숨은 출력 지연 10ms, 보고 없음 + 루프백 보정(입력 숨은 10ms, 대칭)",
+        &sc(Comp::Loopback { hidden_in_us: 10_000.0, measure_err_us: 300.0 }),
+    );
+    assert!(o.mean_err_ms.abs() < 0.5, "{:+.3}", o.mean_err_ms);
+    let o = check(
+        "숨은 출력 지연 10ms, 보고 없음 + 루프백 보정(입력 숨은 8ms, 약한 비대칭)",
+        &sc(Comp::Loopback { hidden_in_us: 8_000.0, measure_err_us: 300.0 }),
+    );
+    assert!((o.mean_err_ms - 0.85).abs() < 0.5, "남는 오차 ≈ (출력 − 입력 − 측정 오차)/2: {:+.3}", o.mean_err_ms);
+    // 크게 비대칭이면 (숨은 출력 − 숨은 입력)/2가 남는다(한계, 설계 1.4절). 그래도 보정 안 함(+10ms)보다 작다.
+    let o = run(&sc(Comp::Loopback { hidden_in_us: 2_000.0, measure_err_us: 300.0 }));
+    report("숨은 출력 지연 10ms, 보고 없음 + 루프백 보정(입력 숨은 2ms, 강한 비대칭)", &o);
+    assert!((o.mean_err_ms - 3.85).abs() < 0.5, "{:+.3}", o.mean_err_ms);
+}
+
+#[test]
+fn both_unreported_peers_align_with_loopback_offsets() {
+    // 두 피어 모두 드라이버 보고 없음(cpal WASAPI), 숨은 지연이 서로 다름: 방장 대칭 4+4ms, 따르는 쪽 대칭 12+12ms.
+    // 보정 없이는 8ms 어긋나고, 각자 루프백 보정값을 넣으면 측정 오차 차이만 남는다.
+    let mut host = spec(80.0, 5e9, 48_000, 20.0, 256, 0.0);
+    host.hidden_out_us = 4_000.0;
+    let mut follower = spec(-60.0, 7e8, 44_100, -30.0, 441, 2222.0);
+    follower.hidden_out_us = 12_000.0;
+    let sc = |h: Comp, f: Comp| Scenario {
+        host: PeerSpec { comp: h, ..host },
+        follower: PeerSpec { comp: f, ..follower },
+        one_way: |_| 7000.0,
+        queue_mean_us: 500.0,
+        bpm: 100.0,
+        secs: 60.0,
+        exclude: None,
+    };
+    let o = run(&sc(Comp::None, Comp::None));
+    report("둘 다 보고 없음(숨은 4ms ↔ 12ms), 보정 안 됨", &o);
+    assert!((o.mean_err_ms - 8.0).abs() < 1.0, "{:+.3}", o.mean_err_ms);
+    let _ = check(
+        "둘 다 보고 없음(숨은 4ms ↔ 12ms), 각자 루프백 보정",
+        &sc(Comp::Loopback { hidden_in_us: 4_000.0, measure_err_us: -200.0 }, Comp::Loopback { hidden_in_us: 12_000.0, measure_err_us: 300.0 }),
+    );
 }
 
 #[test]

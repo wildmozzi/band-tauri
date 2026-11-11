@@ -379,9 +379,18 @@ export interface MetronomeStats extends MetronomePlan {
   lateClicks: number
   /** 콜백 공백 뒤 제 시각이 지나 건너뛴 클릭 수 */
   skippedClicks: number
-  /** 클릭 시각에 반영한 숨은 출력 지연(ms). null = 드라이버가 알려 주지 않아 보정 안 됨 */
+  /** 클릭 시각에 반영한 숨은 출력 지연(ms). null = 드라이버 보고도 루프백 보정값도 없어 보정 안 됨(루프백 측정 안내) */
   outputLatencyMs: number | null
+  /** `outputLatencyMs`의 출처: 드라이버 보고 / 루프백 측정 보정값. null = 보정 안 됨 */
+  outputLatencySource?: MetronomeLatencySource | null
+  /** 기준 피어(방장)가 시계를 싣지 않는 옛 엔진이라 동기화할 수 없음(이 계획으로는 synced가 계속 false) */
+  refClockUnsupported?: boolean
+  /** 시계 추정 직선 무게중심에서 지금까지의 외삽 거리(ms, 진단용) */
+  clockExtrapolationMs?: number | null
 }
+
+/** 메트로놈 숨은 출력 지연 보정의 출처 */
+export type MetronomeLatencySource = 'driver' | 'loopback'
 
 /** 엔진 스레드 우선순위 설정 결과(설계 문서 4절 `threadPriority`) */
 export type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
@@ -505,6 +514,15 @@ export function engineSetMetronome(metronome: MetronomeConfig): Promise<Metronom
 /** 메트로놈 클릭 볼륨(0..4)·뮤트. 로컬 전용(내 귀에만), 엔진 재시작 간 유지 */
 export function engineSetMetronomeGain(gain: number, muted: boolean): Promise<null> {
   return invoke<null>('engine_set_metronome_gain', { gain, muted })
+}
+
+/**
+ * 메트로놈 숨은 출력 지연 보정용 루프백 보정값(`LoopbackReport.offsetMs`, -50..200). null이면 해제.
+ * 루프백 측정이 정상 판정이면 엔진이 자동으로 기억해 같은 장치 구성의 합주 엔진에도 쓴다.
+ * 앱 재시작 뒤 저장해 둔 값을 다시 넣을 때 부른다. 드라이버가 출력 지연을 보고하는 장치에서는 드라이버 값이 우선이다.
+ */
+export function engineSetLoopbackOffset(offsetMs: number | null): Promise<null> {
+  return invoke<null>('engine_set_loopback_offset', { offsetMs })
 }
 
 export function engineStats(): Promise<EngineStats> {
