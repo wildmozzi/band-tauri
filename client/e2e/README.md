@@ -5,7 +5,8 @@
 ```sh
 cd client
 npx playwright install chromium   # 처음 한 번
-npm run e2e                       # 빌드(e2e/vite.config.ts) → vite preview(127.0.0.1:47173) → 테스트
+npm run e2e                       # 빌드(e2e/vite.config.ts) → vite preview(127.0.0.1:<빈 포트>) → 테스트
+E2E_PORT=47173 npm run e2e        # 포트 지정 (bash. PowerShell은 $env:E2E_PORT='47173')
 npm run e2e -- --ui               # 디버깅
 npm run e2e:typecheck
 ```
@@ -18,7 +19,10 @@ npm run e2e:typecheck
   - `signaling.ts` 시그널링 WS (welcome → auth-result → join/room-state, 비밀번호 실패·제한, 채팅)
   - `index.ts` 토스 SDK 스텁, **guard**: 앱·mock 호스트 밖으로 나가는 HTTP/WS는 차단하고 테스트를 실패시킨다
 - `build-safety.e2e.ts`: 빌드 산출물에 가짜 env 값이 모두 있고, 운영 흔적(`*.supabase.co`, `fly.dev`, `vercel.app`, JWT 형태 키, 토스 실키)이 없는지 확인 (guard와 이중 방어)
-- 포트 47173 고정, `reuseExistingServer: false` — 다른 워크트리의 서버(실제 env 빌드)에 붙지 않게.
+- 포트: 실행마다 OS가 준 빈 포트(`port.ts`, 환경변수 `E2E_PORT`로 덮어쓰기). 여러 워크트리·CI self-hosted runner가
+  같은 PC에서 동시에 돌려도 겹치지 않는다. `strictPort` + `reuseExistingServer: false` — 포트를 못 잡으면 다른 포트로 넘어가거나
+  다른 워크트리의 서버(실제 env 빌드)에 붙지 않고 실패한다.
+  같은 워크트리에서 두 실행을 겹치면 빌드 산출물(`e2e/.dist`)·결과 폴더를 공유하므로 권장하지 않는다.
 
 ## 한계
 - **RLS 미구현**: 메모리 PostgREST는 Authorization을 보지 않는다. DB 권한 거부(남의 댓글 수정 등)는 E2E가 보장하지 않는다 — server/test의 마이그레이션 테스트와 개발용 DB E2E 모드에서 다룬다.
