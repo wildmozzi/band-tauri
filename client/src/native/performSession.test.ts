@@ -375,9 +375,11 @@ describe('PerformSession 릴레이 토큰 (P1-4b)', () => {
       const { session, start, types, engine } = setup()
       await start()
       const serverNow = Math.floor(Date.now() / 1000) + 300 // 서버 시계가 5분 앞섬
-      session.handleSignal({ ...relayMsg(1, serverNow + 120), expiresIn: 120, serverNow })
+      const bindKey = 'dsPT7PwIjk-PvXGuvL37EQcCgsdLqHGzNu7BaF_9QbE'
+      session.handleSignal({ ...relayMsg(1, serverNow + 120), expiresIn: 120, serverNow, bindKey })
       await flush()
       expect(engine.relayConfigs[0].expiresInSec).toBe(120)
+      expect(engine.relayConfigs[0].bindKey).toBe(bindKey) // Bind MAC 키(2.1.1)를 엔진에 넘긴다
       // 만료 60초 전 = 받은 뒤 60초 (내 시계로 계산했다면 360초 뒤 → 이미 만료)
       await vi.advanceTimersByTimeAsync(59_999)
       expect(types()).not.toContain('relay-token-request')

@@ -178,7 +178,8 @@ off len 필드
 4   4   sender_ssrc (u32, 세션마다 랜덤)
 8   4   seq (u32, 타입별 독립 증가)
 12  4   timestamp (u32, 48kHz 샘플 클럭; Hello/Ping은 송신측 µs 하위 32비트, HelloAck/Pong은 받은 Hello/Ping의 값을 되돌림)
-16  1   flags: bit0=opus(0이면 PCM16), bit1=stereo
+16  1   flags: Audio bit0=opus(0이면 PCM16), bit1=stereo
+            Hello/HelloAck bit7=경로 태그 있음, bit6=릴레이(RelayData)로 보냄 (P1-4c, relay-design 2.4·4.1). 그 밖의 타입은 0
 17  1   frame_samples / 120 (1,2,4)
 18  ..  암호문 (ChaCha20-Poly1305), 마지막 16바이트 = 태그
 ```
@@ -211,8 +212,8 @@ off len 필드
   - 그중 Hello/HelloAck는 릴레이 경로를 세운다. 그 밖의 패킷은 그 피어와 릴레이 경유 Hello/HelloAck가 오간 뒤(`relay_confirmed`)에만 받는다. 확정 경로가 직접이면 데이터만 받고 생존 시각은 갱신하지 않는다.
   - 경로를 바꾼 직후 2초 동안은 직전 경로로 온 인증 패킷도 받는다(비행 중 패킷, 무끊김 전환).
   - 릴레이 주소가 바뀌거나 해제되면 직전 릴레이 주소에서 온 Hello/HelloAck는 버린다(직접 경로로 오인 방지). 데이터는 위 2초 유예로 받는다.
-  - 경로 종류(`via_relay`)는 인증되지 않은 출발 주소로 정한다. 경로상 공격자가 직접 Hello의 출발 주소를 릴레이로 바꿔 먼저 넣으면 강등시킬 수 있다. 직접 패킷을 버리는 것과 같은 효과라 새 공격력은 아니다(relay-design 4.1).
-- 제어 패킷(Hello~Bye)은 타입별로 이전보다 큰 seq만 받는다(재전송 방어). HelloAck는 피어당 50ms에 1회까지.
+  - 경로 종류(`via_relay`)는 출발 주소로 정하되, Hello/HelloAck는 헤더(AAD)의 경로 태그와 맞아야 받는다(P1-4c). 그래서 경로상 공격자가 직접 Hello의 출발 주소를 릴레이로 바꿔 넣어도 릴레이 경로가 서지 않는다. 태그 없는 Hello(옛 엔진)는 출발 주소만으로 판단한다(relay-design 4.1). Hello/HelloAck는 송신마다 새 seq를 쓰므로 직접·릴레이로 같은 Hello를 따로 봉인해도 nonce가 겹치지 않는다.
+- 제어 패킷(Hello~Bye)은 타입별로 이전보다 큰 seq만 받는다(재전송 방어). HelloAck는 피어당 50ms에 1회까지. Hello/HelloAck는 평문 id·직전 릴레이 주소·경로 태그 검사를 seq 수락 **전에** 한다(걸러질 패킷이 seq를 소모해 진짜 Hello를 막지 않게).
 - Hello/HelloAck 평문: `peer_id`(UTF-8, ≤64B). Bye 평문: 없음.
 - **Pong 평문**(P2-3): `[0xC1, now_us(u64 BE)]` 9바이트다. 응답자가 Pong을 보낼 때의 엔진 시계(µs, Net epoch 기준)이고, 받는 쪽이 시계 오프셋 표본을 만든다(1.4절). 빈 평문(옛 엔진)이나 다른 형식이면 표본만 건너뛴다(RTT는 그대로). 옛 엔진은 Pong 평문을 보지 않으므로 호환된다.
 - Ping 평문: 없음, 또는 **에코 제어 6바이트**(P1-1) `[0xEC, flags, delay_us(u32 BE)]`. RTT는 헤더 timestamp를 쓴다.
@@ -232,7 +233,7 @@ off len 필드
 5. `Connected`: 1초 keepalive(Ping), 500ms 간격 RTT 측정(EWMA). 5초 무응답 → `Reconnecting`(다시 Hello) → 15초 → `Failed`.
 6. `engine_remove_peer` 또는 `engine_stop` 시 Bye 송신.
 7. **릴레이 폴백**(P1-4b, relay-design.md). TURN 대신 자체 UDP 릴레이를 쓴다.
-   - 등록: 서버 `relay-token`을 받으면 프론트가 `engine_set_relay`를 부른다. 엔진은 RelayBind → CookieRequired → 쿠키 Bind → Ok로 등록하고 10초마다 keepalive한다. 릴레이 경로 피어가 1초 넘게 조용하면 keepalive를 1초마다 당겨 보낸다. 그래서 릴레이 재시작·NAT 재바인딩은 CookieRequired를 받아 곧바로 재등록된다. Ack가 3번 연속 없으면 `unreachable`(계속 재시도), 토큰이 만료되면 `expired`(새 토큰 전까지 Bind 중지).
+   - 등록: 서버 `relay-token`을 받으면 프론트가 `engine_set_relay`를 부른다. 엔진은 RelayBind → CookieRequired → 쿠키 Bind → Ok로 등록하고 10초마다 keepalive한다. `bindKey`가 있으면 모든 Bind 끝에 Bind MAC을 붙인다(relay-design 2.1.1, 등록 가로채기 방지). 릴레이 경로 피어가 1초 넘게 조용하면 keepalive를 1초마다 당겨 보낸다. 그래서 릴레이 재시작·NAT 재바인딩은 CookieRequired를 받아 곧바로 재등록된다. Ack가 3번 연속 없으면 `unreachable`(계속 재시도), 토큰이 만료되면 `expired`(새 토큰 전까지 Bind 중지).
    - 토큰 만료는 로컬 벽시계가 아니라 **받은 시각 + `expiresInSec`**(서버 발급 시각 기준 남은 수명)으로 판단한다. 로컬 시계로 토큰을 거부하지 않는다. 시계가 어긋난 PC에서도 끊기지 않게 하려는 것이다(PR #10 M1). 서명·만료의 최종 판정은 릴레이가 한다. 릴레이는 만료 토큰을 조용히 버리므로 엔진에는 `unreachable`로 보인다. 프론트는 `expired`/`unreachable`이면 바로 새 토큰을 요청한다.
    - 릴레이 주소는 프론트가 준 `host:port` 문자열이 같으면 처음 해석한 주소를 유지한다(토큰 갱신마다 DNS를 다시 풀지 않는다). 주소가 실제로 바뀌면 릴레이 경로 피어를 새 주소로 바로 옮긴다(Reconnecting 없이). 해제(`null`)면 경로를 비우고 직접 경로를 다시 찾는다(M3).
    - 경로 상태기계(피어별):
@@ -285,7 +286,7 @@ interface EngineConfig {
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
 interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean }
-interface RelayConfig { addr: string; token: string; expiresInSec?: number }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)
+interface RelayConfig { addr: string; token: string; expiresInSec?: number; bindKey?: string }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)·bindKey(Bind MAC 키, base64url 32B, relay-design 2.1.1)
 interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean }
 type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
 interface LoopbackRun { roundTripMs: number | null; peakRatio: number; correlation: number; clipped: boolean; inverted: boolean; inputPeak: number }
@@ -310,7 +311,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_test_start` | `{ config: EngineConfig }` | `null` (네트워크 없이 모니터만) |
 | `engine_test_stop` | — | `null` |
 | `engine_add_peer` | `{ peerId: string, descriptor: LocalDescriptor }` | `null` |
-| `engine_set_relay` | `{ relay: RelayConfig \| null }` | `null` — 릴레이 설정·토큰 갱신(같은 주소면 등록 유지), null이면 해제. 서버 `relay-token`을 받을 때마다 부른다. 토큰은 `engine_start`가 만든 ssrc에 묶이므로 `engine_start`/`engine_add_peer`의 인자가 아니다. 주소는 DNS 해석 후 IPv4만 쓰고, 같은 `addr` 문자열이면 처음 해석한 주소를 유지한다. 만료는 받은 시각 + `expiresInSec`로 판단한다(없으면 로컬 시계, 로컬 시계로는 거부하지 않음). 토큰 구조·ssrc 불일치는 에러 |
+| `engine_set_relay` | `{ relay: RelayConfig \| null }` | `null` — 릴레이 설정·토큰 갱신(같은 주소면 등록 유지), null이면 해제. 서버 `relay-token`을 받을 때마다 부른다. 토큰은 `engine_start`가 만든 ssrc에 묶이므로 `engine_start`/`engine_add_peer`의 인자가 아니다. 주소는 DNS 해석 후 IPv4만 쓰고, 같은 `addr` 문자열이면 처음 해석한 주소를 유지한다. 만료는 받은 시각 + `expiresInSec`로 판단한다(없으면 로컬 시계, 로컬 시계로는 거부하지 않음). 토큰 구조·ssrc 불일치, `bindKey`가 32바이트 base64url이 아니면 에러 |
 | `engine_remove_peer` | `{ peerId: string }` | `null` |
 | `engine_set_peer_gain` | `{ peerId: string, gain: number, muted: boolean, pan?: number }` | `null` — pan은 -1(왼쪽)..1(오른쪽), 기본 0, equal-power |
 | `engine_set_jitter_profile` | `{ profile: number }` | `null` — 지터 버퍼 프로필(0..1)을 실행 중인 모든 피어와 이후 추가될 피어에 적용(1.2절). 다음 `engine_start`는 `EngineConfig.jitterProfile`을 쓴다. 범위 밖이면 에러 |
@@ -430,7 +431,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 - 연주 시작(앱): `engine_start` → descriptor를 `native-descriptor`로 브로드캐스트. 새 연주자가 들어오거나 `native-descriptor`를 받으면 `engine_add_peer`, 아직 내 descriptor를 그 피어에게 안 보냈으면 `to`로 보낸다(양방향 동시 펀칭).
 - 연주자 이탈/`native-leave`/WS `leave` → `engine_remove_peer`.
-- `relay-token { token, addr, ssrc, expiresAt, expiresIn, serverNow }`(내 엔진 ssrc와 같을 때만) → `engine_set_relay({ addr, token, expiresInSec })`.
+- `relay-token { token, bindKey, addr, ssrc, expiresAt, expiresIn, serverNow }`(내 엔진 ssrc와 같을 때만) → `engine_set_relay({ addr, token, expiresInSec, bindKey })`. `bindKey`는 옛 서버면 없다.
   - 남은 수명은 `expiresIn` → `expiresAt - serverNow` → (옛 서버) `expiresAt - 내 시계` 순으로 정한다. 내 PC 시계는 쓰지 않는다(M1).
   - 받은 시각 + 남은 수명 기준 만료 60초 전(수명이 짧으면 절반 지점)에 `relay-token-request`를 보낸다. WS가 잠시 끊겨도 버틸 여유를 두려는 것이다(L4). 응답이 없으면 10초마다 다시 요청한다.
   - `engine_stats.relay.state`가 `expired`/`unreachable`이면 바로 새 토큰을 요청한다(10초에 한 번까지). `rejected`(정원·ssrc 충돌)는 새 토큰으로 풀리지 않으므로 요청하지 않는다.

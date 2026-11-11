@@ -16,7 +16,7 @@ use sha2::Sha256;
 
 use crate::packet::{self, BindStatus, ACK_BYTES, COOKIE_BYTES, DATA_PREFIX_BYTES, HEADER_BYTES};
 use crate::stats::{DropReason, Stats};
-use crate::token::{self, TokenError, MAC_BYTES};
+use crate::token::{self, TokenError, BIND_KEY_BYTES, BIND_MAC_BYTES, MAC_BYTES};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -45,6 +45,9 @@ pub struct Limits {
     pub max_bind_sources: usize,
     /// 릴레이 전체 등록 수 상한 (메모리 보호)
     pub max_registrations: usize,
+    /// 신규/갱신 RelayBind에 Bind MAC(relay-design 2.1.1)을 요구한다. 전환 기간에는 false(구버전 클라이언트 허용,
+    /// 단 MAC으로 등록된 멤버의 MAC 없는 Bind는 항상 거부). 구버전이 사라지면 `RELAY_REQUIRE_BIND_MAC=1`
+    pub require_bind_mac: bool,
 }
 
 impl Default for Limits {
@@ -63,6 +66,7 @@ impl Default for Limits {
             max_binds_per_sec_per_subnet: 50,
             max_bind_sources: 65_536,
             max_registrations: 20_000,
+            require_bind_mac: false,
         }
     }
 }
@@ -127,6 +131,8 @@ struct Reg {
     token_mac: [u8; MAC_BYTES],
     /// 토큰 만료 (unix 초)
     token_exp: u64,
+    /// Bind MAC으로 등록됨 → 이 멤버의 MAC 없는 Bind는 거부(하향 방지)
+    mac: bool,
     expires: Instant,
     bytes: Bucket,
     packets: Bucket,
@@ -136,6 +142,8 @@ struct Member {
     ssrc: u32,
     client: Box<str>,
     addr: SocketAddr,
+    /// Bind MAC으로 등록됨
+    mac: bool,
 }
 
 #[derive(Default)]
@@ -147,6 +155,8 @@ pub struct Relay {
     secret: Vec<u8>,
     /// 쿠키 HMAC (키 = HMAC(secret, "band-relay cookie v1")). 패킷마다 clone해서 쓴다(할당 없음)
     cookie_mac: HmacSha256,
+    /// `K_bind = HMAC(secret, "band-relay bind v1")` — 토큰별 Bind 키 파생용
+    bind_root: [u8; BIND_KEY_BYTES],
     limits: Limits,
     by_addr: HashMap<SocketAddr, Reg>,
     rooms: HashMap<Box<str>, Room>,
@@ -165,6 +175,7 @@ impl Relay {
         let cookie_key = kdf.finalize().into_bytes();
         Relay {
             cookie_mac: HmacSha256::new_from_slice(&cookie_key).expect("32B 키"),
+            bind_root: token::bind_root_key(&secret),
             secret,
             bind_bucket: Bucket::new(limits.max_binds_per_sec as f64, 1.0, now),
             sources: HashMap::with_capacity(256),
@@ -258,16 +269,23 @@ impl Relay {
     }
 
     fn handle_bind(&mut self, now: Instant, now_unix: u64, from: SocketAddr, buf: &[u8]) -> Outcome {
-        if buf.len() < HEADER_BYTES || buf.len() > HEADER_BYTES + token::MAX_TOKEN_BYTES + COOKIE_BYTES {
+        if buf.len() < HEADER_BYTES || buf.len() > HEADER_BYTES + token::MAX_TOKEN_BYTES + COOKIE_BYTES + BIND_MAC_BYTES {
             return Outcome::Drop(DropReason::Malformed);
         }
+        // flags: bit0 = Bind MAC (2.1.1). 그 밖의 비트와 offset 17은 0
+        let has_mac = match (buf[16], buf[17]) {
+            (0, 0) => false,
+            (packet::BIND_FLAG_MAC, 0) => true,
+            _ => return Outcome::Drop(DropReason::Malformed),
+        };
+        let mac_len = if has_mac { BIND_MAC_BYTES } else { 0 };
         let body = &buf[HEADER_BYTES..];
         let Some(tlen) = token::token_len(body) else {
             return Outcome::Drop(DropReason::Malformed);
         };
-        let cookie = match body.len() - tlen {
-            0 => None,
-            COOKIE_BYTES => Some(&body[tlen..]),
+        let cookie = match (body.len() - tlen).checked_sub(mac_len) {
+            Some(0) => None,
+            Some(COOKIE_BYTES) => Some(&body[tlen..tlen + COOKIE_BYTES]),
             _ => return Outcome::Drop(DropReason::Malformed),
         };
         let tok = &body[..tlen];
@@ -301,6 +319,20 @@ impl Relay {
             Err(TokenError::Expired) => return Outcome::Drop(DropReason::ExpiredToken),
             Err(_) => return Outcome::Drop(DropReason::BadToken),
         };
+        // Bind MAC (2.1.1): 토큰별 키는 WS(TLS)로만 전달되므로, 캡처한 토큰으로 다른 주소에서 쿠키 왕복을 끝내도
+        // 쿠키를 덮는 MAC을 만들 수 없다. MAC 없는 Bind는 전환 기간에만, 그리고 MAC으로 등록된 적 없는 멤버만 받는다.
+        if has_mac {
+            let key = token::bind_key_from_root(&self.bind_root, tok);
+            let split = buf.len() - BIND_MAC_BYTES;
+            if !ct_eq(&token::bind_mac(&key, &buf[..split]), &buf[split..]) {
+                return Outcome::Drop(DropReason::BadBindMac);
+            }
+        } else {
+            if self.limits.require_bind_mac || self.member_has_mac(claims.room, claims.client) {
+                return Outcome::Drop(DropReason::BadBindMac);
+            }
+            self.stats.bind_legacy.fetch_add(1, Relaxed);
+        }
         let mut token_mac = [0u8; MAC_BYTES];
         token_mac.copy_from_slice(mac);
 
@@ -309,6 +341,12 @@ impl Relay {
             if &*reg.room == claims.room && &*reg.client == claims.client && reg.ssrc == claims.ssrc {
                 reg.token_mac = token_mac;
                 reg.token_exp = claims.expires_at;
+                if has_mac && !reg.mac {
+                    reg.mac = true;
+                    if let Some(m) = self.rooms.get_mut(claims.room).and_then(|r| r.members.iter_mut().find(|m| m.addr == from)) {
+                        m.mac = true;
+                    }
+                }
                 let expires = self.reg_expiry(now, now_unix, claims.expires_at);
                 self.by_addr.get_mut(&from).expect("방금 조회").expires = expires;
                 self.stats.bind_ok.fetch_add(1, Relaxed);
@@ -326,7 +364,7 @@ impl Relay {
         }
 
         let expires = self.reg_expiry(now, now_unix, claims.expires_at);
-        let status = self.register(now, expires, from, claims.room, claims.client, claims.ssrc, token_mac, claims.expires_at);
+        let status = self.register(now, expires, from, claims.room, claims.client, claims.ssrc, token_mac, claims.expires_at, has_mac);
         if status == BindStatus::Ok {
             self.stats.bind_ok.fetch_add(1, Relaxed);
         } else {
@@ -366,6 +404,11 @@ impl Relay {
         c
     }
 
+    /// 이 멤버(room, client)의 등록 중 Bind MAC으로 등록된 것이 있는지 (하향 방지)
+    fn member_has_mac(&self, room: &str, client: &str) -> bool {
+        self.rooms.get(room).is_some_and(|r| r.members.iter().any(|m| m.mac && &*m.client == client))
+    }
+
     fn take_source_bucket(&mut self, now: Instant, ip: IpAddr) -> bool {
         let key = subnet_key(ip);
         if let Some(b) = self.sources.get_mut(&key) {
@@ -392,6 +435,7 @@ impl Relay {
         ssrc: u32,
         token_mac: [u8; MAC_BYTES],
         token_exp: u64,
+        mac: bool,
     ) -> BindStatus {
         if let Some(room) = self.rooms.get(room_id) {
             // 다른 클라이언트가 같은 ssrc를 쓰고 있으면 거부 (가로채기 방지)
@@ -420,7 +464,7 @@ impl Relay {
             Some(r) => r,
             None => self.rooms.entry(room_id.into()).or_default(),
         };
-        room.members.push(Member { ssrc, client: client.into(), addr: from });
+        room.members.push(Member { ssrc, client: client.into(), addr: from, mac });
         let rate_bytes = self.limits.max_bits_per_sec as f64 / 8.0;
         self.by_addr.insert(
             from,
@@ -430,6 +474,7 @@ impl Relay {
                 ssrc,
                 token_mac,
                 token_exp,
+                mac,
                 expires,
                 bytes: Bucket::new(rate_bytes, self.limits.burst_secs, now),
                 packets: Bucket::new(self.limits.max_packets_per_sec as f64, self.limits.burst_secs, now),
@@ -470,7 +515,7 @@ impl Relay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{ack_cookie, write_relay_bind, write_relay_data, TYPE_RELAY_BIND_ACK};
+    use crate::packet::{ack_cookie, write_relay_bind, write_relay_bind_mac, write_relay_data, TYPE_RELAY_BIND_ACK};
     use crate::token::Claims;
 
     const SECRET: &[u8] = b"unit-test-secret-0123456789abcdef!!";
@@ -533,6 +578,147 @@ mod tests {
     }
 
     const OK: u8 = BindStatus::Ok as u8;
+
+    fn bind_mac_with(tok: &[u8], ssrc: u32, cookie: Option<&[u8; COOKIE_BYTES]>) -> Vec<u8> {
+        let mut b = Vec::new();
+        write_relay_bind_mac(ssrc, 1, 1234, tok, cookie, &token::bind_key(SECRET, tok), &mut b);
+        b
+    }
+
+    /// MAC 붙은 Bind로 쿠키 왕복까지 등록
+    fn bind_mac_tok(r: &mut Relay, now: Instant, from: SocketAddr, tok: &[u8], ssrc: u32) -> u8 {
+        assert_eq!(r.handle(now, NOW_UNIX, from, &bind_mac_with(tok, ssrc, None)), Outcome::Ack { to: from });
+        if status(r) != BindStatus::CookieRequired as u8 {
+            return status(r);
+        }
+        let cookie = ack_cookie(r.ack());
+        assert_eq!(r.handle(now, NOW_UNIX, from, &bind_mac_with(tok, ssrc, Some(&cookie))), Outcome::Ack { to: from });
+        status(r)
+    }
+
+    /// 2.1.1: 경로상 공격자가 MAC 붙은 Bind(토큰)를 캡처해 자기 주소에서 쿠키 왕복을 해도, 토큰별 키를 몰라
+    /// 쿠키를 덮는 MAC을 못 만든다. MAC을 떼고 구버전처럼 보내도(하향) MAC으로 등록된 멤버라 거부한다.
+    #[test]
+    fn bind_mac_blocks_on_path_hijack_and_downgrade() {
+        let mut r = relay(Limits::default());
+        let now = Instant::now();
+        let victim = addr(1);
+        let attacker = addr(66);
+        let tok = token("room", "a", 11, NOW_UNIX + 600);
+        assert_eq!(bind_mac_tok(&mut r, now, victim, &tok, 11), OK);
+        assert_eq!(bind(&mut r, now, addr(2), "room", "b", 22), OK);
+
+        // 공격자: MAC 없는 Bind는 쿠키조차 못 받는다(MAC으로 등록된 멤버)
+        assert_eq!(r.handle(now, NOW_UNIX, attacker, &bind_with(&tok, 11, None)), Outcome::Drop(DropReason::BadBindMac));
+        // 피해자의 첫 Bind(쿠키 없음, MAC 유효)를 그대로 리플레이하면 자기 주소용 쿠키는 받는다
+        assert_eq!(r.handle(now, NOW_UNIX, attacker, &bind_mac_with(&tok, 11, None)), Outcome::Ack { to: attacker });
+        assert_eq!(status(&r), BindStatus::CookieRequired as u8);
+        let cookie = ack_cookie(r.ack());
+        // (1) 키 없이 위조한 MAC
+        let mut forged = bind_with(&tok, 11, Some(&cookie));
+        forged[16] = packet::BIND_FLAG_MAC;
+        forged.extend_from_slice(&[0x5A; BIND_MAC_BYTES]);
+        assert_eq!(r.handle(now, NOW_UNIX, attacker, &forged), Outcome::Drop(DropReason::BadBindMac));
+        // (2) 피해자의 MAC을 다른 쿠키에 재사용 — MAC이 쿠키를 덮는다
+        let mut reuse = bind_mac_with(&tok, 11, Some(&[0u8; COOKIE_BYTES]));
+        reuse[HEADER_BYTES + tok.len()..HEADER_BYTES + tok.len() + COOKIE_BYTES].copy_from_slice(&cookie);
+        assert_eq!(r.handle(now, NOW_UNIX, attacker, &reuse), Outcome::Drop(DropReason::BadBindMac));
+        // (3) MAC 없는 구버전 Bind로 하향
+        assert_eq!(r.handle(now, NOW_UNIX, attacker, &bind_with(&tok, 11, Some(&cookie))), Outcome::Drop(DropReason::BadBindMac));
+        assert_eq!(r.stats().drops(DropReason::BadBindMac), 4);
+        // 피해자 등록과 수신은 그대로
+        assert_eq!(r.handle(now, NOW_UNIX, addr(2), &data_pkt(11, 22, 40)), Outcome::Forward { to: victim, offset: 8 });
+        // 정당한 이동(NAT 재바인딩)은 키가 있으므로 된다
+        assert_eq!(bind_mac_tok(&mut r, now, addr(3), &tok, 11), OK);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(2), &data_pkt(11, 22, 40)), Outcome::Forward { to: addr(3), offset: 8 });
+    }
+
+    #[test]
+    fn bind_mac_layout_and_tamper() {
+        let mut r = relay(Limits::default());
+        let now = Instant::now();
+        let tok = token("room", "a", 11, NOW_UNIX + 600);
+        let good = bind_mac_with(&tok, 11, None);
+        assert_eq!(good.len(), HEADER_BYTES + tok.len() + BIND_MAC_BYTES);
+        // 헤더(seq/timestamp)·토큰·MAC 어느 바이트를 바꿔도 무효(토큰 변조는 토큰 HMAC에서 먼저 걸린다)
+        for (idx, want) in [(9usize, DropReason::BadBindMac), (13, DropReason::BadBindMac), (good.len() - 1, DropReason::BadBindMac), (HEADER_BYTES + 20, DropReason::BadToken)] {
+            let mut f = good.clone();
+            f[idx] ^= 1;
+            assert_eq!(r.handle(now, NOW_UNIX, addr(1), &f), Outcome::Drop(want), "byte {idx}");
+        }
+        // 모르는 flags 비트·offset 17
+        for (i, v) in [(16usize, 0x02u8), (16, 0x81), (17, 1)] {
+            let mut f = good.clone();
+            f[i] = v;
+            assert_eq!(r.handle(now, NOW_UNIX, addr(1), &f), Outcome::Drop(DropReason::Malformed), "{i}={v:#x}");
+        }
+        // MAC 플래그인데 길이가 MAC만큼 모자람
+        let mut short = good.clone();
+        short.truncate(good.len() - 1);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(1), &short), Outcome::Drop(DropReason::Malformed));
+        // 정상
+        assert_eq!(r.handle(now, NOW_UNIX, addr(1), &good), Outcome::Ack { to: addr(1) });
+        assert_eq!(status(&r), BindStatus::CookieRequired as u8);
+        assert!(r.ack().len() < good.len(), "증폭 없음");
+        assert_eq!(r.stats().bind_legacy.load(Relaxed), 0);
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// 공용 벡터(docs/overhaul/relay-token-vectors.json)의 MAC 붙은 Bind: 같은 바이트를 만들고, 릴레이가 MAC을 받아들인다
+    #[test]
+    fn bind_mac_cross_language_vectors() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../docs/overhaul/relay-token-vectors.json")).unwrap();
+        let now = Instant::now();
+        for v in fixture["vectors"].as_array().unwrap() {
+            let name = v["name"].as_str().unwrap();
+            let secret = v["secret"].as_str().unwrap().as_bytes();
+            let tok = unhex(v["hex"].as_str().unwrap());
+            let b = &v["bind"];
+            let cookie: Option<[u8; COOKIE_BYTES]> = b["cookieHex"].as_str().map(|c| unhex(c).try_into().unwrap());
+            let mut built = Vec::new();
+            let ssrc = v["ssrc"].as_u64().unwrap() as u32;
+            let key = token::bind_key(secret, &tok);
+            write_relay_bind_mac(ssrc, b["seq"].as_u64().unwrap() as u32, b["timestamp"].as_u64().unwrap() as u32, &tok, cookie.as_ref(), &key, &mut built);
+            let want = unhex(b["hex"].as_str().unwrap());
+            assert_eq!(built, want, "{name}: Bind 바이트");
+            let exp = v["expiresAt"].as_u64().unwrap();
+            let mut r = Relay::new(secret.to_vec(), Limits { require_bind_mac: true, ..Limits::default() }, Arc::new(Stats::default()));
+            // MAC 통과 → (벡터의 쿠키는 이 주소용이 아니므로) CookieRequired
+            assert_eq!(r.handle(now, exp - 1, addr(1), &want), Outcome::Ack { to: addr(1) }, "{name}");
+            assert_eq!(status(&r), BindStatus::CookieRequired as u8, "{name}");
+            let mut bad = want.clone();
+            *bad.last_mut().unwrap() ^= 1;
+            assert_eq!(r.handle(now, exp - 1, addr(1), &bad), Outcome::Drop(DropReason::BadBindMac), "{name}");
+        }
+    }
+
+    /// 전환 기간(기본): MAC 없는 구버전 Bind도 받는다(bind_legacy로 관측). 필수 모드면 거부.
+    #[test]
+    fn legacy_bind_allowed_until_required() {
+        let mut r = relay(Limits::default());
+        let now = Instant::now();
+        assert_eq!(bind(&mut r, now, addr(1), "room", "old", 11), OK);
+        assert!(r.stats().bind_legacy.load(Relaxed) >= 1);
+        // 구버전으로 등록한 멤버도 새 클라이언트로 올라오면 MAC으로 교체되고, 그 뒤 MAC 없는 Bind는 거부
+        let tok = token("room", "old", 11, NOW_UNIX + 601);
+        r.handle(now, NOW_UNIX, addr(1), &bind_mac_with(&tok, 11, None));
+        assert_eq!(status(&r), OK, "같은 주소·같은 신원 갱신");
+        let tok3 = token("room", "old", 11, NOW_UNIX + 602);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(1), &bind_with(&tok3, 11, None)), Outcome::Drop(DropReason::BadBindMac));
+
+        let mut r = relay(Limits { require_bind_mac: true, ..Limits::default() });
+        let tok = token("room", "a", 11, NOW_UNIX + 600);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(1), &bind_with(&tok, 11, None)), Outcome::Drop(DropReason::BadBindMac));
+        assert_eq!(r.registration_count(), 0);
+        assert_eq!(bind_mac_tok(&mut r, now, addr(1), &tok, 11), OK);
+        // keepalive(같은 주소·같은 토큰)는 MAC 없이도 빠른 경로 — 등록된 주소만 연장할 수 있다
+        assert_eq!(r.handle(now, NOW_UNIX, addr(1), &bind_with(&tok, 11, None)), Outcome::Ack { to: addr(1) });
+        assert_eq!(status(&r), OK);
+    }
 
     #[test]
     fn routes_within_room() {

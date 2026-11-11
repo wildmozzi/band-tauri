@@ -122,6 +122,8 @@ export interface RelayConfig {
   token: string
   /** 토큰 남은 수명(초, 서버 발급 시각 기준). 엔진은 받은 시각 + 이 값으로 만료를 판단한다(시계 오차 무관) */
   expiresInSec?: number
+  /** 토큰별 Bind MAC 키(base64url 32B, relay-design 2.1.1). 있으면 RelayBind에 MAC을 붙인다 — 경로상 등록 가로채기 방지 */
+  bindKey?: string
 }
 
 export interface PeerStats {

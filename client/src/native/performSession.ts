@@ -385,7 +385,7 @@ export class PerformSession {
     // 이전 엔진(재시작 전 ssrc)에 대한 토큰은 버린다. 엔진도 ssrc를 다시 확인한다.
     if (this.state.phase !== 'running' || msg.ssrc !== this.localSsrc) return
     const gen = this.gen
-    const config = { addr: msg.addr, token: msg.token, expiresInSec: msg.expiresIn }
+    const config = { addr: msg.addr, token: msg.token, expiresInSec: msg.expiresIn, ...(msg.bindKey ? { bindKey: msg.bindKey } : {}) }
     this.enqueue(async () => {
       if (gen !== this.gen) return null
       try {
