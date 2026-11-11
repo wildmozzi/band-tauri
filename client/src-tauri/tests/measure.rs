@@ -254,6 +254,15 @@ fn loopback_offset_carries_to_session_engine_on_same_device() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(metro(&m).output_latency_source, None);
     m.stop();
+    // 버퍼 크기가 다르면 적용하지 않는다(숨은 지연이 버퍼에 따라 바뀔 수 있음, PR #57 M1)
+    m.start(config(512), "alice".into()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(metro(&m).output_latency_source, None, "다른 버퍼에 옛 보정값 적용");
+    m.stop();
+    // 다시 원래 버퍼면 적용된다(키는 버퍼만 달랐음)
+    m.start(config(128), "alice".into()).unwrap();
+    assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
+    m.stop();
     // 해제하면 같은 장치에서도 쓰지 않는다
     m.test_start(config(128)).unwrap();
     assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));

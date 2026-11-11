@@ -318,17 +318,22 @@ impl Engine {
         self.metronome.set_loopback_offset(offset_ms)
     }
 
-    /// 숨은 지연 보정값이 유효한 장치 구성 키: 드라이버·장치·레이트가 같아야 같은 값이다.
+    /// 숨은 지연 보정값이 유효한 장치 구성 키(설계 1.4절). 숨은 지연(실측 − 콜백 크기)에 영향을 주는 값을 모두 넣는다:
+    /// 드라이버·실제 백엔드(자체 WASAPI/cpal 폴백)·실제로 연 장치(기본 장치면 그때 고른 장치)·요청 버퍼 크기·in/out 레이트.
+    /// 버퍼를 바꾸면 엔드포인트 버퍼·드라이버 여유가 달라질 수 있어 다시 재야 한다(PR #57 M1).
     pub fn device_key(&self) -> String {
-        let c = &self.cfg;
+        let (c, i) = (&self.cfg, &self.info);
         format!(
-            "{:?}|{:?}|{}|{}|{}|{}",
+            "{:?}|{:?}|{:?}|{:?}|{:016x}|{:016x}|{}|{}|{}",
             c.input_driver,
             c.output_driver,
-            c.input_device.as_deref().unwrap_or(""),
-            c.output_device.as_deref().unwrap_or(""),
-            self.info.in_rate,
-            self.info.out_rate
+            i.in_backend,
+            i.out_backend,
+            i.in_device_tag,
+            i.out_device_tag,
+            c.buffer_size,
+            i.in_rate,
+            i.out_rate
         )
     }
 

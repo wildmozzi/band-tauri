@@ -90,8 +90,12 @@ impl EngineManager {
         let (_g, cancel) = self.begin_measure()?;
         let report = job.run(runs, &cancel)?;
         // 판정이 정상이면 보정값을 이 장치 구성의 메트로놈 출력 지연 보정으로 기억·적용한다(PR #34 M2(a)).
+        // 범위(−50..200ms) 밖이면 잘라서 "부분 보정"으로 쓰지 않고 기억하지 않는다 — `engine_set_loopback_offset`이
+        // 같은 값을 거부하는 것과 맞춘다(PR #57 L1). 실패·범위 밖이면 이전 값이 그대로 남는다.
         if let (MeasureVerdict::Ok, Some(o)) = (report.verdict, report.offset_ms) {
-            let o = o.clamp(MIN_LOOPBACK_OFFSET_MS, MAX_LOOPBACK_OFFSET_MS);
+            if !(MIN_LOOPBACK_OFFSET_MS..=MAX_LOOPBACK_OFFSET_MS).contains(&o) {
+                return Ok(report);
+            }
             *self.loopback_cal.lock() = Some((key.clone(), o));
             let _ = self.with_engine(|e| if e.device_key() == key { e.set_loopback_offset(Some(o)) } else { Ok(()) });
         }

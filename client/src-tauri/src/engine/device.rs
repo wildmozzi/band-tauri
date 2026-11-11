@@ -79,6 +79,15 @@ pub struct StreamInfo {
     /// ASIO는 `ASIOGetLatencies`, 자체 WASAPI는 `IAudioClient::GetStreamLatency`. 지연 측정 보고서에 쓴다.
     pub in_reported_latency_frames: u32,
     pub out_reported_latency_frames: u32,
+    /// 실제로 연 입력/출력 장치의 식별 태그(`device_tag`). 기본 장치(`None`)로 열었어도 그때 고른 장치를 가리키므로
+    /// OS 기본 장치가 바뀌면 달라진다. 루프백 보정값의 장치 구성 키(`Engine::device_key`)에 쓴다.
+    pub in_device_tag: u64,
+    pub out_device_tag: u64,
+}
+
+/// 장치 이름(또는 엔드포인트 ID)의 안정적인 64비트 태그(FNV-1a). `StreamInfo`를 `Copy`로 두려고 문자열 대신 쓴다.
+pub fn device_tag(name: &str) -> u64 {
+    name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
 impl StreamInfo {
@@ -404,6 +413,8 @@ pub mod cpal_backend {
                 out_period_frames: 0,
                 in_reported_latency_frames: reported.0,
                 out_reported_latency_frames: reported.1,
+                in_device_tag: device_tag(&in_dev.name().unwrap_or_default()),
+                out_device_tag: device_tag(&out_dev.name().unwrap_or_default()),
             };
             Ok((info, Box::new(Streams { _input: input_stream, _output: output_stream, asio: any_asio })))
         }
@@ -993,6 +1004,8 @@ pub mod fake {
                 out_period_frames: out_buf as u32,
                 in_reported_latency_frames: self.reported_latency.0,
                 out_reported_latency_frames: self.reported_latency.1,
+                in_device_tag: device_tag(cfg.input_device.as_deref().unwrap_or("fake::default")),
+                out_device_tag: device_tag(cfg.output_device.as_deref().unwrap_or("fake::default")),
             };
             Ok((info, Box::new(FakeGuard { stop, threads: vec![in_thread, out_thread], exclusive: self.exclusive.clone() })))
         }

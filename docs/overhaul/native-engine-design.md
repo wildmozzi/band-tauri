@@ -146,7 +146,10 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
   - **숨은 출력 지연 h**(PR #34 M2): 드라이버 보고 출력 지연(`StreamInfo.out_reported_latency_frames`: ASIO `ASIOGetLatencies`, 자체 WASAPI `GetStreamLatency`) − 콜백 크기(이미 버퍼 1개를 넣었으므로)를 0 이상으로 자른 값이다. WASAPI 공유 엔진 주기·드라이버 안전 오프셋·USB 내부 버퍼가 여기 들어간다. 드라이버가 알려 주지 않으면(cpal WASAPI 등) 아래 루프백 보정값을 쓴다. 둘 다 없으면 h = 0이고 `outputLatencyMs = null`로 "보정 안 됨"을 알린다(피어 간 숨은 지연 차가 그대로 정렬 오차가 된다).
   - **루프백 보정값으로 보정**(PR #34 M2(a), `measured_hidden_out_us`): 루프백 측정의 `offsetMs`(= 실측 왕복 − 입력 버퍼 − 출력 버퍼)는 숨은 입력 + 숨은 출력이다. 출력 쪽 몫은 드라이버가 입력 지연만 보고하면 그 숨은 입력(보고 − 입력 콜백 크기)을 뺀 나머지, 아니면 **반**(입·출력 대칭 가정: 변환기·WASAPI 엔진 주기·USB 안전 여유는 보통 양방향에 비슷하게 있다)이다. 0..100ms로 자른다. 비대칭이면 (숨은 출력 − 숨은 입력)/2가 남는다.
   - 드라이버 출력 보고가 있으면 그것이 우선이다(출력 쪽을 직접 알려 주므로). 출처는 `outputLatencySource`(`driver` | `loopback` | null).
-  - 값의 수명: 루프백 측정이 정상(`verdict = ok`)이면 `EngineManager`가 그 장치 구성(드라이버·입출력 장치·레이트, `Engine::device_key`)에 묶어 기억하고, 같은 구성으로 시작하는 엔진(테스트 모드에서 재고 합주를 시작하는 흐름)에 적용한다. 장치 구성이 다르면 쓰지 않는다. 앱 재시작 뒤에는 앱이 저장해 둔 값을 `engine_set_loopback_offset`으로 다시 넣는다(null = 해제).
+  - 값의 수명: 루프백 측정이 정상(`verdict = ok`)이면 `EngineManager`가 그 장치 구성(`Engine::device_key`)에 묶어 기억하고, 같은 구성으로 시작하는 엔진(테스트 모드에서 재고 합주를 시작하는 흐름)에 적용한다. 장치 구성이 다르면 쓰지 않는다.
+  - 장치 구성 키(PR #57 M1·L4): 드라이버, 실제 백엔드(자체 WASAPI/cpal 폴백), 실제로 연 입출력 장치(기본 장치로 열었으면 그때 고른 장치 — OS 기본 장치가 바뀌면 다른 키), 요청 버퍼 크기, in/out 레이트. 버퍼를 넣는 이유: 보고 없는 장치(cpal WASAPI)는 엔드포인트 버퍼 − 콜백 크기 몫이 숨은 출력에 들어가고, 드라이버 안전 여유도 버퍼에 따라 다를 수 있다. 앱이 값을 저장할 때도 같은 구성(장치·버퍼·레이트)별로 저장한다.
+  - 범위(−50..200ms) 밖의 측정값은 잘라 쓰지 않고 기억하지 않는다(`engine_set_loopback_offset`이 거부하는 것과 같음). 측정이 실패하거나 범위 밖이면 이전 값이 그대로 남는다. 기억 슬롯은 1개(마지막 구성과 값)다.
+  - 앱 재시작 뒤에는 앱이 저장해 둔 값을 `engine_set_loopback_offset`으로 다시 넣는다(엔진 시작 뒤에만 가능, null = 키와 무관하게 슬롯 해제).
   - 워커만 읽는다(뮤텍스, 반복마다). 출력 콜백 경로는 바뀌지 않는다(클릭 프레임 계산만 이동).
   - **콜백 공백**(PR #34 M3): `DeviceClock`은 2초 창 최솟값 외에 0.15초 짧은 창 최솟값을 본다. 짧은 창 전체가 긴 창보다 3ms 넘게 떠 있으면 공백(장치 일시 중단·스트림 재시작·긴 xrun)으로 보고 창을 리셋한다. 공백 뒤 0.15~0.3초 안에 재수렴한다(이전에는 최대 2초 동안 공백만큼 늦은 클릭). 워커 기상 지연 스파이크는 같은 짧은 창의 다른 관측이 최솟값을 끌어내려 리셋을 일으키지 않는다.
 - 워커는 다음 클릭 하나를 `ClickShared::next`(원자 u64 = `프레임 << 1 | 강박`)에 올린다(CAS). 콜백이 가져가면 다음 박을 올린다.
@@ -383,7 +386,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_set_master_gain` | `{ gain: number }` | `null` |
 | `engine_set_metronome` | `{ metronome: MetronomeConfig }` | `MetronomePlan` — 공유 메트로놈(P2-3, 1.4절). 방장은 `refPeerId` 없이 부른다(`startUs`를 비우면 지금 + 300ms, 반환한 `startUs`를 방에 알린다). 다른 연주자는 `refPeerId` = 방장 엔진 peerId, `startUs` = 방장이 알린 값으로 부른다(그때 `startUs` 필수). 기준 피어가 아직 없거나 시계 표본이 없으면 `synced=false`로 기다린다. 네트워크 없는 엔진(테스트 모드)은 `refPeerId` 없이만 된다(혼자 연습). 다시 부르면 새 계획으로 바로 바뀐다 |
 | `engine_set_metronome_gain` | `{ gain: number, muted: boolean }` | `null` — 클릭 볼륨(0..4, 기본 0.8)·뮤트. 내 장치 출력에만 적용(믹스 탭·방송·녹음에는 클릭이 없음), 엔진 재시작 간 유지 |
-| `engine_set_loopback_offset` | `{ offsetMs: number \| null }` | `null` — 메트로놈 숨은 출력 지연 보정용 루프백 보정값(PR #34 M2(a), 1.4절). `offsetMs` = `engine_measure_loopback` 결과의 `offsetMs`(-50..200, 밖이면 오류). 실행 중인 엔진에 적용하고 그 장치 구성에 묶어 기억한다(같은 구성으로 다시 시작하는 엔진에도 적용). null = 해제. 루프백 측정이 `ok`면 엔진이 같은 일을 자동으로 하므로, 앱 재시작 뒤 저장값을 다시 넣거나 끌 때 쓴다. 드라이버가 출력 지연을 보고하면 드라이버 값이 우선 |
+| `engine_set_loopback_offset` | `{ offsetMs: number \| null }` | `null` — 메트로놈 숨은 출력 지연 보정용 루프백 보정값(PR #34 M2(a), 1.4절). `offsetMs` = `engine_measure_loopback` 결과의 `offsetMs`(-50..200, 밖이면 오류). 실행 중인 엔진에 적용하고(엔진이 없으면 오류) 그 장치 구성(1.4절 키)에 묶어 기억한다(같은 구성으로 다시 시작하는 엔진에도 적용). null = 해제. 루프백 측정이 `ok`면 엔진이 같은 일을 자동으로 하므로, 앱 재시작 뒤 저장값을 다시 넣거나 끌 때 쓴다. 드라이버가 출력 지연을 보고하면 드라이버 값이 우선 |
 | `engine_stats` | — | `EngineStats` |
 | `engine_record_folder` | — | `string` — 현재 녹음 저장 폴더(고른 폴더, 없으면 음악 폴더/`Band Recordings`). 1.5절 |
 | `engine_record_pick_folder` | — | `string \| null` — 폴더 대화상자(호출한 창에 모달). 고른 폴더를 앱 설정에 남기고 돌려준다. 취소하면 `null`. 경로는 프론트가 넘기지 않는다 |
@@ -392,7 +395,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_record_set_track_names` | `{ trackNames: Record<string, string> }` | `null` — 녹음 중 피어 트랙 이름(peerId → 표시 이름)을 더한다(녹음 중에 들어온 연주자, PR #49 M1). 이후 만드는 트랙은 이 이름을 쓰고, 이름 없이(peerId 앞 8자) 만든 트랙은 정지 때 파일 이름을 바꾼다. 녹음 중이 아니면 에러. 1.5절 |
 | `engine_subscribe_mix` | `{ onChunk: Channel<ArrayBuffer> }` | `null` — 20ms마다 48kHz stereo f32 인터리브 믹스(내 입력 포함) 전송. 관람자 브릿지용 |
 | `engine_unsubscribe_mix` | — | `null` |
-| `engine_measure_loopback` | `{ runs?: number }` | `LoopbackReport` — 하드웨어 루프백 왕복(P1-1). 실행 중인 엔진(보통 테스트 모드)에서 `runs`회(기본 8, 1..=20, 반복당 약 0.7초). 측정 동안 장치 출력은 자극만 낸다(모니터·피어 소리 없음). 입·출력 레이트가 다르면 에러, 네트워크 세션 중(합주 중)이면 에러. 판정이 `ok`면 `offsetMs`를 그 장치 구성의 메트로놈 출력 지연 보정으로 기억한다(`engine_set_loopback_offset`, 1.4절) |
+| `engine_measure_loopback` | `{ runs?: number }` | `LoopbackReport` — 하드웨어 루프백 왕복(P1-1). 실행 중인 엔진(보통 테스트 모드)에서 `runs`회(기본 8, 1..=20, 반복당 약 0.7초). 측정 동안 장치 출력은 자극만 낸다(모니터·피어 소리 없음). 입·출력 레이트가 다르면 에러, 네트워크 세션 중(합주 중)이면 에러. 판정이 `ok`이고 `offsetMs`가 −50..200이면 그 장치 구성의 메트로놈 출력 지연 보정으로 기억한다(`engine_set_loopback_offset`, 1.4절) |
 | `engine_set_echo_mode` | `{ peerId: string, enabled: boolean }` | `null` — 에코하는 쪽의 동의/해제. 켜기는 그 피어가 지금 요청 중(`PeerStats.echoRequested`)일 때만 된다(아니면 에러). 상대 요청이 끝나면 엔진이 스스로 끈다 |
 | `engine_measure_echo_peer` | `{ peerId: string, runs?: number, waitMs?: number }` | `EchoReport` — 측정하는 쪽. 그 피어에게 에코를 요청하고 동의를 `waitMs`(기본 30000, 최대 120000)까지 기다린 뒤 클릭 `runs`개(기본 8)로 잰다. 동의가 없으면 "수락하지 않았습니다" 에러 |
 | `engine_cancel_measure` | — | `null` — 진행 중인 측정 취소(진행 중인 측정 커맨드는 "취소" 에러로 끝난다) |
