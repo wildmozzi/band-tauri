@@ -25,7 +25,7 @@ const PLAN_INFO: Record<string, PlanInfo> = {
       'Mix Lab 기본 기능',
       '광고 제거'
     ],
-    color: '#7b7bff'
+    color: 'var(--indigo-400)'
   },
   pro: {
     name: 'Pro 플랜',
@@ -39,7 +39,7 @@ const PLAN_INFO: Record<string, PlanInfo> = {
       '팀 관리 기능',
       '세션 히스토리'
     ],
-    color: '#ff7ab8'
+    color: 'var(--pink-400)'
   }
 }
 
