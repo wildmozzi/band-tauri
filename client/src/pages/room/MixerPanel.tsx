@@ -1,8 +1,10 @@
 import type { PeerInstrument } from '../../contexts/RoomContext'
 import { useRoom } from '../../contexts/RoomContext'
 import { BroadcastMixerChannel, MyMixerChannel, PeerMixerChannel } from './MixerChannels'
-import { DEFAULT_MIX, formatDuration, formatPan, levelClass } from './roomDetailModel'
+import { DEFAULT_MIX, formatDuration, formatPan, levelClass, performerName } from './roomDetailModel'
 import { DiagnosticsExport } from '../../components/DiagnosticsExport'
+import { NativeRecordingControl } from './NativeRecordingControl'
+import { isNativeApp } from '../../native/engineApi'
 
 /** 마스터 볼륨·음소거·패닝(관람만)·레벨 */
 function MixerMaster({ isPerformer }: { isPerformer: boolean }) {
@@ -99,12 +101,15 @@ export function MixerPanel({
   hasAnyPerformer,
   broadcasterName,
   onOpenRecordings,
+  roomTitle,
 }: {
   isPerformer: boolean
   remotePerformers: [string, PeerInstrument][]
   hasAnyPerformer: boolean
   broadcasterName: string | null
   onOpenRecordings: () => void
+  /** 녹음 세션 폴더 이름에 붙인다 */
+  roomTitle?: string | null
 }) {
   const {
     canPerform,
@@ -211,8 +216,15 @@ export function MixerPanel({
         </div>
       </div>
 
-      {/* 녹음 컨트롤 */}
-      <RecordingControl onOpenRecordings={onOpenRecordings} />
+      {/* 녹음: 앱 연주자는 엔진 멀티트랙(P2-4), 관람자는 방송 믹스(MediaRecorder) */}
+      {isPerformer && isNativeApp() ? (
+        <NativeRecordingControl
+          peers={remotePerformers.map(([oderId, p]) => ({ peerId: oderId, name: performerName(p.nickname, oderId) }))}
+          roomTitle={roomTitle}
+        />
+      ) : (
+        <RecordingControl onOpenRecordings={onOpenRecordings} />
+      )}
 
       {/* 관람자 안내 */}
       {!isPerformer && (
