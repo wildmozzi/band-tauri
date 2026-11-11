@@ -30,7 +30,9 @@
 //!   5초 창이라 순간 손실 하나로는 켜지지 않는다(100ms 버스트 하나는 2.5ms 프레임에서 5초 창 2%에 닿을 수 있다 —
 //!   그 정도 버스트가 있는 회선이면 PLC가 나은 쪽이라 켜지는 것이 맞다).
 //! - 끄기: 보고 손실 < `LOSS_EXIT_PCT`(1%)가 `hold` 동안 이어진다. 보고가 `REPORT_STALE`(3초) 넘게 없으면
-//!   (옛 엔진, 상대가 아직 재생 전) 판단 근거가 없는 것으로 보고 켜지 않으며, 켜져 있었으면 "손실 없음" 쪽으로 센다.
+//!   (옛 엔진, 상대가 아직 재생 전) 판단 근거가 없는 것으로 보고 켜지 않는다. 켜져 있을 때 보고가 끊기면 그 원인이 손실
+//!   자체일 수 있으므로(긴 단절로 상대 재생 멈춤) `REPORT_GIVE_UP`(30초) 동안은 복귀를 새로 시작하지 않고, 그 뒤
+//!   "손실 없음" 쪽으로 센다(이미 1% 아래로 세던 타이머는 끊겨도 이어 간다).
 //! - 손실률은 망에서 생기므로 코덱을 바꿔도 보고 값은 그대로다. 그래서 복귀는 망이 실제로 좋아졌을 때만 일어난다.
 //! - 인코더의 예상 손실(`OPUS_SET_PACKET_LOSS_PERC`)은 보고 손실에 맞춘다(`loss_opus_perc`). 2.5ms 프레임은 CELT 전용이라
 //!   in-band FEC(LBRR, SILK 전용)는 실제로 실리지 않는다. 이득은 Opus PLC와, 손실률이 높을수록 프레임 간 예측을 줄이는
@@ -60,6 +62,8 @@ pub const LOSS_ENTER_SUSTAIN: Duration = Duration::from_secs(1);
 pub const LOSS_EXIT_PCT: f32 = 1.0;
 /// 이보다 오래된 보고는 없는 것으로 본다(Ping 500ms × 6).
 pub const REPORT_STALE: Duration = Duration::from_secs(3);
+/// 켜진 동안 보고가 이만큼 없으면 근거 없음으로 보고 복귀 쪽으로 센다(그 전에는 복귀를 시작하지 않는다).
+pub const REPORT_GIVE_UP: Duration = Duration::from_secs(30);
 /// 릴레이 부하로만 켜졌을 때의 인코더 예상 손실(%) — 설정 Opus(1.3절)와 같다.
 pub const DEFAULT_OPUS_LOSS_PERC: u8 = 5;
 
@@ -88,6 +92,29 @@ pub fn loss_opus_perc(reported_loss_pct: Option<f32>) -> u8 {
 pub enum CodecReason {
     RelayLoad,
     LossFeedback,
+}
+
+/// 이 피어에게 이번 프레임을 자동 전환 Opus로 보낼 이유. `relay_on` = 릴레이 부하 정책 켜짐,
+/// `on_relay_path` = 이 피어에게 오디오를 릴레이로 보냄, `loss_on` = 이 피어의 손실 피드백 켜짐.
+/// 둘 다 해당하면 `RelayLoad`(설계 3절 7·9). 워커의 인코드 여부와 송신 시 이유 표시가 같은 규칙을 쓴다.
+pub fn auto_reason(relay_on: bool, on_relay_path: bool, loss_on: bool) -> Option<CodecReason> {
+    if relay_on && on_relay_path {
+        Some(CodecReason::RelayLoad)
+    } else if loss_on {
+        Some(CodecReason::LossFeedback)
+    } else {
+        None
+    }
+}
+
+/// 피어 전용 인코더의 예상 손실(%). 손실 피드백이면 보고 손실에 맞추되 릴레이 경로면 기본값 아래로 내리지 않고,
+/// 릴레이 부하로만 켜졌거나 꺼져 있으면 기본값(설정 Opus와 같음).
+pub fn auto_opus_perc(loss_on: bool, on_relay_path: bool, reported_loss_pct: Option<f32>) -> u8 {
+    if loss_on {
+        loss_opus_perc(reported_loss_pct).max(if on_relay_path { DEFAULT_OPUS_LOSS_PERC } else { 0 })
+    } else {
+        DEFAULT_OPUS_LOSS_PERC
+    }
 }
 
 /// 복귀 hold와 플래핑 규칙(두 정책 공통): 복귀한 지 `FLAP_WINDOW` 안에 다시 켜지면 hold를 두 배로(최대 `HOLD_MAX`),
@@ -276,7 +303,13 @@ impl LossCodecPolicy {
             }
             return None;
         }
-        // 보고가 끊기면(상대 재생 멈춤·옛 엔진으로 교체 등) 손실 근거가 없으므로 복귀 쪽으로 센다
+        // 보고가 끊긴 원인은 손실 자체일 수도 있다(긴 단절로 상대 지터 버퍼가 재생을 벗어남). 그래서 끊긴 지
+        // `REPORT_GIVE_UP` 전까지는 복귀를 새로 시작하지 않는다(이미 1% 아래로 세던 타이머는 이어 간다). 그보다 오래
+        // 없으면(옛 엔진으로 교체, 상대 재생 멈춤) 근거 없음 → 복귀 쪽으로 센다(#66 리뷰 L3).
+        let gave_up = report.is_none_or(|(_, at)| now.saturating_duration_since(at) >= REPORT_GIVE_UP);
+        if loss.is_none() && !gave_up && self.below_since.is_none() {
+            return None;
+        }
         if loss.is_none_or(|l| l < LOSS_EXIT_PCT) {
             let since = *self.below_since.get_or_insert(now);
             if now.duration_since(since) >= self.hy.hold() {
@@ -466,16 +499,39 @@ mod tests {
         let mut p = LossCodecPolicy::default();
         run_reports(&mut p, t0, 0, 3, Some(4.0));
         assert!(p.active());
-        // 보고가 끊김(상대가 옛 엔진으로 바뀜 등): 3초 뒤부터 "손실 없음"으로 세고 hold 뒤 복귀
+        // 보고가 끊김(상대가 옛 엔진으로 바뀜, 또는 심한 손실로 상대 재생이 멈춤): 30초 동안은 복귀를 시작하지 않고
+        // (손실이 원인일 수 있음), 그 뒤 "근거 없음"으로 세어 hold 뒤 복귀
         let last = t0 + Duration::from_millis(2500);
         let mut off = None;
-        for ms in (3000..30_000).step_by(200) {
+        for ms in (3000..60_000).step_by(200) {
             if p.update(t0 + Duration::from_millis(ms), true, rep(4.0, last)).is_some() {
                 off = Some(ms);
                 break;
             }
         }
-        assert_eq!(off, Some(15_600), "보고가 3초 넘게 없으면(5.6초) + hold 10초");
+        assert_eq!(off, Some(42_600), "마지막 보고(2.5초) + 30초(32.6초 점검) + hold 10초");
+        // 보고 자체가 없는(None) 피어는 바로 복귀 쪽으로 센다
+        let mut q = LossCodecPolicy::default();
+        run_reports(&mut q, t0, 0, 3, Some(4.0));
+        assert!(q.active());
+        assert_eq!(q.update(t0 + Duration::from_secs(4), true, None), None);
+        assert_eq!(q.update(t0 + Duration::from_secs(14), true, None), Some(false));
+    }
+
+    /// 1% 아래로 세던 중에 보고가 끊기면 그 타이머는 이어 간다(복귀를 막지 않음). 1~2% 사이로 머물다 끊기면 시작하지 않는다.
+    #[test]
+    fn loss_feedback_stale_reports_keep_running_exit_timer_only() {
+        let t0 = Instant::now();
+        let mut p = LossCodecPolicy::default();
+        run_reports(&mut p, t0, 0, 3, Some(4.0));
+        assert!(p.active());
+        // 0.3% 보고 4초(타이머 시작), 그 뒤 끊김 → 시작 + 10초에 복귀
+        let start = t0 + Duration::from_secs(3);
+        assert_eq!(p.update(start, true, rep(0.3, start)), None);
+        let last = start + Duration::from_secs(4);
+        assert_eq!(p.update(last, true, rep(0.3, last)), None);
+        assert_eq!(p.update(start + Duration::from_secs(9), true, rep(0.3, last)), None);
+        assert_eq!(p.update(start + Duration::from_secs(10), true, rep(0.3, last)), Some(false));
     }
 
     #[test]
@@ -494,6 +550,26 @@ mod tests {
             ms = off[0].0 + 5000; // 5초 뒤 다시 손실(플래핑)
         }
         assert_eq!(holds, vec![10, 20, 40, 80]);
+    }
+
+    /// 두 이유가 겹칠 때(#66 리뷰 L4): 릴레이 경로면 `RelayLoad`로 보이고, 예상 손실은 보고 기반과 기본값(5) 중 큰 쪽.
+    #[test]
+    fn overlapping_reasons_show_relay_load_and_keep_default_perc() {
+        use CodecReason::*;
+        // (relay_on, 릴레이 경로, 손실 피드백) → 이유
+        assert_eq!(auto_reason(true, true, true), Some(RelayLoad));
+        assert_eq!(auto_reason(true, true, false), Some(RelayLoad));
+        assert_eq!(auto_reason(true, false, true), Some(LossFeedback), "직접 경로 피어는 릴레이 부하 대상이 아니다");
+        assert_eq!(auto_reason(false, true, true), Some(LossFeedback));
+        assert_eq!(auto_reason(true, false, false), None);
+        assert_eq!(auto_reason(false, true, false), None);
+        assert_eq!(auto_reason(false, false, false), None);
+        // 예상 손실
+        assert_eq!(auto_opus_perc(true, true, Some(2.5)), DEFAULT_OPUS_LOSS_PERC, "겹치면 max(3, 5)");
+        assert_eq!(auto_opus_perc(true, true, Some(9.2)), 10);
+        assert_eq!(auto_opus_perc(true, false, Some(2.5)), 3, "직접 경로 손실 피드백은 보고 기반");
+        assert_eq!(auto_opus_perc(true, false, None), DEFAULT_OPUS_LOSS_PERC);
+        assert_eq!(auto_opus_perc(false, true, Some(9.0)), DEFAULT_OPUS_LOSS_PERC, "릴레이 부하만이면 기본값");
     }
 
     #[test]

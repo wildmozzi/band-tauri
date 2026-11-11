@@ -160,3 +160,42 @@ fn direct_path_loss_feedback_switches_to_opus_and_back() {
     assert!(t_off.is_some_and(|t| t >= Duration::from_secs(10)), "hold 뒤 PCM16 복귀: {t_off:?}");
     assert_eq!(p.tx_codec_reason, None);
 }
+
+/// 손실을 겪는 피어에게만 전환되는지(#66 리뷰 L4): A가 B(손실 프록시 경유)와 C(직접, 손실 없음)에게 보낸다.
+/// 실제 워커·`send_audio` 경로에서 B만 Opus(`LossFeedback`)로 바뀌고 C는 PCM16을 유지해야 한다.
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::relay_codec::tests::overlapping_reasons_*"]
+fn loss_feedback_switches_only_the_lossy_peer() {
+    let cfg = EngineConfig { buffer_size: 128, frame_ms: 2.5, codec: CodecKind::Pcm16, channels: 1, input_channels: vec![0], ..Default::default() };
+    let start = |id: &str, be: FakeBackend| Engine::start(cfg.clone(), Arc::new(be), Arc::new(MixControls::default()), Some((id.into(), test_net()))).unwrap();
+    let a = start("alice", sine_backend());
+    let b = start("bob", FakeBackend::silence(48_000));
+    let c = start("carol", FakeBackend::silence(48_000));
+    let proxy = LossyProxy::start(local_addr(&a), local_addr(&b));
+    let cand = |d: &LocalDescriptor, addr: SocketAddr| LocalDescriptor {
+        candidates: vec![Candidate { kind: CandidateKind::Lan, addr: addr.to_string() }],
+        ..d.clone()
+    };
+    a.add_peer("bob".into(), &cand(b.descriptor().unwrap(), proxy.pa)).unwrap();
+    b.add_peer("alice".into(), &cand(a.descriptor().unwrap(), proxy.pb)).unwrap();
+    a.add_peer("carol".into(), &cand(c.descriptor().unwrap(), local_addr(&c))).unwrap();
+    c.add_peer("alice".into(), &cand(a.descriptor().unwrap(), local_addr(&a))).unwrap();
+    let ready = |id: &str| peer(&a, id).is_some_and(|p| p.remote_loss_pct.is_some() && p.tx_codec == Some(CodecKind::Pcm16));
+    assert!(wait_until(Duration::from_secs(10), || ready("bob") && ready("carol")).is_some(), "연결·첫 보고: {:?}", a.stats().peers);
+
+    proxy.drop_every.store(20, Ordering::Relaxed);
+    let t_on = wait_until(Duration::from_secs(15), || peer(&a, "bob").is_some_and(|p| p.tx_codec_reason == Some(CodecReason::LossFeedback)));
+    assert!(t_on.is_some(), "B 전환: {:?}", peer(&a, "bob"));
+    // 전환 뒤 3초 동안 C는 계속 PCM16(이유 없음)
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(3) {
+        let pb = peer(&a, "bob").unwrap();
+        let pc = peer(&a, "carol").unwrap();
+        assert_eq!((pb.tx_codec, pb.tx_codec_reason), (Some(CodecKind::Opus), Some(CodecReason::LossFeedback)), "{pb:?}");
+        assert_eq!((pc.tx_codec, pc.tx_codec_reason, pc.tx_codec_auto), (Some(CodecKind::Pcm16), None, false), "{pc:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let pc_rx = peer(&c, "alice").unwrap();
+    println!("B 전환 {t_on:?}; C 수신 손실 {:.2}% 은닉 {:.2}%", pc_rx.loss_pct, pc_rx.conceal_pct);
+    assert!(pc_rx.loss_pct < 0.5, "{pc_rx:?}");
+}

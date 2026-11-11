@@ -12,10 +12,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use band_lib::engine::codec::Encoder;
 use band_lib::engine::config::{CodecKind, EngineConfig};
 use band_lib::engine::cpuprof::{cycle_pct, process_cycles, tsc_now, CpuStats};
 use band_lib::engine::device::fake::FakeBackend;
 use band_lib::engine::mixer::MixControls;
+use band_lib::engine::relay_codec::CodecReason;
 use band_lib::engine::stats::PeerStateKind;
 use band_lib::engine::Engine;
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
@@ -62,7 +64,7 @@ struct Row {
     xruns: u64,
 }
 
-fn run(codec: CodecKind, frame_ms: f32) -> Row {
+fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
     let cfg = EngineConfig { buffer_size: 128, frame_ms, codec, channels: 1, input_channels: vec![0], ..Default::default() };
     let engines: Vec<Engine> = (0..PEERS)
         .map(|i| {
@@ -85,8 +87,22 @@ fn run(codec: CodecKind, frame_ms: f32) -> Row {
         assert!(t0.elapsed() < Duration::from_secs(30), "풀메시 연결 실패");
         std::thread::sleep(Duration::from_millis(50));
     }
+    if force_auto {
+        // P1-4f M1: PCM16 설정에서 손실 피드백이 모든 피어에게 켜진 최악 조건(엔진마다 프레임당 Opus 인코딩 5회)
+        for e in &engines {
+            e.force_auto_opus(true).unwrap();
+        }
+    }
     // 예열(지터 버퍼 수렴) 후 창을 한 번 회전해 기준을 맞춘다
     std::thread::sleep(Duration::from_secs(3));
+    if force_auto {
+        for (i, e) in engines.iter().enumerate() {
+            for p in e.stats().peers {
+                assert_eq!(p.tx_codec_reason, Some(CodecReason::LossFeedback), "엔진 {i} → {}: 강제 전환이 안 됨", p.peer_id);
+                assert_eq!(p.tx_codec, Some(CodecKind::Opus));
+            }
+        }
+    }
     // 창 회전과 xrun 기준(연결·예열 구간 제외)
     let x0: u64 = engines.iter().map(|e| e.stats().xruns).sum();
     let (p0, k0) = (process_cycles(), tsc_now());
@@ -100,7 +116,7 @@ fn run(codec: CodecKind, frame_ms: f32) -> Row {
     }
     let workers: Vec<f32> = cpus.iter().map(|c| c.worker_pct.unwrap_or(f32::NAN)).collect();
     let row = Row {
-        label: format!("{codec:?} {frame_ms}ms"),
+        label: if force_auto { format!("{codec:?} {frame_ms}ms + 5피어 Opus 개별 인코딩(손실 피드백 강제)") } else { format!("{codec:?} {frame_ms}ms") },
         me: cpus[0],
         worker_avg: workers.iter().sum::<f32>() / PEERS as f32,
         worker_max: workers.iter().cloned().fold(0.0, f32::max),
@@ -131,9 +147,49 @@ fn six_peer_full_mesh_cpu() {
     std::hint::black_box(acc);
     println!("Instant::now() 1회 ≈ {per_call_ns:.1}ns (논리 코어 {})", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0));
 
-    let rows: Vec<Row> = [(CodecKind::Opus, 2.5), (CodecKind::Pcm16, 2.5), (CodecKind::Opus, 5.0), (CodecKind::Pcm16, 5.0)]
+    // P1-4f M1: Opus 인코딩 1회 비용(단일 스레드, 음악 같은 화음+잡음 신호). 피어별 인코더 5개 × 프레임률이 1코어의 몇 %인지.
+    for (ch, frame) in [(1usize, 120usize), (2, 120), (1, 240), (2, 240)] {
+        let bitrate = if ch == 2 { 160_000 } else { 96_000 };
+        let mut enc = Encoder::new(CodecKind::Opus, ch, bitrate).unwrap();
+        let _ = enc.set_loss_perc(5);
+        let mut out = vec![0u8; 1500];
+        let frames = 8000usize;
+        let mut seed = 0x1234_5678u32;
+        let sig: Vec<f32> = (0..frames * frame * ch)
+            .map(|i| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let t = (i / ch) as f32 / 48_000.0;
+                let tone: f32 = [196.0f32, 247.0, 294.0, 392.0].iter().map(|f| (t * f * std::f32::consts::TAU).sin()).sum();
+                tone * 0.08 + (seed as f32 / u32::MAX as f32 - 0.5) * 0.05
+            })
+            .collect();
+        let t = Instant::now();
+        for f in sig.chunks_exact(frame * ch) {
+            std::hint::black_box(enc.encode(f, &mut out).unwrap());
+        }
+        let us = t.elapsed().as_secs_f64() * 1e6 / frames as f64;
+        let fps = 48_000.0 / frame as f64;
+        println!(
+            "Opus 인코딩 1회({}, {:.1}ms): {us:.1}µs → 피어 5명 개별 = 1코어의 {:.2}% (4코어 기준 {:.2}%)",
+            if ch == 2 { "stereo 160k" } else { "mono 96k" },
+            frame as f64 / 48.0,
+            us * fps * 5.0 / 1e4,
+            us * fps * 5.0 / 4e4
+        );
+    }
+
+    let rows: Vec<Row> = [
+        (CodecKind::Opus, 2.5, false),
+        (CodecKind::Pcm16, 2.5, false),
+        (CodecKind::Pcm16, 2.5, true),
+        (CodecKind::Opus, 5.0, false),
+        (CodecKind::Pcm16, 5.0, false),
+        (CodecKind::Pcm16, 5.0, true),
+    ]
         .into_iter()
-        .map(|(c, f)| run(c, f))
+        .map(|(c, f, force)| run(c, f, force))
         .collect();
     println!();
     println!("| 구성(128샘플 버퍼, 모노) | 워커 CPU 내 엔진 / 평균 / 최대 (%, 1코어) | 콜백 사용률 평균 (%) | 콜백 p50 / p99 / 최대 (µs, 내 엔진) | p99/주기 (%) | 6피어 최악 p99 (µs) | 연주자 1명 몫 프로세스 CPU (%, 1코어 → 4코어 기준) | 최대 은닉 (%) | xrun(측정 창, 6엔진 합) |");
