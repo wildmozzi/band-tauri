@@ -528,6 +528,11 @@ export function engineRecordStart(options?: RecordOptions): Promise<RecordStats>
   return invoke<RecordStats>('engine_record_start', { options: options ?? null })
 }
 
+/** 녹음 중 피어 트랙 이름 추가(peerId → 표시 이름). 녹음 중에 들어온 연주자도 닉네임 트랙이 된다 */
+export function engineRecordSetTrackNames(trackNames: Record<string, string>): Promise<void> {
+  return invoke<void>('engine_record_set_track_names', { trackNames })
+}
+
 /** 녹음 정지: 파일을 마무리하고 요약을 돌려준다 */
 export function engineRecordStop(): Promise<RecordSummary> {
   return invoke<RecordSummary>('engine_record_stop')

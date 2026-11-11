@@ -257,6 +257,8 @@ struct WriterShared {
     bytes: AtomicU64,
     tracks: AtomicU32,
     error: Mutex<Option<String>>,
+    /// 피어 트랙 이름(peerId → 표시 이름). 시작 옵션으로 채우고 녹음 중에 `set_track_names`로 더한다.
+    names: Mutex<HashMap<String, String>>,
 }
 
 struct Session {
@@ -328,7 +330,7 @@ impl Recorder {
             return Err(e);
         }
 
-        let shared = Arc::new(WriterShared::default());
+        let shared = Arc::new(WriterShared { names: Mutex::new(opts.track_names.clone()), ..Default::default() });
         let stop = Arc::new(AtomicBool::new(false));
         let w = Writer::new(&opts, folder.clone(), rate, s_c, b_c, resolve, shared.clone(), rt_shared.clone(), now_ms);
         let st = stop.clone();
@@ -355,6 +357,14 @@ impl Recorder {
     }
 
     /// 콜백이 돌려준 녹음 끝점(링)을 거둬 해제한다.
+    /// 녹음 중 피어 트랙 이름을 더한다(늦게 들어온 연주자, PR #49 M1). 앞으로 만들 트랙은 이 이름을 쓰고,
+    /// 이름 없이(peerId 앞 8자) 만든 트랙은 정지할 때 이 이름으로 파일을 바꾼다. 녹음 중이 아니면 에러.
+    pub fn set_track_names(&self, names: HashMap<String, String>) -> Result<(), String> {
+        let s = self.session.as_ref().ok_or("녹음 중이 아닙니다")?;
+        s.shared.names.lock().extend(names);
+        Ok(())
+    }
+
     pub fn reclaim(&mut self) {
         self.port.reclaim();
     }
@@ -391,6 +401,10 @@ enum TrackKey {
 struct Track {
     key: TrackKey,
     meta: RecordTrack,
+    /// 파일 번호(`NN-이름.wav`의 NN).
+    idx: usize,
+    /// 피어 트랙을 이름 없이(peerId 앞 8자) 만들었다 → 정지 때 이름이 생겼으면 파일을 바꾼다.
+    unnamed: bool,
     w: Option<WavWriter>,
     /// 쓴 프레임(타임라인 기준, 무음 포함).
     frames: u64,
@@ -404,7 +418,6 @@ struct Writer {
     blocks: HeapCons<RecBlock>,
     resolve: PeerResolver,
     local_name: String,
-    names: HashMap<String, String>,
     tracks: Vec<Track>,
     by_ssrc: HashMap<u32, usize>,
     origin: Option<u64>,
@@ -441,7 +454,6 @@ impl Writer {
             blocks,
             resolve,
             local_name: opts.local_name.clone().unwrap_or_else(|| "me".into()),
-            names: opts.track_names.clone(),
             tracks: Vec::new(),
             by_ssrc: HashMap::new(),
             origin: None,
@@ -529,8 +541,13 @@ impl Writer {
             return Some(i);
         }
         let id = (self.resolve)(ssrc).unwrap_or_else(|| format!("ssrc-{ssrc:08x}"));
-        let name = self.names.get(&id).cloned().unwrap_or_else(|| id.chars().take(8).collect());
+        let named = self.shared.names.lock().get(&id).cloned();
+        let unnamed = named.is_none();
+        let name = named.unwrap_or_else(|| id.chars().take(8).collect());
         let i = self.track(TrackKey::Peer(id.clone()), TrackKind::Peer, name, Some(id))?;
+        if let Some(t) = self.tracks.get_mut(i) {
+            t.unnamed = unnamed;
+        }
         self.by_ssrc.insert(ssrc, i);
         Some(i)
     }
@@ -552,7 +569,7 @@ impl Writer {
         };
         match WavWriter::create(&self.folder.join(&file), self.format, 2, self.rate) {
             Ok(w) => {
-                self.tracks.push(Track { key, meta: RecordTrack { kind, name, file, peer_id }, w: Some(w), frames: 0 });
+                self.tracks.push(Track { key, meta: RecordTrack { kind, name, file, peer_id }, idx, unnamed: false, w: Some(w), frames: 0 });
                 self.shared.tracks.store(self.tracks.len() as u32, Ordering::Relaxed);
                 Some(self.tracks.len() - 1)
             }
@@ -590,6 +607,31 @@ impl Writer {
         }
     }
 
+    /// 이름 없이 만든 피어 트랙에 녹음 중 이름이 생겼으면 파일 이름을 바꾼다(파일은 이미 닫힘). 실패하면 옛 이름 그대로.
+    fn rename_late_named(&mut self) {
+        let names = self.shared.names.lock().clone();
+        for t in self.tracks.iter_mut().filter(|t| t.unnamed) {
+            let Some(name) = t.meta.peer_id.as_ref().and_then(|id| names.get(id)) else { continue };
+            let clean = sanitize_name(name);
+            if clean.is_empty() {
+                continue;
+            }
+            let file = format!("{:02}-{clean}.wav", t.idx);
+            let to = self.folder.join(&file);
+            if to.exists() {
+                continue;
+            }
+            match std::fs::rename(self.folder.join(&t.meta.file), &to) {
+                Ok(()) => {
+                    t.meta.file = file;
+                    t.meta.name = name.clone();
+                    t.unnamed = false;
+                }
+                Err(e) => log::warn!("녹음 트랙 이름 바꾸기 실패({}): {e}", t.meta.file),
+            }
+        }
+    }
+
     fn finish(mut self) -> RecordSummary {
         let end = self.end;
         let mut bytes = 0;
@@ -613,6 +655,7 @@ impl Writer {
                 }
             }
         }
+        self.rename_late_named();
         let summary = RecordSummary {
             folder: self.folder.to_string_lossy().into_owned(),
             format: self.format,
@@ -786,6 +829,55 @@ mod tests {
         assert!(s_me[3 * n * 2..4 * n * 2].iter().all(|&v| v == 0));
         assert!(s_me[4 * n * 2] > 2_000_000);
         assert!(folder.join("session.json").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PR #49 M1: 녹음 중에 이름을 더하면 이후 트랙은 그 이름으로 만들고, 이름 없이 만든 트랙은 정지 때 파일 이름을 바꾼다.
+    #[test]
+    fn late_track_names_apply() {
+        let (mut port_rt, ctl) = record_port();
+        let mut rec = Recorder::new(ctl, 48_000);
+        let dir = tmp("latenames");
+        assert!(rec.set_track_names(HashMap::new()).is_err(), "녹음 중이 아니면 에러");
+        let resolve: PeerResolver = Box::new(|ssrc| match ssrc {
+            7 => Some("peer-aaaaaaaaaa".to_string()),
+            9 => Some("peer-b".to_string()),
+            _ => None,
+        });
+        rec.start(RecordOptions::default(), &dir, resolve, 0).unwrap();
+        let n = 240usize;
+        let data = vec![0.25f32; n * 2];
+        let feed = |port_rt: &mut RecordPortRt, k: u64, peers: &[(usize, u32)]| {
+            port_rt.poll();
+            let r = port_rt.active().expect("녹음 끝점");
+            r.begin(k * n as u64, n);
+            r.source(LOCAL_SOURCE, 0, &data);
+            for &(slot, ssrc) in peers {
+                r.source(slot, ssrc, &data);
+            }
+            r.finish(&data);
+        };
+        for k in 0..2 {
+            feed(&mut port_rt, k, &[(1, 7)]);
+        }
+        // 쓰기 스레드가 이름 없는 트랙을 만들 때까지 기다린다
+        let t0 = Instant::now();
+        while rec.stats().map(|s| s.tracks).unwrap_or(0) < 2 && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        rec.set_track_names(HashMap::from([("peer-aaaaaaaaaa".to_string(), "베이스".to_string()), ("peer-b".to_string(), "드럼".to_string())])).unwrap();
+        for k in 2..4 {
+            feed(&mut port_rt, k, &[(1, 7), (2, 9)]);
+        }
+        let (sum, _port_rt) = stop_with_rt(&mut rec, port_rt);
+        assert!(sum.error.is_none(), "{:?}", sum.error);
+        let peers: Vec<(&str, &str)> = sum.tracks.iter().filter(|t| t.kind == TrackKind::Peer).map(|t| (t.name.as_str(), t.file.as_str())).collect();
+        assert_eq!(peers, vec![("베이스", "02-베이스.wav"), ("드럼", "03-드럼.wav")]);
+        let folder = PathBuf::from(&sum.folder);
+        assert!(!folder.join("02-peer-aaa.wav").exists());
+        for t in &sum.tracks {
+            assert_eq!(data_frames(&folder.join(&t.file)).0, 4 * n, "{}", t.file);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

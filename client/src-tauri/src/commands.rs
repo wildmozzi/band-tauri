@@ -403,6 +403,16 @@ pub async fn engine_record_start(
     blocking(move || m.record_start(options.unwrap_or_default(), &dir)).await
 }
 
+/// 녹음 중 피어 트랙 이름 추가(peerId → 표시 이름). 녹음 중에 들어온 연주자 트랙도 닉네임으로 저장된다.
+#[tauri::command]
+pub async fn engine_record_set_track_names(
+    state: State<'_, EngineState>,
+    track_names: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let m = state.0.clone();
+    blocking(move || m.record_set_track_names(track_names)).await
+}
+
 /// 녹음 정지. 파일을 마무리하고 요약(세션 폴더의 `session.json`과 같은 내용)을 돌려준다.
 #[tauri::command]
 pub async fn engine_record_stop(state: State<'_, EngineState>) -> Result<RecordSummary, String> {
