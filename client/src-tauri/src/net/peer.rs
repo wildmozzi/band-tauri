@@ -644,11 +644,14 @@ pub struct Peer {
     pub conn: Mutex<ConnState>,
     pub jitter: Mutex<JitterBuffer>,
     pub mix: Arc<PeerMixCtl>,
-    /// 이 피어로 보내는 Audio 패킷 seq(피어별). 에코로 되돌리는 패킷도 같은 카운터를 써서 nonce가 겹치지 않는다.
-    pub tx_seq: AtomicU32,
+    /// 이 피어로 보내는 Audio 패킷 seq(송신 키별). 에코로 되돌리는 패킷도 같은 카운터를 써서 nonce가 겹치지 않는다.
+    /// 같은 키를 쓰는 살아 있는 항목(다른 peerId가 같은 descriptor를 보냄)끼리는 이 카운터를 같이 쓴다(`Net::add_peer`).
+    pub tx_seq: Arc<AtomicU32>,
     /// 이 피어로 마지막에 보낸 Audio 타임스탬프(에코 시작 시 타임스탬프를 이어 붙이는 데 쓴다).
     pub tx_last_ts: AtomicU32,
     pub echo: Mutex<EchoState>,
+    /// 이 피어 시계와 내 시계의 오프셋 추정(P2-3, Pong 평문의 응답자 시계로 갱신).
+    pub clock: Mutex<super::clock::ClockSync>,
 }
 
 pub struct PeerSetup<'a> {
@@ -679,9 +682,10 @@ impl Peer {
             conn: Mutex::new(ConnState::new(now)),
             jitter: Mutex::new(JitterBuffer::new(setup.jitter)),
             mix: Arc::new(PeerMixCtl::default()),
-            tx_seq: AtomicU32::new(rand::random()),
+            tx_seq: Arc::new(AtomicU32::new(rand::random())),
             tx_last_ts: AtomicU32::new(0),
             echo: Mutex::new(EchoState::default()),
+            clock: Mutex::new(super::clock::ClockSync::new()),
         })
     }
 
@@ -1080,7 +1084,7 @@ mod tests {
                 Candidate { kind: CandidateKind::Public, addr: RELAY.into() },
             ],
         };
-        let setup = PeerSetup { keys: &keys, my_ssrc: 1, jitter: JitterSettings { min_ms: 0.0, max_ms: 80.0 }, allow_loopback: false };
+        let setup = PeerSetup { keys: &keys, my_ssrc: 1, jitter: JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }, allow_loopback: false };
         let p = Peer::new("p".into(), &desc, &setup, Instant::now()).unwrap();
         p.conn.lock().on_handshake(RELAY.parse().unwrap(), false, &p.candidates, relay(), Instant::now());
         assert_eq!(p.hello_targets(relay()), vec!["192.168.0.5:4000".parse::<SocketAddr>().unwrap()]);

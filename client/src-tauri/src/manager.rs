@@ -208,6 +208,11 @@ impl EngineManager {
         self.slot.lock().starting
     }
 
+    /// start/stop이 불릴 때마다 오르는 세대. 테스트가 "다음 start가 이전 시작을 취소했다"를 벽시계 없이 기다리는 데 쓴다.
+    pub fn start_generation(&self) -> u64 {
+        self.slot.lock().generation
+    }
+
     pub fn with_engine<T>(&self, f: impl FnOnce(&mut Engine) -> Result<T, String>) -> Result<T, String> {
         let mut s = self.slot.lock();
         if s.starting && s.engine.is_none() {
@@ -215,6 +220,17 @@ impl EngineManager {
         }
         let engine = s.engine.as_mut().ok_or("엔진이 실행 중이 아닙니다")?;
         f(engine)
+    }
+
+    /// 진단 기록용(P2-5): 엔진이 있으면 통계·설정·네트워크 여부. 슬롯 락은 `stats()`만큼만 잡는다.
+    pub fn snapshot(&self) -> Option<crate::diag::Snapshot> {
+        let s = self.slot.lock();
+        s.engine.as_ref().map(|e| crate::diag::Snapshot {
+            stats: e.stats(),
+            config: e.config().clone(),
+            network: e.has_network(),
+            session: s.generation,
+        })
     }
 
     pub fn stats(&self) -> EngineStats {

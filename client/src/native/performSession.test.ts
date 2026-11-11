@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { EngineConfig, EngineStats, LocalDescriptor, RelayConfig, RelayStats } from './engineApi'
+import type { EngineConfig, EngineStats, LocalDescriptor, MetronomeConfig, RelayConfig, RelayStats } from './engineApi'
 import { DEFAULT_ENGINE_CONFIG } from './engineConfig'
 import { PerformSession, performErrorFromCode, type EngineBackend, type SignalOut } from './performSession'
 
@@ -82,6 +82,13 @@ class FakeEngine implements EngineBackend {
   }
   setInputMuted(muted: boolean) {
     return this.track(`mute:${muted}`, async () => null)
+  }
+  metronomeConfigs: MetronomeConfig[] = []
+  setMetronome(c: MetronomeConfig) {
+    return this.track(`metro:${c.running}:${c.refPeerId ?? 'self'}`, async () => {
+      this.metronomeConfigs.push(c)
+      return { running: c.running, bpm: c.bpm, beatsPerBar: c.beatsPerBar, startUs: c.startUs ?? 777_000, refPeerId: c.refPeerId ?? null }
+    })
   }
   stats() {
     return this.track('stats', async () => ({ ...stats(this.statsRunning), relay: this.relayStats }))
@@ -467,5 +474,88 @@ describe('PerformSession 릴레이 토큰 (P1-4b)', () => {
     session.handleSignal(relayMsg(2, Math.floor(Date.now() / 1000) + 120))
     await flush()
     expect(engine.calls.filter((c) => c.startsWith('relay:'))).toHaveLength(1)
+  })
+})
+
+describe('PerformSession 공유 메트로놈 (P2-3)', () => {
+  const state = { running: true, bpm: 100, beatsPerBar: 3, startUs: 5_000_000 }
+
+  it('방장: 엔진 계획의 startUs를 방에 알리고, 정지도 알린다', async () => {
+    const { session, start, sent, engine } = setup({ others: ['B'] })
+    expect(await session.setHostMetronome(true, 120, 4)).toBe(false) // 엔진 전에는 불가
+    await start()
+    expect(await session.setHostMetronome(true, 999, 0)).toBe(true)
+    expect(engine.metronomeConfigs[0]).toEqual({ running: true, bpm: 300, beatsPerBar: 1 })
+    expect(last(sent)).toEqual({ type: 'metronome', state: { running: true, bpm: 300, beatsPerBar: 1, startUs: 777_000 } })
+    expect(session.getState().metronome).toEqual({ running: true, bpm: 300, beatsPerBar: 1, leaderId: null })
+    await session.setHostMetronome(false, 300, 1)
+    expect(last(sent)).toMatchObject({ type: 'metronome', state: { running: false } })
+    expect(session.getState().metronome).toBeNull()
+  })
+
+  it('따르는 쪽: 방장 계획을 refPeerId=from으로 적용하고, 엔진 전에 받은 것은 시작 후 적용', async () => {
+    const { session, start, engine } = setup({ others: ['H'] })
+    expect(session.handleSignal({ type: 'metronome', from: 'H', state })).toBe(true)
+    expect(engine.metronomeConfigs).toHaveLength(0)
+    expect(session.getState().metronome).toEqual({ running: true, bpm: 100, beatsPerBar: 3, leaderId: 'H' })
+    await start()
+    await flush()
+    expect(engine.metronomeConfigs).toEqual([{ ...state, refPeerId: 'H' }])
+    // 잘못된 메시지는 무시
+    session.handleSignal({ type: 'metronome', from: 'H', state: { ...state, bpm: 5 } })
+    session.handleSignal({ type: 'metronome', state })
+    await flush()
+    expect(engine.metronomeConfigs).toHaveLength(1)
+  })
+
+  it('방장이 사라지면(native-leave) 클릭을 멈춘다', async () => {
+    const { session, start, engine } = setup({ others: ['H'] })
+    await start()
+    session.handleSignal({ type: 'metronome', from: 'H', state })
+    session.handleSignal({ type: 'native-leave', from: 'H' })
+    await flush()
+    expect(last(engine.metronomeConfigs)).toMatchObject({ running: false })
+    expect(session.getState().metronome).toBeNull()
+  })
+
+  it('방장 엔진만 재시작(ssrc-conflict)되면 정지를 먼저 알리고, 새 엔진에서 같은 BPM으로 새 박 0을 알린다(PR #36 M1)', async () => {
+    const { session, start, sent, engine } = setup({ others: ['B'] })
+    await start()
+    await session.setHostMetronome(true, 90, 3)
+    sent.length = 0
+    session.handleSignal({ type: 'error', code: 'ssrc-conflict', message: 'x' })
+    for (let i = 0; i < 8; i++) await flush()
+    expect(engine.calls.filter((c) => c === 'stop' || c.startsWith('start:'))).toEqual(['start:me', 'stop', 'start:me'])
+    const metros = sent.filter((m) => m.type === 'metronome')
+    expect(metros).toHaveLength(2)
+    expect(metros[0]).toMatchObject({ state: { running: false, bpm: 90, beatsPerBar: 3 } })
+    expect(metros[1]).toEqual({ type: 'metronome', state: { running: true, bpm: 90, beatsPerBar: 3, startUs: 777_000 } })
+    // 정지 알림은 새 descriptor보다 먼저, 새 계획은 그 뒤
+    const order = sent.map((m) => m.type)
+    expect(order.indexOf('metronome')).toBeLessThan(order.indexOf('native-descriptor'))
+    expect(order.lastIndexOf('metronome')).toBeGreaterThan(order.indexOf('native-descriptor'))
+    expect(last(engine.metronomeConfigs)).toEqual({ running: true, bpm: 90, beatsPerBar: 3 })
+    expect(session.getState().metronome).toEqual({ running: true, bpm: 90, beatsPerBar: 3, leaderId: null })
+  })
+
+  it('따르는 쪽 엔진 재시작은 방장 메트로놈을 건드리지 않는다', async () => {
+    const { session, start, sent } = setup({ others: ['H'] })
+    await start()
+    session.handleSignal({ type: 'metronome', from: 'H', state })
+    sent.length = 0
+    session.handleSignal({ type: 'error', code: 'ssrc-conflict', message: 'x' })
+    for (let i = 0; i < 8; i++) await flush()
+    expect(sent.filter((m) => m.type === 'metronome')).toHaveLength(0)
+  })
+
+  it('서버가 방장이 아니라고 거부하면 내 클릭도 끄고 에러를 보여 준다', async () => {
+    const { session, start, engine } = setup()
+    await start()
+    await session.setHostMetronome(true, 120, 4)
+    expect(session.handleSignal({ type: 'error', code: 'metronome-host-only' })).toBe(true)
+    await flush()
+    expect(last(engine.metronomeConfigs)).toMatchObject({ running: false })
+    expect(session.getState()).toMatchObject({ metronome: null, error: '메트로놈은 방장만 조작할 수 있습니다.' })
+    expect(session.getState().phase).toBe('running')
   })
 })

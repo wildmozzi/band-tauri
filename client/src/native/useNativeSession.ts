@@ -8,6 +8,7 @@ import {
   engineRemovePeer,
   engineSetRelay,
   engineSetInputMuted,
+  engineSetMetronome,
   engineSetPeerGain,
   engineStart,
   engineStats,
@@ -26,6 +27,7 @@ export const tauriEngineBackend: EngineBackend = {
   removePeer: engineRemovePeer,
   setPeerGain: engineSetPeerGain,
   setInputMuted: engineSetInputMuted,
+  setMetronome: engineSetMetronome,
   stats: engineStats,
 }
 

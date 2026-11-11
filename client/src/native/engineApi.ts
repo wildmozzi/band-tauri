@@ -43,6 +43,8 @@ export interface EngineConfig {
   opusBitrate?: number
   jitterMinMs?: number
   jitterMaxMs?: number
+  /** 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필, 기본 0.5(균형). 실행 중 변경은 engineSetJitterProfile */
+  jitterProfile?: number
   udpPort?: number
 }
 
@@ -95,6 +97,14 @@ export interface PeerStats {
   rttMs: number | null
   jitterMs: number
   bufferMs: number
+  /** 지터 버퍼 목표 깊이(ms): 지터 추정 + 은닉 마감 여유 + 언더런 여유 + 프로필 여유 */
+  targetMs: number
+  /** 최근 5초 은닉 비율(%, 손실 + 늦은 패킷 + 언더런) */
+  concealPct: number
+  /** 최근 5초 중 깊이 보정(샘플 버림·삽입) 모드였던 패킷 비율(%) */
+  corrTimePct: number
+  /** 깊이 보정의 최대 국소 피치 편차(센트, 재생 시작 이후). 상한 약 4.3센트 */
+  maxCorrCents: number
   lossPct: number
   late: number
   concealed: number
@@ -224,6 +234,48 @@ export interface EngineStats {
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
+  /** 공유 메트로놈 상태(P2-3). 옛 엔진이면 없음 */
+  metronome?: MetronomeStats
+}
+
+/**
+ * 공유 메트로놈 계획(P2-3, 설계 1.4절). 방장은 refPeerId 없이 부르고(startUs를 비우면 지금 + 300ms),
+ * 다른 연주자는 방장 엔진 peerId와 방장이 알린 startUs로 부른다. startUs는 기준 엔진 시계(µs).
+ */
+export interface MetronomeConfig {
+  running: boolean
+  /** 20..300 */
+  bpm: number
+  /** 1..16 */
+  beatsPerBar: number
+  startUs?: number | null
+  refPeerId?: string | null
+}
+
+/** `engine_set_metronome`이 적용한 계획. 방장은 이 값을 방에 알린다. */
+export interface MetronomePlan {
+  running: boolean
+  bpm: number
+  beatsPerBar: number
+  startUs: number
+  refPeerId: string | null
+}
+
+export interface MetronomeStats extends MetronomePlan {
+  /** 시간축이 잡힘(방장이거나 기준 피어 시계 표본 있음). false면 클릭을 내지 않는다 */
+  synced: boolean
+  /** 기준 피어 시계 − 내 시계(ms). 방장이면 0 */
+  clockOffsetMs: number | null
+  clockRttMs: number | null
+  driftPpm: number | null
+  /** 마지막으로 예약한 박 번호(0부터) */
+  beat: number | null
+  clicks: number
+  lateClicks: number
+  /** 콜백 공백 뒤 제 시각이 지나 건너뛴 클릭 수 */
+  skippedClicks: number
+  /** 클릭 시각에 반영한 숨은 출력 지연(ms). null = 드라이버가 알려 주지 않아 보정 안 됨 */
+  outputLatencyMs: number | null
 }
 
 // ============================================================================
@@ -320,8 +372,23 @@ export function engineSetMonitor(enabled: boolean, gain: number): Promise<null> 
   return invoke<null>('engine_set_monitor', { enabled, gain })
 }
 
+/** 지터 버퍼 프로필(0 저지연 ↔ 1 안정)을 실행 중에 바꾼다. 다음 시작에는 EngineConfig.jitterProfile을 쓴다 */
+export function engineSetJitterProfile(profile: number): Promise<null> {
+  return invoke<null>('engine_set_jitter_profile', { profile })
+}
+
 export function engineSetMasterGain(gain: number): Promise<null> {
   return invoke<null>('engine_set_master_gain', { gain })
+}
+
+/** 공유 메트로놈 계획 적용(P2-3). 적용된 계획을 돌려준다 */
+export function engineSetMetronome(metronome: MetronomeConfig): Promise<MetronomePlan> {
+  return invoke<MetronomePlan>('engine_set_metronome', { metronome })
+}
+
+/** 메트로놈 클릭 볼륨(0..4)·뮤트. 로컬 전용(내 귀에만), 엔진 재시작 간 유지 */
+export function engineSetMetronomeGain(gain: number, muted: boolean): Promise<null> {
+  return invoke<null>('engine_set_metronome_gain', { gain, muted })
 }
 
 export function engineStats(): Promise<EngineStats> {
@@ -369,6 +436,14 @@ export async function engineSubscribeMix(onChunk: (samples: Float32Array) => voi
 
 export function engineUnsubscribeMix(): Promise<null> {
   return invoke<null>('engine_unsubscribe_mix')
+}
+
+/**
+ * 진단 내보내기(P2-5): 저장 대화상자를 열고 진단 zip(엔진 통계 타임라인·설정·장치·앱/OS 정보·마스킹된 로그)을 쓴다.
+ * 저장한 경로, 취소하면 null.
+ */
+export function diagExport(): Promise<string | null> {
+  return invoke<string | null>('diag_export')
 }
 
 function toFloat32(data: unknown): Float32Array | null {

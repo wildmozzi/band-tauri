@@ -16,6 +16,7 @@ import {
   type PeerStats,
 } from '../native/engineApi'
 import { copyText, downloadText, echoRows, echoText, VERDICT_LABEL } from '../native/measureFormat'
+import { Modal } from './ui'
 import './LatencyMeasure.css'
 
 interface EchoMeasureProps {
@@ -113,46 +114,50 @@ export function EchoMeasure({ peerId, peerName, stats }: EchoMeasureProps) {
       )}
 
       {open && (
-        <div className="echo-modal-backdrop" onClick={close}>
-          <div className="echo-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="에코 측정">
-            <h3>에코 측정 — {peerName}</h3>
-            <p>
-              {peerName}님의 앱이 내 소리를 그대로 되돌려 보내고, 나는 클릭 8개를 보내 돌아온 시각으로 <b>네트워크 포함 왕복</b>을 잽니다.
-              상대 화면에 허용 버튼이 뜨며, 상대가 허용해야 시작됩니다(최대 30초 대기). 측정 동안 {peerName}님에게는 내 소리 대신 클릭이 가고,
-              나는 되돌아온 클릭을 듣습니다. 다른 연주자에게는 평소대로 내 소리가 갑니다.
-            </p>
-            <div className="measure-controls">
-              <button className="btn-primary" onClick={() => void run()} disabled={busy || !connected}>
-                {busy ? (stats?.peerEchoing ? '측정 중…' : '상대 확인 대기 중…') : '측정 시작'}
-              </button>
-              {busy && <button className="btn-secondary" onClick={() => void engineCancelMeasure()}>취소</button>}
-              <button className="btn-secondary" onClick={close}>닫기</button>
-            </div>
-            {error && <p className="measure-error">{error}</p>}
-            {report && (
-              <div className={`measure-result verdict-${report.verdict}`}>
-                <p className="measure-message"><b>{VERDICT_LABEL[report.verdict]}</b> — {report.message}</p>
-                <table className="measure-table">
-                  <tbody>
-                    {echoRows(report).map((row) => (
-                      <tr key={row.label}>
-                        <th scope="row">{row.label}</th>
-                        <td>
-                          {row.value}
-                          {row.hint && <small>{row.hint}</small>}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <div className="measure-actions">
-                  <button className="btn-secondary" onClick={() => void copyText(text).then(setCopied)}>{copied ? '복사됨' : '결과 복사'}</button>
-                  <button className="btn-secondary" onClick={() => downloadText(`echo-${measuredAt.slice(0, 19).replace(/[:T]/g, '-')}.txt`, text)}>텍스트로 저장</button>
-                </div>
-              </div>
-            )}
+        // 공용 Modal(포커스 트랩·Esc·포커스 복귀). 닫기 버튼은 본문에 있어 머리글 ×는 두지 않는다
+        <Modal
+          className="echo-modal-backdrop"
+          title={<>에코 측정 — {peerName}</>}
+          onClose={close}
+          closeButton={false}
+          classNames={{ backdrop: 'echo-modal-dismiss', content: 'echo-modal', header: 'echo-modal-header', body: 'echo-modal-body' }}
+        >
+          <p>
+            {peerName}님의 앱이 내 소리를 그대로 되돌려 보내고, 나는 클릭 8개를 보내 돌아온 시각으로 <b>네트워크 포함 왕복</b>을 잽니다.
+            상대 화면에 허용 버튼이 뜨며, 상대가 허용해야 시작됩니다(최대 30초 대기). 측정 동안 {peerName}님에게는 내 소리 대신 클릭이 가고,
+            나는 되돌아온 클릭을 듣습니다. 다른 연주자에게는 평소대로 내 소리가 갑니다.
+          </p>
+          <div className="measure-controls">
+            <button className="btn-primary" onClick={() => void run()} disabled={busy || !connected}>
+              {busy ? (stats?.peerEchoing ? '측정 중…' : '상대 확인 대기 중…') : '측정 시작'}
+            </button>
+            {busy && <button className="btn-secondary" onClick={() => void engineCancelMeasure()}>취소</button>}
+            <button className="btn-secondary" onClick={close}>닫기</button>
           </div>
-        </div>
+          {error && <p className="measure-error">{error}</p>}
+          {report && (
+            <div className={`measure-result verdict-${report.verdict}`}>
+              <p className="measure-message"><b>{VERDICT_LABEL[report.verdict]}</b> — {report.message}</p>
+              <table className="measure-table">
+                <tbody>
+                  {echoRows(report).map((row) => (
+                    <tr key={row.label}>
+                      <th scope="row">{row.label}</th>
+                      <td>
+                        {row.value}
+                        {row.hint && <small>{row.hint}</small>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="measure-actions">
+                <button className="btn-secondary" onClick={() => void copyText(text).then(setCopied)}>{copied ? '복사됨' : '결과 복사'}</button>
+                <button className="btn-secondary" onClick={() => downloadText(`echo-${measuredAt.slice(0, 19).replace(/[:T]/g, '-')}.txt`, text)}>텍스트로 저장</button>
+              </div>
+            </div>
+          )}
+        </Modal>
       )}
     </>
   )

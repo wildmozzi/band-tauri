@@ -180,6 +180,7 @@ body {
 
 .hero-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   justify-content: center;
   margin-bottom: 60px;
@@ -187,6 +188,7 @@ body {
 
 .primary-cta,
 .ghost-cta {
+  white-space: nowrap;
   padding: 14px 32px;
   font-size: 1rem;
   font-weight: 600;
@@ -526,7 +528,7 @@ body {
 }
 
 .form-group select option {
-  background: var(--dark-bg);
+  background: var(--bg-app);
   color: white;
 }
 
@@ -658,11 +660,64 @@ body {
   box-shadow: var(--shadow-glow-success);
 }
 
+/* 방 코드 / 초대 링크로 입장 (P2-6). pages/Rooms.css는 어디서도 import되지 않아 이 규칙만 옮겨 온다 (P3-12c) */
+.room-code-join {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.room-code-join input {
+  flex: 1;
+  min-width: 200px;
+  max-width: 420px;
+  padding: 8px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--white-a05);
+  color: inherit;
+}
+
+.room-code-join button {
+  padding: 8px 18px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--white-a08);
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.room-code-join button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.room-code-error {
+  color: var(--error);
+  font-size: 0.85rem;
+}
+
 .room-filters {
   display: flex;
   gap: 12px;
   margin-bottom: 32px;
   flex-wrap: wrap;
+}
+
+/* 커뮤니티 목록·글 상세: 본문 + 오른쪽 사이드바(트렌딩 태그). 좁은 화면에서는 한 열로 (P3-12c) */
+.community-feed-grid {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 24px;
+}
+
+@media (max-width: 1024px) {
+  .community-feed-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .filter-chip {
@@ -843,7 +898,7 @@ body {
   bottom: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
-  background: var(--bg-elevated);
+  background: var(--bg-panel-strong);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 8px;
@@ -871,7 +926,7 @@ body {
   background: var(--white-a08);
   border-radius: var(--radius-sm);
   font-size: 0.75rem;
-  color: var(--text-secondary);
+  color: var(--color-text-subtle);
   white-space: nowrap;
 }
 
@@ -2663,7 +2718,7 @@ body {
 .add-instrument select {
   width: 100%;
   padding: 12px 16px;
-  background: var(--bg-input);
+  background: var(--color-surface);
   border: 1px dashed var(--border);
   border-radius: var(--radius-xl);
   color: var(--text-muted);
@@ -3482,7 +3537,7 @@ body {
    합주실 규칙의 원본은 pages/RoomDetail.css다. 예전에는 같은 블록(약 1,800줄)이 여기 통째로 복사돼 있었고,
    App.css가 나중에 로드돼 아래 몇 규칙은 복사본 쪽 값이 실제로 적용되고 있었다. 화면이 바뀌지 않게 그 값만 남긴다. */
 .recording-time {
-  color: var(--text);
+  color: var(--color-text);
 }
 
 .recording-actions {

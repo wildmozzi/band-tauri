@@ -101,6 +101,38 @@ describe('Modal', () => {
     fireEvent.click(container.querySelector('.modal-backdrop')!)
     expect(onClose).toHaveBeenCalledTimes(1)
   })
+
+  it('classNames·description·closeButton: 기존 CSS를 쓰는 모달용 (P3-8a)', () => {
+    const onClose = vi.fn()
+    const { container } = render(
+      <Modal
+        className="modal-overlay"
+        title="프리미엄 기능입니다"
+        description="설명 문단"
+        onClose={onClose}
+        closeButton={false}
+        classNames={{ backdrop: 'bd', content: 'premium-modal', header: 'hd', body: 'bdy', description: 'feature-description' }}
+      >
+        <p>본문</p>
+      </Modal>,
+    )
+    const dialog = screen.getByRole('dialog', { name: '프리미엄 기능입니다' })
+    expect(dialog.className).toBe('premium-modal')
+    expect(dialog.getAttribute('aria-describedby')).toBe(dialog.querySelector('.hd > p.feature-description')?.id)
+    expect(dialog.querySelector('.bdy')?.textContent).toBe('본문')
+    expect(screen.queryByRole('button', { name: '닫기' })).toBeNull()
+    fireEvent.click(container.querySelector('.modal-overlay > .bd')!)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('description이 없으면 aria-describedby도 없다', () => {
+    render(
+      <Modal className="x" title="t" onClose={() => {}}>
+        <p>x</p>
+      </Modal>,
+    )
+    expect(screen.getByRole('dialog').hasAttribute('aria-describedby')).toBe(false)
+  })
 })
 
 describe('Button / Field / Badge', () => {

@@ -201,6 +201,25 @@ interface InstrumentChangeRequest {
 }
 
 type Msg = Record<string, unknown> & { type: string }
+
+/** 공유 메트로놈(P2-3) 계획. startUs는 방장 엔진 시계(µs) 기준 박 0 시각 */
+export interface MetronomeState {
+  running: boolean
+  bpm: number
+  beatsPerBar: number
+  startUs: number
+}
+
+/** 클라이언트가 보낸 메트로놈 계획 검증(엔진 계약과 같은 범위: bpm 20..300, 박자 1..16) */
+export function parseMetronomeState(v: unknown): MetronomeState | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+  const { running, bpm, beatsPerBar, startUs } = v as Record<string, unknown>
+  if (typeof running !== 'boolean') return null
+  if (typeof bpm !== 'number' || !Number.isFinite(bpm) || bpm < 20 || bpm > 300) return null
+  if (typeof beatsPerBar !== 'number' || !Number.isInteger(beatsPerBar) || beatsPerBar < 1 || beatsPerBar > 16) return null
+  if (typeof startUs !== 'number' || !Number.isFinite(startUs) || startUs < 0 || startUs > Number.MAX_SAFE_INTEGER) return null
+  return { running, bpm, beatsPerBar, startUs }
+}
 type LeaveReason = 'leave' | 'move' | 'close' | 'duplicate'
 
 function send(ws: WebSocket, data: unknown) {
@@ -297,6 +316,8 @@ export function initializeWebSocket(
   const clients = new Map<string, Client>()
   const performRequests = new Map<string, PerformRequest[]>()
   const instrumentChangeRequests = new Map<string, InstrumentChangeRequest[]>()
+  /** roomId → 방장이 켠 공유 메트로놈(P2-3). 방장 엔진이 내려가면(native-leave·퇴장) 지운다 */
+  const metronomes = new Map<string, { hostId: string; state: MetronomeState }>()
   /** roomId → (userId → 만료 시각 | null=무기한). 방장 승인 기록 (H1) */
   const approvals = new Map<string, Map<string, number | null>>()
   /** roomId → (userId → 만료 시각). 연결이 끊긴 사용자 (서버 판정 rejoin, M1) */
@@ -573,10 +594,13 @@ export function initializeWebSocket(
       const peer = clients.get(oderId)
       if (peer) send(peer.ws, { type: 'participant-left', oderId: id })
     }
+    // 방장이 나가면 메트로놈 시각 기준(방장 엔진 시계)이 사라진다. 따르는 쪽은 participant-left로 스스로 멈춘다
+    if (metronomes.get(roomId)?.hostId === id) metronomes.delete(roomId)
 
     if (set.size === 0) {
       rooms.delete(roomId)
       performRequests.delete(roomId)
+      metronomes.delete(roomId)
       instrumentChangeRequests.delete(roomId)
       roomMetaCache.delete(roomId)
     }
@@ -1040,10 +1064,28 @@ export function initializeWebSocket(
           send(ws, { type: 'error', code: 'ssrc-conflict', message: '같은 방에서 이미 쓰는 ssrc입니다. 엔진을 다시 시작하세요.' })
           return
         }
+        const prevSsrc = client.nativeSsrc
         client.nativeActive = true
         if (isValidSsrc(ssrc)) {
           client.nativeSsrc = ssrc
           sendRelayToken(client)
+        }
+        // 방장 엔진이 native-leave 없이 새로 떴다(ssrc가 바뀜, 예: ssrc-conflict 재시작): 메트로놈 startUs는 옛 엔진 시계
+        // 기준이라 무의미하다 → 지우고 연주자들에게 정지를 알린다(PR #36 M1). 같은 엔진의 재알림(WS 재개·회신)은 ssrc가 같다.
+        const hostMetro = metronomes.get(roomId)
+        if (hostMetro && hostMetro.hostId === id && prevSsrc !== undefined && isValidSsrc(ssrc) && ssrc !== prevSsrc) {
+          metronomes.delete(roomId)
+          const stopped = { type: 'metronome', from: id, state: { ...hostMetro.state, running: false } }
+          for (const peerId of rooms.get(roomId) || []) {
+            if (peerId === id) continue
+            const peer = clients.get(peerId)
+            if (peer && isPerformer(peer)) send(peer.ws, stopped)
+          }
+        }
+        // 엔진이 (다시) 떴다: 방장이 켠 메트로놈이 있으면 지금 상태를 알려 준다(늦게 들어온 연주자, 엔진 재시작)
+        const metro = metronomes.get(roomId)
+        if (metro && metro.hostId !== id && clients.get(metro.hostId)?.roomId === roomId) {
+          send(ws, { type: 'metronome', from: metro.hostId, state: metro.state })
         }
         const out = { type: 'native-descriptor', from: id, descriptor }
         if (msg.to !== undefined) {
@@ -1059,6 +1101,28 @@ export function initializeWebSocket(
         return
       }
 
+      // 공유 메트로놈(P2-3): 방장(DB 판정)이 자기 엔진을 켠 상태에서만. 같은 방 연주자에게 중계(from은 서버가 붙임)
+      if (msg.type === 'metronome') {
+        if (!roomId || !isAuthenticated(client) || !client.nativeActive || !isPerformer(client)) return
+        const state = parseMetronomeState(msg.state)
+        if (!state) {
+          send(ws, { type: 'error', code: 'metronome-invalid', message: '메트로놈 설정이 올바르지 않습니다.' })
+          return
+        }
+        if (!(await refreshHost(client)) || client.roomId !== roomId) {
+          send(ws, { type: 'error', code: 'metronome-host-only', message: '메트로놈은 방장만 조작할 수 있습니다.' })
+          return
+        }
+        if (state.running) metronomes.set(roomId, { hostId: id, state })
+        else metronomes.delete(roomId)
+        for (const peerId of rooms.get(roomId) || []) {
+          if (peerId === id) continue
+          const peer = clients.get(peerId)
+          if (peer && isPerformer(peer)) send(peer.ws, { type: 'metronome', from: id, state })
+        }
+        return
+      }
+
       if (msg.type === 'relay-token-request') {
         if (!roomId || !isAuthenticated(client) || !isPerformer(client)) return
         sendRelayToken(client)
@@ -1069,6 +1133,8 @@ export function initializeWebSocket(
         if (!roomId || !isAuthenticated(client) || !(isPerformer(client) || client.nativeActive)) return
         client.nativeActive = false
         client.nativeSsrc = undefined
+        // 방장 엔진이 내려가면 메트로놈도 끝난다(따르는 쪽은 native-leave를 받아 스스로 멈춘다)
+        if (metronomes.get(roomId)?.hostId === id) metronomes.delete(roomId)
         for (const peerId of rooms.get(roomId) || []) {
           if (peerId === id) continue
           const peer = clients.get(peerId)

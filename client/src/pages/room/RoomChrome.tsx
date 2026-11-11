@@ -30,7 +30,7 @@ export function LiveHeader({
   return (
     <header className="live-header">
       <div className="live-header-left">
-        <Link to="/rooms" className="back-link">←</Link>
+        <Link to="/rooms" className="back-link" aria-label="합주실 목록으로">←</Link>
         <div className="live-title-area">
           <h1>{room.title}</h1>
           <div className="live-meta">

@@ -2,6 +2,7 @@
 //!
 //! 두 단계(P3-0, tests/loopback.rs와 같은 규칙):
 //! - **결정적**(기본 `cargo test`): 판정 종류, 거부·취소·동의 흐름, 에코 자동 종료처럼 벽시계 품질 임계가 없는 검사.
+//!   예열·연결 대기는 고정 sleep이 아니라 진행량(출력 샘플 수, 받은 프레임 수)으로 하고 벽시계는 행 감지 상한뿐이다(P3-0a).
 //! - **실시간**(`#[ignore = "realtime: ..."]`): 실제 스레드·실제 시계로 측정 정확도(ms 오차, 흩어짐 판정)를 재는 검사.
 //!   CI `realtime` 잡이 하나씩 3회까지 돌린다. ignore 사유에 같은 계산을 합성 신호로 검증하는 결정적 짝을 적었다.
 //!   로컬: `cargo test --test measure -- --ignored --test-threads 1`.
@@ -82,11 +83,40 @@ fn loopback_backend(rate: u32, in_buf: usize, out_buf: usize, phase_us: u64, jit
     b
 }
 
+/// 결정적 테스트의 대기 상한. 판정은 조건 자체로 하고, 벽시계는 행(hang) 감지에만 쓴다.
+const HANG: Duration = Duration::from_secs(20);
+
+/// 조건이 참이 될 때까지 기다린다(고정 sleep 대신). 상한 안에 참이 되면 true.
+fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let t0 = Instant::now();
+    loop {
+        if cond() {
+            return true;
+        }
+        if t0.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// 출력 콜백이 `ms`만큼(장치 시간) 돌 때까지 기다린다 — 고정 sleep의 "예열" 대신 진행량.
+fn wait_output(sink: &Mutex<Vec<f32>>, channels: usize, rate: u32, ms: u32) {
+    let want = rate as usize * ms as usize / 1000 * channels;
+    assert!(wait_until(HANG, || sink.lock().len() >= want), "출력 콜백이 돌지 않음");
+}
+
+/// 지터 버퍼가 실제 패킷으로 만든 프레임 수(은닉 제외, 첫 피어). 벽시계 대신 "패킷을 이만큼 받았다"는 진행량 기준.
+fn real_frames(e: &Engine) -> u64 {
+    e.peer_jitter_stats().first().map(|(_, js)| js.produced.saturating_sub(js.concealed)).unwrap_or(0)
+}
+
 fn measure(backend: FakeBackend, buffer: u32, runs: u32) -> LoopbackReport {
+    let (sink, ch, rate) = (backend.sink.clone(), backend.channels, backend.out_rate);
     let e = Engine::start(config(buffer), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
     // 모니터를 켜 둔다: 측정 중에는 출력이 자극만 내야 한다(되먹임 없음).
     e.controls().monitor_enabled.store(true, Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(400));
+    wait_output(&sink, ch, rate, 400);
     let cancel = AtomicBool::new(false);
     let rep = e.loopback_job().run(runs, &cancel).unwrap();
     drop(e);
@@ -179,14 +209,17 @@ fn loopback_rejects_mismatched_rates_and_concurrent_runs() {
 #[test]
 fn loopback_refused_during_session() {
     let _g = RT_LOCK.lock();
-    let m = band_lib::manager::EngineManager::new(Arc::new(FakeBackend::silence(48_000)), test_net());
+    let backend = FakeBackend::silence(48_000);
+    let sink = backend.sink.clone();
+    let m = band_lib::manager::EngineManager::new(Arc::new(backend), test_net());
     m.start(config(128), "alice".into()).unwrap();
     let err = m.measure_loopback(1).unwrap_err();
     assert!(err.contains("합주"), "{err}");
     m.stop();
     // 테스트 모드에서는 된다
+    let before = sink.lock().len();
     m.test_start(config(128)).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    assert!(wait_until(HANG, || sink.lock().len() >= before + 48_000 * 2 * 3 / 10), "테스트 모드 출력이 돌지 않음");
     assert_eq!(m.measure_loopback(1).unwrap().verdict, MeasureVerdict::NoSignal);
     m.stop();
 }
@@ -268,7 +301,7 @@ impl Drop for DelayProxy {
 
 fn wait_connected(e: &Engine) {
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(5) {
+    while t0.elapsed() < HANG {
         let s = e.stats();
         if !s.peers.is_empty() && s.peers.iter().all(|p| p.state == PeerStateKind::Connected) {
             return;
@@ -320,7 +353,8 @@ fn echo_once(one_way: Duration) -> band_lib::engine::measure::EchoReport {
     // 동의 전에는 켤 수 없다(양측 합의)
     let err = b.set_echo_mode("alice", true).unwrap_err();
     assert!(err.contains("요청"), "{err}");
-    std::thread::sleep(Duration::from_millis(800));
+    // 고정 sleep(800ms) 대신 진행량(P3-0a): 양쪽이 상대 패킷으로 프레임 320개(2.5ms × 320 = 0.8초분)를 만들 때까지.
+    assert!(wait_until(HANG, || real_frames(&a) >= 320 && real_frames(&b) >= 320), "양방향 오디오가 흐르지 않음");
     let b = Arc::new(Mutex::new(b));
     let stop = Arc::new(AtomicBool::new(false));
     let acc = auto_accept(b.clone(), stop.clone());
@@ -335,7 +369,7 @@ fn echo_once(one_way: Duration) -> band_lib::engine::measure::EchoReport {
         if !pa.echo_active && !pa.echo_requested {
             break;
         }
-        assert!(t0.elapsed() < Duration::from_secs(5), "B 에코가 꺼지지 않음");
+        assert!(t0.elapsed() < HANG, "B 에코가 꺼지지 않음");
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!a.stats().peers[0].peer_echoing);
@@ -384,15 +418,15 @@ fn echo_round_trip_reflects_proxy_delay() {
 fn echo_requires_consent_and_times_out() {
     let _g = RT_LOCK.lock();
     let (a, b, _p) = pair(Duration::from_millis(2));
-    std::thread::sleep(Duration::from_millis(300));
+    assert!(wait_until(HANG, || real_frames(&a) >= 120 && real_frames(&b) >= 120), "양방향 오디오가 흐르지 않음");
     let t0 = Instant::now();
     let err = a.echo_job("bob").unwrap().run(2, Duration::from_millis(1500), &AtomicBool::new(false)).unwrap_err();
     assert!(err.contains("수락"), "{err}");
-    assert!(t0.elapsed() < Duration::from_secs(8));
+    assert!(t0.elapsed() < HANG, "동의 대기 1.5초가 끝나지 않음(행)");
     // B는 요청을 봤지만 동의하지 않았으므로 되돌리지 않았다. 요청이 끝나면 표시도 사라진다.
     let t1 = Instant::now();
     while b.stats().peers[0].echo_requested {
-        assert!(t1.elapsed() < Duration::from_secs(5));
+        assert!(t1.elapsed() < HANG, "요청 표시가 사라지지 않음");
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(!b.stats().peers[0].echo_active);
