@@ -325,9 +325,12 @@ jobs:
         if: steps.pw-cache.outputs.cache-hit != 'true'
         timeout-minutes: 10
         run: npx playwright install --with-deps chromium
+      # 우분투 apt 미러 장애(DNS 실패 등) 때 이 단계가 10분 매달려 모든 PR의 E2E를 막은 적이 있다(2026-11-12).
+      # 호스티드 이미지에는 chromium 의존 패키지가 대부분 있으므로 실패해도 계속 — 정말 빠졌으면 E2E에서 브라우저 실행이 바로 실패한다.
       - name: Install OS deps (브라우저 캐시 적중)
         if: steps.pw-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 10
+        timeout-minutes: 4
+        continue-on-error: true
         run: npx playwright install-deps chromium
       - name: Typecheck e2e
         timeout-minutes: 3
