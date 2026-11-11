@@ -12,12 +12,14 @@ pub mod measure;
 pub mod metronome;
 pub mod mixer;
 pub mod prio;
+pub mod record;
 pub mod relay_codec;
 pub mod resample;
 pub mod rt;
 pub mod stats;
 #[cfg(windows)]
 pub mod wasapi;
+pub mod wav;
 pub mod worker;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -79,6 +81,8 @@ pub struct Engine {
     metronome: Arc<metronome::MetronomeCtl>,
     /// 엔진 시계 기준(Net epoch, 없으면 시작 시각). 메트로놈 `startUs`의 기준이다.
     epoch: Instant,
+    /// 합주 녹음(P2-4). 정지(파일 마무리)는 엔진 락 밖에서 할 수 있게 따로 잠근다.
+    recorder: Arc<Mutex<record::Recorder>>,
 }
 
 impl Engine {
@@ -115,6 +119,9 @@ impl Engine {
         output.attach_measure(m_out);
         let metronome = Arc::new(metronome::MetronomeCtl::default());
         output.attach_click(metronome::ClickRt::new(metronome.click.clone()));
+        // 녹음 핸드오프(링은 녹음 시작 때 할당해 넘긴다)
+        let (rec_rt, rec_ctl) = record::record_port();
+        output.attach_record(rec_rt);
         let probe = Arc::new(Mutex::new(None));
 
         // 오디오 스레드: 스트림을 열고 정지 신호까지 소유한다(cpal::Stream은 !Send).
@@ -175,6 +182,7 @@ impl Engine {
             timer: Some(timer),
             metronome: metronome.clone(),
             epoch: Instant::now(),
+            recorder: Arc::new(Mutex::new(record::Recorder::new(rec_ctl, info.out_rate))),
         };
         // 48kHz 클릭 파형을 장치 레이트로 읽는 보폭
         metronome.click.step.store(INTERNAL_RATE as f32 / info.out_rate.max(1) as f32);
@@ -404,7 +412,26 @@ impl Engine {
             qos: self.net.as_ref().map(|n| n.qos_stats()),
             send_queue: self.net.as_ref().map(|n| n.send_queue_stats()),
             metronome: self.metronome.stats(),
+            // 녹음 락은 짧게만 잡힌다(정지의 기다리는 단계는 락 밖). 정지를 시작하면 null.
+            recording: self.recorder.lock().stats(),
         }
+    }
+
+    /// 녹음 시작(P2-4): `dir` 아래 세션 폴더에 트랙별 WAV를 쓴다.
+    pub fn record_start(&self, opts: record::RecordOptions, dir: &std::path::Path) -> Result<record::RecordStats, String> {
+        let net = self.net.as_ref().map(|n| n.shared().clone());
+        let resolve: record::PeerResolver = Box::new(move |ssrc| net.as_ref().and_then(|n| n.peer_id_for_ssrc(ssrc)));
+        self.recorder.lock().start(opts, dir, resolve, crate::diag::now_ms())
+    }
+
+    /// 녹음 중 피어 트랙 이름 추가(늦게 들어온 연주자, 1.5절).
+    pub fn record_set_track_names(&self, names: std::collections::HashMap<String, String>) -> Result<(), String> {
+        self.recorder.lock().set_track_names(names)
+    }
+
+    /// 녹음 제어 핸들. 정지(콜백 반환 대기 + 파일 마무리, 최대 수 초)는 엔진 락 밖에서 이것으로 한다.
+    pub fn recorder(&self) -> Arc<Mutex<record::Recorder>> {
+        self.recorder.clone()
     }
 
     /// 하드웨어 루프백 측정 작업(설계 4절 `engine_measure_loopback`). 엔진 락 밖에서 `run`한다.
@@ -548,6 +575,15 @@ impl Engine {
 
     /// 모든 스레드를 멈추고 join한다. 여러 번 불러도 안전하다.
     pub fn stop(&mut self) {
+        // 녹음은 출력 콜백이 도는 동안 닫는다(콜백이 녹음 끝점을 돌려줘야 남은 것을 다 쓴다)
+        {
+            let mut r = self.recorder.lock();
+            if r.is_recording() {
+                if let Err(e) = r.stop() {
+                    log::warn!("엔진 정지 중 녹음 정지 실패: {e}");
+                }
+            }
+        }
         self.unsubscribe_mix();
         self.worker_stop.store(true, Ordering::SeqCst);
         if let Some(w) = self.worker.take() {

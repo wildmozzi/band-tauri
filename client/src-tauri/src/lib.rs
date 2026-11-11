@@ -22,6 +22,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::EngineState::default())
         .manage(commands::DiagState::default())
+        .manage(commands::RecordDirState::default())
         .invoke_handler(tauri::generate_handler![
             commands::engine_list_devices,
             commands::engine_start,
@@ -46,6 +47,11 @@ pub fn run() {
             commands::engine_set_echo_mode,
             commands::engine_measure_echo_peer,
             commands::engine_cancel_measure,
+            commands::engine_record_folder,
+            commands::engine_record_pick_folder,
+            commands::engine_record_start,
+            commands::engine_record_stop,
+            commands::engine_record_set_track_names,
             commands::diag_export,
         ])
         .setup(|_app| {
