@@ -25,7 +25,14 @@ import { useRecording, type Recording, type RecordingSource } from './room/useRe
 import { mergeSelfPerformer, withPeer, type PeerInstrument } from './room/roomState'
 import { forgetRoomPassword, joinErrorFromSignal, joinErrorStopsSession, rememberRoomPassword, type JoinError } from './room/roomAccess'
 import { useNativeSession } from '../native/useNativeSession'
-import { DEFAULT_METRONOME_VOLUME, metronomeErrorFromCode, type MetronomeView } from '../native/metronomeLogic'
+import {
+  browserMetronomePrefsStorage,
+  clampMetronomeVolume,
+  loadMetronomeGain,
+  metronomeErrorFromCode,
+  saveMetronomeGain,
+  type MetronomeView,
+} from '../native/metronomeLogic'
 import { MixBroadcaster, MixSource } from '../native/mixBridge'
 import { isEngineDescriptorErrorCode } from '../native/performSession'
 import { computeViewers, selectBroadcaster } from '../native/sessionLogic'
@@ -216,8 +223,12 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [localError, setLocalError] = useState<string | null>(null)
   const [isMonitoringEnabled, setIsMonitoringEnabled] = useState(false)
   const [monitorGain, setMonitorGain] = useState(1)
-  const [metronomeVolume, setMetronomeVolumeState] = useState(DEFAULT_METRONOME_VOLUME)
-  const [metronomeMuted, setMetronomeMutedState] = useState(false)
+  // 클릭 볼륨·뮤트는 사용자별로 로컬에 저장해 방을 다시 들어와도 유지한다(PR #36 L5)
+  const [initialMetronomeGain] = useState(() => loadMetronomeGain(browserMetronomePrefsStorage(), user?.id))
+  const [metronomeVolume, setMetronomeVolumeState] = useState(initialMetronomeGain.volume)
+  const [metronomeMuted, setMetronomeMutedState] = useState(initialMetronomeGain.muted)
+  const metronomeUserIdRef = useRef(user?.id)
+  metronomeUserIdRef.current = user?.id
   const [broadcastViewerCount, setBroadcastViewerCount] = useState(0)
   const [isMiniPlayerMode, setIsMiniPlayerMode] = useState(false)
 
@@ -735,15 +746,27 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     [session],
   )
 
-  const setMetronomeVolume = useCallback((volume: number, muted: boolean) => {
-    const v = Math.max(0, Math.min(1, volume))
-    setMetronomeVolumeState(v)
+  /** 클릭 볼륨을 화면 상태와 엔진에 적용한다. 엔진 제어값은 엔진 재시작 간에도 유지되므로 연주 중이 아니어도 보낸다(앱에서만) */
+  const applyMetronomeGain = useCallback((volume: number, muted: boolean) => {
+    setMetronomeVolumeState(volume)
     setMetronomeMutedState(muted)
-    // 엔진 제어값은 엔진 재시작 간에도 유지되므로 연주 중이 아니어도 보낸다(앱에서만)
     if (isNativeApp()) {
-      engineSetMetronomeGain(v, muted).catch((err) => console.warn('[Native] 메트로놈 볼륨 실패:', engineErrorMessage(err)))
+      engineSetMetronomeGain(volume, muted).catch((err) => console.warn('[Native] 메트로놈 볼륨 실패:', engineErrorMessage(err)))
     }
   }, [])
+
+  const setMetronomeVolume = useCallback((volume: number, muted: boolean) => {
+    const v = clampMetronomeVolume(volume)
+    applyMetronomeGain(v, muted)
+    saveMetronomeGain(browserMetronomePrefsStorage(), metronomeUserIdRef.current, { volume: v, muted })
+  }, [applyMetronomeGain])
+
+  // 시작할 때(그리고 로그인 사용자가 바뀌면) 저장값을 화면·엔진에 한 번 맞춘다. 앱을 다시 띄워도 엔진(MixControls)과
+  // 화면이 어긋나지 않게 한다(PR #36 L5)
+  useEffect(() => {
+    const prefs = loadMetronomeGain(browserMetronomePrefsStorage(), user?.id)
+    applyMetronomeGain(prefs.volume, prefs.muted)
+  }, [user?.id, applyMetronomeGain])
 
   // --- 표시용 파생 값 ---
   const peerEngineStats = useMemo(() => {

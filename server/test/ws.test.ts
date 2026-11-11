@@ -305,6 +305,111 @@ describe('P2-3: shared metronome signaling (host verified by DB)', async () => {
     assert.ok(await member.waitFor(m => m.type === 'metronome' && (m.state as typeof state).startUs === 42))
   })
 
+  it('stops the metronome when the DB host changes and lets the new host take over (#36 L1)', async () => {
+    const urlFresh = await startWs(backend({ metronomeHostCheckMs: 0 }))
+    ROOMS.handover = { hostId: 'host', freeJoin: true }
+    try {
+      const host = await client(urlFresh)
+      const next = await client(urlFresh)
+      const member = await client(urlFresh)
+      await authJoin(host, 'tok:host', 'handover')
+      await authJoin(next, 'tok:nextHost', 'handover')
+      await authJoin(member, 'tok:metroMember4', 'handover')
+      for (const c of [host, next, member]) c.send({ type: 'start-performing', instrument: 'drums' })
+      assert.ok(await host.waitFor(m => m.type === 'performer-updated' && m.oderId === member.id))
+      assert.ok(await host.waitFor(m => m.type === 'performer-updated' && m.oderId === next.id))
+      host.send({ type: 'native-descriptor', descriptor: desc(31) })
+      next.send({ type: 'native-descriptor', descriptor: desc(32) })
+      member.send({ type: 'native-descriptor', descriptor: desc(33) })
+      assert.ok(await member.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+      host.send({ type: 'metronome', state })
+      assert.ok(await member.waitFor(m => m.type === 'metronome' && (m.state as typeof state).running))
+
+      // 같은 방장이면 엔진을 다시 띄운 연주자에게 그대로 다시 보낸다
+      member.inbox.length = 0
+      member.send({ type: 'native-descriptor', descriptor: desc(33) })
+      assert.ok(await member.waitFor(m => m.type === 'metronome' && m.from === host.id && (m.state as typeof state).running))
+
+      // DB에서 방장이 바뀜 → 재전송 대신 정지를 알리고, 옛 방장에게는 host-only로 기준 클릭을 끄게 한다
+      ROOMS.handover = { hostId: 'nextHost', freeJoin: true }
+      member.inbox.length = 0
+      host.inbox.length = 0
+      member.send({ type: 'native-descriptor', descriptor: desc(33) })
+      assert.ok(await member.waitFor(m => m.type === 'metronome' && m.from === host.id && (m.state as typeof state).running === false))
+      assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'metronome-host-only'))
+      assert.ok(await next.waitFor(m => m.type === 'metronome' && (m.state as typeof state).running === false))
+      member.inbox.length = 0
+      member.send({ type: 'native-descriptor', descriptor: desc(33) })
+      await sleep(100)
+      assert.ok(!member.has(m => m.type === 'metronome'), '옛 방장 계획을 다시 보내지 않는다')
+
+      // 옛 방장은 더 이상 조작할 수 없고, 새 방장은 바로 켤 수 있다(조작 권한은 DB로 매번 확인)
+      host.inbox.length = 0
+      host.send({ type: 'metronome', state })
+      assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'metronome-host-only'))
+      next.send({ type: 'metronome', state: { ...state, startUs: 7 } })
+      assert.ok(await member.waitFor(m => m.type === 'metronome' && m.from === next.id && (m.state as typeof state).startUs === 7))
+      assert.ok(await host.waitFor(m => m.type === 'metronome' && m.from === next.id))
+      member.inbox.length = 0
+      member.send({ type: 'native-descriptor', descriptor: desc(33) })
+      assert.ok(await member.waitFor(m => m.type === 'metronome' && m.from === next.id && (m.state as typeof state).startUs === 7))
+    } finally {
+      delete ROOMS.handover
+    }
+  })
+
+  it('stops the old host metronome when a join reads a new DB host (#36 L1)', async () => {
+    ROOMS.handover2 = { hostId: 'host', freeJoin: true }
+    try {
+      const host = await client(url)
+      const member = await client(url)
+      await authJoin(host, 'tok:host', 'handover2')
+      await authJoin(member, 'tok:metroMember5', 'handover2')
+      host.send({ type: 'start-performing', instrument: 'drums' })
+      member.send({ type: 'start-performing', instrument: 'drums' })
+      assert.ok(await host.waitFor(m => m.type === 'performer-updated' && m.oderId === member.id))
+      host.send({ type: 'native-descriptor', descriptor: desc(41) })
+      member.send({ type: 'native-descriptor', descriptor: desc(42) })
+      assert.ok(await member.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+      host.send({ type: 'metronome', state })
+      assert.ok(await member.waitFor(m => m.type === 'metronome' && (m.state as typeof state).running))
+
+      // 새 방장이 들어올 때 join이 DB를 새로 읽는다 → 이양을 알고 멈춘다
+      ROOMS.handover2 = { hostId: 'nextHost2', freeJoin: true }
+      member.inbox.length = 0
+      const next = await client(url)
+      await authJoin(next, 'tok:nextHost2', 'handover2')
+      assert.ok(await member.waitFor(m => m.type === 'metronome' && m.from === host.id && (m.state as typeof state).running === false))
+      assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'metronome-host-only'))
+    } finally {
+      delete ROOMS.handover2
+    }
+  })
+
+  it('keeps the metronome while the host is suspended (resume grace) and replays it', async () => {
+    const urlGrace = await startWs(backend({ resumeGraceMs: 5_000 }))
+    const host = await client(urlGrace)
+    const member = await client(urlGrace)
+    await authJoin(host, 'tok:host', 'free')
+    await authJoin(member, 'tok:metroMember6', 'free')
+    host.send({ type: 'start-performing', instrument: 'drums' })
+    member.send({ type: 'start-performing', instrument: 'drums' })
+    assert.ok(await host.waitFor(m => m.type === 'performer-updated' && m.oderId === member.id))
+    host.send({ type: 'native-descriptor', descriptor: desc(51) })
+    member.send({ type: 'native-descriptor', descriptor: desc(52) })
+    assert.ok(await member.waitFor(m => m.type === 'native-descriptor' && m.from === host.id))
+    host.send({ type: 'metronome', state })
+    assert.ok(await member.waitFor(m => m.type === 'metronome' && (m.state as typeof state).running))
+    const hostId = host.id
+
+    // 방장 WS만 끊김(엔진·P2P 시계는 그대로): 유예 동안 메트로놈을 유지하고 다시 보낸다
+    host.close()
+    await sleep(100)
+    member.inbox.length = 0
+    member.send({ type: 'native-descriptor', descriptor: desc(52) })
+    assert.ok(await member.waitFor(m => m.type === 'metronome' && m.from === hostId && (m.state as typeof state).running))
+  })
+
   it('rejects metronome before the host engine is running', async () => {
     const host = await client(url)
     const member = await client(url)

@@ -115,6 +115,8 @@ export interface WsLimits {
   passwordMaxFailuresPerRoom: number
   /** 방 비밀번호 실패 기록 유지 시간 */
   passwordWindowMs: number
+  /** 메트로놈 상태를 다시 보내기 전 방장(DB host_id) 확인에 쓰는 방 정보 캐시 최대 나이 (PR #36 L1) */
+  metronomeHostCheckMs: number
 }
 
 const DEFAULT_LIMITS: WsLimits = {
@@ -136,6 +138,7 @@ const DEFAULT_LIMITS: WsLimits = {
   passwordMaxFailuresPerIp: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailuresPerIp,
   passwordMaxFailuresPerRoom: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailuresPerRoom,
   passwordWindowMs: DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs,
+  metronomeHostCheckMs: 2_000,
 }
 
 export interface WsOptions {
@@ -376,8 +379,11 @@ export function initializeWebSocket(
   const clients = new Map<string, Client>()
   const performRequests = new Map<string, PerformRequest[]>()
   const instrumentChangeRequests = new Map<string, InstrumentChangeRequest[]>()
-  /** roomId → 방장이 켠 공유 메트로놈(P2-3). 방장 엔진이 내려가면(native-leave·퇴장) 지운다 */
-  const metronomes = new Map<string, { hostId: string; state: MetronomeState }>()
+  /**
+   * roomId → 방장이 켠 공유 메트로놈(P2-3). hostId = 켠 연결(clientId = 엔진 peerId), hostUserId = 켤 때의 DB 방장.
+   * 방장 엔진이 내려가면(native-leave·퇴장) 지우고, DB 방장이 바뀐 것을 알게 되면 정지를 알리고 지운다(PR #36 L1)
+   */
+  const metronomes = new Map<string, { hostId: string; hostUserId: string | undefined; state: MetronomeState }>()
   /** roomId → (userId → 만료 시각 | null=무기한). 방장 승인 기록 (H1) */
   const approvals = new Map<string, Map<string, number | null>>()
   /** roomId → (userId → 만료 시각). 연결이 끊긴 사용자 (서버 판정 rejoin, M1) */
@@ -589,6 +595,59 @@ export function initializeWebSocket(
     const meta = await getRoomMeta(client.roomId)
     client.isHost = !!meta && meta.hostId === client.userId
     return client.isHost
+  }
+
+  /** 메트로놈 정지를 같은 방의 다른 연주자에게 알린다(켠 방장 제외) */
+  function broadcastMetronomeStop(roomId: string, metro: { hostId: string; state: MetronomeState }) {
+    const stopped = { type: 'metronome', from: metro.hostId, state: { ...metro.state, running: false } }
+    for (const peerId of rooms.get(roomId) || []) {
+      if (peerId === metro.hostId) continue
+      const peer = clients.get(peerId)
+      if (peer && isPerformer(peer)) send(peer.ws, stopped)
+    }
+  }
+
+  /**
+   * 방장 이양(PR #36 L1): 지금 DB 방장(`currentHostUserId`, 방이 없으면 null)이 메트로놈을 켠 사용자가 아니면
+   * 정지를 알리고 상태를 지운다. 옛 방장에게는 metronome-host-only를 보내 그쪽 기준 클릭도 끄게 한다.
+   * 조작 권한은 따로 넘길 것이 없다: metronome 메시지마다 DB로 방장을 다시 확인하므로 새 방장은 바로 켤 수 있다.
+   * 지웠으면 true.
+   */
+  function dropMetronomeIfHostChanged(roomId: string, currentHostUserId: string | null): boolean {
+    const metro = metronomes.get(roomId)
+    if (!metro || metro.hostUserId === undefined || metro.hostUserId === currentHostUserId) return false
+    console.log(`[METRONOME] host changed in room ${roomId.slice(0, 8)} - stopping`)
+    metronomes.delete(roomId)
+    broadcastMetronomeStop(roomId, metro)
+    const oldHost = clients.get(metro.hostId)
+    if (oldHost && oldHost.roomId === roomId) {
+      send(oldHost.ws, { type: 'error', code: 'metronome-host-only', message: '방장이 바뀌어 메트로놈을 껐습니다.' })
+    }
+    return true
+  }
+
+  /**
+   * 엔진을 (다시) 켠 연주자에게 방장이 켠 메트로놈을 다시 보낸다(늦게 들어온 연주자, 엔진 재시작).
+   * 보내기 전에 켠 사람이 아직 DB 방장인지 확인한다(이양 뒤 옛 방장 계획을 보내지 않게, PR #36 L1).
+   * DB 조회가 실패하면 판단을 미루고 그대로 보낸다(일시 장애로 합주를 끊지 않음).
+   */
+  async function replayMetronome(c: Client, roomId: string) {
+    const metro = metronomes.get(roomId)
+    if (!metro || metro.hostId === c.id || clients.get(metro.hostId)?.roomId !== roomId) return
+    if (deps.hasBackend && metro.hostUserId !== undefined) {
+      let meta: RoomMeta | null | undefined
+      try {
+        meta = await getRoomMeta(roomId, limits.metronomeHostCheckMs)
+      } catch (err) {
+        console.warn('[METRONOME] host check failed:', err instanceof Error ? err.message : err)
+      }
+      if (meta !== undefined && dropMetronomeIfHostChanged(roomId, meta?.hostId ?? null)) return
+    }
+    // DB 조회 동안 상태가 바뀌었을 수 있다
+    const now = metronomes.get(roomId)
+    if (!now || now.hostId === c.id || clients.get(c.id) !== c || c.roomId !== roomId || !c.nativeActive) return
+    if (clients.get(now.hostId)?.roomId !== roomId) return
+    send(c.ws, { type: 'metronome', from: now.hostId, state: now.state })
   }
 
   /** 참가자 수 DB 갱신 디바운스 (M3) */
@@ -948,6 +1007,8 @@ export function initializeWebSocket(
           return
         }
         isHost = !!client.userId && meta.hostId === client.userId
+        // 방금 읽은 DB 방장이 메트로놈을 켠 사람과 다르면(이양) 진행 중인 메트로놈을 멈춘다(PR #36 L1)
+        dropMetronomeIfHostChanged(roomId, meta.hostId ?? null)
         passwordHash = meta.passwordHash ?? null
         if (meta.maxParticipants !== undefined) capacity = Math.min(capacity, meta.maxParticipants)
         // 비밀번호 방으로 표시됐는데 해시가 아직 없음(생성·변경 중): 방장 외 입장 보류 (fail-closed, 리뷰 L1)
@@ -1169,18 +1230,11 @@ export function initializeWebSocket(
         const hostMetro = metronomes.get(roomId)
         if (hostMetro && hostMetro.hostId === id && prevSsrc !== undefined && ssrc !== prevSsrc) {
           metronomes.delete(roomId)
-          const stopped = { type: 'metronome', from: id, state: { ...hostMetro.state, running: false } }
-          for (const peerId of rooms.get(roomId) || []) {
-            if (peerId === id) continue
-            const peer = clients.get(peerId)
-            if (peer && isPerformer(peer)) send(peer.ws, stopped)
-          }
+          broadcastMetronomeStop(roomId, hostMetro)
         }
-        // 엔진이 (다시) 떴다: 방장이 켠 메트로놈이 있으면 지금 상태를 알려 준다(늦게 들어온 연주자, 엔진 재시작)
-        const metro = metronomes.get(roomId)
-        if (metro && metro.hostId !== id && clients.get(metro.hostId)?.roomId === roomId) {
-          send(ws, { type: 'metronome', from: metro.hostId, state: metro.state })
-        }
+        // 엔진이 (다시) 떴다: 방장이 켠 메트로놈이 있으면 지금 상태를 알려 준다(늦게 들어온 연주자, 엔진 재시작).
+        // 방장 확인(DB)은 비동기라 descriptor 중계를 늦추지 않게 따로 돈다
+        void replayMetronome(client, roomId)
         // 서버가 아는 필드만 다시 구성한다(클라이언트가 descriptor 안에 넣은 from/userId 등은 버림). from은 서버의 clientId
         const out = { type: 'native-descriptor', from: id, descriptor: { ssrc, key, candidates } }
         if (msg.to !== undefined) {
@@ -1205,10 +1259,15 @@ export function initializeWebSocket(
           return
         }
         if (!(await refreshHost(client)) || client.roomId !== roomId) {
+          // 메트로놈을 켰던 연결이 더 이상 방장이 아니다(이양): 진행 중인 메트로놈도 멈춘다(PR #36 L1)
+          // (그때 보낸 metronome-host-only가 이 요청의 거부 응답도 된다)
+          if (client.roomId === roomId && metronomes.get(roomId)?.hostId === id &&
+              dropMetronomeIfHostChanged(roomId, roomMetaCache.get(roomId)?.meta?.hostId ?? null)) return
           send(ws, { type: 'error', code: 'metronome-host-only', message: '메트로놈은 방장만 조작할 수 있습니다.' })
           return
         }
-        if (state.running) metronomes.set(roomId, { hostId: id, state })
+        // 개발 모드(DB 없음)는 방장 확인을 할 수 없어 hostUserId를 비운다(이양 검사 생략)
+        if (state.running) metronomes.set(roomId, { hostId: id, hostUserId: deps.hasBackend ? client.userId : undefined, state })
         else metronomes.delete(roomId)
         for (const peerId of rooms.get(roomId) || []) {
           if (peerId === id) continue
