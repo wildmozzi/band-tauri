@@ -21,12 +21,17 @@ export interface DevServerTarget {
   port: number
 }
 
-function parseIpv4(host: string): number[] | null {
+/**
+ * 엄격한 IPv4 파서: 정규 점-10진 4옥텟만(각 0~255, 앞자리 0 거부).
+ * `010.8.8.8`처럼 앞자리 0이 붙은 표기는 glibc·macOS의 inet_aton이 8진수로 읽어(→ 8.8.8.8) 검사한 주소와
+ * 실제 연결 주소가 달라지므로 받지 않는다(PR #56 M2). 16진(0x7f)·정수(2130706433)·축약 표기도 거부.
+ */
+export function parseIpv4(host: string): number[] | null {
   const parts = host.split('.')
   if (parts.length !== 4) return null
   const nums: number[] = []
   for (const p of parts) {
-    if (!/^\d{1,3}$/.test(p)) return null
+    if (!/^(0|[1-9]\d{0,2})$/.test(p)) return null
     const n = Number(p)
     if (n > 255) return null
     nums.push(n)
@@ -41,6 +46,28 @@ export function isLocalOrPrivateHost(host: string): boolean {
   if (!ip) return false
   const [a, b] = ip
   return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+}
+
+/** 대상이 이 PC 자신(localhost·127/8)인가 */
+export function isLoopbackTarget(host: string): boolean {
+  if (host === 'localhost') return true
+  const ip = parseIpv4(host)
+  return ip != null && ip[0] === 127
+}
+
+/** 소켓 원격 주소(Node `socket.remoteAddress`)가 루프백인가: 127/8, ::1, ::ffff:127.x */
+export function isLoopbackRemoteAddress(addr: string | undefined): boolean {
+  if (!addr) return false
+  const a = addr.toLowerCase()
+  if (a === '::1') return true
+  const ip = parseIpv4(a.startsWith('::ffff:') ? a.slice('::ffff:'.length) : a)
+  return ip != null && ip[0] === 127
+}
+
+/** 검사를 통과한 호스트를 파싱한 숫자로 다시 조립한다(검사한 주소와 연결하는 주소가 같도록) */
+function canonicalHost(host: string): string {
+  const ip = parseIpv4(host)
+  return ip ? ip.join('.') : host
 }
 
 function parsePort(s: string | undefined): number | null {
@@ -69,7 +96,7 @@ export function parseDevServerInput(input: string, defaultScheme: DevServerSchem
   const host = hp[1].toLowerCase()
   const port = parsePort(hp[2])
   if (port == null || !isLocalOrPrivateHost(host)) return null
-  return { scheme, host, port }
+  return { scheme, host: canonicalHost(host), port }
 }
 
 /** 대상 → 프록시 경로 접두사(끝 슬래시 없음) */
@@ -106,5 +133,68 @@ export function matchDevServerProxyPath(url: string): ProxyPathMatch {
   if (port == null || !isLocalOrPrivateHost(host)) return { kind: 'invalid' }
   let path = m[3] ?? '/'
   if (path.startsWith('?')) path = `/${path}`
-  return { kind: 'ok', target: { scheme: m[1] as DevServerScheme, host, port }, path }
+  return { kind: 'ok', target: { scheme: m[1] as DevServerScheme, host: canonicalHost(host), port }, path }
+}
+
+/**
+ * 프록시가 넘겨 주는 대상 경로를 밴드 서버(server/src/app.ts·wsService)의 표면으로 고정한다(PR #56 H1).
+ * - HTTP: `/api/...`, `/uploads/...`, `/health`
+ * - WebSocket 업그레이드: 시그널링(`/` + 쿼리)만
+ * `.`·`..` 경로 조각(퍼센트 인코딩 포함)과 역슬래시는 거부한다(업스트림이 정규화하면 다른 경로가 됨).
+ */
+export function isAllowedProxyPath(path: string, upgrade: boolean): boolean {
+  const q = path.indexOf('?')
+  const pathname = q >= 0 ? path.slice(0, q) : path
+  if (pathname.includes('\\') || /%5c/i.test(pathname)) return false
+  for (const seg of pathname.split('/')) {
+    if (/^(\.|%2e){1,2}$/i.test(seg)) return false
+  }
+  if (upgrade) return pathname === '/'
+  return pathname === '/health' || pathname.startsWith('/api/') || pathname.startsWith('/uploads/')
+}
+
+export interface ProxyRequestInfo {
+  /** 요청 소켓의 원격 주소 */
+  remoteAddress: string | undefined
+  /** Origin 헤더(없으면 undefined) */
+  origin: string | undefined
+  /** Sec-Fetch-Site 헤더(없으면 undefined) */
+  secFetchSite: string | undefined
+  /** 업그레이드 요청이면 Upgrade 헤더 값, 일반 HTTP면 null */
+  upgrade: string | null
+}
+
+export interface ProxyPolicy {
+  /** 허용 출처(개발 페이지 자신의 출처). 소문자 정확 일치 */
+  allowedOrigins: ReadonlySet<string>
+  /** 허용 대상 포트(밴드 서버 포트) */
+  allowedPorts: ReadonlySet<number>
+}
+
+/**
+ * 프록시 요청 허용 여부. 거부면 사유 문자열, 허용이면 null. Vite 플러그인이 HTTP·업그레이드 모두에 쓴다.
+ * - H1: 업그레이드는 `websocket`만. 대상 포트·경로는 밴드 서버로 고정. 요청자가 루프백이 아니면(LAN 기기)
+ *   대상이 루프백인 요청 거부 → LAN 기기가 개발 PC의 127.0.0.1 전용 포트에 닿지 못한다.
+ * - M1: Origin이 있으면 허용 출처만. 없으면 Sec-Fetch-Site가 same-origin/none일 때만(교차 출처 no-cors GET 차단).
+ */
+export function checkProxyRequest(
+  req: ProxyRequestInfo,
+  target: DevServerTarget,
+  path: string,
+  policy: ProxyPolicy,
+): string | null {
+  if (req.upgrade != null && req.upgrade.trim().toLowerCase() !== 'websocket') return 'WebSocket 업그레이드만 허용'
+  if (req.origin !== undefined) {
+    if (!policy.allowedOrigins.has(req.origin.toLowerCase())) return `허용되지 않은 출처(${req.origin})`
+  } else if (req.secFetchSite !== undefined && req.secFetchSite !== 'same-origin' && req.secFetchSite !== 'none') {
+    return `교차 출처 요청(Sec-Fetch-Site: ${req.secFetchSite})`
+  }
+  if (!policy.allowedPorts.has(target.port)) {
+    return `허용되지 않은 대상 포트 ${target.port}(허용: ${Array.from(policy.allowedPorts).join(', ')})`
+  }
+  if (!isAllowedProxyPath(path, req.upgrade != null)) return '밴드 서버 경로(/api/·/uploads/·/health, WebSocket은 /)만 허용'
+  if (isLoopbackTarget(target.host) && !isLoopbackRemoteAddress(req.remoteAddress)) {
+    return '다른 기기에서는 이 PC의 루프백(localhost) 대상으로 프록시할 수 없음 — 서버 PC의 사설 IP를 지정'
+  }
+  return null
 }

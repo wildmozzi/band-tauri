@@ -8,6 +8,7 @@ describe('DevServerSettingsSection', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
     window.localStorage.clear()
   })
 
@@ -17,7 +18,7 @@ describe('DevServerSettingsSection', () => {
   })
 
   it('사설 IP를 저장하고 새로고침한다', () => {
-    vi.stubEnv('VITE_BAND_DEV_PROXY', 'http')
+    vi.stubGlobal('__BAND_DEV_PROXY__', 'http')
     const reload = vi.fn()
     render(<DevServerSettingsSection enabled reload={reload} />)
     expect(screen.getByText(/지금 연결: http:\/\/localhost:8080/)).toBeTruthy()
@@ -28,7 +29,7 @@ describe('DevServerSettingsSection', () => {
   })
 
   it('공인 주소·도메인은 저장하지 않고 알린다', () => {
-    vi.stubEnv('VITE_BAND_DEV_PROXY', 'http')
+    vi.stubGlobal('__BAND_DEV_PROXY__', 'http')
     const reload = vi.fn()
     render(<DevServerSettingsSection enabled reload={reload} />)
     fireEvent.change(screen.getByLabelText('개발 서버 주소'), { target: { value: 'band-server.fly.dev' } })
@@ -39,7 +40,7 @@ describe('DevServerSettingsSection', () => {
   })
 
   it('기본값 버튼은 저장값을 지운다', () => {
-    vi.stubEnv('VITE_BAND_DEV_PROXY', 'http')
+    vi.stubGlobal('__BAND_DEV_PROXY__', 'http')
     window.localStorage.setItem(DEV_SERVER_STORAGE_KEY, '10.0.0.5')
     const reload = vi.fn()
     render(<DevServerSettingsSection enabled reload={reload} />)

@@ -11,10 +11,12 @@ export const DEV_SERVER_STORAGE_KEY = 'band.devServer'
 
 /**
  * Vite 개발 서버의 서버 프록시(vite/bandServerProxy)가 켜져 있으면 로컬 서버의 기본 스킴('http' | 'https').
- * 플러그인이 `vite`(serve)에서만 정의한다 — 운영 빌드·vitest·e2e 빌드에서는 undefined.
+ * 플러그인이 `vite`(serve)에서만 `__BAND_DEV_PROXY__` 상수로 정의한다 — 운영 빌드·vitest·e2e 빌드에서는 undefined.
+ * VITE_ 접두사가 아니라 .env로는 켤 수 없고, 운영 빌드는 DEV 가드로 이 경로째 접힌다(PR #56 L1).
  */
 function devProxyDefaultScheme(): DevServerScheme | null {
-  const v = import.meta.env.VITE_BAND_DEV_PROXY
+  if (!import.meta.env.DEV) return null
+  const v = typeof __BAND_DEV_PROXY__ === 'string' ? __BAND_DEV_PROXY__ : undefined
   return v === 'http' || v === 'https' ? v : null
 }
 

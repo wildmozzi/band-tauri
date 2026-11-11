@@ -74,7 +74,7 @@ describe('개발 서버 프록시(P1-12b)', () => {
 
   it('플러그인이 없으면(운영 빌드) 페이지 프로토콜 규칙 그대로', () => {
     stubWindow()
-    vi.stubEnv('VITE_BAND_DEV_PROXY', '')
+    vi.stubGlobal('__BAND_DEV_PROXY__', '')
     vi.stubEnv('VITE_SIGNALING_URL', 'auto')
     expect(isDevServerProxyEnabled()).toBe(false)
     expect(getDevServerTarget()).toBeNull()
@@ -83,7 +83,7 @@ describe('개발 서버 프록시(P1-12b)', () => {
 
   it('개발 실행 auto는 같은 출처 프록시로 — 평문 로컬 서버도 wss로 붙는다', () => {
     stubWindow()
-    vi.stubEnv('VITE_BAND_DEV_PROXY', 'http')
+    vi.stubGlobal('__BAND_DEV_PROXY__', 'http')
     vi.stubEnv('VITE_SIGNALING_URL', 'auto')
     vi.stubEnv('VITE_API_URL', '')
     expect(getSignalingUrl()).toBe('wss://localhost:5173/__band_server/http/localhost:8080')
@@ -92,13 +92,13 @@ describe('개발 서버 프록시(P1-12b)', () => {
 
   it('로컬 서버에 인증서가 있으면 기본 대상이 https', () => {
     stubWindow()
-    vi.stubEnv('VITE_BAND_DEV_PROXY', 'https')
+    vi.stubGlobal('__BAND_DEV_PROXY__', 'https')
     expect(getApiUrl()).toBe('https://localhost:5173/__band_server/https/localhost:8080')
   })
 
   it('설정한 사설 IP 서버로, 틀린 저장값은 기본값으로', () => {
     stubWindow()
-    vi.stubEnv('VITE_BAND_DEV_PROXY', 'http')
+    vi.stubGlobal('__BAND_DEV_PROXY__', 'http')
     setDevServerSetting(' 192.168.0.10 ')
     expect(getDevServerSetting()).toBe('192.168.0.10')
     expect(getSignalingUrl()).toBe('wss://localhost:5173/__band_server/http/192.168.0.10:8080')
@@ -110,7 +110,7 @@ describe('개발 서버 프록시(P1-12b)', () => {
 
   it('직접 지정한 URL은 프록시를 쓰지 않는다', () => {
     stubWindow()
-    vi.stubEnv('VITE_BAND_DEV_PROXY', 'http')
+    vi.stubGlobal('__BAND_DEV_PROXY__', 'http')
     vi.stubEnv('VITE_SIGNALING_URL', 'ws://localhost:8080')
     vi.stubEnv('VITE_API_URL', 'http://localhost:8080')
     expect(getSignalingUrl()).toBe('ws://localhost:8080')

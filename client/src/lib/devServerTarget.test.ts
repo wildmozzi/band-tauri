@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  checkProxyRequest,
   devServerProxyPath,
   formatDevServerTarget,
   isLocalOrPrivateHost,
+  isLoopbackRemoteAddress,
   matchDevServerProxyPath,
   parseDevServerInput,
+  parseIpv4,
 } from './devServerTarget'
 
 describe('isLocalOrPrivateHost', () => {
@@ -65,5 +68,61 @@ describe('matchDevServerProxyPath', () => {
       '/__band_server/http/user@localhost:8080/']) {
       expect(matchDevServerProxyPath(u).kind).toBe('invalid')
     }
+  })
+})
+
+describe('M2: 엄격한 IPv4 파서', () => {
+  it('앞자리 0·16진·정수·축약 표기는 사설로 보지 않는다', () => {
+    for (const h of ['010.8.8.8', '172.016.0.1', '127.0.0.01', '192.168.00.1', '00.0.0.0', '0x7f.0.0.1', '2130706433', '127.1', '1e1.0.0.1', '+10.0.0.1']) {
+      expect(isLocalOrPrivateHost(h)).toBe(false)
+      expect(matchDevServerProxyPath(`/__band_server/http/${h}:8080/`).kind).toBe('invalid')
+      expect(parseDevServerInput(h, 'http')).toBeNull()
+    }
+    expect(parseIpv4('10.0.0.1')).toEqual([10, 0, 0, 1])
+    expect(parseIpv4('0.0.0.0')).toEqual([0, 0, 0, 0])
+  })
+})
+
+describe('checkProxyRequest', () => {
+  const policy = { allowedOrigins: new Set(['https://localhost:5173']), allowedPorts: new Set([8080]) }
+  const local = { scheme: 'http' as const, host: 'localhost', port: 8080 }
+  const lanTarget = { scheme: 'http' as const, host: '192.168.0.10', port: 8080 }
+  const ok = { remoteAddress: '127.0.0.1', origin: 'https://localhost:5173', secFetchSite: undefined, upgrade: null }
+
+  it('정상 요청은 허용', () => {
+    expect(checkProxyRequest(ok, local, '/api/rooms', policy)).toBeNull()
+    expect(checkProxyRequest({ ...ok, upgrade: 'websocket' }, local, '/?token=a', policy)).toBeNull()
+    expect(checkProxyRequest({ ...ok, remoteAddress: '::ffff:127.0.0.1', origin: undefined, secFetchSite: 'same-origin' }, local, '/health', policy)).toBeNull()
+  })
+
+  it('H1: websocket 외 업그레이드·다른 포트·다른 경로 거부', () => {
+    expect(checkProxyRequest({ ...ok, upgrade: 'foo' }, local, '/', policy)).not.toBeNull()
+    expect(checkProxyRequest({ ...ok, upgrade: '' }, local, '/', policy)).not.toBeNull()
+    expect(checkProxyRequest({ ...ok, upgrade: 'websocket' }, local, '/api/rooms', policy)).not.toBeNull()
+    expect(checkProxyRequest(ok, { ...local, port: 6379 }, '/api/x', policy)).not.toBeNull()
+    for (const p of ['/', '/admin', '/api', '/api/../admin', '/api/%2E%2E/admin', '/api\\..\\admin', '/uploads/%5c..']) {
+      expect(checkProxyRequest(ok, local, p, policy)).not.toBeNull()
+    }
+  })
+
+  it('H1: LAN 요청자는 루프백 대상 거부, 사설 IP 대상은 허용', () => {
+    const lan = { ...ok, remoteAddress: '192.168.0.20', origin: 'https://192.168.0.10:5173' }
+    const lanPolicy = { ...policy, allowedOrigins: new Set(['https://192.168.0.10:5173']) }
+    expect(checkProxyRequest(lan, local, '/api/rooms', lanPolicy)).not.toBeNull()
+    expect(checkProxyRequest(lan, { ...local, host: '127.0.0.1' }, '/api/rooms', lanPolicy)).not.toBeNull()
+    expect(checkProxyRequest({ ...lan, remoteAddress: undefined }, local, '/api/rooms', lanPolicy)).not.toBeNull()
+    expect(checkProxyRequest(lan, lanTarget, '/api/rooms', lanPolicy)).toBeNull()
+  })
+
+  it('M1: 다른 출처·Origin 없는 교차 출처 요청 거부', () => {
+    expect(checkProxyRequest({ ...ok, origin: 'https://evil.example' }, local, '/api/rooms', policy)).not.toBeNull()
+    expect(checkProxyRequest({ ...ok, origin: 'null' }, local, '/api/rooms', policy)).not.toBeNull()
+    expect(checkProxyRequest({ ...ok, origin: undefined, secFetchSite: 'cross-site' }, local, '/api/rooms', policy)).not.toBeNull()
+    expect(checkProxyRequest({ ...ok, origin: undefined, secFetchSite: 'same-site' }, local, '/api/rooms', policy)).not.toBeNull()
+  })
+
+  it('루프백 원격 주소 판별', () => {
+    for (const a of ['127.0.0.1', '127.9.9.9', '::1', '::ffff:127.0.0.1']) expect(isLoopbackRemoteAddress(a)).toBe(true)
+    for (const a of [undefined, '', '192.168.0.2', '::ffff:192.168.0.2', 'fe80::1', '::ffff:0127.0.0.1']) expect(isLoopbackRemoteAddress(a)).toBe(false)
   })
 })
