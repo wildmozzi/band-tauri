@@ -8,11 +8,30 @@ import {
   engineRecordStop,
   engineErrorMessage,
 } from '../../native/engineApi'
-import type { RecordStats } from '../../native/engineApi'
-import { buildRecordOptions, recordStatusLine, recordSummaryLine, recordWarning, trackNameMap } from '../../native/recordLogic'
+import type { RecordFormat, RecordStats } from '../../native/engineApi'
+import {
+  buildRecordOptions,
+  isRecordFormat,
+  RECORD_FORMATS,
+  recordStatusLine,
+  recordSummaryLine,
+  recordWarning,
+  trackNameMap,
+} from '../../native/recordLogic'
+
+const FORMAT_KEY = 'band.recordFormat'
+
+function loadFormat(): RecordFormat {
+  try {
+    const v = localStorage.getItem(FORMAT_KEY)
+    return isRecordFormat(v) ? v : 'wav24'
+  } catch {
+    return 'wav24'
+  }
+}
 
 /**
- * 합주 녹음(P2-4, 데스크톱 앱 연주자). 엔진이 트랙별 WAV(내 입력, 연주자별, 선택: 믹스)를 저장 폴더에 쓴다.
+ * 합주 녹음(P2-4, 데스크톱 앱 연주자). 엔진이 트랙별 WAV/FLAC(내 입력, 연주자별, 선택: 믹스)을 저장 폴더에 쓴다.
  * 상태(시간·용량·트랙 수·버림)는 엔진 통계(`EngineStats.recording`)에서 읽는다. 메트로놈 클릭은 녹음되지 않는다.
  */
 export function NativeRecordingControl({
@@ -34,6 +53,7 @@ export function NativeRecordingControl({
   const recording = rec != null
   const [folder, setFolder] = useState<string | null>(null)
   const [includeMix, setIncludeMix] = useState(false)
+  const [format, setFormat] = useState<RecordFormat>(loadFormat)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -80,7 +100,7 @@ export function NativeRecordingControl({
     setError(null)
     setNotice(null)
     try {
-      const st = await engineRecordStart(buildRecordOptions({ now: new Date(), roomTitle, includeMix, peers }))
+      const st = await engineRecordStart(buildRecordOptions({ now: new Date(), roomTitle, includeMix, peers, format }))
       setStarted(st)
       setStoppedFolder(null)
       sentNamesRef.current = namesKey // 시작 옵션에 이미 넣었다
@@ -141,6 +161,28 @@ export function NativeRecordingControl({
           <input type="checkbox" checked={includeMix} disabled={recording || busy} onChange={(e) => setIncludeMix(e.target.checked)} />
           믹스도 저장
         </label>
+        <select
+          className="recording-format"
+          aria-label="녹음 파일 형식"
+          value={rec?.format ?? format}
+          disabled={recording || busy}
+          title={RECORD_FORMATS.find((f) => f.value === (rec?.format ?? format))?.title}
+          onChange={(e) => {
+            if (!isRecordFormat(e.target.value)) return
+            setFormat(e.target.value)
+            try {
+              localStorage.setItem(FORMAT_KEY, e.target.value)
+            } catch {
+              // 저장 못 해도 이번 선택은 쓴다
+            }
+          }}
+        >
+          {RECORD_FORMATS.map((f) => (
+            <option key={f.value} value={f.value} title={f.title}>
+              {f.label}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="recording-folder">
         <span className="recording-folder-path" title={rec?.folder ?? folder ?? ''}>
@@ -153,7 +195,9 @@ export function NativeRecordingControl({
       {warning && <p className="recording-warning" role="alert">{warning}</p>}
       {error && <p className="recording-warning" role="alert">{error}</p>}
       {notice && !recording && <p className="recording-notice">{notice}</p>}
-      <p className="recording-hint">내 입력과 연주자별 소리를 따로 WAV로 저장합니다(같은 타임라인, 메트로놈 클릭 제외).</p>
+      <p className="recording-hint">
+        내 입력과 연주자별 소리를 따로 WAV·FLAC으로 저장합니다(같은 타임라인, 메트로놈 클릭 제외). 끊김(은닉·버림) 구간은 세션 폴더의 markers.json에 남습니다.
+      </p>
     </div>
   )
 }

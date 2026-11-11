@@ -4,6 +4,7 @@ import {
   buildRecordOptions,
   formatBytes,
   formatRecordTime,
+  isRecordFormat,
   recordSessionName,
   recordStatusLine,
   recordSummaryLine,
@@ -65,6 +66,8 @@ describe('recordLogic', () => {
       localName: '나',
       trackNames: { 'u-1': '앨리스', 'u-2': '밥' },
     })
+    expect(buildRecordOptions({ now: new Date(), includeMix: false, peers: [], format: 'flac' }).format).toBe('flac')
+    expect(isRecordFormat('flac') && isRecordFormat('wavF32') && !isRecordFormat('mp3') && !isRecordFormat(null)).toBe(true)
   })
 
   it('상태 줄과 경고', () => {
@@ -91,5 +94,8 @@ describe('recordLogic', () => {
       error: null,
     }
     expect(recordSummaryLine(s)).toBe('저장됨 · 2트랙 · 1:01 · 2.0 MB')
+    // P2-4a: 끊김 구간이 있으면 마커 파일과 함께 알린다(0이면 그대로)
+    expect(recordSummaryLine({ ...s, markers: 0, markersFile: 'markers.json' })).toBe('저장됨 · 2트랙 · 1:01 · 2.0 MB')
+    expect(recordSummaryLine({ ...s, markers: 4, markersFile: 'markers.json' })).toBe('저장됨 · 2트랙 · 1:01 · 2.0 MB · 끊김 구간 4곳(markers.json)')
   })
 })

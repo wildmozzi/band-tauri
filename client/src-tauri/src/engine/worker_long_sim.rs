@@ -98,13 +98,10 @@ impl Known {
     }
 }
 
-// 기준값 = P1-6a 측정값(2026-11-11, 이중 은닉 제거 후). 고치는 PR에서 갱신하거나 지운다.
-// P1-6a(손실 뒤 언더런 은닉 재해석)로 #2·#5의 은닉·언더런·띠 밖 미달과 #1 5분 띠 밖 미달이 해소되어 지정을 지웠다.
-const TOL_PCT: f64 = 0.3;
-/// #1: 지수(꼬리 긴) 지터에서 목표(분위수 0.95 + 여유)를 넘는 늦은 패킷이 그대로 은닉된다. 손실 0일 때도 약 0.9% (P1-6b).
-const TAIL: &str = "꼬리 긴 지터의 늦은 패킷 은닉(손실 0에서도 ~0.9%, P1-6b)";
-// #1은 언더런 몫이 0.15~0.17%로 예산 안이다 — 초과분은 손실 몫(1.77%, 실제 손실 0.5%)의 늦은 패킷이다.
-const KNOWN_1: &[Known] = &[Known { metric: Metric::Conceal, short: Some(1.94), long: Some(1.93), tol: TOL_PCT, why: TAIL }];
+// 기준값은 측정값으로 넣고, 고치는 PR에서 갱신하거나 지운다. 지금은 알려진 미달이 없다.
+// - P1-6a(손실 뒤 언더런 은닉 재해석): #2·#5의 은닉·언더런·띠 밖 미달과 #1 5분 띠 밖 미달 해소.
+// - P1-6b(늦은 패킷 예산 `tail_extra`): #1 꼬리 긴 지터의 은닉 미달(1.94% / 1.93%) 해소.
+// 새 미달을 known으로 넘길 때 tol은 0.3%p를 쓴다(래칫 문턱).
 
 struct Spec {
     np: NetPeer,
@@ -130,7 +127,7 @@ fn scenario(seconds: f64) -> Vec<Spec> {
     np.dist = JitDist::Exp;
     np.loss = 0.005;
     np.steps = vec![(at(0.30), 8000, 4000), (at(0.60), 0, 2000)];
-    v.push(Spec { np, rule: LossRule::Goal, known: KNOWN_1 });
+    v.push(Spec { np, rule: LossRule::Goal, known: &[] });
     // #2 버스트 손실: 평균 3패킷 버스트(나쁨 진입 0.4%) + 무작위 0.3% ≈ 1.5%, +200ppm, 장치 버퍼 256.
     let mut np = NetPeer::new(240, 1003);
     np.in_buf = 256;

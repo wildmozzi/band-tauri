@@ -1,7 +1,18 @@
 /**
  * 합주 녹음(P2-4) 표시·옵션 로직. 엔진 계약은 설계 문서 1.5절, 래퍼는 `engineApi.ts`.
  */
-import type { RecordOptions, RecordStats, RecordSummary } from './engineApi'
+import type { RecordFormat, RecordOptions, RecordStats, RecordSummary } from './engineApi'
+
+/** 형식 선택지(녹음 패널) */
+export const RECORD_FORMATS: { value: RecordFormat; label: string; title: string }[] = [
+  { value: 'wav24', label: 'WAV 24비트', title: '대부분의 DAW에서 바로 열립니다(48kHz 스테레오 1시간 약 1GB/트랙)' },
+  { value: 'flac', label: 'FLAC', title: '무손실 압축(24비트, 보통 WAV의 절반 안팎)' },
+  { value: 'wavF32', label: 'WAV 32비트 float', title: '클리핑 없이 원본 그대로(WAV 24보다 1/3 큼)' },
+]
+
+export function isRecordFormat(v: unknown): v is RecordFormat {
+  return RECORD_FORMATS.some((f) => f.value === v)
+}
 
 /** 바이트 → "12.3 MB" (1000 단위, 디스크 표기와 같게) */
 export function formatBytes(n: number): string {
@@ -49,10 +60,11 @@ export function buildRecordOptions(params: {
   roomTitle?: string | null
   includeMix: boolean
   peers: { peerId: string; name: string }[]
+  format?: RecordFormat
 }): RecordOptions {
   const trackNames = trackNameMap(params.peers)
   return {
-    format: 'wav24',
+    format: params.format ?? 'wav24',
     includeMix: params.includeMix,
     name: recordSessionName(params.now, params.roomTitle),
     localName: '나',
@@ -75,7 +87,9 @@ export function recordWarning(s: Pick<RecordStats, 'droppedFrames' | 'sampleRate
   return null
 }
 
-/** 정지 후 안내: "저장됨 · 3트랙 · 1:23 · 45.6 MB" */
+/** 정지 후 안내: "저장됨 · 3트랙 · 1:23 · 45.6 MB" (+ 문제 구간이 있으면 " · 끊김 구간 4곳(markers.json)") */
 export function recordSummaryLine(s: RecordSummary): string {
-  return `저장됨 · ${s.tracks.length}트랙 · ${formatRecordTime(s.durationSec)} · ${formatBytes(s.bytes)}`
+  const base = `저장됨 · ${s.tracks.length}트랙 · ${formatRecordTime(s.durationSec)} · ${formatBytes(s.bytes)}`
+  const n = s.markers ?? 0
+  return n > 0 ? `${base} · 끊김 구간 ${n}곳(${s.markersFile ?? 'markers.json'})` : base
 }

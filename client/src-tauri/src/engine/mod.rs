@@ -8,6 +8,7 @@ pub mod codec;
 pub mod config;
 pub mod cpuprof;
 pub mod device;
+pub mod flac;
 pub mod jitter;
 pub mod measure;
 pub mod metronome;
@@ -225,6 +226,7 @@ impl Engine {
             epoch,
             probe,
             metronome,
+            rec_marks: engine.recorder.lock().marks(),
         };
         // 초기화(리샘플러/인코더)는 여기서 해서 실패를 호출자에게 돌려준다(리뷰 M10).
         let worker = Worker::new(params)?;
@@ -608,13 +610,20 @@ impl Engine {
     /// 모든 스레드를 멈추고 join한다. 여러 번 불러도 안전하다.
     pub fn stop(&mut self) {
         // 녹음은 출력 콜백이 도는 동안 닫는다(콜백이 녹음 끝점을 돌려줘야 남은 것을 다 쓴다)
-        {
+        // 마무리(콜백 반환 대기 최대 1초 + 파일 sync)는 recorder 락 밖에서 한다 — 그동안 `stats()`가 막히지 않게(PR #47 L2).
+        let (job, wait) = {
             let mut r = self.recorder.lock();
-            if r.is_recording() {
-                if let Err(e) = r.stop() {
-                    log::warn!("엔진 정지 중 녹음 정지 실패: {e}");
-                }
+            (r.is_recording().then(|| r.begin_stop()), r.waiter())
+        };
+        if let Some(job) = job {
+            if let Err(e) = job.and_then(|j| j.finish()) {
+                log::warn!("엔진 정지 중 녹음 정지 실패: {e}");
             }
+            self.recorder.lock().reclaim();
+        }
+        // `engine_record_stop`이 다른 스레드에서 마무리 중이면 끝날 때까지 기다린다(앱 종료 경합, PR #47 L4).
+        if !wait(Duration::from_secs(10)) {
+            log::warn!("엔진 정지: 녹음 마무리를 기다리다 시간 초과");
         }
         self.unsubscribe_mix();
         self.worker_stop.store(true, Ordering::SeqCst);

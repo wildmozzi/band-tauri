@@ -506,6 +506,7 @@ impl OutputRt {
         };
         let got = cons.pop_slice(scratch) & !1;
         let mut short = false;
+        let mut short_frames = 0;
         if got < want {
             // 받은 꼬리를 짧게 페이드아웃해 클릭을 줄인다(리뷰 L9).
             let fade = (got / 2).min(32);
@@ -521,13 +522,14 @@ impl OutputRt {
                 rest.fill(0.0);
             }
             if sh.playing.load(Ordering::Relaxed) {
-                sh.underrun_frames.fetch_add(((want - got) / 2) as u64, Ordering::Relaxed);
+                short_frames = (want - got) / 2;
+                sh.underrun_frames.fetch_add(short_frames as u64, Ordering::Relaxed);
                 short = true;
             }
         }
-        // 녹음(P2-4): 재생한 그대로(게인·팬·뮤트 전, 부족분 0 포함)
+        // 녹음(P2-4): 재생한 그대로(게인·팬·뮤트 전, 부족분 0 포함). 부족분은 언더런 마커로(P2-4a).
         if let Some(r) = self.rec.as_mut().and_then(|p| p.active()) {
-            r.source(s, sh.occupant.load(Ordering::Relaxed), scratch);
+            r.source(s, sh.occupant.load(Ordering::Relaxed), scratch, short_frames);
         }
         let (bl, br, tl, tr) = (sh.bus_l.load(), sh.bus_r.load(), sh.tap_l.load(), sh.tap_r.load());
         let mut sq = 0.0f32;
@@ -645,9 +647,10 @@ impl OutputRt {
                 let room = self.tap.vacant_len() & !1;
                 let k = want.min(room);
                 self.tap.push_slice(&t[..k]);
-                if let Some(r) = self.rec.as_mut().and_then(|p| p.active()) {
-                    r.finish(t);
-                }
+            }
+            // 녹음 청크 머리는 탭 버스와 상관없이 늘 닫는다(PR #47 L1: 안 닫으면 머리 없는 샘플이 링에 남아 이후 블록이 모두 밀림).
+            if let Some(r) = self.rec.as_mut().and_then(|p| p.active()) {
+                r.finish(self.tap_bus.get(..want).unwrap_or(&[]));
             }
             done += n;
         }
