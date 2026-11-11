@@ -4,6 +4,7 @@ import {
   forgetRoomPassword,
   inviteLink,
   joinErrorFromSignal,
+  joinErrorStopsSession,
   parseRoomCode,
   recallRoomPassword,
   rememberRoomPassword,
@@ -58,8 +59,29 @@ describe('joinErrorFromSignal / describeJoinError', () => {
     expect(joinErrorFromSignal({ type: 'error', code: 'perform-not-approved' })).toBeNull()
     expect(joinErrorFromSignal({ type: 'chat', code: 'password-invalid' })).toBeNull()
     expect(joinErrorFromSignal({ type: 'error', code: 'password-invalid', roomId: ID, remainingAttempts: 2 })).toEqual({
-      code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null,
+      code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null, maxParticipants: null, reason: null,
     })
+  })
+  it('정원 초과(room-full)를 해석하고 정원을 보여준다 (P3-12b)', () => {
+    const e = joinErrorFromSignal({ type: 'error', code: 'room-full', roomId: ID, maxParticipants: 4 })
+    expect(e).toMatchObject({ code: 'room-full', roomId: ID, maxParticipants: 4 })
+    expect(describeJoinError(e!)).toContain('4명')
+    expect(describeJoinError({ code: 'room-full', roomId: null, remainingAttempts: null, retryAfterMs: null })).toContain('정원')
+  })
+  it('익명 상한·재연결 중 자리 잃음을 구분해 안내한다 (PR #23 H1·M3)', () => {
+    const anon = joinErrorFromSignal({ type: 'error', code: 'room-full', reason: 'anonymous-limit', roomId: ID, maxParticipants: 4 })
+    expect(anon?.reason).toBe('anonymous-limit')
+    expect(describeJoinError(anon!)).toContain('로그인')
+    const lost = { ...joinErrorFromSignal({ type: 'error', code: 'room-full', roomId: ID, maxParticipants: 4 })!, afterReconnect: true }
+    expect(describeJoinError(lost)).toContain('자리를 잃었습니다')
+  })
+  it('방 밖으로 밀려나면 연주 세션을 멈춘다 (PR #23 M3)', () => {
+    const e = (code: string) => joinErrorFromSignal({ type: 'error', code, roomId: ID })!
+    expect(joinErrorStopsSession(e('room-full'), false)).toBe(true)
+    expect(joinErrorStopsSession(e('room-full'), true)).toBe(true)
+    expect(joinErrorStopsSession(e('password-invalid'), true)).toBe(true)
+    expect(joinErrorStopsSession(e('password-required'), false)).toBe(false)
+    expect(joinErrorStopsSession(e('password-busy'), true)).toBe(false)
   })
   it('남은 시도 횟수와 대기 시간을 보여준다', () => {
     expect(describeJoinError({ code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null })).toContain('2회')
