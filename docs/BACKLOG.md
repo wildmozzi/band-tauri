@@ -26,7 +26,7 @@
 | P1-1 | **지연 측정 도구**: 에코 피어 모드(받은 오디오를 그대로 되돌려 보냄) + 클릭 왕복 측정 UI, 로컬 루프백(입력→출력 케이블) 측정 | 측정값이 설정 화면/방 화면에 표시, 측정 절차 문서 | 완료(#13; 실측은 P1-1a [사람]) |
 | P1-1b | PR #13 리뷰 Low: remove_peer 은퇴 처리를 write 락 안으로(잠재 경쟁), 중복 키 add 거부 악용 가용성 방해 대응 | 테스트 | 대기 |
 | P1-1a | **[사람]** Scarlett Solo 4세대 ASIO 실측(버퍼 32/64/128, ASIOGetLatencies 확인, 하드웨어 루프백) + 두 PC 실네트워크·릴레이 에코 측정 — 절차 docs/MEASURE.md | 결과를 백로그 완료 기록에 | 대기 |
-| P1-2 | Windows 실시간 스레드 우선순위: 엔진 워커/수신 스레드에 MMCSS "Pro Audio" 등록, 타이머 해상도 1ms | 루프백 테스트 지터 감소 수치 | 대기 |
+| P1-2 | Windows 실시간 스레드 우선순위: 엔진 워커/수신 스레드에 MMCSS "Pro Audio" 등록, 타이머 해상도 1ms | 루프백 테스트 지터 감소 수치 | 진행중(작업자 p1-mmcss) |
 | P1-3 | UDP 송신 DSCP EF 마킹 + 패킷 페이싱, 송신 큐 지연 측정 | 테스트 + 수치 | 대기 |
 | P1-4 | **UDP 릴레이 서버**(fly.io UDP, 방 단위 토큰 인증, 암호문 그대로 중계) + 엔진 폴백 경로 | 홀펀칭 실패 시뮬레이션에서 릴레이로 연결, 지연 표시 | P1-4a 완료(#1), P1-4b 완료(#10); **[사람]** fly 전용 IPv4(유료), 실네트워크는 P1-4d |
 | P1-4c | 릴레이 경로 대역 초과 시 Opus 자동 전환(워커 코덱 전환) + RelayBind MAC(relay-design 4.1 등록 가로채기·경로 위장 대응) | 통합 테스트 | 대기 |
@@ -59,7 +59,7 @@
 | P3-0 | CI 안정화: `callback_mix_early_callbacks_real_time` 타이밍 불안정 테스트 결정화, CI 단계 타임아웃(ffmpeg apt 설치가 50분 멈춘 사례) + apt 캐시/재시도 | CI 연속 녹색 | 완료(#14) |
 | P3-0a | CI 불안정 테스트: `tests/loopback.rs` `input_mute_silences_monitor_and_tap_but_keeps_meter`가 벽시계 sleep(600/400ms)에 의존하는데 결정적 잡에서 실행되어 느린 러너에서 실패(PR #22 CI, 클라이언트 전용 PR). 가상 시계 결정적 짝 + realtime 분류, 결정적 잡에 벽시계 sleep 사용 테스트가 남아 있는지 전수 점검 | 결정적 잡에 sleep 의존 0 | 대기 |
 | P3-0b | **[결정·긴급]** GitHub Actions 사용 한도 초과로 CI 전면 중단(2026-11-10 20시경). 선택: ① 결제/지출 한도 상향 ② 리포 공개 전환(공개 리포는 Actions 무료) ③ 이 PC에 self-hosted runner(무료, PC 자원 사용) ④ CI 비용 절감(엔진 경로 변경 시에만 Windows 잡, realtime은 야간/수동, 문서 변경은 CI 생략) — ④는 어느 선택과도 병행 권장 | CI 재가동 | 완료(#26: self-hosted runner jw-pc-band, 7잡 녹색; **[사람]** runner를 Windows 서비스로 등록해야 재부팅·세션 종료 후에도 유지) |
-| P3-8a | (P3-8 후속) 미정의 CSS 변수 7개(--primary 등) 정리, 남은 모달 3개(Premium/AudioSettings/EchoMeasure) 공용 Modal로, TSX 인라인 색 209곳 토큰화, px 간격 → --space-* | 시각 회귀 통과 | 대기 |
+| P3-8a | (P3-8 후속) 미정의 CSS 변수 7개(--primary 등) 정리, 남은 모달 3개(Premium/AudioSettings/EchoMeasure) 공용 Modal로, TSX 인라인 색 209곳 토큰화, px 간격 → --space-* | 시각 회귀 통과 | 진행중(작업자 p3-tokens) |
 | P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 완료(#3) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 완료(#12; pages 직접 호출 13→0) |
