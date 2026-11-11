@@ -40,6 +40,8 @@ pub struct RelaySetting<'a> {
     pub token: &'a str,
     /// 토큰 남은 수명(서버 발급 시각 기준). 받은 시각 + 이 값이 만료 시각이다(M1).
     pub expires_in: Option<Duration>,
+    /// 토큰별 Bind MAC 키(base64url 32B, relay-design 2.1.1). None이면 MAC 없는 구버전 Bind.
+    pub bind_key: Option<&'a str>,
 }
 
 /// 원격 피어 최대 수(본인 포함 6명).
@@ -297,7 +299,10 @@ impl Net {
             return Ok(());
         };
         relay::validate_relay_addr(&cfg.addr, self.shared.allow_loopback)?;
-        let token = RelayToken::parse(cfg.token, self.shared.ssrc)?;
+        let mut token = RelayToken::parse(cfg.token, self.shared.ssrc)?;
+        if let Some(k) = cfg.bind_key {
+            token.bind_key = Some(relay::parse_bind_key(k)?);
+        }
         let deadline = relay::token_deadline(&token, cfg.expires_in, now, unix_now());
         let moved_from = {
             let mut r = self.shared.relay.lock();
@@ -402,8 +407,11 @@ impl NetShared {
     }
 
     /// 제어 패킷 송신. `via_relay`면 `to`는 릴레이 주소이고 RelayData로 감싼다.
+    /// Hello/HelloAck에는 경로 태그(`packet::path_tag`)를 싣는다: 헤더가 AAD라 출발 주소를 릴레이로 바꾼 직접 Hello를
+    /// 받는 쪽이 가려낸다(relay-design 4.1). 송신마다 seq가 새로우므로 nonce가 겹치지 않는다.
     fn send_ctrl(&self, p: &Peer, t: PacketType, timestamp: u32, plaintext: &[u8], to: SocketAddr, via_relay: bool) {
-        let h = Header { ptype: t, ssrc: self.ssrc, seq: self.next_ctrl_seq(t), timestamp, flags: 0, frame_code: 0 };
+        let flags = if matches!(t, PacketType::Hello | PacketType::HelloAck) { packet::path_tag(via_relay) } else { 0 };
+        let h = Header { ptype: t, ssrc: self.ssrc, seq: self.next_ctrl_seq(t), timestamp, flags, frame_code: 0 };
         let mut buf = [0u8; SEND_BUF_BYTES];
         if let Some(n) = p.tx.seal(&h, plaintext, &mut buf[DATA_PREFIX_BYTES..]) {
             self.send_sealed(&mut buf, n, to, via_relay.then_some(p.ssrc));
@@ -646,6 +654,11 @@ impl NetShared {
                 }
                 // 직전 릴레이 주소에서 온 Hello/HelloAck는 직접 경로로 오인하지 않게 버린다(M3)
                 if !via_relay && *self.prev_relay.read() == Some(from) {
+                    return;
+                }
+                // 경로 종류 위장(relay-design 4.1): 보낸 쪽이 표시한 경로(인증됨)와 수신 경로가 다르면 버린다
+                if !packet::path_tag_matches(h.flags, via_relay) {
+                    log::debug!("{}: 경로 태그 불일치 Hello(from {from}, flags {:#04x}) 폐기", peer.id, h.flags);
                     return;
                 }
                 let is_ack = h.ptype == PacketType::HelloAck;

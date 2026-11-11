@@ -104,6 +104,9 @@ pub struct RelayArgs {
     /// 판단한다(클라이언트 시계 오차 무관, PR #10 M1). 없으면 로컬 시계로 계산.
     #[serde(default)]
     pub expires_in_sec: Option<u64>,
+    /// 토큰별 Bind MAC 키(base64url 32B, relay-design 2.1.1). 있으면 RelayBind에 MAC을 붙인다(옛 서버는 없음).
+    #[serde(default)]
+    pub bind_key: Option<String>,
 }
 
 #[tauri::command]
@@ -121,7 +124,7 @@ pub async fn engine_set_relay(state: State<'_, EngineState>, relay: Option<Relay
             None => crate::net::relay::resolve_relay_addr(&r.addr)?,
         };
         let expires_in = r.expires_in_sec.map(std::time::Duration::from_secs);
-        m.with_engine(|e| e.set_relay(Some(RelaySetting { host: &r.addr, addr, token: &r.token, expires_in })))
+        m.with_engine(|e| e.set_relay(Some(RelaySetting { host: &r.addr, addr, token: &r.token, expires_in, bind_key: r.bind_key.as_deref() })))
     })
     .await
 }

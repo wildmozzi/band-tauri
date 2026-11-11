@@ -38,6 +38,7 @@ if-addrs = "0.13"
 # 피어 쌍별 키 합의 (X25519 ECDH + HKDF-SHA256)
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
 
 # Utilities

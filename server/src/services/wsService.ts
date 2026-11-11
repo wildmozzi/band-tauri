@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
 import { ROOM_CAPACITY_MAX } from '../lib/roomCapacity'
-import { isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
+import { deriveRelayBindKey, isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
 import { createRoomRepository, type RoomMeta, type RoomRepository } from '../repositories/roomRepository'
 import { DEFAULT_PASSWORD_ATTEMPT_LIMITS, PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword, type ScryptGate } from '../lib/roomPassword'
 
@@ -349,6 +349,7 @@ export function initializeWebSocket(
    * - 회수 수단이 없으므로 수명을 짧게(기본 120초) 두고 클라이언트가 갱신한다. 릴레이 등록은 토큰 만료를 넘지 않는다.
    * - expiresIn(남은 수명, 초)·serverNow를 함께 보낸다: 클라이언트는 자기 시계가 아니라 받은 시각 + expiresIn으로
    *   만료·갱신을 판단한다(시계가 어긋난 PC에서 토큰이 주기적으로 끊기지 않게, PR #10 M1).
+   * - bindKey: 토큰별 Bind MAC 키(relay-design 2.1.1). TLS로만 전달되어 경로상 공격자의 등록 가로채기를 막는다.
    */
   function sendRelayToken(c: Client) {
     if (!relayConfig || !c.roomId || !c.userId || c.nativeSsrc === undefined || !isPerformer(c)) return
@@ -358,6 +359,7 @@ export function initializeWebSocket(
     send(c.ws, {
       type: 'relay-token',
       token: token.toString('base64url'),
+      bindKey: deriveRelayBindKey(token, relayConfig.secret).toString('base64url'),
       addr: relayConfig.addr,
       ssrc: c.nativeSsrc,
       expiresAt,
