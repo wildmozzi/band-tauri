@@ -37,6 +37,7 @@ Supabase 무료 한도(Storage 1GB, Egress 5GB/월)를 넘기 전에 env 전환�
    - 예전 Supabase URL은 현재 저장소에 사본이 있으면 새 조회 URL로 바꾸고(이전된 원본), 아직 Supabase에만 있으면 그대로 두고, 둘 다 없으면 거부한다.
    - 이렇게 해서 원본 삭제 뒤에도 오래 열려 있던 편집 폼이 예전 URL을 다시 쓰지 않는다.
 5. 조회 URL은 공개 URL이 있으면 그 URL이고, 없으면 `${PUBLIC_API_URL}/api/storage/post-images/<key>`다. 이 경로는 1시간짜리 서명 GET URL로 302 리다이렉트한다(pending key는 열 수 없음).
+   `PUBLIC_API_URL`은 운영(`NODE_ENV=production`)에서 필수다 — 없거나 https 절대 URL이 아니면 서버가 시작하지 않는다(P3-10g, `requirePublicApiUrl`).
 - 기존 `posts.images`의 Supabase 공개 URL은 그대로 표시된다. 원본을 지우기 전까지는 그렇다. 예전 클라이언트가 만든 파일명(`${ms}-${base36}.${원본 확장자}`, 공백·한글 포함 가능)도 조회 라우트가 받는다.
 - 남용 방지: 업로드 URL 발급은 IP당 분당 30회에 더해 **사용자별 24시간 100개·200MB**까지다. 메모리 기준이라 재시작하면 초기화된다.
 - 고아 정리: 매일 03:30에 게시글이 참조하지 않고 업로드된 지 24시간이 지난 이미지를 찾는다.
