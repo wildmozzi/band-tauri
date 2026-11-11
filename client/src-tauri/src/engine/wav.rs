@@ -1,4 +1,4 @@
-//! 녹음 파일 쓰기(P2-4): WAV(24비트 PCM / 32비트 float), 4GB를 넘으면 RF64(EBU Tech 3306)로 바꾼다.
+//! 녹음 파일 쓰기(P2-4): WAV(24비트 PCM / 32비트 float, fmt는 `WAVE_FORMAT_EXTENSIBLE`), 4GB를 넘으면 RF64(EBU Tech 3306)로 바꾼다.
 //!
 //! 헤더 앞쪽에 `JUNK` 청크(28바이트)를 미리 둔다. 마무리할 때 RIFF 크기가 u32를 넘으면 `RIFF`→`RF64`,
 //! `JUNK`→`ds64`(RIFF·data 크기와 프레임 수 u64)로 바꾸고 32비트 크기 칸은 0xFFFFFFFF로 둔다. 4GB 아래면 보통 WAV다
@@ -44,17 +44,32 @@ impl RecordFormat {
 
 const JUNK_PAYLOAD: u32 = 28;
 const HEADER_REFRESH: Duration = Duration::from_secs(5);
+/// `WAVE_FORMAT_EXTENSIBLE` fmt 크기: 기본 16 + cbSize 2 + 확장 22.
+const FMT_EXT_LEN: u32 = 40;
+/// KSDATAFORMAT_SUBTYPE_* GUID의 첫 필드(1 = PCM, 3 = IEEE float) 뒤 12바이트(`-0000-0010-8000-00AA00389B71`).
+const SUBTYPE_TAIL: [u8; 12] = [0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71];
 
-/// 헤더 바이트와 data 크기 칸 위치를 만든다. `data_bytes`가 크면 RF64 헤더가 된다.
-/// 반환: (헤더, 헤더 길이 = data 시작 위치).
+/// 채널 수의 기본 스피커 배치(`dwChannelMask`). 모노 = 가운데(FC), 스테레오 = FL|FR, 그 이상은 표준 순서 앞에서부터.
+pub fn channel_mask(channels: u16) -> u32 {
+    match channels {
+        1 => 0x4,
+        2..=18 => (1u32 << channels) - 1,
+        // 표준 스피커 위치(18개)보다 많으면 배치 없음
+        _ => 0,
+    }
+}
+
+/// 헤더 바이트(길이 = data 시작 위치)를 만든다. `data_bytes`가 크면 RF64 헤더가 되고, 길이는 같다.
+///
+/// fmt는 늘 `WAVE_FORMAT_EXTENSIBLE`(0xFFFE, 40바이트)이다(PR #47 L3): MS 규격이 16비트 초과·float·3채널 이상에
+/// 권장하고, 일부 구형 리더·하드웨어 레코더는 24비트 `WAVE_FORMAT_PCM`을 거부한다. float는 비PCM이라 `fact`도 둔다.
+/// 배치: `RIFF|RF64` 12 + `JUNK|ds64` 36 + `fmt ` 48 + (float면 `fact` 12) + `data` 8 = 24비트 104, float 116바이트.
 pub fn header_bytes(fmt: RecordFormat, channels: u16, rate: u32, data_bytes: u64) -> Vec<u8> {
     let bps = fmt.bytes_per_sample();
     let block_align = channels * bps;
     let float = fmt == RecordFormat::WavF32;
     let frames = data_bytes / block_align.max(1) as u64;
-    // fmt: PCM 16바이트, float는 cbSize를 더한 18바이트 + fact 청크(비PCM 필수)
-    let fmt_len: u32 = if float { 18 } else { 16 };
-    let header_len = 12 + (8 + JUNK_PAYLOAD) + (8 + fmt_len) + if float { 12 } else { 0 } + 8;
+    let header_len = 12 + (8 + JUNK_PAYLOAD) + (8 + FMT_EXT_LEN) + if float { 12 } else { 0 } + 8;
     let riff_size = header_len as u64 - 8 + data_bytes;
     let rf64 = riff_size > u32::MAX as u64;
     let mut h = Vec::with_capacity(header_len as usize);
@@ -74,15 +89,19 @@ pub fn header_bytes(fmt: RecordFormat, channels: u16, rate: u32, data_bytes: u64
         h.extend_from_slice(&[0u8; JUNK_PAYLOAD as usize]);
     }
     h.extend_from_slice(b"fmt ");
-    h.extend_from_slice(&fmt_len.to_le_bytes());
-    h.extend_from_slice(&(if float { 3u16 } else { 1u16 }).to_le_bytes());
+    h.extend_from_slice(&FMT_EXT_LEN.to_le_bytes());
+    h.extend_from_slice(&0xFFFEu16.to_le_bytes()); // WAVE_FORMAT_EXTENSIBLE
     h.extend_from_slice(&channels.to_le_bytes());
     h.extend_from_slice(&rate.to_le_bytes());
     h.extend_from_slice(&(rate * block_align as u32).to_le_bytes());
     h.extend_from_slice(&block_align.to_le_bytes());
-    h.extend_from_slice(&(bps * 8).to_le_bytes());
+    h.extend_from_slice(&(bps * 8).to_le_bytes()); // 컨테이너 비트
+    h.extend_from_slice(&22u16.to_le_bytes()); // cbSize
+    h.extend_from_slice(&(bps * 8).to_le_bytes()); // wValidBitsPerSample(컨테이너를 다 씀)
+    h.extend_from_slice(&channel_mask(channels).to_le_bytes());
+    h.extend_from_slice(&(if float { 3u32 } else { 1u32 }).to_le_bytes());
+    h.extend_from_slice(&SUBTYPE_TAIL);
     if float {
-        h.extend_from_slice(&0u16.to_le_bytes()); // cbSize
         h.extend_from_slice(b"fact");
         h.extend_from_slice(&4u32.to_le_bytes());
         h.extend_from_slice(&(if rf64 || frames > u32::MAX as u64 { u32::MAX } else { frames as u32 }).to_le_bytes());
@@ -93,7 +112,7 @@ pub fn header_bytes(fmt: RecordFormat, channels: u16, rate: u32, data_bytes: u64
     h
 }
 
-/// 스테레오/모노 인터리브 f32를 받아 WAV로 쓴다. 는 테스트에서 실패 주입용으로 바꾼다.
+/// 인터리브 f32(채널 수 자유)를 받아 WAV로 쓴다. `F`는 테스트에서 실패 주입용으로 바꾼다.
 pub struct WavWriter<F: Write + Seek = File> {
     f: BufWriter<F>,
     fmt: RecordFormat,
@@ -230,10 +249,15 @@ mod tests {
         u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
     }
 
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("band-wav-test-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn pcm24_file_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("band-wav-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tmp_dir("pcm24");
         let path = dir.join("a.wav");
         let mut w = WavWriter::create(&path, RecordFormat::Wav24, 2, 48_000).unwrap();
         w.write(&[0.5, -0.5, 1.5, -1.0]).unwrap();
@@ -246,11 +270,54 @@ mod tests {
         assert_eq!(u32_at(&b, 4) as usize, b.len() - 8);
         assert_eq!(&b[12..16], b"JUNK");
         assert_eq!(&b[48..52], b"fmt ");
-        assert_eq!(u32_at(&b, 76), 30); // 5프레임 × 6바이트
-        let s0 = i32::from_le_bytes([0, b[80], b[81], b[82]]) >> 8;
+        assert_eq!(u32_at(&b, 52), 40);
+        assert_eq!(u32_at(&b, 56) & 0xffff, 0xFFFE); // WAVE_FORMAT_EXTENSIBLE
+        assert_eq!(&b[96..100], b"data");
+        assert_eq!(u32_at(&b, 100), 30); // 5프레임 × 6바이트
+        let s0 = i32::from_le_bytes([0, b[104], b[105], b[106]]) >> 8;
         assert_eq!(s0, 4_194_304); // 0.5 × 8388607 반올림
-        let s2 = i32::from_le_bytes([0, b[86], b[87], b[88]]) >> 8;
+        let s2 = i32::from_le_bytes([0, b[110], b[111], b[112]]) >> 8;
         assert_eq!(s2, 8_388_607); // 1.5는 1로 자름
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PR #47 L3: 24비트·float·모노·다채널 파일을 표준 파서(hound)로 다시 읽으면 형식·길이·샘플이 같다.
+    /// hound는 `WAVE_FORMAT_EXTENSIBLE`의 서브포맷 GUID·유효 비트를 검사하고, `JUNK`·`fact`는 건너뛴다.
+    #[test]
+    fn extensible_files_read_back_with_hound() {
+        let dir = tmp_dir("ext");
+        for (fmt, ch) in [(RecordFormat::Wav24, 2u16), (RecordFormat::WavF32, 2), (RecordFormat::Wav24, 1), (RecordFormat::WavF32, 1), (RecordFormat::Wav24, 6), (RecordFormat::WavF32, 8)] {
+            let path = dir.join(format!("{fmt:?}-{ch}.wav"));
+            let frames = 1000usize;
+            let src: Vec<f32> = (0..frames * ch as usize).map(|i| ((i as f32) * 0.013).sin() * 0.9).collect();
+            let mut w = WavWriter::create(&path, fmt, ch, 44_100).unwrap();
+            w.write(&src).unwrap();
+            w.write_silence(10).unwrap();
+            w.finish().unwrap();
+            let mut r = hound::WavReader::open(&path).unwrap_or_else(|e| panic!("{fmt:?} {ch}ch: {e}"));
+            let spec = r.spec();
+            assert_eq!(spec.channels, ch);
+            assert_eq!(spec.sample_rate, 44_100);
+            assert_eq!(r.duration() as usize, frames + 10, "{fmt:?} {ch}ch");
+            let got: Vec<f32> = match fmt {
+                RecordFormat::WavF32 => {
+                    assert_eq!((spec.sample_format, spec.bits_per_sample), (hound::SampleFormat::Float, 32));
+                    r.samples::<f32>().map(|s| s.unwrap()).collect()
+                }
+                _ => {
+                    assert_eq!((spec.sample_format, spec.bits_per_sample), (hound::SampleFormat::Int, 24));
+                    r.samples::<i32>().map(|s| s.unwrap() as f32 / 8_388_607.0).collect()
+                }
+            };
+            assert_eq!(got.len(), (frames + 10) * ch as usize);
+            let tol = if fmt == RecordFormat::WavF32 { 0.0 } else { 1.0 / 8_388_607.0 };
+            for (a, b) in src.iter().zip(&got) {
+                assert!((a - b).abs() <= tol, "{fmt:?} {ch}ch: {a} vs {b}");
+            }
+            assert!(got[frames * ch as usize..].iter().all(|&v| v == 0.0));
+            let b = std::fs::read(&path).unwrap();
+            assert_eq!(u32_at(&b, 76), channel_mask(ch));
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -322,31 +389,56 @@ mod tests {
     }
 
     #[test]
-    fn float_header_has_fact() {
+    fn float_header_is_extensible_with_fact() {
         let h = header_bytes(RecordFormat::WavF32, 2, 48_000, 800);
         assert_eq!(&h[48..52], b"fmt ");
-        assert_eq!(u32_at(&h, 52), 18);
-        assert_eq!(u32_at(&h, 56) & 0xffff, 3);
-        assert_eq!(&h[74..78], b"fact");
-        assert_eq!(u32_at(&h, 82), 100);
-        assert_eq!(&h[86..90], b"data");
-        assert_eq!(u32_at(&h, 90), 800);
-        assert_eq!(h.len(), 94);
+        assert_eq!(u32_at(&h, 52), 40);
+        assert_eq!(u32_at(&h, 56) & 0xffff, 0xFFFE);
+        assert_eq!(u32_at(&h, 56) >> 16, 2); // 채널
+        assert_eq!(u32_at(&h, 60), 48_000);
+        assert_eq!(u32_at(&h, 64), 48_000 * 8);
+        assert_eq!(u32_at(&h, 68), 8 | (32 << 16)); // block align, 컨테이너 비트
+        assert_eq!(u32_at(&h, 72), 22 | (32 << 16)); // cbSize, 유효 비트
+        assert_eq!(u32_at(&h, 76), 0x3); // FL|FR
+        assert_eq!(u32_at(&h, 80), 3); // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+        assert_eq!(&h[84..96], &SUBTYPE_TAIL);
+        assert_eq!(&h[96..100], b"fact");
+        assert_eq!(u32_at(&h, 104), 100);
+        assert_eq!(&h[108..112], b"data");
+        assert_eq!(u32_at(&h, 112), 800);
+        assert_eq!(h.len(), 116);
+        let p = header_bytes(RecordFormat::Wav24, 1, 48_000, 0);
+        assert_eq!(p.len(), 104);
+        assert_eq!(u32_at(&p, 72), 22 | (24 << 16));
+        assert_eq!(u32_at(&p, 76), 0x4); // 모노 = FC
+        assert_eq!(u32_at(&p, 80), 1); // KSDATAFORMAT_SUBTYPE_PCM
+        assert_eq!(channel_mask(6), 0x3f);
+        assert_eq!(channel_mask(19), 0);
     }
 
     #[test]
     fn large_data_switches_to_rf64() {
         let data = 5_000_000_000u64; // 4GB 초과
-        let h = header_bytes(RecordFormat::Wav24, 2, 48_000, data);
-        assert_eq!(&h[0..4], b"RF64");
-        assert_eq!(u32_at(&h, 4), u32::MAX);
-        assert_eq!(&h[12..16], b"ds64");
-        assert_eq!(u32_at(&h, 16), 28);
-        assert_eq!(u64_at(&h, 20), h.len() as u64 - 8 + data);
-        assert_eq!(u64_at(&h, 28), data);
-        assert_eq!(u64_at(&h, 36), data / 6);
-        assert_eq!(u32_at(&h, h.len() - 4), u32::MAX);
-        // 같은 길이라 제자리에서 바꿀 수 있다
-        assert_eq!(h.len(), header_bytes(RecordFormat::Wav24, 2, 48_000, 0).len());
+        for (fmt, bps) in [(RecordFormat::Wav24, 6u64), (RecordFormat::WavF32, 8)] {
+            let h = header_bytes(fmt, 2, 48_000, data);
+            assert_eq!(&h[0..4], b"RF64");
+            assert_eq!(u32_at(&h, 4), u32::MAX);
+            assert_eq!(&h[12..16], b"ds64");
+            assert_eq!(u32_at(&h, 16), 28);
+            assert_eq!(u64_at(&h, 20), h.len() as u64 - 8 + data);
+            assert_eq!(u64_at(&h, 28), data);
+            assert_eq!(u64_at(&h, 36), data / bps);
+            assert_eq!(&h[h.len() - 8..h.len() - 4], b"data");
+            assert_eq!(u32_at(&h, h.len() - 4), u32::MAX);
+            // 같은 길이라 제자리에서 바꿀 수 있고, RF64에서도 fmt는 같은 EXTENSIBLE 40바이트다(PR #47 L3)
+            let small = header_bytes(fmt, 2, 48_000, 0);
+            assert_eq!(h.len(), small.len());
+            assert_eq!(&h[48..96], &small[48..96]);
+            assert_eq!(u32_at(&h, 56) & 0xffff, 0xFFFE);
+            if fmt == RecordFormat::WavF32 {
+                assert_eq!(&h[96..100], b"fact");
+                assert_eq!(u32_at(&h, 104), u32::MAX); // 프레임 수는 ds64에
+            }
+        }
     }
 }

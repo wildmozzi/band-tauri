@@ -330,7 +330,7 @@ export interface RecordOptions {
   name?: string
   /** 내 입력 트랙 이름(기본 "me") */
   localName?: string
-  /** 피어별 트랙 이름(engine peerId → 표시 이름). 없으면 peerId 앞 8자 */
+  /** 피어별 트랙 이름(engine peerId → 표시 이름). 없으면 peerId 가명(id-xxxxxxxx) */
   trackNames?: Record<string, string>
 }
 
@@ -355,6 +355,7 @@ export interface RecordTrack {
   name: string
   /** 세션 폴더 안 파일 이름 */
   file: string
+  /** 피어 id 가명(id-xxxxxxxx, 진단 내보내기와 같은 값 — 원문 아님). 내 입력·믹스는 null */
   peerId: string | null
 }
 

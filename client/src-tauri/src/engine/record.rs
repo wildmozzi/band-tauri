@@ -26,6 +26,7 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 use serde::{Deserialize, Serialize};
 
 use super::rt::{LOCAL_SOURCE, MAX_SOURCES};
+use crate::diag::mask::pseudonymize;
 use super::flac::FlacWriter;
 use super::wav::{RecordFormat, WavWriter};
 
@@ -312,7 +313,7 @@ pub struct RecordOptions {
     pub name: Option<String>,
     /// 내 입력 트랙 이름(기본 "me").
     pub local_name: Option<String>,
-    /// 피어별 트랙 이름(peerId → 표시 이름). 없으면 peerId 앞 8자.
+    /// 피어별 트랙 이름(peerId → 표시 이름). 없으면 peerId 가명(`id-xxxxxxxx`, PR #62 L5).
     pub track_names: HashMap<String, String>,
 }
 
@@ -330,7 +331,14 @@ pub struct RecordTrack {
     pub kind: TrackKind,
     pub name: String,
     pub file: String,
+    /// 피어 id 가명(`id-` + 해시 8자, 진단 내보내기 `diag::mask::pseudonymize`와 같은 값 — 같은 id는 같은 값, PR #62 L5).
+    /// `session.json`·`markers.json`·`engine_record_stop` 반환 모두 가명이다. 원문은 녹음 중 쓰기 스레드 안에만 있다.
     pub peer_id: Option<String>,
+}
+
+/// 쓰기 스레드 안의 트랙 메타 → 밖으로 내보내는 형태(피어 id 가명화). 표시 이름(닉네임)·파일 이름은 그대로 둔다.
+fn public_track(t: &RecordTrack) -> RecordTrack {
+    RecordTrack { peer_id: t.peer_id.as_deref().map(pseudonymize), ..t.clone() }
 }
 
 /// `engine_record_stop` 반환(세션 폴더의 `session.json`과 같은 내용).
@@ -386,7 +394,8 @@ pub struct MarkersFile {
     pub sample_rate: u32,
     /// 같은 종류 이벤트를 이 간격(프레임) 안이면 한 구간으로 합쳤다.
     pub merge_gap_frames: u64,
-    /// 워커 이벤트 위치 오차(프레임, 대략 ±). 언더런은 청크 머리라 정확하다.
+    /// 워커 이벤트 위치 허용 오차(프레임, ±). 언더런은 청크 머리라 정확하다. 은닉 마커는 실측으로 실제 위치보다 0~1패킷
+    /// 이르다(PR #62 L1, `tests/record.rs` `concealment_marker_positions_match_recorded_concealment`).
     pub accuracy_frames: u64,
     /// 큐가 가득 차 잃은 워커 이벤트 수.
     pub lost_events: u64,
@@ -462,7 +471,8 @@ const MARK_MERGE_SEC: f64 = 0.1;
 fn mark_gap(rate: u32) -> u64 {
     (rate as f64 * MARK_MERGE_SEC) as u64
 }
-/// 워커 이벤트 위치 오차(초, 대략): 소스 링·리샘플러 선행량 추정과 콜백 경계.
+/// 워커 이벤트 위치 허용 오차(초): 소스 링·리샘플러 선행량 추정과 콜백 경계. 실측(PR #62 L1, 5ms 패킷·버퍼 128/256)은
+/// 마커가 녹음 파일의 실제 은닉보다 0~236프레임(≤ 4.9ms) 이르고 늦은 쪽은 +3프레임 이하라 이 값 안이다.
 const MARK_ACCURACY_SEC: f64 = 0.01;
 
 /// 트랙 파일 쓰기(형식별).
@@ -701,7 +711,7 @@ impl Recorder {
 
     /// 콜백이 돌려준 녹음 끝점(링)을 거둬 해제한다.
     /// 녹음 중 피어 트랙 이름을 더한다(늦게 들어온 연주자, PR #49 M1). 앞으로 만들 트랙은 이 이름을 쓰고,
-    /// 이름 없이(peerId 앞 8자) 만든 트랙은 정지할 때 이 이름으로 파일을 바꾼다. 녹음 중이 아니면 에러.
+    /// 이름 없이(peerId 가명) 만든 트랙은 정지할 때 이 이름으로 파일을 바꾼다. 녹음 중이 아니면 에러.
     pub fn set_track_names(&self, names: HashMap<String, String>) -> Result<(), String> {
         let s = self.session.as_ref().ok_or("녹음 중이 아닙니다")?;
         s.shared.names.lock().extend(names);
@@ -746,7 +756,7 @@ struct Track {
     meta: RecordTrack,
     /// 파일 번호(`NN-이름.wav`의 NN).
     idx: usize,
-    /// 피어 트랙을 이름 없이(peerId 앞 8자) 만들었다 → 정지 때 이름이 생겼으면 파일을 바꾼다.
+    /// 피어 트랙을 이름 없이(peerId 가명) 만들었다 → 정지 때 이름이 생겼으면 파일을 바꾼다.
     unnamed: bool,
     w: Option<TrackWriter>,
     /// 쓴 프레임(타임라인 기준, 무음 포함).
@@ -952,7 +962,8 @@ impl Writer {
         let id = (self.resolve)(ssrc).unwrap_or_else(|| format!("ssrc-{ssrc:08x}"));
         let named = self.shared.names.lock().get(&id).cloned();
         let unnamed = named.is_none();
-        let name = named.unwrap_or_else(|| id.chars().take(8).collect());
+        // 닉네임이 없으면 사이드카와 같은 가명(원문 id 앞부분을 파일 이름에 남기지 않음, PR #62 L5)
+        let name = named.unwrap_or_else(|| pseudonymize(&id));
         let i = self.track(TrackKey::Peer(id.clone()), TrackKind::Peer, name, Some(id))?;
         if let Some(t) = self.tracks.get_mut(i) {
             t.unnamed = unnamed;
@@ -1053,7 +1064,7 @@ impl Writer {
                 file: t.meta.file.clone(),
                 name: t.meta.name.clone(),
                 kind: t.meta.kind,
-                peer_id: t.meta.peer_id.clone(),
+                peer_id: t.meta.peer_id.as_deref().map(pseudonymize),
                 markers: match self.marks.iter().find(|(k, _)| *k == t.key) {
                     Some((_, acc)) if t.key != TrackKey::Mix => merge_marks(acc, origin, end, self.rate),
                     _ => Vec::new(),
@@ -1114,7 +1125,7 @@ impl Writer {
             bytes,
             dropped_frames: self.rt_shared.dropped_frames.load(Ordering::Relaxed),
             started_at_ms: self.started_at_ms,
-            tracks: self.tracks.iter().map(|t| t.meta.clone()).collect(),
+            tracks: self.tracks.iter().map(|t| public_track(&t.meta)).collect(),
             error: err,
             markers,
             markers_file,
@@ -1214,11 +1225,12 @@ mod tests {
         (sum, h.join().unwrap())
     }
 
+    /// 24비트 스테레오 WAV를 표준 파서(hound)로 읽는다(EXTENSIBLE 헤더 확인을 겸함, PR #47 L3). 반환: (프레임 수, 인터리브 샘플).
     fn data_frames(path: &Path) -> (usize, Vec<i32>) {
-        let b = std::fs::read(path).unwrap();
-        let data = &b[80..];
-        let s: Vec<i32> = data.chunks(3).map(|c| i32::from_le_bytes([0, c[0], c[1], c[2]]) >> 8).collect();
-        (data.len() / 6, s)
+        let mut r = hound::WavReader::open(path).unwrap();
+        assert_eq!((r.spec().channels, r.spec().bits_per_sample), (2, 24));
+        let s: Vec<i32> = r.samples::<i32>().map(|v| v.unwrap()).collect();
+        (s.len() / 2, s)
     }
 
     /// 콜백을 흉내 낸다: 로컬은 처음부터, 피어(ssrc 7)는 480프레임 뒤부터, 한 청크는 링 부족으로 버린 것처럼 건너뛴다.
@@ -1268,7 +1280,10 @@ mod tests {
         let me = folder.join(&sum.tracks.iter().find(|t| t.kind == TrackKind::Local).unwrap().file);
         let gt = sum.tracks.iter().find(|t| t.kind == TrackKind::Peer).unwrap();
         assert_eq!(gt.name, "기타");
-        assert_eq!(gt.peer_id.as_deref(), Some("peer-a"));
+        // 사이드카·반환의 피어 id는 진단 내보내기와 같은 가명(PR #62 L5), 닉네임은 그대로
+        assert_eq!(gt.peer_id.as_deref(), Some(pseudonymize("peer-a").as_str()));
+        let sj = std::fs::read_to_string(folder.join("session.json")).unwrap();
+        assert!(!sj.contains("peer-a") && sj.contains(&pseudonymize("peer-a")) && sj.contains("기타"), "{sj}");
         let (f_me, s_me) = data_frames(&me);
         let (f_peer, s_peer) = data_frames(&folder.join(&gt.file));
         assert_eq!(f_me, 6 * n);
@@ -1325,7 +1340,7 @@ mod tests {
         let peers: Vec<(&str, &str)> = sum.tracks.iter().filter(|t| t.kind == TrackKind::Peer).map(|t| (t.name.as_str(), t.file.as_str())).collect();
         assert_eq!(peers, vec![("베이스", "02-베이스.wav"), ("드럼", "03-드럼.wav")]);
         let folder = PathBuf::from(&sum.folder);
-        assert!(!folder.join("02-peer-aaa.wav").exists());
+        assert!(!folder.join(format!("02-{}.wav", pseudonymize("peer-aaaaaaaaaa"))).exists());
         for t in &sum.tracks {
             assert_eq!(data_frames(&folder.join(&t.file)).0, 4 * n, "{}", t.file);
         }
@@ -1564,14 +1579,20 @@ mod tests {
         let nn = n as u64;
         assert_eq!(ms(&track("01-me.wav")), vec![("underrun".into(), 11 * nn - 100, 11 * nn, 100, 1)]);
         let a = track("02-기타.wav");
-        assert_eq!(a["peerId"], "peer-a");
+        assert_eq!(a["peerId"], pseudonymize("peer-a"));
         assert_eq!(
             ms(&a),
             vec![("underrun".into(), 51 * nn - 30, 51 * nn, 30, 1), ("conceal".into(), 100 * nn, 103 * nn, 960, 2), ("conceal".into(), 150 * nn, 150 * nn + 240, 240, 1),]
         );
         assert!((a["markers"][1]["startSec"].as_f64().unwrap() - 1.0).abs() < 1e-9);
         // 피어 b: 녹음 앞 은닉은 0부터 잘리고, 녹음 뒤(500청크)는 버린다. 버림은 길이 없는 지점.
-        assert_eq!(ms(&track("03-peer-b.wav")), vec![("conceal".into(), 0, 480, 1480, 1), ("drop".into(), 120 * nn, 120 * nn, 960, 1)]);
+        // 닉네임이 없는 피어 b는 트랙 이름·파일도 가명(원문 id 앞부분을 남기지 않음, PR #62 L5)
+        let b = track(&format!("03-{}.wav", pseudonymize("peer-b")));
+        assert_eq!(b["name"], pseudonymize("peer-b"));
+        assert_eq!(b["peerId"], pseudonymize("peer-b"));
+        let raw = std::fs::read_to_string(folder.join("markers.json")).unwrap() + &std::fs::read_to_string(folder.join("session.json")).unwrap();
+        assert!(!raw.contains("peer-a") && !raw.contains("peer-b"), "사이드카에 피어 id 원문이 없다");
+        assert_eq!(ms(&b), vec![("conceal".into(), 0, 480, 1480, 1), ("drop".into(), 120 * nn, 120 * nn, 960, 1)]);
         assert!(ms(&track("00-mix.wav")).is_empty(), "믹스 트랙에는 마커가 없다");
         assert_eq!(sum.markers, 6);
         std::fs::remove_dir_all(&dir).ok();
