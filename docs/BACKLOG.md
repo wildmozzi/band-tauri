@@ -25,7 +25,7 @@
 | P1-13 | **엔진 결함(P3-0에서 발견)**: 출력 언더런 후 PeerFeed.margin(M4)은 커지는데 지터 목표가 따라오지 않아 정상 상태에서도 은닉·마감 채움·보정 수백 회 반복. 재현: `engine::worker::tests::callback_mix_sim_margin_after_underrun_no_steady_concealment`(known-bug ignore). 수정 시 ignore 제거 + CI realtime 필터에 `callback_mix_early_callbacks_real_time` 복원 | 재현 테스트 통과, realtime 잡 녹색 | 완료(#16) |
 | P1-1 | **지연 측정 도구**: 에코 피어 모드(받은 오디오를 그대로 되돌려 보냄) + 클릭 왕복 측정 UI, 로컬 루프백(입력→출력 케이블) 측정 | 측정값이 설정 화면/방 화면에 표시, 측정 절차 문서 | 완료(#13; 실측은 P1-1a [사람]) |
 | P1-1b | PR #13 리뷰 Low: remove_peer 은퇴 처리를 write 락 안으로(잠재 경쟁), 중복 키 add 거부 악용 가용성 방해 대응 | 테스트 | 완료(PR #42, 2026-11-11) |
-| P1-1c | 서버가 native-descriptor의 공개키를 JWT 신원(userId)에 묶어 다른 사용자가 같은 키로 선점·위장하지 못하게(근본 차단, PR #42 후속) | 서버 테스트 | 대기 |
+| P1-1c | 서버가 native-descriptor의 공개키를 JWT 신원(userId)에 묶어 다른 사용자가 같은 키로 선점·위장하지 못하게(근본 차단, PR #42 후속) | 서버 테스트 | 진행중(작업자 p1-keybind) |
 | P1-1a | **[사람]** Scarlett Solo 4세대 ASIO 실측(버퍼 32/64/128, ASIOGetLatencies 확인, 하드웨어 루프백) + 두 PC 실네트워크·릴레이 에코 측정 — 절차 docs/MEASURE.md | 결과를 백로그 완료 기록에 | 대기 |
 | P1-2 | Windows 실시간 스레드 우선순위: 엔진 워커/수신 스레드에 MMCSS "Pro Audio" 등록, 타이머 해상도 1ms | 루프백 테스트 지터 감소 수치 | 리뷰 완료(PR #31 — 충돌 재해결·push, #46 병합 후 병합) |
 | P1-3 | UDP 송신 DSCP EF 마킹 + 패킷 페이싱, 송신 큐 지연 측정 | 테스트 + 수치 | 리뷰 완료·충돌 해결(PR #37 — #31 병합 후 재충돌 예상) |
