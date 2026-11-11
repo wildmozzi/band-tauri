@@ -626,6 +626,8 @@ pub mod system {
                 }
                 rts
             };
+            // cpal 콜백 스레드는 백엔드가 관리한다. 자체 WASAPI 시도(시간 초과 포함)가 남긴 값을 지운다(리뷰 M1).
+            counters.audio_thread.store(crate::engine::prio::ThreadPriority::Unmanaged);
             self.cpal.open(cfg, input, output, counters)
         }
     }

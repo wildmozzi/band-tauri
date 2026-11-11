@@ -10,6 +10,7 @@
 //! 이 모듈의 함수는 스레드 시작/엔진 시작 시 한 번 부른다. RT 콜백 경로에서 부르지 않는다(로그·시스템콜).
 //! 결과는 `PrioSlot`(원자값)에 남겨 `EngineStats.threadPriority`로 노출한다.
 
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use serde::Serialize;
@@ -91,6 +92,7 @@ impl ThreadPriorityStats {
 // ============================================================================
 
 /// MMCSS/우선순위 OS 호출. 핸들 0은 실패.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct ThreadApi {
     pub register: fn() -> usize,
     pub set_high: fn(usize) -> bool,
@@ -154,11 +156,26 @@ static ENGINE_PROMOTION: AtomicBool = AtomicBool::new(true);
 /// 장치 스레드(자체 WASAPI, 가짜 장치)는 실제 장치 콜백 스레드를 대신하므로 이 스위치와 무관하게 승격한다.
 #[doc(hidden)]
 pub fn set_engine_promotion(enabled: bool) {
-    ENGINE_PROMOTION.store(enabled, Ordering::SeqCst);
+    set_engine_promotion_parts(enabled, enabled);
+}
+
+/// 1ms 타이머를 켤지(측정용, 기본 켬). MMCSS와 따로 끌 수 있어야 각각의 기여를 분리해 잴 수 있다(리뷰 L3).
+static ENGINE_TIMER: AtomicBool = AtomicBool::new(true);
+
+/// 측정용: 엔진 스레드 MMCSS 등록과 1ms 타이머를 따로 켜고 끈다. 다음에 시작하는 엔진부터 적용된다.
+#[doc(hidden)]
+pub fn set_engine_promotion_parts(mmcss: bool, timer_1ms: bool) {
+    ENGINE_PROMOTION.store(mmcss, Ordering::SeqCst);
+    ENGINE_TIMER.store(timer_1ms, Ordering::SeqCst);
 }
 
 pub fn engine_promotion_enabled() -> bool {
     ENGINE_PROMOTION.load(Ordering::SeqCst)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn engine_timer_enabled() -> bool {
+    ENGINE_TIMER.load(Ordering::SeqCst)
 }
 
 pub struct AudioThreadGuard {
@@ -166,9 +183,15 @@ pub struct AudioThreadGuard {
     /// MMCSS 핸들(0이면 없음)과 해제 함수.
     mmcss: usize,
     revert: fn(usize),
+    /// MMCSS 등록은 등록한 스레드에서 풀어야 하므로 가드를 다른 스레드로 옮기지 못하게 `!Send`로 둔다(리뷰 L1).
+    _not_send: PhantomData<*const ()>,
 }
 
 impl AudioThreadGuard {
+    fn new(status: ThreadPriority, mmcss: usize, revert: fn(usize)) -> Self {
+        Self { status, mmcss, revert, _not_send: PhantomData }
+    }
+
     pub fn status(&self) -> ThreadPriority {
         self.status
     }
@@ -180,7 +203,7 @@ pub fn promote_current_thread() -> AudioThreadGuard {
     #[cfg(windows)]
     let g = promote_with(&OS_THREAD);
     #[cfg(not(windows))]
-    let g = AudioThreadGuard { status: ThreadPriority::Unsupported, mmcss: 0, revert: |_| {} };
+    let g = AudioThreadGuard::new(ThreadPriority::Unsupported, 0, |_| {});
     let name = std::thread::current().name().unwrap_or("?").to_string();
     match g.status {
         ThreadPriority::Mmcss => log::info!("스레드 {name}: MMCSS \"Pro Audio\" 등록"),
@@ -197,21 +220,22 @@ pub fn promote_engine_thread(slot: &PrioSlot) -> AudioThreadGuard {
         promote_current_thread()
     } else {
         enable_flush_denormals();
-        AudioThreadGuard { status: ThreadPriority::Disabled, mmcss: 0, revert: |_| {} }
+        AudioThreadGuard::new(ThreadPriority::Disabled, 0, |_| {})
     };
     slot.store(g.status);
     g
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn promote_with(api: &ThreadApi) -> AudioThreadGuard {
     let h = (api.register)();
     if h != 0 {
         // 작업 안 상대 우선순위. 실패해도 등록 자체는 유효하다(기본 NORMAL).
         let _ = (api.set_high)(h);
-        AudioThreadGuard { status: ThreadPriority::Mmcss, mmcss: h, revert: api.revert }
+        AudioThreadGuard::new(ThreadPriority::Mmcss, h, api.revert)
     } else {
         let status = if (api.raise)() { ThreadPriority::Elevated } else { ThreadPriority::Failed };
-        AudioThreadGuard { status, mmcss: 0, revert: api.revert }
+        AudioThreadGuard::new(status, 0, api.revert)
     }
 }
 
@@ -228,6 +252,7 @@ impl Drop for AudioThreadGuard {
 // 타이머 해상도
 // ============================================================================
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct TimerApi {
     pub begin: fn(u32) -> bool,
     pub end: fn(u32),
@@ -237,6 +262,7 @@ pub(crate) struct TimerApi {
 pub(crate) struct TimerRefs(std::sync::Mutex<u32>);
 
 impl TimerRefs {
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) const fn new() -> Self {
         Self(std::sync::Mutex::new(0))
     }
@@ -256,10 +282,10 @@ pub struct TimerResolution {
 }
 
 impl TimerResolution {
-    /// 측정 스위치가 켜져 있고 Windows면 1ms 해상도를 요청한다. 실패해도 엔진은 돈다(`active()`가 false).
+    /// 타이머 측정 스위치가 켜져 있고 Windows면 1ms 해상도를 요청한다. 실패해도 엔진은 돈다(`active()`가 false).
     pub fn acquire() -> Self {
         #[cfg(windows)]
-        if engine_promotion_enabled() {
+        if engine_timer_enabled() {
             let t = Self::acquire_with(&TIMER_REFS, &OS_TIMER);
             if !t.active() {
                 log::warn!("timeBeginPeriod(1) 실패: 기본 타이머 해상도로 동작");
@@ -269,6 +295,7 @@ impl TimerResolution {
         Self { held: None }
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn acquire_with(refs: &'static TimerRefs, api: &'static TimerApi) -> Self {
         let mut n = refs.lock();
         if *n == 0 && !(api.begin)(TIMER_MS) {

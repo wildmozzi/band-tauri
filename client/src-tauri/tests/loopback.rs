@@ -1207,7 +1207,7 @@ fn thread_priority_reported_and_timer_released_on_stop() {
     }
 }
 
-/// 적용 전/후 비교: 엔진 스레드 승격(MMCSS + 1ms 타이머)을 끄고/켜고 같은 링크를 돌린다.
+/// 적용 전/후 비교: 엔진 스레드 승격(MMCSS, 1ms 타이머)을 끔/MMCSS만/타이머만/둘 다로 바꿔 같은 링크를 돌린다.
 /// 지표: 워커와 같은 방식으로 승격된 프로브 스레드의 FINE_POLL(150µs) 수면 초과량, B의 은닉·마감 채움·건너뜀,
 /// 지터버퍼 지연/지터. 부하 단계는 논리 코어 수만큼 바쁜 스레드(보통 우선순위)를 돌린다.
 /// 실행: `cargo test --release --test loopback rt_priority_before_after -- --ignored --nocapture`
@@ -1221,8 +1221,8 @@ fn rt_priority_before_after() {
     println!("|---|---|---|---|---|---|---|---|---|");
     for load in [false, true] {
         for _round in 0..2 {
-            for enabled in [false, true] {
-                prio::set_engine_promotion(enabled);
+            for (mmcss, timer) in [(false, false), (true, false), (false, true), (true, true)] {
+                prio::set_engine_promotion_parts(mmcss, timer);
                 let stop_load = Arc::new(AtomicBool::new(false));
                 let hogs: Vec<_> = (0..if load { cores } else { 0 })
                     .map(|_| {
@@ -1279,7 +1279,12 @@ fn rt_priority_before_after() {
                 println!(
                     "| {} | {} | {}/{}/{} | {:.2} | {} | {} | {:.2} | {:.2} | {} |",
                     if load { format!("{cores}코어 점유") } else { "없음".into() },
-                    if enabled { "켬" } else { "끔" },
+                    match (mmcss, timer) {
+                        (false, false) => "끔",
+                        (true, false) => "MMCSS만",
+                        (false, true) => "타이머만",
+                        (true, true) => "둘 다",
+                    },
                     pct(0.5),
                     pct(0.99),
                     over[over.len() - 1],
