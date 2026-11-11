@@ -14,6 +14,13 @@
 //! - 릴레이 주소 변경 → 릴레이 경로 피어가 새 주소로 바로 옮긴다.
 //! - 토큰 만료 전 갱신 → 같은 주소 갱신으로 등록이 이어진다. 만료(받은 시각 + 남은 수명) → Expired.
 //! - 릴레이 주소가 아닌 곳에서 온 RelayBindAck(type 9)는 무시한다.
+//!
+//! ## 두 단계(P3-0a, tests/loopback.rs와 같은 규칙)
+//! - **결정적**(기본 `cargo test`): `relay_fallback_then_promotion_flow`(폴백·승격·강등 흐름),
+//!   `relay_ack_from_other_address_is_ignored`. 대기는 상태 조건·받은 패킷 수, 벽시계는 행 감지 상한뿐이다.
+//! - **실시간**(`#[ignore = "realtime: ..."]`): 연결·승격·강등·재등록 시간, 은닉률·연속성, 토큰 수명(초 단위 벽시계)을
+//!   재는 나머지. CI `realtime` 잡이 하나씩 3회까지 돌린다. 경로·등록 상태 기계는 ignore 사유의 net::peer /
+//!   net::relay 단위 테스트(가상 시간 주입)가 결정적 짝이다. 로컬: `cargo test --test relay -- --ignored --test-threads 1`.
 
 use std::collections::VecDeque;
 use std::net::{SocketAddr, UdpSocket};
@@ -379,10 +386,46 @@ fn conceal_ratio(e: &Engine) -> (u64, u64) {
     (js.concealed, js.produced)
 }
 
+/// 결정적 테스트의 대기 상한. 판정은 상태 조건으로 하고, 벽시계는 행(hang) 감지에만 쓴다.
+const HANG: Duration = Duration::from_secs(20);
+
 // ============================================================================
+
+/// 결정적(P3-0a): 직접 차단 → 릴레이로 연결·소리 → 직접 개방 → LAN 승격·소리 → 직접 차단 → 릴레이 강등·소리.
+/// 경로 전환 흐름만 본다(연결·승격·강등 시간, 은닉·연속성 임계는 아래 실시간 테스트). 대기는 상태 조건이고
+/// 벽시계는 행 감지 상한(`HANG`)뿐이라 러너 속도와 무관하다. 경로 상태 기계 자체는 net::peer 단위 테스트(가상 시간)가 본다.
+#[test]
+fn relay_fallback_then_promotion_flow() {
+    let _g = RT_LOCK.lock();
+    let relay = RelayServer::start();
+    let p = relay_pair(
+        &relay,
+        PairOpts { direct_delay: Duration::from_millis(2), relay_link_delay: Duration::from_millis(10), ..Default::default() },
+    );
+    assert!(wait_path(&p, PathKind::Relay, HANG).is_some(), "릴레이 경로로 연결되지 않음: A {:?} B {:?}", peer_path(&p.a), peer_path(&p.b));
+    assert!(wait_sound(&p.sink_b, 0, HANG).is_some(), "릴레이 경유 소리 없음");
+    assert_eq!(relay_state(&p.a), Some(RelayStateKind::Bound));
+    assert!(p.proxy.dropped.load(Ordering::Relaxed) > 0, "직접 경로 Hello는 프록시에서 버려져야 한다");
+    assert_eq!(p.proxy.forwarded.load(Ordering::Relaxed), 0);
+    assert!(relay.stats.forwarded_packets.load(Ordering::Relaxed) > 0, "소리는 릴레이를 거쳐야 한다");
+
+    // 직접 경로 개방 → LAN 승격
+    p.proxy.set_open(true);
+    assert!(wait_path(&p, PathKind::Lan, HANG).is_some(), "직접 경로로 승격되지 않음: A {:?} B {:?}", peer_path(&p.a), peer_path(&p.b));
+    let from = p.sink_b.lock().len();
+    assert!(wait_sound(&p.sink_b, from, HANG).is_some(), "승격 뒤 소리 없음");
+    assert!(p.proxy.forwarded.load(Ordering::Relaxed) > 0);
+
+    // 직접 경로 차단 → 릴레이 강등
+    p.proxy.set_open(false);
+    assert!(wait_path(&p, PathKind::Relay, HANG).is_some(), "릴레이로 강등되지 않음: A {:?} B {:?}", peer_path(&p.a), peer_path(&p.b));
+    let from = p.sink_b.lock().len();
+    assert!(wait_sound(&p.sink_b, from, HANG).is_some(), "강등 뒤 소리 없음");
+}
 
 /// 릴레이 경로 편도 20ms(링크 10ms × 2), 직접 경로 편도 2ms: 실망처럼 경로 지연이 다를 때의 전환.
 #[test]
+#[ignore = "realtime: 결정적 짝 net::peer::tests::{relay_hello_after_fallback_delay_only_when_ready, relay_path_established_and_direct_promoted_by_ack, promotion_requires_unbroken_acks_and_acceptable_rtt}, net::relay::tests::bind_cookie_ok_flow, relay_fallback_then_promotion_flow(흐름)"]
 fn direct_blocked_connects_via_relay_then_promotes_to_direct() {
     let _g = RT_LOCK.lock();
     let relay = RelayServer::start();
@@ -479,6 +522,7 @@ fn direct_blocked_connects_via_relay_then_promotes_to_direct() {
 
 /// 직접으로 연결된 뒤 직접 경로가 막히면 릴레이로 강등된다. 무음은 감지(1.5초) + 릴레이 왕복 정도.
 #[test]
+#[ignore = "realtime: 결정적 짝 net::peer::tests::falls_back_to_relay_when_direct_goes_quiet, relay_fallback_then_promotion_flow(흐름)"]
 fn direct_blocked_after_connect_demotes_to_relay() {
     let _g = RT_LOCK.lock();
     let relay = RelayServer::start();
@@ -515,6 +559,7 @@ fn direct_blocked_after_connect_demotes_to_relay() {
 /// 한쪽만 대칭형 NAT(B→A 직접 차단, A→B는 통과): 직접 Hello는 닿지만 HelloAck가 못 돌아오므로 양쪽 모두
 /// 릴레이에 안정적으로 머문다.
 #[test]
+#[ignore = "realtime: 결정적 짝 net::peer::tests::promotion_requires_unbroken_acks_and_acceptable_rtt(HelloAck 없으면 승격 없음)"]
 fn one_way_blocked_direct_stays_on_relay() {
     let _g = RT_LOCK.lock();
     let relay = RelayServer::start();
@@ -542,6 +587,7 @@ fn one_way_blocked_direct_stays_on_relay() {
 /// 직접 경로가 1초 열림/2초 닫힘을 반복(순단하는 Wi-Fi/LTE): 승격 조건(2초 안정)을 못 채우므로 릴레이에 머물고
 /// 소리가 끊기지 않는다.
 #[test]
+#[ignore = "realtime: 결정적 짝 net::peer::tests::demotion_holds_promotion_and_backs_off_on_flapping"]
 fn flapping_direct_path_does_not_flap_engine_path() {
     let _g = RT_LOCK.lock();
     let relay = RelayServer::start();
@@ -573,6 +619,7 @@ fn flapping_direct_path_does_not_flap_engine_path() {
 }
 
 #[test]
+#[ignore = "realtime: 결정적 짝 net::relay::tests::{bind_cookie_ok_flow, cookie_resend_rate_limited_for_stale_or_duplicate_requests}"]
 fn relay_restart_reregisters_and_audio_resumes() {
     let _g = RT_LOCK.lock();
     let mut relay = RelayServer::start();
@@ -612,6 +659,7 @@ fn relay_restart_reregisters_and_audio_resumes() {
 
 /// 릴레이 주소가 바뀌면(DNS 변경·릴레이 이전) 릴레이 경로 피어를 새 주소로 바로 옮긴다(Reconnecting 5초 없이, M3).
 #[test]
+#[ignore = "realtime: 결정적 짝 net::peer::tests::relay_address_change_moves_relay_path"]
 fn relay_address_change_moves_peers_without_reconnecting() {
     let _g = RT_LOCK.lock();
     let relay = RelayServer::start();
@@ -646,6 +694,7 @@ fn relay_address_change_moves_peers_without_reconnecting() {
 }
 
 #[test]
+#[ignore = "realtime: 결정적 짝 net::relay::tests::{unreachable_rejected_expired_and_refresh, deadline_ignores_local_wall_clock_when_server_gives_expires_in}"]
 fn token_refresh_before_expiry_keeps_relay_registration() {
     let _g = RT_LOCK.lock();
     let relay = RelayServer::start();
@@ -676,6 +725,7 @@ fn token_refresh_before_expiry_keeps_relay_registration() {
 }
 
 #[test]
+#[ignore = "realtime: 결정적 짝 net::relay::tests::{unreachable_rejected_expired_and_refresh, deadline_ignores_local_wall_clock_when_server_gives_expires_in}"]
 fn expired_token_without_refresh_stops_binding() {
     let _g = RT_LOCK.lock();
     let relay = RelayServer::start();
@@ -716,8 +766,25 @@ fn relay_ack_from_other_address_is_ignored() {
     ack[16] = 0;
     ack[18..20].copy_from_slice(&30u16.to_be_bytes());
     forger.send_to(&ack, engine_addr).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    // 고정 sleep 대신 진행량(P3-0a): 위조 Ack 뒤로 엔진이 Bind를 두 번 더 재전송할 때까지 기다린다(BIND_RETRY 간격).
+    // 위조 Ack로 등록됐다면 재전송이 멈춰 상한에서 실패하고, 재전송이 이어지면 아직 미등록이다.
+    let mut latest = [0u8; 18];
+    let mut retries = 0;
+    let t0 = Instant::now();
+    while retries < 2 {
+        assert!(t0.elapsed() < HANG, "Bind 재전송이 멈춤(위조 Ack로 등록됐을 수 있음): {:?}", relay_state(&e));
+        if let Ok((n, _)) = fake_relay.recv_from(&mut buf) {
+            if n >= 18 && buf[3] == 7 {
+                latest.copy_from_slice(&buf[..18]);
+                retries += 1;
+            }
+        }
+    }
     assert_ne!(relay_state(&e), Some(RelayStateKind::Bound), "위조 출발 주소의 Ack로 등록되면 안 된다");
+    // 마지막 Bind에 대한 Ok Ack를 릴레이 주소에서 보낸다
+    ack[..18].copy_from_slice(&latest);
+    ack[3] = 9;
+    ack[16] = 0;
     fake_relay.send_to(&ack, engine_addr).unwrap();
-    assert!(wait_relay_state(&e, RelayStateKind::Bound, Duration::from_secs(1)), "릴레이 주소에서 온 Ack는 받는다");
+    assert!(wait_relay_state(&e, RelayStateKind::Bound, HANG), "릴레이 주소에서 온 Ack는 받는다");
 }

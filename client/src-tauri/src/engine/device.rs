@@ -643,15 +643,69 @@ pub mod fake {
     //! - 출력 시작 위상(`out_phase_us`)과 콜백 기상 지연(`wake_jitter_us`, 늦으면 따라잡으며
     //!   몰아서 호출 = 버스트)을 흉내 낸다.
     //! - 열기 지연(`open_delay`)과 스트림 에러 주입(`error_after`)을 지원한다.
+    //! - 열기 문(`open_gate`): 테스트가 장치 열기를 붙잡아 두고 원하는 시점에 놓는다(벽시계 대기 없는 결정적 동기화).
     //!
     //! 시간 모델: 입력 샘플 i는 `t0 + i/in_rate`에 캡처되고, 출력 샘플 j(=sink 인덱스/채널)는
     //! `t0 + out_phase + j/out_rate`에 재생된다. 따라서 임펄스 지연 = out_phase + j/out_rate − i/in_rate.
 
     use super::*;
-    use parking_lot::Mutex;
+    use parking_lot::{Condvar, Mutex};
     use rand::{Rng, SeedableRng};
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::time::{Duration, Instant};
+
+    /// 장치 열기를 테스트가 붙잡아 두는 문. `open`은 들어온 횟수를 올리고, 문이 닫혀 있으면 열릴 때까지 기다린다.
+    /// "시작 중(장치 열기 중)" 구간을 `open_delay`(벽시계) 대신 이것으로 만들면 러너 속도와 무관하게 재현된다.
+    #[derive(Default)]
+    pub struct OpenGate {
+        /// (들어온 횟수, 닫힘)
+        st: Mutex<(u32, bool)>,
+        cv: Condvar,
+    }
+
+    impl OpenGate {
+        /// 닫힌 문.
+        pub fn closed() -> Arc<Self> {
+            let g = Self::default();
+            g.st.lock().1 = true;
+            Arc::new(g)
+        }
+
+        pub fn close(&self) {
+            self.st.lock().1 = true;
+        }
+
+        pub fn release(&self) {
+            self.st.lock().1 = false;
+            self.cv.notify_all();
+        }
+
+        /// 지금까지 `open`이 문에 들어온 횟수.
+        pub fn entered(&self) -> u32 {
+            self.st.lock().0
+        }
+
+        /// 들어온 횟수가 `n` 이상이 될 때까지 기다린다. `timeout`은 행(hang) 감지용 상한이다.
+        pub fn wait_entered(&self, n: u32, timeout: Duration) -> bool {
+            let deadline = Instant::now() + timeout;
+            let mut g = self.st.lock();
+            while g.0 < n {
+                if self.cv.wait_until(&mut g, deadline).timed_out() {
+                    return g.0 >= n;
+                }
+            }
+            true
+        }
+
+        fn pass(&self) {
+            let mut g = self.st.lock();
+            g.0 += 1;
+            self.cv.notify_all();
+            while g.1 {
+                self.cv.wait(&mut g);
+            }
+        }
+    }
 
     /// 입력 신호 생성기: (절대 프레임 인덱스, 채널 수, 인터리브 버퍼).
     pub type SourceFn = dyn Fn(u64, usize, &mut [f32]) + Send + Sync;
@@ -676,6 +730,8 @@ pub mod fake {
         /// `wake_jitter_us`와 합치면 격자 기준 ± 지터. 재생 시각(sink 모델)은 격자 그대로다.
         pub out_early_us: u64,
         pub open_delay: Duration,
+        /// 있으면 장치 열기가 이 문을 지난다(`OpenGate`).
+        pub open_gate: Option<Arc<OpenGate>>,
         /// 이 시간 뒤 스트림 에러 1회 보고(장치 분리 흉내).
         pub error_after: Option<Duration>,
         pub source: Arc<SourceFn>,
@@ -713,6 +769,7 @@ pub mod fake {
                 wake_jitter_us: 0,
                 out_early_us: 0,
                 open_delay: Duration::ZERO,
+                open_gate: None,
                 error_after: None,
                 source,
                 sink: Arc::new(Mutex::new(Vec::new())),
@@ -835,6 +892,9 @@ pub mod fake {
                 }
             }
             std::thread::sleep(self.open_delay);
+            if let Some(g) = &self.open_gate {
+                g.pass();
+            }
             let stop = Arc::new(AtomicBool::new(false));
             let ch = self.channels;
             let in_buf = self.in_buffer.unwrap_or(cfg.buffer_size as usize).max(1);
