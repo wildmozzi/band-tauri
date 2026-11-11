@@ -4,41 +4,30 @@ import { useRequireAuth } from '../features/auth/useRequireAuth'
 import { tossPaymentsService } from '../services/tossPayments'
 import { paymentApi } from '../services/paymentApi'
 import { SERVICE_NAME } from '../lib/brand'
+import { NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor, type PaidPlan } from '../lib/planFeatures'
 
 interface PlanInfo {
+  id: PaidPlan
   name: string
   price: number
   period: string
-  features: string[]
   color: string
 }
 
+/** 가격은 서버 PLAN_PRICES와 같다. 기능 문구는 lib/planFeatures (P3-12a: 유료 전용 기능은 아직 없다) */
 const PLAN_INFO: Record<string, PlanInfo> = {
   standard: {
+    id: 'standard',
     name: 'Standard 플랜',
     price: 2900,
     period: '월',
-    features: [
-      '합주실 최대 6명',
-      '비공개 방 생성',
-      '클라우드 저장 30일',
-      'Mix Lab 기본 기능',
-      '광고 제거'
-    ],
     color: 'var(--indigo-400)'
   },
   pro: {
+    id: 'pro',
     name: 'Pro 플랜',
     price: 6900,
     period: '월',
-    features: [
-      '합주실 최대 8명',
-      '자동 믹싱 기능',
-      '클라우드 저장 무제한',
-      'Mix Lab 고급 기능',
-      '팀 관리 기능',
-      '세션 히스토리'
-    ],
     color: 'var(--pink-400)'
   }
 }
@@ -140,9 +129,15 @@ export function Payment() {
               </div>
               <div className="plan-features">
                 <h4>포함된 기능</h4>
+                <p className="plan-notice">{NO_PAID_ONLY_NOTICE}</p>
                 <ul>
-                  {plan.features.map((feature, index) => (
-                    <li key={index}>✅ {feature}</li>
+                  <li>✅ 무료 플랜의 모든 기능</li>
+                </ul>
+                <h4>준비 중</h4>
+                <p className="plan-notice">{PLANNED_NOTICE}</p>
+                <ul>
+                  {plannedFeaturesFor(plan.id).map(f => (
+                    <li key={f}>⏳ {f}</li>
                   ))}
                 </ul>
               </div>
