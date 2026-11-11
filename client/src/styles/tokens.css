@@ -86,6 +86,7 @@
   /* violet */
   --violet-300: #a89fff;
   --violet-500: #8d7bff;
+  --violet-600: #6e5be8;
   --violet-500-a05: rgba(141, 123, 255, 0.05);
   --violet-500-a08: rgba(141, 123, 255, 0.08);
   --violet-500-a10: rgba(141, 123, 255, 0.1);
@@ -191,6 +192,8 @@
   --text-muted: rgba(244, 247, 255, 0.65);
   --accent: var(--violet-500);
   --accent-strong: var(--pink-400);
+  /* 흰 글자를 얹는 단색 채움(활성 칩·버튼·배지). --accent(#8d7bff)는 흰 글자와 3.28:1이라 AA(4.5:1) 미달 → 4.86:1 (P3-12d) */
+  --accent-fill: var(--violet-600);
   --success: var(--green-400);
   --warning: var(--yellow-400);
   --error: var(--red-400);

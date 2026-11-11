@@ -277,7 +277,7 @@
 }
 
 .test-btn.testing {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--white);
 }
 
@@ -860,7 +860,7 @@
 }
 
 .toggle-btn.active {
-  background: var(--accent);
+  background: var(--accent-fill);
   border-color: var(--accent);
   color: var(--white);
 }

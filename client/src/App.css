@@ -249,7 +249,9 @@ body {
 .not-found-page p {
   color: var(--text-muted);
   margin-bottom: 32px;
-  word-break: break-all;
+  /* 긴 경로만 끊고 한국어 문장은 어절 단위로 (P3-12d) */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 .not-found-actions {
@@ -465,7 +467,7 @@ body {
 }
 
 .auth-tabs button.active {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: white;
 }
 
@@ -733,7 +735,7 @@ body {
 }
 
 .filter-chip.active {
-  background: var(--accent);
+  background: var(--accent-fill);
   border-color: var(--accent);
   color: white;
 }
@@ -857,7 +859,7 @@ body {
 }
 
 .room-enter-btn:hover {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: white;
 }
 
@@ -1809,7 +1811,7 @@ body {
   display: block;
   width: 100%;
   padding: 12px;
-  background: var(--accent);
+  background: var(--accent-fill);
   color: white;
   text-align: center;
   text-decoration: none;
@@ -1935,7 +1937,7 @@ body {
 }
 
 .take-download:hover {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: white;
 }
 
@@ -2556,7 +2558,7 @@ body {
 }
 
 .tag-btn.active {
-  background: var(--accent);
+  background: var(--accent-fill);
   border-color: var(--accent);
   color: white;
 }
@@ -2788,6 +2790,12 @@ body {
 
 .toggle-switch input:checked + .toggle-slider::before {
   transform: translateX(24px);
+}
+
+/* 체크박스는 opacity 0이라 포커스 링이 안 보인다 → 슬라이더에 표시 (P3-12d) */
+.toggle-switch input:focus-visible + .toggle-slider {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .toggle-label {
@@ -3162,7 +3170,7 @@ body {
 }
 
 .test-btn.testing {
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--white);
 }
 
@@ -3812,7 +3820,7 @@ body {
 
 .my-room-enter-btn {
   padding: 8px 16px;
-  background: var(--accent);
+  background: var(--accent-fill);
   border: none;
   border-radius: var(--radius-md);
   color: white;
@@ -4061,7 +4069,7 @@ body {
 
 .edit-custom-tag-input button {
   padding: 10px 16px;
-  background: var(--accent);
+  background: var(--accent-fill);
   border: none;
   border-radius: var(--radius-md);
   color: white;
