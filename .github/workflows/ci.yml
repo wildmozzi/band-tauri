@@ -122,10 +122,10 @@ jobs:
         run: |
           echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
           echo "$LOCALAPPDATA/Microsoft/WinGet/Packages/Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe/cmake-4.4.4-windows-x86_64/bin" >> "$GITHUB_PATH"
-      - uses: taiki-e/install-action@v2
-        timeout-minutes: 5
-        with:
-          tool: cargo-nextest
+      # install-action은 pwsh(PowerShell 7)가 필요해 개발 PC에서 실패한다 — 없을 때만 1회 설치(self-hosted라 이후 유지).
+      - name: Ensure cargo-nextest
+        timeout-minutes: 15
+        run: command -v cargo-nextest >/dev/null 2>&1 || cargo install cargo-nextest --locked
       - name: Placeholder frontend dist (tauri::generate_context! 요구)
         timeout-minutes: 1
         run: mkdir -p ../dist && { [ -f ../dist/index.html ] || echo '<!doctype html>' > ../dist/index.html; }

@@ -32,3 +32,6 @@ server/certs/
 *.key
 certs/
 certs_backup/
+
+# Steinberg ASIO SDK (재배포 금지 — 로컬에만 둔다)
+asio-sdk/
