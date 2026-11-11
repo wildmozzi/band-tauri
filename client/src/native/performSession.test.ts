@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { EngineConfig, EngineStats, LocalDescriptor, MetronomeConfig, RelayConfig, RelayStats } from './engineApi'
 import { DEFAULT_ENGINE_CONFIG } from './engineConfig'
-import { PerformSession, performErrorFromCode, type EngineBackend, type SignalOut } from './performSession'
+import {
+  DESCRIPTOR_INVALID_MESSAGE,
+  KEY_CONFLICT_MESSAGE,
+  KEY_CONFLICT_REPEAT_MESSAGE,
+  PerformSession,
+  isEngineDescriptorErrorCode,
+  performErrorFromCode,
+  type EngineBackend,
+  type SignalOut,
+} from './performSession'
 
 const desc = (ssrc: number): LocalDescriptor => ({ ssrc, key: `k${ssrc}`, candidates: [{ kind: 'lan', addr: '10.0.0.1:5000' }] })
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -472,6 +481,42 @@ describe('PerformSession 릴레이 토큰 (P1-4b)', () => {
     session.handleSignal(relayMsg(2, Math.floor(Date.now() / 1000) + 120))
     await flush()
     expect(engine.calls.filter((c) => c.startsWith('relay:'))).toHaveLength(1)
+  })
+
+  it('key-conflict(P1-1c) → 새 키로 재시작하고 사용자에게 알린다, 짧은 시간에 반복되면 정지', async () => {
+    const { session, start, engine, types } = setup()
+    await start()
+    expect(session.handleSignal({ type: 'error', code: 'key-conflict', message: 'x' })).toBe(true)
+    for (let i = 0; i < 5; i++) await flush()
+    expect(engine.calls).toEqual(['start:me', 'stop', 'start:me'])
+    expect(session.getState().phase).toBe('running')
+    expect(session.getState().error).toBe(KEY_CONFLICT_MESSAGE)
+    expect(types()).not.toContain('native-leave')
+
+    // 바로 또 오면 재시작을 반복하지 않고 멈춘다
+    session.handleSignal({ type: 'error', code: 'key-conflict' })
+    for (let i = 0; i < 5; i++) await flush()
+    expect(session.getState().phase).toBe('idle')
+    expect(session.getState().error).toBe(KEY_CONFLICT_REPEAT_MESSAGE)
+    expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(2)
+  })
+
+  it('descriptor-invalid → 엔진은 그대로, 안내만', async () => {
+    const { session, start, engine } = setup()
+    await start()
+    expect(session.handleSignal({ type: 'error', code: 'descriptor-invalid' })).toBe(true)
+    await flush()
+    expect(engine.calls).toEqual(['start:me'])
+    expect(session.getState().phase).toBe('running')
+    expect(session.getState().error).toBe(DESCRIPTOR_INVALID_MESSAGE)
+  })
+
+  it('엔진 descriptor 거부 코드는 연주 거부가 아니다(방송 유지 판단용)', () => {
+    for (const code of ['ssrc-conflict', 'key-conflict', 'descriptor-invalid']) {
+      expect(isEngineDescriptorErrorCode(code)).toBe(true)
+      expect(performErrorFromCode(code)).toBeNull()
+    }
+    expect(isEngineDescriptorErrorCode('perform-not-approved')).toBe(false)
   })
 })
 

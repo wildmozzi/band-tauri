@@ -60,3 +60,6 @@ export async function authJoin(c: TestClient, token: string | null, roomId: stri
   const ok = await c.waitFor(m => m.type === 'room-state' || (m.type === 'error' && m.code === 'room-not-found'))
   if (!ok) throw new Error('join timed out')
 }
+
+/** 유효한 엔진 공개키(32바이트 표준 base64). 같은 seed면 같은 키 */
+export const engineKey = (seed: number) => Buffer.alloc(32, seed & 0xff).toString('base64')

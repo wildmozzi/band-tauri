@@ -5,8 +5,8 @@ import { describe, it, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type Server } from 'http'
 import type { WebSocketServer } from 'ws'
-import { initializeWebSocket, type RoomMeta, type WsOptions } from '../src/services/wsService'
-import { authJoin, connect, sleep, testVerifier, type TestClient } from './helpers'
+import { initializeWebSocket, parseEngineKey, type RoomMeta, type WsOptions } from '../src/services/wsService'
+import { authJoin, connect, engineKey, sleep, testVerifier, type TestClient } from './helpers'
 
 const ROOMS: Record<string, RoomMeta> = {
   locked: { hostId: 'host', freeJoin: false },
@@ -65,7 +65,7 @@ describe('H1: start-performing requires host / free_join / approval', async () =
     assert.ok(!host.has(m => m.type === 'performer-updated' && m.oderId === member.id))
 
     // 승인 전에는 네이티브 시그널링도 불가
-    member.send({ type: 'native-descriptor', descriptor: { ssrc: 1 } })
+    member.send({ type: 'native-descriptor', descriptor: { ssrc: 1, key: engineKey(1), candidates: [] } })
     await sleep(50)
     assert.ok(!host.has(m => m.type === 'native-descriptor'))
 
@@ -221,7 +221,7 @@ describe('M3: per-IP connection limit', async () => {
 
 describe('P2-3: shared metronome signaling (host verified by DB)', async () => {
   const url = await startWs(backend())
-  const desc = (ssrc: number) => ({ ssrc, key: 'AAAA', candidates: [] })
+  const desc = (ssrc: number) => ({ ssrc, key: engineKey(ssrc), candidates: [] })
   const state = { running: true, bpm: 120, beatsPerBar: 4, startUs: 1_500_000 }
 
   it('relays only the host’s valid metronome to performers and replays it to late engines', async () => {
@@ -314,5 +314,143 @@ describe('P2-3: shared metronome signaling (host verified by DB)', async () => {
     host.send({ type: 'metronome', state })
     await sleep(100)
     assert.ok(!member.has(m => m.type === 'metronome'))
+  })
+})
+
+describe('P1-1c: engine public key is bound to the JWT user within a room', async () => {
+  // 테스트마다 다른 방(연주자 상한 6에 걸리지 않게). 'key-*' 방은 모두 free_join
+  const opts = backend({ resumeGraceMs: 300 })
+  const url = await startWs({ ...opts, deps: { ...opts.deps, fetchRoomMeta: async (roomId) => roomId.startsWith('key-') ? { hostId: 'host', freeJoin: true } : null } })
+  const desc = (ssrc: number, key = engineKey(ssrc)) => ({ ssrc, key, candidates: [{ kind: 'lan', addr: '10.0.0.1:5000' }] })
+  const relayedFrom = (c: TestClient, from: string) => c.inbox.filter(m => m.type === 'native-descriptor' && m.from === from)
+
+  async function performers(room: string, ...users: string[]) {
+    const cs: TestClient[] = []
+    for (const u of users) {
+      const c = await client(url)
+      await authJoin(c, `tok:${u}`, room)
+      c.send({ type: 'start-performing', instrument: 'drums' })
+      cs.push(c)
+    }
+    await sleep(50)
+    return cs
+  }
+
+  it('parseEngineKey accepts only canonical standard base64 of 32 bytes', () => {
+    const k = engineKey(1)
+    assert.equal(parseEngineKey(k), k)
+    assert.equal(parseEngineKey(undefined), null)
+    assert.equal(parseEngineKey('AAAA'), null)
+    assert.equal(parseEngineKey(Buffer.alloc(33).toString('base64')), null)
+    assert.equal(parseEngineKey(Buffer.alloc(31).toString('base64')), null)
+    assert.equal(parseEngineKey(Buffer.alloc(32, 0xfb).toString('base64url')), null, 'URL-safe 표기는 거부')
+    assert.equal(parseEngineKey(k.slice(0, 43)), null, '패딩 없음 거부')
+    // 남는 비트를 켠 비정규 표기(디코딩하면 같은 키)는 거부: 같은 키를 다른 문자열로 등록하지 못하게
+    const zero = engineKey(0)
+    const nonCanonical = zero.slice(0, 42) + 'B='
+    assert.ok(Buffer.from(nonCanonical, 'base64').equals(Buffer.from(zero, 'base64')))
+    assert.equal(parseEngineKey(nonCanonical), null)
+  })
+
+  it('rejects malformed keys with descriptor-invalid and does not relay', async () => {
+    const [host, member] = await performers('key-1', 'host', 'kvMember')
+    for (const key of [undefined, 'AAAA', Buffer.alloc(33, 1).toString('base64'), 'not base64 at all!!']) {
+      member.send({ type: 'native-descriptor', descriptor: { ssrc: 5, key, candidates: [] } })
+    }
+    assert.ok(await member.waitFor(() => member.inbox.filter(x => x.type === 'error' && x.code === 'descriptor-invalid').length === 4))
+    await sleep(50)
+    assert.equal(relayedFrom(host, member.id).length, 0)
+  })
+
+  it('rejects another user\'s descriptor with an already-bound key (key-conflict) and relays server-built fields only', async () => {
+    const [host, victim, thief] = await performers('key-2', 'host', 'kcVictim', 'kcThief')
+    const k = engineKey(101)
+    victim.send({ type: 'native-descriptor', descriptor: { ...desc(101, k), from: 'spoofed', userId: 'host' }, from: 'spoofed' })
+    assert.ok(await host.waitFor(() => relayedFrom(host, victim.id).length === 1))
+    assert.deepEqual(relayedFrom(host, victim.id)[0].descriptor, desc(101, k), 'descriptor 안의 from/userId는 버린다')
+
+    // 다른 사용자가 같은 키(다른 ssrc)로 위장 → 거부, 중계 없음
+    thief.send({ type: 'native-descriptor', descriptor: desc(102, k) })
+    assert.ok(await thief.waitFor(m => m.type === 'error' && m.code === 'key-conflict'))
+    await sleep(50)
+    assert.equal(relayedFrom(host, thief.id).length, 0)
+    assert.equal(relayedFrom(victim, thief.id).length, 0)
+
+    // 자기 키면 정상
+    thief.send({ type: 'native-descriptor', descriptor: desc(102) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, thief.id).length === 1))
+
+    // 같은 사용자의 같은 키 재알림(WS 재개·회신)은 허용
+    victim.send({ type: 'native-descriptor', descriptor: desc(101, k) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, victim.id).length === 2))
+  })
+
+  it('binds keys per room: the same key in another room is not a conflict', async () => {
+    const k = engineKey(111)
+    const [a] = await performers('key-3', 'roomA')
+    a.send({ type: 'native-descriptor', descriptor: desc(111, k) })
+    await sleep(50)
+    const [b] = await performers('key-4', 'roomB')
+    b.send({ type: 'native-descriptor', descriptor: desc(112, k) })
+    await sleep(100)
+    assert.ok(!b.has(m => m.type === 'error' && m.code === 'key-conflict'))
+  })
+
+  it('releases the binding on engine restart (new key), native-leave and leave', async () => {
+    const [host, owner, other] = await performers('key-5', 'host', 'relOwner', 'relOther')
+    const k1 = engineKey(121)
+    const k2 = engineKey(122)
+    owner.send({ type: 'native-descriptor', descriptor: desc(121, k1) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, owner.id).length === 1))
+
+    // 엔진 재시작(새 키·새 ssrc): 옛 키는 풀린다
+    owner.send({ type: 'native-descriptor', descriptor: desc(123, k2) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, owner.id).length === 2))
+    other.send({ type: 'native-descriptor', descriptor: desc(124, k1) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, other.id).length === 1))
+
+    // native-leave: 키가 풀린다
+    other.send({ type: 'native-leave' })
+    owner.send({ type: 'native-leave' })
+    assert.ok(await host.waitFor(m => m.type === 'native-leave' && m.from === owner.id))
+    other.send({ type: 'native-descriptor', descriptor: desc(125, k2) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, other.id).length === 2))
+
+    // 퇴장: 키가 풀린다
+    other.send({ type: 'leave' })
+    assert.ok(await host.waitFor(m => m.type === 'participant-left' && m.oderId === other.id))
+    owner.send({ type: 'native-descriptor', descriptor: desc(126, k2) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, owner.id).length === 3))
+    assert.ok(!owner.has(m => m.type === 'error' && m.code === 'key-conflict'))
+  })
+
+  it('keeps the binding during the resume grace period and releases it when the connection is finally closed', async () => {
+    const [host, owner, thief] = await performers('key-6', 'host', 'graceOwner', 'graceThief')
+    const k = engineKey(131)
+    owner.send({ type: 'native-descriptor', descriptor: desc(131, k) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, owner.id).length === 1))
+    owner.ws.terminate()
+    await sleep(50)
+
+    // 유예 중: 끊긴 연주자의 키를 가로챌 수 없다
+    thief.send({ type: 'native-descriptor', descriptor: desc(132, k) })
+    assert.ok(await thief.waitFor(m => m.type === 'error' && m.code === 'key-conflict'))
+    assert.ok(!host.has(m => m.type === 'participant-left' && m.oderId === owner.id), '아직 유예 중')
+
+    // 유예가 끝나 최종 퇴장하면 풀린다
+    assert.ok(await host.waitFor(m => m.type === 'participant-left' && m.oderId === owner.id))
+    thief.send({ type: 'native-descriptor', descriptor: desc(133, k) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, thief.id).length === 1))
+  })
+
+  it('allows the same user to reuse the key from a new connection (reconnect without resume)', async () => {
+    const [host, first] = await performers('key-7', 'host', 'reconnUser')
+    const k = engineKey(141)
+    first.send({ type: 'native-descriptor', descriptor: desc(141, k) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, first.id).length === 1))
+    const [second] = await performers('key-7', 'reconnUser') // 같은 userId 새 연결: 기존 연결은 중복 정리
+    second.send({ type: 'native-descriptor', descriptor: desc(141, k) })
+    assert.ok(await host.waitFor(() => relayedFrom(host, second.id).length === 1))
+    assert.ok(!second.has(m => m.type === 'error' && m.code === 'key-conflict'))
   })
 })
