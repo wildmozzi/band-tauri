@@ -193,10 +193,21 @@ posts INSERT/UPDATE 정책과 권한을 없앤다. 조회·삭제·좋아요·�
 `rooms.max_participants`(관람 포함 정원)를 2~20으로 제한한다. 서버 방 생성 스키마·WS 정원 상한·클라이언트 선택지와 같은 범위다.
 방 설정은 클라이언트가 직접 UPDATE하므로 이 제약이 없으면 UI 밖에서 0·50 같은 값이 들어가 목록 표시(`3/50명`)와 서버 실효 정원(20)이 어긋난다.
 
-1. [ ] 실행 전 확인: 범위 밖 행 수 (아래 실행이 20으로 보정한다 — 서버가 이미 20으로 강제하던 값이라 입장 동작은 바뀌지 않는다)
+1. [ ] 실행 전 확인
+   - 범위 밖 행 수. 013은 다음처럼 보정한다:
+     - 0·음수·21 이상 → 20: 서버가 이미 상한 20으로 강제하던 값이라 입장 동작은 그대로다.
+     - **1 → 2: 동작 변경.** 이전 서버는 정원 1(방장 혼자)로 강제했다. 1은 새 범위 밖이라 가장 가까운 유효값 2로 올린다(20으로 넓히지 않는다). P3-10g 서버도 1을 2로 읽는다.
+       `max_participants = 1` 행이 있으면 해당 방장에게 알릴지 먼저 정하고 실행한다.
    ```sql
    SELECT max_participants, count(*) FROM rooms
     WHERE max_participants NOT BETWEEN 2 AND 20 GROUP BY 1;
+   ```
+   - 기존 CHECK 제약. rooms는 이 리포 마이그레이션 밖(대시보드)에서 만들어져 `max_participants`를 다루는 CHECK가 다른 이름으로 이미 있을 수 있다.
+     013은 `rooms_max_participants_range`라는 **이름**으로만 존재를 확인한다. 같은 이름이 다른 정의로 있으면 조용히 건너뛰고, 다른 이름의 제약은 그대로 공존한다.
+     결과에 2~20과 충돌하는 제약(예: `max_participants <= 10`)이 있으면 실행 전에 처리 방법을 정한다.
+   ```sql
+   SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
+    WHERE conrelid = 'public.rooms'::regclass AND contype = 'c';
    ```
 2. [ ] 013 실행. `lock_timeout`(5초)으로 실패하면 트래픽이 적을 때 다시 실행
 3. [ ] 확인: 파일 끝 확인 쿼리 — 제약 1행, 범위 밖 0행
