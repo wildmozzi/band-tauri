@@ -1,6 +1,7 @@
 import { useState, ReactNode, useEffect } from 'react'
 import { useAuth } from './useAuth'
 import { paymentApi } from '../services/paymentApi'
+import { isApiUrlConfigured } from '../lib/apiUrl'
 import { PremiumContext, PLAN_LIMITS, type FeatureLimit, type UserPlan } from './usePremium'
 
 interface PremiumProviderProps {
@@ -27,8 +28,7 @@ export function PremiumProvider({ children }: PremiumProviderProps) {
         }
 
         // 결제 서버가 설정된 경우에만 서버에서 최신 정보 가져오기
-        const apiUrl = import.meta.env.VITE_API_URL
-        if (apiUrl) {
+        if (isApiUrlConfigured()) {
           try {
             const result = await paymentApi.getUserSubscription(user.id)
             if (result.success && result.user) {
