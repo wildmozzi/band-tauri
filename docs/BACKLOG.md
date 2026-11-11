@@ -25,7 +25,7 @@
 | P1-13 | **엔진 결함(P3-0에서 발견)**: 출력 언더런 후 PeerFeed.margin(M4)은 커지는데 지터 목표가 따라오지 않아 정상 상태에서도 은닉·마감 채움·보정 수백 회 반복. 재현: `engine::worker::tests::callback_mix_sim_margin_after_underrun_no_steady_concealment`(known-bug ignore). 수정 시 ignore 제거 + CI realtime 필터에 `callback_mix_early_callbacks_real_time` 복원 | 재현 테스트 통과, realtime 잡 녹색 | 완료(#16) |
 | P1-1 | **지연 측정 도구**: 에코 피어 모드(받은 오디오를 그대로 되돌려 보냄) + 클릭 왕복 측정 UI, 로컬 루프백(입력→출력 케이블) 측정 | 측정값이 설정 화면/방 화면에 표시, 측정 절차 문서 | 완료(#13; 실측은 P1-1a [사람]) |
 | P1-1b | PR #13 리뷰 Low: remove_peer 은퇴 처리를 write 락 안으로(잠재 경쟁), 중복 키 add 거부 악용 가용성 방해 대응 | 테스트 | 완료(PR #42, 2026-11-11) |
-| P1-1c | 서버가 native-descriptor의 공개키를 JWT 신원(userId)에 묶어 다른 사용자가 같은 키로 선점·위장하지 못하게(근본 차단, PR #42 후속) | 서버 테스트 | 리뷰 반영·충돌 해결 완료(PR #48, CI 대기) |
+| P1-1c | 서버가 native-descriptor의 공개키를 JWT 신원(userId)에 묶어 다른 사용자가 같은 키로 선점·위장하지 못하게(근본 차단, PR #42 후속) | 서버 테스트 | 완료(PR #48, 2026-11-11) |
 | P1-1a | **[사람]** Scarlett Solo 4세대 ASIO 실측(버퍼 32/64/128, ASIOGetLatencies 확인, 하드웨어 루프백) + 두 PC 실네트워크·릴레이 에코 측정 — 절차 docs/MEASURE.md | 결과를 백로그 완료 기록에 | 대기 |
 | P1-2 | Windows 실시간 스레드 우선순위: 엔진 워커/수신 스레드에 MMCSS "Pro Audio" 등록, 타이머 해상도 1ms | 루프백 테스트 지터 감소 수치 | 완료(PR #31, 2026-11-11 — 부하 시 xrun 수천→0, bufferMs 24~32→7ms대; **[사람]** 실장비에서 threadPriority=mmcss 확인) |
 | P1-3 | UDP 송신 DSCP EF 마킹 + 패킷 페이싱, 송신 큐 지연 측정 | 테스트 + 수치 | 완료(PR #37, 2026-11-11; **[사람]** 다른 PC Wireshark로 DS 필드 확인) |
@@ -87,7 +87,8 @@
 | P3-7 | 웹 E2E(Playwright 또는 ego-browser 시나리오): 로그인, 방 목록, 관람 입장, 커뮤니티 | CI 또는 루프에서 실행 | 완료(#19; RLS 검증은 P3-11) |
 | P3-8 | 공용 UI 컴포넌트/디자인 토큰 정리 | 중복 CSS 감소 (PR #22 후속 Nit 포함: pageTitle 경로 표와 App 라우트 정의 단일화, App.css .live-room 중복 정리) | 완료(PR #24, 2026-11-11) |
 | P3-12 | **웹 점검 발견 사항 정리**(ego-browser, 2026-11-10): ① 탭 제목 "Vite + React + TS" → 서비스명 ② BandSpace/IndigoMuse 이름 통일(결정 필요 시 [결정]으로 묻기 — 기본은 IndigoMuse) ③ 홈 문구 사실과 다름(평균 왕복 18ms·KR/JP/US 3지역·서울/도쿄/LA 리전·20ms 이하·SYNCROOM 명시) → 측정 전에는 사실만 ④ 웹 관람 안내에 데스크톱 다운로드 버튼(VITE_DESKTOP_DOWNLOAD_URL, 비면 '준비 중') ⑤ 커뮤니티 목록 항목이 링크가 아닌 div 클릭(새 탭·접근성 불가) → <a>/<Link> ⑥ /profile, /payment(파라미터 없음)에서 렌더 중 navigate() 경고 → effect로 ⑦ 404 페이지 없음(없는 경로에서 빈 화면) ⑧ 방 최대 인원 선택지 2~20명 vs 연주자 최대 6명 — 관람 포함 의미인지 UI 문구 명확화 ⑨ 합주실 채팅 입력창이 첫 화면 아래(스크롤 필요) ⑩ [버그] 로그인 상태로 /payment?plan= 직접 진입 시 /auth를 거쳐 /로 튕김(E2E test.fixme — 고치면 fixme 해제) ⑪ 결제 약관 체크박스 display:none으로 접근성 없음 | lint/test + ego-browser 재점검 | 완료(#22) |
-| P3-12a | **[결정]** 서비스 문의 메일(현재 support@bandspace.com 표기)과 요금제 문구('최대 8명' 등)를 무엇으로 할지, 데스크톱 앱 이름(tauri productName 'Band')을 IndigoMuse로 바꿀지 | 사용자 결정 | 진행중(사용자 지시 2026-11-11 "실제로 가능한, 설계된 대로 맞춰서" — 작업자 p3-plantext: 요금제 인원·혜택 문구를 실제 구현과 일치, 문의 메일은 VITE_SUPPORT_EMAIL 설정값; **[사람]** 실제 문의 메일 주소 결정 후 Vercel 환경변수) |
+| P3-12a | **[결정]** 서비스 문의 메일(현재 support@bandspace.com 표기)과 요금제 문구('최대 8명' 등)를 무엇으로 할지, 데스크톱 앱 이름(tauri productName 'Band')을 IndigoMuse로 바꿀지 | 사용자 결정 | 리뷰중(PR #51 — 요금제 문구를 실제와 일치: 서버·클라이언트에 요금제 게이트 0개(유료 전용 기능 없음), 미구현 혜택 13종 "준비 중" 분리·삭제, 문의 메일 VITE_SUPPORT_EMAIL) |
+| P3-12e | **[결정]** 유료 요금제(Standard ₩2,900·Pro ₩6,900) 판매를 계속할지 — 지금 유료로만 열리는 기능이 하나도 없음(PR #51 조사). 계속하면 실제 유료 기능(게이트) 구현 필요, 아니면 결제 화면 숨김. **[버그]** Pricing의 무료 전환 버튼이 localStorage만 바꾸고 서버 구독 해지를 부르지 않음(결제 로직 — 승인 후 수정). **[사람]** 운영 VITE_SUPPORT_EMAIL 설정, "7일 환불 보장" 등 결제·환불 고지 문구 법적 검토 | 결정 | 대기 |
 | P3-12b | 방 max_participants를 서버가 강제(입장 시 정원 초과 거부) — 현재 클라이언트 표시만 | 서버 테스트 | 완료(PR #23, 2026-11-11; **[사람]** 데스크톱에서 정원 초과 재입장 시 엔진 해제 확인) |
 | P3-12c | ego-browser 웹 재점검(PR #22 반영분) — 로컬 서버+빌드로 홈·합주실·커뮤니티·결제·404 화면 확인 | 화면 점검 | 완료(PR #41, 2026-11-11 — High 2·Medium 9·Low 11 중 CSS·aria로 고칠 것 반영, 기록 docs/reviews/2026-11-11-web-recheck.md) |
 | P3-12d | 웹 재점검 후속(#41): import 안 되는 사문화 페이지 CSS 7개(~2,600줄) 삭제, 합주실 상세 모바일 연주자 패널 잘림, 대비 토큰·word-break keep-all, 결제 완료/실패 직접 진입 문구, 방 만들기 토글 3개 label 연결 | e2e·시각 회귀 | 완료(PR #45, 2026-11-11) |
