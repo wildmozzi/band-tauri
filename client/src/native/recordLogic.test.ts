@@ -45,6 +45,10 @@ describe('recordLogic', () => {
     expect(recordSessionName(d)).toBe('2026-11-11 21.05.09')
     expect(recordSessionName(d, '  금요 합주 ')).toBe('2026-11-11 21.05.09 금요 합주')
     expect(recordSessionName(d, 'x'.repeat(50)).length).toBe(19 + 1 + 30)
+    // 이모지(서로게이트 쌍)를 반으로 자르지 않는다
+    const t = recordSessionName(d, 'a'.repeat(29) + '🎸🎸')
+    expect(t.endsWith('a🎸')).toBe(true)
+    expect(t).not.toMatch(/[\uD800-\uDBFF]$/)
   })
 
   it('buildRecordOptions는 peerId → 이름', () => {

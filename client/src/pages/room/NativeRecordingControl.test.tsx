@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   engineRecordPickFolder: vi.fn(),
   engineRecordStart: vi.fn(),
   engineRecordStop: vi.fn(),
+  engineRecordSetTrackNames: vi.fn(),
 }))
 
 vi.mock('../../contexts/RoomContext', () => ({ useRoom: () => room }))
@@ -36,6 +37,7 @@ describe('NativeRecordingControl', () => {
     room.isPerforming = true
     api.engineRecordFolder.mockResolvedValue('C:\\Music\\Band Recordings')
     api.engineRecordStart.mockResolvedValue(live)
+    api.engineRecordSetTrackNames.mockResolvedValue(undefined)
   })
   afterEach(() => {
     cleanup()
@@ -82,5 +84,44 @@ describe('NativeRecordingControl', () => {
     render(<NativeRecordingControl peers={[]} />)
     fireEvent.click(screen.getByRole('button', { name: /멀티트랙 녹음/ }))
     expect((await screen.findByRole('alert')).textContent).toBe('녹음을 시작할 수 없습니다: 이미 녹음 중입니다')
+  })
+  it('시작 응답 직후(다음 통계 폴링 전)에도 녹음 중으로 보인다', async () => {
+    render(<NativeRecordingControl peers={[]} />)
+    fireEvent.click(screen.getByRole('button', { name: /멀티트랙 녹음/ }))
+    const btn = await screen.findByRole('button', { name: /녹음 정지/ })
+    expect((btn as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.getByText('🔴 1:05 · 37.0 MB · 3트랙')).toBeTruthy()
+  })
+
+  it('정지 뒤 늦게 온 폴링 응답(같은 세션)은 무시하고 정지 요약을 덮어쓰지 않는다', async () => {
+    room.engineStats = { recording: live }
+    api.engineRecordStop.mockResolvedValue({ ...live, channels: 2, startedAtMs: 0, tracks: [], error: null })
+    const { rerender } = render(<NativeRecordingControl peers={[]} />)
+    fireEvent.click(screen.getByRole('button', { name: /녹음 정지/ }))
+    expect(await screen.findByText(/저장됨 · 0트랙/)).toBeTruthy()
+    // 정지 전에 출발한 폴링이 정지 뒤 도착
+    room.engineStats = { recording: { ...live, durationSec: 66 } }
+    rerender(<NativeRecordingControl peers={[]} />)
+    expect(screen.getByRole('button', { name: /멀티트랙 녹음/ })).toBeTruthy()
+    room.engineStats = { recording: null }
+    rerender(<NativeRecordingControl peers={[]} />)
+    expect(screen.getByText(/저장됨 · 0트랙/)).toBeTruthy()
+    expect(screen.queryByText(/엔진 정지/)).toBeNull()
+  })
+
+  it('녹음 중에 들어온 연주자 이름을 엔진에 더한다', async () => {
+    room.engineStats = { recording: live }
+    const { rerender } = render(<NativeRecordingControl peers={[{ peerId: 'u-1', name: '앨리스' }]} />)
+    await vi.waitFor(() => expect(api.engineRecordSetTrackNames).toHaveBeenCalledWith({ 'u-1': '앨리스' }))
+    rerender(<NativeRecordingControl peers={[{ peerId: 'u-1', name: '앨리스' }]} />)
+    rerender(<NativeRecordingControl peers={[{ peerId: 'u-1', name: '앨리스' }, { peerId: 'u-2', name: '밥' }]} />)
+    await vi.waitFor(() => expect(api.engineRecordSetTrackNames).toHaveBeenLastCalledWith({ 'u-1': '앨리스', 'u-2': '밥' }))
+    expect(api.engineRecordSetTrackNames).toHaveBeenCalledTimes(2)
+  })
+
+  it('녹음 중이 아니면 이름을 보내지 않는다', async () => {
+    render(<NativeRecordingControl peers={[{ peerId: 'u-1', name: '앨리스' }]} />)
+    expect(await screen.findByText(/Band Recordings/)).toBeTruthy()
+    expect(api.engineRecordSetTrackNames).not.toHaveBeenCalled()
   })
 })

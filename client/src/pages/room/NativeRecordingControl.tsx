@@ -3,11 +3,13 @@ import { useRoom } from '../../contexts/RoomContext'
 import {
   engineRecordFolder,
   engineRecordPickFolder,
+  engineRecordSetTrackNames,
   engineRecordStart,
   engineRecordStop,
   engineErrorMessage,
 } from '../../native/engineApi'
-import { buildRecordOptions, recordStatusLine, recordSummaryLine, recordWarning } from '../../native/recordLogic'
+import type { RecordStats } from '../../native/engineApi'
+import { buildRecordOptions, recordStatusLine, recordSummaryLine, recordWarning, trackNameMap } from '../../native/recordLogic'
 
 /**
  * 합주 녹음(P2-4, 데스크톱 앱 연주자). 엔진이 트랙별 WAV(내 입력, 연주자별, 선택: 믹스)를 저장 폴더에 쓴다.
@@ -22,7 +24,13 @@ export function NativeRecordingControl({
   roomTitle?: string | null
 }) {
   const { engineStats, isPerforming } = useRoom()
-  const rec = engineStats?.recording ?? null
+  // 시작 응답(다음 통계 폴링 전까지 녹음 중으로 보이게)과 내가 정지한 세션 폴더(정지 전에 출발한 폴링 응답이
+  // 늦게 와도 다시 녹음 중으로 보이지 않게) — PR #49 M2
+  const [started, setStarted] = useState<RecordStats | null>(null)
+  const [stoppedFolder, setStoppedFolder] = useState<string | null>(null)
+  const polled = engineStats?.recording ?? null
+  const live = polled && polled.folder !== stoppedFolder ? polled : null
+  const rec = live ?? started
   const recording = rec != null
   const [folder, setFolder] = useState<string | null>(null)
   const [includeMix, setIncludeMix] = useState(false)
@@ -36,6 +44,25 @@ export function NativeRecordingControl({
   useEffect(() => {
     engineRecordFolder().then(setFolder).catch(() => setFolder(null))
   }, [])
+
+  useEffect(() => {
+    if (live) setStarted(null)
+  }, [live])
+
+  // 녹음 중에 들어오거나 연주를 시작한 사람도 닉네임 트랙이 되게 이름을 엔진에 더한다(PR #49 M1)
+  const namesKey = JSON.stringify(Object.entries(trackNameMap(peers)).sort())
+  const sentNamesRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!recording) {
+      sentNamesRef.current = null
+      return
+    }
+    if (sentNamesRef.current === namesKey) return
+    sentNamesRef.current = namesKey
+    engineRecordSetTrackNames(Object.fromEntries(JSON.parse(namesKey) as [string, string][])).catch(() => {
+      sentNamesRef.current = null // 다음 변경 때 다시 보낸다(정지 경합이면 무시)
+    })
+  }, [recording, namesKey])
 
   useEffect(() => {
     if (rec) {
@@ -53,7 +80,10 @@ export function NativeRecordingControl({
     setError(null)
     setNotice(null)
     try {
-      await engineRecordStart(buildRecordOptions({ now: new Date(), roomTitle, includeMix, peers }))
+      const st = await engineRecordStart(buildRecordOptions({ now: new Date(), roomTitle, includeMix, peers }))
+      setStarted(st)
+      setStoppedFolder(null)
+      sentNamesRef.current = namesKey // 시작 옵션에 이미 넣었다
     } catch (e) {
       setError(`녹음을 시작할 수 없습니다: ${engineErrorMessage(e)}`)
     } finally {
@@ -64,12 +94,18 @@ export function NativeRecordingControl({
   const stop = async () => {
     setBusy(true)
     stoppingRef.current = true
+    const folderAtStop = rec?.folder ?? null
     try {
       const s = await engineRecordStop()
+      setStoppedFolder(s.folder || folderAtStop)
+      setStarted(null)
       setNotice(`${recordSummaryLine(s)} · ${s.folder}`)
       if (s.error) setError(`일부 저장 실패: ${s.error}`)
     } catch (e) {
       setError(`녹음 정지 실패: ${engineErrorMessage(e)}`)
+      // 이미 끝났거나(엔진 정지 경합) 실패: 이 세션 폴더의 늦은 폴링은 무시한다
+      setStoppedFolder(folderAtStop)
+      setStarted(null)
     } finally {
       lastFolderRef.current = null
       stoppingRef.current = false

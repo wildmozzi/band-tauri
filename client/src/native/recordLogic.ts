@@ -31,8 +31,16 @@ const pad = (n: number) => String(n).padStart(2, '0')
 /** 세션 폴더 이름: "2026-11-11 21.30.05 방 제목" (지역 시각, 엔진이 금지 문자를 다시 정리한다) */
 export function recordSessionName(date: Date, roomTitle?: string | null): string {
   const stamp = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}.${pad(date.getMinutes())}.${pad(date.getSeconds())}`
-  const title = (roomTitle ?? '').trim().slice(0, 30)
+  // 코드 포인트 단위로 자른다(이모지 서로게이트 쌍을 반으로 자르지 않게)
+  const title = Array.from((roomTitle ?? '').trim()).slice(0, 30).join('')
   return title ? `${stamp} ${title}` : stamp
+}
+
+/** 피어 트랙 이름 맵: engine peerId(= oderId) → 표시 이름 */
+export function trackNameMap(peers: { peerId: string; name: string }[]): Record<string, string> {
+  const trackNames: Record<string, string> = {}
+  for (const p of peers) trackNames[p.peerId] = p.name
+  return trackNames
 }
 
 /** 엔진 녹음 옵션: 피어 트랙 이름은 engine peerId(= oderId) → 표시 이름 */
@@ -42,8 +50,7 @@ export function buildRecordOptions(params: {
   includeMix: boolean
   peers: { peerId: string; name: string }[]
 }): RecordOptions {
-  const trackNames: Record<string, string> = {}
-  for (const p of params.peers) trackNames[p.peerId] = p.name
+  const trackNames = trackNameMap(params.peers)
   return {
     format: 'wav24',
     includeMix: params.includeMix,
