@@ -2,12 +2,15 @@ name: CI
 
 # 실행 위치: 이 리포 전용 self-hosted runner(개발 PC, Windows, 라벨 band-tauri).
 # GitHub 호스티드 러너는 비공개 리포 무료 시간(월 2,000분, Windows 2배)을 다 써서 2026-11-10에 멈췄다(P3-0b).
-# 러너 2대(jw-pc-band, jw-pc-band-2)가 잡을 나눠 돈다. 바뀐 경로에 해당하는 잡만 돌려 시간을 아낀다(push to overhaul/develop은 전부).
+# 러너 2대(jw-pc-band, jw-pc-band-2)가 잡을 나눠 돈다. 바뀐 경로에 해당하는 잡만 돌려 시간을 아낀다.
+# overhaul은 push CI를 돌지 않는다: PR CI가 이미 병합 결과(merge ref)를 검증했고, 병합·백로그 커밋마다 전체 잡이
+# 돌다가 다음 push에 취소되기만 했다(2026-11-11 10회 연속 cancelled). 필요하면 Actions 탭에서 수동 실행(workflow_dispatch).
 
 on:
   pull_request:
   push:
-    branches: [develop, overhaul]
+    branches: [develop]
+  workflow_dispatch:
 
 # 최소 권한: 체크아웃(contents), 변경 파일 목록(paths-filter → pull-requests), 아티팩트 업로드(actions).
 permissions:
@@ -28,6 +31,10 @@ env:
   # (C:actions-runner.env → .cargo-target/ci, C:actions-runner-2.env → .cargo-target/ci-2).
   # 러너 2대가 같은 폴더를 쓰면 cargo 잠금으로 서로 기다린다. 작업자 워크트리 공유 target과도 분리.
   CARGO_TERM_COLOR: always
+  # CI 빌드 폴더 크기·링크 시간 절감: 증분 캐시 끔(CI는 매번 다른 커밋이라 이득이 거의 없음), 디버그 정보는 줄 번호만.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 # 모든 잡·스텝에 timeout-minutes를 둔다(P3-0). 값은 정상 소요의 약 2~3배.
 
@@ -37,10 +44,10 @@ jobs:
     runs-on: [self-hosted, band-tauri]
     timeout-minutes: 5
     outputs:
-      engine: ${{ github.event_name == 'push' || steps.f.outputs.engine == 'true' }}
-      relay: ${{ github.event_name == 'push' || steps.f.outputs.relay == 'true' }}
-      client: ${{ github.event_name == 'push' || steps.f.outputs.client == 'true' }}
-      server: ${{ github.event_name == 'push' || steps.f.outputs.server == 'true' }}
+      engine: ${{ github.event_name != 'pull_request' || steps.f.outputs.engine == 'true' }}
+      relay: ${{ github.event_name != 'pull_request' || steps.f.outputs.relay == 'true' }}
+      client: ${{ github.event_name != 'pull_request' || steps.f.outputs.client == 'true' }}
+      server: ${{ github.event_name != 'pull_request' || steps.f.outputs.server == 'true' }}
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
