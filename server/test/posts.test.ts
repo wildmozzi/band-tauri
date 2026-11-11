@@ -262,3 +262,44 @@ describe('POST /api/posts without backends', () => {
     assert.equal(res.status, 503)
   })
 })
+
+describe('per-user post write limits (P3-10g, PR #25 L4)', () => {
+  let server: Server
+  let url: string
+  const posts = memoryPosts()
+  before(async () => {
+    setTokenVerifier(testVerifier)
+    server = createApp({
+      imageStorage: null, postRepository: posts.repo, rateLimits: false,
+      postUserLimits: { createPerMinute: 2, createPerDay: 3, editPerMinute: 2 },
+    }).listen(0)
+    await new Promise(r => server.once('listening', r))
+    url = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+  })
+  after(() => {
+    server.close()
+    setTokenVerifier()
+  })
+
+  it('limits each user by token (not IP) and leaves other users alone', async () => {
+    // 같은 사용자가 IP(X-Forwarded-For)를 바꿔도 같은 상한
+    const statuses: number[] = []
+    for (let i = 0; i < 3; i++) {
+      statuses.push((await req(url, 'POST', '', { title: `t${i}`, content: 'c' }, { ...bearer(ALICE), 'X-Forwarded-For': `10.0.0.${i}` })).status)
+    }
+    assert.deepEqual(statuses, [201, 201, 429])
+    const limited = await req(url, 'POST', '', { title: 'x', content: 'c' }, bearer(ALICE))
+    assert.equal(limited.status, 429)
+    assert.match(((await limited.json()) as { error: string }).error, /너무 자주/)
+    assert.equal(posts.rows.size, 2)
+    // 다른 사용자는 영향 없음
+    assert.equal((await req(url, 'POST', '', { title: 'b', content: 'c' }, bearer(BOB))).status, 201)
+  })
+
+  it('limits edits per user separately from creates', async () => {
+    const [id] = [...posts.rows.values()].filter(r => r.author_id === BOB).map(r => r.id)
+    const statuses: number[] = []
+    for (let i = 0; i < 3; i++) statuses.push((await req(url, 'PUT', `/${id}`, { content: `c${i}` }, bearer(BOB))).status)
+    assert.deepEqual(statuses, [200, 200, 429])
+  })
+})
