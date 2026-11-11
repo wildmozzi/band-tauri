@@ -15,12 +15,18 @@ import {
   engineStop,
   isNativeApp,
 } from './engineApi'
-import { PerformSession, type EngineBackend, type PerformState, type SessionEnv } from './performSession'
+import { reapplyLoopbackOffsetInBackground } from './loopbackOffsetStore'
+import { PerformSession,type EngineBackend, type PerformState, type SessionEnv } from './performSession'
 
 export const STATS_POLL_MS = 500
 
 export const tauriEngineBackend: EngineBackend = {
-  start: engineStart,
+  start: async (config, peerId) => {
+    const descriptor = await engineStart(config, peerId)
+    // 앱 재시작 뒤에도 같은 장치 구성이면 메트로놈 출력 지연 보정값을 다시 넣는다(P2-3c)
+    reapplyLoopbackOffsetInBackground(config)
+    return descriptor
+  },
   stop: engineStop,
   addPeer: engineAddPeer,
   setRelay: engineSetRelay,

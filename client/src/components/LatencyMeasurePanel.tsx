@@ -5,6 +5,13 @@
 import { useState } from 'react'
 import { useAudioSettings } from '../contexts/AudioSettingsContext'
 import { engineCancelMeasure, engineErrorMessage, engineMeasureLoopback, type LoopbackReport } from '../native/engineApi'
+import {
+  clearLoopbackOffset,
+  LATENCY_MEASURE_SECTION_ID,
+  rememberLoopbackOffset,
+  storableOffset,
+  tauriLoopbackOffsetDeps,
+} from '../native/loopbackOffsetStore'
 import { copyText, downloadText, loopbackRows, loopbackText, VERDICT_LABEL } from '../native/measureFormat'
 import './LatencyMeasure.css'
 
@@ -32,6 +39,9 @@ export function LatencyMeasurePanel() {
   const [measuredAt, setMeasuredAt] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  /** 메트로놈 보정값을 저장한 장치 구성 키(P2-3c). null = 저장 안 됨 */
+  const [appliedKey, setAppliedKey] = useState<string | null>(null)
+  const [cleared, setCleared] = useState(false)
 
   const device = `${selectedInputDevice?.name ?? '기본 장치'} (${config.inputDriver}), 버퍼 ${config.bufferSize}, 프레임 ${config.frameMs}ms`
 
@@ -39,6 +49,8 @@ export function LatencyMeasurePanel() {
     setError(null)
     setReport(null)
     setCopied(false)
+    setAppliedKey(null)
+    setCleared(false)
     setBusy(true)
     try {
       if (!isTesting) {
@@ -47,8 +59,12 @@ export function LatencyMeasurePanel() {
         await new Promise((r) => setTimeout(r, 600))
       }
       const r = await engineMeasureLoopback(runs)
-      setMeasuredAt(new Date().toISOString())
+      const at = new Date().toISOString()
+      setMeasuredAt(at)
       setReport(r)
+      // ok 판정이면 엔진이 이미 이 값으로 메트로놈 출력 지연을 보정한다(PR #57).
+      // 엔진 기억은 앱 수명뿐이라 장치 구성별로 저장해 두고 엔진 시작 때 다시 넣는다
+      setAppliedKey(await rememberLoopbackOffset(config, r, at, tauriLoopbackOffsetDeps()))
     } catch (err) {
       setError(engineErrorMessage(err))
     } finally {
@@ -56,10 +72,23 @@ export function LatencyMeasurePanel() {
     }
   }
 
+  const clearOffset = async () => {
+    const deps = tauriLoopbackOffsetDeps()
+    if (appliedKey) clearLoopbackOffset(deps.storage, appliedKey)
+    try {
+      await deps.setOffset(null)
+    } catch {
+      // 엔진이 꺼져 있으면 엔진 기억은 앱 재시작 때 사라진다
+    }
+    setCleared(true)
+  }
+
+  const usedOffset = report ? storableOffset(report) : null
+
   const text = report ? loopbackText(report, { at: measuredAt, device }) : ''
 
   return (
-    <section className="settings-section latency-measure">
+    <section className="settings-section latency-measure" id={LATENCY_MEASURE_SECTION_ID}>
       <h3>지연 측정 (하드웨어 루프백)</h3>
       <ConnectionDiagram />
       <ol className="measure-steps">
@@ -89,6 +118,19 @@ export function LatencyMeasurePanel() {
       {report && (
         <div className={`measure-result verdict-${report.verdict}`}>
           <p className="measure-message"><b>{VERDICT_LABEL[report.verdict]}</b> — {report.message}</p>
+          <p className="measure-metronome" data-testid="measure-metronome">
+            {cleared ? (
+              '메트로놈 출력 지연 보정을 해제했습니다.'
+            ) : usedOffset !== null ? (
+              <>
+                메트로놈 클릭 보정에 적용됨(보정값 {usedOffset.toFixed(1)}ms
+                {appliedKey ? ' · 이 장치 구성에 저장, 앱을 다시 켜도 적용' : ''}).{' '}
+                <button type="button" className="btn-secondary" onClick={() => void clearOffset()}>보정 해제</button>
+              </>
+            ) : (
+              '이 결과는 메트로놈 클릭 보정에 쓰지 않습니다(정상 판정·−50~200ms일 때만). 이전 보정값이 있으면 그대로 씁니다.'
+            )}
+          </p>
           <table className="measure-table">
             <tbody>
               {loopbackRows(report).map((row) => (

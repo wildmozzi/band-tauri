@@ -33,6 +33,7 @@ import {
   type EnginePresetId,
 } from '../native/engineConfig'
 import { SettingsSaveGate, TestMonitorControl } from '../native/settingsSync'
+import { reapplyLoopbackOffsetInBackground } from '../native/loopbackOffsetStore'
 
 const STORAGE_KEY = 'band_engine_config_v2'
 const SAVE_DEBOUNCE_MS = 600
@@ -208,7 +209,13 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const testControlRef = useRef<TestMonitorControl | null>(null)
   if (!testControlRef.current) {
     testControlRef.current = new TestMonitorControl({
-      start: () => engineTestStart(configRef.current),
+      start: async () => {
+        const cfg = configRef.current
+        await engineTestStart(cfg)
+        // 앱 재시작 뒤에도 같은 장치 구성이면 메트로놈 출력 지연 보정값을 다시 넣는다(P2-3c)
+        reapplyLoopbackOffsetInBackground(cfg)
+        return null
+      },
       stop: () => engineTestStop(),
     })
   }

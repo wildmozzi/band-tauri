@@ -9,6 +9,7 @@ import {
   clampBeats,
   clampBpm,
 } from '../../native/metronomeLogic'
+import { OPEN_LATENCY_MEASURE_EVENT, outputLatencyView } from '../../native/loopbackOffsetStore'
 
 /**
  * 공유 메트로놈(P2-3). 방장은 BPM·박자·시작/정지, 모든 연주자는 내 클릭 볼륨·뮤트.
@@ -28,6 +29,8 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
   const running = metronome?.running ?? false
   const following = running && metronome?.leaderId != null
   const synced = engineStats?.metronome?.synced ?? false
+  // 출력 지연 보정 상태(P2-3c): 드라이버 보고 / 루프백 측정 / 없음. 옛 엔진(필드 없음)이면 표시하지 않는다
+  const latency = engineStats?.metronome && 'outputLatencySource' in engineStats.metronome ? outputLatencyView(engineStats.metronome) : null
   // 따르기 시작한 뒤 한참 지나도 시계 표본이 없으면(옛 엔진 방장·연결 문제) 안내를 바꾼다(PR #36 L2)
   const [syncTimedOut, setSyncTimedOut] = useState(false)
   const waitingSync = following && !synced
@@ -131,6 +134,24 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
           title={`클릭 볼륨: ${Math.round(metronomeVolume * 100)}%`}
         />
       </div>
+
+      {latency && (
+        <p className="metronome-hint metronome-latency" data-testid="metronome-latency" data-source={latency.source ?? 'none'}>
+          {latency.text}
+          {latency.needsMeasure && (
+            <>
+              {' — '}루프백 측정을 하면 클릭이 더 정확해집니다(연주를 멈춘 뒤).{' '}
+              <button
+                type="button"
+                className="metronome-link"
+                onClick={() => window.dispatchEvent(new CustomEvent(OPEN_LATENCY_MEASURE_EVENT))}
+              >
+                지연 측정 열기
+              </button>
+            </>
+          )}
+        </p>
+      )}
     </section>
   )
 }
