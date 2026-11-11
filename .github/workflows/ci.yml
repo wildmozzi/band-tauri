@@ -173,11 +173,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
+      # self-hosted: npm 캐시는 PC에 남아 있다. cache: npm(GitHub 캐시 서버 왕복)은 네트워크가 느리면 5분 시간 초과로 잡을 실패시켜 끈다.
       - uses: actions/setup-node@v4
         timeout-minutes: 5
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
         timeout-minutes: 8
       - run: npm run build
@@ -206,11 +206,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
+      # self-hosted: npm 캐시는 PC에 남아 있다. cache: npm(GitHub 캐시 서버 왕복)은 네트워크가 느리면 5분 시간 초과로 잡을 실패시켜 끈다.
       - uses: actions/setup-node@v4
         timeout-minutes: 5
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
         timeout-minutes: 8
         working-directory: .
@@ -246,11 +246,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         timeout-minutes: 5
+      # self-hosted: npm 캐시는 PC에 남아 있다. cache: npm(GitHub 캐시 서버 왕복)은 네트워크가 느리면 5분 시간 초과로 잡을 실패시켜 끈다.
       - uses: actions/setup-node@v4
         timeout-minutes: 5
         with:
           node-version: 22
-          cache: npm
       # ffmpeg(libopus 포함)는 개발 PC에 winget(Gyan.FFmpeg)으로 설치돼 있다. 찾아서 PATH에 올린다.
       - name: Put ffmpeg on PATH
         timeout-minutes: 2
