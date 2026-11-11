@@ -374,6 +374,13 @@ jobs:
             'DPkg::Lock::Timeout "60";' 'APT::Keep-Downloaded-Packages "true";' \
             | sudo tee /etc/apt/apt.conf.d/99pw-osdeps >/dev/null
           sudo rm -f /etc/apt/apt.conf.d/docker-clean
+          # 호스티드 이미지는 미러 목록(mirror+file)의 첫 순위가 azure 미러다. 그 DNS가 죽으면 이 경로(=캐시 시드)도 막히므로
+          # 공식 아카이브·kernel.org 미러를 앞에 두고 azure는 마지막으로. 순서가 고정이라 결정적이다(noble 패키지 버전은 미러 간 같다).
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            echo "기존 미러 목록:" && cat /etc/apt/apt-mirrors.txt
+            printf '%s\tpriority:%s\n' http://archive.ubuntu.com/ubuntu/ 1 http://mirrors.edge.kernel.org/ubuntu/ 2 \
+              http://azure.archive.ubuntu.com/ubuntu/ 3 | sudo tee /etc/apt/apt-mirrors.txt
+          fi
           sudo rm -f /var/cache/apt/archives/*.deb
           npx playwright install-deps chromium
           dir="$HOME/.cache/pw-osdeps"
