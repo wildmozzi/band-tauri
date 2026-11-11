@@ -1,4 +1,5 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { LATENCY_MEASURE_SECTION_ID, OPEN_LATENCY_MEASURE_EVENT } from '../native/loopbackOffsetStore'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { AudioSettings } from './AudioSettings'
@@ -22,6 +23,16 @@ export function Navigation() {
     const observer = new ResizeObserver(apply)
     observer.observe(el)
     return () => observer.disconnect()
+  }, [])
+
+  // 메트로놈 패널의 "지연 측정 열기"(P2-3c): 합주실을 떠나지 않게 오디오 설정 모달을 열고 지연 측정 절로 스크롤한다
+  useEffect(() => {
+    const open = () => {
+      setShowAudioSettings(true)
+      requestAnimationFrame(() => document.getElementById(LATENCY_MEASURE_SECTION_ID)?.scrollIntoView({ block: 'start' }))
+    }
+    window.addEventListener(OPEN_LATENCY_MEASURE_EVENT, open)
+    return () => window.removeEventListener(OPEN_LATENCY_MEASURE_EVENT, open)
   }, [])
 
   const handleSignOut = async () => {

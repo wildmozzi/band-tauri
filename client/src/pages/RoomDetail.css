@@ -3311,3 +3311,13 @@
 .mixer-channel .diag-warn {
   color: var(--warning);
 }
+/* 메트로놈 출력 지연 보정 안내의 "지연 측정 열기" (P2-3c) */
+.metronome-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-strong);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
