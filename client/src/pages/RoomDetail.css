@@ -3104,3 +3104,14 @@
 .live-room .chat-input {
   min-width: 0;
 }
+
+/* 좁은 화면에서 상태 배지·헤더 버튼 글자가 한 글자씩 줄바꿈되지 않게 (P3-12c) */
+.live-meta {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.live-meta > *,
+.header-btn {
+  white-space: nowrap;
+}

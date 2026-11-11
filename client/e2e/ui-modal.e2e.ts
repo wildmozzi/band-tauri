@@ -33,7 +33,7 @@ test('합주실 정보 모달: 대화상자로 열리고 Tab이 안에서 돌며
 
 test('오디오 설정 모달(웹): 대화상자로 열리고 Esc로 닫히며 포커스가 열기 버튼으로 돌아온다 (P3-8a)', async ({ page }) => {
   await page.goto('/')
-  const opener = page.getByRole('button', { name: '🎛️' })
+  const opener = page.getByRole('button', { name: '오디오 설정' })
   await opener.click()
 
   const dialog = page.getByRole('dialog', { name: '오디오 설정' })
