@@ -89,6 +89,8 @@ pub struct RelayStats {
     pub tx_kbps: f32,
     /// 송신량이 릴레이 상한(2Mbps/2500pps)의 90%를 넘음: 릴레이가 패킷을 버리기 시작한다(PCM16 + 릴레이 피어 여럿).
     pub over_budget: bool,
+    /// 릴레이 경로 피어에게 PCM16 대신 Opus로 자동 전환해 보내는 중(P1-4c, 설정 코덱이 PCM16일 때만).
+    pub auto_opus: bool,
 }
 
 /// 검증된 릴레이 토큰(서명은 확인할 수 없다 — 구조, ssrc, 만료만 본다).
@@ -257,6 +259,11 @@ impl RelayClient {
         self.state == RelayStateKind::Bound
     }
 
+    /// 측정 송신량이 상한의 90%를 넘음(`stats()`와 달리 할당 없이 — 워커 루프가 200ms마다 읽는다).
+    pub fn over_budget(&self) -> bool {
+        self.over_budget
+    }
+
     pub fn stats(&self) -> RelayStats {
         RelayStats {
             state: self.state,
@@ -264,6 +271,7 @@ impl RelayClient {
             rtt_ms: self.rtt_ms,
             tx_kbps: self.tx_kbps,
             over_budget: self.over_budget,
+            auto_opus: false,
         }
     }
 

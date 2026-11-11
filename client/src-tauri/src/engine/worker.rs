@@ -17,12 +17,13 @@ use ringbuf::traits::{Consumer, Observer, Producer};
 use ringbuf::{HeapCons, HeapProd};
 
 use super::codec::Encoder;
-use super::config::{frame_code_from_samples, EngineConfig, INTERNAL_RATE, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
+use super::config::{frame_code_from_samples, CodecKind, EngineConfig, INTERNAL_RATE, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
 use super::device::StreamInfo;
 use super::jitter::{shift_one, JitterBuffer};
 use super::measure::EchoProbe;
 use super::metronome::{hidden_out_latency_us, BeatScheduler, MetronomeCtl, MetronomePlan, OutClock};
 use super::mixer::MixControls;
+use super::relay_codec::{pcm_relay_load, PolicyInputs, RelayCodecPolicy};
 use super::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
 use super::rt::{SourceBank, SourceShared, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
 use super::stats::AudioCounters;
@@ -34,6 +35,8 @@ use crate::net::NetShared;
 const POLL: Duration = Duration::from_micros(500);
 /// 피어 은닉 마감이 가까울 때의 폴링 주기.
 const FINE_POLL: Duration = Duration::from_micros(150);
+/// 릴레이 Opus 자동 전환 정책을 다시 보는 간격(P1-4c).
+const RELAY_CODEC_CHECK: Duration = Duration::from_millis(200);
 /// 출력 생산 단위(48kHz 프레임). 1.33ms.
 pub const OUT_CHUNK: usize = 64;
 
@@ -801,6 +804,19 @@ pub struct Worker {
     alt_encoder: Option<Encoder>,
     alt_frame: Vec<f32>,
     alt_payload: Vec<u8>,
+    /// 릴레이 대역용 Opus 인코더(P1-4c). 설정 코덱이 PCM16이고 네트워크가 있을 때 시작 시 만들어 두고,
+    /// 정책이 켜진 동안만 쓴다(전환 순간에 할당·생성 지연이 없게). 켤 때 상태를 초기화해 새 스트림으로 시작한다.
+    relay_opus: Option<Encoder>,
+    relay_payload: Vec<u8>,
+    /// 직전 캡처 프레임(전환 시 인코더 예열용).
+    relay_prev: Vec<f32>,
+    /// 다음 릴레이 프레임 전에 `relay_prev`로 인코더를 예열한다(정책이 막 켜짐).
+    relay_prime: bool,
+    relay_flags: u8,
+    relay_policy: RelayCodecPolicy,
+    /// 지금 오디오를 릴레이로 보내는 피어 수(정책 점검 때 갱신).
+    relay_peers: usize,
+    relay_check_at: Duration,
     flags: u8,
     frame_code: u8,
     ts: u32,
@@ -879,6 +895,12 @@ impl Worker {
             flags |= FLAG_STEREO;
         }
         let frame_code = frame_code_from_samples(frame).ok_or("잘못된 프레임 크기")?;
+        let relay_opus = if p.net.is_some() && p.cfg.codec == CodecKind::Pcm16 {
+            Some(Encoder::new(CodecKind::Opus, ich, p.cfg.opus_bitrate())?)
+        } else {
+            None
+        };
+        let relay_flags = FLAG_OPUS | if ich == 2 { FLAG_STEREO } else { 0 };
         // 로컬 소스는 항상 켜져 있다(모니터 꺼짐 = 버스 게인 0, 탭에는 계속 나감).
         let local_slot = &p.bank.slots[LOCAL_SOURCE];
         local_slot.set_gains((0.0, 0.0), (1.0, 1.0));
@@ -892,6 +914,14 @@ impl Worker {
             alt_encoder: None,
             alt_frame: vec![0.0; frame * ich],
             alt_payload: vec![0u8; MAX_PAYLOAD_BYTES],
+            relay_opus,
+            relay_payload: vec![0u8; MAX_PAYLOAD_BYTES],
+            relay_prev: vec![0.0; frame * ich],
+            relay_prime: false,
+            relay_flags,
+            relay_policy: RelayCodecPolicy::default(),
+            relay_peers: 0,
+            relay_check_at: Duration::ZERO,
             flags,
             frame_code,
             ts: rand::random(),
@@ -1088,13 +1118,84 @@ impl Worker {
         Some((pr.peer_id.clone(), n))
     }
 
+    /// 릴레이 Opus 자동 전환 정책 점검(200ms마다). PCM16 설정에서 릴레이 경로 PCM 부하가 상한의 90%에 닿으면
+    /// 릴레이 경로 피어에게만 Opus로 보내고, 충분히 내려간 상태가 이어지면 PCM16으로 돌아간다(relay_codec.rs).
+    fn update_relay_codec(&mut self) {
+        let (Some(enc), Some(net)) = (self.relay_opus.as_mut(), self.p.net.as_ref()) else {
+            return;
+        };
+        let now_d = self.p.epoch.elapsed();
+        if now_d < self.relay_check_at {
+            return;
+        }
+        self.relay_check_at = now_d + RELAY_CODEC_CHECK;
+        let (relay_peers, measured_over) = net.relay_audio_load();
+        // 켜진 채로 릴레이 피어가 없다가 다시 생기면 인코더가 멈춰 있던 스트림이다 → 새 스트림으로 다시 예열
+        if self.relay_policy.active() && self.relay_peers == 0 && relay_peers > 0 {
+            enc.reset();
+            self.relay_prime = true;
+        }
+        self.relay_peers = relay_peers;
+        let inputs = PolicyInputs {
+            pcm_configured: true,
+            relay_peers,
+            measured_over,
+            predicted_pcm_load: pcm_relay_load(self.frame, self.ich, relay_peers),
+        };
+        match self.relay_policy.update(Instant::now(), inputs) {
+            Some(true) => {
+                enc.reset();
+                self.relay_prime = true;
+                net.set_relay_auto_opus(true);
+                log::info!(
+                    "릴레이 대역: 릴레이 피어 {relay_peers}명에게 Opus로 전환(예상 PCM 부하 {:.0}%, 측정 초과 {measured_over})",
+                    inputs.predicted_pcm_load * 100.0
+                );
+            }
+            Some(false) => {
+                net.set_relay_auto_opus(false);
+                log::info!("릴레이 대역: PCM16으로 복귀(릴레이 피어 {relay_peers}명, 예상 PCM 부하 {:.0}%)", inputs.predicted_pcm_load * 100.0);
+            }
+            None => {}
+        }
+    }
+
+    /// 정책이 켜져 있고 릴레이 피어가 있으면 이 프레임을 Opus로도 인코드한다. 반환: 페이로드 길이.
+    fn relay_frame(&mut self, frame: &[f32]) -> Option<usize> {
+        let enc = self.relay_opus.as_mut()?;
+        let out = if self.relay_policy.active() && self.relay_peers > 0 {
+            if std::mem::take(&mut self.relay_prime) {
+                // 직전 프레임으로 예열(출력은 버림): 첫 패킷이 Opus 알고리즘 지연(2.5ms)만큼 0으로 시작하지 않고
+                // 직전 소리에서 이어진다(전환 구간 불연속 3 → 1, 은닉 0).
+                let _ = enc.encode(&self.relay_prev, &mut self.relay_payload);
+            }
+            match enc.encode(frame, &mut self.relay_payload) {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    if self.encode_errors.is_multiple_of(1000) {
+                        log::warn!("릴레이 Opus 인코드 실패({}회째): {e}", self.encode_errors + 1);
+                    }
+                    self.encode_errors += 1;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        self.relay_prev.copy_from_slice(frame);
+        out
+    }
+
     /// `frame_at`: 송신 큐 지연의 시작점(이 프레임을 꺼낸 워커 패스의 시작 시각, `pump_input`).
     fn on_capture_frame(&mut self, frame: &[f32], frame_at: Instant) {
         let alt = if self.encoder.is_some() { self.probe_frame() } else { None };
+        self.update_relay_codec();
+        let relay_n = self.relay_frame(frame);
         if let (Some(enc), Some(net)) = (self.encoder.as_mut(), self.p.net.as_ref()) {
             let alt = alt.as_ref().map(|(id, n)| (id.as_str(), &self.alt_payload[..*n]));
+            let relay_alt = relay_n.map(|n| (&self.relay_payload[..n], self.relay_flags));
             match enc.encode(frame, &mut self.payload) {
-                Ok(n) => net.send_audio_timed(frame_at, &self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt),
+                Ok(n) => net.send_audio_timed(frame_at, &self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt, relay_alt),
                 Err(e) => {
                     // 레이트 제한 로그(리뷰 L10)
                     if self.encode_errors.is_multiple_of(1000) {
