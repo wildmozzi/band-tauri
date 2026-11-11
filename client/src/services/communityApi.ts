@@ -1,3 +1,4 @@
+import { getApiUrl } from '../lib/apiUrl'
 import type { Tables, TablesInsert } from '../lib/database.types'
 import { supabase } from '../lib/supabaseClient'
 import { authHeaders } from '../lib/authHeaders'
@@ -79,7 +80,7 @@ export function toPost(row: Tables<'posts'>, likedByUser?: boolean): Post {
     category: row.category ?? 'general',
     tags: row.tags ?? [],
     // 서버가 PUBLIC_API_URL 없이 저장한 조회 경로(상대)는 API 서버 기준으로 (웹 origin 기준이면 깨진다)
-    images: (row.images ?? []).map(u => (u.startsWith('/api/storage/post-images/') ? `${getApiUrl().replace(/\/+$/, '')}${u}` : u)),
+    images: (row.images ?? []).map(u => (u.startsWith('/api/storage/post-images/') ? `${getApiUrl()}${u}` : u)),
     instrument: row.instrument ?? 'other',
     likes_count: row.likes_count ?? 0,
     comments_count: row.comments_count ?? 0,
@@ -147,14 +148,6 @@ const COMMENT_SELECT = `
 function requireClient() {
   if (!supabase) throw new Error('Supabase not configured')
   return supabase
-}
-
-function getApiUrl(): string {
-  const envUrl = import.meta.env.VITE_API_URL
-  if (!envUrl || envUrl === 'auto') {
-    return `${window.location.protocol}//${window.location.hostname}:8080`
-  }
-  return envUrl
 }
 
 /** 서버가 거절한 글 저장 (사용자에게 그대로 보여줄 문구). rejected: 저장할 수 없는 이미지와 이유 */
