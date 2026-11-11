@@ -98,11 +98,7 @@ PC B는 PC A의 서버를 써야 한다. PC B 앱의 개발 서버(Vite)가 **�
    npm run tauri:dev
    ```
 5. `band.exe` 방화벽 경고가 뜨면 개인·공용 모두 허용한다.
-6. **개발 서버 주소 넣기**: 이 칸은 `/settings/audio` 페이지에만 있고(🎛️ 버튼으로 뜨는 오디오 설정 창에는 없다) 지금은 메뉴에서 가는 링크가 없다. 앱 화면에서 마우스 오른쪽 → **검사**(또는 `Ctrl+Shift+I`)로 개발자 도구를 열고 **Console** 탭에 아래를 입력한다. 처음 붙여 넣을 때 경고가 뜨면 안내대로 `allow pasting`을 입력한 뒤 다시 붙여 넣는다.
-   ```js
-   location.assign('/settings/audio')
-   ```
-   페이지 아래쪽 **개발 서버 (개발 실행 전용)** 칸에서:
+6. **개발 서버 주소 넣기**: 상단 🎛️(오디오 설정) 버튼을 눌러 뜨는 창의 맨 아래 **개발 서버 (개발 실행 전용)** 칸에서(`/settings/audio` 페이지에도 같은 칸이 있다):
    - **개발 서버 주소** 입력란에 `<A_IP>:8080`(예: `192.168.0.10:8080`)을 넣고 **저장 후 새로고침**을 누른다.
    - 새로고침 뒤 `지금 연결: http://192.168.0.10:8080 · 시그널링 wss://localhost:5173/__band_server/http/192.168.0.10:8080`처럼 보이면 된다.
    - `localhost 또는 사설 IP(10.x, 172.16~31.x, 192.168.x)와 포트만 입력하세요.` 가 뜨면 입력값을 고친다. 도메인과 공인 IP는 받지 않는다.
@@ -165,7 +161,7 @@ PC B는 PC A의 서버를 써야 한다. PC B 앱의 개발 서버(Vite)가 **�
 
 백엔드·우선순위·QoS 정보는 진단 zip의 `logs/*.log`에도 남는다(`스레드 band-worker: MMCSS "Pro Audio" 등록`, `스레드 band-net-recv: …`).
 
-**아직 화면에 없는 값**(메트로놈 동기 3.5절, 릴레이 4절, 송신 큐, 피어별 송신 코덱): 개발자 도구(2.3절 6번처럼 마우스 오른쪽 → **검사** → **Console**)에 아래를 붙여 넣는다.
+**아직 화면에 없는 값**(메트로놈 동기 3.5절, 릴레이 4절, 송신 큐, 피어별 송신 코덱): 개발자 도구(앱 화면에서 마우스 오른쪽 → **검사**(또는 `Ctrl+Shift+I`) → **Console** 탭, 처음 붙여 넣을 때 경고가 뜨면 `allow pasting` 입력 후 다시)에 아래를 붙여 넣는다.
 
 ```js
 const s = await window.__TAURI__.core.invoke('engine_stats'); JSON.stringify({ sendQueue: s.sendQueue, relay: s.relay, metronome: s.metronome, peers: s.peers.map(p => ({ state: p.state, path: p.path, txCodec: p.txCodec, txCodecAuto: p.txCodecAuto })) }, null, 1)
@@ -288,7 +284,7 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
    netsh interface portproxy add v4tov4 listenaddress=127.0.0.1 listenport=8080 connectaddress=<A_PUB> connectport=8080
    ```
 4. PC B 브라우저에서 `http://localhost:8080/health`를 열어 응답을 확인한다.
-5. PC B 앱의 `/settings/audio`(2.3절 6번) **개발 서버** 칸에서 **기본값**을 누른다. `지금 연결: http://localhost:8080`이 되면 된다.
+5. PC B 앱의 🎛️ 오디오 설정 창 맨 아래(2.3절 6번) **개발 서버** 칸에서 **기본값**을 누른다. `지금 연결: http://localhost:8080`이 되면 된다.
 
 ⚠️ 개발 서버(운영 DB의 서비스 키를 가진 서버)가 테스트하는 동안 인터넷에 열린다. 모든 요청은 로그인 토큰으로 인증되지만, **테스트가 끝나면 바로 포트 포워드 규칙을 지운다**.
 
@@ -380,7 +376,7 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
 | 연주 참여 / 관람 전환 | 합주실 왼쪽 **🎤 연주 참여하기** / **👀 관람자로 전환** |
 | 에코 측정 | 왼쪽 연주자 목록, 상대 행의 **📏** |
 | 메트로놈 | 왼쪽 연주자 패널 아래 **메트로놈** |
-| 개발 서버 주소(PC B) | 개발자 도구 Console `location.assign('/settings/audio')` → 아래쪽 **개발 서버 (개발 실행 전용)**(2.3절) |
+| 개발 서버 주소(PC B) | 상단 🎛️ 오디오 설정 창 맨 아래 **개발 서버 (개발 실행 전용)**(또는 `/settings/audio`, 2.3절) |
 | 진단 줄(백엔드·우선순위·QoS·처리 지연·CPU) | 오른쪽 **🎚️ 개인 믹서**의 **나 (모니터)** 채널. 상대 채널에는 RTT·지터·버퍼·손실·경로 |
 | 진단 내보내기 | 개인 믹서 제목 줄 **🩺 진단 내보내기**, 🎛️ 아래쪽 |
 | 녹음 | 개인 믹서 아래 **⏺️ 멀티트랙 녹음** |
@@ -394,7 +390,7 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
 
 | 증상 | 확인 순서 |
 |---|---|
-| 로그인은 되는데 방에 들어가면 계속 연결 중이거나 채팅·연주자 목록이 안 뜸 | ① PC A 터미널에 서버가 떠 있는가 ② `/settings/audio`의 **개발 서버** 칸 `지금 연결:` 주소가 맞는가(PC A = `http://localhost:8080`, PC B = `http://<A_IP>:8080`, 2부 PC B = `http://localhost:8080` + 포트 프록시) ③ PC B 브라우저에서 `http://<A_IP>:8080/health` 응답 ④ PC A `node.exe` 방화벽 허용 ⑤ 실행한 창에 예전 `$env:VITE_SIGNALING_URL`/`$env:VITE_API_URL`이 남아 있지 않은가(새 창에서 다시 실행) |
+| 로그인은 되는데 방에 들어가면 계속 연결 중이거나 채팅·연주자 목록이 안 뜸 | ① PC A 터미널에 서버가 떠 있는가 ② 🎛️ 오디오 설정 창의 **개발 서버** 칸 `지금 연결:` 주소가 맞는가(PC A = `http://localhost:8080`, PC B = `http://<A_IP>:8080`, 2부 PC B = `http://localhost:8080` + 포트 프록시) ③ PC B 브라우저에서 `http://<A_IP>:8080/health` 응답 ④ PC A `node.exe` 방화벽 허용 ⑤ 실행한 창에 예전 `$env:VITE_SIGNALING_URL`/`$env:VITE_API_URL`이 남아 있지 않은가(새 창에서 다시 실행) |
 | **개발 서버** 칸이 페이지에 없음 | `VITE_SIGNALING_URL`·`VITE_API_URL`을 둘 다 직접 지정했거나(새 창에서 다시 실행) 개발 실행이 아니다(설치본·`vite build`). |
 | `개발 서버 프록시: http://… 연결 실패 (…)` | 대상 서버에 닿지 않는다. 대상 주소·포트, PC A 서버와 방화벽을 확인한다 |
 | PC B에서 `/health`가 안 열림 | ① A_IP가 맞는가(PC A `ipconfig`) ② PC A 방화벽 ③ 2부라면 `netsh interface portproxy show all`로 규칙 확인, 공유기 포트 포워드와 A_PUB |
