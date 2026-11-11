@@ -88,6 +88,41 @@ pub fn mac_of(token: &[u8]) -> &[u8] {
     &token[token.len() - MAC_BYTES..]
 }
 
+/// Bind 키 파생 라벨 (relay-design 2.1.1)
+pub const BIND_KEY_LABEL: &[u8] = b"band-relay bind v1";
+pub const BIND_KEY_BYTES: usize = 32;
+/// RelayBind 끝에 붙는 MAC 길이 (HMAC-SHA256 앞 16바이트)
+pub const BIND_MAC_BYTES: usize = 16;
+
+/// `K_bind = HMAC-SHA256(RELAY_SECRET, "band-relay bind v1")`
+pub fn bind_root_key(secret: &[u8]) -> [u8; BIND_KEY_BYTES] {
+    let mut m = HmacSha256::new_from_slice(secret).expect("HMAC은 모든 키 길이를 받는다");
+    m.update(BIND_KEY_LABEL);
+    m.finalize().into_bytes().into()
+}
+
+/// 토큰별 Bind 키 `bind_key = HMAC-SHA256(K_bind, 토큰 전체)`. 시그널링 서버가 WS(TLS)로 토큰과 함께 내려주고,
+/// 릴레이는 비밀값으로 다시 계산한다(상태 없음). 경로상 관찰자는 토큰을 보지만 이 키는 모른다.
+pub fn bind_key(secret: &[u8], token: &[u8]) -> [u8; BIND_KEY_BYTES] {
+    bind_key_from_root(&bind_root_key(secret), token)
+}
+
+pub fn bind_key_from_root(root: &[u8; BIND_KEY_BYTES], token: &[u8]) -> [u8; BIND_KEY_BYTES] {
+    let mut m = HmacSha256::new_from_slice(root).expect("32B 키");
+    m.update(token);
+    m.finalize().into_bytes().into()
+}
+
+/// `bind_mac = HMAC-SHA256(bind_key, RelayBind의 MAC 앞 모든 바이트)[..16]`
+pub fn bind_mac(key: &[u8; BIND_KEY_BYTES], msg: &[u8]) -> [u8; BIND_MAC_BYTES] {
+    let mut m = HmacSha256::new_from_slice(key).expect("32B 키");
+    m.update(msg);
+    let full = m.finalize().into_bytes();
+    let mut out = [0u8; BIND_MAC_BYTES];
+    out.copy_from_slice(&full[..BIND_MAC_BYTES]);
+    out
+}
+
 /// 토큰 검증: 구조 → MAC(상수 시간 비교) → 만료 순서. `now_unix`는 현재 unix 초.
 pub fn verify<'a>(secret: &[u8], token: &'a [u8], now_unix: u64) -> Result<Claims<'a>, TokenError> {
     if token.len() < MIN_TOKEN_BYTES || token.len() > MAX_TOKEN_BYTES || token[0] != TOKEN_VERSION {
@@ -198,6 +233,8 @@ mod tests {
             assert_eq!(token_len(&t), Some(t.len()), "{name}");
             assert_eq!(verify(secret, &t, c.expires_at - 1), Ok(c), "{name}: 만료 1초 전 유효");
             assert_eq!(verify(secret, &t, c.expires_at), Err(TokenError::Expired), "{name}: 만료 시각에 무효");
+            let key: String = bind_key(secret, &t).iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(key, v["bindKeyHex"].as_str().unwrap(), "{name}: bind key");
         }
     }
 

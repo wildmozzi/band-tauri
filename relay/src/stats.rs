@@ -21,10 +21,12 @@ pub enum DropReason {
     UnknownDest,
     /// 클라이언트별 대역/패킷률 상한 초과
     RateLimited,
+    /// RelayBind MAC 위조, 또는 MAC이 필요한데 없음(`RELAY_REQUIRE_BIND_MAC`, MAC으로 등록된 멤버의 하향 시도)
+    BadBindMac,
 }
 
 impl DropReason {
-    pub const ALL: [DropReason; 8] = [
+    pub const ALL: [DropReason; 9] = [
         DropReason::Malformed,
         DropReason::Unregistered,
         DropReason::BadToken,
@@ -33,6 +35,7 @@ impl DropReason {
         DropReason::SsrcMismatch,
         DropReason::UnknownDest,
         DropReason::RateLimited,
+        DropReason::BadBindMac,
     ];
 
     pub fn label(self) -> &'static str {
@@ -45,6 +48,7 @@ impl DropReason {
             DropReason::SsrcMismatch => "ssrc_mismatch",
             DropReason::UnknownDest => "unknown_dest",
             DropReason::RateLimited => "rate_limited",
+            DropReason::BadBindMac => "bad_bind_mac",
         }
     }
 }
@@ -64,11 +68,13 @@ pub struct Stats {
     pub bind_keepalive: AtomicU64,
     /// 새 주소에 보낸 CookieRequired 응답
     pub cookie_sent: AtomicU64,
+    /// MAC 없이 받은 신규/갱신 RelayBind (구버전 클라이언트 — 전환 기간 관측용, relay-design 2.1.1)
+    pub bind_legacy: AtomicU64,
     pub send_errors: AtomicU64,
     pub recv_errors: AtomicU64,
     pub registrations: AtomicU64,
     pub rooms: AtomicU64,
-    drops: [AtomicU64; 8],
+    drops: [AtomicU64; 9],
     latency_buckets: [AtomicU64; LATENCY_BUCKETS_US.len() + 1],
     latency_sum_ns: AtomicU64,
     latency_count: AtomicU64,
@@ -121,7 +127,7 @@ impl Stats {
         let avg_us = if n > 0 { self.latency_sum_ns.load(Relaxed) as f64 / n as f64 / 1000.0 } else { 0.0 };
         let dropped: u64 = DropReason::ALL.iter().map(|&r| self.drops(r)).sum();
         format!(
-            "regs={} rooms={} rx={} fwd={} drop={} bind_ok={} bind_rej={} keepalive={} cookie={} lat_avg={:.1}us lat_p99<={}us lat_max={}us",
+            "regs={} rooms={} rx={} fwd={} drop={} bind_ok={} bind_rej={} keepalive={} cookie={} legacy={} lat_avg={:.1}us lat_p99<={}us lat_max={}us",
             self.registrations.load(Relaxed),
             self.rooms.load(Relaxed),
             self.rx_packets.load(Relaxed),
@@ -131,6 +137,7 @@ impl Stats {
             self.bind_rejected.load(Relaxed),
             self.bind_keepalive.load(Relaxed),
             self.cookie_sent.load(Relaxed),
+            self.bind_legacy.load(Relaxed),
             avg_us,
             self.latency_quantile_us(0.99).unwrap_or(0),
             self.latency_max_ns.load(Relaxed) / 1000,
@@ -151,6 +158,7 @@ impl Stats {
         counter("relay_bind_rejected_total", "valid token but room/server full or ssrc conflict", "counter", self.bind_rejected.load(Relaxed));
         counter("relay_bind_keepalive_total", "keepalive binds (fast path)", "counter", self.bind_keepalive.load(Relaxed));
         counter("relay_cookie_sent_total", "CookieRequired replies to new addresses", "counter", self.cookie_sent.load(Relaxed));
+        counter("relay_bind_legacy_total", "new/refresh RelayBind without MAC (old clients)", "counter", self.bind_legacy.load(Relaxed));
         counter("relay_send_errors_total", "send_to failures", "counter", self.send_errors.load(Relaxed));
         counter("relay_recv_errors_total", "recv_from failures (skipped)", "counter", self.recv_errors.load(Relaxed));
         counter("relay_registrations", "active registrations", "gauge", self.registrations.load(Relaxed));
