@@ -24,9 +24,9 @@
 
 .recording-status-badge {
   padding: 8px 16px;
-  background: rgba(141, 123, 255, 0.2);
+  background: var(--violet-500-a20);
   border: 1px solid var(--accent);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   font-size: 0.9rem;
   font-weight: 700;
   color: var(--accent);
@@ -48,7 +48,7 @@
 .recording-tips-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 28px;
 }
 
@@ -59,25 +59,25 @@
 .status-pill {
   display: inline-block;
   padding: 6px 16px;
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   font-size: 0.85rem;
   font-weight: 700;
   margin-bottom: 8px;
 }
 
 .status-pill.idle {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   color: var(--text-muted);
 }
 
 .status-pill.recording {
-  background: rgba(248, 113, 113, 0.2);
+  background: var(--red-400-a20);
   color: var(--error);
   animation: pulse 1.5s infinite;
 }
 
 .status-pill.preview {
-  background: rgba(74, 222, 128, 0.2);
+  background: var(--green-400-a20);
   color: var(--success);
 }
 
@@ -96,7 +96,7 @@
   flex: 1;
   padding: 14px;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-weight: 700;
   cursor: pointer;
   transition: all 0.2s;
@@ -115,24 +115,24 @@
 }
 
 .rec-btn.start:not(:disabled) {
-  background: linear-gradient(135deg, var(--success), #22c55e);
+  background: var(--gradient-success);
   border: none;
 }
 
 .rec-btn.stop:not(:disabled) {
-  background: linear-gradient(135deg, var(--error), #dc2626);
+  background: linear-gradient(135deg, var(--error), var(--red-600));
   border: none;
 }
 
 .rec-btn.reset {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
 }
 
 .error-text {
   padding: 12px;
-  background: rgba(248, 113, 113, 0.1);
+  background: var(--red-400-a10);
   border: 1px solid var(--error);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   color: var(--error);
   font-size: 0.9rem;
 }
@@ -145,8 +145,8 @@
   gap: 2px;
   margin-bottom: 20px;
   padding: 8px;
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 12px;
+  background: var(--black-a30);
+  border-radius: var(--radius-xl);
 }
 
 .wave-bar {
@@ -158,9 +158,9 @@
 
 .preview-card {
   padding: 20px;
-  background: rgba(141, 123, 255, 0.1);
+  background: var(--violet-500-a10);
   border: 1px solid var(--accent);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
 }
 
 .preview-card h3 {
@@ -181,7 +181,7 @@
   color: white;
   text-align: center;
   text-decoration: none;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   font-weight: 700;
   transition: all 0.2s;
   border: none;
@@ -226,7 +226,7 @@
 .take-board {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 28px;
   max-height: 800px;
   overflow-y: auto;
@@ -247,8 +247,8 @@
 
 .take-count {
   padding: 4px 12px;
-  background: rgba(141, 123, 255, 0.2);
-  border-radius: 12px;
+  background: var(--violet-500-a20);
+  border-radius: var(--radius-xl);
   font-size: 0.85rem;
   font-weight: 700;
   color: var(--accent);
@@ -261,9 +261,9 @@
 }
 
 .take-card {
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--black-a30);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   padding: 16px;
   margin-bottom: 16px;
 }
@@ -298,7 +298,7 @@
   color: var(--accent);
   text-align: center;
   text-decoration: none;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   font-weight: 600;
   font-size: 0.85rem;
   transition: all 0.2s;

@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { SERVICE_NAME } from '../lib/brand'
 import { safeRedirectPath } from '../lib/redirect'
+import { Field } from '../components/ui/Field'
 
 interface SignUpData {
   email: string
@@ -136,8 +137,7 @@ export function Auth() {
           <form onSubmit={handleSubmit} className="auth-form">
             {authMode === 'signup' && (
               <>
-                <div className="form-group">
-                  <label htmlFor="name">이름 *</label>
+                <Field id="name" label="이름 *">
                   <input
                     id="name"
                     type="text"
@@ -147,10 +147,9 @@ export function Auth() {
                     required
                     disabled={!isSupabaseReady}
                   />
-                </div>
+                </Field>
 
-                <div className="form-group">
-                  <label htmlFor="nickname">닉네임 *</label>
+                <Field id="nickname" label="닉네임 *">
                   <input
                     id="nickname"
                     type="text"
@@ -160,12 +159,11 @@ export function Auth() {
                     required
                     disabled={!isSupabaseReady}
                   />
-                </div>
+                </Field>
               </>
             )}
 
-            <div className="form-group">
-              <label htmlFor="email">이메일 *</label>
+            <Field id="email" label="이메일 *">
               <input
                 id="email"
                 type="email"
@@ -175,12 +173,11 @@ export function Auth() {
                 required
                 disabled={!isSupabaseReady}
               />
-            </div>
+            </Field>
 
             {authMode === 'signup' && (
               <>
-                <div className="form-group">
-                  <label htmlFor="birthDate">생년월일 *</label>
+                <Field id="birthDate" label="생년월일 *">
                   <input
                     id="birthDate"
                     type="date"
@@ -190,10 +187,9 @@ export function Auth() {
                     disabled={!isSupabaseReady}
                     max={new Date().toISOString().split('T')[0]}
                   />
-                </div>
+                </Field>
 
-                <div className="form-group">
-                  <label htmlFor="gender">성별</label>
+                <Field id="gender" label="성별">
                   <select
                     id="gender"
                     value={gender}
@@ -205,10 +201,9 @@ export function Auth() {
                     <option value="female">여성</option>
                     <option value="other">기타</option>
                   </select>
-                </div>
+                </Field>
 
-                <div className="form-group">
-                  <label htmlFor="phone">전화번호</label>
+                <Field id="phone" label="전화번호">
                   <input
                     id="phone"
                     type="tel"
@@ -217,12 +212,11 @@ export function Auth() {
                     onChange={(e) => setPhone(e.target.value)}
                     disabled={!isSupabaseReady}
                   />
-                </div>
+                </Field>
               </>
             )}
 
-            <div className="form-group">
-              <label htmlFor="password">비밀번호 *</label>
+            <Field id="password" label="비밀번호 *">
               <input
                 id="password"
                 type="password"
@@ -233,11 +227,10 @@ export function Auth() {
                 required
                 disabled={!isSupabaseReady}
               />
-            </div>
+            </Field>
 
             {authMode === 'signup' && (
-              <div className="form-group">
-                <label htmlFor="passwordConfirm">비밀번호 확인 *</label>
+              <Field id="passwordConfirm" label="비밀번호 확인 *">
                 <input
                   id="passwordConfirm"
                   type="password"
@@ -248,7 +241,7 @@ export function Auth() {
                   required
                   disabled={!isSupabaseReady}
                 />
-              </div>
+              </Field>
             )}
 
             {alert && <div className={`auth-alert ${alert.type}`}>{alert.message}</div>}

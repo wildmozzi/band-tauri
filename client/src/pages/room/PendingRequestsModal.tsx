@@ -2,6 +2,7 @@ import type { PerformRequest } from '../../contexts/RoomContext'
 import { REJECT_REASON_PRESETS } from '../../contexts/room/performRequestState'
 import { INSTRUMENT_INFO, instrumentInfo } from './roomDetailModel'
 import type { RejectPicker } from './useRejectPicker'
+import { Modal } from '../../components/ui/Modal'
 
 /** 방장: 새 연주 참여 요청 알림 토스트 */
 export function RequestNoticeToast({
@@ -36,74 +37,65 @@ export function PendingRequestsModal({
 }) {
   const { rejectingId, rejectReason, setRejectReason, startReject, cancelReject, confirmReject } = picker
   return (
-    <div className="pending-requests-modal">
-      <div className="modal-backdrop" onClick={onClose} />
-      <div className="modal-content">
-        <div className="modal-header">
-          <h2>🎫 연주 참여 요청</h2>
-          <button onClick={onClose} className="close-btn">×</button>
-        </div>
-        <div className="modal-body">
-          {requests.length === 0 ? (
-            <p className="no-requests">대기 중인 요청이 없습니다</p>
-          ) : (
-            <div className="requests-list">
-              {requests.map(request => {
-                const instInfo = instrumentInfo(request.instrument)
-                return (
-                  <div key={request.oderId} className="request-item">
-                    <div className="request-info">
-                      <span className="request-icon">{instInfo.icon}</span>
-                      <div className="request-details">
-                        <span className="request-nickname">{request.nickname}</span>
-                        <span className="request-instrument">{instInfo.name} 연주 희망</span>
-                      </div>
-                    </div>
-                    {rejectingId === request.oderId ? (
-                      <div className="reject-reason-picker">
-                        {REJECT_REASON_PRESETS.map(preset => (
-                          <button key={preset} className="reject-reason-preset" onClick={() => confirmReject(request.oderId, preset)}>
-                            {preset}
-                          </button>
-                        ))}
-                        <form
-                          className="reject-reason-custom"
-                          onSubmit={(e) => { e.preventDefault(); confirmReject(request.oderId, rejectReason) }}
-                        >
-                          <input
-                            type="text"
-                            placeholder="직접 입력 (선택)"
-                            value={rejectReason}
-                            onChange={(e) => setRejectReason(e.target.value)}
-                            maxLength={200}
-                          />
-                          <button type="submit" className="reject-btn">거절</button>
-                          <button type="button" className="cancel-request-btn" onClick={cancelReject}>취소</button>
-                        </form>
-                      </div>
-                    ) : (
-                      <div className="request-actions">
-                        <button
-                          onClick={() => onApprove(request.oderId)}
-                          className="approve-btn"
-                        >
-                          ✓ 승인
-                        </button>
-                        <button
-                          onClick={() => startReject(request.oderId)}
-                          className="reject-btn"
-                        >
-                          ✗ 거절
-                        </button>
-                      </div>
-                    )}
+    <Modal className="pending-requests-modal" title="🎫 연주 참여 요청" onClose={onClose}>
+      {requests.length === 0 ? (
+        <p className="no-requests">대기 중인 요청이 없습니다</p>
+      ) : (
+        <div className="requests-list">
+          {requests.map(request => {
+            const instInfo = instrumentInfo(request.instrument)
+            return (
+              <div key={request.oderId} className="request-item">
+                <div className="request-info">
+                  <span className="request-icon">{instInfo.icon}</span>
+                  <div className="request-details">
+                    <span className="request-nickname">{request.nickname}</span>
+                    <span className="request-instrument">{instInfo.name} 연주 희망</span>
                   </div>
-                )
-              })}
-            </div>
-          )}
+                </div>
+                {rejectingId === request.oderId ? (
+                  <div className="reject-reason-picker">
+                    {REJECT_REASON_PRESETS.map(preset => (
+                      <button key={preset} className="reject-reason-preset" onClick={() => confirmReject(request.oderId, preset)}>
+                        {preset}
+                      </button>
+                    ))}
+                    <form
+                      className="reject-reason-custom"
+                      onSubmit={(e) => { e.preventDefault(); confirmReject(request.oderId, rejectReason) }}
+                    >
+                      <input
+                        type="text"
+                        placeholder="직접 입력 (선택)"
+                        value={rejectReason}
+                        onChange={(e) => setRejectReason(e.target.value)}
+                        maxLength={200}
+                      />
+                      <button type="submit" className="reject-btn">거절</button>
+                      <button type="button" className="cancel-request-btn" onClick={cancelReject}>취소</button>
+                    </form>
+                  </div>
+                ) : (
+                  <div className="request-actions">
+                    <button
+                      onClick={() => onApprove(request.oderId)}
+                      className="approve-btn"
+                    >
+                      ✓ 승인
+                    </button>
+                    <button
+                      onClick={() => startReject(request.oderId)}
+                      className="reject-btn"
+                    >
+                      ✗ 거절
+                    </button>
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
-      </div>
-    </div>
+      )}
+    </Modal>
   )
 }

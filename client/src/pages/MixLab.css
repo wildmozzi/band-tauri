@@ -53,7 +53,7 @@
   padding: 20px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   cursor: pointer;
   transition: all 0.2s;
   text-align: left;
@@ -66,7 +66,7 @@
 
 .preset-btn.active {
   border-color: var(--accent);
-  background: rgba(141, 123, 255, 0.1);
+  background: var(--violet-500-a10);
 }
 
 .preset-btn strong {
@@ -90,7 +90,7 @@
 .mix-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 24px;
 }
 
@@ -106,7 +106,7 @@
 .mix-dot {
   width: 16px;
   height: 16px;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   flex-shrink: 0;
 }
 
@@ -157,7 +157,7 @@
   flex: 1;
   height: 6px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   outline: none;
   -webkit-appearance: none;
 }
@@ -167,7 +167,7 @@
   appearance: none;
   width: 18px;
   height: 18px;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   background: var(--accent);
   cursor: pointer;
   transition: all 0.2s;
@@ -181,7 +181,7 @@
 .slider-display input[type='range']::-moz-range-thumb {
   width: 18px;
   height: 18px;
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   background: var(--accent);
   cursor: pointer;
   border: none;

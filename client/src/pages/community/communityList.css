@@ -12,7 +12,7 @@
   content: '';
   position: absolute;
   inset: 0;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
 }
 
 .community-post-link:focus-visible {

@@ -35,7 +35,7 @@
 .community-form-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 28px;
 }
 
@@ -47,9 +47,9 @@
 .community-form-card textarea {
   width: 100%;
   padding: 14px 16px;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--black-a30);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   color: white;
   font-size: 1rem;
   font-family: inherit;
@@ -66,9 +66,9 @@
 .login-required {
   text-align: center;
   padding: 32px;
-  background: rgba(141, 123, 255, 0.1);
+  background: var(--violet-500-a10);
   border: 1px dashed var(--accent);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   color: var(--text-muted);
 }
 
@@ -81,7 +81,7 @@
 .post-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 24px;
   transition: all 0.2s;
 }
@@ -115,16 +115,16 @@
 
 .post-tag {
   padding: 4px 12px;
-  background: rgba(141, 123, 255, 0.2);
+  background: var(--violet-500-a20);
   border: 1px solid var(--accent);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   font-size: 0.75rem;
   font-weight: 700;
   color: var(--accent);
 }
 
 .post-message {
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--white-a90);
   line-height: 1.6;
   margin-bottom: 12px;
 }
@@ -144,7 +144,7 @@
 .upcoming-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 24px;
 }
 
@@ -162,9 +162,9 @@
 
 .tag-pill {
   padding: 8px 16px;
-  background: rgba(141, 123, 255, 0.2);
+  background: var(--violet-500-a20);
   border: 1px solid var(--accent);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   font-size: 0.9rem;
   font-weight: 700;
   color: var(--accent);
@@ -187,9 +187,9 @@
 
 .upcoming-item {
   padding: 16px;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--black-a30);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   display: flex;
   flex-direction: column;
   gap: 6px;

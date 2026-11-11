@@ -24,14 +24,14 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--black-a70);
   backdrop-filter: blur(4px);
 }
 
 .audio-settings-content {
   background: var(--bg-panel-strong);
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: var(--radius-2xl);
   padding: 32px;
   position: relative;
   z-index: 1;
@@ -66,16 +66,16 @@
 .settings-header h2 {
   font-size: 1.5rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--white);
 }
 
 .close-btn {
   width: 36px;
   height: 36px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-round);
+  background: var(--white-a10);
   border: none;
-  color: #fff;
+  color: var(--white);
   font-size: 1.5rem;
   cursor: pointer;
   display: flex;
@@ -85,7 +85,7 @@
 }
 
 .close-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--white-a20);
 }
 
 .settings-section {
@@ -124,19 +124,19 @@
   align-items: center;
   gap: 8px;
   padding: 16px 12px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 2px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .preset-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
 }
 
 .preset-btn.active {
-  background: rgba(141, 123, 255, 0.15);
+  background: var(--violet-500-a15);
   border-color: var(--accent);
 }
 
@@ -146,7 +146,7 @@
 
 .preset-label {
   font-size: 0.85rem;
-  color: #fff;
+  color: var(--white);
   font-weight: 500;
 }
 
@@ -154,10 +154,10 @@
 .device-select {
   width: 100%;
   padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  color: #fff;
+  border-radius: var(--radius-md);
+  color: var(--white);
   font-size: 0.95rem;
   cursor: pointer;
   appearance: none;
@@ -172,17 +172,17 @@
 }
 
 .device-select option {
-  background: #1a1d2e;
-  color: #fff;
+  background: var(--navy-750);
+  color: var(--white);
   padding: 8px;
 }
 
 .refresh-btn {
   margin-top: 12px;
   padding: 8px 16px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--text-muted);
   font-size: 0.85rem;
   cursor: pointer;
@@ -190,8 +190,8 @@
 }
 
 .refresh-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
-  color: #fff;
+  background: var(--white-a15);
+  color: var(--white);
 }
 
 /* Settings Row */
@@ -210,10 +210,10 @@
 
 .settings-row select {
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  color: #fff;
+  border-radius: var(--radius-sm);
+  color: var(--white);
   font-size: 0.9rem;
   cursor: pointer;
 }
@@ -224,8 +224,8 @@
 }
 
 .settings-row select option {
-  background: #1a1d2e;
-  color: #fff;
+  background: var(--navy-750);
+  color: var(--white);
   padding: 8px;
 }
 
@@ -250,7 +250,7 @@
 
 .settings-toggle span {
   font-size: 0.95rem;
-  color: #fff;
+  color: var(--white);
 }
 
 /* Test Section */
@@ -262,9 +262,9 @@
 
 .test-btn {
   padding: 12px 24px;
-  background: rgba(141, 123, 255, 0.2);
+  background: var(--violet-500-a20);
   border: 1px solid var(--accent);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: var(--accent);
   font-weight: 500;
   cursor: pointer;
@@ -273,12 +273,12 @@
 }
 
 .test-btn:hover {
-  background: rgba(141, 123, 255, 0.3);
+  background: var(--violet-500-a30);
 }
 
 .test-btn.testing {
   background: var(--accent);
-  color: #fff;
+  color: var(--white);
 }
 
 .level-meter {
@@ -291,15 +291,15 @@
 .level-bar {
   flex: 1;
   height: 12px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
+  background: var(--white-a10);
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
 .level-fill {
   height: 100%;
   background: linear-gradient(90deg, var(--success), var(--warning), var(--error));
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   transition: width 0.1s ease;
 }
 
@@ -346,7 +346,7 @@
 .permission-request h3,
 .permission-denied h3 {
   font-size: 1.25rem;
-  color: #fff;
+  color: var(--white);
   margin-bottom: 12px;
 }
 
@@ -360,8 +360,8 @@
   font-size: 0.85rem;
   color: var(--warning);
   padding: 12px;
-  background: rgba(250, 204, 21, 0.1);
-  border-radius: 8px;
+  background: var(--yellow-400-a10);
+  border-radius: var(--radius-md);
 }
 
 /* Audio Settings Page */
@@ -385,10 +385,10 @@
 
 .settings-btn {
   padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  color: #fff;
+  border-radius: var(--radius-md);
+  color: var(--white);
   font-size: 0.9rem;
   cursor: pointer;
   transition: all 0.2s;
@@ -398,7 +398,7 @@
 }
 
 .settings-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--white-a15);
   border-color: var(--accent);
 }
 
@@ -408,8 +408,8 @@
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
+  background: var(--white-a05);
+  border-radius: var(--radius-md);
   margin-bottom: 16px;
 }
 
@@ -421,7 +421,7 @@
 .device-name {
   flex: 1;
   font-size: 0.9rem;
-  color: #fff;
+  color: var(--white);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -429,9 +429,9 @@
 
 .change-device-btn {
   padding: 6px 12px;
-  background: rgba(141, 123, 255, 0.2);
+  background: var(--violet-500-a20);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   color: var(--accent);
   font-size: 0.8rem;
   cursor: pointer;
@@ -439,14 +439,14 @@
 }
 
 .change-device-btn:hover {
-  background: rgba(141, 123, 255, 0.3);
+  background: var(--violet-500-a30);
 }
 
 /* Actual Settings Section */
 .actual-settings-section {
-  background: rgba(141, 123, 255, 0.08);
-  border: 1px solid rgba(141, 123, 255, 0.2);
-  border-radius: 12px;
+  background: var(--violet-500-a08);
+  border: 1px solid var(--violet-500-a20);
+  border-radius: var(--radius-xl);
   padding: 20px;
 }
 
@@ -461,14 +461,14 @@
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 8px;
+  background: var(--white-a05);
+  border-radius: var(--radius-md);
   transition: all 0.2s;
 }
 
 .setting-comparison.mismatch {
-  background: rgba(250, 204, 21, 0.1);
-  border: 1px solid rgba(250, 204, 21, 0.3);
+  background: var(--yellow-400-a10);
+  border: 1px solid var(--yellow-400-a30);
 }
 
 .setting-label {
@@ -486,16 +486,16 @@
 .setting-value {
   font-size: 0.9rem;
   padding: 4px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 
 .setting-value.requested {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   color: var(--text-muted);
 }
 
 .setting-value.actual {
-  background: rgba(141, 123, 255, 0.2);
+  background: var(--violet-500-a20);
   color: var(--accent);
   font-weight: 500;
 }
@@ -514,9 +514,9 @@
 .actual-stream-info {
   margin-top: 16px;
   padding: 16px;
-  background: rgba(141, 123, 255, 0.08);
-  border: 1px solid rgba(141, 123, 255, 0.2);
-  border-radius: 10px;
+  background: var(--violet-500-a08);
+  border: 1px solid var(--violet-500-a20);
+  border-radius: var(--radius-lg);
 }
 
 .actual-stream-info h4 {
@@ -579,8 +579,8 @@
 
 .tag-item {
   padding: 6px 12px;
-  background: rgba(141, 123, 255, 0.15);
-  border-radius: 20px;
+  background: var(--violet-500-a15);
+  border-radius: var(--radius-pill);
   font-size: 0.85rem;
   color: var(--accent);
 }
@@ -607,19 +607,19 @@
   align-items: center;
   gap: 12px;
   padding: 14px 16px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--white-a05);
   border: 2px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .driver-option:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--white-a08);
 }
 
 .driver-option:has(input:checked) {
-  background: rgba(141, 123, 255, 0.15);
+  background: var(--violet-500-a15);
   border-color: var(--accent);
 }
 
@@ -639,7 +639,7 @@
 .driver-label {
   font-size: 0.95rem;
   font-weight: 500;
-  color: #fff;
+  color: var(--white);
 }
 
 .driver-desc {
@@ -674,7 +674,7 @@
 
 .stat-value {
   font-size: 0.95rem;
-  color: #fff;
+  color: var(--white);
   font-weight: 500;
 }
 
@@ -689,19 +689,19 @@
 /* Level Meter in Stats */
 .stat-item .level-meter {
   height: 8px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
+  background: var(--white-a10);
+  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
 .stat-item .level-bar {
   height: 100%;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   transition: width 0.1s ease;
 }
 
 .stat-item .level-bar.input {
-  background: linear-gradient(90deg, #10b981, #22c55e);
+  background: linear-gradient(90deg, #10b981, var(--green-500));
 }
 
 .stat-item .level-bar.output {
@@ -745,7 +745,7 @@
 
 .native-only-notice h3 {
   font-size: 1.25rem;
-  color: #fff;
+  color: var(--white);
   margin-bottom: 12px;
 }
 
@@ -780,9 +780,9 @@
 .loading-spinner {
   width: 40px;
   height: 40px;
-  border: 3px solid rgba(141, 123, 255, 0.2);
+  border: 3px solid var(--violet-500-a20);
   border-top-color: var(--accent);
-  border-radius: 50%;
+  border-radius: var(--radius-round);
   animation: spin 1s linear infinite;
   margin: 0 auto 16px;
 }
@@ -838,9 +838,9 @@
 /* Toggle Button */
 .toggle-btn {
   padding: 8px 20px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--white-a10);
   border: 1px solid var(--border);
-  border-radius: 20px;
+  border-radius: var(--radius-pill);
   color: var(--text-muted);
   font-size: 0.9rem;
   cursor: pointer;
@@ -849,13 +849,13 @@
 }
 
 .toggle-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--white-a15);
 }
 
 .toggle-btn.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--white);
 }
 
 /* Setting Hint */
@@ -916,7 +916,7 @@
 .settings-notice {
   margin-bottom: 12px;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: rgba(96, 165, 250, 0.12);
   color: #93c5fd;
   font-size: 0.85rem;
@@ -928,7 +928,7 @@
 
 .setting-hint.error,
 .settings-issues li {
-  color: #f87171;
+  color: var(--red-400);
 }
 
 .settings-issues {
@@ -938,7 +938,7 @@
 }
 
 .stat-item .level-bar.clip {
-  background: #f87171;
+  background: var(--red-400);
 }
 
 .settings-row select + select {
