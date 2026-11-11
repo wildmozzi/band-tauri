@@ -61,6 +61,7 @@
 | P1-12b | 2대 테스트 마찰 제거(#55 가이드의 우회 절차 없애기): auto 시그널링 ws/wss 불일치, 개발 빌드에서 LAN 사설 IP 서버 허용(dev CSP), threadPriority·qos·CPU 진단 UI 표시 → 이후 TEST-SESSION.md 간소화 | e2e | 완료(PR #56, 2026-11-11; **[사람]** 실장비 2대 확인; 8080 외 포트는 server .env PORT/BAND_DEV_PROXY_PORTS로 허용) |
 | P1-12c | TEST-SESSION.md 간소화 — #56으로 필요 없어진 우회(ws:// 지정, netsh portproxy, devtools engine_stats)를 개발 서버 주소 설정·진단 줄 절차로 교체(바꿀 절 목록은 PR #56 본문) | 문서 | 완료(PR #59, 2026-11-11) |
 | P1-12d | 개발 서버 설정 페이지(/settings/audio) 진입 링크(개발 실행에서만) → 가이드의 devtools 단계 제거 | e2e | 완료(PR #60, 2026-11-11 — TEST-SESSION.md devtools 단계 제거 반영) |
+| P1-13 | 에코(왕복) 지연 측정 견고화 — spread 단일 이상치 제외(중앙값·MAD), 표본·제외 수 노출, Unstable 기준 문서화(실장비 테스트 대비, #71 후속) | 결정적 테스트 | 진행중(작업자 p1-echo) |
 | P2-4 | 합주 녹음: 로컬 멀티트랙(내 입력 + 피어별) WAV/FLAC 저장 | 앱에서 녹음/내보내기 | 완료(PR #47 엔진·#49 UI, 2026-11-11; **[사람]** 실장비 1시간 녹음 droppedFrames 0·DAW 정렬·RF64 열기·클릭 미포함 청취; 후속 P2-4a) |
 | P2-4a | 녹음 후속: FLAC 저장, 은닉(PLC) 구간 마커 사이드카 | 테스트 | 완료(PR #62, 2026-11-11 — FLAC·markers.json; 후속: 마커 위치 대조 측정, peerId 가명화, #47 L3 EXTENSIBLE 헤더) |
 | P2-4b | **[버그]** 녹음 시작·정지 순간 xrun(128/2.5ms에서 녹음 켬 창마다 1회, PR #64 작업 중 관찰) 제거 | xrun 0 테스트 | 완료(PR #67, 2026-11-11 — 녹음 경계 xrun 없음 확인, 링 prefault; **[사람]** 실장비 청취) |
