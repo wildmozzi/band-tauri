@@ -272,6 +272,14 @@ impl Engine {
         self.net.as_ref().and_then(|n| n.relay_addr_for_host(host))
     }
 
+    /// 측정 도구 전용(P1-4f M1, `tests/cpu_profile.rs`): PCM16 설정에서 모든 피어를 손실 피드백 전환 상태로 강제해
+    /// 피어마다 전용 Opus 인코더가 돌게 한다(최악 조건 CPU). 앱은 쓰지 않는다.
+    #[doc(hidden)]
+    pub fn force_auto_opus(&self, on: bool) -> Result<(), String> {
+        self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.shared().set_force_auto_opus(on);
+        Ok(())
+    }
+
     pub fn remove_peer(&self, peer_id: &str) -> Result<(), String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
         net.remove_peer(peer_id);

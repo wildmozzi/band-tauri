@@ -118,6 +118,11 @@ pub struct NetShared {
     relay_tx_packets: AtomicU64,
     /// 워커가 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중(P1-4c, `RelayStats.autoOpus`).
     relay_auto_opus: AtomicBool,
+    /// 릴레이 부하 전환 중인데 자동 전환 페이로드 없이 릴레이 경로로 보낸 피어가 있었다(새 피어, 직접→릴레이 전환).
+    /// 워커가 200ms 점검을 기다리지 않고 다음 프레임에서 피어 목록을 다시 본다(P1-4f, #66 리뷰 L1).
+    auto_refresh: AtomicBool,
+    /// 측정 도구 전용: 모든 피어에게 손실 피드백 전환이 켜진 것처럼 피어별 Opus로 보낸다(P1-4f M1, `cpu_profile`).
+    force_auto_opus: AtomicBool,
     /// 송신 큐 지연(프레임 생성 → send_to 완료, P1-3). 워커가 기록, 제어 스레드가 창을 돌린다.
     send_latency: txlat::SendLatency,
     /// DSCP 마킹 상태(제어 스레드가 바뀔 때 갱신).
@@ -199,6 +204,8 @@ impl Net {
             relay_tx_bytes: AtomicU64::new(0),
             relay_tx_packets: AtomicU64::new(0),
             relay_auto_opus: AtomicBool::new(false),
+            auto_refresh: AtomicBool::new(false),
+            force_auto_opus: AtomicBool::new(false),
             send_latency: txlat::SendLatency::new(),
             qos_stats: Mutex::new(qos::QosStats::default()),
             recv_prio: Default::default(),
@@ -521,7 +528,14 @@ impl NetShared {
         // 자동 전환 페이로드가 상한을 넘으면(있을 수 없지만) 그 피어에게는 설정 코덱으로 보낸다
         let (payload, flags, reason) = match auto.and_then(|f| f(p, kind)).filter(|a| a.payload.len() <= MAX_PAYLOAD_BYTES) {
             Some(a) => (a.payload, a.flags, Some(a.reason)),
-            None => (payload, flags, None),
+            None => {
+                // 릴레이 부하 전환 중인 릴레이 경로 피어인데 워커가 아직 이 피어용 Opus를 만들지 않았다(L1).
+                // `auto`가 없는 송신(에코 측정 클릭 스트림 대상, 에코 반사)은 원래 설정 코덱이라 해당하지 않는다.
+                if auto.is_some() && kind == PathKind::Relay && self.relay_auto_opus.load(Ordering::Relaxed) {
+                    self.auto_refresh.store(true, Ordering::Relaxed);
+                }
+                (payload, flags, None)
+            }
         };
         let h = Header {
             ptype: PacketType::Audio,
@@ -563,6 +577,22 @@ impl NetShared {
     /// 워커의 Opus 자동 전환 상태(`RelayStats.autoOpus`).
     pub fn set_relay_auto_opus(&self, on: bool) {
         self.relay_auto_opus.store(on, Ordering::Relaxed);
+    }
+
+    /// 워커: 자동 전환 대상 목록을 바로 다시 봐야 하는지(읽으면 내린다).
+    pub fn take_auto_refresh(&self) -> bool {
+        self.auto_refresh.load(Ordering::Relaxed) && self.auto_refresh.swap(false, Ordering::Relaxed)
+    }
+
+    /// 측정 도구 전용(P1-4f M1): 모든 피어를 손실 피드백 전환 상태로 강제한다(PCM16 설정에서만 의미가 있다).
+    #[doc(hidden)]
+    pub fn set_force_auto_opus(&self, on: bool) {
+        self.force_auto_opus.store(on, Ordering::Relaxed);
+    }
+
+    #[doc(hidden)]
+    pub fn force_auto_opus(&self) -> bool {
+        self.force_auto_opus.load(Ordering::Relaxed)
     }
 
     /// 오디오 페이로드를 연결된 피어마다 그 피어의 송신 키로 암호화해 보낸다(seq는 피어별).

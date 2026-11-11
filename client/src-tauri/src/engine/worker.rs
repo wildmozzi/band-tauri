@@ -24,7 +24,7 @@ use super::measure::EchoProbe;
 use super::metronome::{choose_hidden_out, hidden_out_latency_us, measured_hidden_out_us, BeatScheduler, MetronomeCtl, MetronomePlan, OutClock};
 use super::mixer::MixControls;
 use super::record::{MarkEvent, MarkKind, MarkSink};
-use super::relay_codec::{loss_opus_perc, pcm_relay_load, CodecReason, LossCodecPolicy, PolicyInputs, RelayCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
+use super::relay_codec::{auto_opus_perc, auto_reason, pcm_relay_load, LossCodecPolicy, PolicyInputs, RelayCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
 use super::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
 use super::rt::{SourceBank, SourceShared, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
 use super::stats::{AudioCounters, PathKind};
@@ -852,11 +852,15 @@ pub struct Worker {
 /// 피어 하나의 Opus 자동 전환 송신 상태(PCM16 설정, P1-4c·P1-4e). 키는 `PeerFeed`와 같은 (피어 주소, ssrc).
 struct AutoTx {
     key: (usize, u32),
+    /// 피어 id(에코 측정 클릭 스트림 대상인지 가릴 때, L2).
+    id: String,
     enc: Encoder,
     payload: Vec<u8>,
     /// 이번 프레임의 Opus 페이로드 길이(대상이 아니거나 인코드 실패면 None → 설정 코덱으로 보낸다).
     len: Option<usize>,
     loss: LossCodecPolicy,
+    /// 손실 피드백 전환이 켜짐(`loss.active()`, 또는 측정 도구의 강제 `force_auto_opus`).
+    loss_on: bool,
     /// 직전 점검 때 오디오를 릴레이로 보내는 피어였다(릴레이 부하 정책의 대상).
     on_relay: bool,
     /// 직전 프레임에서 이 인코더로 인코드했다(아니었다가 대상이 되면 초기화·예열한다).
@@ -867,14 +871,16 @@ struct AutoTx {
 }
 
 impl AutoTx {
-    fn new(key: (usize, u32), mut enc: Encoder) -> Self {
+    fn new(key: (usize, u32), id: String, mut enc: Encoder) -> Self {
         let _ = enc.set_loss_perc(DEFAULT_OPUS_LOSS_PERC);
         Self {
             key,
+            id,
             enc,
             payload: vec![0u8; MAX_PAYLOAD_BYTES],
             len: None,
             loss: LossCodecPolicy::default(),
+            loss_on: false,
             on_relay: false,
             encoding: false,
             perc: DEFAULT_OPUS_LOSS_PERC,
@@ -1164,11 +1170,14 @@ impl Worker {
             return;
         };
         let now_d = self.p.epoch.elapsed();
-        if now_d < self.auto_check_at {
+        // 직전 프레임에 릴레이 부하 전환 대상인데 PCM으로 나간 피어가 있으면(새 피어, 직접→릴레이) 바로 다시 본다(L1)
+        let refresh = net.take_auto_refresh();
+        if now_d < self.auto_check_at && !refresh {
             return;
         }
         self.auto_check_at = now_d + AUTO_CODEC_CHECK;
         let now = Instant::now();
+        let force = net.force_auto_opus();
         let (relay_peers, measured_over) = net.relay_audio_load();
         let inputs = PolicyInputs {
             pcm_configured: true,
@@ -1210,7 +1219,7 @@ impl Worker {
                             }
                         },
                     };
-                    auto.push(AutoTx::new(key, enc));
+                    auto.push(AutoTx::new(key, peer.id.clone(), enc));
                     auto.len() - 1
                 }
             };
@@ -1235,12 +1244,9 @@ impl Worker {
                 ),
                 None => {}
             }
+            a.loss_on = a.loss.active() || force;
             // 인코더 예상 손실: 손실 피드백이면 보고 손실에 맞추고, 릴레이 부하로만 켜졌으면 기본값(설정 Opus와 같음)
-            let perc = if a.loss.active() {
-                loss_opus_perc(loss.map(|l| l.0)).max(if a.on_relay { DEFAULT_OPUS_LOSS_PERC } else { 0 })
-            } else {
-                DEFAULT_OPUS_LOSS_PERC
-            };
+            let perc = auto_opus_perc(a.loss_on, a.on_relay, loss.map(|l| l.0));
             if perc != a.perc && a.enc.set_loss_perc(perc).is_ok() {
                 a.perc = perc;
             }
@@ -1258,11 +1264,13 @@ impl Worker {
     }
 
     /// 자동 전환 대상 피어마다 이 프레임을 그 피어 전용 Opus 인코더로 인코드한다(대상이 아니면 건너뜀).
-    fn auto_frames(&mut self, frame: &[f32]) {
+    /// `alt_peer` = 에코 측정 클릭 스트림을 받는 피어: 그동안은 설정 코덱(클릭)이 가므로 인코드하지 않고,
+    /// 측정이 끝나 다시 대상이 되면 새 스트림으로 초기화·예열한다(#66 리뷰 L2).
+    fn auto_frames(&mut self, frame: &[f32], alt_peer: Option<&str>) {
         let relay_on = self.relay_policy.active();
         for a in &mut self.auto {
             a.len = None;
-            let want = (relay_on && a.on_relay) || a.loss.active();
+            let want = auto_reason(relay_on, a.on_relay, a.loss_on).is_some() && alt_peer != Some(a.id.as_str());
             if want && !a.encoding {
                 // 새 스트림: 상태 초기화 + 직전 프레임으로 예열(출력 버림). 첫 패킷이 Opus 알고리즘 지연(2.5ms)만큼
                 // 0으로 시작하지 않고 직전 소리에서 이어진다(전환 구간 불연속 3 → 1, 은닉 0).
@@ -1292,23 +1300,20 @@ impl Worker {
     fn on_capture_frame(&mut self, frame: &[f32], frame_at: Instant) {
         let alt = if self.encoder.is_some() { self.probe_frame() } else { None };
         self.update_auto_codec();
-        self.auto_frames(frame);
+        self.auto_frames(frame, alt.as_ref().map(|(id, _)| id.as_str()));
         if let (Some(enc), Some(net)) = (self.encoder.as_mut(), self.p.net.as_ref()) {
             let alt = alt.as_ref().map(|(id, n)| (id.as_str(), &self.alt_payload[..*n]));
             let (auto, auto_flags, relay_on) = (&self.auto, self.auto_flags, self.relay_policy.active());
+            // 이유는 송신 순간의 경로로 정한다. 릴레이 부하 대상인데 아직 인코드하지 않은 피어(None)는 net이
+            // 표시해 두고 워커가 다음 프레임에서 바로 다시 본다(L1).
             let lookup = |p: &Peer, kind: PathKind| -> Option<AutoPayload<'_>> {
                 let key = (p as *const Peer as usize, p.ssrc);
                 let a = auto.iter().find(|a| a.key == key)?;
-                let reason = if relay_on && kind == PathKind::Relay {
-                    CodecReason::RelayLoad
-                } else if a.loss.active() {
-                    CodecReason::LossFeedback
-                } else {
-                    return None;
-                };
+                let reason = auto_reason(relay_on, kind == PathKind::Relay, a.loss_on)?;
                 Some(AutoPayload { payload: &a.payload[..a.len?], flags: auto_flags, reason })
             };
-            let auto_fn = (!auto.is_empty()).then_some(&lookup as _);
+            // 자동 전환이 가능하면 대상 목록이 비어 있어도 넘긴다(첫 릴레이 피어도 L1 표시를 받게)
+            let auto_fn = self.auto_enabled.then_some(&lookup as _);
             match enc.encode(frame, &mut self.payload) {
                 Ok(n) => net.send_audio_timed(frame_at, &self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt, auto_fn),
                 Err(e) => {
