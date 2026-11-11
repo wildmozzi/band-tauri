@@ -92,77 +92,77 @@ export function Community() {
   }
 
   const cardStyle = {
-    background: 'rgba(18, 22, 45, 0.8)',
-    border: '1px solid rgba(255, 255, 255, 0.1)',
-    borderRadius: '12px',
-    padding: '20px 24px',
-    marginBottom: '16px',
+    background: 'var(--panel-strong-a80)',
+    border: '1px solid var(--white-a10)',
+    borderRadius: 'var(--radius-xl)',
+    padding: 'var(--space-5) var(--space-6)',
+    marginBottom: 'var(--space-4)',
     cursor: 'pointer',
     transition: 'all 0.2s',
   }
 
   return (
-    <div style={{ maxWidth: '1400px', margin: '0 auto', padding: '24px' }}>
+    <div style={{ maxWidth: '1400px', margin: '0 auto', padding: 'var(--space-6)' }}>
       {/* 헤더 */}
-      <div style={{ marginBottom: '32px' }}>
-        <h1 style={{ fontSize: '32px', fontWeight: '700', marginBottom: '8px' }}>커뮤니티</h1>
-        <p style={{ color: 'rgba(255, 255, 255, 0.6)', fontSize: '16px' }}>세션 파트너와 아이디어 공유</p>
+      <div style={{ marginBottom: 'var(--space-8)' }}>
+        <h1 style={{ fontSize: '32px', fontWeight: '700', marginBottom: 'var(--space-2)' }}>커뮤니티</h1>
+        <p style={{ color: 'var(--white-a60)', fontSize: '16px' }}>세션 파트너와 아이디어 공유</p>
       </div>
 
       <div className="community-feed-grid">
         <div>
           {/* 인기 게시물 섹션 */}
-          <div style={{ marginBottom: '24px' }}>
-            <h2 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '12px' }}>🔥 인기 게시물</h2>
+          <div style={{ marginBottom: 'var(--space-6)' }}>
+            <h2 style={{ fontSize: '18px', fontWeight: '600', marginBottom: 'var(--space-3)' }}>🔥 인기 게시물</h2>
             {loading ? (
-              <div style={{ padding: '20px', textAlign: 'center', color: 'rgba(255, 255, 255, 0.5)' }}>
+              <div style={{ padding: 'var(--space-5)', textAlign: 'center', color: 'var(--white-a50)' }}>
                 로딩 중...
               </div>
             ) : popularPosts.length === 0 ? (
-              <div style={{ padding: '20px', textAlign: 'center', color: 'rgba(255, 255, 255, 0.5)' }}>
+              <div style={{ padding: 'var(--space-5)', textAlign: 'center', color: 'var(--white-a50)' }}>
                 아직 인기 게시물이 없습니다. (좋아요 10개 이상)
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
                 {popularPosts.map((post) => (
                   <article
                     key={post.id}
                     style={cardStyle}
                     className="community-post-card"
                     onMouseOver={(e) => {
-                      e.currentTarget.style.borderColor = 'rgba(141, 123, 255, 0.4)'
+                      e.currentTarget.style.borderColor = 'var(--violet-500-a40)'
                       e.currentTarget.style.transform = 'translateY(-2px)'
                     }}
                     onMouseOut={(e) => {
-                      e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.1)'
+                      e.currentTarget.style.borderColor = 'var(--white-a10)'
                       e.currentTarget.style.transform = 'translateY(0)'
                     }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
-                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-4)' }}>
+                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
                         <span style={{ fontSize: '20px' }}>
                           {INSTRUMENTS.find(i => i.id === post.instrument)?.icon}
                         </span>
                         <div style={{ flex: 1 }}>
                           {post.title && (
-                            <div style={{ fontSize: '16px', fontWeight: '600', marginBottom: '4px' }}>
+                            <div style={{ fontSize: '16px', fontWeight: '600', marginBottom: 'var(--space-1)' }}>
                               <PostLink postId={post.id}>{post.title}</PostLink>
                             </div>
                           )}
-                          <div style={{ fontSize: '14px', fontWeight: '400', marginBottom: '4px', color: 'rgba(255, 255, 255, 0.85)' }}>
+                          <div style={{ fontSize: '14px', fontWeight: '400', marginBottom: 'var(--space-1)', color: 'var(--white-a85)' }}>
                             <PostLink postId={post.id} hidden={!!post.title}>
                               {post.content.length > 60 ? `${post.content.slice(0, 60)}...` : post.content}
                             </PostLink>
                           </div>
-                          <div style={{ fontSize: '13px', color: 'rgba(255, 255, 255, 0.5)' }}>
-                            <span style={{ fontWeight: '600', color: 'rgba(255, 255, 255, 0.7)' }}>{post.author_name}</span>
+                          <div style={{ fontSize: '13px', color: 'var(--white-a50)' }}>
+                            <span style={{ fontWeight: '600', color: 'var(--white-a70)' }}>{post.author_name}</span>
                             {' · '}
                             {formatRelativeTime(post.created_at)}
                           </div>
                         </div>
                       </div>
                       <div
-                        style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}
+                        style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexShrink: 0 }}
                         className="community-post-actions"
                       >
                         {post.tags.length > 0 && post.tags.map((tag, idx) => (
@@ -171,13 +171,13 @@ export function Community() {
                             onClick={() => handleTagClick(tag)}
                             style={{
                               display: 'inline-block',
-                              background: selectedTag === tag ? 'rgba(141, 123, 255, 0.3)' : 'rgba(141, 123, 255, 0.15)',
-                              color: '#a89fff',
-                              padding: '4px 10px',
-                              borderRadius: '6px',
+                              background: selectedTag === tag ? 'var(--violet-500-a30)' : 'var(--violet-500-a15)',
+                              color: 'var(--violet-300)',
+                              padding: 'var(--space-1) 10px',
+                              borderRadius: 'var(--radius-sm)',
                               fontSize: '12px',
                               fontWeight: '500',
-                              border: selectedTag === tag ? '1px solid rgba(141, 123, 255, 0.6)' : '1px solid rgba(141, 123, 255, 0.3)',
+                              border: selectedTag === tag ? '1px solid var(--violet-500-a60)' : '1px solid var(--violet-500-a30)',
                               cursor: 'pointer',
                             }}
                           >
@@ -186,10 +186,10 @@ export function Community() {
                         ))}
                         <span
                           style={{
-                            padding: '4px 12px',
-                            background: post.liked_by_user ? 'rgba(255, 122, 184, 0.25)' : 'rgba(255, 122, 184, 0.15)',
-                            color: '#ff7ab8',
-                            borderRadius: '6px',
+                            padding: 'var(--space-1) var(--space-3)',
+                            background: post.liked_by_user ? 'var(--pink-400-a25)' : 'var(--pink-400-a15)',
+                            color: 'var(--pink-400)',
+                            borderRadius: 'var(--radius-sm)',
                             fontSize: '13px',
                             fontWeight: '500',
                             cursor: 'pointer',
@@ -208,16 +208,16 @@ export function Community() {
 
           {/* 세션별 게시판 섹션 */}
           <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
               <h2 style={{ fontSize: '20px', fontWeight: '600', margin: 0 }}>🎵 세션별 게시판</h2>
               <button
                 onClick={() => navigate('/community/create')}
                 style={{
-                  background: 'linear-gradient(135deg, #8d7bff, #a89fff)',
+                  background: 'linear-gradient(135deg, var(--accent), var(--violet-300))',
                   border: 'none',
-                  color: '#fff',
-                  padding: '10px 20px',
-                  borderRadius: '8px',
+                  color: 'var(--white)',
+                  padding: '10px var(--space-5)',
+                  borderRadius: 'var(--radius-md)',
                   cursor: 'pointer',
                   fontSize: '14px',
                   fontWeight: '600',
@@ -225,7 +225,7 @@ export function Community() {
                 }}
                 onMouseOver={(e) => {
                   e.currentTarget.style.transform = 'translateY(-2px)'
-                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(141, 123, 255, 0.3)'
+                  e.currentTarget.style.boxShadow = '0 4px 12px var(--violet-500-a30)'
                 }}
                 onMouseOut={(e) => {
                   e.currentTarget.style.transform = 'translateY(0)'
@@ -237,21 +237,21 @@ export function Community() {
             </div>
 
             {/* 악기 탭 */}
-            <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-5)', flexWrap: 'wrap' }}>
               {INSTRUMENTS.map((instrument) => (
                 <button
                   key={instrument.id}
                   onClick={() => setSelectedInstrument(instrument.id)}
                   style={{
                     background: selectedInstrument === instrument.id
-                      ? 'linear-gradient(135deg, #8d7bff, #a89fff)'
-                      : 'rgba(18, 22, 45, 0.8)',
+                      ? 'linear-gradient(135deg, var(--accent), var(--violet-300))'
+                      : 'var(--panel-strong-a80)',
                     border: selectedInstrument === instrument.id
-                      ? '1px solid rgba(141, 123, 255, 0.5)'
-                      : '1px solid rgba(255, 255, 255, 0.1)',
-                    color: '#fff',
-                    padding: '8px 16px',
-                    borderRadius: '8px',
+                      ? '1px solid var(--violet-500-a50)'
+                      : '1px solid var(--white-a10)',
+                    color: 'var(--white)',
+                    padding: 'var(--space-2) var(--space-4)',
+                    borderRadius: 'var(--radius-md)',
                     cursor: 'pointer',
                     fontSize: '14px',
                     fontWeight: '500',
@@ -270,29 +270,29 @@ export function Community() {
             {selectedTag && (
               <div
                 style={{
-                  background: 'rgba(141, 123, 255, 0.1)',
-                  border: '1px solid rgba(141, 123, 255, 0.3)',
-                  borderRadius: '8px',
-                  padding: '12px 16px',
-                  marginBottom: '16px',
+                  background: 'var(--violet-500-a10)',
+                  border: '1px solid var(--violet-500-a30)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: 'var(--space-3) var(--space-4)',
+                  marginBottom: 'var(--space-4)',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
                 }}
               >
                 <span style={{ fontSize: '14px' }}>
-                  <span style={{ color: 'rgba(255, 255, 255, 0.6)' }}>필터:</span>{' '}
-                  <span style={{ color: '#a89fff', fontWeight: '600' }}>#{selectedTag}</span>
+                  <span style={{ color: 'var(--white-a60)' }}>필터:</span>{' '}
+                  <span style={{ color: 'var(--violet-300)', fontWeight: '600' }}>#{selectedTag}</span>
                 </span>
                 <button
                   onClick={() => setSelectedTag(null)}
                   style={{
                     background: 'transparent',
                     border: 'none',
-                    color: 'rgba(255, 255, 255, 0.7)',
+                    color: 'var(--white-a70)',
                     cursor: 'pointer',
                     fontSize: '14px',
-                    padding: '4px 8px',
+                    padding: 'var(--space-1) var(--space-2)',
                   }}
                 >
                   ✕ 필터 해제
@@ -301,13 +301,13 @@ export function Community() {
             )}
 
             {/* 필터링된 게시글 목록 */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
               {loading ? (
-                <div style={{ padding: '40px', textAlign: 'center', color: 'rgba(255, 255, 255, 0.5)' }}>
+                <div style={{ padding: 'var(--space-10)', textAlign: 'center', color: 'var(--white-a50)' }}>
                   로딩 중...
                 </div>
               ) : posts.length === 0 ? (
-                <div style={{ padding: '40px', textAlign: 'center', color: 'rgba(255, 255, 255, 0.5)' }}>
+                <div style={{ padding: 'var(--space-10)', textAlign: 'center', color: 'var(--white-a50)' }}>
                   {selectedTag
                     ? `#${selectedTag} 태그가 포함된 게시물이 없습니다.`
                     : '아직 게시물이 없습니다. 첫 게시물을 작성해보세요!'}
@@ -319,25 +319,25 @@ export function Community() {
                     style={cardStyle}
                     className="community-post-card"
                     onMouseOver={(e) => {
-                      e.currentTarget.style.borderColor = 'rgba(141, 123, 255, 0.4)'
+                      e.currentTarget.style.borderColor = 'var(--violet-500-a40)'
                       e.currentTarget.style.transform = 'translateY(-2px)'
                     }}
                     onMouseOut={(e) => {
-                      e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.1)'
+                      e.currentTarget.style.borderColor = 'var(--white-a10)'
                       e.currentTarget.style.transform = 'translateY(0)'
                     }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 'var(--space-4)' }}>
                       <div style={{ flex: 1 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
                           <span style={{ fontSize: '18px' }}>
                             {INSTRUMENTS.find(i => i.id === post.instrument)?.icon}
                           </span>
-                          <span style={{ fontWeight: '600', fontSize: '14px', color: 'rgba(255, 255, 255, 0.7)' }}>
+                          <span style={{ fontWeight: '600', fontSize: '14px', color: 'var(--white-a70)' }}>
                             {post.author_name}
                           </span>
-                          <span style={{ fontSize: '13px', color: 'rgba(255, 255, 255, 0.4)' }}>·</span>
-                          <span style={{ fontSize: '13px', color: 'rgba(255, 255, 255, 0.4)' }}>
+                          <span style={{ fontSize: '13px', color: 'var(--white-a40)' }}>·</span>
+                          <span style={{ fontSize: '13px', color: 'var(--white-a40)' }}>
                             {formatRelativeTime(post.created_at)}
                           </span>
                         </div>
@@ -346,21 +346,21 @@ export function Community() {
                             <PostLink postId={post.id}>{post.title}</PostLink>
                           </div>
                         )}
-                        <p style={{ fontSize: '14px', margin: '0 0 8px 0', lineHeight: '1.5', color: 'rgba(255, 255, 255, 0.85)' }}>
+                        <p style={{ fontSize: '14px', margin: '0 0 var(--space-2) 0', lineHeight: '1.5', color: 'var(--white-a85)' }}>
                           <PostLink postId={post.id} hidden={!!post.title}>
                             {post.content.length > 100 ? `${post.content.slice(0, 100)}...` : post.content}
                           </PostLink>
                         </p>
                         <div
-                          style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+                          style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}
                           className="community-post-actions"
                         >
                           <span
                             style={{
-                              padding: '4px 10px',
-                              background: post.liked_by_user ? 'rgba(255, 122, 184, 0.25)' : 'rgba(255, 122, 184, 0.15)',
-                              color: '#ff7ab8',
-                              borderRadius: '6px',
+                              padding: 'var(--space-1) 10px',
+                              background: post.liked_by_user ? 'var(--pink-400-a25)' : 'var(--pink-400-a15)',
+                              color: 'var(--pink-400)',
+                              borderRadius: 'var(--radius-sm)',
                               fontSize: '12px',
                               fontWeight: '500',
                               cursor: 'pointer',
@@ -371,7 +371,7 @@ export function Community() {
                             {post.liked_by_user ? '💖' : '❤️'} {post.likes_count}
                           </span>
                           {post.comments_count > 0 && (
-                            <span style={{ fontSize: '12px', color: 'rgba(255, 255, 255, 0.5)' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--white-a50)' }}>
                               💬 {post.comments_count}
                             </span>
                           )}
@@ -388,13 +388,13 @@ export function Community() {
                               onClick={() => handleTagClick(tag)}
                               style={{
                                 display: 'inline-block',
-                                background: selectedTag === tag ? 'rgba(141, 123, 255, 0.3)' : 'rgba(141, 123, 255, 0.15)',
-                                color: '#a89fff',
-                                padding: '4px 10px',
-                                borderRadius: '6px',
+                                background: selectedTag === tag ? 'var(--violet-500-a30)' : 'var(--violet-500-a15)',
+                                color: 'var(--violet-300)',
+                                padding: 'var(--space-1) 10px',
+                                borderRadius: 'var(--radius-sm)',
                                 fontSize: '12px',
                                 fontWeight: '500',
-                                border: selectedTag === tag ? '1px solid rgba(141, 123, 255, 0.6)' : '1px solid rgba(141, 123, 255, 0.3)',
+                                border: selectedTag === tag ? '1px solid var(--violet-500-a60)' : '1px solid var(--violet-500-a30)',
                                 cursor: 'pointer',
                               }}
                             >
@@ -416,17 +416,17 @@ export function Community() {
           {/* 트렌딩 태그 */}
           <div
             style={{
-              background: 'rgba(18, 22, 45, 0.8)',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              borderRadius: '12px',
-              padding: '20px',
-              marginBottom: '16px',
+              background: 'var(--panel-strong-a80)',
+              border: '1px solid var(--white-a10)',
+              borderRadius: 'var(--radius-xl)',
+              padding: 'var(--space-5)',
+              marginBottom: 'var(--space-4)',
             }}
           >
-            <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: '12px' }}>트렌딩 태그</h3>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+            <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: 'var(--space-3)' }}>트렌딩 태그</h3>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
               {trendingTags.length === 0 ? (
-                <p style={{ color: 'rgba(255, 255, 255, 0.5)', fontSize: '14px' }}>첫 게시물을 남겨주세요.</p>
+                <p style={{ color: 'var(--white-a50)', fontSize: '14px' }}>첫 게시물을 남겨주세요.</p>
               ) : (
                 trendingTags.map(({ tag, count }) => (
                   <span
@@ -434,24 +434,24 @@ export function Community() {
                     onClick={() => handleTagClick(tag)}
                     style={{
                       display: 'inline-block',
-                      background: selectedTag === tag ? 'rgba(141, 123, 255, 0.3)' : 'rgba(141, 123, 255, 0.15)',
-                      color: '#a89fff',
-                      padding: '6px 12px',
-                      borderRadius: '6px',
+                      background: selectedTag === tag ? 'var(--violet-500-a30)' : 'var(--violet-500-a15)',
+                      color: 'var(--violet-300)',
+                      padding: '6px var(--space-3)',
+                      borderRadius: 'var(--radius-sm)',
                       fontSize: '13px',
                       fontWeight: '500',
-                      border: selectedTag === tag ? '1px solid rgba(141, 123, 255, 0.6)' : '1px solid rgba(141, 123, 255, 0.3)',
+                      border: selectedTag === tag ? '1px solid var(--violet-500-a60)' : '1px solid var(--violet-500-a30)',
                       cursor: 'pointer',
                       transition: 'all 0.2s',
                     }}
                     onMouseOver={(e) => {
                       if (selectedTag !== tag) {
-                        e.currentTarget.style.background = 'rgba(141, 123, 255, 0.25)'
+                        e.currentTarget.style.background = 'var(--violet-500-a25)'
                       }
                     }}
                     onMouseOut={(e) => {
                       if (selectedTag !== tag) {
-                        e.currentTarget.style.background = 'rgba(141, 123, 255, 0.15)'
+                        e.currentTarget.style.background = 'var(--violet-500-a15)'
                       }
                     }}
                   >

@@ -889,14 +889,14 @@
   background: rgba(99, 102, 241, 0.2);
   border: 1px solid var(--indigo-500-a40);
   border-radius: var(--radius-lg);
-  color: var(--primary);
+  color: var(--accent);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .change-instrument-btn:hover {
   background: var(--indigo-500-a30);
-  border-color: var(--primary);
+  border-color: var(--accent);
 }
 
 /* 내 악기 변경 요청 상태 */
@@ -996,12 +996,12 @@
 
 /* 악기 옵션 - 현재 선택된 악기 표시 */
 .instrument-option.current {
-  border-color: var(--primary);
+  border-color: var(--accent);
   background: var(--indigo-500-a10);
 }
 
 .inst-slots.current {
-  background: var(--primary);
+  background: var(--accent);
   color: white;
 }
 
@@ -1180,7 +1180,7 @@
 }
 
 .monitor-toggle.on {
-  background: var(--primary);
+  background: var(--accent);
   color: var(--white);
 }
 
@@ -1220,7 +1220,7 @@
   width: 12px;
   height: 12px;
   border-radius: var(--radius-round);
-  background: var(--primary);
+  background: var(--accent);
   cursor: pointer;
   transition: transform 0.2s;
 }
@@ -1233,7 +1233,7 @@
   width: 12px;
   height: 12px;
   border-radius: var(--radius-round);
-  background: var(--primary);
+  background: var(--accent);
   border: none;
   cursor: pointer;
 }
@@ -1368,13 +1368,13 @@
   padding: 20px;
   border-radius: var(--radius-lg);
   background: var(--indigo-500-a10);
-  border: 1px solid var(--primary);
+  border: 1px solid var(--accent);
 }
 
 .web-notice p {
   font-weight: 600;
   margin-bottom: 8px;
-  color: var(--primary);
+  color: var(--accent);
 }
 
 .web-notice small {
@@ -1388,7 +1388,7 @@
   font: inherit;
   display: inline-block;
   padding: 10px 20px;
-  background: var(--primary);
+  background: var(--accent);
   color: var(--white);
   text-decoration: none;
   border-radius: var(--radius-md);
@@ -1397,7 +1397,7 @@
 }
 
 .web-notice .download-link:hover {
-  background: var(--primary-dark);
+  background: var(--indigo-400);
   transform: translateY(-2px);
 }
 
@@ -1744,7 +1744,7 @@
   font-size: 1.2rem;
   font-weight: 600;
   margin-bottom: 8px;
-  color: var(--text);
+  color: var(--color-text);
 }
 
 .info-title-section .room-description {
@@ -1802,7 +1802,7 @@
 
 .info-inst-name {
   font-size: 0.85rem;
-  color: var(--text);
+  color: var(--color-text);
 }
 
 .info-inst-slots {
@@ -1843,7 +1843,7 @@
   background: var(--white-a10);
   border: none;
   border-radius: var(--radius-md);
-  color: var(--text);
+  color: var(--color-text);
   font-size: 0.9rem;
   cursor: pointer;
   transition: all 0.2s;
@@ -2151,7 +2151,7 @@
   width: 40px;
   flex-shrink: 0;
   font-size: 0.75rem;
-  color: var(--text-secondary);
+  color: var(--color-text-subtle);
 }
 
 .master-control-row input[type="range"] {
@@ -2336,7 +2336,7 @@
 
 .channel-latency .latency-text {
   font-family: 'Monaco', 'Consolas', monospace;
-  color: var(--text-secondary);
+  color: var(--color-text-subtle);
 }
 
 .channel-latency .latency-text small {
@@ -2435,7 +2435,7 @@
 }
 
 .nickname-input {
-  background: var(--bg-input);
+  background: var(--color-surface);
   border: 1px solid var(--accent);
   border-radius: var(--radius-xs);
   padding: 4px 8px;
@@ -2509,7 +2509,7 @@
 
 .chat-input {
   flex: 1;
-  background: var(--bg-input);
+  background: var(--color-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 10px 14px;

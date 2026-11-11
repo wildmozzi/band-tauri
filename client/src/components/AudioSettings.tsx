@@ -30,6 +30,7 @@ import {
 } from '../native/engineConfig'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
 import { DesktopDownloadButton } from './DesktopDownloadButton'
+import { Modal } from './ui'
 import { DiagnosticsExport } from './DiagnosticsExport'
 import './AudioSettings.css'
 
@@ -120,18 +121,28 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     void stopTest()
   }, [stopTest])
 
-  const wrap = (body: React.ReactNode) => (
-    <div className={`audio-settings ${isModal ? 'modal' : ''}`}>
-      {isModal && <div className="modal-backdrop" onClick={onClose} />}
-      <div className="audio-settings-content">
-        <div className="settings-header">
-          <h2>오디오 설정</h2>
-          {onClose && <button onClick={onClose} className="close-btn">×</button>}
-        </div>
+  const wrap = (body: React.ReactNode) =>
+    isModal && onClose ? (
+      // 모달: 공용 Modal(포커스 트랩·Esc·포커스 복귀). 클래스는 기존 오디오 설정 CSS 그대로
+      <Modal
+        className="audio-settings modal"
+        title="오디오 설정"
+        onClose={onClose}
+        classNames={{ content: 'audio-settings-content', header: 'settings-header', body: 'audio-settings-body' }}
+      >
         {body}
+      </Modal>
+    ) : (
+      <div className="audio-settings">
+        <div className="audio-settings-content">
+          <div className="settings-header">
+            <h2>오디오 설정</h2>
+            {onClose && <button onClick={onClose} className="close-btn">×</button>}
+          </div>
+          {body}
+        </div>
       </div>
-    </div>
-  )
+    )
 
   // 웹: 연주는 앱 전용
   if (!isNativeMode) {

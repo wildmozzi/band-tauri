@@ -101,6 +101,13 @@
   padding: 1rem;
 }
 
+/* 공용 Modal(.modal-overlay > .premium-modal-backdrop + .premium-modal): 오버레이 색·흐림은 래퍼가 그리고,
+   배경 클릭 영역은 래퍼 전체를 덮는 투명 backdrop이다 */
+.premium-modal-backdrop {
+  position: absolute;
+  inset: 0;
+}
+
 .premium-modal {
   background: var(--ink-950);
   border: 1px solid var(--indigo-400-a30);
@@ -141,7 +148,11 @@
   border-bottom: 1px solid var(--white-a10);
 }
 
-.premium-icon {
+/* 머리글 아이콘 — 제목(대화상자 이름)에 섞이지 않게 장식으로 그린다 */
+.premium-modal > .modal-header::before {
+  content: '✨';
+  content: '✨' / ''; /* 대체 텍스트 없음 = 스크린리더가 읽지 않는다 */
+  display: block;
   font-size: 3rem;
   margin-bottom: 1rem;
 }

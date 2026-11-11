@@ -175,7 +175,14 @@
   background: rgba(0, 0, 0, 0.65);
 }
 
+/* 공용 Modal: 래퍼(.echo-modal-backdrop)가 어둡게 깔고, 배경 클릭 영역은 래퍼 전체를 덮는 투명 레이어 */
+.echo-modal-dismiss {
+  position: absolute;
+  inset: 0;
+}
+
 .echo-modal {
+  position: relative;
   width: min(520px, calc(100vw - 32px));
   max-height: calc(100vh - 48px);
   overflow-y: auto;
@@ -185,8 +192,9 @@
   border: 1px solid var(--border);
 }
 
-.echo-modal h3 {
+.echo-modal h2 {
   margin: 0 0 10px;
+  font-size: 1.17em; /* 예전 h3 크기 */
   color: var(--accent);
 }
 

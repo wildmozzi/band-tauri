@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
+import { Modal } from './ui'
 
 interface PremiumModalProps {
   isOpen: boolean
@@ -56,89 +57,92 @@ export function PremiumModal({ isOpen, onClose, feature, requiredPlan }: Premium
   }
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="premium-modal" onClick={(e) => e.stopPropagation()}>
-        <button className="modal-close" onClick={onClose}>×</button>
-        
-        <div className="modal-header">
-          <div className="premium-icon">✨</div>
-          <h2>프리미엄 기능입니다</h2>
-          <p className="feature-description">
-            <strong>"{feature}"</strong> 기능을 사용하려면 플랜 업그레이드가 필요합니다.
-          </p>
+    // 머리글 아이콘(✨)은 CSS(.premium-modal > .modal-header::before)로 그린다 — 제목(대화상자 이름)에 섞이지 않게
+    <Modal
+      className="modal-overlay"
+      title="프리미엄 기능입니다"
+      description={
+        <>
+          <strong>"{feature}"</strong> 기능을 사용하려면 플랜 업그레이드가 필요합니다.
+        </>
+      }
+      onClose={onClose}
+      classNames={{
+        backdrop: 'premium-modal-backdrop',
+        content: 'premium-modal',
+        body: 'modal-content',
+        close: 'modal-close',
+        description: 'feature-description',
+      }}
+    >
+      <div className="plan-selector">
+        <div className="plan-tabs">
+          <button 
+            className={`plan-tab ${selectedPlan === 'standard' ? 'active' : ''}`}
+            onClick={() => setSelectedPlan('standard')}
+          >
+            Standard
+          </button>
+          <button 
+            className={`plan-tab ${selectedPlan === 'pro' ? 'active' : ''}`}
+            onClick={() => setSelectedPlan('pro')}
+          >
+            Pro
+          </button>
         </div>
 
-        <div className="modal-content">
-          <div className="plan-selector">
-            <div className="plan-tabs">
-              <button 
-                className={`plan-tab ${selectedPlan === 'standard' ? 'active' : ''}`}
-                onClick={() => setSelectedPlan('standard')}
-              >
-                Standard
-              </button>
-              <button 
-                className={`plan-tab ${selectedPlan === 'pro' ? 'active' : ''}`}
-                onClick={() => setSelectedPlan('pro')}
-              >
-                Pro
-              </button>
-            </div>
-
-            <div className="selected-plan-details">
-              <div className="plan-info">
-                <h3>{planDetails[selectedPlan].name} 플랜</h3>
-                <div className="plan-price">
-                  <span className="price">{planDetails[selectedPlan].price}</span>
-                  <span className="period">{planDetails[selectedPlan].period}</span>
-                </div>
-              </div>
-
-              <div className="plan-features">
-                <h4>포함된 기능:</h4>
-                <ul>
-                  {planDetails[selectedPlan].features.map((feature, index) => (
-                    <li key={index}>✅ {feature}</li>
-                  ))}
-                </ul>
-              </div>
+        <div className="selected-plan-details">
+          <div className="plan-info">
+            <h3>{planDetails[selectedPlan].name} 플랜</h3>
+            <div className="plan-price">
+              <span className="price">{planDetails[selectedPlan].price}</span>
+              <span className="period">{planDetails[selectedPlan].period}</span>
             </div>
           </div>
 
-          <div className="modal-actions">
-            <button className="upgrade-button" onClick={handleUpgrade}>
-              {selectedPlan === 'standard' ? 'Standard로 업그레이드' : 'Pro로 업그레이드'}
-            </button>
-            <Link to="/pricing" className="view-all-plans" onClick={onClose}>
-              모든 플랜 보기
-            </Link>
-          </div>
-
-          <div className="modal-benefits">
-            <div className="benefit-item">
-              <span className="benefit-icon">🔄</span>
-              <div>
-                <strong>언제든 변경 가능</strong>
-                <p>플랜 업그레이드/다운그레이드 자유</p>
-              </div>
-            </div>
-            <div className="benefit-item">
-              <span className="benefit-icon">💾</span>
-              <div>
-                <strong>데이터 보장</strong>
-                <p>기존 녹음 파일과 설정 유지</p>
-              </div>
-            </div>
-            <div className="benefit-item">
-              <span className="benefit-icon">🔒</span>
-              <div>
-                <strong>7일 환불 보장</strong>
-                <p>만족하지 않으면 전액 환불</p>
-              </div>
-            </div>
+          <div className="plan-features">
+            <h4>포함된 기능:</h4>
+            <ul>
+              {planDetails[selectedPlan].features.map((feature, index) => (
+                <li key={index}>✅ {feature}</li>
+              ))}
+            </ul>
           </div>
         </div>
       </div>
-    </div>
+
+      <div className="modal-actions">
+        <button className="upgrade-button" onClick={handleUpgrade}>
+          {selectedPlan === 'standard' ? 'Standard로 업그레이드' : 'Pro로 업그레이드'}
+        </button>
+        <Link to="/pricing" className="view-all-plans" onClick={onClose}>
+          모든 플랜 보기
+        </Link>
+      </div>
+
+      <div className="modal-benefits">
+        <div className="benefit-item">
+          <span className="benefit-icon">🔄</span>
+          <div>
+            <strong>언제든 변경 가능</strong>
+            <p>플랜 업그레이드/다운그레이드 자유</p>
+          </div>
+        </div>
+        <div className="benefit-item">
+          <span className="benefit-icon">💾</span>
+          <div>
+            <strong>데이터 보장</strong>
+            <p>기존 녹음 파일과 설정 유지</p>
+          </div>
+        </div>
+        <div className="benefit-item">
+          <span className="benefit-icon">🔒</span>
+          <div>
+            <strong>7일 환불 보장</strong>
+            <p>만족하지 않으면 전액 환불</p>
+          </div>
+        </div>
+      </div>
+    </Modal>
   )
 }
