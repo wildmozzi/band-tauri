@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import type { User } from '@supabase/supabase-js'
 import { usePremium } from '../contexts/usePremium'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useRequireAuth } from '../features/auth/useRequireAuth'
 import { isSupabaseConfigured } from '../lib/supabaseClient'
 import {
@@ -11,8 +11,15 @@ import {
 } from '../features/profile/queries'
 import './Profile.css'
 import { Button } from '../components/ui/Button'
+import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor } from '../lib/planFeatures'
 
 type ProfileTab = 'info' | 'follow' | 'plan' | 'theme' | 'support'
+const PROFILE_TABS: readonly ProfileTab[] = ['info', 'follow', 'plan', 'theme', 'support']
+
+/** ?tab=plan 처럼 탭을 지정해 열 수 있다 (결제 화면의 '요금제 관리' 안내 링크) */
+function tabFromQuery(value: string | null): ProfileTab {
+  return PROFILE_TABS.find(t => t === value) ?? 'info'
+}
 
 /**
  * 로그인 확인이 끝난 뒤에만 프로필 화면을 만든다 (P3-10f 공통 가드).
@@ -29,7 +36,8 @@ function ProfileContent({ user }: { user: User }) {
   const navigate = useNavigate()
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const [activeTab, setActiveTab] = useState<ProfileTab>('info')
+  const [searchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState<ProfileTab>(() => tabFromQuery(searchParams.get('tab')))
   const [isEditing, setIsEditing] = useState(false)
   const saveProfile = useSaveProfileMutation()
   const updateMetadata = useUpdateUserMetadataMutation()
@@ -344,34 +352,28 @@ function ProfileContent({ user }: { user: User }) {
                 <div className="plan-details">
                   {userPlan === 'free' && (
                     <>
-                      <p className="plan-description">기본 기능을 무료로 이용 중입니다.</p>
+                      <p className="plan-description">무료 플랜을 이용 중입니다. {NO_PAID_ONLY_NOTICE}</p>
                       <ul className="plan-features-list">
-                        <li>합주실 생성 (최대 4명)</li>
-                        <li>녹음 기능 & 로컬 저장</li>
-                        <li>기본 오디오 품질</li>
+                        {ALL_PLAN_FEATURES.map(f => <li key={f}>{f}</li>)}
                       </ul>
                     </>
                   )}
                   {userPlan === 'standard' && (
                     <>
-                      <p className="plan-description">Standard 플랜을 이용 중입니다.</p>
+                      <p className="plan-description">Standard 플랜을 이용 중입니다. {NO_PAID_ONLY_NOTICE}</p>
                       <ul className="plan-features-list">
-                        <li>합주실 생성 (최대 6명)</li>
-                        <li>비공개 방 생성</li>
-                        <li>클라우드 저장 (30일)</li>
-                        <li>Mix Lab 기본 기능</li>
+                        {ALL_PLAN_FEATURES.map(f => <li key={f}>{f}</li>)}
                       </ul>
+                      <p className="plan-description">준비 중: {plannedFeaturesFor('standard').join(', ')} — {PLANNED_NOTICE}</p>
                     </>
                   )}
                   {userPlan === 'pro' && (
                     <>
-                      <p className="plan-description">Pro 플랜을 이용 중입니다.</p>
+                      <p className="plan-description">Pro 플랜을 이용 중입니다. {NO_PAID_ONLY_NOTICE}</p>
                       <ul className="plan-features-list">
-                        <li>합주실 생성 (최대 8명)</li>
-                        <li>클라우드 저장 무제한</li>
-                        <li>자동 믹싱 & 고급 Mix Lab</li>
-                        <li>팀/밴드 관리 기능</li>
+                        {ALL_PLAN_FEATURES.map(f => <li key={f}>{f}</li>)}
                       </ul>
+                      <p className="plan-description">준비 중: {plannedFeaturesFor('pro').join(', ')} — {PLANNED_NOTICE}</p>
                     </>
                   )}
                 </div>

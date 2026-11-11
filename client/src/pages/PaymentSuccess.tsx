@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { usePremium } from '../contexts/usePremium'
+import { SupportContact } from '../components/SupportContact'
+import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor } from '../lib/planFeatures'
 import { paymentApi } from '../services/paymentApi'
 import {
   loadChecking,
@@ -268,75 +270,18 @@ export function PaymentSuccess() {
             </div>
           </div>
 
+          {/* P3-12a: 요금제로 열리는 기능이 아직 없다 — 실제와 다른 혜택(인원·클라우드·자동 믹싱 등)을 보이지 않는다 */}
           <div className="next-steps">
-            <h3>🎉 이제 다음 기능들을 이용하실 수 있습니다</h3>
-            <div className="features-grid">
-              {paymentResult.planType === 'standard' && (
-                <>
-                  <div className="feature-item">
-                    <span className="feature-icon">👥</span>
-                    <div>
-                      <strong>6명 합주실</strong>
-                      <p>더 많은 친구들과 함께 연주하세요</p>
-                    </div>
-                  </div>
-                  <div className="feature-item">
-                    <span className="feature-icon">🔒</span>
-                    <div>
-                      <strong>비공개 방</strong>
-                      <p>팀원들만의 전용 합주 공간</p>
-                    </div>
-                  </div>
-                  <div className="feature-item">
-                    <span className="feature-icon">☁️</span>
-                    <div>
-                      <strong>클라우드 저장</strong>
-                      <p>녹음 파일을 안전하게 보관</p>
-                    </div>
-                  </div>
-                  <div className="feature-item">
-                    <span className="feature-icon">🎛️</span>
-                    <div>
-                      <strong>Mix Lab</strong>
-                      <p>전문적인 믹싱 도구 사용</p>
-                    </div>
-                  </div>
-                </>
-              )}
-              
-              {paymentResult.planType === 'pro' && (
-                <>
-                  <div className="feature-item">
-                    <span className="feature-icon">👥</span>
-                    <div>
-                      <strong>8명 합주실</strong>
-                      <p>대규모 밴드 세션 가능</p>
-                    </div>
-                  </div>
-                  <div className="feature-item">
-                    <span className="feature-icon">🤖</span>
-                    <div>
-                      <strong>자동 믹싱</strong>
-                      <p>AI가 도와주는 스마트 믹싱</p>
-                    </div>
-                  </div>
-                  <div className="feature-item">
-                    <span className="feature-icon">📅</span>
-                    <div>
-                      <strong>합주실 예약</strong>
-                      <p>정기 세션을 미리 계획</p>
-                    </div>
-                  </div>
-                  <div className="feature-item">
-                    <span className="feature-icon">👑</span>
-                    <div>
-                      <strong>팀 관리</strong>
-                      <p>밴드 멤버와 프로젝트 관리</p>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
+            <h3>지금 쓸 수 있는 기능</h3>
+            <p className="plan-notice">{NO_PAID_ONLY_NOTICE}</p>
+            <ul className="plan-feature-list">
+              {ALL_PLAN_FEATURES.map(f => <li key={f}>✅ {f}</li>)}
+            </ul>
+            <h3>준비 중</h3>
+            <p className="plan-notice">{PLANNED_NOTICE}</p>
+            <ul className="plan-feature-list planned">
+              {plannedFeaturesFor(paymentResult.planType).map(f => <li key={f}>⏳ {f}</li>)}
+            </ul>
           </div>
 
           <div className="action-buttons">
@@ -348,14 +293,7 @@ export function PaymentSuccess() {
             </Link>
           </div>
 
-          <div className="support-info">
-            <h4>📞 도움이 필요하신가요?</h4>
-            <p>
-              결제나 서비스 이용에 문의사항이 있으시면 
-              <a href="mailto:support@bandspace.com"> support@bandspace.com</a>으로 
-              연락주세요.
-            </p>
-          </div>
+          <SupportContact />
         </div>
       </div>
     </div>

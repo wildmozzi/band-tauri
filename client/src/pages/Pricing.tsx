@@ -1,28 +1,23 @@
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/useAuth'
 import { usePremium } from '../contexts/usePremium'
+import { MAX_PERFORMERS } from '../native/engineApi'
+import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLAN_COMPARISON, PLANNED_NOTICE, plannedFeaturesFor, type PaidPlan } from '../lib/planFeatures'
 
 type PlanType = 'free' | 'standard' | 'pro'
 
-interface PlanFeature {
-  name: string
-  free: boolean | string
-  standard: boolean | string
-  pro: boolean | string
+/** 유료 플랜 카드의 '준비 중' 목록 — 판매 중인 혜택과 분리해 보인다 (P3-12a) */
+function PlannedFeatures({ plan }: { plan: PaidPlan }) {
+  return (
+    <div className="feature-planned">
+      <h4>⏳ 준비 중</h4>
+      <p>{PLANNED_NOTICE}</p>
+      <ul>
+        {plannedFeaturesFor(plan).map(f => <li key={f}>{f}</li>)}
+      </ul>
+    </div>
+  )
 }
-
-const PLAN_FEATURES: PlanFeature[] = [
-  { name: '합주실 참여자 수', free: '최대 4명', standard: '최대 6명', pro: '최대 8명' },
-  { name: '비공개 방', free: false, standard: true, pro: true },
-  { name: '클라우드 저장', free: false, standard: '30일', pro: '무제한' },
-  { name: '파일 다운로드', free: '로컬만', standard: '7일 제한', pro: '무제한' },
-  { name: 'Mix Lab', free: false, standard: '기본 (프리셋 2개)', pro: '고급 (무제한)' },
-  { name: '자동 믹싱', free: false, standard: false, pro: true },
-  { name: '합주실 예약', free: false, standard: false, pro: true },
-  { name: '팀 관리', free: false, standard: false, pro: true },
-  { name: '세션 히스토리', free: false, standard: false, pro: true },
-  { name: '광고', free: '표시', standard: '없음', pro: '없음' },
-]
 
 export function Pricing() {
   const { user } = useAuth()
@@ -64,6 +59,8 @@ export function Pricing() {
         </p>
       </header>
 
+      <p className="pricing-notice">{NO_PAID_ONLY_NOTICE}</p>
+
       <section className="pricing-plans">
 
         {/* 무료 플랜 */}
@@ -80,18 +77,7 @@ export function Pricing() {
             <div className="feature-highlight">
               <h4>✨ 주요 기능</h4>
               <ul>
-                <li>합주실 생성 (최대 4명 참여)</li>
-                <li>합주실 참여 무제한</li>
-                <li>녹음 기능 & 로컬 저장</li>
-                <li>기본 오디오 품질</li>
-              </ul>
-            </div>
-            <div className="feature-limitations">
-              <h4>⚠️ 제한사항</h4>
-              <ul>
-                <li>광고 표시</li>
-                <li>클라우드 저장 불가</li>
-                <li>파일 공유/편집 기능 없음</li>
+                {ALL_PLAN_FEATURES.map(f => <li key={f}>{f}</li>)}
               </ul>
             </div>
           </div>
@@ -122,16 +108,10 @@ export function Pricing() {
             <div className="feature-highlight">
               <h4>✨ 주요 기능</h4>
               <ul>
-                <li>합주실 생성 (최대 6명 참여)</li>
-                <li>비공개 방 생성</li>
-                <li>합주실 무제한 생성</li>
-                <li>클라우드 저장 (최대 30일)</li>
-                <li>녹음 파일 다운로드 (7일 제한)</li>
-                <li>Mix Lab 기본 이퀄라이저</li>
-                <li>프로필 꾸미기</li>
-                <li>녹음 파일 링크 공유</li>
+                <li>무료 플랜의 모든 기능</li>
               </ul>
             </div>
+            <PlannedFeatures plan="standard" />
           </div>
           <button 
             className={`plan-button standard-button ${userPlan === 'standard' ? 'current-plan' : ''}`}
@@ -141,7 +121,7 @@ export function Pricing() {
             {userPlan === 'standard' ? '현재 플랜' : 'Standard 시작하기'}
           </button>
           <p className="plan-recommendation">
-            🎯 합주/녹음을 관리·다운로드·공유까지 확장
+            🎯 녹음 보관·공유 기능 준비 중
           </p>
         </div>
 
@@ -159,18 +139,10 @@ export function Pricing() {
             <div className="feature-highlight">
               <h4>✨ 주요 기능</h4>
               <ul>
-                <li>합주실 생성 (최대 8명 참여)</li>
-                <li>합주 녹음 자동 믹싱</li>
-                <li>클라우드 저장 무제한 + 자동 백업</li>
-                <li>녹음 파일 다운로드 무제한</li>
-                <li>Mix Lab 고급 (프리셋 저장 무제한)</li>
-                <li>합주실 예약 기능</li>
-                <li>팀/밴드 단위 관리</li>
-                <li>세션 공유 권한 설정</li>
-                <li>세션 히스토리 제공</li>
-                <li>배지/인증 표시</li>
+                <li>무료 플랜의 모든 기능</li>
               </ul>
             </div>
+            <PlannedFeatures plan="pro" />
           </div>
           <button 
             className={`plan-button pro-button ${userPlan === 'pro' ? 'current-plan' : ''}`}
@@ -180,7 +152,7 @@ export function Pricing() {
             {userPlan === 'pro' ? '현재 플랜' : 'Pro 시작하기'}
           </button>
           <p className="plan-recommendation">
-            🚀 전문 밴드용 워크플로우 + 프로젝트 관리
+            🚀 밴드 관리·예약 기능 준비 중
           </p>
         </div>
       </section>
@@ -199,7 +171,7 @@ export function Pricing() {
               </tr>
             </thead>
             <tbody>
-              {PLAN_FEATURES.map((feature, index) => (
+              {PLAN_COMPARISON.map((feature, index) => (
                 <tr key={index}>
                   <td className="feature-name">{feature.name}</td>
                   <td>{renderFeatureValue(feature.free)}</td>
@@ -226,11 +198,11 @@ export function Pricing() {
           </div>
           <div className="faq-item">
             <h3>Q. 녹음 파일이 삭제되면 복구할 수 있나요?</h3>
-            <p>Pro 플랜의 경우 자동 백업으로 30일간 복구 가능합니다.</p>
+            <p>아니요. 녹음은 지금 내 기기에만 저장되고 서버에 보관하지 않으므로, 삭제한 파일은 복구할 수 없습니다. 클라우드 저장은 준비 중입니다.</p>
           </div>
           <div className="faq-item">
             <h3>Q. 팀 계정으로 결제할 수 있나요?</h3>
-            <p>Pro 플랜에서 팀 단위 결제 및 관리 기능을 제공합니다.</p>
+            <p>아직은 개인 단위 결제만 됩니다. 팀/밴드 관리 기능은 준비 중입니다.</p>
           </div>
         </div>
       </section>
@@ -242,7 +214,7 @@ export function Pricing() {
           <div className="step">
             <div className="step-number">1</div>
             <h3>무료로 체험</h3>
-            <p>회원가입 후 바로 합주 시작<br />4명까지 함께 연주 가능</p>
+            <p>회원가입 후 바로 합주 시작<br />최대 {MAX_PERFORMERS}명까지 함께 연주 가능</p>
           </div>
           <div className="step">
             <div className="step-number">2</div>
