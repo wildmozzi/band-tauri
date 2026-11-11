@@ -21,7 +21,7 @@ use super::config::{frame_code_from_samples, EngineConfig, INTERNAL_RATE, MAX_PA
 use super::device::StreamInfo;
 use super::jitter::{shift_one, JitterBuffer};
 use super::measure::EchoProbe;
-use super::metronome::{BeatScheduler, MetronomeCtl, MetronomePlan, OutClock};
+use super::metronome::{hidden_out_latency_us, BeatScheduler, MetronomeCtl, MetronomePlan, OutClock};
 use super::mixer::MixControls;
 use super::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
 use super::rt::{SourceBank, SourceShared, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
@@ -65,7 +65,8 @@ const DEVICE_STALL: Duration = Duration::from_secs(1);
 /// 워커가 본 `wall − played/rate`는 콜백 직후에 관측할수록 작으므로, 최근 `WINDOW` 동안의 최솟값이
 /// 실제 콜백 시각에 가장 가깝다. 최솟값을 고정 창(0.5초 버킷 4개)에서 구하므로
 /// - 워커 기상 지연(값이 커지는 쪽)은 무시되고,
-/// - 장치 정지·절전 복귀처럼 오프셋이 위로 한 번 뛰는 불연속도 최대 2초 안에 따라잡고,
+/// - 장치 정지·절전 복귀·긴 xrun처럼 오프셋이 위로 한 번 뛰는 불연속은 짧은 창(`CLOCK_SHORT_US`)의 최솟값이
+///   긴 창보다 `CLOCK_GAP_US` 넘게 크면 공백으로 보고 창을 그 값으로 리셋해 0.15~0.3초 안에 따라잡고(PR #34 M3),
 /// - 장치-벽시계 드리프트는 창 길이만큼의 바이어스(500ppm에서 1ms 이하)로 따라간다.
 ///
 /// 이전 구현은 소비 샘플 수(`out_consumed`)와 전역 최솟값 + 500ppm 누설을 써서, 출력 언더런마다
@@ -76,10 +77,19 @@ pub struct DeviceClock {
     cur_min: f64,
     prev_mins: [f64; CLOCK_BUCKETS - 1],
     started: bool,
+    short_start_us: f64,
+    short_min: f64,
+    /// 공백 감지로 창을 리셋한 횟수(진단·테스트용).
+    pub resets: u64,
 }
 
 const CLOCK_BUCKET_US: f64 = 500_000.0;
 const CLOCK_BUCKETS: usize = 4;
+/// 공백 감지용 짧은 창. 콜백이 여러 번 들어올 만큼 길고(10ms 주기에서 15번), 재수렴이 빠를 만큼 짧다.
+const CLOCK_SHORT_US: f64 = 150_000.0;
+/// 짧은 창 최솟값이 긴 창보다 이만큼 크면 콜백 공백(장치 일시 중단·스트림 재시작)으로 본다.
+/// 워커 기상 지연은 짧은 창 안의 다른 관측이 최솟값을 끌어내려 걸리지 않는다. 드리프트(500ppm × 2초 = 1ms)보다 크다.
+const CLOCK_GAP_US: f64 = 3_000.0;
 
 impl DeviceClock {
     pub fn new(rate: u32) -> Self {
@@ -89,6 +99,9 @@ impl DeviceClock {
             cur_min: f64::INFINITY,
             prev_mins: [f64::INFINITY; CLOCK_BUCKETS - 1],
             started: false,
+            short_start_us: 0.0,
+            short_min: f64::INFINITY,
+            resets: 0,
         }
     }
 
@@ -101,6 +114,7 @@ impl DeviceClock {
         if !self.started {
             self.started = true;
             self.bucket_start_us = wall;
+            self.short_start_us = wall;
         }
         if wall - self.bucket_start_us >= CLOCK_BUCKET_US {
             // 버킷 회전(오래 쉬었으면 여러 칸)
@@ -114,6 +128,19 @@ impl DeviceClock {
         }
         let dev_t = played_frames as f64 * 1e6 / self.rate;
         let off = wall - dev_t;
+        if wall - self.short_start_us >= CLOCK_SHORT_US {
+            // 짧은 창 마감: 그 창의 관측이 모두 긴 창 최솟값보다 크게 떠 있으면 공백 뒤다 → 긴 창을 버린다.
+            let long_min = self.prev_mins.iter().copied().fold(self.cur_min, f64::min);
+            if self.short_min.is_finite() && self.short_min - long_min > CLOCK_GAP_US {
+                self.prev_mins = [f64::INFINITY; CLOCK_BUCKETS - 1];
+                self.cur_min = self.short_min;
+                self.bucket_start_us = wall;
+                self.resets += 1;
+            }
+            self.short_start_us = wall;
+            self.short_min = f64::INFINITY;
+        }
+        self.short_min = self.short_min.min(off);
         self.cur_min = self.cur_min.min(off);
         let m = self.prev_mins.iter().copied().fold(self.cur_min, f64::min);
         (dev_t + m).max(0.0) as u64
@@ -1061,7 +1088,9 @@ impl Worker {
             None => Some(0.0),
             Some(_) => est.map(|e| e.offset_us),
         };
-        let clock = OutClock { dev_now_us: t.dev_now_us as f64, played: t.played, rate: t.out_rate as f64, burst: t.out_burst as u64 };
+        let rate = t.out_rate as f64;
+        let hidden = hidden_out_latency_us(self.p.info.out_reported_latency_frames, t.out_burst as u64, rate);
+        let clock = OutClock { dev_now_us: t.dev_now_us as f64, played: t.played, rate, burst: t.out_burst as u64, extra_out_us: hidden.unwrap_or(0.0) };
         let beat = self.beats.tick(gen, plan, offset, &clock, &self.p.metronome.click);
         if t.wall_us.saturating_sub(self.metro_stats_at) >= 100_000 || gen != self.metro_stats_gen {
             self.metro_stats_at = t.wall_us;
@@ -1077,6 +1106,7 @@ impl Worker {
             s.clock_rtt_ms = est.map(|e| e.rtt_us / 1000.0);
             s.drift_ppm = est.map(|e| e.drift_ppm);
             s.beat = beat;
+            s.output_latency_ms = hidden.map(|h| h / 1000.0);
         }
     }
 
@@ -1266,9 +1296,9 @@ mod tests {
         }
         let just_after = errs.iter().find(|(k, _)| *k == 205).map(|e| e.1).unwrap_or(0);
         assert!(just_after < -9_000, "결손 직후에는 창이 지나기 전까지 이르게 추정: {just_after}");
-        // 2.5초(250콜백) 뒤에는 오차 1ms 미만으로 돌아와야 한다(최솟값 창 2초)
-        let worst = errs.iter().filter(|(k, _)| *k > 200 + 250).map(|e| e.1.abs()).max().unwrap_or(0);
-        assert!(worst < 1000, "결손 후 2.5초 안에 재동기화: 최대 오차 {worst}µs");
+        // 공백 감지(짧은 창 0.15초)로 0.35초(35콜백) 뒤에는 오차 1ms 미만으로 돌아와야 한다(PR #34 M3)
+        let worst = errs.iter().filter(|(k, _)| *k > 200 + 35).map(|e| e.1.abs()).max().unwrap_or(0);
+        assert!(worst < 1000, "결손 후 0.35초 안에 재동기화: 최대 오차 {worst}µs");
     }
 
     #[test]
@@ -1296,6 +1326,26 @@ mod tests {
         assert!(worst < 3 * 2_667 + 500, "결손이 누적되면 안 됨: 최대 오차 {worst}µs");
         let mean = late_mean.0 / late_mean.1.max(1);
         assert!(mean.abs() < 6_000, "110초 뒤 평균 오차 {mean}µs (이전 구현은 +227ms까지 발산)");
+    }
+
+    #[test]
+    fn device_clock_recovers_quickly_after_callback_gap() {
+        // 장치가 300ms 멈췄다가(콜백 없음, 재생 카운터도 멈춤) 재개: 벽시계 − 재생/레이트가 +300ms 뛴다(PR #34 M3).
+        // 워커 기상 지연 0~1.5ms, 가끔 15ms가 섞여도 공백만 리셋으로 잡아야 한다.
+        let mut c = DeviceClock::new(48_000);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let mut worst_after = 0i64;
+        for k in 1..1000u64 {
+            let gap = if k > 400 { 300_000 } else { 0 };
+            let cb_time = k * 10_000 + gap;
+            let late = if k % 53 == 0 { 15_000 } else { rng.gen_range(0..1500) };
+            let est = c.update(cb_time + late, k * 480);
+            if k > 400 + 30 {
+                worst_after = worst_after.max((est as i64 - cb_time as i64).abs());
+            }
+        }
+        assert_eq!(c.resets, 1, "공백 한 번만 리셋(기상 지연 스파이크는 무시)");
+        assert!(worst_after < 1000, "공백 0.3초 뒤 오차 {worst_after}µs");
     }
 
     #[test]

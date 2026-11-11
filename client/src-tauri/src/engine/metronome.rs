@@ -30,6 +30,8 @@ pub const DEFAULT_START_LEAD_US: f64 = 300_000.0;
 pub const CLICK_LEN: usize = 1440;
 /// 클릭 볼륨 기본값.
 pub const DEFAULT_CLICK_GAIN: f32 = 0.8;
+/// 올려 둔 클릭의 제 시각이 이만큼(초) 넘게 지났다고 다시 계산되면(콜백 공백 뒤) 울리지 않고 건너뛴다.
+const STALE_SKIP_S: f64 = 0.005;
 
 fn encode(frame: u64, accent: bool) -> u64 {
     (frame << 1) | accent as u64
@@ -64,11 +66,13 @@ pub struct ClickShared {
     pub clicks: AtomicU64,
     /// 늦게 시작한 클릭 수(파형 중간부터 울렸거나 통째로 놓침).
     pub late: AtomicU64,
+    /// 콜백 공백 뒤 제 시각이 이미 지나 건너뛴 클릭 수(PR #34 M3).
+    pub skipped: AtomicU64,
 }
 
 impl Default for ClickShared {
     fn default() -> Self {
-        Self { next: AtomicU64::new(NO_CLICK), step: AtomicF32::new(1.0), clicks: AtomicU64::new(0), late: AtomicU64::new(0) }
+        Self { next: AtomicU64::new(NO_CLICK), step: AtomicF32::new(1.0), clicks: AtomicU64::new(0), late: AtomicU64::new(0), skipped: AtomicU64::new(0) }
     }
 }
 
@@ -90,7 +94,8 @@ impl ClickRt {
     }
 
     /// RT: 콜백 시작. `before` = 이 콜백 첫 프레임 위치, `frames` = 이 콜백 프레임 수.
-    pub fn begin(&mut self, before: u64, frames: usize) {
+    /// `audible = false`(측정 자극이 장치 출력을 대신하는 중)이면 이번 콜백에 걸린 클릭을 소비만 하고 세지 않는다(PR #34 L1).
+    pub fn begin(&mut self, before: u64, frames: usize, audible: bool) {
         self.start = None;
         self.step = self.sh.step.load();
         if self.step.is_nan() || self.step <= 0.0 {
@@ -106,6 +111,10 @@ impl ClickRt {
         }
         // 이번 콜백에 걸리면 가져간다. 워커가 동시에 바꿨으면(CAS 실패) 다음 콜백에서 새 값을 본다.
         if self.sh.next.compare_exchange(v, NO_CLICK, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+            return;
+        }
+        if !audible {
+            self.playing = None;
             return;
         }
         if f >= before {
@@ -226,6 +235,11 @@ pub struct MetronomeStats {
     pub beat: Option<u64>,
     pub clicks: u64,
     pub late_clicks: u64,
+    /// 콜백 공백 뒤 제 시각이 지나 건너뛴 클릭 수.
+    pub skipped_clicks: u64,
+    /// 클릭 시각에 반영한 숨은 출력 지연(ms, 드라이버 보고 출력 지연 − 콜백 크기).
+    /// null = 드라이버가 알려 주지 않아 보정 안 됨(cpal WASAPI 등). UI가 "출력 지연 보정 안 됨"을 안내할 수 있다.
+    pub output_latency_ms: Option<f64>,
 }
 
 /// 커맨드 ↔ 워커 공유: 계획(세대 번호와 함께)과 워커가 쓰는 상태.
@@ -247,6 +261,7 @@ impl MetronomeCtl {
         let mut s = self.stats.lock().clone();
         s.clicks = self.click.clicks.load(Ordering::Relaxed);
         s.late_clicks = self.click.late.load(Ordering::Relaxed);
+        s.skipped_clicks = self.click.skipped.load(Ordering::Relaxed);
         s
     }
 }
@@ -265,19 +280,32 @@ pub struct OutClock {
     pub rate: f64,
     /// 출력 콜백 크기(장치 프레임).
     pub burst: u64,
+    /// 장치 출력 버퍼 1개 너머의 숨은 출력 지연(µs): 드라이버 보고 출력 지연 − 콜백 크기(PR #34 M2).
+    /// WASAPI 공유 엔진 주기·드라이버 안전 오프셋·USB 내부 버퍼. 모르면 0(보정 안 됨).
+    pub extra_out_us: f64,
+}
+
+/// 드라이버 보고 출력 지연(장치 프레임, 0 = 모름)에서 숨은 출력 지연(µs)을 구한다.
+/// 보고값은 "콜백이 넘긴 버퍼가 들리기까지"이고 이미 버퍼 1개(콜백 크기)를 포함하므로 그만큼 뺀다.
+/// 반환: `None` = 드라이버가 알려 주지 않음(보정 0).
+pub fn hidden_out_latency_us(reported_frames: u32, burst_frames: u64, rate: f64) -> Option<f64> {
+    if reported_frames == 0 || rate <= 0.0 {
+        return None;
+    }
+    Some((reported_frames as f64 - burst_frames as f64).max(0.0) * 1e6 / rate)
 }
 
 impl OutClock {
     /// 장치 프레임 J가 귀에 닿는 시각(내 시계 µs). 콜백이 프레임 [b, b+n)을 쓰는 시각은 `m + (b+n)/r`이고
-    /// (`m` = `DeviceClock`의 `벽시계 − 재생/레이트` 최솟값), 그 버퍼는 장치 출력 버퍼 1개(n) 뒤에 울린다.
-    /// 따라서 귀 시각 = `m + (J + 2n)/r`.
+    /// (`m` = `DeviceClock`의 `벽시계 − 재생/레이트` 최솟값), 그 버퍼는 장치 출력 버퍼 1개(n)와
+    /// 숨은 출력 지연(`extra_out_us`) 뒤에 울린다. 따라서 귀 시각 = `m + (J + 2n)/r + extra`.
     pub fn ear_time_us(&self, frame: f64) -> f64 {
-        self.dev_now_us + (frame + 2.0 * self.burst as f64 - self.played as f64) * 1e6 / self.rate
+        self.dev_now_us + (frame + 2.0 * self.burst as f64 - self.played as f64) * 1e6 / self.rate + self.extra_out_us
     }
 
     /// 귀 시각 `t_us`에 울릴 장치 프레임.
     pub fn frame_for(&self, t_us: f64) -> f64 {
-        (t_us - self.dev_now_us) * self.rate / 1e6 + self.played as f64 - 2.0 * self.burst as f64
+        (t_us - self.extra_out_us - self.dev_now_us) * self.rate / 1e6 + self.played as f64 - 2.0 * self.burst as f64
     }
 
     /// 이 프레임 이상이어야 다음 콜백(진행 중일 수 있음)과 겹치지 않는다: 콜백 2개 + 2ms.
@@ -332,13 +360,23 @@ impl BeatScheduler {
                 // 시계 추정이 바뀌었으면 아직 멀리 있는 클릭만 다시 맞춘다(울리기 직전 값은 건드리지 않음).
                 let old = decode(raw).0 as f64;
                 let new = beat_frame(k);
-                if new != old && old >= guard && new >= guard {
-                    let v = encode(new as u64, decode(raw).1);
-                    if sh.next.compare_exchange(raw, v, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-                        self.pending = Some((k, v));
+                if !(old >= guard && new < guard && old - new > clock.rate * STALE_SKIP_S) {
+                    if new != old && old >= guard && new >= guard {
+                        let v = encode(new as u64, decode(raw).1);
+                        if sh.next.compare_exchange(raw, v, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                            self.pending = Some((k, v));
+                        }
                     }
+                    return Some(k);
                 }
-                return Some(k);
+                // 콜백 공백 뒤 시계가 다시 잡혀 보니 이 박의 제 시각이 이미 지났다(PR #34 M3):
+                // 공백만큼 늦은 클릭을 내지 않고 건너뛴 뒤 다음 박을 올린다.
+                self.pending = None;
+                self.last_beat = Some(k);
+                if sh.next.compare_exchange(raw, NO_CLICK, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+                    return Some(k); // 그 사이 콜백이 가져갔다(울림)
+                }
+                sh.skipped.fetch_add(1, Ordering::Relaxed);
             }
         }
         // 다음 박: 지난 박 다음, 그리고 지금 올려도 늦지 않은 첫 박(0 이상).
@@ -365,7 +403,7 @@ mod tests {
     use super::*;
 
     fn clock(played: u64) -> OutClock {
-        OutClock { dev_now_us: played as f64 / 48_000.0 * 1e6 + 10_000.0, played, rate: 48_000.0, burst: 128 }
+        OutClock { dev_now_us: played as f64 / 48_000.0 * 1e6 + 10_000.0, played, rate: 48_000.0, burst: 128, extra_out_us: 0.0 }
     }
 
     fn plan(bpm: f64, start: f64) -> MetronomePlan {
@@ -397,7 +435,7 @@ mod tests {
         let sh = Arc::new(ClickShared::default());
         let mut rt = ClickRt::new(sh.clone());
         sh.next.store(encode(1000 + 37, true), Ordering::Release);
-        rt.begin(1000, 64);
+        rt.begin(1000, 64, true);
         let out: Vec<f32> = (0..64).map(|i| rt.sample(i)).collect();
         assert!(out[..37].iter().all(|&x| x == 0.0));
         assert!(out[37] != 0.0);
@@ -406,14 +444,14 @@ mod tests {
         // 늦게 본 클릭: 10프레임 지난 위치부터
         let mut rt2 = ClickRt::new(sh.clone());
         sh.next.store(encode(990, false), Ordering::Release);
-        rt2.begin(1000, 64);
+        rt2.begin(1000, 64, true);
         let x = rt2.sample(0);
         assert!((x - click_wave(1100.0, 0.45)[10]).abs() < 1e-6);
         assert_eq!(sh.late.load(Ordering::Relaxed), 1);
         // 파형이 끝날 만큼 늦으면 버린다
         sh.next.store(encode(0, false), Ordering::Release);
         let mut rt3 = ClickRt::new(sh.clone());
-        rt3.begin(100_000, 64);
+        rt3.begin(100_000, 64, true);
         assert!((0..64).all(|i| rt3.sample(i) == 0.0));
         assert_eq!(sh.clicks.load(Ordering::Relaxed), 2);
     }
@@ -423,7 +461,7 @@ mod tests {
         let sh = Arc::new(ClickShared::default());
         let mut rt = ClickRt::new(sh.clone());
         sh.next.store(encode(5000, false), Ordering::Release);
-        rt.begin(1000, 64);
+        rt.begin(1000, 64, true);
         assert!((0..64).all(|i| rt.sample(i) == 0.0));
         assert_ne!(sh.next.load(Ordering::Relaxed), NO_CLICK);
     }
@@ -478,5 +516,53 @@ mod tests {
         let before = sh.next.load(Ordering::Relaxed);
         s.tick(1, &p, Some(5000.0), &near, &sh);
         assert_eq!(sh.next.load(Ordering::Relaxed), before);
+    }
+
+    #[test]
+    fn rt_swallows_click_during_measurement() {
+        // 측정 자극이 출력을 대신하는 중에는 클릭을 소비만 하고 세지 않는다(PR #34 L1)
+        let sh = Arc::new(ClickShared::default());
+        let mut rt = ClickRt::new(sh.clone());
+        sh.next.store(encode(1010, true), Ordering::Release);
+        rt.begin(1000, 64, false);
+        assert!((0..64).all(|i| rt.sample(i) == 0.0));
+        assert_eq!(sh.next.load(Ordering::Relaxed), NO_CLICK);
+        assert_eq!(sh.clicks.load(Ordering::Relaxed), 0);
+        assert_eq!(sh.late.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn hidden_output_latency_shifts_click_earlier() {
+        // 드라이버 보고 출력 지연 = 콜백 128 + 숨은 352프레임(7.33ms @48k)
+        assert_eq!(hidden_out_latency_us(0, 128, 48_000.0), None, "모르면 보정 안 함");
+        assert_eq!(hidden_out_latency_us(100, 128, 48_000.0), Some(0.0), "보고값이 버퍼보다 작으면 0");
+        let h = hidden_out_latency_us(480, 128, 48_000.0).unwrap();
+        assert!((h - 352.0 / 48.0 * 1000.0).abs() < 1e-6);
+        let c0 = clock(48_000);
+        let c1 = OutClock { extra_out_us: h, ..c0 };
+        let t = c0.ear_time_us(60_000.0) + 50_000.0;
+        // 같은 귀 시각에 울리려면 숨은 지연만큼 이른 프레임에 써야 한다
+        assert!((c0.frame_for(t) - c1.frame_for(t) - 352.0).abs() < 1e-6);
+        assert!((c1.ear_time_us(c1.frame_for(t)) - t).abs() < 1e-6);
+    }
+
+    #[test]
+    fn scheduler_skips_click_made_stale_by_callback_gap() {
+        // 박 0을 올려 둔 뒤 장치가 300ms 멈췄다가 재개 → 시계가 다시 잡히면 박 0의 제 시각은 이미 지났다.
+        // 공백만큼 늦게 울리지 않고 건너뛰고 다음 박을 올린다(PR #34 M3).
+        let sh = ClickShared::default();
+        let mut s = BeatScheduler::new();
+        let c = clock(48_000);
+        let p = plan(120.0, c.ear_time_us(c.played as f64) + 100_000.0);
+        assert_eq!(s.tick(1, &p, Some(0.0), &c, &sh), Some(0));
+        let (f0, _) = decode(sh.next.load(Ordering::Relaxed));
+        // 공백 300ms: 재생 카운터는 거의 그대로(64프레임), 벽시계는 300ms 진행
+        let after = OutClock { played: c.played + 64, dev_now_us: c.dev_now_us + 300_000.0, ..c };
+        assert_eq!(s.tick(1, &p, Some(0.0), &after, &sh), Some(1), "박 0은 건너뛰고 박 1");
+        let (f1, acc1) = decode(sh.next.load(Ordering::Relaxed));
+        assert!(!acc1);
+        assert!((after.ear_time_us(f1 as f64) - (p.start_us + 500_000.0)).abs() < 1e6 / 48_000.0);
+        assert!(f1 > f0);
+        assert_eq!(sh.skipped.load(Ordering::Relaxed), 1);
     }
 }

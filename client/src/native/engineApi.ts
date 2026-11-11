@@ -260,6 +260,10 @@ export interface MetronomeStats extends MetronomePlan {
   beat: number | null
   clicks: number
   lateClicks: number
+  /** 콜백 공백 뒤 제 시각이 지나 건너뛴 클릭 수 */
+  skippedClicks: number
+  /** 클릭 시각에 반영한 숨은 출력 지연(ms). null = 드라이버가 알려 주지 않아 보정 안 됨 */
+  outputLatencyMs: number | null
 }
 
 // ============================================================================
