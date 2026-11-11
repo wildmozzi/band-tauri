@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use serde::Serialize;
 
 use super::mask::{mask_addr, pseudonymize};
+use crate::engine::config::CodecKind;
 use crate::engine::stats::{EngineStats, PathKind, PeerStateKind};
 use crate::net::relay::RelayStateKind;
 
@@ -83,6 +84,9 @@ pub struct PeerSample {
     pub level: f32,
     pub echo_active: bool,
     pub peer_echoing: bool,
+    /// 그 피어에게 보낸 내 소리의 코덱과 릴레이 자동 Opus 여부(P1-4c, 전환 시점 확인용)
+    pub tx_codec: Option<CodecKind>,
+    pub tx_codec_auto: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -94,6 +98,7 @@ pub struct RelaySample {
     pub rtt_ms: Option<f32>,
     pub tx_kbps: f32,
     pub over_budget: bool,
+    pub auto_opus: bool,
 }
 
 /// 1초 샘플 하나(JSONL 한 줄).
@@ -168,6 +173,8 @@ impl Sample {
                     level: p.level,
                     echo_active: p.echo_active,
                     peer_echoing: p.peer_echoing,
+                    tx_codec: p.tx_codec,
+                    tx_codec_auto: p.tx_codec_auto,
                 })
                 .collect(),
             relay: s.relay.as_ref().map(|r| RelaySample {
@@ -176,6 +183,7 @@ impl Sample {
                 rtt_ms: r.rtt_ms,
                 tx_kbps: r.tx_kbps,
                 over_budget: r.over_budget,
+                auto_opus: r.auto_opus,
             }),
         }
     }
@@ -259,6 +267,8 @@ mod tests {
             echo_requested: false,
             echo_active: false,
             peer_echoing: false,
+            tx_codec: Some(CodecKind::Opus),
+            tx_codec_auto: true,
         });
         s.relay = Some(RelayStats {
             state: RelayStateKind::Bound,
@@ -266,6 +276,7 @@ mod tests {
             rtt_ms: Some(20.0),
             tx_kbps: 300.0,
             over_budget: false,
+            auto_opus: true,
         });
         s
     }
@@ -281,6 +292,8 @@ mod tests {
         assert!(!line.contains("203.0.113.45"));
         assert!(line.contains("\"bufferMs\":12.0"));
         assert!(line.contains("\"path\":\"relay\""));
+        assert!(line.contains("\"txCodec\":\"opus\"") && line.contains("\"txCodecAuto\":true"), "{line}");
+        assert!(line.contains("\"autoOpus\":true"), "{line}");
     }
 
     #[test]

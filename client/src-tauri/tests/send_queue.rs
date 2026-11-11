@@ -96,7 +96,7 @@ fn full_mesh_send_queue_latency_and_burst() {
         let frame_at = Instant::now();
         let n = enc.encode(&frame, &mut payload).unwrap();
         let t_send = Instant::now();
-        net.shared().send_audio_timed(frame_at, &payload[..n], 0, code, (k * FRAME) as u32, &mut pkt, None);
+        net.shared().send_audio_timed(frame_at, &payload[..n], 0, code, (k * FRAME) as u32, &mut pkt, None, None);
         let done = Instant::now();
         burst_us.push(done.duration_since(t_send).as_secs_f64() * 1e6);
         total_us.push(done.duration_since(frame_at).as_secs_f64() * 1e6);

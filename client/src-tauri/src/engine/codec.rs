@@ -29,6 +29,13 @@ impl Encoder {
         matches!(self, Encoder::Opus { .. })
     }
 
+    /// 인코더 상태를 처음으로 되돌린다(새 스트림 시작). 할당 없음.
+    pub fn reset(&mut self) {
+        if let Encoder::Opus { enc, .. } = self {
+            let _ = enc.reset_state();
+        }
+    }
+
     pub fn channels(&self) -> usize {
         match self {
             Encoder::Opus { channels, .. } | Encoder::Pcm16 { channels } => *channels,

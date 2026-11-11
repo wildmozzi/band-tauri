@@ -13,6 +13,7 @@ pub mod metronome;
 pub mod mixer;
 pub mod prio;
 pub mod record;
+pub mod relay_codec;
 pub mod resample;
 pub mod rt;
 pub mod stats;
@@ -349,6 +350,12 @@ impl Engine {
                             let now = Instant::now();
                             (e.remote_requesting(now) && !e.enabled, e.reflecting(now), e.remote_echoing(now))
                         };
+                        let (tx_codec, tx_codec_auto) = {
+                            use crate::net::peer::{TX_CODEC_AUTO, TX_CODEC_OPUS, TX_CODEC_SENT};
+                            let c = p.tx_codec.load(Ordering::Relaxed);
+                            let kind = if c & TX_CODEC_OPUS != 0 { config::CodecKind::Opus } else { config::CodecKind::Pcm16 };
+                            ((c & TX_CODEC_SENT != 0).then_some(kind), c & TX_CODEC_AUTO != 0)
+                        };
                         PeerStats {
                             peer_id: p.id.clone(),
                             state: conn.state,
@@ -369,6 +376,8 @@ impl Engine {
                             echo_requested,
                             echo_active,
                             peer_echoing,
+                            tx_codec,
+                            tx_codec_auto,
                         }
                     })
                     .collect()

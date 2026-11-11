@@ -14,6 +14,7 @@
 //! - 릴레이 주소 변경 → 릴레이 경로 피어가 새 주소로 바로 옮긴다.
 //! - 토큰 만료 전 갱신 → 같은 주소 갱신으로 등록이 이어진다. 만료(받은 시각 + 남은 수명) → Expired.
 //! - 릴레이 주소가 아닌 곳에서 온 RelayBindAck(type 9)는 무시한다.
+//! - PCM16 + 릴레이 피어가 늘어 상한(2Mbps)의 90%에 닿으면 릴레이 피어에게 Opus로 자동 전환하고, 줄면 hold 뒤 복귀(P1-4c).
 //! - 릴레이는 Bind MAC을 요구한다(2.1.1). 엔진은 서버가 준 bindKey로 MAC을 붙여 등록한다.
 //! - 직접 Hello의 출발 주소를 릴레이로 위장해도 경로 태그(AAD)로 걸러 릴레이 경로가 서지 않는다(4.1).
 //!
@@ -754,6 +755,118 @@ fn expired_token_without_refresh_stops_binding() {
     assert!(wait_relay_state(&p.a, RelayStateKind::Unreachable, Duration::from_secs(4)), "릴레이가 만료 토큰을 버림: {:?}", p.a.stats().relay);
     // 남의 ssrc 토큰은 받지 않는다
     assert!(set_relay(&p.a, p.link_a.pa, &relay_token(&p.b, "user-bob", 600), Some(600)).is_err());
+}
+
+fn peer_tx(e: &Engine, id: &str) -> (Option<CodecKind>, bool) {
+    e.stats().peers.iter().find(|p| p.peer_id == id).map_or((None, false), |p| (p.tx_codec, p.tx_codec_auto))
+}
+
+fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> Option<Duration> {
+    let t0 = Instant::now();
+    while t0.elapsed() < timeout {
+        if f() {
+            return Some(t0.elapsed());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    None
+}
+
+/// P1-4c ②: PCM16 mono 2.5ms는 릴레이 피어당 ≈0.9 Mbps다. A(사인)가 릴레이로 B에게 보내는 중에 C가 릴레이로
+/// 붙으면 예상 부하가 상한(2 Mbps)의 90%에 닿아 A는 릴레이 피어(B·C)에게 Opus로 자동 전환한다. C가 빠지면
+/// hold(10초) 뒤 PCM16으로 돌아간다. B에서 전환 구간의 은닉·연속성과, 릴레이가 상한 초과로 버린 패킷을 잰다.
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::relay_codec::tests::{switches_on_prediction_and_returns_after_hold, measured_over_budget_switches_and_needs_lower_load_to_return, flapping_doubles_hold_and_stability_resets_it}"]
+fn pcm16_relay_budget_switches_to_opus_and_back() {
+    let _g = RT_LOCK.lock();
+    let relay = RelayServer::start();
+    let cfg = EngineConfig { buffer_size: 128, frame_ms: 2.5, codec: CodecKind::Pcm16, channels: 1, input_channels: vec![0], ..Default::default() };
+    let silent = || {
+        let be = FakeBackend::silence(48_000);
+        let sink = be.sink.clone();
+        (be, sink)
+    };
+    let (be_b, sink_b) = silent();
+    let (be_c, _sink_c) = silent();
+    let a = Engine::start(cfg.clone(), Arc::new(sine_backend()), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(cfg.clone(), Arc::new(be_b), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let c = Engine::start(cfg.clone(), Arc::new(be_c), Arc::new(MixControls::default()), Some(("carol".into(), test_net()))).unwrap();
+    // 직접 후보는 아무것도 돌려주지 않는 소켓(대칭형 NAT 흉내) → 릴레이로만 연결
+    let hole = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let cand = |d: &LocalDescriptor| LocalDescriptor {
+        candidates: vec![Candidate { kind: CandidateKind::Lan, addr: hole.local_addr().unwrap().to_string() }],
+        ..d.clone()
+    };
+    let links: Vec<GateProxy> = [&a, &b, &c].iter().map(|e| GateProxy::start(local_addr(e), relay.addr, true, Duration::ZERO)).collect();
+    for (e, l, m) in [(&a, &links[0], "user-alice"), (&b, &links[1], "user-bob"), (&c, &links[2], "user-carol")] {
+        set_relay(e, l.pa, &relay_token(e, m, 600), Some(600)).unwrap();
+    }
+    a.add_peer("bob".into(), &cand(b.descriptor().unwrap())).unwrap();
+    b.add_peer("alice".into(), &cand(a.descriptor().unwrap())).unwrap();
+    let relay_ok = |e: &Engine, id: &str| e.stats().peers.iter().any(|p| p.peer_id == id && p.state == PeerStateKind::Connected && p.path == Some(PathKind::Relay));
+    wait_until(Duration::from_secs(8), || relay_ok(&a, "bob") && relay_ok(&b, "alice")).expect("A↔B 릴레이 연결");
+    wait_sound(&sink_b, 0, Duration::from_secs(3)).expect("B 첫 소리");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(peer_tx(&a, "bob"), (Some(CodecKind::Pcm16), false), "릴레이 피어 1명(≈45%)은 PCM16 그대로");
+    let pcm_one = a.stats().relay.unwrap();
+
+    // C 합류 → 릴레이 피어 2명(≈90%) → Opus 자동 전환
+    let (conc0, prod0) = conceal_ratio(&b);
+    let s0 = sink_b.lock().len();
+    a.add_peer("carol".into(), &cand(c.descriptor().unwrap())).unwrap();
+    c.add_peer("alice".into(), &cand(a.descriptor().unwrap())).unwrap();
+    let t_carol = Instant::now();
+    wait_until(Duration::from_secs(8), || relay_ok(&a, "carol")).expect("A↔C 릴레이 연결");
+    let carol_up = t_carol.elapsed();
+    let switch_after = wait_until(Duration::from_secs(2), || peer_tx(&a, "bob") == (Some(CodecKind::Opus), true)).expect("Opus 자동 전환");
+    assert_eq!(peer_tx(&a, "carol"), (Some(CodecKind::Opus), true));
+    std::thread::sleep(Duration::from_secs(4));
+    let opus_two = a.stats().relay.unwrap();
+    let (conc1, prod1) = conceal_ratio(&b);
+    let seg_on = sink_b.lock()[s0..].to_vec();
+    let cont_on = analyze(&seg_on);
+    let js_on = b.peer_jitter_stats()[0].1;
+    let rate_drops_on = relay.stats.drops(band_relay::DropReason::RateLimited);
+
+    // C 이탈 → 릴레이 피어 1명(≈45% < 80%) → hold 10초 뒤 PCM16 복귀
+    let s1 = sink_b.lock().len();
+    a.remove_peer("carol").unwrap();
+    let t_rm = Instant::now();
+    wait_until(Duration::from_secs(15), || peer_tx(&a, "bob") == (Some(CodecKind::Pcm16), false)).expect("PCM16 복귀");
+    let back_after = t_rm.elapsed();
+    std::thread::sleep(Duration::from_secs(2));
+    let (conc2, prod2) = conceal_ratio(&b);
+    let seg_off = sink_b.lock()[s1..].to_vec();
+    let cont_off = analyze(&seg_off);
+    let js_off = b.peer_jitter_stats()[0].1;
+    let pcm_back = a.stats().relay.unwrap();
+
+    let conceal_on = (conc1 - conc0) as f64 / (prod1 - prod0).max(1) as f64;
+    let conceal_off = (conc2 - conc1) as f64 / (prod2 - prod1).max(1) as f64;
+    println!("=== 릴레이 Opus 자동 전환 (PCM16 mono 2.5ms, 지연 없는 로컬 UDP, debug 빌드) ===");
+    println!("릴레이 피어 1명(PCM16): A 릴레이 송신 {:.0}kbps(초과 {}, autoOpus {})", pcm_one.tx_kbps, pcm_one.over_budget, pcm_one.auto_opus);
+    println!(
+        "C 합류: 릴레이 연결 {carol_up:?} 뒤 {switch_after:?}에 Opus 전환 → 송신 {:.0}kbps(초과 {}, autoOpus {}), 릴레이 상한 초과 폐기 {rate_drops_on}",
+        opus_two.tx_kbps, opus_two.over_budget, opus_two.auto_opus
+    );
+    println!(
+        "전환 구간(B, 약 5초): 버퍼 {:.1}ms(벽시계 {:.1}ms), 은닉 {:.2}%, 연속성 {:.2}%, 최장 무음 {:.0}ms, 무음 {} 불연속 {}",
+        js_on.buffer_ms, js_on.wall_buffer_ms, conceal_on * 100.0, cont_on.sound_ratio * 100.0, cont_on.max_quiet_ms, cont_on.silent_runs, cont_on.discontinuities
+    );
+    println!(
+        "C 이탈: {back_after:?} 뒤 PCM16 복귀 → 송신 {:.0}kbps(autoOpus {}); 복귀 구간 버퍼 {:.1}ms, 은닉 {:.2}%, 연속성 {:.2}%, 최장 무음 {:.0}ms, 불연속 {}",
+        pcm_back.tx_kbps, pcm_back.auto_opus, js_off.buffer_ms, conceal_off * 100.0, cont_off.sound_ratio * 100.0, cont_off.max_quiet_ms, cont_off.discontinuities
+    );
+
+    assert!(!pcm_one.auto_opus && opus_two.auto_opus && !pcm_back.auto_opus);
+    assert!(switch_after < Duration::from_millis(500), "C가 릴레이로 붙은 뒤 곧바로 전환: {switch_after:?}");
+    assert!(opus_two.tx_kbps < pcm_one.tx_kbps * 1.0, "Opus 2명 송신량({:.0}) < PCM 1명({:.0})", opus_two.tx_kbps, pcm_one.tx_kbps);
+    assert!(!opus_two.over_budget);
+    assert_eq!(rate_drops_on, 0, "상한에 닿기 전에 전환하므로 릴레이가 버린 패킷이 없다");
+    assert!(back_after >= Duration::from_secs(10) && back_after < Duration::from_secs(12), "hold 10초 뒤 복귀: {back_after:?}");
+    assert!(conceal_on < 0.01 && conceal_off < 0.01, "전환 구간 은닉 {conceal_on} / {conceal_off}");
+    assert!(cont_on.sound_ratio > 0.97 && cont_off.sound_ratio > 0.97, "연속성 {cont_on:?} / {cont_off:?}");
+    assert!(cont_on.max_quiet_ms < 20.0 && cont_off.max_quiet_ms < 20.0, "전환 구간 무음 {cont_on:?} / {cont_off:?}");
 }
 
 /// 경로 종류 위장(relay-design 4.1): 경로상 공격자가 B의 직접 Hello를 잡아 출발 주소를 A의 릴레이 주소로 바꿔
