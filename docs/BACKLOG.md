@@ -27,7 +27,7 @@
 | P1-1b | PR #13 리뷰 Low: remove_peer 은퇴 처리를 write 락 안으로(잠재 경쟁), 중복 키 add 거부 악용 가용성 방해 대응 | 테스트 | 대기 |
 | P1-1a | **[사람]** Scarlett Solo 4세대 ASIO 실측(버퍼 32/64/128, ASIOGetLatencies 확인, 하드웨어 루프백) + 두 PC 실네트워크·릴레이 에코 측정 — 절차 docs/MEASURE.md | 결과를 백로그 완료 기록에 | 대기 |
 | P1-2 | Windows 실시간 스레드 우선순위: 엔진 워커/수신 스레드에 MMCSS "Pro Audio" 등록, 타이머 해상도 1ms | 루프백 테스트 지터 감소 수치 | 리뷰 반영 완료(PR #31, CI 대기 — 개선은 전부 MMCSS에서 나옴, 타이머 1ms 단독은 효과 없음 → 타이머 제거 검토·Win11 스로틀링은 후속; **[사람]** 실장비에서 threadPriority=mmcss 확인) |
-| P1-3 | UDP 송신 DSCP EF 마킹 + 패킷 페이싱, 송신 큐 지연 측정 | 테스트 + 수치 | 대기 |
+| P1-3 | UDP 송신 DSCP EF 마킹 + 패킷 페이싱, 송신 큐 지연 측정 | 테스트 + 수치 | 진행중(작업자 p1-dscp) |
 | P1-4 | **UDP 릴레이 서버**(fly.io UDP, 방 단위 토큰 인증, 암호문 그대로 중계) + 엔진 폴백 경로 | 홀펀칭 실패 시뮬레이션에서 릴레이로 연결, 지연 표시 | P1-4a 완료(#1), P1-4b 완료(#10); **[사람]** fly 전용 IPv4(유료), 실네트워크는 P1-4d |
 | P1-4c | 릴레이 경로 대역 초과 시 Opus 자동 전환(워커 코덱 전환) + RelayBind MAC(relay-design 4.1 등록 가로채기·경로 위장 대응) | 통합 테스트 | 대기 |
 | P1-4d | **[사람]** 실네트워크(대칭형 NAT/LTE) + 시계 오차 PC에서 릴레이 경유 10분 연주 확인 | 연결 성공·끊김 기록 | 대기 |
@@ -82,7 +82,7 @@
 | P3-8 | 공용 UI 컴포넌트/디자인 토큰 정리 | 중복 CSS 감소 (PR #22 후속 Nit 포함: pageTitle 경로 표와 App 라우트 정의 단일화, App.css .live-room 중복 정리) | 완료(PR #24, 2026-11-11) |
 | P3-12 | **웹 점검 발견 사항 정리**(ego-browser, 2026-11-10): ① 탭 제목 "Vite + React + TS" → 서비스명 ② BandSpace/IndigoMuse 이름 통일(결정 필요 시 [결정]으로 묻기 — 기본은 IndigoMuse) ③ 홈 문구 사실과 다름(평균 왕복 18ms·KR/JP/US 3지역·서울/도쿄/LA 리전·20ms 이하·SYNCROOM 명시) → 측정 전에는 사실만 ④ 웹 관람 안내에 데스크톱 다운로드 버튼(VITE_DESKTOP_DOWNLOAD_URL, 비면 '준비 중') ⑤ 커뮤니티 목록 항목이 링크가 아닌 div 클릭(새 탭·접근성 불가) → <a>/<Link> ⑥ /profile, /payment(파라미터 없음)에서 렌더 중 navigate() 경고 → effect로 ⑦ 404 페이지 없음(없는 경로에서 빈 화면) ⑧ 방 최대 인원 선택지 2~20명 vs 연주자 최대 6명 — 관람 포함 의미인지 UI 문구 명확화 ⑨ 합주실 채팅 입력창이 첫 화면 아래(스크롤 필요) ⑩ [버그] 로그인 상태로 /payment?plan= 직접 진입 시 /auth를 거쳐 /로 튕김(E2E test.fixme — 고치면 fixme 해제) ⑪ 결제 약관 체크박스 display:none으로 접근성 없음 | lint/test + ego-browser 재점검 | 완료(#22) |
 | P3-12a | **[결정]** 서비스 문의 메일(현재 support@bandspace.com 표기)과 요금제 문구('최대 8명' 등)를 무엇으로 할지, 데스크톱 앱 이름(tauri productName 'Band')을 IndigoMuse로 바꿀지 | 사용자 결정 | 대기 |
-| P3-12b | 방 max_participants를 서버가 강제(입장 시 정원 초과 거부) — 현재 클라이언트 표시만 | 서버 테스트 | 진행중(PR #23: 리뷰 반영·로컬 검증 녹색 — server 325, vitest 335, e2e 17; CI 대기; **[사람]** 데스크톱에서 정원 초과 재입장 시 엔진 해제 확인) |
+| P3-12b | 방 max_participants를 서버가 강제(입장 시 정원 초과 거부) — 현재 클라이언트 표시만 | 서버 테스트 | 완료(PR #23, 2026-11-11; **[사람]** 데스크톱에서 정원 초과 재입장 시 엔진 해제 확인) |
 | P3-12c | ego-browser 웹 재점검(PR #22 반영분) — 로컬 서버+빌드로 홈·합주실·커뮤니티·결제·404 화면 확인 | 화면 점검 | 대기 |
 | P3-9 | (메모) 작업자 3명 이상으로 늘릴 때 빌드 환경: 현재는 워크트리 공유 target(`.cargo-target`, 디스크 10~15GB, 동시 빌드는 잠금 대기). 확장 시 sccache(RUSTC_WRAPPER) + 워크트리별 target + 작업 종료 시 target 자동 삭제를 함께 적용 | 확장 결정 시 | 보류(메모) |
 | P3-10 | **저장소 추상화 + R2 이전 준비**(Supabase 무료 Storage 1GB·Egress 5GB 한도 대응): 서버에 S3 호환 저장소 어댑터(Supabase Storage / Cloudflare R2 / Garage를 env로 선택), 업로드·다운로드는 서명 URL, 게시글 이미지도 서버 발급 서명 URL로 업로드(클라이언트 직접 업로드 제거), 스템 정리·삭제 경로 전환, 기존 파일 이전 스크립트(드라이런 기본) | env 전환만으로 저장소 교체, 테스트(로컬 S3 대역 MinIO 또는 mock) | 완료(#21; 운영 전환은 P3-10a~c) |
@@ -90,7 +90,7 @@
 | P3-10b | **[사람]** 서버를 s3로 전환한 뒤 `npm run migrate:storage` 드라이런 → `--apply` → 앱에서 스템·이미지 확인 → `--delete-source`. **(필수)** supabase 드라이버로 운영하는 동안 post-images·audio-stems 버킷 file_size_limit 5MB·allowed_mime_types 설정(PR #21 리뷰), 새 클라이언트 배포 후 post-images INSERT 정책 제거 · 고아 이미지 정리는 드라이런 로그 확인 후 POST_IMAGE_ORPHAN_CLEANUP=1 · 원본 삭제(--delete-source) 전 post-images INSERT 정책 제거 또는 예전 클라이언트 강제 업데이트 | 이전 완료 | 대기 (P3-10a 후) |
 | P3-10c | **[사람]** 실제 Cloudflare R2(및 원하면 Garage) 버킷으로 업로드·서명 GET/PUT·CORS·이전 스크립트 드라이런 호환 확인 | 실서비스 호환 확인 | 대기 (P3-10a 후) |
 | P3-10d | 게시글 이미지 검증 완전 강제: 게시글 쓰기를 서버 API로 이전하거나 posts.images가 검증 완료 키만 담도록 DB 트리거(새 마이그레이션 파일만, 운영 실행은 [확인]) — PR #21 M3 잔여 | 테스트 | 완료(PR #25, 2026-11-11) — 운영 반영은 P3-10e |
-| P3-10g | PR #23·#25 후속(Low): max_participants DB CHECK(2~20) 새 마이그레이션, 다중 서버 인스턴스에서 정원 일관성, 정원 선택지 범위 결정, PUBLIC_API_URL 필수화, 이메일 표시명 노출 정리, 사용자별 글쓰기 상한, 업로드 검증 기록 방식 정리, getApiUrl 공용화 | 테스트 | 대기 |
+| P3-10g | PR #23·#25 후속(Low): max_participants DB CHECK(2~20) 새 마이그레이션, 다중 서버 인스턴스에서 정원 일관성, 정원 선택지 범위 결정, PUBLIC_API_URL 필수화, 이메일 표시명 노출 정리, 사용자별 글쓰기 상한, 업로드 검증 기록 방식 정리, getApiUrl 공용화 | 테스트 | 진행중(작업자 p3-followup) |
 | P3-10e | **[확인]** 운영 DB에 `012` 실행(게시글 직접 쓰기 차단 RLS) — 순서: 서버 배포 → 새 클라이언트 배포·구버전 소멸 → README 012 절. P3-10b의 post-images INSERT 정책 제거와 함께 해야 이미지 검증이 완전 | 실행 후 확인 쿼리 | 대기([사람] 운영 컷오버 때: 서버 배포 → 새 클라이언트 배포 → 012) |
 | P3-10f | [버그] /community/create·/community/edit/:id 직접 진입 시 /auth로 튕김(P3-12 ⑩ 결제 리다이렉트와 같은 계열) + e2e 고정 포트 47173 때문에 여러 워크트리 동시 e2e가 간헐 실패 → 포트를 워크트리별로 할당(빈 포트 탐색 + strictPort) | e2e | 진행중(PR #27 리뷰; e2e 44, 수정 전 코드에서 새 e2e 3개 실패 확인) |
 | P3-11 | **개발용 DB 분리**: 운영과 별도 Supabase 프로젝트를 개발·E2E·CI용으로 사용 — 마이그레이션 001~최신을 순서대로 적용하는 스크립트(`npm run db:migrate`, 대상 DATABASE_URL 확인 프롬프트·운영 URL 차단 가드), 시드 데이터, client/server .env 개발/운영 분리 가이드, **E2E를 dev DB로 실행하는 모드(mock E2E는 RLS를 검증하지 못함 — PR #19 리뷰 M2)** | dev 프로젝트에 전체 마이그레이션 적용·시드·앱 동작 | 대기 (**[사람]** 개발용 Supabase 프로젝트 생성 후) |
