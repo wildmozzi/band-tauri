@@ -10,6 +10,8 @@ export interface RoomMeta {
   hasPassword?: boolean
   /** room_secrets의 비밀번호 해시 (없으면 null). 서버 메모리에서만 쓰고 클라이언트에 보내지 않는다 */
   passwordHash?: string | null
+  /** rooms.max_participants(관람 포함 정원). 없거나 잘못된 값이면 undefined → 서버 기본 상한만 적용 */
+  maxParticipants?: number
 }
 
 export interface NewRoom {
@@ -67,22 +69,27 @@ export function createRoomRepository(supabase: SupabaseClient): RoomRepository {
     async findMeta(roomId) {
       let res = await supabase
         .from('rooms')
-        .select('host_id, free_join, is_private, has_password')
+        .select('host_id, free_join, is_private, has_password, max_participants')
         .eq('id', roomId)
         .maybeSingle()
       if (res.error && res.error.code && UNDEFINED_COLUMN.has(res.error.code)) {
-        res = await supabase.from('rooms').select('host_id, free_join').eq('id', roomId).maybeSingle()
+        res = await supabase.from('rooms').select('host_id, free_join, max_participants').eq('id', roomId).maybeSingle()
       }
       const { data, error } = res
       if (error) throw toRepositoryError(error, 'rooms.findMeta')
       if (!data) return null
-      const row = data as { host_id?: string | null; free_join?: boolean | null; is_private?: boolean | null; has_password?: boolean | null }
+      const row = data as {
+        host_id?: string | null; free_join?: boolean | null; is_private?: boolean | null; has_password?: boolean | null
+        max_participants?: number | null
+      }
+      const max = row.max_participants
       return {
         hostId: row.host_id ?? null,
         freeJoin: row.free_join !== false,
         isPrivate: row.is_private === true,
         hasPassword: row.has_password === true,
         passwordHash: await findPasswordHash(roomId),
+        maxParticipants: typeof max === 'number' && Number.isInteger(max) && max > 0 ? max : undefined,
       }
     },
 
