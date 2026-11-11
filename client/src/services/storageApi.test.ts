@@ -7,7 +7,7 @@ vi.mock('../lib/authHeaders', () => ({
   authHeaders: async () => ({ Authorization: 'Bearer tok' }),
 }))
 
-import { absoluteImageUrl, checkPostImage, resolvePostImages, uploadPostImage, POST_IMAGE_MAX_BYTES } from './storageApi'
+import { absoluteImageUrl, checkPostImage, uploadPostImage, POST_IMAGE_MAX_BYTES } from './storageApi'
 
 const png = (size = 8) => new File([new Uint8Array(size)], 'a.png', { type: 'image/png' })
 
@@ -101,34 +101,5 @@ describe('uploadPostImage', () => {
     const f = vi.fn()
     await expect(uploadPostImage(new File(['x'], 'x.txt', { type: 'text/plain' }), f as unknown as typeof fetch)).rejects.toThrow()
     expect(f).not.toHaveBeenCalled()
-  })
-})
-
-describe('resolvePostImages (P3-10 리뷰2 M1·M3)', () => {
-  beforeEach(() => { vi.stubEnv('VITE_API_URL', 'https://api.example') })
-  afterEach(() => { vi.unstubAllEnvs() })
-
-  it('sends the URLs to the server and stores only what it returns, as absolute URLs', async () => {
-    const f = vi.fn(async () => json(200, {
-      success: true,
-      urls: ['/api/storage/post-images/u/1.png', 'https://elsewhere/x.png'],
-      rejected: [{ url: 'https://x.supabase.co/storage/v1/object/public/post-images/pending/u/2.png', reason: '검증되지 않은 업로드입니다.' }],
-    }))
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const out = await resolvePostImages(['a', 'b', 'c'], f as unknown as typeof fetch)
-    expect(out).toEqual(['https://api.example/api/storage/post-images/u/1.png', 'https://elsewhere/x.png'])
-    const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit]
-    expect(url).toBe('https://api.example/api/storage/post-images/resolve')
-    expect(JSON.parse(String(init.body))).toEqual({ urls: ['a', 'b', 'c'] })
-    expect(warn).toHaveBeenCalled()
-    warn.mockRestore()
-  })
-
-  it('skips the call for no images and throws when the server refuses', async () => {
-    const f = vi.fn()
-    expect(await resolvePostImages([], f as unknown as typeof fetch)).toEqual([])
-    expect(f).not.toHaveBeenCalled()
-    const bad = vi.fn(async () => json(500, { success: false, error: '이미지를 확인하지 못했습니다.' }))
-    await expect(resolvePostImages(['a'], bad as unknown as typeof fetch)).rejects.toThrow('확인하지 못했습니다')
   })
 })

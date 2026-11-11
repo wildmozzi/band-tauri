@@ -36,6 +36,7 @@ test.describe('커뮤니티', () => {
     let held = mock.supabase.hold('GET', 'post_likes')
     await listLike.click()
     await expect(listLike).toHaveText(`💖 ${DRUM_POST.likes_count + 1}`)
+    await held.arrived() // 요청이 mock에 닿을 때까지 (동기 검사는 경합)
     expect(held.waiting()).toBe(1)
     expect(state()).toMatchObject({ aliceLiked: false, likesCount: DRUM_POST.likes_count })
     held.release()
@@ -51,6 +52,7 @@ test.describe('커뮤니티', () => {
     held = mock.supabase.hold('GET', 'post_likes')
     await detailLike.click()
     await expect(detailLike).toHaveText(`🤍${DRUM_POST.likes_count}`)
+    await held.arrived()
     expect(held.waiting()).toBe(1)
     held.release()
     await expect.poll(state).toMatchObject({ aliceLiked: false, likesCount: DRUM_POST.likes_count })
@@ -123,5 +125,39 @@ test.describe('커뮤니티', () => {
     expect(rows[1].author_id).toBe(BOB.id)
     // comments_count는 DB 트리거(migration 010)가 집계한다
     expect(mock.supabase.db.table('posts').find(p => p.id === GUITAR_POST.id)?.comments_count).toBe(2)
+  })
+})
+
+test.describe('커뮤니티 글쓰기 (P3-10d: 서버 API)', () => {
+  test('글 작성·수정은 서버 API로 하고 posts를 직접 쓰지 않는다', async ({ page, mock }) => {
+    await mock.loginAs(ALICE)
+    // 글쓰기·수정 화면 직접 진입은 세션 복원 전 user=null이면 /auth로 보낸다(P3-12 ⑩과 같은 종류) → 화면 이동으로 들어간다
+    await page.goto('/community')
+    await page.getByRole('button', { name: '✏️ 글 작성' }).click()
+    await page.getByPlaceholder('게시물 제목을 입력하세요').fill('  새 합주 멤버 모집  ')
+    await page.getByPlaceholder('게시물 내용을 입력하세요').fill('토요일 저녁 합주')
+    await page.getByRole('button', { name: '게시하기' }).click()
+    await expect(page).toHaveURL(/\/community$/)
+    await expect(page.getByText('새 합주 멤버 모집')).toBeVisible()
+
+    const created = mock.api.callsTo('POST', '/api/posts')
+    expect(created).toHaveLength(1)
+    expect(created[0]).toMatchObject({ userId: ALICE.id, body: { title: '새 합주 멤버 모집', content: '토요일 저녁 합주', images: [] } })
+    expect((created[0].body as Record<string, unknown>).author_id).toBeUndefined()
+    expect(mock.supabase.db.table('posts')[0]).toMatchObject({ author_id: ALICE.id, author_name: ALICE.nickname })
+
+    await page.getByText(GUITAR_POST.title).click()
+    await page.getByRole('button', { name: '수정', exact: true }).click()
+    await expect(page).toHaveURL(new RegExp(`/community/edit/${GUITAR_POST.id}$`))
+    const title = page.getByPlaceholder('게시물 제목을 입력하세요')
+    await expect(title).toHaveValue(GUITAR_POST.title)
+    await title.fill('기타 톤 질문 (해결)')
+    await page.getByRole('button', { name: '수정 완료' }).click()
+    await expect(page).toHaveURL(new RegExp(`/community/${GUITAR_POST.id}$`))
+    await expect(page.getByRole('heading', { level: 1, name: '기타 톤 질문 (해결)' })).toBeVisible()
+    expect(mock.api.callsTo('PUT', `/api/posts/${GUITAR_POST.id}`)).toHaveLength(1)
+
+    // 클라이언트가 posts에 직접 INSERT/UPDATE하지 않았다 (마이그레이션 012 후에는 거부된다)
+    expect(mock.supabase.db.count('POST', 'posts') + mock.supabase.db.count('PATCH', 'posts')).toBe(0)
   })
 })

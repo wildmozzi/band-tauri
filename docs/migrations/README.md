@@ -126,6 +126,66 @@ SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
  WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity;
 ```
 
+## 🖼️ 012: 게시글 쓰기를 서버 API로만 (P3-10d)
+
+`012_posts_server_writes.sql` — **운영 실행은 사람 승인 후, 새 클라이언트 배포 후에만**. 재실행 안전.
+
+게시글 작성·수정은 서버 API(`POST /api/posts`, `PUT /api/posts/:id`)가 이미지 참조를 검증한 뒤 service_role로 쓴다
+(`posts.images`에 검증 완료 업로드만 — 외부 URL·남의 이미지·미검증 업로드 거부). 012는 클라이언트(anon/authenticated)의
+posts INSERT/UPDATE 정책과 권한을 없앤다. 조회·삭제·좋아요·댓글은 그대로 클라이언트가 한다.
+
+### ⚠️ 운영 실행 체크리스트 (012 + P3-10b 버킷 정책 — 하나의 묶음, 반드시 이 순서)
+
+예전 클라이언트는 posts를 직접 INSERT/UPDATE하고, post-images 버킷에도 직접 올린다.
+**012를 먼저 실행하면 그 클라이언트의 글쓰기·글 수정이 전부 실패한다.**
+**버킷 INSERT 정책이 남아 있으면 012 뒤에도 "최종 경로에 있음 = 서버 검증 통과"가 성립하지 않는다** — 사용자가 본인 폴더에
+서버 형식 이름으로 아무 바이트(매직바이트·크기 검사 없이)를 직접 올린 뒤 `/api/posts`에 붙일 수 있다(supabase 드라이버로 운영하는 동안).
+그래서 012와 버킷 정책 제거(P3-10b의 해당 항목)는 같은 사람 확인 묶음으로 실행한다.
+
+**실행 전 조건** (모두 체크돼야 4단계로 간다)
+
+1. [ ] 서버 배포 (`/api/posts` 포함) — 012 전에도 새 API는 동작한다(service_role)
+2. [ ] 새 클라이언트 배포: 데스크톱(Tauri) 업데이트와 웹 관람 빌드, **indigomuse.art의 band-web 구버전 포함**
+3. [ ] 구버전이 충분히 사라졌는지 확인. 판단 기준(둘 다):
+   - 배포 후 최소 7일 경과, 그리고 최근 3일 동안 새로 생긴 `posts` 행 수가 같은 기간 서버 로그의 `POST /api/posts` 201 응답 수와 같다
+     (직접 INSERT한 글이 없다). `SELECT count(*) FROM posts WHERE created_at > now() - interval '3 days';`
+   - 데스크톱 최소 버전을 강제(업데이트 필수)했다면 그 시점 이후로 충분하다
+4. [ ] 데이터 확인: 새 입력 규칙을 넘는 예전 글 수(참고용 — 서버는 이런 글도 바뀌지 않은 값은 그대로 두고 수정할 수 있게 한다)
+   ```sql
+   SELECT count(*) FROM posts
+    WHERE length(title) > 200 OR length(content) > 20000
+       OR cardinality(tags) > 20 OR cardinality(images) > 5
+       OR instrument NOT IN ('vocal','guitar','bass','keyboard','drums','other')
+       OR category NOT IN ('session','collab','beta','feedback','general');
+   ```
+
+**실행** (같은 작업 창에서 연달아)
+
+5. [ ] post-images 버킷 INSERT 정책 제거 (P3-10b): Storage 정책 확인 → 쓰기 정책 삭제
+   ```sql
+   SELECT policyname, cmd, roles FROM pg_policies
+    WHERE schemaname = 'storage' AND tablename = 'objects' AND cmd IN ('INSERT', 'UPDATE', 'ALL')
+      AND (coalesce(qual, '') || coalesce(with_check, '')) ILIKE '%post-images%';
+   -- 나온 정책마다: DROP POLICY "<policyname>" ON storage.objects;
+   ```
+   (서버 업로드는 service_role이라 영향 없음. 버킷 file_size_limit 5MB·allowed_mime_types는 P3-10b 다른 항목)
+6. [ ] 012를 실행한다. `FOR ALL policy` 오류가 나면 그 정책을 검토(쓰기 허용 여부)한 뒤 다시 실행
+
+**확인**
+
+7. [ ] 확인 쿼리(012 파일 끝): posts INSERT/UPDATE 정책 0개, anon/authenticated INSERT·UPDATE 권한 false
+8. [ ] 5단계 조회를 다시 실행해 0행인지 확인
+9. [ ] 감사: 012 이전에 직접 쓴 미검증 이미지 참조 수 (0이 아니면 해당 글을 검토)
+   ```sql
+   SELECT id, author_id, images FROM posts p
+    WHERE EXISTS (
+      SELECT 1 FROM unnest(p.images) AS u(url)
+       WHERE u.url NOT LIKE '%/post-images/' || p.author_id || '/%'
+    );
+   ```
+
+참고: 012 전까지는 예전 클라이언트가 여전히 posts를 직접 쓸 수 있다(검증 우회 가능). 그 기간에 쓴 참조는 수정 시 "기존 이미지"로 유지된다 → 9단계로 확인.
+
 ## 🔄 롤백 (필요시)
 
 마이그레이션을 되돌려야 하는 경우:
