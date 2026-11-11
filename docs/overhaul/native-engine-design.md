@@ -28,6 +28,8 @@ engine/mixer.rs        피어별 gain/mute, 모니터, 마스터, 클리핑 방�
 engine/stats.rs        원자적 통계 (레벨, xrun, 피어별 RTT/지터/손실/버퍼)
 engine/measure.rs      지연 측정(P1-1): 하드웨어 루프백(처프·FFT 상호상관), 에코 피어 클릭 측정·분석
 engine/metronome.rs    공유 메트로놈(P2-3): 계획·검증, 박 스케줄러(워커), 클릭 생성기(출력 콜백, 1.4절)
+engine/record.rs       합주 녹음(P2-4): 출력 콜백 녹음 링·핸드오프, 트랙 쓰기 스레드(1.5절)
+engine/wav.rs          녹음 파일: WAV 24비트/float32, 4GB 넘으면 RF64(1.5절)
 net/mod.rs             UDP 소켓, 송수신 스레드
 net/clock.rs           피어 시계 오프셋 추정(P2-3): Ping/Pong NTP식 표본, 버킷 최소 RTT + 가중 직선(드리프트)
 net/packet.rs          패킷 직렬화/역직렬화 (아래 2절)
@@ -48,7 +50,7 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 | 스레드 | 하는 일 | 금지 |
 |---|---|---|
 | 입력 콜백 (RT) | 장치 샘플 → 채널 라우팅 → `f32` SPSC 링(사전할당)에 push, 레벨 원자값 갱신. 시작·끝 시각(`Instant::now` = QPC)으로 실행시간을 원자 칸에 기록(P1-10) | 할당, 락, 시스템콜, println |
-| 출력 콜백 (RT) | **콜백 구동 믹스**: 소스 링(로컬 1개 + 피어별 1개, 사전할당 SPSC)에서 필요한 프레임만큼 꺼내 게인·팬(원자값)을 곱해 섞고, 마스터·soft clip 후 장치 포맷/채널 수로 기록. 메트로놈 클릭(1.4절)은 장치 출력에만 더한다. 믹스 탭 링에도 쓴다(클릭 없음). 재생 중인 소스가 모자라면 0을 채우고 소스별 언더런 프레임과 xrun을 원자 증가. 실행시간을 원자 히스토그램에 기록(P1-10) | 동일 |
+| 출력 콜백 (RT) | **콜백 구동 믹스**: 소스 링(로컬 1개 + 피어별 1개, 사전할당 SPSC)에서 필요한 프레임만큼 꺼내 게인·팬(원자값)을 곱해 섞고, 마스터·soft clip 후 장치 포맷/채널 수로 기록. 메트로놈 클릭(1.4절)은 장치 출력에만 더한다. 믹스 탭 링에도 쓴다(클릭 없음). 녹음 중이면 소스별 샘플(게인 전)과 탭 버스를 녹음 링에도 쓴다(1.5절). 재생 중인 소스가 모자라면 0을 채우고 소스별 언더런 프레임과 xrun을 원자 증가. 실행시간을 원자 히스토그램에 기록(P1-10) | 동일 |
 | engine 워커 (비RT, 1개) | 입력 링 → (리샘플) → 프레임 단위 인코드 → 피어별 암호화/송신(send_to 완료마다 송신 큐 지연을 원자 히스토그램에 기록, 3절 8). 피어마다 지터 버퍼에서 디코드한 PCM을 (리샘플해) 그 피어의 소스 링에 공급하고, 로컬 FIFO에서 로컬 소스 링을 채운다 | — |
 | net 수신 스레드 | recv → 복호화/검증 → 피어별 지터 버퍼에 삽입(피어별 `Mutex`는 비RT 스레드끼리만 공유하므로 허용) | — |
 | net 제어 스레드 | 홀펀칭, keepalive(1초), ping/pong(500ms), 타임아웃(5초), DSCP 마킹 플로 동기화(qWAVE 시스템 호출), 송신 큐 지연 창 회전(2초) | — |
@@ -165,6 +167,41 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 - 숨은 출력 지연(M2): 한쪽 10ms, 드라이버 보고 → **최대 0.14ms**. 보고 없음 → 평균 +9.97ms(그대로 어긋남, 위 한계).
 - 콜백 공백(M3): 따르는 쪽 장치 300ms 정지 후 재개 → 재개 0.6초 뒤부터 **최대 0.51ms**, 공백 중 클릭 1개 건너뜀.
 - 시뮬레이션이 덮지 않는 것: 드라이버가 보고하지 않는 숨은 출력 지연과 경로 비대칭. 피어마다 다르면 그만큼 어긋난다. 실장비 2대 청취 확인은 [사람] 항목이다.
+
+### 1.5 합주 녹음 (P2-4, `engine/record.rs`, `engine/wav.rs`)
+
+로컬 멀티트랙: **내 입력 1개 + 피어마다 1개 + (선택) 믹스 1개**를 세션 폴더에 WAV로 저장한다. 녹음은 각자 자기 엔진에서 한다(네트워크로 오디오를 더 보내지 않음).
+
+**무엇을 녹음하나 — 내 출력 타임라인 그대로**
+- 출력 콜백이 소스 링에서 꺼낸 샘플(1.1절 콜백 구동 믹스)을 **게인·팬·뮤트 전**에 그대로 녹음한다. 피어 트랙에는 지터 버퍼 은닉(PLC)·링 부족 0 채움까지 내가 들은 그대로 들어간다. 내 입력 트랙은 로컬 소스(모니터·탭 경로, 입력 뮤트면 무음)다.
+- 믹스 트랙은 믹스 탭 버스(피어 게인·팬 + 내 입력, soft clip)와 같다. **메트로놈 클릭은 어느 트랙에도 없다**(클릭은 장치 출력에만, 1.4절). 측정 자극도 없다.
+- 시간 정렬: 모든 트랙이 출력 타임라인(`out_played_frames`)을 공유한다. 청크 머리에 타임라인 위치가 있어 쓰기 스레드가 트랙 길이를 그 위치에 맞춰 무음으로 채운다. 그래서 늦게 들어온 피어는 앞이 무음이고, 나갔다 다시 들어온 같은 peerId는 같은 트랙에 이어 쓰며(사이는 무음), 정지하면 모든 트랙이 같은 길이다.
+- 내 입력은 모니터 경로 지연(`monitorLatencyMs`의 입력 버퍼 + 로컬 FIFO 몫)만큼, 피어는 입→귀 지연만큼 원 연주보다 늦게 기록된다. "내가 들은 합주"의 정렬이다.
+- 파일 레이트 = 출력 장치 레이트(48k가 아니어도 리샘플하지 않음), 2채널(모노 설정이면 L=R).
+
+**RT 경로(출력 콜백)**
+- 녹음 링(샘플 f32, 청크 머리 `RecBlock`)은 **녹음을 시작할 때** 비RT에서 할당한다(3초 × 장치 레이트 × 2ch × (소스 8 + 믹스 1), 48k에서 약 10MB). 용량 1 핸드오프 링으로 콜백에 넘긴다.
+- 콜백은 주기 시작에 핸드오프를 한 번 본다(`try_pop`). 청크마다 최악의 경우(모든 슬롯 + 믹스)만큼 자리가 있을 때만 그 청크를 쓰고, 없으면 청크를 통째로 버리고 `droppedFrames`만 올린다(머리가 없으니 쓰기 스레드가 무음으로 채움 → 타임라인 유지). 할당·락·시스템콜·로그 없음.
+- 슬롯 점유자는 `SourceShared.occupant`(피어 ssrc, 로컬 0)다. 워커가 슬롯을 `ACTIVE`로 바꾸기 전에 넣는다.
+- 정지: 제어 쪽이 `detach`를 켜면 콜백이 다음 주기 시작에 녹음 끝점을 반환 링으로 돌려준다(링 해제도 비RT). 1초 안에 안 돌아오면(장치 정지) 쓰기 스레드는 남은 것을 비우고 닫는다. 그 끝점이 돌아오기 전에는 새 녹음을 시작하지 않는다(에러).
+
+**쓰기 스레드**(`band-record`, 20ms마다)
+- 블록 순서대로 슬롯별 샘플을 꺼내 트랙에 쓴다. 트랙은 처음 나타날 때 만든다. 피어 이름은 ssrc → peerId(지금 피어 테이블, 없으면 이미 빠진 피어의 ssrc 기록 `NetShared::peer_id_for_ssrc` — 블록을 늦게 비워도 떠난 피어가 `ssrc-…` 트랙으로 갈라지지 않음, PR #47 M3) → `trackNames[peerId]`(없으면 peerId 앞 8자). 녹음 중에 `engine_record_set_track_names`로 이름을 더할 수 있고, 이름 없이 만든 피어 트랙은 정지 때(파일을 닫은 뒤) `NN-새이름.wav`로 바꾼다(같은 이름 파일이 있거나 실패하면 그대로). 파일 이름 `NN-이름.wav`, 믹스는 `00-mix.wav`.
+- 트랙 파일을 **만들지** 못하면(백신·인덱서의 순간 잠금, 이름 문제 등) `error`에 그 파일을 남기고 **그 트랙만** 뺀다(다시 시도하지 않음). 나머지 트랙은 계속 쓴다(PR #47 M2).
+- **쓰기** 실패(디스크 가득 등)면 `error`를 남기고 모든 파일을 닫은 뒤 이후 블록은 버리기만 한다(콜백에는 영향 없음). 닫을 때 버퍼에 남은(못 쓴) 데이터는 버리고, 디스크에 실제로 있는 프레임(프레임 경계로 내림)으로 헤더 크기를 고친 뒤 파일을 그 길이로 자른다(헤더 덮어쓰기는 새 공간이 필요 없음, PR #47 M1).
+- 정지 시 모든 트랙을 같은 길이로 맞추고, 세션 폴더에 `session.json`(= `RecordSummary`)을 쓴다.
+- 엔진 정지(`engine_stop`, 앱 종료)는 녹음을 먼저 마무리한 뒤 오디오를 닫는다.
+
+**파일 형식**(`wav.rs`)
+- `wav24`(기본, 24비트 정수 PCM, ±1 밖은 자름) 또는 `wavF32`(32비트 float, fmt 18바이트 + fact). 48k 스테레오 24비트 = 1시간 약 1.04GB/트랙.
+- 4GB 한계: 헤더에 `JUNK`(28바이트)를 미리 둔다. RIFF 크기가 u32를 넘으면 마무리할 때 `RF64` + `ds64`(EBU Tech 3306)로 제자리에서 바꾼다. 4GB 아래는 보통 WAV다.
+- 쓰는 동안 5초마다 헤더 크기를 고쳐 쓴다. 앱이 죽어도 그때까지는 읽힌다.
+- FLAC은 넣지 않았다(순수 Rust 인코더 크레이트의 품질·라이선스 검토가 필요, 후속).
+- 은닉(PLC) 구간 마커 사이드카는 아직 없다(후속).
+
+**저장 폴더**: 폴더는 Rust 폴더 대화상자(`engine_record_pick_folder`)로만 정한다(프론트가 임의 경로를 넘기지 않음, `diag_export`와 같은 원칙). 고른 폴더는 앱 설정 폴더 `recording.json`에 남고, 고른 적이 없으면 음악 폴더/`Band Recordings`다. 세션 폴더 이름은 `RecordOptions.name`(Windows 금지 문자 → `_`, 예약 이름 앞에 `_`, 60자) 또는 `band-rec-<UTC 시각>Z`이고, 같은 이름이 있으면 ` (2)`를 붙인다.
+
+**검증**: `engine::record::tests`(타임라인 정렬·늦은 피어 무음·버린 청크·핸드오프 반환), `engine::wav::tests`(헤더·RF64·디스크 가득 후 헤더 = 실제 프레임), `engine::record::tests::one_track_create_failure_keeps_others`·`late_track_names_apply`, `tests/peer_key.rs` `removed_peer_ssrc_still_resolves`, `tests/record.rs`(가짜 장치 두 엔진 실녹음, 엔진 정지 시 마무리). 실시간 비교(`recording_does_not_change_buffer_concealment_or_xruns`, ignore): 녹음(믹스 포함, float) 켬/끔 8초씩 — 128/2.5ms에서 bufferMs 5.88 → 6.10ms, 은닉 0 → 0, xrun 0 → 0, 버림 0. 256/5ms에서 8.18 → 8.24ms, 0 → 0, 0 → 0, 버림 0.
 
 ## 2. 패킷 포맷 (`net/packet.rs`)
 
@@ -306,9 +343,14 @@ type QosMarking = 'pending' | 'ef' | 'voice' | 'none'
 interface QosStats { marking: QosMarking; ipTos: boolean; qwave: boolean; flows: number; efFlows: number; failed: number; lastError: string | null }
 interface SendQueueStats { p50Ms: number; p99Ms: number; maxMs: number; packets: number }
 interface CpuStats { workerPct: number | null; callbackLoadPct: number; callbackP50Us: number; callbackP99Us: number; callbackMaxUs: number; callbackP99PeriodPct: number; inputCallbackMaxUs: number; callbacks: number; windowMs: number }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null; cpu: CpuStats }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null; recording: RecordStats | null; cpu: CpuStats }
 type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
 interface ThreadPriorityStats { worker: ThreadPriority; netRecv: ThreadPriority; audio: ThreadPriority; timer1ms: boolean }
+type RecordFormat = 'wav24' | 'wavF32'
+interface RecordOptions { format?: RecordFormat; includeMix?: boolean; name?: string; localName?: string; trackNames?: Record<string, string> }  // 1.5절, 모두 선택
+interface RecordStats { folder: string; format: RecordFormat; sampleRate: number; durationSec: number; bytes: number; tracks: number; droppedFrames: number; error: string | null }
+interface RecordTrack { kind: 'local' | 'peer' | 'mix'; name: string; file: string; peerId: string | null }
+interface RecordSummary { folder: string; format: RecordFormat; sampleRate: number; channels: number; durationSec: number; bytes: number; droppedFrames: number; startedAtMs: number; tracks: RecordTrack[]; error: string | null }
 interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
 interface MetronomePlan { running: boolean; bpm: number; beatsPerBar: number; startUs: number; refPeerId: string | null }
 interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; outputLatencyMs: number | null }
@@ -333,6 +375,11 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_set_metronome` | `{ metronome: MetronomeConfig }` | `MetronomePlan` — 공유 메트로놈(P2-3, 1.4절). 방장은 `refPeerId` 없이 부른다(`startUs`를 비우면 지금 + 300ms, 반환한 `startUs`를 방에 알린다). 다른 연주자는 `refPeerId` = 방장 엔진 peerId, `startUs` = 방장이 알린 값으로 부른다(그때 `startUs` 필수). 기준 피어가 아직 없거나 시계 표본이 없으면 `synced=false`로 기다린다. 네트워크 없는 엔진(테스트 모드)은 `refPeerId` 없이만 된다(혼자 연습). 다시 부르면 새 계획으로 바로 바뀐다 |
 | `engine_set_metronome_gain` | `{ gain: number, muted: boolean }` | `null` — 클릭 볼륨(0..4, 기본 0.8)·뮤트. 내 장치 출력에만 적용(믹스 탭·방송·녹음에는 클릭이 없음), 엔진 재시작 간 유지 |
 | `engine_stats` | — | `EngineStats` |
+| `engine_record_folder` | — | `string` — 현재 녹음 저장 폴더(고른 폴더, 없으면 음악 폴더/`Band Recordings`). 1.5절 |
+| `engine_record_pick_folder` | — | `string \| null` — 폴더 대화상자(호출한 창에 모달). 고른 폴더를 앱 설정에 남기고 돌려준다. 취소하면 `null`. 경로는 프론트가 넘기지 않는다 |
+| `engine_record_start` | `{ options?: RecordOptions }` | `RecordStats` — 합주 녹음 시작(P2-4, 1.5절). 실행 중인 엔진(합주·테스트 모드)에서. 저장 폴더 아래 세션 폴더를 만든다. 이미 녹음 중이거나 이전 녹음 끝점이 아직 안 돌아왔으면 에러 |
+| `engine_record_stop` | — | `RecordSummary` — 녹음 정지. 콜백 반환(최대 1초)·파일 마무리를 엔진 락 밖에서 기다린다. 녹음 중이 아니면 에러. 엔진이 멈추면 녹음은 자동으로 마무리된다(요약은 `session.json`에만) |
+| `engine_record_set_track_names` | `{ trackNames: Record<string, string> }` | `null` — 녹음 중 피어 트랙 이름(peerId → 표시 이름)을 더한다(녹음 중에 들어온 연주자, PR #49 M1). 이후 만드는 트랙은 이 이름을 쓰고, 이름 없이(peerId 앞 8자) 만든 트랙은 정지 때 파일 이름을 바꾼다. 녹음 중이 아니면 에러. 1.5절 |
 | `engine_subscribe_mix` | `{ onChunk: Channel<ArrayBuffer> }` | `null` — 20ms마다 48kHz stereo f32 인터리브 믹스(내 입력 포함) 전송. 관람자 브릿지용 |
 | `engine_unsubscribe_mix` | — | `null` |
 | `engine_measure_loopback` | `{ runs?: number }` | `LoopbackReport` — 하드웨어 루프백 왕복(P1-1). 실행 중인 엔진(보통 테스트 모드)에서 `runs`회(기본 8, 1..=20, 반복당 약 0.7초). 측정 동안 장치 출력은 자극만 낸다(모니터·피어 소리 없음). 입·출력 레이트가 다르면 에러, 네트워크 세션 중(합주 중)이면 에러 |
@@ -350,6 +397,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 장치 버퍼 값은 실측 콜백 크기를 쓴다.
 
 `EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`·`skippedClicks`(엔진 수명 누적, 1.4절), `outputLatencyMs`(클릭 시각에 반영한 숨은 출력 지연, null = 드라이버 보고 없음·보정 안 됨). 워커가 0.1초마다 갱신한다.
+
+`EngineStats.recording`(P2-4): 녹음 중이 아니면(또는 정지·마무리 중이면) null. `durationSec` = 녹음 타임라인 길이(쓴 블록 기준), `bytes` = 지금까지 쓴 오디오 바이트(모든 트랙, 헤더 제외), `tracks` = 만든 트랙 수, `droppedFrames` = 녹음 링이 모자라 버린 프레임(녹음 품질 지표, 0이 정상), `error` = 실패 메시지(트랙 생성 실패면 그 트랙만 빠지고 계속, 쓰기 실패면 그 뒤로 저장 안 됨, 1.5절).
 
 `monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·로컬 소스 링) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
 
@@ -477,6 +526,10 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 방장이 사라지면(`native-leave`·퇴장·연주 중단) 끈다. `metronome-host-only`/`metronome-invalid` 에러를 받으면 내 클릭도 끄고 안내한다(방송은 유지).
   - 클릭 볼륨·뮤트는 각자 `engine_set_metronome_gain`이다. 클릭은 방송·녹음(믹스 탭)에 들어가지 않는다.
     - 사용자별로 localStorage(`band.metronomeGain.<userId|guest>`, `{ volume 0..1, muted }`)에 저장해 방을 다시 들어와도·앱을 다시 켜도 유지한다(PR #36 L5). 앱 시작·로그인 사용자 변경 때 저장값을 화면과 엔진에 한 번 밀어 넣어 둘이 어긋나지 않게 한다. 저장소가 막혔거나 값이 깨졌으면 기본값(0.8, 소리 켬)으로 동작한다.
+- 합주 녹음(P2-4, `client/src/native/recordLogic.ts`, UI `pages/room/NativeRecordingControl.tsx`, 믹서 패널 아래): 앱 연주자는 엔진 멀티트랙 녹음을 쓴다(관람자는 기존 방송 믹스 MediaRecorder).
+  - 시작: `engine_record_start({ name: "YYYY-MM-DD HH.MM.SS 방 제목"(지역 시각), localName: "나", trackNames: { oderId: 닉네임 }, includeMix })`. 엔진 peerId가 `oderId`라 그대로 트랙 이름 키가 된다. 엔진이 꺼져 있으면 버튼을 막는다. 녹음 중에 연주자 목록(닉네임)이 바뀌면 `engine_record_set_track_names`로 더한다(녹음 중 들어온 연주자도 닉네임 트랙, PR #49 M1).
+  - 상태는 `engine_stats.recording`(시간·용량·트랙 수, `droppedFrames`/`error` 경고). 시작 응답(`RecordStats`)으로 다음 폴링 전에도 녹음 중으로 보이고, 정지한 세션 폴더의 늦은 폴링 응답은 무시한다(PR #49 M2). 정지는 `engine_record_stop` 요약을 보여 준다. 내가 정지하지 않았는데 `recording`이 사라지면(엔진 정지) 엔진이 이미 마무리했다고 알린다.
+  - 저장 폴더는 `engine_record_folder`로 보여 주고 `engine_record_pick_folder`로 바꾼다(녹음 중에는 바꿀 수 없음).
 - 관람자 브릿지: 방의 **방송 담당 연주자** = 호스트가 앱 연주자면 호스트, 아니면 연주자 중 `oderId` 사전순 최소. 이 앱만 `engine_subscribe_mix` → AudioWorklet → `MediaStreamAudioDestinationNode` → 웹 관람자와의 WebRTC(송신 전용)로 트랙 전송.
 - 웹(비Tauri)에서는 연주 참여 UI를 숨기고 "데스크톱 앱 다운로드" 안내.
 - Tauri 관련 코드는 `client/src/native/` 아래로 분리: `engineApi.ts`(커맨드 래퍼, 위 타입), `useNativeSession.ts`(시그널링↔엔진), `mixBridge.ts`(관람자 브릿지). `RoomContext.tsx`는 이 훅을 호출만 한다.

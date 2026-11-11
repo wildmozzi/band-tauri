@@ -275,6 +275,8 @@ pub struct SourceShared {
     pub underrun_frames: AtomicU64,
     /// 콜백 1회분 소스 RMS(0..1).
     pub level: AtomicF32,
+    /// 슬롯 점유자(피어 ssrc, 로컬은 0). 워커가 `SLOT_ACTIVE`로 바꾸기 전에 넣는다. 녹음 트랙 구분용(P2-4).
+    pub occupant: AtomicU32,
 }
 
 impl SourceShared {
@@ -313,6 +315,8 @@ pub struct OutputRt {
     measure: Option<MeasureOut>,
     /// 공유 메트로놈 클릭(P2-3). 장치 출력에만 섞고 믹스 탭에는 넣지 않는다.
     click: Option<super::metronome::ClickRt>,
+    /// 합주 녹음 핸드오프(P2-4). 녹음 중일 때만 소스별 샘플(게인 전)과 믹스를 녹음 링에 넣는다.
+    rec: Option<super::record::RecordPortRt>,
 }
 
 /// 입력 링(입력 콜백 → 워커).
@@ -343,6 +347,7 @@ pub fn output_path(counters: Arc<AudioCounters>, controls: Arc<MixControls>) -> 
         level_acc: [0.0; MAX_SOURCES],
         measure: None,
         click: None,
+        rec: None,
     };
     (rt, OutputFeed { prods, bank, tap: tap_c })
 }
@@ -356,6 +361,11 @@ impl OutputRt {
     /// 메트로놈 클릭 생성기를 붙인다(엔진 시작 시, 장치를 열기 전).
     pub fn attach_click(&mut self, c: super::metronome::ClickRt) {
         self.click = Some(c);
+    }
+
+    /// 녹음 핸드오프 끝점을 붙인다(엔진 시작 시, 장치를 열기 전).
+    pub fn attach_record(&mut self, r: super::record::RecordPortRt) {
+        self.rec = Some(r);
     }
 }
 
@@ -515,6 +525,10 @@ impl OutputRt {
                 short = true;
             }
         }
+        // 녹음(P2-4): 재생한 그대로(게인·팬·뮤트 전, 부족분 0 포함)
+        if let Some(r) = self.rec.as_mut().and_then(|p| p.active()) {
+            r.source(s, sh.occupant.load(Ordering::Relaxed), scratch);
+        }
         let (bl, br, tl, tr) = (sh.bus_l.load(), sh.bus_r.load(), sh.tap_l.load(), sh.tap_r.load());
         let mut sq = 0.0f32;
         for ((x, b), t) in scratch
@@ -558,6 +572,9 @@ impl OutputRt {
         if let Some(c) = self.click.as_mut() {
             c.begin(before, frames, !override_out);
         }
+        if let Some(p) = self.rec.as_mut() {
+            p.poll();
+        }
         self.level_acc = [0.0; MAX_SOURCES];
         let mut sum_sq = 0.0f32;
         let mut underrun = false;
@@ -570,6 +587,9 @@ impl OutputRt {
             }
             if let Some(t) = self.tap_bus.get_mut(..want) {
                 t.fill(0.0);
+            }
+            if let Some(r) = self.rec.as_mut().and_then(|p| p.active()) {
+                r.begin(before + done as u64, n);
             }
             for s in 0..MAX_SOURCES {
                 underrun |= self.mix_source(s, n);
@@ -625,6 +645,9 @@ impl OutputRt {
                 let room = self.tap.vacant_len() & !1;
                 let k = want.min(room);
                 self.tap.push_slice(&t[..k]);
+                if let Some(r) = self.rec.as_mut().and_then(|p| p.active()) {
+                    r.finish(t);
+                }
             }
             done += n;
         }

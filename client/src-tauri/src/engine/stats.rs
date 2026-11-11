@@ -156,6 +156,8 @@ pub struct EngineStats {
     pub metronome: super::metronome::MetronomeStats,
     /// 워커 CPU%, RT 콜백 사용률·실행시간 분위수(직전 2초 창, P1-10).
     pub cpu: super::cpuprof::CpuStats,
+    /// 합주 녹음 상태(P2-4). 녹음 중이 아니면 null.
+    pub recording: Option<super::record::RecordStats>,
 }
 
 impl EngineStats {
@@ -184,6 +186,7 @@ impl EngineStats {
             send_queue: None,
             metronome: Default::default(),
             cpu: Default::default(),
+            recording: None,
         }
     }
 }

@@ -277,6 +277,7 @@ export function RoomDetail() {
           hasAnyPerformer={hasAnyPerformer}
           broadcasterName={broadcasterName}
           onOpenRecordings={() => setShowRecordings(true)}
+          roomTitle={room.title}
         />
 
         {/* 오른쪽: 채팅 */}
