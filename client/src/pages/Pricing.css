@@ -367,3 +367,39 @@ rent Plan Styles */
   font-weight: 600;
 }
 
+
+/* P3-12a: 준비 중(미구현) 기능 — 판매 중인 혜택과 구분 */
+.feature-planned h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 1.5rem 0 0.5rem;
+  color: var(--neutral-400);
+}
+
+.feature-planned p {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: var(--neutral-400);
+}
+
+.feature-planned ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.feature-planned li {
+  padding: 0.375rem 0;
+  color: var(--neutral-400);
+  font-size: 0.875rem;
+}
+
+.pricing-notice {
+  max-width: 48rem;
+  margin: 0 auto 2rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--white-a12);
+  border-radius: var(--radius-xl);
+  background: var(--white-a05);
+  text-align: center;
+}

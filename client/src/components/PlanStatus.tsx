@@ -62,42 +62,22 @@ export function PlanStatus({ showUpgrade = true, compact = false }: PlanStatusPr
         )}
       </div>
 
+      {/* 실제 규칙 (P3-12a): 인원·비공개 방은 요금제와 무관 */}
       <div className="plan-limits">
         <div className="limit-item">
-          <span className="limit-label">합주실 최대 인원</span>
-          <span className="limit-value">{planLimits.maxParticipants}명</span>
-        </div>
-        
-        <div className="limit-item">
-          <span className="limit-label">클라우드 저장</span>
-          <span className="limit-value">
-            {planLimits.hasCloudStorage 
-              ? planLimits.cloudStorageDays 
-                ? `${planLimits.cloudStorageDays}일`
-                : '무제한'
-              : '불가'
-            }
-          </span>
+          <span className="limit-label">동시 연주</span>
+          <span className="limit-value">최대 {planLimits.maxPerformers}명</span>
         </div>
 
         <div className="limit-item">
-          <span className="limit-label">Mix Lab</span>
-          <span className="limit-value">
-            {planLimits.hasMixLab 
-              ? planLimits.mixLabPresets 
-                ? `프리셋 ${planLimits.mixLabPresets}개`
-                : '무제한'
-              : '불가'
-            }
-          </span>
+          <span className="limit-label">합주실 정원 (관람 포함)</span>
+          <span className="limit-value">최대 {planLimits.maxRoomCapacity}명</span>
         </div>
 
-        {planLimits.showAds && (
-          <div className="limit-item warning">
-            <span className="limit-label">광고</span>
-            <span className="limit-value">표시됨</span>
-          </div>
-        )}
+        <div className="limit-item">
+          <span className="limit-label">비공개 방</span>
+          <span className="limit-value">{planLimits.canCreatePrivateRooms ? '가능' : '불가'}</span>
+        </div>
       </div>
     </div>
   )

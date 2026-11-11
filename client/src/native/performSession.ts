@@ -11,7 +11,8 @@
  * - 모든 엔진 커맨드(start 포함)는 하나의 큐로 직렬화 (L6)
  * - 릴레이(P1-4b): 서버 relay-token(내 ssrc)이 오면 engine_set_relay, 받은 시각 + expiresIn 기준 만료 60초 전에
  *   relay-token-request. 엔진이 릴레이를 expired/unreachable로 보고하면 바로 다시 요청한다.
- *   서버가 ssrc-conflict를 보내면 엔진을 새 ssrc로 다시 시작한다.
+ *   서버가 ssrc-conflict를 보내면 엔진을 새 ssrc로 다시 시작한다. key-conflict(P1-1c, 다른 사용자가 내 공개키를 먼저 등록)도
+ *   새 키로 재시작하고 안내한다(30초 안에 반복되면 정지). descriptor-invalid는 정지하고 안내.
  */
 import type { EngineConfig, EngineStats, LocalDescriptor, MetronomeConfig, MetronomePlan, RelayConfig } from './engineApi'
 import {
@@ -100,6 +101,21 @@ export function performErrorFromCode(code: unknown, serverMessage?: unknown): { 
   }
 }
 
+/**
+ * 엔진 descriptor에 대한 서버 거부 코드(연주 거부가 아님 → 방송은 유지, 세션이 엔진만 처리).
+ * - ssrc-conflict / key-conflict(P1-1c: 같은 방 다른 사용자가 이미 쓰는 엔진 공개키): 엔진을 새 ssrc·키로 재시작
+ * - descriptor-invalid: 서버가 descriptor 형식(키·ssrc·후보)을 거부 → 엔진 정지 후 안내
+ */
+export function isEngineDescriptorErrorCode(code: unknown): boolean {
+  return code === 'ssrc-conflict' || code === 'key-conflict' || code === 'descriptor-invalid'
+}
+
+export const KEY_CONFLICT_MESSAGE = '같은 합주실의 다른 사용자가 이 엔진 키를 먼저 등록해, 엔진을 새 키로 다시 시작했습니다.'
+export const KEY_CONFLICT_REPEAT_MESSAGE = '엔진 키 충돌이 반복되어 연주를 중단했습니다. 다시 시작해주세요.'
+export const DESCRIPTOR_INVALID_MESSAGE = '서버가 엔진 연결 정보를 거부해 연주를 중단했습니다. 연주를 다시 시작해주세요.'
+/** 이 시간 안에 key-conflict가 또 오면 재시작 반복 대신 정지 */
+const KEY_CONFLICT_REPEAT_MS = 30_000
+
 const DEFAULT_RETRY_DELAYS = [500, 1000, 2000, 4000, 8000]
 
 export class PerformSession {
@@ -119,6 +135,8 @@ export class PerformSession {
   /** 마지막 relay-token-request 시각(ms) — 엔진 상태로 인한 즉시 요청의 간격 제한 */
   private lastRelayRequestAt = -Infinity
   private deadStats = 0
+  /** 마지막 key-conflict 재시작 시각(ms) — 반복 재시작 방지 */
+  private lastKeyConflictAt = -Infinity
   /** 따르는 방장 메트로놈(from = 방장 엔진 peerId) */
   private remoteMetronome: { from: string; state: MetronomeSignalState } | null = null
   private readonly retryDelays: number[]
@@ -162,9 +180,16 @@ export class PerformSession {
 
   // ---------------------------------------------------------------- 시작/정지
 
+  /** 사용자가 시작하는 경로. 새 세션이므로 key-conflict 반복 판정을 초기화한다(PR #48 L2) */
   async start(opts: StartOptions): Promise<boolean> {
+    return this.startEngine(opts, true)
+  }
+
+  /** userInitiated=false는 restart()(ssrc/key 충돌, 새 clientId) 경로: key-conflict 반복 판정을 이어 간다 */
+  private async startEngine(opts: StartOptions, userInitiated: boolean): Promise<boolean> {
     if (this.state.phase === 'running') return true
     if (this.state.phase === 'starting') return false
+    if (userInitiated) this.lastKeyConflictAt = -Infinity
     const selfId = this.env.getSelfId()
     const roomId = this.env.getRoomId()
     if (!selfId || !roomId) {
@@ -298,6 +323,26 @@ export class PerformSession {
       if (this.state.phase === 'running') void this.restart()
       return true
     }
+    if (payload.type === 'error' && payload.code === 'key-conflict') {
+      // 같은 방 다른 사용자가 내 엔진 공개키를 먼저 등록했다(위장·선점, P1-1c): 서버는 중계하지 않았다 → 새 키로 재시작.
+      // 새 키는 엔진이 매번 새로 만들므로 다시 충돌할 수 없다. 짧은 시간에 또 오면 반복하지 않고 멈춘다.
+      if (this.state.phase !== 'running') return true
+      const now = Date.now()
+      if (now - this.lastKeyConflictAt < KEY_CONFLICT_REPEAT_MS) {
+        void this.stop({ notify: true, error: KEY_CONFLICT_REPEAT_MESSAGE })
+        return true
+      }
+      this.lastKeyConflictAt = now
+      void this.restart().then(() => {
+        if (this.state.phase === 'running') this.setState({ error: KEY_CONFLICT_MESSAGE })
+      })
+      return true
+    }
+    if (payload.type === 'error' && payload.code === 'descriptor-invalid') {
+      // 서버가 중계하지 않았다 → 아무와도 연결되지 않은 채 '연주 중'으로 남지 않게 정지하고 안내(PR #48 L3)
+      void this.stop({ notify: true, error: DESCRIPTOR_INVALID_MESSAGE })
+      return true
+    }
     if (payload.type === 'error') {
       const mapped = performErrorFromCode(payload.code, payload.message)
       if (!mapped) return false
@@ -370,7 +415,7 @@ export class PerformSession {
     }
     await this.stop({ notify: false })
     if (!last) return
-    const ok = await this.start(last)
+    const ok = await this.startEngine(last, false)
     if (ok && hosted) await this.setHostMetronome(true, hosted.bpm, hosted.beatsPerBar)
   }
 
@@ -385,7 +430,7 @@ export class PerformSession {
     // 이전 엔진(재시작 전 ssrc)에 대한 토큰은 버린다. 엔진도 ssrc를 다시 확인한다.
     if (this.state.phase !== 'running' || msg.ssrc !== this.localSsrc) return
     const gen = this.gen
-    const config = { addr: msg.addr, token: msg.token, expiresInSec: msg.expiresIn }
+    const config = { addr: msg.addr, token: msg.token, expiresInSec: msg.expiresIn, ...(msg.bindKey ? { bindKey: msg.bindKey } : {}) }
     this.enqueue(async () => {
       if (gen !== this.gen) return null
       try {

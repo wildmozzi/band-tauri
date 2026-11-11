@@ -18,7 +18,8 @@ function setup(initialConfirm: PaymentResponse = { success: true, outcome: 'appr
   let confirm = initialConfirm
   /** 토스 승인 호출 중에 실행 (경쟁 재현용) */
   let onConfirm: (() => Promise<void>) | null = null
-  // 메모리 저장소의 created_at은 실제 시각이므로 시계도 실제 시각에서 시작한다
+  // 서비스와 메모리 저장소(created_at/updated_at)가 같은 가상 시계를 쓴다.
+  // 저장소가 실제 시각을 쓰면 실행 지연(수 ms)만큼 created_at이 가상 시계보다 앞서 경계값 비교가 흔들린다.
   let now = new Date()
   const start = now.getTime()
   const clock = () => now
@@ -38,7 +39,7 @@ function setup(initialConfirm: PaymentResponse = { success: true, outcome: 'appr
       return lookup
     },
   }
-  const subRepo = new MemorySubscriptionRepository()
+  const subRepo = new MemorySubscriptionRepository(clock)
   const orderRepo = new MemoryPaymentOrderRepository()
   const subs = new SubscriptionService(subRepo, g, { retryDelaysMs: [], now: clock })
   const svc = new PaymentOrderService(orderRepo, subs, { now: clock })

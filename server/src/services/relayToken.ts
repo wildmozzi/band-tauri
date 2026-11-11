@@ -64,6 +64,20 @@ export function signRelayToken(claims: RelayTokenClaims, secret: string): Buffer
   return Buffer.concat([body, mac])
 }
 
+/** Bind 키 파생 라벨 (relay-design 2.1.1, relay/src/token.rs BIND_KEY_LABEL) */
+export const RELAY_BIND_KEY_LABEL = 'band-relay bind v1'
+
+/**
+ * 토큰별 Bind 키 = HMAC-SHA256(HMAC-SHA256(RELAY_SECRET, "band-relay bind v1"), 토큰 전체).
+ * WS(TLS)로 토큰과 함께 그 연주자에게만 보낸다(`relay-token.bindKey`). 엔진은 RelayBind 끝에
+ * HMAC(bindKey, Bind)[..16]을 붙이고, 릴레이는 비밀값으로 같은 키를 다시 계산해 검증한다.
+ * 경로상 관찰자는 UDP로 오가는 토큰을 볼 수 있지만 이 키는 모르므로 남의 등록을 가로챌 수 없다(4.1).
+ */
+export function deriveRelayBindKey(token: Buffer, secret: string): Buffer {
+  const root = createHmac('sha256', Buffer.from(secret, 'utf8')).update(RELAY_BIND_KEY_LABEL).digest()
+  return createHmac('sha256', root).update(token).digest()
+}
+
 /** 검증 (테스트/진단용. 운영 검증은 릴레이가 한다) */
 export function verifyRelayToken(token: Buffer, secret: string, nowSec: number): RelayTokenClaims | null {
   if (token.length < 14 + 3 + MAC_BYTES || token[0] !== RELAY_TOKEN_VERSION) return null

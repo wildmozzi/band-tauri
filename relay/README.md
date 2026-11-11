@@ -39,6 +39,7 @@ RELAY_SECRET=$(openssl rand -hex 32) cargo run --release
 | `RELAY_MAX_BINDS_PER_SEC_PER_SUBNET` | `50` | 신규/갱신 RelayBind 출발 서브넷(/24, /64)당 처리율 |
 | `RELAY_MAX_REGISTRATIONS` | `20000` | 전체 등록 수 상한 (메모리 보호) |
 | `RELAY_STATS_LOG_SECS` | `60` | 요약 로그 주기, 0이면 끔 |
+| `RELAY_REQUIRE_BIND_MAC` | `0` | `1`이면 MAC 없는 신규/갱신 RelayBind를 거부한다. 구버전 클라이언트가 사라진 뒤(`relay_bind_legacy_total`이 0으로 유지) 켠다 (relay-design 2.1.1) |
 
 ## 용량 (추정)
 
