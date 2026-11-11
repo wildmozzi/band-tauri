@@ -4,7 +4,7 @@ import { POST_CATEGORIES, POST_INSTRUMENTS, POST_LIMITS, postFieldLabel, type Fi
 import { StoreUnavailableError } from '../repositories/errors'
 import { assertSafeKey, type StorageAdapter } from '../storage/types'
 import { ServiceError } from './errors'
-import { isPendingKey, postImageKeyFromAnyUrl } from './postImageService'
+import { hasVerifiedPostImage, isPendingKey, postImageKeyFromAnyUrl } from './postImageService'
 
 /**
  * 게시글 작성·수정 (P3-10d). posts.images에는 서버가 검증한 업로드만 들어가게 한다.
@@ -104,10 +104,18 @@ export async function checkPostImages(
   const out: string[] = []
   const rejected: RejectedImage[] = []
   const kept = new Set(existing)
+  // 기존 이미지를 key로도 찾는다 (PR #25 L2): 클라이언트가 상대 조회 경로를 절대 URL로 바꿔 돌려보내도 "기존 이미지"로 인정.
+  // key로만 일치했는데 저장소에 없으면 클라이언트가 보낸 URL이 아니라 **원래 저장값**을 유지한다(호스트 바꿔치기 방지)
+  const keptByKey = new Map<string, string>()
+  for (const u of existing) {
+    const k = postImageKeyFromAnyUrl(u)
+    if (k && !keptByKey.has(k)) keptByKey.set(k, u)
+  }
 
   for (const url of [...new Set(urls)]) {
-    const wasThere = kept.has(url)
     const key = postImageKeyFromAnyUrl(url)
+    const original = kept.has(url) ? url : key ? keptByKey.get(key) : undefined
+    const wasThere = original !== undefined
     let safeKey: string | null = null
     if (key && !isPendingKey(key)) {
       try {
@@ -118,7 +126,7 @@ export async function checkPostImages(
       }
     }
 
-    if (safeKey && images && (await images.head(safeKey))) {
+    if (safeKey && images && (await hasVerifiedPostImage(images, safeKey))) {
       if (wasThere || (safeKey.startsWith(`${userId}/`) && isServerPostImageKey(safeKey))) {
         out.push(viewUrl(images, safeKey))
         continue
@@ -132,7 +140,7 @@ export async function checkPostImages(
       continue
     }
     if (wasThere) {
-      out.push(url) // 예전 글의 이미지는 그대로 (하위 호환)
+      out.push(original) // 예전 글의 이미지는 원래 저장값 그대로 (하위 호환)
       continue
     }
     if (!key) rejected.push({ url, reason: '이 서비스에 올린 이미지만 붙일 수 있습니다.' })

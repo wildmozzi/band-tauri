@@ -4,6 +4,9 @@ import { toRepositoryError } from './errors'
 /** 클라이언트에 돌려주는 posts 행 (공개 컬럼만 있는 테이블이라 그대로) */
 export type PostRow = Record<string, unknown> & { id: string; author_id: string; images: string[] | null }
 
+/** 닉네임이 없는 작성자의 공개 표시 이름 (클라이언트 toPost·댓글 대체값과 같다) */
+export const ANONYMOUS_AUTHOR_NAME = 'User'
+
 export interface NewPost {
   authorId: string
   authorName: string
@@ -40,7 +43,7 @@ export interface PostEditSnapshot {
 export interface PostRepository {
   /** 수정 권한·기존 이미지 확인용. 없으면 null */
   findForEdit(postId: string): Promise<PostEditSnapshot | null>
-  /** 작성자 표시 이름: profiles.nickname → 이메일 앞부분 → 'User' (예전 클라이언트와 같은 규칙) */
+  /** 작성자 표시 이름: profiles.nickname, 없으면 ANONYMOUS_AUTHOR_NAME. 이메일은 쓰지 않는다 */
   displayName(userId: string): Promise<string>
   insert(post: NewPost): Promise<PostRow>
   /** 작성자 조건까지 걸어 갱신. 행이 없으면(삭제됐거나 작성자가 아님) null */
@@ -73,17 +76,10 @@ export function createPostRepository(supabase: SupabaseClient): PostRepository {
     },
 
     async displayName(userId) {
+      // 닉네임만 쓴다. 이메일(앞부분 포함)은 공개 컬럼 posts.author_name에 넣지 않는다 (P3-10g, PR #25 L3)
       const { data } = await supabase.from('profiles').select('nickname').eq('id', userId).maybeSingle()
-      const nickname = (data as { nickname?: string | null } | null)?.nickname
-      if (nickname) return nickname
-      try {
-        const { data: u } = await supabase.auth.admin.getUserById(userId)
-        const local = u.user?.email?.split('@')[0]
-        if (local) return local
-      } catch {
-        // 이름은 표시용 — 실패해도 글쓰기는 막지 않는다
-      }
-      return 'User'
+      const nickname = (data as { nickname?: string | null } | null)?.nickname?.trim()
+      return nickname || ANONYMOUS_AUTHOR_NAME
     },
 
     async insert(post) {

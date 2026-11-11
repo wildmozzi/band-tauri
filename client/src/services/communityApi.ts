@@ -1,3 +1,4 @@
+import { getApiUrl } from '../lib/apiUrl'
 import type { Tables, TablesInsert } from '../lib/database.types'
 import { supabase } from '../lib/supabaseClient'
 import { authHeaders } from '../lib/authHeaders'
@@ -61,27 +62,25 @@ export interface CreateCommentData {
 // profiles는 공개 컬럼(id·nickname·audio_settings·avatar_url·created_at·updated_at)만 읽을 수 있다 (011). email 등은 임베드하지 말 것
 type JoinedProfile = { nickname: string | null } | null
 
-// Helper to get author name from user
-const getAuthorName = (email: string | null | undefined): string => {
-  return email?.split('@')[0] ?? 'User'
-}
+// 닉네임이 없는 작성자의 표시 이름. 이메일(앞부분 포함)은 표시명으로 쓰지 않는다 (P3-10g) — 서버 ANONYMOUS_AUTHOR_NAME과 같다
+export const ANONYMOUS_AUTHOR_NAME = 'User'
 
 const joinedAuthorName = (profile: JoinedProfile): string =>
-  profile?.nickname || getAuthorName(null)
+  profile?.nickname || ANONYMOUS_AUTHOR_NAME
 
 /** posts 행 → 화면용 Post. null 컬럼은 insert 기본값과 같은 값으로 채운다. */
 export function toPost(row: Tables<'posts'>, likedByUser?: boolean): Post {
   const post: Post = {
     id: row.id,
     author_id: row.author_id,
-    author_name: row.author_name ?? 'User', // getAuthorName의 대체값과 같게
+    author_name: row.author_name ?? ANONYMOUS_AUTHOR_NAME,
     author_role: row.author_role ?? '',
     title: row.title,
     content: row.content,
     category: row.category ?? 'general',
     tags: row.tags ?? [],
     // 서버가 PUBLIC_API_URL 없이 저장한 조회 경로(상대)는 API 서버 기준으로 (웹 origin 기준이면 깨진다)
-    images: (row.images ?? []).map(u => (u.startsWith('/api/storage/post-images/') ? `${getApiUrl().replace(/\/+$/, '')}${u}` : u)),
+    images: (row.images ?? []).map(u => (u.startsWith('/api/storage/post-images/') ? `${getApiUrl()}${u}` : u)),
     instrument: row.instrument ?? 'other',
     likes_count: row.likes_count ?? 0,
     comments_count: row.comments_count ?? 0,
@@ -149,14 +148,6 @@ const COMMENT_SELECT = `
 function requireClient() {
   if (!supabase) throw new Error('Supabase not configured')
   return supabase
-}
-
-function getApiUrl(): string {
-  const envUrl = import.meta.env.VITE_API_URL
-  if (!envUrl || envUrl === 'auto') {
-    return `${window.location.protocol}//${window.location.hostname}:8080`
-  }
-  return envUrl
 }
 
 /** 서버가 거절한 글 저장 (사용자에게 그대로 보여줄 문구). rejected: 저장할 수 없는 이미지와 이유 */
@@ -373,7 +364,7 @@ export const communityApi = {
       .eq('id', user.id)
       .single()
 
-    const authorName = profile?.nickname || getAuthorName(user.email)
+    const authorName = profile?.nickname || ANONYMOUS_AUTHOR_NAME
 
     const insertData: TablesInsert<'comments'> = {
       post_id: data.post_id,

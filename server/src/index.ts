@@ -10,6 +10,10 @@ import { scheduleCleanup } from './services/cleanupService'
 import { getDefaultSubscriptionService, scheduleSubscriptionJobs } from './services/subscriptionService'
 import { createDefaultPaymentOrderService, scheduleOrderJobs } from './services/paymentOrderService'
 import { createRoomRepository } from './repositories/roomRepository'
+import { requirePublicApiUrl } from './lib/securityConfig'
+
+// 운영에서 PUBLIC_API_URL이 없으면 여기서 실패한다 (게시글 이미지 URL이 상대 경로로 저장되는 것을 막음)
+requirePublicApiUrl()
 
 const PORT = Number(process.env.PORT || 8080)
 

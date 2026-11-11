@@ -5,6 +5,7 @@ import { Server as HttpsServer } from 'https'
 import { v4 as uuidv4 } from 'uuid'
 import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
+import { ROOM_CAPACITY_MAX } from '../lib/roomCapacity'
 import { isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
 import { createRoomRepository, type RoomMeta, type RoomRepository } from '../repositories/roomRepository'
 import { DEFAULT_PASSWORD_ATTEMPT_LIMITS, PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword, type ScryptGate } from '../lib/roomPassword'
@@ -109,7 +110,7 @@ const DEFAULT_LIMITS: WsLimits = {
   maxConnectionsPerIp: 20,
   maxDropped: 200,
   maxPerformers: 6,
-  maxRoomParticipants: 20,
+  maxRoomParticipants: ROOM_CAPACITY_MAX,
   maxAnonymousPerRoom: 10,
   maxAnonymousPerIpPerRoom: 2,
   resumeGraceMs: 30_000,
