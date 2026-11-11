@@ -247,7 +247,7 @@ mod tests {
             rtt_ms: Some(42.0),
             jitter_ms: 1.5,
             buffer_ms: 12.0,
-            target_ms: 12.0,
+            target_ms: 10.0,
             conceal_pct: 0.0,
             corr_time_pct: 0.0,
             max_corr_cents: 0.0,

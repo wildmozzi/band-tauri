@@ -73,7 +73,10 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
   - 입·출력 장치 클럭 차는 수위 제어(1샘플 단위, 최대 500ppm)로 흡수한다.
   - 언더런 때 늘린 여유는 10초 무사고마다 되돌린다.
 - 입력 또는 출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화 HRESULT(`AUDCLNT_E_DEVICE_INVALIDATED`, `AUDCLNT_E_SERVICE_NOT_RUNNING`, `AUDCLNT_E_RESOURCES_INVALIDATED`)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 그 밖의 WASAPI 호출 실패는 일시 오류로 보고 `streamErrors`만 올린 뒤 다음 이벤트를 기다린다. 같은 방향이 연속 4회 실패하면 그 스트림을 재시작(Stop/Reset/Start, `streamRestarts`)하고, 성공 없이 재시작이 3회 이어지거나 연속 50회 실패하면 `streamFailed=true`, `running=false`로 멈춘다.
-- 워커, net 수신, 자체 WASAPI 스레드는 MMCSS "Pro Audio"(실패 시 높은 우선순위)로 등록하고 FTZ/DAZ를 켠다.
+- 워커, net 수신, 자체 WASAPI 스레드는 스레드 시작 시 MMCSS "Pro Audio"에 등록하고(`AvSetMmThreadCharacteristicsW` + `AvSetMmThreadPriority(HIGH)`, 스레드 종료 시 `AvRevertMmThreadCharacteristics`) FTZ/DAZ를 켠다. 등록이 실패하면 `THREAD_PRIORITY_HIGHEST`로 대신하고, 그것도 실패하면 기본 우선순위로 계속 돈다. 결과는 로그와 `EngineStats.threadPriority`에 남는다(P1-2).
+  - cpal WASAPI 콜백 스레드는 cpal(0.15)이 `THREAD_PRIORITY_TIME_CRITICAL`로 올리고, ASIO 콜백 스레드는 드라이버가 관리한다. RT 콜백 안에서는 시스템콜을 하지 않으므로 우리가 따로 등록하지 않는다(`threadPriority.audio = unmanaged`). cpal은 자체 WASAPI가 실패했을 때의 폴백이다.
+  - 엔진이 도는 동안(`Engine::start` ~ `stop`) 시스템 타이머 해상도를 1ms로 쥔다(`timeBeginPeriod(1)`/`timeEndPeriod(1)`). 프로세스 안 참조 카운트로 감싸 처음 쥘 때만 begin, 마지막에 놓을 때만 end를 부르므로 반복 시작·정지와 중첩 엔진에도 짝이 맞는다. begin이 실패하면 end를 부르지 않는다.
+  - Windows 외 플랫폼은 no-op(`unsupported`).
 - **오디오 백엔드 선택**(`SystemBackend`):
   - `asio`(입·출력 중 하나라도) → cpal ASIO(`asio` 피처).
   - `wasapiExclusive` → 자체 WASAPI 이벤트 구동 독점, 장치 최소 주기. 포맷은 독점 지원 포맷 중 48kHz 우선, 없으면 44.1kHz(리샘플), 그다음 96/88.2kHz. 샘플 형식 f32 → 정수 32(유효 32/24, 24-in-32) → 24비트 패킹(3바이트) → 16비트. 채널 마스크는 믹스 포맷 마스크(채널 수가 같을 때) → 기본 마스크(1·2채널) 또는 DIRECTOUT(3채널 이상) 순으로 시도한다.
@@ -194,10 +197,11 @@ off len 필드
 - **nonce 유일성 계약**(PR #13 H1): 같은 (송신 키, 방향) 아래에서 Audio seq는 엔진 세션(Net 수명) 동안 반복되지 않는다.
   - 근거: 이 Net의 키쌍·ssrc는 세션 동안 고정이다. 따라서 A→B 키는 (B 공개키, B ssrc)로 정해진다(HKDF info). Net은 이 쌍마다 "다음에 쓸 seq"를 피어 객체를 버릴 때(`remove_peer`, 같은 id 교체) 기록한다. 기록은 세션 동안 지우지 않는다.
   - 같은 쌍으로 피어를 다시 만들면(WS 순단 뒤 같은 descriptor 재수신, 교체) 기록 + 2^16에서 이어 간다. 여유 2^16은 옛 객체로 아직 진행 중인 송신(워커가 쥔 `Arc`)을 넘는다. 제거된 피어는 수신·워커 목록에서 바로 빠지므로 그 뒤 송신은 많아야 프레임 하나다.
-  - 같은 쌍을 쓰는 살아 있는 피어 객체가 둘이 되는 `add_peer`(다른 id, 같은 descriptor)는 거부한다(카운터가 둘이 되므로).
+  - 수위 기록은 `remove_peer`가 피어 목록에서 빼는 것과 같은 write 락 안에서 한다. 락 밖에서 기록하면 그 사이 같은 쌍의 `add_peer`가 옛 수위에서 시작해 seq를 다시 쓸 수 있다(P1-1b).
+  - 같은 쌍을 쓰는 피어 객체가 둘 살아 있게 되는 `add_peer`(다른 id, 같은 descriptor)는 **거부하지 않는다**(P1-1b). 거부하면 방의 다른 참가자가 남의 descriptor를 복사해 먼저 보내 진짜 주인의 추가를 막을 수 있다(선점에 의한 가용성 방해). 대신 같은 쌍의 살아 있는 객체들은 Audio seq 카운터 **하나를 같이 쓴다**(nonce 유일성 유지). 수신은 복호화로 가릴 수 없으므로 인증된 Hello/HelloAck 평문의 보낸 쪽 id가 일치하는 객체로, 그 밖의 패킷은 핸드셰이크로 경로가 선 객체로 보낸다. 개인키가 없는 선점자 객체는 자기 id로 Hello를 받을 수 없어 연결되지 않는다.
   - 카운터는 u32이고 단조 증가한다. 400pps에서 랩까지 124일이라 세션 안에서 랩이 없다.
   - 상대가 재시작하면(새 키쌍·ssrc) 새 키다. 내가 재시작해도(새 Net) 새 키쌍·ssrc라 새 키다. 릴레이는 암호문을 그대로 중계하므로 nonce에 영향이 없다.
-  - 회귀 테스트: `tests/nonce.rs`(제거 → 재추가 반복, 교체, 릴레이 경로, 에코 반사, ssrc 재생성에서 (키, seq) 중복 0, 재추가 뒤 seq 연속).
+  - 회귀 테스트: `tests/nonce.rs`(제거 → 재추가 반복, 교체, 릴레이 경로, 에코 반사, ssrc 재생성에서 (키, seq) 중복 0, 재추가 뒤 seq 연속), `tests/peer_key.rs`(선점된 키로도 진짜 주인 연결, 같은 키 항목의 카운터 공유, 동시 제거·추가).
 - Nonce(12B) = `sender_ssrc(4) || type(1) || 0(3) || seq(4)`. AAD = 헤더 18바이트.
 - 수신자는 `sender_ssrc`가 같은 피어들 중 복호화에 성공하는 피어로 판정한다(ssrc가 겹쳐도 다른 피어를 덮어쓰지 않음).
 - 복호화 실패, 모르는 ssrc, 송신 주소가 피어의 확정된 경로와 다른 Audio/Ping/Pong/Bye → **폐기**. Hello/HelloAck는 주소 무관하게 처리하되, 확정 경로가 아닌 주소의 Hello는 상태·생존 시각을 갱신하지 않는다(같은 주소에서 5회 연속이면 NAT 리바인딩으로 보고 경로 전환).
@@ -290,7 +294,9 @@ interface EchoReport { verdict: MeasureVerdict; message: string; peerId: string;
 type QosMarking = 'pending' | 'ef' | 'voice' | 'none'
 interface QosStats { marking: QosMarking; ipTos: boolean; qwave: boolean; flows: number; efFlows: number; failed: number; lastError: string | null }
 interface SendQueueStats { p50Ms: number; p99Ms: number; maxMs: number; packets: number }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; peers: PeerStats[]; relay: RelayStats | null; qos: QosStats | null; sendQueue: SendQueueStats | null; metronome: MetronomeStats }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null }
+type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
+interface ThreadPriorityStats { worker: ThreadPriority; netRecv: ThreadPriority; audio: ThreadPriority; timer1ms: boolean }
 interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
 interface MetronomePlan { running: boolean; bpm: number; beatsPerBar: number; startUs: number; refPeerId: string | null }
 interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; outputLatencyMs: number | null }
@@ -355,6 +361,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 `devicePeriodMs`: 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기(독점: 버퍼 = 주기, 저지연 공유: 엔진 주기), cpal·가짜 장치는 실측 콜백 크기다.
 
+`threadPriority`: 스레드 우선순위 설정 결과(P1-2, 1.1절). `worker`·`netRecv`·`audio`(오디오 I/O 스레드) 각각 `mmcss`(MMCSS "Pro Audio" 등록) | `elevated`(MMCSS 실패, `THREAD_PRIORITY_HIGHEST`) | `failed`(둘 다 실패, 기본 우선순위) | `unmanaged`(우리가 설정하지 않음: 네트워크 없음, cpal·ASIO·가짜 장치) | `disabled`(측정용으로 끔) | `unsupported`(Windows 아님). `timer1ms`: 엔진이 1ms 타이머 해상도를 쥐고 있다. 정지 상태면 모두 `unmanaged`/false.
+
 `backend`: 실제로 열린 오디오 백엔드. `wasapiExclusive`(자체 독점) | `wasapiShared3`(자체 IAudioClient3 저지연 공유) | `cpalWasapi`(cpal 공유 폴백) | `cpalAsio` | `fake`(테스트). 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
 
 `engine_list_devices`의 자체 WASAPI 장치: 엔드포인트마다 `wasapiShared` 항목 1개(채널·레이트 = 믹스 포맷)와, 독점 지원 포맷이 있으면 `wasapiExclusive` 항목 1개(채널 = 지원 최대, 레이트 = 독점 지원 레이트)를 낸다. `id`는 둘 다 `wasapi::<장치 이름>`(cpal과 같은 형식)이다.
@@ -410,6 +418,13 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 연주자 상한 6은 `start-performing`에서 따로 강제한다(`room-full-performers`, 유예 중인 연주자 포함). join은 항상 관람으로 들어오므로 연주자 자리는 그때 센다.
 - 연주 참여 요청: `perform-request-sent` `{ instrument, hostOnline }`(같은 요청 재전송에도 다시 보냄), `perform-request-rejected` `{ reason, instrument }`(빈 사유는 기본 문구), 익명 요청에는 `request-perform-error` `{ code: 'login-required' }`도 보낸다. 승인(`perform-request-approved`)을 받은 앱은 바로 엔진을 시작한다(웹은 앱 안내).
 - 중계 시 서버가 `from`을 붙인다(클라이언트가 보낸 `from`은 무시).
+- **공유 메트로놈**(P2-3, 1.4절): `metronome` `{ state: { running, bpm, beatsPerBar, startUs } }`.
+  - 서버 검증: 보낸 사람이 인증된 연주자이고, 엔진을 켰고(`native-descriptor`를 보낸 상태), **방장**이어야 한다. 방장 여부는 DB `rooms.host_id`로 다시 확인한다(`refreshHost`).
+  - 값 범위는 bpm 20..300, beatsPerBar 정수 1..16, startUs 0..2^53이다.
+  - 실패하면 보낸 사람에게 `error` `{ code: 'metronome-host-only' | 'metronome-invalid' }`를 보낸다.
+  - 통과하면 같은 방의 다른 연주자에게 `metronome { from, state }`로 중계한다(관람자 제외). `from` = 방장 clientId = 방장 엔진 peerId다.
+  - 서버는 방마다 켜진 상태 하나를 기억한다. 연주자가 `native-descriptor`를 보내면(엔진 시작·재시작, 늦은 입장) 그 연주자에게 현재 상태를 다시 보낸다.
+  - 상태는 `running=false`, 방장 `native-leave`, 방장 퇴장, 방이 빌 때 지운다. 방장 엔진 시계가 사라지면 `startUs`가 무의미해지기 때문이다.
 
 ## 6. 프론트 흐름
 
@@ -421,6 +436,11 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - `engine_stats.relay.state`가 `expired`/`unreachable`이면 바로 새 토큰을 요청한다(10초에 한 번까지). `rejected`(정원·ssrc 충돌)는 새 토큰으로 풀리지 않으므로 요청하지 않는다.
   - `engine_set_relay` 실패 사유는 세션 상태(`relayError`)에 남겨 'failed' 안내에 쓴다(L5).
   - WS 재연결 상한(35초)이 남은 여유(60초)보다 짧아, WS가 끊긴 동안에도 릴레이 경로가 토큰 만료로 끊기지 않는다. `error{code:'ssrc-conflict'}` → 엔진을 새 ssrc로 재시작한다(`native-leave` 없이). 로직은 `client/src/native/relayLogic.ts`·`performSession.ts`.
+- 공유 메트로놈(P2-3, `client/src/native/metronomeLogic.ts`·`performSession.ts`, UI `pages/room/MetronomePanel.tsx`):
+  - 방장(엔진 실행 중): `engine_set_metronome({ running, bpm, beatsPerBar })` → 반환된 `startUs`로 `metronome`을 보낸다. BPM·박자 변경은 새 박 0으로 다시 시작한다.
+  - 다른 연주자: `metronome { from, state }` → `engine_set_metronome({ ...state, refPeerId: from })`. 엔진이 뜨기 전에 받았으면 시작 뒤 적용한다.
+  - 방장이 사라지면(`native-leave`·퇴장·연주 중단) 끈다. `metronome-host-only`/`metronome-invalid` 에러를 받으면 내 클릭도 끄고 안내한다(방송은 유지).
+  - 클릭 볼륨·뮤트는 각자 `engine_set_metronome_gain`이다. 클릭은 방송·녹음(믹스 탭)에 들어가지 않는다.
 - 관람자 브릿지: 방의 **방송 담당 연주자** = 호스트가 앱 연주자면 호스트, 아니면 연주자 중 `oderId` 사전순 최소. 이 앱만 `engine_subscribe_mix` → AudioWorklet → `MediaStreamAudioDestinationNode` → 웹 관람자와의 WebRTC(송신 전용)로 트랙 전송.
 - 웹(비Tauri)에서는 연주 참여 UI를 숨기고 "데스크톱 앱 다운로드" 안내.
 - Tauri 관련 코드는 `client/src/native/` 아래로 분리: `engineApi.ts`(커맨드 래퍼, 위 타입), `useNativeSession.ts`(시그널링↔엔진), `mixBridge.ts`(관람자 브릿지). `RoomContext.tsx`는 이 훅을 호출만 한다.

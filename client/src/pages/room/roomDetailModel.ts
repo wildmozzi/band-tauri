@@ -55,11 +55,11 @@ export const PEER_STATE_INFO: Record<PeerState, { label: string; className: stri
 
 // 네트워크 품질 아이콘 (관람 방송 채널)
 export const QUALITY_ICONS: Record<string, { icon: string; color: string; label: string }> = {
-  excellent: { icon: '🟢', color: '#4ade80', label: '최상' },
-  good: { icon: '🟢', color: '#4ade80', label: '양호' },
-  fair: { icon: '🟡', color: '#facc15', label: '보통' },
-  poor: { icon: '🔴', color: '#f87171', label: '불량' },
-  unknown: { icon: '⚪', color: '#9ca3af', label: '측정 중' },
+  excellent: { icon: '🟢', color: 'var(--success)', label: '최상' },
+  good: { icon: '🟢', color: 'var(--success)', label: '양호' },
+  fair: { icon: '🟡', color: 'var(--warning)', label: '보통' },
+  poor: { icon: '🔴', color: 'var(--error)', label: '불량' },
+  unknown: { icon: '⚪', color: 'var(--gray-400)', label: '측정 중' },
 }
 
 export const PUBLIC_WEB_URL: string | undefined = import.meta.env.VITE_PUBLIC_WEB_URL || undefined

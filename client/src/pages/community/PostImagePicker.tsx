@@ -15,7 +15,7 @@ function ImageThumb({ url, alt, border, onRemove }: ThumbProps) {
         position: 'relative',
         width: '120px',
         height: '120px',
-        borderRadius: '8px',
+        borderRadius: 'var(--radius-md)',
         overflow: 'hidden',
         border,
       }}
@@ -38,10 +38,10 @@ function ImageThumb({ url, alt, border, onRemove }: ThumbProps) {
           right: '4px',
           width: '24px',
           height: '24px',
-          borderRadius: '50%',
+          borderRadius: 'var(--radius-round)',
           border: 'none',
-          background: 'rgba(0, 0, 0, 0.7)',
-          color: '#fff',
+          background: 'var(--black-a70)',
+          color: 'var(--white)',
           cursor: 'pointer',
           fontSize: '14px',
           display: 'flex',
@@ -55,10 +55,10 @@ function ImageThumb({ url, alt, border, onRemove }: ThumbProps) {
   )
 }
 
-const sectionCaptionStyle: React.CSSProperties = { fontSize: '13px', color: 'rgba(255, 255, 255, 0.5)', marginBottom: '8px' }
-const gridStyle: React.CSSProperties = { display: 'flex', gap: '12px', flexWrap: 'wrap' }
-const NEUTRAL_BORDER = '1px solid rgba(255, 255, 255, 0.1)'
-const ACCENT_BORDER = '1px solid rgba(141, 123, 255, 0.3)'
+const sectionCaptionStyle: React.CSSProperties = { fontSize: '13px', color: 'var(--white-a50)', marginBottom: 'var(--space-2)' }
+const gridStyle: React.CSSProperties = { display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap' }
+const NEUTRAL_BORDER = '1px solid var(--white-a10)'
+const ACCENT_BORDER = '1px solid var(--violet-500-a30)'
 
 interface PostImagePickerProps {
   form: PostFormState
@@ -72,7 +72,7 @@ export function PostImagePicker({ form, splitSections, labelStyle }: PostImagePi
   const full = totalImages >= MAX_IMAGES
 
   return (
-    <div style={{ marginBottom: '20px' }}>
+    <div style={{ marginBottom: 'var(--space-5)' }}>
       <label style={labelStyle}>
         이미지 첨부 (최대 5개, 각 5MB 이하)
       </label>
@@ -89,17 +89,17 @@ export function PostImagePicker({ form, splitSections, labelStyle }: PostImagePi
         onClick={() => fileInputRef.current?.click()}
         disabled={full}
         style={{
-          padding: '10px 16px',
-          borderRadius: '8px',
-          border: '1px dashed rgba(141, 123, 255, 0.5)',
-          background: 'rgba(141, 123, 255, 0.1)',
-          color: full ? 'rgba(255, 255, 255, 0.3)' : '#a89fff',
+          padding: '10px var(--space-4)',
+          borderRadius: 'var(--radius-md)',
+          border: '1px dashed var(--violet-500-a50)',
+          background: 'var(--violet-500-a10)',
+          color: full ? 'var(--white-a30)' : 'var(--violet-300)',
           cursor: full ? 'not-allowed' : 'pointer',
           fontSize: '14px',
           fontWeight: '500',
           display: 'flex',
           alignItems: 'center',
-          gap: '8px',
+          gap: 'var(--space-2)',
         }}
       >
         + 이미지 추가
@@ -109,7 +109,7 @@ export function PostImagePicker({ form, splitSections, labelStyle }: PostImagePi
         <>
           {/* 기존 이미지 */}
           {existingImages.length > 0 && (
-            <div style={{ marginTop: '12px' }}>
+            <div style={{ marginTop: 'var(--space-3)' }}>
               <p style={sectionCaptionStyle}>
                 기존 이미지
               </p>
@@ -129,7 +129,7 @@ export function PostImagePicker({ form, splitSections, labelStyle }: PostImagePi
 
           {/* 새로 추가된 이미지 미리보기 */}
           {previewUrls.length > 0 && (
-            <div style={{ marginTop: '12px' }}>
+            <div style={{ marginTop: 'var(--space-3)' }}>
               <p style={sectionCaptionStyle}>
                 새로 추가된 이미지
               </p>
@@ -150,7 +150,7 @@ export function PostImagePicker({ form, splitSections, labelStyle }: PostImagePi
       ) : (
         /* 이미지 미리보기 */
         previewUrls.length > 0 && (
-          <div style={{ ...gridStyle, marginTop: '12px' }}>
+          <div style={{ ...gridStyle, marginTop: 'var(--space-3)' }}>
             {previewUrls.map((url, idx) => (
               <ImageThumb
                 key={idx}

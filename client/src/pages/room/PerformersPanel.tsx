@@ -1,5 +1,6 @@
 import type { MutableRefObject } from 'react'
 import { useRoom, type PeerInstrument } from '../../contexts/RoomContext'
+import { MetronomePanel } from './MetronomePanel'
 import { MyPerformerItem } from './MyPerformerItem'
 import { ParticipationToggle } from './ParticipationToggle'
 import { RemotePerformerItem } from './RemotePerformerItem'
@@ -60,6 +61,9 @@ export function PerformersPanel({
         {isPerformer && myInstrument && (
           <MyPerformerItem myInstrument={myInstrument} isHost={isHost} onOpenInstrumentChange={onOpenInstrumentChange} />
         )}
+
+        {/* 공유 메트로놈 (앱 연주자, P2-3) */}
+        {isPerformer && myInstrument && canPerform && <MetronomePanel isHost={isHost} />}
 
         {/* 다른 연주자들 (peerInstruments 기반) */}
         {remotePerformers.map(([oderId, peerInfo]) => {

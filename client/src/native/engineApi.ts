@@ -266,6 +266,8 @@ export interface EngineStats {
   devicePeriodMs?: number
   /** 실제로 열린 오디오 백엔드(`AudioBackendKind`, 입·출력이 다르면 `입력/출력`). 정지 상태면 빈 문자열 */
   backend?: string
+  /** 스레드 우선순위 설정 결과(MMCSS 등록 여부, 1ms 타이머) */
+  threadPriority?: ThreadPriorityStats
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
@@ -315,6 +317,17 @@ export interface MetronomeStats extends MetronomePlan {
   skippedClicks: number
   /** 클릭 시각에 반영한 숨은 출력 지연(ms). null = 드라이버가 알려 주지 않아 보정 안 됨 */
   outputLatencyMs: number | null
+}
+
+/** 엔진 스레드 우선순위 설정 결과(설계 문서 4절 `threadPriority`) */
+export type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
+
+export interface ThreadPriorityStats {
+  worker: ThreadPriority
+  netRecv: ThreadPriority
+  /** 오디오 I/O 스레드. 자체 WASAPI만 등록하고 cpal·ASIO는 unmanaged(백엔드가 관리) */
+  audio: ThreadPriority
+  timer1ms: boolean
 }
 
 // ============================================================================

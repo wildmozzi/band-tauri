@@ -33,7 +33,7 @@ export function CommentSection({ comments, user, onAdd, onReply, onEdit, onDelet
     <>
       {/* 댓글 입력 */}
       <div style={{ padding: '28px' }}>
-        <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '16px' }}>
+        <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: 'var(--space-4)' }}>
           댓글 {comments.length}개
         </h3>
         {user ? (
@@ -46,13 +46,13 @@ export function CommentSection({ comments, user, onAdd, onReply, onEdit, onDelet
               style={{
                 width: '100%',
                 padding: '14px',
-                borderRadius: '8px',
-                border: '1px solid rgba(255, 255, 255, 0.15)',
-                background: 'rgba(0, 0, 0, 0.3)',
-                color: '#fff',
+                borderRadius: 'var(--radius-md)',
+                border: '1px solid var(--white-a15)',
+                background: 'var(--black-a30)',
+                color: 'var(--white)',
                 fontSize: '14px',
                 resize: 'vertical',
-                marginBottom: '12px',
+                marginBottom: 'var(--space-3)',
                 fontFamily: 'inherit',
               }}
             />
@@ -60,11 +60,11 @@ export function CommentSection({ comments, user, onAdd, onReply, onEdit, onDelet
               onClick={handleAddComment}
               disabled={!newComment.trim() || submitting}
               style={{
-                background: newComment.trim() && !submitting ? '#8d7bff' : 'rgba(141, 123, 255, 0.3)',
+                background: newComment.trim() && !submitting ? 'var(--accent)' : 'var(--violet-500-a30)',
                 border: 'none',
-                color: '#fff',
-                padding: '10px 20px',
-                borderRadius: '6px',
+                color: 'var(--white)',
+                padding: '10px var(--space-5)',
+                borderRadius: 'var(--radius-sm)',
                 cursor: newComment.trim() && !submitting ? 'pointer' : 'not-allowed',
                 fontSize: '14px',
                 fontWeight: '600',
@@ -76,11 +76,11 @@ export function CommentSection({ comments, user, onAdd, onReply, onEdit, onDelet
         ) : (
           <div
             style={{
-              padding: '16px',
-              background: 'rgba(0, 0, 0, 0.2)',
-              borderRadius: '8px',
+              padding: 'var(--space-4)',
+              background: 'var(--black-a20)',
+              borderRadius: 'var(--radius-md)',
               textAlign: 'center',
-              color: 'rgba(255, 255, 255, 0.5)',
+              color: 'var(--white-a50)',
             }}
           >
             댓글을 작성하려면 로그인이 필요합니다.
@@ -91,7 +91,7 @@ export function CommentSection({ comments, user, onAdd, onReply, onEdit, onDelet
       {/* 댓글 목록 */}
       {comments.length > 0 && (
         <div style={{ padding: '0 28px 28px' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
             {comments.map((comment) => (
               <CommentItem
                 key={comment.id}

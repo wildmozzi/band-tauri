@@ -12,17 +12,18 @@ export function PlanStatus({ showUpgrade = true, compact = false }: PlanStatusPr
   const planInfo = {
     free: {
       name: '무료 플랜',
-      color: '#6b7280',
+      // 배지 글자는 어두운 색(index.css) — #6b7280은 4.22:1이라 AA 미달 → gray-400 (P3-12d)
+      color: 'var(--gray-400)',
       badge: '체험용',
     },
     standard: {
       name: 'Standard',
-      color: '#7b7bff',
+      color: 'var(--indigo-400)',
       badge: '추천',
     },
     pro: {
       name: 'Pro',
-      color: '#ff7ab8',
+      color: 'var(--pink-400)',
       badge: '프리미엄',
     },
   }

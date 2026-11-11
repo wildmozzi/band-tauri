@@ -9,7 +9,9 @@
 //!
 //! ## 두 단계(P3-0)
 //! - **결정적**(기본 `cargo test`): 기능 검사(연결, 뮤트, 팬, 장치 분리, 시작/정지 직렬화, 악성 입력 등).
-//!   벽시계 품질 임계(은닉 수·끊김·지연 ms)가 없어 러너 속도와 무관하다.
+//!   벽시계 품질 임계(은닉 수·끊김·지연 ms)가 없어 러너 속도와 무관하다. 고정 sleep도 쓰지 않는다(P3-0a):
+//!   기다림은 조건(`wait_until`: 상태·출력 진행량·받은 패킷 수)이나 동기화(`OpenGate`, 시작 세대)로 하고,
+//!   벽시계는 행 감지 상한(`HANG` 20초)에만 쓴다. 출력 검사는 "조건을 만족하는 창이 나온다"로 보아 xrun 구멍과 무관하다.
 //! - **실시간**(`#[ignore = "realtime: ..."]`): 실제 스레드·실제 시계로 은닉·끊김·지연 임계를 재는 테스트.
 //!   러너 스케줄링(워커가 은닉 마감 1.5ms 넘게 못 깨어남 등)에 흔들리므로 CI `realtime` 잡이 nextest로 하나씩,
 //!   실패 시 총 3회까지 돌린다. 각 테스트의 ignore 사유에 같은 시나리오를 가상 시간으로 검증하는 **결정적 짝**을
@@ -25,7 +27,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use band_lib::engine::config::{CodecKind, EngineConfig, HEADER_BYTES, MAX_PACKET_BYTES};
-use band_lib::engine::device::fake::FakeBackend;
+use band_lib::engine::device::fake::{FakeBackend, OpenGate};
 use band_lib::engine::jitter as jitter_stats;
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::stats::PeerStateKind;
@@ -84,6 +86,53 @@ fn with_candidate(d: &LocalDescriptor, addr: SocketAddr) -> LocalDescriptor {
 
 fn local_addr(e: &Engine) -> SocketAddr {
     format!("127.0.0.1:{}", e.local_port().unwrap()).parse().unwrap()
+}
+
+/// 결정적 테스트의 대기 상한. 판정은 조건 자체로 하고, 벽시계는 행(hang) 감지에만 쓴다(정상 소요의 수십 배).
+const HANG: Duration = Duration::from_secs(20);
+
+/// 조건이 참이 될 때까지 기다린다(고정 sleep 대신). 상한 안에 참이 되면 true.
+fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let t0 = Instant::now();
+    loop {
+        if cond() {
+            return true;
+        }
+        if t0.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `f`를 다른 스레드에서 돌려 상한 안에 끝나면 결과를 돌려준다(막힘 = None, 테스트가 영영 멈추지 않게).
+fn within<T: Send + 'static>(timeout: Duration, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(timeout).ok()
+}
+
+/// 스테레오 인터리브 sink에서 샘플 인덱스 `from` 이후 마지막 `frames` 프레임의 (L, R) RMS. 아직 모자라면 None.
+/// 시작 지연·xrun과 무관하게 "출력이 이렇게 나온 구간이 있다"를 보려고 짧은 창을 반복해서 본다.
+fn tail_rms_after(sink: &Mutex<Vec<f32>>, from: usize, frames: usize) -> Option<(f32, f32)> {
+    let out = sink.lock();
+    let start = out.len().checked_sub(frames * 2)?;
+    if start < from {
+        return None;
+    }
+    let (mut l, mut r) = (0f32, 0f32);
+    for f in out[start..].as_chunks::<2>().0 {
+        l += f[0] * f[0];
+        r += f[1] * f[1];
+    }
+    Some(((l / frames as f32).sqrt(), (r / frames as f32).sqrt()))
+}
+
+/// 지터 버퍼가 실제 패킷으로 만든 프레임 수(은닉 제외). 벽시계 대신 "그 뒤로 패킷을 이만큼 받았다"는 진행량 기준.
+fn real_frames(e: &Engine, peer: &str) -> u64 {
+    e.peer_jitter_stats().iter().find(|(id, _)| id == peer).map(|(_, js)| js.produced.saturating_sub(js.concealed)).unwrap_or(0)
 }
 
 #[derive(Debug, Default)]
@@ -242,8 +291,8 @@ fn connect_pair(
     };
     a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), to_b)).unwrap();
     b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), to_a)).unwrap();
-    assert!(wait_connected(&a, Duration::from_secs(5)), "A 연결 실패");
-    assert!(wait_connected(&b, Duration::from_secs(5)), "B 연결 실패");
+    assert!(wait_connected(&a, HANG), "A 연결 실패");
+    assert!(wait_connected(&b, HANG), "B 연결 실패");
     (a, b, proxy, sink_b)
 }
 
@@ -747,7 +796,7 @@ fn device_lost_is_reported() {
     let mut backend = FakeBackend::silence(48_000);
     backend.error_after = Some(Duration::from_millis(300));
     let mut e = Engine::start(config(128, 5.0), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
-    std::thread::sleep(Duration::from_millis(700));
+    assert!(wait_until(HANG, || e.stats().stream_errors >= 1), "스트림 에러가 보고되지 않음");
     let s = e.stats();
     e.stop();
     assert_eq!(s.stream_errors, 1);
@@ -758,7 +807,7 @@ fn device_lost_is_reported() {
     backend.halt_after = Some(Duration::from_millis(400));
     let mut e = Engine::start(config(128, 5.0), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
     assert!(e.stats().running);
-    std::thread::sleep(Duration::from_millis(2000));
+    assert!(wait_until(HANG, || e.stats().device_lost), "콜백이 멈췄는데 deviceLost가 서지 않음");
     let s = e.stats();
     e.stop();
     assert!(s.device_lost, "{s:?}");
@@ -826,29 +875,33 @@ fn output_underruns_do_not_accumulate_latency() {
 #[test]
 fn manager_stays_responsive_while_starting() {
     let _g = RT_LOCK.lock();
+    // 장치 열기를 문으로 붙잡는다(벽시계 open_delay 대신): 문이 닫혀 있는 동안은 확실히 "시작 중"이다.
+    let gate = OpenGate::closed();
     let mut backend = FakeBackend::silence(48_000);
-    backend.open_delay = Duration::from_millis(1500);
+    backend.open_gate = Some(gate.clone());
     let m = Arc::new(EngineManager::new(Arc::new(backend), test_net()));
     let m2 = m.clone();
     let starter = std::thread::spawn(move || m2.start(config(128, 5.0), "me".into()));
-    std::thread::sleep(Duration::from_millis(200));
+    assert!(gate.wait_entered(1, HANG), "장치 열기에 들어가지 않음");
     assert!(m.is_starting());
-    // 시작 중에도 다른 커맨드는 즉시 응답(락을 쥔 채 블로킹하지 않음)
-    let t0 = Instant::now();
-    let s = m.stats();
-    let err = m.with_engine(|_| Ok(())).unwrap_err();
-    assert!(t0.elapsed() < Duration::from_millis(50), "stats가 막힘: {:?}", t0.elapsed());
+    // 시작 중에도 다른 커맨드는 응답한다(락을 쥔 채 블로킹하지 않음). 막히면 문이 닫혀 있어 끝나지 않으므로 상한으로 판정.
+    let m3 = m.clone();
+    let (s, err) = within(HANG, move || (m3.stats(), m3.with_engine(|_| Ok(())).unwrap_err())).expect("시작 중 stats/with_engine이 막힘");
+    assert!(m.is_starting(), "문이 닫혀 있으므로 아직 시작 중");
     assert!(!s.running);
     assert!(err.contains("시작 중"), "{err}");
+    gate.release();
     let desc = starter.join().unwrap().unwrap();
     assert!(desc.ssrc != 0 || !desc.key.is_empty());
     assert!(m.stats().running);
 
     // 시작 중 stop → 그 시작은 취소된다
+    gate.close();
     let m3 = m.clone();
     let starter = std::thread::spawn(move || m3.start(config(128, 5.0), "me".into()));
-    std::thread::sleep(Duration::from_millis(300));
+    assert!(gate.wait_entered(2, HANG), "두 번째 시작이 장치 열기에 들어가지 않음");
     m.stop();
+    gate.release();
     let r = starter.join().unwrap();
     assert!(r.is_err(), "취소되어야 함");
     assert!(!m.stats().running, "stop 이후 엔진이 남으면 안 됨");
@@ -859,27 +912,39 @@ fn stop_then_start_during_slow_start_is_serialized() {
     let _g = RT_LOCK.lock();
     // PR #5 M-4: 장치 열기가 느린 시작 중에 stop → 곧바로 start. 장치는 배타라 동시에 열면 실패한다.
     // 새 시작은 이전 시작이 끝나 장치를 놓을 때까지 기다려야 하고, 결국 엔진이 하나 살아 있어야 한다.
+    // 느린 장치 열기는 문(OpenGate)으로 만든다: 순서를 벽시계가 아니라 문과 시작 세대로 고정한다.
+    let gate = OpenGate::closed();
     let mut backend = FakeBackend::silence(48_000);
-    backend.open_delay = Duration::from_millis(1200);
+    backend.open_gate = Some(gate.clone());
     backend.exclusive = Some(Arc::new(AtomicBool::new(false)));
     let m = Arc::new(EngineManager::new(Arc::new(backend), test_net()));
     let m1 = m.clone();
     let first = std::thread::spawn(move || m1.start(config(128, 5.0), "me".into()));
-    std::thread::sleep(Duration::from_millis(200));
+    assert!(gate.wait_entered(1, HANG), "첫 시작이 장치 열기에 들어가지 않음");
     m.stop();
+    let g0 = m.start_generation();
     let m2 = m.clone();
     let second = std::thread::spawn(move || m2.start(config(128, 5.0), "me".into()));
+    // 두 번째 start가 들어왔다(세대 증가). 첫 시작은 아직 장치를 쥔 채 문에 붙잡혀 있다 — 직렬화가 깨졌다면
+    // 두 번째는 배타 장치 열기에 실패한다.
+    assert!(wait_until(HANG, || m.start_generation() > g0), "두 번째 start가 들어오지 않음");
+    gate.release();
     let r1 = first.join().unwrap();
     let r2 = second.join().unwrap();
     assert!(r1.is_err(), "첫 시작은 취소");
     assert!(r2.is_ok(), "두 번째 시작은 장치 사용 중 없이 성공해야 함: {r2:?}");
     assert!(m.stats().running);
     // 연속 start 두 번(설정 변경 연타)도 마지막 하나만 남는다
+    gate.close();
+    let n = gate.entered();
     let m3 = m.clone();
     let a = std::thread::spawn(move || m3.start(config(256, 5.0), "me".into()));
-    std::thread::sleep(Duration::from_millis(100));
+    assert!(gate.wait_entered(n + 1, HANG), "a가 장치 열기에 들어가지 않음");
+    let g1 = m.start_generation();
     let m4 = m.clone();
     let b = std::thread::spawn(move || m4.start(config(128, 2.5), "me".into()));
+    assert!(wait_until(HANG, || m.start_generation() > g1), "b가 들어오지 않음");
+    gate.release();
     let (ra, rb) = (a.join().unwrap(), b.join().unwrap());
     assert!(ra.is_err() && rb.is_ok(), "{ra:?} / {rb:?}");
     assert!(m.stats().running);
@@ -907,19 +972,24 @@ fn repeated_start_stop_joins_threads() {
     let _g = RT_LOCK.lock();
     let controls = Arc::new(MixControls::default());
     for i in 0..5 {
-        let t0 = Instant::now();
+        let backend = FakeBackend::silence(48_000);
+        let sink = backend.sink.clone();
         let mut e = Engine::start(
             config(128, 5.0),
-            Arc::new(FakeBackend::silence(48_000)),
+            Arc::new(backend),
             controls.clone(),
             if i % 2 == 0 { Some((format!("p{i}"), test_net())) } else { None },
         )
         .unwrap();
         e.subscribe_mix(Box::new(|_| {})).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-        e.stop();
-        e.stop(); // 멱등
-        assert!(t0.elapsed() < Duration::from_secs(3), "정지가 지연됨");
+        // 콜백이 실제로 돈 뒤에 정지한다(고정 sleep 대신 출력 진행량)
+        assert!(wait_until(HANG, || sink.lock().len() >= 128 * 2 * 4), "콜백이 돌지 않음");
+        // 정지(join)가 끝나야 한다. 상한은 행 감지용.
+        within(HANG, move || {
+            e.stop();
+            e.stop(); // 멱등
+        })
+        .expect("정지가 끝나지 않음(스레드 join 행)");
     }
 }
 
@@ -931,14 +1001,18 @@ fn test_mode_monitor_passthrough() {
     let backend = sine_backend();
     let sink = backend.sink.clone();
     let mut e = Engine::start(config(128, 5.0), Arc::new(backend), controls, None).unwrap();
-    std::thread::sleep(Duration::from_millis(800));
+    // 모니터 출력에 입력 사인이 원래 크기로 나온다: 50ms 창 RMS가 진폭/√2 근처인 구간이 나올 때까지
+    // (고정 sleep·마지막 0.5초 RMS 대신 — 시작 지연·xrun 구멍과 무관).
+    let want = SINE_AMP / 2f32.sqrt();
+    let mut rms = 0.0;
+    let ok = wait_until(HANG, || {
+        rms = tail_rms_after(&sink, 0, 2400).map_or(0.0, |(l, _)| l);
+        (rms - want).abs() < 0.05
+    });
     let s = e.stats();
     e.stop();
-    let out = sink.lock().clone();
-    let tail = &out[out.len().saturating_sub(48_000)..];
-    let rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len().max(1) as f32).sqrt();
     println!("모니터 모드: rms {rms:.3}, estLatencyMs {:.1}, xruns {}", s.est_latency_ms, s.xruns);
-    assert!((rms - SINE_AMP / 2f32.sqrt()).abs() < 0.05, "모니터 출력 rms {rms}");
+    assert!(ok, "모니터 출력 rms {rms}");
     assert!(s.est_latency_ms < 25.0, "로컬 지연 {}", s.est_latency_ms);
 }
 
@@ -963,26 +1037,34 @@ fn input_mute_silences_monitor_and_tap_but_keeps_meter() {
         g.0 += bytes.len() / 4;
     }))
     .unwrap();
-    std::thread::sleep(Duration::from_millis(600));
-    let s = e.stats();
+    // 고정 sleep 대신 진행량으로 기다린다(P3-0a): 뮤트 상태로 출력 0.5초분(24000프레임)과 탭 샘플이 쌓이고,
+    // 입력 미터가 입력 사인 RMS를 보일 때까지. 처음부터 뮤트였으므로 그동안의 출력·탭 전체가 무음이어야 한다.
+    let want = SINE_AMP / 2f32.sqrt();
+    assert!(wait_until(HANG, || sink.lock().len() >= 48_000 && tap_energy.lock().0 >= 24_000), "출력/탭이 쌓이지 않음");
+    let mut level = 0.0;
+    let level_ok = wait_until(HANG, || {
+        level = e.stats().input_level;
+        (level - want).abs() < 0.03
+    });
     let muted_len = sink.lock().len();
     let muted_rms = {
         let out = sink.lock();
-        let tail = &out[muted_len.saturating_sub(24_000)..muted_len];
-        (tail.iter().map(|x| x * x).sum::<f32>() / tail.len().max(1) as f32).sqrt()
+        let all = &out[..muted_len];
+        (all.iter().map(|x| x * x).sum::<f32>() / all.len().max(1) as f32).sqrt()
     };
     let (n, energy) = *tap_energy.lock();
     controls.input_muted.store(false, Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(400));
+    let mut unmuted_rms = 0.0;
+    let unmuted = wait_until(HANG, || {
+        unmuted_rms = tail_rms_after(&sink, muted_len, 2400).map_or(0.0, |(l, _)| l);
+        unmuted_rms > 0.3
+    });
     e.stop();
-    let out = sink.lock().clone();
-    let tail = &out[out.len() - 24_000..];
-    let unmuted_rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt();
-    println!("입력 뮤트: 출력 rms {muted_rms:.4}, 탭 rms {:.4}, inputLevel {:.3} → 해제 후 rms {unmuted_rms:.3}", (energy / n.max(1) as f64).sqrt(), s.input_level);
+    println!("입력 뮤트: 출력 rms {muted_rms:.4}, 탭 rms {:.4}, inputLevel {level:.3} → 해제 후 rms {unmuted_rms:.3}", (energy / n.max(1) as f64).sqrt());
     assert!(muted_rms < 1e-4, "뮤트 중 모니터 출력은 무음");
     assert!(n > 0 && energy < 1e-6, "뮤트 중 믹스 탭도 무음");
-    assert!((s.input_level - SINE_AMP / 2f32.sqrt()).abs() < 0.03, "inputLevel {}", s.input_level);
-    assert!(unmuted_rms > 0.3, "뮤트 해제 후 복귀");
+    assert!(level_ok, "뮤트 중에도 입력 미터는 동작: inputLevel {level}");
+    assert!(unmuted, "뮤트 해제 후 복귀: rms {unmuted_rms}");
 }
 
 #[test]
@@ -990,22 +1072,28 @@ fn peer_pan_and_levels() {
     let _g = RT_LOCK.lock();
     let (a, b, _p, sink_b) = connect_pair(config(128, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
     b.set_peer_gain("alice", 1.0, false, Some(1.0)).unwrap();
-    std::thread::sleep(Duration::from_millis(700));
+    // 고정 sleep 대신(P3-0a): 팬이 적용된 소리(오른쪽 √2 배, 50ms 창)가 나오고 피어 레벨이 설 때까지 기다린다.
+    let from = sink_b.lock().len();
+    let (mut r, mut peer_level) = (0f32, 0f32);
+    let panned = wait_until(HANG, || {
+        r = tail_rms_after(&sink_b, from, 2400).map_or(0.0, |(_, r)| r);
+        peer_level = b.stats().peers[0].level;
+        r > 0.4 && peer_level > 0.25
+    });
+    assert!(panned, "오른쪽은 √2 배: R rms {r}, 피어 레벨 {peer_level}");
+    // 그 뒤 출력 0.5초분(진행량) 동안 왼쪽은 한 번도 새지 않는다(은닉 프레임도 같은 팬).
+    let settled = sink_b.lock().len();
+    assert!(wait_until(HANG, || sink_b.lock().len() >= settled + 48_000), "출력이 진행하지 않음");
     let st = b.stats();
-    let out = sink_b.lock().clone();
-    let tail = &out[out.len() - 48_000..];
-    let (mut l, mut r) = (0f32, 0f32);
-    for f in tail.as_chunks::<2>().0 {
-        l += f[0] * f[0];
-        r += f[1] * f[1];
-    }
-    let n = (tail.len() / 2) as f32;
-    let (l, r) = ((l / n).sqrt(), (r / n).sqrt());
-    let peer_level = st.peers[0].level;
+    let l = {
+        let out = sink_b.lock();
+        let seg = &out[settled..];
+        let n = (seg.len() / 2).max(1) as f32;
+        (seg.as_chunks::<2>().0.iter().map(|f| f[0] * f[0]).sum::<f32>() / n).sqrt()
+    };
     println!("pan=+1: L rms {l:.4}, R rms {r:.4}, peer level {peer_level:.3}, outputLevel {:.3}", st.output_level);
     assert!(l < 0.01, "오른쪽 끝 팬이면 왼쪽은 무음: {l}");
-    assert!(r > 0.4, "오른쪽은 √2 배: {r}");
-    assert!((0.0..=1.0).contains(&peer_level) && peer_level > 0.25, "피어 레벨은 0..1 RMS: {peer_level}");
+    assert!((0.0..=1.0).contains(&peer_level), "피어 레벨은 0..1 RMS: {peer_level}");
     assert!((0.0..=1.0).contains(&st.output_level));
     assert!(b.set_peer_gain("nobody", 1.0, false, None).is_err());
     drop(a);
@@ -1047,15 +1135,23 @@ fn ssrc_squatting_and_forged_packets_do_not_hijack_peer() {
         assert!(n >= HEADER_BYTES);
         attacker.send_to(&buf[..n], local_addr(&b)).unwrap();
     }
-    std::thread::sleep(Duration::from_millis(600));
+    // 고정 sleep 대신 진행량(P3-0a): 위조 패킷 뒤에 도착한 A의 패킷으로 프레임 200개(1초분)를 더 만들 때까지.
+    // 같은 수신 소켓에서 순서대로 처리하므로 그때는 위조 패킷도 처리가 끝났다. 사칭 Bye가 먹혔다면 A의 프레임이 멈춰 실패한다.
+    let real0 = real_frames(&b, "alice");
+    assert!(wait_until(HANG, || real_frames(&b, "alice") >= real0 + 200), "위조 뒤 A의 패킷이 계속 처리되지 않음");
     let st = b.stats();
     let alice = st.peers.iter().find(|p| p.peer_id == "alice").unwrap();
     assert_eq!(alice.state, PeerStateKind::Connected, "사칭 Bye로 끊기면 안 됨");
-    // B는 여전히 A의 소리를 듣는다
-    let out = sink_b.lock().clone();
-    let tail = &out[out.len() - 24_000..];
-    let rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt();
-    assert!(rms > 0.3, "A 오디오가 계속 들려야 함: {rms}");
+    // B는 여전히 A의 소리를 듣는다(50ms 창이 소리로 찬 구간이 나온다)
+    let from = sink_b.lock().len();
+    let mut rms = 0.0;
+    assert!(
+        wait_until(HANG, || {
+            rms = tail_rms_after(&sink_b, from, 2400).map_or(0.0, |(l, _)| l);
+            rms > 0.3
+        }),
+        "A 오디오가 계속 들려야 함: {rms}"
+    );
     drop(a);
 }
 
@@ -1216,11 +1312,12 @@ fn est_latency_budget_table() {
         backend.in_buffer = Some(r.in_buf);
         backend.out_buffer = Some(r.out_buf);
         let mut e = Engine::start(config(r.in_buf as u32, r.frame_ms), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
-        std::thread::sleep(Duration::from_millis(400));
-        let s = e.stats();
-        e.stop();
         let (i, o) = (r.in_buf as f32 / 48.0, r.out_buf as f32 / 48.0);
         let calc = i + r.frame_ms + o;
+        // 실측 콜백 크기가 잡힐 때까지(고정 sleep 대신). 끝내 안 맞으면 아래 단언이 값을 보여 준다.
+        wait_until(HANG, || (e.stats().est_latency_ms - calc).abs() < 0.05);
+        let s = e.stats();
+        e.stop();
         println!(
             "| {} | {i:.2} | {:.2} | 0 | {o:.2} | **{:.2}** (계산 {calc:.2}) | {} |",
             r.label,
@@ -1234,4 +1331,136 @@ fn est_latency_budget_table() {
             assert!(s.est_latency_ms <= g, "{}: estLatencyMs {:.2} > {g}", r.label, s.est_latency_ms);
         }
     }
+}
+
+// ============================================================================
+// 스레드 우선순위(P1-2): MMCSS 등록 노출, 타이머 짝, 적용 전/후 측정
+// ============================================================================
+
+#[test]
+fn thread_priority_reported_and_timer_released_on_stop() {
+    use band_lib::engine::prio::ThreadPriority;
+    let _g = RT_LOCK.lock();
+    for _ in 0..3 {
+        let (mut a, b, _p, _sink) = connect_pair(config(480, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
+        // 워커·수신 스레드는 시작 직후 우선순위를 적는다
+        let t0 = Instant::now();
+        let mut tp = a.stats().thread_priority;
+        while (tp.worker == ThreadPriority::Unmanaged || tp.net_recv == ThreadPriority::Unmanaged) && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+            tp = a.stats().thread_priority;
+        }
+        println!("threadPriority: {tp:?}");
+        if cfg!(windows) {
+            for p in [tp.worker, tp.net_recv] {
+                assert!(matches!(p, ThreadPriority::Mmcss | ThreadPriority::Elevated | ThreadPriority::Failed), "{tp:?}");
+            }
+            assert!(tp.timer_1ms, "Windows 엔진 실행 중에는 1ms 타이머를 쥔다");
+        } else {
+            assert_eq!(tp.worker, ThreadPriority::Unsupported);
+            assert!(!tp.timer_1ms);
+        }
+        // 가짜 장치는 우리가 관리하지 않는 장치 스레드로 보고된다
+        assert_eq!(tp.audio, ThreadPriority::Unmanaged);
+        let json = serde_json::to_value(a.stats()).unwrap();
+        assert!(json["threadPriority"]["timer1ms"].is_boolean());
+        // stop을 두 번 불러도 안전(타이머 짝은 prio 단위 테스트가 검증)
+        a.stop();
+        a.stop();
+        drop(b);
+    }
+}
+
+/// 적용 전/후 비교: 엔진 스레드 승격(MMCSS, 1ms 타이머)을 끔/MMCSS만/타이머만/둘 다로 바꿔 같은 링크를 돌린다.
+/// 지표: 워커와 같은 방식으로 승격된 프로브 스레드의 FINE_POLL(150µs) 수면 초과량, B의 은닉·마감 채움·건너뜀,
+/// 지터버퍼 지연/지터. 부하 단계는 논리 코어 수만큼 바쁜 스레드(보통 우선순위)를 돌린다.
+/// 실행: `cargo test --release --test loopback rt_priority_before_after -- --ignored --nocapture`
+#[test]
+#[ignore = "realtime: 측정용(임계 없음). 결정적 짝 engine::prio::tests"]
+fn rt_priority_before_after() {
+    use band_lib::engine::prio;
+    let _g = RT_LOCK.lock();
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    println!("| 부하 | 승격 | 프로브 수면 초과 p50/p99/max (µs) | 은닉/s | 마감 채움 | 건너뜀(프레임) | bufferMs 평균 | jitterMs | xruns B |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+    for load in [false, true] {
+        for _round in 0..2 {
+            for (mmcss, timer) in [(false, false), (true, false), (false, true), (true, true)] {
+                prio::set_engine_promotion_parts(mmcss, timer);
+                let stop_load = Arc::new(AtomicBool::new(false));
+                let hogs: Vec<_> = (0..if load { cores } else { 0 })
+                    .map(|_| {
+                        let s = stop_load.clone();
+                        std::thread::spawn(move || {
+                            let mut x = 0u64;
+                            while !s.load(Ordering::Relaxed) {
+                                x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+                            }
+                        })
+                    })
+                    .collect();
+                let mut ba = sine_backend();
+                ba.wake_jitter_us = 0;
+                let bb = FakeBackend::silence(48_000);
+                let (a, b, _p, _sink) = connect_pair(config(128, 2.5), ba, bb, None);
+                // 프로브: 워커와 같은 승격 경로 + 같은 수면 길이
+                let stop_probe = Arc::new(AtomicBool::new(false));
+                let sp = stop_probe.clone();
+                let probe = std::thread::spawn(move || {
+                    let slot = prio::PrioSlot::default();
+                    let _g = prio::promote_engine_thread(&slot);
+                    let mut over = Vec::with_capacity(100_000);
+                    while !sp.load(Ordering::Relaxed) {
+                        let t = Instant::now();
+                        std::thread::sleep(Duration::from_micros(150));
+                        over.push(t.elapsed().as_micros().saturating_sub(150) as u64);
+                    }
+                    over
+                });
+                std::thread::sleep(Duration::from_secs(2));
+                let s0 = b.peer_jitter_stats()[0].1;
+                let f0 = b.feed_stats();
+                let x0 = b.stats().xruns;
+                let mut buf_sum = 0.0;
+                let n = 40;
+                for _ in 0..n {
+                    std::thread::sleep(Duration::from_millis(250));
+                    buf_sum += b.peer_jitter_stats()[0].1.buffer_ms as f64;
+                }
+                let s1 = b.peer_jitter_stats()[0].1;
+                let f1 = b.feed_stats();
+                let x1 = b.stats().xruns;
+                stop_probe.store(true, Ordering::Relaxed);
+                let mut over = probe.join().unwrap();
+                drop(a);
+                drop(b);
+                stop_load.store(true, Ordering::Relaxed);
+                for h in hogs {
+                    let _ = h.join();
+                }
+                over.sort_unstable();
+                let pct = |q: f64| over[((over.len() - 1) as f64 * q) as usize];
+                println!(
+                    "| {} | {} | {}/{}/{} | {:.2} | {} | {} | {:.2} | {:.2} | {} |",
+                    if load { format!("{cores}코어 점유") } else { "없음".into() },
+                    match (mmcss, timer) {
+                        (false, false) => "끔",
+                        (true, false) => "MMCSS만",
+                        (false, true) => "타이머만",
+                        (true, true) => "둘 다",
+                    },
+                    pct(0.5),
+                    pct(0.99),
+                    over[over.len() - 1],
+                    (s1.concealed - s0.concealed) as f64 / (n as f64 * 0.25),
+                    f1.0 - f0.0,
+                    f1.1 - f0.1,
+                    buf_sum / n as f64,
+                    s1.jitter_ms,
+                    x1 - x0,
+                );
+            }
+        }
+    }
+    prio::set_engine_promotion(true);
 }

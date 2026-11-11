@@ -30,3 +30,28 @@ test('합주실 정보 모달: 대화상자로 열리고 Tab이 안에서 돌며
   await page.getByRole('dialog', { name: '방 정보' }).getByRole('button', { name: '닫기' }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
+
+test('오디오 설정 모달(웹): 대화상자로 열리고 Esc로 닫히며 포커스가 열기 버튼으로 돌아온다 (P3-8a)', async ({ page }) => {
+  await page.goto('/')
+  const opener = page.getByRole('button', { name: '오디오 설정' })
+  await opener.click()
+
+  const dialog = page.getByRole('dialog', { name: '오디오 설정' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toHaveAttribute('aria-modal', 'true')
+  await expect(dialog).toBeFocused()
+  for (let i = 0; i < 6; i++) {
+    await page.keyboard.press('Tab')
+    expect(await dialog.evaluate(el => el.contains(document.activeElement))).toBe(true)
+  }
+
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(opener).toBeFocused()
+
+  // 배경을 눌러도 닫힌다
+  await opener.click()
+  await expect(dialog).toBeVisible()
+  await page.mouse.click(5, 5)
+  await expect(dialog).toHaveCount(0)
+})
