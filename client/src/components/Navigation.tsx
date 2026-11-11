@@ -60,13 +60,14 @@ export function Navigation() {
           onClick={() => setShowAudioSettings(true)}
           className="nav-settings"
           title="오디오 설정"
+          aria-label="오디오 설정"
         >
           🎛️
         </button>
         {user ? (
           <div className="user-menu">
             <PlanStatus compact />
-            <Link to="/profile" className="profile-icon-link">
+            <Link to="/profile" className="profile-icon-link" aria-label="프로필">
               {user.user_metadata?.profile_photo ? (
                 <img
                   src={user.user_metadata.profile_photo}

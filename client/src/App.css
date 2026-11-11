@@ -180,6 +180,7 @@ body {
 
 .hero-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   justify-content: center;
   margin-bottom: 60px;
@@ -187,6 +188,7 @@ body {
 
 .primary-cta,
 .ghost-cta {
+  white-space: nowrap;
   padding: 14px 32px;
   font-size: 1rem;
   font-weight: 600;
@@ -658,11 +660,64 @@ body {
   box-shadow: var(--shadow-glow-success);
 }
 
+/* 방 코드 / 초대 링크로 입장 (P2-6). pages/Rooms.css는 어디서도 import되지 않아 이 규칙만 옮겨 온다 (P3-12c) */
+.room-code-join {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.room-code-join input {
+  flex: 1;
+  min-width: 200px;
+  max-width: 420px;
+  padding: 8px 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--white-a05);
+  color: inherit;
+}
+
+.room-code-join button {
+  padding: 8px 18px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--white-a08);
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.room-code-join button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.room-code-error {
+  color: var(--error);
+  font-size: 0.85rem;
+}
+
 .room-filters {
   display: flex;
   gap: 12px;
   margin-bottom: 32px;
   flex-wrap: wrap;
+}
+
+/* 커뮤니티 목록·글 상세: 본문 + 오른쪽 사이드바(트렌딩 태그). 좁은 화면에서는 한 열로 (P3-12c) */
+.community-feed-grid {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 24px;
+}
+
+@media (max-width: 1024px) {
+  .community-feed-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .filter-chip {

@@ -23,6 +23,7 @@ function MixerMaster({ isPerformer }: { isPerformer: boolean }) {
         <label>볼륨</label>
         <input
           type="range"
+          aria-label="마스터 볼륨"
           min="0"
           max="1"
           step="0.01"
@@ -37,6 +38,7 @@ function MixerMaster({ isPerformer }: { isPerformer: boolean }) {
           <label>패닝</label>
           <input
             type="range"
+            aria-label="마스터 패닝"
             min="-1"
             max="1"
             step="0.01"
