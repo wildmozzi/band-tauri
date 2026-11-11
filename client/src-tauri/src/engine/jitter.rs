@@ -95,6 +95,13 @@ const LATE_DOWN_FRAC: f64 = 0.6;
 const LATE_CLIP: f64 = 4.0;
 /// 한 번에 바꾸는 최대 깊이(샘플, 1ms).
 const LATE_STEP_MAX: f64 = 48.0;
+/// 재생 시작 뒤 예산 판단에서 빼는 블록 수: 시작이 걸친 블록 + START_PAD(1초)·짧은 창 수렴 구간(PR #63 리뷰 L3).
+const LATE_SKIP_BLOCKS: u32 = 2;
+/// 손실만으로 은닉 목표를 넘는 회선에서 푸는 예산의 상한(비율, P1-6c PR #65 리뷰 M1·M2). 하네스의 GOAL 밖 회선 기준
+/// "은닉 ≤ 실제 손실 + 0.5%p"(GOAL 2절 손실 1% → 1.5%의 손실 너머 몫)에서 언더런·잡음 몫 0.1%p를 남긴 값이다.
+const LATE_BUDGET_LOSSY_MAX: f64 = 0.004;
+/// 프로필 변경 때 `tail_extra`까지 비우는 은닉 목표 변화 배율(P1-6c, PR #65 리뷰 L2). 이보다 작은 변화는 늦은 비율만 비운다.
+const TAIL_RESET_RATIO: f64 = 1.5;
 /// 재생 시작 직후 목표에 min(1프레임, 2.5ms)을 더해 두는 시간(µs).
 const START_PAD_US: u64 = 1_000_000;
 /// 패킷 단위 버림 시 크로스페이드 길이(샘플).
@@ -304,6 +311,12 @@ pub struct JitterStats {
     pub burst_events: u64,
     /// 벽시계로 잰 실제 버퍼 지연(최근 0.5~1초 최솟값, ms). 장치 클럭 추정과 독립적이다.
     pub wall_buffer_ms: f32,
+    /// 목표 중 늦은 패킷 예산 여유(`tail_extra`, ms). 측정용(P1-6c, PR #65 리뷰).
+    pub tail_ms: f32,
+    /// `tail_extra`를 바꾼 횟수(올림·내림)와 초기화(경로 변경·스트림 리셋·큰 프로필 변경) 횟수.
+    /// 측정용(P1-6c, PR #65 리뷰 M1·L3). Tauri `PeerStats`에는 노출하지 않는다.
+    pub tail_adjusts: u64,
+    pub tail_resets: u64,
 }
 
 impl JitterStats {
@@ -443,7 +456,10 @@ pub struct JitterBuffer {
     path_grace_step: i64,
 
     /// 늦은 패킷 예산(P1-6b): 현재 1초 블록의 늦은 도착 수·도착 패킷 수, 블록별 늦은 비율(예산의 `LATE_CLIP`배로 자름)·
-    /// 실제 손실률 링.
+    /// 실제 손실률 링. 늦은 도착·손실·도착 패킷 모두 재생 중에만 센다(P1-6c, PR #63 리뷰 L4: 이전에는 도착 패킷만
+    /// 버퍼링 중에도 세서 재버퍼가 낀 블록의 비율이 희석됐고, 경로 변경 유예 중 옛 경로 패킷은 늦은 도착만 셌다).
+    /// 남은 비대칭: 언더런 은닉이 2번 이상 쌓인 뒤(debt ≥ 2) 도착한 패킷 하나는 늦은 도착 1개로 센다 — 늦게 온
+    /// 패킷 수를 세는 것이므로 의도된 것이고, 은닉 수와의 차이는 창 평균에서 작다.
     late_block: u32,
     pkts_block: u32,
     /// 현재 블록에서 손실로 넘긴 seq 수와 그중 나중에 도착한(늦은) 수. 차이가 실제 손실이다.
@@ -457,6 +473,8 @@ pub struct JitterBuffer {
     tail_extra: f64,
     /// 마지막 조정 뒤 지난 블록 수(최대 `LATE_BLOCKS`).
     tail_fresh: usize,
+    /// 재생 시작 직후 예산 판단에서 뺄 남은 블록 수(`LATE_SKIP_BLOCKS`, PR #63 리뷰 L3).
+    tail_skip: u32,
 
     stats: JitterStats,
 }
@@ -556,6 +574,7 @@ impl JitterBuffer {
             late_pos: 0,
             tail_extra: 0.0,
             tail_fresh: 0,
+            tail_skip: 0,
             stats: JitterStats::default(),
         }
     }
@@ -620,6 +639,31 @@ impl JitterBuffer {
         self.underrun_debt = 0;
         self.last_frame_valid = false;
         self.xfade_len = 0;
+        self.reset_tail(true);
+    }
+
+    /// 늦은 패킷 예산 초기화(P1-6c, PR #63 리뷰 L2): `tail_extra`와 늦은 비율 링을 비운다. 내림은 10블록마다 절반 걸음이라
+    /// 그대로 두면 새 조건(경로·스트림·프로필)이 꼬리 없는 회선이어도 1프레임이 빠지는 데 수십~200초가 걸렸다. 다시 필요하면
+    /// 5블록 뒤 μ·ln 걸음(≤ 1ms)으로 올라온다. `with_loss`면 실제 손실률 링도 비운다(경로·스트림이 바뀐 경우; 프로필
+    /// 변경은 망 손실과 무관하므로 남긴다). 목표가 바뀌므로 호출한 쪽이 `after_target_change`를 거친다.
+    fn reset_tail(&mut self, with_loss: bool) {
+        self.stats.tail_resets += 1;
+        self.tail_extra = 0.0;
+        self.clear_late_rates();
+        self.late_block = 0;
+        self.pkts_block = 0;
+        self.lost_block = 0;
+        self.late_seq_block = 0;
+        if with_loss {
+            self.loss_rates = [0.0; LATE_BLOCKS];
+            self.loss_count = 0;
+        }
+    }
+
+    /// 늦은 비율 링만 비우고 조정 창을 새로 시작한다(`tail_extra`는 유지).
+    fn clear_late_rates(&mut self) {
+        self.tail_fresh = 0;
+        self.late_rates = [0.0; LATE_BLOCKS];
     }
 
     /// 패킷 프레임 길이(샘플).
@@ -709,10 +753,19 @@ impl JitterBuffer {
             return;
         }
         self.settings.profile = profile;
+        let ratio = tuning.conceal_target / self.tuning.conceal_target;
         self.tuning = tuning;
         self.recompute_delay_stats();
         self.short_cap = self.short_cap.max(Self::grid_up(self.q_rel));
         self.update_long_cap();
+        // 예산(은닉 목표)이 바뀌었으므로 옛 예산으로 잘라 쌓은 늦은 비율(옛 예산 × 4)은 버린다(PR #63 리뷰 L2). 망은 같으므로
+        // 예산이 `TAIL_RESET_RATIO`배 넘게 바뀔 때만 `tail_extra`도 비운다 — 슬라이더 한두 칸(0.5 → 0.55, 목표 1.3 → 1.23%)
+        // 으로 꼬리 대응을 처음부터 다시 쌓지 않게(PR #65 리뷰 L2). 작은 변화는 새 예산으로 다음 블록들에서 조정된다.
+        if ratio.is_finite() && (1.0 / TAIL_RESET_RATIO..=TAIL_RESET_RATIO).contains(&ratio) {
+            self.clear_late_rates();
+        } else {
+            self.reset_tail(false);
+        }
         self.after_target_change();
     }
 
@@ -804,7 +857,6 @@ impl JitterBuffer {
         if self.block_rel.len() < BLOCK_SAMPLES_MAX {
             self.block_rel.push((transit - self.min_transit).max(0));
         }
-        self.pkts_block = self.pkts_block.saturating_add(1);
     }
 
     /// 마감을 놓친 뒤 도착한 패킷 1개(P1-6b): 손실로 넘긴 seq가 도착(`late`)했거나, 언더런 은닉 뒤 도착해 재생·버림됐다.
@@ -814,12 +866,22 @@ impl JitterBuffer {
         }
     }
 
+    /// 늦은 패킷 예산의 분모: 재생 중 도착한 패킷 1개(늦은 도착 포함, 경로 변경 유예로 통계에서 뺀 것 포함). 늦은 도착·
+    /// 손실과 같은 조건(재생 중)으로 센다(L4). `record_delay`(블록 경계) 뒤에 불러 이 패킷이 새 블록에 들어가게 한다.
+    fn note_pkt(&mut self) {
+        if self.state == State::Playing {
+            self.pkts_block = self.pkts_block.saturating_add(1);
+        }
+    }
+
     /// 늦은 패킷 예산(P1-6b): 1초 블록이 끝날 때 마지막 조정 이후 블록들의 늦은 도착 비율을 예산과 비교해 `tail_extra`를
     /// 조정한다. 조정 직후의 블록만 보므로(창을 새로 시작) 창 지연으로 계속 올라가는 과조정이 없다.
     /// - 블록 비율은 예산의 `LATE_CLIP`배로 자른다. 스파이크(블록 1~2개에 늦은 패킷이 몰림)는 긴 창·버스트 감지의
     ///   몫이고 이 예산을 크게 움직이지 않는다. 꼬리 긴 지터처럼 늦은 패킷이 고르게 퍼진 회선에서만 오른다.
     /// - 예산 = 은닉 목표(`conceal_target`, 균형 1.3%) − 실제 손실률(손실로 넘긴 seq − 그중 늦게 도착한 것), 목표의
-    ///   1/4 ~ 3/4로 제한. 손실 은닉은 지터 버퍼가 줄일 수 없으므로 남은 몫만 늦은 패킷에 쓴다(GOAL 2절).
+    ///   1/4 ~ 3/4로 제한. 손실 은닉은 지터 버퍼가 줄일 수 없으므로 남은 몫만 늦은 패킷에 쓴다(GOAL 2절). 손실만으로
+    ///   목표에 닿는 회선은 0.4%까지 연속으로 푼다(`late_budget`, P1-6c).
+    /// - 재생 시작·경로 변경 뒤 `LATE_SKIP_BLOCKS`개 블록은 판단에서 뺀다(L3). 경로 변경·스트림 리셋·큰 프로필 변경은 초기화(L2).
     /// - 올림: 조정 뒤 `LATE_UP_BLOCKS`개 평균이 예산을 넘으면 μ·ln(평균/예산)(격자 0.25ms ~ 1ms). μ는 꼬리 척도로
     ///   RFC 3550 지터를 쓴다(지수 꼬리면 늦은 비율 ∝ exp(−여유/μ)이라 한두 번에 수렴).
     /// - 내림: 조정 뒤 `LATE_DOWN_BLOCKS`개 평균이 예산 × `LATE_DOWN_FRAC` 아래면 그 절반 걸음.
@@ -833,12 +895,17 @@ impl JitterBuffer {
         if pkts < 20 {
             return;
         }
+        // 재생 시작 직후(시작이 걸친 블록, START_PAD·짧은 창 수렴 구간)의 늦은 도착은 초기 과조정을 만들고 내림이 느려
+        // 오래 남으므로 판단에서 뺀다(L3). 재버퍼 뒤 재시작에도 같다.
+        if self.tail_skip > 0 {
+            self.tail_skip -= 1;
+            return;
+        }
         // 실제 손실 = 손실로 넘긴 seq − 그중 나중에 도착한 것. 늦은 도착이 다음 블록에 걸쳐도 창 평균에서 상쇄된다.
         self.loss_rates[self.late_pos] = lost as f64 / pkts as f64 - late_seq as f64 / pkts as f64;
         self.loss_count = (self.loss_count + 1).min(LATE_BLOCKS);
         let real_loss = (self.loss_rates[..self.loss_count].iter().sum::<f64>() / self.loss_count as f64).max(0.0);
-        let target = self.tuning.conceal_target;
-        let budget = (target - real_loss).clamp(target / 4.0, target * 0.75);
+        let budget = Self::late_budget(self.tuning.conceal_target, real_loss);
         self.late_rates[self.late_pos] = (late as f64 / pkts as f64).min(LATE_CLIP * budget);
         self.late_pos = (self.late_pos + 1) % LATE_BLOCKS;
         self.tail_fresh = (self.tail_fresh + 1).min(LATE_BLOCKS);
@@ -857,8 +924,25 @@ impl JitterBuffer {
         }
         if self.tail_extra != before {
             self.tail_fresh = 0;
+            self.stats.tail_adjusts += 1;
             self.after_target_change();
         }
+    }
+
+    /// 늦은 패킷 예산(비율): 은닉 목표 `target`, 실제 손실률 `real_loss`의 연속 함수(P1-6c, PR #65 리뷰 M1).
+    /// - 손실 < 목표(균형 1.3%): `target − real_loss`를 목표의 1/4 ~ 3/4로 제한(P1-6b와 같음, 손실 1%면 0.325%).
+    /// - 목표 ~ 목표 × 1.5(균형 1.3 ~ 1.95%): 하한(목표/4)에서 `LATE_BUDGET_LOSSY_MAX`(0.4%, 목표 1/4 ~ 3/4 안으로)까지
+    ///   선형으로 푼다. 손실만으로 목표에 닿는 회선에서 늦은 패킷을 가장 세게 줄이면 지연(≤ 1F)만 크고 이득이 작다(PR #63
+    ///   리뷰 L1). #65 첫 커밋은 손실 1.3%에서 0.325% → 0.975% 계단이라 손실 1.2~1.5% 회선에서 블록마다 뒤집혔고(M1),
+    ///   0.975%는 하네스의 GOAL 밖 회선 기준(은닉 ≤ 실제 손실 + 0.5%p)을 넘었다(M2).
+    /// - 그 위: 0.4%(균형). 저지연(목표 3%)은 하한 0.75%가 이미 0.4%보다 커서 풀지 않는다(하한 그대로).
+    fn late_budget(target: f64, real_loss: f64) -> f64 {
+        let (lo, hi) = (target / 4.0, target * 0.75);
+        let base = (target - real_loss).clamp(lo, hi);
+        let relaxed = LATE_BUDGET_LOSSY_MAX.clamp(lo, hi);
+        // 손실이 목표를 넘는 만큼(목표/2 폭) 푼다. 목표 아래면 w = 0이라 base 그대로(목표 − 목표/4 ~ 목표 구간은 이미 하한).
+        let w = ((real_loss - target) / (target / 2.0)).clamp(0.0, 1.0);
+        base + (relaxed - lo) * w
     }
 
     fn update_long_cap(&mut self) {
@@ -898,11 +982,13 @@ impl JitterBuffer {
                     self.next_seq = seq;
                 } else {
                     self.stats.late += 1;
+                    // 블록 경계(`record_delay`) 뒤에 세어 늦은 도착과 분모가 같은 블록에 들어가게 한다.
+                    self.record_delay(hdr.timestamp, now_us);
                     self.note_late();
+                    self.note_pkt();
                     if self.state == State::Playing {
                         self.late_seq_block = self.late_seq_block.saturating_add(1);
                     }
-                    self.record_delay(hdr.timestamp, now_us);
                     return;
                 }
             } else if d as usize >= SLOT_COUNT {
@@ -934,6 +1020,7 @@ impl JitterBuffer {
         self.pkt_frame = frame;
 
         self.record_delay(hdr.timestamp, now_us);
+        self.note_pkt();
     }
 
     fn record_delay(&mut self, ts: u32, now_us: u64) {
@@ -988,6 +1075,10 @@ impl JitterBuffer {
         self.recent_rel = [0; BURST_WIN];
         self.block_rel.clear();
         self.block_start_us = None;
+        // 늦은 패킷 예산도 새 경로 기준으로 다시 모은다(L2). 목표 변화는 `record_delay` 끝의 `after_target_change`가 반영한다.
+        // 재생 시작처럼 창·블록이 비어 수렴 중이므로 처음 블록들은 판단에서 뺀다(PR #65 리뷰 L1).
+        self.reset_tail(true);
+        self.tail_skip = LATE_SKIP_BLOCKS;
     }
 
     fn recompute_delay_stats(&mut self) {
@@ -1137,6 +1228,7 @@ impl JitterBuffer {
         self.skip_missing_head();
         self.start_pad = (self.frame() as f64).min(2.5 * Self::samples_per_ms());
         self.start_pad_until_us = now_us + START_PAD_US;
+        self.tail_skip = LATE_SKIP_BLOCKS;
         let target = self.target_samples();
         let Some(depth) = self.depth_if_start(now_us) else {
             return;
@@ -1493,6 +1585,7 @@ impl JitterBuffer {
         s.jitter_est_ms = self.jitter_est() as f32 / spm;
         s.corr_time_pct = self.corr_ring.pct();
         s.max_corr_cents = self.max_corr_cents;
+        s.tail_ms = self.tail_extra as f32 / spm;
         s
     }
 
@@ -1652,6 +1745,8 @@ mod tests {
         /// 끝 시점 늦은 패킷 예산 여유(ms)와 5초 시점 이후 은닉 비율(%).
         tail_extra_ms: f64,
         conceal_after_5s: f64,
+        /// 망 손실률(%, 송신 패킷 중 버린 것).
+        net_loss_pct: f64,
     }
 
     /// 이벤트 시뮬레이션. 송신 클럭은 (1+drift_ppm)배 빠르고, 네트워크 지연은 base + U(0,jitter),
@@ -1672,6 +1767,7 @@ mod tests {
         let mut arrivals: Vec<(f64, Header, Vec<u8>)> = Vec::new();
         let mut t = 0.0;
         let mut k = 0u64;
+        let mut net_lost = 0u64;
         while t < p.seconds * 1e6 {
             let (h, pk) = tx.next();
             // 송신측 장치 버스트: tx_burst마다 몰아서 나감
@@ -1681,7 +1777,9 @@ mod tests {
             } else {
                 t
             };
-            if rng.gen::<f64>() >= p.loss {
+            if rng.gen::<f64>() < p.loss {
+                net_lost += 1;
+            } else {
                 let u = rng.gen::<f64>();
                 let j = if p.exp_jitter { -(1.0 - u).ln() } else { u };
                 let d = base_us + j * p.jitter_ms * 1000.0;
@@ -1753,6 +1851,7 @@ mod tests {
             silent_chunks: silent,
             discontinuities: disc,
             tail_extra_ms: jb.tail_extra / 48.0,
+            net_loss_pct: net_lost as f64 * 100.0 / k.max(1) as f64,
             conceal_after_5s: {
                 let a = at_5s.unwrap_or_default();
                 (stats.concealed - a.concealed) as f64 * 100.0 / (stats.produced - a.produced).max(1) as f64
@@ -2081,6 +2180,203 @@ mod tests {
         let u = run(false, 3.0, 0.01, false);
         assert_eq!(u.tail_extra_ms, 0.0, "균등 지터 + 손실 1%: tail_extra {:.2}ms", u.tail_extra_ms);
         assert!(u.conceal_after_5s < 1.5, "균등 지터 + 손실 1%: 은닉 {:.2}%", u.conceal_after_5s);
+    }
+
+    /// P1-6c(PR #65 리뷰 M1·M2): 예산은 손실의 연속 함수다. 손실 < 0.975%는 P1-6b와 같고(손실 1% → 0.325%), 그 위는
+    /// 0.4%까지 선형으로 풀리며, 어디서도 하네스 GOAL 밖 회선 기준의 손실 너머 몫(0.5%p)에 닿지 않는다.
+    #[test]
+    fn late_budget_is_continuous_in_loss() {
+        let lb = JitterBuffer::late_budget;
+        for &target in &[0.030, 0.013, 0.006, JitterTuning::from_profile(0.25).conceal_target, JitterTuning::from_profile(0.75).conceal_target] {
+            let mut prev = lb(target, 0.0);
+            assert!((prev - target * 0.75).abs() < 1e-12);
+            for k in 1..=10_000 {
+                let r = k as f64 * 1e-5; // 0 ~ 10%, 0.001%p 간격
+                let b = lb(target, r);
+                // 기울기 ≤ 1(이음매에 계단 없음): 손실 0.001%p 변화에 예산도 그 이상 움직이지 않는다.
+                assert!((b - prev).abs() <= 1e-5 + 1e-12, "target {target} r {r}: {prev} → {b}");
+                assert!(b >= target / 4.0 - 1e-12 && b <= target * 0.75 + 1e-12);
+                if r >= target * 0.75 + 1e-5 {
+                    // 손실이 목표에 가까워지면 예산은 줄지 않고(역전 없음), 균형 이하 프로필에서도 0.4%를 넘지 않는다.
+                    assert!(b >= prev - 1e-12, "target {target} r {r}: 손실이 늘었는데 예산이 줄었다");
+                    assert!(b <= LATE_BUDGET_LOSSY_MAX.max(target / 4.0) + 1e-12);
+                }
+                prev = b;
+            }
+        }
+        // 균형: 손실 1%·1.2% → 0.325%(이전과 같음), 1.4% → 0.337%(첫 커밋 0.975%), 1.95% 이상 → 0.4%.
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        assert!(near(lb(0.013, 0.010), 0.00325) && near(lb(0.013, 0.012), 0.00325));
+        assert!(lb(0.013, 0.014) - lb(0.013, 0.012) < 0.0002);
+        assert!(near(lb(0.013, 0.02), 0.004) && near(lb(0.013, 0.05), 0.004));
+        // 저지연(목표 3%)은 풀지 않는다(하한 0.75%가 이미 0.4%보다 큼).
+        assert!(near(lb(0.03, 0.05), 0.0075));
+    }
+
+    /// 시드 여러 개 평균(PR #65 리뷰 L4: 단일 시드 단언은 다음 엔진 변경에서 의미 없이 깨질 수 있다).
+    struct TailRun {
+        tail_ms: f64,
+        conceal: f64,
+        net_loss: f64,
+        adjusts: f64,
+    }
+
+    fn tail_runs(jitter_ms: f64, loss: f64) -> TailRun {
+        let seeds = [7u64, 11, 23];
+        let rs: Vec<SimResult> =
+            seeds.iter().map(|&seed| simulate(Sim { exp_jitter: true, jitter_ms, loss, seconds: 60.0, seed, ..Default::default() })).collect();
+        let mean = |f: &dyn Fn(&SimResult) -> f64| rs.iter().map(f).sum::<f64>() / rs.len() as f64;
+        TailRun {
+            tail_ms: mean(&|r| r.tail_extra_ms),
+            conceal: mean(&|r| r.conceal_after_5s),
+            net_loss: mean(&|r| r.net_loss_pct),
+            adjusts: mean(&|r| r.stats.tail_adjusts as f64),
+        }
+    }
+
+    /// 진단용 격자(지수 지터 2/3/4ms × 손실 0~3%, 시드 3개 평균). 예산 정책을 바꿀 때 PR 본문 표를 만드는 데 쓴다.
+    /// `cargo test --lib tail_matrix_diag -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn tail_matrix_diag() {
+        for j in [2.0, 3.0, 4.0] {
+            for l in [0.0, 0.005, 0.01, 0.012, 0.014, 0.02, 0.03] {
+                let r = tail_runs(j, l);
+                println!(
+                    "지수 지터 {j}ms 손실 {:.1}%: tail {:.2}ms 은닉 {:.2}% 망 손실 {:.2}% (은닉 − 손실 {:+.2}%p) 조정 {:.1}회",
+                    l * 100.0,
+                    r.tail_ms,
+                    r.conceal,
+                    r.net_loss,
+                    r.conceal - r.net_loss,
+                    r.adjusts
+                );
+            }
+        }
+    }
+
+    /// P1-6c(PR #63 리뷰 L1, PR #65 리뷰 M1·M2·L4): 손실이 목표를 넘는 꼬리 지터 회선. 시드 3개 평균.
+    /// - 문턱(균형 1.3%) 양쪽 손실 1.2% / 1.4%에서 `tail_extra`가 격자 2칸(0.5ms) 안이고 조정 횟수도 비슷하다. #65 첫 커밋(계단
+    ///   0.325% → 0.975%)은 지수 지터 3ms에서 2.42 / 1.58ms, 4ms에서 4.83 / 3.83ms로 갈렸다.
+    /// - 1F 상한에 닿지 않는 꼬리(지수 3ms)에서 손실 ≥ 1.4%의 은닉은 하네스 GOAL 밖 회선 기준(실제 손실 + 0.5%p) 안이다.
+    ///   첫 커밋은 손실 2%에서 +0.53%p였다.
+    /// - 손실 2%는 손실 1%보다 여유를 더 쓰지 않는다(예산 0.4% ≥ 0.325%, 격자 1칸 허용).
+    /// - 지수 4ms는 `tail_extra`가 1F 상한(5ms)에 닿아 예산과 무관하게 늦은 패킷이 남는다(손실 0%에서도 은닉 0.74%). 이 영역의
+    ///   은닉 초과는 GOAL 1절 지연 상한과의 교환이므로 여기서는 상한만 확인한다(PR #65 본문 M2).
+    #[test]
+    fn late_budget_relaxes_when_loss_exceeds_target() {
+        for j in [3.0, 4.0] {
+            let (a, b) = (tail_runs(j, 0.012), tail_runs(j, 0.014));
+            println!("지수 지터 {j}ms 손실 1.2% / 1.4%: tail {:.2} / {:.2}ms, 조정 {:.1} / {:.1}회", a.tail_ms, b.tail_ms, a.adjusts, b.adjusts);
+            assert!((a.tail_ms - b.tail_ms).abs() <= 0.5 + 1e-9, "지터 {j}ms: tail {:.2} vs {:.2}", a.tail_ms, b.tail_ms);
+            assert!((a.adjusts - b.adjusts).abs() <= 2.0, "지터 {j}ms: 조정 {:.1} vs {:.1}", a.adjusts, b.adjusts);
+        }
+        let l1 = tail_runs(3.0, 0.01);
+        for loss in [0.014, 0.02, 0.03] {
+            let r = tail_runs(3.0, loss);
+            println!("지수 지터 3ms 손실 {:.1}%: tail {:.2}ms 은닉 {:.2}% = 손실 {:.2}% {:+.2}%p", loss * 100.0, r.tail_ms, r.conceal, r.net_loss, r.conceal - r.net_loss);
+            assert!(r.conceal <= r.net_loss + 0.5, "손실 {loss}: 은닉 {:.2}% > 실제 손실 {:.2}% + 0.5%p", r.conceal, r.net_loss);
+            if loss == 0.02 {
+                assert!(r.tail_ms <= l1.tail_ms + 0.25 + 1e-9, "손실 2% tail {:.2} vs 1% {:.2}", r.tail_ms, l1.tail_ms);
+            }
+        }
+        let r = tail_runs(4.0, 0.02);
+        assert!(r.tail_ms <= 5.0 + 1e-9, "1F 상한: {:.2}ms", r.tail_ms);
+    }
+
+    /// P1-6c(PR #63 리뷰 L4): 늦은 패킷 예산의 분모(도착 패킷)는 재생 중에만 센다.
+    #[test]
+    fn late_budget_counts_packets_only_while_playing() {
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+        jb.set_consumer_lead(72.0);
+        let mut tx = Sender::new(CodecKind::Pcm16, 240, 1, 0);
+        let mut out = vec![0f32; 240 * 2];
+        let mut t = 0u64;
+        let (h, pk) = tx.next();
+        jb.insert(&h, &pk, t);
+        assert!(!jb.is_playing());
+        assert_eq!(jb.pkts_block, 0, "버퍼링 중 도착은 분모에 넣지 않는다");
+        while !jb.is_playing() {
+            t += 5000;
+            let (h, pk) = tx.next();
+            jb.insert(&h, &pk, t);
+            jb.pop(&mut out);
+            jb.end_burst(t, t, 0.0);
+            assert!(t < 2_000_000, "재생 시작 안 됨");
+        }
+        let before = jb.pkts_block;
+        t += 5000;
+        let (h, pk) = tx.next();
+        jb.insert(&h, &pk, t);
+        assert_eq!(jb.pkts_block, before + 1, "재생 중 도착은 센다");
+    }
+
+    /// P1-6c(PR #63 리뷰 L2·L3): 경로 변경·스트림 리셋·프로필 변경은 늦은 패킷 예산을 초기화하고(프로필은 손실 링을 남김),
+    /// 재생 시작은 처음 `LATE_SKIP_BLOCKS`개 블록을 판단에서 뺀다.
+    #[test]
+    fn late_budget_resets_on_path_stream_profile_and_skips_start() {
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+        let dirty = |jb: &mut JitterBuffer| {
+            jb.tail_extra = 96.0;
+            jb.tail_fresh = 3;
+            jb.late_rates = [0.01; LATE_BLOCKS];
+            jb.loss_rates = [0.02; LATE_BLOCKS];
+            jb.loss_count = LATE_BLOCKS;
+            jb.late_block = 5;
+            jb.pkts_block = 100;
+        };
+        dirty(&mut jb);
+        jb.reset_delay_stats(0);
+        assert_eq!((jb.tail_extra, jb.tail_fresh, jb.loss_count, jb.pkts_block, jb.late_block), (0.0, 0, 0, 0, 0), "경로 변경");
+        // 경로 변경 뒤에도 수렴 구간은 판단에서 뺀다(PR #65 리뷰 L1).
+        assert_eq!(jb.tail_skip, LATE_SKIP_BLOCKS);
+        assert_eq!(jb.stats().tail_resets, 1);
+        dirty(&mut jb);
+        jb.reset_stream();
+        assert_eq!((jb.tail_extra, jb.loss_count), (0.0, 0), "스트림 리셋");
+        dirty(&mut jb);
+        jb.set_profile(1.0);
+        assert_eq!(jb.tail_extra, 0.0, "큰 프로필 변경(목표 1.3% → 0.6%)");
+        assert_eq!(jb.late_rates, [0.0; LATE_BLOCKS]);
+        assert_eq!(jb.loss_count, LATE_BLOCKS, "프로필 변경은 손실 링을 남긴다");
+        assert_eq!(jb.stats().tail_resets, 3);
+        // 같은 프로필이면 아무것도 바꾸지 않는다.
+        dirty(&mut jb);
+        jb.set_profile(1.0);
+        assert_eq!(jb.tail_extra, 96.0);
+        assert_eq!(jb.late_rates, [0.01; LATE_BLOCKS]);
+        // 작은 프로필 변경(1.0 → 0.9, 목표 0.6% → 0.74%)은 늦은 비율만 비우고 `tail_extra`는 남긴다(PR #65 리뷰 L2).
+        jb.set_profile(0.9);
+        assert_eq!((jb.tail_extra, jb.tail_fresh), (96.0, 0));
+        assert_eq!(jb.late_rates, [0.0; LATE_BLOCKS]);
+        assert_eq!(jb.stats().tail_resets, 3);
+
+        // 재생 시작 → 처음 블록 2개는 건너뛰고 세 번째부터 센다(재생 중 도착만 분모에 들어감).
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+        jb.set_consumer_lead(72.0);
+        let mut tx = Sender::new(CodecKind::Pcm16, 240, 1, 0);
+        let mut out = vec![0f32; 240 * 2];
+        let mut t = 0u64;
+        while !jb.is_playing() {
+            let (h, pk) = tx.next();
+            jb.insert(&h, &pk, t);
+            jb.pop(&mut out);
+            jb.end_burst(t, t, 0.0);
+            t += 5000;
+            assert!(t < 2_000_000, "재생 시작 안 됨");
+        }
+        assert_eq!(jb.tail_skip, LATE_SKIP_BLOCKS);
+        assert_eq!(jb.loss_count, 0);
+        while t < 6_000_000 {
+            let (h, pk) = tx.next();
+            jb.insert(&h, &pk, t);
+            jb.pop(&mut out);
+            jb.end_burst(t, t, 0.0);
+            t += 5000;
+        }
+        assert_eq!(jb.tail_skip, 0);
+        // 시작 뒤 약 6초 = 블록 5~6개 중 2개는 건너뜀.
+        assert!((3..=4).contains(&jb.loss_count), "센 블록 {}", jb.loss_count);
     }
 
     #[test]

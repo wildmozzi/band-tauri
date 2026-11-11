@@ -117,6 +117,11 @@ pub(super) struct Sample {
     /// 누적 손실 은닉(나머지는 언더런 은닉).
     pub concealed_loss: u64,
     pub produced: u64,
+    /// 목표 구성(ms): 지터 추정(`jitter_est_ms`), 소비자 여유(`lead_ms`), 늦은 패킷 예산 여유(`tail_ms`). 나머지(목표 − 셋)는
+    /// 삽입 진입 문턱 + 프로필·시작 여유(P1-6c, PR #65 리뷰: 1절 초과분 분해).
+    pub jit: f32,
+    pub lead: f32,
+    pub tail: f32,
 }
 
 impl PeerOut {
@@ -374,7 +379,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                 for i in 0..n {
                     let s = jbs[i].stats();
                     let playing = jbs[i].is_playing();
-                    outs[i].samples.push(Sample { t: t as f64 / 1e6, buf: s.buffer_ms, tgt: s.target_ms, playing, concealed: s.concealed, concealed_loss: s.concealed_loss, produced: s.produced });
+                    outs[i].samples.push(Sample { t: t as f64 / 1e6, buf: s.buffer_ms, tgt: s.target_ms, playing, concealed: s.concealed, concealed_loss: s.concealed_loss, produced: s.produced, jit: s.jitter_est_ms, lead: s.lead_ms, tail: s.tail_ms });
                     if playing {
                         outs[i].trace.push((t as f64 / 1e6, s.buffer_ms, s.target_ms));
                         if t >= p.settle_us && (t - p.settle_us) % 5_000_000 < 100_000 && t > p.settle_us + 4_900_000 {
