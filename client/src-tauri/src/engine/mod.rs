@@ -10,6 +10,8 @@ pub mod cpuprof;
 pub mod device;
 pub mod flac;
 pub mod jitter;
+#[cfg(test)]
+mod loss_codec_sim;
 pub mod measure;
 pub mod metronome;
 pub mod mixer;
@@ -383,12 +385,23 @@ impl Engine {
                             let now = Instant::now();
                             (e.remote_requesting(now) && !e.enabled, e.reflecting(now), e.remote_echoing(now))
                         };
-                        let (tx_codec, tx_codec_auto) = {
-                            use crate::net::peer::{TX_CODEC_AUTO, TX_CODEC_OPUS, TX_CODEC_SENT};
+                        let (tx_codec, tx_codec_reason) = {
+                            use crate::engine::relay_codec::CodecReason;
+                            use crate::net::peer::{TX_CODEC_AUTO, TX_CODEC_AUTO_LOSS, TX_CODEC_OPUS, TX_CODEC_SENT};
                             let c = p.tx_codec.load(Ordering::Relaxed);
                             let kind = if c & TX_CODEC_OPUS != 0 { config::CodecKind::Opus } else { config::CodecKind::Pcm16 };
-                            ((c & TX_CODEC_SENT != 0).then_some(kind), c & TX_CODEC_AUTO != 0)
+                            let reason = if c & TX_CODEC_AUTO != 0 {
+                                Some(CodecReason::RelayLoad)
+                            } else if c & TX_CODEC_AUTO_LOSS != 0 {
+                                Some(CodecReason::LossFeedback)
+                            } else {
+                                None
+                            };
+                            ((c & TX_CODEC_SENT != 0).then_some(kind), reason)
                         };
+                        let remote = (*p.remote_loss.lock())
+                            .filter(|(_, at)| Instant::now().saturating_duration_since(*at) <= relay_codec::REPORT_STALE)
+                            .map(|(r, _)| r);
                         PeerStats {
                             peer_id: p.id.clone(),
                             state: conn.state,
@@ -410,7 +423,10 @@ impl Engine {
                             echo_active,
                             peer_echoing,
                             tx_codec,
-                            tx_codec_auto,
+                            tx_codec_auto: tx_codec_reason.is_some(),
+                            tx_codec_reason,
+                            remote_loss_pct: remote.map(|r| r.loss_pct),
+                            remote_conceal_pct: remote.map(|r| r.conceal_pct),
                         }
                     })
                     .collect()

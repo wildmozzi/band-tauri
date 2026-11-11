@@ -42,6 +42,16 @@ impl Encoder {
         }
     }
 
+    /// Opus 예상 손실(%, `OPUS_SET_PACKET_LOSS_PERC`). 할당 없음(인코더 ctl). PCM16이면 무시.
+    pub fn set_loss_perc(&mut self, pct: u8) -> Result<(), String> {
+        match self {
+            Encoder::Opus { enc, .. } => {
+                enc.set_packet_loss_perc(pct.min(100) as i32).map_err(|e| format!("Opus 손실률 설정 실패: {e}"))
+            }
+            Encoder::Pcm16 { .. } => Ok(()),
+        }
+    }
+
     /// `frame`(인터리브)을 인코딩해 `out`에 쓰고 바이트 수를 반환.
     pub fn encode(&mut self, frame: &[f32], out: &mut [u8]) -> Result<usize, String> {
         match self {

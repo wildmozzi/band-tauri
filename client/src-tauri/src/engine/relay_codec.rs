@@ -1,4 +1,12 @@
-//! 릴레이 경로 Opus 자동 전환 정책 (P1-4c ②, relay-design 4절·native-engine-design 3절 7).
+//! PCM16 설정에서 피어별 Opus 자동 전환 정책 (native-engine-design 3절 7·9).
+//!
+//! 설정 코덱이 PCM16일 때 워커는 아래 이유 중 하나에 해당하는 피어에게만 Opus로 보낸다(피어마다 전용 인코더).
+//! 두 정책은 같은 복귀 규칙(`Hysteresis`: hold 10초, 플래핑이면 두 배씩 최대 120초, 60초 안정하면 10초)을 쓴다.
+//! - `RelayLoad`(P1-4c, `RelayCodecPolicy`): 릴레이 대역 부하. 켜지면 **릴레이 경로 피어 모두**.
+//! - `LossFeedback`(P1-4e, `LossCodecPolicy`): 그 피어가 Ping 평문으로 알려 온 **내 소리의 수신 손실률**. 피어마다 따로.
+//!   직접 경로에서도 동작한다(송신 측은 상대가 겪는 손실을 이것 말고는 알 수 없다).
+//!
+//! ## 릴레이 부하 (P1-4c ②, relay-design 4절)
 //!
 //! PCM16 설정에서 릴레이 경유 피어가 늘면 릴레이 클라이언트당 상한(2 Mbps·2500pps)을 넘는다
 //! (PCM16 mono 2.5ms ≈ 0.9 Mbps/피어). 워커는 이 정책이 켜져 있는 동안 **릴레이 경로 피어에게만**
@@ -14,6 +22,19 @@
 //!   버리는 손실이 재진입마다 반복되지 않게 한다.
 //! - 플래핑: 복귀한 지 30초 안에 다시 켜지면 `hold`를 두 배로(10 → 20 → 40 → 80 → 120초). PCM으로 60초 넘게
 //!   안정하면 10초로 돌아간다.
+//!
+//! ## 수신 손실 피드백 (P1-4e)
+//!
+//! 받는 쪽은 Ping(500ms)마다 그 피어 스트림의 최근 5초 손실률·은닉률을 싣는다(설계 2절 "손실 보고").
+//! - 켜기: 보고 손실 ≥ `LOSS_ENTER_PCT`(2%)가 `LOSS_ENTER_SUSTAIN`(1초, 보고 3번) 동안 이어진다. 보고 값 자체가
+//!   5초 창이라 순간 손실 하나로는 켜지지 않는다(100ms 버스트 하나는 2.5ms 프레임에서 5초 창 2%에 닿을 수 있다 —
+//!   그 정도 버스트가 있는 회선이면 PLC가 나은 쪽이라 켜지는 것이 맞다).
+//! - 끄기: 보고 손실 < `LOSS_EXIT_PCT`(1%)가 `hold` 동안 이어진다. 보고가 `REPORT_STALE`(3초) 넘게 없으면
+//!   (옛 엔진, 상대가 아직 재생 전) 판단 근거가 없는 것으로 보고 켜지 않으며, 켜져 있었으면 "손실 없음" 쪽으로 센다.
+//! - 손실률은 망에서 생기므로 코덱을 바꿔도 보고 값은 그대로다. 그래서 복귀는 망이 실제로 좋아졌을 때만 일어난다.
+//! - 인코더의 예상 손실(`OPUS_SET_PACKET_LOSS_PERC`)은 보고 손실에 맞춘다(`loss_opus_perc`). 2.5ms 프레임은 CELT 전용이라
+//!   in-band FEC(LBRR, SILK 전용)는 실제로 실리지 않는다. 이득은 Opus PLC와, 손실률이 높을수록 프레임 간 예측을 줄이는
+//!   CELT 에너지 부호화(손실 뒤 회복이 빠름)다.
 
 use std::time::{Duration, Instant};
 
@@ -32,6 +53,16 @@ pub const LEARNED_TRIP_TTL: Duration = Duration::from_secs(300);
 /// 측정으로 켜진 경우, 복귀 문턱 = 넘은 부하 × 이 값(측정 한도가 예상보다 낮을 때).
 const MEASURED_EXIT_RATIO: f32 = 0.85;
 
+/// 손실 피드백: 보고 손실이 이 값(%) 이상으로 `LOSS_ENTER_SUSTAIN` 이어지면 Opus로.
+pub const LOSS_ENTER_PCT: f32 = 2.0;
+pub const LOSS_ENTER_SUSTAIN: Duration = Duration::from_secs(1);
+/// 손실 피드백: 보고 손실이 이 값(%) 아래로 `hold` 이어지면 PCM16으로.
+pub const LOSS_EXIT_PCT: f32 = 1.0;
+/// 이보다 오래된 보고는 없는 것으로 본다(Ping 500ms × 6).
+pub const REPORT_STALE: Duration = Duration::from_secs(3);
+/// 릴레이 부하로만 켜졌을 때의 인코더 예상 손실(%) — 설정 Opus(1.3절)와 같다.
+pub const DEFAULT_OPUS_LOSS_PERC: u8 = 5;
+
 /// 릴레이 경로 피어 `relay_peers`명에게 PCM16을 보낼 때의 예상 부하(릴레이 상한 대비 비율, bps·pps 중 큰 쪽).
 /// RelayData 기준(접두부 8 + 엔진 헤더 18 + PCM 페이로드 + 태그 16), 제어 패킷(초당 몇 개)은 뺀다.
 pub fn pcm_relay_load(frame_samples: usize, channels: usize, relay_peers: usize) -> f32 {
@@ -41,6 +72,63 @@ pub fn pcm_relay_load(frame_samples: usize, channels: usize, relay_peers: usize)
     let pps = 48_000.0 / frame_samples as f32 * relay_peers as f32;
     let bytes = (DATA_PREFIX_BYTES + HEADER_BYTES + frame_samples * channels * 2 + TAG_BYTES) as f32;
     (bytes * 8.0 * pps / RELAY_BUDGET_BPS).max(pps / RELAY_BUDGET_PPS)
+}
+
+/// 보고 손실(%)에 맞춘 인코더 예상 손실(%): 올림, 2..=25. 보고가 없으면 기본값.
+pub fn loss_opus_perc(reported_loss_pct: Option<f32>) -> u8 {
+    match reported_loss_pct {
+        Some(l) if l.is_finite() => (l.ceil() as i32).clamp(2, 25) as u8,
+        _ => DEFAULT_OPUS_LOSS_PERC,
+    }
+}
+
+/// 자동 전환의 이유(`PeerStats.txCodecReason`). 둘 다 해당하면 `RelayLoad`로 보인다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodecReason {
+    RelayLoad,
+    LossFeedback,
+}
+
+/// 복귀 hold와 플래핑 규칙(두 정책 공통): 복귀한 지 `FLAP_WINDOW` 안에 다시 켜지면 hold를 두 배로(최대 `HOLD_MAX`),
+/// 꺼진 채 `STABLE_RESET` 지나면 `HOLD_MIN`으로.
+#[derive(Debug, Clone)]
+pub struct Hysteresis {
+    hold: Duration,
+    last_exit: Option<Instant>,
+}
+
+impl Default for Hysteresis {
+    fn default() -> Self {
+        Self { hold: HOLD_MIN, last_exit: None }
+    }
+}
+
+impl Hysteresis {
+    pub fn hold(&self) -> Duration {
+        self.hold
+    }
+
+    /// 꺼진 상태의 점검마다.
+    fn idle(&mut self, now: Instant) {
+        if self.since_exit(now).is_some_and(|d| d >= STABLE_RESET) {
+            self.hold = HOLD_MIN;
+        }
+    }
+
+    fn since_exit(&self, now: Instant) -> Option<Duration> {
+        self.last_exit.map(|t| now.duration_since(t))
+    }
+
+    fn enter(&mut self, now: Instant) {
+        if self.since_exit(now).is_some_and(|d| d < FLAP_WINDOW) {
+            self.hold = (self.hold * 2).min(HOLD_MAX);
+        }
+    }
+
+    fn exit(&mut self, now: Instant) {
+        self.last_exit = Some(now);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -61,8 +149,7 @@ pub struct RelayCodecPolicy {
     /// 켜질 때의 예상 PCM 부하(측정으로 켜졌으면 실제 한도가 그보다 낮다는 뜻).
     trip_load: f32,
     below_since: Option<Instant>,
-    hold: Duration,
-    last_exit: Option<Instant>,
+    hy: Hysteresis,
     /// 측정으로 켜졌던 "넘은 부하"(예상 PCM 부하). 복귀 뒤 `LEARNED_TRIP_TTL` 동안 재진입 문턱으로 쓴다.
     learned_trip: Option<f32>,
     /// 켜진 횟수(진단용).
@@ -71,7 +158,7 @@ pub struct RelayCodecPolicy {
 
 impl Default for RelayCodecPolicy {
     fn default() -> Self {
-        Self { active: false, trip_load: BUDGET_WARN, below_since: None, hold: HOLD_MIN, last_exit: None, learned_trip: None, switches: 0 }
+        Self { active: false, trip_load: BUDGET_WARN, below_since: None, hy: Hysteresis::default(), learned_trip: None, switches: 0 }
     }
 }
 
@@ -81,7 +168,7 @@ impl RelayCodecPolicy {
     }
 
     pub fn hold(&self) -> Duration {
-        self.hold
+        self.hy.hold()
     }
 
     /// 복귀 문턱(예상 PCM 부하가 이 아래로 `hold` 동안 이어져야 PCM16으로 돌아간다).
@@ -98,10 +185,8 @@ impl RelayCodecPolicy {
             return was.then_some(false);
         }
         if !self.active {
-            if self.last_exit.is_some_and(|t| now.duration_since(t) >= STABLE_RESET) {
-                self.hold = HOLD_MIN;
-            }
-            if self.last_exit.is_some_and(|t| now.duration_since(t) >= LEARNED_TRIP_TTL) {
+            self.hy.idle(now);
+            if self.hy.since_exit(now).is_some_and(|d| d >= LEARNED_TRIP_TTL) {
                 self.learned_trip = None;
             }
             let predicted = i.predicted_pcm_load >= BUDGET_WARN;
@@ -119,9 +204,7 @@ impl RelayCodecPolicy {
                     self.learned_trip = Some(t);
                     t
                 };
-                if self.last_exit.is_some_and(|t| now.duration_since(t) < FLAP_WINDOW) {
-                    self.hold = (self.hold * 2).min(HOLD_MAX);
-                }
+                self.hy.enter(now);
                 self.active = true;
                 self.below_since = None;
                 self.switches += 1;
@@ -131,10 +214,75 @@ impl RelayCodecPolicy {
         }
         if i.predicted_pcm_load < self.exit_threshold() {
             let since = *self.below_since.get_or_insert(now);
-            if now.duration_since(since) >= self.hold {
+            if now.duration_since(since) >= self.hy.hold() {
                 self.active = false;
                 self.below_since = None;
-                self.last_exit = Some(now);
+                self.hy.exit(now);
+                return Some(false);
+            }
+        } else {
+            self.below_since = None;
+        }
+        None
+    }
+}
+
+/// 피어 하나의 손실 피드백 정책(P1-4e). 입력은 그 피어가 마지막으로 보낸 보고(손실 %, 받은 시각).
+#[derive(Debug, Clone, Default)]
+pub struct LossCodecPolicy {
+    active: bool,
+    above_since: Option<Instant>,
+    below_since: Option<Instant>,
+    hy: Hysteresis,
+    /// 켜진 횟수(진단용).
+    pub switches: u64,
+}
+
+impl LossCodecPolicy {
+    pub fn active(&self) -> bool {
+        self.active
+    }
+
+    pub fn hold(&self) -> Duration {
+        self.hy.hold()
+    }
+
+    /// 상태 갱신. `report = Some((손실 %, 받은 시각))`. 바뀌었으면 `Some(켜짐)`.
+    /// `pcm_configured = false`(설정이 Opus)면 늘 꺼져 있다.
+    pub fn update(&mut self, now: Instant, pcm_configured: bool, report: Option<(f32, Instant)>) -> Option<bool> {
+        if !pcm_configured {
+            let was = self.active;
+            self.active = false;
+            self.above_since = None;
+            self.below_since = None;
+            return was.then_some(false);
+        }
+        let loss = report.filter(|(l, at)| l.is_finite() && now.saturating_duration_since(*at) <= REPORT_STALE).map(|(l, _)| l);
+        if !self.active {
+            self.hy.idle(now);
+            match loss {
+                Some(l) if l >= LOSS_ENTER_PCT => {
+                    let since = *self.above_since.get_or_insert(now);
+                    if now.duration_since(since) >= LOSS_ENTER_SUSTAIN {
+                        self.hy.enter(now);
+                        self.active = true;
+                        self.above_since = None;
+                        self.below_since = None;
+                        self.switches += 1;
+                        return Some(true);
+                    }
+                }
+                _ => self.above_since = None,
+            }
+            return None;
+        }
+        // 보고가 끊기면(상대 재생 멈춤·옛 엔진으로 교체 등) 손실 근거가 없으므로 복귀 쪽으로 센다
+        if loss.is_none_or(|l| l < LOSS_EXIT_PCT) {
+            let since = *self.below_since.get_or_insert(now);
+            if now.duration_since(since) >= self.hy.hold() {
+                self.active = false;
+                self.below_since = None;
+                self.hy.exit(now);
                 return Some(false);
             }
         } else {
@@ -255,5 +403,106 @@ mod tests {
         p.update(t, inputs(1, false));
         assert_eq!(p.update(t, inputs(2, false)), Some(true));
         assert_eq!(p.hold(), HOLD_MIN, "60초 안정 뒤 최소로");
+    }
+
+    fn rep(loss: f32, at: Instant) -> Option<(f32, Instant)> {
+        Some((loss, at))
+    }
+
+    /// 500ms마다 같은 보고를 받으며 `secs`초 동안 갱신. 처음 바뀐 시각(시작부터 ms)과 값을 돌려준다(바뀌면 멈춤).
+    fn run_reports(p: &mut LossCodecPolicy, t0: Instant, from_ms: u64, secs: u64, loss: Option<f32>) -> Vec<(u64, bool)> {
+        let mut out = vec![];
+        let mut ms = from_ms;
+        while ms < from_ms + secs * 1000 {
+            let now = t0 + Duration::from_millis(ms);
+            // 보고는 500ms마다 오고, 점검은 200ms마다다(워커)
+            let at = t0 + Duration::from_millis(ms / 500 * 500);
+            if let Some(c) = p.update(now, true, loss.and_then(|l| rep(l, at))) {
+                out.push((ms, c));
+                break; // 바뀐 뒤의 idle(안정 리셋)은 호출자가 정한다
+            }
+            ms += 200;
+        }
+        out
+    }
+
+    #[test]
+    fn loss_feedback_enters_after_sustain_and_exits_after_hold() {
+        let t0 = Instant::now();
+        let mut p = LossCodecPolicy::default();
+        assert!(run_reports(&mut p, t0, 0, 5, Some(1.5)).is_empty(), "2% 미만은 켜지지 않는다");
+        let on = run_reports(&mut p, t0, 5000, 3, Some(2.5));
+        assert_eq!(on, vec![(6000, true)], "2% 이상 1초 지속 → Opus");
+        // 1~2% 사이: 유지(복귀 문턱 1%)
+        assert!(run_reports(&mut p, t0, 8000, 30, Some(1.5)).is_empty());
+        assert!(p.active());
+        let off = run_reports(&mut p, t0, 38_000, 15, Some(0.3));
+        assert_eq!(off, vec![(48_000, false)], "1% 미만이 hold(10초) 이어지면 PCM16");
+    }
+
+    #[test]
+    fn loss_feedback_ignores_short_spikes_and_stale_reports() {
+        let t0 = Instant::now();
+        let mut p = LossCodecPolicy::default();
+        // 2% 이상이 0.8초만 → 켜지지 않음
+        assert!(run_reports(&mut p, t0, 0, 1, Some(3.0)).is_empty());
+        assert!(run_reports(&mut p, t0, 1000, 2, Some(0.5)).is_empty());
+        // 오래된 보고(3초 넘음)는 무시: 같은 높은 값이 계속 남아 있어도 켜지 않는다
+        let old = t0;
+        for ms in (3000..10_000).step_by(200) {
+            assert_eq!(p.update(t0 + Duration::from_millis(ms + 3500), true, rep(9.0, old)), None);
+        }
+        assert!(!p.active());
+        // 설정이 Opus면 늘 꺼짐
+        let mut q = LossCodecPolicy::default();
+        run_reports(&mut q, t0, 0, 3, Some(5.0));
+        assert!(q.active());
+        assert_eq!(q.update(t0 + Duration::from_secs(4), false, rep(5.0, t0 + Duration::from_secs(4))), Some(false));
+    }
+
+    #[test]
+    fn loss_feedback_returns_when_reports_stop() {
+        let t0 = Instant::now();
+        let mut p = LossCodecPolicy::default();
+        run_reports(&mut p, t0, 0, 3, Some(4.0));
+        assert!(p.active());
+        // 보고가 끊김(상대가 옛 엔진으로 바뀜 등): 3초 뒤부터 "손실 없음"으로 세고 hold 뒤 복귀
+        let last = t0 + Duration::from_millis(2500);
+        let mut off = None;
+        for ms in (3000..30_000).step_by(200) {
+            if p.update(t0 + Duration::from_millis(ms), true, rep(4.0, last)).is_some() {
+                off = Some(ms);
+                break;
+            }
+        }
+        assert_eq!(off, Some(15_600), "보고가 3초 넘게 없으면(5.6초) + hold 10초");
+    }
+
+    #[test]
+    fn loss_feedback_flapping_doubles_hold() {
+        let t0 = Instant::now();
+        let mut p = LossCodecPolicy::default();
+        let mut ms = 0;
+        let mut holds = vec![];
+        for _ in 0..4 {
+            let on = run_reports(&mut p, t0, ms, 3, Some(3.0));
+            assert_eq!(on.len(), 1);
+            holds.push(p.hold().as_secs());
+            ms += 3000;
+            let off = run_reports(&mut p, t0, ms, 130, Some(0.2));
+            assert_eq!(off.len(), 1);
+            ms = off[0].0 + 5000; // 5초 뒤 다시 손실(플래핑)
+        }
+        assert_eq!(holds, vec![10, 20, 40, 80]);
+    }
+
+    #[test]
+    fn opus_perc_follows_reported_loss() {
+        assert_eq!(loss_opus_perc(None), DEFAULT_OPUS_LOSS_PERC);
+        assert_eq!(loss_opus_perc(Some(0.4)), 2);
+        assert_eq!(loss_opus_perc(Some(2.1)), 3);
+        assert_eq!(loss_opus_perc(Some(7.0)), 7);
+        assert_eq!(loss_opus_perc(Some(60.0)), 25);
+        assert_eq!(loss_opus_perc(Some(f32::NAN)), DEFAULT_OPUS_LOSS_PERC);
     }
 }

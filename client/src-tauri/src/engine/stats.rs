@@ -112,6 +112,12 @@ pub struct PeerStats {
     /// Opus로 보내면 'opus'이고 `txCodecAuto`가 true다(P1-4c).
     pub tx_codec: Option<super::config::CodecKind>,
     pub tx_codec_auto: bool,
+    /// 자동 전환 이유(`txCodecAuto`일 때): 릴레이 대역 부하 / 상대가 보고한 수신 손실(P1-4e). 아니면 null.
+    pub tx_codec_reason: Option<super::relay_codec::CodecReason>,
+    /// 이 피어가 Ping으로 알려 온 **내 소리의** 수신 손실률·은닉률(%, 그쪽 최근 5초). 보고가 3초 넘게 없으면 null
+    /// (옛 엔진, 그쪽 재생 전). 손실 피드백 Opus 전환의 입력(P1-4e).
+    pub remote_loss_pct: Option<f32>,
+    pub remote_conceal_pct: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -227,6 +233,9 @@ mod tests {
                 peer_echoing: false,
                 tx_codec: Some(crate::engine::config::CodecKind::Opus),
                 tx_codec_auto: true,
+                tx_codec_reason: Some(crate::engine::relay_codec::CodecReason::LossFeedback),
+                remote_loss_pct: Some(2.5),
+                remote_conceal_pct: Some(2.6),
             }],
             ..EngineStats::stopped()
         };
