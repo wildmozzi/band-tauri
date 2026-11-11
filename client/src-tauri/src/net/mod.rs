@@ -92,8 +92,13 @@ pub struct NetShared {
     /// 같은 키로 피어를 다시 만들면 여기서 이어 간다 → 같은 (키, nonce)가 세션 동안 반복되지 않는다(PR #13 H1).
     /// 크기는 세션 중 만난 피어 descriptor 수 수준이다.
     tx_seq_retired: Mutex<std::collections::HashMap<TxKeyId, u32>>,
+    /// 목록에서 빠진(제거·교체된) 피어의 ssrc → peerId. 녹음 쓰기 스레드가 블록을 늦게 비울 때 이미 떠난 피어도
+    /// 같은 peerId 트랙으로 묶게 한다(P2-4, PR #47 M3). Net 수명 내내 지우지 않으며 크기는 만난 피어 수 수준이다.
+    retired_ssrc_ids: Mutex<std::collections::HashMap<u32, String>>,
     epoch: Instant,
     stop: AtomicBool,
+    /// 수신 스레드 우선순위 설정 결과(P1-2).
+    pub recv_prio: crate::engine::prio::PrioSlot,
     /// 새 피어의 지터 버퍼 설정. 프로필은 실행 중에 바뀐다(`set_jitter_profile`).
     jitter_settings: Mutex<JitterSettings>,
     allow_loopback: bool,
@@ -172,6 +177,7 @@ impl Net {
             seq_ctrl: Default::default(),
             peers: RwLock::new(Vec::new()),
             tx_seq_retired: Mutex::new(std::collections::HashMap::new()),
+            retired_ssrc_ids: Mutex::new(std::collections::HashMap::new()),
             epoch: Instant::now(),
             stop: AtomicBool::new(false),
             jitter_settings: Mutex::new(jitter_settings),
@@ -181,6 +187,7 @@ impl Net {
             prev_relay: RwLock::new(None),
             relay_tx_bytes: AtomicU64::new(0),
             relay_tx_packets: AtomicU64::new(0),
+            recv_prio: Default::default(),
         });
 
         let mut threads = Vec::new();
@@ -189,7 +196,7 @@ impl Net {
             std::thread::Builder::new()
                 .name("band-net-recv".into())
                 .spawn(move || {
-                    let _prio = crate::engine::prio::promote_current_thread();
+                    let _prio = crate::engine::prio::promote_engine_thread(&s.recv_prio);
                     recv_loop(&s)
                 })
                 .map_err(|e| format!("수신 스레드 생성 실패: {e}"))?,
@@ -385,6 +392,8 @@ impl NetShared {
         let mut m = self.tx_seq_retired.lock();
         // 한 키의 seq는 시작점에서 단조 증가(u32 랩, 400pps에서 124일)하므로 마지막 기록이 곧 최고 수위다.
         m.insert((p.public_key, p.ssrc), next);
+        drop(m);
+        self.retired_ssrc_ids.lock().insert(p.ssrc, p.id.clone());
     }
 
     fn next_ctrl_seq(&self, t: PacketType) -> u32 {
@@ -604,6 +613,12 @@ impl NetShared {
     /// 피어 id → ssrc.
     pub fn peer_ssrc(&self, peer_id: &str) -> Result<u32, String> {
         self.peer_by_id(peer_id).map(|p| p.ssrc)
+    }
+
+    /// ssrc → peerId. 지금 목록에 없으면 전에 빠진 피어 기록에서 찾는다(녹음 트랙 이름, P2-4).
+    pub fn peer_id_for_ssrc(&self, ssrc: u32) -> Option<String> {
+        let live = self.peers.read().iter().rev().find(|p| p.ssrc == ssrc).map(|p| p.id.clone());
+        live.or_else(|| self.retired_ssrc_ids.lock().get(&ssrc).cloned())
     }
 
     pub fn for_each_peer(&self, mut f: impl FnMut(&Peer)) {

@@ -127,7 +127,7 @@ fn squat_after_connect_does_not_hijack() {
 // ============================================================================
 
 fn net() -> Net {
-    Net::start("alice".into(), &test_net(), JitterSettings { min_ms: 0.0, max_ms: 80.0 }).unwrap()
+    Net::start("alice".into(), &test_net(), JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }).unwrap()
 }
 
 /// 상대 역할(원시 소켓): Net이 보낸 Audio 헤더의 seq를 모은다.
@@ -288,4 +288,17 @@ fn concurrent_remove_and_add_never_reuse_seq() {
     println!("동시 제거·추가: Audio {total}개 수신, 중복 {dup}");
     assert!(total > 0, "패킷을 하나도 받지 못함");
     assert_eq!(dup, 0, "제거·추가 경쟁에서 nonce 중복");
+}
+
+/// 녹음 트랙 이름(P2-4, PR #47 M3): 피어가 빠진 뒤에도 그 ssrc는 같은 peerId로 풀린다.
+#[test]
+fn removed_peer_ssrc_still_resolves() {
+    let net = net();
+    let fake = Fake::new(0x7777_8888);
+    net.add_peer("carol".into(), &fake.desc()).unwrap();
+    let ssrc = net.shared().peer_ssrc("carol").unwrap();
+    assert_eq!(net.shared().peer_id_for_ssrc(ssrc).as_deref(), Some("carol"));
+    assert!(net.remove_peer("carol"));
+    assert_eq!(net.shared().peer_id_for_ssrc(ssrc).as_deref(), Some("carol"), "빠진 피어도 기록에서 찾는다");
+    assert_eq!(net.shared().peer_id_for_ssrc(ssrc ^ 1), None);
 }

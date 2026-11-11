@@ -337,6 +337,7 @@ impl Recorder {
             Ok(h) => h,
             Err(e) => {
                 self.port.request_detach();
+                std::fs::remove_dir(&folder).ok();
                 return Err(format!("녹음 스레드 생성 실패: {e}"));
             }
         };
@@ -410,6 +411,10 @@ struct Writer {
     end: u64,
     buf: Vec<f32>,
     failed: Option<String>,
+    /// 파일을 만들지 못한 트랙 키(그 트랙만 빼고 나머지는 계속 쓴다, PR #47 M2). 다시 시도하지 않는다.
+    bad_keys: Vec<TrackKey>,
+    /// 트랙 생성 실패 메시지(첫 것). 녹음은 계속되므로 `failed`와 따로 둔다.
+    track_error: Option<String>,
     shared: Arc<WriterShared>,
     rt_shared: Arc<RecordRtShared>,
     started_at_ms: u64,
@@ -443,6 +448,8 @@ impl Writer {
             end: 0,
             buf: Vec::new(),
             failed: None,
+            bad_keys: Vec::new(),
+            track_error: None,
             shared,
             rt_shared,
             started_at_ms,
@@ -533,7 +540,7 @@ impl Writer {
         if let Some(i) = self.tracks.iter().position(|t| t.key == key) {
             return Some(i);
         }
-        if self.failed.is_some() {
+        if self.failed.is_some() || self.bad_keys.contains(&key) {
             return None;
         }
         let idx = self.tracks.len() + 1;
@@ -550,7 +557,13 @@ impl Writer {
                 Some(self.tracks.len() - 1)
             }
             Err(e) => {
-                self.fail(format!("{file}: {e}"));
+                // 백신·인덱서의 순간 잠금, 이름 문제 등: 이 트랙만 빼고 나머지 트랙은 계속 쓴다(PR #47 M2).
+                // 디스크 가득이면 다른 트랙도 곧 쓰기에 실패해 `fail`로 전체가 멈춘다.
+                let msg = format!("{file}: 트랙을 만들 수 없습니다: {e}");
+                log::error!("녹음 {msg}");
+                self.shared.error.lock().get_or_insert_with(|| msg.clone());
+                self.track_error.get_or_insert(msg);
+                self.bad_keys.push(key);
                 None
             }
         }
@@ -580,11 +593,19 @@ impl Writer {
     fn finish(mut self) -> RecordSummary {
         let end = self.end;
         let mut bytes = 0;
-        let mut err = self.failed.clone();
+        let mut err = self.failed.clone().or_else(|| self.track_error.clone());
         for t in &mut self.tracks {
             if let Some(mut w) = t.w.take() {
                 let r = if end > t.frames { w.write_silence(end - t.frames) } else { Ok(()) };
-                match r.and_then(|_| w.finish()) {
+                let r = match r {
+                    Ok(()) => w.finish(),
+                    // 무음 채우기 실패: 디스크에 있는 만큼으로 헤더를 맞춰 닫는다(PR #47 M1)
+                    Err(e) => {
+                        bytes += w.finish_best_effort();
+                        Err(e)
+                    }
+                };
+                match r {
                     Ok(b) => bytes += b,
                     Err(e) => {
                         err.get_or_insert_with(|| format!("{}: {e}", t.meta.file));
@@ -765,6 +786,41 @@ mod tests {
         assert!(s_me[3 * n * 2..4 * n * 2].iter().all(|&v| v == 0));
         assert!(s_me[4 * n * 2] > 2_000_000);
         assert!(folder.join("session.json").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PR #47 M2: 트랙 하나를 만들지 못해도(같은 이름 폴더가 막음) 나머지 트랙은 끝까지 쓴다.
+    #[test]
+    fn one_track_create_failure_keeps_others() {
+        let (mut port_rt, ctl) = record_port();
+        let mut rec = Recorder::new(ctl, 48_000);
+        let dir = tmp("trackfail");
+        let opts = RecordOptions {
+            include_mix: true,
+            track_names: HashMap::from([("peer-a".to_string(), "blocker".to_string())]),
+            ..Default::default()
+        };
+        let st = rec.start(opts, &dir, Box::new(|ssrc| (ssrc == 7).then(|| "peer-a".to_string())), 0).unwrap();
+        std::fs::create_dir_all(PathBuf::from(&st.folder).join("02-blocker.wav")).unwrap();
+        let n = 240usize;
+        let data = vec![0.25f32; n * 2];
+        for k in 0..4u64 {
+            port_rt.poll();
+            let r = port_rt.active().expect("녹음 끝점");
+            r.begin(k * n as u64, n);
+            r.source(LOCAL_SOURCE, 0, &data);
+            r.source(1, 7, &data);
+            r.finish(&data);
+        }
+        let (sum, _port_rt) = stop_with_rt(&mut rec, port_rt);
+        let err = sum.error.clone().expect("트랙 실패를 알린다");
+        assert!(err.contains("02-blocker.wav"), "{err}");
+        let kinds: Vec<TrackKind> = sum.tracks.iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, vec![TrackKind::Local, TrackKind::Mix]);
+        let folder = PathBuf::from(&sum.folder);
+        for t in &sum.tracks {
+            assert_eq!(data_frames(&folder.join(&t.file)).0, 4 * n, "{}", t.file);
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

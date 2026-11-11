@@ -83,9 +83,9 @@ pub fn header_bytes(fmt: RecordFormat, channels: u16, rate: u32, data_bytes: u64
     h
 }
 
-/// 스테레오/모노 인터리브 f32를 받아 WAV로 쓴다.
-pub struct WavWriter {
-    f: BufWriter<File>,
+/// 스테레오/모노 인터리브 f32를 받아 WAV로 쓴다. 는 테스트에서 실패 주입용으로 바꾼다.
+pub struct WavWriter<F: Write + Seek = File> {
+    f: BufWriter<F>,
     fmt: RecordFormat,
     channels: u16,
     rate: u32,
@@ -95,10 +95,36 @@ pub struct WavWriter {
     last_header: Instant,
 }
 
-impl WavWriter {
+impl WavWriter<File> {
     pub fn create(path: &Path, fmt: RecordFormat, channels: u16, rate: u32) -> std::io::Result<Self> {
-        let file = File::create(path)?;
-        let mut f = BufWriter::with_capacity(1 << 20, file);
+        Self::new(File::create(path)?, fmt, channels, rate)
+    }
+
+    /// 헤더 크기를 확정하고 디스크에 내린다. 실패하면(디스크 가득 등) [`Self::finish_best_effort`]로 닫고 그 오류를 돌려준다.
+    pub fn finish(mut self) -> std::io::Result<u64> {
+        if let Err(e) = self.write_header().and_then(|_| self.f.flush()) {
+            self.finish_best_effort();
+            return Err(e);
+        }
+        self.f.get_ref().sync_all()?;
+        Ok(self.header_len + self.data_bytes)
+    }
+
+    /// 쓰기 실패 뒤 마무리: 버퍼에 남은(못 쓴) 데이터는 버리고, 디스크에 실제로 있는 프레임 수로 헤더를 고친 뒤
+    /// 파일을 거기까지 자른다. 헤더 덮어쓰기는 새 공간이 필요 없어 디스크가 가득 차도 된다. 반환: 파일 크기.
+    pub fn finish_best_effort(self) -> u64 {
+        let (file, total) = self.close_lossy();
+        if file.set_len(total).is_err() {
+            log::warn!("녹음 파일 자르기 실패(헤더는 갱신됨)");
+        }
+        let _ = file.sync_all();
+        total
+    }
+}
+
+impl<F: Write + Seek> WavWriter<F> {
+    pub fn new(inner: F, fmt: RecordFormat, channels: u16, rate: u32) -> std::io::Result<Self> {
+        let mut f = BufWriter::with_capacity(1 << 20, inner);
         let h = header_bytes(fmt, channels, rate, 0);
         f.write_all(&h)?;
         Ok(Self { f, fmt, channels, rate, header_len: h.len() as u64, data_bytes: 0, buf: Vec::new(), last_header: Instant::now() })
@@ -167,12 +193,18 @@ impl WavWriter {
         Ok(())
     }
 
-    /// 헤더 크기를 확정하고 디스크에 내린다.
-    pub fn finish(mut self) -> std::io::Result<u64> {
-        self.write_header()?;
-        self.f.flush()?;
-        self.f.get_ref().sync_all()?;
-        Ok(self.header_len + self.data_bytes)
+    /// 버퍼를 비우지 않고(`into_parts`: drop 때 다시 flush하지 않음) 실제 파일 끝에서 프레임 단위로 내린 data 크기로
+    /// 헤더를 쓴다. 반환: (내부 파일, 헤더 + 그 data 크기).
+    fn close_lossy(self) -> (F, u64) {
+        let (mut inner, _unwritten) = self.f.into_parts();
+        let block = (self.channels * self.fmt.bytes_per_sample()).max(1) as u64;
+        let len = inner.seek(SeekFrom::End(0)).unwrap_or(self.header_len);
+        let data = len.saturating_sub(self.header_len) / block * block;
+        let h = header_bytes(self.fmt, self.channels, self.rate, data);
+        if inner.seek(SeekFrom::Start(0)).and_then(|_| inner.write_all(&h)).and_then(|_| inner.flush()).is_err() {
+            log::warn!("녹음 파일 헤더 갱신 실패");
+        }
+        (inner, self.header_len + data)
     }
 }
 
@@ -209,6 +241,73 @@ mod tests {
         let s2 = i32::from_le_bytes([0, b[86], b[87], b[88]]) >> 8;
         assert_eq!(s2, 8_388_607); // 1.5는 1로 자름
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 용량 `cap` 바이트까지만 쓸 수 있는 가짜 디스크(넘으면 받을 수 있는 만큼 쓰고 StorageFull).
+    struct FullDisk {
+        data: Vec<u8>,
+        pos: usize,
+        cap: usize,
+    }
+
+    impl Write for FullDisk {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            let room = self.cap.saturating_sub(self.pos);
+            if room == 0 && !b.is_empty() {
+                return Err(std::io::ErrorKind::StorageFull.into());
+            }
+            let n = b.len().min(room);
+            let end = self.pos + n;
+            if self.data.len() < end {
+                self.data.resize(end, 0);
+            }
+            self.data[self.pos..end].copy_from_slice(&b[..n]);
+            self.pos = end;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for FullDisk {
+        fn seek(&mut self, p: SeekFrom) -> std::io::Result<u64> {
+            self.pos = match p {
+                SeekFrom::Start(o) => o as usize,
+                SeekFrom::End(o) => (self.data.len() as i64 + o) as usize,
+                SeekFrom::Current(o) => (self.pos as i64 + o) as usize,
+            };
+            Ok(self.pos as u64)
+        }
+    }
+
+    /// PR #47 M1: 디스크가 가득 차 쓰기가 실패해도 헤더 크기는 디스크에 실제로 있는 프레임(프레임 경계로 내림)과 같다.
+    #[test]
+    fn header_matches_disk_after_write_failure() {
+        let header_len = header_bytes(RecordFormat::Wav24, 2, 48_000, 0).len();
+        let cap = header_len + 1_500_001; // 프레임(6바이트) 경계가 아닌 곳에서 가득 참
+        let mut w = WavWriter::new(FullDisk { data: Vec::new(), pos: 0, cap }, RecordFormat::Wav24, 2, 48_000).unwrap();
+        let chunk = vec![0.25f32; 9600];
+        let mut failed = false;
+        for _ in 0..200 {
+            if w.write(&chunk).is_err() {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "용량을 넘었는데 쓰기가 성공함");
+        assert!(w.data_bytes() > 1_500_001, "버퍼에만 있는 바이트까지 센다(그래서 헤더를 이 값으로 쓰면 안 됨)");
+        let (disk, total) = w.close_lossy();
+        let data = (1_500_001 / 6 * 6) as u32;
+        assert_eq!(total, (header_len as u32 + data) as u64);
+        let b = &disk.data;
+        assert_eq!(&b[0..4], b"RIFF");
+        assert_eq!(u32_at(b, 4), header_len as u32 - 8 + data);
+        assert_eq!(&b[header_len - 8..header_len - 4], b"data");
+        assert_eq!(u32_at(b, header_len - 4), data);
+        // 실제 샘플이 들어 있다(0.25 → 2097152)
+        let s0 = i32::from_le_bytes([0, b[header_len], b[header_len + 1], b[header_len + 2]]) >> 8;
+        assert_eq!(s0, 2_097_152);
     }
 
     #[test]

@@ -73,7 +73,10 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
   - 입·출력 장치 클럭 차는 수위 제어(1샘플 단위, 최대 500ppm)로 흡수한다.
   - 언더런 때 늘린 여유는 10초 무사고마다 되돌린다.
 - 입력 또는 출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화 HRESULT(`AUDCLNT_E_DEVICE_INVALIDATED`, `AUDCLNT_E_SERVICE_NOT_RUNNING`, `AUDCLNT_E_RESOURCES_INVALIDATED`)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 그 밖의 WASAPI 호출 실패는 일시 오류로 보고 `streamErrors`만 올린 뒤 다음 이벤트를 기다린다. 같은 방향이 연속 4회 실패하면 그 스트림을 재시작(Stop/Reset/Start, `streamRestarts`)하고, 성공 없이 재시작이 3회 이어지거나 연속 50회 실패하면 `streamFailed=true`, `running=false`로 멈춘다.
-- 워커, net 수신, 자체 WASAPI 스레드는 MMCSS "Pro Audio"(실패 시 높은 우선순위)로 등록하고 FTZ/DAZ를 켠다.
+- 워커, net 수신, 자체 WASAPI 스레드는 스레드 시작 시 MMCSS "Pro Audio"에 등록하고(`AvSetMmThreadCharacteristicsW` + `AvSetMmThreadPriority(HIGH)`, 스레드 종료 시 `AvRevertMmThreadCharacteristics`) FTZ/DAZ를 켠다. 등록이 실패하면 `THREAD_PRIORITY_HIGHEST`로 대신하고, 그것도 실패하면 기본 우선순위로 계속 돈다. 결과는 로그와 `EngineStats.threadPriority`에 남는다(P1-2).
+  - cpal WASAPI 콜백 스레드는 cpal(0.15)이 `THREAD_PRIORITY_TIME_CRITICAL`로 올리고, ASIO 콜백 스레드는 드라이버가 관리한다. RT 콜백 안에서는 시스템콜을 하지 않으므로 우리가 따로 등록하지 않는다(`threadPriority.audio = unmanaged`). cpal은 자체 WASAPI가 실패했을 때의 폴백이다.
+  - 엔진이 도는 동안(`Engine::start` ~ `stop`) 시스템 타이머 해상도를 1ms로 쥔다(`timeBeginPeriod(1)`/`timeEndPeriod(1)`). 프로세스 안 참조 카운트로 감싸 처음 쥘 때만 begin, 마지막에 놓을 때만 end를 부르므로 반복 시작·정지와 중첩 엔진에도 짝이 맞는다. begin이 실패하면 end를 부르지 않는다.
+  - Windows 외 플랫폼은 no-op(`unsupported`).
 - **오디오 백엔드 선택**(`SystemBackend`):
   - `asio`(입·출력 중 하나라도) → cpal ASIO(`asio` 피처).
   - `wasapiExclusive` → 자체 WASAPI 이벤트 구동 독점, 장치 최소 주기. 포맷은 독점 지원 포맷 중 48kHz 우선, 없으면 44.1kHz(리샘플), 그다음 96/88.2kHz. 샘플 형식 f32 → 정수 32(유효 32/24, 24-in-32) → 24비트 패킹(3바이트) → 16비트. 채널 마스크는 믹스 포맷 마스크(채널 수가 같을 때) → 기본 마스크(1·2채널) 또는 DIRECTOUT(3채널 이상) 순으로 시도한다.
@@ -180,8 +183,9 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 - 정지: 제어 쪽이 `detach`를 켜면 콜백이 다음 주기 시작에 녹음 끝점을 반환 링으로 돌려준다(링 해제도 비RT). 1초 안에 안 돌아오면(장치 정지) 쓰기 스레드는 남은 것을 비우고 닫는다. 그 끝점이 돌아오기 전에는 새 녹음을 시작하지 않는다(에러).
 
 **쓰기 스레드**(`band-record`, 20ms마다)
-- 블록 순서대로 슬롯별 샘플을 꺼내 트랙에 쓴다. 트랙은 처음 나타날 때 만든다. 피어 이름은 ssrc → peerId(그 시점 피어 테이블) → `trackNames[peerId]`(없으면 peerId 앞 8자). 파일 이름 `NN-이름.wav`, 믹스는 `00-mix.wav`.
-- 쓰기 실패(디스크 가득 등)면 `error`를 남기고 지금까지 쓴 파일을 닫은 뒤 이후 블록은 버리기만 한다(콜백에는 영향 없음).
+- 블록 순서대로 슬롯별 샘플을 꺼내 트랙에 쓴다. 트랙은 처음 나타날 때 만든다. 피어 이름은 ssrc → peerId(지금 피어 테이블, 없으면 이미 빠진 피어의 ssrc 기록 `NetShared::peer_id_for_ssrc` — 블록을 늦게 비워도 떠난 피어가 `ssrc-…` 트랙으로 갈라지지 않음, PR #47 M3) → `trackNames[peerId]`(없으면 peerId 앞 8자). 파일 이름 `NN-이름.wav`, 믹스는 `00-mix.wav`.
+- 트랙 파일을 **만들지** 못하면(백신·인덱서의 순간 잠금, 이름 문제 등) `error`에 그 파일을 남기고 **그 트랙만** 뺀다(다시 시도하지 않음). 나머지 트랙은 계속 쓴다(PR #47 M2).
+- **쓰기** 실패(디스크 가득 등)면 `error`를 남기고 모든 파일을 닫은 뒤 이후 블록은 버리기만 한다(콜백에는 영향 없음). 닫을 때 버퍼에 남은(못 쓴) 데이터는 버리고, 디스크에 실제로 있는 프레임(프레임 경계로 내림)으로 헤더 크기를 고친 뒤 파일을 그 길이로 자른다(헤더 덮어쓰기는 새 공간이 필요 없음, PR #47 M1).
 - 정지 시 모든 트랙을 같은 길이로 맞추고, 세션 폴더에 `session.json`(= `RecordSummary`)을 쓴다.
 - 엔진 정지(`engine_stop`, 앱 종료)는 녹음을 먼저 마무리한 뒤 오디오를 닫는다.
 
@@ -194,7 +198,7 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 
 **저장 폴더**: 폴더는 Rust 폴더 대화상자(`engine_record_pick_folder`)로만 정한다(프론트가 임의 경로를 넘기지 않음, `diag_export`와 같은 원칙). 고른 폴더는 앱 설정 폴더 `recording.json`에 남고, 고른 적이 없으면 음악 폴더/`Band Recordings`다. 세션 폴더 이름은 `RecordOptions.name`(Windows 금지 문자 → `_`, 예약 이름 앞에 `_`, 60자) 또는 `band-rec-<UTC 시각>Z`이고, 같은 이름이 있으면 ` (2)`를 붙인다.
 
-**검증**: `engine::record::tests`(타임라인 정렬·늦은 피어 무음·버린 청크·핸드오프 반환), `engine::wav::tests`(헤더·RF64), `tests/record.rs`(가짜 장치 두 엔진 실녹음, 엔진 정지 시 마무리). 실시간 비교(`recording_does_not_change_buffer_concealment_or_xruns`, ignore): 녹음(믹스 포함, float) 켬/끔 8초씩 — 128/2.5ms에서 bufferMs 5.88 → 6.10ms, 은닉 0 → 0, xrun 0 → 0, 버림 0. 256/5ms에서 8.18 → 8.24ms, 0 → 0, 0 → 0, 버림 0.
+**검증**: `engine::record::tests`(타임라인 정렬·늦은 피어 무음·버린 청크·핸드오프 반환), `engine::wav::tests`(헤더·RF64·디스크 가득 후 헤더 = 실제 프레임), `engine::record::tests::one_track_create_failure_keeps_others`, `tests/peer_key.rs` `removed_peer_ssrc_still_resolves`, `tests/record.rs`(가짜 장치 두 엔진 실녹음, 엔진 정지 시 마무리). 실시간 비교(`recording_does_not_change_buffer_concealment_or_xruns`, ignore): 녹음(믹스 포함, float) 켬/끔 8초씩 — 128/2.5ms에서 bufferMs 5.88 → 6.10ms, 은닉 0 → 0, xrun 0 → 0, 버림 0. 256/5ms에서 8.18 → 8.24ms, 0 → 0, 0 → 0, 버림 0.
 
 ## 2. 패킷 포맷 (`net/packet.rs`)
 
@@ -311,7 +315,9 @@ type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
 interface LoopbackRun { roundTripMs: number | null; peakRatio: number; correlation: number; clipped: boolean; inverted: boolean; inputPeak: number }
 interface LoopbackReport { verdict: MeasureVerdict; message: string; runs: LoopbackRun[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; sampleRate: number; inputBufferFrames: number; outputBufferFrames: number; bufferRoundTripMs: number; driverInputLatencyMs: number | null; driverOutputLatencyMs: number | null; driverRoundTripMs: number | null; estLatencyMs: number; offsetMs: number | null; driverErrorMs: number | null; correctedEstLatencyMs: number | null; backend: string }
 interface EchoReport { verdict: MeasureVerdict; message: string; peerId: string; runs: (number | null)[]; detectedRuns: number; roundTripMs: number | null; minMs: number | null; maxMs: number | null; stdDevMs: number | null; peerEchoDelayMs: number; oneWayMs: number | null; networkRttMs: number | null; jitterBufferMs: number; frameMs: number; localLatencyMs: number; inputBufferMs: number; outputBufferMs: number; mouthToEarMs: number | null; residualMs: number | null; path: 'lan' | 'public' | 'relay' | null }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; recording: RecordStats | null }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; recording: RecordStats | null }
+type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
+interface ThreadPriorityStats { worker: ThreadPriority; netRecv: ThreadPriority; audio: ThreadPriority; timer1ms: boolean }
 type RecordFormat = 'wav24' | 'wavF32'
 interface RecordOptions { format?: RecordFormat; includeMix?: boolean; name?: string; localName?: string; trackNames?: Record<string, string> }  // 1.5절, 모두 선택
 interface RecordStats { folder: string; format: RecordFormat; sampleRate: number; durationSec: number; bytes: number; tracks: number; droppedFrames: number; error: string | null }
@@ -363,7 +369,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 `EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`·`skippedClicks`(엔진 수명 누적, 1.4절), `outputLatencyMs`(클릭 시각에 반영한 숨은 출력 지연, null = 드라이버 보고 없음·보정 안 됨). 워커가 0.1초마다 갱신한다.
 
-`EngineStats.recording`(P2-4): 녹음 중이 아니면(또는 정지·마무리 중이면) null. `durationSec` = 녹음 타임라인 길이(쓴 블록 기준), `bytes` = 지금까지 쓴 오디오 바이트(모든 트랙, 헤더 제외), `tracks` = 만든 트랙 수, `droppedFrames` = 녹음 링이 모자라 버린 프레임(녹음 품질 지표, 0이 정상), `error` = 쓰기 실패 메시지(있으면 그 뒤로 저장 안 됨).
+`EngineStats.recording`(P2-4): 녹음 중이 아니면(또는 정지·마무리 중이면) null. `durationSec` = 녹음 타임라인 길이(쓴 블록 기준), `bytes` = 지금까지 쓴 오디오 바이트(모든 트랙, 헤더 제외), `tracks` = 만든 트랙 수, `droppedFrames` = 녹음 링이 모자라 버린 프레임(녹음 품질 지표, 0이 정상), `error` = 실패 메시지(트랙 생성 실패면 그 트랙만 빠지고 계속, 쓰기 실패면 그 뒤로 저장 안 됨, 1.5절).
 
 `monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·로컬 소스 링) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
 
@@ -386,6 +392,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 `inputSilentPackets`: 장치가 `AUDCLNT_BUFFERFLAGS_SILENT`로 표시한 캡처 패킷 수(자체 WASAPI).
 
 `devicePeriodMs`: 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기(독점: 버퍼 = 주기, 저지연 공유: 엔진 주기), cpal·가짜 장치는 실측 콜백 크기다.
+
+`threadPriority`: 스레드 우선순위 설정 결과(P1-2, 1.1절). `worker`·`netRecv`·`audio`(오디오 I/O 스레드) 각각 `mmcss`(MMCSS "Pro Audio" 등록) | `elevated`(MMCSS 실패, `THREAD_PRIORITY_HIGHEST`) | `failed`(둘 다 실패, 기본 우선순위) | `unmanaged`(우리가 설정하지 않음: 네트워크 없음, cpal·ASIO·가짜 장치) | `disabled`(측정용으로 끔) | `unsupported`(Windows 아님). `timer1ms`: 엔진이 1ms 타이머 해상도를 쥐고 있다. 정지 상태면 모두 `unmanaged`/false.
 
 `backend`: 실제로 열린 오디오 백엔드. `wasapiExclusive`(자체 독점) | `wasapiShared3`(자체 IAudioClient3 저지연 공유) | `cpalWasapi`(cpal 공유 폴백) | `cpalAsio` | `fake`(테스트). 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
 

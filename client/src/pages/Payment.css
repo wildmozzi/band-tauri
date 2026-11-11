@@ -836,7 +836,8 @@ Payment Fail Page */
 
 .support-hours {
   font-size: 0.75rem !important;
-  color: var(--gray-500) !important;
+  /* gray-500은 어두운 카드 위에서 3.91:1 → 본문과 같은 neutral-400 (P3-12d) */
+  color: var(--neutral-400) !important;
   margin-top: 0.5rem !important;
 }
 
