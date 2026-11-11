@@ -24,15 +24,15 @@
 | P1-0 | **자체 WASAPI 백엔드**(엔진 리뷰 H2): cpal 0.15는 WASAPI 공유모드 10ms 주기 고정·독점모드 미지원. `wasapi` 크레이트(또는 windows 크레이트 직접)로 이벤트 구동 독점 모드 + IAudioClient3 저지연 공유 모드(가능 시 2.67~3ms 주기)를 `AudioBackend` 트레이트 구현으로 추가, cpal은 폴백 | 독점/저지연 공유에서 장치 주기·estLatencyMs 실측 로그, 루프백 테스트 통과. **콜백 구동 믹스(또는 JIT 리필)로 출력 링 1버퍼 하한 제거 → ASIO 128/2.5ms estLatency ≤ 8ms**(현재 11.8ms, PR #5 M-5) | 완료(#11: ASIO 128/2.5 est 7.83ms, WASAPI 독점 실장치 7.50ms; **[사람]** USB 인터페이스 독점 청취·장치 분리·30분 xrun) |
 | P1-13 | **엔진 결함(P3-0에서 발견)**: 출력 언더런 후 PeerFeed.margin(M4)은 커지는데 지터 목표가 따라오지 않아 정상 상태에서도 은닉·마감 채움·보정 수백 회 반복. 재현: `engine::worker::tests::callback_mix_sim_margin_after_underrun_no_steady_concealment`(known-bug ignore). 수정 시 ignore 제거 + CI realtime 필터에 `callback_mix_early_callbacks_real_time` 복원 | 재현 테스트 통과, realtime 잡 녹색 | 완료(#16) |
 | P1-1 | **지연 측정 도구**: 에코 피어 모드(받은 오디오를 그대로 되돌려 보냄) + 클릭 왕복 측정 UI, 로컬 루프백(입력→출력 케이블) 측정 | 측정값이 설정 화면/방 화면에 표시, 측정 절차 문서 | 완료(#13; 실측은 P1-1a [사람]) |
-| P1-1b | PR #13 리뷰 Low: remove_peer 은퇴 처리를 write 락 안으로(잠재 경쟁), 중복 키 add 거부 악용 가용성 방해 대응 | 테스트 | 대기 |
+| P1-1b | PR #13 리뷰 Low: remove_peer 은퇴 처리를 write 락 안으로(잠재 경쟁), 중복 키 add 거부 악용 가용성 방해 대응 | 테스트 | 진행중(작업자 p3-0a-tests, P3-0a 다음 PR) |
 | P1-1a | **[사람]** Scarlett Solo 4세대 ASIO 실측(버퍼 32/64/128, ASIOGetLatencies 확인, 하드웨어 루프백) + 두 PC 실네트워크·릴레이 에코 측정 — 절차 docs/MEASURE.md | 결과를 백로그 완료 기록에 | 대기 |
-| P1-2 | Windows 실시간 스레드 우선순위: 엔진 워커/수신 스레드에 MMCSS "Pro Audio" 등록, 타이머 해상도 1ms | 루프백 테스트 지터 감소 수치 | 대기 |
-| P1-3 | UDP 송신 DSCP EF 마킹 + 패킷 페이싱, 송신 큐 지연 측정 | 테스트 + 수치 | 대기 |
+| P1-2 | Windows 실시간 스레드 우선순위: 엔진 워커/수신 스레드에 MMCSS "Pro Audio" 등록, 타이머 해상도 1ms | 루프백 테스트 지터 감소 수치 | 리뷰 반영 완료(PR #31, CI 대기 — 개선은 전부 MMCSS에서 나옴, 타이머 1ms 단독은 효과 없음 → 타이머 제거 검토·Win11 스로틀링은 후속; **[사람]** 실장비에서 threadPriority=mmcss 확인) |
+| P1-3 | UDP 송신 DSCP EF 마킹 + 패킷 페이싱, 송신 큐 지연 측정 | 테스트 + 수치 | 리뷰 반영 완료(PR #37 — sendQueue 시작점=워커 패스 시작, qos 포트 재사용 플레이크 수정; 후속: 릴리스 빌드 버스트 측정; **[사람]** Wireshark DS 필드 확인) |
 | P1-4 | **UDP 릴레이 서버**(fly.io UDP, 방 단위 토큰 인증, 암호문 그대로 중계) + 엔진 폴백 경로 | 홀펀칭 실패 시뮬레이션에서 릴레이로 연결, 지연 표시 | P1-4a 완료(#1), P1-4b 완료(#10); **[사람]** fly 전용 IPv4(유료), 실네트워크는 P1-4d |
 | P1-4c | 릴레이 경로 대역 초과 시 Opus 자동 전환(워커 코덱 전환) + RelayBind MAC(relay-design 4.1 등록 가로채기·경로 위장 대응) | 통합 테스트 | 대기 |
 | P1-4d | **[사람]** 실네트워크(대칭형 NAT/LTE) + 시계 오차 PC에서 릴레이 경유 10분 연주 확인 | 연결 성공·끊김 기록 | 대기 |
 | P1-5 | 지터 버퍼 자동 튜닝 고도화: 회선별 목표 깊이 학습, 급격한 지터 스파이크 대응, 사용자 "저지연↔안정" 슬라이더 | 시뮬레이션 손실 1%/지터 버스트에서 은닉 ≤1.5% & 버퍼 최소화 (참고: 위상 스윕 buf128 보정 116회는 p95 경계 넘는 정당한 목표 상향 — P1-13 보고) (PR #16 리뷰 이월: M1 언더런 직후 은닉 검증 창·여유 스윕 범위, M2 드리프트 시 데드밴드만큼 깊이 하락 시험, M3 큰 버퍼에서 추가 지연 최대 +20ms·복귀 75s 단축) | 진행중(PR #20: 리뷰 반영·로컬 검증 완료(realtime 5회 연속), CI 대기 — 피치 편차 14.5→4.3센트, 보정 시간 51.6→15.7%, 은닉 1.21%; **[사람]** 지속음 맥놀이 청취) |
-| P1-6 | 장시간 테스트 하네스: 6피어 60분 가속 시뮬레이션(드리프트, 손실, 재연결) CI 야간 잡 | 지표 리포트 자동 생성 | 대기 |
+| P1-6 | 장시간 테스트 하네스: 6피어 60분 가속 시뮬레이션(드리프트, 손실, 재연결) CI 야간 잡 | 지표 리포트 자동 생성 | 대기 (PR #20 병합 후 — 새 지터 버퍼 기준으로 측정) |
 | P1-7 | **[사람]** 실장비 검증 1차: 같은 LAN 2대, WASAPI 독점/ASIO, 측정 도구로 지연 기록 | 사용자 측정 결과 기록 | 대기 (P0, P1-1) |
 | P1-8 | **[사람]** 실네트워크 검증: 다른 집 2곳 이상, LTE 핫스팟 1곳(릴레이) | 연결 성공/지연/끊김 기록 | 대기 (P1-4) |
 | P1-9 | ASIO 빌드 경로: CI에서 ASIO SDK 주입(시크릿/캐시) 빌드 + 피처 플래그 배포본 | **[사람]** SDK 제공 후 CI 녹색 | **로컬 ASIO 빌드 성공**(SDK 2.3.4, clippy/test 통과). CI 주입은 SDK 재배포 금지 조항 검토 후 보류 |
@@ -46,9 +46,9 @@
 |---|---|---|---|
 | P2-1 | 설치 파일 + Tauri updater(서명 키, 업데이트 서버/GitHub Releases) | 릴리스 워크플로로 설치본 생성, 업데이트 동작 | 완료(#4, 설치본 ~3MB; **[사람]** 서명 시크릿 등록·첫 릴리스 검증) |
 | P2-2 | **[사람]** 코드 서명 인증서 구매/등록(스마트 앱 컨트롤·SmartScreen 대응) | 서명된 설치본 | 대기 |
-| P2-3 | 공유 메트로놈(방장 기준, 각자 지연 보정한 클릭) | 2피어 시뮬레이션에서 클릭 정렬 오차 ≤ 2ms | 대기 |
+| P2-3 | 공유 메트로놈(방장 기준, 각자 지연 보정한 클릭) | 2피어 시뮬레이션에서 클릭 정렬 오차 ≤ 2ms | 리뷰 반영중(PR #34 M3·#36 M1 — 콜백 지터 시뮬레이션, 출력 지연 보정, 콜백 공백 재수렴, 방장 엔진 재시작) |
 | P2-4 | 합주 녹음: 로컬 멀티트랙(내 입력 + 피어별) WAV/FLAC 저장 | 앱에서 녹음/내보내기 | 대기 |
-| P2-5 | 로그/진단 내보내기(엔진 통계 타임라인 + 설정) | 버튼 하나로 zip | 대기 |
+| P2-5 | 로그/진단 내보내기(엔진 통계 타임라인 + 설정) | 버튼 하나로 zip | 리뷰 반영 완료(PR #32 — Medium 2·Low 8 반영, CI 대기; **[사람]** 실제 앱에서 내보내기 대화상자·연속 클릭·zip 로그 마스킹 확인) |
 | P2-6 | 방 비밀번호/비공개 방, 연주 참여 승인 UX 정리 | E2E | 완료(#9; 실화면 확인 [사람]) |
 
 ## P3 — 구조 개선 / 비용
@@ -57,9 +57,10 @@
 |---|---|---|---|
 | P2-6a | **[결정]** 요금제표의 "비공개 방 = Standard 이상" 제한을 적용할지 (현재 미적용) | 사용자 결정 | 결정(2026-11-10): 무료 플랜도 비공개 방 허용, 요금제 제한은 추후 — 현 구현 유지 |
 | P3-0 | CI 안정화: `callback_mix_early_callbacks_real_time` 타이밍 불안정 테스트 결정화, CI 단계 타임아웃(ffmpeg apt 설치가 50분 멈춘 사례) + apt 캐시/재시도 | CI 연속 녹색 | 완료(#14) |
-| P3-0a | CI 불안정 테스트: `tests/loopback.rs` `input_mute_silences_monitor_and_tap_but_keeps_meter`가 벽시계 sleep(600/400ms)에 의존하는데 결정적 잡에서 실행되어 느린 러너에서 실패(PR #22 CI, 클라이언트 전용 PR). 가상 시계 결정적 짝 + realtime 분류, 결정적 잡에 벽시계 sleep 사용 테스트가 남아 있는지 전수 점검 | 결정적 잡에 sleep 의존 0 | 대기 |
+| P3-0a | CI 불안정 테스트: `tests/loopback.rs` `input_mute_silences_monitor_and_tap_but_keeps_meter`가 벽시계 sleep(600/400ms)에 의존하는데 결정적 잡에서 실행되어 느린 러너에서 실패(PR #22 CI, 클라이언트 전용 PR). 가상 시계 결정적 짝 + realtime 분류, 결정적 잡에 벽시계 sleep 사용 테스트가 남아 있는지 전수 점검 | 결정적 잡에 sleep 의존 0 | 진행중(작업자 p3-0a-tests — 호스티드 러너 전환 대비) |
 | P3-0b | **[결정·긴급]** GitHub Actions 사용 한도 초과로 CI 전면 중단(2026-11-10 20시경). 선택: ① 결제/지출 한도 상향 ② 리포 공개 전환(공개 리포는 Actions 무료) ③ 이 PC에 self-hosted runner(무료, PC 자원 사용) ④ CI 비용 절감(엔진 경로 변경 시에만 Windows 잡, realtime은 야간/수동, 문서 변경은 CI 생략) — ④는 어느 선택과도 병행 권장 | CI 재가동 | 완료(#26: self-hosted runner jw-pc-band, 7잡 녹색; **[사람]** runner를 Windows 서비스로 등록해야 재부팅·세션 종료 후에도 유지) |
-| P3-8a | (P3-8 후속) 미정의 CSS 변수 7개(--primary 등) 정리, 남은 모달 3개(Premium/AudioSettings/EchoMeasure) 공용 Modal로, TSX 인라인 색 209곳 토큰화, px 간격 → --space-* | 시각 회귀 통과 | 대기 |
+| P3-0c | 리포 공개 전환(사용자 승인 2026-11-11): ① 비밀값 검사(gitleaks 전체 기록 — 실제 비밀 없음: Supabase anon(공개용)·토스 문서 샘플 키·mkcert localhost 개발 인증서·LAN 자체서명 인증서) ② CI를 GitHub 호스티드로 복귀(공개 리포에서 self-hosted 금지) ③ 포크 PR 워크플로 승인 정책 ④ 공개 전환 ⑤ self-hosted 러너 중지 | 공개 후 호스티드 CI 녹색 | 진행중(2026-11-11 공개 전환 완료·외부 기여자 PR 전부 승인 필요 설정; PR #38 호스티드 CI 확인 중 → 병합 후 self-hosted 러너 중지) |
+| P3-8a | (P3-8 후속) 미정의 CSS 변수 7개(--primary 등) 정리, 남은 모달 3개(Premium/AudioSettings/EchoMeasure) 공용 Modal로, TSX 인라인 색 209곳 토큰화, px 간격 → --space-* | 시각 회귀 통과 | 리뷰 완료(PR #30, C/H 0; CI 대기; **[사람]** 데스크톱 합주실 화면 확인 — 모니터 토글·슬라이더·채팅 입력·툴팁 색, 에코 측정 Esc 닫기) |
 | P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 완료(#3) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 완료(#12; pages 직접 호출 13→0) |
@@ -82,7 +83,7 @@
 | P3-8 | 공용 UI 컴포넌트/디자인 토큰 정리 | 중복 CSS 감소 (PR #22 후속 Nit 포함: pageTitle 경로 표와 App 라우트 정의 단일화, App.css .live-room 중복 정리) | 완료(PR #24, 2026-11-11) |
 | P3-12 | **웹 점검 발견 사항 정리**(ego-browser, 2026-11-10): ① 탭 제목 "Vite + React + TS" → 서비스명 ② BandSpace/IndigoMuse 이름 통일(결정 필요 시 [결정]으로 묻기 — 기본은 IndigoMuse) ③ 홈 문구 사실과 다름(평균 왕복 18ms·KR/JP/US 3지역·서울/도쿄/LA 리전·20ms 이하·SYNCROOM 명시) → 측정 전에는 사실만 ④ 웹 관람 안내에 데스크톱 다운로드 버튼(VITE_DESKTOP_DOWNLOAD_URL, 비면 '준비 중') ⑤ 커뮤니티 목록 항목이 링크가 아닌 div 클릭(새 탭·접근성 불가) → <a>/<Link> ⑥ /profile, /payment(파라미터 없음)에서 렌더 중 navigate() 경고 → effect로 ⑦ 404 페이지 없음(없는 경로에서 빈 화면) ⑧ 방 최대 인원 선택지 2~20명 vs 연주자 최대 6명 — 관람 포함 의미인지 UI 문구 명확화 ⑨ 합주실 채팅 입력창이 첫 화면 아래(스크롤 필요) ⑩ [버그] 로그인 상태로 /payment?plan= 직접 진입 시 /auth를 거쳐 /로 튕김(E2E test.fixme — 고치면 fixme 해제) ⑪ 결제 약관 체크박스 display:none으로 접근성 없음 | lint/test + ego-browser 재점검 | 완료(#22) |
 | P3-12a | **[결정]** 서비스 문의 메일(현재 support@bandspace.com 표기)과 요금제 문구('최대 8명' 등)를 무엇으로 할지, 데스크톱 앱 이름(tauri productName 'Band')을 IndigoMuse로 바꿀지 | 사용자 결정 | 대기 |
-| P3-12b | 방 max_participants를 서버가 강제(입장 시 정원 초과 거부) — 현재 클라이언트 표시만 | 서버 테스트 | 진행중(PR #23: 리뷰 반영·로컬 검증 녹색 — server 325, vitest 335, e2e 17; CI 대기; **[사람]** 데스크톱에서 정원 초과 재입장 시 엔진 해제 확인) |
+| P3-12b | 방 max_participants를 서버가 강제(입장 시 정원 초과 거부) — 현재 클라이언트 표시만 | 서버 테스트 | 완료(PR #23, 2026-11-11; **[사람]** 데스크톱에서 정원 초과 재입장 시 엔진 해제 확인) |
 | P3-12c | ego-browser 웹 재점검(PR #22 반영분) — 로컬 서버+빌드로 홈·합주실·커뮤니티·결제·404 화면 확인 | 화면 점검 | 대기 |
 | P3-9 | (메모) 작업자 3명 이상으로 늘릴 때 빌드 환경: 현재는 워크트리 공유 target(`.cargo-target`, 디스크 10~15GB, 동시 빌드는 잠금 대기). 확장 시 sccache(RUSTC_WRAPPER) + 워크트리별 target + 작업 종료 시 target 자동 삭제를 함께 적용 | 확장 결정 시 | 보류(메모) |
 | P3-10 | **저장소 추상화 + R2 이전 준비**(Supabase 무료 Storage 1GB·Egress 5GB 한도 대응): 서버에 S3 호환 저장소 어댑터(Supabase Storage / Cloudflare R2 / Garage를 env로 선택), 업로드·다운로드는 서명 URL, 게시글 이미지도 서버 발급 서명 URL로 업로드(클라이언트 직접 업로드 제거), 스템 정리·삭제 경로 전환, 기존 파일 이전 스크립트(드라이런 기본) | env 전환만으로 저장소 교체, 테스트(로컬 S3 대역 MinIO 또는 mock) | 완료(#21; 운영 전환은 P3-10a~c) |
@@ -90,7 +91,7 @@
 | P3-10b | **[사람]** 서버를 s3로 전환한 뒤 `npm run migrate:storage` 드라이런 → `--apply` → 앱에서 스템·이미지 확인 → `--delete-source`. **(필수)** supabase 드라이버로 운영하는 동안 post-images·audio-stems 버킷 file_size_limit 5MB·allowed_mime_types 설정(PR #21 리뷰), 새 클라이언트 배포 후 post-images INSERT 정책 제거 · 고아 이미지 정리는 드라이런 로그 확인 후 POST_IMAGE_ORPHAN_CLEANUP=1 · 원본 삭제(--delete-source) 전 post-images INSERT 정책 제거 또는 예전 클라이언트 강제 업데이트 | 이전 완료 | 대기 (P3-10a 후) |
 | P3-10c | **[사람]** 실제 Cloudflare R2(및 원하면 Garage) 버킷으로 업로드·서명 GET/PUT·CORS·이전 스크립트 드라이런 호환 확인 | 실서비스 호환 확인 | 대기 (P3-10a 후) |
 | P3-10d | 게시글 이미지 검증 완전 강제: 게시글 쓰기를 서버 API로 이전하거나 posts.images가 검증 완료 키만 담도록 DB 트리거(새 마이그레이션 파일만, 운영 실행은 [확인]) — PR #21 M3 잔여 | 테스트 | 완료(PR #25, 2026-11-11) — 운영 반영은 P3-10e |
-| P3-10g | PR #23·#25 후속(Low): max_participants DB CHECK(2~20) 새 마이그레이션, 다중 서버 인스턴스에서 정원 일관성, 정원 선택지 범위 결정, PUBLIC_API_URL 필수화, 이메일 표시명 노출 정리, 사용자별 글쓰기 상한, 업로드 검증 기록 방식 정리, getApiUrl 공용화 | 테스트 | 대기 |
+| P3-10g | PR #23·#25 후속(Low): max_participants DB CHECK(2~20) 새 마이그레이션, 다중 서버 인스턴스에서 정원 일관성, 정원 선택지 범위 결정, PUBLIC_API_URL 필수화, 이메일 표시명 노출 정리, 사용자별 글쓰기 상한, 업로드 검증 기록 방식 정리, getApiUrl 공용화 | 테스트 | 리뷰 반영 완료(PR #35 — 정원 1→2 보정, deploy-server.yml에 PUBLIC_API_URL 배포 전 점검; CI 대기; **[사람]** main 배포 전 `fly secrets set PUBLIC_API_URL=...`, 운영 013 실행(기존 CHECK 사전 확인)) |
 | P3-10e | **[확인]** 운영 DB에 `012` 실행(게시글 직접 쓰기 차단 RLS) — 순서: 서버 배포 → 새 클라이언트 배포·구버전 소멸 → README 012 절. P3-10b의 post-images INSERT 정책 제거와 함께 해야 이미지 검증이 완전 | 실행 후 확인 쿼리 | 대기([사람] 운영 컷오버 때: 서버 배포 → 새 클라이언트 배포 → 012) |
 | P3-10f | [버그] /community/create·/community/edit/:id 직접 진입 시 /auth로 튕김(P3-12 ⑩ 결제 리다이렉트와 같은 계열) + e2e 고정 포트 47173 때문에 여러 워크트리 동시 e2e가 간헐 실패 → 포트를 워크트리별로 할당(빈 포트 탐색 + strictPort) | e2e | 진행중(PR #27 리뷰; e2e 44, 수정 전 코드에서 새 e2e 3개 실패 확인) |
 | P3-11 | **개발용 DB 분리**: 운영과 별도 Supabase 프로젝트를 개발·E2E·CI용으로 사용 — 마이그레이션 001~최신을 순서대로 적용하는 스크립트(`npm run db:migrate`, 대상 DATABASE_URL 확인 프롬프트·운영 URL 차단 가드), 시드 데이터, client/server .env 개발/운영 분리 가이드, **E2E를 dev DB로 실행하는 모드(mock E2E는 RLS를 검증하지 못함 — PR #19 리뷰 M2)** | dev 프로젝트에 전체 마이그레이션 적용·시드·앱 동작 | 대기 (**[사람]** 개발용 Supabase 프로젝트 생성 후) |
