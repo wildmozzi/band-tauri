@@ -119,6 +119,32 @@ describe('NativeRecordingControl', () => {
     expect(api.engineRecordSetTrackNames).toHaveBeenCalledTimes(2)
   })
 
+  it('FLAC을 고르면 그 형식으로 시작하고 선택을 기억하며, 녹음 중에는 바꿀 수 없다(P2-4a)', async () => {
+    localStorage.removeItem('band.recordFormat')
+    const { unmount } = render(<NativeRecordingControl peers={[]} />)
+    const select = screen.getByRole('combobox', { name: '녹음 파일 형식' }) as HTMLSelectElement
+    expect(select.value).toBe('wav24')
+    fireEvent.change(select, { target: { value: 'flac' } })
+    fireEvent.click(screen.getByRole('button', { name: /멀티트랙 녹음/ }))
+    await vi.waitFor(() => expect(api.engineRecordStart).toHaveBeenCalledTimes(1))
+    expect(api.engineRecordStart.mock.calls[0][0]).toMatchObject({ format: 'flac' })
+    unmount()
+    room.engineStats = { recording: { ...live, format: 'flac' } }
+    render(<NativeRecordingControl peers={[]} />)
+    const again = screen.getByRole('combobox', { name: '녹음 파일 형식' }) as HTMLSelectElement
+    expect(again.value).toBe('flac')
+    expect(again.disabled).toBe(true)
+    localStorage.removeItem('band.recordFormat')
+  })
+
+  it('정지 요약에 끊김 구간 수를 보인다(P2-4a)', async () => {
+    room.engineStats = { recording: live }
+    api.engineRecordStop.mockResolvedValue({ ...live, channels: 2, startedAtMs: 0, tracks: [], error: null, markers: 3, markersFile: 'markers.json' })
+    render(<NativeRecordingControl peers={[]} />)
+    fireEvent.click(screen.getByRole('button', { name: /녹음 정지/ }))
+    expect(await screen.findByText(/끊김 구간 3곳\(markers\.json\)/)).toBeTruthy()
+  })
+
   it('녹음 중이 아니면 이름을 보내지 않는다', async () => {
     render(<NativeRecordingControl peers={[{ peerId: 'u-1', name: '앨리스' }]} />)
     expect(await screen.findByText(/Band Recordings/)).toBeTruthy()

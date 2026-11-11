@@ -50,6 +50,8 @@ tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 regex = "1"
+# 녹음 FLAC 저장(P2-4a): 순수 Rust 인코더(Apache-2.0). 기본 피처(par 스레드·serde·log)는 끔 — 쓰기 스레드에서 블록 단위로만 쓴다.
+flacenc = { version = "0.5", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # 워커/수신 스레드 MMCSS("Pro Audio") 등록, 엔진 실행 중 타이머 해상도 1ms(timeBeginPeriod)
@@ -68,6 +70,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+# FLAC 녹음 파일을 표준 디코더로 다시 읽어 비교(P2-4a)
+claxon = "0.4"
 # 릴레이 폴백 통합 테스트(tests/relay.rs): 실제 릴레이를 같은 프로세스에서 띄운다
 band-relay = { path = "../../relay" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time"] }

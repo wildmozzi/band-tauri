@@ -311,8 +311,8 @@ export interface EngineStats {
   recording?: RecordStats | null
 }
 
-/** 녹음 샘플 형식: 24비트 정수 PCM(기본) | 32비트 float */
-export type RecordFormat = 'wav24' | 'wavF32'
+/** 녹음 파일 형식: WAV 24비트 정수 PCM(기본) | WAV 32비트 float | FLAC 24비트 무손실(P2-4a, `.flac`) */
+export type RecordFormat = 'wav24' | 'wavF32' | 'flac'
 
 /** `engine_record_start` 옵션(설계 1.5절). 모두 선택 */
 export interface RecordOptions {
@@ -363,6 +363,33 @@ export interface RecordSummary {
   startedAtMs: number
   tracks: RecordTrack[]
   error: string | null
+  /** 은닉·버림·언더런 구간 수(모든 트랙 합, P2-4a). 옛 엔진이면 없음 */
+  markers?: number
+  /** 마커 사이드카 파일 이름(세션 폴더 안, `markers.json`). 쓰지 못했으면 null, 옛 엔진이면 없음 */
+  markersFile?: string | null
+}
+
+/** `markers.json`의 구간 하나(P2-4a). 위치는 녹음 시작 기준 프레임 = 트랙 파일 샘플 위치 */
+export interface RecordMarker {
+  kind: 'conceal' | 'drop' | 'underrun'
+  start: number
+  /** 끝(제외). `drop`은 길이 없는 지점이라 start와 같다 */
+  end: number
+  startSec: number
+  endSec: number
+  /** 은닉·0 채움·버린 오디오 양(프레임) */
+  frames: number
+  /** 합친 이벤트 수 */
+  events: number
+}
+
+/** `markers.json`(P2-4a) */
+export interface RecordMarkersFile {
+  sampleRate: number
+  mergeGapFrames: number
+  accuracyFrames: number
+  lostEvents: number
+  tracks: { file: string; name: string; kind: RecordTrack['kind']; peerId: string | null; markers: RecordMarker[] }[]
 }
 
 /**

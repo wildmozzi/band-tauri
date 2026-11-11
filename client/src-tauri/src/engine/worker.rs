@@ -23,6 +23,7 @@ use super::jitter::{shift_one, JitterBuffer};
 use super::measure::EchoProbe;
 use super::metronome::{hidden_out_latency_us, BeatScheduler, MetronomeCtl, MetronomePlan, OutClock};
 use super::mixer::MixControls;
+use super::record::{MarkEvent, MarkKind, MarkSink};
 use super::relay_codec::{pcm_relay_load, PolicyInputs, RelayCodecPolicy};
 use super::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
 use super::rt::{SourceBank, SourceShared, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
@@ -786,6 +787,8 @@ pub struct WorkerParams {
     pub probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
     /// 공유 메트로놈 계획·상태(P2-3).
     pub metronome: Arc<MetronomeCtl>,
+    /// 녹음 마커 큐(P2-4a): 녹음 중이면 피어별 은닉·버림을 출력 타임라인 위치로 넣는다.
+    pub rec_marks: Arc<MarkSink>,
 }
 
 pub struct Worker {
@@ -1313,6 +1316,9 @@ impl Worker {
         let probe = self.p.probe.clone();
         let mut guard = probe.lock();
         let mut tap = guard.as_mut().filter(|p| p.tap);
+        let marks = self.p.rec_marks.clone();
+        let marking = marks.active();
+        let played = &self.p.counters.out_played_frames;
         net.for_each_peer(|peer| {
             let key = (peer as *const Peer as usize, peer.ssrc);
             let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) else {
@@ -1325,7 +1331,29 @@ impl Worker {
             let Some(prod) = self.p.prods.get_mut(f.slot) else {
                 return;
             };
-            let ev = f.service(&mut peer.jitter.lock(), prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == peer.id && p.peer_ssrc == peer.ssrc));
+            let mut jb = peer.jitter.lock();
+            let before = marking.then(|| jb.stats());
+            let ev = f.service(&mut jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == peer.id && p.peer_ssrc == peer.ssrc));
+            if let Some(b) = before {
+                // 녹음 마커(P2-4a): 이번 반복에 은닉·버림이 늘었으면, 방금 링에 넣은 꼬리(= 다음 콜백 시작 + 선행량)의
+                // 출력 타임라인 위치로 기록한다. 링 선행량 추정이라 대략 ±1 콜백 정확도다.
+                let a = jb.stats();
+                let to_dev = |n48: u64| (n48 * t.out_rate as u64 / INTERNAL_RATE as u64) as u32;
+                let fs = jb.frame_samples() as u64;
+                let tail = played.load(Ordering::Relaxed) + f.dev_ahead(prod) as u64;
+                let mark = |kind, frames: u32, span: bool| {
+                    let start = if span { tail.saturating_sub(u64::from(frames)) } else { tail };
+                    marks.push(MarkEvent { ssrc: peer.ssrc, kind, start, frames });
+                };
+                if a.concealed > b.concealed {
+                    mark(MarkKind::Conceal, to_dev((a.concealed - b.concealed) * fs), true);
+                }
+                let dropped = (a.dropped_frames - b.dropped_frames) * fs;
+                if dropped > 0 || ev.skipped_frames > 0 {
+                    mark(MarkKind::Drop, to_dev(dropped) + ev.skipped_frames as u32, false);
+                }
+            }
+            drop(jb);
             fills += u64::from(ev.deadline_fill);
             skipped += ev.skipped_frames;
             urgent |= ev.urgent;

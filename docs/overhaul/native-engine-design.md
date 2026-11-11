@@ -168,9 +168,9 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 - 콜백 공백(M3): 따르는 쪽 장치 300ms 정지 후 재개 → 재개 0.6초 뒤부터 **최대 0.51ms**, 공백 중 클릭 1개 건너뜀.
 - 시뮬레이션이 덮지 않는 것: 드라이버가 보고하지 않는 숨은 출력 지연과 경로 비대칭. 피어마다 다르면 그만큼 어긋난다. 실장비 2대 청취 확인은 [사람] 항목이다.
 
-### 1.5 합주 녹음 (P2-4, `engine/record.rs`, `engine/wav.rs`)
+### 1.5 합주 녹음 (P2-4, `engine/record.rs`, `engine/wav.rs`, `engine/flac.rs`)
 
-로컬 멀티트랙: **내 입력 1개 + 피어마다 1개 + (선택) 믹스 1개**를 세션 폴더에 WAV로 저장한다. 녹음은 각자 자기 엔진에서 한다(네트워크로 오디오를 더 보내지 않음).
+로컬 멀티트랙: **내 입력 1개 + 피어마다 1개 + (선택) 믹스 1개**를 세션 폴더에 WAV 또는 FLAC으로 저장한다. 녹음은 각자 자기 엔진에서 한다(네트워크로 오디오를 더 보내지 않음).
 
 **무엇을 녹음하나 — 내 출력 타임라인 그대로**
 - 출력 콜백이 소스 링에서 꺼낸 샘플(1.1절 콜백 구동 믹스)을 **게인·팬·뮤트 전**에 그대로 녹음한다. 피어 트랙에는 지터 버퍼 은닉(PLC)·링 부족 0 채움까지 내가 들은 그대로 들어간다. 내 입력 트랙은 로컬 소스(모니터·탭 경로, 입력 뮤트면 무음)다.
@@ -184,24 +184,36 @@ diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
 - 콜백은 주기 시작에 핸드오프를 한 번 본다(`try_pop`). 청크마다 최악의 경우(모든 슬롯 + 믹스)만큼 자리가 있을 때만 그 청크를 쓰고, 없으면 청크를 통째로 버리고 `droppedFrames`만 올린다(머리가 없으니 쓰기 스레드가 무음으로 채움 → 타임라인 유지). 할당·락·시스템콜·로그 없음.
 - 슬롯 점유자는 `SourceShared.occupant`(피어 ssrc, 로컬 0)다. 워커가 슬롯을 `ACTIVE`로 바꾸기 전에 넣는다.
 - 정지: 제어 쪽이 `detach`를 켜면 콜백이 다음 주기 시작에 녹음 끝점을 반환 링으로 돌려준다(링 해제도 비RT). 1초 안에 안 돌아오면(장치 정지) 쓰기 스레드는 남은 것을 비우고 닫는다. 그 끝점이 돌아오기 전에는 새 녹음을 시작하지 않는다(에러).
+- 청크 머리는 청크마다 반드시 닫는다(`finish`, 믹스 탭 버스와 무관하게 — PR #47 L1). 믹스 길이가 청크와 다르면 믹스만 빼고 머리를 넣는다(쓰기 스레드가 그 자리를 무음으로 채움). 머리 없는 샘플이 링에 남아 이후 블록이 밀리는 일이 없다.
+- 머리에는 슬롯별 `short`(이 청크 끝에서 링 부족으로 0을 채운 프레임, 재생 중일 때만)도 있다. 언더런 마커의 정확한 위치다(아래 "마커").
 
 **쓰기 스레드**(`band-record`, 20ms마다)
-- 블록 순서대로 슬롯별 샘플을 꺼내 트랙에 쓴다. 트랙은 처음 나타날 때 만든다. 피어 이름은 ssrc → peerId(지금 피어 테이블, 없으면 이미 빠진 피어의 ssrc 기록 `NetShared::peer_id_for_ssrc` — 블록을 늦게 비워도 떠난 피어가 `ssrc-…` 트랙으로 갈라지지 않음, PR #47 M3) → `trackNames[peerId]`(없으면 peerId 앞 8자). 녹음 중에 `engine_record_set_track_names`로 이름을 더할 수 있고, 이름 없이 만든 피어 트랙은 정지 때(파일을 닫은 뒤) `NN-새이름.wav`로 바꾼다(같은 이름 파일이 있거나 실패하면 그대로). 파일 이름 `NN-이름.wav`, 믹스는 `00-mix.wav`.
+- 블록 순서대로 슬롯별 샘플을 꺼내 트랙에 쓴다. 트랙은 처음 나타날 때 만든다. 피어 이름은 ssrc → peerId(지금 피어 테이블, 없으면 이미 빠진 피어의 ssrc 기록 `NetShared::peer_id_for_ssrc` — 블록을 늦게 비워도 떠난 피어가 `ssrc-…` 트랙으로 갈라지지 않음, PR #47 M3) → `trackNames[peerId]`(없으면 peerId 앞 8자). 녹음 중에 `engine_record_set_track_names`로 이름을 더할 수 있고, 이름 없이 만든 피어 트랙은 정지 때(파일을 닫은 뒤) `NN-새이름.wav`로 바꾼다(같은 이름 파일이 있거나 실패하면 그대로). 파일 이름 `NN-이름.wav`(FLAC이면 `.flac`), 믹스는 `00-mix.wav`/`00-mix.flac`.
 - 트랙 파일을 **만들지** 못하면(백신·인덱서의 순간 잠금, 이름 문제 등) `error`에 그 파일을 남기고 **그 트랙만** 뺀다(다시 시도하지 않음). 나머지 트랙은 계속 쓴다(PR #47 M2).
 - **쓰기** 실패(디스크 가득 등)면 `error`를 남기고 모든 파일을 닫은 뒤 이후 블록은 버리기만 한다(콜백에는 영향 없음). 닫을 때 버퍼에 남은(못 쓴) 데이터는 버리고, 디스크에 실제로 있는 프레임(프레임 경계로 내림)으로 헤더 크기를 고친 뒤 파일을 그 길이로 자른다(헤더 덮어쓰기는 새 공간이 필요 없음, PR #47 M1).
-- 정지 시 모든 트랙을 같은 길이로 맞추고, 세션 폴더에 `session.json`(= `RecordSummary`)을 쓴다.
-- 엔진 정지(`engine_stop`, 앱 종료)는 녹음을 먼저 마무리한 뒤 오디오를 닫는다.
+- 정지 시 모든 트랙을 같은 길이로 맞추고, 세션 폴더에 `markers.json`(아래)과 `session.json`(= `RecordSummary`)을 쓴다.
+- 엔진 정지(`engine_stop`, 앱 종료)는 녹음을 먼저 마무리한 뒤 오디오를 닫는다. 마무리(콜백 반환 대기 + 파일 sync)는 recorder 락 밖에서 해서 그동안 `stats()`가 막히지 않는다(PR #47 L2). `engine_record_stop`이 다른 스레드에서 마무리 중이면 엔진 정지가 그것이 끝날 때까지(최대 10초) 기다린 뒤 오디오를 닫는다 — 앱 종료가 파일 마무리를 끊지 않는다(PR #47 L4).
 
-**파일 형식**(`wav.rs`)
+**파일 형식**(`wav.rs`, `flac.rs`)
 - `wav24`(기본, 24비트 정수 PCM, ±1 밖은 자름) 또는 `wavF32`(32비트 float, fmt 18바이트 + fact). 48k 스테레오 24비트 = 1시간 약 1.04GB/트랙.
 - 4GB 한계: 헤더에 `JUNK`(28바이트)를 미리 둔다. RIFF 크기가 u32를 넘으면 마무리할 때 `RF64` + `ds64`(EBU Tech 3306)로 제자리에서 바꾼다. 4GB 아래는 보통 WAV다.
 - 쓰는 동안 5초마다 헤더 크기를 고쳐 쓴다. 앱이 죽어도 그때까지는 읽힌다.
-- FLAC은 넣지 않았다(순수 Rust 인코더 크레이트의 품질·라이선스 검토가 필요, 후속).
-- 은닉(PLC) 구간 마커 사이드카는 아직 없다(후속).
+- `flac`(P2-4a): 24비트 무손실, 샘플 값은 `wav24`와 같다(±1 자름, 같은 양자화). 순수 Rust 인코더 `flacenc` 0.5(Apache-2.0, 기본 피처 끔 — 자체 스레드·serde 없음)로 **쓰기 스레드에서만** 4096프레임 블록마다 프레임을 만든다(RT 경로 무변경). 파일 = `fLaC` + STREAMINFO(마지막 메타데이터 블록, 고정 42바이트) + 프레임. 고정 블록이라 마지막 프레임만 짧다.
+  - STREAMINFO(총 샘플·프레임 크기 범위·MD5)는 마무리할 때 제자리에서 확정한다. 쓰는 동안에는 인코딩한 바이트를 1MB 또는 5초마다 내리고 그때 총 샘플 수를 고쳐 쓴다(MD5 0 = 계산 안 함) — 앱이 죽어도 그때까지는 표준 디코더로 읽힌다. 총 길이 제한은 2^36 샘플(48k에서 약 16일)이라 RF64 같은 전환이 없다.
+  - 쓰기 실패(디스크 가득): 마지막으로 다 쓴 1MB 묶음의 끝(프레임 경계)을 기억해 두고, 파일을 거기서 자른 뒤 STREAMINFO 총 샘플 수를 그만큼으로 고친다(MD5 0, 프레임 크기 범위 0 = 모름). WAV의 PR #47 M1과 같은 원칙.
+  - 속도: 30초 스테레오 24비트(사인 + 잡음) 인코딩 0.61초 = 실시간 약 49배(릴리스 빌드, `engine::flac::tests::flac_encode_speed`). 최대 9트랙(소스 8 + 믹스)도 쓰기 스레드 하나로 5배 넘게 여유가 있고, 넘치면 녹음 링(3초)이 받는다. 크기는 잡음 섞인 사인에서 WAV 24의 약 73%, 실제 연주는 보통 절반 안팎.
+
+**마커 사이드카**(`markers.json`, P2-4a): 녹음 뒤 끊김 구간을 찾을 수 있게 트랙마다 은닉·버림·언더런 구간을 녹음 시작 기준 프레임(= 트랙 파일 샘플 위치)으로 남긴다.
+- `underrun`: 출력 콜백이 소스 링 부족으로 0을 채운 곳. 청크 머리 `short`로 오므로 위치가 정확하다(RT는 머리 칸만 채움 — 원자값·할당 없음). 로컬 트랙에도 생길 수 있다.
+- `conceal`: 지터 버퍼 은닉(손실 PLC·FEC, 늦은 패킷 자리 언더런 은닉). 워커가 녹음 중에만(`MarkSink.active()`) 피어마다 `service` 앞뒤의 `JitterStats.concealed` 증가분(× 패킷 길이 → 장치 프레임)을 재고, 방금 링에 넣은 꼬리 위치(`out_played_frames` + 소스 링·리샘플러 선행량)를 끝으로 기록한다. 선행량 추정이라 대략 ±1 콜백(`accuracyFrames`, 10ms로 표기) 정확도다. 지터 알고리즘(`jitter.rs`)은 바꾸지 않았다(읽기만).
+- `drop`: 지연을 줄이려 버린 패킷 프레임(`JitterStats.dropped_frames` 증가분)과 출력 언더런 뒤 스트림 건너뛰기(`skipped_frames`). 길이 없는 지점이라 `start = end`, `frames`에 버린 양.
+- 전달: 워커 → `MarkSink`(녹음 시작 때 용량 1024를 미리 잡은 `Vec`을 `try_lock`으로 넣기만, 가득 차거나 잠겨 있으면 버리고 `lostEvents`만 올림 — 워커 쪽 할당 없음) → 쓰기 스레드가 20ms마다 버퍼를 통째로 바꿔 가져간다. ssrc → peerId는 트랙 이름과 같은 resolver로 정한다.
+- 정지 때 트랙별로 같은 종류를 100ms 안이면 한 구간으로 합치고(`frames`·`events`는 합), 녹음 앞 이벤트는 0으로 자르고 녹음 끝 뒤는 버린다. 믹스 트랙에는 마커가 없다. 형식: `{ sampleRate, mergeGapFrames, accuracyFrames, lostEvents, tracks: [{ file, name, kind, peerId, markers: [{ kind, start, end, startSec, endSec, frames, events }] }] }`. `RecordSummary.markers`(구간 수)·`markersFile`로 요약에도 남는다.
 
 **저장 폴더**: 폴더는 Rust 폴더 대화상자(`engine_record_pick_folder`)로만 정한다(프론트가 임의 경로를 넘기지 않음, `diag_export`와 같은 원칙). 고른 폴더는 앱 설정 폴더 `recording.json`에 남고, 고른 적이 없으면 음악 폴더/`Band Recordings`다. 세션 폴더 이름은 `RecordOptions.name`(Windows 금지 문자 → `_`, 예약 이름 앞에 `_`, 60자) 또는 `band-rec-<UTC 시각>Z`이고, 같은 이름이 있으면 ` (2)`를 붙인다.
 
 **검증**: `engine::record::tests`(타임라인 정렬·늦은 피어 무음·버린 청크·핸드오프 반환), `engine::wav::tests`(헤더·RF64·디스크 가득 후 헤더 = 실제 프레임), `engine::record::tests::one_track_create_failure_keeps_others`·`late_track_names_apply`, `tests/peer_key.rs` `removed_peer_ssrc_still_resolves`, `tests/record.rs`(가짜 장치 두 엔진 실녹음, 엔진 정지 시 마무리). 실시간 비교(`recording_does_not_change_buffer_concealment_or_xruns`, ignore): 녹음(믹스 포함, float) 켬/끔 8초씩 — 128/2.5ms에서 bufferMs 5.88 → 6.10ms, 은닉 0 → 0, xrun 0 → 0, 버림 0. 256/5ms에서 8.18 → 8.24ms, 0 → 0, 0 → 0, 버림 0.
+- P2-4a: `engine::flac::tests`(claxon으로 디코드해 24비트 양자화 값과 정확히 같음·빈 파일·디스크 가득 뒤 프레임 경계로 잘림), `engine::record::tests::flac_tracks_decode_and_align`·`markers_sidecar_maps_events_to_tracks`·`waiter_waits_for_inflight_stop`, `tests/record.rs`(엔진 정지로 마무리한 FLAC 세션을 claxon으로 디코드, `markers.json` 트랙 수). 실시간(ignore): `concealment_markers_follow_jitter_counter` — A → B 패킷 25개마다 1개 손실, 4초 녹음에서 지터 은닉 카운터 33패킷 vs `conceal` 마커 32구간·32패킷(경계 1패킷 차), 잃은 이벤트 0. 녹음 켬/끔 비교에 FLAC 추가: 128/2.5ms에서 bufferMs 5.98 → 6.08ms, 은닉 0 → 0, xrun 1 → 0, 버림 0(WAV float 같은 실행: 6.13 → 6.27ms, 0 → 0, 0 → 0; 256/5ms 8.70 → 8.96ms, 0 → 0, 0 → 0).
 
 ## 2. 패킷 포맷 (`net/packet.rs`)
 
@@ -346,11 +358,13 @@ interface CpuStats { workerPct: number | null; callbackLoadPct: number; callback
 interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null; recording: RecordStats | null; cpu: CpuStats }
 type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
 interface ThreadPriorityStats { worker: ThreadPriority; netRecv: ThreadPriority; audio: ThreadPriority; timer1ms: boolean }
-type RecordFormat = 'wav24' | 'wavF32'
+type RecordFormat = 'wav24' | 'wavF32' | 'flac'  // flac: P2-4a, 24비트 무손실 `.flac`
 interface RecordOptions { format?: RecordFormat; includeMix?: boolean; name?: string; localName?: string; trackNames?: Record<string, string> }  // 1.5절, 모두 선택
 interface RecordStats { folder: string; format: RecordFormat; sampleRate: number; durationSec: number; bytes: number; tracks: number; droppedFrames: number; error: string | null }
 interface RecordTrack { kind: 'local' | 'peer' | 'mix'; name: string; file: string; peerId: string | null }
-interface RecordSummary { folder: string; format: RecordFormat; sampleRate: number; channels: number; durationSec: number; bytes: number; droppedFrames: number; startedAtMs: number; tracks: RecordTrack[]; error: string | null }
+interface RecordSummary { folder: string; format: RecordFormat; sampleRate: number; channels: number; durationSec: number; bytes: number; droppedFrames: number; startedAtMs: number; tracks: RecordTrack[]; error: string | null; markers: number; markersFile: string | null }  // markers·markersFile: P2-4a(1.5절 "마커 사이드카")
+interface RecordMarker { kind: 'conceal' | 'drop' | 'underrun'; start: number; end: number; startSec: number; endSec: number; frames: number; events: number }  // markers.json 구간(녹음 시작 기준 프레임)
+interface RecordMarkersFile { sampleRate: number; mergeGapFrames: number; accuracyFrames: number; lostEvents: number; tracks: { file: string; name: string; kind: RecordTrack['kind']; peerId: string | null; markers: RecordMarker[] }[] }
 interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
 interface MetronomePlan { running: boolean; bpm: number; beatsPerBar: number; startUs: number; refPeerId: string | null }
 interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; outputLatencyMs: number | null }
@@ -530,6 +544,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 시작: `engine_record_start({ name: "YYYY-MM-DD HH.MM.SS 방 제목"(지역 시각), localName: "나", trackNames: { oderId: 닉네임 }, includeMix })`. 엔진 peerId가 `oderId`라 그대로 트랙 이름 키가 된다. 엔진이 꺼져 있으면 버튼을 막는다. 녹음 중에 연주자 목록(닉네임)이 바뀌면 `engine_record_set_track_names`로 더한다(녹음 중 들어온 연주자도 닉네임 트랙, PR #49 M1).
   - 상태는 `engine_stats.recording`(시간·용량·트랙 수, `droppedFrames`/`error` 경고). 시작 응답(`RecordStats`)으로 다음 폴링 전에도 녹음 중으로 보이고, 정지한 세션 폴더의 늦은 폴링 응답은 무시한다(PR #49 M2). 정지는 `engine_record_stop` 요약을 보여 준다. 내가 정지하지 않았는데 `recording`이 사라지면(엔진 정지) 엔진이 이미 마무리했다고 알린다.
   - 저장 폴더는 `engine_record_folder`로 보여 주고 `engine_record_pick_folder`로 바꾼다(녹음 중에는 바꿀 수 없음).
+  - 형식(P2-4a): 패널의 선택 상자(WAV 24비트 기본 · FLAC · WAV 32비트 float)를 `format`으로 넘긴다. 선택은 localStorage `band.recordFormat`에 기억하고(막혔거나 깨졌으면 wav24), 녹음 중에는 바꿀 수 없다(녹음 중에는 그 녹음의 형식을 보인다). 정지 요약에 `markers > 0`이면 "끊김 구간 N곳(markers.json)"을 붙인다.
 - 관람자 브릿지: 방의 **방송 담당 연주자** = 호스트가 앱 연주자면 호스트, 아니면 연주자 중 `oderId` 사전순 최소. 이 앱만 `engine_subscribe_mix` → AudioWorklet → `MediaStreamAudioDestinationNode` → 웹 관람자와의 WebRTC(송신 전용)로 트랙 전송.
 - 웹(비Tauri)에서는 연주 참여 UI를 숨기고 "데스크톱 앱 다운로드" 안내.
 - Tauri 관련 코드는 `client/src/native/` 아래로 분리: `engineApi.ts`(커맨드 래퍼, 위 타입), `useNativeSession.ts`(시그널링↔엔진), `mixBridge.ts`(관람자 브릿지). `RoomContext.tsx`는 이 훅을 호출만 한다.

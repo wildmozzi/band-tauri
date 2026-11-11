@@ -26,6 +26,7 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 use serde::{Deserialize, Serialize};
 
 use super::rt::{LOCAL_SOURCE, MAX_SOURCES};
+use super::flac::FlacWriter;
 use super::wav::{RecordFormat, WavWriter};
 
 /// 녹음 링이 버티는 시간(초). 디스크가 이만큼 멈춰도 버리지 않는다.
@@ -47,6 +48,8 @@ pub struct RecBlock {
     pub mix: bool,
     /// 슬롯 점유자(피어 ssrc, 로컬 슬롯은 0).
     pub occ: [u32; MAX_SOURCES],
+    /// 슬롯별로 이 청크 끝에서 링이 모자라 0으로 채운 프레임(재생 중 언더런, P2-4a 마커).
+    pub short: [u16; MAX_SOURCES],
 }
 
 /// RT와 제어 쪽이 함께 보는 녹음 통계.
@@ -56,6 +59,84 @@ pub struct RecordRtShared {
     pub dropped_frames: AtomicU64,
     /// 콜백이 이 녹음 끝점을 돌려줬다(그 뒤로는 링에 쓰지 않음). 쓰기 스레드는 이것을 보고 남은 것을 비운다.
     pub detached: AtomicBool,
+}
+
+/// 녹음 마커 종류(P2-4a, `markers.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MarkKind {
+    /// 지터 버퍼 은닉(손실 PLC·FEC, 늦은 패킷 자리의 언더런 은닉). 워커가 은닉 카운터 증가분을 기록한다.
+    Conceal,
+    /// 버림: 지연을 줄이려 패킷 프레임을 버렸거나(`droppedFrames`), 출력 언더런 뒤 스트림을 건너뜀. 길이 없는 지점.
+    Drop,
+    /// 출력 콜백이 소스 링 부족으로 0을 채움(재생 중 언더런). 청크 머리에 있어 위치가 정확하다.
+    Underrun,
+}
+
+/// 워커가 녹음 쓰기 스레드에 넘기는 마커 이벤트(위치는 출력 타임라인 `out_played_frames` 기준 장치 프레임).
+#[derive(Debug, Clone, Copy)]
+pub struct MarkEvent {
+    pub ssrc: u32,
+    pub kind: MarkKind,
+    pub start: u64,
+    pub frames: u32,
+}
+
+/// 워커 → 녹음 쓰기 스레드 마커 큐. 녹음 중에만 켜지고, 시작할 때 용량을 미리 잡는다. 워커는 `try_lock`으로
+/// 넣기만 하고(가득 차거나 잠겨 있으면 버리고 `lost`만 올림, 할당 없음), 쓰기 스레드가 20ms마다 통째로 바꿔 간다.
+/// 출력 콜백(RT)은 이것을 쓰지 않는다(언더런은 청크 머리 `short`로 온다).
+#[derive(Debug, Default)]
+pub struct MarkSink {
+    on: AtomicBool,
+    q: Mutex<Vec<MarkEvent>>,
+    lost: AtomicU64,
+}
+
+/// 마커 큐 용량(쓰기 스레드가 20ms마다 비운다).
+const MARK_CAP: usize = 1024;
+
+impl MarkSink {
+    /// 녹음 중(마커를 모으는 중)인가.
+    #[inline]
+    pub fn active(&self) -> bool {
+        self.on.load(Ordering::Acquire)
+    }
+
+    pub fn push(&self, e: MarkEvent) {
+        if let Some(mut q) = self.q.try_lock() {
+            if q.len() < q.capacity() {
+                q.push(e);
+                return;
+            }
+        }
+        self.lost.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn arm(&self) {
+        let mut q = self.q.lock();
+        q.clear();
+        q.reserve(MARK_CAP);
+        self.lost.store(0, Ordering::Relaxed);
+        self.on.store(true, Ordering::Release);
+    }
+}
+
+/// 정지 중(락 밖에서 마무리 중)인 녹음 수. 엔진 정지·앱 종료가 그 마무리를 기다린다(PR #47 L4).
+#[derive(Debug, Default)]
+struct InFlight {
+    n: Mutex<u32>,
+    cv: parking_lot::Condvar,
+}
+
+/// [`StopJob`]이 끝나면(성공·실패·패닉 모두) 줄인다.
+struct InFlightGuard(Arc<InFlight>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        let mut n = self.0.n.lock();
+        *n = n.saturating_sub(1);
+        self.0.cv.notify_all();
+    }
 }
 
 /// 출력 콜백이 쓰는 녹음 끝점(녹음 하나당 하나).
@@ -77,12 +158,12 @@ impl RecordRt {
         if !self.open {
             self.shared.dropped_frames.fetch_add(n as u64, Ordering::Relaxed);
         }
-        self.cur = RecBlock { pos, frames: n as u32, mask: 0, mix: false, occ: [0; MAX_SOURCES] };
+        self.cur = RecBlock { pos, frames: n as u32, mask: 0, mix: false, occ: [0; MAX_SOURCES], short: [0; MAX_SOURCES] };
     }
 
-    /// RT: 슬롯 하나가 이 청크에 재생한 샘플(`n × 2`, 게인 전).
+    /// RT: 슬롯 하나가 이 청크에 재생한 샘플(`n × 2`, 게인 전). `short`: 그중 끝에서 링 부족으로 0을 채운 프레임.
     #[inline]
-    pub fn source(&mut self, slot: usize, occupant: u32, data: &[f32]) {
+    pub fn source(&mut self, slot: usize, occupant: u32, data: &[f32], short: usize) {
         if !self.open || slot >= MAX_SOURCES {
             return;
         }
@@ -91,15 +172,19 @@ impl RecordRt {
         if let Some(o) = self.cur.occ.get_mut(slot) {
             *o = occupant;
         }
+        if let Some(s) = self.cur.short.get_mut(slot) {
+            *s = short.min(u16::MAX as usize) as u16;
+        }
     }
 
-    /// RT: 청크 끝. 믹스(클릭 없는 탭 버스)를 붙이고 머리를 넣는다.
+    /// RT: 청크 끝. 믹스(클릭 없는 탭 버스)를 붙이고 머리를 넣는다. 콜백은 청크마다 반드시 부른다(PR #47 L1).
+    /// 믹스 길이가 청크와 다르면 믹스만 빼고 머리를 넣는다(그 자리는 쓰기 스레드가 무음으로 채움 — 링이 어긋나지 않음).
     #[inline]
     pub fn finish(&mut self, mix: &[f32]) {
         if !self.open {
             return;
         }
-        if self.include_mix {
+        if self.include_mix && mix.len() == self.cur.frames as usize * 2 {
             self.samples.push_slice(mix);
             self.cur.mix = true;
         }
@@ -232,6 +317,141 @@ pub struct RecordSummary {
     pub started_at_ms: u64,
     pub tracks: Vec<RecordTrack>,
     pub error: Option<String>,
+    /// 은닉·버림·언더런 구간 수(모든 트랙 합, 가까운 것은 합침). 자세한 위치는 `markersFile`(P2-4a).
+    pub markers: u32,
+    /// 마커 사이드카 파일 이름(세션 폴더 안, 보통 `markers.json`). 쓰지 못했으면 None.
+    pub markers_file: Option<String>,
+}
+
+/// `markers.json`의 구간 하나. 위치는 녹음 시작 기준 프레임(트랙 파일의 샘플 위치와 같음).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordMarker {
+    pub kind: MarkKind,
+    pub start: u64,
+    /// 끝(제외). `drop`은 길이 없는 지점이라 `start`와 같다.
+    pub end: u64,
+    pub start_sec: f64,
+    pub end_sec: f64,
+    /// 은닉·0 채움·버린 오디오의 양(프레임, 합친 이벤트의 합).
+    pub frames: u64,
+    /// 합친 이벤트 수.
+    pub events: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkerTrack {
+    pub file: String,
+    pub name: String,
+    pub kind: TrackKind,
+    pub peer_id: Option<String>,
+    pub markers: Vec<RecordMarker>,
+}
+
+/// `markers.json` 전체.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkersFile {
+    pub sample_rate: u32,
+    /// 같은 종류 이벤트를 이 간격(프레임) 안이면 한 구간으로 합쳤다.
+    pub merge_gap_frames: u64,
+    /// 워커 이벤트 위치 오차(프레임, 대략 ±). 언더런은 청크 머리라 정확하다.
+    pub accuracy_frames: u64,
+    /// 큐가 가득 차 잃은 워커 이벤트 수.
+    pub lost_events: u64,
+    pub tracks: Vec<MarkerTrack>,
+}
+
+/// 같은 종류 이벤트를 이만큼(초) 안이면 한 구간으로 합친다.
+const MARK_MERGE_SEC: f64 = 0.1;
+/// 워커 이벤트 위치 오차(초, 대략): 소스 링·리샘플러 선행량 추정과 콜백 경계.
+const MARK_ACCURACY_SEC: f64 = 0.01;
+
+/// 트랙 파일 쓰기(형식별).
+enum TrackWriter {
+    Wav(WavWriter),
+    Flac(Box<FlacWriter>),
+}
+
+impl TrackWriter {
+    fn create(path: &Path, fmt: RecordFormat, channels: u16, rate: u32) -> std::io::Result<Self> {
+        Ok(match fmt {
+            RecordFormat::Flac => TrackWriter::Flac(Box::new(FlacWriter::create(path, channels, rate)?)),
+            RecordFormat::Wav24 | RecordFormat::WavF32 => TrackWriter::Wav(WavWriter::create(path, fmt, channels, rate)?),
+        })
+    }
+
+    fn write(&mut self, s: &[f32]) -> std::io::Result<()> {
+        match self {
+            TrackWriter::Wav(w) => w.write(s),
+            TrackWriter::Flac(w) => w.write(s),
+        }
+    }
+
+    fn write_silence(&mut self, frames: u64) -> std::io::Result<()> {
+        match self {
+            TrackWriter::Wav(w) => w.write_silence(frames),
+            TrackWriter::Flac(w) => w.write_silence(frames),
+        }
+    }
+
+    fn data_bytes(&self) -> u64 {
+        match self {
+            TrackWriter::Wav(w) => w.data_bytes(),
+            TrackWriter::Flac(w) => w.data_bytes(),
+        }
+    }
+
+    fn finish(self) -> std::io::Result<u64> {
+        match self {
+            TrackWriter::Wav(w) => w.finish(),
+            TrackWriter::Flac(w) => (*w).finish(),
+        }
+    }
+
+    fn finish_best_effort(self) -> u64 {
+        match self {
+            TrackWriter::Wav(w) => w.finish_best_effort(),
+            TrackWriter::Flac(w) => (*w).finish_best_effort(),
+        }
+    }
+}
+
+/// 마커 이벤트(트랙 키, 절대 타임라인 위치)를 트랙별 구간으로 합친다. `origin`은 녹음 첫 블록 위치, `end`는 녹음 길이.
+fn merge_marks(events: &[(TrackKey, MarkKind, u64, u64)], key: &TrackKey, origin: u64, end: u64, rate: u32) -> Vec<RecordMarker> {
+    let gap = (rate as f64 * MARK_MERGE_SEC) as u64;
+    let mut v: Vec<(MarkKind, u64, u64, u64)> = events
+        .iter()
+        .filter(|e| &e.0 == key)
+        .filter_map(|&(_, kind, pos, frames)| {
+            let span = if kind == MarkKind::Drop { 0 } else { frames };
+            // 녹음 앞(시작 전 이벤트)은 녹음 안으로 자르고, 녹음 뒤는 버린다.
+            let s = pos.saturating_sub(origin);
+            let e = (pos + span).saturating_sub(origin).min(end);
+            (s < end).then_some((kind, s, e.max(s), frames))
+        })
+        .collect();
+    v.sort_by_key(|x| (x.1, x.0 as u8));
+    let mut out: Vec<RecordMarker> = Vec::new();
+    for (kind, s, e, frames) in v {
+        if let Some(m) = out.iter_mut().rev().find(|m| m.kind == kind) {
+            if s <= m.end + gap {
+                m.end = m.end.max(e);
+                m.frames += frames;
+                m.events += 1;
+                continue;
+            }
+        }
+        out.push(RecordMarker { kind, start: s, end: e, start_sec: 0.0, end_sec: 0.0, frames, events: 1 });
+    }
+    out.sort_by_key(|m| (m.start, m.kind as u8));
+    let r = rate.max(1) as f64;
+    for m in &mut out {
+        m.start_sec = (m.start as f64 / r * 1000.0).round() / 1000.0;
+        m.end_sec = (m.end as f64 / r * 1000.0).round() / 1000.0;
+    }
+    out
 }
 
 /// `EngineStats.recording`.
@@ -274,11 +494,12 @@ struct Session {
 /// 정지 중인 녹음. [`StopJob::finish`]가 콜백 반환(최대 1초)과 쓰기 스레드 마무리를 기다린다.
 pub struct StopJob {
     s: Session,
+    _inflight: InFlightGuard,
 }
 
 impl StopJob {
     pub fn finish(self) -> Result<RecordSummary, String> {
-        let s = self.s;
+        let StopJob { s, _inflight } = self;
         let t0 = Instant::now();
         while !s.rt_shared.detached.load(Ordering::Acquire) {
             if t0.elapsed() >= DETACH_WAIT {
@@ -299,15 +520,38 @@ pub struct Recorder {
     port: RecordPortCtl,
     rate: u32,
     session: Option<Session>,
+    marks: Arc<MarkSink>,
+    inflight: Arc<InFlight>,
 }
 
 impl Recorder {
     pub fn new(port: RecordPortCtl, rate: u32) -> Self {
-        Self { port, rate, session: None }
+        Self { port, rate, session: None, marks: Arc::new(MarkSink::default()), inflight: Arc::new(InFlight::default()) }
     }
 
     pub fn is_recording(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// 워커가 은닉·버림 마커를 넣는 큐(P2-4a). 엔진 시작 때 워커에 넘긴다.
+    pub fn marks(&self) -> Arc<MarkSink> {
+        self.marks.clone()
+    }
+
+    /// 락 밖에서 마무리 중인 정지([`StopJob`])가 모두 끝날 때까지 기다린다(최대 `timeout`). 반환: 다 끝났다.
+    /// 이 함수는 `Recorder` 락을 잡은 채 부르지 말 것 — [`Recorder::waiter`]로 받은 것을 락 밖에서 부른다.
+    pub fn waiter(&self) -> impl Fn(Duration) -> bool + Send + 'static {
+        let f = self.inflight.clone();
+        move |timeout| {
+            let deadline = Instant::now() + timeout;
+            let mut n = f.n.lock();
+            while *n > 0 {
+                if f.cv.wait_until(&mut n, deadline).timed_out() {
+                    return *n == 0;
+                }
+            }
+            true
+        }
     }
 
     /// 녹음 시작: `dir` 아래에 세션 폴더를 만들고 링을 할당해 콜백에 넘긴 뒤 쓰기 스레드를 띄운다.
@@ -332,12 +576,14 @@ impl Recorder {
 
         let shared = Arc::new(WriterShared { names: Mutex::new(opts.track_names.clone()), ..Default::default() });
         let stop = Arc::new(AtomicBool::new(false));
-        let w = Writer::new(&opts, folder.clone(), rate, s_c, b_c, resolve, shared.clone(), rt_shared.clone(), now_ms);
+        self.marks.arm();
+        let w = Writer::new(&opts, folder.clone(), rate, s_c, b_c, resolve, shared.clone(), rt_shared.clone(), self.marks.clone(), now_ms);
         let st = stop.clone();
         let handle = std::thread::Builder::new().name("band-record".into()).spawn(move || w.run(&st));
         let handle = match handle {
             Ok(h) => h,
             Err(e) => {
+                self.marks.on.store(false, Ordering::Release);
                 self.port.request_detach();
                 std::fs::remove_dir(&folder).ok();
                 return Err(format!("녹음 스레드 생성 실패: {e}"));
@@ -353,7 +599,10 @@ impl Recorder {
     pub fn begin_stop(&mut self) -> Result<StopJob, String> {
         let s = self.session.take().ok_or("녹음 중이 아닙니다")?;
         self.port.request_detach();
-        Ok(StopJob { s })
+        // 이후 마커는 녹음 끝 뒤라 받지 않는다(이미 큐에 있는 것은 쓰기 스레드가 마지막에 비운다).
+        self.marks.on.store(false, Ordering::Release);
+        *self.inflight.n.lock() += 1;
+        Ok(StopJob { s, _inflight: InFlightGuard(self.inflight.clone()) })
     }
 
     /// 콜백이 돌려준 녹음 끝점(링)을 거둬 해제한다.
@@ -405,7 +654,7 @@ struct Track {
     idx: usize,
     /// 피어 트랙을 이름 없이(peerId 앞 8자) 만들었다 → 정지 때 이름이 생겼으면 파일을 바꾼다.
     unnamed: bool,
-    w: Option<WavWriter>,
+    w: Option<TrackWriter>,
     /// 쓴 프레임(타임라인 기준, 무음 포함).
     frames: u64,
 }
@@ -431,6 +680,11 @@ struct Writer {
     shared: Arc<WriterShared>,
     rt_shared: Arc<RecordRtShared>,
     started_at_ms: u64,
+    /// 워커 마커 큐와 바꿔 쓰는 버퍼(용량 `MARK_CAP`).
+    sink: Arc<MarkSink>,
+    mark_swap: Vec<MarkEvent>,
+    /// 모은 마커(트랙 키, 종류, 절대 타임라인 위치, 프레임).
+    marks: Vec<(TrackKey, MarkKind, u64, u64)>,
 }
 
 impl Writer {
@@ -444,6 +698,7 @@ impl Writer {
         resolve: PeerResolver,
         shared: Arc<WriterShared>,
         rt_shared: Arc<RecordRtShared>,
+        sink: Arc<MarkSink>,
         started_at_ms: u64,
     ) -> Self {
         Self {
@@ -465,7 +720,33 @@ impl Writer {
             shared,
             rt_shared,
             started_at_ms,
+            sink,
+            mark_swap: Vec::with_capacity(MARK_CAP),
+            marks: Vec::new(),
         }
+    }
+
+    /// 피어 ssrc의 트랙 키(트랙을 만들지는 않는다).
+    fn peer_key(&self, ssrc: u32) -> TrackKey {
+        if let Some(t) = self.by_ssrc.get(&ssrc).and_then(|&i| self.tracks.get(i)) {
+            return t.key.clone();
+        }
+        TrackKey::Peer((self.resolve)(ssrc).unwrap_or_else(|| format!("ssrc-{ssrc:08x}")))
+    }
+
+    /// 워커 마커 큐를 비워 모은다(큐와 버퍼를 바꿔 워커 쪽은 할당 없이 계속 넣는다).
+    fn drain_marks(&mut self) {
+        {
+            let mut q = self.sink.q.lock();
+            std::mem::swap(&mut *q, &mut self.mark_swap);
+        }
+        let evs = std::mem::take(&mut self.mark_swap);
+        for e in &evs {
+            let key = self.peer_key(e.ssrc);
+            self.marks.push((key, e.kind, e.start, u64::from(e.frames)));
+        }
+        self.mark_swap = evs;
+        self.mark_swap.clear();
     }
 
     fn run(mut self, stop: &AtomicBool) -> RecordSummary {
@@ -494,6 +775,7 @@ impl Writer {
     }
 
     fn drain(&mut self) {
+        self.drain_marks();
         while let Some(b) = self.blocks.try_pop() {
             let n = b.frames as usize * 2;
             let origin = *self.origin.get_or_insert(b.pos);
@@ -506,6 +788,12 @@ impl Writer {
                 let key = if slot == LOCAL_SOURCE { self.local_track() } else { self.peer_track(b.occ[slot]) };
                 if let Some(i) = key {
                     self.write_track(i, rel, b.frames as u64);
+                }
+                // 언더런 마커(P2-4a): 콜백이 이 청크 끝에서 0으로 채운 만큼
+                let short = u64::from(b.short[slot]).min(b.frames as u64);
+                if short > 0 {
+                    let k = if slot == LOCAL_SOURCE { TrackKey::Local } else { self.peer_key(b.occ[slot]) };
+                    self.marks.push((k, MarkKind::Underrun, b.pos + b.frames as u64 - short, short));
                 }
             }
             if b.mix {
@@ -563,11 +851,12 @@ impl Writer {
         let idx = self.tracks.len() + 1;
         let clean = sanitize_name(&name);
         let label = if clean.is_empty() { format!("track{idx}") } else { clean };
+        let ext = self.format.extension();
         let file = match kind {
-            TrackKind::Mix => "00-mix.wav".to_string(),
-            _ => format!("{idx:02}-{label}.wav"),
+            TrackKind::Mix => format!("00-mix.{ext}"),
+            _ => format!("{idx:02}-{label}.{ext}"),
         };
-        match WavWriter::create(&self.folder.join(&file), self.format, 2, self.rate) {
+        match TrackWriter::create(&self.folder.join(&file), self.format, 2, self.rate) {
             Ok(w) => {
                 self.tracks.push(Track { key, meta: RecordTrack { kind, name, file, peer_id }, idx, unnamed: false, w: Some(w), frames: 0 });
                 self.shared.tracks.store(self.tracks.len() as u32, Ordering::Relaxed);
@@ -616,7 +905,7 @@ impl Writer {
             if clean.is_empty() {
                 continue;
             }
-            let file = format!("{:02}-{clean}.wav", t.idx);
+            let file = format!("{:02}-{clean}.{}", t.idx, self.format.extension());
             let to = self.folder.join(&file);
             if to.exists() {
                 continue;
@@ -628,6 +917,40 @@ impl Writer {
                     t.unnamed = false;
                 }
                 Err(e) => log::warn!("녹음 트랙 이름 바꾸기 실패({}): {e}", t.meta.file),
+            }
+        }
+    }
+
+    /// 트랙별 마커를 합쳐 `markers.json`에 쓴다(트랙 파일 이름이 확정된 뒤). 반환: (구간 수, 파일 이름).
+    fn write_markers(&mut self, end: u64) -> (u32, Option<String>) {
+        self.drain_marks();
+        let origin = self.origin.unwrap_or(0);
+        let tracks: Vec<MarkerTrack> = self
+            .tracks
+            .iter()
+            .map(|t| MarkerTrack {
+                file: t.meta.file.clone(),
+                name: t.meta.name.clone(),
+                kind: t.meta.kind,
+                peer_id: t.meta.peer_id.clone(),
+                markers: if t.key == TrackKey::Mix { Vec::new() } else { merge_marks(&self.marks, &t.key, origin, end, self.rate) },
+            })
+            .collect();
+        let count = tracks.iter().map(|t| t.markers.len() as u32).sum();
+        let file = MarkersFile {
+            sample_rate: self.rate,
+            merge_gap_frames: (self.rate as f64 * MARK_MERGE_SEC) as u64,
+            accuracy_frames: (self.rate as f64 * MARK_ACCURACY_SEC) as u64,
+            lost_events: self.sink.lost.load(Ordering::Relaxed),
+            tracks,
+        };
+        let name = "markers.json";
+        let res = serde_json::to_vec_pretty(&file).map_err(|e| e.to_string()).and_then(|j| std::fs::write(self.folder.join(name), j).map_err(|e| e.to_string()));
+        match res {
+            Ok(()) => (count, Some(name.to_string())),
+            Err(e) => {
+                log::warn!("markers.json 저장 실패: {e}");
+                (count, None)
             }
         }
     }
@@ -656,6 +979,7 @@ impl Writer {
             }
         }
         self.rename_late_named();
+        let (markers, markers_file) = self.write_markers(end);
         let summary = RecordSummary {
             folder: self.folder.to_string_lossy().into_owned(),
             format: self.format,
@@ -667,6 +991,8 @@ impl Writer {
             started_at_ms: self.started_at_ms,
             tracks: self.tracks.iter().map(|t| t.meta.clone()).collect(),
             error: err,
+            markers,
+            markers_file,
         };
         match serde_json::to_vec_pretty(&summary) {
             Ok(j) => {
@@ -799,9 +1125,9 @@ mod tests {
                 continue; // 버린 청크(블록 없음)
             }
             r.begin(base + k * n as u64, n);
-            r.source(LOCAL_SOURCE, 0, &local);
+            r.source(LOCAL_SOURCE, 0, &local, 0);
             if k >= 2 {
-                r.source(1, 7, &peer);
+                r.source(1, 7, &peer, 0);
             }
             r.finish(&mix);
         }
@@ -851,9 +1177,9 @@ mod tests {
             port_rt.poll();
             let r = port_rt.active().expect("녹음 끝점");
             r.begin(k * n as u64, n);
-            r.source(LOCAL_SOURCE, 0, &data);
+            r.source(LOCAL_SOURCE, 0, &data, 0);
             for &(slot, ssrc) in peers {
-                r.source(slot, ssrc, &data);
+                r.source(slot, ssrc, &data, 0);
             }
             r.finish(&data);
         };
@@ -900,8 +1226,8 @@ mod tests {
             port_rt.poll();
             let r = port_rt.active().expect("녹음 끝점");
             r.begin(k * n as u64, n);
-            r.source(LOCAL_SOURCE, 0, &data);
-            r.source(1, 7, &data);
+            r.source(LOCAL_SOURCE, 0, &data, 0);
+            r.source(1, 7, &data, 0);
             r.finish(&data);
         }
         let (sum, _port_rt) = stop_with_rt(&mut rec, port_rt);
@@ -942,7 +1268,7 @@ mod tests {
         let mut pushed = 0;
         for k in 0..100u64 {
             r.begin(k * 100, 100);
-            r.source(0, 0, &data);
+            r.source(0, 0, &data, 0);
             r.finish(&data);
             pushed += 1;
         }
@@ -950,6 +1276,139 @@ mod tests {
         assert!(dropped > 0 && dropped < pushed * 100, "{dropped}");
         let (sum, _) = stop_with_rt(&mut rec, port_rt);
         assert_eq!(sum.dropped_frames, dropped);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P2-4a: FLAC 녹음 — 트랙 파일이 `.flac`이고 표준 디코더(claxon)로 열리며, 타임라인 정렬(늦은 피어 앞 무음)과
+    /// 이름 바꾸기가 WAV와 같다.
+    #[test]
+    fn flac_tracks_decode_and_align() {
+        let (mut port_rt, ctl) = record_port();
+        let mut rec = Recorder::new(ctl, 48_000);
+        let dir = tmp("flac");
+        let opts = RecordOptions { format: RecordFormat::Flac, include_mix: true, ..Default::default() };
+        rec.start(opts, &dir, Box::new(|ssrc| (ssrc == 7).then(|| "peer-a".to_string())), 0).unwrap();
+        let n = 240usize;
+        let local = vec![0.25f32; n * 2];
+        let peer = vec![-0.5f32; n * 2];
+        for k in 0..40u64 {
+            port_rt.poll();
+            let r = port_rt.active().expect("녹음 끝점");
+            r.begin(k * n as u64, n);
+            r.source(LOCAL_SOURCE, 0, &local, 0);
+            if k >= 20 {
+                r.source(1, 7, &peer, 0);
+            }
+            r.finish(&local);
+        }
+        rec.set_track_names(HashMap::from([("peer-a".to_string(), "기타".to_string())])).unwrap();
+        let (sum, _p) = stop_with_rt(&mut rec, port_rt);
+        assert!(sum.error.is_none(), "{:?}", sum.error);
+        let files: Vec<&str> = sum.tracks.iter().map(|t| t.file.as_str()).collect();
+        assert_eq!(files, vec!["01-me.flac", "00-mix.flac", "03-기타.flac"]);
+        let folder = PathBuf::from(&sum.folder);
+        for t in &sum.tracks {
+            let mut r = claxon::FlacReader::open(folder.join(&t.file)).expect("claxon으로 열린다");
+            assert_eq!(r.streaminfo().samples, Some(40 * n as u64), "{}", t.file);
+            assert_eq!(r.streaminfo().bits_per_sample, 24);
+            let s: Vec<i32> = r.samples().map(|x| x.unwrap()).collect();
+            assert_eq!(s.len(), 40 * n * 2);
+            if t.kind == TrackKind::Peer {
+                assert!(s[..20 * n * 2].iter().all(|&v| v == 0), "늦은 피어 앞은 무음");
+                assert!(s[20 * n * 2..].iter().all(|&v| v == -4_194_304));
+            } else {
+                assert!(s.iter().all(|&v| v == 2_097_152));
+            }
+        }
+        assert!(sum.bytes > 0 && sum.bytes < 40 * n as u64 * 6 * 3, "{}", sum.bytes);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P2-4a: 언더런(청크 머리 `short`)과 워커 마커(은닉·버림)가 트랙별 구간으로 `markers.json`에 남는다.
+    /// 가까운 같은 종류는 합치고, 녹음 시작 기준 프레임 위치이며, 녹음 밖 이벤트는 버린다.
+    #[test]
+    fn markers_sidecar_maps_events_to_tracks() {
+        let (mut port_rt, ctl) = record_port();
+        let mut rec = Recorder::new(ctl, 48_000);
+        let marks = rec.marks();
+        assert!(!marks.active());
+        let dir = tmp("marks");
+        let resolve: PeerResolver = Box::new(|ssrc| match ssrc {
+            7 => Some("peer-a".to_string()),
+            9 => Some("peer-b".to_string()),
+            _ => None,
+        });
+        let opts = RecordOptions { include_mix: true, track_names: HashMap::from([("peer-a".to_string(), "기타".to_string())]), ..Default::default() };
+        rec.start(opts, &dir, resolve, 0).unwrap();
+        assert!(marks.active());
+        let base = 500_000u64;
+        let n = 480usize;
+        let data = vec![0.1f32; n * 2];
+        for k in 0..200u64 {
+            port_rt.poll();
+            let r = port_rt.active().expect("녹음 끝점");
+            r.begin(base + k * n as u64, n);
+            r.source(LOCAL_SOURCE, 0, &data, if k == 10 { 100 } else { 0 });
+            // 피어 a: 50번째 청크 끝 30프레임 언더런
+            r.source(1, 7, &data, if k == 50 { 30 } else { 0 });
+            r.source(2, 9, &data, 0);
+            r.finish(&data);
+        }
+        let at = |k: u64| base + k * n as u64;
+        // 피어 a 은닉 두 번(1.0초 근처, 20ms 간격 → 한 구간) + 멀리 하나, 피어 b 버림, 녹음 앞·뒤 이벤트
+        marks.push(MarkEvent { ssrc: 7, kind: MarkKind::Conceal, start: at(100), frames: 480 });
+        marks.push(MarkEvent { ssrc: 7, kind: MarkKind::Conceal, start: at(102), frames: 480 });
+        marks.push(MarkEvent { ssrc: 7, kind: MarkKind::Conceal, start: at(150), frames: 240 });
+        marks.push(MarkEvent { ssrc: 9, kind: MarkKind::Drop, start: at(120), frames: 960 });
+        marks.push(MarkEvent { ssrc: 9, kind: MarkKind::Conceal, start: at(500), frames: 480 });
+        marks.push(MarkEvent { ssrc: 9, kind: MarkKind::Conceal, start: base - 1000, frames: 1480 });
+        let (sum, _p) = stop_with_rt(&mut rec, port_rt);
+        assert!(!marks.active(), "정지하면 마커를 받지 않는다");
+        assert!(sum.error.is_none(), "{:?}", sum.error);
+        assert_eq!(sum.markers_file.as_deref(), Some("markers.json"));
+        let folder = PathBuf::from(&sum.folder);
+        let j: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("markers.json")).unwrap()).unwrap();
+        assert_eq!(j["sampleRate"], 48_000);
+        assert_eq!(j["lostEvents"], 0);
+        let track = |file: &str| j["tracks"].as_array().unwrap().iter().find(|t| t["file"] == file).cloned().unwrap_or_else(|| panic!("{file}: {j}"));
+        let ms = |t: &serde_json::Value| -> Vec<(String, u64, u64, u64, u64)> {
+            t["markers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| (m["kind"].as_str().unwrap().to_string(), m["start"].as_u64().unwrap(), m["end"].as_u64().unwrap(), m["frames"].as_u64().unwrap(), m["events"].as_u64().unwrap()))
+                .collect()
+        };
+        let nn = n as u64;
+        assert_eq!(ms(&track("01-me.wav")), vec![("underrun".into(), 11 * nn - 100, 11 * nn, 100, 1)]);
+        let a = track("02-기타.wav");
+        assert_eq!(a["peerId"], "peer-a");
+        assert_eq!(
+            ms(&a),
+            vec![("underrun".into(), 51 * nn - 30, 51 * nn, 30, 1), ("conceal".into(), 100 * nn, 103 * nn, 960, 2), ("conceal".into(), 150 * nn, 150 * nn + 240, 240, 1),]
+        );
+        assert!((a["markers"][1]["startSec"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        // 피어 b: 녹음 앞 은닉은 0부터 잘리고, 녹음 뒤(500청크)는 버린다. 버림은 길이 없는 지점.
+        assert_eq!(ms(&track("03-peer-b.wav")), vec![("conceal".into(), 0, 480, 1480, 1), ("drop".into(), 120 * nn, 120 * nn, 960, 1)]);
+        assert!(ms(&track("00-mix.wav")).is_empty(), "믹스 트랙에는 마커가 없다");
+        assert_eq!(sum.markers, 6);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// PR #47 L4: 락 밖에서 마무리 중인 정지가 있으면 `waiter`가 그것이 끝날 때까지 기다린다.
+    #[test]
+    fn waiter_waits_for_inflight_stop() {
+        let (_port_rt, ctl) = record_port();
+        let mut rec = Recorder::new(ctl, 48_000);
+        let dir = tmp("inflight");
+        let wait = rec.waiter();
+        assert!(wait(Duration::from_millis(1)), "정지 중인 것이 없으면 바로 끝");
+        rec.start(RecordOptions::default(), &dir, Box::new(|_| None), 0).unwrap();
+        let job = rec.begin_stop().unwrap();
+        assert!(!wait(Duration::from_millis(20)), "마무리 전에는 기다린다");
+        let h = std::thread::spawn(move || job.finish()); // 콜백이 없어 1초 뒤 시간 초과로 마무리
+        assert!(wait(Duration::from_secs(5)));
+        assert!(h.join().unwrap().is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 
