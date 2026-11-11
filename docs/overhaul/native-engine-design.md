@@ -22,7 +22,7 @@ engine/wasapi.rs       자체 WASAPI 백엔드(Windows): 이벤트 구동 독점
 engine/rt.rs           실시간 콜백 (입력 → SPSC 링, 출력: 소스 링들을 꺼내 섞음). 할당/락/시스템콜/로그 금지
 engine/resample.rs     장치 레이트 ↔ 내부 48kHz 변환 (rubato, 비RT 스레드에서 실행)
 engine/codec.rs        Opus / PCM16 인코드·디코드
-engine/relay_codec.rs  릴레이 경로 Opus 자동 전환 정책(P1-4c, 3절 7)
+engine/relay_codec.rs  PCM16 설정의 피어별 Opus 자동 전환 정책: 릴레이 부하(P1-4c, 3절 7)·수신 손실 피드백(P1-4e, 3절 9)
 engine/jitter.rs       피어별 적응형 지터 버퍼 + 드리프트 보정 + PLC
 engine/mixer.rs        피어별 gain/mute, 모니터, 마스터, 클리핑 방지(soft clip)
 engine/stats.rs        원자적 통계 (레벨, xrun, 피어별 RTT/지터/손실/버퍼)
@@ -288,6 +288,9 @@ off len 필드
 - Hello/HelloAck 평문: `peer_id`(UTF-8, ≤64B). Bye 평문: 없음.
 - **Pong 평문**(P2-3): `[0xC1, now_us(u64 BE)]` 9바이트다. 응답자가 Pong을 보낼 때의 엔진 시계(µs, Net epoch 기준)이고, 받는 쪽이 시계 오프셋 표본을 만든다(1.4절). 빈 평문(옛 엔진)이나 다른 형식이면 표본만 건너뛴다(RTT는 그대로). 옛 엔진은 Pong 평문을 보지 않으므로 호환된다.
 - Ping 평문: 없음, 또는 **에코 제어 6바이트**(P1-1) `[0xEC, flags, delay_us(u32 BE)]`. RTT는 헤더 timestamp를 쓴다.
+- **Ping 손실 보고**(P1-4e): Ping 평문에 `[0x4C, loss(u16 BE), conceal(u16 BE)]` 5바이트를 덧붙인다(단위 0.01%, 0..100%). 보낸 쪽이 **받는 쪽의 스트림을** 재생하며 잰 최근 5초 손실률(지터 버퍼 `loss_pct`)·은닉률(`conceal_pct`)이다. 그 피어 지터 버퍼가 재생 중일 때만 싣는다. 에코 블록이 있으면 그 **뒤**에 붙는다(평문 최대 11바이트). 받는 쪽은 에코 블록(`0xEC`로 시작하는 6바이트)을 건너뛰고 태그를 본다. 모르는 태그·잘린 블록은 무시하고, 블록 뒤 바이트는 확장용으로 무시한다.
+  - 구버전 호환: 옛 엔진의 에코 파서는 `[0xEC, flags, d×4, ..]`만 보고 뒤를 무시한다. 손실 블록만 오면 첫 바이트가 `0xEC`가 아니므로 빈 평문(flags 0)과 같다. 그래서 새 → 옛은 에코 동작이 그대로이고, 옛 → 새는 보고가 없으므로 손실 피드백 전환이 일어나지 않는다. Pong 평문(시계, 정확히 9바이트로 읽음)은 옛 엔진이 길이가 다르면 시계 표본을 버리므로 확장하지 않았다.
+  - Ping은 쌍별 키로 봉인되고 제어 seq 창(재전송 방어)을 거치므로 보고는 그 피어만 보낼 수 있다. 보고는 그 피어에게 가는 **내 송신 코덱**만 바꾼다(3절 9) — 거짓 보고로 할 수 있는 것은 자기에게 오는 소리를 Opus로 바꾸게 하는 것뿐이다.
   - flags bit0 `REQUEST`: 보낸 쪽이 받는 쪽에게 "내 오디오를 되돌려 달라"고 요청 중(측정 중). bit1 `ACTIVE`: 보낸 쪽이 받는 쪽의 오디오를 되돌리는 중, `delay_us` = 되돌리기 처리 지연(수신 → 송신 EWMA).
   - 상태는 수준(level)으로 싣는다: Ping(500ms)마다 현재 플래그를 보내고, 바뀌면 바로 한 번 더 보낸다. 빈 평문 = 플래그 0(옛 엔진과 호환). 3초 넘게 갱신이 없으면 끝난 것으로 본다.
   - 받는 쪽은 REQUEST가 없는 Ping을 받으면 에코 동의를 바로 거둔다(측정 끝 = 에코 끝).
@@ -321,15 +324,32 @@ off len 필드
    - 릴레이 경로 송신은 피어마다 RelayData(dest_ssrc = 그 피어의 ssrc) + 원본 엔진 패킷이다. AEAD(쌍별 키, nonce/AAD)는 그대로이고 접두부 8바이트는 AAD 밖이다. Pong은 Ping이 온 경로로 돌려준다. HelloAck는 Hello의 timestamp를 되돌려 경로별 RTT를 잰다.
    - `Failed`는 직접 연결과 릴레이가 모두 안 된 상태다. UI는 릴레이 상태(`EngineStats.relay`)와 마지막 `engine_set_relay` 실패 사유로 안내한다(릴레이 없음/설정 실패/닿지 않음/거절/만료/모두 실패).
    - PCM16은 릴레이 대역 상한(클라이언트당 2 Mbps·2500pps)을 넘을 수 있다. 예: PCM16 mono 2.5ms 피어 3명이면 약 2.7 Mbps, stereo 2.5ms 피어 2명이면 약 3.3 Mbps다. 엔진은 릴레이 송신량을 1초 창으로 재서 상한의 90%를 넘으면 `EngineStats.relay.overBudget = true`로 알리고, 80% 아래로 내려가면 해제한다.
-   - **Opus 자동 전환**(P1-4c, `engine/relay_codec.rs`): 설정 코덱이 PCM16이면 워커가 릴레이 대역용 Opus 인코더(설정 비트레이트, 같은 채널)를 시작 때 만들어 둔다. 200ms마다 정책을 본다.
+   - **Opus 자동 전환**(P1-4c, `engine/relay_codec.rs`): 설정 코덱이 PCM16이면 워커가 **피어마다 전용** Opus 인코더(설정 비트레이트, 같은 채널)를 쓴다. 인코더는 시작 때 최대 피어 수(5)만큼 만들어 두고 피어가 생기면 하나씩 맡긴다(전환 순간 생성 지연 없음, 피어가 나가면 돌려받음). 200ms마다 정책을 본다. 릴레이 부하와 수신 손실 피드백(9)이 같은 인코더·같은 hold/플래핑 규칙(`Hysteresis`)을 쓴다. 피어마다 인코더를 따로 두는 것은 전환 순간 예열과 예상 손실(%)을 피어별로 하기 위해서다(공유 인코더면 나중에 합류한 피어의 디코더가 스트림 중간에서 시작하고, 손실률이 다른 피어들이 한 설정을 나눠 쓴다). 대신 Opus 인코딩이 대상 피어 수만큼 든다(최대 5회/프레임).
      - 켜기(즉시): 오디오를 릴레이로 보내는 피어가 있고, 예상 PCM 부하(릴레이 피어 수 × (접두부 8 + 헤더 18 + PCM 페이로드 + 태그 16)B × 프레임률, 2 Mbps·2500pps 대비)가 90% 이상이거나 측정 `overBudget`이 켜졌다. 예상으로 켜지므로 릴레이가 버리기 전에 바뀐다. 측정으로 켜졌으면(운영 한도가 더 낮음) 그때의 예상 부하를 넘은 부하로 기억한다.
      - 켜진 동안 **릴레이 경로 피어에게만** 같은 프레임의 Opus 패킷(flags=opus)을 보낸다. 직접 경로 피어는 PCM16을 그대로 받는다. 경로가 바뀌면 다음 프레임부터 그 경로의 코덱을 쓴다. 받는 쪽 지터 버퍼는 패킷 flags로 디코더를 바꾸고, seq는 그대로 이어지므로 손실·은닉이 생기지 않는다.
-     - 전환 순간: 인코더 상태를 초기화한 뒤 직전 프레임으로 한 번 예열(출력 버림)하고 보낸다. 첫 패킷이 Opus 알고리즘 지연(2.5ms)만큼 0으로 시작하지 않는다. 남는 것은 2.5ms 위상 이동 한 번이다.
+     - 전환 순간: 그 피어의 인코더가 직전 프레임에 쓰이지 않았다가 대상이 되면(정책이 켜짐, 릴레이 경로로 옮김) 상태를 초기화한 뒤 직전 프레임으로 한 번 예열(출력 버림)하고 보낸다. 첫 패킷이 Opus 알고리즘 지연(2.5ms)만큼 0으로 시작하지 않는다. 남는 것은 2.5ms 위상 이동 한 번이다.
      - 끄기(히스테리시스): 예상 PCM 부하가 `min(80%, 0.85 × 넘은 부하)` 아래로 hold(10초) 동안 이어지면 PCM16으로 돌아간다. 복귀한 지 30초 안에 다시 켜지면 hold를 두 배로 늘린다(최대 120초). 60초 안정하면 10초로 돌아간다.
      - 재진입: 측정으로 켜진 적이 있으면 복귀 뒤 5분(`LEARNED_TRIP_TTL`) 동안 그 "넘은 부하"를 기억해, 예상 PCM 부하가 다시 그 값에 닿으면 측정을 기다리지 않고 바로 켠다(측정 창 1초 동안 릴레이가 PCM을 버리는 손실이 재진입마다 반복되지 않게). 5분이 지나면 잊고 다시 측정으로 판단한다(일시적 원인이었을 수 있음).
      - 에코 측정 중 측정 대상 피어에게 가는 클릭 스트림은 릴레이 경로여도 설정 코덱(PCM16)으로 보낸다(수 초, 한 명).
-     - 상태: `PeerStats.txCodec`(그 피어에게 마지막으로 보낸 코덱)·`txCodecAuto`, `EngineStats.relay.autoOpus`. UI는 릴레이 경로 피어에 "서버 경유 — 대역 절약을 위해 Opus로 자동 전환"을 띄우고, 그래도 `overBudget`이면 "릴레이 대역 초과" 경고를 띄운다.
-     - 받는 쪽 손실 피드백(측정 가용 대역)은 아직 없다. 릴레이가 조용히 버리는 것은 송신 측에서 알 수 없으므로, 예상 부하와 송신량 측정만 쓴다.
+     - 상태: `PeerStats.txCodec`(그 피어에게 마지막으로 보낸 코덱)·`txCodecAuto`·`txCodecReason = 'relayLoad'`, `EngineStats.relay.autoOpus`. 릴레이 부하와 손실 피드백이 둘 다 해당하는 릴레이 경로 피어는 `relayLoad`로 보인다. UI는 릴레이 경로 피어에 "서버 경유 — 대역 절약을 위해 Opus로 자동 전환"을 띄우고, 그래도 `overBudget`이면 "릴레이 대역 초과" 경고를 띄운다.
+     - 릴레이 부하 판단에는 받는 쪽 손실 보고를 쓰지 않는다(예상 부하와 송신량 측정만). 릴레이가 상한 초과로 버린 손실은 받는 쪽 보고에 잡히므로 9의 손실 피드백이 그 피어를 따로 Opus로 바꿀 수는 있다.
+9. **수신 손실 피드백 Opus 전환**(P1-4e, `engine/relay_codec.rs` `LossCodecPolicy`). 직접 경로에서 상대가 손실을 많이 겪어도 송신 측은 알 수 없었다. PCM16 은닉은 직전 프레임 페이드 반복 1회 후 무음이라 손실마다 접합 불연속이 나고 연속 손실은 끊긴다.
+   - 받는 쪽: Ping(500ms)마다 그 피어 스트림의 최근 5초 손실률·은닉률을 싣는다(2절 "Ping 손실 보고").
+   - 보내는 쪽(설정 PCM16, 피어마다): 보고 손실 ≥ 2%가 1초(보고 3번) 이어지면 그 피어에게만 Opus로 보낸다(경로 무관). 보고 손실 < 1%가 hold 동안 이어지면 PCM16으로 돌아간다. hold·플래핑은 7과 같다(10초, 복귀 30초 안 재진입이면 두 배씩 최대 120초, 60초 안정이면 10초). 보고가 3초 넘게 없으면(옛 엔진, 상대 재생 전) 켜지 않고, 켜져 있었으면 "손실 없음"으로 센다. 손실률은 망에서 생기므로 코덱을 바꿔도 보고 값은 그대로이고, 복귀는 망이 실제로 좋아졌을 때만 일어난다.
+   - 인코더 예상 손실(`OPUS_SET_PACKET_LOSS_PERC`) = 보고 손실 올림, 2..25%(릴레이 경로이면 기본 5% 이상). 릴레이 부하로만 켜졌으면 5%(1.3절 설정 Opus와 같음). 2.5ms 프레임은 CELT 전용이라 in-band FEC(LBRR, SILK 전용)는 실제로 실리지 않는다. 이득은 Opus PLC와 손실률에 맞춰 프레임 간 예측을 줄이는 CELT 에너지 부호화다(손실 뒤 회복이 빠름). 은닉 **비율**은 손실을 따라가므로 거의 그대로이고, 들리는 품질(접합 불연속·무음)이 좋아진다.
+   - 설정 코덱이 Opus이면 이 정책은 없다(이미 Opus PLC, 예상 손실 5% 고정 — 피어별 조정은 범위 밖).
+   - 상태: `PeerStats.txCodecReason = 'lossFeedback'`(`txCodecAuto` true), `remoteLossPct`·`remoteConcealPct`(상대 보고, 3초 넘게 없으면 null).
+   - 시뮬레이션(`engine::loss_codec_sim::loss_feedback_sim`, 가상 시간: PCM16 mono 2.5ms, 지연 5ms + 지터 U(0,1ms), 실제 지터 버퍼, 손실 0..40초 뒤 깨끗한 회선, 같은 시드의 PCM16 고정 대조군과 비교, 비교 구간 = 전환 1초 뒤부터 손실 끝까지):
+
+     | 회선 | 실제 손실 | 전환 | 복귀 | 예상 손실 설정 | 은닉 PCM→자동 | 불연속/s PCM→자동 | 끊김 ms/s PCM→자동 |
+     |---|---|---|---|---|---|---|---|
+     | 무작위 0.5% | 0.49% | 없음 | - | - | 0.49% → 0.49% | 3.3 → 3.3 | 0 → 0 |
+     | 무작위 2% | 2.12% | 7.6s | 51.6s | 3% | 2.13% → 2.13% | 11.9 → 0.0 | 0.31 → 0.00 |
+     | 무작위 5% | 4.78% | 1.6s | 54.2s | 5% | 4.77% → 4.77% | 26.6 → 0.0 | 1.49 → 0.00 |
+     | 버스트 ≈2%(평균 4프레임) | 2.10% | 14.2s | 53.2s | 4% | 2.30% → 2.30% | 3.1 → 0.0 | 16.70 → 0.08 |
+
+     불연속 = 인접 샘플 차 > 0.05(신호 최대 기울기 ≈ 0.013), 끊김 = |x| < 1e-3이 1ms 넘게 이어진 구간. 버스트는 5초 창 보고가 2% 위아래를 오가 전환이 늦다. 손실이 끝난 뒤 은닉 0(전환·복귀 자체는 은닉을 만들지 않음).
+   - 실시간 종단(`tests/loss_feedback.rs`, ignore 잡): 직접 경로 프록시가 A→B Audio를 20개 중 1개 버림 → 2.6초 뒤 B에게만 Opus(보고 2.76%), 손실 멈춘 뒤 14.3초에 PCM16 복귀. B 은닉률 = 손실률(5.00%).
 8. **QoS 마킹·송신 페이싱·송신 큐 지연**(P1-3, `net/qos.rs`, `net/txlat.rs`).
    - **DSCP EF(46)**: 엔진 소켓 하나(오디오·제어·릴레이 공용)에 `IP_TOS = 0xB8`을 건다. 리눅스·macOS는 이것으로 표시된다. Windows는 이 호출이 성공해도 기본 정책상 무시하므로 qWAVE(QoS2)를 쓴다.
      - 제어 스레드가 매 틱(20ms) 송신 목적지 집합(확정된 직접 경로 피어 + 릴레이 주소)을 모아, 목적지마다 `QOSAddSocketToFlow(QOSTrafficTypeVoice, QOS_NON_ADAPTIVE_FLOW)`로 플로를 만들고 `QOSSetFlow(QOSSetOutgoingDSCPValue, 46)`을 시도한다. 빠진 목적지의 플로는 `QOSRemoveSocketFromFlow`로 지운다. 송신 경로(워커)는 qWAVE를 부르지 않는다.
@@ -365,7 +385,7 @@ interface EngineConfig {
 }
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
-interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean; txCodec: 'opus' | 'pcm16' | null; txCodecAuto: boolean }
+interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean; txCodec: 'opus' | 'pcm16' | null; txCodecAuto: boolean; txCodecReason: 'relayLoad' | 'lossFeedback' | null; remoteLossPct: number | null; remoteConcealPct: number | null }
 interface RelayConfig { addr: string; token: string; expiresInSec?: number; bindKey?: string }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)·bindKey(Bind MAC 키, base64url 32B, relay-design 2.1.1)
 interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean; autoOpus: boolean }
 type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
@@ -477,7 +497,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - `residualMs` = 왕복 − (프레임 + 핑 RTT + 상대 처리 + 지터 버퍼 평균)이다. 클릭이 놓인 입력 버스트 위상(≤ 입력 버퍼)만큼 흩어진다. 판정: 피크비 ≥ 8, 상관 ≥ 0.3, 흩어짐 > 5ms면 `unstable`.
   - 에코가 시작·끝날 때 측정하는 쪽은 그 피어의 지터 버퍼를 처음부터 다시 채운다(스트림 성격이 바뀜). 측정 뒤 상대가 에코를 멈출 때까지(최대 4초) 그 피어에게 무음을 보낸다(내 실제 소리가 되돌아오지 않게).
 
-`PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제). `autoOpus`는 PCM16 설정에서 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중이라는 뜻이다(3절 7). `PeerStats.txCodec`은 그 피어에게 마지막으로 보낸 내 소리의 코덱이고, `txCodecAuto`는 그것이 자동 전환한 Opus라는 뜻이다. TS 래퍼(`engineApi.ts`)는 `autoOpus`·`txCodec`·`txCodecAuto`를 optional로 둔다(이 필드가 없는 옛 엔진 빌드와 함께 쓸 때).
+`PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제). `autoOpus`는 PCM16 설정에서 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중이라는 뜻이다(3절 7). `PeerStats.txCodec`은 그 피어에게 마지막으로 보낸 내 소리의 코덱이고, `txCodecAuto`는 그것이 자동 전환한 Opus라는 뜻이다. `txCodecReason`은 그 이유다: `'relayLoad'`(릴레이 대역, 3절 7) / `'lossFeedback'`(상대가 보고한 수신 손실, 3절 9) / null. `remoteLossPct`·`remoteConcealPct`는 그 피어가 Ping으로 알려 온 **내 소리의** 수신 손실률·은닉률(%, 그쪽 최근 5초)이고, 보고가 3초 넘게 없으면(옛 엔진, 그쪽 재생 전) null이다. TS 래퍼(`engineApi.ts`)는 `autoOpus`·`txCodec`·`txCodecAuto`·`txCodecReason`·`remoteLossPct`·`remoteConcealPct`를 optional로 둔다(이 필드가 없는 옛 엔진 빌드와 함께 쓸 때).
 
 `qos`(P1-3, 3절 8): 오디오 UDP DSCP 마킹 상태. 네트워크가 없으면 null. `marking`: `ef`(EF 46을 OS에 지정 — 비Windows `IP_TOS`, Windows는 걸린 플로 모두 `QOSSetFlow` 성공) | `voice`(Windows, 걸린 플로 중 DSCP 직접 지정 실패가 있음 — 보통 권한 부족, 그 플로는 트래픽 유형 Voice. `ef`도 플로 추가 실패 목적지가 섞이면 `failed`로 알림) | `pending`(Windows, 아직 송신 목적지 없음) | `none`(표시 못 함). `ipTos`: `IP_TOS` setsockopt 성공(Windows는 성공해도 무시될 수 있다). `qwave`: qWAVE 핸들 획득. `flows`/`efFlows`/`failed`: 플로가 걸린 목적지 수 / 그중 DSCP 46 성공 수 / 플로 추가 실패 수(Windows만, 그 밖에는 0). `lastError`: 지금 남은 실패 사유(소켓·핸들 단계 실패, 또는 현재 목적지 중 실패한 것). 실패한 목적지가 빠지면 지워진다(이력 아님).
 
@@ -493,7 +513,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 **진단 내보내기(P2-5, `diag/`)**
 - 기록: `band-diag` 스레드가 1초마다 `EngineManager::snapshot()`(엔진 슬롯 락 안에서 `Engine::stats()`, UI의 `engine_stats`와 같은 경로)으로 샘플을 링 버퍼(3600개 = 60분)에 넣는다. 엔진이 없으면 기록하지 않고, 엔진이 사라진 순간 `running:false` 정지 표시 샘플을 한 번 넣는다. RT 콜백 경로에는 아무것도 추가하지 않는다.
-- 샘플(JSONL 한 줄): `t`(유닉스 ms), `running`, `network`(합주/테스트, 정지 표시 샘플은 끝난 세션 값), `session`(`EngineManager` generation — 값이 바뀐 곳이 엔진 재시작 경계로, 누적 카운터가 0부터 다시 센다), `EngineStats`의 장치·지연·xrun·스트림 오류 값, `peers[]`(`peer` 가명, `state`, `path`, `rttMs`, `jitterMs`, `bufferMs`, `playoutMs`, `lossPct`, `late`·`concealed` 누적, `level`, 에코 상태, `txCodec`·`txCodecAuto`), `relay`(주소는 대역만, `autoOpus` 포함).
+- 샘플(JSONL 한 줄): `t`(유닉스 ms), `running`, `network`(합주/테스트, 정지 표시 샘플은 끝난 세션 값), `session`(`EngineManager` generation — 값이 바뀐 곳이 엔진 재시작 경계로, 누적 카운터가 0부터 다시 센다), `EngineStats`의 장치·지연·xrun·스트림 오류 값, `peers[]`(`peer` 가명, `state`, `path`, `rttMs`, `jitterMs`, `bufferMs`, `playoutMs`, `lossPct`, `late`·`concealed` 누적, `level`, 에코 상태, `txCodec`·`txCodecAuto`·`txCodecReason`·`remoteLossPct`), `relay`(주소는 대역만, `autoOpus` 포함).
 - zip: `README.txt`, `meta.json`(앱 이름·버전, OS 종류·아키텍처·버전, 내보낸 시각, 타임라인 범위), `engine.json`(현재 또는 마지막 세션 `EngineConfig`, 마지막 샘플, `engine_list_devices` 결과), `timeline.jsonl`, `logs/*.log`(앱 로그 끝부분 최대 2MB, 마스킹).
 - 마스킹: IPv4 앞 두 옥텟(`a.b.x.x`)·IPv6 앞 두 그룹, 이메일·JWT·32자 이상 토큰 덩어리 제거, UUID·피어 id는 `id-` + SHA-256 앞 8 hex(같은 id는 같은 값, 솔트 없는 짧은 해시라 후보 id를 알면 되돌릴 수 있음 — 익명화가 아니라 가명), 사용자 폴더 이름(`C:\Users\<이름>`, `/Users/<이름>`, `/home/<이름>`, 공백 포함 다음 구분자까지) 제거. 32자 이상 덩어리라도 `/` 2개 이상과 `-`·`_`가 함께 있는 경로 조각은 남긴다(조각 하나가 16자 이상 숫자+문자면 가림). 오디오 장치 이름은 진단에 필요해 그대로 둔다.
 - 저장: 확장자를 `.zip`으로 바꾼 이름이 이미 있으면 `-1`, `-2`…를 붙인다(대화상자가 덮어쓰기를 확인하지 않은 파일). 같은 폴더의 `.part` 임시 파일에 쓴 뒤 이름을 바꾼다. zip 압축은 타임라인 락 밖에서 한다.

@@ -26,6 +26,8 @@ export interface DeviceInfo {
 
 export type FrameMs = 2.5 | 5 | 10
 export type CodecKind = 'opus' | 'pcm16'
+/** PCM16 설정에서 피어별 Opus 자동 전환 이유: 릴레이 대역 부하(P1-4c) / 상대가 보고한 수신 손실(P1-4e) */
+export type TxCodecReason = 'relayLoad' | 'lossFeedback'
 
 export interface EngineConfig {
   inputDriver: DriverKind
@@ -178,8 +180,13 @@ export interface PeerStats {
   peerEchoing?: boolean
   /** 이 피어에게 마지막으로 보낸 내 소리의 코덱(아직 안 보냈으면 null) */
   txCodec?: CodecKind | null
-  /** txCodec이 릴레이 대역 때문에 자동 전환한 Opus다(P1-4c) */
+  /** txCodec이 PCM16 설정에서 자동 전환한 Opus다(이유는 txCodecReason) */
   txCodecAuto?: boolean
+  /** 자동 전환 이유(txCodecAuto일 때). 옛 엔진 빌드에는 없다 */
+  txCodecReason?: TxCodecReason | null
+  /** 이 피어가 알려 온 내 소리의 수신 손실률·은닉률(%, 그쪽 최근 5초). 보고가 3초 넘게 없으면 null(옛 엔진, 그쪽 재생 전) */
+  remoteLossPct?: number | null
+  remoteConcealPct?: number | null
 }
 
 // ============================================================================

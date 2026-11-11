@@ -11,6 +11,7 @@ import {
   levelClass,
   lossQualityIcon,
   normalizeDetailRoom,
+  peerCodecLines,
   peerStatsTitle,
   performerName,
   recordingExtension,
@@ -64,6 +65,14 @@ describe('roomDetailModel', () => {
     expect(lines).toContain('RTT: 12ms')
     expect(lines).toContain('손실: 0.5%')
     expect(lines[lines.length - 1]).toBe('늦은 패킷: 1 · 은닉: 2')
+  })
+
+  it('peerStatsTitle: 상대 수신 손실과 자동 전환 이유(P1-4e), 옛 엔진이면 줄 없음', () => {
+    const lines = peerStatsTitle(stats({ remoteLossPct: 2.46, remoteConcealPct: 2.5, txCodec: 'opus', txCodecAuto: true, txCodecReason: 'lossFeedback' })).split('\n')
+    expect(lines).toContain('상대 수신 손실: 2.5% · 은닉 2.5%')
+    expect(lines[lines.length - 1]).toBe('내 송신: Opus 자동 전환 (상대 회선 손실 — 끊김 보정)')
+    expect(peerCodecLines(stats({ txCodecReason: 'relayLoad', remoteLossPct: null }))).toEqual(['내 송신: Opus 자동 전환 (서버 경유 대역 절약)'])
+    expect(peerCodecLines(stats())).toEqual([])
   })
 
   it('remotePeerStatus: 연주 중이면 엔진 상태(통계 없으면 연결 중), 관람이면 배지 없이 활성', () => {

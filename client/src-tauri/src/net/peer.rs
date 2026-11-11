@@ -540,6 +540,62 @@ impl TickAction {
 // 에코 피어 모드(P1-1, 설계 2절 "Ping 평문", 4절 `engine_set_echo_mode`)
 // ============================================================================
 
+/// Ping 평문의 수신 손실 보고 태그(P1-4e, 설계 2절). 블록 = `[LOSS_TAG, loss(u16 BE), conceal(u16 BE)]`(5바이트),
+/// 단위 0.01%. 에코 블록이 있으면 그 **뒤**에 붙는다. 옛 엔진은 `[ECHO_TAG, f, d×4, ..]`만 보고 나머지는 무시하며,
+/// 에코 블록 없이 이 블록만 오면 첫 바이트가 `ECHO_TAG`가 아니므로 빈 평문(flags 0)과 같게 처리한다.
+pub const LOSS_TAG: u8 = 0x4C;
+pub const LOSS_REPORT_BYTES: usize = 5;
+/// Ping 평문 최대 길이(에코 6 + 손실 5).
+pub const PING_PLAIN_MAX: usize = ECHO_PAYLOAD_BYTES + LOSS_REPORT_BYTES;
+
+/// 받는 쪽이 본 그 피어 스트림의 최근 5초 손실률·은닉률(%, 지터 버퍼 `loss_pct`·`conceal_pct`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LossReport {
+    pub loss_pct: f32,
+    pub conceal_pct: f32,
+}
+
+impl LossReport {
+    fn to_units(pct: f32) -> u16 {
+        if pct.is_finite() { (pct.clamp(0.0, 100.0) * 100.0).round() as u16 } else { 0 }
+    }
+
+    pub fn encode(&self) -> [u8; LOSS_REPORT_BYTES] {
+        let l = Self::to_units(self.loss_pct).to_be_bytes();
+        let c = Self::to_units(self.conceal_pct).to_be_bytes();
+        [LOSS_TAG, l[0], l[1], c[0], c[1]]
+    }
+
+    /// Ping 평문에서 손실 보고(없으면 None). 에코 블록이 앞에 있으면 건너뛴다. 100% 넘는 값은 100%로 자른다.
+    pub fn parse_ping(plain: &[u8]) -> Option<Self> {
+        let rest = match plain {
+            [ECHO_TAG, _, _, _, _, _, rest @ ..] => rest,
+            _ => plain,
+        };
+        match rest {
+            [LOSS_TAG, a, b, c, d, ..] => Some(Self {
+                loss_pct: (u16::from_be_bytes([*a, *b]) as f32 / 100.0).min(100.0),
+                conceal_pct: (u16::from_be_bytes([*c, *d]) as f32 / 100.0).min(100.0),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Ping 평문 조립: 에코 블록(있으면) + 손실 보고(있으면). 반환 = 길이(0 = 빈 평문).
+pub fn ping_plain(echo: Option<[u8; ECHO_PAYLOAD_BYTES]>, loss: Option<LossReport>, out: &mut [u8; PING_PLAIN_MAX]) -> usize {
+    let mut n = 0;
+    if let Some(e) = echo {
+        out[..ECHO_PAYLOAD_BYTES].copy_from_slice(&e);
+        n = ECHO_PAYLOAD_BYTES;
+    }
+    if let Some(l) = loss {
+        out[n..n + LOSS_REPORT_BYTES].copy_from_slice(&l.encode());
+        n += LOSS_REPORT_BYTES;
+    }
+    n
+}
+
 /// Ping 평문의 에코 제어 태그. 평문 = `[ECHO_TAG, flags, delay_us(u32 BE)]`(6바이트). 빈 평문 = flags 0.
 pub const ECHO_TAG: u8 = 0xEC;
 pub const ECHO_PAYLOAD_BYTES: usize = 6;
@@ -654,12 +710,16 @@ pub struct Peer {
     pub echo: Mutex<EchoState>,
     /// 이 피어 시계와 내 시계의 오프셋 추정(P2-3, Pong 평문의 응답자 시계로 갱신).
     pub clock: Mutex<super::clock::ClockSync>,
+    /// 이 피어가 Ping으로 알려 온, 내 소리의 수신 손실 보고와 받은 시각(P1-4e). 손실 피드백 Opus 전환의 입력.
+    pub remote_loss: Mutex<Option<(LossReport, Instant)>>,
 }
 
-/// `Peer::tx_codec` 비트: 보낸 적 있음 / Opus / 릴레이 대역 때문에 자동 전환한 Opus(P1-4c)
+/// `Peer::tx_codec` 비트: 보낸 적 있음 / Opus / 릴레이 대역 때문에 자동 전환한 Opus(P1-4c) /
+/// 수신 손실 피드백으로 자동 전환한 Opus(P1-4e). AUTO와 AUTO_LOSS가 둘 다 서면 이유는 릴레이 부하로 보인다.
 pub const TX_CODEC_SENT: u8 = 0x80;
 pub const TX_CODEC_OPUS: u8 = 0x01;
 pub const TX_CODEC_AUTO: u8 = 0x02;
+pub const TX_CODEC_AUTO_LOSS: u8 = 0x04;
 
 pub struct PeerSetup<'a> {
     pub keys: &'a KeyPair,
@@ -694,6 +754,7 @@ impl Peer {
             tx_codec: AtomicU8::new(0),
             echo: Mutex::new(EchoState::default()),
             clock: Mutex::new(super::clock::ClockSync::new()),
+            remote_loss: Mutex::new(None),
         })
     }
 
@@ -1142,5 +1203,39 @@ mod tests {
         assert!(mk(&refs).validated_candidates(false).is_err(), "후보 9개는 거부");
         // 중복 제거
         assert_eq!(mk(&["203.0.113.1:5000", "203.0.113.1:5000"]).validated_candidates(false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn loss_report_roundtrip_and_old_engine_compat() {
+        let now = Instant::now();
+        let rep = LossReport { loss_pct: 2.37, conceal_pct: 2.5 };
+        let mut buf = [0u8; PING_PLAIN_MAX];
+        // 손실 보고만(에코 없음): 옛 엔진의 on_ping은 빈 평문(flags 0)과 같게 처리한다
+        let n = ping_plain(None, Some(rep), &mut buf);
+        assert_eq!(n, LOSS_REPORT_BYTES);
+        assert_eq!(LossReport::parse_ping(&buf[..n]), Some(rep));
+        let mut e = EchoState { enabled: true, remote_request_at: Some(now), ..Default::default() };
+        e.on_ping(&buf[..n], now);
+        assert!(!e.remote_requesting(now) && !e.enabled, "에코 플래그 0으로 해석");
+        // 에코 블록 + 손실 보고: 에코는 그대로(옛 엔진은 뒤 바이트 무시), 손실 보고도 읽힌다
+        let echo = [ECHO_TAG, ECHO_FLAG_REQUEST, 0, 0, 0, 7];
+        let n = ping_plain(Some(echo), Some(rep), &mut buf);
+        assert_eq!(n, PING_PLAIN_MAX);
+        let mut e = EchoState::default();
+        e.on_ping(&buf[..n], now);
+        assert!(e.remote_requesting(now));
+        assert_eq!(LossReport::parse_ping(&buf[..n]), Some(rep));
+        // 옛 엔진 Ping(빈 평문·에코만)에는 보고가 없다
+        assert_eq!(LossReport::parse_ping(&[]), None);
+        assert_eq!(LossReport::parse_ping(&echo), None);
+        assert_eq!(ping_plain(None, None, &mut buf), 0);
+        // 잘린 블록·모르는 태그는 무시, 뒤에 붙는 확장 바이트는 허용
+        assert_eq!(LossReport::parse_ping(&[LOSS_TAG, 0, 1, 0]), None);
+        assert_eq!(LossReport::parse_ping(&[0x55, 0, 1, 0, 1]), None);
+        assert!(LossReport::parse_ping(&[LOSS_TAG, 0, 100, 0, 100, 0xAA, 0xBB]).is_some_and(|r| r.loss_pct == 1.0));
+        // 범위 밖 값: 보낼 때 0..100%로 자르고, 받을 때도 100%를 넘지 않는다
+        let wild = LossReport { loss_pct: f32::NAN, conceal_pct: 400.0 }.encode();
+        assert_eq!(LossReport::parse_ping(&wild), Some(LossReport { loss_pct: 0.0, conceal_pct: 100.0 }));
+        assert_eq!(LossReport::parse_ping(&[LOSS_TAG, 0xFF, 0xFF, 0, 0]).unwrap().loss_pct, 100.0);
     }
 }

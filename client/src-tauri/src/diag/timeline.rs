@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use super::mask::{mask_addr, pseudonymize};
 use crate::engine::config::CodecKind;
+use crate::engine::relay_codec::CodecReason;
 use crate::engine::stats::{EngineStats, PathKind, PeerStateKind};
 use crate::net::relay::RelayStateKind;
 
@@ -87,6 +88,9 @@ pub struct PeerSample {
     /// 그 피어에게 보낸 내 소리의 코덱과 릴레이 자동 Opus 여부(P1-4c, 전환 시점 확인용)
     pub tx_codec: Option<CodecKind>,
     pub tx_codec_auto: bool,
+    /// 자동 전환 이유와 상대가 보고한 내 소리의 수신 손실(P1-4e, 손실 피드백 전환 확인용)
+    pub tx_codec_reason: Option<CodecReason>,
+    pub remote_loss_pct: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -175,6 +179,8 @@ impl Sample {
                     peer_echoing: p.peer_echoing,
                     tx_codec: p.tx_codec,
                     tx_codec_auto: p.tx_codec_auto,
+                    tx_codec_reason: p.tx_codec_reason,
+                    remote_loss_pct: p.remote_loss_pct,
                 })
                 .collect(),
             relay: s.relay.as_ref().map(|r| RelaySample {
@@ -269,6 +275,9 @@ mod tests {
             peer_echoing: false,
             tx_codec: Some(CodecKind::Opus),
             tx_codec_auto: true,
+            tx_codec_reason: Some(CodecReason::LossFeedback),
+            remote_loss_pct: Some(2.5),
+            remote_conceal_pct: Some(2.6),
         });
         s.relay = Some(RelayStats {
             state: RelayStateKind::Bound,

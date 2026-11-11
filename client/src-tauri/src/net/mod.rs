@@ -19,6 +19,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::engine::config::{MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
 use crate::engine::jitter::JitterSettings;
+use crate::engine::relay_codec::CodecReason;
 use crate::engine::stats::{PathKind, PeerStateKind};
 use crypto::KeyPair;
 use packet::{Header, PacketType};
@@ -480,18 +481,27 @@ impl NetShared {
         self.send_ctrl_on_path(p, PacketType::Bye, self.now_us32(), &[]);
     }
 
-    /// Ping 송신(에코 상태가 있으면 평문에 싣는다, 설계 2절).
+    /// Ping 송신. 평문 = 에코 상태(있으면) + 이 피어 스트림의 수신 손실 보고(재생 중이면, P1-4e). 설계 2절.
     fn send_ping(&self, p: &Peer, now: Instant) {
-        let payload = p.echo.lock().ping_payload(now);
-        self.send_ctrl_on_path(p, PacketType::Ping, self.now_us32(), payload.as_ref().map_or(&[][..], |b| &b[..]));
+        let echo = p.echo.lock().ping_payload(now);
+        let loss = {
+            let jb = p.jitter.lock();
+            jb.is_playing().then(|| {
+                let s = jb.stats();
+                peer::LossReport { loss_pct: s.loss_pct, conceal_pct: s.conceal_pct }
+            })
+        };
+        let mut plain = [0u8; peer::PING_PLAIN_MAX];
+        let n = peer::ping_plain(echo, loss, &mut plain);
+        self.send_ctrl_on_path(p, PacketType::Ping, self.now_us32(), &plain[..n]);
     }
 
     /// 피어 하나에 Audio 패킷 송신. seq는 피어별 카운터다(에코로 되돌리는 패킷과 nonce가 겹치지 않게).
-    /// `relay_alt = Some((payload, flags))`면 그 피어의 경로가 릴레이일 때 그것을 보낸다(Opus 자동 전환, P1-4c).
-    /// 보냈으면 실제로 쓴 flags를 돌려준다.
+    /// `auto`가 그 피어·경로에 대해 페이로드를 주면 그것을 보낸다(PCM16 설정의 Opus 자동 전환, P1-4c·P1-4e).
+    /// 보냈으면 실제로 쓴 flags와 자동 전환 이유를 돌려준다.
     /// `frame_at`이 있으면 send_to 완료까지의 지연을 송신 큐 지연 히스토그램에 기록한다(에코 반사는 제외).
     #[allow(clippy::too_many_arguments)]
-    fn send_audio_to(
+    fn send_audio_to<'a>(
         &self,
         p: &Peer,
         payload: &[u8],
@@ -500,17 +510,18 @@ impl NetShared {
         timestamp: u32,
         buf: &mut [u8],
         rbuf: &mut [u8; SEND_BUF_BYTES],
-        relay_alt: Option<(&[u8], u8)>,
+        auto: Option<AutoFn<'_, 'a>>,
         frame_at: Option<Instant>,
-    ) -> Option<u8> {
+    ) -> Option<(u8, Option<CodecReason>)> {
         let target = {
             let c = p.conn.lock();
             if c.can_send_audio() { c.path } else { None }
         };
         let (addr, kind) = target?;
-        let (payload, flags) = match relay_alt {
-            Some(alt) if kind == PathKind::Relay => alt,
-            _ => (payload, flags),
+        // 자동 전환 페이로드가 상한을 넘으면(있을 수 없지만) 그 피어에게는 설정 코덱으로 보낸다
+        let (payload, flags, reason) = match auto.and_then(|f| f(p, kind)).filter(|a| a.payload.len() <= MAX_PAYLOAD_BYTES) {
+            Some(a) => (a.payload, a.flags, Some(a.reason)),
+            None => (payload, flags, None),
         };
         let h = Header {
             ptype: PacketType::Audio,
@@ -531,7 +542,7 @@ impl NetShared {
         if let Some(t0) = frame_at {
             self.send_latency.record(t0.elapsed());
         }
-        Some(flags)
+        Some((flags, reason))
     }
 
     /// 지금 오디오를 릴레이로 보내는 피어 수와, 릴레이 송신량이 상한의 90%를 넘었는지(Opus 자동 전환 입력, P1-4c).
@@ -559,9 +570,10 @@ impl NetShared {
     /// 내가 에코로 되돌리고 있는 피어에게는 내 오디오를 보내지 않는다(되돌린 패킷만 간다).
     /// `buf`는 호출자가 사전 할당한 MAX_PACKET_BYTES 버퍼(직접 경로용). 릴레이 경로는 접두부 자리가 있는
     /// 스택 버퍼를 쓴다(피어마다 RelayData를 따로 보낸다 — 릴레이에는 팬아웃이 없다).
-    /// `relay_alt = Some((payload, flags))`면 릴레이 경로 피어에게는 그것(릴레이 대역용 Opus)을 보낸다(P1-4c).
+    /// `auto(peer, 경로)`가 `Some`을 주면 그 피어에게는 그것(그 피어 전용 Opus 인코더의 이 프레임)을 보낸다
+    /// (PCM16 설정의 자동 전환: 릴레이 부하 P1-4c, 수신 손실 피드백 P1-4e).
     #[allow(clippy::too_many_arguments)]
-    pub fn send_audio(
+    pub fn send_audio<'a>(
         &self,
         payload: &[u8],
         flags: u8,
@@ -569,16 +581,16 @@ impl NetShared {
         timestamp: u32,
         buf: &mut [u8],
         alt: Option<(&str, &[u8])>,
-        relay_alt: Option<(&[u8], u8)>,
+        auto: Option<AutoFn<'_, 'a>>,
     ) {
-        self.send_audio_timed(Instant::now(), payload, flags, frame_code, timestamp, buf, alt, relay_alt)
+        self.send_audio_timed(Instant::now(), payload, flags, frame_code, timestamp, buf, alt, auto)
     }
 
     /// `send_audio`와 같고, `frame_at`(캡처 프레임이 다 모인 시각, 인코딩 전)부터 각 피어 send_to 완료까지를
     /// 송신 큐 지연으로 잰다(P1-3, `EngineStats.sendQueue`). 피어에게는 이 프레임을 간격 없이 연달아 보낸다
     /// (페이싱 없음 — 설계 3절 "송신 페이싱" 측정 근거).
     #[allow(clippy::too_many_arguments)]
-    pub fn send_audio_timed(
+    pub fn send_audio_timed<'a>(
         &self,
         frame_at: Instant,
         payload: &[u8],
@@ -587,12 +599,9 @@ impl NetShared {
         timestamp: u32,
         buf: &mut [u8],
         alt: Option<(&str, &[u8])>,
-        relay_alt: Option<(&[u8], u8)>,
+        auto: Option<AutoFn<'_, 'a>>,
     ) {
-        if payload.len() > MAX_PAYLOAD_BYTES
-            || alt.is_some_and(|(_, a)| a.len() > MAX_PAYLOAD_BYTES)
-            || relay_alt.is_some_and(|(a, _)| a.len() > MAX_PAYLOAD_BYTES)
-        {
+        if payload.len() > MAX_PAYLOAD_BYTES || alt.is_some_and(|(_, a)| a.len() > MAX_PAYLOAD_BYTES) {
             return;
         }
         let peers = self.peers.read();
@@ -605,17 +614,20 @@ impl NetShared {
             if p.echo.lock().reflecting(now) {
                 continue;
             }
-            let (pl, ra) = match alt {
+            let (pl, au) = match alt {
                 // 에코 측정 클릭 스트림은 측정 대상 한 명에게 수 초만 가고 코덱을 바꾸면 측정이 흐트러지므로,
-                // 그 피어가 릴레이 경로여도 설정 코덱(PCM16) 그대로 보낸다(그동안 상한을 잠깐 넘을 수 있다).
+                // 그 피어가 자동 전환 대상이어도 설정 코덱(PCM16) 그대로 보낸다(그동안 릴레이 상한을 잠깐 넘을 수 있다).
                 Some((id, a)) if id == p.id => (a, None),
-                _ => (payload, relay_alt),
+                _ => (payload, auto),
             };
-            if let Some(f) = self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, ra, Some(frame_at)) {
-                let auto = ra.is_some_and(|(_, rf)| rf == f && rf != flags);
+            if let Some((f, reason)) = self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, au, Some(frame_at)) {
                 let code = peer::TX_CODEC_SENT
                     | if f & packet::FLAG_OPUS != 0 { peer::TX_CODEC_OPUS } else { 0 }
-                    | if auto { peer::TX_CODEC_AUTO } else { 0 };
+                    | match reason {
+                        Some(CodecReason::RelayLoad) => peer::TX_CODEC_AUTO,
+                        Some(CodecReason::LossFeedback) => peer::TX_CODEC_AUTO_LOSS,
+                        None => 0,
+                    };
                 p.tx_codec.store(code, Ordering::Relaxed);
             }
         }
@@ -871,6 +883,10 @@ impl NetShared {
                     // Pong은 Ping이 온 길로 돌려준다(경로 전환 중에도 RTT가 끊기지 않게)
                     PacketType::Ping => {
                         peer.echo.lock().on_ping(plain, now);
+                        // 수신 손실 보고(P1-4e): 없으면(옛 엔진, 상대 재생 전) 이전 값을 그대로 두고 받은 시각으로 오래됨을 판단한다
+                        if let Some(r) = peer::LossReport::parse_ping(plain) {
+                            *peer.remote_loss.lock() = Some((r, now));
+                        }
                         let clock = clock_payload(self.now_us());
                         self.send_ctrl(&peer, PacketType::Pong, h.timestamp, &clock, from, via_relay);
                     }
@@ -895,6 +911,17 @@ impl NetShared {
         self.epoch
     }
 }
+
+/// PCM16 설정의 피어별 Opus 자동 전환 페이로드(워커가 그 피어 전용 인코더로 만든 이 프레임, P1-4c·P1-4e).
+#[derive(Debug, Clone, Copy)]
+pub struct AutoPayload<'a> {
+    pub payload: &'a [u8],
+    pub flags: u8,
+    pub reason: CodecReason,
+}
+
+/// `send_audio`의 자동 전환 조회: (피어, 지금 경로) → 그 피어에게 보낼 자동 전환 페이로드.
+pub type AutoFn<'f, 'a> = &'f dyn Fn(&Peer, PathKind) -> Option<AutoPayload<'a>>;
 
 /// Pong 평문의 시계 태그(P2-3, 설계 2절). 평문 = `[CLOCK_TAG, now_us(u64 BE)]`(9바이트).
 pub const CLOCK_TAG: u8 = 0xC1;

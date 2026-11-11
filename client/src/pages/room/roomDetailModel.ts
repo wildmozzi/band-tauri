@@ -90,6 +90,18 @@ export function cpuTitle(cpu: CpuStats): string {
   ].join('\n')
 }
 
+/** 상대가 보고한 내 소리의 수신 품질과 자동 코덱 전환(P1-4e). 옛 엔진(필드 없음)이면 빈 배열 */
+export function peerCodecLines(ps: PeerStats): string[] {
+  const lines: string[] = []
+  if (ps.remoteLossPct != null) {
+    const conceal = ps.remoteConcealPct != null ? ` · 은닉 ${ps.remoteConcealPct.toFixed(1)}%` : ''
+    lines.push(`상대 수신 손실: ${ps.remoteLossPct.toFixed(1)}%${conceal}`)
+  }
+  if (ps.txCodecReason === 'lossFeedback') lines.push('내 송신: Opus 자동 전환 (상대 회선 손실 — 끊김 보정)')
+  else if (ps.txCodecReason === 'relayLoad') lines.push('내 송신: Opus 자동 전환 (서버 경유 대역 절약)')
+  return lines
+}
+
 export function peerStatsTitle(ps: PeerStats): string {
   return [
     `상태: ${PEER_STATE_INFO[ps.state]?.label ?? ps.state}`,
@@ -99,6 +111,7 @@ export function peerStatsTitle(ps: PeerStats): string {
     `버퍼: ${formatMs(ps.bufferMs)}`,
     `손실: ${ps.lossPct.toFixed(1)}%`,
     `늦은 패킷: ${ps.late} · 은닉: ${ps.concealed}`,
+    ...peerCodecLines(ps),
   ].join('\n')
 }
 
