@@ -6,7 +6,8 @@
  *   auth를 모르는 구 서버 호환을 위해 AUTH_FALLBACK_MS 안에 응답이 없으면 그냥 진행한다.
  * - 비정상 종료 시 방에 있었다면 시간 예산(첫 단절부터 35초, 서버 세션 유예 30초 + 여유) 안에서 백오프로 재연결한다.
  *   판단은 reconnectPolicy(순수), 타이머는 이 훅이 가진다. 예산을 넘기면 signalStatus='gave-up' + onGaveUp.
- * - 수신 없음 감지: 15초 동안 아무 메시지도 없으면 ping, 5초 안에 응답이 없으면 close(4000)으로 스스로 닫고 재연결한다.
+ * - 수신 없음 감지: 15초 동안 아무 메시지도 없으면 ping, 5초 안에 응답이 없으면 그 소켓을 버리고(close(4000)) 바로 재연결한다
+ *   (반쯤 열린 연결의 늦은 onclose를 기다리지 않는다).
  *   서버가 pong을 지원하는지는 ready 직후 보내는 ping으로 확인하고, 한 번도 pong을 못 받았으면(구 서버) 닫지 않는다.
  *
  * 신뢰 규칙: 중계 메시지의 `from`/`oderId`는 서버가 붙인 값만 쓴다. 클라이언트가 보낸 from/isHost/userId는 서버가 무시하며,
@@ -143,13 +144,54 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
           pongTimer = null
           if (disposed || wsRef.current !== ws) return
           if (serverPongs) {
-            console.warn(`[WS] ${(IDLE_PING_MS + PONG_TIMEOUT_MS) / 1000}초 동안 수신 없음 — 연결을 닫고 재연결`)
-            ws.close(STALE_CLOSE_CODE, 'stale')
+            console.warn(`[WS] ${(IDLE_PING_MS + PONG_TIMEOUT_MS) / 1000}초 동안 수신 없음 — 연결을 버리고 재연결`)
+            abandonStale(ws)
           } else {
             armLiveness(ws)
           }
         }, PONG_TIMEOUT_MS)
       }, IDLE_PING_MS)
+    }
+
+    /** 현재 연결(wsRef)이 닫힘 — onclose 또는 수신 없음 판정. 상태를 정리하고 재연결 여부를 정한다 */
+    const handleClosed = (code: number) => {
+      if (authTimer) clearTimeout(authTimer)
+      if (connectTimer) clearTimeout(connectTimer)
+      authTimer = connectTimer = null
+      clearLiveness()
+      readyRef.current = false
+      queueRef.current = []
+      setStatus('idle')
+      setClientId(null)
+      setAuthenticated(null)
+      clientIdRef.current = null
+      handlersRef.current.onClosed()
+
+      const decision = budget.onClosed({ code, now: Date.now(), inRoom: handlersRef.current.isInRoom() })
+      if (decision.action === 'retry') {
+        console.log(`[WS] 재연결 시도 ${budget.attemptCount} (${decision.delayMs}ms 뒤, 닫힘 코드 ${code})`)
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null
+          if (!disposed && handlersRef.current.isInRoom()) connect()
+        }, decision.delayMs)
+      } else if (decision.action === 'give-up') {
+        console.warn('[WS] 재연결 예산 초과 — 포기')
+        setStatus('gave-up')
+        handlersRef.current.onGaveUp?.()
+      }
+    }
+
+    /**
+     * 수신 없음 판정: 소켓을 버리고 닫힘 처리를 바로 한다.
+     * 반쯤 열린 연결에서 close()는 닫기 핸드셰이크만 시작하고, Chromium(WebView2 포함)은 서버의 close 프레임을
+     * 핸드셰이크 타임아웃(약 60초)까지 기다린 뒤에야 onclose를 보낸다. 그걸 기다리면 재연결이 서버 유예(30초)를 넘긴다.
+     * 그래서 핸들러를 떼고 wsRef를 비운 뒤 닫힘 처리를 직접 하고, close()는 뒷정리로만 부른다.
+     */
+    const abandonStale = (ws: WebSocket) => {
+      ws.onopen = ws.onclose = ws.onmessage = ws.onerror = null
+      wsRef.current = null
+      handleClosed(STALE_CLOSE_CODE)
+      ws.close(STALE_CLOSE_CODE, 'stale')
     }
 
     let resumed = false
@@ -211,31 +253,9 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
       }
 
       ws.onclose = (event) => {
-        if (authTimer) clearTimeout(authTimer)
-        if (connectTimer) clearTimeout(connectTimer)
-        connectTimer = null
+        // 버린 소켓(수신 없음 판정)의 늦은 onclose는 무시한다. 타이머도 이미 새 연결의 것이므로 건드리지 않는다
         if (disposed || wsRef.current !== ws) return
-        clearLiveness()
-        readyRef.current = false
-        queueRef.current = []
-        setStatus('idle')
-        setClientId(null)
-        setAuthenticated(null)
-        clientIdRef.current = null
-        handlersRef.current.onClosed()
-
-        const decision = budget.onClosed({ code: event.code, now: Date.now(), inRoom: handlersRef.current.isInRoom() })
-        if (decision.action === 'retry') {
-          console.log(`[WS] 재연결 시도 ${budget.attemptCount} (${decision.delayMs}ms 뒤, 닫힘 코드 ${event.code})`)
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null
-            if (!disposed && handlersRef.current.isInRoom()) connect()
-          }, decision.delayMs)
-        } else if (decision.action === 'give-up') {
-          console.warn('[WS] 재연결 예산 초과 — 포기')
-          setStatus('gave-up')
-          handlersRef.current.onGaveUp?.()
-        }
+        handleClosed(event.code)
       }
 
       ws.onmessage = (event) => {

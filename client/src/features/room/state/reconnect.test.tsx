@@ -27,7 +27,9 @@ const h = vi.hoisted(() => {
     updateInstrument: () => {},
     dispose: () => {},
   }
-  return { session }
+  /** 설정하면 getSession이 이 Promise가 풀릴 때까지 기다린다 (토큰 대기 중 닫힘 재현) */
+  const auth = { tokenGate: null as Promise<void> | null }
+  return { session, auth }
 })
 
 vi.mock('../../auth', () => ({ useAuth: () => ({ user: null }) }))
@@ -57,7 +59,10 @@ vi.mock('../../../native/mixBridge', () => ({
 vi.mock('../../../shared/lib/supabaseClient', () => ({
   supabase: {
     auth: {
-      getSession: async () => ({ data: { session: { access_token: 'tok' } } }),
+      getSession: async () => {
+        if (h.auth.tokenGate) await h.auth.tokenGate
+        return { data: { session: { access_token: 'tok' } } }
+      },
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
     },
   },
@@ -68,6 +73,8 @@ import { RoomRuntimeContext, useRoomConnection, type RoomActions } from './roomH
 import type { RoomSessionStore } from './roomSessionStore'
 import { IDLE_PING_MS, PONG_TIMEOUT_MS, STALE_CLOSE_CODE } from './reconnectPolicy'
 
+const AUTH_FALLBACK_MS = 2000 // useSignaling과 같은 값
+
 type Sent = Record<string, unknown> & { type: string }
 
 class FakeWebSocket {
@@ -76,6 +83,8 @@ class FakeWebSocket {
   static readonly CLOSING = 2
   static readonly CLOSED = 3
   static instances: FakeWebSocket[] = []
+  /** true면 반쯤 열린 연결처럼 close()가 닫기 핸드셰이크만 시작하고 onclose를 부르지 않는다 */
+  static halfOpen = false
   readyState = FakeWebSocket.CONNECTING
   sent: Sent[] = []
   closedWith: number | null = null
@@ -94,6 +103,10 @@ class FakeWebSocket {
     if (this.readyState === FakeWebSocket.CLOSED) return
     const wasConnecting = this.readyState === FakeWebSocket.CONNECTING
     this.closedWith = code ?? 1005
+    if (FakeWebSocket.halfOpen && !wasConnecting) {
+      this.readyState = FakeWebSocket.CLOSING
+      return
+    }
     this.readyState = FakeWebSocket.CLOSED
     this.onclose?.({ code: wasConnecting ? 1006 : (code ?? 1005) })
   }
@@ -109,6 +122,9 @@ class FakeWebSocket {
   }
   recv(msg: Record<string, unknown>) {
     this.onmessage?.({ data: JSON.stringify(msg) })
+  }
+  recvRaw(data: string) {
+    this.onmessage?.({ data })
   }
 }
 
@@ -184,6 +200,8 @@ let welcomeSpy: ReturnType<typeof vi.spyOn>
 beforeEach(() => {
   vi.useFakeTimers()
   FakeWebSocket.instances = []
+  FakeWebSocket.halfOpen = false
+  h.auth.tokenGate = null
   vi.stubGlobal('WebSocket', FakeWebSocket)
   stopSpy = vi.spyOn(h.session, 'stop')
   welcomeSpy = vi.spyOn(h.session, 'welcome')
@@ -298,5 +316,107 @@ describe('WS 재연결 (시간 예산)', () => {
     await advance((IDLE_PING_MS + PONG_TIMEOUT_MS) * 3)
     expect(ws.closedWith).toBeNull()
     expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+
+  it('반쯤 열린 연결: close()가 onclose를 부르지 않아도 수신 없음 판정 즉시 재연결하고, 늦은 옛 onclose는 무시한다', async () => {
+    FakeWebSocket.halfOpen = true
+    const ws = await enterRoom()
+    const lateOnclose = ws.onclose!
+    await advance(IDLE_PING_MS + PONG_TIMEOUT_MS)
+    expect(ws.closedWith).toBe(STALE_CLOSE_CODE)
+    expect(ws.readyState).toBe(FakeWebSocket.CLOSING) // 브라우저는 아직 onclose를 보내지 않음
+    expect(ws.onclose).toBeNull()
+    expect(store.getSnapshot().connection.signalStatus).toBe('idle')
+
+    // 첫 백오프(0.5초 ±20%) 안에 새 연결
+    const n = FakeWebSocket.instances.length
+    await advance(600)
+    expect(FakeWebSocket.instances.length).toBe(n + 1)
+    await accept(last(), { resumeAs: 'c1' })
+    expect(store.getSnapshot().connection).toMatchObject({ signalStatus: 'connected', clientId: 'c1' })
+
+    // 브라우저 닫기 핸드셰이크 타임아웃 뒤 늦게 도착한 옛 onclose
+    act(() => lateOnclose({ code: 1006 }))
+    expect(store.getSnapshot().connection).toMatchObject({ signalStatus: 'connected', clientId: 'c1', currentRoomId: 'r1' })
+    await advance(5_000)
+    expect(FakeWebSocket.instances.length).toBe(n + 1)
+    expect(stopSpy).not.toHaveBeenCalled()
+  })
+
+  it('토큰을 기다리는 사이 닫힌 연결은 ready로 보지 않는다 — auth 미전송, 예산 리셋 없음 → 35초 뒤 포기', async () => {
+    const first = await enterRoom()
+    const readyCalls = welcomeSpy.mock.calls.length
+    act(() => first.fail())
+    const dropped: FakeWebSocket[] = []
+    const until = Date.now() + 36_000
+    while (Date.now() < until) {
+      const n = FakeWebSocket.instances.length
+      await advance(100)
+      if (FakeWebSocket.instances.length > n) {
+        const ws = last()
+        let release!: () => void
+        h.auth.tokenGate = new Promise<void>((r) => (release = r))
+        act(() => ws.open()) // getSession 대기 중
+        act(() => ws.fail()) // 그 사이 닫힘
+        release()
+        h.auth.tokenGate = null
+        await flush()
+        await advance(AUTH_FALLBACK_MS) // fallback이 걸렸다면 여기서 ready
+        dropped.push(ws)
+      }
+    }
+    expect(dropped.length).toBeGreaterThanOrEqual(3)
+    for (const ws of dropped) expect(ws.sent.filter((m) => m.type === 'auth')).toHaveLength(0)
+    expect(welcomeSpy.mock.calls.length).toBe(readyCalls) // onReady 없음
+    expect(store.getSnapshot().connection.signalStatus).toBe('gave-up')
+  })
+
+  it('서버 유예가 지나 새 clientId를 받으면(resumed:false) 엔진을 새 id로 한 번 재시작하고 재입장한다', async () => {
+    const first = await enterRoom()
+    const sentBefore = allSent().length
+    const welcomesBefore = welcomeSpy.mock.calls.length
+    act(() => first.fail())
+    const n = FakeWebSocket.instances.length
+    while (FakeWebSocket.instances.length === n) await advance(100)
+    const auth = await accept(last()) // 서버가 재개하지 않음 → 새 id
+    expect(auth.resumeClientId).toBe('c1') // 재개는 요청했다
+    const newId = `tmp${FakeWebSocket.instances.length}`
+    const welcomesAfter = welcomeSpy.mock.calls.slice(welcomesBefore)
+    expect(welcomesAfter).toEqual([[newId, false]])
+    expect(stopSpy).not.toHaveBeenCalled()
+    const joinsAfter = allSent().slice(sentBefore).filter((m) => m.type === 'join')
+    expect(joinsAfter).toHaveLength(1)
+    expect(joinsAfter[0]).toMatchObject({ roomId: 'r1', isRejoin: true })
+    expect(store.getSnapshot().connection).toMatchObject({ signalStatus: 'connected', clientId: newId })
+  })
+
+  it('침묵 판정은 pong이 아닌 모든 수신(파싱 실패 포함)으로도 리셋된다', async () => {
+    const ws = await enterRoom()
+    const pings = () => ws.sent.filter((m) => m.type === 'ping').length
+    const before = pings()
+    await advance(IDLE_PING_MS - 1000)
+    await act(async () => ws.recv({ type: 'peer-joined', peerId: 'x' }))
+    await advance(IDLE_PING_MS - 1000)
+    await act(async () => ws.recvRaw('not json'))
+    await advance(IDLE_PING_MS - 1000)
+    expect(pings()).toBe(before)
+    await advance(1000)
+    expect(pings()).toBe(before + 1)
+  })
+
+  it('언마운트하면 타이머가 남지 않는다 (연결 유지 중)', async () => {
+    await enterRoom()
+    await advance(IDLE_PING_MS) // idle → pong 대기 타이머까지 무장
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    cleanup()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('언마운트하면 타이머가 남지 않는다 (재연결 대기 중)', async () => {
+    const first = await enterRoom()
+    act(() => first.fail()) // 재연결 타이머 대기
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    cleanup()
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
