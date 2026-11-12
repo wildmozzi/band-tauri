@@ -13,7 +13,8 @@
  *
  * - 키: 요소의 DOM 경로(태그:형제 순번 사슬). 클래스는 키에 넣지 않는다 — 특이성 고정을 위해 클래스를 더해도 같은 요소로 비교된다
  *   (클래스 목록은 `c`로 함께 남겨 diff에 참고로 보인다).
- * - 시계·Math.random 고정, 1280×800, 애니메이션·전환 끔(중간 값이 찍히지 않게). 폰트·네트워크가 가라앉은 뒤 덤프한다.
+ * - 시계 고정, Math.random은 상수(0.5) — 호출 순서와 무관하게 같은 값이 나와야 번들 구성(지연 로딩으로 라이브러리 초기화 순서가 바뀜)이
+ *   달라도 게스트 닉네임·파형 같은 난수 데이터가 같다. 1280×800, 애니메이션·전환 끔(중간 값이 찍히지 않게). 폰트·네트워크가 가라앉은 뒤 덤프한다.
  * - 한계: :hover·:focus 등 상호작용 상태, 열지 않은 모달, 화면 너비별 미디어 쿼리(1280 한 폭만)는 보지 않는다.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -130,11 +131,7 @@ test.beforeEach(async ({ page }) => {
   test.skip(!outDir, 'STYLE_SNAPSHOT_OUT(덤프할 폴더)를 지정하세요')
   await page.clock.setFixedTime(FIXED_NOW)
   await page.addInitScript(() => {
-    let seed = 42
-    Math.random = () => {
-      seed = (seed * 16807) % 2147483647
-      return (seed - 1) / 2147483646
-    }
+    Math.random = () => 0.5
   })
 })
 
