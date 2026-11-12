@@ -1,6 +1,6 @@
 //! WASAPI 스모크 테스트(P1-0): 이 PC의 실제 장치로 독점/저지연 공유 스트림을 열어 본다.
 //!
-//! 실행: `cargo run --example wasapi_probe [초=5]`
+//! 실행: `cargo run --example wasapi_probe [초=5]`(릴리스로 돌리면 `--release --features test-support` — 가짜 장치를 쓰는 부분이 있다)
 //!
 //! 출력: 장치 목록(믹스 포맷, 장치 주기, IAudioClient3 엔진 주기, 독점 지원 포맷), 기본 입·출력 장치를
 //! 독점 / 저지연 공유로 열었을 때의 성공 여부·주기·실측 콜백 간격 히스토그램.

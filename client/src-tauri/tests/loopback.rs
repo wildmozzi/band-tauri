@@ -1398,7 +1398,7 @@ fn thread_priority_reported_and_timer_released_on_stop() {
 /// 적용 전/후 비교: 엔진 스레드 승격(MMCSS, 1ms 타이머)을 끔/MMCSS만/타이머만/둘 다로 바꿔 같은 링크를 돌린다.
 /// 지표: 워커와 같은 방식으로 승격된 프로브 스레드의 FINE_POLL(150µs) 수면 초과량, B의 은닉·마감 채움·건너뜀,
 /// 지터버퍼 지연/지터. 부하 단계는 논리 코어 수만큼 바쁜 스레드(보통 우선순위)를 돌린다.
-/// 실행: `cargo test --release --test loopback rt_priority_before_after -- --ignored --nocapture`
+/// 실행: `cargo test --release --features test-support --test loopback rt_priority_before_after -- --ignored --nocapture`
 #[test]
 #[ignore = "realtime: 측정용(임계 없음). 결정적 짝 engine::prio::tests"]
 fn rt_priority_before_after() {
