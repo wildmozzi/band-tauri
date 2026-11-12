@@ -47,7 +47,8 @@ use device::{AudioBackend, StreamInfo};
 use jitter::JitterSettings;
 use measure::{EchoJob, EchoProbe, LoopbackJob};
 use mixer::{clamp_gain, MixControls};
-use peer_media::{MediaSettings, PeerMediaShared};
+use peer_media::{media_port, MediaCmd, MediaPort, MediaSettings, PeerMedia, PeerMediaShared};
+use ringbuf::traits::Producer;
 use resample::StreamResampler;
 use rt::InputRt;
 use stats::AudioCounters;
@@ -100,6 +101,8 @@ pub struct Engine {
     next_key: AtomicU64,
     /// 새 피어의 지터 설정과 실행 중 프로필.
     media_settings: Arc<MediaSettings>,
+    /// 워커 미디어 명령 큐(추가·제거)와 반환 큐의 제어 평면 쪽 끝(③-a2).
+    media_port: MediaPort,
 }
 
 impl Engine {
@@ -140,6 +143,7 @@ impl Engine {
         let (rec_rt, rec_ctl) = record::record_port();
         output.attach_record(rec_rt);
         let probe = Arc::new(Mutex::new(None));
+        let (media_port, media_port_rt) = media_port();
 
         // 오디오 스레드: 스트림을 열고 정지 신호까지 소유한다(cpal::Stream은 !Send).
         let audio_stop = Arc::new(AtomicBool::new(false));
@@ -208,6 +212,7 @@ impl Engine {
                 max_ms: cfg.jitter_max_ms(),
                 profile: cfg.jitter_profile(),
             })),
+            media_port,
         };
         // 48kHz 클릭 파형을 장치 레이트로 읽는 보폭
         metronome.click.step.store(INTERNAL_RATE as f32 / info.out_rate.max(1) as f32);
@@ -246,6 +251,8 @@ impl Engine {
             probe,
             metronome,
             rec_marks: engine.recorder.lock().marks(),
+            media_port: media_port_rt,
+            media_settings: engine.media_settings.clone(),
         };
         // 초기화(리샘플러/인코더)는 여기서 해서 실패를 호출자에게 돌려준다(리뷰 M10).
         let worker = Worker::new(params)?;
@@ -278,16 +285,24 @@ impl Engine {
     /// 피어 추가(같은 peerId면 교체). 미디어 상태(지터 버퍼 할당)는 여기, 커맨드 스레드에서 만든다(설계 1.4절).
     pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor) -> Result<(), String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
+        self.media_port.reclaim();
         let key = PeerKey::from_raw(self.next_key.fetch_add(1, Ordering::Relaxed));
-        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc, self.media_settings.current()));
+        let settings = self.media_settings.current();
+        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc, settings));
         // 등록부 락 안에서 믹스 설정 복사 → net 교체 → 등록부 교체: 겹친 set_peer_gain은 옛 것에 쓰여 복사로 넘어가거나
         // 새 것에 쓰인다(설계 7.3절). 복사는 net에 넣기 전에 해서 워커가 새 항목을 기본 게인으로 보는 순간이 없다.
         let mut reg = self.media.lock();
         if let Some(old) = reg.iter().find(|m| m.peer_id == peer_id) {
             media.inherit_mix(old);
         }
+        // 명령 두 칸(추가 + 교체면 옛 것 제거)을 net에 넣기 전에 확보한다: 넣은 뒤 실패해 되돌릴 일이 없게(설계 4절).
+        // 확보 못 하면 워커가 멈춘 것이다(용량 16, 워커가 반복마다 비운다).
+        let mut cmd = self.media_port.reserve_cmd(2)?;
         let replaced = net.add_peer(peer_id, desc, media.clone())?;
+        // 순서: 새 것 추가 → 옛 것 제거(설계 1.4절). 생산자가 이 락 하나로 직렬화되고 큐가 FIFO라 뒤바뀌지 않는다.
+        let _ = cmd.try_push(MediaCmd::Add(PeerMedia::new(media.clone(), settings.profile)));
         if let Some(old_key) = replaced {
+            let _ = cmd.try_push(MediaCmd::Remove(old_key));
             reg.retain(|m| m.key != old_key);
         }
         reg.push(media);
@@ -314,8 +329,11 @@ impl Engine {
 
     pub fn remove_peer(&self, peer_id: &str) -> Result<(), String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
+        self.media_port.reclaim();
         let mut reg = self.media.lock();
+        let mut cmd = self.media_port.reserve_cmd(1)?;
         if let Some(key) = net.remove_peer(peer_id) {
+            let _ = cmd.try_push(MediaCmd::Remove(key));
             reg.retain(|m| m.key != key);
         }
         Ok(())
@@ -337,11 +355,9 @@ impl Engine {
             return Err(format!("jitterProfile은 0..1 범위여야 합니다: {profile}"));
         }
         self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
-        // 지금 있는 피어 모두와 이후 추가될 피어(P1-5).
+        // 지금 있는 피어 모두와 이후 추가될 피어(P1-5): 워커가 반복마다 이 값을 피어별 마지막 적용값과 비교해 적용한다
+        // (③-a2). 추가와 겹쳐도 다음 반복에 맞춰진다.
         self.media_settings.set_profile(profile);
-        for m in self.media.lock().iter() {
-            m.set_profile(profile);
-        }
         Ok(())
     }
 
@@ -536,6 +552,8 @@ impl Engine {
         if let Some(mut n) = self.net.take() {
             n.stop();
         }
+        // 워커가 끝났으므로 반환 큐에 남은 것과 등록부를 여기(제어 평면)에서 해제한다.
+        self.media_port.reclaim();
         self.media.lock().clear();
         self.audio_stop.store(true, Ordering::SeqCst);
         if let Some(a) = self.audio.take() {

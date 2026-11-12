@@ -1,14 +1,18 @@
 //! 피어 미디어 상태(엔진 ③, `docs/overhaul/engine-stage3-design.md` 1.2절).
 //!
 //! 제어 평면(엔진 등록부)·워커·net이 `Arc<PeerMediaShared>`를 나눈다.
-//! ③-a1 단계: 통계와 손실 보고는 워커가 발행한 스냅샷(seqlock·원자값)으로만 읽는다. 지터 버퍼는 아직 `Mutex` 안에
-//! 있다(net 수신 스레드가 삽입, 워커가 소비, 프로필·재시작 명령이 잡음). ③-a2(명령 원자값)·③-a3(워커 단독 소유
-//! `PeerMedia` + 수신 큐)에서 남은 락 접근자가 없어진다.
+//! - 통계와 손실 보고는 워커가 발행한 스냅샷(seqlock·원자값)으로만 읽는다(③-a1).
+//! - 명령(③-a2): 프로필은 `MediaSettings.profile` 원자값, 재시작은 세대 카운터, 추가·제거는 SPSC 명령 큐
+//!   (`MediaPort` → 워커의 `MediaPortRt`, 용량 16)로 워커 쪽 항목 `PeerMedia`를 넘긴다. 응답은 없고, 제거된 항목은
+//!   반환 큐로 제어 평면에 돌아와 거기서 해제된다.
+//! - 지터 버퍼는 아직 `Mutex` 안에 있다(net 수신 스레드가 삽입, 워커가 소비). ③-a3에서 `PeerMedia`로 들어가 락이 없어진다.
 
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard};
+use ringbuf::traits::{Consumer, Observer, Producer, Split};
+use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use super::jitter::{JitterBuffer, JitterSettings, JitterStats};
 use super::mixer::PeerMixCtl;
@@ -174,6 +178,8 @@ pub struct PeerMediaShared {
     stats: MediaStatsCell,
     /// 워커가 발행하는 손실 보고(net이 Ping에 싣는다). net은 `Peer`에 이 셀의 `Arc`만 쥔다.
     loss: Arc<LossCell>,
+    /// 재시작 요청 세대: 제어가 +1, 워커가 마지막으로 본 값과 비교한다(여러 요청은 한 번으로 합쳐져도 결과가 같다).
+    restart_req: AtomicU32,
     jitter: Mutex<JitterBuffer>,
 }
 
@@ -187,6 +193,7 @@ impl PeerMediaShared {
             mix: PeerMixCtl::default(),
             stats: MediaStatsCell::default(),
             loss: Arc::new(LossCell::default()),
+            restart_req: AtomicU32::new(0),
             jitter: Mutex::new(JitterBuffer::new(settings)),
         }
     }
@@ -213,18 +220,9 @@ impl PeerMediaShared {
         &self.loss
     }
 
-    /// 처음부터 다시 채운다(에코 측정 시작·끝에서 스트림이 바뀔 때).
-    pub fn restart(&self) {
-        self.jitter.lock().restart();
-    }
-
-    pub fn set_profile(&self, profile: f32) {
-        self.jitter.lock().set_profile(profile);
-    }
-
-    /// 워커의 `service` 경로.
-    pub(crate) fn lock_jitter(&self) -> MutexGuard<'_, JitterBuffer> {
-        self.jitter.lock()
+    /// 지터 버퍼를 처음부터 다시 채우라고 요청한다(에코 측정 시작·끝에서 스트림이 바뀔 때). 워커가 다음 반복에 적용한다.
+    pub fn request_restart(&self) {
+        self.restart_req.fetch_add(1, Ordering::Release);
     }
 
     /// 워커 반복의 뒷부분: 통계 스냅샷과 손실 보고를 발행한다(워커만 부른다, `service` 직후).
@@ -233,6 +231,120 @@ impl PeerMediaShared {
         let playing = jb.is_playing();
         self.stats.write(&MediaStats { playing, js, rx_dropped: 0 });
         self.loss.set(playing.then_some((js.loss_pct, js.conceal_pct)));
+    }
+}
+
+/// 워커가 혼자 가지는 피어 미디어 항목(③-a2: 명령 적용 상태. ③-a3에서 지터 버퍼·수신 큐 소비자가 들어온다).
+/// 제어 평면 스레드에서 만들어 명령 큐로 넘기고, 제거되면 반환 큐로 돌아와 제어 평면에서 해제된다.
+pub struct PeerMedia {
+    pub shared: Arc<PeerMediaShared>,
+    restart_seen: u32,
+    /// 이 지터 버퍼에 마지막으로 적용한 프로필(비트).
+    profile_applied: u32,
+}
+
+impl PeerMedia {
+    /// `profile`: 지터 버퍼를 만들 때 쓴 프로필(`MediaSettings::current`).
+    pub fn new(shared: Arc<PeerMediaShared>, profile: f32) -> Self {
+        let restart_seen = shared.restart_req.load(Ordering::Acquire);
+        Self { shared, restart_seen, profile_applied: profile.to_bits() }
+    }
+
+    /// 워커 반복의 앞부분(그 피어의 `service` 직전): 지터 버퍼를 잡고 재시작 → 프로필 순으로 요청을 적용한다(설계 4절).
+    /// `profile`은 이번 반복에 읽은 `MediaSettings.profile`. 마지막 적용값과 같으면 아무것도 하지 않는다.
+    /// ③-a3에서 맨 앞에 수신 큐 비우기가 들어오고 락이 없어진다.
+    pub(crate) fn ingest(&mut self, profile: f32) -> (&PeerMediaShared, MutexGuard<'_, JitterBuffer>) {
+        let mut jb = self.shared.jitter.lock();
+        let req = self.shared.restart_req.load(Ordering::Acquire);
+        if req != self.restart_seen {
+            self.restart_seen = req;
+            jb.restart();
+        }
+        if profile.to_bits() != self.profile_applied {
+            self.profile_applied = profile.to_bits();
+            jb.set_profile(profile);
+        }
+        (&self.shared, jb)
+    }
+}
+
+/// 워커 명령(소유권이 넘어가는 것만. 값은 원자값으로, 설계 4절).
+pub enum MediaCmd {
+    Add(PeerMedia),
+    Remove(PeerKey),
+}
+
+/// 명령 큐 용량. 워커가 반복(≤ 약 1ms)마다 비우므로 차는 것은 워커가 멈췄을 때뿐이다.
+pub const MEDIA_CMD_CAPACITY: usize = 16;
+
+/// 제어 평면 쪽 끝: 명령 생산자(커맨드 스레드가 여럿이라 Mutex, 제어 평면끼리만 다툰다)와 반환 큐 소비자.
+pub struct MediaPort {
+    cmd: Mutex<HeapProd<MediaCmd>>,
+    ret: Mutex<HeapCons<PeerMedia>>,
+}
+
+/// 워커 쪽 끝.
+pub struct MediaPortRt {
+    cmd: HeapCons<MediaCmd>,
+    ret: HeapProd<PeerMedia>,
+}
+
+/// 명령·반환 링을 여기서 사전할당한다.
+pub fn media_port() -> (MediaPort, MediaPortRt) {
+    let (cp, cc) = HeapRb::<MediaCmd>::new(MEDIA_CMD_CAPACITY).split();
+    let (rp, rc) = HeapRb::<PeerMedia>::new(MEDIA_CMD_CAPACITY).split();
+    (MediaPort { cmd: Mutex::new(cp), ret: Mutex::new(rc) }, MediaPortRt { cmd: cc, ret: rp })
+}
+
+/// 명령 큐에 빈칸이 생기기를 기다리는 상한. 워커는 반복(≤ 약 1ms)마다 비우므로, 이만큼 차 있으면 워커가 멈춘 것이다.
+pub const MEDIA_CMD_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+impl MediaPort {
+    /// 명령 큐 생산자를 잡는다. 여러 명령을 한 번에 넣을 때는 빈칸(`vacant_len`)을 먼저 확인한다.
+    pub fn lock_cmd(&self) -> MutexGuard<'_, HeapProd<MediaCmd>> {
+        self.cmd.lock()
+    }
+
+    /// 빈칸이 `n`개 이상인 생산자. 커맨드가 몰려(한 워커 반복 안에 16개 넘게) 차 있으면 워커가 비울 때까지
+    /// `MEDIA_CMD_WAIT`까지 기다린다(제어 평면 스레드라 잠깐 자도 된다). 그래도 차 있으면 워커가 멈춘 것 → 에러.
+    pub fn reserve_cmd(&self, n: usize) -> Result<MutexGuard<'_, HeapProd<MediaCmd>>, String> {
+        let t0 = std::time::Instant::now();
+        let cmd = self.cmd.lock();
+        if cmd.vacant_len() >= n {
+            return Ok(cmd);
+        }
+        let mut cmd = cmd;
+        while t0.elapsed() < MEDIA_CMD_WAIT {
+            MutexGuard::unlocked(&mut cmd, || std::thread::sleep(std::time::Duration::from_millis(1)));
+            if cmd.vacant_len() >= n {
+                return Ok(cmd);
+            }
+        }
+        Err("오디오 워커가 응답하지 않습니다(미디어 명령 큐가 가득 참)".into())
+    }
+
+    /// 워커가 돌려보낸 항목을 비운다(해제는 여기, 제어 평면 스레드에서).
+    pub fn reclaim(&self) {
+        let mut ret = self.ret.lock();
+        while ret.try_pop().is_some() {}
+    }
+}
+
+impl MediaPortRt {
+    /// 워커 반복 맨 앞: 명령을 끝까지 비워 표에 반영한다. `table`은 용량을 미리 잡아 둔 `Vec`이다.
+    /// 제거한 항목은 반환 큐로 보낸다(가득 차 있으면 그 자리에서 해제 — 드문 경로). 모르는 키의 제거는 무시한다.
+    pub fn drain(&mut self, table: &mut Vec<PeerMedia>) {
+        while let Some(cmd) = self.cmd.try_pop() {
+            match cmd {
+                MediaCmd::Add(m) => table.push(m),
+                MediaCmd::Remove(key) => {
+                    if let Some(i) = table.iter().position(|m| m.shared.key == key) {
+                        let m = table.remove(i);
+                        let _ = self.ret.try_push(m);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -254,6 +366,11 @@ impl MediaSettings {
 
     pub fn set_profile(&self, profile: f32) {
         self.profile.store(profile);
+    }
+
+    /// 워커가 반복마다 읽는 지금 프로필.
+    pub fn profile(&self) -> f32 {
+        self.profile.load()
     }
 }
 
@@ -376,5 +493,66 @@ mod tests {
         for r in readers {
             assert!(r.join().unwrap() > 0, "읽기가 한 번도 성공하지 못했다");
         }
+    }
+
+    fn shared(key: u64, profile: f32) -> Arc<PeerMediaShared> {
+        Arc::new(PeerMediaShared::new(PeerKey::from_raw(key), format!("p{key}"), key as u32, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile }))
+    }
+
+    /// 재시작 요청은 세대가 바뀐 반복에 한 번만 적용되고, 여러 요청은 한 번으로 합쳐진다.
+    #[test]
+    fn ingest_applies_restart_once_per_generation() {
+        let mut pm = PeerMedia::new(shared(1, 0.5), 0.5);
+        assert_eq!(pm.restart_seen, 0);
+        pm.shared.request_restart();
+        pm.shared.request_restart();
+        drop(pm.ingest(0.5));
+        assert_eq!(pm.restart_seen, 2);
+        drop(pm.ingest(0.5));
+        assert_eq!(pm.restart_seen, 2);
+    }
+
+    /// 프로필 ↔ 추가 경합(#115 리뷰 L4): 옛 프로필로 만든 피어도 워커의 다음 반복에서 지금 프로필로 맞춰진다.
+    #[test]
+    fn ingest_catches_up_profile_set_before_the_peer_reached_the_worker() {
+        let mut pm = PeerMedia::new(shared(2, 0.2), 0.2);
+        let (_, jb) = pm.ingest(0.9);
+        assert_eq!(jb.tuning(), crate::engine::jitter::JitterTuning::from_profile(0.9));
+        drop(jb);
+        let (_, jb) = pm.ingest(0.1);
+        assert_eq!(jb.tuning(), crate::engine::jitter::JitterTuning::from_profile(0.1));
+    }
+
+    /// 추가 → 제거: 표에서 빠진 항목은 반환 큐로 가서 제어 평면에서 해제된다. 모르는 키의 제거는 무시한다.
+    #[test]
+    fn media_port_moves_ownership_and_returns_removed() {
+        let (port, mut rt) = media_port();
+        let mut table = Vec::with_capacity(MEDIA_CMD_CAPACITY);
+        let (a, b) = (shared(10, 0.5), shared(11, 0.5));
+        {
+            let mut cmd = port.lock_cmd();
+            assert!(cmd.try_push(MediaCmd::Add(PeerMedia::new(a.clone(), 0.5))).is_ok());
+            assert!(cmd.try_push(MediaCmd::Add(PeerMedia::new(b.clone(), 0.5))).is_ok());
+            assert!(cmd.try_push(MediaCmd::Remove(PeerKey::from_raw(99))).is_ok());
+            assert!(cmd.try_push(MediaCmd::Remove(a.key)).is_ok());
+        }
+        rt.drain(&mut table);
+        assert_eq!(table.iter().map(|m| m.shared.key).collect::<Vec<_>>(), vec![b.key]);
+        // 반환 큐에 있는 동안은 워커가 놓은 참조가 남아 있다(엔진 등록부 a, 반환 큐의 PeerMedia)
+        assert_eq!(Arc::strong_count(&a), 2);
+        port.reclaim();
+        assert_eq!(Arc::strong_count(&a), 1, "해제는 제어 평면의 reclaim에서");
+    }
+
+    /// 명령 큐는 용량에서 막힌다(엔진은 넣기 전에 빈칸을 확인한다).
+    #[test]
+    fn media_cmd_queue_is_bounded() {
+        let (port, _rt) = media_port();
+        let mut cmd = port.lock_cmd();
+        for i in 0..MEDIA_CMD_CAPACITY {
+            assert!(cmd.try_push(MediaCmd::Remove(PeerKey::from_raw(i as u64 + 1))).is_ok());
+        }
+        assert_eq!(cmd.vacant_len(), 0);
+        assert!(cmd.try_push(MediaCmd::Remove(PeerKey::from_raw(100))).is_err());
     }
 }

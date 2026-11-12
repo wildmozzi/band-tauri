@@ -81,7 +81,9 @@
 | 게인·팬·모니터·마스터 | 워커, 커맨드(`MixControls`) | RT 출력 | `AtomicF32` | RT는 읽기만 |
 | 레벨·xrun·재생 프레임·콜백 시작/끝·실행시간 | RT | 워커, 통계 | `AudioCounters` 원자값 | 워커는 콜백 시작=끝일 때만 링 점유량과 짝지음 |
 | 믹스 탭·녹음 샘플 | RT 출력 | `band-mix-tap`, `band-record` | SPSC 링 | 느리면 RT가 버리고 센다 |
-| **피어별 `Mutex<JitterBuffer>`**(`PeerMediaShared` 안) | net 수신(`insert`), 워커(`pop`·`end_burst`), 커맨드(`set_profile`), 에코 측정(`restart`) | — (③-a1부터 읽기는 아래 스냅샷으로) | `parking_lot::Mutex` | 접근자 4곳(③-a2에서 2곳, ③-a3에서 0). 락 안 할당·I/O 없음 |
+| **피어별 `Mutex<JitterBuffer>`**(`PeerMediaShared` 안) | net 수신(`insert`), 워커(`pop`·`end_burst`, 명령 적용 `restart`·`set_profile`) | — (③-a1부터 읽기는 아래 스냅샷으로) | `parking_lot::Mutex` | 접근자 2곳(③-a2), ③-a3에서 0. 기본 우선순위 스레드는 잡지 않는다 |
+| 피어 미디어 명령: 추가·제거(`MediaCmd`)와 반환 | 커맨드(`add/remove_peer`) / 워커(반환) | 워커 / 커맨드·통계(`reclaim`) | SPSC 링 용량 16(생산자는 `Mutex<HeapProd>`, 제어 평면끼리만) | 소유 이전(`PeerMedia`). 해제는 제어 평면에서(③-a2) |
+| 지터 프로필·재시작 요청 | 커맨드(`MediaSettings.profile`), 에코 측정(`restart_req` +1) | 워커(반복마다 비교) | `AtomicF32` / `AtomicU32` 세대 | 응답 없음(③-a2) |
 | 피어 미디어 통계 스냅샷(`MediaStatsCell`)·손실 보고(`LossCell`) | 워커(피어마다 `service` 직후) | 통계(`Engine::stats`·`peer_jitter_stats`), net 제어(Ping 손실 보고), 에코 측정(버퍼 깊이) | seqlock(버전 + 필드별 원자값) / `AtomicU64` 하나 | 쓰는 쪽은 워커 하나, 읽는 쪽은 락 없음(③-a1) |
 | `NetShared.peers` | 커맨드(`add/remove_peer`) | 워커(송신·공급마다), net 수신·제어, 통계 | `RwLock<Vec<Arc<Peer>>>` | 쓰기는 피어 변경 때만 |
 | `Peer.conn`·`echo`·`clock`·`remote_loss` | net 수신·제어 | 워커(자동 코덱: `sends_audio_via_relay`·`remote_loss`), 통계(`net_stats`), 메트로놈(`clock`) | 피어별 Mutex 4개 | ③-0부터 필드 private, 밖에서는 값 반환 메서드로만(가드 반환 접근자는 net 안) |
@@ -108,7 +110,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 워커는 은닉 마감(다음 출력 콜백 − 1.5ms)을, net 수신은 패킷 도착 시각 기록을 지켜야 한다. RT만큼 엄격하지 않지만 다음을 지킨다.
 
-1. **할당은 시작·재구성 때만**(버퍼는 `Worker::new`에서 사전할당). 반복 중 할당은 이벤트 드문 경로만 허용하고 목록으로 관리한다 — 현재: 메트로놈 계획이 바뀔 때 `clone`, 새 피어의 `AutoTx`(id `clone`), `Net::peers()`의 `Vec` 복제(측정·통계 경로). ②에서 워커 루프의 매 반복 경로에 할당이 없음을 유지한다.
+1. **할당은 시작·재구성 때만**(버퍼는 `Worker::new`에서 사전할당). 반복 중 할당은 이벤트 드문 경로만 허용하고 목록으로 관리한다 — 현재: 메트로놈 계획이 바뀔 때 `clone`, 새 피어의 `AutoTx`(id `clone`), `Net::peers()`의 `Vec` 복제(측정·통계 경로), 에코 측정 시작·끝의 지터 재시작(`JitterBuffer::restart`가 버퍼를 새로 만든다 — ③-a2부터 워커에서 적용, 측정당 2회). ②에서 워커 루프의 매 반복 경로에 할당이 없음을 유지한다.
 2. **락은 짧게**: 잡은 채 블로킹 I/O·로그·할당을 하지 않는다. 예외: 워커의 `send_to`(UDP, 논블로킹에 가까움, 송신 큐 지연으로 잰다).
 3. **우선순위 역전**: 워커·net 수신은 MMCSS로 올라가 있고 커맨드·`band-diag`는 기본 우선순위다. `parking_lot`은 우선순위 상속이 없으므로 기본 우선순위 스레드가 준RT와 같은 락을 잡을 때 그 안에서는 복사만 한다(`stats()` 스냅샷). 지터 락을 기본 우선순위 스레드가 잡는 경로(통계·프로필 변경)는 ③에서 원자 스냅샷·명령 큐로 바꾼다.
 4. 로그는 레이트 제한(1000회에 1번 등).
@@ -119,7 +121,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 |---|---|---|---|
 | 피어 게인·팬·뮤트 | `PeerMediaShared.mix`(`PeerMixCtl`, 엔진 등록부) | 원자값 → 워커가 소스 슬롯 원자값에 복사 | 즉시 |
 | 모니터·마스터·입력 뮤트 | `MixControls` | 원자값 | 즉시 |
-| 지터 프로필(0..1) | 엔진 `MediaSettings.profile`(③-b) + 피어별 `JitterBuffer` | `Engine::set_jitter_profile` → 등록부의 피어마다 `set_profile`(지터 락) | 즉시. ③-a2에서 워커가 원자값을 비교해 적용 |
+| 지터 프로필(0..1) | 엔진 `MediaSettings.profile`(원자값) | 워커가 반복마다 피어별 마지막 적용값과 비교해 `set_profile`(③-a2) | 다음 워커 반복. 추가와 겹쳐도 맞춰진다 |
 | 메트로놈 계획 | `MetronomeCtl.plan` | Mutex + 세대 번호 | 다음 워커 반복 |
 | 메트로놈 볼륨 | `ClickShared` | 원자값 | 즉시 |
 | 루프백 보정(숨은 출력 지연) | `manager.loopback_cal` → `MetronomeCtl.loopback_offset_ms` | Mutex | 즉시(같은 장치 구성일 때만) |

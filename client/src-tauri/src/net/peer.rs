@@ -839,11 +839,6 @@ impl Peer {
         self.media.key
     }
 
-    /// 피어 미디어 상태(③-b: 워커가 net 피어 표를 돌며 쓴다. ③-a2에서 워커 자체 표로 옮긴다).
-    pub(crate) fn media(&self) -> &Arc<PeerMediaShared> {
-        &self.media
-    }
-
     /// 수신 오디오를 미디어 쪽에 넘긴다. `recv_loop` 경로(`handle_packet`)에서만 부른다.
     pub(super) fn push_audio(&self, hdr: &super::packet::Header, payload: &[u8], arrival_us: u64) {
         self.media.insert(hdr, payload, arrival_us);

@@ -866,7 +866,7 @@ impl EchoJob {
             std::thread::sleep(Duration::from_millis(20));
         }
         *self.probe.lock() = None;
-        self.media.restart();
+        self.media.request_restart();
         res
     }
 
@@ -897,7 +897,7 @@ impl EchoJob {
         // 평소 소리를 듣는다(PR #13 L6). 동의 직후 잠깐은 내 실제 소리가 내게 되돌아오지만 나만 듣는다.
         *self.probe.lock() = Some(EchoProbe::new(self.peer_id.clone(), self.peer_ssrc));
         // 이제 상대가 보내는 것은 되돌아온 내 무음 스트림이다. 이전(상대 소리) 도착 분포를 버리고 다시 채운다.
-        self.media.restart();
+        self.media.request_restart();
         self.sleep(ECHO_SETTLE, cancel)?;
         if let Some(p) = self.probe.lock().as_mut() {
             p.start_clicks(runs);
