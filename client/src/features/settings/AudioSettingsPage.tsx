@@ -1,6 +1,6 @@
 import { AudioSettings } from './AudioSettings'
 import { DevServerSettingsSection } from './DevServerSettings'
-import { UpdateSettingsSection } from './UpdateNotice'
+import { UpdateSettingsSection } from './UpdateSettingsSection'
 
 export function AudioSettingsPage() {
   return (
