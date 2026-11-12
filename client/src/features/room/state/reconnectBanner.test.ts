@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { reconnectBannerKind, selectReconnectBanner } from './reconnectBanner'
+import { canReenter, reconnectBannerKind, selectReconnectBanner } from './reconnectBanner'
 import { IDLE_PERFORM, initialRoomState, RoomSessionStore } from './roomSessionStore'
 import type { SignalStatus } from './useSignaling'
 
@@ -16,14 +16,23 @@ describe('reconnectBannerKind', () => {
     ['error', null, 'none'],
     ['connected', null, 'none'],
     ['gave-up', null, 'none'],
+    ['replaced', null, 'none'],
     // 방 안
     ['connected', 'r1', 'none'],
     ['idle', 'r1', 'reconnecting'],
     ['connecting', 'r1', 'reconnecting'],
     ['error', 'r1', 'reconnecting'],
     ['gave-up', 'r1', 'gave-up'],
+    ['replaced', 'r1', 'replaced'],
   ])('%s, 방 %s → %s', (status, roomId, expected) => {
     expect(reconnectBannerKind({ signalStatus: status, currentRoomId: roomId })).toBe(expected)
+  })
+})
+
+describe('canReenter', () => {
+  it('스스로 다시 연결하지 않는 끊김(포기·밀려남)에서만 다시 입장할 수 있다', () => {
+    const all: SignalStatus[] = ['idle', 'connecting', 'connected', 'error', 'gave-up', 'replaced']
+    expect(all.filter(canReenter)).toEqual(['gave-up', 'replaced'])
   })
 })
 
@@ -32,6 +41,7 @@ describe('selectReconnectBanner', () => {
     expect(selectReconnectBanner(snap('connecting', 'r1', 'running'))).toEqual({ kind: 'reconnecting', audioLive: true })
     expect(selectReconnectBanner(snap('connecting', 'r1', 'idle'))).toEqual({ kind: 'reconnecting', audioLive: false })
     expect(selectReconnectBanner(snap('gave-up', 'r1', 'running'))).toEqual({ kind: 'gave-up', audioLive: false })
+    expect(selectReconnectBanner(snap('replaced', 'r1', 'running'))).toEqual({ kind: 'replaced', audioLive: false })
     expect(selectReconnectBanner(snap('connected', 'r1', 'running'))).toEqual({ kind: 'none', audioLive: false })
   })
 

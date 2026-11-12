@@ -29,8 +29,10 @@ export interface RoomActions {
   /** 거부된 입장(정원 초과 등)을 다시 시도 */
   retryJoin: () => void
   leaveRoom: () => void
-  /** 재연결 포기(gave-up) 뒤 새로고침 없이 시그널링을 다시 열고 같은 방에 새로 입장 */
+  /** 재연결 포기(gave-up)·다른 창에 밀려남(replaced) 뒤 새로고침 없이 시그널링을 다시 열고 같은 방에 새로 입장 */
   reenterRoom: () => void
+  /** 방 밖에서 시그널링 연결이 없으면 다시 연다 (방에 들어가려는데 끊겨 있을 때) */
+  ensureSignaling: () => void
 
   /** 엔진 시작 성공 후에만 악기를 설정하고 start-performing을 보낸다. 실패하면 false */
   startPerforming: (instrument: string) => Promise<boolean>
@@ -184,6 +186,7 @@ export function useRoomConnection() {
     submitRoomPassword: actions.submitRoomPassword,
     retryJoin: actions.retryJoin,
     leaveRoom: actions.leaveRoom,
+    ensureSignaling: actions.ensureSignaling,
   }
 }
 

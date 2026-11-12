@@ -60,7 +60,7 @@
   background: var(--gray-400-a15);
 }
 
-/* 시그널링 재연결 중·포기 (P1-15b) — 평상시에는 DOM에 없다 */
+/* 시그널링 재연결 중·포기·다른 창에 밀려남 (P1-15b) — 평상시에는 DOM에 없다 */
 .mini-player-signal {
   display: inline-flex;
   align-items: center;
@@ -77,6 +77,10 @@
 
 .mini-player-signal.gave-up {
   color: var(--red-400);
+}
+
+.mini-player-signal.replaced {
+  color: var(--gray-400);
 }
 
 .mini-player-signal-dot {

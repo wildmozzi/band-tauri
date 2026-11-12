@@ -38,6 +38,7 @@ import { appendChat, makeChatId } from './chatModel'
 import { initialPerformRequestState, performRequestReducer, type PerformRequestAction } from './performRequestState'
 import { RoomRuntimeContext, type RoomActions, type RoomRuntime } from './roomHooks'
 import { initialRoomState, RoomSessionStore, type RoomSnapshot } from './roomSessionStore'
+import { canReenter } from './reconnectBanner'
 import { reduceRoomSignal, type RoomEffect } from './signalReducer'
 import { useRecording, type RecordingSource } from './useRecording'
 import { useRoomSelector } from './useRoomSelector'
@@ -237,8 +238,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
     const leaveRoom = () => {
       const { send: sendMsg, session: s, viewer: v, mixer: m, recording: rec, restartSignaling: restart } = d()
-      // 재연결을 포기한 채 나가면 다음 입장을 위해 시그널링을 다시 연다 (P1-15b)
-      const gaveUp = conn().signalStatus === 'gave-up'
       sendMsg({ type: 'leave' })
       roomPasswordRef.current = null
       joinOnReadyRef.current = 'none'
@@ -259,7 +258,9 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         local: { ...st.local, localError: null },
         miniPlayer: { active: false },
       }))
-      if (gaveUp) restart()
+      // 연결이 없는 채(재연결 대기 중·포기·밀려남) 나가면 방 밖에서는 아무도 다시 연결하지 않으므로 여기서 다시 연다.
+      // restart는 연결(시도)이 살아 있으면 아무것도 하지 않는다 (P1-15b 리뷰 M-2)
+      restart()
     }
 
     const startPerforming = async (instrument: string): Promise<boolean> => {
@@ -344,14 +345,20 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         store.patch('connection', { joinFeedback: '룸 입장 시도 중...' })
       },
       leaveRoom,
+      /** 방 밖에서 시그널링 연결이 없으면 다시 연다 (연결(시도)이 살아 있으면 아무것도 하지 않는다) */
+      ensureSignaling: () => {
+        if (conn().currentRoomId) return
+        d().restartSignaling()
+      },
       /**
-       * 재연결 포기(gave-up) 뒤 같은 방에 새로 입장 (P1-15b). 서버 세션은 이미 정리됐고 엔진도 멈췄으므로
+       * 재연결 포기(gave-up)나 다른 창·기기에 밀려난(replaced) 뒤 같은 방에 새로 입장 (P1-15b).
+       * replaced에서 부르면 서버가 이번엔 다른 쪽 연결을 닫는다(확인은 화면이 받는다). 서버 세션은 이미 정리됐고 엔진도 멈췄으므로
        * 방 안 상태(참가자·요청)를 비우고 시그널링을 다시 열어, ready가 되면 일반 입장 join을 한 번 보낸다.
        * 방 id·비밀번호·방장 여부·채팅·믹서 설정은 그대로 둔다.
        */
       reenterRoom: () => {
         const c = conn()
-        if (!c.currentRoomId || c.signalStatus !== 'gave-up') return
+        if (!c.currentRoomId || !canReenter(c.signalStatus)) return
         const { viewer: v, restartSignaling: restart } = d()
         rejoiningRef.current = false
         clearBusyRetry()
@@ -508,7 +515,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
   onGaveUpRef.current = () => {
     // 재연결 예산(35초, 서버 세션 유예 30초 + 여유)을 넘겼다: 서버 쪽 세션은 이미 정리됐으므로 엔진도 멈춘다.
-    // 화면은 signalStatus='gave-up'을 보고 "연결이 끊겼습니다 — 다시 입장" 안내를 띄운다.
+    // 다른 창·기기에 밀려났을 때(replaced)도 같다: 서버 쪽 세션은 이미 정리됐다.
+    // 화면은 signalStatus='gave-up'/'replaced'를 보고 "다시 입장" 안내를 띄운다.
     broadcaster.stop()
     void session.stop({ notify: false })
   }

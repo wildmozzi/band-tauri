@@ -81,9 +81,11 @@ vi.mock('./hooks/useRoomDetailData', () => ({
 import { RoomDetail } from './RoomDetail'
 import { FloatingMiniPlayer } from './components/FloatingMiniPlayer'
 import { RoomProvider } from './state/RoomProvider'
+import { DUPLICATE_CONNECTION_CLOSE_REASON } from './state/reconnectPolicy'
 
 const RECONNECTING = '서버 연결이 끊겨 다시 연결하는 중…'
 const GAVE_UP = '서버 연결이 끊겼습니다'
+const REPLACED = '다른 창이나 기기에서 이 합주실에 들어와 여기 연결은 종료됐습니다'
 
 const last = () => FakeWebSocket.last()
 const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms))
@@ -224,10 +226,72 @@ describe('재연결 UX (P1-15b)', () => {
     await failUntilGaveUpMini()
     expect(mini()!.textContent).toContain('연결 끊김')
 
+    // 툴팁은 누르면 일어나는 일(합주실로 돌아가기)을 말한다. 다시 입장은 띠에서 한다
+    expect(document.querySelector('.mini-player-signal')!.getAttribute('title')).toContain('눌러서 합주실로 돌아가기')
+    expect(document.querySelector('.mini-player-signal')!.getAttribute('title')).not.toContain('다시 입장')
+
     fireEvent.click(mini()!)
     expect(title()).toBeTruthy()
     expect(screen.getByText(GAVE_UP)).toBeTruthy()
     expect(screen.getByRole('button', { name: '다시 입장' })).toBeTruthy()
+  })
+
+  it('다른 창·기기에 밀려나면 원인을 알리고, "여기서 다시 입장"은 확인 한 번 뒤에만 입장한다 (리뷰 M-1)', async () => {
+    act(() => last().serverClose(1000, DUPLICATE_CONNECTION_CLOSE_REASON))
+    expect(screen.getByRole('alert').textContent).toContain(REPLACED)
+    expect(screen.queryByText(GAVE_UP)).toBeNull()
+    expect(title()).toBeTruthy()
+    const n = FakeWebSocket.instances.length
+    await advance(10_000)
+    expect(FakeWebSocket.instances.length).toBe(n) // 자동 재연결 없음 (상대를 밀어내지 않는다)
+
+    // 첫 클릭은 확인만 묻는다 — 취소하면 원래 안내로
+    fireEvent.click(screen.getByRole('button', { name: '여기서 다시 입장' }))
+    expect(FakeWebSocket.instances.length).toBe(n)
+    expect(screen.getByText('다른 창이나 기기의 연결은 종료됩니다', { exact: false })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '취소' }))
+    expect(screen.getByText(REPLACED)).toBeTruthy()
+    expect(FakeWebSocket.instances.length).toBe(n)
+
+    // 확인하면 새 연결 → 일반 입장 join 1회
+    const sentBefore = FakeWebSocket.allSent().length
+    fireEvent.click(screen.getByRole('button', { name: '여기서 다시 입장' }))
+    fireEvent.click(screen.getByRole('button', { name: '확인' }))
+    expect(FakeWebSocket.instances.length).toBe(n + 1)
+    await accept(last(), 'c5')
+    const joins = joinsSince(sentBefore)
+    expect(joins).toHaveLength(1)
+    expect(joins[0].isRejoin).toBeUndefined()
+    expect(screen.queryByText(REPLACED)).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('미니 플레이어에 밀려남을 표시한다', async () => {
+    act(() => navigate('/elsewhere'))
+    act(() => last().serverClose(1000, DUPLICATE_CONNECTION_CLOSE_REASON))
+    const signal = document.querySelector('.mini-player-signal.replaced')!
+    expect(signal.textContent).toContain('다른 곳에서 입장')
+    expect(signal.getAttribute('title')).toContain('눌러서 합주실로 돌아가기')
+  })
+
+  it('재연결 중 미니 플레이어에서 방을 나가고 다른 방에 들어가면 새로고침 없이 입장한다 (리뷰 M-2)', async () => {
+    act(() => navigate('/elsewhere'))
+    act(() => last().fail())
+    expect(document.querySelector('.mini-player-signal.reconnecting')).not.toBeNull()
+    const n = FakeWebSocket.instances.length
+    fireEvent.click(screen.getByTitle('합주실 나가기'))
+    expect(document.querySelector('.floating-mini-player')).toBeNull()
+    expect(FakeWebSocket.instances.length).toBe(n + 1) // 백오프를 기다리지 않고 바로 다시 연다
+
+    const sentBefore = FakeWebSocket.allSent().length
+    act(() => navigate('/rooms/r2'))
+    await accept(last(), 'c7')
+    const joins = joinsSince(sentBefore)
+    expect(joins).toHaveLength(1)
+    expect(joins[0]).toMatchObject({ roomId: 'r2' })
+    expect(screen.queryByText('시그널링 서버에 연결 중입니다', { exact: false })).toBeNull()
+    expect(title()).toBeTruthy()
+    expect(screen.queryByRole('status')).toBeNull()
   })
 })
 

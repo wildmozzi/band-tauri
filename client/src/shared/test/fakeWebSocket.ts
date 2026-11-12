@@ -31,7 +31,7 @@ export class FakeWebSocket {
   sent: Sent[] = []
   closedWith: number | null = null
   onopen: (() => void) | null = null
-  onclose: ((e: { code: number }) => void) | null = null
+  onclose: ((e: { code: number; reason?: string }) => void) | null = null
   onerror: (() => void) | null = null
   onmessage: ((e: { data: string }) => void) | null = null
   constructor(public url: string) {
@@ -63,10 +63,10 @@ export class FakeWebSocket {
     this.onerror?.()
     this.onclose?.({ code: 1006 })
   }
-  /** 서버가 이 코드로 닫음 */
-  serverClose(code: number) {
+  /** 서버가 이 코드(와 사유)로 닫음 */
+  serverClose(code: number, reason?: string) {
     this.readyState = FakeWebSocket.CLOSED
-    this.onclose?.({ code })
+    this.onclose?.({ code, reason })
   }
   recv(msg: Record<string, unknown>) {
     this.onmessage?.({ data: JSON.stringify(msg) })

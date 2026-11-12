@@ -290,6 +290,8 @@ function replaceDuplicateConnections(ctx: Ctx<MembershipSvc>, roomId: string): b
       existing.member.roomId = undefined // close 핸들러에서 중복 퇴장 처리 방지
       svc.resume.drop(existing)
       removeClient(existingId)
+      // 사유 문자열은 클라이언트와의 계약: client/src/features/room/state/reconnectPolicy.ts DUPLICATE_CONNECTION_CLOSE_REASON
+      // (클라이언트는 이 사유를 보고 "다른 창·기기에서 입장" 안내를 띄우며 자동 재연결하지 않는다). 바꿀 때는 양쪽을 함께 바꾼다
       existing.conn.ws.close(1000, 'Duplicate connection')
       replacedDuplicate = true
     }

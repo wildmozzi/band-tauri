@@ -158,7 +158,7 @@ client/src/
 | `useRoomRequests` | 연주 참여·악기 변경 요청 + 승인/거절/요청/취소 | 요청 |
 | `useRoomRecording` | 브라우저 녹음 상태·목록·시간 + 시작/정지/삭제 | 녹음 상태, 녹음 중 1초 |
 | `useMiniPlayer` | 미니 플레이어 모드 + 진입/복귀/종료 | 화면 이동 |
-| `useReconnectBanner` | 재연결 안내 띠 종류(`none`·`reconnecting`·`gave-up`, 순수 선택자 `selectReconnectBanner`)와 엔진 오디오 유지 여부 + 다시 입장 | 방 안에서 끊김·복구·포기 |
+| `useReconnectBanner` | 재연결 안내 띠 종류(`none`·`reconnecting`·`gave-up`·`replaced`, 순수 선택자 `selectReconnectBanner`)와 엔진 오디오 유지 여부 + 다시 입장 | 방 안에서 끊김·복구·포기 |
 
 `useRoom()`(전부 한 객체)은 없앤다 — 다시 생기면 전체 리렌더가 돌아온다.
 

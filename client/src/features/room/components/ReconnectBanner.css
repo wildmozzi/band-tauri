@@ -20,6 +20,11 @@
   background: var(--red-400-a20);
 }
 
+/* 다른 창·기기에서 입장해 밀려남: 오류가 아니므로 중립색 */
+.reconnect-banner.replaced {
+  background: var(--gray-400-a15);
+}
+
 .reconnect-banner-dot {
   width: 8px;
   height: 8px;
@@ -36,6 +41,10 @@
   background: var(--error);
 }
 
+.reconnect-banner.replaced .reconnect-banner-dot {
+  background: var(--gray-400);
+}
+
 .reconnect-banner-action {
   padding: 3px 12px;
   background: var(--accent-fill);
@@ -45,6 +54,12 @@
   font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
+}
+
+.reconnect-banner-action.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--color-text);
 }
 
 @keyframes reconnect-banner-pulse {

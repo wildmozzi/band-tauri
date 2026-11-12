@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { backoffDelay, isAbnormalClose, ReconnectBudget, RECONNECT_BUDGET_MS } from './reconnectPolicy'
+import {
+  backoffDelay, DUPLICATE_CONNECTION_CLOSE_REASON, isAbnormalClose, isReplacedClose, ReconnectBudget, RECONNECT_BUDGET_MS,
+} from './reconnectPolicy'
 
 /** 지터 0 (random 0.5 → 배율 1) */
 const noJitter = () => new ReconnectBudget({ random: () => 0.5 })
@@ -64,6 +66,25 @@ describe('reconnectPolicy', () => {
     drop(b, 0)
     expect(drop(b, 1000, 1006, false)).toEqual({ action: 'none' })
     expect(b.dropping).toBe(false)
+  })
+
+  it('방 안에서 중복 연결 사유의 정상 닫힘은 replaced (재연결하지 않음), 방 밖이면 none', () => {
+    const b = noJitter()
+    const reason = DUPLICATE_CONNECTION_CLOSE_REASON
+    expect(b.onClosed({ code: 1000, now: 0, inRoom: true, reason })).toEqual({ action: 'replaced' })
+    expect(b.dropping).toBe(false)
+    expect(b.onClosed({ code: 1000, now: 0, inRoom: false, reason })).toEqual({ action: 'none' })
+    // 다른 사유의 정상 닫힘은 그대로 none, 비정상 코드는 사유와 무관하게 재시도
+    expect(b.onClosed({ code: 1000, now: 0, inRoom: true, reason: 'bye' })).toEqual({ action: 'none' })
+    expect(b.onClosed({ code: 1006, now: 0, inRoom: true, reason }).action).toBe('retry')
+  })
+
+  it('중복 연결 사유는 서버 문자열과 같다 (server/src/signaling/membership.ts)', () => {
+    expect(DUPLICATE_CONNECTION_CLOSE_REASON).toBe('Duplicate connection')
+    expect(isReplacedClose(1000, 'Duplicate connection')).toBe(true)
+    expect(isReplacedClose(1005, 'Duplicate connection')).toBe(true)
+    expect(isReplacedClose(1008, 'Duplicate connection')).toBe(false)
+    expect(isReplacedClose(1000, undefined)).toBe(false)
   })
 
   it('수신 없음 자가 닫힘(4000)은 비정상', () => {

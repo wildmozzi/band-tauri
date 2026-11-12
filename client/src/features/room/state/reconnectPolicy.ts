@@ -26,11 +26,23 @@ export const PONG_TIMEOUT_MS = 5_000
 export const STALE_CLOSE_CODE = 4000
 
 /**
+ * 같은 사용자가 다른 창·기기로 같은 방에 들어와 서버가 이 연결을 밀어낼 때 쓰는 close reason.
+ * 서버 `server/src/signaling/membership.ts`의 `close(1000, 'Duplicate connection')`과 같은 값이어야 한다
+ * (서버 쪽 주석에 이 상수를 표시해 두었다).
+ */
+export const DUPLICATE_CONNECTION_CLOSE_REASON = 'Duplicate connection'
+
+/**
  * - retry: delayMs 뒤 다시 연결
  * - give-up: 예산을 다 썼다 (UI에 "연결이 끊겼습니다" 안내, 엔진 정지)
+ * - replaced: 방 안에서 다른 창·기기의 입장에 밀려났다. 다시 연결하면 상대를 밀어내므로 자동 재연결하지 않는다 (엔진 정지)
  * - none: 재연결이 필요 없는 닫힘 (정상 닫힘·방 밖)
  */
-export type ReconnectDecision = { action: 'retry'; delayMs: number } | { action: 'give-up' } | { action: 'none' }
+export type ReconnectDecision =
+  | { action: 'retry'; delayMs: number }
+  | { action: 'give-up' }
+  | { action: 'replaced' }
+  | { action: 'none' }
 
 export interface CloseInfo {
   /** WebSocket close 코드 */
@@ -39,11 +51,18 @@ export interface CloseInfo {
   now: number
   /** 방 안에 있는지 */
   inRoom: boolean
+  /** WebSocket close reason (중복 연결 판정용) */
+  reason?: string
 }
 
 /** 정상 닫힘(1000 정상, 1005 코드 없음)은 재연결하지 않는다. 4000(수신 없음 자가 닫힘) 등은 비정상 */
 export function isAbnormalClose(code: number): boolean {
   return code !== 1000 && code !== 1005
+}
+
+/** 다른 창·기기의 입장으로 밀려난 닫힘인지 (정상 닫힘 코드 + 서버의 중복 연결 사유) */
+export function isReplacedClose(code: number, reason: string | undefined): boolean {
+  return !isAbnormalClose(code) && reason === DUPLICATE_CONNECTION_CLOSE_REASON
 }
 
 /** n번째 재시도(0부터)의 기본 지연: 0.5, 1, 2, 4, 4 … 초 */
@@ -74,10 +93,10 @@ export class ReconnectBudget {
     this.random = opts.random ?? Math.random
   }
 
-  onClosed({ code, now, inRoom }: CloseInfo): ReconnectDecision {
+  onClosed({ code, now, inRoom, reason }: CloseInfo): ReconnectDecision {
     if (!inRoom || !isAbnormalClose(code)) {
       this.reset()
-      return { action: 'none' }
+      return inRoom && isReplacedClose(code, reason) ? { action: 'replaced' } : { action: 'none' }
     }
     if (this.firstDropAt === null) this.firstDropAt = now
     const elapsed = now - this.firstDropAt

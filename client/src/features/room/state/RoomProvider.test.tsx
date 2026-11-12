@@ -80,7 +80,7 @@ vi.mock('./useSignaling', async (importOriginal) => {
     useSignaling: (handlers: { onMessage: (p: SignalPayload) => void }) => {
       h.signaling.handlers = handlers
       const clientIdRef = useRef<string | null>('me')
-      return { clientIdRef, send: h.signaling.send, isOpen: () => true, authenticated: null }
+      return { clientIdRef, send: h.signaling.send, isOpen: () => true, authenticated: null, restart: () => {} }
     },
   }
 })
