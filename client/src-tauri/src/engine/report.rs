@@ -166,6 +166,8 @@ impl Engine {
             .as_ref()
             .map(|n| {
                 // 등록부 락을 먼저 잡고 net 피어 표를 읽는다: 추가·제거도 같은 순서로 잡으므로 두 표가 맞는 순간을 본다.
+                // 워커가 돌려보낸 제거 항목은 여기서도 해제한다(추가·제거가 한동안 없을 때, 설계 7.3절).
+                self.media_port.reclaim();
                 let reg = self.media.lock();
                 n.peers()
                     .iter()

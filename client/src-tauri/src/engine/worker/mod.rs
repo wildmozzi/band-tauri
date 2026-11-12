@@ -37,6 +37,7 @@ use super::rt::{SourceBank, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, 
 use super::stats::AudioCounters;
 use crate::net::types::PathKind;
 use crate::net::packet::{FLAG_OPUS, FLAG_STEREO};
+use super::peer_media::{MediaPortRt, MediaSettings, PeerMedia, MEDIA_CMD_CAPACITY};
 use crate::net::media_link::PeerKey;
 use crate::net::peer::Peer;
 use crate::net::{AutoPayload, NetShared, MAX_PEERS};
@@ -105,6 +106,10 @@ pub struct WorkerParams {
     pub metronome: Arc<MetronomeCtl>,
     /// 녹음 마커 큐(P2-4a): 녹음 중이면 피어별 은닉·버림을 출력 타임라인 위치로 넣는다.
     pub rec_marks: Arc<MarkSink>,
+    /// 피어 미디어 명령 큐의 워커 쪽 끝(추가·제거, 엔진 ③-a2).
+    pub media_port: MediaPortRt,
+    /// 지터 프로필(원자값, 워커가 반복마다 비교해 적용).
+    pub media_settings: Arc<MediaSettings>,
 }
 
 pub struct Worker {
@@ -140,6 +145,8 @@ pub struct Worker {
     tracker: CallbackTracker,
     local: LocalFifo,
     feeds: Vec<PeerFeed>,
+    /// 워커가 혼자 가지는 피어 미디어 표(명령 큐로만 바뀐다, 엔진 ③-a2). net 피어 표와 같은 순서.
+    media: Vec<PeerMedia>,
     in_tmp: Vec<f32>,
     /// 48k 입력 블록(리샘플 직후, 내부 채널).
     in48_buf: Vec<f32>,
@@ -286,6 +293,7 @@ impl Worker {
             tracker: CallbackTracker::new(p.info.out_rate),
             local: LocalFifo::new(),
             feeds: Vec::with_capacity(MAX_SOURCES),
+            media: Vec::with_capacity(MEDIA_CMD_CAPACITY),
             in_tmp: vec![0.0; 4096],
             in48_buf: vec![0.0; 2048 * ich],
             cap_acc: VecDeque::with_capacity((frame + 4096) * ich),
@@ -707,38 +715,38 @@ impl Worker {
     }
 
     /// 피어 목록과 소스 슬롯을 맞춘다(새 피어에 빈 슬롯 배정, 사라진 피어 슬롯 해제).
-    fn sync_peer_slots(&mut self, net: &NetShared) {
+    fn sync_peer_slots(&mut self) {
         for f in &mut self.feeds {
             f.seen = false;
         }
         let out_rate = self.p.info.out_rate;
-        net.for_each_peer(|peer| {
-            let key = peer.key();
+        for m in &self.media {
+            let key = m.shared.key;
             if let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) {
                 f.seen = true;
-                return;
+                continue;
             }
             let used = |s: usize| self.feeds.iter().any(|f| f.slot == s);
             let free = (1..MAX_SOURCES)
                 .find(|&s| !used(s) && self.p.bank.slots[s].state.load(Ordering::Acquire) == SLOT_FREE);
             let Some(slot) = free else {
                 if !self.slot_full_logged {
-                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", peer.id());
+                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", m.shared.peer_id);
                     self.slot_full_logged = true;
                 }
-                return;
+                continue;
             };
             let sh = &self.p.bank.slots[slot];
             match PeerFeed::new(slot, key, out_rate, sh) {
                 Ok(f) => {
                     sh.playing.store(false, Ordering::Relaxed);
-                    sh.occupant.store(peer.ssrc(), Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
+                    sh.occupant.store(m.shared.ssrc, Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
                     sh.state.store(SLOT_ACTIVE, Ordering::Release);
                     self.feeds.push(f);
                 }
                 Err(e) => log::error!("피어 출력 소스 생성 실패: {e}"),
             }
-        });
+        }
         let bank = &self.p.bank;
         self.feeds.retain(|f| {
             if !f.seen {
@@ -752,10 +760,10 @@ impl Worker {
 
     /// 반환: 은닉 마감이 가까운 피어가 있다(짧게 자야 함).
     fn service_peers(&mut self, t: &FeedTiming) -> bool {
-        let Some(net) = self.p.net.clone() else {
-            return false;
-        };
-        self.sync_peer_slots(&net);
+        // 반복 맨 앞: 추가·제거 명령을 끝까지 비운다(엔진 ③-a2). 프로필은 이번 반복에 한 번 읽는다.
+        self.p.media_port.drain(&mut self.media);
+        let profile = self.p.media_settings.profile();
+        self.sync_peer_slots();
         let counters = self.p.counters.clone();
         let cb_seq = t.cb_seq;
         let consistent = move || cb_seq.is_some_and(|s| counters.out_cb_begin.load(Ordering::SeqCst) == s);
@@ -766,23 +774,23 @@ impl Worker {
         let marks = self.p.rec_marks.clone();
         let marking = marks.active();
         let played = &self.p.counters.out_played_frames;
-        net.for_each_peer(|peer| {
-            let key = peer.key();
-            let media = peer.media();
+        for pm in &mut self.media {
+            // 그 피어의 `service` 직전: 재시작 → 프로필 요청 적용(엔진 ③-a2).
+            let (media, mut jb) = pm.ingest(profile);
+            let key = media.key;
             // 통계 스냅샷은 슬롯이 없어도 발행한다(삽입은 슬롯과 무관하게 계속된다, 엔진 ③-a1).
             let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) else {
-                media.publish(&media.lock_jitter());
-                return;
+                media.publish(&jb);
+                continue;
             };
             let sh = &self.p.bank.slots[f.slot];
             let g = media.mix.lr_gains();
             sh.set_gains(g, g);
             media.mix.level.store(sh.level.load());
             let Some(prod) = self.p.prods.get_mut(f.slot) else {
-                media.publish(&media.lock_jitter());
-                return;
+                media.publish(&jb);
+                continue;
             };
-            let mut jb = media.lock_jitter();
             let before = marking.then(|| jb.mark_counters());
             let ev = f.service(&mut jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == media.peer_id && p.peer_ssrc == media.ssrc));
             if let Some((c0, d0)) = before {
@@ -794,7 +802,7 @@ impl Worker {
                 let tail = played.load(Ordering::Relaxed) + f.dev_ahead(prod) as u64;
                 let mark = |kind, frames: u64, span: bool| {
                     let start = if span { tail.saturating_sub(frames) } else { tail };
-                    marks.push(MarkEvent { ssrc: peer.ssrc(), kind, start, frames });
+                    marks.push(MarkEvent { ssrc: media.ssrc, kind, start, frames });
                 };
                 if c1 > c0 {
                     mark(MarkKind::Conceal, to_dev((c1 - c0) * fs), true);
@@ -810,7 +818,7 @@ impl Worker {
             fills += u64::from(ev.deadline_fill);
             skipped += ev.skipped_frames;
             urgent |= ev.urgent;
-        });
+        }
         if fills > 0 {
             self.p.stats.deadline_fills.fetch_add(fills, Ordering::Relaxed);
         }

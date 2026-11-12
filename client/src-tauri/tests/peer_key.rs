@@ -310,3 +310,67 @@ fn removed_peer_ssrc_still_resolves() {
     assert_eq!(net.shared().peer_id_for_ssrc(ssrc).as_deref(), Some("carol"), "빠진 피어도 기록에서 찾는다");
     assert_eq!(net.shared().peer_id_for_ssrc(ssrc ^ 1), None);
 }
+
+/// 엔진 ③-a2: 추가·제거·교체·프로필 변경·통계 읽기가 여러 커맨드 스레드에서 겹쳐도 등록부·net·워커 표가 어긋나지 않는다.
+/// 끝나면 남은 피어는 alice뿐이고(등록부·`stats`·`peer_jitter_stats`가 같은 집합), alice 소리는 계속 흐른다
+/// (워커 표에 죽은 항목이 남아 슬롯을 잡거나, alice 항목이 사라지면 실패).
+#[test]
+fn add_remove_replace_profile_race_keeps_tables_consistent() {
+    let _g = RT_LOCK.lock();
+    let a = engine("alice", sine());
+    let b = Arc::new(engine("bob", FakeBackend::silence(48_000)));
+    b.add_peer("alice".into(), &desc_at(&a)).unwrap();
+    a.add_peer("bob".into(), &desc_at(&b)).unwrap();
+    assert!(wait_until(HANG, || state(&b, "alice") == Some(PeerStateKind::Connected)), "alice가 연결되지 않음");
+
+    let fakes: Arc<Vec<Fake>> = Arc::new((0..3).map(|i| Fake::new(0x9000 + i)).collect());
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut threads = Vec::new();
+    // 추가·제거 반복(x0, x1)
+    for i in 0..2 {
+        let (b, fakes, stop) = (b.clone(), fakes.clone(), stop.clone());
+        threads.push(std::thread::spawn(move || {
+            let id = format!("x{i}");
+            while !stop.load(Ordering::Relaxed) {
+                b.add_peer(id.clone(), &fakes[i].desc()).unwrap();
+                b.remove_peer(&id).unwrap();
+            }
+        }));
+    }
+    // 같은 id 교체 반복(x2)
+    {
+        let (b, fakes, stop) = (b.clone(), fakes.clone(), stop.clone());
+        threads.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                b.add_peer("x2".into(), &fakes[2].desc()).unwrap();
+            }
+        }));
+    }
+    // 프로필 변경 + 통계 읽기
+    {
+        let (b, stop) = (b.clone(), stop.clone());
+        threads.push(std::thread::spawn(move || {
+            let mut p = 0.2f32;
+            while !stop.load(Ordering::Relaxed) {
+                b.set_jitter_profile(p).unwrap();
+                p = if p < 0.5 { 0.8 } else { 0.2 };
+                let _ = b.stats();
+                let _ = b.peer_jitter_stats();
+            }
+        }));
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    stop.store(true, Ordering::Relaxed);
+    for t in threads {
+        t.join().unwrap();
+    }
+    b.remove_peer("x2").unwrap();
+
+    let mut ids: Vec<String> = b.peer_jitter_stats().into_iter().map(|(id, _)| id).collect();
+    ids.sort();
+    assert_eq!(ids, vec!["alice".to_string()], "등록부에 남은 피어");
+    let net_ids: Vec<String> = b.stats().peers.into_iter().map(|p| p.peer_id).collect();
+    assert_eq!(net_ids, vec!["alice".to_string()], "net 피어 표와 등록부가 맞아야 한다");
+    let f0 = real_frames(&b, "alice");
+    assert!(wait_until(HANG, || real_frames(&b, "alice") >= f0 + 200), "경합 뒤 alice 오디오가 흐르지 않음");
+}
