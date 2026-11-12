@@ -844,6 +844,8 @@ pub struct EchoJob {
     pub net: Arc<NetShared>,
     pub peer_id: String,
     pub peer_ssrc: u32,
+    /// 측정 대상 피어의 미디어 상태(지터 재시작·버퍼 깊이 수집, 엔진 ③).
+    pub media: Arc<crate::engine::peer_media::PeerMediaShared>,
     pub frame_ms: f32,
     pub local_latency_ms: f32,
     pub input_buffer_ms: f32,
@@ -864,7 +866,7 @@ impl EchoJob {
             std::thread::sleep(Duration::from_millis(20));
         }
         *self.probe.lock() = None;
-        let _ = self.net.restart_jitter(&self.peer_id);
+        self.media.restart();
         res
     }
 
@@ -895,7 +897,7 @@ impl EchoJob {
         // 평소 소리를 듣는다(PR #13 L6). 동의 직후 잠깐은 내 실제 소리가 내게 되돌아오지만 나만 듣는다.
         *self.probe.lock() = Some(EchoProbe::new(self.peer_id.clone(), self.peer_ssrc));
         // 이제 상대가 보내는 것은 되돌아온 내 무음 스트림이다. 이전(상대 소리) 도착 분포를 버리고 다시 채운다.
-        self.net.restart_jitter(&self.peer_id)?;
+        self.media.restart();
         self.sleep(ECHO_SETTLE, cancel)?;
         if let Some(p) = self.probe.lock().as_mut() {
             p.start_clicks(runs);
@@ -905,7 +907,7 @@ impl EchoJob {
         let mut jitter_ms = Vec::new();
         while t1.elapsed() < listen {
             self.sleep(Duration::from_millis(100), cancel)?;
-            if let Some(b) = self.net.peer_buffer_ms(&self.peer_id) {
+            if let Some(b) = self.media.playing_buffer_ms() {
                 jitter_ms.push(b as f64);
             }
             if !self.net.remote_echo(&self.peer_id)?.0 {

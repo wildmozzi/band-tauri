@@ -15,6 +15,7 @@ mod sim;
 pub mod measure;
 pub mod metronome;
 pub mod mixer;
+pub mod peer_media;
 pub mod record;
 pub mod relay_codec;
 pub mod report;
@@ -27,7 +28,7 @@ pub mod wasapi;
 pub mod wav;
 pub mod worker;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -37,6 +38,7 @@ use parking_lot::Mutex;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
 
+use crate::net::media_link::PeerKey;
 use crate::net::peer::LocalDescriptor;
 use crate::net::{Net, NetOptions};
 use crate::sys::prio;
@@ -45,6 +47,7 @@ use device::{AudioBackend, StreamInfo};
 use jitter::JitterSettings;
 use measure::{EchoJob, EchoProbe, LoopbackJob};
 use mixer::{clamp_gain, MixControls};
+use peer_media::{MediaSettings, PeerMediaShared};
 use resample::StreamResampler;
 use rt::InputRt;
 use stats::AudioCounters;
@@ -91,6 +94,12 @@ pub struct Engine {
     cpu: Mutex<cpuprof::CpuSampler>,
     /// 합주 녹음(P2-4). 정지(파일 마무리)는 엔진 락 밖에서 할 수 있게 따로 잠근다.
     recorder: Arc<Mutex<record::Recorder>>,
+    /// 피어 미디어 등록부(엔진 ③). net 피어 표와 같은 peerId 집합·순서를 유지한다. 제어 평면 스레드만 잡는다.
+    media: Mutex<Vec<Arc<PeerMediaShared>>>,
+    /// `PeerKey` 발급 카운터(1부터, 단조 증가).
+    next_key: AtomicU64,
+    /// 새 피어의 지터 설정과 실행 중 프로필.
+    media_settings: Arc<MediaSettings>,
 }
 
 impl Engine {
@@ -192,6 +201,13 @@ impl Engine {
             epoch: Instant::now(),
             cpu: Mutex::new(cpuprof::CpuSampler::new(Instant::now(), crate::sys::cpu::tsc_now())),
             recorder: Arc::new(Mutex::new(record::Recorder::new(rec_ctl, info.out_rate))),
+            media: Mutex::new(Vec::new()),
+            next_key: AtomicU64::new(1),
+            media_settings: Arc::new(MediaSettings::new(JitterSettings {
+                min_ms: cfg.jitter_min_ms(),
+                max_ms: cfg.jitter_max_ms(),
+                profile: cfg.jitter_profile(),
+            })),
         };
         // 48kHz 클릭 파형을 장치 레이트로 읽는 보폭
         metronome.click.step.store(INTERNAL_RATE as f32 / info.out_rate.max(1) as f32);
@@ -207,8 +223,7 @@ impl Engine {
             if opts.cancel.is_none() {
                 opts.cancel = cancel.clone();
             }
-            let js = JitterSettings { min_ms: cfg.jitter_min_ms(), max_ms: cfg.jitter_max_ms(), profile: cfg.jitter_profile() };
-            engine.net = Some(Net::start(peer_id, &opts, js)?); // 실패 시 engine drop이 오디오 정리
+            engine.net = Some(Net::start(peer_id, &opts)?); // 실패 시 engine drop이 오디오 정리
         }
         if cancelled() {
             return Err("엔진 시작이 취소되었습니다".into());
@@ -260,8 +275,23 @@ impl Engine {
         self.net.is_some()
     }
 
+    /// 피어 추가(같은 peerId면 교체). 미디어 상태(지터 버퍼 할당)는 여기, 커맨드 스레드에서 만든다(설계 1.4절).
     pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor) -> Result<(), String> {
-        self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.add_peer(peer_id, desc)
+        let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
+        let key = PeerKey::from_raw(self.next_key.fetch_add(1, Ordering::Relaxed));
+        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc, self.media_settings.current()));
+        // 등록부 락 안에서 믹스 설정 복사 → net 교체 → 등록부 교체: 겹친 set_peer_gain은 옛 것에 쓰여 복사로 넘어가거나
+        // 새 것에 쓰인다(설계 7.3절). 복사는 net에 넣기 전에 해서 워커가 새 항목을 기본 게인으로 보는 순간이 없다.
+        let mut reg = self.media.lock();
+        if let Some(old) = reg.iter().find(|m| m.peer_id == peer_id) {
+            media.inherit_mix(old);
+        }
+        let replaced = net.add_peer(peer_id, desc, media.clone())?;
+        if let Some(old_key) = replaced {
+            reg.retain(|m| m.key != old_key);
+        }
+        reg.push(media);
+        Ok(())
     }
 
     /// 릴레이 설정/토큰 갱신/해제(설계 4절 `engine_set_relay`, relay-design.md).
@@ -284,16 +314,20 @@ impl Engine {
 
     pub fn remove_peer(&self, peer_id: &str) -> Result<(), String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
-        net.remove_peer(peer_id);
+        let mut reg = self.media.lock();
+        if let Some(key) = net.remove_peer(peer_id) {
+            reg.retain(|m| m.key != key);
+        }
         Ok(())
     }
 
     pub fn set_peer_gain(&self, peer_id: &str, gain: f32, muted: bool, pan: Option<f32>) -> Result<(), String> {
-        let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
-        let peer = net.peers().into_iter().find(|p| p.id() == peer_id).ok_or("알 수 없는 피어")?;
-        peer.mix().gain.store(clamp_gain(gain));
-        peer.mix().muted.store(muted, Ordering::Relaxed);
-        peer.mix().pan.store(mixer::clamp_pan(pan.unwrap_or(0.0)));
+        self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
+        let reg = self.media.lock();
+        let m = reg.iter().find(|m| m.peer_id == peer_id).ok_or("알 수 없는 피어")?;
+        m.mix.gain.store(clamp_gain(gain));
+        m.mix.muted.store(muted, Ordering::Relaxed);
+        m.mix.pan.store(mixer::clamp_pan(pan.unwrap_or(0.0)));
         Ok(())
     }
 
@@ -302,8 +336,12 @@ impl Engine {
         if !profile.is_finite() || !(0.0..=1.0).contains(&profile) {
             return Err(format!("jitterProfile은 0..1 범위여야 합니다: {profile}"));
         }
-        let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
-        net.set_jitter_profile(profile);
+        self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
+        // 지금 있는 피어 모두와 이후 추가될 피어(P1-5).
+        self.media_settings.set_profile(profile);
+        for m in self.media.lock().iter() {
+            m.set_profile(profile);
+        }
         Ok(())
     }
 
@@ -384,13 +422,14 @@ impl Engine {
     /// 에코 피어 측정 작업(측정하는 쪽, 설계 4절 `engine_measure_echo_peer`). 엔진 락 밖에서 `run`한다.
     pub fn echo_job(&self, peer_id: &str) -> Result<EchoJob, String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.shared().clone();
-        let peer_ssrc = net.peer_ssrc(peer_id)?;
+        let media = self.media.lock().iter().find(|m| m.peer_id == peer_id).cloned().ok_or("알 수 없는 피어")?;
         let (in_ms, out_ms) = self.buffer_ms();
         Ok(EchoJob {
             probe: self.probe.clone(),
             net,
             peer_id: peer_id.to_string(),
-            peer_ssrc,
+            peer_ssrc: media.ssrc,
+            media,
             frame_ms: self.cfg.frame_samples() as f32 * 1000.0 / INTERNAL_RATE as f32,
             local_latency_ms: self.stats().est_latency_ms,
             input_buffer_ms: in_ms,
@@ -497,6 +536,7 @@ impl Engine {
         if let Some(mut n) = self.net.take() {
             n.stop();
         }
+        self.media.lock().clear();
         self.audio_stop.store(true, Ordering::SeqCst);
         if let Some(a) = self.audio.take() {
             if a.join().is_err() {

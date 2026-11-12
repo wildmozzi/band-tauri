@@ -37,6 +37,7 @@ use super::rt::{SourceBank, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, 
 use super::stats::AudioCounters;
 use crate::net::types::PathKind;
 use crate::net::packet::{FLAG_OPUS, FLAG_STEREO};
+use crate::net::media_link::PeerKey;
 use crate::net::peer::Peer;
 use crate::net::{AutoPayload, NetShared, MAX_PEERS};
 
@@ -164,9 +165,9 @@ pub struct Worker {
     slot_full_logged: bool,
 }
 
-/// 피어 하나의 Opus 자동 전환 송신 상태(PCM16 설정, P1-4c·P1-4e). 키는 `PeerFeed`와 같은 (피어 주소, ssrc).
+/// 피어 하나의 Opus 자동 전환 송신 상태(PCM16 설정, P1-4c·P1-4e). 키는 `PeerFeed`와 같은 `PeerKey`.
 struct AutoTx {
-    key: (usize, u32),
+    key: PeerKey,
     /// 피어 id(에코 측정 클릭 스트림 대상인지 가릴 때, L2).
     id: String,
     enc: Encoder,
@@ -186,7 +187,7 @@ struct AutoTx {
 }
 
 impl AutoTx {
-    fn new(key: (usize, u32), id: String, mut enc: Encoder) -> Self {
+    fn new(key: PeerKey, id: String, mut enc: Encoder) -> Self {
         let _ = enc.set_loss_perc(DEFAULT_OPUS_LOSS_PERC);
         Self {
             key,
@@ -520,7 +521,7 @@ impl Worker {
         let (ich, bitrate) = (self.ich, self.p.cfg.opus_bitrate());
         let (auto, pool) = (&mut self.auto, &mut self.auto_pool);
         net.for_each_peer(|peer| {
-            let key = (peer as *const Peer as usize, peer.ssrc());
+            let key = peer.key();
             let idx = match auto.iter().position(|a| a.key == key) {
                 Some(i) => i,
                 None => {
@@ -619,7 +620,7 @@ impl Worker {
             // 이유는 송신 순간의 경로로 정한다. 릴레이 부하 대상인데 아직 인코드하지 않은 피어(None)는 net이
             // 표시해 두고 워커가 다음 프레임에서 바로 다시 본다(L1).
             let lookup = |p: &Peer, kind: PathKind| -> Option<AutoPayload<'_>> {
-                let key = (p as *const Peer as usize, p.ssrc());
+                let key = p.key();
                 let a = auto.iter().find(|a| a.key == key)?;
                 let reason = auto_reason(relay_on, kind == PathKind::Relay, a.loss_on)?;
                 Some(AutoPayload { payload: &a.payload[..a.len?], flags: auto_flags, reason })
@@ -712,7 +713,7 @@ impl Worker {
         }
         let out_rate = self.p.info.out_rate;
         net.for_each_peer(|peer| {
-            let key = (peer as *const Peer as usize, peer.ssrc());
+            let key = peer.key();
             if let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) {
                 f.seen = true;
                 return;
@@ -766,20 +767,21 @@ impl Worker {
         let marking = marks.active();
         let played = &self.p.counters.out_played_frames;
         net.for_each_peer(|peer| {
-            let key = (peer as *const Peer as usize, peer.ssrc());
+            let key = peer.key();
             let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) else {
                 return;
             };
             let sh = &self.p.bank.slots[f.slot];
-            let g = peer.mix().lr_gains();
+            let media = peer.media();
+            let g = media.mix.lr_gains();
             sh.set_gains(g, g);
-            peer.mix().level.store(sh.level.load());
+            media.mix.level.store(sh.level.load());
             let Some(prod) = self.p.prods.get_mut(f.slot) else {
                 return;
             };
-            let mut jb = peer.jitter().lock();
+            let mut jb = media.lock_jitter();
             let before = marking.then(|| jb.mark_counters());
-            let ev = f.service(&mut jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == peer.id() && p.peer_ssrc == peer.ssrc()));
+            let ev = f.service(&mut jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == media.peer_id && p.peer_ssrc == media.ssrc));
             if let Some((c0, d0)) = before {
                 // 녹음 마커(P2-4a): 이번 반복에 은닉·버림이 늘었으면, 방금 링에 넣은 꼬리(= 다음 콜백 시작 + 선행량)의
                 // 출력 타임라인 위치로 기록한다. 링 선행량 추정이라 대략 ±1 콜백으로 추정한다(위치 대조 측정은 아직 없음).

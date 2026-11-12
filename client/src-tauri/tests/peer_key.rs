@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 use band_lib::engine::config::{CodecKind, EngineConfig};
 use band_lib::engine::device::fake::FakeBackend;
 use band_lib::engine::jitter::JitterSettings;
+use band_lib::engine::peer_media::PeerMediaShared;
+use band_lib::net::media_link::PeerKey;
 use band_lib::engine::mixer::MixControls;
 use band_lib::net::types::{PathKind, PeerStateKind};
 use band_lib::engine::Engine;
@@ -24,6 +26,15 @@ use band_lib::net::packet::{Header, PacketType};
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::net::{Net, NetOptions};
 use parking_lot::Mutex;
+
+
+/// 엔진 없이 Net만 쓸 때의 피어 추가. 미디어 상태(엔진 ③)는 여기서 만든다. 이 테스트는 수신 오디오를 보지 않는다.
+fn add(net: &Net, id: String, desc: &LocalDescriptor) -> Result<Option<PeerKey>, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let key = PeerKey::from_raw(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+    net.add_peer(id.clone(), desc, std::sync::Arc::new(PeerMediaShared::new(key, id, desc.ssrc, js)))
+}
 
 const HANG: Duration = Duration::from_secs(20);
 
@@ -127,7 +138,7 @@ fn squat_after_connect_does_not_hijack() {
 // ============================================================================
 
 fn net() -> Net {
-    Net::start("alice".into(), &test_net(), JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }).unwrap()
+    Net::start("alice".into(), &test_net()).unwrap()
 }
 
 /// 상대 역할(원시 소켓): Net이 보낸 Audio 헤더의 seq를 모은다.
@@ -198,8 +209,8 @@ fn same_key_entries_share_one_tx_counter() {
     let net = net();
     let fake = Fake::new(0x5555_6666);
     let mut seen = HashSet::new();
-    net.add_peer("bob".into(), &fake.desc()).unwrap();
-    net.add_peer("bob-copy".into(), &fake.desc()).expect("같은 키라도 거부하지 않는다");
+    add(&net, "bob".into(), &fake.desc()).unwrap();
+    add(&net, "bob-copy".into(), &fake.desc()).expect("같은 키라도 거부하지 않는다");
     let peer = |id: &str| net.peers().into_iter().find(|p| p.id() == id).unwrap();
     assert!(peer("bob").shares_tx_seq_with(&peer("bob-copy")), "같은 키의 항목은 카운터를 같이 써야 한다");
     for id in ["bob", "bob-copy"] {
@@ -209,23 +220,23 @@ fn same_key_entries_share_one_tx_counter() {
     assert_eq!(fake.collect(&mut seen, 80), 0, "같은 키 두 항목 사이 nonce 중복");
 
     // 한쪽 제거 → 재추가: 살아 있는 bob-copy의 카운터를 이어 쓴다
-    assert!(net.remove_peer("bob"));
-    net.add_peer("bob".into(), &fake.desc()).unwrap();
+    assert!(net.remove_peer("bob").is_some());
+    add(&net, "bob".into(), &fake.desc()).unwrap();
     assert!(peer("bob").shares_tx_seq_with(&peer("bob-copy")));
     force_path(&net, "bob", fake.addr());
     send(&net, 40);
     assert_eq!(fake.collect(&mut seen, 80), 0, "재추가 뒤 nonce 중복");
 
     // 같은 id 교체도 마찬가지
-    net.add_peer("bob-copy".into(), &fake.desc()).unwrap();
+    add(&net, "bob-copy".into(), &fake.desc()).unwrap();
     assert!(peer("bob").shares_tx_seq_with(&peer("bob-copy")));
     force_path(&net, "bob-copy", fake.addr());
     send(&net, 40);
     assert_eq!(fake.collect(&mut seen, 80), 0, "교체 뒤 nonce 중복");
 
     // 모두 제거 → 재추가: 기록(수위) + 여유에서 이어 간다
-    assert!(net.remove_peer("bob") && net.remove_peer("bob-copy"));
-    net.add_peer("bob".into(), &fake.desc()).unwrap();
+    assert!(net.remove_peer("bob").is_some() && net.remove_peer("bob-copy").is_some());
+    add(&net, "bob".into(), &fake.desc()).unwrap();
     force_path(&net, "bob", fake.addr());
     send(&net, 40);
     assert_eq!(fake.collect(&mut seen, 40), 0, "모두 제거 뒤 재추가에서 nonce 중복");
@@ -269,7 +280,7 @@ fn concurrent_remove_and_add_never_reuse_seq() {
             let (net, fake) = (net.clone(), fake.clone());
             std::thread::spawn(move || {
                 for _ in 0..300 {
-                    net.add_peer("bob".into(), &fake.desc()).unwrap();
+                    add(&net, "bob".into(), &fake.desc()).unwrap();
                     force_path(&net, "bob", fake.addr());
                     send(&net, 3);
                     net.remove_peer("bob");
@@ -292,10 +303,10 @@ fn concurrent_remove_and_add_never_reuse_seq() {
 fn removed_peer_ssrc_still_resolves() {
     let net = net();
     let fake = Fake::new(0x7777_8888);
-    net.add_peer("carol".into(), &fake.desc()).unwrap();
+    add(&net, "carol".into(), &fake.desc()).unwrap();
     let ssrc = net.shared().peer_ssrc("carol").unwrap();
     assert_eq!(net.shared().peer_id_for_ssrc(ssrc).as_deref(), Some("carol"));
-    assert!(net.remove_peer("carol"));
+    assert!(net.remove_peer("carol").is_some());
     assert_eq!(net.shared().peer_id_for_ssrc(ssrc).as_deref(), Some("carol"), "빠진 피어도 기록에서 찾는다");
     assert_eq!(net.shared().peer_id_for_ssrc(ssrc ^ 1), None);
 }

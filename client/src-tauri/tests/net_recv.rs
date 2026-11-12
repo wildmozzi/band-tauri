@@ -6,7 +6,6 @@
 
 use std::time::{Duration, Instant};
 
-use band_lib::engine::jitter::JitterSettings;
 use band_lib::sys::prio::ThreadPriority;
 use band_lib::net::{Net, NetOptions};
 
@@ -21,7 +20,7 @@ fn stop_wakes_receiver_without_waiting_for_read_timeout() {
         cancel: None,
     };
     for _ in 0..3 {
-        let mut net = Net::start("alice".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }).unwrap();
+        let mut net = Net::start("alice".into(), &opts).unwrap();
         // 수신 스레드가 시작해 우선순위를 적은 뒤(곧바로 recv에 들어간다) 정지한다. 시작 전에 정지하면 플래그만
         // 보고 끝나 깨움을 검사하지 못한다. 상한 20초는 행 감지용이다.
         let t0 = Instant::now();
