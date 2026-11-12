@@ -28,14 +28,14 @@ import {
   type CreatePostData,
   type Post,
   type UpdatePostData,
-} from '../../services/communityApi'
-import { uploadPostImage as uploadImageViaServer } from '../../services/storageApi'
+} from './communityApi'
+import { uploadPostImage as uploadImageViaServer } from './storageApi'
 import {
   addReplyToTree,
   countDeletedComments,
   removeCommentFromTree,
   updateCommentInTree,
-} from '../../pages/community/postLogic'
+} from './postLogic'
 
 export type CommunityUser = { id: string; email?: string }
 

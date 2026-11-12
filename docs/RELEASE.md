@@ -11,7 +11,7 @@ Windows 우선. 설치본은 NSIS(`Band_<버전>_x64-setup.exe`), 자동 업데�
 | 업데이터 공개키 | `tauri.conf.json` `plugins.updater.pubkey` (minisign) |
 | 업데이터 개인키 | **리포 밖**: 생성자 PC `%USERPROFILE%\.tauri\band-updater.key` (+ 비밀번호 `band-updater.key.password`) → GitHub Secrets |
 | 릴리스 워크플로 | `.github/workflows/release.yml` (`v*` 태그 push → draft 릴리스) |
-| 앱 동작 | `client/src/native/updater.ts`, `client/src/components/UpdateNotice.tsx` |
+| 앱 동작 | `client/src/native/updater.ts`, `client/src/features/settings/UpdateNotice.tsx` |
 
 ### 앱 동작
 - 앱 시작 시 조용히 확인(오프라인·실패면 아무것도 띄우지 않음). 새 버전이 있으면 하단 배너 "지금 업데이트 / 나중에".

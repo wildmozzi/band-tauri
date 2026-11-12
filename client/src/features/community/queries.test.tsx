@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createQueryWrapper } from '../../test/queryWrapper'
-import type { Comment, Post } from '../../services/communityApi'
+import { createQueryWrapper } from '../../shared/test/queryWrapper'
+import type { Comment, Post } from './communityApi'
 
 const api = vi.hoisted(() => ({
   getPosts: vi.fn(),
@@ -14,9 +14,9 @@ const api = vi.hoisted(() => ({
   addComment: vi.fn(),
   getTrendingTags: vi.fn(),
 }))
-vi.mock('../../services/communityApi', () => ({ communityApi: api }))
+vi.mock('./communityApi', () => ({ communityApi: api }))
 const storage = vi.hoisted(() => ({ uploadPostImage: vi.fn() }))
-vi.mock('../../services/storageApi', () => storage)
+vi.mock('./storageApi', () => storage)
 
 import {
   communityKeys,

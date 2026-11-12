@@ -19,7 +19,7 @@
 import { useEffect, useRef } from 'react'
 import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import type { Session, User } from '@supabase/supabase-js'
-import { supabase } from '../../lib/supabaseClient'
+import { supabase } from '../../shared/lib/supabaseClient'
 
 function requireClient() {
   if (!supabase) throw new Error('Supabase not configured')

@@ -17,7 +17,7 @@ import {
   validateEngineConfig,
 } from './engineConfig'
 import type { DeviceInfo, EngineConfig } from './engineApi'
-import { tuneOpusSdp } from '../lib/webrtcAudio'
+import { tuneOpusSdp } from '../shared/lib/webrtcAudio'
 
 describe('패킷 크기 제한 (1200B)', () => {
   it('PCM16 바이트 수', () => {

@@ -5,7 +5,7 @@
 
 ## 구조
 - `client/src-tauri/src/engine/*` 오디오 엔진(RT 콜백 `rt.rs`, 워커, 지터, 코덱, 믹서), `net/*` UDP/암호화/피어/STUN, `commands.rs` Tauri 커맨드
-- `client/src/native/*` 엔진 API 래퍼·세션·관람자 브릿지, `client/src/contexts/room/*` 방 기능 훅
+- `client/src/native/*` 엔진 API 래퍼·세션·관람자 브릿지, `client/src/features/<기능>/` 화면·상태·서버 호출(합주실 세션 상태는 `features/room/state`), `client/src/shared/*` 공용 UI·lib, `client/src/app/*` 라우트·Provider. 구조와 경계 규칙: [docs/frontend-architecture.md](docs/frontend-architecture.md)
 - `server/src/services/wsService.ts` 시그널링(JWT 인증), `server/src/routes/*` HTTP API
 
 ## 명령

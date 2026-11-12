@@ -1,6 +1,6 @@
 /**
  * 합주실 목록·내 방·방 상세 서버 상태 (TanStack Query). 화면/페이지 훅은 Supabase를 직접 부르지 않는다.
- * 방 생성·비밀번호는 서버 API(services/roomApi.ts) 경유. 방 상세 조회는 roomApi.fetchRoomById(get_room RPC).
+ * 방 생성·비밀번호는 서버 API(roomApi.ts) 경유. 방 상세 조회는 roomApi.fetchRoomById(get_room RPC).
  *
  * 쿼리 키
  *   ['rooms', 'list']            공개 합주실 목록 (DB 행 전체, 화면에서 publicRooms/toRoom 변환)
@@ -23,11 +23,11 @@
  */
 import { useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import type { TablesUpdate } from '../../lib/database.types'
-import { isSupabaseConfigured, supabase } from '../../lib/supabaseClient'
-import { fetchRoomById } from '../../services/roomApi'
-import type { DbRoom, MyRoom } from '../../pages/rooms/roomModel'
-import { normalizeDetailRoom, type DetailRoom } from '../../pages/room/roomDetailModel'
+import type { TablesUpdate } from '../../shared/lib/database.types'
+import { isSupabaseConfigured, supabase } from '../../shared/lib/supabaseClient'
+import { fetchRoomById } from './roomApi'
+import type { DbRoom, MyRoom } from './roomModel'
+import { normalizeDetailRoom, type DetailRoom } from './roomModel'
 
 export const roomKeys = {
   all: ['rooms'] as const,

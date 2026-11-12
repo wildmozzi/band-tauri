@@ -12,7 +12,7 @@
  * - MixBroadcaster: 관람자 PC 관리. offer는 방송 담당만 보낸다(Glare 없음).
  */
 import { ENGINE_SAMPLE_RATE, engineErrorMessage, engineSubscribeMix, engineUnsubscribeMix } from './engineApi'
-import { ICE_SERVERS, tuneOpusSdp } from '../lib/webrtcAudio'
+import { ICE_SERVERS, tuneOpusSdp } from '../shared/lib/webrtcAudio'
 
 // ============================================================================
 // 링버퍼 (워크릿에 문자열로 들어간다: 외부 참조 금지, ES2015 문법만)

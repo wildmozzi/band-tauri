@@ -1,18 +1,18 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { argsOf, createSupabaseMock } from '../../test/supabaseMock'
-import { createQueryWrapper } from '../../test/queryWrapper'
-import type { DbRoom } from '../../pages/rooms/roomModel'
+import { argsOf, createSupabaseMock } from '../../shared/test/supabaseMock'
+import { createQueryWrapper } from '../../shared/test/queryWrapper'
+import type { DbRoom } from './roomModel'
 
 const sb = vi.hoisted(() => ({ mock: null as ReturnType<typeof createSupabaseMock> | null }))
-vi.mock('../../lib/supabaseClient', async () => {
-  const { createSupabaseMock } = await import('../../test/supabaseMock')
+vi.mock('../../shared/lib/supabaseClient', async () => {
+  const { createSupabaseMock } = await import('../../shared/test/supabaseMock')
   sb.mock = createSupabaseMock()
   return { supabase: sb.mock.client, isSupabaseConfigured: () => true }
 })
 
-import { useMyRooms } from '../../pages/rooms/useMyRooms'
+import { useMyRooms } from './useMyRooms'
 import { roomKeys, useDeleteRoomMutation, useMyRoomsQuery, useRoomsQuery, useUpdateRoomMutation } from './queries'
 
 const room = (id: string, over: Partial<DbRoom> = {}): DbRoom => ({
