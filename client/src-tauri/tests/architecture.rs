@@ -665,6 +665,15 @@ fn parser_assumptions_hold() {
     for (f, _) in source_files() {
         let text = std::fs::read_to_string(&f).expect("읽기");
         assert!(unit_tests_at_end(&text), "{}: `#[cfg(test)] mod tests`는 파일 끝에 둘 것(검사기 전제)", f.display());
+        // `edges()`는 `tests`라는 모듈 파일을 단위 테스트로 보고 건너뛴다. 그러니 `mod tests;` 선언은 바로 앞 줄이
+        // `#[cfg(test)]`여야 한다(이름만 tests인 실제 모듈이 검사에서 조용히 빠지지 않게, #81 리뷰 L1).
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        for (i, l) in lines.iter().enumerate() {
+            if matches!(*l, "mod tests;" | "pub mod tests;" | "pub(crate) mod tests;") {
+                let prev = lines[..i].iter().rev().find(|p| !p.is_empty()).copied().unwrap_or("");
+                assert_eq!(prev, "#[cfg(test)]", "{}: `mod tests;` 앞에는 `#[cfg(test)]`가 있어야 한다(검사기 전제)", f.display());
+            }
+        }
     }
 }
 
