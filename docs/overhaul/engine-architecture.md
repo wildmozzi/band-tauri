@@ -145,7 +145,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats}`, `net::{clock, crypto, txlat}`, `diag::mask` |
 | 2 | `engine::{rt, device, wasapi, record, metronome}` |
 | 3 | `net`, `net::{peer, relay, stun, qos}` |
-| 4 | `engine::{worker, measure}`, 하네스(`engine::loss_codec_sim` → ①에서 `engine::sim`) |
+| 4 | `engine::{worker, measure}`, 하네스 `engine::sim`(`cfg(test)`) |
 | 5 | `engine`(`Engine`), `engine::cpuprof`, `manager`, `diag`, `diag::{timeline, export}` |
 | 6 | `commands`, `lib.rs`, `main.rs` |
 

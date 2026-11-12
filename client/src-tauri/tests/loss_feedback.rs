@@ -1,7 +1,7 @@
 //! 수신 손실 피드백 Opus 전환(P1-4e) 종단 확인: 실제 엔진 둘(A 사인 PCM16 → B), 직접 경로 사이 프록시가 A→B Audio만
 //! N개 중 1개씩 버린다. B가 Ping으로 보고한 손실을 A가 받아 B에게만 Opus로 바꾸고, 손실이 멈추면 hold 뒤 PCM16으로
 //! 돌아오는지 본다. 정책·은닉 수치의 결정적 짝은 `engine::relay_codec::tests::loss_feedback_*`,
-//! `engine::loss_codec_sim::loss_feedback_sim`(가상 시간), 보고 형식은 `net::peer::tests::loss_report_*`.
+//! `engine::sim::loss_codec::loss_feedback_sim`(가상 시간), 보고 형식은 `net::peer::tests::loss_report_*`.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -111,7 +111,7 @@ fn wait_until(timeout: Duration, mut f: impl FnMut() -> bool) -> Option<Duration
 }
 
 #[test]
-#[ignore = "realtime: 결정적 짝 engine::loss_codec_sim::loss_feedback_sim, engine::relay_codec::tests::loss_feedback_*"]
+#[ignore = "realtime: 결정적 짝 engine::sim::loss_codec::loss_feedback_sim, engine::relay_codec::tests::loss_feedback_*"]
 fn direct_path_loss_feedback_switches_to_opus_and_back() {
     let cfg = EngineConfig { buffer_size: 128, frame_ms: 2.5, codec: CodecKind::Pcm16, channels: 1, input_channels: vec![0], ..Default::default() };
     let be_b = FakeBackend::silence(48_000);

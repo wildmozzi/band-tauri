@@ -52,7 +52,7 @@ const NODES: &[(&str, u8)] = &[
     ("net::qos", 3),
     // 4 C 워커 파이프라인
     ("engine::worker", 4),
-    ("engine::loss_codec_sim", 4),
+    ("engine::sim", 4),
     ("engine::measure", 4),
     // 5 B 제어 평면
     ("engine", 5),
@@ -284,7 +284,8 @@ fn unit_tests_at_end(src: &str) -> bool {
 fn without_unit_tests(src: &str) -> &str {
     let mut at = 0;
     for line in src.split_inclusive('\n') {
-        if line.trim() == "#[cfg(test)]" && src[at + line.len()..].trim_start().starts_with("mod tests") {
+        let rest = src[at + line.len()..].trim_start();
+        if line.trim() == "#[cfg(test)]" && rest.strip_prefix("mod tests").is_some_and(|r| r.trim_start().starts_with('{')) {
             return &src[..at];
         }
         at += line.len();
@@ -501,6 +502,10 @@ fn source_files() -> Vec<(PathBuf, Vec<String>)> {
 fn edges() -> BTreeMap<(&'static str, &'static str), BTreeSet<String>> {
     let mut edges: BTreeMap<(&str, &str), BTreeSet<String>> = BTreeMap::new();
     for (f, module) in source_files() {
+        // 파일로 뗀 단위 테스트 모듈(`#[cfg(test)] mod tests;` → `tests.rs`)도 보지 않는다.
+        if module.last().is_some_and(|m| m == "tests") {
+            continue;
+        }
         let from = node_of(&module).unwrap_or_else(|| panic!("{}: NODES에 없는 모듈 {:?} — 표에 계층을 정해 넣을 것", f.display(), module));
         let text = std::fs::read_to_string(&f).expect("읽기");
         let code = strip(without_unit_tests(&text));
@@ -701,4 +706,7 @@ fn parser_resolves_paths() {
     assert_eq!(strip("let r = r#\"a \" crate::x\"#; use crate::y;"), "let r = \"\"; use crate::y;");
     assert!(unit_tests_at_end("fn a() {}\n#[cfg(test)]\nmod tests {\n fn t() { let x = \"}\"; }\n}\n"));
     assert!(!unit_tests_at_end("fn a() {}\n#[cfg(test)]\nmod tests {\n}\nfn after() {}\n"));
+    // 파일 모듈 선언(`mod tests;`)에서는 자르지 않는다 — jitter/mod.rs처럼 선언이 파일 앞에 있어도 뒤 코드를 본다.
+    let decl = "#[cfg(test)]\nmod tests;\nuse crate::x;\n";
+    assert_eq!(without_unit_tests(decl), decl);
 }

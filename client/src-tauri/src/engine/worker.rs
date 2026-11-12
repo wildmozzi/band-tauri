@@ -33,9 +33,9 @@ use crate::net::peer::Peer;
 use crate::net::{AutoPayload, NetShared, MAX_PEERS};
 
 /// 워커 폴링 주기. Windows에서도 std::thread::sleep은 고해상도 타이머를 쓴다.
-const POLL: Duration = Duration::from_micros(500);
+pub(super) const POLL: Duration = Duration::from_micros(500);
 /// 피어 은닉 마감이 가까울 때의 폴링 주기.
-const FINE_POLL: Duration = Duration::from_micros(150);
+pub(super) const FINE_POLL: Duration = Duration::from_micros(150);
 /// 피어별 Opus 자동 전환 정책(릴레이 부하 P1-4c, 손실 피드백 P1-4e)을 다시 보는 간격.
 const AUTO_CODEC_CHECK: Duration = Duration::from_millis(200);
 /// 출력 생산 단위(48kHz 프레임). 1.33ms.
@@ -1566,14 +1566,6 @@ impl Worker {
         self.p.stats.monitor_occupancy_us.store(self.monitor_ewma_us as u64, Ordering::Relaxed);
     }
 }
-
-#[cfg(test)]
-#[path = "worker_tune_sim.rs"]
-mod tune_sim;
-
-#[cfg(test)]
-#[path = "worker_long_sim.rs"]
-mod long_sim;
 
 #[cfg(test)]
 mod tests {

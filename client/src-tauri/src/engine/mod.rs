@@ -11,7 +11,7 @@ pub mod device;
 pub mod flac;
 pub mod jitter;
 #[cfg(test)]
-mod loss_codec_sim;
+mod sim;
 pub mod measure;
 pub mod metronome;
 pub mod mixer;
