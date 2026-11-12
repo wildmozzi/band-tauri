@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use band_lib::engine::codec::Encoder;
 use band_lib::engine::config::{CodecKind, EngineConfig};
-use band_lib::engine::cpuprof::{cycle_pct, process_cycles, tsc_now, CpuStats};
+use band_lib::engine::cpuprof::CpuStats;
+use band_lib::sys::cpu::{cycle_pct, process_cycles, tsc_now};
 use band_lib::engine::device::fake::FakeBackend;
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::relay_codec::CodecReason;

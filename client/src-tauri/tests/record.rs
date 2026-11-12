@@ -352,7 +352,7 @@ fn lossy_proxy(a: SocketAddr, b: SocketAddr, every: usize, armed: Arc<std::sync:
     let st = stop.clone();
     let ar = armed;
     std::thread::spawn(move || {
-        let _prio = band_lib::engine::prio::promote_current_thread();
+        let _prio = band_lib::sys::prio::promote_current_thread();
         let mut buf = [0u8; 2048];
         let mut k = 0usize;
         while !st.load(Ordering::Relaxed) {

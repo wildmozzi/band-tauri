@@ -41,7 +41,7 @@ impl LossyProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let (de, dr, st) = (drop_every.clone(), dropped.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
-            let _prio = band_lib::engine::prio::promote_current_thread();
+            let _prio = band_lib::sys::prio::promote_current_thread();
             let mut buf = [0u8; 2048];
             let mut audio = 0u32;
             while !st.load(Ordering::Relaxed) {

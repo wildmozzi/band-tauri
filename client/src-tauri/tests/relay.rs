@@ -182,7 +182,7 @@ impl GateProxy {
         let dropped = Arc::new(AtomicUsize::new(0));
         let (gab, gba, st, fw, dr) = (ab.clone(), ba.clone(), stop.clone(), forwarded.clone(), dropped.clone());
         let thread = std::thread::spawn(move || {
-            let _prio = band_lib::engine::prio::promote_current_thread();
+            let _prio = band_lib::sys::prio::promote_current_thread();
             let mut buf = [0u8; 2048];
             // (보낼 시각, 내용, true면 sb에서 b로 / false면 sa에서 a로)
             let mut queue: VecDeque<(Instant, Vec<u8>, bool)> = VecDeque::new();

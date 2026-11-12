@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use band_lib::engine::jitter::JitterSettings;
-use band_lib::engine::prio::ThreadPriority;
+use band_lib::sys::prio::ThreadPriority;
 use band_lib::net::{Net, NetOptions};
 
 #[test]

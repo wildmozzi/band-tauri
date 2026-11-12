@@ -9,7 +9,7 @@ pub mod timeline;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 
@@ -116,7 +116,7 @@ impl Diagnostics {
         std::thread::Builder::new().name("band-diag".into()).spawn(move || {
             let interval = Duration::from_millis(SAMPLE_INTERVAL_MS);
             while !me.stop.load(Ordering::Acquire) {
-                me.record(now_ms(), manager.snapshot());
+                me.record(crate::sys::time::unix_ms(), manager.snapshot());
                 let mut g = me.wake.0.lock();
                 if me.stop.load(Ordering::Acquire) {
                     break;
@@ -131,10 +131,6 @@ impl Diagnostics {
         let _g = self.wake.0.lock();
         self.wake.1.notify_all();
     }
-}
-
-pub fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
 #[cfg(test)]

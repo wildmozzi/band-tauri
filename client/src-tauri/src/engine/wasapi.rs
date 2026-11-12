@@ -1221,7 +1221,7 @@ pub fn open_engine_streams(
         let _com = ComGuard::init();
         // MMCSS 등록과 변환 버퍼 할당은 스트림 시작 전에 끝낸다. 독점 2~3ms 주기에서는 시작 뒤에 하면
         // 첫 이벤트를 놓쳐 시작 글리치가 난다(L5).
-        let prio = super::prio::promote_current_thread();
+        let prio = crate::sys::prio::promote_current_thread();
         c.audio_thread.store(prio.status());
         let mut scratch = vec![0f32; SCRATCH_SAMPLES];
         let (mut input, mut output) = (input, output);
@@ -1243,7 +1243,7 @@ pub fn open_engine_streams(
             Err(message) => {
                 // 이 스레드는 곧 끝나고 MMCSS 등록도 풀린다. 다음 시도(다른 모드 또는 cpal 폴백)가 다시 적기 전까지
                 // 오디오 스레드는 우리가 관리하지 않는 상태다(리뷰 M1). send보다 먼저 적어 받는 쪽이 이 값을 본다.
-                c.audio_thread.store(super::prio::ThreadPriority::Unmanaged);
+                c.audio_thread.store(crate::sys::prio::ThreadPriority::Unmanaged);
                 let _ = tx.send(Err(OpenFailure { message, rts: Some(Box::new((input, output))) }));
                 return;
             }
@@ -1398,7 +1398,7 @@ pub fn probe_stream(is_input: bool, device: Option<&str>, mode: ShareMode, secon
             let en = enumerator()?;
             let mut s = DirStream::open(&en, is_input, device.as_deref(), mode, 1)?;
             s.start()?;
-            let _prio = super::prio::promote_current_thread();
+            let _prio = crate::sys::prio::promote_current_thread();
             let stop = AtomicBool::new(false);
             let ch = s.format.channels as usize;
             // (마지막 콜백 시각, 간격 목록, 프레임 수). 프로브는 RT 규칙 대상이 아니다(측정 도구).
@@ -1832,7 +1832,7 @@ mod tests {
     fn failed_open_resets_audio_priority_to_unmanaged() {
         // 리뷰 M1: 열기 실패 후 cpal로 폴백하면 오디오 스레드 상태가 mmcss로 남으면 안 된다.
         use crate::engine::mixer::MixControls;
-        use crate::engine::prio::ThreadPriority;
+        use crate::sys::prio::ThreadPriority;
         use crate::engine::rt::{input_ring, output_path};
         let counters = Arc::new(AudioCounters::default());
         let (p, _c) = input_ring();

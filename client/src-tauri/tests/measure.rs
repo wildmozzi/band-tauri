@@ -316,7 +316,7 @@ impl DelayProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let st = stop.clone();
         let thread = std::thread::spawn(move || {
-            let _prio = band_lib::engine::prio::promote_current_thread();
+            let _prio = band_lib::sys::prio::promote_current_thread();
             let mut queue: std::collections::VecDeque<(Instant, bool, Vec<u8>)> = Default::default();
             let mut buf = [0u8; 2048];
             while !st.load(Ordering::Relaxed) {

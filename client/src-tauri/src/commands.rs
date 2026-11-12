@@ -303,7 +303,7 @@ pub async fn diag_export(
         let Some(_busy) = d.begin_export() else {
             return Err("이미 진단을 내보내는 중입니다".into());
         };
-        let now = crate::diag::now_ms();
+        let now = crate::sys::time::unix_ms();
         let Some(picked) = app
             .dialog()
             .file()
