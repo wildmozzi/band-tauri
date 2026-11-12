@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useAuth } from '../../auth/useAuth'
+import { useAuth } from '../../auth'
 import { useRoom } from '../state/RoomContext'
 
 /** 승인 없이 바로 연주를 시작하는가 (자유참여 방이거나 방장) */

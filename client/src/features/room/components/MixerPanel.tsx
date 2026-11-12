@@ -2,7 +2,7 @@ import type { PeerInstrument } from '../state/RoomContext'
 import { useRoom } from '../state/RoomContext'
 import { BroadcastMixerChannel, MyMixerChannel, PeerMixerChannel } from './MixerChannels'
 import { DEFAULT_MIX, formatDuration, formatPan, levelClass, performerName } from '../roomDetailModel'
-import { DiagnosticsExport } from '../../settings/DiagnosticsExport'
+import { DiagnosticsExport } from '../../settings'
 import { NativeRecordingControl } from './NativeRecordingControl'
 import { isNativeApp } from '../../../native/engineApi'
 

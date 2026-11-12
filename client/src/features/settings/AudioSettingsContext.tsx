@@ -7,8 +7,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Json } from '../../shared/lib/database.types'
 import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
-import { profileApi, useAudioSettingsQuery } from '../auth/profileQueries'
-import { useAuth } from '../auth/useAuth'
+import { profileApi, useAudioSettingsQuery, useAuth } from '../auth'
 import {
   engineErrorMessage,
   engineListDevices,

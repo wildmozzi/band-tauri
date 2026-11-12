@@ -21,12 +21,12 @@ vi.mock('../../rooms/roomApi', async (importOriginal) => {
   return { ...original, setRoomPassword }
 })
 
-import { forgetRoomDetail, roomKeys, useRoomDetailQuery, useSyncParticipantsMutation } from '../../rooms/queries'
+import { forgetRoomDetail, roomKeys, useRoomDetailQuery, useSyncParticipantsMutation } from '../../rooms'
 import type { DetailRoom } from '../roomDetailModel'
 import { useRoomDetailData } from './useRoomDetailData'
 import { useRoomHostActions } from './useRoomHostActions'
 import { useRoomSettingsForm } from './useRoomSettingsForm'
-import { useResetQueryCacheOnUserChange } from '../../auth/queries'
+import { useResetQueryCacheOnUserChange } from '../../auth'
 
 const dbRow = (over: Record<string, unknown> = {}) => ({
   id: 'r1', title: '방', description: null, host_id: 'h1', max_participants: 8, current_participants: 1,

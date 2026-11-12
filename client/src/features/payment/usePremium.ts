@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react'
 import { MAX_PERFORMERS } from '../../native/engineApi'
-import { ROOM_CAPACITY_MAX } from '../rooms/roomModel'
+import { ROOM_CAPACITY_MAX } from '../rooms'
 
 export type UserPlan = 'free' | 'standard' | 'pro'
 

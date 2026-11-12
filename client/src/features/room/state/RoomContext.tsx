@@ -9,8 +9,8 @@
  * 결정사항(docs/overhaul/native-engine-design.md): 연주자는 앱 전용, 웹은 관람만. 앱 연주자끼리는 WebRTC를 쓰지 않는다.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useAuth } from '../../auth/useAuth'
-import { useAudioSettings } from '../../settings/AudioSettingsContext'
+import { useAuth } from '../../auth'
+import { useAudioSettings } from '../../settings'
 import { useSignaling, type SignalPayload, type SignalStatus } from './useSignaling'
 import { useChat, type ChatMessage } from './useChat'
 import {
@@ -23,7 +23,7 @@ import { useViewerAudio, type PeerNetworkStats, type RtcStatus } from './useView
 import { useWebAudioMixer, type MixSettings } from './useWebAudioMixer'
 import { useRecording, type Recording, type RecordingSource } from './useRecording'
 import { mergeSelfPerformer, withPeer, type PeerInstrument } from './roomState'
-import { forgetRoomPassword, joinErrorFromSignal, joinErrorStopsSession, rememberRoomPassword, type JoinError } from '../../rooms/roomAccess'
+import { forgetRoomPassword, joinErrorFromSignal, joinErrorStopsSession, rememberRoomPassword, type JoinError } from '../../rooms'
 import { useNativeSession } from '../../../native/useNativeSession'
 import {
   browserMetronomePrefsStorage,

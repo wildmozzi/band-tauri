@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { RoomNotFoundError, useRoomDetailQuery } from '../../rooms/queries'
-import { useProfileNicknameQuery } from '../../auth/profileQueries'
+import { RoomNotFoundError, useRoomDetailQuery } from '../../rooms'
+import { useProfileNicknameQuery } from '../../auth'
 import type { DetailRoom } from '../roomDetailModel'
 
 export interface RoomDetailData {

@@ -1,4 +1,4 @@
-import { AVAILABLE_INSTRUMENTS, COMMON_TAGS, GENRES, maxParticipantOptionsFor, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from '../../rooms/roomModel'
+import { AVAILABLE_INSTRUMENTS, COMMON_TAGS, GENRES, maxParticipantOptionsFor, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from '../../rooms'
 import type { DetailRoom } from '../roomDetailModel'
 import type { RoomSettingsForm } from '../hooks/useRoomSettingsForm'
 import { Modal } from '../../../shared/ui/Modal'

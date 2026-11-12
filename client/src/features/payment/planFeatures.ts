@@ -9,7 +9,7 @@
  * 기능을 구현하고 실제로 요금제 게이트(서버 강제)를 걸었을 때만 PLANNED → 혜택으로 옮긴다.
  */
 import { MAX_PERFORMERS } from '../../native/engineApi'
-import { ROOM_CAPACITY_MAX } from '../rooms/roomModel'
+import { ROOM_CAPACITY_MAX } from '../rooms'
 
 export type PaidPlan = 'standard' | 'pro'
 

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useRequireAuth } from '../auth/useRequireAuth'
+import { useRequireAuth } from '../auth'
 import { MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from './roomModel'
 import { createRoom } from './roomApi'
 import { validateRoomPasswordInput, ROOM_PASSWORD_MAX } from './roomAccess'

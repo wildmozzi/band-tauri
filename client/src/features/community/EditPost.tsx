@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { usePostQuery, useUpdatePostMutation } from './queries'
-import { useRequireAuth } from '../auth/useRequireAuth'
+import { useRequireAuth } from '../auth'
 import type { Post } from './communityApi'
 import { PostForm } from './PostForm'
 import { usePostForm } from './usePostForm'

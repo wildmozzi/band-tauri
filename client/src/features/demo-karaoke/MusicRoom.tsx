@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '../auth/useAuth'
+import { useAuth } from '../auth'
 import {
   clearStemHistory,
   fetchFreshStemHistory,

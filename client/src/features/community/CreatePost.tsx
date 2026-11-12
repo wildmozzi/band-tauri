@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import { useCreatePostMutation } from './queries'
-import { useRequireAuth } from '../auth/useRequireAuth'
+import { useRequireAuth } from '../auth'
 import { PostForm } from './PostForm'
 import { usePostForm } from './usePostForm'
 

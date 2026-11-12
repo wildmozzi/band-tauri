@@ -1,17 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
 import type { User } from '@supabase/supabase-js'
-import { usePremium } from '../payment/usePremium'
+import { usePremium, ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor } from '../payment'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { useRequireAuth } from '../auth/useRequireAuth'
+import { useRequireAuth, useProfileNicknameQuery, useSaveProfileMutation, useUpdateUserMetadataMutation } from '../auth'
 import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
-import {
-  useProfileNicknameQuery,
-  useSaveProfileMutation,
-  useUpdateUserMetadataMutation,
-} from '../auth/profileQueries'
 import './Profile.css'
 import { Button } from '../../shared/ui/Button'
-import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor } from '../payment/planFeatures'
 
 type ProfileTab = 'info' | 'follow' | 'plan' | 'theme' | 'support'
 const PROFILE_TABS: readonly ProfileTab[] = ['info', 'follow', 'plan', 'theme', 'support']

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useAuth } from '../auth/useAuth'
+import { useAuth } from '../auth'
 import { CommentSection } from './CommentSection'
 import { DeletePostModal } from './DeletePostModal'
 import { PostArticle } from './PostArticle'

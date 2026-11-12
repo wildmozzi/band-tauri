@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
-import { useAuth } from '../../auth/useAuth'
+import { useAuth } from '../../auth'
 import { useRoom } from '../state/RoomContext'
-import { recallRoomPassword } from '../../rooms/roomAccess'
+import { recallRoomPassword } from '../../rooms'
 import type { DetailRoom } from '../roomDetailModel'
 
 /**

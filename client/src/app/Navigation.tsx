@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { LATENCY_MEASURE_SECTION_ID, OPEN_LATENCY_MEASURE_EVENT } from '../native/loopbackOffsetStore'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../features/auth/useAuth'
-import { AudioSettings } from '../features/settings/AudioSettings'
-import { PlanStatus } from '../features/payment/PlanStatus'
+import { useAuth } from '../features/auth'
+import { AudioSettings } from '../features/settings'
+import { PlanStatus } from '../features/payment'
 import { SERVICE_NAME } from '../shared/lib/brand'
 import './Navigation.css'
 

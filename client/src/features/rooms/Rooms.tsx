@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../auth/useAuth'
+import { useAuth } from '../auth'
 import { parseRoomCode } from './roomAccess'
 import { ROOM_FILTERS, type RoomStatus } from './roomFilters'
 import { MyRoomsModal } from './MyRoomsModal'

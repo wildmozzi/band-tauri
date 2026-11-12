@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../auth/useAuth'
+import { useAuth } from '../auth'
 import { usePostsQuery, useToggleLikeMutation, useTrendingTagsQuery } from './queries'
 import type { Post } from './communityApi'
 import './communityList.css'

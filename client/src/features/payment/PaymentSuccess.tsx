@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
-import { useAuth } from '../auth/useAuth'
+import { useAuth } from '../auth'
 import { usePremium } from './usePremium'
 import { SupportContact } from './SupportContact'
 import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor } from './planFeatures'

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useAuth } from '../auth/useAuth'
+import { useAuth } from '../auth'
 import { useRoom } from './state/RoomContext'
 import { MAX_PERFORMERS } from '../../native/engineApi'
 import { instrumentUsage } from './roomDetailModel'

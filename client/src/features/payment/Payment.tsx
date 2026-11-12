@@ -1,6 +1,6 @@
 import { useState, type ReactElement } from 'react'
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom'
-import { useRequireAuth } from '../auth/useRequireAuth'
+import { useRequireAuth } from '../auth'
 import { tossPaymentsService } from './tossPayments'
 import { paymentApi } from './paymentApi'
 import { SERVICE_NAME } from '../../shared/lib/brand'

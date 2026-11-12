@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../auth/useAuth'
+import { useAuth } from '../auth'
 import { Modal } from '../../shared/ui'
 import { PLANNED_NOTICE, plannedFeaturesFor } from './planFeatures'
 

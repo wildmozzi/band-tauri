@@ -1,7 +1,7 @@
 // 합주실 상세(RoomDetail) 화면의 타입·상수·순수 함수.
 import type { CpuStats, PeerState, PeerStats } from '../../native/engineApi'
 import { RELAY_PATH_HINT, pathLabel } from '../../native/relayLogic'
-import type { DetailRoom, InstrumentSlot } from '../rooms/roomModel'
+import type { DetailRoom, InstrumentSlot } from '../rooms'
 export type { DetailRoom, InstrumentSlot }
 
 // 악기 정보 (아이콘, 이름)
