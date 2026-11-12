@@ -2,17 +2,9 @@
  * 네이티브 엔진 오디오 설정 화면 (EngineConfig / DeviceInfo, 설계 4절).
  * 상태와 저장은 AudioSettingsContext가 맡고, 이 컴포넌트는 표시와 입력만 한다.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect } from 'react'
 import { useAudioSettings } from './AudioSettingsContext'
-import {
-  MAX_PAYLOAD_BYTES,
-  engineSetJitterProfile,
-  engineStats,
-  type CodecKind,
-  type DriverKind,
-  type FrameMs,
-  type PeerStats,
-} from '../../native/engineApi'
+import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs } from '../../native/engineApi'
 import {
   BUFFER_OPTIONS,
   DRIVER_OPTIONS,
@@ -24,7 +16,6 @@ import {
   clampJitterProfile,
   estimatePayloadBytes,
   formatPeerJitter,
-  isPayloadAllowed,
   jitterProfileLabel,
   type EnginePresetId,
 } from '../../native/engineConfig'
@@ -33,6 +24,22 @@ import { DesktopDownloadButton } from '../../shared/ui/DesktopDownloadButton'
 import { Modal } from '../../shared/ui'
 import { DiagnosticsExport } from './DiagnosticsExport'
 import { DevServerSettingsSection } from './DevServerSettings'
+import { useLivePeerStats } from './hooks/useLivePeerStats'
+import { useDebouncedJitterProfile } from './hooks/useDebouncedJitterProfile'
+import {
+  formatTestDevice,
+  formatTestLatency,
+  inputChannelOptions,
+  isClipping,
+  levelPercent,
+  parseChannels,
+  parseJitterMs,
+  payloadAllowed,
+  peerLabel,
+  withLeftInputChannel,
+  withRightInputChannel,
+  type PayloadPatch,
+} from './audioSettingsView'
 import './AudioSettings.css'
 import './audioSettingsPanel.css'
 
@@ -41,41 +48,11 @@ interface AudioSettingsProps {
   isModal?: boolean
 }
 
-const PEER_STATS_POLL_MS = 1000
-const PROFILE_APPLY_DEBOUNCE_MS = 200
-
-/** 합주 중(엔진 사용 중)일 때만 피어 통계를 1초마다 읽는다(지터 버퍼 상태 표시용). */
-function useLivePeerStats(enabled: boolean): PeerStats[] {
-  const [peers, setPeers] = useState<PeerStats[]>([])
-  useEffect(() => {
-    if (!enabled) {
-      setPeers([])
-      return
-    }
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const s = await engineStats()
-        if (!cancelled) setPeers(s.peers)
-      } catch {
-        // 엔진이 막 멈춘 경우 등: 다음 주기에 다시
-      }
-    }
-    void poll()
-    const timer = setInterval(() => void poll(), PEER_STATS_POLL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [enabled])
-  return peers
-}
-
 function LevelMeter({ value, kind }: { value: number; kind: 'input' | 'output' }) {
-  const pct = Math.max(0, Math.min(100, value * 100))
+  const pct = levelPercent(value)
   return (
     <div className="level-meter">
-      <div className={`level-bar ${kind} ${pct > 90 ? 'clip' : ''}`} style={{ width: `${pct}%` }} />
+      <div className={`level-bar ${kind} ${isClipping(pct) ? 'clip' : ''}`} style={{ width: `${pct}%` }} />
     </div>
   )
 }
@@ -106,17 +83,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
 
   const livePeers = useLivePeerStats(isNativeMode && engineInUse)
   // 슬라이더 드래그 중에는 표시만 바꾸고, 엔진 적용(IPC)은 마지막 값으로 200ms 뒤 한 번만(PR #20 M3).
-  const profileTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => () => {
-    if (profileTimer.current) clearTimeout(profileTimer.current)
-  }, [])
-  const scheduleProfileApply = (p: number) => {
-    if (profileTimer.current) clearTimeout(profileTimer.current)
-    profileTimer.current = setTimeout(() => {
-      profileTimer.current = null
-      void engineSetJitterProfile(p).catch(() => undefined)
-    }, PROFILE_APPLY_DEBOUNCE_MS)
-  }
+  const scheduleProfileApply = useDebouncedJitterProfile()
 
   // 설정 화면을 닫으면 테스트 종료
   useEffect(() => () => {
@@ -190,12 +157,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
   }
 
   const payloadBytes = estimatePayloadBytes(config.codec, config.channels, config.frameMs, config.opusBitrate)
-  const deviceChannels = Math.max(1, selectedInputDevice?.channels ?? 2)
-  const channelOptions = Array.from({ length: deviceChannels }, (_, i) => i)
-  const allowed = (patch: { codec?: CodecKind; channels?: 1 | 2; frameMs?: FrameMs }) =>
-    isPayloadAllowed(patch.codec ?? config.codec, patch.channels ?? config.channels, patch.frameMs ?? config.frameMs, config.opusBitrate)
-
-  const testLatency = testStats?.estLatencyMs
+  const channelOptions = inputChannelOptions(selectedInputDevice?.channels)
+  const allowed = (patch: PayloadPatch) => payloadAllowed(config, patch)
 
   return wrap(
     <>
@@ -344,7 +307,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           <select
             id="channels"
             value={config.channels}
-            onChange={(e) => updateConfig({ channels: Number(e.target.value) === 2 ? 2 : 1 })}
+            onChange={(e) => updateConfig({ channels: parseChannels(e.target.value) })}
           >
             <option value={1}>모노</option>
             <option value={2} disabled={!allowed({ channels: 2 })}>
@@ -375,14 +338,14 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             <select
               aria-label="왼쪽 입력 채널"
               value={config.inputChannels[0]}
-              onChange={(e) => updateConfig({ inputChannels: [Number(e.target.value), config.inputChannels[1] ?? 1] })}
+              onChange={(e) => updateConfig({ inputChannels: withLeftInputChannel(config.inputChannels, Number(e.target.value)) })}
             >
               {channelOptions.map((ch) => <option key={ch} value={ch}>L: Ch{ch + 1}</option>)}
             </select>
             <select
               aria-label="오른쪽 입력 채널"
               value={config.inputChannels[1] ?? 1}
-              onChange={(e) => updateConfig({ inputChannels: [config.inputChannels[0], Number(e.target.value)] })}
+              onChange={(e) => updateConfig({ inputChannels: withRightInputChannel(config.inputChannels, Number(e.target.value)) })}
             >
               {channelOptions.map((ch) => <option key={ch} value={ch}>R: Ch{ch + 1}</option>)}
             </select>
@@ -419,7 +382,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             {livePeers.length === 0 && <p className="setting-hint">연결된 피어가 없습니다.</p>}
             {livePeers.map((ps) => (
               <div className="stat-item" key={ps.peerId}>
-                <span className="stat-label">{ps.peerId.slice(0, 8)}</span>
+                <span className="stat-label">{peerLabel(ps)}</span>
                 <span className="stat-value">{formatPeerJitter(ps)}</span>
               </div>
             ))}
@@ -434,7 +397,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             max={JITTER_MAX_LIMIT_MS}
             step={5}
             value={config.jitterMinMs ?? 0}
-            onChange={(e) => updateConfig({ jitterMinMs: Math.max(0, Number(e.target.value) || 0) })}
+            onChange={(e) => updateConfig({ jitterMinMs: parseJitterMs(e.target.value) })}
           />
           <span>ms</span>
         </div>
@@ -447,7 +410,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             max={JITTER_MAX_LIMIT_MS}
             step={5}
             value={config.jitterMaxMs ?? 80}
-            onChange={(e) => updateConfig({ jitterMaxMs: Math.max(0, Number(e.target.value) || 0) })}
+            onChange={(e) => updateConfig({ jitterMaxMs: parseJitterMs(e.target.value) })}
           />
           <span>ms</span>
         </div>
@@ -482,11 +445,11 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             <>
               <div className="stat-item">
                 <span className="stat-label">로컬 처리 지연</span>
-                <span className="stat-value">{testLatency !== undefined ? `${testLatency.toFixed(1)}ms` : '--'}</span>
+                <span className="stat-value">{formatTestLatency(testStats.estLatencyMs)}</span>
               </div>
               <div className="stat-item">
                 <span className="stat-label">장치</span>
-                <span className="stat-value">{testStats.sampleRate / 1000}kHz · 버퍼 {testStats.deviceBuffer}</span>
+                <span className="stat-value">{formatTestDevice(testStats.sampleRate, testStats.deviceBuffer)}</span>
               </div>
               <div className="stat-item">
                 <span className="stat-label">xrun</span>
