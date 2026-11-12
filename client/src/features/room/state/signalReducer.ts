@@ -240,16 +240,20 @@ function reduceParticipants(s: RoomState, p: SignalPayload, ctx: SignalContext):
     case 'participant-left': {
       if (typeof p.oderId !== 'string') return { handled: true, patch: null, effects: [] }
       const id = p.oderId
+      // 바뀐 것이 없는 조각은 패치에 넣지 않는다(기존 참조 유지) — 그 조각을 구독한 화면을 다시 그리지 않는다
+      const patch: RoomPatch = {}
+      const peers = conn.peers.filter((x) => x !== id)
+      if (peers.length !== conn.peers.length) patch.connection = { ...conn, peers }
+      const roster = withoutKey(s.roster, id)
+      if (roster !== s.roster) patch.roster = roster
       const perform = performRequestReducer(s.requests.perform, { type: 'peer-left', peerId: id })
-      return {
-        handled: true,
-        patch: {
-          connection: { ...conn, peers: conn.peers.filter((x) => x !== id) },
-          roster: withoutKey(s.roster, id),
-          requests: { ...s.requests, perform, pendingInstrumentChanges: s.requests.pendingInstrumentChanges.filter((r) => r.oderId !== id) },
-        },
-        effects: [{ type: 'peer-gone', peerId: id }, { type: 'close-viewer', peerId: id }],
+      const changes = s.requests.pendingInstrumentChanges
+      const remaining = changes.filter((r) => r.oderId !== id)
+      const changesTouched = remaining.length !== changes.length
+      if (perform !== s.requests.perform || changesTouched) {
+        patch.requests = { ...s.requests, perform, pendingInstrumentChanges: changesTouched ? remaining : changes }
       }
+      return { handled: true, patch, effects: [{ type: 'peer-gone', peerId: id }, { type: 'close-viewer', peerId: id }] }
     }
 
     case 'performer-updated': {

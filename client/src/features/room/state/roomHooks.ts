@@ -3,7 +3,7 @@
  * 각 훅은 스토어에서 자기 조각만 구독하고(useRoomSelector), 명령은 RoomProvider가 한 번 만든 안정 객체에서 꺼낸다.
  * 조각이 그대로면 그 훅을 쓰는 컴포넌트는 다시 그리지 않는다.
  */
-import { createContext, useContext } from 'react'
+import { createContext, useContext, useMemo } from 'react'
 import { isNativeApp, type EngineStats, type PeerStats } from '../../../native/engineApi'
 import type { RoomSessionStore, RoomSnapshot } from './roomSessionStore'
 import { useRoomSelector } from './useRoomSelector'
@@ -164,6 +164,8 @@ const selectRequests = (s: RoomSnapshot) => {
 
 const selectRecording = (s: RoomSnapshot) => s.recording
 
+const selectRecordings = (s: RoomSnapshot) => s.recording.recordings
+
 const selectMiniPlayer = (s: RoomSnapshot) => s.miniPlayer.active
 
 // --- 훅 ---
@@ -207,13 +209,19 @@ export function useRoomMetronome() {
  */
 export function useRoomTelemetry<K extends keyof RoomTelemetry>(...keys: K[]): Pick<RoomTelemetry, K> {
   const { store } = useRoomRuntime()
-  return useRoomSelector(store, (s) => {
-    const all = telemetryOf(s)
-    if (keys.length === 0) return all
-    const picked = {} as Pick<RoomTelemetry, K>
-    for (const k of keys) picked[k] = all[k]
-    return picked
-  })
+  // 키 목록이 같으면 같은 선택자를 쓴다(useRoomSelector의 캐시 키). 키가 바뀌면 새 선택자로 다시 고른다
+  const keyList = keys.join(',')
+  const selector = useMemo(() => {
+    const picked = keyList ? (keyList.split(',') as K[]) : []
+    return (s: RoomSnapshot): Pick<RoomTelemetry, K> => {
+      const all = telemetryOf(s)
+      if (picked.length === 0) return all
+      const out = {} as Pick<RoomTelemetry, K>
+      for (const k of picked) out[k] = all[k]
+      return out
+    }
+  }, [keyList])
+  return useRoomSelector(store, selector)
 }
 
 /** 관람 수신·개인 믹서: 표시용 연결 상태, 수신 스트림, 믹서 설정·마스터 */
@@ -257,7 +265,14 @@ export function useRoomRequests() {
   }
 }
 
-/** 브라우저 녹음(MediaRecorder): 상태·목록·시간 */
+/** 브라우저 녹음 목록과 삭제만. 녹음 시간(1s 틱)이 바뀌어도 다시 그리지 않는다 */
+export function useRoomRecordings() {
+  const { store, actions } = useRoomRuntime()
+  const recordings = useRoomSelector(store, selectRecordings)
+  return { recordings, deleteRecording: actions.deleteRecording }
+}
+
+/** 브라우저 녹음(MediaRecorder): 상태·목록·시간. 녹음 중에는 1초마다 다시 그린다 — 목록만 필요하면 useRoomRecordings */
 export function useRoomRecording() {
   const { store, actions } = useRoomRuntime()
   const r = useRoomSelector(store, selectRecording)

@@ -177,7 +177,7 @@ client/src/
 | 규칙 | 위반 예 |
 |---|---|
 | ① 다른 기능의 내부 파일 import 금지 — `features/<y>/index.ts`만 | `features/room/…`에서 `../rooms/roomModel` |
-| ① app·native·shared도 기능 내부 금지 | `app/App.tsx`에서 `../features/room/state/RoomContext` |
+| ① app·native·shared도 기능 내부 금지 | `app/App.tsx`에서 `../features/room/state/RoomProvider` |
 | ② shared → features·native·app 금지 | `shared/ui/…`에서 `../../features/auth` |
 | ③ native → features·app 금지 | `native/…`에서 `../features/room` |
 | ④ features → app 금지 | `features/home/…`에서 `../../app/routeTable` |

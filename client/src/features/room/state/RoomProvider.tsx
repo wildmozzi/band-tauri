@@ -47,7 +47,13 @@ import { useWebAudioMixer } from './useWebAudioMixer'
 
 const BROADCAST_RESYNC_MS = 5000
 
+/** 엔진에 붙은 피어 id 목록(문자열) — 통계 틱마다 바뀌는 레벨 값이 아니라 피어 구성이 바뀔 때만 달라진다 */
+const enginePeerIdsOf = (s: RoomSnapshot) => (s.perform.stats?.peers ?? []).map((p) => p.peerId).join(',')
+
 const selectProviderView = (s: RoomSnapshot) => ({
+  /** 엔진 세션 단계 (스토어 미러가 유일한 원천) */
+  phase: s.perform.phase,
+  enginePeerIds: enginePeerIdsOf(s),
   currentRoomId: s.connection.currentRoomId,
   isBroadcaster: s.derived.isBroadcaster,
   viewers: s.derived.viewers,
@@ -127,24 +133,28 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   }, store)
 
   // --- 연주 세션 (엔진) ---
-  const { session, state: perf } = useNativeSession({
+  const { session } = useNativeSession({
     send,
     getSelfId: () => clientIdRef.current,
     getRoomId: () => store.getSnapshot().connection.currentRoomId,
     getOtherPerformers: () => Object.keys(store.getSnapshot().roster).filter((id) => id !== clientIdRef.current),
   })
-  const running = perf.phase === 'running'
-  // 엔진 세션 상태를 스토어에 미러 (화면은 스토어에서 읽는다)
+  // 엔진 세션 상태를 스토어에 미러 (화면과 Provider 모두 스토어에서 읽는다)
   useEffect(() => {
     store.update({ perform: session.getState() })
     return session.subscribe((p) => store.update({ perform: p }))
   }, [store, session])
 
+  // Provider가 쓰는 조각. 엔진 통계 틱(레벨만 바뀜)에는 값이 그대로라 Provider도 다시 그리지 않는다
+  const view = useRoomSelector(store, selectProviderView)
+  const { phase, enginePeerIds } = view
+  const running = phase === 'running'
+
   // 연주 세션이 돌면 설정 화면의 테스트를 막는다
   const { setEngineInUse } = audioSettings
   useEffect(() => {
-    setEngineInUse(perf.phase !== 'idle')
-  }, [perf.phase, setEngineInUse])
+    setEngineInUse(phase !== 'idle')
+  }, [phase, setEngineInUse])
 
   // 악기 변경 결과 표시 타이머
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
@@ -194,8 +204,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     if (recordingFromEngineRef.current) stopRecording()
     mixSource.invalidate()
   }, [running, stopRecording, mixSource])
-
-  const view = useRoomSelector(store, selectProviderView)
 
   // 방에 있는 동안(엔진 시작 전 대기 포함)은 앱 업데이트 설치를 보류한다 (native/updater)
   useEffect(() => {
@@ -559,7 +567,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   // --- 엔진 믹서 적용 (연주 중) ---
   const { mixSettingsMap, masterVolume, masterMuted } = view
   const appliedGainRef = useRef<Record<string, string>>({})
-  const enginePeerIds = useMemo(() => (perf.stats?.peers ?? []).map((p) => p.peerId).join(','), [perf.stats])
   useEffect(() => {
     if (!running) {
       appliedGainRef.current = {}

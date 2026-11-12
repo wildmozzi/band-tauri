@@ -11,7 +11,7 @@ export type UserPlan = 'free' | 'standard' | 'pro'
  * 요금제 게이트를 새로 걸면 서버에서 강제하고, 그때 여기 값을 나눈다.
  */
 export interface FeatureLimit {
-  /** 동시 연주자 상한 — 엔진 MAX_PERFORMERS (RoomContext·sessionLogic이 강제) */
+  /** 동시 연주자 상한 — 엔진 MAX_PERFORMERS (RoomProvider·sessionLogic이 강제) */
   maxPerformers: number
   /** 방 정원(관람 포함) 상한 — 서버 roomCapacity·DB CHECK(013) */
   maxRoomCapacity: number

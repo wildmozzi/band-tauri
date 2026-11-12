@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
-import { useRoomConnection, useRoomPerform, useRoomMixer, useRoomRequests, useRoomRecording } from './state/roomHooks'
+import { useRoomConnection, useRoomPerform, useRoomMixer, useRoomRequests, useRoomRecordings } from './state/roomHooks'
 import { MAX_PERFORMERS } from '../../native/engineApi'
 import { instrumentUsage } from './roomDetailModel'
 import { useRoomDetailData } from './hooks/useRoomDetailData'
@@ -25,7 +25,7 @@ import './RoomDetail.css'
 /**
  * 합주실 화면. 하위 컴포넌트는 components/, 화면 훅은 hooks/, 세션 상태는 state/에 있다.
  * 서버 상태(방 상세·방장 닉네임·설정 저장·삭제)는 features/rooms·profile의 query 훅,
- * 실시간 상태(시그널링·엔진·믹서·채팅)는 RoomContext가 갖는다.
+ * 실시간 상태(시그널링·엔진·믹서·채팅)는 state/RoomProvider(RoomSessionStore)가 갖고 화면은 state/roomHooks의 선택 구독 훅으로 읽는다.
  */
 export function RoomDetail() {
   const { roomId } = useParams<{ roomId: string }>()
@@ -35,7 +35,7 @@ export function RoomDetail() {
   const { isPerforming, myInstrument, peerInstruments, broadcasterId } = useRoomPerform()
   const { rtcStatus, resumeAllAudioContexts } = useRoomMixer()
   const { pendingRequests, requestNotice, dismissRequestNotice, approveRequest, rejectRequest, pendingInstrumentChanges, approveInstrumentChange, rejectInstrumentChange, requestInstrumentChange } = useRoomRequests()
-  const { recordings, deleteRecording } = useRoomRecording()
+  const { recordings, deleteRecording } = useRoomRecordings()
 
   const { room, loading, hostNickname } = useRoomDetailData(roomId)
   useRoomPresence(roomId, room)

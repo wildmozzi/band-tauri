@@ -129,6 +129,15 @@ describe('reduceRoomSignal — 참가자·WebRTC', () => {
     expect(r.effects).toEqual([{ type: 'peer-gone', peerId: 'a' }, { type: 'close-viewer', peerId: 'a' }])
   })
 
+  it('participant-left: 대기 요청·연주 기록이 없던 참가자면 요청·연주자 조각을 건드리지 않는다 (#78 L4)', () => {
+    const r = reduceRoomSignal(inRoom(), { type: 'participant-left', oderId: 'a' }, ctx())
+    expect(r.patch?.connection?.peers).toEqual([])
+    expect(r.patch && 'requests' in r.patch).toBe(false)
+    expect(r.patch && 'roster' in r.patch).toBe(false)
+    const stranger = reduceRoomSignal(inRoom(), { type: 'participant-left', oderId: 'nobody' }, ctx())
+    expect(stranger.patch).toEqual({})
+  })
+
   it('performer-updated: 연주 시작이면 등록 + 엔진에 알림, 중단이면 제거', () => {
     const on = reduceRoomSignal(inRoom(), { type: 'performer-updated', oderId: 'c', isPerforming: true, instrument: 'keys' }, ctx())
     expect(on.patch?.connection?.peers).toEqual(['a', 'c'])
