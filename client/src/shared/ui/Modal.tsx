@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react'
 import './ui.css'
+import './modal.css'
 
 /** 열린 모달 스택 — Esc·Tab은 맨 위 모달만 처리한다 (모달 위에 모달이 뜨는 경우) */
 const openStack: symbol[] = []

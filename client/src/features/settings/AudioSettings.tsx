@@ -34,6 +34,7 @@ import { Modal } from '../../shared/ui'
 import { DiagnosticsExport } from './DiagnosticsExport'
 import { DevServerSettingsSection } from './DevServerSettings'
 import './AudioSettings.css'
+import './audioSettingsPanel.css'
 
 interface AudioSettingsProps {
   onClose?: () => void

@@ -1,0 +1,176 @@
+/* RoomCard.css — app/App.css에서 옮긴 화면 전용 규칙 (P3-2 ③-3). 순서는 원래 App.css 순서 그대로 */
+.room-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl);
+  padding: 24px;
+  cursor: pointer;
+  transition: all 0.3s;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.room-card:hover {
+  background: var(--bg-panel-strong);
+  border-color: var(--accent);
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-lg);
+}
+
+.room-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.room-info h3 {
+  font-size: 1.3rem;
+  margin-bottom: 4px;
+}
+
+.room-genre {
+  font-size: 0.85rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.room-vibe {
+  color: var(--text-muted);
+  line-height: 1.5;
+  font-size: 0.95rem;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.room-card-footer {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.room-enter-btn {
+  width: 100%;
+  padding: 10px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  color: var(--accent);
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.room-enter-btn:hover {
+  background: var(--accent-fill);
+  color: white;
+}
+
+/* Room Card - Tags */
+.room-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.room-card-tag {
+  padding: 3px 10px;
+  background: var(--white-a05);
+  border-radius: var(--radius-xl);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.room-card-tag.more {
+  background: var(--violet-500-a10);
+  color: var(--accent);
+}
+
+.room-card-tag.more.clickable {
+  cursor: pointer;
+  transition: all 0.2s ease;
+  position: relative;
+}
+
+.room-card-tag.more.clickable:hover {
+  background: var(--violet-500-a25);
+}
+
+/* Tags Popup */
+.tags-popup {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 150px;
+  max-width: 250px;
+  box-shadow: var(--shadow-md);
+  z-index: 100;
+}
+
+.tags-popup::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: var(--border);
+}
+
+.popup-tag {
+  padding: 4px 8px;
+  background: var(--white-a08);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  color: var(--color-text-subtle);
+  white-space: nowrap;
+}
+
+.room-card-tag.empty {
+  font-style: italic;
+  opacity: 0.5;
+}
+
+/* Room Card - Instruments */
+.room-card-instruments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.room-card-inst {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--white-a05);
+  border-radius: var(--radius-md);
+  font-size: 1rem;
+}
+
+.room-card:hover .room-card-inst {
+  background: var(--white-a08);
+}
+
+.inst-slot-count {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.stat-value.approval {
+  color: var(--warning);
+}

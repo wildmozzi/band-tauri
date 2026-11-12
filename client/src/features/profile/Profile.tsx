@@ -4,6 +4,7 @@ import { usePremium, ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, pla
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useRequireAuth, useProfileNicknameQuery, useSaveProfileMutation, useUpdateUserMetadataMutation } from '../auth'
 import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
+import './profileDetails.css'
 import './Profile.css'
 import { Button } from '../../shared/ui/Button'
 
