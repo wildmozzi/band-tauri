@@ -4,18 +4,18 @@ import { Server as HttpsServer } from 'https'
 import { v4 as uuidv4 } from 'uuid'
 import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
-import { deriveRelayBindKey, isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
+import { isValidSsrc } from './relayToken'
 import type { RoomMeta } from '../repositories/roomRepository'
 import { defaultScryptGate } from '../lib/roomPassword'
 import {
   APPROVAL_GRACE_MS, AUTH_TIMEOUT_MS, MAX_CHAT_LENGTH, MAX_MESSAGE_BYTES, MAX_NICKNAME_LENGTH, MAX_PENDING_MESSAGES,
   MAX_ROOM_ID_LENGTH, PARTICIPANT_UPDATE_DEBOUNCE_MS, REJOIN_WINDOW_MS, TOKEN_EXPIRY_GRACE_MS,
-  type InstrumentChangeRequest, type MetronomeState, type Msg, type PerformRequest,
+  type InstrumentChangeRequest, type Msg, type PerformRequest,
 } from '../signaling/protocol'
 import { DEFAULT_LIMITS, type Client, type LeaveReason, type WsDeps, type WsLimits, type WsOptions } from '../signaling/types'
 import { TokenBucket } from '../signaling/rateLimit'
 import { parseCandidates, parseEngineKey } from '../signaling/descriptor'
-import { parseMetronomeState } from '../signaling/metronome'
+import { METRONOME_HOST_CHANGED, createMetronome, parseMetronomeState } from '../signaling/metronome'
 import { jwtExpiryMs } from '../signaling/auth'
 import { clientIp } from '../signaling/connection'
 import { supabaseDeps } from '../signaling/supabaseDeps'
@@ -25,6 +25,7 @@ import { createRequests } from '../signaling/requests'
 import { createCapacity } from '../signaling/capacity'
 import { createPassword } from '../signaling/password'
 import { createPerformers } from '../signaling/performers'
+import { createNativeSession } from '../signaling/nativeSession'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -95,7 +96,6 @@ export function initializeWebSocket(
   const deps: WsDeps = { ...supabaseDeps(supabase), ...options.deps }
   const limits: WsLimits = { ...DEFAULT_LIMITS, ...options.limits }
   const scryptGate = options.scryptGate ?? defaultScryptGate
-  const relayConfig = relayConfigFromEnv(env)
 
   // 서버 인스턴스별 상태
   const insecureDevMode = isInsecureDevMode(deps.hasBackend, env)
@@ -103,16 +103,13 @@ export function initializeWebSocket(
   const registry = createRegistry()
   const { rooms, clients, addClient, removeClient, addToRoom, removeFromRoom, getRoomParticipants, broadcastToRoom, findRoomHost, getRoomPeer } = registry
   const roomMeta = createRoomMeta(deps, insecureDevMode)
-  const { getRoomMeta, getRoomMetaOrNull, checkHost, refreshHost } = roomMeta
+  const { getRoomMetaOrNull, checkHost, refreshHost } = roomMeta
   const { performRequests, instrumentChangeRequests } = createRequests()
   const { seatHolds, recentlyLeft, checkCapacity, hasSeatHold, clearSeatHold, consumeRejoin, sweep } = createCapacity(registry, limits)
   const { checkRoomPassword } = createPassword(limits, scryptGate)
   const { approvals, hasApproval, setApproval, clearApproval, canStartPerforming } = createPerformers(roomMeta, insecureDevMode)
-  /**
-   * roomId → 방장이 켠 공유 메트로놈(P2-3). hostId = 켠 연결(clientId = 엔진 peerId), hostUserId = 켤 때의 DB 방장.
-   * 방장 엔진이 내려가면(native-leave·퇴장) 지우고, DB 방장이 바뀐 것을 알게 되면 정지를 알리고 지운다(PR #36 L1)
-   */
-  const metronomes = new Map<string, { hostId: string; hostUserId: string | undefined; state: MetronomeState }>()
+  const { metronomes, broadcastMetronomeStop, dropMetronomeIfHostChanged, replayMetronome } = createMetronome(registry, roomMeta, deps, limits)
+  const { clearNative, sendRelayToken, ssrcTakenInRoom, keyTakenInRoom } = createNativeSession(registry, env)
   const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const connectionsPerIp = new Map<string, number>()
   /** clientId → 연결이 끊겨 재개를 기다리는 클라이언트 (방/연주 상태 유지) */
@@ -140,121 +137,6 @@ export function initializeWebSocket(
   }
 
   // ---------- helpers ----------
-
-  /** 엔진 상태(descriptor 바인딩) 정리: native-leave·퇴장·방 이동 */
-  function clearNative(c: Client) {
-    c.nativeActive = false
-    c.nativeSsrc = undefined
-    c.nativeKey = undefined
-  }
-
-  /**
-   * 릴레이 토큰 발급 (연주자 전용). roomId/memberId/ssrc는 서버가 아는 값만 쓴다.
-   * - memberId는 검증된 userId: 세션 재개 없이 재접속해도(새 clientId) 릴레이가 같은 멤버로 보고 이전 슬롯을 교체한다.
-   * - 회수 수단이 없으므로 수명을 짧게(기본 120초) 두고 클라이언트가 갱신한다. 릴레이 등록은 토큰 만료를 넘지 않는다.
-   * - expiresIn(남은 수명, 초)·serverNow를 함께 보낸다: 클라이언트는 자기 시계가 아니라 받은 시각 + expiresIn으로
-   *   만료·갱신을 판단한다(시계가 어긋난 PC에서 토큰이 주기적으로 끊기지 않게, PR #10 M1).
-   * - bindKey: 토큰별 Bind MAC 키(relay-design 2.1.1). TLS로만 전달되어 경로상 공격자의 등록 가로채기를 막는다.
-   */
-  function sendRelayToken(c: Client) {
-    if (!relayConfig || !c.roomId || !c.userId || c.nativeSsrc === undefined || !isPerformer(c)) return
-    const serverNow = Math.floor(Date.now() / 1000)
-    const expiresAt = serverNow + relayConfig.ttlSec
-    const token = signRelayToken({ roomId: c.roomId, memberId: c.userId, ssrc: c.nativeSsrc, expiresAt }, relayConfig.secret)
-    send(c.ws, {
-      type: 'relay-token',
-      token: token.toString('base64url'),
-      bindKey: deriveRelayBindKey(token, relayConfig.secret).toString('base64url'),
-      addr: relayConfig.addr,
-      ssrc: c.nativeSsrc,
-      expiresAt,
-      expiresIn: relayConfig.ttlSec,
-      serverNow,
-    })
-  }
-
-  /** 같은 방의 다른 사용자가 이 ssrc를 쓰고 있는지 (ssrc 선점·가로채기 방지) */
-  function ssrcTakenInRoom(c: Client, ssrc: number): boolean {
-    if (!c.roomId) return false
-    for (const peerId of rooms.get(c.roomId) || []) {
-      if (peerId === c.id) continue
-      const peer = clients.get(peerId)
-      if (peer && peer.nativeSsrc === ssrc && peer.userId !== c.userId) return true
-    }
-    return false
-  }
-
-  /**
-   * 같은 방의 다른 사용자(JWT userId 기준)가 이 엔진 공개키를 쓰고 있는지 (P1-1c: 공개키 위장·선점 방지).
-   * 세션 재개 유예 중인 연결도 방에 남아 있으므로 그 키는 계속 보호된다. 같은 userId(재접속·엔진 재시작)는 허용.
-   */
-  function keyTakenInRoom(c: Client, key: string): boolean {
-    if (!c.roomId) return false
-    for (const peerId of rooms.get(c.roomId) || []) {
-      if (peerId === c.id) continue
-      const peer = clients.get(peerId)
-      if (peer && peer.nativeKey === key && peer.userId !== c.userId) return true
-    }
-    return false
-  }
-
-  const METRONOME_HOST_CHANGED = { type: 'error', code: 'metronome-host-only', message: '방장이 바뀌어 메트로놈을 껐습니다.' }
-
-  /** 메트로놈 정지를 같은 방의 다른 연주자에게 알린다(켠 방장 제외) */
-  function broadcastMetronomeStop(roomId: string, metro: { hostId: string; state: MetronomeState }) {
-    const stopped = { type: 'metronome', from: metro.hostId, state: { ...metro.state, running: false } }
-    for (const peerId of rooms.get(roomId) || []) {
-      if (peerId === metro.hostId) continue
-      const peer = clients.get(peerId)
-      if (peer && isPerformer(peer)) send(peer.ws, stopped)
-    }
-  }
-
-  /**
-   * 방장 이양(PR #36 L1): 지금 DB 방장(`currentHostUserId`, 방이 없으면 null)이 메트로놈을 켠 사용자가 아니면
-   * 정지를 알리고 상태를 지운다. 옛 방장에게는 metronome-host-only를 보내 그쪽 기준 클릭도 끄게 한다.
-   * 조작 권한은 따로 넘길 것이 없다: metronome 메시지마다 방장을 다시 확인하므로(캐시 최대 metronomeHostCheckMs, PR #53 M1)
-   * 새 방장은 곧바로 켤 수 있고 옛 방장은 곧바로 막힌다.
-   * 옛 방장이 재개 유예 중(소켓 끊김)이면 알림을 재개 때 보낸다(PR #53 L2).
-   * 지웠으면 true.
-   */
-  function dropMetronomeIfHostChanged(roomId: string, currentHostUserId: string | null): boolean {
-    const metro = metronomes.get(roomId)
-    if (!metro || metro.hostUserId === undefined || metro.hostUserId === currentHostUserId) return false
-    console.log(`[METRONOME] host changed in room ${roomId.slice(0, 8)} - stopping`)
-    metronomes.delete(roomId)
-    broadcastMetronomeStop(roomId, metro)
-    const oldHost = clients.get(metro.hostId)
-    if (oldHost && oldHost.roomId === roomId) {
-      if (oldHost.ws.readyState === oldHost.ws.OPEN) send(oldHost.ws, METRONOME_HOST_CHANGED)
-      else oldHost.pendingMetronomeStop = true
-    }
-    return true
-  }
-
-  /**
-   * 엔진을 (다시) 켠 연주자에게 방장이 켠 메트로놈을 다시 보낸다(늦게 들어온 연주자, 엔진 재시작).
-   * 보내기 전에 켠 사람이 아직 DB 방장인지 확인한다(이양 뒤 옛 방장 계획을 보내지 않게, PR #36 L1).
-   * DB 조회가 실패하면(throw, 방 없음 null과 구분) 판단을 미루고 그대로 보낸다(일시 장애로 합주를 끊지 않음, PR #53 H1).
-   */
-  async function replayMetronome(c: Client, roomId: string) {
-    const metro = metronomes.get(roomId)
-    if (!metro || metro.hostId === c.id || clients.get(metro.hostId)?.roomId !== roomId) return
-    if (deps.hasBackend && metro.hostUserId !== undefined) {
-      let meta: RoomMeta | null | undefined
-      try {
-        meta = await getRoomMeta(roomId, limits.metronomeHostCheckMs)
-      } catch (err) {
-        console.warn('[METRONOME] host check failed:', err instanceof Error ? err.message : err)
-      }
-      if (meta !== undefined && dropMetronomeIfHostChanged(roomId, meta?.hostId ?? null)) return
-    }
-    // DB 조회 동안 상태가 바뀌었을 수 있다
-    const now = metronomes.get(roomId)
-    if (!now || now.hostId === c.id || clients.get(c.id) !== c || c.roomId !== roomId || !c.nativeActive) return
-    if (clients.get(now.hostId)?.roomId !== roomId) return
-    send(c.ws, { type: 'metronome', from: now.hostId, state: now.state })
-  }
 
   /** 참가자 수 DB 갱신 디바운스 (M3) */
   function scheduleParticipantUpdate(roomId: string) {
