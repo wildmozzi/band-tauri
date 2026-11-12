@@ -18,7 +18,7 @@ import { createPassword } from '../src/signaling/password'
 import { createPerformers } from '../src/signaling/performers'
 import { DEFAULT_LIMITS } from '../src/signaling/types'
 import { ScryptGate, hashRoomPassword } from '../src/lib/roomPassword'
-import { METRONOME_HOST_CHANGED, createMetronome } from '../src/signaling/metronome'
+import { createMetronome, metronomeHostChanged } from '../src/signaling/metronome'
 import { createNativeSession } from '../src/signaling/nativeSession'
 import { sleep } from './helpers'
 
@@ -382,7 +382,7 @@ describe('metronome', () => {
     assert.equal(metro.metronomes.has('r'), false)
     assert.deepEqual(sentTo(performer), [{ type: 'metronome', from: 'h', state: { ...STATE, running: false } }])
     assert.deepEqual(sentTo(viewer), [], 'viewers are not engine peers')
-    assert.deepEqual(sentTo(host), [METRONOME_HOST_CHANGED])
+    assert.deepEqual(sentTo(host), [metronomeHostChanged()])
   })
 
   it('an old host whose socket is closed (resume grace) gets the notice on resume instead', () => {

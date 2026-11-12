@@ -16,6 +16,17 @@ export const APPROVAL_GRACE_MS = 60_000
 export const TOKEN_EXPIRY_GRACE_MS = 60_000
 export const PARTICIPANT_UPDATE_DEBOUNCE_MS = 1000
 
+/** 길이 제한이 있는 비어 있지 않은 문자열 (S3: wsService에서 이동, 순수) */
+export function isNonEmptyString(v: unknown, max = 256): v is string {
+  return typeof v === 'string' && v.length > 0 && v.length <= max
+}
+
+export function sanitizeNickname(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined
+  const trimmed = v.trim().slice(0, MAX_NICKNAME_LENGTH)
+  return trimmed || undefined
+}
+
 export interface Participant {
   oderId: string
   nickname: string
@@ -53,7 +64,7 @@ export interface EngineCandidate { kind: 'lan' | 'public'; addr: string }
 
 // ---------- 송신 메시지(서버 → 클라이언트) ----------
 // 모양의 기준은 서버 코드와 test/fixtures/ws-transcript.json이다. 서버 send는 아직 이 타입으로 검사하지 않는다
-// (S3 디스패치 정리 때). 지금은 e2e mock(client/e2e/mocks/signaling.ts)이 이 타입으로 맞춰 mock이 서버와 어긋나면 e2e tsc가 실패한다.
+// (S3은 위치만 옮겨 아직 하지 않음 — S4 이후). 지금은 e2e mock(client/e2e/mocks/signaling.ts)이 이 타입으로 맞춰 mock이 서버와 어긋나면 e2e tsc가 실패한다.
 
 export interface EngineDescriptor {
   ssrc: number
