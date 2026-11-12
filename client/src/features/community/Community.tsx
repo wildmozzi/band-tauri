@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
 import { usePostsQuery, useToggleLikeMutation, useTrendingTagsQuery } from './queries'
 import type { Post } from './communityApi'
+import './communityFeed.css'
 import './communityList.css'
 
 // 사용 가능한 악기 목록

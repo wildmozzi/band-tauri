@@ -20,7 +20,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { Page } from '@playwright/test'
-import { ALICE, GUITAR_POST, REMOTE_PERFORMER, ROCK_ROOM } from '../fixtures'
+import { ALICE, GUITAR_POST, JAZZ_ROOM, JAZZ_ROOM_PASSWORD, REMOTE_PERFORMER, ROCK_ROOM } from '../fixtures'
 import type { MockBackend } from '../mocks'
 import { fulfillJson } from '../mocks/http'
 import { expect, test } from '../test'
@@ -47,9 +47,78 @@ const SCREENS: Screen[] = [
   { name: 'home', path: '/', ready: h1('온라인 합주실') },
   { name: 'home-login', path: '/', login: true, ready: h1('온라인 합주실') },
   { name: 'auth', path: '/auth', ready: p => p.locator('form.auth-form') },
+  {
+    name: 'auth-signup',
+    path: '/auth',
+    ready: p => p.locator('form.auth-form'),
+    act: async page => {
+      await page.locator('.auth-tabs button').nth(1).click()
+      await expect(page.locator('.auth-tabs button').nth(1)).toHaveClass(/active/)
+    },
+  },
+  {
+    name: 'audio-settings-modal',
+    path: '/',
+    ready: h1('온라인 합주실'),
+    act: async page => {
+      await page.getByRole('button', { name: '오디오 설정' }).click()
+      await expect(page.getByRole('dialog', { name: '오디오 설정' })).toBeVisible()
+    },
+  },
   { name: 'rooms', path: '/rooms', ready: p => p.locator('.room-card').filter({ hasText: ROCK_ROOM.title }) },
   { name: 'rooms-login', path: '/rooms', login: true, ready: p => p.locator('.room-card').filter({ hasText: ROCK_ROOM.title }) },
+  {
+    name: 'my-rooms-modal',
+    path: '/rooms',
+    login: true,
+    ready: p => p.locator('.room-card').filter({ hasText: ROCK_ROOM.title }),
+    act: async page => {
+      await page.getByRole('button', { name: /내 합주실/ }).click()
+      await expect(page.locator('.my-room-edit-btn').first()).toBeVisible()
+    },
+  },
+  {
+    name: 'room-edit-modal',
+    path: '/rooms',
+    login: true,
+    ready: p => p.locator('.room-card').filter({ hasText: ROCK_ROOM.title }),
+    act: async page => {
+      await page.getByRole('button', { name: /내 합주실/ }).click()
+      await page.locator('.my-room-edit-btn').first().click()
+      await expect(page.locator('.room-edit-modal')).toBeVisible()
+    },
+  },
   { name: 'room-create', path: '/rooms/create', login: true, ready: h1('새 합주실 만들기') },
+  {
+    name: 'room-password',
+    path: `/rooms/${JAZZ_ROOM.id}`,
+    setup: mock => mock.signaling.setRoom(JAZZ_ROOM.id, { password: JAZZ_ROOM_PASSWORD, maxAttempts: 5 }),
+    ready: p => p.locator('.room-password-card'),
+    act: async page => {
+      await page.getByPlaceholder('합주실 비밀번호').fill('wrong-pass')
+      await page.locator('.room-password-card').getByRole('button', { name: '입장' }).click()
+      await expect(page.locator('.room-password-card')).toContainText('남은 시도 4회')
+    },
+  },
+  {
+    name: 'room-full',
+    path: `/rooms/${ROCK_ROOM.id}`,
+    setup: mock =>
+      mock.signaling.setRoom(ROCK_ROOM.id, {
+        participants: Array.from({ length: ROCK_ROOM.max_participants }, (_, i) => ({ oderId: `full-${i}`, nickname: `관람${i}` })),
+      }),
+    ready: p => p.locator('.room-password-card').getByRole('alert'),
+  },
+  {
+    name: 'room-info-modal',
+    path: `/rooms/${ROCK_ROOM.id}`,
+    setup: mock => mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] }),
+    ready: p => p.locator('.performers-panel').filter({ hasText: REMOTE_PERFORMER.nickname }),
+    act: async page => {
+      await page.getByRole('button', { name: /정보/ }).click()
+      await expect(page.getByRole('dialog', { name: '방 정보' })).toBeVisible()
+    },
+  },
   {
     name: 'room-detail-spectator',
     path: `/rooms/${ROCK_ROOM.id}`,

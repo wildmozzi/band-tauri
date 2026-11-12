@@ -1,4 +1,5 @@
 import { findInstrument, type InstrumentSlot } from './roomModel'
+import './RoomCard.css'
 
 interface TagOverflowProps {
   roomId: string

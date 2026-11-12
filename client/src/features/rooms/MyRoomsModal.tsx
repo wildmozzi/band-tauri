@@ -1,6 +1,7 @@
 import { InstrumentBadges, TagOverflow } from './RoomTags'
 import { effectiveRoomCapacity, formatDate, myRoomStatusLabel, type MyRoom } from './roomModel'
 import { Modal } from '../../shared/ui/Modal'
+import './MyRoomsModal.css'
 
 interface MyRoomsModalProps {
   myRooms: MyRoom[]

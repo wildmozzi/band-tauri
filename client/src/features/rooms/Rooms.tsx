@@ -11,6 +11,7 @@ import { useExpandedTags } from './useExpandedTags'
 import { useMyRooms } from './useMyRooms'
 import { useRoomEditor } from './useRoomEditor'
 import { useRoomList } from './useRoomList'
+import './Rooms.css'
 
 export function Rooms() {
   const { user } = useAuth()
