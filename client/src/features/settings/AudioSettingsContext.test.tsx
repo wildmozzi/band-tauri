@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// AudioSettingsContext의 DB 로드/저장이 features/profile 훅으로 옮겨진 뒤에도 저장 게이트 규칙을 지키는지
+// AudioSettingsContext의 DB 로드/저장이 features/auth의 프로필 query 훅으로 옮겨진 뒤에도 저장 게이트 규칙을 지키는지
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

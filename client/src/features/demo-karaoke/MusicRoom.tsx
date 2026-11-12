@@ -66,7 +66,7 @@ export function MusicRoom() {
   const isLoggedIn = Boolean(user)
   const queryClient = useQueryClient()
 
-  // 히스토리 상태 (features/stems/queries)
+  // 히스토리 상태 (stemQueries.ts)
   const [showHistory, setShowHistory] = useState(false)
   const historyQuery = useStemHistoryQuery(userId, showHistory && isLoggedIn)
   const separationHistory: StemSeparation[] = historyQuery.data ?? []

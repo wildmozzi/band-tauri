@@ -1,5 +1,5 @@
 /**
- * 관람자 브릿지 WebRTC 공통 설정 (송신: native/mixBridge.ts, 수신: contexts/room/useViewerAudio.ts).
+ * 관람자 브릿지 WebRTC 공통 설정 (송신: native/mixBridge.ts, 수신: features/room/state/useViewerAudio.ts).
  */
 
 export const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }]

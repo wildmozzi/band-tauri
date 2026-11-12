@@ -109,7 +109,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const configRef = useRef(config)
   configRef.current = config
 
-  // --- DB 로드 (로그인 사용자, features/profile의 useAudioSettingsQuery) ---
+  // --- DB 로드 (로그인 사용자, features/auth의 useAudioSettingsQuery) ---
   const userId = user?.id ?? null
   const stored = useAudioSettingsQuery(userId)
   const storedReady = stored.isSuccess

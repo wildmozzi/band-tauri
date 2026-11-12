@@ -1,10 +1,10 @@
 /**
  * 합주실 상태. 기능별 훅을 조합만 한다.
  *
- * - 시그널링 WS: room/useSignaling
+ * - 시그널링 WS: useSignaling
  * - 연주(데스크톱 앱 전용): native/performSession(useNativeSession) (UDP 풀메시) + native/mixBridge (관람자 방송)
- * - 관람(웹/앱 공통): room/useViewerAudio (방송 담당 연주자의 믹스를 WebRTC 수신 전용으로) + room/useWebAudioMixer
- * - 채팅/참여요청/녹음: room/useChat, room/usePerformRequests, room/useRecording
+ * - 관람(웹/앱 공통): useViewerAudio (방송 담당 연주자의 믹스를 WebRTC 수신 전용으로) + useWebAudioMixer
+ * - 채팅/참여요청/녹음: useChat, usePerformRequests, useRecording
  *
  * 결정사항(docs/overhaul/native-engine-design.md): 연주자는 앱 전용, 웹은 관람만. 앱 연주자끼리는 WebRTC를 쓰지 않는다.
  */

@@ -1,6 +1,6 @@
 /**
  * 합주실 목록·내 방·방 상세 서버 상태 (TanStack Query). 화면/페이지 훅은 Supabase를 직접 부르지 않는다.
- * 방 생성·비밀번호는 서버 API(services/roomApi.ts) 경유. 방 상세 조회는 roomApi.fetchRoomById(get_room RPC).
+ * 방 생성·비밀번호는 서버 API(roomApi.ts) 경유. 방 상세 조회는 roomApi.fetchRoomById(get_room RPC).
  *
  * 쿼리 키
  *   ['rooms', 'list']            공개 합주실 목록 (DB 행 전체, 화면에서 publicRooms/toRoom 변환)

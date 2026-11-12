@@ -1,5 +1,5 @@
 /**
- * 개발 실행 전용 서버 프록시(P1-12b)의 경로 규칙. 브라우저(lib/apiUrl)와 Vite 개발 서버 플러그인(vite/bandServerProxy)이 함께 쓴다.
+ * 개발 실행 전용 서버 프록시(P1-12b)의 경로 규칙. 브라우저(apiUrl.ts)와 Vite 개발 서버 플러그인(vite/bandServerProxy)이 함께 쓴다.
  *
  * 개발 모드에서 VITE_API_URL/VITE_SIGNALING_URL이 'auto'(또는 비어 있음)면 앱은 서버에 직접 붙지 않고
  * 자기 Vite 개발 서버(https://localhost:5173)의 `/__band_server/<http|https>/<host>:<port>/...`로 붙는다.

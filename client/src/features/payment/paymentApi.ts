@@ -3,7 +3,7 @@ import { getApiUrl } from '../../shared/lib/apiUrl'
 import { authHeaders } from '../../shared/lib/authHeaders'
 import type { OrderStatus, OrderStatusResult } from './paymentFlow'
 
-// VITE_API_URL 또는 (auto) 현재 호스트:8080 — lib/apiUrl
+// VITE_API_URL 또는 (auto) 현재 호스트:8080 — shared/lib/apiUrl
 const API_BASE_URL = getApiUrl()
 
 /** orderId는 createOrder로 서버에서 받은 것. amount는 토스 successUrl의 금액(서버가 주문 금액과 대조) */

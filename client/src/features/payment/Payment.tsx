@@ -14,7 +14,7 @@ interface PlanInfo {
   color: string
 }
 
-/** 가격은 서버 PLAN_PRICES와 같다. 기능 문구는 lib/planFeatures (P3-12a: 유료 전용 기능은 아직 없다) */
+/** 가격은 서버 PLAN_PRICES와 같다. 기능 문구는 planFeatures.ts (P3-12a: 유료 전용 기능은 아직 없다) */
 const PLAN_INFO: Record<string, PlanInfo> = {
   standard: {
     id: 'standard',

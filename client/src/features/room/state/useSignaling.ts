@@ -20,7 +20,7 @@ const AUTH_FALLBACK_MS = 2000
 const MAX_RECONNECT = 3
 const RECONNECT_DELAY_MS = 2000
 
-/** 'auto'면 현재 접속한 호스트의 8080 포트 (lib/apiUrl과 같은 규칙) */
+/** 'auto'면 현재 접속한 호스트의 8080 포트 (shared/lib/apiUrl과 같은 규칙) */
 export { getSignalingUrl }
 
 async function getAccessToken(): Promise<string | null> {

@@ -1,7 +1,7 @@
 /**
  * 앱 라우트의 단일 정의 (P3-8, PR #22 후속): 경로·탭 제목을 여기 한 번만 적는다.
  * - App(routes.tsx)은 이 표의 id마다 화면 요소를 붙여 useRoutes로 그린다(표에 없는 id는 타입 오류).
- * - 탭 제목(lib/pageTitle.ts)은 이 표를 react-router matchRoutes로 매칭한다 — 라우터와 같은 우선순위.
+ * - 탭 제목(pageTitle.ts)은 이 표를 react-router matchRoutes로 매칭한다 — 라우터와 같은 우선순위.
  * 이 파일은 화면 컴포넌트를 import하지 않는다(단위 테스트에서 가볍게 쓰도록).
  */
 export interface RouteMeta {

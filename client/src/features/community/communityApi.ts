@@ -262,7 +262,7 @@ export const communityApi = {
     return toPost(data)
   },
 
-  // 이미지 업로드는 서버 서명 URL 경유 (services/storageApi.ts, P3-10). Supabase Storage에 직접 쓰지 않는다
+  // 이미지 업로드는 서버 서명 URL 경유 (storageApi.ts, P3-10). Supabase Storage에 직접 쓰지 않는다
 
   /**
    * 글 작성·수정은 서버 API (P3-10d). 작성자는 서버가 토큰으로 정하고, 이미지는 서버가 검증 완료 업로드만

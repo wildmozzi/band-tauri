@@ -23,7 +23,7 @@ import { ChatPanel } from './components/ChatPanel'
 import './RoomDetail.css'
 
 /**
- * 합주실 화면. 하위 컴포넌트·훅은 pages/room/ 아래에 있다.
+ * 합주실 화면. 하위 컴포넌트는 components/, 화면 훅은 hooks/, 세션 상태는 state/에 있다.
  * 서버 상태(방 상세·방장 닉네임·설정 저장·삭제)는 features/rooms·profile의 query 훅,
  * 실시간 상태(시그널링·엔진·믹서·채팅)는 RoomContext가 갖는다.
  */

@@ -7,7 +7,7 @@ export type UserPlan = 'free' | 'standard' | 'pro'
 /**
  * 요금제별 한도 (표시용). 실제 동작과 같게 둔다 (P3-12a):
  * 서버·클라이언트 어디에서도 요금제로 막는 기능이 없으므로 세 요금제가 모두 같다.
- * 미구현 기능(클라우드 저장·자동 믹싱·예약 등)은 여기 두지 않는다 — lib/planFeatures의 PLANNED_FEATURES.
+ * 미구현 기능(클라우드 저장·자동 믹싱·예약 등)은 여기 두지 않는다 — planFeatures.ts의 PLANNED_FEATURES.
  * 요금제 게이트를 새로 걸면 서버에서 강제하고, 그때 여기 값을 나눈다.
  */
 export interface FeatureLimit {

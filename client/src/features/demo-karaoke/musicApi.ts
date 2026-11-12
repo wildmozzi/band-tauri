@@ -4,7 +4,7 @@
 import { getApiUrl } from '../../shared/lib/apiUrl'
 import { authHeaders } from '../../shared/lib/authHeaders'
 
-// VITE_API_URL 또는 (auto) 현재 호스트:8080 — lib/apiUrl
+// VITE_API_URL 또는 (auto) 현재 호스트:8080 — shared/lib/apiUrl
 const API_BASE_URL = getApiUrl()
 const DEMUCS_API_URL = import.meta.env.VITE_DEMUCS_API_URL || 'http://localhost:8000'
 

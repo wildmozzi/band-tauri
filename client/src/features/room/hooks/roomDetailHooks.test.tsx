@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// 방 상세 query 훅(features/rooms)과 RoomDetail 페이지 훅(pages/room) — 직접 Supabase 호출을 옮긴 부분
+// 방 상세 query 훅(features/rooms)과 RoomDetail 페이지 훅(features/room/hooks) — 직접 Supabase 호출을 옮긴 부분
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { argsOf, createSupabaseMock } from '../../../shared/test/supabaseMock'
