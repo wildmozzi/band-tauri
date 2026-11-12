@@ -26,15 +26,17 @@ export interface RequestsSvc {
 
 /**
  * 승인 계열 네 개(approve/reject-perform, approve/reject-instrument-change)의 공통 전처리: 방장 여부를 다시 확인 (L2).
- * S3: handleMessage의 `isHostAction` 블록을 그대로 옮겼다. 통과하면 true(원래는 통과하면 아래 분기로 내려갔다).
+ * S3: handleMessage의 `isHostAction` 블록을 그대로 옮겼다. 통과하면 검사한 roomId·targetId를 좁힌 타입으로 돌려주고 아니면 null.
+ * (S4-1: 호출부에 있던 "통과하면 늘 참인 원래 분기 조건 사본"을 이 반환값으로 대신했다 — #93 리뷰 Low-3)
  * roomId는 호출부가 처리 시작 때 읽은 값이다(원래 handleMessage의 `const roomId = client.roomId`).
  */
-async function requireHost(ctx: Ctx<RequestsSvc>, roomId: string | undefined, msg: Msg): Promise<boolean> {
+async function requireHost(ctx: Ctx<RequestsSvc>, roomId: string | undefined, msg: Msg): Promise<{ roomId: string; targetId: string } | null> {
   const { client } = ctx
   const { refreshHost } = ctx.svc.roomMeta
-  if (!roomId || typeof msg.targetId !== 'string') return false
-  if (!(await refreshHost(client)) || client.roomId !== roomId) return false
-  return true
+  const targetId = msg.targetId
+  if (!roomId || typeof targetId !== 'string') return null
+  if (!(await refreshHost(client)) || client.roomId !== roomId) return null
+  return { roomId, targetId }
 }
 
 /** `request-perform` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 (분기 조건은 첫 줄로) */
@@ -71,17 +73,17 @@ export function handleRequestPerform(ctx: Ctx<RequestsSvc>, msg: Msg) {
 /** `approve-perform` — S3: 방장 재확인(requireHost) 뒤 분기 본문을 그대로 옮겼다 */
 export async function handleApprovePerform(ctx: Ctx<RequestsSvc>, msg: Msg) {
   const { client } = ctx
-  const roomId = client.roomId
   const { getRoomPeer } = ctx.svc.registry
   const { performRequests } = ctx.svc.requests
   const { setApproval } = ctx.svc.performers
-  if (!(await requireHost(ctx, roomId, msg))) return
-  if (!roomId || typeof msg.targetId !== 'string') return // 원래 분기 조건(requireHost를 통과하면 늘 참)
+  const host = await requireHost(ctx, client.roomId, msg)
+  if (!host) return
+  const { roomId, targetId } = host
 
   const requests = performRequests.get(roomId)
-  const target = getRoomPeer(client, msg.targetId)
+  const target = getRoomPeer(client, targetId)
   if (!requests || !target) return
-  const requestIndex = requests.findIndex(r => r.oderId === msg.targetId)
+  const requestIndex = requests.findIndex(r => r.oderId === targetId)
   if (requestIndex === -1) return
   const request = requests[requestIndex]
   requests.splice(requestIndex, 1)
@@ -94,20 +96,20 @@ export async function handleApprovePerform(ctx: Ctx<RequestsSvc>, msg: Msg) {
 /** `reject-perform` — S3: 방장 재확인(requireHost) 뒤 분기 본문을 그대로 옮겼다 */
 export async function handleRejectPerform(ctx: Ctx<RequestsSvc>, msg: Msg) {
   const { client } = ctx
-  const roomId = client.roomId
   const { getRoomPeer } = ctx.svc.registry
   const { performRequests } = ctx.svc.requests
-  if (!(await requireHost(ctx, roomId, msg))) return
-  if (!roomId || typeof msg.targetId !== 'string') return // 원래 분기 조건(requireHost를 통과하면 늘 참)
+  const host = await requireHost(ctx, client.roomId, msg)
+  if (!host) return
+  const { roomId, targetId } = host
 
   const requests = performRequests.get(roomId)
   if (!requests) return
-  const requestIndex = requests.findIndex(r => r.oderId === msg.targetId)
+  const requestIndex = requests.findIndex(r => r.oderId === targetId)
   if (requestIndex === -1) return
   const request = requests[requestIndex]
   requests.splice(requestIndex, 1)
-  console.log(`[REJECT-PERFORM] Host rejected ${msg.targetId.slice(0, 8)} (${request.nickname})`)
-  const target = getRoomPeer(client, msg.targetId)
+  console.log(`[REJECT-PERFORM] Host rejected ${targetId.slice(0, 8)} (${request.nickname})`)
+  const target = getRoomPeer(client, targetId)
   const reason = (typeof msg.reason === 'string' ? msg.reason.trim().slice(0, 200) : '') || '방장이 요청을 거절했습니다.'
   if (target) send(target.ws, { type: 'perform-request-rejected', reason, instrument: request.instrument })
   return
@@ -155,16 +157,16 @@ export function handleRequestInstrumentChange(ctx: Ctx<RequestsSvc>, msg: Msg) {
 /** `approve-instrument-change` — S3: 방장 재확인(requireHost) 뒤 분기 본문을 그대로 옮겼다 */
 export async function handleApproveInstrumentChange(ctx: Ctx<RequestsSvc>, msg: Msg) {
   const { client } = ctx
-  const roomId = client.roomId
   const { rooms, clients, getRoomPeer } = ctx.svc.registry
   const { instrumentChangeRequests } = ctx.svc.requests
-  if (!(await requireHost(ctx, roomId, msg))) return
-  if (!roomId || typeof msg.targetId !== 'string') return // 원래 분기 조건(requireHost를 통과하면 늘 참)
+  const host = await requireHost(ctx, client.roomId, msg)
+  if (!host) return
+  const { roomId, targetId } = host
 
   const requests = instrumentChangeRequests.get(roomId)
-  const target = getRoomPeer(client, msg.targetId)
+  const target = getRoomPeer(client, targetId)
   if (!requests || !target) return
-  const requestIndex = requests.findIndex(r => r.oderId === msg.targetId)
+  const requestIndex = requests.findIndex(r => r.oderId === targetId)
   if (requestIndex === -1) return
   const request = requests[requestIndex]
   requests.splice(requestIndex, 1)
@@ -180,18 +182,18 @@ export async function handleApproveInstrumentChange(ctx: Ctx<RequestsSvc>, msg: 
 /** `reject-instrument-change` — S3: 방장 재확인(requireHost) 뒤 분기 본문을 그대로 옮겼다 */
 export async function handleRejectInstrumentChange(ctx: Ctx<RequestsSvc>, msg: Msg) {
   const { client } = ctx
-  const roomId = client.roomId
   const { getRoomPeer } = ctx.svc.registry
   const { instrumentChangeRequests } = ctx.svc.requests
-  if (!(await requireHost(ctx, roomId, msg))) return
-  if (!roomId || typeof msg.targetId !== 'string') return // 원래 분기 조건(requireHost를 통과하면 늘 참)
+  const host = await requireHost(ctx, client.roomId, msg)
+  if (!host) return
+  const { roomId, targetId } = host
 
   const requests = instrumentChangeRequests.get(roomId)
   if (!requests) return
-  const requestIndex = requests.findIndex(r => r.oderId === msg.targetId)
+  const requestIndex = requests.findIndex(r => r.oderId === targetId)
   if (requestIndex === -1) return
   requests.splice(requestIndex, 1)
-  const target = getRoomPeer(client, msg.targetId)
+  const target = getRoomPeer(client, targetId)
   const reason = typeof msg.reason === 'string' ? msg.reason.slice(0, 200) : '방장이 악기 변경을 거절했습니다.'
   if (target) send(target.ws, { type: 'instrument-change-rejected', reason })
   return
