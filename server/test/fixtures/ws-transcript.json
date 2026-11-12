@@ -1,0 +1,1809 @@
+[
+  {
+    "step": "host: connect",
+    "received": {
+      "host": [
+        {
+          "type": "welcome",
+          "clientId": "c1"
+        }
+      ]
+    }
+  },
+  {
+    "step": "host: auth",
+    "received": {
+      "host": [
+        {
+          "type": "auth-result",
+          "authenticated": true,
+          "userId": "host"
+        }
+      ]
+    }
+  },
+  {
+    "step": "host: join jam",
+    "received": {
+      "host": [
+        {
+          "type": "room-state",
+          "participants": [],
+          "peerIds": [],
+          "isHost": true
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: connect",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "welcome",
+          "clientId": "c2"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: auth",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "auth-result",
+          "authenticated": true,
+          "userId": "p1"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: join jam",
+    "received": {
+      "host": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c2",
+            "nickname": "P1",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c2",
+          "from": "c2"
+        }
+      ],
+      "p1": [
+        {
+          "type": "room-state",
+          "participants": [
+            {
+              "oderId": "c1",
+              "nickname": "Host",
+              "isPerforming": false,
+              "isHost": true
+            }
+          ],
+          "peerIds": [
+            "c1"
+          ],
+          "isHost": false
+        }
+      ]
+    }
+  },
+  {
+    "step": "p2: connect",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "welcome",
+          "clientId": "c3"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p2: auth",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "auth-result",
+          "authenticated": true,
+          "userId": "p2"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p2: join jam",
+    "received": {
+      "host": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c3",
+            "nickname": "P2",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c3",
+          "from": "c3"
+        }
+      ],
+      "p1": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c3",
+            "nickname": "P2",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c3",
+          "from": "c3"
+        }
+      ],
+      "p2": [
+        {
+          "type": "room-state",
+          "participants": [
+            {
+              "oderId": "c1",
+              "nickname": "Host",
+              "isPerforming": false,
+              "isHost": true
+            },
+            {
+              "oderId": "c2",
+              "nickname": "P1",
+              "isPerforming": false,
+              "isHost": false
+            }
+          ],
+          "peerIds": [
+            "c1",
+            "c2"
+          ],
+          "isHost": false
+        }
+      ]
+    }
+  },
+  {
+    "step": "viewer: connect",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [
+        {
+          "type": "welcome",
+          "clientId": "c4"
+        }
+      ]
+    }
+  },
+  {
+    "step": "viewer: auth",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [
+        {
+          "type": "auth-result",
+          "authenticated": true,
+          "userId": "viewer"
+        }
+      ]
+    }
+  },
+  {
+    "step": "viewer: join jam",
+    "received": {
+      "host": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c4",
+            "nickname": "Viewer",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c4",
+          "from": "c4"
+        }
+      ],
+      "p1": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c4",
+            "nickname": "Viewer",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c4",
+          "from": "c4"
+        }
+      ],
+      "p2": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c4",
+            "nickname": "Viewer",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c4",
+          "from": "c4"
+        }
+      ],
+      "viewer": [
+        {
+          "type": "room-state",
+          "participants": [
+            {
+              "oderId": "c1",
+              "nickname": "Host",
+              "isPerforming": false,
+              "isHost": true
+            },
+            {
+              "oderId": "c2",
+              "nickname": "P1",
+              "isPerforming": false,
+              "isHost": false
+            },
+            {
+              "oderId": "c3",
+              "nickname": "P2",
+              "isPerforming": false,
+              "isHost": false
+            }
+          ],
+          "peerIds": [
+            "c1",
+            "c2",
+            "c3"
+          ],
+          "isHost": false
+        }
+      ]
+    }
+  },
+  {
+    "step": "anon: connect",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [
+        {
+          "type": "welcome",
+          "clientId": "c5"
+        }
+      ]
+    }
+  },
+  {
+    "step": "anon: chat before auth, then anonymous auth",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [
+        {
+          "type": "error",
+          "code": "auth-required",
+          "message": "auth 메시지를 먼저 보내야 합니다.",
+          "rejectedType": "chat"
+        },
+        {
+          "type": "auth-result",
+          "authenticated": false,
+          "userId": null
+        }
+      ]
+    }
+  },
+  {
+    "step": "anon: join jam",
+    "received": {
+      "host": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c5",
+            "nickname": "Anon",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c5",
+          "from": "c5"
+        }
+      ],
+      "p1": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c5",
+            "nickname": "Anon",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c5",
+          "from": "c5"
+        }
+      ],
+      "p2": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c5",
+            "nickname": "Anon",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c5",
+          "from": "c5"
+        }
+      ],
+      "viewer": [
+        {
+          "type": "participant-joined",
+          "participant": {
+            "oderId": "c5",
+            "nickname": "Anon",
+            "isPerforming": false,
+            "isHost": false
+          },
+          "rejoin": false,
+          "oderId": "c5",
+          "from": "c5"
+        }
+      ],
+      "anon": [
+        {
+          "type": "room-state",
+          "participants": [
+            {
+              "oderId": "c1",
+              "nickname": "Host",
+              "isPerforming": false,
+              "isHost": true
+            },
+            {
+              "oderId": "c2",
+              "nickname": "P1",
+              "isPerforming": false,
+              "isHost": false
+            },
+            {
+              "oderId": "c3",
+              "nickname": "P2",
+              "isPerforming": false,
+              "isHost": false
+            },
+            {
+              "oderId": "c4",
+              "nickname": "Viewer",
+              "isPerforming": false,
+              "isHost": false
+            }
+          ],
+          "peerIds": [
+            "c1",
+            "c2",
+            "c3",
+            "c4"
+          ],
+          "isHost": false
+        }
+      ]
+    }
+  },
+  {
+    "step": "anon2: connect",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [],
+      "anon2": [
+        {
+          "type": "welcome",
+          "clientId": "c6"
+        }
+      ]
+    }
+  },
+  {
+    "step": "anon2: auth",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [],
+      "anon2": [
+        {
+          "type": "auth-result",
+          "authenticated": false,
+          "userId": null
+        }
+      ]
+    }
+  },
+  {
+    "step": "anon2: join jam (room-full)",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [],
+      "anon2": [
+        {
+          "type": "error",
+          "code": "room-full",
+          "reason": "room-full",
+          "roomId": "jam",
+          "maxParticipants": 5,
+          "message": "합주실 정원(5명)이 가득 찼습니다."
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: start-performing without approval (perform-not-approved)",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "error",
+          "code": "perform-not-approved",
+          "message": "방장의 승인이 필요합니다."
+        }
+      ],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "anon: start-performing (login-required)",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [
+        {
+          "type": "error",
+          "code": "login-required",
+          "message": "연주하려면 로그인이 필요합니다."
+        }
+      ]
+    }
+  },
+  {
+    "step": "anon: request-perform (login-required)",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [
+        {
+          "type": "error",
+          "code": "login-required",
+          "message": "연주 요청은 로그인이 필요합니다."
+        },
+        {
+          "type": "request-perform-error",
+          "code": "login-required",
+          "message": "연주 요청은 로그인이 필요합니다."
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: request-perform",
+    "received": {
+      "host": [
+        {
+          "type": "perform-request-received",
+          "request": {
+            "oderId": "c2",
+            "nickname": "P1",
+            "instrument": "guitar",
+            "timestamp": "<t>"
+          }
+        }
+      ],
+      "p1": [
+        {
+          "type": "perform-request-sent",
+          "instrument": "guitar",
+          "hostOnline": true
+        }
+      ],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: approve-perform p1",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "perform-request-approved",
+          "instrument": "guitar"
+        }
+      ],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: request-perform",
+    "received": {
+      "host": [
+        {
+          "type": "perform-request-received",
+          "request": {
+            "oderId": "c3",
+            "nickname": "P2",
+            "instrument": "bass",
+            "timestamp": "<t>"
+          }
+        }
+      ],
+      "p1": [],
+      "p2": [
+        {
+          "type": "perform-request-sent",
+          "instrument": "bass",
+          "hostOnline": true
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: reject-perform p2",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "perform-request-rejected",
+          "reason": "다음 곡에",
+          "instrument": "bass"
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: request-perform again",
+    "received": {
+      "host": [
+        {
+          "type": "perform-request-received",
+          "request": {
+            "oderId": "c3",
+            "nickname": "P2",
+            "instrument": "bass",
+            "timestamp": "<t>"
+          }
+        }
+      ],
+      "p1": [],
+      "p2": [
+        {
+          "type": "perform-request-sent",
+          "instrument": "bass",
+          "hostOnline": true
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: request-perform resend (pending)",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "perform-request-sent",
+          "instrument": "bass",
+          "hostOnline": true
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: approve-perform p2",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "perform-request-approved",
+          "instrument": "bass"
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: start-performing",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "performer-updated",
+          "oderId": "c1",
+          "nickname": "Host",
+          "instrument": "drums",
+          "isPerforming": true,
+          "isHost": true,
+          "from": "c1"
+        }
+      ],
+      "p2": [
+        {
+          "type": "performer-updated",
+          "oderId": "c1",
+          "nickname": "Host",
+          "instrument": "drums",
+          "isPerforming": true,
+          "isHost": true,
+          "from": "c1"
+        }
+      ],
+      "viewer": [
+        {
+          "type": "performer-updated",
+          "oderId": "c1",
+          "nickname": "Host",
+          "instrument": "drums",
+          "isPerforming": true,
+          "isHost": true,
+          "from": "c1"
+        }
+      ],
+      "anon": [
+        {
+          "type": "performer-updated",
+          "oderId": "c1",
+          "nickname": "Host",
+          "instrument": "drums",
+          "isPerforming": true,
+          "isHost": true,
+          "from": "c1"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: start-performing",
+    "received": {
+      "host": [
+        {
+          "type": "performer-updated",
+          "oderId": "c2",
+          "nickname": "P1",
+          "instrument": "guitar",
+          "isPerforming": true,
+          "isHost": false,
+          "from": "c2"
+        }
+      ],
+      "p1": [],
+      "p2": [
+        {
+          "type": "performer-updated",
+          "oderId": "c2",
+          "nickname": "P1",
+          "instrument": "guitar",
+          "isPerforming": true,
+          "isHost": false,
+          "from": "c2"
+        }
+      ],
+      "viewer": [
+        {
+          "type": "performer-updated",
+          "oderId": "c2",
+          "nickname": "P1",
+          "instrument": "guitar",
+          "isPerforming": true,
+          "isHost": false,
+          "from": "c2"
+        }
+      ],
+      "anon": [
+        {
+          "type": "performer-updated",
+          "oderId": "c2",
+          "nickname": "P1",
+          "instrument": "guitar",
+          "isPerforming": true,
+          "isHost": false,
+          "from": "c2"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p2: start-performing",
+    "received": {
+      "host": [
+        {
+          "type": "performer-updated",
+          "oderId": "c3",
+          "nickname": "P2",
+          "instrument": "bass",
+          "isPerforming": true,
+          "isHost": false,
+          "from": "c3"
+        }
+      ],
+      "p1": [
+        {
+          "type": "performer-updated",
+          "oderId": "c3",
+          "nickname": "P2",
+          "instrument": "bass",
+          "isPerforming": true,
+          "isHost": false,
+          "from": "c3"
+        }
+      ],
+      "p2": [],
+      "viewer": [
+        {
+          "type": "performer-updated",
+          "oderId": "c3",
+          "nickname": "P2",
+          "instrument": "bass",
+          "isPerforming": true,
+          "isHost": false,
+          "from": "c3"
+        }
+      ],
+      "anon": [
+        {
+          "type": "performer-updated",
+          "oderId": "c3",
+          "nickname": "P2",
+          "instrument": "bass",
+          "isPerforming": true,
+          "isHost": false,
+          "from": "c3"
+        }
+      ]
+    }
+  },
+  {
+    "step": "host: native-descriptor (all)",
+    "received": {
+      "host": [
+        {
+          "type": "relay-token",
+          "token": "<token>",
+          "bindKey": "<token>",
+          "addr": "relay.example:5000",
+          "ssrc": 101,
+          "expiresAt": "<t>",
+          "expiresIn": 120,
+          "serverNow": "<t>"
+        }
+      ],
+      "p1": [
+        {
+          "type": "native-descriptor",
+          "from": "c1",
+          "descriptor": {
+            "ssrc": 101,
+            "key": "ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=",
+            "candidates": [
+              {
+                "kind": "lan",
+                "addr": "192.168.0.10:50000"
+              },
+              {
+                "kind": "public",
+                "addr": "203.0.113.7:50001"
+              }
+            ]
+          }
+        }
+      ],
+      "p2": [
+        {
+          "type": "native-descriptor",
+          "from": "c1",
+          "descriptor": {
+            "ssrc": 101,
+            "key": "ZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWU=",
+            "candidates": [
+              {
+                "kind": "lan",
+                "addr": "192.168.0.10:50000"
+              },
+              {
+                "kind": "public",
+                "addr": "203.0.113.7:50001"
+              }
+            ]
+          }
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p1: native-descriptor (all)",
+    "received": {
+      "host": [
+        {
+          "type": "native-descriptor",
+          "from": "c2",
+          "descriptor": {
+            "ssrc": 102,
+            "key": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+            "candidates": []
+          }
+        }
+      ],
+      "p1": [
+        {
+          "type": "relay-token",
+          "token": "<token>",
+          "bindKey": "<token>",
+          "addr": "relay.example:5000",
+          "ssrc": 102,
+          "expiresAt": "<t>",
+          "expiresIn": 120,
+          "serverNow": "<t>"
+        }
+      ],
+      "p2": [
+        {
+          "type": "native-descriptor",
+          "from": "c2",
+          "descriptor": {
+            "ssrc": 102,
+            "key": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+            "candidates": []
+          }
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: native-descriptor to p1",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "native-descriptor",
+          "from": "c3",
+          "descriptor": {
+            "ssrc": 103,
+            "key": "Z2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2dnZ2c=",
+            "candidates": []
+          }
+        }
+      ],
+      "p2": [
+        {
+          "type": "relay-token",
+          "token": "<token>",
+          "bindKey": "<token>",
+          "addr": "relay.example:5000",
+          "ssrc": 103,
+          "expiresAt": "<t>",
+          "expiresIn": 120,
+          "serverNow": "<t>"
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: descriptor-invalid",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "error",
+          "code": "descriptor-invalid",
+          "message": "엔진 연결 정보가 올바르지 않습니다."
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: key-conflict",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "error",
+          "code": "key-conflict",
+          "message": "같은 방의 다른 사용자가 이미 쓰는 엔진 키입니다."
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: ssrc-conflict",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "error",
+          "code": "ssrc-conflict",
+          "message": "같은 방에서 이미 쓰는 ssrc입니다. 엔진을 다시 시작하세요."
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p1: relay-token-request",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "relay-token",
+          "token": "<token>",
+          "bindKey": "<token>",
+          "addr": "relay.example:5000",
+          "ssrc": 102,
+          "expiresAt": "<t>",
+          "expiresIn": 120,
+          "serverNow": "<t>"
+        }
+      ],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "viewer: relay-token-request (not a performer, ignored)",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p1: metronome (metronome-host-only)",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "error",
+          "code": "metronome-host-only",
+          "message": "메트로놈은 방장만 조작할 수 있습니다."
+        }
+      ],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: metronome invalid",
+    "received": {
+      "host": [
+        {
+          "type": "error",
+          "code": "metronome-invalid",
+          "message": "메트로놈 설정이 올바르지 않습니다."
+        }
+      ],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: metronome on",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "metronome",
+          "from": "c1",
+          "state": {
+            "running": true,
+            "bpm": 120,
+            "beatsPerBar": 4,
+            "startUs": 1500000
+          }
+        }
+      ],
+      "p2": [
+        {
+          "type": "metronome",
+          "from": "c1",
+          "state": {
+            "running": true,
+            "bpm": 120,
+            "beatsPerBar": 4,
+            "startUs": 1500000
+          }
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: metronome off",
+    "received": {
+      "host": [],
+      "p1": [
+        {
+          "type": "metronome",
+          "from": "c1",
+          "state": {
+            "running": false,
+            "bpm": 120,
+            "beatsPerBar": 4,
+            "startUs": 1500000
+          }
+        }
+      ],
+      "p2": [
+        {
+          "type": "metronome",
+          "from": "c1",
+          "state": {
+            "running": false,
+            "bpm": 120,
+            "beatsPerBar": 4,
+            "startUs": 1500000
+          }
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "viewer: chat",
+    "received": {
+      "host": [
+        {
+          "type": "chat",
+          "message": "hello",
+          "nickname": "Viewer",
+          "timestamp": "<t>",
+          "oderId": "c4",
+          "from": "c4"
+        }
+      ],
+      "p1": [
+        {
+          "type": "chat",
+          "message": "hello",
+          "nickname": "Viewer",
+          "timestamp": "<t>",
+          "oderId": "c4",
+          "from": "c4"
+        }
+      ],
+      "p2": [
+        {
+          "type": "chat",
+          "message": "hello",
+          "nickname": "Viewer",
+          "timestamp": "<t>",
+          "oderId": "c4",
+          "from": "c4"
+        }
+      ],
+      "viewer": [],
+      "anon": [
+        {
+          "type": "chat",
+          "message": "hello",
+          "nickname": "Viewer",
+          "timestamp": "<t>",
+          "oderId": "c4",
+          "from": "c4"
+        }
+      ]
+    }
+  },
+  {
+    "step": "anon: chat flood (rate-limited)",
+    "received": {
+      "host": [
+        {
+          "type": "chat",
+          "message": "one",
+          "nickname": "Anon",
+          "timestamp": "<t>",
+          "oderId": "c5",
+          "from": "c5"
+        },
+        {
+          "type": "chat",
+          "message": "two",
+          "nickname": "Anon",
+          "timestamp": "<t>",
+          "oderId": "c5",
+          "from": "c5"
+        }
+      ],
+      "p1": [
+        {
+          "type": "chat",
+          "message": "one",
+          "nickname": "Anon",
+          "timestamp": "<t>",
+          "oderId": "c5",
+          "from": "c5"
+        },
+        {
+          "type": "chat",
+          "message": "two",
+          "nickname": "Anon",
+          "timestamp": "<t>",
+          "oderId": "c5",
+          "from": "c5"
+        }
+      ],
+      "p2": [
+        {
+          "type": "chat",
+          "message": "one",
+          "nickname": "Anon",
+          "timestamp": "<t>",
+          "oderId": "c5",
+          "from": "c5"
+        },
+        {
+          "type": "chat",
+          "message": "two",
+          "nickname": "Anon",
+          "timestamp": "<t>",
+          "oderId": "c5",
+          "from": "c5"
+        }
+      ],
+      "viewer": [
+        {
+          "type": "chat",
+          "message": "one",
+          "nickname": "Anon",
+          "timestamp": "<t>",
+          "oderId": "c5",
+          "from": "c5"
+        },
+        {
+          "type": "chat",
+          "message": "two",
+          "nickname": "Anon",
+          "timestamp": "<t>",
+          "oderId": "c5",
+          "from": "c5"
+        }
+      ],
+      "anon": [
+        {
+          "type": "error",
+          "code": "rate-limited",
+          "message": "메시지를 너무 많이 보냈습니다.",
+          "rejectedType": "chat"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: request-instrument-change",
+    "received": {
+      "host": [
+        {
+          "type": "instrument-change-request-received",
+          "request": {
+            "oderId": "c2",
+            "nickname": "P1",
+            "currentInstrument": "guitar",
+            "newInstrument": "bass",
+            "timestamp": "<t>"
+          }
+        }
+      ],
+      "p1": [
+        {
+          "type": "instrument-change-request-sent",
+          "newInstrument": "bass"
+        }
+      ],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: approve-instrument-change p1",
+    "received": {
+      "host": [
+        {
+          "type": "participant-instrument-changed",
+          "oderId": "c2",
+          "instrument": "bass"
+        }
+      ],
+      "p1": [
+        {
+          "type": "instrument-change-approved",
+          "newInstrument": "bass"
+        }
+      ],
+      "p2": [
+        {
+          "type": "participant-instrument-changed",
+          "oderId": "c2",
+          "instrument": "bass"
+        }
+      ],
+      "viewer": [
+        {
+          "type": "participant-instrument-changed",
+          "oderId": "c2",
+          "instrument": "bass"
+        }
+      ],
+      "anon": [
+        {
+          "type": "participant-instrument-changed",
+          "oderId": "c2",
+          "instrument": "bass"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p2: request-instrument-change",
+    "received": {
+      "host": [
+        {
+          "type": "instrument-change-request-received",
+          "request": {
+            "oderId": "c3",
+            "nickname": "P2",
+            "currentInstrument": "bass",
+            "newInstrument": "keys",
+            "timestamp": "<t>"
+          }
+        }
+      ],
+      "p1": [],
+      "p2": [
+        {
+          "type": "instrument-change-request-sent",
+          "newInstrument": "keys"
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: reject-instrument-change p2",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "instrument-change-rejected",
+          "reason": "no"
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: request-instrument-change again",
+    "received": {
+      "host": [
+        {
+          "type": "instrument-change-request-received",
+          "request": {
+            "oderId": "c3",
+            "nickname": "P2",
+            "currentInstrument": "bass",
+            "newInstrument": "synth",
+            "timestamp": "<t>"
+          }
+        }
+      ],
+      "p1": [],
+      "p2": [
+        {
+          "type": "instrument-change-request-sent",
+          "newInstrument": "synth"
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: cancel-instrument-change-request",
+    "received": {
+      "host": [
+        {
+          "type": "instrument-change-request-cancelled",
+          "oderId": "c3"
+        }
+      ],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "viewer: request-instrument-change (not performing, ignored)",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "host: offer to viewer",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [
+        {
+          "type": "offer",
+          "to": "c4",
+          "from": "c1",
+          "offer": {
+            "type": "offer",
+            "sdp": "v=0 host"
+          }
+        }
+      ],
+      "anon": []
+    }
+  },
+  {
+    "step": "viewer: answer to host",
+    "received": {
+      "host": [
+        {
+          "type": "answer",
+          "to": "c1",
+          "answer": {
+            "type": "answer",
+            "sdp": "v=0 viewer"
+          },
+          "from": "c4"
+        }
+      ],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "viewer: ice-candidate to host",
+    "received": {
+      "host": [
+        {
+          "type": "ice-candidate",
+          "to": "c1",
+          "candidate": {
+            "candidate": "candidate:1",
+            "sdpMid": "0"
+          },
+          "from": "c4"
+        }
+      ],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "anon: offer to viewer (two non-performers, dropped)",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p1#resumed: connect",
+    "received": {
+      "host": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": [
+        {
+          "type": "welcome",
+          "clientId": "c7"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: auth with resumeClientId",
+    "received": {
+      "host": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": [
+        {
+          "type": "welcome",
+          "clientId": "c2",
+          "resumed": true
+        },
+        {
+          "type": "auth-result",
+          "authenticated": true,
+          "userId": "p1",
+          "resumed": true
+        },
+        {
+          "type": "room-state",
+          "participants": [
+            {
+              "oderId": "c1",
+              "nickname": "Host",
+              "instrument": "drums",
+              "isPerforming": true,
+              "isHost": true
+            },
+            {
+              "oderId": "c3",
+              "nickname": "P2",
+              "instrument": "bass",
+              "isPerforming": true,
+              "isHost": false
+            },
+            {
+              "oderId": "c4",
+              "nickname": "Viewer",
+              "isPerforming": false,
+              "isHost": false
+            },
+            {
+              "oderId": "c5",
+              "nickname": "Anon",
+              "isPerforming": false,
+              "isHost": false
+            }
+          ],
+          "peerIds": [
+            "c1",
+            "c3",
+            "c4",
+            "c5"
+          ],
+          "isHost": false
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: rejoin after resume",
+    "received": {
+      "host": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": [
+        {
+          "type": "room-state",
+          "participants": [
+            {
+              "oderId": "c1",
+              "nickname": "Host",
+              "instrument": "drums",
+              "isPerforming": true,
+              "isHost": true
+            },
+            {
+              "oderId": "c3",
+              "nickname": "P2",
+              "instrument": "bass",
+              "isPerforming": true,
+              "isHost": false
+            },
+            {
+              "oderId": "c4",
+              "nickname": "Viewer",
+              "isPerforming": false,
+              "isHost": false
+            },
+            {
+              "oderId": "c5",
+              "nickname": "Anon",
+              "isPerforming": false,
+              "isHost": false
+            }
+          ],
+          "peerIds": [
+            "c1",
+            "c3",
+            "c4",
+            "c5"
+          ],
+          "isHost": false
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: native-descriptor re-announce",
+    "received": {
+      "host": [
+        {
+          "type": "native-descriptor",
+          "from": "c2",
+          "descriptor": {
+            "ssrc": 102,
+            "key": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+            "candidates": []
+          }
+        }
+      ],
+      "p2": [
+        {
+          "type": "native-descriptor",
+          "from": "c2",
+          "descriptor": {
+            "ssrc": 102,
+            "key": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=",
+            "candidates": []
+          }
+        }
+      ],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": [
+        {
+          "type": "relay-token",
+          "token": "<token>",
+          "bindKey": "<token>",
+          "addr": "relay.example:5000",
+          "ssrc": 102,
+          "expiresAt": "<t>",
+          "expiresIn": 120,
+          "serverNow": "<t>"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p2: connection lost, resume grace expires",
+    "received": {
+      "host": [
+        {
+          "type": "participant-left",
+          "oderId": "c3"
+        }
+      ],
+      "viewer": [
+        {
+          "type": "participant-left",
+          "oderId": "c3"
+        }
+      ],
+      "anon": [
+        {
+          "type": "participant-left",
+          "oderId": "c3"
+        }
+      ],
+      "p1#resumed": [
+        {
+          "type": "participant-left",
+          "oderId": "c3"
+        }
+      ]
+    }
+  },
+  {
+    "step": "viewer: join vault without password",
+    "received": {
+      "host": [],
+      "viewer": [
+        {
+          "type": "error",
+          "code": "password-required",
+          "roomId": "vault",
+          "message": "비밀번호가 필요한 방입니다."
+        }
+      ],
+      "anon": [],
+      "p1#resumed": []
+    }
+  },
+  {
+    "step": "viewer: join vault wrong password",
+    "received": {
+      "host": [],
+      "viewer": [
+        {
+          "type": "error",
+          "code": "password-invalid",
+          "roomId": "vault",
+          "remainingAttempts": 4,
+          "message": "비밀번호가 올바르지 않습니다."
+        }
+      ],
+      "anon": [],
+      "p1#resumed": []
+    }
+  },
+  {
+    "step": "viewer: join vault (move)",
+    "received": {
+      "host": [
+        {
+          "type": "participant-left",
+          "oderId": "c4"
+        }
+      ],
+      "viewer": [
+        {
+          "type": "room-state",
+          "participants": [],
+          "peerIds": [],
+          "isHost": false
+        }
+      ],
+      "anon": [
+        {
+          "type": "participant-left",
+          "oderId": "c4"
+        }
+      ],
+      "p1#resumed": [
+        {
+          "type": "participant-left",
+          "oderId": "c4"
+        }
+      ]
+    }
+  },
+  {
+    "step": "host: native-leave",
+    "received": {
+      "host": [],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": [
+        {
+          "type": "native-leave",
+          "from": "c1"
+        }
+      ]
+    }
+  },
+  {
+    "step": "anon: leave",
+    "received": {
+      "host": [
+        {
+          "type": "participant-left",
+          "oderId": "c5"
+        }
+      ],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": [
+        {
+          "type": "participant-left",
+          "oderId": "c5"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: leave",
+    "received": {
+      "host": [
+        {
+          "type": "participant-left",
+          "oderId": "c2"
+        }
+      ],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": []
+    }
+  },
+  {
+    "step": "host: leave",
+    "received": {
+      "host": [],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": []
+    }
+  },
+  {
+    "step": "viewer: leave",
+    "received": {
+      "host": [],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": []
+    }
+  }
+]
