@@ -66,7 +66,7 @@
 | `band-net-ctrl` | `net/mod.rs` | 홀펀칭·Ping·타임아웃·DSCP·송신 지연 창, net 수명 | 기본 | stop 원자값, join |
 | `band-stun-dns` | `net/stun.rs` | STUN 서버 이름 해석, 시작 동안 | 기본 | 시간 제한 뒤 버림 |
 | `band-diag` | `diag/mod.rs` | 1초 타임라인 기록, 앱 수명 | 기본 | stop 원자값 + Condvar, join |
-| `band-fake-in`, `band-fake-out` | `device.rs`(`device::fake`) | 가짜 장치(통합 테스트·측정 도구), 스트림 수명 | 기본 | stop 원자값, join. 릴리스에 들어가 있음 → ⑨에서 `test-support` 피처 뒤로 |
+| `band-fake-in`, `band-fake-out` | `device.rs`(`device::fake`) | 가짜 장치(통합 테스트·측정 도구), 스트림 수명 | 기본 | stop 원자값, join. 릴리스 제품 빌드에는 없음(②a, 7절) |
 | 측정 | `manager.rs`(커맨드 스레드에서 블로킹) | 루프백·에코 측정 동안 | 기본 | 취소 원자값 |
 | 커맨드 | Tauri | 요청마다(`spawn_blocking`) | 기본 | — |
 
@@ -175,7 +175,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 어긋남 | 위치 | 단계 |
 |---|---|---|
 | `Peer`가 net 상태와 미디어 상태를 함께 가진 공용 구조체(필드 전부 `pub`, Mutex 5개 + 원자값). net·워커·통계·커맨드가 직접 잠근다. single writer가 아니다 | `net/peer.rs` | ③ |
-| 지터 락 접근자 7곳(4.1절), 기본 우선순위 스레드가 준RT 락을 잡음 | `net/mod.rs`, `engine/mod.rs`, `worker.rs` | ③ |
+| 지터 락 접근자 7곳(4.1절), 기본 우선순위 스레드가 준RT 락을 잡음 | `net/mod.rs`, `engine/mod.rs`, `worker/mod.rs` | ③ |
 | 녹음 폴더 설정 파일 저장·검증이 어댑터에 | `commands.rs`(`record_dir_file`, `current_record_dir`) | ⑦ |
 | 큰 파일: `wasapi.rs` 1.9k(열거·프로브 + 스트림), `net/mod.rs` 1.1k(송신 + 수신 루프 + 제어 루프), `net/peer.rs` 1.2k, `engine/mod.rs`의 `stats()` 조립 130줄 | | ⑥, ④ |
 
@@ -232,7 +232,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 정책:
 
 1. **공개 표면**: `manager::EngineManager`, `commands`, 계약 DTO(`EngineConfig`, `EngineStats`·`PeerStats`, `LocalDescriptor`, 측정·녹음 보고). 나머지는 `pub(crate)`가 목표다.
-2. **테스트 표면**: 통합 테스트·측정 도구가 쓰는 내부는 `test-support` 피처(`#[cfg(any(test, feature = "test-support"))]`)의 `testing` 모듈 한 곳에서 다시 내보낸다. 개발 의존성에서 `band = { path = ".", features = ["test-support"] }`로 켠다. `device::fake`는 작아서 ②a에서 먼저 피처 뒤로 옮기고(예제 `examples/`·측정 도구도 그 피처로), 나머지(측정 훅, `testing` 모듈)는 ⑨.
+2. **테스트 표면**: 통합 테스트·측정 도구가 쓰는 내부는 `test-support` 피처(`#[cfg(any(test, feature = "test-support"))]`)의 `testing` 모듈 한 곳에서 다시 내보낸다. 개발 의존성에서 `band = { path = ".", features = ["test-support"] }`로 켠다. `device::fake`는 ②a에서 먼저 옮겼다: `#[cfg(any(test, debug_assertions, feature = "test-support"))]` — 디버그 빌드·단위 테스트에는 늘 있고, 릴리스 제품 빌드에는 없으며, 릴리스 측정(`cpu_profile`)은 `--features test-support`로 켠다(없으면 `compile_error!`로 안내). 나머지(측정 훅, `testing` 모듈)는 ⑨.
 3. **R-1 ①②의 가시성**: 새 하위 모듈은 private, 형제 간에는 `pub(super)`. **기존 공개 경로는 `pub use`로 유지**한다(예: `engine::jitter::{JitterBuffer, JitterSettings, JitterStats, shift_one, MAX_CORR_RATE, TARGET_GRID, correction_*}`, `engine::worker::{CallbackTracker, OUT_CHUNK, …}`). 그래서 ①②는 `tests/`를 바꾸지 않는다. 하네스가 쓰는 워커 내부(폴링 주기 등)는 `pub(in crate::engine)`.
 4. ⑨에서 영향받는 테스트: `loopback`·`cpu_profile`·`measure`·`record`·`metronome`·`rt_alloc`·`net_recv`·`nonce`·`peer_key`·`send_queue`·`relay`·`loss_feedback`·`stun`(목록은 `grep -h "band_lib::" tests/*.rs`).
 5. 이름: `EngineManager::test_start/test_stop`은 제품 기능(네트워크 없는 모니터 모드)이다. 테스트 전용으로 오해되지 않게 ⑨에서 `start_monitor_only` 등으로 바꾼다(커맨드 이름 `engine_test_start`는 계약이라 유지).
@@ -296,7 +296,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 지터·워커(①②③⑧) | 5분 하네스: `long_sim_6peers_5min`이 리포트 JSON에서 `wallSeconds`를 뺀 나머지를 **`tests/fixtures/sim-report-short-5min.json`과 비교해 다르면 실패**(자동, 수동 비교 없음) | 바이트 동일. 동작을 의도적으로 바꾸는 PR만 fixture를 갱신하고 본문에 차이를 적는다(`SIM_UPDATE_FIXTURE=1`) |
 | | 60분 하네스 | PASS(같은 판정) |
 | | 루프백 실시간(`link_matrix_*`, `loopback_loss5_*`) | 버퍼 지연·은닉률이 기준 실행과 같은 범위(실시간이라 잡음 있음) |
-| | `cargo test --release --test cpu_profile` | 워커 CPU·콜백 사용률 ±5% |
+| | `cargo test --release --features test-support --test cpu_profile` | 워커 CPU·콜백 사용률 ±5% |
 | net(③④⑥) | `tests/net_recv.rs`·`nonce.rs`·`peer_key.rs`·`send_queue.rs`·`relay.rs`·`loss_feedback.rs`·`stun.rs`, 루프백 실시간 | 녹색, 루프백 수치 같은 범위 |
 | 녹음(⑥) | `tests/record.rs`, `engine::record` 단위 테스트 | 녹색 |
 | 메트로놈(⑥) | `tests/metronome.rs` | 녹색 |

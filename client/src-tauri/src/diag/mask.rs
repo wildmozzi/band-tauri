@@ -164,7 +164,7 @@ mod tests {
             mask_text("[2026-11-11][12:34:56][band_lib::net][INFO] 릴레이 설정: 203.0.113.45:3479 (relay.example.com)"),
             "[2026-11-11][12:34:56][band_lib::net][INFO] 릴레이 설정: 203.0.x.x:3479 (relay.example.com)"
         );
-        // engine/worker.rs `출력 소스 슬롯이 부족합니다(피어 {id})`
+        // engine/worker/mod.rs `출력 소스 슬롯이 부족합니다(피어 {id})`
         let id = "8a1f0c2e-1111-2222-3333-444455556666";
         assert_eq!(
             mask_text(&format!("[2026-11-11][12:34:57][band_lib::engine::worker][WARN] 출력 소스 슬롯이 부족합니다(피어 {id})")),

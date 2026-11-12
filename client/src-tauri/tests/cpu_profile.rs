@@ -6,7 +6,10 @@
 //! 연주자 1명 몫(워커 + 네트워크 수신·제어 + 가짜 장치 스레드)을 낸다. 수치 판정 없이 표만 출력한다(측정 도구).
 //!
 //! 실행(수치는 release 기준이 의미 있다):
-//! `cargo test --release --test cpu_profile -- --ignored --nocapture`
+//! `cargo test --release --features test-support --test cpu_profile -- --ignored --nocapture`
+
+#[cfg(not(any(debug_assertions, feature = "test-support")))]
+compile_error!("릴리스 측정은 가짜 장치가 필요하다: cargo test --release --features test-support --test cpu_profile");
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -134,7 +137,7 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
 }
 
 #[test]
-#[ignore = "측정 도구: cargo test --release --test cpu_profile -- --ignored --nocapture"]
+#[ignore = "측정 도구: cargo test --release --features test-support --test cpu_profile -- --ignored --nocapture"]
 fn six_peer_full_mesh_cpu() {
     // RT 콜백 타이머 비용(QPC)
     let n = 1_000_000;

@@ -408,7 +408,7 @@ net에 남는 에코 API(`set_echo_request`·`set_echo_mode`·`remote_echo`, `ne
 | 루프백 실시간(`link_matrix_*`, `loopback_loss5_*`): 버퍼 지연·은닉률 전/후 | — | ○ | ○ | ○ | ○ |
 | `tests/measure.rs`(에코 측정) | — | ○ | ○ | ○ | ○ |
 | 60분 하네스 1회 | — | — | — | — | ○ |
-| `cargo test --release --test cpu_profile` 전/후 | — | — | ○(발행 비용) | — | ○(삽입이 워커로) |
+| `cargo test --release --features test-support --test cpu_profile` 전/후 | — | — | ○(발행 비용) | — | ○(삽입이 워커로) |
 | 통계 폭주 시험(7.1절) 전/후 | — | — | — | — | ○ |
 | 지연 민감도 표(6.4절) | — | — | — | — | ○ |
 

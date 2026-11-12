@@ -87,6 +87,9 @@ custom-protocol = ["tauri/custom-protocol"]
 devtools = ["tauri/devtools"]
 # ASIO 지원 (CPAL_ASIO_DIR에 Steinberg ASIO SDK 필요). 기본 빌드는 WASAPI만.
 asio = ["cpal/asio"]
+# 통합 테스트·측정 도구용 내부(가짜 장치 `engine::device::fake`)를 릴리스 빌드에도 넣는다. 디버그 빌드에는 항상 있다.
+# 릴리스 CPU 측정: cargo test --release --features test-support --test cpu_profile -- --ignored --nocapture
+test-support = []
 
 # 디버그 빌드(dev:tauri)에서도 FLAC 녹음 인코딩이 실시간을 넉넉히 넘도록 인코더와 그 해시·CRC만 최적화한다(PR #62 M1).
 # opt-level 0이면 30초 스테레오 24비트 인코딩이 실시간 4배뿐이라 9트랙(소스 8 + 믹스) 녹음이 링을 넘친다.
