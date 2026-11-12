@@ -1180,6 +1180,11 @@ export function initializeWebSocket(
     }
 
     const handleMessage = async (msg: Msg) => {
+      // 앱 수준 ping (P1-15): 브라우저는 프로토콜 ping을 못 보므로 클라이언트가 수신 없음 감지에 쓴다. 신원 무관, rate limit은 위에서 적용됨
+      if (msg.type === 'ping') {
+        send(ws, { type: 'pong' })
+        return
+      }
       if (msg.type === 'auth') {
         await handleAuth(msg)
         return
