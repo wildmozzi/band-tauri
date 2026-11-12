@@ -506,7 +506,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 저장: 확장자를 `.zip`으로 바꾼 이름이 이미 있으면 `-1`, `-2`…를 붙인다(대화상자가 덮어쓰기를 확인하지 않은 파일). 같은 폴더의 `.part` 임시 파일에 쓴 뒤 이름을 바꾼다. zip 압축은 타임라인 락 밖에서 한다.
 - 앱 로그(`tauri-plugin-log` LogDir)는 파일당 1MB, 회전 파일 2개까지 남긴다.
 
-## 5. 시그널링 (WS 서버 `server/src/services/wsService.ts`)
+## 5. 시그널링 (WS 서버 `server/src/signaling/*`, 조립은 `server/src/services/wsService.ts`)
 
 - 연결 직후 첫 메시지는 `{ type: 'auth', accessToken }`(Supabase JWT). 서버가 `supabaseAdmin.auth.getUser`로 검증하고 `userId`를 서버에서 결정. 비로그인은 관람 전용 익명 클라이언트로만 허용(연주 요청 불가).
 - `isHost`는 서버가 DB `rooms` 테이블의 호스트 컬럼과 `userId`로 판정. 클라이언트가 보낸 `isHost`/`userId`는 무시.
