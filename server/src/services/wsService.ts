@@ -1,4 +1,4 @@
-import { WebSocketServer, WebSocket, type RawData } from 'ws'
+import { WebSocketServer, type RawData } from 'ws'
 import { Server as HttpServer } from 'http'
 import { Server as HttpsServer } from 'https'
 import { v4 as uuidv4 } from 'uuid'
@@ -9,8 +9,8 @@ import type { RoomMeta } from '../repositories/roomRepository'
 import { PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword } from '../lib/roomPassword'
 import {
   APPROVAL_GRACE_MS, AUTH_TIMEOUT_MS, MAX_CHAT_LENGTH, MAX_MESSAGE_BYTES, MAX_NICKNAME_LENGTH, MAX_PENDING_MESSAGES,
-  MAX_ROOM_ID_LENGTH, PARTICIPANT_UPDATE_DEBOUNCE_MS, REJOIN_WINDOW_MS, ROOM_META_TTL_MS, TOKEN_EXPIRY_GRACE_MS,
-  type InstrumentChangeRequest, type MetronomeState, type Msg, type Participant, type PerformRequest,
+  MAX_ROOM_ID_LENGTH, PARTICIPANT_UPDATE_DEBOUNCE_MS, REJOIN_WINDOW_MS, TOKEN_EXPIRY_GRACE_MS,
+  type InstrumentChangeRequest, type MetronomeState, type Msg, type PerformRequest,
 } from '../signaling/protocol'
 import { DEFAULT_LIMITS, type Client, type LeaveReason, type WsDeps, type WsLimits, type WsOptions } from '../signaling/types'
 import { TokenBucket } from '../signaling/rateLimit'
@@ -19,6 +19,9 @@ import { parseMetronomeState } from '../signaling/metronome'
 import { jwtExpiryMs } from '../signaling/auth'
 import { clientIp } from '../signaling/connection'
 import { supabaseDeps } from '../signaling/supabaseDeps'
+import { createRegistry, isAuthenticated, isPerformer, send } from '../signaling/registry'
+import { createRoomMeta } from '../signaling/roomMeta'
+import { createRequests } from '../signaling/requests'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -66,12 +69,6 @@ export { parseMetronomeState } from '../signaling/metronome'
 export { jwtExpiryMs } from '../signaling/auth'
 export { roomDeps } from '../signaling/roomDeps'
 
-function send(ws: WebSocket, data: unknown) {
-  if (ws.readyState === ws.OPEN) {
-    ws.send(JSON.stringify(data))
-  }
-}
-
 function isNonEmptyString(v: unknown, max = 256): v is string {
   return typeof v === 'string' && v.length > 0 && v.length <= max
 }
@@ -98,10 +95,13 @@ export function initializeWebSocket(
   const relayConfig = relayConfigFromEnv(env)
 
   // 서버 인스턴스별 상태
-  const rooms = new Map<string, Set<string>>()
-  const clients = new Map<string, Client>()
-  const performRequests = new Map<string, PerformRequest[]>()
-  const instrumentChangeRequests = new Map<string, InstrumentChangeRequest[]>()
+  const insecureDevMode = isInsecureDevMode(deps.hasBackend, env)
+  // S2(docs/server-architecture.md 3절): 상태 소유 모듈. if 사슬과 handleJoin/handleLeave는 그대로 두고 이 이름으로 부른다
+  const registry = createRegistry()
+  const { rooms, clients, addClient, removeClient, addToRoom, removeFromRoom, getRoomParticipants, broadcastToRoom, findRoomHost, getRoomPeer } = registry
+  const roomMeta = createRoomMeta(deps, insecureDevMode)
+  const { getRoomMeta, getRoomMetaOrNull, checkHost, refreshHost } = roomMeta
+  const { performRequests, instrumentChangeRequests } = createRequests()
   /**
    * roomId → 방장이 켠 공유 메트로놈(P2-3). hostId = 켠 연결(clientId = 엔진 peerId), hostUserId = 켤 때의 DB 방장.
    * 방장 엔진이 내려가면(native-leave·퇴장) 지우고, DB 방장이 바뀐 것을 알게 되면 정지를 알리고 지운다(PR #36 L1)
@@ -113,9 +113,6 @@ export function initializeWebSocket(
   const recentlyLeft = new Map<string, Map<string, number>>()
   /** roomId → (userId → 만료 시각). 유예 밖으로 끊긴 연주자·승인 보유자의 자리 예약: 이 동안 재입장은 정원 검사를 건너뛴다 (PR #23 M2) */
   const seatHolds = new Map<string, Map<string, number>>()
-  const roomMetaCache = new Map<string, { meta: RoomMeta | null; fetchedAt: number }>()
-  /** roomId → 진행 중인 DB 조회 (동시에 여러 연결이 같은 방을 물으면 한 번만 조회, PR #53 L3) */
-  const roomMetaInflight = new Map<string, Promise<RoomMeta | null>>()
   const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const connectionsPerIp = new Map<string, number>()
   /** clientId → 연결이 끊겨 재개를 기다리는 클라이언트 (방/연주 상태 유지) */
@@ -136,13 +133,12 @@ export function initializeWebSocket(
     console.log(`[RESUME] ${c.id.slice(0, 8)} grace period over - leaving`)
     if (c.roomId && rooms.has(c.roomId)) handleLeave(c, c.roomId, 'close')
     c.roomId = undefined
-    clients.delete(c.id)
+    removeClient(c.id)
   }
 
   // maxPayload 초과 시 ws가 연결을 1009로 끊는다
   const wss = new WebSocketServer({ server, maxPayload: MAX_MESSAGE_BYTES })
 
-  const insecureDevMode = isInsecureDevMode(deps.hasBackend, env)
   if (insecureDevMode) {
     console.warn('[WS][SECURITY] INSECURE dev mode (NODE_ENV=development, ALLOW_INSECURE_WS=1, no Supabase): client-sent userId/isHost are trusted.')
   } else if (!deps.hasBackend) {
@@ -157,10 +153,6 @@ export function initializeWebSocket(
     c.nativeSsrc = undefined
     c.nativeKey = undefined
   }
-
-  const isAuthenticated = (c: Client) => c.authState === 'authenticated' && !!c.userId
-  /** 연주자 = 연주 중이거나 방장 */
-  const isPerformer = (c: Client) => c.isPerforming || c.isHost
 
   /**
    * 릴레이 토큰 발급 (연주자 전용). roomId/memberId/ssrc는 서버가 아는 값만 쓴다.
@@ -210,43 +202,6 @@ export function initializeWebSocket(
       if (peer && peer.nativeKey === key && peer.userId !== c.userId) return true
     }
     return false
-  }
-
-  function getRoomParticipants(roomId: string): Participant[] {
-    const room = rooms.get(roomId)
-    if (!room) return []
-    const participants: Participant[] = []
-    for (const oderId of room) {
-      const c = clients.get(oderId)
-      if (c) participants.push({ oderId: c.id, nickname: c.nickname, instrument: c.instrument, isPerforming: c.isPerforming, isHost: c.isHost })
-    }
-    return participants
-  }
-
-  function broadcastToRoom(roomId: string, senderId: string, data: object) {
-    const room = rooms.get(roomId)
-    if (!room) return
-    for (const oderId of room) {
-      if (oderId === senderId) continue
-      const peer = clients.get(oderId)
-      if (peer) send(peer.ws, { ...data, oderId: senderId, from: senderId })
-    }
-  }
-
-  function findRoomHost(roomId: string): Client | null {
-    for (const oderId of rooms.get(roomId) || []) {
-      const c = clients.get(oderId)
-      if (c?.isHost) return c
-    }
-    return null
-  }
-
-  /** 같은 방에 있는 대상만 반환 (방 밖 중계 차단) */
-  function getRoomPeer(sender: Client, targetId: unknown): Client | null {
-    if (!sender.roomId || typeof targetId !== 'string' || targetId === sender.id) return null
-    const target = clients.get(targetId)
-    if (!target || target.roomId !== sender.roomId) return null
-    return target
   }
 
   /**
@@ -300,61 +255,6 @@ export function initializeWebSocket(
     const m = seatHolds.get(roomId)
     m?.delete(userId)
     if (m && m.size === 0) seatHolds.delete(roomId)
-  }
-
-  /**
-   * 방 정보(캐시 maxAgeMs). null = 방 없음. 조회 실패는 throw하고 캐시하지 않는다(PR #53 H1).
-   * maxAgeMs > 0이면 진행 중인 조회를 함께 기다린다(방금 시작한 조회라 나이 조건을 만족, L3).
-   * maxAgeMs 0(join)은 요청 뒤에 시작한 조회만 믿는다.
-   */
-  async function getRoomMeta(roomId: string, maxAgeMs = ROOM_META_TTL_MS): Promise<RoomMeta | null> {
-    const cached = roomMetaCache.get(roomId)
-    if (cached && Date.now() - cached.fetchedAt <= maxAgeMs) return cached.meta
-    const inflight = roomMetaInflight.get(roomId)
-    if (inflight && maxAgeMs > 0) return inflight
-    const p = deps.fetchRoomMeta(roomId).then(meta => {
-      roomMetaCache.set(roomId, { meta, fetchedAt: Date.now() })
-      return meta
-    })
-    roomMetaInflight.set(roomId, p)
-    const clear = () => { if (roomMetaInflight.get(roomId) === p) roomMetaInflight.delete(roomId) }
-    p.then(clear, clear)
-    return p
-  }
-
-  /** getRoomMeta, 조회 실패는 로그 후 "방 없음"으로(입장·연주 허용 등 fail-closed 경로 — 기존 동작) */
-  async function getRoomMetaOrNull(roomId: string, maxAgeMs = ROOM_META_TTL_MS): Promise<RoomMeta | null> {
-    try {
-      return await getRoomMeta(roomId, maxAgeMs)
-    } catch (err) {
-      console.warn('[DB] room lookup failed:', err instanceof Error ? err.message : err)
-      return null
-    }
-  }
-
-  /**
-   * 방장 여부 재확인 (L2). 개발 모드에서는 join 때 값 유지.
-   * hostUserId = DB 방장(방이 없으면 null). DB 조회가 실패하면 마지막으로 읽은 값(나이 무관)으로 권한만 판단하고
-   * stale=true — 이때는 이양 판단(메트로놈 정지)을 하지 않는다(PR #53 H1). 읽은 적도 없으면 권한 없음.
-   */
-  async function checkHost(client: Client, maxAgeMs = ROOM_META_TTL_MS): Promise<{ isHost: boolean; hostUserId: string | null; stale: boolean }> {
-    if (!client.roomId || insecureDevMode) return { isHost: client.isHost, hostUserId: null, stale: true }
-    const roomId = client.roomId
-    let meta: RoomMeta | null
-    let stale = false
-    try {
-      meta = await getRoomMeta(roomId, maxAgeMs)
-    } catch (err) {
-      console.warn('[DB] host check failed:', err instanceof Error ? err.message : err)
-      meta = roomMetaCache.get(roomId)?.meta ?? null
-      stale = true
-    }
-    client.isHost = !!client.userId && !!meta && meta.hostId === client.userId
-    return { isHost: client.isHost, hostUserId: meta?.hostId ?? null, stale }
-  }
-
-  async function refreshHost(client: Client): Promise<boolean> {
-    return (await checkHost(client)).isHost
   }
 
   const METRONOME_HOST_CHANGED = { type: 'error', code: 'metronome-host-only', message: '방장이 바뀌어 메트로놈을 껐습니다.' }
@@ -452,7 +352,7 @@ export function initializeWebSocket(
     const set = rooms.get(roomId)
     if (!set) return
 
-    set.delete(id)
+    removeFromRoom(roomId, id)
     console.log(`[LEAVE] Client ${id.slice(0, 8)} left room (${reason}). Room size: ${set.size}`)
     scheduleParticipantUpdate(roomId)
 
@@ -507,8 +407,7 @@ export function initializeWebSocket(
       performRequests.delete(roomId)
       metronomes.delete(roomId)
       instrumentChangeRequests.delete(roomId)
-      roomMetaCache.delete(roomId)
-      roomMetaInflight.delete(roomId)
+      roomMeta.forget(roomId)
     }
   }
 
@@ -602,7 +501,7 @@ export function initializeWebSocket(
       dropped: 0,
       lastRateLimitNotice: 0,
     }
-    clients.set(id, client)
+    addClient(client)
     console.log(`[CONNECT] Client ${id.slice(0, 8)} connected. Total clients: ${clients.size}`)
     send(ws, { type: 'welcome', clientId: id })
 
@@ -661,7 +560,7 @@ export function initializeWebSocket(
       old.tokenExp = jwtExpiryMs(token)
 
       if (temp.expiryTimer) clearTimeout(temp.expiryTimer)
-      clients.delete(temp.id)
+      removeClient(temp.id)
       client = old
       id = old.id
       scheduleExpiryCheck(client)
@@ -850,7 +749,7 @@ export function initializeWebSocket(
             if (existing.suspendTimer) clearTimeout(existing.suspendTimer)
             existing.suspendTimer = undefined
             suspended.delete(existingId)
-            clients.delete(existingId)
+            removeClient(existingId)
             existing.ws.close(1000, 'Duplicate connection')
             replacedDuplicate = true
           }
@@ -866,8 +765,7 @@ export function initializeWebSocket(
       // 이 clientId가 이미 방에 있었는지 (세션 재개 후 클라이언트의 rejoin은 같은 id라서 true)
       const alreadyInRoom = rooms.get(roomId)?.has(id) ?? false
       client.roomId = roomId
-      if (!rooms.has(roomId)) rooms.set(roomId, new Set())
-      rooms.get(roomId)!.add(id)
+      addToRoom(roomId, id)
 
       const participants = getRoomParticipants(roomId)
       console.log(`[${isRejoin ? 'REJOIN' : 'JOIN'}] Client ${id.slice(0, 8)} (${client.nickname}) joined room ${roomId.slice(0, 8)}. Room size: ${participants.length}${client.isHost ? ' [HOST]' : ''}${client.authState === 'anonymous' ? ' [ANON]' : ''}`)
@@ -1301,7 +1199,7 @@ export function initializeWebSocket(
 
       if (roomId && rooms.has(roomId)) handleLeave(client, roomId, 'close')
       client.roomId = undefined
-      clients.delete(id)
+      removeClient(id)
     })
   })
 
