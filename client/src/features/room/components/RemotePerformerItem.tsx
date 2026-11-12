@@ -2,8 +2,8 @@ import { EchoMeasure } from '../../settings'
 import type { PeerInstrument } from '../state/roomHooks'
 import type { EngineStats, PeerStats } from '../../../native/engineApi'
 import { pathLabel, peerPathHint } from '../../../native/relayLogic'
+import { earLatencyLevel, earLatencyTitleLines, estimateEarLatencyMs, formatEarLatency } from '../earLatency'
 import {
-  formatMs,
   instrumentInfo,
   lossQualityIcon,
   peerStatsTitle,
@@ -12,7 +12,7 @@ import {
 } from '../roomDetailModel'
 import './RemotePerformerItem.css'
 
-/** 연주자 목록의 상대 연주자 행: 피어 상태 배지, 경로 안내, RTT, 음소거, 에코 측정 */
+/** 연주자 목록의 상대 연주자 행: 피어 상태 배지, 경로 안내, 입→귀 추정 지연(RTT는 툴팁), 음소거, 에코 측정 */
 export function RemotePerformerItem({
   oderId,
   peerInfo,
@@ -43,6 +43,8 @@ export function RemotePerformerItem({
   const { state, stateInfo, isActive } = remotePeerStatus(isPerformer, ps)
   // 'failed'(릴레이까지 실패) 안내 또는 릴레이 경로 지연 안내
   const pathHint = state ? peerPathHint(state, ps?.path, engineStats?.relay, relayError) : null
+  // 상대 입력 → 내 귀 추정(P2-8). 엔진 통계만으로 계산, 상대 프레임은 엔진이 주지 않아 생략(≈)
+  const ear = ps ? estimateEarLatencyMs(ps, engineStats) : null
 
   return (
     <div className="performer-item-wrapper" ref={rowRef}>
@@ -69,9 +71,11 @@ export function RemotePerformerItem({
           {pathHint && <span className={state === 'failed' || engineStats?.relay?.overBudget ? 'peer-failed-hint' : 'peer-relay-hint'}>{pathHint}</span>}
         </div>
         {/* 네트워크 상태 (연주 중일 때만: 엔진 통계) */}
-        {ps && state !== 'failed' && (
-          <div className="performer-latency" title={peerStatsTitle(ps)}>
-            <span className="latency-value">{formatMs(ps.rttMs)}</span>
+        {ps && ear && state !== 'failed' && (
+          <div className="performer-latency" title={[...earLatencyTitleLines(ear), peerStatsTitle(ps)].join('\n')}>
+            <span className={`latency-value ear-latency ${earLatencyLevel(ear.totalMs) ?? 'unknown'}`} data-testid="ear-latency">
+              {formatEarLatency(ear)}
+            </span>
             <span className="quality-indicator">{lossQualityIcon(ps.lossPct)}</span>
           </div>
         )}
