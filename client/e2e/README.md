@@ -37,3 +37,14 @@ npm run e2e:typecheck
 - 고정 데이터는 `fixtures/` (테스트마다 새 DB 사본). 상태 확인은 `mock.supabase.db.table('posts')`, `mock.api.calls`, `mock.signaling.received`.
 - 파일 이름은 `*.e2e.ts` (vitest가 `*.test.ts`/`*.spec.ts`를 집어 가므로).
 - 셀렉터는 역할·텍스트 우선, 부족하면 최소한의 `data-testid`만 앱에 추가한다.
+
+## 계산 스타일 스냅샷 (CSS 구조 정리용, CI 밖)
+CSS 파일 분리·import 위치 이동·지연 로딩이 화면을 바꾸지 않았는지 확인하는 수동 도구(P3-2 ③-3). 주요 화면 23개에서
+모든 요소(+ `::before`/`::after`)의 `getComputedStyle` 주요 속성을 DOM 경로 키로 JSON에 덤프하고 두 덤프를 비교한다.
+
+```sh
+STYLE_SNAPSHOT_OUT=../../style-base npm run e2e:styles    # 정리 전 커밋에서 기준
+STYLE_SNAPSHOT_OUT=../../style-after npm run e2e:styles   # 정리 후
+node e2e/tools/style-diff.ts ../../style-base ../../style-after   # 차이 0이어야 병합 (차이가 있으면 종료 코드 1)
+```
+화면 목록·속성·한계(:hover 등 상호작용 상태, 열지 않은 모달, 1280px 한 폭)는 `tools/style-snapshot.tool.ts` 머리말.

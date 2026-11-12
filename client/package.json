@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "e2e": "npm run e2e:build && playwright test",
     "e2e:build": "vite build --config e2e/vite.config.ts --logLevel warn",
-    "e2e:typecheck": "tsc -p e2e"
+    "e2e:typecheck": "tsc -p e2e",
+    "e2e:styles": "npm run e2e:build && playwright test -c e2e/tools/style-snapshot.config.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.81.1",
