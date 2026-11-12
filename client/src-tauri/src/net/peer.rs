@@ -1,12 +1,12 @@
 //! 피어 테이블, 홀펀칭 상태기계, keepalive, RTT (설계 문서 3절).
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU32, AtomicU8};
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
 use super::crypto::{KeyPair, PacketCipher, KEY_BYTES};
@@ -689,29 +689,29 @@ impl EchoState {
 }
 
 pub struct Peer {
-    pub id: String,
-    pub ssrc: u32,
-    pub public_key: [u8; KEY_BYTES],
+    id: String,
+    ssrc: u32,
+    public_key: [u8; KEY_BYTES],
     /// 내 → 피어 송신 암호기.
-    pub tx: PacketCipher,
+    tx: PacketCipher,
     /// 피어 → 나 수신 암호기.
-    pub rx: PacketCipher,
-    pub candidates: Vec<(SocketAddr, CandidateKind)>,
-    pub conn: Mutex<ConnState>,
-    pub jitter: Mutex<JitterBuffer>,
-    pub mix: Arc<PeerMixCtl>,
+    rx: PacketCipher,
+    candidates: Vec<(SocketAddr, CandidateKind)>,
+    conn: Mutex<ConnState>,
+    jitter: Mutex<JitterBuffer>,
+    mix: Arc<PeerMixCtl>,
     /// 이 피어로 보내는 Audio 패킷 seq(송신 키별). 에코로 되돌리는 패킷도 같은 카운터를 써서 nonce가 겹치지 않는다.
     /// 같은 키를 쓰는 살아 있는 항목(다른 peerId가 같은 descriptor를 보냄)끼리는 이 카운터를 같이 쓴다(`Net::add_peer`).
-    pub tx_seq: Arc<AtomicU32>,
+    tx_seq: Arc<AtomicU32>,
     /// 이 피어로 마지막에 보낸 Audio 타임스탬프(에코 시작 시 타임스탬프를 이어 붙이는 데 쓴다).
-    pub tx_last_ts: AtomicU32,
+    tx_last_ts: AtomicU32,
     /// 이 피어로 마지막에 보낸 내 오디오의 코덱(`TX_CODEC_*` 비트, 0 = 아직 안 보냄). PeerStats.txCodec.
-    pub tx_codec: AtomicU8,
-    pub echo: Mutex<EchoState>,
+    tx_codec: AtomicU8,
+    echo: Mutex<EchoState>,
     /// 이 피어 시계와 내 시계의 오프셋 추정(P2-3, Pong 평문의 응답자 시계로 갱신).
-    pub clock: Mutex<super::clock::ClockSync>,
+    clock: Mutex<super::clock::ClockSync>,
     /// 이 피어가 Ping으로 알려 온, 내 소리의 수신 손실 보고와 받은 시각(P1-4e). 손실 피드백 Opus 전환의 입력.
-    pub remote_loss: Mutex<Option<(LossReport, Instant)>>,
+    remote_loss: Mutex<Option<(LossReport, Instant)>>,
 }
 
 /// `Peer::tx_codec` 비트: 보낸 적 있음 / Opus / 릴레이 대역 때문에 자동 전환한 Opus(P1-4c) /
@@ -720,6 +720,20 @@ pub const TX_CODEC_SENT: u8 = 0x80;
 pub const TX_CODEC_OPUS: u8 = 0x01;
 pub const TX_CODEC_AUTO: u8 = 0x02;
 pub const TX_CODEC_AUTO_LOSS: u8 = 0x04;
+
+/// `PeerStats`의 net 몫(상태·경로·RTT·에코·송신 코덱 비트·원격 손실 보고)을 값으로 담는다.
+#[derive(Clone, Copy, Debug)]
+pub struct PeerNetStats {
+    pub state: PeerStateKind,
+    pub path: Option<PathKind>,
+    pub rtt_ms: Option<f32>,
+    pub echo_requested: bool,
+    pub echo_active: bool,
+    pub peer_echoing: bool,
+    /// `TX_CODEC_*` 비트.
+    pub tx_codec: u8,
+    pub remote_loss: Option<(LossReport, Instant)>,
+}
 
 pub struct PeerSetup<'a> {
     pub keys: &'a KeyPair,
@@ -756,6 +770,134 @@ impl Peer {
             clock: Mutex::new(super::clock::ClockSync::new()),
             remote_loss: Mutex::new(None),
         })
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn ssrc(&self) -> u32 {
+        self.ssrc
+    }
+
+    pub fn public_key(&self) -> &[u8; KEY_BYTES] {
+        &self.public_key
+    }
+
+    /// 오디오를 보낼 수 있으면 지금 경로(주소, 종류).
+    pub fn route(&self) -> Option<(SocketAddr, PathKind)> {
+        let c = self.conn.lock();
+        if c.can_send_audio() {
+            c.path
+        } else {
+            None
+        }
+    }
+
+    /// 지금 오디오를 릴레이로 보내는 중인가(자동 코덱·릴레이 부하 계산).
+    pub fn sends_audio_via_relay(&self) -> bool {
+        self.route().is_some_and(|(_, k)| k == PathKind::Relay)
+    }
+
+    /// 이 피어가 Ping으로 알려 온 내 소리의 수신 손실 보고와 받은 시각.
+    pub fn remote_loss(&self) -> Option<(LossReport, Instant)> {
+        *self.remote_loss.lock()
+    }
+
+    /// 지금 이 피어의 오디오를 되돌려 보내는 중인가(에코 반사).
+    pub fn reflecting(&self, now: Instant) -> bool {
+        self.echo.lock().reflecting(now)
+    }
+
+    /// `PeerStats`의 net 몫을 값으로.
+    pub fn net_stats(&self, now: Instant) -> PeerNetStats {
+        let (state, path, rtt_ms) = {
+            let c = self.conn.lock();
+            (c.state, c.path.map(|(_, k)| k), c.rtt_ms)
+        };
+        let (echo_requested, echo_active, peer_echoing) = {
+            let e = self.echo.lock();
+            (e.remote_requesting(now) && !e.enabled, e.reflecting(now), e.remote_echoing(now))
+        };
+        PeerNetStats {
+            state,
+            path,
+            rtt_ms,
+            echo_requested,
+            echo_active,
+            peer_echoing,
+            tx_codec: self.tx_codec.load(Ordering::Relaxed),
+            remote_loss: self.remote_loss(),
+        }
+    }
+
+    /// 피어 미디어 상태(③-b에서 엔진으로 옮긴다).
+    pub(crate) fn jitter(&self) -> &Mutex<JitterBuffer> {
+        &self.jitter
+    }
+
+    pub(crate) fn mix(&self) -> &Arc<PeerMixCtl> {
+        &self.mix
+    }
+
+    pub(super) fn tx(&self) -> &PacketCipher {
+        &self.tx
+    }
+
+    pub(super) fn rx(&self) -> &PacketCipher {
+        &self.rx
+    }
+
+    pub(super) fn candidates(&self) -> &[(SocketAddr, CandidateKind)] {
+        &self.candidates
+    }
+
+    pub(super) fn conn(&self) -> MutexGuard<'_, ConnState> {
+        self.conn.lock()
+    }
+
+    pub(super) fn echo(&self) -> MutexGuard<'_, EchoState> {
+        self.echo.lock()
+    }
+
+    pub(super) fn clock(&self) -> MutexGuard<'_, super::clock::ClockSync> {
+        self.clock.lock()
+    }
+
+    pub(super) fn set_remote_loss(&self, r: LossReport, at: Instant) {
+        *self.remote_loss.lock() = Some((r, at));
+    }
+
+    pub(super) fn tx_seq(&self) -> &AtomicU32 {
+        &self.tx_seq
+    }
+
+    pub(super) fn tx_last_ts(&self) -> &AtomicU32 {
+        &self.tx_last_ts
+    }
+
+    pub(super) fn tx_codec(&self) -> &AtomicU8 {
+        &self.tx_codec
+    }
+
+    /// 같은 송신 키를 쓰는 살아 있는 항목과 seq 카운터를 같이 쓴다(`Net::add_peer`, 공유 전 단계).
+    pub(super) fn share_tx_seq(&mut self, live: &Peer) {
+        self.tx_seq = live.tx_seq.clone();
+    }
+
+    /// 테스트용: 경로를 강제로 세운다(핸드셰이크 없이).
+    #[doc(hidden)]
+    pub fn force_path(&self, addr: SocketAddr, kind: PathKind) {
+        let mut c = self.conn.lock();
+        c.state = PeerStateKind::Connected;
+        c.path = Some((addr, kind));
+        c.last_rx = Some(Instant::now());
+    }
+
+    /// 테스트용: 두 항목이 송신 seq 카운터를 같이 쓰는가.
+    #[doc(hidden)]
+    pub fn shares_tx_seq_with(&self, other: &Peer) -> bool {
+        Arc::ptr_eq(&self.tx_seq, &other.tx_seq)
     }
 
     /// 직접 Hello를 보낼 주소들: 모든 후보 + (다르면) 현재 직접 경로 + 리바인딩 후보 주소. 최대 10개.

@@ -9,7 +9,7 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use band_lib::engine::jitter::JitterSettings;
-use band_lib::net::types::{PathKind, PeerStateKind};
+use band_lib::net::types::PathKind;
 use band_lib::net::crypto::KeyPair;
 use band_lib::net::packet::{Header, PacketType};
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor, ECHO_FLAG_REQUEST, ECHO_TAG};
@@ -96,11 +96,7 @@ impl Fake {
 
 /// 핸드셰이크 없이 경로를 세운다(테스트: 송신 경로만 본다).
 fn force_path(net: &Net, addr: SocketAddr, kind: PathKind) {
-    let p = net.peers().into_iter().find(|p| p.id == PEER).unwrap();
-    let mut c = p.conn.lock();
-    c.state = PeerStateKind::Connected;
-    c.path = Some((addr, kind));
-    c.last_rx = Some(Instant::now());
+    net.peers().into_iter().find(|p| p.id() == PEER).unwrap().force_path(addr, kind);
 }
 
 fn send(net: &Net, n: usize) {

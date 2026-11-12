@@ -290,10 +290,10 @@ impl Engine {
 
     pub fn set_peer_gain(&self, peer_id: &str, gain: f32, muted: bool, pan: Option<f32>) -> Result<(), String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
-        let peer = net.peers().into_iter().find(|p| p.id == peer_id).ok_or("알 수 없는 피어")?;
-        peer.mix.gain.store(clamp_gain(gain));
-        peer.mix.muted.store(muted, Ordering::Relaxed);
-        peer.mix.pan.store(mixer::clamp_pan(pan.unwrap_or(0.0)));
+        let peer = net.peers().into_iter().find(|p| p.id() == peer_id).ok_or("알 수 없는 피어")?;
+        peer.mix().gain.store(clamp_gain(gain));
+        peer.mix().muted.store(muted, Ordering::Relaxed);
+        peer.mix().pan.store(mixer::clamp_pan(pan.unwrap_or(0.0)));
         Ok(())
     }
 

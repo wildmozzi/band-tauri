@@ -168,17 +168,13 @@ impl Engine {
                 n.peers()
                     .iter()
                     .map(|p| {
-                        let conn = p.conn.lock().clone();
-                        let js = p.jitter.lock().stats();
-                        let (echo_requested, echo_active, peer_echoing) = {
-                            let e = p.echo.lock();
-                            let now = Instant::now();
-                            (e.remote_requesting(now) && !e.enabled, e.reflecting(now), e.remote_echoing(now))
-                        };
+                        let now = Instant::now();
+                        let ns = p.net_stats(now);
+                        let js = p.jitter().lock().stats();
                         let (tx_codec, tx_codec_reason) = {
                             use crate::engine::relay_codec::CodecReason;
                             use crate::net::peer::{TX_CODEC_AUTO, TX_CODEC_AUTO_LOSS, TX_CODEC_OPUS, TX_CODEC_SENT};
-                            let c = p.tx_codec.load(Ordering::Relaxed);
+                            let c = ns.tx_codec;
                             let kind = if c & TX_CODEC_OPUS != 0 { config::CodecKind::Opus } else { config::CodecKind::Pcm16 };
                             let reason = if c & TX_CODEC_AUTO != 0 {
                                 Some(CodecReason::RelayLoad)
@@ -189,14 +185,15 @@ impl Engine {
                             };
                             ((c & TX_CODEC_SENT != 0).then_some(kind), reason)
                         };
-                        let remote = (*p.remote_loss.lock())
-                            .filter(|(_, at)| Instant::now().saturating_duration_since(*at) <= relay_codec::REPORT_STALE)
+                        let remote = ns
+                            .remote_loss
+                            .filter(|(_, at)| now.saturating_duration_since(*at) <= relay_codec::REPORT_STALE)
                             .map(|(r, _)| r);
                         PeerStats {
-                            peer_id: p.id.clone(),
-                            state: conn.state,
-                            path: conn.path.map(|(_, k)| k),
-                            rtt_ms: conn.rtt_ms,
+                            peer_id: p.id().to_string(),
+                            state: ns.state,
+                            path: ns.path,
+                            rtt_ms: ns.rtt_ms,
                             jitter_ms: js.jitter_ms,
                             buffer_ms: js.buffer_ms,
                             target_ms: js.target_ms,
@@ -206,12 +203,12 @@ impl Engine {
                             loss_pct: js.loss_pct,
                             late: js.late,
                             concealed: js.concealed,
-                            level: p.mix.level.load(),
+                            level: p.mix().level.load(),
                             // 벽시계로 잰 버퍼 지연(소스 링 포함) + 장치 출력 버퍼: 클럭 추정과 독립적인 실제 재생 지연
                             playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + out_ms } else { 0.0 },
-                            echo_requested,
-                            echo_active,
-                            peer_echoing,
+                            echo_requested: ns.echo_requested,
+                            echo_active: ns.echo_active,
+                            peer_echoing: ns.peer_echoing,
                             tx_codec,
                             tx_codec_auto: tx_codec_reason.is_some(),
                             tx_codec_reason,
@@ -291,7 +288,7 @@ impl Engine {
     pub fn peer_jitter_stats(&self) -> Vec<(String, jitter::JitterStats)> {
         self.net
             .as_ref()
-            .map(|n| n.peers().iter().map(|p| (p.id.clone(), p.jitter.lock().stats())).collect())
+            .map(|n| n.peers().iter().map(|p| (p.id().to_string(), p.jitter().lock().stats())).collect())
             .unwrap_or_default()
     }
 }

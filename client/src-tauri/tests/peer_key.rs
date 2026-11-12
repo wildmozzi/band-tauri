@@ -179,11 +179,8 @@ impl Fake {
 
 /// 핸드셰이크 없이 경로를 세운다(송신 경로만 본다).
 fn force_path(net: &Net, id: &str, addr: SocketAddr) {
-    if let Some(p) = net.peers().into_iter().find(|p| p.id == id) {
-        let mut c = p.conn.lock();
-        c.state = PeerStateKind::Connected;
-        c.path = Some((addr, PathKind::Lan));
-        c.last_rx = Some(Instant::now());
+    if let Some(p) = net.peers().into_iter().find(|p| p.id() == id) {
+        p.force_path(addr, PathKind::Lan);
     }
 }
 
@@ -203,8 +200,8 @@ fn same_key_entries_share_one_tx_counter() {
     let mut seen = HashSet::new();
     net.add_peer("bob".into(), &fake.desc()).unwrap();
     net.add_peer("bob-copy".into(), &fake.desc()).expect("같은 키라도 거부하지 않는다");
-    let ctr = |id: &str| net.peers().into_iter().find(|p| p.id == id).unwrap().tx_seq.clone();
-    assert!(Arc::ptr_eq(&ctr("bob"), &ctr("bob-copy")), "같은 키의 항목은 카운터를 같이 써야 한다");
+    let peer = |id: &str| net.peers().into_iter().find(|p| p.id() == id).unwrap();
+    assert!(peer("bob").shares_tx_seq_with(&peer("bob-copy")), "같은 키의 항목은 카운터를 같이 써야 한다");
     for id in ["bob", "bob-copy"] {
         force_path(&net, id, fake.addr());
     }
@@ -214,14 +211,14 @@ fn same_key_entries_share_one_tx_counter() {
     // 한쪽 제거 → 재추가: 살아 있는 bob-copy의 카운터를 이어 쓴다
     assert!(net.remove_peer("bob"));
     net.add_peer("bob".into(), &fake.desc()).unwrap();
-    assert!(Arc::ptr_eq(&ctr("bob"), &ctr("bob-copy")));
+    assert!(peer("bob").shares_tx_seq_with(&peer("bob-copy")));
     force_path(&net, "bob", fake.addr());
     send(&net, 40);
     assert_eq!(fake.collect(&mut seen, 80), 0, "재추가 뒤 nonce 중복");
 
     // 같은 id 교체도 마찬가지
     net.add_peer("bob-copy".into(), &fake.desc()).unwrap();
-    assert!(Arc::ptr_eq(&ctr("bob"), &ctr("bob-copy")));
+    assert!(peer("bob").shares_tx_seq_with(&peer("bob-copy")));
     force_path(&net, "bob-copy", fake.addr());
     send(&net, 40);
     assert_eq!(fake.collect(&mut seen, 80), 0, "교체 뒤 nonce 중복");
