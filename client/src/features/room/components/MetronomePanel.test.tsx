@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import type { EngineStats, MetronomeStats } from '../../native/engineApi'
-import { OPEN_LATENCY_MEASURE_EVENT } from '../../native/loopbackOffsetStore'
+import type { EngineStats, MetronomeStats } from '../../../native/engineApi'
+import { OPEN_LATENCY_MEASURE_EVENT } from '../../../native/loopbackOffsetStore'
 
 const room = vi.hoisted(() => ({
   metronome: null,
@@ -13,7 +13,7 @@ const room = vi.hoisted(() => ({
   engineStats: null as Partial<EngineStats> | null,
   isPerforming: true,
 }))
-vi.mock('../../contexts/RoomContext', () => ({ useRoom: () => room }))
+vi.mock('../state/RoomContext', () => ({ useRoom: () => room }))
 
 import { MetronomePanel } from './MetronomePanel'
 

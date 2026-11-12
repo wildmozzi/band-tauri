@@ -1,11 +1,11 @@
 // 합주실 화면의 머리글, 비밀번호 입장 화면, 악기 변경 요청 말풍선.
 import { Link } from 'react-router-dom'
-import type { InstrumentChangeRequest, JoinError, RtcStatus } from '../../contexts/RoomContext'
-import { describeJoinError } from '../../contexts/room/roomAccess'
-import { INSTRUMENT_INFO, RTC_STATUS_TEXT, type DetailRoom } from './roomDetailModel'
-import type { BubblePositions } from './useBubblePositions'
-import { Badge } from '../../components/ui/Badge'
-import { Button } from '../../components/ui/Button'
+import type { InstrumentChangeRequest, JoinError, RtcStatus } from '../state/RoomContext'
+import { describeJoinError } from '../../rooms/roomAccess'
+import { INSTRUMENT_INFO, RTC_STATUS_TEXT, type DetailRoom } from '../roomDetailModel'
+import type { BubblePositions } from '../hooks/useBubblePositions'
+import { Badge } from '../../../shared/ui/Badge'
+import { Button } from '../../../shared/ui/Button'
 
 /** 상단 헤더: 제목, 상태 배지, 인원, 방장, 정보/설정/나가기 */
 export function LiveHeader({

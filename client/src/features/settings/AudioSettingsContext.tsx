@@ -5,10 +5,10 @@
  * - 웹(비Tauri)에서는 장치 조회/테스트를 하지 않는다(연주는 앱 전용).
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { Json } from '../lib/database.types'
-import { isSupabaseConfigured } from '../lib/supabaseClient'
-import { profileApi, useAudioSettingsQuery } from '../features/profile/queries'
-import { useAuth } from './useAuth'
+import type { Json } from '../../shared/lib/database.types'
+import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
+import { profileApi, useAudioSettingsQuery } from '../auth/profileQueries'
+import { useAuth } from '../auth/useAuth'
 import {
   engineErrorMessage,
   engineListDevices,
@@ -19,7 +19,7 @@ import {
   type DeviceInfo,
   type EngineConfig,
   type EngineStats,
-} from '../native/engineApi'
+} from '../../native/engineApi'
 import {
   DEFAULT_ENGINE_CONFIG,
   applyPreset as applyPresetToConfig,
@@ -31,9 +31,9 @@ import {
   validateEngineConfig,
   type ConfigIssue,
   type EnginePresetId,
-} from '../native/engineConfig'
-import { SettingsSaveGate, TestMonitorControl } from '../native/settingsSync'
-import { reapplyLoopbackOffsetInBackground } from '../native/loopbackOffsetStore'
+} from '../../native/engineConfig'
+import { SettingsSaveGate, TestMonitorControl } from '../../native/settingsSync'
+import { reapplyLoopbackOffsetInBackground } from '../../native/loopbackOffsetStore'
 
 const STORAGE_KEY = 'band_engine_config_v2'
 const SAVE_DEBOUNCE_MS = 600

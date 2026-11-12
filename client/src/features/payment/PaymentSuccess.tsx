@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
-import { useAuth } from '../contexts/useAuth'
-import { usePremium } from '../contexts/usePremium'
-import { SupportContact } from '../components/SupportContact'
-import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor } from '../lib/planFeatures'
-import { paymentApi } from '../services/paymentApi'
+import { useAuth } from '../auth/useAuth'
+import { usePremium } from './usePremium'
+import { SupportContact } from './SupportContact'
+import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor } from './planFeatures'
+import { paymentApi } from './paymentApi'
 import {
   loadChecking,
   recheckOrder,
@@ -13,7 +13,7 @@ import {
   type KeyValueStorage,
   type PaymentFlowDeps,
   type PaymentFlowResult,
-} from '../services/paymentFlow'
+} from './paymentFlow'
 
 const PLAN_INFO: Record<string, { name: string; price: number }> = {
   standard: { name: 'Standard 플랜', price: 2900 },

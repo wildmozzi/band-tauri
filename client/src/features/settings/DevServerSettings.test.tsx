@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DevServerSettingsSection } from './DevServerSettings'
-import { DEV_SERVER_STORAGE_KEY } from '../lib/apiUrl'
+import { DEV_SERVER_STORAGE_KEY } from '../../shared/lib/apiUrl'
 
 describe('DevServerSettingsSection', () => {
   afterEach(() => {

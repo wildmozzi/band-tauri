@@ -1,9 +1,9 @@
 import type { ReactElement } from 'react'
 import type { User } from '@supabase/supabase-js'
 import { Navigate, useLocation } from 'react-router-dom'
-import { AuthChecking } from '../../components/AuthChecking'
-import { useAuth } from '../../contexts/useAuth'
-import { safeRedirectPath } from '../../lib/redirect'
+import { AuthChecking } from './AuthChecking'
+import { useAuth } from './useAuth'
+import { safeRedirectPath } from '../../shared/lib/redirect'
 
 /**
  * 로그인이 필요한 페이지의 공통 가드 (P3-10f, P3-12 ⑩ 결제 수정과 같은 방식).

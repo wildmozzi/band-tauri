@@ -10,8 +10,8 @@
  * 이 클라이언트도 다른 클라이언트가 보낸 그런 필드를 권한 판단 근거로 쓰지 않는다.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { supabase } from '../../lib/supabaseClient'
-import { getSignalingUrl } from '../../lib/apiUrl'
+import { supabase } from '../../../shared/lib/supabaseClient'
+import { getSignalingUrl } from '../../../shared/lib/apiUrl'
 
 export type SignalStatus = 'idle' | 'connecting' | 'connected' | 'error'
 export type SignalPayload = Record<string, unknown> & { type: string }

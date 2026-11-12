@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-vi.mock('../lib/authHeaders', () => ({
+vi.mock('../../shared/lib/authHeaders', () => ({
   authHeaders: async () => ({ Authorization: 'Bearer tok' }),
 }))
 

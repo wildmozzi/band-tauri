@@ -3,18 +3,18 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { argsOf, createSupabaseMock } from '../test/supabaseMock'
-import { createQueryWrapper } from '../test/queryWrapper'
+import { argsOf, createSupabaseMock } from '../../shared/test/supabaseMock'
+import { createQueryWrapper } from '../../shared/test/queryWrapper'
 
 const sb = vi.hoisted(() => ({ mock: null as ReturnType<typeof createSupabaseMock> | null }))
-vi.mock('../lib/supabaseClient', async () => {
-  const { createSupabaseMock } = await import('../test/supabaseMock')
+vi.mock('../../shared/lib/supabaseClient', async () => {
+  const { createSupabaseMock } = await import('../../shared/test/supabaseMock')
   sb.mock = createSupabaseMock()
   return { supabase: sb.mock.client, isSupabaseConfigured: () => true }
 })
 
 const auth = vi.hoisted(() => ({ user: { id: 'u1' } as { id: string } | null }))
-vi.mock('./useAuth', () => ({ useAuth: () => ({ user: auth.user }) }))
+vi.mock('../auth/useAuth', () => ({ useAuth: () => ({ user: auth.user }) }))
 
 import { AudioSettingsProvider, useAudioSettings } from './AudioSettingsContext'
 

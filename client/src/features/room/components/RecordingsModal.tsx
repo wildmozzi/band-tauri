@@ -1,11 +1,11 @@
-import type { Recording } from '../../contexts/RoomContext'
+import type { Recording } from '../state/RoomContext'
 import {
   downloadRecording,
   formatDuration,
   recordingFormatLabel,
   recordingTimeLabel,
-} from './roomDetailModel'
-import { Modal } from '../../components/ui/Modal'
+} from '../roomDetailModel'
+import { Modal } from '../../../shared/ui/Modal'
 
 /** 녹음 목록 모달 */
 export function RecordingsModal({

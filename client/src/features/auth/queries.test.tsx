@@ -3,7 +3,7 @@
 import { act, cleanup, render, renderHook, waitFor } from '@testing-library/react'
 import { useQuery } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createQueryWrapper } from '../../test/queryWrapper'
+import { createQueryWrapper } from '../../shared/test/queryWrapper'
 
 type AuthCb = (event: string, session: { user: { id: string } } | null) => void
 const sb = vi.hoisted(() => {
@@ -20,11 +20,11 @@ const sb = vi.hoisted(() => {
   }
   return { state, client: { auth, from: vi.fn() } }
 })
-vi.mock('../../lib/supabaseClient', () => ({ supabase: sb.client, isSupabaseConfigured: () => true }))
+vi.mock('../../shared/lib/supabaseClient', () => ({ supabase: sb.client, isSupabaseConfigured: () => true }))
 
 import { authApi, isUserAgnosticKey, resetUserScopedCache, shouldResetUserCache, useResetQueryCacheOnUserChange } from './queries'
-import { AuthProvider } from '../../contexts/AuthContext'
-import { useAuth } from '../../contexts/useAuth'
+import { AuthProvider } from './AuthContext'
+import { useAuth } from './useAuth'
 
 beforeEach(() => {
   sb.state.user = null

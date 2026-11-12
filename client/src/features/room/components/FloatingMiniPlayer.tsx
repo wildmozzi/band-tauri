@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { useRoom } from '../contexts/RoomContext'
+import { useRoom } from '../state/RoomContext'
 import './FloatingMiniPlayer.css'
 
 // 악기 정보

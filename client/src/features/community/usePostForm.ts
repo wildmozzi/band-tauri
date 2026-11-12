@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
-import { uploadPostImage } from '../../features/community/queries'
-import { PostSaveError, type Post } from '../../services/communityApi'
+import { uploadPostImage } from './queries'
+import { PostSaveError, type Post } from './communityApi'
 import { MAX_IMAGES, addUniqueTag, uploadSequentially, validateImageFiles } from './postLogic'
 
 interface SubmitOptions {

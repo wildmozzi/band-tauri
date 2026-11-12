@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { SUPPORT_EMAIL } from '../lib/brand'
+import { SUPPORT_EMAIL } from '../../shared/lib/brand'
 
 interface SupportContactProps {
   /** 문의 메일. 기본은 VITE_SUPPORT_EMAIL — 테스트에서 주입 */

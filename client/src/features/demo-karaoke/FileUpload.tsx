@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { uploadMusicFile, type UploadResponse } from '../services/musicApi'
+import { uploadMusicFile, type UploadResponse } from './musicApi'
 
 interface FileUploadProps {
   onUploadSuccess: (result: UploadResponse) => void

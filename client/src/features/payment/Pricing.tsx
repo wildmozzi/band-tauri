@@ -1,8 +1,8 @@
 import { useNavigate } from 'react-router-dom'
-import { useAuth } from '../contexts/useAuth'
-import { usePremium } from '../contexts/usePremium'
-import { MAX_PERFORMERS } from '../native/engineApi'
-import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLAN_COMPARISON, PLANNED_NOTICE, plannedFeaturesFor, type PaidPlan } from '../lib/planFeatures'
+import { useAuth } from '../auth/useAuth'
+import { usePremium } from './usePremium'
+import { MAX_PERFORMERS } from '../../native/engineApi'
+import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLAN_COMPARISON, PLANNED_NOTICE, plannedFeaturesFor, type PaidPlan } from './planFeatures'
 
 type PlanType = 'free' | 'standard' | 'pro'
 

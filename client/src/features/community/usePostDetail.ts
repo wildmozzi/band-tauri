@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import type { Comment } from '../../services/communityApi'
+import type { Comment } from './communityApi'
 import {
   forgetPost,
   useAddCommentMutation,
@@ -13,7 +13,7 @@ import {
   useTrendingTagsQuery,
   useUpdateCommentMutation,
   type CommunityUser,
-} from '../../features/community/queries'
+} from './queries'
 
 const EMPTY_COMMENTS: Comment[] = []
 const EMPTY_TAGS: { tag: string; count: number }[] = []

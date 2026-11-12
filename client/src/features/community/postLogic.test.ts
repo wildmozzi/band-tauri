@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Comment } from '../../services/communityApi'
+import type { Comment } from './communityApi'
 import {
   MAX_FILE_SIZE,
   addReplyToTree,

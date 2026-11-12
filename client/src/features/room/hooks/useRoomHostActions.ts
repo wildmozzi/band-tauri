@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { isSupabaseConfigured } from '../../lib/supabaseClient'
-import { forgetRoomDetail, useDeleteRoomMutation, useSyncParticipantsMutation } from '../../features/rooms/queries'
+import { isSupabaseConfigured } from '../../../shared/lib/supabaseClient'
+import { forgetRoomDetail, useDeleteRoomMutation, useSyncParticipantsMutation } from '../../rooms/queries'
 
 /** 방장 전용: 참여자 수 새로고침(서버 기준 값 다시 읽기), 합주실 삭제 */
 export function useRoomHostActions(opts: {

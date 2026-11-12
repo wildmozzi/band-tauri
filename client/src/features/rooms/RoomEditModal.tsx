@@ -1,7 +1,7 @@
 import type { RoomEditorState } from './useRoomEditor'
 import { COMMON_TAGS, GENRES, maxParticipantOptionsFor, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, MAX_SLOT_COUNT, findInstrument, maxParticipantsOptionLabel } from './roomModel'
-import { Modal } from '../../components/ui/Modal'
-import { Field } from '../../components/ui/Field'
+import { Modal } from '../../shared/ui/Modal'
+import { Field } from '../../shared/ui/Field'
 
 /** "합주실 설정" 모달. editor.editingRoom이 있을 때만 렌더한다. */
 export function RoomEditModal({ editor }: { editor: RoomEditorState }) {

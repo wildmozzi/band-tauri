@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useAuth } from '../contexts/useAuth'
+import { useAuth } from '../auth/useAuth'
 import {
   clearStemHistory,
   fetchFreshStemHistory,
   invalidateStemHistory,
   useDeleteStemSeparationMutation,
   useStemHistoryQuery,
-} from '../features/stems/queries'
+} from './stemQueries'
 import {
   separateAudioStems,
   getMusicFileUrl,
@@ -15,9 +15,9 @@ import {
   getAvailableStemsFromSeparation,
   type SeparatedStems,
   type StemSeparation
-} from '../services/musicApi'
-import { MultiTrackPlayer } from '../services/MultiTrackPlayer'
-import { stemFileExtension, fetchStemForDownload, saveBlob } from '../services/stemAudio'
+} from './musicApi'
+import { MultiTrackPlayer } from './MultiTrackPlayer'
+import { stemFileExtension, fetchStemForDownload, saveBlob } from './stemAudio'
 import './MusicRoom.css'
 
 // 스템 이름 한글 매핑

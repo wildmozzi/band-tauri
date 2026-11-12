@@ -1,7 +1,7 @@
-import { EchoMeasure } from '../../components/EchoMeasure'
-import type { PeerInstrument } from '../../contexts/RoomContext'
-import type { EngineStats, PeerStats } from '../../native/engineApi'
-import { pathLabel, peerPathHint } from '../../native/relayLogic'
+import { EchoMeasure } from '../../settings/EchoMeasure'
+import type { PeerInstrument } from '../state/RoomContext'
+import type { EngineStats, PeerStats } from '../../../native/engineApi'
+import { pathLabel, peerPathHint } from '../../../native/relayLogic'
 import {
   formatMs,
   instrumentInfo,
@@ -9,7 +9,7 @@ import {
   peerStatsTitle,
   performerName,
   remotePeerStatus,
-} from './roomDetailModel'
+} from '../roomDetailModel'
 
 /** 연주자 목록의 상대 연주자 행: 피어 상태 배지, 경로 안내, RTT, 음소거, 에코 측정 */
 export function RemotePerformerItem({

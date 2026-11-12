@@ -2,20 +2,20 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Post } from '../../services/communityApi'
+import type { Post } from './communityApi'
 
 const api = vi.hoisted(() => ({ getPost: vi.fn() }))
 const auth = vi.hoisted(() => ({ user: null as { id: string } | null }))
 
-vi.mock('../../services/communityApi', () => ({ communityApi: api }))
+vi.mock('./communityApi', () => ({ communityApi: api }))
 // 매 렌더 새 객체를 돌려준다(토큰 갱신으로 user 참조만 바뀌는 상황)
-vi.mock('../../contexts/useAuth', () => ({
+vi.mock('../auth/useAuth', () => ({
   useAuth: () => ({ user: auth.user ? { ...auth.user } : null }),
 }))
 
-import { CreatePost } from '../CreatePost'
-import { EditPost } from '../EditPost'
-import { createQueryWrapper } from '../../test/queryWrapper'
+import { CreatePost } from './CreatePost'
+import { EditPost } from './EditPost'
+import { createQueryWrapper } from '../../shared/test/queryWrapper'
 
 const post: Post = {
   id: 'p1', author_id: 'u1', author_name: 'n', author_role: '', title: '원래 제목', content: '본문',

@@ -1,8 +1,8 @@
 /**
  * 음악 파일 업로드 및 관리 API 서비스
  */
-import { getApiUrl } from '../lib/apiUrl'
-import { authHeaders } from '../lib/authHeaders'
+import { getApiUrl } from '../../shared/lib/apiUrl'
+import { authHeaders } from '../../shared/lib/authHeaders'
 
 // VITE_API_URL 또는 (auto) 현재 호스트:8080 — lib/apiUrl
 const API_BASE_URL = getApiUrl()

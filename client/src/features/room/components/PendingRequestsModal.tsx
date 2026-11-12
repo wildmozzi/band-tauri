@@ -1,8 +1,8 @@
-import type { PerformRequest } from '../../contexts/RoomContext'
-import { REJECT_REASON_PRESETS } from '../../contexts/room/performRequestState'
-import { INSTRUMENT_INFO, instrumentInfo } from './roomDetailModel'
-import type { RejectPicker } from './useRejectPicker'
-import { Modal } from '../../components/ui/Modal'
+import type { PerformRequest } from '../state/RoomContext'
+import { REJECT_REASON_PRESETS } from '../state/performRequestState'
+import { INSTRUMENT_INFO, instrumentInfo } from '../roomDetailModel'
+import type { RejectPicker } from '../hooks/useRejectPicker'
+import { Modal } from '../../../shared/ui/Modal'
 
 /** 방장: 새 연주 참여 요청 알림 토스트 */
 export function RequestNoticeToast({

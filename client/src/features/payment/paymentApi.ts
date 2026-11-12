@@ -1,6 +1,6 @@
 // 결제 API는 모두 Bearer 토큰 필요. userId는 서버가 토큰으로 결정한다(본문의 userId는 무시됨)
-import { getApiUrl } from '../lib/apiUrl'
-import { authHeaders } from '../lib/authHeaders'
+import { getApiUrl } from '../../shared/lib/apiUrl'
+import { authHeaders } from '../../shared/lib/authHeaders'
 import type { OrderStatus, OrderStatusResult } from './paymentFlow'
 
 // VITE_API_URL 또는 (auto) 현재 호스트:8080 — lib/apiUrl

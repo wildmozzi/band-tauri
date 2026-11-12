@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ROOM_FILTERS } from '../../data/rooms'
-import { useRoomsQuery } from '../../features/rooms/queries'
+import { ROOM_FILTERS } from './roomFilters'
+import { useRoomsQuery } from './queries'
 import { publicRooms, toRoom, type Room } from './roomModel'
 
 const EMPTY: Room[] = []

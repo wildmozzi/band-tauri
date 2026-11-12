@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DiagnosticsExport } from './DiagnosticsExport'
-import { diagStatusText } from '../native/diagFormat'
+import { diagStatusText } from '../../native/diagFormat'
 
 describe('DiagnosticsExport', () => {
   afterEach(cleanup)

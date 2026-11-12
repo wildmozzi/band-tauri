@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { isSupabaseConfigured } from '../../lib/supabaseClient'
-import { patchMyRoomCache, roomKeys, useDeleteRoomMutation, useMyRoomsQuery } from '../../features/rooms/queries'
+import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
+import { patchMyRoomCache, roomKeys, useDeleteRoomMutation, useMyRoomsQuery } from './queries'
 import type { MyRoom } from './roomModel'
 
 const EMPTY: MyRoom[] = []

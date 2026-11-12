@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import type { EngineStats, RecordStats } from '../../native/engineApi'
+import type { EngineStats, RecordStats } from '../../../native/engineApi'
 
 const room = vi.hoisted(() => ({ engineStats: null as Partial<EngineStats> | null, isPerforming: true }))
 const api = vi.hoisted(() => ({
@@ -12,8 +12,8 @@ const api = vi.hoisted(() => ({
   engineRecordSetTrackNames: vi.fn(),
 }))
 
-vi.mock('../../contexts/RoomContext', () => ({ useRoom: () => room }))
-vi.mock('../../native/engineApi', () => ({
+vi.mock('../state/RoomContext', () => ({ useRoom: () => room }))
+vi.mock('../../../native/engineApi', () => ({
   ...api,
   engineErrorMessage: (e: unknown) => String(e),
 }))

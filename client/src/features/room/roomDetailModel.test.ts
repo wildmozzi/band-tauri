@@ -20,9 +20,9 @@ import {
   recordingTimeLabel,
   remotePeerStatus,
 } from './roomDetailModel'
-import { bubblePositionFor } from './useBubblePositions'
-import { startsWithoutApproval } from './usePerformControls'
-import { settingsSaveErrorMessage } from './useRoomSettingsForm'
+import { bubblePositionFor } from './hooks/useBubblePositions'
+import { startsWithoutApproval } from './hooks/usePerformControls'
+import { settingsSaveErrorMessage } from './hooks/useRoomSettingsForm'
 
 const stats = (over: Partial<PeerStats> = {}): PeerStats => ({
   state: 'connected', path: 'direct', rttMs: 12.4, jitterMs: 1.26, bufferMs: 10, lossPct: 0.5, late: 1, concealed: 2,

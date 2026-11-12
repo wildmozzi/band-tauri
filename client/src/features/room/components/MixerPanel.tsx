@@ -1,10 +1,10 @@
-import type { PeerInstrument } from '../../contexts/RoomContext'
-import { useRoom } from '../../contexts/RoomContext'
+import type { PeerInstrument } from '../state/RoomContext'
+import { useRoom } from '../state/RoomContext'
 import { BroadcastMixerChannel, MyMixerChannel, PeerMixerChannel } from './MixerChannels'
-import { DEFAULT_MIX, formatDuration, formatPan, levelClass, performerName } from './roomDetailModel'
-import { DiagnosticsExport } from '../../components/DiagnosticsExport'
+import { DEFAULT_MIX, formatDuration, formatPan, levelClass, performerName } from '../roomDetailModel'
+import { DiagnosticsExport } from '../../settings/DiagnosticsExport'
 import { NativeRecordingControl } from './NativeRecordingControl'
-import { isNativeApp } from '../../native/engineApi'
+import { isNativeApp } from '../../../native/engineApi'
 
 /** 마스터 볼륨·음소거·패닝(관람만)·레벨 */
 function MixerMaster({ isPerformer }: { isPerformer: boolean }) {

@@ -1,10 +1,10 @@
 import { Link } from 'react-router-dom'
-import { PlanStatus } from '../components/PlanStatus'
-import { AdBanner } from '../components/AdBanner'
-import { useAuth } from '../contexts/useAuth'
-import { DesktopDownloadButton } from '../components/DesktopDownloadButton'
-import { SERVICE_NAME } from '../lib/brand'
-import { MAX_PERFORMERS } from '../native/engineApi'
+import { PlanStatus } from '../payment/PlanStatus'
+import { AdBanner } from './AdBanner'
+import { useAuth } from '../auth/useAuth'
+import { DesktopDownloadButton } from '../../shared/ui/DesktopDownloadButton'
+import { SERVICE_NAME } from '../../shared/lib/brand'
+import { MAX_PERFORMERS } from '../../native/engineApi'
 
 type FeaturePillar = {
   title: string

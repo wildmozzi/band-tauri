@@ -2,8 +2,8 @@
  * 파일 저장소 API (P3-10). 게시글 이미지는 서버가 발급한 서명 PUT URL로 올리고, 서버 확인(/complete)을 거친다
  * (클라이언트가 Supabase Storage에 직접 쓰지 않는다 — 저장소는 서버 설정 STORAGE_DRIVER로 바뀐다).
  */
-import { getApiUrl } from '../lib/apiUrl'
-import { authHeaders } from '../lib/authHeaders'
+import { getApiUrl } from '../../shared/lib/apiUrl'
+import { authHeaders } from '../../shared/lib/authHeaders'
 
 /** 서버 상한과 같게 유지 (server/src/lib/imageStorage.ts). 서버가 최종 판단한다 */
 export const POST_IMAGE_MAX_BYTES = 5 * 1024 * 1024

@@ -9,22 +9,22 @@
  * 결정사항(docs/overhaul/native-engine-design.md): 연주자는 앱 전용, 웹은 관람만. 앱 연주자끼리는 WebRTC를 쓰지 않는다.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useAuth } from './useAuth'
-import { useAudioSettings } from './AudioSettingsContext'
-import { useSignaling, type SignalPayload, type SignalStatus } from './room/useSignaling'
-import { useChat, type ChatMessage } from './room/useChat'
+import { useAuth } from '../../auth/useAuth'
+import { useAudioSettings } from '../../settings/AudioSettingsContext'
+import { useSignaling, type SignalPayload, type SignalStatus } from './useSignaling'
+import { useChat, type ChatMessage } from './useChat'
 import {
   usePerformRequests,
   type InstrumentChangeRequest,
   type MyRequestStatus,
   type PerformRequest,
-} from './room/usePerformRequests'
-import { useViewerAudio, type PeerNetworkStats, type RtcStatus } from './room/useViewerAudio'
-import { useWebAudioMixer, type MixSettings } from './room/useWebAudioMixer'
-import { useRecording, type Recording, type RecordingSource } from './room/useRecording'
-import { mergeSelfPerformer, withPeer, type PeerInstrument } from './room/roomState'
-import { forgetRoomPassword, joinErrorFromSignal, joinErrorStopsSession, rememberRoomPassword, type JoinError } from './room/roomAccess'
-import { useNativeSession } from '../native/useNativeSession'
+} from './usePerformRequests'
+import { useViewerAudio, type PeerNetworkStats, type RtcStatus } from './useViewerAudio'
+import { useWebAudioMixer, type MixSettings } from './useWebAudioMixer'
+import { useRecording, type Recording, type RecordingSource } from './useRecording'
+import { mergeSelfPerformer, withPeer, type PeerInstrument } from './roomState'
+import { forgetRoomPassword, joinErrorFromSignal, joinErrorStopsSession, rememberRoomPassword, type JoinError } from '../../rooms/roomAccess'
+import { useNativeSession } from '../../../native/useNativeSession'
 import {
   browserMetronomePrefsStorage,
   clampMetronomeVolume,
@@ -32,10 +32,10 @@ import {
   metronomeErrorFromCode,
   saveMetronomeGain,
   type MetronomeView,
-} from '../native/metronomeLogic'
-import { MixBroadcaster, MixSource } from '../native/mixBridge'
-import { isEngineDescriptorErrorCode } from '../native/performSession'
-import { computeViewers, selectBroadcaster } from '../native/sessionLogic'
+} from '../../../native/metronomeLogic'
+import { MixBroadcaster, MixSource } from '../../../native/mixBridge'
+import { isEngineDescriptorErrorCode } from '../../../native/performSession'
+import { computeViewers, selectBroadcaster } from '../../../native/sessionLogic'
 import {
   MAX_PERFORMERS,
   engineErrorMessage,
@@ -45,7 +45,7 @@ import {
   isNativeApp,
   type EngineStats,
   type PeerStats,
-} from '../native/engineApi'
+} from '../../../native/engineApi'
 
 export type { JoinError }
 export type { ChatMessage, InstrumentChangeRequest, MyRequestStatus, PerformRequest, PeerNetworkStats, RtcStatus, MixSettings, Recording, SignalStatus, PeerInstrument }

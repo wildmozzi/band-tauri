@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Comment } from '../../services/communityApi'
+import type { Comment } from './communityApi'
 
 // Comment component for rendering nested comments
 interface CommentItemProps {

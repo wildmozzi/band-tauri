@@ -14,9 +14,9 @@ import {
   engineSetEchoMode,
   type EchoReport,
   type PeerStats,
-} from '../native/engineApi'
-import { copyText, downloadText, echoRows, echoText, VERDICT_LABEL } from '../native/measureFormat'
-import { Modal } from './ui'
+} from '../../native/engineApi'
+import { copyText, downloadText, echoRows, echoText, VERDICT_LABEL } from '../../native/measureFormat'
+import { Modal } from '../../shared/ui'
 import './LatencyMeasure.css'
 
 interface EchoMeasureProps {

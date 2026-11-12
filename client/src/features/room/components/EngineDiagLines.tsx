@@ -1,4 +1,4 @@
-import type { EngineStats } from '../../native/engineApi'
+import type { EngineStats } from '../../../native/engineApi'
 import {
   formatBackend,
   formatQos,
@@ -6,7 +6,7 @@ import {
   qosTitle,
   threadPriorityFailed,
   threadPriorityTitle,
-} from '../../native/engineDiagFormat'
+} from '../../../native/engineDiagFormat'
 
 /** 내 채널 진단 줄(P1-12b): 오디오 백엔드, 스레드 우선순위(MMCSS), QoS 마킹. 값이 없는 줄(옛 엔진·네트워크 미시작)은 숨긴다 */
 export function EngineDiagLines({ stats }: { stats: EngineStats }) {

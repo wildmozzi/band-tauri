@@ -1,17 +1,17 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { argsOf, createSupabaseMock } from '../../test/supabaseMock'
-import { createQueryWrapper } from '../../test/queryWrapper'
+import { argsOf, createSupabaseMock } from '../../shared/test/supabaseMock'
+import { createQueryWrapper } from '../../shared/test/queryWrapper'
 
 const sb = vi.hoisted(() => ({ mock: null as ReturnType<typeof createSupabaseMock> | null }))
-vi.mock('../../lib/supabaseClient', async () => {
-  const { createSupabaseMock } = await import('../../test/supabaseMock')
+vi.mock('../../shared/lib/supabaseClient', async () => {
+  const { createSupabaseMock } = await import('../../shared/test/supabaseMock')
   sb.mock = createSupabaseMock()
   return { supabase: sb.mock.client, isSupabaseConfigured: () => true }
 })
 
-import { profileApi, profileKeys, useProfileNicknameQuery, useSaveProfileMutation } from './queries'
+import { profileApi, profileKeys, useProfileNicknameQuery, useSaveProfileMutation } from './profileQueries'
 
 const form = { nickname: '새닉', bio: '', instagram: '', youtube: '', twitter: '' }
 

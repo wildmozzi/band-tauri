@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Comment, Post } from '../../services/communityApi'
+import type { Comment, Post } from './communityApi'
 
 const api = vi.hoisted(() => ({
   getPost: vi.fn(),
@@ -12,11 +12,11 @@ const api = vi.hoisted(() => ({
 }))
 const navigate = vi.hoisted(() => vi.fn())
 
-vi.mock('../../services/communityApi', () => ({ communityApi: api }))
+vi.mock('./communityApi', () => ({ communityApi: api }))
 vi.mock('react-router-dom', () => ({ useNavigate: () => navigate }))
 
 import { usePostDetail } from './usePostDetail'
-import { createQueryWrapper } from '../../test/queryWrapper'
+import { createQueryWrapper } from '../../shared/test/queryWrapper'
 
 const post = (id: string, over: Partial<Post> = {}): Post => ({
   id, author_id: 'u', author_name: 'n', author_role: '', title: id, content: '', category: 'general',

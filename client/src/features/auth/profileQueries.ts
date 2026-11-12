@@ -14,8 +14,8 @@
  *     같은 사용자로는 다시 적용하지 않는다. 계정이 바뀌면 키가 달라지고 로그아웃 시 캐시가 초기화된다(features/auth)
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { Json, TablesInsert } from '../../lib/database.types'
-import { isSupabaseConfigured, supabase } from '../../lib/supabaseClient'
+import type { Json, TablesInsert } from '../../shared/lib/database.types'
+import { isSupabaseConfigured, supabase } from '../../shared/lib/supabaseClient'
 
 export const profileKeys = {
   all: ['profile'] as const,

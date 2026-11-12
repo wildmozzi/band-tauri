@@ -1,4 +1,4 @@
-import type { Post } from '../../services/communityApi'
+import type { Post } from './communityApi'
 import { POST_INSTRUMENTS, formatRelativeTime } from './postLogic'
 
 const DETAIL_INSTRUMENTS = [{ id: 'all', name: '전체', icon: '🎵' }, ...POST_INSTRUMENTS]

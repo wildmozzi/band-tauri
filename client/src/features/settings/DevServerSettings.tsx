@@ -6,8 +6,8 @@ import {
   isDevServerProxyEnabled,
   setDevServerSetting,
   usesAutoServerUrl,
-} from '../lib/apiUrl'
-import { formatDevServerTarget, parseDevServerInput } from '../lib/devServerTarget'
+} from '../../shared/lib/apiUrl'
+import { formatDevServerTarget, parseDevServerInput } from '../../shared/lib/devServerTarget'
 import './UpdateNotice.css'
 import './DevServerSettings.css'
 

@@ -1,8 +1,8 @@
-import type { RoomStatus } from '../../data/rooms'
+import type { RoomStatus } from './roomFilters'
 import { InstrumentBadges, TagOverflow } from './RoomTags'
 import { roomStatusLabel, type Room } from './roomModel'
-import { Badge } from '../../components/ui/Badge'
-import { Card } from '../../components/ui/Card'
+import { Badge } from '../../shared/ui/Badge'
+import { Card } from '../../shared/ui/Card'
 
 interface RoomCardProps {
   room: Room

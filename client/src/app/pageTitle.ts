@@ -1,6 +1,6 @@
 import { matchRoutes } from 'react-router-dom'
-import { SERVICE_NAME } from './brand'
-import { NOT_FOUND_TITLE, ROUTE_TABLE } from '../routeTable'
+import { SERVICE_NAME } from '../shared/lib/brand'
+import { NOT_FOUND_TITLE, ROUTE_TABLE } from './routeTable'
 
 export { NOT_FOUND_TITLE }
 

@@ -23,11 +23,11 @@
  */
 import { useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import type { TablesUpdate } from '../../lib/database.types'
-import { isSupabaseConfigured, supabase } from '../../lib/supabaseClient'
-import { fetchRoomById } from '../../services/roomApi'
-import type { DbRoom, MyRoom } from '../../pages/rooms/roomModel'
-import { normalizeDetailRoom, type DetailRoom } from '../../pages/room/roomDetailModel'
+import type { TablesUpdate } from '../../shared/lib/database.types'
+import { isSupabaseConfigured, supabase } from '../../shared/lib/supabaseClient'
+import { fetchRoomById } from './roomApi'
+import type { DbRoom, MyRoom } from './roomModel'
+import { normalizeDetailRoom, type DetailRoom } from '../room/roomDetailModel'
 
 export const roomKeys = {
   all: ['rooms'] as const,

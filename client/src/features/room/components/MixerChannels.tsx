@@ -1,6 +1,6 @@
-import type { MixSettings, PeerInstrument, PeerNetworkStats } from '../../contexts/RoomContext'
-import type { EngineStats, PeerState, PeerStats } from '../../native/engineApi'
-import { pathLabel, peerPathHint } from '../../native/relayLogic'
+import type { MixSettings, PeerInstrument, PeerNetworkStats } from '../state/RoomContext'
+import type { EngineStats, PeerState, PeerStats } from '../../../native/engineApi'
+import { pathLabel, peerPathHint } from '../../../native/relayLogic'
 import { EngineDiagLines } from './EngineDiagLines'
 import {
   INSTRUMENT_INFO,
@@ -14,7 +14,7 @@ import {
   levelClass,
   peerStatsTitle,
   performerName,
-} from './roomDetailModel'
+} from '../roomDetailModel'
 
 function ChannelLevel({ level }: { level: number }) {
   return (

@@ -1,5 +1,5 @@
-import { useRoom } from '../../contexts/RoomContext'
-import { INSTRUMENT_INFO, formatMs } from './roomDetailModel'
+import { useRoom } from '../state/RoomContext'
+import { INSTRUMENT_INFO, formatMs } from '../roomDetailModel'
 
 /** 연주자 목록의 내 행: 처리 지연·xrun·입력 레벨, 악기 변경 요청, 입력 뮤트, 모니터링 */
 export function MyPerformerItem({

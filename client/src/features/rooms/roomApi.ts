@@ -1,8 +1,8 @@
 // 방 생성/비밀번호 API (P2-6). 비밀번호는 서버가 해시해서 저장하므로 방 생성은 서버를 거친다.
 // 방 조회는 Supabase: 비공개 방도 id를 알면 get_room(id)로 조회한다(목록에는 RLS로 숨김).
-import { getApiUrl } from '../lib/apiUrl'
-import { authHeaders } from '../lib/authHeaders'
-import { supabase } from '../lib/supabaseClient'
+import { getApiUrl } from '../../shared/lib/apiUrl'
+import { authHeaders } from '../../shared/lib/authHeaders'
+import { supabase } from '../../shared/lib/supabaseClient'
 
 export interface CreateRoomInput {
   title: string

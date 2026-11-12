@@ -1,7 +1,7 @@
-import { getApiUrl } from '../lib/apiUrl'
-import type { Tables, TablesInsert } from '../lib/database.types'
-import { supabase } from '../lib/supabaseClient'
-import { authHeaders } from '../lib/authHeaders'
+import { getApiUrl } from '../../shared/lib/apiUrl'
+import type { Tables, TablesInsert } from '../../shared/lib/database.types'
+import { supabase } from '../../shared/lib/supabaseClient'
+import { authHeaders } from '../../shared/lib/authHeaders'
 
 // Types
 export interface Post {

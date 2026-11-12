@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { usePostQuery, useUpdatePostMutation } from '../features/community/queries'
-import { useRequireAuth } from '../features/auth/useRequireAuth'
-import type { Post } from '../services/communityApi'
-import { PostForm } from './community/PostForm'
-import { usePostForm } from './community/usePostForm'
+import { usePostQuery, useUpdatePostMutation } from './queries'
+import { useRequireAuth } from '../auth/useRequireAuth'
+import type { Post } from './communityApi'
+import { PostForm } from './PostForm'
+import { usePostForm } from './usePostForm'
 
 export function EditPost() {
   const { postId } = useParams<{ postId: string }>()

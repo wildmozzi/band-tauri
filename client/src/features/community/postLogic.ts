@@ -1,5 +1,5 @@
 // 게시글 작성/수정/상세에서 공용으로 쓰는 상수와 순수 함수.
-import type { Comment } from '../../services/communityApi'
+import type { Comment } from './communityApi'
 
 export const POST_INSTRUMENTS = [
   { id: 'vocal', name: '보컬', icon: '🎤' },

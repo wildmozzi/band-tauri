@@ -3,7 +3,7 @@
  * 상태와 저장은 AudioSettingsContext가 맡고, 이 컴포넌트는 표시와 입력만 한다.
  */
 import { useEffect, useRef, useState } from 'react'
-import { useAudioSettings } from '../contexts/AudioSettingsContext'
+import { useAudioSettings } from './AudioSettingsContext'
 import {
   MAX_PAYLOAD_BYTES,
   engineSetJitterProfile,
@@ -12,7 +12,7 @@ import {
   type DriverKind,
   type FrameMs,
   type PeerStats,
-} from '../native/engineApi'
+} from '../../native/engineApi'
 import {
   BUFFER_OPTIONS,
   DRIVER_OPTIONS,
@@ -27,10 +27,10 @@ import {
   isPayloadAllowed,
   jitterProfileLabel,
   type EnginePresetId,
-} from '../native/engineConfig'
+} from '../../native/engineConfig'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
-import { DesktopDownloadButton } from './DesktopDownloadButton'
-import { Modal } from './ui'
+import { DesktopDownloadButton } from '../../shared/ui/DesktopDownloadButton'
+import { Modal } from '../../shared/ui'
 import { DiagnosticsExport } from './DiagnosticsExport'
 import { DevServerSettingsSection } from './DevServerSettings'
 import './AudioSettings.css'

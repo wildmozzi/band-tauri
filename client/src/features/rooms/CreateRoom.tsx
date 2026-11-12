@@ -1,11 +1,11 @@
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useRequireAuth } from '../features/auth/useRequireAuth'
-import { MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from './rooms/roomModel'
-import { createRoom } from '../services/roomApi'
-import { validateRoomPasswordInput, ROOM_PASSWORD_MAX } from '../contexts/room/roomAccess'
-import { Field } from '../components/ui/Field'
-import { Button } from '../components/ui/Button'
+import { useRequireAuth } from '../auth/useRequireAuth'
+import { MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from './roomModel'
+import { createRoom } from './roomApi'
+import { validateRoomPasswordInput, ROOM_PASSWORD_MAX } from './roomAccess'
+import { Field } from '../../shared/ui/Field'
+import { Button } from '../../shared/ui/Button'
 
 const GENRES = [
   '록', '재즈', '블루스', '클래식', '팝', '힙합',

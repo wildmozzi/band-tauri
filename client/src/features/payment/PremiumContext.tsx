@@ -1,7 +1,7 @@
 import { useState, ReactNode, useEffect } from 'react'
-import { useAuth } from './useAuth'
-import { paymentApi } from '../services/paymentApi'
-import { isApiUrlConfigured } from '../lib/apiUrl'
+import { useAuth } from '../auth/useAuth'
+import { paymentApi } from './paymentApi'
+import { isApiUrlConfigured } from '../../shared/lib/apiUrl'
 import { PremiumContext, PLAN_LIMITS, type FeatureLimit, type UserPlan } from './usePremium'
 
 interface PremiumProviderProps {

@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createQueryWrapper } from '../../test/queryWrapper'
-import type { StemSeparation } from '../../services/musicApi'
+import { createQueryWrapper } from '../../shared/test/queryWrapper'
+import type { StemSeparation } from './musicApi'
 
 const api = vi.hoisted(() => ({ fetchStemHistory: vi.fn(), deleteStemSeparation: vi.fn() }))
-vi.mock('../../services/musicApi', () => api)
+vi.mock('./musicApi', () => api)
 
 import {
   clearStemHistory,
@@ -13,7 +13,7 @@ import {
   stemKeys,
   useDeleteStemSeparationMutation,
   useStemHistoryQuery,
-} from './queries'
+} from './stemQueries'
 
 const sep = (id: string) => ({ id, original_filename: `${id}.mp3` }) as StemSeparation
 const ids = (v: unknown) => (v as StemSeparation[]).map(s => s.id)

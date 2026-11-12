@@ -7,7 +7,7 @@ const navigate = vi.hoisted(() => vi.fn())
 vi.mock('react-router-dom', () => ({ useNavigate: () => navigate }))
 
 const auth = vi.hoisted(() => ({ user: { id: 'u1' } as { id: string } | null }))
-vi.mock('../../contexts/useAuth', () => ({ useAuth: () => ({ user: auth.user, loading: false }) }))
+vi.mock('../../auth/useAuth', () => ({ useAuth: () => ({ user: auth.user, loading: false }) }))
 
 const room = vi.hoisted(() => ({
   canPerform: true,
@@ -18,7 +18,7 @@ const room = vi.hoisted(() => ({
   requestPerform: vi.fn(),
   cancelRequest: vi.fn(),
 }))
-vi.mock('../../contexts/RoomContext', () => ({ useRoom: () => room }))
+vi.mock('../state/RoomContext', () => ({ useRoom: () => room }))
 
 import { usePerformControls } from './usePerformControls'
 import { useRejectPicker } from './useRejectPicker'

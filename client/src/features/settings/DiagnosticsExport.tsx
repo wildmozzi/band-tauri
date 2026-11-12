@@ -4,9 +4,9 @@
  * 데스크톱 앱에서만 보인다.
  */
 import { useState } from 'react'
-import { diagExport, engineErrorMessage, isNativeApp } from '../native/engineApi'
-import { diagStatusText, type DiagExportStatus } from '../native/diagFormat'
-import { Button } from './ui'
+import { diagExport, engineErrorMessage, isNativeApp } from '../../native/engineApi'
+import { diagStatusText, type DiagExportStatus } from '../../native/diagFormat'
+import { Button } from '../../shared/ui'
 import './DiagnosticsExport.css'
 
 export interface DiagnosticsExportProps {

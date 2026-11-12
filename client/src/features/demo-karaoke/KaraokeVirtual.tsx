@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
-import { FileUpload } from '../components/FileUpload'
-import { ScoreDisplay } from '../components/ScoreDisplay'
-import { MusicPlayer, type InstrumentType } from '../services/MusicPlayer'
-import { getMusicFileUrl, type UploadResponse } from '../services/musicApi'
-import { convertMusicXmlToMidi, midiToUrl } from '../services/MusicXmlToMidi'
+import { FileUpload } from './FileUpload'
+import { ScoreDisplay } from './ScoreDisplay'
+import { MusicPlayer, type InstrumentType } from './MusicPlayer'
+import { getMusicFileUrl, type UploadResponse } from './musicApi'
+import { convertMusicXmlToMidi, midiToUrl } from './MusicXmlToMidi'
 import './Karaoke.css'
 
 /**

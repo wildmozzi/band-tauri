@@ -1,5 +1,5 @@
 // 합주실 목록/내 합주실/설정 모달에서 쓰는 타입·상수·순수 함수.
-import type { RoomStatus } from '../../data/rooms'
+import type { RoomStatus } from './roomFilters'
 import { MAX_PERFORMERS } from '../../native/engineApi'
 
 export const GENRES = [

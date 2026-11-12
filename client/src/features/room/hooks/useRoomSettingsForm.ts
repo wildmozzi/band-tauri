@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { isSupabaseConfigured } from '../../lib/supabaseClient'
-import { setRoomPassword } from '../../services/roomApi'
-import { validateRoomPasswordInput } from '../../contexts/room/roomAccess'
-import { patchRoomDetailCache, useUpdateRoomMutation } from '../../features/rooms/queries'
+import { isSupabaseConfigured } from '../../../shared/lib/supabaseClient'
+import { setRoomPassword } from '../../rooms/roomApi'
+import { validateRoomPasswordInput } from '../../rooms/roomAccess'
+import { patchRoomDetailCache, useUpdateRoomMutation } from '../../rooms/queries'
 import {
   buildRoomUpdate,
   effectiveRoomCapacity,
@@ -11,8 +11,8 @@ import {
   setSlotCount,
   toggleTag,
   totalSlotCount,
-} from '../rooms/roomModel'
-import type { DetailRoom, InstrumentSlot } from './roomDetailModel'
+} from '../../rooms/roomModel'
+import type { DetailRoom, InstrumentSlot } from '../roomDetailModel'
 
 export type PasswordMode = 'keep' | 'set' | 'clear'
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { pageTitleFor } from './pageTitle'
-import { ROUTE_TABLE } from '../routeTable'
+import { ROUTE_TABLE } from './routeTable'
 
 describe('pageTitleFor', () => {
   it('라우트별 제목에 서비스명을 붙인다', () => {

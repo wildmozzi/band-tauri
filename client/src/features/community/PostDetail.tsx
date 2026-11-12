@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useAuth } from '../contexts/useAuth'
-import { CommentSection } from './community/CommentSection'
-import { DeletePostModal } from './community/DeletePostModal'
-import { PostArticle } from './community/PostArticle'
-import { TrendingTagsCard } from './community/TrendingTagsCard'
-import { usePostDetail } from './community/usePostDetail'
+import { useAuth } from '../auth/useAuth'
+import { CommentSection } from './CommentSection'
+import { DeletePostModal } from './DeletePostModal'
+import { PostArticle } from './PostArticle'
+import { TrendingTagsCard } from './TrendingTagsCard'
+import { usePostDetail } from './usePostDetail'
 
 export function PostDetail() {
   const { postId } = useParams<{ postId: string }>()

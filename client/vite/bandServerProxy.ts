@@ -2,7 +2,7 @@
  * 개발 실행 전용 서버 프록시(P1-12b). `vite`(serve)에서만 켜진다 — 운영 빌드(`vite build`)·vitest에는 없다.
  *
  * 앱(https://localhost:5173)이 `/__band_server/<http|https>/<host>:<port>/...`로 보낸 HTTP 요청과 WebSocket 업그레이드를
- * 대상 서버로 그대로 넘긴다. 대상은 localhost·루프백·사설 IPv4만(src/lib/devServerTarget). 그래서
+ * 대상 서버로 그대로 넘긴다. 대상은 localhost·루프백·사설 IPv4만(src/shared/lib/devServerTarget). 그래서
  * - 인증서 없는 로컬 서버(ws://)에 https 화면이 붙고(VITE_SIGNALING_URL=auto가 wss://localhost:8080을 만들던 문제),
  * - 두 번째 PC가 첫 PC의 서버(사설 IP)에 붙는다(mixed content·devCsp 확장, netsh portproxy 없이).
  * 클라이언트 IP 헤더(X-Forwarded-For)는 붙이지 않는다: 서버는 프록시를 띄운 PC의 IP를 클라이언트 IP로 본다.
@@ -28,7 +28,7 @@ import {
   matchDevServerProxyPath,
   type DevServerTarget,
   type ProxyPolicy,
-} from '../src/lib/devServerTarget'
+} from '../src/shared/lib/devServerTarget'
 
 /** 홉 단위 헤더: 넘기지 않는다(HTTP/2 응답에 넣으면 오류) */
 const HOP_BY_HOP = new Set([

@@ -1,10 +1,10 @@
 // communityApi 체인 테스트: 쿼리 조건과 행 정규화(toPost/toComment), 좋아요 토글 분기
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { argsOf, createSupabaseMock, type Call } from '../test/supabaseMock'
+import { argsOf, createSupabaseMock, type Call } from '../../shared/test/supabaseMock'
 
 const sb = vi.hoisted(() => ({ mock: null as ReturnType<typeof createSupabaseMock> | null }))
-vi.mock('../lib/supabaseClient', async () => {
-  const { createSupabaseMock } = await import('../test/supabaseMock')
+vi.mock('../../shared/lib/supabaseClient', async () => {
+  const { createSupabaseMock } = await import('../../shared/test/supabaseMock')
   sb.mock = createSupabaseMock()
   return { supabase: sb.mock.client, isSupabaseConfigured: () => true }
 })

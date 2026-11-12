@@ -6,7 +6,7 @@
  * - 방송 담당은 한 명이므로 다른 연주자의 offer가 오면(인계) 이전 연결을 닫는다.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ICE_SERVERS, tuneOpusSdp } from '../../lib/webrtcAudio'
+import { ICE_SERVERS, tuneOpusSdp } from '../../../shared/lib/webrtcAudio'
 import type { SignalPayload } from './useSignaling'
 
 export type RtcStatus = 'idle' | 'connecting' | 'live' | 'error'

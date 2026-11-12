@@ -1,9 +1,9 @@
 import { useState, useMemo, useEffect, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../contexts/useAuth'
-import { usePostsQuery, useToggleLikeMutation, useTrendingTagsQuery } from '../features/community/queries'
-import type { Post } from '../services/communityApi'
-import './community/communityList.css'
+import { useAuth } from '../auth/useAuth'
+import { usePostsQuery, useToggleLikeMutation, useTrendingTagsQuery } from './queries'
+import type { Post } from './communityApi'
+import './communityList.css'
 
 // 사용 가능한 악기 목록
 const INSTRUMENTS = [

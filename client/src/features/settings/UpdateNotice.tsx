@@ -6,8 +6,8 @@
  */
 import { useEffect, useState } from 'react'
 import { getVersion } from '@tauri-apps/api/app'
-import { useRoom } from '../contexts/RoomContext'
-import { appUpdater, isUpdaterAvailable, useUpdateStatus, type UpdateStatus } from '../native/updater'
+import { useRoom } from '../room/state/RoomContext'
+import { appUpdater, isUpdaterAvailable, useUpdateStatus, type UpdateStatus } from '../../native/updater'
 import './UpdateNotice.css'
 
 function formatMb(bytes: number): string {

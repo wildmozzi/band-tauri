@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useRoom } from '../../contexts/RoomContext'
+import { useRoom } from '../state/RoomContext'
 import {
   engineRecordFolder,
   engineRecordPickFolder,
@@ -7,8 +7,8 @@ import {
   engineRecordStart,
   engineRecordStop,
   engineErrorMessage,
-} from '../../native/engineApi'
-import type { RecordFormat, RecordStats } from '../../native/engineApi'
+} from '../../../native/engineApi'
+import type { RecordFormat, RecordStats } from '../../../native/engineApi'
 import {
   buildRecordOptions,
   isRecordFormat,
@@ -17,7 +17,7 @@ import {
   recordSummaryLine,
   recordWarning,
   trackNameMap,
-} from '../../native/recordLogic'
+} from '../../../native/recordLogic'
 
 const FORMAT_KEY = 'band.recordFormat'
 

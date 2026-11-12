@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../contexts/useAuth'
-import { Modal } from './ui'
-import { PLANNED_NOTICE, plannedFeaturesFor } from '../lib/planFeatures'
+import { useAuth } from '../auth/useAuth'
+import { Modal } from '../../shared/ui'
+import { PLANNED_NOTICE, plannedFeaturesFor } from './planFeatures'
 
 interface PremiumModalProps {
   isOpen: boolean

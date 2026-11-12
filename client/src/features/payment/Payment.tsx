@@ -1,10 +1,10 @@
 import { useState, type ReactElement } from 'react'
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom'
-import { useRequireAuth } from '../features/auth/useRequireAuth'
-import { tossPaymentsService } from '../services/tossPayments'
-import { paymentApi } from '../services/paymentApi'
-import { SERVICE_NAME } from '../lib/brand'
-import { NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor, type PaidPlan } from '../lib/planFeatures'
+import { useRequireAuth } from '../auth/useRequireAuth'
+import { tossPaymentsService } from './tossPayments'
+import { paymentApi } from './paymentApi'
+import { SERVICE_NAME } from '../../shared/lib/brand'
+import { NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor, type PaidPlan } from './planFeatures'
 
 interface PlanInfo {
   id: PaidPlan

@@ -2,12 +2,12 @@
 // 방 상세 query 훅(features/rooms)과 RoomDetail 페이지 훅(pages/room) — 직접 Supabase 호출을 옮긴 부분
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { argsOf, createSupabaseMock } from '../../test/supabaseMock'
-import { createQueryWrapper } from '../../test/queryWrapper'
+import { argsOf, createSupabaseMock } from '../../../shared/test/supabaseMock'
+import { createQueryWrapper } from '../../../shared/test/queryWrapper'
 
 const sb = vi.hoisted(() => ({ mock: null as ReturnType<typeof createSupabaseMock> | null }))
-vi.mock('../../lib/supabaseClient', async () => {
-  const { createSupabaseMock } = await import('../../test/supabaseMock')
+vi.mock('../../../shared/lib/supabaseClient', async () => {
+  const { createSupabaseMock } = await import('../../../shared/test/supabaseMock')
   sb.mock = createSupabaseMock()
   return { supabase: sb.mock.client, isSupabaseConfigured: () => true }
 })
@@ -16,17 +16,17 @@ const navigate = vi.hoisted(() => vi.fn())
 vi.mock('react-router-dom', () => ({ useNavigate: () => navigate }))
 
 const setRoomPassword = vi.hoisted(() => vi.fn(async (_roomId: string, pw: string | null) => pw !== null))
-vi.mock('../../services/roomApi', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../../services/roomApi')>()
+vi.mock('../../rooms/roomApi', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../rooms/roomApi')>()
   return { ...original, setRoomPassword }
 })
 
-import { forgetRoomDetail, roomKeys, useRoomDetailQuery, useSyncParticipantsMutation } from '../../features/rooms/queries'
-import type { DetailRoom } from './roomDetailModel'
+import { forgetRoomDetail, roomKeys, useRoomDetailQuery, useSyncParticipantsMutation } from '../../rooms/queries'
+import type { DetailRoom } from '../roomDetailModel'
 import { useRoomDetailData } from './useRoomDetailData'
 import { useRoomHostActions } from './useRoomHostActions'
 import { useRoomSettingsForm } from './useRoomSettingsForm'
-import { useResetQueryCacheOnUserChange } from '../../features/auth/queries'
+import { useResetQueryCacheOnUserChange } from '../../auth/queries'
 
 const dbRow = (over: Record<string, unknown> = {}) => ({
   id: 'r1', title: '방', description: null, host_id: 'h1', max_participants: 8, current_participants: 1,

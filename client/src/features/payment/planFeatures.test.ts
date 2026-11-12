@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { ALL_PLAN_FEATURES, PLAN_COMPARISON, PLANNED_FEATURES, plannedFeaturesFor } from './planFeatures'
-import { PLAN_LIMITS } from '../contexts/usePremium'
-import { MAX_PERFORMERS } from '../native/engineApi'
-import { ROOM_CAPACITY_MAX } from '../pages/rooms/roomModel'
+import { PLAN_LIMITS } from './usePremium'
+import { MAX_PERFORMERS } from '../../native/engineApi'
+import { ROOM_CAPACITY_MAX } from '../rooms/roomModel'
 
 describe('요금제 문구 (P3-12a)', () => {
   it('인원·비공개 방 한도는 요금제와 무관하게 실제 규칙과 같다', () => {

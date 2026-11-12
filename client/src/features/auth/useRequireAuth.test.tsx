@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const auth = vi.hoisted(() => ({ user: null as { id: string } | null, loading: true }))
-vi.mock('../../contexts/useAuth', () => ({
+vi.mock('./useAuth', () => ({
   useAuth: () => ({ user: auth.user, loading: auth.loading }),
 }))
 

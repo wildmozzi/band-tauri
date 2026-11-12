@@ -15,7 +15,7 @@
  *     실패하면 캐시를 그대로 두고 캐시값(없으면 빈 목록)으로 검사한다
  */
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
-import { deleteStemSeparation, fetchStemHistory, type StemSeparation } from '../../services/musicApi'
+import { deleteStemSeparation, fetchStemHistory, type StemSeparation } from './musicApi'
 
 async function loadStemHistory(): Promise<StemSeparation[]> {
   try {

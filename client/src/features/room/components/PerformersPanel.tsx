@@ -1,5 +1,5 @@
 import type { MutableRefObject } from 'react'
-import { useRoom, type PeerInstrument } from '../../contexts/RoomContext'
+import { useRoom, type PeerInstrument } from '../state/RoomContext'
 import { MetronomePanel } from './MetronomePanel'
 import { MyPerformerItem } from './MyPerformerItem'
 import { ParticipationToggle } from './ParticipationToggle'

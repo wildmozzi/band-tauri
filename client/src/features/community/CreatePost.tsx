@@ -1,8 +1,8 @@
 import { useNavigate } from 'react-router-dom'
-import { useCreatePostMutation } from '../features/community/queries'
-import { useRequireAuth } from '../features/auth/useRequireAuth'
-import { PostForm } from './community/PostForm'
-import { usePostForm } from './community/usePostForm'
+import { useCreatePostMutation } from './queries'
+import { useRequireAuth } from '../auth/useRequireAuth'
+import { PostForm } from './PostForm'
+import { usePostForm } from './usePostForm'
 
 export function CreatePost() {
   const navigate = useNavigate()

@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { User } from '@supabase/supabase-js'
-import { isSupabaseConfigured } from '../lib/supabaseClient'
-import { authApi, useResetQueryCacheOnUserChange } from '../features/auth/queries'
-import { profileApi } from '../features/profile/queries'
+import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
+import { authApi, useResetQueryCacheOnUserChange } from './queries'
+import { profileApi } from './profileQueries'
 import { AuthContext, type AuthAlert, type SignUpData } from './useAuth'
 
 export function AuthProvider({ children }: { children: ReactNode }) {

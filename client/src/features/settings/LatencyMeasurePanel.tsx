@@ -3,16 +3,16 @@
  * 측정은 테스트 엔진에서 돈다(꺼져 있으면 먼저 켠다). 절차는 docs/MEASURE.md.
  */
 import { useState } from 'react'
-import { useAudioSettings } from '../contexts/AudioSettingsContext'
-import { engineCancelMeasure, engineErrorMessage, engineMeasureLoopback, type LoopbackReport } from '../native/engineApi'
+import { useAudioSettings } from './AudioSettingsContext'
+import { engineCancelMeasure, engineErrorMessage, engineMeasureLoopback, type LoopbackReport } from '../../native/engineApi'
 import {
   clearLoopbackOffset,
   LATENCY_MEASURE_SECTION_ID,
   rememberLoopbackOffset,
   storableOffset,
   tauriLoopbackOffsetDeps,
-} from '../native/loopbackOffsetStore'
-import { copyText, downloadText, loopbackRows, loopbackText, VERDICT_LABEL } from '../native/measureFormat'
+} from '../../native/loopbackOffsetStore'
+import { copyText, downloadText, loopbackRows, loopbackText, VERDICT_LABEL } from '../../native/measureFormat'
 import './LatencyMeasure.css'
 
 const RUN_OPTIONS = [5, 8, 10] as const

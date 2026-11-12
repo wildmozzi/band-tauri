@@ -1,8 +1,8 @@
 import { useEffect, useRef } from 'react'
-import { useAuth } from '../../contexts/useAuth'
-import { useRoom } from '../../contexts/RoomContext'
-import { recallRoomPassword } from '../../contexts/room/roomAccess'
-import type { DetailRoom } from './roomDetailModel'
+import { useAuth } from '../../auth/useAuth'
+import { useRoom } from '../state/RoomContext'
+import { recallRoomPassword } from '../../rooms/roomAccess'
+import type { DetailRoom } from '../roomDetailModel'
 
 /**
  * 방 입장/이탈 수명주기.

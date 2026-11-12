@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { SupportContact } from '../components/SupportContact'
+import { SupportContact } from './SupportContact'
 
 export function PaymentFail() {
   const [searchParams] = useSearchParams()

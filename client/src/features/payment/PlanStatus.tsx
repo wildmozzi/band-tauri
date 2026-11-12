@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { usePremium } from '../contexts/usePremium'
+import { usePremium } from './usePremium'
 
 interface PlanStatusProps {
   showUpgrade?: boolean

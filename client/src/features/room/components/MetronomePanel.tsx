@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useRoom } from '../../contexts/RoomContext'
+import { useRoom } from '../state/RoomContext'
 import {
   DEFAULT_METRONOME_BEATS,
   DEFAULT_METRONOME_BPM,
@@ -8,8 +8,8 @@ import {
   METRONOME_MIN_BPM,
   clampBeats,
   clampBpm,
-} from '../../native/metronomeLogic'
-import { OPEN_LATENCY_MEASURE_EVENT, outputLatencyView } from '../../native/loopbackOffsetStore'
+} from '../../../native/metronomeLogic'
+import { OPEN_LATENCY_MEASURE_EVENT, outputLatencyView } from '../../../native/loopbackOffsetStore'
 
 /**
  * 공유 메트로놈(P2-3). 방장은 BPM·박자·시작/정지, 모든 연주자는 내 클릭 볼륨·뮤트.

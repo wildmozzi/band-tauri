@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { isSupabaseConfigured } from '../../lib/supabaseClient'
-import { useUpdateRoomMutation } from '../../features/rooms/queries'
+import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
+import { useUpdateRoomMutation } from './queries'
 import {
   DEFAULT_EDIT_SLOTS,
   buildRoomUpdate,
