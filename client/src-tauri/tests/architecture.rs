@@ -101,6 +101,14 @@ const MAX_EXCEPTIONS: usize = 10;
 /// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
 const OPEN_STAGES: &[&str] = &["③", "⑤", "⑥", "⑦"];
 
+/// 계층 규칙상 허용(아래로 가는 간선)이지만 금지하는 간선(엔진 ③, `engine-stage3-design.md` 7.1절):
+/// net은 미디어 상태(지터 버퍼·믹스 제어)를 모른다. 미디어 쪽과는 `net::media_link`로만 잇는다.
+/// `from`이 `"net"`이면 `net`과 `net::*` 모든 노드에 적용한다.
+const FORBIDDEN: &[(&str, &str, &str)] = &[
+    ("net", "engine::jitter", "③-b"),
+    ("net", "engine::mixer", "③-b"),
+];
+
 /// 어댑터(계층 6)가 쓸 수 있는 노드: 제어 평면과 계약 DTO(설정·보고·디스크립터)를 가진 모듈만. 로직은 제어 평면에서 부른다.
 const ADAPTER_MAY_USE: &[&str] = &[
     "manager",
@@ -638,6 +646,21 @@ fn module_dependencies_follow_layers() {
 }
 
 #[test]
+fn forbidden_edges_absent() {
+    let edges = edges();
+    let covers = |rule: &str, node: &str| node == rule || node.starts_with(&format!("{rule}::"));
+    let mut bad = Vec::new();
+    for &(from, to) in edges.keys() {
+        for (rf, rt, stage) in FORBIDDEN {
+            if covers(rf, from) && to == *rt {
+                bad.push(format!("  {from} → {to}: 금지 간선(단계 {stage}) [{}]", files_of(&edges, (from, to))));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "금지 간선(FORBIDDEN) — net은 미디어 상태를 직접 쓰지 않는다:\n{}", bad.join("\n"));
+}
+
+#[test]
 fn exception_list_is_a_ratchet() {
     assert_eq!(
         EXCEPTIONS.len(),
@@ -657,6 +680,9 @@ fn every_node_is_listed_once() {
     }
     for (a, b, _) in EXCEPTIONS {
         assert!(seen.contains(a) && seen.contains(b), "EXCEPTIONS의 노드가 NODES에 없음: {a} → {b}");
+    }
+    for (a, b, _) in FORBIDDEN {
+        assert!(seen.contains(a) && seen.contains(b), "FORBIDDEN의 노드가 NODES에 없음: {a} → {b}");
     }
 }
 

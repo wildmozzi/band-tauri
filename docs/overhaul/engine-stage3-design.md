@@ -306,15 +306,17 @@ pub struct MediaStats {
 }
 ```
 
-`MediaStatsCell`은 **seqlock**이다: 버전 `AtomicU32` 하나 + 필드마다 원자값(`f32`는 비트를 `AtomicU32`에, `u64`·`i64`는 `AtomicU64`에, `bool`은 `AtomicBool`).
+`MediaStatsCell`은 **seqlock**이다: 버전 `AtomicU32` 하나 + 칸 26개의 `AtomicU64` 배열(`JitterStats` 24필드 + `playing` + `rx_dropped`. `f32`는 비트를, `i64`는 `as u64`를, `bool`은 0/1을 넣는다 — 같은 타입 배열이라 `pack`/`unpack` 두 함수로 끝난다. ③-a1 구현).
 
 ```text
-쓰기(워커만):  ver += 1 (홀수) → 필드 27개 store(Relaxed) → ver += 1 (짝수, Release)
-읽기(누구나):  loop { v1 = ver(Acquire); 홀수면 다시; 필드 복사; v2 = ver(Acquire); v1 == v2면 끝 }
+쓰기(워커만):  v = ver(Relaxed); ver = v+1 (홀수, Relaxed); fence(Release); 칸 26개 store(Relaxed); ver = v+2 (짝수, Release)
+읽기(누구나):  loop { v1 = ver(Acquire); 홀수면 다시; 칸 복사(Relaxed); fence(Acquire); v2 = ver(Relaxed); v1 == v2면 끝 }
 ```
 
 - `unsafe`가 없다(필드가 전부 원자값이라 찢긴 읽기도 정의된 동작이고, 버전 비교가 한 벌임을 보장한다).
-- 쓰는 쪽은 기다리지 않는다(wait-free). 읽는 쪽은 발행 중(수십 ns)에 걸리면 다시 읽는다. 발행 간격이 500µs 이상이라 연속 재시도는 사실상 없다. 상한 3회 뒤에는 마지막으로 읽은 값을 쓴다(통계이므로).
+- 읽기의 `fence(Acquire)`는 칸 load가 두 번째 버전 load 뒤로 밀리지 않게 한다(두 번째 load를 `Acquire`로 하는 것만으로는 부족하다 — Acquire는 뒤의 접근만 막는다). 쓰기의 `fence(Release)`는 칸 store가 홀수 버전보다 먼저 보이지 않게 한다.
+- 쓰는 쪽은 기다리지 않는다(wait-free). 읽는 쪽은 발행 중(수십 ns)에 걸리면 다시 읽는다. 발행 간격이 150µs 이상이라 연속 재시도는 사실상 없다. **상한 없이 성공할 때까지** 다시 읽고 64회마다 `yield_now`로 쓰는 쪽에 CPU를 넘긴다 — 찢긴 값은 절대 돌려주지 않는다(처음 설계의 "상한 3회 뒤 마지막 값"은 쓰기 폭주 시험에서 약 1e-4로 찢긴 값을 냈다, #116 M-1). `read()`는 비RT 독자만 부른다. RT 경로가 읽을 일이 생기면 `try_read`(한 번, 실패하면 None)만 쓴다.
+- 쓰는 스레드는 하나여야 한다. ③-a1·a2는 워커가 지터 락을 쥔 채 발행해 락이 직렬화하고, ③-a3는 워커 단독 소유 `PeerMedia`의 `&mut self` 메서드에서만 발행해 타입으로 보장한다.
 
 **seqlock이 필요한가** — 필요하다.
 

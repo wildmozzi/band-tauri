@@ -1,16 +1,166 @@
 //! 피어 미디어 상태(엔진 ③, `docs/overhaul/engine-stage3-design.md` 1.2절).
 //!
 //! 제어 평면(엔진 등록부)·워커·net이 `Arc<PeerMediaShared>`를 나눈다.
-//! ③-b 단계: 지터 버퍼는 아직 `Mutex` 안에 있다(net 수신 스레드가 삽입, 워커가 소비, 통계·명령이 잡음).
-//! ③-a1(통계 스냅샷)·③-a2(명령 원자값)·③-a3(워커 단독 소유 `PeerMedia` + 수신 큐)에서 이 락 접근자가 줄어 없어진다.
+//! ③-a1 단계: 통계와 손실 보고는 워커가 발행한 스냅샷(seqlock·원자값)으로만 읽는다. 지터 버퍼는 아직 `Mutex` 안에
+//! 있다(net 수신 스레드가 삽입, 워커가 소비, 프로필·재시작 명령이 잡음). ③-a2(명령 원자값)·③-a3(워커 단독 소유
+//! `PeerMedia` + 수신 큐)에서 남은 락 접근자가 없어진다.
+
+use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard};
 
 use super::jitter::{JitterBuffer, JitterSettings, JitterStats};
 use super::mixer::PeerMixCtl;
 use super::stats::AtomicF32;
-use crate::net::media_link::PeerKey;
+use crate::net::media_link::{LossCell, PeerKey};
 use crate::net::packet::Header;
+
+/// 피어 하나의 미디어 통계 한 벌(워커가 발행한 스냅샷).
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct MediaStats {
+    /// 지터 버퍼가 재생 중인가.
+    pub playing: bool,
+    pub js: JitterStats,
+    /// 수신 큐가 가득 차 버린 패킷 수(③-a3부터. 그 전에는 0).
+    pub rx_dropped: u64,
+}
+
+/// `MediaStats`의 원자값 칸 수: `JitterStats` 24필드 + playing + rx_dropped. 필드가 늘면 `unpack`의 구조체 식이
+/// 컴파일되지 않으므로 `pack`·`unpack`을 함께 고친다.
+const STAT_WORDS: usize = 26;
+
+fn pack(s: &MediaStats) -> [u64; STAT_WORDS] {
+    let j = &s.js;
+    let f = |v: f32| v.to_bits() as u64;
+    [
+        s.playing as u64,
+        s.rx_dropped,
+        f(j.buffer_ms),
+        f(j.target_ms),
+        f(j.jitter_ms),
+        f(j.loss_pct),
+        j.late,
+        j.concealed,
+        j.concealed_loss,
+        j.produced,
+        j.dropped_frames,
+        j.samples_dropped,
+        j.samples_inserted,
+        j.rebuffers,
+        f(j.conceal_pct),
+        f(j.lead_ms),
+        f(j.jitter_est_ms),
+        f(j.corr_time_pct),
+        f(j.max_corr_cents),
+        j.late_dropped,
+        j.burst_events,
+        f(j.wall_buffer_ms),
+        f(j.tail_ms),
+        j.tail_adjusts,
+        j.tail_resets,
+        j.min_transit as u64,
+    ]
+}
+
+fn unpack(w: &[u64; STAT_WORDS]) -> MediaStats {
+    let f = |v: u64| f32::from_bits(v as u32);
+    MediaStats {
+        playing: w[0] != 0,
+        rx_dropped: w[1],
+        js: JitterStats {
+            buffer_ms: f(w[2]),
+            target_ms: f(w[3]),
+            jitter_ms: f(w[4]),
+            loss_pct: f(w[5]),
+            late: w[6],
+            concealed: w[7],
+            concealed_loss: w[8],
+            produced: w[9],
+            dropped_frames: w[10],
+            samples_dropped: w[11],
+            samples_inserted: w[12],
+            rebuffers: w[13],
+            conceal_pct: f(w[14]),
+            lead_ms: f(w[15]),
+            jitter_est_ms: f(w[16]),
+            corr_time_pct: f(w[17]),
+            max_corr_cents: f(w[18]),
+            late_dropped: w[19],
+            burst_events: w[20],
+            wall_buffer_ms: f(w[21]),
+            tail_ms: f(w[22]),
+            tail_adjusts: w[23],
+            tail_resets: w[24],
+            min_transit: w[25] as i64,
+        },
+    }
+}
+
+/// `MediaStats` seqlock(설계 3.2절). 쓰는 쪽은 워커 하나뿐이고 기다리지 않는다. 읽는 쪽은 발행 중이면 다시 읽는다.
+/// 필드가 전부 원자값이라 `unsafe`가 없다(찢긴 읽기도 정의된 동작이고, 버전 비교가 한 벌임을 보장한다).
+/// 누적 카운터는 짝으로 쓰이므로(`produced − concealed`) 한 벌 일관성이 필요하다.
+pub struct MediaStatsCell {
+    ver: AtomicU32,
+    words: [AtomicU64; STAT_WORDS],
+}
+
+impl Default for MediaStatsCell {
+    fn default() -> Self {
+        let cell = Self { ver: AtomicU32::new(0), words: std::array::from_fn(|_| AtomicU64::new(0)) };
+        cell.write(&MediaStats::default());
+        cell
+    }
+}
+
+/// 읽기에서 바쁜 재시도를 이만큼 한 뒤에는 `yield_now`로 쓰는 쪽(워커)에 CPU를 넘긴다. 발행은 수십 ns이고 간격은
+/// 워커 반복(≥150µs)이라 실제로는 1~2회에 끝난다.
+const SPINS_BEFORE_YIELD: usize = 64;
+
+impl MediaStatsCell {
+    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨진다). 지금(③-a1·a2)은 워커만 `PeerMediaShared::publish`로
+    /// 부르고, 그 호출이 지터 락을 쥔 채라 락이 직렬화한다. ③-a3에서 락이 없어지면 워커 단독 소유 `PeerMedia`의
+    /// `&mut self` 메서드에서만 부르게 해 타입으로 보장한다.
+    pub(crate) fn write(&self, s: &MediaStats) {
+        let w = pack(s);
+        let v = self.ver.load(Ordering::Relaxed);
+        self.ver.store(v.wrapping_add(1), Ordering::Relaxed); // 홀수: 쓰는 중
+        fence(Ordering::Release); // 아래 필드 store가 홀수 버전보다 먼저 보이지 않게
+        for (a, x) in self.words.iter().zip(w) {
+            a.store(x, Ordering::Relaxed);
+        }
+        self.ver.store(v.wrapping_add(2), Ordering::Release); // 짝수: 한 벌 완성
+    }
+
+    /// 한 번 읽어 본다. 발행 중이었거나 그 사이 발행이 끼었으면 None.
+    pub fn try_read(&self) -> Option<MediaStats> {
+        let v1 = self.ver.load(Ordering::Acquire);
+        if v1 & 1 != 0 {
+            return None;
+        }
+        let w: [u64; STAT_WORDS] = std::array::from_fn(|i| self.words[i].load(Ordering::Relaxed));
+        fence(Ordering::Acquire); // 필드 load가 아래 버전 load보다 뒤로 가지 않게
+        (self.ver.load(Ordering::Relaxed) == v1).then(|| unpack(&w))
+    }
+
+    /// 일관된 한 벌. 성공할 때까지 다시 읽는다(찢긴 값은 절대 돌려주지 않는다). `SPINS_BEFORE_YIELD`회마다
+    /// `yield_now` — 쓰는 쪽이 발행 도중 선점됐으면 그 스레드가 마치게 한다. 비RT 독자(커맨드·`band-diag`·
+    /// 측정)만 부른다. RT 경로가 읽어야 한다면 `try_read`만 쓴다(이 셀은 지금 RT 경로에서 쓰지 않는다).
+    pub fn read(&self) -> MediaStats {
+        let mut spins = 0;
+        loop {
+            if let Some(s) = self.try_read() {
+                return s;
+            }
+            spins += 1;
+            if spins % SPINS_BEFORE_YIELD == 0 {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+}
 
 /// 피어 하나의 미디어 상태 중 여러 스레드가 보는 쪽.
 pub struct PeerMediaShared {
@@ -20,18 +170,29 @@ pub struct PeerMediaShared {
     pub ssrc: u32,
     /// gain·muted·pan: 커맨드가 쓴다. level: 워커가 쓴다.
     pub mix: PeerMixCtl,
+    /// 워커가 반복마다 발행하는 통계 스냅샷.
+    stats: MediaStatsCell,
+    /// 워커가 발행하는 손실 보고(net이 Ping에 싣는다). net은 `Peer`에 이 셀의 `Arc`만 쥔다.
+    loss: Arc<LossCell>,
     jitter: Mutex<JitterBuffer>,
 }
 
 impl PeerMediaShared {
     /// 지터 버퍼(슬롯 1024개 ≈ 1.19MB + 디코더)를 여기서 할당한다. 제어 평면 스레드에서 부른다.
     pub fn new(key: PeerKey, peer_id: String, ssrc: u32, settings: JitterSettings) -> Self {
-        Self { key, peer_id, ssrc, mix: PeerMixCtl::default(), jitter: Mutex::new(JitterBuffer::new(settings)) }
+        Self {
+            key,
+            peer_id,
+            ssrc,
+            mix: PeerMixCtl::default(),
+            stats: MediaStatsCell::default(),
+            loss: Arc::new(LossCell::default()),
+            jitter: Mutex::new(JitterBuffer::new(settings)),
+        }
     }
 
     /// 교체(같은 peerId 재추가) 때 옛 상태의 믹스 설정(gain·muted·pan)을 이어받는다.
     pub fn inherit_mix(&self, old: &PeerMediaShared) {
-        use std::sync::atomic::Ordering;
         self.mix.gain.store(old.mix.gain.load());
         self.mix.muted.store(old.mix.muted.load(Ordering::Relaxed), Ordering::Relaxed);
         self.mix.pan.store(old.mix.pan.load());
@@ -42,24 +203,14 @@ impl PeerMediaShared {
         self.jitter.lock().insert(hdr, payload, arrival_us);
     }
 
-    /// 지터 통계 한 벌.
-    pub fn stats(&self) -> JitterStats {
-        self.jitter.lock().stats()
+    /// 워커가 마지막으로 발행한 통계(락 없음, 최대 워커 반복 1회 전의 값).
+    pub fn stats(&self) -> MediaStats {
+        self.stats.read()
     }
 
-    /// 이 피어 스트림의 수신 손실 보고 `(loss_pct, conceal_pct)`. 재생 중이 아니면 None(Ping, P1-4e).
-    pub fn loss_report(&self) -> Option<(f32, f32)> {
-        let jb = self.jitter.lock();
-        jb.is_playing().then(|| {
-            let s = jb.stats();
-            (s.loss_pct, s.conceal_pct)
-        })
-    }
-
-    /// 지터 버퍼 깊이(`bufferMs`), 재생 중일 때만(에코 측정).
-    pub fn playing_buffer_ms(&self) -> Option<f32> {
-        let jb = self.jitter.lock();
-        jb.is_playing().then(|| jb.stats().buffer_ms)
+    /// net이 Ping 손실 보고에 쓰는 셀.
+    pub fn loss_cell(&self) -> &Arc<LossCell> {
+        &self.loss
     }
 
     /// 처음부터 다시 채운다(에코 측정 시작·끝에서 스트림이 바뀔 때).
@@ -74,6 +225,14 @@ impl PeerMediaShared {
     /// 워커의 `service` 경로.
     pub(crate) fn lock_jitter(&self) -> MutexGuard<'_, JitterBuffer> {
         self.jitter.lock()
+    }
+
+    /// 워커 반복의 뒷부분: 통계 스냅샷과 손실 보고를 발행한다(워커만 부른다, `service` 직후).
+    pub(crate) fn publish(&self, jb: &JitterBuffer) {
+        let js = jb.stats();
+        let playing = jb.is_playing();
+        self.stats.write(&MediaStats { playing, js, rx_dropped: 0 });
+        self.loss.set(playing.then_some((js.loss_pct, js.conceal_pct)));
     }
 }
 
@@ -95,5 +254,127 @@ impl MediaSettings {
 
     pub fn set_profile(&self, profile: f32) {
         self.profile.store(profile);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn sample(n: u64) -> MediaStats {
+        let js = JitterStats {
+            buffer_ms: n as f32 * 0.5,
+            target_ms: 7.25,
+            jitter_ms: 1.5,
+            loss_pct: 0.25,
+            late: n + 1,
+            concealed: n / 3,
+            concealed_loss: n / 5,
+            produced: n,
+            dropped_frames: 2,
+            samples_dropped: 3,
+            samples_inserted: 4,
+            rebuffers: 5,
+            conceal_pct: 0.75,
+            lead_ms: 2.5,
+            jitter_est_ms: 3.5,
+            corr_time_pct: 4.5,
+            max_corr_cents: 5.5,
+            late_dropped: 6,
+            burst_events: 7,
+            wall_buffer_ms: 8.5,
+            tail_ms: 9.5,
+            tail_adjusts: 10,
+            tail_resets: 11,
+            min_transit: -123_456,
+        };
+        MediaStats { playing: n % 2 == 1, js, rx_dropped: n * 7 }
+    }
+
+    #[test]
+    fn pack_roundtrip_keeps_every_field() {
+        for n in [0, 1, 99, u32::MAX as u64 + 5] {
+            let s = sample(n);
+            assert_eq!(unpack(&pack(&s)), s);
+        }
+    }
+
+    #[test]
+    fn cell_starts_as_default_and_returns_last_write() {
+        let c = MediaStatsCell::default();
+        assert_eq!(c.read(), MediaStats::default());
+        c.write(&sample(41));
+        assert_eq!(c.read(), sample(41));
+    }
+
+    /// 한 벌이면 기본값(첫 발행 전) 아니면 `sample(n)`이다.
+    fn assert_whole(s: &MediaStats) {
+        let n = s.js.produced;
+        assert!(s.js.concealed <= s.js.produced);
+        assert_eq!(*s, if n == 0 && s.js.late == 0 { MediaStats::default() } else { sample(n) }, "찢긴 스냅샷");
+    }
+
+    /// 쓰기 폭주(쉬지 않는 쓰는 스레드) 중에도 `read()`는 찢긴 값을 돌려주지 않는다(#116 M-1: 전에는 재시도 상한 뒤
+    /// 검증 없는 값을 돌려줘 약 1e-4로 찢겼다). 읽는 스레드 넷 × 각 2만 회, 실제보다 수천 배 거센 조건이다.
+    #[test]
+    fn seqlock_read_never_returns_torn_under_write_storm() {
+        let c = Arc::new(MediaStatsCell::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (c, stop) = (c.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut n = 1u64;
+                while !stop.load(Ordering::Relaxed) {
+                    c.write(&sample(n));
+                    n += 1;
+                }
+                n
+            })
+        };
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let c = c.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..20_000 {
+                        assert_whole(&c.read());
+                    }
+                })
+            })
+            .collect();
+        for r in readers {
+            r.join().unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert!(writer.join().unwrap() > 1, "쓰기가 돌지 않았다");
+    }
+
+    /// 쓰는 스레드 하나 + 읽는 스레드 넷: 성공한 읽기는 언제나 한 벌이다(`concealed ≤ produced`, 같은 n에서 나온 값).
+    #[test]
+    fn seqlock_reads_are_never_torn() {
+        let c = Arc::new(MediaStatsCell::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (c, stop) = (c.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let mut ok = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        if let Some(s) = c.try_read() {
+                            assert_whole(&s);
+                            ok += 1;
+                        }
+                    }
+                    ok
+                })
+            })
+            .collect();
+        for n in 1..200_000u64 {
+            c.write(&sample(n));
+        }
+        stop.store(true, Ordering::Relaxed);
+        for r in readers {
+            assert!(r.join().unwrap() > 0, "읽기가 한 번도 성공하지 못했다");
+        }
     }
 }

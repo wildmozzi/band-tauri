@@ -81,11 +81,13 @@
 | 게인·팬·모니터·마스터 | 워커, 커맨드(`MixControls`) | RT 출력 | `AtomicF32` | RT는 읽기만 |
 | 레벨·xrun·재생 프레임·콜백 시작/끝·실행시간 | RT | 워커, 통계 | `AudioCounters` 원자값 | 워커는 콜백 시작=끝일 때만 링 점유량과 짝지음 |
 | 믹스 탭·녹음 샘플 | RT 출력 | `band-mix-tap`, `band-record` | SPSC 링 | 느리면 RT가 버리고 센다 |
-| **피어별 `Mutex<JitterBuffer>`** | net 수신(`insert`), 워커(`pop`·`end_burst`), 커맨드(`set_profile`·`restart`) | net 제어(Ping 손실 보고 `stats`), 통계(`Engine::stats`, 커맨드·`band-diag`), 에코 측정(`peer_buffer_ms`) | `parking_lot::Mutex` | 접근자 7곳(③에서 줄임). 락 안 할당·I/O 없음 |
+| **피어별 `Mutex<JitterBuffer>`**(`PeerMediaShared` 안) | net 수신(`insert`), 워커(`pop`·`end_burst`), 커맨드(`set_profile`), 에코 측정(`restart`) | — (③-a1부터 읽기는 아래 스냅샷으로) | `parking_lot::Mutex` | 접근자 4곳(③-a2에서 2곳, ③-a3에서 0). 락 안 할당·I/O 없음 |
+| 피어 미디어 통계 스냅샷(`MediaStatsCell`)·손실 보고(`LossCell`) | 워커(피어마다 `service` 직후) | 통계(`Engine::stats`·`peer_jitter_stats`), net 제어(Ping 손실 보고), 에코 측정(버퍼 깊이) | seqlock(버전 + 필드별 원자값) / `AtomicU64` 하나 | 쓰는 쪽은 워커 하나, 읽는 쪽은 락 없음(③-a1) |
 | `NetShared.peers` | 커맨드(`add/remove_peer`) | 워커(송신·공급마다), net 수신·제어, 통계 | `RwLock<Vec<Arc<Peer>>>` | 쓰기는 피어 변경 때만 |
-| `Peer.conn`·`echo`·`clock`·`remote_loss` | net 수신·제어 | 워커(자동 코덱: `conn`·`remote_loss`), 통계(`echo`·`remote_loss`), 메트로놈(`clock`) | 피어별 Mutex 4개 | `Peer` 필드 전부 `pub` — 여러 계층이 직접 만진다(③) |
-| `Peer.mix`(`PeerMixCtl`) | 커맨드(게인·팬) | 워커(→ 소스 슬롯), 통계 | 원자값 | |
-| `jitter_settings`, `relay` | 커맨드 | net(새 피어 생성, 릴레이 송신) | Mutex | 미디어 설정을 net이 보관(③) |
+| `Peer.conn`·`echo`·`clock`·`remote_loss` | net 수신·제어 | 워커(자동 코덱: `sends_audio_via_relay`·`remote_loss`), 통계(`net_stats`), 메트로놈(`clock`) | 피어별 Mutex 4개 | ③-0부터 필드 private, 밖에서는 값 반환 메서드로만(가드 반환 접근자는 net 안) |
+| `PeerMediaShared.mix`(`PeerMixCtl`) | 커맨드(게인·팬, 엔진 등록부 경유) | 워커(→ 소스 슬롯), 통계 | 원자값 | 교체 때 엔진이 옛 값을 복사(③-b) |
+| `MediaSettings`(지터 최소·최대·프로필) | 커맨드 | 커맨드(새 피어 생성) | 프로필 `AtomicF32` | 엔진 소유(③-b). net은 미디어 설정을 갖지 않는다 |
+| `relay` | 커맨드 | net(릴레이 송신) | Mutex | |
 | 메트로놈 계획·상태·루프백 보정 | 커맨드 / 워커 | 워커 / 커맨드 | Mutex(세대 번호 비교 뒤 복사) | 워커는 반복마다 짧게 |
 | 에코 프로브 | 측정 | 워커 | `Mutex<Option<EchoProbe>>` | 워커가 공급 동안 잡음 |
 | 녹음 마커 | 워커 | `band-record` | `MarkSink`(Mutex 큐) | 녹음 중에만 |
@@ -115,9 +117,9 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 | 설정 | 소유자 | 전파 수단 | 반영 |
 |---|---|---|---|
-| 피어 게인·팬·뮤트 | `Peer.mix`(`PeerMixCtl`) | 원자값 → 워커가 소스 슬롯 원자값에 복사 | 즉시 |
+| 피어 게인·팬·뮤트 | `PeerMediaShared.mix`(`PeerMixCtl`, 엔진 등록부) | 원자값 → 워커가 소스 슬롯 원자값에 복사 | 즉시 |
 | 모니터·마스터·입력 뮤트 | `MixControls` | 원자값 | 즉시 |
-| 지터 프로필(0..1) | net의 `jitter_settings` Mutex + 피어별 `JitterBuffer` | `Engine` → `Net::set_jitter_profile` → 피어마다 `jitter.lock().set_profile` | 즉시. ③에서 소유를 미디어 쪽(엔진)으로 옮긴다 |
+| 지터 프로필(0..1) | 엔진 `MediaSettings.profile`(③-b) + 피어별 `JitterBuffer` | `Engine::set_jitter_profile` → 등록부의 피어마다 `set_profile`(지터 락) | 즉시. ③-a2에서 워커가 원자값을 비교해 적용 |
 | 메트로놈 계획 | `MetronomeCtl.plan` | Mutex + 세대 번호 | 다음 워커 반복 |
 | 메트로놈 볼륨 | `ClickShared` | 원자값 | 즉시 |
 | 루프백 보정(숨은 출력 지연) | `manager.loopback_cal` → `MetronomeCtl.loopback_offset_ms` | Mutex | 즉시(같은 장치 구성일 때만) |

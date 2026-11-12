@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::crypto::{KeyPair, PacketCipher, KEY_BYTES};
 use super::packet::PacketType;
-use super::media_link::PeerKey;
+use super::media_link::{LossCell, PeerKey};
 use crate::engine::peer_media::PeerMediaShared;
 use super::types::{PathKind, PeerStateKind};
 
@@ -698,9 +698,11 @@ pub struct Peer {
     rx: PacketCipher,
     candidates: Vec<(SocketAddr, CandidateKind)>,
     conn: Mutex<ConnState>,
-    /// 이 피어의 미디어 상태(엔진 등록부와 공유, ③-b). 수신 스레드가 오디오를 삽입하고 Ping 손실 보고를 읽는다.
+    /// 이 피어의 미디어 상태(엔진 등록부와 공유, ③-b). 수신 스레드가 오디오를 삽입한다.
     /// ③-a3에서 수신 큐 생산자(`MediaTx`)로 바뀐다.
     media: Arc<PeerMediaShared>,
+    /// 워커가 발행하는 이 피어 스트림의 수신 손실 보고(Ping, P1-4e). 락 없이 읽는다(③-a1).
+    rx_report: Arc<LossCell>,
     /// 이 피어로 보내는 Audio 패킷 seq(송신 키별). 에코로 되돌리는 패킷도 같은 카운터를 써서 nonce가 겹치지 않는다.
     /// 같은 키를 쓰는 살아 있는 항목(다른 peerId가 같은 descriptor를 보냄)끼리는 이 카운터를 같이 쓴다(`Net::add_peer`).
     tx_seq: Arc<AtomicU32>,
@@ -762,6 +764,7 @@ impl Peer {
             rx,
             candidates,
             conn: Mutex::new(ConnState::new(now)),
+            rx_report: media.loss_cell().clone(),
             media,
             tx_seq: Arc::new(AtomicU32::new(rand::random())),
             tx_last_ts: AtomicU32::new(0),
@@ -848,7 +851,7 @@ impl Peer {
 
     /// 이 피어 스트림의 수신 손실 보고(재생 중이 아니면 None). Ping에 싣는다(P1-4e).
     pub(super) fn loss_report(&self) -> Option<LossReport> {
-        self.media.loss_report().map(|(loss_pct, conceal_pct)| LossReport { loss_pct, conceal_pct })
+        self.rx_report.get().map(|(loss_pct, conceal_pct)| LossReport { loss_pct, conceal_pct })
     }
 
     pub(super) fn tx(&self) -> &PacketCipher {
