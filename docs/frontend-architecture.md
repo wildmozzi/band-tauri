@@ -209,6 +209,6 @@ client/src/
 | 데모 오디오 코드 | `demo-karaoke`의 `MusicPlayer`·`SynthDrum`·`MultiTrackPlayer`(Tone.js)는 합주 목표 밖. 유지할지(번들 크기 큼) 결정 후 지연 로딩(`React.lazy`) 또는 제거 |
 | 지연 로딩 | 모든 화면을 즉시 import해 번들 1개(>500kB). 라우트 단위 `lazy` 도입(데모·결제·커뮤니티부터). CSS 순서 정리 후에 |
 | 큰 컴포넌트 | `MusicRoom.tsx`(760줄), `ScoreDisplay.tsx`(600줄), `AudioSettings.tsx`(520줄), `Community.tsx`(470줄), `Profile.tsx`(430줄), `CreateRoom.tsx`(400줄) — 화면 로직을 훅·순수 함수로 |
-| 쓰이지 않는 코드 | `features/profile/ProfileCard.tsx`(+css), `shared/ui/icon/*.png` — 참조 없음 |
-| 공유 타입 중복 | `rooms/roomFilters.ts`의 `Room`·`RoomStatus`와 `roomModel.ts`의 `Room` 정리, `payment/paymentFlow.ts`와 `planFeatures.ts`의 `PaidPlan` 중복 |
-| 업데이트 알림 | `UpdateSettingsSection`과 `UpdateNotice`가 한 파일 — 설정 화면용·앱 루트용 분리 |
+| 쓰이지 않는 코드 | **완료(P3-2 ③-1)** — `features/profile/ProfileCard.tsx`(+css), `shared/ui/icon/*.png` 삭제 |
+| 공유 타입 중복 | **완료(P3-2 ③-1)** — `Room`·`RoomStatus`는 `rooms/roomModel.ts` 한 곳(`roomFilters.ts`는 import), `PaidPlan`은 `payment/planFeatures.ts` 한 곳(`paymentFlow.ts`는 import) |
+| 업데이트 알림 | **완료(P3-2 ③-1)** — `settings/UpdateNotice.tsx`(앱 루트 배너)·`UpdateSettingsSection.tsx`(설정 화면)로 분리, 공용 문구 `updateStatusText.ts`·버튼 `UpdateInstallButton.tsx` |
