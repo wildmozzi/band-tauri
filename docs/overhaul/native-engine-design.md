@@ -445,6 +445,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 `PeerStats.playoutMs` = 벽시계로 잰 버퍼 지연(소스 링 포함, 최근 0.5~1초 최솟값) + 장치 출력 버퍼.
 - 장치 클럭 추정과 독립적이다. 그래서 `bufferMs`(클럭 추정 기준 목표 제어값)와 비교하면 숨은 지연 누적을 탐지할 수 있다.
 - 재생 전에는 0이다.
+- 클라이언트 추정식(P2-8, `client/src/features/room/earLatency.ts`): 멤버 카드의 입→귀 ≈ `rttMs`/2 + 상대 송신 프레임(엔진이 주지 않아 지금은 생략, "≈" 표시) + `playoutMs`(0이면 재생 전이라 표시 안 함, 필드 없는 옛 엔진은 `bufferMs` + `EngineStats.devicePeriodMs`). 상대 입력 버퍼·인코딩은 빠진 하한 쪽 추정이고, 실측 기준은 에코 측정 `mouthToEarMs`다.
 
 `deviceLost`: 장치를 잃었다. 이때 `running`은 false다. 그래서 프론트의 "running=false 연속 → 엔진 정지" 감지가 그대로 동작한다. 자동 재열기는 아직 없다.
 - 입력 또는 출력 콜백이 1초 넘게 멈추면 켜지고, 콜백이 다시 돌면 꺼진다.

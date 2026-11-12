@@ -49,7 +49,8 @@ export type SignalMessage = Record<string, unknown> & { type: string }
 export const RATE_LIMIT_RETRY_MS = DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs
 
 /** 이 mock이 처리하는 클라이언트 → 서버 메시지 */
-const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping'])
+// 연주(데스크톱 앱, e2e/mocks/tauri.ts로 흉내 낼 때만 온다): 기록만 — 서버의 중계·응답은 흉내 내지 않는다
+const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping', 'start-performing', 'stop-performing', 'native-leave', 'native-descriptor', 'relay-token-request', 'metronome'])
 
 /** setDown이 연결을 끊을 때 쓰는 코드 (1012 Service Restart — 앱은 비정상 닫힘으로 보고 재연결한다) */
 const SERVER_RESTART_CLOSE_CODE = 1012
@@ -172,7 +173,7 @@ export class FakeSignaling {
         conn.roomId = null
         return
       default:
-        // chat: 기록만 (received)
+        // chat·연주 메시지: 기록만 (received)
         return
     }
   }

@@ -45,3 +45,16 @@
 .performer-latency .quality-indicator {
   font-size: 0.8rem;
 }
+
+/* 입→귀 추정 지연 색 구간(P2-8, 경계는 earLatency.ts EAR_LATENCY_THRESHOLDS) */
+.performer-latency .ear-latency.good {
+  color: var(--success);
+}
+
+.performer-latency .ear-latency.fair {
+  color: var(--warning);
+}
+
+.performer-latency .ear-latency.poor {
+  color: var(--error);
+}
