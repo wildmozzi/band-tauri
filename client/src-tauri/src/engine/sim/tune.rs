@@ -1,5 +1,8 @@
 //! 지터 버퍼 자동 튜닝(P1-5) 결정적 시나리오: 피어 여럿(최대 6) → 지터 버퍼 → PeerFeed(워커) → OutputRt(콜백).
 //!
+//! 수신 경로는 실제와 같다(엔진 ③-a3): 도착 사건에서 피어별 수신 큐(`MediaTx::push`)에 넣고, 워커 사건에서 피어마다
+//! `PeerMedia::ingest`(큐 비우기 → 재시작·프로필) 뒤 `service`. 같은 시각이면 도착을 워커보다 먼저 처리한다.
+//!
 //! `worker::tests::run_feed_sim`과 같은 이벤트 모델이다(가상 시간, 결정적 의사난수). 피어마다 송신 장치 클럭(드리프트),
 //! 망 지터, 손실, 지연 스파이크(와이파이 버스트)를 따로 준다. 지표는 구현과 독립적으로 잰다:
 //! - `p95`: 실제 도착 지연(transit = 도착 − ts)의 1초 블록별 p95(블록 최솟값 기준)의 중앙값. GOAL 1절 "p95 지터".
@@ -14,8 +17,9 @@ use crate::engine::stats::AudioCounters;
 use crate::engine::worker::{CallbackTracker, PeerFeed, FINE_POLL, OUT_CHUNK, POLL};
 use crate::engine::codec::Encoder as SimEncoder;
 use crate::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
-use crate::engine::jitter::{JitterBuffer, JitterSettings, JitterStats};
-use crate::net::media_link::PeerKey;
+use crate::engine::jitter::{JitterSettings, JitterStats};
+use crate::engine::peer_media::{PeerMedia, PeerMediaShared};
+use crate::net::media_link::{media_link, PeerKey};
 use crate::engine::rt::{output_path, SLOT_ACTIVE};
 use crate::net::packet::{Header, PacketType};
 use rand::{Rng, SeedableRng};
@@ -71,6 +75,9 @@ pub(super) struct MultiSim {
     pub settle_us: u64,
     pub seed: u64,
     pub peers: Vec<NetPeer>,
+    /// 지연 민감도(설계 6.4절 (4)): 패킷이 도착하고도 이만큼 더 묵은 뒤에야 수신 큐에 보인다(도착 시각은 그대로).
+    /// 실제 설계는 0이다. 0이면 사건 순서가 이 필드가 없을 때와 같다.
+    pub rx_hold_us: u64,
 }
 
 impl MultiSim {
@@ -86,6 +93,7 @@ impl MultiSim {
             settle_us: 5_000_000,
             seed: 1,
             peers,
+            rx_hold_us: 0,
         }
     }
 }
@@ -214,15 +222,20 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
     let controls = Arc::new(MixControls::default());
     let (mut rt, mut feed) = output_path(counters.clone(), controls);
     let mut pfs = Vec::new();
-    let mut jbs = Vec::new();
+    let mut pms = Vec::new();
+    let mut mtxs = Vec::new();
     let mut txs = Vec::new();
     for (i, np) in p.peers.iter().enumerate() {
         let slot = 1 + i;
         let sh = &feed.bank.slots[slot];
         sh.set_gains((0.15, 0.15), (0.15, 0.15));
         sh.state.store(SLOT_ACTIVE, Ordering::Release);
-        pfs.push(PeerFeed::new(slot, PeerKey::from_raw(i as u64 + 1), 48_000, sh).unwrap());
-        jbs.push(JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: np.profile }));
+        let key = PeerKey::from_raw(i as u64 + 1);
+        pfs.push(PeerFeed::new(slot, key, 48_000, sh).unwrap());
+        let (mtx, mrx) = media_link(key);
+        let shared = Arc::new(PeerMediaShared::new(key, format!("p{i}"), 1 + i as u32));
+        pms.push(PeerMedia::new(shared, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: np.profile }, mrx));
+        mtxs.push(mtx);
         txs.push(TxState {
             enc: SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap(),
             rng: rand::rngs::StdRng::seed_from_u64(np.seed),
@@ -244,6 +257,8 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
     let mut dev = vec![0f32; p.out_buf * 2];
     let mut payload = vec![0u8; MAX_PAYLOAD_BYTES];
     let mut pending: Vec<(u64, usize, Header, Vec<u8>)> = Vec::new();
+    // rx_hold_us > 0일 때만: (보이는 시각, 피어, 헤더, 페이로드, 도착 시각)
+    let mut held: Vec<(u64, usize, Header, Vec<u8>, u64)> = Vec::new();
     let out_period = p.out_buf as f64 / RATE * 1e6;
     let mut k_out = 0u64;
     let mut t_w = 0u64;
@@ -279,14 +294,19 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         let (pi, t_in) = t_ins.iter().copied().enumerate().min_by_key(|x| x.1).unwrap();
         let t_out = out_due(k_out);
         let t_arr = pending.iter().map(|x| x.0).min().unwrap_or(u64::MAX);
-        let t = t_in.min(t_out).min(t_arr).min(t_w);
+        let t_vis = held.iter().map(|x| x.0).min().unwrap_or(u64::MAX);
+        let t = t_in.min(t_out).min(t_arr).min(t_vis).min(t_w);
         if t > end_us {
             break;
         }
         if t == t_arr {
             let i = pending.iter().position(|x| x.0 == t).unwrap();
             let (_, peer, h, pl) = pending.swap_remove(i);
-            jbs[peer].insert(&h, &pl, t);
+            if p.rx_hold_us == 0 {
+                mtxs[peer].push(&h, &pl, t);
+            } else {
+                held.push((t + p.rx_hold_us, peer, h, pl.clone(), t));
+            }
             // 실제 도착 지연(µs): 도착 − ts를 수신 클럭으로 환산(송신 클럭 편차는 블록 최솟값이 흡수)
             let tx = &mut txs[peer];
             let blk = t / 1_000_000;
@@ -303,6 +323,10 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             }
             let ts_us = h.timestamp.wrapping_sub(1000 + peer as u32 * 77_777) as f64 / RATE * 1e6 / (1.0 + p.peers[peer].drift_ppm * 1e-6);
             tx.block.push(t as f64 - ts_us);
+        } else if t == t_vis {
+            let i = held.iter().position(|x| x.0 == t).unwrap();
+            let (_, peer, h, pl, arrival) = held.swap_remove(i);
+            mtxs[peer].push(&h, &pl, arrival);
         } else if t == t_in {
             let np = &p.peers[pi];
             let tx = &mut txs[pi];
@@ -362,9 +386,10 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             let mut urgent = false;
             for i in 0..n {
                 let slot = pfs[i].slot();
-                let ev = pfs[i].service(&mut jbs[i], &mut feed.prods[slot], &feed.bank.slots[slot], &timing, &|| true, &mut chunk, &mut tmp, None);
+                let (_, jb) = pms[i].ingest(p.peers[i].profile);
+                let ev = pfs[i].service(jb, &mut feed.prods[slot], &feed.bank.slots[slot], &timing, &|| true, &mut chunk, &mut tmp, None);
                 urgent |= ev.urgent;
-                let c = jbs[i].stats().concealed;
+                let c = pms[i].jitter().stats().concealed;
                 if c > seen_conc[i] {
                     outs[i].conceal_us.push(t);
                 }
@@ -378,13 +403,13 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             if !settled && t >= p.settle_us {
                 settled = true;
                 for i in 0..n {
-                    outs[i].js_settle = jbs[i].stats();
+                    outs[i].js_settle = pms[i].jitter().stats();
                 }
             }
             if t >= next_trace {
                 for i in 0..n {
-                    let s = jbs[i].stats();
-                    let playing = jbs[i].is_playing();
+                    let s = pms[i].jitter().stats();
+                    let playing = pms[i].jitter().is_playing();
                     outs[i].samples.push(Sample { t: t as f64 / 1e6, buf: s.buffer_ms, tgt: s.target_ms, playing, concealed: s.concealed, concealed_loss: s.concealed_loss, produced: s.produced, jit: s.jitter_est_ms, lead: s.lead_ms, tail: s.tail_ms });
                     if playing {
                         outs[i].trace.push((t as f64 / 1e6, s.buffer_ms, s.target_ms));
@@ -400,7 +425,10 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         }
     }
     for i in 0..n {
-        outs[i].js = jbs[i].stats();
+        // 마지막 워커 사건 뒤에 도착해 큐에 남은 것까지 넣고 잰다(이전: 도착 즉시 삽입 — 같은 상태가 된다)
+        let _ = pms[i].ingest(p.peers[i].profile);
+        assert_eq!(pms[i].rx_dropped(), 0, "하네스에서 수신 큐가 넘쳤다(피어 {i})");
+        outs[i].js = pms[i].jitter().stats();
         outs[i].margin = pfs[i].margin();
     }
     MultiOut { peers: outs, xruns: counters.xruns.load(Ordering::Relaxed), xrun_us }

@@ -784,6 +784,34 @@ fn long_sim_6peers_60min() {
     run_and_report("long-60min", 3600.0);
 }
 
+/// 지연 민감도(엔진 ③-a3, 설계 6.4절 (4)): 5분 시나리오를 패킷이 도착하고도 `rx_hold_us`만큼 더 큐에 묵은 뒤에야
+/// 워커에 보이게 해서(도착 시각은 그대로) 피어별 평시 은닉률·버퍼 중앙값을 잰다. 실제 설계는 0(= fixture)이다.
+/// 수치 판정 없이 표만 출력한다(측정 도구): `cargo test --lib rx_hold_sensitivity -- --ignored --nocapture`.
+#[test]
+#[ignore = "측정: 5분 시나리오 4회(디버그 수 분)"]
+fn rx_hold_sensitivity() {
+    let seconds = 300.0;
+    let specs = scenario(seconds);
+    let mut rows = Vec::new();
+    for hold in [0u64, 150, 500, 1500] {
+        let mut sim = MultiSim::new(seconds, specs.iter().map(|s| s.np.clone()).collect());
+        sim.settle_us = (SETTLE_S * 1e6) as u64;
+        sim.seed = 6;
+        sim.rx_hold_us = hold;
+        let out = run_multi(&sim);
+        let res: Vec<PeerResult> = specs.iter().zip(&out.peers).map(|(s, p)| analyze(&s.np, s.rule, s.known, p, seconds)).collect();
+        let conceal: Vec<String> = res.iter().map(|r| format!("{:.2}", r.conceal_pct)).collect();
+        let buf: Vec<String> = res.iter().map(|r| format!("{:.1}", r.buf_med)).collect();
+        let late: Vec<String> = out.peers.iter().map(|p| p.js.late.to_string()).collect();
+        rows.push(format!("| {hold} | {} | {} | {} |", conceal.join(" / "), buf.join(" / "), late.join(" / ")));
+    }
+    println!("| rx_hold_us | 피어 1~6 평시 은닉률(%) | 피어 1~6 bufferMs 중앙값 | 피어 1~6 late |");
+    println!("|---|---|---|---|");
+    for r in rows {
+        println!("{r}");
+    }
+}
+
 /// 래칫: 알려진 미달은 기준값 ± tol 안에서만 통과하고, 악화·크게 개선·해소는 모두 실패로 분류된다.
 #[test]
 fn long_sim_ratchet() {

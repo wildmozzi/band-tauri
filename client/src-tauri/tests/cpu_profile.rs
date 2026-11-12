@@ -218,3 +218,77 @@ fn six_peer_full_mesh_cpu() {
         );
     }
 }
+
+/// 엔진 ③-a2부터 지터 재시작(에코 측정 시작·끝)은 워커가 적용하고, `JitterBuffer::restart`는 버퍼를 새로 만든다
+/// (≈1.19MB 할당·해제). 그 비용이 워커 반복을 얼마나 늘리고 다른 일(송신·다른 피어 공급)을 늦추는지 잰다.
+/// (1) `restart` 1회 시간 분포(= 재시작을 적용하는 반복에 더해지는 시간). (2) 6엔진 풀메시에서 엔진 0이 피어 5명 모두를
+/// 50ms마다 재시작(실제는 측정당 2회 — 수백 배 거센 조건)할 때와 조용할 때, 엔진 0의 건너뛴 프레임·xrun과
+/// **다른 엔진들이 받는 엔진 0 소리의 은닉**(엔진 0 워커가 늦어 송신이 밀리면 오른다)을 비교한다. 판정 없이 표만 낸다.
+/// `cargo test --release --features test-support --test cpu_profile restart_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "측정: release 권장(약 40초)"]
+fn restart_cost_on_worker() {
+    use band_lib::engine::jitter::{JitterBuffer, JitterSettings};
+    // (1) restart 1회 시간
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    let mut us: Vec<f64> = (0..300)
+        .map(|_| {
+            let t = Instant::now();
+            jb.restart();
+            t.elapsed().as_secs_f64() * 1e6
+        })
+        .collect();
+    us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let q = |p: f64| us[((us.len() as f64 * p) as usize).min(us.len() - 1)];
+    println!("JitterBuffer::restart 1회(µs, 300회): p50 {:.1} / p99 {:.1} / 최대 {:.1}", q(0.5), q(0.99), us[us.len() - 1]);
+
+    // (2) 풀메시에서 재시작 폭주 전/중
+    let cfg = EngineConfig { buffer_size: 128, frame_ms: 2.5, codec: CodecKind::Pcm16, channels: 1, input_channels: vec![0], ..Default::default() };
+    let engines: Vec<Engine> = (0..PEERS)
+        .map(|i| Engine::start(cfg.clone(), Arc::new(sine_backend(220.0 * (i + 1) as f64)), Arc::new(MixControls::default()), Some((format!("p{i}"), test_net()))).unwrap())
+        .collect();
+    for (i, e) in engines.iter().enumerate() {
+        for (j, o) in engines.iter().enumerate() {
+            if i != j {
+                e.add_peer(format!("p{j}"), &with_candidate(o.descriptor().unwrap(), addr(o))).unwrap();
+            }
+        }
+    }
+    let t0 = Instant::now();
+    while !engines.iter().all(|e| e.stats().peers.iter().filter(|p| p.state == PeerStateKind::Connected).count() == PEERS - 1) {
+        assert!(t0.elapsed() < Duration::from_secs(30), "풀메시 연결 실패");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let medias: Vec<_> = (1..PEERS).map(|j| engines[0].echo_job(&format!("p{j}")).unwrap().media).collect();
+    // 다른 엔진들이 받는 p0 소리의 (은닉, 생산) 합
+    let p0_stream = |es: &[Engine]| -> (u64, u64) {
+        es[1..].iter().flat_map(|e| e.peer_jitter_stats()).filter(|(id, _)| id == "p0").fold((0, 0), |a, (_, s)| (a.0 + s.concealed, a.1 + s.produced))
+    };
+    let window = |storm: bool| -> (u64, u64, f64, f32) {
+        let (f0, x0, (c0, n0)) = (engines[0].feed_stats().1, engines[0].stats().xruns, p0_stream(&engines));
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_secs(8) {
+            if storm {
+                for m in &medias {
+                    m.request_restart();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let (f1, s1, (c1, n1)) = (engines[0].feed_stats().1, engines[0].stats(), p0_stream(&engines));
+        let pct = (c1 - c0) as f64 * 100.0 / (n1 - n0).max(1) as f64;
+        (f1 - f0, s1.xruns - x0, pct, s1.cpu.worker_pct.unwrap_or(f32::NAN))
+    };
+    let quiet = window(false);
+    let storm = window(true);
+    let quiet2 = window(false);
+    println!("| 창(8s, PCM16 2.5ms, 6엔진) | 엔진0 건너뛴 프레임 | 엔진0 xrun | 다른 엔진이 받는 p0 은닉(%) | 엔진0 워커 CPU(%) |");
+    println!("|---|---|---|---|---|");
+    for (name, w) in [("조용함", quiet), ("재시작 폭주(피어 5명 × 20회/s)", storm), ("조용함(다시)", quiet2)] {
+        println!("| {name} | {} | {} | {:.3} | {:.2} |", w.0, w.1, w.2, w.3);
+    }
+    for mut e in engines {
+        e.stop();
+    }
+}

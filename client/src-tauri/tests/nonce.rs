@@ -8,9 +8,7 @@ use std::collections::HashSet;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-use band_lib::engine::jitter::JitterSettings;
-use band_lib::engine::peer_media::PeerMediaShared;
-use band_lib::net::media_link::PeerKey;
+use band_lib::net::media_link::{media_link, PeerKey};
 use band_lib::net::types::PathKind;
 use band_lib::net::crypto::KeyPair;
 use band_lib::net::packet::{Header, PacketType};
@@ -20,12 +18,12 @@ use band_lib::net::types::DATA_PREFIX_BYTES;
 use band_lib::net::{Net, NetOptions, AUDIO_SEQ_HANDOVER_GAP};
 
 
-/// 엔진 없이 Net만 쓸 때의 피어 추가. 미디어 상태(엔진 ③)는 여기서 만든다. 이 테스트는 수신 오디오를 보지 않는다.
+/// 엔진 없이 Net만 쓸 때의 피어 추가(엔진 ③). 수신 큐 소비자(`MediaRx`)는 버린다 — 이 테스트는 수신 오디오를 보지
+/// 않는다. 오디오가 오면 큐가 찰 때까지 쌓이다 버려진다.
 fn add(net: &Net, id: String, desc: &LocalDescriptor) -> Result<Option<PeerKey>, String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let key = PeerKey::from_raw(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
-    net.add_peer(id.clone(), desc, std::sync::Arc::new(PeerMediaShared::new(key, id, desc.ssrc, js)))
+    net.add_peer(id, desc, media_link(key).0)
 }
 
 const PEER: &str = "bob";

@@ -38,13 +38,13 @@
 송신  장치 입력 ─(RT 입력 콜백)→ 입력 SPSC 링 ─(워커)→ 리샘플 48k ─┬→ 프레임 누적 → 인코드(설정 코덱 / 피어별 자동 Opus)
                                                               │      → net::send_audio(피어별 암호화 → UDP)
                                                               └→ 로컬 FIFO → 로컬 소스 링(모니터·믹스 탭)
-수신  UDP ─(net 수신)→ 복호·검증 → 피어별 JitterBuffer::insert(피어별 Mutex)
-      ─(워커)→ JitterBuffer::pop(디코드·은닉·보정) → 48k → 장치 레이트 → 피어 소스 SPSC 링
+수신  UDP ─(net 수신)→ 복호·검증 → 피어별 수신 SPSC 큐(헤더·도착 µs·페이로드, 넘치면 버리고 셈)
+      ─(워커, 피어마다 service 직전)→ 큐 비우기 → JitterBuffer::insert → pop(디코드·은닉·보정) → 48k → 장치 레이트 → 피어 소스 SPSC 링
 출력  (RT 출력 콜백) 소스 링들 → 게인·팬(원자값) → 마스터·soft clip → 장치 ─┬→ 믹스 탭 링 → band-mix-tap → 관람자 브릿지
                                                                      ├→ 녹음 링(소스별) → band-record → 파일
                                                                      └→ 메트로놈 클릭(장치 출력에만)
 제어  커맨드 → manager → Engine → 원자값(게인·뮤트·모니터) / Mutex(메트로놈 계획·에코 프로브·루프백 보정) / net API
-통계  RT·워커·net 원자값 + 피어별 지터 락 → Engine::stats()가 EngineStats로 조립 → 커맨드·band-diag
+통계  RT·워커·net 원자값 + 피어별 미디어 통계 스냅샷(seqlock, 워커 발행) → Engine::stats()가 EngineStats로 조립 → 커맨드·band-diag
 ```
 
 깊이 측정의 시각 기준(`DeviceClock`)과 은닉 마감 규칙은 계약 문서 1.1·1.2절이 기준이다.
@@ -81,7 +81,8 @@
 | 게인·팬·모니터·마스터 | 워커, 커맨드(`MixControls`) | RT 출력 | `AtomicF32` | RT는 읽기만 |
 | 레벨·xrun·재생 프레임·콜백 시작/끝·실행시간 | RT | 워커, 통계 | `AudioCounters` 원자값 | 워커는 콜백 시작=끝일 때만 링 점유량과 짝지음 |
 | 믹스 탭·녹음 샘플 | RT 출력 | `band-mix-tap`, `band-record` | SPSC 링 | 느리면 RT가 버리고 센다 |
-| **피어별 `Mutex<JitterBuffer>`**(`PeerMediaShared` 안) | net 수신(`insert`), 워커(`pop`·`end_burst`, 명령 적용 `restart`·`set_profile`) | — (③-a1부터 읽기는 아래 스냅샷으로) | `parking_lot::Mutex` | 접근자 2곳(③-a2), ③-a3에서 0. 기본 우선순위 스레드는 잡지 않는다 |
+| 피어별 수신 큐(`net::media_link`) | net 수신(`MediaTx::push`, `Peer` 안 무경쟁 `Mutex`) | 워커(`PeerMedia::ingest`) | SPSC 링 128 × 1,192B(사전할당) | 가득 차면 새 패킷을 버리고 `rx_dropped`로 센다(③-a3) |
+| 피어별 `JitterBuffer` | 워커만(`PeerMedia` 안, `insert`·`pop`·`end_burst`·`restart`·`set_profile`) | 워커만 | 단독 소유(락 없음) | 생성·해제는 제어 평면(명령·반환 큐). `tests/architecture.rs`가 `Mutex<JitterBuffer>`를 막는다(③-a3) |
 | 피어 미디어 명령: 추가·제거(`MediaCmd`)와 반환 | 커맨드(`add/remove_peer`) / 워커(반환) | 워커 / 커맨드·통계(`reclaim`) | SPSC 링 용량 16(생산자는 `Mutex<HeapProd>`, 제어 평면끼리만) | 소유 이전(`PeerMedia`). 해제는 제어 평면에서(③-a2) |
 | 지터 프로필·재시작 요청 | 커맨드(`MediaSettings.profile`), 에코 측정(`restart_req` +1) | 워커(반복마다 비교) | `AtomicF32` / `AtomicU32` 세대 | 응답 없음(③-a2) |
 | 피어 미디어 통계 스냅샷(`MediaStatsCell`)·손실 보고(`LossCell`) | 워커(피어마다 `service` 직후) | 통계(`Engine::stats`·`peer_jitter_stats`), net 제어(Ping 손실 보고), 에코 측정(버퍼 깊이) | seqlock(버전 + 필드별 원자값) / `AtomicU64` 하나 | 쓰는 쪽은 워커 하나, 읽는 쪽은 락 없음(③-a1) |
@@ -95,6 +96,19 @@
 | 녹음 마커 | 워커 | `band-record` | `MarkSink`(Mutex 큐) | 녹음 중에만 |
 | 워커 통계 | 워커 | 통계 | 원자값(`WorkerStats`) | |
 | 정지 신호 | 제어 | 각 스레드 | `AtomicBool` + join | 수신은 빈 데이터그램으로 깨움 |
+
+**③ 뒤에도 워커가 잡는 락**(지터 락만 없어졌다 — "우선순위 역전 제거"는 수신 미디어 경로에 한정된다. 송신 쪽은 ADR D2 ③c):
+
+| 락 | 워커가 잡는 곳·빈도 | 같은 락을 잡는 기본 우선순위 스레드 |
+|---|---|---|
+| `NetShared.peers`(RwLock, 읽기) | 송신 프레임마다, 자동 코덱 200ms | 커맨드 `add_peer`·`remove_peer`(쓰기) |
+| `Peer.conn` | 송신 프레임마다 피어마다(`route`), 200ms(`sends_audio_via_relay`) | `band-net-ctrl` 20ms, 통계(`net_stats`) |
+| `Peer.echo` | 송신 프레임마다 피어마다(`reflecting`) | `band-net-ctrl`, 커맨드(에코 요청·모드), 통계 |
+| `Peer.remote_loss` | 200ms | 통계 |
+| `relay` | 200ms | `band-net-ctrl`, 커맨드 |
+| 에코 `probe` | 반복마다, 캡처 프레임마다 | 측정 |
+| 메트로놈 `plan`·`stats`·`loopback_offset_ms` | 반복마다, 100ms | 커맨드, 통계 |
+| 녹음 마커 `MarkSink` | 녹음 중 은닉·버림이 있을 때 | `band-record` |
 
 ### 4.2 RT 경로 불변 조건
 
@@ -112,7 +126,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 1. **할당은 시작·재구성 때만**(버퍼는 `Worker::new`에서 사전할당). 반복 중 할당은 이벤트 드문 경로만 허용하고 목록으로 관리한다 — 현재: 메트로놈 계획이 바뀔 때 `clone`, 새 피어의 `AutoTx`(id `clone`), `Net::peers()`의 `Vec` 복제(측정·통계 경로), 에코 측정 시작·끝의 지터 재시작(`JitterBuffer::restart`가 버퍼를 새로 만든다 — ③-a2부터 워커에서 적용, 측정당 2회). ②에서 워커 루프의 매 반복 경로에 할당이 없음을 유지한다.
 2. **락은 짧게**: 잡은 채 블로킹 I/O·로그·할당을 하지 않는다. 예외: 워커의 `send_to`(UDP, 논블로킹에 가까움, 송신 큐 지연으로 잰다).
-3. **우선순위 역전**: 워커·net 수신은 MMCSS로 올라가 있고 커맨드·`band-diag`는 기본 우선순위다. `parking_lot`은 우선순위 상속이 없으므로 기본 우선순위 스레드가 준RT와 같은 락을 잡을 때 그 안에서는 복사만 한다(`stats()` 스냅샷). 지터 락을 기본 우선순위 스레드가 잡는 경로(통계·프로필 변경)는 ③에서 원자 스냅샷·명령 큐로 바꾼다.
+3. **우선순위 역전**: 워커·net 수신은 MMCSS로 올라가 있고 커맨드·`band-diag`는 기본 우선순위다. `parking_lot`은 우선순위 상속이 없으므로 기본 우선순위 스레드가 준RT와 같은 락을 잡을 때 그 안에서는 복사만 한다(`stats()` 스냅샷). 지터 락은 ③에서 없앴다(통계 = seqlock 스냅샷, 프로필·재시작 = 원자값, 추가·제거 = 명령 큐, 삽입 = 수신 큐). 남은 락은 4.1절 끝 표.
 4. 로그는 레이트 제한(1000회에 1번 등).
 
 ### 4.4 설정 전파
@@ -176,7 +190,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 어긋남 | 위치 | 단계 |
 |---|---|---|
 | `Peer`가 net 상태와 미디어 상태를 함께 가진 공용 구조체(필드 전부 `pub`, Mutex 5개 + 원자값). net·워커·통계·커맨드가 직접 잠근다. single writer가 아니다 | `net/peer.rs` | ③ |
-| 지터 락 접근자 7곳(4.1절), 기본 우선순위 스레드가 준RT 락을 잡음 | `net/mod.rs`, `engine/mod.rs`, `worker/mod.rs` | ③ |
+| ~~지터 락 접근자 7곳, 기본 우선순위 스레드가 준RT 락을 잡음~~ | (③-a3에서 해소: 지터 버퍼는 워커 단독 소유) | ③ 완료 |
 | 녹음 폴더 설정 파일 저장·검증이 어댑터에 | `commands.rs`(`record_dir_file`, `current_record_dir`) | ⑦ |
 | 큰 파일: `wasapi.rs` 1.9k(열거·프로브 + 스트림), `net/mod.rs` 1.1k(송신 + 수신 루프 + 제어 루프), `net/peer.rs` 1.2k | | ⑥ |
 
@@ -268,7 +282,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 ### ③ 목표(확정)
 
 - **종착**: net 수신 → 피어별 SPSC 큐(헤더·페이로드·**도착 µs**) → 워커가 `insert` + `pop`. **지터 `Mutex` 제거**, `JitterBuffer`는 워커 단일 소유.
-  - 도착 시각을 큐에 실으므로 지연 통계·지터 추정(`transit = 도착 − ts`)은 그대로다. 달라지는 것은 워커가 패킷을 **보는** 시각뿐: 최대 1 폴링 주기(`POLL` 500µs, 마감 근처 `FINE_POLL` 150µs) 늦게 `real_frames`에 잡힌다. 은닉 마감 여유(1.5ms)보다 작다.
+  - 도착 시각을 큐에 싣고 워커가 **피어마다 `service` 직전에** 큐를 비우므로 지터 버퍼가 겪는 호출 순서·인자가 이전과 같다(지터 추정·늦음 판정·은닉 불변, 추가 지연 없음 — `engine-stage3-design.md` 2.4절). 근거: 5분 하네스 fixture 바이트 동일(하네스가 큐를 거친 상태)과 지연 민감도 표(③-a3 PR).
   - 증거: 5분 하네스 fixture 동일(하네스는 가상 시간에서 삽입 시각 = 도착 시각이라 그대로여야 한다) + 루프백 실시간 은닉률·버퍼 지연 같은 범위 + 폴링 주기를 하네스에 넣은 지연 민감도(삽입을 0/150/500µs 늦췄을 때 은닉 변화) 수치.
   - 큐가 차면(워커 정지 등) 수신이 버리고 센다(RT 링과 같은 규칙).
 - **`Peer` 분해**: net 소유(주소·암호·`conn`·`clock`·`echo`·`remote_loss`, 접근은 메서드)와 미디어 소유(`JitterBuffer`·`PeerMixCtl`·지터 설정, 워커).
@@ -314,7 +328,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 제어 평면과 데이터 평면 분리: 파라미터는 원자값, 구조 변경은 비RT에서 준비 후 상태 하나로 넘김 | JUCE 파라미터, Web Audio control/render 스레드 | 게인·팬은 원자값, 소스 슬롯은 `FREE/ACTIVE/DRAIN`으로 소유 이전, 링은 사전할당 |
 | 풀(pull) 모델 믹스 | JACK, CoreAudio, WASAPI 이벤트 구동 | 콜백 구동 믹스(P1-0), 믹스 출력 링 없음 |
 | 지터 버퍼 적응(목표 추정·가감속·은닉)은 도착 통계로 | WebRTC NetEQ | 같은 구성. NetEQ는 장치 스레드가 `GetAudio`(10ms)로 당길 때 디코드까지 하지만, 여기서는 디코드·은닉·보정을 워커가 하고 RT 콜백에는 PCM 링만 준다 — RT 실행시간이 코덱·패킷 수와 무관 |
-| 상태마다 쓰는 쪽은 하나(single writer) | lock-free 설계 일반 | RT 경계(링·원자값)는 지킨다. **`Peer`(지터 락·Mutex 4개)는 지키지 않는다**(4.1절) — ③에서 미디어 상태를 워커 단일 소유로 |
+| 상태마다 쓰는 쪽은 하나(single writer) | lock-free 설계 일반 | RT 경계(링·원자값)는 지킨다. 피어 미디어 상태는 ③에서 워커 단일 소유가 됐다. **`Peer`의 net 상태(Mutex 4개)는 아직 지키지 않는다**(4.1절 끝 표, ③c) |
 | 의존은 정책 → 메커니즘 한 방향, 순환 없음 | Clean Architecture 의존 규칙, 비순환 의존 원칙(ADP) | 5절 규칙을 `tests/architecture.rs`가 검사, 현재 예외는 단계와 함께 관리 |
 | 결정적 시뮬레이션으로 동작 고정 | NetEQ 시뮬레이터, 가상 시간 하네스 | `engine/sim`(5분 기본 테스트, 60분 야간), 리포트 숫자가 같으면 동작 불변 |
 

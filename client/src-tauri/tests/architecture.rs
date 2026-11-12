@@ -107,6 +107,8 @@ const OPEN_STAGES: &[&str] = &["③", "⑤", "⑥", "⑦"];
 const FORBIDDEN: &[(&str, &str, &str)] = &[
     ("net", "engine::jitter", "③-b"),
     ("net", "engine::mixer", "③-b"),
+    // net은 수신 큐(`net::media_link`)에 넣기만 한다. 피어 미디어 상태는 워커 소유(③-a3).
+    ("net", "engine::peer_media", "③-a3"),
 ];
 
 /// 어댑터(계층 6)가 쓸 수 있는 노드: 제어 평면과 계약 DTO(설정·보고·디스크립터)를 가진 모듈만. 로직은 제어 평면에서 부른다.
@@ -658,6 +660,23 @@ fn forbidden_edges_absent() {
         }
     }
     assert!(bad.is_empty(), "금지 간선(FORBIDDEN) — net은 미디어 상태를 직접 쓰지 않는다:\n{}", bad.join("\n"));
+}
+
+/// 지터 버퍼를 락으로 감싸지 않는다(엔진 ③-a3): `JitterBuffer`를 만지는 스레드는 워커뿐이다(생성·해제는 제어 평면).
+/// 누가 다시 넣으면 기본 우선순위 스레드와 워커의 우선순위 역전 경로가 돌아온다. 주석·문자열은 보지 않는다.
+#[test]
+fn no_locked_jitter_buffer() {
+    let mut bad = Vec::new();
+    for (file, _) in source_files() {
+        let src = std::fs::read_to_string(&file).unwrap();
+        let code: String = strip(without_unit_tests(&src)).chars().filter(|c| !c.is_whitespace()).collect();
+        for lock in ["Mutex<JitterBuffer>", "RwLock<JitterBuffer>", "Mutex<jitter::JitterBuffer>", "RwLock<jitter::JitterBuffer>"] {
+            if code.contains(lock) {
+                bad.push(format!("  {}: {lock}", file.display()));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "지터 버퍼를 락으로 감쌌다(엔진 ③, engine-stage3-design.md 7.1절):\n{}", bad.join("\n"));
 }
 
 #[test]

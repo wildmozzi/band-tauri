@@ -20,8 +20,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 
 use crate::engine::config::{MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
-use crate::engine::peer_media::PeerMediaShared;
-use media_link::PeerKey;
+use media_link::{MediaTx, PeerKey};
 use crate::engine::relay_codec::CodecReason;
 use crypto::KeyPair;
 use packet::{Header, PacketType};
@@ -258,8 +257,8 @@ impl Net {
     /// 항목들은 **송신 카운터 하나를 같이 쓰고**(nonce 유일성 유지), 수신은 키 주인이 인증된 Hello에 싣는 자기 id로
     /// 가린다(`open_from_peers`). 개인키가 없는 선점자 항목은 핸드셰이크를 마칠 수 없어 연결되지 않는다.
     ///
-    /// `media`: 엔진이 만든 이 피어의 미디어 상태. 같은 peerId를 교체했으면 옛 항목의 미디어 키를 돌려준다.
-    pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor, media: Arc<PeerMediaShared>) -> Result<Option<PeerKey>, String> {
+    /// `media`: 엔진이 만든 이 피어의 수신 큐 생산자(`media_link`). 같은 peerId를 교체했으면 옛 항목의 미디어 키를 돌려준다.
+    pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor, media: MediaTx) -> Result<Option<PeerKey>, String> {
         let setup = PeerSetup {
             keys: &self.shared.keys,
             my_ssrc: self.shared.ssrc,
