@@ -61,11 +61,22 @@
 | P1-12b | 2대 테스트 마찰 제거(#55 가이드의 우회 절차 없애기): auto 시그널링 ws/wss 불일치, 개발 빌드에서 LAN 사설 IP 서버 허용(dev CSP), threadPriority·qos·CPU 진단 UI 표시 → 이후 TEST-SESSION.md 간소화 | e2e | 완료(PR #56, 2026-11-11; **[사람]** 실장비 2대 확인; 8080 외 포트는 server .env PORT/BAND_DEV_PROXY_PORTS로 허용) |
 | P1-12c | TEST-SESSION.md 간소화 — #56으로 필요 없어진 우회(ws:// 지정, netsh portproxy, devtools engine_stats)를 개발 서버 주소 설정·진단 줄 절차로 교체(바꿀 절 목록은 PR #56 본문) | 문서 | 완료(PR #59, 2026-11-11) |
 | P1-12d | 개발 서버 설정 페이지(/settings/audio) 진입 링크(개발 실행에서만) → 가이드의 devtools 단계 제거 | e2e | 완료(PR #60, 2026-11-11 — TEST-SESSION.md devtools 단계 제거 반영) |
-| P1-13 | 에코(왕복) 지연 측정 견고화 — spread 단일 이상치 제외(중앙값·MAD), 표본·제외 수 노출, Unstable 기준 문서화(실장비 테스트 대비, #71 후속) | 결정적 테스트 | 진행중(작업자 p1-echo) |
+| P1-13b | 에코(왕복) 지연 측정 견고화 — spread 단일 이상치 제외(중앙값·MAD), 표본·제외 수 노출, Unstable 기준 문서화(실장비 테스트 대비, #71 후속) | 결정적 테스트 | 진행중(작업자 p1-echo) |
+| P1-14 | 6엔진 실시간 soak: 한 프로세스에 가짜 장치 엔진 6개 풀메시, 실제 시계 60분(야간 잡), 기본·초저지연 프리셋 각 1회 — 측정만 | 60분 동안 모든 피어 Connected 이탈 0, xrun 0, 은닉 ≤ 기준, 리포트 아티팩트 | 대기 (GOAL 2-3·2-4, goal-gap 2026-11-12) |
+| P1-15 | **[GOAL 미달]** WS 재연결을 시간 예산으로: useSignaling의 3회×2초 대신 35초 동안 백오프 재시도(0.5→4초), 수신 없음 감지 시 스스로 닫고 재연결, 판단 로직을 React 밖 순수 함수로 | 가짜 소켓·타이머 테스트: 25초 실패 후 붙으면 resumeClientId auth·engine_stop 0회·재공지 1회, 35초 넘기면 정지 안내 | 대기 (#78 병합 후, GOAL 2-6) |
+| P1-16 | **[GOAL 미달]** 서버: 닫힘을 아직 모르는 옛 연결도 세션 재개 — 같은 JWT userId가 resumeClientId로 오면 suspended가 아니어도 옛 소켓을 닫고 그 Client에 붙임 | ws-session 테스트: 옛 소켓 안 닫고 재개 → 같은 clientId, participant-left/joined 없음, 다른 사용자 토큰 실패; 설계 5절 갱신 | 대기 (서버 S0 후, GOAL 2-6) |
+| P1-17 | **[결정]** 서버 재시작·배포 때의 합주: ① 운영 규칙(합주 중 배포 금지 + 연주자 수 확인 수단) ② clientId 변경에도 엔진 유지(peerId 재매핑, 계약 변경) ③ 세션 상태 저장소 | 결정 후 | 대기 (사용자 결정) |
+| P1-18 | 연결 결과 기록 + NAT 흉내 테스트: 엔진이 피어별 시도→결과(lan/public/relay/failed)·소요 ms를 진단 타임라인에, 프록시로 포트 제한 콘·대칭형 흉내 통합 테스트 | diag zip에 연결 결과, 흉내 테스트 녹색; 성공률 숫자는 P1-8·P1-4d 실측표 | 대기 (GOAL 3-1·3-5) |
+| P1-19 | **[결정]** GOAL 2절 "기본 프리셋 = WASAPI 독점"과 앱 기본값(wasapiShared) 불일치 — 기본값을 독점으로(다른 앱 소리 막힘) / GOAL 문구를 "권장 설정(독점)"으로 | 결정 후 | 대기 (사용자 결정, GOAL 변경은 승인) |
+| P1-20 | **[GOAL 미달]** 입장→첫 소리 시간 지표: 피어별 connectMs·firstAudioMs(PeerStats), 클라이언트 "연주 시작→첫 피어 소리" 기록, 진단 줄·타임라인 표시, 테스트 단언(로컬 직접 ≤1초, 직접 차단→릴레이 ≤3초) | 루프백·relay 테스트 단언, 설계 4절 갱신 | 대기 (GOAL 3-6) |
 | P2-4 | 합주 녹음: 로컬 멀티트랙(내 입력 + 피어별) WAV/FLAC 저장 | 앱에서 녹음/내보내기 | 완료(PR #47 엔진·#49 UI, 2026-11-11; **[사람]** 실장비 1시간 녹음 droppedFrames 0·DAW 정렬·RF64 열기·클릭 미포함 청취; 후속 P2-4a) |
 | P2-4a | 녹음 후속: FLAC 저장, 은닉(PLC) 구간 마커 사이드카 | 테스트 | 완료(PR #62, 2026-11-11 — FLAC·markers.json; 후속: 마커 위치 대조 측정, peerId 가명화, #47 L3 EXTENSIBLE 헤더) |
 | P2-4b | **[버그]** 녹음 시작·정지 순간 xrun(128/2.5ms에서 녹음 켬 창마다 1회, PR #64 작업 중 관찰) 제거 | xrun 0 테스트 | 완료(PR #67, 2026-11-11 — 녹음 경계 xrun 없음 확인, 링 prefault; **[사람]** 실장비 청취) |
 | P2-4c | 녹음 후속: WAV EXTENSIBLE 헤더(#47 L3), session/markers 피어 id 가명화(#62 L5), 마커 위치 정확도 측정(#62 L1) | 테스트 | 완료(PR #72, 2026-11-12 — WAV EXTENSIBLE, 피어 id 가명화, 마커 정확도 ≤4.9ms; **[사람]** DAW에서 WAV 열기; Low: 3채널+ channel_mask) |
+| P2-7 | 배포본에 없는 드라이버(ASIO) 표시: 엔진이 빌드의 지원 드라이버를 알려 주고 설정 화면이 선택지를 막고 이유를 보임 | engine_list_devices 필드·AudioSettings 테스트, 계약 변경 시 설계 4절 | 대기 (GOAL 4-1) |
+| P2-8 | 멤버별 입→귀 추정 지연 표시(RTT/2 + 상대 송신 프레임 + 내 playoutMs) — 지금은 RTT만 보임 | roomDetailModel 순수 함수 테스트, e2e 스냅샷; **[사람]** 에코 측정과 ±5ms 대조 | 대기 (GOAL 4-6) |
+| P2-9 | **[결정]** 방장이 연주자를 내리거나 승인을 거두는 기능(GOAL 4절은 승인만 요구) | 결정 후 서버 메시지·계약 5절·테스트 | 대기 (사용자 결정) |
+| P2-10 | **[사람]** 업데이터 주소 확인: tauri.conf.json·docs/RELEASE.md의 exception-busters/band-tauri가 실제 릴리스 리포(wildmozzi/band-tauri)와 다름 — 첫 공개 릴리스 전에 확정 | 주소 확정, 옛→새 버전 업데이트 성공 | 대기 (사용자 확인) |
 | P2-5 | 로그/진단 내보내기(엔진 통계 타임라인 + 설정) | 버튼 하나로 zip | 완료(PR #32, 2026-11-11; **[사람]** 실제 앱에서 내보내기 대화상자·연속 클릭·zip 로그 마스킹 확인) |
 | P2-6 | 방 비밀번호/비공개 방, 연주 참여 승인 UX 정리 | E2E | 완료(#9; 실화면 확인 [사람]) |
 
@@ -84,6 +95,7 @@
 | P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 완료(#3) |
 | P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | ① 완료(PR #77) · ② 리뷰중(PR #78 — RoomSessionStore+useRoomSelector, reduceRoomSignal 순수화, 통계 5틱에 채팅·미니플레이어 리렌더 0; 후속 ③: 전역 CSS 정리·데모 지연 로딩·큰 컴포넌트 분해) |
 | R-1 | 엔진 구조 정리(사용자 지시 2026-11-12 "유지보수 가능한 깔끔한 구조"): jitter 로직·테스트 분리, 시뮬레이션 engine/sim/, worker.rs를 송신·수신·코덱 전환·녹음·메트로놈·통계 하위 모듈로 — 동작·성능·계약 불변(5분 하네스 숫자 동일, 60분 PASS, CPU ±5%) | 하네스·CPU 전후 동일 | ⓪ PR #76 재리뷰 완료(검사기 빈틈 N1·N2 수정 중) + 코디네이터 설계 검토 반영(단계 ②a→④→③→②b, ③ 목표=워커 단일 소유·SPSC, ⑩ 크레이트 3분리, 수명 상태기계·시간 기준 규칙, 5분 하네스 기준 fixture) · ① 진행중 |
+| S-0 | 서버 구조 정리(docs/server-architecture.md, #79): S0 특성 테스트(ws-transcript 기준 파일·ws-identity·누락 흐름, src 무변경) → S1 순수 코드 이동 → S2 createX 팩토리 이동 → S3 디스패치 표+ctx → S4 leave 순서·join 단계·Client 소유 묶음 → S5 문서 | 각 단계 D6·3.1절 증거(기존 테스트 diff 0, transcript 바이트 동일) | S0 진행중(작업자 s0-server-tests) |
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 완료(#12; pages 직접 호출 13→0) |
 | P3-3a | **[사람]** 운영 DB에서 `supabase gen types` 실행 결과와 `client/src/lib/database.types.ts` 비교(profiles/rooms/post_likes 컬럼은 코드에서 추론, rooms.is_private/has_password는 008 적용 후 확인, posts.instrument 포함) | 차이 없음 확인 | 대기 |
 | P3-3b | RoomDetail 직접 Supabase 호출(4)·contexts의 profiles 접근(11)을 query 훅으로 이전 | 직접 호출 0 | 완료(#15; useSignaling 인증 호출 2개는 범위 밖) |
