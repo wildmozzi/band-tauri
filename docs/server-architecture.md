@@ -142,6 +142,8 @@ interface Client {
 
 `userId`는 `auth`만 쓴다. 다른 모듈에는 읽기 전용이다 — 불변 규칙의 코드 표현이다. 개발 모드에서 `join`의 `userId`를 받는 유일한 경로도 `auth.adoptInsecureUserId()`로 `auth` 안에 둔다.
 
+S4-3 구현: `Client`는 위 여섯 묶음 그대로다(`signaling/types.ts`). 한 가지만 다르다 — 개발 모드의 `userId` 채택은 `auth.adoptInsecureUserId()`로 옮기지 않고 `membership.handleJoin` 첫머리에 남겼다. 계층 3 안 순서가 membership < resume < auth(2.1절)라 membership이 auth를 부를 수 없기 때문이다. 이 경로는 `isInsecureDevMode`일 때만 열리고 `Client` 주석에 유일한 예외로 적었다.
+
 **퇴장 정리는 이벤트 버스가 아니라 `membership.leave()` 안의 고정된 호출 순서**로 쓴다. 순서가 곧 메시지 순서(1.2-1)이기 때문에 눈에 보여야 한다.
 
 ```ts
@@ -158,6 +160,8 @@ function leave(client, roomId, reason) {
 ```
 
 자리 예약 판정은 승인 기록이 있는지를 본다. `capacity`가 `performers`를 직접 부르지 않도록 `membership`이 그 값을 넘긴다(계층 2 사이 간선을 늘리지 않음).
+
+S4-3 구현 이름(위 표의 입구와 대응): registry `getClient`·`clientCount`·`allClients`·`hasRoom`·`isInRoom`·`roomSize`·`roomMemberIds`·`roomMembers`·`deleteRoom`·`broadcastLeft`, capacity `checkCapacity`·`hasSeatHold`·`hold`·`clearSeatHold`·`noteLeft`·`consumeRejoin`·`onLeave`·`sweep`(`countRoomSeats`는 내부), performers `hasApproval`·`setApproval`·`clearApproval`·`onLeave`·`releaseGraceOnRejoin`, metronome `replayMetronome`·`dropMetronomeIfHostChanged`·`onEngineRestart`·`onEngineDown`·`onMemberLeft`·`onRoomEmpty`(+ 자기 핸들러용 `isRunningBy`·`update`), requests `pendingFor`·`onLeave`·`onRoomEmpty`(+ 자기 핸들러용 `performList`·`instrumentList`), resume `drop`·`find`·`isSuspended`·`add`·`clearTimers`. 팩토리가 함수만 돌려주는지는 `signaling-units.test.ts` "state ownership"이 검사한다.
 
 ### 2.3 메시지 디스패치
 

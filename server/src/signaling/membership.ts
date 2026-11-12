@@ -48,12 +48,12 @@ export interface MembershipSvc {
 /** 참가자 수 DB 갱신 디바운스 (M3) */
 export function scheduleParticipantUpdate(svc: MembershipSvc, roomId: string) {
   const { deps, participantTimers } = svc
-  const { rooms } = svc.registry
+  const { roomSize } = svc.registry
 
   if (!deps.hasBackend || participantTimers.has(roomId)) return
   const t = setTimeout(() => {
     participantTimers.delete(roomId)
-    void deps.updateParticipants(roomId, rooms.get(roomId)?.size ?? 0)
+    void deps.updateParticipants(roomId, roomSize(roomId))
   }, PARTICIPANT_UPDATE_DEBOUNCE_MS)
   t.unref?.()
   participantTimers.set(roomId, t)
@@ -73,7 +73,7 @@ export function scheduleParticipantUpdate(svc: MembershipSvc, roomId: string) {
 export function handleLeave(svc: MembershipSvc, client: Client, roomId: string, reason: LeaveReason) {
   const { registry, performers, capacity, requests, metronome, roomMeta } = svc
   const id = client.id
-  if (!registry.rooms.has(roomId)) return
+  if (!registry.hasRoom(roomId)) return
 
   // 1
   registry.removeFromRoom(roomId, id)
@@ -101,18 +101,19 @@ export function handleLeave(svc: MembershipSvc, client: Client, roomId: string, 
 export function sendRoomState(ctx: Ctx<MembershipSvc>, roomId: string) {
   const { ws, client, id } = ctx
   const { getRoomParticipants } = ctx.svc.registry
-  const { performRequests, instrumentChangeRequests } = ctx.svc.requests
+  const { pendingFor } = ctx.svc.requests
 
   const others = getRoomParticipants(roomId).filter(p => p.oderId !== id)
   send(ws, {
     type: 'room-state',
     participants: others,
     peerIds: others.map(p => p.oderId),
-    isHost: client.isHost,
+    isHost: client.member.isHost,
   })
-  if (client.isHost) {
-    for (const request of performRequests.get(roomId) || []) send(ws, { type: 'perform-request-received', request })
-    for (const request of instrumentChangeRequests.get(roomId) || []) send(ws, { type: 'instrument-change-request-received', request })
+  if (client.member.isHost) {
+    const pending = pendingFor(roomId)
+    for (const request of pending.perform) send(ws, { type: 'perform-request-received', request })
+    for (const request of pending.instrument) send(ws, { type: 'instrument-change-request-received', request })
   }
 }
 
@@ -143,7 +144,7 @@ async function checkRoom(ctx: Ctx<MembershipSvc>, roomId: string): Promise<JoinP
     send(ws, { type: 'error', code: 'room-not-found', message: '방을 찾을 수 없습니다.' })
     return null
   }
-  const isHost = !!client.userId && meta.hostId === client.userId
+  const isHost = !!client.auth.userId && meta.hostId === client.auth.userId
   // 방금 읽은 DB 방장이 메트로놈을 켠 사람과 다르면(이양) 진행 중인 메트로놈을 멈춘다(PR #36 L1)
   dropMetronomeIfHostChanged(roomId, meta.hostId ?? null)
   const passwordHash = meta.passwordHash ?? null
@@ -160,7 +161,7 @@ async function checkRoom(ctx: Ctx<MembershipSvc>, roomId: string): Promise<JoinP
 function localRoomPlan(ctx: Ctx<MembershipSvc>, msg: Msg): JoinPlan {
   const { client } = ctx
   const { limits, insecureDevMode } = ctx.svc
-  const isHost = insecureDevMode && client.authState === 'authenticated' ? msg.isHost === true : false
+  const isHost = insecureDevMode && client.auth.state === 'authenticated' ? msg.isHost === true : false
   return { isHost, passwordHash: null, capacity: limits.maxRoomParticipants }
 }
 
@@ -170,7 +171,7 @@ function localRoomPlan(ctx: Ctx<MembershipSvc>, msg: Msg): JoinPlan {
  */
 export async function handleJoin(ctx: Ctx<MembershipSvc>, msg: Msg) {
   const { ws, client, id, svc } = ctx
-  const { rooms, clients } = svc.registry
+  const { getClient, isInRoom } = svc.registry
   const { checkRoomPassword } = svc.password
   const { deps, insecureDevMode } = svc
 
@@ -178,21 +179,21 @@ export async function handleJoin(ctx: Ctx<MembershipSvc>, msg: Msg) {
   if (!isNonEmptyString(roomId, MAX_ROOM_ID_LENGTH)) return
 
   // 개발 모드에서만 클라이언트 userId 사용 (그 외에는 auth로 확정된 값만)
-  if (insecureDevMode && client.authState === 'authenticated' && !client.userId && isNonEmptyString(msg.userId, 128)) {
-    client.userId = msg.userId
+  if (insecureDevMode && client.auth.state === 'authenticated' && !client.auth.userId && isNonEmptyString(msg.userId, 128)) {
+    client.auth.userId = msg.userId
   }
 
   // 1. 방 확인 + 방장 판정 (백엔드가 있으면 DB 기준). 백엔드가 없으면 await하지 않는다(원래와 같음)
   const plan = deps.hasBackend ? await checkRoom(ctx, roomId) : localRoomPlan(ctx, msg)
   if (!plan) return
   // DB 조회 중 연결이 끊겼으면 중단
-  if (clients.get(id) !== client) return
+  if (getClient(id) !== client) return
 
   // 이미 이 방에 있음 (세션 재개 후 클라이언트의 rejoin 등): 상태만 다시 보내고 브로드캐스트 없음
-  if (client.roomId === roomId && rooms.get(roomId)?.has(id)) {
-    client.isHost = plan.isHost
+  if (client.member.roomId === roomId && isInRoom(roomId, id)) {
+    client.member.isHost = plan.isHost
     const nickname = sanitizeNickname(msg.nickname)
-    if (nickname) client.nickname = nickname
+    if (nickname) client.member.nickname = nickname
     sendRoomState(ctx, roomId)
     return
   }
@@ -200,7 +201,7 @@ export async function handleJoin(ctx: Ctx<MembershipSvc>, msg: Msg) {
   // 2. 비밀번호 방: 방장이 아니면 검증 (실패하면 지금 있는 방은 그대로 둔다)
   if (plan.passwordHash && !plan.isHost) {
     const ok = await checkRoomPassword(ws, client, roomId, plan.passwordHash, msg.password)
-    if (!ok || clients.get(id) !== client) return
+    if (!ok || getClient(id) !== client) return
   }
 
   // ── 마지막 await. 여기부터 방에 추가할 때까지 동기 구간(1.2-2) — admitToRoom 하나로 묶었다 ──
@@ -223,10 +224,10 @@ export function admitToRoom(ctx: Ctx<MembershipSvc>, msg: Msg, roomId: string, p
 
   // 4. 이동: 다른 방에 있었다면 먼저 퇴장 처리
   moveOutOfPreviousRoom(ctx, roomId)
-  client.isHost = plan.isHost
+  client.member.isHost = plan.isHost
 
   const nickname = sanitizeNickname(msg.nickname)
-  if (nickname) client.nickname = nickname
+  if (nickname) client.member.nickname = nickname
 
   // 5. 중복 정리
   const replacedDuplicate = replaceDuplicateConnections(ctx, roomId)
@@ -246,7 +247,7 @@ function passCapacity(ctx: Ctx<MembershipSvc>, roomId: string, plan: JoinPlan): 
   const { hasApproval } = ctx.svc.performers
   const { capacity } = plan
 
-  const reserved = hasApproval(roomId, client.userId) || hasSeatHold(roomId, client.userId)
+  const reserved = hasApproval(roomId, client.auth.userId) || hasSeatHold(roomId, client.auth.userId)
   const rejected = plan.isHost || reserved ? null : checkCapacity(roomId, client, capacity)
   if (rejected) {
     console.warn(`[JOIN] ${id.slice(0, 8)} rejected: room ${roomId.slice(0, 8)} ${rejected} (${capacity})`)
@@ -256,18 +257,18 @@ function passCapacity(ctx: Ctx<MembershipSvc>, roomId: string, plan: JoinPlan): 
     send(ws, { type: 'error', code: 'room-full', reason: rejected, roomId, maxParticipants: capacity, message })
     return false
   }
-  clearSeatHold(roomId, client.userId)
+  clearSeatHold(roomId, client.auth.userId)
   return true
 }
 
 /** 4단계 이동: 다른 방에 있었다면 'move'로 퇴장 처리하고 그 방의 연주·엔진 상태를 지운다 */
 function moveOutOfPreviousRoom(ctx: Ctx<MembershipSvc>, roomId: string): void {
   const { client, svc } = ctx
-  if (!client.roomId || client.roomId === roomId) return
-  handleLeave(svc, client, client.roomId, 'move')
-  client.roomId = undefined
-  client.isPerforming = false
-  client.instrument = undefined
+  if (!client.member.roomId || client.member.roomId === roomId) return
+  handleLeave(svc, client, client.member.roomId, 'move')
+  client.member.roomId = undefined
+  client.perform.isPerforming = false
+  client.perform.instrument = undefined
   svc.nativeSession.clearNative(client)
 }
 
@@ -277,19 +278,19 @@ function moveOutOfPreviousRoom(ctx: Ctx<MembershipSvc>, roomId: string): void {
  */
 function replaceDuplicateConnections(ctx: Ctx<MembershipSvc>, roomId: string): boolean {
   const { client, id, svc } = ctx
-  const { rooms, clients, removeClient } = svc.registry
+  const { getClient, roomMemberIds, removeClient } = svc.registry
   let replacedDuplicate = false
-  if (!client.userId) return replacedDuplicate
-  for (const existingId of [...(rooms.get(roomId) || [])]) {
+  if (!client.auth.userId) return replacedDuplicate
+  for (const existingId of roomMemberIds(roomId)) {
     if (existingId === id) continue
-    const existing = clients.get(existingId)
-    if (existing && existing.userId === client.userId) {
-      console.log(`[JOIN] Removing duplicate connection for userId ${client.userId.slice(0, 8)}: ${existingId.slice(0, 8)}`)
+    const existing = getClient(existingId)
+    if (existing && existing.auth.userId === client.auth.userId) {
+      console.log(`[JOIN] Removing duplicate connection for userId ${client.auth.userId.slice(0, 8)}: ${existingId.slice(0, 8)}`)
       handleLeave(svc, existing, roomId, 'duplicate')
-      existing.roomId = undefined // close 핸들러에서 중복 퇴장 처리 방지
+      existing.member.roomId = undefined // close 핸들러에서 중복 퇴장 처리 방지
       svc.resume.drop(existing)
       removeClient(existingId)
-      existing.ws.close(1000, 'Duplicate connection')
+      existing.conn.ws.close(1000, 'Duplicate connection')
       replacedDuplicate = true
     }
   }
@@ -299,23 +300,21 @@ function replaceDuplicateConnections(ctx: Ctx<MembershipSvc>, roomId: string): b
 /** 6단계 추가·알림: rejoin 판정·승인 유예 해제 → rooms 추가 → 참가자 수 갱신 → participant-joined → room-state */
 function addAndAnnounce(ctx: Ctx<MembershipSvc>, msg: Msg, roomId: string, replacedDuplicate: boolean): void {
   const { client, id, svc } = ctx
-  const { rooms, addToRoom, getRoomParticipants, broadcastToRoom } = svc.registry
+  const { isInRoom, addToRoom, getRoomParticipants, broadcastToRoom } = svc.registry
   const { consumeRejoin } = svc.capacity
-  const { approvals, hasApproval, setApproval } = svc.performers
+  const { releaseGraceOnRejoin } = svc.performers
 
   // rejoin 여부는 서버가 판단: 같은 사용자가 직전에 이 방에서 끊겼거나 중복 연결을 대체한 경우만
-  const isRejoin = msg.isRejoin === true && (consumeRejoin(roomId, client.userId) || replacedDuplicate)
-  if (client.userId && approvals.get(roomId)?.has(client.userId) && hasApproval(roomId, client.userId)) {
-    setApproval(roomId, client.userId, null) // 재접속: 승인 유예 해제
-  }
+  const isRejoin = msg.isRejoin === true && (consumeRejoin(roomId, client.auth.userId) || replacedDuplicate)
+  releaseGraceOnRejoin(roomId, client.auth.userId) // 재접속: 승인 유예 해제
 
   // 이 clientId가 이미 방에 있었는지 (세션 재개 후 클라이언트의 rejoin은 같은 id라서 true)
-  const alreadyInRoom = rooms.get(roomId)?.has(id) ?? false
-  client.roomId = roomId
+  const alreadyInRoom = isInRoom(roomId, id)
+  client.member.roomId = roomId
   addToRoom(roomId, id)
 
   const participants = getRoomParticipants(roomId)
-  console.log(`[${isRejoin ? 'REJOIN' : 'JOIN'}] Client ${id.slice(0, 8)} (${client.nickname}) joined room ${roomId.slice(0, 8)}. Room size: ${participants.length}${client.isHost ? ' [HOST]' : ''}${client.authState === 'anonymous' ? ' [ANON]' : ''}`)
+  console.log(`[${isRejoin ? 'REJOIN' : 'JOIN'}] Client ${id.slice(0, 8)} (${client.member.nickname}) joined room ${roomId.slice(0, 8)}. Room size: ${participants.length}${client.member.isHost ? ' [HOST]' : ''}${client.auth.state === 'anonymous' ? ' [ANON]' : ''}`)
 
   scheduleParticipantUpdate(svc, roomId)
 
@@ -324,7 +323,7 @@ function addAndAnnounce(ctx: Ctx<MembershipSvc>, msg: Msg, roomId: string, repla
   if (!alreadyInRoom) {
     broadcastToRoom(roomId, id, {
       type: 'participant-joined',
-      participant: { oderId: id, nickname: client.nickname, instrument: client.instrument, isPerforming: client.isPerforming, isHost: client.isHost },
+      participant: { oderId: id, nickname: client.member.nickname, instrument: client.perform.instrument, isPerforming: client.perform.isPerforming, isHost: client.member.isHost },
       rejoin: isRejoin,
     })
   }
@@ -335,15 +334,15 @@ function addAndAnnounce(ctx: Ctx<MembershipSvc>, msg: Msg, roomId: string, repla
 /** `leave` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
 export function handleLeaveMessage(ctx: Ctx<MembershipSvc>, _msg: Msg) {
   const { client, svc } = ctx
-  const roomId = client.roomId
+  const roomId = client.member.roomId
   const { clearNative } = svc.nativeSession
   if (!roomId) return
 
   handleLeave(svc, client, roomId, 'leave')
-  client.roomId = undefined
-  client.isPerforming = false
-  client.instrument = undefined
-  client.isHost = false
+  client.member.roomId = undefined
+  client.perform.isPerforming = false
+  client.perform.instrument = undefined
+  client.member.isHost = false
   clearNative(client)
   return
 }

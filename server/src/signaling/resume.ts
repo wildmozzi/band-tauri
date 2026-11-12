@@ -14,21 +14,21 @@ import type { Client, WsLimits } from './types'
  * membership은 이 모듈을 import하지 않는다(순환). 중복 연결 정리는 svc.resume.drop으로 부른다(설계 2.2).
  */
 export function createResume(registry: Registry) {
-  const { clients } = registry
+  const { getClient } = registry
   /** clientId → 연결이 끊겨 재개를 기다리는 클라이언트 (방/연주 상태 유지) */
   const suspended = new Map<string, Client>()
 
   /** 유예 해제: 타이머를 끄고 목록에서 뺀다 (재개·유예 만료·중복 연결 정리) */
   function drop(c: Client) {
-    if (c.suspendTimer) clearTimeout(c.suspendTimer)
-    c.suspendTimer = undefined
+    if (c.resume.timer) clearTimeout(c.resume.timer)
+    c.resume.timer = undefined
     suspended.delete(c.id)
   }
 
   /** 재개 대상: 이전 clientId의 주인이 같은 userId이고 유예시간 안(suspended에 남아 있음)일 때만 */
   function find(clientId: string, userId: string): Client | null {
     const old = suspended.get(clientId)
-    return old && old.userId === userId && clients.get(old.id) === old ? old : null
+    return old && old.auth.userId === userId && getClient(old.id) === old ? old : null
   }
 
   function isSuspended(clientId: string): boolean {
@@ -37,12 +37,12 @@ export function createResume(registry: Registry) {
 
   function add(c: Client, timer: ReturnType<typeof setTimeout>) {
     suspended.set(c.id, c)
-    c.suspendTimer = timer
+    c.resume.timer = timer
   }
 
   /** 서버 종료: 유예 타이머 정리 */
   function clearTimers() {
-    for (const c of suspended.values()) if (c.suspendTimer) clearTimeout(c.suspendTimer)
+    for (const c of suspended.values()) if (c.resume.timer) clearTimeout(c.resume.timer)
   }
 
   return { drop, find, isSuspended, add, clearTimers }
@@ -58,12 +58,12 @@ export interface ResumeSvc extends MembershipSvc {
 
 /** 유예 중인 클라이언트를 최종 제거 (방 참가자에게 leave 전송) */
 function finalizeSuspended(svc: ResumeSvc, c: Client) {
-  const { rooms, clients, removeClient } = svc.registry
+  const { hasRoom, getClient, removeClient } = svc.registry
   svc.resume.drop(c)
-  if (clients.get(c.id) !== c) return
+  if (getClient(c.id) !== c) return
   console.log(`[RESUME] ${c.id.slice(0, 8)} grace period over - leaving`)
-  if (c.roomId && rooms.has(c.roomId)) handleLeave(svc, c, c.roomId, 'close')
-  c.roomId = undefined
+  if (c.member.roomId && hasRoom(c.member.roomId)) handleLeave(svc, c, c.member.roomId, 'close')
+  c.member.roomId = undefined
   removeClient(c.id)
 }
 
@@ -72,10 +72,10 @@ function finalizeSuspended(svc: ResumeSvc, c: Client) {
  * 유예에 들어갔으면 true — 호출부는 퇴장 처리를 하지 않는다.
  */
 export function suspendOnClose(svc: ResumeSvc, client: Client): boolean {
-  const { rooms } = svc.registry
+  const { hasRoom } = svc.registry
   const { limits } = svc
-  const roomId = client.roomId
-  if (!(roomId && rooms.has(roomId) && isAuthenticated(client) && limits.resumeGraceMs > 0)) return false
+  const roomId = client.member.roomId
+  if (!(roomId && hasRoom(roomId) && isAuthenticated(client) && limits.resumeGraceMs > 0)) return false
   const c = client
   const timer = setTimeout(() => finalizeSuspended(svc, c), limits.resumeGraceMs)
   timer.unref?.()
@@ -96,16 +96,16 @@ export function attachSession(ctx: Ctx<ResumeSvc>, old: Client): Client {
   const temp = ctx.client
   ctx.svc.resume.drop(old)
 
-  old.ws = ws
-  old.ip = temp.ip
-  old.isAlive = true
+  old.conn.ws = ws
+  old.conn.ip = temp.conn.ip
+  old.conn.isAlive = true
   // 이 연결에서 이미 큐에 쌓인 메시지 순서를 유지하기 위해 체인/카운터를 넘겨받는다
-  old.chain = temp.chain
-  old.pending = temp.pending
-  old.msgBucket = temp.msgBucket
-  old.chatBucket = temp.chatBucket
-  old.joinBucket = temp.joinBucket
-  old.dropped = 0
+  old.conn.chain = temp.conn.chain
+  old.conn.pending = temp.conn.pending
+  old.conn.msgBucket = temp.conn.msgBucket
+  old.conn.chatBucket = temp.conn.chatBucket
+  old.conn.joinBucket = temp.conn.joinBucket
+  old.conn.dropped = 0
 
   removeClient(temp.id)
   ctx.client = old
@@ -119,14 +119,14 @@ export function attachSession(ctx: Ctx<ResumeSvc>, old: Client): Client {
  */
 export function announceResumed(ctx: Ctx<ResumeSvc>) {
   const { ws, client, id } = ctx
-  const { rooms } = ctx.svc.registry
-  console.log(`[RESUME] ${id.slice(0, 8)} resumed session (user ${client.userId?.slice(0, 8)}, room ${client.roomId?.slice(0, 8) || 'none'}, performing: ${client.isPerforming})`)
+  const { hasRoom } = ctx.svc.registry
+  console.log(`[RESUME] ${id.slice(0, 8)} resumed session (user ${client.auth.userId?.slice(0, 8)}, room ${client.member.roomId?.slice(0, 8) || 'none'}, performing: ${client.perform.isPerforming})`)
   send(ws, { type: 'welcome', clientId: id, resumed: true })
-  send(ws, { type: 'auth-result', authenticated: true, userId: client.userId ?? null, resumed: true })
-  if (client.roomId && rooms.has(client.roomId)) sendRoomState(ctx, client.roomId)
+  send(ws, { type: 'auth-result', authenticated: true, userId: client.auth.userId ?? null, resumed: true })
+  if (client.member.roomId && hasRoom(client.member.roomId)) sendRoomState(ctx, client.member.roomId)
   // 유예 중에 이양으로 메트로놈이 꺼졌다: 그때 못 받은 알림을 지금 보내 내 기준 클릭도 끄게 한다(PR #53 L2)
-  if (client.pendingMetronomeStop) {
-    client.pendingMetronomeStop = false
+  if (client.resume.pendingMetronomeStop) {
+    client.resume.pendingMetronomeStop = false
     send(ws, metronomeHostChanged())
   }
 }
