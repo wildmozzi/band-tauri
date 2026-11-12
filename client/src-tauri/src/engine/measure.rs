@@ -835,7 +835,7 @@ pub struct EchoReport {
     pub mouth_to_ear_ms: Option<f64>,
     /// 설명되지 않는 몫 = 왕복 − (프레임 + 핑 RTT + 상대 처리 + 지터 버퍼). 0에 가까우면 통계가 맞다.
     pub residual_ms: Option<f64>,
-    pub path: Option<crate::engine::stats::PathKind>,
+    pub path: Option<crate::net::types::PathKind>,
 }
 
 /// 에코 측정 작업(측정하는 쪽). 엔진 락 밖에서 돈다.
@@ -932,7 +932,7 @@ impl EchoJob {
         delay_us: u32,
         rtt: Option<f32>,
         jitter: f32,
-        path: Option<crate::engine::stats::PathKind>,
+        path: Option<crate::net::types::PathKind>,
     ) -> EchoReport {
         let s = echo_summary(&per);
         let mut verdict = s.verdict;

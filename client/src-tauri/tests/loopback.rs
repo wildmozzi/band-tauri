@@ -30,7 +30,7 @@ use band_lib::engine::config::{CodecKind, EngineConfig, HEADER_BYTES, MAX_PACKET
 use band_lib::engine::device::fake::{FakeBackend, OpenGate};
 use band_lib::engine::jitter as jitter_stats;
 use band_lib::engine::mixer::MixControls;
-use band_lib::engine::stats::PeerStateKind;
+use band_lib::net::types::PeerStateKind;
 use band_lib::engine::Engine;
 use band_lib::manager::EngineManager;
 use band_lib::net::crypto::KeyPair;

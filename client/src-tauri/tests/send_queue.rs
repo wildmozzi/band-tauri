@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use band_lib::engine::codec::Encoder;
 use band_lib::engine::config::{frame_code_from_samples, CodecKind, HEADER_BYTES, TAG_BYTES};
 use band_lib::engine::jitter::JitterSettings;
-use band_lib::engine::stats::{PathKind, PeerStateKind};
+use band_lib::net::types::{PathKind, PeerStateKind};
 use band_lib::net::crypto::KeyPair;
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::net::{Net, NetOptions, MAX_PEERS};

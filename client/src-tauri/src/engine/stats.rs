@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use serde::Serialize;
 
+use crate::net::types::{PathKind, PeerStateKind};
+
 /// f32를 비트로 저장하는 원자값. RT 콜백에서 안전하게 쓸 수 있다.
 #[derive(Debug, Default)]
 pub struct AtomicF32(AtomicU32);
@@ -58,24 +60,6 @@ pub struct AudioCounters {
     pub audio_thread: crate::sys::prio::PrioSlot,
     /// 입·출력 콜백 실행시간 히스토그램(P1-10). 콜백은 원자 덧셈만 한다.
     pub rt_timing: crate::engine::cpuprof::RtTiming,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PeerStateKind {
-    Connecting,
-    Connected,
-    Reconnecting,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PathKind {
-    Lan,
-    Public,
-    /// UDP 릴레이 경유(서버 경유 — 지연 증가). relay-design.md, P1-4b.
-    Relay,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,7 +137,7 @@ pub struct EngineStats {
     pub thread_priority: crate::sys::prio::ThreadPriorityStats,
     pub peers: Vec<PeerStats>,
     /// 릴레이 등록 상태(릴레이를 설정하지 않았으면 null).
-    pub relay: Option<crate::net::relay::RelayStats>,
+    pub relay: Option<crate::net::types::RelayStats>,
     /// 오디오 UDP DSCP 마킹 상태(P1-3, 네트워크 미시작이면 null).
     pub qos: Option<crate::net::qos::QosStats>,
     /// 송신 큐 지연: 프레임 생성(인코딩 전) → 피어별 send_to 완료, 직전 2초 창(P1-3, 네트워크 미시작이면 null).

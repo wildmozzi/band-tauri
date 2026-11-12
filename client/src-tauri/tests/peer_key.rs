@@ -17,7 +17,7 @@ use band_lib::engine::config::{CodecKind, EngineConfig};
 use band_lib::engine::device::fake::FakeBackend;
 use band_lib::engine::jitter::JitterSettings;
 use band_lib::engine::mixer::MixControls;
-use band_lib::engine::stats::{PathKind, PeerStateKind};
+use band_lib::net::types::{PathKind, PeerStateKind};
 use band_lib::engine::Engine;
 use band_lib::net::crypto::KeyPair;
 use band_lib::net::packet::{Header, PacketType};

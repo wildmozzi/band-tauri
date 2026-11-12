@@ -10,8 +10,8 @@ use serde::Serialize;
 use super::mask::{mask_addr, pseudonymize};
 use crate::engine::config::CodecKind;
 use crate::engine::relay_codec::CodecReason;
-use crate::engine::stats::{EngineStats, PathKind, PeerStateKind};
-use crate::net::relay::RelayStateKind;
+use crate::engine::stats::EngineStats;
+use crate::net::types::{PathKind, PeerStateKind, RelayStateKind};
 
 /// 기본 기록 간격(ms).
 pub const SAMPLE_INTERVAL_MS: u64 = 1000;
@@ -220,7 +220,7 @@ pub fn to_jsonl(tl: &Timeline) -> String {
 mod tests {
     use super::*;
     use crate::engine::stats::PeerStats;
-    use crate::net::relay::RelayStats;
+    use crate::net::types::RelayStats;
 
     #[test]
     fn ring_keeps_capacity_and_order() {

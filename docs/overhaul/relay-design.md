@@ -1,7 +1,7 @@
 # UDP 릴레이 — 설계 문서 (계약서)
 
 이 문서는 직접 연결(홀펀칭, [native-engine-design.md](native-engine-design.md) 3절)이 실패하는 대칭형 NAT/LTE 연주자를 위한 **UDP 릴레이**의 계약이다(GOAL.md 3절: 직접 연결이 실패하면 릴레이로 자동 폴백).
-릴레이 서버(`relay/`), 시그널링 서버(`server/src/services/relayToken.ts`, `wsService.ts`), 엔진 연동(P1-4b)은 모두 이 문서를 따른다. 바꿀 때는 세 곳을 같은 PR에서 갱신한다.
+릴레이 서버(`relay/`), 시그널링 서버(토큰 형식 `server/src/services/relayToken.ts`, 발급·ssrc 바인딩 `server/src/signaling/nativeSession.ts`), 엔진 연동(P1-4b)은 모두 이 문서를 따른다. 바꿀 때는 세 곳을 같은 PR에서 갱신한다.
 
 ## 0. 원칙
 

@@ -245,10 +245,11 @@ export function initializeWebSocket(
       ctx.client.conn.pending++
       // 메시지를 순차 처리 (auth 검증/DB 조회 같은 비동기 작업 중에도 순서 유지).
       // 콜백 안의 ctx.client·ctx.id는 실행 시점 값이다(원래 클로저 변수와 같음: 재개 뒤면 옛 Client)
+      // 세션 재개(P1-16)로 Client가 새 연결로 넘어갔으면 옛 연결에 남은 메시지는 처리하지 않는다(conn.ws가 이 소켓이 아님)
       ctx.client.conn.chain = ctx.client.conn.chain
-        .then(() => (getClient(ctx.id) === ctx.client ? dispatch(ctx, msg) : undefined))
+        .then(() => (getClient(ctx.id) === ctx.client && ctx.client.conn.ws === ws ? dispatch(ctx, msg) : undefined))
         .catch(err => console.error('[ERROR] Failed to handle message:', err))
-        .finally(() => { ctx.client.conn.pending-- })
+        .finally(() => { if (ctx.client.conn.ws === ws) ctx.client.conn.pending-- }) // 넘어간 뒤의 옛 연결 몫은 새 연결 카운터에서 빼지 않는다
     })
 
     // 소켓 에러(예: maxPayload 초과 1009)를 처리하지 않으면 프로세스가 죽는다
@@ -259,14 +260,16 @@ export function initializeWebSocket(
     ws.on('close', () => {
       const client = ctx.client
       const id = ctx.id
+      // 세션 재개(P1-16)가 이 Client를 새 연결로 가져갔다: 옛 소켓의 close는 새 연결의 타이머·유예·퇴장을 건드리지 않는다
+      const takenOver = client.conn.ws !== ws
       clearTimeout(authTimer)
-      if (client.auth.expiryTimer) clearTimeout(client.auth.expiryTimer)
+      if (!takenOver && client.auth.expiryTimer) clearTimeout(client.auth.expiryTimer)
       const n = (connectionsPerIp.get(ip) || 1) - 1
       if (n <= 0) connectionsPerIp.delete(ip)
       else connectionsPerIp.set(ip, n)
 
-      // 이미 다른 연결로 대체/정리된 Client (중복 연결 제거 등)
-      if (getClient(id) !== client) return
+      // 이미 다른 연결로 대체/정리된 Client (중복 연결 제거, 세션 재개로 넘어감 등)
+      if (takenOver || getClient(id) !== client) return
 
       const roomId = client.member.roomId
       console.log(`[DISCONNECT] Client ${id.slice(0, 8)} disconnected. roomId: ${roomId?.slice(0, 8) || 'none'}`)

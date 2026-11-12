@@ -6,7 +6,7 @@
 ## 구조
 - `client/src-tauri/src/engine/*` 오디오 엔진(RT 콜백 `rt.rs`, 워커, 지터, 코덱, 믹서), `net/*` UDP/암호화/피어/STUN, `commands.rs` Tauri 커맨드
 - `client/src/native/*` 엔진 API 래퍼·세션·관람자 브릿지, `client/src/features/<기능>/` 화면·상태·서버 호출(합주실 세션 상태는 `features/room/state`), `client/src/shared/*` 공용 UI·lib, `client/src/app/*` 라우트·Provider. 구조와 경계 규칙: [docs/frontend-architecture.md](docs/frontend-architecture.md)
-- `server/src/services/wsService.ts` 시그널링(JWT 인증), `server/src/routes/*` HTTP API
+- `server/src/signaling/*` 시그널링 모듈(인증·재개·멤버십·연주·메트로놈 등, 구조: [docs/server-architecture.md](docs/server-architecture.md)), `server/src/services/wsService.ts`는 조립부(상태 소유 모듈 생성·연결 수명), `server/src/routes/*` HTTP API
 
 ## 명령
 - Rust: `cd client/src-tauri && cargo clippy --all-targets -- -D warnings && cargo test` (먼저 `client/dist`가 있어야 함: `cd client && npm run build`). PATH에 `%USERPROFILE%\.cargo\bin`, CMake, LLVM.

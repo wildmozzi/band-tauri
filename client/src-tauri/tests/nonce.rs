@@ -9,11 +9,12 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use band_lib::engine::jitter::JitterSettings;
-use band_lib::engine::stats::{PathKind, PeerStateKind};
+use band_lib::net::types::{PathKind, PeerStateKind};
 use band_lib::net::crypto::KeyPair;
 use band_lib::net::packet::{Header, PacketType};
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor, ECHO_FLAG_REQUEST, ECHO_TAG};
-use band_lib::net::relay::{DATA_PREFIX_BYTES, TYPE_RELAY_DATA};
+use band_lib::net::relay::TYPE_RELAY_DATA;
+use band_lib::net::types::DATA_PREFIX_BYTES;
 use band_lib::net::{Net, NetOptions, AUDIO_SEQ_HANDOVER_GAP};
 
 const PEER: &str = "bob";

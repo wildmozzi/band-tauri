@@ -40,6 +40,7 @@ const NODES: &[(&str, u8)] = &[
     ("net::clock", 1),
     ("net::crypto", 1),
     ("net::txlat", 1),
+    ("net::types", 1),
     ("diag::mask", 1),
     // 2 E 장치 I/O·RT
     ("engine::rt", 2),
@@ -78,9 +79,6 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[
     ("engine::stats", "engine::metronome", "④"),
     ("engine::stats", "engine::record", "④"),
     ("engine::stats", "net::qos", "④"),
-    ("engine::stats", "net::relay", "④"),
-    // relay_codec → net::relay(릴레이 상태 타입), net → relay_codec(CodecReason) 순환 → ④ 공용 타입을 아래로.
-    ("engine::relay_codec", "net::relay", "④"),
     // 믹서가 메트로놈 기본 게인을 안다(metronome.rs가 RT 클릭·스케줄러·계획을 한 파일에) → ⑥ metronome 계층별 분리.
     ("engine::mixer", "engine::metronome", "⑥"),
     // 장치 선택(device) ↔ 자체 WASAPI(wasapi) 순환 → ⑥ device를 선택·cpal·가짜로, 공용 타입(StreamInfo 등)을 아래로.
@@ -99,7 +97,7 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[
 ];
 
 /// 예외 수 상한(래칫). 단계를 끝내 예외를 지우면 이 값도 내린다. 올리는 것은 금지(위 주석).
-const MAX_EXCEPTIONS: usize = 16;
+const MAX_EXCEPTIONS: usize = 14;
 
 /// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
 const OPEN_STAGES: &[&str] = &["③", "④", "⑤", "⑥", "⑦"];

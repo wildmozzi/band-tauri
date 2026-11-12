@@ -8,6 +8,7 @@ pub mod qos;
 pub mod relay;
 pub mod stun;
 pub mod txlat;
+pub mod types;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -20,11 +21,11 @@ use parking_lot::{Mutex, RwLock};
 use crate::engine::config::{MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
 use crate::engine::jitter::JitterSettings;
 use crate::engine::relay_codec::CodecReason;
-use crate::engine::stats::{PathKind, PeerStateKind};
 use crypto::KeyPair;
 use packet::{Header, PacketType};
 use peer::{Candidate, CandidateKind, HandshakeOutcome, LocalDescriptor, Peer, PeerSetup};
-use relay::{AckAction, RelayClient, RelayStats, RelayToken, DATA_PREFIX_BYTES};
+use relay::{AckAction, RelayClient, RelayToken};
+use types::{PathKind, PeerStateKind, RelayStats, DATA_PREFIX_BYTES};
 
 /// 릴레이 접두부를 둘 자리까지 포함한 송신 버퍼 크기.
 const SEND_BUF_BYTES: usize = DATA_PREFIX_BYTES + MAX_PACKET_BYTES;
