@@ -12,7 +12,8 @@
 
 ## D1. 엔진(client/src-tauri) — 소유권
 - **RT 콜백**(engine/rt.rs, 백엔드 콜백, `ClickRt`, 녹음 RT 링): 힙 할당·락·시스템콜·로그·panic 금지. 다른 스레드와는 사전할당 SPSC 링과 원자값으로만. 구조 정리에서 RT 코드는 **이동만** 한다. 회귀 방지: `tests/rt_alloc.rs`, `tests/cpu_profile.rs`.
-- **워커(`band-worker`)가 피어 미디어 상태(지터 버퍼·재생·피어 믹스 제어)를 단일 소유**한다. 네트워크 수신 스레드는 패킷을 피어별 SPSC 큐에 `(헤더, 페이로드, 도착 µs)`로 넣기만 하고, 삽입·pop·보정은 워커가 한다. 지터 버퍼 Mutex는 없앤다. 통계는 워커가 원자 스냅샷을 발행하고 명령·통계·측정 스레드는 그것만 읽는다. 프로필 변경·재시작은 워커로 가는 명령(원자값/큐)이다. 도착 시각을 큐에 싣으므로 지터 추정은 불변이고 늦음 판정만 ≤1 워커 폴링 지연 — 폴링 주기와 함께 수치로 증명한다.
+- **워커(`band-worker`)가 피어 미디어 상태(지터 버퍼·재생·피어 믹스 제어)를 단일 소유**한다. 네트워크 수신 스레드는 패킷을 피어별 SPSC 큐에 `(헤더, 페이로드, 도착 µs)`로 넣기만 하고, 삽입·pop·보정은 워커가 한다. 지터 버퍼 Mutex는 없앤다. 통계는 워커가 원자 스냅샷을 발행하고 명령·통계·측정 스레드는 그것만 읽는다. 프로필 변경·재시작은 워커로 가는 명령(원자값/큐)이다. 도착 시각을 큐에 싣고 워커가 피어마다 `service` 직전에 큐를 끝까지 비우므로, 지터 버퍼가 겪는 호출 순서·인자가 지금과 같다(지터 추정·늦음 판정·은닉 불변). 근거는 5분 하네스 fixture 동일(하네스가 큐를 거친 상태)과 지연 민감도 표다. 상세: [overhaul/engine-stage3-design.md](overhaul/engine-stage3-design.md).
+- **워커의 매 프레임 경로는 기본 우선순위 스레드와 락을 나누지 않는다.** ③은 수신 쪽(지터 Mutex)을 없애고, 송신 쪽(`peers` RwLock·`conn`·`echo`·`relay`·`probe`·메트로놈 계획)은 **③c**에서 다룬다 — 먼저 폭주 시험(`add_peer`/`remove_peer` 반복 + `set_echo_mode`)으로 `sendQueue.p99Us`가 흔들리는지 측정하고, 흔들리지 않으면 "측정상 불필요"로 닫는다. 흔들리면 송신 경로 스냅샷(`Peer`가 주소·경로·송신 가능·반사 중을 `AtomicU64` 하나로 발행)과 피어 표 세대 번호(워커가 복사본을 들고 세대가 바뀔 때만 읽기 락)로 푼다.
 - **`Peer`는 네트워크 소유 상태**(주소·암호·연결·시계·에코·원격 손실)만 가진다. 필드는 private, 접근은 메서드. 미디어 상태는 엔진 쪽 `PeerMedia`.
 - **설정 전파**: 즉시 반영 값은 원자값, 구조 변경은 비RT에서 준비한 뒤 상태 하나로 넘긴다(소스 슬롯 `FREE/ACTIVE/DRAIN` 방식 유지). 코덱·프레임·장치·버퍼는 재시작.
 - **시간 기준**: 엔진·네트워크는 단조 µs 시계 하나(`sys::time`)만 쓴다. 벽시계는 진단 내보내기·파일 이름 경계에서만.
@@ -28,8 +29,9 @@
 | ⓪ | 문서·검사 | engine-architecture.md, `tests/architecture.rs`(상대 경로·`super::` 간선 포함, 예외 목록은 고정 상수 — 새 예외 추가는 코드 수정 없이는 불가, 해소되면 지우지 않으면 실패) |
 | ① | 이동 | `jitter.rs` → `jitter/`(tuning·target·late_budget·playout·correction·stats·tests), 하네스 → `sim/` |
 | ②a | 이동 | `worker.rs` → `worker/`(clock·local·peer_feed 등 독립 타입과 테스트), `device::fake`를 `test-support` 피처 뒤로 |
-| ④ | 이동 | `stats.rs`를 원자 카운터와 보고 DTO로 분리, `Engine::stats()` 조립을 `report.rs`로, 공용 타입(`PathKind`·`PeerStateKind`·`CodecReason`·릴레이 상태)을 계층 1로, `prio`·`cpuprof`·시간을 `sys/`로 |
-| ③ | 재배치+측정 | D1의 소유권: `Peer` 분해, 피어별 SPSC 수신 큐, 지터 Mutex 제거, 원자 통계 스냅샷, 명령 큐 |
+| ④ | 이동 | `stats.rs`를 원자 카운터와 보고 DTO로 분리, `Engine::stats()` 조립을 `report.rs`로, 공용 타입(`PathKind`·`PeerStateKind`·`RelayStateKind`·`RelayStats`·릴레이 예산 상수)을 `net/types.rs`(계층 1)로, `prio`·`cpuprof`의 플랫폼 함수·시간을 `sys/`로. 상세·PR 분할: [overhaul/engine-stage4-scope.md](overhaul/engine-stage4-scope.md) |
+| ③ | 재배치+측정 | D1의 소유권: `Peer` 분해, 피어별 SPSC 수신 큐, 지터 Mutex 제거, 원자 통계 스냅샷(seqlock), 명령 큐. PR 분할 ③-0(캡슐화)·③-b(소유 이전, Mutex 유지)·③-a1(통계)·③-a2(명령)·③-a3(큐 전환+측정). fixture 갱신 금지 — 달라지면 버그 |
+| ③c | 측정→재배치 | 워커 송신 경로의 남는 락(D1): 폭주 시험으로 측정 후 필요하면 송신 스냅샷·피어 표 세대 번호. ②b 앞 또는 ②b와 함께 |
 | ②b | 재배치 | `Worker`를 단계 구조체(`Capture`·`AutoCodec`·`PeerSources`·`LocalPath`·`BeatSched`·`DeviceWatch`)로, 루프는 얇은 조정자. 단계 사이 값은 반환값, 전역 없음 |
 | ⑤ | 재배치 | `diag`는 `manager`를 모르고 스냅샷 클로저를 받는다 |
 | ⑥ | 이동 | 혼합·큰 파일 분리: `metronome`→{plan,sched,click}, `record`→{rt_ring,writer,sidecar}, `measure`→{loopback,echo,analysis}, `device`→{select,cpal,fake,types}, `wasapi`→{enumerate,stream}, `net/mod`→{send,recv_loop,control_loop}, `net/peer`→{table,punch,loss_report} |
