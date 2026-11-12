@@ -12,40 +12,7 @@
 
 ## 1. Rust 엔진 구조 (`client/src-tauri/src/`)
 
-모듈 경계·계층·의존 방향·스레드 간 통신 규칙과 리팩터 단계는 [engine-architecture.md](engine-architecture.md)가 기준이다(아래 목록은 파일별 책임).
-
-```
-lib.rs                 Tauri 빌더, 커맨드 등록
-commands.rs            Tauri 커맨드 (얇은 어댑터, 로직 없음)
-engine/mod.rs          Engine: 시작/정지, 스레드 소유, 공개 API
-engine/config.rs       EngineConfig, 검증
-engine/device.rs       AudioBackend 트레이트, SystemBackend(자체 WASAPI 우선 → cpal 폴백), cpal 백엔드(ASIO 싱글톤 우회 유지), 가짜 장치
-engine/wasapi.rs       자체 WASAPI 백엔드(Windows): 이벤트 구동 독점, IAudioClient3 저지연 공유, 장치 열거, 프로브
-engine/rt.rs           실시간 콜백 (입력 → SPSC 링, 출력: 소스 링들을 꺼내 섞음). 할당/락/시스템콜/로그 금지
-engine/resample.rs     장치 레이트 ↔ 내부 48kHz 변환 (rubato, 비RT 스레드에서 실행)
-engine/codec.rs        Opus / PCM16 인코드·디코드
-engine/relay_codec.rs  PCM16 설정의 피어별 Opus 자동 전환 정책: 릴레이 부하(P1-4c, 3절 7)·수신 손실 피드백(P1-4e, 3절 9)
-engine/jitter.rs       피어별 적응형 지터 버퍼 + 드리프트 보정 + PLC
-engine/mixer.rs        피어별 gain/mute, 모니터, 마스터, 클리핑 방지(soft clip)
-engine/stats.rs        원자적 통계 (레벨, xrun, 피어별 RTT/지터/손실/버퍼)
-engine/measure.rs      지연 측정(P1-1): 하드웨어 루프백(처프·FFT 상호상관), 에코 피어 클릭 측정·분석
-engine/metronome.rs    공유 메트로놈(P2-3): 계획·검증, 박 스케줄러(워커), 클릭 생성기(출력 콜백, 1.4절)
-engine/record.rs       합주 녹음(P2-4): 출력 콜백 녹음 링·핸드오프, 트랙 쓰기 스레드(1.5절)
-engine/wav.rs          녹음 파일: WAV 24비트/float32, 4GB 넘으면 RF64(1.5절)
-net/mod.rs             UDP 소켓, 송수신 스레드
-net/clock.rs           피어 시계 오프셋 추정(P2-3): Ping/Pong NTP식 표본, 버킷 최소 RTT + 가중 직선(드리프트)
-net/packet.rs          패킷 직렬화/역직렬화 (아래 2절)
-net/crypto.rs          ChaCha20-Poly1305 패킷 암호화
-net/peer.rs            피어 테이블, 홀펀칭 상태기계, keepalive, RTT
-net/stun.rs            STUN (기존 파서 이식)
-net/relay.rs           UDP 릴레이 클라이언트(RelayBind/쿠키/keepalive/토큰 갱신, relay-design.md)
-net/qos.rs             오디오 UDP DSCP EF 마킹(IP_TOS, Windows qWAVE), 3절 8
-net/txlat.rs           송신 큐 지연 히스토그램(프레임 생성 → send_to 완료), 3절 8
-diag/mod.rs            진단(P2-5): 1초 간격 엔진 통계 타임라인 기록 스레드(최근 60분 링 버퍼)
-diag/timeline.rs       링 버퍼, 샘플 형식(JSONL)
-diag/mask.rs           개인정보 마스킹(IP 대역, 이메일, 토큰, id 가명, 사용자 폴더)
-diag/export.rs         진단 zip 구성(README, meta, engine, timeline, logs)
-```
+파일 목록·책임, 계층, 의존 방향, 스레드 목록, 공유 상태 표는 [engine-architecture.md](engine-architecture.md)가 기준이다(이 문서에는 두지 않는다 — 두 곳에 두면 어긋난다). 아래 1.x절은 동작 계약(스레드별 금지 사항, 지터·믹스 규칙)이다.
 
 ### 1.1 스레드 모델
 
