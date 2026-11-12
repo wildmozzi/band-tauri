@@ -1,6 +1,6 @@
 //! 장시간 하네스(P1-6): 6피어 풀메시 60분을 가상 시간으로 돌려 GOAL 1·2절 수치를 자동 판정한다.
 //!
-//! 모델은 `tune_sim::run_multi`(피어 6 → 지터 버퍼 → PeerFeed(워커) → OutputRt(콜백), 결정적)를 그대로 쓴다.
+//! 모델은 `sim::tune::run_multi`(피어 6 → 지터 버퍼 → PeerFeed(워커) → OutputRt(콜백), 결정적)를 그대로 쓴다.
 //! 이 엔진 하나가 원격 스트림 6개를 받는다(6인 풀메시에서 한 사람이 받는 것은 5개 — 1개 더 얹어 여유 있게 검증).
 //! 엔진은 원격 스트림마다 독립된 지터 버퍼를 쓰므로 수신 쪽 하나가 풀메시 전체의 수신 경로를 대표한다. 스트림마다 다른 장치 드리프트(±200ppm), 무작위·버스트 손실(0.5~2%), 지터(분포·계단 변화), 와이파이 스파이크,
 //! UDP 5초 단절로 흔든다. 측정만 하고 엔진 로직은 바꾸지 않는다.
@@ -14,7 +14,7 @@
 //! - 짧은 버전(5분)은 기본 `cargo test`에서 돈다.
 //! - 60분 전체: `cargo test --lib long_sim_6peers_60min -- --ignored --nocapture` (CI 야간 잡 `long-sim`).
 
-use super::tune_sim::{run_multi, JitDist, MultiOut, MultiSim, NetPeer, PeerOut, Sample};
+use super::tune::{run_multi, JitDist, MultiOut, MultiSim, NetPeer, PeerOut, Sample};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 

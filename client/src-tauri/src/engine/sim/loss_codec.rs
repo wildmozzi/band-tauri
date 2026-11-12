@@ -20,10 +20,10 @@ use std::time::{Duration, Instant};
 
 use rand::{Rng, SeedableRng};
 
-use super::codec::Encoder;
-use super::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
-use super::jitter::{JitterBuffer, JitterSettings};
-use super::relay_codec::{loss_opus_perc, LossCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
+use crate::engine::codec::Encoder;
+use crate::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
+use crate::engine::jitter::{JitterBuffer, JitterSettings};
+use crate::engine::relay_codec::{loss_opus_perc, LossCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
 use crate::net::packet::{Header, PacketType, FLAG_OPUS};
 use crate::net::peer::{ping_plain, LossReport, PING_PLAIN_MAX};
 
