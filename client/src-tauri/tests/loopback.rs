@@ -724,7 +724,7 @@ fn impulse_latency_matches_estimate() {
 fn link_impulse_latency(
     cfg: EngineConfig,
     seconds: u64,
-) -> (Vec<f64>, band_lib::engine::stats::EngineStats, band_lib::engine::stats::EngineStats, jitter_stats::JitterStats) {
+) -> (Vec<f64>, band_lib::engine::report::EngineStats, band_lib::engine::report::EngineStats, jitter_stats::JitterStats) {
     const PERIOD: u64 = 9_601; // 0.2초, 장치 버퍼·프레임과 서로소
     let src: Arc<band_lib::engine::device::fake::SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
         for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {

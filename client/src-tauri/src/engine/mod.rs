@@ -17,8 +17,10 @@ pub mod metronome;
 pub mod mixer;
 pub mod record;
 pub mod relay_codec;
+pub mod report;
 pub mod resample;
 pub mod rt;
+pub mod rt_timing;
 pub mod stats;
 #[cfg(windows)]
 pub mod wasapi;
@@ -45,7 +47,7 @@ use measure::{EchoJob, EchoProbe, LoopbackJob};
 use mixer::{clamp_gain, MixControls};
 use resample::StreamResampler;
 use rt::InputRt;
-use stats::{AudioCounters, EngineStats, PeerStats};
+use stats::AudioCounters;
 use worker::{Worker, WorkerParams, WorkerStats};
 
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
@@ -349,132 +351,6 @@ impl Engine {
         )
     }
 
-    pub fn stats(&self) -> EngineStats {
-        let c = &self.counters;
-        let in_buf = match c.in_cb_frames.load(Ordering::Relaxed) {
-            0 => self.info.buffer_frames,
-            n => n,
-        };
-        let out_buf = match c.out_cb_frames.load(Ordering::Relaxed) {
-            0 => self.info.buffer_frames,
-            n => n,
-        };
-        let in_ms = in_buf as f32 / self.info.in_rate as f32 * 1000.0;
-        let out_ms = out_buf as f32 / self.info.out_rate as f32 * 1000.0;
-        let frame_ms = self.cfg.frame_samples() as f32 / config::INTERNAL_RATE as f32 * 1000.0;
-        let ws = &self.worker_stats;
-        // GOAL 1절 정의: 입력 장치 버퍼 + 프레임 + 출력 링 + 장치 출력 버퍼(네트워크 경로의 로컬 몫, 첫 샘플 기준).
-        // 콜백 구동 믹스(P1-0)에는 믹스된 출력 링이 없다. 출력 콜백이 피어 소스 링에서 바로 꺼내고,
-        // 소스 링에 머무는 시간은 지터 버퍼 깊이(`PeerStats.bufferMs`)에 포함되어 목표로 제어된다.
-        let est = in_ms + frame_ms + out_ms;
-        // 모니터 경로(내 소리 → 내 귀): 입력 버퍼 + 로컬 FIFO·로컬 소스 링 점유량 시간평균 + 출력 버퍼(임펄스 실측으로 검증).
-        let monitor = in_ms + ws.monitor_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0 + out_ms;
-        let stream_errors = c.stream_errors.load(Ordering::Relaxed);
-        let device_lost = ws.device_stalled.load(Ordering::Relaxed) || c.device_lost.load(Ordering::Relaxed);
-        let stream_failed = c.stream_failed.load(Ordering::Relaxed);
-        let period_frames = match self.info.out_period_frames {
-            0 => out_buf,
-            n => n,
-        };
-        let device_period_ms = period_frames as f32 / self.info.out_rate.max(1) as f32 * 1000.0;
-        let worker_cycles = self.worker.as_ref().and_then(crate::sys::cpu::thread_cycles);
-        let cpu = self.cpu.lock().sample(Instant::now(), &c.rt_timing, crate::sys::cpu::tsc_now(), worker_cycles, device_period_ms * 1000.0);
-        let peers = self
-            .net
-            .as_ref()
-            .map(|n| {
-                n.peers()
-                    .iter()
-                    .map(|p| {
-                        let conn = p.conn.lock().clone();
-                        let js = p.jitter.lock().stats();
-                        let (echo_requested, echo_active, peer_echoing) = {
-                            let e = p.echo.lock();
-                            let now = Instant::now();
-                            (e.remote_requesting(now) && !e.enabled, e.reflecting(now), e.remote_echoing(now))
-                        };
-                        let (tx_codec, tx_codec_reason) = {
-                            use crate::engine::relay_codec::CodecReason;
-                            use crate::net::peer::{TX_CODEC_AUTO, TX_CODEC_AUTO_LOSS, TX_CODEC_OPUS, TX_CODEC_SENT};
-                            let c = p.tx_codec.load(Ordering::Relaxed);
-                            let kind = if c & TX_CODEC_OPUS != 0 { config::CodecKind::Opus } else { config::CodecKind::Pcm16 };
-                            let reason = if c & TX_CODEC_AUTO != 0 {
-                                Some(CodecReason::RelayLoad)
-                            } else if c & TX_CODEC_AUTO_LOSS != 0 {
-                                Some(CodecReason::LossFeedback)
-                            } else {
-                                None
-                            };
-                            ((c & TX_CODEC_SENT != 0).then_some(kind), reason)
-                        };
-                        let remote = (*p.remote_loss.lock())
-                            .filter(|(_, at)| Instant::now().saturating_duration_since(*at) <= relay_codec::REPORT_STALE)
-                            .map(|(r, _)| r);
-                        PeerStats {
-                            peer_id: p.id.clone(),
-                            state: conn.state,
-                            path: conn.path.map(|(_, k)| k),
-                            rtt_ms: conn.rtt_ms,
-                            jitter_ms: js.jitter_ms,
-                            buffer_ms: js.buffer_ms,
-                            target_ms: js.target_ms,
-                            conceal_pct: js.conceal_pct,
-                            corr_time_pct: js.corr_time_pct,
-                            max_corr_cents: js.max_corr_cents,
-                            loss_pct: js.loss_pct,
-                            late: js.late,
-                            concealed: js.concealed,
-                            level: p.mix.level.load(),
-                            // 벽시계로 잰 버퍼 지연(소스 링 포함) + 장치 출력 버퍼: 클럭 추정과 독립적인 실제 재생 지연
-                            playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + out_ms } else { 0.0 },
-                            echo_requested,
-                            echo_active,
-                            peer_echoing,
-                            tx_codec,
-                            tx_codec_auto: tx_codec_reason.is_some(),
-                            tx_codec_reason,
-                            remote_loss_pct: remote.map(|r| r.loss_pct),
-                            remote_conceal_pct: remote.map(|r| r.conceal_pct),
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        EngineStats {
-            // 장치를 잃으면 false: 프론트의 기존 "엔진 정지" 감지(running=false 연속)가 그대로 동작한다(PR #5 M-2).
-            running: !device_lost && !stream_failed,
-            sample_rate: self.info.out_rate,
-            device_buffer: out_buf,
-            input_level: c.input_level.load(),
-            output_level: c.output_level.load(),
-            xruns: c.xruns.load(Ordering::Relaxed),
-            est_latency_ms: est,
-            monitor_latency_ms: monitor,
-            stream_errors,
-            device_lost,
-            stream_failed,
-            stream_restarts: c.stream_restarts.load(Ordering::Relaxed),
-            input_discontinuities: c.input_discontinuities.load(Ordering::Relaxed),
-            input_silent_packets: c.input_silent_packets.load(Ordering::Relaxed),
-            device_period_ms,
-            backend: self.info.backend_label(),
-            thread_priority: prio::ThreadPriorityStats {
-                worker: ws.thread_prio.load(),
-                net_recv: self.net.as_ref().map(|n| n.shared().recv_prio.load()).unwrap_or(prio::ThreadPriority::Unmanaged),
-                audio: c.audio_thread.load(),
-                timer_1ms: self.timer.as_ref().is_some_and(|t| t.active()),
-            },
-            peers,
-            relay: self.net.as_ref().and_then(|n| n.relay_stats()),
-            qos: self.net.as_ref().map(|n| n.qos_stats()),
-            send_queue: self.net.as_ref().map(|n| n.send_queue_stats()),
-            metronome: self.metronome.stats(),
-            cpu,
-            // 녹음 락은 짧게만 잡힌다(정지의 기다리는 단계는 락 밖). 정지를 시작하면 null.
-            recording: self.recorder.lock().stats(),
-        }
-    }
-
     /// 녹음 시작(P2-4): `dir` 아래 세션 폴더에 트랙별 WAV를 쓴다.
     pub fn record_start(&self, opts: record::RecordOptions, dir: &std::path::Path) -> Result<record::RecordStats, String> {
         let net = self.net.as_ref().map(|n| n.shared().clone());
@@ -527,53 +403,15 @@ impl Engine {
         self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.shared().set_echo_mode(peer_id, enabled)
     }
 
-    /// (입력 버퍼, 출력 버퍼) ms — 실측 콜백 크기(아직 없으면 요청값).
-    fn buffer_ms(&self) -> (f32, f32) {
-        let c = &self.counters;
-        let in_buf = match c.in_cb_frames.load(Ordering::Relaxed) {
-            0 => self.info.buffer_frames,
-            n => n,
-        };
-        let out_buf = match c.out_cb_frames.load(Ordering::Relaxed) {
-            0 => self.info.buffer_frames,
-            n => n,
-        };
-        (in_buf as f32 / self.info.in_rate.max(1) as f32 * 1000.0, out_buf as f32 / self.info.out_rate.max(1) as f32 * 1000.0)
-    }
-
     /// 열린 스트림 정보(백엔드, 레이트, 장치 주기).
     pub fn stream_info(&self) -> StreamInfo {
         self.info
-    }
-
-    /// 콜백 구동 믹스 진단: (마감 직전 은닉 횟수, 콜백 언더런으로 건너뛴 장치 프레임).
-    pub fn feed_stats(&self) -> (u64, u64) {
-        (
-            self.worker_stats.deadline_fills.load(Ordering::Relaxed),
-            self.worker_stats.skipped_frames.load(Ordering::Relaxed),
-        )
     }
 
     /// 피어와의 키 확인용 안전 번호(SAS). 양쪽이 같은 값을 보면 시그널링 서버가 키를 바꿔치기하지 않은 것이다.
     pub fn safety_code(&self, peer_id: &str) -> Result<String, String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
         net.safety_code(peer_id)
-    }
-
-    /// 로컬 입력 FIFO 보정/언더런 횟수(테스트/진단용).
-    pub fn local_path_stats(&self) -> (u64, u64) {
-        (
-            self.worker_stats.local_corrections.load(Ordering::Relaxed),
-            self.worker_stats.local_underruns.load(Ordering::Relaxed),
-        )
-    }
-
-    /// 상세 지터 통계(테스트/진단용).
-    pub fn peer_jitter_stats(&self) -> Vec<(String, jitter::JitterStats)> {
-        self.net
-            .as_ref()
-            .map(|n| n.peers().iter().map(|p| (p.id.clone(), p.jitter.lock().stats())).collect())
-            .unwrap_or_default()
     }
 
     /// 믹스 구독. 20ms마다 콜백 호출. 기존 구독은 교체된다.

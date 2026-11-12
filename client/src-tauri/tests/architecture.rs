@@ -37,6 +37,7 @@ const NODES: &[(&str, u8)] = &[
     ("engine::relay_codec", 1),
     ("engine::mixer", 1),
     ("engine::stats", 1),
+    ("engine::rt_timing", 1),
     ("net::clock", 1),
     ("net::crypto", 1),
     ("net::txlat", 1),
@@ -61,6 +62,7 @@ const NODES: &[(&str, u8)] = &[
     // 5 B 제어 평면
     ("engine", 5),
     ("engine::cpuprof", 5),
+    ("engine::report", 5),
     ("manager", 5),
     ("diag", 5),
     ("diag::timeline", 5),
@@ -74,11 +76,6 @@ const NODES: &[(&str, u8)] = &[
 /// 현재 어긋남(고정): (from, to, 풀 단계). 위 계층으로 가는 간선, 같은 계층 순환을 끊을 간선, 어댑터의 직접 의존.
 /// 문서 5.3절 표와 같다. 단계를 끝내면 여기서 지운다(남아 있으면 `module_dependencies_follow_layers`가 실패).
 const EXCEPTIONS: &[(&str, &str, &str)] = &[
-    // 보고 DTO(stats)가 위 계층 타입을 모은다 → ④ stats를 원자 카운터와 보고 DTO로 나눈다.
-    ("engine::stats", "engine::cpuprof", "④"),
-    ("engine::stats", "engine::metronome", "④"),
-    ("engine::stats", "engine::record", "④"),
-    ("engine::stats", "net::qos", "④"),
     // 믹서가 메트로놈 기본 게인을 안다(metronome.rs가 RT 클릭·스케줄러·계획을 한 파일에) → ⑥ metronome 계층별 분리.
     ("engine::mixer", "engine::metronome", "⑥"),
     // 장치 선택(device) ↔ 자체 WASAPI(wasapi) 순환 → ⑥ device를 선택·cpal·가짜로, 공용 타입(StreamInfo 등)을 아래로.
@@ -97,10 +94,10 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[
 ];
 
 /// 예외 수 상한(래칫). 단계를 끝내 예외를 지우면 이 값도 내린다. 올리는 것은 금지(위 주석).
-const MAX_EXCEPTIONS: usize = 14;
+const MAX_EXCEPTIONS: usize = 10;
 
 /// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
-const OPEN_STAGES: &[&str] = &["③", "④", "⑤", "⑥", "⑦"];
+const OPEN_STAGES: &[&str] = &["③", "⑤", "⑥", "⑦"];
 
 /// 어댑터(계층 6)가 쓸 수 있는 노드: 제어 평면과 계약 DTO(설정·보고·디스크립터)를 가진 모듈만. 로직은 제어 평면에서 부른다.
 const ADAPTER_MAY_USE: &[&str] = &[
@@ -112,7 +109,7 @@ const ADAPTER_MAY_USE: &[&str] = &[
     "engine::measure",
     "engine::metronome",
     "engine::record",
-    "engine::stats",
+    "engine::report",
     "net",
     "net::peer",
     // 벽시계(진단 내보내기 파일 이름 시각). 로직이 아닌 계층 0 함수(④-1에서 diag::now_ms를 옮김).

@@ -10,7 +10,7 @@ use serde::Serialize;
 use super::mask::{mask_addr, pseudonymize};
 use crate::engine::config::CodecKind;
 use crate::engine::relay_codec::CodecReason;
-use crate::engine::stats::EngineStats;
+use crate::engine::report::EngineStats;
 use crate::net::types::{PathKind, PeerStateKind, RelayStateKind};
 
 /// 기본 기록 간격(ms).
@@ -219,7 +219,7 @@ pub fn to_jsonl(tl: &Timeline) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::stats::PeerStats;
+    use crate::engine::report::PeerStats;
     use crate::net::types::RelayStats;
 
     #[test]

@@ -15,7 +15,7 @@ use crate::engine::measure::{EchoReport, LoopbackReport, MeasureVerdict};
 use crate::engine::metronome::{MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OFFSET_MS};
 use crate::engine::device::AudioBackend;
 use crate::engine::mixer::MixControls;
-use crate::engine::stats::EngineStats;
+use crate::engine::report::EngineStats;
 use crate::engine::Engine;
 use crate::net::peer::LocalDescriptor;
 use crate::net::NetOptions;
