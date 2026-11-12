@@ -20,7 +20,7 @@ use crate::engine::device::DeviceInfo;
 use crate::engine::metronome::{MetronomeConfig, MetronomePlan};
 use crate::engine::mixer::clamp_gain;
 use crate::engine::record::{RecordOptions, RecordStats, RecordSummary};
-use crate::engine::stats::EngineStats;
+use crate::engine::report::EngineStats;
 use crate::manager::EngineManager;
 use crate::net::RelaySetting;
 use crate::net::peer::LocalDescriptor;

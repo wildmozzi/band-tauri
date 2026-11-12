@@ -1,10 +1,6 @@
-//! 원자적 통계와 프론트로 나가는 통계 타입 (설계 문서 4절).
+//! 원자 카운터(RT·워커 공유). 프론트로 나가는 보고 DTO는 `engine::report`(설계 문서 4절).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-
-use serde::Serialize;
-
-use crate::net::types::{PathKind, PeerStateKind};
 
 /// f32를 비트로 저장하는 원자값. RT 콜백에서 안전하게 쓸 수 있다.
 #[derive(Debug, Default)]
@@ -59,126 +55,7 @@ pub struct AudioCounters {
     /// 오디오 I/O 스레드의 우선순위 설정 결과(자체 WASAPI가 적는다; cpal·가짜 장치는 `Unmanaged`).
     pub audio_thread: crate::sys::prio::PrioSlot,
     /// 입·출력 콜백 실행시간 히스토그램(P1-10). 콜백은 원자 덧셈만 한다.
-    pub rt_timing: crate::engine::cpuprof::RtTiming,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PeerStats {
-    pub peer_id: String,
-    pub state: PeerStateKind,
-    pub path: Option<PathKind>,
-    pub rtt_ms: Option<f32>,
-    pub jitter_ms: f32,
-    pub buffer_ms: f32,
-    /// 지터 버퍼 목표 깊이(ms): 지터 추정 + 은닉 마감 여유 + 피어 적응 여유(언더런) + 프로필 여유(P1-5).
-    pub target_ms: f32,
-    /// 최근 5초 은닉 비율(%, 손실 + 늦은 패킷 + 언더런). GOAL 2절 "은닉 프레임 비율".
-    pub conceal_pct: f32,
-    /// 최근 5초 중 깊이 보정(샘플 버림·삽입) 모드였던 패킷 비율(%, PR #20 H1).
-    pub corr_time_pct: f32,
-    /// 깊이 보정의 최대 국소 피치 편차(센트, 재생 시작 이후). 비율 상한 0.25%라 약 4.3센트 이하.
-    pub max_corr_cents: f32,
-    pub loss_pct: f32,
-    pub late: u64,
-    pub concealed: u64,
-    pub level: f32,
-    /// 실제 재생 지연(ms): 벽시계로 잰 버퍼 지연 + 출력 링 + 장치 출력 버퍼. 장치 클럭 추정과 독립적이라
-    /// `bufferMs`와 차이가 벌어지면 숨은 지연 누적을 뜻한다(PR #5 H-1). 재생 전에는 0.
-    pub playout_ms: f32,
-    /// 이 피어가 나에게 에코 측정을 요청 중이다(UI가 동의를 묻는다, P1-1).
-    pub echo_requested: bool,
-    /// 내가 이 피어의 오디오를 되돌려 보내는 중이다(동의함).
-    pub echo_active: bool,
-    /// 이 피어가 내 오디오를 되돌려 보내는 중이다(내 측정이 진행 중).
-    pub peer_echoing: bool,
-    /// 이 피어에게 마지막으로 보낸 내 오디오의 코덱(아직 안 보냈으면 null). 릴레이 대역 때문에 PCM16 대신
-    /// Opus로 보내면 'opus'이고 `txCodecAuto`가 true다(P1-4c).
-    pub tx_codec: Option<super::config::CodecKind>,
-    pub tx_codec_auto: bool,
-    /// 자동 전환 이유(`txCodecAuto`일 때): 릴레이 대역 부하 / 상대가 보고한 수신 손실(P1-4e). 아니면 null.
-    pub tx_codec_reason: Option<super::relay_codec::CodecReason>,
-    /// 이 피어가 Ping으로 알려 온 **내 소리의** 수신 손실률·은닉률(%, 그쪽 최근 5초). 보고가 3초 넘게 없으면 null
-    /// (옛 엔진, 그쪽 재생 전). 손실 피드백 Opus 전환의 입력(P1-4e).
-    pub remote_loss_pct: Option<f32>,
-    pub remote_conceal_pct: Option<f32>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EngineStats {
-    pub running: bool,
-    pub sample_rate: u32,
-    pub device_buffer: u32,
-    pub input_level: f32,
-    pub output_level: f32,
-    pub xruns: u64,
-    pub est_latency_ms: f32,
-    /// 모니터 경로(내 입력 → 내 출력) 지연(ms), 첫 샘플 기준.
-    pub monitor_latency_ms: f32,
-    /// 오디오 스트림 에러 누적 횟수(장치 분리 등, 리뷰 M9).
-    pub stream_errors: u32,
-    /// 장치를 잃었다(콜백 1초 정지, 또는 백엔드의 분리·기본 장치 변경 통지). 이때 `running`은 false.
-    pub device_lost: bool,
-    /// 스트림이 복구되지 않는 오류로 멈췄다(재시작 반복 실패, 치명 오류). 이때 `running`은 false.
-    pub stream_failed: bool,
-    /// 일시 오류 반복으로 스트림을 재시작한 횟수(자체 WASAPI).
-    pub stream_restarts: u32,
-    /// 캡처 DATA_DISCONTINUITY 횟수(입력 오버런, `xruns`에도 포함). 자체 WASAPI만 센다.
-    pub input_discontinuities: u64,
-    /// 장치가 SILENT로 표시한 캡처 패킷 수(자체 WASAPI).
-    pub input_silent_packets: u64,
-    /// 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기, cpal·가짜 장치는 실측 콜백 크기.
-    pub device_period_ms: f32,
-    /// 실제로 열린 오디오 백엔드: `wasapiExclusive` | `wasapiShared3`(IAudioClient3 저지연 공유) |
-    /// `cpalWasapi` | `cpalAsio` | `fake`. 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
-    pub backend: String,
-    /// 엔진 스레드의 MMCSS 등록 결과와 1ms 타이머 해상도 여부(P1-2).
-    pub thread_priority: crate::sys::prio::ThreadPriorityStats,
-    pub peers: Vec<PeerStats>,
-    /// 릴레이 등록 상태(릴레이를 설정하지 않았으면 null).
-    pub relay: Option<crate::net::types::RelayStats>,
-    /// 오디오 UDP DSCP 마킹 상태(P1-3, 네트워크 미시작이면 null).
-    pub qos: Option<crate::net::qos::QosStats>,
-    /// 송신 큐 지연: 프레임 생성(인코딩 전) → 피어별 send_to 완료, 직전 2초 창(P1-3, 네트워크 미시작이면 null).
-    pub send_queue: Option<crate::net::txlat::SendQueueStats>,
-    /// 공유 메트로놈 상태(P2-3).
-    pub metronome: super::metronome::MetronomeStats,
-    /// 워커 CPU%, RT 콜백 사용률·실행시간 분위수(직전 2초 창, P1-10).
-    pub cpu: super::cpuprof::CpuStats,
-    /// 합주 녹음 상태(P2-4). 녹음 중이 아니면 null.
-    pub recording: Option<super::record::RecordStats>,
-}
-
-impl EngineStats {
-    pub fn stopped() -> Self {
-        Self {
-            running: false,
-            sample_rate: 0,
-            device_buffer: 0,
-            input_level: 0.0,
-            output_level: 0.0,
-            xruns: 0,
-            est_latency_ms: 0.0,
-            monitor_latency_ms: 0.0,
-            stream_errors: 0,
-            device_lost: false,
-            stream_failed: false,
-            stream_restarts: 0,
-            input_discontinuities: 0,
-            input_silent_packets: 0,
-            device_period_ms: 0.0,
-            backend: String::new(),
-            thread_priority: crate::sys::prio::ThreadPriorityStats::stopped(),
-            peers: Vec::new(),
-            relay: None,
-            qos: None,
-            send_queue: None,
-            metronome: Default::default(),
-            cpu: Default::default(),
-            recording: None,
-        }
-    }
+    pub rt_timing: crate::engine::rt_timing::RtTiming,
 }
 
 #[cfg(test)]
@@ -191,51 +68,5 @@ mod tests {
         assert_eq!(a.load(), 0.25);
         a.store(-1.5);
         assert_eq!(a.load(), -1.5);
-    }
-
-    #[test]
-    fn serializes_camel_case() {
-        let s = EngineStats {
-            peers: vec![PeerStats {
-                peer_id: "a".into(),
-                state: PeerStateKind::Connected,
-                path: Some(PathKind::Lan),
-                rtt_ms: None,
-                jitter_ms: 1.0,
-                buffer_ms: 2.0,
-                target_ms: 2.5,
-                conceal_pct: 0.0,
-                corr_time_pct: 1.5,
-                max_corr_cents: 4.3,
-                loss_pct: 0.0,
-                late: 0,
-                concealed: 0,
-                level: 0.0,
-                playout_ms: 0.0,
-                echo_requested: true,
-                echo_active: false,
-                peer_echoing: false,
-                tx_codec: Some(crate::engine::config::CodecKind::Opus),
-                tx_codec_auto: true,
-                tx_codec_reason: Some(crate::engine::relay_codec::CodecReason::LossFeedback),
-                remote_loss_pct: Some(2.5),
-                remote_conceal_pct: Some(2.6),
-            }],
-            ..EngineStats::stopped()
-        };
-        let j = serde_json::to_string(&s).unwrap();
-        assert!(j.contains("\"echoRequested\":true") && j.contains("\"peerEchoing\":false"));
-        assert!(j.contains("\"txCodec\":\"opus\"") && j.contains("\"txCodecAuto\":true"), "{j}");
-        assert!(j.contains("\"targetMs\":2.5") && j.contains("\"concealPct\":0.0"));
-        assert!(j.contains("\"corrTimePct\":1.5") && j.contains("\"maxCorrCents\":4.3"));
-        assert!(j.contains("\"estLatencyMs\""));
-        assert!(j.contains("\"peerId\":\"a\""));
-        assert!(j.contains("\"state\":\"connected\""));
-        assert!(j.contains("\"path\":\"lan\""));
-        assert!(j.contains("\"rttMs\":null"));
-        assert!(j.contains("\"relay\":null") && j.contains("\"qos\":null") && j.contains("\"sendQueue\":null"), "{j}");
-        assert_eq!(serde_json::to_string(&PathKind::Relay).unwrap(), "\"relay\"");
-        assert!(j.contains("\"cpu\":{\"workerPct\":null"), "{j}");
-        assert!(j.contains("\"devicePeriodMs\":0.0") && j.contains("\"backend\":\"\"") && j.contains("\"inputDiscontinuities\":0") && j.contains("\"streamFailed\":false"), "{j}");
     }
 }

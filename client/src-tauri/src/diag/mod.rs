@@ -14,7 +14,7 @@ use std::time::Duration;
 use parking_lot::{Condvar, Mutex};
 
 use crate::engine::config::EngineConfig;
-use crate::engine::stats::EngineStats;
+use crate::engine::report::EngineStats;
 use crate::manager::EngineManager;
 use timeline::{Sample, Timeline, DEFAULT_CAPACITY, SAMPLE_INTERVAL_MS};
 

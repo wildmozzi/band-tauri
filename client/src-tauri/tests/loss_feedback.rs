@@ -13,7 +13,7 @@ use band_lib::engine::config::{CodecKind, EngineConfig};
 use band_lib::engine::device::fake::FakeBackend;
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::relay_codec::CodecReason;
-use band_lib::engine::stats::PeerStats;
+use band_lib::engine::report::PeerStats;
 use band_lib::engine::Engine;
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::net::NetOptions;

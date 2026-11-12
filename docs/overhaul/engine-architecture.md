@@ -28,7 +28,7 @@
 | `engine/metronome.rs` | 클릭 생성(E, RT) + 박 스케줄러(C) + 계획·상태 Mutex(B) | ⑥ |
 | `engine/record.rs` | 출력 콜백 녹음 링(E, RT) + 쓰기 스레드·사이드카(비RT) | ⑥ |
 | `engine/measure.rs` | 루프백(장치) + 에코 프로브(워커) + 분석(알고리즘) | ⑥ |
-| `engine/stats.rs` | RT·워커 원자 카운터(1) + 보고 DTO(`EngineStats`, 5) | ④ |
+| ~~`engine/stats.rs`~~ | (④에서 해소) 원자 카운터 `stats.rs`(1) · RT 타이밍 `rt_timing.rs`(1) · 보고 DTO와 `stats()` 조립 `report.rs`(5) | ④ 완료 |
 | `engine/device.rs` | 백엔드 선택 + cpal 백엔드 + 가짜 장치 + 공용 타입(`StreamInfo`) | ⑥ |
 | `net/peer.rs` | 피어 테이블·홀펀칭(D) + 미디어 상태(`JitterBuffer`·`PeerMixCtl` 소유) | ③ |
 
@@ -141,12 +141,12 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 | 계층 | 노드 |
 |---|---|
-| 0 | `engine::config`, `net::packet`, `engine::prio` |
-| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats}`, `net::{clock, crypto, txlat}`, `diag::mask` |
+| 0 | `engine::config`, `net::packet`, `sys`, `sys::{prio, cpu, time}`(④) |
+| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing}`, `net::{clock, crypto, txlat, types}`, `diag::mask` |
 | 2 | `engine::{rt, device, wasapi, record, metronome}` |
 | 3 | `net`, `net::{peer, relay, stun, qos}` |
 | 4 | `engine::{worker, measure}`, 하네스 `engine::sim`(`cfg(test)`) |
-| 5 | `engine`(`Engine`), `engine::cpuprof`, `manager`, `diag`, `diag::{timeline, export}` |
+| 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `diag`, `diag::{timeline, export}` |
 | 6 | `commands`, `lib.rs`, `main.rs` |
 
 `net::peer → engine::jitter`(3 → 1)처럼 **아래로 가는 간선은 의존 규칙상 허용**이다. 그 간선의 문제는 의존이 아니라 공유 상태(4.1절: 여러 계층이 `Peer`의 락을 직접 잡음)이고, ③이 그것을 다룬다.
@@ -161,13 +161,10 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 | 간선 | 원인 | 풀 단계 |
 |---|---|---|
-| `engine::stats` → `engine::{cpuprof, metronome, record}`, `net::{qos, relay}` | 보고 DTO가 원자 카운터와 한 파일. RT(`rt.rs` → `stats`)가 컴파일 단위로 net에 묶임 | ④ |
-| `engine::relay_codec` → `net::relay` (그리고 `net` → `relay_codec::CodecReason`) | 공용 타입(릴레이 상태, 코덱 이유, `PathKind`)이 위 계층에 있음 | ④ |
 | `engine::mixer` → `engine::metronome` | 기본 클릭 게인 상수. metronome 혼합 파일 | ⑥ |
 | `engine::device` ↔ `engine::wasapi` | 공용 타입(`StreamInfo`·`DeviceInfo`)과 백엔드 선택이 한 파일 | ⑥ |
 | `engine::rt` ↔ `engine::record` | 녹음 RT 링과 쓰기 쪽이 한 파일, rt의 소스 상수를 record가 씀 | ⑥ |
 | `manager` ↔ `diag`, `diag::export` → `manager` | diag가 수집 대상(`EngineManager`)을 직접 앎 | ⑤ |
-| `engine` → `diag` (`engine` ↔ `manager` ↔ `diag` 3-순환) | `Engine`이 진단의 시각 함수(`now_ms`)를 씀 | ④ (`sys::time`) |
 | `commands` → `net::relay`(`resolve_relay_addr` DNS 해석), `commands` → `engine::mixer`(`clamp_gain`) | 어댑터에 로직 | ⑦ |
 
 간선 그래프에 안 보이는 어긋남:
@@ -177,7 +174,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `Peer`가 net 상태와 미디어 상태를 함께 가진 공용 구조체(필드 전부 `pub`, Mutex 5개 + 원자값). net·워커·통계·커맨드가 직접 잠근다. single writer가 아니다 | `net/peer.rs` | ③ |
 | 지터 락 접근자 7곳(4.1절), 기본 우선순위 스레드가 준RT 락을 잡음 | `net/mod.rs`, `engine/mod.rs`, `worker/mod.rs` | ③ |
 | 녹음 폴더 설정 파일 저장·검증이 어댑터에 | `commands.rs`(`record_dir_file`, `current_record_dir`) | ⑦ |
-| 큰 파일: `wasapi.rs` 1.9k(열거·프로브 + 스트림), `net/mod.rs` 1.1k(송신 + 수신 루프 + 제어 루프), `net/peer.rs` 1.2k, `engine/mod.rs`의 `stats()` 조립 130줄 | | ⑥, ④ |
+| 큰 파일: `wasapi.rs` 1.9k(열거·프로브 + 스트림), `net/mod.rs` 1.1k(송신 + 수신 루프 + 제어 루프), `net/peer.rs` 1.2k | | ⑥ |
 
 ## 6. 모듈 지도 — 현재 → 목표(R-1)
 
@@ -214,7 +211,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/worker/device_watch.rs` | 장치 멈춤 감시·스트림 에러 로그 | 장치 감시 |
 | `engine/sim/{mod,tune,long,loss_codec}.rs` | 가상 시간 결정적 하네스(`cfg(test)`): 6피어 5·60분, 손실 피드백 | 하네스 시나리오 |
 | `engine/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
-| `engine/stats.rs` | 원자 통계 카운터 + 보고 DTO(④에서 나눔) | 통계 계약 |
+| `engine/stats.rs`, `rt_timing.rs`, `report.rs` | RT·워커 원자 통계 카운터, RT 콜백 타이밍, 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
 | `engine/measure.rs` | 지연 측정: 루프백(처프·상호상관), 에코 클릭 | 측정 |
 | `engine/metronome.rs` | 공유 메트로놈: 계획·검증, 스케줄러, 클릭 생성기 | 메트로놈 |
 | `engine/record.rs`, `wav.rs`, `flac.rs` | 합주 녹음: RT 링·핸드오프, 쓰기 스레드, WAV/RF64·FLAC | 녹음 |

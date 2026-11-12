@@ -335,7 +335,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::stats::EngineStats;
+    use crate::engine::report::EngineStats;
     use std::io::Read;
 
     fn meta(tl: &Timeline) -> Meta {
