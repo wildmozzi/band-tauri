@@ -77,7 +77,8 @@ type FromSender = { oderId: string; from: string }
 
 export type ServerMessage =
   | { type: 'welcome'; clientId: string; resumed?: true }
-  | { type: 'auth-result'; authenticated: boolean; userId: string | null; resumed?: true }
+  /** userId: auth 타임아웃(AUTH_TIMEOUT_MS) 경로는 이 키 없이 보낸다 */
+  | { type: 'auth-result'; authenticated: boolean; userId?: string | null; resumed?: true }
   /** 앱 수준 ping에 대한 응답 (P1-15) */
   | { type: 'pong' }
   | ServerError
