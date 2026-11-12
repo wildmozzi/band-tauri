@@ -82,7 +82,8 @@
 | P3-0c | 리포 공개 전환(사용자 승인 2026-11-11): ① 비밀값 검사(gitleaks 전체 기록 — 실제 비밀 없음: Supabase anon(공개용)·토스 문서 샘플 키·mkcert localhost 개발 인증서·LAN 자체서명 인증서) ② CI를 GitHub 호스티드로 복귀(공개 리포에서 self-hosted 금지) ③ 포크 PR 워크플로 승인 정책 ④ 공개 전환 ⑤ self-hosted 러너 중지 | 공개 후 호스티드 CI 녹색 | 완료(2026-11-11: 공개 전환, 외부 기여자 PR 전부 승인 필요, 호스티드 CI(#38), self-hosted 러너 2대 중지·등록 해제) |
 | P3-8a | (P3-8 후속) 미정의 CSS 변수 7개(--primary 등) 정리, 남은 모달 3개(Premium/AudioSettings/EchoMeasure) 공용 Modal로, TSX 인라인 색 209곳 토큰화, px 간격 → --space-* | 시각 회귀 통과 | 완료(PR #30, 2026-11-11; **[사람]** 데스크톱 합주실 화면 확인) |
 | P3-1 | lint 에러 0 + CI에서 lint 필수화 | `npm run lint` 통과 | 완료(#3) |
-| P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 대기 |
+| P3-2 | client 기능 단위 폴더 재편(`features/*`) | build/test 통과, 동작 동일 | 진행중(R-2 작업자 r-client: 기능 단위 폴더 + 경계 lint + RoomContext 분리) |
+| R-1 | 엔진 구조 정리(사용자 지시 2026-11-12 "유지보수 가능한 깔끔한 구조"): jitter 로직·테스트 분리, 시뮬레이션 engine/sim/, worker.rs를 송신·수신·코덱 전환·녹음·메트로놈·통계 하위 모듈로 — 동작·성능·계약 불변(5분 하네스 숫자 동일, 60분 PASS, CPU ±5%) | 하네스·CPU 전후 동일 | 진행중(작업자 r-engine) |
 | P3-3 | Supabase 생성 타입 + TanStack Query 데이터 계층 | 화면별 직접 호출 제거 | 완료(#12; pages 직접 호출 13→0) |
 | P3-3a | **[사람]** 운영 DB에서 `supabase gen types` 실행 결과와 `client/src/lib/database.types.ts` 비교(profiles/rooms/post_likes 컬럼은 코드에서 추론, rooms.is_private/has_password는 008 적용 후 확인, posts.instrument 포함) | 차이 없음 확인 | 대기 |
 | P3-3b | RoomDetail 직접 Supabase 호출(4)·contexts의 profiles 접근(11)을 query 훅으로 이전 | 직접 호출 0 | 완료(#15; useSignaling 인증 호출 2개는 범위 밖) |
