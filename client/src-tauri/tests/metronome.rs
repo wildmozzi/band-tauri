@@ -529,7 +529,7 @@ mod engines {
     use band_lib::engine::device::fake::FakeBackend;
     use band_lib::engine::metronome::MetronomeConfig;
     use band_lib::engine::mixer::MixControls;
-    use band_lib::engine::stats::PeerStateKind;
+    use band_lib::net::types::PeerStateKind;
     use band_lib::engine::Engine;
     use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
     use band_lib::net::{clock_payload, parse_clock_payload, NetOptions};

@@ -17,7 +17,7 @@ use band_lib::engine::config::{CodecKind, EngineConfig};
 use band_lib::engine::device::fake::{FakeBackend, SourceFn};
 use band_lib::engine::measure::{LoopbackReport, MeasureVerdict, ECHO_UNSTABLE_SPREAD_MS};
 use band_lib::engine::mixer::MixControls;
-use band_lib::engine::stats::PeerStateKind;
+use band_lib::net::types::PeerStateKind;
 use band_lib::engine::Engine;
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::net::NetOptions;

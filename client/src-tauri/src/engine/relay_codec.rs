@@ -41,7 +41,7 @@
 use std::time::{Duration, Instant};
 
 use crate::engine::config::{HEADER_BYTES, TAG_BYTES};
-use crate::net::relay::{BUDGET_CLEAR, BUDGET_WARN, DATA_PREFIX_BYTES, RELAY_BUDGET_BPS, RELAY_BUDGET_PPS};
+use crate::net::types::{BUDGET_CLEAR, BUDGET_WARN, DATA_PREFIX_BYTES, RELAY_BUDGET_BPS, RELAY_BUDGET_PPS};
 
 pub const HOLD_MIN: Duration = Duration::from_secs(10);
 pub const HOLD_MAX: Duration = Duration::from_secs(120);

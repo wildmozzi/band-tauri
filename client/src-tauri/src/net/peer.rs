@@ -13,7 +13,7 @@ use super::crypto::{KeyPair, PacketCipher, KEY_BYTES};
 use super::packet::PacketType;
 use crate::engine::jitter::{JitterBuffer, JitterSettings};
 use crate::engine::mixer::PeerMixCtl;
-use crate::engine::stats::{PathKind, PeerStateKind};
+use super::types::{PathKind, PeerStateKind};
 
 pub const HELLO_INTERVAL: Duration = Duration::from_millis(100);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
