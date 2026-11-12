@@ -78,6 +78,8 @@ type FromSender = { oderId: string; from: string }
 export type ServerMessage =
   | { type: 'welcome'; clientId: string; resumed?: true }
   | { type: 'auth-result'; authenticated: boolean; userId: string | null; resumed?: true }
+  /** 앱 수준 ping에 대한 응답 (P1-15) */
+  | { type: 'pong' }
   | ServerError
   | { type: 'room-state'; participants: Participant[]; peerIds: string[]; isHost: boolean }
   | ({ type: 'participant-joined'; participant: Participant; rejoin: boolean } & FromSender)
