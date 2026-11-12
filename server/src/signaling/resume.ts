@@ -1,3 +1,4 @@
+import type { WebSocket } from 'ws'
 import type { Ctx } from './ctx'
 import { handleLeave, sendRoomState, type MembershipSvc } from './membership'
 import { metronomeHostChanged } from './metronome'
@@ -12,6 +13,9 @@ import type { Client, WsLimits } from './types'
  * S4-1: wsService 조립부의 close suspend 분기·finalizeSuspended·resumeSession을 옮겼다.
  * 재개는 auth가 attachSession → (auth 필드·만료 타이머) → announceResumed 순으로 부른다(원래 resumeSession 한 함수의 순서).
  * membership은 이 모듈을 import하지 않는다(순환). 중복 연결 정리는 svc.resume.drop으로 부른다(설계 2.2).
+ *
+ * P1-16: 서버가 옛 소켓의 닫힘을 아직 모르는(반쯤 열린) 연결도 재개 대상이다(findLive). 새 연결을 붙인 뒤
+ * 옛 소켓을 끊는다(attachSession). 옛 소켓의 close는 `client.conn.ws`가 이미 새 소켓이라 "대체됨"으로 보고 무시한다(조립부).
  */
 export function createResume(registry: Registry) {
   const { getClient } = registry
@@ -31,6 +35,17 @@ export function createResume(registry: Registry) {
     return old && old.auth.userId === userId && getClient(old.id) === old ? old : null
   }
 
+  /**
+   * 재개 대상(P1-16): 유예 중이 아니어도 같은 userId(JWT)의 Client가 살아 있으면 — 서버가 옛 소켓의 닫힘을 아직 모를 때.
+   * 클라이언트는 수신 없음(15초 + ping 5초)으로 먼저 끊김을 알고 재연결하지만 서버 하트비트는 최대 60초 뒤에야 안다.
+   * 인증된 연결만(userId는 auth가 JWT로만 정한다). 이 연결 자신(self)은 제외.
+   */
+  function findLive(clientId: string, userId: string, self: WebSocket): Client | null {
+    const c = getClient(clientId)
+    if (!c || suspended.has(clientId)) return null
+    return c.auth.state === 'authenticated' && c.auth.userId === userId && c.conn.ws !== self ? c : null
+  }
+
   function isSuspended(clientId: string): boolean {
     return suspended.has(clientId)
   }
@@ -45,7 +60,7 @@ export function createResume(registry: Registry) {
     for (const c of suspended.values()) if (c.resume.timer) clearTimeout(c.resume.timer)
   }
 
-  return { drop, find, isSuspended, add, clearTimers }
+  return { drop, find, findLive, isSuspended, add, clearTimers }
 }
 
 export type Resume = ReturnType<typeof createResume>
@@ -85,10 +100,12 @@ export function suspendOnClose(svc: ResumeSvc, client: Client): boolean {
 }
 
 /**
- * 세션 재개 1단계: 이 연결(ctx)을 유예 중이던 이전 Client(clientId/방/연주 상태)에 붙인다.
+ * 세션 재개 1단계: 이 연결(ctx)을 유예 중이던(또는 P1-16: 아직 닫힘을 모르는 옛 소켓에 붙어 있던) 이전 Client(clientId/방/연주 상태)에 붙인다.
  * 연결 상태(소켓·체인·대기 수·버킷)를 옛 Client로 옮기고, 임시 Client를 지우고, ctx.client·ctx.id를 바꿔 끼운다(1.2-6).
  * 그 뒤로 이 연결의 메시지 체인·close·auth 타이머는 모두 ctx를 거쳐 옛 Client를 본다.
  * 인증 필드(authState·tokenExp·만료 타이머)는 auth가 이어서 정한다. 임시 Client를 돌려준다(그 만료 타이머 정리용).
+ * 옛 소켓이 아직 열려 있으면(P1-16) 새 소켓으로 바꿔 끼운 뒤 terminate한다. 그 close 핸들러는 conn.ws가 자기 소켓이 아니므로
+ * 유예·퇴장을 일으키지 않는다(같은 방 참가자에게 participant-left/joined 없음).
  */
 export function attachSession(ctx: Ctx<ResumeSvc>, old: Client): Client {
   const { ws } = ctx
@@ -96,6 +113,7 @@ export function attachSession(ctx: Ctx<ResumeSvc>, old: Client): Client {
   const temp = ctx.client
   ctx.svc.resume.drop(old)
 
+  const prevWs = old.conn.ws
   old.conn.ws = ws
   old.conn.ip = temp.conn.ip
   old.conn.isAlive = true
@@ -110,6 +128,11 @@ export function attachSession(ctx: Ctx<ResumeSvc>, old: Client): Client {
   removeClient(temp.id)
   ctx.client = old
   ctx.id = old.id
+  // P1-16: 반쯤 열린 옛 소켓. 유예에서 온 경우는 이미 닫혀 있어 아무 일도 없다
+  if (prevWs !== ws && prevWs.readyState !== prevWs.CLOSED) {
+    console.log(`[RESUME] ${old.id.slice(0, 8)} taking over a live connection - terminating the old socket`)
+    prevWs.terminate()
+  }
   return temp
 }
 
