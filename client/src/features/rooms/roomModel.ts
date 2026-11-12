@@ -1,5 +1,4 @@
 // 합주실 목록/내 합주실/설정 모달에서 쓰는 타입·상수·순수 함수.
-import type { RoomStatus } from './roomFilters'
 import { MAX_PERFORMERS } from '../../native/engineApi'
 
 export const GENRES = [
@@ -104,6 +103,8 @@ export interface DetailRoom {
   is_private?: boolean
   has_password?: boolean
 }
+
+export type RoomStatus = 'open' | 'recording' | 'locked'
 
 export interface Room {
   id: string

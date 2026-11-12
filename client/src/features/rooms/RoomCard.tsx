@@ -1,6 +1,5 @@
-import type { RoomStatus } from './roomFilters'
 import { InstrumentBadges, TagOverflow } from './RoomTags'
-import { roomStatusLabel, type Room } from './roomModel'
+import { roomStatusLabel, type Room, type RoomStatus } from './roomModel'
 import { Badge } from '../../shared/ui/Badge'
 import { Card } from '../../shared/ui/Card'
 
