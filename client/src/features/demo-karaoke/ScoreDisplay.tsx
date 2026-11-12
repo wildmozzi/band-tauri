@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
+import {
+  a4HeightFor,
+  clampMeasureIndex,
+  fallbackPageCount,
+  findScoreSystems,
+  pageBreaksByBottom,
+  pageBreaksByHeight,
+  pageForY,
+  systemBoxes,
+} from './scoreLayout'
 
 interface ScoreDisplayProps {
   musicXmlUrl?: string
@@ -167,43 +177,8 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
               setSvgElement(svg as SVGElement)
 
               // System(악보 줄) 요소들 찾기 - 여러 가능한 셀렉터 시도
-              let systems: Element[] = []
-
-              // 시도 1: osmd_system으로 시작하는 ID
-              systems = Array.from(svg.querySelectorAll('g[id^="osmd_system"]'))
-              console.log('[ScoreDisplay] Found systems (osmd_system):', systems.length)
-
-              // 시도 2: vf-stave 클래스 (VexFlow 기반)
-              if (systems.length === 0) {
-                systems = Array.from(svg.querySelectorAll('g.vf-stave'))
-                console.log('[ScoreDisplay] Found systems (vf-stave):', systems.length)
-              }
-
-              // 시도 3: 최상위 g 요소들 중 y 좌표가 다른 것들 (악보 줄로 추정)
-              if (systems.length === 0) {
-                const allGroups = Array.from(svg.querySelectorAll('svg > g > g'))
-                const yPositions = new Map<number, Element>()
-
-                allGroups.forEach(g => {
-                  try {
-                    const bbox = (g as SVGGraphicsElement).getBBox()
-                    const roundedY = Math.round(bbox.y / 10) * 10 // 10px 단위로 반올림
-                    if (bbox.height > 50 && !yPositions.has(roundedY)) { // 높이가 50px 이상인 것만
-                      yPositions.set(roundedY, g)
-                    }
-                  } catch (e) {
-                    // getBBox 실패 시 무시
-                  }
-                })
-
-                systems = Array.from(yPositions.values()).sort((a, b) => {
-                  const bboxA = (a as SVGGraphicsElement).getBBox()
-                  const bboxB = (b as SVGGraphicsElement).getBBox()
-                  return bboxA.y - bboxB.y
-                })
-
-                console.log('[ScoreDisplay] Found systems (by position):', systems.length)
-              }
+              const systems = findScoreSystems(svg, (label, count) =>
+                console.log(`[ScoreDisplay] Found systems (${label}):`, count))
 
               if (systems.length > 0) {
                 // SVG의 실제 크기 가져오기
@@ -213,31 +188,12 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
 
                 // A4 비율: 210mm x 297mm = 1:1.414
                 // SVG 너비를 기준으로 A4 높이 계산
-                const a4Height = svgWidth * 1.414
+                const a4Height = a4HeightFor(svgWidth)
 
                 console.log('[ScoreDisplay] SVG size:', svgWidth, 'x', svgHeight, 'A4 height:', a4Height)
 
                 // 각 system의 y 위치를 기준으로 페이지 분할
-                const pageBreaks: number[] = [0] // 첫 페이지 시작
-                let lastSystemBottom = 0
-
-                systems.forEach((system, index) => {
-                  const bbox = (system as SVGGraphicsElement).getBBox()
-                  const systemHeight = bbox.height
-                  const systemY = bbox.y
-                  const systemBottom = systemY + systemHeight
-
-                  // 현재 페이지에 이 system을 추가하면 A4 높이를 넘는지 확인
-                  const pageStartY = pageBreaks[pageBreaks.length - 1]
-                  const currentPageUsed = systemBottom - pageStartY
-
-                  if (index > 0 && currentPageUsed > a4Height) {
-                    // 새 페이지 시작
-                    pageBreaks.push(systemY)
-                  }
-
-                  lastSystemBottom = systemBottom
-                })
+                const { breaks: pageBreaks, lastBottom: lastSystemBottom } = pageBreaksByBottom(systemBoxes(systems), a4Height)
 
                 const calculatedPages = pageBreaks.length
                 setTotalPages(calculatedPages)
@@ -250,8 +206,8 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
                 // System을 못 찾으면 기존 방식 사용
                 const svgHeight = svg.getBoundingClientRect().height
                 const containerWidth = containerRef.current.clientWidth
-                const a4Height = containerWidth * 1.414
-                const calculatedPages = Math.ceil(svgHeight / a4Height)
+                const a4Height = a4HeightFor(containerWidth)
+                const calculatedPages = fallbackPageCount(svgHeight, a4Height)
 
                 setTotalPages(calculatedPages)
                 setCurrentPage(0)
@@ -319,9 +275,7 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
 
         // 1. 목표 마디 인덱스 결정 (플레이어의 마디 번호를 물리적 순서로 취급)
         const playerBarIndex = currentMeasureRef.current
-        let targetIndex = playerBarIndex
-        if (targetIndex >= measureStarts.length) targetIndex = measureStarts.length - 1
-        if (targetIndex < 0) targetIndex = 0
+        const targetIndex = clampMeasureIndex(playerBarIndex, measureStarts.length)
 
         const targetTime = measureStarts[targetIndex]
         const currentTs = cursor.Iterator.currentTimeStamp?.RealValue || 0
@@ -393,13 +347,7 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
                 const cursorY = cursorBBox.y
 
                 // 어느 페이지에 속하는지 계산 (민감도 보정)
-                let targetPage = 0
-                for (let i = pageBreaks.length - 1; i >= 0; i--) {
-                  if (pageBreaks[i] <= cursorY + 50) { // 10 -> 50으로 마진 확대 (더 빨리 인식)
-                    targetPage = i
-                    break
-                  }
-                }
+                const targetPage = pageForY(pageBreaks, cursorY, 50) // 10 -> 50으로 마진 확대 (더 빨리 인식)
 
                 if (targetPage !== currentPage) {
                   console.log(`[ScoreDisplay] Auto switching to page ${targetPage + 1} (measure: ${mIdx})`)
@@ -432,56 +380,13 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
 
     const handleResize = () => {
       // System(악보 줄) 요소들 찾기 - 여러 가능한 셀렉터 시도
-      let systems: Element[] = []
-
-      systems = Array.from(svgElement.querySelectorAll('g[id^="osmd_system"]'))
-
-      if (systems.length === 0) {
-        systems = Array.from(svgElement.querySelectorAll('g.vf-stave'))
-      }
-
-      if (systems.length === 0) {
-        const allGroups = Array.from(svgElement.querySelectorAll('svg > g > g'))
-        const yPositions = new Map<number, Element>()
-
-        allGroups.forEach(g => {
-          try {
-            const bbox = (g as SVGGraphicsElement).getBBox()
-            const roundedY = Math.round(bbox.y / 10) * 10
-            if (bbox.height > 50 && !yPositions.has(roundedY)) {
-              yPositions.set(roundedY, g)
-            }
-          } catch (e) {
-            // getBBox 실패 시 무시
-          }
-        })
-
-        systems = Array.from(yPositions.values()).sort((a, b) => {
-          const bboxA = (a as SVGGraphicsElement).getBBox()
-          const bboxB = (b as SVGGraphicsElement).getBBox()
-          return bboxA.y - bboxB.y
-        })
-      }
+      const systems = findScoreSystems(svgElement)
 
       if (systems.length > 0) {
         const containerWidth = containerRef.current!.clientWidth
-        const a4Height = containerWidth * 1.414
+        const a4Height = a4HeightFor(containerWidth)
 
-        const pageBreaks: number[] = [0]
-        let currentPageHeight = 0
-
-        systems.forEach((system, index) => {
-          const bbox = (system as SVGGraphicsElement).getBBox()
-          const systemHeight = bbox.height
-          const systemY = bbox.y
-
-          if (index > 0 && currentPageHeight + systemHeight > a4Height) {
-            pageBreaks.push(systemY)
-            currentPageHeight = systemHeight
-          } else {
-            currentPageHeight += systemHeight
-          }
-        })
+        const pageBreaks = pageBreaksByHeight(systemBoxes(systems), a4Height)
 
         const calculatedPages = pageBreaks.length
         setPageHeight(a4Height)
