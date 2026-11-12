@@ -137,6 +137,16 @@ export function RoomDetail() {
     )
   }
 
+  // 재연결 예산(35초)을 넘겨 포기함 (P1-15): 서버 세션이 정리됐으므로 처음부터 다시 입장
+  if (signalStatus === 'gave-up') {
+    return (
+      <div className="error-state" role="alert">
+        <p>연결이 끊겼습니다. 다시 입장해 주세요.</p>
+        <button onClick={() => window.location.reload()}>다시 입장</button>
+      </div>
+    )
+  }
+
   // 비밀번호 방 입장 (방장은 서버가 묻지 않는다) / 정원 초과 안내
   if (joinError) {
     return (

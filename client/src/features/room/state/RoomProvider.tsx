@@ -121,6 +121,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const onMessageRef = useRef<(p: SignalPayload) => void>(() => {})
   const onReadyRef = useRef<(id: string, resumed: boolean) => void>(() => {})
   const onClosedRef = useRef<() => void>(() => {})
+  const onGaveUpRef = useRef<() => void>(() => {})
   const buildJoinMessageRef = useRef(buildJoinMessage)
   buildJoinMessageRef.current = buildJoinMessage
 
@@ -128,6 +129,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     onReady: (id, resumed) => onReadyRef.current(id, resumed),
     onMessage: (p) => onMessageRef.current(p),
     onClosed: () => onClosedRef.current(),
+    onGaveUp: () => onGaveUpRef.current(),
     isInRoom: () => store.getSnapshot().connection.currentRoomId !== null,
     getJoinMessage: () => buildJoinMessageRef.current(false),
   }, store)
@@ -462,6 +464,13 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     viewer.closeAll()
     // 엔진(UDP 메시)은 유지한다. 재연결/세션 재개 여부는 onReady에서 결정 (M6)
     session.connectionLost()
+  }
+
+  onGaveUpRef.current = () => {
+    // 재연결 예산(35초, 서버 세션 유예 30초 + 여유)을 넘겼다: 서버 쪽 세션은 이미 정리됐으므로 엔진도 멈춘다.
+    // 화면은 signalStatus='gave-up'을 보고 "연결이 끊겼습니다 — 다시 입장" 안내를 띄운다.
+    broadcaster.stop()
+    void session.stop({ notify: false })
   }
 
   const runEffect = (e: RoomEffect) => {
