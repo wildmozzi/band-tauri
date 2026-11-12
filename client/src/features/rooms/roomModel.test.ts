@@ -10,6 +10,7 @@ import {
   MAX_PARTICIPANTS_HINT,
   maxParticipantsOptionLabel,
   myRoomStatusLabel,
+  normalizeDetailRoom,
   publicRooms,
   roomStatusLabel,
   setSlotCount,
@@ -182,5 +183,19 @@ describe('room capacity range (P3-10g)', () => {
   it('toRoom shows the effective capacity', () => {
     const row = { id: 'r', title: 't', description: null, genre: null, current_participants: 3, max_participants: 50, status: 'open', tags: null, instrument_slots: null } as unknown as Parameters<typeof toRoom>[0]
     expect(toRoom(row).capacity).toBe(20)
+  })
+})
+
+describe('normalizeDetailRoom', () => {
+  it('normalizeDetailRoom: 자유참여 기본 true, 악기 구성 없으면 기본 5슬롯, 있으면 유지', () => {
+    const base = { id: 'r', title: 't', host_id: 'h' }
+    const a = normalizeDetailRoom({ ...base, free_join: null, instrument_slots: null })
+    expect(a.free_join).toBe(true)
+    expect(a.instrument_slots).toHaveLength(5)
+    const b = normalizeDetailRoom({ ...base, free_join: false, instrument_slots: [{ instrument: 'bass', count: 2 }] })
+    expect(b.free_join).toBe(false)
+    expect(b.instrument_slots).toEqual([{ instrument: 'bass', count: 2 }])
+    // 기본 슬롯은 방마다 새 배열(공유 상수를 고치지 않게)
+    expect(normalizeDetailRoom(base).instrument_slots).not.toBe(a.instrument_slots)
   })
 })

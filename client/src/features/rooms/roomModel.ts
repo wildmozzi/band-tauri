@@ -87,6 +87,24 @@ export interface DbRoom {
 /** 내가 만든 방(DbRoom과 동일) */
 export type MyRoom = DbRoom
 
+/** 화면용 방 (DB 행에 기본값을 채운 것). 조회는 queries.ts의 useRoomDetailQuery */
+export interface DetailRoom {
+  id: string
+  title: string
+  description: string | null
+  host_id: string
+  max_participants: number
+  current_participants: number
+  status: string
+  genre: string | null
+  tags: string[]
+  free_join: boolean
+  instrument_slots: InstrumentSlot[]
+  /** 마이그레이션 008 전이면 undefined */
+  is_private?: boolean
+  has_password?: boolean
+}
+
 export interface Room {
   id: string
   title: string
@@ -110,6 +128,16 @@ export const DEFAULT_EDIT_SLOTS: InstrumentSlot[] = [
   { instrument: 'keyboard', count: 1 },
   { instrument: 'drums', count: 1 },
 ]
+
+/** DB 행 → 화면용 방. 자유참여 기본 true, 악기 구성이 없으면 기본 5슬롯 */
+export function normalizeDetailRoom(data: Record<string, unknown>): DetailRoom {
+  const row = data as unknown as DetailRoom & { free_join?: boolean | null; instrument_slots?: InstrumentSlot[] | null }
+  return {
+    ...row,
+    free_join: row.free_join ?? true,
+    instrument_slots: row.instrument_slots ?? DEFAULT_EDIT_SLOTS.map(s => ({ ...s })),
+  }
+}
 
 /** DB 행을 목록 카드용 형식으로 변환 */
 export function toRoom(room: DbRoom): Room {

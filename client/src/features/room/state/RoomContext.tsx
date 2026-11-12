@@ -46,6 +46,7 @@ import {
   type EngineStats,
   type PeerStats,
 } from '../../../native/engineApi'
+import { appUpdater } from '../../../native/updater'
 
 export type { JoinError }
 export type { ChatMessage, InstrumentChangeRequest, MyRequestStatus, PerformRequest, PeerNetworkStats, RtcStatus, MixSettings, Recording, SignalStatus, PeerInstrument }
@@ -645,6 +646,11 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     setLocalError(null)
     setIsMiniPlayerMode(false)
   }, [send, session, viewer, mixer, recording, chat, requests])
+
+  // 방에 있는 동안(엔진 시작 전 대기 포함)은 앱 업데이트 설치를 보류한다 (native/updater)
+  useEffect(() => {
+    appUpdater.setInRoom(currentRoomId !== null)
+  }, [currentRoomId])
 
   // --- 연주자 목록 (나 포함) ---
   const peerInstruments = useMemo(() => mergeSelfPerformer(remotePerformers, {

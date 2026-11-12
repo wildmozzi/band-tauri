@@ -2,11 +2,10 @@
  * 데스크톱 자동 업데이트 UI (P2-1).
  * - UpdateNotice: 앱 시작 시 조용히 확인하고, 새 버전이 있으면 하단 배너로 알린다.
  * - UpdateSettingsSection: 설정 화면의 "업데이트 확인" 버튼과 상태.
- * 로직과 연주 중 보류 규칙은 native/updater.ts.
+ * 로직과 연주 중 보류 규칙은 native/updater.ts. 합주실 입장 여부는 RoomProvider가 appUpdater.setInRoom으로 알린다.
  */
 import { useEffect, useState } from 'react'
 import { getVersion } from '@tauri-apps/api/app'
-import { useRoom } from '../room/state/RoomContext'
 import { appUpdater, isUpdaterAvailable, useUpdateStatus, type UpdateStatus } from '../../native/updater'
 import './UpdateNotice.css'
 
@@ -51,13 +50,6 @@ function InstallButton({ status }: { status: UpdateStatus }) {
 /** 앱 루트에 한 번 마운트. 시작 시 1회 확인. */
 export function UpdateNotice() {
   const status = useUpdateStatus()
-  const { currentRoomId } = useRoom()
-
-  // 방에 있는 동안(엔진 시작 전 대기 포함)은 설치를 보류한다.
-  useEffect(() => {
-    appUpdater.setInRoom(currentRoomId !== null)
-  }, [currentRoomId])
-
   useEffect(() => {
     // dev(`tauri dev`)에서는 자동 확인하지 않는다 — 설정 화면 버튼으로만.
     if (!isUpdaterAvailable() || import.meta.env.DEV) return

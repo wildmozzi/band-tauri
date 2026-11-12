@@ -10,7 +10,6 @@ import {
   instrumentUsage,
   levelClass,
   lossQualityIcon,
-  normalizeDetailRoom,
   peerCodecLines,
   peerStatsTitle,
   performerName,
@@ -102,18 +101,6 @@ describe('roomDetailModel', () => {
     expect(recordingExtension('audio/wav')).toBe('wav')
     expect(recordingExtension('audio/webm')).toBe('webm')
     expect(recordingFilename(ts, 'audio/ogg')).toBe('recording_20260102_0304.ogg')
-  })
-
-  it('normalizeDetailRoom: 자유참여 기본 true, 악기 구성 없으면 기본 5슬롯, 있으면 유지', () => {
-    const base = { id: 'r', title: 't', host_id: 'h' }
-    const a = normalizeDetailRoom({ ...base, free_join: null, instrument_slots: null })
-    expect(a.free_join).toBe(true)
-    expect(a.instrument_slots).toHaveLength(5)
-    const b = normalizeDetailRoom({ ...base, free_join: false, instrument_slots: [{ instrument: 'bass', count: 2 }] })
-    expect(b.free_join).toBe(false)
-    expect(b.instrument_slots).toEqual([{ instrument: 'bass', count: 2 }])
-    // 기본 슬롯은 방마다 새 배열(공유 상수를 고치지 않게)
-    expect(normalizeDetailRoom(base).instrument_slots).not.toBe(a.instrument_slots)
   })
 
   it('instrumentUsage / instrumentInfo / performerName', () => {

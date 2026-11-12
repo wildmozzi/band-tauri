@@ -27,7 +27,7 @@ import type { TablesUpdate } from '../../shared/lib/database.types'
 import { isSupabaseConfigured, supabase } from '../../shared/lib/supabaseClient'
 import { fetchRoomById } from './roomApi'
 import type { DbRoom, MyRoom } from './roomModel'
-import { normalizeDetailRoom, type DetailRoom } from '../room/roomDetailModel'
+import { normalizeDetailRoom, type DetailRoom } from './roomModel'
 
 export const roomKeys = {
   all: ['rooms'] as const,
