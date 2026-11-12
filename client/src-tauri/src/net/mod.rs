@@ -739,11 +739,6 @@ impl NetShared {
         self.peer_by_id(peer_id).ok().and_then(|p| p.conn().path.map(|(_, k)| k))
     }
 
-    /// 피어 id → ssrc.
-    pub fn peer_ssrc(&self, peer_id: &str) -> Result<u32, String> {
-        self.peer_by_id(peer_id).map(|p| p.ssrc())
-    }
-
     /// ssrc → peerId. 지금 목록에 없으면 전에 빠진 피어 기록에서 찾는다(녹음 트랙 이름, P2-4).
     pub fn peer_id_for_ssrc(&self, ssrc: u32) -> Option<String> {
         let live = self.peers.read().iter().rev().find(|p| p.ssrc() == ssrc).map(|p| p.id().to_string());

@@ -304,7 +304,7 @@ fn removed_peer_ssrc_still_resolves() {
     let net = net();
     let fake = Fake::new(0x7777_8888);
     add(&net, "carol".into(), &fake.desc()).unwrap();
-    let ssrc = net.shared().peer_ssrc("carol").unwrap();
+    let ssrc = fake.ssrc;
     assert_eq!(net.shared().peer_id_for_ssrc(ssrc).as_deref(), Some("carol"));
     assert!(net.remove_peer("carol").is_some());
     assert_eq!(net.shared().peer_id_for_ssrc(ssrc).as_deref(), Some("carol"), "빠진 피어도 기록에서 찾는다");
