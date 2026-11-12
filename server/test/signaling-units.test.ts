@@ -20,6 +20,8 @@ import { DEFAULT_LIMITS } from '../src/signaling/types'
 import { ScryptGate, hashRoomPassword } from '../src/lib/roomPassword'
 import { createMetronome, metronomeHostChanged } from '../src/signaling/metronome'
 import { createNativeSession } from '../src/signaling/nativeSession'
+import { admitToRoom, handleLeave, type MembershipSvc } from '../src/signaling/membership'
+import type { Ctx } from '../src/signaling/ctx'
 import { sleep } from './helpers'
 
 const OPEN = 1
@@ -463,5 +465,84 @@ describe('nativeSession', () => {
     assert.equal(t.addr, 'relay.example:5000')
     assert.equal(t.ssrc, 5)
     assert.equal(t.expiresAt - t.serverNow, t.expiresIn)
+  })
+})
+
+/** membership 단계 함수용 공용 서비스 (백엔드 없음, 실제 팩토리) */
+function membershipSvc(): MembershipSvc {
+  const registry = createRegistry()
+  const deps: WsDeps = { hasBackend: false, verifyToken: async () => null, fetchRoomMeta: async () => null, updateParticipants: async () => {} }
+  const roomMeta = createRoomMeta(deps, false)
+  return {
+    registry,
+    roomMeta,
+    capacity: createCapacity(registry, DEFAULT_LIMITS),
+    password: createPassword(DEFAULT_LIMITS, new ScryptGate(2, 16)),
+    performers: createPerformers(roomMeta, false),
+    metronome: createMetronome(registry, roomMeta, deps, DEFAULT_LIMITS),
+    nativeSession: createNativeSession(registry, {}),
+    requests: createRequests(),
+    deps,
+    limits: DEFAULT_LIMITS,
+    insecureDevMode: false,
+    resume: { drop: () => {} },
+    participantTimers: new Map(),
+  }
+}
+
+const ctxOf = (svc: MembershipSvc, c: Client): Ctx<MembershipSvc> => ({ ws: c.ws, ip: c.ip, client: c, id: c.id, svc })
+const PLAN = (capacity: number) => ({ isHost: false, passwordHash: null, capacity })
+
+describe('membership (S4-2)', () => {
+  it('admitToRoom — the join section after the last await — is synchronous: not async, returns undefined, room updated on return', () => {
+    assert.notEqual(admitToRoom.constructor.name, 'AsyncFunction')
+    const svc = membershipSvc()
+    const host = fakeClient('h', { userId: 'uh', isHost: true })
+    seat(svc.registry, 'r', host)
+    const me = fakeClient('me', { userId: 'u1' })
+    svc.registry.addClient(me)
+    const ret: unknown = admitToRoom(ctxOf(svc, me), { type: 'join', roomId: 'r', nickname: 'Me' }, 'r', PLAN(5))
+    assert.equal(ret, undefined)
+    assert.equal(me.roomId, 'r')
+    assert.deepEqual(svc.registry.getRoomParticipants('r').map(p => p.oderId).sort(), ['h', 'me'])
+    assert.deepEqual(sentTo(host).map(m => m.type), ['participant-joined'])
+    assert.deepEqual(sentTo(me).map(m => m.type), ['room-state'])
+  })
+
+  it('back-to-back admits see each other: the second one is rejected at capacity', () => {
+    const svc = membershipSvc()
+    seat(svc.registry, 'r', fakeClient('h', { userId: 'uh', isHost: true }))
+    const a = fakeClient('a', { userId: 'ua' })
+    const b = fakeClient('b', { userId: 'ub' })
+    svc.registry.addClient(a)
+    svc.registry.addClient(b)
+    admitToRoom(ctxOf(svc, a), { type: 'join', roomId: 'r' }, 'r', PLAN(2))
+    admitToRoom(ctxOf(svc, b), { type: 'join', roomId: 'r' }, 'r', PLAN(2))
+    assert.equal(a.roomId, 'r')
+    assert.equal(b.roomId, undefined)
+    assert.deepEqual(sentTo(b).map(m => [m.type, m.code]), [['error', 'room-full']])
+  })
+
+  it('handleLeave runs the 2.2 steps in order: request cancels to the host, then participant-left, then empty-room cleanup', () => {
+    const svc = membershipSvc()
+    const host = fakeClient('h', { userId: 'uh', isHost: true })
+    const p = fakeClient('p', { userId: 'up', isPerforming: true, instrument: 'bass' })
+    const v = fakeClient('v')
+    seat(svc.registry, 'r', host, p, v)
+    svc.requests.performRequests.set('r', [{ oderId: 'p', nickname: 'P', instrument: 'drums', timestamp: 0 }])
+    svc.requests.instrumentChangeRequests.set('r', [{ oderId: 'p', nickname: 'P', currentInstrument: 'bass', newInstrument: 'keys', timestamp: 0 }])
+    svc.performers.setApproval('r', 'up', null)
+
+    handleLeave(svc, p, 'r', 'close')
+    assert.deepEqual(sentTo(host).map(m => m.type), ['perform-request-cancelled', 'instrument-change-request-cancelled', 'participant-left'])
+    assert.deepEqual(sentTo(v).map(m => m.type), ['participant-left'])
+    assert.equal(svc.capacity.hasSeatHold('r', 'up'), true, 'performer dropped by close keeps a seat')
+    assert.equal(svc.performers.hasApproval('r', 'up'), true, 'approval kept for the grace period')
+
+    handleLeave(svc, host, 'r', 'leave')
+    handleLeave(svc, v, 'r', 'leave')
+    assert.equal(svc.registry.roomSize('r'), 0)
+    assert.equal(svc.registry.rooms.has('r'), false, 'empty room removed')
+    assert.equal(svc.requests.performRequests.has('r'), false)
   })
 })

@@ -90,7 +90,18 @@ export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, dep
     send(c.ws, { type: 'metronome', from: now.hostId, state: now.state })
   }
 
-  return { metronomes, broadcastMetronomeStop, dropMetronomeIfHostChanged, replayMetronome }
+  /** 퇴장 정리 단계 (membership.leave, 설계 2.2절): 방장이 나가면 메트로놈 시각 기준(방장 엔진 시계)이 사라진다.
+   *  따르는 쪽은 participant-left로 스스로 멈춘다(알림 없음) */
+  function onMemberLeft(roomId: string, clientId: string) {
+    if (metronomes.get(roomId)?.hostId === clientId) metronomes.delete(roomId)
+  }
+
+  /** 방이 비었을 때 */
+  function onRoomEmpty(roomId: string) {
+    metronomes.delete(roomId)
+  }
+
+  return { metronomes, broadcastMetronomeStop, dropMetronomeIfHostChanged, replayMetronome, onMemberLeft, onRoomEmpty }
 }
 
 export type Metronome = ReturnType<typeof createMetronome>

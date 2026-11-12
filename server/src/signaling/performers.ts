@@ -1,8 +1,8 @@
 import type { Ctx } from './ctx'
-import { sanitizeNickname, type Msg } from './protocol'
+import { APPROVAL_GRACE_MS, sanitizeNickname, type Msg } from './protocol'
 import { isAuthenticated, isPerformer, send, type Registry } from './registry'
 import type { RoomMetaStore } from './roomMeta'
-import type { Client, WsLimits } from './types'
+import type { Client, LeaveReason, WsLimits } from './types'
 
 /**
  * 연주 권한·승인 기록 (설계 docs/server-architecture.md 2.1절 F, 계층 2).
@@ -46,7 +46,21 @@ export function createPerformers(roomMeta: RoomMetaStore, insecureDevMode: boole
     return !!meta && meta.freeJoin
   }
 
-  return { approvals, hasApproval, setApproval, clearApproval, canStartPerforming }
+  /**
+   * 퇴장 정리 단계 (membership.leave, 설계 2.2절): 명시적 퇴장/방 이동은 승인 즉시 삭제, 연결 끊김은 재접속 유예 후 만료,
+   * 중복 연결 정리는 유지. 정리 뒤에도 승인 기록이 남아 있으면 true (자리 예약 판정에 쓴다 — 만료 여부는 보지 않는 원래 판정).
+   */
+  function onLeave(client: Client, roomId: string, reason: LeaveReason): boolean {
+    if (!client.userId) return false
+    if (reason === 'leave' || reason === 'move') {
+      clearApproval(roomId, client.userId)
+    } else if (reason === 'close' && approvals.get(roomId)?.has(client.userId)) {
+      setApproval(roomId, client.userId, Date.now() + APPROVAL_GRACE_MS)
+    }
+    return approvals.get(roomId)?.has(client.userId) ?? false
+  }
+
+  return { approvals, hasApproval, setApproval, clearApproval, canStartPerforming, onLeave }
 }
 
 export type Performers = ReturnType<typeof createPerformers>
