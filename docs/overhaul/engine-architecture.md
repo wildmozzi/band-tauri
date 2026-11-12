@@ -2,6 +2,7 @@
 
 데스크톱 엔진(`client/src-tauri/src/`)을 어떻게 나누고, 누가 누구를 알아도 되고, 스레드끼리 무엇으로 주고받는지 정한다.
 
+- **결정 기준**: [../ARCHITECTURE-DECISIONS.md](../ARCHITECTURE-DECISIONS.md)(ADR, 코디네이터). 이 문서는 그 결정의 상세 설계다. 다르면 ADR이 맞고 이 문서를 고친다. ADR에 없는 세부는 여기서 정한다.
 - 이 문서: **구조**(모듈 지도·계층·의존 방향·스레드·공유 상태·공개 표면)의 기준. 파일 목록은 여기 한 곳에만 둔다.
 - [native-engine-design.md](native-engine-design.md): **계약**(패킷 포맷, Tauri 커맨드, `EngineStats` JSON, 지터·믹스 동작 규칙). 이 문서는 계약을 바꾸지 않는다.
 - [engine-notes.md](engine-notes.md): 구현 메모·측정 기록.
@@ -65,6 +66,7 @@
 | `band-net-ctrl` | `net/mod.rs` | 홀펀칭·Ping·타임아웃·DSCP·송신 지연 창, net 수명 | 기본 | stop 원자값, join |
 | `band-stun-dns` | `net/stun.rs` | STUN 서버 이름 해석, 시작 동안 | 기본 | 시간 제한 뒤 버림 |
 | `band-diag` | `diag/mod.rs` | 1초 타임라인 기록, 앱 수명 | 기본 | stop 원자값 + Condvar, join |
+| `band-fake-in`, `band-fake-out` | `device.rs`(`device::fake`) | 가짜 장치(통합 테스트·측정 도구), 스트림 수명 | 기본 | stop 원자값, join. 릴리스에 들어가 있음 → ⑨에서 `test-support` 피처 뒤로 |
 | 측정 | `manager.rs`(커맨드 스레드에서 블로킹) | 루프백·에코 측정 동안 | 기본 | 취소 원자값 |
 | 커맨드 | Tauri | 요청마다(`spawn_blocking`) | 기본 | — |
 
@@ -127,10 +129,12 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 ### 5.1 규칙(검사: `tests/architecture.rs`)
 
-1. 노드는 **자기 계층 이하**만 쓴다(같은 계층 허용). 같은 계층에서 서로 쓰는 2-순환은 금지.
+1. 노드는 **자기 계층 이하**만 쓴다(같은 계층 허용). 같은 계층의 순환은 길이와 무관하게 금지(강한 연결 요소로 검사, ADR D2의 "2-순환 금지"보다 강하다). 예외 간선은 "그 단계에서 끊을 간선"으로 보고 빼고 검사한다.
+   부모 모듈이 자식을 상대 경로(`use peer::…`)로 쓰는 간선도 센다 — 부모↔자식 순환(③ `Peer` 분해에서 생기기 쉬움)을 잡는다.
 2. 어댑터(6)는 제어 평면과 계약 DTO를 가진 노드만 쓴다(`ADAPTER_MAY_USE`). 로직은 제어 평면에서 부른다.
-3. 지금 어긋난 간선은 `EXCEPTIONS`에 **풀 단계**와 함께 적는다. 단계를 끝내 간선이 사라지면 예외도 지워야 테스트가 통과한다(목록이 실제와 늘 같다).
-4. 단위 테스트 모듈(`#[cfg(test)] mod tests`)은 보지 않는다.
+3. **예외 래칫**: 지금 어긋난 간선은 `EXCEPTIONS`에 풀 단계와 함께 고정돼 있다. 목록 밖 위반은 0, 목록 안 항목이 해소되면 실패(지우고 `MAX_EXCEPTIONS`를 내린다), 풀 단계는 열린 단계(`OPEN_STAGES`)만.
+   **새 예외 추가는 금지**: 새 어긋남은 고친다. 꼭 필요하면 PR 본문에 사유를 적고 리뷰에서 High로 다룬다(`MAX_EXCEPTIONS`를 올려야 하므로 diff에 드러난다).
+4. 단위 테스트 모듈(`#[cfg(test)] mod tests`)은 보지 않는다. 검사기 전제(테스트 모듈은 파일 끝, 원시 문자열 처리)는 `parser_assumptions_hold`가 확인한다.
 5. 하위 모듈 사이: 형제 모듈은 서로의 `pub(super)` 항목만 쓴다. 구현이 하나뿐인 trait·제네릭은 만들지 않는다(`AudioBackend`처럼 구현이 둘 이상인 경우만).
 
 노드와 계층(허용 간선 행렬 = 행의 계층 이하 열 전부):
@@ -147,9 +151,9 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 `net::peer → engine::jitter`(3 → 1)처럼 **아래로 가는 간선은 의존 규칙상 허용**이다. 그 간선의 문제는 의존이 아니라 공유 상태(4.1절: 여러 계층이 `Peer`의 락을 직접 잡음)이고, ③이 그것을 다룬다.
 
-### 5.2 크레이트 분리(장기)
+### 5.2 크레이트 분리
 
-컴파일러가 순환을 막는 유일한 방법은 크레이트 분리(`band-dsp`, `band-net` 등)다. 과분할 위험이 있어 지금은 하지 않는다. ③ 뒤 예외가 0이 되면 검토한다.
+컴파일러가 순환을 막는 유일한 방법은 크레이트 분리다. 마지막 단계 ⑩으로 한다(9절: `band-dsp` · `band-engine` · 앱 3개). 그 전까지는 이 테스트가 막는다.
 
 ### 5.3 현재 어긋남
 
@@ -163,6 +167,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine::device` ↔ `engine::wasapi` | 공용 타입(`StreamInfo`·`DeviceInfo`)과 백엔드 선택이 한 파일 | ⑥ |
 | `engine::rt` ↔ `engine::record` | 녹음 RT 링과 쓰기 쪽이 한 파일, rt의 소스 상수를 record가 씀 | ⑥ |
 | `manager` ↔ `diag`, `diag::export` → `manager` | diag가 수집 대상(`EngineManager`)을 직접 앎 | ⑤ |
+| `engine` → `diag` (`engine` ↔ `manager` ↔ `diag` 3-순환) | `Engine`이 진단의 시각 함수(`now_ms`)를 씀 | ④ (`sys::time`) |
 | `commands` → `net::relay`(`resolve_relay_addr` DNS 해석), `commands` → `engine::mixer`(`clamp_gain`) | 어댑터에 로직 | ⑦ |
 
 간선 그래프에 안 보이는 어긋남:
@@ -227,7 +232,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 정책:
 
 1. **공개 표면**: `manager::EngineManager`, `commands`, 계약 DTO(`EngineConfig`, `EngineStats`·`PeerStats`, `LocalDescriptor`, 측정·녹음 보고). 나머지는 `pub(crate)`가 목표다.
-2. **테스트 표면**: 통합 테스트·측정 도구가 쓰는 내부는 `test-support` 피처(`#[cfg(any(test, feature = "test-support"))]`)의 `testing` 모듈 한 곳에서 다시 내보낸다. `device::fake`와 측정 훅도 그 피처 뒤로. 개발 의존성에서 `band = { path = ".", features = ["test-support"] }`로 켠다. 단계 ⑨.
+2. **테스트 표면**: 통합 테스트·측정 도구가 쓰는 내부는 `test-support` 피처(`#[cfg(any(test, feature = "test-support"))]`)의 `testing` 모듈 한 곳에서 다시 내보낸다. 개발 의존성에서 `band = { path = ".", features = ["test-support"] }`로 켠다. `device::fake`는 작아서 ②a에서 먼저 피처 뒤로 옮기고(예제 `examples/`·측정 도구도 그 피처로), 나머지(측정 훅, `testing` 모듈)는 ⑨.
 3. **R-1 ①②의 가시성**: 새 하위 모듈은 private, 형제 간에는 `pub(super)`. **기존 공개 경로는 `pub use`로 유지**한다(예: `engine::jitter::{JitterBuffer, JitterSettings, JitterStats, shift_one, MAX_CORR_RATE, TARGET_GRID, correction_*}`, `engine::worker::{CallbackTracker, OUT_CHUNK, …}`). 그래서 ①②는 `tests/`를 바꾸지 않는다. 하네스가 쓰는 워커 내부(폴링 주기 등)는 `pub(in crate::engine)`.
 4. ⑨에서 영향받는 테스트: `loopback`·`cpu_profile`·`measure`·`record`·`metronome`·`rt_alloc`·`net_recv`·`nonce`·`peer_key`·`send_queue`·`relay`·`loss_feedback`·`stun`(목록은 `grep -h "band_lib::" tests/*.rs`).
 5. 이름: `EngineManager::test_start/test_stop`은 제품 기능(네트워크 없는 모니터 모드)이다. 테스트 전용으로 오해되지 않게 ⑨에서 `start_monitor_only` 등으로 바꾼다(커맨드 이름 `engine_test_start`는 계약이라 유지).
@@ -242,28 +247,53 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 ## 9. 단계와 증거
 
-동작·성능·계약은 모든 단계에서 그대로다. **이동 PR과 재배치 PR을 나눈다.** 위험이 낮은 것부터.
+동작·성능·계약은 모든 단계에서 그대로다. **이동 PR과 재배치 PR을 나눈다.** 순서는 소유권을 먼저 정하고 그 위에 구조를 얹는다 — 같은 코드를 두 번 손대지 않게.
 
-| 단계 | 종류 | 내용 |
+| 순서 | 단계 | 종류 | 내용 |
+|---|---|---|---|
+| 1 | ⓪ | 문서·검사 | 이 문서, `tests/architecture.rs`(의존 규칙), 5분 하네스 기준값 fixture(9.1) |
+| 2 | ① | 이동 | `jitter.rs` → `jitter/`(`impl JitterBuffer`를 응집 단위 파일로, 테스트 분리). 하네스 → `engine/sim/`. 필드는 한 구조체에 남는다 |
+| 3 | ②a | 이동 | `worker.rs` → `worker/`: 독립 타입(`DeviceClock`·`CallbackTracker`·`FeedTiming` → `clock.rs`, `LocalFifo` → `local.rs`, `PeerFeed` → `peer_feed.rs`)과 테스트 이동. `device::fake`를 `test-support` 피처 뒤로(7절) |
+| 4 | ④ | 이동 | 컴파일 결합을 먼저 끊는다(싸다): `stats.rs`를 원자 카운터와 보고 DTO로, `Engine::stats()` 조립을 `engine/report.rs`로. 공용 타입(`PathKind`, `PeerStateKind`, `CodecReason`, 릴레이 상태)을 아래 계층으로. `prio`·`cpuprof`·시간(12절)을 공용 `sys/`로 |
+| 5 | ③ | 재배치 + 측정 | **`Peer` 분해, 미디어 상태 워커 단일 소유**(아래) |
+| 6 | ②b | 재배치 | ③이 정한 소유권 위에서 `Worker` 필드를 단계별 구조체(`Capture`, `AutoCodec`, `PeerSources`, `LocalPath`, `BeatSched`, `DeviceWatch`)로 나누고 루프를 얇은 조정자로 |
+| 7 | ⑤ | 재배치 | `diag`는 `manager` 대신 스냅샷 함수(클로저)를 받는다. `diag::mask`는 계층 1 공용, `record`는 가명화 함수만 |
+| 8 | ⑥ | 이동 | 혼합·큰 파일 나누기: `metronome` → `{plan, sched, click}`, `record` → `{rt_ring, writer, sidecar}`, `measure` → `{loopback, echo, analysis}`, `device` → `{select, cpal, fake, types}`, `wasapi` → `{enumerate, stream}`, `net/mod.rs` → `{send, recv_loop, control_loop}`, `net/peer.rs` → `{table, punch, loss_report}` |
+| 9 | ⑦ | 재배치 | `commands.rs`의 로직(녹음 폴더 설정, 릴레이 DNS 해석, 게인 자르기)을 `manager`·설정 모듈로. ⑥에서 DTO가 `types` 같은 파일로 갈라지면 `ADAPTER_MAY_USE`를 그 DTO 노드로 좁힌다. |
+| 10 | ⑧ | 재배치 | `jitter/`의 필드 묶음을 하위 상태 구조체로(`LateBudget`, `DelayStats` 등, `late_budget`·`target` 결합도를 보고 합칠지 정함). 수명 상태기계(11절)를 `manager`의 명시적 enum으로 — 코드를 문서에 정렬 |
+| 11 | ⑨ | 재배치 | 공개·테스트 표면(7절): `pub(crate)`, `testing` 모듈, 측정 훅을 `test-support` 뒤로. 이름 정리는 선택 |
+| 12 | ⑩ | 크레이트 분리 | 아래 |
+
+### ③ 목표(확정)
+
+- **종착**: net 수신 → 피어별 SPSC 큐(헤더·페이로드·**도착 µs**) → 워커가 `insert` + `pop`. **지터 `Mutex` 제거**, `JitterBuffer`는 워커 단일 소유.
+  - 도착 시각을 큐에 실으므로 지연 통계·지터 추정(`transit = 도착 − ts`)은 그대로다. 달라지는 것은 워커가 패킷을 **보는** 시각뿐: 최대 1 폴링 주기(`POLL` 500µs, 마감 근처 `FINE_POLL` 150µs) 늦게 `real_frames`에 잡힌다. 은닉 마감 여유(1.5ms)보다 작다.
+  - 증거: 5분 하네스 fixture 동일(하네스는 가상 시간에서 삽입 시각 = 도착 시각이라 그대로여야 한다) + 루프백 실시간 은닉률·버퍼 지연 같은 범위 + 폴링 주기를 하네스에 넣은 지연 민감도(삽입을 0/150/500µs 늦췄을 때 은닉 변화) 수치.
+  - 큐가 차면(워커 정지 등) 수신이 버리고 센다(RT 링과 같은 규칙).
+- **`Peer` 분해**: net 소유(주소·암호·`conn`·`clock`·`echo`·`remote_loss`, 접근은 메서드)와 미디어 소유(`JitterBuffer`·`PeerMixCtl`·지터 설정, 워커).
+- **통계**: 워커가 피어별 지터 통계를 원자 스냅샷으로 발행한다. net 제어(Ping 손실 보고)·`Engine::stats()`·에코 측정은 그것만 읽는다 → 기본 우선순위 스레드가 준RT 락을 잡는 경로가 없어진다(4.3절 3).
+- **명령**: 프로필 변경·`restart`(에코 모드 전환)는 워커로 가는 명령(원자값·SPSC)으로.
+- 중간 단계 (b)(소유만 엔진 쪽 `Arc<PeerMedia>`로 옮기고 Mutex 유지)는 PR 크기를 나누는 데만 쓰고 종착이 아니다.
+
+### ⑩ 크레이트 분리(마지막 단계)
+
+컴파일러가 순환을 막는 유일한 방법이다. 셋만 만든다(과분할 금지).
+
+| 크레이트 | 내용 | 의존 |
 |---|---|---|
-| ⓪ | 문서·검사 | 이 문서, `tests/architecture.rs`(의존 규칙 검사) |
-| ① | 이동 | `jitter.rs` → `jitter/`(`impl JitterBuffer`를 응집 단위 파일로, 테스트 분리). 하네스 → `engine/sim/`. 필드는 한 구조체에 남는다 |
-| ②a | 이동 | `worker.rs` → `worker/`: 독립 타입(`DeviceClock`·`CallbackTracker`·`FeedTiming` → `clock.rs`, `LocalFifo` → `local.rs`, `PeerFeed` → `peer_feed.rs`)과 테스트 이동 |
-| ②b | 재배치 | `Worker` 필드를 단계별 구조체(`Capture`, `AutoCodec`, `PeerSources`, `LocalPath`, `BeatSched`, `DeviceWatch`)로 나누고 루프를 얇은 조정자로 |
-| ④ | 이동 | `stats.rs`를 원자 카운터와 보고 DTO로, `Engine::stats()` 조립을 `engine/report.rs`로. 공용 타입(`PathKind`, `PeerStateKind`, `CodecReason`, 릴레이 상태)을 아래 계층으로. `prio`·`cpuprof`·시간 함수(`diag::now_ms`)를 공용 `sys/`로 |
-| ⑤ | 재배치 | `diag`는 `manager` 대신 스냅샷 함수(클로저)를 받는다. `diag::mask`는 계층 1 공용으로 두고 `record`는 가명화 함수만 쓴다 |
-| ③ | 재배치 + 측정 | **`Peer` 분해**: net 소유(주소·암호·`conn`·`clock`·`echo`·`remote_loss`)와 미디어 소유(`JitterBuffer`·`PeerMixCtl`·지터 설정)로 나누고 접근은 메서드로. 지터 락을 기본 우선순위 스레드에서 끊는다: 워커가 피어별 통계 원자 스냅샷을 내고, net 제어(손실 보고)·통계·에코 측정은 그것만 읽는다. 프로필 변경·`restart`는 워커로 가는 명령(원자값/큐). 그 뒤 수신 삽입 경로 선택: (b) 소유만 엔진 쪽 `Arc<PeerMedia>`로 옮기고 Mutex 유지(동작 동일) 먼저, (a) net 수신 → 피어별 SPSC 큐(도착 시각 포함) → 워커 삽입(락 제거, `real_frames` 반영이 최대 폴링 1주기 늦음)은 측정 뒤 |
-| ⑥ | 이동 | 혼합·큰 파일 나누기: `metronome` → `{plan, sched, click}`, `record` → `{rt_ring, writer, sidecar}`, `measure` → `{loopback, echo, analysis}`, `device` → `{select, cpal, fake, types}`, `wasapi` → `{enumerate, stream}`, `net/mod.rs` → `{send, recv_loop, control_loop}`, `net/peer.rs` → `{table, punch, loss_report}` |
-| ⑦ | 재배치 | `commands.rs`의 로직(녹음 폴더 설정, 릴레이 DNS 해석, 게인 자르기)을 `manager`·설정 모듈로 |
-| ⑧ | 재배치 | `jitter/`의 필드 묶음을 하위 상태 구조체로(`LateBudget`, `DelayStats` 등). `late_budget`과 `target`의 결합도를 보고 합칠지 정한다 |
-| ⑨ | 재배치 | 공개·테스트 표면(7절): `pub(crate)`, `test-support` 피처, 이름 정리 |
+| `band-dsp` | 계층 0·1: `config`, `packet`, `crypto`, `codec`, `resample`, `jitter`, `mixer`(함수), `net::clock`, `relay_codec`, 통계 카운터. **스레드·소켓·장치 없음** | opus, rubato 등 순수 라이브러리 |
+| `band-engine` | 계층 2~5: RT·장치, 네트워크, 워커, 제어 평면 | `band-dsp`, cpal, windows |
+| 앱(`band`) | 계층 6: Tauri 어댑터 | `band-engine`, tauri |
 
-### 9.1 단계별 동작 불변 증거
+- 결정적 하네스(`engine/sim`)는 lib 안 `cfg(test)`가 아니라 `band-dsp`(와 워커 공급 로직)를 쓰는 별도 dev 크레이트/tests로 옮긴다 → 60분 하네스가 cpal·tauri 없이 컴파일되어 CI·로컬 메모리 부담이 준다. 워커 공급(`PeerFeed`, `DeviceClock`)이 장치 의존 없이 `band-dsp` 쪽에 설 수 있는지는 ②b·③ 뒤에 정한다.
+- 분리 뒤 `tests/architecture.rs`는 크레이트 안 간선만 본다(크레이트 사이는 컴파일러가 막는다).
+
+### 9.1 단계별 동작 불변 증거(각 단계 PR 본문에 이 표를 전/후 수치로 채운다)
 
 | 범위 | 증거 | 기준 |
 |---|---|---|
 | 공통 | `cargo clippy --all-targets -- -D warnings`, `cargo test`, `tests/architecture.rs` | 녹색, 예외 목록이 단계만큼 줄어듦 |
-| 지터·워커(①②⑧, ③ 공급 경로) | 5분 하네스 리포트(`sim-report-*.json`, 결정적) | **지표 숫자 전부 동일**(JSON에서 실행 시각·경과 시간 필드를 뺀 나머지 바이트 동일) |
+| 지터·워커(①②③⑧) | 5분 하네스: `long_sim_6peers_5min`이 리포트 JSON에서 `wallSeconds`를 뺀 나머지를 **`tests/fixtures/sim-report-short-5min.json`과 비교해 다르면 실패**(자동, 수동 비교 없음) | 바이트 동일. 동작을 의도적으로 바꾸는 PR만 fixture를 갱신하고 본문에 차이를 적는다(`SIM_UPDATE_FIXTURE=1`) |
 | | 60분 하네스 | PASS(같은 판정) |
 | | 루프백 실시간(`link_matrix_*`, `loopback_loss5_*`) | 버퍼 지연·은닉률이 기준 실행과 같은 범위(실시간이라 잡음 있음) |
 | | `cargo test --release --test cpu_profile` | 워커 CPU·콜백 사용률 ±5% |
@@ -286,3 +316,59 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 상태마다 쓰는 쪽은 하나(single writer) | lock-free 설계 일반 | RT 경계(링·원자값)는 지킨다. **`Peer`(지터 락·Mutex 4개)는 지키지 않는다**(4.1절) — ③에서 미디어 상태를 워커 단일 소유로 |
 | 의존은 정책 → 메커니즘 한 방향, 순환 없음 | Clean Architecture 의존 규칙, 비순환 의존 원칙(ADP) | 5절 규칙을 `tests/architecture.rs`가 검사, 현재 예외는 단계와 함께 관리 |
 | 결정적 시뮬레이션으로 동작 고정 | NetEQ 시뮬레이터, 가상 시간 하네스 | `engine/sim`(5분 기본 테스트, 60분 야간), 리포트 숫자가 같으면 동작 불변 |
+
+## 11. 엔진 수명 상태기계
+
+지금 규칙은 `manager.rs`(슬롯·세대 번호), `Engine`(스레드 소유·`deviceLost` 보고), 프론트 `performSession.ts`(시그널링·재시작 판단)에 흩어져 있다. 상태와 전이를 여기 한 곳에 둔다. ⑧에서 `manager`가 이 상태를 명시적 enum으로 갖는다(지금은 `Slot { engine, starting, generation, cancel }` 조합으로 표현).
+
+```text
+          start(cfg, peer?) / test_start(cfg)            Engine::start 성공(세대 일치)
+  Idle ───────────────────────────────────▶ Starting ─────────────────────────────▶ Running
+   ▲  ▲                                     │  │ 실패 / 세대 불일치(stop·다른 start가 끼어듦)   │  ▲
+   │  └─────────────────────────────────────┘  └─▶ Idle(결과 버림, 장치 놓은 뒤)               │  │ 장치 복귀(콜백 재개)
+   │                                                                                  장치 분실│  │
+   │                stop() / test_stop() / Drop                                    (콜백 1초 정지,│  │
+   └──────────────────────── Stopping(락 밖 join: 워커→net→오디오→탭·녹음 마무리) ◀── 무효화 HRESULT)▼  │
+                                         ▲                                          Degraded(deviceLost)
+                                         └──────────────────────────────────────────────┘
+```
+
+| 상태 | 뜻 | `manager` 표현 | 보고 |
+|---|---|---|---|
+| Idle | 엔진 없음 | `engine = None`, `starting = false` | 커맨드가 "실행 중이 아님" |
+| Starting | 장치 열기·STUN·스레드 시작 중(블로킹, `start_lock` 직렬화) | `starting = true`, `cancel = Some` | 커맨드가 "시작 중" |
+| Running | 정상 | `engine = Some` | `running = true` |
+| Degraded | 장치 분실(콜백 1초 정지, WASAPI 무효화 HRESULT, 기본 장치 변경). 엔진 객체는 남음 | `engine = Some` | `deviceLost = true`, `running = false` |
+| Stopping | 슬롯에서 꺼낸 엔진을 락 밖에서 drop(join) | 슬롯 밖 지역 변수 | — |
+
+- **세대 번호**: `start`/`stop`마다 오른다. 블로킹 시작이 끝났을 때 세대가 다르면 결과를 버리고(`start_lock`을 쥔 채 정지해 장치를 놓은 뒤) "취소됨"을 돌려준다. 이전 시작은 `cancel` 원자값으로 일찍 포기한다.
+- **누가 전이시키는가**: Idle↔Starting↔Running·Stopping은 커맨드(`manager`). Running↔Degraded는 엔진 스레드(워커의 장치 감시, `band-wasapi`)가 원자값으로 보고만 하고, 정지·재시작 결정은 프론트(`performSession`: `running=false`가 이어지면 정지, L7)가 한다. 엔진이 스스로 재시작하지 않는다(자체 WASAPI의 일시 오류 스트림 재시작은 Running 안의 일).
+- **사례**:
+
+| 사례 | 전이 | 비고 |
+|---|---|---|
+| 연주 시작 / 테스트 모드 | Idle → Starting → Running | 테스트 모드는 net 없음, 모니터 강제 켬(끝나면 복원) |
+| 시작 중 다시 시작·정지 | Starting → (세대 불일치) → 새 Starting / Idle | 이전 결과 버림 |
+| 장치 분리 | Running → Degraded → (프론트) stop → Idle | 장치가 돌아오면 Degraded → Running |
+| `ssrc-conflict` / `key-conflict` | Running → Stopping → Starting → Running(새 ssrc·키) | 프론트 `performSession.restart`. key-conflict가 30초 안에 반복되면 Idle |
+| WS 재연결 실패(새 clientId) | Running → 재시작(위와 같음) | `resumed`면 엔진 유지(전이 없음) |
+| 방장 엔진 재시작(메트로놈) | 방장: 위 재시작. 다른 연주자: 엔진 전이 없음, 피어 교체(remove+add) | 기준 피어의 시계 추정(`ClockSync`)이 새로 수렴할 때까지 메트로놈 `synced = false` |
+| 앱 종료 | 모든 상태 → Stopping → Idle | `EngineState::shutdown`, `Drop` |
+
+## 12. 시간 기준
+
+지금 네 가지가 섞여 있다.
+
+| 시계 | 단위·기원 | 쓰는 곳 |
+|---|---|---|
+| `Instant`(QPC) | 단조, 기원 없음 | RT 실행시간, 송신 큐 지연, 타임아웃 |
+| net epoch `now_us` | 단조 µs, `NetShared.epoch`(net 시작 시각) | 지터 도착 시각, Ping/Pong, `ClockSync`, 메트로놈 `startUs`, 워커 `FeedTiming.wall_us`(`Engine.epoch` = net epoch) |
+| 장치 클럭 추정(`DeviceClock`) | µs, 같은 epoch 위의 **출력 콜백 시각 추정** | 지터 깊이 측정, 은닉 마감, 메트로놈 박 위치 |
+| 벽시계 `diag::now_ms` | Unix ms | 진단 타임라인, 녹음 파일 이름·사이드카 |
+
+규칙:
+
+1. 엔진·net 안의 시각은 **단조 µs 하나**: `sys::time`(④)의 엔진 epoch에서 잰 값. 함수 인자·필드 이름에 단위를 붙인다(`_us`, `_frames`). `Instant`는 구간 측정에만, epoch 변환은 `sys::time` 한 곳에서.
+2. 장치 클럭 추정은 같은 µs 축 위의 "다른 사건 시각"이다(새 시계가 아님). 깊이 측정·마감 판단은 이것만, 벽시계 기상 시각은 진단(`wall_buffer_ms`)에만.
+3. **벽시계(Unix)는 경계에서만**: `diag`(타임라인·내보내기)와 녹음 파일 이름. 엔진·net 로직은 벽시계를 읽지 않는다(시계 조정·NTP 점프에 무관해야 한다). 단, 릴레이 토큰 만료처럼 서버와 맞추는 값은 net이 받는 순간 단조 시각으로 바꿔 둔다.
+4. 피어 시계 사이 변환은 `net::clock::ClockSync`만 한다(오프셋·드리프트).

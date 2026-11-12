@@ -1,11 +1,19 @@
 //! 모듈 의존 방향 검사(`docs/overhaul/engine-architecture.md` 5절).
 //!
-//! `src/**/*.rs`의 `use`·경로(`crate::…`, `super::…`)를 읽어 모듈 노드 사이 간선을 만들고 두 규칙을 본다.
-//! 1. 계층: 노드는 자기 계층 이하만 쓴다(같은 계층 허용, 단 서로 쓰는 2-순환은 금지). 어댑터(6)는 `ADAPTER_MAY_USE`만.
-//! 2. 예외: 지금 어긋난 간선은 `EXCEPTIONS`에 "풀 단계"와 함께 적는다. 단계를 끝내 간선이 사라졌는데 예외가 남아
-//!    있으면 실패한다(목록이 늘 실제와 같게).
+//! `src/**/*.rs`의 `use`·경로(`crate::…`, `super::…`, `self::…`, 자식 모듈 이름으로 시작하는 상대 경로)를 읽어
+//! 모듈 노드 사이 간선을 만들고 규칙을 본다.
+//! 1. 계층: 노드는 자기 계층 이하만 쓴다. 같은 계층은 허용하되 순환(강한 연결 요소, 길이 무관)은 금지.
+//!    어댑터(6)는 `ADAPTER_MAY_USE`만.
+//! 2. 예외 래칫: 지금 어긋난 간선은 `EXCEPTIONS`에 "풀 단계"와 함께 고정돼 있다.
+//!    - 목록 밖 위반은 0이어야 한다. **새 예외 추가는 금지**: 새 어긋남은 고친다. 꼭 필요하면 PR 본문에 사유를 적고
+//!      리뷰에서 High로 다룬다(`MAX_EXCEPTIONS`를 올려야 해서 diff에 보인다).
+//!    - 목록 안 항목이 해소되면(간선이 사라지면) 실패한다 → 지우고 `MAX_EXCEPTIONS`를 내린다.
+//!    - 풀 단계는 아직 열린 단계(`OPEN_STAGES`)여야 한다.
 //!
-//! 단위 테스트 모듈(`#[cfg(test)] mod tests { … }` 이후)은 보지 않는다. 테스트 코드는 계층을 건너 도우미를 쓸 수 있다.
+//! 파서 전제(어기면 `parser_assumptions_hold`가 실패):
+//! - 단위 테스트 모듈 `#[cfg(test)] mod tests { … }`는 파일 끝에 있다. 그 안은 보지 않는다(테스트는 계층을 건너 도우미를 쓸 수 있다).
+//! - 원시 문자열 `r"…"`, `r#"…"#`는 지운다(`#` 개수 일치). 주석·문자열·문자 리터럴 안의 경로는 간선이 아니다.
+//!
 //! 간선 목록 보기: `cargo test --test architecture -- --nocapture`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,7 +67,7 @@ const NODES: &[(&str, u8)] = &[
     ("main", 6),
 ];
 
-/// 현재 어긋남: (from, to, 풀 단계). 위 계층으로 가는 간선, 같은 계층 2-순환(양쪽 다 적는다), 어댑터의 직접 의존.
+/// 현재 어긋남(고정): (from, to, 풀 단계). 위 계층으로 가는 간선, 같은 계층 순환을 끊을 간선, 어댑터의 직접 의존.
 /// 문서 5.3절 표와 같다. 단계를 끝내면 여기서 지운다(남아 있으면 `module_dependencies_follow_layers`가 실패).
 const EXCEPTIONS: &[(&str, &str, &str)] = &[
     // 보고 DTO(stats)가 위 계층 타입을 모은다 → ④ stats를 원자 카운터와 보고 DTO로 나눈다.
@@ -82,10 +90,18 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[
     ("diag", "manager", "⑤"),
     ("diag::export", "manager", "⑤"),
     ("manager", "diag", "⑤"),
+    // Engine이 diag의 시각 함수(now_ms)를 쓴다 → engine ↔ manager ↔ diag 순환. ④ 시간을 sys::time으로.
+    ("engine", "diag", "④"),
     // 어댑터의 로직: 릴레이 주소 DNS 해석, 게인 범위 자르기 → ⑦ manager 쪽으로.
     ("commands", "net::relay", "⑦"),
     ("commands", "engine::mixer", "⑦"),
 ];
+
+/// 예외 수 상한(래칫). 단계를 끝내 예외를 지우면 이 값도 내린다. 올리는 것은 금지(위 주석).
+const MAX_EXCEPTIONS: usize = 17;
+
+/// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
+const OPEN_STAGES: &[&str] = &["③", "④", "⑤", "⑥", "⑦"];
 
 /// 어댑터(계층 6)가 쓸 수 있는 노드: 제어 평면과 계약 DTO(설정·보고·디스크립터)를 가진 모듈만. 로직은 제어 평면에서 부른다.
 const ADAPTER_MAY_USE: &[&str] = &[
@@ -181,6 +197,9 @@ fn strip(src: &str) -> String {
                 i += 1;
             }
             i += 2;
+        } else if let Some(end) = raw_string_end(b, i) {
+            i = end;
+            out.push_str("\"\"");
         } else if b[i] == b'"' {
             i += 1;
             while i < b.len() && b[i] != b'"' {
@@ -208,6 +227,57 @@ fn strip(src: &str) -> String {
         }
     }
     out
+}
+
+/// `i`가 원시 문자열(`r"…"`, `r#"…"#`, `br"…"`) 시작이면 그 끝 다음 위치.
+fn raw_string_end(b: &[u8], i: usize) -> Option<usize> {
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let byte_prefix = i > 0 && b[i - 1] == b'b' && (i < 2 || !ident(b[i - 2]));
+    if b[i] != b'r' || (i > 0 && ident(b[i - 1]) && !byte_prefix) {
+        return None;
+    }
+    let mut j = i + 1;
+    let mut hashes = 0;
+    while b.get(j) == Some(&b'#') {
+        hashes += 1;
+        j += 1;
+    }
+    if b.get(j) != Some(&b'"') {
+        return None;
+    }
+    j += 1;
+    while j < b.len() {
+        if b[j] == b'"' && b[j + 1..].iter().take(hashes).filter(|&&c| c == b'#').count() == hashes {
+            return Some(j + 1 + hashes);
+        }
+        j += 1;
+    }
+    Some(b.len())
+}
+
+/// 단위 테스트 모듈이 파일 끝에 있는지(그 뒤에 코드가 없는지). 주석·문자열을 지운 코드 기준.
+fn unit_tests_at_end(src: &str) -> bool {
+    let code = strip(src);
+    let cut = without_unit_tests(&code).len();
+    if cut == code.len() {
+        return true;
+    }
+    let rest = &code[cut..];
+    let Some(open) = rest.find('{') else { return false };
+    let mut depth = 0usize;
+    for (k, c) in rest[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return rest[open + k + 1..].trim().is_empty();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// 단위 테스트 모듈 앞까지만 남긴다.
@@ -257,10 +327,30 @@ fn join(a: &str, b: &str) -> String {
     }
 }
 
-/// 파일 안의 `crate::`/`super::`/`self::` 경로들과 그 위치(모듈 경로로 해석 전).
-fn raw_paths(code: &str) -> Vec<(usize, String)> {
+/// 이 파일이 선언한 자식 모듈 이름(`mod a;`, `pub mod a;`, 인라인 `mod a { … }`). 상대 경로 `a::…`의 해석에 쓴다.
+fn declared_children(code: &str) -> BTreeSet<String> {
+    let b = code.as_bytes();
+    let mut out = BTreeSet::new();
+    let mut from = 0;
+    while let Some(i) = find_word(&code[from..], "mod ") {
+        let at = from + i;
+        let rest = &code[at + 4..];
+        let n = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
+        let after = rest[n..].trim_start();
+        if n > 0 && (after.starts_with(';') || after.starts_with('{')) && (at == 0 || b[at - 1] != b':') {
+            out.insert(rest[..n].to_string());
+        }
+        from = at + 4;
+    }
+    out
+}
+
+/// 파일 안의 크레이트 내부 경로와 그 위치(모듈 경로로 해석 전): `use` 문(펼침), 본문의 `crate::`/`super::`/`self::`
+/// 경로, 자식 모듈 이름으로 시작하는 상대 경로(`peer::Peer`).
+fn raw_paths(code: &str, children: &BTreeSet<String>) -> Vec<(usize, String)> {
     let mut out = Vec::new();
-    // use 문
+    // use 문(범위는 본문 스캔에서 뺀다 — `use crate::{a, b}`의 `crate::`를 거짓 간선으로 다시 잡지 않게)
+    let mut uses: Vec<(usize, usize)> = Vec::new();
     let mut base = 0;
     while let Some(i) = find_word(&code[base..], "use ") {
         let at = base + i;
@@ -269,21 +359,28 @@ fn raw_paths(code: &str) -> Vec<(usize, String)> {
         let mut v = Vec::new();
         expand_use(&after[..end], "", &mut v);
         out.extend(v.into_iter().map(|p| (at, p)));
+        uses.push((at, at + 4 + end));
         base = at + 4 + end;
     }
+    let in_use = |s: usize| uses.iter().any(|&(a, e)| a <= s && s < e);
     // 본문의 경로(타입·함수 경로)
     let b = code.as_bytes();
-    for kw in ["crate::", "super::"] {
+    let mut kws: Vec<String> = vec!["crate::".into(), "super::".into(), "self::".into()];
+    kws.extend(children.iter().map(|c| format!("{c}::")));
+    for kw in &kws {
         let mut from = 0;
-        while let Some(i) = code[from..].find(kw) {
+        while let Some(i) = code[from..].find(kw.as_str()) {
             let s = from + i;
             from = s + kw.len();
-            if s > 0 && (b[s - 1].is_ascii_alphanumeric() || b[s - 1] == b'_' || b[s - 1] == b':') {
+            if in_use(s) || (s > 0 && (b[s - 1].is_ascii_alphanumeric() || b[s - 1] == b'_' || b[s - 1] == b':')) {
                 continue;
             }
             let end = code[s..]
                 .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
                 .map_or(code.len(), |e| s + e);
+            if code[end..].starts_with('{') {
+                continue; // `crate::{…}` 묶음은 use 문에서만 나온다
+            }
             out.push((s, code[s..end].trim_end_matches(':').to_string()));
         }
     }
@@ -351,8 +448,9 @@ fn find_word(s: &str, w: &str) -> Option<usize> {
     None
 }
 
-/// 경로를 이 파일의 모듈 기준으로 절대 모듈 경로로 바꾼다. 크레이트 밖(std, 외부 크레이트)이면 None.
-fn resolve(path: &str, module: &[String]) -> Option<Vec<String>> {
+/// 경로를 이 파일의 모듈 기준으로 절대 모듈 경로로 바꾼다. 첫 세그먼트가 자식 모듈 이름(`children`)이면 `self::`로 본다.
+/// 크레이트 밖(std, 외부 크레이트)이면 None.
+fn resolve(path: &str, module: &[String], children: &BTreeSet<String>) -> Option<Vec<String>> {
     let segs: Vec<&str> = path.split("::").filter(|s| !s.is_empty()).collect();
     let mut cur: Vec<String>;
     let mut it = segs.iter().peekable();
@@ -374,6 +472,7 @@ fn resolve(path: &str, module: &[String]) -> Option<Vec<String>> {
                 it.next();
             }
         }
+        Some(first) if children.contains(*first) => cur = module.to_vec(),
         _ => return None,
     }
     cur.extend(it.map(|s| s.to_string()));
@@ -384,20 +483,31 @@ fn layer(node: &str) -> u8 {
     NODES.iter().find(|(k, _)| *k == node).map(|(_, l)| *l).expect("NODES에 있는 노드")
 }
 
-/// 실제 간선(from → to, 노드 단위).
-fn edges() -> BTreeMap<(&'static str, &'static str), BTreeSet<String>> {
+/// 크레이트 소스 파일과 그 모듈 경로.
+fn source_files() -> Vec<(PathBuf, Vec<String>)> {
     let mut files = Vec::new();
     rs_files(&src_dir(), &mut files);
     let attached = path_attr_modules(&files);
+    files
+        .into_iter()
+        .map(|f| {
+            let m = attached.get(&f).cloned().unwrap_or_else(|| module_of_file(&f));
+            (f, m)
+        })
+        .collect()
+}
+
+/// 실제 간선(from → to, 노드 단위)과 그 간선이 나온 파일.
+fn edges() -> BTreeMap<(&'static str, &'static str), BTreeSet<String>> {
     let mut edges: BTreeMap<(&str, &str), BTreeSet<String>> = BTreeMap::new();
-    for f in files {
-        let module = attached.get(&f).cloned().unwrap_or_else(|| module_of_file(&f));
+    for (f, module) in source_files() {
         let from = node_of(&module).unwrap_or_else(|| panic!("{}: NODES에 없는 모듈 {:?} — 표에 계층을 정해 넣을 것", f.display(), module));
         let text = std::fs::read_to_string(&f).expect("읽기");
         let code = strip(without_unit_tests(&text));
         let inline = inline_modules(&code);
-        for (at, p) in raw_paths(&code) {
-            let Some(abs) = resolve(&p, &module_at(&module, &inline, at)) else { continue };
+        let children = declared_children(&code);
+        for (at, p) in raw_paths(&code, &children) {
+            let Some(abs) = resolve(&p, &module_at(&module, &inline, at), &children) else { continue };
             let Some(to) = node_of(&abs) else { continue };
             if to != from {
                 let rel = f.strip_prefix(src_dir()).unwrap_or(&f).display().to_string().replace('\\', "/");
@@ -408,25 +518,101 @@ fn edges() -> BTreeMap<(&'static str, &'static str), BTreeSet<String>> {
     edges
 }
 
+/// Tarjan 강한 연결 요소 탐색 상태.
+struct Scc<'a> {
+    adj: BTreeMap<&'a str, Vec<&'a str>>,
+    index: BTreeMap<&'a str, usize>,
+    low: BTreeMap<&'a str, usize>,
+    stack: Vec<&'a str>,
+    on: BTreeSet<&'a str>,
+    next: usize,
+    out: Vec<BTreeSet<&'a str>>,
+}
+
+impl<'a> Scc<'a> {
+    fn visit(&mut self, v: &'a str) {
+        self.index.insert(v, self.next);
+        self.low.insert(v, self.next);
+        self.next += 1;
+        self.stack.push(v);
+        self.on.insert(v);
+        for w in self.adj.get(v).cloned().unwrap_or_default() {
+            let cand = if !self.index.contains_key(w) {
+                self.visit(w);
+                Some(self.low[w])
+            } else if self.on.contains(w) {
+                Some(self.index[w])
+            } else {
+                None
+            };
+            if let Some(c) = cand {
+                let lv = self.low.get_mut(v).expect("방문함");
+                *lv = (*lv).min(c);
+            }
+        }
+        if self.low[v] == self.index[v] {
+            let mut scc = BTreeSet::new();
+            while let Some(w) = self.stack.pop() {
+                self.on.remove(w);
+                scc.insert(w);
+                if w == v {
+                    break;
+                }
+            }
+            if scc.len() > 1 {
+                self.out.push(scc);
+            }
+        }
+    }
+}
+
+/// 같은 계층 간선 중 예외(`skip`)가 아닌 것으로 만든 그래프의 강한 연결 요소(크기 2 이상) — 길이와 무관하게 순환을 찾는다.
+/// 예외 간선은 "그 단계에서 끊을 간선"이므로 빼고 본다: 순환마다 끊을 간선 하나가 예외에 있으면 통과.
+fn same_layer_cycles<'a>(edges: &BTreeMap<(&'a str, &'a str), BTreeSet<String>>, skip: &BTreeSet<(&str, &str)>) -> Vec<BTreeSet<&'a str>> {
+    let mut t = Scc { adj: BTreeMap::new(), index: BTreeMap::new(), low: BTreeMap::new(), stack: Vec::new(), on: BTreeSet::new(), next: 0, out: Vec::new() };
+    for &(a, b) in edges.keys() {
+        if layer(a) == layer(b) && !skip.contains(&(a, b)) {
+            t.adj.entry(a).or_default().push(b);
+        }
+    }
+    let nodes: Vec<&str> = t.adj.keys().copied().collect();
+    for v in nodes {
+        if !t.index.contains_key(v) {
+            t.visit(v);
+        }
+    }
+    t.out
+}
+
+fn files_of(edges: &BTreeMap<(&str, &str), BTreeSet<String>>, k: (&str, &str)) -> String {
+    edges.get(&k).map(|f| f.iter().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default()
+}
+
 #[test]
 fn module_dependencies_follow_layers() {
     let edges = edges();
+    for ((from, to), files) in &edges {
+        println!("{from} → {to}  [{}]", files.iter().cloned().collect::<Vec<_>>().join(", "));
+    }
     let exc: BTreeSet<(&str, &str)> = EXCEPTIONS.iter().map(|(a, b, _)| (*a, *b)).collect();
     let mut bad = Vec::new();
-    for ((from, to), files) in &edges {
+    for &(from, to) in edges.keys() {
         let (lf, lt) = (layer(from), layer(to));
-        let upward = lt > lf;
-        let cycle = lt == lf && edges.contains_key(&(*to, *from));
-        let adapter = lf == 6 && !ADAPTER_MAY_USE.contains(to);
-        if (upward || cycle || adapter) && !exc.contains(&(*from, *to)) {
-            let why = if upward {
-                format!("위 계층 사용({lf} → {lt})")
-            } else if cycle {
-                "같은 계층 순환".to_string()
-            } else {
-                "어댑터는 제어 평면·계약 DTO만(ADAPTER_MAY_USE)".to_string()
-            };
-            bad.push(format!("  {from} → {to}: {why} [{}]", files.iter().cloned().collect::<Vec<_>>().join(", ")));
+        if exc.contains(&(from, to)) {
+            continue;
+        }
+        if lt > lf {
+            bad.push(format!("  {from} → {to}: 위 계층 사용({lf} → {lt}) [{}]", files_of(&edges, (from, to))));
+        } else if lf == 6 && !ADAPTER_MAY_USE.contains(&to) {
+            bad.push(format!("  {from} → {to}: 어댑터는 제어 평면·계약 DTO만(ADAPTER_MAY_USE) [{}]", files_of(&edges, (from, to))));
+        }
+    }
+    // 같은 계층 순환: 예외 간선을 뺀 뒤에도 남는 순환(강한 연결 요소)은 위반.
+    for scc in same_layer_cycles(&edges, &exc) {
+        for &(a, b) in edges.keys() {
+            if scc.contains(a) && scc.contains(b) && !exc.contains(&(a, b)) {
+                bad.push(format!("  {a} → {b}: 같은 계층 순환 {scc:?} [{}]", files_of(&edges, (a, b))));
+            }
         }
     }
     let stale: Vec<String> = EXCEPTIONS
@@ -434,15 +620,28 @@ fn module_dependencies_follow_layers() {
         .filter(|(a, b, _)| !edges.contains_key(&(*a, *b)))
         .map(|(a, b, s)| format!("  {a} → {b} (단계 {s})"))
         .collect();
-    for ((from, to), files) in &edges {
-        println!("{from} → {to}  [{}]", files.iter().cloned().collect::<Vec<_>>().join(", "));
-    }
     assert!(
         bad.is_empty(),
-        "의존 방향 위반(engine-architecture.md 5절). 고치거나, 정말 필요하면 문서와 EXCEPTIONS에 풀 단계와 함께 적을 것:\n{}",
+        "의존 방향 위반(engine-architecture.md 5절) — 코드를 고칠 것. 예외 추가는 금지(이 파일 머리 주석):\n{}",
         bad.join("\n")
     );
-    assert!(stale.is_empty(), "이미 사라진 예외 — EXCEPTIONS와 문서에서 지울 것:\n{}", stale.join("\n"));
+    assert!(
+        stale.is_empty(),
+        "해소된 예외 — EXCEPTIONS와 문서 5.3절에서 지우고 MAX_EXCEPTIONS를 내릴 것:\n{}",
+        stale.join("\n")
+    );
+}
+
+#[test]
+fn exception_list_is_a_ratchet() {
+    assert_eq!(
+        EXCEPTIONS.len(),
+        MAX_EXCEPTIONS,
+        "예외 수가 상한과 다르다. 지웠으면 MAX_EXCEPTIONS를 내리고, 늘리지 말 것(새 예외 추가 금지)"
+    );
+    for (a, b, s) in EXCEPTIONS {
+        assert!(OPEN_STAGES.contains(s), "{a} → {b}: 풀 단계 {s}가 열린 단계(OPEN_STAGES)가 아니다");
+    }
 }
 
 #[test]
@@ -457,12 +656,21 @@ fn every_node_is_listed_once() {
 }
 
 #[test]
+fn parser_assumptions_hold() {
+    for (f, _) in source_files() {
+        let text = std::fs::read_to_string(&f).expect("읽기");
+        assert!(unit_tests_at_end(&text), "{}: `#[cfg(test)] mod tests`는 파일 끝에 둘 것(검사기 전제)", f.display());
+    }
+}
+
+#[test]
 fn parser_resolves_paths() {
+    let none = BTreeSet::new();
     let m: Vec<String> = vec!["engine".into(), "jitter".into(), "target".into()];
-    assert_eq!(resolve("super::State", &m), Some(vec!["engine".into(), "jitter".into(), "State".into()]));
-    assert_eq!(resolve("super::super::config::X", &m), Some(vec!["engine".into(), "config".into(), "X".into()]));
-    assert_eq!(resolve("crate::net::peer::Peer", &m), Some(vec!["net".into(), "peer".into(), "Peer".into()]));
-    assert_eq!(resolve("std::sync::Arc", &m), None);
+    assert_eq!(resolve("super::State", &m, &none), Some(vec!["engine".into(), "jitter".into(), "State".into()]));
+    assert_eq!(resolve("super::super::config::X", &m, &none), Some(vec!["engine".into(), "config".into(), "X".into()]));
+    assert_eq!(resolve("crate::net::peer::Peer", &m, &none), Some(vec!["net".into(), "peer".into(), "Peer".into()]));
+    assert_eq!(resolve("std::sync::Arc", &m, &none), None);
     let mut out = Vec::new();
     expand_use("super::{codec::Decoder, config::{A, B as C}}", "", &mut out);
     assert_eq!(out, vec!["super::codec::Decoder", "super::config::A", "super::config::B"]);
@@ -472,9 +680,25 @@ fn parser_resolves_paths() {
     let code = "pub mod a { use super::x; fn f() {} }\nuse super::y;";
     let inline = inline_modules(code);
     let file: Vec<String> = vec!["engine".into(), "device".into()];
-    let ps = raw_paths(code);
-    let resolved: Vec<Vec<String>> = ps.iter().filter_map(|(at, p)| resolve(p, &module_at(&file, &inline, *at))).collect();
+    let ps = raw_paths(code, &none);
+    let resolved: Vec<Vec<String>> = ps.iter().filter_map(|(at, p)| resolve(p, &module_at(&file, &inline, *at), &none)).collect();
     assert!(resolved.contains(&vec!["engine".into(), "device".into(), "x".into()]));
     assert!(resolved.contains(&vec!["engine".into(), "y".into()]));
+    // 부모가 자식을 상대 경로로 쓴다(net/mod.rs의 `use peer::…`, 본문 `relay::f()`) — 부모↔자식 순환을 잡으려면 필요(#76 N1).
+    let code = "pub mod peer;\nmod relay;\nuse peer::{Peer, LocalDescriptor};\nfn f() { relay::resolve(); other::g(); }";
+    let children = declared_children(code);
+    assert_eq!(children, ["peer".to_string(), "relay".to_string()].into_iter().collect());
+    let net: Vec<String> = vec!["net".into()];
+    let resolved: Vec<Vec<String>> = raw_paths(code, &children).iter().filter_map(|(_, p)| resolve(p, &net, &children)).collect();
+    assert!(resolved.contains(&vec!["net".into(), "peer".into(), "Peer".into()]));
+    assert!(resolved.contains(&vec!["net".into(), "relay".into(), "resolve".into()]));
+    assert!(!resolved.iter().any(|p| p.first().is_some_and(|s| s == "other")));
+    // `use crate::{a, b}` 묶음의 `crate::`를 본문 경로로 다시 잡지 않는다(#76 N3).
+    let ps = raw_paths("use crate::{engine::config, net};", &none);
+    let ps: Vec<&str> = ps.iter().map(|(_, p)| p.as_str()).collect();
+    assert_eq!(ps, vec!["crate::engine::config", "crate::net"]);
     assert_eq!(strip("let s = \"crate::x\"; // crate::y\nuse crate::z;"), "let s = \"\"; \nuse crate::z;");
+    assert_eq!(strip("let r = r#\"a \" crate::x\"#; use crate::y;"), "let r = \"\"; use crate::y;");
+    assert!(unit_tests_at_end("fn a() {}\n#[cfg(test)]\nmod tests {\n fn t() { let x = \"}\"; }\n}\n"));
+    assert!(!unit_tests_at_end("fn a() {}\n#[cfg(test)]\nmod tests {\n}\nfn after() {}\n"));
 }
