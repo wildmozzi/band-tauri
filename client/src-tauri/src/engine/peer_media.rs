@@ -113,12 +113,15 @@ impl Default for MediaStatsCell {
     }
 }
 
-/// 읽기 재시도 상한. 발행은 수십 ns이고 간격은 워커 반복(≥150µs)이라 실제로는 1~2회에 끝난다.
-const READ_RETRIES: usize = 64;
+/// 읽기에서 바쁜 재시도를 이만큼 한 뒤에는 `yield_now`로 쓰는 쪽(워커)에 CPU를 넘긴다. 발행은 수십 ns이고 간격은
+/// 워커 반복(≥150µs)이라 실제로는 1~2회에 끝난다.
+const SPINS_BEFORE_YIELD: usize = 64;
 
 impl MediaStatsCell {
-    /// 쓰기(워커만 부른다. 쓰는 스레드가 둘이면 버전이 깨진다).
-    pub fn write(&self, s: &MediaStats) {
+    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨진다). 지금(③-a1·a2)은 워커만 `PeerMediaShared::publish`로
+    /// 부르고, 그 호출이 지터 락을 쥔 채라 락이 직렬화한다. ③-a3에서 락이 없어지면 워커 단독 소유 `PeerMedia`의
+    /// `&mut self` 메서드에서만 부르게 해 타입으로 보장한다.
+    pub(crate) fn write(&self, s: &MediaStats) {
         let w = pack(s);
         let v = self.ver.load(Ordering::Relaxed);
         self.ver.store(v.wrapping_add(1), Ordering::Relaxed); // 홀수: 쓰는 중
@@ -140,16 +143,22 @@ impl MediaStatsCell {
         (self.ver.load(Ordering::Relaxed) == v1).then(|| unpack(&w))
     }
 
-    /// 일관된 한 벌. 상한까지 실패하면(사실상 없음) 마지막으로 읽은 값을 쓴다(통계이므로).
+    /// 일관된 한 벌. 성공할 때까지 다시 읽는다(찢긴 값은 절대 돌려주지 않는다). `SPINS_BEFORE_YIELD`회마다
+    /// `yield_now` — 쓰는 쪽이 발행 도중 선점됐으면 그 스레드가 마치게 한다. 비RT 독자(커맨드·`band-diag`·
+    /// 측정)만 부른다. RT 경로가 읽어야 한다면 `try_read`만 쓴다(이 셀은 지금 RT 경로에서 쓰지 않는다).
     pub fn read(&self) -> MediaStats {
-        for _ in 0..READ_RETRIES {
+        let mut spins = 0;
+        loop {
             if let Some(s) = self.try_read() {
                 return s;
             }
-            std::hint::spin_loop();
+            spins += 1;
+            if spins % SPINS_BEFORE_YIELD == 0 {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
         }
-        let w: [u64; STAT_WORDS] = std::array::from_fn(|i| self.words[i].load(Ordering::Relaxed));
-        unpack(&w)
     }
 }
 
@@ -299,6 +308,47 @@ mod tests {
         assert_eq!(c.read(), sample(41));
     }
 
+    /// 한 벌이면 기본값(첫 발행 전) 아니면 `sample(n)`이다.
+    fn assert_whole(s: &MediaStats) {
+        let n = s.js.produced;
+        assert!(s.js.concealed <= s.js.produced);
+        assert_eq!(*s, if n == 0 && s.js.late == 0 { MediaStats::default() } else { sample(n) }, "찢긴 스냅샷");
+    }
+
+    /// 쓰기 폭주(쉬지 않는 쓰는 스레드) 중에도 `read()`는 찢긴 값을 돌려주지 않는다(#116 M-1: 전에는 재시도 상한 뒤
+    /// 검증 없는 값을 돌려줘 약 1e-4로 찢겼다). 읽는 스레드 넷 × 각 2만 회, 실제보다 수천 배 거센 조건이다.
+    #[test]
+    fn seqlock_read_never_returns_torn_under_write_storm() {
+        let c = Arc::new(MediaStatsCell::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (c, stop) = (c.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut n = 1u64;
+                while !stop.load(Ordering::Relaxed) {
+                    c.write(&sample(n));
+                    n += 1;
+                }
+                n
+            })
+        };
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let c = c.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..20_000 {
+                        assert_whole(&c.read());
+                    }
+                })
+            })
+            .collect();
+        for r in readers {
+            r.join().unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert!(writer.join().unwrap() > 1, "쓰기가 돌지 않았다");
+    }
+
     /// 쓰는 스레드 하나 + 읽는 스레드 넷: 성공한 읽기는 언제나 한 벌이다(`concealed ≤ produced`, 같은 n에서 나온 값).
     #[test]
     fn seqlock_reads_are_never_torn() {
@@ -311,9 +361,7 @@ mod tests {
                     let mut ok = 0u64;
                     while !stop.load(Ordering::Relaxed) {
                         if let Some(s) = c.try_read() {
-                            let n = s.js.produced;
-                            assert!(s.js.concealed <= s.js.produced);
-                            assert_eq!(s, if n == 0 && s.js.late == 0 { MediaStats::default() } else { sample(n) });
+                            assert_whole(&s);
                             ok += 1;
                         }
                     }
