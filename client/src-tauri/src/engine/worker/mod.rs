@@ -768,15 +768,18 @@ impl Worker {
         let played = &self.p.counters.out_played_frames;
         net.for_each_peer(|peer| {
             let key = peer.key();
+            let media = peer.media();
+            // 통계 스냅샷은 슬롯이 없어도 발행한다(삽입은 슬롯과 무관하게 계속된다, 엔진 ③-a1).
             let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) else {
+                media.publish(&media.lock_jitter());
                 return;
             };
             let sh = &self.p.bank.slots[f.slot];
-            let media = peer.media();
             let g = media.mix.lr_gains();
             sh.set_gains(g, g);
             media.mix.level.store(sh.level.load());
             let Some(prod) = self.p.prods.get_mut(f.slot) else {
+                media.publish(&media.lock_jitter());
                 return;
             };
             let mut jb = media.lock_jitter();
@@ -802,6 +805,7 @@ impl Worker {
                     mark(MarkKind::Drop, to_dev(dropped) + ev.skipped_frames, false);
                 }
             }
+            media.publish(&jb);
             drop(jb);
             fills += u64::from(ev.deadline_fill);
             skipped += ev.skipped_frames;

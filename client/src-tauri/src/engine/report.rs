@@ -173,7 +173,7 @@ impl Engine {
                         let media = reg.iter().find(|m| m.key == p.key())?;
                         let now = Instant::now();
                         let ns = p.net_stats(now);
-                        let js = media.stats();
+                        let js = media.stats().js;
                         let (tx_codec, tx_codec_reason) = {
                             use crate::engine::relay_codec::CodecReason;
                             use crate::net::peer::{TX_CODEC_AUTO, TX_CODEC_AUTO_LOSS, TX_CODEC_OPUS, TX_CODEC_SENT};
@@ -291,7 +291,7 @@ impl Engine {
     pub fn peer_jitter_stats(&self) -> Vec<(String, jitter::JitterStats)> {
         self.net
             .as_ref()
-            .map(|_| self.media.lock().iter().map(|m| (m.peer_id.clone(), m.stats())).collect())
+            .map(|_| self.media.lock().iter().map(|m| (m.peer_id.clone(), m.stats().js)).collect())
             .unwrap_or_default()
     }
 }

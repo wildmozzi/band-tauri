@@ -907,8 +907,10 @@ impl EchoJob {
         let mut jitter_ms = Vec::new();
         while t1.elapsed() < listen {
             self.sleep(Duration::from_millis(100), cancel)?;
-            if let Some(b) = self.media.playing_buffer_ms() {
-                jitter_ms.push(b as f64);
+            // 워커가 발행한 스냅샷(락 없음, 엔진 ③-a1)
+            let s = self.media.stats();
+            if s.playing {
+                jitter_ms.push(s.js.buffer_ms as f64);
             }
             if !self.net.remote_echo(&self.peer_id)?.0 {
                 return Err("상대가 에코를 멈췄습니다".into());
