@@ -15,6 +15,7 @@ use crate::engine::worker::{CallbackTracker, PeerFeed, FINE_POLL, OUT_CHUNK, POL
 use crate::engine::codec::Encoder as SimEncoder;
 use crate::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
 use crate::engine::jitter::{JitterBuffer, JitterSettings, JitterStats};
+use crate::net::media_link::PeerKey;
 use crate::engine::rt::{output_path, SLOT_ACTIVE};
 use crate::net::packet::{Header, PacketType};
 use rand::{Rng, SeedableRng};
@@ -220,7 +221,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         let sh = &feed.bank.slots[slot];
         sh.set_gains((0.15, 0.15), (0.15, 0.15));
         sh.state.store(SLOT_ACTIVE, Ordering::Release);
-        pfs.push(PeerFeed::new(slot, (i, i as u32), 48_000, sh).unwrap());
+        pfs.push(PeerFeed::new(slot, PeerKey::from_raw(i as u64 + 1), 48_000, sh).unwrap());
         jbs.push(JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: np.profile }));
         txs.push(TxState {
             enc: SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap(),

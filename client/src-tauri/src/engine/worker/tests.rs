@@ -338,7 +338,7 @@ fn run_feed_sim(p: FeedSim) -> FeedSimResult {
     let sh = &feed.bank.slots[slot];
     sh.set_gains((1.0, 1.0), (1.0, 1.0));
     sh.state.store(SLOT_ACTIVE, Ordering::Release);
-    let mut pf = PeerFeed::new(slot, (0, 0), 48_000, sh).unwrap();
+    let mut pf = PeerFeed::new(slot, crate::net::media_link::PeerKey::from_raw(1), 48_000, sh).unwrap();
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     let mut tracker = CallbackTracker::new(48_000);
     let mut enc = SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap();

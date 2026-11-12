@@ -165,12 +165,15 @@ impl Engine {
             .net
             .as_ref()
             .map(|n| {
+                // 등록부 락을 먼저 잡고 net 피어 표를 읽는다: 추가·제거도 같은 순서로 잡으므로 두 표가 맞는 순간을 본다.
+                let reg = self.media.lock();
                 n.peers()
                     .iter()
-                    .map(|p| {
+                    .filter_map(|p| {
+                        let media = reg.iter().find(|m| m.key == p.key())?;
                         let now = Instant::now();
                         let ns = p.net_stats(now);
-                        let js = p.jitter().lock().stats();
+                        let js = media.stats();
                         let (tx_codec, tx_codec_reason) = {
                             use crate::engine::relay_codec::CodecReason;
                             use crate::net::peer::{TX_CODEC_AUTO, TX_CODEC_AUTO_LOSS, TX_CODEC_OPUS, TX_CODEC_SENT};
@@ -189,7 +192,7 @@ impl Engine {
                             .remote_loss
                             .filter(|(_, at)| now.saturating_duration_since(*at) <= relay_codec::REPORT_STALE)
                             .map(|(r, _)| r);
-                        PeerStats {
+                        Some(PeerStats {
                             peer_id: p.id().to_string(),
                             state: ns.state,
                             path: ns.path,
@@ -203,7 +206,7 @@ impl Engine {
                             loss_pct: js.loss_pct,
                             late: js.late,
                             concealed: js.concealed,
-                            level: p.mix().level.load(),
+                            level: media.mix.level.load(),
                             // 벽시계로 잰 버퍼 지연(소스 링 포함) + 장치 출력 버퍼: 클럭 추정과 독립적인 실제 재생 지연
                             playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + out_ms } else { 0.0 },
                             echo_requested: ns.echo_requested,
@@ -214,7 +217,7 @@ impl Engine {
                             tx_codec_reason,
                             remote_loss_pct: remote.map(|r| r.loss_pct),
                             remote_conceal_pct: remote.map(|r| r.conceal_pct),
-                        }
+                        })
                     })
                     .collect()
             })
@@ -288,7 +291,7 @@ impl Engine {
     pub fn peer_jitter_stats(&self) -> Vec<(String, jitter::JitterStats)> {
         self.net
             .as_ref()
-            .map(|n| n.peers().iter().map(|p| (p.id().to_string(), p.jitter().lock().stats())).collect())
+            .map(|_| self.media.lock().iter().map(|m| (m.peer_id.clone(), m.stats())).collect())
             .unwrap_or_default()
     }
 }

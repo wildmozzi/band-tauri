@@ -15,10 +15,21 @@ use std::time::{Duration, Instant};
 use band_lib::engine::codec::Encoder;
 use band_lib::engine::config::{frame_code_from_samples, CodecKind, HEADER_BYTES, TAG_BYTES};
 use band_lib::engine::jitter::JitterSettings;
+use band_lib::engine::peer_media::PeerMediaShared;
+use band_lib::net::media_link::PeerKey;
 use band_lib::net::types::PathKind;
 use band_lib::net::crypto::KeyPair;
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::net::{Net, NetOptions, MAX_PEERS};
+
+
+/// 엔진 없이 Net만 쓸 때의 피어 추가. 미디어 상태(엔진 ③)는 여기서 만든다. 이 테스트는 수신 오디오를 보지 않는다.
+fn add(net: &Net, id: String, desc: &LocalDescriptor) -> Result<Option<PeerKey>, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let key = PeerKey::from_raw(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+    net.add_peer(id.clone(), desc, std::sync::Arc::new(PeerMediaShared::new(key, id, desc.ssrc, js)))
+}
 
 const FRAME: usize = 120; // 2.5ms @ 48kHz
 const CH: usize = 2;
@@ -32,7 +43,7 @@ fn quantile(v: &mut [f64], p: f64) -> f64 {
 #[ignore = "realtime: 결정적 짝 net::txlat::tests::{quantiles_and_window_reset, rotate_race_does_not_zero_quantiles}, engine::worker::tests::batched_frames_share_pass_start_for_send_queue"]
 fn full_mesh_send_queue_latency_and_burst() {
     let opts = NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
-    let net = Net::start("me".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }).unwrap();
+    let net = Net::start("me".into(), &opts).unwrap();
 
     // 원격 피어 5명: 받은 패킷은 별도 스레드가 비운다(수신 버퍼가 차서 송신 측 동작이 바뀌지 않게).
     let stop = Arc::new(AtomicBool::new(false));
@@ -46,7 +57,7 @@ fn full_mesh_send_queue_latency_and_burst() {
         let keys = KeyPair::generate();
         let desc = LocalDescriptor { ssrc: 0x1000 + i as u32, key: LocalDescriptor::encode_key(&keys.public_bytes()), candidates: vec![Candidate { kind: CandidateKind::Lan, addr: addr.to_string() }] };
         let id = format!("p{i}");
-        net.add_peer(id.clone(), &desc).unwrap();
+        add(&net, id.clone(), &desc).unwrap();
         net.peers().into_iter().find(|p| p.id() == id).unwrap().force_path(addr, PathKind::Lan);
         let stop = stop.clone();
         drains.push(std::thread::spawn(move || {

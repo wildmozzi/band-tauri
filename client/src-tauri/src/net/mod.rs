@@ -2,6 +2,7 @@
 
 pub mod clock;
 pub mod crypto;
+pub mod media_link;
 pub mod packet;
 pub mod peer;
 pub mod qos;
@@ -19,7 +20,8 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, RwLock};
 
 use crate::engine::config::{MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
-use crate::engine::jitter::JitterSettings;
+use crate::engine::peer_media::PeerMediaShared;
+use media_link::PeerKey;
 use crate::engine::relay_codec::CodecReason;
 use crypto::KeyPair;
 use packet::{Header, PacketType};
@@ -108,8 +110,6 @@ pub struct NetShared {
     stop: AtomicBool,
     /// 수신 스레드 우선순위 설정 결과(P1-2).
     pub recv_prio: crate::sys::prio::PrioSlot,
-    /// 새 피어의 지터 버퍼 설정. 프로필은 실행 중에 바뀐다(`set_jitter_profile`).
-    jitter_settings: Mutex<JitterSettings>,
     allow_loopback: bool,
     /// UDP 릴레이 클라이언트(P1-4b). 토큰을 받기 전에는 None.
     relay: Mutex<Option<RelayClient>>,
@@ -157,7 +157,7 @@ fn lan_addresses() -> Vec<Ipv4Addr> {
 }
 
 impl Net {
-    pub fn start(local_peer_id: String, opts: &NetOptions, jitter_settings: JitterSettings) -> Result<Net, String> {
+    pub fn start(local_peer_id: String, opts: &NetOptions) -> Result<Net, String> {
         if local_peer_id.is_empty() || local_peer_id.len() > peer::MAX_PEER_ID_BYTES {
             return Err("peerId는 1..64바이트여야 합니다".into());
         }
@@ -200,7 +200,6 @@ impl Net {
             retired_ssrc_ids: Mutex::new(std::collections::HashMap::new()),
             epoch: Instant::now(),
             stop: AtomicBool::new(false),
-            jitter_settings: Mutex::new(jitter_settings),
             allow_loopback: opts.allow_loopback_candidates,
             relay: Mutex::new(None),
             relay_addr: RwLock::new(None),
@@ -258,26 +257,26 @@ impl Net {
     /// 먼저 보낸 사람이 진짜 주인의 추가를 막을 수 있다(선점에 의한 가용성 방해). 대신 같은 키의 살아 있는
     /// 항목들은 **송신 카운터 하나를 같이 쓰고**(nonce 유일성 유지), 수신은 키 주인이 인증된 Hello에 싣는 자기 id로
     /// 가린다(`open_from_peers`). 개인키가 없는 선점자 항목은 핸드셰이크를 마칠 수 없어 연결되지 않는다.
-    pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor) -> Result<(), String> {
+    ///
+    /// `media`: 엔진이 만든 이 피어의 미디어 상태. 같은 peerId를 교체했으면 옛 항목의 미디어 키를 돌려준다.
+    pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor, media: Arc<PeerMediaShared>) -> Result<Option<PeerKey>, String> {
         let setup = PeerSetup {
             keys: &self.shared.keys,
             my_ssrc: self.shared.ssrc,
-            jitter: *self.shared.jitter_settings.lock(),
             allow_loopback: self.shared.allow_loopback,
         };
-        let mut peer = Peer::new(peer_id.clone(), desc, &setup, Instant::now())?;
+        let mut peer = Peer::new(peer_id.clone(), desc, &setup, media, Instant::now())?;
         let key = (*peer.public_key(), peer.ssrc());
         let mut peers = self.shared.peers.write();
         let old_idx = peers.iter().position(|p| p.id() == peer_id);
         if peers.len() - usize::from(old_idx.is_some()) >= MAX_PEERS {
             return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
         }
+        let mut replaced = None;
         if let Some(i) = old_idx {
             let old = peers.remove(i);
             self.shared.retire_tx_seq(&old);
-            peer.mix().gain.store(old.mix().gain.load());
-            peer.mix().muted.store(old.mix().muted.load(Ordering::Relaxed), Ordering::Relaxed);
-            peer.mix().pan.store(old.mix().pan.load());
+            replaced = Some(old.key());
             // 같은 세션(같은 공개키)이면 제어 패킷 재전송 창을 이어받는다. 새 키(상대 재시작)면 seq가
             // 처음부터 다시 시작하므로 이어받지 않는다(PR #5 L-2).
             if old.public_key() == peer.public_key() {
@@ -293,10 +292,11 @@ impl Net {
             peer.tx_seq().store(hw.wrapping_add(AUDIO_SEQ_HANDOVER_GAP), Ordering::Relaxed);
         }
         peers.push(Arc::new(peer));
-        Ok(())
+        Ok(replaced)
     }
 
-    pub fn remove_peer(&self, peer_id: &str) -> bool {
+    /// 지운 항목의 미디어 키(없던 peerId면 None).
+    pub fn remove_peer(&self, peer_id: &str) -> Option<PeerKey> {
         let removed = {
             let mut peers = self.shared.peers.write();
             let removed = peers.iter().position(|p| p.id() == peer_id).map(|i| peers.remove(i));
@@ -310,17 +310,9 @@ impl Net {
         match removed {
             Some(p) => {
                 self.shared.send_bye(&p);
-                true
+                Some(p.key())
             }
-            None => false,
-        }
-    }
-
-    /// 지터 버퍼 프로필 변경: 지금 있는 피어 모두와 이후 추가될 피어(P1-5).
-    pub fn set_jitter_profile(&self, profile: f32) {
-        self.shared.jitter_settings.lock().profile = profile;
-        for p in self.peers() {
-            p.jitter().lock().set_profile(profile);
+            None => None,
         }
     }
 
@@ -498,13 +490,7 @@ impl NetShared {
     /// Ping 송신. 평문 = 에코 상태(있으면) + 이 피어 스트림의 수신 손실 보고(재생 중이면, P1-4e). 설계 2절.
     fn send_ping(&self, p: &Peer, now: Instant) {
         let echo = p.echo().ping_payload(now);
-        let loss = {
-            let jb = p.jitter().lock();
-            jb.is_playing().then(|| {
-                let s = jb.stats();
-                peer::LossReport { loss_pct: s.loss_pct, conceal_pct: s.conceal_pct }
-            })
-        };
+        let loss = p.loss_report();
         let mut plain = [0u8; peer::PING_PLAIN_MAX];
         let n = peer::ping_plain(echo, loss, &mut plain);
         self.send_ctrl_on_path(p, PacketType::Ping, self.now_us32(), &plain[..n]);
@@ -735,13 +721,6 @@ impl NetShared {
         Ok((e.remote_echoing(Instant::now()), e.remote_delay_us))
     }
 
-    /// 그 피어의 지터 버퍼를 처음부터 다시 채운다(에코 시작/끝에서 스트림이 바뀔 때).
-    pub fn restart_jitter(&self, peer_id: &str) -> Result<(), String> {
-        let p = self.peer_by_id(peer_id)?;
-        p.jitter().lock().restart();
-        Ok(())
-    }
-
     /// 그 피어 시계 − 내 시계 추정(P2-3). `at_us` = 내 시계(`now_us`). 피어가 없거나 표본이 없으면 None.
     pub fn peer_clock(&self, peer_id: &str, at_us: u64) -> Option<clock::ClockEstimate> {
         self.peer_by_id(peer_id).ok().and_then(|p| p.clock().estimate(at_us as f64))
@@ -758,13 +737,6 @@ impl NetShared {
 
     pub fn peer_path(&self, peer_id: &str) -> Option<PathKind> {
         self.peer_by_id(peer_id).ok().and_then(|p| p.conn().path.map(|(_, k)| k))
-    }
-
-    /// 그 피어의 지터 버퍼 깊이(`bufferMs`, 재생 중일 때만).
-    pub fn peer_buffer_ms(&self, peer_id: &str) -> Option<f32> {
-        let p = self.peer_by_id(peer_id).ok()?;
-        let j = p.jitter().lock();
-        j.is_playing().then(|| j.stats().buffer_ms)
     }
 
     /// 피어 id → ssrc.
@@ -922,7 +894,7 @@ impl NetShared {
                     }
                     PacketType::Audio => {
                         let now_us = now.duration_since(self.epoch).as_micros() as u64;
-                        peer.jitter().lock().insert(&h, plain, now_us);
+                        peer.push_audio(&h, plain, now_us);
                         // 에코 모드(동의함): 받은 그대로 되돌린다(믹스와 별도 경로).
                         self.reflect_audio(&peer, &h, plain, now);
                     }

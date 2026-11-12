@@ -30,7 +30,7 @@
 | `engine/measure.rs` | 루프백(장치) + 에코 프로브(워커) + 분석(알고리즘) | ⑥ |
 | ~~`engine/stats.rs`~~ | (④에서 해소) 원자 카운터 `stats.rs`(1) · RT 타이밍 `rt_timing.rs`(1) · 보고 DTO와 `stats()` 조립 `report.rs`(5) | ④ 완료 |
 | `engine/device.rs` | 백엔드 선택 + cpal 백엔드 + 가짜 장치 + 공용 타입(`StreamInfo`) | ⑥ |
-| `net/peer.rs` | 피어 테이블·홀펀칭(D) + 미디어 상태(`JitterBuffer`·`PeerMixCtl` 소유) | ③ |
+| `net/peer.rs` | 피어 테이블·홀펀칭(D) + 미디어 상태 — ③-b에서 `JitterBuffer`·`PeerMixCtl`은 `engine::peer_media::PeerMediaShared`(엔진 등록부 소유)로 옮겼고 `Peer`는 그 `Arc`만 쥔다. ③-a3에서 수신 큐 생산자(`MediaTx`)로 바뀐다 | ③ |
 
 ## 2. 데이터 흐름
 
@@ -142,7 +142,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 계층 | 노드 |
 |---|---|
 | 0 | `engine::config`, `net::packet`, `sys`, `sys::{prio, cpu, time}`(④) |
-| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing}`, `net::{clock, crypto, txlat, types}`, `diag::mask` |
+| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `diag::mask` |
 | 2 | `engine::{rt, device, wasapi, record, metronome}` |
 | 3 | `net`, `net::{peer, relay, stun, qos}` |
 | 4 | `engine::{worker, measure}`, 하네스 `engine::sim`(`cfg(test)`) |

@@ -9,6 +9,8 @@ use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 use band_lib::engine::jitter::JitterSettings;
+use band_lib::engine::peer_media::PeerMediaShared;
+use band_lib::net::media_link::PeerKey;
 use band_lib::net::types::PathKind;
 use band_lib::net::crypto::KeyPair;
 use band_lib::net::packet::{Header, PacketType};
@@ -16,6 +18,15 @@ use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor, ECHO_FLAG_R
 use band_lib::net::relay::TYPE_RELAY_DATA;
 use band_lib::net::types::DATA_PREFIX_BYTES;
 use band_lib::net::{Net, NetOptions, AUDIO_SEQ_HANDOVER_GAP};
+
+
+/// 엔진 없이 Net만 쓸 때의 피어 추가. 미디어 상태(엔진 ③)는 여기서 만든다. 이 테스트는 수신 오디오를 보지 않는다.
+fn add(net: &Net, id: String, desc: &LocalDescriptor) -> Result<Option<PeerKey>, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let key = PeerKey::from_raw(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+    net.add_peer(id.clone(), desc, std::sync::Arc::new(PeerMediaShared::new(key, id, desc.ssrc, js)))
+}
 
 const PEER: &str = "bob";
 
@@ -31,7 +42,7 @@ fn net() -> Net {
         allow_loopback_candidates: true,
         cancel: None,
     };
-    Net::start("alice".into(), &opts, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }).unwrap()
+    Net::start("alice".into(), &opts).unwrap()
 }
 
 /// 상대 역할: 키쌍, ssrc, 소켓.
@@ -117,19 +128,19 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
 
     // 1) 제거 → 같은 descriptor 재추가 반복(WS 순단 뒤 같은 descriptor 재수신)
     for _ in 0..6 {
-        net.add_peer(PEER.into(), &fake.desc()).unwrap();
+        add(&net, PEER.into(), &fake.desc()).unwrap();
         force_path(&net, fake.addr(), PathKind::Lan);
         send(&net, 40);
         let (n, d) = fake.collect(false, &mut seen, 40);
         assert_eq!(d, 0, "제거 후 재추가에서 nonce 중복");
         total += n;
-        assert!(net.remove_peer(PEER));
+        assert!(net.remove_peer(PEER).is_some());
     }
     // 2) 교체(같은 id로 다시 add)와 3) 릴레이 경로
-    net.add_peer(PEER.into(), &fake.desc()).unwrap();
+    add(&net, PEER.into(), &fake.desc()).unwrap();
     force_path(&net, fake.addr(), PathKind::Lan);
     send(&net, 40);
-    net.add_peer(PEER.into(), &fake.desc()).unwrap();
+    add(&net, PEER.into(), &fake.desc()).unwrap();
     force_path(&net, fake.addr(), PathKind::Relay);
     send(&net, 40);
     let (n, d) = fake.collect(true, &mut seen, 80);
@@ -138,8 +149,8 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
     total += n;
 
     // 4) 같은 키를 다른 id로 추가해도 거부하지 않고 송신 카운터를 같이 쓴다(P1-1b, 자세한 검사는 tests/peer_key.rs).
-    net.add_peer("bob-2".into(), &fake.desc()).unwrap();
-    assert!(net.remove_peer("bob-2"));
+    add(&net, "bob-2".into(), &fake.desc()).unwrap();
+    assert!(net.remove_peer("bob-2").is_some());
 
     // 5) 에코 반사: 상대가 요청 Ping과 Audio를 보내면 수신 스레드가 같은 카운터로 되돌린다
     force_path(&net, fake.addr(), PathKind::Lan);
@@ -168,8 +179,8 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
     assert!(n >= 25, "반사 패킷 {n}");
     total += n;
     // 반사 중 제거 → 재추가
-    assert!(net.remove_peer(PEER));
-    net.add_peer(PEER.into(), &fake.desc()).unwrap();
+    assert!(net.remove_peer(PEER).is_some());
+    add(&net, PEER.into(), &fake.desc()).unwrap();
     force_path(&net, fake.addr(), PathKind::Lan);
     send(&net, 40);
     let (n, d) = fake.collect(false, &mut seen, 40);
@@ -177,16 +188,16 @@ fn audio_nonce_never_repeats_across_remove_add_replace_relay_and_echo() {
     total += n;
 
     // 6) ssrc 재생성(상대 엔진 재시작 = 새 키): 다른 키이므로 독립, 그 안에서도 중복 없음
-    assert!(net.remove_peer(PEER));
+    assert!(net.remove_peer(PEER).is_some());
     let fake2 = Fake::new(0x3333_4444);
     for _ in 0..3 {
-        net.add_peer(PEER.into(), &fake2.desc()).unwrap();
+        add(&net, PEER.into(), &fake2.desc()).unwrap();
         force_path(&net, fake2.addr(), PathKind::Lan);
         send(&net, 40);
         let (n, d) = fake2.collect(false, &mut seen, 40);
         assert_eq!(d, 0, "새 키에서 nonce 중복");
         total += n;
-        assert!(net.remove_peer(PEER));
+        assert!(net.remove_peer(PEER).is_some());
     }
     assert!(total >= 505, "수집한 패킷 {total}");
 }
