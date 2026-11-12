@@ -31,11 +31,18 @@ const LAYERS: Record<string, number> = {
   index: 5,
 }
 
-/** 계층 2 사이에 허용하는 간선(1.2절): 재전송·ssrc 변경 정지, 승인 기록·악기 변경, 연주 중단 시 ssrc 삭제 */
+/**
+ * 같은 계층 안에서 허용하는 간선 — 계층 안의 순서를 정하는 설계 규칙(2.1절)이다.
+ * 계층 2(1.2절): 재전송·ssrc 변경 정지, 승인 기록·악기 변경, 연주 중단 시 ssrc 삭제.
+ * 계층 3(S4-1, 순서 membership < resume < auth): 유예 만료 퇴장·재개 room-state(resume → membership), auth 메시지의 재개(auth → resume).
+ * 역방향(membership → resume, resume → auth)은 순환이라 금지 — membership의 중복 연결 정리는 svc.resume.drop 구조 타입으로 부른다(2.2절).
+ */
 const SAME_LAYER_ALLOWED = new Set([
   'nativeSession->metronome',
   'requests->performers',
   'performers->nativeSession',
+  'resume->membership',
+  'auth->resume',
 ])
 
 /** signaling이 import해도 되는 `src/services/*` (2.1절: relayToken은 Rust 릴레이와 맞춘 형식이라 services에 남는다) */
@@ -153,7 +160,7 @@ function cycles(modules: Modules): string[] {
   return found
 }
 
-describe('signaling architecture (S2·S3)', () => {
+describe('signaling architecture (S2·S3·S4)', () => {
   const modules = signalingModules()
 
   it('reads the import statements it is meant to check', () => {
@@ -232,5 +239,26 @@ describe('signaling architecture (S2·S3)', () => {
     assert.deepEqual(missingLayers(fake), ['sub/helper'])
     assert.deepEqual(servicesViolations(fake).sort(), ['descriptor -> services/stemEncoder', 'metronome -> services/wsService'])
     assert.deepEqual(cycles(fake), ['performers -> requests -> performers'])
+  })
+
+  // 계층 3 안 순서(membership < resume < auth, S4-1): 역방향 import는 위반이다
+  it('rejects layer-3 imports against the membership < resume < auth order', () => {
+    const fake: Modules = new Map([
+      ['membership', ['./resume']], // 역방향: 순환을 만든다 (drop은 svc.resume로)
+      ['resume', ['./auth', './membership']], // resume → auth는 역방향, resume → membership은 허용
+      ['auth', ['./resume', './membership']], // auth → resume 허용, auth → membership은 허용 목록에 없음
+    ])
+    assert.deepEqual(layerViolations(fake).sort(), [
+      'auth(3) -> membership(3)',
+      'membership(3) -> resume(3)',
+      'resume(3) -> auth(3)',
+    ])
+  })
+
+  it('the real resume module keeps the layer-3 order', () => {
+    assert.ok(modules.has('resume'), 'signaling/resume.ts exists (S4-1)')
+    const edges = (from: string) => (modules.get(from) || []).map(spec => resolveImport(from, spec)?.name)
+    assert.ok(!edges('membership').includes('resume'), 'membership must not import resume')
+    assert.ok(!edges('resume').includes('auth'), 'resume must not import auth')
   })
 })

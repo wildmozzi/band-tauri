@@ -1,12 +1,12 @@
 import type { Ctx } from './ctx'
 import { TOKEN_EXPIRY_GRACE_MS, isNonEmptyString, type Msg } from './protocol'
-import { isAuthenticated, send, type Registry } from './registry'
+import { isAuthenticated, send } from './registry'
+import { announceResumed, attachSession, type ResumeSvc } from './resume'
 import type { Client, WsDeps } from './types'
 
 /**
- * 인증 (설계 docs/server-architecture.md 2.1절 B, 계층 3).
- * `auth` 메시지·재인증·토큰 만료 타이머. 세션 재개(resumeSession)는 아직 조립부(wsService)에 있어 svc로 받는다
- * (resume.ts로 떼는 일은 S4 — 같은 계층 3끼리 import 간선을 만들지 않으려고 함수로 주입).
+ * 인증 (설계 docs/server-architecture.md 2.1절 B, 계층 3 — 계층 안 순서 membership < resume < auth).
+ * `auth` 메시지·재인증·토큰 만료 타이머. 세션 재개는 resume 모듈을 부른다(허용 간선 auth → resume, S4-1).
  */
 
 /** JWT의 exp(초)를 ms로. 검증은 하지 않는다(verifyToken 통과 후에만 사용) */
@@ -22,14 +22,23 @@ export function jwtExpiryMs(token: string): number | null {
 }
 
 /** auth 핸들러가 쓰는 공용 서비스 조각 (전체 모양은 dispatch.ts SignalingServices) */
-export interface AuthSvc {
-  registry: Registry
+export interface AuthSvc extends ResumeSvc {
   deps: WsDeps
   insecureDevMode: boolean
-  /** clientId → 연결이 끊겨 재개를 기다리는 클라이언트 */
-  suspended: Map<string, Client>
-  /** 세션 재개: 이 연결(ctx)을 유예 중이던 이전 Client에 붙인다 (조립부 wsService가 준다) */
-  resumeSession(ctx: Ctx, old: Client, token: string): void
+}
+
+/**
+ * 세션 재개: 이 연결(ctx)을 유예 중이던 이전 Client에 붙인다.
+ * 실행 순서는 S3까지 조립부에 있던 resumeSession 한 함수와 같다: 유예 해제·연결 상태 이식·임시 Client 제거·ctx 교체(resume)
+ * → 인증 필드·임시 Client의 만료 타이머 정리·만료 타이머 예약(auth 소유 필드) → 재개 알림(resume).
+ */
+function resumeSession(ctx: Ctx<AuthSvc>, old: Client, token: string) {
+  const temp = attachSession(ctx, old)
+  old.authState = 'authenticated'
+  old.tokenExp = jwtExpiryMs(token)
+  if (temp.expiryTimer) clearTimeout(temp.expiryTimer)
+  scheduleExpiryCheck(old)
+  announceResumed(ctx)
 }
 
 /** S3: 연결 클로저의 함수를 그대로 옮겼다(캡처하던 값 없음) */
@@ -57,9 +66,7 @@ export function sendAuthResult(ctx: Ctx<{ insecureDevMode: boolean }>) {
 /** `auth` — S3: 연결 클로저의 handleAuth 본문을 그대로 옮겼다 */
 export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
   const { client, id } = ctx
-  const { clients } = ctx.svc.registry
-  const { deps, insecureDevMode, suspended } = ctx.svc
-  const resumeSession = (old: Client, token: string) => ctx.svc.resumeSession(ctx, old, token)
+  const { deps, insecureDevMode, resume } = ctx.svc
 
   const token = msg.accessToken
 
@@ -88,9 +95,9 @@ export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
     // 세션 재개: 이전 clientId의 주인이 같은 userId이고 유예시간 안(suspended에 남아 있음)일 때만
     const resumeId = msg.resumeClientId
     if (uid && isNonEmptyString(resumeId, 64)) {
-      const old = suspended.get(resumeId)
-      if (old && old.userId === uid && clients.get(old.id) === old) {
-        resumeSession(old, token)
+      const old = resume.find(resumeId, uid)
+      if (old) {
+        resumeSession(ctx, old, token)
         return
       }
     }

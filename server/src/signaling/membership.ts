@@ -36,8 +36,11 @@ export interface MembershipSvc {
   deps: WsDeps
   limits: WsLimits
   insecureDevMode: boolean
-  /** clientId → 연결이 끊겨 재개를 기다리는 클라이언트 (중복 연결 정리 때 지운다) */
-  suspended: Map<string, Client>
+  /**
+   * 세션 재개 유예(resume 모듈)의 해제 함수 하나. 순환 방지용 주입, 설계 2.2: resume이 membership을 import하므로
+   * (계층 3 안 순서 membership < resume < auth) membership은 resume을 import하지 않고 이 구조 타입으로만 부른다.
+   */
+  resume: { drop(c: Client): void }
   /** roomId → 참가자 수 DB 갱신 디바운스 타이머 */
   participantTimers: Map<string, ReturnType<typeof setTimeout>>
 }
@@ -157,7 +160,7 @@ export async function handleJoin(ctx: Ctx<MembershipSvc>, msg: Msg) {
   const { approvals, hasApproval, setApproval } = svc.performers
   const { dropMetronomeIfHostChanged } = svc.metronome
   const { clearNative } = svc.nativeSession
-  const { deps, limits, insecureDevMode, suspended } = svc
+  const { deps, limits, insecureDevMode, resume } = svc
 
   const roomId = msg.roomId
   if (!isNonEmptyString(roomId, MAX_ROOM_ID_LENGTH)) return
@@ -247,9 +250,7 @@ export async function handleJoin(ctx: Ctx<MembershipSvc>, msg: Msg) {
         console.log(`[JOIN] Removing duplicate connection for userId ${client.userId.slice(0, 8)}: ${existingId.slice(0, 8)}`)
         handleLeave(svc, existing, roomId, 'duplicate')
         existing.roomId = undefined // close 핸들러에서 중복 퇴장 처리 방지
-        if (existing.suspendTimer) clearTimeout(existing.suspendTimer)
-        existing.suspendTimer = undefined
-        suspended.delete(existingId)
+        resume.drop(existing)
         removeClient(existingId)
         existing.ws.close(1000, 'Duplicate connection')
         replacedDuplicate = true

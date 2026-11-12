@@ -102,6 +102,8 @@ server/src/services/wsService.ts   한 줄짜리 재수출(export * from '../sig
 
 계층 2의 모듈끼리는 1.2절에 적은 간선만 허용한다: `nativeSession → metronome`(재전송·ssrc 변경 정지), `requests → performers`(승인 기록, 악기 변경), `performers → nativeSession`(연주 중단 시 ssrc 삭제). 이 세 간선은 **허용 목록**으로 고정한다(2.5절 검사).
 
+계층 3 안에도 순서가 있다(S4-1): **membership < resume < auth**. 허용 간선은 `resume → membership`(유예 만료 때 `handleLeave(close)`, 재개 때 `sendRoomState` — 2.6절·1.2-6)과 `auth → resume`(auth 메시지의 `resumeClientId`로 재개) 두 개이고, 계층 2의 세 간선과 같은 허용 목록에 둔다. 역방향 `membership → resume`·`resume → auth`는 순환이라 금지하고 음성 테스트로 고정한다. 그런데 membership의 중복 연결 정리는 유예 해제(`resume.drop`, 2.2절 표)를 불러야 한다. 이 한 곳만 import 대신 `svc.resume`(`createResume`가 만든 객체)을 `MembershipSvc`에 `{ drop(c): void }` 구조 타입으로 적어 부른다(순환 방지용 주입). 재개 흐름의 인증 필드(`authState`·`tokenExp`·만료 타이머)는 auth가 정하므로 resume은 auth를 모른다: auth가 `attachSession`(resume) → 인증 필드·만료 타이머(auth) → `announceResumed`(resume) 순으로 부른다.
+
 계층 0 안의 간선(예: `descriptor → protocol`의 타입 import, `supabaseDeps → roomDeps`)은 허용한다. 계층 0은 실행 상태가 없는 순수 코드라 서로 참조해도 결합이 생기지 않는다.
 
 `signaling` 밖으로는 `lib/*`·`repositories/*`(타입)와 `services/relayToken`만 import한다. 다른 `services/*`, 특히 `services/wsService`는 금지다(조립은 wsService → signaling 한 방향). 이것도 2.5절 검사가 허용 목록으로 강제한다.
@@ -182,7 +184,7 @@ const handlers: Record<string, Handler> = {
 - `dispatch(ctx, msg)`: `ping`이면 `pong`(신원 무관), `auth`면 `auth.handle`, 아직 `pending`/`verifying`이면 `auth-required` 에러, 그 밖에는 표에서 찾아 호출, 없으면 무시. 지금 `handleMessage`의 앞 세 분기와 같다. `ping`은 `connection`이 아니라 `dispatch` 안에 둔다: 속도 제한·순차 체인을 거친 뒤에 처리돼야 하고, `connection`(계층 4)이 `dispatch`를 부르므로 반대 방향 import는 순환이 된다.
 - **선행 조건은 핸들러 안에 둔다.** "방 안인가", "인증됐는가", "연주자인가"를 표의 속성으로 올리고 싶어지지만, 지금 코드는 같은 조건의 실패를 메시지마다 다르게 다룬다(`start-performing`은 `login-required` 에러, `native-descriptor`는 조용히 무시, `request-perform`은 에러 두 개). 속성으로 올리면 그 차이를 다시 예외로 뚫어야 한다. 대신 `registry`/`auth`에 `inRoom(ctx)`, `isAuthenticated(client)` 같은 한 줄 판정 함수를 두고 핸들러 첫 줄에서 부른다.
 - 승인 계열 네 개가 공유하는 방장 재확인(`refreshHost` 뒤 `client.roomId !== roomId` 재검사)은 `requests` 안의 `requireHost(ctx)` 도우미 하나다.
-- **`ctx`는 연결의 "현재 Client"를 가리키는 가변 참조**다: `{ ws, ip, client, id, svc }`(S3, `ctx.ts`). `ws`·`ip`는 이 연결의 것이라 바뀌지 않고, 자기에게 보내는 응답은 `client.ws`가 아니라 `ctx.ws`로 보낸다(재개 뒤 `client.ws`는 새 연결 소켓일 수 있다). `svc`는 서버 인스턴스 하나의 공용 서비스 객체로 모든 연결이 같은 참조를 가진다. 타입은 `Ctx<S>`로 매개변수화해 계층 2 모듈은 자기가 쓰는 조각(`…Svc`)만 적고, 전체 모양 `SignalingServices`는 `dispatch`(계층 4)가 정한다 — `ctx`가 계층 2의 타입을 import하면 의존 방향이 거꾸로 서기 때문이다. 세션 재개(`resumeSession`)는 S3에서 아직 조립부(wsService)에 있고 `svc.resumeSession`으로 `auth`에 주입된다(`resume.ts` 분리는 S4). 세션 재개가 `client`를 바꿔 끼우기 때문에(1.2-6) 핸들러가 `Client`를 직접 캡처하면 안 된다. 핸들러 안에서 `const client = ctx.client`로 잡은 값은 그 메시지 처리 동안만 쓴다(재개는 `auth` 메시지 처리 중에만 일어나고 체인이 순차라 안전하다).
+- **`ctx`는 연결의 "현재 Client"를 가리키는 가변 참조**다: `{ ws, ip, client, id, svc }`(S3, `ctx.ts`). `ws`·`ip`는 이 연결의 것이라 바뀌지 않고, 자기에게 보내는 응답은 `client.ws`가 아니라 `ctx.ws`로 보낸다(재개 뒤 `client.ws`는 새 연결 소켓일 수 있다). `svc`는 서버 인스턴스 하나의 공용 서비스 객체로 모든 연결이 같은 참조를 가진다. 타입은 `Ctx<S>`로 매개변수화해 계층 2 모듈은 자기가 쓰는 조각(`…Svc`)만 적고, 전체 모양 `SignalingServices`는 `dispatch`(계층 4)가 정한다 — `ctx`가 계층 2의 타입을 import하면 의존 방향이 거꾸로 서기 때문이다. 세션 재개는 S3까지 조립부(wsService)에 있다가 S4-1에서 `resume.ts`로 옮겼다(`auth`가 import해서 부른다, 위 2.1절 계층 3 순서). 세션 재개가 `client`를 바꿔 끼우기 때문에(1.2-6) 핸들러가 `Client`를 직접 캡처하면 안 된다. 핸들러 안에서 `const client = ctx.client`로 잡은 값은 그 메시지 처리 동안만 쓴다(재개는 `auth` 메시지 처리 중에만 일어나고 체인이 순차라 안전하다).
 - 속도 제한·대기 상한·JSON 파싱·순차 체인은 `connection`에 남는다. `dispatch`는 체인 안에서 불린다.
 
 ### 2.4 단일 인스턴스 가정의 한계
