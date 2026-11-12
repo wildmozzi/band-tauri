@@ -16,19 +16,19 @@ import {
   type SeparatedStems,
   type StemSeparation
 } from './musicApi'
-import { MultiTrackPlayer } from './MultiTrackPlayer'
 import { stemFileExtension, fetchStemForDownload, saveBlob } from './stemAudio'
+import {
+  allStemsEnabled,
+  dataUrlToBlob,
+  formatHistoryDate,
+  formatPlaybackTime,
+  hasDuplicateSeparation,
+  nonEmptyStems,
+  stemFileNameFromPath,
+  stemInfo,
+} from './musicRoomLogic'
+import { useStemPlayer } from './useStemPlayer'
 import './MusicRoom.css'
-
-// 스템 이름 한글 매핑
-const STEM_LABELS: Record<string, { icon: string; label: string }> = {
-  vocals: { icon: '🎤', label: '보컬' },
-  drums: { icon: '🥁', label: '드럼' },
-  bass: { icon: '🎸', label: '베이스' },
-  piano: { icon: '🎹', label: '피아노' },
-  guitar: { icon: '🎸', label: '기타' },
-  other: { icon: '🎼', label: '기타 악기' },
-}
 
 /**
  * 음악재생 방 - MP3 음원을 세션별로 분리하여 연습
@@ -40,25 +40,6 @@ export function MusicRoom() {
   const [separatedStems, setSeparatedStems] = useState<SeparatedStems>({})
   const [availableStems, setAvailableStems] = useState<string[]>([])
   const [uploadStatus, setUploadStatus] = useState<string>('')
-
-  // 플레이어 상태
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [isPaused, setIsPaused] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [currentTime, setCurrentTime] = useState(0)
-  const [duration, setDuration] = useState(0)
-  const [tempo, setTempo] = useState(1.0)
-  const [pitch, setPitch] = useState(0)
-
-  // 드래그 상태
-  const [isDragging, setIsDragging] = useState(false)
-
-  // 스템 활성화 상태
-  const [stemStates, setStemStates] = useState<Record<string, boolean>>({})
-
-  // 볼륨 상태
-  const [masterVolume, setMasterVolume] = useState(100)
-  const [stemVolumes, setStemVolumes] = useState<Record<string, number>>({})
 
   // 인증 상태 (AuthContext)
   const { user } = useAuth()
@@ -75,11 +56,35 @@ export function MusicRoom() {
   const [currentSeparationId, setCurrentSeparationId] = useState<string | null>(null)
   const [loadingStemsFromHistory, setLoadingStemsFromHistory] = useState(false)
 
-  // MultiTrackPlayer 인스턴스
-  const playerRef = useRef<MultiTrackPlayer | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const progressBarRef = useRef<HTMLDivElement>(null)
-  const isDraggingRef = useRef(false)  // 드래그 상태 ref (콜백에서 참조용)
+
+  // 플레이어 (재생·탐색·스템 켜기/끄기·볼륨·템포·음정)
+  const {
+    progressBarRef,
+    isPlaying,
+    isPaused,
+    progress,
+    currentTime,
+    duration,
+    tempo,
+    pitch,
+    isDragging,
+    stemStates,
+    setStemStates,
+    masterVolume,
+    stemVolumes,
+    loadStems,
+    resetPlayer,
+    handlePlay,
+    handlePause,
+    handleStop,
+    handleProgressBarMouseDown,
+    handleStemToggle,
+    handleMasterVolumeChange,
+    handleStemVolumeChange,
+    handleTempoChange,
+    handlePitchChange,
+  } = useStemPlayer(availableStems.length > 0)
 
   // 로그아웃하면 히스토리를 닫고 비운다
   useEffect(() => {
@@ -87,27 +92,6 @@ export function MusicRoom() {
     setShowHistory(false)
     clearStemHistory(queryClient)
   }, [isLoggedIn, queryClient])
-
-  // 컴포넌트 마운트 시 플레이어 초기화
-  useEffect(() => {
-    playerRef.current = new MultiTrackPlayer()
-
-    // 진행률 콜백 등록
-    playerRef.current.onProgress((p, t) => {
-      // 드래그 중에는 플레이어의 progress 업데이트 무시
-      if (isDraggingRef.current) return
-      setProgress(p)
-      setCurrentTime(t)
-    })
-
-    return () => {
-      // 정리
-      if (playerRef.current) {
-        playerRef.current.dispose()
-        playerRef.current = null
-      }
-    }
-  }, [])
 
   // 파일 선택 핸들러
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -127,24 +111,8 @@ export function MusicRoom() {
 
     // 만료되지 않은 같은 이름의 기록이 있으면 확인 요청
     // DB에 깨진 이름으로 저장된 기존 레코드도 디코딩해서 비교
-    const tryDecodeFilename = (name: string): string => {
-      if (/[가-힣ᄀ-ᇿ㄰-㆏]/.test(name)) return name
-      try {
-        const bytes = new Uint8Array([...name].map(c => c.charCodeAt(0) & 0xFF))
-        const decoded = new TextDecoder('utf-8').decode(bytes)
-        if (/[가-힣ᄀ-ᇿ㄰-㆏]/.test(decoded)) return decoded
-      } catch { /* UTF-8 디코딩 실패 시 원래 이름 사용 */ }
-      return name
-    }
     const history = await fetchFreshStemHistory(queryClient, userId)
-    const now = new Date()
-    const uploadBaseName = selectedFile.name.replace(/ \(\d+\)(\.[^.]+)$/, '$1')
-    const hasDuplicate = history.some(h => {
-      if (new Date(h.expires_at) <= now) return false
-      const decoded = tryDecodeFilename(h.original_filename)
-      const decodedBase = decoded.replace(/ \(\d+\)(\.[^.]+)$/, '$1')
-      return decodedBase === uploadBaseName || decoded === selectedFile.name
-    })
+    const hasDuplicate = hasDuplicateSeparation(history, selectedFile.name, new Date())
     if (hasDuplicate) {
       const confirmed = window.confirm(
         `같은 이름의 음원 분리 기록이 있습니다.\n계속 분리하시겠습니까?`
@@ -177,18 +145,10 @@ export function MusicRoom() {
       setAvailableStems(result.availableStems || Object.keys(result.stems))
 
       // 초기 스템 상태 설정 (모두 활성화)
-      const initialStates: Record<string, boolean> = {}
-      Object.keys(result.stems).forEach((stem) => {
-        initialStates[stem] = true
-      })
-      setStemStates(initialStates)
+      setStemStates(allStemsEnabled(Object.keys(result.stems)))
 
       // 플레이어에 스템 로드
-      if (playerRef.current && result.stems) {
-        await playerRef.current.loadStems(result.stems as Record<string, string>)
-        const state = playerRef.current.getState()
-        setDuration(state.duration)
-      }
+      await loadStems(result.stems as Record<string, string>)
 
       setUploadStatus('음원 분리 완료!')
 
@@ -207,148 +167,6 @@ export function MusicRoom() {
     }
   }
 
-  // 재생 컨트롤
-  const handlePlay = async () => {
-    if (!playerRef.current || availableStems.length === 0) {
-      alert('먼저 MP3 파일을 업로드하고 분리해주세요.')
-      return
-    }
-
-    try {
-      await playerRef.current.play()
-      setIsPlaying(true)
-      setIsPaused(false)
-    } catch (error) {
-      console.error('[MusicRoom] Play error:', error)
-      alert('재생 실패')
-    }
-  }
-
-  const handlePause = () => {
-    if (playerRef.current) {
-      playerRef.current.pause()
-      setIsPlaying(false)
-      setIsPaused(true)
-    }
-  }
-
-  const handleStop = () => {
-    if (playerRef.current) {
-      playerRef.current.stop()
-      setIsPlaying(false)
-      setIsPaused(false)
-      setProgress(0)
-      setCurrentTime(0)
-    }
-  }
-
-  // 진행률 바 마우스 다운 (드래그 시작)
-  const handleProgressBarMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!playerRef.current || !progressBarRef.current || duration === 0) return
-    e.preventDefault()
-
-    isDraggingRef.current = true
-    setIsDragging(true)
-
-    const rect = progressBarRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left
-    const newProgress = Math.max(0, Math.min(1, x / rect.width))
-    setProgress(newProgress)
-    setCurrentTime(newProgress * duration)
-  }
-
-  // 드래그 중 마우스 이동 및 마우스 업 처리
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDraggingRef.current || !progressBarRef.current) return
-
-      const rect = progressBarRef.current.getBoundingClientRect()
-      const x = e.clientX - rect.left
-      const newProgress = Math.max(0, Math.min(1, x / rect.width))
-      setProgress(newProgress)
-      setCurrentTime(newProgress * duration)
-    }
-
-    const handleMouseUp = (e: MouseEvent) => {
-      if (!isDraggingRef.current || !progressBarRef.current) return
-
-      const rect = progressBarRef.current.getBoundingClientRect()
-      const x = e.clientX - rect.left
-      const newProgress = Math.max(0, Math.min(1, x / rect.width))
-
-      if (playerRef.current) {
-        playerRef.current.seekToProgress(newProgress)
-      }
-
-      isDraggingRef.current = false
-      setIsDragging(false)
-    }
-
-    window.addEventListener('mousemove', handleMouseMove)
-    window.addEventListener('mouseup', handleMouseUp)
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup', handleMouseUp)
-    }
-  }, [duration])
-
-  // 스템 토글
-  const handleStemToggle = (stemName: string) => {
-    if (playerRef.current) {
-      playerRef.current.toggleStem(stemName)
-      const newState = playerRef.current.isStemEnabled(stemName)
-      setStemStates((prev) => ({
-        ...prev,
-        [stemName]: newState
-      }))
-    }
-  }
-
-  // 마스터 볼륨 변경
-  const handleMasterVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const vol = Number(e.target.value)
-    setMasterVolume(vol)
-    if (playerRef.current) {
-      playerRef.current.setMasterVolume(vol / 100)
-    }
-  }
-
-  // 스템 개별 볼륨 변경
-  const handleStemVolumeChange = (stemName: string, value: number) => {
-    setStemVolumes((prev) => ({ ...prev, [stemName]: value }))
-    if (playerRef.current) {
-      playerRef.current.setStemVolume(stemName, value / 100)
-    }
-  }
-
-  // 템포 변경
-  const handleTempoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newTempo = Number(e.target.value)
-    setTempo(newTempo)
-
-    if (playerRef.current) {
-      playerRef.current.setTempo(newTempo)
-    }
-  }
-
-  // 음정 변경
-  const handlePitchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newPitch = Number(e.target.value)
-    setPitch(newPitch)
-
-    if (playerRef.current) {
-      playerRef.current.setPitch(newPitch)
-    }
-  }
-
-  // 시간 포맷 (초 → MM:SS)
-  const formatTime = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
-
   // 스템 다운로드
   const handleDownloadStem = (stemName: string, e: React.MouseEvent) => {
     e.stopPropagation() // 버튼 클릭 시 토글 방지
@@ -358,18 +176,10 @@ export function MusicRoom() {
 
     // base64 data URL인 경우
     if (stemData.startsWith('data:')) {
-      const [header, base64Data] = stemData.split(',')
-      const mimeType = header.match(/data:(.*);/)?.[1] || 'audio/wav'
       const extension = stemFileExtension(stemData)
 
       // base64를 Blob으로 변환
-      const byteCharacters = atob(base64Data)
-      const byteNumbers = new Array(byteCharacters.length)
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i)
-      }
-      const byteArray = new Uint8Array(byteNumbers)
-      const blob = new Blob([byteArray], { type: mimeType })
+      const blob = dataUrlToBlob(stemData)
 
       // 다운로드
       const url = URL.createObjectURL(blob)
@@ -390,7 +200,7 @@ export function MusicRoom() {
         })
     } else {
       // 파일 경로인 경우
-      const fileName = stemData.split(/[/\\]/).pop() || `${stemName}.wav`
+      const fileName = stemFileNameFromPath(stemData, stemName)
       const fileUrl = getMusicFileUrl(fileName)
 
       const a = document.createElement('a')
@@ -424,48 +234,21 @@ export function MusicRoom() {
       setLoadingStemsFromHistory(true)
       setShowHistory(false)
 
-      if (playerRef.current) {
-        playerRef.current.stop()
-        playerRef.current.dispose()
-        playerRef.current = new MultiTrackPlayer()
-        playerRef.current.onProgress((p, t) => {
-          if (isDraggingRef.current) return
-          setProgress(p)
-          setCurrentTime(t)
-        })
-      }
-
+      resetPlayer()
       setSeparatedStems({})
       setAvailableStems([])
-      setStemStates({})
-      setProgress(0)
-      setCurrentTime(0)
-      setDuration(0)
-      setIsPlaying(false)
-      setIsPaused(false)
 
       const stems = getStemsFromSeparation(separation)
       const availStems = getAvailableStemsFromSeparation(separation)
 
-      if (playerRef.current) {
-        const validStems: Record<string, string> = {}
-        for (const [key, value] of Object.entries(stems)) {
-          if (value) validStems[key] = value
-        }
-
-        setUploadStatus(`"${separation.original_filename}" 로딩 중...`)
-        await playerRef.current.loadStems(validStems)
-        const state = playerRef.current.getState()
-        setDuration(state.duration)
-      }
+      setUploadStatus(`"${separation.original_filename}" 로딩 중...`)
+      await loadStems(nonEmptyStems(stems))
 
       setSeparatedStems(stems)
       setAvailableStems(availStems)
       setCurrentSeparationId(separation.id)
 
-      const initialStates: Record<string, boolean> = {}
-      availStems.forEach(stem => { initialStates[stem] = true })
-      setStemStates(initialStates)
+      setStemStates(allStemsEnabled(availStems))
 
       setUploadStatus(`"${separation.original_filename}" 불러오기 완료`)
     } catch (error) {
@@ -493,12 +276,6 @@ export function MusicRoom() {
       console.error('Failed to delete:', error)
       alert('삭제 실패')
     }
-  }
-
-  // 날짜 포맷
-  const formatDate = (dateString: string): string => {
-    const date = new Date(dateString)
-    return date.toLocaleDateString('ko-KR', { year: 'numeric', month: 'short', day: 'numeric' })
   }
 
   // 모든 스템 다운로드
@@ -584,8 +361,8 @@ export function MusicRoom() {
                   >
                     <div className="history-item-info">
                       <span className="history-filename">{sep.original_filename}</span>
-                      <span className="history-date">{formatDate(sep.created_at)}</span>
-                      <span className="history-expires">만료: {formatDate(sep.expires_at)}</span>
+                      <span className="history-date">{formatHistoryDate(sep.created_at)}</span>
+                      <span className="history-expires">만료: {formatHistoryDate(sep.expires_at)}</span>
                     </div>
                     <div className="history-item-actions">
                       <button
@@ -622,7 +399,7 @@ export function MusicRoom() {
 
           <div className="stems-buttons">
             {availableStems.map((stemName) => {
-              const info = STEM_LABELS[stemName] || { icon: '🎵', label: stemName }
+              const info = stemInfo(stemName)
               const isEnabled = stemStates[stemName] !== false
 
               const stemVol = stemVolumes[stemName] ?? 100
@@ -705,8 +482,8 @@ export function MusicRoom() {
               <div className="progress-fill" style={{ width: `${progress * 100}%` }}></div>
             </div>
             <div className="time-display">
-              <span>{formatTime(currentTime)}</span>
-              <span>{formatTime(duration)}</span>
+              <span>{formatPlaybackTime(currentTime)}</span>
+              <span>{formatPlaybackTime(duration)}</span>
             </div>
           </div>
 
