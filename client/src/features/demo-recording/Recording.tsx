@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
+import './Recording.css'
 
 type RecordingTake = {
   id: string

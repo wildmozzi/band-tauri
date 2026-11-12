@@ -4,6 +4,7 @@ import { useAuth } from './useAuth'
 import { SERVICE_NAME } from '../../shared/lib/brand'
 import { safeRedirectPath } from './redirect'
 import { Field } from '../../shared/ui/Field'
+import './Auth.css'
 
 interface SignUpData {
   email: string

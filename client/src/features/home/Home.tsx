@@ -5,6 +5,7 @@ import { useAuth } from '../auth'
 import { DesktopDownloadButton } from '../../shared/ui/DesktopDownloadButton'
 import { SERVICE_NAME } from '../../shared/lib/brand'
 import { MAX_PERFORMERS } from '../../native/engineApi'
+import './Home.css'
 
 type FeaturePillar = {
   title: string

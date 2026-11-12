@@ -1,0 +1,26 @@
+/* modal.css — app/App.css에서 옮긴 화면 전용 규칙 (P3-2 ③-3). 순서는 원래 App.css 순서 그대로 */
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--black-a70);
+  backdrop-filter: blur(4px);
+}
+
+.modal-body {
+  flex: 1;
+}
+
+.room-edit-modal > .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--black-a80);
+}
+
+.room-edit-modal .modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}

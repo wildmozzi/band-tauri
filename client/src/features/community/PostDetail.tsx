@@ -6,6 +6,7 @@ import { DeletePostModal } from './DeletePostModal'
 import { PostArticle } from './PostArticle'
 import { TrendingTagsCard } from './TrendingTagsCard'
 import { usePostDetail } from './usePostDetail'
+import './communityFeed.css'
 
 export function PostDetail() {
   const { postId } = useParams<{ postId: string }>()

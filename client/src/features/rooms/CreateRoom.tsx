@@ -6,6 +6,7 @@ import { createRoom } from './roomApi'
 import { validateRoomPasswordInput, ROOM_PASSWORD_MAX } from './roomAccess'
 import { Field } from '../../shared/ui/Field'
 import { Button } from '../../shared/ui/Button'
+import './CreateRoom.css'
 
 const GENRES = [
   '록', '재즈', '블루스', '클래식', '팝', '힙합',

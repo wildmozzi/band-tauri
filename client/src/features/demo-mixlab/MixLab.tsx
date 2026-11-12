@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react'
+import './MixLab.css'
 
 type MixTrack = {
   id: string
