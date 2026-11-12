@@ -51,6 +51,9 @@ export const RATE_LIMIT_RETRY_MS = DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs
 /** 이 mock이 처리하는 클라이언트 → 서버 메시지 */
 const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping'])
 
+/** setDown이 연결을 끊을 때 쓰는 코드 (1012 Service Restart — 앱은 비정상 닫힘으로 보고 재연결한다) */
+const SERVER_RESTART_CLOSE_CODE = 1012
+
 /** 브라우저 연결의 가짜 IP (서버는 익명 사용자를 IP 단위로 센다) */
 const FAKE_IP = '203.0.113.10'
 
@@ -68,6 +71,9 @@ export class FakeSignaling {
   private rooms = new Map<string, FakeRoomConfig>()
   private limiters = new Map<string, PasswordAttemptLimiter>()
   private seq = 0
+  private down = false
+  /** down 동안 받자마자 닫은 연결 수 (앱의 재연결 시도) */
+  refused = 0
 
   constructor(private readonly db: MemoryPostgrest, private readonly violations: Violations) {}
 
@@ -87,6 +93,17 @@ export class FakeSignaling {
       if (c.roomId !== roomId) continue
       this.send(c, { type: 'chat', message, nickname: from.nickname, timestamp: Date.now(), oderId: from.oderId, from: from.oderId })
     }
+  }
+
+  /**
+   * 서버 장애 흉내 (P1-15b 재연결 UX). down이면 지금 연결을 모두 비정상 코드로 닫고, 새 연결도 받자마자 닫는다.
+   * up으로 되돌리면 다음 재연결부터 평소처럼 받는다(세션 재개는 흉내 내지 않는다 — 새 clientId + rejoin join → room-state).
+   */
+  setDown(down: boolean) {
+    this.down = down
+    if (!down) return
+    for (const c of this.conns) void c.ws.close({ code: SERVER_RESTART_CLOSE_CODE, reason: 'e2e down' })
+    this.conns = []
   }
 
   async install(context: BrowserContext) {
@@ -109,6 +126,11 @@ export class FakeSignaling {
   }
 
   private accept(ws: WebSocketRoute) {
+    if (this.down) {
+      this.refused++
+      void ws.close({ code: SERVER_RESTART_CLOSE_CODE, reason: 'e2e down' })
+      return
+    }
     const conn: Conn = { ws, clientId: `e2e-client-${++this.seq}`, userId: null, roomId: null }
     this.conns.push(conn)
     ws.onClose(() => {

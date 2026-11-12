@@ -60,6 +60,36 @@
   background: var(--gray-400-a15);
 }
 
+/* 시그널링 재연결 중·포기 (P1-15b) — 평상시에는 DOM에 없다 */
+.mini-player-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mini-player-signal.reconnecting {
+  color: var(--yellow-400);
+}
+
+.mini-player-signal.gave-up {
+  color: var(--red-400);
+}
+
+.mini-player-signal-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+  background: currentColor;
+}
+
+.mini-player-signal.reconnecting .mini-player-signal-dot {
+  animation: pulse-live 1.2s infinite;
+}
+
 @keyframes pulse-live {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }

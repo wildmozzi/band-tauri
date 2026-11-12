@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { useRoomConnection, useRoomPerform, useRoomMixer, useMiniPlayer } from '../state/roomHooks'
+import { useRoomConnection, useRoomPerform, useRoomMixer, useMiniPlayer, useReconnectBanner } from '../state/roomHooks'
 import './FloatingMiniPlayer.css'
 
 // 악기 정보
@@ -18,6 +18,8 @@ export function FloatingMiniPlayer() {
   const { peerInstruments, myInstrument, isPerforming, isMonitoringEnabled, monitorGain, setMonitor } = useRoomPerform()
   const { rtcStatus, masterMuted, toggleMasterMute } = useRoomMixer()
   const { isMiniPlayerMode, returnToRoom, exitMiniPlayerMode } = useMiniPlayer()
+  // 시그널링 재연결 중·포기 (P1-15b). 클릭하면 합주실로 돌아가 띠에서 자세한 안내와 "다시 입장"을 본다
+  const { kind: signalBanner } = useReconnectBanner()
 
   // 미니 플레이어 모드가 아니면 렌더링하지 않음
   if (!isMiniPlayerMode || !currentRoomId) {
@@ -49,6 +51,16 @@ export function FloatingMiniPlayer() {
         <span className={`status-indicator ${rtcStatus}`}>
           {rtcStatus === 'live' ? '● LIVE' : rtcStatus === 'connecting' ? '◌ 연결 중' : '○ 대기'}
         </span>
+        {signalBanner !== 'none' && (
+          <span
+            className={`mini-player-signal ${signalBanner}`}
+            role={signalBanner === 'gave-up' ? 'alert' : 'status'}
+            title={signalBanner === 'gave-up' ? '서버 연결이 끊겼습니다 — 눌러서 다시 입장' : '서버에 다시 연결하는 중'}
+          >
+            <span className="mini-player-signal-dot" aria-hidden="true" />
+            {signalBanner === 'gave-up' ? '연결 끊김' : '재연결 중'}
+          </span>
+        )}
       </div>
 
       {/* 연주자 정보 */}

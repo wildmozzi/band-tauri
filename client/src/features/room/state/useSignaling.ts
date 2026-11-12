@@ -9,6 +9,8 @@
  * - 수신 없음 감지: 15초 동안 아무 메시지도 없으면 ping, 5초 안에 응답이 없으면 그 소켓을 버리고(close(4000)) 바로 재연결한다
  *   (반쯤 열린 연결의 늦은 onclose를 기다리지 않는다).
  *   서버가 pong을 지원하는지는 ready 직후 보내는 ping으로 확인하고, 한 번도 pong을 못 받았으면(구 서버) 닫지 않는다.
+ * - 포기(gave-up) 뒤에는 `restart()`로 새로고침 없이 다시 연결한다(예산 리셋, 세션 재개 요청 없음 — 새 입장).
+ *   방 안에서 정상 닫힘(1000/1005)이라 재연결하지 않는 경우도 화면이 갇히지 않게 gave-up으로 본다(P1-15b).
  *
  * 신뢰 규칙: 중계 메시지의 `from`/`oderId`는 서버가 붙인 값만 쓴다. 클라이언트가 보낸 from/isHost/userId는 서버가 무시하며,
  * 이 클라이언트도 다른 클라이언트가 보낸 그런 필드를 권한 판단 근거로 쓰지 않는다.
@@ -67,6 +69,11 @@ export interface Signaling {
   isOpen: () => boolean
   /** 서버가 인증된 사용자로 판정했는지 (구 서버면 null) */
   authenticated: boolean | null
+  /**
+   * 포기(gave-up) 뒤 다시 연결: 재연결 예산을 리셋하고, 이전 clientId로 재개를 요청하지 않는 새 연결을 연다.
+   * 연결(시도)이 살아 있으면 아무것도 하지 않는다. 연결되면 평소처럼 onReady가 불린다.
+   */
+  restart: () => void
 }
 
 /** 연결 상태(signalStatus)와 clientId는 스토어의 connection 슬라이스에 쓴다 */
@@ -83,6 +90,8 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
   const rejectedJoinRef = useRef(false)
   const handlersRef = useRef(handlers)
   handlersRef.current = handlers
+  /** 연결 effect 안의 재시작 경로 (effect가 살아 있는 동안만 동작) */
+  const restartRef = useRef<() => void>(() => {})
 
   const rawSend = (ws: WebSocket, payload: SignalPayload) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload))
@@ -176,6 +185,11 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
         }, decision.delayMs)
       } else if (decision.action === 'give-up') {
         console.warn('[WS] 재연결 예산 초과 — 포기')
+        setStatus('gave-up')
+        handlersRef.current.onGaveUp?.()
+      } else if (handlersRef.current.isInRoom()) {
+        // 방 안에서 정상 닫힘(서버가 1000/1005로 닫음): 재연결하지 않으므로 "다시 입장" 안내로 넘긴다
+        console.warn(`[WS] 방 안에서 정상 닫힘(${code}) — 재연결하지 않음`)
         setStatus('gave-up')
         handlersRef.current.onGaveUp?.()
       }
@@ -309,8 +323,22 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
 
     connect()
 
+    restartRef.current = () => {
+      if (disposed) return
+      const cur = wsRef.current
+      if (cur && (cur.readyState === WebSocket.CONNECTING || cur.readyState === WebSocket.OPEN)) return
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      reconnectTimer = null
+      budget.reset()
+      // 서버 세션은 이미 정리됐다: 재개를 요청하지 않는 새 입장
+      lastClientIdRef.current = null
+      console.log('[WS] 다시 연결 (사용자 요청)')
+      connect()
+    }
+
     return () => {
       disposed = true
+      restartRef.current = () => {}
       if (reconnectTimer) clearTimeout(reconnectTimer)
       if (authTimer) clearTimeout(authTimer)
       if (connectTimer) clearTimeout(connectTimer)
@@ -324,5 +352,7 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
     }
   }, [setStatus, setClientId])
 
-  return { clientIdRef, send, isOpen, authenticated }
+  const restart = useCallback(() => restartRef.current(), [])
+
+  return { clientIdRef, send, isOpen, authenticated, restart }
 }

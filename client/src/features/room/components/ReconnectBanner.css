@@ -1,0 +1,53 @@
+/* 시그널링 재연결 안내 띠 (P1-15b) — 합주실 상단, 평상시에는 DOM에 없다 */
+.reconnect-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 32px;
+  padding: 4px 16px;
+  font-size: 0.85rem;
+  color: var(--color-text);
+  border-bottom: 1px solid var(--border);
+}
+
+.reconnect-banner.reconnecting {
+  background: var(--yellow-400-a15);
+}
+
+.reconnect-banner.gave-up {
+  background: var(--red-400-a20);
+}
+
+.reconnect-banner-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: var(--radius-round);
+}
+
+.reconnect-banner.reconnecting .reconnect-banner-dot {
+  background: var(--warning);
+  animation: reconnect-banner-pulse 1.2s ease-in-out infinite;
+}
+
+.reconnect-banner.gave-up .reconnect-banner-dot {
+  background: var(--error);
+}
+
+.reconnect-banner-action {
+  padding: 3px 12px;
+  background: var(--accent-fill);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--white);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+@keyframes reconnect-banner-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}

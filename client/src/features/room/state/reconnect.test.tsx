@@ -72,72 +72,22 @@ import { RoomProvider } from './RoomProvider'
 import { RoomRuntimeContext, useRoomConnection, type RoomActions } from './roomHooks'
 import type { RoomSessionStore } from './roomSessionStore'
 import { IDLE_PING_MS, PONG_TIMEOUT_MS, STALE_CLOSE_CODE } from './reconnectPolicy'
+import { FakeWebSocket } from '../../../shared/test/fakeWebSocket'
 
 const AUTH_FALLBACK_MS = 2000 // useSignaling과 같은 값
 
-type Sent = Record<string, unknown> & { type: string }
-
-class FakeWebSocket {
-  static readonly CONNECTING = 0
-  static readonly OPEN = 1
-  static readonly CLOSING = 2
-  static readonly CLOSED = 3
-  static instances: FakeWebSocket[] = []
-  /** true면 반쯤 열린 연결처럼 close()가 닫기 핸드셰이크만 시작하고 onclose를 부르지 않는다 */
-  static halfOpen = false
-  readyState = FakeWebSocket.CONNECTING
-  sent: Sent[] = []
-  closedWith: number | null = null
-  onopen: (() => void) | null = null
-  onclose: ((e: { code: number }) => void) | null = null
-  onerror: (() => void) | null = null
-  onmessage: ((e: { data: string }) => void) | null = null
-  constructor(public url: string) {
-    FakeWebSocket.instances.push(this)
-  }
-  send(data: string) {
-    this.sent.push(JSON.parse(data))
-  }
-  /** 클라이언트가 닫음 */
-  close(code?: number) {
-    if (this.readyState === FakeWebSocket.CLOSED) return
-    const wasConnecting = this.readyState === FakeWebSocket.CONNECTING
-    this.closedWith = code ?? 1005
-    if (FakeWebSocket.halfOpen && !wasConnecting) {
-      this.readyState = FakeWebSocket.CLOSING
-      return
-    }
-    this.readyState = FakeWebSocket.CLOSED
-    this.onclose?.({ code: wasConnecting ? 1006 : (code ?? 1005) })
-  }
-  // --- 서버/네트워크 쪽 조작 ---
-  open() {
-    this.readyState = FakeWebSocket.OPEN
-    this.onopen?.()
-  }
-  fail() {
-    this.readyState = FakeWebSocket.CLOSED
-    this.onerror?.()
-    this.onclose?.({ code: 1006 })
-  }
-  recv(msg: Record<string, unknown>) {
-    this.onmessage?.({ data: JSON.stringify(msg) })
-  }
-  recvRaw(data: string) {
-    this.onmessage?.({ data })
-  }
-}
-
-const last = () => FakeWebSocket.instances[FakeWebSocket.instances.length - 1]
-const allSent = () => FakeWebSocket.instances.flatMap((w) => w.sent)
+const last = () => FakeWebSocket.last()
+const allSent = () => FakeWebSocket.allSent()
 const flush = () => act(() => vi.advanceTimersByTimeAsync(0))
 const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms))
 
 let store: RoomSessionStore
-let actions: Pick<RoomActions, 'joinRoom'>
+let actions: RoomActions
 function Grab() {
-  store = useContext(RoomRuntimeContext)!.store
-  actions = useRoomConnection()
+  const runtime = useContext(RoomRuntimeContext)!
+  store = runtime.store
+  actions = runtime.actions
+  useRoomConnection()
   return null
 }
 
@@ -199,8 +149,7 @@ let welcomeSpy: ReturnType<typeof vi.spyOn>
 
 beforeEach(() => {
   vi.useFakeTimers()
-  FakeWebSocket.instances = []
-  FakeWebSocket.halfOpen = false
+  FakeWebSocket.reset()
   h.auth.tokenGate = null
   vi.stubGlobal('WebSocket', FakeWebSocket)
   stopSpy = vi.spyOn(h.session, 'stop')
@@ -426,5 +375,87 @@ describe('WS 재연결 (시간 예산)', () => {
     expect(vi.getTimerCount()).toBeGreaterThan(0)
     cleanup()
     expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('포기 뒤 다시 입장 (P1-15b)', () => {
+  /** 35초 넘게 실패시켜 gave-up을 만든다 */
+  async function giveUp() {
+    const first = await enterRoom()
+    act(() => first.fail())
+    await failFor(36_000)
+    expect(store.getSnapshot().connection.signalStatus).toBe('gave-up')
+  }
+
+  it('다시 입장: 새로고침 없이 새 연결 1개 → 재개 요청 없는 auth → 일반 입장 join 1회(isRejoin 없음) → 연결됨', async () => {
+    await giveUp()
+    const n = FakeWebSocket.instances.length
+    const sentBefore = allSent().length
+    act(() => actions.reenterRoom())
+    expect(FakeWebSocket.instances.length).toBe(n + 1)
+    expect(store.getSnapshot().connection).toMatchObject({ signalStatus: 'connecting', currentRoomId: 'r1', roomJoined: false })
+
+    const auth = await accept(last())
+    expect(auth.resumeClientId).toBeUndefined()
+    const joins = allSent().slice(sentBefore).filter((m) => m.type === 'join')
+    expect(joins).toHaveLength(1)
+    expect(joins[0]).toMatchObject({ roomId: 'r1' })
+    expect(joins[0].isRejoin).toBeUndefined()
+    await act(async () => last().recv({ type: 'room-state', peerIds: ['x'], participants: [], isHost: false }))
+    expect(store.getSnapshot().connection).toMatchObject({ signalStatus: 'connected', currentRoomId: 'r1', roomJoined: true })
+
+    // 연결이 살아 있으면 다시 눌러도 아무것도 하지 않는다
+    act(() => actions.reenterRoom())
+    expect(FakeWebSocket.instances.length).toBe(n + 1)
+  })
+
+  it('다시 입장한 연결이 또 실패하면 예산을 처음부터 다시 쓴다 (즉시 포기하지 않음)', async () => {
+    await giveUp()
+    act(() => actions.reenterRoom())
+    act(() => last().fail())
+    expect(store.getSnapshot().connection.signalStatus).not.toBe('gave-up')
+    await failFor(20_000)
+    expect(store.getSnapshot().connection.signalStatus).not.toBe('gave-up')
+    await failFor(16_000)
+    expect(store.getSnapshot().connection.signalStatus).toBe('gave-up')
+  })
+
+  it('첫 연결에서 ready 전에 입장하면 join은 1회뿐이다 (ready에서 rejoin을 덧보내지 않는다)', async () => {
+    const ws = last()
+    await act(async () => {
+      ws.open()
+      ws.recv({ type: 'welcome', clientId: 'c1' })
+    })
+    act(() => actions.joinRoom('r1')) // 열렸지만 auth 전 — 큐에 들어간다
+    await flush()
+    await act(async () => ws.recv({ type: 'auth-result', authenticated: true }))
+    expect(ws.sent.filter((m) => m.type === 'join')).toEqual([expect.not.objectContaining({ isRejoin: true })])
+    expect(ws.sent.filter((m) => m.type === 'join')).toHaveLength(1)
+  })
+
+  it('포기 상태가 아니면 다시 입장은 아무것도 하지 않는다', async () => {
+    await enterRoom()
+    const n = FakeWebSocket.instances.length
+    act(() => actions.reenterRoom())
+    expect(FakeWebSocket.instances.length).toBe(n)
+  })
+
+  it('포기한 채 방을 나가면 다음 입장을 위해 시그널링을 다시 연다', async () => {
+    await giveUp()
+    const n = FakeWebSocket.instances.length
+    act(() => actions.leaveRoom())
+    expect(FakeWebSocket.instances.length).toBe(n + 1)
+    await accept(last())
+    expect(store.getSnapshot().connection).toMatchObject({ signalStatus: 'connected', currentRoomId: null })
+  })
+
+  it('방 안에서 서버가 정상 닫힘(1000)으로 끊으면 재연결하지 않고 포기 안내로 넘긴다 (엔진 정지)', async () => {
+    const ws = await enterRoom()
+    const n = FakeWebSocket.instances.length
+    act(() => ws.serverClose(1000))
+    expect(store.getSnapshot().connection.signalStatus).toBe('gave-up')
+    expect(stopSpy).toHaveBeenCalledWith({ notify: false })
+    await advance(10_000)
+    expect(FakeWebSocket.instances.length).toBe(n)
   })
 })

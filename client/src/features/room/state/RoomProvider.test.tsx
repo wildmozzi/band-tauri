@@ -86,6 +86,7 @@ vi.mock('./useSignaling', async (importOriginal) => {
 })
 
 import { FloatingMiniPlayer } from '../components/FloatingMiniPlayer'
+import { ReconnectBanner } from '../components/ReconnectBanner'
 import { RoomProvider } from './RoomProvider'
 import {
   RoomRuntimeContext,
@@ -100,7 +101,7 @@ import {
 } from './roomHooks'
 import type { RoomSessionStore } from './roomSessionStore'
 
-const renders = { chat: 0, mini: 0, detail: 0, stats: 0, levels: 0, connection: 0 }
+const renders = { chat: 0, mini: 0, detail: 0, stats: 0, levels: 0, connection: 0, banner: 0 }
 let joinRoom: RoomActions['joinRoom'] = () => {}
 let leaveRoom: RoomActions['leaveRoom'] = () => {}
 let peers: string[] = []
@@ -147,7 +148,7 @@ function StoreGrab() {
 const message = (p: SignalPayload) => act(() => h.signaling.handlers!.onMessage(p))
 
 beforeEach(() => {
-  Object.assign(renders, { chat: 0, mini: 0, detail: 0, stats: 0, levels: 0, connection: 0 })
+  Object.assign(renders, { chat: 0, mini: 0, detail: 0, stats: 0, levels: 0, connection: 0, banner: 0 })
   h.providerRenders = 0
   h.signaling.send.mockClear()
   h.setInRoom.mockClear()
@@ -162,6 +163,10 @@ beforeEach(() => {
           <FloatingMiniPlayer />
         </Profiler>
         <DetailProbe />
+        {/* 재연결 안내 띠 (P1-15b) */}
+        <Profiler id="banner" onRender={() => renders.banner++}>
+          <ReconnectBanner />
+        </Profiler>
         <StatsProbe />
         <LevelsProbe />
         <ConnectionProbe />
@@ -205,6 +210,7 @@ describe('RoomProvider', () => {
     expect(renders.detail).toBe(before.detail)
     expect(renders.chat).toBe(before.chat)
     expect(renders.connection).toBe(before.connection)
+    expect(renders.banner).toBe(before.banner)
     expect(h.providerRenders).toBe(providerBefore)
   })
 

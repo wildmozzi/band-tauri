@@ -104,7 +104,8 @@ export class ReconnectBudget {
     return this.attempts
   }
 
-  private reset(): void {
+  /** 예산을 처음부터 다시 쓴다 (ready, 또는 포기 뒤 사용자가 "다시 입장"을 눌렀을 때) */
+  reset(): void {
     this.firstDropAt = null
     this.attempts = 0
   }
