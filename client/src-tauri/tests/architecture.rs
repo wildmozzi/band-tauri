@@ -24,7 +24,10 @@ const NODES: &[(&str, u8)] = &[
     // 0 공용 기초
     ("engine::config", 0),
     ("net::packet", 0),
-    ("engine::prio", 0),
+    ("sys", 0),
+    ("sys::prio", 0),
+    ("sys::cpu", 0),
+    ("sys::time", 0),
     // 1 알고리즘·상태(스레드·소켓 없음)
     ("engine::codec", 1),
     ("engine::resample", 1),
@@ -90,15 +93,13 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[
     ("diag", "manager", "⑤"),
     ("diag::export", "manager", "⑤"),
     ("manager", "diag", "⑤"),
-    // Engine이 diag의 시각 함수(now_ms)를 쓴다 → engine ↔ manager ↔ diag 순환. ④ 시간을 sys::time으로.
-    ("engine", "diag", "④"),
     // 어댑터의 로직: 릴레이 주소 DNS 해석, 게인 범위 자르기 → ⑦ manager 쪽으로.
     ("commands", "net::relay", "⑦"),
     ("commands", "engine::mixer", "⑦"),
 ];
 
 /// 예외 수 상한(래칫). 단계를 끝내 예외를 지우면 이 값도 내린다. 올리는 것은 금지(위 주석).
-const MAX_EXCEPTIONS: usize = 17;
+const MAX_EXCEPTIONS: usize = 16;
 
 /// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
 const OPEN_STAGES: &[&str] = &["③", "④", "⑤", "⑥", "⑦"];
@@ -116,6 +117,8 @@ const ADAPTER_MAY_USE: &[&str] = &[
     "engine::stats",
     "net",
     "net::peer",
+    // 벽시계(진단 내보내기 파일 이름 시각). 로직이 아닌 계층 0 함수(④-1에서 diag::now_ms를 옮김).
+    "sys::time",
     "commands",
 ];
 

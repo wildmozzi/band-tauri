@@ -55,7 +55,7 @@ pub struct AudioCounters {
     /// 장치가 SILENT로 표시한 캡처 패킷 수.
     pub input_silent_packets: AtomicU64,
     /// 오디오 I/O 스레드의 우선순위 설정 결과(자체 WASAPI가 적는다; cpal·가짜 장치는 `Unmanaged`).
-    pub audio_thread: crate::engine::prio::PrioSlot,
+    pub audio_thread: crate::sys::prio::PrioSlot,
     /// 입·출력 콜백 실행시간 히스토그램(P1-10). 콜백은 원자 덧셈만 한다.
     pub rt_timing: crate::engine::cpuprof::RtTiming,
 }
@@ -150,7 +150,7 @@ pub struct EngineStats {
     /// `cpalWasapi` | `cpalAsio` | `fake`. 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
     pub backend: String,
     /// 엔진 스레드의 MMCSS 등록 결과와 1ms 타이머 해상도 여부(P1-2).
-    pub thread_priority: crate::engine::prio::ThreadPriorityStats,
+    pub thread_priority: crate::sys::prio::ThreadPriorityStats,
     pub peers: Vec<PeerStats>,
     /// 릴레이 등록 상태(릴레이를 설정하지 않았으면 null).
     pub relay: Option<crate::net::relay::RelayStats>,
@@ -185,7 +185,7 @@ impl EngineStats {
             input_silent_packets: 0,
             device_period_ms: 0.0,
             backend: String::new(),
-            thread_priority: crate::engine::prio::ThreadPriorityStats::stopped(),
+            thread_priority: crate::sys::prio::ThreadPriorityStats::stopped(),
             peers: Vec::new(),
             relay: None,
             qos: None,

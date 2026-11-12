@@ -215,7 +215,7 @@ impl Proxy {
         let (st, fw, dr) = (stop.clone(), forwarded.clone(), dropped.clone());
         let thread = std::thread::spawn(move || {
             // 프록시는 "네트워크"를 흉내 낸다. 실제 망은 로컬 CPU 부하에 느려지지 않으므로 높은 우선순위로 돈다.
-            let _prio = band_lib::engine::prio::promote_current_thread();
+            let _prio = band_lib::sys::prio::promote_current_thread();
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
             let mut queue: Vec<(Instant, bool, Vec<u8>)> = Vec::new();
             let mut buf = [0u8; 2048];
@@ -1363,7 +1363,7 @@ fn est_latency_budget_table() {
 
 #[test]
 fn thread_priority_reported_and_timer_released_on_stop() {
-    use band_lib::engine::prio::ThreadPriority;
+    use band_lib::sys::prio::ThreadPriority;
     let _g = RT_LOCK.lock();
     for _ in 0..3 {
         let (mut a, b, _p, _sink) = connect_pair(config(480, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
@@ -1400,9 +1400,9 @@ fn thread_priority_reported_and_timer_released_on_stop() {
 /// 지터버퍼 지연/지터. 부하 단계는 논리 코어 수만큼 바쁜 스레드(보통 우선순위)를 돌린다.
 /// 실행: `cargo test --release --features test-support --test loopback rt_priority_before_after -- --ignored --nocapture`
 #[test]
-#[ignore = "realtime: 측정용(임계 없음). 결정적 짝 engine::prio::tests"]
+#[ignore = "realtime: 측정용(임계 없음). 결정적 짝 sys::prio::tests"]
 fn rt_priority_before_after() {
-    use band_lib::engine::prio;
+    use band_lib::sys::prio;
     let _g = RT_LOCK.lock();
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     println!("| 부하 | 승격 | 프로브 수면 초과 p50/p99/max (µs) | 은닉/s | 마감 채움 | 건너뜀(프레임) | bufferMs 평균 | jitterMs | xruns B |");

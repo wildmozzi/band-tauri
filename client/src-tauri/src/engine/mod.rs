@@ -15,7 +15,6 @@ mod sim;
 pub mod measure;
 pub mod metronome;
 pub mod mixer;
-pub mod prio;
 pub mod record;
 pub mod relay_codec;
 pub mod resample;
@@ -38,6 +37,7 @@ use ringbuf::HeapCons;
 
 use crate::net::peer::LocalDescriptor;
 use crate::net::{Net, NetOptions};
+use crate::sys::prio;
 use config::{EngineConfig, INTERNAL_RATE};
 use device::{AudioBackend, StreamInfo};
 use jitter::JitterSettings;
@@ -188,7 +188,7 @@ impl Engine {
             timer: Some(timer),
             metronome: metronome.clone(),
             epoch: Instant::now(),
-            cpu: Mutex::new(cpuprof::CpuSampler::new(Instant::now(), cpuprof::tsc_now())),
+            cpu: Mutex::new(cpuprof::CpuSampler::new(Instant::now(), crate::sys::cpu::tsc_now())),
             recorder: Arc::new(Mutex::new(record::Recorder::new(rec_ctl, info.out_rate))),
         };
         // 48kHz 클릭 파형을 장치 레이트로 읽는 보폭
@@ -377,8 +377,8 @@ impl Engine {
             n => n,
         };
         let device_period_ms = period_frames as f32 / self.info.out_rate.max(1) as f32 * 1000.0;
-        let worker_cycles = self.worker.as_ref().and_then(cpuprof::thread_cycles);
-        let cpu = self.cpu.lock().sample(Instant::now(), &c.rt_timing, cpuprof::tsc_now(), worker_cycles, device_period_ms * 1000.0);
+        let worker_cycles = self.worker.as_ref().and_then(crate::sys::cpu::thread_cycles);
+        let cpu = self.cpu.lock().sample(Instant::now(), &c.rt_timing, crate::sys::cpu::tsc_now(), worker_cycles, device_period_ms * 1000.0);
         let peers = self
             .net
             .as_ref()
@@ -479,7 +479,7 @@ impl Engine {
     pub fn record_start(&self, opts: record::RecordOptions, dir: &std::path::Path) -> Result<record::RecordStats, String> {
         let net = self.net.as_ref().map(|n| n.shared().clone());
         let resolve: record::PeerResolver = Box::new(move |ssrc| net.as_ref().and_then(|n| n.peer_id_for_ssrc(ssrc)));
-        self.recorder.lock().start(opts, dir, resolve, crate::diag::now_ms())
+        self.recorder.lock().start(opts, dir, resolve, crate::sys::time::unix_ms())
     }
 
     /// 녹음 중 피어 트랙 이름 추가(늦게 들어온 연주자, 1.5절).

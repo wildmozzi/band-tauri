@@ -3,6 +3,7 @@ pub mod diag;
 pub mod engine;
 pub mod manager;
 pub mod net;
+pub mod sys;
 
 use tauri::Manager;
 

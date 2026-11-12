@@ -638,7 +638,7 @@ pub mod system {
                 rts
             };
             // cpal 콜백 스레드는 백엔드가 관리한다. 자체 WASAPI 시도(시간 초과 포함)가 남긴 값을 지운다(리뷰 M1).
-            counters.audio_thread.store(crate::engine::prio::ThreadPriority::Unmanaged);
+            counters.audio_thread.store(crate::sys::prio::ThreadPriority::Unmanaged);
             self.cpal.open(cfg, input, output, counters)
         }
     }
@@ -849,7 +849,7 @@ pub mod fake {
 
     fn clocked_loop(stop: Arc<AtomicBool>, c: LoopCfg, mut f: impl FnMut(u64)) {
         // 실제 장치 콜백 스레드(cpal WASAPI/ASIO)는 시간 임계 우선순위로 돈다. 가짜도 같게 둔다.
-        let _prio = crate::engine::prio::promote_current_thread();
+        let _prio = crate::sys::prio::promote_current_thread();
         let mut rng = rand::rngs::StdRng::seed_from_u64(c.seed);
         let mut k: u64 = 0;
         let mut next_stall = c.stall.map(|(every, _)| every);

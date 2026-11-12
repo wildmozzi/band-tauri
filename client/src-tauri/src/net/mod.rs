@@ -13,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 
@@ -28,10 +28,6 @@ use relay::{AckAction, RelayClient, RelayStats, RelayToken, DATA_PREFIX_BYTES};
 
 /// 릴레이 접두부를 둘 자리까지 포함한 송신 버퍼 크기.
 const SEND_BUF_BYTES: usize = DATA_PREFIX_BYTES + MAX_PACKET_BYTES;
-
-fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
 
 /// `Net::set_relay` 인자(설계 4절 `engine_set_relay`).
 #[derive(Debug, Clone, Copy)]
@@ -110,7 +106,7 @@ pub struct NetShared {
     epoch: Instant,
     stop: AtomicBool,
     /// 수신 스레드 우선순위 설정 결과(P1-2).
-    pub recv_prio: crate::engine::prio::PrioSlot,
+    pub recv_prio: crate::sys::prio::PrioSlot,
     /// 새 피어의 지터 버퍼 설정. 프로필은 실행 중에 바뀐다(`set_jitter_profile`).
     jitter_settings: Mutex<JitterSettings>,
     allow_loopback: bool,
@@ -224,7 +220,7 @@ impl Net {
             std::thread::Builder::new()
                 .name("band-net-recv".into())
                 .spawn(move || {
-                    let _prio = crate::engine::prio::promote_engine_thread(&s.recv_prio);
+                    let _prio = crate::sys::prio::promote_engine_thread(&s.recv_prio);
                     recv_loop(&s)
                 })
                 .map_err(|e| format!("수신 스레드 생성 실패: {e}"))?,
@@ -356,7 +352,7 @@ impl Net {
         if let Some(k) = cfg.bind_key {
             token.bind_key = Some(relay::parse_bind_key(k)?);
         }
-        let deadline = relay::token_deadline(&token, cfg.expires_in, now, unix_now());
+        let deadline = relay::token_deadline(&token, cfg.expires_in, now, crate::sys::time::unix_secs());
         let moved_from = {
             let mut r = self.shared.relay.lock();
             match r.as_mut() {
