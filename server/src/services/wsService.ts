@@ -6,7 +6,7 @@ import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
 import { deriveRelayBindKey, isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
 import type { RoomMeta } from '../repositories/roomRepository'
-import { PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword } from '../lib/roomPassword'
+import { defaultScryptGate } from '../lib/roomPassword'
 import {
   APPROVAL_GRACE_MS, AUTH_TIMEOUT_MS, MAX_CHAT_LENGTH, MAX_MESSAGE_BYTES, MAX_NICKNAME_LENGTH, MAX_PENDING_MESSAGES,
   MAX_ROOM_ID_LENGTH, PARTICIPANT_UPDATE_DEBOUNCE_MS, REJOIN_WINDOW_MS, TOKEN_EXPIRY_GRACE_MS,
@@ -22,6 +22,9 @@ import { supabaseDeps } from '../signaling/supabaseDeps'
 import { createRegistry, isAuthenticated, isPerformer, send } from '../signaling/registry'
 import { createRoomMeta } from '../signaling/roomMeta'
 import { createRequests } from '../signaling/requests'
+import { createCapacity } from '../signaling/capacity'
+import { createPassword } from '../signaling/password'
+import { createPerformers } from '../signaling/performers'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -102,27 +105,18 @@ export function initializeWebSocket(
   const roomMeta = createRoomMeta(deps, insecureDevMode)
   const { getRoomMeta, getRoomMetaOrNull, checkHost, refreshHost } = roomMeta
   const { performRequests, instrumentChangeRequests } = createRequests()
+  const { seatHolds, recentlyLeft, checkCapacity, hasSeatHold, clearSeatHold, consumeRejoin, sweep } = createCapacity(registry, limits)
+  const { checkRoomPassword } = createPassword(limits, scryptGate)
+  const { approvals, hasApproval, setApproval, clearApproval, canStartPerforming } = createPerformers(roomMeta, insecureDevMode)
   /**
    * roomId → 방장이 켠 공유 메트로놈(P2-3). hostId = 켠 연결(clientId = 엔진 peerId), hostUserId = 켤 때의 DB 방장.
    * 방장 엔진이 내려가면(native-leave·퇴장) 지우고, DB 방장이 바뀐 것을 알게 되면 정지를 알리고 지운다(PR #36 L1)
    */
   const metronomes = new Map<string, { hostId: string; hostUserId: string | undefined; state: MetronomeState }>()
-  /** roomId → (userId → 만료 시각 | null=무기한). 방장 승인 기록 (H1) */
-  const approvals = new Map<string, Map<string, number | null>>()
-  /** roomId → (userId → 만료 시각). 연결이 끊긴 사용자 (서버 판정 rejoin, M1) */
-  const recentlyLeft = new Map<string, Map<string, number>>()
-  /** roomId → (userId → 만료 시각). 유예 밖으로 끊긴 연주자·승인 보유자의 자리 예약: 이 동안 재입장은 정원 검사를 건너뛴다 (PR #23 M2) */
-  const seatHolds = new Map<string, Map<string, number>>()
   const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const connectionsPerIp = new Map<string, number>()
   /** clientId → 연결이 끊겨 재개를 기다리는 클라이언트 (방/연주 상태 유지) */
   const suspended = new Map<string, Client>()
-  const passwordLimiter = new PasswordAttemptLimiter({
-    maxFailures: limits.passwordMaxFailures,
-    maxFailuresPerIp: limits.passwordMaxFailuresPerIp,
-    maxFailuresPerRoom: limits.passwordMaxFailuresPerRoom,
-    windowMs: limits.passwordWindowMs,
-  })
 
   /** 유예 중인 클라이언트를 최종 제거 (방 참가자에게 leave 전송) */
   function finalizeSuspended(c: Client) {
@@ -204,59 +198,6 @@ export function initializeWebSocket(
     return false
   }
 
-  /**
-   * 방 정원 계산용 자리 수: 방 멤버(유예 중 세션 포함)에서 자기 자신과 같은 userId의 기존 연결(입장 시 대체됨)은 뺀다.
-   * members = 로그인 사용자(userId 있음), anonymous = 익명 관람자, anonymousFromIp = 그중 같은 IP(/64)에서 온 연결.
-   */
-  function countRoomSeats(roomId: string, self: Client): { total: number; members: number; anonymous: number; anonymousFromIp: number } {
-    const bucket = ipBucket(self.ip)
-    const seats = { total: 0, members: 0, anonymous: 0, anonymousFromIp: 0 }
-    for (const pid of rooms.get(roomId) || []) {
-      if (pid === self.id) continue
-      const c = clients.get(pid)
-      if (self.userId && c?.userId === self.userId) continue
-      seats.total++
-      if (c?.userId) seats.members++
-      else {
-        seats.anonymous++
-        if (c && ipBucket(c.ip) === bucket) seats.anonymousFromIp++
-      }
-    }
-    return seats
-  }
-
-  /**
-   * 정원 검사 (P3-12b, PR #23 H1). 통과하면 null, 아니면 거부 사유.
-   * - 로그인 사용자는 로그인 사용자 수로만 정원을 센다: 익명 관람자가 자리를 채워도 밴드 멤버·연주자는 막히지 않는다.
-   * - 익명 관람자는 빈자리가 있을 때만(전체 < 정원), 방별 익명 상한·IP당 방별 익명 상한 안에서 들어온다.
-   *   이미 있는 익명을 밀어내지 않으므로, 로그인 사용자가 뒤에 들어오면 전체 인원이 잠시 정원을 넘을 수 있다.
-   */
-  function checkCapacity(roomId: string, self: Client, capacity: number): 'room-full' | 'anonymous-limit' | null {
-    const seats = countRoomSeats(roomId, self)
-    if (self.userId) return seats.members >= capacity ? 'room-full' : null
-    if (seats.total >= capacity) return 'room-full'
-    if (seats.anonymous >= limits.maxAnonymousPerRoom || seats.anonymousFromIp >= limits.maxAnonymousPerIpPerRoom) return 'anonymous-limit'
-    return null
-  }
-
-  /** 자리 예약(유예 밖 재입장 우선권)이 살아 있는지. 확인만 하고 지우지 않는다 */
-  function hasSeatHold(roomId: string, userId: string | undefined): boolean {
-    if (!userId) return false
-    const m = seatHolds.get(roomId)
-    const exp = m?.get(userId)
-    if (exp === undefined) return false
-    if (exp > Date.now()) return true
-    clearSeatHold(roomId, userId)
-    return false
-  }
-
-  function clearSeatHold(roomId: string, userId: string | undefined) {
-    if (!userId) return
-    const m = seatHolds.get(roomId)
-    m?.delete(userId)
-    if (m && m.size === 0) seatHolds.delete(roomId)
-  }
-
   const METRONOME_HOST_CHANGED = { type: 'error', code: 'metronome-host-only', message: '방장이 바뀌어 메트로놈을 껐습니다.' }
 
   /** 메트로놈 정지를 같은 방의 다른 연주자에게 알린다(켠 방장 제외) */
@@ -326,27 +267,6 @@ export function initializeWebSocket(
     participantTimers.set(roomId, t)
   }
 
-  function hasApproval(roomId: string, userId: string | undefined): boolean {
-    if (!userId) return false
-    const exp = approvals.get(roomId)?.get(userId)
-    if (exp === undefined) return false
-    if (exp === null || exp > Date.now()) return true
-    approvals.get(roomId)?.delete(userId)
-    return false
-  }
-
-  function setApproval(roomId: string, userId: string, expiresAt: number | null) {
-    if (!approvals.has(roomId)) approvals.set(roomId, new Map())
-    approvals.get(roomId)!.set(userId, expiresAt)
-  }
-
-  function clearApproval(roomId: string, userId: string | undefined) {
-    if (!userId) return
-    const m = approvals.get(roomId)
-    m?.delete(userId)
-    if (m && m.size === 0) approvals.delete(roomId)
-  }
-
   function handleLeave(client: Client, roomId: string, reason: LeaveReason) {
     const id = client.id
     const set = rooms.get(roomId)
@@ -411,16 +331,6 @@ export function initializeWebSocket(
     }
   }
 
-  function consumeRejoin(roomId: string, userId: string | undefined): boolean {
-    if (!userId) return false
-    const m = recentlyLeft.get(roomId)
-    const exp = m?.get(userId)
-    if (exp === undefined) return false
-    m!.delete(userId)
-    if (m!.size === 0) recentlyLeft.delete(roomId)
-    return exp > Date.now()
-  }
-
   function scheduleExpiryCheck(client: Client) {
     if (client.expiryTimer) clearTimeout(client.expiryTimer)
     client.expiryTimer = undefined
@@ -439,10 +349,7 @@ export function initializeWebSocket(
 
   const heartbeat = setInterval(() => {
     const now = Date.now()
-    for (const [roomId, holds] of seatHolds) {
-      for (const [uid, exp] of holds) if (exp <= now) holds.delete(uid)
-      if (holds.size === 0) seatHolds.delete(roomId)
-    }
+    sweep(now)
     for (const c of clients.values()) {
       if (suspended.has(c.id)) continue // 이미 끊긴 연결 (재개 대기)
       if (!c.isAlive) {
@@ -626,37 +533,6 @@ export function initializeWebSocket(
       sendAuthResult()
     }
 
-    /** 방 비밀번호 검증 + 실패 횟수 제한. 통과하면 true, 아니면 에러를 보내고 false */
-    const checkRoomPassword = async (roomId: string, hash: string, password: unknown): Promise<boolean> => {
-      if (typeof password !== 'string' || password.length === 0) {
-        send(ws, { type: 'error', code: 'password-required', roomId, message: '비밀번호가 필요한 방입니다.' })
-        return false
-      }
-      // 익명은 IP(/64) 단위로 묶는다 (재접속·주소 회전으로 횟수를 초기화하지 못하게)
-      const subject = client.userId ? `u:${client.userId}` : `anon:${ipBucket(client.ip)}`
-      const attempt = passwordLimiter.begin(roomId, subject, client.ip)
-      if (!attempt.ok) {
-        send(ws, { type: 'error', code: 'password-rate-limited', roomId, retryAfterMs: attempt.retryAfterMs, message: '비밀번호를 너무 많이 틀렸습니다. 잠시 후 다시 시도하세요.' })
-        return false
-      }
-      let valid: boolean
-      try {
-        valid = await verifyRoomPassword(password, hash, scryptGate)
-      } catch (err) {
-        if (!(err instanceof ScryptBusyError)) throw err
-        passwordLimiter.cancelled(roomId, subject, client.ip)
-        send(ws, { type: 'error', code: 'password-busy', roomId, retryAfterMs: 2000, message: '서버가 혼잡합니다. 잠시 후 다시 시도하세요.' })
-        return false
-      }
-      if (valid) {
-        passwordLimiter.succeeded(roomId, subject, client.ip)
-        return true
-      }
-      console.warn(`[JOIN] ${id.slice(0, 8)} wrong password for room ${roomId.slice(0, 8)} (remaining ${attempt.remaining})`)
-      send(ws, { type: 'error', code: 'password-invalid', roomId, remainingAttempts: attempt.remaining, message: '비밀번호가 올바르지 않습니다.' })
-      return false
-    }
-
     const handleJoin = async (msg: Msg) => {
       const roomId = msg.roomId
       if (!isNonEmptyString(roomId, MAX_ROOM_ID_LENGTH)) return
@@ -703,7 +579,7 @@ export function initializeWebSocket(
 
       // 비밀번호 방: 방장이 아니면 검증 (실패하면 지금 있는 방은 그대로 둔다)
       if (passwordHash && !isHost) {
-        const ok = await checkRoomPassword(roomId, passwordHash, msg.password)
+        const ok = await checkRoomPassword(client, roomId, passwordHash, msg.password)
         if (!ok || clients.get(id) !== client) return
       }
 
@@ -785,16 +661,6 @@ export function initializeWebSocket(
       sendRoomState(roomId)
     }
 
-    /** 연주 시작 허용 여부 (H1): 방장, free_join 방, 또는 방장이 승인한 사용자 */
-    const canStartPerforming = async (roomId: string): Promise<boolean> => {
-      if (!isAuthenticated(client) && !(insecureDevMode && client.authState === 'authenticated')) return false
-      if (insecureDevMode) return true
-      if (client.isHost) return true
-      if (hasApproval(roomId, client.userId)) return true
-      const meta = await getRoomMetaOrNull(roomId)
-      return !!meta && meta.freeJoin
-    }
-
     const handleMessage = async (msg: Msg) => {
       // 앱 수준 ping (P1-15): 브라우저는 프로토콜 ping을 못 보므로 클라이언트가 수신 없음 감지에 쓴다. 신원 무관, rate limit은 위에서 적용됨
       if (msg.type === 'ping') {
@@ -824,7 +690,7 @@ export function initializeWebSocket(
           send(ws, { type: 'error', code: 'login-required', message: '연주하려면 로그인이 필요합니다.' })
           return
         }
-        if (!(await canStartPerforming(roomId)) || client.roomId !== roomId) {
+        if (!(await canStartPerforming(client, roomId)) || client.roomId !== roomId) {
           send(ws, { type: 'error', code: 'perform-not-approved', message: '방장의 승인이 필요합니다.' })
           return
         }
