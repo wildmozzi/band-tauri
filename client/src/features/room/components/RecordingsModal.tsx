@@ -6,6 +6,7 @@ import {
   recordingTimeLabel,
 } from '../roomDetailModel'
 import { Modal } from '../../../shared/ui/Modal'
+import './RecordingsModal.css'
 
 /** 녹음 목록 모달 */
 export function RecordingsModal({

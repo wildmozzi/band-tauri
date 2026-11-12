@@ -10,6 +10,7 @@ import {
   clampBpm,
 } from '../../../native/metronomeLogic'
 import { OPEN_LATENCY_MEASURE_EVENT, outputLatencyView } from '../../../native/loopbackOffsetStore'
+import './MetronomePanel.css'
 
 /**
  * 공유 메트로놈(P2-3). 방장은 BPM·박자·시작/정지, 모든 연주자는 내 클릭 볼륨·뮤트.

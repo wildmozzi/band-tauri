@@ -4,6 +4,7 @@ import { DEFAULT_MIX, formatDuration, formatPan, levelClass, performerName } fro
 import { DiagnosticsExport } from '../../settings'
 import { NativeRecordingControl } from './NativeRecordingControl'
 import { isNativeApp } from '../../../native/engineApi'
+import './MixerPanel.css'
 
 /** 마스터 볼륨·음소거·패닝(관람만)·레벨 */
 function MixerMaster({ isPerformer }: { isPerformer: boolean }) {

@@ -1,0 +1,168 @@
+/* PendingRequestsModal.css — features/room/RoomDetail.css에서 옮긴 이 컴포넌트 전용 규칙 (P3-2 ③-3). 순서는 원래 RoomDetail.css 순서 그대로 */
+.change-request-actions .approve-btn.small,
+.change-request-actions .reject-btn.small {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-round);
+  border: none;
+  cursor: pointer;
+  font-size: 0.7rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.change-request-actions .approve-btn.small {
+  background: var(--green-400-a20);
+  color: var(--green-400);
+}
+
+.change-request-actions .approve-btn.small:hover {
+  background: var(--green-400-a40);
+}
+
+.change-request-actions .reject-btn.small {
+  background: var(--red-400-a20);
+  color: var(--red-400);
+}
+
+.change-request-actions .reject-btn.small:hover {
+  background: var(--red-400-a40);
+}
+
+/* 승인 요청 모달 */
+.pending-requests-modal .modal-content {
+  max-width: 450px;
+}
+
+.pending-requests-modal .no-requests {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 24px;
+}
+
+.requests-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.request-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: var(--white-a05);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+}
+
+.request-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.request-icon {
+  font-size: 1.5rem;
+}
+
+.request-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.request-nickname {
+  font-weight: 600;
+}
+
+.request-instrument {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.request-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.approve-btn,
+.reject-btn {
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  border: none;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.approve-btn {
+  background: var(--success);
+  color: var(--black);
+}
+
+.approve-btn:hover {
+  background: var(--green-500);
+  transform: translateY(-1px);
+}
+
+.reject-btn {
+  background: var(--red-400-a20);
+  color: var(--error);
+  border: 1px solid var(--error);
+}
+
+.reject-btn:hover {
+  background: var(--red-400-a30);
+}
+
+.request-notice-toast button {
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--warning);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.request-notice-toast .close-btn {
+  border: none;
+  font-size: 1.1rem;
+  padding: 0 4px;
+}
+
+.reject-reason-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  width: 100%;
+}
+
+.reject-reason-preset {
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--white-a04);
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.reject-reason-preset:hover {
+  border-color: var(--error);
+}
+
+.reject-reason-custom {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.reject-reason-custom input {
+  flex: 1;
+  min-width: 140px;
+}

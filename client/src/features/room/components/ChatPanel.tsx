@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useRoomConnection, useRoomChat } from '../state/roomHooks'
+import './ChatPanel.css'
 
 /** 오른쪽: 채팅. 입력 중인 글은 페이지가 갖는다(재연결 화면을 거쳐도 유지) */
 export function ChatPanel({ chatInput, onChatInputChange }: { chatInput: string; onChatInputChange: (v: string) => void }) {

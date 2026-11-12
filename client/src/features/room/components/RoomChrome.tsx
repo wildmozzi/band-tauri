@@ -6,6 +6,7 @@ import { INSTRUMENT_INFO, RTC_STATUS_TEXT, type DetailRoom } from '../roomDetail
 import type { BubblePositions } from '../hooks/useBubblePositions'
 import { Badge } from '../../../shared/ui/Badge'
 import { Button } from '../../../shared/ui/Button'
+import './RoomChrome.css'
 
 /** 상단 헤더: 제목, 상태 배지, 인원, 방장, 정보/설정/나가기 */
 export function LiveHeader({

@@ -1,0 +1,154 @@
+/* MixerPanel.css — features/room/RoomDetail.css에서 옮긴 이 컴포넌트 전용 규칙 (P3-2 ③-3). 순서는 원래 RoomDetail.css 순서 그대로 */
+/* Viewer Guide */
+.viewer-guide {
+  padding: 16px 24px;
+  background: var(--white-a03);
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+
+.viewer-guide p {
+  font-size: 0.95rem;
+  margin-bottom: 4px;
+}
+
+.viewer-guide small {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+/* Mixer Panel (Center) */
+.mixer-panel {
+  background: var(--bg-app);
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 73px);
+}
+
+.mixer-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.mixer-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.mixer-master {
+  background: var(--violet-500-a10);
+  border: 1px solid var(--violet-500-a30);
+  border-radius: var(--radius-xl);
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.mixer-master label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.master-control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.master-control-row label {
+  width: 40px;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: var(--color-text-subtle);
+}
+
+.master-control-row input[type="range"] {
+  flex: 1;
+}
+
+.master-control-row span {
+  width: 45px;
+  text-align: right;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.mixer-master.muted {
+  opacity: 0.6;
+}
+
+.mixer-master.muted .master-control-row span {
+  color: var(--text-muted);
+}
+
+.master-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.master-header label {
+  margin-bottom: 0;
+}
+
+.master-mute-btn {
+  background: var(--white-a10);
+  border: none;
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.master-mute-btn:hover {
+  background: var(--white-a20);
+}
+
+.master-mute-btn.active {
+  background: rgba(220, 38, 38, 0.3);
+  color: var(--red-400);
+}
+
+/* 분리 전에는 뒤에 와서 이기던 규칙 — 이 파일이 RoomDetail.css·AudioSettings.css보다 먼저 로드되므로 문맥 클래스로 특이성 고정 (P3-2 ③-3) */
+.level-meter.master-level {
+  margin-top: 12px;
+}
+
+.level-meter.master-level .level-bar {
+  height: 12px;
+}
+
+.mixer-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.mixer-empty {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-muted);
+}
+
+.mixer-empty p {
+  margin-bottom: 8px;
+}
+
+.mixer-empty small {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+@media (max-width: 768px) {
+
+  .mixer-panel {
+    height: auto;
+    min-height: 200px;
+    order: 2;
+  }
+}

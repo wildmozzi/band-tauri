@@ -18,6 +18,7 @@ import {
   recordWarning,
   trackNameMap,
 } from '../../../native/recordLogic'
+import './NativeRecordingControl.css'
 
 const FORMAT_KEY = 'band.recordFormat'
 
