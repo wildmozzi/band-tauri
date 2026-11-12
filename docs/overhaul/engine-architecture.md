@@ -28,7 +28,7 @@
 | `engine/metronome.rs` | 클릭 생성(E, RT) + 박 스케줄러(C) + 계획·상태 Mutex(B) | ⑥ |
 | `engine/record.rs` | 출력 콜백 녹음 링(E, RT) + 쓰기 스레드·사이드카(비RT) | ⑥ |
 | `engine/measure.rs` | 루프백(장치) + 에코 프로브(워커) + 분석(알고리즘) | ⑥ |
-| `engine/stats.rs` | RT·워커 원자 카운터(1) + 보고 DTO(`EngineStats`, 5) | ④ |
+| ~~`engine/stats.rs`~~ | (④에서 해소) 원자 카운터 `stats.rs`(1) · RT 타이밍 `rt_timing.rs`(1) · 보고 DTO와 `stats()` 조립 `report.rs`(5) | ④ 완료 |
 | `engine/device.rs` | 백엔드 선택 + cpal 백엔드 + 가짜 장치 + 공용 타입(`StreamInfo`) | ⑥ |
 | `net/peer.rs` | 피어 테이블·홀펀칭(D) + 미디어 상태(`JitterBuffer`·`PeerMixCtl` 소유) | ③ |
 
@@ -211,7 +211,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/worker/device_watch.rs` | 장치 멈춤 감시·스트림 에러 로그 | 장치 감시 |
 | `engine/sim/{mod,tune,long,loss_codec}.rs` | 가상 시간 결정적 하네스(`cfg(test)`): 6피어 5·60분, 손실 피드백 | 하네스 시나리오 |
 | `engine/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
-| `engine/stats.rs` | 원자 통계 카운터 + 보고 DTO(④에서 나눔) | 통계 계약 |
+| `engine/stats.rs`, `rt_timing.rs`, `report.rs` | RT·워커 원자 통계 카운터, RT 콜백 타이밍, 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
 | `engine/measure.rs` | 지연 측정: 루프백(처프·상호상관), 에코 클릭 | 측정 |
 | `engine/metronome.rs` | 공유 메트로놈: 계획·검증, 스케줄러, 클릭 생성기 | 메트로놈 |
 | `engine/record.rs`, `wav.rs`, `flac.rs` | 합주 녹음: RT 링·핸드오프, 쓰기 스레드, WAV/RF64·FLAC | 녹음 |

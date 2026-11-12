@@ -125,6 +125,11 @@ jobs:
       - name: Clippy
         timeout-minutes: 20
         run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy (test-support)
+        # soak.rs·cpu_profile.rs 등 `test-support` 전용 테스트는 위 기본 clippy에서 컴파일되지 않는다.
+        # 경로 이동으로 깨진 것을 야간 잡이 아니라 PR에서 잡는다(#108·#110 병렬 병합으로 develop이 깨졌던 일).
+        timeout-minutes: 20
+        run: cargo clippy --all-targets --features test-support -- -D warnings
       - name: Test (결정적)
         timeout-minutes: 20
         run: cargo test
