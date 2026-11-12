@@ -7,22 +7,21 @@ import { isInsecureDevMode } from '../lib/securityConfig'
 import type { RoomMeta } from '../repositories/roomRepository'
 import { defaultScryptGate } from '../lib/roomPassword'
 import { AUTH_TIMEOUT_MS, MAX_MESSAGE_BYTES, MAX_PENDING_MESSAGES, type Msg } from '../signaling/protocol'
-import { DEFAULT_LIMITS, type Client, type WsDeps, type WsLimits, type WsOptions } from '../signaling/types'
+import { DEFAULT_LIMITS, type WsDeps, type WsLimits, type WsOptions } from '../signaling/types'
 import { TokenBucket } from '../signaling/rateLimit'
-import { createMetronome, metronomeHostChanged } from '../signaling/metronome'
-import { jwtExpiryMs, scheduleExpiryCheck } from '../signaling/auth'
+import { createMetronome } from '../signaling/metronome'
 import { clientIp } from '../signaling/connection'
 import { supabaseDeps } from '../signaling/supabaseDeps'
-import { createRegistry, isAuthenticated, send } from '../signaling/registry'
+import { createRegistry, send } from '../signaling/registry'
 import { createRoomMeta } from '../signaling/roomMeta'
 import { createRequests } from '../signaling/requests'
 import { createCapacity } from '../signaling/capacity'
 import { createPassword } from '../signaling/password'
 import { createPerformers } from '../signaling/performers'
 import { createNativeSession } from '../signaling/nativeSession'
-import { handleLeave, sendRoomState } from '../signaling/membership'
+import { handleLeave } from '../signaling/membership'
+import { createResume, suspendOnClose } from '../signaling/resume'
 import { dispatch, type ConnCtx, type SignalingServices } from '../signaling/dispatch'
-import type { Ctx } from '../signaling/ctx'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -85,7 +84,7 @@ export function initializeWebSocket(
   const insecureDevMode = isInsecureDevMode(deps.hasBackend, env)
   // S2(docs/server-architecture.md 3절): 상태 소유 모듈. S3: 메시지 처리는 signaling/dispatch 표의 handle*가 한다
   const registry = createRegistry()
-  const { rooms, clients, addClient, removeClient } = registry
+  const { getClient, clientCount, allClients, hasRoom, addClient, removeClient } = registry
   const roomMeta = createRoomMeta(deps, insecureDevMode)
   const requests = createRequests()
   const capacity = createCapacity(registry, limits)
@@ -95,8 +94,7 @@ export function initializeWebSocket(
   const nativeSession = createNativeSession(registry, env)
   const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const connectionsPerIp = new Map<string, number>()
-  /** clientId → 연결이 끊겨 재개를 기다리는 클라이언트 (방/연주 상태 유지) */
-  const suspended = new Map<string, Client>()
+  const resume = createResume(registry)
 
   /**
    * 공용 서비스 객체 하나 (S3). 모든 연결의 ctx.svc가 이 객체를 가리킨다(복사하지 않음).
@@ -104,67 +102,8 @@ export function initializeWebSocket(
    */
   const svc: SignalingServices = {
     env, deps, limits, insecureDevMode,
-    registry, roomMeta, requests, capacity, password, performers, metronome, nativeSession,
-    suspended, participantTimers,
-    resumeSession,
-  }
-
-  /** 유예 중인 클라이언트를 최종 제거 (방 참가자에게 leave 전송) */
-  function finalizeSuspended(c: Client) {
-    if (c.suspendTimer) clearTimeout(c.suspendTimer)
-    c.suspendTimer = undefined
-    suspended.delete(c.id)
-    if (clients.get(c.id) !== c) return
-    console.log(`[RESUME] ${c.id.slice(0, 8)} grace period over - leaving`)
-    if (c.roomId && rooms.has(c.roomId)) handleLeave(svc, c, c.roomId, 'close')
-    c.roomId = undefined
-    removeClient(c.id)
-  }
-
-  /**
-   * 세션 재개: 이 연결(ctx)을 유예 중이던 이전 Client(clientId/방/연주 상태)에 붙인다.
-   * 방 참가자에게는 leave/joined를 보내지 않는다(그들 입장에서는 끊긴 적이 없음).
-   * S3: 연결 클로저의 `client = old; id = old.id`가 `ctx.client = old; ctx.id = old.id`가 됐다. 그 뒤로 이 연결의
-   * 메시지 체인·close·auth 타이머는 모두 ctx를 거쳐 옛 Client를 본다(1.2-6). auth 핸들러가 svc.resumeSession으로 부른다.
-   * ctx는 모두 connection 핸들러가 svc로 만든 ConnCtx다(auth 조각 타입 Ctx로 넘어올 뿐) — sendRoomState에 그대로 넘긴다.
-   */
-  function resumeSession(ctx: Ctx, old: Client, token: string) {
-    const { ws } = ctx
-    const temp = ctx.client
-    if (old.suspendTimer) clearTimeout(old.suspendTimer)
-    old.suspendTimer = undefined
-    suspended.delete(old.id)
-
-    old.ws = ws
-    old.ip = temp.ip
-    old.isAlive = true
-    // 이 연결에서 이미 큐에 쌓인 메시지 순서를 유지하기 위해 체인/카운터를 넘겨받는다
-    old.chain = temp.chain
-    old.pending = temp.pending
-    old.msgBucket = temp.msgBucket
-    old.chatBucket = temp.chatBucket
-    old.joinBucket = temp.joinBucket
-    old.dropped = 0
-    old.authState = 'authenticated'
-    old.tokenExp = jwtExpiryMs(token)
-
-    if (temp.expiryTimer) clearTimeout(temp.expiryTimer)
-    removeClient(temp.id)
-    ctx.client = old
-    ctx.id = old.id
-    const client = ctx.client
-    const id = ctx.id
-    scheduleExpiryCheck(client)
-
-    console.log(`[RESUME] ${id.slice(0, 8)} resumed session (user ${client.userId?.slice(0, 8)}, room ${client.roomId?.slice(0, 8) || 'none'}, performing: ${client.isPerforming})`)
-    send(ws, { type: 'welcome', clientId: id, resumed: true })
-    send(ws, { type: 'auth-result', authenticated: true, userId: client.userId ?? null, resumed: true })
-    if (client.roomId && rooms.has(client.roomId)) sendRoomState(ctx as ConnCtx, client.roomId)
-    // 유예 중에 이양으로 메트로놈이 꺼졌다: 그때 못 받은 알림을 지금 보내 내 기준 클릭도 끄게 한다(PR #53 L2)
-    if (client.pendingMetronomeStop) {
-      client.pendingMetronomeStop = false
-      send(ws, metronomeHostChanged())
-    }
+    registry, roomMeta, requests, capacity, password, performers, metronome, nativeSession, resume,
+    participantTimers,
   }
 
   // maxPayload 초과 시 ws가 연결을 1009로 끊는다
@@ -181,16 +120,16 @@ export function initializeWebSocket(
   const heartbeat = setInterval(() => {
     const now = Date.now()
     capacity.sweep(now)
-    for (const c of clients.values()) {
-      if (suspended.has(c.id)) continue // 이미 끊긴 연결 (재개 대기)
-      if (!c.isAlive) {
+    for (const c of allClients()) {
+      if (resume.isSuspended(c.id)) continue // 이미 끊긴 연결 (재개 대기)
+      if (!c.conn.isAlive) {
         console.log(`[WS] ${c.id.slice(0, 8)} heartbeat timeout - terminating`)
-        c.ws.terminate()
+        c.conn.ws.terminate()
         continue
       }
-      c.isAlive = false
+      c.conn.isAlive = false
       try {
-        c.ws.ping()
+        c.conn.ws.ping()
       } catch {
         // 무시
       }
@@ -201,7 +140,7 @@ export function initializeWebSocket(
   wss.on('close', () => {
     clearInterval(heartbeat)
     for (const t of participantTimers.values()) clearTimeout(t)
-    for (const c of suspended.values()) if (c.suspendTimer) clearTimeout(c.suspendTimer)
+    resume.clearTimers()
   })
 
   wss.on('error', (err) => {
@@ -226,35 +165,36 @@ export function initializeWebSocket(
       id: newId,
       client: {
         id: newId,
-        ws,
-        ip,
-        nickname: `User${newId.slice(0, 4)}`,
-        isPerforming: false,
-        isHost: false,
-        authState: 'pending',
-        tokenExp: null,
-        nativeActive: false,
-        chain: Promise.resolve(),
-        pending: 0,
-        isAlive: true,
-        msgBucket: new TokenBucket(limits.msgBurst, limits.msgPerSec),
-        chatBucket: new TokenBucket(limits.chatBurst, limits.chatPerSec),
-        joinBucket: new TokenBucket(limits.joinBurst, limits.joinPerSec),
-        dropped: 0,
-        lastRateLimitNotice: 0,
+        conn: {
+          ws,
+          ip,
+          chain: Promise.resolve(),
+          pending: 0,
+          isAlive: true,
+          msgBucket: new TokenBucket(limits.msgBurst, limits.msgPerSec),
+          chatBucket: new TokenBucket(limits.chatBurst, limits.chatPerSec),
+          joinBucket: new TokenBucket(limits.joinBurst, limits.joinPerSec),
+          dropped: 0,
+          lastRateLimitNotice: 0,
+        },
+        auth: { state: 'pending', tokenExp: null },
+        resume: {},
+        member: { nickname: `User${newId.slice(0, 4)}`, isHost: false },
+        perform: { isPerforming: false },
+        native: { active: false },
       },
       svc,
     }
     addClient(ctx.client)
-    console.log(`[CONNECT] Client ${ctx.id.slice(0, 8)} connected. Total clients: ${clients.size}`)
+    console.log(`[CONNECT] Client ${ctx.id.slice(0, 8)} connected. Total clients: ${clientCount()}`)
     send(ws, { type: 'welcome', clientId: ctx.id })
 
-    ws.on('pong', () => { ctx.client.isAlive = true })
+    ws.on('pong', () => { ctx.client.conn.isAlive = true })
 
     // 5초 내 auth가 없으면 익명 관람자로 진행
     const authTimer = setTimeout(() => {
-      if (ctx.client.authState === 'pending') {
-        ctx.client.authState = 'anonymous'
+      if (ctx.client.auth.state === 'pending') {
+        ctx.client.auth.state = 'anonymous'
         console.log(`[AUTH] ${ctx.id.slice(0, 8)} no auth within ${AUTH_TIMEOUT_MS}ms - anonymous viewer`)
         send(ws, { type: 'auth-result', authenticated: false })
       }
@@ -264,20 +204,20 @@ export function initializeWebSocket(
     /** 메시지 rate limit (M3). 통과하면 true */
     const allowMessage = (msg: Msg): boolean => {
       const client = ctx.client
-      let ok = client.msgBucket.take()
-      if (ok && msg.type === 'chat') ok = client.chatBucket.take()
-      if (ok && (msg.type === 'join' || msg.type === 'leave')) ok = client.joinBucket.take()
+      let ok = client.conn.msgBucket.take()
+      if (ok && msg.type === 'chat') ok = client.conn.chatBucket.take()
+      if (ok && (msg.type === 'join' || msg.type === 'leave')) ok = client.conn.joinBucket.take()
       if (ok) return true
 
-      client.dropped++
-      if (client.dropped >= limits.maxDropped) {
+      client.conn.dropped++
+      if (client.conn.dropped >= limits.maxDropped) {
         console.warn(`[WS] ${ctx.id.slice(0, 8)} exceeded rate limit repeatedly - closing`)
         ws.close(1008, 'Rate limit exceeded')
         return false
       }
       const now = Date.now()
-      if (now - client.lastRateLimitNotice > 1000) {
-        client.lastRateLimitNotice = now
+      if (now - client.conn.lastRateLimitNotice > 1000) {
+        client.conn.lastRateLimitNotice = now
         send(ws, { type: 'error', code: 'rate-limited', message: '메시지를 너무 많이 보냈습니다.', rejectedType: msg.type })
       }
       return false
@@ -297,18 +237,19 @@ export function initializeWebSocket(
 
       if (!allowMessage(msg)) return
 
-      if (ctx.client.pending >= MAX_PENDING_MESSAGES) {
+      if (ctx.client.conn.pending >= MAX_PENDING_MESSAGES) {
         console.warn(`[WS] ${ctx.id.slice(0, 8)} too many pending messages - closing`)
         ws.close(1008, 'Too many pending messages')
         return
       }
-      ctx.client.pending++
+      ctx.client.conn.pending++
       // 메시지를 순차 처리 (auth 검증/DB 조회 같은 비동기 작업 중에도 순서 유지).
       // 콜백 안의 ctx.client·ctx.id는 실행 시점 값이다(원래 클로저 변수와 같음: 재개 뒤면 옛 Client)
-      ctx.client.chain = ctx.client.chain
-        .then(() => (clients.get(ctx.id) === ctx.client ? dispatch(ctx, msg) : undefined))
+      // 세션 재개(P1-16)로 Client가 새 연결로 넘어갔으면 옛 연결에 남은 메시지는 처리하지 않는다(conn.ws가 이 소켓이 아님)
+      ctx.client.conn.chain = ctx.client.conn.chain
+        .then(() => (getClient(ctx.id) === ctx.client && ctx.client.conn.ws === ws ? dispatch(ctx, msg) : undefined))
         .catch(err => console.error('[ERROR] Failed to handle message:', err))
-        .finally(() => { ctx.client.pending-- })
+        .finally(() => { if (ctx.client.conn.ws === ws) ctx.client.conn.pending-- }) // 넘어간 뒤의 옛 연결 몫은 새 연결 카운터에서 빼지 않는다
     })
 
     // 소켓 에러(예: maxPayload 초과 1009)를 처리하지 않으면 프로세스가 죽는다
@@ -319,30 +260,25 @@ export function initializeWebSocket(
     ws.on('close', () => {
       const client = ctx.client
       const id = ctx.id
+      // 세션 재개(P1-16)가 이 Client를 새 연결로 가져갔다: 옛 소켓의 close는 새 연결의 타이머·유예·퇴장을 건드리지 않는다
+      const takenOver = client.conn.ws !== ws
       clearTimeout(authTimer)
-      if (client.expiryTimer) clearTimeout(client.expiryTimer)
+      if (!takenOver && client.auth.expiryTimer) clearTimeout(client.auth.expiryTimer)
       const n = (connectionsPerIp.get(ip) || 1) - 1
       if (n <= 0) connectionsPerIp.delete(ip)
       else connectionsPerIp.set(ip, n)
 
-      // 이미 다른 연결로 대체/정리된 Client (중복 연결 제거 등)
-      if (clients.get(id) !== client) return
+      // 이미 다른 연결로 대체/정리된 Client (중복 연결 제거, 세션 재개로 넘어감 등)
+      if (takenOver || getClient(id) !== client) return
 
-      const roomId = client.roomId
+      const roomId = client.member.roomId
       console.log(`[DISCONNECT] Client ${id.slice(0, 8)} disconnected. roomId: ${roomId?.slice(0, 8) || 'none'}`)
 
       // 인증된 사용자가 방 안에서 끊김: 유예시간 동안 상태 유지 (참가자에게 leave 안 보냄)
-      if (roomId && rooms.has(roomId) && isAuthenticated(client) && limits.resumeGraceMs > 0) {
-        const c = client
-        suspended.set(c.id, c)
-        c.suspendTimer = setTimeout(() => finalizeSuspended(c), limits.resumeGraceMs)
-        c.suspendTimer.unref?.()
-        console.log(`[RESUME] ${c.id.slice(0, 8)} suspended for ${limits.resumeGraceMs}ms`)
-        return
-      }
+      if (suspendOnClose(svc, client)) return
 
-      if (roomId && rooms.has(roomId)) handleLeave(svc, client, roomId, 'close')
-      client.roomId = undefined
+      if (roomId && hasRoom(roomId)) handleLeave(svc, client, roomId, 'close')
+      client.member.roomId = undefined
       removeClient(id)
     })
   })

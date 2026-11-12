@@ -1,7 +1,7 @@
 import { handleAuth, type AuthSvc } from './auth'
 import { handleChat } from './chat'
 import type { Ctx } from './ctx'
-import { handleJoin, handleLeaveMessage, type MembershipSvc } from './membership'
+import { handleJoin, handleLeaveMessage } from './membership'
 import { handleMetronome, type MetronomeSvc } from './metronome'
 import { handleNativeDescriptor, handleNativeLeave, handleRelayTokenRequest, type NativeSessionSvc } from './nativeSession'
 import { handleStartPerforming, handleStopPerforming, type PerformersSvc } from './performers'
@@ -23,7 +23,7 @@ import { handleViewerSignal } from './viewerRelay'
  * 서버 인스턴스 하나의 공용 서비스. 조립부(wsService)가 한 번 만들고, 모든 연결의 ctx.svc가 **이 객체 하나**를 가리킨다.
  * 각 핸들러 모듈은 자기가 쓰는 조각(…Svc)만 타입으로 적는다. 이 타입은 그 조각들을 모두 만족해야 한다(아래 handlers 표가 검사).
  */
-export interface SignalingServices extends AuthSvc, MembershipSvc, PerformersSvc, NativeSessionSvc, MetronomeSvc, RequestsSvc {
+export interface SignalingServices extends AuthSvc, PerformersSvc, NativeSessionSvc, MetronomeSvc, RequestsSvc {
   env: Env
 }
 
@@ -59,9 +59,6 @@ const handlers: Record<string, Handler> = Object.assign(Object.create(null) as R
   'leave': handleLeaveMessage,
 } satisfies Record<string, Handler>)
 
-/** 표에 있는 메시지 종류 (테스트·문서 대조용) */
-export const DISPATCH_TYPES: readonly string[] = Object.keys(handlers)
-
 /**
  * 메시지 하나 처리. 연결의 순차 체인 안에서 불린다(속도 제한·대기 상한·파싱은 그 앞, 조립부).
  * 순서는 원래 handleMessage와 같다: ping → auth → auth 게이트(표에 없는 type도 여기서 auth-required) → 표.
@@ -78,7 +75,7 @@ export async function dispatch(ctx: ConnCtx, msg: Msg) {
   }
 
   // auth 전 메시지는 거부
-  if (ctx.client.authState === 'pending' || ctx.client.authState === 'verifying') {
+  if (ctx.client.auth.state === 'pending' || ctx.client.auth.state === 'verifying') {
     send(ctx.ws, { type: 'error', code: 'auth-required', message: 'auth 메시지를 먼저 보내야 합니다.', rejectedType: msg.type })
     return
   }

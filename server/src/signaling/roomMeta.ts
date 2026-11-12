@@ -47,8 +47,8 @@ export function createRoomMeta(deps: WsDeps, insecureDevMode: boolean) {
    * stale=true — 이때는 이양 판단(메트로놈 정지)을 하지 않는다(PR #53 H1). 읽은 적도 없으면 권한 없음.
    */
   async function checkHost(client: Client, maxAgeMs = ROOM_META_TTL_MS): Promise<{ isHost: boolean; hostUserId: string | null; stale: boolean }> {
-    if (!client.roomId || insecureDevMode) return { isHost: client.isHost, hostUserId: null, stale: true }
-    const roomId = client.roomId
+    if (!client.member.roomId || insecureDevMode) return { isHost: client.member.isHost, hostUserId: null, stale: true }
+    const roomId = client.member.roomId
     let meta: RoomMeta | null
     let stale = false
     try {
@@ -58,8 +58,8 @@ export function createRoomMeta(deps: WsDeps, insecureDevMode: boolean) {
       meta = roomMetaCache.get(roomId)?.meta ?? null
       stale = true
     }
-    client.isHost = !!client.userId && !!meta && meta.hostId === client.userId
-    return { isHost: client.isHost, hostUserId: meta?.hostId ?? null, stale }
+    client.member.isHost = !!client.auth.userId && !!meta && meta.hostId === client.auth.userId
+    return { isHost: client.member.isHost, hostUserId: meta?.hostId ?? null, stale }
   }
 
   async function refreshHost(client: Client): Promise<boolean> {

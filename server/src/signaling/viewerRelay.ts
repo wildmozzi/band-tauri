@@ -17,7 +17,7 @@ export function handleViewerSignal(ctx: Ctx<ViewerRelaySvc>, msg: Msg) {
   const target = getRoomPeer(client, msg.to)
   if (target && (isPerformer(client) || isPerformer(target))) {
     console.log(`[SIGNAL] ${msg.type} from ${id.slice(0, 8)} to ${target.id.slice(0, 8)}`)
-    send(target.ws, { ...msg, from: id })
+    send(target.conn.ws, { ...msg, from: id })
   }
   return
 }

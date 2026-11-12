@@ -1,152 +1,49 @@
-import { useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useRequireAuth } from '../auth'
-import { MAX_PARTICIPANT_OPTIONS, MAX_PARTICIPANTS_HINT, MAX_PARTICIPANTS_LABEL, maxParticipantsOptionLabel } from './roomModel'
-import { createRoom } from './roomApi'
-import { validateRoomPasswordInput, ROOM_PASSWORD_MAX } from './roomAccess'
+import {
+  COMMON_TAGS,
+  GENRES,
+  MAX_PARTICIPANT_OPTIONS,
+  MAX_SLOT_COUNT,
+  MAX_PARTICIPANTS_HINT,
+  MAX_PARTICIPANTS_LABEL,
+  findInstrument,
+  maxParticipantsOptionLabel,
+} from './roomModel'
+import { ROOM_PASSWORD_MAX } from './roomAccess'
+import { useCreateRoomForm } from './useCreateRoomForm'
 import { Field } from '../../shared/ui/Field'
 import { Button } from '../../shared/ui/Button'
 import './CreateRoom.css'
 
-const GENRES = [
-  '록', '재즈', '블루스', '클래식', '팝', '힙합',
-  '일렉트로닉', '포크', '메탈', '펑크', '레게', '기타'
-]
-
-const COMMON_TAGS = [
-  '초보환영', '경력자', '세션구함', '정기모임',
-  '즉흥연주', '커버곡', '자작곡', '녹음가능'
-]
-
-// 사용 가능한 악기 목록
-const AVAILABLE_INSTRUMENTS = [
-  { id: 'vocal', name: '보컬', icon: '🎤' },
-  { id: 'guitar', name: '기타', icon: '🎸' },
-  { id: 'bass', name: '베이스', icon: '🎸' },
-  { id: 'keyboard', name: '건반', icon: '🎹' },
-  { id: 'drums', name: '드럼', icon: '🥁' },
-  { id: 'other', name: '기타 악기', icon: '🎵' },
-]
-
-// 악기 슬롯 타입
-interface InstrumentSlot {
-  instrument: string
-  count: number
-}
-
 export function CreateRoom() {
   const { gate } = useRequireAuth()
-  const navigate = useNavigate()
-
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [genre, setGenre] = useState('록')
-  const [maxParticipants, setMaxParticipants] = useState(8)
-  const [selectedTags, setSelectedTags] = useState<string[]>([])
-  const [customTag, setCustomTag] = useState('')
-  const [freeJoin, setFreeJoin] = useState(true)
-  const [isPrivate, setIsPrivate] = useState(false)
-  const [usePassword, setUsePassword] = useState(false)
-  const [password, setPassword] = useState('')
-  const [instrumentSlots, setInstrumentSlots] = useState<InstrumentSlot[]>([
-    { instrument: 'vocal', count: 1 },
-    { instrument: 'guitar', count: 1 },
-    { instrument: 'bass', count: 1 },
-    { instrument: 'keyboard', count: 1 },
-    { instrument: 'drums', count: 1 },
-  ])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const {
+    title, setTitle,
+    description, setDescription,
+    genre, setGenre,
+    maxParticipants, setMaxParticipants,
+    selectedTags,
+    customTag, setCustomTag,
+    freeJoin, setFreeJoin,
+    isPrivate, setIsPrivate,
+    usePassword, setUsePassword,
+    password, setPassword,
+    instrumentSlots,
+    loading,
+    error,
+    availableToAdd,
+    totalSlots,
+    handleTagToggle,
+    handleAddCustomTag,
+    handleSlotCountChange,
+    handleAddInstrument,
+    handleRemoveInstrument,
+    handleSubmit,
+    cancel,
+  } = useCreateRoomForm()
 
   // 로그인 안 되어 있으면 로그인 페이지로 (세션 복원 중엔 기다림 — P3-12 ⑥, P3-10f 공통 가드)
   if (gate) return gate
-
-  const handleTagToggle = (tag: string) => {
-    setSelectedTags(prev =>
-      prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
-    )
-  }
-
-  const handleAddCustomTag = () => {
-    const tag = customTag.trim()
-    if (tag && !selectedTags.includes(tag)) {
-      setSelectedTags(prev => [...prev, tag])
-      setCustomTag('')
-    }
-  }
-
-  // 악기 슬롯 관리 함수들
-  const handleSlotCountChange = (instrument: string, count: number) => {
-    setInstrumentSlots(prev =>
-      prev.map(slot =>
-        slot.instrument === instrument ? { ...slot, count: Math.max(0, Math.min(10, count)) } : slot
-      )
-    )
-  }
-
-  const handleAddInstrument = (instrumentId: string) => {
-    if (!instrumentSlots.find(s => s.instrument === instrumentId)) {
-      setInstrumentSlots(prev => [...prev, { instrument: instrumentId, count: 1 }])
-    }
-  }
-
-  const handleRemoveInstrument = (instrument: string) => {
-    setInstrumentSlots(prev => prev.filter(s => s.instrument !== instrument))
-  }
-
-  // 아직 추가되지 않은 악기 목록
-  const availableToAdd = AVAILABLE_INSTRUMENTS.filter(
-    inst => !instrumentSlots.find(s => s.instrument === inst.id)
-  )
-
-  // 총 악기 슬롯 수 계산
-  const totalSlots = instrumentSlots.reduce((sum, s) => sum + s.count, 0)
-
-  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault()
-
-    if (!title.trim()) {
-      setError('방 제목을 입력하세요.')
-      return
-    }
-
-    if (usePassword) {
-      const problem = validateRoomPasswordInput(password)
-      if (problem) {
-        setError(problem)
-        return
-      }
-    }
-
-    setLoading(true)
-    setError(null)
-
-    try {
-      // 0개인 악기 슬롯은 제외
-      const validSlots = instrumentSlots.filter(s => s.count > 0)
-
-      // 비밀번호는 서버가 해시해 저장한다 (방장 = 로그인 토큰의 사용자)
-      const room = await createRoom({
-        title: title.trim(),
-        description: description.trim() || null,
-        genre,
-        maxParticipants,
-        tags: selectedTags,
-        freeJoin,
-        isPrivate,
-        instrumentSlots: validSlots,
-        password: usePassword ? password : null,
-      })
-
-      // 방 생성 성공 -> 방 상세 페이지로 이동
-      navigate(`/rooms/${room.id}`)
-    } catch (err) {
-      console.error('Room creation error:', err)
-      setError(err instanceof Error ? err.message : '방 생성에 실패했습니다.')
-    } finally {
-      setLoading(false)
-    }
-  }
 
   return (
     <div className="create-room-page">
@@ -255,7 +152,7 @@ export function CreateRoom() {
 
             <div className="instrument-slots">
               {instrumentSlots.map(slot => {
-                const instInfo = AVAILABLE_INSTRUMENTS.find(i => i.id === slot.instrument)
+                const instInfo = findInstrument(slot.instrument)
                 return (
                   <div key={slot.instrument} className="instrument-slot">
                     <span className="slot-icon">{instInfo?.icon}</span>
@@ -272,7 +169,7 @@ export function CreateRoom() {
                       <button
                         type="button"
                         onClick={() => handleSlotCountChange(slot.instrument, slot.count + 1)}
-                        disabled={slot.count >= 10}
+                        disabled={slot.count >= MAX_SLOT_COUNT}
                       >
                         +
                       </button>
@@ -392,7 +289,7 @@ export function CreateRoom() {
           {error && <div className="form-error">{error}</div>}
 
           <div className="form-actions">
-            <Button variant="secondary" onClick={() => navigate('/rooms')} disabled={loading}>
+            <Button variant="secondary" onClick={cancel} disabled={loading}>
               취소
             </Button>
             <Button type="submit" disabled={loading}>
