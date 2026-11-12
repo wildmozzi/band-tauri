@@ -520,7 +520,7 @@ impl Worker {
         let (ich, bitrate) = (self.ich, self.p.cfg.opus_bitrate());
         let (auto, pool) = (&mut self.auto, &mut self.auto_pool);
         net.for_each_peer(|peer| {
-            let key = (peer as *const Peer as usize, peer.ssrc);
+            let key = (peer as *const Peer as usize, peer.ssrc());
             let idx = match auto.iter().position(|a| a.key == key) {
                 Some(i) => i,
                 None => {
@@ -529,32 +529,29 @@ impl Worker {
                         None => match Encoder::new(CodecKind::Opus, ich, bitrate) {
                             Ok(e) => e,
                             Err(e) => {
-                                log::warn!("{}: 자동 전환용 Opus 인코더 생성 실패: {e}", peer.id);
+                                log::warn!("{}: 자동 전환용 Opus 인코더 생성 실패: {e}", peer.id());
                                 return;
                             }
                         },
                     };
-                    auto.push(AutoTx::new(key, peer.id.clone(), enc));
+                    auto.push(AutoTx::new(key, peer.id().to_string(), enc));
                     auto.len() - 1
                 }
             };
             let a = &mut auto[idx];
             a.seen = true;
-            a.on_relay = {
-                let c = peer.conn.lock();
-                c.can_send_audio() && c.path.is_some_and(|(_, k)| k == PathKind::Relay)
-            };
-            let report = *peer.remote_loss.lock();
+            a.on_relay = peer.sends_audio_via_relay();
+            let report = peer.remote_loss();
             let loss = report.map(|(r, at)| (r.loss_pct, at));
             match a.loss.update(now, true, loss) {
                 Some(true) => log::info!(
                     "{}: 수신 손실 {:.1}%(상대 보고) — 이 피어에게 Opus로 전환(손실 피드백)",
-                    peer.id,
+                    peer.id(),
                     loss.map_or(0.0, |l| l.0)
                 ),
                 Some(false) => log::info!(
                     "{}: 수신 손실 회복(상대 보고 {}) — PCM16으로 복귀",
-                    peer.id,
+                    peer.id(),
                     loss.map_or("없음".to_string(), |l| format!("{:.1}%", l.0))
                 ),
                 None => {}
@@ -622,7 +619,7 @@ impl Worker {
             // 이유는 송신 순간의 경로로 정한다. 릴레이 부하 대상인데 아직 인코드하지 않은 피어(None)는 net이
             // 표시해 두고 워커가 다음 프레임에서 바로 다시 본다(L1).
             let lookup = |p: &Peer, kind: PathKind| -> Option<AutoPayload<'_>> {
-                let key = (p as *const Peer as usize, p.ssrc);
+                let key = (p as *const Peer as usize, p.ssrc());
                 let a = auto.iter().find(|a| a.key == key)?;
                 let reason = auto_reason(relay_on, kind == PathKind::Relay, a.loss_on)?;
                 Some(AutoPayload { payload: &a.payload[..a.len?], flags: auto_flags, reason })
@@ -715,7 +712,7 @@ impl Worker {
         }
         let out_rate = self.p.info.out_rate;
         net.for_each_peer(|peer| {
-            let key = (peer as *const Peer as usize, peer.ssrc);
+            let key = (peer as *const Peer as usize, peer.ssrc());
             if let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) {
                 f.seen = true;
                 return;
@@ -725,7 +722,7 @@ impl Worker {
                 .find(|&s| !used(s) && self.p.bank.slots[s].state.load(Ordering::Acquire) == SLOT_FREE);
             let Some(slot) = free else {
                 if !self.slot_full_logged {
-                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", peer.id);
+                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", peer.id());
                     self.slot_full_logged = true;
                 }
                 return;
@@ -734,7 +731,7 @@ impl Worker {
             match PeerFeed::new(slot, key, out_rate, sh) {
                 Ok(f) => {
                     sh.playing.store(false, Ordering::Relaxed);
-                    sh.occupant.store(peer.ssrc, Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
+                    sh.occupant.store(peer.ssrc(), Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
                     sh.state.store(SLOT_ACTIVE, Ordering::Release);
                     self.feeds.push(f);
                 }
@@ -769,20 +766,20 @@ impl Worker {
         let marking = marks.active();
         let played = &self.p.counters.out_played_frames;
         net.for_each_peer(|peer| {
-            let key = (peer as *const Peer as usize, peer.ssrc);
+            let key = (peer as *const Peer as usize, peer.ssrc());
             let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) else {
                 return;
             };
             let sh = &self.p.bank.slots[f.slot];
-            let g = peer.mix.lr_gains();
+            let g = peer.mix().lr_gains();
             sh.set_gains(g, g);
-            peer.mix.level.store(sh.level.load());
+            peer.mix().level.store(sh.level.load());
             let Some(prod) = self.p.prods.get_mut(f.slot) else {
                 return;
             };
-            let mut jb = peer.jitter.lock();
+            let mut jb = peer.jitter().lock();
             let before = marking.then(|| jb.mark_counters());
-            let ev = f.service(&mut jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == peer.id && p.peer_ssrc == peer.ssrc));
+            let ev = f.service(&mut jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == peer.id() && p.peer_ssrc == peer.ssrc()));
             if let Some((c0, d0)) = before {
                 // 녹음 마커(P2-4a): 이번 반복에 은닉·버림이 늘었으면, 방금 링에 넣은 꼬리(= 다음 콜백 시작 + 선행량)의
                 // 출력 타임라인 위치로 기록한다. 링 선행량 추정이라 대략 ±1 콜백으로 추정한다(위치 대조 측정은 아직 없음).
@@ -792,7 +789,7 @@ impl Worker {
                 let tail = played.load(Ordering::Relaxed) + f.dev_ahead(prod) as u64;
                 let mark = |kind, frames: u64, span: bool| {
                     let start = if span { tail.saturating_sub(frames) } else { tail };
-                    marks.push(MarkEvent { ssrc: peer.ssrc, kind, start, frames });
+                    marks.push(MarkEvent { ssrc: peer.ssrc(), kind, start, frames });
                 };
                 if c1 > c0 {
                     mark(MarkKind::Conceal, to_dev((c1 - c0) * fs), true);

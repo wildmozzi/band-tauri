@@ -266,31 +266,31 @@ impl Net {
             allow_loopback: self.shared.allow_loopback,
         };
         let mut peer = Peer::new(peer_id.clone(), desc, &setup, Instant::now())?;
-        let key = (peer.public_key, peer.ssrc);
+        let key = (*peer.public_key(), peer.ssrc());
         let mut peers = self.shared.peers.write();
-        let old_idx = peers.iter().position(|p| p.id == peer_id);
+        let old_idx = peers.iter().position(|p| p.id() == peer_id);
         if peers.len() - usize::from(old_idx.is_some()) >= MAX_PEERS {
             return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
         }
         if let Some(i) = old_idx {
             let old = peers.remove(i);
             self.shared.retire_tx_seq(&old);
-            peer.mix.gain.store(old.mix.gain.load());
-            peer.mix.muted.store(old.mix.muted.load(Ordering::Relaxed), Ordering::Relaxed);
-            peer.mix.pan.store(old.mix.pan.load());
+            peer.mix().gain.store(old.mix().gain.load());
+            peer.mix().muted.store(old.mix().muted.load(Ordering::Relaxed), Ordering::Relaxed);
+            peer.mix().pan.store(old.mix().pan.load());
             // 같은 세션(같은 공개키)이면 제어 패킷 재전송 창을 이어받는다. 새 키(상대 재시작)면 seq가
             // 처음부터 다시 시작하므로 이어받지 않는다(PR #5 L-2).
-            if old.public_key == peer.public_key {
-                let old_conn = old.conn.lock();
-                peer.conn.lock().inherit_replay_window(&old_conn);
+            if old.public_key() == peer.public_key() {
+                let old_conn = old.conn();
+                peer.conn().inherit_replay_window(&old_conn);
             }
         }
         // 송신 카운터(PR #13 H1, P1-1b): 같은 키의 살아 있는 다른 항목이 있으면 그 카운터를 같이 쓴다(카운터가
         // 둘이 되면 nonce가 겹친다). 없고 이 키로 전에 보낸 적이 있으면(교체, 제거 후 재추가) 그 최고 수위 + 여유에서 이어 간다.
-        if let Some(live) = peers.iter().find(|p| (p.public_key, p.ssrc) == key) {
-            peer.tx_seq = live.tx_seq.clone();
+        if let Some(live) = peers.iter().find(|p| (*p.public_key(), p.ssrc()) == key) {
+            peer.share_tx_seq(live);
         } else if let Some(&hw) = self.shared.tx_seq_retired.lock().get(&key) {
-            peer.tx_seq.store(hw.wrapping_add(AUDIO_SEQ_HANDOVER_GAP), Ordering::Relaxed);
+            peer.tx_seq().store(hw.wrapping_add(AUDIO_SEQ_HANDOVER_GAP), Ordering::Relaxed);
         }
         peers.push(Arc::new(peer));
         Ok(())
@@ -299,7 +299,7 @@ impl Net {
     pub fn remove_peer(&self, peer_id: &str) -> bool {
         let removed = {
             let mut peers = self.shared.peers.write();
-            let removed = peers.iter().position(|p| p.id == peer_id).map(|i| peers.remove(i));
+            let removed = peers.iter().position(|p| p.id() == peer_id).map(|i| peers.remove(i));
             // 수위 기록은 목록에서 빼는 것과 같은 write 락 안에서 한다(P1-1b, PR #13 리뷰 Low). 락을 놓은 뒤 기록하면
             // 그 사이 같은 키의 add_peer가 옛 수위(또는 기록 없음)에서 시작해 이 객체가 이미 쓴 seq를 다시 쓸 수 있다.
             if let Some(p) = &removed {
@@ -320,7 +320,7 @@ impl Net {
     pub fn set_jitter_profile(&self, profile: f32) {
         self.shared.jitter_settings.lock().profile = profile;
         for p in self.peers() {
-            p.jitter.lock().set_profile(profile);
+            p.jitter().lock().set_profile(profile);
         }
     }
 
@@ -331,8 +331,8 @@ impl Net {
     /// 피어와의 안전 번호(SAS). 양쪽 공개키로 계산하므로 두 사람이 같은 값을 보면 키가 바꿔치기되지
     /// 않은 것이다(시그널링 서버 중간자 탐지, PR #5 M-3).
     pub fn safety_code(&self, peer_id: &str) -> Result<String, String> {
-        let peer = self.peers().into_iter().find(|p| p.id == peer_id).ok_or("알 수 없는 피어")?;
-        Ok(crypto::safety_code(&self.shared.keys.public_bytes(), &peer.public_key))
+        let peer = self.peers().into_iter().find(|p| p.id() == peer_id).ok_or("알 수 없는 피어")?;
+        Ok(crypto::safety_code(&self.shared.keys.public_bytes(), peer.public_key()))
     }
 
     /// 릴레이 설정/갱신/해제(설계 4절 `engine_set_relay`). 같은 주소면 등록을 유지한 채 토큰만 바꾼다(갱신).
@@ -430,12 +430,12 @@ impl NetShared {
     /// 피어 객체를 버릴 때 그 송신 키의 Audio seq 최고 수위를 기록한다(같은 키로 다시 만들면 이어 간다).
     /// 기록 뒤에도 옛 객체로 보내는 패킷이 있을 수 있어 재생성 시 `AUDIO_SEQ_HANDOVER_GAP`을 더한다.
     fn retire_tx_seq(&self, p: &Peer) {
-        let next = p.tx_seq.load(Ordering::Relaxed);
+        let next = p.tx_seq().load(Ordering::Relaxed);
         let mut m = self.tx_seq_retired.lock();
         // 한 키의 seq는 시작점에서 단조 증가(u32 랩, 400pps에서 124일)하므로 마지막 기록이 곧 최고 수위다.
-        m.insert((p.public_key, p.ssrc), next);
+        m.insert((*p.public_key(), p.ssrc()), next);
         drop(m);
-        self.retired_ssrc_ids.lock().insert(p.ssrc, p.id.clone());
+        self.retired_ssrc_ids.lock().insert(p.ssrc(), p.id().to_string());
     }
 
     fn next_ctrl_seq(&self, t: PacketType) -> u32 {
@@ -452,7 +452,7 @@ impl NetShared {
         *self.prev_relay.write() = Some(old);
         *self.relay_addr.write() = new;
         for p in self.peers.read().iter() {
-            p.conn.lock().relay_moved(old, new, now);
+            p.conn().relay_moved(old, new, now);
         }
     }
 
@@ -478,14 +478,14 @@ impl NetShared {
         let flags = if matches!(t, PacketType::Hello | PacketType::HelloAck) { packet::path_tag(via_relay) } else { 0 };
         let h = Header { ptype: t, ssrc: self.ssrc, seq: self.next_ctrl_seq(t), timestamp, flags, frame_code: 0 };
         let mut buf = [0u8; SEND_BUF_BYTES];
-        if let Some(n) = p.tx.seal(&h, plaintext, &mut buf[DATA_PREFIX_BYTES..]) {
-            self.send_sealed(&mut buf, n, to, via_relay.then_some(p.ssrc));
+        if let Some(n) = p.tx().seal(&h, plaintext, &mut buf[DATA_PREFIX_BYTES..]) {
+            self.send_sealed(&mut buf, n, to, via_relay.then_some(p.ssrc()));
         }
     }
 
     /// 확정 경로로 제어 패킷(Ping/Bye) 송신.
     fn send_ctrl_on_path(&self, p: &Peer, t: PacketType, timestamp: u32, plaintext: &[u8]) {
-        let path = p.conn.lock().path;
+        let path = p.conn().path;
         if let Some((addr, kind)) = path {
             self.send_ctrl(p, t, timestamp, plaintext, addr, kind == PathKind::Relay);
         }
@@ -497,9 +497,9 @@ impl NetShared {
 
     /// Ping 송신. 평문 = 에코 상태(있으면) + 이 피어 스트림의 수신 손실 보고(재생 중이면, P1-4e). 설계 2절.
     fn send_ping(&self, p: &Peer, now: Instant) {
-        let echo = p.echo.lock().ping_payload(now);
+        let echo = p.echo().ping_payload(now);
         let loss = {
-            let jb = p.jitter.lock();
+            let jb = p.jitter().lock();
             jb.is_playing().then(|| {
                 let s = jb.stats();
                 peer::LossReport { loss_pct: s.loss_pct, conceal_pct: s.conceal_pct }
@@ -527,11 +527,7 @@ impl NetShared {
         auto: Option<AutoFn<'_, 'a>>,
         frame_at: Option<Instant>,
     ) -> Option<(u8, Option<CodecReason>)> {
-        let target = {
-            let c = p.conn.lock();
-            if c.can_send_audio() { c.path } else { None }
-        };
-        let (addr, kind) = target?;
+        let (addr, kind) = p.route()?;
         // 자동 전환 페이로드가 상한을 넘으면(있을 수 없지만) 그 피어에게는 설정 코덱으로 보낸다
         let (payload, flags, reason) = match auto.and_then(|f| f(p, kind)).filter(|a| a.payload.len() <= MAX_PAYLOAD_BYTES) {
             Some(a) => (a.payload, a.flags, Some(a.reason)),
@@ -547,17 +543,17 @@ impl NetShared {
         let h = Header {
             ptype: PacketType::Audio,
             ssrc: self.ssrc,
-            seq: p.tx_seq.fetch_add(1, Ordering::Relaxed),
+            seq: p.tx_seq().fetch_add(1, Ordering::Relaxed),
             timestamp,
             flags,
             frame_code,
         };
-        p.tx_last_ts.store(timestamp, Ordering::Relaxed);
+        p.tx_last_ts().store(timestamp, Ordering::Relaxed);
         if kind == PathKind::Relay {
-            if let Some(n) = p.tx.seal(&h, payload, &mut rbuf[DATA_PREFIX_BYTES..]) {
-                self.send_sealed(rbuf, n, addr, Some(p.ssrc));
+            if let Some(n) = p.tx().seal(&h, payload, &mut rbuf[DATA_PREFIX_BYTES..]) {
+                self.send_sealed(rbuf, n, addr, Some(p.ssrc()));
             }
-        } else if let Some(n) = p.tx.seal(&h, payload, buf) {
+        } else if let Some(n) = p.tx().seal(&h, payload, buf) {
             let _ = self.socket.send_to(&buf[..n], addr);
         }
         if let Some(t0) = frame_at {
@@ -571,10 +567,7 @@ impl NetShared {
         let peers = self.peers.read();
         let n = peers
             .iter()
-            .filter(|p| {
-                let c = p.conn.lock();
-                c.can_send_audio() && c.path.is_some_and(|(_, k)| k == PathKind::Relay)
-            })
+            .filter(|p| p.sends_audio_via_relay())
             .count();
         drop(peers);
         let over = self.relay.lock().as_ref().is_some_and(|c| c.over_budget());
@@ -648,13 +641,13 @@ impl NetShared {
         let now = Instant::now();
         let mut rbuf = [0u8; SEND_BUF_BYTES];
         for p in peers.iter() {
-            if p.echo.lock().reflecting(now) {
+            if p.reflecting(now) {
                 continue;
             }
             let (pl, au) = match alt {
                 // 에코 측정 클릭 스트림은 측정 대상 한 명에게 수 초만 가고 코덱을 바꾸면 측정이 흐트러지므로,
                 // 그 피어가 자동 전환 대상이어도 설정 코덱(PCM16) 그대로 보낸다(그동안 릴레이 상한을 잠깐 넘을 수 있다).
-                Some((id, a)) if id == p.id => (a, None),
+                Some((id, a)) if id == p.id() => (a, None),
                 _ => (payload, auto),
             };
             if let Some((f, reason)) = self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, au, Some(frame_at)) {
@@ -665,7 +658,7 @@ impl NetShared {
                         Some(CodecReason::LossFeedback) => peer::TX_CODEC_AUTO_LOSS,
                         None => 0,
                     };
-                p.tx_codec.store(code, Ordering::Relaxed);
+                p.tx_codec().store(code, Ordering::Relaxed);
             }
         }
     }
@@ -675,25 +668,25 @@ impl NetShared {
     fn reflect_audio(&self, p: &Peer, h: &Header, plain: &[u8], received: Instant) {
         let frame = crate::engine::config::frame_samples_from_code(h.frame_code).unwrap_or(0) as u32;
         let ts = {
-            let mut e = p.echo.lock();
+            let mut e = p.echo();
             if !e.reflecting(received) {
                 return;
             }
             let off = *e
                 .ts_offset
-                .get_or_insert_with(|| p.tx_last_ts.load(Ordering::Relaxed).wrapping_add(frame).wrapping_sub(h.timestamp));
+                .get_or_insert_with(|| p.tx_last_ts().load(Ordering::Relaxed).wrapping_add(frame).wrapping_sub(h.timestamp));
             h.timestamp.wrapping_add(off)
         };
         let mut buf = [0u8; MAX_PACKET_BYTES];
         let mut rbuf = [0u8; SEND_BUF_BYTES];
         self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf, None, None);
         let us = received.elapsed().as_secs_f32() * 1e6;
-        let mut e = p.echo.lock();
+        let mut e = p.echo();
         e.reflect_us += (us - e.reflect_us) * 0.05;
     }
 
     fn peer_by_id(&self, peer_id: &str) -> Result<Arc<Peer>, String> {
-        self.peers.read().iter().find(|p| p.id == peer_id).cloned().ok_or_else(|| "알 수 없는 피어".to_string())
+        self.peers.read().iter().find(|p| p.id() == peer_id).cloned().ok_or_else(|| "알 수 없는 피어".to_string())
     }
 
     /// 측정하는 쪽: 피어에게 에코를 요청/해제한다. 상태는 Ping에 실어 알리고, 바뀌면 바로 한 번 보낸다.
@@ -701,7 +694,7 @@ impl NetShared {
         let p = self.peer_by_id(peer_id)?;
         let now = Instant::now();
         {
-            let mut e = p.echo.lock();
+            let mut e = p.echo();
             // 서로 동시에 에코하면 둘 다 상대 패킷만 되돌리고 자기 클릭은 보내지 않아 측정이 안 된다(PR #13 L1).
             if on && e.reflecting(now) {
                 return Err("이 연주자의 에코 측정에 응답하는 중입니다. 끝난 뒤 다시 시도하세요".into());
@@ -717,7 +710,7 @@ impl NetShared {
         let p = self.peer_by_id(peer_id)?;
         let now = Instant::now();
         {
-            let mut e = p.echo.lock();
+            let mut e = p.echo();
             if enabled {
                 if !e.remote_requesting(now) {
                     return Err("상대가 에코 측정을 요청하지 않았습니다".into());
@@ -738,50 +731,50 @@ impl NetShared {
     /// (피어가 나를 에코 중인가, 피어가 보고한 처리 지연 µs).
     pub fn remote_echo(&self, peer_id: &str) -> Result<(bool, u32), String> {
         let p = self.peer_by_id(peer_id)?;
-        let e = p.echo.lock();
+        let e = p.echo();
         Ok((e.remote_echoing(Instant::now()), e.remote_delay_us))
     }
 
     /// 그 피어의 지터 버퍼를 처음부터 다시 채운다(에코 시작/끝에서 스트림이 바뀔 때).
     pub fn restart_jitter(&self, peer_id: &str) -> Result<(), String> {
         let p = self.peer_by_id(peer_id)?;
-        p.jitter.lock().restart();
+        p.jitter().lock().restart();
         Ok(())
     }
 
     /// 그 피어 시계 − 내 시계 추정(P2-3). `at_us` = 내 시계(`now_us`). 피어가 없거나 표본이 없으면 None.
     pub fn peer_clock(&self, peer_id: &str, at_us: u64) -> Option<clock::ClockEstimate> {
-        self.peer_by_id(peer_id).ok().and_then(|p| p.clock.lock().estimate(at_us as f64))
+        self.peer_by_id(peer_id).ok().and_then(|p| p.clock().estimate(at_us as f64))
     }
 
     /// 그 피어가 Pong에 시계를 싣지 않는 엔진(옛 버전)으로 보이는지(PR #34 L4, `ClockSync::unsupported`).
     pub fn peer_clock_unsupported(&self, peer_id: &str) -> bool {
-        self.peer_by_id(peer_id).ok().is_some_and(|p| p.clock.lock().unsupported())
+        self.peer_by_id(peer_id).ok().is_some_and(|p| p.clock().unsupported())
     }
 
     pub fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
-        self.peer_by_id(peer_id).ok().and_then(|p| p.conn.lock().rtt_ms)
+        self.peer_by_id(peer_id).ok().and_then(|p| p.conn().rtt_ms)
     }
 
     pub fn peer_path(&self, peer_id: &str) -> Option<PathKind> {
-        self.peer_by_id(peer_id).ok().and_then(|p| p.conn.lock().path.map(|(_, k)| k))
+        self.peer_by_id(peer_id).ok().and_then(|p| p.conn().path.map(|(_, k)| k))
     }
 
     /// 그 피어의 지터 버퍼 깊이(`bufferMs`, 재생 중일 때만).
     pub fn peer_buffer_ms(&self, peer_id: &str) -> Option<f32> {
         let p = self.peer_by_id(peer_id).ok()?;
-        let j = p.jitter.lock();
+        let j = p.jitter().lock();
         j.is_playing().then(|| j.stats().buffer_ms)
     }
 
     /// 피어 id → ssrc.
     pub fn peer_ssrc(&self, peer_id: &str) -> Result<u32, String> {
-        self.peer_by_id(peer_id).map(|p| p.ssrc)
+        self.peer_by_id(peer_id).map(|p| p.ssrc())
     }
 
     /// ssrc → peerId. 지금 목록에 없으면 전에 빠진 피어 기록에서 찾는다(녹음 트랙 이름, P2-4).
     pub fn peer_id_for_ssrc(&self, ssrc: u32) -> Option<String> {
-        let live = self.peers.read().iter().rev().find(|p| p.ssrc == ssrc).map(|p| p.id.clone());
+        let live = self.peers.read().iter().rev().find(|p| p.ssrc() == ssrc).map(|p| p.id().to_string());
         live.or_else(|| self.retired_ssrc_ids.lock().get(&ssrc).cloned())
     }
 
@@ -798,15 +791,15 @@ impl NetShared {
     /// 그 밖의 패킷은 핸드셰이크로 경로가 선 항목으로 보낸다. 그런 항목이 없으면 처음 찾은 항목(기존 동작).
     fn open_from_peers(&self, h: &Header, buf: &mut [u8]) -> Option<(Arc<Peer>, std::ops::Range<usize>)> {
         let peers = self.peers.read();
-        let (first, r) = peers.iter().filter(|p| p.ssrc == h.ssrc).find_map(|p| p.rx.open(h, buf).map(|r| (p, r)))?;
-        let same_key = |q: &&Arc<Peer>| q.ssrc == first.ssrc && q.public_key == first.public_key;
+        let (first, r) = peers.iter().filter(|p| p.ssrc() == h.ssrc).find_map(|p| p.rx().open(h, buf).map(|r| (p, r)))?;
+        let same_key = |q: &&Arc<Peer>| q.ssrc() == first.ssrc() && q.public_key() == first.public_key();
         if peers.iter().filter(same_key).nth(1).is_none() {
             return Some((first.clone(), r));
         }
         let plain = &buf[r.clone()];
         let owner = match h.ptype {
-            PacketType::Hello | PacketType::HelloAck => peers.iter().filter(same_key).find(|q| q.id.as_bytes() == plain),
-            _ => peers.iter().filter(same_key).find(|q| q.conn.lock().path.is_some()),
+            PacketType::Hello | PacketType::HelloAck => peers.iter().filter(same_key).find(|q| q.id().as_bytes() == plain),
+            _ => peers.iter().filter(same_key).find(|q| q.conn().path.is_some()),
         };
         Some((owner.unwrap_or(first).clone(), r))
     }
@@ -852,7 +845,7 @@ impl NetShared {
         // Hello/HelloAck의 값싼 검사는 seq 수락 **전에** 한다. 위장 Hello(같은 seq, 다른 출발 주소)가 먼저 와
         // seq를 소모하면 늦게 온 진짜 Hello가 "재전송"으로 버려지기 때문이다(PR #40 리뷰 M1).
         if is_hello {
-            if plain != peer.id.as_bytes() {
+            if plain != peer.id().as_bytes() {
                 return;
             }
             // 직전 릴레이 주소에서 온 Hello/HelloAck는 직접 경로로 오인하지 않게 버린다(M3)
@@ -861,11 +854,11 @@ impl NetShared {
             }
             // 경로 종류 위장(relay-design 4.1): 보낸 쪽이 표시한 경로(인증됨)와 수신 경로가 다르면 버린다
             if !packet::path_tag_matches(h.flags, via_relay) {
-                log::debug!("{}: 경로 태그 불일치 Hello(from {from}, flags {:#04x}) 폐기", peer.id, h.flags);
+                log::debug!("{}: 경로 태그 불일치 Hello(from {from}, flags {:#04x}) 폐기", peer.id(), h.flags);
                 return;
             }
         }
-        if h.ptype != PacketType::Audio && !peer.conn.lock().accept_ctrl_seq(h.ptype, h.seq) {
+        if h.ptype != PacketType::Audio && !peer.conn().accept_ctrl_seq(h.ptype, h.seq) {
             return; // 재전송된 제어 패킷(리뷰 L5)
         }
         match h.ptype {
@@ -878,9 +871,9 @@ impl NetShared {
                     None
                 };
                 let ack = {
-                    let mut c = peer.conn.lock();
-                    if c.on_handshake_rtt(from, is_ack, &peer.candidates, relay, now, ack_rtt) == HandshakeOutcome::Ignored {
-                        log::debug!("{}: 경로가 아닌 주소 {from}의 Hello(리바인딩/승격 대기)", peer.id);
+                    let mut c = peer.conn();
+                    if c.on_handshake_rtt(from, is_ack, peer.candidates(), relay, now, ack_rtt) == HandshakeOutcome::Ignored {
+                        log::debug!("{}: 경로가 아닌 주소 {from}의 Hello(리바인딩/승격 대기)", peer.id());
                     }
                     !is_ack && c.ack_allowed(from, now)
                 };
@@ -891,8 +884,8 @@ impl NetShared {
             }
             other => {
                 {
-                    let mut c = peer.conn.lock();
-                    if !c.accept_rx(from, &peer.candidates, relay, now) {
+                    let mut c = peer.conn();
+                    if !c.accept_rx(from, peer.candidates(), relay, now) {
                         return;
                     }
                     match other {
@@ -903,9 +896,9 @@ impl NetShared {
                             // 시계 표본(P2-3): Pong 평문 = [CLOCK_TAG, 응답자 시계 u64 BE]. 빈 평문(옛 엔진)은 건너뛴다.
                             if let Some(remote) = parse_clock_payload(plain) {
                                 let t0 = t3.saturating_sub(rtt_us as u64);
-                                peer.clock.lock().on_sample(t0 as f64, t3 as f64, remote as f64);
+                                peer.clock().on_sample(t0 as f64, t3 as f64, remote as f64);
                             } else {
-                                peer.clock.lock().on_plain_pong();
+                                peer.clock().on_plain_pong();
                             }
                         }
                         PacketType::Bye => {
@@ -919,17 +912,17 @@ impl NetShared {
                 match other {
                     // Pong은 Ping이 온 길로 돌려준다(경로 전환 중에도 RTT가 끊기지 않게)
                     PacketType::Ping => {
-                        peer.echo.lock().on_ping(plain, now);
+                        peer.echo().on_ping(plain, now);
                         // 수신 손실 보고(P1-4e): 없으면(옛 엔진, 상대 재생 전) 이전 값을 그대로 두고 받은 시각으로 오래됨을 판단한다
                         if let Some(r) = peer::LossReport::parse_ping(plain) {
-                            *peer.remote_loss.lock() = Some((r, now));
+                            peer.set_remote_loss(r, now);
                         }
                         let clock = clock_payload(self.now_us());
                         self.send_ctrl(&peer, PacketType::Pong, h.timestamp, &clock, from, via_relay);
                     }
                     PacketType::Audio => {
                         let now_us = now.duration_since(self.epoch).as_micros() as u64;
-                        peer.jitter.lock().insert(&h, plain, now_us);
+                        peer.jitter().lock().insert(&h, plain, now_us);
                         // 에코 모드(동의함): 받은 그대로 되돌린다(믹스와 별도 경로).
                         self.reflect_audio(&peer, &h, plain, now);
                     }
@@ -1018,7 +1011,7 @@ fn control_loop(s: &NetShared) {
         qos_dests.clear();
         qos_dests.extend(relay);
         for p in &peers {
-            if let Some((addr, kind)) = p.conn.lock().path {
+            if let Some((addr, kind)) = p.conn().path {
                 if kind != PathKind::Relay && !qos_dests.contains(&addr) {
                     qos_dests.push(addr);
                 }
@@ -1034,7 +1027,7 @@ fn control_loop(s: &NetShared) {
         let mut relay_quiet = false;
         for p in &peers {
             let (action, path, last_rx, failed) = {
-                let mut c = p.conn.lock();
+                let mut c = p.conn();
                 let a = c.tick(now, relay_ready);
                 (a, c.path, c.last_rx, c.state == PeerStateKind::Failed)
             };
@@ -1046,7 +1039,7 @@ fn control_loop(s: &NetShared) {
             if let (true, Some(r)) = (action.hello_relay, relay) {
                 s.send_ctrl(p, PacketType::Hello, s.now_us32(), s.local_peer_id.as_bytes(), r, true);
             }
-            p.echo.lock().expire(now);
+            p.echo().expire(now);
             if action.ping {
                 s.send_ping(p, now);
             }

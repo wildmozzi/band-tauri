@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use band_lib::engine::codec::Encoder;
 use band_lib::engine::config::{frame_code_from_samples, CodecKind, HEADER_BYTES, TAG_BYTES};
 use band_lib::engine::jitter::JitterSettings;
-use band_lib::net::types::{PathKind, PeerStateKind};
+use band_lib::net::types::PathKind;
 use band_lib::net::crypto::KeyPair;
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::net::{Net, NetOptions, MAX_PEERS};
@@ -47,13 +47,7 @@ fn full_mesh_send_queue_latency_and_burst() {
         let desc = LocalDescriptor { ssrc: 0x1000 + i as u32, key: LocalDescriptor::encode_key(&keys.public_bytes()), candidates: vec![Candidate { kind: CandidateKind::Lan, addr: addr.to_string() }] };
         let id = format!("p{i}");
         net.add_peer(id.clone(), &desc).unwrap();
-        let p = net.peers().into_iter().find(|p| p.id == id).unwrap();
-        {
-            let mut c = p.conn.lock();
-            c.state = PeerStateKind::Connected;
-            c.path = Some((addr, PathKind::Lan));
-            c.last_rx = Some(Instant::now());
-        }
+        net.peers().into_iter().find(|p| p.id() == id).unwrap().force_path(addr, PathKind::Lan);
         let stop = stop.clone();
         drains.push(std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
