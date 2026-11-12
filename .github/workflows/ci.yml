@@ -19,7 +19,11 @@ on:
         description: '장시간 시뮬레이션(6피어 60분, long-sim 잡)도 돌린다'
         type: boolean
         default: false
-  # 야간(P1-6): 장시간 시뮬레이션만 돈다(나머지 잡은 changes 잡이 건너뛰어 같이 빠진다). 03:30 KST.
+      soak:
+        description: '실시간 soak(6엔진 실제 시계·UDP, 프리셋 2개 × 60분, soak 잡)도 돌린다'
+        type: boolean
+        default: false
+  # 야간(P1-6): 장시간 시뮬레이션(long-sim)과 실시간 soak(soak, P1-14)만 돈다(나머지 잡은 changes 잡이 건너뛰어 같이 빠진다). 03:30 KST.
   # GitHub schedule은 기본 브랜치(main)의 워크플로·코드로만 돈다 — main에 병합된 뒤부터 동작한다.
   schedule:
     - cron: '30 18 * * *'
@@ -31,7 +35,8 @@ permissions:
   actions: write
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # 장시간 수동 측정(long_sim·soak)은 따로 묶어, 그 사이 develop에 들어온 push가 측정을 취소하지 않게 한다
+  group: ci-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && (inputs.long_sim || inputs.soak) && '-long' || '' }}
   cancel-in-progress: true
 
 defaults:
@@ -54,7 +59,7 @@ jobs:
     name: Changed paths
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # 야간 schedule에서는 건너뛴다 → 이 잡에 needs로 걸린 잡도 모두 건너뛴다(long-sim만 돈다).
+    # 야간 schedule에서는 건너뛴다 → 이 잡에 needs로 걸린 잡도 모두 건너뛴다(long-sim·soak만 돈다).
     if: github.event_name != 'schedule'
     # PR이 아니면(develop push, workflow_dispatch) 필터 없이 전부 돈다.
     outputs:
@@ -185,6 +190,67 @@ jobs:
         with:
           name: sim-report-long-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/sim-report/
+          retention-days: 30
+          if-no-files-found: warn
+
+  soak:
+    # 실시간 soak(P1-14, GOAL 2-3·2-4): 가짜 장치 엔진 6개를 127.0.0.1 UDP 풀메시로 실제 시계에서 60분씩 돌린다(tests/soak.rs).
+    # 프리셋 2개(기본·초저지연)를 차례로. long-sim과 같은 조건(야간 schedule, 수동 실행 soak 입력)에서만 돈다.
+    # 측정 도구: 수치 판정 없이 Markdown·JSON 리포트를 아티팩트로 남긴다(성공해도). 실패 = Connected 이탈·엔진 정지·패닉.
+    # tests/soak.rs는 test-support 피처에서만 컴파일되므로 realtime 잡(디버그, 기본 피처, ignore 전부 실행)에는 끼지 않는다.
+    name: Soak (6엔진 실시간 60분 × 2, Windows)
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.soak)
+    runs-on: windows-latest
+    timeout-minutes: 170
+    defaults:
+      run:
+        shell: bash
+        working-directory: client/src-tauri
+    # SOAK_OUT은 step 단위로 둔다(job-level env에서는 runner 컨텍스트를 쓸 수 없다).
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+        with:
+          # schedule은 기본 브랜치(main)의 워크플로로 돈다. 야간에는 개발 흐름(develop) 코드를 잰다.
+          ref: ${{ github.event_name == 'schedule' && 'develop' || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
+        with:
+          workspaces: client/src-tauri
+          key: soak
+      - name: Placeholder frontend dist (tauri::generate_context! 요구)
+        timeout-minutes: 1
+        run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
+      - name: Build tests (release + test-support)
+        timeout-minutes: 30
+        run: cargo test --release --features test-support --test soak --no-run
+      - name: Soak 기본(균형) 60분
+        timeout-minutes: 65
+        run: cargo test --release --features test-support --test soak soak_balanced -- --ignored --exact --nocapture
+        env:
+          SOAK_OUT: ${{ runner.temp }}/soak-report
+      - name: Soak 초저지연 60분
+        # 앞 프리셋이 실패해도 돈다(리포트를 둘 다 남긴다)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 65
+        run: cargo test --release --features test-support --test soak soak_ultra_low -- --ignored --exact --nocapture
+        env:
+          SOAK_OUT: ${{ runner.temp }}/soak-report
+      - name: Job summary
+        if: ${{ !cancelled() }}
+        timeout-minutes: 1
+        run: cat "$SOAK_OUT"/soak-*.md >> "$GITHUB_STEP_SUMMARY" || true
+        env:
+          SOAK_OUT: ${{ runner.temp }}/soak-report
+      - name: Upload soak report
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/soak-report/
           retention-days: 30
           if-no-files-found: warn
 

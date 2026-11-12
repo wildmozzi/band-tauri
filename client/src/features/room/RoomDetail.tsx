@@ -4,6 +4,7 @@ import { useAuth } from '../auth'
 import { useRoomConnection, useRoomPerform, useRoomMixer, useRoomRequests, useRoomRecordings } from './state/roomHooks'
 import { MAX_PERFORMERS } from '../../native/engineApi'
 import { instrumentUsage } from './roomDetailModel'
+import { reconnectBannerKind } from './state/reconnectBanner'
 import { useRoomDetailData } from './hooks/useRoomDetailData'
 import { useRoomPresence } from './hooks/useRoomPresence'
 import { useBubblePositions } from './hooks/useBubblePositions'
@@ -20,6 +21,7 @@ import { InstrumentChangeBubbles, LiveHeader, RoomPasswordGate } from './compone
 import { PerformersPanel } from './components/PerformersPanel'
 import { MixerPanel } from './components/MixerPanel'
 import { ChatPanel } from './components/ChatPanel'
+import { ReconnectBanner } from './components/ReconnectBanner'
 import './RoomDetail.css'
 
 /**
@@ -31,7 +33,7 @@ export function RoomDetail() {
   const { roomId } = useParams<{ roomId: string }>()
   const { user } = useAuth()
   const navigate = useNavigate()
-  const { signalStatus, clientId, peers, joinError, submitRoomPassword, retryJoin, leaveRoom, isRoomHost } = useRoomConnection()
+  const { signalStatus, currentRoomId, clientId, peers, joinError, submitRoomPassword, retryJoin, leaveRoom, isRoomHost } = useRoomConnection()
   const { isPerforming, myInstrument, peerInstruments, broadcasterId } = useRoomPerform()
   const { rtcStatus, resumeAllAudioContexts } = useRoomMixer()
   const { pendingRequests, requestNotice, dismissRequestNotice, approveRequest, rejectRequest, pendingInstrumentChanges, approveInstrumentChange, rejectInstrumentChange, requestInstrumentChange } = useRoomRequests()
@@ -119,7 +121,11 @@ export function RoomDetail() {
     return null
   }
 
-  if (signalStatus === 'connecting') {
+  // 방 안에서 끊긴 경우(재연결 중·포기)는 화면을 그대로 두고 상단 띠(ReconnectBanner)로 알린다 (P1-15b).
+  // 아래 전체 화면 안내는 방에 들어가기 전의 첫 연결에만 쓴다
+  const inRoomDisconnect = reconnectBannerKind({ signalStatus, currentRoomId }) !== 'none'
+
+  if (signalStatus === 'connecting' && !inRoomDisconnect) {
     return (
       <div className="loading-state">
         <div className="connecting-spinner" />
@@ -128,7 +134,7 @@ export function RoomDetail() {
     )
   }
 
-  if (signalStatus === 'error') {
+  if (signalStatus === 'error' && !inRoomDisconnect) {
     return (
       <div className="error-state">
         <p>시그널링 서버 연결에 실패했습니다.</p>
@@ -137,8 +143,8 @@ export function RoomDetail() {
     )
   }
 
-  // 재연결 예산(35초)을 넘겨 포기함 (P1-15): 서버 세션이 정리됐으므로 처음부터 다시 입장
-  if (signalStatus === 'gave-up') {
+  // 재연결 포기 상태로 방 밖에 있음 (방 안이면 띠의 "다시 입장"이 새로고침 없이 처리한다)
+  if (signalStatus === 'gave-up' && !inRoomDisconnect) {
     return (
       <div className="error-state" role="alert">
         <p>연결이 끊겼습니다. 다시 입장해 주세요.</p>
@@ -164,6 +170,8 @@ export function RoomDetail() {
 
   return (
     <div className="live-room" onClick={resumeAllAudioContexts}>
+      {/* 시그널링 재연결 중·포기 안내 (평상시에는 그리지 않는다) */}
+      <ReconnectBanner />
       {/* 방장: 새 연주 참여 요청 알림 */}
       {isHost && requestNotice && !showPendingRequests && (
         <RequestNoticeToast

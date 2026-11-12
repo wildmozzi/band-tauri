@@ -11,7 +11,7 @@ import type { DetailRoom } from '../roomDetailModel'
  */
 export function useRoomPresence(roomId: string | undefined, room: DetailRoom | null) {
   const { user, loading: authLoading } = useAuth()
-  const { signalStatus, joinRoom, roomJoined, leaveRoom, currentRoomId: contextRoomId } = useRoomConnection()
+  const { signalStatus, joinRoom, roomJoined, leaveRoom, ensureSignaling, currentRoomId: contextRoomId } = useRoomConnection()
   const { enterMiniPlayerMode, clearMiniPlayerMode } = useMiniPlayer()
   const hasJoinedRef = useRef(false)
 
@@ -44,6 +44,12 @@ export function useRoomPresence(roomId: string | undefined, room: DetailRoom | n
       hasJoinedRef.current = false
     }
 
+    // 방 밖에서 끊긴 채(방 밖 닫힘은 자동 재연결하지 않음) 들어왔으면 다시 연다. 연결되면 이 effect가 다시 돌아 입장한다
+    if (room && roomId && !hasJoinedRef.current && (signalStatus === 'idle' || signalStatus === 'gave-up' || signalStatus === 'replaced')) {
+      ensureSignaling()
+      return
+    }
+
     if (room && roomId && signalStatus === 'connected' && !hasJoinedRef.current) {
       hasJoinedRef.current = true
       // isHost를 여기서 다시 계산 (최신 user 상태 반영)
@@ -53,7 +59,7 @@ export function useRoomPresence(roomId: string | undefined, room: DetailRoom | n
       console.log('[ROOM] Joining room with isHost:', hostFlag, 'user:', user?.id, 'host_id:', room.host_id)
       // 참여자 수 동기화는 room-state 수신 후 peers 변경 시 자동으로 처리됨
     }
-  }, [room, roomId, signalStatus, authLoading, user, joinRoom, leaveRoom, contextRoomId])
+  }, [room, roomId, signalStatus, authLoading, user, joinRoom, leaveRoom, ensureSignaling, contextRoomId])
 
   // 함수들을 ref로 저장 (의존성 문제 방지)
   const leaveRoomRef = useRef(leaveRoom)

@@ -38,6 +38,7 @@ import { appendChat, makeChatId } from './chatModel'
 import { initialPerformRequestState, performRequestReducer, type PerformRequestAction } from './performRequestState'
 import { RoomRuntimeContext, type RoomActions, type RoomRuntime } from './roomHooks'
 import { initialRoomState, RoomSessionStore, type RoomSnapshot } from './roomSessionStore'
+import { canReenter } from './reconnectBanner'
 import { reduceRoomSignal, type RoomEffect } from './signalReducer'
 import { useRecording, type RecordingSource } from './useRecording'
 import { useRoomSelector } from './useRoomSelector'
@@ -101,6 +102,13 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const isReturningToRoomRef = useRef(false)
   /** 녹음이 엔진 믹스를 쓰는 중인지 (엔진 정지 시 녹음도 멈춘다: M4) */
   const recordingFromEngineRef = useRef(false)
+  /**
+   * 다음 ready(연결·인증 완료)에서 보낼 join.
+   * - rejoin: 방 안에서 끊긴 뒤 재연결 (isRejoin, 서버 세션 재개 대상)
+   * - fresh: 포기 뒤 "다시 입장"(reenterRoom)으로 연 연결 — 서버 세션이 없으므로 일반 입장 (P1-15b)
+   * - none: 보내지 않음 (첫 연결의 입장 join은 joinRoom이 보낸다)
+   */
+  const joinOnReadyRef = useRef<'none' | 'rejoin' | 'fresh'>('none')
 
   const buildJoinMessage = (isRejoin: boolean): SignalPayload | null => {
     const c = store.getSnapshot().connection
@@ -125,7 +133,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const buildJoinMessageRef = useRef(buildJoinMessage)
   buildJoinMessageRef.current = buildJoinMessage
 
-  const { send, clientIdRef, isOpen } = useSignaling({
+  const { send, clientIdRef, isOpen, restart: restartSignaling } = useSignaling({
     onReady: (id, resumed) => onReadyRef.current(id, resumed),
     onMessage: (p) => onMessageRef.current(p),
     onClosed: () => onClosedRef.current(),
@@ -213,7 +221,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   }, [view.currentRoomId])
 
   // 명령과 부수효과가 쓰는 최신 의존성 (명령 객체는 한 번만 만든다)
-  const deps = { session, viewer, mixer, recording, send, isOpen, clientIdRef }
+  const deps = { session, viewer, mixer, recording, send, isOpen, clientIdRef, restartSignaling }
   const depsRef = useRef(deps)
   depsRef.current = deps
 
@@ -229,9 +237,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     }
 
     const leaveRoom = () => {
-      const { send: sendMsg, session: s, viewer: v, mixer: m, recording: rec } = d()
+      const { send: sendMsg, session: s, viewer: v, mixer: m, recording: rec, restartSignaling: restart } = d()
       sendMsg({ type: 'leave' })
       roomPasswordRef.current = null
+      joinOnReadyRef.current = 'none'
       clearBusyRetry()
       // 방 id를 먼저 비워야 시작 중인 엔진이 완료 시 "퇴장함"을 보고 스스로 내려간다 (H2)
       store.patch('connection', { currentRoomId: null, joinError: null, roomJoined: false })
@@ -249,6 +258,9 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         local: { ...st.local, localError: null },
         miniPlayer: { active: false },
       }))
+      // 연결이 없는 채(재연결 대기 중·포기·밀려남) 나가면 방 밖에서는 아무도 다시 연결하지 않으므로 여기서 다시 연다.
+      // restart는 연결(시도)이 살아 있으면 아무것도 하지 않는다 (P1-15b 리뷰 M-2)
+      restart()
     }
 
     const startPerforming = async (instrument: string): Promise<boolean> => {
@@ -306,6 +318,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         }
         roomPasswordRef.current = password || null
         rejoiningRef.current = false
+        // 이 연결에서 직접 join을 보낸다 (ready 전이면 큐에 넣었다가 보낸다)
+        joinOnReadyRef.current = 'none'
         clearBusyRetry()
         store.patch('connection', { currentRoomId: roomId, joinError: null, roomJoined: false, isRoomHost: isHost === true })
         sendJoin()
@@ -331,6 +345,33 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         store.patch('connection', { joinFeedback: '룸 입장 시도 중...' })
       },
       leaveRoom,
+      /** 방 밖에서 시그널링 연결이 없으면 다시 연다 (연결(시도)이 살아 있으면 아무것도 하지 않는다) */
+      ensureSignaling: () => {
+        if (conn().currentRoomId) return
+        d().restartSignaling()
+      },
+      /**
+       * 재연결 포기(gave-up)나 다른 창·기기에 밀려난(replaced) 뒤 같은 방에 새로 입장 (P1-15b).
+       * replaced에서 부르면 서버가 이번엔 다른 쪽 연결을 닫는다(확인은 화면이 받는다). 서버 세션은 이미 정리됐고 엔진도 멈췄으므로
+       * 방 안 상태(참가자·요청)를 비우고 시그널링을 다시 열어, ready가 되면 일반 입장 join을 한 번 보낸다.
+       * 방 id·비밀번호·방장 여부·채팅·믹서 설정은 그대로 둔다.
+       */
+      reenterRoom: () => {
+        const c = conn()
+        if (!c.currentRoomId || !canReenter(c.signalStatus)) return
+        const { viewer: v, restartSignaling: restart } = d()
+        rejoiningRef.current = false
+        clearBusyRetry()
+        broadcaster.stop()
+        v.closeAll()
+        joinOnReadyRef.current = 'fresh'
+        store.update((st) => ({
+          connection: { ...st.connection, peers: [], roomJoined: false, joinError: null, joinFeedback: '룸 입장 시도 중...' },
+          roster: {},
+          requests: { perform: initialPerformRequestState, pendingInstrumentChanges: [], myInstrumentChangeStatus: 'none', myNewInstrument: null },
+        }))
+        restart()
+      },
 
       startPerforming,
       stopPerforming: async () => {
@@ -451,15 +492,21 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
   // --- 시그널링 이벤트 ---
   onReadyRef.current = (id, resumed) => {
-    // 재연결: 이전 방에 다시 입장 (resumed면 서버는 이미 방에 있는 것으로 보고 상태만 다시 보낸다)
-    const join = buildJoinMessageRef.current(true)
-    rejoiningRef.current = !!join
+    // 재연결: 이전 방에 다시 입장 (resumed면 서버는 이미 방에 있는 것으로 보고 상태만 다시 보낸다).
+    // 포기 뒤 "다시 입장"이면 일반 입장 join (서버 세션이 없으므로 rejoin이 아니다)
+    // 첫 연결이면 보내지 않는다: 입장 join은 joinRoom이 이미 보냈다(ready 전이면 큐에 있다가 방금 나갔다)
+    const mode = joinOnReadyRef.current
+    joinOnReadyRef.current = 'none'
+    const join = mode === 'none' ? null : buildJoinMessageRef.current(mode === 'rejoin')
+    rejoiningRef.current = !!join && mode === 'rejoin'
     if (join) send(join)
     // resumed && 같은 id → 엔진 유지 + descriptor 재전송, 아니면 새 id로 엔진 재시작
     void session.welcome(id, resumed)
   }
 
   onClosedRef.current = () => {
+    // 방 안에서 끊겼으면 다음 ready에서 다시 입장한다 ("다시 입장"으로 연 연결이면 일반 입장 그대로)
+    if (store.getSnapshot().connection.currentRoomId !== null && joinOnReadyRef.current === 'none') joinOnReadyRef.current = 'rejoin'
     store.patch('connection', { peers: [] })
     viewer.closeAll()
     // 엔진(UDP 메시)은 유지한다. 재연결/세션 재개 여부는 onReady에서 결정 (M6)
@@ -468,7 +515,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
   onGaveUpRef.current = () => {
     // 재연결 예산(35초, 서버 세션 유예 30초 + 여유)을 넘겼다: 서버 쪽 세션은 이미 정리됐으므로 엔진도 멈춘다.
-    // 화면은 signalStatus='gave-up'을 보고 "연결이 끊겼습니다 — 다시 입장" 안내를 띄운다.
+    // 다른 창·기기에 밀려났을 때(replaced)도 같다: 서버 쪽 세션은 이미 정리됐다.
+    // 화면은 signalStatus='gave-up'/'replaced'를 보고 "다시 입장" 안내를 띄운다.
     broadcaster.stop()
     void session.stop({ notify: false })
   }

@@ -6,6 +6,7 @@
 import { createContext, useContext, useMemo } from 'react'
 import { isNativeApp, type EngineStats, type PeerStats } from '../../../native/engineApi'
 import type { RoomSessionStore, RoomSnapshot } from './roomSessionStore'
+import { selectReconnectBanner } from './reconnectBanner'
 import { useRoomSelector } from './useRoomSelector'
 import type { PeerNetworkStats } from './useViewerAudio'
 
@@ -13,6 +14,7 @@ export type { JoinError } from '../../rooms'
 export type { ChatMessage } from './chatModel'
 export type { InstrumentChangeRequest, MyRequestStatus, PerformRequest } from './performRequestState'
 export type { PeerInstrument } from './roomState'
+export type { ReconnectBanner, ReconnectBannerKind } from './reconnectBanner'
 export type { Recording } from './useRecording'
 export type { SignalStatus } from './useSignaling'
 export type { PeerNetworkStats, RtcStatus } from './useViewerAudio'
@@ -27,6 +29,10 @@ export interface RoomActions {
   /** 거부된 입장(정원 초과 등)을 다시 시도 */
   retryJoin: () => void
   leaveRoom: () => void
+  /** 재연결 포기(gave-up)·다른 창에 밀려남(replaced) 뒤 새로고침 없이 시그널링을 다시 열고 같은 방에 새로 입장 */
+  reenterRoom: () => void
+  /** 방 밖에서 시그널링 연결이 없으면 다시 연다 (방에 들어가려는데 끊겨 있을 때) */
+  ensureSignaling: () => void
 
   /** 엔진 시작 성공 후에만 악기를 설정하고 start-performing을 보낸다. 실패하면 false */
   startPerforming: (instrument: string) => Promise<boolean>
@@ -180,6 +186,7 @@ export function useRoomConnection() {
     submitRoomPassword: actions.submitRoomPassword,
     retryJoin: actions.retryJoin,
     leaveRoom: actions.leaveRoom,
+    ensureSignaling: actions.ensureSignaling,
   }
 }
 
@@ -277,6 +284,16 @@ export function useRoomRecording() {
   const { store, actions } = useRoomRuntime()
   const r = useRoomSelector(store, selectRecording)
   return { ...r, startRecording: actions.startRecording, stopRecording: actions.stopRecording, deleteRecording: actions.deleteRecording }
+}
+
+/**
+ * 시그널링 재연결 안내 띠 (P1-15b). 연결 상태·방 id·엔진 단계에서 고른 값 두 개만 구독하므로 통계·레벨 틱에는 다시 그리지 않고,
+ * 띠 상태가 바뀔 때만 다시 그린다.
+ */
+export function useReconnectBanner() {
+  const { store, actions } = useRoomRuntime()
+  const banner = useRoomSelector(store, selectReconnectBanner)
+  return { ...banner, reenterRoom: actions.reenterRoom }
 }
 
 /** 미니 플레이어 (합주실에서 다른 화면으로 이동했을 때) */
