@@ -5,6 +5,7 @@ import { tossPaymentsService } from './tossPayments'
 import { paymentApi } from './paymentApi'
 import { SERVICE_NAME } from '../../shared/lib/brand'
 import { NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor, type PaidPlan } from './planFeatures'
+import './Payment.css'
 
 interface PlanInfo {
   id: PaidPlan

@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
 import { Modal } from '../../shared/ui'
 import { PLANNED_NOTICE, plannedFeaturesFor } from './planFeatures'
+import './PremiumModal.css'
 
 interface PremiumModalProps {
   isOpen: boolean

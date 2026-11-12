@@ -11,8 +11,12 @@ const OUTSIDE_FEATURES = fs
   .readdirSync(path.join(__dirname, 'src'))
   .filter((name) => name !== 'features' && name !== 'app')
   .map((name) => `./src/${name}`)
-// app이 전역 순서를 정해 import하는 기능 CSS(지금은 어느 화면에서든 쓰이는 결제 스타일). 컴포넌트로 옮기면 지운다(문서 9절)
-const APP_GLOBAL_CSS = { payment: ['./Pricing.css', './PremiumModal.css', './Payment.css'] }
+// app이 전역 순서를 정해 import하는 기능 CSS(결제 CSS 중 결제 화면 밖에서도 매칭되는 규칙, P3-2 ③-2). 화면별 CSS 정리 때 지운다(문서 9절)
+const APP_GLOBAL_CSS = {
+  payment: ['./paymentGlobal.css'],
+  profile: ['./profileGlobal.css'],
+  'demo-karaoke': ['./karaokeGlobal.css'],
+}
 
 const boundaryZones = [
   // ① 기능 내부 파일은 그 기능 안에서만. 밖(다른 기능·app·native·shared)에서는 index.ts로만
