@@ -12,12 +12,17 @@
  *   서버 의미: 시도를 먼저 세고 remaining = max - count. 5번째 오답은 password-invalid{remainingAttempts: 0},
  *   6번째 시도에서 password-rate-limited.
  * 처리하지 않는 메시지 타입은 위반으로 기록한다(앱이 새 메시지를 보내기 시작하면 테스트가 알게).
+ *
+ * 보내는 메시지는 서버의 송신 메시지 타입(server/src/signaling/protocol.ts ServerMessage)으로 검사한다:
+ * 서버 계약에서 필드가 바뀌면 e2e tsc(npm run e2e:typecheck)가 실패한다(docs/server-architecture.md 3.3절).
+ * 서버 쪽 사실은 server/test/fixtures/ws-transcript.json이 고정한다.
  */
 import type { BrowserContext, WebSocketRoute } from '@playwright/test'
 import {
   DEFAULT_PASSWORD_ATTEMPT_LIMITS,
   PasswordAttemptLimiter,
 } from '../../../server/src/lib/roomPassword'
+import type { ServerMessage } from '../../../server/src/signaling/protocol'
 import { SIGNALING_URL } from '../env'
 import type { Violations } from './http'
 import type { MemoryPostgrest } from './postgrest'
@@ -89,7 +94,7 @@ export class FakeSignaling {
     await context.routeWebSocket(url => url.host === host, ws => this.accept(ws))
   }
 
-  private send(c: Conn, msg: SignalMessage) {
+  private send(c: Conn, msg: ServerMessage) {
     c.ws.send(JSON.stringify(msg))
   }
 
@@ -179,14 +184,15 @@ export class FakeSignaling {
     const participants = config.participants ?? []
     const max = typeof room?.max_participants === 'number' ? Math.min(room.max_participants, 20) : 20
     if (!isHost && participants.length >= max) {
-      this.send(conn, { type: 'error', code: 'room-full', roomId, maxParticipants: max, message: `합주실 정원(${max}명)이 가득 찼습니다.` })
+      this.send(conn, { type: 'error', code: 'room-full', reason: 'room-full', roomId, maxParticipants: max, message: `합주실 정원(${max}명)이 가득 찼습니다.` })
       return
     }
 
     conn.roomId = roomId
     this.send(conn, {
       type: 'room-state',
-      participants,
+      // 서버는 isPerforming·isHost를 항상 채워 보낸다
+      participants: participants.map(p => ({ isPerforming: false, isHost: false, ...p })),
       peerIds: participants.map(p => p.oderId),
       isHost,
     })

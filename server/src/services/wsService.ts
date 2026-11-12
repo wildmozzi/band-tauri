@@ -1,14 +1,24 @@
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
-import type { IncomingMessage } from 'http'
 import { Server as HttpServer } from 'http'
 import { Server as HttpsServer } from 'https'
 import { v4 as uuidv4 } from 'uuid'
 import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
-import { ROOM_CAPACITY_MAX } from '../lib/roomCapacity'
 import { deriveRelayBindKey, isValidSsrc, relayConfigFromEnv, signRelayToken } from './relayToken'
-import { createRoomRepository, type RoomMeta, type RoomRepository } from '../repositories/roomRepository'
-import { DEFAULT_PASSWORD_ATTEMPT_LIMITS, PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword, type ScryptGate } from '../lib/roomPassword'
+import type { RoomMeta } from '../repositories/roomRepository'
+import { PasswordAttemptLimiter, ScryptBusyError, defaultScryptGate, ipBucket, verifyRoomPassword } from '../lib/roomPassword'
+import {
+  APPROVAL_GRACE_MS, AUTH_TIMEOUT_MS, MAX_CHAT_LENGTH, MAX_MESSAGE_BYTES, MAX_NICKNAME_LENGTH, MAX_PENDING_MESSAGES,
+  MAX_ROOM_ID_LENGTH, PARTICIPANT_UPDATE_DEBOUNCE_MS, REJOIN_WINDOW_MS, ROOM_META_TTL_MS, TOKEN_EXPIRY_GRACE_MS,
+  type InstrumentChangeRequest, type MetronomeState, type Msg, type Participant, type PerformRequest,
+} from '../signaling/protocol'
+import { DEFAULT_LIMITS, type Client, type LeaveReason, type WsDeps, type WsLimits, type WsOptions } from '../signaling/types'
+import { TokenBucket } from '../signaling/rateLimit'
+import { parseCandidates, parseEngineKey } from '../signaling/descriptor'
+import { parseMetronomeState } from '../signaling/metronome'
+import { jwtExpiryMs } from '../signaling/auth'
+import { clientIp } from '../signaling/connection'
+import { supabaseDeps } from '../signaling/supabaseDeps'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -47,245 +57,14 @@ import { DEFAULT_PASSWORD_ATTEMPT_LIMITS, PasswordAttemptLimiter, ScryptBusyErro
  * - 한계: 서버 인스턴스 1대 가정(P3-10g 정원과 같음). 여러 대로 늘리면 방 단위 상태(바인딩·정원·승인)를 공유 저장소로 옮겨야 한다.
  */
 
-const MAX_MESSAGE_BYTES = 64 * 1024
-const AUTH_TIMEOUT_MS = 5000
-const MAX_PENDING_MESSAGES = 100
-const MAX_ROOM_ID_LENGTH = 128
-const MAX_NICKNAME_LENGTH = 50
-const MAX_CHAT_LENGTH = 1000
-const ROOM_META_TTL_MS = 30_000
-const REJOIN_WINDOW_MS = 60_000
-const APPROVAL_GRACE_MS = 60_000
-const TOKEN_EXPIRY_GRACE_MS = 60_000
-const PARTICIPANT_UPDATE_DEBOUNCE_MS = 1000
-/** X25519 공개키 길이(바이트). descriptor.key는 이것의 표준 base64(패딩 포함 44자) */
-const ENGINE_KEY_BYTES = 32
-const ENGINE_KEY_B64_RE = /^[A-Za-z0-9+/]{43}=$/
-/** descriptor 후보 개수 상한(엔진 net/peer.rs MAX_CANDIDATES와 같음) */
-export const MAX_ENGINE_CANDIDATES = 8
-/** 후보 주소 형식: IPv4 `a.b.c.d:port`만(엔진 소켓은 IPv4, 받는 쪽 엔진도 IPv6를 거부한다) */
-const CANDIDATE_ADDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/
-const CANDIDATE_ADDR_MAX = 21 // '255.255.255.255:65535'
-
-type Env = Record<string, string | undefined>
-type AuthState = 'pending' | 'verifying' | 'authenticated' | 'anonymous'
-
+// S1(docs/server-architecture.md 3절): 클로저 밖 순수 코드는 signaling/*로 옮겼다. 기존 import 경로를 유지하는 재수출
 export type { RoomMeta }
-
-/** 외부 의존성 (테스트에서 교체 가능) */
-export interface WsDeps {
-  /** Supabase 등 인증/DB 백엔드가 설정되어 있는지 */
-  hasBackend: boolean
-  verifyToken: (token: string) => Promise<string | null>
-  /** 방 정보. 방이 없으면 null, 조회 자체가 실패하면 throw(호출부가 "방 없음"과 구분해 판단을 보류할 수 있게, PR #53 H1) */
-  fetchRoomMeta: (roomId: string) => Promise<RoomMeta | null>
-  updateParticipants: (roomId: string, count: number) => Promise<void>
-}
-
-export interface WsLimits {
-  /** 일반 메시지 토큰 버킷 */
-  msgBurst: number
-  msgPerSec: number
-  /** chat 토큰 버킷 */
-  chatBurst: number
-  chatPerSec: number
-  /** join/leave 토큰 버킷 (DB 쓰기 증폭 방지) */
-  joinBurst: number
-  joinPerSec: number
-  /** IP당 동시 연결 수 */
-  maxConnectionsPerIp: number
-  /** 이만큼 메시지를 버리면 연결 종료 */
-  maxDropped: number
-  heartbeatMs: number
-  /** 방 하나의 최대 연주자 수 (설계: 최대 6명) */
-  maxPerformers: number
-  /** 방 하나의 최대 인원(관람 포함) 서버 상한. rooms.max_participants가 없거나 더 크면 이 값 (방 생성 스키마 최대 20) */
-  maxRoomParticipants: number
-  /** 방 하나에 들어올 수 있는 익명(로그인 안 한) 관람자 수 상한 (정원과 별도, PR #23 H1) */
-  maxAnonymousPerRoom: number
-  /** 같은 IP(/64)에서 한 방에 들어올 수 있는 익명 연결 수 (PR #23 H1) */
-  maxAnonymousPerIpPerRoom: number
-  /** 인증된 사용자가 끊긴 뒤 세션을 재개할 수 있는 유예시간 (이 동안 방 참가자에게 leave를 보내지 않음) */
-  resumeGraceMs: number
-  /** 방 비밀번호: (방, 사용자) 허용 실패 횟수 */
-  passwordMaxFailures: number
-  /** 방 비밀번호: (방, IP) 허용 실패 횟수 */
-  passwordMaxFailuresPerIp: number
-  /** 방 비밀번호: (방 전체) 허용 실패 횟수 */
-  passwordMaxFailuresPerRoom: number
-  /** 방 비밀번호 실패 기록 유지 시간 */
-  passwordWindowMs: number
-  /** 메트로놈 상태를 다시 보내기 전 방장(DB host_id) 확인에 쓰는 방 정보 캐시 최대 나이 (PR #36 L1) */
-  metronomeHostCheckMs: number
-}
-
-const DEFAULT_LIMITS: WsLimits = {
-  msgBurst: 40,
-  msgPerSec: 20,
-  chatBurst: 5,
-  chatPerSec: 2,
-  joinBurst: 5,
-  joinPerSec: 0.2,
-  maxConnectionsPerIp: 20,
-  maxDropped: 200,
-  maxPerformers: 6,
-  maxRoomParticipants: ROOM_CAPACITY_MAX,
-  maxAnonymousPerRoom: 10,
-  maxAnonymousPerIpPerRoom: 2,
-  resumeGraceMs: 30_000,
-  heartbeatMs: 30_000,
-  passwordMaxFailures: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailures,
-  passwordMaxFailuresPerIp: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailuresPerIp,
-  passwordMaxFailuresPerRoom: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailuresPerRoom,
-  passwordWindowMs: DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs,
-  metronomeHostCheckMs: 2_000,
-}
-
-export interface WsOptions {
-  /** scrypt 동시 실행 게이트 (테스트 주입용, 기본: 프로세스 공용) */
-  scryptGate?: ScryptGate
-  deps?: Partial<WsDeps>
-  limits?: Partial<WsLimits>
-  env?: Env
-}
-
-class TokenBucket {
-  private tokens: number
-  private last = Date.now()
-  constructor(private capacity: number, private perSec: number) {
-    this.tokens = capacity
-  }
-  take(): boolean {
-    const now = Date.now()
-    this.tokens = Math.min(this.capacity, this.tokens + ((now - this.last) / 1000) * this.perSec)
-    this.last = now
-    if (this.tokens < 1) return false
-    this.tokens -= 1
-    return true
-  }
-}
-
-interface Client {
-  id: string
-  ws: WebSocket
-  ip: string
-  roomId?: string
-  nickname: string
-  instrument?: string
-  isPerforming: boolean
-  isHost: boolean
-  /** 서버가 검증한 userId (익명이면 undefined) */
-  userId?: string
-  authState: AuthState
-  /** 토큰 만료 시각(ms). 알 수 없으면 null */
-  tokenExp: number | null
-  expiryTimer?: ReturnType<typeof setTimeout>
-  /** native-descriptor를 보낸 적 있음 (native-leave 허용 판단용) */
-  nativeActive: boolean
-  /** 마지막 native-descriptor의 ssrc (릴레이 토큰 발급용) */
-  nativeSsrc?: number
-  /** 마지막 native-descriptor의 엔진 공개키 (같은 방 안에서 이 연결·userId에 묶임, P1-1c) */
-  nativeKey?: string
-  /** 메시지 순차 처리 체인 (비동기 auth/DB 조회 중 순서 보장) */
-  chain: Promise<void>
-  pending: number
-  isAlive: boolean
-  msgBucket: TokenBucket
-  chatBucket: TokenBucket
-  joinBucket: TokenBucket
-  dropped: number
-  lastRateLimitNotice: number
-  /** 끊긴 뒤 세션 재개 대기 중이면 유예 만료 타이머 */
-  suspendTimer?: ReturnType<typeof setTimeout>
-  /** 재개 유예 중에 이양으로 내 메트로놈이 꺼졌다: 재개 때 metronome-host-only를 보낸다 (PR #53 L2) */
-  pendingMetronomeStop?: boolean
-}
-
-interface Participant {
-  oderId: string
-  nickname: string
-  instrument?: string
-  isPerforming: boolean
-  isHost: boolean
-}
-
-interface PerformRequest {
-  oderId: string
-  nickname: string
-  instrument: string
-  timestamp: number
-}
-
-interface InstrumentChangeRequest {
-  oderId: string
-  nickname: string
-  currentInstrument: string
-  newInstrument: string
-  timestamp: number
-}
-
-type Msg = Record<string, unknown> & { type: string }
-
-/** 공유 메트로놈(P2-3) 계획. startUs는 방장 엔진 시계(µs) 기준 박 0 시각 */
-export interface MetronomeState {
-  running: boolean
-  bpm: number
-  beatsPerBar: number
-  startUs: number
-}
-
-/** 클라이언트가 보낸 메트로놈 계획 검증(엔진 계약과 같은 범위: bpm 20..300, 박자 1..16) */
-export function parseMetronomeState(v: unknown): MetronomeState | null {
-  if (!v || typeof v !== 'object' || Array.isArray(v)) return null
-  const { running, bpm, beatsPerBar, startUs } = v as Record<string, unknown>
-  if (typeof running !== 'boolean') return null
-  if (typeof bpm !== 'number' || !Number.isFinite(bpm) || bpm < 20 || bpm > 300) return null
-  if (typeof beatsPerBar !== 'number' || !Number.isInteger(beatsPerBar) || beatsPerBar < 1 || beatsPerBar > 16) return null
-  if (typeof startUs !== 'number' || !Number.isFinite(startUs) || startUs < 0 || startUs > Number.MAX_SAFE_INTEGER) return null
-  return { running, bpm, beatsPerBar, startUs }
-}
-type LeaveReason = 'leave' | 'move' | 'close' | 'duplicate'
-
-/**
- * descriptor.key 검증: 표준 base64(패딩 포함), 디코딩하면 정확히 32바이트(X25519 공개키).
- * 엔진(net/peer.rs)은 STANDARD로 인코딩한다. 비정규 표기(마지막 문자의 남는 비트)로 같은 키를 다른 문자열로
- * 보내 바인딩을 우회하지 못하게, 다시 인코딩한 값과 같아야 통과한다. 통과하면 키 문자열, 아니면 null.
- */
-export function parseEngineKey(v: unknown): string | null {
-  if (typeof v !== 'string' || !ENGINE_KEY_B64_RE.test(v)) return null
-  const raw = Buffer.from(v, 'base64')
-  if (raw.length !== ENGINE_KEY_BYTES || raw.toString('base64') !== v) return null
-  return v
-}
-
-export interface EngineCandidate { kind: 'lan' | 'public'; addr: string }
-
-/**
- * descriptor.candidates 검증과 재구성(PR #48 M1): 배열, 최대 MAX_ENGINE_CANDIDATES개, 각 원소는
- * `{ kind: 'lan'|'public', addr: 'IPv4:port' }`. 원소의 다른 필드는 버리고 아는 필드만 새로 만든다.
- * 옥텟 0..255, 포트 1..65535, 선행 0 표기는 거부(같은 주소를 다른 문자열로 보내지 못하게).
- * 0.0.0.0·멀티캐스트·루프백 같은 의미 검사는 받는 쪽 엔진(validate_candidate)이 한다(루프백은 테스트 옵션으로 허용될 수 있음).
- * 하나라도 틀리면 null.
- */
-export function parseCandidates(v: unknown): EngineCandidate[] | null {
-  if (!Array.isArray(v) || v.length > MAX_ENGINE_CANDIDATES) return null
-  const out: EngineCandidate[] = []
-  for (const item of v) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return null
-    const { kind, addr } = item as Record<string, unknown>
-    if (kind !== 'lan' && kind !== 'public') return null
-    if (typeof addr !== 'string' || addr.length > CANDIDATE_ADDR_MAX) return null
-    const m = CANDIDATE_ADDR_RE.exec(addr)
-    if (!m) return null
-    const parts = m.slice(1)
-    if (parts.some(p => p.length > 1 && p.startsWith('0'))) return null
-    const nums = parts.map(Number)
-    if (nums.slice(0, 4).some(n => n > 255)) return null
-    if (nums[4] < 1 || nums[4] > 65535) return null
-    out.push({ kind, addr })
-  }
-  return out
-}
+export type { WsDeps, WsLimits, WsOptions } from '../signaling/types'
+export type { EngineCandidate, MetronomeState } from '../signaling/protocol'
+export { MAX_ENGINE_CANDIDATES, parseCandidates, parseEngineKey } from '../signaling/descriptor'
+export { parseMetronomeState } from '../signaling/metronome'
+export { jwtExpiryMs } from '../signaling/auth'
+export { roomDeps } from '../signaling/roomDeps'
 
 function send(ws: WebSocket, data: unknown) {
   if (ws.readyState === ws.OPEN) {
@@ -303,70 +82,9 @@ function sanitizeNickname(v: unknown): string | undefined {
   return trimmed || undefined
 }
 
-/** JWT의 exp(초)를 ms로. 검증은 하지 않는다(verifyToken 통과 후에만 사용) */
-export function jwtExpiryMs(token: string): number | null {
-  const parts = token.split('.')
-  if (parts.length !== 3) return null
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'))
-    return typeof payload.exp === 'number' ? payload.exp * 1000 : null
-  } catch {
-    return null
-  }
-}
 
-function clientIp(req: IncomingMessage, env: Env): string {
-  // fly.io 프록시 뒤에서는 Fly-Client-IP가 실제 클라이언트 IP (fly 밖에서는 위조 가능하므로 사용 안 함)
-  if (env.FLY_APP_NAME) {
-    const h = req.headers['fly-client-ip']
-    const v = Array.isArray(h) ? h[0] : h
-    if (v) return v
-  }
-  return req.socket.remoteAddress || 'unknown'
-}
 
-function supabaseDeps(supabase: SupabaseClient | null): WsDeps {
-  return {
-    hasBackend: !!supabase,
-    verifyToken: async (token) => {
-      if (!supabase) return null
-      try {
-        const { data, error } = await supabase.auth.getUser(token)
-        return !error && data.user ? data.user.id : null
-      } catch (err) {
-        console.error('[AUTH] getUser failed:', err)
-        return null
-      }
-    },
-    ...roomDeps(supabase ? createRoomRepository(supabase) : null),
-  }
-}
 
-/**
- * rooms 테이블 접근 (repository). 방 조회 오류는 로그 후 다시 던진다: "방 없음(null)"으로 삼키면
- * 메트로놈 재전송이 DB 일시 장애를 방장 이양으로 오인한다(PR #53 H1). 참가자 수 갱신 오류는 무시 — 기존 동작
- */
-export function roomDeps(rooms: RoomRepository | null): Pick<WsDeps, 'fetchRoomMeta' | 'updateParticipants'> {
-  return {
-    fetchRoomMeta: async (roomId) => {
-      if (!rooms) return null
-      try {
-        return await rooms.findMeta(roomId)
-      } catch (err) {
-        console.error('[DB] Failed to look up room:', err instanceof Error ? err.message : err)
-        throw err
-      }
-    },
-    updateParticipants: async (roomId, count) => {
-      if (!rooms) return
-      try {
-        await rooms.updateParticipantCount(roomId, count)
-      } catch (err) {
-        console.error('[DB] Failed to update participants:', err instanceof Error ? err.message : err)
-      }
-    },
-  }
-}
 
 export function initializeWebSocket(
   server: HttpServer | HttpsServer,
