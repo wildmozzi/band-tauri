@@ -579,7 +579,7 @@ export function initializeWebSocket(
 
       // 비밀번호 방: 방장이 아니면 검증 (실패하면 지금 있는 방은 그대로 둔다)
       if (passwordHash && !isHost) {
-        const ok = await checkRoomPassword(client, roomId, passwordHash, msg.password)
+        const ok = await checkRoomPassword(ws, client, roomId, passwordHash, msg.password)
         if (!ok || clients.get(id) !== client) return
       }
 

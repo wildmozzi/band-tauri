@@ -1,5 +1,6 @@
 import { PasswordAttemptLimiter, ScryptBusyError, ipBucket, verifyRoomPassword, type ScryptGate } from '../lib/roomPassword'
 import { send } from './registry'
+import type { WebSocket } from 'ws'
 import type { Client, WsLimits } from './types'
 
 /**
@@ -15,9 +16,10 @@ export function createPassword(limits: WsLimits, scryptGate: ScryptGate) {
   })
 
   /** 방 비밀번호 검증 + 실패 횟수 제한. 통과하면 true, 아니면 에러를 보내고 false */
-  const checkRoomPassword = async (client: Client, roomId: string, hash: string, password: unknown): Promise<boolean> => {
-    // 연결 클로저가 캡처하던 값: 이 연결의 소켓과 clientId (await 전에 잡는다 — 원래 클로저와 같은 소켓으로 응답)
-    const { ws, id } = client
+  // ws는 연결 클로저가 캡처하던 이 연결의 소켓을 호출부에서 그대로 받는다. client.ws는 resume 뒤 새 연결의 소켓으로
+  // 바뀔 수 있으므로(끊긴 연결의 대기 중 join 응답이 새 소켓으로 가면 안 됨) 대신 쓰지 않는다.
+  const checkRoomPassword = async (ws: WebSocket, client: Client, roomId: string, hash: string, password: unknown): Promise<boolean> => {
+    const id = client.id
     if (typeof password !== 'string' || password.length === 0) {
       send(ws, { type: 'error', code: 'password-required', roomId, message: '비밀번호가 필요한 방입니다.' })
       return false

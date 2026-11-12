@@ -33,7 +33,8 @@ export function createPerformers(roomMeta: RoomMetaStore, insecureDevMode: boole
     if (m && m.size === 0) approvals.delete(roomId)
   }
 
-  /** 연주 시작 허용 여부 (H1): 방장, free_join 방, 또는 방장이 승인한 사용자 */
+  /** 연주 시작 허용 여부 (H1): 방장, free_join 방, 또는 방장이 승인한 사용자.
+   *  client는 연결 클로저의 값을 호출부에서 넘긴다(팩토리는 연결 상태를 캡처하지 않는다 — password의 ws와 같은 원칙). */
   const canStartPerforming = async (client: Client, roomId: string): Promise<boolean> => {
     if (!isAuthenticated(client) && !(insecureDevMode && client.authState === 'authenticated')) return false
     if (insecureDevMode) return true
