@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../auth'
-import { useRoom } from '../state/RoomContext'
+import { useRoomPerform, useRoomRequests } from '../state/roomHooks'
 
 /** 승인 없이 바로 연주를 시작하는가 (자유참여 방이거나 방장) */
 export function startsWithoutApproval(freeJoin: boolean | undefined, isHost: boolean): boolean {
@@ -15,15 +15,8 @@ export function startsWithoutApproval(freeJoin: boolean | undefined, isHost: boo
 export function usePerformControls(roomId: string | undefined, freeJoin: boolean | undefined, isHost: boolean) {
   const { user } = useAuth()
   const navigate = useNavigate()
-  const {
-    canPerform,
-    startPerforming,
-    stopPerforming,
-    myRequestStatus,
-    myRequestInstrument,
-    requestPerform,
-    cancelRequest,
-  } = useRoom()
+  const { canPerform, startPerforming, stopPerforming } = useRoomPerform()
+  const { myRequestStatus, myRequestInstrument, requestPerform, cancelRequest } = useRoomRequests()
   const [showInstrumentSelect, setShowInstrumentSelect] = useState(false)
   // 연주 시작 처리 중
   const [performBusy, setPerformBusy] = useState(false)

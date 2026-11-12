@@ -576,7 +576,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 형식(P2-4a): 패널의 선택 상자(WAV 24비트 기본 · FLAC · WAV 32비트 float)를 `format`으로 넘긴다. 선택은 localStorage `band.recordFormat`에 기억하고(막혔거나 깨졌으면 wav24), 녹음 중에는 바꿀 수 없다(녹음 중에는 그 녹음의 형식을 보인다). 정지 요약에 `markers > 0`이면 "끊김 구간 N곳(markers.json)"을 붙인다.
 - 관람자 브릿지: 방의 **방송 담당 연주자** = 호스트가 앱 연주자면 호스트, 아니면 연주자 중 `oderId` 사전순 최소. 이 앱만 `engine_subscribe_mix` → AudioWorklet → `MediaStreamAudioDestinationNode` → 웹 관람자와의 WebRTC(송신 전용)로 트랙 전송.
 - 웹(비Tauri)에서는 연주 참여 UI를 숨기고 "데스크톱 앱 다운로드" 안내.
-- Tauri 관련 코드는 `client/src/native/` 아래로 분리: `engineApi.ts`(커맨드 래퍼, 위 타입), `useNativeSession.ts`(시그널링↔엔진), `mixBridge.ts`(관람자 브릿지). `RoomContext.tsx`는 이 훅을 호출만 한다.
+- Tauri 관련 코드는 `client/src/native/` 아래로 분리: `engineApi.ts`(커맨드 래퍼, 위 타입), `useNativeSession.ts`(시그널링↔엔진), `mixBridge.ts`(관람자 브릿지). 합주실 상태 조립은 `client/src/features/room/state/RoomProvider.tsx`가 맡고, 이 훅을 호출해 세션 상태를 `RoomSessionStore`에 미러한다(화면은 선택 구독 훅으로 읽는다).
 
 ## 7. 품질 기준
 

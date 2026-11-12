@@ -64,7 +64,7 @@ interface AudioSettingsContextType {
   startTest: () => Promise<void>
   stopTest: () => Promise<void>
 
-  /** 합주실에서 엔진 사용 중(테스트 불가) — RoomContext가 설정 */
+  /** 합주실에서 엔진 사용 중(테스트 불가) — RoomProvider가 설정 */
   engineInUse: boolean
   setEngineInUse: (inUse: boolean) => void
 }

@@ -10,6 +10,7 @@
  * 이 클라이언트도 다른 클라이언트가 보낸 그런 필드를 권한 판단 근거로 쓰지 않는다.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { RoomSessionStore } from './roomSessionStore'
 import { supabase } from '../../../shared/lib/supabaseClient'
 import { getSignalingUrl } from '../../../shared/lib/apiUrl'
 
@@ -52,8 +53,6 @@ export interface SignalingHandlers {
 }
 
 export interface Signaling {
-  status: SignalStatus
-  clientId: string | null
   clientIdRef: React.MutableRefObject<string | null>
   /** auth 완료 전이면 큐에 넣고, 연결이 없으면 버린다 */
   send: (payload: SignalPayload) => void
@@ -62,9 +61,10 @@ export interface Signaling {
   authenticated: boolean | null
 }
 
-export function useSignaling(handlers: SignalingHandlers): Signaling {
-  const [status, setStatus] = useState<SignalStatus>('idle')
-  const [clientId, setClientId] = useState<string | null>(null)
+/** 연결 상태(signalStatus)와 clientId는 스토어의 connection 슬라이스에 쓴다 */
+export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStore): Signaling {
+  const setStatus = useCallback((signalStatus: SignalStatus) => store.patch('connection', { signalStatus }), [store])
+  const setClientId = useCallback((clientId: string | null) => store.patch('connection', { clientId }), [store])
   const [authenticated, setAuthenticated] = useState<boolean | null>(null)
   const clientIdRef = useRef<string | null>(null)
   /** 마지막으로 받은 clientId (연결이 끊겨도 유지). 재연결 시 resumeClientId로 보내 세션 재개를 요청 */
@@ -240,7 +240,7 @@ export function useSignaling(handlers: SignalingHandlers): Signaling {
         else if (ws.readyState === WebSocket.CONNECTING) ws.onopen = () => ws.close(1000)
       }
     }
-  }, [])
+  }, [setStatus, setClientId])
 
-  return { status, clientId, clientIdRef, send, isOpen, authenticated }
+  return { clientIdRef, send, isOpen, authenticated }
 }

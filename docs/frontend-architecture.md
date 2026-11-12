@@ -51,7 +51,7 @@ client/src/
 │                           Navigation.tsx(앱 셸), NotFound.tsx, App.css·index.css(전역 스타일)
 ├─ features/
 │  ├─ room/                 합주실 안(라이브 세션): 상세 화면·연주자/믹서/채팅 패널·미니 플레이어
-│  │  ├─ state/             RoomProvider와 세션 훅(시그널링·채팅·참여 요청·관람 수신·웹 믹서·녹음)
+│  │  ├─ state/             RoomSessionStore·signalReducer·RoomProvider(디스패처)·선택자 훅(roomHooks)·미디어 훅(시그널링·관람 수신·웹 믹서·녹음)
 │  │  ├─ components/        화면 조각(패널·모달)
 │  │  └─ hooks/             화면 전용 훅(입장/퇴장·방장 동작·설정 폼 등)
 │  ├─ rooms/                방 카탈로그: 목록·만들기·내 방 관리, 방 모델·서버 상태(조회/수정/삭제), 입장 규칙(비밀번호·코드·초대 링크)
@@ -67,7 +67,7 @@ client/src/
 ├─ native/                  엔진 브릿지(위 1절)
 └─ shared/
    ├─ ui/                   Button·Card·Badge·Field·Modal·cx, 디자인 토큰(tokens.css), DesktopDownloadButton
-   ├─ lib/                  supabaseClient, apiUrl·authHeaders, brand, redirect, devServerTarget, webrtcAudio, database.types
+   ├─ lib/                  supabaseClient, apiUrl·authHeaders, brand, devServerTarget, webrtcAudio, database.types
    └─ test/                 테스트 도우미(queryWrapper, supabaseMock) — 테스트에서만 import
 ```
 
@@ -152,7 +152,7 @@ client/src/
 | `useRoomConnection` | 시그널링 상태, clientId, 피어 목록, 현재 방, 입장 결과·오류, 방장 여부, 닉네임 + 입장/퇴장/비밀번호/재시도 | 입장·퇴장·재연결 |
 | `useRoomPerform` | 연주 가능/중/시작 중, 내 악기, 연주자 목록, 릴레이 오류, 모니터, 입력 뮤트, 방송 담당·관람자 수 + 시작·정지 | 연주 시작/정지, 연주자 변동, 설정 조작 |
 | `useRoomMetronome` | 공유 메트로놈, 내 클릭 볼륨·뮤트 + 방장 시작/정지 | 메트로놈 변경 |
-| `useRoomTelemetry` | 엔진 통계·피어 통계, 레벨 미터, 관람 회선 통계 | 주기적(수십 ms~2s) — 표시하는 컴포넌트만 |
+| `useRoomTelemetry(...keys)` | 엔진 통계·피어 통계, 레벨 미터, 관람 회선 통계. 쓰는 키만 넘기면 그 값이 바뀔 때만 다시 그린다 | 주기적(수십 ms~2s) — 표시하는 컴포넌트만 |
 | `useRoomMixer` | 표시용 연결 상태·오류, 수신 스트림, 개인 믹서 설정·마스터 + 오디오 컨텍스트 재개 | 사용자 조작, 수신 연결 변화 |
 | `useRoomChat` | 채팅 메시지 + 보내기 | 메시지 |
 | `useRoomRequests` | 연주 참여·악기 변경 요청 + 승인/거절/요청/취소 | 요청 |
@@ -160,6 +160,8 @@ client/src/
 | `useMiniPlayer` | 미니 플레이어 모드 + 진입/복귀/종료 | 화면 이동 |
 
 `useRoom()`(전부 한 객체)은 없앤다 — 다시 생기면 전체 리렌더가 돌아온다.
+
+미디어 훅(`useViewerAudio`·`useWebAudioMixer`·`useRecording`)과 `useSignaling`은 브라우저 객체(RTCPeerConnection·AudioContext·MediaRecorder·WebSocket)를 ref로 갖고, 화면에 보일 값만 스토어 슬라이스에 쓴다. 테스트: `signalReducer.test.ts`(메시지별 상태 변경·효과·처리 순서), `roomSessionStore.test.ts`(바뀐 슬라이스만 교체·파생 값 참조 유지), `RoomProvider.test.tsx`(엔진 통계·채팅이 바뀔 때 그 조각을 구독한 컴포넌트만 다시 그리는지, 입장 중 앱 업데이트 보류).
 
 ## 5. 기능 폴더 안 규칙
 
@@ -175,7 +177,7 @@ client/src/
 | 규칙 | 위반 예 |
 |---|---|
 | ① 다른 기능의 내부 파일 import 금지 — `features/<y>/index.ts`만 | `features/room/…`에서 `../rooms/roomModel` |
-| ① app·native·shared도 기능 내부 금지 | `app/App.tsx`에서 `../features/room/state/RoomContext` |
+| ① app·native·shared도 기능 내부 금지 | `app/App.tsx`에서 `../features/room/state/RoomProvider` |
 | ② shared → features·native·app 금지 | `shared/ui/…`에서 `../../features/auth` |
 | ③ native → features·app 금지 | `native/…`에서 `../features/room` |
 | ④ features → app 금지 | `features/home/…`에서 `../../app/routeTable` |

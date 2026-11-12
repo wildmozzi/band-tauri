@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useAuth } from '../../auth'
-import { useRoom } from '../state/RoomContext'
+import { useRoomConnection, useMiniPlayer } from '../state/roomHooks'
 import { recallRoomPassword } from '../../rooms'
 import type { DetailRoom } from '../roomDetailModel'
 
@@ -11,15 +11,8 @@ import type { DetailRoom } from '../roomDetailModel'
  */
 export function useRoomPresence(roomId: string | undefined, room: DetailRoom | null) {
   const { user, loading: authLoading } = useAuth()
-  const {
-    signalStatus,
-    joinRoom,
-    roomJoined,
-    leaveRoom,
-    enterMiniPlayerMode,
-    clearMiniPlayerMode,
-    currentRoomId: contextRoomId,
-  } = useRoom()
+  const { signalStatus, joinRoom, roomJoined, leaveRoom, currentRoomId: contextRoomId } = useRoomConnection()
+  const { enterMiniPlayerMode, clearMiniPlayerMode } = useMiniPlayer()
   const hasJoinedRef = useRef(false)
 
   // clearMiniPlayerMode를 ref로 저장 (의존성 문제 방지)

@@ -1,4 +1,4 @@
-import type { Recording } from '../state/RoomContext'
+import type { Recording } from '../state/roomHooks'
 import {
   downloadRecording,
   formatDuration,

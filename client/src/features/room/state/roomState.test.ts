@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mergeSelfPerformer, withPeer, type PeerInstrument } from './roomState'
-import { makeChatId } from './useChat'
+import { makeChatId } from './chatModel'
 
 const p = (id: string, isHost = false): PeerInstrument => ({ peerId: id, instrument: 'guitar', nickname: id, isHost })
 

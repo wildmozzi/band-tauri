@@ -1,14 +1,28 @@
 // @vitest-environment jsdom
 // 방 상세 query 훅(features/rooms)과 RoomDetail 페이지 훅(features/room/hooks) — 직접 Supabase 호출을 옮긴 부분
 import { act, renderHook, waitFor } from '@testing-library/react'
+import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { argsOf, createSupabaseMock } from '../../../shared/test/supabaseMock'
 import { createQueryWrapper } from '../../../shared/test/queryWrapper'
 
-const sb = vi.hoisted(() => ({ mock: null as ReturnType<typeof createSupabaseMock> | null }))
+type AuthSession = { user: { id: string } } | null
+const sb = vi.hoisted(() => ({
+  mock: null as ReturnType<typeof createSupabaseMock> | null,
+  /** AuthProvider가 구독한 Supabase 인증 이벤트 (사용자 전환을 흉내낸다) */
+  authCb: null as null | ((event: string, session: AuthSession) => void),
+  user: null as null | { id: string },
+}))
 vi.mock('../../../shared/lib/supabaseClient', async () => {
   const { createSupabaseMock } = await import('../../../shared/test/supabaseMock')
   sb.mock = createSupabaseMock()
+  Object.assign(sb.mock.client.auth, {
+    getUser: vi.fn(async () => ({ data: { user: sb.user } })),
+    onAuthStateChange: vi.fn((cb: (event: string, session: AuthSession) => void) => {
+      sb.authCb = cb
+      return { data: { subscription: { unsubscribe: vi.fn() } } }
+    }),
+  })
   return { supabase: sb.mock.client, isSupabaseConfigured: () => true }
 })
 
@@ -26,7 +40,7 @@ import type { DetailRoom } from '../roomDetailModel'
 import { useRoomDetailData } from './useRoomDetailData'
 import { useRoomHostActions } from './useRoomHostActions'
 import { useRoomSettingsForm } from './useRoomSettingsForm'
-import { useResetQueryCacheOnUserChange } from '../../auth'
+import { AuthProvider } from '../../auth'
 
 const dbRow = (over: Record<string, unknown> = {}) => ({
   id: 'r1', title: '방', description: null, host_id: 'h1', max_participants: 8, current_participants: 1,
@@ -143,20 +157,23 @@ describe('합주실에 있는 동안 사용자가 바뀔 때 (리뷰 M1)', () =>
   it('다른 탭 로그아웃·세션 만료·계정 전환에도 방 화면이 로딩으로 바뀌거나 목록으로 이동하지 않는다', async () => {
     sb.mock!.setResult('rpc:get_room', { data: [dbRow()] })
     sb.mock!.setResult('profiles', { data: { nickname: '방장님' } })
-    const { wrapper } = createQueryWrapper()
+    // 실제 AuthProvider(사용자 전환 시 Query 캐시 초기화)로 감싼다
+    sb.user = { id: 'u1' }
+    const { wrapper: QueryWrapper } = createQueryWrapper()
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryWrapper><AuthProvider>{children}</AuthProvider></QueryWrapper>
     const seen: { loading: boolean; room: boolean }[] = []
-    const { result, rerender } = renderHook(({ userId }) => {
-      useResetQueryCacheOnUserChange(userId, false)
+    const { result } = renderHook(() => {
       const data = useRoomDetailData('r1')
       seen.push({ loading: data.loading, room: data.room !== null })
       return data
-    }, { wrapper, initialProps: { userId: 'u1' as string | null } })
+    }, { wrapper })
     await waitFor(() => expect(result.current.hostNickname).toBe('방장님'))
+    await waitFor(() => expect(sb.authCb).not.toBeNull())
     const rpcBefore = sb.mock!.client.rpc.mock.calls.length
     seen.length = 0
 
-    rerender({ userId: null }) // 다른 탭에서 로그아웃 / refresh token 만료
-    rerender({ userId: 'u2' }) // 다른 계정으로 로그인
+    await act(async () => sb.authCb!('SIGNED_OUT', null)) // 다른 탭에서 로그아웃 / refresh token 만료
+    await act(async () => sb.authCb!('SIGNED_IN', { user: { id: 'u2' } })) // 다른 계정으로 로그인
     await act(async () => {})
 
     expect(seen.every(s => s.room && !s.loading)).toBe(true)

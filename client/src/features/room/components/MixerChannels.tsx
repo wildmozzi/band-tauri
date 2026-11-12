@@ -1,4 +1,4 @@
-import type { MixSettings, PeerInstrument, PeerNetworkStats } from '../state/RoomContext'
+import type { MixSettings, PeerInstrument, PeerNetworkStats } from '../state/roomHooks'
 import type { EngineStats, PeerState, PeerStats } from '../../../native/engineApi'
 import { pathLabel, peerPathHint } from '../../../native/relayLogic'
 import { EngineDiagLines } from './EngineDiagLines'

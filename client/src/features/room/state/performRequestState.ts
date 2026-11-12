@@ -1,5 +1,5 @@
 /**
- * 연주 참여 요청 상태 (순수 리듀서). usePerformRequests가 useReducer로 쓴다.
+ * 연주 참여·악기 변경 요청 상태 (순수). signalReducer와 RoomProvider 명령이 쓴다.
  * - 요청자: none → (요청 전송) → pending(서버 확인) → approved | rejected(사유)
  * - 방장: 대기 요청 목록 + 새 요청 알림(notice)
  * 승인 판단은 서버가 한다. 여기는 서버 메시지를 화면 상태로 옮길 뿐이다.
@@ -147,3 +147,20 @@ export const REJECT_REASON_PRESETS = [
   '해당 악기 자리가 찼습니다',
   '곡 진행 중입니다. 잠시 후 다시 요청해 주세요',
 ] as const
+
+/** 악기 변경 요청 (방장 승인 흐름) */
+export interface InstrumentChangeRequest {
+  oderId: string
+  nickname: string
+  currentInstrument: string
+  newInstrument: string
+  timestamp: number
+}
+
+export function isInstrumentChangeRequest(v: unknown): v is InstrumentChangeRequest {
+  const r = v as InstrumentChangeRequest
+  return !!r && typeof r.oderId === 'string' && typeof r.newInstrument === 'string'
+}
+
+/** 악기 변경 결과(승인 2초·거절 3초)를 보여준 뒤 기본 상태로 돌아가는 시간 */
+export const INSTRUMENT_CHANGE_RESULT_MS = { approved: 2000, rejected: 3000 } as const

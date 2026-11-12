@@ -1,6 +1,6 @@
 // 합주실 화면의 머리글, 비밀번호 입장 화면, 악기 변경 요청 말풍선.
 import { Link } from 'react-router-dom'
-import type { InstrumentChangeRequest, JoinError, RtcStatus } from '../state/RoomContext'
+import type { InstrumentChangeRequest, JoinError, RtcStatus } from '../state/roomHooks'
 import { describeJoinError } from '../../rooms'
 import { INSTRUMENT_INFO, RTC_STATUS_TEXT, type DetailRoom } from '../roomDetailModel'
 import type { BubblePositions } from '../hooks/useBubblePositions'

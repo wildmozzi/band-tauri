@@ -1,9 +1,10 @@
 import { useEffect, useRef } from 'react'
-import { useRoom } from '../state/RoomContext'
+import { useRoomConnection, useRoomChat } from '../state/roomHooks'
 
 /** 오른쪽: 채팅. 입력 중인 글은 페이지가 갖는다(재연결 화면을 거쳐도 유지) */
 export function ChatPanel({ chatInput, onChatInputChange }: { chatInput: string; onChatInputChange: (v: string) => void }) {
-  const { chatMessages, sendChatMessage, nickname, clientId } = useRoom()
+  const { nickname, clientId } = useRoomConnection()
+  const { chatMessages, sendChatMessage } = useRoomChat()
   const chatContainerRef = useRef<HTMLDivElement | null>(null)
 
   // 채팅 스크롤 자동 이동

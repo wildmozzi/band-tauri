@@ -16,7 +16,7 @@ import {
   isNativeApp,
 } from './engineApi'
 import { reapplyLoopbackOffsetInBackground } from './loopbackOffsetStore'
-import { PerformSession,type EngineBackend, type PerformState, type SessionEnv } from './performSession'
+import { PerformSession,type EngineBackend, type SessionEnv } from './performSession'
 
 export const STATS_POLL_MS = 500
 
@@ -37,8 +37,12 @@ export const tauriEngineBackend: EngineBackend = {
   stats: engineStats,
 }
 
-/** env는 ref로 최신 값을 읽으므로 한 번만 만든 세션을 계속 쓴다 */
-export function useNativeSession(env: SessionEnv): { session: PerformSession; state: PerformState } {
+/**
+ * env는 ref로 최신 값을 읽으므로 한 번만 만든 세션을 계속 쓴다.
+ * 세션 상태는 돌려주지 않는다 — 화면·Provider는 스토어 미러(RoomSessionStore.perform) 하나에서 읽는다.
+ * 이 훅은 폴링 on/off에 필요한 running 여부만 React 상태로 들고 있어서 통계 틱(500ms)에는 호출한 컴포넌트를 다시 그리지 않는다.
+ */
+export function useNativeSession(env: SessionEnv): { session: PerformSession } {
   const envRef = useRef(env)
   envRef.current = env
   const sessionRef = useRef<PerformSession | null>(null)
@@ -51,12 +55,11 @@ export function useNativeSession(env: SessionEnv): { session: PerformSession; st
     })
   }
   const session = sessionRef.current
-  const [state, setState] = useState<PerformState>(session.getState())
+  const [running, setRunning] = useState(() => session.getState().phase === 'running')
 
-  useEffect(() => session.subscribe(setState), [session])
+  useEffect(() => session.subscribe((s) => setRunning(s.phase === 'running')), [session])
 
   // engine_stats 500ms 폴링 (연주 중에만)
-  const running = state.phase === 'running'
   useEffect(() => {
     if (!running || !isNativeApp()) return
     void session.pollStats()
@@ -67,5 +70,5 @@ export function useNativeSession(env: SessionEnv): { session: PerformSession; st
   // 언마운트 시 정지
   useEffect(() => () => session.dispose(), [session])
 
-  return { session, state }
+  return { session }
 }

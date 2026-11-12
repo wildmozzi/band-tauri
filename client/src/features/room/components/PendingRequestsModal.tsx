@@ -1,4 +1,4 @@
-import type { PerformRequest } from '../state/RoomContext'
+import type { PerformRequest } from '../state/roomHooks'
 import { REJECT_REASON_PRESETS } from '../state/performRequestState'
 import { INSTRUMENT_INFO, instrumentInfo } from '../roomDetailModel'
 import type { RejectPicker } from '../hooks/useRejectPicker'

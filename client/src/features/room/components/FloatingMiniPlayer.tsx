@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { useRoom } from '../state/RoomContext'
+import { useRoomConnection, useRoomPerform, useRoomMixer, useMiniPlayer } from '../state/roomHooks'
 import './FloatingMiniPlayer.css'
 
 // 악기 정보
@@ -14,23 +14,10 @@ const INSTRUMENT_INFO: Record<string, { icon: string; name: string }> = {
 
 export function FloatingMiniPlayer() {
   const navigate = useNavigate()
-  const {
-    isMiniPlayerMode,
-    currentRoomId,
-    returnToRoom,
-    exitMiniPlayerMode,
-    peers,
-    peerInstruments,
-    clientId,
-    myInstrument,
-    rtcStatus,
-    masterMuted,
-    toggleMasterMute,
-    isPerforming,
-    isMonitoringEnabled,
-    monitorGain,
-    setMonitor,
-  } = useRoom()
+  const { currentRoomId, peers, clientId } = useRoomConnection()
+  const { peerInstruments, myInstrument, isPerforming, isMonitoringEnabled, monitorGain, setMonitor } = useRoomPerform()
+  const { rtcStatus, masterMuted, toggleMasterMute } = useRoomMixer()
+  const { isMiniPlayerMode, returnToRoom, exitMiniPlayerMode } = useMiniPlayer()
 
   // 미니 플레이어 모드가 아니면 렌더링하지 않음
   if (!isMiniPlayerMode || !currentRoomId) {

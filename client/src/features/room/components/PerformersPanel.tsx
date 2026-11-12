@@ -1,5 +1,5 @@
 import type { MutableRefObject } from 'react'
-import { useRoom, type PeerInstrument } from '../state/RoomContext'
+import { useRoomPerform, useRoomTelemetry, useRoomMixer, useRoomRequests, type PeerInstrument } from '../state/roomHooks'
 import { MetronomePanel } from './MetronomePanel'
 import { MyPerformerItem } from './MyPerformerItem'
 import { ParticipationToggle } from './ParticipationToggle'
@@ -37,17 +37,10 @@ export function PerformersPanel({
   onBecomeViewer: () => void
   onStartAfterApproval: () => void
 }) {
-  const {
-    myInstrument,
-    canPerform,
-    broadcasterId,
-    peerEngineStats,
-    engineStats,
-    relayError,
-    mixSettingsMap,
-    setMixMuted,
-    pendingRequests,
-  } = useRoom()
+  const { myInstrument, canPerform, broadcasterId, relayError } = useRoomPerform()
+  const { peerEngineStats, engineStats } = useRoomTelemetry('peerEngineStats', 'engineStats')
+  const { mixSettingsMap, setMixMuted } = useRoomMixer()
+  const { pendingRequests } = useRoomRequests()
 
   return (
     <aside className="performers-panel">
