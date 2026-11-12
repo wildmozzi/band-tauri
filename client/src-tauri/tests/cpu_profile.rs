@@ -22,7 +22,7 @@ use band_lib::sys::cpu::{cycle_pct, process_cycles, tsc_now};
 use band_lib::engine::device::fake::FakeBackend;
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::relay_codec::CodecReason;
-use band_lib::engine::stats::PeerStateKind;
+use band_lib::net::types::PeerStateKind;
 use band_lib::engine::Engine;
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::net::NetOptions;

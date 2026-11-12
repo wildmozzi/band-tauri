@@ -15,7 +15,7 @@ use band_lib::engine::config::{CodecKind, EngineConfig};
 use band_lib::engine::device::fake::FakeBackend;
 use band_lib::engine::mixer::MixControls;
 use band_lib::engine::record::{RecordOptions, TrackKind};
-use band_lib::engine::stats::PeerStateKind;
+use band_lib::net::types::PeerStateKind;
 use band_lib::engine::wav::RecordFormat;
 use band_lib::engine::Engine;
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
