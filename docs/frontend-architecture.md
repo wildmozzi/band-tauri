@@ -6,7 +6,7 @@
 - 구조 **결정**의 기준은 [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md)(D0·D3). 이 문서는 그 결정의 프런트 상세이며, 다르면 ADR이 맞고 이 문서를 고친다.
 - 엔진(Rust) 계약은 [overhaul/native-engine-design.md](overhaul/native-engine-design.md). 이 문서는 그 위의 TS 계층만 다룬다.
 - 규칙은 ESLint로 강제한다(6절). 문서와 lint가 다르면 lint가 맞고 문서를 고친다.
-- 서버(`server/`, 특히 시그널링 `wsService.ts` 약 1,600줄)는 이 문서 범위 밖이다. 다음 정리 대상이며 `docs/server-architecture.md`(예정)에서 다룬다.
+- 서버(`server/`, 시그널링 `server/src/signaling/*`)는 이 문서 범위 밖이다. 구조는 [server-architecture.md](server-architecture.md)에서 다룬다.
 
 ## 1. 계층과 의존 방향
 

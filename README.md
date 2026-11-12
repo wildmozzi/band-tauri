@@ -21,7 +21,8 @@
 │   └── vercel.json         웹 배포 설정 (SPA rewrite)
 ├── server/                 Express API + WebSocket 시그널링 서버
 │   ├── src/routes/         /api/music, /api/payment
-│   ├── src/services/       wsService(시그널링), demucs, omr, payment 등
+│   ├── src/signaling/      WebSocket 시그널링 모듈 (docs/server-architecture.md)
+│   ├── src/services/       wsService(시그널링 조립), relayToken, demucs, omr, payment 등
 │   ├── Dockerfile, fly.toml
 ├── relay/                  UDP 릴레이 서버 (Rust, tokio). 암호문 그대로 중계, 시그널링이 발급한 토큰으로 인증
 │   ├── Dockerfile, fly.toml (fly-global-services UDP 바인드, 전용 IPv4 필요)
