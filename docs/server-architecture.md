@@ -72,7 +72,7 @@ server/src/signaling/
   connection.ts     A: clientIp (Fly-Client-IP 신뢰 규칙). 연결 수명 본체는 아직 조립부(wsService)에 있다 — 아래 "실제"
   rateLimit.ts      TokenBucket (순수)
   auth.ts           B: handleAuth, 재인증, 토큰 만료 타이머, jwtExpiryMs. 재개는 resume을 부른다
-  resume.ts         C: suspended(createResume: drop·find·isSuspended·add·clearTimers), suspendOnClose,
+  resume.ts         C: suspended(createResume: drop·find·findLive·isSuspended·add·clearTimers), suspendOnClose,
                     attachSession(연결 상태 이식·ctx 교체), announceResumed(재개 알림)
   roomMeta.ts       D: 방 정보 캐시·진행 중 조회 합치기, checkHost
   membership.ts     E: join/leave, room-state, 중복 연결 대체, 참가자 수 DB 디바운스
@@ -174,7 +174,7 @@ function handleLeave(svc, client, roomId, reason) {
 
 자리 예약 판정은 승인 기록이 있는지를 본다. `capacity`가 `performers`를 직접 부르지 않도록 `membership`이 그 값을 넘긴다(계층 2 사이 간선을 늘리지 않음).
 
-S4-3 구현 이름(위 표의 입구와 대응): registry `getClient`·`clientCount`·`allClients`·`hasRoom`·`isInRoom`·`roomSize`·`roomMemberIds`·`roomMembers`·`deleteRoom`·`broadcastLeft`, capacity `checkCapacity`·`hasSeatHold`·`hold`·`clearSeatHold`·`noteLeft`·`consumeRejoin`·`onLeave`·`sweep`(`countRoomSeats`는 내부), performers `hasApproval`·`setApproval`·`clearApproval`·`onLeave`·`releaseGraceOnRejoin`, metronome `replayMetronome`·`dropMetronomeIfHostChanged`·`onEngineRestart`·`onEngineDown`·`onMemberLeft`·`onRoomEmpty`(+ 자기 핸들러용 `isRunningBy`·`update`), requests `pendingFor`·`onLeave`·`onRoomEmpty`(+ 자기 핸들러용 `performList`·`instrumentList`), resume `drop`·`find`·`isSuspended`·`add`·`clearTimers`. 팩토리가 함수만 돌려주는지는 `signaling-units.test.ts` "state ownership"이 검사한다.
+S4-3 구현 이름(위 표의 입구와 대응): registry `getClient`·`clientCount`·`allClients`·`hasRoom`·`isInRoom`·`roomSize`·`roomMemberIds`·`roomMembers`·`deleteRoom`·`broadcastLeft`, capacity `checkCapacity`·`hasSeatHold`·`hold`·`clearSeatHold`·`noteLeft`·`consumeRejoin`·`onLeave`·`sweep`(`countRoomSeats`는 내부), performers `hasApproval`·`setApproval`·`clearApproval`·`onLeave`·`releaseGraceOnRejoin`, metronome `replayMetronome`·`dropMetronomeIfHostChanged`·`onEngineRestart`·`onEngineDown`·`onMemberLeft`·`onRoomEmpty`(+ 자기 핸들러용 `isRunningBy`·`update`), requests `pendingFor`·`onLeave`·`onRoomEmpty`(+ 자기 핸들러용 `performList`·`instrumentList`), resume `drop`·`find`·`findLive`(P1-16)·`isSuspended`·`add`·`clearTimers`. 팩토리가 함수만 돌려주는지는 `signaling-units.test.ts` "state ownership"이 검사한다.
 
 **실제(설계와 다른 점 2)**: 맵을 숨기면서 `signaling-units.test.ts`의 내부 정리 확인 3개(만료된 자리 예약이 읽을 때 지워짐, `sweep`이 빈 방 항목을 지움, 빈 승인 맵을 지움)는 맵을 직접 볼 수 없어 **공개 결과**(`hasSeatHold`·`hasApproval`이 false) 확인으로 바꿨다(S4-3 #104). "결과가 맞다"는 보지만 "맵에 항목이 남지 않는다(메모리)"는 더 이상 보지 않는다 — 검사가 약해진 부분이다. 메모리 누수 쪽은 4.4-2(정기 정리)를 고칠 때 팩토리에 크기 조회(`size()`류)를 더해 다시 덮는다.
 
@@ -276,7 +276,14 @@ authenticated ─(토큰 만료 + 60초)→ 4001 종료
 소켓 닫힘 ─┬─ 인증됨 + 방 안 + resumeGraceMs>0 → suspended ─┬─ 30초 내 같은 userId가 resumeClientId로 auth → 재개(같은 clientId)
            │                                                └─ 만료 → leave(close) → 삭제
            └─ 그 밖 → leave(close) → 삭제
+
+살아 있는 연결(서버가 닫힘을 아직 모름) ── 같은 userId(JWT)가 resumeClientId로 auth → 재개(같은 clientId)   ※ P1-16
+           └ 옛 소켓은 terminate. 그 close는 conn.ws가 이미 새 소켓이라 "넘어감"으로 보고 무시(유예·leave 없음)
 ```
+
+**재개 대상 판정**(`resume.find` → 없으면 `resume.findLive`, auth가 부른다): ① `suspended`에 있고 `userId`가 같음, 또는 ② (P1-16) `suspended`에 없지만 `clients`에 살아 있고 인증됨(`auth.state === 'authenticated'`)이며 `userId`가 같고 이 연결 자신이 아님. 둘 다 `userId`는 이번 auth의 JWT 검증 값과 비교한다 — 다른 사용자 토큰·토큰 없음은 재개하지 못하고 옛 연결은 그대로 둔다. 붙이는 경로는 같다(`attachSession` → 인증 필드·만료 타이머 → `announceResumed`). ②일 때 `attachSession`이 `conn.ws`를 새 소켓으로 바꾼 뒤 옛 소켓을 `terminate`한다. 조립부는 `client.conn.ws !== 이 소켓`을 "넘어감"으로 보고, 옛 소켓의 close에서 만료 타이머 정리·유예·퇴장을 건너뛰고, 옛 연결 체인에 남은 메시지는 처리하지 않는다. 같은 방 참가자에게는 participant-left/joined가 가지 않는다(유예 재개와 같음). 테스트: `ws-resume-live.test.ts`.
+
+이 판정이 필요한 이유: 클라이언트는 15초 수신 없음 + ping 5초로 먼저 끊김을 알고 재연결하지만, 서버는 하트비트(30초 주기, 감지까지 최대 60초)나 TCP 타임아웃으로만 안다. ①만 있으면 그 사이의 재연결이 새 clientId를 받아 엔진이 재시작된다(오디오 끊김, GOAL 2-6).
 
 클라이언트는 이 유예에 맞춰 첫 비정상 닫힘부터 35초(30초 + 여유) 동안 백오프(0.5→4초)로 재연결하고, 15초 수신 없음이면 앱 수준 `ping`→`pong`으로 확인해 5초 무응답이면 그 소켓을 버리고(4000) `onclose`를 기다리지 않고 바로 재연결한다(P1-15, 엔진 설계 5절).
 
@@ -373,7 +380,7 @@ S2가 가장 크다. 리뷰가 어려우면 모듈 두세 개씩 나눠 올린�
 
 읽으면서 발견한 것이다. 구조 PR에 섞지 않는다. 합주 목표와 관련된 것은 [reviews/2026-11-12-goal-gap.md](reviews/2026-11-12-goal-gap.md)에 백로그 제안으로 적었다.
 
-1. **반쯤 끊긴 연결에서 세션 재개 실패**: 재개는 서버가 소켓 닫힘을 **본 뒤에만**(`suspended`에 있을 때만) 된다. 클라이언트 쪽 망이 끊겨 서버가 아직 닫힘을 모르는 동안(하트비트 30초 주기 — 감지까지 최대 60초) 클라이언트가 새 소켓으로 `resumeClientId`를 보내면 재개되지 않고 새 clientId가 된다. 클라이언트는 엔진을 재시작한다(오디오 끊김). 고치려면 "같은 userId의 살아 있는 옛 연결"도 재개 대상으로 삼아야 한다 — `resume` 모듈의 정책 변경.
+1. **반쯤 끊긴 연결에서 세션 재개 실패**: 재개는 서버가 소켓 닫힘을 **본 뒤에만**(`suspended`에 있을 때만) 된다. 클라이언트 쪽 망이 끊겨 서버가 아직 닫힘을 모르는 동안(하트비트 30초 주기 — 감지까지 최대 60초) 클라이언트가 새 소켓으로 `resumeClientId`를 보내면 재개되지 않고 새 clientId가 된다. 클라이언트는 엔진을 재시작한다(오디오 끊김). 고치려면 "같은 userId의 살아 있는 옛 연결"도 재개 대상으로 삼아야 한다 — `resume` 모듈의 정책 변경. **고침(P1-16)**: 2.6절 재개 대상 판정 ②.
 2. 만료된 `recentlyLeft`·`approvals` 항목의 정기 정리 없음(1.3절). `capacity.sweep`·`performers.sweep`을 하트비트에서 부르면 된다.
 3. 방장 이양 기능이 생기면 그 경로에서 `metronome.dropIfHostChanged`를 바로 부른다(P2-3b, 이미 백로그).
 4. 운영 문서에 "시그널링 1대 고정"과 "배포는 합주 중인 방이 없을 때"를 적는다(2.4절).

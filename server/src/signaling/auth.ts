@@ -92,10 +92,11 @@ export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
   client.auth.state = 'verifying'
   if (isNonEmptyString(token, 8192) && deps.hasBackend) {
     const uid = await deps.verifyToken(token)
-    // 세션 재개: 이전 clientId의 주인이 같은 userId이고 유예시간 안(suspended에 남아 있음)일 때만
+    // 세션 재개: 이전 clientId의 주인이 같은 userId(JWT)이고, 유예시간 안(suspended에 남아 있음)이거나
+    // 서버가 아직 닫힘을 모르는 살아 있는 연결일 때(P1-16 — 옛 소켓은 attachSession이 끊는다)
     const resumeId = msg.resumeClientId
     if (uid && isNonEmptyString(resumeId, 64)) {
-      const old = resume.find(resumeId, uid)
+      const old = resume.find(resumeId, uid) ?? resume.findLive(resumeId, uid, ctx.ws)
       if (old) {
         resumeSession(ctx, old, token)
         return
