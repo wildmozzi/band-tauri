@@ -510,6 +510,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 - 연결 직후 첫 메시지는 `{ type: 'auth', accessToken }`(Supabase JWT). 서버가 `supabaseAdmin.auth.getUser`로 검증하고 `userId`를 서버에서 결정. 비로그인은 관람 전용 익명 클라이언트로만 허용(연주 요청 불가).
 - `isHost`는 서버가 DB `rooms` 테이블의 호스트 컬럼과 `userId`로 판정. 클라이언트가 보낸 `isHost`/`userId`는 무시.
+- **수신 없음 감지**(P1-15): 클라이언트가 `{ type: 'ping' }`을 보내면 서버는 신원과 무관하게 `{ type: 'pong' }`으로 답한다(브라우저는 프로토콜 ping을 볼 수 없어 앱 수준 메시지를 쓴다). 클라이언트는 ready 직후 ping 한 번으로 지원 여부를 확인하고, 15초 동안 아무 메시지도 못 받으면 ping, 그 뒤 5초 안에 아무것도 오지 않으면 그 소켓을 버리고(핸들러를 떼고 `close(4000)`) 브라우저의 `onclose`를 기다리지 않고 바로 재연결 판단을 한다(반쯤 열린 연결에서는 닫기 핸드셰이크 타임아웃 약 60초 뒤에야 `onclose`가 와 서버 유예 30초를 넘기므로). pong을 한 번도 받지 못한 서버(구 서버)에는 닫지 않는다.
+- **재연결 예산**(P1-15, `client/src/features/room/state/reconnectPolicy.ts`): 방 안에서 비정상으로 닫히면(1000/1005 외, 4000 포함) 첫 닫힘부터 **35초**(서버 세션 유예 `resumeGraceMs` 30초 + 여유) 동안 0.5 → 1 → 2 → 4 → 4 …초(±20% 지터) 간격으로 다시 연결하고, 로그인 상태면 `auth.resumeClientId`로 세션 재개를 요청한다. 예산은 ready(`auth-result` 또는 구 서버 fallback)에서만 리셋하고 `onopen`만으로는 리셋하지 않는다. 한 시도가 8초 안에 열리지 않으면 닫고 다음 시도로 간다. 단절 동안 엔진(UDP 메시)은 유지하며, 예산을 넘기면 `signalStatus='gave-up'`으로 "연결이 끊겼습니다 — 다시 입장"을 안내하고 그때 엔진을 멈춘다.
 - 신규 메시지(같은 방 연주자에게만 중계):
   - `native-descriptor` `{ to?: string, descriptor: LocalDescriptor }` — `to` 없으면 같은 방 다른 연주자 전원. 서버는 송신자가 그 방의 연주자일 때만 중계.
     - **공개키 바인딩(P1-1c)**: 서버는 `descriptor.key`를 보낸 연결(clientId)과 JWT `userId`에 묶는다(방 단위). 거부하면 중계하지 않고 보낸 사람에게 `error`:

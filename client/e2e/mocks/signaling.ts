@@ -49,7 +49,7 @@ export type SignalMessage = Record<string, unknown> & { type: string }
 export const RATE_LIMIT_RETRY_MS = DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs
 
 /** 이 mock이 처리하는 클라이언트 → 서버 메시지 */
-const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat'])
+const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping'])
 
 /** 브라우저 연결의 가짜 IP (서버는 익명 사용자를 IP 단위로 센다) */
 const FAKE_IP = '203.0.113.10'
@@ -140,6 +140,10 @@ export class FakeSignaling {
         this.send(conn, { type: 'auth-result', authenticated: user !== null, userId: conn.userId })
         return
       }
+      // 수신 없음 감지용 앱 수준 ping (P1-15, 서버 wsService와 같은 응답)
+      case 'ping':
+        this.send(conn, { type: 'pong' })
+        return
       case 'join':
         return this.join(conn, msg)
       case 'leave':
