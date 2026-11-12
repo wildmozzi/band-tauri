@@ -8,7 +8,7 @@
  * 3) 그 밖의 실패(400·404·409·410 등)는 확정 실패
  */
 
-export type PaidPlan = 'standard' | 'pro'
+import type { PaidPlan } from './planFeatures'
 
 /** 서버 주문 상태 (server/src/services/paymentOrderService.ts의 OrderStatus와 같다) */
 export type OrderStatus = 'created' | 'processing' | 'paid' | 'failed' | 'cancelled' | 'expired'

@@ -1,15 +1,4 @@
-export type RoomStatus = 'open' | 'recording' | 'locked'
-
-// 합주실 타입 (간소화됨 - DB 스키마와 일치)
-export type Room = {
-  id: string
-  title: string
-  genre: string
-  vibe: string
-  capacity: number
-  musicians: number
-  status: RoomStatus
-}
+import type { Room } from './roomModel'
 
 export type RoomFilter = {
   id: string
