@@ -5,7 +5,7 @@ import type { NativeSession } from './nativeSession'
 import type { Password } from './password'
 import type { Performers } from './performers'
 import {
-  APPROVAL_GRACE_MS, MAX_ROOM_ID_LENGTH, PARTICIPANT_UPDATE_DEBOUNCE_MS, REJOIN_WINDOW_MS,
+  MAX_ROOM_ID_LENGTH, PARTICIPANT_UPDATE_DEBOUNCE_MS,
   isNonEmptyString, sanitizeNickname, type Msg,
 } from './protocol'
 import { send, type Registry } from './registry'
@@ -18,9 +18,9 @@ import type { Client, LeaveReason, WsDeps, WsLimits } from './types'
  *
  * S3: handleJoin·handleLeave·sendRoomState·scheduleParticipantUpdate를 wsService 클로저에서 **본문 순서 그대로** 옮겼다.
  * 바뀐 것은 캡처하던 값을 ctx·svc에서 꺼내는 머리 부분과, 같은 모듈 함수 호출에 svc/ctx 인자를 붙인 것뿐이다.
- * handleJoin의 마지막 await(비밀번호 검증) 뒤 ~ addToRoom 구간은 동기다(1.2-2: 동시 입장이 정원을 넘지 못함).
- * 이 구간에 await를 넣지 않는다 — room-capacity.test.ts "concurrent joins never exceed the capacity".
- * 단계 함수 분해와 leave() 호출 순서 정리는 S4.
+ * S4-2: handleLeave는 설계 2.2절의 이름 붙인 단계(소유 모듈의 onLeave·onRoomEmpty 호출)로, handleJoin은 단계 함수
+ * (방 확인 → 비밀번호 → 정원 → 이동 → 중복 정리 → 추가·알림)로 나눴다. 실행 순서는 그대로다.
+ * handleJoin의 마지막 await(비밀번호 검증) 뒤 ~ rooms 추가 구간은 동기 함수 admitToRoom 하나다(1.2-2: 동시 입장이 정원을 넘지 못함).
  */
 
 /** membership이 쓰는 공용 서비스 조각 (전체 모양은 dispatch.ts SignalingServices) */
@@ -59,74 +59,40 @@ export function scheduleParticipantUpdate(svc: MembershipSvc, roomId: string) {
   participantTimers.set(roomId, t)
 }
 
-/** 퇴장 처리. 실행 순서가 클라이언트가 받는 메시지 순서다(1.2-1) */
+/**
+ * 퇴장 처리 — 설계 2.2절의 고정된 호출 순서. **실행 순서가 클라이언트가 받는 메시지 순서다**(1.2-1).
+ * 이벤트 버스가 아니라 명시적 호출이다. 단계를 더하거나 순서를 바꾸면 ws-transcript 기준 파일이 깨진다.
+ *   1. 방 멤버에서 제거 + 참가자 수 DB 디바운스
+ *   2. 승인 기록 (performers) — 정리 뒤에도 승인이 남았는지를 3에 넘긴다(capacity가 performers를 부르지 않게)
+ *   3. 자리 예약·재입장 기록 (capacity)
+ *   4. 대기 중 요청 취소 → 방장에게 perform-request-cancelled, instrument-change-request-cancelled (requests)
+ *   5. 남은 사람에게 participant-left (registry)
+ *   6. 나간 사람이 켠 메트로놈 삭제 (metronome)
+ *   7. 방이 비면 방·요청·메트로놈·방 정보 캐시 삭제
+ */
 export function handleLeave(svc: MembershipSvc, client: Client, roomId: string, reason: LeaveReason) {
-  const { rooms, clients, removeFromRoom, findRoomHost } = svc.registry
-  const { approvals, setApproval, clearApproval } = svc.performers
-  const { seatHolds, recentlyLeft, clearSeatHold } = svc.capacity
-  const { performRequests, instrumentChangeRequests } = svc.requests
-  const { metronomes } = svc.metronome
-  const roomMeta = svc.roomMeta
-
+  const { registry, performers, capacity, requests, metronome, roomMeta } = svc
   const id = client.id
-  const set = rooms.get(roomId)
-  if (!set) return
+  if (!registry.rooms.has(roomId)) return
 
-  removeFromRoom(roomId, id)
-  console.log(`[LEAVE] Client ${id.slice(0, 8)} left room (${reason}). Room size: ${set.size}`)
+  // 1
+  registry.removeFromRoom(roomId, id)
+  console.log(`[LEAVE] Client ${id.slice(0, 8)} left room (${reason}). Room size: ${registry.roomSize(roomId)}`)
   scheduleParticipantUpdate(svc, roomId)
-
-  // 승인 기록: 명시적 퇴장/방 이동은 즉시 삭제, 연결 끊김은 재접속 유예 후 만료, 중복 연결 정리는 유지
-  if (client.userId) {
-    if (reason === 'leave' || reason === 'move') {
-      clearApproval(roomId, client.userId)
-      clearSeatHold(roomId, client.userId)
-    } else if (reason === 'close' && approvals.get(roomId)?.has(client.userId)) {
-      setApproval(roomId, client.userId, Date.now() + APPROVAL_GRACE_MS)
-    }
-    // 연주 중이었거나 승인을 가진 사용자가 끊기면 승인 유예와 같은 시간 동안 자리를 예약한다 (PR #23 M2)
-    if (reason === 'close' && (client.isPerforming || approvals.get(roomId)?.has(client.userId))) {
-      if (!seatHolds.has(roomId)) seatHolds.set(roomId, new Map())
-      seatHolds.get(roomId)!.set(client.userId, Date.now() + APPROVAL_GRACE_MS)
-    }
-    if (reason === 'close') {
-      if (!recentlyLeft.has(roomId)) recentlyLeft.set(roomId, new Map())
-      recentlyLeft.get(roomId)!.set(client.userId, Date.now() + REJOIN_WINDOW_MS)
-    }
-  }
-
-  const host = findRoomHost(roomId)
-
-  const requests = performRequests.get(roomId)
-  if (requests) {
-    const idx = requests.findIndex(r => r.oderId === id)
-    if (idx !== -1) {
-      requests.splice(idx, 1)
-      if (host) send(host.ws, { type: 'perform-request-cancelled', oderId: id })
-    }
-  }
-
-  const changeRequests = instrumentChangeRequests.get(roomId)
-  if (changeRequests) {
-    const idx = changeRequests.findIndex(r => r.oderId === id)
-    if (idx !== -1) {
-      changeRequests.splice(idx, 1)
-      if (host) send(host.ws, { type: 'instrument-change-request-cancelled', oderId: id })
-    }
-  }
-
-  for (const oderId of set) {
-    const peer = clients.get(oderId)
-    if (peer) send(peer.ws, { type: 'participant-left', oderId: id })
-  }
-  // 방장이 나가면 메트로놈 시각 기준(방장 엔진 시계)이 사라진다. 따르는 쪽은 participant-left로 스스로 멈춘다
-  if (metronomes.get(roomId)?.hostId === id) metronomes.delete(roomId)
-
-  if (set.size === 0) {
-    rooms.delete(roomId)
-    performRequests.delete(roomId)
-    metronomes.delete(roomId)
-    instrumentChangeRequests.delete(roomId)
+  // 2·3
+  const approved = performers.onLeave(client, roomId, reason)
+  capacity.onLeave(client, roomId, reason, approved)
+  // 4
+  requests.onLeave(roomId, id, registry.findRoomHost(roomId))
+  // 5
+  registry.broadcastLeft(roomId, id)
+  // 6
+  metronome.onMemberLeft(roomId, id)
+  // 7
+  if (registry.roomSize(roomId) === 0) {
+    registry.deleteRoom(roomId)
+    requests.onRoomEmpty(roomId)
+    metronome.onRoomEmpty(roomId)
     roomMeta.forget(roomId)
   }
 }
@@ -150,17 +116,63 @@ export function sendRoomState(ctx: Ctx<MembershipSvc>, roomId: string) {
   }
 }
 
-/** `join` — S3: 연결 클로저의 handleJoin 본문을 순서 그대로 옮겼다 */
+/** join 1단계(방 확인)의 결과: 이 방에 들어올 조건 */
+export interface JoinPlan {
+  /** DB 기준 방장 (개발 모드는 클라이언트 값) */
+  isHost: boolean
+  /** 비밀번호 해시 (없으면 비밀번호 없는 방) */
+  passwordHash: string | null
+  /** 정원: 서버 상한과 rooms.max_participants 중 작은 값 */
+  capacity: number
+}
+
+/**
+ * join 1단계 — 방 확인 (백엔드 있음): 캐시 없이 DB를 새로 읽어 방 존재·방장·비밀번호·정원을 정한다.
+ * 방금 읽은 DB 방장이 메트로놈을 켠 사람과 다르면(이양) 여기서 메트로놈을 멈춘다(join이 이양 감지 시점, 1.2-2).
+ * 거부하면 에러를 보내고 null.
+ */
+async function checkRoom(ctx: Ctx<MembershipSvc>, roomId: string): Promise<JoinPlan | null> {
+  const { ws, client } = ctx
+  const { getRoomMetaOrNull } = ctx.svc.roomMeta
+  const { dropMetronomeIfHostChanged } = ctx.svc.metronome
+  const { limits } = ctx.svc
+
+  let capacity = limits.maxRoomParticipants
+  const meta = await getRoomMetaOrNull(roomId, 0)
+  if (!meta) {
+    send(ws, { type: 'error', code: 'room-not-found', message: '방을 찾을 수 없습니다.' })
+    return null
+  }
+  const isHost = !!client.userId && meta.hostId === client.userId
+  // 방금 읽은 DB 방장이 메트로놈을 켠 사람과 다르면(이양) 진행 중인 메트로놈을 멈춘다(PR #36 L1)
+  dropMetronomeIfHostChanged(roomId, meta.hostId ?? null)
+  const passwordHash = meta.passwordHash ?? null
+  if (meta.maxParticipants !== undefined) capacity = Math.min(capacity, meta.maxParticipants)
+  // 비밀번호 방으로 표시됐는데 해시가 아직 없음(생성·변경 중): 방장 외 입장 보류 (fail-closed, 리뷰 L1)
+  if (meta.hasPassword && !passwordHash && !isHost) {
+    send(ws, { type: 'error', code: 'password-busy', roomId, retryAfterMs: 1000, message: '합주실을 준비 중입니다. 잠시 후 다시 시도하세요.' })
+    return null
+  }
+  return { isHost, passwordHash, capacity }
+}
+
+/** join 1단계 — 방 확인 (백엔드 없음): DB가 없어 방장은 개발 모드에서만 클라이언트 값. 동기(await 없음 — 원래도 없었다) */
+function localRoomPlan(ctx: Ctx<MembershipSvc>, msg: Msg): JoinPlan {
+  const { client } = ctx
+  const { limits, insecureDevMode } = ctx.svc
+  const isHost = insecureDevMode && client.authState === 'authenticated' ? msg.isHost === true : false
+  return { isHost, passwordHash: null, capacity: limits.maxRoomParticipants }
+}
+
+/**
+ * `join` — 단계: 방 확인 → 비밀번호 → (여기서부터 동기) 정원 → 이동 → 중복 정리 → 추가·알림.
+ * await는 방 확인(DB)과 비밀번호(scrypt) 두 곳뿐이고, 각 await 뒤에 연결이 그대로인지 다시 확인한다(1.2-9).
+ */
 export async function handleJoin(ctx: Ctx<MembershipSvc>, msg: Msg) {
   const { ws, client, id, svc } = ctx
-  const { rooms, clients, removeClient, addToRoom, getRoomParticipants, broadcastToRoom } = svc.registry
-  const { getRoomMetaOrNull } = svc.roomMeta
-  const { checkCapacity, hasSeatHold, clearSeatHold, consumeRejoin } = svc.capacity
+  const { rooms, clients } = svc.registry
   const { checkRoomPassword } = svc.password
-  const { approvals, hasApproval, setApproval } = svc.performers
-  const { dropMetronomeIfHostChanged } = svc.metronome
-  const { clearNative } = svc.nativeSession
-  const { deps, limits, insecureDevMode, resume } = svc
+  const { deps, insecureDevMode } = svc
 
   const roomId = msg.roomId
   if (!isNonEmptyString(roomId, MAX_ROOM_ID_LENGTH)) return
@@ -170,93 +182,126 @@ export async function handleJoin(ctx: Ctx<MembershipSvc>, msg: Msg) {
     client.userId = msg.userId
   }
 
-  // 방 존재 확인 + 방장 판정 (백엔드가 있으면 DB 기준)
-  let isHost = false
-  let passwordHash: string | null = null
-  let capacity = limits.maxRoomParticipants
-  if (deps.hasBackend) {
-    const meta = await getRoomMetaOrNull(roomId, 0)
-    if (!meta) {
-      send(ws, { type: 'error', code: 'room-not-found', message: '방을 찾을 수 없습니다.' })
-      return
-    }
-    isHost = !!client.userId && meta.hostId === client.userId
-    // 방금 읽은 DB 방장이 메트로놈을 켠 사람과 다르면(이양) 진행 중인 메트로놈을 멈춘다(PR #36 L1)
-    dropMetronomeIfHostChanged(roomId, meta.hostId ?? null)
-    passwordHash = meta.passwordHash ?? null
-    if (meta.maxParticipants !== undefined) capacity = Math.min(capacity, meta.maxParticipants)
-    // 비밀번호 방으로 표시됐는데 해시가 아직 없음(생성·변경 중): 방장 외 입장 보류 (fail-closed, 리뷰 L1)
-    if (meta.hasPassword && !passwordHash && !isHost) {
-      send(ws, { type: 'error', code: 'password-busy', roomId, retryAfterMs: 1000, message: '합주실을 준비 중입니다. 잠시 후 다시 시도하세요.' })
-      return
-    }
-  } else if (insecureDevMode && client.authState === 'authenticated') {
-    isHost = msg.isHost === true
-  }
+  // 1. 방 확인 + 방장 판정 (백엔드가 있으면 DB 기준). 백엔드가 없으면 await하지 않는다(원래와 같음)
+  const plan = deps.hasBackend ? await checkRoom(ctx, roomId) : localRoomPlan(ctx, msg)
+  if (!plan) return
   // DB 조회 중 연결이 끊겼으면 중단
   if (clients.get(id) !== client) return
 
   // 이미 이 방에 있음 (세션 재개 후 클라이언트의 rejoin 등): 상태만 다시 보내고 브로드캐스트 없음
   if (client.roomId === roomId && rooms.get(roomId)?.has(id)) {
-    client.isHost = isHost
+    client.isHost = plan.isHost
     const nickname = sanitizeNickname(msg.nickname)
     if (nickname) client.nickname = nickname
     sendRoomState(ctx, roomId)
     return
   }
 
-  // 비밀번호 방: 방장이 아니면 검증 (실패하면 지금 있는 방은 그대로 둔다)
-  if (passwordHash && !isHost) {
-    const ok = await checkRoomPassword(ws, client, roomId, passwordHash, msg.password)
+  // 2. 비밀번호 방: 방장이 아니면 검증 (실패하면 지금 있는 방은 그대로 둔다)
+  if (plan.passwordHash && !plan.isHost) {
+    const ok = await checkRoomPassword(ws, client, roomId, plan.passwordHash, msg.password)
     if (!ok || clients.get(id) !== client) return
   }
 
-  // 정원(관람 포함, P3-12b): 방장은 항상 입장. 마지막 await 뒤부터 방에 추가할 때까지 동기 구간이라 동시 입장 경합이 없다.
-  // 유예 중인 세션은 rooms에 남아 자리를 유지하고, 같은 사용자의 기존 연결(아래에서 대체됨)은 새 자리로 세지 않는다.
-  // 승인 보유자·자리 예약(유예 밖으로 끊긴 연주자, M2)은 정원 검사를 건너뛴다. 로그인 사용자가 익명보다 우선이다(H1).
-  // 실패해도 지금 있는 방은 그대로 둔다.
+  // ── 마지막 await. 여기부터 방에 추가할 때까지 동기 구간(1.2-2) — admitToRoom 하나로 묶었다 ──
+  admitToRoom(ctx, msg, roomId, plan)
+}
+
+/**
+ * join 동기 구간: 정원 → 이동 → 중복 정리 → 추가·알림.
+ *
+ * **이 함수와 여기서 부르는 단계 함수에 await를 넣지 않는다.** 정원 검사부터 rooms 추가까지 사이에 다른 연결의 메시지가
+ * 끼어들 수 없어야 동시 입장이 정원을 넘지 못한다(1.2-2, room-capacity.test.ts "concurrent joins never exceed the capacity").
+ * 반환 타입을 `void`로 적어 고정한다: async로 바꾸면 tsc가 막고(async 함수의 반환 타입은 Promise여야 함),
+ * async가 아닌 함수 안의 await는 문법 오류다. signaling-units.test.ts가 실제로 불러 Promise가 아님을 확인한다.
+ */
+export function admitToRoom(ctx: Ctx<MembershipSvc>, msg: Msg, roomId: string, plan: JoinPlan): void {
+  const { client } = ctx
+
+  // 3. 정원
+  if (!passCapacity(ctx, roomId, plan)) return
+
+  // 4. 이동: 다른 방에 있었다면 먼저 퇴장 처리
+  moveOutOfPreviousRoom(ctx, roomId)
+  client.isHost = plan.isHost
+
+  const nickname = sanitizeNickname(msg.nickname)
+  if (nickname) client.nickname = nickname
+
+  // 5. 중복 정리
+  const replacedDuplicate = replaceDuplicateConnections(ctx, roomId)
+
+  // 6. 추가·알림
+  addAndAnnounce(ctx, msg, roomId, replacedDuplicate)
+}
+
+/**
+ * 3단계 정원(관람 포함, P3-12b): 방장은 항상 입장. 유예 중인 세션은 rooms에 남아 자리를 유지하고,
+ * 같은 사용자의 기존 연결(5단계에서 대체됨)은 새 자리로 세지 않는다. 승인 보유자·자리 예약(유예 밖으로 끊긴 연주자, M2)은
+ * 정원 검사를 건너뛴다. 로그인 사용자가 익명보다 우선이다(H1). 거부하면 에러를 보내고 false — 지금 있는 방은 그대로 둔다.
+ */
+function passCapacity(ctx: Ctx<MembershipSvc>, roomId: string, plan: JoinPlan): boolean {
+  const { ws, client, id } = ctx
+  const { checkCapacity, hasSeatHold, clearSeatHold } = ctx.svc.capacity
+  const { hasApproval } = ctx.svc.performers
+  const { capacity } = plan
+
   const reserved = hasApproval(roomId, client.userId) || hasSeatHold(roomId, client.userId)
-  const rejected = isHost || reserved ? null : checkCapacity(roomId, client, capacity)
+  const rejected = plan.isHost || reserved ? null : checkCapacity(roomId, client, capacity)
   if (rejected) {
     console.warn(`[JOIN] ${id.slice(0, 8)} rejected: room ${roomId.slice(0, 8)} ${rejected} (${capacity})`)
     const message = rejected === 'room-full'
       ? `합주실 정원(${capacity}명)이 가득 찼습니다.`
       : '로그인하지 않은 관람자 자리가 가득 찼습니다. 로그인하면 입장할 수 있습니다.'
     send(ws, { type: 'error', code: 'room-full', reason: rejected, roomId, maxParticipants: capacity, message })
-    return
+    return false
   }
   clearSeatHold(roomId, client.userId)
+  return true
+}
 
-  // 다른 방에 있었다면 먼저 퇴장 처리
-  if (client.roomId && client.roomId !== roomId) {
-    handleLeave(svc, client, client.roomId, 'move')
-    client.roomId = undefined
-    client.isPerforming = false
-    client.instrument = undefined
-    clearNative(client)
-  }
-  client.isHost = isHost
+/** 4단계 이동: 다른 방에 있었다면 'move'로 퇴장 처리하고 그 방의 연주·엔진 상태를 지운다 */
+function moveOutOfPreviousRoom(ctx: Ctx<MembershipSvc>, roomId: string): void {
+  const { client, svc } = ctx
+  if (!client.roomId || client.roomId === roomId) return
+  handleLeave(svc, client, client.roomId, 'move')
+  client.roomId = undefined
+  client.isPerforming = false
+  client.instrument = undefined
+  svc.nativeSession.clearNative(client)
+}
 
-  const nickname = sanitizeNickname(msg.nickname)
-  if (nickname) client.nickname = nickname
-
-  // 같은 userId 중복 연결 제거 (서버 확정 userId 기준) — 상태 정리까지 수행 (L3)
+/**
+ * 5단계 중복 정리: 같은 userId(서버 확정 값)의 이 방 기존 연결을 'duplicate'로 내보내고 상태까지 정리한다(L3).
+ * 유예 중이던 연결이면 유예도 푼다(svc.resume.drop). 하나라도 대체했으면 true(서버 판정 rejoin 근거).
+ */
+function replaceDuplicateConnections(ctx: Ctx<MembershipSvc>, roomId: string): boolean {
+  const { client, id, svc } = ctx
+  const { rooms, clients, removeClient } = svc.registry
   let replacedDuplicate = false
-  if (client.userId) {
-    for (const existingId of [...(rooms.get(roomId) || [])]) {
-      if (existingId === id) continue
-      const existing = clients.get(existingId)
-      if (existing && existing.userId === client.userId) {
-        console.log(`[JOIN] Removing duplicate connection for userId ${client.userId.slice(0, 8)}: ${existingId.slice(0, 8)}`)
-        handleLeave(svc, existing, roomId, 'duplicate')
-        existing.roomId = undefined // close 핸들러에서 중복 퇴장 처리 방지
-        resume.drop(existing)
-        removeClient(existingId)
-        existing.ws.close(1000, 'Duplicate connection')
-        replacedDuplicate = true
-      }
+  if (!client.userId) return replacedDuplicate
+  for (const existingId of [...(rooms.get(roomId) || [])]) {
+    if (existingId === id) continue
+    const existing = clients.get(existingId)
+    if (existing && existing.userId === client.userId) {
+      console.log(`[JOIN] Removing duplicate connection for userId ${client.userId.slice(0, 8)}: ${existingId.slice(0, 8)}`)
+      handleLeave(svc, existing, roomId, 'duplicate')
+      existing.roomId = undefined // close 핸들러에서 중복 퇴장 처리 방지
+      svc.resume.drop(existing)
+      removeClient(existingId)
+      existing.ws.close(1000, 'Duplicate connection')
+      replacedDuplicate = true
     }
   }
+  return replacedDuplicate
+}
+
+/** 6단계 추가·알림: rejoin 판정·승인 유예 해제 → rooms 추가 → 참가자 수 갱신 → participant-joined → room-state */
+function addAndAnnounce(ctx: Ctx<MembershipSvc>, msg: Msg, roomId: string, replacedDuplicate: boolean): void {
+  const { client, id, svc } = ctx
+  const { rooms, addToRoom, getRoomParticipants, broadcastToRoom } = svc.registry
+  const { consumeRejoin } = svc.capacity
+  const { approvals, hasApproval, setApproval } = svc.performers
 
   // rejoin 여부는 서버가 판단: 같은 사용자가 직전에 이 방에서 끊겼거나 중복 연결을 대체한 경우만
   const isRejoin = msg.isRejoin === true && (consumeRejoin(roomId, client.userId) || replacedDuplicate)

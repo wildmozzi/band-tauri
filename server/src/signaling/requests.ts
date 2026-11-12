@@ -2,6 +2,7 @@ import type { Ctx } from './ctx'
 import type { Performers } from './performers'
 import { isNonEmptyString, type InstrumentChangeRequest, type Msg, type PerformRequest } from './protocol'
 import { isAuthenticated, send, type Registry } from './registry'
+import type { Client } from './types'
 import type { RoomMetaStore } from './roomMeta'
 
 /**
@@ -11,7 +12,38 @@ import type { RoomMetaStore } from './roomMeta'
 export function createRequests() {
   const performRequests = new Map<string, PerformRequest[]>()
   const instrumentChangeRequests = new Map<string, InstrumentChangeRequest[]>()
-  return { performRequests, instrumentChangeRequests }
+
+  /**
+   * 퇴장 정리 단계 (membership.leave, 설계 2.2절): 나간 사람의 대기 중 요청을 지우고 방장에게 알린다.
+   * 순서: perform-request-cancelled → instrument-change-request-cancelled. host는 퇴장 처리한 뒤의 방장(없으면 null).
+   */
+  function onLeave(roomId: string, clientId: string, host: Client | null) {
+    const requests = performRequests.get(roomId)
+    if (requests) {
+      const idx = requests.findIndex(r => r.oderId === clientId)
+      if (idx !== -1) {
+        requests.splice(idx, 1)
+        if (host) send(host.ws, { type: 'perform-request-cancelled', oderId: clientId })
+      }
+    }
+
+    const changeRequests = instrumentChangeRequests.get(roomId)
+    if (changeRequests) {
+      const idx = changeRequests.findIndex(r => r.oderId === clientId)
+      if (idx !== -1) {
+        changeRequests.splice(idx, 1)
+        if (host) send(host.ws, { type: 'instrument-change-request-cancelled', oderId: clientId })
+      }
+    }
+  }
+
+  /** 방이 비었을 때: 그 방의 요청 목록을 지운다 */
+  function onRoomEmpty(roomId: string) {
+    performRequests.delete(roomId)
+    instrumentChangeRequests.delete(roomId)
+  }
+
+  return { performRequests, instrumentChangeRequests, onLeave, onRoomEmpty }
 }
 
 export type Requests = ReturnType<typeof createRequests>

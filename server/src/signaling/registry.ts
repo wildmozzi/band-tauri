@@ -41,6 +41,24 @@ export function createRegistry() {
     rooms.get(roomId)?.delete(clientId)
   }
 
+  /** 방 멤버 수 (방이 없으면 0) */
+  function roomSize(roomId: string): number {
+    return rooms.get(roomId)?.size ?? 0
+  }
+
+  /** 빈 방 정리 (퇴장 처리 끝, 2.2절) */
+  function deleteRoom(roomId: string) {
+    rooms.delete(roomId)
+  }
+
+  /** 남은 방 멤버 전원에게 participant-left (퇴장 정리 단계, 2.2절) */
+  function broadcastLeft(roomId: string, clientId: string) {
+    for (const oderId of rooms.get(roomId) || []) {
+      const peer = clients.get(oderId)
+      if (peer) send(peer.ws, { type: 'participant-left', oderId: clientId })
+    }
+  }
+
   function getRoomParticipants(roomId: string): Participant[] {
     const room = rooms.get(roomId)
     if (!room) return []
@@ -78,7 +96,7 @@ export function createRegistry() {
     return target
   }
 
-  return { rooms, clients, addClient, removeClient, addToRoom, removeFromRoom, getRoomParticipants, broadcastToRoom, findRoomHost, getRoomPeer }
+  return { rooms, clients, addClient, removeClient, addToRoom, removeFromRoom, roomSize, deleteRoom, broadcastLeft, getRoomParticipants, broadcastToRoom, findRoomHost, getRoomPeer }
 }
 
 export type Registry = ReturnType<typeof createRegistry>

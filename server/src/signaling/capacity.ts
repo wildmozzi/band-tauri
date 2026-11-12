@@ -1,6 +1,7 @@
 import { ipBucket } from '../lib/roomPassword'
+import { APPROVAL_GRACE_MS, REJOIN_WINDOW_MS } from './protocol'
 import type { Registry } from './registry'
-import type { Client, WsLimits } from './types'
+import type { Client, LeaveReason, WsLimits } from './types'
 
 /**
  * 정원·자리 예약·재입장 기록 (설계 docs/server-architecture.md 2.1절 E, 계층 2).
@@ -77,6 +78,24 @@ export function createCapacity(registry: Registry, limits: WsLimits) {
     return exp > Date.now()
   }
 
+  /**
+   * 퇴장 정리 단계 (membership.leave, 설계 2.2절). approved = performers.onLeave가 돌려준 "승인 기록이 남았나".
+   * - 명시적 퇴장/방 이동: 자리 예약 삭제
+   * - 연결 끊김: 연주 중이었거나 승인을 가진 사용자는 승인 유예와 같은 시간 동안 자리 예약 (PR #23 M2), 재입장 기록
+   */
+  function onLeave(client: Client, roomId: string, reason: LeaveReason, approved: boolean) {
+    if (!client.userId) return
+    if (reason === 'leave' || reason === 'move') clearSeatHold(roomId, client.userId)
+    if (reason === 'close' && (client.isPerforming || approved)) {
+      if (!seatHolds.has(roomId)) seatHolds.set(roomId, new Map())
+      seatHolds.get(roomId)!.set(client.userId, Date.now() + APPROVAL_GRACE_MS)
+    }
+    if (reason === 'close') {
+      if (!recentlyLeft.has(roomId)) recentlyLeft.set(roomId, new Map())
+      recentlyLeft.get(roomId)!.set(client.userId, Date.now() + REJOIN_WINDOW_MS)
+    }
+  }
+
   /** 만료된 자리 예약 정리 (하트비트, L4) */
   function sweep(now: number) {
     for (const [roomId, holds] of seatHolds) {
@@ -85,7 +104,7 @@ export function createCapacity(registry: Registry, limits: WsLimits) {
     }
   }
 
-  return { seatHolds, recentlyLeft, countRoomSeats, checkCapacity, hasSeatHold, clearSeatHold, consumeRejoin, sweep }
+  return { seatHolds, recentlyLeft, countRoomSeats, checkCapacity, hasSeatHold, clearSeatHold, consumeRejoin, onLeave, sweep }
 }
 
 export type Capacity = ReturnType<typeof createCapacity>
