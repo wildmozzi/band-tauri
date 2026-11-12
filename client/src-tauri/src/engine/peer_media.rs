@@ -1,11 +1,11 @@
 //! 피어 미디어 상태(엔진 ③, `docs/overhaul/engine-stage3-design.md` 1.2절).
 //!
-//! 제어 평면(엔진 등록부)·워커·net이 `Arc<PeerMediaShared>`를 나눈다.
+//! - `PeerMedia`(지터 버퍼 + 수신 큐 소비자): 워커가 `Box`로 넘겨받아 혼자 가진다. 락이 없다(③-a3).
+//!   net 수신 스레드는 피어별 수신 큐(`net::media_link`)에 넣기만 하고, 워커가 피어마다 `service` 직전에 비워 삽입한다.
+//! - `PeerMediaShared`(믹스 제어·통계 스냅샷·재시작 요청, 전부 원자값): 제어 평면(엔진 등록부)과 워커가 `Arc`로 나눈다.
 //! - 통계와 손실 보고는 워커가 발행한 스냅샷(seqlock·원자값)으로만 읽는다(③-a1).
 //! - 명령(③-a2): 프로필은 `MediaSettings.profile` 원자값, 재시작은 세대 카운터, 추가·제거는 SPSC 명령 큐
-//!   (`MediaPort` → 워커의 `MediaPortRt`, 용량 16)로 워커 쪽 항목 `PeerMedia`를 넘긴다. 응답은 없고, 제거된 항목은
-//!   반환 큐로 제어 평면에 돌아와 거기서 해제된다.
-//! - 지터 버퍼는 아직 `Mutex` 안에 있다(net 수신 스레드가 삽입, 워커가 소비). ③-a3에서 `PeerMedia`로 들어가 락이 없어진다.
+//!   (`MediaPort` → 워커의 `MediaPortRt`, 용량 16). 응답은 없고, 제거된 항목은 반환 큐로 제어 평면에 돌아와 해제된다.
 
 use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -17,8 +17,7 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 use super::jitter::{JitterBuffer, JitterSettings, JitterStats};
 use super::mixer::PeerMixCtl;
 use super::stats::AtomicF32;
-use crate::net::media_link::{LossCell, PeerKey};
-use crate::net::packet::Header;
+use crate::net::media_link::{MediaRx, PeerKey};
 
 /// 피어 하나의 미디어 통계 한 벌(워커가 발행한 스냅샷).
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -166,7 +165,7 @@ impl MediaStatsCell {
     }
 }
 
-/// 피어 하나의 미디어 상태 중 여러 스레드가 보는 쪽.
+/// 피어 하나의 미디어 상태 중 여러 스레드가 보는 쪽. 전부 원자값이라 누구도 락을 잡지 않는다(설계 1.2절).
 pub struct PeerMediaShared {
     pub key: PeerKey,
     pub peer_id: String,
@@ -174,28 +173,15 @@ pub struct PeerMediaShared {
     pub ssrc: u32,
     /// gain·muted·pan: 커맨드가 쓴다. level: 워커가 쓴다.
     pub mix: PeerMixCtl,
-    /// 워커가 반복마다 발행하는 통계 스냅샷.
+    /// 워커가 반복마다 발행하는 통계 스냅샷(쓰는 쪽은 `PeerMedia::publish` 하나).
     stats: MediaStatsCell,
-    /// 워커가 발행하는 손실 보고(net이 Ping에 싣는다). net은 `Peer`에 이 셀의 `Arc`만 쥔다.
-    loss: Arc<LossCell>,
     /// 재시작 요청 세대: 제어가 +1, 워커가 마지막으로 본 값과 비교한다(여러 요청은 한 번으로 합쳐져도 결과가 같다).
     restart_req: AtomicU32,
-    jitter: Mutex<JitterBuffer>,
 }
 
 impl PeerMediaShared {
-    /// 지터 버퍼(슬롯 1024개 ≈ 1.19MB + 디코더)를 여기서 할당한다. 제어 평면 스레드에서 부른다.
-    pub fn new(key: PeerKey, peer_id: String, ssrc: u32, settings: JitterSettings) -> Self {
-        Self {
-            key,
-            peer_id,
-            ssrc,
-            mix: PeerMixCtl::default(),
-            stats: MediaStatsCell::default(),
-            loss: Arc::new(LossCell::default()),
-            restart_req: AtomicU32::new(0),
-            jitter: Mutex::new(JitterBuffer::new(settings)),
-        }
+    pub fn new(key: PeerKey, peer_id: String, ssrc: u32) -> Self {
+        Self { key, peer_id, ssrc, mix: PeerMixCtl::default(), stats: MediaStatsCell::default(), restart_req: AtomicU32::new(0) }
     }
 
     /// 교체(같은 peerId 재추가) 때 옛 상태의 믹스 설정(gain·muted·pan)을 이어받는다.
@@ -205,72 +191,79 @@ impl PeerMediaShared {
         self.mix.pan.store(old.mix.pan.load());
     }
 
-    /// 수신 오디오 삽입(net 수신 스레드). `arrival_us` = net epoch 기준 도착 시각.
-    pub fn insert(&self, hdr: &Header, payload: &[u8], arrival_us: u64) {
-        self.jitter.lock().insert(hdr, payload, arrival_us);
-    }
-
     /// 워커가 마지막으로 발행한 통계(락 없음, 최대 워커 반복 1회 전의 값).
     pub fn stats(&self) -> MediaStats {
         self.stats.read()
-    }
-
-    /// net이 Ping 손실 보고에 쓰는 셀.
-    pub fn loss_cell(&self) -> &Arc<LossCell> {
-        &self.loss
     }
 
     /// 지터 버퍼를 처음부터 다시 채우라고 요청한다(에코 측정 시작·끝에서 스트림이 바뀔 때). 워커가 다음 반복에 적용한다.
     pub fn request_restart(&self) {
         self.restart_req.fetch_add(1, Ordering::Release);
     }
-
-    /// 워커 반복의 뒷부분: 통계 스냅샷과 손실 보고를 발행한다(워커만 부른다, `service` 직후).
-    pub(crate) fn publish(&self, jb: &JitterBuffer) {
-        let js = jb.stats();
-        let playing = jb.is_playing();
-        self.stats.write(&MediaStats { playing, js, rx_dropped: 0 });
-        self.loss.set(playing.then_some((js.loss_pct, js.conceal_pct)));
-    }
 }
 
-/// 워커가 혼자 가지는 피어 미디어 항목(③-a2: 명령 적용 상태. ③-a3에서 지터 버퍼·수신 큐 소비자가 들어온다).
-/// 제어 평면 스레드에서 만들어 명령 큐로 넘기고, 제거되면 반환 큐로 돌아와 제어 평면에서 해제된다.
+/// 워커가 혼자 가지는 피어 미디어 상태: 지터 버퍼(락 없음)와 수신 큐 소비자(설계 1.2절).
+/// 제어 평면 스레드에서 만들어(지터 버퍼 할당) 명령 큐로 넘기고, 제거되면 반환 큐로 돌아와 제어 평면에서 해제된다.
 pub struct PeerMedia {
     pub shared: Arc<PeerMediaShared>,
+    rx: MediaRx,
+    jitter: JitterBuffer,
     restart_seen: u32,
     /// 이 지터 버퍼에 마지막으로 적용한 프로필(비트).
     profile_applied: u32,
 }
 
 impl PeerMedia {
-    /// `profile`: 지터 버퍼를 만들 때 쓴 프로필(`MediaSettings::current`).
-    pub fn new(shared: Arc<PeerMediaShared>, profile: f32) -> Self {
+    /// 지터 버퍼(슬롯 1024개 ≈ 1.19MB + 디코더)를 여기서 할당한다. 제어 평면 스레드에서 부른다.
+    pub fn new(shared: Arc<PeerMediaShared>, settings: JitterSettings, rx: MediaRx) -> Box<Self> {
         let restart_seen = shared.restart_req.load(Ordering::Acquire);
-        Self { shared, restart_seen, profile_applied: profile.to_bits() }
+        Box::new(Self { shared, rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits() })
     }
 
-    /// 워커 반복의 앞부분(그 피어의 `service` 직전): 지터 버퍼를 잡고 재시작 → 프로필 순으로 요청을 적용한다(설계 4절).
+    /// 워커 반복의 앞부분(그 피어의 `service` 바로 앞, 설계 2.4절·4절):
+    /// ① 수신 큐를 **끝까지** 비워 도착 순서·도착 시각 그대로 `insert` → ② 재시작 요청 → ③ 프로필.
+    /// 큐를 비운 뒤 재시작하는 이유: 요청 전에 도착한 옛 스트림 패킷이 새 버퍼의 지연 통계에 섞이지 않게.
     /// `profile`은 이번 반복에 읽은 `MediaSettings.profile`. 마지막 적용값과 같으면 아무것도 하지 않는다.
-    /// ③-a3에서 맨 앞에 수신 큐 비우기가 들어오고 락이 없어진다.
-    pub(crate) fn ingest(&mut self, profile: f32) -> (&PeerMediaShared, MutexGuard<'_, JitterBuffer>) {
-        let mut jb = self.shared.jitter.lock();
+    pub(crate) fn ingest(&mut self, profile: f32) -> (&PeerMediaShared, &mut JitterBuffer) {
+        let jb = &mut self.jitter;
+        self.rx.drain(|p| jb.insert(&p.hdr, p.payload(), p.arrival_us));
         let req = self.shared.restart_req.load(Ordering::Acquire);
         if req != self.restart_seen {
             self.restart_seen = req;
-            jb.restart();
+            self.jitter.restart();
         }
         if profile.to_bits() != self.profile_applied {
             self.profile_applied = profile.to_bits();
-            jb.set_profile(profile);
+            self.jitter.set_profile(profile);
         }
-        (&self.shared, jb)
+        (&self.shared, &mut self.jitter)
+    }
+
+    /// 워커 반복의 뒷부분(`service` 직후): 통계 스냅샷과 손실 보고를 발행한다. `&mut self`라 쓰는 쪽이 이 항목의
+    /// 단독 소유자(워커) 하나임이 타입으로 보장된다 — seqlock의 단일 작성자 조건(#116 L-1).
+    pub(crate) fn publish(&mut self) {
+        let js = self.jitter.stats();
+        let playing = self.jitter.is_playing();
+        self.shared.stats.write(&MediaStats { playing, js, rx_dropped: self.rx.dropped() });
+        self.rx.set_loss_report(playing.then_some((js.loss_pct, js.conceal_pct)));
+    }
+
+    /// 지터 버퍼 읽기(하네스·테스트).
+    #[cfg(test)]
+    pub(crate) fn jitter(&self) -> &JitterBuffer {
+        &self.jitter
+    }
+
+    /// 수신 큐 넘침 누적(하네스·테스트).
+    #[cfg(test)]
+    pub(crate) fn rx_dropped(&self) -> u64 {
+        self.rx.dropped()
     }
 }
 
 /// 워커 명령(소유권이 넘어가는 것만. 값은 원자값으로, 설계 4절).
 pub enum MediaCmd {
-    Add(PeerMedia),
+    Add(Box<PeerMedia>),
     Remove(PeerKey),
 }
 
@@ -280,19 +273,19 @@ pub const MEDIA_CMD_CAPACITY: usize = 16;
 /// 제어 평면 쪽 끝: 명령 생산자(커맨드 스레드가 여럿이라 Mutex, 제어 평면끼리만 다툰다)와 반환 큐 소비자.
 pub struct MediaPort {
     cmd: Mutex<HeapProd<MediaCmd>>,
-    ret: Mutex<HeapCons<PeerMedia>>,
+    ret: Mutex<HeapCons<Box<PeerMedia>>>,
 }
 
 /// 워커 쪽 끝.
 pub struct MediaPortRt {
     cmd: HeapCons<MediaCmd>,
-    ret: HeapProd<PeerMedia>,
+    ret: HeapProd<Box<PeerMedia>>,
 }
 
 /// 명령·반환 링을 여기서 사전할당한다.
 pub fn media_port() -> (MediaPort, MediaPortRt) {
     let (cp, cc) = HeapRb::<MediaCmd>::new(MEDIA_CMD_CAPACITY).split();
-    let (rp, rc) = HeapRb::<PeerMedia>::new(MEDIA_CMD_CAPACITY).split();
+    let (rp, rc) = HeapRb::<Box<PeerMedia>>::new(MEDIA_CMD_CAPACITY).split();
     (MediaPort { cmd: Mutex::new(cp), ret: Mutex::new(rc) }, MediaPortRt { cmd: cc, ret: rp })
 }
 
@@ -309,21 +302,17 @@ impl MediaPort {
     /// `MEDIA_CMD_WAIT`까지 기다린다(제어 평면 스레드라 잠깐 자도 된다). 그래도 차 있으면 워커가 멈춘 것 → 에러.
     pub fn reserve_cmd(&self, n: usize) -> Result<MutexGuard<'_, HeapProd<MediaCmd>>, String> {
         let t0 = std::time::Instant::now();
-        let cmd = self.cmd.lock();
-        if cmd.vacant_len() >= n {
-            return Ok(cmd);
-        }
-        let mut cmd = cmd;
-        while t0.elapsed() < MEDIA_CMD_WAIT {
-            MutexGuard::unlocked(&mut cmd, || std::thread::sleep(std::time::Duration::from_millis(1)));
-            if cmd.vacant_len() >= n {
-                return Ok(cmd);
+        let mut cmd = self.cmd.lock();
+        while cmd.vacant_len() < n {
+            if t0.elapsed() >= MEDIA_CMD_WAIT {
+                return Err("오디오 워커가 응답하지 않습니다(미디어 명령 큐가 가득 참)".into());
             }
+            MutexGuard::unlocked(&mut cmd, || std::thread::sleep(std::time::Duration::from_millis(1)));
         }
-        Err("오디오 워커가 응답하지 않습니다(미디어 명령 큐가 가득 참)".into())
+        Ok(cmd)
     }
 
-    /// 워커가 돌려보낸 항목을 비운다(해제는 여기, 제어 평면 스레드에서).
+    /// 워커가 돌려보낸 항목을 비운다(지터 버퍼·수신 큐 해제는 여기, 제어 평면 스레드에서).
     pub fn reclaim(&self) {
         let mut ret = self.ret.lock();
         while ret.try_pop().is_some() {}
@@ -333,7 +322,7 @@ impl MediaPort {
 impl MediaPortRt {
     /// 워커 반복 맨 앞: 명령을 끝까지 비워 표에 반영한다. `table`은 용량을 미리 잡아 둔 `Vec`이다.
     /// 제거한 항목은 반환 큐로 보낸다(가득 차 있으면 그 자리에서 해제 — 드문 경로). 모르는 키의 제거는 무시한다.
-    pub fn drain(&mut self, table: &mut Vec<PeerMedia>) {
+    pub fn drain(&mut self, table: &mut Vec<Box<PeerMedia>>) {
         while let Some(cmd) = self.cmd.try_pop() {
             match cmd {
                 MediaCmd::Add(m) => table.push(m),
@@ -377,6 +366,7 @@ impl MediaSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::media_link::{media_link, MediaTx};
     use std::sync::atomic::AtomicBool;
 
     fn sample(n: u64) -> MediaStats {
@@ -495,30 +485,35 @@ mod tests {
         }
     }
 
-    fn shared(key: u64, profile: f32) -> Arc<PeerMediaShared> {
-        Arc::new(PeerMediaShared::new(PeerKey::from_raw(key), format!("p{key}"), key as u32, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile }))
+    fn shared(key: u64) -> Arc<PeerMediaShared> {
+        Arc::new(PeerMediaShared::new(PeerKey::from_raw(key), format!("p{key}"), key as u32))
+    }
+
+    fn media(key: u64, profile: f32) -> (Box<PeerMedia>, MediaTx) {
+        let s = shared(key);
+        let (tx, rx) = media_link(s.key);
+        (PeerMedia::new(s, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile }, rx), tx)
     }
 
     /// 재시작 요청은 세대가 바뀐 반복에 한 번만 적용되고, 여러 요청은 한 번으로 합쳐진다.
     #[test]
     fn ingest_applies_restart_once_per_generation() {
-        let mut pm = PeerMedia::new(shared(1, 0.5), 0.5);
+        let (mut pm, _tx) = media(1, 0.5);
         assert_eq!(pm.restart_seen, 0);
         pm.shared.request_restart();
         pm.shared.request_restart();
-        drop(pm.ingest(0.5));
+        let _ = pm.ingest(0.5);
         assert_eq!(pm.restart_seen, 2);
-        drop(pm.ingest(0.5));
+        let _ = pm.ingest(0.5);
         assert_eq!(pm.restart_seen, 2);
     }
 
     /// 프로필 ↔ 추가 경합(#115 리뷰 L4): 옛 프로필로 만든 피어도 워커의 다음 반복에서 지금 프로필로 맞춰진다.
     #[test]
     fn ingest_catches_up_profile_set_before_the_peer_reached_the_worker() {
-        let mut pm = PeerMedia::new(shared(2, 0.2), 0.2);
+        let (mut pm, _tx) = media(2, 0.2);
         let (_, jb) = pm.ingest(0.9);
         assert_eq!(jb.tuning(), crate::engine::jitter::JitterTuning::from_profile(0.9));
-        drop(jb);
         let (_, jb) = pm.ingest(0.1);
         assert_eq!(jb.tuning(), crate::engine::jitter::JitterTuning::from_profile(0.1));
     }
@@ -528,11 +523,12 @@ mod tests {
     fn media_port_moves_ownership_and_returns_removed() {
         let (port, mut rt) = media_port();
         let mut table = Vec::with_capacity(MEDIA_CMD_CAPACITY);
-        let (a, b) = (shared(10, 0.5), shared(11, 0.5));
+        let (a, b) = (shared(10), shared(11));
+        let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
         {
             let mut cmd = port.lock_cmd();
-            assert!(cmd.try_push(MediaCmd::Add(PeerMedia::new(a.clone(), 0.5))).is_ok());
-            assert!(cmd.try_push(MediaCmd::Add(PeerMedia::new(b.clone(), 0.5))).is_ok());
+            assert!(cmd.try_push(MediaCmd::Add(PeerMedia::new(a.clone(), js, media_link(a.key).1))).is_ok());
+            assert!(cmd.try_push(MediaCmd::Add(PeerMedia::new(b.clone(), js, media_link(b.key).1))).is_ok());
             assert!(cmd.try_push(MediaCmd::Remove(PeerKey::from_raw(99))).is_ok());
             assert!(cmd.try_push(MediaCmd::Remove(a.key)).is_ok());
         }
@@ -542,6 +538,32 @@ mod tests {
         assert_eq!(Arc::strong_count(&a), 2);
         port.reclaim();
         assert_eq!(Arc::strong_count(&a), 1, "해제는 제어 평면의 reclaim에서");
+    }
+
+    /// `ingest`는 큐를 끝까지 비워 지터 버퍼에 넣고, `publish`는 큐 넘침(`rx_dropped`)과 재생 여부를 발행한다.
+    #[test]
+    fn ingest_drains_queue_and_publish_reports_rx_dropped() {
+        use crate::net::media_link::AUDIO_QUEUE_PACKETS;
+        use crate::net::packet::{Header, PacketType};
+        let (mut pm, mut tx) = media(5, 0.5);
+        let fcode = crate::engine::config::frame_code_from_samples(240).unwrap();
+        let h = |seq: u32| Header { ptype: PacketType::Audio, ssrc: 5, seq, timestamp: seq * 240, flags: 0, frame_code: fcode };
+        let pcm = [0u8; 480];
+        for i in 0..(AUDIO_QUEUE_PACKETS as u32 + 3) {
+            tx.push(&h(i), &pcm, 1_000 + i as u64 * 5_000);
+        }
+        let (_, jb) = pm.ingest(0.5);
+        // 128개가 지터 버퍼로 갔다(삽입된 패킷은 아직 pop 전이라 버퍼에 쌓여 있다)
+        assert!(jb.stats().late == 0);
+        pm.publish();
+        let s = pm.shared.stats();
+        assert_eq!(s.rx_dropped, 3);
+        assert_eq!(s.playing, pm.jitter().is_playing());
+        assert_eq!(tx.loss_cell().get().is_some(), s.playing);
+        // 다시 비우면 남은 것이 없다
+        let mut n = 0;
+        pm.rx.drain(|_| n += 1);
+        assert_eq!(n, 0);
     }
 
     /// 명령 큐는 용량에서 막힌다(엔진은 넣기 전에 빈칸을 확인한다).

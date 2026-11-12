@@ -273,6 +273,12 @@ impl Engine {
         (in_buf as f32 / self.info.in_rate.max(1) as f32 * 1000.0, out_buf as f32 / self.info.out_rate.max(1) as f32 * 1000.0)
     }
 
+    /// 워커가 가진 피어 미디어 항목 수(진단·테스트, 엔진 ③). 정착하면 net 피어 수와 같다.
+    #[doc(hidden)]
+    pub fn worker_media_peers(&self) -> u64 {
+        self.worker_stats.media_peers.load(Ordering::Relaxed)
+    }
+
     /// 콜백 구동 믹스 진단: (마감 직전 은닉 횟수, 콜백 언더런으로 건너뛴 장치 프레임).
     pub fn feed_stats(&self) -> (u64, u64) {
         (

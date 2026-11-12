@@ -15,9 +15,7 @@ use std::time::{Duration, Instant};
 
 use band_lib::engine::config::{CodecKind, EngineConfig};
 use band_lib::engine::device::fake::FakeBackend;
-use band_lib::engine::jitter::JitterSettings;
-use band_lib::engine::peer_media::PeerMediaShared;
-use band_lib::net::media_link::PeerKey;
+use band_lib::net::media_link::{media_link, PeerKey};
 use band_lib::engine::mixer::MixControls;
 use band_lib::net::types::{PathKind, PeerStateKind};
 use band_lib::engine::Engine;
@@ -28,12 +26,12 @@ use band_lib::net::{Net, NetOptions};
 use parking_lot::Mutex;
 
 
-/// 엔진 없이 Net만 쓸 때의 피어 추가. 미디어 상태(엔진 ③)는 여기서 만든다. 이 테스트는 수신 오디오를 보지 않는다.
+/// 엔진 없이 Net만 쓸 때의 피어 추가(엔진 ③). 수신 큐 소비자(`MediaRx`)는 버린다 — 이 테스트는 수신 오디오를 보지
+/// 않는다. 오디오가 오면 큐가 찰 때까지 쌓이다 버려진다.
 fn add(net: &Net, id: String, desc: &LocalDescriptor) -> Result<Option<PeerKey>, String> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let key = PeerKey::from_raw(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
-    let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
-    net.add_peer(id.clone(), desc, std::sync::Arc::new(PeerMediaShared::new(key, id, desc.ssrc, js)))
+    net.add_peer(id, desc, media_link(key).0)
 }
 
 const HANG: Duration = Duration::from_secs(20);
@@ -371,6 +369,8 @@ fn add_remove_replace_profile_race_keeps_tables_consistent() {
     assert_eq!(ids, vec!["alice".to_string()], "등록부에 남은 피어");
     let net_ids: Vec<String> = b.stats().peers.into_iter().map(|p| p.peer_id).collect();
     assert_eq!(net_ids, vec!["alice".to_string()], "net 피어 표와 등록부가 맞아야 한다");
+    // 워커 표도 직접 본다(#117 리뷰 L4): 죽은 항목이 남으면 1이 되지 않는다
+    assert!(wait_until(HANG, || b.worker_media_peers() == 1), "워커 표에 남은 항목: {}", b.worker_media_peers());
     let f0 = real_frames(&b, "alice");
     assert!(wait_until(HANG, || real_frames(&b, "alice") >= f0 + 200), "경합 뒤 alice 오디오가 흐르지 않음");
 }

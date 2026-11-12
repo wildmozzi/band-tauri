@@ -178,7 +178,7 @@ pub struct Peer {
 **워커 쪽**:
 
 - `AddPeer(media)`: 미디어 표(`Vec`, 용량 `MAX_PEERS + 2` 사전할당)에 넣는다. 소스 슬롯 배정은 지금의 `sync_peer_slots`(`worker.rs:1397-1438`)와 같되 net 피어 표가 아니라 자기 표를 돈다. 슬롯이 없어도 표에는 남고 큐를 계속 비워 삽입한다(지금도 삽입은 슬롯과 무관하다).
-- `RemovePeer(key)`: 슬롯을 `SLOT_DRAIN`으로 놓고, 표에서 뺀 `Box<PeerMedia>`를 **반환 큐**로 제어 평면에 돌려보낸다. 1.19MB 해제가 워커에서 일어나지 않는다. 반환 큐가 가득 차 있으면 그 자리에서 버린다(드문 경로, 해제 한 번). 제어 평면은 다음 `add_peer`·`remove_peer`·`stop`에서 반환 큐를 비운다. `record.rs`의 `RecordPortCtl { inbox, outbox }`(`record.rs:231-233`)와 같은 모양이다.
+- `RemovePeer(key)`: 슬롯을 `SLOT_DRAIN`으로 놓고, 표에서 뺀 `Box<PeerMedia>`를 **반환 큐**로 제어 평면에 돌려보낸다. 1.19MB 해제가 워커에서 일어나지 않는다. 반환 큐가 가득 차 있으면 그 자리에서 버린다(드문 경로, 해제 한 번 ≈ 1.3MB). 반환 큐 점유는 "직전 `reclaim` 이후 워커가 처리한 제거 수"이고 제어 평면은 `add_peer`·`remove_peer`·`stats`(1초) 앞마다 비우므로, 용량(16)을 넘는 것은 워커가 명령이 가득 찬 채 멈췄다 풀리는 경우뿐이다(#117 리뷰 L2). 제어 평면은 다음 `add_peer`·`remove_peer`·`stop`에서 반환 큐를 비운다. `record.rs`의 `RecordPortCtl { inbox, outbox }`(`record.rs:231-233`)와 같은 모양이다.
 - 모르는 키의 `RemovePeer`는 무시한다.
 
 **늦게 도착하는 패킷**:
@@ -191,7 +191,7 @@ pub struct Peer {
 | 교체(같은 peerId, 같은 키·ssrc) 직후 옛 세션의 패킷 | 표에는 새 `Peer`만 있어 새 큐로 감. 새 지터 버퍼가 스트림 시작으로 받음 | 같음 |
 | 엔진 정지(워커 join → net stop, `engine/mod.rs:653-661`) 사이 | 소비자 없는 큐에 push → 가득 차면 버리고 셈 | 영향 없음 |
 
-**재협상(교체) 순서**: 워커는 `AddPeer(new)`를 먼저, `RemovePeer(old)`를 다음에 본다. 피어 슬롯은 7개(`MAX_SOURCES` 8 − 로컬 1, `rt.rs:246`)이고 피어는 최대 5명(`net/mod.rs:52`)이라 옛 슬롯이 `DRAIN`에서 풀리기 전에도 새 슬롯이 있다(지금과 같은 여유).
+**재협상(교체) 순서**: 워커는 `AddPeer(new)`를 먼저, `RemovePeer(old)`를 다음에 본다. 생산자 락은 워커를 막지 않으므로 워커가 두 명령 사이에서 큐 비우기를 끝내면 **그 한 반복 동안 같은 peerId 항목이 둘** 있고 둘 다 슬롯을 받는다(옛 것은 다음 반복에 `SLOT_DRAIN`). 이전(net 표 원자 교체)과 달라진 점이지만 1ms짜리 창이고 슬롯은 충분하다(#117 리뷰 L3). 피어 슬롯은 7개(`MAX_SOURCES` 8 − 로컬 1, `rt.rs:246`)이고 피어는 최대 5명(`net/mod.rs:52`)이라 옛 슬롯이 `DRAIN`에서 풀리기 전에도 새 슬롯이 있다(지금과 같은 여유).
 
 **`Net`만 쓰는 테스트**(`nonce`·`peer_key`·`send_queue`): `media_link(key)`로 짝을 만들어 `MediaTx`만 넘기고 `MediaRx`는 들고 있거나 버린다. 오디오가 오면 큐에 쌓이다 버려진다 — 이 테스트들은 수신 오디오를 보지 않는다.
 

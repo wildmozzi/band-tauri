@@ -1488,3 +1488,82 @@ fn rt_priority_before_after() {
     }
     prio::set_engine_promotion(true);
 }
+
+// ============================================================================
+// 통계 폭주 시험(엔진 ③, engine-stage3-design.md 7.1절 2): 우선순위 역전이 측정에 드러나는가
+// ============================================================================
+
+/// 루프백 2엔진(b가 a의 사인을 받는다)을 돌리면서 기본 우선순위 스레드 4개가 `stats()`·`peer_jitter_stats()`를 쉬지 않고
+/// 부르고, 하나는 `set_jitter_profile`을 10ms마다 같은 값 둘(0.5 ↔ 0.5001, 튜닝 불변)로 바꾸고, 코어 수만큼의 계산
+/// 스레드가 CPU를 채운다(락을 쥔 채 선점되게). 10초 동안 b의 `deadline_fills`·`skipped_frames`·`concealed` 증가를
+/// 폭주 없는 같은 길이 창과 비교한다. ③-a3 전에는 지터 락을 통계·프로필 스레드가 잡았고, 뒤에는 잡지 않는다.
+/// 판정 없이 표만 낸다(전·후 바이너리로 각각 실행해 PR 본문에 적는다).
+#[test]
+#[ignore = "측정(realtime): 통계 폭주 전/후 비교 — cargo test --test loopback stats_storm -- --ignored --nocapture"]
+fn stats_storm_does_not_disturb_playout() {
+    let _g = RT_LOCK.lock();
+    let (a, b, _p, _sink) = connect_pair(config(128, 2.5), sine_backend(), FakeBackend::silence(48_000), None);
+    let (a, b) = (Arc::new(a), Arc::new(b));
+    std::thread::sleep(Duration::from_secs(3));
+    let snap = |b: &Engine| {
+        let (fills, skipped) = b.feed_stats();
+        let js = b.peer_jitter_stats().into_iter().find(|(id, _)| id == "alice").map(|(_, s)| s).unwrap_or_default();
+        (fills, skipped, js.concealed, js.produced)
+    };
+    let window = |storm: bool| {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut th = Vec::new();
+        if storm {
+            for _ in 0..4 {
+                let (a, b, stop) = (a.clone(), b.clone(), stop.clone());
+                th.push(std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = b.stats();
+                        let _ = b.peer_jitter_stats();
+                        let _ = a.stats();
+                    }
+                }));
+            }
+            {
+                let (b, stop) = (b.clone(), stop.clone());
+                th.push(std::thread::spawn(move || {
+                    let mut p = 0.5f32;
+                    while !stop.load(Ordering::Relaxed) {
+                        b.set_jitter_profile(p).unwrap();
+                        p = if p == 0.5 { 0.5001 } else { 0.5 };
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }));
+            }
+            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            for _ in 0..cores {
+                let stop = stop.clone();
+                th.push(std::thread::spawn(move || {
+                    let mut x = 1u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        for _ in 0..10_000 {
+                            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        }
+                        std::hint::black_box(x);
+                    }
+                }));
+            }
+        }
+        let s0 = snap(&b);
+        std::thread::sleep(Duration::from_secs(10));
+        let s1 = snap(&b);
+        stop.store(true, Ordering::Relaxed);
+        for t in th {
+            t.join().unwrap();
+        }
+        (s1.0 - s0.0, s1.1 - s0.1, s1.2 - s0.2, s1.3 - s0.3)
+    };
+    let quiet = window(false);
+    let storm = window(true);
+    let quiet2 = window(false);
+    println!("| 창(10s, 128 / 2.5ms) | deadline_fills | skipped_frames | concealed / produced |");
+    println!("|---|---|---|---|");
+    for (name, w) in [("조용함", quiet), ("통계·프로필 폭주 + CPU 포화", storm), ("조용함(다시)", quiet2)] {
+        println!("| {name} | {} | {} | {} / {} |", w.0, w.1, w.2, w.3);
+    }
+}

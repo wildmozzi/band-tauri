@@ -76,6 +76,8 @@ pub struct WorkerStats {
     pub device_stalled: AtomicBool,
     /// 워커 스레드 우선순위 설정 결과(P1-2).
     pub thread_prio: crate::sys::prio::PrioSlot,
+    /// 워커의 피어 미디어 표 길이(명령을 비운 직후, 엔진 ③). 진단·테스트: 표에 죽은 항목이 남는지 직접 본다.
+    pub media_peers: AtomicU64,
 }
 
 /// 콜백이 이 시간 동안 멈추면 장치를 잃은 것으로 본다.
@@ -145,8 +147,10 @@ pub struct Worker {
     tracker: CallbackTracker,
     local: LocalFifo,
     feeds: Vec<PeerFeed>,
-    /// 워커가 혼자 가지는 피어 미디어 표(명령 큐로만 바뀐다, 엔진 ③-a2). net 피어 표와 같은 순서.
-    media: Vec<PeerMedia>,
+    /// 워커가 혼자 가지는 피어 미디어 표(지터 버퍼·수신 큐 소비자, 명령 큐로만 바뀐다, 엔진 ③-a2·a3). net 피어 표와 같은 순서.
+    // Box 그대로 둔다: 명령 큐로 받은 할당을 제거 때 반환 큐로 그대로 돌려보내므로 워커가 다시 Box하지(할당하지) 않는다.
+    #[allow(clippy::vec_box)]
+    media: Vec<Box<PeerMedia>>,
     in_tmp: Vec<f32>,
     /// 48k 입력 블록(리샘플 직후, 내부 채널).
     in48_buf: Vec<f32>,
@@ -762,6 +766,7 @@ impl Worker {
     fn service_peers(&mut self, t: &FeedTiming) -> bool {
         // 반복 맨 앞: 추가·제거 명령을 끝까지 비운다(엔진 ③-a2). 프로필은 이번 반복에 한 번 읽는다.
         self.p.media_port.drain(&mut self.media);
+        self.p.stats.media_peers.store(self.media.len() as u64, Ordering::Relaxed);
         let profile = self.p.media_settings.profile();
         self.sync_peer_slots();
         let counters = self.p.counters.clone();
@@ -775,12 +780,14 @@ impl Worker {
         let marking = marks.active();
         let played = &self.p.counters.out_played_frames;
         for pm in &mut self.media {
-            // 그 피어의 `service` 직전: 재시작 → 프로필 요청 적용(엔진 ③-a2).
-            let (media, mut jb) = pm.ingest(profile);
+            // 그 피어의 `service` **바로 앞**에서 그 피어의 수신 큐를 끝까지 비워 삽입하고, 재시작 → 프로필 요청을 적용한다
+            // (엔진 ③-a3, 설계 2.4절). 반복 맨 앞에서 전 피어를 한꺼번에 비우면 앞 피어의 service 동안 온 패킷이
+            // 다음 반복으로 밀린다 — 그래서 피어마다 여기서 비운다.
+            let (media, jb) = pm.ingest(profile);
             let key = media.key;
-            // 통계 스냅샷은 슬롯이 없어도 발행한다(삽입은 슬롯과 무관하게 계속된다, 엔진 ③-a1).
+            // 통계 스냅샷은 슬롯이 없어도 발행한다(큐 비우기·삽입은 슬롯과 무관하게 계속된다, 엔진 ③-a1).
             let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) else {
-                media.publish(&jb);
+                pm.publish();
                 continue;
             };
             let sh = &self.p.bank.slots[f.slot];
@@ -788,11 +795,11 @@ impl Worker {
             sh.set_gains(g, g);
             media.mix.level.store(sh.level.load());
             let Some(prod) = self.p.prods.get_mut(f.slot) else {
-                media.publish(&jb);
+                pm.publish();
                 continue;
             };
             let before = marking.then(|| jb.mark_counters());
-            let ev = f.service(&mut jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == media.peer_id && p.peer_ssrc == media.ssrc));
+            let ev = f.service(jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == media.peer_id && p.peer_ssrc == media.ssrc));
             if let Some((c0, d0)) = before {
                 // 녹음 마커(P2-4a): 이번 반복에 은닉·버림이 늘었으면, 방금 링에 넣은 꼬리(= 다음 콜백 시작 + 선행량)의
                 // 출력 타임라인 위치로 기록한다. 링 선행량 추정이라 대략 ±1 콜백으로 추정한다(위치 대조 측정은 아직 없음).
@@ -813,8 +820,7 @@ impl Worker {
                     mark(MarkKind::Drop, to_dev(dropped) + ev.skipped_frames, false);
                 }
             }
-            media.publish(&jb);
-            drop(jb);
+            pm.publish();
             fills += u64::from(ev.deadline_fill);
             skipped += ev.skipped_frames;
             urgent |= ev.urgent;

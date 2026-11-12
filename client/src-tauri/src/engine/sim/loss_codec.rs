@@ -208,6 +208,8 @@ fn run(s: &Scenario, feedback: bool, kind: SignalKind, disc_thr: f32) -> RunOut 
     let t0 = Instant::now();
     let at = |us: f64| t0 + Duration::from_micros(us as u64);
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    // 수신은 실제처럼 피어별 수신 큐를 거친다(엔진 ③-a3): 도착 → push, pop 직전에 비워 삽입.
+    let (mut mtx, mut mrx) = crate::net::media_link::media_link(crate::net::media_link::PeerKey::from_raw(1));
     jb.set_consumer_lead(72.0);
     let mut pcm = Encoder::new(CodecKind::Pcm16, 1, 96_000).unwrap();
     let mut opus = Encoder::new(CodecKind::Opus, 1, 96_000).unwrap();
@@ -287,8 +289,9 @@ fn run(s: &Scenario, feedback: bool, kind: SignalKind, disc_thr: f32) -> RunOut 
         // ── 수신 ──
         while pending.front().is_some_and(|(a, _, _)| *a <= t) {
             let (a, h, pk) = pending.pop_front().unwrap();
-            jb.insert(&h, &pk, a as u64);
+            mtx.push(&h, &pk, a as u64);
         }
+        mrx.drain(|p| jb.insert(&p.hdr, p.payload(), p.arrival_us));
         jb.pop(&mut out);
         jb.end_burst(t as u64, t as u64, 0.0);
         if jb.is_playing() {

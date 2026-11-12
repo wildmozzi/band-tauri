@@ -38,7 +38,7 @@ use parking_lot::Mutex;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
 
-use crate::net::media_link::PeerKey;
+use crate::net::media_link::{media_link, PeerKey};
 use crate::net::peer::LocalDescriptor;
 use crate::net::{Net, NetOptions};
 use crate::sys::prio;
@@ -288,7 +288,10 @@ impl Engine {
         self.media_port.reclaim();
         let key = PeerKey::from_raw(self.next_key.fetch_add(1, Ordering::Relaxed));
         let settings = self.media_settings.current();
-        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc, settings));
+        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc));
+        // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB)는 여기, 락 밖에서 할당한다. 워커는 할당하지 않는다.
+        let (tx, rx) = media_link(key);
+        let worker_side = PeerMedia::new(media.clone(), settings, rx);
         // 등록부 락 안에서 믹스 설정 복사 → net 교체 → 등록부 교체: 겹친 set_peer_gain은 옛 것에 쓰여 복사로 넘어가거나
         // 새 것에 쓰인다(설계 7.3절). 복사는 net에 넣기 전에 해서 워커가 새 항목을 기본 게인으로 보는 순간이 없다.
         let mut reg = self.media.lock();
@@ -296,11 +299,14 @@ impl Engine {
             media.inherit_mix(old);
         }
         // 명령 두 칸(추가 + 교체면 옛 것 제거)을 net에 넣기 전에 확보한다: 넣은 뒤 실패해 되돌릴 일이 없게(설계 4절).
-        // 확보 못 하면 워커가 멈춘 것이다(용량 16, 워커가 반복마다 비운다).
+        // 확보 못 하면 워커가 멈춘 것이다(용량 16, 워커가 반복마다 비운다). 기다리는 동안(최대 100ms) 명령 락은 놓지만
+        // 등록부 락은 쥐고 있어 그동안 `stats`·`peer_jitter_stats`·게인 변경도 기다린다 — 제어 평면만 막히고 워커·RT는 무관하다.
         let mut cmd = self.media_port.reserve_cmd(2)?;
-        let replaced = net.add_peer(peer_id, desc, media.clone())?;
+        // net 검증이 실패하면 `worker_side`는 여기(커맨드 스레드)에서 해제된다 — 워커는 모른다.
+        let replaced = net.add_peer(peer_id, desc, tx)?;
         // 순서: 새 것 추가 → 옛 것 제거(설계 1.4절). 생산자가 이 락 하나로 직렬화되고 큐가 FIFO라 뒤바뀌지 않는다.
-        let _ = cmd.try_push(MediaCmd::Add(PeerMedia::new(media.clone(), settings.profile)));
+        // net에 넣은 뒤 `Add`가 워커에 닿기 전에 온 패킷은 새 수신 큐에서 기다린다(도착 시각 보존).
+        let _ = cmd.try_push(MediaCmd::Add(worker_side));
         if let Some(old_key) = replaced {
             let _ = cmd.try_push(MediaCmd::Remove(old_key));
             reg.retain(|m| m.key != old_key);

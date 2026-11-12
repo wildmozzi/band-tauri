@@ -11,8 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::crypto::{KeyPair, PacketCipher, KEY_BYTES};
 use super::packet::PacketType;
-use super::media_link::{LossCell, PeerKey};
-use crate::engine::peer_media::PeerMediaShared;
+use super::media_link::{LossCell, MediaTx, PeerKey};
 use super::types::{PathKind, PeerStateKind};
 
 pub const HELLO_INTERVAL: Duration = Duration::from_millis(100);
@@ -698,10 +697,12 @@ pub struct Peer {
     rx: PacketCipher,
     candidates: Vec<(SocketAddr, CandidateKind)>,
     conn: Mutex<ConnState>,
-    /// 이 피어의 미디어 상태(엔진 등록부와 공유, ③-b). 수신 스레드가 오디오를 삽입한다.
-    /// ③-a3에서 수신 큐 생산자(`MediaTx`)로 바뀐다.
-    media: Arc<PeerMediaShared>,
-    /// 워커가 발행하는 이 피어 스트림의 수신 손실 보고(Ping, P1-4e). 락 없이 읽는다(③-a1).
+    /// 피어별 수신 큐 생산자(엔진 ③-a3). `ringbuf` 생산자는 `&mut`가 필요하고 `Peer`는 `Arc`로 공유되므로 Mutex로
+    /// 감싼다. 넣는 스레드는 `band-net-recv` 하나뿐이라(`push_audio`는 `recv_loop` 경로에서만) 경쟁자가 없다(설계 1.2절).
+    media: Mutex<MediaTx>,
+    /// `media.key()`의 복사본(락 없이 읽게).
+    key: PeerKey,
+    /// 워커가 발행하는 이 피어 스트림의 수신 손실 보고(Ping, P1-4e). `media` 락을 잡지 않고 읽게 따로 쥔다.
     rx_report: Arc<LossCell>,
     /// 이 피어로 보내는 Audio 패킷 seq(송신 키별). 에코로 되돌리는 패킷도 같은 카운터를 써서 nonce가 겹치지 않는다.
     /// 같은 키를 쓰는 살아 있는 항목(다른 peerId가 같은 descriptor를 보냄)끼리는 이 카운터를 같이 쓴다(`Net::add_peer`).
@@ -745,8 +746,8 @@ pub struct PeerSetup<'a> {
 }
 
 impl Peer {
-    /// `media`: 엔진이 만든 이 피어의 미디어 상태(키·지터 버퍼·믹스 제어).
-    pub fn new(id: String, desc: &LocalDescriptor, setup: &PeerSetup<'_>, media: Arc<PeerMediaShared>, now: Instant) -> Result<Self, String> {
+    /// `media`: 엔진이 만든 이 피어의 수신 큐 생산자(`media_link`).
+    pub fn new(id: String, desc: &LocalDescriptor, setup: &PeerSetup<'_>, media: MediaTx, now: Instant) -> Result<Self, String> {
         if id.is_empty() || id.len() > MAX_PEER_ID_BYTES {
             return Err("peerId는 1..64바이트여야 합니다".into());
         }
@@ -765,7 +766,8 @@ impl Peer {
             candidates,
             conn: Mutex::new(ConnState::new(now)),
             rx_report: media.loss_cell().clone(),
-            media,
+            key: media.key(),
+            media: Mutex::new(media),
             tx_seq: Arc::new(AtomicU32::new(rand::random())),
             tx_last_ts: AtomicU32::new(0),
             tx_codec: AtomicU8::new(0),
@@ -836,12 +838,13 @@ impl Peer {
 
     /// 이 피어 미디어 상태의 키(엔진 등록부·워커와 짝짓는 값).
     pub fn key(&self) -> PeerKey {
-        self.media.key
+        self.key
     }
 
-    /// 수신 오디오를 미디어 쪽에 넘긴다. `recv_loop` 경로(`handle_packet`)에서만 부른다.
+    /// 수신 오디오를 피어별 수신 큐에 넣는다(가득 차면 버리고 센다). `recv_loop` 경로(`handle_packet`)에서만 부른다 —
+    /// 다른 스레드가 부르면 SPSC가 Mutex로 직렬화될 뿐 깨지지는 않지만 무경쟁 가정이 깨진다(③-a3 리뷰 항목).
     pub(super) fn push_audio(&self, hdr: &super::packet::Header, payload: &[u8], arrival_us: u64) {
-        self.media.insert(hdr, payload, arrival_us);
+        self.media.lock().push(hdr, payload, arrival_us);
     }
 
     /// 이 피어 스트림의 수신 손실 보고(재생 중이 아니면 None). Ping에 싣는다(P1-4e).
@@ -1305,8 +1308,7 @@ mod tests {
             ],
         };
         let setup = PeerSetup { keys: &keys, my_ssrc: 1, allow_loopback: false };
-        let js = crate::engine::jitter::JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
-        let media = Arc::new(PeerMediaShared::new(PeerKey::from_raw(1), "p".into(), desc.ssrc, js));
+        let (media, _rx) = super::super::media_link::media_link(PeerKey::from_raw(1));
         let p = Peer::new("p".into(), &desc, &setup, media, Instant::now()).unwrap();
         p.conn.lock().on_handshake(RELAY.parse().unwrap(), false, &p.candidates, relay(), Instant::now());
         assert_eq!(p.hello_targets(relay()), vec!["192.168.0.5:4000".parse::<SocketAddr>().unwrap()]);
