@@ -5,6 +5,7 @@
 
 - 엔진(Rust) 계약은 [overhaul/native-engine-design.md](overhaul/native-engine-design.md). 이 문서는 그 위의 TS 계층만 다룬다.
 - 규칙은 ESLint로 강제한다(6절). 문서와 lint가 다르면 lint가 맞고 문서를 고친다.
+- 서버(`server/`, 특히 시그널링 `wsService.ts` 약 1,600줄)는 이 문서 범위 밖이다. 다음 정리 대상이며 `docs/server-architecture.md`(예정)에서 다룬다.
 
 ## 1. 계층과 의존 방향
 
@@ -81,8 +82,8 @@ client/src/
 | profile | 프로필 화면 | auth, payment |
 | community | 게시판 | auth |
 | home | 홈 | auth, payment |
-| demo-karaoke | 노래방·음원 분리 | auth |
-| demo-recording, demo-mixlab | 데모 화면 | — |
+| demo-karaoke | 노래방·음원 분리 (합주 목표 밖 데모) | auth |
+| demo-recording, demo-mixlab | 데모 화면 (합주 목표 밖) | — |
 
 `room`과 `rooms`를 나눈 이유: 방 **카탈로그**(DB의 rooms 행을 만들고 고치는 일)와 방 **안의 실시간 세션**(WS·엔진·WebRTC)은 바뀌는 이유와 속도가 전혀 다르다. 세션 쪽이 카탈로그를 쓰고(방 상세 조회, 정원 표시), 반대 방향은 없다.
 
@@ -95,53 +96,67 @@ client/src/
 | 종류 | 도구 | 위치 | 예 |
 |---|---|---|---|
 | 서버 상태(DB/HTTP) | TanStack Query | `features/<x>/queries.ts` — 쿼리 키·API·무효화 규칙을 파일 머리 주석에 | 방 목록·상세, 게시글, 프로필, stems 기록 |
-| 실시간 세션 상태(WS·엔진·WebRTC) | React-독립 컨트롤러 + 얇은 훅 + 컨텍스트 | 엔진: `native/performSession`(클래스) → `useNativeSession`. 방: `features/room/state` | 연주 단계, 연주자 목록, 엔진 통계, 채팅 |
+| 실시간 세션 상태(WS·엔진·WebRTC) | React 밖 스토어/컨트롤러(`subscribe`·`getSnapshot`) + 선택 구독 훅 | 엔진: `native/performSession`(클래스) → `useNativeSession`. 방: `features/room/state`의 `RoomSessionStore` → `useRoomSelector`(4절) | 연주 단계, 연주자 목록, 엔진 통계, 채팅 |
 | 앱 전역 클라이언트 상태 | 컨텍스트(작게) | 그 상태를 가진 기능(`AuthProvider`·`AudioSettingsProvider`·`PremiumProvider`·`RoomProvider`) | 로그인 사용자, 오디오 설정 |
 | UI 상태 | `useState` 로컬 | 쓰는 컴포넌트 | 모달 열림, 입력값 |
 | 기기 저장 선호 | 작은 저장소 함수(주입 가능한 storage) | 그 값을 쓰는 기능/계층 | 메트로놈 볼륨, 루프백 보정값, 방 비밀번호 기억 |
 
 실시간 세션 상태 규칙:
 1. **로직은 React 밖에.** 상태기계·재시도·직렬화는 순수 함수나 클래스로 두고 단위 테스트한다(`sessionLogic`, `performSession`, `relayLogic`, `performRequestState`, `roomAccess`). 훅은 그 결과를 React 상태로 옮기기만 한다.
-2. **컨텍스트는 바뀌는 이유·빈도별로 쪼갠다.** 엔진 통계(500ms)·레벨 미터(수십 ms)·녹음 시간(1s)처럼 자주 바뀌는 값을 입장 상태·채팅과 한 객체로 내보내면 미니 플레이어·업데이트 알림까지 매 틱 다시 그린다. 자주 바뀌는 측정값은 별도 컨텍스트로 두고, 각 값은 `useMemo`로 안정화한다(4절).
+2. **선택 구독.** 엔진 통계(500ms)·레벨 미터(수십 ms)·녹음 시간(1s)처럼 자주 바뀌는 값을 입장 상태·채팅과 한 객체(컨텍스트)로 내보내면 미니 플레이어·업데이트 알림까지 매 틱 다시 그린다. 상태는 외부 스토어에 두고 컴포넌트는 필요한 조각만 `useSyncExternalStore`로 구독한다(4절). 컨텍스트에는 바뀌지 않는 것(스토어·명령 객체)만 둔다.
 3. **명령은 안정 참조.** `joinRoom`·`sendChatMessage` 같은 함수는 `useCallback`/ref로 고정해 소비자의 effect·memo가 쓸데없이 다시 돌지 않게 한다.
 4. **신원은 서버가 붙인 값만.** 시그널링 메시지의 `from`/`oderId`는 서버가 붙인 값만 쓰고, 다른 클라이언트가 보낸 `isHost`/`userId`를 권한 근거로 쓰지 않는다(CLAUDE.md 서버 규칙의 클라이언트 쪽 짝).
 
 ## 4. 합주실 데이터 흐름
 
 ```
-                      ┌────────────── features/room/state ─────────────────────────────┐
- 서버(ws, JWT 인증) ◄──┤ useSignaling ── onMessage ─► RoomProvider(디스패처)            │
-                      │                               │  ├─ 입장/재연결/비밀번호 → 연결 상태 │
-                      │                               │  ├─ 참가자·연주자 목록             │
-                      │                               │  ├─ useChat / usePerformRequests   │
-                      │                               │  ├─ session.handleSignal ──────────┼──► native/performSession
-                      │                               │  └─ offer/answer/ice → 관람 수신·방송 │      (엔진 수명주기·descriptor·릴레이)
-                      │                                                                  │            │ engineApi(invoke)
-                      │ useViewerAudio(관람: recvonly) → useWebAudioMixer(웹 믹서·레벨)   │            ▼
-                      │ useRecording(MediaRecorder; 소스=웹 믹스 또는 엔진 믹스)            │      Rust 엔진(UDP 풀메시)
-                      └──────────────────────────────────────────────────────────────────┘
- 방송 담당 연주자 앱: engine_subscribe_mix → native/mixBridge(MixSource → MixBroadcaster) → 관람자별 WebRTC sendonly
+                     ┌──────────────────────── features/room/state ────────────────────────────┐
+서버(ws, JWT 인증) ◄──┤ useSignaling ─ 메시지 ─► RoomProvider(디스패처)                           │
+                     │                          ├─ session.handleSignal ───────────────────────┼─► native/PerformSession
+                     │                          │   (엔진 세션 메시지면 여기서 끝)                 │   (엔진 수명주기·descriptor·릴레이)
+                     │                          ├─ reduceRoomSignal(순수) ─► { 상태 변경, effects }│        │ subscribe
+                     │                          │     채팅 → 참여/악기 요청 → 입장 오류 → 참가자·WebRTC│        ▼ (스냅샷 미러)
+                     │                          ├─ store.update(상태 변경) ───────────────► RoomSessionStore ◄─┘
+                     │                          └─ effects 실행(엔진·관람 수신·방송·재시도 타이머)       │ subscribe/getSnapshot
+                     │ 브라우저 미디어 훅: useViewerAudio(recvonly) · useWebAudioMixer · useRecording ─► store │
+                     └─────────────────────────────────────────────────────────────────────┬──────┘
+                                         useRoomSelector(useSyncExternalStore) ◄────────────┘
+                                         → useRoomConnection·useRoomChat·… (컴포넌트는 필요한 조각만 구독)
+방송 담당 연주자 앱: engine_subscribe_mix → native/mixBridge(MixSource → MixBroadcaster) → 관람자별 WebRTC sendonly
 ```
 
-- **시그널링**: 한 WS 연결(`useSignaling`)이 모든 방 메시지를 받는다. `RoomProvider`가 메시지 종류별로 엔진 세션(`session.handleSignal`) → 채팅 → 참여 요청 → 입장 오류 → 참가자/WebRTC 순으로 넘긴다. 핸들러는 ref로 넘겨 WS 재연결 없이 최신 클로저를 쓴다.
-- **엔진 세션**(앱 연주자): `PerformSession`이 엔진 시작·descriptor 교환·피어 추가/제거·릴레이 토큰·재연결을 소유한다. React는 `useNativeSession`으로 상태 스냅샷과 500ms 통계를 받는다. 연주자끼리는 WebRTC를 쓰지 않는다.
+- **시그널링**: 한 WS 연결(`useSignaling`)이 모든 방 메시지를 받는다. 디스패처는 엔진 세션(`session.handleSignal`)에 먼저 주고, 거기서 처리하지 않은 메시지를 순수 함수 `reduceRoomSignal`이 채팅 → 참여·악기 변경 요청 → 입장 오류 → 참가자/WebRTC 순으로 처리한다. 핸들러는 ref로 넘겨 WS 재연결 없이 최신 클로저를 쓴다.
+- **엔진 세션**(앱 연주자): `PerformSession`이 엔진 시작·descriptor 교환·피어 추가/제거·릴레이 토큰·재연결을 소유한다. 연주자끼리는 WebRTC를 쓰지 않는다.
 - **관람 방송**: 연주자 중 한 명(`selectBroadcaster`)의 앱이 엔진 믹스를 관람자에게 WebRTC로 보낸다. 관람자(웹·앱)는 offer에 answer만 한다(`useViewerAudio`).
 - **녹음**: 연주 중이면 엔진 믹스(`MixSource` lease), 관람 중이면 웹 믹서 출력. 엔진 파일 녹음(멀티트랙)은 `NativeRecordingControl`이 엔진 커맨드로 직접.
 
-### 방 상태 컨텍스트 분리 (P3-2 ②)
+### 방 상태: React 밖 스토어 + 선택 구독 (P3-2 ②)
 
-`RoomProvider`는 디스패처·조립자로 남고, 내보내는 값은 바뀌는 이유·빈도별 컨텍스트로 나눈다. 소비자는 필요한 것만 구독한다.
+엔진 세션(`PerformSession` + `useNativeSession`)과 같은 모양으로 맞춘다 — **상태와 로직은 React 밖, React는 구독만.** 패턴이 하나라 엔진·방 상태를 같은 방식으로 읽고 테스트한다.
 
-| 훅 | 담는 것 | 바뀌는 때 |
+| 파일 | 역할 |
+|---|---|
+| `state/roomSessionStore.ts` | `RoomSessionStore` — React 없는 순수 클래스. `getSnapshot()`·`subscribe()`·`update(patch)`. 스냅샷은 불변이고 바뀐 슬라이스만 새 참조가 된다. 파생 값(나를 합친 연주자 목록, 방송 담당, 관람자 목록, 표시용 연결 상태 등)은 입력 슬라이스가 바뀔 때만 다시 계산해 스냅샷에 둔다 → 선택자는 고르기만 한다 |
+| `state/signalReducer.ts` | `reduceRoomSignal(state, msg, ctx) → { patch, effects }` 순수 함수. 상태 변경과 부수효과 기술(엔진 세션 호출·관람 수신 닫기·방송 응답·재시도 예약 등)을 돌려준다. React·WS 없이 단위 테스트 |
+| `state/RoomProvider.tsx` | 디스패처·조립자. 시그널링 WS·엔진 세션·브라우저 미디어 훅을 소유하고, 메시지 → 리듀서 → `store.update` + effects 실행. 명령(입장·퇴장·요청 등)은 한 번 만든 안정 객체 하나로 컨텍스트에 둔다(값이 바뀌지 않으므로 리렌더를 퍼뜨리지 않는다) |
+| `state/useRoomSelector.ts` | `useSyncExternalStore`(React 18 내장, 의존 추가 없음) + 얕은 비교. 선택 결과가 그대로면 그 컴포넌트는 다시 그리지 않는다 |
+| `state/roomHooks.ts` | 아래 얇은 선택자 훅들 |
+
+스냅샷 슬라이스: `connection`(시그널링 상태·clientId·피어·현재 방·입장 결과·방장 여부·닉네임) · `roster`(원격 연주자) · `perform`(엔진 세션 스냅샷 미러) · `chat` · `requests` · `viewer`(관람 수신) · `mixer`(개인 믹서 설정) · `levels`(레벨 미터) · `recording` · `local`(모니터·메트로놈 볼륨·방송 관람자 수·안내 오류) · `miniPlayer`.
+
+| 선택자 훅 | 고르는 것 | 다시 그리는 때 |
 |---|---|---|
-| `useRoomConnection` | 시그널링 상태, clientId, 피어 목록, 입장/퇴장/비밀번호/재시도, 현재 방, 방장 여부, 닉네임 | 입장·퇴장·재연결 |
-| `useRoomPerform` | 연주 가능/중/시작 중, 시작·정지, 내 악기, 연주자 목록, 모니터, 입력 뮤트, 메트로놈, 방송 담당 | 연주 시작/정지, 연주자 변동, 설정 조작 |
-| `useRoomTelemetry` | 엔진 통계·피어 통계, 레벨 미터, 관람 회선 통계 | 주기적(수십 ms~2s) |
-| `useRoomMixer` | 관람 수신 상태·스트림, 개인 믹서 설정·마스터, 오디오 컨텍스트 재개 | 사용자 조작, 수신 연결 변화 |
-| `useRoomChat` | 채팅 메시지·보내기 | 메시지 |
-| `useRoomRequests` | 연주 참여·악기 변경 요청 | 요청 |
-| `useRoomRecording` | 브라우저 녹음 상태·목록·시간 | 녹음 중 1초 |
-| `useMiniPlayer` | 미니 플레이어 모드 | 화면 이동 |
+| `useRoomConnection` | 시그널링 상태, clientId, 피어 목록, 현재 방, 입장 결과·오류, 방장 여부, 닉네임 + 입장/퇴장/비밀번호/재시도 | 입장·퇴장·재연결 |
+| `useRoomPerform` | 연주 가능/중/시작 중, 내 악기, 연주자 목록, 릴레이 오류, 모니터, 입력 뮤트, 방송 담당·관람자 수 + 시작·정지 | 연주 시작/정지, 연주자 변동, 설정 조작 |
+| `useRoomMetronome` | 공유 메트로놈, 내 클릭 볼륨·뮤트 + 방장 시작/정지 | 메트로놈 변경 |
+| `useRoomTelemetry` | 엔진 통계·피어 통계, 레벨 미터, 관람 회선 통계 | 주기적(수십 ms~2s) — 표시하는 컴포넌트만 |
+| `useRoomAudio` | 표시용 연결 상태·오류, 수신 스트림, 개인 믹서 설정·마스터 + 오디오 컨텍스트 재개 | 사용자 조작, 수신 연결 변화 |
+| `useRoomChat` | 채팅 메시지 + 보내기 | 메시지 |
+| `useRoomRequests` | 연주 참여·악기 변경 요청 + 승인/거절/요청/취소 | 요청 |
+| `useRoomRecording` | 브라우저 녹음 상태·목록·시간 + 시작/정지/삭제 | 녹음 상태, 녹음 중 1초 |
+| `useMiniPlayer` | 미니 플레이어 모드 + 진입/복귀/종료 | 화면 이동 |
+
+`useRoom()`(전부 한 객체)은 없앤다 — 다시 생기면 전체 리렌더가 돌아온다.
 
 ## 5. 기능 폴더 안 규칙
 
@@ -178,7 +193,7 @@ client/src/
 
 - **Feature-Sliced Design / bulletproof-react**: 기능 단위 폴더 + 공개 API + 단방향 계층(app → features → shared)을 따른다. FSD의 `pages`·`widgets`·`entities` 계층은 두지 않았다 — 화면 수가 20개 안팎이고 기능 간 공유 엔티티가 적어(방, 사용자) 계층을 더 두면 이동 비용만 커진다. 공유 엔티티가 필요한 곳은 소유 기능을 하나 정하고(방=rooms, 사용자 프로필=auth) 나머지가 그 공개 API를 쓴다. 기능이 늘어 순환이 자주 생기면 `entities/`를 도입한다.
 - **실시간 협업 앱(Figma 멀티플레이·Excalidraw·Liveblocks류)의 공통점**: 전송(WS/WebRTC)·세션 상태기계를 UI 프레임워크 밖의 객체로 두고, UI는 스냅샷을 **구독**한다. 이 프로젝트의 `PerformSession`(React 비의존, 커맨드 큐 직렬화) + `useNativeSession`이 같은 형태다. 방 상태도 같은 방향으로 옮긴다(디스패처는 하나, 구독은 조각별).
-- **고빈도 상태 분리**: 레벨 미터·통계처럼 초당 여러 번 바뀌는 값은 별도 구독 단위로 둬야 전체 트리 리렌더를 피한다(React 컨텍스트는 선택 구독이 없으므로 컨텍스트 자체를 나눈다). 외부 상태 라이브러리(zustand 등)는 아직 도입하지 않는다 — 컨텍스트 분리로 충분하고 의존이 늘지 않는다. 계측에서 컨텍스트 분리로 부족하면 `useSyncExternalStore` 기반 선택 구독을 검토한다.
+- **고빈도 상태 분리**: 레벨 미터·통계처럼 초당 여러 번 바뀌는 값은 선택 구독으로 그 값을 표시하는 컴포넌트만 다시 그린다. React 컨텍스트는 선택 구독이 없어 컨텍스트를 쪼개면 Provider 중첩만 늘어난다. 그래서 외부 스토어 + `useSyncExternalStore`(React 18 내장)를 쓴다. 외부 상태 라이브러리(zustand 등)는 도입하지 않는다 — 필요한 것은 작은 스토어 클래스와 선택자 훅 하나뿐이고 의존이 늘지 않는다.
 
 ## 9. 후속 정리 제안 (③ 이후, 동작 변경 포함이라 별도 PR)
 
