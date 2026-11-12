@@ -75,7 +75,8 @@
 | P2-4b | **[버그]** 녹음 시작·정지 순간 xrun(128/2.5ms에서 녹음 켬 창마다 1회, PR #64 작업 중 관찰) 제거 | xrun 0 테스트 | 완료(PR #67, 2026-11-11 — 녹음 경계 xrun 없음 확인, 링 prefault; **[사람]** 실장비 청취) |
 | P2-4c | 녹음 후속: WAV EXTENSIBLE 헤더(#47 L3), session/markers 피어 id 가명화(#62 L5), 마커 위치 정확도 측정(#62 L1) | 테스트 | 완료(PR #72, 2026-11-12 — WAV EXTENSIBLE, 피어 id 가명화, 마커 정확도 ≤4.9ms; **[사람]** DAW에서 WAV 열기; Low: 3채널+ channel_mask) |
 | P2-7 | 배포본에 없는 드라이버(ASIO) 표시: 엔진이 빌드의 지원 드라이버를 알려 주고 설정 화면이 선택지를 막고 이유를 보임 | engine_list_devices 필드·AudioSettings 테스트, 계약 변경 시 설계 4절 | 대기 (GOAL 4-1) |
-| P2-8 | 멤버별 입→귀 추정 지연 표시(RTT/2 + 상대 송신 프레임 + 내 playoutMs) — 지금은 RTT만 보임 | roomDetailModel 순수 함수 테스트, e2e 스냅샷; **[사람]** 에코 측정과 ±5ms 대조 | 진행중(작업자 p2-8-ear, Opus) |
+| P2-8 | 멤버별 입→귀 추정 지연 표시(RTT/2 + 상대 송신 프레임 + 내 playoutMs) — 지금은 RTT만 보임 | roomDetailModel 순수 함수 테스트, e2e 스냅샷; **[사람]** 에코 측정과 ±5ms 대조 | PR #112 병합 대기 — 귀까지 ≈ RTT/2 + playoutMs(재생 전 —), GOAL 25/40ms 색, RTT는 툴팁 · **[사람]** 에코 측정 mouthToEarMs와 ±5ms 대조 |
+| P2-8b | 엔진 PeerStats에 상대 송신 프레임(remoteFrameMs, descriptor에서)과 상대 입력 버퍼 추정을 노출 → 입→귀 추정의 "≈" 제거 (#112 제안) | 엔진 단위 테스트, 계약(설계 4절) 갱신, earLatency 테스트 | 대기 (R-1 ③ 뒤 — PeerStats/stats 경로 정리 후) |
 | P2-9 | **[결정]** 방장이 연주자를 내리거나 승인을 거두는 기능(GOAL 4절은 승인만 요구) | 결정 후 서버 메시지·계약 5절·테스트 | 대기 (사용자 결정) |
 | P2-10 | **[사람]** 업데이터 주소 확인: tauri.conf.json·docs/RELEASE.md의 exception-busters/band-tauri가 실제 릴리스 리포(wildmozzi/band-tauri)와 다름 — 첫 공개 릴리스 전에 확정 | 주소 확정, 옛→새 버전 업데이트 성공 | 대기 (사용자 확인) |
 | P2-11 | 서버: `reject-instrument-change`와 `reject-perform`의 기본 거절 사유 처리가 다름(#82 S0 관찰) — 둘을 같은 규칙으로 맞추고 ws-transcript 기준 파일·native-engine-design 5절 함께 갱신 | 테스트 | 대기 (S3 이후, 동작 변경이라 S 단계와 분리) |
