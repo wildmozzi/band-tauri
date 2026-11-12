@@ -343,32 +343,40 @@ describe('WS 재연결 (시간 예산)', () => {
     expect(stopSpy).not.toHaveBeenCalled()
   })
 
-  it('토큰을 기다리는 사이 닫힌 연결은 ready로 보지 않는다 — auth 미전송, 예산 리셋 없음 → 35초 뒤 포기', async () => {
+  // 지터(±20%)에 따라 재연결 소켓이 생기는 시각이 달라진다. 양 끝과 가운데를 고정해 모두 확인한다
+  it.each([0, 0.5, 0.999])('토큰을 기다리는 사이 닫힌 연결은 ready로 보지 않는다 — auth 미전송, 예산 리셋 없음 → 35초 뒤 포기 (지터 난수 %s)', async (r) => {
+    vi.spyOn(Math, 'random').mockReturnValue(r)
     const first = await enterRoom()
     const readyCalls = welcomeSpy.mock.calls.length
     act(() => first.fail())
+    const t0 = Date.now()
     const dropped: FakeWebSocket[] = []
-    const until = Date.now() + 36_000
-    while (Date.now() < until) {
-      const n = FakeWebSocket.instances.length
+    let gaveUpAt: number | null = null
+    // 새로 생긴 소켓은 advance 도중 생긴 것까지 빠짐없이 토큰 대기 중에 닫는다. 포기할 때까지 (상한 60초)
+    let handled = FakeWebSocket.instances.length
+    while (gaveUpAt === null && Date.now() - t0 < 60_000) {
       await advance(100)
-      if (FakeWebSocket.instances.length > n) {
-        const ws = last()
+      while (gaveUpAt === null && handled < FakeWebSocket.instances.length) {
+        const ws = FakeWebSocket.instances[handled++]
         let release!: () => void
-        h.auth.tokenGate = new Promise<void>((r) => (release = r))
+        h.auth.tokenGate = new Promise<void>((res) => (release = res))
         act(() => ws.open()) // getSession 대기 중
         act(() => ws.fail()) // 그 사이 닫힘
+        dropped.push(ws)
+        if (store.getSnapshot().connection.signalStatus === 'gave-up') gaveUpAt = Date.now()
         release()
         h.auth.tokenGate = null
         await flush()
-        await advance(AUTH_FALLBACK_MS) // fallback이 걸렸다면 여기서 ready
-        dropped.push(ws)
+        await advance(AUTH_FALLBACK_MS) // fallback이 걸렸다면 여기서 ready (그동안 생긴 새 소켓은 다음 차례에 처리)
       }
     }
+    expect(store.getSnapshot().connection.signalStatus).toBe('gave-up')
+    // 예산은 첫 닫힘부터 35초. 리셋됐다면 훨씬 늦게 포기한다. 여유는 새 소켓을 처리하기까지의 지연(fallback 대기 + 폴링 간격)
+    expect(gaveUpAt! - t0).toBeGreaterThanOrEqual(35_000)
+    expect(gaveUpAt! - t0).toBeLessThanOrEqual(35_000 + AUTH_FALLBACK_MS + 100)
     expect(dropped.length).toBeGreaterThanOrEqual(3)
     for (const ws of dropped) expect(ws.sent.filter((m) => m.type === 'auth')).toHaveLength(0)
     expect(welcomeSpy.mock.calls.length).toBe(readyCalls) // onReady 없음
-    expect(store.getSnapshot().connection.signalStatus).toBe('gave-up')
   })
 
   it('서버 유예가 지나 새 clientId를 받으면(resumed:false) 엔진을 새 id로 한 번 재시작하고 재입장한다', async () => {
