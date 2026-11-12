@@ -1,32 +1,10 @@
-import { useState, useMemo, useEffect, type ReactNode } from 'react'
+import { type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../auth'
-import { usePostsQuery, useToggleLikeMutation, useTrendingTagsQuery } from './queries'
-import type { Post } from './communityApi'
+import { formatRelativeTime } from './postLogic'
+import { FEED_INSTRUMENTS, excerpt, instrumentIcon } from './communityFeed'
+import { useCommunityFeed } from './useCommunityFeed'
 import './communityFeed.css'
 import './communityList.css'
-
-// 사용 가능한 악기 목록
-const INSTRUMENTS = [
-  { id: 'all', name: '전체', icon: '🎵' },
-  { id: 'vocal', name: '보컬', icon: '🎤' },
-  { id: 'guitar', name: '기타', icon: '🎸' },
-  { id: 'bass', name: '베이스', icon: '🎸' },
-  { id: 'keyboard', name: '건반', icon: '🎹' },
-  { id: 'drums', name: '드럼', icon: '🥁' },
-  { id: 'other', name: '기타 악기', icon: '🎵' },
-]
-
-function formatRelativeTime(iso: string) {
-  const diff = Date.now() - new Date(iso).getTime()
-  const minutes = Math.max(0, Math.round(diff / 60000))
-  if (minutes < 1) return '방금 전'
-  if (minutes < 60) return `${minutes}분 전`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}시간 전`
-  const days = Math.round(hours / 24)
-  return `${days}일 전`
-}
 
 /**
  * 글 상세 링크 (P3-12 ⑤). 카드 전체를 덮는 링크(::after)라 카드 어디를 눌러도 이동하고,
@@ -44,53 +22,16 @@ function PostLink({ postId, hidden = false, children }: { postId: string; hidden
 
 export function Community() {
   const navigate = useNavigate()
-  const { user } = useAuth()
-  const [selectedInstrument, setSelectedInstrument] = useState('all')
-  const [selectedTag, setSelectedTag] = useState<string | null>(null)
-
-  // 글 목록·인기 태그 (features/community/queries)
-  const postsQuery = usePostsQuery({ instrument: selectedInstrument, tag: selectedTag, userId: user?.id ?? null })
-  const trendingQuery = useTrendingTagsQuery(5)
-  const toggleLike = useToggleLikeMutation()
-  const posts: Post[] = useMemo(() => postsQuery.data ?? [], [postsQuery.data])
-  const loading = postsQuery.isPending
-  const trendingTags = trendingQuery.data ?? []
-
-  useEffect(() => {
-    if (postsQuery.error) console.error('Failed to fetch posts:', postsQuery.error)
-  }, [postsQuery.error])
-
-  useEffect(() => {
-    if (trendingQuery.error) console.error('Failed to fetch trending tags:', trendingQuery.error)
-  }, [trendingQuery.error])
-
-  // 인기 게시물 (좋아요 10개 이상, 좋아요 많은 순)
-  const popularPosts = useMemo(() => {
-    return [...posts]
-      .filter(post => post.likes_count >= 10)
-      .sort((a, b) => b.likes_count - a.likes_count)
-      .slice(0, 3)
-  }, [posts])
-
-  const handleLike = async (postId: string, e?: React.MouseEvent) => {
-    e?.stopPropagation()
-
-    if (!user) {
-      alert('좋아요를 누르려면 로그인이 필요합니다.')
-      return
-    }
-
-    try {
-      // 응답값으로 목록·상세 캐시를 갱신한다
-      await toggleLike.mutateAsync({ postId, userId: user.id })
-    } catch (error) {
-      console.error('Failed to toggle like:', error)
-    }
-  }
-
-  const handleTagClick = (tag: string) => {
-    setSelectedTag(selectedTag === tag ? null : tag)
-  }
+  const {
+    selectedInstrument, setSelectedInstrument,
+    selectedTag, setSelectedTag,
+    posts,
+    popularPosts,
+    loading,
+    trendingTags,
+    handleLike,
+    handleTagClick,
+  } = useCommunityFeed()
 
   const cardStyle = {
     background: 'var(--panel-strong-a80)',
@@ -142,7 +83,7 @@ export function Community() {
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 'var(--space-4)' }}>
                       <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
                         <span style={{ fontSize: '20px' }}>
-                          {INSTRUMENTS.find(i => i.id === post.instrument)?.icon}
+                          {instrumentIcon(post.instrument)}
                         </span>
                         <div style={{ flex: 1 }}>
                           {post.title && (
@@ -152,7 +93,7 @@ export function Community() {
                           )}
                           <div style={{ fontSize: '14px', fontWeight: '400', marginBottom: 'var(--space-1)', color: 'var(--white-a85)' }}>
                             <PostLink postId={post.id} hidden={!!post.title}>
-                              {post.content.length > 60 ? `${post.content.slice(0, 60)}...` : post.content}
+                              {excerpt(post.content, 60)}
                             </PostLink>
                           </div>
                           <div style={{ fontSize: '13px', color: 'var(--white-a50)' }}>
@@ -239,7 +180,7 @@ export function Community() {
 
             {/* 악기 탭 */}
             <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-5)', flexWrap: 'wrap' }}>
-              {INSTRUMENTS.map((instrument) => (
+              {FEED_INSTRUMENTS.map((instrument) => (
                 <button
                   key={instrument.id}
                   onClick={() => setSelectedInstrument(instrument.id)}
@@ -332,7 +273,7 @@ export function Community() {
                       <div style={{ flex: 1 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
                           <span style={{ fontSize: '18px' }}>
-                            {INSTRUMENTS.find(i => i.id === post.instrument)?.icon}
+                            {instrumentIcon(post.instrument)}
                           </span>
                           <span style={{ fontWeight: '600', fontSize: '14px', color: 'var(--white-a70)' }}>
                             {post.author_name}
@@ -349,7 +290,7 @@ export function Community() {
                         )}
                         <p style={{ fontSize: '14px', margin: '0 0 var(--space-2) 0', lineHeight: '1.5', color: 'var(--white-a85)' }}>
                           <PostLink postId={post.id} hidden={!!post.title}>
-                            {post.content.length > 100 ? `${post.content.slice(0, 100)}...` : post.content}
+                            {excerpt(post.content, 100)}
                           </PostLink>
                         </p>
                         <div

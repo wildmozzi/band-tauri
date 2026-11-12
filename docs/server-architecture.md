@@ -3,17 +3,19 @@
 작성: 2026-11-12, 기준 `origin/develop`(ce1628c). 결정의 출처는 [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md) D0·D4·D6이고, 이 문서는 그 결정을 서버에 풀어 쓴 상세 설계다. 둘이 다르면 ADR이 맞다.
 메시지 계약은 [overhaul/native-engine-design.md](overhaul/native-engine-design.md) 5절이다. **이 정리는 메시지 종류·필드·순서·에러 코드를 하나도 바꾸지 않는다.**
 
-이 문서는 설계만 담는다. 코드는 아직 그대로다(`services/wsService.ts` 1,586줄 한 파일).
+**상태(S5, 2026-11-12): S0~S4가 끝나 2절은 지금 코드의 모습이다.** 단계별 PR: S0 #82, S1 #86, S2 #87·#88·#89, S3 #93, S4 #99·#101·#104. `services/wsService.ts`(정리 전 1,586줄 한 파일)는 284줄 조립부가 되었고 메시지 처리는 `server/src/signaling/*` 22개 모듈(2,291줄)이 한다. 1절은 정리 **전** 지도라 기록으로 남긴다. 설계와 실제가 다른 곳은 2절 각 항목의 "실제:"에 적었다.
 
 ## 0. 범위
 
-- 대상: `server/src/services/wsService.ts`와 그것이 쓰는 `lib/roomPassword.ts`, `lib/roomCapacity.ts`, `lib/securityConfig.ts`, `services/relayToken.ts`, `repositories/roomRepository.ts`.
+- 대상(정리 전 기준): `server/src/services/wsService.ts`와 그것이 쓰는 `lib/roomPassword.ts`, `lib/roomCapacity.ts`, `lib/securityConfig.ts`, `services/relayToken.ts`, `repositories/roomRepository.ts`.
 - 대상 아님: HTTP 쪽(`routes/` → `services/` → `repositories/`)은 P3-5(#6)에서 이미 계층화됐다. 결제·게시글·스템·저장소는 합주 목표와 무관하고 지금 구조로 충분하다.
 - 불변 규칙(모든 단계): **서버는 클라이언트가 보낸 신원(`userId`·`isHost`·`from`·`isRejoin`)을 믿지 않는다.** 신원은 JWT(`verifyToken`), 권한은 DB(`rooms.host_id`, `free_join`)와 서버 메모리의 승인 기록이다. 유일한 예외는 `isInsecureDevMode`(Supabase 없음 + `NODE_ENV=development` + `ALLOW_INSECURE_WS=1`)다.
 
-## 1. 현재 책임 지도
+## 1. 정리 전 책임 지도 (S0 기준, 기록)
 
-`initializeWebSocket()` 하나가 클로저로 모든 상태와 핸들러를 가진다. 연결마다 `wss.on('connection')` 안의 클로저가 `client`·`id`를 잡고 `handleMessage`의 if 사슬(`auth` 포함 메시지 종류 21개)로 처리한다.
+> 이 절은 정리를 시작하기 전(ce1628c)의 코드를 설명한다. 함수·필드 이름은 그때 것이다(예: `Client.suspendTimer`는 지금 `Client.resume.timer`). 지금 위치는 2절을 본다. 1.2절의 결합 지점은 지금도 유효한 불변 조건이다.
+
+정리 전에는 `initializeWebSocket()` 하나가 클로저로 모든 상태와 핸들러를 가진다. 연결마다 `wss.on('connection')` 안의 클로저가 `client`·`id`를 잡고 `handleMessage`의 if 사슬(`auth` 포함 메시지 종류 21개)로 처리한다.
 
 ### 1.1 책임 묶음 (바뀌는 이유별)
 
@@ -53,21 +55,25 @@
 - 묶음별로 따로 테스트할 수 없다. 모든 테스트가 실제 WS 서버를 띄우는 통합 테스트다(그 자체는 좋지만, 순수 로직 — 정원 계산·이양 판정 — 까지 소켓과 `sleep`으로만 검증한다).
 - `handleLeave`·`handleJoin`의 결합이 암묵적이라, 새 방 단위 상태를 더할 때 정리 누락이 생기기 쉽다. 실제로 만료된 `recentlyLeft` 항목과 만료된 `approvals` 항목은 같은 사용자가 다시 올 때만 지워지고 정기 정리가 없다(`seatHolds`만 하트비트에서 정리). 동작 변경이라 구조 정리 밖에서 고친다(4.4절).
 
-## 2. 목표 구조
+## 2. 현재 구조 (S0~S4 결과)
 
 ### 2.1 폴더와 모듈 경계
 
 ```
+server/src/services/wsService.ts   조립부(284줄). initializeWebSocket: deps·limits를 정하고 팩토리로 상태 소유 모듈을 만들어
+                                   svc 하나로 묶고, wss 이벤트(접속 제한·welcome·auth 타이머·파싱·속도 제한·순차 체인·
+                                   하트비트·close → resume.suspendOnClose 또는 membership.handleLeave)를 연결.
+                                   S1의 재수출(parseCandidates·jwtExpiryMs 등)도 여기 있다 — index.ts·테스트의 import 경로 유지
 server/src/signaling/
-  index.ts          공개 입구. initializeWebSocket: deps·limits·상태를 만들고 모듈을 조립, wss 이벤트 연결
   protocol.ts       메시지 종류·에러 코드 상수, 수신/송신 메시지 타입(계약의 TS 표현), 길이 상한
   types.ts          Client, WsDeps, WsLimits(DEFAULT_LIMITS), WsOptions, LeaveReason
   registry.ts       [상태 소유] clients, rooms(멤버 집합). 조회·중계 도우미: roomMembers, getRoomPeer,
                     findRoomHost, broadcastToRoom, participants, isPerformer, send
-  connection.ts     A: 접속 제한, welcome, 메시지 파싱, 속도 제한, 순차 체인, 하트비트, close → 유예/최종 종료
+  connection.ts     A: clientIp (Fly-Client-IP 신뢰 규칙). 연결 수명 본체는 아직 조립부(wsService)에 있다 — 아래 "실제"
   rateLimit.ts      TokenBucket (순수)
-  auth.ts           B: handleAuth, 재인증, 토큰 만료 타이머, jwtExpiryMs
-  resume.ts         C: suspended, suspend/finalize/resume
+  auth.ts           B: handleAuth, 재인증, 토큰 만료 타이머, jwtExpiryMs. 재개는 resume을 부른다
+  resume.ts         C: suspended(createResume: drop·find·isSuspended·add·clearTimers), suspendOnClose,
+                    attachSession(연결 상태 이식·ctx 교체), announceResumed(재개 알림)
   roomMeta.ts       D: 방 정보 캐시·진행 중 조회 합치기, checkHost
   membership.ts     E: join/leave, room-state, 중복 연결 대체, 참가자 수 DB 디바운스
   capacity.ts       E: countRoomSeats, checkCapacity, seatHolds, recentlyLeft (소켓 없이 테스트 가능한 계산)
@@ -81,12 +87,13 @@ server/src/signaling/
   viewerRelay.ts    K: offer/answer/ice-candidate
   dispatch.ts       메시지 종류 → 핸들러 표, ping·auth 게이트, 공용 서비스 타입(SignalingServices)
   ctx.ts            연결 문맥 타입 Ctx<S> { ws, ip, client, id, svc } (S3)
-server/src/services/wsService.ts   한 줄짜리 재수출(export * from '../signaling') — index.ts·테스트의 import 경로 유지
 ```
+
+실제(설계와 다른 점): 설계는 `signaling/index.ts`가 조립하고 `services/wsService.ts`는 한 줄 재수출, 연결 수명은 `connection.ts`로 갈 계획이었다. 지금은 **조립과 연결 수명이 `services/wsService.ts`에 남아 있고** `signaling/index.ts`는 없다. 조립부는 `signaling/*`를 import하는 한 방향이고(역방향은 2.5절 검사가 금지), 연결 수명 코드는 `ctx`·`svc`를 만드는 곳과 떨어지지 않아 S3·S4에서 옮기지 않았다. 옮기는 일은 순수 이동이라 필요해질 때(예: 연결 수명 정책 변경) 한다. 그래서 계층 표의 5(`index`)는 지금 `services/wsService.ts`다.
 
 `services/relayToken.ts`(Rust 릴레이와 바이트 단위로 맞춘 형식), `lib/roomPassword.ts`, `lib/roomCapacity.ts`, `repositories/roomRepository.ts`는 그대로 둔다. HTTP 라우트와 함께 쓰는 코드다.
 
-파일 20개는 많아 보이지만 기준은 줄 수가 아니라 1.1절의 "바뀌는 이유"다(D0-1). `chat.ts`·`viewerRelay.ts`처럼 20줄 남짓인 것도 따로 두는 이유는 핸들러 표의 한 줄이 파일 하나에 대응해야 "이 메시지는 어디서 처리하나"의 답이 하나가 되기 때문이다. 반대로 `capacity.ts`와 `password.ts`를 `membership.ts`에서 떼는 이유는 소켓 없이 단위 테스트할 계산이라서다.
+파일 22개는 많아 보이지만 기준은 줄 수가 아니라 1.1절의 "바뀌는 이유"다(D0-1). `chat.ts`·`viewerRelay.ts`처럼 20줄 남짓인 것도 따로 두는 이유는 핸들러 표의 한 줄이 파일 하나에 대응해야 "이 메시지는 어디서 처리하나"의 답이 하나가 되기 때문이다. 반대로 `capacity.ts`와 `password.ts`를 `membership.ts`에서 떼는 이유는 소켓 없이 단위 테스트할 계산이라서다.
 
 **의존 방향**(아래만 의존, 순환 금지):
 
@@ -97,10 +104,12 @@ server/src/services/wsService.ts   한 줄짜리 재수출(export * from '../sig
 2  capacity · password · performers · metronome · requests · nativeSession · chat · viewerRelay
 3  membership · resume · auth                         (2의 정리 함수를 순서대로 부른다)
 4  dispatch · connection
-5  index
+5  index                                             (실제: 조립부 services/wsService.ts, signaling 밖)
 ```
 
 계층 2의 모듈끼리는 1.2절에 적은 간선만 허용한다: `nativeSession → metronome`(재전송·ssrc 변경 정지), `requests → performers`(승인 기록, 악기 변경), `performers → nativeSession`(연주 중단 시 ssrc 삭제). 이 세 간선은 **허용 목록**으로 고정한다(2.5절 검사).
+
+계층 3 안에도 순서가 있다(S4-1): **membership < resume < auth**. 허용 간선은 `resume → membership`(유예 만료 때 `handleLeave(close)`, 재개 때 `sendRoomState` — 2.6절·1.2-6)과 `auth → resume`(auth 메시지의 `resumeClientId`로 재개) 두 개이고, 계층 2의 세 간선과 같은 허용 목록에 둔다. 역방향 `membership → resume`·`resume → auth`는 순환이라 금지하고 음성 테스트로 고정한다. 그런데 membership의 중복 연결 정리는 유예 해제(`resume.drop`, 2.2절 표)를 불러야 한다. 이 한 곳만 import 대신 `svc.resume`(`createResume`가 만든 객체)을 `MembershipSvc`에 `{ drop(c): void }` 구조 타입으로 적어 부른다(순환 방지용 주입). 재개 흐름의 인증 필드(`authState`·`tokenExp`·만료 타이머)는 auth가 정하므로 resume은 auth를 모른다: auth가 `attachSession`(resume) → 인증 필드·만료 타이머(auth) → `announceResumed`(resume) 순으로 부른다.
 
 계층 0 안의 간선(예: `descriptor → protocol`의 타입 import, `supabaseDeps → roomDeps`)은 허용한다. 계층 0은 실행 상태가 없는 순수 코드라 서로 참조해도 결합이 생기지 않는다.
 
@@ -108,7 +117,7 @@ server/src/services/wsService.ts   한 줄짜리 재수출(export * from '../sig
 
 ### 2.2 공유 상태의 소유자
 
-규칙: **맵 하나에 쓰는 모듈은 하나.** 다른 모듈은 소유 모듈이 내놓은 함수로만 읽고 쓴다. 맵을 모듈 밖으로 내보내지 않는다.
+아래 표의 입구 이름은 설계 때 이름이다. 실제 함수 이름은 표 아래 "S4-3 구현 이름" 문단에 있다. 규칙: **맵 하나에 쓰는 모듈은 하나.** 다른 모듈은 소유 모듈이 내놓은 함수로만 읽고 쓴다. 맵을 모듈 밖으로 내보내지 않는다.
 
 | 상태 | 소유 모듈 | 다른 모듈이 쓰는 입구 |
 |---|---|---|
@@ -127,9 +136,10 @@ server/src/services/wsService.ts   한 줄짜리 재수출(export * from '../sig
 **`Client`는 객체 하나로 두되 필드를 소유 묶음으로 나눈다.** 연결당 상태의 메모리 상한이 연결 수라는 성질(키 바인딩 주석)과 세션 재개의 "옛 `Client`에 새 소켓 붙이기"를 유지하려면 한 객체가 맞다.
 
 ```ts
+// signaling/types.ts (S4-3, 설계대로)
 interface Client {
   id: string
-  conn:    { ws, ip, chain, pending, isAlive, msgBucket, chatBucket, joinBucket, dropped, lastRateLimitNotice }  // connection
+  conn:    { ws, ip, chain, pending, isAlive, msgBucket, chatBucket, joinBucket, dropped, lastRateLimitNotice }  // connection(조립부)
   auth:    { state, userId, tokenExp, expiryTimer }                                                              // auth
   resume:  { timer, pendingMetronomeStop }                                                                       // resume
   member:  { roomId, nickname, isHost }                                                                          // membership (isHost는 roomMeta.checkHost도 갱신)
@@ -138,51 +148,58 @@ interface Client {
 }
 ```
 
-`userId`는 `auth`만 쓴다. 다른 모듈에는 읽기 전용이다 — 불변 규칙의 코드 표현이다. 개발 모드에서 `join`의 `userId`를 받는 유일한 경로도 `auth.adoptInsecureUserId()`로 `auth` 안에 둔다.
+`userId`는 `auth`만 쓴다. 다른 모듈에는 읽기 전용이다 — 불변 규칙의 코드 표현이다. 설계는 개발 모드에서 `join`의 `userId`를 받는 유일한 경로도 `auth.adoptInsecureUserId()`로 `auth` 안에 두려 했다(실제는 아래).
+
+**실제(설계와 다른 점 1)**: `Client`는 위 여섯 묶음 그대로다(`signaling/types.ts`). 한 가지만 다르다 — 개발 모드의 `userId` 채택은 `auth.adoptInsecureUserId()`로 옮기지 않고 `membership.handleJoin` 첫머리에 남겼다. 계층 3 안 순서가 membership < resume < auth(2.1절)라 membership이 auth를 부를 수 없기 때문이다. 이 경로는 `isInsecureDevMode`일 때만 열리고 `Client` 주석에 유일한 예외로 적었다. "다른 모듈에는 읽기 전용"도 타입(`readonly`)으로 강제하지 않았다 — 쓰는 곳은 auth(검증·승격)와 이 개발 모드 경로뿐이고 `grep "auth.userId ="`로 감사한다.
 
 **퇴장 정리는 이벤트 버스가 아니라 `membership.leave()` 안의 고정된 호출 순서**로 쓴다. 순서가 곧 메시지 순서(1.2-1)이기 때문에 눈에 보여야 한다.
 
 ```ts
-function leave(client, roomId, reason) {
-  registry.removeFromRoom(roomId, client.id)
-  scheduleParticipantUpdate(roomId)
-  const approved = performers.onLeave(client, roomId, reason)   // 승인: leave/move 삭제, close 유예. 승인 기록이 남았으면 true
-  capacity.onLeave(client, roomId, reason, approved)            // 자리 예약(연주 중이었거나 approved), 재입장 기록
-  requests.onLeave(client, roomId)                // 방장에게 *-cancelled
-  registry.broadcastLeft(roomId, client.id)       // participant-left
-  metronome.onMemberLeft(roomId, client.id)
-  if (registry.roomSize(roomId) === 0) { requests.onRoomEmpty(roomId); metronome.onRoomEmpty(roomId); roomMeta.forget(roomId) }
+// signaling/membership.ts handleLeave (S4-2) — 주석 번호가 단계 번호
+function handleLeave(svc, client, roomId, reason) {
+  if (!registry.hasRoom(roomId)) return
+  registry.removeFromRoom(roomId, id); scheduleParticipantUpdate(svc, roomId)   // 1
+  const approved = performers.onLeave(client, roomId, reason)                    // 2 승인: leave/move 삭제, close 유예. 남았으면 true
+  capacity.onLeave(client, roomId, reason, approved)                             // 3 자리 예약(연주 중이었거나 approved), 재입장 기록
+  requests.onLeave(roomId, id, registry.findRoomHost(roomId))                    // 4 방장에게 *-cancelled
+  registry.broadcastLeft(roomId, id)                                             // 5 participant-left
+  metronome.onMemberLeft(roomId, id)                                             // 6
+  if (registry.roomSize(roomId) === 0) {                                         // 7
+    registry.deleteRoom(roomId); requests.onRoomEmpty(roomId); metronome.onRoomEmpty(roomId); roomMeta.forget(roomId)
+  }
 }
 ```
 
+`join`도 단계 함수다(S4-2): `handleJoin`이 방 확인 → 비밀번호 → 정원(마지막 `await`)까지 하고 결과를 `JoinPlan`으로 넘기면, `admitToRoom`이 **동기 구간**(이동 → 중복 정리 → 추가·알림)을 `await` 없이 끝낸다(1.2-2). `admitToRoom`이 `void`를 돌려주는 것을 타입으로 고정했다.
+
 자리 예약 판정은 승인 기록이 있는지를 본다. `capacity`가 `performers`를 직접 부르지 않도록 `membership`이 그 값을 넘긴다(계층 2 사이 간선을 늘리지 않음).
+
+S4-3 구현 이름(위 표의 입구와 대응): registry `getClient`·`clientCount`·`allClients`·`hasRoom`·`isInRoom`·`roomSize`·`roomMemberIds`·`roomMembers`·`deleteRoom`·`broadcastLeft`, capacity `checkCapacity`·`hasSeatHold`·`hold`·`clearSeatHold`·`noteLeft`·`consumeRejoin`·`onLeave`·`sweep`(`countRoomSeats`는 내부), performers `hasApproval`·`setApproval`·`clearApproval`·`onLeave`·`releaseGraceOnRejoin`, metronome `replayMetronome`·`dropMetronomeIfHostChanged`·`onEngineRestart`·`onEngineDown`·`onMemberLeft`·`onRoomEmpty`(+ 자기 핸들러용 `isRunningBy`·`update`), requests `pendingFor`·`onLeave`·`onRoomEmpty`(+ 자기 핸들러용 `performList`·`instrumentList`), resume `drop`·`find`·`isSuspended`·`add`·`clearTimers`. 팩토리가 함수만 돌려주는지는 `signaling-units.test.ts` "state ownership"이 검사한다.
+
+**실제(설계와 다른 점 2)**: 맵을 숨기면서 `signaling-units.test.ts`의 내부 정리 확인 3개(만료된 자리 예약이 읽을 때 지워짐, `sweep`이 빈 방 항목을 지움, 빈 승인 맵을 지움)는 맵을 직접 볼 수 없어 **공개 결과**(`hasSeatHold`·`hasApproval`이 false) 확인으로 바꿨다(S4-3 #104). "결과가 맞다"는 보지만 "맵에 항목이 남지 않는다(메모리)"는 더 이상 보지 않는다 — 검사가 약해진 부분이다. 메모리 누수 쪽은 4.4-2(정기 정리)를 고칠 때 팩토리에 크기 조회(`size()`류)를 더해 다시 덮는다.
 
 ### 2.3 메시지 디스패치
 
-if 사슬을 **표**로 바꾼다. 표는 일반 객체이고 클래스·등록 API·미들웨어 체인은 만들지 않는다.
+if 사슬을 **표**로 바꿨다(S3, `signaling/dispatch.ts`). 표는 프로토타입 없는 일반 객체이고 클래스·등록 API·미들웨어 체인은 만들지 않는다.
 
 ```ts
-type Handler = (ctx: Ctx, msg: Msg) => void | Promise<void>
+type Handler = (ctx: ConnCtx, msg: Msg) => void | Promise<void>
 const handlers: Record<string, Handler> = {
-  'join': membership.handleJoin,
-  'leave': membership.handleLeave,
-  'start-performing': performers.handleStart,
-  'stop-performing': performers.handleStop,
-  'offer': viewerRelay.handle, 'answer': viewerRelay.handle, 'ice-candidate': viewerRelay.handle,
-  'native-descriptor': nativeSession.handleDescriptor,
-  'native-leave': nativeSession.handleLeave,
-  'relay-token-request': nativeSession.handleTokenRequest,
-  'metronome': metronome.handle,
-  'chat': chat.handle,
-  'request-perform': requests.handleRequest,
-  'approve-perform': requests.handleApprove,   // … 나머지 요청 계열 6개
+  'join': handleJoin, 'leave': handleLeaveMessage,                              // membership
+  'start-performing': handleStartPerforming, 'stop-performing': handleStopPerforming,  // performers
+  'offer': handleViewerSignal, 'answer': handleViewerSignal, 'ice-candidate': handleViewerSignal,  // viewerRelay
+  'native-descriptor': handleNativeDescriptor, 'native-leave': handleNativeLeave,
+  'relay-token-request': handleRelayTokenRequest,                               // nativeSession
+  'metronome': handleMetronome,                                                 // metronome
+  'chat': handleChat,                                                           // chat
+  'request-perform': handleRequestPerform, 'approve-perform': handleApprovePerform,  // requests … 요청 계열 8개
 }
 ```
 
 - `dispatch(ctx, msg)`: `ping`이면 `pong`(신원 무관), `auth`면 `auth.handle`, 아직 `pending`/`verifying`이면 `auth-required` 에러, 그 밖에는 표에서 찾아 호출, 없으면 무시. 지금 `handleMessage`의 앞 세 분기와 같다. `ping`은 `connection`이 아니라 `dispatch` 안에 둔다: 속도 제한·순차 체인을 거친 뒤에 처리돼야 하고, `connection`(계층 4)이 `dispatch`를 부르므로 반대 방향 import는 순환이 된다.
-- **선행 조건은 핸들러 안에 둔다.** "방 안인가", "인증됐는가", "연주자인가"를 표의 속성으로 올리고 싶어지지만, 지금 코드는 같은 조건의 실패를 메시지마다 다르게 다룬다(`start-performing`은 `login-required` 에러, `native-descriptor`는 조용히 무시, `request-perform`은 에러 두 개). 속성으로 올리면 그 차이를 다시 예외로 뚫어야 한다. 대신 `registry`/`auth`에 `inRoom(ctx)`, `isAuthenticated(client)` 같은 한 줄 판정 함수를 두고 핸들러 첫 줄에서 부른다.
+- **선행 조건은 핸들러 안에 둔다.** "방 안인가", "인증됐는가", "연주자인가"를 표의 속성으로 올리고 싶어지지만, 지금 코드는 같은 조건의 실패를 메시지마다 다르게 다룬다(`start-performing`은 `login-required` 에러, `native-descriptor`는 조용히 무시, `request-perform`은 에러 두 개). 속성으로 올리면 그 차이를 다시 예외로 뚫어야 한다. 대신 `registry`의 한 줄 판정 함수(`isAuthenticated(client)`, `isPerformer(client)`, `isInRoom(roomId, id)`)를 핸들러 첫 줄에서 부른다.
 - 승인 계열 네 개가 공유하는 방장 재확인(`refreshHost` 뒤 `client.roomId !== roomId` 재검사)은 `requests` 안의 `requireHost(ctx)` 도우미 하나다.
-- **`ctx`는 연결의 "현재 Client"를 가리키는 가변 참조**다: `{ ws, ip, client, id, svc }`(S3, `ctx.ts`). `ws`·`ip`는 이 연결의 것이라 바뀌지 않고, 자기에게 보내는 응답은 `client.ws`가 아니라 `ctx.ws`로 보낸다(재개 뒤 `client.ws`는 새 연결 소켓일 수 있다). `svc`는 서버 인스턴스 하나의 공용 서비스 객체로 모든 연결이 같은 참조를 가진다. 타입은 `Ctx<S>`로 매개변수화해 계층 2 모듈은 자기가 쓰는 조각(`…Svc`)만 적고, 전체 모양 `SignalingServices`는 `dispatch`(계층 4)가 정한다 — `ctx`가 계층 2의 타입을 import하면 의존 방향이 거꾸로 서기 때문이다. 세션 재개(`resumeSession`)는 S3에서 아직 조립부(wsService)에 있고 `svc.resumeSession`으로 `auth`에 주입된다(`resume.ts` 분리는 S4). 세션 재개가 `client`를 바꿔 끼우기 때문에(1.2-6) 핸들러가 `Client`를 직접 캡처하면 안 된다. 핸들러 안에서 `const client = ctx.client`로 잡은 값은 그 메시지 처리 동안만 쓴다(재개는 `auth` 메시지 처리 중에만 일어나고 체인이 순차라 안전하다).
+- **`ctx`는 연결의 "현재 Client"를 가리키는 가변 참조**다: `{ ws, ip, client, id, svc }`(S3, `ctx.ts`). `ws`·`ip`는 이 연결의 것이라 바뀌지 않고, 자기에게 보내는 응답은 `client.ws`가 아니라 `ctx.ws`로 보낸다(재개 뒤 `client.ws`는 새 연결 소켓일 수 있다). `svc`는 서버 인스턴스 하나의 공용 서비스 객체로 모든 연결이 같은 참조를 가진다. 타입은 `Ctx<S>`로 매개변수화해 계층 2 모듈은 자기가 쓰는 조각(`…Svc`)만 적고, 전체 모양 `SignalingServices`는 `dispatch`(계층 4)가 정한다 — `ctx`가 계층 2의 타입을 import하면 의존 방향이 거꾸로 서기 때문이다. 세션 재개는 S3까지 조립부(wsService)에 있다가 S4-1에서 `resume.ts`로 옮겼다(`auth`가 import해서 부른다, 위 2.1절 계층 3 순서). 세션 재개가 `client`를 바꿔 끼우기 때문에(1.2-6) 핸들러가 `Client`를 직접 캡처하면 안 된다. 핸들러 안에서 `const client = ctx.client`로 잡은 값은 그 메시지 처리 동안만 쓴다(재개는 `auth` 메시지 처리 중에만 일어나고 체인이 순차라 안전하다).
 - 속도 제한·대기 상한·JSON 파싱·순차 체인은 `connection`에 남는다. `dispatch`는 체인 안에서 불린다.
 
 ### 2.4 단일 인스턴스 가정의 한계
@@ -220,10 +237,10 @@ const handlers: Record<string, Handler> = {
 | `ws.test.ts` | 연주 권한, 개발 모드, 중계 역할, 채팅, 속도 제한, 메트로놈, 키 바인딩, descriptor 검증 | 이동 단계에서 **한 줄도 고치지 않는다** |
 | `ws-session.test.ts` | 연주자 상한, 세션 재개, rejoin 알림 | 〃 |
 | `room-capacity.test.ts`, `room-password.test.ts`, `relay-token.test.ts` | 정원, 비밀번호, 릴레이 토큰 | 〃 |
-| `ws-transcript.test.ts` (새로) | 메시지 포맷 불변 기준(3.2절) | S0에서 추가 |
-| `ws-identity.test.ts` (새로) | 모듈별 신원 불신 테스트(아래 표) 중 빈 것 | S0에서 추가 |
-| `signaling-units.test.ts` (새로) | 소켓 없이: `capacity`(자리 계산), `metronome.dropIfHostChanged`, `roomMeta`(캐시·진행 중 조회), `descriptor` | 해당 모듈이 떨어져 나오는 단계에서 추가 |
-| `signaling-architecture.test.ts` (새로) | `signaling/*.ts`의 import 간선이 2.1절 계층·허용 목록 안인지 검사(엔진 `tests/architecture.rs`와 같은 역할, 예외 목록은 고정 상수) | S2에서 추가 |
+| `ws-transcript.test.ts` | 메시지 포맷 불변 기준(3.2절) | S0에서 추가 |
+| `ws-identity.test.ts` | 모듈별 신원 불신 테스트(아래 표) 중 빈 것 | S0에서 추가 |
+| `signaling-units.test.ts` | 소켓 없이: `capacity`(자리 계산), `metronome.dropIfHostChanged`, `roomMeta`(캐시·진행 중 조회), `descriptor` | 해당 모듈이 떨어져 나오는 단계에서 추가 |
+| `signaling-architecture.test.ts` | `signaling/*.ts`의 import 간선이 2.1절 계층·허용 목록 안인지 검사(엔진 `tests/architecture.rs`와 같은 역할, 예외 목록은 고정 상수) | S2에서 추가 |
 
 서버에는 ESLint가 없다. 경계 검사 하나 때문에 린트 도구를 들이지 않고, import 문을 읽는 60줄 남짓의 테스트로 강제한다(D0-3 "규칙은 도구가 강제").
 
@@ -269,14 +286,14 @@ authenticated ─(토큰 만료 + 60초)→ 4001 종료
 
 이동 PR(코드를 옮기기만, 리뷰는 "같은 코드인가")과 재배치 PR(책임·모양을 바꿈, 리뷰는 "같은 동작인가")을 나눈다(D0-5). 각 PR은 서버만 건드린다.
 
-| 단계 | 종류 | 내용 | 크기 |
-|---|---|---|---|
-| **S0** | 테스트만 | 특성 테스트로 그물 치기: `ws-transcript.test.ts`(+ 기준 파일), `ws-identity.test.ts`(2.5절 빈 곳), 지금 테스트가 없는 흐름(악기 변경 요청 6종, 토큰 만료 4001, 하트비트 타임아웃, 대기 메시지 상한, IP 연결 수 감소, 재인증 승격). **`src/`는 한 줄도 바꾸지 않는다** | 테스트 +400줄 |
-| **S1** | 이동 | 클로저 밖에 이미 있는 순수 코드를 파일로: `protocol`(상수), `types`, `rateLimit`, `descriptor`, `metronome`의 `parseMetronomeState`, `auth`의 `jwtExpiryMs`, `connection`의 `clientIp`, `roomDeps`·`supabaseDeps`. `services/wsService.ts`는 재수출로 남긴다 | −370줄 이동 |
-| **S2** | 이동 | 클로저 안의 도우미를 `createX(state…)` 팩토리로 꺼낸다(본문은 복사, 캡처하던 변수만 인자로): `registry`, `roomMeta`, `capacity`, `password`, `performers`(승인), `metronome`(재전송·이양), `nativeSession`(토큰·바인딩 판정), `requests`(맵). `handleMessage`의 if 사슬과 `handleJoin`·`handleLeave` 본문은 **그 자리에 둔 채** 새 함수를 부르게만 한다. `signaling-architecture.test.ts`·`signaling-units.test.ts` 추가 | −500줄 이동 |
-| **S3** | 재배치 | 디스패치 표 + `ctx`. if 사슬의 분기 본문을 각 모듈의 `handle*`로 옮긴다. 연결 클로저의 `let client`·`let id`를 `ctx`로 | 분기 21개 |
-| **S4** | 재배치 | `membership.leave()`의 호출 순서 명시(2.2절), `handleJoin`을 단계 함수로(방 확인 → 비밀번호 → 정원 → 이동 → 중복 정리 → 추가·알림. 동기 구간에 주석과 테스트), `Client` 필드를 소유 묶음으로, 맵을 모듈 밖으로 내보내지 않기 | |
-| **S5** | 문서 | native-engine-design 5절 제목의 파일 경로, CLAUDE.md 구조 절, relay-design·README의 `wsService.ts` 언급 갱신. 이 문서의 "목표"를 "현재"로 | |
+| 단계 | 종류 | 내용 | 크기 | 결과 |
+|---|---|---|---|---|
+| **S0** | 테스트만 | 특성 테스트로 그물 치기: `ws-transcript.test.ts`(+ 기준 파일), `ws-identity.test.ts`(2.5절 빈 곳), 지금 테스트가 없는 흐름(악기 변경 요청 6종, 토큰 만료 4001, 하트비트 타임아웃, 대기 메시지 상한, IP 연결 수 감소, 재인증 승격). **`src/`는 한 줄도 바꾸지 않는다** | 테스트 +400줄 | 완료 #82 |
+| **S1** | 이동 | 클로저 밖에 이미 있는 순수 코드를 파일로: `protocol`(상수), `types`, `rateLimit`, `descriptor`, `metronome`의 `parseMetronomeState`, `auth`의 `jwtExpiryMs`, `connection`의 `clientIp`, `roomDeps`·`supabaseDeps`. `services/wsService.ts`는 재수출로 남긴다 | −370줄 이동 | 완료 #86 |
+| **S2** | 이동 | 클로저 안의 도우미를 `createX(state…)` 팩토리로 꺼낸다(본문은 복사, 캡처하던 변수만 인자로): `registry`, `roomMeta`, `capacity`, `password`, `performers`(승인), `metronome`(재전송·이양), `nativeSession`(토큰·바인딩 판정), `requests`(맵). `handleMessage`의 if 사슬과 `handleJoin`·`handleLeave` 본문은 **그 자리에 둔 채** 새 함수를 부르게만 한다. `signaling-architecture.test.ts`·`signaling-units.test.ts` 추가 | −500줄 이동 | 완료 #87·#88·#89 (세 번에 나눔) |
+| **S3** | 재배치 | 디스패치 표 + `ctx`. if 사슬의 분기 본문을 각 모듈의 `handle*`로 옮긴다. 연결 클로저의 `let client`·`let id`를 `ctx`로 | 분기 21개 | 완료 #93 (wsService 955→351줄) |
+| **S4** | 재배치 | `membership.leave()`의 호출 순서 명시(2.2절), `handleJoin`을 단계 함수로(방 확인 → 비밀번호 → 정원 → 이동 → 중복 정리 → 추가·알림. 동기 구간에 주석과 테스트), `Client` 필드를 소유 묶음으로, 맵을 모듈 밖으로 내보내지 않기 | | 완료 #99(S4-1 resume.ts 분리, 계층 3 순서) · #101(S4-2 leave 7단계·join 단계 함수) · #104(S4-3 Client 묶음·맵 숨기기). wsService 284줄 |
+| **S5** | 문서 | native-engine-design 5절 제목의 파일 경로, CLAUDE.md 구조 절, relay-design·README의 `wsService.ts` 언급 갱신. 이 문서의 "목표"를 "현재"로 | | 이 문서 갱신(2026-11-12) |
 
 S2가 가장 크다. 리뷰가 어려우면 모듈 두세 개씩 나눠 올린다(각각 독립적으로 병합 가능 — 사슬이 그대로라서).
 

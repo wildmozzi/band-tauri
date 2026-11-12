@@ -1,20 +1,13 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import { usePremium, ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLANNED_NOTICE, plannedFeaturesFor } from '../payment'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { useRequireAuth, useProfileNicknameQuery, useSaveProfileMutation, useUpdateUserMetadataMutation } from '../auth'
-import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
+import { useRequireAuth } from '../auth'
+import { tabFromQuery, type ProfileTab } from './profileForm'
+import { useProfileForm } from './useProfileForm'
 import './profileDetails.css'
 import './Profile.css'
 import { Button } from '../../shared/ui/Button'
-
-type ProfileTab = 'info' | 'follow' | 'plan' | 'theme' | 'support'
-const PROFILE_TABS: readonly ProfileTab[] = ['info', 'follow', 'plan', 'theme', 'support']
-
-/** ?tab=plan 처럼 탭을 지정해 열 수 있다 (결제 화면의 '요금제 관리' 안내 링크) */
-function tabFromQuery(value: string | null): ProfileTab {
-  return PROFILE_TABS.find(t => t === value) ?? 'info'
-}
 
 /**
  * 로그인 확인이 끝난 뒤에만 프로필 화면을 만든다 (P3-10f 공통 가드).
@@ -29,111 +22,23 @@ export function Profile() {
 function ProfileContent({ user }: { user: User }) {
   const { userPlan } = usePremium()
   const navigate = useNavigate()
-  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const [searchParams] = useSearchParams()
   const [activeTab, setActiveTab] = useState<ProfileTab>(() => tabFromQuery(searchParams.get('tab')))
-  const [isEditing, setIsEditing] = useState(false)
-  const saveProfile = useSaveProfileMutation()
-  const updateMetadata = useUpdateUserMetadataMutation()
-  const isSaving = saveProfile.isPending
   const [isHoveringPhoto, setIsHoveringPhoto] = useState(false)
-
-  // 프로필 정보 상태
-  const [nickname, setNickname] = useState('')
-  const [originalNickname, setOriginalNickname] = useState('')
-  const [bio, setBio] = useState(user?.user_metadata?.bio || '')
-  const [snsLinks, setSnsLinks] = useState({
-    instagram: user?.user_metadata?.instagram || '',
-    youtube: user?.user_metadata?.youtube || '',
-    twitter: user?.user_metadata?.twitter || '',
-  })
-  const [profilePhoto, setProfilePhoto] = useState(user?.user_metadata?.profile_photo || '')
-
-  // 닉네임: user_metadata 우선, 없으면 profiles 테이블에서 가져온다
-  const metadataNickname: string | undefined = user?.user_metadata?.nickname || undefined
-  const { data: profileNickname } = useProfileNicknameQuery(user?.id, !metadataNickname)
-  const { mutate: syncMetadata } = updateMetadata
-
-  useEffect(() => {
-    if (!user?.id || !metadataNickname) return
-    setNickname(metadataNickname)
-    setOriginalNickname(metadataNickname)
-  }, [user?.id, metadataNickname])
-
-  useEffect(() => {
-    if (metadataNickname || !profileNickname) return
-    setNickname(profileNickname)
-    setOriginalNickname(profileNickname)
-    // user_metadata도 업데이트
-    syncMetadata({ nickname: profileNickname })
-  }, [metadataNickname, profileNickname, syncMetadata])
-
-  const handlePhotoClick = () => {
-    fileInputRef.current?.click()
-  }
-
-  const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-
-    // 이미지를 base64로 변환
-    const reader = new FileReader()
-    reader.onload = async (event) => {
-      const base64Image = event.target?.result as string
-      setProfilePhoto(base64Image)
-
-      // Supabase에 저장
-      if (isSupabaseConfigured()) {
-        try {
-          await updateMetadata.mutateAsync({ profile_photo: base64Image })
-        } catch (err) {
-          console.error('Failed to update profile photo:', err)
-          alert('프로필 사진 업데이트에 실패했습니다.')
-        }
-      }
-    }
-    reader.readAsDataURL(file)
-  }
-
-  const handleSave = async () => {
-    if (!isSupabaseConfigured() || !user?.id) {
-      alert('데이터베이스에 연결할 수 없습니다.')
-      return
-    }
-
-    try {
-      // auth user_metadata + profiles 테이블
-      await saveProfile.mutateAsync({
-        userId: user.id,
-        form: {
-          nickname,
-          bio,
-          instagram: snsLinks.instagram,
-          youtube: snsLinks.youtube,
-          twitter: snsLinks.twitter,
-        },
-      })
-
-      setOriginalNickname(nickname)
-      setIsEditing(false)
-      alert('프로필이 업데이트되었습니다.')
-    } catch (err) {
-      console.error('Failed to update profile:', err)
-      alert('프로필 업데이트에 실패했습니다.')
-    }
-  }
-
-  const handleCancel = () => {
-    setNickname(originalNickname)
-    setBio(user?.user_metadata?.bio || '')
-    setSnsLinks({
-      instagram: user?.user_metadata?.instagram || '',
-      youtube: user?.user_metadata?.youtube || '',
-      twitter: user?.user_metadata?.twitter || '',
-    })
-    setIsEditing(false)
-  }
+  const {
+    fileInputRef,
+    isEditing, setIsEditing,
+    isSaving,
+    nickname, setNickname,
+    bio, setBio,
+    snsLinks, setSnsLinks,
+    profilePhoto,
+    handlePhotoClick,
+    handlePhotoChange,
+    handleSave,
+    handleCancel,
+  } = useProfileForm(user)
 
   return (
     <div className="profile-page">

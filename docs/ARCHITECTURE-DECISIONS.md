@@ -51,8 +51,10 @@
 ## D4. 서버(server/src) — 다음 라운드
 `services/wsService.ts`(1,586줄)가 시그널링 전체(연결 수명·방 멤버십·연주자 상태·메트로놈·릴레이 토큰·descriptor 검증)를 가진 신 파일이다. 엔진·프런트 정리 뒤 세 번째 라운드로: `docs/server-architecture.md`를 먼저 쓰고, 연결 수명 / 방 멤버십·정원 / 연주 세션(descriptor·키 바인딩·릴레이 토큰) / 메트로놈 / 채팅·요청으로 나눈다. 불변 규칙: 서버는 클라이언트가 보낸 신원을 믿지 않는다(JWT·DB) — 각 모듈에 테스트.
 
+- **계층 3 내부 순서(2026-11-12, S4-1)**: `membership < resume < auth`. 허용 간선은 `resume → membership`(유예 만료 시 퇴장·재개 시 방 상태), `auth → resume`(세션 재개) 둘뿐이며 `signaling-architecture.test.ts`의 `SAME_LAYER_ALLOWED`에 적는다(예외가 아니라 규칙, 역방향은 음성 테스트로 막음). 순환을 낳는 `membership → resume`(중복 연결 정리의 `drop`)은 import 없이 `svc.resume` 구조 타입 한 곳으로 주입한다. 상세: [server-architecture.md](server-architecture.md) 2.1절.
+
 ## D5. 모델·진행 방식
-- 설계·구조 결정은 이 문서(코디네이터). 구현·문서 확장·리뷰 작업자는 **Opus 5.5**(`--model opus`). 작은 문서·테스트·CSS PR은 코디네이터가 직접 리뷰.
+- 설계·구조 결정은 이 문서(코디네이터). 구현·문서 확장·리뷰 작업자는 기본 **Opus 5.5**(`--model opus`), 가장 복잡한 작업(엔진 ③ 소유권 재배치와 그 리뷰, ②b·⑩ 설계, GOAL 미달 분석)만 Fable 5.2. 작은 문서·테스트·CSS PR은 코디네이터가 직접 리뷰.
 - 구조 정리 PR은 반드시 검토자(설계 부합·경계·응집·과한 추상화·동작 불변 근거).
 
 ## D6. 동작 불변 증거(병합 조건)

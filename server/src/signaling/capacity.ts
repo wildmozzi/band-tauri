@@ -1,14 +1,15 @@
 import { ipBucket } from '../lib/roomPassword'
+import { APPROVAL_GRACE_MS, REJOIN_WINDOW_MS } from './protocol'
 import type { Registry } from './registry'
-import type { Client, WsLimits } from './types'
+import type { Client, LeaveReason, WsLimits } from './types'
 
 /**
  * 정원·자리 예약·재입장 기록 (설계 docs/server-architecture.md 2.1절 E, 계층 2).
- * seatHolds·recentlyLeft의 소유자. S2에서는 handleLeave가 그대로라 맵도 내보낸다(S4에서 hold/noteLeft로 감춤).
+ * seatHolds·recentlyLeft의 소유자. 맵은 내보내지 않는다(S4-3): 입장은 checkCapacity·hasSeatHold·clearSeatHold·consumeRejoin, 퇴장은 onLeave.
  * 모든 함수는 동기다: handleJoin의 마지막 await 뒤 ~ rooms 추가 구간(1.2-2)에서 불린다.
  */
 export function createCapacity(registry: Registry, limits: WsLimits) {
-  const { rooms, clients } = registry
+  const { roomMemberIds, getClient } = registry
   /** roomId → (userId → 만료 시각). 연결이 끊긴 사용자 (서버 판정 rejoin, M1) */
   const recentlyLeft = new Map<string, Map<string, number>>()
   /** roomId → (userId → 만료 시각). 유예 밖으로 끊긴 연주자·승인 보유자의 자리 예약: 이 동안 재입장은 정원 검사를 건너뛴다 (PR #23 M2) */
@@ -19,17 +20,17 @@ export function createCapacity(registry: Registry, limits: WsLimits) {
    * members = 로그인 사용자(userId 있음), anonymous = 익명 관람자, anonymousFromIp = 그중 같은 IP(/64)에서 온 연결.
    */
   function countRoomSeats(roomId: string, self: Client): { total: number; members: number; anonymous: number; anonymousFromIp: number } {
-    const bucket = ipBucket(self.ip)
+    const bucket = ipBucket(self.conn.ip)
     const seats = { total: 0, members: 0, anonymous: 0, anonymousFromIp: 0 }
-    for (const pid of rooms.get(roomId) || []) {
+    for (const pid of roomMemberIds(roomId)) {
       if (pid === self.id) continue
-      const c = clients.get(pid)
-      if (self.userId && c?.userId === self.userId) continue
+      const c = getClient(pid)
+      if (self.auth.userId && c?.auth.userId === self.auth.userId) continue
       seats.total++
-      if (c?.userId) seats.members++
+      if (c?.auth.userId) seats.members++
       else {
         seats.anonymous++
-        if (c && ipBucket(c.ip) === bucket) seats.anonymousFromIp++
+        if (c && ipBucket(c.conn.ip) === bucket) seats.anonymousFromIp++
       }
     }
     return seats
@@ -43,7 +44,7 @@ export function createCapacity(registry: Registry, limits: WsLimits) {
    */
   function checkCapacity(roomId: string, self: Client, capacity: number): 'room-full' | 'anonymous-limit' | null {
     const seats = countRoomSeats(roomId, self)
-    if (self.userId) return seats.members >= capacity ? 'room-full' : null
+    if (self.auth.userId) return seats.members >= capacity ? 'room-full' : null
     if (seats.total >= capacity) return 'room-full'
     if (seats.anonymous >= limits.maxAnonymousPerRoom || seats.anonymousFromIp >= limits.maxAnonymousPerIpPerRoom) return 'anonymous-limit'
     return null
@@ -77,6 +78,30 @@ export function createCapacity(registry: Registry, limits: WsLimits) {
     return exp > Date.now()
   }
 
+  /**
+   * 퇴장 정리 단계 (membership.leave, 설계 2.2절). approved = performers.onLeave가 돌려준 "승인 기록이 남았나".
+   * - 명시적 퇴장/방 이동: 자리 예약 삭제
+   * - 연결 끊김: 연주 중이었거나 승인을 가진 사용자는 승인 유예와 같은 시간 동안 자리 예약 (PR #23 M2), 재입장 기록
+   */
+  function onLeave(client: Client, roomId: string, reason: LeaveReason, approved: boolean) {
+    if (!client.auth.userId) return
+    if (reason === 'leave' || reason === 'move') clearSeatHold(roomId, client.auth.userId)
+    if (reason === 'close' && (client.perform.isPerforming || approved)) hold(roomId, client.auth.userId, Date.now() + APPROVAL_GRACE_MS)
+    if (reason === 'close') noteLeft(roomId, client.auth.userId, Date.now() + REJOIN_WINDOW_MS)
+  }
+
+  /** 자리 예약: expiresAt까지 이 사용자의 재입장은 정원 검사를 건너뛴다 */
+  function hold(roomId: string, userId: string, expiresAt: number) {
+    if (!seatHolds.has(roomId)) seatHolds.set(roomId, new Map())
+    seatHolds.get(roomId)!.set(userId, expiresAt)
+  }
+
+  /** 재입장 기록: expiresAt까지 이 사용자의 재입장은 서버 판정 rejoin이다 (consumeRejoin이 한 번 소비) */
+  function noteLeft(roomId: string, userId: string, expiresAt: number) {
+    if (!recentlyLeft.has(roomId)) recentlyLeft.set(roomId, new Map())
+    recentlyLeft.get(roomId)!.set(userId, expiresAt)
+  }
+
   /** 만료된 자리 예약 정리 (하트비트, L4) */
   function sweep(now: number) {
     for (const [roomId, holds] of seatHolds) {
@@ -85,7 +110,7 @@ export function createCapacity(registry: Registry, limits: WsLimits) {
     }
   }
 
-  return { seatHolds, recentlyLeft, countRoomSeats, checkCapacity, hasSeatHold, clearSeatHold, consumeRejoin, sweep }
+  return { checkCapacity, hasSeatHold, hold, clearSeatHold, noteLeft, consumeRejoin, onLeave, sweep }
 }
 
 export type Capacity = ReturnType<typeof createCapacity>
