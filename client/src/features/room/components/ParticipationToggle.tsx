@@ -1,4 +1,4 @@
-import { useRoom } from '../state/RoomContext'
+import { useRoomPerform, useRoomMixer, useRoomRequests } from '../state/roomHooks'
 import { MAX_PERFORMERS } from '../../../native/engineApi'
 import { DesktopDownloadButton } from '../../../shared/ui/DesktopDownloadButton'
 import { INSTRUMENT_INFO } from '../roomDetailModel'
@@ -23,17 +23,9 @@ export function ParticipationToggle({
   onBecomeViewer: () => void
   onStartAfterApproval: () => void
 }) {
-  const {
-    canPerform,
-    performStarting,
-    rtcError,
-    myRequestStatus,
-    myRequestInstrument,
-    myRejectReason,
-    hostOnline,
-    cancelRequest,
-    dismissRejection,
-  } = useRoom()
+  const { canPerform, performStarting } = useRoomPerform()
+  const { rtcError } = useRoomMixer()
+  const { myRequestStatus, myRequestInstrument, myRejectReason, hostOnline, cancelRequest, dismissRejection } = useRoomRequests()
 
   return (
     <div className="participation-toggle">

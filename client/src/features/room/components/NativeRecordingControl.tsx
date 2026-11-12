@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useRoom } from '../state/RoomContext'
+import { useRoomPerform, useRoomTelemetry } from '../state/roomHooks'
 import {
   engineRecordFolder,
   engineRecordPickFolder,
@@ -42,7 +42,8 @@ export function NativeRecordingControl({
   peers: { peerId: string; name: string }[]
   roomTitle?: string | null
 }) {
-  const { engineStats, isPerforming } = useRoom()
+  const { isPerforming } = useRoomPerform()
+  const { engineStats } = useRoomTelemetry('engineStats')
   // 시작 응답(다음 통계 폴링 전까지 녹음 중으로 보이게)과 내가 정지한 세션 폴더(정지 전에 출발한 폴링 응답이
   // 늦게 와도 다시 녹음 중으로 보이지 않게) — PR #49 M2
   const [started, setStarted] = useState<RecordStats | null>(null)

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
-import { useRoom } from './state/RoomContext'
+import { useRoomConnection, useRoomPerform, useRoomMixer, useRoomRequests, useRoomRecording } from './state/roomHooks'
 import { MAX_PERFORMERS } from '../../native/engineApi'
 import { instrumentUsage } from './roomDetailModel'
 import { useRoomDetailData } from './hooks/useRoomDetailData'
@@ -31,33 +31,11 @@ export function RoomDetail() {
   const { roomId } = useParams<{ roomId: string }>()
   const { user } = useAuth()
   const navigate = useNavigate()
-  const {
-    signalStatus,
-    clientId,
-    peers,
-    joinError,
-    submitRoomPassword,
-    retryJoin,
-    rtcStatus,
-    leaveRoom,
-    isRoomHost,
-    isPerforming,
-    myInstrument,
-    peerInstruments,
-    broadcasterId,
-    resumeAllAudioContexts,
-    pendingRequests,
-    requestNotice,
-    dismissRequestNotice,
-    approveRequest,
-    rejectRequest,
-    pendingInstrumentChanges,
-    approveInstrumentChange,
-    rejectInstrumentChange,
-    requestInstrumentChange,
-    recordings,
-    deleteRecording,
-  } = useRoom()
+  const { signalStatus, clientId, peers, joinError, submitRoomPassword, retryJoin, leaveRoom, isRoomHost } = useRoomConnection()
+  const { isPerforming, myInstrument, peerInstruments, broadcasterId } = useRoomPerform()
+  const { rtcStatus, resumeAllAudioContexts } = useRoomMixer()
+  const { pendingRequests, requestNotice, dismissRequestNotice, approveRequest, rejectRequest, pendingInstrumentChanges, approveInstrumentChange, rejectInstrumentChange, requestInstrumentChange } = useRoomRequests()
+  const { recordings, deleteRecording } = useRoomRecording()
 
   const { room, loading, hostNickname } = useRoomDetailData(roomId)
   useRoomPresence(roomId, room)

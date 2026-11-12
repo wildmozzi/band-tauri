@@ -1,5 +1,4 @@
-import type { PeerInstrument } from '../state/RoomContext'
-import { useRoom } from '../state/RoomContext'
+import { useRoomTelemetry, useRoomMixer, useRoomRecording, useRoomConnection, useRoomPerform, type PeerInstrument } from '../state/roomHooks'
 import { BroadcastMixerChannel, MyMixerChannel, PeerMixerChannel } from './MixerChannels'
 import { DEFAULT_MIX, formatDuration, formatPan, levelClass, performerName } from '../roomDetailModel'
 import { DiagnosticsExport } from '../../settings'
@@ -8,7 +7,8 @@ import { isNativeApp } from '../../../native/engineApi'
 
 /** 마스터 볼륨·음소거·패닝(관람만)·레벨 */
 function MixerMaster({ isPerformer }: { isPerformer: boolean }) {
-  const { masterVolume, setMasterVolume, masterMuted, toggleMasterMute, masterPan, setMasterPan, masterLevel } = useRoom()
+  const { masterLevel } = useRoomTelemetry('masterLevel')
+  const { masterVolume, setMasterVolume, masterMuted, toggleMasterMute, masterPan, setMasterPan } = useRoomMixer()
   return (
     <div className={`mixer-master ${masterMuted ? 'muted' : ''}`}>
       <div className="master-header">
@@ -64,7 +64,7 @@ function MixerMaster({ isPerformer }: { isPerformer: boolean }) {
 
 /** 녹음 시작/중지, 녹음 시간, 녹음 목록 버튼 */
 function RecordingControl({ onOpenRecordings }: { onOpenRecordings: () => void }) {
-  const { isRecording, recordings, recordingDuration, startRecording, stopRecording } = useRoom()
+  const { isRecording, recordings, recordingDuration, startRecording, stopRecording } = useRoomRecording()
   return (
     <div className="recording-section">
       <div className="recording-control">
@@ -111,22 +111,10 @@ export function MixerPanel({
   /** 녹음 세션 폴더 이름에 붙인다 */
   roomTitle?: string | null
 }) {
-  const {
-    canPerform,
-    clientId,
-    myInstrument,
-    engineStats,
-    relayError,
-    rtcError,
-    peerEngineStats,
-    peerNetworkStats,
-    remoteAudioMap,
-    mixSettingsMap,
-    setMixVolume,
-    setMixPan,
-    setMixMuted,
-    audioLevels,
-  } = useRoom()
+  const { clientId } = useRoomConnection()
+  const { canPerform, myInstrument, relayError } = useRoomPerform()
+  const { engineStats, peerEngineStats, peerNetworkStats, audioLevels } = useRoomTelemetry('engineStats', 'peerEngineStats', 'peerNetworkStats', 'audioLevels')
+  const { rtcError, remoteAudioMap, mixSettingsMap, setMixVolume, setMixPan, setMixMuted } = useRoomMixer()
   // 관람자가 듣는 방송 믹스 스트림 (방송 담당자 하나)
   const broadcastStreams = Object.keys(remoteAudioMap)
 

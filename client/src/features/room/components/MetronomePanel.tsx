@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useRoom } from '../state/RoomContext'
+import { useRoomPerform, useRoomMetronome, useRoomTelemetry } from '../state/roomHooks'
 import {
   DEFAULT_METRONOME_BEATS,
   DEFAULT_METRONOME_BPM,
@@ -19,7 +19,9 @@ import { OPEN_LATENCY_MEASURE_EVENT, outputLatencyView } from '../../../native/l
 const SYNC_TIMEOUT_MS = 5000
 
 export function MetronomePanel({ isHost }: { isHost: boolean }) {
-  const { metronome, setHostMetronome, metronomeVolume, metronomeMuted, setMetronomeVolume, engineStats, isPerforming } = useRoom()
+  const { isPerforming } = useRoomPerform()
+  const { metronome, setHostMetronome, metronomeVolume, metronomeMuted, setMetronomeVolume } = useRoomMetronome()
+  const { engineStats } = useRoomTelemetry('engineStats')
   // 입력 중에는 문자열로 두고(빈 칸 = 0이 상태로 들어가지 않게), 적용·blur 때 범위로 자른다(PR #36 L4)
   const [bpmText, setBpmText] = useState(String(DEFAULT_METRONOME_BPM))
   const bpmValid = bpmText.trim() !== '' && Number.isFinite(Number(bpmText))

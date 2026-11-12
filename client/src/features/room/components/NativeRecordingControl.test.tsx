@@ -12,7 +12,7 @@ const api = vi.hoisted(() => ({
   engineRecordSetTrackNames: vi.fn(),
 }))
 
-vi.mock('../state/RoomContext', () => ({ useRoom: () => room }))
+vi.mock('../state/roomHooks', () => ({ useRoomPerform: () => room, useRoomTelemetry: () => room }))
 vi.mock('../../../native/engineApi', () => ({
   ...api,
   engineErrorMessage: (e: unknown) => String(e),

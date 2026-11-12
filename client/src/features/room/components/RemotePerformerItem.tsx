@@ -1,5 +1,5 @@
 import { EchoMeasure } from '../../settings'
-import type { PeerInstrument } from '../state/RoomContext'
+import type { PeerInstrument } from '../state/roomHooks'
 import type { EngineStats, PeerStats } from '../../../native/engineApi'
 import { pathLabel, peerPathHint } from '../../../native/relayLogic'
 import {

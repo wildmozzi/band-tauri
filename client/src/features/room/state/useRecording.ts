@@ -3,7 +3,8 @@
  * - 관람자: 수신 중인 방송 믹스(Web Audio 그래프)
  * - 앱 연주자: 엔진 믹스(engine_subscribe_mix → MixSource)
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
+import type { RoomSessionStore } from './roomSessionStore'
 
 export interface Recording {
   id: string
@@ -24,10 +25,13 @@ function pickMimeType(): string {
   return types.find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t)) ?? ''
 }
 
-export function useRecording(resolveSource: () => Promise<RecordingSource | null>) {
-  const [isRecording, setIsRecording] = useState(false)
-  const [recordings, setRecordings] = useState<Recording[]>([])
-  const [recordingDuration, setRecordingDuration] = useState(0)
+/** 녹음 상태·목록·시간은 스토어의 recording 슬라이스에 쓴다 */
+export function useRecording(resolveSource: () => Promise<RecordingSource | null>, store: RoomSessionStore) {
+  const { setIsRecording, setRecordings, setRecordingDuration } = useMemo(() => ({
+    setIsRecording: store.fieldSetter('recording', 'isRecording'),
+    setRecordings: store.fieldSetter('recording', 'recordings'),
+    setRecordingDuration: store.fieldSetter('recording', 'recordingDuration'),
+  }), [store])
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const startRef = useRef(0)
@@ -96,7 +100,7 @@ export function useRecording(resolveSource: () => Promise<RecordingSource | null
       recorderRef.current = null
       alert('녹음을 시작할 수 없습니다: ' + (err instanceof Error ? err.message : '알 수 없는 오류'))
     }
-  }, [])
+  }, [setIsRecording, setRecordings, setRecordingDuration])
 
   const stopRecording = useCallback(() => {
     const recorder = recorderRef.current
@@ -104,7 +108,7 @@ export function useRecording(resolveSource: () => Promise<RecordingSource | null
     recorderRef.current = null
     if (recorder.state !== 'inactive') recorder.stop()
     setIsRecording(false)
-  }, [])
+  }, [setIsRecording])
 
   const deleteRecording = useCallback((id: string) => {
     setRecordings((prev) => {
@@ -112,12 +116,12 @@ export function useRecording(resolveSource: () => Promise<RecordingSource | null
       if (rec) URL.revokeObjectURL(rec.url)
       return prev.filter((r) => r.id !== id)
     })
-  }, [])
+  }, [setRecordings])
 
   useEffect(() => () => {
     clearTimer()
     recorderRef.current?.stop()
   }, [])
 
-  return { isRecording, recordings, recordingDuration, startRecording, stopRecording, deleteRecording }
+  return { startRecording, stopRecording, deleteRecording }
 }

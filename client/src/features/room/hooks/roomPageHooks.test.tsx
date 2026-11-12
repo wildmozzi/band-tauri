@@ -18,7 +18,7 @@ const room = vi.hoisted(() => ({
   requestPerform: vi.fn(),
   cancelRequest: vi.fn(),
 }))
-vi.mock('../state/RoomContext', () => ({ useRoom: () => room }))
+vi.mock('../state/roomHooks', () => ({ useRoomPerform: () => room, useRoomRequests: () => room }))
 
 import { usePerformControls } from './usePerformControls'
 import { useRejectPicker } from './useRejectPicker'

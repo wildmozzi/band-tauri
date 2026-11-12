@@ -2,8 +2,11 @@
  * 수신 스트림(관람자: 방송 믹스) 재생용 Web Audio 믹서.
  * stream → (숨긴 muted <audio>로 스트림 소비) → source → analyser → gain → panner → destination
  * 페이지를 벗어나도(미니 플레이어) 같은 그래프가 계속 재생한다.
+ * 수신 스트림(viewer)·믹서 설정(mixer)은 스토어에서 읽고, 설정과 레벨 미터(levels)는 스토어에 쓴다.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { RoomSessionStore, RoomSnapshot } from './roomSessionStore'
+import { useRoomSelector } from './useRoomSelector'
 
 export interface MixSettings {
   volume: number // 0 ~ 1
@@ -24,17 +27,22 @@ interface Nodes {
 
 const LEVEL_INTERVAL_MS = 66
 
-export function useWebAudioMixer(remoteAudioMap: Record<string, MediaStream>) {
+const selectRemoteAudioMap = (s: RoomSnapshot) => s.viewer.remoteAudioMap
+const selectMixer = (s: RoomSnapshot) => s.mixer
+
+export function useWebAudioMixer(store: RoomSessionStore) {
+  const remoteAudioMap = useRoomSelector(store, selectRemoteAudioMap)
+  const { mixSettingsMap, masterVolume, masterMuted, masterPan } = useRoomSelector(store, selectMixer)
   const ctxRef = useRef<AudioContext | null>(null)
   const nodesRef = useRef<Map<string, Nodes>>(new Map())
   const recordingDestRef = useRef<MediaStreamAudioDestinationNode | null>(null)
 
-  const [mixSettingsMap, setMixSettingsMap] = useState<Record<string, MixSettings>>({})
-  const [masterVolume, setMasterVolumeState] = useState(1)
-  const [masterMuted, setMasterMuted] = useState(false)
-  const [masterPan, setMasterPanState] = useState(0)
-  const [audioLevels, setAudioLevels] = useState<Record<string, number>>({})
-  const [masterLevel, setMasterLevel] = useState(0)
+  const { setMixSettingsMap, setMasterVolumeState, setMasterMuted, setMasterPanState } = useMemo(() => ({
+    setMixSettingsMap: store.fieldSetter('mixer', 'mixSettingsMap'),
+    setMasterVolumeState: store.fieldSetter('mixer', 'masterVolume'),
+    setMasterMuted: store.fieldSetter('mixer', 'masterMuted'),
+    setMasterPanState: store.fieldSetter('mixer', 'masterPan'),
+  }), [store])
   const [nodeCount, setNodeCount] = useState(0)
 
   const settingsRef = useRef({ mixSettingsMap, masterVolume, masterMuted, masterPan })
@@ -122,8 +130,7 @@ export function useWebAudioMixer(remoteAudioMap: Record<string, MediaStream>) {
   // 레벨 측정
   useEffect(() => {
     if (nodeCount === 0) {
-      setAudioLevels({})
-      setMasterLevel(0)
+      store.patch('levels', { audioLevels: {}, masterLevel: 0 })
       return
     }
     const timer = setInterval(() => {
@@ -137,11 +144,10 @@ export function useWebAudioMixer(remoteAudioMap: Record<string, MediaStream>) {
         levels[peerId] = level
         max = Math.max(max, level)
       })
-      setAudioLevels(levels)
-      setMasterLevel(max)
+      store.patch('levels', { audioLevels: levels, masterLevel: max })
     }, LEVEL_INTERVAL_MS)
     return () => clearInterval(timer)
-  }, [nodeCount])
+  }, [nodeCount, store])
 
   // 언마운트 정리
   useEffect(() => {
@@ -159,7 +165,7 @@ export function useWebAudioMixer(remoteAudioMap: Record<string, MediaStream>) {
 
   const updateMix = useCallback((peerId: string, patch: Partial<MixSettings>) => {
     setMixSettingsMap((prev) => ({ ...prev, [peerId]: { ...DEFAULT_MIX, ...prev[peerId], ...patch } }))
-  }, [])
+  }, [setMixSettingsMap])
 
   const setMixVolume = useCallback((peerId: string, volume: number) => {
     updateMix(peerId, { volume: Math.max(0, Math.min(1, volume)) })
@@ -173,9 +179,9 @@ export function useWebAudioMixer(remoteAudioMap: Record<string, MediaStream>) {
     updateMix(peerId, { muted })
   }, [updateMix])
 
-  const setMasterVolume = useCallback((v: number) => setMasterVolumeState(Math.max(0, Math.min(1, v))), [])
-  const setMasterPan = useCallback((p: number) => setMasterPanState(Math.max(-1, Math.min(1, p))), [])
-  const toggleMasterMute = useCallback(() => setMasterMuted((m) => !m), [])
+  const setMasterVolume = useCallback((v: number) => setMasterVolumeState(Math.max(0, Math.min(1, v))), [setMasterVolumeState])
+  const setMasterPan = useCallback((p: number) => setMasterPanState(Math.max(-1, Math.min(1, p))), [setMasterPanState])
+  const toggleMasterMute = useCallback(() => setMasterMuted((m) => !m), [setMasterMuted])
 
   const resume = useCallback(() => {
     const ctx = ctxRef.current
@@ -205,22 +211,15 @@ export function useWebAudioMixer(remoteAudioMap: Record<string, MediaStream>) {
     recordingDestRef.current = null
     setMixSettingsMap({})
     setNodeCount(0)
-  }, [disconnect])
+  }, [disconnect, setMixSettingsMap])
 
   return {
-    mixSettingsMap,
     setMixVolume,
     setMixPan,
     setMixMuted,
-    masterVolume,
     setMasterVolume,
-    masterMuted,
-    setMasterMuted,
     toggleMasterMute,
-    masterPan,
     setMasterPan,
-    audioLevels,
-    masterLevel,
     resume,
     getRecordingStream,
     reset,

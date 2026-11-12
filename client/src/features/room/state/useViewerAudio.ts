@@ -4,9 +4,11 @@
  * - 관람자는 offer를 보내지 않는다. 방송 담당 연주자 앱이 보낸 offer에 answer만 한다(Glare 없음).
  * - offer는 서버가 붙인 `from`이 현재 연주자일 때만 받는다(아무나 관람자에게 소리를 밀어 넣지 못하게).
  * - 방송 담당은 한 명이므로 다른 연주자의 offer가 오면(인계) 이전 연결을 닫는다.
+ * - 수신 스트림·상태·회선 통계는 스토어의 viewer 슬라이스에 쓴다(화면은 선택자로 읽는다).
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { ICE_SERVERS, tuneOpusSdp } from '../../../shared/lib/webrtcAudio'
+import type { RoomSessionStore } from './roomSessionStore'
 import type { SignalPayload } from './useSignaling'
 
 export type RtcStatus = 'idle' | 'connecting' | 'live' | 'error'
@@ -38,22 +40,26 @@ export function useViewerAudio(opts: {
   send: (p: SignalPayload) => void
   /** offer를 받아도 되는 발신자인지 (현재 연주자) */
   isAllowedSender: (peerId: string) => boolean
+  store: RoomSessionStore
 }) {
   const optsRef = useRef(opts)
   optsRef.current = opts
   const pcsRef = useRef<Map<string, Incoming>>(new Map())
 
-  const [remoteAudioMap, setRemoteAudioMap] = useState<Record<string, MediaStream>>({})
-  const [status, setStatus] = useState<RtcStatus>('idle')
-  const [error, setError] = useState<string | null>(null)
-  const [networkStats, setNetworkStats] = useState<Record<string, PeerNetworkStats>>({})
+  const { store } = opts
+  const { setRemoteAudioMap, setStatus, setError, setNetworkStats } = useMemo(() => ({
+    setRemoteAudioMap: store.fieldSetter('viewer', 'remoteAudioMap'),
+    setStatus: store.fieldSetter('viewer', 'status'),
+    setError: store.fieldSetter('viewer', 'error'),
+    setNetworkStats: store.fieldSetter('viewer', 'networkStats'),
+  }), [store])
 
   const refreshStatus = useCallback(() => {
     const states = [...pcsRef.current.values()].map((i) => i.pc.connectionState)
     if (states.length === 0) setStatus('idle')
     else if (states.includes('connected')) setStatus('live')
     else setStatus('connecting')
-  }, [])
+  }, [setStatus])
 
   const closeFrom = useCallback((peerId: string) => {
     const incoming = pcsRef.current.get(peerId)
@@ -77,14 +83,14 @@ export function useViewerAudio(opts: {
       return next
     })
     refreshStatus()
-  }, [refreshStatus])
+  }, [refreshStatus, setRemoteAudioMap, setNetworkStats])
 
   const closeAll = useCallback(() => {
     for (const id of [...pcsRef.current.keys()]) closeFrom(id)
     setRemoteAudioMap({})
     setNetworkStats({})
     setStatus('idle')
-  }, [closeFrom])
+  }, [closeFrom, setRemoteAudioMap, setNetworkStats, setStatus])
 
   const hasPeer = useCallback((peerId: string) => pcsRef.current.has(peerId), [])
 
@@ -138,7 +144,7 @@ export function useViewerAudio(opts: {
       closeFrom(from)
       setStatus('error')
     }
-  }, [closeFrom, refreshStatus])
+  }, [closeFrom, refreshStatus, setStatus, setError, setRemoteAudioMap])
 
   const handleCandidate = useCallback(async (from: string, candidate: RTCIceCandidateInit) => {
     const incoming = pcsRef.current.get(from)
@@ -199,7 +205,7 @@ export function useViewerAudio(opts: {
       if (pcsRef.current.size > 0) void measure()
     }, 2000)
     return () => clearInterval(timer)
-  }, [])
+  }, [setNetworkStats])
 
   // 언마운트 정리
   useEffect(() => {
@@ -210,5 +216,5 @@ export function useViewerAudio(opts: {
     }
   }, [])
 
-  return { remoteAudioMap, status, error, networkStats, handleOffer, handleCandidate, closeFrom, closeAll, hasPeer }
+  return { handleOffer, handleCandidate, closeFrom, closeAll, hasPeer }
 }
