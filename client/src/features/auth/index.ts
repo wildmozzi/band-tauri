@@ -8,6 +8,5 @@ export {
   useSaveProfileMutation,
   useUpdateUserMetadataMutation,
 } from './profileQueries'
-export { useResetQueryCacheOnUserChange } from './queries'
 export { useAuth } from './useAuth'
 export { useRequireAuth } from './useRequireAuth'

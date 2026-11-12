@@ -2,7 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from './useAuth'
 import { SERVICE_NAME } from '../../shared/lib/brand'
-import { safeRedirectPath } from '../../shared/lib/redirect'
+import { safeRedirectPath } from './redirect'
 import { Field } from '../../shared/ui/Field'
 
 interface SignUpData {
