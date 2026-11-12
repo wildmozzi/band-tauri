@@ -79,6 +79,7 @@
 | P2-9 | **[결정]** 방장이 연주자를 내리거나 승인을 거두는 기능(GOAL 4절은 승인만 요구) | 결정 후 서버 메시지·계약 5절·테스트 | 대기 (사용자 결정) |
 | P2-10 | **[사람]** 업데이터 주소 확인: tauri.conf.json·docs/RELEASE.md의 exception-busters/band-tauri가 실제 릴리스 리포(wildmozzi/band-tauri)와 다름 — 첫 공개 릴리스 전에 확정 | 주소 확정, 옛→새 버전 업데이트 성공 | 대기 (사용자 확인) |
 | P2-11 | 서버: `reject-instrument-change`와 `reject-perform`의 기본 거절 사유 처리가 다름(#82 S0 관찰) — 둘을 같은 규칙으로 맞추고 ws-transcript 기준 파일·native-engine-design 5절 함께 갱신 | 테스트 | 대기 (S3 이후, 동작 변경이라 S 단계와 분리) |
+| P2-12 | 프로필 사진을 base64로 Supabase `user_metadata`에 저장(#100 발견) → JWT가 커져 모든 요청·WS `auth` 메시지가 무거워지고 토큰 크기 한도에 걸릴 수 있음. Storage 업로드 + URL만 metadata에, 기존 base64는 읽을 때 무시 | 단위 테스트(업로드 경로), JWT 크기 확인 | 대기 (데모 단계라 후순위, 운영 Storage 버킷 설정은 사용자 승인) |
 | P2-5 | 로그/진단 내보내기(엔진 통계 타임라인 + 설정) | 버튼 하나로 zip | 완료(PR #32, 2026-11-11; **[사람]** 실제 앱에서 내보내기 대화상자·연속 클릭·zip 로그 마스킹 확인) |
 | P2-6 | 방 비밀번호/비공개 방, 연주 참여 승인 UX 정리 | E2E | 완료(#9; 실화면 확인 [사람]) |
 
