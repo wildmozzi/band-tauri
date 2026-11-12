@@ -18,6 +18,8 @@ import { createPassword } from '../src/signaling/password'
 import { createPerformers } from '../src/signaling/performers'
 import { DEFAULT_LIMITS } from '../src/signaling/types'
 import { ScryptGate, hashRoomPassword } from '../src/lib/roomPassword'
+import { METRONOME_HOST_CHANGED, createMetronome } from '../src/signaling/metronome'
+import { createNativeSession } from '../src/signaling/nativeSession'
 import { sleep } from './helpers'
 
 const OPEN = 1
@@ -348,5 +350,118 @@ describe('performers', () => {
     const dev = createPerformers(meta(false), true)
     assert.equal(await dev.canStartPerforming(fakeClient('d'), 'r'), true)
     assert.equal(await dev.canStartPerforming(fakeClient('d', { authState: 'anonymous' }), 'r'), false)
+  })
+})
+
+describe('metronome', () => {
+  const STATE = { running: true, bpm: 120, beatsPerBar: 4, startUs: 1000 }
+
+  function setup(fetchRoomMeta: WsDeps['fetchRoomMeta'], hasBackend = true) {
+    const reg = createRegistry()
+    const deps: WsDeps = { hasBackend, verifyToken: async () => null, fetchRoomMeta, updateParticipants: async () => {} }
+    const metro = createMetronome(reg, createRoomMeta(deps, false), deps, { ...DEFAULT_LIMITS, metronomeHostCheckMs: 0 })
+    const host = fakeClient('h', { userId: 'host', isHost: true, nativeActive: true })
+    const performer = fakeClient('p', { userId: 'p', isPerforming: true, nativeActive: true })
+    const viewer = fakeClient('v', { userId: 'v' })
+    seat(reg, 'r', host, performer, viewer)
+    metro.metronomes.set('r', { hostId: 'h', hostUserId: 'host', state: STATE })
+    return { reg, metro, host, performer, viewer }
+  }
+
+  it('dropMetronomeIfHostChanged keeps the metronome while the DB host is the one who started it', () => {
+    const { metro } = setup(async () => null)
+    assert.equal(metro.dropMetronomeIfHostChanged('r', 'host'), false)
+    assert.ok(metro.metronomes.has('r'))
+    metro.metronomes.set('dev', { hostId: 'h', hostUserId: undefined, state: STATE })
+    assert.equal(metro.dropMetronomeIfHostChanged('dev', 'someone'), false, 'dev mode (no hostUserId) skips the handover check')
+  })
+
+  it('on handover: stops it for the other performers and tells the old host', () => {
+    const { metro, host, performer, viewer } = setup(async () => null)
+    assert.equal(metro.dropMetronomeIfHostChanged('r', 'new-host'), true)
+    assert.equal(metro.metronomes.has('r'), false)
+    assert.deepEqual(sentTo(performer), [{ type: 'metronome', from: 'h', state: { ...STATE, running: false } }])
+    assert.deepEqual(sentTo(viewer), [], 'viewers are not engine peers')
+    assert.deepEqual(sentTo(host), [METRONOME_HOST_CHANGED])
+  })
+
+  it('an old host whose socket is closed (resume grace) gets the notice on resume instead', () => {
+    const { metro, host } = setup(async () => null)
+    ;(host.ws as unknown as FakeWs).readyState = CLOSED
+    assert.equal(metro.dropMetronomeIfHostChanged('r', null), true)
+    assert.equal(host.pendingMetronomeStop, true)
+    assert.deepEqual(sentTo(host), [])
+  })
+
+  it('replayMetronome sends the running plan to a performer after checking the DB host', async () => {
+    const { metro, performer } = setup(async () => ({ hostId: 'host', freeJoin: false }))
+    await metro.replayMetronome(performer, 'r')
+    assert.deepEqual(sentTo(performer), [{ type: 'metronome', from: 'h', state: STATE }])
+  })
+
+  it('replayMetronome drops the metronome when the DB host changed, and still sends when the DB lookup fails', async () => {
+    const changed = setup(async () => ({ hostId: 'new-host', freeJoin: false }))
+    await changed.metro.replayMetronome(changed.performer, 'r')
+    assert.equal(changed.metro.metronomes.has('r'), false)
+    assert.deepEqual(sentTo(changed.performer).map(m => m.state.running), [false], 'only the stop notice')
+
+    const down = setup(async () => { throw new Error('db down') })
+    await down.metro.replayMetronome(down.performer, 'r')
+    assert.deepEqual(sentTo(down.performer), [{ type: 'metronome', from: 'h', state: STATE }])
+  })
+
+  it('replayMetronome skips the host itself and engines that are down', async () => {
+    const { metro, host, performer } = setup(async () => ({ hostId: 'host', freeJoin: false }))
+    await metro.replayMetronome(host, 'r')
+    performer.nativeActive = false
+    await metro.replayMetronome(performer, 'r')
+    assert.deepEqual(sentTo(host), [])
+    assert.deepEqual(sentTo(performer), [])
+  })
+})
+
+describe('nativeSession', () => {
+  const SECRET = 'x'.repeat(32)
+
+  it('key/ssrc bindings conflict only with another user in the same room', () => {
+    const reg = createRegistry()
+    const ns = createNativeSession(reg, {})
+    const mine = fakeClient('a', { userId: 'u1', nativeKey: 'K', nativeSsrc: 7 })
+    const myOtherConn = fakeClient('a2', { userId: 'u1' })
+    const other = fakeClient('b', { userId: 'u2' })
+    const elsewhere = fakeClient('z', { userId: 'u3', nativeKey: 'Z', nativeSsrc: 9 })
+    seat(reg, 'r', mine, myOtherConn, other)
+    seat(reg, 'other', elsewhere)
+    assert.equal(ns.keyTakenInRoom(other, 'K'), true)
+    assert.equal(ns.ssrcTakenInRoom(other, 7), true)
+    assert.equal(ns.keyTakenInRoom(myOtherConn, 'K'), false, 'same verified user (engine restart, reconnect)')
+    assert.equal(ns.ssrcTakenInRoom(myOtherConn, 7), false)
+    assert.equal(ns.keyTakenInRoom(other, 'Z'), false, 'other room')
+    assert.equal(ns.ssrcTakenInRoom(fakeClient('n', { userId: 'u4' }), 7), false, 'not in a room')
+  })
+
+  it('clearNative drops the engine binding', () => {
+    const ns = createNativeSession(createRegistry(), {})
+    const c = fakeClient('a', { nativeActive: true, nativeKey: 'K', nativeSsrc: 7 })
+    ns.clearNative(c)
+    assert.deepEqual([c.nativeActive, c.nativeKey, c.nativeSsrc], [false, undefined, undefined])
+  })
+
+  it('sendRelayToken: only with relay config, for a verified performer with an ssrc', () => {
+    const off = createNativeSession(createRegistry(), {})
+    const performer = fakeClient('p', { userId: 'u', roomId: 'r', isPerforming: true, nativeSsrc: 5 })
+    off.sendRelayToken(performer)
+    assert.deepEqual(sentTo(performer), [], 'relay not configured')
+
+    const on = createNativeSession(createRegistry(), { RELAY_SECRET: SECRET, RELAY_ADDR: 'relay.example:5000' })
+    on.sendRelayToken(fakeClient('v', { userId: 'u', roomId: 'r', nativeSsrc: 5 }))
+    on.sendRelayToken(fakeClient('n', { userId: 'u', roomId: 'r', isPerforming: true }))
+    on.sendRelayToken(performer)
+    assert.equal(sentTo(performer).length, 1)
+    const t = sentTo(performer)[0]
+    assert.equal(t.type, 'relay-token')
+    assert.equal(t.addr, 'relay.example:5000')
+    assert.equal(t.ssrc, 5)
+    assert.equal(t.expiresAt - t.serverNow, t.expiresIn)
   })
 })
