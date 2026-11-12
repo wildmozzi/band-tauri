@@ -14,6 +14,7 @@ import {
   type PaymentFlowDeps,
   type PaymentFlowResult,
 } from './paymentFlow'
+import './Payment.css'
 
 const PLAN_INFO: Record<string, { name: string; price: number }> = {
   standard: { name: 'Standard 플랜', price: 2900 },

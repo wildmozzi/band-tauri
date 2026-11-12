@@ -3,6 +3,7 @@ import { useAuth } from '../auth'
 import { usePremium } from './usePremium'
 import { MAX_PERFORMERS } from '../../native/engineApi'
 import { ALL_PLAN_FEATURES, NO_PAID_ONLY_NOTICE, PLAN_COMPARISON, PLANNED_NOTICE, plannedFeaturesFor, type PaidPlan } from './planFeatures'
+import './Pricing.css'
 
 type PlanType = 'free' | 'standard' | 'pro'
 

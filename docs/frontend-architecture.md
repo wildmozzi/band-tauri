@@ -205,9 +205,9 @@ client/src/
 | 항목 | 내용 |
 |---|---|
 | 전역 CSS 정리 | `app/App.css`(4천여 줄)·`features/room/RoomDetail.css`(3천여 줄)에 화면별 스타일이 섞여 있다. 화면별 파일로 옮기고 중복 선택자를 없애 import 순서 의존을 끊는다 |
-| 결제 CSS 로드 위치 | `Pricing.css`·`Payment.css`·`PremiumModal.css`를 App이 전역으로 import한다(결제 화면 밖에서도 쓰는 클래스 확인 후 각 컴포넌트로) |
-| 데모 오디오 코드 | `demo-karaoke`의 `MusicPlayer`·`SynthDrum`·`MultiTrackPlayer`(Tone.js)는 합주 목표 밖. 유지할지(번들 크기 큼) 결정 후 지연 로딩(`React.lazy`) 또는 제거 |
-| 지연 로딩 | 모든 화면을 즉시 import해 번들 1개(>500kB). 라우트 단위 `lazy` 도입(데모·결제·커뮤니티부터). CSS 순서 정리 후에 |
+| 결제 CSS 로드 위치 | **완료(P3-2 ③-2)** — 화면 전용 규칙은 각 컴포넌트가 import(`Pricing.css`·`Payment.css`는 지연 청크). 결제 화면 밖에서도 매칭되거나 같은 특이성으로 순서에 기대던 규칙은 `payment/paymentGlobal.css`로 모아 App이 예전 자리에서 import(목록은 파일 머리말·PR #(③-2)). 지연 화면의 `profile/profileGlobal.css`·`demo-karaoke/karaokeGlobal.css`도 같은 방식(routes.tsx가 import, `.eslintrc.cjs` `APP_GLOBAL_CSS`). 전역 CSS 정리 때 소유 화면으로 옮긴다 |
+| 데모 오디오 코드 | **지연 로딩(P3-2 ③-2)** — 데모 단계라 유지. Tone.js·악보(OSMD)는 `/karaoke` 진입 때만 내려받는다(메인 청크에서 빠짐) |
+| 지연 로딩 | **완료(P3-2 ③-2)** — `app/routes.tsx`: 데모 3종·커뮤니티·프로필, `payment/lazyScreens.ts`: 요금제·결제·결제 완료/실패. 합주 경로(홈·방 목록·방 만들기·합주실·설정)는 즉시 로드. 메인 JS 2,045.67 kB → 447.31 kB. 동작 불변은 계산 스타일 스냅샷(`client/e2e/tools`)으로 확인 |
 | 큰 컴포넌트 | `MusicRoom.tsx`(760줄), `ScoreDisplay.tsx`(600줄), `AudioSettings.tsx`(520줄), `Community.tsx`(470줄), `Profile.tsx`(430줄), `CreateRoom.tsx`(400줄) — 화면 로직을 훅·순수 함수로 |
 | 쓰이지 않는 코드 | `features/profile/ProfileCard.tsx`(+css), `shared/ui/icon/*.png` — 참조 없음 |
 | 공유 타입 중복 | `rooms/roomFilters.ts`의 `Room`·`RoomStatus`와 `roomModel.ts`의 `Room` 정리, `payment/paymentFlow.ts`와 `planFeatures.ts`의 `PaidPlan` 중복 |

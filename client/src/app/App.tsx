@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { Suspense, useEffect } from 'react'
 import { BrowserRouter, useLocation, useRoutes } from 'react-router-dom'
 import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClient } from './queryClient'
@@ -11,9 +11,8 @@ import { APP_ROUTES } from './routes'
 import { pageTitleFor } from './pageTitle'
 import { SERVICE_NAME } from '../shared/lib/brand'
 import './App.css'
-import '../features/payment/Pricing.css'
-import '../features/payment/PremiumModal.css'
-import '../features/payment/Payment.css'
+// 결제 CSS 중 결제 화면 밖에서도 매칭되는 규칙만 전역(App.css 뒤 같은 자리). 결제 화면 전용 규칙은 각 화면이 import한다 (P3-2 ③-2)
+import '../features/payment/paymentGlobal.css'
 
 /** 라우트가 바뀔 때마다 탭 제목을 'IndigoMuse — <화면>'으로 맞춘다 (P3-12 ①) */
 function DocumentTitle() {
@@ -34,7 +33,8 @@ function AppContent() {
       <DocumentTitle />
       <Navigation />
       <main className="app-content">
-        {routes}
+        {/* 지연 로딩 화면(routes.tsx)을 처음 내려받는 동안은 비워 둔다. 라우터 이동은 transition이라 이전 화면을 유지한다 */}
+        <Suspense fallback={null}>{routes}</Suspense>
       </main>
       <footer className="app-footer">
         <p>{SERVICE_NAME} · 연주는 데스크톱 앱에서, 관람은 웹에서.</p>

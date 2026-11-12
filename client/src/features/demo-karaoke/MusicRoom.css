@@ -104,10 +104,6 @@
   animation: spin 1s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 /* 세션 섹션 */
 .stems-section {
   background: var(--white-a05);
@@ -299,33 +295,6 @@
   margin-bottom: 2rem;
   justify-content: center;
   flex-wrap: wrap;
-}
-
-.control-btn {
-  padding: 1rem 2rem;
-  background: var(--white-a10);
-  border: 1px solid var(--white-a20);
-  border-radius: var(--radius-md);
-  color: var(--white);
-  font-size: 1rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.3s ease;
-  min-width: 140px;
-}
-
-.control-btn:hover:not(:disabled) {
-  background: var(--white-a20);
-  transform: translateY(-2px);
-}
-
-.control-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.control-btn.play:not(:disabled) {
-  background: var(--gradient-cyan);
 }
 
 .progress-section {
@@ -657,9 +626,5 @@
 
   .playback-controls {
     flex-direction: column;
-  }
-
-  .control-btn {
-    width: 100%;
   }
 }
