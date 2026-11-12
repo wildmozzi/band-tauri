@@ -1,6 +1,6 @@
 // e2e 포트 선택(P3-10f, 경쟁 수정 P3-0d). vitest가 실행한다(*.test.ts) — Playwright 실행과 별개로 빠르게 확인.
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -97,6 +97,27 @@ describe('findFreePortSync', () => {
     expect(existsSync(join(dir, `${min + 2}.lock`))).toBe(false)
     expect(findFreePortSync({ lockDir: dir, min, max, start: 2 })).toBe(min + 2)
     expect(existsSync(join(dir, `${min}.lock`))).toBe(true) // 살아 있는 잠금은 그대로
+  })
+
+  it('죽은 잠금 치우기는 회수 잠금을 잡은 실행만 한다 (회수 도중 죽은 실행의 오래된 회수 잠금은 치운다)', () => {
+    const dir = lockDir()
+    const { min, max } = smallRange()
+    const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' })
+    const lock = join(dir, `${min}.lock`)
+    const reclaim = join(dir, `${min}.reclaim`)
+    writeFileSync(lock, `${dead.stdout} ${Date.now()}\n`)
+    // 다른 실행이 지금 회수 중이면 죽은 잠금이어도 건드리지 않는다
+    writeFileSync(reclaim, `${process.pid} ${Date.now()}\n`)
+    expect(findFreePortSync({ lockDir: dir, min, max, start: 0 })).not.toBe(min)
+    expect(existsSync(lock)).toBe(true)
+    // 회수 잠금이 오래되면(회수 도중 죽음) 그것을 치우고, 다음 실행이 죽은 잠금을 회수한다
+    const old = new Date(Date.now() - 120_000)
+    utimesSync(reclaim, old, old)
+    expect(findFreePortSync({ lockDir: dir, min, max, start: 0 })).not.toBe(min)
+    expect(existsSync(reclaim)).toBe(false)
+    expect(findFreePortSync({ lockDir: dir, min, max, start: 0 })).not.toBe(min) // 이번에 죽은 잠금을 치우고 건너뜀
+    expect(existsSync(lock)).toBe(false)
+    expect(findFreePortSync({ lockDir: dir, min, max, start: 0 })).toBe(min)
   })
 
   it('여러 프로세스가 같은 시작점에서 동시에 골라 strict 바인딩해도 모두 성공하고 포트가 겹치지 않는다', async () => {
