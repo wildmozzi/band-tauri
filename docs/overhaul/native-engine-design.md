@@ -12,6 +12,8 @@
 
 ## 1. Rust 엔진 구조 (`client/src-tauri/src/`)
 
+모듈 경계·계층·의존 방향·스레드 간 통신 규칙과 리팩터 단계는 [engine-architecture.md](engine-architecture.md)가 기준이다(아래 목록은 파일별 책임).
+
 ```
 lib.rs                 Tauri 빌더, 커맨드 등록
 commands.rs            Tauri 커맨드 (얇은 어댑터, 로직 없음)
