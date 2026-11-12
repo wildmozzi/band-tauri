@@ -1,6 +1,7 @@
 import type { RoomMeta } from '../repositories/roomRepository'
-import type { MetronomeState } from './protocol'
-import { isPerformer, send, type Registry } from './registry'
+import type { Ctx } from './ctx'
+import type { MetronomeState, Msg } from './protocol'
+import { isAuthenticated, isPerformer, send, type Registry } from './registry'
 import type { RoomMetaStore } from './roomMeta'
 import type { Client, WsDeps, WsLimits } from './types'
 
@@ -15,11 +16,14 @@ export function parseMetronomeState(v: unknown): MetronomeState | null {
   return { running, bpm, beatsPerBar, startUs }
 }
 
-export const METRONOME_HOST_CHANGED = { type: 'error', code: 'metronome-host-only', message: '방장이 바뀌어 메트로놈을 껐습니다.' }
+/** 이양으로 메트로놈을 껐다는 알림. 보낼 때마다 새 객체를 만든다(S2까지는 모듈 전역 공유 객체 — #89 리뷰 L). 내용은 같다 */
+export function metronomeHostChanged() {
+  return { type: 'error', code: 'metronome-host-only', message: '방장이 바뀌어 메트로놈을 껐습니다.' }
+}
 
 /**
  * 공유 메트로놈 상태·재전송·이양 정지 (설계 docs/server-architecture.md 2.1절 H, 계층 2).
- * metronomes의 소유자. S2에서는 metronome·native-descriptor·native-leave 분기와 handleLeave가 그대로라 맵도 내보낸다(S4에서 감춤).
+ * metronomes의 소유자. metronome 메시지는 아래 handleMetronome(S3). native-descriptor·native-leave 핸들러와 handleLeave가 맵을 직접 만지므로 맵도 내보낸다(S4에서 감춤).
  */
 export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, deps: WsDeps, limits: WsLimits) {
   const { rooms, clients } = registry
@@ -56,7 +60,7 @@ export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, dep
     broadcastMetronomeStop(roomId, metro)
     const oldHost = clients.get(metro.hostId)
     if (oldHost && oldHost.roomId === roomId) {
-      if (oldHost.ws.readyState === oldHost.ws.OPEN) send(oldHost.ws, METRONOME_HOST_CHANGED)
+      if (oldHost.ws.readyState === oldHost.ws.OPEN) send(oldHost.ws, metronomeHostChanged())
       else oldHost.pendingMetronomeStop = true
     }
     return true
@@ -90,3 +94,50 @@ export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, dep
 }
 
 export type Metronome = ReturnType<typeof createMetronome>
+
+/** handleMetronome이 쓰는 공용 서비스 조각 (전체 모양은 dispatch.ts SignalingServices) */
+export interface MetronomeSvc {
+  registry: Registry
+  roomMeta: RoomMetaStore
+  metronome: Metronome
+  deps: WsDeps
+  limits: WsLimits
+}
+
+/** `metronome` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 */
+export async function handleMetronome(ctx: Ctx<MetronomeSvc>, msg: Msg) {
+  const { ws, client, id } = ctx
+  const roomId = client.roomId
+  const { rooms, clients } = ctx.svc.registry
+  const { checkHost } = ctx.svc.roomMeta
+  const { metronomes, dropMetronomeIfHostChanged } = ctx.svc.metronome
+  const { deps, limits } = ctx.svc
+
+  // 공유 메트로놈(P2-3): 방장(DB 판정)이 자기 엔진을 켠 상태에서만. 같은 방 연주자에게 중계(from은 서버가 붙임)
+  if (!roomId || !isAuthenticated(client) || !client.nativeActive || !isPerformer(client)) return
+  const state = parseMetronomeState(msg.state)
+  if (!state) {
+    send(ws, { type: 'error', code: 'metronome-invalid', message: '메트로놈 설정이 올바르지 않습니다.' })
+    return
+  }
+  // 사람이 누르는 조작이라 드물다: 30초 캐시 대신 재전송과 같은 짧은 캐시로 확인한다
+  // (옛 방장은 곧바로 막히고 새 방장은 곧바로 켤 수 있게, PR #53 M1)
+  const host = await checkHost(client, limits.metronomeHostCheckMs)
+  if (!host.isHost || client.roomId !== roomId) {
+    // 메트로놈을 켰던 연결이 더 이상 방장이 아니다(이양): 진행 중인 메트로놈도 멈춘다(PR #36 L1)
+    // (그때 보낸 metronome-host-only가 이 요청의 거부 응답도 된다). DB 조회 실패(stale)면 이양 판단은 보류
+    if (!host.stale && client.roomId === roomId && metronomes.get(roomId)?.hostId === id &&
+        dropMetronomeIfHostChanged(roomId, host.hostUserId)) return
+    send(ws, { type: 'error', code: 'metronome-host-only', message: '메트로놈은 방장만 조작할 수 있습니다.' })
+    return
+  }
+  // 개발 모드(DB 없음)는 방장 확인을 할 수 없어 hostUserId를 비운다(이양 검사 생략)
+  if (state.running) metronomes.set(roomId, { hostId: id, hostUserId: deps.hasBackend ? client.userId : undefined, state })
+  else metronomes.delete(roomId)
+  for (const peerId of rooms.get(roomId) || []) {
+    if (peerId === id) continue
+    const peer = clients.get(peerId)
+    if (peer && isPerformer(peer)) send(peer.ws, { type: 'metronome', from: id, state })
+  }
+  return
+}

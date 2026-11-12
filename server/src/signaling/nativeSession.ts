@@ -1,11 +1,15 @@
-import { deriveRelayBindKey, relayConfigFromEnv, signRelayToken } from '../services/relayToken'
-import { isPerformer, send, type Registry } from './registry'
+import { deriveRelayBindKey, isValidSsrc, relayConfigFromEnv, signRelayToken } from '../services/relayToken'
+import type { Ctx } from './ctx'
+import { parseCandidates, parseEngineKey } from './descriptor'
+import type { Metronome } from './metronome'
+import type { Msg } from './protocol'
+import { isAuthenticated, isPerformer, send, type Registry } from './registry'
 import type { Client, Env } from './types'
 
 /**
  * 연주 세션(엔진) 바인딩·릴레이 토큰 (설계 docs/server-architecture.md 2.1절 G, 계층 2).
  * relayConfig의 소유자. 키·ssrc 바인딩은 Client.nativeKey/nativeSsrc 하나뿐이다(연결당 1개 → 메모리 상한 = 연결 수 상한).
- * S2에서는 native-descriptor·native-leave·relay-token-request 분기가 그대로라 판정·발급 함수만 꺼냈다(S3에서 handle*로).
+ * native-descriptor·native-leave·relay-token-request 메시지는 아래 handle*(S3).
  */
 export function createNativeSession(registry: Registry, env: Env) {
   const { rooms, clients } = registry
@@ -72,3 +76,103 @@ export function createNativeSession(registry: Registry, env: Env) {
 }
 
 export type NativeSession = ReturnType<typeof createNativeSession>
+
+/** 엔진 시그널링 핸들러가 쓰는 공용 서비스 조각 (전체 모양은 dispatch.ts SignalingServices) */
+export interface NativeSessionSvc {
+  registry: Registry
+  nativeSession: NativeSession
+  metronome: Metronome
+}
+
+/** `native-descriptor` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 */
+export function handleNativeDescriptor(ctx: Ctx<NativeSessionSvc>, msg: Msg) {
+  const { ws, client, id } = ctx
+  const roomId = client.roomId
+  const { rooms, clients, getRoomPeer } = ctx.svc.registry
+  const { sendRelayToken, ssrcTakenInRoom, keyTakenInRoom } = ctx.svc.nativeSession
+  const { metronomes, broadcastMetronomeStop, replayMetronome } = ctx.svc.metronome
+
+  // 네이티브 엔진 시그널링: 같은 방 연주자끼리만
+  if (!roomId || !isAuthenticated(client) || !isPerformer(client)) return
+  const descriptor = msg.descriptor
+  if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) return
+  const d = descriptor as Record<string, unknown>
+  // 서버가 아는 필드(ssrc, key, candidates)를 모두 검증하고 그 값만으로 다시 구성한다(PR #48 M1)
+  const key = parseEngineKey(d.key)
+  const ssrc = d.ssrc
+  const candidates = parseCandidates(d.candidates)
+  if (!key || !isValidSsrc(ssrc) || !candidates) {
+    send(ws, { type: 'error', code: 'descriptor-invalid', message: '엔진 연결 정보가 올바르지 않습니다.' })
+    return
+  }
+  if (keyTakenInRoom(client, key)) {
+    // 같은 방의 다른 사용자가 이미 이 공개키로 등록했다: 위장·선점 시도. 중계하지 않는다.
+    // 정상 클라이언트가 이걸 받으면(키를 먼저 빼앗긴 경우) 엔진을 새 키로 다시 시작한다.
+    console.warn(`[NATIVE] key-conflict from ${id.slice(0, 8)} in room ${roomId.slice(0, 8)}`)
+    send(ws, { type: 'error', code: 'key-conflict', message: '같은 방의 다른 사용자가 이미 쓰는 엔진 키입니다.' })
+    return
+  }
+  if (ssrcTakenInRoom(client, ssrc)) {
+    send(ws, { type: 'error', code: 'ssrc-conflict', message: '같은 방에서 이미 쓰는 ssrc입니다. 엔진을 다시 시작하세요.' })
+    return
+  }
+  const prevSsrc = client.nativeSsrc
+  client.nativeActive = true
+  client.nativeKey = key // 같은 사용자의 새 키(엔진 재시작)는 옛 바인딩을 덮어쓴다
+  client.nativeSsrc = ssrc
+  sendRelayToken(client)
+  // 방장 엔진이 native-leave 없이 새로 떴다(ssrc가 바뀜, 예: ssrc-conflict 재시작): 메트로놈 startUs는 옛 엔진 시계
+  // 기준이라 무의미하다 → 지우고 연주자들에게 정지를 알린다(PR #36 M1). 같은 엔진의 재알림(WS 재개·회신)은 ssrc가 같다.
+  const hostMetro = metronomes.get(roomId)
+  if (hostMetro && hostMetro.hostId === id && prevSsrc !== undefined && ssrc !== prevSsrc) {
+    metronomes.delete(roomId)
+    broadcastMetronomeStop(roomId, hostMetro)
+  }
+  // 엔진이 (다시) 떴다: 방장이 켠 메트로놈이 있으면 지금 상태를 알려 준다(늦게 들어온 연주자, 엔진 재시작).
+  // 방장 확인(DB)은 비동기라 descriptor 중계를 늦추지 않게 따로 돈다
+  void replayMetronome(client, roomId)
+  // 서버가 아는 필드만 다시 구성한다(클라이언트가 descriptor 안에 넣은 from/userId 등은 버림). from은 서버의 clientId
+  const out = { type: 'native-descriptor', from: id, descriptor: { ssrc, key, candidates } }
+  if (msg.to !== undefined) {
+    const target = getRoomPeer(client, msg.to)
+    if (target && isPerformer(target)) send(target.ws, out)
+    return
+  }
+  for (const peerId of rooms.get(roomId) || []) {
+    if (peerId === id) continue
+    const peer = clients.get(peerId)
+    if (peer && isPerformer(peer)) send(peer.ws, out)
+  }
+  return
+}
+
+/** `relay-token-request` — S3: 분기 본문을 그대로 옮겼다 */
+export function handleRelayTokenRequest(ctx: Ctx<NativeSessionSvc>, _msg: Msg) {
+  const { client } = ctx
+  const roomId = client.roomId
+  const { sendRelayToken } = ctx.svc.nativeSession
+
+  if (!roomId || !isAuthenticated(client) || !isPerformer(client)) return
+  sendRelayToken(client)
+  return
+}
+
+/** `native-leave` — S3: 분기 본문을 그대로 옮겼다 */
+export function handleNativeLeave(ctx: Ctx<NativeSessionSvc>, _msg: Msg) {
+  const { client, id } = ctx
+  const roomId = client.roomId
+  const { rooms, clients } = ctx.svc.registry
+  const { clearNative } = ctx.svc.nativeSession
+  const { metronomes } = ctx.svc.metronome
+
+  if (!roomId || !isAuthenticated(client) || !(isPerformer(client) || client.nativeActive)) return
+  clearNative(client)
+  // 방장 엔진이 내려가면 메트로놈도 끝난다(따르는 쪽은 native-leave를 받아 스스로 멈춘다)
+  if (metronomes.get(roomId)?.hostId === id) metronomes.delete(roomId)
+  for (const peerId of rooms.get(roomId) || []) {
+    if (peerId === id) continue
+    const peer = clients.get(peerId)
+    if (peer && (isPerformer(peer) || peer.nativeActive)) send(peer.ws, { type: 'native-leave', from: id })
+  }
+  return
+}

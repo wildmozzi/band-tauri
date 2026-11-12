@@ -1,10 +1,12 @@
-import { isAuthenticated } from './registry'
+import type { Ctx } from './ctx'
+import { sanitizeNickname, type Msg } from './protocol'
+import { isAuthenticated, isPerformer, send, type Registry } from './registry'
 import type { RoomMetaStore } from './roomMeta'
-import type { Client } from './types'
+import type { Client, WsLimits } from './types'
 
 /**
  * 연주 권한·승인 기록 (설계 docs/server-architecture.md 2.1절 F, 계층 2).
- * approvals의 소유자. S2에서는 handleJoin·handleLeave·승인 분기가 그대로라 맵도 내보낸다(S4에서 감춤).
+ * approvals의 소유자. start/stop-performing 메시지는 아래 handle*(S3). handleJoin·handleLeave·승인 핸들러가 맵을 직접 보므로 맵도 내보낸다(S4에서 감춤).
  * 승인 유예(끊김 → APPROVAL_GRACE_MS 뒤 만료)는 handleLeave가 setApproval로 건다.
  */
 export function createPerformers(roomMeta: RoomMetaStore, insecureDevMode: boolean) {
@@ -48,3 +50,65 @@ export function createPerformers(roomMeta: RoomMetaStore, insecureDevMode: boole
 }
 
 export type Performers = ReturnType<typeof createPerformers>
+
+/** 연주 시작·중단 핸들러가 쓰는 공용 서비스 조각 (전체 모양은 dispatch.ts SignalingServices) */
+export interface PerformersSvc {
+  registry: Registry
+  performers: Performers
+  limits: WsLimits
+  insecureDevMode: boolean
+}
+
+/** `start-performing` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
+export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
+  const { ws, client, id } = ctx
+  const roomId = client.roomId
+  const { rooms, clients, broadcastToRoom } = ctx.svc.registry
+  const { canStartPerforming } = ctx.svc.performers
+  const { limits, insecureDevMode } = ctx.svc
+  if (!roomId) return
+
+  if (!isAuthenticated(client) && !(insecureDevMode && client.authState === 'authenticated')) {
+    send(ws, { type: 'error', code: 'login-required', message: '연주하려면 로그인이 필요합니다.' })
+    return
+  }
+  if (!(await canStartPerforming(client, roomId)) || client.roomId !== roomId) {
+    send(ws, { type: 'error', code: 'perform-not-approved', message: '방장의 승인이 필요합니다.' })
+    return
+  }
+  // 연주자 수 제한 (이미 연주 중인 본인의 재전송은 허용)
+  if (!client.isPerforming) {
+    let performers = 0
+    for (const pid of rooms.get(roomId) || []) {
+      if (pid !== id && clients.get(pid)?.isPerforming) performers++
+    }
+    if (performers >= limits.maxPerformers) {
+      send(ws, { type: 'error', code: 'room-full-performers', message: `연주자는 최대 ${limits.maxPerformers}명입니다.` })
+      return
+    }
+  }
+  client.isPerforming = true
+  client.instrument = typeof msg.instrument === 'string' ? msg.instrument.slice(0, 50) : undefined
+  const nickname = sanitizeNickname(msg.nickname)
+  if (nickname) client.nickname = nickname
+  // 클라이언트 isHost는 무시 (서버 판정)
+  console.log(`[START-PERFORMING] ${id.slice(0, 8)} (${client.nickname}) started performing: ${client.instrument}, isHost: ${client.isHost}`)
+  broadcastToRoom(roomId, id, { type: 'performer-updated', oderId: id, nickname: client.nickname, instrument: client.instrument, isPerforming: true, isHost: client.isHost })
+  return
+}
+
+/** `stop-performing` — S3: 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
+export function handleStopPerforming(ctx: Ctx<PerformersSvc>, _msg: Msg) {
+  const { client, id } = ctx
+  const roomId = client.roomId
+  const { broadcastToRoom } = ctx.svc.registry
+  if (!roomId) return
+
+  client.isPerforming = false
+  client.instrument = undefined
+  // 연주자가 아니게 되면 ssrc를 잊는다(토큰 갱신 불가 → 기존 토큰 만료와 함께 릴레이 슬롯 해제)
+  if (!isPerformer(client)) client.nativeSsrc = undefined
+  console.log(`[STOP-PERFORMING] ${id.slice(0, 8)} (${client.nickname}) stopped performing`)
+  broadcastToRoom(roomId, id, { type: 'performer-updated', oderId: id, nickname: client.nickname, instrument: undefined, isPerforming: false })
+  return
+}
