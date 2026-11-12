@@ -25,8 +25,8 @@ export function createPassword(limits: WsLimits, scryptGate: ScryptGate) {
       return false
     }
     // 익명은 IP(/64) 단위로 묶는다 (재접속·주소 회전으로 횟수를 초기화하지 못하게)
-    const subject = client.userId ? `u:${client.userId}` : `anon:${ipBucket(client.ip)}`
-    const attempt = passwordLimiter.begin(roomId, subject, client.ip)
+    const subject = client.auth.userId ? `u:${client.auth.userId}` : `anon:${ipBucket(client.conn.ip)}`
+    const attempt = passwordLimiter.begin(roomId, subject, client.conn.ip)
     if (!attempt.ok) {
       send(ws, { type: 'error', code: 'password-rate-limited', roomId, retryAfterMs: attempt.retryAfterMs, message: '비밀번호를 너무 많이 틀렸습니다. 잠시 후 다시 시도하세요.' })
       return false
@@ -36,12 +36,12 @@ export function createPassword(limits: WsLimits, scryptGate: ScryptGate) {
       valid = await verifyRoomPassword(password, hash, scryptGate)
     } catch (err) {
       if (!(err instanceof ScryptBusyError)) throw err
-      passwordLimiter.cancelled(roomId, subject, client.ip)
+      passwordLimiter.cancelled(roomId, subject, client.conn.ip)
       send(ws, { type: 'error', code: 'password-busy', roomId, retryAfterMs: 2000, message: '서버가 혼잡합니다. 잠시 후 다시 시도하세요.' })
       return false
     }
     if (valid) {
-      passwordLimiter.succeeded(roomId, subject, client.ip)
+      passwordLimiter.succeeded(roomId, subject, client.conn.ip)
       return true
     }
     console.warn(`[JOIN] ${id.slice(0, 8)} wrong password for room ${roomId.slice(0, 8)} (remaining ${attempt.remaining})`)

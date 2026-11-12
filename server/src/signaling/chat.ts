@@ -11,7 +11,7 @@ export interface ChatSvc {
 /** `chat` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
 export function handleChat(ctx: Ctx<ChatSvc>, msg: Msg) {
   const { client, id } = ctx
-  const roomId = client.roomId
+  const roomId = client.member.roomId
   const { broadcastToRoom } = ctx.svc.registry
   if (!roomId) return
 
@@ -19,6 +19,6 @@ export function handleChat(ctx: Ctx<ChatSvc>, msg: Msg) {
   if (typeof msg.message !== 'string') return
   const message = msg.message.trim().slice(0, MAX_CHAT_LENGTH)
   if (!message) return
-  broadcastToRoom(roomId, id, { type: 'chat', message, nickname: client.nickname, timestamp: Date.now() })
+  broadcastToRoom(roomId, id, { type: 'chat', message, nickname: client.member.nickname, timestamp: Date.now() })
   return
 }

@@ -34,33 +34,33 @@ export interface AuthSvc extends ResumeSvc {
  */
 function resumeSession(ctx: Ctx<AuthSvc>, old: Client, token: string) {
   const temp = attachSession(ctx, old)
-  old.authState = 'authenticated'
-  old.tokenExp = jwtExpiryMs(token)
-  if (temp.expiryTimer) clearTimeout(temp.expiryTimer)
+  old.auth.state = 'authenticated'
+  old.auth.tokenExp = jwtExpiryMs(token)
+  if (temp.auth.expiryTimer) clearTimeout(temp.auth.expiryTimer)
   scheduleExpiryCheck(old)
   announceResumed(ctx)
 }
 
 /** S3: 연결 클로저의 함수를 그대로 옮겼다(캡처하던 값 없음) */
 export function scheduleExpiryCheck(client: Client) {
-  if (client.expiryTimer) clearTimeout(client.expiryTimer)
-  client.expiryTimer = undefined
-  if (client.tokenExp === null) return
-  const delay = Math.min(Math.max(client.tokenExp + TOKEN_EXPIRY_GRACE_MS - Date.now(), 0), 2 ** 31 - 1)
-  client.expiryTimer = setTimeout(() => {
-    if (client.tokenExp !== null && client.tokenExp + TOKEN_EXPIRY_GRACE_MS <= Date.now()) {
+  if (client.auth.expiryTimer) clearTimeout(client.auth.expiryTimer)
+  client.auth.expiryTimer = undefined
+  if (client.auth.tokenExp === null) return
+  const delay = Math.min(Math.max(client.auth.tokenExp + TOKEN_EXPIRY_GRACE_MS - Date.now(), 0), 2 ** 31 - 1)
+  client.auth.expiryTimer = setTimeout(() => {
+    if (client.auth.tokenExp !== null && client.auth.tokenExp + TOKEN_EXPIRY_GRACE_MS <= Date.now()) {
       console.log(`[AUTH] ${client.id.slice(0, 8)} token expired - closing`)
-      client.ws.close(4001, 'Token expired')
+      client.conn.ws.close(4001, 'Token expired')
     }
   }, delay)
-  client.expiryTimer.unref?.()
+  client.auth.expiryTimer.unref?.()
 }
 
 /** S3: 연결 클로저의 sendAuthResult를 그대로 옮겼다(ws·client는 ctx에서) */
 export function sendAuthResult(ctx: Ctx<{ insecureDevMode: boolean }>) {
   const { ws, client } = ctx
   const { insecureDevMode } = ctx.svc
-  send(ws, { type: 'auth-result', authenticated: isAuthenticated(client) || (insecureDevMode && client.authState === 'authenticated'), userId: client.userId ?? null })
+  send(ws, { type: 'auth-result', authenticated: isAuthenticated(client) || (insecureDevMode && client.auth.state === 'authenticated'), userId: client.auth.userId ?? null })
 }
 
 /** `auth` — S3: 연결 클로저의 handleAuth 본문을 그대로 옮겼다 */
@@ -71,17 +71,17 @@ export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
   const token = msg.accessToken
 
   // 재인증 (L1): 같은 사용자의 갱신 토큰이면 만료 연장, 방 밖의 익명 연결은 로그인으로 승격
-  if (client.authState === 'authenticated' || client.authState === 'anonymous') {
+  if (client.auth.state === 'authenticated' || client.auth.state === 'anonymous') {
     if (insecureDevMode || !isNonEmptyString(token, 8192)) return
     const uid = await deps.verifyToken(token)
     if (!uid) return
-    if (client.authState === 'authenticated' && uid === client.userId) {
-      client.tokenExp = jwtExpiryMs(token)
+    if (client.auth.state === 'authenticated' && uid === client.auth.userId) {
+      client.auth.tokenExp = jwtExpiryMs(token)
       scheduleExpiryCheck(client)
-    } else if (client.authState === 'anonymous' && !client.roomId) {
-      client.userId = uid
-      client.authState = 'authenticated'
-      client.tokenExp = jwtExpiryMs(token)
+    } else if (client.auth.state === 'anonymous' && !client.member.roomId) {
+      client.auth.userId = uid
+      client.auth.state = 'authenticated'
+      client.auth.tokenExp = jwtExpiryMs(token)
       scheduleExpiryCheck(client)
       console.log(`[AUTH] ${id.slice(0, 8)} upgraded to user ${uid.slice(0, 8)}`)
     }
@@ -89,7 +89,7 @@ export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
     return
   }
 
-  client.authState = 'verifying'
+  client.auth.state = 'verifying'
   if (isNonEmptyString(token, 8192) && deps.hasBackend) {
     const uid = await deps.verifyToken(token)
     // 세션 재개: 이전 clientId의 주인이 같은 userId이고 유예시간 안(suspended에 남아 있음)일 때만
@@ -102,17 +102,17 @@ export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
       }
     }
     if (uid) {
-      client.userId = uid
-      client.authState = 'authenticated'
-      client.tokenExp = jwtExpiryMs(token)
+      client.auth.userId = uid
+      client.auth.state = 'authenticated'
+      client.auth.tokenExp = jwtExpiryMs(token)
       scheduleExpiryCheck(client)
     }
   } else if (insecureDevMode && isNonEmptyString(token, 8192)) {
     // 개발 모드: 검증 불가. userId는 join 시 클라이언트 값 사용
-    client.authState = 'authenticated'
+    client.auth.state = 'authenticated'
   }
 
-  if (client.authState !== 'authenticated') client.authState = 'anonymous'
-  console.log(`[AUTH] ${id.slice(0, 8)} ${client.authState}${client.userId ? ` user ${client.userId.slice(0, 8)}` : ''}`)
+  if (client.auth.state !== 'authenticated') client.auth.state = 'anonymous'
+  console.log(`[AUTH] ${id.slice(0, 8)} ${client.auth.state}${client.auth.userId ? ` user ${client.auth.userId.slice(0, 8)}` : ''}`)
   sendAuthResult(ctx)
 }

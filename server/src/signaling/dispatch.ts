@@ -75,7 +75,7 @@ export async function dispatch(ctx: ConnCtx, msg: Msg) {
   }
 
   // auth 전 메시지는 거부
-  if (ctx.client.authState === 'pending' || ctx.client.authState === 'verifying') {
+  if (ctx.client.auth.state === 'pending' || ctx.client.auth.state === 'verifying') {
     send(ctx.ws, { type: 'error', code: 'auth-required', message: 'auth 메시지를 먼저 보내야 합니다.', rejectedType: msg.type })
     return
   }

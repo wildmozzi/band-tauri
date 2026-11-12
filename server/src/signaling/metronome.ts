@@ -23,10 +23,11 @@ export function metronomeHostChanged() {
 
 /**
  * 공유 메트로놈 상태·재전송·이양 정지 (설계 docs/server-architecture.md 2.1절 H, 계층 2).
- * metronomes의 소유자. metronome 메시지는 아래 handleMetronome(S3). native-descriptor·native-leave 핸들러와 handleLeave가 맵을 직접 만지므로 맵도 내보낸다(S4에서 감춤).
+ * metronomes의 소유자. metronome 메시지는 아래 handleMetronome(S3). 맵은 내보내지 않는다(S4-3):
+ * 엔진 쪽(nativeSession)은 onEngineRestart·onEngineDown, 퇴장 정리는 onMemberLeft·onRoomEmpty, 입장은 dropMetronomeIfHostChanged.
  */
 export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, deps: WsDeps, limits: WsLimits) {
-  const { rooms, clients } = registry
+  const { roomMembers, getClient } = registry
   const { getRoomMeta } = roomMeta
   /**
    * roomId → 방장이 켠 공유 메트로놈(P2-3). hostId = 켠 연결(clientId = 엔진 peerId), hostUserId = 켤 때의 DB 방장.
@@ -37,10 +38,9 @@ export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, dep
   /** 메트로놈 정지를 같은 방의 다른 연주자에게 알린다(켠 방장 제외) */
   function broadcastMetronomeStop(roomId: string, metro: { hostId: string; state: MetronomeState }) {
     const stopped = { type: 'metronome', from: metro.hostId, state: { ...metro.state, running: false } }
-    for (const peerId of rooms.get(roomId) || []) {
-      if (peerId === metro.hostId) continue
-      const peer = clients.get(peerId)
-      if (peer && isPerformer(peer)) send(peer.ws, stopped)
+    for (const peer of roomMembers(roomId)) {
+      if (peer.id === metro.hostId) continue
+      if (isPerformer(peer)) send(peer.conn.ws, stopped)
     }
   }
 
@@ -58,10 +58,10 @@ export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, dep
     console.log(`[METRONOME] host changed in room ${roomId.slice(0, 8)} - stopping`)
     metronomes.delete(roomId)
     broadcastMetronomeStop(roomId, metro)
-    const oldHost = clients.get(metro.hostId)
-    if (oldHost && oldHost.roomId === roomId) {
-      if (oldHost.ws.readyState === oldHost.ws.OPEN) send(oldHost.ws, metronomeHostChanged())
-      else oldHost.pendingMetronomeStop = true
+    const oldHost = getClient(metro.hostId)
+    if (oldHost && oldHost.member.roomId === roomId) {
+      if (oldHost.conn.ws.readyState === oldHost.conn.ws.OPEN) send(oldHost.conn.ws, metronomeHostChanged())
+      else oldHost.resume.pendingMetronomeStop = true
     }
     return true
   }
@@ -73,7 +73,7 @@ export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, dep
    */
   async function replayMetronome(c: Client, roomId: string) {
     const metro = metronomes.get(roomId)
-    if (!metro || metro.hostId === c.id || clients.get(metro.hostId)?.roomId !== roomId) return
+    if (!metro || metro.hostId === c.id || getClient(metro.hostId)?.member.roomId !== roomId) return
     if (deps.hasBackend && metro.hostUserId !== undefined) {
       let meta: RoomMeta | null | undefined
       try {
@@ -85,9 +85,9 @@ export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, dep
     }
     // DB 조회 동안 상태가 바뀌었을 수 있다
     const now = metronomes.get(roomId)
-    if (!now || now.hostId === c.id || clients.get(c.id) !== c || c.roomId !== roomId || !c.nativeActive) return
-    if (clients.get(now.hostId)?.roomId !== roomId) return
-    send(c.ws, { type: 'metronome', from: now.hostId, state: now.state })
+    if (!now || now.hostId === c.id || getClient(c.id) !== c || c.member.roomId !== roomId || !c.native.active) return
+    if (getClient(now.hostId)?.member.roomId !== roomId) return
+    send(c.conn.ws, { type: 'metronome', from: now.hostId, state: now.state })
   }
 
   /** 퇴장 정리 단계 (membership.leave, 설계 2.2절): 방장이 나가면 메트로놈 시각 기준(방장 엔진 시계)이 사라진다.
@@ -101,7 +101,35 @@ export function createMetronome(registry: Registry, roomMeta: RoomMetaStore, dep
     metronomes.delete(roomId)
   }
 
-  return { metronomes, broadcastMetronomeStop, dropMetronomeIfHostChanged, replayMetronome, onMemberLeft, onRoomEmpty }
+  /**
+   * 방장 엔진이 native-leave 없이 새로 떴다(ssrc가 바뀜, 예: ssrc-conflict 재시작): 메트로놈 startUs는 옛 엔진 시계
+   * 기준이라 무의미하다 → 그 엔진이 켠 메트로놈이면 지우고 연주자들에게 정지를 알린다(PR #36 M1). 판정(ssrc 변경)은 호출부가 한다
+   */
+  function onEngineRestart(roomId: string, clientId: string) {
+    const hostMetro = metronomes.get(roomId)
+    if (hostMetro && hostMetro.hostId === clientId) {
+      metronomes.delete(roomId)
+      broadcastMetronomeStop(roomId, hostMetro)
+    }
+  }
+
+  /** 방장 엔진이 내려가면(native-leave) 메트로놈도 끝난다(따르는 쪽은 native-leave를 받아 스스로 멈춘다) */
+  function onEngineDown(roomId: string, clientId: string) {
+    if (metronomes.get(roomId)?.hostId === clientId) metronomes.delete(roomId)
+  }
+
+  /** 이 연결이 지금 방의 메트로놈을 켠 연결인가 */
+  function isRunningBy(roomId: string, clientId: string): boolean {
+    return metronomes.get(roomId)?.hostId === clientId
+  }
+
+  /** metronome 메시지 반영: 켜면 저장, 끄면 삭제 */
+  function update(roomId: string, hostId: string, hostUserId: string | undefined, state: MetronomeState) {
+    if (state.running) metronomes.set(roomId, { hostId, hostUserId, state })
+    else metronomes.delete(roomId)
+  }
+
+  return { dropMetronomeIfHostChanged, replayMetronome, onMemberLeft, onRoomEmpty, onEngineRestart, onEngineDown, isRunningBy, update }
 }
 
 export type Metronome = ReturnType<typeof createMetronome>
@@ -118,14 +146,14 @@ export interface MetronomeSvc {
 /** `metronome` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 */
 export async function handleMetronome(ctx: Ctx<MetronomeSvc>, msg: Msg) {
   const { ws, client, id } = ctx
-  const roomId = client.roomId
-  const { rooms, clients } = ctx.svc.registry
+  const roomId = client.member.roomId
+  const { roomMembers } = ctx.svc.registry
   const { checkHost } = ctx.svc.roomMeta
-  const { metronomes, dropMetronomeIfHostChanged } = ctx.svc.metronome
+  const { isRunningBy, update, dropMetronomeIfHostChanged } = ctx.svc.metronome
   const { deps, limits } = ctx.svc
 
   // 공유 메트로놈(P2-3): 방장(DB 판정)이 자기 엔진을 켠 상태에서만. 같은 방 연주자에게 중계(from은 서버가 붙임)
-  if (!roomId || !isAuthenticated(client) || !client.nativeActive || !isPerformer(client)) return
+  if (!roomId || !isAuthenticated(client) || !client.native.active || !isPerformer(client)) return
   const state = parseMetronomeState(msg.state)
   if (!state) {
     send(ws, { type: 'error', code: 'metronome-invalid', message: '메트로놈 설정이 올바르지 않습니다.' })
@@ -134,21 +162,19 @@ export async function handleMetronome(ctx: Ctx<MetronomeSvc>, msg: Msg) {
   // 사람이 누르는 조작이라 드물다: 30초 캐시 대신 재전송과 같은 짧은 캐시로 확인한다
   // (옛 방장은 곧바로 막히고 새 방장은 곧바로 켤 수 있게, PR #53 M1)
   const host = await checkHost(client, limits.metronomeHostCheckMs)
-  if (!host.isHost || client.roomId !== roomId) {
+  if (!host.isHost || client.member.roomId !== roomId) {
     // 메트로놈을 켰던 연결이 더 이상 방장이 아니다(이양): 진행 중인 메트로놈도 멈춘다(PR #36 L1)
     // (그때 보낸 metronome-host-only가 이 요청의 거부 응답도 된다). DB 조회 실패(stale)면 이양 판단은 보류
-    if (!host.stale && client.roomId === roomId && metronomes.get(roomId)?.hostId === id &&
+    if (!host.stale && client.member.roomId === roomId && isRunningBy(roomId, id) &&
         dropMetronomeIfHostChanged(roomId, host.hostUserId)) return
     send(ws, { type: 'error', code: 'metronome-host-only', message: '메트로놈은 방장만 조작할 수 있습니다.' })
     return
   }
   // 개발 모드(DB 없음)는 방장 확인을 할 수 없어 hostUserId를 비운다(이양 검사 생략)
-  if (state.running) metronomes.set(roomId, { hostId: id, hostUserId: deps.hasBackend ? client.userId : undefined, state })
-  else metronomes.delete(roomId)
-  for (const peerId of rooms.get(roomId) || []) {
-    if (peerId === id) continue
-    const peer = clients.get(peerId)
-    if (peer && isPerformer(peer)) send(peer.ws, { type: 'metronome', from: id, state })
+  update(roomId, id, deps.hasBackend ? client.auth.userId : undefined, state)
+  for (const peer of roomMembers(roomId)) {
+    if (peer.id === id) continue
+    if (isPerformer(peer)) send(peer.conn.ws, { type: 'metronome', from: id, state })
   }
   return
 }

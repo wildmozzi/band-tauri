@@ -22,6 +22,7 @@ import { createMetronome, metronomeHostChanged } from '../src/signaling/metronom
 import { createNativeSession } from '../src/signaling/nativeSession'
 import { admitToRoom, handleLeave, type MembershipSvc } from '../src/signaling/membership'
 import type { Ctx } from '../src/signaling/ctx'
+import { createResume } from '../src/signaling/resume'
 import { sleep } from './helpers'
 
 const OPEN = 1
@@ -34,35 +35,49 @@ function fakeWs(readyState = OPEN): FakeWs {
   return ws
 }
 
-function fakeClient(id: string, over: Partial<Client> = {}): Client & { ws: WebSocket & FakeWs } {
-  return {
-    id,
-    ws: fakeWs() as unknown as WebSocket & FakeWs,
-    ip: '10.0.0.1',
-    nickname: `N-${id}`,
-    isPerforming: false,
-    isHost: false,
-    authState: 'authenticated',
-    tokenExp: null,
-    nativeActive: false,
-    chain: Promise.resolve(),
-    pending: 0,
-    isAlive: true,
-    msgBucket: new TokenBucket(1, 1),
-    chatBucket: new TokenBucket(1, 1),
-    joinBucket: new TokenBucket(1, 1),
-    dropped: 0,
-    lastRateLimitNotice: 0,
-    ...over,
-  } as Client & { ws: WebSocket & FakeWs }
+/** 테스트용 평평한 덮어쓰기 (Client 소유 묶음으로 나눠 넣는다, S4-3) */
+interface FakeOver {
+  ip?: string
+  userId?: string
+  authState?: Client['auth']['state']
+  roomId?: string
+  isHost?: boolean
+  isPerforming?: boolean
+  instrument?: string
+  nativeActive?: boolean
+  nativeSsrc?: number
+  nativeKey?: string
 }
 
-const sentTo = (c: Client) => (c.ws as unknown as FakeWs).sent
+function fakeClient(id: string, over: FakeOver = {}): Client {
+  return {
+    id,
+    conn: {
+      ws: fakeWs() as unknown as WebSocket,
+      ip: over.ip ?? '10.0.0.1',
+      chain: Promise.resolve(),
+      pending: 0,
+      isAlive: true,
+      msgBucket: new TokenBucket(1, 1),
+      chatBucket: new TokenBucket(1, 1),
+      joinBucket: new TokenBucket(1, 1),
+      dropped: 0,
+      lastRateLimitNotice: 0,
+    },
+    auth: { state: over.authState ?? 'authenticated', userId: over.userId, tokenExp: null },
+    resume: {},
+    member: { roomId: over.roomId, nickname: `N-${id}`, isHost: over.isHost ?? false },
+    perform: { isPerforming: over.isPerforming ?? false, instrument: over.instrument },
+    native: { active: over.nativeActive ?? false, ssrc: over.nativeSsrc, key: over.nativeKey },
+  }
+}
+
+const sentTo = (c: Client) => (c.conn.ws as unknown as FakeWs).sent
 
 /** 같은 방(roomId)에 클라이언트들을 넣는다 */
 function seat(reg: ReturnType<typeof createRegistry>, roomId: string, ...cs: Client[]) {
   for (const c of cs) {
-    c.roomId = roomId
+    c.member.roomId = roomId
     reg.addClient(c)
     reg.addToRoom(roomId, c.id)
   }
@@ -91,13 +106,19 @@ describe('registry', () => {
     const reg = createRegistry()
     const a = fakeClient('a')
     seat(reg, 'r', a)
-    assert.equal(reg.clients.get('a'), a)
-    assert.deepEqual([...reg.rooms.get('r')!], ['a'])
+    assert.equal(reg.getClient('a'), a)
+    assert.deepEqual(reg.roomMemberIds('r'), ['a'])
+    assert.deepEqual(reg.roomMembers('r'), [a])
+    assert.equal(reg.isInRoom('r', 'a'), true)
     reg.removeFromRoom('r', 'a')
-    assert.deepEqual([...reg.rooms.get('r')!], [], 'the empty room entry stays until leave cleanup deletes it')
+    assert.deepEqual(reg.roomMemberIds('r'), [])
+    assert.equal(reg.hasRoom('r'), true, 'the empty room entry stays until leave cleanup deletes it')
+    reg.deleteRoom('r')
+    assert.equal(reg.hasRoom('r'), false)
     reg.removeFromRoom('missing', 'a')
     reg.removeClient('a')
-    assert.equal(reg.clients.has('a'), false)
+    assert.equal(reg.getClient('a'), undefined)
+    assert.equal(reg.clientCount(), 0)
   })
 
   it('broadcastToRoom skips the sender and stamps oderId/from', () => {
@@ -184,7 +205,7 @@ describe('roomMeta', () => {
     const other = fakeClient('o', { userId: 'other', roomId: 'r', isHost: true })
     assert.deepEqual(await meta.checkHost(host), { isHost: true, hostUserId: 'host', stale: false })
     assert.equal(await meta.refreshHost(other), false, 'client-held isHost is overwritten by the DB')
-    assert.equal(other.isHost, false)
+    assert.equal(other.member.isHost, false)
     fail = true
     await sleep(5)
     assert.deepEqual(await meta.checkHost(host, 0), { isHost: true, hostUserId: 'host', stale: true })
@@ -214,9 +235,12 @@ describe('requests', () => {
   it('each factory owns its own request maps', () => {
     const a = createRequests()
     const b = createRequests()
-    a.performRequests.set('r', [{ oderId: 'x', nickname: 'n', instrument: 'bass', timestamp: 0 }])
-    assert.equal(b.performRequests.has('r'), false)
-    assert.equal(a.instrumentChangeRequests.size, 0)
+    a.performList('r', true).push({ oderId: 'x', nickname: 'n', instrument: 'bass', timestamp: 0 })
+    assert.equal(b.performList('r'), undefined)
+    assert.equal(a.instrumentList('r'), undefined)
+    assert.deepEqual(a.pendingFor('r').perform.map(r => r.oderId), ['x'])
+    a.onRoomEmpty('r')
+    assert.deepEqual(a.pendingFor('r'), { perform: [], instrument: [] })
   })
 })
 
@@ -229,7 +253,12 @@ describe('capacity', () => {
     const self = fakeClient('self', { userId: 'u1', ip: '10.0.0.9' })
     seat(reg, 'r', fakeClient('old', { userId: 'u1' }), fakeClient('m', { userId: 'u2' }), fakeClient('a1', { ip: '10.0.0.9' }), fakeClient('a2', { ip: '10.0.0.8' }))
     seat(reg, 'r', self)
-    assert.deepEqual(cap.countRoomSeats('r', self), { total: 3, members: 1, anonymous: 2, anonymousFromIp: 1 })
+    // 셈은 내부(countRoomSeats)라 checkCapacity의 경계로 본다: members 1(같은 사용자의 옛 연결 제외), anonymous 2, 그중 같은 IP 1
+    assert.equal(cap.checkCapacity('r', self, 2), null, 'members = 1: the same user older connection is not counted')
+    assert.equal(cap.checkCapacity('r', self, 1), 'room-full')
+    const anon = fakeClient('anon', { ip: '10.0.0.7' })
+    assert.equal(createCapacity(reg, { ...limits, maxAnonymousPerRoom: 3 }).checkCapacity('r', anon, 6), null, 'total = 5 < 6')
+    assert.equal(createCapacity(reg, { ...limits, maxAnonymousPerRoom: 3 }).checkCapacity('r', anon, 5), 'room-full', 'total = 5')
   })
 
   it('members only count members; anonymous viewers need a free seat and stay under both anonymous caps', () => {
@@ -255,23 +284,24 @@ describe('capacity', () => {
   it('seat holds expire on read and on sweep; rejoin records are consumed once', () => {
     const cap = createCapacity(createRegistry(), limits)
     const now = Date.now()
-    cap.seatHolds.set('r', new Map([['live', now + 60_000], ['dead', now - 1]]))
+    cap.hold('r', 'live', now + 60_000)
+    cap.hold('r', 'dead', now - 1)
     assert.equal(cap.hasSeatHold('r', 'live'), true)
     assert.equal(cap.hasSeatHold('r', 'dead'), false)
-    assert.equal(cap.seatHolds.get('r')!.has('dead'), false, 'expired hold removed on read')
     assert.equal(cap.hasSeatHold('r', undefined), false)
-    cap.seatHolds.set('s', new Map([['old', now - 1]]))
+    cap.hold('s', 'old', now - 1)
     cap.sweep(now)
-    assert.equal(cap.seatHolds.has('s'), false, 'sweep drops empty rooms')
-    assert.equal(cap.seatHolds.get('r')!.has('live'), true)
+    assert.equal(cap.hasSeatHold('s', 'old'), false)
+    assert.equal(cap.hasSeatHold('r', 'live'), true, 'sweep keeps live holds')
     cap.clearSeatHold('r', 'live')
-    assert.equal(cap.seatHolds.has('r'), false)
+    assert.equal(cap.hasSeatHold('r', 'live'), false)
 
-    cap.recentlyLeft.set('r', new Map([['u', now + 60_000], ['late', now - 1]]))
+    cap.noteLeft('r', 'u', now + 60_000)
+    cap.noteLeft('r', 'late', now - 1)
     assert.equal(cap.consumeRejoin('r', 'u'), true)
     assert.equal(cap.consumeRejoin('r', 'u'), false, 'consumed')
     assert.equal(cap.consumeRejoin('r', 'late'), false, 'expired record is removed and not a rejoin')
-    assert.equal(cap.recentlyLeft.has('r'), false)
+    assert.equal(cap.consumeRejoin('r', 'late'), false)
   })
 })
 
@@ -282,12 +312,12 @@ describe('password', () => {
     const hash = await hashRoomPassword('secret-1')
     const { checkRoomPassword } = createPassword(limits, new ScryptGate(2, 16))
     const c = fakeClient('c', { userId: 'u' })
-    assert.equal(await checkRoomPassword(c.ws, c,'r', hash, ''), false)
-    assert.equal(await checkRoomPassword(c.ws, c,'r', hash, 'wrong'), false)
-    assert.equal(await checkRoomPassword(c.ws, c,'r', hash, 'secret-1'), true, 'success clears the user failures')
-    assert.equal(await checkRoomPassword(c.ws, c,'r', hash, 'wrong'), false)
-    assert.equal(await checkRoomPassword(c.ws, c,'r', hash, 'wrong'), false)
-    assert.equal(await checkRoomPassword(c.ws, c,'r', hash, 'secret-1'), false, 'limited even with the right password')
+    assert.equal(await checkRoomPassword(c.conn.ws, c,'r', hash, ''), false)
+    assert.equal(await checkRoomPassword(c.conn.ws, c,'r', hash, 'wrong'), false)
+    assert.equal(await checkRoomPassword(c.conn.ws, c,'r', hash, 'secret-1'), true, 'success clears the user failures')
+    assert.equal(await checkRoomPassword(c.conn.ws, c,'r', hash, 'wrong'), false)
+    assert.equal(await checkRoomPassword(c.conn.ws, c,'r', hash, 'wrong'), false)
+    assert.equal(await checkRoomPassword(c.conn.ws, c,'r', hash, 'secret-1'), false, 'limited even with the right password')
     assert.deepEqual(sentTo(c).map(m => m.code), ['password-required', 'password-invalid', 'password-invalid', 'password-invalid', 'password-rate-limited'])
     assert.equal(sentTo(c)[1].remainingAttempts, 1)
   })
@@ -296,8 +326,8 @@ describe('password', () => {
     const hash = await hashRoomPassword('secret-1')
     const { checkRoomPassword } = createPassword({ ...limits, passwordMaxFailures: 1 }, new ScryptGate(0, 0))
     const c = fakeClient('c', { userId: 'u' })
-    assert.equal(await checkRoomPassword(c.ws, c,'r', hash, 'wrong'), false)
-    assert.equal(await checkRoomPassword(c.ws, c,'r', hash, 'wrong'), false)
+    assert.equal(await checkRoomPassword(c.conn.ws, c,'r', hash, 'wrong'), false)
+    assert.equal(await checkRoomPassword(c.conn.ws, c,'r', hash, 'wrong'), false)
     assert.deepEqual(sentTo(c).map(m => m.code), ['password-busy', 'password-busy'])
   })
 
@@ -305,13 +335,13 @@ describe('password', () => {
     const hash = await hashRoomPassword('secret-1')
     const { checkRoomPassword } = createPassword(limits, new ScryptGate(2, 16))
     const c = fakeClient('c', { userId: 'u' })
-    const oldWs = c.ws
+    const oldWs = c.conn.ws
     const newWs = fakeWs()
     // 연결 X(oldWs)의 join이 대기하는 사이 연결 Y가 같은 Client를 resume해 client.ws가 바뀐 상황
-    c.ws = newWs as unknown as WebSocket & FakeWs
+    c.conn.ws = newWs as unknown as WebSocket & FakeWs
     assert.equal(await checkRoomPassword(oldWs, c, 'r', hash, ''), false)
     assert.equal(await checkRoomPassword(oldWs, c, 'r', hash, 'wrong'), false)
-    assert.deepEqual(oldWs.sent.map(m => m.code), ['password-required', 'password-invalid'])
+    assert.deepEqual((oldWs as unknown as FakeWs).sent.map(m => m.code), ['password-required', 'password-invalid'])
     assert.deepEqual(newWs.sent, [], 'nothing goes to the resumed socket')
   })
 })
@@ -328,11 +358,11 @@ describe('performers', () => {
     assert.equal(p.hasApproval('r', 'a'), true)
     assert.equal(p.hasApproval('r', 'b'), true)
     assert.equal(p.hasApproval('r', 'c'), false)
-    assert.equal(p.approvals.get('r')!.has('c'), false)
     assert.equal(p.hasApproval('r', undefined), false)
     p.clearApproval('r', 'a')
     p.clearApproval('r', 'b')
-    assert.equal(p.approvals.has('r'), false)
+    assert.equal(p.hasApproval('r', 'a'), false)
+    assert.equal(p.hasApproval('r', 'b'), false)
   })
 
   it('canStartPerforming: verified login required; host, approval, or a free_join room', async () => {
@@ -366,22 +396,22 @@ describe('metronome', () => {
     const performer = fakeClient('p', { userId: 'p', isPerforming: true, nativeActive: true })
     const viewer = fakeClient('v', { userId: 'v' })
     seat(reg, 'r', host, performer, viewer)
-    metro.metronomes.set('r', { hostId: 'h', hostUserId: 'host', state: STATE })
+    metro.update('r', 'h', 'host', STATE)
     return { reg, metro, host, performer, viewer }
   }
 
   it('dropMetronomeIfHostChanged keeps the metronome while the DB host is the one who started it', () => {
     const { metro } = setup(async () => null)
     assert.equal(metro.dropMetronomeIfHostChanged('r', 'host'), false)
-    assert.ok(metro.metronomes.has('r'))
-    metro.metronomes.set('dev', { hostId: 'h', hostUserId: undefined, state: STATE })
+    assert.ok(metro.isRunningBy('r', 'h'))
+    metro.update('dev', 'h', undefined, STATE)
     assert.equal(metro.dropMetronomeIfHostChanged('dev', 'someone'), false, 'dev mode (no hostUserId) skips the handover check')
   })
 
   it('on handover: stops it for the other performers and tells the old host', () => {
     const { metro, host, performer, viewer } = setup(async () => null)
     assert.equal(metro.dropMetronomeIfHostChanged('r', 'new-host'), true)
-    assert.equal(metro.metronomes.has('r'), false)
+    assert.equal(metro.isRunningBy('r', 'h'), false)
     assert.deepEqual(sentTo(performer), [{ type: 'metronome', from: 'h', state: { ...STATE, running: false } }])
     assert.deepEqual(sentTo(viewer), [], 'viewers are not engine peers')
     assert.deepEqual(sentTo(host), [metronomeHostChanged()])
@@ -389,9 +419,9 @@ describe('metronome', () => {
 
   it('an old host whose socket is closed (resume grace) gets the notice on resume instead', () => {
     const { metro, host } = setup(async () => null)
-    ;(host.ws as unknown as FakeWs).readyState = CLOSED
+    ;(host.conn.ws as unknown as FakeWs).readyState = CLOSED
     assert.equal(metro.dropMetronomeIfHostChanged('r', null), true)
-    assert.equal(host.pendingMetronomeStop, true)
+    assert.equal(host.resume.pendingMetronomeStop, true)
     assert.deepEqual(sentTo(host), [])
   })
 
@@ -404,7 +434,7 @@ describe('metronome', () => {
   it('replayMetronome drops the metronome when the DB host changed, and still sends when the DB lookup fails', async () => {
     const changed = setup(async () => ({ hostId: 'new-host', freeJoin: false }))
     await changed.metro.replayMetronome(changed.performer, 'r')
-    assert.equal(changed.metro.metronomes.has('r'), false)
+    assert.equal(changed.metro.isRunningBy('r', 'h'), false)
     assert.deepEqual(sentTo(changed.performer).map(m => m.state.running), [false], 'only the stop notice')
 
     const down = setup(async () => { throw new Error('db down') })
@@ -415,7 +445,7 @@ describe('metronome', () => {
   it('replayMetronome skips the host itself and engines that are down', async () => {
     const { metro, host, performer } = setup(async () => ({ hostId: 'host', freeJoin: false }))
     await metro.replayMetronome(host, 'r')
-    performer.nativeActive = false
+    performer.native.active = false
     await metro.replayMetronome(performer, 'r')
     assert.deepEqual(sentTo(host), [])
     assert.deepEqual(sentTo(performer), [])
@@ -446,7 +476,7 @@ describe('nativeSession', () => {
     const ns = createNativeSession(createRegistry(), {})
     const c = fakeClient('a', { nativeActive: true, nativeKey: 'K', nativeSsrc: 7 })
     ns.clearNative(c)
-    assert.deepEqual([c.nativeActive, c.nativeKey, c.nativeSsrc], [false, undefined, undefined])
+    assert.deepEqual([c.native.active, c.native.key, c.native.ssrc], [false, undefined, undefined])
   })
 
   it('sendRelayToken: only with relay config, for a verified performer with an ssrc', () => {
@@ -490,7 +520,7 @@ function membershipSvc(): MembershipSvc {
   }
 }
 
-const ctxOf = (svc: MembershipSvc, c: Client): Ctx<MembershipSvc> => ({ ws: c.ws, ip: c.ip, client: c, id: c.id, svc })
+const ctxOf = (svc: MembershipSvc, c: Client): Ctx<MembershipSvc> => ({ ws: c.conn.ws, ip: c.conn.ip, client: c, id: c.id, svc })
 const PLAN = (capacity: number) => ({ isHost: false, passwordHash: null, capacity })
 
 describe('membership (S4-2)', () => {
@@ -503,7 +533,7 @@ describe('membership (S4-2)', () => {
     svc.registry.addClient(me)
     const ret: unknown = admitToRoom(ctxOf(svc, me), { type: 'join', roomId: 'r', nickname: 'Me' }, 'r', PLAN(5))
     assert.equal(ret, undefined)
-    assert.equal(me.roomId, 'r')
+    assert.equal(me.member.roomId, 'r')
     assert.deepEqual(svc.registry.getRoomParticipants('r').map(p => p.oderId).sort(), ['h', 'me'])
     assert.deepEqual(sentTo(host).map(m => m.type), ['participant-joined'])
     assert.deepEqual(sentTo(me).map(m => m.type), ['room-state'])
@@ -518,8 +548,8 @@ describe('membership (S4-2)', () => {
     svc.registry.addClient(b)
     admitToRoom(ctxOf(svc, a), { type: 'join', roomId: 'r' }, 'r', PLAN(2))
     admitToRoom(ctxOf(svc, b), { type: 'join', roomId: 'r' }, 'r', PLAN(2))
-    assert.equal(a.roomId, 'r')
-    assert.equal(b.roomId, undefined)
+    assert.equal(a.member.roomId, 'r')
+    assert.equal(b.member.roomId, undefined)
     assert.deepEqual(sentTo(b).map(m => [m.type, m.code]), [['error', 'room-full']])
   })
 
@@ -529,8 +559,8 @@ describe('membership (S4-2)', () => {
     const p = fakeClient('p', { userId: 'up', isPerforming: true, instrument: 'bass' })
     const v = fakeClient('v')
     seat(svc.registry, 'r', host, p, v)
-    svc.requests.performRequests.set('r', [{ oderId: 'p', nickname: 'P', instrument: 'drums', timestamp: 0 }])
-    svc.requests.instrumentChangeRequests.set('r', [{ oderId: 'p', nickname: 'P', currentInstrument: 'bass', newInstrument: 'keys', timestamp: 0 }])
+    svc.requests.performList('r', true).push({ oderId: 'p', nickname: 'P', instrument: 'drums', timestamp: 0 })
+    svc.requests.instrumentList('r', true).push({ oderId: 'p', nickname: 'P', currentInstrument: 'bass', newInstrument: 'keys', timestamp: 0 })
     svc.performers.setApproval('r', 'up', null)
 
     handleLeave(svc, p, 'r', 'close')
@@ -542,7 +572,22 @@ describe('membership (S4-2)', () => {
     handleLeave(svc, host, 'r', 'leave')
     handleLeave(svc, v, 'r', 'leave')
     assert.equal(svc.registry.roomSize('r'), 0)
-    assert.equal(svc.registry.rooms.has('r'), false, 'empty room removed')
-    assert.equal(svc.requests.performRequests.has('r'), false)
+    assert.equal(svc.registry.hasRoom('r'), false, 'empty room removed')
+    assert.equal(svc.requests.performList('r'), undefined)
+  })
+})
+
+describe('state ownership (S4-3)', () => {
+  it('no owner module hands out its maps — other modules go through functions (design 2.2)', () => {
+    const svc = membershipSvc()
+    const owners: Record<string, object> = {
+      registry: svc.registry, roomMeta: svc.roomMeta, capacity: svc.capacity, password: svc.password, performers: svc.performers,
+      metronome: svc.metronome, nativeSession: svc.nativeSession, requests: svc.requests, resume: createResume(svc.registry),
+    }
+    for (const [name, api] of Object.entries(owners)) {
+      for (const [key, value] of Object.entries(api)) {
+        assert.ok(typeof value === 'function', `${name}.${key} must be a function, not shared state`)
+      }
+    }
   })
 })
