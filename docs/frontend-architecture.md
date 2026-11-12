@@ -3,6 +3,7 @@
 실시간 합주 앱의 프런트(React 18 + Vite, 데스크톱은 Tauri WebView, 웹은 Vercel) 목표 구조와 규칙.
 목표는 **바뀌는 이유가 같은 코드는 한곳에, 의존은 한 방향으로** — 기능을 고치거나 지울 때 그 기능 폴더만 보면 되게 한다.
 
+- 구조 **결정**의 기준은 [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md)(D0·D3). 이 문서는 그 결정의 프런트 상세이며, 다르면 ADR이 맞고 이 문서를 고친다.
 - 엔진(Rust) 계약은 [overhaul/native-engine-design.md](overhaul/native-engine-design.md). 이 문서는 그 위의 TS 계층만 다룬다.
 - 규칙은 ESLint로 강제한다(6절). 문서와 lint가 다르면 lint가 맞고 문서를 고친다.
 - 서버(`server/`, 특히 시그널링 `wsService.ts` 약 1,600줄)는 이 문서 범위 밖이다. 다음 정리 대상이며 `docs/server-architecture.md`(예정)에서 다룬다.
@@ -85,6 +86,8 @@ client/src/
 | demo-karaoke | 노래방·음원 분리 (합주 목표 밖 데모) | auth |
 | demo-recording, demo-mixlab | 데모 화면 (합주 목표 밖) | — |
 
+데모(`demo-*`)는 다른 기능이 import하지 않는다(app의 라우트만 참조). 지울 때는 폴더와 `app/routes.tsx`·`app/routeTable.ts`의 해당 줄만 지우면 된다(ADR D3).
+
 `room`과 `rooms`를 나눈 이유: 방 **카탈로그**(DB의 rooms 행을 만들고 고치는 일)와 방 **안의 실시간 세션**(WS·엔진·WebRTC)은 바뀌는 이유와 속도가 전혀 다르다. 세션 쪽이 카탈로그를 쓰고(방 상세 조회, 정원 표시), 반대 방향은 없다.
 
 `auth`가 프로필 데이터(profiles 테이블)를 갖는 이유: 회원가입이 프로필 행을 만들고, 설정(오디오 설정 저장)·합주실(방장 닉네임)·프로필 화면이 모두 그 행을 읽는다. 프로필 **화면**만 `profile`에 둔다. 데이터까지 `profile`에 두면 auth ↔ profile 순환이 생긴다(프로필 화면은 로그인 가드를 쓴다).
@@ -150,7 +153,7 @@ client/src/
 | `useRoomPerform` | 연주 가능/중/시작 중, 내 악기, 연주자 목록, 릴레이 오류, 모니터, 입력 뮤트, 방송 담당·관람자 수 + 시작·정지 | 연주 시작/정지, 연주자 변동, 설정 조작 |
 | `useRoomMetronome` | 공유 메트로놈, 내 클릭 볼륨·뮤트 + 방장 시작/정지 | 메트로놈 변경 |
 | `useRoomTelemetry` | 엔진 통계·피어 통계, 레벨 미터, 관람 회선 통계 | 주기적(수십 ms~2s) — 표시하는 컴포넌트만 |
-| `useRoomAudio` | 표시용 연결 상태·오류, 수신 스트림, 개인 믹서 설정·마스터 + 오디오 컨텍스트 재개 | 사용자 조작, 수신 연결 변화 |
+| `useRoomMixer` | 표시용 연결 상태·오류, 수신 스트림, 개인 믹서 설정·마스터 + 오디오 컨텍스트 재개 | 사용자 조작, 수신 연결 변화 |
 | `useRoomChat` | 채팅 메시지 + 보내기 | 메시지 |
 | `useRoomRequests` | 연주 참여·악기 변경 요청 + 승인/거절/요청/취소 | 요청 |
 | `useRoomRecording` | 브라우저 녹음 상태·목록·시간 + 시작/정지/삭제 | 녹음 상태, 녹음 중 1초 |
