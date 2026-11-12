@@ -35,7 +35,8 @@ permissions:
   actions: write
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # 장시간 수동 측정(long_sim·soak)은 따로 묶어, 그 사이 develop에 들어온 push가 측정을 취소하지 않게 한다
+  group: ci-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && (inputs.long_sim || inputs.soak) && '-long' || '' }}
   cancel-in-progress: true
 
 defaults:
