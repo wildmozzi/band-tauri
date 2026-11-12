@@ -187,6 +187,10 @@ export interface PeerStats {
   /** 이 피어가 알려 온 내 소리의 수신 손실률·은닉률(%, 그쪽 최근 5초). 보고가 3초 넘게 없으면 null(옛 엔진, 그쪽 재생 전) */
   remoteLossPct?: number | null
   remoteConcealPct?: number | null
+  /** engine_add_peer → 이 피어와 처음 Connected(ms, P1-20). 아직이면 null. 재연결·경로 전환으로 다시 재지 않는다(옛 엔진에는 없다) */
+  connectMs?: number | null
+  /** engine_add_peer → 이 피어의 실제 소리가 처음 재생된 순간(ms, P1-20). 아직이면 null. 리셋 규칙은 connectMs와 같다 */
+  firstAudioMs?: number | null
 }
 
 // ============================================================================

@@ -133,6 +133,8 @@ pub struct ConnState {
     pub state: PeerStateKind,
     pub path: Option<(SocketAddr, PathKind)>,
     pub started: Instant,
+    /// 이 항목(add_peer)에서 처음 Connected가 된 시각(P1-20 `connectMs`). 한 번 정하면 재연결·경로 전환에도 그대로다.
+    pub connected_at: Option<Instant>,
     pub last_rx: Option<Instant>,
     pub last_hello: Option<Instant>,
     pub last_ping: Option<Instant>,
@@ -186,6 +188,7 @@ impl ConnState {
             state: PeerStateKind::Connecting,
             path: None,
             started: now,
+            connected_at: None,
             last_rx: None,
             last_hello: None,
             last_ping: None,
@@ -371,6 +374,7 @@ impl ConnState {
             self.on_rtt_sample(r);
         }
         self.state = PeerStateKind::Connected;
+        self.connected_at.get_or_insert(now);
         self.bye = false;
         self.last_rx = Some(now);
         HandshakeOutcome::Accepted
@@ -737,6 +741,8 @@ pub struct PeerNetStats {
     /// `TX_CODEC_*` 비트.
     pub tx_codec: u8,
     pub remote_loss: Option<(LossReport, Instant)>,
+    /// add_peer → 처음 Connected(ms, P1-20). 아직 연결 전이면 None.
+    pub connect_ms: Option<f32>,
 }
 
 pub struct PeerSetup<'a> {
@@ -816,9 +822,10 @@ impl Peer {
 
     /// `PeerStats`의 net 몫을 값으로.
     pub fn net_stats(&self, now: Instant) -> PeerNetStats {
-        let (state, path, rtt_ms) = {
+        let (state, path, rtt_ms, connect_ms) = {
             let c = self.conn.lock();
-            (c.state, c.path.map(|(_, k)| k), c.rtt_ms)
+            let connect_ms = c.connected_at.map(|t| t.saturating_duration_since(c.started).as_secs_f32() * 1000.0);
+            (c.state, c.path.map(|(_, k)| k), c.rtt_ms, connect_ms)
         };
         let (echo_requested, echo_active, peer_echoing) = {
             let e = self.echo.lock();
@@ -833,6 +840,7 @@ impl Peer {
             peer_echoing,
             tx_codec: self.tx_codec.load(Ordering::Relaxed),
             remote_loss: self.remote_loss(),
+            connect_ms,
         }
     }
 
@@ -956,6 +964,27 @@ mod tests {
         let mut c = ConnState::new(t0);
         c.on_handshake("198.51.100.1:7".parse().unwrap(), false, &cands(), None, t0);
         assert_eq!(c.path.unwrap().1, PathKind::Public);
+    }
+
+    /// P1-20 `connectMs`: 처음 Connected가 된 시각만 남고, 끊김 → 재연결·경로 승격에도 바뀌지 않는다.
+    #[test]
+    fn connected_at_is_first_connect_only() {
+        let t0 = Instant::now();
+        let mut c = ConnState::new(t0);
+        assert_eq!(c.connected_at, None);
+        let public: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+        let t1 = t0 + Duration::from_millis(120);
+        c.on_handshake(public, false, &cands(), None, t1);
+        assert_eq!(c.connected_at, Some(t1));
+        // LAN 승격
+        c.on_handshake("192.168.0.5:4000".parse().unwrap(), false, &cands(), None, t1 + Duration::from_millis(50));
+        assert_eq!(c.connected_at, Some(t1));
+        // 끊김 → 재연결
+        c.tick(t1 + Duration::from_secs(6), false);
+        assert_eq!(c.state, PeerStateKind::Reconnecting);
+        c.on_handshake("192.168.0.5:4000".parse().unwrap(), false, &cands(), None, t1 + Duration::from_secs(7));
+        assert_eq!(c.state, PeerStateKind::Connected);
+        assert_eq!(c.connected_at, Some(t1));
     }
 
     #[test]

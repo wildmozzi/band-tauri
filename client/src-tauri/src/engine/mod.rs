@@ -288,7 +288,8 @@ impl Engine {
         self.media_port.reclaim();
         let key = PeerKey::from_raw(self.next_key.fetch_add(1, Ordering::Relaxed));
         let settings = self.media_settings.current();
-        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc));
+        // 시각은 엔진 epoch(= net epoch) µs: 워커의 첫 재생 시각(`FeedTiming.wall_us`)과 같은 기준이다(P1-20).
+        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc).added_at(self.epoch.elapsed().as_micros() as u64));
         // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB)는 여기, 락 밖에서 할당한다. 워커는 할당하지 않는다.
         let (tx, rx) = media_link(key);
         let worker_side = PeerMedia::new(media.clone(), settings, rx);

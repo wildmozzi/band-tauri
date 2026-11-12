@@ -5,6 +5,7 @@
  */
 import { createContext, useContext, useMemo } from 'react'
 import { isNativeApp, type EngineStats, type PeerStats } from '../../../native/engineApi'
+import type { FirstAudioSummary } from '../../../native/firstAudio'
 import type { RoomSessionStore, RoomSnapshot } from './roomSessionStore'
 import { selectReconnectBanner } from './reconnectBanner'
 import { useRoomSelector } from './useRoomSelector'
@@ -128,6 +129,8 @@ export interface RoomTelemetry {
   masterLevel: number
   /** 관람 수신 회선 통계 */
   peerNetworkStats: Record<string, PeerNetworkStats>
+  /** 연주 시작 → 첫 피어 소리(P1-20). 연주 중이 아니거나 피어가 없으면 null */
+  firstAudio: FirstAudioSummary | null
 }
 
 const telemetryOf = (s: RoomSnapshot): RoomTelemetry => ({
@@ -136,6 +139,7 @@ const telemetryOf = (s: RoomSnapshot): RoomTelemetry => ({
   audioLevels: s.derived.audioLevels,
   masterLevel: s.derived.masterLevel,
   peerNetworkStats: s.viewer.networkStats,
+  firstAudio: s.perform.firstAudio ?? null,
 })
 
 const selectMixer = (s: RoomSnapshot) => ({

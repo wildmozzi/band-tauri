@@ -1124,6 +1124,59 @@ fn peer_pan_and_levels() {
 }
 
 // ============================================================================
+// 입장 → 연결·첫 소리(P1-20, GOAL 3-6)
+// ============================================================================
+
+/// add_peer 뒤 `connectMs`·`firstAudioMs`가 서고, 연결이 소리보다 먼저다. 한 번 정해진 값은 그대로다(결정적: 임계 ms 없음).
+#[test]
+fn first_audio_and_connect_ms_reported() {
+    let _g = RT_LOCK.lock();
+    let (a, b, _p, _sink_b) = connect_pair(config(128, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
+    let mut got = (None, None);
+    assert!(
+        wait_until(HANG, || {
+            let s = b.stats();
+            let p = &s.peers[0];
+            got = (p.connect_ms, p.first_audio_ms);
+            got.1.is_some()
+        }),
+        "firstAudioMs가 서지 않음: {got:?}"
+    );
+    let (connect, first) = (got.0.expect("connectMs"), got.1.unwrap());
+    assert!(connect >= 0.0 && connect <= first, "연결({connect}ms)이 첫 소리({first}ms)보다 먼저");
+    // A는 무음 장치가 아니라 B의 무음을 받는다: 무음도 실제 오디오다(은닉이 아님)
+    assert!(wait_until(HANG, || a.stats().peers[0].first_audio_ms.is_some()), "A쪽 firstAudioMs가 서지 않음");
+    let again = b.stats().peers[0].clone();
+    assert_eq!((again.connect_ms, again.first_audio_ms), (Some(connect), Some(first)), "한 번 정한 값은 그대로");
+}
+
+/// GOAL 3-6의 로컬 몫: 루프백 직접 연결에서 add_peer → 첫 소리 ≤ 1초.
+#[test]
+#[ignore = "realtime: 결정적 짝 first_audio_and_connect_ms_reported, net::peer::tests::connected_at_is_first_connect_only, engine::peer_media::tests::first_audio_recorded_once_relative_to_add"]
+fn first_audio_local_direct_within_1s() {
+    let _g = RT_LOCK.lock();
+    let t_add = Instant::now();
+    let (_a, b, _p, sink_b) = connect_pair(config(128, 2.5), sine_backend(), FakeBackend::silence(48_000), None);
+    let mut got = (None, None);
+    assert!(
+        wait_until(HANG, || {
+            let s = b.stats();
+            let p = &s.peers[0];
+            got = (p.connect_ms, p.first_audio_ms);
+            got.1.is_some()
+        }),
+        "firstAudioMs가 서지 않음: {got:?}"
+    );
+    // 출력에서 처음 사인(|x| > 0.05)이 나온 시점까지(장치 출력 버퍼만큼 엔진 값보다 늦다)
+    assert!(wait_until(HANG, || sink_b.lock().iter().any(|x| x.abs() > 0.05)), "B 출력에 소리 없음");
+    let heard_wall = t_add.elapsed();
+    let (connect, first) = (got.0.unwrap_or(f32::NAN), got.1.unwrap());
+    println!("P1-20 로컬 직접: connectMs {connect:.1}, firstAudioMs {first:.1}, 테스트 벽시계(시작 포함 → 출력에서 소리 확인) {heard_wall:?}");
+    assert!(first <= 1000.0, "로컬 직접 첫 소리 {first}ms > 1초");
+    assert!(connect <= first);
+}
+
+// ============================================================================
 // 보안(M7 사칭·ssrc 충돌, M8 후보 폭주, M6 경로 고정)
 // ============================================================================
 

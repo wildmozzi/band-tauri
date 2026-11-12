@@ -27,11 +27,20 @@ pub struct MediaStats {
     pub js: JitterStats,
     /// 수신 큐가 가득 차 버린 패킷 수(③-a3부터. 그 전에는 0).
     pub rx_dropped: u64,
+    /// 이 피어의 실제(은닉이 아닌) 오디오가 처음 재생 링에 들어간 시각(엔진 epoch µs, P1-20). 0 = 아직.
+    pub first_audio_us: u64,
 }
 
-/// `MediaStats`의 원자값 칸 수: `JitterStats` 24필드 + playing + rx_dropped. 필드가 늘면 `unpack`의 구조체 식이
+impl MediaStats {
+    /// add_peer(`added_us`) → 첫 실제 오디오 재생(ms, P1-20). 아직이면 None.
+    pub fn first_audio_ms(&self, added_us: u64) -> Option<f32> {
+        (self.first_audio_us != 0).then(|| self.first_audio_us.saturating_sub(added_us) as f32 / 1000.0)
+    }
+}
+
+/// `MediaStats`의 원자값 칸 수: `JitterStats` 24필드 + playing + rx_dropped + first_audio_us. 필드가 늘면 `unpack`의 구조체 식이
 /// 컴파일되지 않으므로 `pack`·`unpack`을 함께 고친다.
-const STAT_WORDS: usize = 26;
+const STAT_WORDS: usize = 27;
 
 fn pack(s: &MediaStats) -> [u64; STAT_WORDS] {
     let j = &s.js;
@@ -63,6 +72,7 @@ fn pack(s: &MediaStats) -> [u64; STAT_WORDS] {
         j.tail_adjusts,
         j.tail_resets,
         j.min_transit as u64,
+        s.first_audio_us,
     ]
 }
 
@@ -97,6 +107,7 @@ fn unpack(w: &[u64; STAT_WORDS]) -> MediaStats {
             tail_resets: w[24],
             min_transit: w[25] as i64,
         },
+        first_audio_us: w[26],
     }
 }
 
@@ -177,11 +188,19 @@ pub struct PeerMediaShared {
     stats: MediaStatsCell,
     /// 재시작 요청 세대: 제어가 +1, 워커가 마지막으로 본 값과 비교한다(여러 요청은 한 번으로 합쳐져도 결과가 같다).
     restart_req: AtomicU32,
+    /// `add_peer` 시각(엔진 epoch µs, 불변). `firstAudioMs`의 기준(P1-20).
+    pub added_us: u64,
 }
 
 impl PeerMediaShared {
     pub fn new(key: PeerKey, peer_id: String, ssrc: u32) -> Self {
-        Self { key, peer_id, ssrc, mix: PeerMixCtl::default(), stats: MediaStatsCell::default(), restart_req: AtomicU32::new(0) }
+        Self { key, peer_id, ssrc, mix: PeerMixCtl::default(), stats: MediaStatsCell::default(), restart_req: AtomicU32::new(0), added_us: 0 }
+    }
+
+    /// `add_peer` 시각(엔진 epoch µs)을 정한다. 만들 때 한 번만 부른다.
+    pub fn added_at(mut self, us: u64) -> Self {
+        self.added_us = us;
+        self
     }
 
     /// 교체(같은 peerId 재추가) 때 옛 상태의 믹스 설정(gain·muted·pan)을 이어받는다.
@@ -211,13 +230,15 @@ pub struct PeerMedia {
     restart_seen: u32,
     /// 이 지터 버퍼에 마지막으로 적용한 프로필(비트).
     profile_applied: u32,
+    /// 첫 실제 오디오를 재생 링에 넣은 시각(엔진 epoch µs, 0 = 아직). 이 항목의 수명 동안 한 번만 정한다(P1-20).
+    first_audio_us: u64,
 }
 
 impl PeerMedia {
     /// 지터 버퍼(슬롯 1024개 ≈ 1.19MB + 디코더)를 여기서 할당한다. 제어 평면 스레드에서 부른다.
     pub fn new(shared: Arc<PeerMediaShared>, settings: JitterSettings, rx: MediaRx) -> Box<Self> {
         let restart_seen = shared.restart_req.load(Ordering::Acquire);
-        Box::new(Self { shared, rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits() })
+        Box::new(Self { shared, rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits(), first_audio_us: 0 })
     }
 
     /// 워커 반복의 앞부분(그 피어의 `service` 바로 앞, 설계 2.4절·4절):
@@ -241,10 +262,18 @@ impl PeerMedia {
 
     /// 워커 반복의 뒷부분(`service` 직후): 통계 스냅샷과 손실 보고를 발행한다. `&mut self`라 쓰는 쪽이 이 항목의
     /// 단독 소유자(워커) 하나임이 타입으로 보장된다 — seqlock의 단일 작성자 조건(#116 L-1).
+    /// 이번 반복에 이 피어의 실제(은닉이 아닌) 오디오를 재생 링에 넣었다(워커, `service` 직후). 처음 한 번만 기록한다.
+    /// 지터 재시작(에코 측정)·경로 전환은 다시 재지 않는다 — 같은 항목의 "입장 → 첫 소리"는 한 번뿐이다.
+    pub(crate) fn note_audio(&mut self, now_us: u64) {
+        if self.first_audio_us == 0 {
+            self.first_audio_us = now_us.max(1);
+        }
+    }
+
     pub(crate) fn publish(&mut self) {
         let js = self.jitter.stats();
         let playing = self.jitter.is_playing();
-        self.shared.stats.write(&MediaStats { playing, js, rx_dropped: self.rx.dropped() });
+        self.shared.stats.write(&MediaStats { playing, js, rx_dropped: self.rx.dropped(), first_audio_us: self.first_audio_us });
         self.rx.set_loss_report(playing.then_some((js.loss_pct, js.conceal_pct)));
     }
 
@@ -396,7 +425,7 @@ mod tests {
             tail_resets: 11,
             min_transit: -123_456,
         };
-        MediaStats { playing: n % 2 == 1, js, rx_dropped: n * 7 }
+        MediaStats { playing: n % 2 == 1, js, rx_dropped: n * 7, first_audio_us: n * 11 }
     }
 
     #[test]
@@ -506,6 +535,24 @@ mod tests {
         assert_eq!(pm.restart_seen, 2);
         let _ = pm.ingest(0.5);
         assert_eq!(pm.restart_seen, 2);
+    }
+
+    /// 첫 소리(P1-20): 처음 한 번만 기록되고 지터 재시작(에코 측정)에도 다시 재지 않는다. 기준은 `added_us`.
+    #[test]
+    fn first_audio_recorded_once_relative_to_add() {
+        let s = Arc::new(PeerMediaShared::new(PeerKey::from_raw(3), "p3".into(), 3).added_at(1_000_000));
+        let (_tx, rx) = media_link(s.key);
+        let mut pm = PeerMedia::new(s.clone(), JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }, rx);
+        pm.publish();
+        assert_eq!(s.stats().first_audio_ms(s.added_us), None);
+        pm.note_audio(1_250_500);
+        pm.publish();
+        assert_eq!(s.stats().first_audio_ms(s.added_us), Some(250.5));
+        s.request_restart();
+        let _ = pm.ingest(0.5);
+        pm.note_audio(9_000_000);
+        pm.publish();
+        assert_eq!(s.stats().first_audio_ms(s.added_us), Some(250.5));
     }
 
     /// 프로필 ↔ 추가 경합(#115 리뷰 L4): 옛 프로필로 만든 피어도 워커의 다음 반복에서 지금 프로필로 맞춰진다.

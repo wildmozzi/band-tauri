@@ -91,6 +91,9 @@ pub struct PeerSample {
     /// 자동 전환 이유와 상대가 보고한 내 소리의 수신 손실(P1-4e, 손실 피드백 전환 확인용)
     pub tx_codec_reason: Option<CodecReason>,
     pub remote_loss_pct: Option<f32>,
+    /// 입장 → 연결·첫 소리(ms, P1-20). 한 번 정하면 그 피어 항목 동안 그대로다.
+    pub connect_ms: Option<f32>,
+    pub first_audio_ms: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -181,6 +184,8 @@ impl Sample {
                     tx_codec_auto: p.tx_codec_auto,
                     tx_codec_reason: p.tx_codec_reason,
                     remote_loss_pct: p.remote_loss_pct,
+                    connect_ms: p.connect_ms,
+                    first_audio_ms: p.first_audio_ms,
                 })
                 .collect(),
             relay: s.relay.as_ref().map(|r| RelaySample {
@@ -278,6 +283,8 @@ mod tests {
             tx_codec_reason: Some(CodecReason::LossFeedback),
             remote_loss_pct: Some(2.5),
             remote_conceal_pct: Some(2.6),
+            connect_ms: Some(120.0),
+            first_audio_ms: Some(180.5),
         });
         s.relay = Some(RelayStats {
             state: RelayStateKind::Bound,
@@ -303,6 +310,7 @@ mod tests {
         assert!(line.contains("\"path\":\"relay\""));
         assert!(line.contains("\"txCodec\":\"opus\"") && line.contains("\"txCodecAuto\":true"), "{line}");
         assert!(line.contains("\"autoOpus\":true"), "{line}");
+        assert!(line.contains("\"connectMs\":120.0") && line.contains("\"firstAudioMs\":180.5"), "{line}");
     }
 
     #[test]

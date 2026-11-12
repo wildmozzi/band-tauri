@@ -32,6 +32,8 @@ pub struct FeedEvents {
     pub skipped_frames: u64,
     /// 링이 다음 콜백에 모자라고 은닉 마감이 한 폴링 주기 안이다. 워커는 짧게 자서 마감을 놓치지 않는다.
     pub urgent: bool,
+    /// 이번 반복에 실제(은닉이 아닌) 오디오를 소스 링에 넣었다(P1-20 `firstAudioMs`).
+    pub real_audio: bool,
 }
 
 /// 피어 하나의 출력 소스: 소스 링 슬롯 + 48k → 장치 레이트 리샘플러.
@@ -224,6 +226,7 @@ impl PeerFeed {
                 p.record(&chunk[..k * 2], self.play_time_us(prod, t));
             }
             self.push(&chunk[..k * 2], prod, tmp);
+            ev.real_audio = true;
         }
         // (2) 은닉은 마감 직전에만, 다음 콜백에 모자란 만큼만(+ 적응 여유)
         let need = t.out_burst + m_eff;

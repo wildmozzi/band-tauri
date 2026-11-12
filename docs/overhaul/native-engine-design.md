@@ -369,7 +369,7 @@ interface EngineConfig {
 }
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
-interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean; txCodec: 'opus' | 'pcm16' | null; txCodecAuto: boolean; txCodecReason: 'relayLoad' | 'lossFeedback' | null; remoteLossPct: number | null; remoteConcealPct: number | null }
+interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean; txCodec: 'opus' | 'pcm16' | null; txCodecAuto: boolean; txCodecReason: 'relayLoad' | 'lossFeedback' | null; remoteLossPct: number | null; remoteConcealPct: number | null; connectMs: number | null; firstAudioMs: number | null }| null; remoteConcealPct: number | null }
 interface RelayConfig { addr: string; token: string; expiresInSec?: number; bindKey?: string }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)·bindKey(Bind MAC 키, base64url 32B, relay-design 2.1.1)
 interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean; autoOpus: boolean }
 type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
@@ -442,6 +442,13 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 `monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·로컬 소스 링) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
 
+`PeerStats.connectMs`·`firstAudioMs`(P1-20, GOAL 3-6 "입장 후 3초 이내 소리"의 엔진 몫): 기준은 그 피어의 `engine_add_peer` 시각(엔진 시계 = net epoch 단조 µs). 아직이면 null.
+- `connectMs` = add_peer → 그 피어와 처음 `connected`가 된 순간. net이 Hello/HelloAck를 받아들여 상태를 바꿀 때 `ConnState.connected_at`에 남긴다(수신 스레드, RT 아님).
+- `firstAudioMs` = add_peer → 그 피어의 **실제**(은닉이 아닌) 소리가 처음 소스 링(재생 링)에 들어간 순간. 워커가 `PeerFeed::service`의 "실제 데이터는 미리" 단계에서 링에 넣은 반복의 관측 시각(`FeedTiming.wall_us`)으로 기록하고(`PeerMedia::note_audio`), 통계 seqlock(`MediaStatsCell`, `MediaStats.first_audio_us`)으로 발행한다. RT 콜백은 기록하지 않는다. 장치 출력 버퍼만큼(한 콜백 이내) 귀에 닿는 시각보다 이르다.
+- 리셋 규칙: 둘 다 **피어 항목(add_peer 1회)마다 한 번** 정하고 그 뒤로 바꾸지 않는다. 끊김 → 재연결(`reconnecting` → `connected`), 경로 전환(릴레이 ↔ 직접 승격·강등), 지터 버퍼 재시작(에코 측정)은 다시 재지 않는다. 같은 peerId를 다시 추가하면(교체·재시도) 새 항목이라 새로 잰다. 엔진을 다시 시작하면 모두 새로 잰다.
+- 클라이언트의 "연주 시작 → 첫 피어 소리"는 `native/firstAudio.ts`가 계산한다: 시작 때 이미 있던 연주자는 (그 피어 add_peer 호출 시각 − 연주 시작 시각) + `firstAudioMs`, 시작 뒤에 들어온 연주자는 그 피어를 처음 추가한 시각부터. 진단 줄에 가장 빠른~가장 늦은 피어를 보이고, 진단 타임라인(`timeline.jsonl`의 피어 샘플)에는 피어별 `connectMs`·`firstAudioMs`가 남는다.
+- 검증: `net::peer::tests::connected_at_is_first_connect_only`, `engine::peer_media::tests::first_audio_recorded_once_relative_to_add`, `tests/loopback.rs` `first_audio_and_connect_ms_reported`(결정적)·`first_audio_local_direct_within_1s`(실시간, ≤ 1초), `tests/relay.rs` `direct_blocked_connects_via_relay_then_promotes_to_direct`(실시간, 직접 차단 → 릴레이 ≤ 3초).
+
 `PeerStats.playoutMs` = 벽시계로 잰 버퍼 지연(소스 링 포함, 최근 0.5~1초 최솟값) + 장치 출력 버퍼.
 - 장치 클럭 추정과 독립적이다. 그래서 `bufferMs`(클럭 추정 기준 목표 제어값)와 비교하면 숨은 지연 누적을 탐지할 수 있다.
 - 재생 전에는 0이다.
@@ -485,7 +492,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - `unstable` 메시지는 원인을 나눠 다시 재라고 안내한다: 검출 부족("돌아온 클릭이 절반 이하… 연결 상태를 확인하고 다시 재세요"), 흩어짐("클릭 간 흩어짐 Xms > 5ms… 잠시 뒤 다시 재고, 계속되면 유선 연결…").
   - 에코가 시작·끝날 때 측정하는 쪽은 그 피어의 지터 버퍼를 처음부터 다시 채운다(스트림 성격이 바뀜). 측정 뒤 상대가 에코를 멈출 때까지(최대 4초) 그 피어에게 무음을 보낸다(내 실제 소리가 되돌아오지 않게).
 
-`PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제). `autoOpus`는 PCM16 설정에서 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중이라는 뜻이다(3절 7). `PeerStats.txCodec`은 그 피어에게 마지막으로 보낸 내 소리의 코덱이고, `txCodecAuto`는 그것이 자동 전환한 Opus라는 뜻이다. `txCodecReason`은 그 이유다: `'relayLoad'`(릴레이 대역, 3절 7) / `'lossFeedback'`(상대가 보고한 수신 손실, 3절 9) / null. `remoteLossPct`·`remoteConcealPct`는 그 피어가 Ping으로 알려 온 **내 소리의** 수신 손실률·은닉률(%, 그쪽 최근 5초)이고, 보고가 3초 넘게 없으면(옛 엔진, 그쪽 재생 전) null이다. TS 래퍼(`engineApi.ts`)는 `autoOpus`·`txCodec`·`txCodecAuto`·`txCodecReason`·`remoteLossPct`·`remoteConcealPct`를 optional로 둔다(이 필드가 없는 옛 엔진 빌드와 함께 쓸 때).
+`PeerStats.path = 'relay'`: 서버 경유(UI는 "서버 경유 — 지연 증가"). 이때 `rttMs`는 릴레이를 거친 종단 간 왕복이다. `EngineStats.relay.rttMs`는 이 엔진 ↔ 릴레이 왕복(Bind/Ack)이다. `txKbps`는 최근 1초 릴레이 송신량(접두부 포함, UDP/IP 헤더 제외)이다. `overBudget`은 릴레이 클라이언트당 상한(2 Mbps·2500pps)의 90%를 넘었다는 뜻이다(80% 아래면 해제). `autoOpus`는 PCM16 설정에서 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중이라는 뜻이다(3절 7). `PeerStats.txCodec`은 그 피어에게 마지막으로 보낸 내 소리의 코덱이고, `txCodecAuto`는 그것이 자동 전환한 Opus라는 뜻이다. `txCodecReason`은 그 이유다: `'relayLoad'`(릴레이 대역, 3절 7) / `'lossFeedback'`(상대가 보고한 수신 손실, 3절 9) / null. `remoteLossPct`·`remoteConcealPct`는 그 피어가 Ping으로 알려 온 **내 소리의** 수신 손실률·은닉률(%, 그쪽 최근 5초)이고, 보고가 3초 넘게 없으면(옛 엔진, 그쪽 재생 전) null이다. TS 래퍼(`engineApi.ts`)는 `autoOpus`·`txCodec`·`txCodecAuto`·`txCodecReason`·`remoteLossPct`·`remoteConcealPct`·`connectMs`·`firstAudioMs`를 optional로 둔다(이 필드가 없는 옛 엔진 빌드와 함께 쓸 때).
 
 `qos`(P1-3, 3절 8): 오디오 UDP DSCP 마킹 상태. 네트워크가 없으면 null. `marking`: `ef`(EF 46을 OS에 지정 — 비Windows `IP_TOS`, Windows는 걸린 플로 모두 `QOSSetFlow` 성공) | `voice`(Windows, 걸린 플로 중 DSCP 직접 지정 실패가 있음 — 보통 권한 부족, 그 플로는 트래픽 유형 Voice. `ef`도 플로 추가 실패 목적지가 섞이면 `failed`로 알림) | `pending`(Windows, 아직 송신 목적지 없음) | `none`(표시 못 함). `ipTos`: `IP_TOS` setsockopt 성공(Windows는 성공해도 무시될 수 있다). `qwave`: qWAVE 핸들 획득. `flows`/`efFlows`/`failed`: 플로가 걸린 목적지 수 / 그중 DSCP 46 성공 수 / 플로 추가 실패 수(Windows만, 그 밖에는 0). `lastError`: 지금 남은 실패 사유(소켓·핸들 단계 실패, 또는 현재 목적지 중 실패한 것). 실패한 목적지가 빠지면 지워진다(이력 아님).
 

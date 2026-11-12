@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { EngineConfig, EngineStats, LocalDescriptor, MetronomeConfig, RelayConfig, RelayStats } from './engineApi'
+import type { EngineConfig, EngineStats, LocalDescriptor, MetronomeConfig, PeerStats, RelayConfig, RelayStats } from './engineApi'
 import { DEFAULT_ENGINE_CONFIG } from './engineConfig'
 import {
   DESCRIPTOR_INVALID_MESSAGE,
@@ -30,6 +30,7 @@ class FakeEngine implements EngineBackend {
   /** 다음 start를 수동으로 끝내고 싶으면 true */
   holdStart = false
   private release: (() => void) | null = null
+  peerStats: PeerStats[] = []
   startFail: string | null = null
   addPeerFailures = 0
   running = false
@@ -100,12 +101,13 @@ class FakeEngine implements EngineBackend {
     })
   }
   stats() {
-    return this.track('stats', async () => ({ ...stats(this.statsRunning), relay: this.relayStats }))
+    return this.track('stats', async () => ({ ...stats(this.statsRunning), relay: this.relayStats, peers: this.peerStats }))
   }
 }
 
 function setup(opts: { others?: string[] } = {}) {
   const engine = new FakeEngine()
+  const clock = { now: 0 }
   const sent: SignalOut[] = []
   const env = { selfId: 'me' as string | null, roomId: 'room' as string | null, others: opts.others ?? [] }
   const session = new PerformSession(engine, {
@@ -113,10 +115,10 @@ function setup(opts: { others?: string[] } = {}) {
     getSelfId: () => env.selfId,
     getRoomId: () => env.roomId,
     getOtherPerformers: () => env.others,
-  }, { retryDelaysMs: [5, 5, 5], reconnectTimeoutMs: 30, deadStatsThreshold: 2, relayRetryMs: 20 })
+  }, { retryDelaysMs: [5, 5, 5], reconnectTimeoutMs: 30, deadStatsThreshold: 2, relayRetryMs: 20, now: () => clock.now })
   const start = () => session.start({ instrument: 'guitar', config: DEFAULT_ENGINE_CONFIG, nickname: 'n', isHost: false })
   const types = () => sent.map((m) => m.type + ('to' in m ? `>${m.to}` : ''))
-  return { engine, sent, env, session, start, types }
+  return { engine, sent, env, session, start, types, clock }
 }
 
 describe('PerformSession 시작/정지', () => {
@@ -326,6 +328,27 @@ describe('PerformSession 피어/엔진 상태', () => {
     expect(session.getState().phase).toBe('idle')
     expect(session.getState().error).toContain('엔진이 멈췄')
     expect(types().slice(-2)).toEqual(['native-leave', 'stop-performing'])
+  })
+
+  it('P1-20: 연주 시작 → 첫 피어 소리 = (add_peer 시각 − 시작) + 엔진 firstAudioMs, 가장 빠른/늦은 피어', async () => {
+    const { session, start, engine, clock } = setup({ others: ['B'] })
+    clock.now = 1000
+    await start()
+    clock.now = 1400 // 서버 왕복 뒤 B의 descriptor
+    session.handleSignal({ type: 'native-descriptor', from: 'B', descriptor: desc(50) })
+    await flush()
+    clock.now = 61_000 // 시작 뒤에 들어온 C: 그 사람의 입장부터 잰다
+    session.handleSignal({ type: 'native-descriptor', from: 'C', descriptor: desc(60) })
+    await flush()
+    const ps = (peerId: string, firstAudioMs: number | null) => ({ peerId, state: 'connected', path: 'lan', firstAudioMs }) as PeerStats
+    engine.peerStats = [ps('B', null), ps('C', null)]
+    await session.pollStats()
+    expect(session.getState().firstAudio).toEqual({ firstMs: null, lastMs: null, heard: 0, total: 2 })
+    engine.peerStats = [ps('B', 350), ps('C', 200)]
+    await session.pollStats()
+    expect(session.getState().firstAudio).toEqual({ firstMs: 200, lastMs: 750, heard: 2, total: 2 })
+    await session.stop()
+    expect(session.getState().firstAudio).toBeNull()
   })
 
   it('stats가 정상이면 상태에 반영', async () => {

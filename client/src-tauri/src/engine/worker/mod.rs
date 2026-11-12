@@ -820,6 +820,9 @@ impl Worker {
                     mark(MarkKind::Drop, to_dev(dropped) + ev.skipped_frames, false);
                 }
             }
+            if ev.real_audio {
+                pm.note_audio(t.wall_us);
+            }
             pm.publish();
             fills += u64::from(ev.deadline_fill);
             skipped += ev.skipped_frames;
