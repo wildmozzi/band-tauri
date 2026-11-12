@@ -613,45 +613,6 @@
   background: var(--bg-app);
 }
 
-/* Live Header */
-.live-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px 24px;
-  background: var(--bg-panel-strong);
-  border-bottom: 1px solid var(--border);
-}
-
-.live-header-left {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.back-link {
-  font-size: 1.5rem;
-  color: var(--text-muted);
-  text-decoration: none;
-  padding: 8px;
-  transition: color 0.2s;
-}
-
-.back-link:hover {
-  color: var(--white);
-}
-
-.live-title-area h1 {
-  font-size: 1.25rem;
-  margin-bottom: 4px;
-}
-
-.live-meta {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
 .live-badge {
   padding: 4px 10px;
   border-radius: var(--radius-xs);
@@ -690,47 +651,6 @@
   color: var(--violet-300);
 }
 
-.viewer-count {
-  font-size: 0.85rem;
-  color: var(--text-muted);
-}
-
-.host-info {
-  font-size: 0.85rem;
-  color: var(--accent);
-  font-weight: 500;
-}
-
-.live-header-right {
-  display: flex;
-  gap: 12px;
-}
-
-.header-btn {
-  padding: 10px 20px;
-  background: var(--white-a10);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--white);
-  font-size: 0.9rem;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.header-btn:hover {
-  background: var(--white-a15);
-}
-
-.header-btn.leave {
-  background: var(--red-400-a20);
-  border-color: var(--red-400-a40);
-  color: var(--error);
-}
-
-.header-btn.leave:hover {
-  background: var(--red-400-a30);
-}
-
 /* Live Body - 3 Column Layout */
 .live-body {
   display: grid;
@@ -739,14 +659,6 @@
   flex: 1;
   background: var(--border);
   overflow: visible;
-}
-
-/* Performers Panel (Left) */
-.performers-panel {
-  background: var(--bg-panel);
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 73px);
 }
 
 .panel-header {
@@ -759,15 +671,6 @@
 
 .panel-header h2 {
   font-size: 1rem;
-  font-weight: 600;
-}
-
-.performer-count {
-  background: var(--accent-fill);
-  color: var(--white);
-  padding: 2px 8px;
-  border-radius: var(--radius-lg);
-  font-size: 0.75rem;
   font-weight: 600;
 }
 
@@ -860,85 +763,6 @@
   color: var(--success);
 }
 
-/* 합주자 목록 음소거 버튼 */
-.performer-mute-btn {
-  padding: 4px 8px;
-  font-size: 0.9rem;
-  background: var(--white-a10);
-  border: 1px solid var(--white-a20);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: all 0.2s;
-  flex-shrink: 0;
-}
-
-.performer-mute-btn:hover {
-  background: var(--white-a20);
-}
-
-.performer-mute-btn.muted {
-  background: var(--red-400-a20);
-  border-color: var(--red-400-a40);
-}
-
-/* 악기 변경 요청 버튼 */
-.change-instrument-btn {
-  margin-top: 4px;
-  padding: 2px 8px;
-  font-size: 0.7rem;
-  background: rgba(99, 102, 241, 0.2);
-  border: 1px solid var(--indigo-500-a40);
-  border-radius: var(--radius-lg);
-  color: var(--accent);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.change-instrument-btn:hover {
-  background: var(--indigo-500-a30);
-  border-color: var(--accent);
-}
-
-/* 내 악기 변경 요청 상태 */
-.my-instrument-change-status {
-  margin-top: 4px;
-  padding: 2px 8px;
-  font-size: 0.7rem;
-  border-radius: var(--radius-md);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.my-instrument-change-status.pending {
-  background: var(--yellow-400-a15);
-  color: var(--yellow-400);
-}
-
-.my-instrument-change-status.approved {
-  background: var(--green-400-a15);
-  color: var(--green-400);
-}
-
-.my-instrument-change-status.rejected {
-  background: var(--red-400-a15);
-  color: var(--red-400);
-}
-
-.my-instrument-change-status .cancel-btn.small {
-  padding: 1px 6px;
-  font-size: 0.65rem;
-  background: var(--red-400-a20);
-  border: 1px solid var(--red-400-a40);
-  border-radius: var(--radius-sm);
-  color: var(--red-400);
-  cursor: pointer;
-}
-
-.my-instrument-change-status .cancel-btn.small:hover {
-  background: var(--red-400-a40);
-}
-
 /* 방장에게 표시되는 악기 변경 요청 */
 .instrument-change-request {
   margin-top: 4px;
@@ -962,74 +786,6 @@
   gap: 4px;
 }
 
-.change-request-actions .approve-btn.small,
-.change-request-actions .reject-btn.small {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-round);
-  border: none;
-  cursor: pointer;
-  font-size: 0.7rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-}
-
-.change-request-actions .approve-btn.small {
-  background: var(--green-400-a20);
-  color: var(--green-400);
-}
-
-.change-request-actions .approve-btn.small:hover {
-  background: var(--green-400-a40);
-}
-
-.change-request-actions .reject-btn.small {
-  background: var(--red-400-a20);
-  color: var(--red-400);
-}
-
-.change-request-actions .reject-btn.small:hover {
-  background: var(--red-400-a40);
-}
-
-/* 악기 옵션 - 현재 선택된 악기 표시 */
-.instrument-option.current {
-  border-color: var(--accent);
-  background: var(--indigo-500-a10);
-}
-
-.inst-slots.current {
-  background: var(--accent);
-  color: white;
-}
-
-/* 연주자 아이템 래퍼 (말풍선 포지셔닝용) */
-.performer-item-wrapper {
-  position: relative;
-}
-
-/* 악기 변경 요청 말풍선 */
-.instrument-change-bubble {
-  position: absolute;
-  left: calc(100% + 8px);
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 9999;
-  animation: bubble-pop 0.3s ease-out;
-}
-
-/* Fixed position 말풍선 (믹서 위에 표시, 네비게이션보다는 아래) */
-.instrument-change-bubble.fixed {
-  position: fixed;
-  left: auto;
-  top: auto;
-  transform: translateY(-50%);
-  z-index: 50;
-  pointer-events: auto;
-}
-
 @keyframes bubble-pop {
   0% {
     opacity: 0;
@@ -1039,169 +795,6 @@
     opacity: 1;
     transform: translateY(-50%) scale(1);
   }
-}
-
-.bubble-arrow {
-  position: absolute;
-  left: -7px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 0;
-  height: 0;
-  border-top: 7px solid transparent;
-  border-bottom: 7px solid transparent;
-  border-right: 7px solid var(--violet-500-a60);
-}
-
-/* 배경색 안쪽 삼각형 */
-.bubble-arrow::after {
-  content: '';
-  position: absolute;
-  left: 2px;
-  top: -6px;
-  width: 0;
-  height: 0;
-  border-top: 6px solid transparent;
-  border-bottom: 6px solid transparent;
-  border-right: 6px solid var(--panel-strong-a95);
-}
-
-.bubble-content {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--panel-strong-a95);
-  border: 1px solid var(--violet-500-a60);
-  border-radius: var(--radius-md);
-  box-shadow: 0 2px 8px var(--black-a30);
-  white-space: nowrap;
-  color: var(--white);
-}
-
-.bubble-text {
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--white);
-}
-
-.bubble-actions {
-  display: flex;
-  gap: 4px;
-}
-
-.bubble-btn {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-round);
-  border: none;
-  cursor: pointer;
-  font-size: 0.7rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-}
-
-.bubble-btn.approve {
-  background: var(--green-400);
-  color: var(--navy-800);
-}
-
-.bubble-btn.approve:hover {
-  background: var(--green-500);
-  transform: scale(1.15);
-}
-
-.bubble-btn.reject {
-  background: var(--red-400);
-  color: var(--navy-800);
-}
-
-.bubble-btn.reject:hover {
-  background: var(--red-500);
-  transform: scale(1.15);
-}
-
-/* 레이턴시 표시 */
-.performer-latency {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.7rem;
-  padding: 2px 6px;
-  background: var(--black-a30);
-  border-radius: var(--radius-lg);
-  margin-left: auto;
-}
-
-.performer-latency .latency-value {
-  font-family: 'Monaco', 'Consolas', monospace;
-  font-weight: 500;
-}
-
-.performer-latency .quality-indicator {
-  font-size: 0.8rem;
-}
-
-.mic-toggle {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-round);
-  border: none;
-  cursor: pointer;
-  font-size: 1rem;
-  transition: all 0.2s;
-}
-
-.mic-toggle.on {
-  background: var(--success);
-  color: var(--white);
-}
-
-.mic-toggle.off {
-  background: var(--white-a10);
-  color: var(--text-muted);
-}
-
-.mic-toggle:hover {
-  transform: scale(1.1);
-}
-
-.monitor-toggle {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-round);
-  border: none;
-  cursor: pointer;
-  font-size: 1rem;
-  transition: all 0.2s;
-  margin-left: 8px;
-}
-
-.monitor-toggle.on {
-  background: var(--accent);
-  color: var(--white);
-}
-
-.monitor-toggle.off {
-  background: var(--white-a10);
-  color: var(--text-muted);
-}
-
-.monitor-toggle:hover {
-  transform: scale(1.1);
-}
-
-.monitoring-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: 8px;
-}
-
-.monitoring-controls .monitor-toggle {
-  margin-left: 0;
 }
 
 .monitoring-volume-slider {
@@ -1242,27 +835,6 @@
   display: none;
 }
 
-.no-performers {
-  text-align: center;
-  padding: 40px 20px;
-  color: var(--text-muted);
-}
-
-.no-performers p {
-  margin-bottom: 8px;
-}
-
-.no-performers small {
-  font-size: 0.8rem;
-  opacity: 0.7;
-}
-
-/* Participation Toggle */
-.participation-toggle {
-  padding: 16px;
-  border-top: 1px solid var(--border);
-}
-
 .toggle-btn {
   width: 100%;
   padding: 14px;
@@ -1274,21 +846,6 @@
   transition: all 0.2s;
 }
 
-.toggle-btn.performer {
-  background: var(--gradient-accent);
-  color: var(--white);
-}
-
-.toggle-btn.performer:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 20px var(--violet-500-a40);
-}
-
-.toggle-btn.performer:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
 .toggle-btn.viewer {
   background: var(--white-a10);
   color: var(--text-muted);
@@ -1298,52 +855,6 @@
 .toggle-btn.viewer:hover {
   background: var(--white-a15);
   color: var(--white);
-}
-
-.approval-notice {
-  margin-top: 12px;
-  font-size: 0.8rem;
-  color: var(--warning);
-  text-align: center;
-}
-
-/* 요청 상태 표시 */
-.request-status {
-  text-align: center;
-  padding: 16px;
-  border-radius: var(--radius-lg);
-  background: var(--white-a05);
-}
-
-.request-status p {
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-
-.request-status small {
-  color: var(--text-muted);
-  display: block;
-  margin-bottom: 12px;
-}
-
-.request-status.pending {
-  border: 1px solid var(--warning);
-}
-
-.request-status.approved {
-  border: 1px solid var(--success);
-}
-
-.request-status.approved p {
-  color: var(--success);
-}
-
-.request-status.rejected {
-  border: 1px solid var(--error);
-}
-
-.request-status.rejected p {
-  color: var(--error);
 }
 
 .cancel-request-btn {
@@ -1360,164 +871,6 @@
 .cancel-request-btn:hover {
   background: var(--white-a10);
   color: var(--white);
-}
-
-/* 웹 사용자 안내 */
-.web-notice {
-  text-align: center;
-  padding: 20px;
-  border-radius: var(--radius-lg);
-  background: var(--indigo-500-a10);
-  border: 1px solid var(--accent);
-}
-
-.web-notice p {
-  font-weight: 600;
-  margin-bottom: 8px;
-  color: var(--accent);
-}
-
-.web-notice small {
-  color: var(--text-muted);
-  display: block;
-  margin-bottom: 12px;
-}
-
-.web-notice .download-link {
-  border: none;
-  font: inherit;
-  display: inline-block;
-  padding: 10px 20px;
-  background: var(--accent);
-  color: var(--white);
-  text-decoration: none;
-  border-radius: var(--radius-md);
-  font-weight: 500;
-  transition: all 0.2s;
-}
-
-.web-notice .download-link:hover {
-  background: var(--indigo-400);
-  transform: translateY(-2px);
-}
-
-/* 방장: 승인 요청 알림 */
-.pending-requests-alert {
-  margin-top: 12px;
-  padding: 12px 16px;
-  background: linear-gradient(135deg, var(--yellow-400-a20), var(--pink-400-a20));
-  border: 1px solid var(--warning);
-  border-radius: var(--radius-lg);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.pending-requests-alert:hover {
-  background: linear-gradient(135deg, var(--yellow-400-a30), var(--pink-400-a30));
-  transform: translateY(-2px);
-}
-
-.pending-requests-alert .alert-badge {
-  background: var(--warning);
-  color: var(--black);
-  font-weight: 700;
-  font-size: 0.85rem;
-  padding: 4px 10px;
-  border-radius: var(--radius-pill);
-}
-
-.pending-requests-alert span:last-child {
-  font-weight: 500;
-}
-
-/* 승인 요청 모달 */
-.pending-requests-modal .modal-content {
-  max-width: 450px;
-}
-
-.pending-requests-modal .no-requests {
-  text-align: center;
-  color: var(--text-muted);
-  padding: 24px;
-}
-
-.requests-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.request-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px;
-  background: var(--white-a05);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-}
-
-.request-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.request-icon {
-  font-size: 1.5rem;
-}
-
-.request-details {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.request-nickname {
-  font-weight: 600;
-}
-
-.request-instrument {
-  font-size: 0.85rem;
-  color: var(--text-muted);
-}
-
-.request-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.approve-btn,
-.reject-btn {
-  padding: 8px 14px;
-  border-radius: var(--radius-sm);
-  border: none;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.approve-btn {
-  background: var(--success);
-  color: var(--black);
-}
-
-.approve-btn:hover {
-  background: var(--green-500);
-  transform: translateY(-1px);
-}
-
-.reject-btn {
-  background: var(--red-400-a20);
-  color: var(--error);
-  border: 1px solid var(--error);
-}
-
-.reject-btn:hover {
-  background: var(--red-400-a30);
 }
 
 /* Main Stage (Center) */
@@ -1651,24 +1004,6 @@
   font-size: 0.85rem;
 }
 
-/* Viewer Guide */
-.viewer-guide {
-  padding: 16px 24px;
-  background: var(--white-a03);
-  border-top: 1px solid var(--border);
-  text-align: center;
-}
-
-.viewer-guide p {
-  font-size: 0.95rem;
-  margin-bottom: 4px;
-}
-
-.viewer-guide small {
-  color: var(--text-muted);
-  font-size: 0.8rem;
-}
-
 /* Info Panel (Right) */
 .info-panel {
   background: var(--bg-panel);
@@ -1710,15 +1045,6 @@
   font-size: 0.85rem;
 }
 
-.room-description {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
 .tags-list {
   display: flex;
   flex-wrap: wrap;
@@ -1731,92 +1057,6 @@
   border-radius: var(--radius-xl);
   font-size: 0.8rem;
   color: var(--accent);
-}
-
-/* Enhanced Room Info Modal Styles */
-.info-title-section {
-  margin-bottom: 16px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--border);
-}
-
-.info-title-section h3 {
-  font-size: 1.2rem;
-  font-weight: 600;
-  margin-bottom: 8px;
-  color: var(--color-text);
-}
-
-.info-title-section .room-description {
-  margin-top: 8px;
-  padding-top: 0;
-  border-top: none;
-}
-
-.info-section {
-  margin-bottom: 16px;
-}
-
-.info-section h4 {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  margin-bottom: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-.info-tags-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.info-tag {
-  padding: 5px 12px;
-  background: var(--violet-500-a15);
-  border-radius: var(--radius-2xl);
-  font-size: 0.8rem;
-  color: var(--accent);
-}
-
-.info-instrument-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.info-instrument-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  background: var(--white-a05);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-}
-
-.info-inst-icon {
-  font-size: 1.1rem;
-}
-
-.info-inst-name {
-  font-size: 0.85rem;
-  color: var(--color-text);
-}
-
-.info-inst-slots {
-  font-size: 0.75rem;
-  padding: 2px 8px;
-  background: var(--green-400-a20);
-  color: var(--green-400);
-  border-radius: var(--radius-lg);
-  font-weight: 500;
-}
-
-.info-inst-slots.full {
-  background: var(--red-400-a20);
-  color: var(--red-400);
 }
 
 /* ===== Recording Section ===== */
@@ -1892,159 +1132,20 @@
   cursor: default;
 }
 
-/* 엔진 멀티트랙 녹음(P2-4) */
-.recording-option {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  cursor: pointer;
-}
-
 /* 녹음 파일 형식(P2-4a) */
-.recording-format {
-  font-size: 0.85rem;
-  padding: 2px 6px;
-  border-radius: 6px;
-  border: 1px solid var(--border-color, #444);
-  background: transparent;
-  color: inherit;
-}
 
 .recording-format:disabled {
   opacity: 0.6;
 }
 
-.recording-folder {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-  min-width: 0;
-}
-
-.recording-folder-path {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-
-.recording-warning {
-  margin: 8px 0 0;
-  font-size: 0.8rem;
-  color: var(--warning);
-}
-
-.recording-notice {
-  margin: 8px 0 0;
-  font-size: 0.8rem;
-  color: var(--color-text);
-  word-break: break-all;
-}
-
-.recording-hint {
-  margin: 6px 0 0;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
-
-/* Recordings Modal */
-.recordings-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.recordings-modal > .modal-backdrop {
-  position: absolute;
-  inset: 0;
-  background: var(--black-a70);
-}
-
-.recordings-modal .modal-content {
-  position: relative;
-  background: var(--bg-panel);
-  border-radius: var(--radius-2xl);
-  width: 90%;
-  max-width: 550px;
-  max-height: 85vh;
-  overflow-y: auto;
-}
-
-.no-recordings {
-  text-align: center;
-  padding: 32px 16px;
-  color: var(--text-muted);
-}
-
-.no-recordings p {
-  font-size: 1rem;
-  margin-bottom: 8px;
-}
-
-.no-recordings small {
-  font-size: 0.85rem;
-  opacity: 0.7;
-}
-
-.recordings-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.recording-item {
-  padding: 12px;
-  background: var(--white-a03);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-}
-
-.recording-info {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.recording-duration {
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  padding: 2px 8px;
-  background: var(--white-a10);
-  border-radius: var(--radius-xs);
-}
-
 .recording-format {
+  border: 1px solid var(--border-color, #444);
   font-size: 0.75rem;
   color: var(--accent);
   padding: 2px 6px;
   background: var(--violet-500-a15);
   border-radius: var(--radius-xs);
   text-transform: uppercase;
-}
-
-.recording-controls {
-  margin-bottom: 10px;
-}
-
-.recording-audio {
-  width: 100%;
-  height: 36px;
-  border-radius: var(--radius-sm);
-}
-
-.recording-audio::-webkit-media-controls-panel {
-  background: var(--white-a10);
 }
 
 .recording-actions {
@@ -2069,15 +1170,6 @@
 
 .download-btn:hover {
   background: var(--green-400-a30);
-}
-
-.delete-btn {
-  background: var(--red-400-a20);
-  color: var(--red-400);
-}
-
-.delete-btn:hover {
-  background: var(--red-400-a30);
 }
 
 .users-list {
@@ -2119,11 +1211,6 @@
   border-radius: var(--radius-lg);
   font-size: 0.7rem;
   font-weight: 600;
-}
-
-.role-badge.performer {
-  background: var(--green-400-a20);
-  color: var(--success);
 }
 
 .role-badge.host {
@@ -2174,103 +1261,6 @@
   to { transform: rotate(360deg); }
 }
 
-/* Mixer Panel (Center) */
-.mixer-panel {
-  background: var(--bg-app);
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 73px);
-}
-
-.mixer-hint {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
-
-.mixer-content {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px;
-}
-
-.mixer-master {
-  background: var(--violet-500-a10);
-  border: 1px solid var(--violet-500-a30);
-  border-radius: var(--radius-xl);
-  padding: 16px;
-  margin-bottom: 20px;
-}
-
-.mixer-master label {
-  display: block;
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-
-.master-control-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.master-control-row label {
-  width: 40px;
-  flex-shrink: 0;
-  font-size: 0.75rem;
-  color: var(--color-text-subtle);
-}
-
-.master-control-row input[type="range"] {
-  flex: 1;
-}
-
-.master-control-row span {
-  width: 45px;
-  text-align: right;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-.mixer-master.muted {
-  opacity: 0.6;
-}
-
-.mixer-master.muted .master-control-row span {
-  color: var(--text-muted);
-}
-
-.master-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.master-header label {
-  margin-bottom: 0;
-}
-
-.master-mute-btn {
-  background: var(--white-a10);
-  border: none;
-  border-radius: var(--radius-md);
-  padding: 6px 10px;
-  font-size: 1rem;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.master-mute-btn:hover {
-  background: var(--white-a20);
-}
-
-.master-mute-btn.active {
-  background: rgba(220, 38, 38, 0.3);
-  color: var(--red-400);
-}
-
 /* Level Meter Styles */
 .level-meter {
   width: 100%;
@@ -2299,192 +1289,6 @@
   background: linear-gradient(90deg, var(--green-400), var(--yellow-400), var(--red-400));
 }
 
-.master-level {
-  margin-top: 12px;
-}
-
-.master-level .level-bar {
-  height: 12px;
-}
-
-.channel-level {
-  margin: 8px 0;
-}
-
-.channel-level .level-bar {
-  height: 6px;
-}
-
-.mixer-channels {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.mixer-channel {
-  background: var(--white-a03);
-  border-radius: var(--radius-xl);
-  padding: 16px;
-  border: 1px solid var(--border);
-  transition: all 0.2s;
-}
-
-.mixer-channel.me {
-  background: var(--violet-500-a08);
-  border-color: var(--violet-500-a30);
-}
-
-.mixer-channel.muted {
-  opacity: 0.5;
-}
-
-.channel-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.channel-icon {
-  font-size: 1.5rem;
-}
-
-.channel-name {
-  flex: 1;
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-.mute-btn {
-  width: 32px;
-  height: 32px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: var(--white-a10);
-  cursor: pointer;
-  font-size: 1rem;
-  transition: all 0.2s;
-}
-
-.mute-btn:hover {
-  background: var(--white-a20);
-}
-
-.mute-btn.active {
-  background: var(--red-400-a20);
-}
-
-.channel-info {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 12px;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-}
-
-/* 믹서 채널 레이턴시 표시 */
-.channel-latency {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  background: var(--black-a20);
-  border-radius: var(--radius-sm);
-  font-size: 0.75rem;
-  margin-bottom: 8px;
-}
-
-.channel-latency .quality-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--radius-round);
-  flex-shrink: 0;
-}
-
-.channel-latency .latency-text {
-  font-family: 'Monaco', 'Consolas', monospace;
-  color: var(--color-text-subtle);
-}
-
-.channel-latency .latency-text small {
-  color: var(--text-muted);
-  font-size: 0.65rem;
-}
-
-.channel-error {
-  padding: 8px;
-  background: var(--red-400-a10);
-  border-radius: var(--radius-sm);
-  font-size: 0.8rem;
-  color: var(--error);
-}
-
-.channel-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.control-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.control-row label {
-  width: 40px;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-
-.control-row input[type="range"] {
-  flex: 1;
-  height: 6px;
-  background: var(--border);
-  border-radius: 3px;
-  cursor: pointer;
-}
-
-.control-row input[type="range"]:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
-}
-
-.control-row span {
-  width: 50px;
-  text-align: right;
-  font-size: 0.8rem;
-  font-weight: 500;
-}
-
-.mixer-empty {
-  text-align: center;
-  padding: 40px 20px;
-  color: var(--text-muted);
-}
-
-.mixer-empty p {
-  margin-bottom: 8px;
-}
-
-.mixer-empty small {
-  font-size: 0.8rem;
-  opacity: 0.7;
-}
-
-/* Chat Panel (Right) */
-.chat-panel {
-  background: var(--bg-panel);
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 73px);
-}
-
-.nickname-area {
-  display: flex;
-  align-items: center;
-}
-
 .nickname-btn {
   background: none;
   border: none;
@@ -2509,105 +1313,6 @@
   font-size: 0.8rem;
   color: var(--white);
   width: 100px;
-}
-
-.nickname-display {
-  color: var(--text-muted);
-  font-size: 0.85rem;
-  padding: 4px 8px;
-  background: var(--white-a05);
-  border-radius: var(--radius-xs);
-}
-
-.chat-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.chat-empty {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-  font-size: 0.9rem;
-}
-
-.chat-message {
-  padding: 8px 12px;
-  background: var(--white-a03);
-  border-radius: var(--radius-md);
-  max-width: 85%;
-}
-
-.chat-message.me {
-  background: var(--violet-500-a15);
-  margin-left: auto;
-}
-
-.chat-nickname {
-  display: block;
-  font-size: 0.7rem;
-  color: var(--accent);
-  margin-bottom: 4px;
-  font-weight: 600;
-}
-
-.chat-message.me .chat-nickname {
-  color: var(--accent-strong);
-}
-
-.chat-text {
-  font-size: 0.85rem;
-  line-height: 1.4;
-  word-break: break-word;
-}
-
-.chat-input-area {
-  display: flex;
-  gap: 8px;
-  padding: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.chat-input {
-  flex: 1;
-  background: var(--color-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 10px 14px;
-  font-size: 0.9rem;
-  color: var(--white);
-  transition: border-color 0.2s;
-}
-
-.chat-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.chat-input::placeholder {
-  color: var(--text-muted);
-}
-
-.chat-send-btn {
-  padding: 10px 16px;
-  background: var(--accent-fill);
-  border: none;
-  border-radius: var(--radius-md);
-  color: var(--white);
-  font-size: 0.85rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.chat-send-btn:hover {
-  background: var(--accent-strong);
 }
 
 /* Room Info Modal */
@@ -2673,49 +1378,6 @@
   max-height: none !important;
 }
 
-/* Host Actions in Modal */
-.host-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 20px;
-}
-
-.sync-btn {
-  width: 100%;
-  padding: 12px 16px;
-  background: #2563eb;
-  color: white;
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: 0.95rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.sync-btn:hover {
-  background: #1d4ed8;
-}
-
-/* Delete Room Button */
-.delete-room-btn {
-  width: 100%;
-  padding: 12px 16px;
-  background: var(--red-600);
-  color: white;
-  border: none;
-  border-radius: var(--radius-md);
-  font-size: 0.95rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.delete-room-btn:hover {
-  background: #b91c1c;
-}
-
 /* Performer Instrument Label */
 .performer-instrument {
   display: block;
@@ -2724,82 +1386,10 @@
   text-transform: capitalize;
 }
 
-/* Instrument Select Modal */
-.instrument-select-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.instrument-select-modal .modal-content {
-  position: relative;
-  background: var(--bg-panel);
-  border-radius: var(--radius-2xl);
-  width: 90%;
-  max-width: 650px !important;
-  max-height: none !important;
-  overflow: visible !important;
-}
-
 .modal-description {
   color: var(--text-muted);
   font-size: 0.9rem;
   margin-bottom: 20px;
-}
-
-.instrument-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 12px;
-}
-
-.instrument-option {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 20px 16px;
-  background: var(--white-a03);
-  border: 2px solid var(--border);
-  border-radius: var(--radius-xl);
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.instrument-option:hover:not(.disabled) {
-  border-color: var(--accent);
-  background: var(--violet-500-a10);
-  transform: translateY(-2px);
-}
-
-.instrument-option.disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.inst-icon {
-  font-size: 2.5rem;
-}
-
-.inst-name {
-  font-size: 0.95rem;
-  font-weight: 600;
-}
-
-.inst-slots {
-  font-size: 0.8rem;
-  padding: 4px 12px;
-  background: var(--green-400-a20);
-  color: var(--success);
-  border-radius: var(--radius-xl);
-}
-
-.inst-slots.full {
-  background: var(--red-400-a20);
-  color: var(--error);
 }
 
 /* Room Entrance & Session Responsive */
@@ -2838,51 +1428,12 @@
   .live-body {
     grid-template-columns: 200px 1fr;
   }
-
-  .chat-panel {
-    display: none;
-  }
 }
 
 @media (max-width: 768px) {
   .live-body {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr auto;
-  }
-
-  .performers-panel {
-    height: auto;
-    max-height: 200px;
-    order: 1;
-  }
-
-  .mixer-panel {
-    height: auto;
-    min-height: 200px;
-    order: 2;
-  }
-
-  .chat-panel {
-    display: flex;
-    height: 250px;
-    order: 3;
-  }
-
-  .live-header {
-    padding: 12px 16px;
-  }
-
-  .live-title-area h1 {
-    font-size: 1rem;
-  }
-
-  .live-meta {
-    gap: 8px;
-  }
-
-  .header-btn {
-    padding: 6px 10px;
-    font-size: 0.75rem;
   }
 }
 
@@ -2926,70 +1477,16 @@
   font-size: 0.7rem;
   color: var(--orange-400);
 }
-.engine-peer-stats .peer-relay-hint { color: var(--orange-400); }
-
-.engine-local-stats {
-  display: block;
-  font-size: 0.7rem;
-  color: var(--text-muted);
-}
-.engine-local-stats .xrun-warn { color: var(--orange-400); }
 
 .level-meter.mini {
   margin-top: 4px;
   max-width: 120px;
 }
 
-.engine-peer-stats {
-  font-size: 0.72rem;
-}
-
-.perform-error {
-  margin-top: 8px;
-  font-size: 0.8rem;
-  color: var(--red-400);
-}
-
 .download-link.disabled {
   opacity: 0.5;
   cursor: default;
   pointer-events: none;
-}
-
-/* ===== P2-6: 비밀번호 입장 / 초대 / 연주 요청 알림 ===== */
-.room-password-gate {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 400px;
-  padding: 16px;
-}
-
-.room-password-card {
-  width: 100%;
-  max-width: 380px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 24px;
-  border-radius: var(--radius-xl);
-  background: var(--white-a05);
-  border: 1px solid var(--border);
-}
-
-.room-password-card h2 {
-  margin: 0;
-  font-size: 1.2rem;
-}
-
-.room-password-message {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 0.9rem;
-}
-
-.room-password-message.error {
-  color: var(--error);
 }
 
 .room-password-card input,
@@ -3001,32 +1498,6 @@
   background: var(--black-a20);
   color: inherit;
   font-size: 0.95rem;
-}
-
-.room-password-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.room-password-actions button {
-  padding: 8px 18px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-
-.room-password-actions .btn-primary {
-  background: var(--accent-fill);
-  border-color: var(--accent);
-  color: var(--white);
-}
-
-.room-password-actions button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .request-notice-toast,
@@ -3050,84 +1521,6 @@
 
 .copy-notice-toast {
   border-color: var(--success);
-}
-
-.request-notice-toast button {
-  padding: 4px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--warning);
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-
-.request-notice-toast .close-btn {
-  border: none;
-  font-size: 1.1rem;
-  padding: 0 4px;
-}
-
-.invite-actions {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.reject-reason-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
-  width: 100%;
-}
-
-.reject-reason-preset {
-  text-align: left;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--white-a04);
-  color: inherit;
-  cursor: pointer;
-  font-size: 0.85rem;
-}
-
-.reject-reason-preset:hover {
-  border-color: var(--error);
-}
-
-.reject-reason-custom {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.reject-reason-custom input {
-  flex: 1;
-  min-width: 140px;
-}
-
-.request-status .request-hint {
-  font-size: 0.75rem;
-}
-
-.request-status .reject-reason {
-  color: inherit;
-}
-
-.password-mode-options {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 8px;
-  flex-wrap: wrap;
-}
-
-.password-mode-options label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-weight: normal;
-  cursor: pointer;
 }
 
 /* ===== P3-12 ⑨: 합주실을 내비게이션 아래 남은 화면 한 장에 맞춘다 (채팅 입력창이 스크롤 없이 보이게) =====
@@ -3173,126 +1566,6 @@
   min-width: 0;
 }
 
-/* ===== 공유 메트로놈 (P2-3) ===== */
-.metronome-panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin: 0 0 var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  background: var(--color-surface);
-  color: var(--color-text);
-}
-
-.metronome-header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.metronome-dot {
-  width: 8px;
-  height: 8px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--white-a30);
-}
-
-.metronome-dot.on {
-  background: var(--success);
-}
-
-.metronome-title {
-  font-weight: 600;
-}
-
-.metronome-status {
-  margin-left: auto;
-  overflow: hidden;
-  color: var(--color-text-subtle);
-  font-size: 0.85em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.metronome-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.metronome-field {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  color: var(--color-text-subtle);
-  font-size: 0.85em;
-}
-
-.metronome-field input,
-.metronome-field select {
-  width: 64px;
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--black-a30);
-  color: var(--color-text);
-}
-
-.metronome-btn {
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-hover);
-  color: var(--color-text);
-  cursor: pointer;
-}
-
-.metronome-btn.start {
-  border-color: transparent;
-  background: var(--gradient-accent);
-  color: var(--color-on-accent);
-}
-
-.metronome-btn:disabled {
-  cursor: default;
-  opacity: 0.5;
-}
-
-.metronome-mute {
-  padding: 0 var(--space-1);
-  border: none;
-  background: none;
-  cursor: pointer;
-  font-size: 1.1em;
-}
-
-.metronome-volume {
-  flex: 1;
-  min-width: 80px;
-  max-width: 160px;
-}
-
-.metronome-hint {
-  margin: 0;
-  color: var(--color-text-subtle);
-  font-size: 0.85em;
-}
-/* 좁은 화면에서 상태 배지·헤더 버튼 글자가 한 글자씩 줄바꿈되지 않게 (P3-12c) */
-.live-meta {
-  flex-wrap: wrap;
-  row-gap: 4px;
-}
-
-.live-meta > *,
-.header-btn {
-  white-space: nowrap;
-}
-
 /* 좁은 화면(세로 쌓기)에서 연주자 패널이 max-height 200px에 갇혀, 데스크톱 앱 안내(참여 토글)가
    연주자 목록을 덮고 카드 윗부분만 보이던 문제 (P3-12d, 리뷰 M8).
    패널은 내용 높이만큼 늘리고, 연주자가 많을 때만 목록 안에서 스크롤한다. */
@@ -3305,19 +1578,4 @@
     flex: none;
     max-height: 320px;
   }
-}
-
-/* 진단 줄 경고(P1-12b): 스레드 우선순위 등록 실패 등 */
-.mixer-channel .diag-warn {
-  color: var(--warning);
-}
-/* 메트로놈 출력 지연 보정 안내의 "지연 측정 열기" (P2-3c) */
-.metronome-link {
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--accent-strong);
-  font: inherit;
-  text-decoration: underline;
-  cursor: pointer;
 }

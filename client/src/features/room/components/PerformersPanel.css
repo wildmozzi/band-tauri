@@ -1,0 +1,73 @@
+/* PerformersPanel.css — features/room/RoomDetail.css에서 옮긴 이 컴포넌트 전용 규칙 (P3-2 ③-3). 순서는 원래 RoomDetail.css 순서 그대로 */
+/* Performers Panel (Left) */
+.performers-panel {
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 73px);
+}
+
+.performer-count {
+  background: var(--accent-fill);
+  color: var(--white);
+  padding: 2px 8px;
+  border-radius: var(--radius-lg);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.no-performers {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-muted);
+}
+
+.no-performers p {
+  margin-bottom: 8px;
+}
+
+.no-performers small {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+/* 방장: 승인 요청 알림 */
+.pending-requests-alert {
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, var(--yellow-400-a20), var(--pink-400-a20));
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.pending-requests-alert:hover {
+  background: linear-gradient(135deg, var(--yellow-400-a30), var(--pink-400-a30));
+  transform: translateY(-2px);
+}
+
+.pending-requests-alert .alert-badge {
+  background: var(--warning);
+  color: var(--black);
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+}
+
+.pending-requests-alert span:last-child {
+  font-weight: 500;
+}
+
+@media (max-width: 768px) {
+
+  .performers-panel {
+    height: auto;
+    max-height: 200px;
+    order: 1;
+  }
+}

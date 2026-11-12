@@ -1,0 +1,47 @@
+/* RemotePerformerItem.css — features/room/RoomDetail.css에서 옮긴 이 컴포넌트 전용 규칙 (P3-2 ③-3). 순서는 원래 RoomDetail.css 순서 그대로 */
+/* 합주자 목록 음소거 버튼 */
+.performer-mute-btn {
+  padding: 4px 8px;
+  font-size: 0.9rem;
+  background: var(--white-a10);
+  border: 1px solid var(--white-a20);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.performer-mute-btn:hover {
+  background: var(--white-a20);
+}
+
+.performer-mute-btn.muted {
+  background: var(--red-400-a20);
+  border-color: var(--red-400-a40);
+}
+
+/* 연주자 아이템 래퍼 (말풍선 포지셔닝용) */
+.performer-item-wrapper {
+  position: relative;
+}
+
+/* 레이턴시 표시 */
+.performer-latency {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  background: var(--black-a30);
+  border-radius: var(--radius-lg);
+  margin-left: auto;
+}
+
+.performer-latency .latency-value {
+  font-family: 'Monaco', 'Consolas', monospace;
+  font-weight: 500;
+}
+
+.performer-latency .quality-indicator {
+  font-size: 0.8rem;
+}

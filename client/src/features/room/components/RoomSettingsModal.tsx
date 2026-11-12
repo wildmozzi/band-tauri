@@ -3,6 +3,7 @@ import type { DetailRoom } from '../roomDetailModel'
 import type { RoomSettingsForm } from '../hooks/useRoomSettingsForm'
 import { Modal } from '../../../shared/ui/Modal'
 import { Field } from '../../../shared/ui/Field'
+import './RoomSettingsModal.css'
 
 /** 방 설정 모달 (방장용): 제목·설명·장르·인원·태그·악기 구성·참여 방식·공개 여부·비밀번호 */
 export function RoomSettingsModal({ room, form }: { room: DetailRoom; form: RoomSettingsForm }) {

@@ -15,6 +15,7 @@ import {
   peerStatsTitle,
   performerName,
 } from '../roomDetailModel'
+import './MixerChannels.css'
 
 function ChannelLevel({ level }: { level: number }) {
   return (

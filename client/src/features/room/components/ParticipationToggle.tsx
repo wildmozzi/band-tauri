@@ -2,6 +2,7 @@ import { useRoomPerform, useRoomMixer, useRoomRequests } from '../state/roomHook
 import { MAX_PERFORMERS } from '../../../native/engineApi'
 import { DesktopDownloadButton } from '../../../shared/ui/DesktopDownloadButton'
 import { INSTRUMENT_INFO } from '../roomDetailModel'
+import './ParticipationToggle.css'
 
 /** 참여/관람 전환 버튼과 연주 요청 상태 (웹은 데스크톱 앱 안내) */
 export function ParticipationToggle({

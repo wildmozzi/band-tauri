@@ -1,5 +1,6 @@
 import { INSTRUMENT_INFO, instrumentInfo, type InstrumentSlot } from '../roomDetailModel'
 import { Modal } from '../../../shared/ui/Modal'
+import './InstrumentModals.css'
 
 /** 악기 선택 모달 (연주 참여) */
 export function InstrumentSelectModal({

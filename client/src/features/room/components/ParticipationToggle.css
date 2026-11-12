@@ -1,0 +1,126 @@
+/* ParticipationToggle.css — features/room/RoomDetail.css에서 옮긴 이 컴포넌트 전용 규칙 (P3-2 ③-3). 순서는 원래 RoomDetail.css 순서 그대로 */
+/* Participation Toggle */
+.participation-toggle {
+  padding: 16px;
+  border-top: 1px solid var(--border);
+}
+
+/* 분리 전에는 뒤에 와서 이기던 규칙 — 이 파일이 RoomDetail.css·AudioSettings.css보다 먼저 로드되므로 문맥 클래스로 특이성 고정 (P3-2 ③-3) */
+.participation-toggle .toggle-btn.performer {
+  background: var(--gradient-accent);
+  color: var(--white);
+}
+
+.toggle-btn.performer:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 20px var(--violet-500-a40);
+}
+
+.toggle-btn.performer:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.approval-notice {
+  margin-top: 12px;
+  font-size: 0.8rem;
+  color: var(--warning);
+  text-align: center;
+}
+
+/* 요청 상태 표시 */
+.request-status {
+  text-align: center;
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  background: var(--white-a05);
+}
+
+.request-status p {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.request-status small {
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 12px;
+}
+
+.request-status.pending {
+  border: 1px solid var(--warning);
+}
+
+.request-status.approved {
+  border: 1px solid var(--success);
+}
+
+.request-status.approved p {
+  color: var(--success);
+}
+
+.request-status.rejected {
+  border: 1px solid var(--error);
+}
+
+.request-status.rejected p {
+  color: var(--error);
+}
+
+/* 웹 사용자 안내 */
+.web-notice {
+  text-align: center;
+  padding: 20px;
+  border-radius: var(--radius-lg);
+  background: var(--indigo-500-a10);
+  border: 1px solid var(--accent);
+}
+
+.web-notice p {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--accent);
+}
+
+.web-notice small {
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 12px;
+}
+
+.web-notice .download-link {
+  border: none;
+  font: inherit;
+  display: inline-block;
+  padding: 10px 20px;
+  background: var(--accent);
+  color: var(--white);
+  text-decoration: none;
+  border-radius: var(--radius-md);
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.web-notice .download-link:hover {
+  background: var(--indigo-400);
+  transform: translateY(-2px);
+}
+
+.role-badge.performer {
+  background: var(--green-400-a20);
+  color: var(--success);
+}
+
+.perform-error {
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: var(--red-400);
+}
+
+.request-status .request-hint {
+  font-size: 0.75rem;
+}
+
+.request-status .reject-reason {
+  color: inherit;
+}

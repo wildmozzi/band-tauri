@@ -1,6 +1,7 @@
 import { inviteLink, effectiveRoomCapacity } from '../../rooms'
 import { PUBLIC_WEB_URL, instrumentInfo, type DetailRoom } from '../roomDetailModel'
 import { Modal } from '../../../shared/ui/Modal'
+import './RoomInfoModal.css'
 
 /** "방 정보" 모달: 기본 정보, 초대 링크, 태그, 악기 구성, 방장 버튼 */
 export function RoomInfoModal({

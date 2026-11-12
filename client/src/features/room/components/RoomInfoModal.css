@@ -1,0 +1,144 @@
+/* RoomInfoModal.css — features/room/RoomDetail.css에서 옮긴 이 컴포넌트 전용 규칙 (P3-2 ③-3). 순서는 원래 RoomDetail.css 순서 그대로 */
+.room-description {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* Enhanced Room Info Modal Styles */
+.info-title-section {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.info-title-section h3 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--color-text);
+}
+
+.info-title-section .room-description {
+  margin-top: 8px;
+  padding-top: 0;
+  border-top: none;
+}
+
+.info-section {
+  margin-bottom: 16px;
+}
+
+.info-section h4 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.info-tags-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.info-tag {
+  padding: 5px 12px;
+  background: var(--violet-500-a15);
+  border-radius: var(--radius-2xl);
+  font-size: 0.8rem;
+  color: var(--accent);
+}
+
+.info-instrument-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.info-instrument-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--white-a05);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+}
+
+.info-inst-icon {
+  font-size: 1.1rem;
+}
+
+.info-inst-name {
+  font-size: 0.85rem;
+  color: var(--color-text);
+}
+
+.info-inst-slots {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  background: var(--green-400-a20);
+  color: var(--green-400);
+  border-radius: var(--radius-lg);
+  font-weight: 500;
+}
+
+.info-inst-slots.full {
+  background: var(--red-400-a20);
+  color: var(--red-400);
+}
+
+/* Host Actions in Modal */
+.host-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.sync-btn {
+  width: 100%;
+  padding: 12px 16px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.sync-btn:hover {
+  background: #1d4ed8;
+}
+
+/* Delete Room Button */
+.delete-room-btn {
+  width: 100%;
+  padding: 12px 16px;
+  background: var(--red-600);
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.delete-room-btn:hover {
+  background: #b91c1c;
+}
+
+.invite-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}

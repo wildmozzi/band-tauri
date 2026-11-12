@@ -1,0 +1,125 @@
+/* MyPerformerItem.css — features/room/RoomDetail.css에서 옮긴 이 컴포넌트 전용 규칙 (P3-2 ③-3). 순서는 원래 RoomDetail.css 순서 그대로 */
+/* 악기 변경 요청 버튼 */
+.change-instrument-btn {
+  margin-top: 4px;
+  padding: 2px 8px;
+  font-size: 0.7rem;
+  background: rgba(99, 102, 241, 0.2);
+  border: 1px solid var(--indigo-500-a40);
+  border-radius: var(--radius-lg);
+  color: var(--accent);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.change-instrument-btn:hover {
+  background: var(--indigo-500-a30);
+  border-color: var(--accent);
+}
+
+/* 내 악기 변경 요청 상태 */
+.my-instrument-change-status {
+  margin-top: 4px;
+  padding: 2px 8px;
+  font-size: 0.7rem;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.my-instrument-change-status.pending {
+  background: var(--yellow-400-a15);
+  color: var(--yellow-400);
+}
+
+.my-instrument-change-status.approved {
+  background: var(--green-400-a15);
+  color: var(--green-400);
+}
+
+.my-instrument-change-status.rejected {
+  background: var(--red-400-a15);
+  color: var(--red-400);
+}
+
+.my-instrument-change-status .cancel-btn.small {
+  padding: 1px 6px;
+  font-size: 0.65rem;
+  background: var(--red-400-a20);
+  border: 1px solid var(--red-400-a40);
+  border-radius: var(--radius-sm);
+  color: var(--red-400);
+  cursor: pointer;
+}
+
+.my-instrument-change-status .cancel-btn.small:hover {
+  background: var(--red-400-a40);
+}
+
+.mic-toggle {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-round);
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: all 0.2s;
+}
+
+.mic-toggle.on {
+  background: var(--success);
+  color: var(--white);
+}
+
+.mic-toggle.off {
+  background: var(--white-a10);
+  color: var(--text-muted);
+}
+
+.mic-toggle:hover {
+  transform: scale(1.1);
+}
+
+.monitor-toggle {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-round);
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: all 0.2s;
+  margin-left: 8px;
+}
+
+.monitor-toggle.on {
+  background: var(--accent);
+  color: var(--white);
+}
+
+.monitor-toggle.off {
+  background: var(--white-a10);
+  color: var(--text-muted);
+}
+
+.monitor-toggle:hover {
+  transform: scale(1.1);
+}
+
+.monitoring-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+}
+
+.monitoring-controls .monitor-toggle {
+  margin-left: 0;
+}
+
+.engine-local-stats {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+.engine-local-stats .xrun-warn { color: var(--orange-400); }

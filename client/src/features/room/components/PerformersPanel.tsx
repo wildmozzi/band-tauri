@@ -4,6 +4,7 @@ import { MetronomePanel } from './MetronomePanel'
 import { MyPerformerItem } from './MyPerformerItem'
 import { ParticipationToggle } from './ParticipationToggle'
 import { RemotePerformerItem } from './RemotePerformerItem'
+import './PerformersPanel.css'
 
 /** 왼쪽: 연주자 패널 (내 행, 상대 연주자, 참여 요청 알림, 참여/관람 전환) */
 export function PerformersPanel({

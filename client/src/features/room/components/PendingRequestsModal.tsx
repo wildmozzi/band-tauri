@@ -3,6 +3,7 @@ import { REJECT_REASON_PRESETS } from '../state/performRequestState'
 import { INSTRUMENT_INFO, instrumentInfo } from '../roomDetailModel'
 import type { RejectPicker } from '../hooks/useRejectPicker'
 import { Modal } from '../../../shared/ui/Modal'
+import './PendingRequestsModal.css'
 
 /** 방장: 새 연주 참여 요청 알림 토스트 */
 export function RequestNoticeToast({
