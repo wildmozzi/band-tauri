@@ -722,7 +722,7 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
     Report { md, json, fails }
 }
 
-fn run_and_report(tag: &str, seconds: f64) {
+fn run_and_report(tag: &str, seconds: f64) -> Value {
     let specs = scenario(seconds);
     let mut sim = MultiSim::new(seconds, specs.iter().map(|s| s.np.clone()).collect());
     sim.settle_us = (SETTLE_S * 1e6) as u64;
@@ -739,12 +739,42 @@ fn run_and_report(tag: &str, seconds: f64) {
     std::fs::write(dir.join(format!("sim-report-{tag}.json")), serde_json::to_string_pretty(&rep.json).unwrap()).unwrap();
     println!("{}\n리포트: {}", rep.md, md_path.display());
     assert!(rep.fails.is_empty(), "GOAL 미달 {}건: {:?} (리포트 {})", rep.fails.len(), rep.fails, md_path.display());
+    rep.json
+}
+
+/// 동작 불변 기준값(engine-architecture.md 9.1절): 리포트 JSON에서 실행 시간(`wallSeconds`)을 뺀 나머지가
+/// `tests/fixtures/sim-report-<tag>.json`과 바이트 단위로 같아야 한다. 하네스는 결정적이므로 구조 정리 PR은 이 값을
+/// 바꾸지 않는다. 동작을 의도적으로 바꾸는 PR만 `SIM_UPDATE_FIXTURE=1`로 다시 쓰고, PR 본문에 차이를 적는다.
+fn check_fixture(tag: &str, report: &Value) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(format!("sim-report-{tag}.json"));
+    let mut v = report.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("wallSeconds");
+    }
+    let got = serde_json::to_string_pretty(&v).unwrap() + "\n";
+    if std::env::var_os("SIM_UPDATE_FIXTURE").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &got).unwrap();
+        println!("기준값 갱신: {}", path.display());
+        return;
+    }
+    let want = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("기준값 {} 읽기 실패({e}) — SIM_UPDATE_FIXTURE=1로 만든다", path.display()))
+        .replace("\r\n", "\n");
+    if want != got {
+        let (n, (w, g)) = want.lines().zip(got.lines()).enumerate().find(|(_, (w, g))| w != g).unwrap_or((0, ("(길이 다름)", "")));
+        panic!(
+            "5분 하네스 결과가 기준값과 다르다(동작 변경). 첫 차이 {}행:\n  기준: {w}\n  실행: {g}\n의도한 변경이면 SIM_UPDATE_FIXTURE=1로 {}을 다시 쓰고 PR 본문에 차이를 적을 것",
+            n + 1,
+            path.display()
+        );
+    }
 }
 
 /// 6피어 5분(가상): 기본 `cargo test`에서 도는 짧은 버전. 60분 버전과 같은 시나리오 모양(사건 위치는 길이 비율).
 #[test]
 fn long_sim_6peers_5min() {
-    run_and_report("short-5min", 300.0);
+    check_fixture("short-5min", &run_and_report("short-5min", 300.0));
 }
 
 /// 6피어 60분(가상, 디버그 빌드 수 분). CI 야간 잡(`long-sim`)과 수동 실행용.
