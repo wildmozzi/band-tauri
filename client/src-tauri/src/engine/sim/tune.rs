@@ -18,7 +18,7 @@ use crate::engine::worker::{CallbackTracker, PeerFeed, FINE_POLL, OUT_CHUNK, POL
 use crate::engine::codec::Encoder as SimEncoder;
 use crate::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
 use crate::engine::jitter::{JitterSettings, JitterStats};
-use crate::engine::peer_media::{PeerMedia, PeerMediaShared};
+use crate::engine::peer_media::PeerMedia;
 use crate::net::media_link::{media_link, PeerKey};
 use crate::engine::rt::{output_path, SLOT_ACTIVE};
 use crate::net::packet::{Header, PacketType};
@@ -233,8 +233,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         let key = PeerKey::from_raw(i as u64 + 1);
         pfs.push(PeerFeed::new(slot, key, 48_000, sh).unwrap());
         let (mtx, mrx) = media_link(key);
-        let shared = Arc::new(PeerMediaShared::new(key, format!("p{i}"), 1 + i as u32));
-        pms.push(PeerMedia::new(shared, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: np.profile }, mrx));
+        pms.push(PeerMedia::new(key, format!("p{i}"), 1 + i as u32, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: np.profile }, mrx).1);
         mtxs.push(mtx);
         txs.push(TxState {
             enc: SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap(),

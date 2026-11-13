@@ -180,7 +180,8 @@ pub struct PeerMediaShared {
 }
 
 impl PeerMediaShared {
-    pub fn new(key: PeerKey, peer_id: String, ssrc: u32) -> Self {
+    /// `PeerMedia::new`만 부른다(짝 하나로만 생긴다 — seqlock 단일 작성자의 타입 보장, #118 리뷰 L-3).
+    fn new(key: PeerKey, peer_id: String, ssrc: u32) -> Self {
         Self { key, peer_id, ssrc, mix: PeerMixCtl::default(), stats: MediaStatsCell::default(), restart_req: AtomicU32::new(0) }
     }
 
@@ -215,9 +216,14 @@ pub struct PeerMedia {
 
 impl PeerMedia {
     /// 지터 버퍼(슬롯 1024개 ≈ 1.19MB + 디코더)를 여기서 할당한다. 제어 평면 스레드에서 부른다.
-    pub fn new(shared: Arc<PeerMediaShared>, settings: JitterSettings, rx: MediaRx) -> Box<Self> {
+    /// 공유 쪽(`PeerMediaShared`)도 여기서 함께 만들어 짝으로 돌려준다: `PeerMediaShared`는 이 함수로만 생기므로 한 공유 상태에
+    /// 작성자(`PeerMedia`, `Clone` 아님, `publish(&mut self)`)가 정확히 하나다 — seqlock 단일 작성자가 모듈 규약이 아니라
+    /// 타입으로 보장된다(#116 L-1, #118 리뷰 L-3).
+    pub fn new(key: PeerKey, peer_id: String, ssrc: u32, settings: JitterSettings, rx: MediaRx) -> (Arc<PeerMediaShared>, Box<Self>) {
+        let shared = Arc::new(PeerMediaShared::new(key, peer_id, ssrc));
         let restart_seen = shared.restart_req.load(Ordering::Acquire);
-        Box::new(Self { shared, rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits() })
+        let me = Box::new(Self { shared: shared.clone(), rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits() });
+        (shared, me)
     }
 
     /// 워커 반복의 앞부분(그 피어의 `service` 바로 앞, 설계 2.4절·4절):
@@ -495,14 +501,10 @@ mod tests {
         assert_whole(&last);
     }
 
-    fn shared(key: u64) -> Arc<PeerMediaShared> {
-        Arc::new(PeerMediaShared::new(PeerKey::from_raw(key), format!("p{key}"), key as u32))
-    }
-
     fn media(key: u64, profile: f32) -> (Box<PeerMedia>, MediaTx) {
-        let s = shared(key);
-        let (tx, rx) = media_link(s.key);
-        (PeerMedia::new(s, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile }, rx), tx)
+        let k = PeerKey::from_raw(key);
+        let (tx, rx) = media_link(k);
+        (PeerMedia::new(k, format!("p{key}"), key as u32, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile }, rx).1, tx)
     }
 
     /// 재시작 요청은 세대가 바뀐 반복에 한 번만 적용되고, 여러 요청은 한 번으로 합쳐진다.
@@ -533,12 +535,16 @@ mod tests {
     fn media_port_moves_ownership_and_returns_removed() {
         let (port, mut rt) = media_port();
         let mut table = Vec::with_capacity(MEDIA_CMD_CAPACITY);
-        let (a, b) = (shared(10), shared(11));
         let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+        let mk = |k: u64| {
+            let key = PeerKey::from_raw(k);
+            PeerMedia::new(key, format!("p{k}"), k as u32, js, media_link(key).1)
+        };
+        let ((a, ma), (b, mb)) = (mk(10), mk(11));
         {
             let mut cmd = port.lock_cmd();
-            assert!(cmd.try_push(MediaCmd::Add(PeerMedia::new(a.clone(), js, media_link(a.key).1))).is_ok());
-            assert!(cmd.try_push(MediaCmd::Add(PeerMedia::new(b.clone(), js, media_link(b.key).1))).is_ok());
+            assert!(cmd.try_push(MediaCmd::Add(ma)).is_ok());
+            assert!(cmd.try_push(MediaCmd::Add(mb)).is_ok());
             assert!(cmd.try_push(MediaCmd::Remove(PeerKey::from_raw(99))).is_ok());
             assert!(cmd.try_push(MediaCmd::Remove(a.key)).is_ok());
         }

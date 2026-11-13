@@ -15,6 +15,12 @@ impl RateRing {
         Self { ring: vec![false; cap], pos: 0, len: 0, hits: 0 }
     }
 
+    /// `new(cap)`과 같은 상태로(할당 없음, 엔진 ③c restart).
+    pub(super) fn reset(&mut self) {
+        self.ring.fill(false);
+        (self.pos, self.len, self.hits) = (0, 0, 0);
+    }
+
     pub(super) fn push(&mut self, v: bool, win: usize) {
         let cap = self.ring.len();
         let win = win.clamp(1, cap);

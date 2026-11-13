@@ -288,10 +288,9 @@ impl Engine {
         self.media_port.reclaim();
         let key = PeerKey::from_raw(self.next_key.fetch_add(1, Ordering::Relaxed));
         let settings = self.media_settings.current();
-        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc));
-        // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB)는 여기, 락 밖에서 할당한다. 워커는 할당하지 않는다.
+        // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB)는 여기, 락 밖에서 할당한다. 워커는 추가·제거·재시작 어디서도 할당·해제하지 않는다(재시작은 제자리 초기화 — ③c, `tests/rt_alloc.rs`; 해제는 반환 큐를 거쳐 제어 평면에서).
         let (tx, rx) = media_link(key);
-        let worker_side = PeerMedia::new(media.clone(), settings, rx);
+        let (media, worker_side) = PeerMedia::new(key, peer_id.clone(), desc.ssrc, settings, rx);
         // 등록부 락 안에서 믹스 설정 복사 → net 교체 → 등록부 교체: 겹친 set_peer_gain은 옛 것에 쓰여 복사로 넘어가거나
         // 새 것에 쓰인다(설계 7.3절). 복사는 net에 넣기 전에 해서 워커가 새 항목을 기본 게인으로 보는 순간이 없다.
         let mut reg = self.media.lock();

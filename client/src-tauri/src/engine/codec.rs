@@ -90,6 +90,13 @@ impl Decoder {
         }
     }
 
+    /// 새로 만든 디코더와 같은 상태로(Opus `OPUS_RESET_STATE`, 할당 없음 — 지터 버퍼 restart, 엔진 ③c).
+    pub fn reset(&mut self) {
+        if let Decoder::Opus { dec, .. } = self {
+            let _ = dec.reset_state();
+        }
+    }
+
     pub fn matches(&self, opus: bool, channels: usize) -> bool {
         match self {
             Decoder::Opus { channels: c, .. } => opus && *c == channels,
@@ -189,6 +196,47 @@ mod tests {
             }
             assert!(energy > 1.0, "디코드 결과가 무음이면 안 됨 ch={ch} n={n}");
             assert_eq!(d.decode_plc(&mut out).unwrap(), n);
+        }
+    }
+
+    /// 엔진 ③c: `reset`한 디코더는 새로 만든 디코더와 비트 단위로 같은 출력(디코드·PLC·FEC)을 낸다.
+    #[test]
+    fn opus_reset_equals_fresh_decoder() {
+        for ch in [1usize, 2] {
+            let n = 240;
+            let mut e = Encoder::new(CodecKind::Opus, ch, 96_000).unwrap();
+            let mut buf = [0u8; 1166];
+            let pkts: Vec<Vec<u8>> = (0..40)
+                .map(|k| {
+                    let len = e.encode(&sine(n, ch, k * n), &mut buf).unwrap();
+                    buf[..len].to_vec()
+                })
+                .collect();
+            let mut used = Decoder::new(true, ch).unwrap();
+            let mut out = vec![0.0; n * ch];
+            for p in &pkts[..20] {
+                used.decode(p, &mut out).unwrap();
+            }
+            used.reset();
+            let mut fresh = Decoder::new(true, ch).unwrap();
+            let (mut a, mut b) = (vec![0.0; n * ch], vec![0.0; n * ch]);
+            for (k, p) in pkts[20..].iter().enumerate() {
+                match k % 7 {
+                    3 => {
+                        used.decode_plc(&mut a).unwrap();
+                        fresh.decode_plc(&mut b).unwrap();
+                    }
+                    5 => {
+                        used.decode_fec(p, &mut a).unwrap();
+                        fresh.decode_fec(p, &mut b).unwrap();
+                    }
+                    _ => {
+                        used.decode(p, &mut a).unwrap();
+                        fresh.decode(p, &mut b).unwrap();
+                    }
+                }
+                assert_eq!(a, b, "ch {ch} k {k}");
+            }
         }
     }
 }
