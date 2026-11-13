@@ -67,7 +67,7 @@
 | 범위 | 증거 | 기준 |
 |---|---|---|
 | 공통 | clippy `-D warnings`, `cargo test`, `tests/architecture.rs` | 녹색, 예외 목록이 단계만큼 줄어듦 |
-| 지터·워커·수신 경로(①②③⑧) | 5분 하네스 리포트 JSON — **기준 파일을 `tests/fixtures/`에 커밋**, 실행 시각 필드를 뺀 나머지 바이트 동일을 테스트가 비교. 하네스가 타는 범위: `jitter/`·`PeerMedia`·`PeerFeed`·`CallbackTracker`·`OutputRt`, ②b-3부터 `PeerSources`. 그 밖의 워커 단계(캡처·송신·로컬·메트로놈)는 fixture가 덮지 않는다 — ②b-1·②b-2의 증거는 조건 대조표 + 루프백 실시간(과 soak) | 동일 |
+| 지터·워커·수신 경로(①②③⑧) | 5분 하네스 리포트 JSON — **기준 파일을 `tests/fixtures/`에 커밋**, 실행 시각 필드를 뺀 나머지 바이트 동일을 테스트가 비교. 하네스가 타는 범위: `jitter/`·`PeerMedia`·`PeerFeed`·`CallbackTracker`·`OutputRt`, ②b-3부터 `PeerSources` — 단, 하네스는 피어를 시작 때만 넣으므로 fixture가 지키는 것은 시작 시 추가 순서·슬롯 배치와 지터 설정·일관성(J3·J6)까지다. 실행 중 추가·제거·`seen` 쓸기(J1)는 ②b-3b의 별도 시나리오 fixture가 덮는다. 그 밖의 워커 단계(캡처·송신·로컬·메트로놈)는 fixture가 덮지 않는다 — ②b-1·②b-2의 증거는 조건 대조표 + 루프백 실시간(과 soak) | 동일 |
 | | 60분 하네스 1회, 루프백 실시간(버퍼 지연·은닉률), `cpu_profile`(release 1회) | PASS, 같은 범위, ±5% |
 | net(③④⑥) | `net_recv`·`nonce`·`peer_key`·`send_queue`·`relay`·`loss_feedback`·`stun` + 루프백 | 녹색, 같은 범위 |
 | 녹음·메트로놈·측정(⑥) | 각 통합 테스트 | 녹색 |
