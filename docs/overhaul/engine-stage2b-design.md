@@ -19,7 +19,7 @@
 | 메트로놈 락 | 계획: 세대 원자값 + 바뀐 반복에서만 `try_lock`(③c의 피어 표와 같은 방식). 루프백 보정: `AtomicU64` 하나. 상태 보고: seqlock 칸(지금의 `MediaStatsCell` 방식을 공용화) |
 | ADR에 없던 워커 락 | `MetronomeCtl.stats`·`loopback_offset_ms`(ADR은 "계획"만 적음), 메트로놈이 기준 피어 시계를 볼 때의 `peers.read()`(반복마다). `Peer.clock`은 워커와 `band-net-recv`만 잡는다(둘 다 MMCSS) — 규칙 위반이 아니라 남긴다 |
 | 5분 fixture | 모든 PR에서 **바이트 동일**. 다만 하네스는 `Worker`를 돌리지 않으므로(5.1절) fixture만으로는 조정자를 증명하지 못한다 → ②b-3에서 하네스가 `PeerSources`를 타게 한 뒤부터 fixture가 공급 조정까지 덮는다 |
-| PR | 8개, 순서대로: ②b-0 계측·"전" 수치·송신 패킷 열 시험 → ②b-1 이동(수신 쪽 단계) → ②b-3 하네스가 `PeerSources`를 탐(②b-1의 수신 쪽 증거를 겸함) → ②b-2 이동(송신 쪽 단계) → ②b-4 피어 표 합치기 → ②b-5 에코 프로브 → ②b-6a `SeqCell` 추출 → ②b-6b 메트로놈·"후" 수치·정적 검사. 번호는 내용의 이름이고 순서는 이 줄이다(6.1절) |
+| PR | 8개(+ ②b-3b, 6.1절), 순서대로: ②b-0 계측·"전" 수치·송신 패킷 열 시험 → ②b-1 이동(수신 쪽 단계) → ②b-3 하네스가 `PeerSources`를 탐(②b-1의 수신 쪽 증거를 겸함) → ②b-2 이동(송신 쪽 단계) → ②b-4 피어 표 합치기 → ②b-5 에코 프로브 → ②b-6a `SeqCell` 추출 → ②b-6b 메트로놈·"후" 수치·정적 검사. 번호는 내용의 이름이고 순서는 이 줄이다(6.1절) |
 
 ## 1. 지금
 
@@ -519,6 +519,7 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 - ②b-1·②b-2가 고치는 파일은 `worker/mod.rs`와 새 단계 파일이고, 하네스가 쓰는 `jitter/`·`peer_media.rs`·`worker/peer_feed.rs`·`worker/clock.rs`·`rt.rs`는 **건드리지 않는다** → fixture는 당연히 동일하다. ③-0~③-a2 때와 같이, 이 두 PR의 실제 증거는 fixture가 아니라 아래 5.2절의 대조와 실시간 테스트다. PR 본문에 그렇게 적는다.
 - ②b-3에서 하네스의 워커 사건을 `PeerSources::service`로 바꾼다. 그 뒤로는 fixture가 `PeerSources`(명령 큐 → 슬롯 배정 → 피어별 `ingest` → `service` → `publish`)를 덮는다. 5.3절.
 - **②b-3이 ②b-1의 수신 쪽 증거를 겸한다.** ②b-3의 fixture 동일은 "②b-1이 옮긴 `PeerSources`가 하네스의 손 조립과 같은 호출 열을 낸다"는 뜻이므로, ②b-1의 `PeerSources` 이동(J1·J2·J3·J7)에 대한 **사후 fixture 증거**다. 그래서 ②b-3을 ②b-1 **바로 뒤**(②b-2 앞)에 둔다 — `PeerSources`가 fixture 없이 떠 있는 기간이 PR 하나로 줄고, 문제가 나면 ②b-1/②b-3 묶음으로 되돌린다(6.1절). ②b-1의 나머지(`LocalPath`·`MetronomeStage`·`DeviceWatch`)와 ②b-2(송신 쪽)는 여전히 대조표 + 실시간이 증거다.
+- **fixture가 `PeerSources`에서 실제로 지키는 범위(②b-3에서 변이로 확인, #136 리뷰 M1): J3(프로필 적용)·J6(`consistent`) + 추가 순서·슬롯 배정.** 하네스는 피어를 시작 때만 넣으므로 실행 중 추가·제거·`seen` 쓸기 경로(J1, ②b-4가 고치는 곳)를 타지 않고, 가상 시간이라 J2·J4(피어 간 `ingest` 시점·순서)는 원리상 못 지킨다. 그래서 ②b-4 앞에 **②b-3b**를 둔다: 실행 중 추가·제거 시나리오 + 사건 시점 단언을 가진 **별도** fixture(기존 5분 fixture는 그대로). ②b-4의 "실증"은 5분 fixture + ②b-3b fixture 둘을 뜻한다.
 
 ### 5.2 조정자가 지켜야 하는 호출 열
 
@@ -645,6 +646,7 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 | 1 | ②b-0 | 계측 | 4.3절 시험 조건 둘과 진단 계측(락 넷의 대기 시간). 본문에 "전" 수치. 송신 패킷 열 시험(5.4절 — 가능 여부 확인 포함). 워커 동작은 그대로 | ③c 병합(같은 시험 파일) |
 | 2 | ②b-1 | 이동 | `WorkerCtx`(조정자 묶음). 수신 쪽 단계: `PeerSources`·`LocalPath`·`MetronomeStage`·`DeviceWatch`. 메서드 본문은 `self.p.x` → 인자 `x`(2.2절 표) 치환 말고는 그대로. 락·순서·읽는 시점 불변. `engine-architecture.md` 6절 지도 갱신 | ③c 병합(`worker/mod.rs`가 겹친다) |
 | 3 | ②b-3 | 하네스 | `sim::tune`의 워커 사건이 `PeerSources::service`를 부른다(5.3절). fixture 바이트 동일 — **②b-1이 옮긴 `PeerSources`의 사후 증거를 겸한다**(5.1절) | ②b-1 |
+| 3b | ②b-3b | 하네스 | 실행 중 피어 추가·제거 시나리오(`sim::tune`)와 그 fixture: 슬롯 배정·`DRAIN`·표 길이의 사건 시점 단언. 워커 코드는 그대로. ②b-4가 고치는 경로(`seen` 표시·쓸기, 키 조인)를 ②b-4 **전에** fixture로 고정한다(#136 리뷰 M1) | ②b-3(병합 순서는 ②b-2 뒤, ②b-4 앞) |
 | 4 | ②b-2 | 이동 | 송신 쪽 단계: `Capture`·`SendPath`·`AutoCodec`. 흩어진 `Option`·플래그 검사(1.4절 3)가 `Option<SendPath>`·`Option<AutoCodec>` 둘로. `Worker`에 남는 것은 2.1절 그림 | ②b-1(②b-3과는 파일이 겹치지 않지만 순서는 ②b-3 뒤). 〔③c 뒤 확정: 송신 경로 본문은 #126 결과(복사본·스냅샷, 락 없음)를 그대로 옮긴다. `send_frame`은 `&mut PeerTableCopy`를 인자로 받는다〕 |
 | 5 | ②b-4 | 재배치 | 피어 표 합치기: `media`와 `feeds`를 한 표(`PeerSource { media: Box<PeerMedia>, feed: Option<PeerFeed> }`)로. 반복마다의 키 조인(`:737`, `:797`)과 `seen` 표시·쓸기(`:731-733`, `:763-770`)가 없어진다. 조건: 표 순서·슬롯 배정 순서 그대로(J4), 제거 때 슬롯 `DRAIN` 처리 그대로 | ②b-3(fixture가 이 PR을 지킨다) |
 | 6 | ②b-5 | 재배치 | 에코 프로브 소유 이전(3절): 측정 번호에 묶인 상태 판정, 탭 끝과 반환 분리, 회수 뒤 분석. `alt_*` 필드가 `EchoProbe` 안으로. `Engine.probe`·`WorkerParams.probe` → `EchoPort`/`EchoPortRt`. 시험 둘 추가(설치·취소 반복에서 프로브 회수, 정리 구간 무음 — 6.3절) | ②b-2 |
