@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::crypto::{KeyPair, PacketCipher, KEY_BYTES};
 use super::packet::PacketType;
 use super::media_link::{LossCell, MediaTx, PeerKey};
+use super::txlat::LockWait;
 use super::types::{PathKind, PeerStateKind};
 
 pub const HELLO_INTERVAL: Duration = Duration::from_millis(100);
@@ -797,7 +798,12 @@ impl Peer {
 
     /// 오디오를 보낼 수 있으면 지금 경로(주소, 종류).
     pub fn route(&self) -> Option<(SocketAddr, PathKind)> {
-        let c = self.conn.lock();
+        self.route_waited(&mut LockWait::default())
+    }
+
+    /// `route`와 같고, 락을 바로 못 잡으면 기다린 시간을 `w`에 더한다(워커 송신 경로, 엔진 ③c 측정).
+    pub(super) fn route_waited(&self, w: &mut LockWait) -> Option<(SocketAddr, PathKind)> {
+        let c = w.lock(&self.conn);
         if c.can_send_audio() {
             c.path
         } else {
@@ -818,6 +824,11 @@ impl Peer {
     /// 지금 이 피어의 오디오를 되돌려 보내는 중인가(에코 반사).
     pub fn reflecting(&self, now: Instant) -> bool {
         self.echo.lock().reflecting(now)
+    }
+
+    /// `reflecting`과 같고, 락 대기 시간을 `w`에 더한다(워커 송신 경로, 엔진 ③c 측정).
+    pub(super) fn reflecting_waited(&self, now: Instant, w: &mut LockWait) -> bool {
+        w.lock(&self.echo).reflecting(now)
     }
 
     /// `PeerStats`의 net 몫을 값으로.

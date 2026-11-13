@@ -289,6 +289,18 @@ impl Engine {
         self.worker_stats.media_peers.load(Ordering::Relaxed)
     }
 
+    /// 워커 반복 (본문, 시작 간격) 분포를 지난 호출 이후로 돌려주고 비운다(엔진 ③c 측정, 진단·테스트 전용).
+    #[doc(hidden)]
+    pub fn take_worker_timing(&self) -> (crate::net::txlat::SendQueueStats, crate::net::txlat::SendQueueStats) {
+        (self.worker_stats.iter_body.rotate(), self.worker_stats.iter_period.rotate())
+    }
+
+    /// 워커 송신 경로 락 대기 분포를 지난 호출 이후로 돌려주고 비운다(엔진 ③c 측정, 진단·테스트 전용).
+    #[doc(hidden)]
+    pub fn take_send_lock_wait(&self) -> Option<crate::net::txlat::LockWaitStats> {
+        self.net.as_ref().map(|n| n.take_send_lock_wait())
+    }
+
     /// 콜백 구동 믹스 진단: (마감 직전 은닉 횟수, 콜백 언더런으로 건너뛴 장치 프레임).
     pub fn feed_stats(&self) -> (u64, u64) {
         (
