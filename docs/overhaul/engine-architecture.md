@@ -97,18 +97,26 @@
 | 워커 통계 | 워커 | 통계 | 원자값(`WorkerStats`) | |
 | 정지 신호 | 제어 | 각 스레드 | `AtomicBool` + join | 수신은 빈 데이터그램으로 깨움 |
 
-**③ 뒤에도 워커가 잡는 락**(지터 락만 없어졌다 — "우선순위 역전 제거"는 수신 미디어 경로에 한정된다. 송신 쪽은 ADR D2 ③c):
+**③c 뒤 워커의 송신 경로**(ADR D1·D2 ③c, [engine-stage3-design.md](engine-stage3-design.md) 10·11절): 피어 표는 워커 복사본(`PeerTableCopy`, 세대가 바뀐 반복에만 `try_read` — 바쁘면 옛 복사본), 경로·반사 여부는 `Peer` 스냅샷(`route_snap`·`echo_snap`, `conn()`·`echo()` 가드가 놓을 때 발행), 원격 손실 보고는 seqlock 셀, 릴레이 상한 초과는 `band-net-ctrl`이 발행하는 원자값. **송신·자동 코덱 경로는 어떤 락도 기다리지 않는다.**
+
+| 송신 경로가 보던 것 | ③c 뒤 | 쓰는 쪽 |
+|---|---|---|
+| `NetShared.peers`(RwLock) | 복사본 + 세대(`peers_gen`), 빠진 항목은 `retired_peers`가 쥐고 제어 스레드가 놓음 | 커맨드 `add_peer`·`remove_peer`(쓰기 락 안에서 세대 +1) |
+| `Peer.conn`(경로·송신 가능) | `route_snap: AtomicU64`(IPv4 32 + 포트 16 + 종류 2 + 송신 가능 + 유효). IPv6이면 무효 → `try_lock`, 바쁘면 그 프레임 건너뜀(센다) | `band-net-recv`·`band-net-ctrl`·커맨드 — `ConnGuard` |
+| `Peer.echo`(반사 중) | `echo_snap: AtomicU64` = 반사 마감 ns(`enabled`면 `요청 시각 + ECHO_LAPSE`) | 같은 — `EchoGuard` |
+| `Peer.remote_loss` | seqlock 셀(단일 작성자 `band-net-recv`) | `band-net-recv` |
+| `relay`(상한 초과) | `relay_over_budget: AtomicBool` | `band-net-ctrl` 틱 |
+
+**③c 뒤에도 워커가 잡는 락**(송신 경로 밖 — ②b에서 단계 구조체로 나눌 때 세대 번호 + 원자값으로, ADR D2):
 
 | 락 | 워커가 잡는 곳·빈도 | 같은 락을 잡는 기본 우선순위 스레드 |
 |---|---|---|
-| `NetShared.peers`(RwLock, 읽기) | 송신 프레임마다, 자동 코덱 200ms | 커맨드 `add_peer`·`remove_peer`(쓰기) |
-| `Peer.conn` | 송신 프레임마다 피어마다(`route`), 200ms(`sends_audio_via_relay`) | `band-net-ctrl` 20ms, 통계(`net_stats`) |
-| `Peer.echo` | 송신 프레임마다 피어마다(`reflecting`) | `band-net-ctrl`, 커맨드(에코 요청·모드), 통계 |
-| `Peer.remote_loss` | 200ms | 통계 |
-| `relay` | 200ms | `band-net-ctrl`, 커맨드 |
 | 에코 `probe` | 반복마다, 캡처 프레임마다 | 측정 |
-| 메트로놈 `plan`·`stats`·`loopback_offset_ms` | 반복마다, 100ms | 커맨드, 통계 |
+| 메트로놈 `plan`·`stats`·`loopback_offset_ms` | 반복마다, 100ms | 커맨드, 통계(`Engine::stats`가 `metronome.stats`를 잡는다) |
+| 메트로놈 기준 피어 시계(`net.peer_clock` → `peers` 읽기 + `Peer.clock`) | 메트로놈이 기준 피어로 도는 동안 반복마다 | 커맨드 `add_peer`·`remove_peer`, `band-net-recv`(Pong) |
 | 녹음 마커 `MarkSink` | 녹음 중 은닉·버림이 있을 때 | `band-record` |
+
+이 락들의 대기는 측정 빌드(`test-support`)에서 반복마다 `WorkerStats.iter_lock_wait`로 잰다(10·11절 표).
 
 ### 4.2 RT 경로 불변 조건
 
@@ -328,7 +336,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 제어 평면과 데이터 평면 분리: 파라미터는 원자값, 구조 변경은 비RT에서 준비 후 상태 하나로 넘김 | JUCE 파라미터, Web Audio control/render 스레드 | 게인·팬은 원자값, 소스 슬롯은 `FREE/ACTIVE/DRAIN`으로 소유 이전, 링은 사전할당 |
 | 풀(pull) 모델 믹스 | JACK, CoreAudio, WASAPI 이벤트 구동 | 콜백 구동 믹스(P1-0), 믹스 출력 링 없음 |
 | 지터 버퍼 적응(목표 추정·가감속·은닉)은 도착 통계로 | WebRTC NetEQ | 같은 구성. NetEQ는 장치 스레드가 `GetAudio`(10ms)로 당길 때 디코드까지 하지만, 여기서는 디코드·은닉·보정을 워커가 하고 RT 콜백에는 PCM 링만 준다 — RT 실행시간이 코덱·패킷 수와 무관 |
-| 상태마다 쓰는 쪽은 하나(single writer) | lock-free 설계 일반 | RT 경계(링·원자값)는 지킨다. 피어 미디어 상태는 ③에서 워커 단일 소유가 됐다. **`Peer`의 net 상태(Mutex 4개)는 아직 지키지 않는다**(4.1절 끝 표, ③c) |
+| 상태마다 쓰는 쪽은 하나(single writer) | lock-free 설계 일반 | RT 경계(링·원자값)는 지킨다. 피어 미디어 상태는 ③에서 워커 단일 소유가 됐다. `Peer`의 net 상태는 Mutex로 여러 스레드가 쓰지만, 워커가 보는 값은 ③c에서 가드가 발행하는 스냅샷이다(4.1절 끝 표). 원격 손실 보고는 단일 작성자 seqlock |
 | 의존은 정책 → 메커니즘 한 방향, 순환 없음 | Clean Architecture 의존 규칙, 비순환 의존 원칙(ADP) | 5절 규칙을 `tests/architecture.rs`가 검사, 현재 예외는 단계와 함께 관리 |
 | 결정적 시뮬레이션으로 동작 고정 | NetEQ 시뮬레이터, 가상 시간 하네스 | `engine/sim`(5분 기본 테스트, 60분 야간), 리포트 숫자가 같으면 동작 불변 |
 

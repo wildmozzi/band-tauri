@@ -15,6 +15,12 @@ impl RateRing {
         Self { ring: vec![false; cap], pos: 0, len: 0, hits: 0 }
     }
 
+    /// 시험: 비었나(`new` 직후와 같은 계수 상태).
+    #[cfg(test)]
+    pub(super) fn is_fresh(&self) -> bool {
+        self.pos == 0 && self.len == 0 && self.hits == 0 && self.ring.iter().all(|b| !b)
+    }
+
     /// `new(cap)`과 같은 상태로(할당 없음, 엔진 ③c restart).
     pub(super) fn reset(&mut self) {
         self.ring.fill(false);

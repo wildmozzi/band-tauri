@@ -98,6 +98,20 @@ pub struct NetShared {
     keys: KeyPair,
     seq_ctrl: [AtomicU32; 6],
     peers: RwLock<Vec<Arc<Peer>>>,
+    /// 피어 표 세대(엔진 ③c): `peers`를 바꾸는 쓰기 락 안에서 +1. 워커는 복사본(`PeerTableCopy`)을 들고 세대가 바뀐
+    /// 반복에서만 `try_read`로 다시 복사한다 — 쓰기 락을 기다리지 않는다.
+    peers_gen: AtomicU64,
+    /// 표에서 빠진 항목(세대, 항목). 워커 복사본이 그 세대 이상으로 갱신될 때까지 여기서 쥐어, 마지막 `Arc`가 워커에서
+    /// 놓이지 않게 한다(해제는 제어 스레드). 쓰기는 `peers` 쓰기 락 안에서.
+    retired_peers: Mutex<Vec<(u64, Arc<Peer>)>>,
+    /// 워커 복사본이 마지막으로 맞춘 세대.
+    copy_gen: AtomicU64,
+    /// 진단(엔진 ③c): 복사본 갱신 수, 쓰기 락이 바빠 옛 복사본으로 보낸 프레임 수, 담을 수 없는 경로라 건너뛴 송신 수.
+    copy_refreshes: AtomicU64,
+    stale_copy_frames: AtomicU64,
+    route_skips: AtomicU64,
+    /// 릴레이 송신량이 상한의 90%를 넘음(제어 스레드가 틱마다 `relay` 락 안에서 발행 — 워커는 락 없이 읽는다, 엔진 ③c).
+    relay_over_budget: AtomicBool,
     /// 송신 키별 Audio seq 최고 수위(다음에 쓸 값). 피어를 제거·교체할 때 기록하고 Net 수명 내내 지우지 않는다.
     /// 같은 키로 피어를 다시 만들면 여기서 이어 간다 → 같은 (키, nonce)가 세션 동안 반복되지 않는다(PR #13 H1).
     /// 크기는 세션 중 만난 피어 descriptor 수 수준이다.
@@ -128,10 +142,38 @@ pub struct NetShared {
     force_auto_opus: AtomicBool,
     /// 송신 큐 지연(프레임 생성 → send_to 완료, P1-3). 워커가 기록, 제어 스레드가 창을 돌린다.
     send_latency: txlat::SendLatency,
-    /// 워커 송신 경로의 락 대기(엔진 ③c 측정, 진단 전용 — 측정 시험만 비운다).
-    send_lock_wait: txlat::LockWaitHist,
     /// DSCP 마킹 상태(제어 스레드가 바뀔 때 갱신).
     qos_stats: Mutex<qos::QosStats>,
+}
+
+/// 워커가 들고 있는 피어 표 복사본(엔진 ③c, ADR D1). 세대가 바뀐 반복에서만 다시 복사한다(`NetShared::refresh_copy`).
+/// Net 하나에 오래 사는 복사본은 워커의 것 하나다(빠진 항목 해제가 이 복사본의 세대를 기준으로 한다).
+pub struct PeerTableCopy {
+    gen: u64,
+    peers: Vec<Arc<Peer>>,
+}
+
+impl Default for PeerTableCopy {
+    fn default() -> Self {
+        Self { gen: u64::MAX, peers: Vec::with_capacity(MAX_PEERS + 1) }
+    }
+}
+
+impl PeerTableCopy {
+    pub fn peers(&self) -> &[Arc<Peer>] {
+        &self.peers
+    }
+}
+
+/// 송신 경로 진단(엔진 ③c, `Net::take_send_path_diag`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendPathDiag {
+    /// 피어 표 복사본을 다시 복사한 횟수(세대가 바뀌고 읽기 락을 바로 잡음).
+    pub copy_refreshes: u64,
+    /// 세대가 바뀌었지만 쓰기 락이 바빠 옛 복사본으로 보낸 프레임 수.
+    pub stale_copy_frames: u64,
+    /// 스냅샷에 담을 수 없는 경로(IPv6)인데 `conn` 락도 바빠 그 프레임을 건너뛴 송신 수(지금은 0이어야 한다).
+    pub route_skips: u64,
 }
 
 pub struct Net {
@@ -197,6 +239,13 @@ impl Net {
             keys,
             seq_ctrl: Default::default(),
             peers: RwLock::new(Vec::new()),
+            peers_gen: AtomicU64::new(0),
+            retired_peers: Mutex::new(Vec::new()),
+            copy_gen: AtomicU64::new(0),
+            copy_refreshes: AtomicU64::new(0),
+            stale_copy_frames: AtomicU64::new(0),
+            route_skips: AtomicU64::new(0),
+            relay_over_budget: AtomicBool::new(false),
             tx_seq_retired: Mutex::new(std::collections::HashMap::new()),
             retired_ssrc_ids: Mutex::new(std::collections::HashMap::new()),
             epoch: Instant::now(),
@@ -211,7 +260,6 @@ impl Net {
             auto_refresh: AtomicBool::new(false),
             force_auto_opus: AtomicBool::new(false),
             send_latency: txlat::SendLatency::new(),
-            send_lock_wait: txlat::LockWaitHist::default(),
             qos_stats: Mutex::new(qos::QosStats::default()),
             recv_prio: Default::default(),
         });
@@ -281,6 +329,7 @@ impl Net {
             return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
         }
         let mut replaced = None;
+        let mut retire = None;
         if let Some(i) = old_idx {
             let old = peers.remove(i);
             self.shared.retire_tx_seq(&old);
@@ -291,6 +340,7 @@ impl Net {
                 let old_conn = old.conn();
                 peer.conn().inherit_replay_window(&old_conn);
             }
+            retire = Some(old);
         }
         // 송신 카운터(PR #13 H1, P1-1b): 같은 키의 살아 있는 다른 항목이 있으면 그 카운터를 같이 쓴다(카운터가
         // 둘이 되면 nonce가 겹친다). 없고 이 키로 전에 보낸 적이 있으면(교체, 제거 후 재추가) 그 최고 수위 + 여유에서 이어 간다.
@@ -300,6 +350,7 @@ impl Net {
             peer.tx_seq().store(hw.wrapping_add(AUDIO_SEQ_HANDOVER_GAP), Ordering::Relaxed);
         }
         peers.push(Arc::new(peer));
+        self.shared.bump_peers_gen(retire);
         Ok(replaced)
     }
 
@@ -312,6 +363,7 @@ impl Net {
             // 그 사이 같은 키의 add_peer가 옛 수위(또는 기록 없음)에서 시작해 이 객체가 이미 쓴 seq를 다시 쓸 수 있다.
             if let Some(p) = &removed {
                 self.shared.retire_tx_seq(p);
+                self.shared.bump_peers_gen(Some(p.clone()));
             }
             removed
         };
@@ -397,10 +449,15 @@ impl Net {
         self.shared.send_latency.last()
     }
 
-    /// 워커 송신 경로 락 대기의 지난 호출 이후 분포(엔진 ③c 측정, 진단·테스트 전용).
+    /// 송신 경로 진단(엔진 ③c)의 지난 호출 이후 값을 돌려주고 비운다(진단·테스트 전용).
     #[doc(hidden)]
-    pub fn take_send_lock_wait(&self) -> txlat::LockWaitStats {
-        self.shared.send_lock_wait.take()
+    pub fn take_send_path_diag(&self) -> SendPathDiag {
+        let s = &self.shared;
+        SendPathDiag {
+            copy_refreshes: s.copy_refreshes.swap(0, Ordering::Relaxed),
+            stale_copy_frames: s.stale_copy_frames.swap(0, Ordering::Relaxed),
+            route_skips: s.route_skips.swap(0, Ordering::Relaxed),
+        }
     }
 
     pub fn stop(&mut self) {
@@ -442,6 +499,46 @@ impl NetShared {
         m.insert((*p.public_key(), p.ssrc()), next);
         drop(m);
         self.retired_ssrc_ids.lock().insert(p.ssrc(), p.id().to_string());
+    }
+
+    /// 피어 표를 바꾼 직후(`peers` 쓰기 락 안에서) 세대를 올리고, 빠진 항목을 워커 복사본이 따라올 때까지 쥔다.
+    fn bump_peers_gen(&self, retired: Option<Arc<Peer>>) {
+        let g = self.peers_gen.fetch_add(1, Ordering::Release) + 1;
+        if let Some(p) = retired {
+            self.retired_peers.lock().push((g, p));
+        }
+    }
+
+    /// 워커 복사본을 맞춘다(엔진 ③c). 세대가 같으면 아무것도 안 한다(원자 load 하나). 바뀌었으면 `try_read`로 다시
+    /// 복사하고, 쓰기 락이 바쁘면 **기다리지 않고** 옛 복사본을 이번 프레임에 그대로 쓴다(다음 프레임에 다시 본다).
+    /// 옛 복사본의 영향: 방금 빠진 피어에게 몇 프레임 더 보낼 수 있다 — 그 송신 키의 seq는 제거 때 기록한 수위를 넘지만,
+    /// 같은 키를 다시 만들 때 `AUDIO_SEQ_HANDOVER_GAP`(65,536프레임)만큼 띄우므로 nonce가 겹치지 않는다. 방금 들어온
+    /// 피어는 몇 프레임 늦게 보이지만, 핸드셰이크가 끝나야 경로가 생기므로(수 ms 이상) 첫 소리 시각은 같다.
+    /// 할당 없음: 복사본은 `MAX_PEERS + 1` 용량으로 미리 잡혀 있고, 빠진 항목의 마지막 `Arc`는 `retired_peers`가 쥔다.
+    fn refresh_copy(&self, c: &mut PeerTableCopy) {
+        if self.peers_gen.load(Ordering::Acquire) == c.gen {
+            return;
+        }
+        let Some(peers) = self.peers.try_read() else {
+            self.stale_copy_frames.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        c.peers.clear();
+        c.peers.extend(peers.iter().cloned());
+        // 쓰기 락 안에서만 오르므로 읽기 락을 쥔 동안 이 값은 복사한 표의 세대다.
+        c.gen = self.peers_gen.load(Ordering::Acquire);
+        drop(peers);
+        self.copy_gen.store(c.gen, Ordering::Release);
+        self.copy_refreshes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 제어 스레드: 워커 복사본이 이미 지나간 세대의 빠진 항목을 놓는다(여기가 마지막 `Arc`).
+    fn release_retired(&self) {
+        let seen = self.copy_gen.load(Ordering::Acquire);
+        let mut r = self.retired_peers.lock();
+        if r.iter().any(|(g, _)| *g <= seen) {
+            r.retain(|(g, _)| *g > seen);
+        }
     }
 
     fn next_ctrl_seq(&self, t: PacketType) -> u32 {
@@ -526,9 +623,14 @@ impl NetShared {
         rbuf: &mut [u8; SEND_BUF_BYTES],
         auto: Option<AutoFn<'_, 'a>>,
         frame_at: Option<Instant>,
-        wait: &mut txlat::LockWait,
     ) -> Option<(u8, Option<CodecReason>)> {
-        let (addr, kind) = p.route_waited(wait)?;
+        let (addr, kind) = match p.send_route() {
+            Ok(r) => r?,
+            Err(()) => {
+                self.route_skips.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
         // 자동 전환 페이로드가 상한을 넘으면(있을 수 없지만) 그 피어에게는 설정 코덱으로 보낸다
         let (payload, flags, reason) = match auto.and_then(|f| f(p, kind)).filter(|a| a.payload.len() <= MAX_PAYLOAD_BYTES) {
             Some(a) => (a.payload, a.flags, Some(a.reason)),
@@ -564,15 +666,10 @@ impl NetShared {
     }
 
     /// 지금 오디오를 릴레이로 보내는 피어 수와, 릴레이 송신량이 상한의 90%를 넘었는지(Opus 자동 전환 입력, P1-4c).
-    pub fn relay_audio_load(&self) -> (usize, bool) {
-        let peers = self.peers.read();
-        let n = peers
-            .iter()
-            .filter(|p| p.sends_audio_via_relay())
-            .count();
-        drop(peers);
-        let over = self.relay.lock().as_ref().is_some_and(|c| c.over_budget());
-        (n, over)
+    /// 워커가 부른다: 피어 표는 워커 복사본으로, 상한 초과는 제어 스레드가 발행한 원자값으로 본다(락 없음, 엔진 ③c).
+    pub fn relay_audio_load(&self, copy: &PeerTableCopy) -> (usize, bool) {
+        let n = copy.peers().iter().filter(|p| p.sends_audio_via_relay()).count();
+        (n, self.relay_over_budget.load(Ordering::Relaxed))
     }
 
     /// 워커의 Opus 자동 전환 상태(`RelayStats.autoOpus`).
@@ -614,7 +711,8 @@ impl NetShared {
         alt: Option<(&str, &[u8])>,
         auto: Option<AutoFn<'_, 'a>>,
     ) {
-        self.send_audio_timed(Instant::now(), payload, flags, frame_code, timestamp, buf, alt, auto)
+        // 테스트·도구용: 부를 때마다 새 복사본(할당). 워커는 `send_audio_timed`에 자기 복사본을 넘긴다.
+        self.send_audio_timed(&mut PeerTableCopy::default(), Instant::now(), payload, flags, frame_code, timestamp, buf, alt, auto)
     }
 
     /// `send_audio`와 같고, `frame_at`(캡처 프레임이 다 모인 시각, 인코딩 전)부터 각 피어 send_to 완료까지를
@@ -623,6 +721,7 @@ impl NetShared {
     #[allow(clippy::too_many_arguments)]
     pub fn send_audio_timed<'a>(
         &self,
+        copy: &mut PeerTableCopy,
         frame_at: Instant,
         payload: &[u8],
         flags: u8,
@@ -635,15 +734,17 @@ impl NetShared {
         if payload.len() > MAX_PAYLOAD_BYTES || alt.is_some_and(|(_, a)| a.len() > MAX_PAYLOAD_BYTES) {
             return;
         }
-        let mut wait = txlat::LockWait::default();
-        let peers = wait.read(&self.peers);
+        // 피어 표는 워커 복사본(세대가 바뀐 반복에만 `try_read`), 경로·반사 여부는 `Peer` 스냅샷 — 이 경로는 어떤 락도
+        // 기다리지 않는다(엔진 ③c, ADR D1).
+        self.refresh_copy(copy);
+        let peers = &copy.peers;
         if peers.is_empty() {
             return;
         }
         let now = Instant::now();
         let mut rbuf = [0u8; SEND_BUF_BYTES];
         for p in peers.iter() {
-            if p.reflecting_waited(now, &mut wait) {
+            if p.reflecting(now) {
                 continue;
             }
             let (pl, au) = match alt {
@@ -652,7 +753,7 @@ impl NetShared {
                 Some((id, a)) if id == p.id() => (a, None),
                 _ => (payload, auto),
             };
-            if let Some((f, reason)) = self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, au, Some(frame_at), &mut wait) {
+            if let Some((f, reason)) = self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, au, Some(frame_at)) {
                 let code = peer::TX_CODEC_SENT
                     | if f & packet::FLAG_OPUS != 0 { peer::TX_CODEC_OPUS } else { 0 }
                     | match reason {
@@ -663,8 +764,6 @@ impl NetShared {
                 p.tx_codec().store(code, Ordering::Relaxed);
             }
         }
-        drop(peers);
-        self.send_lock_wait.record(wait);
     }
 
     /// 에코 모드: 피어가 보낸 Audio 평문을 그대로(디코드 없이) 그 피어에게 되돌린다. 타임스탬프는 내 송신
@@ -683,7 +782,7 @@ impl NetShared {
         };
         let mut buf = [0u8; MAX_PACKET_BYTES];
         let mut rbuf = [0u8; SEND_BUF_BYTES];
-        self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf, None, None, &mut txlat::LockWait::default());
+        self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf, None, None);
         let us = received.elapsed().as_secs_f32() * 1e6;
         let mut e = p.echo();
         e.reflect_us += (us - e.reflect_us) * 0.05;
@@ -989,6 +1088,7 @@ fn control_loop(s: &NetShared) {
     while !s.stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         let peers = s.peers.read().clone();
+        s.release_retired();
         let (relay_ready, relay) = {
             let r = s.relay.lock();
             (r.as_ref().is_some_and(|c| c.ready()), r.as_ref().map(|c| c.addr))
@@ -1044,6 +1144,8 @@ fn control_loop(s: &NetShared) {
                     c.record_tx(bytes, packets, elapsed);
                 }
             }
+            // 워커가 락 없이 읽게 발행(엔진 ③c). `over_budget`은 `record_tx`가 1초 창마다 바꾼다.
+            s.relay_over_budget.store(r.as_ref().is_some_and(|c| c.over_budget()), Ordering::Relaxed);
             if let Some(c) = r.as_mut() {
                 if c.tick(now, relay_quiet) {
                     let mut out = [0u8; relay::BIND_MAX_BYTES];
@@ -1053,5 +1155,75 @@ fn control_loop(s: &NetShared) {
             }
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    use peer::{Candidate, CandidateKind};
+
+    fn net() -> Net {
+        let opts = NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
+        Net::start("me".into(), &opts).unwrap()
+    }
+
+    fn desc(ssrc: u32) -> LocalDescriptor {
+        LocalDescriptor {
+            ssrc,
+            key: LocalDescriptor::encode_key(&KeyPair::generate().public_bytes()),
+            candidates: vec![Candidate { kind: CandidateKind::Lan, addr: "127.0.0.1:9".into() }],
+        }
+    }
+
+    fn add(n: &Net, id: &str, k: u64) {
+        n.add_peer(id.into(), &desc(k as u32 + 100), media_link::media_link(PeerKey::from_raw(k)).0).unwrap();
+    }
+
+    fn ids(c: &PeerTableCopy) -> Vec<String> {
+        c.peers().iter().map(|p| p.id().to_string()).collect()
+    }
+
+    /// 엔진 ③c(#122 리뷰 M1 조건): 복사본은 세대가 바뀔 때만 다시 읽고, 쓰기 락이 바쁘면 기다리지 않고 옛 복사본을 쓰며
+    /// 그 프레임을 센다. 락이 풀린 다음 갱신에서 새 피어가 보이고 빠진 피어가 사라진다. 빠진 피어의 마지막 `Arc`는
+    /// 워커 복사본이 아니라 제어 스레드(`release_retired`)가 놓는다.
+    #[test]
+    fn copy_refreshes_on_generation_and_never_waits() {
+        let n = net();
+        let s = n.shared();
+        let mut c = PeerTableCopy::default();
+        add(&n, "a", 1);
+        s.refresh_copy(&mut c);
+        assert_eq!(ids(&c), ["a"]);
+        let d0 = n.take_send_path_diag();
+        assert_eq!((d0.copy_refreshes, d0.stale_copy_frames), (1, 0));
+        // 세대 그대로면 아무것도 안 한다
+        s.refresh_copy(&mut c);
+        assert_eq!(n.take_send_path_diag().copy_refreshes, 0);
+        // 쓰기 락이 바쁜 동안: 세대는 이미 올랐어도(추가 직후) 옛 복사본 그대로, 기다리지 않음
+        add(&n, "b", 2);
+        let held = s.peers.write();
+        let t = Instant::now();
+        s.refresh_copy(&mut c);
+        s.refresh_copy(&mut c);
+        assert!(t.elapsed() < Duration::from_millis(50), "기다리지 않는다");
+        assert_eq!(ids(&c), ["a"], "옛 복사본");
+        drop(held);
+        let d = n.take_send_path_diag();
+        assert_eq!((d.copy_refreshes, d.stale_copy_frames), (0, 2));
+        s.refresh_copy(&mut c);
+        assert_eq!(ids(&c), ["a", "b"], "락이 풀리면 다음 반복에 보인다");
+        // 제거: 워커 복사본이 아직 옛 세대면 빠진 항목은 retired가 쥔다 → 복사본 갱신 뒤 제어 스레드가 놓는다
+        let a = c.peers()[0].clone();
+        n.remove_peer("a");
+        s.release_retired();
+        assert_eq!(s.retired_peers.lock().len(), 1, "복사본이 따라오기 전에는 놓지 않는다");
+        s.refresh_copy(&mut c);
+        assert_eq!(ids(&c), ["b"]);
+        assert_eq!(Arc::strong_count(&a), 2, "retired + 이 시험");
+        s.release_retired();
+        assert!(s.retired_peers.lock().is_empty());
+        assert_eq!(Arc::strong_count(&a), 1, "마지막 참조는 워커 쪽이 아니다");
+        assert_eq!(n.take_send_path_diag().route_skips, 0);
     }
 }

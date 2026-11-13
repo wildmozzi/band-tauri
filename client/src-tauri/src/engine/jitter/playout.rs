@@ -121,11 +121,11 @@ impl JitterBuffer {
 
     fn ensure_decoder(&mut self, opus: bool, ch: usize) {
         if !self.decoder.as_ref().is_some_and(|d| d.matches(opus, ch)) {
-            // 재시작에서 거둔 예비가 맞으면 쓴다(상태 초기화됨 — 새로 만든 것과 같다). 아니면 새로(코덱이 바뀐 경우).
-            self.decoder = match self.spare_decoder.take() {
-                Some(d) if d.matches(opus, ch) => Some(d),
-                _ => Decoder::new(opus, ch).ok(),
-            };
+            // 처음·재시작 뒤·코덱 변경: 풀과 주고받는다(새로 만든 것과 같은 상태, 워커에서 할당·해제 없음 — 엔진 ③c).
+            if let Some(old) = self.decoder.take() {
+                self.decoders.give(old);
+            }
+            self.decoder = self.decoders.take(opus, ch);
         }
     }
 

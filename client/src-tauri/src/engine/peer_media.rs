@@ -132,10 +132,10 @@ impl Default for MediaStatsCell {
 const SPINS_BEFORE_YIELD: usize = 64;
 
 impl MediaStatsCell {
-    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨진다). 지금(③-a1·a2)은 워커만 `PeerMediaShared::publish`로
-    /// 부르고, 그 호출이 지터 락을 쥔 채라 락이 직렬화한다. ③-a3에서 락이 없어지면 워커 단독 소유 `PeerMedia`의
-    /// `&mut self` 메서드에서만 부르게 해 타입으로 보장한다.
-    pub(crate) fn write(&self, s: &MediaStats) {
+    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨진다). 부르는 곳은 워커 단독 소유 `PeerMedia::publish(&mut self)`
+    /// 하나이고, `PeerMediaShared`는 `PeerMedia::new`가 짝으로만 만들며 `PeerMedia.shared`는 private이다 — 한 셀에 작성자가
+    /// 하나임이 타입으로 보장된다(#116 L-1, #118 L-3, #124 L-4·L-5).
+    fn write(&self, s: &MediaStats) {
         let w = pack(s);
         let v = self.ver.load(Ordering::Relaxed);
         self.ver.store(v.wrapping_add(1), Ordering::Relaxed); // 홀수: 쓰는 중
@@ -219,7 +219,7 @@ impl PeerMediaShared {
 /// 워커가 혼자 가지는 피어 미디어 상태: 지터 버퍼(락 없음)와 수신 큐 소비자(설계 1.2절).
 /// 제어 평면 스레드에서 만들어(지터 버퍼 할당) 명령 큐로 넘기고, 제거되면 반환 큐로 돌아와 제어 평면에서 해제된다.
 pub struct PeerMedia {
-    pub shared: Arc<PeerMediaShared>,
+    shared: Arc<PeerMediaShared>,
     rx: MediaRx,
     jitter: JitterBuffer,
     restart_seen: u32,
@@ -230,6 +230,11 @@ pub struct PeerMedia {
 }
 
 impl PeerMedia {
+    /// 공유 쪽(읽기 전용 참조 — 바꿔 끼울 수 없게 필드는 private, #124 리뷰 L-4).
+    pub fn shared(&self) -> &PeerMediaShared {
+        &self.shared
+    }
+
     /// 지터 버퍼(슬롯 1024개 ≈ 1.19MB + 디코더)를 여기서 할당한다. 제어 평면 스레드에서 부른다.
     /// 공유 쪽(`PeerMediaShared`)도 여기서 함께 만들어 짝으로 돌려준다: `PeerMediaShared`는 이 함수로만 생기므로 한 공유 상태에
     /// 작성자(`PeerMedia`, `Clone` 아님, `publish(&mut self)`)가 정확히 하나다 — seqlock 단일 작성자가 모듈 규약이 아니라

@@ -293,7 +293,7 @@ impl Engine {
         // (`reserve_cmd` 대기가 끼어도 어긋나지 않게, #120 L-3).
         let added = Instant::now();
         let added_us = added.saturating_duration_since(self.epoch).as_micros() as u64;
-        // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB)는 여기, 락 밖에서 할당한다. 워커는 추가·제거·재시작 어디서도 할당·해제하지 않는다(재시작은 제자리 초기화 — ③c, `tests/rt_alloc.rs`; 해제는 반환 큐를 거쳐 제어 평면에서).
+        // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB)는 여기, 락 밖에서 할당한다. 워커는 추가·제거·재시작 어디서도 할당·해제하지 않는다(재시작은 제자리 초기화, 디코더는 여기서 미리 만든 Opus 모노·스테레오 풀과 주고받는다 — 코덱이 바뀌어도 새로 만들지 않음, ③c `tests/rt_alloc.rs`; 해제는 반환 큐를 거쳐 제어 평면에서).
         let (tx, rx) = media_link(key);
         let (media, worker_side) = PeerMedia::new(key, peer_id.clone(), desc.ssrc, added_us, settings, rx);
         // 등록부 락 안에서 믹스 설정 복사 → net 교체 → 등록부 교체: 겹친 set_peer_gain은 옛 것에 쓰여 복사로 넘어가거나

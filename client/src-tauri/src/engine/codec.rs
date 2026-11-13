@@ -73,27 +73,44 @@ impl Encoder {
     }
 }
 
+/// 만든 Opus 디코더 수(진단·시험, 엔진 ③c). libopus는 C `malloc`으로 할당해 Rust 할당자 계수(`tests/rt_alloc.rs`)에 안 잡히므로
+/// 워커에서 디코더를 만들지 않음을 이 값으로 확인한다.
+static OPUS_DECODERS_CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[doc(hidden)]
+pub fn opus_decoders_created() -> u64 {
+    OPUS_DECODERS_CREATED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub enum Decoder {
     Opus { dec: opus::Decoder, channels: usize },
     Pcm16 { channels: usize },
 }
 
 impl Decoder {
+    pub fn is_opus(&self) -> bool {
+        matches!(self, Decoder::Opus { .. })
+    }
+
     pub fn new(opus: bool, channels: usize) -> Result<Self, String> {
         if opus {
             let ch = if channels == 2 { opus::Channels::Stereo } else { opus::Channels::Mono };
             let dec = opus::Decoder::new(INTERNAL_RATE, ch)
                 .map_err(|e| format!("Opus 디코더 생성 실패: {e}"))?;
+            OPUS_DECODERS_CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(Decoder::Opus { dec, channels })
         } else {
             Ok(Decoder::Pcm16 { channels })
         }
     }
 
-    /// 새로 만든 디코더와 같은 상태로(Opus `OPUS_RESET_STATE`, 할당 없음 — 지터 버퍼 restart, 엔진 ③c).
-    pub fn reset(&mut self) {
-        if let Decoder::Opus { dec, .. } = self {
-            let _ = dec.reset_state();
+    /// 새로 만든 디코더와 같은 상태로(Opus `OPUS_RESET_STATE`, 할당 없음 — 지터 버퍼 디코더 풀, 엔진 ③c).
+    /// 실패하면 false — 옛 상태가 남았을 수 있으니 부르는 쪽이 버린다(#124 리뷰 L-2).
+    #[must_use]
+    pub fn reset(&mut self) -> bool {
+        match self {
+            Decoder::Opus { dec, .. } => dec.reset_state().is_ok(),
+            Decoder::Pcm16 { .. } => true,
         }
     }
 
@@ -217,7 +234,7 @@ mod tests {
             for p in &pkts[..20] {
                 used.decode(p, &mut out).unwrap();
             }
-            used.reset();
+            assert!(used.reset());
             let mut fresh = Decoder::new(true, ch).unwrap();
             let (mut a, mut b) = (vec![0.0; n * ch], vec![0.0; n * ch]);
             for (k, p) in pkts[20..].iter().enumerate() {

@@ -134,8 +134,9 @@ pub struct JitterBuffer {
     highest: u32,
 
     decoder: Option<Decoder>,
-    /// 재시작에서 거둔 디코더(상태 초기화됨). `ensure_decoder`가 같은 종류면 새로 만들지 않고 쓴다(엔진 ③c, 할당 없음).
-    spare_decoder: Option<Decoder>,
+    /// 쓰지 않는 Opus 디코더(모노·스테레오). 만들 때(제어 평면) 미리 할당해 두고, 재시작·코덱 변경 때 `decoder`와 주고받는다 —
+    /// 워커에서 디코더를 만들거나 버리지 않는다(엔진 ③c, #124 리뷰 M-2).
+    decoders: DecoderPool,
     /// 디코드된 스테레오 인터리브 샘플 FIFO.
     fifo: VecDeque<f32>,
     /// FIFO 끝 샘플 다음 위치의 타임스탬프(확장).
@@ -260,11 +261,49 @@ fn seq_diff(a: u32, b: u32) -> i32 {
     a.wrapping_sub(b) as i32
 }
 
+/// Opus 디코더 풀(모노·스테레오 한 개씩, 엔진 ③c #124 리뷰 M-2). PCM 디코더는 힙이 없어 그때그때 만든다.
+/// 꺼낼 때 `OPUS_RESET_STATE`로 새로 만든 것과 같은 상태로 만든다(`codec::tests::opus_reset_equals_fresh_decoder`).
+#[derive(Default)]
+struct DecoderPool {
+    opus: [Option<Decoder>; 2],
+}
+
+impl DecoderPool {
+    fn alloc() -> Self {
+        Self { opus: [Decoder::new(true, 1).ok(), Decoder::new(true, 2).ok()] }
+    }
+
+    fn slot(opus: bool, ch: usize) -> Option<usize> {
+        (opus && (1..=2).contains(&ch)).then(|| ch - 1)
+    }
+
+    /// 이 종류의 디코더(새것과 같은 상태). 풀에 있으면 할당 없음. 초기화가 실패한 것은 버리고 새로 만든다(드묾).
+    fn take(&mut self, opus: bool, ch: usize) -> Option<Decoder> {
+        if let Some(i) = Self::slot(opus, ch) {
+            if let Some(mut d) = self.opus[i].take() {
+                if d.reset() {
+                    return Some(d);
+                }
+            }
+        }
+        Decoder::new(opus, ch).ok()
+    }
+
+    /// 다 쓴 디코더를 돌려준다(Opus는 자리가 비었으면 보관, PCM은 힙이 없어 그냥 놓는다).
+    fn give(&mut self, d: Decoder) {
+        if let Some(i) = Self::slot(d.is_opus(), d.channels()) {
+            if self.opus[i].is_none() {
+                self.opus[i] = Some(d);
+            }
+        }
+    }
+}
+
 /// 지터 버퍼의 힙 버퍼 묶음. `new`는 새로 할당하고, `restart`는 지금 것을 꺼내 처음 상태로 되돌려 다시 쓴다
 /// (엔진 ③c: 재시작은 워커에서 적용되므로 할당·해제가 없어야 한다). 필드 초기값은 `from_buffers` 한 곳에만 있다.
 struct Buffers {
     slots: Vec<Slot>,
-    spare_decoder: Option<Decoder>,
+    decoders: DecoderPool,
     fifo: VecDeque<f32>,
     scratch: Vec<i64>,
     block_rel: Vec<i64>,
@@ -283,7 +322,7 @@ impl Buffers {
             slots: (0..SLOT_COUNT)
                 .map(|_| Slot { seq: 0, valid: false, len: 0, flags: 0, frame: 0, ts: 0, data: vec![0u8; MAX_PAYLOAD_BYTES].into_boxed_slice() })
                 .collect(),
-            spare_decoder: None,
+            decoders: DecoderPool::alloc(),
             fifo: VecDeque::with_capacity(MAX_PKT_FRAME * 16 * 2),
             scratch: Vec::with_capacity(DELAY_WINDOW),
             block_rel: Vec::with_capacity(BLOCK_SAMPLES_MAX),
@@ -299,16 +338,16 @@ impl Buffers {
 
     /// `jb`의 버퍼를 꺼내 `alloc()`과 같은 내용으로 되돌린다(할당·해제 없음 — 빈 `Vec`/`RateRing`은 할당하지 않는다).
     /// 슬롯 `data`는 지우지 않는다: 읽는 곳은 모두 쓴 길이 `[..len]`까지이고(`insert`가 먼저 쓴다) `len`·`valid`를 0으로 돌린다.
-    /// 디코더는 상태를 초기화해 예비로 둔다(`ensure_decoder`가 같은 종류면 새로 만들지 않고 쓴다). 재시작 직후 `decoder`는
+    /// 디코더는 풀로 돌려준다(꺼낼 때 상태를 초기화한다 — 새로 만든 것과 같다). 재시작 직후 `decoder`는
     /// `new`처럼 비어 있으므로 첫 디코드 전까지의 동작(디코더 PLC 없음)이 새 버퍼와 같다.
     fn reclaim(jb: &mut JitterBuffer) -> Self {
         let mut slots = std::mem::take(&mut jb.slots);
         for s in &mut slots {
             (s.seq, s.valid, s.len, s.flags, s.frame, s.ts) = (0, false, 0, 0, 0, 0);
         }
-        let mut spare_decoder = jb.decoder.take().or_else(|| jb.spare_decoder.take());
-        if let Some(d) = spare_decoder.as_mut() {
-            d.reset();
+        let mut decoders = std::mem::take(&mut jb.decoders);
+        if let Some(d) = jb.decoder.take() {
+            decoders.give(d);
         }
         let mut fifo = std::mem::take(&mut jb.fifo);
         fifo.clear();
@@ -328,7 +367,7 @@ impl Buffers {
         };
         Self {
             slots,
-            spare_decoder,
+            decoders,
             fifo,
             scratch,
             block_rel,
@@ -357,7 +396,7 @@ impl JitterBuffer {
             has_stream: false,
             highest: 0,
             decoder: None,
-            spare_decoder: b.spare_decoder,
+            decoders: b.decoders,
             fifo: b.fifo,
             fifo_end_ts: 0,
             have_ts: false,

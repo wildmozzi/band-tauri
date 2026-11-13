@@ -719,10 +719,12 @@ fn add_aliases(files: &[Vec<String>], names: &mut BTreeSet<String>) {
 }
 
 /// 락 타입 인자(`Mutex<…>`·`Mutex::<…>`, 경로 한정 포함)에 `names`가 나오는 곳.
-fn locked_names(t: &[String], names: &BTreeSet<String>) -> Vec<String> {
+fn locked_names(t: &[String], locks: &BTreeSet<String>, names: &BTreeSet<String>) -> Vec<String> {
+    // 꺾쇠 짝 찾기: `->`의 `>`는 세지 않는다(`fn() -> T`, #124 리뷰 L-3-4).
+    let closes = |k: usize| t[k] == ">" && !(k > 0 && t[k - 1] == "-");
     let mut hits = Vec::new();
     for i in 0..t.len() {
-        if !LOCK_TYPES.contains(&t[i].as_str()) {
+        if !locks.contains(&t[i]) {
             continue;
         }
         let mut j = i + 1;
@@ -733,20 +735,37 @@ fn locked_names(t: &[String], names: &BTreeSet<String>) -> Vec<String> {
             continue;
         }
         let mut depth = 0;
-        for k in j..t.len() {
+        let mut k = j;
+        while k < t.len() {
             match t[k].as_str() {
                 "<" => depth += 1,
-                ">" => {
+                ">" if closes(k) => {
                     depth -= 1;
                     if depth == 0 {
                         break;
                     }
                 }
                 ";" | "{" => break,
-                x if QUEUE_ENDPOINTS.contains(&x) => break,
+                // 링 끝점은 그 꺾쇠 구간만 건너뛴다(나머지 인자는 계속 본다, #124 리뷰 L-3-2)
+                x if QUEUE_ENDPOINTS.contains(&x) && t.get(k + 1).map(String::as_str) == Some("<") => {
+                    let mut d = 0;
+                    k += 1;
+                    while k < t.len() {
+                        if t[k] == "<" {
+                            d += 1;
+                        } else if closes(k) {
+                            d -= 1;
+                            if d == 0 {
+                                break;
+                            }
+                        }
+                        k += 1;
+                    }
+                }
                 x if names.contains(x) => hits.push(format!("{}<…{x}…>", t[i])),
                 _ => {}
             }
+            k += 1;
         }
     }
     hits
@@ -756,10 +775,20 @@ fn worker_owned_names() -> BTreeSet<String> {
     WORKER_OWNED.iter().map(|s| s.to_string()).collect()
 }
 
+/// 락 타입 이름과 그 별칭(`use parking_lot::Mutex as PlMutex`, `type Guarded<T> = Mutex<T>`, #124 리뷰 L-3-1).
+fn lock_names(files: &[Vec<String>]) -> BTreeSet<String> {
+    let mut locks: BTreeSet<String> = LOCK_TYPES.iter().map(|s| s.to_string()).collect();
+    add_aliases(files, &mut locks);
+    locks
+}
+
 /// 지터 버퍼·피어 미디어를 락으로 감싸지 않는다(엔진 ③-a3): `JitterBuffer`·`PeerMedia`를 만지는 스레드는 워커뿐이다
 /// (생성·해제는 제어 평면). 누가 다시 넣으면 기본 우선순위 스레드와 워커의 우선순위 역전 경로가 돌아온다.
 /// 경로 한정(`crate::engine::jitter::JitterBuffer`), 별칭(`type`·`use … as`, 파일을 넘어서도), 중첩(`Arc<Mutex<Box<PeerMedia>>>`)을
-/// 잡는다(#118 리뷰 L-1). 주석·문자열·단위 테스트는 보지 않는다. 검사기 자체의 음성 확인은 `locked_media_scanner_catches_variants`.
+/// 잡는다(#118 리뷰 L-1), 락 이름의 별칭(`use … Mutex as X`, `type G<T> = Mutex<T>`)과 링 끝점 뒤 인자도(#124 리뷰 L-3).
+/// 한계: 이름이 락 인자에 **직접** 나와야 한다 — 감싼 구조체(`struct H { jb: JitterBuffer }` + `Mutex<H>`)·명령 열거형
+/// (`Mutex<Vec<MediaCmd>>`)은 못 잡는다. 또 `#[cfg(test)] mod tests` 뒤의 코드는 보지 않는다(테스트 모듈은 파일 끝이 관례).
+/// 주석·문자열·단위 테스트는 보지 않는다. 검사기 자체의 음성 확인은 `locked_media_scanner_catches_variants`.
 #[test]
 fn no_locked_jitter_buffer() {
     let files: Vec<(PathBuf, Vec<String>)> = source_files()
@@ -770,11 +799,13 @@ fn no_locked_jitter_buffer() {
             (f, t)
         })
         .collect();
+    let all: Vec<Vec<String>> = files.iter().map(|(_, t)| t.clone()).collect();
     let mut names = worker_owned_names();
-    add_aliases(&files.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(), &mut names);
+    add_aliases(&all, &mut names);
+    let locks = lock_names(&all);
     let mut bad = Vec::new();
     for (file, t) in &files {
-        for h in locked_names(t, &names) {
+        for h in locked_names(t, &locks, &names) {
             bad.push(format!("  {}: {h}", file.display()));
         }
     }
@@ -788,7 +819,7 @@ fn locked_media_scanner_catches_variants() {
         let t = tokens(&strip(code));
         let mut names = worker_owned_names();
         add_aliases(std::slice::from_ref(&t), &mut names);
-        locked_names(&t, &names)
+        locked_names(&t, &lock_names(std::slice::from_ref(&t)), &names)
     };
     for bad in [
         "struct A { j: parking_lot::Mutex<JitterBuffer> }",
@@ -799,6 +830,12 @@ fn locked_media_scanner_catches_variants() {
         "type Jb = jitter::JitterBuffer; type Jb2 = Jb; struct A { j: RwLock<Option<Jb2>> }",
         "use crate::engine::jitter::JitterBuffer as Jb; struct A { j: std::sync::RwLock<Jb> }",
         "fn f() { let m = Mutex::<PeerMedia>::new(x); }",
+        // #124 리뷰 L-3: 락 이름 별칭, 끝점 뒤의 인자, `->`
+        "use parking_lot::Mutex as PlMutex; struct A { j: PlMutex<Option<JitterBuffer>> }",
+        "type Guarded<T> = Mutex<T>; struct A { m: Guarded<PeerMedia> }",
+        "struct A { m: Mutex<(HeapCons<u8>, Box<PeerMedia>)> }",
+        "struct A { m: Mutex<(fn() -> u8, JitterBuffer)> }",
+        "struct A { m: tokio::sync::Mutex<JitterBuffer> }",
     ] {
         assert!(!scan(bad).is_empty(), "못 잡음: {bad}");
     }

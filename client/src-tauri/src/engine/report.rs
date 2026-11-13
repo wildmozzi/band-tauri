@@ -11,6 +11,19 @@ use super::{config, jitter, relay_codec, Engine};
 use crate::net::types::{PathKind, PeerStateKind};
 use crate::sys::prio;
 
+/// 워커 반복 시간 분포(엔진 ③c 측정, `Engine::take_worker_timing`). 단위는 `SendQueueStats`처럼 ms.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkerTiming {
+    /// 반복 본문(수면 제외).
+    pub body: crate::net::txlat::SendQueueStats,
+    /// 반복 시작 간격.
+    pub period: crate::net::txlat::SendQueueStats,
+    /// 남은 락(에코 프로브·메트로놈)에서 기다린 합.
+    pub lock_wait: crate::net::txlat::SendQueueStats,
+    /// 본문 − 락 대기(락 밖 비용).
+    pub unlocked: crate::net::txlat::SendQueueStats,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeerStats {
@@ -289,16 +302,17 @@ impl Engine {
         self.worker_stats.media_peers.load(Ordering::Relaxed)
     }
 
-    /// 워커 반복 (본문, 시작 간격) 분포를 지난 호출 이후로 돌려주고 비운다(엔진 ③c 측정, 진단·테스트 전용).
+    /// 워커 반복 시간 분포를 지난 호출 이후로 돌려주고 비운다(엔진 ③c 측정, 진단·테스트 전용 — `test-support` 빌드에서만 채워진다).
     #[doc(hidden)]
-    pub fn take_worker_timing(&self) -> (crate::net::txlat::SendQueueStats, crate::net::txlat::SendQueueStats) {
-        (self.worker_stats.iter_body.rotate(), self.worker_stats.iter_period.rotate())
+    pub fn take_worker_timing(&self) -> WorkerTiming {
+        let s = &self.worker_stats;
+        WorkerTiming { body: s.iter_body.rotate(), period: s.iter_period.rotate(), lock_wait: s.iter_lock_wait.rotate(), unlocked: s.iter_unlocked.rotate() }
     }
 
-    /// 워커 송신 경로 락 대기 분포를 지난 호출 이후로 돌려주고 비운다(엔진 ③c 측정, 진단·테스트 전용).
+    /// 송신 경로 진단(피어 표 복사본 갱신·옛 복사본 프레임·건너뛴 송신)을 지난 호출 이후로 돌려주고 비운다(엔진 ③c).
     #[doc(hidden)]
-    pub fn take_send_lock_wait(&self) -> Option<crate::net::txlat::LockWaitStats> {
-        self.net.as_ref().map(|n| n.take_send_lock_wait())
+    pub fn take_send_path_diag(&self) -> Option<crate::net::SendPathDiag> {
+        self.net.as_ref().map(|n| n.take_send_path_diag())
     }
 
     /// 콜백 구동 믹스 진단: (마감 직전 은닉 횟수, 콜백 언더런으로 건너뛴 장치 프레임).

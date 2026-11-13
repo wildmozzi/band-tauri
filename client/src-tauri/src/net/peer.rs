@@ -1,7 +1,7 @@
 //! 피어 테이블, 홀펀칭 상태기계, keepalive, RTT (설계 문서 3절).
 
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use super::crypto::{KeyPair, PacketCipher, KEY_BYTES};
 use super::packet::PacketType;
 use super::media_link::{LossCell, MediaTx, PeerKey};
-use super::txlat::LockWait;
 use super::types::{PathKind, PeerStateKind};
 
 pub const HELLO_INTERVAL: Duration = Duration::from_millis(100);
@@ -692,6 +691,172 @@ impl EchoState {
     }
 }
 
+// ============================================================================
+// 송신 경로 스냅샷(엔진 ③c, ADR D1): 워커가 `conn`·`echo` 락 없이 읽는 값
+// ============================================================================
+//
+// 측정(engine-stage3-design.md 10절): 워커가 `conn`·`echo`를 잡으면, 그 락을 쥔 기본 우선순위 스레드(통계·커맨드·
+// `band-net-ctrl`)가 선점될 때 워커가 수~수십 ms 멈춘다(`parking_lot`은 우선순위 상속이 없다). 그래서 두 상태를 바꾸는
+// 쪽이 락을 쥔 채 원자값을 발행하고(가드의 `Drop` — 락 해제 **전**에 저장하므로 발행 순서가 락 순서와 같다), 워커는
+// 원자값만 읽는다.
+
+/// 경로 스냅샷 비트: 주소 IPv4 32 | 포트 16 | 종류 2 | 보낼 수 있음 1 | … | 유효 1(최상위).
+const ROUTE_VALID: u64 = 1 << 63;
+const ROUTE_SENDABLE: u64 = 1 << 50;
+
+fn kind_bits(k: PathKind) -> u64 {
+    match k {
+        PathKind::Lan => 0,
+        PathKind::Public => 1,
+        PathKind::Relay => 2,
+    }
+}
+
+/// `ConnState`의 송신 경로를 64비트 하나로. 경로가 IPv6이면(지금은 후보·릴레이·STUN 모두 IPv4만 받아 생기지 않는다)
+/// 담을 수 없으므로 유효 비트 없이 낸다 — 그때 워커는 `try_lock`으로 직접 보고, 못 잡으면 그 프레임을 그 피어에게 건너뛴다.
+pub(crate) fn encode_route(c: &ConnState) -> u64 {
+    match (c.can_send_audio(), c.path) {
+        (true, Some((SocketAddr::V4(a), kind))) => {
+            ROUTE_VALID | ROUTE_SENDABLE | (kind_bits(kind) << 48) | ((a.port() as u64) << 32) | u32::from(*a.ip()) as u64
+        }
+        (true, Some((SocketAddr::V6(_), _))) => 0,
+        _ => ROUTE_VALID,
+    }
+}
+
+/// 스냅샷 해석: `Some(경로 또는 없음)` = 유효, `None` = 담을 수 없는 경로(락으로 직접 봐야 함).
+pub(crate) fn decode_route(v: u64) -> Option<Option<(SocketAddr, PathKind)>> {
+    if v & ROUTE_VALID == 0 {
+        return None;
+    }
+    if v & ROUTE_SENDABLE == 0 {
+        return Some(None);
+    }
+    let ip = std::net::Ipv4Addr::from(v as u32);
+    let port = (v >> 32) as u16;
+    let kind = match (v >> 48) & 3 {
+        0 => PathKind::Lan,
+        1 => PathKind::Public,
+        _ => PathKind::Relay,
+    };
+    Some(Some((SocketAddr::from((ip, port)), kind)))
+}
+
+/// 반사 마감(피어 시계 기준 ns, 0 = 반사 안 함). `EchoState::reflecting(now)` = `enabled && now - t < ECHO_LAPSE`
+/// = `now < t + ECHO_LAPSE`이므로 `enabled`일 때 `t + ECHO_LAPSE`를 내면 시각 비교 하나로 같은 답이 나온다
+/// (`Instant` 차이는 ns 단위로 정확하다). 시간이 지나 요청이 끊기는 것도 틱 없이 반영된다.
+pub(crate) fn echo_deadline_ns(e: &EchoState, born: Instant) -> u64 {
+    match (e.enabled, e.remote_request_at) {
+        (true, Some(t)) => ((t + ECHO_LAPSE).saturating_duration_since(born).as_nanos() as u64).max(1),
+        _ => 0,
+    }
+}
+
+/// `now`가 반사 마감 전인가(`echo_deadline_ns`의 짝).
+pub(crate) fn before_deadline(deadline_ns: u64, now: Instant, born: Instant) -> bool {
+    deadline_ns != 0 && (now.saturating_duration_since(born).as_nanos() as u64) < deadline_ns
+}
+
+/// `ConnState` 가드: 놓을 때(락 해제 전) 송신 경로 스냅샷을 발행한다. 상태를 바꾸는 모든 곳이 `Peer::conn()`을 거치므로
+/// 빠뜨릴 수 없다.
+pub(crate) struct ConnGuard<'a> {
+    g: MutexGuard<'a, ConnState>,
+    snap: &'a AtomicU64,
+}
+
+impl std::ops::Deref for ConnGuard<'_> {
+    type Target = ConnState;
+    fn deref(&self) -> &ConnState {
+        &self.g
+    }
+}
+
+impl std::ops::DerefMut for ConnGuard<'_> {
+    fn deref_mut(&mut self) -> &mut ConnState {
+        &mut self.g
+    }
+}
+
+impl Drop for ConnGuard<'_> {
+    fn drop(&mut self) {
+        // 필드(`g`, 락)는 이 함수가 끝난 뒤에 놓인다 → 락을 쥔 채 저장.
+        self.snap.store(encode_route(&self.g), Ordering::Release);
+    }
+}
+
+/// `EchoState` 가드: 놓을 때(락 해제 전) 반사 마감을 발행한다.
+pub(crate) struct EchoGuard<'a> {
+    g: MutexGuard<'a, EchoState>,
+    snap: &'a AtomicU64,
+    born: Instant,
+}
+
+impl std::ops::Deref for EchoGuard<'_> {
+    type Target = EchoState;
+    fn deref(&self) -> &EchoState {
+        &self.g
+    }
+}
+
+impl std::ops::DerefMut for EchoGuard<'_> {
+    fn deref_mut(&mut self) -> &mut EchoState {
+        &mut self.g
+    }
+}
+
+impl Drop for EchoGuard<'_> {
+    fn drop(&mut self) {
+        self.snap.store(echo_deadline_ns(&self.g, self.born), Ordering::Release);
+    }
+}
+
+/// 원격 손실 보고 셀(엔진 ③c): 쓰는 쪽은 수신 스레드 하나(`set_remote_loss`), 읽는 쪽(워커 200ms, 통계)은 락을 잡지 않는다.
+/// seqlock(#116과 같은 꼴): 홀수 버전 → fence(Release) → 필드 → 짝수 Release / 읽기 Acquire → 필드 → fence(Acquire) → 재확인.
+#[derive(Default)]
+struct RemoteLossCell {
+    ver: AtomicU32,
+    /// `loss_pct` 비트 << 32 | `conceal_pct` 비트.
+    report: AtomicU64,
+    /// 받은 시각(피어 시계 ns + 1, 0 = 없음).
+    at: AtomicU64,
+}
+
+impl RemoteLossCell {
+    fn write(&self, r: LossReport, at_ns: u64) {
+        let v = self.ver.load(Ordering::Relaxed);
+        self.ver.store(v.wrapping_add(1), Ordering::Relaxed);
+        std::sync::atomic::fence(Ordering::Release);
+        self.report.store(((r.loss_pct.to_bits() as u64) << 32) | r.conceal_pct.to_bits() as u64, Ordering::Relaxed);
+        self.at.store(at_ns.saturating_add(1), Ordering::Relaxed);
+        self.ver.store(v.wrapping_add(2), Ordering::Release);
+    }
+
+    /// 성공할 때까지 다시 읽는다. 쓰기 구간은 저장 두 번이고 쓰는 쪽(`band-net-recv`)은 MMCSS라 사실상 한두 번이다.
+    fn read(&self) -> Option<(LossReport, u64)> {
+        let mut tries = 0u32;
+        loop {
+            let v1 = self.ver.load(Ordering::Acquire);
+            if v1 & 1 == 0 {
+                let (r, at) = (self.report.load(Ordering::Relaxed), self.at.load(Ordering::Relaxed));
+                std::sync::atomic::fence(Ordering::Acquire);
+                if self.ver.load(Ordering::Relaxed) == v1 {
+                    if at == 0 {
+                        return None;
+                    }
+                    let rep = LossReport { loss_pct: f32::from_bits((r >> 32) as u32), conceal_pct: f32::from_bits(r as u32) };
+                    return Some((rep, at - 1));
+                }
+            }
+            tries += 1;
+            if tries.is_multiple_of(64) {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+}
+
 pub struct Peer {
     id: String,
     ssrc: u32,
@@ -702,6 +867,12 @@ pub struct Peer {
     rx: PacketCipher,
     candidates: Vec<(SocketAddr, CandidateKind)>,
     conn: Mutex<ConnState>,
+    /// 송信 경로 스냅샷(`encode_route`, `ConnGuard`가 발행). 워커는 이것만 읽는다(엔진 ③c).
+    route_snap: AtomicU64,
+    /// 반사 마감(`echo_deadline_ns`, `EchoGuard`가 발행). 워커는 이것만 읽는다(엔진 ③c).
+    echo_snap: AtomicU64,
+    /// 스냅샷 시각의 기준(이 항목을 만든 시각).
+    born: Instant,
     /// 피어별 수신 큐 생산자(엔진 ③-a3). `ringbuf` 생산자는 `&mut`가 필요하고 `Peer`는 `Arc`로 공유되므로 Mutex로
     /// 감싼다. 넣는 스레드는 `band-net-recv` 하나뿐이라(`push_audio`는 `recv_loop` 경로에서만) 경쟁자가 없다(설계 1.2절).
     media: Mutex<MediaTx>,
@@ -720,7 +891,7 @@ pub struct Peer {
     /// 이 피어 시계와 내 시계의 오프셋 추정(P2-3, Pong 평문의 응답자 시계로 갱신).
     clock: Mutex<super::clock::ClockSync>,
     /// 이 피어가 Ping으로 알려 온, 내 소리의 수신 손실 보고와 받은 시각(P1-4e). 손실 피드백 Opus 전환의 입력.
-    remote_loss: Mutex<Option<(LossReport, Instant)>>,
+    remote_loss: RemoteLossCell,
 }
 
 /// `Peer::tx_codec` 비트: 보낸 적 있음 / Opus / 릴레이 대역 때문에 자동 전환한 Opus(P1-4c) /
@@ -771,6 +942,9 @@ impl Peer {
             tx,
             rx,
             candidates,
+            route_snap: AtomicU64::new(encode_route(&ConnState::new(now))),
+            echo_snap: AtomicU64::new(0),
+            born: now,
             conn: Mutex::new(ConnState::new(now)),
             rx_report: media.loss_cell().clone(),
             key: media.key(),
@@ -780,7 +954,7 @@ impl Peer {
             tx_codec: AtomicU8::new(0),
             echo: Mutex::new(EchoState::default()),
             clock: Mutex::new(super::clock::ClockSync::new()),
-            remote_loss: Mutex::new(None),
+            remote_loss: RemoteLossCell::default(),
         })
     }
 
@@ -796,18 +970,17 @@ impl Peer {
         &self.public_key
     }
 
-    /// 오디오를 보낼 수 있으면 지금 경로(주소, 종류).
+    /// 오디오를 보낼 수 있으면 지금 경로(주소, 종류). 락 없이 스냅샷에서 읽는다(엔진 ③c — 워커 송신 경로·자동 코덱).
+    /// 스냅샷에 담을 수 없는 경로(IPv6, 지금은 생기지 않음)면 `try_lock`으로 직접 보고, 락이 바쁘면 기다리지 않고 None.
     pub fn route(&self) -> Option<(SocketAddr, PathKind)> {
-        self.route_waited(&mut LockWait::default())
+        self.send_route().unwrap_or(None)
     }
 
-    /// `route`와 같고, 락을 바로 못 잡으면 기다린 시간을 `w`에 더한다(워커 송신 경로, 엔진 ③c 측정).
-    pub(super) fn route_waited(&self, w: &mut LockWait) -> Option<(SocketAddr, PathKind)> {
-        let c = w.lock(&self.conn);
-        if c.can_send_audio() {
-            c.path
-        } else {
-            None
+    /// `route`와 같되, 담을 수 없는 경로인데 `conn` 락이 바빠 못 본 경우를 `Err`로 구분한다(송신 경로가 건너뛴 수를 센다).
+    pub(super) fn send_route(&self) -> Result<Option<(SocketAddr, PathKind)>, ()> {
+        match decode_route(self.route_snap.load(Ordering::Acquire)) {
+            Some(r) => Ok(r),
+            None => self.conn.try_lock().map(|c| if c.can_send_audio() { c.path } else { None }).ok_or(()),
         }
     }
 
@@ -816,19 +989,15 @@ impl Peer {
         self.route().is_some_and(|(_, k)| k == PathKind::Relay)
     }
 
-    /// 이 피어가 Ping으로 알려 온 내 소리의 수신 손실 보고와 받은 시각.
+    /// 이 피어가 Ping으로 알려 온 내 소리의 수신 손실 보고와 받은 시각(락 없음, 엔진 ③c).
     pub fn remote_loss(&self) -> Option<(LossReport, Instant)> {
-        *self.remote_loss.lock()
+        self.remote_loss.read().map(|(r, ns)| (r, self.born + Duration::from_nanos(ns)))
     }
 
-    /// 지금 이 피어의 오디오를 되돌려 보내는 중인가(에코 반사).
+    /// 지금 이 피어의 오디오를 되돌려 보내는 중인가(에코 반사). 락 없이 반사 마감과 비교한다(엔진 ③c) —
+    /// `EchoState::reflecting(now)`과 같은 답(`echo_deadline_ns`).
     pub fn reflecting(&self, now: Instant) -> bool {
-        self.echo.lock().reflecting(now)
-    }
-
-    /// `reflecting`과 같고, 락 대기 시간을 `w`에 더한다(워커 송신 경로, 엔진 ③c 측정).
-    pub(super) fn reflecting_waited(&self, now: Instant, w: &mut LockWait) -> bool {
-        w.lock(&self.echo).reflecting(now)
+        before_deadline(self.echo_snap.load(Ordering::Acquire), now, self.born)
     }
 
     /// `PeerStats`의 net 몫을 값으로.
@@ -883,12 +1052,14 @@ impl Peer {
         &self.candidates
     }
 
-    pub(super) fn conn(&self) -> MutexGuard<'_, ConnState> {
-        self.conn.lock()
+    /// 상태를 바꾸는 곳은 모두 이 가드를 거친다 — 놓을 때 송신 경로 스냅샷을 발행한다(엔진 ③c).
+    pub(super) fn conn(&self) -> ConnGuard<'_> {
+        ConnGuard { g: self.conn.lock(), snap: &self.route_snap }
     }
 
-    pub(super) fn echo(&self) -> MutexGuard<'_, EchoState> {
-        self.echo.lock()
+    /// 상태를 바꾸는 곳은 모두 이 가드를 거친다 — 놓을 때 반사 마감을 발행한다(엔진 ③c).
+    pub(super) fn echo(&self) -> EchoGuard<'_> {
+        EchoGuard { g: self.echo.lock(), snap: &self.echo_snap, born: self.born }
     }
 
     pub(super) fn clock(&self) -> MutexGuard<'_, super::clock::ClockSync> {
@@ -896,7 +1067,7 @@ impl Peer {
     }
 
     pub(super) fn set_remote_loss(&self, r: LossReport, at: Instant) {
-        *self.remote_loss.lock() = Some((r, at));
+        self.remote_loss.write(r, at.saturating_duration_since(self.born).as_nanos() as u64);
     }
 
     pub(super) fn tx_seq(&self) -> &AtomicU32 {
@@ -919,7 +1090,7 @@ impl Peer {
     /// 테스트용: 경로를 강제로 세운다(핸드셰이크 없이).
     #[doc(hidden)]
     pub fn force_path(&self, addr: SocketAddr, kind: PathKind) {
-        let mut c = self.conn.lock();
+        let mut c = self.conn();
         c.state = PeerStateKind::Connected;
         c.path = Some((addr, kind));
         c.last_rx = Some(Instant::now());
@@ -1333,6 +1504,109 @@ mod tests {
         let mut c = ConnState::new(t0);
         c.on_handshake("192.168.0.5:4000".parse().unwrap(), false, &cands(), relay(), t0);
         assert!(!c.accept_rx(RELAY.parse().unwrap(), &cands(), relay(), t0));
+    }
+
+    fn test_peer() -> Peer {
+        let keys = KeyPair::generate();
+        let other = KeyPair::generate();
+        let desc = LocalDescriptor {
+            ssrc: 9,
+            key: LocalDescriptor::encode_key(&other.public_bytes()),
+            candidates: vec![Candidate { kind: CandidateKind::Lan, addr: "192.168.0.5:4000".into() }],
+        };
+        let setup = PeerSetup { keys: &keys, my_ssrc: 1, allow_loopback: false };
+        let (media, _rx) = super::super::media_link::media_link(PeerKey::from_raw(1));
+        Peer::new("p".into(), &desc, &setup, media, Instant::now()).unwrap()
+    }
+
+    /// 엔진 ③c: 경로 스냅샷 왕복 — IPv4 경로는 그대로, 보낼 수 없으면 없음, IPv6이면 유효 비트 없음.
+    #[test]
+    fn route_snapshot_roundtrip() {
+        let t0 = Instant::now();
+        let mut c = ConnState::new(t0);
+        assert_eq!(decode_route(encode_route(&c)), Some(None), "처음엔 경로 없음(유효)");
+        for (addr, kind) in [("192.168.0.5:4000", PathKind::Lan), ("203.0.113.9:65535", PathKind::Public), ("198.51.100.1:1", PathKind::Relay)] {
+            c.state = PeerStateKind::Connected;
+            c.path = Some((addr.parse().unwrap(), kind));
+            assert_eq!(decode_route(encode_route(&c)), Some(Some((addr.parse().unwrap(), kind))));
+            c.state = PeerStateKind::Reconnecting;
+            assert_eq!(decode_route(encode_route(&c)), Some(Some((addr.parse().unwrap(), kind))), "재연결 중에도 보낸다");
+            c.state = PeerStateKind::Failed;
+            assert_eq!(decode_route(encode_route(&c)), Some(None), "실패면 안 보낸다");
+        }
+        c.state = PeerStateKind::Connected;
+        c.path = Some(("[2001:db8::1]:4000".parse().unwrap(), PathKind::Public));
+        assert_eq!(decode_route(encode_route(&c)), None, "IPv6은 담을 수 없다 → 락으로 직접");
+    }
+
+    /// 엔진 ③c: `conn()`·`echo()` 가드가 놓을 때 스냅샷을 발행한다 — 락 없는 `route()`·`reflecting()`이 바로 본다.
+    /// 담을 수 없는 경로(IPv6)는 `try_lock`으로 보고, 락이 바쁘면 기다리지 않고 `Err`(건너뜀).
+    #[test]
+    fn guards_publish_snapshots() {
+        let p = test_peer();
+        assert_eq!(p.route(), None);
+        let a: SocketAddr = "192.168.0.5:4000".parse().unwrap();
+        p.force_path(a, PathKind::Lan);
+        assert_eq!(p.route(), Some((a, PathKind::Lan)));
+        p.conn().state = PeerStateKind::Failed;
+        assert_eq!(p.route(), None);
+        // IPv6: 스냅샷 무효 → try_lock 경로
+        let v6: SocketAddr = "[2001:db8::1]:4000".parse().unwrap();
+        p.force_path(v6, PathKind::Public);
+        assert_eq!(p.send_route(), Ok(Some((v6, PathKind::Public))));
+        let held = p.conn.lock();
+        assert_eq!(p.send_route(), Err(()), "락이 바쁘면 기다리지 않는다");
+        assert_eq!(p.route(), None);
+        drop(held);
+        // 에코: 요청 + 동의 → 반사, 동의 거두면 즉시 아님
+        let now = Instant::now();
+        assert!(!p.reflecting(now));
+        {
+            let mut e = p.echo();
+            e.remote_request_at = Some(now);
+            e.enabled = true;
+        }
+        assert!(p.reflecting(now));
+        assert!(p.reflecting(now + ECHO_LAPSE - Duration::from_nanos(1)));
+        assert!(!p.reflecting(now + ECHO_LAPSE), "요청이 끊기면 틱 없이도 반사가 멈춘다");
+        p.echo().stop_reflecting();
+        assert!(!p.reflecting(now));
+    }
+
+    /// 엔진 ③c: 반사 마감 비교가 `EchoState::reflecting(now)`과 같은 답 — 동의 여부, 요청 시각(기준 전·후), 확인 시각을
+    /// 경계(마감 −1ns, 마감, +1ns)와 그 사이에서 모두 비교한다.
+    #[test]
+    fn echo_deadline_matches_reflecting() {
+        let born = Instant::now();
+        let ns = Duration::from_nanos;
+        for enabled in [false, true] {
+            for req_off in [None, Some(0u64), Some(1), Some(1_500_000_000), Some(7_000_000_123)] {
+                let e = EchoState { enabled, remote_request_at: req_off.map(|o| born + ns(o)), ..EchoState::default() };
+                let dl = echo_deadline_ns(&e, born);
+                let mut probes = vec![0u64, 1, 2_999_999_999, 3_000_000_000, 10_000_000_000];
+                if let Some(o) = req_off {
+                    let edge = o + ECHO_LAPSE.as_nanos() as u64;
+                    probes.extend([o.saturating_sub(5), o, edge - 1, edge, edge + 1]);
+                }
+                for q in probes {
+                    let now = born + ns(q);
+                    assert_eq!(before_deadline(dl, now, born), e.reflecting(now), "enabled {enabled} req {req_off:?} now +{q}ns");
+                }
+            }
+        }
+    }
+
+    /// 엔진 ③c: 원격 손실 보고 셀 — 없음 → 쓴 값·시각 그대로, 덮어쓰기.
+    #[test]
+    fn remote_loss_cell_roundtrip() {
+        let p = test_peer();
+        assert_eq!(p.remote_loss(), None);
+        let at = p.born + Duration::from_millis(1234);
+        p.set_remote_loss(LossReport { loss_pct: 2.5, conceal_pct: 1.25 }, at);
+        assert_eq!(p.remote_loss(), Some((LossReport { loss_pct: 2.5, conceal_pct: 1.25 }, at)));
+        let at2 = at + Duration::from_nanos(7);
+        p.set_remote_loss(LossReport { loss_pct: 0.0, conceal_pct: 9.0 }, at2);
+        assert_eq!(p.remote_loss(), Some((LossReport { loss_pct: 0.0, conceal_pct: 9.0 }, at2)));
     }
 
     #[test]
