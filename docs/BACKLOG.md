@@ -74,7 +74,7 @@
 | P2-4a | 녹음 후속: FLAC 저장, 은닉(PLC) 구간 마커 사이드카 | 테스트 | 완료(PR #62, 2026-11-11 — FLAC·markers.json; 후속: 마커 위치 대조 측정, peerId 가명화, #47 L3 EXTENSIBLE 헤더) |
 | P2-4b | **[버그]** 녹음 시작·정지 순간 xrun(128/2.5ms에서 녹음 켬 창마다 1회, PR #64 작업 중 관찰) 제거 | xrun 0 테스트 | 완료(PR #67, 2026-11-11 — 녹음 경계 xrun 없음 확인, 링 prefault; **[사람]** 실장비 청취) |
 | P2-4c | 녹음 후속: WAV EXTENSIBLE 헤더(#47 L3), session/markers 피어 id 가명화(#62 L5), 마커 위치 정확도 측정(#62 L1) | 테스트 | 완료(PR #72, 2026-11-12 — WAV EXTENSIBLE, 피어 id 가명화, 마커 정확도 ≤4.9ms; **[사람]** DAW에서 WAV 열기; Low: 3채널+ channel_mask) |
-| P2-7 | 배포본에 없는 드라이버(ASIO) 표시: 엔진이 빌드의 지원 드라이버를 알려 주고 설정 화면이 선택지를 막고 이유를 보임 | engine_list_devices 필드·AudioSettings 테스트, 계약 변경 시 설계 4절 | 대기 (GOAL 4-1) |
+| P2-7 | 배포본에 없는 드라이버(ASIO) 표시: 엔진이 빌드의 지원 드라이버를 알려 주고 설정 화면이 선택지를 막고 이유를 보임 | engine_list_devices 필드·AudioSettings 테스트, 계약 변경 시 설계 4절 | 완료(#121 — engine_supported_drivers 커맨드, 설정 화면이 미지원 드라이버 비활성화+이유, 저장된 ASIO는 로컬에서만 WASAPI 독점으로; 2026-11-13) · **[사람]** asio 피처 빌드에서 ASIO 활성·장치 나열 확인 |
 | P2-8 | 멤버별 입→귀 추정 지연 표시(RTT/2 + 상대 송신 프레임 + 내 playoutMs) — 지금은 RTT만 보임 | roomDetailModel 순수 함수 테스트, e2e 스냅샷; **[사람]** 에코 측정과 ±5ms 대조 | 완료(#112) — 귀까지 ≈ RTT/2 + playoutMs(재생 전 —), GOAL 25/40ms 색, RTT는 툴팁 · **[사람]** 에코 측정 mouthToEarMs와 ±5ms 대조 |
 | P2-8b | 엔진 PeerStats에 상대 송신 프레임(remoteFrameMs, descriptor에서)과 상대 입력 버퍼 추정을 노출 → 입→귀 추정의 "≈" 제거 (#112 제안) | 엔진 단위 테스트, 계약(설계 4절) 갱신, earLatency 테스트 | 대기 (R-1 ③ 뒤 — PeerStats/stats 경로 정리 후) |
 | P2-9 | **[결정]** 방장이 연주자를 내리거나 승인을 거두는 기능(GOAL 4절은 승인만 요구) | 결정 후 서버 메시지·계약 5절·테스트 | 대기 (사용자 결정) |
