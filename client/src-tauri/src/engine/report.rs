@@ -149,6 +149,17 @@ impl EngineStats {
     }
 }
 
+/// 엔진 한 순간의 상태(진단 기록 입력). `EngineManager::snapshot()`이 만들고 `diag`가 받는다(엔진 ⑤:
+/// 둘 다 이 타입만 알고 서로는 모른다).
+pub struct EngineSnapshot {
+    pub stats: EngineStats,
+    pub config: config::EngineConfig,
+    /// 합주(네트워크) 세션인지
+    pub network: bool,
+    /// 엔진 세션 번호(`EngineManager` generation, 시작·정지마다 증가)
+    pub session: u64,
+}
+
 impl Engine {
     pub fn stats(&self) -> EngineStats {
         let c = &self.counters;

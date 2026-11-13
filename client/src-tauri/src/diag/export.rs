@@ -21,7 +21,7 @@ use super::timeline::{to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
 use super::Diagnostics;
 use crate::engine::config::EngineConfig;
 use crate::engine::device::DeviceInfo;
-use crate::manager::EngineManager;
+use crate::engine::report::EngineSnapshot;
 
 /// 로그 전체 상한(마스킹 전 바이트). 최신 파일의 끝부분부터 채운다.
 pub const LOG_BUDGET_BYTES: usize = 2 * 1024 * 1024;
@@ -181,19 +181,21 @@ impl Bundle {
     }
 }
 
-/// 진단 zip을 만든다(엔진·타임라인·장치·로그 수집 + 마스킹). 블로킹(장치 열거·파일 읽기)이므로 비UI 스레드에서.
+/// 진단 zip을 만든다(타임라인·로그 수집 + 마스킹). 블로킹(파일 읽기)이므로 비UI 스레드에서.
+/// `current`(지금 엔진 스냅샷)와 `devices`(장치 열거 결과)는 부르는 쪽(어댑터)이 엔진에서 얻어 넘긴다 —
+/// 한 번 쓰는 값이라 클로저가 아니라 값으로 받는다. `diag`는 `manager`를 모른다(엔진 ⑤).
 pub fn build(
-    manager: &EngineManager,
+    current: Option<EngineSnapshot>,
+    devices: Result<Vec<DeviceInfo>, String>,
     diag: &Diagnostics,
     app: AppInfo,
     log_dir: Option<&Path>,
     now_ms: u64,
 ) -> Result<Vec<u8>, String> {
-    let (devices, devices_error) = match manager.backend().list_devices() {
+    let (devices, devices_error) = match devices {
         Ok(d) => (d, None),
         Err(e) => (Vec::new(), Some(e)),
     };
-    let current = manager.snapshot();
     let logs = log_dir.map(|d| collect_logs(d, LOG_BUDGET_BYTES)).unwrap_or_default();
     let os = OsInfo::current();
     // 타임라인 락 안에서는 필요한 값만 꺼내고, 압축(로그 최대 2MB)은 락 밖에서 한다(기록 스레드를 막지 않게).
@@ -464,5 +466,86 @@ mod tests {
         assert_eq!(engine["devices"], serde_json::json!([]));
         assert_eq!(read(&mut z, "timeline.jsonl").lines().count(), 2);
         assert_eq!(read(&mut z, "logs/Band.log"), "hello\n");
+    }
+    /// 고정 입력(타임라인 2샘플, 엔진 없음, 가짜 장치 2개, 로그 1개)으로 만든 zip 항목별 SHA-256.
+    /// meta.json의 `os`는 실행 환경에 따라 다르므로 빼고 잰다. 기대값은 엔진 ⑤ 이전 코드(`build(&EngineManager, ..)`)로 뽑았다.
+    fn golden_digest(bytes: Vec<u8>) -> Vec<(String, String)> {
+        use sha2::{Digest, Sha256};
+        let mut z = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        (0..z.len())
+            .map(|i| {
+                let mut f = z.by_index(i).unwrap();
+                let name = f.name().unwrap().to_string();
+                let mut body = Vec::new();
+                f.read_to_end(&mut body).unwrap();
+                if name == "meta.json" {
+                    let mut v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    v.as_object_mut().unwrap().remove("os");
+                    body = serde_json::to_vec_pretty(&v).unwrap();
+                }
+                let h: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
+                (name, h)
+            })
+            .collect()
+    }
+
+    fn golden_inputs(tag: &str) -> (Diagnostics, std::path::PathBuf) {
+        use crate::engine::report::EngineStats;
+        let d = Diagnostics::new(10);
+        let mut stats = EngineStats::stopped();
+        stats.running = true;
+        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 3 }));
+        d.record(2_000, None);
+        let dir = std::env::temp_dir().join(format!("band-diag-golden-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Band.log"), "user a@b.com from 1.2.3.4:5\n").unwrap();
+        (d, dir)
+    }
+
+    /// 엔진 ⑤ 동작 불변: 같은 입력이면 zip 항목·내용이 ⑤ 이전과 같다(기대값은 이전 코드로 뽑은 해시).
+    #[test]
+    fn build_matches_pre_stage5_golden() {
+        use crate::engine::device::fake::FakeBackend;
+        use crate::engine::device::AudioBackend;
+        let (d, dir) = golden_inputs("new");
+        let app = AppInfo { name: "Band".into(), version: "0.1.0".into() };
+        let devices = FakeBackend::silence(48_000).list_devices();
+        let bytes = build(None, devices, &d, app, Some(&dir), 1_794_388_087_123).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let expected = [
+            ("README.txt", "36644f90258d9b366f050b8c914136b227880623d709ee4ee1f013897dae7223"),
+            ("meta.json", "9f50cc67df0cdc8a7cb437b7ac8a920b527faa9466fb04ba0fbc4874096abe3c"),
+            ("engine.json", "eff8c630e2dfc6b97ac0f06328dff69d196a03a6087e1b0049ce0309cc36370e"),
+            ("timeline.jsonl", "3439e58dad4fa31e0ad39d03171b9c5752e3ed097d82404a7ba3fee74224769a"),
+            ("logs/Band.log", "6774d10d922e095e6e4dab8cd7dc9a152b767e4d69a2c4af13ffe7cc8359e982"),
+        ];
+        let got = golden_digest(bytes);
+        let got: Vec<(&str, &str)> = got.iter().map(|(n, h)| (n.as_str(), h.as_str())).collect();
+        assert_eq!(got, expected);
+    }
+
+    /// 지금 엔진 스냅샷을 넘기면 그것이 engine.json의 현재 값이 된다(타임라인 마지막 값보다 우선), 장치 열거 실패는 사유로.
+    #[test]
+    fn build_uses_current_snapshot_and_device_error() {
+        use crate::engine::report::EngineStats;
+        let (d, dir) = golden_inputs("cur");
+        let mut stats = EngineStats::stopped();
+        stats.running = true;
+        let cfg = EngineConfig { buffer_size: 256, ..EngineConfig::default() };
+        let cur = EngineSnapshot { stats, config: cfg, network: false, session: 8 };
+        let app = AppInfo { name: "Band".into(), version: "0.1.0".into() };
+        let bytes = build(Some(cur), Err("열거 실패".into()), &d, app, None, 5_000).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        let mut z = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut s = String::new();
+        z.by_name("engine.json").unwrap().read_to_string(&mut s).unwrap();
+        let e: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(e["active"], true);
+        assert_eq!(e["config"]["bufferSize"], 256);
+        assert_eq!(e["lastStats"]["t"], 5_000);
+        assert_eq!(e["lastStats"]["session"], 8);
+        assert_eq!(e["devices"], serde_json::json!([]));
+        assert_eq!(e["devicesError"], "열거 실패");
+        assert!(z.by_name("logs/Band.log").is_err(), "log_dir 없으면 로그 없음");
     }
 }
