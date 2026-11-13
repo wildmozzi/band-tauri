@@ -26,7 +26,7 @@ import {
   type MetronomeView,
 } from './metronomeLogic'
 import { parseRelayToken, relayNeedsNewToken, relayRefreshDelayMs } from './relayLogic'
-import { newFirstAudioTrack, noteAddPeer, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
+import { newFirstAudioTrack, noteAddPeer, notePeerLeft, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
 
 export interface EngineBackend {
@@ -385,6 +385,11 @@ export class PerformSession {
         this.enqueue(() => this.engine.setMetronome(stoppedConfig(state.bpm, state.beatsPerBar))).catch(() => {})
       }
     }
+    // 들리기 전에 떠난 연주자는 다시 들어오면 그 재입장부터 잰다(#120 L-5). 큐에 넣어 앞서 대기 중인 add_peer 뒤에 적용한다
+    const gen = this.gen
+    this.enqueue(async () => {
+      if (gen === this.gen && this.firstAudio) this.firstAudio = notePeerLeft(this.firstAudio, peerId)
+    }).catch(() => {})
     this.runActions(this.machine.peerGone(peerId))
   }
 
@@ -554,6 +559,8 @@ export class PerformSession {
   async pollStats(): Promise<void> {
     if (this.state.phase !== 'running') return
     const gen = this.gen
+    // 통계 요청은 명령 큐 밖이라 그사이 재추가와 겹칠 수 있다: 요청 순간의 add 시각과 비교한다(#120 L-4)
+    const addedAtAtRequest = this.firstAudio?.addedAt
     let stats: EngineStats
     try {
       stats = await this.engine.stats()
@@ -569,7 +576,7 @@ export class PerformSession {
       return
     }
     this.deadStats = 0
-    if (this.firstAudio) this.firstAudio = noteStats(this.firstAudio, stats.peers)
+    if (this.firstAudio) this.firstAudio = noteStats(this.firstAudio, stats.peers, addedAtAtRequest)
     this.setState({ stats, firstAudio: summarizeFirstAudio(this.firstAudio, stats.peers) })
     this.maybeRequestRelayTokenFor(stats)
   }

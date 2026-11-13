@@ -260,8 +260,6 @@ impl PeerMedia {
         (&self.shared, &mut self.jitter)
     }
 
-    /// 워커 반복의 뒷부분(`service` 직후): 통계 스냅샷과 손실 보고를 발행한다. `&mut self`라 쓰는 쪽이 이 항목의
-    /// 단독 소유자(워커) 하나임이 타입으로 보장된다 — seqlock의 단일 작성자 조건(#116 L-1).
     /// 이번 반복에 이 피어의 실제(은닉이 아닌) 오디오를 재생 링에 넣었다(워커, `service` 직후). 처음 한 번만 기록한다.
     /// 지터 재시작(에코 측정)·경로 전환은 다시 재지 않는다 — 같은 항목의 "입장 → 첫 소리"는 한 번뿐이다.
     pub(crate) fn note_audio(&mut self, now_us: u64) {
@@ -270,6 +268,8 @@ impl PeerMedia {
         }
     }
 
+    /// 워커 반복의 뒷부분(`service` 직후): 통계 스냅샷과 손실 보고를 발행한다. `&mut self`라 쓰는 쪽이 이 항목의
+    /// 단독 소유자(워커) 하나임이 타입으로 보장된다 — seqlock의 단일 작성자 조건(#116 L-1).
     pub(crate) fn publish(&mut self) {
         let js = self.jitter.stats();
         let playing = self.jitter.is_playing();

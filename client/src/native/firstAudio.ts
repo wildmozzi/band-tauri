@@ -6,6 +6,7 @@
  *   그 피어가 들린 시각 = addedAt + firstAudioMs. 기준은 시작 때 이미 있던 연주자면 `startAt`(서버 왕복·descriptor
  *   교환 포함), 시작 뒤에 들어온 연주자면 그 피어를 처음 추가한 시각(그 사람의 입장)이다.
  * - 한 번 들린 피어의 값은 고정한다(재추가·경로 전환으로 다시 재지 않는다). 엔진을 다시 시작하면 새로 잰다.
+ * - 들리기 전에 떠났다가 다시 들어온 연주자는 그 재입장부터 잰다(`notePeerLeft`).
  */
 
 import type { PeerStats } from './engineApi'
@@ -38,14 +39,40 @@ export function noteAddPeer(t: FirstAudioTrack, peerId: string, now: number): Fi
   return { ...t, base, addedAt }
 }
 
-/** 엔진 통계에서 새로 들린 피어를 확정한다. 바뀐 게 없으면 같은 객체를 돌려준다 */
-export function noteStats(t: FirstAudioTrack, peers: readonly PeerStats[]): FirstAudioTrack {
+/**
+ * 연주자가 방을 떠났다(participant-left·native-leave). 아직 들리지 않은 연주자의 기준을 지워, 다시 들어오면
+ * 그 재입장부터 잰다(#120 L-5). 이미 들린 값은 고정이다. 바뀐 게 없으면 같은 객체를 돌려준다.
+ */
+export function notePeerLeft(t: FirstAudioTrack, peerId: string): FirstAudioTrack {
+  if (t.heard.has(peerId) || (!t.base.has(peerId) && !t.startPeers.has(peerId))) return t
+  const base = new Map(t.base)
+  base.delete(peerId)
+  const addedAt = new Map(t.addedAt)
+  addedAt.delete(peerId)
+  const startPeers = new Set(t.startPeers)
+  startPeers.delete(peerId)
+  return { ...t, startPeers, base, addedAt }
+}
+
+/**
+ * 엔진 통계에서 새로 들린 피어를 확정한다. 바뀐 게 없으면 같은 객체를 돌려준다.
+ *
+ * `addedAtAtRequest`: 통계를 요청하던 순간의 `addedAt`. 통계 요청은 명령 큐 밖이라 응답을 기다리는 사이 같은 피어가
+ * 다시 추가될 수 있다. 그 피어는 응답이 옛 항목의 값인지 새 항목의 값인지 알 수 없으므로 이번에는 건너뛰고 다음
+ * 폴링에서 확정한다(#120 L-4).
+ */
+export function noteStats(
+  t: FirstAudioTrack,
+  peers: readonly PeerStats[],
+  addedAtAtRequest?: ReadonlyMap<string, number>,
+): FirstAudioTrack {
   let heard: Map<string, number> | null = null
   for (const p of peers) {
     if (t.heard.has(p.peerId) || p.firstAudioMs == null || !Number.isFinite(p.firstAudioMs)) continue
     const added = t.addedAt.get(p.peerId)
     const base = t.base.get(p.peerId)
     if (added === undefined || base === undefined) continue
+    if (addedAtAtRequest && addedAtAtRequest.get(p.peerId) !== added) continue
     heard ??= new Map(t.heard)
     heard.set(p.peerId, Math.max(0, added + p.firstAudioMs - base))
   }

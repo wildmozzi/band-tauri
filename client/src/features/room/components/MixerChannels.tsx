@@ -99,7 +99,6 @@ export function MyMixerChannel({
   engineStats: EngineStats | null
   /** 연주 시작 → 첫 피어 소리(P1-20) */
   firstAudio?: FirstAudioSummary | null
-| null
   level: number
   rtcError: string | null
 }) {

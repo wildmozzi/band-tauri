@@ -369,7 +369,7 @@ interface EngineConfig {
 }
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
-interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean; txCodec: 'opus' | 'pcm16' | null; txCodecAuto: boolean; txCodecReason: 'relayLoad' | 'lossFeedback' | null; remoteLossPct: number | null; remoteConcealPct: number | null; connectMs: number | null; firstAudioMs: number | null }| null; remoteConcealPct: number | null }
+interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean; txCodec: 'opus' | 'pcm16' | null; txCodecAuto: boolean; txCodecReason: 'relayLoad' | 'lossFeedback' | null; remoteLossPct: number | null; remoteConcealPct: number | null; connectMs: number | null; firstAudioMs: number | null }
 interface RelayConfig { addr: string; token: string; expiresInSec?: number; bindKey?: string }  // 서버 relay-token의 addr(host:port)·token(base64url)·expiresIn(남은 수명 초)·bindKey(Bind MAC 키, base64url 32B, relay-design 2.1.1)
 interface RelayStats { state: 'binding' | 'bound' | 'unreachable' | 'rejected' | 'expired'; addr: string; rttMs: number | null; txKbps: number; overBudget: boolean; autoOpus: boolean }
 type MeasureVerdict = 'ok' | 'noSignal' | 'clipped' | 'unstable'
@@ -442,11 +442,11 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 `monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·로컬 소스 링) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
 
-`PeerStats.connectMs`·`firstAudioMs`(P1-20, GOAL 3-6 "입장 후 3초 이내 소리"의 엔진 몫): 기준은 그 피어의 `engine_add_peer` 시각(엔진 시계 = net epoch 단조 µs). 아직이면 null.
+`PeerStats.connectMs`·`firstAudioMs`(P1-20, GOAL 3-6 "입장 후 3초 이내 소리"의 엔진 몫): 기준은 그 피어의 `engine_add_peer` 시각(엔진 시계 = net epoch 단조 µs). 두 지표는 같은 `Instant` 하나(미디어 `added_us` = net `ConnState.started`)를 기준으로 쓴다. 아직이면 null.
 - `connectMs` = add_peer → 그 피어와 처음 `connected`가 된 순간. net이 Hello/HelloAck를 받아들여 상태를 바꿀 때 `ConnState.connected_at`에 남긴다(수신 스레드, RT 아님).
 - `firstAudioMs` = add_peer → 그 피어의 **실제**(은닉이 아닌) 소리가 처음 소스 링(재생 링)에 들어간 순간. 워커가 `PeerFeed::service`의 "실제 데이터는 미리" 단계에서 링에 넣은 반복의 관측 시각(`FeedTiming.wall_us`)으로 기록하고(`PeerMedia::note_audio`), 통계 seqlock(`MediaStatsCell`, `MediaStats.first_audio_us`)으로 발행한다. RT 콜백은 기록하지 않는다. 장치 출력 버퍼만큼(한 콜백 이내) 귀에 닿는 시각보다 이르다.
 - 리셋 규칙: 둘 다 **피어 항목(add_peer 1회)마다 한 번** 정하고 그 뒤로 바꾸지 않는다. 끊김 → 재연결(`reconnecting` → `connected`), 경로 전환(릴레이 ↔ 직접 승격·강등), 지터 버퍼 재시작(에코 측정)은 다시 재지 않는다. 같은 peerId를 다시 추가하면(교체·재시도) 새 항목이라 새로 잰다. 엔진을 다시 시작하면 모두 새로 잰다.
-- 클라이언트의 "연주 시작 → 첫 피어 소리"는 `native/firstAudio.ts`가 계산한다: 시작 때 이미 있던 연주자는 (그 피어 add_peer 호출 시각 − 연주 시작 시각) + `firstAudioMs`, 시작 뒤에 들어온 연주자는 그 피어를 처음 추가한 시각부터. 진단 줄에 가장 빠른~가장 늦은 피어를 보이고, 진단 타임라인(`timeline.jsonl`의 피어 샘플)에는 피어별 `connectMs`·`firstAudioMs`가 남는다.
+- 클라이언트의 "연주 시작 → 첫 피어 소리"는 `native/firstAudio.ts`가 계산한다: 시작 때 이미 있던 연주자는 (그 피어 add_peer 호출 시각 − 연주 시작 시각) + `firstAudioMs`, 시작 뒤에 들어온 연주자는 그 피어를 처음 추가한 시각부터. 들리기 전에 떠났다 다시 들어온 연주자는 재입장부터 다시 재고, 통계 응답을 기다리는 사이 재추가된 피어는 그 응답으로 확정하지 않는다(다음 폴링). 진단 줄에 가장 빠른~가장 늦은 피어를 보이고, 진단 타임라인(`timeline.jsonl`의 피어 샘플)에는 피어별 `connectMs`·`firstAudioMs`가 남는다.
 - 검증: `net::peer::tests::connected_at_is_first_connect_only`, `engine::peer_media::tests::first_audio_recorded_once_relative_to_add`, `tests/loopback.rs` `first_audio_and_connect_ms_reported`(결정적)·`first_audio_local_direct_within_1s`(실시간, ≤ 1초), `tests/relay.rs` `direct_blocked_connects_via_relay_then_promotes_to_direct`(실시간, 직접 차단 → 릴레이 ≤ 3초).
 
 `PeerStats.playoutMs` = 벽시계로 잰 버퍼 지연(소스 링 포함, 최근 0.5~1초 최솟값) + 장치 출력 버퍼.

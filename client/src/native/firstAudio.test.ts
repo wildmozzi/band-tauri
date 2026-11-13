@@ -5,6 +5,7 @@ import {
   formatFirstAudio,
   newFirstAudioTrack,
   noteAddPeer,
+  notePeerLeft,
   noteStats,
   summarizeFirstAudio,
 } from './firstAudio'
@@ -47,6 +48,34 @@ describe('firstAudio (P1-20)', () => {
     t = noteAddPeer(t, 'A', 2000) // 실패 후 재시도
     t = noteStats(t, [peer('A', 300)])
     expect(t.heard.get('A')).toBe(2300)
+  })
+
+  it('들리기 전에 떠났다 다시 들어오면 재입장부터 잰다(시작 때 있던 연주자도)', () => {
+    let t = newFirstAudioTrack(0, ['B'])
+    t = noteAddPeer(t, 'B', 100)
+    t = notePeerLeft(t, 'B')
+    t = noteAddPeer(t, 'B', 600_000)
+    t = noteStats(t, [peer('B', 300)])
+    expect(t.heard.get('B')).toBe(300)
+  })
+
+  it('이미 들린 연주자는 떠나도 값이 그대로', () => {
+    let t = newFirstAudioTrack(0, ['A'])
+    t = noteAddPeer(t, 'A', 100)
+    t = noteStats(t, [peer('A', 400)])
+    expect(notePeerLeft(t, 'A')).toBe(t)
+    expect(notePeerLeft(t, 'X')).toBe(t)
+  })
+
+  it('통계 요청 중에 재추가되면 그 피어는 이번 응답으로 확정하지 않는다', () => {
+    let t = newFirstAudioTrack(0, [])
+    t = noteAddPeer(t, 'A', 1000)
+    const atRequest = t.addedAt
+    t = noteAddPeer(t, 'A', 5000) // 요청이 진행 중일 때 재추가
+    const same = noteStats(t, [peer('A', 200)], atRequest) // 옛 항목의 값일 수 있다
+    expect(same).toBe(t)
+    t = noteStats(t, [peer('A', 200)], t.addedAt)
+    expect(t.heard.get('A')).toBe(4200) // 기준은 처음 추가(1000), 새 add(5000) + 200
   })
 
   it('옛 엔진(firstAudioMs 없음)·추가 기록 없는 피어는 대기로 남는다', () => {
