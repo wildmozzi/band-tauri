@@ -172,7 +172,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1) |
 | 3 | `net`, `net::{peer, relay, stun, qos}` |
 | 4 | `engine::{worker, measure}`, 하네스 `engine::sim`(`cfg(test)`) |
-| 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `diag`, `diag::{timeline, export}` |
+| 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `settings`, `diag`, `diag::{timeline, export}` |
 | 6 | `commands`, `lib.rs`, `main.rs` |
 
 `net::peer → engine::jitter`(3 → 1)처럼 **아래로 가는 간선은 의존 규칙상 허용**이다. 그 간선의 문제는 의존이 아니라 공유 상태(4.1절: 여러 계층이 `Peer`의 락을 직접 잡음)이고, ③이 그것을 다룬다.
@@ -195,7 +195,6 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 |---|---|---|
 | `Peer`가 net 상태와 미디어 상태를 함께 가진 공용 구조체(필드 전부 `pub`, Mutex 5개 + 원자값). net·워커·통계·커맨드가 직접 잠근다. single writer가 아니다 | `net/peer.rs` | ③ |
 | ~~지터 락 접근자 7곳, 기본 우선순위 스레드가 준RT 락을 잡음~~ | (③-a3에서 해소: 지터 버퍼는 워커 단독 소유) | ③ 완료 |
-| 녹음 폴더 설정 파일 저장·검증이 어댑터에 | `commands.rs`(`record_dir_file`, `current_record_dir`) | ⑦ |
 | 큰 파일: `wasapi.rs` 1.9k(열거·프로브 + 스트림), `net/mod.rs` 1.1k(송신 + 수신 루프 + 제어 루프), `net/peer.rs` 1.2k | | ⑥ |
 
 ## 6. 모듈 지도 — 현재 → 목표(R-1)

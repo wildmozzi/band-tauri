@@ -15,7 +15,8 @@
 
 mod marks;
 pub mod rt_ring;
-mod sidecar;
+// 계약 DTO(녹음 옵션·통계·요약) — 어댑터가 이 노드만 쓴다(⑦-2, ADAPTER_MAY_USE).
+pub mod sidecar;
 mod writer;
 
 pub use marks::{MarkEvent, MarkKind, MarkSink};
