@@ -398,6 +398,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | 커맨드 | 인자 | 반환 |
 |---|---|---|
 | `engine_list_devices` | — | `DeviceInfo[]` |
+| `engine_supported_drivers` | — | `DriverKind[]` — 이 빌드가 열 수 있는 드라이버(P2-7, 지연 낮은 순). `asio` 피처로 빌드했을 때만 `asio`가 들어간다(기본 배포본은 `["wasapiExclusive", "wasapiShared"]`). 빌드마다 고정이라 한 번만 물으면 된다. 이 커맨드가 없는 옛 엔진이면 클라이언트는 모든 드라이버를 지원한다고 본다 |
 | `engine_start` | `{ config: EngineConfig, peerId: string }` | `LocalDescriptor` |
 | `engine_stop` | — | `null` |
 | `engine_test_start` | `{ config: EngineConfig }` | `null` (네트워크 없이 모니터만) |
@@ -468,6 +469,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 `backend`: 실제로 열린 오디오 백엔드. `wasapiExclusive`(자체 독점) | `wasapiShared3`(자체 IAudioClient3 저지연 공유) | `cpalWasapi`(cpal 공유 폴백) | `cpalAsio` | `fake`(테스트). 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
 
 `engine_list_devices`의 자체 WASAPI 장치: 엔드포인트마다 `wasapiShared` 항목 1개(채널·레이트 = 믹스 포맷)와, 독점 지원 포맷이 있으면 `wasapiExclusive` 항목 1개(채널 = 지원 최대, 레이트 = 독점 지원 레이트)를 낸다. `id`는 둘 다 `wasapi::<장치 이름>`(cpal과 같은 형식)이다.
+
+지원 드라이버(P2-7): 설정 화면은 `engine_supported_drivers`에 없는 드라이버를 선택지에서 비활성화하고 이유("이 배포본에는 ASIO가 포함되어 있지 않습니다 — WASAPI 독점 모드를 쓰세요")를 보인다. 저장된 설정의 드라이버가 목록에 없으면 WASAPI 독점(없으면 공유)으로 바꾸고 그쪽 장치 선택을 비운 뒤 안내한다 — 사용자 편집이 아니므로 DB에는 바로 쓰지 않는다. `engine_list_devices`의 응답 모양(`DeviceInfo[]`)은 바꾸지 않는다(배열에 빌드 정보를 끼우면 기존 호출자·진단 내보내기가 깨진다).
 
 **지연 측정(P1-1, `engine/measure.rs`, 절차는 docs/MEASURE.md)**
 - `LoopbackReport.roundTripMs` = 소프트웨어 패스스루(입력 → 바로 출력)의 아날로그 입력 → 아날로그 출력 지연. 업계 RTL 측정값과 같은 정의로, 이상적인 장치에서 입력 버퍼 + 출력 버퍼 + 변환기·드라이버 안전 여유다.

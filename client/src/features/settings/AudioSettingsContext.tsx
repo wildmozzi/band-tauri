@@ -12,10 +12,12 @@ import {
   engineErrorMessage,
   engineListDevices,
   engineStats,
+  engineSupportedDrivers,
   engineTestStart,
   engineTestStop,
   isNativeApp,
   type DeviceInfo,
+  type DriverKind,
   type EngineConfig,
   type EngineStats,
 } from '../../native/engineApi'
@@ -33,6 +35,7 @@ import {
 } from '../../native/engineConfig'
 import { SettingsSaveGate, TestMonitorControl } from '../../native/settingsSync'
 import { reapplyLoopbackOffsetInBackground } from '../../native/loopbackOffsetStore'
+import { coerceToSupportedDrivers } from './driverSupport'
 
 const STORAGE_KEY = 'band_engine_config_v2'
 const SAVE_DEBOUNCE_MS = 600
@@ -56,6 +59,10 @@ interface AudioSettingsContextType {
   isSaving: boolean
   /** 구형 설정을 변환했으면 true (안내 표시용) */
   migrated: boolean
+  /** 이 빌드가 지원하는 드라이버. null = 엔진이 알려 주지 않음(옛 엔진, 모두 표시) — P2-7 */
+  supportedDrivers: DriverKind[] | null
+  /** 저장된 드라이버를 지원 드라이버로 바꿨을 때 안내 문구 */
+  driverNotice: string | null
 
   // 테스트 모니터 (engine_test_start/stop)
   isTesting: boolean
@@ -98,6 +105,8 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [migrated, setMigrated] = useState(false)
+  const [supportedDrivers, setSupportedDrivers] = useState<DriverKind[] | null>(null)
+  const [driverNotice, setDriverNotice] = useState<string | null>(null)
   const [isTesting, setIsTesting] = useState(false)
   const [testStats, setTestStats] = useState<EngineStats | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
@@ -186,6 +195,27 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refreshDevices()
   }, [refreshDevices])
+
+  // --- 지원 드라이버 (P2-7): 빌드마다 고정이라 한 번만 묻는다 ---
+  useEffect(() => {
+    if (!isNativeMode) return
+    let cancelled = false
+    void engineSupportedDrivers().then((list) => {
+      if (!cancelled) setSupportedDrivers(list)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [isNativeMode])
+
+  // 저장된(로컬·DB) 설정이 지원 안 하는 드라이버면 지원 드라이버로 되돌리고 안내한다.
+  // 사용자 편집이 아니므로 DB에는 바로 쓰지 않는다(다른 배포본에서 쓰던 ASIO 선택을 지우지 않음) — 다음 편집 때 함께 저장된다.
+  useEffect(() => {
+    const r = coerceToSupportedDrivers(config, supportedDrivers)
+    if (r.notice === null) return
+    setConfig(r.config)
+    setDriverNotice(r.notice)
+  }, [config, supportedDrivers])
 
   const inputDevices = useMemo(
     () => devices.filter((d) => d.isInput && d.driver === config.inputDriver),
@@ -325,6 +355,8 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     error,
     isSaving,
     migrated,
+    supportedDrivers,
+    driverNotice,
     isTesting,
     testStats,
     testError,

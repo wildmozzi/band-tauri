@@ -5,11 +5,13 @@
  * 실제 엔진·Rust 코드는 돌지 않는다 — 엔진 통계를 화면이 어떻게 보여 주는지만 본다.
  */
 import type { Page } from '@playwright/test'
-import type { EngineStats, LocalDescriptor } from '../../src/native/engineApi'
+import type { DriverKind, EngineStats, LocalDescriptor } from '../../src/native/engineApi'
 
 export interface FakeTauriResponses {
   engine_start?: LocalDescriptor
   engine_stats?: EngineStats
+  /** 이 빌드의 지원 드라이버(P2-7). 빼면 null → 옛 엔진처럼 모든 드라이버를 보인다 */
+  engine_supported_drivers?: DriverKind[]
   [cmd: string]: unknown
 }
 

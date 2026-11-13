@@ -21,6 +21,25 @@ pub enum DriverKind {
     WasapiExclusive,
 }
 
+impl DriverKind {
+    /// 이 빌드가 열 수 있는 드라이버(P2-7, 설계 4절 `engine_supported_drivers`).
+    /// ASIO는 `asio` 피처(+ CPAL_ASIO_DIR SDK)로 빌드했을 때만 들어간다.
+    pub fn supported() -> Vec<DriverKind> {
+        supported_drivers(cfg!(feature = "asio"))
+    }
+}
+
+/// 지원 드라이버 목록(지연 낮은 순). `asio` = ASIO 포함 빌드인가.
+pub fn supported_drivers(asio: bool) -> Vec<DriverKind> {
+    let mut v = Vec::with_capacity(3);
+    if asio {
+        v.push(DriverKind::Asio);
+    }
+    v.push(DriverKind::WasapiExclusive);
+    v.push(DriverKind::WasapiShared);
+    v
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CodecKind {
@@ -180,6 +199,26 @@ impl EngineConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supported_drivers_follow_asio_flag() {
+        assert_eq!(supported_drivers(false), vec![DriverKind::WasapiExclusive, DriverKind::WasapiShared]);
+        assert_eq!(
+            supported_drivers(true),
+            vec![DriverKind::Asio, DriverKind::WasapiExclusive, DriverKind::WasapiShared]
+        );
+    }
+
+    #[test]
+    fn supported_matches_build_feature() {
+        let s = DriverKind::supported();
+        // 기본 빌드(asio 피처 꺼짐)에는 ASIO가 없어야 한다
+        assert_eq!(s.contains(&DriverKind::Asio), cfg!(feature = "asio"));
+        assert!(s.contains(&DriverKind::WasapiShared) && s.contains(&DriverKind::WasapiExclusive));
+        // 직렬화 형식(설계 4절 DriverKind 문자열)
+        let json = serde_json::to_string(&supported_drivers(true)).unwrap();
+        assert_eq!(json, r#"["asio","wasapiExclusive","wasapiShared"]"#);
+    }
 
     #[test]
     fn default_is_valid() {
