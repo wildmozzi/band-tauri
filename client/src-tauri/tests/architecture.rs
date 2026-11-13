@@ -50,6 +50,10 @@ const NODES: &[(&str, u8)] = &[
     ("engine::device", 2),
     ("engine::wasapi", 2),
     ("engine::record", 2),
+    ("engine::record::rt_ring", 2),
+    ("engine::record::marks", 2),
+    ("engine::record::sidecar", 2),
+    ("engine::record::writer", 2),
     ("engine::metronome", 2),
     // 3 D 네트워크
     ("net", 3),
@@ -83,16 +87,13 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[
     // 장치 선택(device) ↔ 자체 WASAPI(wasapi) 순환 → ⑥ device를 선택·cpal·가짜로, 공용 타입(StreamInfo 등)을 아래로.
     ("engine::device", "engine::wasapi", "⑥"),
     ("engine::wasapi", "engine::device", "⑥"),
-    // RT 콜백(rt) ↔ 녹음(record: RT 링 + 쓰기 스레드 + 사이드카) 순환 → ⑥ record를 RT 링과 쓰기 쪽으로.
-    ("engine::rt", "engine::record", "⑥"),
-    ("engine::record", "engine::rt", "⑥"),
     // 어댑터의 로직: 릴레이 주소 DNS 해석, 게인 범위 자르기 → ⑦ manager 쪽으로.
     ("commands", "net::relay", "⑦"),
     ("commands", "engine::mixer", "⑦"),
 ];
 
 /// 예외 수 상한(래칫). 단계를 끝내 예외를 지우면 이 값도 내린다. 올리는 것은 금지(위 주석).
-const MAX_EXCEPTIONS: usize = 7;
+const MAX_EXCEPTIONS: usize = 5;
 
 /// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
 const OPEN_STAGES: &[&str] = &["③", "⑥", "⑦"];
