@@ -51,6 +51,12 @@ pub struct PeerStats {
     /// (옛 엔진, 그쪽 재생 전). 손실 피드백 Opus 전환의 입력(P1-4e).
     pub remote_loss_pct: Option<f32>,
     pub remote_conceal_pct: Option<f32>,
+    /// `engine_add_peer` → 이 피어와 처음 Connected(ms, P1-20). 아직이면 null. 이 항목(add_peer 1회)에서 한 번 정하면
+    /// 재연결·경로 전환(릴레이 ↔ 직접)에도 그대로다. 같은 peerId를 다시 추가하면 새로 잰다.
+    pub connect_ms: Option<f32>,
+    /// `engine_add_peer` → 이 피어의 실제(은닉이 아닌) 소리가 처음 재생 링에 들어간 순간(ms, P1-20). 아직이면 null.
+    /// 리셋 규칙은 `connectMs`와 같다(지터 재시작·경로 전환으로 다시 재지 않는다).
+    pub first_audio_ms: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,7 +181,9 @@ impl Engine {
                         let media = reg.iter().find(|m| m.key == p.key())?;
                         let now = Instant::now();
                         let ns = p.net_stats(now);
-                        let js = media.stats().js;
+                        let ms = media.stats();
+                        let first_audio_ms = ms.first_audio_ms(media.added_us);
+                        let js = ms.js;
                         let (tx_codec, tx_codec_reason) = {
                             use crate::engine::relay_codec::CodecReason;
                             use crate::net::peer::{TX_CODEC_AUTO, TX_CODEC_AUTO_LOSS, TX_CODEC_OPUS, TX_CODEC_SENT};
@@ -219,6 +227,8 @@ impl Engine {
                             tx_codec_reason,
                             remote_loss_pct: remote.map(|r| r.loss_pct),
                             remote_conceal_pct: remote.map(|r| r.conceal_pct),
+                            connect_ms: ns.connect_ms,
+                            first_audio_ms,
                         })
                     })
                     .collect()
@@ -335,6 +345,8 @@ mod tests {
                 tx_codec_reason: Some(crate::engine::relay_codec::CodecReason::LossFeedback),
                 remote_loss_pct: Some(2.5),
                 remote_conceal_pct: Some(2.6),
+                connect_ms: Some(95.5),
+                first_audio_ms: None,
             }],
             ..EngineStats::stopped()
         };
@@ -348,6 +360,7 @@ mod tests {
         assert!(j.contains("\"state\":\"connected\""));
         assert!(j.contains("\"path\":\"lan\""));
         assert!(j.contains("\"rttMs\":null"));
+        assert!(j.contains("\"connectMs\":95.5") && j.contains("\"firstAudioMs\":null"), "{j}");
         assert!(j.contains("\"relay\":null") && j.contains("\"qos\":null") && j.contains("\"sendQueue\":null"), "{j}");
         assert_eq!(serde_json::to_string(&PathKind::Relay).unwrap(), "\"relay\"");
         assert!(j.contains("\"cpu\":{\"workerPct\":null"), "{j}");

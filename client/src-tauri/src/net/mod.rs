@@ -259,12 +259,18 @@ impl Net {
     ///
     /// `media`: 엔진이 만든 이 피어의 수신 큐 생산자(`media_link`). 같은 peerId를 교체했으면 옛 항목의 미디어 키를 돌려준다.
     pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor, media: MediaTx) -> Result<Option<PeerKey>, String> {
+        self.add_peer_at(peer_id, desc, media, Instant::now())
+    }
+
+    /// `add_peer`와 같고, 핸드셰이크 경과·`connectMs`의 기준 시각(`ConnState.started`)을 호출자가 준다. 엔진은
+    /// `firstAudioMs`의 기준(`added_us`)과 같은 `Instant`를 넘겨 두 지표의 기준을 맞춘다(P1-20, #120 L-3).
+    pub fn add_peer_at(&self, peer_id: String, desc: &LocalDescriptor, media: MediaTx, added: Instant) -> Result<Option<PeerKey>, String> {
         let setup = PeerSetup {
             keys: &self.shared.keys,
             my_ssrc: self.shared.ssrc,
             allow_loopback: self.shared.allow_loopback,
         };
-        let mut peer = Peer::new(peer_id.clone(), desc, &setup, media, Instant::now())?;
+        let mut peer = Peer::new(peer_id.clone(), desc, &setup, media, added)?;
         let key = (*peer.public_key(), peer.ssrc());
         let mut peers = self.shared.peers.write();
         let old_idx = peers.iter().position(|p| p.id() == peer_id);

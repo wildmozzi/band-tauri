@@ -288,7 +288,12 @@ impl Engine {
         self.media_port.reclaim();
         let key = PeerKey::from_raw(self.next_key.fetch_add(1, Ordering::Relaxed));
         let settings = self.media_settings.current();
-        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc));
+        // 시각은 엔진 epoch(= net epoch) µs: 워커의 첫 재생 시각(`FeedTiming.wall_us`)과 같은 기준이다(P1-20).
+        // 같은 `Instant`를 net의 `ConnState.started`로도 넘겨 connectMs·firstAudioMs의 기준을 한 시각으로 맞춘다
+        // (`reserve_cmd` 대기가 끼어도 어긋나지 않게, #120 L-3).
+        let added = Instant::now();
+        let added_us = added.saturating_duration_since(self.epoch).as_micros() as u64;
+        let media = Arc::new(PeerMediaShared::new(key, peer_id.clone(), desc.ssrc).added_at(added_us));
         // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB)는 여기, 락 밖에서 할당한다. 워커는 할당하지 않는다.
         let (tx, rx) = media_link(key);
         let worker_side = PeerMedia::new(media.clone(), settings, rx);
@@ -303,7 +308,7 @@ impl Engine {
         // 등록부 락은 쥐고 있어 그동안 `stats`·`peer_jitter_stats`·게인 변경도 기다린다 — 제어 평면만 막히고 워커·RT는 무관하다.
         let mut cmd = self.media_port.reserve_cmd(2)?;
         // net 검증이 실패하면 `worker_side`는 여기(커맨드 스레드)에서 해제된다 — 워커는 모른다.
-        let replaced = net.add_peer(peer_id, desc, tx)?;
+        let replaced = net.add_peer_at(peer_id, desc, tx, added)?;
         // 순서: 새 것 추가 → 옛 것 제거(설계 1.4절). 생산자가 이 락 하나로 직렬화되고 큐가 FIFO라 뒤바뀌지 않는다.
         // net에 넣은 뒤 `Add`가 워커에 닿기 전에 온 패킷은 새 수신 큐에서 기다린다(도착 시각 보존).
         let _ = cmd.try_push(MediaCmd::Add(worker_side));

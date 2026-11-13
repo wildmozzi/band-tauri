@@ -114,7 +114,7 @@ export function MixerPanel({
 }) {
   const { clientId } = useRoomConnection()
   const { canPerform, myInstrument, relayError } = useRoomPerform()
-  const { engineStats, peerEngineStats, peerNetworkStats, audioLevels } = useRoomTelemetry('engineStats', 'peerEngineStats', 'peerNetworkStats', 'audioLevels')
+  const { engineStats, peerEngineStats, peerNetworkStats, audioLevels, firstAudio } = useRoomTelemetry('engineStats', 'peerEngineStats', 'peerNetworkStats', 'audioLevels', 'firstAudio')
   const { rtcError, remoteAudioMap, mixSettingsMap, setMixVolume, setMixPan, setMixMuted } = useRoomMixer()
   // 관람자가 듣는 방송 믹스 스트림 (방송 담당자 하나)
   const broadcastStreams = Object.keys(remoteAudioMap)
@@ -140,6 +140,7 @@ export function MixerPanel({
                 <MyMixerChannel
                   myInstrument={myInstrument}
                   engineStats={engineStats}
+                  firstAudio={firstAudio}
                   level={audioLevels[clientId ?? ''] ?? 0}
                   rtcError={rtcError}
                 />
