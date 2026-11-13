@@ -14,6 +14,7 @@ const RING_SECONDS: usize = 3;
 /// 콜백 청크 최소 크기 가정(블록 링 용량 산정).
 const MIN_CHUNK_FRAMES: usize = 16;
 
+/// 콜백 청크 하나의 머리.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RecBlock {
     /// 청크 첫 프레임의 출력 타임라인 위치(`out_played_frames` 기준 장치 프레임).
