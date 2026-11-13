@@ -75,6 +75,8 @@ fn full_mesh_send_queue_latency_and_burst() {
     let mut frame = vec![0f32; FRAME * CH];
     let mut payload = vec![0u8; 1500];
     let mut pkt = vec![0u8; 1500];
+    // 워커처럼 피어 표 복사본 하나를 계속 쓴다(엔진 ③c).
+    let mut copy = band_lib::net::PeerTableCopy::default();
     let period = Duration::from_micros(2500);
     let frames = 2400; // 6초: 제어 스레드의 2초 창이 최소 두 번 돈다
     let mut burst_us = Vec::with_capacity(frames);
@@ -99,7 +101,7 @@ fn full_mesh_send_queue_latency_and_burst() {
         let frame_at = Instant::now();
         let n = enc.encode(&frame, &mut payload).unwrap();
         let t_send = Instant::now();
-        net.shared().send_audio_timed(frame_at, &payload[..n], 0, code, (k * FRAME) as u32, &mut pkt, None, None);
+        net.shared().send_audio_timed(&mut copy, frame_at, &payload[..n], 0, code, (k * FRAME) as u32, &mut pkt, None, None);
         let done = Instant::now();
         burst_us.push(done.duration_since(t_send).as_secs_f64() * 1e6);
         total_us.push(done.duration_since(frame_at).as_secs_f64() * 1e6);

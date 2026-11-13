@@ -975,59 +975,107 @@ fn shift_one_lengths_and_continuity() {
         assert!((w[1] - w[0] - 1.0).abs() < 0.01);
     }
 }
-
-/// 엔진 ③c: `restart`(버퍼 재사용·디코더 상태 초기화)가 `new`와 같은 버퍼를 만든다 — 같은 입력에 같은 출력·통계.
+/// 엔진 ③c: `restart`(버퍼 재사용·디코더 풀)가 `new`와 같은 버퍼를 만든다 — 같은 입력에 같은 출력·통계.
 /// 재시작할 버퍼는 먼저 손실·늦음·재정렬이 섞인 스트림을 겪게 해 슬롯·FIFO·창·디코더가 모두 더럽혀진 상태다.
+/// 새 스트림 두 가지(#124 리뷰 M-1): seq가 겹치지 않는 2초, 그리고 **옛 스트림과 seq가 겹치는** 7초(재시작 때 남은 슬롯이
+/// `valid`로 남으면 옛 페이로드를 재생하고, 블록 표본이 남으면 1초 블록 분위수·긴 창 목표에 섞인다 — 둘 다 여기서 드러난다).
+/// 재시작 직후 상태도 직접 단언한다.
 #[test]
 fn restart_matches_fresh_buffer() {
     for codec in [CodecKind::Opus, CodecKind::Pcm16] {
-        let settings = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
-        let mut dirty = JitterBuffer::new(settings);
-        let mut tx = Sender::new(codec, 240, 1000, 0);
-        let mut out = vec![0f32; 480];
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        for tick in 0..400u64 {
-            let (h, p) = tx.next();
-            if rng.gen_bool(0.9) {
-                dirty.insert(&h, &p, tick * 5000 + rng.gen_range(0..8000));
+        for (seq0, ticks) in [(70_000u32, 400u64), (1_380, 1_400)] {
+            let settings = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+            let mut dirty = JitterBuffer::new(settings);
+            let mut tx = Sender::new(codec, 240, 1000, 0);
+            let mut out = vec![0f32; 480];
+            let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+            for tick in 0..400u64 {
+                let (h, p) = tx.next();
+                if rng.gen_bool(0.9) {
+                    dirty.insert(&h, &p, tick * 5000 + rng.gen_range(0..8000));
+                }
+                dirty.pop(&mut out);
+                dirty.end_burst(tick * 5000, tick * 5000, 0.0);
             }
-            dirty.pop(&mut out);
-            dirty.end_burst(tick * 5000, tick * 5000, 0.0);
+            // 재시작 직전: 슬롯에 아직 안 꺼낸 패킷이 있어야 이 시험이 슬롯 초기화를 본다
+            assert!(dirty.slots.iter().any(|s| s.valid), "{codec:?}: 남은 슬롯 없음 — 시험 입력을 고칠 것");
+            assert!(!dirty.block_rel.is_empty(), "{codec:?}: 블록 표본 없음 — 시험 입력을 고칠 것");
+            let before = dirty.stats();
+            dirty.restart();
+            assert!(dirty.slots.iter().all(|s| !s.valid && s.len == 0 && s.seq == 0 && s.flags == 0 && s.frame == 0 && s.ts == 0));
+            assert!(dirty.fifo.is_empty() && dirty.scratch.is_empty() && dirty.block_rel.is_empty());
+            assert!(dirty.loss.is_fresh() && dirty.conceal.is_fresh() && dirty.corr_ring.is_fresh());
+            assert!(dirty.decoder.is_none(), "재시작 직후 디코더는 new처럼 비어 있다");
+            let mut fresh = JitterBuffer::new(settings);
+            let mut tx2 = Sender::new(codec, 240, seq0, 123_456);
+            let (mut o1, mut o2) = (vec![0f32; 480], vec![0f32; 480]);
+            let base = dirty.stats();
+            for tick in 0..ticks {
+                let (h, p) = tx2.next();
+                let t = 10_000_000 + tick * 5000;
+                if rng.gen_bool(0.93) {
+                    let at = t + rng.gen_range(0..9000);
+                    dirty.insert(&h, &p, at);
+                    fresh.insert(&h, &p, at);
+                }
+                dirty.pop(&mut o1);
+                fresh.pop(&mut o2);
+                assert_eq!(o1, o2, "{codec:?} seq0 {seq0} tick {tick}");
+                dirty.end_burst(t, t, 0.0);
+                fresh.end_burst(t, t, 0.0);
+                assert_eq!(dirty.target_samples(), fresh.target_samples(), "{codec:?} seq0 {seq0} tick {tick}");
+                // 창·비율 값(손실·은닉·보정 링, 지연 창)은 매 틱 같아야 한다
+                let (a, b) = (dirty.stats(), fresh.stats());
+                let rates = |s: JitterStats| (s.buffer_ms, s.target_ms, s.jitter_ms, s.loss_pct, s.conceal_pct, s.lead_ms, s.jitter_est_ms, s.corr_time_pct, s.wall_buffer_ms, s.tail_ms, s.min_transit);
+                assert_eq!(rates(a), rates(b), "{codec:?} seq0 {seq0} tick {tick}");
+            }
+            // 누적 카운터는 유지되므로 차이로 비교
+            let (d, f) = (dirty.stats(), fresh.stats());
+            assert!(before.produced > 0);
+            assert_eq!(d.produced - base.produced, f.produced, "{codec:?}");
+            assert_eq!(d.concealed - base.concealed, f.concealed, "{codec:?}");
+            assert_eq!(d.late - base.late, f.late, "{codec:?}");
+            assert_eq!(d.rebuffers - base.rebuffers, f.rebuffers, "{codec:?}");
+            assert_eq!(d.buffer_ms, f.buffer_ms, "{codec:?}");
+            assert_eq!(d.target_ms, f.target_ms, "{codec:?}");
         }
-        let before = dirty.stats();
-        dirty.restart();
+    }
+}
+
+/// 엔진 ③c(#124 리뷰 M-2): 재시작·코덱 변경으로 디코더가 바뀌어도 풀과 주고받을 뿐 새로 만들지 않는다 — 꺼낸 디코더는
+/// 새것과 같은 상태라 출력이 새 버퍼와 같다(Opus → PCM → Opus 스테레오 → Opus 모노).
+#[test]
+fn decoder_pool_switches_codecs_like_fresh() {
+    let settings = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+    let mut jb = JitterBuffer::new(settings);
+    let mut seq = 0u32;
+    for (codec, ch) in [(CodecKind::Opus, 1usize), (CodecKind::Pcm16, 1), (CodecKind::Opus, 2), (CodecKind::Opus, 1)] {
+        jb.restart();
         let mut fresh = JitterBuffer::new(settings);
-        // 같은 새 스트림(다른 seq·ts 시작)을 둘에 똑같이
-        let mut tx2 = Sender::new(codec, 240, 70_000, 123_456);
+        let mut enc = Encoder::new(codec, ch, 96_000).unwrap();
         let (mut o1, mut o2) = (vec![0f32; 480], vec![0f32; 480]);
-        let base = dirty.stats();
-        for tick in 0..400u64 {
-            let (h, p) = tx2.next();
-            let t = 10_000_000 + tick * 5000;
-            if rng.gen_bool(0.93) {
-                let at = t + rng.gen_range(0..9000);
-                dirty.insert(&h, &p, at);
-                fresh.insert(&h, &p, at);
-            }
-            dirty.pop(&mut o1);
+        for tick in 0..120u64 {
+            let pcm: Vec<f32> = (0..240 * ch).map(|i| ((i + tick as usize * 240) as f32 * 0.03).sin() * 0.4).collect();
+            let mut buf = vec![0u8; MAX_PAYLOAD_BYTES];
+            let n = enc.encode(&pcm, &mut buf).unwrap();
+            let h = Header {
+                ptype: PacketType::Audio,
+                ssrc: 1,
+                seq,
+                timestamp: seq.wrapping_mul(240),
+                flags: if codec == CodecKind::Opus { FLAG_OPUS } else { 0 },
+                frame_code: frame_code_from_samples(240).unwrap(),
+            };
+            seq += 1;
+            let t = 50_000_000 * (seq as u64 / 120 + 1) + tick * 5000;
+            jb.insert(&h, &buf[..n], t);
+            fresh.insert(&h, &buf[..n], t);
+            jb.pop(&mut o1);
             fresh.pop(&mut o2);
-            assert_eq!(o1, o2, "{codec:?} tick {tick}");
-            dirty.end_burst(t, t, 0.0);
+            assert_eq!(o1, o2, "{codec:?} ch {ch} tick {tick}");
+            jb.end_burst(t, t, 0.0);
             fresh.end_burst(t, t, 0.0);
-            assert_eq!(dirty.target_samples(), fresh.target_samples(), "{codec:?} tick {tick}");
-            // 창·비율 값(손실·은닉·보정 링, 지연 창)은 매 틱 같아야 한다
-            let (a, b) = (dirty.stats(), fresh.stats());
-            let rates = |s: JitterStats| (s.buffer_ms, s.target_ms, s.jitter_ms, s.loss_pct, s.conceal_pct, s.lead_ms, s.jitter_est_ms, s.corr_time_pct, s.wall_buffer_ms, s.tail_ms, s.min_transit);
-            assert_eq!(rates(a), rates(b), "{codec:?} tick {tick}");
         }
-        // 누적 카운터는 유지되므로 차이로 비교
-        let (d, f) = (dirty.stats(), fresh.stats());
-        assert!(before.produced > 0);
-        assert_eq!(d.produced - base.produced, f.produced, "{codec:?}");
-        assert_eq!(d.concealed - base.concealed, f.concealed, "{codec:?}");
-        assert_eq!(d.late - base.late, f.late, "{codec:?}");
-        assert_eq!(d.rebuffers - base.rebuffers, f.rebuffers, "{codec:?}");
-        assert_eq!(d.buffer_ms, f.buffer_ms, "{codec:?}");
-        assert_eq!(d.target_ms, f.target_ms, "{codec:?}");
+        assert!(jb.is_playing(), "{codec:?} ch {ch}");
     }
 }

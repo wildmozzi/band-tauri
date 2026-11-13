@@ -81,7 +81,13 @@ pub struct WorkerStats {
     /// 워커 반복 본문 시간(수면 제외)과 반복 시작 간격 분포(엔진 ③c 측정, 진단 전용 — 측정 시험이 비운다).
     pub iter_body: crate::net::txlat::SendLatency,
     pub iter_period: crate::net::txlat::SendLatency,
+    /// 반복마다 남은 락(에코 프로브·메트로놈)에서 기다린 합과, 본문에서 그것을 뺀 값(락 밖 비용, #122 리뷰 M3).
+    pub iter_lock_wait: crate::net::txlat::SendLatency,
+    pub iter_unlocked: crate::net::txlat::SendLatency,
 }
+
+/// 워커 반복 시간 분포 기록(엔진 ③c 측정, #122 리뷰 Low): 측정 빌드(`test-support`)에서만. 출시 빌드는 시계를 더 읽지 않는다.
+const DIAG_TIMING: bool = cfg!(feature = "test-support");
 
 /// 콜백이 이 시간 동안 멈추면 장치를 잃은 것으로 본다.
 const DEVICE_STALL: Duration = Duration::from_secs(1);
@@ -123,6 +129,10 @@ pub struct Worker {
     metro_plan: (u64, MetronomePlan),
     metro_stats_at: u64,
     metro_stats_gen: u64,
+    /// 피어 표 복사본(엔진 ③c): 송신·자동 코덱이 락 없이 본다. 세대가 바뀐 반복에서만 다시 복사된다.
+    peer_copy: crate::net::PeerTableCopy,
+    /// 이번 반복에 남은 락(에코 프로브·메트로놈)에서 기다린 시간(엔진 ③c 측정 — 본문에서 빼서 락 밖 비용을 본다).
+    lock_wait: crate::net::txlat::LockWait,
     frame: usize,
     ich: usize,
     in_rs: StreamResampler,
@@ -326,6 +336,8 @@ impl Worker {
             metro_plan: (0, MetronomePlan::default()),
             metro_stats_at: 0,
             metro_stats_gen: 0,
+            peer_copy: crate::net::PeerTableCopy::for_worker(),
+            lock_wait: Default::default(),
             p,
         })
     }
@@ -336,8 +348,15 @@ impl Worker {
         let mut last_start = Instant::now();
         while !self.p.stop.load(Ordering::Relaxed) {
             let start = Instant::now();
-            self.p.stats.iter_period.record(start - last_start);
+            if DIAG_TIMING {
+                self.p.stats.iter_period.record(start - last_start);
+            }
             last_start = start;
+            // 피어 표 복사본은 송신과 무관하게 반복마다 맞춘다: 캡처가 멈춰도(장치 분리) 빠진 피어가 쌓이지 않게(#126 리뷰 M-1).
+            // 세대가 같으면 원자 load 하나.
+            if let Some(net) = self.p.net.as_ref() {
+                net.refresh_copy(&mut self.peer_copy);
+            }
             self.reconfigure_local();
             self.pump_input();
             let timing = self.timing();
@@ -351,7 +370,14 @@ impl Worker {
                 log::warn!("오디오 스트림 에러 누적 {}회(장치 분리 등)", errs);
                 self.reported_errors = errs;
             }
-            self.p.stats.iter_body.record(start.elapsed());
+            let waited = std::time::Duration::from_nanos(std::mem::take(&mut self.lock_wait).ns);
+            if DIAG_TIMING {
+                let body = start.elapsed();
+                let s = &self.p.stats;
+                s.iter_body.record(body);
+                s.iter_lock_wait.record(waited);
+                s.iter_unlocked.record(body.saturating_sub(waited));
+            }
             // 은닉 마감이 가까우면 짧게 잔다(Windows 고해상도 타이머라도 0.5ms 폴링은 마감을 넘길 수 있다).
             std::thread::sleep(if urgent { FINE_POLL } else { POLL });
         }
@@ -476,7 +502,7 @@ impl Worker {
     /// 에코 측정 대상 피어용 프레임(무음 + 클릭)을 만들어 인코드한다. 반환: (피어 id, 페이로드 길이).
     fn probe_frame(&mut self) -> Option<(String, usize)> {
         let now_us = self.p.epoch.elapsed().as_secs_f64() * 1e6;
-        let mut g = self.p.probe.lock();
+        let mut g = self.lock_wait.lock(&self.p.probe);
         let Some(pr) = g.as_mut() else {
             self.alt_encoder = None;
             return None;
@@ -514,7 +540,7 @@ impl Worker {
         self.auto_check_at = now_d + AUTO_CODEC_CHECK;
         let now = Instant::now();
         let force = net.force_auto_opus();
-        let (relay_peers, measured_over) = net.relay_audio_load();
+        let (relay_peers, measured_over) = net.relay_audio_load(&self.peer_copy);
         let inputs = PolicyInputs {
             pcm_configured: true,
             relay_peers,
@@ -540,7 +566,7 @@ impl Worker {
         }
         let (ich, bitrate) = (self.ich, self.p.cfg.opus_bitrate());
         let (auto, pool) = (&mut self.auto, &mut self.auto_pool);
-        net.for_each_peer(|peer| {
+        for peer in self.peer_copy.peers() {
             let key = peer.key();
             let idx = match auto.iter().position(|a| a.key == key) {
                 Some(i) => i,
@@ -551,7 +577,7 @@ impl Worker {
                             Ok(e) => e,
                             Err(e) => {
                                 log::warn!("{}: 자동 전환용 Opus 인코더 생성 실패: {e}", peer.id());
-                                return;
+                                continue;
                             }
                         },
                     };
@@ -583,7 +609,7 @@ impl Worker {
             if perc != a.perc && a.enc.set_loss_perc(perc).is_ok() {
                 a.perc = perc;
             }
-        });
+        }
         // 사라진 피어의 인코더는 풀로 돌려준다(다음 피어가 새 스트림으로 쓴다 — 켤 때 초기화한다)
         let mut i = 0;
         while i < self.auto.len() {
@@ -648,7 +674,7 @@ impl Worker {
             // 자동 전환이 가능하면 대상 목록이 비어 있어도 넘긴다(첫 릴레이 피어도 L1 표시를 받게)
             let auto_fn = self.auto_enabled.then_some(&lookup as _);
             match enc.encode(frame, &mut self.payload) {
-                Ok(n) => net.send_audio_timed(frame_at, &self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt, auto_fn),
+                Ok(n) => net.send_audio_timed(&mut self.peer_copy, frame_at, &self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt, auto_fn),
                 Err(e) => {
                     // 레이트 제한 로그(리뷰 L10)
                     if self.encode_errors.is_multiple_of(1000) {
@@ -673,7 +699,7 @@ impl Worker {
             return; // 콜백 도중: 재생 카운터와 시각이 어긋날 수 있다
         }
         {
-            let p = self.p.metronome.plan.lock();
+            let p = self.lock_wait.lock(&self.p.metronome.plan);
             if p.0 != self.metro_plan.0 {
                 self.metro_plan = p.clone();
             }
@@ -691,7 +717,7 @@ impl Worker {
         let info = &self.p.info;
         let driver = hidden_out_latency_us(info.out_reported_latency_frames, t.out_burst as u64, rate);
         // 드라이버가 출력 지연을 알려 주지 않으면 루프백 보정값으로(PR #34 M2(a)). 입력 쪽 보고가 있으면 그만큼 뺀다.
-        let loopback = (*self.p.metronome.loopback_offset_ms.lock()).map(|o| {
+        let loopback = (*self.lock_wait.lock(&self.p.metronome.loopback_offset_ms)).map(|o| {
             let in_burst = match self.p.counters.in_cb_frames.load(Ordering::Relaxed) {
                 0 => info.buffer_frames,
                 n => n,
@@ -705,7 +731,7 @@ impl Worker {
         if t.wall_us.saturating_sub(self.metro_stats_at) >= 100_000 || gen != self.metro_stats_gen {
             self.metro_stats_at = t.wall_us;
             self.metro_stats_gen = gen;
-            let mut s = self.p.metronome.stats.lock();
+            let mut s = self.lock_wait.lock(&self.p.metronome.stats);
             s.running = plan.running;
             s.synced = offset.is_some();
             s.bpm = plan.bpm;
@@ -733,7 +759,7 @@ impl Worker {
         }
         let out_rate = self.p.info.out_rate;
         for m in &self.media {
-            let key = m.shared.key;
+            let key = m.shared().key;
             if let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) {
                 f.seen = true;
                 continue;
@@ -743,7 +769,7 @@ impl Worker {
                 .find(|&s| !used(s) && self.p.bank.slots[s].state.load(Ordering::Acquire) == SLOT_FREE);
             let Some(slot) = free else {
                 if !self.slot_full_logged {
-                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", m.shared.peer_id);
+                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", m.shared().peer_id);
                     self.slot_full_logged = true;
                 }
                 continue;
@@ -752,7 +778,7 @@ impl Worker {
             match PeerFeed::new(slot, key, out_rate, sh) {
                 Ok(f) => {
                     sh.playing.store(false, Ordering::Relaxed);
-                    sh.occupant.store(m.shared.ssrc, Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
+                    sh.occupant.store(m.shared().ssrc, Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
                     sh.state.store(SLOT_ACTIVE, Ordering::Release);
                     self.feeds.push(f);
                 }
@@ -782,7 +808,7 @@ impl Worker {
         let consistent = move || cb_seq.is_some_and(|s| counters.out_cb_begin.load(Ordering::SeqCst) == s);
         let (mut fills, mut skipped, mut urgent) = (0u64, 0u64, false);
         let probe = self.p.probe.clone();
-        let mut guard = probe.lock();
+        let mut guard = self.lock_wait.lock(&probe);
         let mut tap = guard.as_mut().filter(|p| p.tap);
         let marks = self.p.rec_marks.clone();
         let marking = marks.active();

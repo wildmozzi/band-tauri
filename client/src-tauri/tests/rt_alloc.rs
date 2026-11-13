@@ -172,8 +172,9 @@ fn rt_callbacks_do_not_allocate() {
 }
 
 /// 엔진 ③c: 지터 버퍼 `restart`는 워커 반복에서 적용되므로 할당·해제가 없어야 한다(이전에는 `Self::new`로 ≈1.19MB
-/// 할당 + 옛 버퍼 해제). 버퍼를 Opus·PCM 스트림으로 채워 디코더·FIFO·슬롯이 모두 쓰인 뒤 잰다. 재시작 뒤 같은 코덱의
-/// 첫 디코드도 예비 디코더를 다시 쓰므로 할당하지 않는다.
+/// 할당 + 옛 버퍼 해제). 버퍼 하나에 코덱·채널을 바꿔 가며(Opus 모노 → 연속 restart → PCM → Opus 스테레오 → Opus 모노,
+/// 에코 측정에서 내 코덱이 상대와 다를 때의 경로 — #124 리뷰 M-2·L-1) restart와 그 뒤 재생 경로(insert/pop/end_burst)를
+/// 모두 잰다. 디코더는 버퍼를 만들 때(제어 평면) 미리 만든 풀과 주고받을 뿐이다. 인코드는 표시 구간 밖.
 #[test]
 fn jitter_restart_does_not_allocate() {
     use band_lib::engine::codec::Encoder;
@@ -181,50 +182,52 @@ fn jitter_restart_does_not_allocate() {
     use band_lib::engine::jitter::{JitterBuffer, JitterSettings};
     use band_lib::net::packet::{Header, PacketType, FLAG_OPUS};
 
-    for codec in [CodecKind::Opus, CodecKind::Pcm16] {
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    // libopus는 C malloc으로 할당해 위 계수에 안 잡힌다 → Opus 디코더 생성 수로 따로 본다(버퍼를 만들 때 모노·스테레오 둘).
+    // 계수는 프로세스 전역이다: 이 바이너리의 다른 시험이 병렬로 디코더를 만들면 깨진다(지금은 없음, #126 리뷰 L-5).
+    let created0 = band_lib::engine::codec::opus_decoders_created();
+    let mut payload = vec![0u8; MAX_PAYLOAD_BYTES];
+    let mut out = vec![0f32; 480];
+    let mut seq = 0u32;
+    let mut t = 0u64;
+    for (i, (codec, ch)) in [(CodecKind::Opus, 1usize), (CodecKind::Opus, 1), (CodecKind::Pcm16, 1), (CodecKind::Opus, 2), (CodecKind::Opus, 1)].into_iter().enumerate() {
         let opus = codec == CodecKind::Opus;
-        let mut enc = Encoder::new(codec, 1, 96_000).unwrap();
-        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
-        let pcm: Vec<f32> = (0..240).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
-        let mut payload = vec![0u8; MAX_PAYLOAD_BYTES];
-        let mut out = vec![0f32; 480];
-        let mut seq = 0u32;
-        let mut feed = |jb: &mut JitterBuffer, ticks: u64, t0: u64, payload: &mut Vec<u8>, out: &mut Vec<f32>| {
-            for k in 0..ticks {
-                let n = enc.encode(&pcm, payload).unwrap();
-                let h = Header {
-                    ptype: PacketType::Audio,
-                    ssrc: 1,
-                    seq,
-                    timestamp: seq.wrapping_mul(240),
-                    flags: if opus { FLAG_OPUS } else { 0 },
-                    frame_code: frame_code_from_samples(240).unwrap(),
-                };
-                seq += 1;
-                let t = t0 + k * 5000;
-                jb.insert(&h, &payload[..n], t);
-                jb.pop(out);
-                jb.end_burst(t, t, 0.0);
-            }
-        };
-        feed(&mut jb, 200, 0, &mut payload, &mut out);
-        assert!(jb.is_playing(), "{codec:?}");
-        let n = rt_allocs(|| jb.restart());
-        assert_eq!(n, 0, "{codec:?}: restart가 할당·해제를 했다");
-        // 재시작 직후 같은 코덱 스트림: 예비 디코더 재사용 — 삽입·재생 경로도 할당 0(인코드는 표시 구간 밖)
+        let mut enc = Encoder::new(codec, ch, 96_000).unwrap();
+        let pcm: Vec<f32> = (0..240 * ch).map(|k| (k as f32 * 0.05).sin() * 0.5).collect();
+        // 첫 단계는 restart 전 버퍼를 채운다(측정 밖). 둘째 단계 앞은 연속 restart(디코드 전 restart) 두 번.
+        if i > 0 {
+            let n = rt_allocs(|| {
+                jb.restart();
+                if i == 1 {
+                    jb.restart();
+                }
+            });
+            assert_eq!(n, 0, "단계 {i} {codec:?} ch {ch}: restart가 할당·해제를 했다");
+        }
         let mut allocs = 0;
-        for k in 0..100u64 {
+        for _ in 0..200 {
             let n = enc.encode(&pcm, &mut payload).unwrap();
-            let h = Header { ptype: PacketType::Audio, ssrc: 1, seq, timestamp: seq.wrapping_mul(240), flags: if opus { FLAG_OPUS } else { 0 }, frame_code: frame_code_from_samples(240).unwrap() };
+            let h = Header {
+                ptype: PacketType::Audio,
+                ssrc: 1,
+                seq,
+                timestamp: seq.wrapping_mul(240),
+                flags: if opus { FLAG_OPUS } else { 0 },
+                frame_code: frame_code_from_samples(240).unwrap(),
+            };
             seq += 1;
-            let t = 10_000_000 + k * 5000;
-            allocs += rt_allocs(|| {
+            t += 5000;
+            let a = rt_allocs(|| {
                 jb.insert(&h, &payload[..n], t);
                 jb.pop(&mut out);
                 jb.end_burst(t, t, 0.0);
             });
+            if i > 0 {
+                allocs += a;
+            }
         }
-        assert!(jb.is_playing(), "{codec:?}");
-        assert_eq!(allocs, 0, "{codec:?}: 재시작 뒤 첫 디코드가 디코더를 새로 만들었다");
+        assert!(jb.is_playing(), "단계 {i} {codec:?} ch {ch}");
+        assert_eq!(allocs, 0, "단계 {i} {codec:?} ch {ch}: 재시작 뒤 재생 경로(디코더 교체 포함)가 할당·해제를 했다");
     }
+    assert_eq!(band_lib::engine::codec::opus_decoders_created(), created0, "디코더는 풀에서만 — 재시작·코덱 변경에서 새로 만들지 않는다");
 }
