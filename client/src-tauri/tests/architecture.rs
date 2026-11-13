@@ -89,13 +89,10 @@ const NODES: &[(&str, u8)] = &[
 const EXCEPTIONS: &[(&str, &str, &str)] = &[
     // 믹서가 메트로놈 기본 게인을 안다(metronome.rs가 RT 클릭·스케줄러·계획을 한 파일에) → ⑥ metronome 계층별 분리.
     ("engine::mixer", "engine::metronome", "⑥"),
-    // 어댑터의 로직: 릴레이 주소 DNS 해석, 게인 범위 자르기 → ⑦ manager 쪽으로.
-    ("commands", "net::relay", "⑦"),
-    ("commands", "engine::mixer", "⑦"),
 ];
 
 /// 예외 수 상한(래칫). 단계를 끝내 예외를 지우면 이 값도 내린다. 올리는 것은 금지(위 주석).
-const MAX_EXCEPTIONS: usize = 3;
+const MAX_EXCEPTIONS: usize = 1;
 
 /// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
 const OPEN_STAGES: &[&str] = &["③", "⑥", "⑦"];

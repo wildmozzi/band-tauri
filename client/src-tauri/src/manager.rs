@@ -14,11 +14,12 @@ use crate::engine::config::EngineConfig;
 use crate::engine::measure::{EchoReport, LoopbackReport, MeasureVerdict};
 use crate::engine::metronome::{MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OFFSET_MS};
 use crate::engine::device::AudioBackend;
-use crate::engine::mixer::MixControls;
+use crate::engine::mixer::{clamp_gain, MixControls};
 use crate::engine::report::{EngineSnapshot, EngineStats};
 use crate::engine::Engine;
 use crate::net::peer::LocalDescriptor;
-use crate::net::NetOptions;
+use crate::net::relay::resolve_relay_addr;
+use crate::net::{NetOptions, RelaySetting};
 
 #[derive(Default)]
 struct Slot {
@@ -133,6 +134,45 @@ impl EngineManager {
 
     pub fn backend(&self) -> &Arc<dyn AudioBackend> {
         &self.backend
+    }
+
+    /// 릴레이 설정(설계 4절). 서버의 `relay-token`을 받을 때마다(최초·갱신) 부른다. 블로킹(DNS)이므로 비UI 스레드에서.
+    /// DNS 조회는 엔진 락 밖에서 한다. 같은 host:port 문자열이면 처음 해석한 주소를 유지한다(토큰 갱신마다 다시
+    /// 풀면 라운드로빈 A 레코드에서 릴레이가 바뀌어 끊긴다, M3).
+    pub fn set_relay(&self, host: &str, token: &str, expires_in: Option<std::time::Duration>, bind_key: Option<&str>) -> Result<(), String> {
+        let known = self.with_engine(|e| Ok(e.relay_addr_for_host(host)))?;
+        let addr = match known {
+            Some(a) => a,
+            None => resolve_relay_addr(host)?,
+        };
+        self.with_engine(|e| e.set_relay(Some(RelaySetting { host, addr, token, expires_in, bind_key })))
+    }
+
+    /// 릴레이 해제.
+    pub fn clear_relay(&self) -> Result<(), String> {
+        self.with_engine(|e| e.set_relay(None))
+    }
+
+    /// 마이크 입력 뮤트(로컬 송신·모니터).
+    pub fn set_input_muted(&self, muted: bool) {
+        self.controls.input_muted.store(muted, Ordering::Relaxed);
+    }
+
+    /// 내 입력 모니터. 게인은 믹서 범위로 자른다.
+    pub fn set_monitor(&self, enabled: bool, gain: f32) {
+        self.controls.monitor_enabled.store(enabled, Ordering::Relaxed);
+        self.controls.monitor_gain.store(clamp_gain(gain));
+    }
+
+    /// 마스터 게인(믹서 범위로 자른다).
+    pub fn set_master_gain(&self, gain: f32) {
+        self.controls.master_gain.store(clamp_gain(gain));
+    }
+
+    /// 메트로놈 클릭 볼륨·뮤트(로컬 전용, 엔진 재시작 간 유지). 게인은 믹서 범위로 자른다.
+    pub fn set_metronome_gain(&self, gain: f32, muted: bool) {
+        self.controls.click_gain.store(clamp_gain(gain));
+        self.controls.click_muted.store(muted, Ordering::Relaxed);
     }
 
     fn restore_monitor(&self, s: &mut Slot) {
