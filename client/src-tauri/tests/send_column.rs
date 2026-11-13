@@ -37,9 +37,12 @@ use sha2::{Digest, Sha256};
 const HANG: Duration = Duration::from_secs(30);
 /// 비교하는 패킷 수(2.5ms 프레임 2,000개 = 5초분).
 const COLUMN: usize = 2_000;
-/// fixture 구간(프레임 번호). 연결은 엔진 시작 직후 로컬에서 서므로 2초(프레임 800) 전에 첫 패킷이 온다.
+/// fixture 구간(프레임 번호). 입력은 클럭 원점(엔진 시작 + `T0_MARGIN`)부터 흐르고 연결은 그 전에 선다 — 첫 패킷은 프레임 0 근처다.
 const FIX_FROM: usize = 800;
 const FIX_LEN: usize = 2_000;
+
+/// 가짜 장치의 클럭 원점을 엔진 시작보다 이만큼 뒤에 둔다(장치 열기는 엔진 시작의 첫 단계 — 평소 수 ms).
+const T0_MARGIN: Duration = Duration::from_secs(2);
 
 /// 샘플 번호 → [-0.5, 0.5) 결정적 잡음(splitmix64). 프레임마다 내용이 달라 참조 열에서 위치가 하나로 정해진다.
 fn sample(i: u64) -> f32 {
@@ -63,20 +66,27 @@ struct Reference {
     enc: Encoder,
     frame: usize,
     ch: usize,
+    /// 첫 프레임의 첫 샘플 번호(정상은 0).
+    start: u64,
     payloads: Vec<Vec<u8>>,
 }
 
 impl Reference {
     fn new(cfg: &EngineConfig) -> Self {
+        Self::from_sample(cfg, 0)
+    }
+
+    /// 입력이 샘플 `start`에서 시작했다고 보고 만든 참조(진단용: 장치 열기가 클럭 원점보다 늦은 경우를 가린다).
+    fn from_sample(cfg: &EngineConfig, start: u64) -> Self {
         let ch = cfg.channels as usize;
-        Self { enc: Encoder::new(cfg.codec, ch, cfg.opus_bitrate()).unwrap(), frame: cfg.frame_samples(), ch, payloads: Vec::new() }
+        Self { enc: Encoder::new(cfg.codec, ch, cfg.opus_bitrate()).unwrap(), frame: cfg.frame_samples(), ch, start, payloads: Vec::new() }
     }
 
     fn get(&mut self, k: usize) -> &[u8] {
         let mut pcm = vec![0f32; self.frame * self.ch];
         let mut out = vec![0u8; MAX_PAYLOAD_BYTES];
         while self.payloads.len() <= k {
-            let k0 = self.payloads.len() as u64 * self.frame as u64;
+            let k0 = self.start + self.payloads.len() as u64 * self.frame as u64;
             for (i, fr) in pcm.chunks_exact_mut(self.ch).enumerate() {
                 fr.fill(sample(k0 + i as u64));
             }
@@ -98,7 +108,9 @@ fn collect(cfg: &EngineConfig, want: usize) -> Vec<Packet> {
     let mut backend = FakeBackend::new(48_000, source());
     backend.record_output = false;
     // 클럭 원점을 미래로: 입력 콜백이 샘플 0부터 시작한다(원점이 과거면 "지금"에 해당하는 블록부터라 실행마다 다르다).
-    backend.t0 = Some(Instant::now() + Duration::from_millis(300));
+    // 여유는 벽시계 가정이다(#131 리뷰 M1): 장치 열기가 이보다 늦으면 입력이 샘플 0이 아닌 블록에서 시작한다. 그 경우는
+    // `assert_matches_reference`가 따로 가려 "조건 밖"이라고 알린다(엔진 결함으로 읽히지 않게).
+    backend.t0 = Some(Instant::now() + T0_MARGIN);
     let opts = NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
     let e = Engine::start(cfg.clone(), Arc::new(backend), Arc::new(MixControls::default()), Some(("alice".into(), opts))).unwrap();
     let e_addr: SocketAddr = format!("127.0.0.1:{}", e.local_port().unwrap()).parse().unwrap();
@@ -149,7 +161,22 @@ fn assert_matches_reference(cfg: &EngineConfig, got: &[Packet], reference: &mut 
     let want_flags = if cfg.codec == CodecKind::Opus { FLAG_OPUS } else { 0 } | if cfg.channels == 2 { FLAG_STEREO } else { 0 };
     // 첫 패킷이 몇 번째 프레임인지: 참조에서 같은 페이로드를 찾는다(연결은 수 초 안에 선다).
     let limit = (HANG.as_secs_f64() * 48_000.0 / frame as f64) as usize;
-    let k0 = (0..limit).find(|&k| reference.get(k) == got[0].payload.as_slice()).expect("첫 패킷이 참조 열 어디에도 없다 — 프레임 경계나 인코더 상태가 다르다");
+    let Some(k0) = (0..limit).find(|&k| reference.get(k) == got[0].payload.as_slice()) else {
+        // 원인을 가른다(#131 리뷰 M1): 장치 열기가 클럭 원점보다 늦어 입력이 뒤 블록에서 시작했으면 시험 조건 밖이다.
+        // 그 경우 받은 열은 "샘플 j·버퍼에서 시작한 참조"와 맞는다. PCM16은 상태가 없어 이 검사로 확실히 갈리고,
+        // Opus도 시작점이 맞으면 인코더 상태까지 같아 맞는다.
+        let buf = cfg.buffer_size as u64;
+        for j in 1..=400u64 {
+            let mut shifted = Reference::from_sample(cfg, j * buf);
+            if (0..2_000).any(|k| shifted.get(k) == got[0].payload.as_slice()) {
+                panic!(
+                    "시험 조건 밖(엔진 결함 아님): 입력이 샘플 {}에서 시작했다 — 장치 열기가 클럭 원점(엔진 시작 + {T0_MARGIN:?})보다 늦었다(부하). 다시 돌릴 것",
+                    j * buf
+                );
+            }
+        }
+        panic!("첫 패킷이 참조 열 어디에도 없다 — 프레임 경계나 인코더 상태가 다르다(입력 시작이 밀린 경우도 아니다)");
+    };
     for (i, p) in got.iter().enumerate() {
         assert_eq!(p.flags, want_flags, "패킷 {i}의 flags");
         if i > 0 {

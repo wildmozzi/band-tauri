@@ -132,7 +132,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 워커는 은닉 마감(다음 출력 콜백 − 1.5ms)을, net 수신은 패킷 도착 시각 기록을 지켜야 한다. RT만큼 엄격하지 않지만 다음을 지킨다.
 
-1. **할당은 시작·재구성 때만**(버퍼는 `Worker::new`에서 사전할당). 반복 중 할당은 이벤트 드문 경로만 허용하고 목록으로 관리한다 — 현재: 메트로놈 계획이 바뀔 때 `clone`, 새 피어의 `AutoTx`(id `clone`), `Net::peers()`의 `Vec` 복제(측정·통계 경로), 에코 측정 시작·끝의 지터 재시작(`JitterBuffer::restart`가 버퍼를 새로 만든다 — ③-a2부터 워커에서 적용, 측정당 2회). ②에서 워커 루프의 매 반복 경로에 할당이 없음을 유지한다.
+1. **할당은 시작·재구성 때만**(버퍼는 `Worker::new`에서 사전할당). 반복 중 할당은 이벤트 드문 경로만 허용하고 목록으로 관리한다 — 현재: 메트로놈 계획이 바뀔 때 `clone`, 새 피어의 `AutoTx`(id `clone`), 새 피어의 `PeerFeed`(리샘플러, `PeerSources`가 슬롯을 배정할 때 — 제어 평면으로 옮기는 것은 ⑧ 후속), `Net::peers()`의 `Vec` 복제(측정·통계 경로), 에코 측정 시작·끝의 지터 재시작(`JitterBuffer::restart`가 버퍼를 새로 만든다 — ③-a2부터 워커에서 적용, 측정당 2회). ②에서 워커 루프의 매 반복 경로에 할당이 없음을 유지한다.
 2. **락은 짧게**: 잡은 채 블로킹 I/O·로그·할당을 하지 않는다. 예외: 워커의 `send_to`(UDP, 논블로킹에 가까움, 송신 큐 지연으로 잰다).
 3. **우선순위 역전**: 워커·net 수신은 MMCSS로 올라가 있고 커맨드·`band-diag`는 기본 우선순위다. `parking_lot`은 우선순위 상속이 없으므로 기본 우선순위 스레드가 준RT와 같은 락을 잡을 때 그 안에서는 복사만 한다(`stats()` 스냅샷). 지터 락은 ③에서 없앴다(통계 = seqlock 스냅샷, 프로필·재시작 = 원자값, 추가·제거 = 명령 큐, 삽입 = 수신 큐). 남은 락은 4.1절 끝 표.
 4. 로그는 레이트 제한(1000회에 1번 등).
@@ -224,12 +224,15 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/jitter/tests.rs` | 결정적 단위 시뮬레이션 | |
 | `engine/worker/mod.rs` | `Worker` 조립·루프(단계를 순서대로 부르는 조정자), 정지 | 단계 순서 |
 | `engine/worker/clock.rs` | 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`) | 시각 추정 |
-| `engine/worker/capture.rs` | 송신: 입력 링 → 리샘플 → 프레임 → 인코드 → `send_audio`, 에코 클릭 스트림 | 송신 경로 |
-| `engine/worker/auto_codec.rs` | 피어별 자동 Opus 송신 상태(`relay_codec` 정책 연동) | 자동 전환 |
-| `engine/worker/peer_feed.rs` | 수신 공급: 피어 슬롯 배정, 지터 → 소스 링(`PeerFeed`), 녹음 마커 | 콜백 구동 믹스 규칙 |
-| `engine/worker/local.rs` | 로컬 모니터·탭 경로(`LocalFifo`, 로컬 소스 링 수위) | 모니터 경로 |
-| `engine/worker/beat_sched.rs` | 메트로놈 박 예약·상태 보고(워커 쪽) | 메트로놈 스케줄 |
-| `engine/worker/device_watch.rs` | 장치 멈춤 감시·스트림 에러 로그 | 장치 감시 |
+| `engine/worker/capture.rs`(②b-2) | `Capture`: 입력 링 → 리샘플 → 48k 블록·프레임 | 입력 장치 형식·리샘플·프레임 크기 |
+| `engine/worker/send.rs`(②b-2) | `SendPath`: 프레임 → 인코드 → `send_audio`, 에코 클릭 스트림. 네트워크가 있을 때만 존재 | 코덱·패킷 플래그·송신 API |
+| `engine/worker/auto_codec.rs`(②b-2) | `AutoCodec`(`SendPath`의 부속): 피어별 자동 Opus 송신 상태(`relay_codec` 정책 연동) | 자동 전환 |
+| `engine/worker/peer_sources.rs` | `PeerSources`: 피어 미디어 표(명령 큐)·슬롯 배정·피어별 공급 순서·녹음 마커 | 피어 수명, 공급 순서 |
+| `engine/worker/peer_feed.rs` | `PeerFeed`: 피어 하나의 지터 → 소스 링 공급 | 콜백 구동 믹스 규칙 |
+| `engine/worker/local_path.rs` | `LocalPath`: 로컬 모니터·탭 공급, 여유 적응, 점유 통계 | 모니터 경로 |
+| `engine/worker/local.rs` | `LocalFifo`(로컬 입력 FIFO, 수위 제어) | FIFO 수위 규칙 |
+| `engine/worker/metronome_stage.rs` | `MetronomeStage`: 메트로놈 박 예약 입력(시계 추정·숨은 출력 지연)·상태 보고 | 메트로놈 스케줄 |
+| `engine/worker/device_watch.rs` | `DeviceWatch`: 장치 멈춤 감시·스트림 에러 로그 | 장치 감시 |
 | `engine/sim/{mod,tune,long,loss_codec}.rs` | 가상 시간 결정적 하네스(`cfg(test)`): 6피어 5·60분, 손실 피드백 | 하네스 시나리오 |
 | `engine/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
 | `engine/stats.rs`, `rt_timing.rs`, `report.rs` | RT·워커 원자 통계 카운터, RT 콜백 타이밍, 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
@@ -241,7 +244,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `net/{clock, packet, crypto, peer, stun, relay, qos, txlat}.rs` | 시계 오프셋, 패킷, 암호, 피어 테이블·홀펀칭, STUN, 릴레이, DSCP, 송신 큐 지연 | 각 프로토콜 |
 | `diag/{mod, timeline, mask, export}.rs` | 진단 기록 스레드, 링 버퍼, 마스킹, zip | 진단 |
 
-워커 하위 모듈 사이 공유 상태는 **명시적 구조체**로 넘긴다: 읽기 전용 문맥(장치 정보·카운터·소스 뱅크·net)은 `&WorkerParams`, 단계 사이 값은 반환값(`FeedTiming`, 캡처 프레임). 전역 상태는 없다.
+워커 하위 모듈(단계) 사이 공유 상태는 **명시적으로** 넘긴다(②b, [engine-stage2b-design.md](engine-stage2b-design.md) 2.2절): 읽기 전용 문맥(설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop)은 조정자만 갖는 `WorkerCtx`이고, **조정자가 거기서 쓰는 값만 꺼내 단계 메서드의 인자로 준다**(단계는 `&WorkerCtx`를 받지 않는다). `WorkerParams`는 `Worker::new`의 입력일 뿐이다 — 소유권이 넘어가는 끝(`in_cons`·`prods`·`media_port`)이 섞여 있어 단계에 그대로 줄 수 없다. `net`은 쓰는 단계만 생성 때 받아 갖는다. 단계 사이 값은 반환값·인자(`FeedTiming`, 48k 블록·프레임, `PeerRound.urgent`, 입력 쪽 대기량). 전역 상태는 없다.
 
 ## 7. 공개 표면과 테스트 표면
 

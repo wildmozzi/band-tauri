@@ -8,11 +8,20 @@
 //!   - 로컬(모니터·탭): 콜백이 소비한 만큼 `OUT_CHUNK` 단위로 로컬 FIFO에서 꺼내 다시 채운다.
 //! - 깊이 측정 시각은 워커 기상 시각이 아니라 `DeviceClock`이 추정한 출력 콜백 시각이다.
 //!
+//! ## 구조(엔진 ②b, `docs/overhaul/engine-stage2b-design.md`)
+//! `Worker`는 **조정자**다: 단계 구조체를 정해진 순서로 부르고 단계 사이 값(48k 블록, `FeedTiming`, `urgent`,
+//! 입력 쪽 대기량)을 인자·반환값으로 넘긴다. 단계는 서로의 필드를 읽지 않고, 읽기 전용 문맥(`WorkerCtx`) 전체가 아니라
+//! 쓰는 값만 인자로 받는다.
+//!
 //! ## 파일
-//! - `mod.rs`: `Worker` 조립과 루프(입력 펌프·송신·자동 코덱·메트로놈·피어 슬롯·로컬 공급·장치 감시), 정지
-//! - `clock.rs`: 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`)
-//! - `local.rs`: 로컬 입력 FIFO(`LocalFifo`, 모니터·믹스 탭)
-//! - `peer_feed.rs`: 피어 소스 공급(`PeerFeed`, 콜백 구동 믹스 규칙)
+//! - `mod.rs`: `Worker`(조정자) 조립과 루프, 정지. 송신 쪽(입력 펌프·인코드·송신·자동 코덱)은 아직 여기 있다(②b-2에서 단계로)
+//! - `clock.rs`: 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`) — 시각 단계
+//! - `peer_sources.rs`: 피어 소스 단계(`PeerSources`: 미디어 표·슬롯 배정·피어별 공급·녹음 마커)
+//! - `peer_feed.rs`: 피어 하나의 소스 공급(`PeerFeed`, 콜백 구동 믹스 규칙)
+//! - `local_path.rs`: 로컬 경로 단계(`LocalPath`: 모니터·탭 공급, 여유 적응, 점유 통계)
+//! - `local.rs`: 로컬 입력 FIFO(`LocalFifo`)
+//! - `metronome_stage.rs`: 메트로놈 단계(`MetronomeStage`: 박 예약 입력·상태 보고)
+//! - `device_watch.rs`: 장치 감시 단계(`DeviceWatch`)
 //! - `tests.rs`: 결정적 단위 시뮬레이션
 
 use std::collections::VecDeque;
@@ -20,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ringbuf::traits::{Consumer, Observer, Producer};
+use ringbuf::traits::Consumer;
 use ringbuf::{HeapCons, HeapProd};
 
 use super::codec::Encoder;
@@ -28,29 +37,38 @@ use super::config::{frame_code_from_samples, CodecKind, EngineConfig, INTERNAL_R
 use super::device::StreamInfo;
 
 use super::measure::EchoProbe;
-use super::metronome::{choose_hidden_out, hidden_out_latency_us, measured_hidden_out_us, BeatScheduler, MetronomeCtl, MetronomePlan, OutClock};
+use super::metronome::MetronomeCtl;
 use super::mixer::MixControls;
-use super::record::{MarkEvent, MarkKind, MarkSink};
+use super::record::MarkSink;
 use super::relay_codec::{auto_opus_perc, auto_reason, pcm_relay_load, LossCodecPolicy, PolicyInputs, RelayCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
 use super::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
-use super::rt::{SourceBank, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
+use super::rt::{SourceBank, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE};
 use super::stats::AudioCounters;
 use crate::net::types::PathKind;
 use crate::net::packet::{FLAG_OPUS, FLAG_STEREO};
-use super::peer_media::{MediaPortRt, MediaSettings, PeerMedia, MEDIA_CMD_CAPACITY};
+use super::peer_media::{MediaPortRt, MediaSettings};
 use crate::net::media_link::PeerKey;
 use crate::net::peer::Peer;
 use crate::net::{AutoPayload, NetShared, MAX_PEERS};
 
 mod clock;
+mod device_watch;
 mod local;
+mod local_path;
+mod metronome_stage;
 mod peer_feed;
+mod peer_sources;
 #[cfg(test)]
 mod tests;
 
 pub use clock::{CallbackTracker, DeviceClock, FeedTiming};
 pub use local::LocalFifo;
 pub use peer_feed::{FeedEvents, PeerFeed, DEADLINE_GUARD_US};
+
+use device_watch::DeviceWatch;
+use local_path::LocalPath;
+use metronome_stage::MetronomeStage;
+use peer_sources::{PeerSources, PeerSourcesParts};
 
 /// 워커 폴링 주기. Windows에서도 std::thread::sleep은 고해상도 타이머를 쓴다.
 pub(super) const POLL: Duration = Duration::from_micros(500);
@@ -108,14 +126,13 @@ pub struct WorkerLockSites {
 /// 워커 반복 시간 분포 기록(엔진 ③c 측정, #122 리뷰 Low): 측정 빌드(`test-support`)에서만. 출시 빌드는 시계를 더 읽지 않는다.
 const DIAG_TIMING: bool = cfg!(feature = "test-support");
 
-/// 콜백이 이 시간 동안 멈추면 장치를 잃은 것으로 본다.
-const DEVICE_STALL: Duration = Duration::from_secs(1);
-
 
 // ============================================================================
 // 워커
 // ============================================================================
 
+/// `Worker::new`의 입력. 소유권이 넘어가는 끝(`in_cons`·`prods`·`media_port`)과 공유 읽기 전용 값이 섞여 있으므로 단계에
+/// 그대로 주지 않는다 — `Worker::new`가 `WorkerCtx`(조정자 묶음)와 단계들에 나눠 준다.
 pub struct WorkerParams {
     pub cfg: EngineConfig,
     pub info: StreamInfo,
@@ -142,21 +159,82 @@ pub struct WorkerParams {
     pub media_settings: Arc<MediaSettings>,
 }
 
+/// 조정자(`Worker::run`)의 읽기 전용 묶음: 설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop(모두 `Arc`·`Copy`·불변).
+/// **단계 메서드는 이것을 받지 않는다** — 조정자가 필드를 꺼내 쓰는 값만 인자로 넘긴다(설계 2.2절). `net`은 여기에 없다.
+struct WorkerCtx {
+    cfg: EngineConfig,
+    info: StreamInfo,
+    counters: Arc<AudioCounters>,
+    controls: Arc<MixControls>,
+    bank: Arc<SourceBank>,
+    stats: Arc<WorkerStats>,
+    /// 지터 버퍼 수신 시각과 같은 기준(µs)의 시계.
+    epoch: Instant,
+    stop: Arc<AtomicBool>,
+}
+
+impl WorkerCtx {
+    fn wall_us(&self) -> u64 {
+        self.epoch.elapsed().as_micros() as u64
+    }
+}
+
+// 버스트 계산: 단계가 문맥 없이 부를 수 있게 자유 함수다. **부를 때마다 원자값을 읽는다** — 반복당 한 번 읽어 넘기는
+// 것으로 바꾸지 않는다(콜백 크기가 바뀌는 순간의 동작이 달라진다, 설계 2.2절).
+
+fn to48(frames: u32, rate: u32) -> usize {
+    (frames as u64 * INTERNAL_RATE as u64).div_ceil(rate.max(1) as u64) as usize
+}
+
+/// 입력 콜백 크기(48k 환산). 아직 콜백이 안 돌았으면 장치 버퍼 크기.
+fn in_burst48(info: &StreamInfo, counters: &AudioCounters) -> usize {
+    let n = match counters.in_cb_frames.load(Ordering::Relaxed) {
+        0 => info.buffer_frames,
+        n => n,
+    };
+    to48(n, info.in_rate)
+}
+
+/// 출력 콜백 크기(장치 프레임). 아직 콜백이 안 돌았으면 장치 주기, 그것도 모르면 장치 버퍼 크기.
+fn out_burst_dev(info: &StreamInfo, counters: &AudioCounters) -> u64 {
+    match counters.out_cb_frames.load(Ordering::Relaxed) {
+        0 => match info.out_period_frames {
+            0 => info.buffer_frames as u64,
+            n => n as u64,
+        },
+        n => n as u64,
+    }
+}
+
+/// 출력 생산 단위 `OUT_CHUNK`(48k)의 장치 프레임 수.
+fn chunk_dev(info: &StreamInfo) -> u64 {
+    (OUT_CHUNK as u64 * info.out_rate as u64).div_ceil(INTERNAL_RATE as u64)
+}
+
+/// 조정자. 필드 = 문맥 + 단계들 + 조정자가 갖고 단계에 빌려 주는 것(`peer_copy`·`lock_wait`) + 아직 단계로 옮기지 않은
+/// 송신 쪽(②b-2에서 `Capture`·`SendPath`·`AutoCodec`).
 pub struct Worker {
-    p: WorkerParams,
-    beats: BeatScheduler,
-    metro_plan: (u64, MetronomePlan),
-    metro_stats_at: u64,
-    metro_stats_gen: u64,
+    ctx: WorkerCtx,
+    /// 시각 단계(출력 콜백 시각 추정).
+    clock: CallbackTracker,
+    metro: MetronomeStage,
+    peers: PeerSources,
+    local: LocalPath,
+    watch: DeviceWatch,
     /// 피어 표 복사본(엔진 ③c): 송신·자동 코덱이 락 없이 본다. 세대가 바뀐 반복에서만 다시 복사된다.
     peer_copy: crate::net::PeerTableCopy,
     /// 이번 반복에 남은 락(에코 프로브·메트로놈)에서 기다린 시간(엔진 ③c 측정 — 본문에서 빼서 락 밖 비용을 본다).
+    /// 락을 잡는 단계 메서드에 빌려 준다.
     lock_wait: crate::net::txlat::LockWait,
+
+    // ---- 송신 쪽(②b-2에서 단계로 옮긴다) ----
+    net: Option<Arc<NetShared>>,
+    in_cons: HeapCons<f32>,
+    /// 에코 측정 상태(클릭 프레임 생성). 재생 시각 탭 쪽 복제는 `PeerSources`가 갖는다.
+    probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
     frame: usize,
     ich: usize,
     in_rs: StreamResampler,
-    /// 로컬(모니터) 소스: 48k → 장치 레이트.
-    local_rs: StreamResampler,
     encoder: Option<Encoder>,
     /// 에코 측정 대상 피어용 인코더(측정 중에만 있음). 다른 피어와 코덱 상태를 섞지 않는다.
     alt_encoder: Option<Encoder>,
@@ -176,37 +254,17 @@ pub struct Worker {
     flags: u8,
     frame_code: u8,
     ts: u32,
-    tracker: CallbackTracker,
-    local: LocalFifo,
-    feeds: Vec<PeerFeed>,
-    /// 워커가 혼자 가지는 피어 미디어 표(지터 버퍼·수신 큐 소비자, 명령 큐로만 바뀐다, 엔진 ③-a2·a3). net 피어 표와 같은 순서.
-    // Box 그대로 둔다: 명령 큐로 받은 할당을 제거 때 반환 큐로 그대로 돌려보내므로 워커가 다시 Box하지(할당하지) 않는다.
-    #[allow(clippy::vec_box)]
-    media: Vec<Box<PeerMedia>>,
     in_tmp: Vec<f32>,
     /// 48k 입력 블록(리샘플 직후, 내부 채널).
     in48_buf: Vec<f32>,
     /// 인코더용 프레임 누적.
     cap_acc: VecDeque<f32>,
     frame_buf: Vec<f32>,
-    stereo_buf: Vec<f32>,
     payload: Vec<u8>,
     pkt: Vec<u8>,
-    local_buf: Vec<f32>,
-    chunk_buf: Vec<f32>,
-    out_tmp: Vec<f32>,
-    reported_errors: u32,
     encode_errors: u64,
-    monitor_ewma_us: f64,
-    safety: u64,
-    seen_xruns: u64,
-    last_xrun: Duration,
-    last_played: u64,
-    last_played_at: Duration,
-    last_captured: u64,
-    last_captured_at: Duration,
-    slot_full_logged: bool,
 }
+
 
 /// 피어 하나의 Opus 자동 전환 송신 상태(PCM16 설정, P1-4c·P1-4e). 키는 `PeerFeed`와 같은 `PeerKey`.
 struct AutoTx {
@@ -270,20 +328,25 @@ const MAX_DEVICE_RATE: u32 = 384_000;
 impl Worker {
     /// 리샘플러/인코더 생성. 실패하면 엔진 시작을 실패시킨다(리뷰 M10).
     pub fn new(p: WorkerParams) -> Result<Self, String> {
-        let frame = p.cfg.frame_samples();
-        let ich = p.cfg.channels as usize;
-        for (what, r) in [("입력", p.info.in_rate), ("출력", p.info.out_rate)] {
+        let WorkerParams { cfg, info, in_cons, mut prods, bank, counters, controls, net, stop, stats, epoch, probe, metronome, rec_marks, media_port, media_settings } = p;
+        let frame = cfg.frame_samples();
+        let ich = cfg.channels as usize;
+        for (what, r) in [("입력", info.in_rate), ("출력", info.out_rate)] {
             if !(MIN_DEVICE_RATE..=MAX_DEVICE_RATE).contains(&r) {
                 return Err(format!("지원하지 않는 {what} 장치 레이트: {r}Hz"));
             }
         }
-        if p.prods.len() != MAX_SOURCES {
+        if prods.len() != MAX_SOURCES {
             return Err("소스 링 수가 맞지 않습니다".into());
         }
-        let in_rs = StreamResampler::new(p.info.in_rate, INTERNAL_RATE, ich)?;
-        let local_rs = StreamResampler::new(INTERNAL_RATE, p.info.out_rate, 2)?;
-        let encoder = if p.net.is_some() {
-            Some(Encoder::new(p.cfg.codec, ich, p.cfg.opus_bitrate())?)
+        // 소스 링 생산자: 로컬 것(슬롯 0)은 `LocalPath`, 나머지(슬롯 1..)는 `PeerSources`.
+        const _: () = assert!(LOCAL_SOURCE == 0);
+        let peer_prods = prods.split_off(LOCAL_SOURCE + 1);
+        let local_prod = prods.pop().ok_or("소스 링 수가 맞지 않습니다")?;
+        let in_rs = StreamResampler::new(info.in_rate, INTERNAL_RATE, ich)?;
+        let local = LocalPath::new(ich, info.out_rate, local_prod)?;
+        let encoder = if net.is_some() {
+            Some(Encoder::new(cfg.codec, ich, cfg.opus_bitrate())?)
         } else {
             None
         };
@@ -295,23 +358,32 @@ impl Worker {
             flags |= FLAG_STEREO;
         }
         let frame_code = frame_code_from_samples(frame).ok_or("잘못된 프레임 크기")?;
-        let auto_enabled = p.net.is_some() && p.cfg.codec == CodecKind::Pcm16;
+        let auto_enabled = net.is_some() && cfg.codec == CodecKind::Pcm16;
         let mut auto_pool = Vec::with_capacity(MAX_PEERS);
         if auto_enabled {
             for _ in 0..MAX_PEERS {
-                auto_pool.push(Encoder::new(CodecKind::Opus, ich, p.cfg.opus_bitrate())?);
+                auto_pool.push(Encoder::new(CodecKind::Opus, ich, cfg.opus_bitrate())?);
             }
         }
         let auto_flags = FLAG_OPUS | if ich == 2 { FLAG_STEREO } else { 0 };
         // 로컬 소스는 항상 켜져 있다(모니터 꺼짐 = 버스 게인 0, 탭에는 계속 나감).
-        let local_slot = &p.bank.slots[LOCAL_SOURCE];
+        let local_slot = &bank.slots[LOCAL_SOURCE];
         local_slot.set_gains((0.0, 0.0), (1.0, 1.0));
         local_slot.state.store(SLOT_ACTIVE, Ordering::Release);
         Ok(Self {
+            clock: CallbackTracker::new(info.out_rate),
+            metro: MetronomeStage::new(metronome, net.clone()),
+            peers: PeerSources::new(PeerSourcesParts { prods: peer_prods, port: media_port, settings: media_settings, rec_marks, probe: probe.clone() }),
+            local,
+            watch: DeviceWatch::new(),
+            peer_copy: crate::net::PeerTableCopy::for_worker(),
+            lock_wait: Default::default(),
+            net,
+            in_cons,
+            probe,
             frame,
             ich,
             in_rs,
-            local_rs,
             encoder,
             alt_encoder: None,
             alt_frame: vec![0.0; frame * ich],
@@ -326,142 +398,61 @@ impl Worker {
             flags,
             frame_code,
             ts: rand::random(),
-            tracker: CallbackTracker::new(p.info.out_rate),
-            local: LocalFifo::new(),
-            feeds: Vec::with_capacity(MAX_SOURCES),
-            media: Vec::with_capacity(MEDIA_CMD_CAPACITY),
             in_tmp: vec![0.0; 4096],
             in48_buf: vec![0.0; 2048 * ich],
             cap_acc: VecDeque::with_capacity((frame + 4096) * ich),
             frame_buf: vec![0.0; frame * ich],
-            stereo_buf: vec![0.0; 2048 * 2],
             payload: vec![0u8; MAX_PAYLOAD_BYTES],
             pkt: vec![0u8; MAX_PACKET_BYTES],
-            local_buf: vec![0.0; OUT_CHUNK * 2],
-            chunk_buf: vec![0.0; OUT_CHUNK * 2],
-            out_tmp: vec![0.0; 8192],
-            reported_errors: 0,
             encode_errors: 0,
-            monitor_ewma_us: 0.0,
-            safety: 0,
-            seen_xruns: 0,
-            last_xrun: Duration::ZERO,
-            last_played: 0,
-            last_played_at: Duration::ZERO,
-            last_captured: 0,
-            last_captured_at: Duration::ZERO,
-            slot_full_logged: false,
-            beats: BeatScheduler::new(),
-            metro_plan: (0, MetronomePlan::default()),
-            metro_stats_at: 0,
-            metro_stats_gen: 0,
-            peer_copy: crate::net::PeerTableCopy::for_worker(),
-            lock_wait: Default::default(),
-            p,
+            ctx: WorkerCtx { cfg, info, counters, controls, bank, stats, epoch, stop },
         })
     }
 
+    /// 워커 루프. **호출 순서와 원자값·시계를 읽는 시점이 계약이다**(설계 5절) — 읽기 좋게 재배열하지 말 것:
+    /// - `clock.observe`(`FeedTiming`)는 캡처·인코드·송신 **뒤**, 메트로놈·피어 공급 **앞**에서 한 번(J5). 앞으로 옮기면 실시간
+    ///   은닉 마감 판단이 송신 시간만큼 이르게 된다.
+    /// - 로컬 FIFO는 `configure` → `push`(블록마다, `pump_input` 안) → `service` 순.
     pub fn run(mut self) {
-        let _prio = crate::sys::prio::promote_engine_thread(&self.p.stats.thread_prio);
+        let _prio = crate::sys::prio::promote_engine_thread(&self.ctx.stats.thread_prio);
         log::info!("워커 시작: frame {} ch {}", self.frame, self.ich);
         let mut last_start = Instant::now();
-        while !self.p.stop.load(Ordering::Relaxed) {
+        while !self.ctx.stop.load(Ordering::Relaxed) {
             let start = Instant::now();
             if DIAG_TIMING {
-                self.p.stats.iter_period.record(start - last_start);
+                self.ctx.stats.iter_period.record(start - last_start);
             }
             last_start = start;
             // 피어 표 복사본은 송신과 무관하게 반복마다 맞춘다: 캡처가 멈춰도(장치 분리) 빠진 피어가 쌓이지 않게(#126 리뷰 M-1).
             // 세대가 같으면 원자 load 하나.
-            if let Some(net) = self.p.net.as_ref() {
+            if let Some(net) = self.net.as_ref() {
                 net.refresh_copy(&mut self.peer_copy);
             }
-            self.reconfigure_local();
+            // 모니터/탭은 프레임 누적 전에 분기하므로 입력 방출 단위는 리샘플러 청크(패스스루면 1)다.
+            let granularity = if self.in_rs.is_passthrough() { 1 } else { RESAMPLE_CHUNK };
+            self.local.configure(&self.ctx.info, &self.ctx.counters, granularity);
             self.pump_input();
-            let timing = self.timing();
-            self.service_metronome(&timing);
-            let urgent = self.service_peers(&timing);
-            self.service_local();
-            self.track_occupancy();
-            self.watch_device();
-            let errs = self.p.counters.stream_errors.load(Ordering::Relaxed);
-            if errs != self.reported_errors {
-                log::warn!("오디오 스트림 에러 누적 {}회(장치 분리 등)", errs);
-                self.reported_errors = errs;
-            }
+            let c = &self.ctx;
+            // 인자 평가 순서 = 읽는 순서: 벽시계 → 출력 버스트 → (observe 안) 콜백 카운터.
+            let timing = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);
+            self.metro.service(&c.info, &c.counters, &c.stats, &timing, &mut self.lock_wait);
+            let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &timing, &mut self.lock_wait);
+            self.local.service(&c.info, &c.counters, &c.controls, &c.bank, &c.stats, c.epoch);
+            self.local.track_occupancy(&c.info, &c.stats, self.in_rs.available());
+            self.watch.check(&c.counters, &c.stats, c.epoch);
             let waited = std::time::Duration::from_nanos(std::mem::take(&mut self.lock_wait).ns);
             if DIAG_TIMING {
                 let body = start.elapsed();
-                let s = &self.p.stats;
+                let s = &c.stats;
                 s.iter_body.record(body);
                 s.iter_lock_wait.record(waited);
                 s.iter_unlocked.record(body.saturating_sub(waited));
             }
             // 은닉 마감이 가까우면 짧게 잔다(Windows 고해상도 타이머라도 0.5ms 폴링은 마감을 넘길 수 있다).
-            std::thread::sleep(if urgent { FINE_POLL } else { POLL });
+            std::thread::sleep(if round.urgent { FINE_POLL } else { POLL });
         }
-        // 정지: 피어 슬롯을 닫는다(콜백이 아직 돌면 남은 소리를 버린다).
-        for f in self.feeds.drain(..) {
-            let sh = &self.p.bank.slots[f.slot];
-            sh.playing.store(false, Ordering::Relaxed);
-            sh.state.store(SLOT_DRAIN, Ordering::Release);
-        }
+        self.peers.close(&self.ctx.bank);
         log::info!("워커 종료");
-    }
-
-    fn to48(frames: u32, rate: u32) -> usize {
-        (frames as u64 * INTERNAL_RATE as u64).div_ceil(rate.max(1) as u64) as usize
-    }
-
-    fn in_burst48(&self) -> usize {
-        let n = match self.p.counters.in_cb_frames.load(Ordering::Relaxed) {
-            0 => self.p.info.buffer_frames,
-            n => n,
-        };
-        Self::to48(n, self.p.info.in_rate)
-    }
-
-    fn out_burst_dev(&self) -> u64 {
-        match self.p.counters.out_cb_frames.load(Ordering::Relaxed) {
-            0 => match self.p.info.out_period_frames {
-                0 => self.p.info.buffer_frames as u64,
-                n => n as u64,
-            },
-            n => n as u64,
-        }
-    }
-
-    fn reconfigure_local(&mut self) {
-        let out48 = Self::to48(self.out_burst_dev() as u32, self.p.info.out_rate);
-        // 모니터/탭은 프레임 누적 전에 분기하므로 입력 방출 단위는 리샘플러 청크(패스스루면 1)다.
-        let granularity = if self.in_rs.is_passthrough() { 1 } else { RESAMPLE_CHUNK };
-        self.local.configure(self.in_burst48(), out48, granularity);
-    }
-
-    /// 입력·출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 본다(리뷰 M9 / PR #5 M-2).
-    /// cpal 에러 콜백은 비치명 에러도 보내므로 그것만으로는 판단하지 않는다.
-    fn watch_device(&mut self) {
-        let now = self.p.epoch.elapsed();
-        let played = self.p.counters.out_played_frames.load(Ordering::Relaxed);
-        let captured = self.p.counters.in_captured_frames.load(Ordering::Relaxed);
-        if played != self.last_played {
-            self.last_played = played;
-            self.last_played_at = now;
-        }
-        if captured != self.last_captured {
-            self.last_captured = captured;
-            self.last_captured_at = now;
-        }
-        let stalled = (played > 0 && now.saturating_sub(self.last_played_at) > DEVICE_STALL)
-            || (captured > 0 && now.saturating_sub(self.last_captured_at) > DEVICE_STALL);
-        if stalled != self.p.stats.device_stalled.load(Ordering::Relaxed) {
-            if stalled {
-                log::error!("오디오 장치 콜백이 멈췄습니다(장치 분리 가능성)");
-            } else {
-                log::info!("오디오 장치 콜백 재개");
-            }
-            self.p.stats.device_stalled.store(stalled, Ordering::Relaxed);
-        }
     }
 
     fn pump_input(&mut self) {
@@ -470,14 +461,14 @@ impl Worker {
         // (cap_acc에 남는 것은 프레임 미만이므로, 여기서 나가는 프레임의 마지막 샘플은 모두 이번 패스에 들어왔다.)
         let pass_at = Instant::now();
         loop {
-            let n = self.p.in_cons.pop_slice(&mut self.in_tmp);
+            let n = self.in_cons.pop_slice(&mut self.in_tmp);
             if n == 0 {
                 break;
             }
             let n = n - n % self.ich;
             self.in_rs.push(&self.in_tmp[..n]);
         }
-        let muted = self.p.controls.input_muted.load(Ordering::Relaxed);
+        let muted = self.ctx.controls.input_muted.load(Ordering::Relaxed);
         // 리샘플 직후 모니터/탭으로 바로 보낸다(프레임 누적 대기 없음, PR #5 M-5).
         loop {
             let mut buf = std::mem::take(&mut self.in48_buf);
@@ -491,7 +482,7 @@ impl Worker {
             if muted {
                 block.fill(0.0);
             }
-            self.push_local(block);
+            self.local.push(block);
             self.cap_acc.extend(block.iter().copied());
             self.in48_buf = buf;
         }
@@ -502,32 +493,16 @@ impl Worker {
         self.frame_buf = fb;
     }
 
-    fn push_local(&mut self, block: &[f32]) {
-        if self.ich == 2 {
-            self.local.push(block);
-        } else {
-            let sb = &mut self.stereo_buf;
-            for (d, &s) in sb.as_chunks_mut::<2>().0.iter_mut().zip(block.iter()) {
-                d[0] = s;
-                d[1] = s;
-            }
-            let n = block.len() * 2;
-            let sb = std::mem::take(&mut self.stereo_buf);
-            self.local.push(&sb[..n]);
-            self.stereo_buf = sb;
-        }
-    }
-
     /// 에코 측정 대상 피어용 프레임(무음 + 클릭)을 만들어 인코드한다. 반환: (피어 id, 페이로드 길이).
     fn probe_frame(&mut self) -> Option<(String, usize)> {
-        let now_us = self.p.epoch.elapsed().as_secs_f64() * 1e6;
-        let mut g = self.lock_wait.lock(&self.p.probe, &self.p.stats.lock_sites.probe_send);
+        let now_us = self.ctx.epoch.elapsed().as_secs_f64() * 1e6;
+        let mut g = self.lock_wait.lock(&self.probe, &self.ctx.stats.lock_sites.probe_send);
         let Some(pr) = g.as_mut() else {
             self.alt_encoder = None;
             return None;
         };
         if self.alt_encoder.is_none() {
-            match Encoder::new(self.p.cfg.codec, self.ich, self.p.cfg.opus_bitrate()) {
+            match Encoder::new(self.ctx.cfg.codec, self.ich, self.ctx.cfg.opus_bitrate()) {
                 Ok(e) => self.alt_encoder = Some(e),
                 Err(e) => {
                     log::warn!("에코 측정 인코더 생성 실패: {e}");
@@ -547,10 +522,10 @@ impl Worker {
         if !self.auto_enabled {
             return;
         }
-        let Some(net) = self.p.net.clone() else {
+        let Some(net) = self.net.clone() else {
             return;
         };
-        let now_d = self.p.epoch.elapsed();
+        let now_d = self.ctx.epoch.elapsed();
         // 직전 프레임에 릴레이 부하 전환 대상인데 PCM으로 나간 피어가 있으면(새 피어, 직접→릴레이) 바로 다시 본다(L1)
         let refresh = net.take_auto_refresh();
         if now_d < self.auto_check_at && !refresh {
@@ -583,7 +558,7 @@ impl Worker {
         for a in &mut self.auto {
             a.seen = false;
         }
-        let (ich, bitrate) = (self.ich, self.p.cfg.opus_bitrate());
+        let (ich, bitrate) = (self.ich, self.ctx.cfg.opus_bitrate());
         let (auto, pool) = (&mut self.auto, &mut self.auto_pool);
         for peer in self.peer_copy.peers() {
             let key = peer.key();
@@ -679,7 +654,7 @@ impl Worker {
         let alt = if self.encoder.is_some() { self.probe_frame() } else { None };
         self.update_auto_codec();
         self.auto_frames(frame, alt.as_ref().map(|(id, _)| id.as_str()));
-        if let (Some(enc), Some(net)) = (self.encoder.as_mut(), self.p.net.as_ref()) {
+        if let (Some(enc), Some(net)) = (self.encoder.as_mut(), self.net.as_ref()) {
             let alt = alt.as_ref().map(|(id, n)| (id.as_str(), &self.alt_payload[..*n]));
             let (auto, auto_flags, relay_on) = (&self.auto, self.auto_flags, self.relay_policy.active());
             // 이유는 송신 순간의 경로로 정한다. 릴레이 부하 대상인데 아직 인코드하지 않은 피어(None)는 net이
@@ -704,253 +679,5 @@ impl Worker {
             }
         }
         self.ts = self.ts.wrapping_add(self.frame as u32);
-    }
-
-    fn timing(&mut self) -> FeedTiming {
-        let wall_us = self.p.epoch.elapsed().as_micros() as u64;
-        let out_burst = self.out_burst_dev() as usize;
-        self.tracker.observe(&self.p.counters, wall_us, out_burst, self.p.info.out_rate)
-    }
-
-    /// 공유 메트로놈(P2-3): 다음 클릭 프레임을 올리고(시계 추정이 바뀌면 다시 맞춤), 상태를 0.1초마다 알린다.
-    fn service_metronome(&mut self, t: &FeedTiming) {
-        if t.cb_seq.is_none() {
-            return; // 콜백 도중: 재생 카운터와 시각이 어긋날 수 있다
-        }
-        {
-            let p = self.lock_wait.lock(&self.p.metronome.plan, &self.p.stats.lock_sites.metro_plan);
-            if p.0 != self.metro_plan.0 {
-                self.metro_plan = p.clone();
-            }
-        }
-        let (gen, plan) = (self.metro_plan.0, &self.metro_plan.1);
-        let est = match (&plan.ref_peer_id, self.p.net.as_ref()) {
-            (Some(id), Some(net)) if plan.running => net.peer_clock_timed(id, t.wall_us, &mut self.lock_wait, &self.p.stats.lock_sites.peer_clock),
-            _ => None,
-        };
-        let offset = match &plan.ref_peer_id {
-            None => Some(0.0),
-            Some(_) => est.map(|e| e.offset_us),
-        };
-        let rate = t.out_rate as f64;
-        let info = &self.p.info;
-        let driver = hidden_out_latency_us(info.out_reported_latency_frames, t.out_burst as u64, rate);
-        // 드라이버가 출력 지연을 알려 주지 않으면 루프백 보정값으로(PR #34 M2(a)). 입력 쪽 보고가 있으면 그만큼 뺀다.
-        let loopback = (*self.lock_wait.lock(&self.p.metronome.loopback_offset_ms, &self.p.stats.lock_sites.metro_offset)).map(|o| {
-            let in_burst = match self.p.counters.in_cb_frames.load(Ordering::Relaxed) {
-                0 => info.buffer_frames,
-                n => n,
-            };
-            measured_hidden_out_us(o, hidden_out_latency_us(info.in_reported_latency_frames, in_burst as u64, info.in_rate as f64))
-        });
-        let hidden = choose_hidden_out(driver, loopback);
-        let extra_out_us = hidden.map_or(0.0, |h| h.0);
-        let clock = OutClock { dev_now_us: t.dev_now_us as f64, played: t.played, rate, burst: t.out_burst as u64, extra_out_us };
-        let beat = self.beats.tick(gen, plan, offset, &clock, &self.p.metronome.click);
-        if t.wall_us.saturating_sub(self.metro_stats_at) >= 100_000 || gen != self.metro_stats_gen {
-            self.metro_stats_at = t.wall_us;
-            self.metro_stats_gen = gen;
-            let mut s = self.lock_wait.lock(&self.p.metronome.stats, &self.p.stats.lock_sites.metro_stats);
-            s.running = plan.running;
-            s.synced = offset.is_some();
-            s.bpm = plan.bpm;
-            s.beats_per_bar = plan.beats_per_bar;
-            s.start_us = plan.start_us;
-            s.ref_peer_id.clone_from(&plan.ref_peer_id);
-            s.clock_offset_ms = offset.map(|o| o / 1000.0);
-            s.clock_rtt_ms = est.map(|e| e.rtt_us / 1000.0);
-            s.drift_ppm = est.map(|e| e.drift_ppm);
-            s.beat = beat;
-            s.output_latency_ms = hidden.map(|h| h.0 / 1000.0);
-            s.output_latency_source = hidden.map(|h| h.1);
-            s.ref_clock_unsupported = match (&plan.ref_peer_id, self.p.net.as_ref()) {
-                (Some(id), Some(net)) if plan.running && est.is_none() => net.peer_clock_unsupported_timed(id, &mut self.lock_wait, &self.p.stats.lock_sites.peer_clock),
-                _ => false,
-            };
-            s.clock_extrapolation_ms = est.map(|e| e.extrapolation_us / 1000.0);
-        }
-    }
-
-    /// 피어 목록과 소스 슬롯을 맞춘다(새 피어에 빈 슬롯 배정, 사라진 피어 슬롯 해제).
-    fn sync_peer_slots(&mut self) {
-        for f in &mut self.feeds {
-            f.seen = false;
-        }
-        let out_rate = self.p.info.out_rate;
-        for m in &self.media {
-            let key = m.shared().key;
-            if let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) {
-                f.seen = true;
-                continue;
-            }
-            let used = |s: usize| self.feeds.iter().any(|f| f.slot == s);
-            let free = (1..MAX_SOURCES)
-                .find(|&s| !used(s) && self.p.bank.slots[s].state.load(Ordering::Acquire) == SLOT_FREE);
-            let Some(slot) = free else {
-                if !self.slot_full_logged {
-                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", m.shared().peer_id);
-                    self.slot_full_logged = true;
-                }
-                continue;
-            };
-            let sh = &self.p.bank.slots[slot];
-            match PeerFeed::new(slot, key, out_rate, sh) {
-                Ok(f) => {
-                    sh.playing.store(false, Ordering::Relaxed);
-                    sh.occupant.store(m.shared().ssrc, Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
-                    sh.state.store(SLOT_ACTIVE, Ordering::Release);
-                    self.feeds.push(f);
-                }
-                Err(e) => log::error!("피어 출력 소스 생성 실패: {e}"),
-            }
-        }
-        let bank = &self.p.bank;
-        self.feeds.retain(|f| {
-            if !f.seen {
-                let sh = &bank.slots[f.slot];
-                sh.playing.store(false, Ordering::Relaxed);
-                sh.state.store(SLOT_DRAIN, Ordering::Release);
-            }
-            f.seen
-        });
-    }
-
-    /// 반환: 은닉 마감이 가까운 피어가 있다(짧게 자야 함).
-    fn service_peers(&mut self, t: &FeedTiming) -> bool {
-        // 반복 맨 앞: 추가·제거 명령을 끝까지 비운다(엔진 ③-a2). 프로필은 이번 반복에 한 번 읽는다.
-        self.p.media_port.drain(&mut self.media);
-        self.p.stats.media_peers.store(self.media.len() as u64, Ordering::Relaxed);
-        let profile = self.p.media_settings.profile();
-        self.sync_peer_slots();
-        let counters = self.p.counters.clone();
-        let cb_seq = t.cb_seq;
-        let consistent = move || cb_seq.is_some_and(|s| counters.out_cb_begin.load(Ordering::SeqCst) == s);
-        let (mut fills, mut skipped, mut urgent) = (0u64, 0u64, false);
-        let probe = self.p.probe.clone();
-        let mut guard = self.lock_wait.lock(&probe, &self.p.stats.lock_sites.probe_feed);
-        let mut tap = guard.as_mut().filter(|p| p.tap);
-        let marks = self.p.rec_marks.clone();
-        let marking = marks.active();
-        let played = &self.p.counters.out_played_frames;
-        for pm in &mut self.media {
-            // 그 피어의 `service` **바로 앞**에서 그 피어의 수신 큐를 끝까지 비워 삽입하고, 재시작 → 프로필 요청을 적용한다
-            // (엔진 ③-a3, 설계 2.4절). 반복 맨 앞에서 전 피어를 한꺼번에 비우면 앞 피어의 service 동안 온 패킷이
-            // 다음 반복으로 밀린다 — 그래서 피어마다 여기서 비운다.
-            let (media, jb) = pm.ingest(profile);
-            let key = media.key;
-            // 통계 스냅샷은 슬롯이 없어도 발행한다(큐 비우기·삽입은 슬롯과 무관하게 계속된다, 엔진 ③-a1).
-            let Some(f) = self.feeds.iter_mut().find(|f| f.key == key) else {
-                pm.publish();
-                continue;
-            };
-            let sh = &self.p.bank.slots[f.slot];
-            let g = media.mix.lr_gains();
-            sh.set_gains(g, g);
-            media.mix.level.store(sh.level.load());
-            let Some(prod) = self.p.prods.get_mut(f.slot) else {
-                pm.publish();
-                continue;
-            };
-            let before = marking.then(|| jb.mark_counters());
-            let ev = f.service(jb, prod, sh, t, &consistent, &mut self.chunk_buf, &mut self.out_tmp, tap.as_deref_mut().filter(|p| p.peer_id == media.peer_id && p.peer_ssrc == media.ssrc));
-            if let Some((c0, d0)) = before {
-                // 녹음 마커(P2-4a): 이번 반복에 은닉·버림이 늘었으면, 방금 링에 넣은 꼬리(= 다음 콜백 시작 + 선행량)의
-                // 출력 타임라인 위치로 기록한다. 링 선행량 추정이라 대략 ±1 콜백으로 추정한다(위치 대조 측정은 아직 없음).
-                let (c1, d1) = jb.mark_counters();
-                let to_dev = |n48: u64| n48 * t.out_rate as u64 / INTERNAL_RATE as u64;
-                let fs = jb.frame_samples() as u64;
-                let tail = played.load(Ordering::Relaxed) + f.dev_ahead(prod) as u64;
-                let mark = |kind, frames: u64, span: bool| {
-                    let start = if span { tail.saturating_sub(frames) } else { tail };
-                    marks.push(MarkEvent { ssrc: media.ssrc, kind, start, frames });
-                };
-                if c1 > c0 {
-                    mark(MarkKind::Conceal, to_dev((c1 - c0) * fs), true);
-                }
-                // `skipped_frames`는 이미 장치 프레임이다
-                let dropped = d1.saturating_sub(d0) * fs;
-                if dropped > 0 || ev.skipped_frames > 0 {
-                    mark(MarkKind::Drop, to_dev(dropped) + ev.skipped_frames, false);
-                }
-            }
-            if ev.real_audio {
-                pm.note_audio(t.wall_us);
-            }
-            pm.publish();
-            fills += u64::from(ev.deadline_fill);
-            skipped += ev.skipped_frames;
-            urgent |= ev.urgent;
-        }
-        if fills > 0 {
-            self.p.stats.deadline_fills.fetch_add(fills, Ordering::Relaxed);
-        }
-        if skipped > 0 {
-            self.p.stats.skipped_frames.fetch_add(skipped, Ordering::Relaxed);
-        }
-        urgent
-    }
-
-    /// xrun이 나면 로컬 소스 여유를 청크 하나씩 늘리고(최대 장치 버퍼 1개), 10초 동안 없으면 줄인다.
-    /// 콜백 간격이 들쭉날쭉하거나 워커 스케줄링이 늦는 환경(느린 CI 러너 포함)에 적응한다.
-    fn adapt_safety(&mut self, chunk_dev: u64) {
-        let xruns = self.p.counters.xruns.load(Ordering::Relaxed);
-        let now = self.p.epoch.elapsed();
-        if xruns > self.seen_xruns {
-            self.seen_xruns = xruns;
-            self.safety = (self.safety + chunk_dev).min(self.out_burst_dev());
-            self.last_xrun = now;
-        } else if self.safety > 0 && now.saturating_sub(self.last_xrun) > Duration::from_secs(10) {
-            self.safety = self.safety.saturating_sub(chunk_dev);
-            self.last_xrun = now;
-        }
-    }
-
-    /// 로컬(모니터 + 탭) 소스. 로컬 FIFO가 입·출력 클럭 차를 흡수하고 자기 수위를 제어하므로, 소스 링은
-    /// 콜백이 소비한 만큼 "장치 버퍼 1개 + 청크 + 적응 여유"로 다시 채운다(모니터 경로는 GOAL 지표 밖).
-    fn service_local(&mut self) {
-        let ctl = &self.p.controls;
-        let mon = if ctl.monitor_enabled.load(Ordering::Relaxed) { ctl.monitor_gain.load() } else { 0.0 };
-        let sh = &self.p.bank.slots[LOCAL_SOURCE];
-        sh.set_gains((mon, mon), (1.0, 1.0));
-        let chunk_dev = (OUT_CHUNK as u64 * self.p.info.out_rate as u64).div_ceil(INTERNAL_RATE as u64);
-        self.adapt_safety(chunk_dev);
-        let target = self.out_burst_dev() + chunk_dev + self.safety;
-        let fill = |w: &Self| (w.p.prods[LOCAL_SOURCE].occupied_len() / 2 + w.local_rs.available()) as u64;
-        if fill(self) >= target {
-            return;
-        }
-        // 한 번에 너무 많이 만들지 않도록 상한(장치 버퍼 4개분)
-        let max_chunks = ((self.out_burst_dev() * 4) / chunk_dev.max(1) + 2) as usize;
-        let mut produced = 0;
-        while fill(self) < target && produced < max_chunks {
-            self.local.pull(&mut self.local_buf);
-            self.local_rs.push(&self.local_buf);
-            let prod = &mut self.p.prods[LOCAL_SOURCE];
-            loop {
-                let room = (prod.vacant_len() / 2).min(self.out_tmp.len() / 2);
-                let n = if room == 0 { 0 } else { self.local_rs.pop(&mut self.out_tmp[..room * 2]) };
-                if n == 0 {
-                    break;
-                }
-                prod.push_slice(&self.out_tmp[..n * 2]);
-            }
-            produced += 1;
-        }
-        if produced > 0 {
-            self.local.end_burst();
-            self.p.bank.slots[LOCAL_SOURCE].playing.store(true, Ordering::Relaxed);
-            self.p.stats.local_corrections.store(self.local.corrections, Ordering::Relaxed);
-            self.p.stats.local_underruns.store(self.local.underruns, Ordering::Relaxed);
-        }
-    }
-
-    /// 모니터 경로 점유량(시간) 이동 평균(리뷰 M12).
-    fn track_occupancy(&mut self) {
-        let in48 = (self.in_rs.available() + self.local.frames()) as f64;
-        let local_dev = (self.p.prods[LOCAL_SOURCE].occupied_len() / 2 + self.local_rs.available()) as f64;
-        let out_us = local_dev * 1e6 / self.p.info.out_rate.max(1) as f64;
-        let mon_us = in48 * 1e6 / INTERNAL_RATE as f64 + out_us;
-        self.monitor_ewma_us += (mon_us - self.monitor_ewma_us) * 0.01;
-        self.p.stats.monitor_occupancy_us.store(self.monitor_ewma_us as u64, Ordering::Relaxed);
     }
 }
