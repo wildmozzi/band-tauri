@@ -24,9 +24,9 @@ use crate::net::txlat::LockWait;
 
 /// `service` 한 번의 결과.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct PeerRound {
+pub(crate) struct PeerRound {
     /// 은닉 마감이 가까운 피어가 있다(조정자가 짧게 자야 한다).
-    pub(super) urgent: bool,
+    pub(crate) urgent: bool,
 }
 
 /// 피어 슬롯(1..`MAX_SOURCES`)의 소스 링 생산자. 로컬 것(슬롯 0)은 `LocalPath`가 가지므로 슬롯 번호로만 접근한다.
@@ -39,17 +39,18 @@ impl PeerProds {
 }
 
 /// `PeerSources::new` 입력(소유권이 넘어오는 끝과 공유 핸들).
-pub(super) struct PeerSourcesParts {
+pub(crate) struct PeerSourcesParts {
     /// 슬롯 1.. 의 생산자(슬롯 번호 순).
-    pub(super) prods: Vec<HeapProd<f32>>,
-    pub(super) port: MediaPortRt,
-    pub(super) settings: Arc<MediaSettings>,
-    pub(super) rec_marks: Arc<MarkSink>,
+    pub(crate) prods: Vec<HeapProd<f32>>,
+    pub(crate) port: MediaPortRt,
+    pub(crate) settings: Arc<MediaSettings>,
+    pub(crate) rec_marks: Arc<MarkSink>,
     /// 에코 측정 상태(재생 시각 탭). ②b-5에서 조정자의 `EchoRt`가 빌려 주는 인자로 바뀐다.
-    pub(super) probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
+    pub(crate) probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
 }
 
-pub(super) struct PeerSources {
+/// 워커와 가상 시간 하네스(`sim::tune`, ②b-3)가 **같은 것**을 쓴다 — 하네스의 5분 fixture가 이 단계의 호출 열을 지킨다.
+pub(crate) struct PeerSources {
     /// 워커가 혼자 가지는 피어 미디어 표(지터 버퍼·수신 큐 소비자, 명령 큐로만 바뀐다, 엔진 ③-a2·a3). net 피어 표와 같은 순서.
     // Box 그대로 둔다: 명령 큐로 받은 할당을 제거 때 반환 큐로 그대로 돌려보내므로 워커가 다시 Box하지(할당하지) 않는다.
     #[allow(clippy::vec_box)]
@@ -69,7 +70,7 @@ pub(super) struct PeerSources {
 }
 
 impl PeerSources {
-    pub(super) fn new(parts: PeerSourcesParts) -> Self {
+    pub(crate) fn new(parts: PeerSourcesParts) -> Self {
         Self {
             media: Vec::with_capacity(MEDIA_CMD_CAPACITY),
             feeds: Vec::with_capacity(MAX_SOURCES),
@@ -127,7 +128,7 @@ impl PeerSources {
     }
 
     /// 반복마다, `FeedTiming`을 만든 뒤. `stats`에는 표 길이·마감 채움·건너뜀을 쓴다(+ 락 자리별 대기 기록).
-    pub(super) fn service(&mut self, bank: &SourceBank, counters: &AudioCounters, stats: &WorkerStats, out_rate: u32, t: &FeedTiming, lock_wait: &mut LockWait) -> PeerRound {
+    pub(crate) fn service(&mut self, bank: &SourceBank, counters: &AudioCounters, stats: &WorkerStats, out_rate: u32, t: &FeedTiming, lock_wait: &mut LockWait) -> PeerRound {
         // 반복 맨 앞: 추가·제거 명령을 끝까지 비운다(엔진 ③-a2). 프로필은 이번 반복에 한 번 읽는다.
         self.port.drain(&mut self.media);
         stats.media_peers.store(self.media.len() as u64, Ordering::Relaxed);
@@ -206,5 +207,27 @@ impl PeerSources {
             sh.playing.store(false, Ordering::Relaxed);
             sh.state.store(SLOT_DRAIN, Ordering::Release);
         }
+    }
+
+    /// 피어 미디어 표(표 순서 = 추가 순). 하네스·테스트가 `service` 뒤에 피어별 지터 통계를 읽고, 끝에 남은 수신 큐를
+    /// 비우는 데 쓴다. 제품 코드에는 이 입구가 없다.
+    #[cfg(test)]
+    #[allow(clippy::vec_box)]
+    pub(crate) fn media_table(&mut self) -> &mut [Box<PeerMedia>] {
+        &mut self.media
+    }
+
+    /// 표의 `i`번째 피어에 배정된 공급 상태의 적응 여유(장치 프레임). 슬롯이 없으면 None(하네스·테스트).
+    #[cfg(test)]
+    pub(crate) fn feed_margin(&self, i: usize) -> Option<usize> {
+        let key = self.media.get(i)?.shared().key;
+        self.feeds.iter().find(|f| f.key == key).map(|f| f.margin())
+    }
+
+    /// 표의 `i`번째 피어의 슬롯 번호(하네스·테스트).
+    #[cfg(test)]
+    pub(crate) fn feed_slot(&self, i: usize) -> Option<usize> {
+        let key = self.media.get(i)?.shared().key;
+        self.feeds.iter().find(|f| f.key == key).map(|f| f.slot)
     }
 }

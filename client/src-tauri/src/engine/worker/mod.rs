@@ -68,7 +68,7 @@ pub use peer_feed::{FeedEvents, PeerFeed, DEADLINE_GUARD_US};
 use device_watch::DeviceWatch;
 use local_path::LocalPath;
 use metronome_stage::MetronomeStage;
-use peer_sources::{PeerSources, PeerSourcesParts};
+pub(crate) use peer_sources::{PeerSources, PeerSourcesParts};
 
 /// 워커 폴링 주기. Windows에서도 std::thread::sleep은 고해상도 타이머를 쓴다.
 pub(super) const POLL: Duration = Duration::from_micros(500);
@@ -437,8 +437,8 @@ impl Worker {
             let timing = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);
             self.metro.service(&c.info, &c.counters, &c.stats, &timing, &mut self.lock_wait);
             let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &timing, &mut self.lock_wait);
-            self.local.service(&c.info, &c.counters, &c.controls, &c.bank, &c.stats, c.epoch);
-            self.local.track_occupancy(&c.info, &c.stats, self.in_rs.available());
+            self.local.service(&c.info, &c.counters, &c.controls, &c.bank.slots[LOCAL_SOURCE], &c.stats, c.epoch);
+            self.local.track_occupancy(c.info.out_rate, &c.stats, self.in_rs.available());
             self.watch.check(&c.counters, &c.stats, c.epoch);
             let waited = std::time::Duration::from_nanos(std::mem::take(&mut self.lock_wait).ns);
             if DIAG_TIMING {

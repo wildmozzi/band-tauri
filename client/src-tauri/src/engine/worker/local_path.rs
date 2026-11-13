@@ -17,7 +17,7 @@ use crate::engine::config::INTERNAL_RATE;
 use crate::engine::device::StreamInfo;
 use crate::engine::mixer::MixControls;
 use crate::engine::resample::StreamResampler;
-use crate::engine::rt::{SourceBank, LOCAL_SOURCE};
+use crate::engine::rt::SourceShared;
 use crate::engine::stats::AudioCounters;
 
 pub(super) struct LocalPath {
@@ -96,9 +96,9 @@ impl LocalPath {
     }
 
     /// 로컬(모니터 + 탭) 소스 공급. 모니터 게인을 로컬 슬롯에 쓰고(반복마다, 맨 앞), 소스 링을 목표 수위까지 채운다.
-    pub(super) fn service(&mut self, info: &StreamInfo, counters: &AudioCounters, controls: &MixControls, bank: &SourceBank, stats: &WorkerStats, epoch: Instant) {
+    /// `sh` = 로컬 소스 슬롯(`bank.slots[LOCAL_SOURCE]`) — 뱅크 전체가 아니라 그 하나만 받는다(피어 슬롯을 모른다).
+    pub(super) fn service(&mut self, info: &StreamInfo, counters: &AudioCounters, controls: &MixControls, sh: &SourceShared, stats: &WorkerStats, epoch: Instant) {
         let mon = if controls.monitor_enabled.load(Ordering::Relaxed) { controls.monitor_gain.load() } else { 0.0 };
-        let sh = &bank.slots[LOCAL_SOURCE];
         sh.set_gains((mon, mon), (1.0, 1.0));
         let chunk_dev = chunk_dev(info);
         self.adapt_safety(info, counters, epoch, chunk_dev);
@@ -131,10 +131,10 @@ impl LocalPath {
     }
 
     /// 모니터 경로 점유량(시간) 이동 평균(리뷰 M12). `pending48` = 입력 쪽(리샘플러)에 남은 48k 프레임(`Capture` 몫).
-    pub(super) fn track_occupancy(&mut self, info: &StreamInfo, stats: &WorkerStats, pending48: usize) {
+    pub(super) fn track_occupancy(&mut self, out_rate: u32, stats: &WorkerStats, pending48: usize) {
         let in48 = (pending48 + self.local.frames()) as f64;
         let local_dev = (self.prod.occupied_len() / 2 + self.local_rs.available()) as f64;
-        let out_us = local_dev * 1e6 / info.out_rate.max(1) as f64;
+        let out_us = local_dev * 1e6 / out_rate.max(1) as f64;
         let mon_us = in48 * 1e6 / INTERNAL_RATE as f64 + out_us;
         self.monitor_ewma_us += (mon_us - self.monitor_ewma_us) * 0.01;
         stats.monitor_occupancy_us.store(self.monitor_ewma_us as u64, Ordering::Relaxed);
