@@ -19,6 +19,7 @@ import {
   jitterProfileLabel,
   type EnginePresetId,
 } from '../../native/engineConfig'
+import { driverChoices } from './driverSupport'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
 import { DesktopDownloadButton } from '../../shared/ui/DesktopDownloadButton'
 import { Modal } from '../../shared/ui'
@@ -73,6 +74,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     error,
     isSaving,
     migrated,
+    supportedDrivers,
+    driverNotice,
     isTesting,
     testStats,
     testError,
@@ -159,6 +162,14 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
   const payloadBytes = estimatePayloadBytes(config.codec, config.channels, config.frameMs, config.opusBitrate)
   const channelOptions = inputChannelOptions(selectedInputDevice?.channels)
   const allowed = (patch: PayloadPatch) => payloadAllowed(config, patch)
+  // 이 배포본에 없는 드라이버(예: ASIO 없이 빌드)는 고를 수 없게 하고 이유를 보인다(P2-7)
+  const drivers = driverChoices(supportedDrivers)
+  const driverOptions = drivers.map((d) => (
+    <option key={d.id} value={d.id} disabled={d.disabled}>
+      {d.label}{d.disabled ? ' (이 배포본에 없음)' : ''}
+    </option>
+  ))
+  const unsupportedReasons = drivers.flatMap((d) => (d.reason ? [d.reason] : []))
 
   return wrap(
     <>
@@ -167,6 +178,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           이전 버전의 오디오 설정을 새 엔진 형식으로 변환했습니다. 장치 선택을 확인해주세요.
         </div>
       )}
+
+      {driverNotice && <div className="settings-notice" data-testid="driver-notice">{driverNotice}</div>}
 
       {/* 프리셋 */}
       <section className="settings-section">
@@ -199,12 +212,11 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             value={config.inputDriver}
             onChange={(e) => updateConfig({ inputDriver: e.target.value as DriverKind })}
           >
-            {DRIVER_OPTIONS.map((d) => (
-              <option key={d.id} value={d.id}>{d.label}</option>
-            ))}
+            {driverOptions}
           </select>
         </div>
         <p className="setting-hint">{DRIVER_OPTIONS.find((d) => d.id === config.inputDriver)?.desc}</p>
+        {unsupportedReasons.map((r) => <p key={r} className="setting-hint" data-testid="driver-unsupported">{r}</p>)}
         <div className="settings-row">
           <label htmlFor="input-device">장치</label>
           <select
@@ -233,9 +245,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             value={config.outputDriver}
             onChange={(e) => updateConfig({ outputDriver: e.target.value as DriverKind })}
           >
-            {DRIVER_OPTIONS.map((d) => (
-              <option key={d.id} value={d.id}>{d.label}</option>
-            ))}
+            {driverOptions}
           </select>
         </div>
         <div className="settings-row">

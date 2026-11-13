@@ -514,6 +514,23 @@ export function engineListDevices(): Promise<DeviceInfo[]> {
   return invoke<DeviceInfo[]>('engine_list_devices')
 }
 
+const DRIVER_KINDS: readonly DriverKind[] = ['asio', 'wasapiShared', 'wasapiExclusive']
+
+/**
+ * 이 빌드가 지원하는 드라이버(P2-7, 설계 4절 `engine_supported_drivers`).
+ * 옛 엔진(커맨드 없음)·실패·형식이 이상한 응답이면 null — 호출자는 "모두 지원"으로 본다.
+ */
+export async function engineSupportedDrivers(): Promise<DriverKind[] | null> {
+  try {
+    const list = await invoke<unknown>('engine_supported_drivers')
+    if (!Array.isArray(list)) return null
+    const known = list.filter((d): d is DriverKind => DRIVER_KINDS.includes(d as DriverKind))
+    return known.length > 0 ? known : null
+  } catch {
+    return null
+  }
+}
+
 export function engineStart(config: EngineConfig, peerId: string): Promise<LocalDescriptor> {
   return invoke<LocalDescriptor>('engine_start', { config, peerId })
 }
