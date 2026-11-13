@@ -6,7 +6,6 @@
 //!
 //! `engine_subscribe_mix`는 JSON이 아닌 raw 바이트(`InvokeResponseBody::Raw`, f32 LE 인터리브)로 보낸다.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -18,11 +17,9 @@ use crate::engine::measure::{EchoReport, LoopbackReport};
 use crate::engine::device::system::SystemBackend;
 use crate::engine::device::DeviceInfo;
 use crate::engine::metronome::{MetronomeConfig, MetronomePlan};
-use crate::engine::mixer::clamp_gain;
 use crate::engine::record::{RecordOptions, RecordStats, RecordSummary};
 use crate::engine::report::EngineStats;
 use crate::manager::EngineManager;
-use crate::net::RelaySetting;
 use crate::net::peer::LocalDescriptor;
 use crate::net::NetOptions;
 
@@ -140,19 +137,10 @@ pub struct RelayArgs {
 #[tauri::command]
 pub async fn engine_set_relay(state: State<'_, EngineState>, relay: Option<RelayArgs>) -> Result<(), String> {
     let m = state.0.clone();
-    // DNS 조회는 블로킹이므로 엔진 락 밖, 블로킹 스레드에서. 같은 host:port 문자열이면 처음 해석한 주소를
-    // 유지한다(토큰 갱신마다 다시 풀면 라운드로빈 A 레코드에서 릴레이가 바뀌어 끊긴다, M3).
-    blocking(move || {
-        let Some(r) = relay else {
-            return m.with_engine(|e| e.set_relay(None));
-        };
-        let known = m.with_engine(|e| Ok(e.relay_addr_for_host(&r.addr)))?;
-        let addr = match known {
-            Some(a) => a,
-            None => crate::net::relay::resolve_relay_addr(&r.addr)?,
-        };
-        let expires_in = r.expires_in_sec.map(std::time::Duration::from_secs);
-        m.with_engine(|e| e.set_relay(Some(RelaySetting { host: &r.addr, addr, token: &r.token, expires_in, bind_key: r.bind_key.as_deref() })))
+    // DNS 조회가 블로킹이므로 블로킹 스레드에서(주소 유지 규칙 M3는 `EngineManager::set_relay`)
+    blocking(move || match relay {
+        None => m.clear_relay(),
+        Some(r) => m.set_relay(&r.addr, &r.token, r.expires_in_sec.map(std::time::Duration::from_secs), r.bind_key.as_deref()),
     })
     .await
 }
@@ -187,21 +175,19 @@ pub async fn engine_set_jitter_profile(state: State<'_, EngineState>, profile: f
 
 #[tauri::command]
 pub async fn engine_set_input_muted(state: State<'_, EngineState>, muted: bool) -> Result<(), String> {
-    state.0.controls().input_muted.store(muted, Ordering::Relaxed);
+    state.0.set_input_muted(muted);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn engine_set_monitor(state: State<'_, EngineState>, enabled: bool, gain: f32) -> Result<(), String> {
-    let c = state.0.controls();
-    c.monitor_enabled.store(enabled, Ordering::Relaxed);
-    c.monitor_gain.store(clamp_gain(gain));
+    state.0.set_monitor(enabled, gain);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn engine_set_master_gain(state: State<'_, EngineState>, gain: f32) -> Result<(), String> {
-    state.0.controls().master_gain.store(clamp_gain(gain));
+    state.0.set_master_gain(gain);
     Ok(())
 }
 
@@ -215,9 +201,7 @@ pub async fn engine_set_metronome(state: State<'_, EngineState>, metronome: Metr
 /// 메트로놈 클릭 볼륨·뮤트(로컬 전용, 엔진 재시작 간 유지).
 #[tauri::command]
 pub async fn engine_set_metronome_gain(state: State<'_, EngineState>, gain: f32, muted: bool) -> Result<(), String> {
-    let c = state.0.controls();
-    c.click_gain.store(clamp_gain(gain));
-    c.click_muted.store(muted, Ordering::Relaxed);
+    state.0.set_metronome_gain(gain, muted);
     Ok(())
 }
 
