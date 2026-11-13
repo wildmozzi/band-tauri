@@ -12,6 +12,10 @@ pub const HEADER_BYTES: usize = 18;
 pub const TAG_BYTES: usize = 16;
 /// 페이로드(평문) 최대 크기.
 pub const MAX_PAYLOAD_BYTES: usize = MAX_PACKET_BYTES - HEADER_BYTES - TAG_BYTES;
+/// 출력 소스 슬롯 수: 0 = 로컬(모니터), 1.. = 피어(원격 최대 5명 + 교체 중인 슬롯 여유).
+pub const MAX_SOURCES: usize = 8;
+/// 로컬 입력(모니터) 소스 슬롯.
+pub const LOCAL_SOURCE: usize = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
