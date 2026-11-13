@@ -7,6 +7,9 @@ use std::collections::VecDeque;
 
 #[test]
 fn batched_frames_share_pass_start_for_send_queue() {
+    // (②b-2 뒤) 이 시험은 **제품 루프를 지키지 않는다**: `drain_frames`는 시험 전용 도우미이고 제품은 조정자 루프
+    // (`Worker::run`: `pass_at`을 한 번 찍고 `next_frame`마다 같은 변수를 넘긴다)다 — 프레임이 같은 시작점을 받는 것은 이제
+    // 구조(변수 하나)로 보장된다. 여기 남기는 것은 그 규칙의 뜻(왜 프레임마다 now()를 찍으면 안 되는가)을 보이는 예시다.
     // 리뷰 M1: 한 패스에서 4프레임(10ms 장치 버퍼 / 2.5ms 프레임)이 나오면 k번째 프레임의 시작점은 패스 시작이어야
     // 한다. 프레임마다 now()를 찍던 이전 구현은 앞 프레임 처리(여기선 프레임당 2ms 이상)를 빼서 과소 보고했다.
     let frame = 4;
@@ -340,7 +343,7 @@ fn run_feed_sim(p: FeedSim) -> FeedSimResult {
     let sh = &feed.bank.slots[slot];
     sh.set_gains((1.0, 1.0), (1.0, 1.0));
     sh.state.store(SLOT_ACTIVE, Ordering::Release);
-    let mut pf = PeerFeed::new(slot, crate::net::media_link::PeerKey::from_raw(1), 48_000, sh).unwrap();
+    let mut pf = PeerFeed::new(slot, 48_000, sh).unwrap();
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     let mut tracker = CallbackTracker::new(48_000);
     let mut enc = SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap();

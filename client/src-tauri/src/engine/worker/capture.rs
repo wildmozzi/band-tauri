@@ -118,8 +118,8 @@ mod tests {
     use crate::engine::rt::input_ring;
     use ringbuf::traits::Producer;
 
-    /// 알려진 입력 링 → 블록·프레임 열이 `drain_frames`(전의 `pump_input`이 쓰던 것)와 같다(설계 5.4절).
-    /// 48k 패스스루라 블록 = 넣은 샘플 그대로다.
+    /// 알려진 입력 링 → 블록·프레임 열(설계 5.4절). 48k 패스스루라 블록 = 넣은 샘플 그대로다.
+    /// 프레임의 기준은 `pop_frame`과 무관하게 만든다(#137 리뷰 L1): 넣은 입력(뮤트 패스는 0)을 이어 붙여 `chunks_exact`로 자른 것.
     #[test]
     fn blocks_and_frames_match_reference() {
         for ich in [1usize, 2] {
@@ -127,9 +127,8 @@ mod tests {
             let (mut prod, cons) = input_ring();
             let mut cap = Capture::new(cons, 48_000, ich, frame).unwrap();
             assert_eq!(cap.granularity(), 1);
-            let mut reference: VecDeque<f32> = VecDeque::new();
-            let mut ref_frame = vec![0.0; frame * ich];
-            let (mut got, mut want) = (Vec::new(), Vec::new());
+            let mut all: Vec<f32> = Vec::new();
+            let mut got = Vec::new();
             let mut next = 0u32;
             // 패스마다 다른 크기(프레임 경계와 어긋나게), 세 번째 패스는 뮤트
             for (pass, frames_in) in [128usize, 7, 300, 0, 480, 64].into_iter().enumerate() {
@@ -146,10 +145,12 @@ mod tests {
                 while let Some(f) = cap.next_frame() {
                     got.push(f.to_vec());
                 }
-                reference.extend(expect);
-                drain_frames(&mut reference, &mut ref_frame, std::time::Instant::now(), |f, _| want.push(f.to_vec()));
+                all.extend(expect);
+                // 이 패스까지 나온 프레임 수 = 지금까지 들어온 샘플로 만들 수 있는 프레임 수(나머지는 다음 패스로)
+                assert_eq!(got.len(), all.len() / (frame * ich), "패스 {pass}");
                 assert_eq!(cap.pending48(), 0);
             }
+            let want: Vec<Vec<f32>> = all.chunks_exact(frame * ich).map(|c| c.to_vec()).collect();
             assert_eq!(got, want, "ich {ich}");
             assert_eq!(got.len(), (128 + 7 + 300 + 480 + 64) / frame);
         }

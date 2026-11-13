@@ -12,7 +12,6 @@ use super::super::resample::StreamResampler;
 use super::super::rt::SourceShared;
 use super::clock::FeedTiming;
 use super::{OUT_CHUNK, POLL};
-use crate::net::media_link::PeerKey;
 
 // 콜백 구동 믹스: 피어 소스 공급(PeerFeed)
 // ============================================================================
@@ -55,10 +54,8 @@ pub struct FeedEvents {
 ///    동안 유지하고, 그 뒤 `MARGIN_STEP_US`마다 청크씩 줄인다(이전: 10초마다 청크 → 480프레임이면 75초).
 pub struct PeerFeed {
     pub(super) slot: usize,
-    pub(super) key: PeerKey,
     rs: StreamResampler,
     seen_underrun: u64,
-    pub(super) seen: bool,
     /// 적응 여유(장치 프레임).
     margin: usize,
     /// 마지막 여유 증가(언더런) 시각(µs).
@@ -73,13 +70,11 @@ const MARGIN_HOLD_US: u64 = 10_000_000;
 const MARGIN_STEP_US: u64 = 2_000_000;
 
 impl PeerFeed {
-    pub fn new(slot: usize, key: PeerKey, out_rate: u32, shared: &SourceShared) -> Result<Self, String> {
+    pub fn new(slot: usize, out_rate: u32, shared: &SourceShared) -> Result<Self, String> {
         Ok(Self {
             slot,
-            key,
             rs: StreamResampler::new(INTERNAL_RATE, out_rate, 2)?,
             seen_underrun: shared.underrun_frames.load(Ordering::Relaxed),
-            seen: true,
             margin: 0,
             margin_at_us: 0,
             margin_step_us: 0,

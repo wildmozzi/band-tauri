@@ -212,7 +212,16 @@ fn chunk_dev(info: &StreamInfo) -> u64 {
 }
 
 
-/// 조정자가 갖는 피어 표 복사본(엔진 ③c)과 그것을 맞추는 net. 네트워크가 있을 때만 있다.
+/// 네트워크가 있을 때만 있는 것 둘: 송신 단계와 피어 표 복사본. **둘은 같은 `net`에서 나와 늘 함께 있거나 함께 없다** —
+/// 따로 `Option` 둘로 두면 한쪽만 `None`이 되는 변경에서 프레임이 조용히 버려진다(#137 리뷰 L2). 그래서 한 묶음이다.
+struct NetSide {
+    /// 송신 단계(프레임 → 인코드 → 송신).
+    send: SendPath,
+    /// 피어 표 복사본. 송신에 빌려 준다(②b-6b부터 메트로놈에도).
+    table: PeerTable,
+}
+
+/// 조정자가 갖는 피어 표 복사본(엔진 ③c)과 그것을 맞추는 net.
 /// 단계에는 이 묶음이 아니라 안의 복사본만 빌려 준다(`SendPath`: 송신·자동 코덱이 락 없이 본다).
 struct PeerTable {
     net: Arc<NetShared>,
@@ -230,19 +239,18 @@ impl PeerTable {
     }
 }
 
-/// 조정자. 필드 = 문맥 + 단계들 + 조정자가 갖고 단계에 빌려 주는 것(`peer_table`·`lock_wait`).
+/// 조정자. 필드 = 문맥 + 단계들 + 조정자가 갖고 단계에 빌려 주는 것(`net` 안의 피어 표 복사본·`lock_wait`).
 pub struct Worker {
     ctx: WorkerCtx,
     capture: Capture,
-    /// 송신 단계. 네트워크가 있을 때만(없으면 캡처 프레임은 버려진다).
-    send: Option<SendPath>,
+    /// 송신 단계 + 피어 표 복사본. 네트워크가 있을 때만(없으면 캡처 프레임은 버려진다).
+    net: Option<NetSide>,
     /// 시각 단계(출력 콜백 시각 추정).
     clock: CallbackTracker,
     metro: MetronomeStage,
     peers: PeerSources,
     local: LocalPath,
     watch: DeviceWatch,
-    peer_table: Option<PeerTable>,
     /// 이번 반복에 남은 락(에코 프로브·메트로놈)에서 기다린 시간(엔진 ③c 측정 — 본문에서 빼서 락 밖 비용을 본다).
     /// 락을 잡는 단계 메서드에 빌려 준다.
     lock_wait: LockWait,
@@ -276,8 +284,8 @@ impl Worker {
         // 프레임 크기 검증은 네트워크가 없어도 한다(전과 같다). 인코더가 먼저 실패하면 그 에러가 먼저 나가게 `SendPath::new` 안에서
         // 인코더를 만든 뒤 코드를 쓴다 — 그래서 코드 계산은 여기서 하되 에러는 인코더 뒤에 낸다.
         let frame_code = frame_code_from_samples(frame);
-        let send = match &net {
-            Some(net) => Some(SendPath::new(net.clone(), &cfg, epoch, frame_code, probe.clone())?),
+        let net_side = match &net {
+            Some(net) => Some(NetSide { send: SendPath::new(net.clone(), &cfg, epoch, frame_code, probe.clone())?, table: PeerTable::new(net.clone()) }),
             None => {
                 frame_code.ok_or("잘못된 프레임 크기")?;
                 None
@@ -289,13 +297,12 @@ impl Worker {
         local_slot.state.store(SLOT_ACTIVE, Ordering::Release);
         Ok(Self {
             capture,
-            send,
+            net: net_side,
             clock: CallbackTracker::new(info.out_rate),
-            metro: MetronomeStage::new(metronome, net.clone()),
+            metro: MetronomeStage::new(metronome, net),
             peers: PeerSources::new(PeerSourcesParts { prods: peer_prods, port: media_port, settings: media_settings, rec_marks, probe }),
             local,
             watch: DeviceWatch::new(),
-            peer_table: net.map(PeerTable::new),
             lock_wait: Default::default(),
             ctx: WorkerCtx { cfg, info, counters, controls, bank, stats, epoch, stop },
         })
@@ -319,8 +326,8 @@ impl Worker {
             }
             last_start = start;
             // 피어 표 복사본은 송신과 무관하게 반복마다 맞춘다: 캡처가 멈춰도(장치 분리) 빠진 피어가 쌓이지 않게(#126 리뷰 M-1).
-            if let Some(t) = self.peer_table.as_mut() {
-                t.refresh();
+            if let Some(n) = self.net.as_mut() {
+                n.table.refresh();
             }
             self.local.configure(&c.info, &c.counters, self.capture.granularity());
             // 송신 큐 지연의 시작점(P1-3, 리뷰 M1): 이 패스에서 링을 비우기 직전 시각. 이번 패스에서 완성되는 프레임은
@@ -334,8 +341,8 @@ impl Worker {
             }
             while let Some(frame) = self.capture.next_frame() {
                 // 네트워크가 없으면 프레임은 버려진다(전에는 `ts`만 올렸다 — 송신에서만 쓰는 값이라 관찰되지 않는다).
-                if let (Some(tx), Some(table)) = (self.send.as_mut(), self.peer_table.as_mut()) {
-                    tx.send_frame(frame, pass_at, &mut table.copy, &c.stats, &mut self.lock_wait);
+                if let Some(n) = self.net.as_mut() {
+                    n.send.send_frame(frame, pass_at, &mut n.table.copy, &c.stats, &mut self.lock_wait);
                 }
             }
             // 인자 평가 순서 = 읽는 순서: 벽시계 → 출력 버스트 → (observe 안) 콜백 카운터.

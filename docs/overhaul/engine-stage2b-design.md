@@ -133,14 +133,13 @@ b가 **프레임마다 c 앞에서** 불린다는 점이 순서 조건이다: d�
 pub struct Worker {
     ctx: WorkerCtx,                // 조정자만 본다. 단계에는 필드를 꺼내 준다(2.2절)
     capture: Capture,
-    send: Option<SendPath>,        // 네트워크가 있을 때만. net은 여기와 MetronomeStage가 생성 때 받는다
+    net: Option<NetSide>,          // 네트워크가 있을 때만: NetSide { send: SendPath, table: PeerTable } — 둘은 늘 함께다(#137 리뷰 L2)
     clock: CallbackTracker,        // 지금의 clock.rs 그대로
     metro: MetronomeStage,
     peers: PeerSources,
     local: LocalPath,
     watch: DeviceWatch,
     echo: EchoRt,                  // 에코 프로브의 워커 쪽 끝(3절, ②b-5부터)
-    peer_table: Option<PeerTable>, // 〔③c 뒤 확정〕 피어 표 복사본(net + PeerTableCopy). SendPath·MetronomeStage에 복사본을 빌려 준다(4.2절)
     lock_wait: LockWait,           // 〔③c 뒤 확정〕 이번 반복의 남은 락 대기 합(진단). 락을 잡는 단계에 빌려 준다(4.2절)
 }
 
@@ -153,7 +152,7 @@ pub fn run(mut self) {
         c.stats.iter_period.record(start - last_start);
         last_start = start;
         self.echo.poll();                                             // ②b-5: 프로브 명령 적용(그 전에는 없음)
-        if let Some(t) = &mut self.peer_table { t.refresh(); }       // 〔③c 뒤 확정〕 세대가 같으면 원자 load 하나
+        if let Some(n) = &mut self.net { n.table.refresh(); }        // 〔③c 뒤 확정〕 피어 표 복사본: 세대가 같으면 원자 load 하나
         self.local.configure(&c.info, &c.counters, self.capture.granularity());   // :341
         let pass_at = Instant::now();                                 // :426
         self.capture.fill();                                          // :427-434
@@ -162,8 +161,8 @@ pub fn run(mut self) {
             self.local.push(block);
         }
         while let Some(frame) = self.capture.next_frame() {           // :453-457
-            if let Some(tx) = &mut self.send {
-                tx.send_frame(frame, pass_at, self.echo.probe_mut()); // :633-662
+            if let Some(n) = &mut self.net {
+                n.send.send_frame(frame, pass_at, &mut n.table.copy, self.echo.probe_mut()); // :633-662
             }
         }
         let t = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);  // :664-668
@@ -235,7 +234,7 @@ pub fn run(mut self) {
 
 | | |
 |---|---|
-| 소유 | `encoder`(이제 `Option`이 아님), `payload`, `pkt`, `flags`, `frame_code`, `ts`, `encode_errors`, `auto: AutoCodec`, (②b-4까지) `alt_encoder`·`alt_frame`·`alt_payload` |
+| 소유 | `encoder`(이제 `Option`이 아님), `payload`, `pkt`, `flags`, `frame_code`, `ts`, `encode_errors`, `auto: AutoCodec`, (②b-5 전까지) `alt_encoder`·`alt_frame`·`alt_payload` — ②b-5에서 `EchoProbe` 안으로(6.1절) |
 | 입력 | 프레임, `pass_at`(송신 큐 지연 시작점), 에코 프로브(`Option<&mut EchoProbe>`). `net`·`epoch`는 생성 때 받아 갖는다 |
 | 출력 | 없음(패킷이 나간다). 송신 통계는 net이 낸다 |
 | 존재 조건 | `WorkerParams.net`이 `Some`일 때만 만든다. 없으면 `Worker.send = None`이고 프레임은 버려진다(지금도 `ts`만 올린다, `:661` — `ts`는 송신에서만 쓰이므로 관찰되지 않는다) |
