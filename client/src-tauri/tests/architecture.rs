@@ -75,6 +75,7 @@ const NODES: &[(&str, u8)] = &[
     ("engine::cpuprof", 5),
     ("engine::report", 5),
     ("manager", 5),
+    ("settings", 5),
     ("diag", 5),
     ("diag::timeline", 5),
     ("diag::export", 5),
@@ -95,7 +96,7 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[
 const MAX_EXCEPTIONS: usize = 1;
 
 /// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
-const OPEN_STAGES: &[&str] = &["③", "⑥", "⑦"];
+const OPEN_STAGES: &[&str] = &["③", "⑥"];
 
 /// 계층 규칙상 허용(아래로 가는 간선)이지만 금지하는 간선(엔진 ③, `engine-stage3-design.md` 7.1절):
 /// net은 미디어 상태(지터 버퍼·믹스 제어)를 모른다. 미디어 쪽과는 `net::media_link`로만 잇는다.
@@ -110,13 +111,16 @@ const FORBIDDEN: &[(&str, &str, &str)] = &[
 /// 어댑터(계층 6)가 쓸 수 있는 노드: 제어 평면과 계약 DTO(설정·보고·디스크립터)를 가진 모듈만. 로직은 제어 평면에서 부른다.
 const ADAPTER_MAY_USE: &[&str] = &[
     "manager",
+    // 앱 설정(녹음 폴더, ⑦-2). 저장 형식·우선순위는 여기, Tauri 경로 조회·대화상자는 어댑터.
+    "settings",
     "diag",
     "diag::export",
     "engine::config",
-    "engine::device",
+    "engine::device::types",
+    "engine::device::select",
     "engine::measure",
     "engine::metronome",
-    "engine::record",
+    "engine::record::sidecar",
     "engine::report",
     "net",
     "net::peer",

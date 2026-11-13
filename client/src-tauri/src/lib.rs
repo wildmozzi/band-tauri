@@ -3,6 +3,7 @@ pub mod diag;
 pub mod engine;
 pub mod manager;
 pub mod net;
+pub mod settings;
 pub mod sys;
 
 use tauri::Manager;
@@ -23,7 +24,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::EngineState::default())
         .manage(commands::DiagState::default())
-        .manage(commands::RecordDirState::default())
         .invoke_handler(tauri::generate_handler![
             commands::engine_list_devices,
             commands::engine_supported_drivers,
@@ -58,6 +58,8 @@ pub fn run() {
             commands::diag_export,
         ])
         .setup(|_app| {
+            // 녹음 폴더 설정(P2-4): 설정 파일 경로는 앱 설정 폴더 — AppHandle이 있어야 찾는다
+            _app.manage(commands::RecordDirState::new(_app.handle()));
             // 엔진 통계 타임라인 기록(P2-5): 1초 간격, 최근 60분
             let engine = _app.state::<commands::EngineState>().manager();
             if let Err(e) = _app.state::<commands::DiagState>().spawn_recorder(engine) {
