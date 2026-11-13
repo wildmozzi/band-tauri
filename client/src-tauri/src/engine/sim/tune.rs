@@ -24,7 +24,7 @@ use crate::engine::peer_media::{media_port, MediaCmd, MediaSettings, PeerMedia};
 use crate::engine::record::MarkSink;
 use crate::net::txlat::LockWait;
 use crate::net::media_link::{media_link, PeerKey};
-use crate::engine::rt::output_path;
+use crate::engine::rt::{output_path, SLOT_DRAIN, SLOT_FREE};
 use crate::net::packet::{Header, PacketType};
 use rand::{Rng, SeedableRng};
 use ringbuf::traits::Producer;
@@ -52,6 +52,11 @@ pub(super) struct NetPeer {
     pub outages: Vec<(u64, u64)>,
     /// 망 조건 계단 변화(시각 µs, 추가 지연 µs, 지터 µs): 그 시각부터 기본 지연과 지터를 바꾼다(RTT 계단). `switch`보다 우선.
     pub steps: Vec<(u64, u64, u64)>,
+    /// 실행 중 추가(②b-3b): 이 시각(µs) 이후 첫 워커 사건 직전에 미디어 명령 큐에 `Add`를 넣는다. 0이면 시작 때(기존 시나리오).
+    /// 그 전에 도착한 이 피어의 패킷은 버린다(엔진에서는 net에 피어가 없어 버려진다).
+    pub join_us: u64,
+    /// 실행 중 제거(②b-3b): 이 시각 이후 첫 워커 사건 직전에 `Remove`를 넣는다. 그 뒤 도착한 패킷은 버린다.
+    pub leave_us: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -63,7 +68,7 @@ pub(super) enum JitDist {
 
 impl NetPeer {
     pub fn new(frame: usize, seed: u64) -> Self {
-        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new() }
+        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None }
     }
 }
 
@@ -199,6 +204,23 @@ pub(super) struct MultiOut {
     pub peers: Vec<PeerOut>,
     pub xruns: u64,
     pub xrun_us: Vec<u64>,
+    /// 피어 수명 사건(②b-3b): (관찰한 사건 시각 µs, 피어 번호, 사건). 워커 사건·콜백 사건 직후에 본 것이다.
+    pub churn: Vec<(u64, usize, ChurnEv)>,
+}
+
+/// 하네스가 본 피어 수명 사건(②b-3b). 슬롯 번호를 싣는다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ChurnEv {
+    /// `Add`를 넣은 워커 사건.
+    Join,
+    /// `PeerSources`가 슬롯을 배정했다(그 워커 사건 직후 처음 보임).
+    Slot(usize),
+    /// `Remove`를 넣은 워커 사건.
+    Leave,
+    /// 슬롯이 `SLOT_DRAIN`이 됐다(워커가 해제 요청).
+    Drain(usize),
+    /// 출력 콜백이 슬롯을 비워 `SLOT_FREE`가 됐다.
+    Free(usize),
 }
 
 struct TxState {
@@ -245,6 +267,16 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
     let bank = feed.bank;
     let wstats = WorkerStats::default();
     let mut lock_wait = LockWait::default();
+    // 피어 수명(②b-3b). `order` = 지금 워커 표에 있어야 하는 피어 번호(표 순서 — 추가 순, 제거는 그 자리를 뺀다).
+    // 표의 `pos`번째 = 피어 `order[pos]`. 시작 때만 넣는 기존 시나리오에서는 0..n 그대로다.
+    let mut order: Vec<usize> = Vec::new();
+    let mut waiting: Vec<Option<Box<PeerMedia>>> = Vec::new();
+    let mut left = vec![false; n];
+    let mut slot_of: Vec<Option<usize>> = vec![None; n];
+    // (피어, 슬롯, DRAIN을 봤는가): 제거한 피어의 슬롯이 DRAIN → FREE로 가는 것을 본다.
+    let mut draining: Vec<(usize, usize, bool)> = Vec::new();
+    let mut churn: Vec<(u64, usize, ChurnEv)> = Vec::new();
+    let churning = p.peers.iter().any(|np| np.join_us > 0 || np.leave_us.is_some());
     let mut mtxs = Vec::new();
     let mut txs = Vec::new();
     for (i, np) in p.peers.iter().enumerate() {
@@ -258,7 +290,14 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         shared.mix.gain.store(0.15);
         let g = shared.mix.lr_gains();
         assert!((g.0 - 0.15).abs() < 1e-6 && g.0 == g.1, "슬롯 게인 {g:?}");
-        let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Add(media));
+        // 시작 때 있는 피어는 바로 넣고(기존 시나리오 그대로), 실행 중 추가는 그 시각의 워커 사건에서 넣는다(②b-3b).
+        if np.join_us == 0 {
+            let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Add(media));
+            order.push(i);
+            waiting.push(None);
+        } else {
+            waiting.push(Some(media));
+        }
         mtxs.push(mtx);
         txs.push(TxState {
             enc: SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap(),
@@ -324,6 +363,10 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         if t == t_arr {
             let i = pending.iter().position(|x| x.0 == t).unwrap();
             let (_, peer, h, pl) = pending.swap_remove(i);
+            // 아직 추가 전이거나 제거된 피어의 패킷은 버린다(②b-3b — 엔진에서는 net 피어 표에 없어 버려진다)
+            if !order.contains(&peer) {
+                continue;
+            }
             if p.rx_hold_us == 0 {
                 mtxs[peer].push(&h, &pl, t);
             } else {
@@ -403,14 +446,61 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         } else if t == t_out {
             rt.process(&mut dev, 2);
             k_out += 1;
+            draining.retain(|&(i, s, _)| {
+                let free = bank.slots[s].state.load(Ordering::Acquire) == SLOT_FREE;
+                if free {
+                    churn.push((t, i, ChurnEv::Free(s)));
+                }
+                !free
+            });
         } else {
             let timing = tracker.observe(&counters, t, p.out_buf, 48_000);
             // 워커 사건: 워커와 같은 함수. 첫 사건에서 명령 큐의 `Add`가 표에 들어가고 슬롯 1..n이 순서대로 배정된다.
+            // 피어 수명(②b-3b): 제어 평면이 이 워커 반복 직전에 명령을 넣은 것으로 본다. 반환 큐도 제어 평면처럼 비운다.
+            if churning {
+                port.reclaim();
+                for i in 0..n {
+                    if let Some(media) = waiting[i].take_if(|_| t >= p.peers[i].join_us) {
+                        let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Add(media));
+                        order.push(i);
+                        churn.push((t, i, ChurnEv::Join));
+                    }
+                    if !left[i] && p.peers[i].leave_us.is_some_and(|l| t >= l) {
+                        if let Some(pos) = order.iter().position(|&x| x == i) {
+                            // 마지막 통계는 제거 직전 것(이전 워커 사건의 결과)
+                            outs[i].js = sources.media_table()[pos].jitter().stats();
+                            let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Remove(PeerKey::from_raw(i as u64 + 1)));
+                            order.remove(pos);
+                            left[i] = true;
+                            churn.push((t, i, ChurnEv::Leave));
+                            if let Some(s) = slot_of[i].take() {
+                                draining.push((i, s, false));
+                            }
+                        }
+                    }
+                }
+            }
             let urgent = sources.service(&bank, &counters, &wstats, 48_000, &timing, &mut lock_wait).urgent;
+            // 명령은 그 반복에 적용된다(J1): 표 길이·순서가 바로 맞고, 새 피어는 슬롯을 받고, 제거된 피어의 슬롯은 DRAIN이다.
+            assert_eq!(sources.media_table().len(), order.len(), "t={t}: 워커 표 길이");
+            for (pos, &i) in order.iter().enumerate() {
+                assert_eq!(sources.media_table()[pos].shared().key, PeerKey::from_raw(i as u64 + 1), "t={t}: 표 순서");
+                if slot_of[i].is_none() {
+                    if let Some(s) = sources.feed_slot(pos) {
+                        slot_of[i] = Some(s);
+                        churn.push((t, i, ChurnEv::Slot(s)));
+                    }
+                }
+            }
+            for d in draining.iter_mut().filter(|d| !d.2) {
+                if bank.slots[d.1].state.load(Ordering::Acquire) == SLOT_DRAIN {
+                    d.2 = true;
+                    churn.push((t, d.0, ChurnEv::Drain(d.1)));
+                }
+            }
             let pms = sources.media_table();
-            assert_eq!(pms.len(), n, "피어가 모두 표에 들어와야 한다");
-            for i in 0..n {
-                let c = pms[i].jitter().stats().concealed;
+            for (pos, &i) in order.iter().enumerate() {
+                let c = pms[pos].jitter().stats().concealed;
                 if c > seen_conc[i] {
                     outs[i].conceal_us.push(t);
                 }
@@ -423,14 +513,14 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             seen_x = x;
             if !settled && t >= p.settle_us {
                 settled = true;
-                for i in 0..n {
-                    outs[i].js_settle = pms[i].jitter().stats();
+                for (pos, &i) in order.iter().enumerate() {
+                    outs[i].js_settle = pms[pos].jitter().stats();
                 }
             }
             if t >= next_trace {
-                for i in 0..n {
-                    let s = pms[i].jitter().stats();
-                    let playing = pms[i].jitter().is_playing();
+                for (pos, &i) in order.iter().enumerate() {
+                    let s = pms[pos].jitter().stats();
+                    let playing = pms[pos].jitter().is_playing();
                     outs[i].samples.push(Sample { t: t as f64 / 1e6, buf: s.buffer_ms, tgt: s.target_ms, playing, concealed: s.concealed, concealed_loss: s.concealed_loss, produced: s.produced, jit: s.jitter_est_ms, lead: s.lead_ms, tail: s.tail_ms });
                     if playing {
                         outs[i].trace.push((t as f64 / 1e6, s.buffer_ms, s.target_ms));
@@ -445,18 +535,19 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             t_w = t + poll + if p.worker_jitter_us > 0 { rng.gen_range(0..p.worker_jitter_us) } else { 0 };
         }
     }
-    #[allow(clippy::needless_range_loop)] // i는 outs와 PeerSources 표를 함께 색인한다
-    for i in 0..n {
-        // 슬롯은 추가 순서대로 1..n(전에는 하네스가 손으로 준 값)
-        assert_eq!(sources.feed_slot(i), Some(1 + i), "피어 {i}의 슬롯");
-        outs[i].margin = sources.feed_margin(i).expect("슬롯이 배정된 피어");
-        let pm = &mut sources.media_table()[i];
+    for (pos, &i) in order.iter().enumerate() {
+        if !churning {
+            // 슬롯은 추가 순서대로 1..n(전에는 하네스가 손으로 준 값)
+            assert_eq!(sources.feed_slot(pos), Some(1 + i), "피어 {i}의 슬롯");
+        }
+        outs[i].margin = sources.feed_margin(pos).expect("슬롯이 배정된 피어");
+        let pm = &mut sources.media_table()[pos];
         // 마지막 워커 사건 뒤에 도착해 큐에 남은 것까지 넣고 잰다(이전: 도착 즉시 삽입 — 같은 상태가 된다)
         let _ = pm.ingest(profile);
         assert_eq!(pm.rx_dropped(), 0, "하네스에서 수신 큐가 넘쳤다(피어 {i})");
         outs[i].js = pm.jitter().stats();
     }
-    MultiOut { peers: outs, xruns: counters.xruns.load(Ordering::Relaxed), xrun_us }
+    MultiOut { peers: outs, xruns: counters.xruns.load(Ordering::Relaxed), xrun_us, churn }
 }
 
 fn ms(frame: usize) -> f32 {
@@ -692,4 +783,89 @@ fn tune_path_switch_to_jittery_direct() {
         assert!(after < 20.0, "F {frame}: 옛 경로 지연을 끌지 않음: {after:.2}");
         assert!(c2 <= 6, "F {frame}: 전환 직후 은닉 {c2}");
     }
+}
+
+/// 실행 중 피어 추가·제거(엔진 ②b-3b, #136 리뷰 M1): `PeerSources`의 명령 큐 → 표 → 슬롯 배정·해제 경로를 결정적으로 고정한다.
+/// 5분 fixture는 피어를 시작 때만 넣어 이 경로(제거, 실행 중 추가, `seen` 표시·쓸기)를 타지 않는다 — ②b-4(표 합치기)가
+/// 고치는 곳이다. 사건 시점을 단언하고(J1: 명령은 넣은 그 워커 반복에 적용된다), 사건 열과 피어별 통계를 별도 fixture
+/// (`tests/fixtures/sim-churn.json`)와 바이트 비교한다. 5분 fixture와 같은 규칙: 구조 정리 PR은 이 값을 바꾸지 않는다.
+#[test]
+fn churn_add_remove_events_match_fixture() {
+    let s = |x: f64| (x * 1e6) as u64;
+    let mut peers: Vec<NetPeer> = (0..6)
+        .map(|i| {
+            let mut np = NetPeer::new(120, 300 + i as u64);
+            np.net_jitter_us = 1000;
+            np
+        })
+        .collect();
+    // 시작: 0·1·2(슬롯 1·2·3). 3은 5초에 들어온다 → 슬롯 4. 1이 10초에 나간다 → 슬롯 2 해제.
+    // 4가 15초에 들어온다 → 가장 낮은 빈 슬롯 2. 20초: 0이 나가고 **같은 반복에** 5가 들어온다 → 0의 슬롯 1은 그 반복에는
+    // 아직 쥐고 있어(해제는 배정 뒤) 5는 슬롯 5를 받는다. 2는 25초, 3은 30초에 나간다.
+    peers[3].join_us = s(5.0);
+    peers[1].leave_us = Some(s(10.0));
+    peers[4].join_us = s(15.0);
+    peers[0].leave_us = Some(s(20.0));
+    peers[5].join_us = s(20.0);
+    peers[2].leave_us = Some(s(25.0));
+    peers[3].leave_us = Some(s(30.0));
+    let sim = MultiSim::new(35.0, peers);
+    let out = run_multi(&sim);
+    let at = |i: usize, f: &dyn Fn(&ChurnEv) -> bool| out.churn.iter().find(|e| e.1 == i && f(&e.2)).map(|e| (e.0, e.2));
+    // 시작 때 있던 피어: 첫 워커 사건에서 추가 순서대로 슬롯 1·2·3
+    let first = out.churn[0].0;
+    for i in 0..3 {
+        assert_eq!(at(i, &|e| matches!(e, ChurnEv::Slot(_))), Some((first, ChurnEv::Slot(1 + i))), "피어 {i}");
+    }
+    // 실행 중 추가: `Add`를 넣은 그 워커 사건에서 슬롯을 받는다(J1). 슬롯은 가장 낮은 빈 것.
+    for (i, slot) in [(3usize, 4usize), (4, 2), (5, 5)] {
+        let (t_join, _) = at(i, &|e| *e == ChurnEv::Join).unwrap_or_else(|| panic!("피어 {i} Join 없음: {:?}", out.churn));
+        assert!(t_join >= sim.peers[i].join_us && t_join < sim.peers[i].join_us + 2_000, "피어 {i}: 추가 시각 {t_join}");
+        assert_eq!(at(i, &|e| matches!(e, ChurnEv::Slot(_))), Some((t_join, ChurnEv::Slot(slot))), "피어 {i}: 추가한 반복에 슬롯 {slot}");
+    }
+    // 제거: `Remove`를 넣은 그 워커 사건에서 슬롯이 DRAIN, 다음 출력 콜백에서 FREE(128프레임 = 2.67ms 안).
+    for (i, slot) in [(1usize, 2usize), (0, 1), (2, 3), (3, 4)] {
+        let (t_leave, _) = at(i, &|e| *e == ChurnEv::Leave).unwrap_or_else(|| panic!("피어 {i} Leave 없음"));
+        assert_eq!(at(i, &|e| matches!(e, ChurnEv::Drain(_))), Some((t_leave, ChurnEv::Drain(slot))), "피어 {i}: 제거한 반복에 DRAIN");
+        let (t_free, ev) = at(i, &|e| matches!(e, ChurnEv::Free(_))).unwrap_or_else(|| panic!("피어 {i} Free 없음"));
+        assert_eq!(ev, ChurnEv::Free(slot));
+        assert!(t_free > t_leave && t_free <= t_leave + 2_700, "피어 {i}: DRAIN {t_leave} → FREE {t_free}");
+    }
+    // 4는 1이 비운 슬롯 2를 FREE가 된 뒤에 받았다
+    assert!(at(4, &|e| matches!(e, ChurnEv::Slot(_))).unwrap().0 > at(1, &|e| matches!(e, ChurnEv::Free(_))).unwrap().0);
+    // 남은 피어(4·5)는 끝까지 재생 중이고, 다른 피어의 추가·제거가 은닉을 만들지 않았다(무손실 회선)
+    for (i, peer) in out.peers.iter().enumerate() {
+        let js = &peer.js;
+        assert!(js.produced > 1_000, "피어 {i}: 생산 {}", js.produced);
+        assert_eq!(js.concealed, 0, "피어 {i}: 무손실 회선에서 은닉");
+    }
+    assert_eq!(out.xruns, 0);
+    let ev_json: Vec<serde_json::Value> = out
+        .churn
+        .iter()
+        .map(|&(t, i, e)| {
+            let (name, slot) = match e {
+                ChurnEv::Join => ("join", None),
+                ChurnEv::Slot(s) => ("slot", Some(s)),
+                ChurnEv::Leave => ("leave", None),
+                ChurnEv::Drain(s) => ("drain", Some(s)),
+                ChurnEv::Free(s) => ("free", Some(s)),
+            };
+            serde_json::json!({ "tUs": t, "peer": i, "event": name, "slot": slot })
+        })
+        .collect();
+    let peer_json: Vec<serde_json::Value> = out
+        .peers
+        .iter()
+        .map(|p| serde_json::json!({ "produced": p.js.produced, "concealed": p.js.concealed, "bufferMs": format!("{:.3}", p.js.buffer_ms), "targetMs": format!("{:.3}", p.js.target_ms), "margin": p.margin }))
+        .collect();
+    let got = serde_json::to_string_pretty(&serde_json::json!({ "events": ev_json, "peers": peer_json })).unwrap() + "\n";
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("sim-churn.json");
+    if std::env::var_os("SIM_UPDATE_FIXTURE").is_some() {
+        std::fs::write(&path, &got).unwrap();
+        println!("기준값 갱신: {}", path.display());
+        return;
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+    assert!(got == want, "피어 추가·제거 사건 열이 fixture({})와 다르다 — 구조 정리 PR은 이 값을 바꾸지 않는다.\n--- 지금 ---\n{got}", path.display());
 }

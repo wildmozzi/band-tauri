@@ -1,0 +1,174 @@
+{
+  "events": [
+    {
+      "event": "slot",
+      "peer": 0,
+      "slot": 1,
+      "tUs": 0
+    },
+    {
+      "event": "slot",
+      "peer": 1,
+      "slot": 2,
+      "tUs": 0
+    },
+    {
+      "event": "slot",
+      "peer": 2,
+      "slot": 3,
+      "tUs": 0
+    },
+    {
+      "event": "join",
+      "peer": 3,
+      "slot": null,
+      "tUs": 5000512
+    },
+    {
+      "event": "slot",
+      "peer": 3,
+      "slot": 4,
+      "tUs": 5000512
+    },
+    {
+      "event": "leave",
+      "peer": 1,
+      "slot": null,
+      "tUs": 10000291
+    },
+    {
+      "event": "drain",
+      "peer": 1,
+      "slot": 2,
+      "tUs": 10000291
+    },
+    {
+      "event": "free",
+      "peer": 1,
+      "slot": 2,
+      "tUs": 10000794
+    },
+    {
+      "event": "join",
+      "peer": 4,
+      "slot": null,
+      "tUs": 15000659
+    },
+    {
+      "event": "slot",
+      "peer": 4,
+      "slot": 2,
+      "tUs": 15000659
+    },
+    {
+      "event": "leave",
+      "peer": 0,
+      "slot": null,
+      "tUs": 20000620
+    },
+    {
+      "event": "join",
+      "peer": 5,
+      "slot": null,
+      "tUs": 20000620
+    },
+    {
+      "event": "slot",
+      "peer": 5,
+      "slot": 5,
+      "tUs": 20000620
+    },
+    {
+      "event": "drain",
+      "peer": 0,
+      "slot": 1,
+      "tUs": 20000620
+    },
+    {
+      "event": "free",
+      "peer": 0,
+      "slot": 1,
+      "tUs": 20000966
+    },
+    {
+      "event": "leave",
+      "peer": 2,
+      "slot": null,
+      "tUs": 25000010
+    },
+    {
+      "event": "drain",
+      "peer": 2,
+      "slot": 3,
+      "tUs": 25000010
+    },
+    {
+      "event": "free",
+      "peer": 2,
+      "slot": 3,
+      "tUs": 25000964
+    },
+    {
+      "event": "leave",
+      "peer": 3,
+      "slot": null,
+      "tUs": 30000008
+    },
+    {
+      "event": "drain",
+      "peer": 3,
+      "slot": 4,
+      "tUs": 30000008
+    },
+    {
+      "event": "free",
+      "peer": 3,
+      "slot": 4,
+      "tUs": 30001182
+    }
+  ],
+  "peers": [
+    {
+      "bufferMs": "5.667",
+      "concealed": 0,
+      "margin": 0,
+      "produced": 7998,
+      "targetMs": "5.312"
+    },
+    {
+      "bufferMs": "5.750",
+      "concealed": 0,
+      "margin": 0,
+      "produced": 3998,
+      "targetMs": "5.312"
+    },
+    {
+      "bufferMs": "5.479",
+      "concealed": 0,
+      "margin": 0,
+      "produced": 9998,
+      "targetMs": "5.312"
+    },
+    {
+      "bufferMs": "5.396",
+      "concealed": 0,
+      "margin": 0,
+      "produced": 10000,
+      "targetMs": "5.312"
+    },
+    {
+      "bufferMs": "5.459",
+      "concealed": 0,
+      "margin": 0,
+      "produced": 8000,
+      "targetMs": "5.312"
+    },
+    {
+      "bufferMs": "5.476",
+      "concealed": 0,
+      "margin": 0,
+      "produced": 5998,
+      "targetMs": "5.312"
+    }
+  ]
+}
