@@ -2,23 +2,24 @@
 
 - 결정 기준: [../ARCHITECTURE-DECISIONS.md](../ARCHITECTURE-DECISIONS.md) D1(소유권, ③c 항목 끝 줄 "`probe`·메트로놈 계획 락은 ②b에서")·D2(단계 ②b)·D6(증거). 구조 기준: [engine-architecture.md](engine-architecture.md) 4.1·4.3·6절. 본보기: [engine-stage3-design.md](engine-stage3-design.md).
 - 이 문서는 ②b를 **구현할 수 있는 수준**으로 적는다. 코드는 바꾸지 않았고 빌드·측정도 하지 않았다. 줄 번호는 `origin/develop`(3c8e9d7) 기준이다.
-- ③c(송신 경로 락 재배치·restart 무할당)가 진행 중이다(PR #124 등). 이 문서는 develop 현재 코드로 쓰고, ③c가 바꿀 곳은 **〔③c 뒤 갱신〕**으로 표시했다.
+- ③c(송신 경로 락 재배치)가 진행 중이다(PR #126, 아직 열려 있다. restart 무할당 #124는 병합됐다). 이 문서는 #124 **앞**의 코드로 썼고, ③c가 바꿀 곳은 **〔③c 뒤 갱신〕**으로 표시했다. #124가 `tests/architecture.rs`(+155줄)·`peer_media.rs`·`sim/tune.rs`를 바꿔 이 세 파일의 줄 번호는 조금 밀렸다(내용은 같다) — #126 병합 뒤 〔③c 뒤 갱신〕 줄과 함께 한 번에 고친다.
 - 다음 단계 범위는 [engine-stage5-10-scope.md](engine-stage5-10-scope.md). ADR과 다르게 하자는 제안은 9절.
+- PR #125 설계 검토(High 1·Medium 5·Low 11)를 반영했다. 검토가 바꾼 결정: 에코 프로브 반환 시점(3절), 프로브 신호를 상태로 판정(3.2절), 단계 메서드 인자(2.2절), PR 순서와 `SeqCell` 분리(6.1절), 송신 패킷 열 시험(6.2절), 단계 이름 `MetronomeStage`.
 
 ## 0. 요약
 
 | 항목 | 결정 |
 |---|---|
-| 단계 구조체 | `Capture`(입력 → 48k 블록·프레임) · `SendPath`(프레임 → 인코드·송신, 네트워크가 있을 때만 존재, 자동 코덱은 그 부속 `AutoCodec`) · `PeerSources`(피어 미디어 표·슬롯·공급) · `LocalPath`(모니터·탭) · `BeatSched`(메트로놈) · `DeviceWatch`(장치 감시). 출력 콜백 시각은 이미 있는 `CallbackTracker`가 단계다 |
-| ADR 이름과 다른 점 | `AutoCodec`은 루프 단계가 아니다 — 프레임마다 `SendPath` 안에서만 불린다. ADR의 `Capture`는 `Capture` + `SendPath` 둘로 나눈다(9절 제안 1) |
-| 공용 문맥 | `WorkerCtx`(읽기 전용: 설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·net). `WorkerParams`는 생성 입력으로만 남고 `Worker::new`가 단계에 나눠 준다 |
+| 단계 구조체 | `Capture`(입력 → 48k 블록·프레임) · `SendPath`(프레임 → 인코드·송신, 네트워크가 있을 때만 존재, 자동 코덱은 그 부속 `AutoCodec`) · `PeerSources`(피어 미디어 표·슬롯·공급) · `LocalPath`(모니터·탭) · `MetronomeStage`(메트로놈) · `DeviceWatch`(장치 감시). 출력 콜백 시각은 이미 있는 `CallbackTracker`가 단계다 |
+| ADR 이름과 다른 점 | `AutoCodec`은 루프 단계가 아니다 — 프레임마다 `SendPath` 안에서만 불린다. ADR의 `Capture`는 `Capture` + `SendPath` 둘로 나눈다. ADR의 `BeatSched`는 `MetronomeStage`로 부른다(9절 제안 1) |
+| 공용 문맥 | `WorkerCtx`(읽기 전용: 설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop)는 **조정자만 갖는 묶음**이다. 단계 메서드는 `&WorkerCtx`가 아니라 **쓰는 값만** 인자로 받는다(2.2절). `net`은 묶음에 넣지 않고 쓰는 단계 둘(`SendPath`·`MetronomeStage`)이 갖는다. `WorkerParams`는 생성 입력으로만 남고 `Worker::new`가 단계에 나눠 준다 |
 | 단계 사이 값 | `FeedTiming`(시각 단계 반환), 48k 블록·프레임(`Capture`가 빌려 줌), `urgent`(`PeerSources` 반환), 입력 쪽 대기량(`Capture` 반환 → `LocalPath` 점유 통계). 전역·단계 간 필드 접근 없음 |
 | 순서 | 지금과 같다(1.1절 표). 카운터·시계를 읽는 **시점도 옮기지 않는다** |
-| 에코 프로브 락 | 없앤다. 측정 스레드가 `Box<EchoProbe>`(인코더·버퍼 사전할당 포함)를 만들어 **SPSC 명령 큐로 넘기고**, 워커가 혼자 쓰다가 **반환 큐로 돌려준다**(`MediaPort`·`RecordPortCtl`과 같은 모양). 클릭 시작·끝은 원자 세대 번호 |
+| 에코 프로브 락 | 없앤다. 측정 스레드가 `Box<EchoProbe>`(인코더·버퍼 사전할당 포함)를 만들어 **SPSC 명령 큐로 넘기고**, 워커가 혼자 쓰다가 **반환 큐로 돌려준다**(`MediaPort`·`RecordPortCtl`과 같은 모양). 클릭 시작·탭 끝·반환은 **측정 번호에 묶인 원자값**이고 워커는 사건이 아니라 상태로 판정한다. 프로브는 지금처럼 **상대가 에코를 멈출 때까지 워커에 남고**, 분석은 회수한 뒤에 한다(3.2절) |
 | 메트로놈 락 | 계획: 세대 원자값 + 바뀐 반복에서만 `try_lock`(③c의 피어 표와 같은 방식). 루프백 보정: `AtomicU64` 하나. 상태 보고: seqlock 칸(지금의 `MediaStatsCell` 방식을 공용화) |
 | ADR에 없던 워커 락 | `MetronomeCtl.stats`·`loopback_offset_ms`(ADR은 "계획"만 적음), 메트로놈이 기준 피어 시계를 볼 때의 `peers.read()`(반복마다). `Peer.clock`은 워커와 `band-net-recv`만 잡는다(둘 다 MMCSS) — 규칙 위반이 아니라 남긴다 |
 | 5분 fixture | 모든 PR에서 **바이트 동일**. 다만 하네스는 `Worker`를 돌리지 않으므로(5.1절) fixture만으로는 조정자를 증명하지 못한다 → ②b-3에서 하네스가 `PeerSources`를 타게 한 뒤부터 fixture가 공급 조정까지 덮는다 |
-| PR | 7개: ②b-0 계측·"전" 수치 → ②b-1 이동(수신 쪽 단계) → ②b-2 이동(송신 쪽 단계) → ②b-3 하네스가 `PeerSources`를 탐 → ②b-4 피어 표 합치기 → ②b-5 에코 프로브 → ②b-6 메트로놈·"후" 수치·정적 검사 |
+| PR | 8개, 순서대로: ②b-0 계측·"전" 수치·송신 패킷 열 시험 → ②b-1 이동(수신 쪽 단계) → ②b-3 하네스가 `PeerSources`를 탐(②b-1의 수신 쪽 증거를 겸함) → ②b-2 이동(송신 쪽 단계) → ②b-4 피어 표 합치기 → ②b-5 에코 프로브 → ②b-6a `SeqCell` 추출 → ②b-6b 메트로놈·"후" 수치·정적 검사. 번호는 내용의 이름이고 순서는 이 줄이다(6.1절) |
 
 ## 1. 지금
 
@@ -77,7 +78,7 @@ b가 **프레임마다 c 앞에서** 불린다는 점이 순서 조건이다: d�
 | 메트로놈 | `beats` `metro_plan` `metro_stats_at` `metro_stats_gen` | `service_metronome` |
 | 장치 감시 | `last_played` `last_played_at` `last_captured` `last_captured_at` `reported_errors` | `watch_device`, `run` |
 
-묶음 사이를 건너는 필드는 `out_tmp`(스크래치), `in_rs`(로컬 설정·점유 통계가 읽음), `encode_errors`(로그 빈도 카운터) 셋뿐이다. 나머지 45개는 한 묶음 안에서만 쓰인다 — 단계 구조체로 나눌 수 있는 근거다.
+묶음 사이를 건너는 필드는 다섯이다. 바뀌는 상태는 `out_tmp`(스크래치), `in_rs`(로컬 설정·점유 통계가 읽음), `encode_errors`(로그 빈도 카운터) 셋이고, 나머지 둘 `frame`·`ich`는 생성 뒤 바뀌지 않는 값이다(`push_local`의 `ich`, `on_capture_frame`의 `ts += frame`, `update_auto_codec`의 `pcm_relay_load(frame, ich, ..)`) — `cfg`에서 유도되므로 각 단계가 생성 때 복사해 갖는다. 나머지 43개는 한 묶음 안에서만 쓰인다 — 단계 구조체로 나눌 수 있는 근거다.
 
 ### 1.4 읽으면서 확인한 것 가운데 설계를 바꾼 사실
 
@@ -96,11 +97,11 @@ b가 **프레임마다 c 앞에서** 불린다는 점이 순서 조건이다: d�
 ```rust
 // engine/worker/mod.rs — 조정자. 단계를 순서대로 부르고 값을 넘긴다. 자기 상태는 단계들과 문맥뿐이다.
 pub struct Worker {
-    ctx: WorkerCtx,
+    ctx: WorkerCtx,                // 조정자만 본다. 단계에는 필드를 꺼내 준다(2.2절)
     capture: Capture,
-    send: Option<SendPath>,        // 네트워크가 있을 때만
+    send: Option<SendPath>,        // 네트워크가 있을 때만. net은 여기와 MetronomeStage가 생성 때 받는다
     clock: CallbackTracker,        // 지금의 clock.rs 그대로
-    beat: BeatSched,
+    metro: MetronomeStage,
     peers: PeerSources,
     local: LocalPath,
     watch: DeviceWatch,
@@ -108,52 +109,72 @@ pub struct Worker {
 }
 
 pub fn run(mut self) {
-    let _prio = promote_engine_thread(&self.ctx.stats.thread_prio);
+    let c = &self.ctx;
+    let _prio = promote_engine_thread(&c.stats.thread_prio);
     let mut last_start = Instant::now();
-    while !self.ctx.stop.load(Relaxed) {
+    while !c.stop.load(Relaxed) {
         let start = Instant::now();                                   // :338-340
-        self.ctx.stats.iter_period.record(start - last_start);
+        c.stats.iter_period.record(start - last_start);
         last_start = start;
         self.echo.poll();                                             // ②b-5: 프로브 명령 적용(그 전에는 없음)
-        self.local.configure(&self.ctx, self.capture.granularity());  // :341
+        self.local.configure(&c.info, &c.counters, self.capture.granularity());   // :341
         let pass_at = Instant::now();                                 // :426
         self.capture.fill();                                          // :427-434
-        let muted = self.ctx.controls.input_muted.load(Relaxed);      // :435
+        let muted = c.controls.input_muted.load(Relaxed);             // :435
         while let Some(block) = self.capture.next_block(muted) {      // :437-452
             self.local.push(block);
         }
         while let Some(frame) = self.capture.next_frame() {           // :453-457
             if let Some(tx) = &mut self.send {
-                tx.send_frame(&self.ctx, frame, pass_at, self.echo.probe_mut());   // :633-662
+                tx.send_frame(frame, pass_at, self.echo.probe_mut()); // :633-662
             }
         }
-        let t = self.clock.observe(&self.ctx.counters, self.ctx.wall_us(), self.ctx.out_burst_dev() as usize, self.ctx.info.out_rate);  // :664-668
-        self.beat.service(&self.ctx, &t);                             // :344
-        let round = self.peers.service(&self.ctx, &t, self.echo.tap_mut());       // :345
-        self.local.service(&self.ctx);                                // :346
-        self.local.track_occupancy(&self.ctx, self.capture.pending48());          // :347
-        self.watch.check(&self.ctx);                                  // :348-353
-        self.ctx.stats.iter_body.record(start.elapsed());
+        let t = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);  // :664-668
+        self.metro.service(&c.info, &c.counters, &t);                 // :344
+        let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &t, self.echo.tap_mut());  // :345
+        self.local.service(&c.info, &c.counters, &c.controls, &c.stats, c.epoch); // :346
+        self.local.track_occupancy(&c.stats, self.capture.pending48());           // :347
+        self.watch.check(&c.counters, &c.stats, c.epoch);             // :348-353
+        c.stats.iter_body.record(start.elapsed());
         std::thread::sleep(if round.urgent { FINE_POLL } else { POLL });
     }
-    self.peers.close(&self.ctx);                                      // :359-363
+    self.peers.close(&c.bank);                                        // :359-363
+    self.echo.close();                                                // ②b-5: 쥐고 있는 프로브를 반환 큐로(3.2절)
 }
 ```
 
-호출 모양(빌려 주는 반복 `next_block`/`next_frame`인지 클로저인지)은 구현 PR에서 정해도 된다. 정해진 것은 **호출 순서와 읽는 시점**이다(5절).
+호출 모양(빌려 주는 반복 `next_block`/`next_frame`인지 클로저인지, 인자 순서)은 구현 PR에서 정해도 된다. 정해진 것은 **호출 순서와 읽는 시점**(5절), 그리고 **단계가 `&WorkerCtx`를 받지 않는다**는 것(2.2절)이다.
 
-### 2.2 `WorkerCtx` — 읽기 전용 문맥
+### 2.2 `WorkerCtx` — 조정자의 읽기 전용 묶음
 
 `WorkerParams`(`:94-118`)는 소유권이 넘어가는 끝(`in_cons`·`prods`·`media_port`)과 공유 읽기 전용 값이 섞여 있어 `&WorkerParams`를 단계에 그대로 줄 수 없다(`engine-architecture.md` 6절 끝 문장은 이 점에서 틀렸다 — ②b-1에서 고친다). 나눈다:
 
 | `WorkerParams` 필드 | 가는 곳 |
 |---|---|
-| `cfg` `info` `counters` `controls` `bank` `stats` `epoch` `stop` `net` | `WorkerCtx`(모두 `Arc`·`Copy`·불변). 도우미 `wall_us()`, `in_burst48()`(`:371-377`), `out_burst_dev()`(`:379-387`), `chunk_dev()`를 여기 둔다 |
+| `cfg` `info` `counters` `controls` `bank` `stats` `epoch` `stop` | `WorkerCtx`(모두 `Arc`·`Copy`·불변). 도우미 `wall_us()`만 여기 둔다. 버스트 계산 `in_burst48`(`:371-377`)·`out_burst_dev`(`:379-387`)·`chunk_dev`는 `(&StreamInfo, &AudioCounters)`를 받는 자유 함수로(단계가 `WorkerCtx` 없이 부를 수 있게) |
+| `net` | `WorkerCtx`에 넣지 않는다. 쓰는 단계 둘(`SendPath`, `MetronomeStage`)이 생성 때 `Arc`를 받아 갖는다 — "모르는 것: net"이 나머지 단계에서 타입으로 지켜진다 |
 | `in_cons` | `Capture` |
 | `prods[LOCAL_SOURCE]` | `LocalPath` |
 | `prods[1..]` `media_port` `media_settings` `rec_marks` | `PeerSources` |
-| `metronome` | `BeatSched` |
-| `probe` | (②b-1~4) `WorkerCtx`에 그대로 `Arc<Mutex<..>>` → (②b-5) `EchoPortRt`가 되어 `EchoRt`로 |
+| `metronome` | `MetronomeStage` |
+| `probe` | (②b-1~4) 지금 쓰는 두 단계(`SendPath`·`PeerSources`)가 `Arc<Mutex<..>>` 복제를 하나씩 갖는다(지금도 `:784`에서 복제해 잠근다) → (②b-5) `EchoPortRt`가 되어 조정자의 `EchoRt`로 |
+
+**단계 메서드는 `&WorkerCtx`를 받지 않는다. 쓰는 값만 인자로 받는다**(PR #125 검토 M2). `WorkerCtx`는 조정자(`Worker::run`)가 필드를 꺼내 주는 묶음일 뿐이다. 제네릭·trait는 쓰지 않는다. 이유:
+
+- 단계 정의의 "모르는 것"이 서명으로 지켜진다. `&WorkerCtx`를 통째로 주면 `LocalPath`·`DeviceWatch`도 `net`·`stop`에 닿을 수 있다(D0-1 "좁은 입구").
+- ②b-3에서 가상 시간 하네스가 `PeerSources::service`를 부를 때 벽시계 `epoch`·`StreamInfo`·`stop`·`net`을 꾸며 낼 필요가 없다(5.3절).
+
+| 단계 메서드 | 받는 것(생성 때 받아 갖는 것은 괄호) |
+|---|---|
+| `Capture::fill` / `next_block` / `next_frame` | 없음 / `muted` / 없음 (`cfg`에서 유도한 `frame`·`ich`) |
+| `SendPath::send_frame` | 프레임, `pass_at`, 에코 프로브 (`net`, `epoch`, `cfg`에서 유도한 코덱·`frame`·`ich`) |
+| `MetronomeStage::service` | `&StreamInfo`, `&AudioCounters`(`in_cb_frames`), `&FeedTiming` (`MetronomeCtl`, `net`) |
+| `PeerSources::service` | `&SourceBank`, `&AudioCounters`, `&WorkerStats`(원자값 셋: `media_peers`·`deadline_fills`·`skipped_frames`), `out_rate`, `&FeedTiming`, 에코 탭 |
+| `PeerSources::close` | `&SourceBank` |
+| `LocalPath::configure` / `service` / `track_occupancy` | `&StreamInfo`·`&AudioCounters`·`granularity` / `&StreamInfo`·`&AudioCounters`·`&MixControls`·`&WorkerStats`·`epoch` / `&WorkerStats`·`pending48` |
+| `DeviceWatch::check` | `&AudioCounters`, `&WorkerStats`, `epoch` |
+
+2.3절 표의 "입력" 칸에 `ctx.x`라고 적은 것은 "조정자가 `ctx`에서 꺼내 인자로 넘기는 `x`"라는 뜻이다. 인자 목록의 정확한 모양은 구현 PR이 정하되, 메서드 하나의 인자가 7개를 넘으면 그 단계 전용의 작은 빌림 구조체(`PeerEnv<'a> { bank, counters, stats, out_rate }` 같은 것)로 묶는다 — `WorkerCtx` 통째는 아니다.
 
 `in_burst48`·`out_burst_dev`는 **부를 때마다 원자값을 읽는다**. 지금 한 반복에 `out_burst_dev`가 최대 5번 불린다(`:390`, `:666`, `:855`, `:872`, `:878`). ②b는 이것을 "반복당 한 번 읽어 넘기기"로 바꾸지 **않는다** — 읽는 시점이 달라지면 콜백 크기가 바뀌는 순간의 동작이 달라진다. 그 정리는 동작 변경이므로 하지 않는다(7절).
 
@@ -176,12 +197,12 @@ pub fn run(mut self) {
 | | |
 |---|---|
 | 소유 | `encoder`(이제 `Option`이 아님), `payload`, `pkt`, `flags`, `frame_code`, `ts`, `encode_errors`, `auto: AutoCodec`, (②b-4까지) `alt_encoder`·`alt_frame`·`alt_payload` |
-| 입력 | 프레임, `pass_at`(송신 큐 지연 시작점), 에코 프로브(`Option<&mut EchoProbe>`), `ctx.net`·`ctx.epoch` |
+| 입력 | 프레임, `pass_at`(송신 큐 지연 시작점), 에코 프로브(`Option<&mut EchoProbe>`). `net`·`epoch`는 생성 때 받아 갖는다 |
 | 출력 | 없음(패킷이 나간다). 송신 통계는 net이 낸다 |
-| 존재 조건 | `ctx.net.is_some()`일 때만 만든다. 없으면 `Worker.send = None`이고 프레임은 버려진다(지금도 `ts`만 올린다, `:661` — `ts`는 송신에서만 쓰이므로 관찰되지 않는다) |
+| 존재 조건 | `WorkerParams.net`이 `Some`일 때만 만든다. 없으면 `Worker.send = None`이고 프레임은 버려진다(지금도 `ts`만 올린다, `:661` — `ts`는 송신에서만 쓰이므로 관찰되지 않는다) |
 | 바뀌는 이유 | 코덱·패킷 플래그·송신 API |
 
-`AutoCodec`(부속, `auto_codec.rs`): 소유 `auto`(`Vec<AutoTx>`), `auto_pool`, `auto_flags`, `relay_prev`, `relay_policy`, `auto_check_at`. `Option<AutoCodec>`으로 두어 `auto_enabled`(PCM16 설정일 때만, `:269`) 검사를 타입으로 바꾼다. 메서드 셋은 지금의 세 함수 그대로다 — `update(&ctx)`(1.2절 b), `encode_frames(frame, alt_peer, &mut encode_errors)`(c), `lookup(peer, kind)`(d의 조회). 바뀌는 이유: 전환 정책 연동(`relay_codec`).
+`AutoCodec`(부속, `auto_codec.rs`): 소유 `auto`(`Vec<AutoTx>`), `auto_pool`, `auto_flags`, `relay_prev`, `relay_policy`, `auto_check_at`. `Option<AutoCodec>`으로 두어 `auto_enabled`(PCM16 설정일 때만, `:269`) 검사를 타입으로 바꾼다. 메서드 셋은 지금의 세 함수 그대로다 — `update(&NetShared)`(1.2절 b, `SendPath`가 자기 `net`을 빌려 준다), `encode_frames(frame, alt_peer, &mut encode_errors)`(c), `lookup(peer, kind)`(d의 조회). 바뀌는 이유: 전환 정책 연동(`relay_codec`).
 
 `encode_errors`는 로그 빈도 제한 카운터로 설정 코덱과 자동 코덱이 함께 센다(`:620-623`, `:654-657`). 나누면 로그 빈도만 달라지지만 그것도 바꾸지 않으려고 `SendPath`가 갖고 `AutoCodec`에 빌려 준다.
 
@@ -190,7 +211,7 @@ pub fn run(mut self) {
 | | |
 |---|---|
 | 소유 | `media`(`Vec<Box<PeerMedia>>`), `feeds`(`Vec<PeerFeed>`), `media_port`(워커 쪽 끝), `media_settings`, `prods`(슬롯 1..), `rec_marks`, `chunk_buf`, 자기 `tmp`(지금의 `out_tmp`를 로컬 경로와 나눠 가짐: `Worker::new`에서 8,192 × 4B 하나 더 할당), `slot_full_logged` |
-| 입력 | `&FeedTiming`, 에코 탭(`Option<&mut EchoProbe>`), `ctx.bank`·`ctx.counters`·`ctx.stats` |
+| 입력 | `&FeedTiming`, 에코 탭(`Option<&mut EchoProbe>`), `ctx.bank`·`ctx.counters`·`ctx.stats`·`ctx.info.out_rate`(값) |
 | 출력 | `PeerRound { urgent: bool }` |
 | 바뀌는 이유 | 피어 수명(추가·제거·슬롯), 공급 순서, 녹음 마커 |
 
@@ -209,16 +230,16 @@ pub fn run(mut self) {
 
 메서드: `configure`(`:389-394`), `push`(`:460-474`, 모노 → 스테레오 포함), `service`(`:865-900` + `adapt_safety` `:850-861`), `track_occupancy`(`:903-910`).
 
-**`BeatSched`** — `worker/beat_sched.rs`
+**`MetronomeStage`** — `worker/metronome_stage.rs`
 
 | | |
 |---|---|
 | 소유 | `beats`(`metronome::BeatScheduler`), 적용한 계획 `(세대, MetronomePlan)`, `stats_at`, `stats_gen` |
-| 입력 | `&FeedTiming`, `ctx.info`·`ctx.counters.in_cb_frames`·`ctx.net`, `MetronomeCtl` |
+| 입력 | `&FeedTiming`, `ctx.info`·`ctx.counters.in_cb_frames`. `net`·`MetronomeCtl`은 생성 때 받아 갖는다 |
 | 출력 | 없음(`ClickShared` 원자값, 상태 보고) |
 | 바뀌는 이유 | 박 예약 입력(시계 추정·숨은 출력 지연), 상태 보고 필드 |
 
-이름이 `metronome::BeatScheduler`(순수 스케줄러)와 한 글자 차이다. 헷갈리면 `MetronomeStage`로 바꿔도 된다(9절 제안 1에 선택 사항으로).
+ADR의 이름은 `BeatSched`였다. 이 단계가 `metronome::BeatScheduler`(순수 스케줄러)를 필드로 가지므로 한 파일에 한 글자 차이 타입이 둘이 된다 — PR #125 검토에서 `MetronomeStage`로 확정했다(9절 제안 1).
 
 **`DeviceWatch`** — `worker/device_watch.rs`
 
@@ -239,7 +260,7 @@ pub fn run(mut self) {
 | `muted: bool` | 조정자 | `Capture` | `:435` |
 | 48k 블록 `&[f32]` | `Capture` | `LocalPath::push` | `self.push_local(block)`(`:449`) |
 | 프레임 `&[f32]` | `Capture` | `SendPath::send_frame` | `drain_frames` 클로저(`:455`) |
-| `FeedTiming` | `CallbackTracker` | `BeatSched`, `PeerSources` | 같음(`:343-345`) |
+| `FeedTiming` | `CallbackTracker` | `MetronomeStage`, `PeerSources` | 같음(`:343-345`) |
 | `PeerRound.urgent` | `PeerSources` | 조정자(수면 길이) | `service_peers` 반환값(`:345`) |
 | `pending48: usize` | `Capture` | `LocalPath::track_occupancy` | `self.in_rs.available()` 직접 읽기(`:904`) |
 | `granularity: usize` | `Capture` | `LocalPath::configure` | `self.in_rs.is_passthrough()` 직접 읽기(`:392`) |
@@ -264,19 +285,25 @@ pub fn run(mut self) {
 
 측정 스레드는 기본 우선순위다. 락을 쥔 채 선점되면 워커가 캡처 프레임(= 송신)과 공급에서 기다린다 — #122가 확인한 구조와 같다. 측정 중이 아닐 때도 워커는 프레임마다·반복마다 이 락을 잡았다 놓는다.
 
-### 3.2 설계 — 소유권 이전(명령·반환 큐) + 원자 세대
+### 3.2 설계 — 소유권 이전(명령·반환 큐) + 측정 번호에 묶인 원자값
 
-③의 기준(`engine-stage3-design.md` 4절)을 그대로 쓴다: **값만 바뀌면 원자값, 소유권이 넘어가면 큐.** 프로브는 인코더와 수 MB 버퍼를 가진 상태 덩어리이고 측정 동안 워커만 쓴다 → 소유권 이전. 클릭 시작·측정 끝은 사건 → 세대 번호.
+③의 기준(`engine-stage3-design.md` 4절)을 그대로 쓴다: **값만 바뀌면 원자값, 소유권이 넘어가면 큐.** 프로브는 인코더와 수 MB 버퍼를 가진 상태 덩어리이고 측정 동안 워커만 쓴다 → 소유권 이전. 클릭 시작·탭 끝·반환은 값 → 원자값.
+
+PR #125 검토에서 두 가지를 고쳤다.
+
+- **신호는 사건이 아니라 상태다(M1).** 처음 안은 "세대가 바뀌었다"는 사건을 워커가 한 번 보고 지나가는 모양이었다. 그러면 워커가 명령 큐를 본 뒤(비어 있음) 측정 스레드가 설치 + 끝을 연달아 내면, 워커는 끝을 먼저 보고(프로브 없음) 다음 반복에 프로브를 받아 **영영 돌려주지 않는다**. 그래서 프로브에 측정 번호 `id`를 싣고, `EchoCtl`은 "이 번호까지 탭 끝"·"이 번호까지 반환"·"이 번호의 클릭 n회"를 발행하며, 워커는 **반복마다 쥔 프로브의 `id`와 비교**한다. 설치와 신호가 어느 순서로 보여도 결과가 같다(7.3절).
+- **탭 끝과 반환은 다른 시점이다(H1).** 지금 코드는 결과 수거 때 `tap = false`만 하고 프로브는 워커에 **남긴다**(`measure.rs:919-924`). 프로브가 사라지는 것은 `run()`의 정리에서 상대가 에코를 멈출 때까지(`ECHO_STOP_WAIT`, 최대 4초) 기다린 **뒤**다(`:862-868`). 프로브가 있는 동안 워커는 그 피어에게 내 입력 대신 무음을 보내므로, 반환을 결과 수거 시점으로 당기면 상대가 반사를 멈추기 전까지 **내 실제 소리가 내게 되돌아온다**. 그래서 탭 끝(`tap_off`)과 반환(`stop`)을 따로 두고, 반환은 지금과 같은 시점(정리 루프 뒤)에 낸다. 수집 버퍼가 프로브 안에 있으므로 `analyze_echo`는 **회수한 뒤**에 돈다. 검토 수정안 (a)다 — (b)(수집 버퍼만 따로 `Box`로 먼저 돌려받기)는 넘기는 타입이 둘이 되어 고르지 않았다.
 
 ```rust
 // engine/measure.rs(⑥ 뒤에는 measure/echo.rs)
 
 /// 측정 동안 워커가 혼자 가진다. 만들고 버리는 것은 측정 스레드다.
 pub struct EchoProbe {
+    id: u32,                     // 측정 번호(1부터, EchoPort가 측정마다 +1). 워커는 이것으로 신호를 판정한다
     pub peer_id: String, pub peer_ssrc: u32,
     enc: Encoder,                // 지금 워커가 만드는 alt_encoder(worker/mod.rs:485) — 측정 스레드가 미리 만든다
     frame: Vec<f32>, payload: Vec<u8>,          // 지금의 alt_frame·alt_payload
-    click: Vec<f32>, clicks_left: u32, until_next: u64, cursor: Option<usize>,
+    click: Vec<f32>, clicks_started: bool, clicks_left: u32, until_next: u64, cursor: Option<usize>,
     emitted_us: Vec<f64>,        // with_capacity(20) — 상한 20회(measure.rs:861)
     tap: bool,
     arrivals: Vec<f32>, arrival_us: Vec<f64>,   // with_capacity(듣는 시간 + 0.5초). 차면 버리고 센다(늘리지 않는다)
@@ -284,21 +311,34 @@ pub struct EchoProbe {
 }
 
 /// 측정 스레드 쪽 끝(엔진이 갖고 `EchoJob`에 `Arc`로 준다).
-pub struct EchoPort { cmd: Mutex<HeapProd<Box<EchoProbe>>>, ret: Mutex<HeapCons<Box<EchoProbe>>>, ctl: Arc<EchoCtl>, busy: AtomicBool }
+pub struct EchoPort { cmd: Mutex<HeapProd<Box<EchoProbe>>>, ret: Mutex<HeapCons<Box<EchoProbe>>>, ctl: Arc<EchoCtl>, busy: AtomicBool, next_id: AtomicU32 }
 /// 워커 쪽 끝.
 pub struct EchoPortRt { cmd: HeapCons<Box<EchoProbe>>, ret: HeapProd<Box<EchoProbe>>, ctl: Arc<EchoCtl> }
-/// 원자값만.
-pub struct EchoCtl { clicks: AtomicU64 /* 세대 << 32 | 횟수 */, stop: AtomicU32 /* 세대 */ }
+/// 원자값만. 셋 다 "측정 번호"에 묶인 상태다(사건이 아니다). 측정 스레드만 쓰고 번호는 늘기만 한다.
+pub struct EchoCtl {
+    clicks: AtomicU64,   // 측정 번호 << 32 | 횟수: "이 번호의 측정은 클릭 n회를 시작한다"
+    tap_off: AtomicU32,  // "이 번호까지는 탭을 끈다"(결과 수거 시점)
+    stop: AtomicU32,     // "이 번호까지는 프로브를 돌려준다"(정리 루프 뒤)
+}
 
-/// 워커가 갖는 상태: 끝 + 지금 쥔 프로브.
-pub struct EchoRt { port: EchoPortRt, probe: Option<Box<EchoProbe>>, clicks_seen: u32, stop_seen: u32 }
+/// 워커가 갖는 상태: 끝 + 지금 쥔 프로브. 본 세대를 기억하는 필드는 없다.
+pub struct EchoRt { port: EchoPortRt, probe: Option<Box<EchoProbe>> }
 impl EchoRt {
-    /// 반복 맨 앞: 설치 명령을 받고, 클릭 시작·끝 세대를 적용한다. 끝이면 프로브를 반환 큐로 돌려준다.
+    /// 반복 맨 앞. 순서: ① 쥔 프로브가 없으면 명령 큐에서 하나 받는다
+    /// ② 쥔 프로브의 id <= ctl.stop이면 반환 큐로 돌려주고 끝(방금 받은 것도 마찬가지)
+    /// ③ id <= ctl.tap_off이면 tap = false
+    /// ④ ctl.clicks의 번호 == id이고 !clicks_started이면 start_clicks(n)
     pub fn poll(&mut self);
     pub fn probe_mut(&mut self) -> Option<&mut EchoProbe>;                 // 송신
     pub fn tap_mut(&mut self) -> Option<&mut EchoProbe>;                   // 공급(tap이 켜져 있을 때만)
+    /// 루프를 나갈 때: 쥔 프로브와 명령 큐에 남은 것을 반환 큐로.
+    pub fn close(&mut self);
 }
 ```
+
+- 판정이 전부 "쥔 프로브의 `id`와 원자값의 비교"라서 워커가 신호를 **놓칠 수 없다**. 설치보다 끝이 먼저 보여도, 프로브를 받은 그 `poll`의 ②에서 돌려준다. `clicks_seen`·`stop_seen` 같은 "본 세대" 필드가 없다.
+- 측정 번호는 `u32`이고 측정마다 1씩 는다(엔진 하나의 수명 동안 2³²회에 닿지 않는다). 0은 "없음"이다.
+- `EchoPort::install`은 넣기 전에 **반환 큐를 먼저 비운다**(지난 측정이 200ms 안에 못 받은 `Box`가 뒤늦게 와 있을 수 있다 — 측정 스레드에서 해제된다). 워커는 한 번에 프로브 하나만 쥐므로, 쥔 채로 새 것이 오면 새 것은 명령 큐에 남아 있다가 쥔 것을 돌려준 다음 반복에 받는다. 워커가 `Box`를 떨어뜨리는(워커 해제) 경로는 없다.
 
 - 큐 용량 2(측정은 `EngineManager::begin_measure`가 하나로 직렬화한다, `manager.rs:70-78`). `EchoPort`의 `Mutex` 둘은 측정 스레드만 잡는다(`Engine`이 `Sync`여야 해서 있을 뿐이다). 워커는 잡지 않는다.
 - `busy`가 지금의 `probe.lock().is_some()`(`measure.rs:858`)을 대신한다(`compare_exchange`).
@@ -306,26 +346,36 @@ impl EchoRt {
 - 샘플별 `arrival_us`를 그대로 둔다. 청크 시작 시각만 실어 보내고 측정 스레드에서 펼치면 메모리가 2/3 줄지만, `analyze_echo`가 받는 값이 한 비트도 달라지지 않게 하는 쪽을 고른다.
 - `net.send_audio_timed`의 `alt: Option<(&str, &[u8])>`는 그대로다. 지금 `peer_id.clone()`이 필요한 이유는 락 가드를 놓아야 해서인데, 워커가 프로브를 소유하면 `&probe.peer_id`를 빌려 주면 된다 → `net/`은 바꾸지 않는다.
 
-**흐름**(`EchoJob::run_inner`, `measure.rs:884-929` 기준):
+**흐름**(`EchoJob::run`·`run_inner`, `measure.rs:857-931` 기준):
 
 | 단계 | 지금 | 뒤 |
 |---|---|---|
-| 상대 동의 뒤 설치 | `*probe.lock() = Some(EchoProbe::new(..))`(`:898`) | 측정 스레드가 `Box<EchoProbe>`를 만들어(인코더·버퍼 포함) `port.install(box)` → 워커가 다음 반복의 `poll`에서 받는다 |
+| 상대 동의 뒤 설치 | `*probe.lock() = Some(EchoProbe::new(..))`(`:898`) | 측정 스레드가 `Box<EchoProbe>`를 만들어(인코더·버퍼 포함, 측정 번호 `id`) `port.install(box)` → 워커가 다음 반복의 `poll`에서 받는다 |
 | 지터 재시작, 1.5초 대기 | `:899-900` | 같음 |
-| 클릭 시작 | `probe.lock()…start_clicks(runs)`(`:902-904`) | `ctl.clicks`에 `(세대 + 1, runs)` → 워커가 `poll`에서 `start_clicks` |
+| 클릭 시작 | `probe.lock()…start_clicks(runs)`(`:902-904`) | `ctl.clicks = (id, runs)` → 워커가 `poll`에서 `start_clicks` |
 | 듣기(100ms마다 깊이 수집) | `:907-918` | 같음 |
-| 결과 수거 | 락 안에서 `tap = false` + `mem::take`(`:919-924`) | `ctl.stop` 세대 + 1 → 워커가 `poll`에서 프로브를 반환 큐로 → 측정 스레드가 1ms 간격으로 최대 200ms 기다려 받는다. 못 받으면 "오디오 워커가 응답하지 않습니다"(`reserve_cmd`와 같은 뜻, `peer_media.rs:332-345`) |
-| 정리 | `*probe.lock() = None`(`:868`) | 실패 경로에서 아직 워커에 있으면 `stop` → 회수. `busy = false`. 받은 `Box`를 여기서 해제 |
+| 결과 수거(`run_inner` 끝) | 락 안에서 `tap = false` + `mem::take` 셋(`:919-924`), 이어서 `delay_us`·rtt·경로를 net에서 읽고(`:925-927`) `analyze_echo`(`:929`) | `ctl.tap_off = id`(원자값 하나) → 워커가 다음 `poll`에서 `tap = false`. **프로브는 워커에 남는다.** `delay_us`·rtt·경로·깊이 요약은 지금과 같은 시점에 net·통계에서 읽어 `run_inner`가 **재료**로 돌려준다(분석은 아직 안 한다) |
+| 정리(`run`): 요청 거두기, 상대가 에코를 멈출 때까지 대기 | `:863-867` — 그동안 워커는 프로브가 있으므로 무음을 보낸다 | 같음(프로브가 워커에 있다) |
+| 프로브 제거 | `*probe.lock() = None`(`:868`) | `ctl.stop = id` → 워커가 다음 `poll`에서 프로브를 반환 큐로 → 측정 스레드가 1ms 간격으로 최대 200ms 기다려 받는다. 못 받으면 "오디오 워커가 응답하지 않습니다"(`reserve_cmd`와 같은 뜻, `peer_media.rs:332-345`) |
+| 분석 | (결과 수거 때 이미 함) | 회수한 프로브의 `emitted_us`·`arrivals`·`arrival_us`로 `analyze_echo` → 재료와 합쳐 보고서. `run_inner`가 실패했으면 분석 없이 그 에러를 낸다(회수는 한다) |
+| 마무리 | `media.request_restart()`(`:869`), `res` 반환 | 같음. `busy = false`, 받은 `Box`를 측정 스레드에서 해제 |
 
-워커가 끝날 때(`run` 루프 탈출) 프로브를 쥐고 있으면 반환 큐로 돌려준다(엔진 정지 중 측정).
+`run()`은 지금도 정리(최대 4초)가 끝난 **뒤**에 보고서를 돌려준다(`:861-870`). 그래서 분석을 정리 뒤로 옮겨도 호출자가 결과를 받는 시각은 같다(분석 시간만큼 — 수 ms — 늦다).
+
+워커가 끝날 때(`run` 루프 탈출) `EchoRt::close`가 쥔 프로브를 반환 큐로 돌려준다(엔진 정지 중 측정).
 
 ### 3.3 달라지는 것(전부 실시간에서만, 워커 반복 1회 이내)
+
+**달라지지 않는 것부터**: 프로브가 워커에 있는 구간(= 그 피어에게 무음 + 클릭을 보내는 구간)은 지금과 같다 — 설치부터 정리 루프 끝까지. 측정이 끝난 뒤 상대가 반사를 멈추기 전에 내 실제 소리가 나가 되돌아오는 일은 없다(H1). 구현 PR(②b-5)은 이것을 시험으로 고정한다: 가짜 장치에 입력 신호를 넣고 측정 대상 피어가 받는 오디오가 `stop` 발행 전까지 무음(클릭 제외)임을 확인한다.
 
 | | 지금 | 뒤 |
 |---|---|---|
 | 설치 → 첫 클릭 스트림 프레임 | 설치 뒤 처음 완성되는 프레임 | 설치 뒤 다음 반복에서 처음 완성되는 프레임(≤ 약 1ms 늦음). 그 뒤 1.5초를 기다린다 |
 | 클릭 시작 | 다음 프레임 | 다음 반복의 다음 프레임 |
 | 탭 끝 | `tap = false` 즉시 | 다음 반복. 그 사이 샘플은 분석 창(`송신 + 280ms`, `measure.rs:785`) 밖이라 쓰이지 않는다 |
+| 프로브가 워커를 떠나는 시점 | 정리 루프 뒤 즉시 | 정리 루프 뒤 다음 반복(≤ 약 1ms 동안 무음이 더 나간다) |
+| 분석 시점 | 결과 수거 직후(정리 앞) | 프로브 회수 뒤(정리 뒤). 입력 셋은 같다 — 탭이 꺼진 뒤 `arrivals`·`arrival_us`는 늘지 않고, 클릭이 끝난 뒤 `emitted_us`도 늘지 않는다 |
+| 워커가 200ms 안에 못 돌려줌 | (해당 없음) | 측정이 "오디오 워커가 응답하지 않습니다"로 실패한다. 수집한 값은 버린다 |
 | 인코더 | 워커가 첫 프레임에서 생성 | 측정 스레드가 같은 인자로 생성 — 인코더 상태가 같으므로 바이트가 같다 |
 | 워커의 할당 | 인코더 생성·해제, 프레임마다 `String`, 탭 `Vec` 성장 | 없음 |
 | 워커의 락 | 프레임마다 + 반복마다 | 없음 |
@@ -356,7 +406,7 @@ pub struct MetronomeCtl {
     plan_gen: AtomicU64,                 // set_plan이 락 안에서 새 세대를 쓴 뒤 store(Release)
     ..
 }
-// 워커(BeatSched), 반복마다:
+// 워커(MetronomeStage), 반복마다:
 if ctl.plan_gen.load(Acquire) != self.plan.0 {
     if let Some(p) = ctl.plan.try_lock() { /* 필드 복사, ref_peer_id는 clone_from */ }
     // 못 잡으면 옛 계획으로 이번 반복을 돌고 다음 반복에 다시 본다
@@ -379,15 +429,17 @@ if ctl.plan_gen.load(Acquire) != self.plan.0 {
 | `ref_peer_id: Option<String>` | 워커가 적용한 계획의 복사 | `MetronomeCtl::stats()`가 제어 쪽 `plan`에서 읽는다 |
 | `clicks` `late_clicks` `skipped_clicks` | `ClickShared` 원자값 | 그대로 |
 
-- seqlock은 `MediaStatsCell`(`peer_media.rs`, ③-a1)과 같은 알고리즘이다. 두 번째 사용자가 생기므로 버전 + `[AtomicU64; N]`만 가진 `SeqCell<N>`을 `engine/stats.rs`(계층 1)로 빼고 `MediaStatsCell`이 그것을 쓴다. 미묘한 lock-free 코드를 복사하지 않기 위해서다(구현이 둘이라 D0-2에 걸리지 않는다).
-- 계약 문서는 `EngineStats.metronome`을 "마지막으로 **적용된** 계획"이라 적는다(`native-engine-design.md:440`). 수 필드는 칸이 워커가 적용한 값을 실으므로 그대로다. **`refPeerId`만** 제어 쪽에서 읽으므로 `set_metronome` 직후 워커 반복 1회(≤ 약 1ms) 동안 수 필드보다 한 발 앞설 수 있다. 프런트는 500ms마다 읽는다. ②b-6에서 계약 문서 그 줄에 이 사실을 적는다.
+- seqlock은 `MediaStatsCell`(`peer_media.rs`, ③-a1)과 같은 알고리즘이다. 두 번째 사용자가 생기므로 버전 + `[AtomicU64; N]`만 가진 `SeqCell<N>`을 `engine/stats.rs`(계층 1)로 빼고 `MediaStatsCell`이 그것을 쓴다(추출은 따로 ②b-6a, 6.1절). 미묘한 lock-free 코드를 복사하지 않기 위해서다(구현이 둘이라 D0-2에 걸리지 않는다).
+- 계약 문서는 `EngineStats.metronome`을 "마지막으로 **적용된** 계획"이라 적는다(`native-engine-design.md:440`). 수 필드는 칸이 워커가 적용한 값을 실으므로 그대로다. **`refPeerId`만** 제어 쪽에서 읽으므로 `set_metronome` 직후 워커 반복 1회(≤ 약 1ms) 동안 수 필드보다 한 발 앞설 수 있다. 프런트는 500ms마다 읽는다. ②b-6b에서 계약 문서 그 줄에 이 사실을 적는다.
 - `MetronomeCtl::stats()`는 `plan`을 잠가 `ref_peer_id`를 복제한다. 그 락은 이제 제어 평면끼리만 다투고 워커는 `try_lock`이라 영향이 없다.
 
 **피어 시계 — 피어 표 락만 없앤다.**〔③c 뒤 갱신〕 ③c가 워커에 주는 피어 표 복사본(`Vec<Arc<Peer>>` + 세대)에서 `id()`가 기준 피어와 같은 항목을 찾아 `Peer`의 값 반환 메서드(`clock_estimate(at_us)`, `clock_unsupported()` — 지금의 `clock()` 가드 접근자는 `pub(super)`라 새로 낸다)를 부른다. `peers.read()`가 사라진다. `Peer.clock` 자체는 남긴다(1.4절 7). ③c가 복사본을 워커가 아니라 net 안에 두는 모양으로 끝나면, `NetShared::peer_clock`이 그 복사본을 쓰게 고치는 것으로 같은 효과를 낸다 — 어느 쪽이든 조건은 "메트로놈 경로가 `peers` 읽기 락을 기다리지 않는다".
 
+복사본이 **워커에** 있게 되면 읽는 단계가 둘이다(`SendPath`, `MetronomeStage`). 세대가 바뀔 때 갱신되는 값이라 읽기 전용 묶음 `WorkerCtx`에는 담을 수 없으므로, `EchoRt`처럼 **조정자가 갖고 두 단계에 빌려 주는 필드가 하나 는다**(2.1절 그림에 `peer_table` 한 줄, 8절의 "필드 9개"가 10개). 복사본이 net 안에 있으면 필드는 늘지 않는다. #126 병합 뒤 어느 쪽인지 이 문단·2.1절·8절을 한 번에 확정한다.
+
 ### 4.3 측정 계획
 
-D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는다")은 이미 결정이다. 측정은 할지 말지를 정하려는 것이 아니라 **크기를 기록하고 재배치 뒤 0이 됐는지 확인**하려는 것이다. 실행은 구현 PR(②b-0, ②b-6)의 몫이고 이 문서의 표는 비어 있다.
+D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는다")은 이미 결정이다. 측정은 할지 말지를 정하려는 것이 아니라 **크기를 기록하고 재배치 뒤 0이 됐는지 확인**하려는 것이다. 실행은 구현 PR(②b-0, ②b-6b)의 몫이고 이 문서의 표는 비어 있다.
 
 시험: #122의 `send_path_storm_measure`(`tests/loopback.rs`, `#[ignore]`)에 조건 둘을 더한다.〔③c 뒤 갱신: ③c가 이 시험과 `txlat::LockWait`를 고치면 그 모양에 맞춘다〕
 
@@ -402,6 +454,8 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 |---|---|---|---|---|---|---|
 | 메트로놈 + CPU | (측정) | 0 · 0 | (측정) | CPU 포화 창 범위 | (측정) | (측정) |
 | 에코 측정 + CPU | (측정) | 0 · 0 | (측정) | CPU 포화 창 범위 | (측정) | (측정) |
+
+"후" 수치를 읽을 때: 메트로놈 조건은 계획 둘을 번갈아 넣으므로 워커가 계획이 바뀐 반복마다 `ref_peer_id`를 `clone_from` 한다(두 계획의 기준 피어가 `Some` ↔ `None`으로 다르면 할당·해제). 락 대기가 0이어도 **할당자 경합**이 워커 본문 최대에 섞일 수 있다. 그래서 (1) 두 계획의 `ref_peer_id`를 같게 둔 창과 다르게 둔 창을 따로 재고, (2) "후"의 본문 최대가 CPU 포화 창 범위를 넘으면 락이 아니라 이 할당인지부터 가른다(락 대기 지표가 0인지로 구분된다).
 
 "전"에서 흔들림이 안 보여도(계획 락은 잡는 시간이 수십 ns다) 재배치는 한다 — 그 경우 PR 본문에 "측정된 끊김 감소는 없고 이득은 규칙의 일관성"이라고 그대로 적는다.
 
@@ -423,6 +477,7 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 
 - ②b-1·②b-2가 고치는 파일은 `worker/mod.rs`와 새 단계 파일이고, 하네스가 쓰는 `jitter/`·`peer_media.rs`·`worker/peer_feed.rs`·`worker/clock.rs`·`rt.rs`는 **건드리지 않는다** → fixture는 당연히 동일하다. ③-0~③-a2 때와 같이, 이 두 PR의 실제 증거는 fixture가 아니라 아래 5.2절의 대조와 실시간 테스트다. PR 본문에 그렇게 적는다.
 - ②b-3에서 하네스의 워커 사건을 `PeerSources::service`로 바꾼다. 그 뒤로는 fixture가 `PeerSources`(명령 큐 → 슬롯 배정 → 피어별 `ingest` → `service` → `publish`)를 덮는다. 5.3절.
+- **②b-3이 ②b-1의 수신 쪽 증거를 겸한다.** ②b-3의 fixture 동일은 "②b-1이 옮긴 `PeerSources`가 하네스의 손 조립과 같은 호출 열을 낸다"는 뜻이므로, ②b-1의 `PeerSources` 이동(J1·J2·J3·J7)에 대한 **사후 fixture 증거**다. 그래서 ②b-3을 ②b-1 **바로 뒤**(②b-2 앞)에 둔다 — `PeerSources`가 fixture 없이 떠 있는 기간이 PR 하나로 줄고, 문제가 나면 ②b-1/②b-3 묶음으로 되돌린다(6.1절). ②b-1의 나머지(`LocalPath`·`MetronomeStage`·`DeviceWatch`)와 ②b-2(송신 쪽)는 여전히 대조표 + 실시간이 증거다.
 
 ### 5.2 조정자가 지켜야 하는 호출 열
 
@@ -483,8 +538,23 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 
 ```text
 워커 사건(지금):  피어마다 { ingest; PeerFeed::service(.., &|| true, .., None) }
-워커 사건(뒤):    round = peer_sources.service(&ctx, &timing, None)
+워커 사건(뒤):    round = peer_sources.service(&bank, &counters, &stats, 48_000, &timing, None)
 ```
+
+`service`가 `&WorkerCtx`를 받지 않으므로(2.2절) 하네스는 `WorkerCtx`를 지어내지 않는다. **하네스가 마련해야 하는 것 전부**:
+
+| 값 | 하네스의 지금 | ②b-3에서 |
+|---|---|---|
+| `SourceBank`, 슬롯별 생산자(`prods`) | 이미 있다(`rt::output_path`가 만든 것, `sim/tune.rs:223-234`) | 생산자를 `PeerSources::new`에 넘긴다 |
+| `AudioCounters` | 이미 있다(`:221`) | 그대로 |
+| `out_rate` | 상수 48,000(`:234`) | 그대로(값 인자) |
+| `FeedTiming` | 이미 있다(`CallbackTracker::observe`) | 그대로 |
+| `WorkerStats` | 없음 | `WorkerStats::default()` 하나. `service`가 쓰는 것은 원자값 셋(`media_peers`·`deadline_fills`·`skipped_frames`)뿐이고 하네스는 읽지 않는다 |
+| 미디어 명령 큐의 워커 쪽 끝(`MediaPortRt`)·`MediaSettings` | 없음(표를 직접 채움) | 링 생성 함수로 만들어 워커 쪽 끝을 `PeerSources::new`에, 제어 쪽 끝으로 `MediaCmd::Add`를 넣는다 |
+| 녹음 마커 싱크(`rec_marks`) | 없음 | 비활성 싱크 하나(`active() == false`라 읽지 않는다, `:788`) |
+| 에코 탭 | `None` | ②b-5 전: `PeerSources`가 갖는 빈 `Arc<Mutex<None>>`(2.2절 `probe` 행), ②b-5부터: 인자 `None` |
+
+지어내지 **않는** 것: 벽시계 `epoch`, `StreamInfo`, `stop`, `net`, `MixControls`, `EngineConfig`. ⑩에서 하네스가 끌고 오는 워커 쪽 타입은 `PeerSources`·`WorkerStats`·`PeerFeed`·`CallbackTracker`다(`SendLatency`·net은 아니다).
 
 바이트 동일이어야 하는 이유를 호출 단위로 맞춰 본다.
 
@@ -493,13 +563,13 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 | 명령 큐 비우기 | 없음(시작 때 표를 직접 채움) | 하네스가 시작 때 `MediaCmd::Add`를 순서대로 넣는다 → 첫 워커 사건에서 같은 순서의 표 |
 | 슬롯 배정(가장 낮은 빈 슬롯, `:742-743`) | 손으로 1..n(`sim/tune.rs:234`) | 추가 순서가 같으면 같은 슬롯 |
 | `ingest(profile)` | 같음 | 하네스 모델은 피어마다 프로필을 따로 받는다(`p.peers[i].profile`, `sim/tune.rs:388`). 5분·60분 시나리오(`sim/long.rs`)는 프로필을 정하지 않아 전 피어가 기본값 0.5다(`sim/tune.rs:61`) → `PeerSources`의 "전역 한 값"과 같다. 피어별로 다른 프로필을 주는 시나리오가 있으면(튜닝 스윕) `PeerSources`에 테스트 전용 입구를 두지 **말고** 그 시나리오만 지금 방식(직접 호출)으로 남긴다 |
-| 게인·레벨 복사 | 없음 | 지터 버퍼를 건드리지 않는다. 리포트(`sim/long.rs`)에는 믹스 출력 샘플에서 나온 값이 없다(지터 통계·은닉 시각·xrun 시각뿐). xrun 판정이 슬롯 게인과 무관한지는 ②b-3에서 `rt.rs`를 읽어 확인한다(이 문서 작업에서는 확인하지 않았다) |
+| 게인·레벨 복사 | 손으로 슬롯 게인을 0.15로 한 번 둔다(`set_gains((0.15, 0.15), (0.15, 0.15))`, `sim/tune.rs:231`) | **다르다**: `PeerSources`는 반복마다 `media.mix.lr_gains()`로 슬롯 게인을 덮어쓴다(`:802-803`). 지터 버퍼는 건드리지 않고, 리포트(`sim/long.rs`)에는 믹스 출력 샘플에서 나온 값이 없다(지터 통계·은닉 시각·xrun 시각뿐). 처리: **하네스가 `PeerMix` 게인을 `lr_gains()`가 (0.15, 0.15)를 내도록 맞춘다** — 슬롯에 쓰이는 값이 지금과 같아져 "게인이 리포트에 영향이 없다"는 논증에 기대지 않는다. 팬 법칙 때문에 정확히 0.15를 낼 수 없으면, 맞추지 않아도 되는 근거(xrun 판정이 슬롯 게인과 무관함 — `rt.rs`를 읽어 확인. 이 문서 작업에서는 확인하지 않았다)를 ②b-3 본문에 적는다 |
 | `consistent`(실제 클로저) | `|| true` | 하네스에서는 콜백 사건과 워커 사건이 겹치지 않아 항상 참 |
 | 녹음 마커 | 없음 | 녹음 중이 아니면 읽기도 안 한다(`:788`, `:809`) |
 | `publish` | 없음 | `JitterBuffer::stats()`는 읽기다. 손실 보고 칸 쓰기는 지터 버퍼를 건드리지 않는다 |
-| 은닉 시각 기록 등 하네스 계측 | 피어 루프 안(`:391-395`) | `service` 뒤 피어별 통계를 읽는 것으로 옮긴다 — 같은 워커 사건 안이라 값이 같다 |
+| 은닉 시각 기록 등 하네스 계측 | 피어 루프 안(`:391-395`) | `service` 뒤 피어별 통계를 읽는 것으로 옮긴다 — 같은 워커 사건 안이라 값이 같다. 그러려면 `PeerSources`의 표(피어별 `PeerMedia`)를 읽는 **테스트 전용 접근자**가 하나 필요하다(`#[cfg(any(test, feature = "test-support"))]`, 지금의 `PeerMedia::jitter()`·`rx_dropped()`와 같은 문). 제품 코드 경로에는 입구를 더하지 않는다 |
 
-달라지면 버그다(③과 같은 규칙, fixture 갱신 금지). 원인을 못 찾으면 ②b-3만 되돌린다 — ②b-1·②b-2는 영향받지 않는다.
+달라지면 버그다(③과 같은 규칙, fixture 갱신 금지). 원인이 하네스 쪽 전환에 있으면 ②b-3만 되돌리고, ②b-1이 옮긴 `PeerSources` 쪽에 있는데 못 고치면 ②b-1/②b-3을 묶어 되돌린다(이 시점에 ②b-2는 아직 없다).
 
 ### 5.4 fixture가 끝까지 덮지 못하는 것
 
@@ -508,69 +578,92 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 | 단계 | 결정적 테스트 | 실시간 테스트 |
 |---|---|---|
 | `Capture` | 새 단위 테스트(②b-2): 알려진 입력 링 → 블록·프레임 열이 지금의 `drain_frames` 결과와 같다. 기존 `batched_frames_share_pass_start_for_send_queue`(`worker/tests.rs:7`) 유지 | `loopback_*`(파형 대조), `tests/send_queue.rs` |
-| `SendPath`·`AutoCodec` | `sim::loss_codec`(정책 + 인코더, 워커 밖), `relay_codec` 단위 테스트 | `tests/relay.rs`(경로 전환 구간 은닉), `tests/loss_feedback.rs`, `tests/nonce.rs` |
+| `SendPath`·`AutoCodec` | **송신 패킷 열 시험**(아래, ②b-0에서 추가), `sim::loss_codec`(정책 + 인코더, 워커 밖), `relay_codec` 단위 테스트 | `tests/relay.rs`(경로 전환 구간 은닉), `tests/loss_feedback.rs`, `tests/nonce.rs` |
 | `LocalPath` | `worker/tests.rs`의 `local_fifo_*`(FIFO 자체) | `loopback.rs:420`·`:603`·`:676`(모니터 지연·클럭 차) |
-| `BeatSched` | `tests/metronome.rs`(가상 시간 2피어: `BeatScheduler`·`CallbackTracker`·`ClockSync`·`OutputRt`를 직접 조립) — ②b-6에서 이 테스트가 `BeatSched`를 타게 할 수 있는지 본다 | — |
+| `MetronomeStage` | `tests/metronome.rs`(가상 시간 2피어: `BeatScheduler`·`CallbackTracker`·`ClockSync`·`OutputRt`를 직접 조립) — ②b-6b에서 이 테스트가 `MetronomeStage`를 타게 할 수 있는지 본다 | — |
 | `DeviceWatch` | 새 단위 테스트(②b-1): 카운터를 멈췄다 움직이며 `device_stalled` 전이 | `loopback.rs:854`(출력 정지) |
 | 조정자 순서 전체 | 없음 | 루프백 실시간 전체, 야간 soak(#123의 회귀 판정) |
+
+**송신 패킷 열 시험(PR #125 검토 M3).** C1~C6(인코더가 모든 프레임을 순서대로, `ts` 증가, 자동 코덱 예열)은 `SendPath`를 옮길 때의 조건인데, 실시간 테스트의 "은닉 수가 같은 범위"로는 약하다 — 인코더가 한 프레임을 건너뛰어도 PCM16에서는 은닉 1회로만 보인다. 그래서 ②b-0에 시험 하나를 넣는다:
+
+- 가짜 장치에 결정적 입력(고정 시드 신호)을 넣고, 상대(루프백 b)가 받은 오디오 패킷마다 `(ts 증가분, flags, 페이로드 해시)`를 모아 **열 전체**를 기준과 비교한다.
+- 조건: 설정 코덱 고정, 자동 전환 없음(릴레이 부하·손실 피드백 정책이 움직이지 않는 구성), 입력 링 넘침 없음. 이 조건에서는 패킷 **내용**이 타이밍과 무관하다(프레임 경계는 입력 샘플 수로만 정해진다). 실시간 지터로 달라지는 것(도착 시각, 패킷 수의 끝자리)은 비교에서 뺀다 — 앞에서부터 N개(예: 5초분).
+- ②b-0은 먼저 같은 구성을 두 번 돌려 열이 같은지(결정적인지) 확인한다. 같으면 열의 해시를 fixture로 커밋해 CI가 지키게 하고, 이동 PR은 그 fixture가 그대로임을 증거로 낸다(5분 fixture와 같은 규칙 — 갱신 금지, 달라지면 버그).
+- 덮는 PR: ②b-2(송신 쪽 이동, C1·C2·C4·C6·C7)와 ②b-5(프로브가 송신 경로의 `alt` 페이로드를 고친다 — 측정 중이 아닌 피어의 패킷 열이 그대로임). 자동 코덱 전환 구간(C3·C5)은 조건 밖이라 여전히 `tests/relay.rs`가 증거다.
+- **가능한지는 ②b-0에서 확인한다**(이 문서 작업에서는 코드를 돌리지 않았다). 가짜 장치의 입력 공급이 실시간 스레드라 프레임 경계가 실행마다 달라지는 등으로 결정적이지 않으면 넣지 않고, 6.2절 표의 그 행을 지운 뒤 "②b-2의 증거는 조건 대조표 + 실시간뿐"이라고 6.2절에 명시한다. D6 기준으로는 그 경우도 통과다(병합 조건은 아니다).
 
 ## 6. 마이그레이션
 
 ### 6.1 PR 분할
 
-| PR | 종류 | 내용 | 선행 |
-|---|---|---|---|
-| ②b-0 | 계측 | 4.3절 시험 조건 둘과 진단 계측(락 넷의 대기 시간). 본문에 "전" 수치. 워커 동작은 그대로 | ③c 병합(같은 시험 파일) |
-| ②b-1 | 이동 | `WorkerCtx`. 수신 쪽 단계: `PeerSources`·`LocalPath`·`BeatSched`·`DeviceWatch`. 메서드 본문은 `self.x` → `self.x`/`ctx.x` 치환 말고는 그대로. 락·순서·읽는 시점 불변. `engine-architecture.md` 6절 지도 갱신 | ③c 병합(`worker/mod.rs`가 겹친다) |
-| ②b-2 | 이동 | 송신 쪽 단계: `Capture`·`SendPath`·`AutoCodec`. 흩어진 `Option`·플래그 검사(1.4절 3)가 `Option<SendPath>`·`Option<AutoCodec>` 둘로. `Worker`에 남는 것은 2.1절 그림 | ②b-1. 〔③c 뒤 갱신: 송신 경로 본문은 ③c 결과를 옮긴다〕 |
-| ②b-3 | 하네스 | `sim::tune`의 워커 사건이 `PeerSources::service`를 부른다(5.3절). fixture 바이트 동일 | ②b-1 |
-| ②b-4 | 재배치 | 피어 표 합치기: `media`와 `feeds`를 한 표(`PeerSource { media: Box<PeerMedia>, feed: Option<PeerFeed> }`)로. 반복마다의 키 조인(`:737`, `:797`)과 `seen` 표시·쓸기(`:731-733`, `:763-770`)가 없어진다. 조건: 표 순서·슬롯 배정 순서 그대로(J4), 제거 때 슬롯 `DRAIN` 처리 그대로 | ②b-3(fixture가 이 PR을 지킨다) |
-| ②b-5 | 재배치 | 에코 프로브 소유 이전(3절). `alt_*` 필드가 `EchoProbe` 안으로. `Engine.probe`·`WorkerParams.probe` → `EchoPort`/`EchoPortRt` | ②b-2 |
-| ②b-6 | 재배치 + 측정 | 메트로놈: 계획 세대 + `try_lock`, 루프백 보정 원자값, 상태 seqlock(`SeqCell` 공용화), 피어 시계 조회에서 `peers.read()` 제거. "후" 수치. 정적 검사(7.1절). 문서: `engine-architecture.md` 4.1·4.3·4.4절, 계약 문서 `:440` 한 줄, ADR 반영 요청 | ②b-1, ②b-0 |
+표는 **병합 순서**대로다. 번호는 내용의 이름이라 순서와 다르다(②b-3이 ②b-2 앞).
 
-- ②b-1·②b-2는 "필드를 다른 구조체로 옮기고 메서드를 따라 옮기는" PR이라 ADR D0-5의 **이동**에 해당한다. 책임이 바뀌는 것(누가 프로브를 갖는가, 누가 계획을 쓰는가, 표가 몇 개인가)은 ②b-4~6에 모았다.
+| 순서 | PR | 종류 | 내용 | 선행 |
+|---|---|---|---|---|
+| 1 | ②b-0 | 계측 | 4.3절 시험 조건 둘과 진단 계측(락 넷의 대기 시간). 본문에 "전" 수치. 송신 패킷 열 시험(5.4절 — 가능 여부 확인 포함). 워커 동작은 그대로 | ③c 병합(같은 시험 파일) |
+| 2 | ②b-1 | 이동 | `WorkerCtx`(조정자 묶음). 수신 쪽 단계: `PeerSources`·`LocalPath`·`MetronomeStage`·`DeviceWatch`. 메서드 본문은 `self.p.x` → 인자 `x`(2.2절 표) 치환 말고는 그대로. 락·순서·읽는 시점 불변. `engine-architecture.md` 6절 지도 갱신 | ③c 병합(`worker/mod.rs`가 겹친다) |
+| 3 | ②b-3 | 하네스 | `sim::tune`의 워커 사건이 `PeerSources::service`를 부른다(5.3절). fixture 바이트 동일 — **②b-1이 옮긴 `PeerSources`의 사후 증거를 겸한다**(5.1절) | ②b-1 |
+| 4 | ②b-2 | 이동 | 송신 쪽 단계: `Capture`·`SendPath`·`AutoCodec`. 흩어진 `Option`·플래그 검사(1.4절 3)가 `Option<SendPath>`·`Option<AutoCodec>` 둘로. `Worker`에 남는 것은 2.1절 그림 | ②b-1(②b-3과는 파일이 겹치지 않지만 순서는 ②b-3 뒤). 〔③c 뒤 갱신: 송신 경로 본문은 ③c 결과를 옮긴다〕 |
+| 5 | ②b-4 | 재배치 | 피어 표 합치기: `media`와 `feeds`를 한 표(`PeerSource { media: Box<PeerMedia>, feed: Option<PeerFeed> }`)로. 반복마다의 키 조인(`:737`, `:797`)과 `seen` 표시·쓸기(`:731-733`, `:763-770`)가 없어진다. 조건: 표 순서·슬롯 배정 순서 그대로(J4), 제거 때 슬롯 `DRAIN` 처리 그대로 | ②b-3(fixture가 이 PR을 지킨다) |
+| 6 | ②b-5 | 재배치 | 에코 프로브 소유 이전(3절): 측정 번호에 묶인 상태 판정, 탭 끝과 반환 분리, 회수 뒤 분석. `alt_*` 필드가 `EchoProbe` 안으로. `Engine.probe`·`WorkerParams.probe` → `EchoPort`/`EchoPortRt`. 시험 둘 추가(설치·취소 반복에서 프로브 회수, 정리 구간 무음 — 6.3절) | ②b-2 |
+| 7 | ②b-6a | 이동 | `SeqCell<N>` 추출: `MediaStatsCell`의 seqlock(버전 + `[AtomicU64; N]`)을 `engine/stats.rs`로 빼고 `MediaStatsCell`이 그것을 쓴다. 알고리즘과 칸 배치(`pack`/`unpack`)는 그대로. 메트로놈은 건드리지 않는다 | 없음(`peer_media.rs`·`stats.rs`만. ②b-3 뒤에 두면 fixture가 `publish` 경로까지 덮는다) |
+| 8 | ②b-6b | 재배치 + 측정 | 메트로놈: 계획 세대 + `try_lock`, 루프백 보정 원자값, 상태 보고를 `SeqCell` 칸으로, 피어 시계 조회에서 `peers.read()` 제거. "후" 수치. 정적 검사(7.1절). 문서: `engine-architecture.md` 4.1·4.3·4.4절, 계약 문서 `:440` 한 줄, ADR 반영 요청 | ②b-1, ②b-0, ②b-6a |
+
+- ②b-1·②b-2는 "필드를 다른 구조체로 옮기고 메서드를 따라 옮기는" PR이라 ADR D0-5의 **이동**에 해당한다. 책임이 바뀌는 것(누가 프로브를 갖는가, 누가 계획을 쓰는가, 표가 몇 개인가)은 ②b-4·②b-5·②b-6b에 모았다.
+- **②b-3을 ②b-2 앞에 두는 이유**(PR #125 검토 M4): ②b-3의 선행은 ②b-1뿐이고, ②b-3의 fixture 동일이 ②b-1의 `PeerSources` 이동에 대한 사후 증거다(5.1절). 순서를 이렇게 두면 `PeerSources`가 fixture 없이 develop에 있는 기간이 PR 하나이고, 되돌림도 ②b-1/②b-3 묶음으로 끝난다(그 위에 ②b-2가 얹혀 있지 않다).
 - ②b-4는 "하면 좋은" 것이 아니라 `PeerSources`라는 이름이 뜻하는 구조다(피어 하나 = 미디어 + 공급). 다만 fixture 없이 하면 위험하므로 ②b-3 뒤에 둔다. 새 피어의 `PeerFeed::new`(리샘플러 할당, 워커 스레드, `:752`)는 ②b에서 옮기지 않는다 — 제어 평면에서 미리 만들어 `PeerMedia`에 실어 보내려면 `PeerFeed::new` 서명과 하네스·단위 테스트가 바뀐다. ⑧ 범위 문서에 후속으로 적었다. 드문 할당 목록에는 ②b-1에서 추가한다(지금 빠져 있다).
-- ②b-3·②b-5는 서로 독립이라 병렬로 할 수 있다.
+- **`SeqCell` 추출을 ②b-6a로 뗀 이유**(검토 L6): 처음 안의 ②b-6은 변경 넷(계획·루프백 보정·상태 보고·피어 시계) + `MediaStatsCell`을 건드리는 공용화 + 측정 + 정적 검사 + 문서 셋이었다. 추출은 이동이고 증거가 따로 있다(5분 fixture, 기존 seqlock 찢김 시험). 떼어 두면 ②b-6b의 되돌림 단위가 메트로놈만 남는다. `SeqCell<N>`은 사용자가 둘(`MediaStatsCell`, 메트로놈 상태)이라 D0-2에 걸리지 않는다 — 다만 ②b-6a만 병합된 동안에는 사용자가 하나이므로, ②b-6b가 되돌려지면 ②b-6a도 함께 되돌릴지 그때 정한다.
+- ②b-5와 ②b-6a·②b-6b는 서로 독립이라 병렬로 할 수 있다(`worker/mod.rs`에서 만나는 것은 `run()`의 한두 줄이다).
 
 ### 6.2 PR마다 내는 증거(D6)
 
-| 증거 | ②b-0 | ②b-1 | ②b-2 | ②b-3 | ②b-4 | ②b-5 | ②b-6 |
-|---|---|---|---|---|---|---|---|
-| clippy `-D warnings`(기본 + `test-support`), `cargo test`, `tests/architecture.rs` | ○ | ○ | ○ | ○ | ○ | ○ | ○ |
-| 5분 fixture 바이트 동일 | ○(무관) | ○(무관, 5.1절) | ○(무관) | ○(**실증**) | ○(**실증**) | ○ | ○ |
-| 5.2절 조건 대조표(J1~J7, C1~C7, M1~M2 각각 "옮긴 뒤 줄 번호") | — | J·M | C | J | J | C5 | — |
-| 루프백 실시간(`link_matrix_*`, `loopback_loss5_*`) 전/후 3회씩, 버퍼 지연·은닉률 | — | ○ | ○ | — | ○ | ○ | ○ |
-| net 통합(`relay`·`loss_feedback`·`send_queue`·`nonce`·`peer_key`) | — | — | ○ | — | ○(`peer_key`의 추가·제거 경합) | — | — |
-| `tests/measure.rs`(에코 측정, 실시간) | — | — | — | — | — | ○ | — |
-| `tests/metronome.rs` + 메트로놈 루프백 | — | ○ | — | — | — | — | ○ |
-| `tests/record.rs`(마커) | — | ○ | — | — | ○ | — | — |
-| `cpu_profile`(release) 워커 CPU·콜백 p99 ±5% | — | ○ | ○ | — | ○ | — | ○ |
-| 60분 하네스 1회 | — | — | — | ○ | ○ | — | — |
-| 4.3절 폭주 시험 | "전" | — | — | — | — | (에코 조건 "후") | "후" |
-| `rt_alloc` | — | ○ | ○ | — | — | ○ | ○ |
+열은 병합 순서다.
+
+| 증거 | ②b-0 | ②b-1 | ②b-3 | ②b-2 | ②b-4 | ②b-5 | ②b-6a | ②b-6b |
+|---|---|---|---|---|---|---|---|---|
+| clippy `-D warnings`(기본 + `test-support`), `cargo test`, `tests/architecture.rs` | ○ | ○ | ○ | ○ | ○ | ○ | ○ | ○ |
+| 5분 fixture 바이트 동일 | ○(무관) | ○(무관, 5.1절) | ○(**실증** — ②b-1의 `PeerSources`도) | ○(무관) | ○(**실증**) | ○ | ○(**실증**: `publish`) | ○ |
+| 송신 패킷 열 `(ts 증가분, flags, 페이로드 해시)` 동일(5.4절) | 시험 추가·기준 | — | — | ○ | — | ○(측정 대상이 아닌 피어) | — | — |
+| 5.2절 조건 대조표(J1~J7, C1~C7, M1~M2 각각 "옮긴 뒤 줄 번호") | — | J·M | J | C | J | C5 | — | — |
+| 루프백 실시간(`link_matrix_*`, `loopback_loss5_*`) 전/후 3회씩, 버퍼 지연·은닉률 | — | ○ | — | ○ | ○ | ○ | — | ○ |
+| net 통합(`relay`·`loss_feedback`·`send_queue`·`nonce`·`peer_key`) | — | — | — | ○ | ○(`peer_key`의 추가·제거 경합) | ○(`send_queue`·`nonce` — 송신 경로의 `alt` 페이로드 빌림을 고친다) | — | — |
+| `tests/measure.rs`(에코 측정, 실시간) + 프로브 회수·정리 구간 무음 시험 | — | — | — | — | — | ○ | — | — |
+| `tests/metronome.rs` + 메트로놈 루프백 | — | ○ | — | — | — | — | — | ○ |
+| `tests/record.rs`(마커) | — | ○ | — | — | ○ | — | — | — |
+| seqlock 찢김 시험(`peer_media.rs` 단위 테스트) | — | — | — | — | — | — | ○ | ○ |
+| `cpu_profile`(release) 워커 CPU·콜백 p99 ±5% | — | ○ | — | ○ | ○ | ○ | — | ○ |
+| 60분 하네스 1회 | — | — | ○ | — | ○ | — | — | — |
+| 4.3절 폭주 시험 | "전" | — | — | — | — | (에코 조건 "후") | — | "후" |
+| `rt_alloc` | — | ○ | — | ○ | — | ○ | ○ | ○ |
+
+- 송신 패킷 열 시험이 ②b-0에서 결정적이지 않다고 판명되면 그 행을 지운다. 그 경우 **②b-2의 증거는 조건 대조표(C1~C7) + 루프백 실시간 + net 통합뿐**이고, ②b-2 본문에 그대로 적는다(5.4절).
+- ②b-5에 net 통합과 `cpu_profile`이 있는 이유: 프로브 소유 이전이 송신 경로(`send_audio_timed`에 넘기는 `alt` 페이로드의 빌림)를 고친다.
 
 ②b는 RT 코드(`rt.rs`, 백엔드 콜백, `ClickRt`, 녹음 RT 링)를 건드리지 않는다.
 
 ### 6.3 되돌림 기준
 
-PR 단위로 되돌린다. 뒤 PR이 앞 PR에 얹혀 있으므로 순서는 역순이다.
+PR 단위로 되돌린다. 뒤 PR이 앞 PR에 얹혀 있으므로 순서는 6.1절 병합 순서의 역순이다. ②b-1을 되돌리려면 ②b-3도 함께 되돌린다(묶음).
 
 | PR | 되돌리는 조건 |
 |---|---|
+| ②b-6a | 5분 fixture 다름, seqlock 찢김 시험 실패 |
 | ②b-1, ②b-2 | 루프백 버퍼 지연·은닉률이 기준 범위 밖(3회 중 2회 이상), `cpu_profile` 워커 CPU +5% 초과, 야간 soak 회귀 판정 FAIL(#123 기준)이고 원인이 이 PR. 이동 PR이므로 원인은 5.2절 조건 위반일 것 — 고칠 수 있으면 고치고, 하루 안에 못 찾으면 되돌린다 |
 | ②b-3 | fixture가 다르고 그 PR 안에서 원인을 못 찾음. **fixture는 갱신하지 않는다** |
 | ②b-4 | fixture 다름, 60분 하네스 FAIL, `peer_key` 경합 시험에서 표 불일치 |
-| ②b-5 | `tests/measure.rs` 에코 측정의 판정·흩어짐이 기준 실행과 다름, 측정 뒤 워커가 프로브를 돌려주지 않는 경우가 한 번이라도 재현됨 |
-| ②b-6 | `tests/metronome.rs` 정렬 오차 기준(2ms) 실패, 폭주 시험 "후"에서 락 대기가 0이 아님(= 빠뜨린 락), `late_clicks`가 "전"보다 늘어남 |
+| ②b-5 | `tests/measure.rs` 에코 측정의 판정·흩어짐이 기준 실행과 다름, 측정 뒤 워커가 프로브를 돌려주지 않는 경우가 한 번이라도 재현됨(설치·취소를 무작위 간격으로 반복하는 시험을 ②b-5에 넣는다 — 7.3절 첫 행), 정리 구간에 측정 대상 피어로 무음이 아닌 소리가 나감(3.3절) |
+| ②b-6b | `tests/metronome.rs` 정렬 오차 기준(2ms) 실패, 폭주 시험 "후"에서 락 대기가 0이 아님(= 빠뜨린 락), `late_clicks`가 "전"보다 늘어남 |
 | 공통 | [사람] 실장비 청취에서 그 PR 전에는 없던 끊김(백로그에 [사람]으로 남긴다 — 이 문서는 실장비 검증을 주장하지 않는다) |
 
 ## 7. 위험
 
 ### 7.1 락이 없어졌는지 확인하는 방법
 
-1. **정적**: `tests/architecture.rs`에 문자열 검사 하나 — `src/engine/worker/`(tests.rs 제외) 안에 `.lock()`·`.read()`·`.write()` 호출이 없다(`try_lock`·`try_read`만). `Mutex<JitterBuffer>` 검사(③-a3)와 같은 방식이다.〔③c 뒤 갱신: #124가 락 검사를 보강 중이면 그 형식을 따른다〕 워커가 부르는 net 함수 **안**의 락은 이 검사로 못 본다 — 그것은 ③c와 2번이 본다.
-2. **동적**: 4.3절 시험의 "후"에서 락 대기 0.
-3. **목록**: `engine-architecture.md` 4.1절 끝 표("워커가 잡는 락")를 ②b-6에서 갱신한다. ②b 뒤에 남는 것은 `Peer.clock`(MMCSS끼리)과 녹음 마커(`try_lock`)다.〔③c 뒤 갱신: ③c가 남긴 것이 있으면 여기에 더한다〕
+서열: **주 증거는 2번(동적, 4.3절의 락 대기 0)** 이고, 1번(정적)은 재발 방지용이다. ②b 뒤에는 워커의 접근이 메서드 뒤로 숨기 때문이다 — `MetronomeCtl`·`EchoPort`·net 메서드 **안**에서 잡는 락은 `worker/` 디렉터리의 문자열 검사에 보이지 않는다.
+
+1. **정적(재발 방지)**: `tests/architecture.rs`에 문자열 검사 하나 — `src/engine/worker/`(tests.rs 제외) 안에 기다리는 락 호출이 없다(`try_lock`·`try_read`만). `Mutex<JitterBuffer>` 검사(③-a3)와 같은 방식이다.〔③c 뒤 갱신: #124·#126이 고친 락 검사의 형식을 따른다〕 패턴은 다른 이름과 겹치지 않게 정한다: `.lock()`은 그대로 찾고, `.read()`·`.write()`는 seqlock 칸 읽기(`SeqCell::read`, `MediaStatsCell::read`)·링 쓰기 같은 이름과 겹치므로 **수신자까지 본다** — `RwLock`인 필드 이름(`peers` 등)을 목록으로 두고 `<그 이름>.read()`·`.write()`만 잡거나, 칸 읽기 메서드 이름을 `load`/`snapshot`으로 정해 겹침을 없앤다(구현 PR에서 택일, 거짓 양성 0이 조건). 이 검사는 워커 파일이 **직접** 쓰는 락만 본다.
+2. **동적(주 증거)**: 4.3절 시험의 "후"에서 락 대기 0. 계측(`LockWait`)이 워커가 부르는 메서드 안의 락까지 잰다.
+3. **목록**: `engine-architecture.md` 4.1절 끝 표("워커가 잡는 락")를 ②b-6b에서 갱신한다. ②b 뒤에 남는 것은 `Peer.clock`(MMCSS끼리), 녹음 마커(`try_lock`), 그리고 **로그**다 — 워커의 상태 변화 로그(`log::`: 장치 멈춤, 스트림 에러, 슬롯 부족, 인코드 실패)는 로그 싱크의 락을 거친다. 상태가 바뀔 때만 나가 드물지만 기본 우선순위 스레드와 나누는 락이므로 목록에 적는다(없애는 것은 ②b 범위가 아니다).〔③c 뒤 갱신: ③c가 남긴 것이 있으면 여기에 더한다〕
 
 ### 7.2 이동 PR에서 순서가 슬쩍 바뀌는 것
 
@@ -586,9 +679,12 @@ PR 단위로 되돌린다. 뒤 PR이 앞 PR에 얹혀 있으므로 순서는 역
 
 | 경쟁 | 결과 |
 |---|---|
-| 설치 명령이 워커에 닿기 전에 측정 취소 | 측정 스레드가 `stop` 세대를 올리고 반환을 기다린다. 워커는 같은 `poll`에서 설치와 끝을 차례로 보고 바로 돌려준다 |
+| 설치 명령이 워커에 닿기 전에 측정 취소(설치 push와 `stop` 발행이 워커의 한 반복 사이에 일어남) | 워커가 어느 것을 먼저 보든 같다. ① 설치를 먼저 보면: 받은 그 `poll`에서 `id <= ctl.stop`이라 바로 돌려준다. ② `stop`을 먼저 보면(명령 큐를 본 뒤에 설치가 들어온 경우): 쥔 프로브가 없어 아무 일도 없고, 다음 반복에 프로브를 받는 그 `poll`에서 `id <= ctl.stop`이라 돌려준다. 판정이 "세대가 바뀌었다"(사건)가 아니라 "쥔 프로브의 번호가 끝난 번호 이하다"(상태)라서 프로브가 워커에 갇히지 않는다 |
+| 측정 스레드가 200ms 안에 못 받고 실패한 뒤 워커가 뒤늦게 돌려줌 | `Box`가 반환 큐에 남는다. 다음 측정의 `install`이 반환 큐를 먼저 비워 측정 스레드에서 해제한다. 엔진이 먼저 내려가면 큐와 함께 해제된다 |
+| 지난 측정의 프로브가 아직 명령 큐에 있는데(워커 멈춤) 새 측정 시작 | 큐 용량 2라 하나는 더 들어간다. 워커가 깨어나면 앞의 것을 받아 바로 돌려주고(번호가 `stop` 이하) 다음 반복에 새 것을 받는다. 큐가 차 있으면 `install`이 "오디오 워커가 응답하지 않습니다"로 실패한다(`Box`는 측정 스레드에서 해제) |
+| 결과 수거(`tap_off`)와 반환(`stop`) 사이에 취소·에러 | `run()`의 정리가 항상 `stop`을 낸다(성공·실패 공통). `tap_off` 없이 `stop`만 와도 워커는 돌려준다 — 그 경우 수집 버퍼는 쓰이지 않는다 |
 | 측정 중 대상 피어 교체·제거 | 프로브의 `peer_id`에 맞는 피어가 없어 클릭이 아무에게도 안 가고 탭도 안 된다. 측정은 "상대가 에코를 멈췄습니다"로 끝난다(지금과 같다, `engine-stage3-design.md` 7.3절) |
-| 측정 중 엔진 정지 | 워커가 루프를 나가며 프로브를 반환 큐에 넣는다. 측정 스레드는 `remote_echo` 실패로 빠져나와 회수한다. 워커가 먼저 사라져 못 받으면 200ms 뒤 에러 — `Box`는 큐와 함께 엔진 drop에서 해제된다 |
+| 측정 중 엔진 정지 | 워커가 루프를 나가며(`EchoRt::close`) 프로브를 반환 큐에 넣는다. 측정 스레드는 `remote_echo` 실패로 빠져나와 회수한다. 워커가 먼저 사라져 못 받으면 200ms 뒤 에러 — `Box`는 큐와 함께 엔진 drop에서 해제된다 |
 | 워커 정지(장치 분실) 중 측정 시작 | 설치 명령이 큐에 남는다. 측정은 동의 대기·정리 단계에서 200ms 뒤 "오디오 워커가 응답하지 않습니다" |
 | 탭 버퍼가 참 | 버리고 `overflow`를 센다. 0이 아니면 보고서 판정을 불안정으로(지금은 무제한 성장이라 일어나지 않던 경우) |
 
@@ -603,7 +699,7 @@ PR 단위로 되돌린다. 뒤 PR이 앞 PR에 얹혀 있으므로 순서는 역
 | 파일 | ③c | ②b | 처리 |
 |---|---|---|---|
 | `worker/mod.rs` | 송신 경로(`on_capture_frame`·`update_auto_codec`)의 피어 표 접근 | 파일 전체를 단계로 | ③c 병합 뒤 ②b-1 시작. ②b-2는 ③c가 만든 본문을 그대로 옮긴다 |
-| `net/mod.rs`·`net/peer.rs` 송신 경로 | 스냅샷·세대 번호 | ②b-6에서 `Peer::clock_estimate` 등 메서드 둘 추가 | 겹치지 않는 줄 |
+| `net/mod.rs`·`net/peer.rs` 송신 경로 | 스냅샷·세대 번호 | ②b-6b에서 `Peer::clock_estimate` 등 메서드 둘 추가 | 겹치지 않는 줄 |
 | `tests/loopback.rs` 폭주 시험, `net/txlat.rs` `LockWait` | 시험 재실행·보강 | 조건 둘 추가 | ③c 뒤 리베이스 |
 | `jitter/` `restart` 제자리 초기화(#124) | 본문 변경 | 건드리지 않음 | 없음 |
 
@@ -611,8 +707,9 @@ PR 단위로 되돌린다. 뒤 PR이 앞 PR에 얹혀 있으므로 순서는 역
 
 ## 8. 완료 조건
 
-- `Worker`의 필드가 2.1절 그림의 9개이고, `run` 본문이 단계 호출과 값 전달뿐이다.
-- 단계가 다른 단계의 필드를 읽지 않는다. 스크래치 공유가 없다.
+- `Worker`의 필드가 2.1절 그림의 9개이고(〔③c 뒤 갱신〕 피어 표 복사본이 워커에 있으면 10개, 4.2절), `run` 본문이 단계 호출과 값 전달뿐이다.
+- 단계가 다른 단계의 필드를 읽지 않는다. 스크래치 공유가 없다. 단계 메서드가 `&WorkerCtx`를 받지 않는다(2.2절).
+- 에코 측정이 끝난 뒤 상대가 반사를 멈출 때까지 측정 대상 피어에 무음이 나간다(지금과 같다, 3.3절). 설치·취소가 어떤 순서로 겹쳐도 프로브가 측정 스레드로 돌아온다.
 - `src/engine/worker/`에 기다리는 락 호출이 없다(정적 검사). 워커가 프레임·반복마다 잡던 `probe`·`plan`·`loopback_offset_ms`·`stats` 락이 없다.
 - 워커의 드문 할당 목록(`engine-architecture.md` 4.3절 1)이 실제와 맞다: 계획 변경 때 문자열 복사, 새 피어의 `AutoTx`·`PeerFeed`. 에코 측정 관련 할당은 0.
 - 5분 하네스가 `PeerSources`를 탄다. fixture는 한 번도 갱신되지 않았다.
@@ -620,28 +717,28 @@ PR 단위로 되돌린다. 뒤 PR이 앞 PR에 얹혀 있으므로 순서는 역
 
 ## 9. ADR 변경 제안
 
-D1·D2의 결정을 뒤집는 제안은 없다. 이름·범위를 코드에 맞추는 제안 셋이다.
+D1·D2의 결정을 뒤집는 제안은 없다. 이름·범위를 코드에 맞추는 제안 셋이다. PR #125 검토의 판정(1·2 수정 채택, 3 채택)을 반영한 문구다. ADR에 그대로 붙일 최종 문구는 PR #125 본문 "ADR 최종 문구" 절에 있고, ADR 파일은 코디네이터가 고친다.
 
-### 제안 1 — D2 ②b 줄의 단계 이름
+### 제안 1 — D2 ②b 줄의 단계 이름 (수정 채택)
 
 지금: "`Capture`·`AutoCodec`·`PeerSources`·`LocalPath`·`BeatSched`·`DeviceWatch`".
 
-제안: "`Capture`(입력 → 프레임)·`SendPath`(프레임 → 송신, 네트워크가 있을 때만. 자동 코덱 `AutoCodec`은 그 부속)·`PeerSources`·`LocalPath`·`BeatSched`·`DeviceWatch`, 출력 콜백 시각은 기존 `CallbackTracker`".
+제안: "`Capture`(입력 → 프레임)·`SendPath`(프레임 → 인코드·송신, 네트워크가 있을 때만 존재. 자동 코덱 `AutoCodec`은 그 부속)·`PeerSources`·`LocalPath`·`MetronomeStage`·`DeviceWatch`, 출력 콜백 시각은 기존 `CallbackTracker`. 에코 프로브의 워커 쪽 끝(`EchoRt`)은 조정자가 갖고 단계에 빌려 준다. 단계는 문맥(`WorkerCtx`) 전체가 아니라 쓰는 값만 받는다".
 
-근거: 1.4절 2·3. `AutoCodec`은 루프가 부르는 단계가 아니라 프레임마다 송신 안에서만 돈다. ADR의 `Capture`에는 바뀌는 이유가 다른 두 가지(장치 입력 / 코덱·net)가 들어 있고, 뒤쪽은 네트워크가 없으면 존재하지 않는다. (선택) `BeatSched`는 `metronome::BeatScheduler`와 헷갈리므로 `MetronomeStage`.
+근거: 1.4절 2·3. `AutoCodec`은 루프가 부르는 단계가 아니라 프레임마다 송신 안에서만 돈다. ADR의 `Capture`에는 바뀌는 이유가 다른 두 가지(장치 입력 / 코덱·net)가 들어 있고, 뒤쪽은 네트워크가 없으면 존재하지 않는다. `BeatSched` → `MetronomeStage`: 이 단계가 `metronome::BeatScheduler`를 필드로 가져 한 파일에 한 글자 차이 타입이 둘이 된다(검토에서 확정). 끝 두 문장은 검토가 더한 것이다(3.2절의 `EchoRt`, 2.2절·M2).
 
-`engine-architecture.md` 6절 지도도 같이: `worker/capture.rs`의 책임에서 "인코드 → `send_audio`, 에코 클릭 스트림"을 `worker/send.rs`로, `worker/peer_feed.rs`에서 "피어 슬롯 배정·녹음 마커"를 `worker/peer_sources.rs`로, 끝 문장의 `&WorkerParams`를 `&WorkerCtx`로.
+`engine-architecture.md` 6절 지도도 같이: `worker/capture.rs`의 책임에서 "인코드 → `send_audio`, 에코 클릭 스트림"을 `worker/send.rs`로, `worker/peer_feed.rs`에서 "피어 슬롯 배정·녹음 마커"를 `worker/peer_sources.rs`로, 끝 문장의 "`&WorkerParams`를 단계에 준다"를 "조정자가 `WorkerCtx`에서 쓰는 값만 꺼내 단계에 준다"로.
 
-### 제안 2 — D1 ③c 항목 끝 줄을 구체화
+### 제안 2 — D1 ③c 항목 끝 줄을 구체화 (수정 채택)
 
 지금: "`probe`·메트로놈 계획 락은 ②b에서."
 
 제안:
 
-> ②b에서 없애는 워커 락: 에코 프로브(측정 스레드가 만든 `Box<EchoProbe>`를 명령 큐로 넘기고 반환 큐로 돌려받는다 — 클릭 시작·끝은 원자 세대), 메트로놈 계획(세대 원자값 + 바뀐 반복에서만 `try_lock`), 루프백 보정(원자값), 메트로놈 상태 보고(seqlock), 기준 피어 시계 조회의 피어 표 읽기 락. `Peer.clock`은 워커와 `band-net-recv`(둘 다 MMCSS)만 잡으므로 남긴다.
+> ②b에서 없애는 워커 락: 에코 프로브(측정 스레드가 만든 `Box<EchoProbe>`를 명령 큐로 넘기고 반환 큐로 돌려받는다. 클릭 시작·탭 끝·반환은 측정 번호에 묶인 원자값이고 워커는 사건이 아니라 상태로 판정한다. 프로브는 상대가 에코를 멈출 때까지 워커에 남는다), 메트로놈 계획(세대 원자값 + 바뀐 반복에서만 `try_lock`), 루프백 보정(원자값), 메트로놈 상태 보고(seqlock), 기준 피어 시계 조회의 피어 표 읽기 락. `Peer.clock`은 워커와 `band-net-recv`(둘 다 MMCSS)만 잡으므로 남긴다 — 기본 우선순위 스레드가 잡지 않는 한.
 
-근거: 1.4절 5·6·7. ADR이 적은 "메트로놈 계획"보다 락이 둘 더 있고(`stats`·`loopback_offset_ms`), 메트로놈 경로의 `peers.read()`는 ③c의 송신 경로 목록에 없다.
+근거: 1.4절 5·6·7. ADR이 적은 "메트로놈 계획"보다 락이 둘 더 있고(`stats`·`loopback_offset_ms`), 메트로놈 경로의 `peers.read()`는 ③c의 송신 경로 목록에 없다. 프로브 문구는 검토 H1·M1(3.2절), `Peer.clock`의 조건은 검토가 더했다 — 기본 우선순위 스레드(예: 통계)가 `clock`을 잡게 되는 변경은 이 규칙을 다시 열어야 한다.
 
-### 제안 3 — D6 "지터·워커·수신 경로" 줄에 fixture의 범위를 적는다
+### 제안 3 — D6 "지터·워커·수신 경로" 줄에 fixture의 범위를 적는다 (채택)
 
-지금 표는 ①②③⑧의 증거로 "5분 하네스 fixture 바이트 동일"을 든다. 하네스는 `Worker`를 돌리지 않으므로 ②b의 이동 PR에서는 fixture가 아무것도 증명하지 않는다(5.1절). 제안: 그 줄에 "하네스가 타는 범위: `jitter/`·`PeerMedia`·`PeerFeed`·`CallbackTracker`·`OutputRt`, ②b-3부터 `PeerSources`. 그 밖의 워커 단계(캡처·송신·로컬·메트로놈)는 루프백 실시간과 soak가 증거"를 더한다.
+지금 표는 ①②③⑧의 증거로 "5분 하네스 fixture 바이트 동일"을 든다. 하네스는 `Worker`를 돌리지 않으므로 ②b의 이동 PR에서는 fixture가 아무것도 증명하지 않는다(5.1절). 제안: 그 줄에 "하네스가 타는 범위: `jitter/`·`PeerMedia`·`PeerFeed`·`CallbackTracker`·`OutputRt`, ②b-3부터 `PeerSources`. 그 밖의 워커 단계(캡처·송신·로컬·메트로놈)는 fixture가 덮지 않는다 — ②b-1·②b-2의 증거는 조건 대조표 + 루프백 실시간(과 soak)"을 더한다.
