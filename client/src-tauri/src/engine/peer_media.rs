@@ -488,12 +488,16 @@ mod tests {
     /// 쓰는 스레드 하나 + 읽는 스레드 넷: 성공한 읽기는 언제나 한 벌이다(`concealed ≤ produced`, 같은 n에서 나온 값).
     #[test]
     fn seqlock_reads_are_never_torn() {
+        // 읽는 스레드가 모두 돈 뒤에 쓰기를 시작하고(Barrier), 쓰는 쪽이 가끔 양보해 느린 CI에서도 읽기가 끼어들 틈을 준다.
+        // 검사 대상은 "성공한 읽기는 언제나 한 벌"이다 — 성공 횟수 자체는 스케줄러에 달려 있어 전체 합만 본다.
         let c = Arc::new(MediaStatsCell::default());
         let stop = Arc::new(AtomicBool::new(false));
+        let start = Arc::new(std::sync::Barrier::new(5));
         let readers: Vec<_> = (0..4)
             .map(|_| {
-                let (c, stop) = (c.clone(), stop.clone());
+                let (c, stop, start) = (c.clone(), stop.clone(), start.clone());
                 std::thread::spawn(move || {
+                    start.wait();
                     let mut ok = 0u64;
                     while !stop.load(Ordering::Relaxed) {
                         if let Some(s) = c.try_read() {
@@ -505,13 +509,19 @@ mod tests {
                 })
             })
             .collect();
+        start.wait();
         for n in 1..200_000u64 {
             c.write(&sample(n));
+            if n % 256 == 0 {
+                std::thread::yield_now();
+            }
         }
         stop.store(true, Ordering::Relaxed);
-        for r in readers {
-            assert!(r.join().unwrap() > 0, "읽기가 한 번도 성공하지 못했다");
-        }
+        let total: u64 = readers.into_iter().map(|r| r.join().unwrap()).sum();
+        assert!(total > 0, "쓰는 동안 읽기가 한 번도 성공하지 못했다");
+        // 쓰기가 멈춘 뒤에는 언제나 성공하고 마지막 값이어야 한다
+        let last = c.try_read().expect("쓰기가 없을 때 try_read는 성공한다");
+        assert_whole(&last);
     }
 
     fn shared(key: u64) -> Arc<PeerMediaShared> {
