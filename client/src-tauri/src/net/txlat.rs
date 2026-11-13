@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use serde::Serialize;
 
 /// 분위수를 계산하는 창(통계는 직전 창 기준).
@@ -145,21 +145,68 @@ pub(crate) struct LockWait {
     pub contended: u32,
 }
 
+/// 락 하나(자리)에서 워커가 기다린 기록(엔진 ②b 측정, 진단 전용): 기다린 횟수·합·최대. 기다렸을 때만 쓴다(원자값).
+/// 측정 시험이 `take`로 읽고 비운다.
+#[derive(Debug, Default)]
+pub struct LockSite {
+    contended: AtomicU64,
+    total_ns: AtomicU64,
+    max_ns: AtomicU64,
+}
+
+/// `LockSite` 스냅샷.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LockSiteWait {
+    pub contended: u64,
+    pub total_us: u64,
+    pub max_us: u64,
+}
+
+impl LockSite {
+    fn note(&self, ns: u64) {
+        self.contended.fetch_add(1, Ordering::Relaxed);
+        self.total_ns.fetch_add(ns, Ordering::Relaxed);
+        self.max_ns.fetch_max(ns, Ordering::Relaxed);
+    }
+
+    pub fn take(&self) -> LockSiteWait {
+        LockSiteWait {
+            contended: self.contended.swap(0, Ordering::Relaxed),
+            total_us: self.total_ns.swap(0, Ordering::Relaxed) / 1000,
+            max_us: self.max_ns.swap(0, Ordering::Relaxed).div_ceil(1000),
+        }
+    }
+}
+
 impl LockWait {
     #[inline]
-    pub(crate) fn lock<'a, T>(&mut self, m: &'a Mutex<T>) -> MutexGuard<'a, T> {
+    pub(crate) fn lock<'a, T>(&mut self, m: &'a Mutex<T>, site: &LockSite) -> MutexGuard<'a, T> {
         if let Some(g) = m.try_lock() {
             return g;
         }
         let t = Instant::now();
         let g = m.lock();
-        self.add(t);
+        self.add(t, site);
         g
     }
 
-    fn add(&mut self, t: Instant) {
-        self.ns += t.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    /// 읽기 락(피어 표). `lock`과 같은 방식.
+    #[inline]
+    pub(crate) fn read<'a, T>(&mut self, m: &'a RwLock<T>, site: &LockSite) -> RwLockReadGuard<'a, T> {
+        if let Some(g) = m.try_read() {
+            return g;
+        }
+        let t = Instant::now();
+        let g = m.read();
+        self.add(t, site);
+        g
+    }
+
+    fn add(&mut self, t: Instant, site: &LockSite) {
+        let ns = t.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.ns += ns;
         self.contended += 1;
+        site.note(ns);
     }
 }
 
@@ -228,17 +275,19 @@ mod tests {
     fn lock_wait_counts_only_contention() {
         let m = std::sync::Arc::new(Mutex::new(0u32));
         // 경합 없음: 0µs·0회
+        let site = std::sync::Arc::new(LockSite::default());
         let mut w = LockWait::default();
-        drop(w.lock(&m));
+        drop(w.lock(&m, &site));
         assert_eq!((w.ns, w.contended), (0, 0));
+        assert_eq!(site.take(), LockSiteWait::default());
         // 다른 스레드가 20ms 쥔 락: 대기가 잡힌다
         let g = m.lock();
         let (tx, rx) = std::sync::mpsc::channel();
-        let m2 = m.clone();
+        let (m2, site2) = (m.clone(), site.clone());
         let t = std::thread::spawn(move || {
             let mut w = LockWait::default();
             tx.send(()).unwrap();
-            drop(w.lock(&m2));
+            drop(w.lock(&m2, &site2));
             w
         });
         rx.recv().unwrap();
@@ -247,6 +296,16 @@ mod tests {
         let w = t.join().unwrap();
         assert_eq!(w.contended, 1);
         assert!(w.ns >= 10_000_000, "{w:?}");
+        // 자리별 기록: 한 번, 10ms 이상. 읽으면 비워진다.
+        let s = site.take();
+        assert_eq!(s.contended, 1);
+        assert!(s.max_us >= 10_000 && s.total_us >= 10_000, "{s:?}");
+        assert_eq!(site.take(), LockSiteWait::default());
+        // 읽기 락도 같은 방식(경합이 없으면 0)
+        let rw = RwLock::new(0u32);
+        let mut w = LockWait::default();
+        drop(w.read(&rw, &site));
+        assert_eq!((w.ns, w.contended), (0, 0));
     }
 
     #[test]

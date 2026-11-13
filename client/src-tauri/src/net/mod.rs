@@ -859,6 +859,18 @@ impl NetShared {
         self.peer_by_id(peer_id).ok().is_some_and(|p| p.clock().unsupported())
     }
 
+    /// `peer_clock`과 같되 피어 표 읽기 락을 기다린 시간을 잰다(워커 전용, 엔진 ②b 측정 — ②b-6b에서 이 락이 없어진다).
+    pub(crate) fn peer_clock_timed(&self, peer_id: &str, at_us: u64, w: &mut txlat::LockWait, site: &txlat::LockSite) -> Option<clock::ClockEstimate> {
+        let p = w.read(&self.peers, site).iter().find(|p| p.id() == peer_id).cloned();
+        p.and_then(|p| p.clock().estimate(at_us as f64))
+    }
+
+    /// `peer_clock_unsupported`의 워커 전용 짝(위와 같음).
+    pub(crate) fn peer_clock_unsupported_timed(&self, peer_id: &str, w: &mut txlat::LockWait, site: &txlat::LockSite) -> bool {
+        let p = w.read(&self.peers, site).iter().find(|p| p.id() == peer_id).cloned();
+        p.is_some_and(|p| p.clock().unsupported())
+    }
+
     pub fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
         self.peer_by_id(peer_id).ok().and_then(|p| p.conn().rtt_ms)
     }

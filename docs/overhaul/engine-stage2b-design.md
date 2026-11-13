@@ -2,7 +2,7 @@
 
 - 결정 기준: [../ARCHITECTURE-DECISIONS.md](../ARCHITECTURE-DECISIONS.md) D1(소유권, ③c 항목 끝 줄 "`probe`·메트로놈 계획 락은 ②b에서")·D2(단계 ②b)·D6(증거). 구조 기준: [engine-architecture.md](engine-architecture.md) 4.1·4.3·6절. 본보기: [engine-stage3-design.md](engine-stage3-design.md).
 - 이 문서는 ②b를 **구현할 수 있는 수준**으로 적는다. 코드는 바꾸지 않았고 빌드·측정도 하지 않았다. 줄 번호는 `origin/develop`(3c8e9d7) 기준이다.
-- ③c(송신 경로 락 재배치)가 진행 중이다(PR #126, 아직 열려 있다. restart 무할당 #124는 병합됐다). 이 문서는 #124 **앞**의 코드로 썼고, ③c가 바꿀 곳은 **〔③c 뒤 갱신〕**으로 표시했다. #124가 `tests/architecture.rs`(+155줄)·`peer_media.rs`·`sim/tune.rs`를 바꿔 이 세 파일의 줄 번호는 조금 밀렸다(내용은 같다) — #126 병합 뒤 〔③c 뒤 갱신〕 줄과 함께 한 번에 고친다.
+- ③c(송신 경로 락 재배치, PR #126)와 restart 무할당(#124)은 병합됐다. 이 문서는 그 **앞**의 코드로 썼고 ③c가 바꿀 곳을 〔③c 뒤 갱신〕으로 표시해 두었다 — **②b-0에서 #126 병합 뒤 코드로 확정했다**(표시를 지우고 **〔③c 뒤 확정〕**으로 적었다. 요약은 1.5절). 본문의 줄 번호는 여전히 `3c8e9d7` 기준이다(내용은 같다) — 지금 코드의 위치는 1.5절 대응표로 찾는다.
 - 다음 단계 범위는 [engine-stage5-10-scope.md](engine-stage5-10-scope.md). ADR과 다르게 하자는 제안은 9절.
 - PR #125 설계 검토(High 1·Medium 5·Low 11)를 반영했다. 검토가 바꾼 결정: 에코 프로브 반환 시점(3절), 프로브 신호를 상태로 판정(3.2절), 단계 메서드 인자(2.2절), PR 순서와 `SeqCell` 분리(6.1절), 송신 패킷 열 시험(6.2절), 단계 이름 `MetronomeStage`.
 
@@ -55,9 +55,9 @@
 | # | 줄 | 하는 일 | 락·할당 |
 |---|---|---|---|
 | a | `:634` → `:477-497` | `probe_frame`(인코더가 있을 때만): 프로브가 있으면 무음 + 클릭 프레임을 만들어 전용 인코더로 인코드 | **락**: `probe`(`:479`, 프레임마다). **할당**: 측정 시작 뒤 첫 프레임의 `Encoder::new`(`:485`), 프레임마다 `peer_id.clone()`(`:496`), `emitted_us.push`(`measure.rs:748`), 측정이 끝난 뒤 첫 프레임의 인코더 해제(`:481`) |
-| b | `:635` → `:501-597` | `update_auto_codec`: 200ms마다(또는 net이 "바로 다시 보라"고 표시했을 때, `:510-513`) 릴레이 부하 정책·피어별 손실 피드백 정책 갱신, 인코더 풀 관리 | **락**〔③c 뒤 갱신〕: `peers.read()` + `Peer.conn`, `relay`(`:517` → `net/mod.rs:567-576`), `peers.read()` + `conn` + `remote_loss`(`:543-565`). **할당**: 새 피어의 `AutoTx::new`(`id` 문자열·페이로드 버퍼, `:558`), 풀이 비었을 때 `Encoder::new`(`:550`) |
+| b | `:635` → `:501-597` | `update_auto_codec`: 200ms마다(또는 net이 "바로 다시 보라"고 표시했을 때, `:510-513`) 릴레이 부하 정책·피어별 손실 피드백 정책 갱신, 인코더 풀 관리 | **락**〔③c 뒤 확정〕: 없다 — 피어 표는 워커 복사본(`PeerTableCopy`), 릴레이 송신 여부는 `Peer` 송신 스냅샷(`sends_audio_via_relay`), 상한 초과는 제어 스레드가 발행한 원자값(`relay_over_budget`), 손실 보고는 `remote_loss` 칸(#126 전에는 `peers.read()` + `Peer.conn` + `relay` + `remote_loss` 락). **할당**: 새 피어의 `AutoTx::new`(`id` 문자열·페이로드 버퍼, `:558`), 풀이 비었을 때 `Encoder::new`(`:550`) |
 | c | `:636` → `:602-630` | `auto_frames`: 대상 피어마다 전용 Opus 인코더로 인코드(대상이 된 첫 프레임은 초기화 + 직전 프레임으로 예열), `relay_prev` 갱신 | — |
-| d | `:637-660` | 설정 코덱으로 인코드 → `net.send_audio_timed`(피어마다 암호화·`send_to`) | **락**〔③c 뒤 갱신〕: `peers.read()`, `Peer.echo`, `Peer.conn`(`net/mod.rs:639-646`, `:531`) |
+| d | `:637-660` | 설정 코덱으로 인코드 → `net.send_audio_timed`(피어마다 암호화·`send_to`) | **락**〔③c 뒤 확정〕: 없다 — `send_audio_timed(&mut PeerTableCopy, ..)`가 워커 복사본을 돌며 경로·반사 여부를 `Peer` 스냅샷(원자값)으로 읽는다(#126 전에는 `peers.read()`·`Peer.echo`·`Peer.conn`). 복사본은 반복 맨 앞에서 `net.refresh_copy`가 세대가 바뀐 때만 `try_read`로 다시 채운다 |
 | e | `:661` | `ts += frame` | — |
 
 b가 **프레임마다 c 앞에서** 불린다는 점이 순서 조건이다: d가 어떤 피어를 "릴레이 부하 전환 대상인데 아직 Opus가 없다"고 표시하면(`net/mod.rs:539`) 같은 패스의 **다음 프레임**에서 b가 그것을 읽고 바로 정책을 다시 본다(`:510`). b를 반복당 한 번으로 줄이면 그 프레임이 PCM으로 한 번 더 나간다.
@@ -90,6 +90,40 @@ b가 **프레임마다 c 앞에서** 불린다는 점이 순서 조건이다: d�
 6. **메트로놈이 기준 피어 시계를 볼 때 피어 표 읽기 락을 반복마다 잡는다**(`:683` → `peer_by_id`, `net/mod.rs:692-693`). #122에서 가장 크게 흔들린 그 락이다. ③c의 "송신 경로" 목록에는 없다.
 7. **`Peer.clock`은 기본 우선순위 스레드가 잡지 않는다.** 잡는 곳은 워커(`net/mod.rs:744`, `:749`)와 `band-net-recv`(`:884`, `:886`)뿐이고 둘 다 MMCSS다. `net_stats`(통계)는 `clock`을 보지 않는다.
 
+### 1.5 〔③c 뒤 확정〕 #126 병합 뒤의 코드(②b-0에서 확인)
+
+| 항목 | #126 뒤 |
+|---|---|
+| 워커 송신 경로의 락(1.2절 b·d) | 없다. 피어 표는 워커 복사본 `Worker.peer_copy: PeerTableCopy`(세대가 바뀐 반복에서만 `try_read`), 경로·반사 여부·릴레이 송신 여부는 `Peer` 스냅샷(원자값), 릴레이 상한 초과는 `relay_over_budget`(원자값), 손실 보고는 `remote_loss` 칸 |
+| 반복 맨 앞 | `net.refresh_copy(&mut self.peer_copy)`가 `reconfigure_local` 앞에 한 줄 있다(1.1절 표의 0과 1 사이). 세대가 같으면 원자 load 하나 |
+| 워커에 남은 락 | 에코 프로브(`probe`, 프레임마다 + 반복마다), 메트로놈 `plan`·`loopback_offset_ms`(반복마다)·`stats`(100ms), 기준 피어 시계 조회의 `peers.read()` → `Peer.clock`. 넷 다 `LockWait`로 감싸 대기를 잰다(#126) — ②b-0이 자리별 기록(`LockSite`)을 더했다 |
+| `Worker` 필드 | 48 → 50: `peer_copy`(조정자 필드 `peer_table`이 된다), `lock_wait`(조정자 필드로 남는다) |
+| 피어 표 복사본의 자리(4.2절) | 워커. 조정자가 갖고 `SendPath`·`MetronomeStage`에 빌려 준다 |
+| 정적 검사(7.1절) | #126의 `worker_send_path_waits_for_no_net_lock` 형식을 따른다 |
+| 폭주 시험(4.3절) | #126이 `send_path_storm_measure`를 조건 표(`Cond`) + `SEND_STORM_ROUNDS` 모양으로 고쳤다. ②b-0이 조건 셋(메트로놈 ×2, 에코 측정)과 자리별 지표를 더했다 |
+
+줄 번호 대응(`worker/mod.rs`, 왼쪽 = 이 문서 본문의 `3c8e9d7`, 오른쪽 = ②b-0 병합 시점):
+
+| 함수 | 본문 | 지금 |
+|---|---|---|
+| `run` | `:333-365` | `:364-410` |
+| `in_burst48` · `out_burst_dev` | `:371-387` | `:416-432` |
+| `reconfigure_local` | `:389-394` | `:434-439` |
+| `watch_device` | `:398-420` | `:443-465` |
+| `pump_input` · `push_local` | `:422-474` | `:467-519` |
+| `probe_frame` | `:477-497` | `:522-542` |
+| `update_auto_codec` | `:501-597` | `:546-642` |
+| `auto_frames` | `:602-630` | `:647-675` |
+| `on_capture_frame` | `:633-662` | `:678-707` |
+| `timing` | `:664-668` | `:709-713` |
+| `service_metronome` | `:671-727` | `:716-772` |
+| `sync_peer_slots` | `:730-771` | `:775-816` |
+| `service_peers` | `:774-846` | `:819-891` |
+| `adapt_safety` · `service_local` | `:850-900` | `:895-945` |
+| `track_occupancy` | `:903-910` | `:948-955` |
+
+`sim/tune.rs`의 워커 사건은 지금 `:384-390`(같다), 손으로 둔 슬롯 게인은 `:231`이다.
+
 ## 2. 단계 구조체
 
 ### 2.1 전체 그림
@@ -106,6 +140,8 @@ pub struct Worker {
     local: LocalPath,
     watch: DeviceWatch,
     echo: EchoRt,                  // 에코 프로브의 워커 쪽 끝(3절, ②b-5부터)
+    peer_table: Option<PeerTable>, // 〔③c 뒤 확정〕 피어 표 복사본(net + PeerTableCopy). SendPath·MetronomeStage에 복사본을 빌려 준다(4.2절)
+    lock_wait: LockWait,           // 〔③c 뒤 확정〕 이번 반복의 남은 락 대기 합(진단). 락을 잡는 단계에 빌려 준다(4.2절)
 }
 
 pub fn run(mut self) {
@@ -117,6 +153,7 @@ pub fn run(mut self) {
         c.stats.iter_period.record(start - last_start);
         last_start = start;
         self.echo.poll();                                             // ②b-5: 프로브 명령 적용(그 전에는 없음)
+        if let Some(t) = &mut self.peer_table { t.refresh(); }       // 〔③c 뒤 확정〕 세대가 같으면 원자 load 하나
         self.local.configure(&c.info, &c.counters, self.capture.granularity());   // :341
         let pass_at = Instant::now();                                 // :426
         self.capture.fill();                                          // :427-434
@@ -167,12 +204,14 @@ pub fn run(mut self) {
 | 단계 메서드 | 받는 것(생성 때 받아 갖는 것은 괄호) |
 |---|---|
 | `Capture::fill` / `next_block` / `next_frame` | 없음 / `muted` / 없음 (`cfg`에서 유도한 `frame`·`ich`) |
-| `SendPath::send_frame` | 프레임, `pass_at`, 에코 프로브 (`net`, `epoch`, `cfg`에서 유도한 코덱·`frame`·`ich`) |
-| `MetronomeStage::service` | `&StreamInfo`, `&AudioCounters`(`in_cb_frames`), `&FeedTiming` (`MetronomeCtl`, `net`) |
+| `SendPath::send_frame` | 프레임, `pass_at`, 에코 프로브, 피어 표 복사본(`&mut PeerTableCopy`, 〔③c 뒤 확정〕) (`net`, `epoch`, `cfg`에서 유도한 코덱·`frame`·`ich`) |
+| `MetronomeStage::service` | `&StreamInfo`, `&AudioCounters`(`in_cb_frames`), `&FeedTiming`, (②b-6b부터) 피어 표 복사본(`Option<&PeerTableCopy>`) (`MetronomeCtl`, `net`) |
 | `PeerSources::service` | `&SourceBank`, `&AudioCounters`, `&WorkerStats`(원자값 셋: `media_peers`·`deadline_fills`·`skipped_frames`), `out_rate`, `&FeedTiming`, 에코 탭 |
 | `PeerSources::close` | `&SourceBank` |
 | `LocalPath::configure` / `service` / `track_occupancy` | `&StreamInfo`·`&AudioCounters`·`granularity` / `&StreamInfo`·`&AudioCounters`·`&MixControls`·`&WorkerStats`·`epoch` / `&WorkerStats`·`pending48` |
 | `DeviceWatch::check` | `&AudioCounters`, `&WorkerStats`, `epoch` |
+
+락이 남아 있는 동안(②b-5·②b-6b 전) 락을 잡는 세 메서드(`send_frame`·`MetronomeStage::service`·`PeerSources::service`)는 `&mut LockWait`(진단 누적값)와 자리별 기록이 든 `&WorkerStats`도 받는다(4.2절).
 
 2.3절 표의 "입력" 칸에 `ctx.x`라고 적은 것은 "조정자가 `ctx`에서 꺼내 인자로 넘기는 `x`"라는 뜻이다. 인자 목록의 정확한 모양은 구현 PR이 정하되, 메서드 하나의 인자가 7개를 넘으면 그 단계 전용의 작은 빌림 구조체(`PeerEnv<'a> { bank, counters, stats, out_rate }` 같은 것)로 묶는다 — `WorkerCtx` 통째는 아니다.
 
@@ -433,15 +472,17 @@ if ctl.plan_gen.load(Acquire) != self.plan.0 {
 - 계약 문서는 `EngineStats.metronome`을 "마지막으로 **적용된** 계획"이라 적는다(`native-engine-design.md:440`). 수 필드는 칸이 워커가 적용한 값을 실으므로 그대로다. **`refPeerId`만** 제어 쪽에서 읽으므로 `set_metronome` 직후 워커 반복 1회(≤ 약 1ms) 동안 수 필드보다 한 발 앞설 수 있다. 프런트는 500ms마다 읽는다. ②b-6b에서 계약 문서 그 줄에 이 사실을 적는다.
 - `MetronomeCtl::stats()`는 `plan`을 잠가 `ref_peer_id`를 복제한다. 그 락은 이제 제어 평면끼리만 다투고 워커는 `try_lock`이라 영향이 없다.
 
-**피어 시계 — 피어 표 락만 없앤다.**〔③c 뒤 갱신〕 ③c가 워커에 주는 피어 표 복사본(`Vec<Arc<Peer>>` + 세대)에서 `id()`가 기준 피어와 같은 항목을 찾아 `Peer`의 값 반환 메서드(`clock_estimate(at_us)`, `clock_unsupported()` — 지금의 `clock()` 가드 접근자는 `pub(super)`라 새로 낸다)를 부른다. `peers.read()`가 사라진다. `Peer.clock` 자체는 남긴다(1.4절 7). ③c가 복사본을 워커가 아니라 net 안에 두는 모양으로 끝나면, `NetShared::peer_clock`이 그 복사본을 쓰게 고치는 것으로 같은 효과를 낸다 — 어느 쪽이든 조건은 "메트로놈 경로가 `peers` 읽기 락을 기다리지 않는다".
+**피어 시계 — 피어 표 락만 없앤다.**〔③c 뒤 확정〕 ③c는 피어 표 복사본을 **워커에** 두었다(`Worker.peer_copy: PeerTableCopy`, 반복 맨 앞에서 `net.refresh_copy`). ②b-6b에서 그 복사본에서 `id()`가 기준 피어와 같은 항목을 찾아 `Peer`의 값 반환 메서드(`clock_estimate(at_us)`, `clock_unsupported()` — 지금의 `clock()` 가드 접근자는 `pub(super)`라 새로 낸다)를 부른다. `peers.read()`가 사라진다. `Peer.clock` 자체는 남긴다(1.4절 7). 조건은 "메트로놈 경로가 `peers` 읽기 락을 기다리지 않는다". 그 전까지(②b-0~②b-6a) 워커는 `NetShared::peer_clock_timed`(읽기 락 대기를 재는 짝, ②b-0)를 쓴다.
 
-복사본이 **워커에** 있게 되면 읽는 단계가 둘이다(`SendPath`, `MetronomeStage`). 세대가 바뀔 때 갱신되는 값이라 읽기 전용 묶음 `WorkerCtx`에는 담을 수 없으므로, `EchoRt`처럼 **조정자가 갖고 두 단계에 빌려 주는 필드가 하나 는다**(2.1절 그림에 `peer_table` 한 줄, 8절의 "필드 9개"가 10개). 복사본이 net 안에 있으면 필드는 늘지 않는다. #126 병합 뒤 어느 쪽인지 이 문단·2.1절·8절을 한 번에 확정한다.
+복사본이 워커에 있으므로 읽는 단계가 둘이다(`SendPath`, `MetronomeStage`). 세대가 바뀔 때 갱신되는 값이라 읽기 전용 묶음 `WorkerCtx`에는 담을 수 없다 → `EchoRt`처럼 **조정자가 갖고 두 단계에 빌려 주는 필드가 하나 는다**: `peer_table: Option<PeerTable>`(`PeerTable { net, copy }`, 네트워크가 있을 때만. `refresh()`가 반복 맨 앞에서 복사본을 맞춘다 — 캡처가 멈춰도 빠진 피어가 쌓이지 않게, #126 리뷰 M-1). 단계는 `PeerTable`이 아니라 그 안의 복사본(`&mut PeerTableCopy` / `&PeerTableCopy`)만 받는다. net을 아는 것은 `SendPath`·`MetronomeStage`와 이 작은 묶음 셋이다. 2.1절 그림·8절에 반영했다(필드 9 → 11: `peer_table`과 아래 `lock_wait`).
+
+③c가 워커에 남긴 진단 누적값 `lock_wait: LockWait`(반복 한 번이 남은 락에서 기다린 합, `WorkerStats.iter_lock_wait`·`iter_unlocked`의 재료)도 조정자가 갖고, 락을 잡는 단계 메서드(`SendPath::send_frame`·`MetronomeStage::service`·`PeerSources::service`)에 `&mut LockWait`로 빌려 준다. ②b-5·②b-6b가 락을 없애면 그 인자도 같이 없어지고, 남는 것은 `Peer.clock`(MMCSS끼리) 하나의 대기 기록이다.
 
 ### 4.3 측정 계획
 
 D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는다")은 이미 결정이다. 측정은 할지 말지를 정하려는 것이 아니라 **크기를 기록하고 재배치 뒤 0이 됐는지 확인**하려는 것이다. 실행은 구현 PR(②b-0, ②b-6b)의 몫이고 이 문서의 표는 비어 있다.
 
-시험: #122의 `send_path_storm_measure`(`tests/loopback.rs`, `#[ignore]`)에 조건 둘을 더한다.〔③c 뒤 갱신: ③c가 이 시험과 `txlat::LockWait`를 고치면 그 모양에 맞춘다〕
+시험: #122의 `send_path_storm_measure`(`tests/loopback.rs`, `#[ignore]`)에 조건 둘을 더한다.〔③c 뒤 확정: ②b-0에서 더했다. ③c가 남긴 `LockWait`(반복당 합)에 **자리별 기록** `LockSite`(횟수·합·최대)를 붙여 `WorkerTiming.sites`로 낸다 — 프로브(송신)·프로브(공급)·계획·보정·상태 보고·피어 시계(피어 표 읽기 락) 여섯 자리. 메트로놈 조건은 두 계획의 기준 피어가 같은 창과 다른 창 둘로 돈다. `SEND_STORM_ONLY`로 조건을 고른다〕
 
 | 조건 | 폭주 스레드(기본 우선순위) | 워커 쪽 상태 |
 |---|---|---|
@@ -590,6 +631,7 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 - 조건: 설정 코덱 고정, 자동 전환 없음(릴레이 부하·손실 피드백 정책이 움직이지 않는 구성), 입력 링 넘침 없음. 이 조건에서는 패킷 **내용**이 타이밍과 무관하다(프레임 경계는 입력 샘플 수로만 정해진다). 실시간 지터로 달라지는 것(도착 시각, 패킷 수의 끝자리)은 비교에서 뺀다 — 앞에서부터 N개(예: 5초분).
 - ②b-0은 먼저 같은 구성을 두 번 돌려 열이 같은지(결정적인지) 확인한다. 같으면 열의 해시를 fixture로 커밋해 CI가 지키게 하고, 이동 PR은 그 fixture가 그대로임을 증거로 낸다(5분 fixture와 같은 규칙 — 갱신 금지, 달라지면 버그).
 - 덮는 PR: ②b-2(송신 쪽 이동, C1·C2·C4·C6·C7)와 ②b-5(프로브가 송신 경로의 `alt` 페이로드를 고친다 — 측정 중이 아닌 피어의 패킷 열이 그대로임). 자동 코덱 전환 구간(C3·C5)은 조건 밖이라 여전히 `tests/relay.rs`가 증거다.
+- **②b-0 확인 결과: 결정적이다**(`tests/send_column.rs`). 가짜 장치의 클럭 원점을 미래로 두면 입력이 샘플 0부터 시작해 프레임 경계가 실행마다 같다. 구현에서 하나를 바꿨다: Opus 부동소수 경로는 CPU 종류에 따라 비트가 다를 수 있어(러너 ≠ 개발 기계) 해시 fixture 대신 **같은 프로세스의 참조 인코더**(같은 입력을 프레임 0부터 순서대로 인코드)와 받은 패킷을 전부 바이트 비교한다 — 기계와 무관하고, 어긋난 프레임 번호가 나온다. PCM16은 참조 비교에 더해 프레임 800..2800의 열 해시를 fixture(`tests/fixtures/send-column-pcm16.sha256`)로 둔다(갱신 금지). 이동 PR의 증거는 "이 시험 통과 + fixture 파일 무변경"이다. 아래는 확인 전에 적은 문장이다.
 - **가능한지는 ②b-0에서 확인한다**(이 문서 작업에서는 코드를 돌리지 않았다). 가짜 장치의 입력 공급이 실시간 스레드라 프레임 경계가 실행마다 달라지는 등으로 결정적이지 않으면 넣지 않고, 6.2절 표의 그 행을 지운 뒤 "②b-2의 증거는 조건 대조표 + 실시간뿐"이라고 6.2절에 명시한다. D6 기준으로는 그 경우도 통과다(병합 조건은 아니다).
 
 ## 6. 마이그레이션
@@ -603,7 +645,7 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 | 1 | ②b-0 | 계측 | 4.3절 시험 조건 둘과 진단 계측(락 넷의 대기 시간). 본문에 "전" 수치. 송신 패킷 열 시험(5.4절 — 가능 여부 확인 포함). 워커 동작은 그대로 | ③c 병합(같은 시험 파일) |
 | 2 | ②b-1 | 이동 | `WorkerCtx`(조정자 묶음). 수신 쪽 단계: `PeerSources`·`LocalPath`·`MetronomeStage`·`DeviceWatch`. 메서드 본문은 `self.p.x` → 인자 `x`(2.2절 표) 치환 말고는 그대로. 락·순서·읽는 시점 불변. `engine-architecture.md` 6절 지도 갱신 | ③c 병합(`worker/mod.rs`가 겹친다) |
 | 3 | ②b-3 | 하네스 | `sim::tune`의 워커 사건이 `PeerSources::service`를 부른다(5.3절). fixture 바이트 동일 — **②b-1이 옮긴 `PeerSources`의 사후 증거를 겸한다**(5.1절) | ②b-1 |
-| 4 | ②b-2 | 이동 | 송신 쪽 단계: `Capture`·`SendPath`·`AutoCodec`. 흩어진 `Option`·플래그 검사(1.4절 3)가 `Option<SendPath>`·`Option<AutoCodec>` 둘로. `Worker`에 남는 것은 2.1절 그림 | ②b-1(②b-3과는 파일이 겹치지 않지만 순서는 ②b-3 뒤). 〔③c 뒤 갱신: 송신 경로 본문은 ③c 결과를 옮긴다〕 |
+| 4 | ②b-2 | 이동 | 송신 쪽 단계: `Capture`·`SendPath`·`AutoCodec`. 흩어진 `Option`·플래그 검사(1.4절 3)가 `Option<SendPath>`·`Option<AutoCodec>` 둘로. `Worker`에 남는 것은 2.1절 그림 | ②b-1(②b-3과는 파일이 겹치지 않지만 순서는 ②b-3 뒤). 〔③c 뒤 확정: 송신 경로 본문은 #126 결과(복사본·스냅샷, 락 없음)를 그대로 옮긴다. `send_frame`은 `&mut PeerTableCopy`를 인자로 받는다〕 |
 | 5 | ②b-4 | 재배치 | 피어 표 합치기: `media`와 `feeds`를 한 표(`PeerSource { media: Box<PeerMedia>, feed: Option<PeerFeed> }`)로. 반복마다의 키 조인(`:737`, `:797`)과 `seen` 표시·쓸기(`:731-733`, `:763-770`)가 없어진다. 조건: 표 순서·슬롯 배정 순서 그대로(J4), 제거 때 슬롯 `DRAIN` 처리 그대로 | ②b-3(fixture가 이 PR을 지킨다) |
 | 6 | ②b-5 | 재배치 | 에코 프로브 소유 이전(3절): 측정 번호에 묶인 상태 판정, 탭 끝과 반환 분리, 회수 뒤 분석. `alt_*` 필드가 `EchoProbe` 안으로. `Engine.probe`·`WorkerParams.probe` → `EchoPort`/`EchoPortRt`. 시험 둘 추가(설치·취소 반복에서 프로브 회수, 정리 구간 무음 — 6.3절) | ②b-2 |
 | 7 | ②b-6a | 이동 | `SeqCell<N>` 추출: `MediaStatsCell`의 seqlock(버전 + `[AtomicU64; N]`)을 `engine/stats.rs`로 빼고 `MediaStatsCell`이 그것을 쓴다. 알고리즘과 칸 배치(`pack`/`unpack`)는 그대로. 메트로놈은 건드리지 않는다 | 없음(`peer_media.rs`·`stats.rs`만. ②b-3 뒤에 두면 fixture가 `publish` 경로까지 덮는다) |
@@ -661,9 +703,9 @@ PR 단위로 되돌린다. 뒤 PR이 앞 PR에 얹혀 있으므로 순서는 6.1
 
 서열: **주 증거는 2번(동적, 4.3절의 락 대기 0)** 이고, 1번(정적)은 재발 방지용이다. ②b 뒤에는 워커의 접근이 메서드 뒤로 숨기 때문이다 — `MetronomeCtl`·`EchoPort`·net 메서드 **안**에서 잡는 락은 `worker/` 디렉터리의 문자열 검사에 보이지 않는다.
 
-1. **정적(재발 방지)**: `tests/architecture.rs`에 문자열 검사 하나 — `src/engine/worker/`(tests.rs 제외) 안에 기다리는 락 호출이 없다(`try_lock`·`try_read`만). `Mutex<JitterBuffer>` 검사(③-a3)와 같은 방식이다.〔③c 뒤 갱신: #124·#126이 고친 락 검사의 형식을 따른다〕 패턴은 다른 이름과 겹치지 않게 정한다: `.lock()`은 그대로 찾고, `.read()`·`.write()`는 seqlock 칸 읽기(`SeqCell::read`, `MediaStatsCell::read`)·링 쓰기 같은 이름과 겹치므로 **수신자까지 본다** — `RwLock`인 필드 이름(`peers` 등)을 목록으로 두고 `<그 이름>.read()`·`.write()`만 잡거나, 칸 읽기 메서드 이름을 `load`/`snapshot`으로 정해 겹침을 없앤다(구현 PR에서 택일, 거짓 양성 0이 조건). 이 검사는 워커 파일이 **직접** 쓰는 락만 본다.
+1. **정적(재발 방지)**: `tests/architecture.rs`에 문자열 검사 하나 — `src/engine/worker/`(tests.rs 제외) 안에 기다리는 락 호출이 없다(`try_lock`·`try_read`만). `Mutex<JitterBuffer>` 검사(③-a3)와 같은 방식이다.〔③c 뒤 확정: #126이 넣은 `worker_send_path_waits_for_no_net_lock`(`tests/architecture.rs`)과 같은 형식 — 주석을 뺀 본문에서 금지 문자열을 찾고 예외 수를 고정한다〕 패턴은 다른 이름과 겹치지 않게 정한다: `.lock()`은 그대로 찾고, `.read()`·`.write()`는 seqlock 칸 읽기(`SeqCell::read`, `MediaStatsCell::read`)·링 쓰기 같은 이름과 겹치므로 **수신자까지 본다** — `RwLock`인 필드 이름(`peers` 등)을 목록으로 두고 `<그 이름>.read()`·`.write()`만 잡거나, 칸 읽기 메서드 이름을 `load`/`snapshot`으로 정해 겹침을 없앤다(구현 PR에서 택일, 거짓 양성 0이 조건). 이 검사는 워커 파일이 **직접** 쓰는 락만 본다.
 2. **동적(주 증거)**: 4.3절 시험의 "후"에서 락 대기 0. 계측(`LockWait`)이 워커가 부르는 메서드 안의 락까지 잰다.
-3. **목록**: `engine-architecture.md` 4.1절 끝 표("워커가 잡는 락")를 ②b-6b에서 갱신한다. ②b 뒤에 남는 것은 `Peer.clock`(MMCSS끼리), 녹음 마커(`try_lock`), 그리고 **로그**다 — 워커의 상태 변화 로그(`log::`: 장치 멈춤, 스트림 에러, 슬롯 부족, 인코드 실패)는 로그 싱크의 락을 거친다. 상태가 바뀔 때만 나가 드물지만 기본 우선순위 스레드와 나누는 락이므로 목록에 적는다(없애는 것은 ②b 범위가 아니다).〔③c 뒤 갱신: ③c가 남긴 것이 있으면 여기에 더한다〕
+3. **목록**: `engine-architecture.md` 4.1절 끝 표("워커가 잡는 락")를 ②b-6b에서 갱신한다. ②b 뒤에 남는 것은 `Peer.clock`(MMCSS끼리), 녹음 마커(`try_lock`), 그리고 **로그**다 — 워커의 상태 변화 로그(`log::`: 장치 멈춤, 스트림 에러, 슬롯 부족, 인코드 실패)는 로그 싱크의 락을 거친다. 상태가 바뀔 때만 나가 드물지만 기본 우선순위 스레드와 나누는 락이므로 목록에 적는다(없애는 것은 ②b 범위가 아니다).〔③c 뒤 확정: ③c가 워커 송신 경로에 남긴 락은 없다(1.5절). `refresh_copy`의 `try_read`는 기다리지 않는다〕
 
 ### 7.2 이동 PR에서 순서가 슬쩍 바뀌는 것
 
@@ -703,11 +745,11 @@ PR 단위로 되돌린다. 뒤 PR이 앞 PR에 얹혀 있으므로 순서는 6.1
 | `tests/loopback.rs` 폭주 시험, `net/txlat.rs` `LockWait` | 시험 재실행·보강 | 조건 둘 추가 | ③c 뒤 리베이스 |
 | `jitter/` `restart` 제자리 초기화(#124) | 본문 변경 | 건드리지 않음 | 없음 |
 
-이 문서의 1절 표에서 〔③c 뒤 갱신〕이 붙은 줄(1.2절 b·d의 락, 4.2절 피어 시계, 7.1절)은 ③c 병합 뒤 한 번 고친다.
+이 문서에서 〔③c 뒤 갱신〕이 붙어 있던 줄(1.2절 b·d의 락, 4.2절 피어 시계, 4.3절 시험, 6.1절, 7.1절, 8절)은 ②b-0에서 #126 병합 뒤 코드로 확정했다(〔③c 뒤 확정〕, 1.5절).
 
 ## 8. 완료 조건
 
-- `Worker`의 필드가 2.1절 그림의 9개이고(〔③c 뒤 갱신〕 피어 표 복사본이 워커에 있으면 10개, 4.2절), `run` 본문이 단계 호출과 값 전달뿐이다.
+- `Worker`의 필드가 2.1절 그림의 11개이고(〔③c 뒤 확정〕 처음 안의 9개 + 피어 표 복사본 `peer_table` + 진단 누적값 `lock_wait`, 4.2절), `run` 본문이 단계 호출과 값 전달뿐이다.
 - 단계가 다른 단계의 필드를 읽지 않는다. 스크래치 공유가 없다. 단계 메서드가 `&WorkerCtx`를 받지 않는다(2.2절).
 - 에코 측정이 끝난 뒤 상대가 반사를 멈출 때까지 측정 대상 피어에 무음이 나간다(지금과 같다, 3.3절). 설치·취소가 어떤 순서로 겹쳐도 프로브가 측정 스레드로 돌아온다.
 - `src/engine/worker/`에 기다리는 락 호출이 없다(정적 검사). 워커가 프레임·반복마다 잡던 `probe`·`plan`·`loopback_offset_ms`·`stats` 락이 없다.
