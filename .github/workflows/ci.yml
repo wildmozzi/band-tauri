@@ -260,8 +260,9 @@ jobs:
           if-no-files-found: warn
 
   realtime:
-    # 벽시계 의존 통합 테스트(tests/*.rs의 `#[ignore = "realtime: ..."]`)만 돈다. 단위 테스트의 ignore(known-bug 재현)는
-    # `kind(test)` 필터로 제외한다. 가짜 장치를 실제 스레드·실제 시계로 돌려 은닉·끊김·지연 임계를 재므로
+    # 벽시계 의존 통합 테스트(tests/*.rs의 `#[ignore = "realtime: ..."]`)와 lib 안 실시간 시험(이름이 `realtime_`으로
+    # 시작하는 `#[ignore = "realtime: ..."]`, 예: sys::cpu, P3-15)만 돈다. 그 밖의 단위 테스트 ignore(known-bug 재현·측정·long)는
+    # `kind(test) | (kind(lib) & test(/::realtime_/))` 필터로 제외한다.가짜 장치를 실제 스레드·실제 시계로 돌려 은닉·끊김·지연 임계를 재므로
     # 러너 스케줄링에 흔들린다. 각 테스트는 별도 프로세스에서 하나씩 돌고, 실패하면 최대 2번 더(총 3회) 재시도한다.
     # 3회 모두 실패하면 잡이 실패한다. 재시도 끝에 통과한 테스트는 nextest 요약에 FLAKY로 남는다.
     # 판별: 같은 시나리오의 결정적 짝이 `rust` 잡에 있다. 짝이 녹색인데 여기만 실패하면 실행 환경, 짝도 실패하면 엔진 회귀다.
@@ -297,7 +298,7 @@ jobs:
       - name: Realtime tests (직렬, 3회까지)
         # 37개 직렬 약 22분(2026-11-13, ③c 측정 시험 추가 뒤) + 재시도 여유. 넘으면 시험 구성 재검토
         timeout-minutes: 35
-        run: cargo nextest run -E 'kind(test)' --run-ignored only --retries 2 --test-threads 1 --no-fail-fast --success-output final --failure-output immediate-final
+        run: cargo nextest run -E 'kind(test) | (kind(lib) & test(/::realtime_/))' --run-ignored only --retries 2 --test-threads 1 --no-fail-fast --success-output final --failure-output immediate-final
 
   relay:
     name: Relay (clippy + test)
