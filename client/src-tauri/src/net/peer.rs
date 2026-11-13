@@ -867,7 +867,7 @@ pub struct Peer {
     rx: PacketCipher,
     candidates: Vec<(SocketAddr, CandidateKind)>,
     conn: Mutex<ConnState>,
-    /// 송信 경로 스냅샷(`encode_route`, `ConnGuard`가 발행). 워커는 이것만 읽는다(엔진 ③c).
+    /// 송신 경로 스냅샷(`encode_route`, `ConnGuard`가 발행). 워커는 이것만 읽는다(엔진 ③c).
     route_snap: AtomicU64,
     /// 반사 마감(`echo_deadline_ns`, `EchoGuard`가 발행). 워커는 이것만 읽는다(엔진 ③c).
     echo_snap: AtomicU64,

@@ -184,6 +184,7 @@ fn jitter_restart_does_not_allocate() {
 
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     // libopus는 C malloc으로 할당해 위 계수에 안 잡힌다 → Opus 디코더 생성 수로 따로 본다(버퍼를 만들 때 모노·스테레오 둘).
+    // 계수는 프로세스 전역이다: 이 바이너리의 다른 시험이 병렬로 디코더를 만들면 깨진다(지금은 없음, #126 리뷰 L-5).
     let created0 = band_lib::engine::codec::opus_decoders_created();
     let mut payload = vec![0u8; MAX_PAYLOAD_BYTES];
     let mut out = vec![0f32; 480];

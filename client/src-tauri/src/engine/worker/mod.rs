@@ -336,7 +336,7 @@ impl Worker {
             metro_plan: (0, MetronomePlan::default()),
             metro_stats_at: 0,
             metro_stats_gen: 0,
-            peer_copy: crate::net::PeerTableCopy::default(),
+            peer_copy: crate::net::PeerTableCopy::for_worker(),
             lock_wait: Default::default(),
             p,
         })
@@ -352,6 +352,11 @@ impl Worker {
                 self.p.stats.iter_period.record(start - last_start);
             }
             last_start = start;
+            // 피어 표 복사본은 송신과 무관하게 반복마다 맞춘다: 캡처가 멈춰도(장치 분리) 빠진 피어가 쌓이지 않게(#126 리뷰 M-1).
+            // 세대가 같으면 원자 load 하나.
+            if let Some(net) = self.p.net.as_ref() {
+                net.refresh_copy(&mut self.peer_copy);
+            }
             self.reconfigure_local();
             self.pump_input();
             let timing = self.timing();

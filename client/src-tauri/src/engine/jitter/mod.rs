@@ -285,6 +285,8 @@ impl DecoderPool {
                     return Some(d);
                 }
             }
+            // 정상 흐름(give 뒤 take)에서는 오지 않는다: 미리 만들기 실패나 reset 실패 뒤 — 워커에서 할당한다(#126 리뷰 L-4).
+            log::warn!("지터 버퍼 디코더 풀이 비어 Opus 디코더를 새로 만든다(ch {ch})");
         }
         Decoder::new(opus, ch).ok()
     }

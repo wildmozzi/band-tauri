@@ -147,19 +147,27 @@ pub struct NetShared {
 }
 
 /// 워커가 들고 있는 피어 표 복사본(엔진 ③c, ADR D1). 세대가 바뀐 반복에서만 다시 복사한다(`NetShared::refresh_copy`).
-/// Net 하나에 오래 사는 복사본은 워커의 것 하나다(빠진 항목 해제가 이 복사본의 세대를 기준으로 한다).
+/// 빠진 항목 해제(`retired_peers`)는 **워커 복사본**(`for_worker`)이 맞춘 세대만 기준으로 한다. 다른 복사본(`Default`, 시험·도구의
+/// 임시 복사본)은 그 세대를 발행하지 않는다 — 워커 복사본보다 앞서 발행하면 워커가 빠진 피어의 마지막 `Arc`를 놓게 된다
+/// (#126 리뷰 M-2). Net 하나에 워커 복사본은 하나다.
 pub struct PeerTableCopy {
     gen: u64,
     peers: Vec<Arc<Peer>>,
+    publishes: bool,
 }
 
 impl Default for PeerTableCopy {
     fn default() -> Self {
-        Self { gen: u64::MAX, peers: Vec::with_capacity(MAX_PEERS + 1) }
+        Self { gen: u64::MAX, peers: Vec::with_capacity(MAX_PEERS + 1), publishes: false }
     }
 }
 
 impl PeerTableCopy {
+    /// 워커가 엔진 수명 동안 쥐는 복사본(맞춘 세대를 발행해 빠진 항목 해제의 기준이 된다).
+    pub fn for_worker() -> Self {
+        Self { publishes: true, ..Self::default() }
+    }
+
     pub fn peers(&self) -> &[Arc<Peer>] {
         &self.peers
     }
@@ -515,7 +523,7 @@ impl NetShared {
     /// 같은 키를 다시 만들 때 `AUDIO_SEQ_HANDOVER_GAP`(65,536프레임)만큼 띄우므로 nonce가 겹치지 않는다. 방금 들어온
     /// 피어는 몇 프레임 늦게 보이지만, 핸드셰이크가 끝나야 경로가 생기므로(수 ms 이상) 첫 소리 시각은 같다.
     /// 할당 없음: 복사본은 `MAX_PEERS + 1` 용량으로 미리 잡혀 있고, 빠진 항목의 마지막 `Arc`는 `retired_peers`가 쥔다.
-    fn refresh_copy(&self, c: &mut PeerTableCopy) {
+    pub fn refresh_copy(&self, c: &mut PeerTableCopy) {
         if self.peers_gen.load(Ordering::Acquire) == c.gen {
             return;
         }
@@ -528,7 +536,9 @@ impl NetShared {
         // 쓰기 락 안에서만 오르므로 읽기 락을 쥔 동안 이 값은 복사한 표의 세대다.
         c.gen = self.peers_gen.load(Ordering::Acquire);
         drop(peers);
-        self.copy_gen.store(c.gen, Ordering::Release);
+        if c.publishes {
+            self.copy_gen.store(c.gen, Ordering::Release);
+        }
         self.copy_refreshes.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -700,6 +710,7 @@ impl NetShared {
     /// 스택 버퍼를 쓴다(피어마다 RelayData를 따로 보낸다 — 릴레이에는 팬아웃이 없다).
     /// `auto(peer, 경로)`가 `Some`을 주면 그 피어에게는 그것(그 피어 전용 Opus 인코더의 이 프레임)을 보낸다
     /// (PCM16 설정의 자동 전환: 릴레이 부하 P1-4c, 수신 손실 피드백 P1-4e).
+    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn send_audio<'a>(
         &self,
@@ -1154,6 +1165,8 @@ fn control_loop(s: &NetShared) {
                 }
             }
         }
+        // 표 복사본은 자기 전에 놓는다: 빠진 피어를 20ms 더 쥐지 않게(#126 리뷰 H-1).
+        drop(peers);
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -1187,11 +1200,14 @@ mod copy_tests {
     /// 엔진 ③c(#122 리뷰 M1 조건): 복사본은 세대가 바뀔 때만 다시 읽고, 쓰기 락이 바쁘면 기다리지 않고 옛 복사본을 쓰며
     /// 그 프레임을 센다. 락이 풀린 다음 갱신에서 새 피어가 보이고 빠진 피어가 사라진다. 빠진 피어의 마지막 `Arc`는
     /// 워커 복사본이 아니라 제어 스레드(`release_retired`)가 놓는다.
+    /// net 스레드는 먼저 멈춘다: 제어 스레드가 표 복사본을 쥐거나 `release_retired`를 같이 부르면 참조 수가 스케줄링에
+    /// 달린다(#126 리뷰 H-1). 시각 단언은 두지 않는다 — 기다리지 않았다는 것은 `stale_copy_frames`가 보인다.
     #[test]
     fn copy_refreshes_on_generation_and_never_waits() {
-        let n = net();
-        let s = n.shared();
-        let mut c = PeerTableCopy::default();
+        let mut n = net();
+        n.stop();
+        let s = n.shared().clone();
+        let mut c = PeerTableCopy::for_worker();
         add(&n, "a", 1);
         s.refresh_copy(&mut c);
         assert_eq!(ids(&c), ["a"]);
@@ -1200,13 +1216,11 @@ mod copy_tests {
         // 세대 그대로면 아무것도 안 한다
         s.refresh_copy(&mut c);
         assert_eq!(n.take_send_path_diag().copy_refreshes, 0);
-        // 쓰기 락이 바쁜 동안: 세대는 이미 올랐어도(추가 직후) 옛 복사본 그대로, 기다리지 않음
+        // 쓰기 락이 바쁜 동안: 세대는 이미 올랐어도(추가 직후) 옛 복사본 그대로(try_read 실패 → 기다리지 않음)
         add(&n, "b", 2);
         let held = s.peers.write();
-        let t = Instant::now();
         s.refresh_copy(&mut c);
         s.refresh_copy(&mut c);
-        assert!(t.elapsed() < Duration::from_millis(50), "기다리지 않는다");
         assert_eq!(ids(&c), ["a"], "옛 복사본");
         drop(held);
         let d = n.take_send_path_diag();
@@ -1214,16 +1228,39 @@ mod copy_tests {
         s.refresh_copy(&mut c);
         assert_eq!(ids(&c), ["a", "b"], "락이 풀리면 다음 반복에 보인다");
         // 제거: 워커 복사본이 아직 옛 세대면 빠진 항목은 retired가 쥔다 → 복사본 갱신 뒤 제어 스레드가 놓는다
-        let a = c.peers()[0].clone();
+        let a = Arc::downgrade(&c.peers()[0]);
         n.remove_peer("a");
         s.release_retired();
         assert_eq!(s.retired_peers.lock().len(), 1, "복사본이 따라오기 전에는 놓지 않는다");
         s.refresh_copy(&mut c);
         assert_eq!(ids(&c), ["b"]);
-        assert_eq!(Arc::strong_count(&a), 2, "retired + 이 시험");
+        assert!(a.upgrade().is_some(), "워커 복사본이 놓아도 살아 있다 — 마지막 참조는 워커 쪽이 아니다");
         s.release_retired();
         assert!(s.retired_peers.lock().is_empty());
-        assert_eq!(Arc::strong_count(&a), 1, "마지막 참조는 워커 쪽이 아니다");
+        assert!(a.upgrade().is_none(), "제어 스레드의 release_retired가 놓았다");
         assert_eq!(n.take_send_path_diag().route_skips, 0);
+    }
+
+    /// #126 리뷰 M-2: 워커 복사본이 아닌 복사본(시험·도구의 `send_audio`)은 세대를 발행하지 않는다 — 워커 복사본이
+    /// 아직 옛 세대인 동안 빠진 항목을 놓게 하지 않는다.
+    #[test]
+    fn temporary_copy_does_not_release_retired() {
+        let mut n = net();
+        n.stop();
+        let s = n.shared().clone();
+        let mut worker = PeerTableCopy::for_worker();
+        add(&n, "a", 1);
+        s.refresh_copy(&mut worker);
+        n.remove_peer("a");
+        let mut tmp = PeerTableCopy::default();
+        s.refresh_copy(&mut tmp);
+        assert!(tmp.peers().is_empty());
+        let mut buf = [0u8; MAX_PACKET_BYTES];
+        s.send_audio(&[0u8; 40], 0, 1, 0, &mut buf, None, None);
+        s.release_retired();
+        assert_eq!(s.retired_peers.lock().len(), 1, "임시 복사본이 갱신해도 워커 복사본 기준으로만 놓는다");
+        s.refresh_copy(&mut worker);
+        s.release_retired();
+        assert!(s.retired_peers.lock().is_empty());
     }
 }
