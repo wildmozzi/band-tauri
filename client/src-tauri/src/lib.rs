@@ -26,6 +26,7 @@ pub fn run() {
         .manage(commands::RecordDirState::default())
         .invoke_handler(tauri::generate_handler![
             commands::engine_list_devices,
+            commands::engine_supported_drivers,
             commands::engine_start,
             commands::engine_stop,
             commands::engine_test_start,

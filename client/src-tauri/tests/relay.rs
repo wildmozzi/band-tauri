@@ -449,6 +449,17 @@ fn direct_blocked_connects_via_relay_then_promotes_to_direct() {
     let connect_ms = p.t_added.elapsed().as_millis();
     let sound_after = wait_sound(&p.sink_b, 0, Duration::from_secs(3)).expect("릴레이 경유 소리 없음");
     let first_sound_ms = p.t_added.elapsed().as_millis();
+    // 엔진 지표(P1-20): add_peer → 처음 Connected / 실제 소리가 처음 재생 링에 들어간 순간(B가 A 소리를 받는 쪽)
+    let mut eng = (None, None);
+    assert!(
+        wait_until(Duration::from_secs(3), || {
+            let s = p.b.stats();
+            eng = s.peers.first().map_or((None, None), |x| (x.connect_ms, x.first_audio_ms));
+            eng.1.is_some()
+        }).is_some(),
+        "B의 firstAudioMs가 서지 않음: {eng:?}"
+    );
+    let (eng_connect_ms, eng_first_audio_ms) = (eng.0.unwrap_or(f32::NAN), eng.1.unwrap());
     assert_eq!(relay_state(&p.a), Some(RelayStateKind::Bound));
     assert!(p.proxy.dropped.load(Ordering::Relaxed) > 0, "직접 경로 Hello는 프록시에서 버려져야 한다");
     assert_eq!(p.proxy.forwarded.load(Ordering::Relaxed), 0);
@@ -483,6 +494,7 @@ fn direct_blocked_connects_via_relay_then_promotes_to_direct() {
     let conceal_switch = (conc1 - conc0) as f64 / (prod1 - prod0).max(1) as f64;
     println!("=== 릴레이 폴백 (직접 차단, 릴레이 편도 20ms / 직접 편도 2ms, 로컬 UDP, debug 빌드) ===");
     println!("연결: add_peer → 양쪽 릴레이 Connected {connect_ms}ms (대기 {t_relay:?}), 첫 소리 {first_sound_ms}ms ({sound_after:?})");
+    println!("엔진 지표(P1-20, B←A): connectMs {eng_connect_ms:.1}, firstAudioMs {eng_first_audio_ms:.1}");
     println!("릴레이 경로 B←A 지터버퍼: {js_relay:?}");
     println!(
         "릴레이 경로: 버퍼 {:.1}ms(목표 {:.1}ms, 벽시계 {:.1}ms), 은닉 {:.2}%, 연속성 {:.2}%, 무음 {} 불연속 {}, xrun {xruns_b}",
@@ -513,6 +525,8 @@ fn direct_blocked_connects_via_relay_then_promotes_to_direct() {
 
     // GOAL 3절: 입장 후 3초 이내 소리 (폴백 1.5초 + 릴레이 왕복 + 지터 버퍼)
     assert!(first_sound_ms < 3000, "첫 소리까지 {first_sound_ms}ms");
+    assert!(eng_first_audio_ms <= 3000.0, "엔진 firstAudioMs {eng_first_audio_ms}ms > 3초(직접 차단 → 릴레이)");
+    assert!(eng_connect_ms <= eng_first_audio_ms, "연결 {eng_connect_ms}ms ≤ 첫 소리 {eng_first_audio_ms}ms");
     assert!(cont_relay.sound_ratio > 0.97, "릴레이 경로 연속성 {:?}", cont_relay);
     assert!(cont_relay.silent_runs as u64 <= 3 * xruns_b, "릴레이 경로 무음 {:?} (xrun {xruns_b})", cont_relay);
     assert!(conceal_relay < 0.02, "릴레이 경로 은닉 {conceal_relay}");

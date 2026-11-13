@@ -187,6 +187,10 @@ export interface PeerStats {
   /** 이 피어가 알려 온 내 소리의 수신 손실률·은닉률(%, 그쪽 최근 5초). 보고가 3초 넘게 없으면 null(옛 엔진, 그쪽 재생 전) */
   remoteLossPct?: number | null
   remoteConcealPct?: number | null
+  /** engine_add_peer → 이 피어와 처음 Connected(ms, P1-20). 아직이면 null. 재연결·경로 전환으로 다시 재지 않는다(옛 엔진에는 없다) */
+  connectMs?: number | null
+  /** engine_add_peer → 이 피어의 실제 소리가 처음 재생된 순간(ms, P1-20). 아직이면 null. 리셋 규칙은 connectMs와 같다 */
+  firstAudioMs?: number | null
 }
 
 // ============================================================================
@@ -508,6 +512,23 @@ export function engineErrorMessage(err: unknown): string {
 
 export function engineListDevices(): Promise<DeviceInfo[]> {
   return invoke<DeviceInfo[]>('engine_list_devices')
+}
+
+const DRIVER_KINDS: readonly DriverKind[] = ['asio', 'wasapiShared', 'wasapiExclusive']
+
+/**
+ * 이 빌드가 지원하는 드라이버(P2-7, 설계 4절 `engine_supported_drivers`).
+ * 옛 엔진(커맨드 없음)·실패·형식이 이상한 응답이면 null — 호출자는 "모두 지원"으로 본다.
+ */
+export async function engineSupportedDrivers(): Promise<DriverKind[] | null> {
+  try {
+    const list = await invoke<unknown>('engine_supported_drivers')
+    if (!Array.isArray(list)) return null
+    const known = list.filter((d): d is DriverKind => DRIVER_KINDS.includes(d as DriverKind))
+    return known.length > 0 ? known : null
+  } catch {
+    return null
+  }
 }
 
 export function engineStart(config: EngineConfig, peerId: string): Promise<LocalDescriptor> {

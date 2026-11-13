@@ -26,6 +26,7 @@ import {
   type MetronomeView,
 } from './metronomeLogic'
 import { parseRelayToken, relayNeedsNewToken, relayRefreshDelayMs } from './relayLogic'
+import { newFirstAudioTrack, noteAddPeer, notePeerLeft, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
 
 export interface EngineBackend {
@@ -66,6 +67,8 @@ export interface PerformState {
   relayError?: string | null
   /** 공유 메트로놈(P2-3). 켜진 적 없거나 엔진이 꺼지면 null */
   metronome?: MetronomeView | null
+  /** 연주 시작 → 첫 피어 소리(P1-20, 가장 빠른/가장 늦은 피어). 연주 중이 아니거나 피어가 없으면 null */
+  firstAudio?: FirstAudioSummary | null
 }
 
 export interface StartOptions {
@@ -84,6 +87,8 @@ export interface PerformSessionOptions {
   deadStatsThreshold?: number
   /** relay-token-request에 응답이 없을 때 다시 요청하는 간격 */
   relayRetryMs?: number
+  /** 단조 시계(ms). 테스트용 — 기본 performance.now */
+  now?: () => number
 }
 
 /** 서버 에러 코드 → 사용자 메시지. 연주 상태 롤백 대상이면 rollback=true */
@@ -143,12 +148,16 @@ export class PerformSession {
   private readonly reconnectTimeoutMs: number
   private readonly deadStatsThreshold: number
   private readonly relayRetryMs: number
+  private readonly now: () => number
+  /** 연주 시작 → 첫 피어 소리 추적(P1-20). 엔진을 시작할 때마다 새로, 정지하면 null */
+  private firstAudio: FirstAudioTrack | null = null
 
   constructor(private readonly engine: EngineBackend, private readonly env: SessionEnv, opts: PerformSessionOptions = {}) {
     this.retryDelays = opts.retryDelaysMs ?? DEFAULT_RETRY_DELAYS
     this.reconnectTimeoutMs = opts.reconnectTimeoutMs ?? 35_000
     this.deadStatsThreshold = opts.deadStatsThreshold ?? 2
     this.relayRetryMs = opts.relayRetryMs ?? 10_000
+    this.now = opts.now ?? (() => performance.now())
   }
 
   // ---------------------------------------------------------------- 상태
@@ -200,6 +209,8 @@ export class PerformSession {
     const gen = ++this.gen
     this.lastStart = opts
     this.setState({ phase: 'starting', error: null, instrument: opts.instrument, sessionId: selfId })
+    // 연주 시작(P1-20): 지금 알고 있는 연주자는 이 시각부터, 뒤에 들어오는 연주자는 처음 추가한 시각부터 잰다
+    this.firstAudio = newFirstAudioTrack(this.now(), this.env.getOtherPerformers())
 
     // 시작·검사·확정을 한 큐 작업 안에서 끝낸다. 그래야 사이에 끼어든 stop/재시작과 순서가 꼬이지 않는다.
     return this.enqueue(async () => {
@@ -256,8 +267,9 @@ export class PerformSession {
     this.localSsrc = null
     this.lastRelayRequestAt = -Infinity
     // 연주자가 아니면 서버가 메트로놈을 보내지 않으므로 잊는다(다시 시작하면 서버가 현재 상태를 보내 준다)
+    this.firstAudio = null
     this.remoteMetronome = null
-    this.setState({ phase: 'idle', instrument: null, sessionId: null, stats: null, error, relayError: null, metronome: null })
+    this.setState({ phase: 'idle', instrument: null, sessionId: null, stats: null, error, relayError: null, metronome: null, firstAudio: null })
     if (wasRunning) {
       if (notify) {
         this.env.send({ type: 'native-leave' })
@@ -373,6 +385,11 @@ export class PerformSession {
         this.enqueue(() => this.engine.setMetronome(stoppedConfig(state.bpm, state.beatsPerBar))).catch(() => {})
       }
     }
+    // 들리기 전에 떠난 연주자는 다시 들어오면 그 재입장부터 잰다(#120 L-5). 큐에 넣어 앞서 대기 중인 add_peer 뒤에 적용한다
+    const gen = this.gen
+    this.enqueue(async () => {
+      if (gen === this.gen && this.firstAudio) this.firstAudio = notePeerLeft(this.firstAudio, peerId)
+    }).catch(() => {})
     this.runActions(this.machine.peerGone(peerId))
   }
 
@@ -542,6 +559,8 @@ export class PerformSession {
   async pollStats(): Promise<void> {
     if (this.state.phase !== 'running') return
     const gen = this.gen
+    // 통계 요청은 명령 큐 밖이라 그사이 재추가와 겹칠 수 있다: 요청 순간의 add 시각과 비교한다(#120 L-4)
+    const addedAtAtRequest = this.firstAudio?.addedAt
     let stats: EngineStats
     try {
       stats = await this.engine.stats()
@@ -557,7 +576,8 @@ export class PerformSession {
       return
     }
     this.deadStats = 0
-    this.setState({ stats })
+    if (this.firstAudio) this.firstAudio = noteStats(this.firstAudio, stats.peers, addedAtAtRequest)
+    this.setState({ stats, firstAudio: summarizeFirstAudio(this.firstAudio, stats.peers) })
     this.maybeRequestRelayTokenFor(stats)
   }
 
@@ -594,7 +614,11 @@ export class PerformSession {
 
   private addPeer(peerId: string, descriptor: LocalDescriptor) {
     const gen = this.gen
-    this.enqueue(() => this.engine.addPeer(peerId, descriptor))
+    this.enqueue(() => {
+      // 엔진 firstAudioMs의 기준(engine_add_peer 호출 시각). 큐에서 실제로 부르는 순간에 잰다
+      if (gen === this.gen && this.firstAudio) this.firstAudio = noteAddPeer(this.firstAudio, peerId, this.now())
+      return this.engine.addPeer(peerId, descriptor)
+    })
       .then(() => {
         if (gen !== this.gen) return
         this.machine.addPeerSucceeded(peerId)

@@ -233,7 +233,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         let key = PeerKey::from_raw(i as u64 + 1);
         pfs.push(PeerFeed::new(slot, key, 48_000, sh).unwrap());
         let (mtx, mrx) = media_link(key);
-        pms.push(PeerMedia::new(key, format!("p{i}"), 1 + i as u32, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: np.profile }, mrx).1);
+        pms.push(PeerMedia::new(key, format!("p{i}"), 1 + i as u32, 0, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: np.profile }, mrx).1);
         mtxs.push(mtx);
         txs.push(TxState {
             enc: SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap(),

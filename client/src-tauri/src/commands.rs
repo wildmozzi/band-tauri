@@ -13,7 +13,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
 use crate::diag::Diagnostics;
-use crate::engine::config::EngineConfig;
+use crate::engine::config::{DriverKind, EngineConfig};
 use crate::engine::measure::{EchoReport, LoopbackReport};
 use crate::engine::device::system::SystemBackend;
 use crate::engine::device::DeviceInfo;
@@ -69,6 +69,12 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Sen
 pub async fn engine_list_devices(state: State<'_, EngineState>) -> Result<Vec<DeviceInfo>, String> {
     let m = state.0.clone();
     blocking(move || m.backend().list_devices()).await
+}
+
+/// 이 빌드가 지원하는 드라이버(P2-7). 기본 배포본은 `asio` 피처 없이 빌드되어 ASIO가 빠진다.
+#[tauri::command]
+pub fn engine_supported_drivers() -> Vec<DriverKind> {
+    DriverKind::supported()
 }
 
 #[tauri::command]

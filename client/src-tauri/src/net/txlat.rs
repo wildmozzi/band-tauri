@@ -4,9 +4,9 @@
 //! `WINDOW`마다 `rotate`로 현재 창을 비워 p50/p99/최대를 계산해 둔다. 통계 조회는 그 스냅샷을 읽는다.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use serde::Serialize;
 
 /// 분위수를 계산하는 창(통계는 직전 창 기준).
@@ -85,6 +85,12 @@ pub struct SendLatency {
     last: Mutex<SendQueueStats>,
 }
 
+impl std::fmt::Debug for SendLatency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendLatency").field("last", &self.last()).finish()
+    }
+}
+
 impl Default for SendLatency {
     fn default() -> Self {
         Self::new()
@@ -128,6 +134,82 @@ impl SendLatency {
 
     pub fn last(&self) -> SendQueueStats {
         *self.last.lock()
+    }
+}
+
+/// 송신 경로 한 번(워커의 `send_audio_timed`)이 다른 스레드가 쥔 락을 기다린 시간 합(엔진 ③c 측정).
+/// 먼저 `try_*`로 잡아 보고 못 잡을 때만 시계를 읽으므로, 경합이 없으면 비용은 성공하는 try 한 번이다.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct LockWait {
+    pub ns: u64,
+    pub contended: u32,
+}
+
+impl LockWait {
+    #[inline]
+    pub(crate) fn lock<'a, T>(&mut self, m: &'a Mutex<T>) -> MutexGuard<'a, T> {
+        if let Some(g) = m.try_lock() {
+            return g;
+        }
+        let t = Instant::now();
+        let g = m.lock();
+        self.add(t);
+        g
+    }
+
+    #[inline]
+    pub(crate) fn read<'a, T>(&mut self, l: &'a RwLock<T>) -> RwLockReadGuard<'a, T> {
+        if let Some(g) = l.try_read() {
+            return g;
+        }
+        let t = Instant::now();
+        let g = l.read();
+        self.add(t);
+        g
+    }
+
+    fn add(&mut self, t: Instant) {
+        self.ns += t.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.contended += 1;
+    }
+}
+
+/// 송신 경로 락 대기 분포(엔진 ③c 측정, 진단 전용). 워커가 송신마다 한 번 기록하고(경합 없으면 0µs), 측정 쪽이 비운다.
+#[derive(Default)]
+pub struct LockWaitHist {
+    hist: SendLatency,
+    contended: AtomicU64,
+    calls: AtomicU64,
+}
+
+/// `LockWaitHist::take`의 결과.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LockWaitStats {
+    /// 송신 한 번당 대기 합의 분포(ms — `SendQueueStats`와 같은 칸).
+    pub wait: SendQueueStats,
+    /// 창 동안 바로 못 잡은 락 획득 수.
+    pub contended: u64,
+    /// 창 동안 기록한 송신 수.
+    pub calls: u64,
+}
+
+impl LockWaitHist {
+    #[inline]
+    pub(crate) fn record(&self, w: LockWait) {
+        self.hist.record(Duration::from_nanos(w.ns));
+        if w.contended > 0 {
+            self.contended.fetch_add(w.contended as u64, Ordering::Relaxed);
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 지금까지를 비우고 돌려준다(측정 쪽).
+    pub fn take(&self) -> LockWaitStats {
+        LockWaitStats {
+            wait: self.hist.rotate(),
+            contended: self.contended.swap(0, Ordering::Relaxed),
+            calls: self.calls.swap(0, Ordering::Relaxed),
+        }
     }
 }
 
@@ -190,6 +272,40 @@ mod tests {
         h.record(Duration::from_micros(17));
         let s = h.rotate();
         assert!(s.p50_ms <= s.max_ms && s.p99_ms <= s.max_ms, "{s:?}");
+    }
+
+    #[test]
+    fn lock_wait_counts_only_contention() {
+        let m = std::sync::Arc::new(Mutex::new(0u32));
+        let l = RwLock::new(0u32);
+        let hist = LockWaitHist::default();
+        // 경합 없음: 0µs·0회
+        let mut w = LockWait::default();
+        drop(w.lock(&m));
+        drop(w.read(&l));
+        assert_eq!((w.ns, w.contended), (0, 0));
+        hist.record(w);
+        // 다른 스레드가 20ms 쥔 락: 대기가 잡힌다
+        let g = m.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let m2 = m.clone();
+        let t = std::thread::spawn(move || {
+            let mut w = LockWait::default();
+            tx.send(()).unwrap();
+            drop(w.lock(&m2));
+            w
+        });
+        rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        drop(g);
+        let w = t.join().unwrap();
+        assert_eq!(w.contended, 1);
+        assert!(w.ns >= 10_000_000, "{w:?}");
+        hist.record(w);
+        let s = hist.take();
+        assert_eq!((s.calls, s.contended), (2, 1));
+        assert!(s.wait.max_ms >= 10.0, "{s:?}");
+        assert_eq!(hist.take().calls, 0, "take가 비운다");
     }
 
     #[test]

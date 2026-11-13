@@ -1124,6 +1124,59 @@ fn peer_pan_and_levels() {
 }
 
 // ============================================================================
+// 입장 → 연결·첫 소리(P1-20, GOAL 3-6)
+// ============================================================================
+
+/// add_peer 뒤 `connectMs`·`firstAudioMs`가 서고, 연결이 소리보다 먼저다. 한 번 정해진 값은 그대로다(결정적: 임계 ms 없음).
+#[test]
+fn first_audio_and_connect_ms_reported() {
+    let _g = RT_LOCK.lock();
+    let (a, b, _p, _sink_b) = connect_pair(config(128, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
+    let mut got = (None, None);
+    assert!(
+        wait_until(HANG, || {
+            let s = b.stats();
+            let p = &s.peers[0];
+            got = (p.connect_ms, p.first_audio_ms);
+            got.1.is_some()
+        }),
+        "firstAudioMs가 서지 않음: {got:?}"
+    );
+    let (connect, first) = (got.0.expect("connectMs"), got.1.unwrap());
+    assert!(connect >= 0.0 && connect <= first, "연결({connect}ms)이 첫 소리({first}ms)보다 먼저");
+    // A는 무음 장치가 아니라 B의 무음을 받는다: 무음도 실제 오디오다(은닉이 아님)
+    assert!(wait_until(HANG, || a.stats().peers[0].first_audio_ms.is_some()), "A쪽 firstAudioMs가 서지 않음");
+    let again = b.stats().peers[0].clone();
+    assert_eq!((again.connect_ms, again.first_audio_ms), (Some(connect), Some(first)), "한 번 정한 값은 그대로");
+}
+
+/// GOAL 3-6의 로컬 몫: 루프백 직접 연결에서 add_peer → 첫 소리 ≤ 1초.
+#[test]
+#[ignore = "realtime: 결정적 짝 first_audio_and_connect_ms_reported, net::peer::tests::connected_at_is_first_connect_only, engine::peer_media::tests::first_audio_recorded_once_relative_to_add"]
+fn first_audio_local_direct_within_1s() {
+    let _g = RT_LOCK.lock();
+    let t_add = Instant::now();
+    let (_a, b, _p, sink_b) = connect_pair(config(128, 2.5), sine_backend(), FakeBackend::silence(48_000), None);
+    let mut got = (None, None);
+    assert!(
+        wait_until(HANG, || {
+            let s = b.stats();
+            let p = &s.peers[0];
+            got = (p.connect_ms, p.first_audio_ms);
+            got.1.is_some()
+        }),
+        "firstAudioMs가 서지 않음: {got:?}"
+    );
+    // 출력에서 처음 사인(|x| > 0.05)이 나온 시점까지(장치 출력 버퍼만큼 엔진 값보다 늦다)
+    assert!(wait_until(HANG, || sink_b.lock().iter().any(|x| x.abs() > 0.05)), "B 출력에 소리 없음");
+    let heard_wall = t_add.elapsed();
+    let (connect, first) = (got.0.unwrap_or(f32::NAN), got.1.unwrap());
+    println!("P1-20 로컬 직접: connectMs {connect:.1}, firstAudioMs {first:.1}, 테스트 벽시계(시작 포함 → 출력에서 소리 확인) {heard_wall:?}");
+    assert!(first <= 1000.0, "로컬 직접 첫 소리 {first}ms > 1초");
+    assert!(connect <= first);
+}
+
+// ============================================================================
 // 보안(M7 사칭·ssrc 충돌, M8 후보 폭주, M6 경로 고정)
 // ============================================================================
 
@@ -1565,5 +1618,199 @@ fn stats_storm_does_not_disturb_playout() {
     println!("|---|---|---|---|");
     for (name, w) in [("조용함", quiet), ("통계·프로필 폭주 + CPU 포화", storm), ("조용함(다시)", quiet2)] {
         println!("| {name} | {} | {} | {} / {} |", w.0, w.1, w.2, w.3);
+    }
+}
+
+// ============================================================================
+// 송신 경로 폭주 시험(엔진 ③c, ADR D1·engine-stage3-design.md 9절 제안 1): 워커 송신 경로가 기본 우선순위 스레드와
+// 나누는 락(`peers` RwLock·`Peer.conn`·`Peer.echo`) 때문에 기다리는가
+// ============================================================================
+
+/// 루프백 2엔진(a가 b에게 사인을 보낸다)에서 a의 워커 송신 경로를 잰다. 창(10초)마다 조건 하나:
+/// - 조용함: 아무것도 안 함.
+/// - CPU 포화: 코어 수만큼 계산 스레드(락 폭주의 대조군 — 락 없이 선점만).
+/// - 락 폭주 + CPU 포화: 기본 우선순위 스레드 2개가 `add_peer`/`remove_peer`를 쉬지 않고 반복(피어 표 쓰기 락 —
+///   `parking_lot` RwLock은 기다리는 쓰기가 새 읽기를 막는다), 1개가 `set_echo_mode("bob")`를 쉬지 않고 켜고 끈다
+///   (`Peer.echo` 락. bob이 에코를 요청하지 않으므로 반사는 일어나지 않고 송신 결과는 같다), 1개가 `stats()`
+///   (`Peer.conn`·`echo` 락), 그리고 CPU 포화(락을 쥔 채 선점되게).
+///
+/// 유령 피어는 셋째 엔진 c의 descriptor다(c는 a를 피어로 두지 않으므로 연결되지 않고, 경로가 없어 송신 대상이 아니다).
+/// 지표: 워커 송신 한 번당 락 대기(경합 없으면 0 — try 후 시계), 바로 못 잡은 획득 수, `sendQueue.p99Us`(2초 창 5개의
+/// 중앙값·최대), 워커 반복 본문·시작 간격 p99/최대, b가 받는 a 소리의 은닉·마감 채움. 조건마다 3창(A/A 분산).
+/// 판정 없이 표만 낸다(engine-stage3-design.md 10절에 결과를 적는다).
+#[test]
+#[ignore = "측정(realtime): 송신 경로 락 폭주 — cargo test --release --features test-support --test loopback send_path_storm -- --ignored --nocapture"]
+fn send_path_storm_measure() {
+    let _g = RT_LOCK.lock();
+    let (a, b, _p, _sink) = connect_pair(config(128, 2.5), sine_backend(), FakeBackend::silence(48_000), None);
+    let c = Engine::start(config(128, 2.5), Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), Some(("carol".into(), test_net()))).unwrap();
+    let ghost = with_candidate(c.descriptor().unwrap(), local_addr(&c));
+    a.add_peer("ghost-check".into(), &ghost).expect("유령 피어 descriptor가 유효해야 한다");
+    a.remove_peer("ghost-check").unwrap();
+    let (a, b) = (Arc::new(a), Arc::new(b));
+    std::thread::sleep(Duration::from_secs(3));
+
+    // 창 조건: 어느 폭주 스레드를 켤지(피어 표 쓰기, echo 락, 통계, CPU 포화).
+    #[derive(Clone, Copy)]
+    struct Cond {
+        name: &'static str,
+        peers: bool,
+        echo: bool,
+        stats: bool,
+        cpu: bool,
+    }
+    struct Row {
+        cond: &'static str,
+        wait_p50_us: f32,
+        wait_p99_us: f32,
+        wait_max_us: f32,
+        contended: u64,
+        calls: u64,
+        sq_p99_med_us: f32,
+        sq_p99_max_us: f32,
+        sq_max_us: f32,
+        body_p99_us: f32,
+        body_max_us: f32,
+        period_p99_us: f32,
+        period_max_us: f32,
+        b_fills: u64,
+        b_conc: u64,
+        b_prod: u64,
+        ops: u64,
+    }
+    let snap_b = |b: &Engine| {
+        let (fills, _) = b.feed_stats();
+        let js = b.peer_jitter_stats().into_iter().find(|(id, _)| id == "alice").map(|(_, s)| s).unwrap_or_default();
+        (fills, js.concealed, js.produced)
+    };
+    let window = |cond: Cond| -> Row {
+        let stop = Arc::new(AtomicBool::new(false));
+        let ops = Arc::new(AtomicUsize::new(0));
+        let mut th = Vec::new();
+        if cond.peers {
+            for k in 0..2 {
+                let (a, stop, ops, ghost) = (a.clone(), stop.clone(), ops.clone(), ghost.clone());
+                th.push(std::thread::spawn(move || {
+                    let id = format!("ghost{k}");
+                    while !stop.load(Ordering::Relaxed) {
+                        if a.add_peer(id.clone(), &ghost).is_ok() {
+                            let _ = a.remove_peer(&id);
+                            ops.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }));
+            }
+        }
+        if cond.echo {
+            {
+                let (a, stop, ops) = (a.clone(), stop.clone(), ops.clone());
+                th.push(std::thread::spawn(move || {
+                    // 켜기는 bob이 요청하지 않아 에러로 끝나지만 echo 락은 잡는다. 끄기는 락 + Ping 송신(conn 락)까지 간다.
+                    // Ping이 소켓을 채워 송신 지연을 따로 올리지 않게 0.5ms씩 쉰다(초당 약 1~2천 회).
+                    let mut on = true;
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = a.set_echo_mode("bob", on);
+                        on = !on;
+                        ops.fetch_add(1, Ordering::Relaxed);
+                        std::thread::sleep(Duration::from_micros(500));
+                    }
+                    let _ = a.set_echo_mode("bob", false);
+                }));
+            }
+        }
+        if cond.stats {
+            {
+                let (a, stop) = (a.clone(), stop.clone());
+                th.push(std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = a.stats();
+                    }
+                }));
+            }
+        }
+        if cond.cpu {
+            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            for _ in 0..cores {
+                let stop = stop.clone();
+                th.push(std::thread::spawn(move || {
+                    let mut x = 1u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        for _ in 0..10_000 {
+                            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        }
+                        std::hint::black_box(x);
+                    }
+                }));
+            }
+        }
+        // sendQueue는 net 제어 스레드가 2초마다 창을 돌린다: 앞 창(다른 조건)이 섞이지 않게 두 번 돌 때까지 기다린다.
+        std::thread::sleep(Duration::from_millis(4500));
+        let _ = a.take_send_lock_wait();
+        let _ = a.take_worker_timing();
+        let s0 = snap_b(&b);
+        let mut sq = Vec::new();
+        let mut sq_max = 0f32;
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_secs(2));
+            if let Some(q) = a.stats().send_queue {
+                sq.push(q.p99_ms * 1000.0);
+                sq_max = sq_max.max(q.max_ms * 1000.0);
+            }
+        }
+        let lw = a.take_send_lock_wait().unwrap();
+        let (body, period) = a.take_worker_timing();
+        let s1 = snap_b(&b);
+        stop.store(true, Ordering::Relaxed);
+        for t in th {
+            t.join().unwrap();
+        }
+        sq.sort_by(|x, y| x.total_cmp(y));
+        Row {
+            cond: cond.name,
+            wait_p50_us: lw.wait.p50_ms * 1000.0,
+            wait_p99_us: lw.wait.p99_ms * 1000.0,
+            wait_max_us: lw.wait.max_ms * 1000.0,
+            contended: lw.contended,
+            calls: lw.calls,
+            sq_p99_med_us: sq.get(sq.len() / 2).copied().unwrap_or(0.0),
+            sq_p99_max_us: sq.last().copied().unwrap_or(0.0),
+            sq_max_us: sq_max,
+            body_p99_us: body.p99_ms * 1000.0,
+            body_max_us: body.max_ms * 1000.0,
+            period_p99_us: period.p99_ms * 1000.0,
+            period_max_us: period.max_ms * 1000.0,
+            b_fills: s1.0 - s0.0,
+            b_conc: s1.1 - s0.1,
+            b_prod: s1.2 - s0.2,
+            ops: ops.load(Ordering::Relaxed) as u64,
+        }
+    };
+    let c = |name, peers, echo, stats, cpu| Cond { name, peers, echo, stats, cpu };
+    let conds = [
+        c("조용함", false, false, false, false),
+        c("CPU 포화", false, false, false, true),
+        c("락 폭주 전부 + CPU", true, true, true, true),
+        c("피어 추가·제거 + CPU", true, false, false, true),
+        c("echo 토글 + CPU", false, true, false, true),
+        c("stats + CPU", false, false, true, true),
+        c("락 폭주 전부(CPU 없음)", true, true, true, false),
+    ];
+    // 조건마다 몇 창(A/A 분산). 기본 3.
+    let rounds: usize = std::env::var("SEND_STORM_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    let mut rows = Vec::new();
+    for _ in 0..rounds {
+        for cond in conds {
+            rows.push(window(cond));
+        }
+    }
+    rows.sort_by_key(|r| conds.iter().position(|c| c.name == r.cond));
+    println!("| 창(10s, 128 / 2.5ms) | 락 대기/송신 p50·p99·최대 (µs) | 바로 못 잡음 / 송신 수 | sendQueue p99 중앙값·최대, 최대 (µs) | 워커 본문 p99·최대 (µs) | 워커 간격 p99·최대 (µs) | b 마감 채움 | b 은닉 / 생산 | 폭주 연산 수 |");
+    println!("|---|---|---|---|---|---|---|---|---|");
+    for r in &rows {
+        println!(
+            "| {} | {:.1} · {:.1} · {:.0} | {} / {} | {:.0} · {:.0}, {:.0} | {:.0} · {:.0} | {:.0} · {:.0} | {} | {} / {} | {} |",
+            r.cond, r.wait_p50_us, r.wait_p99_us, r.wait_max_us, r.contended, r.calls, r.sq_p99_med_us, r.sq_p99_max_us, r.sq_max_us,
+            r.body_p99_us, r.body_max_us, r.period_p99_us, r.period_max_us, r.b_fills, r.b_conc, r.b_prod, r.ops
+        );
     }
 }

@@ -1,5 +1,6 @@
 import type { MixSettings, PeerInstrument, PeerNetworkStats } from '../state/roomHooks'
 import type { EngineStats, PeerState, PeerStats } from '../../../native/engineApi'
+import type { FirstAudioSummary } from '../../../native/firstAudio'
 import { pathLabel, peerPathHint } from '../../../native/relayLogic'
 import { EngineDiagLines } from './EngineDiagLines'
 import {
@@ -90,11 +91,14 @@ function ChannelControls({
 export function MyMixerChannel({
   myInstrument,
   engineStats,
+  firstAudio = null,
   level,
   rtcError,
 }: {
   myInstrument: string
   engineStats: EngineStats | null
+  /** 연주 시작 → 첫 피어 소리(P1-20) */
+  firstAudio?: FirstAudioSummary | null
   level: number
   rtcError: string | null
 }) {
@@ -109,7 +113,7 @@ export function MyMixerChannel({
           {engineStats ? `${engineStats.sampleRate / 1000}kHz · 버퍼 ${engineStats.deviceBuffer}` : '엔진 상태 확인 중'}
         </span>
         {/* 백엔드·스레드 우선순위·QoS(P1-12b): 실장비 테스트에서 개발자 도구 없이 읽는다 */}
-        {engineStats && <EngineDiagLines stats={engineStats} />}
+        {engineStats && <EngineDiagLines stats={engineStats} firstAudio={firstAudio} />}
         <span className="audio-info">처리 지연 {formatMs(engineStats?.estLatencyMs, 1)} · xrun {engineStats?.xruns ?? 0}</span>
         {engineStats?.cpu && formatCpu(engineStats.cpu) && (
           <span className="audio-info" title={cpuTitle(engineStats.cpu)}>{formatCpu(engineStats.cpu)}</span>
