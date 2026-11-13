@@ -1635,7 +1635,15 @@ fn stats_storm_does_not_disturb_playout() {
 /// - 실제 빈도(#122 리뷰 M2): UI·`band-diag`처럼 `stats()` 1초마다, 입·퇴장처럼 추가·제거 1초마다 + CPU 포화.
 ///
 /// 유령 피어는 셋째 엔진 c의 descriptor다(c는 a를 피어로 두지 않으므로 연결되지 않고, 경로가 없어 송신 대상이 아니다).
-/// 지표: 워커 반복의 남은 락(에코 프로브·메트로놈) 대기, 본문, 본문 − 락 대기(락 밖 비용, #122 M3), 반복 간격,
+/// ②b 조건(engine-stage2b-design.md 4.3절 — ②b-5·②b-6b가 없앨 락의 "전"·"후"):
+/// - 메트로놈 + CPU: a가 b를 기준 피어로 따라 메트로놈을 돌리는 동안 `set_metronome`(두 계획을 번갈아, 쉬지 않고) 1개,
+///   `stats()` 1개, `set_loopback_offset` 0.5ms 간격 1개 + CPU 포화. 두 계획의 기준 피어가 같은 창과 다른 창(계획이
+///   바뀐 반복마다 워커가 `ref_peer_id`를 할당·해제 — 락 대기와 할당자 경합을 가른다)을 따로 잰다.
+/// - 에코 측정 + CPU: a가 b를 에코 측정(20회)하기를 되풀이하는 동안 `stats()` 1개 + CPU 포화. 측정 스레드는 평소대로다.
+///
+/// `SEND_STORM_ONLY`(쉼표로 나눈 조건 이름 일부)를 주면 그 조건만 돈다.
+///
+/// 지표: 워커 반복의 남은 락(에코 프로브·메트로놈) 대기와 그 자리별 횟수·최대, 본문, 본문 − 락 대기(락 밖 비용, #122 M3), 반복 간격,
 /// `sendQueue`(2초 창 p99 5개의 중앙값·최대와 창 최대), 송신 경로 진단(복사본 갱신·옛 복사본 프레임·건너뛴 송신, #122 M1),
 /// b가 받는 a 소리의 마감 채움·은닉, 폭주 연산 수(추가·제거 / echo / stats). 판정 없이 표만 낸다.
 /// 워커 반복 시간은 `test-support` 빌드에서만 기록된다.
@@ -1659,6 +1667,10 @@ fn send_path_storm_measure() {
         echo: Option<u64>,
         stats: Option<u64>,
         cpu: bool,
+        /// 메트로놈 폭주: Some(두 계획의 기준 피어가 같은가).
+        metro: Option<bool>,
+        /// 에코 측정을 되풀이한다.
+        measure: bool,
     }
     struct Row {
         cond: &'static str,
@@ -1677,6 +1689,10 @@ fn send_path_storm_measure() {
         b_conc: u64,
         b_prod: u64,
         ops: (u64, u64, u64),
+        sites: band_lib::engine::report::WorkerLockWaits,
+        /// 메트로놈 계획 변경 / 루프백 보정 변경 / 끝난 에코 측정 수.
+        ops2: (u64, u64, u64),
+        late_clicks: u64,
     }
     fn pause(ms: u64) {
         if ms > 0 {
@@ -1690,8 +1706,61 @@ fn send_path_storm_measure() {
     };
     let window = |cond: Cond| -> Row {
         let stop = Arc::new(AtomicBool::new(false));
-        let ops: Arc<[AtomicUsize; 3]> = Arc::new(Default::default());
+        let ops: Arc<[AtomicUsize; 6]> = Arc::new(Default::default());
         let mut th = Vec::new();
+        if let Some(same_ref) = cond.metro {
+            use band_lib::engine::metronome::MetronomeConfig;
+            let plan = |bpm: f64, follow: bool| MetronomeConfig {
+                running: true,
+                bpm,
+                beats_per_bar: 4,
+                start_us: follow.then(|| b.now_us() + 300_000.0),
+                ref_peer_id: follow.then(|| "bob".to_string()),
+            };
+            a.set_metronome(plan(120.0, true)).unwrap();
+            {
+                let (a, stop, ops) = (a.clone(), stop.clone(), ops.clone());
+                let plans = [plan(120.0, true), plan(121.0, same_ref)];
+                th.push(std::thread::spawn(move || {
+                    let mut i = 0;
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = a.set_metronome(plans[i % 2].clone());
+                        i += 1;
+                        ops[3].fetch_add(1, Ordering::Relaxed);
+                    }
+                }));
+            }
+            let (a, stop, ops) = (a.clone(), stop.clone(), ops.clone());
+            th.push(std::thread::spawn(move || {
+                let mut on = false;
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = a.set_loopback_offset(Some(if on { 1.0 } else { 1.5 }));
+                    on = !on;
+                    ops[4].fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_micros(500));
+                }
+                let _ = a.set_loopback_offset(None);
+            }));
+        }
+        if cond.measure {
+            // b: 사람이 "허용"을 누르는 것(요청이 없으면 에러 — 무시).
+            let (b2, stop2) = (b.clone(), stop.clone());
+            th.push(std::thread::spawn(move || {
+                while !stop2.load(Ordering::Relaxed) {
+                    let _ = b2.set_echo_mode("alice", true);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }));
+            let (a, stop, ops) = (a.clone(), stop.clone(), ops.clone());
+            th.push(std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(job) = a.echo_job("bob") {
+                        let _ = job.run(20, Duration::from_secs(3), &stop);
+                        ops[5].fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
         if let Some(ms) = cond.peers {
             for k in 0..if ms == 0 { 2 } else { 1 } {
                 let (a, stop, ops, ghost) = (a.clone(), stop.clone(), ops.clone(), ghost.clone());
@@ -1756,6 +1825,7 @@ fn send_path_storm_measure() {
         let _ = a.take_send_path_diag();
         let ops0: Vec<usize> = ops.iter().map(|o| o.load(Ordering::Relaxed)).collect();
         let s0 = snap_b(&b);
+        let late0 = a.stats().metronome.late_clicks;
         let mut sq = Vec::new();
         let mut sq_max = 0f32;
         for _ in 0..5 {
@@ -1770,9 +1840,15 @@ fn send_path_storm_measure() {
         let s1 = snap_b(&b);
         let op = |i: usize| (ops[i].load(Ordering::Relaxed) - ops0[i]) as u64;
         let ops_n = (op(0), op(1), op(2));
+        let ops2 = (op(3), op(4), op(5));
+        let late_clicks = a.stats().metronome.late_clicks - late0;
         stop.store(true, Ordering::Relaxed);
         for t in th {
             t.join().unwrap();
+        }
+        if cond.metro.is_some() {
+            use band_lib::engine::metronome::MetronomeConfig;
+            let _ = a.set_metronome(MetronomeConfig { running: false, bpm: 120.0, beats_per_bar: 4, start_us: None, ref_peer_id: None });
         }
         sq.sort_by(|x, y| x.total_cmp(y));
         let us = |q: band_lib::net::txlat::SendQueueStats| (q.p99_ms * 1000.0, q.max_ms * 1000.0);
@@ -1793,10 +1869,13 @@ fn send_path_storm_measure() {
             b_conc: s1.1 - s0.1,
             b_prod: s1.2 - s0.2,
             ops: ops_n,
+            sites: wt.sites,
+            ops2,
+            late_clicks,
         }
     };
-    let c = |name, peers, echo, stats, cpu| Cond { name, peers, echo, stats, cpu };
-    let conds = [
+    let c = |name, peers, echo, stats, cpu| Cond { name, peers, echo, stats, cpu, metro: None, measure: false };
+    let all = [
         c("조용함", None, None, None, false),
         c("CPU 포화", None, None, None, true),
         c("락 폭주 전부 + CPU", Some(0), Some(0), Some(0), true),
@@ -1806,24 +1885,34 @@ fn send_path_storm_measure() {
         c("락 폭주 전부(CPU 없음)", Some(0), Some(0), Some(0), false),
         c("실제 빈도: stats 1s + CPU", None, None, Some(1000), true),
         c("실제 빈도: stats 1s + 추가·제거 1s + CPU", Some(1000), None, Some(1000), true),
+        Cond { metro: Some(true), ..c("메트로놈(같은 기준 피어) + CPU", None, None, Some(0), true) },
+        Cond { metro: Some(false), ..c("메트로놈(기준 피어 바뀜) + CPU", None, None, Some(0), true) },
+        Cond { measure: true, ..c("에코 측정 + CPU", None, None, Some(0), true) },
     ];
+    let only = std::env::var("SEND_STORM_ONLY").unwrap_or_default();
+    let conds: Vec<Cond> = all.into_iter().filter(|c| only.is_empty() || only.split(',').any(|o| c.name.contains(o.trim()))).collect();
     // 조건마다 몇 창(A/A 분산). 기본 3.
     let rounds: usize = std::env::var("SEND_STORM_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let mut rows = Vec::new();
     for _ in 0..rounds {
-        for cond in conds {
-            rows.push(window(cond));
+        for cond in &conds {
+            rows.push(window(*cond));
         }
     }
     rows.sort_by_key(|r| conds.iter().position(|c| c.name == r.cond));
-    println!("| 창(10s, 128 / 2.5ms) | 남은 락 대기/반복 p99·최대 (µs) | 본문 p99·최대 (µs) | 본문−락 최대 (µs) | 간격 p99·최대 (µs) | sendQueue p99 중앙값·최대, 최대 (µs) | 복사본 갱신 / 옛 복사본 프레임 / 건너뜀 | b 마감 채움 | b 은닉 / 생산 | 연산(추가·제거 / echo / stats) |");
-    println!("|---|---|---|---|---|---|---|---|---|---|");
+    println!("| 창(10s, 128 / 2.5ms) | 남은 락 대기/반복 p99·최대 (µs) | 본문 p99·최대 (µs) | 본문−락 최대 (µs) | 간격 p99·최대 (µs) | sendQueue p99 중앙값·최대, 최대 (µs) | 복사본 갱신 / 옛 복사본 프레임 / 건너뜀 | b 마감 채움 | b 은닉 / 생산 | 연산(추가·제거 / echo / stats) | 락 자리별 대기 횟수·최대µs(프로브 송신 / 프로브 공급 / 계획 / 보정 / 상태 / 피어 시계) | 늦은 클릭 | 연산(계획 / 보정 / 에코 측정) |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
         println!(
-            "| {} | {:.1} · {:.0} | {:.0} · {:.0} | {:.0} | {:.0} · {:.0} | {:.0} · {:.0}, {:.0} | {} / {} / {} | {} | {} / {} | {} / {} / {} |",
+            "| {} | {:.1} · {:.0} | {:.0} · {:.0} | {:.0} | {:.0} · {:.0} | {:.0} · {:.0}, {:.0} | {} / {} / {} | {} | {} / {} | {} / {} / {} | {} | {} | {} / {} / {} |",
             r.cond, r.lock_p99_us, r.lock_max_us, r.body_p99_us, r.body_max_us, r.unlocked_max_us, r.period_p99_us, r.period_max_us,
             r.sq_p99_med_us, r.sq_p99_max_us, r.sq_max_us, r.diag.copy_refreshes, r.diag.stale_copy_frames, r.diag.route_skips,
-            r.b_fills, r.b_conc, r.b_prod, r.ops.0, r.ops.1, r.ops.2
+            r.b_fills, r.b_conc, r.b_prod, r.ops.0, r.ops.1, r.ops.2,
+            {
+                let s = &r.sites;
+                [s.probe_send, s.probe_feed, s.metro_plan, s.metro_offset, s.metro_stats, s.peer_clock].map(|w| format!("{}·{}", w.contended, w.max_us)).join(" / ")
+            },
+            r.late_clicks, r.ops2.0, r.ops2.1, r.ops2.2
         );
     }
 }

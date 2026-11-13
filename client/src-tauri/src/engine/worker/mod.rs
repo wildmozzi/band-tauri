@@ -84,6 +84,25 @@ pub struct WorkerStats {
     /// 반복마다 남은 락(에코 프로브·메트로놈)에서 기다린 합과, 본문에서 그것을 뺀 값(락 밖 비용, #122 리뷰 M3).
     pub iter_lock_wait: crate::net::txlat::SendLatency,
     pub iter_unlocked: crate::net::txlat::SendLatency,
+    /// 남은 락을 자리별로(엔진 ②b 측정, 설계 4.3절): 기다린 횟수·합·최대. ②b-5·②b-6b가 없앨 락들이다.
+    pub lock_sites: WorkerLockSites,
+}
+
+/// 워커가 기본 우선순위 스레드와 나누는 남은 락의 자리별 대기 기록(진단 전용, `Engine::take_worker_timing`).
+#[derive(Debug, Default)]
+pub struct WorkerLockSites {
+    /// 에코 프로브 락 — 캡처 프레임마다(클릭 프레임 생성).
+    pub probe_send: crate::net::txlat::LockSite,
+    /// 에코 프로브 락 — 반복마다, 전 피어 공급 동안 쥔다(재생 시각 탭).
+    pub probe_feed: crate::net::txlat::LockSite,
+    /// 메트로놈 계획 락 — 반복마다.
+    pub metro_plan: crate::net::txlat::LockSite,
+    /// 메트로놈 루프백 보정 락 — 반복마다.
+    pub metro_offset: crate::net::txlat::LockSite,
+    /// 메트로놈 상태 보고 락 — 100ms마다.
+    pub metro_stats: crate::net::txlat::LockSite,
+    /// 기준 피어 시계 조회의 피어 표 읽기 락 — 기준 피어를 따르는 동안 반복마다.
+    pub peer_clock: crate::net::txlat::LockSite,
 }
 
 /// 워커 반복 시간 분포 기록(엔진 ③c 측정, #122 리뷰 Low): 측정 빌드(`test-support`)에서만. 출시 빌드는 시계를 더 읽지 않는다.
@@ -502,7 +521,7 @@ impl Worker {
     /// 에코 측정 대상 피어용 프레임(무음 + 클릭)을 만들어 인코드한다. 반환: (피어 id, 페이로드 길이).
     fn probe_frame(&mut self) -> Option<(String, usize)> {
         let now_us = self.p.epoch.elapsed().as_secs_f64() * 1e6;
-        let mut g = self.lock_wait.lock(&self.p.probe);
+        let mut g = self.lock_wait.lock(&self.p.probe, &self.p.stats.lock_sites.probe_send);
         let Some(pr) = g.as_mut() else {
             self.alt_encoder = None;
             return None;
@@ -699,14 +718,14 @@ impl Worker {
             return; // 콜백 도중: 재생 카운터와 시각이 어긋날 수 있다
         }
         {
-            let p = self.lock_wait.lock(&self.p.metronome.plan);
+            let p = self.lock_wait.lock(&self.p.metronome.plan, &self.p.stats.lock_sites.metro_plan);
             if p.0 != self.metro_plan.0 {
                 self.metro_plan = p.clone();
             }
         }
         let (gen, plan) = (self.metro_plan.0, &self.metro_plan.1);
         let est = match (&plan.ref_peer_id, self.p.net.as_ref()) {
-            (Some(id), Some(net)) if plan.running => net.peer_clock(id, t.wall_us),
+            (Some(id), Some(net)) if plan.running => net.peer_clock_timed(id, t.wall_us, &mut self.lock_wait, &self.p.stats.lock_sites.peer_clock),
             _ => None,
         };
         let offset = match &plan.ref_peer_id {
@@ -717,7 +736,7 @@ impl Worker {
         let info = &self.p.info;
         let driver = hidden_out_latency_us(info.out_reported_latency_frames, t.out_burst as u64, rate);
         // 드라이버가 출력 지연을 알려 주지 않으면 루프백 보정값으로(PR #34 M2(a)). 입력 쪽 보고가 있으면 그만큼 뺀다.
-        let loopback = (*self.lock_wait.lock(&self.p.metronome.loopback_offset_ms)).map(|o| {
+        let loopback = (*self.lock_wait.lock(&self.p.metronome.loopback_offset_ms, &self.p.stats.lock_sites.metro_offset)).map(|o| {
             let in_burst = match self.p.counters.in_cb_frames.load(Ordering::Relaxed) {
                 0 => info.buffer_frames,
                 n => n,
@@ -731,7 +750,7 @@ impl Worker {
         if t.wall_us.saturating_sub(self.metro_stats_at) >= 100_000 || gen != self.metro_stats_gen {
             self.metro_stats_at = t.wall_us;
             self.metro_stats_gen = gen;
-            let mut s = self.lock_wait.lock(&self.p.metronome.stats);
+            let mut s = self.lock_wait.lock(&self.p.metronome.stats, &self.p.stats.lock_sites.metro_stats);
             s.running = plan.running;
             s.synced = offset.is_some();
             s.bpm = plan.bpm;
@@ -745,7 +764,7 @@ impl Worker {
             s.output_latency_ms = hidden.map(|h| h.0 / 1000.0);
             s.output_latency_source = hidden.map(|h| h.1);
             s.ref_clock_unsupported = match (&plan.ref_peer_id, self.p.net.as_ref()) {
-                (Some(id), Some(net)) if plan.running && est.is_none() => net.peer_clock_unsupported(id),
+                (Some(id), Some(net)) if plan.running && est.is_none() => net.peer_clock_unsupported_timed(id, &mut self.lock_wait, &self.p.stats.lock_sites.peer_clock),
                 _ => false,
             };
             s.clock_extrapolation_ms = est.map(|e| e.extrapolation_us / 1000.0);
@@ -808,7 +827,7 @@ impl Worker {
         let consistent = move || cb_seq.is_some_and(|s| counters.out_cb_begin.load(Ordering::SeqCst) == s);
         let (mut fills, mut skipped, mut urgent) = (0u64, 0u64, false);
         let probe = self.p.probe.clone();
-        let mut guard = self.lock_wait.lock(&probe);
+        let mut guard = self.lock_wait.lock(&probe, &self.p.stats.lock_sites.probe_feed);
         let mut tap = guard.as_mut().filter(|p| p.tap);
         let marks = self.p.rec_marks.clone();
         let marking = marks.active();

@@ -22,6 +22,19 @@ pub struct WorkerTiming {
     pub lock_wait: crate::net::txlat::SendQueueStats,
     /// 본문 − 락 대기(락 밖 비용).
     pub unlocked: crate::net::txlat::SendQueueStats,
+    /// 남은 락의 자리별 대기(엔진 ②b 측정): 에코 프로브(송신·공급), 메트로놈 계획·루프백 보정·상태 보고, 기준 피어 시계의 피어 표.
+    pub sites: WorkerLockWaits,
+}
+
+/// `WorkerTiming.sites`: 워커가 자리별로 기다린 횟수·합·최대(지난 `take_worker_timing` 이후).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorkerLockWaits {
+    pub probe_send: crate::net::txlat::LockSiteWait,
+    pub probe_feed: crate::net::txlat::LockSiteWait,
+    pub metro_plan: crate::net::txlat::LockSiteWait,
+    pub metro_offset: crate::net::txlat::LockSiteWait,
+    pub metro_stats: crate::net::txlat::LockSiteWait,
+    pub peer_clock: crate::net::txlat::LockSiteWait,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -317,7 +330,16 @@ impl Engine {
     #[doc(hidden)]
     pub fn take_worker_timing(&self) -> WorkerTiming {
         let s = &self.worker_stats;
-        WorkerTiming { body: s.iter_body.rotate(), period: s.iter_period.rotate(), lock_wait: s.iter_lock_wait.rotate(), unlocked: s.iter_unlocked.rotate() }
+        let l = &s.lock_sites;
+        let sites = WorkerLockWaits {
+            probe_send: l.probe_send.take(),
+            probe_feed: l.probe_feed.take(),
+            metro_plan: l.metro_plan.take(),
+            metro_offset: l.metro_offset.take(),
+            metro_stats: l.metro_stats.take(),
+            peer_clock: l.peer_clock.take(),
+        };
+        WorkerTiming { body: s.iter_body.rotate(), period: s.iter_period.rotate(), lock_wait: s.iter_lock_wait.rotate(), unlocked: s.iter_unlocked.rotate(), sites }
     }
 
     /// 송신 경로 진단(피어 표 복사본 갱신·옛 복사본 프레임·건너뛴 송신)을 지난 호출 이후로 돌려주고 비운다(엔진 ③c).
