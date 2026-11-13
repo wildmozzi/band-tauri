@@ -242,10 +242,7 @@ pub struct InputRt {
     measure: Option<MeasureIn>,
 }
 
-/// 출력 소스 슬롯 수: 0 = 로컬(모니터), 1.. = 피어(원격 최대 5명 + 교체 중인 슬롯 여유).
-pub const MAX_SOURCES: usize = 8;
-/// 로컬 입력(모니터) 소스 슬롯.
-pub const LOCAL_SOURCE: usize = 0;
+pub use super::config::{LOCAL_SOURCE, MAX_SOURCES};
 /// 소스 링 용량(장치 레이트 스테레오 샘플): 192kHz에서 0.1초.
 pub const SOURCE_RING_CAPACITY: usize = 192_000 / 10 * 2;
 /// 믹스 탭 링 용량(장치 레이트 스테레오 샘플): 192kHz에서 0.5초.
@@ -316,7 +313,7 @@ pub struct OutputRt {
     /// 공유 메트로놈 클릭(P2-3). 장치 출력에만 섞고 믹스 탭에는 넣지 않는다.
     click: Option<super::metronome::ClickRt>,
     /// 합주 녹음 핸드오프(P2-4). 녹음 중일 때만 소스별 샘플(게인 전)과 믹스를 녹음 링에 넣는다.
-    rec: Option<super::record::RecordPortRt>,
+    rec: Option<super::record::rt_ring::RecordPortRt>,
 }
 
 /// 입력 링(입력 콜백 → 워커).
@@ -364,7 +361,7 @@ impl OutputRt {
     }
 
     /// 녹음 핸드오프 끝점을 붙인다(엔진 시작 시, 장치를 열기 전).
-    pub fn attach_record(&mut self, r: super::record::RecordPortRt) {
+    pub fn attach_record(&mut self, r: super::record::rt_ring::RecordPortRt) {
         self.rec = Some(r);
     }
 }
