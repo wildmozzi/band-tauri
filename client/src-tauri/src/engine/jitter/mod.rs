@@ -134,6 +134,8 @@ pub struct JitterBuffer {
     highest: u32,
 
     decoder: Option<Decoder>,
+    /// 재시작에서 거둔 디코더(상태 초기화됨). `ensure_decoder`가 같은 종류면 새로 만들지 않고 쓴다(엔진 ③c, 할당 없음).
+    spare_decoder: Option<Decoder>,
     /// 디코드된 스테레오 인터리브 샘플 FIFO.
     fifo: VecDeque<f32>,
     /// FIFO 끝 샘플 다음 위치의 타임스탬프(확장).
@@ -258,28 +260,105 @@ fn seq_diff(a: u32, b: u32) -> i32 {
     a.wrapping_sub(b) as i32
 }
 
+/// 지터 버퍼의 힙 버퍼 묶음. `new`는 새로 할당하고, `restart`는 지금 것을 꺼내 처음 상태로 되돌려 다시 쓴다
+/// (엔진 ③c: 재시작은 워커에서 적용되므로 할당·해제가 없어야 한다). 필드 초기값은 `from_buffers` 한 곳에만 있다.
+struct Buffers {
+    slots: Vec<Slot>,
+    spare_decoder: Option<Decoder>,
+    fifo: VecDeque<f32>,
+    scratch: Vec<i64>,
+    block_rel: Vec<i64>,
+    corr_ring: RateRing,
+    last_frame: Vec<f32>,
+    dec_buf: Vec<f32>,
+    shift_buf: Vec<f32>,
+    xfade_buf: Vec<f32>,
+    loss: RateRing,
+    conceal: RateRing,
+}
+
+impl Buffers {
+    fn alloc() -> Self {
+        Self {
+            slots: (0..SLOT_COUNT)
+                .map(|_| Slot { seq: 0, valid: false, len: 0, flags: 0, frame: 0, ts: 0, data: vec![0u8; MAX_PAYLOAD_BYTES].into_boxed_slice() })
+                .collect(),
+            spare_decoder: None,
+            fifo: VecDeque::with_capacity(MAX_PKT_FRAME * 16 * 2),
+            scratch: Vec::with_capacity(DELAY_WINDOW),
+            block_rel: Vec::with_capacity(BLOCK_SAMPLES_MAX),
+            corr_ring: RateRing::new(LOSS_WINDOW_MAX),
+            last_frame: vec![0.0; MAX_PKT_FRAME * 2],
+            dec_buf: vec![0.0; MAX_PKT_FRAME * 2],
+            shift_buf: vec![0.0; (MAX_PKT_FRAME + 4) * 2],
+            xfade_buf: vec![0.0; MAX_PKT_FRAME * 2],
+            loss: RateRing::new(LOSS_WINDOW_MAX),
+            conceal: RateRing::new(LOSS_WINDOW_MAX),
+        }
+    }
+
+    /// `jb`의 버퍼를 꺼내 `alloc()`과 같은 내용으로 되돌린다(할당·해제 없음 — 빈 `Vec`/`RateRing`은 할당하지 않는다).
+    /// 슬롯 `data`는 지우지 않는다: 읽는 곳은 모두 쓴 길이 `[..len]`까지이고(`insert`가 먼저 쓴다) `len`·`valid`를 0으로 돌린다.
+    /// 디코더는 상태를 초기화해 예비로 둔다(`ensure_decoder`가 같은 종류면 새로 만들지 않고 쓴다). 재시작 직후 `decoder`는
+    /// `new`처럼 비어 있으므로 첫 디코드 전까지의 동작(디코더 PLC 없음)이 새 버퍼와 같다.
+    fn reclaim(jb: &mut JitterBuffer) -> Self {
+        let mut slots = std::mem::take(&mut jb.slots);
+        for s in &mut slots {
+            (s.seq, s.valid, s.len, s.flags, s.frame, s.ts) = (0, false, 0, 0, 0, 0);
+        }
+        let mut spare_decoder = jb.decoder.take().or_else(|| jb.spare_decoder.take());
+        if let Some(d) = spare_decoder.as_mut() {
+            d.reset();
+        }
+        let mut fifo = std::mem::take(&mut jb.fifo);
+        fifo.clear();
+        let mut scratch = std::mem::take(&mut jb.scratch);
+        scratch.clear();
+        let mut block_rel = std::mem::take(&mut jb.block_rel);
+        block_rel.clear();
+        let zeroed = |v: &mut Vec<f32>| {
+            let mut v = std::mem::take(v);
+            v.fill(0.0);
+            v
+        };
+        let reset = |r: &mut RateRing| {
+            let mut r = std::mem::replace(r, RateRing::new(0));
+            r.reset();
+            r
+        };
+        Self {
+            slots,
+            spare_decoder,
+            fifo,
+            scratch,
+            block_rel,
+            corr_ring: reset(&mut jb.corr_ring),
+            last_frame: zeroed(&mut jb.last_frame),
+            dec_buf: zeroed(&mut jb.dec_buf),
+            shift_buf: zeroed(&mut jb.shift_buf),
+            xfade_buf: zeroed(&mut jb.xfade_buf),
+            loss: reset(&mut jb.loss),
+            conceal: reset(&mut jb.conceal),
+        }
+    }
+}
+
 impl JitterBuffer {
     pub fn new(settings: JitterSettings) -> Self {
-        let slots = (0..SLOT_COUNT)
-            .map(|_| Slot {
-                seq: 0,
-                valid: false,
-                len: 0,
-                flags: 0,
-                frame: 0,
-                ts: 0,
-                data: vec![0u8; MAX_PAYLOAD_BYTES].into_boxed_slice(),
-            })
-            .collect();
+        Self::from_buffers(settings, Buffers::alloc())
+    }
+
+    fn from_buffers(settings: JitterSettings, b: Buffers) -> Self {
         Self {
             settings,
-            slots,
+            slots: b.slots,
             state: State::Buffering,
             next_seq: 0,
             has_stream: false,
             highest: 0,
             decoder: None,
-            fifo: VecDeque::with_capacity(MAX_PKT_FRAME * 16 * 2),
+            spare_decoder: b.spare_decoder,
+            fifo: b.fifo,
             fifo_end_ts: 0,
             have_ts: false,
             last_ts: 0,
@@ -288,7 +367,7 @@ impl JitterBuffer {
             transit_count: 0,
             transit_pos: 0,
             since_stats: 0,
-            scratch: Vec::with_capacity(DELAY_WINDOW),
+            scratch: b.scratch,
             min_transit: 0,
             q_rel: 0.0,
             q99_rel: 0.0,
@@ -301,7 +380,7 @@ impl JitterBuffer {
             burst_at_us: 0,
             recent_rel: [0; BURST_WIN],
             recent_pos: 0,
-            block_rel: Vec::with_capacity(BLOCK_SAMPLES_MAX),
+            block_rel: b.block_rel,
             block_start_us: None,
             block_q: [0.0; LONG_BLOCKS_MAX],
             block_pos: 0,
@@ -316,25 +395,25 @@ impl JitterBuffer {
             drop_frames_pending: 0,
             trimming: false,
             shifter: RateShifter::default(),
-            corr_ring: RateRing::new(LOSS_WINDOW_MAX),
+            corr_ring: b.corr_ring,
             max_corr_cents: 0.0,
             wall_bucket_start: 0,
             wall_cur_min: f64::INFINITY,
             wall_prev_min: f64::INFINITY,
             pkt_frame: 240,
             pkt_channels: 1,
-            last_frame: vec![0.0; MAX_PKT_FRAME * 2],
+            last_frame: b.last_frame,
             last_frame_valid: false,
             conceal_run: 0,
             starve_samples: 0,
             underrun_debt: 0,
-            dec_buf: vec![0.0; MAX_PKT_FRAME * 2],
-            shift_buf: vec![0.0; (MAX_PKT_FRAME + 4) * 2],
-            xfade_buf: vec![0.0; MAX_PKT_FRAME * 2],
+            dec_buf: b.dec_buf,
+            shift_buf: b.shift_buf,
+            xfade_buf: b.xfade_buf,
             xfade_len: 0,
             xfade_ch: 0,
-            loss: RateRing::new(LOSS_WINDOW_MAX),
-            conceal: RateRing::new(LOSS_WINDOW_MAX),
+            loss: b.loss,
+            conceal: b.conceal,
             start_pad: 0.0,
             start_pad_until_us: 0,
             path_reset_until_us: 0,
@@ -391,7 +470,9 @@ impl JitterBuffer {
     /// 바뀔 때(에코 측정 시작/끝: 상대 오디오 ↔ 되돌아온 내 오디오) 이전 도착 시각 분포를 섞지 않으려고 쓴다.
     pub fn restart(&mut self) {
         let stats = self.stats;
-        *self = Self::new(self.settings);
+        // 버퍼를 꺼내 처음 상태로 되돌려 다시 쓴다(엔진 ③c — 워커에서 적용되므로 할당·해제 0, `tests/rt_alloc.rs`).
+        let buffers = Buffers::reclaim(self);
+        *self = Self::from_buffers(self.settings, buffers);
         self.stats = stats;
     }
 

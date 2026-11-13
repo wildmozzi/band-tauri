@@ -170,3 +170,61 @@ fn rt_callbacks_do_not_allocate() {
     let w = counters.rt_timing.take(std::time::Duration::from_secs(1));
     assert_eq!(w.callbacks, 80, "실행시간 기록 경로: {w:?}");
 }
+
+/// 엔진 ③c: 지터 버퍼 `restart`는 워커 반복에서 적용되므로 할당·해제가 없어야 한다(이전에는 `Self::new`로 ≈1.19MB
+/// 할당 + 옛 버퍼 해제). 버퍼를 Opus·PCM 스트림으로 채워 디코더·FIFO·슬롯이 모두 쓰인 뒤 잰다. 재시작 뒤 같은 코덱의
+/// 첫 디코드도 예비 디코더를 다시 쓰므로 할당하지 않는다.
+#[test]
+fn jitter_restart_does_not_allocate() {
+    use band_lib::engine::codec::Encoder;
+    use band_lib::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
+    use band_lib::engine::jitter::{JitterBuffer, JitterSettings};
+    use band_lib::net::packet::{Header, PacketType, FLAG_OPUS};
+
+    for codec in [CodecKind::Opus, CodecKind::Pcm16] {
+        let opus = codec == CodecKind::Opus;
+        let mut enc = Encoder::new(codec, 1, 96_000).unwrap();
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+        let pcm: Vec<f32> = (0..240).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        let mut payload = vec![0u8; MAX_PAYLOAD_BYTES];
+        let mut out = vec![0f32; 480];
+        let mut seq = 0u32;
+        let mut feed = |jb: &mut JitterBuffer, ticks: u64, t0: u64, payload: &mut Vec<u8>, out: &mut Vec<f32>| {
+            for k in 0..ticks {
+                let n = enc.encode(&pcm, payload).unwrap();
+                let h = Header {
+                    ptype: PacketType::Audio,
+                    ssrc: 1,
+                    seq,
+                    timestamp: seq.wrapping_mul(240),
+                    flags: if opus { FLAG_OPUS } else { 0 },
+                    frame_code: frame_code_from_samples(240).unwrap(),
+                };
+                seq += 1;
+                let t = t0 + k * 5000;
+                jb.insert(&h, &payload[..n], t);
+                jb.pop(out);
+                jb.end_burst(t, t, 0.0);
+            }
+        };
+        feed(&mut jb, 200, 0, &mut payload, &mut out);
+        assert!(jb.is_playing(), "{codec:?}");
+        let n = rt_allocs(|| jb.restart());
+        assert_eq!(n, 0, "{codec:?}: restart가 할당·해제를 했다");
+        // 재시작 직후 같은 코덱 스트림: 예비 디코더 재사용 — 삽입·재생 경로도 할당 0(인코드는 표시 구간 밖)
+        let mut allocs = 0;
+        for k in 0..100u64 {
+            let n = enc.encode(&pcm, &mut payload).unwrap();
+            let h = Header { ptype: PacketType::Audio, ssrc: 1, seq, timestamp: seq.wrapping_mul(240), flags: if opus { FLAG_OPUS } else { 0 }, frame_code: frame_code_from_samples(240).unwrap() };
+            seq += 1;
+            let t = 10_000_000 + k * 5000;
+            allocs += rt_allocs(|| {
+                jb.insert(&h, &payload[..n], t);
+                jb.pop(&mut out);
+                jb.end_burst(t, t, 0.0);
+            });
+        }
+        assert!(jb.is_playing(), "{codec:?}");
+        assert_eq!(allocs, 0, "{codec:?}: 재시작 뒤 첫 디코드가 디코더를 새로 만들었다");
+    }
+}

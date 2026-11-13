@@ -662,21 +662,156 @@ fn forbidden_edges_absent() {
     assert!(bad.is_empty(), "금지 간선(FORBIDDEN) — net은 미디어 상태를 직접 쓰지 않는다:\n{}", bad.join("\n"));
 }
 
-/// 지터 버퍼를 락으로 감싸지 않는다(엔진 ③-a3): `JitterBuffer`를 만지는 스레드는 워커뿐이다(생성·해제는 제어 평면).
-/// 누가 다시 넣으면 기본 우선순위 스레드와 워커의 우선순위 역전 경로가 돌아온다. 주석·문자열은 보지 않는다.
-#[test]
-fn no_locked_jitter_buffer() {
-    let mut bad = Vec::new();
-    for (file, _) in source_files() {
-        let src = std::fs::read_to_string(&file).unwrap();
-        let code: String = strip(without_unit_tests(&src)).chars().filter(|c| !c.is_whitespace()).collect();
-        for lock in ["Mutex<JitterBuffer>", "RwLock<JitterBuffer>", "Mutex<jitter::JitterBuffer>", "RwLock<jitter::JitterBuffer>"] {
-            if code.contains(lock) {
-                bad.push(format!("  {}: {lock}", file.display()));
+/// 워커 단독 소유 미디어 상태 타입(엔진 ③). 락 안에 들어가면 안 된다. `PeerMediaShared`(원자값만)는 다른 이름이라 해당 없음.
+const WORKER_OWNED: &[&str] = &["JitterBuffer", "PeerMedia"];
+/// 락 타입 이름(`parking_lot`·`std` 모두 같은 이름).
+const LOCK_TYPES: &[&str] = &["Mutex", "RwLock", "ReentrantMutex", "FairMutex"];
+/// SPSC 링 끝점: 그 안의 값은 공유가 아니라 소유 이전이다(예: 제어 평면의 반환 큐 `Mutex<HeapCons<Box<PeerMedia>>>` — 워커는
+/// 생산 끝만 갖고 소비 끝을 잡지 않는다). 락 인자가 이것을 거쳐 이름에 닿으면 세지 않는다.
+const QUEUE_ENDPOINTS: &[&str] = &["HeapCons", "HeapProd", "CachingCons", "CachingProd"];
+
+/// 식별자와 구두점 한 글자씩으로 자른다(공백 무시). 경로(`a::b::C`)는 `a` `:` `:` `b` … 로 나온다.
+fn tokens(code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in code.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            cur.push(ch);
+            continue;
+        }
+        if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !ch.is_whitespace() {
+            out.push(ch.to_string());
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// `names`를 가리키는 별칭을 `names`에 더한다: `type X = …name…;`, `use …::name as X;`. 한 번에 한 단계씩, 더 늘지 않을 때까지.
+fn add_aliases(files: &[Vec<String>], names: &mut BTreeSet<String>) {
+    loop {
+        let before = names.len();
+        for t in files {
+            for i in 0..t.len() {
+                if t[i] == "type" && i + 2 < t.len() {
+                    let alias = &t[i + 1];
+                    if let Some(end) = t[i..].iter().position(|x| x == ";") {
+                        let rhs = &t[i + 2..i + end];
+                        if rhs.iter().any(|x| names.contains(x)) {
+                            names.insert(alias.clone());
+                        }
+                    }
+                }
+                if t[i] == "as" && i > 0 && i + 1 < t.len() && names.contains(&t[i - 1]) {
+                    names.insert(t[i + 1].clone());
+                }
+            }
+        }
+        if names.len() == before {
+            return;
+        }
+    }
+}
+
+/// 락 타입 인자(`Mutex<…>`·`Mutex::<…>`, 경로 한정 포함)에 `names`가 나오는 곳.
+fn locked_names(t: &[String], names: &BTreeSet<String>) -> Vec<String> {
+    let mut hits = Vec::new();
+    for i in 0..t.len() {
+        if !LOCK_TYPES.contains(&t[i].as_str()) {
+            continue;
+        }
+        let mut j = i + 1;
+        if t.get(j).map(String::as_str) == Some(":") && t.get(j + 1).map(String::as_str) == Some(":") {
+            j += 2;
+        }
+        if t.get(j).map(String::as_str) != Some("<") {
+            continue;
+        }
+        let mut depth = 0;
+        for k in j..t.len() {
+            match t[k].as_str() {
+                "<" => depth += 1,
+                ">" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                ";" | "{" => break,
+                x if QUEUE_ENDPOINTS.contains(&x) => break,
+                x if names.contains(x) => hits.push(format!("{}<…{x}…>", t[i])),
+                _ => {}
             }
         }
     }
-    assert!(bad.is_empty(), "지터 버퍼를 락으로 감쌌다(엔진 ③, engine-stage3-design.md 7.1절):\n{}", bad.join("\n"));
+    hits
+}
+
+fn worker_owned_names() -> BTreeSet<String> {
+    WORKER_OWNED.iter().map(|s| s.to_string()).collect()
+}
+
+/// 지터 버퍼·피어 미디어를 락으로 감싸지 않는다(엔진 ③-a3): `JitterBuffer`·`PeerMedia`를 만지는 스레드는 워커뿐이다
+/// (생성·해제는 제어 평면). 누가 다시 넣으면 기본 우선순위 스레드와 워커의 우선순위 역전 경로가 돌아온다.
+/// 경로 한정(`crate::engine::jitter::JitterBuffer`), 별칭(`type`·`use … as`, 파일을 넘어서도), 중첩(`Arc<Mutex<Box<PeerMedia>>>`)을
+/// 잡는다(#118 리뷰 L-1). 주석·문자열·단위 테스트는 보지 않는다. 검사기 자체의 음성 확인은 `locked_media_scanner_catches_variants`.
+#[test]
+fn no_locked_jitter_buffer() {
+    let files: Vec<(PathBuf, Vec<String>)> = source_files()
+        .into_iter()
+        .map(|(f, _)| {
+            let src = std::fs::read_to_string(&f).unwrap();
+            let t = tokens(&strip(without_unit_tests(&src)));
+            (f, t)
+        })
+        .collect();
+    let mut names = worker_owned_names();
+    add_aliases(&files.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>(), &mut names);
+    let mut bad = Vec::new();
+    for (file, t) in &files {
+        for h in locked_names(t, &names) {
+            bad.push(format!("  {}: {h}", file.display()));
+        }
+    }
+    assert!(bad.is_empty(), "워커 단독 소유 미디어 상태를 락으로 감쌌다(엔진 ③, engine-stage3-design.md 7.1절):\n{}", bad.join("\n"));
+}
+
+/// 검사기 음성 확인(#118 리뷰 L-1의 표): 잡아야 할 것은 잡고, 원자값 공유 상태(`PeerMediaShared`)는 통과시킨다.
+#[test]
+fn locked_media_scanner_catches_variants() {
+    let scan = |code: &str| {
+        let t = tokens(&strip(code));
+        let mut names = worker_owned_names();
+        add_aliases(std::slice::from_ref(&t), &mut names);
+        locked_names(&t, &names)
+    };
+    for bad in [
+        "struct A { j: parking_lot::Mutex<JitterBuffer> }",
+        "struct A { j: parking_lot::Mutex<crate::engine::jitter::JitterBuffer> }",
+        "struct A { m: Arc<parking_lot::Mutex<PeerMedia>> }",
+        "struct A { m: Mutex<Vec<Box<PeerMedia>>> }",
+        "type Jb = JitterBuffer; struct A { j: Mutex<Jb> }",
+        "type Jb = jitter::JitterBuffer; type Jb2 = Jb; struct A { j: RwLock<Option<Jb2>> }",
+        "use crate::engine::jitter::JitterBuffer as Jb; struct A { j: std::sync::RwLock<Jb> }",
+        "fn f() { let m = Mutex::<PeerMedia>::new(x); }",
+    ] {
+        assert!(!scan(bad).is_empty(), "못 잡음: {bad}");
+    }
+    for ok in [
+        "struct E { media: Mutex<Vec<Arc<PeerMediaShared>>> }",
+        "struct W { media: Vec<Box<PeerMedia>>, jb: JitterBuffer }",
+        "// Mutex<JitterBuffer>\nstruct A;",
+        "fn f() { log(\"Mutex<PeerMedia>\"); }",
+        "struct A { m: Mutex<u32> } fn g(p: &PeerMedia) {}",
+        "struct P { ret: Mutex<HeapCons<Box<PeerMedia>>> }",
+    ] {
+        assert!(scan(ok).is_empty(), "잘못 잡음: {ok} → {:?}", scan(ok));
+    }
 }
 
 #[test]
