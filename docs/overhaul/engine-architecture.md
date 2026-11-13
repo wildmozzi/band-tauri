@@ -181,8 +181,6 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 |---|---|---|
 | `engine::mixer` → `engine::metronome` | 기본 클릭 게인 상수. metronome 혼합 파일 | ⑥ |
 | `engine::device` ↔ `engine::wasapi` | 공용 타입(`StreamInfo`·`DeviceInfo`)과 백엔드 선택이 한 파일 | ⑥ |
-| ~~`engine::rt` ↔ `engine::record`~~ | (⑥-1에서 해소: rt는 `record::rt_ring`만 쓰고, 소스 상수는 `engine::config`로) | ⑥-1 완료 |
-| `manager` ↔ `diag`, `diag::export` → `manager` | diag가 수집 대상(`EngineManager`)을 직접 앎 | ⑤ |
 | `commands` → `net::relay`(`resolve_relay_addr` DNS 해석), `commands` → `engine::mixer`(`clamp_gain`) | 어댑터에 로직 | ⑦ |
 
 간선 그래프에 안 보이는 어긋남:
@@ -272,7 +270,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 4 | ④ | 이동 | 컴파일 결합을 먼저 끊는다(싸다): `stats.rs`를 원자 카운터와 보고 DTO로, `Engine::stats()` 조립을 `engine/report.rs`로. 공용 타입(`PathKind`, `PeerStateKind`, `CodecReason`, 릴레이 상태)을 아래 계층으로. `prio`·`cpuprof`·시간(12절)을 공용 `sys/`로 |
 | 5 | ③ | 재배치 + 측정 | **`Peer` 분해, 미디어 상태 워커 단일 소유**(아래) |
 | 6 | ②b | 재배치 | ③이 정한 소유권 위에서 `Worker` 필드를 단계별 구조체(`Capture`, `AutoCodec`, `PeerSources`, `LocalPath`, `BeatSched`, `DeviceWatch`)로 나누고 루프를 얇은 조정자로 |
-| 7 | ⑤ | 재배치 | `diag`는 `manager` 대신 스냅샷 함수(클로저)를 받는다. `diag::mask`는 계층 1 공용, `record`는 가명화 함수만 |
+| 7 | ⑤ | 재배치 | `diag`는 `manager` 대신 스냅샷 함수(클로저)를 받는다. `diag::mask`는 계층 1 공용, `record`는 가명화 함수만 (완료: 스냅샷 타입은 `engine::report::EngineSnapshot`, `manager`도 `diag`를 모른다) |
 | 8 | ⑥ | 이동 | 혼합·큰 파일 나누기: `metronome` → `{plan, sched, click}`, `record` → `{rt_ring, writer, sidecar}`, `measure` → `{loopback, echo, analysis}`, `device` → `{select, cpal, fake, types}`, `wasapi` → `{enumerate, stream}`, `net/mod.rs` → `{send, recv_loop, control_loop}`, `net/peer.rs` → `{table, punch, loss_report}` |
 | 9 | ⑦ | 재배치 | `commands.rs`의 로직(녹음 폴더 설정, 릴레이 DNS 해석, 게인 자르기)을 `manager`·설정 모듈로. ⑥에서 DTO가 `types` 같은 파일로 갈라지면 `ADAPTER_MAY_USE`를 그 DTO 노드로 좁힌다. |
 | 10 | ⑧ | 재배치 | `jitter/`의 필드 묶음을 하위 상태 구조체로(`LateBudget`, `DelayStats` 등, `late_budget`·`target` 결합도를 보고 합칠지 정함). 수명 상태기계(11절)를 `manager`의 명시적 enum으로 — 코드를 문서에 정렬 |

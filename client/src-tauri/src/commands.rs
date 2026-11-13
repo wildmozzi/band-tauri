@@ -52,8 +52,9 @@ impl EngineState {
 pub struct DiagState(Arc<Diagnostics>);
 
 impl DiagState {
+    /// 기록 스레드에는 엔진 스냅샷 함수만 넘긴다(`diag`는 `manager`를 모른다, 엔진 ⑤).
     pub fn spawn_recorder(&self, engine: Arc<EngineManager>) -> std::io::Result<()> {
-        self.0.spawn_recorder(engine).map(|_| ())
+        self.0.spawn_recorder(move || engine.snapshot()).map(|_| ())
     }
 
     pub fn shutdown(&self) {
@@ -326,7 +327,9 @@ pub async fn diag_export(
         let info = app.package_info();
         let app_info = crate::diag::export::AppInfo { name: info.name.clone(), version: info.version.to_string() };
         let log_dir = app.path().app_log_dir().ok();
-        let bytes = crate::diag::export::build(&m, &d, app_info, log_dir.as_deref(), now)?;
+        // 장치 열거 → 스냅샷 순서는 ⑤ 이전 `build` 안의 순서 그대로
+        let devices = m.backend().list_devices();
+        let bytes = crate::diag::export::build(m.snapshot(), devices, &d, app_info, log_dir.as_deref(), now)?;
         crate::diag::export::write_atomic(&path, &bytes).map_err(|e| format!("진단 파일 저장 실패: {e}"))?;
         log::info!("진단 내보내기 완료");
         Ok(Some(path.to_string_lossy().into_owned()))

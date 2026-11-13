@@ -87,20 +87,16 @@ const EXCEPTIONS: &[(&str, &str, &str)] = &[
     // 장치 선택(device) ↔ 자체 WASAPI(wasapi) 순환 → ⑥ device를 선택·cpal·가짜로, 공용 타입(StreamInfo 등)을 아래로.
     ("engine::device", "engine::wasapi", "⑥"),
     ("engine::wasapi", "engine::device", "⑥"),
-    // manager ↔ diag 순환 → ⑤ diag는 스냅샷 함수를 받는다.
-    ("diag", "manager", "⑤"),
-    ("diag::export", "manager", "⑤"),
-    ("manager", "diag", "⑤"),
     // 어댑터의 로직: 릴레이 주소 DNS 해석, 게인 범위 자르기 → ⑦ manager 쪽으로.
     ("commands", "net::relay", "⑦"),
     ("commands", "engine::mixer", "⑦"),
 ];
 
 /// 예외 수 상한(래칫). 단계를 끝내 예외를 지우면 이 값도 내린다. 올리는 것은 금지(위 주석).
-const MAX_EXCEPTIONS: usize = 8;
+const MAX_EXCEPTIONS: usize = 5;
 
 /// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
-const OPEN_STAGES: &[&str] = &["③", "⑤", "⑥", "⑦"];
+const OPEN_STAGES: &[&str] = &["③", "⑥", "⑦"];
 
 /// 계층 규칙상 허용(아래로 가는 간선)이지만 금지하는 간선(엔진 ③, `engine-stage3-design.md` 7.1절):
 /// net은 미디어 상태(지터 버퍼·믹스 제어)를 모른다. 미디어 쪽과는 `net::media_link`로만 잇는다.
