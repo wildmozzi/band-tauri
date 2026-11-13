@@ -16,7 +16,9 @@
 //! 조건(이 안에서는 패킷 내용이 타이밍과 무관하다): 설정 코덱 고정, 자동 전환 없음(직접 경로 피어 하나, 손실 보고 없음),
 //! 입력 링 넘침 없음, 48kHz(리샘플러 통과). 프레임 경계는 입력 샘플 수로만 정해진다 — 가짜 장치의 클럭 원점을 미래로 두어
 //! 입력이 샘플 0부터 시작하게 한다. 도착 시각·패킷 수의 끝자리는 비교하지 않는다.
-//! 벽시계 임계가 없으므로 기본 `cargo test`(결정적)에서 돈다.
+//! 판정은 내용뿐이고 품질 임계(은닉 수·지연 ms)는 없어 기본 `cargo test`에서 돈다. 다만 벽시계 가정이 둘 있다: 장치 열기가 클럭
+//! 원점(엔진 시작 + `T0_MARGIN`)보다 이르다, 로컬 UDP 수신 버퍼가 넘치지 않는다. 어긋나면 시험은 실패하되 메시지가
+//! "시험 조건 밖"이라고 가려 준다(엔진 결함으로 읽히지 않게, #131 리뷰 M1).
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -180,7 +182,14 @@ fn assert_matches_reference(cfg: &EngineConfig, got: &[Packet], reference: &mut 
     for (i, p) in got.iter().enumerate() {
         assert_eq!(p.flags, want_flags, "패킷 {i}의 flags");
         if i > 0 {
-            assert_eq!(p.ts.wrapping_sub(got[i - 1].ts), frame, "패킷 {i}의 ts 증가분(프레임 {})", k0 + i);
+            let d = p.ts.wrapping_sub(got[i - 1].ts);
+            // 증가분이 프레임의 2배 이상인 정수배면 엔진이 아니라 수신 쪽(이 시험의 소켓 버퍼)에서 패킷을 잃은 것이다.
+            assert!(
+                !(d >= 2 * frame && d % frame == 0 && d / frame < 1_000),
+                "시험 조건 밖(엔진 결함 아님): 패킷 {i} 앞에서 {}개를 잃었다(로컬 UDP 수신 버퍼, 부하). 다시 돌릴 것",
+                d / frame - 1
+            );
+            assert_eq!(d, frame, "패킷 {i}의 ts 증가분(프레임 {})", k0 + i);
         }
         assert!(reference.get(k0 + i) == p.payload.as_slice(), "패킷 {i}(프레임 {})의 페이로드가 참조 인코더와 다르다", k0 + i);
     }

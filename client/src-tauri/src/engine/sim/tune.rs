@@ -1,7 +1,9 @@
 //! 지터 버퍼 자동 튜닝(P1-5) 결정적 시나리오: 피어 여럿(최대 6) → 지터 버퍼 → PeerFeed(워커) → OutputRt(콜백).
 //!
-//! 수신 경로는 실제와 같다(엔진 ③-a3): 도착 사건에서 피어별 수신 큐(`MediaTx::push`)에 넣고, 워커 사건에서 피어마다
-//! `PeerMedia::ingest`(큐 비우기 → 재시작·프로필) 뒤 `service`. 같은 시각이면 도착을 워커보다 먼저 처리한다.
+//! 수신 경로는 실제와 같다(엔진 ③-a3): 도착 사건에서 피어별 수신 큐(`MediaTx::push`)에 넣고, 워커 사건에서 워커와 **같은
+//! 함수** `PeerSources::service`를 부른다(엔진 ②b-3 — 명령 큐 비우기 → 슬롯 배정 → 피어마다 `ingest` → `PeerFeed::service` →
+//! `publish`). 피어는 시작 때 미디어 명령 큐에 `MediaCmd::Add`로 넣는다. 같은 시각이면 도착을 워커보다 먼저 처리한다.
+//! 그래서 5분 fixture가 `PeerSources`의 공급 조정(순서·슬롯·프로필 적용)까지 덮는다.
 //!
 //! `worker::tests::run_feed_sim`과 같은 이벤트 모델이다(가상 시간, 결정적 의사난수). 피어마다 송신 장치 클럭(드리프트),
 //! 망 지터, 손실, 지연 스파이크(와이파이 버스트)를 따로 준다. 지표는 구현과 독립적으로 잰다:
@@ -14,15 +16,18 @@ use std::sync::Arc;
 
 use crate::engine::mixer::MixControls;
 use crate::engine::stats::AudioCounters;
-use crate::engine::worker::{CallbackTracker, PeerFeed, FINE_POLL, OUT_CHUNK, POLL};
+use crate::engine::worker::{CallbackTracker, PeerSources, PeerSourcesParts, WorkerStats, FINE_POLL, POLL};
 use crate::engine::codec::Encoder as SimEncoder;
 use crate::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
 use crate::engine::jitter::{JitterSettings, JitterStats};
-use crate::engine::peer_media::PeerMedia;
+use crate::engine::peer_media::{media_port, MediaCmd, MediaSettings, PeerMedia};
+use crate::engine::record::MarkSink;
+use crate::net::txlat::LockWait;
 use crate::net::media_link::{media_link, PeerKey};
-use crate::engine::rt::{output_path, SLOT_ACTIVE};
+use crate::engine::rt::output_path;
 use crate::net::packet::{Header, PacketType};
 use rand::{Rng, SeedableRng};
+use ringbuf::traits::Producer;
 
 #[derive(Clone)]
 pub(super) struct NetPeer {
@@ -220,20 +225,40 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
     let mut rng = rand::rngs::StdRng::seed_from_u64(p.seed);
     let counters = Arc::new(AudioCounters::default());
     let controls = Arc::new(MixControls::default());
-    let (mut rt, mut feed) = output_path(counters.clone(), controls);
-    let mut pfs = Vec::new();
-    let mut pms = Vec::new();
+    let (mut rt, feed) = output_path(counters.clone(), controls);
+    // 워커와 같은 조립(②b-3): 슬롯 1.. 생산자와 미디어 명령 큐의 워커 쪽 끝을 `PeerSources`에 주고, 피어는 명령 큐로 넣는다.
+    // 프로필은 워커처럼 전역 한 값이다 — 한 실행 안에서 피어마다 다른 프로필을 주는 시나리오는 없다(있으면 여기서 멈춘다:
+    // `PeerSources`에 테스트 전용 입구를 내지 말고 그 시나리오만 따로 조립할 것, 설계 5.3절).
+    let profile = p.peers[0].profile;
+    assert!(p.peers.iter().all(|np| np.profile == profile), "하네스는 한 실행에 프로필 하나만 받는다");
+    let settings = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile };
+    let (port, port_rt) = media_port();
+    let mut prods = feed.prods;
+    let peer_prods = prods.split_off(1);
+    let mut sources = PeerSources::new(PeerSourcesParts {
+        prods: peer_prods,
+        port: port_rt,
+        settings: Arc::new(MediaSettings::new(settings)),
+        rec_marks: Arc::new(MarkSink::default()),
+        probe: Arc::new(parking_lot::Mutex::new(None)),
+    });
+    let bank = feed.bank;
+    let wstats = WorkerStats::default();
+    let mut lock_wait = LockWait::default();
     let mut mtxs = Vec::new();
     let mut txs = Vec::new();
     for (i, np) in p.peers.iter().enumerate() {
-        let slot = 1 + i;
-        let sh = &feed.bank.slots[slot];
-        sh.set_gains((0.15, 0.15), (0.15, 0.15));
-        sh.state.store(SLOT_ACTIVE, Ordering::Release);
         let key = PeerKey::from_raw(i as u64 + 1);
-        pfs.push(PeerFeed::new(slot, key, 48_000, sh).unwrap());
         let (mtx, mrx) = media_link(key);
-        pms.push(PeerMedia::new(key, format!("p{i}"), 1 + i as u32, 0, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: np.profile }, mrx).1);
+        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, 0, settings, mrx);
+        // 슬롯 게인: 전에는 하네스가 슬롯에 (0.15, 0.15)를 직접 썼다. 이제 `PeerSources`가 반복마다 피어 믹스 게인으로 덮어쓰므로
+        // 믹스 게인을 0.15로 둔다(팬 0). 팬 법칙(cos(π/4)·√2, f32)이 정확히 1이 아니라 슬롯 게인은 0.15에서 1ulp쯤 다르다.
+        // 리포트에는 영향이 없다: 슬롯 게인은 `OutputRt::mix_source`에서 버스·탭에 더할 때만 곱해지고, 언더런(xrun) 판정은
+        // 링에서 꺼낸 양(`got < want`)과 `playing`만 본다. 하네스 리포트는 지터 통계·은닉 시각·xrun 시각뿐이다(설계 5.3절).
+        shared.mix.gain.store(0.15);
+        let g = shared.mix.lr_gains();
+        assert!((g.0 - 0.15).abs() < 1e-6 && g.0 == g.1, "슬롯 게인 {g:?}");
+        let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Add(media));
         mtxs.push(mtx);
         txs.push(TxState {
             enc: SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap(),
@@ -251,8 +276,6 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         });
     }
     let mut tracker = CallbackTracker::new(48_000);
-    let mut chunk = vec![0f32; OUT_CHUNK * 2];
-    let mut tmp = vec![0f32; 8192];
     let mut dev = vec![0f32; p.out_buf * 2];
     let mut payload = vec![0u8; MAX_PAYLOAD_BYTES];
     let mut pending: Vec<(u64, usize, Header, Vec<u8>)> = Vec::new();
@@ -382,12 +405,11 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             k_out += 1;
         } else {
             let timing = tracker.observe(&counters, t, p.out_buf, 48_000);
-            let mut urgent = false;
+            // 워커 사건: 워커와 같은 함수. 첫 사건에서 명령 큐의 `Add`가 표에 들어가고 슬롯 1..n이 순서대로 배정된다.
+            let urgent = sources.service(&bank, &counters, &wstats, 48_000, &timing, &mut lock_wait).urgent;
+            let pms = sources.media_table();
+            assert_eq!(pms.len(), n, "피어가 모두 표에 들어와야 한다");
             for i in 0..n {
-                let slot = pfs[i].slot();
-                let (_, jb) = pms[i].ingest(p.peers[i].profile);
-                let ev = pfs[i].service(jb, &mut feed.prods[slot], &feed.bank.slots[slot], &timing, &|| true, &mut chunk, &mut tmp, None);
-                urgent |= ev.urgent;
                 let c = pms[i].jitter().stats().concealed;
                 if c > seen_conc[i] {
                     outs[i].conceal_us.push(t);
@@ -423,12 +445,16 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             t_w = t + poll + if p.worker_jitter_us > 0 { rng.gen_range(0..p.worker_jitter_us) } else { 0 };
         }
     }
+    #[allow(clippy::needless_range_loop)] // i는 outs와 PeerSources 표를 함께 색인한다
     for i in 0..n {
+        // 슬롯은 추가 순서대로 1..n(전에는 하네스가 손으로 준 값)
+        assert_eq!(sources.feed_slot(i), Some(1 + i), "피어 {i}의 슬롯");
+        outs[i].margin = sources.feed_margin(i).expect("슬롯이 배정된 피어");
+        let pm = &mut sources.media_table()[i];
         // 마지막 워커 사건 뒤에 도착해 큐에 남은 것까지 넣고 잰다(이전: 도착 즉시 삽입 — 같은 상태가 된다)
-        let _ = pms[i].ingest(p.peers[i].profile);
-        assert_eq!(pms[i].rx_dropped(), 0, "하네스에서 수신 큐가 넘쳤다(피어 {i})");
-        outs[i].js = pms[i].jitter().stats();
-        outs[i].margin = pfs[i].margin();
+        let _ = pm.ingest(profile);
+        assert_eq!(pm.rx_dropped(), 0, "하네스에서 수신 큐가 넘쳤다(피어 {i})");
+        outs[i].js = pm.jitter().stats();
     }
     MultiOut { peers: outs, xruns: counters.xruns.load(Ordering::Relaxed), xrun_us }
 }

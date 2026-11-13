@@ -208,7 +208,7 @@ pub fn run(mut self) {
 | `MetronomeStage::service` | `&StreamInfo`, `&AudioCounters`(`in_cb_frames`), `&FeedTiming`, (②b-6b부터) 피어 표 복사본(`Option<&PeerTableCopy>`) (`MetronomeCtl`, `net`) |
 | `PeerSources::service` | `&SourceBank`, `&AudioCounters`, `&WorkerStats`(원자값 셋: `media_peers`·`deadline_fills`·`skipped_frames`), `out_rate`, `&FeedTiming`, 에코 탭 |
 | `PeerSources::close` | `&SourceBank` |
-| `LocalPath::configure` / `service` / `track_occupancy` | `&StreamInfo`·`&AudioCounters`·`granularity` / `&StreamInfo`·`&AudioCounters`·`&MixControls`·`&WorkerStats`·`epoch` / `&WorkerStats`·`pending48` |
+| `LocalPath::configure` / `service` / `track_occupancy` | `&StreamInfo`·`&AudioCounters`·`granularity` / `&StreamInfo`·`&AudioCounters`·`&MixControls`·로컬 슬롯 `&SourceShared`(뱅크 전체가 아니다 — #134 리뷰 L2)·`&WorkerStats`·`epoch` / `out_rate`·`&WorkerStats`·`pending48` |
 | `DeviceWatch::check` | `&AudioCounters`, `&WorkerStats`, `epoch` |
 
 락이 남아 있는 동안(②b-5·②b-6b 전) 락을 잡는 세 메서드(`send_frame`·`MetronomeStage::service`·`PeerSources::service`)는 `&mut LockWait`(진단 누적값)와 자리별 기록이 든 `&WorkerStats`도 받는다(4.2절).
