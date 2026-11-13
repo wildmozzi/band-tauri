@@ -69,7 +69,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Threading::{CreateEventW, WaitForMultipleObjects};
 
 use super::config::{DriverKind, EngineConfig};
-use super::device::{device_id, device_name_from_id, device_tag, BackendKind, DeviceInfo, StreamInfo};
+use super::device::types::{device_id, device_name_from_id, device_tag, BackendKind, DeviceInfo, StreamInfo};
 use super::rt::{InputRt, OutputRt};
 use super::stats::AudioCounters;
 

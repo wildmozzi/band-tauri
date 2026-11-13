@@ -188,7 +188,6 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 간선 | 원인 | 풀 단계 |
 |---|---|---|
 | `engine::mixer` → `engine::metronome` | 기본 클릭 게인 상수. metronome 혼합 파일 | ⑥ |
-| `engine::device` ↔ `engine::wasapi` | 공용 타입(`StreamInfo`·`DeviceInfo`)과 백엔드 선택이 한 파일 | ⑥ |
 
 간선 그래프에 안 보이는 어긋남:
 

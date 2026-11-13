@@ -120,7 +120,7 @@
 
 순환 끊기: `rt.rs`는 `record::RecordPortRt`를 필드로 갖고(`rt.rs:319`, `:367`), `record.rs`는 `rt::{LOCAL_SOURCE, MAX_SOURCES}`를 쓴다(`record.rs:28`). 파일을 나눠도 `rt ↔ record::rt_ring`이 남는다. → 상수 둘을 `engine::config`(계층 0)로 내리고 `rt.rs`는 `pub use super::config::{LOCAL_SOURCE, MAX_SOURCES};` 한 줄로 기존 경로를 유지한다(`rt.rs:246-248`의 정의 두 줄이 `pub use` 한 줄로 바뀐다 — RT 함수 본문은 건드리지 않는다). 그러면 `rt → record::rt_ring → config`로 한 방향이다. `architecture.rs`의 `NODES`에 `engine::record::{rt_ring, marks, sidecar, writer}`를 따로 올린다.
 
-`mod.rs` 규칙: `record/mod.rs`에는 `mod` 선언과 `pub use`만 둔다(위 표에 `mod` 행이 없는 이유다 — 심볼이 전부 자식에 있다). 형제 간선은 `writer → {rt_ring, marks, sidecar}` 한 방향이고, `rt.rs`는 `record::RecordPortRt`(부모의 다시 내보내기)가 아니라 `record::rt_ring::RecordPortRt`로 쓴다 — 예외 4(`rt → record`)가 지워지려면 간선이 `rt → record::rt_ring`이어야 한다(8절 표).
+`mod.rs` 규칙: `record/mod.rs`에는 `mod` 선언과 `pub use`만 둔다(위 표에 `mod` 행이 없는 이유다 — 심볼이 전부 자식에 있다). 형제 간선은 `writer → {rt_ring, marks, sidecar}`와 `sidecar → marks`(`MarkKind`) 한 방향이고, `rt.rs`는 `record::RecordPortRt`(부모의 다시 내보내기)가 아니라 `record::rt_ring::RecordPortRt`로 쓴다 — 예외 4(`rt → record`)가 지워지려면 간선이 `rt → record::rt_ring`이어야 한다(8절 표).
 
 **⑥-2 `device`**
 
