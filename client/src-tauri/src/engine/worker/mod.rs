@@ -14,7 +14,10 @@
 //! 쓰는 값만 인자로 받는다.
 //!
 //! ## 파일
-//! - `mod.rs`: `Worker`(조정자) 조립과 루프, 정지. 송신 쪽(입력 펌프·인코드·송신·자동 코덱)은 아직 여기 있다(②b-2에서 단계로)
+//! - `mod.rs`: `Worker`(조정자) 조립과 루프, 정지
+//! - `capture.rs`: 캡처 단계(`Capture`: 입력 링 → 리샘플 → 48k 블록·프레임)
+//! - `send.rs`: 송신 단계(`SendPath`: 프레임 → 인코드 → 송신, 에코 클릭 스트림. 네트워크가 있을 때만 존재)
+//! - `auto_codec.rs`: `SendPath`의 부속 `AutoCodec`(PCM16 설정의 피어별 Opus 자동 전환 송신 상태)
 //! - `clock.rs`: 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`) — 시각 단계
 //! - `peer_sources.rs`: 피어 소스 단계(`PeerSources`: 미디어 표·슬롯 배정·피어별 공급·녹음 마커)
 //! - `peer_feed.rs`: 피어 하나의 소스 공급(`PeerFeed`, 콜백 구동 믹스 규칙)
@@ -24,33 +27,27 @@
 //! - `device_watch.rs`: 장치 감시 단계(`DeviceWatch`)
 //! - `tests.rs`: 결정적 단위 시뮬레이션
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ringbuf::traits::Consumer;
 use ringbuf::{HeapCons, HeapProd};
 
-use super::codec::Encoder;
-use super::config::{frame_code_from_samples, CodecKind, EngineConfig, INTERNAL_RATE, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
+use super::config::{frame_code_from_samples, EngineConfig, INTERNAL_RATE};
 use super::device::StreamInfo;
 
 use super::measure::EchoProbe;
 use super::metronome::MetronomeCtl;
 use super::mixer::MixControls;
 use super::record::MarkSink;
-use super::relay_codec::{auto_opus_perc, auto_reason, pcm_relay_load, LossCodecPolicy, PolicyInputs, RelayCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
-use super::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
 use super::rt::{SourceBank, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE};
 use super::stats::AudioCounters;
-use crate::net::types::PathKind;
-use crate::net::packet::{FLAG_OPUS, FLAG_STEREO};
 use super::peer_media::{MediaPortRt, MediaSettings};
-use crate::net::media_link::PeerKey;
-use crate::net::peer::Peer;
-use crate::net::{AutoPayload, NetShared, MAX_PEERS};
+use crate::net::txlat::LockWait;
+use crate::net::{NetShared, PeerTableCopy};
 
+mod auto_codec;
+mod capture;
 mod clock;
 mod device_watch;
 mod local;
@@ -58,6 +55,7 @@ mod local_path;
 mod metronome_stage;
 mod peer_feed;
 mod peer_sources;
+mod send;
 #[cfg(test)]
 mod tests;
 
@@ -65,17 +63,19 @@ pub use clock::{CallbackTracker, DeviceClock, FeedTiming};
 pub use local::LocalFifo;
 pub use peer_feed::{FeedEvents, PeerFeed, DEADLINE_GUARD_US};
 
+use capture::Capture;
+#[cfg(test)]
+use capture::drain_frames;
 use device_watch::DeviceWatch;
 use local_path::LocalPath;
 use metronome_stage::MetronomeStage;
 pub(crate) use peer_sources::{PeerSources, PeerSourcesParts};
+use send::SendPath;
 
 /// 워커 폴링 주기. Windows에서도 std::thread::sleep은 고해상도 타이머를 쓴다.
 pub(super) const POLL: Duration = Duration::from_micros(500);
 /// 피어 은닉 마감이 가까울 때의 폴링 주기.
 pub(super) const FINE_POLL: Duration = Duration::from_micros(150);
-/// 피어별 Opus 자동 전환 정책(릴레이 부하 P1-4c, 손실 피드백 P1-4e)을 다시 보는 간격.
-const AUTO_CODEC_CHECK: Duration = Duration::from_millis(200);
 /// 출력 생산 단위(48kHz 프레임). 1.33ms.
 pub const OUT_CHUNK: usize = 64;
 
@@ -211,114 +211,41 @@ fn chunk_dev(info: &StreamInfo) -> u64 {
     (OUT_CHUNK as u64 * info.out_rate as u64).div_ceil(INTERNAL_RATE as u64)
 }
 
-/// 조정자. 필드 = 문맥 + 단계들 + 조정자가 갖고 단계에 빌려 주는 것(`peer_copy`·`lock_wait`) + 아직 단계로 옮기지 않은
-/// 송신 쪽(②b-2에서 `Capture`·`SendPath`·`AutoCodec`).
+
+/// 조정자가 갖는 피어 표 복사본(엔진 ③c)과 그것을 맞추는 net. 네트워크가 있을 때만 있다.
+/// 단계에는 이 묶음이 아니라 안의 복사본만 빌려 준다(`SendPath`: 송신·자동 코덱이 락 없이 본다).
+struct PeerTable {
+    net: Arc<NetShared>,
+    copy: PeerTableCopy,
+}
+
+impl PeerTable {
+    fn new(net: Arc<NetShared>) -> Self {
+        Self { net, copy: PeerTableCopy::for_worker() }
+    }
+
+    /// 반복마다. 세대가 같으면 원자 load 하나, 바뀐 반복에서만 `try_read`로 다시 복사한다(기다리지 않는다).
+    fn refresh(&mut self) {
+        self.net.refresh_copy(&mut self.copy);
+    }
+}
+
+/// 조정자. 필드 = 문맥 + 단계들 + 조정자가 갖고 단계에 빌려 주는 것(`peer_table`·`lock_wait`).
 pub struct Worker {
     ctx: WorkerCtx,
+    capture: Capture,
+    /// 송신 단계. 네트워크가 있을 때만(없으면 캡처 프레임은 버려진다).
+    send: Option<SendPath>,
     /// 시각 단계(출력 콜백 시각 추정).
     clock: CallbackTracker,
     metro: MetronomeStage,
     peers: PeerSources,
     local: LocalPath,
     watch: DeviceWatch,
-    /// 피어 표 복사본(엔진 ③c): 송신·자동 코덱이 락 없이 본다. 세대가 바뀐 반복에서만 다시 복사된다.
-    peer_copy: crate::net::PeerTableCopy,
+    peer_table: Option<PeerTable>,
     /// 이번 반복에 남은 락(에코 프로브·메트로놈)에서 기다린 시간(엔진 ③c 측정 — 본문에서 빼서 락 밖 비용을 본다).
     /// 락을 잡는 단계 메서드에 빌려 준다.
-    lock_wait: crate::net::txlat::LockWait,
-
-    // ---- 송신 쪽(②b-2에서 단계로 옮긴다) ----
-    net: Option<Arc<NetShared>>,
-    in_cons: HeapCons<f32>,
-    /// 에코 측정 상태(클릭 프레임 생성). 재생 시각 탭 쪽 복제는 `PeerSources`가 갖는다.
-    probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
-    frame: usize,
-    ich: usize,
-    in_rs: StreamResampler,
-    encoder: Option<Encoder>,
-    /// 에코 측정 대상 피어용 인코더(측정 중에만 있음). 다른 피어와 코덱 상태를 섞지 않는다.
-    alt_encoder: Option<Encoder>,
-    alt_frame: Vec<f32>,
-    alt_payload: Vec<u8>,
-    /// PCM16 설정의 피어별 Opus 자동 전환(릴레이 부하 P1-4c, 수신 손실 피드백 P1-4e). 피어마다 전용 인코더라
-    /// 전환 순간 예열과 예상 손실(%)이 피어별이다. 네트워크가 있고 설정이 PCM16일 때만 쓴다.
-    auto: Vec<AutoTx>,
-    /// 미리 만들어 둔 Opus 인코더(피어 수만큼, 시작 시). 새 피어가 자동 전환 대상이 될 때 생성 지연이 없게 한다.
-    auto_pool: Vec<Encoder>,
-    auto_enabled: bool,
-    auto_flags: u8,
-    /// 직전 캡처 프레임(전환 시 인코더 예열용).
-    relay_prev: Vec<f32>,
-    relay_policy: RelayCodecPolicy,
-    auto_check_at: Duration,
-    flags: u8,
-    frame_code: u8,
-    ts: u32,
-    in_tmp: Vec<f32>,
-    /// 48k 입력 블록(리샘플 직후, 내부 채널).
-    in48_buf: Vec<f32>,
-    /// 인코더용 프레임 누적.
-    cap_acc: VecDeque<f32>,
-    frame_buf: Vec<f32>,
-    payload: Vec<u8>,
-    pkt: Vec<u8>,
-    encode_errors: u64,
-}
-
-
-/// 피어 하나의 Opus 자동 전환 송신 상태(PCM16 설정, P1-4c·P1-4e). 키는 `PeerFeed`와 같은 `PeerKey`.
-struct AutoTx {
-    key: PeerKey,
-    /// 피어 id(에코 측정 클릭 스트림 대상인지 가릴 때, L2).
-    id: String,
-    enc: Encoder,
-    payload: Vec<u8>,
-    /// 이번 프레임의 Opus 페이로드 길이(대상이 아니거나 인코드 실패면 None → 설정 코덱으로 보낸다).
-    len: Option<usize>,
-    loss: LossCodecPolicy,
-    /// 손실 피드백 전환이 켜짐(`loss.active()`, 또는 측정 도구의 강제 `force_auto_opus`).
-    loss_on: bool,
-    /// 직전 점검 때 오디오를 릴레이로 보내는 피어였다(릴레이 부하 정책의 대상).
-    on_relay: bool,
-    /// 직전 프레임에서 이 인코더로 인코드했다(아니었다가 대상이 되면 초기화·예열한다).
-    encoding: bool,
-    /// 인코더에 설정한 예상 손실(%).
-    perc: u8,
-    seen: bool,
-}
-
-impl AutoTx {
-    fn new(key: PeerKey, id: String, mut enc: Encoder) -> Self {
-        let _ = enc.set_loss_perc(DEFAULT_OPUS_LOSS_PERC);
-        Self {
-            key,
-            id,
-            enc,
-            payload: vec![0u8; MAX_PAYLOAD_BYTES],
-            len: None,
-            loss: LossCodecPolicy::default(),
-            loss_on: false,
-            on_relay: false,
-            encoding: false,
-            perc: DEFAULT_OPUS_LOSS_PERC,
-            seen: true,
-        }
-    }
-}
-
-/// `acc`에서 `frame.len()` 샘플짜리 프레임을 가능한 만큼 꺼내 `f(프레임, 시작 시각)`에 넘긴다. 한 패스에서 나온
-/// 프레임은 모두 같은 `pass_at`을 받는다(리뷰 M1: 프레임마다 `now()`를 찍으면 앞 프레임 뒤에서 기다린 시간이 빠진다).
-fn drain_frames(acc: &mut VecDeque<f32>, frame: &mut [f32], pass_at: Instant, mut f: impl FnMut(&[f32], Instant)) -> usize {
-    let n = frame.len();
-    let mut count = 0;
-    while n > 0 && acc.len() >= n {
-        for (d, s) in frame.iter_mut().zip(acc.drain(..n)) {
-            *d = s;
-        }
-        f(frame, pass_at);
-        count += 1;
-    }
-    count
+    lock_wait: LockWait,
 }
 
 /// 지원하는 장치 레이트 범위.
@@ -343,102 +270,80 @@ impl Worker {
         const _: () = assert!(LOCAL_SOURCE == 0);
         let peer_prods = prods.split_off(LOCAL_SOURCE + 1);
         let local_prod = prods.pop().ok_or("소스 링 수가 맞지 않습니다")?;
-        let in_rs = StreamResampler::new(info.in_rate, INTERNAL_RATE, ich)?;
+        // 실패 순서는 전과 같다: 입력 리샘플러 → 로컬 리샘플러 → 설정 코덱 인코더 → 프레임 크기 → 자동 전환 인코더 풀.
+        let capture = Capture::new(in_cons, info.in_rate, ich, frame)?;
         let local = LocalPath::new(ich, info.out_rate, local_prod)?;
-        let encoder = if net.is_some() {
-            Some(Encoder::new(cfg.codec, ich, cfg.opus_bitrate())?)
-        } else {
-            None
-        };
-        let mut flags = 0;
-        if encoder.as_ref().is_some_and(|e| e.is_opus()) {
-            flags |= FLAG_OPUS;
-        }
-        if ich == 2 {
-            flags |= FLAG_STEREO;
-        }
-        let frame_code = frame_code_from_samples(frame).ok_or("잘못된 프레임 크기")?;
-        let auto_enabled = net.is_some() && cfg.codec == CodecKind::Pcm16;
-        let mut auto_pool = Vec::with_capacity(MAX_PEERS);
-        if auto_enabled {
-            for _ in 0..MAX_PEERS {
-                auto_pool.push(Encoder::new(CodecKind::Opus, ich, cfg.opus_bitrate())?);
+        // 프레임 크기 검증은 네트워크가 없어도 한다(전과 같다). 인코더가 먼저 실패하면 그 에러가 먼저 나가게 `SendPath::new` 안에서
+        // 인코더를 만든 뒤 코드를 쓴다 — 그래서 코드 계산은 여기서 하되 에러는 인코더 뒤에 낸다.
+        let frame_code = frame_code_from_samples(frame);
+        let send = match &net {
+            Some(net) => Some(SendPath::new(net.clone(), &cfg, epoch, frame_code, probe.clone())?),
+            None => {
+                frame_code.ok_or("잘못된 프레임 크기")?;
+                None
             }
-        }
-        let auto_flags = FLAG_OPUS | if ich == 2 { FLAG_STEREO } else { 0 };
+        };
         // 로컬 소스는 항상 켜져 있다(모니터 꺼짐 = 버스 게인 0, 탭에는 계속 나감).
         let local_slot = &bank.slots[LOCAL_SOURCE];
         local_slot.set_gains((0.0, 0.0), (1.0, 1.0));
         local_slot.state.store(SLOT_ACTIVE, Ordering::Release);
         Ok(Self {
+            capture,
+            send,
             clock: CallbackTracker::new(info.out_rate),
             metro: MetronomeStage::new(metronome, net.clone()),
-            peers: PeerSources::new(PeerSourcesParts { prods: peer_prods, port: media_port, settings: media_settings, rec_marks, probe: probe.clone() }),
+            peers: PeerSources::new(PeerSourcesParts { prods: peer_prods, port: media_port, settings: media_settings, rec_marks, probe }),
             local,
             watch: DeviceWatch::new(),
-            peer_copy: crate::net::PeerTableCopy::for_worker(),
+            peer_table: net.map(PeerTable::new),
             lock_wait: Default::default(),
-            net,
-            in_cons,
-            probe,
-            frame,
-            ich,
-            in_rs,
-            encoder,
-            alt_encoder: None,
-            alt_frame: vec![0.0; frame * ich],
-            alt_payload: vec![0u8; MAX_PAYLOAD_BYTES],
-            auto: Vec::with_capacity(MAX_PEERS),
-            auto_pool,
-            auto_enabled,
-            auto_flags,
-            relay_prev: vec![0.0; frame * ich],
-            relay_policy: RelayCodecPolicy::default(),
-            auto_check_at: Duration::ZERO,
-            flags,
-            frame_code,
-            ts: rand::random(),
-            in_tmp: vec![0.0; 4096],
-            in48_buf: vec![0.0; 2048 * ich],
-            cap_acc: VecDeque::with_capacity((frame + 4096) * ich),
-            frame_buf: vec![0.0; frame * ich],
-            payload: vec![0u8; MAX_PAYLOAD_BYTES],
-            pkt: vec![0u8; MAX_PACKET_BYTES],
-            encode_errors: 0,
             ctx: WorkerCtx { cfg, info, counters, controls, bank, stats, epoch, stop },
         })
     }
 
     /// 워커 루프. **호출 순서와 원자값·시계를 읽는 시점이 계약이다**(설계 5절) — 읽기 좋게 재배열하지 말 것:
+    /// - `pass_at`(송신 큐 지연의 시작점)은 입력 링을 비우기 **직전**에 한 번. 한 패스의 프레임은 모두 이 값을 쓴다(C7).
+    /// - 48k 블록을 **모두** 로컬 경로에 넣은 뒤에 프레임을 보낸다(블록마다 `local.push`).
     /// - `clock.observe`(`FeedTiming`)는 캡처·인코드·송신 **뒤**, 메트로놈·피어 공급 **앞**에서 한 번(J5). 앞으로 옮기면 실시간
     ///   은닉 마감 판단이 송신 시간만큼 이르게 된다.
-    /// - 로컬 FIFO는 `configure` → `push`(블록마다, `pump_input` 안) → `service` 순.
+    /// - 로컬 FIFO는 `configure` → `push`(블록마다) → `service` 순.
     pub fn run(mut self) {
         let _prio = crate::sys::prio::promote_engine_thread(&self.ctx.stats.thread_prio);
-        log::info!("워커 시작: frame {} ch {}", self.frame, self.ich);
+        log::info!("워커 시작: frame {} ch {}", self.ctx.cfg.frame_samples(), self.ctx.cfg.channels);
+        let c = &self.ctx;
         let mut last_start = Instant::now();
-        while !self.ctx.stop.load(Ordering::Relaxed) {
+        while !c.stop.load(Ordering::Relaxed) {
             let start = Instant::now();
             if DIAG_TIMING {
-                self.ctx.stats.iter_period.record(start - last_start);
+                c.stats.iter_period.record(start - last_start);
             }
             last_start = start;
             // 피어 표 복사본은 송신과 무관하게 반복마다 맞춘다: 캡처가 멈춰도(장치 분리) 빠진 피어가 쌓이지 않게(#126 리뷰 M-1).
-            // 세대가 같으면 원자 load 하나.
-            if let Some(net) = self.net.as_ref() {
-                net.refresh_copy(&mut self.peer_copy);
+            if let Some(t) = self.peer_table.as_mut() {
+                t.refresh();
             }
-            // 모니터/탭은 프레임 누적 전에 분기하므로 입력 방출 단위는 리샘플러 청크(패스스루면 1)다.
-            let granularity = if self.in_rs.is_passthrough() { 1 } else { RESAMPLE_CHUNK };
-            self.local.configure(&self.ctx.info, &self.ctx.counters, granularity);
-            self.pump_input();
-            let c = &self.ctx;
+            self.local.configure(&c.info, &c.counters, self.capture.granularity());
+            // 송신 큐 지연의 시작점(P1-3, 리뷰 M1): 이 패스에서 링을 비우기 직전 시각. 이번 패스에서 완성되는 프레임은
+            // 모두 이 시각을 쓴다 — 같은 패스의 뒤 프레임은 앞 프레임의 인코딩·송신을 기다린 시간까지 포함된다.
+            // (캡처에 남는 것은 프레임 미만이므로, 여기서 나가는 프레임의 마지막 샘플은 모두 이번 패스에 들어왔다.)
+            let pass_at = Instant::now();
+            self.capture.fill();
+            let muted = c.controls.input_muted.load(Ordering::Relaxed);
+            while let Some(block) = self.capture.next_block(muted) {
+                self.local.push(block);
+            }
+            while let Some(frame) = self.capture.next_frame() {
+                // 네트워크가 없으면 프레임은 버려진다(전에는 `ts`만 올렸다 — 송신에서만 쓰는 값이라 관찰되지 않는다).
+                if let (Some(tx), Some(table)) = (self.send.as_mut(), self.peer_table.as_mut()) {
+                    tx.send_frame(frame, pass_at, &mut table.copy, &c.stats, &mut self.lock_wait);
+                }
+            }
             // 인자 평가 순서 = 읽는 순서: 벽시계 → 출력 버스트 → (observe 안) 콜백 카운터.
             let timing = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);
             self.metro.service(&c.info, &c.counters, &c.stats, &timing, &mut self.lock_wait);
             let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &timing, &mut self.lock_wait);
             self.local.service(&c.info, &c.counters, &c.controls, &c.bank.slots[LOCAL_SOURCE], &c.stats, c.epoch);
-            self.local.track_occupancy(c.info.out_rate, &c.stats, self.in_rs.available());
+            self.local.track_occupancy(c.info.out_rate, &c.stats, self.capture.pending48());
             self.watch.check(&c.counters, &c.stats, c.epoch);
             let waited = std::time::Duration::from_nanos(std::mem::take(&mut self.lock_wait).ns);
             if DIAG_TIMING {
@@ -451,233 +356,7 @@ impl Worker {
             // 은닉 마감이 가까우면 짧게 잔다(Windows 고해상도 타이머라도 0.5ms 폴링은 마감을 넘길 수 있다).
             std::thread::sleep(if round.urgent { FINE_POLL } else { POLL });
         }
-        self.peers.close(&self.ctx.bank);
+        self.peers.close(&c.bank);
         log::info!("워커 종료");
-    }
-
-    fn pump_input(&mut self) {
-        // 송신 큐 지연의 시작점(P1-3, 리뷰 M1): 이 패스에서 링을 비우기 직전 시각. 이번 패스에서 완성되는 프레임은
-        // 모두 이 시각을 쓴다 — 같은 패스의 뒤 프레임은 앞 프레임의 인코딩·송신을 기다린 시간까지 포함된다.
-        // (cap_acc에 남는 것은 프레임 미만이므로, 여기서 나가는 프레임의 마지막 샘플은 모두 이번 패스에 들어왔다.)
-        let pass_at = Instant::now();
-        loop {
-            let n = self.in_cons.pop_slice(&mut self.in_tmp);
-            if n == 0 {
-                break;
-            }
-            let n = n - n % self.ich;
-            self.in_rs.push(&self.in_tmp[..n]);
-        }
-        let muted = self.ctx.controls.input_muted.load(Ordering::Relaxed);
-        // 리샘플 직후 모니터/탭으로 바로 보낸다(프레임 누적 대기 없음, PR #5 M-5).
-        loop {
-            let mut buf = std::mem::take(&mut self.in48_buf);
-            let frames = self.in_rs.pop(&mut buf);
-            if frames == 0 {
-                self.in48_buf = buf;
-                break;
-            }
-            let block = &mut buf[..frames * self.ich];
-            // 입력 뮤트: 송신/모니터/탭 모두 무음. 패킷은 계속 보내 수신측 타이밍을 유지한다.
-            if muted {
-                block.fill(0.0);
-            }
-            self.local.push(block);
-            self.cap_acc.extend(block.iter().copied());
-            self.in48_buf = buf;
-        }
-        let mut fb = std::mem::take(&mut self.frame_buf);
-        let mut acc = std::mem::take(&mut self.cap_acc);
-        drain_frames(&mut acc, &mut fb, pass_at, |f, at| self.on_capture_frame(f, at));
-        self.cap_acc = acc;
-        self.frame_buf = fb;
-    }
-
-    /// 에코 측정 대상 피어용 프레임(무음 + 클릭)을 만들어 인코드한다. 반환: (피어 id, 페이로드 길이).
-    fn probe_frame(&mut self) -> Option<(String, usize)> {
-        let now_us = self.ctx.epoch.elapsed().as_secs_f64() * 1e6;
-        let mut g = self.lock_wait.lock(&self.probe, &self.ctx.stats.lock_sites.probe_send);
-        let Some(pr) = g.as_mut() else {
-            self.alt_encoder = None;
-            return None;
-        };
-        if self.alt_encoder.is_none() {
-            match Encoder::new(self.ctx.cfg.codec, self.ich, self.ctx.cfg.opus_bitrate()) {
-                Ok(e) => self.alt_encoder = Some(e),
-                Err(e) => {
-                    log::warn!("에코 측정 인코더 생성 실패: {e}");
-                    return None;
-                }
-            }
-        }
-        pr.next_frame(&mut self.alt_frame, self.ich, now_us);
-        let enc = self.alt_encoder.as_mut()?;
-        let n = enc.encode(&self.alt_frame, &mut self.alt_payload).ok()?;
-        Some((pr.peer_id.clone(), n))
-    }
-
-    /// 피어별 Opus 자동 전환 정책 점검(200ms마다, PCM16 설정). 릴레이 부하 정책(전체)과 피어마다의 손실 피드백
-    /// 정책을 갱신하고, 인코더 예상 손실을 맞춘다(relay_codec.rs). 인코더 생성(풀이 비었을 때)도 여기, 워커에서 한다.
-    fn update_auto_codec(&mut self) {
-        if !self.auto_enabled {
-            return;
-        }
-        let Some(net) = self.net.clone() else {
-            return;
-        };
-        let now_d = self.ctx.epoch.elapsed();
-        // 직전 프레임에 릴레이 부하 전환 대상인데 PCM으로 나간 피어가 있으면(새 피어, 직접→릴레이) 바로 다시 본다(L1)
-        let refresh = net.take_auto_refresh();
-        if now_d < self.auto_check_at && !refresh {
-            return;
-        }
-        self.auto_check_at = now_d + AUTO_CODEC_CHECK;
-        let now = Instant::now();
-        let force = net.force_auto_opus();
-        let (relay_peers, measured_over) = net.relay_audio_load(&self.peer_copy);
-        let inputs = PolicyInputs {
-            pcm_configured: true,
-            relay_peers,
-            measured_over,
-            predicted_pcm_load: pcm_relay_load(self.frame, self.ich, relay_peers),
-        };
-        match self.relay_policy.update(now, inputs) {
-            Some(true) => {
-                net.set_relay_auto_opus(true);
-                log::info!(
-                    "릴레이 대역: 릴레이 피어 {relay_peers}명에게 Opus로 전환(예상 PCM 부하 {:.0}%, 측정 초과 {measured_over})",
-                    inputs.predicted_pcm_load * 100.0
-                );
-            }
-            Some(false) => {
-                net.set_relay_auto_opus(false);
-                log::info!("릴레이 대역: PCM16으로 복귀(릴레이 피어 {relay_peers}명, 예상 PCM 부하 {:.0}%)", inputs.predicted_pcm_load * 100.0);
-            }
-            None => {}
-        }
-        for a in &mut self.auto {
-            a.seen = false;
-        }
-        let (ich, bitrate) = (self.ich, self.ctx.cfg.opus_bitrate());
-        let (auto, pool) = (&mut self.auto, &mut self.auto_pool);
-        for peer in self.peer_copy.peers() {
-            let key = peer.key();
-            let idx = match auto.iter().position(|a| a.key == key) {
-                Some(i) => i,
-                None => {
-                    let enc = match pool.pop() {
-                        Some(e) => e,
-                        None => match Encoder::new(CodecKind::Opus, ich, bitrate) {
-                            Ok(e) => e,
-                            Err(e) => {
-                                log::warn!("{}: 자동 전환용 Opus 인코더 생성 실패: {e}", peer.id());
-                                continue;
-                            }
-                        },
-                    };
-                    auto.push(AutoTx::new(key, peer.id().to_string(), enc));
-                    auto.len() - 1
-                }
-            };
-            let a = &mut auto[idx];
-            a.seen = true;
-            a.on_relay = peer.sends_audio_via_relay();
-            let report = peer.remote_loss();
-            let loss = report.map(|(r, at)| (r.loss_pct, at));
-            match a.loss.update(now, true, loss) {
-                Some(true) => log::info!(
-                    "{}: 수신 손실 {:.1}%(상대 보고) — 이 피어에게 Opus로 전환(손실 피드백)",
-                    peer.id(),
-                    loss.map_or(0.0, |l| l.0)
-                ),
-                Some(false) => log::info!(
-                    "{}: 수신 손실 회복(상대 보고 {}) — PCM16으로 복귀",
-                    peer.id(),
-                    loss.map_or("없음".to_string(), |l| format!("{:.1}%", l.0))
-                ),
-                None => {}
-            }
-            a.loss_on = a.loss.active() || force;
-            // 인코더 예상 손실: 손실 피드백이면 보고 손실에 맞추고, 릴레이 부하로만 켜졌으면 기본값(설정 Opus와 같음)
-            let perc = auto_opus_perc(a.loss_on, a.on_relay, loss.map(|l| l.0));
-            if perc != a.perc && a.enc.set_loss_perc(perc).is_ok() {
-                a.perc = perc;
-            }
-        }
-        // 사라진 피어의 인코더는 풀로 돌려준다(다음 피어가 새 스트림으로 쓴다 — 켤 때 초기화한다)
-        let mut i = 0;
-        while i < self.auto.len() {
-            if self.auto[i].seen {
-                i += 1;
-            } else {
-                let a = self.auto.swap_remove(i);
-                self.auto_pool.push(a.enc);
-            }
-        }
-    }
-
-    /// 자동 전환 대상 피어마다 이 프레임을 그 피어 전용 Opus 인코더로 인코드한다(대상이 아니면 건너뜀).
-    /// `alt_peer` = 에코 측정 클릭 스트림을 받는 피어: 그동안은 설정 코덱(클릭)이 가므로 인코드하지 않고,
-    /// 측정이 끝나 다시 대상이 되면 새 스트림으로 초기화·예열한다(#66 리뷰 L2).
-    fn auto_frames(&mut self, frame: &[f32], alt_peer: Option<&str>) {
-        let relay_on = self.relay_policy.active();
-        for a in &mut self.auto {
-            a.len = None;
-            let want = auto_reason(relay_on, a.on_relay, a.loss_on).is_some() && alt_peer != Some(a.id.as_str());
-            if want && !a.encoding {
-                // 새 스트림: 상태 초기화 + 직전 프레임으로 예열(출력 버림). 첫 패킷이 Opus 알고리즘 지연(2.5ms)만큼
-                // 0으로 시작하지 않고 직전 소리에서 이어진다(전환 구간 불연속 3 → 1, 은닉 0).
-                a.enc.reset();
-                let _ = a.enc.encode(&self.relay_prev, &mut a.payload);
-            }
-            a.encoding = want;
-            if !want {
-                continue;
-            }
-            match a.enc.encode(frame, &mut a.payload) {
-                Ok(n) => a.len = Some(n),
-                Err(e) => {
-                    if self.encode_errors.is_multiple_of(1000) {
-                        log::warn!("자동 전환 Opus 인코드 실패({}회째): {e}", self.encode_errors + 1);
-                    }
-                    self.encode_errors += 1;
-                }
-            }
-        }
-        if self.auto_enabled {
-            self.relay_prev.copy_from_slice(frame);
-        }
-    }
-
-    /// `frame_at`: 송신 큐 지연의 시작점(이 프레임을 꺼낸 워커 패스의 시작 시각, `pump_input`).
-    fn on_capture_frame(&mut self, frame: &[f32], frame_at: Instant) {
-        let alt = if self.encoder.is_some() { self.probe_frame() } else { None };
-        self.update_auto_codec();
-        self.auto_frames(frame, alt.as_ref().map(|(id, _)| id.as_str()));
-        if let (Some(enc), Some(net)) = (self.encoder.as_mut(), self.net.as_ref()) {
-            let alt = alt.as_ref().map(|(id, n)| (id.as_str(), &self.alt_payload[..*n]));
-            let (auto, auto_flags, relay_on) = (&self.auto, self.auto_flags, self.relay_policy.active());
-            // 이유는 송신 순간의 경로로 정한다. 릴레이 부하 대상인데 아직 인코드하지 않은 피어(None)는 net이
-            // 표시해 두고 워커가 다음 프레임에서 바로 다시 본다(L1).
-            let lookup = |p: &Peer, kind: PathKind| -> Option<AutoPayload<'_>> {
-                let key = p.key();
-                let a = auto.iter().find(|a| a.key == key)?;
-                let reason = auto_reason(relay_on, kind == PathKind::Relay, a.loss_on)?;
-                Some(AutoPayload { payload: &a.payload[..a.len?], flags: auto_flags, reason })
-            };
-            // 자동 전환이 가능하면 대상 목록이 비어 있어도 넘긴다(첫 릴레이 피어도 L1 표시를 받게)
-            let auto_fn = self.auto_enabled.then_some(&lookup as _);
-            match enc.encode(frame, &mut self.payload) {
-                Ok(n) => net.send_audio_timed(&mut self.peer_copy, frame_at, &self.payload[..n], self.flags, self.frame_code, self.ts, &mut self.pkt, alt, auto_fn),
-                Err(e) => {
-                    // 레이트 제한 로그(리뷰 L10)
-                    if self.encode_errors.is_multiple_of(1000) {
-                        log::warn!("인코드 실패({}회째): {e}", self.encode_errors + 1);
-                    }
-                    self.encode_errors += 1;
-                }
-            }
-        }
-        self.ts = self.ts.wrapping_add(self.frame as u32);
     }
 }

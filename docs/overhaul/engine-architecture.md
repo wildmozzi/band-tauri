@@ -224,9 +224,9 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/jitter/tests.rs` | 결정적 단위 시뮬레이션 | |
 | `engine/worker/mod.rs` | `Worker` 조립·루프(단계를 순서대로 부르는 조정자), 정지 | 단계 순서 |
 | `engine/worker/clock.rs` | 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`) | 시각 추정 |
-| `engine/worker/capture.rs`(②b-2) | `Capture`: 입력 링 → 리샘플 → 48k 블록·프레임 | 입력 장치 형식·리샘플·프레임 크기 |
-| `engine/worker/send.rs`(②b-2) | `SendPath`: 프레임 → 인코드 → `send_audio`, 에코 클릭 스트림. 네트워크가 있을 때만 존재 | 코덱·패킷 플래그·송신 API |
-| `engine/worker/auto_codec.rs`(②b-2) | `AutoCodec`(`SendPath`의 부속): 피어별 자동 Opus 송신 상태(`relay_codec` 정책 연동) | 자동 전환 |
+| `engine/worker/capture.rs` | `Capture`: 입력 링 → 리샘플 → 48k 블록·프레임 | 입력 장치 형식·리샘플·프레임 크기 |
+| `engine/worker/send.rs` | `SendPath`: 프레임 → 인코드 → `send_audio`, 에코 클릭 스트림. 네트워크가 있을 때만 존재 | 코덱·패킷 플래그·송신 API |
+| `engine/worker/auto_codec.rs` | `AutoCodec`(`SendPath`의 부속): 피어별 자동 Opus 송신 상태(`relay_codec` 정책 연동) | 자동 전환 |
 | `engine/worker/peer_sources.rs` | `PeerSources`: 피어 미디어 표(명령 큐)·슬롯 배정·피어별 공급 순서·녹음 마커 | 피어 수명, 공급 순서 |
 | `engine/worker/peer_feed.rs` | `PeerFeed`: 피어 하나의 지터 → 소스 링 공급 | 콜백 구동 믹스 규칙 |
 | `engine/worker/local_path.rs` | `LocalPath`: 로컬 모니터·탭 공급, 여유 적응, 점유 통계 | 모니터 경로 |

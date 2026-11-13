@@ -100,6 +100,8 @@ impl Reference {
 }
 
 struct Packet {
+    /// 송신 seq(피어별, 패킷마다 +1). 수신 쪽 손실과 엔진 쪽 프레임 누락을 가르는 데 쓴다.
+    seq: u32,
     ts: u32,
     flags: u8,
     payload: Vec<u8>,
@@ -151,7 +153,7 @@ fn collect(cfg: &EngineConfig, want: usize) -> Vec<Packet> {
             continue;
         }
         let range = rx.open(&h, &mut buf[..n]).expect("엔진의 Audio 패킷이 복호화돼야 한다");
-        out.push(Packet { ts: h.timestamp, flags: h.flags, payload: buf[range].to_vec() });
+        out.push(Packet { seq: h.seq, ts: h.timestamp, flags: h.flags, payload: buf[range].to_vec() });
     }
     // 입력 링이 넘치면(워커가 2초 넘게 멈춤) 프레임 경계가 밀린다 — 그때는 아래 참조 비교가 "어디에도 없다"로 실패한다.
     out
@@ -183,13 +185,14 @@ fn assert_matches_reference(cfg: &EngineConfig, got: &[Packet], reference: &mut 
         assert_eq!(p.flags, want_flags, "패킷 {i}의 flags");
         if i > 0 {
             let d = p.ts.wrapping_sub(got[i - 1].ts);
-            // 증가분이 프레임의 2배 이상인 정수배면 엔진이 아니라 수신 쪽(이 시험의 소켓 버퍼)에서 패킷을 잃은 것이다.
-            assert!(
-                !(d >= 2 * frame && d % frame == 0 && d / frame < 1_000),
-                "시험 조건 밖(엔진 결함 아님): 패킷 {i} 앞에서 {}개를 잃었다(로컬 UDP 수신 버퍼, 부하). 다시 돌릴 것",
-                d / frame - 1
-            );
-            assert_eq!(d, frame, "패킷 {i}의 ts 증가분(프레임 {})", k0 + i);
+            let ds = p.seq.wrapping_sub(got[i - 1].seq);
+            // ts가 여러 프레임을 건너뛰었을 때 seq로 가른다(#136 리뷰 M2): seq도 같은 수만큼 건너뛰었으면 엔진은 보냈고 수신 쪽(이
+            // 시험의 소켓 버퍼)이 잃은 것 — 시험 조건 밖이다. seq는 이어지는데 ts만 건너뛰었으면 **엔진이 프레임을 빠뜨린 것**이다.
+            if d >= 2 * frame && d % frame == 0 && ds == d / frame {
+                panic!("시험 조건 밖(엔진 결함 아님): 패킷 {i} 앞에서 {}개를 잃었다(seq도 {ds} 건너뜀 — 로컬 UDP 수신 버퍼, 부하). 다시 돌릴 것", ds - 1);
+            }
+            assert_eq!(d, frame, "패킷 {i}의 ts 증가분(프레임 {}, seq 증가분 {ds}) — seq가 이어지는데 ts가 어긋나면 엔진이 프레임을 빠뜨렸거나 두 번 보낸 것", k0 + i);
+            assert_eq!(ds, 1, "패킷 {i}의 seq 증가분");
         }
         assert!(reference.get(k0 + i) == p.payload.as_slice(), "패킷 {i}(프레임 {})의 페이로드가 참조 인코더와 다르다", k0 + i);
     }
