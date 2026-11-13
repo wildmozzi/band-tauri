@@ -78,6 +78,9 @@ pub struct WorkerStats {
     pub thread_prio: crate::sys::prio::PrioSlot,
     /// 워커의 피어 미디어 표 길이(명령을 비운 직후, 엔진 ③). 진단·테스트: 표에 죽은 항목이 남는지 직접 본다.
     pub media_peers: AtomicU64,
+    /// 워커 반복 본문 시간(수면 제외)과 반복 시작 간격 분포(엔진 ③c 측정, 진단 전용 — 측정 시험이 비운다).
+    pub iter_body: crate::net::txlat::SendLatency,
+    pub iter_period: crate::net::txlat::SendLatency,
 }
 
 /// 콜백이 이 시간 동안 멈추면 장치를 잃은 것으로 본다.
@@ -330,7 +333,11 @@ impl Worker {
     pub fn run(mut self) {
         let _prio = crate::sys::prio::promote_engine_thread(&self.p.stats.thread_prio);
         log::info!("워커 시작: frame {} ch {}", self.frame, self.ich);
+        let mut last_start = Instant::now();
         while !self.p.stop.load(Ordering::Relaxed) {
+            let start = Instant::now();
+            self.p.stats.iter_period.record(start - last_start);
+            last_start = start;
             self.reconfigure_local();
             self.pump_input();
             let timing = self.timing();
@@ -344,6 +351,7 @@ impl Worker {
                 log::warn!("오디오 스트림 에러 누적 {}회(장치 분리 등)", errs);
                 self.reported_errors = errs;
             }
+            self.p.stats.iter_body.record(start.elapsed());
             // 은닉 마감이 가까우면 짧게 잔다(Windows 고해상도 타이머라도 0.5ms 폴링은 마감을 넘길 수 있다).
             std::thread::sleep(if urgent { FINE_POLL } else { POLL });
         }

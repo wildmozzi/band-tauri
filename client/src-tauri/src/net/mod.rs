@@ -128,6 +128,8 @@ pub struct NetShared {
     force_auto_opus: AtomicBool,
     /// 송신 큐 지연(프레임 생성 → send_to 완료, P1-3). 워커가 기록, 제어 스레드가 창을 돌린다.
     send_latency: txlat::SendLatency,
+    /// 워커 송신 경로의 락 대기(엔진 ③c 측정, 진단 전용 — 측정 시험만 비운다).
+    send_lock_wait: txlat::LockWaitHist,
     /// DSCP 마킹 상태(제어 스레드가 바뀔 때 갱신).
     qos_stats: Mutex<qos::QosStats>,
 }
@@ -209,6 +211,7 @@ impl Net {
             auto_refresh: AtomicBool::new(false),
             force_auto_opus: AtomicBool::new(false),
             send_latency: txlat::SendLatency::new(),
+            send_lock_wait: txlat::LockWaitHist::default(),
             qos_stats: Mutex::new(qos::QosStats::default()),
             recv_prio: Default::default(),
         });
@@ -388,6 +391,12 @@ impl Net {
         self.shared.send_latency.last()
     }
 
+    /// 워커 송신 경로 락 대기의 지난 호출 이후 분포(엔진 ③c 측정, 진단·테스트 전용).
+    #[doc(hidden)]
+    pub fn take_send_lock_wait(&self) -> txlat::LockWaitStats {
+        self.shared.send_lock_wait.take()
+    }
+
     pub fn stop(&mut self) {
         if self.shared.stop.swap(true, Ordering::SeqCst) {
             return;
@@ -511,8 +520,9 @@ impl NetShared {
         rbuf: &mut [u8; SEND_BUF_BYTES],
         auto: Option<AutoFn<'_, 'a>>,
         frame_at: Option<Instant>,
+        wait: &mut txlat::LockWait,
     ) -> Option<(u8, Option<CodecReason>)> {
-        let (addr, kind) = p.route()?;
+        let (addr, kind) = p.route_waited(wait)?;
         // 자동 전환 페이로드가 상한을 넘으면(있을 수 없지만) 그 피어에게는 설정 코덱으로 보낸다
         let (payload, flags, reason) = match auto.and_then(|f| f(p, kind)).filter(|a| a.payload.len() <= MAX_PAYLOAD_BYTES) {
             Some(a) => (a.payload, a.flags, Some(a.reason)),
@@ -619,14 +629,15 @@ impl NetShared {
         if payload.len() > MAX_PAYLOAD_BYTES || alt.is_some_and(|(_, a)| a.len() > MAX_PAYLOAD_BYTES) {
             return;
         }
-        let peers = self.peers.read();
+        let mut wait = txlat::LockWait::default();
+        let peers = wait.read(&self.peers);
         if peers.is_empty() {
             return;
         }
         let now = Instant::now();
         let mut rbuf = [0u8; SEND_BUF_BYTES];
         for p in peers.iter() {
-            if p.reflecting(now) {
+            if p.reflecting_waited(now, &mut wait) {
                 continue;
             }
             let (pl, au) = match alt {
@@ -635,7 +646,7 @@ impl NetShared {
                 Some((id, a)) if id == p.id() => (a, None),
                 _ => (payload, auto),
             };
-            if let Some((f, reason)) = self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, au, Some(frame_at)) {
+            if let Some((f, reason)) = self.send_audio_to(p, pl, flags, frame_code, timestamp, buf, &mut rbuf, au, Some(frame_at), &mut wait) {
                 let code = peer::TX_CODEC_SENT
                     | if f & packet::FLAG_OPUS != 0 { peer::TX_CODEC_OPUS } else { 0 }
                     | match reason {
@@ -646,6 +657,8 @@ impl NetShared {
                 p.tx_codec().store(code, Ordering::Relaxed);
             }
         }
+        drop(peers);
+        self.send_lock_wait.record(wait);
     }
 
     /// 에코 모드: 피어가 보낸 Audio 평문을 그대로(디코드 없이) 그 피어에게 되돌린다. 타임스탬프는 내 송신
@@ -664,7 +677,7 @@ impl NetShared {
         };
         let mut buf = [0u8; MAX_PACKET_BYTES];
         let mut rbuf = [0u8; SEND_BUF_BYTES];
-        self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf, None, None);
+        self.send_audio_to(p, plain, h.flags, h.frame_code, ts, &mut buf, &mut rbuf, None, None, &mut txlat::LockWait::default());
         let us = received.elapsed().as_secs_f32() * 1e6;
         let mut e = p.echo();
         e.reflect_us += (us - e.reflect_us) * 0.05;
