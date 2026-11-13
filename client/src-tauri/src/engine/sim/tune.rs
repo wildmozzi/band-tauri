@@ -468,7 +468,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     if !left[i] && p.peers[i].leave_us.is_some_and(|l| t >= l) {
                         if let Some(pos) = order.iter().position(|&x| x == i) {
                             // 마지막 통계는 제거 직전 것(이전 워커 사건의 결과)
-                            outs[i].js = sources.media_table()[pos].jitter().stats();
+                            outs[i].js = sources.media_at(pos).jitter().stats();
                             let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Remove(PeerKey::from_raw(i as u64 + 1)));
                             order.remove(pos);
                             left[i] = true;
@@ -482,9 +482,9 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             }
             let urgent = sources.service(&bank, &counters, &wstats, 48_000, &timing, &mut lock_wait).urgent;
             // 명령은 그 반복에 적용된다(J1): 표 길이·순서가 바로 맞고, 새 피어는 슬롯을 받고, 제거된 피어의 슬롯은 DRAIN이다.
-            assert_eq!(sources.media_table().len(), order.len(), "t={t}: 워커 표 길이");
+            assert_eq!(sources.table_len(), order.len(), "t={t}: 워커 표 길이");
             for (pos, &i) in order.iter().enumerate() {
-                assert_eq!(sources.media_table()[pos].shared().key, PeerKey::from_raw(i as u64 + 1), "t={t}: 표 순서");
+                assert_eq!(sources.media_at(pos).shared().key, PeerKey::from_raw(i as u64 + 1), "t={t}: 표 순서");
                 if slot_of[i].is_none() {
                     if let Some(s) = sources.feed_slot(pos) {
                         slot_of[i] = Some(s);
@@ -498,9 +498,8 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     churn.push((t, d.0, ChurnEv::Drain(d.1)));
                 }
             }
-            let pms = sources.media_table();
             for (pos, &i) in order.iter().enumerate() {
-                let c = pms[pos].jitter().stats().concealed;
+                let c = sources.media_at(pos).jitter().stats().concealed;
                 if c > seen_conc[i] {
                     outs[i].conceal_us.push(t);
                 }
@@ -514,13 +513,13 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             if !settled && t >= p.settle_us {
                 settled = true;
                 for (pos, &i) in order.iter().enumerate() {
-                    outs[i].js_settle = pms[pos].jitter().stats();
+                    outs[i].js_settle = sources.media_at(pos).jitter().stats();
                 }
             }
             if t >= next_trace {
                 for (pos, &i) in order.iter().enumerate() {
-                    let s = pms[pos].jitter().stats();
-                    let playing = pms[pos].jitter().is_playing();
+                    let s = sources.media_at(pos).jitter().stats();
+                    let playing = sources.media_at(pos).jitter().is_playing();
                     outs[i].samples.push(Sample { t: t as f64 / 1e6, buf: s.buffer_ms, tgt: s.target_ms, playing, concealed: s.concealed, concealed_loss: s.concealed_loss, produced: s.produced, jit: s.jitter_est_ms, lead: s.lead_ms, tail: s.tail_ms });
                     if playing {
                         outs[i].trace.push((t as f64 / 1e6, s.buffer_ms, s.target_ms));
@@ -541,7 +540,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             assert_eq!(sources.feed_slot(pos), Some(1 + i), "피어 {i}의 슬롯");
         }
         outs[i].margin = sources.feed_margin(pos).expect("슬롯이 배정된 피어");
-        let pm = &mut sources.media_table()[pos];
+        let pm = sources.media_at(pos);
         // 마지막 워커 사건 뒤에 도착해 큐에 남은 것까지 넣고 잰다(이전: 도착 즉시 삽입 — 같은 상태가 된다)
         let _ = pm.ingest(profile);
         assert_eq!(pm.rx_dropped(), 0, "하네스에서 수신 큐가 넘쳤다(피어 {i})");

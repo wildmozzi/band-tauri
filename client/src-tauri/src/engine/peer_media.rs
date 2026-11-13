@@ -357,18 +357,30 @@ impl MediaPort {
 impl MediaPortRt {
     /// 워커 반복 맨 앞: 명령을 끝까지 비워 표에 반영한다. `table`은 용량을 미리 잡아 둔 `Vec`이다.
     /// 제거한 항목은 반환 큐로 보낸다(가득 차 있으면 그 자리에서 해제 — 드문 경로). 모르는 키의 제거는 무시한다.
+    #[cfg(test)]
     pub fn drain(&mut self, table: &mut Vec<Box<PeerMedia>>) {
-        while let Some(cmd) = self.cmd.try_pop() {
+        while let Some(cmd) = self.next_cmd() {
             match cmd {
                 MediaCmd::Add(m) => table.push(m),
                 MediaCmd::Remove(key) => {
                     if let Some(i) = table.iter().position(|m| m.shared.key == key) {
                         let m = table.remove(i);
-                        let _ = self.ret.try_push(m);
+                        self.give_back(m);
                     }
                 }
             }
         }
+    }
+
+    /// 다음 명령(없으면 None). 워커(`PeerSources`)가 반복 맨 앞에서 끝까지 꺼내 자기 표에 반영한다(엔진 ②b-4 — 표가 미디어와
+    /// 공급 상태를 함께 가지므로 반영은 표 주인이 한다).
+    pub fn next_cmd(&mut self) -> Option<MediaCmd> {
+        self.cmd.try_pop()
+    }
+
+    /// 제거한 미디어를 반환 큐로 보낸다(해제는 제어 평면에서). 가득 차 있으면 그 자리에서 해제된다 — 드문 경로.
+    pub fn give_back(&mut self, m: Box<PeerMedia>) {
+        let _ = self.ret.try_push(m);
     }
 }
 

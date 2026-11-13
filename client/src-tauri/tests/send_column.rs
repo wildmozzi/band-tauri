@@ -189,7 +189,7 @@ fn assert_matches_reference(cfg: &EngineConfig, got: &[Packet], reference: &mut 
             // ts가 여러 프레임을 건너뛰었을 때 seq로 가른다(#136 리뷰 M2): seq도 같은 수만큼 건너뛰었으면 엔진은 보냈고 수신 쪽(이
             // 시험의 소켓 버퍼)이 잃은 것 — 시험 조건 밖이다. seq는 이어지는데 ts만 건너뛰었으면 **엔진이 프레임을 빠뜨린 것**이다.
             if d >= 2 * frame && d % frame == 0 && ds == d / frame {
-                panic!("시험 조건 밖(엔진 결함 아님): 패킷 {i} 앞에서 {}개를 잃었다(seq도 {ds} 건너뜀 — 로컬 UDP 수신 버퍼, 부하). 다시 돌릴 것", ds - 1);
+                panic!("시험 조건 밖(프레임 순서 결함은 아님): 패킷 {i} 앞에서 {}개가 오지 않았다(seq도 {ds} 건너뜀 — 엔진은 seq를 매겼고, 그 뒤 로컬 UDP 수신 버퍼나 송신 실패로 잃었다). 다시 돌릴 것", ds - 1);
             }
             assert_eq!(d, frame, "패킷 {i}의 ts 증가분(프레임 {}, seq 증가분 {ds}) — seq가 이어지는데 ts가 어긋나면 엔진이 프레임을 빠뜨렸거나 두 번 보낸 것", k0 + i);
             assert_eq!(ds, 1, "패킷 {i}의 seq 증가분");
