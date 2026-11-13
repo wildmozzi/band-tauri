@@ -2,8 +2,9 @@
 //!
 //! 가상 시간 하네스(`engine::sim::long`)와 달리 **실제 시계·실제 스레드·실제 UDP(127.0.0.1)**로 가짜 장치 엔진 6개를
 //! 풀메시로 연결해 `SOAK_MINUTES`(기본 60) 동안 연주시키고, 1초마다 `Engine::stats()` 스냅샷을 모아 리포트를 낸다.
-//! 측정 도구다: 수치 판정 기준은 없다(첫 실측 뒤 GOAL과 대조해 정한다). 실패는 두 가지뿐이다 —
-//! 측정 구간 중 피어가 Connected를 벗어남(재연결), 패닉(테스트 스레드든 엔진 스레드든).
+//! 야간 회귀 판정(P1-14b, 기준값은 아래 `LIMIT_*` 상수 한 곳): 이탈 0 · 패닉/엔진 정지 0 · CPU 1명 몫 ≤ 15% ·
+//! 전체 은닉 ≤ 0.1% · 은닉 5초 창 최대 ≤ 2% · RSS 증가 ≤ 20MB. 하나라도 넘으면 실패한다. xrun은 판정하지 않는다
+//! (공유 VM에서 가짜 장치 기상 지연이 만드는 값이라 엔진 회귀 신호가 아니다). 리포트 맨 위에 판정 표가 붙는다.
 //!
 //! 프리셋(클라이언트 `ENGINE_PRESETS`와 같은 값):
 //! - `soak_balanced` — 기본(균형): 버퍼 128 · 5ms · Opus · 모노 · 지터 0..80ms · 프로필 0.5
@@ -41,6 +42,23 @@ use serde_json::json;
 const PEERS: usize = 6;
 const WARMUP: Duration = Duration::from_secs(5);
 const TICK: Duration = Duration::from_secs(1);
+
+// ── 야간 회귀 판정 기준(P1-14b) ─────────────────────────────────────────────────────────────────────────
+// 근거: GOAL 2-3 "6인 풀메시 60분 CPU ≤ 15%·재연결 없이 유지". 첫 60분 실측(CI run 43186650655, 2026-11-12,
+// GitHub windows 러너): 기본 프리셋 은닉 0.001%·5초 창 최대 0.4%·CPU 3.06%·RSS 끝−최소 0.27MB·xrun 40,
+// 초저지연 은닉 0.000%·5초 창 최대 0.2%·CPU 2.38%·RSS 끝−최소 0.21MB·xrun 73. 이탈·패닉은 0개(무관용).
+/// 연주자 1명 몫 프로세스 CPU(4코어 기준 %), 측정 구간 전체 평균. GOAL 2-3 값 그대로(실측의 ~5배 여유).
+const LIMIT_NODE_CPU_PCT: f32 = 15.0;
+/// 전체 은닉률(누적 은닉 프레임 / 재생 프레임, %). 실측 0.001%의 100배 — 손실 없는 루프백에서 넘으면 회귀다.
+const LIMIT_CONCEAL_ALL_PCT: f64 = 0.1;
+/// 은닉 5초 창 최대(전 쌍, %). 전체 평균이 가리는 짧은 끊김 감시. 실측 최대 0.4%(0.2%)의 5배,
+/// 5ms 프레임이면 5초 창 1000프레임 중 20프레임(100ms) — 귀에 들리는 끊김이 한 번 생기는 수준.
+const LIMIT_CONCEAL_WIN_PCT: f32 = 2.0;
+/// RSS 증가(끝 − 측정 중 최소, MB). 누수 감시. 비교 대상을 "처음"이 아니라 "최소"로 잡는 이유: Windows 작업 집합이
+/// 첫 3분에 ~13MB 줄어(실측 68.7 → 56.1MB, 68.5 → 54.7MB) 처음 대비로는 그만큼의 누수가 가려진다. "최대"가 아니라
+/// "끝"을 쓰는 이유: 3분 이후에도 일시적 출렁임이 +1.6MB까지 있다. 실측 끝 − 최소 0.2~0.3MB라 20MB는 출렁임과 겹치지 않고,
+/// 60분이면 초당 ~5.6KB 누수를 잡는다(짧은 실행에서는 둔하다 — 야간 60분용 기준).
+const LIMIT_RSS_GROWTH_MB: f64 = 20.0;
 
 /// 두 프리셋 테스트가 같은 프로세스에서 겹쳐 돌지 않게 한다(엔진 12개면 CPU 수치가 의미 없다).
 static SOAK_LOCK: Mutex<()> = Mutex::new(());
@@ -236,6 +254,7 @@ struct Report {
     rss_start: Option<u64>,
     rss_end: Option<u64>,
     rss_max: Option<u64>,
+    rss_min: Option<u64>,
     timeline: Vec<Minute>,
     panicked: bool,
     not_running: Vec<String>,
@@ -301,6 +320,7 @@ fn run(preset: Preset) {
         .collect();
     let rss_start = rss_bytes();
     let mut rss_max = rss_start;
+    let mut rss_min = rss_start;
     let (pc0, tsc0) = (process_cycles(), tsc_now());
     let (mut pc_prev, mut tsc_prev) = (pc0, tsc0);
 
@@ -334,6 +354,9 @@ fn run(preset: Preset) {
         let rss = rss_bytes();
         if let (Some(r), Some(m)) = (rss, rss_max) {
             rss_max = Some(r.max(m));
+        }
+        if let (Some(r), Some(m)) = (rss, rss_min) {
+            rss_min = Some(r.min(m));
         }
         ticks += 1;
 
@@ -441,6 +464,7 @@ fn run(preset: Preset) {
         rss_start,
         rss_end,
         rss_max,
+        rss_min,
         timeline,
         panicked: PANICKED.load(Ordering::SeqCst),
         not_running,
@@ -459,16 +483,80 @@ fn run(preset: Preset) {
     std::fs::write(dir.join(format!("{stem}.json")), serde_json::to_string_pretty(&js).unwrap()).unwrap();
     println!("\n{md}\n리포트: {}", md_path.display());
 
-    // 실패 조건: 패닉, 엔진 정지, 측정 구간 중 Connected 이탈. 나머지는 측정만 한다.
-    assert!(!report.panicked, "soak 중 패닉");
-    assert!(report.not_running.is_empty(), "정지한 엔진: {:?}", report.not_running);
-    let off: Vec<String> = report
+    // 판정(P1-14b): 기준은 `LIMIT_*` 상수, 표는 리포트 맨 위에도 있다. 리포트를 먼저 쓰고 실패시킨다.
+    let failed: Vec<String> = judge(&report, frames_per_s)
+        .into_iter()
+        .filter(|c| c.pass == Some(false))
+        .map(|c| format!("{} — 기준 {}, 값 {}", c.item, c.limit, c.value))
+        .collect();
+    assert!(failed.is_empty(), "soak 회귀 판정 실패:\n  {}", failed.join("\n  "));
+}
+
+/// 판정 표 한 줄. `pass == None`은 판정 제외(측정만).
+struct Check {
+    item: &'static str,
+    limit: String,
+    value: String,
+    pass: Option<bool>,
+}
+
+/// 전체 은닉률(%): 30쌍 누적 은닉 프레임 / (측정 시간 × 프레임률 × 30).
+fn conceal_all_pct(r: &Report, frames_per_s: f64) -> f64 {
+    let frames = r.elapsed_s * frames_per_s;
+    let links = r.links.iter().flatten();
+    let n = links.clone().count() as f64;
+    links.map(|l| (l.concealed1 - l.concealed0) as f64).sum::<f64>() / (frames * n) * 100.0
+}
+
+fn conceal_win_max(r: &Report) -> f32 {
+    r.links.iter().flatten().map(|l| l.conceal_win_max).fold(0.0, f32::max)
+}
+
+fn judge(r: &Report, frames_per_s: f64) -> Vec<Check> {
+    let off: Vec<String> = r
         .links
         .iter()
         .enumerate()
         .flat_map(|(i, ls)| ls.iter().filter(|l| l.off_secs > 0).map(move |l| format!("p{i}→{} {}회 {}초", l.peer_id, l.off_events, l.off_secs)))
         .collect();
-    assert!(off.is_empty(), "Connected 이탈: {off:?}");
+    let conceal = conceal_all_pct(r, frames_per_s);
+    let win = conceal_win_max(r);
+    let rss_growth = match (r.rss_end, r.rss_min) {
+        (Some(e), Some(m)) => Some(e.saturating_sub(m) as f64 / 1e6),
+        _ => None,
+    };
+    let xr: u64 = r.xruns.iter().sum();
+    vec![
+        Check {
+            item: "피어 상태 이탈(Connected 아님, 30쌍)",
+            limit: "0".into(),
+            value: if off.is_empty() { "0".into() } else { off.join(", ") },
+            pass: Some(off.is_empty()),
+        },
+        Check { item: "패닉", limit: "없음".into(), value: if r.panicked { "있음".into() } else { "없음".into() }, pass: Some(!r.panicked) },
+        Check {
+            item: "정지한 엔진",
+            limit: "없음".into(),
+            value: if r.not_running.is_empty() { "없음".into() } else { r.not_running.join(", ") },
+            pass: Some(r.not_running.is_empty()),
+        },
+        Check {
+            item: "CPU 연주자 1명 몫(4코어 %, 전체 평균)",
+            limit: format!("≤ {LIMIT_NODE_CPU_PCT}"),
+            value: format!("{:.2}", r.node_cpu_total),
+            // NaN(측정 실패)이면 실패 — GOAL 2-3의 핵심 수치를 조용히 건너뛰지 않는다.
+            pass: Some(r.node_cpu_total <= LIMIT_NODE_CPU_PCT),
+        },
+        Check { item: "은닉률 전체(%)", limit: format!("≤ {LIMIT_CONCEAL_ALL_PCT}"), value: format!("{conceal:.3}"), pass: Some(conceal <= LIMIT_CONCEAL_ALL_PCT) },
+        Check { item: "은닉률 5초 창 최대(전 쌍, %)", limit: format!("≤ {LIMIT_CONCEAL_WIN_PCT}"), value: format!("{win:.2}"), pass: Some(win <= LIMIT_CONCEAL_WIN_PCT) },
+        Check {
+            item: "RSS 증가(끝 − 최소, MB)",
+            limit: format!("≤ {LIMIT_RSS_GROWTH_MB}"),
+            value: rss_growth.map(|g| format!("{g:.1}")).unwrap_or_else(|| "n/a(측정 불가, 판정 제외)".into()),
+            pass: rss_growth.map(|g| g <= LIMIT_RSS_GROWTH_MB),
+        },
+        Check { item: "xrun(6엔진 합)", limit: "판정 제외(가짜 장치)".into(), value: xr.to_string(), pass: None },
+    ]
 }
 
 fn fmt_minutes(m: f64) -> String {
@@ -496,8 +584,10 @@ fn render(r: &Report, frames_per_s: f64) -> (String, serde_json::Value) {
             })
         })
         .collect();
-    let conceal_total: f64 = link_rows.iter().map(|(_, _, c, _)| c).sum();
-    let conceal_all_pct = conceal_total / (frames * link_rows.len() as f64) * 100.0;
+    let conceal_all_pct = conceal_all_pct(r, frames_per_s);
+    let conceal_win_max = conceal_win_max(r);
+    let checks = judge(r, frames_per_s);
+    let all_pass = checks.iter().all(|c| c.pass != Some(false));
     let per_link_pct: Vec<f32> = link_rows.iter().map(|(_, _, c, _)| (c / frames * 100.0) as f32).collect();
     let per_link_sorted = sorted(per_link_pct.clone());
     let all_buffer = sorted(r.links.iter().flatten().flat_map(|l| l.buffer.iter().cloned()).collect());
@@ -522,7 +612,17 @@ fn render(r: &Report, frames_per_s: f64) -> (String, serde_json::Value) {
         r.connect_s,
         WARMUP.as_secs()
     );
-    let _ = writeln!(md, "| 항목 | 값 |\n|---|---|");
+    let _ = writeln!(md, "## 회귀 판정: {}\n", if all_pass { "통과" } else { "**실패**" });
+    let _ = writeln!(md, "| 항목 | 기준 | 값 | 통과 |\n|---|---|---|---|");
+    for c in &checks {
+        let mark = match c.pass {
+            Some(true) => "✅",
+            Some(false) => "❌",
+            None => "—",
+        };
+        let _ = writeln!(md, "| {} | {} | {} | {mark} |", c.item, c.limit, c.value);
+    }
+    let _ = writeln!(md, "\n## 측정값\n\n| 항목 | 값 |\n|---|---|");
     let _ = writeln!(md, "| 피어 상태 이탈(Connected 아님, 30쌍 합) | {off_events}회 · {off_secs}초 |");
     let _ = writeln!(md, "| 패닉 / 정지한 엔진 | {} / {:?} |", r.panicked, r.not_running);
     let _ = writeln!(md, "| xrun(측정 구간, 6엔진 합 / 엔진별) | {xr_total} / {:?} (예열까지 {}) |", r.xruns, r.xruns_warmup);
@@ -541,7 +641,7 @@ fn render(r: &Report, frames_per_s: f64) -> (String, serde_json::Value) {
     let _ = writeln!(
         md,
         "| 은닉률 5초 창 최대(전 쌍) | {:.2}% |",
-        r.links.iter().flatten().map(|l| l.conceal_win_max).fold(0.0, f32::max)
+        conceal_win_max
     );
     let _ = writeln!(md, "| 버퍼 지연 p50 / p99 / 최대 (ms) | {:.2} / {:.2} / {:.2} |", q(&all_buffer, 0.5), q(&all_buffer, 0.99), all_buffer.last().cloned().unwrap_or(f32::NAN));
     let _ = writeln!(md, "| 재생 지연(playout) p50 / p99 (ms) | {:.2} / {:.2} |", q(&all_playout, 0.5), q(&all_playout, 0.99));
@@ -556,7 +656,7 @@ fn render(r: &Report, frames_per_s: f64) -> (String, serde_json::Value) {
     );
     let _ = writeln!(md, "| 워커 CPU(1코어 %) p50 / p99 | {:.2} / {:.2} |", q(&worker, 0.5), q(&worker, 0.99));
     let _ = writeln!(md, "| 출력 콜백 p99(µs) p50 / p99, 최대 | {:.0} / {:.0}, {:.0} |", q(&cb, 0.5), q(&cb, 0.99), r.cb_max_us);
-    let _ = writeln!(md, "| RSS 처음 / 끝 / 최대 (MB) | {} / {} / {} |", mb(r.rss_start), mb(r.rss_end), mb(r.rss_max));
+    let _ = writeln!(md, "| RSS 처음 / 끝 / 최소 / 최대 (MB) | {} / {} / {} / {} |", mb(r.rss_start), mb(r.rss_end), mb(r.rss_min), mb(r.rss_max));
 
     let _ = writeln!(md, "\n## 피어 쌍별\n\n| 쌍 | 이탈 회/초 | 은닉 % | 늦은 패킷 | 5초 창 은닉 최대 % | 손실 최대 % | 버퍼 p50/p99 ms | 목표 p50 ms | 보정 최대 cent |\n|---|---|---|---|---|---|---|---|---|");
     for ((i, l, _, late), pct) in link_rows.iter().zip(&per_link_pct) {
@@ -611,7 +711,7 @@ fn render(r: &Report, frames_per_s: f64) -> (String, serde_json::Value) {
             "overall": conceal_all_pct,
             "perLinkP50": q(&per_link_sorted, 0.5),
             "perLinkMax": per_link_sorted.last(),
-            "window5sMax": r.links.iter().flatten().map(|l| l.conceal_win_max).fold(0.0, f32::max),
+            "window5sMax": conceal_win_max,
         },
         "bufferMs": { "p50": q(&all_buffer, 0.5), "p99": q(&all_buffer, 0.99), "max": all_buffer.last() },
         "playoutMs": { "p50": q(&all_playout, 0.5), "p99": q(&all_playout, 0.99) },
@@ -619,7 +719,11 @@ fn render(r: &Report, frames_per_s: f64) -> (String, serde_json::Value) {
         "nodeCpuPct4Core": { "mean": r.node_cpu_total, "tickP50": q(&node_tick, 0.5), "tickP99": q(&node_tick, 0.99), "tickMax": node_tick.last() },
         "workerPct1Core": { "p50": q(&worker, 0.5), "p99": q(&worker, 0.99) },
         "callbackP99Us": { "p50": q(&cb, 0.5), "p99": q(&cb, 0.99), "max": r.cb_max_us },
-        "rssBytes": { "start": r.rss_start, "end": r.rss_end, "max": r.rss_max },
+        "rssBytes": { "start": r.rss_start, "end": r.rss_end, "max": r.rss_max, "min": r.rss_min },
+        "verdict": {
+            "pass": all_pass,
+            "checks": checks.iter().map(|c| json!({ "item": c.item, "limit": c.limit, "value": c.value, "pass": c.pass })).collect::<Vec<_>>(),
+        },
         "links": link_rows.iter().zip(&per_link_pct).map(|((i, l, _, late), pct)| {
             let b = sorted(l.buffer.clone());
             json!({
@@ -649,13 +753,13 @@ fn render(r: &Report, frames_per_s: f64) -> (String, serde_json::Value) {
 }
 
 #[test]
-#[ignore = "soak(측정 도구, 기본 60분): SOAK_MINUTES=3 cargo test --release --features test-support --test soak soak_balanced -- --ignored --nocapture"]
+#[ignore = "soak(야간 회귀 판정, 기본 60분): SOAK_MINUTES=3 cargo test --release --features test-support --test soak soak_balanced -- --ignored --nocapture"]
 fn soak_balanced() {
     run(preset_balanced());
 }
 
 #[test]
-#[ignore = "soak(측정 도구, 기본 60분): SOAK_MINUTES=3 cargo test --release --features test-support --test soak soak_ultra_low -- --ignored --nocapture"]
+#[ignore = "soak(야간 회귀 판정, 기본 60분): SOAK_MINUTES=3 cargo test --release --features test-support --test soak soak_ultra_low -- --ignored --nocapture"]
 fn soak_ultra_low() {
     run(preset_ultra_low());
 }
