@@ -834,8 +834,8 @@ fn churn_add_remove_events_match_fixture() {
     // 4는 1이 비운 슬롯 2를 FREE가 된 뒤에 받았다
     assert!(at(4, &|e| matches!(e, ChurnEv::Slot(_))).unwrap().0 > at(1, &|e| matches!(e, ChurnEv::Free(_))).unwrap().0);
     // 남은 피어(4·5)는 끝까지 재생 중이고, 다른 피어의 추가·제거가 은닉을 만들지 않았다(무손실 회선)
-    for i in 0..6 {
-        let js = &out.peers[i].js;
+    for (i, peer) in out.peers.iter().enumerate() {
+        let js = &peer.js;
         assert!(js.produced > 1_000, "피어 {i}: 생산 {}", js.produced);
         assert_eq!(js.concealed, 0, "피어 {i}: 무손실 회선에서 은닉");
     }
