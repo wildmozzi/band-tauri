@@ -73,9 +73,16 @@ mod tests {
 
     /// 워커처럼 잠들었다 깨어 짧게 일하는 스레드의 CPU%를 정확히 재는지(리뷰 H1: `GetThreadTimes`는 이 패턴에서
     /// ±50% 틀렸다). 스레드가 스스로 `Instant`로 잰 바쁜 시간 합(기준)과 사이클/TSC 비율을 비교한다.
+    ///
+    /// 실시간 시험(P3-15): 병렬 `cargo test --lib`에서는 sleep이 늘어나 1.5초 창 안 깨어남 횟수가 크게 줄고
+    /// (1000/200µs의 기준이 이상값 16.7% 대신 0.7~11%), 회당 깨기·잠들기 비용 비중이 커져 오차가 +20%를 넘는다
+    /// (2026-11-13 로컬 20회 중 1회 +20.2%). 그래서 `#[ignore]`로 빼고 CI realtime 잡이 직렬로 돌린다. lib 안
+    /// 실시간 시험은 이름이 `realtime_`으로 시작해야 그 잡 필터(`kind(lib) & test(/::realtime_/)`)에 잡힌다.
+    /// 로컬: `cargo test --lib realtime_ -- --ignored`.
     #[cfg(all(windows, target_arch = "x86_64"))]
     #[test]
-    fn cycles_track_sleepy_busy_thread() {
+    #[ignore = "realtime: 벽시계·스케줄러 의존 — CI realtime 잡에서 직렬 실행"]
+    fn realtime_cycles_track_sleepy_busy_thread() {
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
         for (sleep_us, busy_us) in [(1000u64, 200u64), (5000, 500), (2500, 1000)] {
