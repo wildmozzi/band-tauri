@@ -1,7 +1,8 @@
 //! 진단(P2-5): 엔진 통계 타임라인 기록과 진단 zip 내보내기.
 //!
-//! 기록 스레드는 1초마다 `EngineManager::snapshot()`(엔진 슬롯 락을 잠깐 잡고 `Engine::stats()`)을 부른다.
-//! UI가 `engine_stats`를 부르는 것과 같은 경로다. RT 콜백(`engine/rt.rs`)에는 아무것도 추가하지 않는다.
+//! 기록 스레드는 1초마다 받은 스냅샷 함수를 부른다. 앱에서는 어댑터(`commands::DiagState`)가
+//! `EngineManager::snapshot()`(엔진 슬롯 락을 잠깐 잡고 `Engine::stats()`)을 넘긴다 — UI가 `engine_stats`를 부르는 것과 같은 경로다.
+//! `diag`는 `manager`를 모른다(엔진 ⑤). 입력 타입은 `engine::report::EngineSnapshot`. RT 콜백(`engine/rt.rs`)에는 아무것도 추가하지 않는다.
 
 pub mod export;
 pub mod mask;
@@ -14,19 +15,8 @@ use std::time::Duration;
 use parking_lot::{Condvar, Mutex};
 
 use crate::engine::config::EngineConfig;
-use crate::engine::report::EngineStats;
-use crate::manager::EngineManager;
+use crate::engine::report::EngineSnapshot;
 use timeline::{Sample, Timeline, DEFAULT_CAPACITY, SAMPLE_INTERVAL_MS};
-
-/// 엔진 한 순간의 상태(기록 스레드 입력).
-pub struct Snapshot {
-    pub stats: EngineStats,
-    pub config: EngineConfig,
-    /// 합주(네트워크) 세션인지
-    pub network: bool,
-    /// 엔진 세션 번호(`EngineManager` generation, 시작·정지마다 증가)
-    pub session: u64,
-}
 
 struct Inner {
     timeline: Timeline,
@@ -78,7 +68,7 @@ impl Diagnostics {
 
     /// 한 번 기록한다. 엔진이 있으면 샘플을 넣고, 엔진이 막 없어졌으면 정지 표시 샘플을 한 번 넣는다.
     /// 엔진이 계속 없으면 아무것도 넣지 않는다(빈 시간은 `t` 간격으로 보인다).
-    pub fn record(&self, now_ms: u64, snap: Option<Snapshot>) {
+    pub fn record(&self, now_ms: u64, snap: Option<EngineSnapshot>) {
         let mut g = self.inner.lock();
         match snap {
             Some(s) => {
@@ -110,13 +100,16 @@ impl Diagnostics {
         f(&g.timeline, g.last_config.as_ref(), g.was_active)
     }
 
-    /// 1초마다 기록하는 스레드를 띄운다. `shutdown()`으로 멈춘다.
-    pub fn spawn_recorder(self: &Arc<Self>, manager: Arc<EngineManager>) -> std::io::Result<std::thread::JoinHandle<()>> {
+    /// 1초마다 `snapshot()`을 불러 기록하는 스레드를 띄운다. `shutdown()`으로 멈춘다.
+    pub fn spawn_recorder(
+        self: &Arc<Self>,
+        snapshot: impl Fn() -> Option<EngineSnapshot> + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
         let me = self.clone();
         std::thread::Builder::new().name("band-diag".into()).spawn(move || {
             let interval = Duration::from_millis(SAMPLE_INTERVAL_MS);
             while !me.stop.load(Ordering::Acquire) {
-                me.record(crate::sys::time::unix_ms(), manager.snapshot());
+                me.record(crate::sys::time::unix_ms(), snapshot());
                 let mut g = me.wake.0.lock();
                 if me.stop.load(Ordering::Acquire) {
                     break;
@@ -136,11 +129,12 @@ impl Diagnostics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::report::EngineStats;
 
-    fn snap(running: bool) -> Snapshot {
+    fn snap(running: bool) -> EngineSnapshot {
         let mut stats = EngineStats::stopped();
         stats.running = running;
-        Snapshot { stats, config: EngineConfig::default(), network: true, session: 7 }
+        EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 7 }
     }
 
     #[test]
@@ -148,7 +142,7 @@ mod tests {
         let d = Diagnostics::new(10);
         d.record(1, Some(snap(true)));
         // 1초 안에 재시작: 정지 표시는 없지만 session이 바뀐다
-        d.record(2, Some(Snapshot { session: 9, ..snap(true) }));
+        d.record(2, Some(EngineSnapshot { session: 9, ..snap(true) }));
         d.record(3, None);
         d.with_timeline(|tl, _, _| {
             let v: Vec<_> = tl.iter().map(|s| (s.t, s.session, s.network, s.running)).collect();
@@ -185,11 +179,13 @@ mod tests {
     #[test]
     fn recorder_thread_samples_and_stops() {
         use crate::engine::device::fake::FakeBackend;
+        use crate::manager::EngineManager;
         use crate::net::NetOptions;
         let mgr = Arc::new(EngineManager::new(Arc::new(FakeBackend::silence(48_000)), NetOptions::default()));
         mgr.test_start(EngineConfig::default()).unwrap();
         let d = Arc::new(Diagnostics::new(10));
-        let h = d.spawn_recorder(mgr.clone()).unwrap();
+        let m = mgr.clone();
+        let h = d.spawn_recorder(move || m.snapshot()).unwrap();
         // 첫 기록은 즉시
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while d.with_timeline(|tl, _, _| tl.is_empty()) && std::time::Instant::now() < deadline {
