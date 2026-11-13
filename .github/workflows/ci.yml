@@ -295,7 +295,8 @@ jobs:
         timeout-minutes: 20
         run: cargo nextest run --no-run
       - name: Realtime tests (직렬, 3회까지)
-        timeout-minutes: 20
+        # 37개 직렬 약 22분(2026-11-13, ③c 측정 시험 추가 뒤) + 재시도 여유. 넘으면 시험 구성 재검토
+        timeout-minutes: 35
         run: cargo nextest run -E 'kind(test)' --run-ignored only --retries 2 --test-threads 1 --no-fail-fast --success-output final --failure-output immediate-final
 
   relay:
