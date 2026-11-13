@@ -83,7 +83,7 @@
 | P2-12 | 프로필 사진을 base64로 Supabase `user_metadata`에 저장(#100 발견) → JWT가 커져 모든 요청·WS `auth` 메시지가 무거워지고 토큰 크기 한도에 걸릴 수 있음. Storage 업로드 + URL만 metadata에, 기존 base64는 읽을 때 무시 | 단위 테스트(업로드 경로), JWT 크기 확인 | 대기 (데모 단계라 후순위, 운영 Storage 버킷 설정은 사용자 승인) |
 | P3-13 | 데모 ScoreDisplay 정리(#105 발견): 첫 렌더·리사이즈의 페이지 분할 규칙 통일(지금 창 크기를 조금 바꾸면 페이지 수가 달라짐), 커서 effect가 측정·페이지마다 rAF 루프 재생성·매 프레임 Math.random 로그, console.log 과다 | scoreLayout 테스트 | 대기 (데모, 낮은 우선순위) |
 | P3-14 | e2e `port.test.ts` 동시 포트 테스트 flaky(#105 발견) — 원인 확인 후 결정적으로 | 20회 반복 녹색 | 완료(#114 — pick-port 잠금 원자 생성(link)·죽은 잠금 회수 직렬화, 제품 코드 버그였음; 부하 12병렬 100회 녹색) |
-| P3-15 | `sys::cpu::tests::cycles_track_sleepy_busy_thread` 부하 의존 flaky(전체 병렬 --lib 실행에서만 실패, 단독 통과; #131 리뷰) — 실시간 묶음(ignore realtime)으로 옮기거나 직렬화 | 병렬 --lib 20회 녹색 | 대기 |
+| P3-15 | `sys::cpu::tests::cycles_track_sleepy_busy_thread` 부하 의존 flaky(전체 병렬 --lib 실행에서만 실패, 단독 통과; #131 리뷰) — 실시간 묶음(ignore realtime)으로 옮기거나 직렬화 | 병렬 --lib 20회 녹색 | 완료(#135 — realtime_ 시험으로 직렬 realtime 잡에서, 잡 필터에 lib realtime_ 포함) |
 | P3-16 | 루프백 `link_matrix` 엄격 판정(480/5ms 추정, loopback.rs:528)이 부하에 따라 첫 회 실패 — #134 전·후 모두 관찰. 원인 확인 후 판정을 결정적으로 또는 재시도 근거 명시 | 실시간 10회 녹색 | 대기 |
 | P3-17 | `rt_alloc` 전역 할당 카운터 경합으로 로컬에서 6회 중 1회 실패(#134 리뷰, PR 무관) — 측정 구간을 스레드별로 | 20회 녹색 | 대기 |
 | P2-5 | 로그/진단 내보내기(엔진 통계 타임라인 + 설정) | 버튼 하나로 zip | 완료(PR #32, 2026-11-11; **[사람]** 실제 앱에서 내보내기 대화상자·연속 클릭·zip 로그 마스킹 확인) |
