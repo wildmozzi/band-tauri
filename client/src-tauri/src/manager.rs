@@ -15,7 +15,7 @@ use crate::engine::measure::{EchoReport, LoopbackReport, MeasureVerdict};
 use crate::engine::metronome::{MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OFFSET_MS};
 use crate::engine::device::AudioBackend;
 use crate::engine::mixer::MixControls;
-use crate::engine::report::EngineStats;
+use crate::engine::report::{EngineSnapshot, EngineStats};
 use crate::engine::Engine;
 use crate::net::peer::LocalDescriptor;
 use crate::net::NetOptions;
@@ -279,9 +279,9 @@ impl EngineManager {
     }
 
     /// 진단 기록용(P2-5): 엔진이 있으면 통계·설정·네트워크 여부. 슬롯 락은 `stats()`만큼만 잡는다.
-    pub fn snapshot(&self) -> Option<crate::diag::Snapshot> {
+    pub fn snapshot(&self) -> Option<EngineSnapshot> {
         let s = self.slot.lock();
-        s.engine.as_ref().map(|e| crate::diag::Snapshot {
+        s.engine.as_ref().map(|e| EngineSnapshot {
             stats: e.stats(),
             config: e.config().clone(),
             network: e.has_network(),
