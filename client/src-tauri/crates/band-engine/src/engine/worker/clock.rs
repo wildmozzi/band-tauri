@@ -1,10 +1,17 @@
 //! 출력 콜백 시각 추정: 재생 프레임 카운터 → 콜백 시각(`DeviceClock`), 반복마다의 공급 타이밍(`FeedTiming`).
 
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use band_dsp::config::INTERNAL_RATE;
 use band_dsp::stats::AudioCounters;
 use super::OUT_CHUNK;
+
+/// 워커 폴링 주기. Windows에서도 std::thread::sleep은 고해상도 타이머를 쓴다. (공개 범위는 `worker/mod.rs`의 재노출이 정한다 —
+/// 제품 빌드는 엔진 안, `test-support`는 하네스까지.)
+pub const POLL: Duration = Duration::from_micros(500);
+/// 피어 은닉 마감이 가까울 때의 폴링 주기.
+pub const FINE_POLL: Duration = Duration::from_micros(150);
 
 // ============================================================================
 // 장치 클럭 추정

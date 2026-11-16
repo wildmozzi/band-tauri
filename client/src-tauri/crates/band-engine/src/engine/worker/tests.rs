@@ -4,6 +4,7 @@ use super::local::{gcd, lcm};
 use band_dsp::config::MAX_PAYLOAD_BYTES;
 use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
+use std::time::Duration;
 
 #[test]
 fn batched_frames_share_pass_start_for_send_queue() {
@@ -297,7 +298,7 @@ fn mismatched_feed_resampler_gets_no_slot_and_worker_never_allocates() {
     use crate::engine::media_port::media_port;
     use band_dsp::peer_media::{MediaCmd, MediaSettings, PeerMedia};
     use crate::engine::record::MarkSink;
-    use crate::engine::sim::alloc::counted;
+    use crate::testing::alloc::counted;
     use ringbuf::traits::Producer;
     use band_dsp::media_link::{media_link, PeerKey};
     let counters = Arc::new(AudioCounters::default());

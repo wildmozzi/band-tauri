@@ -7,8 +7,6 @@
 pub mod cpuprof;
 pub mod device;
 pub mod flac;
-#[cfg(test)]
-mod sim;
 pub mod measure;
 pub mod media_port;
 pub mod metronome;

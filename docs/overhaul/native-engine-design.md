@@ -336,7 +336,7 @@ off len 필드
    - 인코더 예상 손실(`OPUS_SET_PACKET_LOSS_PERC`) = 보고 손실 올림, 2..25%(릴레이 경로이면 기본 5% 이상). 릴레이 부하로만 켜졌으면 5%(1.3절 설정 Opus와 같음). 2.5ms 프레임은 CELT 전용이라 in-band FEC(LBRR, SILK 전용)는 실제로 실리지 않는다. 이득은 Opus PLC와 손실률에 맞춰 프레임 간 예측을 줄이는 CELT 에너지 부호화다(손실 뒤 회복이 빠름). 은닉 **비율**은 손실을 따라가므로 거의 그대로이고, 들리는 품질(접합 불연속·무음)이 좋아진다.
    - 설정 코덱이 Opus이면 이 정책은 없다(이미 Opus PLC, 예상 손실 5% 고정 — 피어별 조정은 범위 밖).
    - 상태: `PeerStats.txCodecReason = 'lossFeedback'`(`txCodecAuto` true), `remoteLossPct`·`remoteConcealPct`(상대 보고, 3초 넘게 없으면 null).
-   - 시뮬레이션(`engine::sim::loss_codec::loss_feedback_sim`, 가상 시간: PCM16 mono 2.5ms, 지연 5ms + 지터 U(0,1ms), 실제 지터 버퍼, 손실 0..40초 뒤 깨끗한 회선, 같은 시드의 PCM16 고정 대조군과 비교, 비교 구간 = 전환 1초 뒤부터 손실 끝까지):
+   - 시뮬레이션(하네스 `crates/band-engine/tests/sim/loss_codec.rs`의 `loss_feedback_sim`, 가상 시간: PCM16 mono 2.5ms, 지연 5ms + 지터 U(0,1ms), 실제 지터 버퍼, 손실 0..40초 뒤 깨끗한 회선, 같은 시드의 PCM16 고정 대조군과 비교, 비교 구간 = 전환 1초 뒤부터 손실 끝까지):
 
      | 회선 | 실제 손실 | 전환 | 복귀 | 예상 손실 설정 | 은닉 PCM→자동 | 불연속/s PCM→자동 | 끊김 ms/s PCM→자동 |
      |---|---|---|---|---|---|---|---|
