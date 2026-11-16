@@ -26,17 +26,17 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::config::{CodecKind, EngineConfig, HEADER_BYTES, MAX_PACKET_BYTES};
-use band_lib::engine::device::fake::{FakeBackend, OpenGate};
-use band_lib::engine::jitter as jitter_stats;
-use band_lib::engine::mixer::MixControls;
-use band_lib::net::types::PeerStateKind;
-use band_lib::engine::Engine;
-use band_lib::manager::EngineManager;
-use band_lib::net::crypto::KeyPair;
-use band_lib::net::packet::{Header, PacketType};
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::NetOptions;
+use band_lib::testing::engine::config::{CodecKind, EngineConfig, HEADER_BYTES, MAX_PACKET_BYTES};
+use band_lib::testing::engine::device::fake::{FakeBackend, OpenGate};
+use band_lib::testing::engine::jitter as jitter_stats;
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::net::types::PeerStateKind;
+use band_lib::testing::engine::Engine;
+use band_lib::testing::manager::EngineManager;
+use band_lib::testing::net::crypto::KeyPair;
+use band_lib::testing::net::packet::{Header, PacketType};
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::NetOptions;
 use parking_lot::Mutex;
 use rand::{Rng, SeedableRng};
 
@@ -45,7 +45,7 @@ static RT_LOCK: Mutex<()> = Mutex::new(());
 const SINE_HZ: f64 = 440.0;
 const SINE_AMP: f32 = 0.5;
 
-fn sine_source() -> Arc<band_lib::engine::device::fake::SourceFn> {
+fn sine_source() -> Arc<band_lib::testing::engine::device::fake::SourceFn> {
     Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
         for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
             let t = (start + i as u64) as f64 / 48_000.0;
@@ -215,7 +215,7 @@ impl Proxy {
         let (st, fw, dr) = (stop.clone(), forwarded.clone(), dropped.clone());
         let thread = std::thread::spawn(move || {
             // 프록시는 "네트워크"를 흉내 낸다. 실제 망은 로컬 CPU 부하에 느려지지 않으므로 높은 우선순위로 돈다.
-            let _prio = band_lib::sys::prio::promote_current_thread();
+            let _prio = band_lib::testing::sys::prio::promote_current_thread();
             let mut rng = rand::rngs::StdRng::seed_from_u64(42);
             let mut queue: Vec<(Instant, bool, Vec<u8>)> = Vec::new();
             let mut buf = [0u8; 2048];
@@ -679,9 +679,9 @@ fn resampled_44k_devices_end_to_end() {
                     let t = (start + i as u64) as f64 / 44_100.0;
                     frame.fill((t * SINE_HZ * 2.0 * std::f64::consts::PI).sin() as f32 * SINE_AMP);
                 }
-            }) as Arc<band_lib::engine::device::fake::SourceFn>
+            }) as Arc<band_lib::testing::engine::device::fake::SourceFn>
         } else {
-            Arc::new(|_: u64, _: usize, buf: &mut [f32]| buf.fill(0.0)) as Arc<band_lib::engine::device::fake::SourceFn>
+            Arc::new(|_: u64, _: usize, buf: &mut [f32]| buf.fill(0.0)) as Arc<band_lib::testing::engine::device::fake::SourceFn>
         };
         let mut b = FakeBackend::new(44_100, src);
         b.in_buffer = Some(441);
@@ -713,7 +713,7 @@ fn impulse_latency_matches_estimate() {
     let _g = RT_LOCK.lock();
     // 임펄스(값 0.9)를 12007샘플마다 넣어 모니터 경로의 종단 지연을 잰다.
     const PERIOD: u64 = 12_007;
-    let src: Arc<band_lib::engine::device::fake::SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+    let src: Arc<band_lib::testing::engine::device::fake::SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
         for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
             let idx = start + i as u64;
             frame.fill(if idx % PERIOD == 100 { 0.9 } else { 0.0 });
@@ -759,9 +759,9 @@ fn impulse_latency_matches_estimate() {
 fn link_impulse_latency(
     cfg: EngineConfig,
     seconds: u64,
-) -> (Vec<f64>, band_lib::engine::report::EngineStats, band_lib::engine::report::EngineStats, jitter_stats::JitterStats) {
+) -> (Vec<f64>, band_lib::testing::engine::report::EngineStats, band_lib::testing::engine::report::EngineStats, jitter_stats::JitterStats) {
     const PERIOD: u64 = 9_601; // 0.2초, 장치 버퍼·프레임과 서로소
-    let src: Arc<band_lib::engine::device::fake::SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+    let src: Arc<band_lib::testing::engine::device::fake::SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
         for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
             frame.fill(if (start + i as u64) % PERIOD == 100 { 0.9 } else { 0.0 });
         }
@@ -1479,7 +1479,7 @@ fn est_latency_budget_table() {
 
 #[test]
 fn thread_priority_reported_and_timer_released_on_stop() {
-    use band_lib::sys::prio::ThreadPriority;
+    use band_lib::testing::sys::prio::ThreadPriority;
     let _g = RT_LOCK.lock();
     for _ in 0..3 {
         let (mut a, b, _p, _sink) = connect_pair(config(480, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
@@ -1518,7 +1518,7 @@ fn thread_priority_reported_and_timer_released_on_stop() {
 #[test]
 #[ignore = "realtime: 측정용(임계 없음). 결정적 짝 sys::prio::tests"]
 fn rt_priority_before_after() {
-    use band_lib::sys::prio;
+    use band_lib::testing::sys::prio;
     let _g = RT_LOCK.lock();
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     println!("| 부하 | 승격 | 프로브 수면 초과 p50/p99/max (µs) | 은닉/s | 마감 채움 | 건너뜀(프레임) | bufferMs 평균 | jitterMs | xruns B |");
@@ -1709,7 +1709,7 @@ fn stats_storm_does_not_disturb_playout() {
 /// 지표: 워커 반복의 남은 락(`Peer.clock` — MMCSS끼리) 대기 횟수·최대와 계획 `try_lock` 실패 반복 수, 본문, 본문 − 락 대기(락 밖 비용, #122 M3), 반복 간격,
 /// `sendQueue`(2초 창 p99 5개의 중앙값·최대와 창 최대), 송신 경로 진단(복사본 갱신·옛 복사본 프레임·건너뛴 송신, #122 M1),
 /// b가 받는 a 소리의 마감 채움·은닉, 폭주 연산 수(추가·제거 / echo / stats). 판정 없이 표만 낸다.
-/// 워커 반복 시간은 `test-support` 빌드에서만 기록된다.
+/// 워커 반복 시간은 `test-support` 빌드에서만 기록된다(테스트 빌드는 늘 켜짐, ⑨a).
 #[test]
 #[ignore = "측정(realtime): 송신 경로 락 폭주 — cargo test --release --features test-support --test loopback send_path_storm -- --ignored --nocapture"]
 fn send_path_storm_measure() {
@@ -1747,12 +1747,12 @@ fn send_path_storm_measure() {
         sq_p99_med_us: f32,
         sq_p99_max_us: f32,
         sq_max_us: f32,
-        diag: band_lib::net::SendPathDiag,
+        diag: band_lib::testing::net::SendPathDiag,
         b_fills: u64,
         b_conc: u64,
         b_prod: u64,
         ops: (u64, u64, u64),
-        sites: band_lib::engine::report::WorkerLockWaits,
+        sites: band_lib::testing::engine::report::WorkerLockWaits,
         /// 메트로놈 계획 변경 / 루프백 보정 변경 / 끝난 에코 측정 수.
         ops2: (u64, u64, u64),
         late_clicks: u64,
@@ -1772,7 +1772,7 @@ fn send_path_storm_measure() {
         let ops: Arc<[AtomicUsize; 6]> = Arc::new(Default::default());
         let mut th = Vec::new();
         if let Some(same_ref) = cond.metro {
-            use band_lib::engine::metronome::MetronomeConfig;
+            use band_lib::testing::engine::metronome::MetronomeConfig;
             let plan = |bpm: f64, follow: bool| MetronomeConfig {
                 running: true,
                 bpm,
@@ -1910,11 +1910,11 @@ fn send_path_storm_measure() {
             t.join().unwrap();
         }
         if cond.metro.is_some() {
-            use band_lib::engine::metronome::MetronomeConfig;
+            use band_lib::testing::engine::metronome::MetronomeConfig;
             let _ = a.set_metronome(MetronomeConfig { running: false, bpm: 120.0, beats_per_bar: 4, start_us: None, ref_peer_id: None });
         }
         sq.sort_by(|x, y| x.total_cmp(y));
-        let us = |q: band_lib::net::txlat::SendQueueStats| (q.p99_ms * 1000.0, q.max_ms * 1000.0);
+        let us = |q: band_lib::testing::net::txlat::SendQueueStats| (q.p99_ms * 1000.0, q.max_ms * 1000.0);
         Row {
             cond: cond.name,
             lock_p99_us: us(wt.lock_wait).0,

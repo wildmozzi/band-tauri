@@ -6,8 +6,8 @@
 
 use std::time::{Duration, Instant};
 
-use band_lib::sys::prio::ThreadPriority;
-use band_lib::net::{Net, NetOptions};
+use band_lib::testing::sys::prio::ThreadPriority;
+use band_lib::testing::net::{Net, NetOptions};
 
 #[test]
 fn stop_wakes_receiver_without_waiting_for_read_timeout() {

@@ -13,14 +13,14 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::config::{CodecKind, EngineConfig};
-use band_lib::engine::device::fake::{FakeBackend, SourceFn};
-use band_lib::engine::measure::{LoopbackReport, MeasureVerdict, ECHO_UNSTABLE_SPREAD_MS};
-use band_lib::engine::mixer::MixControls;
-use band_lib::net::types::PeerStateKind;
-use band_lib::engine::Engine;
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::NetOptions;
+use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_lib::testing::engine::device::fake::{FakeBackend, SourceFn};
+use band_lib::testing::engine::measure::{LoopbackReport, MeasureVerdict, ECHO_UNSTABLE_SPREAD_MS};
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::net::types::PeerStateKind;
+use band_lib::testing::engine::Engine;
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::NetOptions;
 use parking_lot::Mutex;
 use rand::{Rng, SeedableRng};
 
@@ -211,7 +211,7 @@ fn loopback_refused_during_session() {
     let _g = RT_LOCK.lock();
     let backend = FakeBackend::silence(48_000);
     let sink = backend.sink.clone();
-    let m = band_lib::manager::EngineManager::new(Arc::new(backend), test_net());
+    let m = band_lib::testing::manager::EngineManager::new(Arc::new(backend), test_net());
     m.start(config(128), "alice".into()).unwrap();
     let err = m.measure_loopback(1).unwrap_err();
     assert!(err.contains("합주"), "{err}");
@@ -227,12 +227,12 @@ fn loopback_refused_during_session() {
 #[test]
 fn loopback_offset_carries_to_session_engine_on_same_device() {
     // PR #34 M2(a): 테스트 모드에서 넣은(또는 잰) 루프백 보정값이 같은 장치 구성의 합주 엔진 메트로놈에 이어진다.
-    use band_lib::engine::metronome::OutputLatencySource;
+    use band_lib::testing::engine::metronome::OutputLatencySource;
     let _g = RT_LOCK.lock();
     let backend = FakeBackend::silence(48_000); // 드라이버 보고 지연 없음(cpal WASAPI처럼)
-    let m = band_lib::manager::EngineManager::new(Arc::new(backend), test_net());
-    let metro = |m: &band_lib::manager::EngineManager| m.stats().metronome;
-    let wait_src = |m: &band_lib::manager::EngineManager, want: Option<OutputLatencySource>| {
+    let m = band_lib::testing::manager::EngineManager::new(Arc::new(backend), test_net());
+    let metro = |m: &band_lib::testing::manager::EngineManager| m.stats().metronome;
+    let wait_src = |m: &band_lib::testing::manager::EngineManager, want: Option<OutputLatencySource>| {
         wait_until(HANG, || metro(m).output_latency_source == want)
     };
     // 엔진이 없으면 거부
@@ -316,7 +316,7 @@ impl DelayProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let st = stop.clone();
         let thread = std::thread::spawn(move || {
-            let _prio = band_lib::sys::prio::promote_current_thread();
+            let _prio = band_lib::testing::sys::prio::promote_current_thread();
             let mut queue: std::collections::VecDeque<(Instant, bool, Vec<u8>)> = Default::default();
             let mut buf = [0u8; 2048];
             while !st.load(Ordering::Relaxed) {
@@ -399,7 +399,7 @@ fn auto_accept(b: Arc<Mutex<Engine>>, stop: Arc<AtomicBool>) -> JoinHandle<bool>
     })
 }
 
-fn echo_once(one_way: Duration) -> band_lib::engine::measure::EchoReport {
+fn echo_once(one_way: Duration) -> band_lib::testing::engine::measure::EchoReport {
     let (a, b, _p) = pair(one_way);
     // 동의 전에는 켤 수 없다(양측 합의)
     let err = b.set_echo_mode("alice", true).unwrap_err();

@@ -6,7 +6,7 @@
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
 
-use band_lib::net::stun::query_many;
+use band_lib::testing::net::stun::query_many;
 
 /// `txn`에 대한 XOR-MAPPED-ADDRESS 응답(203.0.113.5:40000).
 fn response(txn: &[u8]) -> Vec<u8> {

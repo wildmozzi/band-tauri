@@ -283,20 +283,20 @@ ADR은 `{table, punch, loss_report}`라 적었다. 실제 파일에는 피어 **
 
 - `lib.rs:1-6`: `pub mod commands, diag, engine, manager, net, sys`. `engine/mod.rs:7-29`: 하위 모듈 19개가 `pub mod`(`sim`만 `#[cfg(test)] mod`).
 - 통합 테스트가 쓰는 경로(`grep "band_lib::" tests/*.rs`, 상위): `engine::device`(14) `net::types`(12) `net::peer`(11) `engine::mixer`(11) `engine::config`(10) `sys::prio`(8) `manager`(5) `engine::metronome`(5) `net::crypto`(4) …
-- 측정·테스트 전용 훅(`#[doc(hidden)] pub`, 11개): `Engine::force_auto_opus`(`engine/mod.rs:336`), `Engine::{worker_media_peers, take_worker_timing, take_send_lock_wait}`(`report.rs:288-300`), `NetShared::{take_send_lock_wait, set_force_auto_opus, force_auto_opus}`(`net/mod.rs:402`, `:590`, `:595`), `Peer::{force_path, shares_tx_seq_with}`(`net/peer.rs:921`, `:930`), `prio::{set_engine_promotion, set_engine_promotion_parts}`(`sys/prio.rs:158`, `:167`).
+- 측정·테스트 전용 훅(`#[doc(hidden)] pub`, 11개): `Engine::force_auto_opus`(`engine/mod.rs:336`), `Engine::{worker_media_peers, take_worker_timing, take_send_lock_wait}`(`report.rs:288-300`), `NetShared::{take_send_lock_wait, set_force_auto_opus, force_auto_opus}`(`net/mod.rs:402`, `:590`, `:595`), `Peer::{force_path, shares_tx_seq_with}`(`net/peer/mod.rs:467`, `:476` — ⑥-7 이후), `prio::{set_engine_promotion, set_engine_promotion_parts}`(`sys/prio.rs:158`, `:167`).
 - 피처: `test-support = []`(`Cargo.toml`), 쓰는 곳은 `device::fake` 하나(`device.rs:653`).
 
 ### 6.2 ⑨a(⑩ 앞)
 
 | 항목 | 내용 |
 |---|---|
-| `testing` 모듈 | `#[cfg(any(test, feature = "test-support"))] pub mod testing` — 통합 테스트·예제·측정 도구가 쓰는 내부를 여기서만 다시 내보낸다. 테스트의 `use band_lib::engine::…`를 `use band_lib::testing::…`로 |
-| 피처 켜기 | `[dev-dependencies] band = { path = ".", features = ["test-support"] }`(자기 자신을 개발 의존으로) → `cargo test`가 늘 켠다. 그러면 `--all-targets`도 늘 `test-support`가 켜진 채로 돈다. 그래서 CI의 별도 clippy 단계(`ci.yml:129-132`)는 없어지는 것이 아니라 **방향이 바뀐다**: 지금은 "피처를 켠 구성"을 따로 검사하지만, 뒤에는 "피처 **없는** 제품 구성"을 따로 검사해야 한다 — `cargo clippy --lib --bins -- -D warnings`(테스트 타깃을 빼면 개발 의존의 피처가 합쳐지지 않는다 — 피처 리졸버 2 기준. 실제로 꺼지는지는 ⑨a에서 `test-support` 전용 항목을 일부러 써 보아 확인한다). 이 단계가 없으면 `test-support` 뒤로 숨긴 훅을 제품 코드가 실수로 써도 CI가 못 잡는다 |
-| 측정 훅 | 위 11개를 `#[cfg(any(test, feature = "test-support"))]` 뒤로. 제품 빌드에서 사라진다. `device::fake`의 `debug_assertions` 조건은 `examples/`가 디버그로 쓰므로 남길지 여기서 정한다(남기지 않으면 예제도 `--features test-support`) |
+| `testing` 모듈 (**⑨a-1 완료**) | `src/testing.rs`, `#[cfg(any(test, feature = "test-support"))] pub mod testing`(`lib.rs`). 하위 모듈은 원래 경로를 따른다: `testing::{engine, net, sys, diag, manager}` 안에 테스트가 실제로 쓰는 하위 모듈·항목만 `pub use`(목록 = 테스트가 기대는 내부 표면, ⑨b에서 이것만 남긴다). `tests/*.rs` 15개·`examples/` 2개의 `band_lib::<모듈>::…`을 `band_lib::testing::<모듈>::…`로. 지키는 검사: `tests/architecture.rs` `tests_use_only_testing_surface`(tests/·examples/에 `band_lib::testing::` 밖의 경로가 있으면 실패), 계층 표의 노드 `testing`(계층 7 — 제품 노드가 쓰면 위 계층 사용으로 실패) |
+| 피처 켜기 (**⑨a-1 완료**) | `[dev-dependencies] band = { path = ".", features = ["test-support"] }`(자기 자신을 개발 의존으로) → `cargo test`가 늘 켠다. 그러면 `--all-targets`도 늘 `test-support`가 켜진 채로 돈다. 그래서 CI의 별도 clippy 단계는 없어지는 것이 아니라 **방향이 바뀌었다**: `Clippy (제품 구성, test-support 없음)` = `cargo clippy --lib --bins -- -D warnings`(테스트 타깃을 빼면 개발 의존의 피처가 합쳐지지 않는다 — 피처 리졸버 2). 변이 확인(⑨a-1 PR): 제품 코드(`manager.rs`)에서 `crate::testing::…`을 쓰면 `--lib --bins`·`cargo build`는 `E0433`으로 실패하고 `--all-targets`는 통과한다 — 이 단계가 없으면 CI가 못 잡는다. 따라 바뀐 것: `tests/soak.rs`의 `#![cfg(feature = "test-support")]`(늘 참이 됨)를 지우고 CI realtime 잡 nextest 필터에 `!binary(soak)`를 더해 60분 soak이 끼지 않게 했다. 워커 반복 시간 기록(`DIAG_TIMING = cfg!(feature = "test-support")`)이 디버그 `cargo test`에서도 켜진다(제품 빌드는 그대로 꺼짐) |
+| 측정 훅 | 위 11개를 `#[cfg(any(test, feature = "test-support"))]` 뒤로. 제품 빌드에서 사라진다. `device::fake`의 `debug_assertions` 조건은 `examples/`가 디버그로 쓰므로 남길지 여기서 정한다(남기지 않으면 예제도 `--features test-support`). ⑨a-1 이후 사실: 예제(`cargo run --example`)도 개발 의존을 받으므로 디버그·릴리스 모두 `test-support`가 켜진다 |
 | 이름 | `EngineManager::test_start`·`test_stop`(`manager.rs:150`, `:227`) → `start_monitor_only`·`stop_monitor_only`. 커맨드 `engine_test_start`·`engine_test_stop`은 계약이라 그대로 |
 | `engine::stats` 이름 | ④에서 미룬 것(`engine-stage4-scope.md` 2절 B). `counters`로 바꾸면 `rt.rs` 등 RT 파일의 `use` 한 줄씩을 고쳐야 한다. **바꾸지 않는다** — ⑩에서 어차피 경로가 `band_dsp::stats`가 된다 |
 
-PR 2개: (1) `testing` 모듈 + 테스트 `use` 전환(기계적, 통합 테스트 14개 + 예제 2개), (2) 훅 게이트 + 이름.
+PR 2개: (1) `testing` 모듈 + 테스트 `use` 전환(기계적, 통합 테스트 14개 + 예제 2개) — ⑨a-1, 완료, (2) 훅 게이트 + 이름 — ⑨a-2.
 
 ### 6.3 ⑨b(⑩ 뒤)
 

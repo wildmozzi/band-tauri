@@ -5,6 +5,9 @@ pub mod manager;
 pub mod net;
 pub mod settings;
 pub mod sys;
+/// 통합 테스트·예제·측정 도구용 내부 재노출(⑨a). 제품 빌드(피처 없음)에는 없다.
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 
 use tauri::Manager;
 

@@ -3,7 +3,7 @@
 //! `src/**/*.rs`의 `use`·경로(`crate::…`, `super::…`, `self::…`, 자식 모듈 이름으로 시작하는 상대 경로)를 읽어
 //! 모듈 노드 사이 간선을 만들고 규칙을 본다.
 //! 1. 계층: 노드는 자기 계층 이하만 쓴다. 같은 계층은 허용하되 순환(강한 연결 요소, 길이 무관)은 금지.
-//!    어댑터(6)는 `ADAPTER_MAY_USE`만.
+//!    어댑터(6)는 `ADAPTER_MAY_USE`만. 테스트 표면 `testing`(7)은 맨 위라 무엇이든 쓰고, 아무도 그것을 쓰지 못한다.
 //! 2. 예외 래칫: 지금 어긋난 간선은 `EXCEPTIONS`에 "풀 단계"와 함께 고정돼 있다.
 //!    - 목록 밖 위반은 0이어야 한다. **새 예외 추가는 금지**: 새 어긋남은 고친다. 꼭 필요하면 PR 본문에 사유를 적고
 //!      리뷰에서 High로 다룬다(`MAX_EXCEPTIONS`를 올려야 해서 diff에 보인다).
@@ -98,6 +98,9 @@ const NODES: &[(&str, u8)] = &[
     ("commands", 6),
     ("crate", 6),
     ("main", 6),
+    // 7 테스트 표면(`cfg(any(test, feature = "test-support"))`, ⑨a). 모든 계층을 다시 내보낸다. 제품 노드는 위 계층을 못 쓰므로
+    // 이 노드를 쓰는 제품 코드도 계층 규칙으로 실패한다(제품 빌드에서는 컴파일도 안 된다 — CI `Clippy (제품 구성)`).
+    ("testing", 7),
 ];
 
 /// 현재 어긋남(고정): (from, to, 풀 단계). 위 계층으로 가는 간선, 같은 계층 순환을 끊을 간선, 어댑터의 직접 의존.
@@ -967,8 +970,10 @@ fn send_path_takes_no_locks() {
     files.sort();
     let code: String = files.iter().map(|f| strip(without_unit_tests(&std::fs::read_to_string(f).unwrap())) + "\n").collect();
     let names: Vec<String> = fn_bodies(&code).into_iter().map(|(n, _)| n).collect();
-    for g in ["conn", "echo"] {
-        assert_eq!(names.iter().filter(|n| *n == g).count(), 1, "net/peer/에서 가드 생성자 `{g}`를 정확히 하나 찾아야 한다");
+    // 허용 목록의 이름은 모두 정확히 하나여야 한다(#155 리뷰 L1): 형제 파일에 같은 이름의 함수가 생기면 그 함수의 직접 락이
+    // 이름 허용으로 통과하기 때문이다. 가드 생성자(`conn`·`echo`)를 못 찾으면 실패하는 것도 여기서 함께 지킨다.
+    for g in PEER_DIRECT_LOCK_ALLOWED {
+        assert_eq!(names.iter().filter(|n| n == g).count(), 1, "net/peer/에서 허용 목록 함수 `{g}`를 정확히 하나 찾아야 한다");
     }
     let peer = peer_direct_lock_violations(&code);
     assert!(peer.is_empty(), "net/peer/에서 가드 없이 conn·echo 락을 잡는 함수(스냅샷이 발행되지 않는다): {peer:?}");
@@ -1727,4 +1732,31 @@ fn rt_scanner_catches_variants() {
             "f.rs on_error: RT로 보지 않는 g.rs의 note( 를 부른다(RT_CODE 목록에 넣거나 제외 근거를 다시 볼 것)"
         ]
     );
+}
+
+/// 엔진 R-1 ⑨a: 통합 테스트·예제는 내부를 `band_lib::testing::…`으로만 쓴다(engine-stage5-10-scope.md 6.2절).
+/// 원래 경로(`band_lib::engine::…` 등)를 직접 쓰면 `testing`이 "테스트가 기대는 표면"의 목록 구실을 못 한다.
+#[test]
+fn tests_use_only_testing_surface() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    rs_files(&root.join("tests"), &mut files);
+    rs_files(&root.join("examples"), &mut files);
+    assert!(files.len() > 10, "tests/·examples/ 파일을 찾지 못했다: {files:?}");
+    let mut bad = Vec::new();
+    for f in &files {
+        let src = std::fs::read_to_string(f).unwrap();
+        for (i, line) in src.lines().enumerate() {
+            let mut rest = line;
+            while let Some(p) = rest.find("band_lib::") {
+                rest = &rest[p + "band_lib::".len()..];
+                if !rest.starts_with("testing::") {
+                    bad.push(format!("{}:{}", f.strip_prefix(root).unwrap_or(f).display(), i + 1));
+                }
+            }
+        }
+    }
+    // 이 파일은 검사 문자열("band_lib::")을 담고 있으므로 뺀다.
+    bad.retain(|loc| !loc.starts_with(&format!("tests{}architecture.rs", std::path::MAIN_SEPARATOR)));
+    assert!(bad.is_empty(), "tests/·examples/에서 `band_lib::testing::` 밖의 경로를 쓴다: {bad:?}");
 }

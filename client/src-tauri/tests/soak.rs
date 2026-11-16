@@ -17,9 +17,9 @@
 //! `SOAK_MINUTES=3 cargo test --release --features test-support --test soak soak_balanced -- --ignored --nocapture`
 //! 리포트: `SOAK_OUT`(없으면 `<target>/soak-report/`)에 `soak-<프리셋>-<분>min.{md,json}`.
 //!
-//! `test-support` 피처에서만 컴파일한다: CI realtime 잡(디버그, 기본 피처)은 ignore된 통합 테스트를 모두 돌리므로
-//! 60분짜리가 거기 끼지 않게 한다.
-#![cfg(feature = "test-support")]
+//! CI realtime 잡은 ignore된 통합 테스트를 모두 돌리므로 60분짜리가 거기 끼지 않게 그 잡의 nextest 필터에서
+//! `!binary(soak)`로 뺀다(ci.yml). 예전에는 `#![cfg(feature = "test-support")]`로 막았지만 ⑨a부터 테스트 빌드는
+//! 늘 `test-support`가 켜진다(Cargo.toml 자기 자신 개발 의존).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -27,15 +27,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::config::{CodecKind, EngineConfig};
-use band_lib::engine::device::fake::FakeBackend;
-use band_lib::engine::mixer::MixControls;
-use band_lib::engine::report::EngineStats;
-use band_lib::engine::Engine;
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::types::PeerStateKind;
-use band_lib::net::NetOptions;
-use band_lib::sys::cpu::{cycle_pct, process_cycles, tsc_now};
+use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_lib::testing::engine::device::fake::FakeBackend;
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::engine::report::EngineStats;
+use band_lib::testing::engine::Engine;
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::types::PeerStateKind;
+use band_lib::testing::net::NetOptions;
+use band_lib::testing::sys::cpu::{cycle_pct, process_cycles, tsc_now};
 use parking_lot::Mutex;
 use serde_json::json;
 

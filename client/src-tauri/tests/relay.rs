@@ -35,18 +35,18 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use band_lib::engine::config::{CodecKind, EngineConfig};
-use band_lib::engine::device::fake::FakeBackend;
-use band_lib::engine::mixer::MixControls;
-use band_lib::net::types::{PathKind, PeerStateKind};
-use band_lib::engine::report::EngineSnapshot;
-use band_lib::engine::Engine;
-use band_lib::diag::timeline::to_jsonl;
-use band_lib::diag::Diagnostics;
-use band_lib::net::connlog::{ConnOutcome, ConnPhase};
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::types::RelayStateKind;
-use band_lib::net::{NetOptions, RelaySetting};
+use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_lib::testing::engine::device::fake::FakeBackend;
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::net::types::{PathKind, PeerStateKind};
+use band_lib::testing::engine::report::EngineSnapshot;
+use band_lib::testing::engine::Engine;
+use band_lib::testing::diag::timeline::to_jsonl;
+use band_lib::testing::diag::Diagnostics;
+use band_lib::testing::net::connlog::{ConnOutcome, ConnPhase};
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::types::RelayStateKind;
+use band_lib::testing::net::{NetOptions, RelaySetting};
 use band_relay::token::{self, Claims};
 use band_relay::{server, Limits, Relay, Stats};
 use base64::Engine as _;
@@ -189,7 +189,7 @@ impl GateProxy {
         let dropped = Arc::new(AtomicUsize::new(0));
         let (gab, gba, st, fw, dr) = (ab.clone(), ba.clone(), stop.clone(), forwarded.clone(), dropped.clone());
         let thread = std::thread::spawn(move || {
-            let _prio = band_lib::sys::prio::promote_current_thread();
+            let _prio = band_lib::testing::sys::prio::promote_current_thread();
             let mut buf = [0u8; 2048];
             // (보낼 시각, 내용, true면 sb에서 b로 / false면 sa에서 a로)
             let mut queue: VecDeque<(Instant, Vec<u8>, bool)> = VecDeque::new();

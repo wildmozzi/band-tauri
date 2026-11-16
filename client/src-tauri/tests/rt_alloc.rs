@@ -14,10 +14,10 @@ use std::cell::Cell;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use band_lib::engine::metronome::ClickShared;
-use band_lib::engine::mixer::MixControls;
-use band_lib::engine::rt::{self, InputRt, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN};
-use band_lib::engine::stats::AudioCounters;
+use band_lib::testing::engine::metronome::ClickShared;
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::engine::rt::{self, InputRt, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN};
+use band_lib::testing::engine::stats::AudioCounters;
 use ringbuf::traits::{Consumer, Producer};
 
 struct Counting;
@@ -119,11 +119,11 @@ fn rt_callbacks_do_not_allocate() {
     let (mut output, mut feed) = rt::output_path(counters.clone(), controls.clone());
     output.attach_measure(m_out);
     let click = Arc::new(ClickShared::default());
-    output.attach_click(band_lib::engine::metronome::ClickRt::new(click.clone()));
+    output.attach_click(band_lib::testing::engine::metronome::ClickRt::new(click.clone()));
     // 녹음(P2-4b): 콜백이 녹음 끝점을 받고(시작), 청크마다 링에 쓰고, 정지 요청에 돌려주는 경로
-    let (rec_rt, rec_ctl) = band_lib::engine::record::record_port();
+    let (rec_rt, rec_ctl) = band_lib::testing::engine::record::record_port();
     output.attach_record(rec_rt);
-    let mut recorder = band_lib::engine::record::Recorder::new(rec_ctl, 48_000);
+    let mut recorder = band_lib::testing::engine::record::Recorder::new(rec_ctl, 48_000);
     let rec_dir = std::env::temp_dir().join(format!("band-rt-alloc-rec-{}", std::process::id()));
     let mut stops = Vec::new();
     for (i, sh) in feed.bank.slots.iter().enumerate() {
@@ -210,15 +210,15 @@ fn rt_callbacks_do_not_allocate() {
 /// 모두 잰다. 디코더는 버퍼를 만들 때(제어 평면) 미리 만든 풀과 주고받을 뿐이다. 인코드는 표시 구간 밖.
 #[test]
 fn jitter_restart_does_not_allocate() {
-    use band_lib::engine::codec::Encoder;
-    use band_lib::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
-    use band_lib::engine::jitter::{JitterBuffer, JitterSettings};
-    use band_lib::net::packet::{Header, PacketType, FLAG_OPUS};
+    use band_lib::testing::engine::codec::Encoder;
+    use band_lib::testing::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
+    use band_lib::testing::engine::jitter::{JitterBuffer, JitterSettings};
+    use band_lib::testing::net::packet::{Header, PacketType, FLAG_OPUS};
 
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     // libopus는 C malloc으로 할당해 위 계수에 안 잡힌다 → Opus 디코더 생성 수로 따로 본다(버퍼를 만들 때 모노·스테레오 둘).
     // 계수는 프로세스 전역이다: 이 바이너리의 다른 시험이 병렬로 디코더를 만들면 깨진다(지금은 없음, #126 리뷰 L-5).
-    let created0 = band_lib::engine::codec::opus_decoders_created();
+    let created0 = band_lib::testing::engine::codec::opus_decoders_created();
     let mut payload = vec![0u8; MAX_PAYLOAD_BYTES];
     let mut out = vec![0f32; 480];
     let mut seq = 0u32;
@@ -262,5 +262,5 @@ fn jitter_restart_does_not_allocate() {
         assert!(jb.is_playing(), "단계 {i} {codec:?} ch {ch}");
         assert_eq!(allocs, 0, "단계 {i} {codec:?} ch {ch}: 재시작 뒤 재생 경로(디코더 교체 포함)가 할당·해제를 했다");
     }
-    assert_eq!(band_lib::engine::codec::opus_decoders_created(), created0, "디코더는 풀에서만 — 재시작·코덱 변경에서 새로 만들지 않는다");
+    assert_eq!(band_lib::testing::engine::codec::opus_decoders_created(), created0, "디코더는 풀에서만 — 재시작·코덱 변경에서 새로 만들지 않는다");
 }

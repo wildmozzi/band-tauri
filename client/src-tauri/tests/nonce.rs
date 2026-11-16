@@ -8,14 +8,14 @@ use std::collections::HashSet;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-use band_lib::net::media_link::{media_link, PeerKey};
-use band_lib::net::types::PathKind;
-use band_lib::net::crypto::KeyPair;
-use band_lib::net::packet::{Header, PacketType};
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor, ECHO_FLAG_REQUEST, ECHO_TAG};
-use band_lib::net::relay::TYPE_RELAY_DATA;
-use band_lib::net::types::DATA_PREFIX_BYTES;
-use band_lib::net::{Net, NetOptions, AUDIO_SEQ_HANDOVER_GAP};
+use band_lib::testing::net::media_link::{media_link, PeerKey};
+use band_lib::testing::net::types::PathKind;
+use band_lib::testing::net::crypto::KeyPair;
+use band_lib::testing::net::packet::{Header, PacketType};
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor, ECHO_FLAG_REQUEST, ECHO_TAG};
+use band_lib::testing::net::relay::TYPE_RELAY_DATA;
+use band_lib::testing::net::types::DATA_PREFIX_BYTES;
+use band_lib::testing::net::{Net, NetOptions, AUDIO_SEQ_HANDOVER_GAP};
 
 
 /// 엔진 없이 Net만 쓸 때의 피어 추가(엔진 ③). 수신 큐 소비자(`MediaRx`)는 버린다 — 이 테스트는 수신 오디오를 보지

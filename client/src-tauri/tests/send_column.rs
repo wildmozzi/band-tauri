@@ -24,15 +24,15 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::codec::Encoder;
-use band_lib::engine::config::{CodecKind, EngineConfig, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
-use band_lib::engine::device::fake::{FakeBackend, SourceFn};
-use band_lib::engine::mixer::MixControls;
-use band_lib::engine::Engine;
-use band_lib::net::crypto::KeyPair;
-use band_lib::net::packet::{path_tag, Header, PacketType, FLAG_OPUS, FLAG_STEREO};
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::NetOptions;
+use band_lib::testing::engine::codec::Encoder;
+use band_lib::testing::engine::config::{CodecKind, EngineConfig, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
+use band_lib::testing::engine::device::fake::{FakeBackend, SourceFn};
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::engine::Engine;
+use band_lib::testing::net::crypto::KeyPair;
+use band_lib::testing::net::packet::{path_tag, Header, PacketType, FLAG_OPUS, FLAG_STEREO};
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::NetOptions;
 use sha2::{Digest, Sha256};
 
 /// 행 감지 상한. 판정은 받은 패킷의 내용으로 한다.

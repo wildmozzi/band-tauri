@@ -12,13 +12,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::codec::Encoder;
-use band_lib::engine::config::{frame_code_from_samples, CodecKind, HEADER_BYTES, TAG_BYTES};
-use band_lib::net::media_link::{media_link, PeerKey};
-use band_lib::net::types::PathKind;
-use band_lib::net::crypto::KeyPair;
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::{Net, NetOptions, MAX_PEERS};
+use band_lib::testing::engine::codec::Encoder;
+use band_lib::testing::engine::config::{frame_code_from_samples, CodecKind, HEADER_BYTES, TAG_BYTES};
+use band_lib::testing::net::media_link::{media_link, PeerKey};
+use band_lib::testing::net::types::PathKind;
+use band_lib::testing::net::crypto::KeyPair;
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::{Net, NetOptions, MAX_PEERS};
 
 
 /// 엔진 없이 Net만 쓸 때의 피어 추가(엔진 ③). 수신 큐 소비자(`MediaRx`)는 버린다 — 이 테스트는 수신 오디오를 보지
@@ -76,7 +76,7 @@ fn full_mesh_send_queue_latency_and_burst() {
     let mut payload = vec![0u8; 1500];
     let mut pkt = vec![0u8; 1500];
     // 워커처럼 피어 표 복사본 하나를 계속 쓴다(엔진 ③c).
-    let mut copy = band_lib::net::PeerTableCopy::default();
+    let mut copy = band_lib::testing::net::PeerTableCopy::default();
     let period = Duration::from_micros(2500);
     let frames = 2400; // 6초: 제어 스레드의 2초 창이 최소 두 번 돈다
     let mut burst_us = Vec::with_capacity(frames);
