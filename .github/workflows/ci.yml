@@ -131,6 +131,11 @@ jobs:
         # `test-support` 뒤의 내부(`band_lib::testing` 등)를 제품 코드가 실수로 쓰면 여기서만 실패한다.
         timeout-minutes: 20
         run: cargo clippy --lib --bins -- -D warnings
+      - name: Check (릴리스 예제)
+        # 예제는 개발 의존으로 `test-support`가 켜진 채 디버그·릴리스 모두 빌드돼야 한다(⑨a-2). 위 `--all-targets`는 디버그만 본다 —
+        # `debug_assertions`에 기대는 cfg가 다시 생기면 여기서 실패한다(#158 리뷰 L3).
+        timeout-minutes: 20
+        run: cargo check --release --examples
       - name: Test (결정적)
         timeout-minutes: 20
         run: cargo test

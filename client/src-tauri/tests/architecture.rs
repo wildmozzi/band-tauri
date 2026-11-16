@@ -1747,12 +1747,14 @@ fn tests_use_only_testing_surface() {
     for f in &files {
         let src = std::fs::read_to_string(f).unwrap();
         for (i, line) in src.lines().enumerate() {
-            // `band_lib`이 나오는 모든 곳의 바로 뒤가 `::testing::`이어야 한다. 별칭(`use band_lib as x;`,
-            // `extern crate band_lib as x;`)·`band_lib::{…}`·`band_lib;`로 우회하는 것도 실패로 친다(#156 리뷰 L1).
+            // `band_lib`이 나오는 모든 곳의 바로 뒤가 `::testing`이고 그 뒤가 `::`·`;`·` as `여야 한다. 크레이트 별칭
+            // (`use band_lib as x;`, `extern crate band_lib as x;`)·`band_lib::{…}`·`band_lib;`로 우회하는 것은 실패로 친다
+            // (#156 리뷰 L1). `testing` 모듈 자체의 별칭(`use band_lib::testing as t;`)은 그 안의 표면만 쓰므로 허용(#158 리뷰 L2).
             let mut rest = line;
             while let Some(p) = rest.find("band_lib") {
                 rest = &rest[p + "band_lib".len()..];
-                if !rest.starts_with("::testing::") {
+                let ok = rest.strip_prefix("::testing").is_some_and(|t| t.starts_with("::") || t.starts_with(';') || t.starts_with(" as "));
+                if !ok {
                     bad.push(format!("{}:{}", f.strip_prefix(root).unwrap_or(f).display(), i + 1));
                 }
             }

@@ -500,13 +500,13 @@ mod tests {
         assert!(m.with_engine(|e| Ok(!e.has_network())).unwrap());
         assert!(m.snapshot().is_some_and(|s| !s.network));
 
-        // test_stop은 테스트 모드 엔진만 멈춘다
+        // stop_monitor_only는 테스트 모드 엔진만 멈춘다
         m.stop_monitor_only();
         assert_eq!(phase(&m), P::Idle);
         assert!(!held.load(Ordering::SeqCst), "정지하면 장치를 놓는다");
         assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed), "모니터 복원");
 
-        // 연주(net 있음)는 test_stop으로 멈추지 않는다
+        // 연주(net 있음)는 stop_monitor_only로 멈추지 않는다
         m.start(cfg(), "me".into()).unwrap();
         assert_eq!(phase(&m), P::Running);
         m.stop_monitor_only();
