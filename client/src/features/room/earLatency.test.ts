@@ -69,20 +69,46 @@ describe('estimateEarLatencyMs (P2-8)', () => {
   })
 
   it.each([
-    ['PCM16 2.5ms 프레임', 2.5, 19.5],
-    ['Opus 5ms 프레임', 5, 22],
-    ['Opus 10ms 프레임', 10, 27],
-  ])('상대 프레임을 알면 더하고 근사 표시를 뗀다: %s', (_name, frame, total) => {
-    const est = estimateEarLatencyMs(peer({ rttMs: 10, playoutMs: 12 }), null, frame)
+    ['PCM16 2.5ms 프레임, 입력 128', 2.5, 128 / 48, 22.17],
+    ['Opus 5ms 프레임, 입력 128', 5, 128 / 48, 24.67],
+    ['Opus 10ms 프레임, 입력 256', 10, 256 / 48, 32.33],
+  ])('상대 입력 버퍼·프레임(P2-8b)이 다 있으면 더하고 근사 표시를 뗀다: %s', (_name, frame, input, total) => {
+    const est = estimateEarLatencyMs(peer({ rttMs: 10, playoutMs: 12, remoteFrameMs: frame, remoteInputBufferMs: input }), null)
     expect(est.remoteFrameMs).toBe(frame)
-    expect(est.totalMs).toBeCloseTo(total)
+    expect(est.remoteInputMs).toBeCloseTo(input)
+    expect(est.totalMs).toBeCloseTo(total, 2)
     expect(est.approx).toBe(false)
     expect(formatEarLatency(est)).toBe(`귀까지 ${Math.round(total)} ms`)
+    const lines = earLatencyTitleLines(est)
+    expect(lines[0]).not.toContain('≈')
+    expect(lines.join('\n')).toContain(`상대 입력 버퍼: ${input.toFixed(1)}ms`)
   })
 
-  it('잘못된 상대 프레임(0·NaN)은 무시', () => {
-    expect(estimateEarLatencyMs(peer({ playoutMs: 12 }), null, 0).remoteFrameMs).toBeNull()
-    expect(estimateEarLatencyMs(peer({ playoutMs: 12 }), null, Number.NaN).approx).toBe(true)
+  it.each([
+    ['프레임만(옛 엔진 상대 — 입력 버퍼 보고 없음)', { remoteFrameMs: 5, remoteInputBufferMs: null }, 22],
+    ['입력 버퍼만(아직 오디오 못 받음)', { remoteFrameMs: null, remoteInputBufferMs: 2.5 }, 19.5],
+    ['둘 다 없음(옛 엔진)', {}, 17],
+  ])('하나라도 없으면 있는 항만 더하고 ≈: %s', (_name, over, total) => {
+    const est = estimateEarLatencyMs(peer({ rttMs: 10, playoutMs: 12, ...over }), null)
+    expect(est.totalMs).toBeCloseTo(total)
+    expect(est.approx).toBe(true)
+    expect(formatEarLatency(est)).toBe(`귀까지 ≈ ${Math.round(total)} ms`)
+    expect(earLatencyTitleLines(est).join('\n')).toContain('모름(생략)')
+  })
+
+  it('옛 엔진 폴백(playoutMs 없음)에 출력 주기도 모르면 상대 값이 다 있어도 ≈', () => {
+    const est = estimateEarLatencyMs(peer({ rttMs: 8, bufferMs: 6, remoteFrameMs: 5, remoteInputBufferMs: 2 }), null)
+    expect(est.totalMs).toBe(17)
+    expect(est.approx).toBe(true)
+    const exact = estimateEarLatencyMs(peer({ rttMs: 8, bufferMs: 6, remoteFrameMs: 5, remoteInputBufferMs: 2 }), { devicePeriodMs: 3 })
+    expect(exact.totalMs).toBe(20)
+    expect(exact.approx).toBe(false)
+  })
+
+  it('잘못된 상대 값(0·NaN·음수)은 무시', () => {
+    expect(estimateEarLatencyMs(peer({ playoutMs: 12, remoteFrameMs: 0 }), null).remoteFrameMs).toBeNull()
+    expect(estimateEarLatencyMs(peer({ playoutMs: 12, remoteFrameMs: Number.NaN, remoteInputBufferMs: 2 }), null).approx).toBe(true)
+    expect(estimateEarLatencyMs(peer({ playoutMs: 12, remoteFrameMs: 5, remoteInputBufferMs: -1 }), null).remoteInputMs).toBeNull()
   })
 
   it('색 구간은 GOAL 1절 수치(25 / 40ms) 경계 포함', () => {

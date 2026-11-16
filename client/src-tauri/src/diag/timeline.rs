@@ -312,6 +312,8 @@ mod tests {
             remote_conceal_pct: Some(2.6),
             connect_ms: Some(120.0),
             first_audio_ms: Some(180.5),
+            remote_frame_ms: Some(5.0),
+            remote_input_buffer_ms: Some(2.67),
         });
         s.relay = Some(RelayStats {
             state: RelayStateKind::Bound,

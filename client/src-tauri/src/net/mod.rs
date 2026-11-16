@@ -147,7 +147,13 @@ pub struct NetShared {
     qos_stats: Mutex<qos::QosStats>,
     /// 피어별 연결 시도 → 결과(P1-18). 제어 스레드가 쓰고 진단 스냅샷이 읽는다.
     conn_log: Mutex<connlog::ConnLog>,
+    /// 내 입력 장치 버퍼(µs, 0 = 모름)를 읽는 함수(P2-8b). 엔진이 시작 때 한 번 정하고, 제어 스레드가 Ping마다 불러
+    /// 입력 버퍼 블록에 싣는다. 없으면(엔진 없는 시험·도구) 블록을 싣지 않는다.
+    input_buffer_us: std::sync::OnceLock<InputBufferFn>,
 }
+
+/// `NetShared::set_input_buffer_source`의 함수 꼴.
+pub type InputBufferFn = Box<dyn Fn() -> u32 + Send + Sync>;
 
 /// 워커가 들고 있는 피어 표 복사본(엔진 ③c, ADR D1). 세대가 바뀐 반복에서만 다시 복사한다(`NetShared::refresh_copy`).
 /// 빠진 항목 해제(`retired_peers`)는 **워커 복사본**(`for_worker`)이 맞춘 세대만 기준으로 한다. 다른 복사본(`Default`, 시험·도구의
@@ -274,6 +280,7 @@ impl Net {
             qos_stats: Mutex::new(qos::QosStats::default()),
             conn_log: Mutex::new(connlog::ConnLog::default()),
             recv_prio: Default::default(),
+            input_buffer_us: std::sync::OnceLock::new(),
         });
 
         let mut threads = Vec::new();
@@ -623,6 +630,9 @@ impl NetShared {
         let loss = p.loss_report();
         let mut plain = [0u8; peer::PING_PLAIN_MAX];
         let n = peer::ping_plain(echo, loss, &mut plain);
+        // 내 입력 장치 버퍼(P2-8b): 상대가 입→귀 추정에 쓴다. 모르면 싣지 않는다.
+        let in_buf_us = self.input_buffer_us.get().map_or(0, |f| f());
+        let n = peer::append_input_buffer(&mut plain, n, in_buf_us);
         self.send_ctrl_on_path(p, PacketType::Ping, self.now_us32(), &plain[..n]);
     }
 
@@ -1011,6 +1021,10 @@ impl NetShared {
                         if let Some(r) = peer::LossReport::parse_ping(plain) {
                             peer.set_remote_loss(r, now);
                         }
+                        // 상대 입력 장치 버퍼(P2-8b): 없으면(옛 엔진) 이전 값을 두고 받은 시각으로 오래됨을 판단한다
+                        if let Some(us) = peer::parse_ping_input_buffer(plain) {
+                            peer.set_remote_input_buffer(us, now);
+                        }
                         let clock = clock_payload(self.now_us());
                         self.send_ctrl(&peer, PacketType::Pong, h.timestamp, &clock, from, via_relay);
                     }
@@ -1027,6 +1041,12 @@ impl NetShared {
     }
 
     /// 지터 버퍼/워커가 쓰는 공통 시계(µs).
+    /// 내 입력 장치 버퍼(µs, 0 = 모름)를 읽는 함수를 정한다(P2-8b, 한 번만 — 두 번째부터는 무시). Ping마다 제어 스레드가
+    /// 부르므로 원자값 읽기 정도로 가벼워야 한다.
+    pub fn set_input_buffer_source(&self, f: InputBufferFn) {
+        let _ = self.input_buffer_us.set(f);
+    }
+
     pub fn now_us(&self) -> u64 {
         self.epoch.elapsed().as_micros() as u64
     }
