@@ -1,6 +1,7 @@
 //! UDP 소켓과 송수신/제어 스레드 (설계 문서 1.1, 2, 3절).
 
 pub mod clock;
+pub mod connlog;
 pub mod crypto;
 pub mod media_link;
 pub mod packet;
@@ -144,6 +145,8 @@ pub struct NetShared {
     send_latency: txlat::SendLatency,
     /// DSCP 마킹 상태(제어 스레드가 바뀔 때 갱신).
     qos_stats: Mutex<qos::QosStats>,
+    /// 피어별 연결 시도 → 결과(P1-18). 제어 스레드가 쓰고 진단 스냅샷이 읽는다.
+    conn_log: Mutex<connlog::ConnLog>,
 }
 
 /// 워커가 들고 있는 피어 표 복사본(엔진 ③c, ADR D1). 세대가 바뀐 반복에서만 다시 복사한다(`NetShared::refresh_copy`).
@@ -269,6 +272,7 @@ impl Net {
             force_auto_opus: AtomicBool::new(false),
             send_latency: txlat::SendLatency::new(),
             qos_stats: Mutex::new(qos::QosStats::default()),
+            conn_log: Mutex::new(connlog::ConnLog::default()),
             recv_prio: Default::default(),
         });
 
@@ -450,6 +454,11 @@ impl Net {
     /// DSCP 마킹 상태(`EngineStats.qos`).
     pub fn qos_stats(&self) -> qos::QosStats {
         self.shared.qos_stats.lock().clone()
+    }
+
+    /// 최근 연결 이벤트(P1-18, 오래된 것부터, 최대 `connlog::LOG_CAPACITY`개). 진단 기록용.
+    pub fn conn_events(&self) -> Vec<connlog::ConnEvent> {
+        self.shared.conn_log.lock().events()
     }
 
     /// 직전 창의 송신 큐 지연(`EngineStats.sendQueue`).
@@ -1086,6 +1095,10 @@ fn control_loop(s: &NetShared) {
     let mut qos = qos::Qos::new(&s.socket);
     *s.qos_stats.lock() = qos.stats();
     let mut qos_dests: Vec<SocketAddr> = Vec::with_capacity(MAX_PEERS + 1);
+    let mut conns = connlog::ConnTracker::default();
+    // 연결 결과 기록(P1-18): 이벤트가 있을 때만 벽시계를 읽고 로그 락을 잡는다.
+    let mut unix_ms = crate::sys::time::unix_ms;
+    let mut push = |at: u64, id: &str, phase, outcome, ms| s.conn_log.lock().push(at, id, phase, outcome, ms);
     while !s.stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         let peers = s.peers.read().clone();
@@ -1111,12 +1124,22 @@ fn control_loop(s: &NetShared) {
             s.send_latency.rotate();
         }
         let mut relay_quiet = false;
+        conns.begin();
         for p in &peers {
-            let (action, path, last_rx, failed) = {
+            let (action, path, last_rx, failed, view) = {
                 let mut c = p.conn();
                 let a = c.tick(now, relay_ready);
-                (a, c.path, c.last_rx, c.state == PeerStateKind::Failed)
+                let view = connlog::ConnView {
+                    state: c.state,
+                    path: c.path.map(|(_, k)| k),
+                    started: c.started,
+                    connected_at: c.connected_at,
+                    lost_at: c.last_rx.map(|t| t + peer::LOST_AFTER),
+                    bye: c.bye,
+                };
+                (a, c.path, c.last_rx, c.state == PeerStateKind::Failed, view)
             };
+            conns.observe(p.id(), view, now, &mut connlog::Sink { unix_ms: &mut unix_ms, log: &mut push });
             if action.hello_direct {
                 for addr in p.hello_targets(relay) {
                     s.send_ctrl(p, PacketType::Hello, s.now_us32(), s.local_peer_id.as_bytes(), addr, false);
@@ -1155,10 +1178,13 @@ fn control_loop(s: &NetShared) {
                 }
             }
         }
+        conns.end(now, &mut connlog::Sink { unix_ms: &mut unix_ms, log: &mut push });
         // 표 복사본은 자기 전에 놓는다: 빠진 피어를 20ms 더 쥐지 않게(#126 리뷰 H-1).
         drop(peers);
         std::thread::sleep(Duration::from_millis(20));
     }
+    // Net 정지: 결과 전인 시도는 `aborted`로 남긴다(#145 M-1). 엔진 관리자가 정지 뒤 이 로그를 넘겨받아 진단에 준다.
+    conns.finish(Instant::now(), &mut connlog::Sink { unix_ms: &mut unix_ms, log: &mut push });
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use super::mask::{mask_addr, pseudonymize};
 use crate::engine::config::CodecKind;
 use crate::engine::relay_codec::CodecReason;
 use crate::engine::report::EngineStats;
+use crate::net::connlog::{ConnEvent, ConnOutcome, ConnPhase};
 use crate::net::types::{PathKind, PeerStateKind, RelayStateKind};
 
 /// 기본 기록 간격(ms).
@@ -108,6 +109,28 @@ pub struct RelaySample {
     pub auto_opus: bool,
 }
 
+/// 연결 시도 → 결과 하나(P1-18, `net::connlog`). 그 이벤트가 난 뒤 첫 샘플의 `conn`에 들어간다.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnSample {
+    /// 이벤트 시각(유닉스 ms) — 샘플의 `t`보다 최대 1초 앞선다.
+    pub t: u64,
+    /// `pseudonymize(peerId)`(`peers[].peer`와 같은 값)
+    pub peer: String,
+    /// `connect`(첫 시도) | `reconnect`(무수신 뒤 다시 찾음) | `switch`(연결 중 경로 종류 바뀜)
+    pub phase: ConnPhase,
+    /// `lan` | `public` | `relay` | `failed`
+    pub result: ConnOutcome,
+    /// 시도 시작 → 결과(ms). `switch`면 직전 경로에 머문 시간.
+    pub ms: u32,
+}
+
+impl ConnSample {
+    pub fn from_event(e: &ConnEvent) -> Self {
+        Self { t: e.at_ms, peer: pseudonymize(&e.peer_id), phase: e.phase, result: e.outcome, ms: e.ms }
+    }
+}
+
 /// 1초 샘플 하나(JSONL 한 줄).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -138,6 +161,9 @@ pub struct Sample {
     pub stream_failed: bool,
     pub peers: Vec<PeerSample>,
     pub relay: Option<RelaySample>,
+    /// 직전 샘플 뒤로 생긴 연결 이벤트(P1-18). 없으면 줄에 넣지 않는다(기존 줄 형식 그대로).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub conn: Vec<ConnSample>,
 }
 
 impl Sample {
@@ -196,6 +222,7 @@ impl Sample {
                 over_budget: r.over_budget,
                 auto_opus: r.auto_opus,
             }),
+            conn: Vec::new(),
         }
     }
 

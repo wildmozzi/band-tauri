@@ -41,6 +41,7 @@ const NODES: &[(&str, u8)] = &[
     ("engine::stats", 1),
     ("engine::rt_timing", 1),
     ("net::clock", 1),
+    ("net::connlog", 1),
     ("net::crypto", 1),
     ("net::media_link", 1),
     ("net::txlat", 1),

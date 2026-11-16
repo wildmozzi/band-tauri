@@ -172,7 +172,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 계층 | 노드 |
 |---|---|
 | 0 | `engine::config`, `net::packet`, `sys`, `sys::{prio, cpu, time}`(④) |
-| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `diag::mask`, `engine::measure::analysis`(⑥-4) |
+| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4) |
 | 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1) |
 | 3 | `net`, `net::{peer, relay, stun, qos}` |
 | 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), 하네스 `engine::sim`(`cfg(test)`) |

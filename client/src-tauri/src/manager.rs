@@ -15,7 +15,7 @@ use crate::engine::measure::{EchoReport, LoopbackReport, MeasureVerdict};
 use crate::engine::metronome::{MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OFFSET_MS};
 use crate::engine::device::AudioBackend;
 use crate::engine::mixer::{clamp_gain, MixControls};
-use crate::engine::report::{EngineSnapshot, EngineStats};
+use crate::engine::report::{EndedConn, EngineSnapshot, EngineStats};
 use crate::engine::Engine;
 use crate::net::peer::LocalDescriptor;
 use crate::net::relay::resolve_relay_addr;
@@ -44,6 +44,8 @@ pub struct EngineManager {
     /// 마지막 루프백 보정값(`Engine::device_key`, `offsetMs`). 테스트 모드에서 잰 값을 같은 장치 구성의
     /// 합주 엔진에도 적용한다(메트로놈 숨은 출력 지연 보정, PR #34 M2(a)). 장치 구성이 바뀌면 쓰지 않는다.
     loopback_cal: Mutex<Option<(String, f64)>>,
+    /// 정지한 합주 엔진의 마지막 연결 이벤트(P1-18). 진단 기록이 `take_ended_conn`으로 가져간다.
+    ended_conn: Mutex<Vec<EndedConn>>,
 }
 
 /// 측정 진행 표시를 지우는 가드.
@@ -65,6 +67,7 @@ impl EngineManager {
             net_options,
             measure: Mutex::new(None),
             loopback_cal: Mutex::new(None),
+            ended_conn: Mutex::new(Vec::new()),
         }
     }
 
@@ -193,10 +196,8 @@ impl EngineManager {
 
     fn start_inner(&self, config: EngineConfig, peer_id: Option<String>) -> Result<LocalDescriptor, String> {
         let cancel = Arc::new(AtomicBool::new(false));
-        let (gen, old) = {
+        let (gen, old_session, old) = {
             let mut s = self.slot.lock();
-            s.generation += 1;
-            s.starting = true;
             // 진행 중인 이전 시작은 취소(장치 열기 뒤·STUN 중에 일찍 포기하고 장치를 놓는다)
             if let Some(c) = s.cancel.replace(cancel.clone()) {
                 c.store(true, Ordering::SeqCst);
@@ -209,9 +210,12 @@ impl EngineManager {
                 }
                 self.controls.monitor_enabled.store(true, Ordering::Relaxed);
             }
-            (s.generation, s.engine.take())
+            let old_session = s.generation;
+            s.generation += 1;
+            s.starting = true;
+            (s.generation, old_session, s.engine.take())
         };
-        drop(old); // 슬롯 락 밖에서 정지(join)
+        self.retire(old, old_session); // 슬롯 락 밖에서 정지(join)
 
         // 이전 시작이 끝나(그리고 취소된 결과를 버려 장치를 놓을 때까지) 기다린다.
         let _serial = self.start_lock.lock();
@@ -250,17 +254,34 @@ impl EngineManager {
 
     /// 엔진 정지(시작 중이면 그 시작을 취소). 블로킹(join)이므로 비UI 스레드에서 부른다.
     pub fn stop(&self) {
-        let old = {
+        let (old_session, old) = {
             let mut s = self.slot.lock();
+            let old_session = s.generation;
             s.generation += 1;
             s.starting = false;
             if let Some(c) = s.cancel.take() {
                 c.store(true, Ordering::SeqCst);
             }
             self.restore_monitor(&mut s);
-            s.engine.take()
+            (old_session, s.engine.take())
         };
-        drop(old);
+        self.retire(old, old_session);
+    }
+
+    /// 꺼낸 엔진을 정지(join)하고, 합주 엔진이면 마지막 연결 이벤트(정지 때 `aborted` 포함)를 진단용으로 남긴다
+    /// (P1-18, #145 M-1). 슬롯 락 밖에서 부른다.
+    fn retire(&self, old: Option<Engine>, session: u64) {
+        let Some(mut e) = old else { return };
+        let network = e.has_network();
+        e.stop();
+        if network {
+            self.ended_conn.lock().push(EndedConn { session, events: e.conn_events() });
+        }
+    }
+
+    /// 정지한 합주 엔진의 마지막 연결 이벤트를 가져간다(진단 기록 스레드가 1초마다, 한 번만).
+    pub fn take_ended_conn(&self) -> Vec<EndedConn> {
+        std::mem::take(&mut *self.ended_conn.lock())
     }
 
     /// 테스트 모드 엔진만 정지한다.
@@ -326,6 +347,7 @@ impl EngineManager {
             config: e.config().clone(),
             network: e.has_network(),
             session: s.generation,
+            conn_events: e.conn_events(),
         })
     }
 
