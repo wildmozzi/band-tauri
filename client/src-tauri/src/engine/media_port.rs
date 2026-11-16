@@ -8,7 +8,7 @@ use parking_lot::{Mutex, MutexGuard};
 use ringbuf::traits::{Consumer, Observer};
 use ringbuf::{HeapCons, HeapProd};
 
-use super::peer_media::{media_rings, MediaCmd, MediaPortRt, PeerMedia};
+use band_dsp::peer_media::{media_rings, MediaCmd, MediaPortRt, PeerMedia};
 
 /// 제어 평면 쪽 끝: 명령 생산자(커맨드 스레드가 여럿이라 Mutex, 제어 평면끼리만 다툰다)와 반환 큐 소비자.
 pub struct MediaPort {
@@ -55,9 +55,9 @@ impl MediaPort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::jitter::JitterSettings;
-    use crate::engine::peer_media::{MEDIA_CMD_CAPACITY, MEDIA_RET_CAPACITY};
-    use crate::net::media_link::{media_link, PeerKey};
+    use band_dsp::jitter::JitterSettings;
+    use band_dsp::peer_media::{MEDIA_CMD_CAPACITY, MEDIA_RET_CAPACITY};
+    use band_dsp::media_link::{media_link, PeerKey};
     use ringbuf::traits::Producer;
     use std::sync::Arc;
 

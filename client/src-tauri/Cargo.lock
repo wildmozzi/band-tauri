@@ -178,6 +178,7 @@ name = "band"
 version = "0.1.0"
 dependencies = [
  "band",
+ "band-dsp",
  "band-relay",
  "base64 0.22.1",
  "chacha20poly1305",
@@ -190,12 +191,10 @@ dependencies = [
  "if-addrs",
  "log",
  "md-5",
- "opus",
  "parking_lot",
  "rand",
  "regex",
  "ringbuf",
- "rubato",
  "rustfft",
  "serde",
  "serde_json",
@@ -213,6 +212,20 @@ dependencies = [
  "windows-sys 0.59.0",
  "x25519-dalek",
  "zip",
+]
+
+[[package]]
+name = "band-dsp"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "opus",
+ "rand",
+ "ringbuf",
+ "rubato",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

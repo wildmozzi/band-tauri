@@ -13,7 +13,7 @@
 //! 18  ..  암호문 + 16B 태그
 //! ```
 
-use crate::engine::config::{HEADER_BYTES, TAG_BYTES};
+use crate::config::{HEADER_BYTES, TAG_BYTES};
 
 pub const MAGIC: [u8; 2] = [0x42, 0x4E];
 pub const VERSION: u8 = 1;

@@ -5,10 +5,10 @@ use std::sync::atomic::Ordering;
 use ringbuf::traits::{Observer, Producer};
 use ringbuf::HeapProd;
 
-use super::super::config::INTERNAL_RATE;
-use super::super::jitter::JitterBuffer;
+use band_dsp::config::INTERNAL_RATE;
+use band_dsp::jitter::JitterBuffer;
 use super::super::measure::echo::EchoProbe;
-use super::super::resample::StreamResampler;
+use band_dsp::resample::StreamResampler;
 use super::super::rt::SourceShared;
 use super::clock::FeedTiming;
 use super::{OUT_CHUNK, POLL};

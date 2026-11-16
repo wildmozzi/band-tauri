@@ -20,12 +20,12 @@ use std::sync::Arc;
 use ringbuf::HeapProd;
 
 use super::{FeedTiming, PeerFeed, WorkerStats, OUT_CHUNK};
-use crate::engine::config::INTERNAL_RATE;
+use band_dsp::config::INTERNAL_RATE;
 use crate::engine::measure::echo::EchoProbe;
-use crate::engine::peer_media::{MediaCmd, MediaPortRt, MediaSettings, PeerMedia, MEDIA_CMD_CAPACITY};
+use band_dsp::peer_media::{MediaCmd, MediaPortRt, MediaSettings, PeerMedia, MEDIA_CMD_CAPACITY};
 use crate::engine::record::{MarkEvent, MarkKind, MarkSink};
 use crate::engine::rt::{SourceBank, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 /// `service` 한 번의 결과.
 #[derive(Debug, Clone, Copy, Default)]

@@ -1,6 +1,6 @@
 //! Opus / PCM16 인코드·디코드 (설계 문서 1.3절). 48kHz, f32 인터리브.
 
-use super::config::{CodecKind, INTERNAL_RATE};
+use crate::config::{CodecKind, INTERNAL_RATE};
 
 pub enum Encoder {
     Opus { enc: opus::Encoder, channels: usize },

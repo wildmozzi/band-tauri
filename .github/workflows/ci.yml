@@ -81,6 +81,10 @@ jobs:
             relay:
               - 'relay/**'
               - 'client/src-tauri/src/net/**'
+              # 릴레이 계약 파일만: 접두부·예산 상수(types)와 패킷 헤더(packet). ⑩-1에서 net/에서 band-dsp로 옮겼다.
+              # 같이 옮긴 media_link·clock은 relay/가 쓰지 않아 넣지 않는다(#160 리뷰 L4).
+              - 'client/src-tauri/crates/band-dsp/src/types.rs'
+              - 'client/src-tauri/crates/band-dsp/src/packet.rs'
               - '.github/workflows/ci.yml'
             client:
               - 'client/**'
@@ -99,6 +103,8 @@ jobs:
   rust:
     # 결정적 테스트만 돈다: 단위 테스트(가상 시간 시뮬레이션 포함) + 벽시계 품질 임계가 없는 통합 테스트.
     # 실패하면 재시도 없이 실패 = 회귀로 본다.
+    # 워크스페이스(엔진 R-1 ⑩-1): `client/src-tauri/Cargo.toml`의 `default-members`가 앱(`band`)과 `crates/band-dsp`를 함께 고르므로
+    # 아래 명령(clippy 두 구성, 릴리스 예제 check, test)과 realtime 잡의 nextest는 `--workspace` 없이 두 크레이트를 모두 본다.
     name: Rust engine (Windows)
     needs: changes
     if: needs.changes.outputs.engine == 'true'

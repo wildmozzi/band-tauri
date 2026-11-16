@@ -1,9 +1,9 @@
 use super::correction::RateShifter;
 use super::*;
 use super::late_budget::{LATE_BUDGET_LOSSY_MAX, LATE_SKIP_BLOCKS};
-use crate::engine::codec::Encoder;
-use crate::engine::config::{frame_code_from_samples, CodecKind};
-use crate::net::packet::{PacketType, FLAG_OPUS};
+use crate::codec::Encoder;
+use crate::config::{frame_code_from_samples, CodecKind};
+use crate::packet::{PacketType, FLAG_OPUS};
 use rand::{Rng, SeedableRng};
 
 struct Sender {

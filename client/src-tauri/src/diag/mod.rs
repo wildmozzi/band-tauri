@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::engine::config::EngineConfig;
+use band_dsp::config::EngineConfig;
 use crate::engine::report::{EndedConn, EngineSnapshot};
 use crate::net::connlog::ConnEvent;
 use timeline::{ConnSample, Sample, Timeline, DEFAULT_CAPACITY, SAMPLE_INTERVAL_MS};

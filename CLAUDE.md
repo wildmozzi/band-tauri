@@ -4,7 +4,8 @@
 목표와 우선순위: [docs/GOAL.md](docs/GOAL.md), 할 일: [docs/BACKLOG.md](docs/BACKLOG.md), 엔진 계약: [docs/overhaul/native-engine-design.md](docs/overhaul/native-engine-design.md).
 
 ## 구조
-- `client/src-tauri/src/engine/*` 오디오 엔진(RT 콜백 `rt.rs`, 워커, 지터, 코덱, 믹서), `net/*` UDP/암호화/피어/STUN, `commands.rs` Tauri 커맨드
+- `client/src-tauri/src/engine/*` 오디오 엔진(RT 콜백 `rt.rs`, 워커, 장치, 녹음, 메트로놈), `net/*` UDP/암호화/피어/STUN, `commands.rs` Tauri 커맨드
+- `client/src-tauri/crates/band-dsp` 결정적 코어(지터, 코덱, 믹서, 패킷, 클록 추정 — 스레드·I/O·OS API 없음). `client/src-tauri/Cargo.toml`이 워크스페이스 루트이고 `default-members`가 둘 다라 아래 cargo 명령은 플래그 없이 두 크레이트를 본다
 - `client/src/native/*` 엔진 API 래퍼·세션·관람자 브릿지, `client/src/features/<기능>/` 화면·상태·서버 호출(합주실 세션 상태는 `features/room/state`), `client/src/shared/*` 공용 UI·lib, `client/src/app/*` 라우트·Provider. 구조와 경계 규칙: [docs/frontend-architecture.md](docs/frontend-architecture.md)
 - `server/src/signaling/*` 시그널링 모듈(인증·재개·멤버십·연주·메트로놈 등, 구조: [docs/server-architecture.md](docs/server-architecture.md)), `server/src/services/wsService.ts`는 조립부(상태 소유 모듈 생성·연결 수명), `server/src/routes/*` HTTP API
 

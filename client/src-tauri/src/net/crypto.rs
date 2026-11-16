@@ -6,8 +6,8 @@
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
 
-use super::packet::Header;
-use crate::engine::config::{HEADER_BYTES, MAX_PACKET_BYTES, TAG_BYTES};
+use band_dsp::packet::Header;
+use band_dsp::config::{HEADER_BYTES, MAX_PACKET_BYTES, TAG_BYTES};
 
 pub const KEY_BYTES: usize = 32;
 
@@ -151,7 +151,7 @@ impl PacketCipher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::packet::{PacketType, FLAG_OPUS};
+    use band_dsp::packet::{PacketType, FLAG_OPUS};
 
     fn hdr(seq: u32) -> Header {
         Header { ptype: PacketType::Audio, ssrc: 7, seq, timestamp: 99, flags: FLAG_OPUS, frame_code: 2 }

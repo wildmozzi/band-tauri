@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use super::{FeedTiming, WorkerStats};
 use crate::engine::device::StreamInfo;
 use crate::engine::metronome::{choose_hidden_out, hidden_out_latency_us, measured_hidden_out_us, BeatScheduler, MetroReport, MetronomePlan, MetronomeRt, OutClock};
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 use crate::net::txlat::LockWait;
 use crate::net::PeerTableCopy;
 

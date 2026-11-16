@@ -12,10 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use band_lib::testing::engine::codec::Encoder;
-use band_lib::testing::engine::config::{frame_code_from_samples, CodecKind, HEADER_BYTES, TAG_BYTES};
-use band_lib::testing::net::media_link::{media_link, PeerKey};
-use band_lib::testing::net::types::PathKind;
+use band_dsp::codec::Encoder;
+use band_dsp::config::{frame_code_from_samples, CodecKind, HEADER_BYTES, TAG_BYTES};
+use band_dsp::media_link::{media_link, PeerKey};
+use band_dsp::types::PathKind;
 use band_lib::testing::net::crypto::KeyPair;
 use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::testing::net::{Net, NetOptions, MAX_PEERS};

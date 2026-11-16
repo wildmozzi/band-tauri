@@ -53,9 +53,9 @@ pub struct AudioCounters {
     /// 장치가 SILENT로 표시한 캡처 패킷 수.
     pub input_silent_packets: AtomicU64,
     /// 오디오 I/O 스레드의 우선순위 설정 결과(자체 WASAPI가 적는다; cpal·가짜 장치는 `Unmanaged`).
-    pub audio_thread: super::prio_slot::PrioSlot,
+    pub audio_thread: crate::prio_slot::PrioSlot,
     /// 입·출력 콜백 실행시간 히스토그램(P1-10). 콜백은 원자 덧셈만 한다.
-    pub rt_timing: crate::engine::rt_timing::RtTiming,
+    pub rt_timing: crate::rt_timing::RtTiming,
 }
 
 /// seqlock 칸: 버전 + `[AtomicU64; N]`(②b-6a, `engine-stage2b-design.md` 3.2절·6.1절). 쓰는 쪽은 하나뿐이고 기다리지
@@ -83,10 +83,11 @@ impl<const N: usize> Default for SeqCell<N> {
 const SPINS_BEFORE_YIELD: usize = 64;
 
 impl<const N: usize> SeqCell<N> {
-    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨져 독자가 섞인 한 벌을 받는다). `pub(crate)`: 크레이트 밖
-    /// (`tests/`, 실행파일)에서는 못 부르고, 안에서는 감싸는 타입이 작성자 하나를 타입으로 보장하는 곳에서만 부른다
-    /// (새 사용자는 `MediaStatsCell`·`MetronomeRt`처럼 작성 끝을 하나로 묶을 것).
-    pub(crate) fn write(&self, w: &[u64; N]) {
+    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨져 독자가 섞인 한 벌을 받는다). 타입으로 막지 않으므로 규약이다:
+    /// 감싸는 타입이 작성자 하나를 `&mut self`로 보장하는 곳에서만 부른다 — `MediaStatsCell`(`PeerMedia::publish`),
+    /// `band`의 `MetronomeRt::publish`. 새 사용자도 작성 끝을 하나로 묶을 것. (⑩-1에서 `pub(crate)` → `pub`: `band`의
+    /// `metronome::sched`가 크레이트 밖이 됐다.)
+    pub fn write(&self, w: &[u64; N]) {
         let v = self.ver.load(Ordering::Relaxed);
         self.ver.store(v.wrapping_add(1), Ordering::Relaxed); // 홀수: 쓰는 중
         fence(Ordering::Release); // 아래 필드 store가 홀수 버전보다 먼저 보이지 않게

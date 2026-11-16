@@ -17,8 +17,8 @@ use std::time::Instant;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
-use super::mixer::{soft_clip, MixControls};
-use super::stats::{AtomicF32, AudioCounters};
+use band_dsp::mixer::{soft_clip, MixControls};
+use band_dsp::stats::{AtomicF32, AudioCounters};
 
 /// 콜백 내부 처리 단위(프레임). 스크래치 버퍼 크기를 결정한다.
 const RT_CHUNK_FRAMES: usize = 256;
@@ -242,7 +242,7 @@ pub struct InputRt {
     measure: Option<MeasureIn>,
 }
 
-pub use super::config::{LOCAL_SOURCE, MAX_SOURCES};
+pub use band_dsp::config::{LOCAL_SOURCE, MAX_SOURCES};
 /// 소스 링 용량(장치 레이트 스테레오 샘플): 192kHz에서 0.1초.
 pub const SOURCE_RING_CAPACITY: usize = 192_000 / 10 * 2;
 /// 믹스 탭 링 용량(장치 레이트 스테레오 샘플): 192kHz에서 0.5초.

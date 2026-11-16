@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
 
-use crate::engine::prio_slot::{PrioSlot, ThreadPriority};
+use band_dsp::prio_slot::{PrioSlot, ThreadPriority};
 
 /// 프론트로 나가는 스레드 우선순위 요약(`EngineStats.threadPriority`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

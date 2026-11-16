@@ -12,7 +12,7 @@ use serde::Serialize;
 use super::analysis::{analyze_loopback, chirp, ms, summarize, verdict_of, LoopbackRun, MeasureVerdict, CANCELLED, MAX_LOOPBACK_MS};
 use crate::engine::device::StreamInfo;
 use crate::engine::rt::{MeasureEnds, MeasureShared};
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 /// 측정 스레드 대기 중 카운터·벽시계를 읽어 카운터 원점(`벽시계 − 프레임/레이트`의 최솟값)을 잡는다.
 /// 카운터를 먼저 읽고 시각을 나중에 읽는다(관찰된 카운터 값보다 이른 시각을 쓰지 않게).

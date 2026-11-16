@@ -186,7 +186,9 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 컴파일러가 순환을 막는 유일한 방법은 크레이트 분리다. 마지막 단계 ⑩으로 한다(9절: `band-dsp` · `band-engine` · 앱 3개). 그 전까지는 이 테스트가 막는다.
 
-**dsp 예정 노드(⑩-0)**: `tests/architecture.rs`의 `DSP_PLANNED`가 ⑩-1에서 `band-dsp`가 될 노드 집합이다 — `engine::{config, prio_slot, codec, resample, jitter, relay_codec, mixer, peer_media, stats, rt_timing, histo}`, `net::{packet, clock, media_link, types}`. 기준은 계층 번호가 아니라 성질이다(스레드를 만들지 않고, 소켓·파일·장치·OS API를 부르지 않고, 벽시계를 읽지 않는다 — `engine-stage5-10-scope.md` 제안 3). 검사 둘: 이 집합에서 밖으로 나가는 간선 0(`dsp_planned_nodes_are_closed`), 이 집합의 파일(단위 테스트 제외)이 쓰는 외부 크레이트는 `opus`·`rubato`·`ringbuf`·`serde`·`log`뿐(`dsp_planned_nodes_use_only_dsp_crates`, 경로 없는 `use krate as x;`·`extern crate`도). dsp 밖이 쓰는 dsp 쪽 `pub(crate)`·시험 전용 항목은 `DSP_BOUNDARY`에 고정(`dsp_boundary_items_are_listed`, ⑩-1 처리 목록 — `engine-stage5-10-scope.md` 7.3절). 워커는 `engine::media_port`(제어 쪽 끝, 계층 4)를 쓰지 않는다(`FORBIDDEN`). 계층 0·1이라도 `sys::*`·`net::crypto`·`diag::mask`·`wav`·`flac`(이제 계층 2)와 `engine::media_port`·`net::txlat`(제어 쪽)은 `DSP_EXCLUDED`라 집합에 넣으면 실패한다. 남은 계층 1 노드(`net::connlog`·`net::peer::ping`·`engine::device::types`·`engine::measure::analysis`·`engine::metronome::plan`·`engine::wasapi::format`)는 순수하지만 dsp가 쓰지 않으므로 `band-engine`에 남는다.
+**`band-dsp`(⑩-1)**: `client/src-tauri/Cargo.toml`이 워크스페이스 루트이자 앱 패키지이고, 멤버 `crates/band-dsp`가 결정적 코어다 — `config`, `prio_slot`, `codec`, `resample`, `jitter`, `relay_codec`, `mixer`, `peer_media`, `stats`, `rt_timing`, `histo`, `packet`, `clock`, `media_link`, `types`(⑩-0의 dsp 예정 노드 15개). 경로는 평평하다(`band_dsp::jitter`, `band_dsp::packet`) — `engine`·`net`이 옛 경로로 다시 내보내지 않는다. 기준은 계층 번호가 아니라 성질이다(스레드를 만들지 않고, 소켓·파일·장치·OS API를 부르지 않고, 벽시계를 읽지 않는다 — `engine-stage5-10-scope.md` 제안 3). 의존은 `opus`·`rubato`·`ringbuf`·`serde`·`log`뿐이다.
+
+`tests/architecture.rs`는 파서 하나로 두 소스(`src`, `crates/band-dsp/src`)를 각자의 노드 표(`NODES`, `DSP_NODES` — 이름이 `band_dsp::`로 시작)로 본다. 앱 쪽의 `band_dsp::…` 경로는 그 노드로 가는 간선이라 계층과 `FORBIDDEN`("net은 `band_dsp::{jitter, mixer, peer_media}`를 쓰지 않는다")이 크레이트 경계를 넘어서도 선다. 반대 방향(`band-dsp` → 앱)과 `band-dsp`가 쓸 수 있는 외부 크레이트는 **컴파일러가 막는다** — 그래서 ⑩-0의 닫힘 검사(`dsp_planned_nodes_are_closed`)와 소스의 외부 크레이트 검사(`dsp_planned_nodes_use_only_dsp_crates`)는 없애고, `band-dsp/Cargo.toml`의 의존 목록을 고정하는 검사(`dsp_crate_uses_only_dsp_deps`)로 바꿨다. 시험 전용 표면은 `band-dsp`의 `test-support` 피처(앱의 `test-support`가 켠다) 뒤에 있고 `DSP_TEST_SUPPORT`로 고정한다(`dsp_test_support_items_are_listed` — 하위 파일의 `impl` 블록 안까지). 컴파일러가 막지 않는 std(스레드 생성·파일·소켓·`Instant::now`·`SystemTime`)는 `dsp_crate_has_no_thread_io_or_clock`이 막는다(예외: `SeqCell::read`의 `yield_now`). `sys::*`·`net::crypto`·`diag::mask`·`wav`·`flac`·`engine::media_port`·`net::txlat`은 `DSP_EXCLUDED`라 `band-dsp`에 같은 이름의 노드가 생기면 실패한다. 워커는 `engine::media_port`(제어 쪽 끝, 계층 4)를 쓰지 않는다(`FORBIDDEN`). 앱과 `band-engine`의 분리는 ⑩-2, 하네스 분리는 ⑩-3이다.
 
 ### 5.3 현재 어긋남
 
@@ -214,23 +216,23 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `commands.rs` | Tauri 커맨드(얇은 어댑터) | 커맨드 계약 |
 | `manager.rs` | 엔진 수명(시작·정지 락 밖, 세대 번호), 측정·녹음 지휘 | 수명 규칙 |
 | `engine/mod.rs` | `Engine` 파사드: 스레드 소유, 공개 API, 통계 조립 | 엔진 API |
-| `engine/config.rs` | `EngineConfig`, 검증, 상수 | 설정 계약 |
+| `crates/band-dsp/src/config.rs` | `EngineConfig`, 검증, 상수 | 설정 계약 |
 | `engine/device.rs` | `AudioBackend`, 백엔드 선택, cpal 백엔드(ASIO 우회), 가짜 장치 | 장치 지원 |
 | `engine/wasapi/{mod, format, enumerate, stream, probe}.rs` | 자체 WASAPI(이벤트 구동 독점, IAudioClient3): 형식·24비트 변환·오류 분류(`format`), COM 보조·열거(`enumerate`), 스트림·이벤트 루프·엔진용 열기·기본 장치 감시(`stream`, RT 포함), 스모크 프로브(`probe`). `mod.rs`는 옛 경로 `engine::wasapi::…`를 `pub use`로 유지 | WASAPI |
 | `engine/rt.rs` | RT 콜백(입력 → 링, 소스 링 → 믹스 → 출력) | RT 믹스 |
-| `engine/resample.rs` | 장치 레이트 ↔ 48kHz | 리샘플 |
-| `engine/codec.rs` | Opus / PCM16 | 코덱 |
-| `engine/relay_codec.rs` | PCM16 설정의 피어별 Opus 자동 전환 정책(릴레이 부하·손실 피드백) | 전환 정책 |
-| `engine/jitter/mod.rs` | `JitterBuffer` 상태·수명·공개 API, 패킷 삽입(슬롯 링) | 버퍼 API·슬롯 형식 |
-| `engine/jitter/tuning.rs` | 설정(`JitterSettings`)과 프로필 → 계수(`JitterTuning`) | 프로필 곡선 |
-| `engine/jitter/delay.rs` | 지연 통계 `DelayStats`(transit 창, 최소 transit·분위수, RFC 지터) — ⑧(a) | 지터 추정 정책(P1-5) |
-| `engine/jitter/target.rs` | 목표 깊이 추정 `TargetEst`(짧은 창·버스트·긴 창, 경로 변경)와 목표 합성 — ⑧(a) | 지터 추정 정책(P1-5) |
-| `engine/jitter/late_budget.rs` | 늦은 패킷 예산 `LateBudget`(`tail_extra`) — ⑧(a) | 은닉 목표 정책(P1-6b/c) |
-| `engine/jitter/playout.rs` | 재생 시작, 패킷 생산(슬롯 → 디코드/은닉 → 보정 → FIFO), 버림, 언더런 정산 | 은닉·재생 규칙 |
-| `engine/jitter/conceal.rs` | 디코드·은닉 `Concealer`(디코더 풀, FEC/PLC·PCM 페이드, 버림 크로스페이드, 언더런 빚, 손실·은닉 창) — ⑧(b) | 은닉·재생 규칙 |
-| `engine/jitter/correction.rs` | 깊이 측정(`end_burst`)·데드밴드 보정 `DepthCtl`(`chase`·재생 시작 여유 포함)·비율 리샘플러, `shift_n` — ⑧(b) | 드리프트·보정 정책(H1) |
-| `engine/jitter/stats.rs` | `JitterStats`, 비율 창, 통계 스냅샷 | 통계 필드 |
-| `engine/jitter/tests.rs` | 결정적 단위 시뮬레이션, 지터 trace fixture(`tests/fixtures/jitter-trace.sha256`, ⑧(b)) | |
+| `crates/band-dsp/src/resample.rs` | 장치 레이트 ↔ 48kHz | 리샘플 |
+| `crates/band-dsp/src/codec.rs` | Opus / PCM16 | 코덱 |
+| `crates/band-dsp/src/relay_codec.rs` | PCM16 설정의 피어별 Opus 자동 전환 정책(릴레이 부하·손실 피드백) | 전환 정책 |
+| `crates/band-dsp/src/jitter/mod.rs` | `JitterBuffer` 상태·수명·공개 API, 패킷 삽입(슬롯 링) | 버퍼 API·슬롯 형식 |
+| `crates/band-dsp/src/jitter/tuning.rs` | 설정(`JitterSettings`)과 프로필 → 계수(`JitterTuning`) | 프로필 곡선 |
+| `crates/band-dsp/src/jitter/delay.rs` | 지연 통계 `DelayStats`(transit 창, 최소 transit·분위수, RFC 지터) — ⑧(a) | 지터 추정 정책(P1-5) |
+| `crates/band-dsp/src/jitter/target.rs` | 목표 깊이 추정 `TargetEst`(짧은 창·버스트·긴 창, 경로 변경)와 목표 합성 — ⑧(a) | 지터 추정 정책(P1-5) |
+| `crates/band-dsp/src/jitter/late_budget.rs` | 늦은 패킷 예산 `LateBudget`(`tail_extra`) — ⑧(a) | 은닉 목표 정책(P1-6b/c) |
+| `crates/band-dsp/src/jitter/playout.rs` | 재생 시작, 패킷 생산(슬롯 → 디코드/은닉 → 보정 → FIFO), 버림, 언더런 정산 | 은닉·재생 규칙 |
+| `crates/band-dsp/src/jitter/conceal.rs` | 디코드·은닉 `Concealer`(디코더 풀, FEC/PLC·PCM 페이드, 버림 크로스페이드, 언더런 빚, 손실·은닉 창) — ⑧(b) | 은닉·재생 규칙 |
+| `crates/band-dsp/src/jitter/correction.rs` | 깊이 측정(`end_burst`)·데드밴드 보정 `DepthCtl`(`chase`·재생 시작 여유 포함)·비율 리샘플러, `shift_n` — ⑧(b) | 드리프트·보정 정책(H1) |
+| `crates/band-dsp/src/jitter/stats.rs` | `JitterStats`, 비율 창, 통계 스냅샷 | 통계 필드 |
+| `crates/band-dsp/src/jitter/tests.rs` | 결정적 단위 시뮬레이션, 지터 trace fixture(`crates/band-dsp/tests/fixtures/jitter-trace.sha256`, ⑧(b), ⑩-1에서 바이트 그대로 옮김) | |
 | `engine/worker/mod.rs` | `Worker` 조립·루프(단계를 순서대로 부르는 조정자), 정지 | 단계 순서 |
 | `engine/worker/clock.rs` | 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`) | 시각 추정 |
 | `engine/worker/capture.rs` | `Capture`: 입력 링 → 리샘플 → 48k 블록·프레임 | 입력 장치 형식·리샘플·프레임 크기 |
@@ -244,14 +246,15 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/worker/device_watch.rs` | `DeviceWatch`: 장치 멈춤 감시·스트림 에러 로그 | 장치 감시 |
 | `engine/sim/{mod,tune,long,loss_codec}.rs` | 가상 시간 결정적 하네스(`cfg(test)`): 6피어 5·60분, 손실 피드백 | 하네스 시나리오 |
 | `engine/sim/alloc.rs` | 단위 테스트 바이너리의 계수 할당자(`cfg(test)`): 표시 구간 안의 할당·해제를 스레드별로 센다 — 하네스가 워커 단계의 할당·해제 0을 단언(⑧ 후속) | 워커 무할당 증거 |
-| `engine/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
-| `engine/stats.rs`, `rt_timing.rs`, `report.rs` | RT·워커 원자 통계 카운터, RT 콜백 타이밍, 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
+| `crates/band-dsp/src/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
+| `crates/band-dsp/src/{stats, rt_timing, histo, prio_slot}.rs`, `engine/report.rs` | RT·워커 원자 통계 카운터·seqlock 칸, RT 콜백 타이밍, 지연 히스토그램 칸 함수, 스레드 우선순위 결과 슬롯 / 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
+| `crates/band-dsp/src/peer_media.rs`, `crates/band-dsp/src/media_link.rs`, `crates/band-dsp/src/types.rs` | 피어 미디어 상태(워커 소유)·명령 링 생성 / 수신 큐(net → 워커) / 경로·릴레이 공용 타입·상수 | 미디어 소유, 수신 큐 |
 | `engine/measure/{mod, analysis, loopback, echo}.rs` | 지연 측정: 신호 처리·분석·판정(`analysis`), 하드웨어 루프백 작업(`loopback`), 에코 프로브·측정 스레드 ↔ 워커 큐·작업(`echo`). `mod.rs`는 옛 경로 `engine::measure::…`를 `pub use`로 유지 | 측정 |
 | `engine/metronome/{mod, click, plan, sched}.rs` | 공유 메트로놈: 클릭 생성기(`click`, RT), 계획·검증·상태 DTO(`plan`), 커맨드 ↔ 워커 공유·박 스케줄러(`sched`). `mod.rs`는 옛 경로 `engine::metronome::…`를 `pub use`로 유지 | 메트로놈 |
 | `engine/record.rs`, `wav.rs`, `flac.rs` | 합주 녹음: RT 링·핸드오프, 쓰기 스레드, WAV/RF64·FLAC | 녹음 |
 | `engine/prio.rs`, `cpuprof.rs` | 스레드 우선순위·타이머 해상도, CPU 측정 | 플랫폼 |
 | `net/{mod, send, recv_loop, control_loop}.rs` | UDP 소켓·`Net` 수명·피어 표·에코/피어 조회 API·시계 페이로드(`mod`), 봉인·제어 패킷·Audio 팬아웃·에코 반사(`send`), 수신 스레드·패킷 처리(`recv_loop`), 제어 스레드(`control_loop`). `impl NetShared`를 네 파일에 나눠 쓰므로 노드는 `net` 하나 | 네트워크 |
-| `net/{clock, packet, crypto, peer, stun, relay, qos, txlat}.rs` | 시계 오프셋, 패킷, 암호, 피어 테이블·홀펀칭, STUN, 릴레이, DSCP, 송신 큐 지연(칸 함수는 `engine/histo.rs`, ⑩-0) | 각 프로토콜 |
+| `net/{crypto, peer, stun, relay, qos, txlat}.rs`, `crates/band-dsp/src/{clock, packet}.rs` | 암호, 피어 테이블·홀펀칭, STUN, 릴레이, DSCP, 송신 큐 지연(칸 함수는 `band_dsp::histo`) / 시계 오프셋, 패킷 | 각 프로토콜 |
 | `diag/{mod, timeline, mask, export}.rs` | 진단 기록 스레드, 링 버퍼, 마스킹, zip | 진단 |
 
 워커 하위 모듈(단계) 사이 공유 상태는 **명시적으로** 넘긴다(②b, [engine-stage2b-design.md](engine-stage2b-design.md) 2.2절): 읽기 전용 문맥(설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop)은 조정자만 갖는 `WorkerCtx`이고, **조정자가 거기서 쓰는 값만 꺼내 단계 메서드의 인자로 준다**(단계는 `&WorkerCtx`를 받지 않는다). `WorkerParams`는 `Worker::new`의 입력일 뿐이다 — 소유권이 넘어가는 끝(`in_cons`·`prods`·`media_port`)이 섞여 있어 단계에 그대로 줄 수 없다. `net`은 쓰는 단계만 생성 때 받아 갖는다. 단계 사이 값은 반환값·인자(`FeedTiming`, 48k 블록·프레임, `PeerRound.urgent`, 입력 쪽 대기량). 전역 상태는 없다.
@@ -316,12 +319,12 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 | 크레이트 | 내용 | 의존 |
 |---|---|---|
-| `band-dsp` | dsp 예정 노드(5.2절, `DSP_PLANNED`): `config`, `packet`, `codec`, `resample`, `jitter`, `mixer`, `net::clock`, `relay_codec`, 통계 카운터(`stats`·`prio_slot`·`rt_timing`·`histo`), `peer_media`(코어), `media_link`, `types`. **스레드를 만들지 않고 소켓·파일·장치·OS API를 부르지 않으며 벽시계를 읽지 않는다.** `crypto`(OS 난수)·`sys`·`wav`·`flac`·`diag::mask`는 `band-engine`(⑩-0, `engine-stage5-10-scope.md` 7절) | opus, rubato, ringbuf, serde, log |
+| `band-dsp` | **⑩-1 완료**(`crates/band-dsp`, 5.2절 `DSP_NODES`): `config`, `packet`, `codec`, `resample`, `jitter`, `mixer`, `net::clock`, `relay_codec`, 통계 카운터(`stats`·`prio_slot`·`rt_timing`·`histo`), `peer_media`(코어), `media_link`, `types`. **스레드를 만들지 않고 소켓·파일·장치·OS API를 부르지 않으며 벽시계를 읽지 않는다.** `crypto`(OS 난수)·`sys`·`wav`·`flac`·`diag::mask`는 `band-engine`(⑩-0, `engine-stage5-10-scope.md` 7절) | opus, rubato, ringbuf, serde, log |
 | `band-engine` | 계층 2~5: RT·장치, 네트워크, 워커, 제어 평면 | `band-dsp`, cpal, windows |
 | 앱(`band`) | 계층 6: Tauri 어댑터 | `band-engine`, tauri |
 
 - 결정적 하네스(`engine/sim`)는 lib 안 `cfg(test)`가 아니라 `band-dsp`(와 워커 공급 로직)를 쓰는 별도 dev 크레이트/tests로 옮긴다 → 60분 하네스가 cpal·tauri 없이 컴파일되어 CI·로컬 메모리 부담이 준다. 워커 공급(`PeerFeed`, `DeviceClock`)이 장치 의존 없이 `band-dsp` 쪽에 설 수 있는지는 ②b·③ 뒤에 정한다.
-- 분리 뒤 `tests/architecture.rs`는 크레이트 안 간선만 본다(크레이트 사이는 컴파일러가 막는다).
+- 분리 뒤 `tests/architecture.rs`는 크레이트마다 노드 표를 따로 갖고 파서는 하나다. 위 크레이트 → 아래 크레이트 간선(`band_dsp::…`)은 계속 본다(`FORBIDDEN` "net은 미디어 상태를 모른다"가 그 간선이다). 아래 → 위는 컴파일러가 막는다(5.2절).
 
 ### 9.1 단계별 동작 불변 증거(각 단계 PR 본문에 이 표를 전/후 수치로 채운다)
 

@@ -27,13 +27,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_dsp::config::{CodecKind, EngineConfig};
 use band_lib::testing::engine::device::fake::FakeBackend;
-use band_lib::testing::engine::mixer::MixControls;
+use band_dsp::mixer::MixControls;
 use band_lib::testing::engine::report::EngineStats;
 use band_lib::testing::engine::Engine;
 use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::testing::net::types::PeerStateKind;
+use band_dsp::types::PeerStateKind;
 use band_lib::testing::net::NetOptions;
 use band_lib::testing::sys::cpu::{cycle_pct, process_cycles, tsc_now};
 use parking_lot::Mutex;

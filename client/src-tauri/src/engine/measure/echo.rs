@@ -11,8 +11,8 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 use serde::Serialize;
 
 use super::analysis::{analyze_echo, click_template, echo_message, echo_summary, summarize, MeasureVerdict, CANCELLED, MAX_ECHO_MS, MAX_PEER_ECHO_DELAY_US};
-use crate::engine::codec::Encoder;
-use crate::engine::config::{CodecKind, INTERNAL_RATE, MAX_PAYLOAD_BYTES};
+use band_dsp::codec::Encoder;
+use band_dsp::config::{CodecKind, INTERNAL_RATE, MAX_PAYLOAD_BYTES};
 use crate::net::NetShared;
 
 // ============================================================================
@@ -392,7 +392,7 @@ pub struct EchoReport {
     pub mouth_to_ear_ms: Option<f64>,
     /// 설명되지 않는 몫 = 왕복 − (프레임 + 핑 RTT + 상대 처리 + 지터 버퍼). 0에 가까우면 통계가 맞다.
     pub residual_ms: Option<f64>,
-    pub path: Option<crate::net::types::PathKind>,
+    pub path: Option<band_dsp::types::PathKind>,
 }
 
 /// 에코 측정 작업(측정하는 쪽). 엔진 락 밖에서 돈다.
@@ -403,7 +403,7 @@ pub struct EchoJob {
     pub peer_id: String,
     pub peer_ssrc: u32,
     /// 측정 대상 피어의 미디어 상태(지터 재시작·버퍼 깊이 수집, 엔진 ③).
-    pub media: Arc<crate::engine::peer_media::PeerMediaShared>,
+    pub media: Arc<band_dsp::peer_media::PeerMediaShared>,
     /// 클릭 스트림 형식(설정 코덱과 같다).
     pub stream: EchoStream,
     pub frame_ms: f32,
@@ -417,7 +417,7 @@ struct EchoMaterials {
     delay_us: u32,
     rtt: Option<f32>,
     jitter: f32,
-    path: Option<crate::net::types::PathKind>,
+    path: Option<band_dsp::types::PathKind>,
 }
 
 /// `EchoPort::begin`의 짝을 drop에서 맞춘다(#140 리뷰 L4): 측정 도중 패닉해도 워커가 프로브를 돌려주고(`stop`) 다음 측정을
@@ -525,7 +525,7 @@ impl EchoJob {
         delay_us: u32,
         rtt: Option<f32>,
         jitter: f32,
-        path: Option<crate::net::types::PathKind>,
+        path: Option<band_dsp::types::PathKind>,
     ) -> EchoReport {
         let s = echo_summary(&per);
         let mut verdict = s.verdict;

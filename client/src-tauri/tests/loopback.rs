@@ -26,15 +26,15 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use band_lib::testing::engine::config::{CodecKind, EngineConfig, HEADER_BYTES, MAX_PACKET_BYTES};
+use band_dsp::config::{CodecKind, EngineConfig, HEADER_BYTES, MAX_PACKET_BYTES};
 use band_lib::testing::engine::device::fake::{FakeBackend, OpenGate};
-use band_lib::testing::engine::jitter as jitter_stats;
-use band_lib::testing::engine::mixer::MixControls;
-use band_lib::testing::net::types::PeerStateKind;
+use band_dsp::jitter as jitter_stats;
+use band_dsp::mixer::MixControls;
+use band_dsp::types::PeerStateKind;
 use band_lib::testing::engine::Engine;
 use band_lib::testing::manager::EngineManager;
 use band_lib::testing::net::crypto::KeyPair;
-use band_lib::testing::net::packet::{Header, PacketType};
+use band_dsp::packet::{Header, PacketType};
 use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::testing::net::NetOptions;
 use parking_lot::Mutex;
@@ -1479,7 +1479,7 @@ fn est_latency_budget_table() {
 
 #[test]
 fn thread_priority_reported_and_timer_released_on_stop() {
-    use band_lib::testing::engine::prio_slot::ThreadPriority;
+    use band_dsp::prio_slot::ThreadPriority;
     let _g = RT_LOCK.lock();
     for _ in 0..3 {
         let (mut a, b, _p, _sink) = connect_pair(config(480, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
@@ -1547,7 +1547,7 @@ fn rt_priority_before_after() {
                 let stop_probe = Arc::new(AtomicBool::new(false));
                 let sp = stop_probe.clone();
                 let probe = std::thread::spawn(move || {
-                    let slot = band_lib::testing::engine::prio_slot::PrioSlot::default();
+                    let slot = band_dsp::prio_slot::PrioSlot::default();
                     let _g = prio::promote_engine_thread(&slot);
                     let mut over = Vec::with_capacity(100_000);
                     while !sp.load(Ordering::Relaxed) {

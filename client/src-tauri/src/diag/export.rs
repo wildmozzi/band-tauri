@@ -19,7 +19,7 @@ use zip::{CompressionMethod, ZipWriter};
 use super::mask::mask_text;
 use super::timeline::{to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
 use super::Diagnostics;
-use crate::engine::config::EngineConfig;
+use band_dsp::config::EngineConfig;
 use crate::engine::device::DeviceInfo;
 use crate::engine::report::EngineSnapshot;
 

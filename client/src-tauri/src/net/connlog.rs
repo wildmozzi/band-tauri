@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use super::types::{PathKind, PeerStateKind};
+use band_dsp::types::{PathKind, PeerStateKind};
 
 /// 링 용량(최근 이벤트 수). 피어 5명이 1초에 여러 번 바뀌어도 진단 기록(1초 간격)이 놓치지 않을 만큼.
 pub const LOG_CAPACITY: usize = 128;

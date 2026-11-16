@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use super::super::jitter::shift_one;
+use band_dsp::jitter::shift_one;
 use super::OUT_CHUNK;
 
 // ============================================================================

@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::stats::AtomicF32;
+use crate::stats::AtomicF32;
 
 /// 피어별 믹스 제어값(커맨드 스레드 → 워커).
 #[derive(Debug)]

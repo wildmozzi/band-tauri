@@ -9,13 +9,13 @@
 
 use std::time::{Duration, Instant};
 
-use crate::engine::codec::Encoder;
-use crate::engine::config::{CodecKind, MAX_PAYLOAD_BYTES};
-use crate::engine::relay_codec::{auto_opus_perc, auto_reason, pcm_relay_load, LossCodecPolicy, PolicyInputs, RelayCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
-use crate::net::media_link::PeerKey;
-use crate::net::packet::{FLAG_OPUS, FLAG_STEREO};
+use band_dsp::codec::Encoder;
+use band_dsp::config::{CodecKind, MAX_PAYLOAD_BYTES};
+use band_dsp::relay_codec::{auto_opus_perc, auto_reason, pcm_relay_load, LossCodecPolicy, PolicyInputs, RelayCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
+use band_dsp::media_link::PeerKey;
+use band_dsp::packet::{FLAG_OPUS, FLAG_STEREO};
 use crate::net::peer::Peer;
-use crate::net::types::PathKind;
+use band_dsp::types::PathKind;
 use crate::net::{AutoPayload, NetShared, PeerTableCopy, MAX_PEERS};
 
 /// 피어별 Opus 자동 전환 정책(릴레이 부하 P1-4c, 손실 피드백 P1-4e)을 다시 보는 간격.

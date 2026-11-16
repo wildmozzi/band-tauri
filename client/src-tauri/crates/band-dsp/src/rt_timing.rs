@@ -13,7 +13,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use super::histo::{bucket_lower, bucket_of, quantile_us, BUCKETS};
+use crate::histo::{bucket_lower, bucket_of, quantile_us, BUCKETS};
 
 /// RT 콜백 실행시간 누적(콜백 → 통계 조회). 모두 원자값이다.
 #[derive(Debug)]

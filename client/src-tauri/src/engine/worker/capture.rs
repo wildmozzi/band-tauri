@@ -9,8 +9,8 @@ use std::collections::VecDeque;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
 
-use crate::engine::config::INTERNAL_RATE;
-use crate::engine::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
+use band_dsp::config::INTERNAL_RATE;
+use band_dsp::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
 
 pub(super) struct Capture {
     /// 내부 채널 수.

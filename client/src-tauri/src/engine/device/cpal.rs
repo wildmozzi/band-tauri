@@ -4,9 +4,9 @@ use std::any::Any;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::engine::config::{DriverKind, EngineConfig, INTERNAL_RATE};
+use band_dsp::config::{DriverKind, EngineConfig, INTERNAL_RATE};
 use crate::engine::rt::{InputRt, OutputRt};
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 use super::backend::AudioBackend;
 use super::types::*;
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn asio_unsupported_without_feature() {
         use super::CpalBackend;
-        use crate::engine::mixer::MixControls;
+        use band_dsp::mixer::MixControls;
         use crate::engine::rt::{input_ring, output_path};
         let counters = Arc::new(AudioCounters::default());
         let (p, _c) = input_ring();

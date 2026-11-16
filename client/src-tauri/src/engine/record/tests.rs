@@ -13,7 +13,7 @@ use super::rt_ring::*;
 use super::sidecar::*;
 use super::writer::*;
 use crate::diag::mask::pseudonymize;
-use crate::engine::config::LOCAL_SOURCE;
+use band_dsp::config::LOCAL_SOURCE;
 use crate::engine::wav::RecordFormat;
 
 fn tmp(tag: &str) -> PathBuf {

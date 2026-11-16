@@ -6,7 +6,7 @@
 
 use super::stats::RateRing;
 use super::{LOSS_WINDOW_MAX, MAX_PKT_FRAME};
-use crate::engine::codec::Decoder;
+use crate::codec::Decoder;
 
 /// 패킷 단위 버림 시 크로스페이드 길이(샘플).
 const DROP_XFADE: usize = 48;

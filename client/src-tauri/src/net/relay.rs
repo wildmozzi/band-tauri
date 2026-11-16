@@ -22,8 +22,8 @@ use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use super::packet::{MAGIC, VERSION};
-use super::types::{RelayStateKind, RelayStats, BUDGET_CLEAR, BUDGET_WARN, RELAY_BUDGET_BPS, RELAY_BUDGET_PPS};
+use band_dsp::packet::{MAGIC, VERSION};
+use band_dsp::types::{RelayStateKind, RelayStats, BUDGET_CLEAR, BUDGET_WARN, RELAY_BUDGET_BPS, RELAY_BUDGET_PPS};
 
 pub const TYPE_RELAY_BIND: u8 = 7;
 pub const TYPE_RELAY_DATA: u8 = 8;

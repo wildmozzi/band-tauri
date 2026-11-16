@@ -13,7 +13,7 @@ use windows::Win32::System::Com::{
 };
 
 use super::format::{mask_candidates, SampleKind, StreamFormat};
-use crate::engine::config::DriverKind;
+use band_dsp::config::DriverKind;
 use crate::engine::device::types::{device_id, DeviceInfo};
 
 /// PKEY_Device_FriendlyName

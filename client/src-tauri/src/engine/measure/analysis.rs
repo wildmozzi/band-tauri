@@ -5,7 +5,7 @@ use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 use serde::Serialize;
 
-use crate::engine::config::INTERNAL_RATE;
+use band_dsp::config::INTERNAL_RATE;
 
 // ============================================================================
 // 신호 처리

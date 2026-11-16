@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, MutexGuard};
 use serde::Serialize;
 
-use crate::engine::histo::{bucket_lower, bucket_of, quantile_us, BUCKETS};
+use band_dsp::histo::{bucket_lower, bucket_of, quantile_us, BUCKETS};
 
 /// 분위수를 계산하는 창(통계는 직전 창 기준).
 pub const WINDOW: Duration = Duration::from_secs(2);
@@ -150,7 +150,6 @@ impl LockWait {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::histo::bucket_value;
 
     #[test]
     fn quantiles_and_window_reset() {
@@ -181,10 +180,6 @@ mod tests {
         assert_eq!(s.packets, 1);
         assert!(s.p50_ms >= 2.6 && s.p99_ms >= 2.6 && s.max_ms >= 2.6, "칸 하한 아래로 깎이지 않음: {s:?}");
         assert!(s.p50_ms <= s.max_ms && s.p99_ms <= s.max_ms, "{s:?}");
-        for i in 0..BUCKETS {
-            assert!(bucket_lower(i) as f64 <= bucket_value(i), "{i}");
-            assert_eq!(bucket_of(bucket_lower(i)), i, "{i}");
-        }
     }
 
     #[test]

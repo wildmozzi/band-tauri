@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use parking_lot::{Mutex, MutexGuard};
 
 use super::crypto::{KeyPair, PacketCipher, KEY_BYTES};
-use super::media_link::{LossCell, MediaTx, PeerKey};
-use super::types::{PathKind, PeerStateKind};
+use band_dsp::media_link::{LossCell, MediaTx, PeerKey};
+use band_dsp::types::{PathKind, PeerStateKind};
 
 pub const MAX_PEER_ID_BYTES: usize = 64;
 
@@ -223,7 +223,7 @@ pub struct Peer {
     tx_codec: AtomicU8,
     echo: Mutex<EchoState>,
     /// 이 피어 시계와 내 시계의 오프셋 추정(P2-3, Pong 평문의 응답자 시계로 갱신).
-    clock: Mutex<super::clock::ClockSync>,
+    clock: Mutex<band_dsp::clock::ClockSync>,
     /// 이 피어가 Ping으로 알려 온, 내 소리의 수신 손실 보고와 받은 시각(P1-4e). 손실 피드백 Opus 전환의 입력.
     remote_loss: RemoteLossCell,
     /// 이 피어가 Ping으로 알려 온 그쪽 입력 장치 버퍼(P2-8b): 0 = 없음, 아니면 `(받은 ms(born 기준) + 1) << 16 | µs`.
@@ -296,7 +296,7 @@ impl Peer {
             tx_last_ts: AtomicU32::new(0),
             tx_codec: AtomicU8::new(0),
             echo: Mutex::new(EchoState::default()),
-            clock: Mutex::new(super::clock::ClockSync::new()),
+            clock: Mutex::new(band_dsp::clock::ClockSync::new()),
             remote_loss: RemoteLossCell::default(),
             remote_in_buf: AtomicU64::new(0),
             rx_frame_code: AtomicU8::new(0),
@@ -378,7 +378,7 @@ impl Peer {
 
     /// 수신 오디오를 피어별 수신 큐에 넣는다(가득 차면 버리고 센다). `recv_loop` 경로(`handle_packet`)에서만 부른다 —
     /// 다른 스레드가 부르면 SPSC가 Mutex로 직렬화될 뿐 깨지지는 않지만 무경쟁 가정이 깨진다(③-a3 리뷰 항목).
-    pub(super) fn push_audio(&self, hdr: &super::packet::Header, payload: &[u8], arrival_us: u64) {
+    pub(super) fn push_audio(&self, hdr: &band_dsp::packet::Header, payload: &[u8], arrival_us: u64) {
         // 프레임은 거의 바뀌지 않는다 — 같으면 쓰지 않아 패킷마다 캐시라인을 더럽히지 않는다(P2-8b 리뷰 Low-3)
         if self.rx_frame_code.load(Ordering::Relaxed) != hdr.frame_code {
             self.rx_frame_code.store(hdr.frame_code, Ordering::Relaxed);
@@ -413,7 +413,7 @@ impl Peer {
         EchoGuard { g: self.echo.lock(), snap: &self.echo_snap, born: self.born }
     }
 
-    pub(super) fn clock(&self) -> MutexGuard<'_, super::clock::ClockSync> {
+    pub(super) fn clock(&self) -> MutexGuard<'_, band_dsp::clock::ClockSync> {
         self.clock.lock()
     }
 
@@ -422,7 +422,7 @@ impl Peer {
     /// 상대는 `band-net-recv`뿐이다(둘 다 MMCSS). 기본 우선순위 스레드가 `clock`을 잡게 되면 이 규칙을 다시 열어야 한다
     /// (ADR D1). 가시성으로는 적을 수 없어(`net`의 메서드를 `engine::worker`에만 보이게 할 수 없다) `tests/architecture.rs`의
     /// `peer_clock_is_read_only_by_worker`가 부르는 파일을 워커 디렉터리로 고정한다. 기다렸으면 `w`·`site`에 적는다(진단).
-    pub(crate) fn clock_estimate(&self, at_us: u64, w: &mut super::txlat::LockWait, site: &super::txlat::LockSite) -> Option<super::clock::ClockEstimate> {
+    pub(crate) fn clock_estimate(&self, at_us: u64, w: &mut super::txlat::LockWait, site: &super::txlat::LockSite) -> Option<band_dsp::clock::ClockEstimate> {
         w.lock(&self.clock, site).estimate(at_us as f64)
     }
 
@@ -501,7 +501,7 @@ impl Peer {
 mod tests {
     use super::*;
 
-    use crate::net::packet::PacketType;
+    use band_dsp::packet::PacketType;
 
     fn cands() -> Vec<(SocketAddr, CandidateKind)> {
         vec![
@@ -895,7 +895,7 @@ mod tests {
             candidates: vec![Candidate { kind: CandidateKind::Lan, addr: "192.168.0.5:4000".into() }],
         };
         let setup = PeerSetup { keys: &keys, my_ssrc: 1, allow_loopback: false };
-        let (media, _rx) = super::super::media_link::media_link(PeerKey::from_raw(1));
+        let (media, _rx) = band_dsp::media_link::media_link(PeerKey::from_raw(1));
         Peer::new("p".into(), &desc, &setup, media, Instant::now()).unwrap()
     }
 
@@ -1002,7 +1002,7 @@ mod tests {
             ],
         };
         let setup = PeerSetup { keys: &keys, my_ssrc: 1, allow_loopback: false };
-        let (media, _rx) = super::super::media_link::media_link(PeerKey::from_raw(1));
+        let (media, _rx) = band_dsp::media_link::media_link(PeerKey::from_raw(1));
         let p = Peer::new("p".into(), &desc, &setup, media, Instant::now()).unwrap();
         p.conn.lock().on_handshake(RELAY.parse().unwrap(), false, &p.candidates, relay(), Instant::now());
         assert_eq!(p.hello_targets(relay()), vec!["192.168.0.5:4000".parse::<SocketAddr>().unwrap()]);

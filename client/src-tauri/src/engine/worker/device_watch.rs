@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use super::WorkerStats;
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 /// 콜백이 이 시간 동안 멈추면 장치를 잃은 것으로 본다.
 const DEVICE_STALL: Duration = Duration::from_secs(1);

@@ -2,8 +2,8 @@
 
 use std::sync::atomic::Ordering;
 
-use super::super::config::INTERNAL_RATE;
-use super::super::stats::AudioCounters;
+use band_dsp::config::INTERNAL_RATE;
+use band_dsp::stats::AudioCounters;
 use super::OUT_CHUNK;
 
 // ============================================================================
