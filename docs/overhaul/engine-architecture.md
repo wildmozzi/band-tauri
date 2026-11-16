@@ -30,7 +30,7 @@
 | ~~`engine/measure.rs`~~ | (⑥-4에서 해소) `measure/{analysis(1) 신호 처리·분석·판정, loopback(4) 루프백 작업, echo(4) 에코 프로브·큐·작업}`, `mod.rs`는 `pub use`만 | ⑥-4 완료 |
 | ~~`engine/stats.rs`~~ | (④에서 해소) 원자 카운터 `stats.rs`(1) · RT 타이밍 `rt_timing.rs`(1) · 보고 DTO와 `stats()` 조립 `report.rs`(5) | ④ 완료 |
 | `engine/device.rs` | 백엔드 선택 + cpal 백엔드 + 가짜 장치 + 공용 타입(`StreamInfo`) | ⑥ |
-| `net/peer.rs` | 피어 테이블·홀펀칭(D) + 미디어 상태 — ③-b에서 `JitterBuffer`·`PeerMixCtl`은 `engine::peer_media::PeerMediaShared`(엔진 등록부 소유)로 옮겼고 `Peer`는 그 `Arc`만 쥔다. ③-a3에서 수신 큐 생산자(`MediaTx`)로 바뀐다 | ③ |
+| ~~`net/peer.rs`~~ | (⑥-7에서 해소) `net/peer/`: `mod`(3) `Peer`·송신 경로 스냅샷·가드, `conn`(노드 아님 — `net::peer`로 접힘) 홀펀칭·경로 선택·타이밍, `descriptor`(3) 계약 DTO, `ping`(1) Ping 평문·에코 상태. 미디어 상태는 ③-b·③-a3에서 `engine::peer_media`로 갔고 `Peer`는 수신 큐 생산자(`MediaTx`)만 쥔다 | ⑥-7 완료 |
 
 ## 2. 데이터 흐름
 
@@ -172,9 +172,9 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 계층 | 노드 |
 |---|---|
 | 0 | `engine::config`, `net::packet`, `sys`, `sys::{prio, cpu, time}`(④) |
-| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4), `engine::metronome::plan`(⑥-3), `engine::wasapi::format`(⑥-5) |
+| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4), `engine::metronome::plan`(⑥-3), `engine::wasapi::format`(⑥-5), `net::peer::ping`(⑥-7) |
 | 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1), `engine::metronome::{click, sched}`(⑥-3), `engine::wasapi::{enumerate, stream, probe}`(⑥-5) |
-| 3 | `net`, `net::{peer, relay, stun, qos}` |
+| 3 | `net`, `net::{peer, relay, stun, qos}`, `net::peer::descriptor`(⑥-7) |
 | 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), 하네스 `engine::sim`(`cfg(test)`) |
 | 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `settings`, `diag`, `diag::{timeline, export}` |
 | 6 | `commands`, `lib.rs`, `main.rs` |
@@ -199,7 +199,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 |---|---|---|
 | `Peer`가 net 상태와 미디어 상태를 함께 가진 공용 구조체(필드 전부 `pub`, Mutex 5개 + 원자값). net·워커·통계·커맨드가 직접 잠근다. single writer가 아니다 | `net/peer.rs` | ③ |
 | ~~지터 락 접근자 7곳, 기본 우선순위 스레드가 준RT 락을 잡음~~ | (③-a3에서 해소: 지터 버퍼는 워커 단독 소유) | ③ 완료 |
-| 큰 파일: ~~`wasapi.rs` 1.9k~~(⑥-5에서 `wasapi/{format, enumerate, stream, probe}`로 해소), ~~`net/mod.rs` 1.3k(송신 + 수신 루프 + 제어 루프)~~(⑥-6에서 `net/{mod, send, recv_loop, control_loop}`로 나눔), `net/peer.rs` 1.2k | | ⑥ |
+| 큰 파일: ~~`wasapi.rs` 1.9k~~(⑥-5에서 `wasapi/{format, enumerate, stream, probe}`로 해소), ~~`net/mod.rs` 1.3k(송신 + 수신 루프 + 제어 루프)~~(⑥-6에서 `net/{mod, send, recv_loop, control_loop}`로 나눔), ~~`net/peer.rs` 1.8k~~(⑥-7에서 `net/peer/{mod, descriptor, conn, ping}`으로 나눔) | | ⑥ |
 
 ## 6. 모듈 지도 — 현재 → 목표(R-1)
 
@@ -286,7 +286,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 5 | ③ | 재배치 + 측정 | **`Peer` 분해, 미디어 상태 워커 단일 소유**(아래) |
 | 6 | ②b | 재배치 | ③이 정한 소유권 위에서 `Worker` 필드를 단계별 구조체(`Capture`, `AutoCodec`, `PeerSources`, `LocalPath`, `BeatSched`, `DeviceWatch`)로 나누고 루프를 얇은 조정자로 |
 | 7 | ⑤ | 재배치 | `diag`는 `manager` 대신 스냅샷 함수(클로저)를 받는다. `diag::mask`는 계층 1 공용, `record`는 가명화 함수만 (완료: 스냅샷 타입은 `engine::report::EngineSnapshot`, `manager`도 `diag`를 모른다) |
-| 8 | ⑥ | 이동 | 혼합·큰 파일 나누기: `metronome` → `{plan, sched, click}`, `record` → `{rt_ring, writer, sidecar}`, `measure` → `{loopback, echo, analysis}`, `device` → `{select, cpal, fake, types}`, `wasapi` → `{enumerate, stream}`, `net/mod.rs` → `{send, recv_loop, control_loop}`, `net/peer.rs` → `{table, punch, loss_report}` |
+| 8 | ⑥ | 이동 | 혼합·큰 파일 나누기: `metronome` → `{plan, sched, click}`, `record` → `{rt_ring, writer, sidecar}`, `measure` → `{loopback, echo, analysis}`, `device` → `{select, cpal, fake, types}`, `wasapi` → `{enumerate, stream}`, `net/mod.rs` → `{send, recv_loop, control_loop}`, `net/peer.rs` → `{descriptor, conn, ping}`(ADR의 `{table, punch, loss_report}`에서 바꿈, 범위 문서 9절 제안 2) |
 | 9 | ⑦ | 재배치 | `commands.rs`의 로직(녹음 폴더 설정, 릴레이 DNS 해석, 게인 자르기)을 `manager`·설정 모듈로. ⑥에서 DTO가 `types` 같은 파일로 갈라지면 `ADAPTER_MAY_USE`를 그 DTO 노드로 좁힌다. |
 | 10 | ⑧ | 재배치 | `jitter/`의 필드 묶음을 하위 상태 구조체로(`LateBudget`, `DelayStats` 등, `late_budget`·`target` 결합도를 보고 합칠지 정함). 수명 상태기계(11절)를 `manager`의 명시적 enum으로 — 코드를 문서에 정렬 |
 | 11 | ⑨ | 재배치 | 공개·테스트 표면(7절): `pub(crate)`, `testing` 모듈, 측정 훅을 `test-support` 뒤로. 이름 정리는 선택 |
