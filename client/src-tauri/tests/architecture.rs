@@ -46,6 +46,8 @@ const NODES: &[(&str, u8)] = &[
     ("net::media_link", 1),
     ("net::txlat", 1),
     ("net::types", 1),
+    // Ping 평문 조립·해석과 에코 상태(순수 — 소켓·스레드·락 없음, ⑥-7). 하네스(`sim/loss_codec.rs`)가 쓴다.
+    ("net::peer::ping", 1),
     ("diag::mask", 1),
     ("engine::measure::analysis", 1),
     ("engine::metronome::plan", 1),
@@ -72,6 +74,8 @@ const NODES: &[(&str, u8)] = &[
     // 3 D 네트워크
     ("net", 3),
     ("net::peer", 3),
+    // 계약 DTO(어댑터가 쓰는 디스크립터). `net::peer`의 다른 항목을 쓰지 않는다(⑥-7). `conn`은 `Peer`와 서로 불러 `net::peer`로 접힌다.
+    ("net::peer::descriptor", 3),
     ("net::relay", 3),
     ("net::stun", 3),
     ("net::qos", 3),
@@ -956,8 +960,18 @@ fn send_path_takes_no_locks() {
         let src = std::fs::read_to_string(src_dir().join(rel)).unwrap();
         strip(without_unit_tests(&src))
     };
-    let peer = peer_direct_lock_violations(&read("net/peer.rs"));
-    assert!(peer.is_empty(), "net/peer.rs에서 가드 없이 conn·echo 락을 잡는 함수(스냅샷이 발행되지 않는다): {peer:?}");
+    // `Peer`와 가드는 `net/peer/mod.rs`, 상태기계·에코 상태는 형제 파일에 있다(엔진 R-1 ⑥-7). 디렉터리의 모든 파일을 이어 본다 —
+    // 가드 생성자(`conn`·`echo`)를 못 찾으면 실패하므로 파일을 옮겨도 검사가 빠지지 않는다.
+    let mut files = Vec::new();
+    rs_files(&src_dir().join("net/peer"), &mut files);
+    files.sort();
+    let code: String = files.iter().map(|f| strip(without_unit_tests(&std::fs::read_to_string(f).unwrap())) + "\n").collect();
+    let names: Vec<String> = fn_bodies(&code).into_iter().map(|(n, _)| n).collect();
+    for g in ["conn", "echo"] {
+        assert_eq!(names.iter().filter(|n| *n == g).count(), 1, "net/peer/에서 가드 생성자 `{g}`를 정확히 하나 찾아야 한다");
+    }
+    let peer = peer_direct_lock_violations(&code);
+    assert!(peer.is_empty(), "net/peer/에서 가드 없이 conn·echo 락을 잡는 함수(스냅샷이 발행되지 않는다): {peer:?}");
     // 송신 경로 함수는 `net/send.rs`, 피어 표 복사본(`refresh_copy`)은 `net/mod.rs`에 있다(엔진 R-1 ⑥-6). 둘을 이어 본다 —
     // 함수를 못 찾으면 실패하므로 파일을 옮겨도 검사가 빠지지 않는다.
     let send = send_path_lock_violations(&(read("net/mod.rs") + "\n" + &read("net/send.rs")));
