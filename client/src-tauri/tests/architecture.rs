@@ -952,7 +952,7 @@ fn send_path_lock_violations(code: &str) -> Vec<String> {
     bad
 }
 
-/// 엔진 ③c(#126 리뷰 M-3): (1) `net/peer.rs`에서 `conn`·`echo` 락을 직접 잡는 함수는 허용 목록뿐(상태 변경은 스냅샷을
+/// 엔진 ③c(#126 리뷰 M-3): (1) `net/peer/`에서 `conn`·`echo` 락을 직접 잡는 함수는 허용 목록뿐(상태 변경은 스냅샷을
 /// 발행하는 가드로만), (2) 워커 송신 경로 함수에 락 획득이 없다. 단위 시험 코드는 보지 않는다.
 #[test]
 fn send_path_takes_no_locks() {
