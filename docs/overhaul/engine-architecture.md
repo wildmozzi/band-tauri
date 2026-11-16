@@ -256,18 +256,19 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 ## 7. 공개 표면과 테스트 표면
 
-지금은 `lib.rs`가 `commands/diag/engine/manager/net`을 모두 `pub mod`로 열고, 하위 모듈도 거의 `pub mod`다. 통합 테스트(`tests/*.rs`, 별도 크레이트)와 측정 도구가 내부(`rt::{output_path, SLOT_*}`, `device::fake`, `prio`, `worker::CallbackTracker`, `metronome::{BeatScheduler, ClickRt}` 등)를 쓰기 때문이다. 측정 전용 훅(`Engine::force_auto_opus`, `NetShared::set_force_auto_opus`, `prio::set_engine_promotion*`)은 `#[doc(hidden)] pub`이고 `device::fake`는 릴리스에 들어간다.
+지금은 `lib.rs`가 `commands/diag/engine/manager/net`을 모두 `pub mod`로 열고, 하위 모듈도 거의 `pub mod`다. 통합 테스트(`tests/*.rs`, 별도 크레이트)와 측정 도구가 내부(`rt::{output_path, SLOT_*}`, `device::fake`, `prio`, `worker::CallbackTracker`, `metronome::{BeatScheduler, ClickRt}` 등)를 쓰기 때문이다. 측정 전용 훅과 `device::fake`는 ⑨a-2부터 `test-support` 뒤에 있다(정책 2).
 
 정책:
 
 1. **공개 표면**: `manager::EngineManager`, `commands`, 계약 DTO(`EngineConfig`, `EngineStats`·`PeerStats`, `LocalDescriptor`, 측정·녹음 보고). 나머지는 `pub(crate)`가 목표다.
 2. **테스트 표면**(⑨a-1): 통합 테스트·예제·측정 도구가 쓰는 내부는 `test-support` 피처(`#[cfg(any(test, feature = "test-support"))]`)의 `testing` 모듈(`src/testing.rs`) 한 곳에서 다시 내보낸다. 하위 모듈은 원래 경로를 따른다(`band_lib::testing::engine::mixer`, `…::net::peer`, `…::sys::prio`, `…::diag::mask`, `…::manager::EngineManager`). 목록에는 테스트가 실제로 쓰는 것만 둔다 — 새 테스트가 다른 내부를 쓰려면 이 목록에 더한다.
-   - 켜기: 개발 의존성 `band = { path = ".", features = ["test-support"] }`(자기 자신). 테스트·예제 타깃이 들어가는 빌드(`cargo test`, `--all-targets`, `cargo run --example`)는 디버그·릴리스 모두 늘 켜진다. 테스트 타깃이 없는 제품 구성(`cargo build`, `cargo tauri build`, `cargo clippy --lib --bins`)에는 합쳐지지 않는다(피처 리졸버 2).
-   - 지키는 검사: CI `Clippy (제품 구성, test-support 없음)`(`cargo clippy --lib --bins -- -D warnings` — 제품 코드가 `testing`이나 `test-support` 뒤 항목을 쓰면 여기서만 실패), `tests/architecture.rs`의 `tests_use_only_testing_surface`(tests/·examples/는 `band_lib::testing::`만)와 계층 7 노드 `testing`(5.1절).
-   - `device::fake`는 ②a에서 먼저 옮겼다: `#[cfg(any(test, debug_assertions, feature = "test-support"))]` — 디버그 빌드·단위 테스트에는 늘 있고, 릴리스 제품 빌드에는 없다. `debug_assertions` 조건을 남길지와 측정 훅 게이트는 ⑨a-2.
+   - 켜기: 개발 의존성 `band = { path = ".", default-features = false, features = ["test-support"] }`(자기 자신 — 개발 의존이 더하는 피처는 `test-support` 하나). 테스트·예제 타깃이 들어가는 빌드(`cargo test`, `--all-targets`, `cargo run --example`)는 디버그·릴리스 모두 늘 켜진다. 테스트 타깃이 없는 제품 구성(`cargo build`, `cargo tauri build`, `cargo clippy --lib --bins`)에는 합쳐지지 않는다(피처 리졸버 2).
+   - 지키는 검사: CI `Clippy (제품 구성, test-support 없음)`(`cargo clippy --lib --bins -- -D warnings` — 제품 코드가 `testing`이나 `test-support` 뒤 항목을 쓰면 여기서만 실패), `tests/architecture.rs`의 `tests_use_only_testing_surface`(tests/·examples/에서 `band_lib`이 나오는 곳은 모두 바로 뒤가 `::testing::` — 별칭 `use band_lib as x;`도 실패, ⑨a-2)와 계층 7 노드 `testing`(5.1절).
+   - **측정·테스트 전용 훅**(⑨a-2): 예전 `#[doc(hidden)] pub` 15개 — `Engine::{force_auto_opus, worker_media_peers, take_worker_timing, take_send_path_diag}`, `NetShared::{set_force_auto_opus, send_audio}`, `Net::take_send_path_diag`, `Peer::{force_path, shares_tx_seq_with}`, `prio::{set_engine_promotion, set_engine_promotion_parts}`, `codec::opus_decoders_created`, `MetronomeCtl`의 `plan_gens`·`take_plan_retries` — 는 `#[cfg(any(test, feature = "test-support"))]` 뒤에 있다. 제품 빌드에는 없다. 훅이 읽고 쓰는 원자값·카운터(`force_auto_opus` 깃발, `ENGINE_PROMOTION`·`ENGINE_TIMER`, 송신 경로 진단·디코더 수·워커 미디어 피어 수 카운터)는 게이트하지 **않는다**: 제품 코드가 읽거나(워커의 `force_auto_opus()` 읽기 — 제품에서는 늘 `false`, `engine_promotion_enabled` — 늘 켬) 갱신하는 자리가 워커·송신 경로 안에 있어, 게이트하면 그 경로에 cfg 분기가 생기고 테스트 빌드와 제품 빌드의 동작이 갈린다. 남는 비용은 원자값 하나씩이다. `NetShared::force_auto_opus()`(읽기)는 제품 워커가 쓰므로 훅이 아니라 `pub(crate)`.
+   - `device::fake`: `#[cfg(any(test, feature = "test-support"))]`(⑨a-2에서 `debug_assertions` 조건을 뺐다). 예제·측정은 개발 의존이 `test-support`를 켜므로 디버그·릴리스 모두 쓸 수 있고, 제품 디버그 빌드(`npm run dev:tauri`)는 릴리스와 같은 표면이 된다 — 제품 코드가 가짜 장치를 쓰면 디버그에서도 컴파일 실패(`cargo clippy --lib --bins`). `--features test-support`는 이제 어느 명령에도 따로 줄 필요가 없다.
 3. **R-1 ①②의 가시성**: 새 하위 모듈은 private, 형제 간에는 `pub(super)`. **기존 공개 경로는 `pub use`로 유지**한다(예: `engine::jitter::{JitterBuffer, JitterSettings, JitterStats, shift_one, MAX_CORR_RATE, TARGET_GRID, correction_*}`, `engine::worker::{CallbackTracker, OUT_CHUNK, …}`). 그래서 ①②는 `tests/`를 바꾸지 않는다. 하네스가 쓰는 워커 내부(폴링 주기 등)는 `pub(in crate::engine)`.
 4. ⑨a-1에서 `use`를 바꾼 테스트: `loopback`·`cpu_profile`·`measure`·`record`·`metronome`·`rt_alloc`·`net_recv`·`nonce`·`peer_key`·`send_queue`·`send_column`·`relay`·`loss_feedback`·`soak`·`stun`, 예제 `measure_smoke`·`wasapi_probe`.
-5. 이름: `EngineManager::test_start/test_stop`은 제품 기능(네트워크 없는 모니터 모드)이다. 테스트 전용으로 오해되지 않게 ⑨에서 `start_monitor_only` 등으로 바꾼다(커맨드 이름 `engine_test_start`는 계약이라 유지).
+5. 이름(⑨a-2 완료): 네트워크 없는 모니터 모드는 제품 기능이라 `EngineManager::start_monitor_only`·`stop_monitor_only`(옛 `test_start`·`test_stop`). Tauri 커맨드 이름 `engine_test_start`·`engine_test_stop`은 계약이라 그대로다.
 
 ## 8. 에러 타입
 
@@ -351,15 +352,15 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 ## 11. 엔진 수명 상태기계
 
-지금 규칙은 `manager.rs`(슬롯·세대 번호), `Engine`(스레드 소유·`deviceLost` 보고), 프론트 `performSession.ts`(시그널링·재시작 판단)에 흩어져 있다. 상태와 전이를 여기 한 곳에 둔다. ⑧부터 `manager`가 전이시키는 상태는 명시적 enum `Phase::{Idle, Starting { cancel }, Running(Box<Engine>)}`이다(`Slot { phase, generation, monitor_before_test }`). Degraded는 enum에 없다 — 엔진이 보고하는 값이라 `EngineSnapshot`(`stats.deviceLost`)에서 읽는다. Stopping도 enum에 없다 — `Phase::leave`로 꺼낸 엔진을 락 밖에서 정지하는 지역 변수다(`retire`: join, 합주 엔진이면 마지막 연결 이벤트를 `ended_conn`에 남김, 세션 = 증가 전 세대. `test_stop`은 net 없는 엔진만 꺼내므로 그냥 drop).
+지금 규칙은 `manager.rs`(슬롯·세대 번호), `Engine`(스레드 소유·`deviceLost` 보고), 프론트 `performSession.ts`(시그널링·재시작 판단)에 흩어져 있다. 상태와 전이를 여기 한 곳에 둔다. ⑧부터 `manager`가 전이시키는 상태는 명시적 enum `Phase::{Idle, Starting { cancel }, Running(Box<Engine>)}`이다(`Slot { phase, generation, monitor_before_test }`). Degraded는 enum에 없다 — 엔진이 보고하는 값이라 `EngineSnapshot`(`stats.deviceLost`)에서 읽는다. Stopping도 enum에 없다 — `Phase::leave`로 꺼낸 엔진을 락 밖에서 정지하는 지역 변수다(`retire`: join, 합주 엔진이면 마지막 연결 이벤트를 `ended_conn`에 남김, 세션 = 증가 전 세대. `stop_monitor_only`는 net 없는 엔진만 꺼내므로 그냥 drop).
 
 ```text
-          start(cfg, peer?) / test_start(cfg)            Engine::start 성공(세대 일치)
+          start(cfg, peer?) / start_monitor_only(cfg)    Engine::start 성공(세대 일치)
   Idle ───────────────────────────────────▶ Starting ─────────────────────────────▶ Running
    ▲  ▲                                     │  │ 실패 / 세대 불일치(stop·다른 start가 끼어듦)   │  ▲
    │  └─────────────────────────────────────┘  └─▶ Idle(결과 버림, 장치 놓은 뒤)               │  │ 장치 복귀(콜백 재개)
    │                                                                                  장치 분실│  │
-   │                stop() / test_stop() / Drop                                    (콜백 1초 정지,│  │
+   │                stop() / stop_monitor_only() / Drop                            (콜백 1초 정지,│  │
    └──────────────────────── Stopping(락 밖 join: 워커→net→오디오→탭·녹음 마무리) ◀── 무효화 HRESULT)▼  │
                                          ▲                                          Degraded(deviceLost)
                                          └──────────────────────────────────────────────┘

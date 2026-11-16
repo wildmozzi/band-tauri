@@ -100,14 +100,14 @@ pub async fn engine_stop(state: State<'_, EngineState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn engine_test_start(state: State<'_, EngineState>, config: EngineConfig) -> Result<(), String> {
     let m = state.0.clone();
-    blocking(move || m.test_start(config)).await
+    blocking(move || m.start_monitor_only(config)).await
 }
 
 #[tauri::command]
 pub async fn engine_test_stop(state: State<'_, EngineState>) -> Result<(), String> {
     let m = state.0.clone();
     blocking(move || {
-        m.test_stop();
+        m.stop_monitor_only();
         Ok(())
     })
     .await

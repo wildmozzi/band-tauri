@@ -229,19 +229,19 @@ jobs:
       - name: Placeholder frontend dist (tauri::generate_context! 요구)
         timeout-minutes: 1
         run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
-      - name: Build tests (release + test-support)
+      - name: Build tests (release, test-support는 개발 의존이 켬)
         timeout-minutes: 30
-        run: cargo test --release --features test-support --test soak --no-run
+        run: cargo test --release --test soak --no-run
       - name: Soak 기본(균형) 60분
         timeout-minutes: 65
-        run: cargo test --release --features test-support --test soak soak_balanced -- --ignored --exact --nocapture
+        run: cargo test --release --test soak soak_balanced -- --ignored --exact --nocapture
         env:
           SOAK_OUT: ${{ runner.temp }}/soak-report
       - name: Soak 초저지연 60분
         # 앞 프리셋이 실패해도 돈다(리포트를 둘 다 남긴다)
         if: ${{ !cancelled() }}
         timeout-minutes: 65
-        run: cargo test --release --features test-support --test soak soak_ultra_low -- --ignored --exact --nocapture
+        run: cargo test --release --test soak soak_ultra_low -- --ignored --exact --nocapture
         env:
           SOAK_OUT: ${{ runner.temp }}/soak-report
       - name: Job summary

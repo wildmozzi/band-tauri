@@ -1015,12 +1015,12 @@ fn test_mode_restores_monitor_setting() {
     let _g = RT_LOCK.lock();
     let m = EngineManager::new(Arc::new(FakeBackend::silence(48_000)), test_net());
     assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed));
-    m.test_start(config(128, 5.0)).unwrap();
+    m.start_monitor_only(config(128, 5.0)).unwrap();
     assert!(m.controls().monitor_enabled.load(Ordering::Relaxed), "테스트 모드는 모니터를 켬");
-    m.test_stop();
+    m.stop_monitor_only();
     assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed), "끝나면 원래 값(꺼짐)으로 복원(리뷰 L4)");
     // 테스트 모드에서 바로 실제 세션으로 넘어가도 복원
-    m.test_start(config(128, 5.0)).unwrap();
+    m.start_monitor_only(config(128, 5.0)).unwrap();
     m.start(config(128, 5.0), "me".into()).unwrap();
     assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed));
     m.stop();
@@ -1514,7 +1514,7 @@ fn thread_priority_reported_and_timer_released_on_stop() {
 /// 적용 전/후 비교: 엔진 스레드 승격(MMCSS, 1ms 타이머)을 끔/MMCSS만/타이머만/둘 다로 바꿔 같은 링크를 돌린다.
 /// 지표: 워커와 같은 방식으로 승격된 프로브 스레드의 FINE_POLL(150µs) 수면 초과량, B의 은닉·마감 채움·건너뜀,
 /// 지터버퍼 지연/지터. 부하 단계는 논리 코어 수만큼 바쁜 스레드(보통 우선순위)를 돌린다.
-/// 실행: `cargo test --release --features test-support --test loopback rt_priority_before_after -- --ignored --nocapture`
+/// 실행: `cargo test --release --test loopback rt_priority_before_after -- --ignored --nocapture`
 #[test]
 #[ignore = "realtime: 측정용(임계 없음). 결정적 짝 sys::prio::tests"]
 fn rt_priority_before_after() {
@@ -1711,7 +1711,7 @@ fn stats_storm_does_not_disturb_playout() {
 /// b가 받는 a 소리의 마감 채움·은닉, 폭주 연산 수(추가·제거 / echo / stats). 판정 없이 표만 낸다.
 /// 워커 반복 시간은 `test-support` 빌드에서만 기록된다(테스트 빌드는 늘 켜짐, ⑨a).
 #[test]
-#[ignore = "측정(realtime): 송신 경로 락 폭주 — cargo test --release --features test-support --test loopback send_path_storm -- --ignored --nocapture"]
+#[ignore = "측정(realtime): 송신 경로 락 폭주 — cargo test --release --test loopback send_path_storm -- --ignored --nocapture"]
 fn send_path_storm_measure() {
     let _g = RT_LOCK.lock();
     let (a, b, _p, _sink) = connect_pair(config(128, 2.5), sine_backend(), FakeBackend::silence(48_000), None);

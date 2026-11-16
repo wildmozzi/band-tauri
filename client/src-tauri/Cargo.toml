@@ -80,8 +80,8 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time"] }
 # 녹음 WAV(EXTENSIBLE 헤더)를 표준 파서로 다시 읽어 확인(PR #47 L3)
 hound = "3.5"
 # 자기 자신을 개발 의존으로(엔진 R-1 ⑨a): 테스트·예제 타깃이 들어가는 빌드(`cargo test`, `--all-targets`, `--example`)는
-# 늘 `test-support`가 켜진다. 테스트 타깃이 없는 제품 구성(`cargo build`, `cargo clippy --lib --bins`)에는 합쳐지지 않는다(피처 리졸버 2).
-band = { path = ".", features = ["test-support"] }
+# 늘 `test-support`가 켜진다(`default-features = false`: 개발 의존이 더하는 피처는 이것 하나, #156 리뷰 L2). 테스트 타깃이 없는 제품 구성(`cargo build`, `cargo clippy --lib --bins`)에는 합쳐지지 않는다(피처 리졸버 2).
+band = { path = ".", default-features = false, features = ["test-support"] }
 
 [features]
 default = ["custom-protocol"]

@@ -77,7 +77,7 @@ impl Encoder {
 /// 워커에서 디코더를 만들지 않음을 이 값으로 확인한다.
 static OPUS_DECODERS_CREATED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-#[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn opus_decoders_created() -> u64 {
     OPUS_DECODERS_CREATED.load(std::sync::atomic::Ordering::Relaxed)
 }

@@ -480,7 +480,7 @@ impl Net {
     }
 
     /// 송신 경로 진단(엔진 ③c)의 지난 호출 이후 값을 돌려주고 비운다(진단·테스트 전용).
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn take_send_path_diag(&self) -> SendPathDiag {
         let s = &self.shared;
         SendPathDiag {
