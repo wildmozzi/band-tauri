@@ -50,9 +50,10 @@ impl EngineState {
 pub struct DiagState(Arc<Diagnostics>);
 
 impl DiagState {
-    /// 기록 스레드에는 엔진 스냅샷 함수만 넘긴다(`diag`는 `manager`를 모른다, 엔진 ⑤).
+    /// 기록 스레드에는 엔진 스냅샷 함수와 정지한 엔진의 연결 이벤트 함수만 넘긴다(`diag`는 `manager`를 모른다, 엔진 ⑤).
     pub fn spawn_recorder(&self, engine: Arc<EngineManager>) -> std::io::Result<()> {
-        self.0.spawn_recorder(move || engine.snapshot()).map(|_| ())
+        let e2 = engine.clone();
+        self.0.spawn_recorder(move || engine.snapshot(), move || e2.take_ended_conn()).map(|_| ())
     }
 
     pub fn shutdown(&self) {

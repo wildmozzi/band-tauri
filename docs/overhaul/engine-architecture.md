@@ -25,7 +25,7 @@
 
 | 혼합 파일 | 섞인 계층 | 쪼갤 단계 |
 |---|---|---|
-| `engine/metronome.rs` | 클릭 생성(E, RT) + 박 스케줄러(C) + 계획·상태 Mutex(B) | ⑥ |
+| `engine/metronome.rs` | 클릭 생성(E, RT) + 박 스케줄러(C) + 계획 Mutex·상태 칸(B, 워커 쪽 끝 `MetronomeRt`는 C) | ⑥ |
 | `engine/record.rs` | 출력 콜백 녹음 링(E, RT) + 쓰기 스레드·사이드카(비RT) | ⑥ |
 | ~~`engine/measure.rs`~~ | (⑥-4에서 해소) `measure/{analysis(1) 신호 처리·분석·판정, loopback(4) 루프백 작업, echo(4) 에코 프로브·큐·작업}`, `mod.rs`는 `pub use`만 | ⑥-4 완료 |
 | ~~`engine/stats.rs`~~ | (④에서 해소) 원자 카운터 `stats.rs`(1) · RT 타이밍 `rt_timing.rs`(1) · 보고 DTO와 `stats()` 조립 `report.rs`(5) | ④ 완료 |
@@ -43,8 +43,8 @@
 출력  (RT 출력 콜백) 소스 링들 → 게인·팬(원자값) → 마스터·soft clip → 장치 ─┬→ 믹스 탭 링 → band-mix-tap → 관람자 브릿지
                                                                      ├→ 녹음 링(소스별) → band-record → 파일
                                                                      └→ 메트로놈 클릭(장치 출력에만)
-제어  커맨드 → manager → Engine → 원자값(게인·뮤트·모니터) / Mutex(메트로놈 계획·루프백 보정) / 에코 프로브 큐(소유 이전, ②b-5) / net API
-통계  RT·워커·net 원자값 + 피어별 미디어 통계 스냅샷(seqlock, 워커 발행) → Engine::stats()가 EngineStats로 조립 → 커맨드·band-diag
+제어  커맨드 → manager → Engine → 원자값(게인·뮤트·모니터·루프백 보정) / 메트로놈 계획(Mutex + 세대, 워커는 `try_lock` 복사, ②b-6b) / 에코 프로브 큐(소유 이전, ②b-5) / net API
+통계  RT·워커·net 원자값 + 피어별 미디어 통계 스냅샷·메트로놈 상태(seqlock, 워커 발행) → Engine::stats()가 EngineStats로 조립 → 커맨드·band-diag
 ```
 
 깊이 측정의 시각 기준(`DeviceClock`)과 은닉 마감 규칙은 계약 문서 1.1·1.2절이 기준이다.
@@ -86,12 +86,14 @@
 | 피어 미디어 명령: 추가·제거(`MediaCmd`)와 반환 | 커맨드(`add/remove_peer`) / 워커(반환) | 워커 / 커맨드·통계(`reclaim`) | SPSC 링 용량 16(생산자는 `Mutex<HeapProd>`, 제어 평면끼리만) | 소유 이전(`PeerMedia`). 해제는 제어 평면에서(③-a2) |
 | 지터 프로필·재시작 요청 | 커맨드(`MediaSettings.profile`), 에코 측정(`restart_req` +1) | 워커(반복마다 비교) | `AtomicF32` / `AtomicU32` 세대 | 응답 없음(③-a2) |
 | 피어 미디어 통계 스냅샷(`MediaStatsCell`)·손실 보고(`LossCell`) | 워커(피어마다 `service` 직후) | 통계(`Engine::stats`·`peer_jitter_stats`), net 제어(Ping 손실 보고), 에코 측정(버퍼 깊이) | seqlock(버전 + 필드별 원자값) / `AtomicU64` 하나 | 쓰는 쪽은 워커 하나, 읽는 쪽은 락 없음(③-a1) |
-| `NetShared.peers` | 커맨드(`add/remove_peer`) | 워커(송신·공급마다), net 수신·제어, 통계 | `RwLock<Vec<Arc<Peer>>>` | 쓰기는 피어 변경 때만 |
-| `Peer.conn`·`echo`·`clock`·`remote_loss` | net 수신·제어 | 워커(자동 코덱: `sends_audio_via_relay`·`remote_loss`), 통계(`net_stats`), 메트로놈(`clock`) | 피어별 Mutex 4개 | ③-0부터 필드 private, 밖에서는 값 반환 메서드로만(가드 반환 접근자는 net 안) |
+| `NetShared.peers` | 커맨드(`add/remove_peer`) | 워커(복사본 `PeerTableCopy`로만 — 송신·자동 코덱 ③c, 메트로놈 기준 피어 ②b-6b), net 수신·제어, 통계 | `RwLock<Vec<Arc<Peer>>>` + 세대 | 쓰기는 피어 변경 때만. 워커는 세대가 바뀐 반복에 `try_read`만(기다리지 않는다) |
+| `Peer.conn`·`echo`·`clock`·`remote_loss` | net 수신·제어 | 워커(자동 코덱: `sends_audio_via_relay`·`remote_loss`, 메트로놈: `clock_estimate`·`clock_unsupported`), 통계(`net_stats` — `clock`은 보지 않는다) | 피어별 Mutex 4개 | ③-0부터 필드 private, 밖에서는 값 반환 메서드로만(가드 반환 접근자는 net 안). `clock`을 잡는 것은 워커와 `band-net-recv`뿐이다(둘 다 MMCSS) |
 | `PeerMediaShared.mix`(`PeerMixCtl`) | 커맨드(게인·팬, 엔진 등록부 경유) | 워커(→ 소스 슬롯), 통계 | 원자값 | 교체 때 엔진이 옛 값을 복사(③-b) |
 | `MediaSettings`(지터 최소·최대·프로필) | 커맨드 | 커맨드(새 피어 생성) | 프로필 `AtomicF32` | 엔진 소유(③-b). net은 미디어 설정을 갖지 않는다 |
 | `relay` | 커맨드 | net(릴레이 송신) | Mutex | |
-| 메트로놈 계획·상태·루프백 보정 | 커맨드 / 워커 | 워커 / 커맨드 | Mutex(세대 번호 비교 뒤 복사) | 워커는 반복마다 짧게 |
+| 메트로놈 계획 | 커맨드(`MetronomeCtl::set_plan`) | 워커(`MetronomeRt::refresh_plan`), 통계(`ref_peer_id`만) | `Mutex<(세대, 계획)>` + `plan_gen: AtomicU64` | 워커는 세대가 같으면 원자 읽기 하나, 바뀐 반복에만 `try_lock`으로 복사(바쁘면 옛 계획으로 돌고 다음 반복에 다시). 락은 제어 평면끼리만 기다린다(②b-6b, [engine-stage2b-design.md](engine-stage2b-design.md) 4절) |
+| 메트로놈 루프백 보정 | 커맨드 | 워커(반복마다) | `AtomicU64`(`f64` 비트, 없음 = `u64::MAX`) | ②b-6b |
+| 메트로놈 상태 보고(`MetroReport`) | 워커(0.1초마다·계획이 바뀐 반복, `MetronomeRt::publish`) | 통계(`MetronomeCtl::stats`) | seqlock 칸 `SeqCell<10>` | 작성자는 워커 하나(`MetronomeRt`는 `Clone`이 아니고 `pair`가 하나만 만든다). `refPeerId`만 제어 쪽 계획에서 읽는다(②b-6b) |
 | 에코 프로브 | 측정(`EchoPort`: 만들기·설치·회수·해제) | 워커(`EchoRt`: 반복마다 `poll`) | 명령·반환 SPSC 링 용량 2(`Box<EchoProbe>` 소유 이전) + 측정 번호에 묶인 원자값(`EchoCtl`: 클릭 시작·탭 끝·반환) | 워커는 락·할당 없음. `EchoPort`의 `Mutex` 둘은 측정 스레드만 잡는다(②b-5, [engine-stage2b-design.md](engine-stage2b-design.md) 3절) |
 | 녹음 마커 | 워커 | `band-record` | `MarkSink`(Mutex 큐) | 녹음 중에만 |
 | 워커 통계 | 워커 | 통계 | 원자값(`WorkerStats`) | |
@@ -107,16 +109,18 @@
 | `Peer.remote_loss` | seqlock 셀(단일 작성자 `band-net-recv`) | `band-net-recv` |
 | `relay`(상한 초과) | `relay_over_budget: AtomicBool` | `band-net-ctrl` 틱 |
 
-**③c 뒤에도 워커가 잡는 락**(송신 경로 밖 — ②b에서 단계 구조체로 나눌 때 세대 번호 + 원자값으로, ADR D2):
+**②b 뒤 워커가 잡는 락**(ADR D1·D2 ②b). 워커가 **기본 우선순위 스레드와 나누며 기다리는 락은 없다** — 에코 프로브는 ②b-5(소유 이전), 메트로놈 계획·루프백 보정·상태 보고와 기준 피어 시계 조회의 피어 표 읽기 락은 ②b-6b에서 없앴다. 남은 것:
 
-| 락 | 워커가 잡는 곳·빈도 | 같은 락을 잡는 기본 우선순위 스레드 |
-|---|---|---|
-| (에코 `probe` — ②b-5에서 없어졌다: 프로브는 측정 동안 워커가 소유한다) | — | — |
-| 메트로놈 `plan`·`stats`·`loopback_offset_ms` | 반복마다, 100ms | 커맨드, 통계(`Engine::stats`가 `metronome.stats`를 잡는다) |
-| 메트로놈 기준 피어 시계(`net.peer_clock` → `peers` 읽기 + `Peer.clock`) | 메트로놈이 기준 피어로 도는 동안 반복마다 | 커맨드 `add_peer`·`remove_peer`, `band-net-recv`(Pong) |
-| 녹음 마커 `MarkSink` | 녹음 중 은닉·버림이 있을 때 | `band-record` |
+| 락 | 워커가 잡는 곳·빈도 | 기다리는가 | 같은 락을 잡는 스레드 |
+|---|---|---|---|
+| `Peer.clock`(기준 피어 하나) | `MetronomeStage` → `Peer::clock_estimate`·`clock_unsupported`: 메트로놈이 기준 피어를 따르는 동안 반복마다 | 기다린다 | `band-net-recv`(Pong 표본)뿐 — **둘 다 MMCSS**. 기본 우선순위 스레드(통계 등)가 `clock`을 잡게 되는 변경은 이 규칙을 다시 열어야 한다 |
+| 메트로놈 계획 `MetronomeCtl.plan` | 계획 세대가 바뀐 반복에만 | `try_lock` — 못 잡으면 옛 계획으로 돈다 | 커맨드(`set_metronome`), 통계(`ref_peer_id` 복제) |
+| `NetShared.peers` | 피어 표 세대가 바뀐 반복에만(`refresh_copy`) | `try_read` — 못 잡으면 옛 복사본 | 커맨드 `add_peer`·`remove_peer`, net 수신·제어, 통계 |
+| `Peer.conn` | IPv6 경로(스냅샷에 못 담는다)일 때 프레임마다 | `try_lock` — 못 잡으면 그 프레임 건너뜀(센다) | net 수신·제어, 커맨드, 통계 |
+| 녹음 마커 `MarkSink` | 녹음 중 은닉·버림이 있을 때 | `try_lock` | `band-record` |
+| 로그 싱크(`log::`) | 상태가 바뀔 때만: 장치 멈춤·복귀, 스트림 에러, 슬롯 부족, 인코드 실패(레이트 제한) | 기다린다 | 로그를 쓰는 모든 스레드(기본 우선순위 포함) — 드물지만 남아 있다. 없애는 것은 ②b 범위가 아니다 |
 
-이 락들의 대기는 측정 빌드(`test-support`)에서 반복마다 `WorkerStats.iter_lock_wait`로 잰다(10·11절 표).
+지키는 방법 셋([engine-stage2b-design.md](engine-stage2b-design.md) 7.1절): ① `tests/architecture.rs`의 `worker_dir_waits_for_no_lock` — `src/engine/worker/`(tests.rs 제외)에 `.lock(`·`.read(`·`.write(` 호출이 없다(예외 0. 워커 파일이 **직접** 쓰는 락만 본다 — 재발 방지용), ② 폭주 시험 `send_path_storm_measure`의 락 대기 계측(워커가 부르는 메서드 안의 락까지 잰다 — 주 증거), ③ 이 표. `Peer.clock` 대기는 측정 빌드(`test-support`)에서 반복마다 `WorkerStats.iter_lock_wait`와 자리별 기록(`lock_sites.peer_clock`)으로, 계획 `try_lock` 실패는 `WorkerTiming.sites.plan_retries`로 잰다.
 
 ### 4.2 RT 경로 불변 조건
 
@@ -132,9 +136,9 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 워커는 은닉 마감(다음 출력 콜백 − 1.5ms)을, net 수신은 패킷 도착 시각 기록을 지켜야 한다. RT만큼 엄격하지 않지만 다음을 지킨다.
 
-1. **할당은 시작·재구성 때만**(버퍼는 `Worker::new`에서 사전할당). 반복 중 할당은 이벤트 드문 경로만 허용하고 목록으로 관리한다 — 현재: 메트로놈 계획이 바뀔 때 `clone`, 새 피어의 `AutoTx`(id `clone`), 새 피어의 `PeerFeed`(리샘플러, `PeerSources`가 슬롯을 배정할 때 — 제어 평면으로 옮기는 것은 ⑧ 후속), `Net::peers()`의 `Vec` 복제(측정·통계 경로), 에코 측정 시작·끝의 지터 재시작(`JitterBuffer::restart`가 버퍼를 새로 만든다 — ③-a2부터 워커에서 적용, 측정당 2회). ②에서 워커 루프의 매 반복 경로에 할당이 없음을 유지한다.
+1. **할당은 시작·재구성 때만**(버퍼는 `Worker::new`에서 사전할당). 반복 중 할당은 이벤트 드문 경로만 허용하고 목록으로 관리한다 — 현재: 메트로놈 계획이 바뀔 때 `ref_peer_id` 문자열 복사(`clone_from` — 기준 피어가 `None` ↔ `Some`으로 바뀌거나 더 긴 id로 바뀔 때만 할당·해제), 새 피어의 `AutoTx`(id `clone`), 새 피어의 `PeerFeed`(리샘플러, `PeerSources`가 슬롯을 배정할 때 — 제어 평면으로 옮기는 것은 ⑧ 후속), `Net::peers()`의 `Vec` 복제(측정·통계 경로), 에코 측정 시작·끝의 지터 재시작(`JitterBuffer::restart` — ③-a2부터 워커에서 적용, 측정당 2회). 에코 프로브 관련 할당은 0이다(②b-5: 인코더·버퍼는 측정 스레드가 미리 만든다). ②에서 워커 루프의 매 반복 경로에 할당이 없음을 유지한다.
 2. **락은 짧게**: 잡은 채 블로킹 I/O·로그·할당을 하지 않는다. 예외: 워커의 `send_to`(UDP, 논블로킹에 가까움, 송신 큐 지연으로 잰다).
-3. **우선순위 역전**: 워커·net 수신은 MMCSS로 올라가 있고 커맨드·`band-diag`는 기본 우선순위다. `parking_lot`은 우선순위 상속이 없으므로 기본 우선순위 스레드가 준RT와 같은 락을 잡을 때 그 안에서는 복사만 한다(`stats()` 스냅샷). 지터 락은 ③에서 없앴다(통계 = seqlock 스냅샷, 프로필·재시작 = 원자값, 추가·제거 = 명령 큐, 삽입 = 수신 큐). 남은 락은 4.1절 끝 표.
+3. **우선순위 역전**: 워커·net 수신은 MMCSS로 올라가 있고 커맨드·`band-diag`는 기본 우선순위다. `parking_lot`은 우선순위 상속이 없으므로 기본 우선순위 스레드가 준RT와 같은 락을 잡을 때 그 안에서는 복사만 한다(`stats()` 스냅샷). **워커는 기본 우선순위 스레드와 락을 나누며 기다리지 않는다**(ADR D1): 지터 락은 ③(통계 = seqlock 스냅샷, 프로필·재시작 = 원자값, 추가·제거 = 명령 큐, 삽입 = 수신 큐), 송신 경로는 ③c(복사본·스냅샷), 에코 프로브와 메트로놈은 ②b(소유 이전 큐 / 세대 + `try_lock`·원자값·seqlock 칸)에서 없앴다. 새 공유 상태도 같은 기준으로 고른다: 값만 바뀌면 원자값, 한 벌이어야 하면 seqlock 칸(`SeqCell`), 소유권이 넘어가면 큐, 드물게 바뀌는 큰 값이면 세대 + `try_lock` 복사. 남은 것(`Peer.clock` — MMCSS끼리, 로그)은 4.1절 끝 표.
 4. 로그는 레이트 제한(1000회에 1번 등).
 
 ### 4.4 설정 전파
@@ -144,9 +148,9 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 피어 게인·팬·뮤트 | `PeerMediaShared.mix`(`PeerMixCtl`, 엔진 등록부) | 원자값 → 워커가 소스 슬롯 원자값에 복사 | 즉시 |
 | 모니터·마스터·입력 뮤트 | `MixControls` | 원자값 | 즉시 |
 | 지터 프로필(0..1) | 엔진 `MediaSettings.profile`(원자값) | 워커가 반복마다 피어별 마지막 적용값과 비교해 `set_profile`(③-a2) | 다음 워커 반복. 추가와 겹쳐도 맞춰진다 |
-| 메트로놈 계획 | `MetronomeCtl.plan` | Mutex + 세대 번호 | 다음 워커 반복 |
+| 메트로놈 계획 | `MetronomeCtl.plan` | Mutex + 세대 원자값(`plan_gen`). 워커는 세대가 바뀐 반복에 `try_lock`으로 복사 | 다음 워커 반복(제어 스레드가 락을 쥔 채 선점돼 있으면 그만큼 늦게 — 새 계획의 박 0은 지금 + 300ms 뒤라 첫 박을 놓치지 않는다) |
 | 메트로놈 볼륨 | `ClickShared` | 원자값 | 즉시 |
-| 루프백 보정(숨은 출력 지연) | `manager.loopback_cal` → `MetronomeCtl.loopback_offset_ms` | Mutex | 즉시(같은 장치 구성일 때만) |
+| 루프백 보정(숨은 출력 지연) | `manager.loopback_cal` → `MetronomeCtl`(`set_loopback_offset`) | 원자값(`f64` 비트) | 다음 워커 반복(같은 장치 구성일 때만) |
 | 릴레이 | net `relay` Mutex | `Engine::set_relay` → net | 즉시 |
 | 강제 자동 Opus(측정 도구) | `NetShared.force_auto_opus` | 원자값 | 다음 점검(200ms) |
 | 코덱·프레임·채널·장치·버퍼 | `EngineConfig` | 엔진 재시작 | 재시작 |
@@ -168,7 +172,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 계층 | 노드 |
 |---|---|
 | 0 | `engine::config`, `net::packet`, `sys`, `sys::{prio, cpu, time}`(④) |
-| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `diag::mask`, `engine::measure::analysis`(⑥-4) |
+| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4) |
 | 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1) |
 | 3 | `net`, `net::{peer, relay, stun, qos}` |
 | 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), 하네스 `engine::sim`(`cfg(test)`) |
@@ -340,7 +344,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 ## 11. 엔진 수명 상태기계
 
-지금 규칙은 `manager.rs`(슬롯·세대 번호), `Engine`(스레드 소유·`deviceLost` 보고), 프론트 `performSession.ts`(시그널링·재시작 판단)에 흩어져 있다. 상태와 전이를 여기 한 곳에 둔다. ⑧부터 `manager`가 전이시키는 상태는 명시적 enum `Phase::{Idle, Starting { cancel }, Running(Box<Engine>)}`이다(`Slot { phase, generation, monitor_before_test }`). Degraded는 enum에 없다 — 엔진이 보고하는 값이라 `EngineSnapshot`(`stats.deviceLost`)에서 읽는다. Stopping도 enum에 없다 — `Phase::leave`로 꺼낸 엔진을 락 밖에서 drop하는 지역 변수다.
+지금 규칙은 `manager.rs`(슬롯·세대 번호), `Engine`(스레드 소유·`deviceLost` 보고), 프론트 `performSession.ts`(시그널링·재시작 판단)에 흩어져 있다. 상태와 전이를 여기 한 곳에 둔다. ⑧부터 `manager`가 전이시키는 상태는 명시적 enum `Phase::{Idle, Starting { cancel }, Running(Box<Engine>)}`이다(`Slot { phase, generation, monitor_before_test }`). Degraded는 enum에 없다 — 엔진이 보고하는 값이라 `EngineSnapshot`(`stats.deviceLost`)에서 읽는다. Stopping도 enum에 없다 — `Phase::leave`로 꺼낸 엔진을 락 밖에서 정지하는 지역 변수다(`retire`: join, 합주 엔진이면 마지막 연결 이벤트를 `ended_conn`에 남김, 세션 = 증가 전 세대. `test_stop`은 net 없는 엔진만 꺼내므로 그냥 drop).
 
 ```text
           start(cfg, peer?) / test_start(cfg)            Engine::start 성공(세대 일치)
@@ -360,7 +364,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | Starting | 장치 열기·STUN·스레드 시작 중(블로킹, `start_lock` 직렬화) | `Phase::Starting { cancel }` | 커맨드가 "시작 중" |
 | Running | 정상 | `Phase::Running(Box<Engine>)` | `running = true` |
 | Degraded | 장치 분실(콜백 1초 정지, WASAPI 무효화 HRESULT, 기본 장치 변경). 엔진 객체는 남음 | `Phase::Running` 그대로(enum 밖, `EngineSnapshot`에서 읽음) | `deviceLost = true`, `running = false` |
-| Stopping | 슬롯에서 꺼낸 엔진을 락 밖에서 drop(join) | 슬롯 밖 지역 변수(`Phase::leave`가 돌려준 엔진) | — |
+| Stopping | 슬롯에서 꺼낸 엔진을 락 밖에서 정지(`retire`: join + 합주 엔진의 마지막 연결 이벤트) | 슬롯 밖 지역 변수(`Phase::leave`가 돌려준 엔진) | — |
 
 - **세대 번호**: `start`/`stop`마다 오른다. 블로킹 시작이 끝났을 때 세대가 다르면 결과를 버리고(`start_lock`을 쥔 채 정지해 장치를 놓은 뒤) "취소됨"을 돌려준다. 이전 시작은 `cancel` 원자값으로 일찍 포기한다.
 - **누가 전이시키는가**: Idle↔Starting↔Running·Stopping은 커맨드(`manager`). Running↔Degraded는 엔진 스레드(워커의 장치 감시, `band-wasapi`)가 원자값으로 보고만 하고, 정지·재시작 결정은 프론트(`performSession`: `running=false`가 이어지면 정지, L7)가 한다. 엔진이 스스로 재시작하지 않는다(자체 WASAPI의 일시 오류 스트림 재시작은 Running 안의 일).

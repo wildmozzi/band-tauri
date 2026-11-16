@@ -77,6 +77,8 @@ pub struct Engine {
     audio_stop: Arc<AtomicBool>,
     audio: Option<JoinHandle<()>>,
     net: Option<Net>,
+    /// 정지한 Net의 마지막 연결 이벤트(P1-18, 정지 때 `aborted`까지 포함). `stop` 뒤 `conn_events`가 이것을 준다.
+    ended_conn: Vec<crate::net::connlog::ConnEvent>,
     /// 출력 콜백이 장치 레이트로 채우는 믹스 탭 링의 소비자. 구독 중에는 탭 스레드가 가진다.
     tap_cons: Mutex<Option<HeapCons<f32>>>,
     tap_thread: Option<TapThread>,
@@ -137,7 +139,7 @@ impl Engine {
         let (measure_sh, m_in, m_out, measure_ends) = rt::measure_path();
         input.attach_measure(m_in);
         output.attach_measure(m_out);
-        let metronome = Arc::new(metronome::MetronomeCtl::default());
+        let (metronome, metronome_rt) = metronome::MetronomeCtl::pair();
         output.attach_click(metronome::ClickRt::new(metronome.click.clone()));
         // 녹음 핸드오프(링은 녹음 시작 때 할당해 넘긴다)
         let (rec_rt, rec_ctl) = record::record_port();
@@ -195,6 +197,7 @@ impl Engine {
             audio_stop,
             audio: Some(audio),
             net: None,
+            ended_conn: Vec::new(),
             tap_cons: Mutex::new(Some(feed.tap)),
             tap_thread: None,
             measure_sh,
@@ -249,7 +252,7 @@ impl Engine {
             stats: engine.worker_stats.clone(),
             epoch,
             echo: echo_rt,
-            metronome,
+            metronome: metronome_rt,
             rec_marks: engine.recorder.lock().marks(),
             media_port: media_port_rt,
             media_settings: engine.media_settings.clone(),
@@ -562,6 +565,8 @@ impl Engine {
         }
         if let Some(mut n) = self.net.take() {
             n.stop();
+            // 제어 스레드가 끝나며 남긴 `aborted`까지 들고 있는다(관리자가 진단에 넘긴다, P1-18).
+            self.ended_conn = n.conn_events();
         }
         // 워커가 끝났으므로 반환 큐에 남은 것과 등록부를 여기(제어 평면)에서 해제한다.
         self.media_port.reclaim();

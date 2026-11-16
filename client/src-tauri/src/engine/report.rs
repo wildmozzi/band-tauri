@@ -18,21 +18,21 @@ pub struct WorkerTiming {
     pub body: crate::net::txlat::SendQueueStats,
     /// 반복 시작 간격.
     pub period: crate::net::txlat::SendQueueStats,
-    /// 남은 락(에코 프로브·메트로놈)에서 기다린 합.
+    /// 남은 락(`Peer.clock` — MMCSS끼리)에서 기다린 합.
     pub lock_wait: crate::net::txlat::SendQueueStats,
     /// 본문 − 락 대기(락 밖 비용).
     pub unlocked: crate::net::txlat::SendQueueStats,
-    /// 남은 락의 자리별 대기(엔진 ②b 측정): 메트로놈 계획·루프백 보정·상태 보고, 기준 피어 시계의 피어 표(에코 프로브 락은 ②b-5에서 없어졌다).
+    /// 남은 락의 자리별 대기(엔진 ②b 측정). ②b-6b 뒤로 워커가 기다리는 락은 `Peer.clock` 하나다.
     pub sites: WorkerLockWaits,
 }
 
 /// `WorkerTiming.sites`: 워커가 자리별로 기다린 횟수·합·최대(지난 `take_worker_timing` 이후).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WorkerLockWaits {
-    pub metro_plan: crate::net::txlat::LockSiteWait,
-    pub metro_offset: crate::net::txlat::LockSiteWait,
-    pub metro_stats: crate::net::txlat::LockSiteWait,
+    /// 기준 피어의 `Peer.clock`(상대는 `band-net-recv`뿐 — 둘 다 MMCSS).
     pub peer_clock: crate::net::txlat::LockSiteWait,
+    /// 메트로놈 계획 `try_lock`에 실패해 옛 계획으로 돈 반복 수(기다리지 않는다, 설계 7.4절).
+    pub plan_retries: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -169,9 +169,25 @@ pub struct EngineSnapshot {
     pub network: bool,
     /// 엔진 세션 번호(`EngineManager` generation, 시작·정지마다 증가)
     pub session: u64,
+    /// 최근 연결 이벤트(P1-18, `Engine::conn_events`). 진단이 `seq`로 이미 기록한 것을 거른다.
+    pub conn_events: Vec<crate::net::connlog::ConnEvent>,
+}
+
+/// 정지한 엔진의 마지막 연결 이벤트(P1-18, #145 M-1). 정지 때 생긴 `aborted`는 엔진이 사라진 뒤라 스냅샷으로는
+/// 볼 수 없으므로 `EngineManager`가 정지하며 남기고 진단 기록이 한 번 가져간다.
+pub struct EndedConn {
+    /// 그 엔진의 세션 번호(스냅샷의 `session`과 같은 값).
+    pub session: u64,
+    pub events: Vec<crate::net::connlog::ConnEvent>,
 }
 
 impl Engine {
+    /// 피어별 연결 시도 → 결과(P1-18, net 제어 스레드가 기록). 정지 뒤에는 정지한 Net의 마지막 이벤트,
+    /// 네트워크 없는 엔진이면 빈 목록.
+    pub fn conn_events(&self) -> Vec<crate::net::connlog::ConnEvent> {
+        self.net.as_ref().map_or_else(|| self.ended_conn.clone(), |n| n.conn_events())
+    }
+
     pub fn stats(&self) -> EngineStats {
         let c = &self.counters;
         let in_buf = match c.in_cb_frames.load(Ordering::Relaxed) {
@@ -329,12 +345,7 @@ impl Engine {
     pub fn take_worker_timing(&self) -> WorkerTiming {
         let s = &self.worker_stats;
         let l = &s.lock_sites;
-        let sites = WorkerLockWaits {
-            metro_plan: l.metro_plan.take(),
-            metro_offset: l.metro_offset.take(),
-            metro_stats: l.metro_stats.take(),
-            peer_clock: l.peer_clock.take(),
-        };
+        let sites = WorkerLockWaits { peer_clock: l.peer_clock.take(), plan_retries: self.metronome.take_plan_retries() };
         WorkerTiming { body: s.iter_body.rotate(), period: s.iter_period.rotate(), lock_wait: s.iter_lock_wait.rotate(), unlocked: s.iter_unlocked.rotate(), sites }
     }
 

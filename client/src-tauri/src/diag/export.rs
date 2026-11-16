@@ -494,7 +494,7 @@ mod tests {
         let d = Diagnostics::new(10);
         let mut stats = EngineStats::stopped();
         stats.running = true;
-        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 3 }));
+        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 3, conn_events: vec![] }));
         d.record(2_000, None);
         let dir = std::env::temp_dir().join(format!("band-diag-golden-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -532,7 +532,7 @@ mod tests {
         let mut stats = EngineStats::stopped();
         stats.running = true;
         let cfg = EngineConfig { buffer_size: 256, ..EngineConfig::default() };
-        let cur = EngineSnapshot { stats, config: cfg, network: false, session: 8 };
+        let cur = EngineSnapshot { stats, config: cfg, network: false, session: 8, conn_events: vec![] };
         let app = AppInfo { name: "Band".into(), version: "0.1.0".into() };
         let bytes = build(Some(cur), Err("열거 실패".into()), &d, app, None, 5_000).unwrap();
         std::fs::remove_dir_all(&dir).ok();

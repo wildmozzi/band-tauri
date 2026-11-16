@@ -1,6 +1,7 @@
 //! UDP 소켓과 송수신/제어 스레드 (설계 문서 1.1, 2, 3절).
 
 pub mod clock;
+pub mod connlog;
 pub mod crypto;
 pub mod media_link;
 pub mod packet;
@@ -144,6 +145,8 @@ pub struct NetShared {
     send_latency: txlat::SendLatency,
     /// DSCP 마킹 상태(제어 스레드가 바뀔 때 갱신).
     qos_stats: Mutex<qos::QosStats>,
+    /// 피어별 연결 시도 → 결과(P1-18). 제어 스레드가 쓰고 진단 스냅샷이 읽는다.
+    conn_log: Mutex<connlog::ConnLog>,
 }
 
 /// 워커가 들고 있는 피어 표 복사본(엔진 ③c, ADR D1). 세대가 바뀐 반복에서만 다시 복사한다(`NetShared::refresh_copy`).
@@ -269,6 +272,7 @@ impl Net {
             force_auto_opus: AtomicBool::new(false),
             send_latency: txlat::SendLatency::new(),
             qos_stats: Mutex::new(qos::QosStats::default()),
+            conn_log: Mutex::new(connlog::ConnLog::default()),
             recv_prio: Default::default(),
         });
 
@@ -450,6 +454,11 @@ impl Net {
     /// DSCP 마킹 상태(`EngineStats.qos`).
     pub fn qos_stats(&self) -> qos::QosStats {
         self.shared.qos_stats.lock().clone()
+    }
+
+    /// 최근 연결 이벤트(P1-18, 오래된 것부터, 최대 `connlog::LOG_CAPACITY`개). 진단 기록용.
+    pub fn conn_events(&self) -> Vec<connlog::ConnEvent> {
+        self.shared.conn_log.lock().events()
     }
 
     /// 직전 창의 송신 큐 지연(`EngineStats.sendQueue`).
@@ -849,28 +858,6 @@ impl NetShared {
         Ok((e.remote_echoing(Instant::now()), e.remote_delay_us))
     }
 
-    /// 그 피어 시계 − 내 시계 추정(P2-3). `at_us` = 내 시계(`now_us`). 피어가 없거나 표본이 없으면 None.
-    pub fn peer_clock(&self, peer_id: &str, at_us: u64) -> Option<clock::ClockEstimate> {
-        self.peer_by_id(peer_id).ok().and_then(|p| p.clock().estimate(at_us as f64))
-    }
-
-    /// 그 피어가 Pong에 시계를 싣지 않는 엔진(옛 버전)으로 보이는지(PR #34 L4, `ClockSync::unsupported`).
-    pub fn peer_clock_unsupported(&self, peer_id: &str) -> bool {
-        self.peer_by_id(peer_id).ok().is_some_and(|p| p.clock().unsupported())
-    }
-
-    /// `peer_clock`과 같되 피어 표 읽기 락을 기다린 시간을 잰다(워커 전용, 엔진 ②b 측정 — ②b-6b에서 이 락이 없어진다).
-    pub(crate) fn peer_clock_timed(&self, peer_id: &str, at_us: u64, w: &mut txlat::LockWait, site: &txlat::LockSite) -> Option<clock::ClockEstimate> {
-        let p = w.read(&self.peers, site).iter().find(|p| p.id() == peer_id).cloned();
-        p.and_then(|p| p.clock().estimate(at_us as f64))
-    }
-
-    /// `peer_clock_unsupported`의 워커 전용 짝(위와 같음).
-    pub(crate) fn peer_clock_unsupported_timed(&self, peer_id: &str, w: &mut txlat::LockWait, site: &txlat::LockSite) -> bool {
-        let p = w.read(&self.peers, site).iter().find(|p| p.id() == peer_id).cloned();
-        p.is_some_and(|p| p.clock().unsupported())
-    }
-
     pub fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
         self.peer_by_id(peer_id).ok().and_then(|p| p.conn().rtt_ms)
     }
@@ -1108,6 +1095,10 @@ fn control_loop(s: &NetShared) {
     let mut qos = qos::Qos::new(&s.socket);
     *s.qos_stats.lock() = qos.stats();
     let mut qos_dests: Vec<SocketAddr> = Vec::with_capacity(MAX_PEERS + 1);
+    let mut conns = connlog::ConnTracker::default();
+    // 연결 결과 기록(P1-18): 이벤트가 있을 때만 벽시계를 읽고 로그 락을 잡는다.
+    let mut unix_ms = crate::sys::time::unix_ms;
+    let mut push = |at: u64, id: &str, phase, outcome, ms| s.conn_log.lock().push(at, id, phase, outcome, ms);
     while !s.stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         let peers = s.peers.read().clone();
@@ -1133,12 +1124,22 @@ fn control_loop(s: &NetShared) {
             s.send_latency.rotate();
         }
         let mut relay_quiet = false;
+        conns.begin();
         for p in &peers {
-            let (action, path, last_rx, failed) = {
+            let (action, path, last_rx, failed, view) = {
                 let mut c = p.conn();
                 let a = c.tick(now, relay_ready);
-                (a, c.path, c.last_rx, c.state == PeerStateKind::Failed)
+                let view = connlog::ConnView {
+                    state: c.state,
+                    path: c.path.map(|(_, k)| k),
+                    started: c.started,
+                    connected_at: c.connected_at,
+                    lost_at: c.last_rx.map(|t| t + peer::LOST_AFTER),
+                    bye: c.bye,
+                };
+                (a, c.path, c.last_rx, c.state == PeerStateKind::Failed, view)
             };
+            conns.observe(p.id(), view, now, &mut connlog::Sink { unix_ms: &mut unix_ms, log: &mut push });
             if action.hello_direct {
                 for addr in p.hello_targets(relay) {
                     s.send_ctrl(p, PacketType::Hello, s.now_us32(), s.local_peer_id.as_bytes(), addr, false);
@@ -1177,10 +1178,13 @@ fn control_loop(s: &NetShared) {
                 }
             }
         }
+        conns.end(now, &mut connlog::Sink { unix_ms: &mut unix_ms, log: &mut push });
         // 표 복사본은 자기 전에 놓는다: 빠진 피어를 20ms 더 쥐지 않게(#126 리뷰 H-1).
         drop(peers);
         std::thread::sleep(Duration::from_millis(20));
     }
+    // Net 정지: 결과 전인 시도는 `aborted`로 남긴다(#145 M-1). 엔진 관리자가 정지 뒤 이 로그를 넘겨받아 진단에 준다.
+    conns.finish(Instant::now(), &mut connlog::Sink { unix_ms: &mut unix_ms, log: &mut push });
 }
 
 #[cfg(test)]
@@ -1251,6 +1255,47 @@ mod copy_tests {
         assert!(s.retired_peers.lock().is_empty());
         assert!(a.upgrade().is_none(), "제어 스레드의 release_retired가 놓았다");
         assert_eq!(n.take_send_path_diag().route_skips, 0);
+    }
+
+    /// 엔진 ②b-6b: 메트로놈의 기준 피어 시계 조회는 워커 복사본에서 찾은 `Peer`에 직접 한다 — 피어 표 락을 거치지 않으므로
+    /// 제어 스레드가 쓰기 락을 쥐고 있어도(선점된 추가·제거) 돈다. 전에는 `peers.read()`에서 그 시간만큼 기다렸다.
+    /// 별도 스레드에서 부르고 시한을 둔다: 조회가 피어 표 락을 다시 잡게 되면 걸려서 실패한다(멈추지 않는다).
+    #[test]
+    fn ref_peer_clock_reads_through_copy_while_table_is_write_locked() {
+        let mut n = net();
+        n.stop();
+        let s = n.shared().clone();
+        add(&n, "host", 1);
+        add(&n, "old", 2);
+        let mut c = PeerTableCopy::for_worker();
+        s.refresh_copy(&mut c);
+        let by_id = |c: &PeerTableCopy, id: &str| c.peers().iter().find(|p| p.id() == id).cloned().unwrap();
+        // host 시계 = 내 시계 + 40ms, 왕복 200µs. old는 시계를 싣지 않는 Pong만 보낸다.
+        for i in 0..8 {
+            let t0 = 1_000_000.0 + i as f64 * 500_000.0;
+            by_id(&c, "host").clock().on_sample(t0, t0 + 200.0, t0 + 100.0 + 40_000.0);
+        }
+        for _ in 0..64 {
+            by_id(&c, "old").clock().on_plain_pong();
+        }
+        let held = s.peers.write();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            let site = txlat::LockSite::default();
+            let mut w = txlat::LockWait::default();
+            let est = by_id(&c, "host").clock_estimate(5_000_000, &mut w, &site);
+            let old = by_id(&c, "old");
+            let r = (est, old.clock_estimate(5_000_000, &mut w, &site).is_none(), old.clock_unsupported(&mut w, &site), w.contended);
+            tx.send(r).unwrap();
+        });
+        let (est, old_none, old_unsupported, contended) =
+            rx.recv_timeout(Duration::from_secs(5)).expect("기준 피어 시계 조회가 피어 표 쓰기 락을 기다린다");
+        drop(held);
+        t.join().unwrap();
+        let est = est.expect("표본이 있으면 추정이 나온다");
+        assert!((est.offset_us - 40_000.0).abs() < 50.0, "{est:?}");
+        assert!(old_none && old_unsupported, "시계를 싣지 않는 피어");
+        assert_eq!(contended, 0, "Peer.clock은 아무도 쥐고 있지 않았다");
     }
 
     /// #126 리뷰 M-2: 워커 복사본이 아닌 복사본(시험·도구의 `send_audio`)은 세대를 발행하지 않는다 — 워커 복사본이
