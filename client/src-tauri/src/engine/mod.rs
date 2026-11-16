@@ -54,6 +54,9 @@ use rt::InputRt;
 use stats::AudioCounters;
 use worker::{Worker, WorkerParams, WorkerStats};
 
+// 반환 큐가 차지 않는 근거(`peer_media::MEDIA_RET_CAPACITY`): 명령 큐를 채운 제거 + 그 호출의 하나 + 정지 때 표에 남은 피어.
+const _: () = assert!(peer_media::MEDIA_RET_CAPACITY >= peer_media::MEDIA_CMD_CAPACITY + crate::net::MAX_PEERS + 2);
+
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
 pub type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
 
@@ -307,9 +310,11 @@ impl Engine {
         // (`reserve_cmd` 대기가 끼어도 어긋나지 않게, #120 L-3).
         let added = Instant::now();
         let added_us = added.saturating_duration_since(self.epoch).as_micros() as u64;
-        // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB)는 여기, 락 밖에서 할당한다. 워커는 추가·제거·재시작 어디서도 할당·해제하지 않는다(재시작은 제자리 초기화, 디코더는 여기서 미리 만든 Opus 모노·스테레오 풀과 주고받는다 — 코덱이 바뀌어도 새로 만들지 않음, ③c `tests/rt_alloc.rs`; 해제는 반환 큐를 거쳐 제어 평면에서).
+        // 공급 리샘플러(엔진 ⑧ 후속)는 이 엔진의 장치 출력 레이트로 만든다: `info.out_rate`는 엔진 수명 동안 고정이고 워커도
+        // 같은 값을 쓴다(장치·레이트를 바꾸면 엔진을 다시 시작하고 피어도 다시 추가된다). 만들 수 없으면 net에 넣기 전에 에러.
+        // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB, 공급 리샘플러)는 여기, 락 밖에서 할당한다. 워커는 추가·제거·재시작 어디서도 할당·해제하지 않는다(재시작은 제자리 초기화, 디코더는 여기서 미리 만든 Opus 모노·스테레오 풀과 주고받는다 — 코덱이 바뀌어도 새로 만들지 않음, ③c `tests/rt_alloc.rs`; 해제는 반환 큐를 거쳐 제어 평면에서).
         let (tx, rx) = media_link(key);
-        let (media, worker_side) = PeerMedia::new(key, peer_id.clone(), desc.ssrc, added_us, settings, rx);
+        let (media, worker_side) = PeerMedia::new(key, peer_id.clone(), desc.ssrc, added_us, settings, rx, self.info.out_rate)?;
         // 등록부 락 안에서 믹스 설정 복사 → net 교체 → 등록부 교체: 겹친 set_peer_gain은 옛 것에 쓰여 복사로 넘어가거나
         // 새 것에 쓰인다(설계 7.3절). 복사는 net에 넣기 전에 해서 워커가 새 항목을 기본 게인으로 보는 순간이 없다.
         let mut reg = self.media.lock();
@@ -579,7 +584,8 @@ impl Engine {
             // 제어 스레드가 끝나며 남긴 `aborted`까지 들고 있는다(관리자가 진단에 넘긴다, P1-18).
             self.ended_conn = n.conn_events();
         }
-        // 워커가 끝났으므로 반환 큐에 남은 것과 등록부를 여기(제어 평면)에서 해제한다.
+        // 워커가 끝났으므로 반환 큐에 남은 것과 등록부를 여기(제어 평면)에서 해제한다. 워커는 끝나면서 표에 남은 피어를
+        // 모두 반환 큐로 보냈다(`PeerSources::close`) — 지터 버퍼·공급 리샘플러 해제는 여기서 한다(엔진 ⑧ 후속).
         self.media_port.reclaim();
         self.media.lock().clear();
         self.audio_stop.store(true, Ordering::SeqCst);

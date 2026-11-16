@@ -1,5 +1,6 @@
 //! 장치 레이트 ↔ 내부 48kHz 스트리밍 리샘플러 (rubato `FastFixedIn`).
-//! 워커(비RT) 스레드에서만 사용한다. 생성 후에는 할당하지 않는다.
+//! 워커(비RT) 스레드에서만 사용한다. 생성 후에는 할당하지 않는다. 피어 공급용은 제어 평면(`PeerMedia::new`, 커맨드
+//! 스레드)이 만들어 명령 큐로 워커에 넘기고 반환 큐로 돌려받아 해제한다(엔진 ⑧ 후속).
 
 use std::collections::VecDeque;
 
@@ -10,6 +11,8 @@ pub const CHUNK: usize = 48;
 
 pub struct StreamResampler {
     channels: usize,
+    /// 출력 레이트(만들 때 정한다). 넘겨받은 쪽이 자기 장치 레이트와 맞는지 확인한다.
+    to_rate: u32,
     inner: Option<FastFixedIn<f32>>,
     in_planar: Vec<Vec<f32>>,
     in_fill: usize,
@@ -32,6 +35,7 @@ impl StreamResampler {
         let out_max = inner.as_ref().map(|r| r.output_frames_max()).unwrap_or(0);
         Ok(Self {
             channels,
+            to_rate,
             in_planar: (0..channels).map(|_| vec![0.0; CHUNK]).collect(),
             in_fill: 0,
             out_planar: (0..channels).map(|_| vec![0.0; out_max]).collect(),
@@ -39,6 +43,11 @@ impl StreamResampler {
             out: VecDeque::with_capacity(to_rate as usize * channels),
             inner,
         })
+    }
+
+    /// 출력 레이트(Hz).
+    pub fn out_rate(&self) -> u32 {
+        self.to_rate
     }
 
     pub fn is_passthrough(&self) -> bool {

@@ -276,10 +276,14 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
     let churning = p.peers.iter().any(|np| np.join_us > 0 || np.leave_us.is_some());
     let mut mtxs = Vec::new();
     let mut txs = Vec::new();
+    // 워커 단계(`PeerSources::service`·`close`) 안에서 일어난 할당·재할당·해제 수(엔진 ⑧ 후속). 0이어야 한다.
+    let mut worker_allocs = 0u64;
+    // 제어 평면이 쥔 공유 쪽(엔진 등록부 역할): 끝에 참조 수로 누수·워커 해제가 없음을 본다.
+    let mut shareds = Vec::new();
     for (i, np) in p.peers.iter().enumerate() {
         let key = PeerKey::from_raw(i as u64 + 1);
         let (mtx, mrx) = media_link(key);
-        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, 0, settings, mrx);
+        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, 0, settings, mrx, 48_000).expect("48k 통과 리샘플러");
         // 슬롯 게인: 전에는 하네스가 슬롯에 (0.15, 0.15)를 직접 썼다. 이제 `PeerSources`가 반복마다 피어 믹스 게인으로 덮어쓰므로
         // 믹스 게인을 0.15로 둔다(팬 0). 팬 법칙(cos(π/4)·√2, f32)이 정확히 1이 아니라 슬롯 게인은 0.15에서 1ulp쯤 다르다.
         // 리포트에는 영향이 없다: 슬롯 게인은 `OutputRt::mix_source`에서 버스·탭에 더할 때만 곱해지고, 언더런(xrun) 판정은
@@ -287,6 +291,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         shared.mix.gain.store(0.15);
         let g = shared.mix.lr_gains();
         assert!((g.0 - 0.15).abs() < 1e-6 && g.0 == g.1, "슬롯 게인 {g:?}");
+        shareds.push(shared);
         // 시작 때 있는 피어는 바로 넣고(기존 시나리오 그대로), 실행 중 추가는 그 시각의 워커 사건에서 넣는다(②b-3b).
         if np.join_us == 0 {
             let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Add(media));
@@ -477,7 +482,9 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     }
                 }
             }
-            let urgent = sources.service(&bank, &counters, &wstats, 48_000, &timing, None).urgent;
+            let (round, a) = super::alloc::counted(|| sources.service(&bank, &counters, &wstats, 48_000, &timing, None));
+            worker_allocs += a;
+            let urgent = round.urgent;
             // 명령은 그 반복에 적용된다(J1): 표 길이·순서가 바로 맞고, 새 피어는 슬롯을 받고, 제거된 피어의 슬롯은 DRAIN이다.
             assert_eq!(sources.table_len(), order.len(), "t={t}: 워커 표 길이");
             for (pos, &i) in order.iter().enumerate() {
@@ -543,6 +550,20 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         assert_eq!(pm.rx_dropped(), 0, "하네스에서 수신 큐가 넘쳤다(피어 {i})");
         outs[i].js = pm.jitter().stats();
     }
+    // 정지(엔진 ⑧ 후속): 워커는 표에 남은 피어를 리샘플러째 반환 큐로 보내고(할당·해제 0), 해제는 제어 평면의 `reclaim`이 한다.
+    // 실행 중 제거된 피어는 이미 `reclaim`됐거나 아직 반환 큐에 있다 — 어느 쪽이든 워커가 해제한 것은 없다.
+    let ((), a) = super::alloc::counted(|| sources.close(&bank));
+    worker_allocs += a;
+    assert_eq!(sources.table_len(), 0);
+    for &i in &order {
+        assert_eq!(Arc::strong_count(&shareds[i]), 2, "피어 {i}: 정지 때 남은 피어는 반환 큐에 살아 있어야 한다(워커가 해제하지 않는다)");
+    }
+    port.reclaim();
+    for (i, s) in shareds.iter().enumerate() {
+        let never_joined = waiting[i].is_some();
+        assert_eq!(Arc::strong_count(s), 1 + usize::from(never_joined), "피어 {i}: 반환 큐를 비운 뒤 남은 참조(누수)");
+    }
+    assert_eq!(worker_allocs, 0, "워커 단계(PeerSources::service·close)가 할당·해제를 {worker_allocs}회 했다");
     MultiOut { peers: outs, xruns: counters.xruns.load(Ordering::Relaxed), xrun_us, churn }
 }
 
