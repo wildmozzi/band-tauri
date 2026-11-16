@@ -9,6 +9,8 @@
 //! 표는 하나다(엔진 ②b-4): 피어 하나 = 미디어(지터 버퍼·수신 큐 소비자) + 공급 상태(슬롯·리샘플러, 슬롯을 못 받았으면 없음).
 //! 리샘플러는 미디어가 싣고 온 것을 슬롯 배정 때 공급 상태로 옮기고, 제거·정지 때 미디어에 되실어 반환 큐로 보낸다 — 이 단계는
 //! 피어 추가·제거에서 할당도 해제도 하지 않는다(엔진 ⑧ 후속, `sim::tune`의 churn 시험이 할당 계수로 지킨다).
+//! 예외 하나: 반환 큐가 가득 차 있으면 `give_back`이 그 항목을 여기(워커)서 해제하고 경고를 남긴다 — 제어 평면이 규약대로
+//! 비우는 한 닿지 않는다(`peer_media::MEDIA_RET_CAPACITY`).
 //! 피어 하나의 공급 규칙은 `peer_feed.rs`(`PeerFeed`)다.
 //! 바뀌는 이유: 피어 수명(추가·제거·슬롯), 공급 순서, 녹음 마커. 모르는 것: net, 코덱 설정, 로컬 경로.
 
@@ -139,7 +141,7 @@ impl PeerSources {
             // 미디어가 싣고 온 리샘플러를 옮긴다(할당 없음, engine-architecture.md 4.3절 1).
             let Some(rs) = p.media.take_feed_resampler(out_rate) else {
                 if !self.rate_mismatch_logged {
-                    log::error!("피어 {}의 공급 리샘플러가 출력 레이트 {out_rate}Hz와 맞지 않습니다(소리 없음)", p.media.shared().peer_id);
+                    log::error!("피어 {}의 공급 리샘플러가 출력 레이트 {out_rate}Hz와 맞지 않습니다(소리 없음 — 이후 같은 경고는 생략)", p.media.shared().peer_id);
                     self.rate_mismatch_logged = true;
                 }
                 continue;

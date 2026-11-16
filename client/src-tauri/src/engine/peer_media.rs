@@ -314,10 +314,12 @@ pub struct MediaPortRt {
     ret: HeapProd<Box<PeerMedia>>,
 }
 
-/// 반환 큐 용량. 제어 평면이 살아 있는 동안 가득 차지 않게 잡는다: 제어 호출은 직렬이고(`EngineManager` 슬롯 락) 호출마다
-/// 맨 앞에서 `reclaim`한 뒤 `Remove`를 많아야 하나 넣는다. 그래서 마지막 `reclaim` 뒤에 워커가 돌려보낼 수 있는 것은 그때
-/// 명령 큐에 있던 `Remove`(≤ 16) + 그 호출이 넣은 하나 = 17개까지다. 엔진 정지 때는 워커가 표에 남은 피어(≤ `MAX_PEERS` +
-/// 교체 중 하나)를 마저 돌려보낸다 — 17 + 6 ≤ 32. 넘치는 경우(이 규약이 깨졌을 때)의 처리는 `MediaPortRt::give_back`.
+/// 반환 큐 용량. 제어 평면이 살아 있는 동안 가득 차지 않게 잡는다: 제어 호출은 직렬이고(`EngineManager` 슬롯 락)
+/// `add_peer`·`remove_peer`는 맨 앞에서 `reclaim`한 뒤 `Remove`를 많아야 하나 넣는다. 그래서 마지막 `reclaim` 뒤에 워커가
+/// 돌려보낼 수 있는 것은 그때 명령 큐에 있던 `Remove`(≤ 16) + 그 호출이 넣은 하나 = 17개까지다. 엔진 정지 때는 워커가 표에
+/// 남은 피어(≤ `MAX_PEERS` + 교체 중 하나)를 마저 돌려보낸다 — 17 + 6 ≤ 32. `Engine::stats`(`report.rs`, 프론트가 주기적으로
+/// 부른다)와 `stop`도 `reclaim`하므로 실제 점유는 이보다 훨씬 낮다. 넘치는 경우(이 규약이 깨졌을 때)의 처리는
+/// `MediaPortRt::give_back`.
 pub const MEDIA_RET_CAPACITY: usize = 2 * MEDIA_CMD_CAPACITY;
 
 /// 명령·반환 링을 여기서 사전할당한다.

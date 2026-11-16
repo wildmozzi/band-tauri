@@ -48,12 +48,21 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
-/// `f`를 구간으로 표시하고 돌린다. 결과와, 그동안 이 스레드가 한 할당·재할당·해제 횟수를 돌려준다. 겹쳐 부르지 않는다.
+/// `f`를 구간으로 표시하고 돌린다. 결과와, 그동안 **이 스레드**가 한 할당·재할당·해제 횟수를 돌려준다(구간 안에서 띄운 다른
+/// 스레드의 것은 세지 않는다). 겹쳐 부르지 않는다(단언). `f`가 패닉해도 표시는 풀린다.
 pub(crate) fn counted<R>(f: impl FnOnce() -> R) -> (R, u64) {
+    struct Unmark;
+    impl Drop for Unmark {
+        fn drop(&mut self) {
+            MARKED.with(|x| x.set(false));
+        }
+    }
+    assert!(!MARKED.with(|x| x.get()), "counted 구간을 겹쳐 불렀다");
     let before = EVENTS.with(|n| n.get());
     MARKED.with(|x| x.set(true));
+    let unmark = Unmark;
     let r = f();
-    MARKED.with(|x| x.set(false));
+    drop(unmark);
     (r, EVENTS.with(|n| n.get()) - before)
 }
 
