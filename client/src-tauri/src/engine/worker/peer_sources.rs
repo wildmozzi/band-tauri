@@ -17,7 +17,7 @@ use ringbuf::HeapProd;
 
 use super::{FeedTiming, PeerFeed, WorkerStats, OUT_CHUNK};
 use crate::engine::config::INTERNAL_RATE;
-use crate::engine::measure::EchoProbe;
+use crate::engine::measure::echo::EchoProbe;
 use crate::engine::peer_media::{MediaCmd, MediaPortRt, MediaSettings, PeerMedia, MEDIA_CMD_CAPACITY};
 use crate::engine::record::{MarkEvent, MarkKind, MarkSink};
 use crate::engine::rt::{SourceBank, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
