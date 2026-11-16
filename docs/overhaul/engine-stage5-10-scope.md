@@ -105,7 +105,7 @@
 | ⑥-4 | `engine/measure.rs`(1,169) | `measure/{mod, analysis, loopback, echo}` | — | ②b-5 | `tests/measure.rs` |
 | ⑥-5 | `engine/wasapi.rs`(1,879) | `wasapi/{mod, format, enumerate, stream, probe}` | — | ⑥-2 | 자동 테스트는 `wasapi` 단위 테스트뿐 → **[사람] 실장비**(독점·공유 열기, 장치 분리, 기본 장치 변경) |
 | ⑥-6 | `net/mod.rs`(1,057, ⑥-6 착수 때 1,343) | `net/{mod, send, recv_loop, control_loop}` | — | ③c | net 통합 테스트 7개 + 루프백 |
-| ⑥-7 | `net/peer.rs`(1,436) | `net/peer/{mod, descriptor, conn, ping}` | — | ③c | 같음 + `net::peer` 단위 테스트 |
+| ⑥-7 | `net/peer.rs`(1,436 → 시작 때 1,850) | `net/peer/{mod, descriptor, conn, ping}` | — | ③c | 같음 + `net::peer` 단위 테스트 |
 
 ### 3.2 심볼 배치
 
@@ -195,14 +195,16 @@ ADR은 `{enumerate, stream}` 둘만 적었다. 둘이 함께 쓰는 형식·COM 
 
 처음 표와 다른 점: `refresh_copy`(워커가 부르는 피어 표 복사)는 `PeerTableCopy`·세대 필드와 함께 `mod`에 남겼다 — 송신 전용이 아니라 표의 세대 규칙이다. 다른 파일에서 부르는 메서드만 `pub(super)`로 열었다(`send_ctrl`·`send_bye`·`send_ping`·`reflect_audio`, 스레드 본문 `recv_loop`·`control_loop`). 정적 검사 `send_path_takes_no_locks`는 `net/mod.rs` + `net/send.rs`를 이어 본다(`SEND_PATH_FNS` 다섯 개를 못 찾으면 실패하는 것은 그대로).
 
-**⑥-7 `net/peer.rs`** 〔③c 뒤 갱신: 송신 경로 스냅샷 필드〕
+**⑥-7 `net/peer.rs`** (⑥-7 완료 — 코드 기준으로 고침, 시작 때 1,850줄)
 
 | 하위 모듈 | 심볼 |
 |---|---|
-| `descriptor` | `CandidateKind`·`Candidate`·`LocalDescriptor`·`validate_candidate`(`:55-126`) — 계약 DTO |
-| `conn` | 타이밍 상수(`:18-51`), `ConnState`·`DirectProbe`·`HandshakeOutcome`·`TickAction`·`direct_kind`(`:128-542`) — 홀펀칭·경로 선택·승격 |
-| `ping` | `LossReport`·`ping_plain`(`:544-600`), `EchoState`와 그 상수(`:604-693`) — Ping 평문에 실리는 것 |
-| `mod` | `Peer`·`PeerNetStats`·`PeerSetup`·`TX_CODEC_*`(`:695-950`) |
+| `descriptor` | `MAX_CANDIDATES`, `CandidateKind`·`Candidate`·`LocalDescriptor`(+`impl`: 키 인코딩·후보 검증)·`validate_candidate` — 계약 DTO. 노드(계층 3), `net::crypto`만 쓴다 |
+| `conn` | 타이밍 상수(`HELLO_INTERVAL` … `FLAP_WINDOW`), `seq_newer`, `ConnState`·`DirectProbe`·`HandshakeOutcome`·`TickAction`·`direct_kind` — 홀펀칭·경로 선택·승격. 노드 아님(`net::peer`로 접힘) |
+| `ping` | `LOSS_TAG`·`LOSS_REPORT_BYTES`·`INBUF_TAG`·`INBUF_BYTES`·`PING_PLAIN_MAX`·`LossReport`·`ping_plain`·`append_input_buffer`·`parse_ping_input_buffer`, `ECHO_*` 상수·`EchoState` — Ping 평문에 실리는 것. 노드(계층 1), 표준 라이브러리만 쓴다 |
+| `mod` | 하위 모듈 선언·`pub use {conn, descriptor, ping}::*`, `MAX_PEER_ID_BYTES`, 송신 경로 스냅샷(`encode_route`·`decode_route`·`echo_deadline_ns`·`before_deadline`·`ConnGuard`·`EchoGuard`·`RemoteLossCell`), `Peer`·`TX_CODEC_*`·`PeerNetStats`·`PeerSetup`, 단위 테스트 `tests`(29개, 경로 `net::peer::tests::*` 유지) |
+
+처음 표와 다른 점: (1) 송신 경로 스냅샷(③c)은 `Peer::conn()`·`echo()` 가드와 한 덩어리라 `mod`에 뒀다. (2) `MAX_CANDIDATES`는 `descriptor`가 쓰므로 그쪽으로 내렸다(`conn`·`mod`는 `descriptor`를 쓴다 — 아래로 가는 간선). `MAX_PEER_ID_BYTES`는 `Peer::new`만 쓰므로 `mod`에 뒀다. (3) 단위 테스트는 나누지 않았다 — `tests/relay.rs`·`loopback.rs`의 `#[ignore]` 사유와 설계 문서가 `net::peer::tests::…` 경로로 가리킨다. (4) `ping`의 옛 구획 주석("에코 피어 모드")은 파일 머리 문서로 바꿨다. 정적 검사 `send_path_takes_no_locks`는 `net/peer/` 전체를 이어 보고, 가드 생성자 `conn`·`echo`를 정확히 하나씩 못 찾으면 실패한다. `ADAPTER_MAY_USE`의 `net::peer` → `net::peer::descriptor` 좁히기는 ⑦에서 한다(어댑터 `use`를 새 경로로 고쳐야 한다).
 
 ADR은 `{table, punch, loss_report}`라 적었다. 실제 파일에는 피어 **표**가 없고(표는 `NetShared.peers`다), `EchoState`와 디스크립터가 빠져 있다. 위 이름을 제안한다(제안 2). `ping`의 `LossReport`·`ping_plain`은 소켓·스레드를 쓰지 않는 순수 함수라 계층 1 노드로 올릴 수 있다 — 하네스(`sim/loss_codec.rs:28`)가 쓴다.
 
