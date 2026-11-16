@@ -238,7 +238,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `crates/band-dsp/src/jitter/stats.rs` | `JitterStats`, 비율 창, 통계 스냅샷 | 통계 필드 |
 | `crates/band-dsp/src/jitter/tests.rs` | 결정적 단위 시뮬레이션, 지터 trace fixture(`crates/band-dsp/tests/fixtures/jitter-trace.sha256`, ⑧(b), ⑩-1에서 바이트 그대로 옮김) | |
 | `engine/worker/mod.rs` | `Worker` 조립·루프(단계를 순서대로 부르는 조정자), 정지 | 단계 순서 |
-| `engine/worker/clock.rs` | 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`) | 시각 추정 |
+| `engine/worker/clock.rs` | 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`), 워커 폴링 주기(`POLL`·`FINE_POLL`) | 시각 추정 |
 | `engine/worker/capture.rs` | `Capture`: 입력 링 → 리샘플 → 48k 블록·프레임 | 입력 장치 형식·리샘플·프레임 크기 |
 | `engine/worker/send.rs` | `SendPath`: 프레임 → 인코드 → `send_audio`, 에코 클릭 스트림. 네트워크가 있을 때만 존재 | 코덱·패킷 플래그·송신 API |
 | `engine/worker/auto_codec.rs` | `AutoCodec`(`SendPath`의 부속): 피어별 자동 Opus 송신 상태(`relay_codec` 정책 연동) | 자동 전환 |
@@ -248,8 +248,8 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/worker/local.rs` | `LocalFifo`(로컬 입력 FIFO, 수위 제어) | FIFO 수위 규칙 |
 | `engine/worker/metronome_stage.rs` | `MetronomeStage`: 메트로놈 박 예약 입력(시계 추정·숨은 출력 지연)·상태 보고 | 메트로놈 스케줄 |
 | `engine/worker/device_watch.rs` | `DeviceWatch`: 장치 멈춤 감시·스트림 에러 로그 | 장치 감시 |
-| `engine/sim/{mod,tune,long,loss_codec}.rs` | 가상 시간 결정적 하네스(`cfg(test)`): 6피어 5·60분, 손실 피드백 | 하네스 시나리오 |
-| `engine/sim/alloc.rs` | 단위 테스트 바이너리의 계수 할당자(`cfg(test)`): 표시 구간 안의 할당·해제를 스레드별로 센다 — 하네스가 워커 단계의 할당·해제 0을 단언(⑧ 후속) | 워커 무할당 증거 |
+| `crates/band-engine/tests/sim/{main,tune,long,loss_codec}.rs` | 가상 시간 결정적 하네스(테스트 타깃 `sim`, ⑩-3 — 백엔드 없이 `cargo test -p band-engine --no-default-features --features test-support --test sim`): 6피어 5·60분, 손실 피드백 | 하네스 시나리오 |
+| `testing/alloc.rs` | 시험 바이너리의 계수 할당자(`testing::alloc`, 단위 테스트 바이너리와 하네스 `sim`이 글로벌 할당자로 건다): 표시 구간 안의 할당·해제를 스레드별로 센다 — 하네스가 워커 단계의 할당·해제 0을 단언(⑧ 후속) | 워커 무할당 증거 |
 | `crates/band-dsp/src/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
 | `crates/band-dsp/src/{stats, rt_timing, histo, prio_slot}.rs`, `engine/report.rs` | RT·워커 원자 통계 카운터·seqlock 칸, RT 콜백 타이밍, 지연 히스토그램 칸 함수, 스레드 우선순위 결과 슬롯 / 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
 | `crates/band-dsp/src/peer_media.rs`, `crates/band-dsp/src/media_link.rs`, `crates/band-dsp/src/types.rs` | 피어 미디어 상태(워커 소유)·명령 링 생성 / 수신 큐(net → 워커) / 경로·릴레이 공용 타입·상수 | 미디어 소유, 수신 큐 |

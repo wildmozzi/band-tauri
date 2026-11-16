@@ -41,7 +41,7 @@ const NODES: &[(&str, u8)] = &[
     ("engine::device::types", 1),
     ("net::connlog", 1),
     ("net::crypto", 1),
-    // Ping 평문 조립·해석과 에코 상태(순수 — 소켓·스레드·락 없음, ⑥-7). 하네스(`sim/loss_codec.rs`)가 쓴다.
+    // Ping 평문 조립·해석과 에코 상태(순수 — 소켓·스레드·락 없음, ⑥-7). 하네스(`tests/sim/loss_codec.rs`)가 쓴다.
     ("net::peer::ping", 1),
     ("diag::mask", 1),
     ("engine::measure::analysis", 1),
@@ -81,12 +81,12 @@ const NODES: &[(&str, u8)] = &[
     ("net::txlat", 3),
     // 4 C 워커 파이프라인
     ("engine::worker", 4),
-    ("engine::sim", 4),
     ("engine::measure", 4),
     ("engine::measure::loopback", 4),
     ("engine::measure::echo", 4),
     // 미디어 명령 큐의 제어 평면 쪽 끝(`MediaPort`: Mutex·수면·시계). 링은 `band_dsp::peer_media`가 만든다(⑩-0).
-    // 문서 7.3절 처음 안은 계층 5였으나 하네스(`engine::sim`, 계층 4)가 쓰므로 4.
+    // 문서 7.3절 처음 안은 계층 5였으나 하네스(당시 `engine::sim`, 계층 4)가 쓰므로 4. 하네스는 ⑩-3에서 테스트 타깃(`tests/sim`)이 됐다 —
+    // 계층은 그대로 둔다(⑩-3은 위치만 옮긴다. 제품 코드에서 쓰는 곳은 `engine`(5)뿐이라 5로 올려도 되는지는 ⑨b에서 본다).
     ("engine::media_port", 4),
     // 5 B 제어 평면
     ("engine", 5),
@@ -191,8 +191,8 @@ const DSP_EXCLUDED: &[&str] = &[
 const DSP_TEST_SUPPORT: &[(&str, &str, &str)] = &[
     ("codec.rs", "opus_decoders_created", "tests/rt_alloc.rs"),
     ("peer_media.rs", "has_feed_resampler", "src/engine/worker/tests.rs"),
-    ("peer_media.rs", "jitter", "src/engine/sim/tune.rs"),
-    ("peer_media.rs", "rx_dropped", "src/engine/sim/tune.rs"),
+    ("peer_media.rs", "jitter", "tests/sim/tune.rs"),
+    ("peer_media.rs", "rx_dropped", "tests/sim/tune.rs"),
     ("peer_media.rs", "drain", "src/engine/media_port.rs"),
 ];
 
@@ -2065,10 +2065,29 @@ const RT_CODE: &[(&str, RtPick, &[&str])] = &[
     ),
     // 포맷 협상(열기)이 대부분이라 RT 함수만 고른다: 24비트 변환과 루프의 `on_error`가 부르는 `classify`(#154 리뷰 M-2).
     ("engine/wasapi/format.rs", RtPick::Only(&["i24_to_f32", "f32_to_i24", "classify"]), &[]),
+    // `band-dsp`에서 RT 본문(위 파일들)이 부르는 함수(#161 리뷰 L-2, ⑩-3). 경로가 `crates/`로 시작하면 워크스페이스 루트 기준이다.
+    // 출력 콜백의 소프트 클립(`rt.rs` `OutputRt::process`), 레벨·게인 원자값(`rt.rs`·`click.rs`), 콜백 실행시간 기록
+    // (`counters.rt_timing.record_{in,out}` → `nanos`·`histo::bucket_of`). 같은 파일의 나머지(믹스 합산·RMS 등)는 워커·제어 평면 쪽이다 —
+    // 워커 경로의 할당은 하네스(`tests/sim`)의 계수 단언과 `rt_alloc`이 동적으로 본다. RT에서 새 `band_dsp` 함수를 부르면 여기에 넣는다.
+    ("crates/band-dsp/src/mixer.rs", RtPick::Only(&["soft_clip"]), &[]),
+    ("crates/band-dsp/src/stats.rs", RtPick::Only(&["load", "store"]), &[]),
+    ("crates/band-dsp/src/rt_timing.rs", RtPick::Only(&["record_out", "record_in", "nanos"]), &[]),
+    ("crates/band-dsp/src/histo.rs", RtPick::Only(&["bucket_of"]), &[]),
 ];
 
+/// `RT_CODE`의 파일 경로 → 실제 경로: `crates/`로 시작하면 워크스페이스 루트 기준(`band-dsp`), 아니면 이 크레이트의 `src` 기준.
+fn rt_code_path(rel: &str) -> PathBuf {
+    if rel.starts_with("crates/") {
+        ws_dir().join(rel)
+    } else {
+        src_dir().join(rel)
+    }
+}
+
 /// RT 본문이 부르는 같은 이름을 "목록 밖 함수 호출"로 보지 않는 흔한 이름(생성자·트레이트 메서드 — `X::default()` 등).
-const RT_COMMON_NAMES: &[&str] = &["new", "default", "drop"];
+/// `take`: `Iterator::take`·`Option::take`(WASAPI `drive_loop`의 `.enumerate().take(n)`)가 `band-dsp` `RtTiming::take`(비RT 창 요약)와
+/// 이름이 같다(⑩-3에서 `band-dsp` 파일을 대상에 넣으며 생김). `RtTiming::take`는 진단 스레드가 부른다.
+const RT_COMMON_NAMES: &[&str] = &["new", "default", "drop", "take"];
 
 /// 공백을 지운 본문에서 이름 앞에 붙을 수 있는 키워드(`rt_uncovered_callees`의 경계).
 const RT_KEYWORDS: &[&str] = &["match", "return", "if", "while", "in", "else", "mut", "move", "unsafe", "let", "for"];
@@ -2224,7 +2243,7 @@ fn rt_uncovered_callees(rt: &[(String, String, String)], others: &[(String, BTre
     bad
 }
 
-/// RT 경로 정적 검사: `rt.rs`, 출력 콜백의 클릭(`metronome/click.rs`), 자체 WASAPI 이벤트 루프(`wasapi/stream.rs` — 루프 함수와
+/// RT 경로 정적 검사: `rt.rs`, 출력 콜백의 클릭(`metronome/click.rs`), RT가 부르는 `band-dsp` 함수(⑩-3), 자체 WASAPI 이벤트 루프(`wasapi/stream.rs` — 루프 함수와
 /// `run_loop`에 넘기는 콜백 클로저 — 와 `format.rs`의 변환·`classify`)에 할당·락·채널·로그·panic·시스템콜 문자열이 없다.
 /// WASAPI 루프의 Win32·COM 호출은 `WASAPI_LOOP_SYSCALLS`의 (이름, 함수)만(#152 리뷰 L3, #154 리뷰). RT 본문이 RT로 보지 않는
 /// 대상 파일의 함수를 부르면 실패한다.
@@ -2233,7 +2252,7 @@ fn rt_paths_have_no_alloc_lock_log_panic_syscall() {
     let mut bad = Vec::new();
     let (mut rt, mut others) = (Vec::new(), Vec::new());
     for (rel, pick, callbacks) in RT_CODE {
-        let src = std::fs::read_to_string(src_dir().join(rel)).unwrap();
+        let src = std::fs::read_to_string(rt_code_path(rel)).unwrap();
         if !unit_tests_at_end(&src) {
             bad.push(format!("{rel}: 단위 테스트 모듈 뒤에 코드가 있다(검사가 보지 못한다)"));
         }

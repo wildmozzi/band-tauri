@@ -9,7 +9,10 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use band_dsp::config::{DriverKind, EngineConfig};
+use band_dsp::config::EngineConfig;
+// 자체 WASAPI 경로(`mode_of`, 열거)에서만 쓴다 — `backend-cpal`만 켠 구성(= Windows 밖의 기본 구성)에서 unused import가 되지 않게(#161 리뷰 L-1).
+#[cfg(all(windows, feature = "backend-wasapi"))]
+use band_dsp::config::DriverKind;
 use crate::engine::rt::{InputRt, OutputRt};
 use band_dsp::stats::AudioCounters;
 

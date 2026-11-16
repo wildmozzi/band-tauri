@@ -25,7 +25,7 @@ use band_dsp::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
 use band_dsp::jitter::{JitterBuffer, JitterSettings};
 use band_dsp::relay_codec::{loss_opus_perc, LossCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
 use band_dsp::packet::{Header, PacketType, FLAG_OPUS};
-use crate::net::peer::{ping_plain, LossReport, PING_PLAIN_MAX};
+use band_engine::testing::net::peer::{ping_plain, LossReport, PING_PLAIN_MAX};
 
 const FRAME: usize = 120;
 const TICK_US: f64 = FRAME as f64 / 48.0 * 1000.0;

@@ -8,7 +8,7 @@
 //!
 //! 표는 하나다(엔진 ②b-4): 피어 하나 = 미디어(지터 버퍼·수신 큐 소비자) + 공급 상태(슬롯·리샘플러, 슬롯을 못 받았으면 없음).
 //! 리샘플러는 미디어가 싣고 온 것을 슬롯 배정 때 공급 상태로 옮기고, 제거·정지 때 미디어에 되실어 반환 큐로 보낸다 — 이 단계는
-//! 피어 추가·제거에서 할당도 해제도 하지 않는다(엔진 ⑧ 후속, `sim::tune`의 churn 시험이 할당 계수로 지킨다).
+//! 피어 추가·제거에서 할당도 해제도 하지 않는다(엔진 ⑧ 후속, 하네스 `tests/sim/tune.rs`의 churn 시험이 할당 계수로 지킨다).
 //! 예외 하나: 반환 큐가 가득 차 있으면 `give_back`이 그 항목을 여기(워커)서 해제하고 경고를 남긴다 — 제어 평면이 규약대로
 //! 비우는 한 닿지 않는다(`peer_media::MEDIA_RET_CAPACITY`).
 //! 피어 하나의 공급 규칙은 `peer_feed.rs`(`PeerFeed`)다.
@@ -29,9 +29,9 @@ use band_dsp::stats::AudioCounters;
 
 /// `service` 한 번의 결과.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct PeerRound {
+pub struct PeerRound {
     /// 은닉 마감이 가까운 피어가 있다(조정자가 짧게 자야 한다).
-    pub(crate) urgent: bool,
+    pub urgent: bool,
 }
 
 /// 피어 슬롯(1..`MAX_SOURCES`)의 소스 링 생산자. 로컬 것(슬롯 0)은 `LocalPath`가 가지므로 슬롯 번호로만 접근한다.
@@ -44,15 +44,15 @@ impl PeerProds {
 }
 
 /// `PeerSources::new` 입력(소유권이 넘어오는 끝과 공유 핸들).
-pub(crate) struct PeerSourcesParts {
+pub struct PeerSourcesParts {
     /// 슬롯 1.. 의 생산자(슬롯 번호 순).
-    pub(crate) prods: Vec<HeapProd<f32>>,
-    pub(crate) port: MediaPortRt,
-    pub(crate) settings: Arc<MediaSettings>,
-    pub(crate) rec_marks: Arc<MarkSink>,
+    pub prods: Vec<HeapProd<f32>>,
+    pub port: MediaPortRt,
+    pub settings: Arc<MediaSettings>,
+    pub rec_marks: Arc<MarkSink>,
 }
 
-/// 워커와 가상 시간 하네스(`sim::tune`, ②b-3)가 **같은 것**을 쓴다 — 하네스의 5분 fixture가 이 단계의 호출 열을 지킨다.
+/// 워커와 가상 시간 하네스(`tests/sim/tune.rs`, ②b-3)가 **같은 것**을 쓴다 — 하네스의 5분 fixture가 이 단계의 호출 열을 지킨다.
 /// 피어 하나의 소스: 미디어 + 공급 상태.
 struct PeerSource {
     /// 지터 버퍼·수신 큐 소비자. Box 그대로 둔다: 명령 큐로 받은 할당을 제거 때 반환 큐로 그대로 돌려보내므로 워커가 다시
@@ -62,7 +62,7 @@ struct PeerSource {
     feed: Option<PeerFeed>,
 }
 
-pub(crate) struct PeerSources {
+pub struct PeerSources {
     /// 워커가 혼자 가지는 피어 표(명령 큐로만 바뀐다, 엔진 ③-a2·a3). net 피어 표와 같은 순서(추가 순, 제거는 그 자리를 뺀다 —
     /// 순서를 바꾸지 않는다, J4).
     table: Vec<PeerSource>,
@@ -83,7 +83,7 @@ pub(crate) struct PeerSources {
 }
 
 impl PeerSources {
-    pub(crate) fn new(parts: PeerSourcesParts) -> Self {
+    pub fn new(parts: PeerSourcesParts) -> Self {
         Self {
             table: Vec::with_capacity(MEDIA_CMD_CAPACITY),
             released: Vec::with_capacity(MAX_SOURCES),
@@ -162,7 +162,7 @@ impl PeerSources {
 
     /// 반복마다, `FeedTiming`을 만든 뒤. `stats`에는 표 길이·마감 채움·건너뜀을 쓴다. `tap` = 에코 측정 중 탭이 켜진 프로브
     /// (조정자가 빌려 준다): 그 피어의 소스 링에 넣는 샘플과 재생 시각을 모은다.
-    pub(crate) fn service(&mut self, bank: &SourceBank, counters: &AudioCounters, stats: &WorkerStats, out_rate: u32, t: &FeedTiming, mut tap: Option<&mut EchoProbe>) -> PeerRound {
+    pub fn service(&mut self, bank: &SourceBank, counters: &AudioCounters, stats: &WorkerStats, out_rate: u32, t: &FeedTiming, mut tap: Option<&mut EchoProbe>) -> PeerRound {
         // 반복 맨 앞: 추가·제거 명령을 끝까지 비운다(엔진 ③-a2). 프로필은 이번 반복에 한 번 읽는다.
         self.apply_commands();
         stats.media_peers.store(self.table.len() as u64, Ordering::Relaxed);
@@ -234,7 +234,7 @@ impl PeerSources {
     /// 정지: 피어 슬롯을 닫고(콜백이 아직 돌면 남은 소리를 버린다), 표에 남은 피어를 리샘플러를 되실어 모두 반환 큐로
     /// 보낸다 — 해제는 워커가 끝난 뒤 제어 평면(`Engine::stop`의 `reclaim`)이 한다. 워커 스레드는 끝나면서도 피어 상태를
     /// 해제하지 않는다(엔진 ⑧ 후속. 전에는 표에 남은 지터 버퍼·리샘플러가 워커 스레드에서 해제됐다).
-    pub(crate) fn close(&mut self, bank: &SourceBank) {
+    pub fn close(&mut self, bank: &SourceBank) {
         let drain = |slot: usize| {
             let sh = &bank.slots[slot];
             sh.playing.store(false, Ordering::Relaxed);
@@ -251,27 +251,27 @@ impl PeerSources {
     }
 
     /// 표 길이(하네스·테스트). 제품 코드에는 아래 입구들이 없다.
-    #[cfg(test)]
-    pub(crate) fn table_len(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn table_len(&self) -> usize {
         self.table.len()
     }
 
     /// 표의 `i`번째 피어의 미디어(표 순서 = 추가 순). 하네스·테스트가 `service` 뒤에 피어별 지터 통계를 읽고, 끝에 남은
     /// 수신 큐를 비우는 데 쓴다.
-    #[cfg(test)]
-    pub(crate) fn media_at(&mut self, i: usize) -> &mut PeerMedia {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn media_at(&mut self, i: usize) -> &mut PeerMedia {
         &mut self.table[i].media
     }
 
     /// 표의 `i`번째 피어에 배정된 공급 상태의 적응 여유(장치 프레임). 슬롯이 없으면 None(하네스·테스트).
-    #[cfg(test)]
-    pub(crate) fn feed_margin(&self, i: usize) -> Option<usize> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn feed_margin(&self, i: usize) -> Option<usize> {
         self.table.get(i)?.feed.as_ref().map(|f| f.margin())
     }
 
     /// 표의 `i`번째 피어의 슬롯 번호(하네스·테스트).
-    #[cfg(test)]
-    pub(crate) fn feed_slot(&self, i: usize) -> Option<usize> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn feed_slot(&self, i: usize) -> Option<usize> {
         self.table.get(i)?.feed.as_ref().map(|f| f.slot)
     }
 }

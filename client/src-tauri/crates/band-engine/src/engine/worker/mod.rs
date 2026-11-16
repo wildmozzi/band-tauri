@@ -29,7 +29,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ringbuf::{HeapCons, HeapProd};
 
@@ -69,13 +69,19 @@ use capture::drain_frames;
 use device_watch::DeviceWatch;
 use local_path::LocalPath;
 use metronome_stage::MetronomeStage;
-pub(crate) use peer_sources::{PeerSources, PeerSourcesParts};
 use send::SendPath;
 
-/// 워커 폴링 주기. Windows에서도 std::thread::sleep은 고해상도 타이머를 쓴다.
-pub(super) const POLL: Duration = Duration::from_micros(500);
-/// 피어 은닉 마감이 가까울 때의 폴링 주기.
-pub(super) const FINE_POLL: Duration = Duration::from_micros(150);
+// 하네스(`tests/sim`, ⑩-3)가 워커와 같은 단계(`PeerSources`, ②b-3)와 폴링 주기를 쓴다. 제품 빌드에서는 크레이트 안(`pub(crate)`)·
+// 엔진 안(`pub(super)`)에만 보이고, 시험 빌드(`test-support`)에서만 `pub`이다 — 시험은 `testing::engine::worker`로 쓴다(⑨a와 같은 문).
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use peer_sources::{PeerSources, PeerSourcesParts};
+#[cfg(any(test, feature = "test-support"))]
+pub use peer_sources::{PeerRound, PeerSources, PeerSourcesParts};
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) use clock::{FINE_POLL, POLL};
+#[cfg(any(test, feature = "test-support"))]
+pub use clock::{FINE_POLL, POLL};
+
 /// 출력 생산 단위(48kHz 프레임). 1.33ms.
 pub const OUT_CHUNK: usize = 64;
 

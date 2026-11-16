@@ -1,17 +1,19 @@
 //! 워커 경로 할당·해제 계수(테스트 바이너리 전용, 엔진 ⑧ 후속).
 //!
-//! 단위 테스트 바이너리의 글로벌 할당자를 계수 할당자로 바꾼다: 지금 스레드가 `counted` 구간 안일 때의 할당·재할당·**해제**만
-//! 센다. 표시도 카운터도 스레드별이라(`tests/rt_alloc.rs`와 같은 방식, P3-17) 병렬로 도는 다른 시험의 할당이 섞이지 않는다.
-//! 구간 밖에서는 스레드 로컬 `Cell` 하나를 읽고 `System`에 넘길 뿐이다.
+//! 계수 할당자 `Counting`을 테스트 바이너리의 글로벌 할당자로 건다 — 이 크레이트의 단위 테스트 바이너리는 아래 `cfg(test)`
+//! 정적 변수가, 하네스(`tests/sim`, ⑩-3)는 자기 `main.rs`가 건다(글로벌 할당자는 최종 바이너리가 정한다). 걸린 바이너리에서는
+//! 지금 스레드가 `counted` 구간 안일 때의 할당·재할당·**해제**만 센다. 표시도 카운터도 스레드별이라(`tests/rt_alloc.rs`와 같은
+//! 방식, P3-17) 병렬로 도는 다른 시험의 할당이 섞이지 않는다. 구간 밖에서는 스레드 로컬 `Cell` 하나를 읽고 `System`에 넘길 뿐이다.
 //!
-//! 쓰는 곳: `sim::tune::run_multi`가 워커 단계 호출(`PeerSources::service`·`close`)만 구간으로 감싼다 — 하네스 자신의 할당
-//! (패킷 `Vec`, 통계 표본)과 제어 평면 몫(`PeerMedia::new`, `MediaPort::reclaim`)은 구간 밖이다. 워커 단위 시험
+//! 쓰는 곳: 하네스 `tests/sim/tune.rs`의 `run_multi`가 워커 단계 호출(`PeerSources::service`·`close`)만 구간으로 감싼다 — 하네스
+//! 자신의 할당(패킷 `Vec`, 통계 표본)과 제어 평면 몫(`PeerMedia::new`, `MediaPort::reclaim`)은 구간 밖이다. 워커 단위 시험
 //! (`worker/tests.rs`의 레이트 불일치 시험)도 같은 방식으로 쓴다.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-struct Counting;
+/// 계수 할당자. 모든 호출을 `System`에 넘기고, `counted` 구간 안이면 이 스레드의 계수를 하나 올린다.
+pub struct Counting;
 
 thread_local! {
     // const 초기화·Drop 없는 Cell이라 접근해도 할당하지 않는다(할당자 안에서 써도 재귀 없음, 스레드 종료 중에도 접근 가능).
@@ -45,12 +47,13 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
+#[cfg(test)]
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
 /// `f`를 구간으로 표시하고 돌린다. 결과와, 그동안 **이 스레드**가 한 할당·재할당·해제 횟수를 돌려준다(구간 안에서 띄운 다른
 /// 스레드의 것은 세지 않는다). 겹쳐 부르지 않는다(단언). `f`가 패닉해도 표시는 풀린다.
-pub(crate) fn counted<R>(f: impl FnOnce() -> R) -> (R, u64) {
+pub fn counted<R>(f: impl FnOnce() -> R) -> (R, u64) {
     struct Unmark;
     impl Drop for Unmark {
         fn drop(&mut self) {

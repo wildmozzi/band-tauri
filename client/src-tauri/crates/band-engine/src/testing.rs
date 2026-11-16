@@ -12,12 +12,16 @@
 //! `band_dsp::jitter`처럼 바로 쓴다(공개 API이고, 경로가 둘이 되지 않게). 시험 전용 훅은 `band-dsp`의 `test-support` 피처
 //! 뒤에 있고 이 크레이트의 `test-support`가 켠다.
 
-/// 엔진(`crate::engine`)에서 테스트가 쓰는 것.
+/// 워커 경로 할당·해제 계수 할당자(엔진 ⑧ 후속). 하네스(`tests/sim`)와 이 크레이트의 단위 테스트가 글로벌 할당자로 건다(⑩-3).
+pub mod alloc;
+
+/// 엔진(`crate::engine`)에서 테스트가 쓰는 것. `worker`의 `PeerSources`·`PeerSourcesParts`·`PeerRound`·`POLL`·`FINE_POLL`은
+/// 이 구성(`test-support`)에서만 크레이트 밖에 보인다(하네스 `tests/sim`, ⑩-3).
 pub mod engine {
     #[cfg(all(windows, feature = "backend-wasapi"))]
     pub use crate::engine::wasapi;
     pub use crate::engine::{
-        cpuprof, device, measure, metronome, record, report, rt, wav, worker, Engine,
+        cpuprof, device, measure, media_port, metronome, record, report, rt, wav, worker, Engine,
     };
 }
 

@@ -16,15 +16,15 @@ use std::sync::Arc;
 
 use band_dsp::mixer::MixControls;
 use band_dsp::stats::AudioCounters;
-use crate::engine::worker::{CallbackTracker, PeerSources, PeerSourcesParts, WorkerStats, FINE_POLL, POLL};
+use band_engine::testing::engine::worker::{CallbackTracker, PeerSources, PeerSourcesParts, WorkerStats, FINE_POLL, POLL};
 use band_dsp::codec::Encoder as SimEncoder;
 use band_dsp::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
 use band_dsp::jitter::{JitterSettings, JitterStats};
-use crate::engine::media_port::media_port;
+use band_engine::testing::engine::media_port::media_port;
 use band_dsp::peer_media::{MediaCmd, MediaSettings, PeerMedia};
-use crate::engine::record::MarkSink;
+use band_engine::testing::engine::record::MarkSink;
 use band_dsp::media_link::{media_link, PeerKey};
-use crate::engine::rt::{output_path, SLOT_DRAIN, SLOT_FREE};
+use band_engine::testing::engine::rt::{output_path, SLOT_DRAIN, SLOT_FREE};
 use band_dsp::packet::{Header, PacketType};
 use rand::{Rng, SeedableRng};
 use ringbuf::traits::Producer;
@@ -483,7 +483,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     }
                 }
             }
-            let (round, a) = super::alloc::counted(|| sources.service(&bank, &counters, &wstats, 48_000, &timing, None));
+            let (round, a) = band_engine::testing::alloc::counted(|| sources.service(&bank, &counters, &wstats, 48_000, &timing, None));
             worker_allocs += a;
             let urgent = round.urgent;
             // 명령은 그 반복에 적용된다(J1): 표 길이·순서가 바로 맞고, 새 피어는 슬롯을 받고, 제거된 피어의 슬롯은 DRAIN이다.
@@ -553,7 +553,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
     }
     // 정지(엔진 ⑧ 후속): 워커는 표에 남은 피어를 리샘플러째 반환 큐로 보내고(할당·해제 0), 해제는 제어 평면의 `reclaim`이 한다.
     // 실행 중 제거된 피어는 이미 `reclaim`됐거나 아직 반환 큐에 있다 — 어느 쪽이든 워커가 해제한 것은 없다.
-    let ((), a) = super::alloc::counted(|| sources.close(&bank));
+    let ((), a) = band_engine::testing::alloc::counted(|| sources.close(&bank));
     worker_allocs += a;
     assert_eq!(sources.table_len(), 0);
     for &i in &order {
