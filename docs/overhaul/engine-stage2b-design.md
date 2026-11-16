@@ -12,7 +12,7 @@
 |---|---|
 | 단계 구조체 | `Capture`(입력 → 48k 블록·프레임) · `SendPath`(프레임 → 인코드·송신, 네트워크가 있을 때만 존재, 자동 코덱은 그 부속 `AutoCodec`) · `PeerSources`(피어 미디어 표·슬롯·공급) · `LocalPath`(모니터·탭) · `MetronomeStage`(메트로놈) · `DeviceWatch`(장치 감시). 출력 콜백 시각은 이미 있는 `CallbackTracker`가 단계다 |
 | ADR 이름과 다른 점 | `AutoCodec`은 루프 단계가 아니다 — 프레임마다 `SendPath` 안에서만 불린다. ADR의 `Capture`는 `Capture` + `SendPath` 둘로 나눈다. ADR의 `BeatSched`는 `MetronomeStage`로 부른다(9절 제안 1) |
-| 공용 문맥 | `WorkerCtx`(읽기 전용: 설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop)는 **조정자만 갖는 묶음**이다. 단계 메서드는 `&WorkerCtx`가 아니라 **쓰는 값만** 인자로 받는다(2.2절). `net`은 묶음에 넣지 않고 쓰는 단계 둘(`SendPath`·`MetronomeStage`)이 갖는다. `WorkerParams`는 생성 입력으로만 남고 `Worker::new`가 단계에 나눠 준다 |
+| 공용 문맥 | `WorkerCtx`(읽기 전용: 설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop)는 **조정자만 갖는 묶음**이다. 단계 메서드는 `&WorkerCtx`가 아니라 **쓰는 값만** 인자로 받는다(2.2절). `net`은 묶음에 넣지 않고 쓰는 단계 `SendPath`가 갖는다(〔②b-6b 구현 확정〕 `MetronomeStage`는 ②b-6b부터 net을 갖지 않는다 — 4.2절). `WorkerParams`는 생성 입력으로만 남고 `Worker::new`가 단계에 나눠 준다 |
 | 단계 사이 값 | `FeedTiming`(시각 단계 반환), 48k 블록·프레임(`Capture`가 빌려 줌), `urgent`(`PeerSources` 반환), 입력 쪽 대기량(`Capture` 반환 → `LocalPath` 점유 통계). 전역·단계 간 필드 접근 없음 |
 | 순서 | 지금과 같다(1.1절 표). 카운터·시계를 읽는 **시점도 옮기지 않는다** |
 | 에코 프로브 락 | 없앤다. 측정 스레드가 `Box<EchoProbe>`(인코더·버퍼 사전할당 포함)를 만들어 **SPSC 명령 큐로 넘기고**, 워커가 혼자 쓰다가 **반환 큐로 돌려준다**(`MediaPort`·`RecordPortCtl`과 같은 모양). 클릭 시작·탭 끝·반환은 **측정 번호에 묶인 원자값**이고 워커는 사건이 아니라 상태로 판정한다. 프로브는 지금처럼 **상대가 에코를 멈출 때까지 워커에 남고**, 분석은 회수한 뒤에 한다(3.2절) |
@@ -188,7 +188,7 @@ pub fn run(mut self) {
 | `WorkerParams` 필드 | 가는 곳 |
 |---|---|
 | `cfg` `info` `counters` `controls` `bank` `stats` `epoch` `stop` | `WorkerCtx`(모두 `Arc`·`Copy`·불변). 도우미 `wall_us()`만 여기 둔다. 버스트 계산 `in_burst48`(`:371-377`)·`out_burst_dev`(`:379-387`)·`chunk_dev`는 `(&StreamInfo, &AudioCounters)`를 받는 자유 함수로(단계가 `WorkerCtx` 없이 부를 수 있게) |
-| `net` | `WorkerCtx`에 넣지 않는다. 쓰는 단계 둘(`SendPath`, `MetronomeStage`)이 생성 때 `Arc`를 받아 갖는다 — "모르는 것: net"이 나머지 단계에서 타입으로 지켜진다 |
+| `net` | `WorkerCtx`에 넣지 않는다. 쓰는 단계 `SendPath`가 생성 때 `Arc`를 받아 갖는다 — "모르는 것: net"이 나머지 단계에서 타입으로 지켜진다. 〔②b-6b 구현 확정〕 `MetronomeStage`는 ②b-6a까지만 `net`을 가졌다. ②b-6b부터는 피어 표 복사본을 인자로 받고 net을 모른다(4.2절) |
 | `in_cons` | `Capture` |
 | `prods[LOCAL_SOURCE]` | `LocalPath` |
 | `prods[1..]` `media_port` `media_settings` `rec_marks` | `PeerSources` |
@@ -204,7 +204,7 @@ pub fn run(mut self) {
 |---|---|
 | `Capture::fill` / `next_block` / `next_frame` | 없음 / `muted` / 없음 (`cfg`에서 유도한 `frame`·`ich`) |
 | `SendPath::send_frame` | 프레임, `pass_at`, 에코 프로브, 피어 표 복사본(`&mut PeerTableCopy`, 〔③c 뒤 확정〕) (`net`, `epoch`, `cfg`에서 유도한 코덱·`frame`·`ich`) |
-| `MetronomeStage::service` | `&StreamInfo`, `&AudioCounters`(`in_cb_frames`), `&FeedTiming`, (②b-6b부터) 피어 표 복사본(`Option<&PeerTableCopy>`) (`MetronomeCtl`, `net`) |
+| `MetronomeStage::service` | `&StreamInfo`, `&AudioCounters`(`in_cb_frames`), `&FeedTiming`, (②b-6b부터) 피어 표 복사본(`Option<&PeerTableCopy>`), `Peer.clock` 대기 기록용 `&WorkerStats`·`&mut LockWait` (〔②b-6b 구현 확정〕 `MetronomeRt` — ②b-6a까지는 `MetronomeCtl`, `net`) |
 | `PeerSources::service` | `&SourceBank`, `&AudioCounters`, `&WorkerStats`(원자값 셋: `media_peers`·`deadline_fills`·`skipped_frames`), `out_rate`, `&FeedTiming`, 에코 탭 |
 | `PeerSources::close` | `&SourceBank` |
 | `LocalPath::configure` / `service` / `track_occupancy` | `&StreamInfo`·`&AudioCounters`·`granularity` / `&StreamInfo`·`&AudioCounters`·`&MixControls`·로컬 슬롯 `&SourceShared`(뱅크 전체가 아니다 — #134 리뷰 L2)·`&WorkerStats`·`epoch` / `out_rate`·`&WorkerStats`·`pending48` |
@@ -484,7 +484,7 @@ if ctl.plan_gen.load(Acquire) != self.plan.0 {
 - **`Peer::clock_estimate`·`clock_unsupported`는 `&mut LockWait`·`&LockSite`를 받는다.** 남은 락 `Peer.clock`의 대기를 재려는 것이다(위 "남는 것은 `Peer.clock` 하나의 대기 기록"). 워커 전용이라 `pub(crate)`이고, `NetShared::peer_clock*` 넷(피어 표 읽기 락을 거치던 것)은 부르는 곳이 없어져 지웠다.
 - **자리별 계측은 `peer_clock`(= `Peer.clock` 뮤텍스) 하나와 계획 `try_lock` 실패 수(`plan_retries`)**로 줄었다. 계획·보정·상태·피어 표 읽기 락은 자리가 없어졌다(4.3절 표의 "후 0 · 0"은 "자리 없음"이다).
 
-복사본이 워커에 있으므로 읽는 단계가 둘이다(`SendPath`, `MetronomeStage`). 세대가 바뀔 때 갱신되는 값이라 읽기 전용 묶음 `WorkerCtx`에는 담을 수 없다 → `EchoRt`처럼 **조정자가 갖고 두 단계에 빌려 주는 필드가 하나 는다**: `peer_table: Option<PeerTable>`(`PeerTable { net, copy }`, 네트워크가 있을 때만. `refresh()`가 반복 맨 앞에서 복사본을 맞춘다 — 캡처가 멈춰도 빠진 피어가 쌓이지 않게, #126 리뷰 M-1). 단계는 `PeerTable`이 아니라 그 안의 복사본(`&mut PeerTableCopy` / `&PeerTableCopy`)만 받는다. net을 아는 것은 `SendPath`·`MetronomeStage`와 이 작은 묶음 셋이다. 2.1절 그림·8절에 반영했다(필드 9 → 11: `peer_table`과 아래 `lock_wait`).
+복사본이 워커에 있으므로 읽는 단계가 둘이다(`SendPath`, `MetronomeStage`). 세대가 바뀔 때 갱신되는 값이라 읽기 전용 묶음 `WorkerCtx`에는 담을 수 없다 → `EchoRt`처럼 **조정자가 갖고 두 단계에 빌려 주는 필드가 하나 는다**: `peer_table: Option<PeerTable>`(`PeerTable { net, copy }`, 네트워크가 있을 때만. `refresh()`가 반복 맨 앞에서 복사본을 맞춘다 — 캡처가 멈춰도 빠진 피어가 쌓이지 않게, #126 리뷰 M-1). 단계는 `PeerTable`이 아니라 그 안의 복사본(`&mut PeerTableCopy` / `&PeerTableCopy`)만 받는다. net을 아는 것은 `SendPath`와 이 작은 묶음 둘이다(〔②b-6b 구현 확정〕 처음 안은 `MetronomeStage`까지 셋이었다 — 위 메모). 2.1절 그림·8절에 반영했다(필드 9 → 11: `peer_table`과 아래 `lock_wait`).
 
 ③c가 워커에 남긴 진단 누적값 `lock_wait: LockWait`(반복 한 번이 남은 락에서 기다린 합, `WorkerStats.iter_lock_wait`·`iter_unlocked`의 재료)도 조정자가 갖고, 락을 잡는 단계 메서드(`SendPath::send_frame`·`MetronomeStage::service`·`PeerSources::service`)에 `&mut LockWait`로 빌려 준다. ②b-5·②b-6b가 락을 없애면 그 인자도 같이 없어지고, 남는 것은 `Peer.clock`(MMCSS끼리) 하나의 대기 기록이다.
 

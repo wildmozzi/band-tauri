@@ -963,11 +963,33 @@ fn send_path_scanner_catches_variants() {
     assert_eq!(send_path_lock_violations("fn x() {}").len(), SEND_PATH_FNS.len(), "함수를 못 찾으면 실패");
 }
 
-/// 워커가 **기다리는** 락 호출(엔진 ②b-6b, 설계 7.1절). `try_lock`·`try_read`·`try_write`는 기다리지 않으므로 걸리지 않는다
-/// (`.try_lock(`에는 `.lock(`이 없다). `.read(`는 `RwLock` 읽기뿐 아니라 seqlock 칸의 `SeqCell::read`·`MediaStatsCell::read`도
-/// 잡는다 — 거짓 양성이 아니다: 그 둘은 재시도하며 `yield_now`를 부르는 **비RT 독자 전용**이고 워커는 그 칸의 작성자다
-/// (읽어야 하면 `try_read`). 진단 래퍼 `LockWait::lock(..)`·`read(..)`도 같은 문자열이라 함께 걸린다.
-const WAITING_LOCK_CALLS: &[&str] = &[".lock(", ".read(", ".write("];
+/// 워커가 **기다리는** 락 호출(엔진 ②b-6b, 설계 7.1절, #143 리뷰 M-1). 공백을 지운 본문에서 찾는 문자열이다.
+/// - 메서드 꼴: `.lock(`·`.read(`·`.write(`와 parking_lot의 다른 기다리는 입구(`lock_arc`, `read_recursive`,
+///   `upgradable_read`, `read_arc`·`write_arc`, `Condvar`의 `wait`·`wait_while`).
+/// - 시한 대기: `_for(`·`_until(`로 끝나는 이름(`try_lock_for`, `try_read_until`, `wait_for` …) — 이름은 try여도 시한만큼 기다린다.
+/// - UFCS: `::lock(`·`::read(`·`::write(`(`Mutex::lock(&m)`, `RwLock::read(&l)`).
+///
+/// `try_lock(`·`try_read(`·`try_write(`는 기다리지 않으므로 걸리지 않는다(`.try_lock(`에는 `.lock(`이 없다).
+/// `.read(`는 seqlock 칸의 `SeqCell::read`·`MediaStatsCell::read`도 잡는다 — 거짓 양성이 아니다: 그 둘은 재시도하며
+/// `yield_now`를 부르는 **비RT 독자 전용**이고 워커는 그 칸의 작성자다(읽어야 하면 `try_read`). 진단 래퍼
+/// `LockWait::lock(..)`도 같은 문자열이라 함께 걸린다.
+const WAITING_LOCK_CALLS: &[&str] = &[
+    ".lock(",
+    ".read(",
+    ".write(",
+    ".lock_arc(",
+    ".read_recursive(",
+    ".upgradable_read(",
+    ".read_arc(",
+    ".write_arc(",
+    ".wait(",
+    ".wait_while(",
+    "_for(",
+    "_until(",
+    "::lock(",
+    "::read(",
+    "::write(",
+];
 
 /// 주석·문자열을 지운 본문에서 기다리는 락 호출을 찾는다(공백 무시).
 fn waiting_lock_calls(code: &str) -> Vec<&'static str> {
@@ -976,6 +998,7 @@ fn waiting_lock_calls(code: &str) -> Vec<&'static str> {
 }
 
 /// 엔진 ②b 완료 조건(설계 7.1절·8절): `src/engine/worker/`(tests.rs 제외) 안에 기다리는 락 호출이 없다. 예외 0.
+/// 단위 테스트 모듈은 보지 않으므로, 그 **뒤**에 코드를 숨길 수 없게 테스트 모듈이 파일 끝임도 확인한다.
 /// **재발 방지용**이다 — 워커 파일이 직접 쓰는 락만 본다. 워커가 부르는 메서드 안의 락(`Peer.clock` 등)은 폭주 시험의
 /// 락 대기 계측(`send_path_storm_measure`)과 `engine-architecture.md` 4.1절 표가 맡는다.
 #[test]
@@ -986,9 +1009,13 @@ fn worker_dir_waits_for_no_lock() {
     assert!(files.len() >= 10, "워커 파일을 못 찾음: {files:?}");
     let mut bad = Vec::new();
     for f in files.iter().filter(|f| f.file_name().is_some_and(|n| n != "tests.rs")) {
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
         let src = std::fs::read_to_string(f).unwrap();
+        if !unit_tests_at_end(&src) {
+            bad.push(format!("{name}: 단위 테스트 모듈 뒤에 코드가 있다(검사가 보지 못한다)"));
+        }
         for l in waiting_lock_calls(without_unit_tests(&src)) {
-            bad.push(format!("{}: {l}", f.file_name().unwrap().to_string_lossy()));
+            bad.push(format!("{name}: {l}"));
         }
     }
     assert!(bad.is_empty(), "워커 디렉터리에 기다리는 락 호출이 있다(원자값·큐·try_lock으로 바꿀 것): {bad:?}");
@@ -997,14 +1024,103 @@ fn worker_dir_waits_for_no_lock() {
 /// 위 검사기의 음성 확인.
 #[test]
 fn worker_lock_scanner_catches_variants() {
-    assert_eq!(waiting_lock_calls("fn a(&self) { let p = self.ctl.plan.lock(); }"), [".lock("]);
-    assert_eq!(waiting_lock_calls("fn a(&self) { let p = self.net.peers
-    .read(); }"), [".read("]);
-    assert_eq!(waiting_lock_calls("fn a(&self) { *self.x . write() = 1; let s = cell.read(); }"), [".read(", ".write("]);
-    assert_eq!(waiting_lock_calls("fn a(&mut self, w: &mut LockWait) { let g = w.lock(&self.m, site); }"), [".lock("]);
+    let hit = |code: &str| waiting_lock_calls(&format!("fn a(&self) {{ {code} }}"));
+    assert_eq!(hit("let p = self.ctl.plan.lock();"), [".lock("]);
+    assert_eq!(hit("let p = self.net.peers\n    .read();"), [".read("]);
+    assert_eq!(hit("*self.x . write() = 1; let s = cell.read();"), [".read(", ".write("]);
+    assert_eq!(hit("let g = w.lock(&self.m, site);"), [".lock("], "진단 래퍼 LockWait::lock");
+    // parking_lot의 다른 기다리는 입구(#143 리뷰 M-1)
+    assert_eq!(hit("let g = parking_lot::Mutex::lock(&stats.m);"), ["::lock("]);
+    assert_eq!(hit("let g = RwLock::read(&net.peers); let h = RwLock :: write(&net.peers);"), ["::read(", "::write("]);
+    assert_eq!(hit("let g = stats.m.try_lock_for(Duration::from_secs(1));"), ["_for("]);
+    assert_eq!(hit("let g = net.peers.try_read_until(deadline);"), ["_until("]);
+    assert_eq!(hit("let g = net.peers.try_write_for(d);"), ["_for("]);
+    assert_eq!(hit("let g = net.peers.read_recursive();"), [".read_recursive("]);
+    assert_eq!(hit("let g = net.peers.upgradable_read();"), [".upgradable_read("]);
+    assert_eq!(hit("let g = stats.m.lock_arc();"), [".lock_arc("]);
+    assert_eq!(hit("let g = peers.read_arc(); let h = peers.write_arc();"), [".read_arc(", ".write_arc("]);
+    assert_eq!(hit("cv.wait(&mut g);"), [".wait("]);
+    assert_eq!(hit("cv.wait_for(&mut g, d); cv.wait_while(&mut g, |x| *x);"), [".wait_while(", "_for("]);
     // 기다리지 않는 것, 주석·문자열 안의 것은 걸리지 않는다
-    let ok = "fn a(&self) { if let Some(p) = self.plan.try_lock() {} let _ = t.try_read(); let _ = t.try_write();               /* x.lock() */ log::warn!(\".lock( .read(\"); } // m.write()";
-    assert!(waiting_lock_calls(ok).is_empty());
+    let ok = "if let Some(p) = self.plan.try_lock() {} let _ = t.try_read(); let _ = t.try_write(); \
+              /* x.lock() */ log::warn!(\".lock( .read( Mutex::lock( try_lock_for(\"); // m.write()";
+    assert!(hit(ok).is_empty());
+    // 테스트 모듈 뒤에 숨긴 코드는 "끝이 아님"으로 잡힌다
+    assert!(unit_tests_at_end("fn a() {}\n#[cfg(test)]\nmod tests {\n fn t() {}\n}\n"));
+    assert!(!unit_tests_at_end("fn a() {}\n#[cfg(test)]\nmod tests {\n}\nfn hidden() { M.lock(); }\n"));
+}
+
+/// `Peer.clock`을 잡는 워커 쪽 입구. 부르는 곳은 워커 디렉터리뿐이어야 한다(#143 리뷰 L-2).
+const PEER_CLOCK_CALLS: &[&str] = &[".clock_estimate(", ".clock_unsupported("];
+
+/// 주석·문자열을 지운 코드에서 인라인 시험 모듈(`#[cfg(test)] mod 이름 { .. }` — 이름이 `tests`가 아닌 `copy_tests`도)을
+/// **그 모듈만** 들어낸다. 모듈 뒤에 이어지는 코드는 남는다(뒤에 숨길 수 없다). 선언만 있는 `mod tests;`는 건드리지 않는다.
+fn without_inline_test_mods(src: &str) -> String {
+    const ATTR: &str = "#[cfg(test)]";
+    let code = strip(src);
+    let mut out = String::new();
+    let mut rest = code.as_str();
+    while let Some(i) = rest.find(ATTR) {
+        let after = &rest[i + ATTR.len()..];
+        let body = after.trim_start().strip_prefix("mod ").and_then(|m| {
+            let open = m.find(['{', ';'])?;
+            m[open..].starts_with('{').then(|| &m[open..])
+        });
+        let Some(body) = body else {
+            out.push_str(&rest[..i + ATTR.len()]);
+            rest = after;
+            continue;
+        };
+        out.push_str(&rest[..i]);
+        let mut depth = 0usize;
+        let mut end = body.len();
+        for (k, c) in body.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = k + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &body[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 엔진 ②b-6b(ADR D1 "`Peer.clock`은 워커와 `band-net-recv`만 잡는다 — 기본 우선순위 스레드가 잡지 않는 한"):
+/// `Peer::clock_estimate`·`clock_unsupported`는 `pub(crate)`라 가시성으로는 "워커 전용"을 못 적는다(`net`의 메서드를
+/// `engine::worker`에만 보이게 할 수 없다). 그래서 부르는 파일이 `engine/worker/`뿐임을 여기서 고정한다 — 통계·커맨드가
+/// 부르게 되면 ②b가 없앤 우선순위 역전이 돌아온다. 시험 모듈 안의 호출은 보지 않는다.
+#[test]
+fn peer_clock_is_read_only_by_worker() {
+    let mut files = Vec::new();
+    rs_files(&src_dir(), &mut files);
+    let worker = src_dir().join("engine/worker");
+    let mut bad = Vec::new();
+    let mut seen = 0;
+    for f in &files {
+        let src = std::fs::read_to_string(f).unwrap();
+        let flat: String = without_inline_test_mods(&src).chars().filter(|c| !c.is_whitespace()).collect();
+        for c in PEER_CLOCK_CALLS.iter().filter(|c| flat.contains(*c)) {
+            seen += 1;
+            if !f.starts_with(&worker) {
+                bad.push(format!("{}: {c}", f.strip_prefix(src_dir()).unwrap().display()));
+            }
+        }
+    }
+    assert!(seen >= 2, "호출을 못 찾음(이름이 바뀌었으면 PEER_CLOCK_CALLS를 고칠 것)");
+    assert!(bad.is_empty(), "워커 밖에서 Peer.clock을 잡는 호출(기본 우선순위 스레드면 워커가 그 뒤에서 기다린다): {bad:?}");
+    // 검사기 음성 확인: 시험 모듈만 들어내고 그 뒤 코드는 남긴다
+    let cut = without_inline_test_mods("fn a() {}\n#[cfg(test)]\nmod copy_tests {\n fn t() { if x { p.clock_estimate(1); } }\n}\nfn b() { p.clock_unsupported(); }\n");
+    assert!(!cut.contains("clock_estimate") && cut.contains("fn a()") && cut.contains("fn b() { p.clock_unsupported(); }"), "{cut}");
+    let decl = "#[cfg(test)]\nmod tests;\nfn a() { p.clock_estimate(1); }\n";
+    assert_eq!(without_inline_test_mods(decl), decl, "선언만 있는 모듈은 자르지 않는다");
 }
 
 #[test]

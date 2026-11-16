@@ -877,15 +877,22 @@ mod tests {
         rt.refresh_plan(&mut mine);
         assert_eq!(mine, (1, p1.clone()));
         // 제어 쪽이 락을 쥔 동안(선점된 `set_plan`·`stats`): 워커 끝은 돌아오고 옛 계획을 유지한다
+        // 워커 끝은 별도 스레드에서 부르고 시한을 둔다: `try_lock`이 `lock`으로 되돌아가면 멈추지 않고 실패한다(#143 리뷰 L-1).
         ctl.set_plan(plan(200.0, 9.0));
-        {
-            let _held = ctl.plan.lock();
+        let held = ctl.plan.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
             rt.refresh_plan(&mut mine);
             rt.refresh_plan(&mut mine);
-            assert_eq!(mine, (1, p1));
-            assert_eq!(rt.loopback_offset_ms(), None);
+            let offset = rt.loopback_offset_ms();
             rt.publish(&MetroReport { applied_gen: mine.0, bpm: 90.0, ..Default::default() });
-        }
+            tx.send((mine.clone(), offset)).unwrap();
+            (rt, mine)
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("워커 쪽 끝이 계획 락을 기다린다");
+        drop(held);
+        let (mut rt, mut mine) = t.join().unwrap();
+        assert_eq!(got, ((1, p1), None));
         assert_eq!(ctl.take_plan_retries(), 2);
         rt.refresh_plan(&mut mine);
         assert_eq!(mine, (2, plan(200.0, 9.0)));

@@ -1069,7 +1069,8 @@ impl Peer {
     /// 이 피어 시계 − 내 시계 추정(P2-3). `at_us` = 내 시계. 표본이 없으면 None. **워커 전용**(메트로놈 단계, 엔진 ②b-6b):
     /// 워커가 피어 표 복사본에서 찾은 피어에 부른다 — 피어 표 락을 거치지 않는다. 잡는 락은 `clock` 하나이고 그것을 나누는
     /// 상대는 `band-net-recv`뿐이다(둘 다 MMCSS). 기본 우선순위 스레드가 `clock`을 잡게 되면 이 규칙을 다시 열어야 한다
-    /// (ADR D1). 기다렸으면 `w`·`site`에 적는다(진단).
+    /// (ADR D1). 가시성으로는 적을 수 없어(`net`의 메서드를 `engine::worker`에만 보이게 할 수 없다) `tests/architecture.rs`의
+    /// `peer_clock_is_read_only_by_worker`가 부르는 파일을 워커 디렉터리로 고정한다. 기다렸으면 `w`·`site`에 적는다(진단).
     pub(crate) fn clock_estimate(&self, at_us: u64, w: &mut super::txlat::LockWait, site: &super::txlat::LockSite) -> Option<super::clock::ClockEstimate> {
         w.lock(&self.clock, site).estimate(at_us as f64)
     }
