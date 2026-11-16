@@ -948,7 +948,9 @@ fn send_path_takes_no_locks() {
     };
     let peer = peer_direct_lock_violations(&read("net/peer.rs"));
     assert!(peer.is_empty(), "net/peer.rs에서 가드 없이 conn·echo 락을 잡는 함수(스냅샷이 발행되지 않는다): {peer:?}");
-    let send = send_path_lock_violations(&read("net/mod.rs"));
+    // 송신 경로 함수는 `net/send.rs`, 피어 표 복사본(`refresh_copy`)은 `net/mod.rs`에 있다(엔진 R-1 ⑥-6). 둘을 이어 본다 —
+    // 함수를 못 찾으면 실패하므로 파일을 옮겨도 검사가 빠지지 않는다.
+    let send = send_path_lock_violations(&(read("net/mod.rs") + "\n" + &read("net/send.rs")));
     assert!(send.is_empty(), "워커 송신 경로에 락 획득이 있다: {send:?}");
 }
 

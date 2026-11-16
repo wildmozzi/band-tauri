@@ -104,7 +104,7 @@
 | ⑥-3 | `engine/metronome.rs`(652) | `metronome/{mod, click, plan, sched}` | `mixer → metronome`(1) | ②b-6 | `tests/metronome.rs`, `rt_alloc` |
 | ⑥-4 | `engine/measure.rs`(1,169) | `measure/{mod, analysis, loopback, echo}` | — | ②b-5 | `tests/measure.rs` |
 | ⑥-5 | `engine/wasapi.rs`(1,879) | `wasapi/{mod, format, enumerate, stream, probe}` | — | ⑥-2 | 자동 테스트는 `wasapi` 단위 테스트뿐 → **[사람] 실장비**(독점·공유 열기, 장치 분리, 기본 장치 변경) |
-| ⑥-6 | `net/mod.rs`(1,057) | `net/{mod, send, recv_loop, control_loop}` | — | ③c | net 통합 테스트 7개 + 루프백 |
+| ⑥-6 | `net/mod.rs`(1,057, ⑥-6 착수 때 1,343) | `net/{mod, send, recv_loop, control_loop}` | — | ③c | net 통합 테스트 7개 + 루프백 |
 | ⑥-7 | `net/peer.rs`(1,436) | `net/peer/{mod, descriptor, conn, ping}` | — | ③c | 같음 + `net::peer` 단위 테스트 |
 
 ### 3.2 심볼 배치
@@ -179,16 +179,18 @@
 
 ADR은 `{enumerate, stream}` 둘만 적었다. 둘이 함께 쓰는 형식·COM 보조가 갈 곳이 필요해 `format`을, 예제 전용 코드를 떼려고 `probe`를 더했다(제안 2).
 
-**⑥-6 `net/mod.rs`** 〔③c 뒤 갱신: 송신 경로 본문〕
+**⑥-6 `net/mod.rs`** 〔③c 뒤 갱신: 송신 경로 본문. ⑥-6 구현(코드) 기준으로 고침〕
 
 | 하위 모듈 | 심볼 |
 |---|---|
-| `mod` | `RelaySetting`·상수·`NetOptions`·`NetShared` 구조체·`Net`(시작·피어 추가·제거·정지, `:36-430`), 에코·피어 조회 API(`:692-770`), `now_us`·`epoch`(`:921-930`), 시계 페이로드(`:942-959`) |
-| `send` | `send_sealed`·`send_ctrl*`·`send_bye`·`send_ping`·`send_audio_to`·`relay_audio_load`·자동 전환 플래그·`send_audio`·`send_audio_timed`·`reflect_audio`(`:467-690`), `AutoPayload`·`AutoFn`(`:932-939`) |
-| `recv_loop` | `open_from_peers`·`handle_relay_ack`·`handle_packet`(`:777-920`), `recv_loop`(`:961-975`) |
-| `control_loop` | `control_loop`과 그 상수(`:977-1057`) |
+| `mod` | 하위 모듈 선언·`use`·`pub use send::{AutoFn, AutoPayload}`, `RelaySetting`·상수(`SEND_BUF_BYTES`·`MAX_PEERS`·`AUDIO_SEQ_HANDOVER_GAP`·`RECV_TIMEOUT`)·`TxKeyId`·`NetOptions`·`NetShared` 구조체·`InputBufferFn`·`PeerTableCopy`·`SendPathDiag`·`lan_addresses`·`Net`(시작·피어 추가·제거·릴레이 설정·통계·정지), `impl NetShared`의 표·세대·릴레이 주소 보조(`now_us32`·`retire_tx_seq`·`bump_peers_gen`·`refresh_copy`·`release_retired`·`next_ctrl_seq`·`relay_addr`·`move_relay`), 에코·피어 조회 API(`peer_by_id`·`set_echo_*`·`remote_echo`·`peer_rtt_ms`·`peer_path`·`peer_id_for_ssrc`·`for_each_peer`), `set_input_buffer_source`·`now_us`·`epoch`, 시계 페이로드(`CLOCK_TAG`·`CLOCK_PAYLOAD_BYTES`·`clock_payload`·`parse_clock_payload`), 단위 테스트 `copy_tests` |
+| `send` | `send_sealed`·`send_ctrl`·`send_ctrl_on_path`·`send_bye`·`send_ping`·`send_audio_to`·`relay_audio_load`·자동 전환 플래그(`set_relay_auto_opus`·`take_auto_refresh`·`set_force_auto_opus`·`force_auto_opus`)·`send_audio`·`send_audio_timed`·`reflect_audio`, `AutoPayload`·`AutoFn` |
+| `recv_loop` | `open_from_peers`·`handle_relay_ack`·`handle_packet`, `recv_loop`(스레드 본문) |
+| `control_loop` | `RELAY_QUIET_PROBE`·`RELAY_RATE_WINDOW`, `control_loop`(스레드 본문) |
 
-`impl NetShared`를 파일 넷에 나눠 쓰는 방식이다(①의 `impl JitterBuffer`와 같다). 노드는 `net` 하나로 둔다(같은 타입의 메서드라 서로 부른다).
+`impl NetShared`를 파일 넷에 나눠 쓰는 방식이다(①의 `impl JitterBuffer`와 같다). 노드는 `net` 하나로 둔다(같은 타입의 메서드라 서로 부른다 — 자식이 부모의 비공개 필드·보조 메서드와 `SEND_BUF_BYTES`를 쓰고, 부모가 자식의 `send_bye`·`send_ping`과 스레드 본문을 부른다). `architecture.rs`의 `NODES`에 자식을 올리지 않았으므로 네 파일은 `net`으로 접혀 간선이 이전과 같다.
+
+처음 표와 다른 점: `refresh_copy`(워커가 부르는 피어 표 복사)는 `PeerTableCopy`·세대 필드와 함께 `mod`에 남겼다 — 송신 전용이 아니라 표의 세대 규칙이다. 다른 파일에서 부르는 메서드만 `pub(super)`로 열었다(`send_ctrl`·`send_bye`·`send_ping`·`reflect_audio`, 스레드 본문 `recv_loop`·`control_loop`). 정적 검사 `send_path_takes_no_locks`는 `net/mod.rs` + `net/send.rs`를 이어 본다(`SEND_PATH_FNS` 다섯 개를 못 찾으면 실패하는 것은 그대로).
 
 **⑥-7 `net/peer.rs`** 〔③c 뒤 갱신: 송신 경로 스냅샷 필드〕
 
