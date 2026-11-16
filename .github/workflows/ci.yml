@@ -81,7 +81,8 @@ jobs:
             relay:
               - 'relay/**'
               - 'client/src-tauri/src/net/**'
-              # 릴레이 접두부·패킷 헤더(⑩-1에서 net/에서 band-dsp로 옮김)
+              # 릴레이 계약 파일만: 접두부·예산 상수(types)와 패킷 헤더(packet). ⑩-1에서 net/에서 band-dsp로 옮겼다.
+              # 같이 옮긴 media_link·clock은 relay/가 쓰지 않아 넣지 않는다(#160 리뷰 L4).
               - 'client/src-tauri/crates/band-dsp/src/types.rs'
               - 'client/src-tauri/crates/band-dsp/src/packet.rs'
               - '.github/workflows/ci.yml'

@@ -786,13 +786,27 @@ fn forbidden_edges_absent() {
 }
 
 /// 매니페스트의 `[dependencies]`·`[target.*.dependencies]` 이름(`-` → `_`). 개발·빌드 의존은 뺀다.
+/// 점 표기 섹션(`[dependencies.parking_lot]`, `[target.'cfg(windows)'.dependencies.windows-sys]`)은 헤더에서 이름을 읽는다
+/// (#160 리뷰 L3 — 이 꼴로 의존을 더해도 `dsp_crate_uses_only_dsp_deps`가 놓치지 않게).
 fn extern_crates(manifest: &Path) -> BTreeSet<String> {
     let text = std::fs::read_to_string(manifest).unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
+    extern_crates_of(&text)
+}
+
+fn extern_crates_of(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut in_deps = false;
     for l in text.lines().map(str::trim) {
         if l.starts_with('[') {
-            in_deps = l == "[dependencies]" || (l.starts_with("[target.") && l.ends_with(".dependencies]"));
+            let head = l.trim_start_matches('[').trim_end_matches(']').trim();
+            in_deps = head == "dependencies" || (head.starts_with("target.") && head.ends_with(".dependencies"));
+            // 점 표기: `dependencies.<이름>` 또는 `target.<…>.dependencies.<이름>`(`dev-dependencies.`·`build-dependencies.`는 아님).
+            let dotted = head.strip_prefix("dependencies.").or_else(|| {
+                head.starts_with("target.").then(|| head.rsplit_once(".dependencies.").map(|(_, n)| n)).flatten()
+            });
+            if let Some(name) = dotted {
+                out.insert(name.trim_matches(|c| c == '"' || c == '\'').replace('-', "_"));
+            }
             continue;
         }
         if in_deps && !l.starts_with('#') {
@@ -807,27 +821,41 @@ fn extern_crates(manifest: &Path) -> BTreeSet<String> {
     out
 }
 
-/// 코드(주석·문자열·파일 끝 단위 시험을 지운 것)의 시험 전용 항목: (이름, 종류). 뿌리 파일(`root`)의 비공개 아닌 항목 가운데
-/// `cfg(test)`(종류 `test` — `band-dsp` 단위 시험에서만 보인다)와 `cfg(any(test, …))`(종류 `support` — 피처로 밖에 연다).
-/// 하위 파일(`jitter/conceal.rs` 등)은 비공개 모듈 안이라 보지 않는다. ⑩-0에서는 `pub(crate)`·`pub(super)`도 경계 항목으로
-/// 봤으나(`DSP_BOUNDARY`) 크레이트를 가른 뒤에는 컴파일러가 막는다.
+/// 코드(파일 끝 단위 시험을 지운 것, 문자열은 그대로 — 피처 이름을 읽어야 한다)의 시험 전용 항목: (이름, 종류).
+/// - `support`: `test-support` 피처를 이름으로 든 `#[cfg(…)]`(`any(test, feature = "test-support")`, `feature = "test-support"`,
+///   `all(…)` 등) 뒤의 비공개 아닌 항목. **모든 파일**에서 본다 — 하위 파일(`jitter/target.rs` 등)이 비공개 모듈이어도
+///   그 안 `impl JitterBuffer`의 `pub fn`은 타입이 공개라 크레이트 밖에서 부를 수 있다(#160 리뷰 M1).
+/// - `test`: `#[cfg(test)]` 뒤의 비공개 아닌 항목. 뿌리 파일(`root`)만(`band-dsp` 단위 시험에서만 보인다 — 참고용).
+///
+/// 줄 단위로 보고 `//`로 시작하는 주석 줄은 건너뛴다. ⑩-0에서는 `pub(crate)`·`pub(super)`도 경계 항목으로 봤으나
+/// (`DSP_BOUNDARY`) 크레이트를 가른 뒤에는 컴파일러가 막는다.
 fn test_only_items(code: &str, root: bool) -> Vec<(String, &'static str)> {
     let mut out = Vec::new();
-    if !root {
-        return out;
-    }
     let mut gate: Option<&'static str> = None;
     for line in code.lines().map(str::trim) {
+        if line.starts_with("//") {
+            continue;
+        }
         let mut l = line;
         while l.starts_with("#[") {
-            if l.starts_with("#[cfg(test)]") {
+            // 속성 끝: 괄호 짝이 맞는 `]`(피처 이름 문자열 안에 `]`는 없다).
+            let mut depth = 0i32;
+            let end = l.char_indices().skip(1).find(|&(_, c)| {
+                match c {
+                    '[' | '(' => depth += 1,
+                    ']' | ')' => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            });
+            let attr = &l[..end.map_or(l.len(), |(e, _)| e + 1)];
+            if attr == "#[cfg(test)]" {
                 gate = Some("test");
-            } else if l.starts_with("#[cfg(any(test") {
+            } else if attr.starts_with("#[cfg(") && attr.contains("\"test-support\"") {
                 gate = Some("support");
             }
-            match l.find(']') {
-                // 속성 안의 `]`(`#[cfg(any(test, feature = ""))]`는 없다 — 문자열은 지워졌다)까지 넘긴다.
-                Some(e) => l = l[e + 1..].trim_start(),
+            match end {
+                Some((e, _)) => l = l[e + 1..].trim_start(),
                 None => break,
             }
         }
@@ -844,6 +872,9 @@ fn test_only_items(code: &str, root: bool) -> Vec<(String, &'static str)> {
         let item = ["fn ", "const ", "static ", "struct ", "enum ", "type ", "trait "].iter().find_map(|k| rest.strip_prefix(k));
         let was = gate.take();
         let (Some(item), Some(kind)) = (item, was) else { continue };
+        if kind == "test" && !root {
+            continue;
+        }
         let name: String = item.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
         if !name.is_empty() {
             out.push((name, kind));
@@ -868,7 +899,7 @@ fn dsp_test_support_items_are_listed() {
         roots += usize::from(root);
         let rel = f.strip_prefix(dsp_src_dir()).unwrap_or(&f).display().to_string().replace('\\', "/");
         let text = std::fs::read_to_string(&f).expect("읽기");
-        for (name, kind) in test_only_items(&strip(without_unit_tests(&text)), root) {
+        for (name, kind) in test_only_items(without_unit_tests(&text), root) {
             if kind == "support" {
                 found.insert((rel.clone(), name));
             }
@@ -894,16 +925,42 @@ fn dsp_test_support_items_are_listed() {
     assert!(line.contains("\"band-dsp/test-support\""), "band의 test-support가 band-dsp/test-support를 켜지 않는다: {line}");
 }
 
-/// 변이: 뿌리 파일의 시험 전용 항목만 종류와 함께 잡고(`pub(crate)`여도), 보통 `pub`·비공개 시험 도우미·하위 파일은 잡지 않는다.
+/// 변이: `test-support` 게이트 항목은 형태(`any`·`all`·피처만)와 위치(뿌리·하위 파일, `impl` 블록 안)와 상관없이 잡고,
+/// `cfg(test)`는 뿌리에서만, 보통 `pub`·비공개 시험 도우미·다른 피처(`asio`)·주석 줄은 잡지 않는다(#160 리뷰 M1).
 #[test]
 fn dsp_test_only_scanner_catches_variants() {
-    let code = "pub(crate) fn a() {}\npub(super) const B: u8 = 0;\n#[cfg(test)]\n#[inline]\npub fn c() {}\n\
-                #[cfg(any(test, feature = \"\"))]\npub(crate) fn d() {}\n#[cfg(test)]\nfn e() {}\npub fn f() {}\n\
-                #[derive(Debug)]\npub(crate) struct G;\npub(crate) const fn h() {}\nimpl X {\n    #[cfg(any(test, feature = \"\"))]\n    pub fn i(&self) {}\n}\n";
-    let got = test_only_items(code, true);
-    let want: Vec<(String, &str)> = [("c", "test"), ("d", "support"), ("i", "support")].iter().map(|(n, k)| (n.to_string(), *k)).collect();
-    assert_eq!(got, want);
-    assert!(test_only_items(code, false).is_empty(), "하위 파일은 보지 않는다");
+    let code = r#"pub(crate) fn a() {}
+pub(super) const B: u8 = 0;
+#[cfg(test)]
+#[inline]
+pub fn c() {}
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn d() {}
+#[cfg(test)]
+fn e() {}
+pub fn f() {}
+#[derive(Debug)]
+pub(crate) struct G;
+pub(crate) const fn h() {}
+impl X {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn i(&self) {}
+    #[cfg(feature = "test-support")]
+    #[inline]
+    pub fn j(&self) {}
+    #[cfg(all(windows, feature = "test-support"))]
+    pub fn k(&self) {}
+    #[cfg(feature = "asio")]
+    pub fn l(&self) {}
+    // #[cfg(any(test, feature = "test-support"))]
+    pub fn m(&self) {}
+}
+"#;
+    let pick = |root| -> Vec<(String, &str)> { test_only_items(code, root) };
+    let names = |v: &[(&str, &'static str)]| -> Vec<(String, &'static str)> { v.iter().map(|(n, k)| (n.to_string(), *k)).collect() };
+    assert_eq!(pick(true), names(&[("c", "test"), ("d", "support"), ("i", "support"), ("j", "support"), ("k", "support")]));
+    // 하위 파일(비공개 모듈 안의 `impl JitterBuffer` 등): test-support 게이트는 잡고 cfg(test)는 보지 않는다.
+    assert_eq!(pick(false), names(&[("d", "support"), ("i", "support"), ("j", "support"), ("k", "support")]));
 }
 
 /// `band-dsp`로 옮기면 안 되는 노드(`DSP_EXCLUDED`)는 이 크레이트에 있고, 같은 이름의 모듈이 `band-dsp`에 생기지 않는다.
@@ -934,6 +991,70 @@ fn dsp_crate_uses_only_dsp_deps() {
     for k in ["sha2", "rand", "parking_lot", "windows_sys", "x25519_dalek", "band_dsp"] {
         assert!(band.contains(k), "Cargo.toml 의존 읽기: {k} 없음 {band:?}");
     }
+    // 점 표기 섹션도 읽는다(#160 리뷰 L3).
+    let dotted = "[dependencies]\nlog = \"0.4\"\n[dependencies.parking_lot]\nversion = \"0.12\"\n\
+                  [target.'cfg(windows)'.dependencies.windows-sys]\nversion = \"0.59\"\n[dev-dependencies.rand]\nversion = \"0.8\"\n\
+                  [target.'cfg(windows)'.dev-dependencies.sha2]\nversion = \"0.10\"\n[build-dependencies]\ncc = \"1\"\n";
+    let got = extern_crates_of(dotted);
+    let want: BTreeSet<String> = ["log", "parking_lot", "windows_sys"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(got, want, "점 표기 의존");
+}
+
+/// `band-dsp` 정의(ADR 제안 3)의 std 쪽: 스레드를 만들지 않고, 파일·소켓·프로세스·환경을 쓰지 않고, 벽시계를 읽지 않는다
+/// (#160 리뷰 L1 — 외부 크레이트·`band` 모듈은 컴파일러가 막지만 std는 막지 않는다). RT 검사의 `시스템콜` 문자열 목록에
+/// `Instant::now`를 더해 비시험 코드(파일 끝 단위 시험·`tests.rs` 제외, 주석·문자열 제외)에서 찾는다. `Instant` 타입 자체는
+/// 허용한다(`relay_codec`이 인자로 받기만 한다). 예외는 `DSP_STD_ALLOWED`뿐.
+const DSP_STD_ALLOWED: &[(&str, &str, &str)] = &[(
+    "stats.rs",
+    "std::thread::yield_now()",
+    "SeqCell::read — 비RT 독자의 seqlock 재시도 양보. 스레드 생성·I/O·시계가 아니다(7.3절)",
+)];
+
+fn dsp_std_violations(rel: &str, code: &str) -> Vec<String> {
+    let mut flat: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    for (f, ok, _) in DSP_STD_ALLOWED {
+        if *f == rel {
+            flat = flat.replace(ok, "");
+        }
+    }
+    let syscalls = RT_FORBIDDEN.iter().find(|(k, _)| *k == "시스템콜").map(|(_, p)| *p).expect("RT_FORBIDDEN 시스템콜");
+    syscalls.iter().copied().chain(["Instant::now"]).filter(|p| flat.contains(p)).map(|p| format!("  {rel}: {p}")).collect()
+}
+
+#[test]
+fn dsp_crate_has_no_thread_io_or_clock() {
+    let mut bad = Vec::new();
+    let mut seen = 0;
+    let mut used_allow = BTreeSet::new();
+    for (f, module) in source_files() {
+        if module.first().is_none_or(|m| m != DSP_ROOT) || module.last().is_some_and(|m| m == "tests") {
+            continue;
+        }
+        seen += 1;
+        let rel = f.strip_prefix(dsp_src_dir()).unwrap_or(&f).display().to_string().replace('\\', "/");
+        let text = std::fs::read_to_string(&f).expect("읽기");
+        let code = strip(without_unit_tests(&text));
+        for (af, ok, _) in DSP_STD_ALLOWED {
+            if *af == rel && code.chars().filter(|c| !c.is_whitespace()).collect::<String>().contains(ok) {
+                used_allow.insert(*ok);
+            }
+        }
+        bad.extend(dsp_std_violations(&rel, &code));
+    }
+    assert!(seen > DSP_NODES.len(), "band-dsp 파일을 다 보지 못했다: {seen}");
+    assert!(bad.is_empty(), "band-dsp가 스레드·I/O·벽시계를 쓴다(ADR 제안 3 — band로 옮길 것):\n{}", bad.join("\n"));
+    for (f, ok, _) in DSP_STD_ALLOWED {
+        assert!(used_allow.contains(ok), "DSP_STD_ALLOWED의 {f}: {ok}가 없어졌다 — 목록에서 지울 것");
+    }
+    // 변이: 스레드 생성·벽시계·파일·네트워크는 잡고, 허용 예외·`Instant` 타입 인자는 잡지 않는다.
+    assert_eq!(dsp_std_violations("x.rs", "fn a() { std::thread::spawn(|| {}); }"), ["  x.rs: thread::"]);
+    assert_eq!(dsp_std_violations("x.rs", "fn a() -> u64 { let t = Instant::now(); 0 }"), ["  x.rs: Instant::now"]);
+    assert_eq!(dsp_std_violations("x.rs", "fn a() { let _ = SystemTime::UNIX_EPOCH; }"), ["  x.rs: SystemTime"]);
+    assert_eq!(dsp_std_violations("x.rs", "fn a() { let _ = std::fs::File::open(p); }"), ["  x.rs: std::fs", "  x.rs: File::"]);
+    assert_eq!(dsp_std_violations("x.rs", "use std::net::UdpSocket;"), ["  x.rs: std::net"]);
+    assert_eq!(dsp_std_violations("stats.rs", "fn r() { std::thread::yield_now(); }"), Vec::<String>::new());
+    assert_eq!(dsp_std_violations("mixer.rs", "fn r() { std::thread::yield_now(); }"), ["  mixer.rs: thread::"], "허용은 그 파일에서만");
+    assert!(dsp_std_violations("x.rs", "fn update(now: Instant) {}").is_empty());
 }
 
 /// 워커 단독 소유 미디어 상태 타입(엔진 ③). 락 안에 들어가면 안 된다. `PeerMediaShared`(원자값만)는 다른 이름이라 해당 없음.
