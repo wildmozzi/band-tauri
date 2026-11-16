@@ -497,3 +497,61 @@ fn echo_requires_consent_and_times_out() {
     assert!(!b.stats().peers[0].echo_active);
     assert!(a.echo_job("nobody").is_err());
 }
+
+/// 엔진 ②b-5(설계 3.3절 H1): 에코 측정이 결과를 거둔 뒤에도 **상대가 반사를 멈출 때까지** 측정 대상 피어에게는 무음이 나간다.
+/// 프로브를 결과 수거 시점에 거두면(탭 끝 = 반환) 상대가 반사를 멈추기 전에 내 실제 소리가 내게 되돌아온다.
+///
+/// A의 입력은 사인(진폭 0.5), B의 입력은 무음, 편도 40ms 프록시. A의 출력에는 B의 스트림만 들리므로:
+/// - 반사 경로가 내 실제 소리를 나른다는 것부터 본다(공허한 시험이 아니게): 상대 동의 직후 ~ 프로브 설치 전에 보낸
+///   내 사인이 되돌아와 측정 초반에 들린다.
+/// - 클릭이 끝난 뒤(결과 수거 무렵)부터 측정이 돌아온 뒤 0.3초까지는 **완전한 무음**이어야 한다. 프로브를 일찍 거두는
+///   구현에서는 그 사이 보낸 사인(≥ 편도 40ms분)이 왕복 80ms 뒤 이 창에 들린다.
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::tests::echo_rt_follows_measure_signals(탭을 꺼도 프로브는 stop까지 워커에 남는다)"]
+fn echo_target_gets_silence_until_peer_stops_echoing() {
+    let _g = RT_LOCK.lock();
+    let sine: Arc<SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+        for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+            let t = (start + i as u64) as f64 / 48_000.0;
+            frame.fill((t * 440.0 * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5);
+        }
+    });
+    let backend_a = FakeBackend::new(48_000, sine);
+    let sink_a = backend_a.sink.clone();
+    let a = Engine::start(config(128), Arc::new(backend_a), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(config(128), Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let _proxy = DelayProxy::start(local_addr(&a), local_addr(&b), Duration::from_millis(40));
+    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), _proxy.pa)).unwrap();
+    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), _proxy.pb)).unwrap();
+    wait_connected(&a);
+    wait_connected(&b);
+    assert!(wait_until(HANG, || real_frames(&a) >= 320 && real_frames(&b) >= 320), "양방향 오디오가 흐르지 않음");
+    // 측정 전: A는 B의 무음만 듣는다
+    let peak = |from: usize, to: usize| -> f32 {
+        let s = sink_a.lock();
+        s[from.min(s.len())..to.min(s.len())].iter().fold(0f32, |m, x| m.max(x.abs()))
+    };
+    let n_before = sink_a.lock().len();
+    assert!(peak(n_before.saturating_sub(9_600), n_before) < 0.02, "측정 전 A의 출력은 무음(B의 입력)");
+
+    let b = Arc::new(Mutex::new(b));
+    let stop = Arc::new(AtomicBool::new(false));
+    let acc = auto_accept(b.clone(), stop.clone());
+    let n_start = sink_a.lock().len();
+    let rep = a.echo_job("bob").unwrap().run(3, Duration::from_secs(5), &AtomicBool::new(false)).unwrap();
+    let n_return = sink_a.lock().len();
+    stop.store(true, Ordering::Relaxed);
+    assert!(acc.join().unwrap());
+    assert!(rep.detected_runs >= 2, "{rep:?}");
+    // 측정이 돌아온 뒤 0.3초를 더 본다(그때 되돌아올 소리가 있다면 이 안에 온다: 왕복 80ms + 버퍼)
+    let frames = |ms: usize| ms * 48 * 2; // 스테레오 인터리브 샘플 수
+    assert!(wait_until(HANG, || sink_a.lock().len() >= n_return + frames(300)), "출력이 진행하지 않음");
+    // (1) 반사 경로는 내 실제 소리를 나른다: 동의 직후 프로브 설치 전에 나간 사인이 측정 초반 1초 안에 들린다
+    let early = peak(n_start, n_start + frames(1_000));
+    assert!(early > 0.2, "측정 초반에 되돌아온 내 소리가 들려야 한다(반사 경로 확인): 최대 {early}");
+    // (2) 결과 수거 무렵부터 측정이 돌아온 뒤 0.3초까지 무음. 창 시작 = 반환 150ms 전: 마지막 클릭은 듣기 끝보다 0.48초
+    // 앞에 나갔고 그 반사는 0.28초 안에 돌아오므로 이 창에 클릭은 없다.
+    let late = peak(n_return.saturating_sub(frames(150)), n_return + frames(300));
+    assert!(late < 0.02, "상대가 반사를 멈추기 전에 내 실제 소리가 나갔다가 되돌아왔다: 최대 {late}");
+    drop(a);
+}

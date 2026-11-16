@@ -22,7 +22,6 @@ use crate::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTE
 use crate::engine::jitter::{JitterSettings, JitterStats};
 use crate::engine::peer_media::{media_port, MediaCmd, MediaSettings, PeerMedia};
 use crate::engine::record::MarkSink;
-use crate::net::txlat::LockWait;
 use crate::net::media_link::{media_link, PeerKey};
 use crate::engine::rt::{output_path, SLOT_DRAIN, SLOT_FREE};
 use crate::net::packet::{Header, PacketType};
@@ -262,11 +261,9 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         port: port_rt,
         settings: Arc::new(MediaSettings::new(settings)),
         rec_marks: Arc::new(MarkSink::default()),
-        probe: Arc::new(parking_lot::Mutex::new(None)),
     });
     let bank = feed.bank;
     let wstats = WorkerStats::default();
-    let mut lock_wait = LockWait::default();
     // 피어 수명(②b-3b). `order` = 지금 워커 표에 있어야 하는 피어 번호(표 순서 — 추가 순, 제거는 그 자리를 뺀다).
     // 표의 `pos`번째 = 피어 `order[pos]`. 시작 때만 넣는 기존 시나리오에서는 0..n 그대로다.
     let mut order: Vec<usize> = Vec::new();
@@ -480,7 +477,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     }
                 }
             }
-            let urgent = sources.service(&bank, &counters, &wstats, 48_000, &timing, &mut lock_wait).urgent;
+            let urgent = sources.service(&bank, &counters, &wstats, 48_000, &timing, None).urgent;
             // 명령은 그 반복에 적용된다(J1): 표 길이·순서가 바로 맞고, 새 피어는 슬롯을 받고, 제거된 피어의 슬롯은 DRAIN이다.
             assert_eq!(sources.table_len(), order.len(), "t={t}: 워커 표 길이");
             for (pos, &i) in order.iter().enumerate() {

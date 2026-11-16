@@ -22,7 +22,6 @@ use crate::engine::peer_media::{MediaCmd, MediaPortRt, MediaSettings, PeerMedia,
 use crate::engine::record::{MarkEvent, MarkKind, MarkSink};
 use crate::engine::rt::{SourceBank, MAX_SOURCES, SLOT_ACTIVE, SLOT_DRAIN, SLOT_FREE};
 use crate::engine::stats::AudioCounters;
-use crate::net::txlat::LockWait;
 
 /// `service` 한 번의 결과.
 #[derive(Debug, Clone, Copy, Default)]
@@ -47,8 +46,6 @@ pub(crate) struct PeerSourcesParts {
     pub(crate) port: MediaPortRt,
     pub(crate) settings: Arc<MediaSettings>,
     pub(crate) rec_marks: Arc<MarkSink>,
-    /// 에코 측정 상태(재생 시각 탭). ②b-5에서 조정자의 `EchoRt`가 빌려 주는 인자로 바뀐다.
-    pub(crate) probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
 }
 
 /// 워커와 가상 시간 하네스(`sim::tune`, ②b-3)가 **같은 것**을 쓴다 — 하네스의 5분 fixture가 이 단계의 호출 열을 지킨다.
@@ -74,7 +71,6 @@ pub(crate) struct PeerSources {
     prods: PeerProds,
     /// 녹음 마커 큐(P2-4a): 녹음 중이면 피어별 은닉·버림을 출력 타임라인 위치로 넣는다.
     rec_marks: Arc<MarkSink>,
-    probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
     chunk_buf: Vec<f32>,
     tmp: Vec<f32>,
     slot_full_logged: bool,
@@ -89,7 +85,6 @@ impl PeerSources {
             settings: parts.settings,
             prods: PeerProds(parts.prods),
             rec_marks: parts.rec_marks,
-            probe: parts.probe,
             chunk_buf: vec![0.0; OUT_CHUNK * 2],
             tmp: vec![0.0; 8192],
             slot_full_logged: false,
@@ -152,8 +147,9 @@ impl PeerSources {
         }
     }
 
-    /// 반복마다, `FeedTiming`을 만든 뒤. `stats`에는 표 길이·마감 채움·건너뜀을 쓴다(+ 락 자리별 대기 기록).
-    pub(crate) fn service(&mut self, bank: &SourceBank, counters: &AudioCounters, stats: &WorkerStats, out_rate: u32, t: &FeedTiming, lock_wait: &mut LockWait) -> PeerRound {
+    /// 반복마다, `FeedTiming`을 만든 뒤. `stats`에는 표 길이·마감 채움·건너뜀을 쓴다. `tap` = 에코 측정 중 탭이 켜진 프로브
+    /// (조정자가 빌려 준다): 그 피어의 소스 링에 넣는 샘플과 재생 시각을 모은다.
+    pub(crate) fn service(&mut self, bank: &SourceBank, counters: &AudioCounters, stats: &WorkerStats, out_rate: u32, t: &FeedTiming, mut tap: Option<&mut EchoProbe>) -> PeerRound {
         // 반복 맨 앞: 추가·제거 명령을 끝까지 비운다(엔진 ③-a2). 프로필은 이번 반복에 한 번 읽는다.
         self.apply_commands();
         stats.media_peers.store(self.table.len() as u64, Ordering::Relaxed);
@@ -162,8 +158,6 @@ impl PeerSources {
         let cb_seq = t.cb_seq;
         let consistent = || cb_seq.is_some_and(|s| counters.out_cb_begin.load(Ordering::SeqCst) == s);
         let (mut fills, mut skipped, mut urgent) = (0u64, 0u64, false);
-        let mut guard = lock_wait.lock(&self.probe, &stats.lock_sites.probe_feed);
-        let mut tap = guard.as_mut().filter(|p| p.tap);
         let marks = &self.rec_marks;
         let marking = marks.active();
         let played = &counters.out_played_frames;

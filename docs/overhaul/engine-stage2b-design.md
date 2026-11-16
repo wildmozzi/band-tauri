@@ -420,6 +420,8 @@ impl EchoRt {
 
 측정값에 들어가는 시각(`emitted_us`, `arrival_us`)을 만드는 식은 그대로다(`measure.rs:748`, `:769`).
 
+〔②b-5 구현 확정〕 위 설계대로 구현했다. 구현에서 정한 것 넷: (1) `EchoPort`의 측정 쪽 API는 `begin`(= `busy` 잡기 + 번호 발급)·`install`·`start_clicks`·`tap_off`·`stop`·`recover`·`end`이고 `tap_off`·`stop`은 `fetch_max`다(번호가 늘기만 한다). (2) `poll`의 ④는 `tap_off`가 이 번호에 닿지 않았을 때만 한다 — 탭을 끄라는 신호가 이미 있는데 뒤늦게 본 클릭 시작이 탭을 다시 켜지 않게. (3) 클릭용 인코더를 측정 스레드가 만들므로 생성 실패는 측정 에러가 된다(전에는 워커가 경고 로그를 내고 그 피어에게 평소 소리를 보내며 측정이 미검출로 끝났다). (4) 반환 큐가 차 있으면 워커는 프로브를 쥔 채 다음 반복에 다시 넣는다(떨어뜨리지 않는다). 프로브가 송신 프레임을 만드는 일(`fill_frame` + 인코드)은 `EchoProbe::encode_next`로 묶여 `SendPath`에는 `alt_*`·`codec`·`bitrate`·`ich` 필드가 남지 않는다.
+
 ## 4. 메트로놈 락 없애기
 
 ### 4.1 지금
