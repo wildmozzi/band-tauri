@@ -929,8 +929,14 @@ fn send_path_lock_violations(code: &str) -> Vec<String> {
     let bodies = fn_bodies(code);
     let mut bad = Vec::new();
     for f in SEND_PATH_FNS {
-        let Some((_, body)) = bodies.iter().find(|(n, _)| n == f) else {
-            bad.push(format!("{f}: 함수를 못 찾음(이름이 바뀌었으면 SEND_PATH_FNS를 고칠 것)"));
+        // 여러 파일을 이어 보므로(⑥-6) 같은 이름이 둘이면 어느 본문을 봤는지 모른다 — 정확히 하나여야 한다(#153 리뷰 L1).
+        let found: Vec<&String> = bodies.iter().filter(|(n, _)| n == f).map(|(_, b)| b).collect();
+        let [body] = found[..] else {
+            bad.push(if found.is_empty() {
+                format!("{f}: 함수를 못 찾음(이름이 바뀌었으면 SEND_PATH_FNS를 고칠 것)")
+            } else {
+                format!("{f}: 같은 이름 함수가 {}개(검사 대상이 모호하다 — 이름을 바꿀 것)", found.len())
+            });
             continue;
         };
         for l in LOCK_CALLS {
@@ -952,7 +958,9 @@ fn send_path_takes_no_locks() {
     };
     let peer = peer_direct_lock_violations(&read("net/peer.rs"));
     assert!(peer.is_empty(), "net/peer.rs에서 가드 없이 conn·echo 락을 잡는 함수(스냅샷이 발행되지 않는다): {peer:?}");
-    let send = send_path_lock_violations(&read("net/mod.rs"));
+    // 송신 경로 함수는 `net/send.rs`, 피어 표 복사본(`refresh_copy`)은 `net/mod.rs`에 있다(엔진 R-1 ⑥-6). 둘을 이어 본다 —
+    // 함수를 못 찾으면 실패하므로 파일을 옮겨도 검사가 빠지지 않는다.
+    let send = send_path_lock_violations(&(read("net/mod.rs") + "\n" + &read("net/send.rs")));
     assert!(send.is_empty(), "워커 송신 경로에 락 획득이 있다: {send:?}");
 }
 
@@ -969,6 +977,9 @@ fn send_path_scanner_catches_variants() {
                 fn relay_audio_load(&self) { self.relay.lock(); }";
     assert_eq!(send_path_lock_violations(&strip(send)), ["send_audio_timed: .read(", "relay_audio_load: .lock("]);
     assert_eq!(send_path_lock_violations("fn x() {}").len(), SEND_PATH_FNS.len(), "함수를 못 찾으면 실패");
+    // 같은 이름이 둘(앞 것은 깨끗, 뒤 것이 락)이면 앞 것만 보고 통과하지 않는다(#153 리뷰 L1)
+    let twice = format!("{send} fn send_sealed(&self) {{ self.relay.lock(); }}");
+    assert!(send_path_lock_violations(&strip(&twice)).iter().any(|v| v.starts_with("send_sealed: 같은 이름 함수가 2개")));
 }
 
 /// 워커가 **기다리는** 락 호출(엔진 ②b-6b, 설계 7.1절, #143 리뷰 M-1). 공백을 지운 본문에서 찾는 문자열이다.

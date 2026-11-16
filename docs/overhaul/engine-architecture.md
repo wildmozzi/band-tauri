@@ -62,8 +62,8 @@
 | `band-mix-tap` | `engine/mod.rs` | 믹스 탭 구독 동안 | 기본 | stop 원자값, join(탭 링 소비자를 돌려받음) |
 | `band-record` | `record.rs` | 녹음 중 | 기본 | 핸드오프 닫기, join |
 | 녹음 마무리 | `record.rs` | 정지 뒤 파일 마무리 | 기본 | 끝나면 join |
-| `band-net-recv` | `net/mod.rs` | 수신·복호·지터 삽입, net 수명 | MMCSS Pro Audio(준RT) | stop 원자값 + 자기 주소로 빈 데이터그램, join |
-| `band-net-ctrl` | `net/mod.rs` | 홀펀칭·Ping·타임아웃·DSCP·송신 지연 창, net 수명 | 기본 | stop 원자값, join |
+| `band-net-recv` | `net/recv_loop.rs`(시작·정지는 `net/mod.rs`) | 수신·복호·지터 삽입, net 수명 | MMCSS Pro Audio(준RT) | stop 원자값 + 자기 주소로 빈 데이터그램, join |
+| `band-net-ctrl` | `net/control_loop.rs`(시작·정지는 `net/mod.rs`) | 홀펀칭·Ping·타임아웃·DSCP·송신 지연 창, net 수명 | 기본 | stop 원자값, join |
 | `band-stun-dns` | `net/stun.rs` | STUN 서버 이름 해석, 시작 동안 | 기본 | 시간 제한 뒤 버림 |
 | `band-diag` | `diag/mod.rs` | 1초 타임라인 기록, 앱 수명 | 기본 | stop 원자값 + Condvar, join |
 | `band-fake-in`, `band-fake-out` | `device.rs`(`device::fake`) | 가짜 장치(통합 테스트·측정 도구), 스트림 수명 | 기본 | stop 원자값, join. 릴리스 제품 빌드에는 없음(②a, 7절) |
@@ -199,7 +199,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 |---|---|---|
 | `Peer`가 net 상태와 미디어 상태를 함께 가진 공용 구조체(필드 전부 `pub`, Mutex 5개 + 원자값). net·워커·통계·커맨드가 직접 잠근다. single writer가 아니다 | `net/peer.rs` | ③ |
 | ~~지터 락 접근자 7곳, 기본 우선순위 스레드가 준RT 락을 잡음~~ | (③-a3에서 해소: 지터 버퍼는 워커 단독 소유) | ③ 완료 |
-| 큰 파일: ~~`wasapi.rs` 1.9k~~(⑥-5에서 `wasapi/{format, enumerate, stream, probe}`로 해소), `net/mod.rs` 1.1k(송신 + 수신 루프 + 제어 루프), `net/peer.rs` 1.2k | | ⑥ |
+| 큰 파일: ~~`wasapi.rs` 1.9k~~(⑥-5에서 `wasapi/{format, enumerate, stream, probe}`로 해소), ~~`net/mod.rs` 1.3k(송신 + 수신 루프 + 제어 루프)~~(⑥-6에서 `net/{mod, send, recv_loop, control_loop}`로 나눔), `net/peer.rs` 1.2k | | ⑥ |
 
 ## 6. 모듈 지도 — 현재 → 목표(R-1)
 
@@ -247,7 +247,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/metronome/{mod, click, plan, sched}.rs` | 공유 메트로놈: 클릭 생성기(`click`, RT), 계획·검증·상태 DTO(`plan`), 커맨드 ↔ 워커 공유·박 스케줄러(`sched`). `mod.rs`는 옛 경로 `engine::metronome::…`를 `pub use`로 유지 | 메트로놈 |
 | `engine/record.rs`, `wav.rs`, `flac.rs` | 합주 녹음: RT 링·핸드오프, 쓰기 스레드, WAV/RF64·FLAC | 녹음 |
 | `engine/prio.rs`, `cpuprof.rs` | 스레드 우선순위·타이머 해상도, CPU 측정 | 플랫폼 |
-| `net/mod.rs` | UDP 소켓, 송신, 수신·제어 루프 | 네트워크 |
+| `net/{mod, send, recv_loop, control_loop}.rs` | UDP 소켓·`Net` 수명·피어 표·에코/피어 조회 API·시계 페이로드(`mod`), 봉인·제어 패킷·Audio 팬아웃·에코 반사(`send`), 수신 스레드·패킷 처리(`recv_loop`), 제어 스레드(`control_loop`). `impl NetShared`를 네 파일에 나눠 쓰므로 노드는 `net` 하나 | 네트워크 |
 | `net/{clock, packet, crypto, peer, stun, relay, qos, txlat}.rs` | 시계 오프셋, 패킷, 암호, 피어 테이블·홀펀칭, STUN, 릴레이, DSCP, 송신 큐 지연 | 각 프로토콜 |
 | `diag/{mod, timeline, mask, export}.rs` | 진단 기록 스레드, 링 버퍼, 마스킹, zip | 진단 |
 
