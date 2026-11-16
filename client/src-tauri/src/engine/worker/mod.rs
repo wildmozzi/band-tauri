@@ -36,7 +36,7 @@ use ringbuf::{HeapCons, HeapProd};
 use super::config::{frame_code_from_samples, EngineConfig, INTERNAL_RATE};
 use super::device::StreamInfo;
 
-use super::measure::{EchoPortRt, EchoRt};
+use super::measure::echo::{EchoPortRt, EchoRt};
 use super::metronome::MetronomeCtl;
 use super::mixer::MixControls;
 use super::record::MarkSink;

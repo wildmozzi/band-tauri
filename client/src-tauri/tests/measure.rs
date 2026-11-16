@@ -124,7 +124,7 @@ fn measure(backend: FakeBackend, buffer: u32, runs: u32) -> LoopbackReport {
 }
 
 #[test]
-#[ignore = "realtime: 결정적 짝 engine::measure::tests::{loopback_math_matches_time_model, xcorr_finds_known_offset_with_subsample_precision, noisy_loopback_detects_within_tolerance}"]
+#[ignore = "realtime: 결정적 짝 engine::measure::analysis::tests::{loopback_math_matches_time_model, xcorr_finds_known_offset_with_subsample_precision, noisy_loopback_detects_within_tolerance}"]
 fn loopback_known_delay_within_half_ms() {
     let _g = RT_LOCK.lock();
     // (레이트, 입력 버퍼, 출력 버퍼, 출력 위상 µs, 기상 지터 µs)
@@ -177,7 +177,7 @@ fn loopback_noise_clipping_and_no_signal_verdicts() {
 }
 
 #[test]
-#[ignore = "realtime: 결정적 짝 engine::measure::tests::noisy_loopback_detects_within_tolerance"]
+#[ignore = "realtime: 결정적 짝 engine::measure::analysis::tests::noisy_loopback_detects_within_tolerance"]
 fn loopback_with_noise_within_half_ms() {
     let _g = RT_LOCK.lock();
     let b = loopback_backend(48_000, 128, 128, 0, 0, Loop { delay_s: 0.0075, gain: 1.0, noise: 0.05, connected: true });
@@ -438,12 +438,12 @@ fn echo_flow_consent_measure_auto_stop() {
 }
 
 #[test]
-#[ignore = "realtime: 결정적 짝 engine::measure::tests::echo_probe_emits_frame_aligned_clicks_and_detects_them(클릭 송신·검출 시각 계산), echo_flow_consent_measure_auto_stop(흐름)"]
+#[ignore = "realtime: 결정적 짝 engine::measure::echo::tests::echo_probe_emits_frame_aligned_clicks_and_detects_them(클릭 송신·검출 시각 계산), echo_flow_consent_measure_auto_stop(흐름)"]
 fn echo_round_trip_reflects_proxy_delay() {
     let _g = RT_LOCK.lock();
     // 호스티드 러너에서 6회 중 한 회차만 ~4ms 일찍 잡혀 흩어짐이 5.1~5.8ms로 상한(`ECHO_UNSTABLE_SPREAD_MS` 5ms)을 넘는
     // 일이 CI 17회 중 4회 있었다(PR #71). P1-13부터 판정이 단일 이상치를 빼고 보므로(`echo_summary`, 결정적 짝
-    // `engine::measure::tests::echo_single_outlier_is_excluded`) 이 모양은 Ok다. 그래도 Unstable이면 한 번 다시 잰다(앱도
+    // `engine::measure::analysis::tests::echo_single_outlier_is_excluded`) 이 모양은 Ok다. 그래도 Unstable이면 한 번 다시 잰다(앱도
     // "다시 재세요"라고 안내한다). 두 번 연속 Unstable이거나 검출이 모자라면 그대로 실패한다.
     let measure = |one_way_ms: u64| {
         let r = echo_once(Duration::from_millis(one_way_ms));
@@ -516,7 +516,7 @@ fn echo_requires_consent_and_times_out() {
 /// A의 출력(되돌아온 소리)도 본다. 다만 그쪽 단언 (2)는 **요청 해제 Ping이 제때 닿는 이 시험에서는 변이를 못 잡는다**:
 /// B가 Ping을 내 실제 소리보다 먼저 받아 바로 반사를 멈추기 때문이다. Ping 유실 상황의 A 쪽 관찰은 하지 않는다.
 #[test]
-#[ignore = "realtime: 결정적 짝 engine::measure::tests::echo_rt_follows_measure_signals(탭을 꺼도 프로브는 stop까지 워커에 남는다)"]
+#[ignore = "realtime: 결정적 짝 engine::measure::echo::tests::echo_rt_follows_measure_signals(탭을 꺼도 프로브는 stop까지 워커에 남는다)"]
 fn echo_target_gets_silence_until_peer_stops_echoing() {
     let _g = RT_LOCK.lock();
     let sine: Arc<SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
