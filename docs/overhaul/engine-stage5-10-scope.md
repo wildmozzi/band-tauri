@@ -172,12 +172,15 @@
 
 | 하위 모듈 | 심볼 |
 |---|---|
-| `format` | `ShareMode`·`fallback_modes`·`SampleKind`·채널 마스크·`StreamFormat`(`:104-277`), `i24_to_f32`·`f32_to_i24`(`:279-307`, RT), `ErrClass`·`classify`(`:309-333`) |
-| `enumerate` | `Shared3Periods`·`Endpoint`(`:335-357`), COM 보조(`:359-519`), `describe_endpoint`·`enumerate_endpoints`·`device_infos`(`:521-629`) |
-| `stream` | `DirStream`·`open_exclusive`·`open_shared3`(`:631-818`), 이벤트 루프(`DevBuf`·`LoopEnd`·`LoopIo`·`drive_loop`·`WasapiIo`·`run_loop`·`service_capture`·`service_render`·`feed_input`·`fill_output`, `:820-1180`, RT 포함), `open_engine_streams`·`watch_default`(`:1182-1366`) |
-| `probe` | `ProbeReport`·`probe_stream`(`:1368-1461`) — `examples/wasapi_probe.rs`만 쓴다 |
+| `format`(1) | `WAVE_FORMAT_*`·`SUBTYPE_*`(`:77-81`), `ShareMode`·`fallback_modes`·`SampleKind`·채널 마스크·`StreamFormat`(`:104-277`), `i24_to_f32`·`f32_to_i24`(`:279-307`, RT), `ErrClass`·`classify`(`:309-333`). 단위 테스트(형식 왕복·24비트·마스크·폴백 순서·HRESULT 분류) |
+| `enumerate`(2) | `PKEY_FRIENDLY_NAME`·`EXCLUSIVE_RATES`·`LIST_RATES`(`:82-89`), `Shared3Periods`·`Endpoint`(`:335-357`), COM 보조(`:359-519`), `describe_endpoint`·`enumerate_endpoints`·`device_infos`(`:521-629`). 단위 테스트(채널 후보·장치 목록) |
+| `stream`(2) | `HNS_PER_SEC`·`SCRATCH_SAMPLES`·`WAIT_TIMEOUT_MS`·`RESTART_AFTER`·`MAX_RESTARTS`·`FAIL_AFTER`(`:76`, `:90-100`), `DirStream`·`open_exclusive`·`open_shared3`(`:631-818`), 이벤트 루프(`DevBuf`·`LoopEnd`·`WaitResult`·`LoopIo`·`FailState`·`on_error`·`drive_loop`·`WasapiIo`·`run_loop`·`chunk_samples`·`service_capture`·`service_render`·`feed_input`·`fill_output`, `:820-1180`, RT 포함), `OpenFailure`·`WasapiGuard`·`open_engine_streams`·`watch_default`(`:1182-1366`). 단위 테스트(오류 정책 가짜 HRESULT·`chunk_samples`·열기 실패 우선순위) |
+| `probe`(2) | `ProbeReport`·`probe_stream`(`:1368-1461`) — `examples/wasapi_probe.rs`만 쓴다 |
+| `mod` | 모듈 문서, `mod` 선언, `pub use`만 |
 
 ADR은 `{enumerate, stream}` 둘만 적었다. 둘이 함께 쓰는 형식·COM 보조가 갈 곳이 필요해 `format`을, 예제 전용 코드를 떼려고 `probe`를 더했다(제안 2).
+
+구현(⑥-5)에서 정한 것: 머리 상수는 쓰는 함수 곁으로 나눴다(위 표). COM 보조는 처음 표대로 `enumerate`에 두고 `stream`·`probe`가 `pub(super)`로 쓴다 — `stream → enumerate → format`, `probe → {stream, enumerate, format}` 한 방향이다. `format`은 COM 객체를 만들지 않고 `device::types`만 쓰므로 계층 1 노드로 올렸다(단위 테스트의 `rt::RtSample`은 검사 대상 밖). 노드 `engine::wasapi::{format(1), enumerate, stream, probe(2)}`를 `architecture.rs`에 올렸다. 줄 번호는 이동 전 `wasapi.rs` 기준이다.
 
 **⑥-6 `net/mod.rs`** 〔③c 뒤 갱신: 송신 경로 본문〕
 
