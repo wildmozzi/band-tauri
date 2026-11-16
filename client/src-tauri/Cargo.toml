@@ -7,12 +7,15 @@ license = "MIT"
 repository = ""
 edition = "2021"
 
-# 워크스페이스 루트이자 앱 패키지(엔진 R-1 ⑩-1). 멤버: `crates/band-dsp`(결정적 코어). `default-members`에 둘 다 두어
-# 이 디렉터리의 `cargo test`·`cargo clippy --all-targets`·`cargo nextest run`이 플래그 없이 두 크레이트를 함께 본다.
-# `[profile.*]`은 루트에만 둘 수 있어 아래에 그대로 있다. 빌드 산출물 위치는 상위 `.cargo/config.toml`(공유 target-dir)이 정한다.
+# 워크스페이스 루트이자 앱 패키지(엔진 R-1 ⑩-1·⑩-2, docs/overhaul/engine-stage5-10-scope.md 7.2절). 멤버:
+# `crates/band-engine`(엔진: 장치·RT·워커·네트워크·녹음·제어 평면), `crates/band-dsp`(결정적 코어). 앱에는 Tauri 진입점과
+# 커맨드 어댑터(`src/{lib, main, commands}.rs`)·`build.rs`·`tauri.conf.json`만 남는다 — 시험이 없다.
+# `default-members`에 셋 다 두어 이 디렉터리의 `cargo test`·`cargo clippy --all-targets`·`cargo nextest run`이 플래그 없이
+# 세 크레이트를 함께 본다. `[profile.*]`은 루트에만 둘 수 있어 아래에 그대로 있다. 빌드 산출물 위치는 상위
+# `.cargo/config.toml`(공유 target-dir)이 정한다.
 [workspace]
-members = [".", "crates/band-dsp"]
-default-members = [".", "crates/band-dsp"]
+members = [".", "crates/band-engine", "crates/band-dsp"]
+default-members = [".", "crates/band-engine", "crates/band-dsp"]
 resolver = "2"
 
 [lib]
@@ -26,83 +29,24 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-log = "2"
+tauri-plugin-process = "2"
+# 진단 내보내기(P2-5): 저장 위치 대화상자. zip 작성·로그 마스킹은 band-engine(`diag::export`).
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
-# 결정적 코어(코덱·지터·믹서·패킷 등, 엔진 R-1 ⑩-1)
+# 엔진(엔진 R-1 ⑩-2). 기본 피처 = 장치 백엔드 둘(`backend-cpal`, `backend-wasapi`) — 앱은 늘 켠다.
+band-engine = { path = "crates/band-engine" }
+# 결정적 코어(설정 DTO `config` 등, 엔진 R-1 ⑩-1)
 band-dsp = { path = "crates/band-dsp" }
-
-# Audio I/O (WASAPI 기본, ASIO는 `asio` 피처로 옵트인)
-cpal = "0.15"
-# opus·rubato는 band-dsp(코덱·리샘플)만 쓴다(⑩-1). ringbuf는 측정·미디어 포트·녹음 링도 쓴다.
-ringbuf = "0.4"
-# 지연 측정 상호상관(P1-1). rubato(band-dsp)가 이미 쓰는 버전이다.
-rustfft = "6"
-
-# Network / crypto
-chacha20poly1305 = "0.10"
-rand = "0.8"
-base64 = "0.22"
-if-addrs = "0.13"
-# 오디오 소켓 IP_TOS(DSCP EF) 설정(P1-3). Cargo.lock에 이미 있는 버전이다.
-socket2 = "0.6"
-# 피어 쌍별 키 합의 (X25519 ECDH + HKDF-SHA256)
-x25519-dalek = { version = "2", features = ["static_secrets"] }
-hkdf = "0.12"
-hmac = "0.12"
-sha2 = "0.10"
-
-# Utilities
-parking_lot = "0.12"
-tauri-plugin-process = "2"
-# 진단 내보내기(P2-5): 저장 위치 대화상자, zip 작성, 로그 마스킹
-tauri-plugin-dialog = "2"
-zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-regex = "1"
-# 녹음 FLAC 저장(P2-4a): 순수 Rust 인코더(Apache-2.0). 기본 피처(par 스레드·serde·log)는 끔 — 쓰기 스레드에서 블록 단위로만 쓴다.
-flacenc = { version = "0.5", default-features = false }
-
-[target.'cfg(windows)'.dependencies]
-# 워커/수신 스레드 MMCSS("Pro Audio") 등록, 엔진 실행 중 타이머 해상도 1ms(timeBeginPeriod)
-# + 오디오 소켓 DSCP 마킹(qWAVE, P1-3)
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_NetworkManagement_QoS", "Win32_Networking_WinSock", "Win32_System_IO"] }
-# 자체 WASAPI 백엔드(독점 이벤트 모드, IAudioClient3 저지연 공유 모드). 0.62는 Tauri가 이미 쓰는 버전이다.
-windows = { version = "0.62", features = [
-    "Win32_Foundation",
-    "Win32_Media_Audio",
-    "Win32_Security",
-    "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_System_Threading",
-    "Win32_System_Variant",
-    "Win32_UI_Shell_PropertiesSystem",
-] }
-
-[dev-dependencies]
-# FLAC 녹음 파일을 표준 디코더로 다시 읽어 비교(P2-4a)
-claxon = "0.4"
-# FLAC STREAMINFO MD5를 인코더와 따로 계산해 비교(PR #62 L2). flacenc가 이미 쓰는 크레이트다.
-md-5 = "0.10"
-# 릴레이 폴백 통합 테스트(tests/relay.rs): 실제 릴레이를 같은 프로세스에서 띄운다
-band-relay = { path = "../../relay" }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time"] }
-# 녹음 WAV(EXTENSIBLE 헤더)를 표준 파서로 다시 읽어 확인(PR #47 L3)
-hound = "3.5"
-# 자기 자신을 개발 의존으로(엔진 R-1 ⑨a): 테스트·예제 타깃이 들어가는 빌드(`cargo test`, `--all-targets`, `--example`)는
-# 늘 `test-support`가 켜진다(`default-features = false`: 개발 의존이 더하는 피처는 이것 하나, #156 리뷰 L2). 테스트 타깃이 없는 제품 구성(`cargo build`, `cargo clippy --lib --bins`)에는 합쳐지지 않는다(피처 리졸버 2).
-band = { path = ".", default-features = false, features = ["test-support"] }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 # 릴리스 빌드에서는 devtools 비활성. 필요 시: cargo tauri build --features devtools
 devtools = ["tauri/devtools"]
-# ASIO 지원 (CPAL_ASIO_DIR에 Steinberg ASIO SDK 필요). 기본 빌드는 WASAPI만.
-asio = ["cpal/asio", "band-dsp/asio"]
-# 통합 테스트·예제·측정 도구용 내부(`band_lib::testing`, 가짜 장치 `engine::device::fake`, 워커 반복 시간 기록).
-# 위 개발 의존(자기 자신)이 테스트·예제 빌드에서 늘 켠다 — `--features test-support`를 따로 줄 필요가 없다.
-# 제품 구성에서 꺼지는지는 CI `Clippy (제품 구성)` 단계(`cargo clippy --lib --bins`)가 지킨다.
-test-support = ["band-dsp/test-support"]
+# ASIO 지원 (CPAL_ASIO_DIR에 Steinberg ASIO SDK 필요). 기본 빌드는 WASAPI만. 엔진의 `asio`(cpal/asio, band-dsp/asio)로 넘긴다.
+asio = ["band-engine/asio"]
 
 # 디버그 빌드(dev:tauri)에서도 FLAC 녹음 인코딩이 실시간을 넉넉히 넘도록 인코더와 그 해시·CRC만 최적화한다(PR #62 M1).
 # opt-level 0이면 30초 스테레오 24비트 인코딩이 실시간 4배뿐이라 9트랙(소스 8 + 믹스) 녹음이 링을 넘친다.
