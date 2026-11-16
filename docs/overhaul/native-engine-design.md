@@ -437,7 +437,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 콜백 구동 믹스(1.1절)에는 믹스된 출력 링이 없으므로 출력 링 항은 0이다. 출력 콜백이 꺼내는 피어 소스 링은 지터 버퍼 깊이(`bufferMs`)에 포함되어 목표로 제어된다. 그래서 입→귀 지연 = 송신측 `estLatencyMs`의 입력+프레임 몫 + 망 + 수신측 `bufferMs` + 수신측 출력 버퍼다. 공유 클럭 종단 실측이 `estLatencyMs + bufferMs + 1ms`를 넘지 않음을 통합 테스트로 확인한다.
 - 장치 버퍼 값은 실측 콜백 크기를 쓴다.
 
-`EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`·`skippedClicks`(엔진 수명 누적, 1.4절), `outputLatencyMs`(클릭 시각에 반영한 숨은 출력 지연, null = 드라이버 보고·루프백 보정값 모두 없어 보정 안 됨)·`outputLatencySource`(`driver` | `loopback` | null), `refClockUnsupported`(기준 피어가 시계를 싣지 않는 옛 엔진, 1.4절), `clockExtrapolationMs`(시계 추정 외삽 거리, 진단용). 워커가 0.1초마다 갱신한다.
+`EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`·`skippedClicks`(엔진 수명 누적, 1.4절), `outputLatencyMs`(클릭 시각에 반영한 숨은 출력 지연, null = 드라이버 보고·루프백 보정값 모두 없어 보정 안 됨)·`outputLatencySource`(`driver` | `loopback` | null), `refClockUnsupported`(기준 피어가 시계를 싣지 않는 옛 엔진, 1.4절), `clockExtrapolationMs`(시계 추정 외삽 거리, 진단용). 워커가 0.1초마다 갱신한다. 수 필드는 워커가 낸 한 벌(서로 일관된 값)이다. **`refPeerId`만** 제어 쪽의 지금 계획에서 읽으므로 `engine_set_metronome` 직후 워커 반복 1회(약 1ms, 드물게 제어 스레드가 선점된 동안 더) 동안 다른 필드보다 한 발 앞설 수 있다(엔진 ②b-6b — 워커가 계획·상태 락을 기다리지 않게 한 결과다).
 
 `EngineStats.recording`(P2-4): 녹음 중이 아니면(또는 정지·마무리 중이면) null. `durationSec` = 녹음 타임라인 길이(쓴 블록 기준), `bytes` = 지금까지 쓴 오디오 바이트(모든 트랙, 헤더 제외), `tracks` = 만든 트랙 수, `droppedFrames` = 녹음 링이 모자라 버린 프레임(녹음 품질 지표, 0이 정상), `error` = 실패 메시지(트랙 생성 실패면 그 트랙만 빠지고 계속, 쓰기 실패면 그 뒤로 저장 안 됨, 1.5절).
 

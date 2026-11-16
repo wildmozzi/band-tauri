@@ -60,8 +60,12 @@ pub struct AudioCounters {
 
 /// seqlock 칸: 버전 + `[AtomicU64; N]`(②b-6a, `engine-stage2b-design.md` 3.2절·6.1절). 쓰는 쪽은 하나뿐이고 기다리지
 /// 않는다. 읽는 쪽은 발행 중이면 다시 읽는다. 필드가 전부 원자값이라 `unsafe`가 없다(찢긴 읽기도 정의된 동작이고,
-/// 버전 비교가 한 벌임을 보장한다). 값의 칸 배치와 단일 작성자 보장은 감싸는 타입이 맡는다(`peer_media::MediaStatsCell`).
-/// `write`·`try_read`는 할당·락·시스템콜이 없다. `read`는 재시도 중 `yield_now`를 부르므로 비RT 독자만 쓴다.
+/// 버전 비교가 한 벌임을 보장한다). 값의 칸 배치와 단일 작성자 보장은 감싸는 타입이 맡는다 — 사용자는 둘이다:
+/// `peer_media::MediaStatsCell`(private `write`, 워커 단독 소유 `PeerMedia`만 부른다)과 메트로놈 상태 보고
+/// (`metronome::MetronomeRt::publish(&mut self)`, `Clone`이 아닌 워커 쪽 끝). `write`는 크레이트 안에서만 보인다(#141 리뷰 M-1).
+/// `write`·`try_read`는 할당·락·시스템콜이 없다. `read`는 재시도 중 `yield_now`를 부르므로 비RT 독자만 쓴다(워커는 쓰는
+/// 쪽이다 — `tests/architecture.rs`의 워커 락 검사가 워커 디렉터리의 `.read(`를 막는다).
+#[derive(Debug)]
 pub struct SeqCell<const N: usize> {
     ver: AtomicU32,
     words: [AtomicU64; N],
@@ -79,9 +83,10 @@ impl<const N: usize> Default for SeqCell<N> {
 const SPINS_BEFORE_YIELD: usize = 64;
 
 impl<const N: usize> SeqCell<N> {
-    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨진다). 감싸는 타입이 자기 `write`를 private으로 두고
-    /// 작성자 하나를 타입으로 보장한다.
-    pub fn write(&self, w: &[u64; N]) {
+    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨져 독자가 섞인 한 벌을 받는다). `pub(crate)`: 크레이트 밖
+    /// (`tests/`, 실행파일)에서는 못 부르고, 안에서는 감싸는 타입이 작성자 하나를 타입으로 보장하는 곳에서만 부른다
+    /// (새 사용자는 `MediaStatsCell`·`MetronomeRt`처럼 작성 끝을 하나로 묶을 것).
+    pub(crate) fn write(&self, w: &[u64; N]) {
         let v = self.ver.load(Ordering::Relaxed);
         self.ver.store(v.wrapping_add(1), Ordering::Relaxed); // 홀수: 쓰는 중
         fence(Ordering::Release); // 아래 필드 store가 홀수 버전보다 먼저 보이지 않게
@@ -171,7 +176,7 @@ mod tests {
         const N: usize = 64;
         let c = Arc::new(SeqCell::<N>::default());
         let stop = Arc::new(AtomicBool::new(false));
-        let start = Arc::new(std::sync::Barrier::new(5));
+        let start = Arc::new(std::sync::Barrier::new(2));
         let writer = {
             let (c, stop, start) = (c.clone(), stop.clone(), start.clone());
             std::thread::spawn(move || {
@@ -187,11 +192,15 @@ mod tests {
                 n
             })
         };
+        // 쓰기가 실제로 겹치게: 읽기 시작 전에 쓰는 쪽이 돌고 있어야 한다(#141 리뷰 L-1).
+        start.wait();
+        while c.try_read().is_none_or(|w| w[0] < 64) {
+            std::thread::yield_now();
+        }
         let readers: Vec<_> = (0..4u32)
             .map(|k| {
-                let (c, start) = (c.clone(), start.clone());
+                let c = c.clone();
                 std::thread::spawn(move || {
-                    start.wait();
                     let (mut full, mut ok) = (0u64, 0u64);
                     for _ in 0..20_000 {
                         if k.is_multiple_of(2) {
@@ -206,10 +215,13 @@ mod tests {
                 })
             })
             .collect();
-        let (full, _ok) = readers.into_iter().map(|r| r.join().unwrap()).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        let (full, ok) = readers.into_iter().map(|r| r.join().unwrap()).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
         stop.store(true, Ordering::Relaxed);
-        assert!(writer.join().unwrap() > 1, "쓰기가 돌지 않았다");
+        assert!(writer.join().unwrap() > 64, "쓰기가 돌지 않았다");
         assert_eq!(full, 40_000, "read()는 언제나 한 벌을 돌려준다");
+        // `try_read` 가지도 실제로 값을 검사했다(#141 리뷰 L-1). 성공 **비율**은 스케줄러에 달려 하한만 본다: 4만 번 가운데
+        // 한 번도 성공하지 못하려면 매번 발행과 겹쳐야 한다(쓰는 쪽은 256회마다 양보한다).
+        assert!(ok > 0, "try_read가 한 번도 성공하지 못했다");
         assert_whole(&c.try_read().expect("쓰기가 없을 때 try_read는 성공한다"));
     }
 }

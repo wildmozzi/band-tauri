@@ -1631,11 +1631,11 @@ fn stats_storm_does_not_disturb_playout() {
 /// (기본 3, 같은 조건 A/A 분산), 조건 순서는 돌아가며:
 /// - 조용함 / CPU 포화(코어 수만큼 계산 스레드 — 락 없이 선점만, 대조군).
 /// - 폭주(기본 우선순위 스레드, 쉬지 않고): 피어 추가·제거 2개(피어 표 쓰기 락), echo 토글 1개(`Peer.echo`, 0.5ms 간격 —
-///   Ping이 소켓을 채우지 않게), `stats()` 1개(`Peer.conn`·`echo`·메트로놈 통계 락). + CPU 포화(락을 쥔 채 선점되게).
+///   Ping이 소켓을 채우지 않게), `stats()` 1개(`Peer.conn`·`echo`, 메트로놈 계획 락 — 워커는 ②b-6b부터 `try_lock`만). + CPU 포화(락을 쥔 채 선점되게).
 /// - 실제 빈도(#122 리뷰 M2): UI·`band-diag`처럼 `stats()` 1초마다, 입·퇴장처럼 추가·제거 1초마다 + CPU 포화.
 ///
 /// 유령 피어는 셋째 엔진 c의 descriptor다(c는 a를 피어로 두지 않으므로 연결되지 않고, 경로가 없어 송신 대상이 아니다).
-/// ②b 조건(engine-stage2b-design.md 4.3절 — ②b-5·②b-6b가 없앨 락의 "전"·"후"):
+/// ②b 조건(engine-stage2b-design.md 4.3절 — ②b-5·②b-6b가 없앤 락의 "전"·"후". 지금 코드는 "후"다):
 /// - 메트로놈 + CPU: a가 b를 기준 피어로 따라 메트로놈을 돌리는 동안 `set_metronome`(두 계획을 번갈아, 쉬지 않고) 1개,
 ///   `stats()` 1개, `set_loopback_offset` 0.5ms 간격 1개 + CPU 포화. 두 계획의 기준 피어가 같은 창과 다른 창(계획이
 ///   바뀐 반복마다 워커가 `ref_peer_id`를 할당·해제 — 락 대기와 할당자 경합을 가른다)을 따로 잰다.
@@ -1643,7 +1643,7 @@ fn stats_storm_does_not_disturb_playout() {
 ///
 /// `SEND_STORM_ONLY`(쉼표로 나눈 조건 이름 일부)를 주면 그 조건만 돈다.
 ///
-/// 지표: 워커 반복의 남은 락(에코 프로브·메트로놈) 대기와 그 자리별 횟수·최대, 본문, 본문 − 락 대기(락 밖 비용, #122 M3), 반복 간격,
+/// 지표: 워커 반복의 남은 락(`Peer.clock` — MMCSS끼리) 대기 횟수·최대와 계획 `try_lock` 실패 반복 수, 본문, 본문 − 락 대기(락 밖 비용, #122 M3), 반복 간격,
 /// `sendQueue`(2초 창 p99 5개의 중앙값·최대와 창 최대), 송신 경로 진단(복사본 갱신·옛 복사본 프레임·건너뛴 송신, #122 M1),
 /// b가 받는 a 소리의 마감 채움·은닉, 폭주 연산 수(추가·제거 / echo / stats). 판정 없이 표만 낸다.
 /// 워커 반복 시간은 `test-support` 빌드에서만 기록된다.
@@ -1900,7 +1900,7 @@ fn send_path_storm_measure() {
         }
     }
     rows.sort_by_key(|r| conds.iter().position(|c| c.name == r.cond));
-    println!("| 창(10s, 128 / 2.5ms) | 남은 락 대기/반복 p99·최대 (µs) | 본문 p99·최대 (µs) | 본문−락 최대 (µs) | 간격 p99·최대 (µs) | sendQueue p99 중앙값·최대, 최대 (µs) | 복사본 갱신 / 옛 복사본 프레임 / 건너뜀 | b 마감 채움 | b 은닉 / 생산 | 연산(추가·제거 / echo / stats) | 락 자리별 대기 횟수·최대µs(계획 / 보정 / 상태 / 피어 시계 — 에코 프로브 락은 ②b-5에서 없어짐) | 늦은 클릭 | 연산(계획 / 보정 / 에코 측정) |");
+    println!("| 창(10s, 128 / 2.5ms) | 남은 락 대기/반복 p99·최대 (µs) | 본문 p99·최대 (µs) | 본문−락 최대 (µs) | 간격 p99·최대 (µs) | sendQueue p99 중앙값·최대, 최대 (µs) | 복사본 갱신 / 옛 복사본 프레임 / 건너뜀 | b 마감 채움 | b 은닉 / 생산 | 연산(추가·제거 / echo / stats) | Peer.clock 대기 횟수·최대µs(MMCSS끼리) / 계획 try_lock 실패 반복(기다리지 않음) — 계획·보정·상태·피어 표 락은 ②b-6b에서 없어짐 | 늦은 클릭 | 연산(계획 / 보정 / 에코 측정) |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
         println!(
@@ -1910,7 +1910,7 @@ fn send_path_storm_measure() {
             r.b_fills, r.b_conc, r.b_prod, r.ops.0, r.ops.1, r.ops.2,
             {
                 let s = &r.sites;
-                [s.metro_plan, s.metro_offset, s.metro_stats, s.peer_clock].map(|w| format!("{}·{}", w.contended, w.max_us)).join(" / ")
+                format!("{}·{} / {}", s.peer_clock.contended, s.peer_clock.max_us, s.plan_retries)
             },
             r.late_clicks, r.ops2.0, r.ops2.1, r.ops2.2
         );

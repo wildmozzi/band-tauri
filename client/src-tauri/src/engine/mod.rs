@@ -137,7 +137,7 @@ impl Engine {
         let (measure_sh, m_in, m_out, measure_ends) = rt::measure_path();
         input.attach_measure(m_in);
         output.attach_measure(m_out);
-        let metronome = Arc::new(metronome::MetronomeCtl::default());
+        let (metronome, metronome_rt) = metronome::MetronomeCtl::pair();
         output.attach_click(metronome::ClickRt::new(metronome.click.clone()));
         // 녹음 핸드오프(링은 녹음 시작 때 할당해 넘긴다)
         let (rec_rt, rec_ctl) = record::record_port();
@@ -249,7 +249,7 @@ impl Engine {
             stats: engine.worker_stats.clone(),
             epoch,
             echo: echo_rt,
-            metronome,
+            metronome: metronome_rt,
             rec_marks: engine.recorder.lock().marks(),
             media_port: media_port_rt,
             media_settings: engine.media_settings.clone(),

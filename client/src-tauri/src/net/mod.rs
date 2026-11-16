@@ -849,28 +849,6 @@ impl NetShared {
         Ok((e.remote_echoing(Instant::now()), e.remote_delay_us))
     }
 
-    /// 그 피어 시계 − 내 시계 추정(P2-3). `at_us` = 내 시계(`now_us`). 피어가 없거나 표본이 없으면 None.
-    pub fn peer_clock(&self, peer_id: &str, at_us: u64) -> Option<clock::ClockEstimate> {
-        self.peer_by_id(peer_id).ok().and_then(|p| p.clock().estimate(at_us as f64))
-    }
-
-    /// 그 피어가 Pong에 시계를 싣지 않는 엔진(옛 버전)으로 보이는지(PR #34 L4, `ClockSync::unsupported`).
-    pub fn peer_clock_unsupported(&self, peer_id: &str) -> bool {
-        self.peer_by_id(peer_id).ok().is_some_and(|p| p.clock().unsupported())
-    }
-
-    /// `peer_clock`과 같되 피어 표 읽기 락을 기다린 시간을 잰다(워커 전용, 엔진 ②b 측정 — ②b-6b에서 이 락이 없어진다).
-    pub(crate) fn peer_clock_timed(&self, peer_id: &str, at_us: u64, w: &mut txlat::LockWait, site: &txlat::LockSite) -> Option<clock::ClockEstimate> {
-        let p = w.read(&self.peers, site).iter().find(|p| p.id() == peer_id).cloned();
-        p.and_then(|p| p.clock().estimate(at_us as f64))
-    }
-
-    /// `peer_clock_unsupported`의 워커 전용 짝(위와 같음).
-    pub(crate) fn peer_clock_unsupported_timed(&self, peer_id: &str, w: &mut txlat::LockWait, site: &txlat::LockSite) -> bool {
-        let p = w.read(&self.peers, site).iter().find(|p| p.id() == peer_id).cloned();
-        p.is_some_and(|p| p.clock().unsupported())
-    }
-
     pub fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
         self.peer_by_id(peer_id).ok().and_then(|p| p.conn().rtt_ms)
     }
@@ -1251,6 +1229,47 @@ mod copy_tests {
         assert!(s.retired_peers.lock().is_empty());
         assert!(a.upgrade().is_none(), "제어 스레드의 release_retired가 놓았다");
         assert_eq!(n.take_send_path_diag().route_skips, 0);
+    }
+
+    /// 엔진 ②b-6b: 메트로놈의 기준 피어 시계 조회는 워커 복사본에서 찾은 `Peer`에 직접 한다 — 피어 표 락을 거치지 않으므로
+    /// 제어 스레드가 쓰기 락을 쥐고 있어도(선점된 추가·제거) 돈다. 전에는 `peers.read()`에서 그 시간만큼 기다렸다.
+    /// 별도 스레드에서 부르고 시한을 둔다: 조회가 피어 표 락을 다시 잡게 되면 걸려서 실패한다(멈추지 않는다).
+    #[test]
+    fn ref_peer_clock_reads_through_copy_while_table_is_write_locked() {
+        let mut n = net();
+        n.stop();
+        let s = n.shared().clone();
+        add(&n, "host", 1);
+        add(&n, "old", 2);
+        let mut c = PeerTableCopy::for_worker();
+        s.refresh_copy(&mut c);
+        let by_id = |c: &PeerTableCopy, id: &str| c.peers().iter().find(|p| p.id() == id).cloned().unwrap();
+        // host 시계 = 내 시계 + 40ms, 왕복 200µs. old는 시계를 싣지 않는 Pong만 보낸다.
+        for i in 0..8 {
+            let t0 = 1_000_000.0 + i as f64 * 500_000.0;
+            by_id(&c, "host").clock().on_sample(t0, t0 + 200.0, t0 + 100.0 + 40_000.0);
+        }
+        for _ in 0..64 {
+            by_id(&c, "old").clock().on_plain_pong();
+        }
+        let held = s.peers.write();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            let site = txlat::LockSite::default();
+            let mut w = txlat::LockWait::default();
+            let est = by_id(&c, "host").clock_estimate(5_000_000, &mut w, &site);
+            let old = by_id(&c, "old");
+            let r = (est, old.clock_estimate(5_000_000, &mut w, &site).is_none(), old.clock_unsupported(&mut w, &site), w.contended);
+            tx.send(r).unwrap();
+        });
+        let (est, old_none, old_unsupported, contended) =
+            rx.recv_timeout(Duration::from_secs(5)).expect("기준 피어 시계 조회가 피어 표 쓰기 락을 기다린다");
+        drop(held);
+        t.join().unwrap();
+        let est = est.expect("표본이 있으면 추정이 나온다");
+        assert!((est.offset_us - 40_000.0).abs() < 50.0, "{est:?}");
+        assert!(old_none && old_unsupported, "시계를 싣지 않는 피어");
+        assert_eq!(contended, 0, "Peer.clock은 아무도 쥐고 있지 않았다");
     }
 
     /// #126 리뷰 M-2: 워커 복사본이 아닌 복사본(시험·도구의 `send_audio`)은 세대를 발행하지 않는다 — 워커 복사본이
