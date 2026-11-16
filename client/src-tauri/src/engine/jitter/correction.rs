@@ -105,7 +105,7 @@ impl JitterBuffer {
     /// 꺼냈지만 재생 전인 양(`ahead`). 링에 있는 샘플이 더 오래되었으므로 깊이는 그만큼 크다.
     pub(super) fn depth_now(&self, now_us: u64) -> f64 {
         let next_ts = self.fifo_end_ts - (self.fifo.len() / 2) as i64;
-        (Self::now_samples(now_us) - next_ts - self.min_transit) as f64 + self.ahead
+        (Self::now_samples(now_us) - next_ts - self.delay.min_transit()) as f64 + self.ahead
     }
 
     /// 다음 seq의 시작 타임스탬프 기준 깊이(버퍼링 중 판단용). 소스 링에 이전 스트림이 남아 있으면
@@ -115,7 +115,7 @@ impl JitterBuffer {
         if !(slot.valid && slot.seq == self.next_seq) {
             return None;
         }
-        Some((Self::now_samples(now_us) - self.ts_ext(slot.ts) - self.min_transit) as f64 + self.ahead)
+        Some((Self::now_samples(now_us) - self.ts_ext(slot.ts) - self.delay.min_transit()) as f64 + self.ahead)
     }
 
     /// 출력 버스트 종료. `now_us`는 출력 콜백 시각 추정치(장치 클럭 기준).

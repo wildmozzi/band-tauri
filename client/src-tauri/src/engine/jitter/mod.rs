@@ -3,8 +3,9 @@
 //! ## 파일
 //! - `mod.rs`: `JitterBuffer` 상태·수명·공개 API, 패킷 삽입(슬롯 링)
 //! - `tuning.rs`: 설정과 프로필 → 계수
-//! - `target.rs`: 목표 깊이 추정(지연 통계, 짧은 창·버스트·긴 창, 경로 변경, 목표 합성)
-//! - `late_budget.rs`: 늦은 패킷 예산(`tail_extra`)
+//! - `delay.rs`: 지연 통계(`DelayStats`: transit 창, 최소 transit·분위수, RFC 지터)
+//! - `target.rs`: 목표 깊이 추정(`TargetEst`: 짧은 창·버스트·긴 창, 경로 변경)과 목표 합성
+//! - `late_budget.rs`: 늦은 패킷 예산(`LateBudget`: `tail_extra`)
 //! - `playout.rs`: 재생 시작, 패킷 생산(디코드·FEC/PLC·PCM 페이드), 버림, 언더런 정산
 //! - `correction.rs`: 깊이 측정(`end_burst`)·데드밴드 보정·비율 리샘플러, 샘플 시프트 유틸
 //! - `stats.rs`: `JitterStats`, 비율 창, 통계 스냅샷
@@ -61,6 +62,7 @@
 //! - 이미 재생 지난 seq는 폐기하고 `late` 증가.
 
 mod correction;
+mod delay;
 mod late_budget;
 mod playout;
 mod stats;
@@ -80,7 +82,10 @@ pub use stats::JitterStats;
 pub use tuning::{JitterSettings, JitterTuning};
 
 use correction::RateShifter;
+use delay::DelayStats;
+use late_budget::LateBudget;
 use stats::RateRing;
+use target::TargetEst;
 
 /// 슬롯 링 크기: 2의 거듭제곱(u32 seq 랩에서도 슬롯 충돌 없음, 리뷰 L1). 2.5ms 기준 2.56초.
 const SLOT_COUNT: usize = 1024;
@@ -147,41 +152,16 @@ pub struct JitterBuffer {
     last_ts: u32,
     ts_ext_base: i64,
 
-    // 지연 통계
-    transits: [i64; DELAY_WINDOW],
-    transit_count: usize,
-    transit_pos: usize,
-    since_stats: usize,
-    scratch: Vec<i64>,
-    min_transit: i64,
-    /// 상대 지연의 프로필 분위수(샘플, 짧은 창).
-    q_rel: f64,
-    /// 짧은 창 p99(샘플). 버스트 판정 기준(꼬리 패킷과 버스트를 가른다, PR #20 M1).
-    q99_rel: f64,
-    rfc_jitter: f64,
-    last_transit: Option<i64>,
+    /// 지연 통계(도착 쪽, `delay.rs`).
+    delay: DelayStats,
 
     tuning: JitterTuning,
-    // 목표 추정(샘플). 짧은 창 상한과 하향 대기 시작 시각.
-    short_cap: f64,
-    short_lower_since: Option<u64>,
-    /// 버스트 상향: 절대 transit 기준 수준(최소 지연이 오르면 그만큼 줄어든다)과 마지막 버스트 패킷 시각.
-    burst_abs: Option<i64>,
-    burst_at_us: u64,
-    recent_rel: [i64; BURST_WIN],
-    recent_pos: usize,
-    /// 긴 창: 현재 블록 표본과 시작 시각, 블록 분위수 링.
-    block_rel: Vec<i64>,
-    block_start_us: Option<u64>,
-    block_q: [f64; LONG_BLOCKS_MAX],
-    block_pos: usize,
-    block_count: usize,
-    long_cap: f64,
-    /// 마지막으로 계산한 목표(샘플). 내려가면 `chase`.
-    last_target: f64,
-    /// 소비자가 은닉 판단 시각에 p95 너머로 요구하는 깊이(샘플, 48k, `set_consumer_lead`, P1-13).
-    consumer_lead: f64,
-    /// 소비자 요구로 목표가 바뀐 뒤 해제 문턱까지 보정 중(데드밴드 무시).
+    /// 목표 깊이 추정(도착 쪽, `target.rs`).
+    target: TargetEst,
+    /// 늦은 패킷 예산(도착 쪽, `late_budget.rs`).
+    late: LateBudget,
+    /// 목표가 내려가거나 소비자 요구가 바뀐 뒤 해제 문턱까지 보정 중(데드밴드 무시). `TargetEst`가 사건(`note_target`·
+    /// `set_consumer_lead`의 반환값)을 알리고 보정(`correction.rs`)이 읽고 끈다 — 보정 상태라 ⑧(b)에서 `DepthCtl`로 간다.
     chase: bool,
 
     depth_ewma: Option<f64>,
@@ -228,31 +208,6 @@ pub struct JitterBuffer {
     /// 아직 못 본 첫 콜백들에서 소스 링이 모자라지 않게 한다. 끝나면 `chase`로 목표까지 내려간다.
     start_pad: f64,
     start_pad_until_us: u64,
-    /// 경로 변경 유예 끝 시각(µs, `PATH_GRACE_US`).
-    path_reset_until_us: u64,
-    /// 경로 변경 유예 동안의 비교 문턱(샘플, 리셋 전 값).
-    path_grace_step: i64,
-
-    /// 늦은 패킷 예산(P1-6b): 현재 1초 블록의 늦은 도착 수·도착 패킷 수, 블록별 늦은 비율(예산의 `LATE_CLIP`배로 자름)·
-    /// 실제 손실률 링. 늦은 도착·손실·도착 패킷 모두 재생 중에만 센다(P1-6c, PR #63 리뷰 L4: 이전에는 도착 패킷만
-    /// 버퍼링 중에도 세서 재버퍼가 낀 블록의 비율이 희석됐고, 경로 변경 유예 중 옛 경로 패킷은 늦은 도착만 셌다).
-    /// 남은 비대칭: 언더런 은닉이 2번 이상 쌓인 뒤(debt ≥ 2) 도착한 패킷 하나는 늦은 도착 1개로 센다 — 늦게 온
-    /// 패킷 수를 세는 것이므로 의도된 것이고, 은닉 수와의 차이는 창 평균에서 작다.
-    late_block: u32,
-    pkts_block: u32,
-    /// 현재 블록에서 손실로 넘긴 seq 수와 그중 나중에 도착한(늦은) 수. 차이가 실제 손실이다.
-    lost_block: u32,
-    late_seq_block: u32,
-    late_rates: [f64; LATE_BLOCKS],
-    loss_rates: [f64; LATE_BLOCKS],
-    loss_count: usize,
-    late_pos: usize,
-    /// 늦은 비율이 예산을 넘는 동안 목표에 더하는 깊이(샘플, 0..=F).
-    tail_extra: f64,
-    /// 마지막 조정 뒤 지난 블록 수(최대 `LATE_BLOCKS`).
-    tail_fresh: usize,
-    /// 재생 시작 직후 예산 판단에서 뺄 남은 블록 수(`LATE_SKIP_BLOCKS`, PR #63 리뷰 L3).
-    tail_skip: u32,
 
     stats: JitterStats,
 }
@@ -353,10 +308,8 @@ impl Buffers {
         }
         let mut fifo = std::mem::take(&mut jb.fifo);
         fifo.clear();
-        let mut scratch = std::mem::take(&mut jb.scratch);
-        scratch.clear();
-        let mut block_rel = std::mem::take(&mut jb.block_rel);
-        block_rel.clear();
+        let scratch = jb.delay.take_scratch();
+        let block_rel = jb.target.take_block_rel();
         let zeroed = |v: &mut Vec<f32>| {
             let mut v = std::mem::take(v);
             v.fill(0.0);
@@ -404,31 +357,10 @@ impl JitterBuffer {
             have_ts: false,
             last_ts: 0,
             ts_ext_base: 0,
-            transits: [0; DELAY_WINDOW],
-            transit_count: 0,
-            transit_pos: 0,
-            since_stats: 0,
-            scratch: b.scratch,
-            min_transit: 0,
-            q_rel: 0.0,
-            q99_rel: 0.0,
-            rfc_jitter: 0.0,
-            last_transit: None,
+            delay: DelayStats::new(b.scratch),
             tuning: JitterTuning::from_profile(settings.profile),
-            short_cap: -1.0,
-            short_lower_since: None,
-            burst_abs: None,
-            burst_at_us: 0,
-            recent_rel: [0; BURST_WIN],
-            recent_pos: 0,
-            block_rel: b.block_rel,
-            block_start_us: None,
-            block_q: [0.0; LONG_BLOCKS_MAX],
-            block_pos: 0,
-            block_count: 0,
-            long_cap: 0.0,
-            last_target: 0.0,
-            consumer_lead: 0.0,
+            target: TargetEst::new(b.block_rel),
+            late: LateBudget::new(),
             chase: false,
             depth_ewma: None,
             ahead: 0.0,
@@ -457,19 +389,6 @@ impl JitterBuffer {
             conceal: b.conceal,
             start_pad: 0.0,
             start_pad_until_us: 0,
-            path_reset_until_us: 0,
-            path_grace_step: 0,
-            late_block: 0,
-            pkts_block: 0,
-            lost_block: 0,
-            late_seq_block: 0,
-            late_rates: [0.0; LATE_BLOCKS],
-            loss_rates: [0.0; LATE_BLOCKS],
-            loss_count: 0,
-            late_pos: 0,
-            tail_extra: 0.0,
-            tail_fresh: 0,
-            tail_skip: 0,
             stats: JitterStats::default(),
         }
     }
@@ -546,7 +465,7 @@ impl JitterBuffer {
 
     /// 목표 중 소비자 요구 깊이(샘플). 진단·통계용(`lead_ms`).
     pub fn extra_target(&self) -> f64 {
-        self.consumer_lead
+        self.target.consumer_lead()
     }
 
     /// 패킷 프레임(샘플, 48k).
@@ -583,7 +502,7 @@ impl JitterBuffer {
                     self.note_late();
                     self.note_pkt();
                     if self.state == State::Playing {
-                        self.late_seq_block = self.late_seq_block.saturating_add(1);
+                        self.late.note_late_seq();
                     }
                     return;
                 }

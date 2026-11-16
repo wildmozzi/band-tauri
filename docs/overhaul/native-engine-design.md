@@ -479,7 +479,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 지원 드라이버(P2-7): 설정 화면은 `engine_supported_drivers`에 없는 드라이버를 선택지에서 비활성화하고 이유("이 배포본에는 ASIO가 포함되어 있지 않습니다 — WASAPI 독점 모드를 쓰세요")를 보인다. 저장된 설정의 드라이버가 목록에 없으면 WASAPI 독점(없으면 공유)으로 바꾸고 그쪽 장치 선택을 비운 뒤 안내한다 — 사용자 편집이 아니므로 DB에는 바로 쓰지 않는다. `engine_list_devices`의 응답 모양(`DeviceInfo[]`)은 바꾸지 않는다(배열에 빌드 정보를 끼우면 기존 호출자·진단 내보내기가 깨진다).
 
-**지연 측정(P1-1, `engine/measure.rs`, 절차는 docs/MEASURE.md)**
+**지연 측정(P1-1, `engine/measure/`: `analysis`·`loopback`·`echo`, 절차는 docs/MEASURE.md)**
 - `LoopbackReport.roundTripMs` = 소프트웨어 패스스루(입력 → 바로 출력)의 아날로그 입력 → 아날로그 출력 지연. 업계 RTL 측정값과 같은 정의로, 이상적인 장치에서 입력 버퍼 + 출력 버퍼 + 변환기·드라이버 안전 여유다.
   - 자극: 100ms 선형 처프(200Hz → min(12kHz, 0.45·레이트), 진폭 0.3). 출력 콜백이 모든 출력 채널에 쓰고, 입력 콜백이 라우팅된 첫 입력 채널을 녹음한다. 콜백은 사전 할당 SPSC 링(자극 0.25초·녹음 0.5초 @192kHz)과 원자값만 쓴다.
   - 도착 위치는 FFT 상호상관 피크(포물선 보간)다. 입력·출력 프레임 카운터는 측정 스레드가 `벽시계 − 카운터/레이트`의 최솟값으로 같은 시간축에 놓는다. 출력 프레임 J의 쓰기 시각 = `e_out + (J + 출력 콜백 크기)/r`, 입력 프레임 I의 캡처 시각 = `e_in + I/r`이고, 왕복 = 캡처 − 쓰기 + 입력 콜백 크기/r.

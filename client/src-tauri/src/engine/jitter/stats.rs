@@ -119,15 +119,15 @@ impl JitterBuffer {
         s.target_ms = self.target_samples() as f32 / spm;
         let wall = self.wall_cur_min.min(self.wall_prev_min);
         s.wall_buffer_ms = if self.state == State::Playing && wall.is_finite() { wall as f32 / spm } else { 0.0 };
-        s.jitter_ms = self.rfc_jitter as f32 / spm;
+        s.jitter_ms = self.delay.rfc_jitter() as f32 / spm;
         s.loss_pct = self.loss.pct();
         s.conceal_pct = self.conceal.pct();
-        s.lead_ms = self.consumer_lead as f32 / spm;
+        s.lead_ms = self.target.consumer_lead() as f32 / spm;
         s.jitter_est_ms = self.jitter_est() as f32 / spm;
         s.corr_time_pct = self.corr_ring.pct();
         s.max_corr_cents = self.max_corr_cents;
-        s.tail_ms = self.tail_extra as f32 / spm;
-        s.min_transit = self.min_transit;
+        s.tail_ms = self.late.tail_extra() as f32 / spm;
+        s.min_transit = self.delay.min_transit();
         s
     }
 }
