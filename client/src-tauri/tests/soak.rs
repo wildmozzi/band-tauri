@@ -14,7 +14,7 @@
 //! 0..300µs를 준다. 출력 기록(sink)은 끈다(60분 메모리).
 //!
 //! 실행(수치는 release 기준이 의미 있다, 한 번에 하나씩):
-//! `SOAK_MINUTES=3 cargo test --release --features test-support --test soak soak_balanced -- --ignored --nocapture`
+//! `SOAK_MINUTES=3 cargo test --release --test soak soak_balanced -- --ignored --nocapture`
 //! 리포트: `SOAK_OUT`(없으면 `<target>/soak-report/`)에 `soak-<프리셋>-<분>min.{md,json}`.
 //!
 //! CI realtime 잡은 ignore된 통합 테스트를 모두 돌리므로 60분짜리가 거기 끼지 않게 그 잡의 nextest 필터에서
@@ -753,13 +753,13 @@ fn render(r: &Report, frames_per_s: f64) -> (String, serde_json::Value) {
 }
 
 #[test]
-#[ignore = "soak(야간 회귀 판정, 기본 60분): SOAK_MINUTES=3 cargo test --release --features test-support --test soak soak_balanced -- --ignored --nocapture"]
+#[ignore = "soak(야간 회귀 판정, 기본 60분): SOAK_MINUTES=3 cargo test --release --test soak soak_balanced -- --ignored --nocapture"]
 fn soak_balanced() {
     run(preset_balanced());
 }
 
 #[test]
-#[ignore = "soak(야간 회귀 판정, 기본 60분): SOAK_MINUTES=3 cargo test --release --features test-support --test soak soak_ultra_low -- --ignored --nocapture"]
+#[ignore = "soak(야간 회귀 판정, 기본 60분): SOAK_MINUTES=3 cargo test --release --test soak soak_ultra_low -- --ignored --nocapture"]
 fn soak_ultra_low() {
     run(preset_ultra_low());
 }

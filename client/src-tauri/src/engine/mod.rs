@@ -350,7 +350,7 @@ impl Engine {
 
     /// 측정 도구 전용(P1-4f M1, `tests/cpu_profile.rs`): PCM16 설정에서 모든 피어를 손실 피드백 전환 상태로 강제해
     /// 피어마다 전용 Opus 인코더가 돌게 한다(최악 조건 CPU). 앱은 쓰지 않는다.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn force_auto_opus(&self, on: bool) -> Result<(), String> {
         self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?.shared().set_force_auto_opus(on);
         Ok(())

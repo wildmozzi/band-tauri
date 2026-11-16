@@ -303,7 +303,7 @@ mod tests {
         use crate::manager::EngineManager;
         use crate::net::NetOptions;
         let mgr = Arc::new(EngineManager::new(Arc::new(FakeBackend::silence(48_000)), NetOptions::default()));
-        mgr.test_start(EngineConfig::default()).unwrap();
+        mgr.start_monitor_only(EngineConfig::default()).unwrap();
         let d = Arc::new(Diagnostics::new(10));
         let m = mgr.clone();
         let m2 = mgr.clone();

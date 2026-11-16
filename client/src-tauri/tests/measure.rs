@@ -218,7 +218,7 @@ fn loopback_refused_during_session() {
     m.stop();
     // 테스트 모드에서는 된다
     let before = sink.lock().len();
-    m.test_start(config(128)).unwrap();
+    m.start_monitor_only(config(128)).unwrap();
     assert!(wait_until(HANG, || sink.lock().len() >= before + 48_000 * 2 * 3 / 10), "테스트 모드 출력이 돌지 않음");
     assert_eq!(m.measure_loopback(1).unwrap().verdict, MeasureVerdict::NoSignal);
     m.stop();
@@ -237,7 +237,7 @@ fn loopback_offset_carries_to_session_engine_on_same_device() {
     };
     // 엔진이 없으면 거부
     assert!(m.set_loopback_offset(Some(12.0)).is_err());
-    m.test_start(config(128)).unwrap();
+    m.start_monitor_only(config(128)).unwrap();
     assert!(wait_src(&m, None), "처음에는 보정 안 됨");
     assert!(m.set_loopback_offset(Some(f64::NAN)).is_err());
     m.set_loopback_offset(Some(12.0)).unwrap();
@@ -264,7 +264,7 @@ fn loopback_offset_carries_to_session_engine_on_same_device() {
     assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
     m.stop();
     // 해제하면 같은 장치에서도 쓰지 않는다
-    m.test_start(config(128)).unwrap();
+    m.start_monitor_only(config(128)).unwrap();
     assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
     m.set_loopback_offset(None).unwrap();
     assert!(wait_src(&m, None));

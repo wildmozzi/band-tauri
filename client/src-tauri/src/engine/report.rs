@@ -349,13 +349,13 @@ impl Engine {
     }
 
     /// 워커가 가진 피어 미디어 항목 수(진단·테스트, 엔진 ③). 정착하면 net 피어 수와 같다.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn worker_media_peers(&self) -> u64 {
         self.worker_stats.media_peers.load(Ordering::Relaxed)
     }
 
     /// 워커 반복 시간 분포를 지난 호출 이후로 돌려주고 비운다(엔진 ③c 측정, 진단·테스트 전용 — `test-support` 빌드에서만 채워진다).
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn take_worker_timing(&self) -> WorkerTiming {
         let s = &self.worker_stats;
         let l = &s.lock_sites;
@@ -364,7 +364,7 @@ impl Engine {
     }
 
     /// 송신 경로 진단(피어 표 복사본 갱신·옛 복사본 프레임·건너뛴 송신)을 지난 호출 이후로 돌려주고 비운다(엔진 ③c).
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn take_send_path_diag(&self) -> Option<crate::net::SendPathDiag> {
         self.net.as_ref().map(|n| n.take_send_path_diag())
     }

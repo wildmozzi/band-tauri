@@ -208,13 +208,13 @@ impl MetronomeCtl {
     }
 
     /// (지금 계획 세대, 워커가 마지막 보고에 실은 적용 세대). 진단·테스트: 워커가 새 계획을 적용했는지 본다.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn plan_gens(&self) -> (u64, u64) {
         (self.plan_gen.load(Ordering::Acquire), MetroReport::unpack(&self.report.read()).applied_gen)
     }
 
     /// 워커가 계획 `try_lock`에 실패한 반복 수를 돌려주고 비운다(진단·테스트).
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn take_plan_retries(&self) -> u64 {
         self.plan_retries.swap(0, Ordering::Relaxed)
     }

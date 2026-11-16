@@ -6,10 +6,7 @@
 //! 연주자 1명 몫(워커 + 네트워크 수신·제어 + 가짜 장치 스레드)을 낸다. 수치 판정 없이 표만 출력한다(측정 도구).
 //!
 //! 실행(수치는 release 기준이 의미 있다):
-//! `cargo test --release --features test-support --test cpu_profile -- --ignored --nocapture`
-
-#[cfg(not(any(debug_assertions, feature = "test-support")))]
-compile_error!("릴리스 측정은 가짜 장치가 필요하다: cargo test --release --features test-support --test cpu_profile");
+//! `cargo test --release --test cpu_profile -- --ignored --nocapture`
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -138,7 +135,7 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
 }
 
 #[test]
-#[ignore = "측정 도구: cargo test --release --features test-support --test cpu_profile -- --ignored --nocapture"]
+#[ignore = "측정 도구: cargo test --release --test cpu_profile -- --ignored --nocapture"]
 fn six_peer_full_mesh_cpu() {
     // RT 콜백 타이머 비용(QPC)
     let n = 1_000_000;
@@ -224,7 +221,7 @@ fn six_peer_full_mesh_cpu() {
 /// (1) `restart` 1회 시간 분포(= 재시작을 적용하는 반복에 더해지는 시간). (2) 6엔진 풀메시에서 엔진 0이 피어 5명 모두를
 /// 50ms마다 재시작(실제는 측정당 2회 — 수백 배 거센 조건)할 때와 조용할 때, 엔진 0의 건너뛴 프레임·xrun과
 /// **다른 엔진들이 받는 엔진 0 소리의 은닉**(엔진 0 워커가 늦어 송신이 밀리면 오른다)을 비교한다. 판정 없이 표만 낸다.
-/// `cargo test --release --features test-support --test cpu_profile restart_cost -- --ignored --nocapture`
+/// `cargo test --release --test cpu_profile restart_cost -- --ignored --nocapture`
 #[test]
 #[ignore = "측정: release 권장(약 40초)"]
 fn restart_cost_on_worker() {

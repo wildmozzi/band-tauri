@@ -35,9 +35,9 @@ pub mod select;
 // 가짜 장치 (테스트/통합 테스트용)
 // ============================================================================
 
-// 릴리스 제품 빌드에는 들어가지 않는다: 디버그 빌드·단위 테스트, 또는 `test-support` 피처(릴리스 측정:
-// `cargo test --release --features test-support --test cpu_profile`)에서만 컴파일된다(engine-architecture.md 7절).
-#[cfg(any(test, debug_assertions, feature = "test-support"))]
+// 제품 빌드(디버그·릴리스 모두)에는 들어가지 않는다: 단위 테스트, 또는 `test-support` 피처에서만 컴파일된다(⑨a-2).
+// 테스트·예제 빌드는 Cargo.toml의 자기 자신 개발 의존이 늘 켠다(engine-architecture.md 7절).
+#[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 
 pub use self::cpal as cpal_backend;

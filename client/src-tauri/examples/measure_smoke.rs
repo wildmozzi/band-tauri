@@ -47,7 +47,7 @@ fn main() {
     }
     let m = EngineManager::new(backend, NetOptions::default());
     println!("# 지연 측정 스모크: {driver:?}, 버퍼 {buffer}, 반복 {runs}");
-    if let Err(e) = m.test_start(cfg) {
+    if let Err(e) = m.start_monitor_only(cfg) {
         println!("테스트 엔진 시작 실패: {e}");
         return;
     }

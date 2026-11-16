@@ -227,7 +227,7 @@ impl EngineManager {
     }
 
     /// 네트워크 없이 모니터만(테스트 모드).
-    pub fn test_start(&self, config: EngineConfig) -> Result<(), String> {
+    pub fn start_monitor_only(&self, config: EngineConfig) -> Result<(), String> {
         self.start_inner(config, None).map(|_| ())
     }
 
@@ -318,7 +318,7 @@ impl EngineManager {
     }
 
     /// 테스트 모드 엔진만 정지한다.
-    pub fn test_stop(&self) {
+    pub fn stop_monitor_only(&self) {
         let old = {
             let mut s = self.slot.lock();
             if s.phase.engine().is_some_and(|e| !e.has_network()) {
@@ -486,7 +486,7 @@ mod tests {
         assert!(m.snapshot().is_none());
 
         let m2 = m.clone();
-        let t = std::thread::spawn(move || m2.test_start(cfg()));
+        let t = std::thread::spawn(move || m2.start_monitor_only(cfg()));
         assert!(gate.wait_entered(1, HANG));
         assert_eq!(phase(&m), P::Starting);
         assert!(m.is_starting());
@@ -500,16 +500,16 @@ mod tests {
         assert!(m.with_engine(|e| Ok(!e.has_network())).unwrap());
         assert!(m.snapshot().is_some_and(|s| !s.network));
 
-        // test_stop은 테스트 모드 엔진만 멈춘다
-        m.test_stop();
+        // stop_monitor_only는 테스트 모드 엔진만 멈춘다
+        m.stop_monitor_only();
         assert_eq!(phase(&m), P::Idle);
         assert!(!held.load(Ordering::SeqCst), "정지하면 장치를 놓는다");
         assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed), "모니터 복원");
 
-        // 연주(net 있음)는 test_stop으로 멈추지 않는다
+        // 연주(net 있음)는 stop_monitor_only로 멈추지 않는다
         m.start(cfg(), "me".into()).unwrap();
         assert_eq!(phase(&m), P::Running);
-        m.test_stop();
+        m.stop_monitor_only();
         assert_eq!(phase(&m), P::Running);
         assert!(m.snapshot().is_some_and(|s| s.network));
         m.stop();
@@ -568,7 +568,7 @@ mod tests {
         let mut b = FakeBackend::silence(48_000);
         b.exclusive = Some(Arc::new(AtomicBool::new(true))); // 이미 다른 곳이 쥔 장치
         let m = EngineManager::new(Arc::new(b), net());
-        assert!(m.test_start(cfg()).is_err());
+        assert!(m.start_monitor_only(cfg()).is_err());
         assert_eq!(phase(&m), P::Idle);
         assert!(!m.is_starting());
         assert!(!m.stats().running);
@@ -597,7 +597,7 @@ mod tests {
         let mut b = FakeBackend::silence(48_000);
         b.halt_after = Some(Duration::from_millis(200));
         let m = EngineManager::new(Arc::new(b), net());
-        m.test_start(cfg()).unwrap();
+        m.start_monitor_only(cfg()).unwrap();
         assert!(wait_until(|| m.snapshot().is_some_and(|s| s.stats.device_lost)), "deviceLost가 서지 않음");
         assert_eq!(phase(&m), P::Running);
         let s = m.snapshot().unwrap();

@@ -154,7 +154,7 @@ static ENGINE_PROMOTION: AtomicBool = AtomicBool::new(true);
 
 /// 측정용: 엔진 스레드의 MMCSS 등록과 1ms 타이머를 끈다/켠다. 다음에 시작하는 엔진부터 적용된다.
 /// 장치 스레드(자체 WASAPI, 가짜 장치)는 실제 장치 콜백 스레드를 대신하므로 이 스위치와 무관하게 승격한다.
-#[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_engine_promotion(enabled: bool) {
     set_engine_promotion_parts(enabled, enabled);
 }
@@ -163,7 +163,7 @@ pub fn set_engine_promotion(enabled: bool) {
 static ENGINE_TIMER: AtomicBool = AtomicBool::new(true);
 
 /// 측정용: 엔진 스레드 MMCSS 등록과 1ms 타이머를 따로 켜고 끈다. 다음에 시작하는 엔진부터 적용된다.
-#[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn set_engine_promotion_parts(mmcss: bool, timer_1ms: bool) {
     ENGINE_PROMOTION.store(mmcss, Ordering::SeqCst);
     ENGINE_TIMER.store(timer_1ms, Ordering::SeqCst);

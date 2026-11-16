@@ -466,7 +466,7 @@ impl Peer {
     }
 
     /// 테스트용: 경로를 강제로 세운다(핸드셰이크 없이).
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn force_path(&self, addr: SocketAddr, kind: PathKind) {
         let mut c = self.conn();
         c.state = PeerStateKind::Connected;
@@ -475,7 +475,7 @@ impl Peer {
     }
 
     /// 테스트용: 두 항목이 송신 seq 카운터를 같이 쓰는가.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn shares_tx_seq_with(&self, other: &Peer) -> bool {
         Arc::ptr_eq(&self.tx_seq, &other.tx_seq)
     }

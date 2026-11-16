@@ -141,13 +141,13 @@ impl NetShared {
     }
 
     /// 측정 도구 전용(P1-4f M1): 모든 피어를 손실 피드백 전환 상태로 강제한다(PCM16 설정에서만 의미가 있다).
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_force_auto_opus(&self, on: bool) {
         self.force_auto_opus.store(on, Ordering::Relaxed);
     }
 
-    #[doc(hidden)]
-    pub fn force_auto_opus(&self) -> bool {
+    /// 워커가 읽는다(`auto_codec`). 제품 빌드에는 켜는 쪽(`set_force_auto_opus`)이 없어 늘 `false`다(⑨a-2).
+    pub(crate) fn force_auto_opus(&self) -> bool {
         self.force_auto_opus.load(Ordering::Relaxed)
     }
 
@@ -158,7 +158,7 @@ impl NetShared {
     /// 스택 버퍼를 쓴다(피어마다 RelayData를 따로 보낸다 — 릴레이에는 팬아웃이 없다).
     /// `auto(peer, 경로)`가 `Some`을 주면 그 피어에게는 그것(그 피어 전용 Opus 인코더의 이 프레임)을 보낸다
     /// (PCM16 설정의 자동 전환: 릴레이 부하 P1-4c, 수신 손실 피드백 P1-4e).
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::too_many_arguments)]
     pub fn send_audio<'a>(
         &self,
