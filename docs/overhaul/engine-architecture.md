@@ -220,12 +220,14 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/relay_codec.rs` | PCM16 설정의 피어별 Opus 자동 전환 정책(릴레이 부하·손실 피드백) | 전환 정책 |
 | `engine/jitter/mod.rs` | `JitterBuffer` 상태·수명·공개 API, 패킷 삽입(슬롯 링) | 버퍼 API·슬롯 형식 |
 | `engine/jitter/tuning.rs` | 설정(`JitterSettings`)과 프로필 → 계수(`JitterTuning`) | 프로필 곡선 |
-| `engine/jitter/target.rs` | 목표 깊이 추정: 지연 통계, 짧은 창·버스트·긴 창, 경로 변경, 목표 합성 | 지터 추정 정책(P1-5) |
-| `engine/jitter/late_budget.rs` | 늦은 패킷 예산(`tail_extra`) | 은닉 목표 정책(P1-6b/c) |
-| `engine/jitter/playout.rs` | 재생 시작, 패킷 생산(디코드·FEC/PLC·PCM 페이드), 버림, 언더런 정산 | 은닉·재생 규칙 |
-| `engine/jitter/correction.rs` | 깊이 측정(`end_burst`)·데드밴드 보정·비율 리샘플러, `shift_n` | 드리프트·보정 정책(H1) |
+| `engine/jitter/delay.rs` | 지연 통계 `DelayStats`(transit 창, 최소 transit·분위수, RFC 지터) — ⑧(a) | 지터 추정 정책(P1-5) |
+| `engine/jitter/target.rs` | 목표 깊이 추정 `TargetEst`(짧은 창·버스트·긴 창, 경로 변경)와 목표 합성 — ⑧(a) | 지터 추정 정책(P1-5) |
+| `engine/jitter/late_budget.rs` | 늦은 패킷 예산 `LateBudget`(`tail_extra`) — ⑧(a) | 은닉 목표 정책(P1-6b/c) |
+| `engine/jitter/playout.rs` | 재생 시작, 패킷 생산(슬롯 → 디코드/은닉 → 보정 → FIFO), 버림, 언더런 정산 | 은닉·재생 규칙 |
+| `engine/jitter/conceal.rs` | 디코드·은닉 `Concealer`(디코더 풀, FEC/PLC·PCM 페이드, 버림 크로스페이드, 언더런 빚, 손실·은닉 창) — ⑧(b) | 은닉·재생 규칙 |
+| `engine/jitter/correction.rs` | 깊이 측정(`end_burst`)·데드밴드 보정 `DepthCtl`(`chase`·재생 시작 여유 포함)·비율 리샘플러, `shift_n` — ⑧(b) | 드리프트·보정 정책(H1) |
 | `engine/jitter/stats.rs` | `JitterStats`, 비율 창, 통계 스냅샷 | 통계 필드 |
-| `engine/jitter/tests.rs` | 결정적 단위 시뮬레이션 | |
+| `engine/jitter/tests.rs` | 결정적 단위 시뮬레이션, 지터 trace fixture(`tests/fixtures/jitter-trace.sha256`, ⑧(b)) | |
 | `engine/worker/mod.rs` | `Worker` 조립·루프(단계를 순서대로 부르는 조정자), 정지 | 단계 순서 |
 | `engine/worker/clock.rs` | 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`) | 시각 추정 |
 | `engine/worker/capture.rs` | `Capture`: 입력 링 → 리샘플 → 48k 블록·프레임 | 입력 장치 형식·리샘플·프레임 크기 |
