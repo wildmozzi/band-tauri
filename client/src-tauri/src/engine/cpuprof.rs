@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::sys::cpu::cycle_pct;
-use super::rt_timing::RtTiming;
+use band_dsp::rt_timing::RtTiming;
 
 /// 통계 창. 송신 큐 지연(`sendQueue`)과 같다.
 pub const WINDOW: Duration = crate::net::txlat::WINDOW;

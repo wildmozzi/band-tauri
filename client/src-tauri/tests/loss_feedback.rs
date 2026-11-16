@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_dsp::config::{CodecKind, EngineConfig};
 use band_lib::testing::engine::device::fake::FakeBackend;
-use band_lib::testing::engine::mixer::MixControls;
-use band_lib::testing::engine::relay_codec::CodecReason;
+use band_dsp::mixer::MixControls;
+use band_dsp::relay_codec::CodecReason;
 use band_lib::testing::engine::report::PeerStats;
 use band_lib::testing::engine::Engine;
 use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};

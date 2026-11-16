@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 
 use super::click::{decode, encode, ClickShared, NO_CLICK};
 use super::plan::{MetronomePlan, MetronomeStats, OutputLatencySource, MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OFFSET_MS};
-use crate::engine::stats::SeqCell;
+use band_dsp::stats::SeqCell;
 
 /// 올려 둔 클릭의 제 시각이 이만큼(초) 넘게 지났다고 다시 계산되면(콜백 공백 뒤) 울리지 않고 건너뛴다.
 const STALE_SKIP_S: f64 = 0.005;

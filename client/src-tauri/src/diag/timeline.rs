@@ -8,11 +8,11 @@ use std::collections::VecDeque;
 use serde::Serialize;
 
 use super::mask::{mask_addr, pseudonymize};
-use crate::engine::config::CodecKind;
-use crate::engine::relay_codec::CodecReason;
+use band_dsp::config::CodecKind;
+use band_dsp::relay_codec::CodecReason;
 use crate::engine::report::EngineStats;
 use crate::net::connlog::{ConnEvent, ConnOutcome, ConnPhase};
-use crate::net::types::{PathKind, PeerStateKind, RelayStateKind};
+use band_dsp::types::{PathKind, PeerStateKind, RelayStateKind};
 
 /// 기본 기록 간격(ms).
 pub const SAMPLE_INTERVAL_MS: u64 = 1000;
@@ -252,7 +252,7 @@ pub fn to_jsonl(tl: &Timeline) -> String {
 mod tests {
     use super::*;
     use crate::engine::report::PeerStats;
-    use crate::net::types::RelayStats;
+    use band_dsp::types::RelayStats;
 
     #[test]
     fn ring_keeps_capacity_and_order() {

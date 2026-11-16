@@ -7,22 +7,24 @@
 //! `test-support`를 켜므로 늘 보인다. 하위 모듈은 원래 경로 이름을 그대로 따른다(`testing::engine::mixer` 등).
 //!
 //! 새 테스트가 여기 없는 내부를 써야 하면 해당 줄에 추가한다(원래 경로를 테스트에서 직접 쓰지 않는다).
+//!
+//! 결정적 코어(코덱·지터·믹서·패킷 등)는 ⑩-1부터 `band_dsp` 크레이트다. 그 모듈은 여기서 다시 내보내지 않는다 — 테스트는
+//! `band_dsp::jitter`처럼 바로 쓴다(공개 API이고, 경로가 둘이 되지 않게). 시험 전용 훅은 `band-dsp`의 `test-support` 피처
+//! 뒤에 있고 이 크레이트의 `test-support`가 켠다.
 
 /// 엔진(`crate::engine`)에서 테스트가 쓰는 것.
 pub mod engine {
     #[cfg(windows)]
     pub use crate::engine::wasapi;
     pub use crate::engine::{
-        codec, config, cpuprof, device, jitter, measure, metronome, mixer, prio_slot, record, relay_codec, report, rt,
-        stats, wav, worker, Engine,
+        cpuprof, device, measure, metronome, record, report, rt, wav, worker, Engine,
     };
 }
 
 /// 네트워크(`crate::net`)에서 테스트가 쓰는 것.
 pub mod net {
     pub use crate::net::{
-        clock, clock_payload, connlog, crypto, media_link, packet, parse_clock_payload, peer, relay, stun, txlat, types,
-        Net, NetOptions, PeerTableCopy, RelaySetting, SendPathDiag, AUDIO_SEQ_HANDOVER_GAP, MAX_PEERS,
+        clock_payload, connlog, crypto, parse_clock_payload, peer, relay, stun, txlat, Net, NetOptions, PeerTableCopy, RelaySetting, SendPathDiag, AUDIO_SEQ_HANDOVER_GAP, MAX_PEERS,
     };
 }
 

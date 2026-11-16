@@ -3,9 +3,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use crate::engine::config::EngineConfig;
+use band_dsp::config::EngineConfig;
 use crate::engine::rt::{InputRt, OutputRt};
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 use super::types::{DeviceInfo, StreamInfo};
 

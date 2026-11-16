@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::engine::config::EngineConfig;
+use band_dsp::config::EngineConfig;
 use crate::engine::measure::{EchoReport, LoopbackReport, MeasureVerdict};
 use crate::engine::metronome::{MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OFFSET_MS};
 use crate::engine::device::AudioBackend;
-use crate::engine::mixer::{clamp_gain, MixControls};
+use band_dsp::mixer::{clamp_gain, MixControls};
 use crate::engine::report::{EndedConn, EngineSnapshot, EngineStats};
 use crate::engine::Engine;
 use crate::net::peer::LocalDescriptor;

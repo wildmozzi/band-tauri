@@ -7,6 +7,14 @@ license = "MIT"
 repository = ""
 edition = "2021"
 
+# 워크스페이스 루트이자 앱 패키지(엔진 R-1 ⑩-1). 멤버: `crates/band-dsp`(결정적 코어). `default-members`에 둘 다 두어
+# 이 디렉터리의 `cargo test`·`cargo clippy --all-targets`·`cargo nextest run`이 플래그 없이 두 크레이트를 함께 본다.
+# `[profile.*]`은 루트에만 둘 수 있어 아래에 그대로 있다. 빌드 산출물 위치는 상위 `.cargo/config.toml`(공유 target-dir)이 정한다.
+[workspace]
+members = [".", "crates/band-dsp"]
+default-members = [".", "crates/band-dsp"]
+resolver = "2"
+
 [lib]
 name = "band_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -21,13 +29,14 @@ tauri-plugin-log = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
+# 결정적 코어(코덱·지터·믹서·패킷 등, 엔진 R-1 ⑩-1)
+band-dsp = { path = "crates/band-dsp" }
 
 # Audio I/O (WASAPI 기본, ASIO는 `asio` 피처로 옵트인)
 cpal = "0.15"
-opus = "0.3"
+# opus·rubato는 band-dsp(코덱·리샘플)만 쓴다(⑩-1). ringbuf는 측정·미디어 포트·녹음 링도 쓴다.
 ringbuf = "0.4"
-rubato = "0.16"
-# 지연 측정 상호상관(P1-1). rubato가 이미 쓰는 버전이다.
+# 지연 측정 상호상관(P1-1). rubato(band-dsp)가 이미 쓰는 버전이다.
 rustfft = "6"
 
 # Network / crypto
@@ -89,11 +98,11 @@ custom-protocol = ["tauri/custom-protocol"]
 # 릴리스 빌드에서는 devtools 비활성. 필요 시: cargo tauri build --features devtools
 devtools = ["tauri/devtools"]
 # ASIO 지원 (CPAL_ASIO_DIR에 Steinberg ASIO SDK 필요). 기본 빌드는 WASAPI만.
-asio = ["cpal/asio"]
+asio = ["cpal/asio", "band-dsp/asio"]
 # 통합 테스트·예제·측정 도구용 내부(`band_lib::testing`, 가짜 장치 `engine::device::fake`, 워커 반복 시간 기록).
 # 위 개발 의존(자기 자신)이 테스트·예제 빌드에서 늘 켠다 — `--features test-support`를 따로 줄 필요가 없다.
 # 제품 구성에서 꺼지는지는 CI `Clippy (제품 구성)` 단계(`cargo clippy --lib --bins`)가 지킨다.
-test-support = []
+test-support = ["band-dsp/test-support"]
 
 # 디버그 빌드(dev:tauri)에서도 FLAC 녹음 인코딩이 실시간을 넉넉히 넘도록 인코더와 그 해시·CRC만 최적화한다(PR #62 M1).
 # opt-level 0이면 30초 스테레오 24비트 인코딩이 실시간 4배뿐이라 9트랙(소스 8 + 믹스) 녹음이 링을 넘친다.

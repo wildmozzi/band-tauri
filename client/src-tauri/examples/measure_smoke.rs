@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use band_lib::testing::engine::config::{DriverKind, EngineConfig};
+use band_dsp::config::{DriverKind, EngineConfig};
 use band_lib::testing::engine::device::system::SystemBackend;
 use band_lib::testing::manager::EngineManager;
 use band_lib::testing::net::NetOptions;

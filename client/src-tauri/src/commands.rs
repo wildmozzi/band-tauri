@@ -12,7 +12,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
 use crate::diag::Diagnostics;
-use crate::engine::config::{DriverKind, EngineConfig};
+use band_dsp::config::{DriverKind, EngineConfig};
 use crate::engine::measure::{EchoReport, LoopbackReport};
 use crate::engine::device::select::SystemBackend;
 use crate::engine::device::types::DeviceInfo;

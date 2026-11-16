@@ -13,8 +13,8 @@ use std::sync::Arc;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
-use super::packet::Header;
-use crate::engine::config::MAX_PAYLOAD_BYTES;
+use crate::packet::Header;
+use crate::config::MAX_PAYLOAD_BYTES;
 
 /// 피어 미디어 상태를 가리키는 안정 키. 엔진이 `add_peer`마다 단조 증가로 발급한다(0은 쓰지 않는다).
 /// 같은 peerId를 다시 추가해도(교체) 새 키다. 옛 `(Peer 포인터, ssrc)` 키의 ABA 여지를 없앤다(설계 1.3절).
@@ -156,7 +156,7 @@ impl MediaRx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::packet::PacketType;
+    use crate::packet::PacketType;
 
     #[test]
     fn loss_cell_roundtrip_keeps_f32_bits() {

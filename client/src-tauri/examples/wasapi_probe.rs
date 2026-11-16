@@ -103,9 +103,9 @@ fn main() {
 /// 모니터 꺼짐·피어 없음이라 출력은 0(무음)이다.
 #[cfg(windows)]
 fn engine_runs(seconds: f64) {
-    use band_lib::testing::engine::config::{CodecKind, DriverKind, EngineConfig};
+    use band_dsp::config::{CodecKind, DriverKind, EngineConfig};
     use band_lib::testing::engine::device::system::SystemBackend;
-    use band_lib::testing::engine::mixer::MixControls;
+    use band_dsp::mixer::MixControls;
     use band_lib::testing::engine::Engine;
     use std::sync::Arc;
     use std::time::Duration;
@@ -158,10 +158,10 @@ fn engine_runs(seconds: f64) {
 /// 마감 직전 은닉, 언더런 건너뛰기)는 실제 장치 콜백 타이밍으로 그대로 돈다.
 #[cfg(windows)]
 fn peer_runs(seconds: f64) {
-    use band_lib::testing::engine::config::{CodecKind, DriverKind, EngineConfig};
+    use band_dsp::config::{CodecKind, DriverKind, EngineConfig};
     use band_lib::testing::engine::device::fake::FakeBackend;
     use band_lib::testing::engine::device::system::SystemBackend;
-    use band_lib::testing::engine::mixer::MixControls;
+    use band_dsp::mixer::MixControls;
     use band_lib::testing::engine::Engine;
     use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
     use band_lib::testing::net::NetOptions;

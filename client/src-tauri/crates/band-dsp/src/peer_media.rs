@@ -15,12 +15,12 @@ use std::sync::Arc;
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
-use super::jitter::{JitterBuffer, JitterSettings, JitterStats};
-use super::config::INTERNAL_RATE;
-use super::mixer::PeerMixCtl;
-use super::resample::StreamResampler;
-use super::stats::{AtomicF32, SeqCell};
-use crate::net::media_link::{MediaRx, PeerKey};
+use crate::jitter::{JitterBuffer, JitterSettings, JitterStats};
+use crate::config::INTERNAL_RATE;
+use crate::mixer::PeerMixCtl;
+use crate::resample::StreamResampler;
+use crate::stats::{AtomicF32, SeqCell};
+use crate::media_link::{MediaRx, PeerKey};
 
 /// 피어 하나의 미디어 통계 한 벌(워커가 발행한 스냅샷).
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -227,19 +227,19 @@ impl PeerMedia {
     /// 워커의 슬롯 배정: 싣고 온 공급 리샘플러를 꺼낸다(옮기기만 한다 — 할당 없음). 출력 레이트가 워커의 장치 레이트와 다르면
     /// 꺼내지 않는다(None): 그 피어는 슬롯 없이 `ingest`·`publish`만 하고, 리샘플러는 그대로 실려 있다가 제거 때 돌아간다.
     /// 이미 꺼냈으면 None.
-    pub(crate) fn take_feed_resampler(&mut self, out_rate: u32) -> Option<StreamResampler> {
+    pub fn take_feed_resampler(&mut self, out_rate: u32) -> Option<StreamResampler> {
         self.feed_rs.take_if(|rs| rs.out_rate() == out_rate)
     }
 
     /// 제거·정지: 공급에 쓰던 리샘플러를 되싣는다(해제는 반환 큐를 거쳐 제어 평면에서).
-    pub(crate) fn put_feed_resampler(&mut self, rs: StreamResampler) {
+    pub fn put_feed_resampler(&mut self, rs: StreamResampler) {
         debug_assert!(self.feed_rs.is_none(), "공급 리샘플러는 피어당 하나다");
         self.feed_rs = Some(rs);
     }
 
     /// 공급 리샘플러가 실려 있는가(하네스·테스트).
-    #[cfg(test)]
-    pub(crate) fn has_feed_resampler(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_feed_resampler(&self) -> bool {
         self.feed_rs.is_some()
     }
 
@@ -247,7 +247,7 @@ impl PeerMedia {
     /// ① 수신 큐를 **끝까지** 비워 도착 순서·도착 시각 그대로 `insert` → ② 재시작 요청 → ③ 프로필.
     /// 큐를 비운 뒤 재시작하는 이유: 요청 전에 도착한 옛 스트림 패킷이 새 버퍼의 지연 통계에 섞이지 않게.
     /// `profile`은 이번 반복에 읽은 `MediaSettings.profile`. 마지막 적용값과 같으면 아무것도 하지 않는다.
-    pub(crate) fn ingest(&mut self, profile: f32) -> (&PeerMediaShared, &mut JitterBuffer) {
+    pub fn ingest(&mut self, profile: f32) -> (&PeerMediaShared, &mut JitterBuffer) {
         let jb = &mut self.jitter;
         self.rx.drain(|p| jb.insert(&p.hdr, p.payload(), p.arrival_us));
         let req = self.shared.restart_req.load(Ordering::Acquire);
@@ -264,7 +264,7 @@ impl PeerMedia {
 
     /// 이번 반복에 이 피어의 실제(은닉이 아닌) 오디오를 재생 링에 넣었다(워커, `service` 직후). 처음 한 번만 기록한다.
     /// 지터 재시작(에코 측정)·경로 전환은 다시 재지 않는다 — 같은 항목의 "입장 → 첫 소리"는 한 번뿐이다.
-    pub(crate) fn note_audio(&mut self, now_us: u64) {
+    pub fn note_audio(&mut self, now_us: u64) {
         if self.first_audio_us == 0 {
             self.first_audio_us = now_us.max(1);
         }
@@ -272,7 +272,7 @@ impl PeerMedia {
 
     /// 워커 반복의 뒷부분(`service` 직후): 통계 스냅샷과 손실 보고를 발행한다. `&mut self`라 쓰는 쪽이 이 항목의
     /// 단독 소유자(워커) 하나임이 타입으로 보장된다 — seqlock의 단일 작성자 조건(#116 L-1).
-    pub(crate) fn publish(&mut self) {
+    pub fn publish(&mut self) {
         let js = self.jitter.stats();
         let playing = self.jitter.is_playing();
         self.shared.stats.write(&MediaStats { playing, js, rx_dropped: self.rx.dropped(), first_audio_us: self.first_audio_us });
@@ -280,14 +280,14 @@ impl PeerMedia {
     }
 
     /// 지터 버퍼 읽기(하네스·테스트).
-    #[cfg(test)]
-    pub(crate) fn jitter(&self) -> &JitterBuffer {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn jitter(&self) -> &JitterBuffer {
         &self.jitter
     }
 
     /// 수신 큐 넘침 누적(하네스·테스트).
-    #[cfg(test)]
-    pub(crate) fn rx_dropped(&self) -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rx_dropped(&self) -> u64 {
         self.rx.dropped()
     }
 }
@@ -326,7 +326,7 @@ pub fn media_rings() -> (HeapProd<MediaCmd>, HeapCons<Box<PeerMedia>>, MediaPort
 impl MediaPortRt {
     /// 워커 반복 맨 앞: 명령을 끝까지 비워 표에 반영한다. `table`은 용량을 미리 잡아 둔 `Vec`이다.
     /// 제거한 항목은 반환 큐로 보낸다. 모르는 키의 제거는 무시한다.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn drain(&mut self, table: &mut Vec<Box<PeerMedia>>) {
         while let Some(cmd) = self.next_cmd() {
             match cmd {
@@ -390,7 +390,7 @@ impl MediaSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::media_link::{media_link, MediaTx};
+    use crate::media_link::{media_link, MediaTx};
     use std::sync::atomic::AtomicBool;
 
     fn sample(n: u64) -> MediaStats {
@@ -560,18 +560,18 @@ mod tests {
     fn ingest_catches_up_profile_set_before_the_peer_reached_the_worker() {
         let (mut pm, _tx) = media(2, 0.2);
         let (_, jb) = pm.ingest(0.9);
-        assert_eq!(jb.tuning(), crate::engine::jitter::JitterTuning::from_profile(0.9));
+        assert_eq!(jb.tuning(), crate::jitter::JitterTuning::from_profile(0.9));
         let (_, jb) = pm.ingest(0.1);
-        assert_eq!(jb.tuning(), crate::engine::jitter::JitterTuning::from_profile(0.1));
+        assert_eq!(jb.tuning(), crate::jitter::JitterTuning::from_profile(0.1));
     }
 
     /// `ingest`는 큐를 끝까지 비워 지터 버퍼에 넣고, `publish`는 큐 넘침(`rx_dropped`)과 재생 여부를 발행한다.
     #[test]
     fn ingest_drains_queue_and_publish_reports_rx_dropped() {
-        use crate::net::media_link::AUDIO_QUEUE_PACKETS;
-        use crate::net::packet::{Header, PacketType};
+        use crate::media_link::AUDIO_QUEUE_PACKETS;
+        use crate::packet::{Header, PacketType};
         let (mut pm, mut tx) = media(5, 0.5);
-        let fcode = crate::engine::config::frame_code_from_samples(240).unwrap();
+        let fcode = crate::config::frame_code_from_samples(240).unwrap();
         let h = |seq: u32| Header { ptype: PacketType::Audio, ssrc: 5, seq, timestamp: seq * 240, flags: 0, frame_code: fcode };
         let pcm = [0u8; 480];
         for i in 0..(AUDIO_QUEUE_PACKETS as u32 + 3) {

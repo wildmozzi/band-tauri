@@ -8,13 +8,13 @@ use std::collections::HashSet;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-use band_lib::testing::net::media_link::{media_link, PeerKey};
-use band_lib::testing::net::types::PathKind;
+use band_dsp::media_link::{media_link, PeerKey};
+use band_dsp::types::PathKind;
 use band_lib::testing::net::crypto::KeyPair;
-use band_lib::testing::net::packet::{Header, PacketType};
+use band_dsp::packet::{Header, PacketType};
 use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor, ECHO_FLAG_REQUEST, ECHO_TAG};
 use band_lib::testing::net::relay::TYPE_RELAY_DATA;
-use band_lib::testing::net::types::DATA_PREFIX_BYTES;
+use band_dsp::types::DATA_PREFIX_BYTES;
 use band_lib::testing::net::{Net, NetOptions, AUDIO_SEQ_HANDOVER_GAP};
 
 

@@ -13,11 +13,11 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_dsp::config::{CodecKind, EngineConfig};
 use band_lib::testing::engine::device::fake::{FakeBackend, SourceFn};
 use band_lib::testing::engine::measure::{LoopbackReport, MeasureVerdict, ECHO_UNSTABLE_SPREAD_MS};
-use band_lib::testing::engine::mixer::MixControls;
-use band_lib::testing::net::types::PeerStateKind;
+use band_dsp::mixer::MixControls;
+use band_dsp::types::PeerStateKind;
 use band_lib::testing::engine::Engine;
 use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::testing::net::NetOptions;

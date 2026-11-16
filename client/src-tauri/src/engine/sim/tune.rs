@@ -14,18 +14,18 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::engine::mixer::MixControls;
-use crate::engine::stats::AudioCounters;
+use band_dsp::mixer::MixControls;
+use band_dsp::stats::AudioCounters;
 use crate::engine::worker::{CallbackTracker, PeerSources, PeerSourcesParts, WorkerStats, FINE_POLL, POLL};
-use crate::engine::codec::Encoder as SimEncoder;
-use crate::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
-use crate::engine::jitter::{JitterSettings, JitterStats};
+use band_dsp::codec::Encoder as SimEncoder;
+use band_dsp::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
+use band_dsp::jitter::{JitterSettings, JitterStats};
 use crate::engine::media_port::media_port;
-use crate::engine::peer_media::{MediaCmd, MediaSettings, PeerMedia};
+use band_dsp::peer_media::{MediaCmd, MediaSettings, PeerMedia};
 use crate::engine::record::MarkSink;
-use crate::net::media_link::{media_link, PeerKey};
+use band_dsp::media_link::{media_link, PeerKey};
 use crate::engine::rt::{output_path, SLOT_DRAIN, SLOT_FREE};
-use crate::net::packet::{Header, PacketType};
+use band_dsp::packet::{Header, PacketType};
 use rand::{Rng, SeedableRng};
 use ringbuf::traits::Producer;
 

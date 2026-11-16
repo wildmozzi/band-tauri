@@ -9,9 +9,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use crate::engine::config::{DriverKind, EngineConfig};
+use band_dsp::config::{DriverKind, EngineConfig};
 use crate::engine::rt::{InputRt, OutputRt};
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 use super::backend::AudioBackend;
 use super::cpal::CpalBackend;
@@ -93,7 +93,7 @@ impl AudioBackend for SystemBackend {
             rts
         };
         // cpal 콜백 스레드는 백엔드가 관리한다. 자체 WASAPI 시도(시간 초과 포함)가 남긴 값을 지운다(리뷰 M1).
-        counters.audio_thread.store(crate::engine::prio_slot::ThreadPriority::Unmanaged);
+        counters.audio_thread.store(band_dsp::prio_slot::ThreadPriority::Unmanaged);
         self.cpal.open(cfg, input, output, counters)
     }
 }

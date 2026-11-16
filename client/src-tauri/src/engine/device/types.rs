@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::engine::config::{DriverKind, INTERNAL_RATE};
+use band_dsp::config::{DriverKind, INTERNAL_RATE};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

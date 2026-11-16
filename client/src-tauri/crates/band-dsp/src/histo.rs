@@ -9,7 +9,7 @@ const SUB: usize = 8;
 const OCTAVES: usize = 17;
 pub const BUCKETS: usize = LINEAR + OCTAVES * SUB;
 
-pub(crate) fn bucket_of(us: u64) -> usize {
+pub fn bucket_of(us: u64) -> usize {
     if us < LINEAR as u64 {
         return us as usize;
     }
@@ -19,7 +19,7 @@ pub(crate) fn bucket_of(us: u64) -> usize {
 }
 
 /// 칸의 하한(µs).
-pub(crate) fn bucket_lower(i: usize) -> u64 {
+pub fn bucket_lower(i: usize) -> u64 {
     if i < LINEAR {
         return i as u64;
     }
@@ -41,7 +41,7 @@ pub(crate) fn bucket_value(i: usize) -> f64 {
 
 /// 칸 개수 배열의 `p` 분위수(µs): 순위 ceil(p·N)번째 표본이 든 칸의 대표값이되 실측 최대 `max_us`를 넘지 않는다.
 /// `total = 0`이면 0. RT 콜백 실행시간 히스토그램(`engine::cpuprof`)도 같은 칸을 쓴다.
-pub(crate) fn quantile_us(counts: &[u32], total: u64, max_us: f64, p: f64) -> f64 {
+pub fn quantile_us(counts: &[u32], total: u64, max_us: f64, p: f64) -> f64 {
     if total == 0 {
         return 0.0;
     }
@@ -72,5 +72,10 @@ mod tests {
             assert!((v - us as f64).abs() <= us as f64 / 8.0 + 0.5, "us {us} → {v}");
         }
         assert_eq!(bucket_of(u64::MAX), BUCKETS - 1);
+        // 칸 하한은 대표값 이하이고 제 칸에 든다(⑩-1에서 `net::txlat` 시험에서 옮김 — `bucket_value`는 크레이트 안에 둔다).
+        for i in 0..BUCKETS {
+            assert!(bucket_lower(i) as f64 <= bucket_value(i), "{i}");
+            assert_eq!(bucket_of(bucket_lower(i)), i, "{i}");
+        }
     }
 }

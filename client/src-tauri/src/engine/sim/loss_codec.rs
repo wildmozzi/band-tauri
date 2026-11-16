@@ -20,11 +20,11 @@ use std::time::{Duration, Instant};
 
 use rand::{Rng, SeedableRng};
 
-use crate::engine::codec::Encoder;
-use crate::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
-use crate::engine::jitter::{JitterBuffer, JitterSettings};
-use crate::engine::relay_codec::{loss_opus_perc, LossCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
-use crate::net::packet::{Header, PacketType, FLAG_OPUS};
+use band_dsp::codec::Encoder;
+use band_dsp::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
+use band_dsp::jitter::{JitterBuffer, JitterSettings};
+use band_dsp::relay_codec::{loss_opus_perc, LossCodecPolicy, DEFAULT_OPUS_LOSS_PERC};
+use band_dsp::packet::{Header, PacketType, FLAG_OPUS};
 use crate::net::peer::{ping_plain, LossReport, PING_PLAIN_MAX};
 
 const FRAME: usize = 120;
@@ -209,7 +209,7 @@ fn run(s: &Scenario, feedback: bool, kind: SignalKind, disc_thr: f32) -> RunOut 
     let at = |us: f64| t0 + Duration::from_micros(us as u64);
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     // 수신은 실제처럼 피어별 수신 큐를 거친다(엔진 ③-a3): 도착 → push, pop 직전에 비워 삽입.
-    let (mut mtx, mut mrx) = crate::net::media_link::media_link(crate::net::media_link::PeerKey::from_raw(1));
+    let (mut mtx, mut mrx) = band_dsp::media_link::media_link(band_dsp::media_link::PeerKey::from_raw(1));
     jb.set_consumer_lead(72.0);
     let mut pcm = Encoder::new(CodecKind::Pcm16, 1, 96_000).unwrap();
     let mut opus = Encoder::new(CodecKind::Opus, 1, 96_000).unwrap();

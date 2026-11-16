@@ -20,11 +20,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use band_lib::testing::engine::metronome::{measured_hidden_out_us, BeatScheduler, ClickRt, ClickShared, MetronomePlan, OutClock};
-use band_lib::testing::engine::mixer::MixControls;
+use band_dsp::mixer::MixControls;
 use band_lib::testing::engine::rt::{output_path, OutputRt};
-use band_lib::testing::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 use band_lib::testing::engine::worker::CallbackTracker;
-use band_lib::testing::net::clock::ClockSync;
+use band_dsp::clock::ClockSync;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
 
@@ -525,11 +525,11 @@ mod engines {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+    use band_dsp::config::{CodecKind, EngineConfig};
     use band_lib::testing::engine::device::fake::FakeBackend;
     use band_lib::testing::engine::metronome::MetronomeConfig;
-    use band_lib::testing::engine::mixer::MixControls;
-    use band_lib::testing::net::types::PeerStateKind;
+    use band_dsp::mixer::MixControls;
+    use band_dsp::types::PeerStateKind;
     use band_lib::testing::engine::Engine;
     use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
     use band_lib::testing::net::{clock_payload, parse_clock_payload, NetOptions};

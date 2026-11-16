@@ -1,0 +1,29 @@
+[package]
+name = "band-dsp"
+version = "0.1.0"
+description = "band 실시간 합주 엔진의 결정적 코어(코덱·지터·믹서·패킷 등)"
+authors = ["Band Team"]
+license = "MIT"
+edition = "2021"
+publish = false
+
+# 정의(ADR 제안 3, docs/overhaul/engine-stage5-10-scope.md 7.1·7.2절): 스레드를 만들지 않고, 소켓·파일·장치·OS API를
+# 부르지 않고, 벽시계를 읽지 않는 코드. 외부 의존은 아래 다섯뿐이다(`tests/architecture.rs`의 `dsp_crate_uses_only_dsp_deps`).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
+opus = "0.3"
+ringbuf = "0.4"
+rubato = "0.16"
+
+[dev-dependencies]
+# 지터 단위 테스트(`jitter/tests.rs`): 무작위 손실·지터 생성, 트레이스 해시(fixture), 보고 직렬화
+rand = "0.8"
+sha2 = "0.10"
+serde_json = "1"
+
+[features]
+# `config::DriverKind::supported()`가 ASIO를 목록에 넣는지(빌드 플래그일 뿐 — 장치 코드는 없다). `band`의 `asio`가 켠다.
+asio = []
+# 통합 테스트·하네스용 훅(`cfg(any(test, feature = "test-support"))`). `band`의 `test-support`가 켠다(⑨a와 같은 문).
+test-support = []

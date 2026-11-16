@@ -3,8 +3,8 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::net::packet::PacketType;
-use crate::net::types::{PathKind, PeerStateKind};
+use band_dsp::packet::PacketType;
+use band_dsp::types::{PathKind, PeerStateKind};
 
 use super::descriptor::{CandidateKind, MAX_CANDIDATES};
 

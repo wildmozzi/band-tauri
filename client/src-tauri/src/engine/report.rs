@@ -7,9 +7,10 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use super::prio_slot::ThreadPriority;
-use super::{config, jitter, relay_codec, Engine};
-use crate::net::types::{PathKind, PeerStateKind};
+use band_dsp::prio_slot::ThreadPriority;
+use super::Engine;
+use band_dsp::{config, jitter, relay_codec};
+use band_dsp::types::{PathKind, PeerStateKind};
 use crate::sys::prio;
 
 /// 워커 반복 시간 분포(엔진 ③c 측정, `Engine::take_worker_timing`). 단위는 `SendQueueStats`처럼 ms.
@@ -68,10 +69,10 @@ pub struct PeerStats {
     pub peer_echoing: bool,
     /// 이 피어에게 마지막으로 보낸 내 오디오의 코덱(아직 안 보냈으면 null). 릴레이 대역 때문에 PCM16 대신
     /// Opus로 보내면 'opus'이고 `txCodecAuto`가 true다(P1-4c).
-    pub tx_codec: Option<super::config::CodecKind>,
+    pub tx_codec: Option<band_dsp::config::CodecKind>,
     pub tx_codec_auto: bool,
     /// 자동 전환 이유(`txCodecAuto`일 때): 릴레이 대역 부하 / 상대가 보고한 수신 손실(P1-4e). 아니면 null.
-    pub tx_codec_reason: Option<super::relay_codec::CodecReason>,
+    pub tx_codec_reason: Option<band_dsp::relay_codec::CodecReason>,
     /// 이 피어가 Ping으로 알려 온 **내 소리의** 수신 손실률·은닉률(%, 그쪽 최근 5초). 보고가 3초 넘게 없으면 null
     /// (옛 엔진, 그쪽 재생 전). 손실 피드백 Opus 전환의 입력(P1-4e).
     pub remote_loss_pct: Option<f32>,
@@ -123,7 +124,7 @@ pub struct EngineStats {
     pub thread_priority: crate::sys::prio::ThreadPriorityStats,
     pub peers: Vec<PeerStats>,
     /// 릴레이 등록 상태(릴레이를 설정하지 않았으면 null).
-    pub relay: Option<crate::net::types::RelayStats>,
+    pub relay: Option<band_dsp::types::RelayStats>,
     /// 오디오 UDP DSCP 마킹 상태(P1-3, 네트워크 미시작이면 null).
     pub qos: Option<crate::net::qos::QosStats>,
     /// 송신 큐 지연: 프레임 생성(인코딩 전) → 피어별 send_to 완료, 직전 2초 창(P1-3, 네트워크 미시작이면 null).
@@ -243,7 +244,7 @@ impl Engine {
                         let first_audio_ms = ms.first_audio_ms(media.added_us);
                         let js = ms.js;
                         let (tx_codec, tx_codec_reason) = {
-                            use crate::engine::relay_codec::CodecReason;
+                            use band_dsp::relay_codec::CodecReason;
                             use crate::net::peer::{TX_CODEC_AUTO, TX_CODEC_AUTO_LOSS, TX_CODEC_OPUS, TX_CODEC_SENT};
                             let c = ns.tx_codec;
                             let kind = if c & TX_CODEC_OPUS != 0 { config::CodecKind::Opus } else { config::CodecKind::Pcm16 };
@@ -421,9 +422,9 @@ mod tests {
                 echo_requested: true,
                 echo_active: false,
                 peer_echoing: false,
-                tx_codec: Some(crate::engine::config::CodecKind::Opus),
+                tx_codec: Some(band_dsp::config::CodecKind::Opus),
                 tx_codec_auto: true,
-                tx_codec_reason: Some(crate::engine::relay_codec::CodecReason::LossFeedback),
+                tx_codec_reason: Some(band_dsp::relay_codec::CodecReason::LossFeedback),
                 remote_loss_pct: Some(2.5),
                 remote_conceal_pct: Some(2.6),
                 connect_ms: Some(95.5),

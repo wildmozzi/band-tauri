@@ -4,13 +4,13 @@ use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use crate::engine::config::{MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
-use crate::engine::relay_codec::CodecReason;
+use band_dsp::config::{MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
+use band_dsp::relay_codec::CodecReason;
 
-use super::packet::{self, Header, PacketType};
+use band_dsp::packet::{self, Header, PacketType};
 use super::peer::{self, Peer};
 use super::relay;
-use super::types::{PathKind, DATA_PREFIX_BYTES};
+use band_dsp::types::{PathKind, DATA_PREFIX_BYTES};
 use super::{NetShared, PeerTableCopy, SEND_BUF_BYTES};
 
 impl NetShared {
@@ -228,7 +228,7 @@ impl NetShared {
     /// 에코 모드: 피어가 보낸 Audio 평문을 그대로(디코드 없이) 그 피어에게 되돌린다. 타임스탬프는 내 송신
     /// 스트림에 이어지게 바꾼다(상대 지터 버퍼가 시각 점프를 보지 않게). 자기 입력은 섞지 않는다.
     pub(super) fn reflect_audio(&self, p: &Peer, h: &Header, plain: &[u8], received: Instant) {
-        let frame = crate::engine::config::frame_samples_from_code(h.frame_code).unwrap_or(0) as u32;
+        let frame = band_dsp::config::frame_samples_from_code(h.frame_code).unwrap_or(0) as u32;
         let ts = {
             let mut e = p.echo();
             if !e.reflecting(received) {

@@ -14,9 +14,9 @@ use std::any::Any;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::engine::config::{DriverKind, EngineConfig};
+use band_dsp::config::{DriverKind, EngineConfig};
 use crate::engine::rt::{InputRt, OutputRt};
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 use super::backend::AudioBackend;
 use super::types::*;

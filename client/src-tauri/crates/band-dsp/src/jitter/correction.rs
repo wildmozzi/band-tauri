@@ -2,7 +2,7 @@
 
 use super::stats::RateRing;
 use super::{samples_per_ms, JitterBuffer, State, LOSS_WINDOW_MAX, MAX_PKT_FRAME};
-use crate::engine::config::INTERNAL_RATE;
+use crate::config::INTERNAL_RATE;
 
 /// 깊이 EWMA 계수(버스트당 1회 측정).
 const DEPTH_ALPHA: f64 = 0.05;

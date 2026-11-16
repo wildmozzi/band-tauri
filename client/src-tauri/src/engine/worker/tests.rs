@@ -1,7 +1,7 @@
 use super::*;
-use super::super::jitter::JitterBuffer;
+use band_dsp::jitter::JitterBuffer;
 use super::local::{gcd, lcm};
-use crate::engine::config::MAX_PAYLOAD_BYTES;
+use band_dsp::config::MAX_PAYLOAD_BYTES;
 use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
 
@@ -283,11 +283,11 @@ fn local_fifo_tracks_device_clock_difference() {
 // 콜백 구동 믹스 결정적 시뮬레이션(P1-0): 송신 장치 → 패킷 → 지터 버퍼 → PeerFeed(워커) → OutputRt(콜백)
 // ------------------------------------------------------------------------
 
-use crate::engine::codec::Encoder as SimEncoder;
-use crate::engine::config::CodecKind;
-use crate::engine::jitter::{JitterSettings, JitterStats};
+use band_dsp::codec::Encoder as SimEncoder;
+use band_dsp::config::CodecKind;
+use band_dsp::jitter::{JitterSettings, JitterStats};
 use crate::engine::rt::output_path;
-use crate::net::packet::{Header, PacketType};
+use band_dsp::packet::{Header, PacketType};
 
 /// 출력 레이트 불일치(엔진 ⑧ 후속): 실려 온 공급 리샘플러의 레이트가 워커의 장치 레이트와 다르면 워커는 **새로 만들지 않고**
 /// 그 피어에 슬롯을 주지 않는다(표에는 남아 `ingest`·`publish`는 계속한다). 맞는 피어는 가장 낮은 빈 슬롯을 받는다. 제거하면
@@ -295,11 +295,11 @@ use crate::net::packet::{Header, PacketType};
 #[test]
 fn mismatched_feed_resampler_gets_no_slot_and_worker_never_allocates() {
     use crate::engine::media_port::media_port;
-    use crate::engine::peer_media::{MediaCmd, MediaSettings, PeerMedia};
+    use band_dsp::peer_media::{MediaCmd, MediaSettings, PeerMedia};
     use crate::engine::record::MarkSink;
     use crate::engine::sim::alloc::counted;
     use ringbuf::traits::Producer;
-    use crate::net::media_link::{media_link, PeerKey};
+    use band_dsp::media_link::{media_link, PeerKey};
     let counters = Arc::new(AudioCounters::default());
     let (_rt, feed) = output_path(counters.clone(), Arc::new(MixControls::default()));
     let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
@@ -406,7 +406,7 @@ fn run_feed_sim(p: FeedSim) -> FeedSimResult {
     let sh = &feed.bank.slots[slot];
     sh.set_gains((1.0, 1.0), (1.0, 1.0));
     sh.state.store(SLOT_ACTIVE, Ordering::Release);
-    let mut pf = PeerFeed::new(slot, crate::engine::resample::StreamResampler::new(INTERNAL_RATE, 48_000, 2).unwrap(), sh);
+    let mut pf = PeerFeed::new(slot, band_dsp::resample::StreamResampler::new(INTERNAL_RATE, 48_000, 2).unwrap(), sh);
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     let mut tracker = CallbackTracker::new(48_000);
     let mut enc = SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap();

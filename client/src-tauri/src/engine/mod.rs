@@ -4,28 +4,17 @@
 //! 워커 1개, 네트워크 수신/제어 스레드, (구독 시) 믹스 탭 스레드.
 //! `Engine::stop`(또는 drop)은 모든 스레드를 멈추고 join한다.
 
-pub mod codec;
-pub mod config;
 pub mod cpuprof;
 pub mod device;
 pub mod flac;
-pub mod histo;
-pub mod jitter;
 #[cfg(test)]
 mod sim;
 pub mod measure;
 pub mod media_port;
 pub mod metronome;
-pub mod mixer;
-pub mod peer_media;
-pub mod prio_slot;
 pub mod record;
-pub mod relay_codec;
 pub mod report;
-pub mod resample;
 pub mod rt;
-pub mod rt_timing;
-pub mod stats;
 #[cfg(windows)]
 pub mod wasapi;
 pub mod wav;
@@ -41,25 +30,25 @@ use parking_lot::Mutex;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
 
-use crate::net::media_link::{media_link, PeerKey};
+use band_dsp::media_link::{media_link, PeerKey};
 use crate::net::peer::LocalDescriptor;
 use crate::net::{Net, NetOptions};
 use crate::sys::prio;
-use config::{EngineConfig, INTERNAL_RATE};
+use band_dsp::config::{EngineConfig, INTERNAL_RATE};
 use device::{AudioBackend, StreamInfo};
-use jitter::JitterSettings;
+use band_dsp::jitter::JitterSettings;
 use measure::{EchoJob, LoopbackJob};
-use mixer::{clamp_gain, MixControls};
+use band_dsp::mixer::{clamp_gain, MixControls};
 use media_port::{media_port, MediaPort};
-use peer_media::{MediaCmd, MediaSettings, PeerMedia, PeerMediaShared};
+use band_dsp::peer_media::{MediaCmd, MediaSettings, PeerMedia, PeerMediaShared};
 use ringbuf::traits::Producer;
-use resample::StreamResampler;
+use band_dsp::resample::StreamResampler;
 use rt::InputRt;
-use stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 use worker::{Worker, WorkerParams, WorkerStats};
 
-// 반환 큐가 차지 않는 근거(`peer_media::MEDIA_RET_CAPACITY`): 명령 큐를 채운 제거 + 그 호출의 하나 + 정지 때 표에 남은 피어.
-const _: () = assert!(peer_media::MEDIA_RET_CAPACITY >= peer_media::MEDIA_CMD_CAPACITY + crate::net::MAX_PEERS + 2);
+// 반환 큐가 차지 않는 근거(`band_dsp::peer_media::MEDIA_RET_CAPACITY`): 명령 큐를 채운 제거 + 그 호출의 하나 + 정지 때 표에 남은 피어.
+const _: () = assert!(band_dsp::peer_media::MEDIA_RET_CAPACITY >= band_dsp::peer_media::MEDIA_CMD_CAPACITY + crate::net::MAX_PEERS + 2);
 
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
 pub type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
@@ -378,7 +367,7 @@ impl Engine {
         let m = reg.iter().find(|m| m.peer_id == peer_id).ok_or("알 수 없는 피어")?;
         m.mix.gain.store(clamp_gain(gain));
         m.mix.muted.store(muted, Ordering::Relaxed);
-        m.mix.pan.store(mixer::clamp_pan(pan.unwrap_or(0.0)));
+        m.mix.pan.store(band_dsp::mixer::clamp_pan(pan.unwrap_or(0.0)));
         Ok(())
     }
 

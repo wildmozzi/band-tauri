@@ -23,10 +23,10 @@ use super::enumerate::{
     activate, default_endpoint_id, endpoint_id, enumerator, err, find_device, friendly_name, mix_format, pick_exclusive_format, ComGuard,
 };
 use super::format::{classify, f32_to_i24, i24_to_f32, ErrClass, SampleKind, ShareMode, StreamFormat};
-use crate::engine::config::EngineConfig;
+use band_dsp::config::EngineConfig;
 use crate::engine::device::types::{device_name_from_id, device_tag, StreamInfo};
 use crate::engine::rt::{InputRt, OutputRt};
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 const HNS_PER_SEC: f64 = 10_000_000.0;
 /// 변환 버퍼(f32 샘플): 무음 캡처 패킷의 0, 24비트 패킹 변환. 독점 192kHz 8채널 50ms도 덮는다.
@@ -657,7 +657,7 @@ pub fn open_engine_streams(
             Err(message) => {
                 // 이 스레드는 곧 끝나고 MMCSS 등록도 풀린다. 다음 시도(다른 모드 또는 cpal 폴백)가 다시 적기 전까지
                 // 오디오 스레드는 우리가 관리하지 않는 상태다(리뷰 M1). send보다 먼저 적어 받는 쪽이 이 값을 본다.
-                c.audio_thread.store(crate::engine::prio_slot::ThreadPriority::Unmanaged);
+                c.audio_thread.store(band_dsp::prio_slot::ThreadPriority::Unmanaged);
                 let _ = tx.send(Err(OpenFailure { message, rts: Some(Box::new((input, output))) }));
                 return;
             }
@@ -995,8 +995,8 @@ mod tests {
     #[test]
     fn failed_open_resets_audio_priority_to_unmanaged() {
         // 리뷰 M1: 열기 실패 후 cpal로 폴백하면 오디오 스레드 상태가 mmcss로 남으면 안 된다.
-        use crate::engine::mixer::MixControls;
-        use crate::engine::prio_slot::ThreadPriority;
+        use band_dsp::mixer::MixControls;
+        use band_dsp::prio_slot::ThreadPriority;
         use crate::engine::rt::{input_ring, output_path};
         let counters = Arc::new(AudioCounters::default());
         let (p, _c) = input_ring();

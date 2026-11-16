@@ -75,8 +75,8 @@ mod tuning;
 
 use std::collections::VecDeque;
 
-use super::config::{frame_samples_from_code, INTERNAL_RATE, MAX_PAYLOAD_BYTES};
-use crate::net::packet::Header;
+use crate::config::{frame_samples_from_code, INTERNAL_RATE, MAX_PAYLOAD_BYTES};
+use crate::packet::Header;
 
 pub use correction::{correction_catch_up_secs, correction_exit_ms, shift_n, shift_one, MAX_CORR_RATE};
 pub use stats::JitterStats;

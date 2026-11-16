@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
-use crate::engine::config::MAX_SOURCES;
+use band_dsp::config::MAX_SOURCES;
 
 /// 녹음 링이 버티는 시간(초). 디스크가 이만큼 멈춰도 버리지 않는다.
 const RING_SECONDS: usize = 3;

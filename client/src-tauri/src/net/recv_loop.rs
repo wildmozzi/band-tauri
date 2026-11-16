@@ -5,12 +5,12 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::engine::config::MAX_PACKET_BYTES;
+use band_dsp::config::MAX_PACKET_BYTES;
 
-use super::packet::{self, Header, PacketType};
+use band_dsp::packet::{self, Header, PacketType};
 use super::peer::{self, HandshakeOutcome, Peer};
 use super::relay::{self, AckAction};
-use super::types::PeerStateKind;
+use band_dsp::types::PeerStateKind;
 use super::{clock_payload, parse_clock_payload, NetShared};
 
 impl NetShared {

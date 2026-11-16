@@ -13,12 +13,12 @@ use ringbuf::traits::{Observer, Producer};
 use ringbuf::HeapProd;
 
 use super::{chunk_dev, in_burst48, out_burst_dev, to48, LocalFifo, WorkerStats, OUT_CHUNK};
-use crate::engine::config::INTERNAL_RATE;
+use band_dsp::config::INTERNAL_RATE;
 use crate::engine::device::StreamInfo;
-use crate::engine::mixer::MixControls;
-use crate::engine::resample::StreamResampler;
+use band_dsp::mixer::MixControls;
+use band_dsp::resample::StreamResampler;
 use crate::engine::rt::SourceShared;
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 pub(super) struct LocalPath {
     /// 내부 채널 수(1이면 `push`가 스테레오로 펼친다).

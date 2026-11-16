@@ -4,8 +4,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use super::packet::PacketType;
-use super::types::{PathKind, PeerStateKind};
+use band_dsp::packet::PacketType;
+use band_dsp::types::{PathKind, PeerStateKind};
 use super::{connlog, peer, qos, relay, txlat, NetShared, MAX_PEERS};
 
 /// 릴레이 경로 피어가 이 시간 넘게 조용하면 릴레이 keepalive를 당겨 보낸다(릴레이 재시작 감지).

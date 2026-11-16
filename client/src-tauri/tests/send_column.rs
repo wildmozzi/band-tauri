@@ -24,13 +24,13 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use band_lib::testing::engine::codec::Encoder;
-use band_lib::testing::engine::config::{CodecKind, EngineConfig, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
+use band_dsp::codec::Encoder;
+use band_dsp::config::{CodecKind, EngineConfig, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
 use band_lib::testing::engine::device::fake::{FakeBackend, SourceFn};
-use band_lib::testing::engine::mixer::MixControls;
+use band_dsp::mixer::MixControls;
 use band_lib::testing::engine::Engine;
 use band_lib::testing::net::crypto::KeyPair;
-use band_lib::testing::net::packet::{path_tag, Header, PacketType, FLAG_OPUS, FLAG_STEREO};
+use band_dsp::packet::{path_tag, Header, PacketType, FLAG_OPUS, FLAG_STEREO};
 use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::testing::net::NetOptions;
 use sha2::{Digest, Sha256};

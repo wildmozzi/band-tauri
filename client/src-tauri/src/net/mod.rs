@@ -1,16 +1,12 @@
 //! UDP 소켓과 송수신/제어 스레드 (설계 문서 1.1, 2, 3절).
 
-pub mod clock;
 pub mod connlog;
 pub mod crypto;
-pub mod media_link;
-pub mod packet;
 pub mod peer;
 pub mod qos;
 pub mod relay;
 pub mod stun;
 pub mod txlat;
-pub mod types;
 mod control_loop;
 mod recv_loop;
 mod send;
@@ -23,13 +19,13 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Mutex, RwLock};
 
-use crate::engine::config::MAX_PACKET_BYTES;
-use media_link::{MediaTx, PeerKey};
+use band_dsp::config::MAX_PACKET_BYTES;
+use band_dsp::media_link::{MediaTx, PeerKey};
 use crypto::KeyPair;
-use packet::PacketType;
+use band_dsp::packet::PacketType;
 use peer::{Candidate, CandidateKind, LocalDescriptor, Peer, PeerSetup};
 use relay::{RelayClient, RelayToken};
-use types::{PathKind, RelayStats, DATA_PREFIX_BYTES};
+use band_dsp::types::{PathKind, RelayStats, DATA_PREFIX_BYTES};
 
 use control_loop::control_loop;
 use recv_loop::recv_loop;
@@ -129,7 +125,7 @@ pub struct NetShared {
     epoch: Instant,
     stop: AtomicBool,
     /// 수신 스레드 우선순위 설정 결과(P1-2).
-    pub recv_prio: crate::engine::prio_slot::PrioSlot,
+    pub recv_prio: band_dsp::prio_slot::PrioSlot,
     allow_loopback: bool,
     /// UDP 릴레이 클라이언트(P1-4b). 토큰을 받기 전에는 None.
     relay: Mutex<Option<RelayClient>>,
@@ -717,7 +713,7 @@ mod copy_tests {
     }
 
     fn add(n: &Net, id: &str, k: u64) {
-        n.add_peer(id.into(), &desc(k as u32 + 100), media_link::media_link(PeerKey::from_raw(k)).0).unwrap();
+        n.add_peer(id.into(), &desc(k as u32 + 100), band_dsp::media_link::media_link(PeerKey::from_raw(k)).0).unwrap();
     }
 
     fn ids(c: &PeerTableCopy) -> Vec<String> {

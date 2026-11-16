@@ -6,7 +6,7 @@ use std::time::Instant;
 use super::enumerate::{enumerator, ComGuard};
 use super::format::{ShareMode, StreamFormat};
 use super::stream::{run_loop, DevBuf, DirStream, LoopEnd, SCRATCH_SAMPLES};
-use crate::engine::stats::AudioCounters;
+use band_dsp::stats::AudioCounters;
 
 // ============================================================================
 // 스모크 테스트(examples/wasapi_probe.rs)

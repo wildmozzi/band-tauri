@@ -4,8 +4,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::engine::config::INTERNAL_RATE;
-use crate::engine::stats::AtomicF32;
+use band_dsp::config::INTERNAL_RATE;
+use band_dsp::stats::AtomicF32;
 
 /// 다음 클릭 없음.
 pub const NO_CLICK: u64 = u64::MAX;

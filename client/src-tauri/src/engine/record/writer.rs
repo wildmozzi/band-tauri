@@ -15,7 +15,7 @@ use super::marks::{MarkEvent, MarkKind, MarkSink, MARK_CAP};
 use super::rt_ring::{alloc_rings, InFlight, InFlightGuard, RecBlock, RecordPortCtl, RecordRt, RecordRtShared};
 use super::sidecar::{default_session_name, public_track, sanitize_name, unique_dir, MarkerTrack, MarkersFile, RecordMarker, RecordOptions, RecordStats, RecordSummary, RecordTrack, TrackKind};
 use crate::diag::mask::pseudonymize;
-use crate::engine::config::{LOCAL_SOURCE, MAX_SOURCES};
+use band_dsp::config::{LOCAL_SOURCE, MAX_SOURCES};
 use crate::engine::flac::FlacWriter;
 use crate::engine::wav::{RecordFormat, WavWriter};
 
