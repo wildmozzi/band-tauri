@@ -698,6 +698,15 @@ const ECHO_TAP_SLACK_S: f64 = 0.5;
 pub const ECHO_MAX_RUNS: u32 = 20;
 const WORKER_UNRESPONSIVE: &str = "오디오 워커가 응답하지 않습니다";
 
+/// 용량 `cap`의 빈 버퍼. 측정 스레드에서 **미리 한 번 만져 둔다** — `with_capacity`만 하면 워커가 처음 채울 때 4KB마다
+/// 페이지 폴트로 커널에 들어간다(#140 리뷰 L1). 0이 아닌 값으로 채운다(0은 페이지를 안 만지고 끝낼 수 있다).
+fn prefaulted<T: Copy + From<f32>>(cap: usize) -> Vec<T> {
+    let mut v = Vec::with_capacity(cap);
+    v.resize(cap, T::from(1.0));
+    v.clear();
+    v
+}
+
 /// 클릭을 `runs`회 보낸 뒤 돌아오기를 듣는 시간(초).
 fn echo_listen_s(runs: u32) -> f64 {
     runs as f64 * CLICK_INTERVAL as f64 / INTERNAL_RATE as f64 + MAX_ECHO_MS / 1000.0 + 0.1
@@ -733,6 +742,8 @@ pub struct EchoProbe {
     pub arrival_us: Vec<f64>,
     /// 탭 버퍼가 차서 버린 샘플 수(0이 아니면 측정이 불안정하다).
     pub overflow: u64,
+    /// 탭 버퍼 상한(샘플). 두 `Vec`의 실제 용량은 이 이상이다 — 넘침은 이 값으로 판정한다(용량이 서로 달라도 늘지 않게).
+    tap_cap: usize,
 }
 
 impl EchoProbe {
@@ -756,8 +767,9 @@ impl EchoProbe {
             cursor: None,
             emitted_us: Vec::with_capacity(ECHO_MAX_RUNS as usize),
             tap: false,
-            arrivals: Vec::with_capacity(tap_cap),
-            arrival_us: Vec::with_capacity(tap_cap),
+            arrivals: prefaulted(tap_cap),
+            arrival_us: prefaulted(tap_cap),
+            tap_cap,
             overflow: 0,
         }))
     }
@@ -787,7 +799,7 @@ impl EchoProbe {
                 self.cursor = Some(0);
                 self.clicks_left -= 1;
                 self.until_next = CLICK_INTERVAL;
-                if self.emitted_us.len() < self.emitted_us.capacity() {
+                if self.emitted_us.len() < ECHO_MAX_RUNS as usize {
                     self.emitted_us.push(now_us - (f - pos) as f64 * 1e6 / INTERNAL_RATE as f64);
                 }
             }
@@ -819,7 +831,7 @@ impl EchoProbe {
         }
         let step = 1e6 / INTERNAL_RATE as f64;
         for (m, fr) in stereo.as_chunks::<2>().0.iter().enumerate() {
-            if self.arrivals.len() == self.arrivals.capacity() {
+            if self.arrivals.len() >= self.tap_cap {
                 self.overflow += 1;
                 continue;
             }
@@ -1094,10 +1106,25 @@ struct EchoMaterials {
     path: Option<crate::net::types::PathKind>,
 }
 
+/// `EchoPort::begin`의 짝을 drop에서 맞춘다(#140 리뷰 L4): 측정 도중 패닉해도 워커가 프로브를 돌려주고(`stop`) 다음 측정을
+/// 시작할 수 있다(`end`). 둘 다 다시 불러도 같다.
+struct EchoSession<'a> {
+    port: &'a EchoPort,
+    id: u32,
+}
+
+impl Drop for EchoSession<'_> {
+    fn drop(&mut self) {
+        self.port.stop(self.id);
+        self.port.end();
+    }
+}
+
 impl EchoJob {
     /// 상대 동의를 `wait`까지 기다린 뒤 `runs`회(1..=20) 클릭을 보내 왕복을 잰다. 블로킹.
     pub fn run(&self, runs: u32, wait: Duration, cancel: &AtomicBool) -> Result<EchoReport, String> {
         let id = self.port.begin()?;
+        let session = EchoSession { port: &self.port, id };
         let mut installed = false;
         let res = self.run_inner(id, runs.clamp(1, ECHO_MAX_RUNS), wait, cancel, &mut installed);
         // 정리: 요청을 거두고, 상대가 에코를 멈출 때까지 무음을 보낸 뒤(프로브는 그동안 워커에 남는다) 프로브를 거두고,
@@ -1110,7 +1137,7 @@ impl EchoJob {
         self.port.stop(id);
         let probe = if installed { self.port.recover(id, ECHO_RETURN_WAIT) } else { None };
         self.media.request_restart();
-        self.port.end();
+        drop(session);
         let m = res?;
         // 프로브(수집 버퍼)를 못 받으면 수집한 값은 버린다. 받은 프로브는 여기(측정 스레드)에서 해제된다.
         let probe = probe.ok_or(WORKER_UNRESPONSIVE)?;
@@ -1606,16 +1633,17 @@ mod tests {
     fn echo_probe_tap_is_bounded() {
         let mut p = test_probe(1);
         p.start_clicks(2);
-        let cap = p.arrivals.capacity();
+        let cap = p.tap_cap;
+        let caps = (p.arrivals.capacity(), p.arrival_us.capacity());
         assert!(cap >= ((echo_listen_s(2) + ECHO_TAP_SLACK_S) * 48_000.0) as usize && cap < 96_000, "{cap}");
         let chunk = [0.25f32; 128];
         for _ in 0..cap / 64 + 10 {
             p.record(&chunk, 0.0);
         }
         assert_eq!((p.arrivals.len(), p.arrival_us.len()), (cap, cap));
-        assert_eq!(p.arrivals.capacity(), cap, "버퍼가 늘지 않았다");
+        assert_eq!((p.arrivals.capacity(), p.arrival_us.capacity()), caps, "버퍼가 늘지 않았다");
         assert!(p.overflow > 0);
         // 클릭 송신 시각도 용량(상한 20) 안에서만
-        assert_eq!(p.emitted_us.capacity(), ECHO_MAX_RUNS as usize);
+        assert!(p.emitted_us.capacity() >= ECHO_MAX_RUNS as usize);
     }
 }

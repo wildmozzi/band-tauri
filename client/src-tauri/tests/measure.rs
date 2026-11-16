@@ -499,13 +499,22 @@ fn echo_requires_consent_and_times_out() {
 }
 
 /// 엔진 ②b-5(설계 3.3절 H1): 에코 측정이 결과를 거둔 뒤에도 **상대가 반사를 멈출 때까지** 측정 대상 피어에게는 무음이 나간다.
-/// 프로브를 결과 수거 시점에 거두면(탭 끝 = 반환) 상대가 반사를 멈추기 전에 내 실제 소리가 내게 되돌아온다.
+/// 프로브를 결과 수거 시점에 거두면(탭 끝 = 반환) 그때부터 내 실제 소리가 상대에게 나간다 — 요청 해제 Ping이 유실되면
+/// 상대는 다음 Ping까지 그것을 내게 되돌린다.
 ///
-/// A의 입력은 사인(진폭 0.5), B의 입력은 무음, 편도 40ms 프록시. A의 출력에는 B의 스트림만 들리므로:
-/// - 반사 경로가 내 실제 소리를 나른다는 것부터 본다(공허한 시험이 아니게): 상대 동의 직후 ~ 프로브 설치 전에 보낸
-///   내 사인이 되돌아와 측정 초반에 들린다.
-/// - 클릭이 끝난 뒤(결과 수거 무렵)부터 측정이 돌아온 뒤 0.3초까지는 **완전한 무음**이어야 한다. 프로브를 일찍 거두는
-///   구현에서는 그 사이 보낸 사인(≥ 편도 40ms분)이 왕복 80ms 뒤 이 창에 들린다.
+/// A의 입력은 사인(진폭 0.5), B의 입력은 무음, 편도 100ms(= D) 프록시. **B가 받는 오디오**(B의 출력 = A의 스트림)를
+/// B가 반사를 멈춘 시점(B의 `echo_active`가 꺼진 때 = 요청 해제 Ping이 B에 닿은 때) 기준으로 본다:
+/// - 올바른 구현: A는 "B가 반사를 멈췄다"는 표시가 돌아온 뒤(B의 다음 Ping, D 이상 뒤)에야 프로브를 놓고, 그 뒤 나간
+///   사인은 다시 D 뒤에 B에 닿는다 → B가 반사를 멈춘 뒤 **2D = 200ms 이상** B의 출력은 무음이다.
+/// - 프로브를 결과 수거 때 거두는 구현(`run_inner`의 `tap_off` → `stop`): 사인이 요청 해제 Ping과 거의 같이 나가므로
+///   B가 반사를 멈춘 직후(지터 버퍼만큼 뒤)부터 들린다.
+///
+/// 그래서 "B가 반사를 멈춘 뒤 150ms 동안 B의 출력이 무음"을 단언한다(이 변이에서 실패함을 확인했다, #140 리뷰 M1).
+/// 기준을 `run()` 반환 시점으로 잡지 않는 이유: `run()`은 프로브 회수 뒤 분석까지 하고 돌아오는데 디버그 빌드에서는 분석이
+/// 수백 ms라 반환 시점에는 이미 B에 내 소리가 닿아 있다.
+///
+/// A의 출력(되돌아온 소리)도 본다. 다만 그쪽 단언 (2)는 **요청 해제 Ping이 제때 닿는 이 시험에서는 변이를 못 잡는다**:
+/// B가 Ping을 내 실제 소리보다 먼저 받아 바로 반사를 멈추기 때문이다. Ping 유실 상황의 A 쪽 관찰은 하지 않는다.
 #[test]
 #[ignore = "realtime: 결정적 짝 engine::measure::tests::echo_rt_follows_measure_signals(탭을 꺼도 프로브는 stop까지 워커에 남는다)"]
 fn echo_target_gets_silence_until_peer_stops_echoing() {
@@ -518,40 +527,70 @@ fn echo_target_gets_silence_until_peer_stops_echoing() {
     });
     let backend_a = FakeBackend::new(48_000, sine);
     let sink_a = backend_a.sink.clone();
+    let backend_b = FakeBackend::silence(48_000);
+    let sink_b = backend_b.sink.clone();
     let a = Engine::start(config(128), Arc::new(backend_a), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
-    let b = Engine::start(config(128), Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
-    let _proxy = DelayProxy::start(local_addr(&a), local_addr(&b), Duration::from_millis(40));
+    let b = Engine::start(config(128), Arc::new(backend_b), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let _proxy = DelayProxy::start(local_addr(&a), local_addr(&b), Duration::from_millis(100));
     a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), _proxy.pa)).unwrap();
     b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), _proxy.pb)).unwrap();
     wait_connected(&a);
     wait_connected(&b);
     assert!(wait_until(HANG, || real_frames(&a) >= 320 && real_frames(&b) >= 320), "양방향 오디오가 흐르지 않음");
-    // 측정 전: A는 B의 무음만 듣는다
-    let peak = |from: usize, to: usize| -> f32 {
-        let s = sink_a.lock();
+    let peak_of = |sink: &Arc<Mutex<Vec<f32>>>, from: usize, to: usize| -> f32 {
+        let s = sink.lock();
         s[from.min(s.len())..to.min(s.len())].iter().fold(0f32, |m, x| m.max(x.abs()))
     };
+    let frames = |ms: usize| ms * 48 * 2; // 스테레오 인터리브 샘플 수
+    // 측정 전: A는 B의 무음만 듣고, B는 A의 사인을 듣는다(B 쪽 관찰이 공허하지 않다는 확인)
     let n_before = sink_a.lock().len();
-    assert!(peak(n_before.saturating_sub(9_600), n_before) < 0.02, "측정 전 A의 출력은 무음(B의 입력)");
+    assert!(peak_of(&sink_a, n_before.saturating_sub(9_600), n_before) < 0.02, "측정 전 A의 출력은 무음(B의 입력)");
+    assert!(wait_until(HANG, || {
+        let n = sink_b.lock().len();
+        peak_of(&sink_b, n.saturating_sub(frames(50)), n) > 0.2
+    }), "측정 전 B는 A의 사인을 들어야 한다");
 
     let b = Arc::new(Mutex::new(b));
     let stop = Arc::new(AtomicBool::new(false));
     let acc = auto_accept(b.clone(), stop.clone());
+    // B가 반사를 시작했다가 멈추는 순간의 B 출력 위치를 잡는다(1ms 간격).
+    let watch = {
+        let (b, sink_b, stop) = (b.clone(), sink_b.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut was_active = false;
+            while !stop.load(Ordering::Relaxed) {
+                let active = b.lock().stats().peers.iter().any(|p| p.peer_id == "alice" && p.echo_active);
+                if was_active && !active {
+                    return Some(sink_b.lock().len());
+                }
+                was_active |= active;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            None
+        })
+    };
     let n_start = sink_a.lock().len();
     let rep = a.echo_job("bob").unwrap().run(3, Duration::from_secs(5), &AtomicBool::new(false)).unwrap();
-    let n_return = sink_a.lock().len();
+    let (n_return, nb_return) = (sink_a.lock().len(), sink_b.lock().len());
     stop.store(true, Ordering::Relaxed);
     assert!(acc.join().unwrap());
+    let nb_off = watch.join().unwrap().expect("B가 반사를 시작했다가 멈추는 것을 보지 못함");
     assert!(rep.detected_runs >= 2, "{rep:?}");
-    // 측정이 돌아온 뒤 0.3초를 더 본다(그때 되돌아올 소리가 있다면 이 안에 온다: 왕복 80ms + 버퍼)
-    let frames = |ms: usize| ms * 48 * 2; // 스테레오 인터리브 샘플 수
+    // (B) B가 반사를 멈춘 뒤 150ms 동안 B가 듣는 것은 무음이다: A는 그 표시가 돌아올 때까지 프로브를 쥐고 있었다.
+    assert!(wait_until(HANG, || sink_b.lock().len() >= nb_return + frames(600)), "B 출력이 진행하지 않음");
+    let b_late = peak_of(&sink_b, nb_off, nb_off + frames(150));
+    assert!(b_late < 0.02, "상대가 반사를 멈췄다는 것을 알기 전에 측정 대상에게 내 실제 소리가 나갔다: B 출력 최대 {b_late}");
+    // 측정 뒤에는 B가 다시 A의 사인을 듣는다(위 무음이 '아무것도 안 들림'이 아니라 프로브 때문이었다는 확인)
+    let b_after = peak_of(&sink_b, nb_return + frames(300), nb_return + frames(600));
+    assert!(b_after > 0.2, "측정이 끝난 뒤 B는 A의 소리를 다시 들어야 한다: 최대 {b_after}");
+    // 측정이 돌아온 뒤 0.3초를 더 본다(A 쪽)
     assert!(wait_until(HANG, || sink_a.lock().len() >= n_return + frames(300)), "출력이 진행하지 않음");
     // (1) 반사 경로는 내 실제 소리를 나른다: 동의 직후 프로브 설치 전에 나간 사인이 측정 초반 1초 안에 들린다
-    let early = peak(n_start, n_start + frames(1_000));
+    let early = peak_of(&sink_a, n_start, n_start + frames(1_000));
     assert!(early > 0.2, "측정 초반에 되돌아온 내 소리가 들려야 한다(반사 경로 확인): 최대 {early}");
-    // (2) 결과 수거 무렵부터 측정이 돌아온 뒤 0.3초까지 무음. 창 시작 = 반환 150ms 전: 마지막 클릭은 듣기 끝보다 0.48초
-    // 앞에 나갔고 그 반사는 0.28초 안에 돌아오므로 이 창에 클릭은 없다.
-    let late = peak(n_return.saturating_sub(frames(150)), n_return + frames(300));
+    // (2) 결과 수거 무렵부터 측정이 돌아온 뒤 0.3초까지 A의 출력은 무음(Ping이 제때 닿는 경우의 확인 — 변이는 (B)가 잡는다).
+    // 창 시작 = 반환 150ms 전: 마지막 클릭의 반사는 그 전에 다 돌아왔다.
+    let late = peak_of(&sink_a, n_return.saturating_sub(frames(150)), n_return + frames(300));
     assert!(late < 0.02, "상대가 반사를 멈추기 전에 내 실제 소리가 나갔다가 되돌아왔다: 최대 {late}");
     drop(a);
 }
