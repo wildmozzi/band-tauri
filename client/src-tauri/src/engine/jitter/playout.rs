@@ -1,6 +1,5 @@
 //! 재생: 시작, 패킷 생산(디코드·FEC/PLC·PCM 페이드), 패킷 버림, 언더런 정산.
 
-use super::late_budget::LATE_SKIP_BLOCKS;
 use super::{seq_diff, Correction, JitterBuffer, State, SLOT_COUNT};
 use crate::engine::codec::Decoder;
 
@@ -53,7 +52,7 @@ impl JitterBuffer {
         self.skip_missing_head();
         self.start_pad = (self.frame() as f64).min(2.5 * Self::samples_per_ms());
         self.start_pad_until_us = now_us + START_PAD_US;
-        self.tail_skip = LATE_SKIP_BLOCKS;
+        self.late.skip_start();
         let target = self.target_samples();
         let Some(depth) = self.depth_if_start(now_us) else {
             return;
@@ -113,7 +112,7 @@ impl JitterBuffer {
 
     fn push_loss(&mut self, lost: bool) {
         if lost && self.state == State::Playing {
-            self.lost_block = self.lost_block.saturating_add(1);
+            self.late.note_lost();
         }
         let win = self.rate_window();
         self.loss.push(lost, win);
