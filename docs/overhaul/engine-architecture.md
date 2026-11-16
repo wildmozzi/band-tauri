@@ -27,7 +27,7 @@
 |---|---|---|
 | `engine/metronome.rs` | 클릭 생성(E, RT) + 박 스케줄러(C) + 계획 Mutex·상태 칸(B, 워커 쪽 끝 `MetronomeRt`는 C) | ⑥ |
 | `engine/record.rs` | 출력 콜백 녹음 링(E, RT) + 쓰기 스레드·사이드카(비RT) | ⑥ |
-| `engine/measure.rs` | 루프백(장치) + 에코 프로브(워커) + 분석(알고리즘) | ⑥ |
+| ~~`engine/measure.rs`~~ | (⑥-4에서 해소) `measure/{analysis(1) 신호 처리·분석·판정, loopback(4) 루프백 작업, echo(4) 에코 프로브·큐·작업}`, `mod.rs`는 `pub use`만 | ⑥-4 완료 |
 | ~~`engine/stats.rs`~~ | (④에서 해소) 원자 카운터 `stats.rs`(1) · RT 타이밍 `rt_timing.rs`(1) · 보고 DTO와 `stats()` 조립 `report.rs`(5) | ④ 완료 |
 | `engine/device.rs` | 백엔드 선택 + cpal 백엔드 + 가짜 장치 + 공용 타입(`StreamInfo`) | ⑥ |
 | `net/peer.rs` | 피어 테이블·홀펀칭(D) + 미디어 상태 — ③-b에서 `JitterBuffer`·`PeerMixCtl`은 `engine::peer_media::PeerMediaShared`(엔진 등록부 소유)로 옮겼고 `Peer`는 그 `Arc`만 쥔다. ③-a3에서 수신 큐 생산자(`MediaTx`)로 바뀐다 | ③ |
@@ -172,10 +172,10 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 계층 | 노드 |
 |---|---|
 | 0 | `engine::config`, `net::packet`, `sys`, `sys::{prio, cpu, time}`(④) |
-| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `diag::mask` |
+| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `diag::mask`, `engine::measure::analysis`(⑥-4) |
 | 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1) |
 | 3 | `net`, `net::{peer, relay, stun, qos}` |
-| 4 | `engine::{worker, measure}`, 하네스 `engine::sim`(`cfg(test)`) |
+| 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), 하네스 `engine::sim`(`cfg(test)`) |
 | 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `settings`, `diag`, `diag::{timeline, export}` |
 | 6 | `commands`, `lib.rs`, `main.rs` |
 
@@ -240,7 +240,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/sim/{mod,tune,long,loss_codec}.rs` | 가상 시간 결정적 하네스(`cfg(test)`): 6피어 5·60분, 손실 피드백 | 하네스 시나리오 |
 | `engine/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
 | `engine/stats.rs`, `rt_timing.rs`, `report.rs` | RT·워커 원자 통계 카운터, RT 콜백 타이밍, 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
-| `engine/measure.rs` | 지연 측정: 루프백(처프·상호상관), 에코 클릭 | 측정 |
+| `engine/measure/{mod, analysis, loopback, echo}.rs` | 지연 측정: 신호 처리·분석·판정(`analysis`), 하드웨어 루프백 작업(`loopback`), 에코 프로브·측정 스레드 ↔ 워커 큐·작업(`echo`). `mod.rs`는 옛 경로 `engine::measure::…`를 `pub use`로 유지 | 측정 |
 | `engine/metronome.rs` | 공유 메트로놈: 계획·검증, 스케줄러, 클릭 생성기 | 메트로놈 |
 | `engine/record.rs`, `wav.rs`, `flac.rs` | 합주 녹음: RT 링·핸드오프, 쓰기 스레드, WAV/RF64·FLAC | 녹음 |
 | `engine/prio.rs`, `cpuprof.rs` | 스레드 우선순위·타이머 해상도, CPU 측정 | 플랫폼 |

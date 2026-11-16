@@ -209,7 +209,7 @@ fn simulate(p: Sim) -> SimResult {
         trace,
         silent_chunks: silent,
         discontinuities: disc,
-        tail_extra_ms: jb.tail_extra / 48.0,
+        tail_extra_ms: jb.late.tail_extra() / 48.0,
         net_loss_pct: net_lost as f64 * 100.0 / k.max(1) as f64,
         conceal_after_5s: {
             let a = at_5s.unwrap_or_default();
@@ -545,7 +545,7 @@ fn late_budget_tracks_tail_jitter_only() {
 /// 0.4%까지 선형으로 풀리며, 어디서도 하네스 GOAL 밖 회선 기준의 손실 너머 몫(0.5%p)에 닿지 않는다.
 #[test]
 fn late_budget_is_continuous_in_loss() {
-    let lb = JitterBuffer::late_budget;
+    let lb = late_budget::LateBudget::budget;
     for &target in &[0.030, 0.013, 0.006, JitterTuning::from_profile(0.25).conceal_target, JitterTuning::from_profile(0.75).conceal_target] {
         let mut prev = lb(target, 0.0);
         assert!((prev - target * 0.75).abs() < 1e-12);
@@ -654,7 +654,7 @@ fn late_budget_counts_packets_only_while_playing() {
     let (h, pk) = tx.next();
     jb.insert(&h, &pk, t);
     assert!(!jb.is_playing());
-    assert_eq!(jb.pkts_block, 0, "버퍼링 중 도착은 분모에 넣지 않는다");
+    assert_eq!(jb.late.probe().pkts_block, 0, "버퍼링 중 도착은 분모에 넣지 않는다");
     while !jb.is_playing() {
         t += 5000;
         let (h, pk) = tx.next();
@@ -663,11 +663,11 @@ fn late_budget_counts_packets_only_while_playing() {
         jb.end_burst(t, t, 0.0);
         assert!(t < 2_000_000, "재생 시작 안 됨");
     }
-    let before = jb.pkts_block;
+    let before = jb.late.probe().pkts_block;
     t += 5000;
     let (h, pk) = tx.next();
     jb.insert(&h, &pk, t);
-    assert_eq!(jb.pkts_block, before + 1, "재생 중 도착은 센다");
+    assert_eq!(jb.late.probe().pkts_block, before + 1, "재생 중 도착은 센다");
 }
 
 /// P1-6c(PR #63 리뷰 L2·L3): 경로 변경·스트림 리셋·프로필 변경은 늦은 패킷 예산을 초기화하고(프로필은 손실 링을 남김),
@@ -675,39 +675,32 @@ fn late_budget_counts_packets_only_while_playing() {
 #[test]
 fn late_budget_resets_on_path_stream_profile_and_skips_start() {
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
-    let dirty = |jb: &mut JitterBuffer| {
-        jb.tail_extra = 96.0;
-        jb.tail_fresh = 3;
-        jb.late_rates = [0.01; LATE_BLOCKS];
-        jb.loss_rates = [0.02; LATE_BLOCKS];
-        jb.loss_count = LATE_BLOCKS;
-        jb.late_block = 5;
-        jb.pkts_block = 100;
-    };
-    dirty(&mut jb);
+    let p = |jb: &JitterBuffer| jb.late.probe();
+    jb.late.dirty();
     jb.reset_delay_stats(0);
-    assert_eq!((jb.tail_extra, jb.tail_fresh, jb.loss_count, jb.pkts_block, jb.late_block), (0.0, 0, 0, 0, 0), "경로 변경");
+    let q = p(&jb);
+    assert_eq!((q.tail_extra, q.tail_fresh, q.loss_count, q.pkts_block, q.late_block), (0.0, 0, 0, 0, 0), "경로 변경");
     // 경로 변경 뒤에도 수렴 구간은 판단에서 뺀다(PR #65 리뷰 L1).
-    assert_eq!(jb.tail_skip, LATE_SKIP_BLOCKS);
+    assert_eq!(q.tail_skip, LATE_SKIP_BLOCKS);
     assert_eq!(jb.stats().tail_resets, 1);
-    dirty(&mut jb);
+    jb.late.dirty();
     jb.reset_stream();
-    assert_eq!((jb.tail_extra, jb.loss_count), (0.0, 0), "스트림 리셋");
-    dirty(&mut jb);
+    assert_eq!((p(&jb).tail_extra, p(&jb).loss_count), (0.0, 0), "스트림 리셋");
+    jb.late.dirty();
     jb.set_profile(1.0);
-    assert_eq!(jb.tail_extra, 0.0, "큰 프로필 변경(목표 1.3% → 0.6%)");
-    assert_eq!(jb.late_rates, [0.0; LATE_BLOCKS]);
-    assert_eq!(jb.loss_count, LATE_BLOCKS, "프로필 변경은 손실 링을 남긴다");
+    assert_eq!(p(&jb).tail_extra, 0.0, "큰 프로필 변경(목표 1.3% → 0.6%)");
+    assert_eq!(p(&jb).late_rates, [0.0; LATE_BLOCKS]);
+    assert_eq!(p(&jb).loss_count, LATE_BLOCKS, "프로필 변경은 손실 링을 남긴다");
     assert_eq!(jb.stats().tail_resets, 3);
     // 같은 프로필이면 아무것도 바꾸지 않는다.
-    dirty(&mut jb);
+    jb.late.dirty();
     jb.set_profile(1.0);
-    assert_eq!(jb.tail_extra, 96.0);
-    assert_eq!(jb.late_rates, [0.01; LATE_BLOCKS]);
+    assert_eq!(p(&jb).tail_extra, 96.0);
+    assert_eq!(p(&jb).late_rates, [0.01; LATE_BLOCKS]);
     // 작은 프로필 변경(1.0 → 0.9, 목표 0.6% → 0.74%)은 늦은 비율만 비우고 `tail_extra`는 남긴다(PR #65 리뷰 L2).
     jb.set_profile(0.9);
-    assert_eq!((jb.tail_extra, jb.tail_fresh), (96.0, 0));
-    assert_eq!(jb.late_rates, [0.0; LATE_BLOCKS]);
+    assert_eq!((p(&jb).tail_extra, p(&jb).tail_fresh), (96.0, 0));
+    assert_eq!(p(&jb).late_rates, [0.0; LATE_BLOCKS]);
     assert_eq!(jb.stats().tail_resets, 3);
 
     // 재생 시작 → 처음 블록 2개는 건너뛰고 세 번째부터 센다(재생 중 도착만 분모에 들어감).
@@ -724,8 +717,8 @@ fn late_budget_resets_on_path_stream_profile_and_skips_start() {
         t += 5000;
         assert!(t < 2_000_000, "재생 시작 안 됨");
     }
-    assert_eq!(jb.tail_skip, LATE_SKIP_BLOCKS);
-    assert_eq!(jb.loss_count, 0);
+    assert_eq!(p(&jb).tail_skip, LATE_SKIP_BLOCKS);
+    assert_eq!(p(&jb).loss_count, 0);
     while t < 6_000_000 {
         let (h, pk) = tx.next();
         jb.insert(&h, &pk, t);
@@ -733,9 +726,9 @@ fn late_budget_resets_on_path_stream_profile_and_skips_start() {
         jb.end_burst(t, t, 0.0);
         t += 5000;
     }
-    assert_eq!(jb.tail_skip, 0);
+    assert_eq!(p(&jb).tail_skip, 0);
     // 시작 뒤 약 6초 = 블록 5~6개 중 2개는 건너뜀.
-    assert!((3..=4).contains(&jb.loss_count), "센 블록 {}", jb.loss_count);
+    assert!((3..=4).contains(&p(&jb).loss_count), "센 블록 {}", p(&jb).loss_count);
 }
 
 #[test]
@@ -999,11 +992,11 @@ fn restart_matches_fresh_buffer() {
             }
             // 재시작 직전: 슬롯에 아직 안 꺼낸 패킷이 있어야 이 시험이 슬롯 초기화를 본다
             assert!(dirty.slots.iter().any(|s| s.valid), "{codec:?}: 남은 슬롯 없음 — 시험 입력을 고칠 것");
-            assert!(!dirty.block_rel.is_empty(), "{codec:?}: 블록 표본 없음 — 시험 입력을 고칠 것");
+            assert!(dirty.target.block_len() > 0, "{codec:?}: 블록 표본 없음 — 시험 입력을 고칠 것");
             let before = dirty.stats();
             dirty.restart();
             assert!(dirty.slots.iter().all(|s| !s.valid && s.len == 0 && s.seq == 0 && s.flags == 0 && s.frame == 0 && s.ts == 0));
-            assert!(dirty.fifo.is_empty() && dirty.scratch.is_empty() && dirty.block_rel.is_empty());
+            assert!(dirty.fifo.is_empty() && dirty.delay.scratch_is_empty() && dirty.target.block_len() == 0);
             assert!(dirty.loss.is_fresh() && dirty.conceal.is_fresh() && dirty.corr_ring.is_fresh());
             assert!(dirty.decoder.is_none(), "재시작 직후 디코더는 new처럼 비어 있다");
             let mut fresh = JitterBuffer::new(settings);

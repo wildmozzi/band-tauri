@@ -46,6 +46,7 @@ const NODES: &[(&str, u8)] = &[
     ("net::txlat", 1),
     ("net::types", 1),
     ("diag::mask", 1),
+    ("engine::measure::analysis", 1),
     // 2 E 장치 I/O·RT
     ("engine::rt", 2),
     ("engine::device", 2),
@@ -70,6 +71,8 @@ const NODES: &[(&str, u8)] = &[
     ("engine::worker", 4),
     ("engine::sim", 4),
     ("engine::measure", 4),
+    ("engine::measure::loopback", 4),
+    ("engine::measure::echo", 4),
     // 5 B 제어 평면
     ("engine", 5),
     ("engine::cpuprof", 5),
