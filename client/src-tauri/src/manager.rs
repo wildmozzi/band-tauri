@@ -393,6 +393,14 @@ mod tests {
         }
     }
 
+    /// 지금 `Starting`인 시작의 취소 플래그(같은 Arc). Starting이 아니면 실패.
+    fn starting_cancel(m: &EngineManager) -> Arc<AtomicBool> {
+        match &m.slot.lock().phase {
+            Phase::Starting { cancel } => cancel.clone(),
+            _ => panic!("Starting이 아님"),
+        }
+    }
+
     fn net() -> NetOptions {
         NetOptions {
             port: 0,
@@ -427,6 +435,22 @@ mod tests {
         b.open_gate = Some(gate.clone());
         b.exclusive = Some(held.clone());
         (gate, held, b)
+    }
+
+    #[test]
+    fn leave_cancels_starting_and_returns_engine() {
+        let mut p = Phase::Idle;
+        assert!(p.leave().is_none());
+        let cancel = Arc::new(AtomicBool::new(false));
+        p = Phase::Starting { cancel: cancel.clone() };
+        assert!(p.leave().is_none());
+        assert!(cancel.load(Ordering::SeqCst), "Starting을 떠나면 그 시작을 취소");
+        assert!(matches!(p, Phase::Idle));
+        let controls = Arc::new(MixControls::default());
+        let e = Engine::start(cfg(), Arc::new(FakeBackend::silence(48_000)), controls, None).unwrap();
+        p = Phase::Running(Box::new(e));
+        assert!(p.leave().is_some());
+        assert!(matches!(p, Phase::Idle));
     }
 
     #[test]
@@ -478,12 +502,18 @@ mod tests {
         let m1 = m.clone();
         let a = std::thread::spawn(move || m1.start(cfg(), "me".into()));
         assert!(gate.wait_entered(1, HANG));
+        let cancel_a = starting_cancel(&m);
+        assert!(!cancel_a.load(Ordering::SeqCst));
         let g0 = m.start_generation();
         let m2 = m.clone();
         let b = std::thread::spawn(move || m2.start(cfg(), "me".into()));
         assert!(wait_until(|| m.start_generation() > g0), "두 번째 start가 들어오지 않음");
         // 두 번째 시작은 start_lock에서 기다린다: 여전히 Starting(새 cancel)
         assert_eq!(phase(&m), P::Starting);
+        // 재시작은 이전 시작에 취소를 보낸다(장치 열기 뒤·STUN 중에 일찍 포기 — 세대 불일치만으로는 늦게 버린다)
+        assert!(cancel_a.load(Ordering::SeqCst), "재시작이 이전 시작의 cancel을 세우지 않음");
+        let cancel_b = starting_cancel(&m);
+        assert!(!Arc::ptr_eq(&cancel_a, &cancel_b) && !cancel_b.load(Ordering::SeqCst), "새 시작은 새 cancel");
         gate.release();
         let (ra, rb) = (a.join().unwrap(), b.join().unwrap());
         assert_eq!(ra.unwrap_err(), "엔진 시작이 취소되었습니다");
@@ -498,11 +528,13 @@ mod tests {
         let c = std::thread::spawn(move || m3.start(cfg(), "me".into()));
         assert!(gate.wait_entered(n + 1, HANG));
         assert_eq!(phase(&m), P::Starting);
+        let cancel_c = starting_cancel(&m);
         m.stop();
+        assert!(cancel_c.load(Ordering::SeqCst), "stop이 진행 중인 시작의 cancel을 세우지 않음");
         assert_eq!(phase(&m), P::Idle, "stop은 시작을 기다리지 않고 곧바로 Idle");
         assert!(!m.is_starting());
         gate.release();
-        assert!(c.join().unwrap().is_err());
+        assert_eq!(c.join().unwrap().unwrap_err(), "엔진 시작이 취소되었습니다");
         assert_eq!(phase(&m), P::Idle, "늦게 끝난 시작이 슬롯을 되살리지 않는다");
         assert!(!held.load(Ordering::SeqCst), "버린 결과의 장치는 닫혔다");
     }
@@ -537,7 +569,8 @@ mod tests {
 
     #[test]
     fn degraded_is_reported_not_transitioned() {
-        // 장치 분리: 엔진이 deviceLost를 보고해도 manager는 Running 그대로(전이는 프론트의 stop)
+        // 장치 분리: 엔진이 deviceLost를 보고해도 manager는 Running 그대로(전이는 프론트의 stop).
+        // 전이 시험과 달리 Degraded 감지는 문·세대가 아니라 폴링이다(엔진의 장치 감시 주기 약 1초, 상한 HANG).
         let mut b = FakeBackend::silence(48_000);
         b.halt_after = Some(Duration::from_millis(200));
         let m = EngineManager::new(Arc::new(b), net());
