@@ -7,7 +7,7 @@ use ringbuf::HeapProd;
 
 use super::super::config::INTERNAL_RATE;
 use super::super::jitter::JitterBuffer;
-use super::super::measure::EchoProbe;
+use super::super::measure::echo::EchoProbe;
 use super::super::resample::StreamResampler;
 use super::super::rt::SourceShared;
 use super::clock::FeedTiming;

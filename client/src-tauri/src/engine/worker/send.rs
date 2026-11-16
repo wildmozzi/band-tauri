@@ -16,7 +16,7 @@ use std::time::Instant;
 use super::auto_codec::AutoCodec;
 use crate::engine::codec::Encoder;
 use crate::engine::config::{CodecKind, EngineConfig, MAX_PACKET_BYTES, MAX_PAYLOAD_BYTES};
-use crate::engine::measure::{EchoProbe, EchoProbeFrame};
+use crate::engine::measure::echo::{EchoProbe, EchoProbeFrame};
 use crate::net::packet::{FLAG_OPUS, FLAG_STEREO};
 use crate::net::peer::Peer;
 use crate::net::types::PathKind;

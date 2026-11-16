@@ -151,15 +151,17 @@
 
 `mod.rs` 규칙: `metronome/mod.rs`에는 `mod` 선언과 `pub use`만 둔다. 형제 간선은 `sched → {click, plan}` 한 방향(`click`이 한계 상수를 쓰면 `click → plan`). `rt.rs`는 `metronome::click::ClickRt`로, 보고·어댑터는 `metronome::plan::…`으로 쓴다.
 
-**⑥-4 `measure`** 〔②b-5 뒤 갱신: `EchoProbe`·`EchoPort`〕
+**⑥-4 `measure`** 〔②b-5 뒤 갱신: `EchoProbe`·`EchoPort`. ⑥-4 구현(코드) 기준으로 고침〕
 
 | 하위 모듈(계층) | 심볼 |
 |---|---|
-| `analysis`(1) | `chirp`·`xcorr`·`Detection`·`detect_in`·`summarize`·`MeasureVerdict`·`single_outlier`·`EchoSummary`·`echo_summary`·`echo_message`·`verdict_*`(`:46-321`), `analyze_loopback`(`:576-613`), `click_template`(`:673`), `analyze_echo`(`:776-796`) — `rustfft`만 쓰는 순수 계산 |
-| `loopback`(4) | `CounterClock`(`:323-352`), 상수·`LoopbackRun`·`LoopbackReport`·`LoopbackJob`(`:357-574`), `drain`·`spin`·`wait_until`(`:615-667`) |
-| `echo`(4) | 상수(`:678-689`), `EchoProbe`(`:692-772`), `EchoReport`(`:799-839`), `EchoJob`(`:842-983`) |
+| `analysis`(1) | `chirp`·`xcorr`·`Detection`·`MIN_RATIO`·`MIN_COEFF`·`detect_in`·`summarize`·`MeasureVerdict`·`UNSTABLE_SPREAD_MS`·`ECHO_UNSTABLE_SPREAD_MS`·`ECHO_OUTLIER_MIN_RUNS`·`median_sorted`·`single_outlier`·`EchoSummary`·`echo_summary`·`echo_message`·`verdict_of`·`verdict_with`, `analyze_loopback`과 그 결과 `LoopbackRun`·한계 `MAX_LOOPBACK_MS`·`CLIP_LEVEL`, `click_template`·`analyze_echo`와 한계 `MAX_ECHO_MS`·`MAX_PEER_ECHO_DELAY_US`(`echo_message`가 씀)·`ECHO_MIN_RATIO`·`ECHO_MIN_COEFF`, 두 작업이 함께 쓰는 `CANCELLED`·`ms` — `rustfft`·`config::INTERNAL_RATE`만 쓰는 순수 계산. 단위 테스트(신호 처리·판정) |
+| `loopback`(4) | `CounterClock`, 상수(`STIM_SECONDS`·`STIM_AMP`·`PREROLL`·`RUN_GAP`·`ACK_TIMEOUT`), `LoopbackReport`·`LoopbackJob`, `drain`·`spin`·`wait_until` |
+| `echo`(4) | 상수(`CLICK_INTERVAL`·`ECHO_SETTLE`·`ECHO_STOP_WAIT`·`ECHO_RETURN_WAIT`·`ECHO_TAP_SLACK_S`·`ECHO_MAX_RUNS`·`WORKER_UNRESPONSIVE`·`ECHO_QUEUE`), `prefaulted`·`echo_listen_s`, `EchoProbe`·`EchoStream`·`EchoProbeFrame`·`EchoCtl`·`EchoPort`·`EchoPortRt`·`echo_port`·`EchoRt`, `EchoReport`·`EchoJob`·`EchoMaterials`·`EchoSession`. 단위 테스트(프로브·`EchoRt`) |
 
-`mod.rs` 규칙: `measure/mod.rs`에는 `mod` 선언과 `pub use`만 둔다. 형제 간선은 `loopback → analysis`, `echo → analysis` 한 방향이다. 워커(`worker::send`·`peer_sources`·`EchoRt`)는 `measure::echo::EchoProbe`로 쓴다.
+처음 표와 다른 점: `analyze_loopback`이 `LoopbackRun`을 만들고 `MAX_LOOPBACK_MS`·`CLIP_LEVEL`을, `analyze_echo`·`echo_message`가 에코 한계·문턱을 쓰므로 이것들도 `analysis`로 내렸다(`loopback`·`echo`에 두면 `analysis → 형제`가 생겨 순환). 형제가 쓰는 `CANCELLED`·`ms`(둘 다)·`verdict_of`(`loopback`)는 `pub(super)`로 `analysis`에 둔다. 노드 `engine::measure::{analysis, loopback, echo}`를 `architecture.rs`에 올렸다.
+
+`mod.rs` 규칙: `measure/mod.rs`에는 모듈 문서·`mod` 선언과 `pub use`만 둔다. 형제 간선은 `loopback → analysis`, `echo → analysis` 한 방향이다. 워커(`worker::{mod, send, peer_sources, peer_feed}`)는 `measure::echo::…`로 쓴다.
 
 **⑥-5 `wasapi`**
 
