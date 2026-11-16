@@ -16,7 +16,7 @@ use crate::engine::config::{DriverKind, EngineConfig};
 use crate::engine::measure::{EchoReport, LoopbackReport};
 use crate::engine::device::select::SystemBackend;
 use crate::engine::device::types::DeviceInfo;
-use crate::engine::metronome::{MetronomeConfig, MetronomePlan};
+use crate::engine::metronome::plan::{MetronomeConfig, MetronomePlan};
 use crate::engine::record::sidecar::{RecordOptions, RecordStats, RecordSummary};
 use crate::engine::report::EngineStats;
 use crate::manager::EngineManager;

@@ -48,6 +48,7 @@ const NODES: &[(&str, u8)] = &[
     ("net::types", 1),
     ("diag::mask", 1),
     ("engine::measure::analysis", 1),
+    ("engine::metronome::plan", 1),
     // 2 E 장치 I/O·RT
     ("engine::rt", 2),
     ("engine::device", 2),
@@ -62,6 +63,8 @@ const NODES: &[(&str, u8)] = &[
     ("engine::record::sidecar", 2),
     ("engine::record::writer", 2),
     ("engine::metronome", 2),
+    ("engine::metronome::click", 2),
+    ("engine::metronome::sched", 2),
     // 3 D 네트워크
     ("net", 3),
     ("net::peer", 3),
@@ -91,16 +94,13 @@ const NODES: &[(&str, u8)] = &[
 
 /// 현재 어긋남(고정): (from, to, 풀 단계). 위 계층으로 가는 간선, 같은 계층 순환을 끊을 간선, 어댑터의 직접 의존.
 /// 문서 5.3절 표와 같다. 단계를 끝내면 여기서 지운다(남아 있으면 `module_dependencies_follow_layers`가 실패).
-const EXCEPTIONS: &[(&str, &str, &str)] = &[
-    // 믹서가 메트로놈 기본 게인을 안다(metronome.rs가 RT 클릭·스케줄러·계획을 한 파일에) → ⑥ metronome 계층별 분리.
-    ("engine::mixer", "engine::metronome", "⑥"),
-];
+const EXCEPTIONS: &[(&str, &str, &str)] = &[];
 
 /// 예외 수 상한(래칫). 단계를 끝내 예외를 지우면 이 값도 내린다. 올리는 것은 금지(위 주석).
-const MAX_EXCEPTIONS: usize = 1;
+const MAX_EXCEPTIONS: usize = 0;
 
 /// 아직 끝나지 않은 단계(문서 9절). 단계를 끝내면 지운다.
-const OPEN_STAGES: &[&str] = &["③", "⑥"];
+const OPEN_STAGES: &[&str] = &["③"];
 
 /// 계층 규칙상 허용(아래로 가는 간선)이지만 금지하는 간선(엔진 ③, `engine-stage3-design.md` 7.1절):
 /// net은 미디어 상태(지터 버퍼·믹스 제어)를 모른다. 미디어 쪽과는 `net::media_link`로만 잇는다.
@@ -123,7 +123,7 @@ const ADAPTER_MAY_USE: &[&str] = &[
     "engine::device::types",
     "engine::device::select",
     "engine::measure",
-    "engine::metronome",
+    "engine::metronome::plan",
     "engine::record::sidecar",
     "engine::report",
     "net",

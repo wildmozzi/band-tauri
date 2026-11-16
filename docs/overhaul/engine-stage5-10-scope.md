@@ -139,17 +139,22 @@
 
 `wasapi.rs`의 `use`(`wasapi.rs:72`)는 `device::types::…`로 고친다. 부모 경로 `device::…`로 남기면 `wasapi → device(부모) → device::select → wasapi` 순환이 그대로다.
 
-**⑥-3 `metronome`** 〔②b-6 뒤 갱신: `MetronomeCtl`의 락 구성이 바뀐다〕
+**⑥-3 `metronome`** 〔②b-6b 뒤 갱신, ⑥-3 구현(코드) 기준으로 고침〕
 
 | 하위 모듈(계층) | 심볼 | 비고 |
 |---|---|---|
-| `click`(2, RT) | `NO_CLICK`·`CLICK_LEN`·`STALE_SKIP_S`·`encode`·`decode`·`click_wave`·`ClickShared`·`ClickRt`(`:21-160`) | 이동만 |
-| `plan`(1) | `MIN_BPM`·`MAX_BPM`·`MAX_BEATS_PER_BAR`·`DEFAULT_START_LEAD_US`·루프백 보정 한계(`:23-39`), `MetronomeConfig`·`MetronomePlan`·`MetronomeStats`·`OutputLatencySource`·`measured_hidden_out_us`·`choose_hidden_out`(`:169-292`) | 값 타입·검증 |
-| `sched`(2) | `MetronomeCtl`(`:295-329`), `OutClock`·`hidden_out_latency_us`·`BeatScheduler`(`:336-460`) | `ClickShared`를 쓴다 |
+| `click`(2, RT) | `NO_CLICK`·`CLICK_LEN`·`encode`·`decode`(`pub(super)` — `sched`가 씀)·`click_wave`·`ClickShared`·`ClickRt` | 이동만. 단위 테스트(RT 클릭 3개) |
+| `plan`(1) | `MIN_BPM`·`MAX_BPM`·`MAX_BEATS_PER_BAR`·`DEFAULT_START_LEAD_US`·`MIN_LOOPBACK_OFFSET_MS`·`MAX_LOOPBACK_OFFSET_MS`·`MAX_MEASURED_HIDDEN_OUT_US`, `MetronomeConfig`·`MetronomePlan`·`MetronomeStats`·`OutputLatencySource`·`measured_hidden_out_us`·`choose_hidden_out` | 값 타입·검증. `serde`만 쓴다 |
+| `sched`(2) | `STALE_SKIP_S`, `MetroReport`(상태 칸 한 벌: `REPORT_WORDS`·플래그 비트·`pack`·`unpack`), `NO_LOOPBACK_OFFSET`, `MetronomeCtl`(계획 `Mutex<(세대, 계획)>` + `plan_gen` 원자값 + `try_lock` 재시도 수, 상태 `SeqCell`, 루프백 보정 원자값)·`MetronomeRt`(워커 쪽 끝), `OutClock`·`hidden_out_latency_us`·`BeatScheduler` | `click`(`ClickShared`·`encode`·`decode`·`NO_CLICK`)과 `plan`(계획·상태 타입·루프백 한계)을 쓴다 |
 
-`mixer → metronome`: `MixControls`가 클릭 게인 기본값을 `metronome::DEFAULT_CLICK_GAIN`에서 가져온다(`mixer.rs:93`, 정의 `metronome.rs:32`, 쓰는 곳은 이 한 군데). 상수를 `mixer.rs`로 옮긴다 — 클릭 게인 원자값의 주인이 `MixControls`이므로 기본값도 거기 있는 것이 맞다.
+처음 표와 다른 점(②b-6b #143 뒤 코드 기준):
+- ②b-6b가 더한 `MetroReport`·`MetronomeRt`는 `sched`에 둔다. `MetroReport`의 `pack`·`unpack`·`REPORT_WORDS`는 `MetronomeCtl`의 `SeqCell` 칸 형식이라 같은 파일에 두면 비공개로 남는다(`plan`에 두면 `pub(super)`가 셋 늘고 계층 1 값 타입이 칸 형식을 안다).
+- `STALE_SKIP_S`는 `BeatScheduler`만 쓴다(`ClickRt`는 쓰지 않는다) — `click`이 아니라 `sched`에 비공개로 둔다.
+- 단위 테스트 `loopback_offset_splits_into_output_share`는 앞 절반(`measured_hidden_out_us`·`choose_hidden_out`, 비공개 `MAX_MEASURED_HIDDEN_OUT_US`를 씀)을 `plan`에 남기고, 커맨드 범위 검사(`MetronomeCtl::pair`) 절반을 `sched::tests::loopback_offset_command_range`로 나눴다. 단언문은 그대로다.
 
-`mod.rs` 규칙: `metronome/mod.rs`에는 `mod` 선언과 `pub use`만 둔다. 형제 간선은 `sched → {click, plan}` 한 방향(`click`이 한계 상수를 쓰면 `click → plan`). `rt.rs`는 `metronome::click::ClickRt`로, 보고·어댑터는 `metronome::plan::…`으로 쓴다.
+`mixer → metronome`: `MixControls`가 클릭 게인 기본값을 `metronome::DEFAULT_CLICK_GAIN`에서 가져왔다(쓰는 곳은 이 한 군데). 상수를 `mixer.rs`로 옮겼다 — 클릭 게인 원자값의 주인이 `MixControls`이므로 기본값도 거기 있는 것이 맞다. `metronome`은 이 상수를 다시 내보내지 않는다(쓰는 곳 없음). 이것이 마지막 간선 예외라 `EXCEPTIONS`는 0, `OPEN_STAGES`에서 ⑥을 지웠다.
+
+`mod.rs` 규칙: `metronome/mod.rs`에는 모듈 문서·`mod` 선언과 `pub use`만 둔다. 형제 간선은 `sched → {click, plan}` 한 방향이다(`click`·`plan`은 형제를 쓰지 않는다). `rt.rs`는 `metronome::click::ClickRt`로, 보고(`report.rs`)·어댑터(`commands.rs`)는 `metronome::plan::…`으로 쓴다(`ADAPTER_MAY_USE`는 `engine::metronome` → `engine::metronome::plan`). 워커·`engine/mod.rs`·`manager.rs`·`tests/`는 옛 경로 그대로다.
 
 **⑥-4 `measure`** 〔②b-5 뒤 갱신: `EchoProbe`·`EchoPort`. ⑥-4 구현(코드) 기준으로 고침〕
 
@@ -303,7 +308,7 @@ PR 2개: (1) `testing` 모듈 + 테스트 `use` 전환(기계적, 통합 테스�
 | `engine::config`, `net::packet`, `engine::codec`, `engine::jitter::*`, `engine::rt_timing`, `net::clock`, `net::media_link`, `net::types` | 없음 | 예 |
 | `engine::resample` | `log::warn!` 한 곳(`resample.rs:70`) | 예(`log`는 파사드 — I/O가 아니다) |
 | `engine::relay_codec` | 시계를 읽지 않지만 시각 인자가 `Instant`다(`:207`, `:279`) | 예. 다만 12절 "단조 µs 하나" 규칙과 어긋나고 하네스가 `Instant`를 지어내야 한다 → ⑩-0에서 `now_us: u64`로 바꿀지 정한다(선택) |
-| `engine::mixer` | `metronome` 상수(⑥-3에서 해소) | 예 |
+| `engine::mixer` | 없음(`metronome` 상수는 ⑥-3에서 `mixer`로 옮김) | 예 |
 | `engine::stats` | `AudioCounters`가 `sys::prio::PrioSlot`을 필드로(`stats.rs:56`) | `PrioSlot`·`ThreadPriority`(원자 슬롯과 enum, `prio.rs:8-64`)를 함께 내려야 한다 |
 | `net::crypto` | `OsRng`(키 생성 `crypto.rs:27`, 무작위 키 `:106`) | **아니오.** engine에 남긴다(PR #125 검토 L10). 쓰는 곳이 `net/mod.rs`·`net/peer.rs`와 통합 테스트뿐이고 dsp 예정 모듈·하네스는 쓰지 않는다. 남기면 "OS API를 부르지 않는다"에 예외를 둘 필요가 없고 dsp 의존에서 `chacha20poly1305`·`x25519-dalek`·`hkdf`·`rand`가 빠진다 |
 | `engine::peer_media` | `MediaPort`: `Mutex` 둘 + `reserve_cmd`의 `sleep`·`Instant::now`(`peer_media.rs:302-345`). `MediaStatsCell::read`의 `yield_now`(`:171`) | 나눈다: `PeerMedia`·`PeerMediaShared`·`MediaStatsCell`·`MediaCmd`·`MediaPortRt`·`MediaSettings`는 dsp, `MediaPort`(제어 평면 쪽 끝)는 engine |

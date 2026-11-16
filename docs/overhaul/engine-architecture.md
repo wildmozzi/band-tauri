@@ -25,7 +25,7 @@
 
 | 혼합 파일 | 섞인 계층 | 쪼갤 단계 |
 |---|---|---|
-| `engine/metronome.rs` | 클릭 생성(E, RT) + 박 스케줄러(C) + 계획 Mutex·상태 칸(B, 워커 쪽 끝 `MetronomeRt`는 C) | ⑥ |
+| ~~`engine/metronome.rs`~~ | (⑥-3에서 해소) `metronome/{click(2) RT 클릭 생성, plan(1) 계획·상태 DTO·검증, sched(2) 커맨드 ↔ 워커 공유(계획 Mutex·상태 칸·워커 쪽 끝 `MetronomeRt`)·박 스케줄러}`, `mod.rs`는 `pub use`만 | ⑥-3 완료 |
 | `engine/record.rs` | 출력 콜백 녹음 링(E, RT) + 쓰기 스레드·사이드카(비RT) | ⑥ |
 | ~~`engine/measure.rs`~~ | (⑥-4에서 해소) `measure/{analysis(1) 신호 처리·분석·판정, loopback(4) 루프백 작업, echo(4) 에코 프로브·큐·작업}`, `mod.rs`는 `pub use`만 | ⑥-4 완료 |
 | ~~`engine/stats.rs`~~ | (④에서 해소) 원자 카운터 `stats.rs`(1) · RT 타이밍 `rt_timing.rs`(1) · 보고 DTO와 `stats()` 조립 `report.rs`(5) | ④ 완료 |
@@ -124,7 +124,7 @@
 
 ### 4.2 RT 경로 불변 조건
 
-RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASIO 콜백과 `band-wasapi`의 `GetBuffer`~`ReleaseBuffer` 구간, 그 안에서 부르는 `mixer`·`metronome::ClickRt`·`record`의 RT 함수.
+RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASIO 콜백과 `band-wasapi`의 `GetBuffer`~`ReleaseBuffer` 구간, 그 안에서 부르는 `mixer`·`metronome::click::ClickRt`·`record`의 RT 함수.
 
 1. 힙 할당, 락(Mutex·RwLock·채널), 시스템콜·로그, panic 가능 코드 금지. 인덱스는 사전 검증 또는 `get`.
    예외: `Instant::now`(QPC), `band-wasapi`의 WASAPI 호출·이벤트 대기(계약 문서 1.1절과 같음).
@@ -172,8 +172,8 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 계층 | 노드 |
 |---|---|
 | 0 | `engine::config`, `net::packet`, `sys`, `sys::{prio, cpu, time}`(④) |
-| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4) |
-| 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1) |
+| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4), `engine::metronome::plan`(⑥-3) |
+| 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1), `engine::metronome::{click, sched}`(⑥-3) |
 | 3 | `net`, `net::{peer, relay, stun, qos}` |
 | 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), 하네스 `engine::sim`(`cfg(test)`) |
 | 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `settings`, `diag`, `diag::{timeline, export}` |
@@ -191,7 +191,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 | 간선 | 원인 | 풀 단계 |
 |---|---|---|
-| `engine::mixer` → `engine::metronome` | 기본 클릭 게인 상수. metronome 혼합 파일 | ⑥ |
+| (없음) | ⑥-3에서 마지막 예외(`engine::mixer` → `engine::metronome`, 기본 클릭 게인 상수)를 상수를 `mixer`로 옮겨 해소. `EXCEPTIONS` 0 | — |
 
 간선 그래프에 안 보이는 어긋남:
 
@@ -243,7 +243,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
 | `engine/stats.rs`, `rt_timing.rs`, `report.rs` | RT·워커 원자 통계 카운터, RT 콜백 타이밍, 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
 | `engine/measure/{mod, analysis, loopback, echo}.rs` | 지연 측정: 신호 처리·분석·판정(`analysis`), 하드웨어 루프백 작업(`loopback`), 에코 프로브·측정 스레드 ↔ 워커 큐·작업(`echo`). `mod.rs`는 옛 경로 `engine::measure::…`를 `pub use`로 유지 | 측정 |
-| `engine/metronome.rs` | 공유 메트로놈: 계획·검증, 스케줄러, 클릭 생성기 | 메트로놈 |
+| `engine/metronome/{mod, click, plan, sched}.rs` | 공유 메트로놈: 클릭 생성기(`click`, RT), 계획·검증·상태 DTO(`plan`), 커맨드 ↔ 워커 공유·박 스케줄러(`sched`). `mod.rs`는 옛 경로 `engine::metronome::…`를 `pub use`로 유지 | 메트로놈 |
 | `engine/record.rs`, `wav.rs`, `flac.rs` | 합주 녹음: RT 링·핸드오프, 쓰기 스레드, WAV/RF64·FLAC | 녹음 |
 | `engine/prio.rs`, `cpuprof.rs` | 스레드 우선순위·타이머 해상도, CPU 측정 | 플랫폼 |
 | `net/mod.rs` | UDP 소켓, 송신, 수신·제어 루프 | 네트워크 |
