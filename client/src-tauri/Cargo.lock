@@ -177,8 +177,40 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 name = "band"
 version = "0.1.0"
 dependencies = [
- "band",
  "band-dsp",
+ "band-engine",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-log",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tauri-plugin-updater",
+]
+
+[[package]]
+name = "band-dsp"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "opus",
+ "rand",
+ "ringbuf",
+ "rubato",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "band-engine"
+version = "0.1.0"
+dependencies = [
+ "band-dsp",
+ "band-engine",
  "band-relay",
  "base64 0.22.1",
  "chacha20poly1305",
@@ -200,32 +232,11 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-log",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tauri-plugin-updater",
  "tokio",
  "windows 0.62.2",
  "windows-sys 0.59.0",
  "x25519-dalek",
  "zip",
-]
-
-[[package]]
-name = "band-dsp"
-version = "0.1.0"
-dependencies = [
- "log",
- "opus",
- "rand",
- "ringbuf",
- "rubato",
- "serde",
- "serde_json",
- "sha2",
 ]
 
 [[package]]

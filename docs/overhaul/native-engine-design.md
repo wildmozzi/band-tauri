@@ -10,7 +10,7 @@
 - `band`(웹) 리포는 `band-tauri`로 통합한다. 이 리포 하나에서 웹 빌드(Vercel)와 데스크톱 빌드(Tauri)를 모두 낸다.
 - 기존 `audio.rs`, `network.rs`, `commands.rs`는 **새 엔진으로 교체**한다. 레거시 커맨드는 전부 삭제한다.
 
-## 1. Rust 엔진 구조 (`client/src-tauri/src/`)
+## 1. Rust 엔진 구조 (`client/src-tauri/` — 앱 `src/`, 엔진 `crates/band-engine/`, 결정적 코어 `crates/band-dsp/`)
 
 파일 목록·책임, 계층, 의존 방향, 스레드 목록, 공유 상태 표는 [engine-architecture.md](engine-architecture.md)가 기준이다(이 문서에는 두지 않는다 — 두 곳에 두면 어긋난다). 아래 1.x절은 동작 계약(스레드별 금지 사항, 지터·믹스 규칙)이다.
 

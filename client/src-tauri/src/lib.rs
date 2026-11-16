@@ -1,13 +1,7 @@
+//! 앱 크레이트(엔진 R-1 ⑩-2): Tauri 진입점과 커맨드 어댑터(`commands`)만 둔다. 엔진은 `band_engine`, 결정적 코어는
+//! `band_dsp`(`docs/overhaul/engine-stage5-10-scope.md` 7.2절).
+
 pub mod commands;
-pub mod diag;
-pub mod engine;
-pub mod manager;
-pub mod net;
-pub mod settings;
-pub mod sys;
-/// 통합 테스트·예제·측정 도구용 내부 재노출(⑨a). 제품 빌드(피처 없음)에는 없다.
-#[cfg(any(test, feature = "test-support"))]
-pub mod testing;
 
 use tauri::Manager;
 
@@ -71,7 +65,7 @@ pub fn run() {
             // 자동 업데이트 (P2-1): 엔드포인트·공개키는 tauri.conf.json plugins.updater, 절차는 docs/RELEASE.md
             #[cfg(desktop)]
             _app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
-            // ASIO Host는 여기서(백그라운드로) 미리 만들지 않는다 — engine/device.rs 참고.
+            // ASIO Host는 여기서(백그라운드로) 미리 만들지 않는다 — band_engine::engine::device 참고.
             #[cfg(debug_assertions)]
             {
                 if let Some(window) = _app.get_webview_window("main") {

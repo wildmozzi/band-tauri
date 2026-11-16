@@ -11,18 +11,18 @@ use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
-use crate::diag::Diagnostics;
+use band_engine::diag::Diagnostics;
 use band_dsp::config::{DriverKind, EngineConfig};
-use crate::engine::measure::{EchoReport, LoopbackReport};
-use crate::engine::device::select::SystemBackend;
-use crate::engine::device::types::DeviceInfo;
-use crate::engine::metronome::plan::{MetronomeConfig, MetronomePlan};
-use crate::engine::record::sidecar::{RecordOptions, RecordStats, RecordSummary};
-use crate::engine::report::EngineStats;
-use crate::manager::EngineManager;
-use crate::net::peer::LocalDescriptor;
-use crate::net::NetOptions;
-use crate::settings::{RecordDir, RECORD_DIR_FILE};
+use band_engine::engine::measure::{EchoReport, LoopbackReport};
+use band_engine::engine::device::select::SystemBackend;
+use band_engine::engine::device::types::DeviceInfo;
+use band_engine::engine::metronome::plan::{MetronomeConfig, MetronomePlan};
+use band_engine::engine::record::sidecar::{RecordOptions, RecordStats, RecordSummary};
+use band_engine::engine::report::EngineStats;
+use band_engine::manager::EngineManager;
+use band_engine::net::peer::LocalDescriptor;
+use band_engine::net::NetOptions;
+use band_engine::settings::{RecordDir, RECORD_DIR_FILE};
 
 #[derive(Clone)]
 pub struct EngineState(Arc<EngineManager>);
@@ -296,27 +296,27 @@ pub async fn diag_export(
         let Some(_busy) = d.begin_export() else {
             return Err("이미 진단을 내보내는 중입니다".into());
         };
-        let now = crate::sys::time::unix_ms();
+        let now = band_engine::sys::time::unix_ms();
         let Some(picked) = app
             .dialog()
             .file()
             // 부모 창에 모달로 붙인다(없으면 Windows에서 앱 뒤나 작업 표시줄에 따로 뜰 수 있다)
             .set_parent(&window)
             .set_title("진단 내보내기")
-            .set_file_name(crate::diag::export::default_file_name(now))
+            .set_file_name(band_engine::diag::export::default_file_name(now))
             .add_filter("zip", &["zip"])
             .blocking_save_file()
         else {
             return Ok(None);
         };
-        let path = crate::diag::export::target_path(picked.into_path().map_err(|e| format!("저장 경로 오류: {e}"))?);
+        let path = band_engine::diag::export::target_path(picked.into_path().map_err(|e| format!("저장 경로 오류: {e}"))?);
         let info = app.package_info();
-        let app_info = crate::diag::export::AppInfo { name: info.name.clone(), version: info.version.to_string() };
+        let app_info = band_engine::diag::export::AppInfo { name: info.name.clone(), version: info.version.to_string() };
         let log_dir = app.path().app_log_dir().ok();
         // 장치 열거 → 스냅샷 순서는 ⑤ 이전 `build` 안의 순서 그대로
         let devices = m.backend().list_devices();
-        let bytes = crate::diag::export::build(m.snapshot(), devices, &d, app_info, log_dir.as_deref(), now)?;
-        crate::diag::export::write_atomic(&path, &bytes).map_err(|e| format!("진단 파일 저장 실패: {e}"))?;
+        let bytes = band_engine::diag::export::build(m.snapshot(), devices, &d, app_info, log_dir.as_deref(), now)?;
+        band_engine::diag::export::write_atomic(&path, &bytes).map_err(|e| format!("진단 파일 저장 실패: {e}"))?;
         log::info!("진단 내보내기 완료");
         Ok(Some(path.to_string_lossy().into_owned()))
     })

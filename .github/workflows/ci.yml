@@ -80,7 +80,7 @@ jobs:
               - '.github/workflows/ci.yml'
             relay:
               - 'relay/**'
-              - 'client/src-tauri/src/net/**'
+              - 'client/src-tauri/crates/band-engine/src/net/**'
               # 릴레이 계약 파일만: 접두부·예산 상수(types)와 패킷 헤더(packet). ⑩-1에서 net/에서 band-dsp로 옮겼다.
               # 같이 옮긴 media_link·clock은 relay/가 쓰지 않아 넣지 않는다(#160 리뷰 L4).
               - 'client/src-tauri/crates/band-dsp/src/types.rs'
@@ -103,8 +103,9 @@ jobs:
   rust:
     # 결정적 테스트만 돈다: 단위 테스트(가상 시간 시뮬레이션 포함) + 벽시계 품질 임계가 없는 통합 테스트.
     # 실패하면 재시도 없이 실패 = 회귀로 본다.
-    # 워크스페이스(엔진 R-1 ⑩-1): `client/src-tauri/Cargo.toml`의 `default-members`가 앱(`band`)과 `crates/band-dsp`를 함께 고르므로
-    # 아래 명령(clippy 두 구성, 릴리스 예제 check, test)과 realtime 잡의 nextest는 `--workspace` 없이 두 크레이트를 모두 본다.
+    # 워크스페이스(엔진 R-1 ⑩-1·⑩-2): `client/src-tauri/Cargo.toml`의 `default-members`가 앱(`band`)·`crates/band-engine`·
+    # `crates/band-dsp`를 함께 고르므로 아래 명령(clippy 두 구성, 릴리스 예제 check, test)과 realtime 잡의 nextest는 `--workspace`
+    # 없이 세 크레이트를 모두 본다. 통합 테스트·예제·하네스는 전부 `band-engine`에 있다(앱에는 시험이 없다).
     name: Rust engine (Windows)
     needs: changes
     if: needs.changes.outputs.engine == 'true'
@@ -134,9 +135,15 @@ jobs:
       - name: Clippy (제품 구성, test-support 없음)
         # 위 `--all-targets`는 자기 자신 개발 의존(Cargo.toml)이 `test-support`를 늘 켠 구성이다(엔진 R-1 ⑨a) — soak.rs·cpu_profile.rs 등
         # 테스트 전용 경로도 거기서 검사된다. 여기서는 반대로 테스트 타깃 없이(피처가 합쳐지지 않는다) 제품 구성만 본다:
-        # `test-support` 뒤의 내부(`band_lib::testing` 등)를 제품 코드가 실수로 쓰면 여기서만 실패한다.
+        # `test-support` 뒤의 내부(`band_engine::testing` 등)를 제품 코드가 실수로 쓰면 여기서만 실패한다.
         timeout-minutes: 20
         run: cargo clippy --lib --bins -- -D warnings
+      - name: Clippy (band-engine, 백엔드 없음)
+        # 하네스·시험은 band-engine을 장치 백엔드(cpal·windows) 없이 쓸 수 있어야 한다(엔진 R-1 ⑩-2, engine-stage5-10-scope.md 7.4절).
+        # `backend-cpal`·`backend-wasapi` 게이트가 빠지거나 백엔드 밖 코드가 cpal·windows를 쓰면 여기서만 실패한다. 예제는
+        # `required-features`로 빠진다. (`tests/architecture.rs`의 `engine_crate_deps_follow_graph`가 같은 규칙을 정적으로도 본다.)
+        timeout-minutes: 20
+        run: cargo clippy -p band-engine --no-default-features --features test-support --all-targets -- -D warnings
       - name: Check (릴리스 예제)
         # 예제는 개발 의존으로 `test-support`가 켜진 채 디버그·릴리스 모두 빌드돼야 한다(⑨a-2). 위 `--all-targets`는 디버그만 본다 —
         # `debug_assertions`에 기대는 cfg가 다시 생기면 여기서 실패한다(#158 리뷰 L3).
@@ -183,15 +190,13 @@ jobs:
         timeout-minutes: 10
         with:
           workspaces: client/src-tauri
-      - name: Placeholder frontend dist (tauri::generate_context! 요구)
-        timeout-minutes: 1
-        run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
       - name: Build tests
         timeout-minutes: 20
-        run: cargo test --lib --no-run
+        # 하네스는 band-engine 안에 있다(⑩-2). 앱(tauri-build)을 빌드하지 않으므로 프런트 dist 자리 표시가 필요 없다.
+        run: cargo test -p band-engine --lib --no-run
       - name: Long sim (60분)
         timeout-minutes: 50
-        run: cargo test --lib long_sim_6peers_60min -- --ignored --nocapture
+        run: cargo test -p band-engine --lib long_sim_6peers_60min -- --ignored --nocapture
         env:
           SIM_REPORT_DIR: ${{ runner.temp }}/sim-report
       - name: Job summary
@@ -237,22 +242,20 @@ jobs:
         with:
           workspaces: client/src-tauri
           key: soak
-      - name: Placeholder frontend dist (tauri::generate_context! 요구)
-        timeout-minutes: 1
-        run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
       - name: Build tests (release, test-support는 개발 의존이 켬)
         timeout-minutes: 30
-        run: cargo test --release --test soak --no-run
+        # soak 시험은 band-engine에 있다(⑩-2). 앱(tauri-build)을 빌드하지 않으므로 프런트 dist 자리 표시가 필요 없다.
+        run: cargo test -p band-engine --release --test soak --no-run
       - name: Soak 기본(균형) 60분
         timeout-minutes: 65
-        run: cargo test --release --test soak soak_balanced -- --ignored --exact --nocapture
+        run: cargo test -p band-engine --release --test soak soak_balanced -- --ignored --exact --nocapture
         env:
           SOAK_OUT: ${{ runner.temp }}/soak-report
       - name: Soak 초저지연 60분
         # 앞 프리셋이 실패해도 돈다(리포트를 둘 다 남긴다)
         if: ${{ !cancelled() }}
         timeout-minutes: 65
-        run: cargo test --release --test soak soak_ultra_low -- --ignored --exact --nocapture
+        run: cargo test -p band-engine --release --test soak soak_ultra_low -- --ignored --exact --nocapture
         env:
           SOAK_OUT: ${{ runner.temp }}/soak-report
       - name: Job summary
@@ -306,6 +309,8 @@ jobs:
         run: mkdir -p ../dist && echo '<!doctype html>' > ../dist/index.html
       - name: Build tests
         timeout-minutes: 20
+        # default-members(앱·band-engine·band-dsp) 전체. 통합 시험(kind(test))과 lib의 `realtime_` 시험은 전부 band-engine에 있다(⑩-2) —
+        # 앱 lib 시험 바이너리(시험 0개)도 함께 빌드되므로 위 dist 자리 표시가 남는다.
         run: cargo nextest run --no-run
       - name: Realtime tests (직렬, 3회까지)
         # 37개 직렬 약 22분(2026-11-13, ③c 측정 시험 추가 뒤) + 재시도 여유. 넘으면 시험 구성 재검토

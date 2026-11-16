@@ -1,6 +1,7 @@
 //! 원자 카운터(RT·워커 공유). 프론트로 나가는 보고 DTO는 `engine::report`(설계 문서 4절).
 
 use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// f32를 비트로 저장하는 원자값. RT 콜백에서 안전하게 쓸 수 있다.
 #[derive(Debug, Default)]
@@ -60,9 +61,13 @@ pub struct AudioCounters {
 
 /// seqlock 칸: 버전 + `[AtomicU64; N]`(②b-6a, `engine-stage2b-design.md` 3.2절·6.1절). 쓰는 쪽은 하나뿐이고 기다리지
 /// 않는다. 읽는 쪽은 발행 중이면 다시 읽는다. 필드가 전부 원자값이라 `unsafe`가 없다(찢긴 읽기도 정의된 동작이고,
-/// 버전 비교가 한 벌임을 보장한다). 값의 칸 배치와 단일 작성자 보장은 감싸는 타입이 맡는다 — 사용자는 둘이다:
-/// `peer_media::MediaStatsCell`(private `write`, 워커 단독 소유 `PeerMedia`만 부른다)과 메트로놈 상태 보고
-/// (`metronome::MetronomeRt::publish(&mut self)`, `Clone`이 아닌 워커 쪽 끝). `write`는 크레이트 안에서만 보인다(#141 리뷰 M-1).
+/// 버전 비교가 한 벌임을 보장한다). 값의 칸 배치는 감싸는 타입이 맡는다. 작성자가 하나임은 타입으로 보장한다:
+/// - 크레이트 밖: 작성 끝 `SeqWriter`(`SeqCell::pair`가 하나만 만들고 `Clone`이 아니며 `write(&mut self)`)로만 쓴다 —
+///   `band-engine`의 메트로놈 상태 보고(`metronome::MetronomeRt`). ⑩-1에서 `write`를 `pub`으로 열었던 것을 ⑩-2에서
+///   이 타입으로 닫았다(#160 리뷰 L2).
+/// - 크레이트 안: `peer_media::MediaStatsCell`(private `write`, 워커 단독 소유 `PeerMedia::publish(&mut self)`만 부른다)이
+///   `SeqCell::write`(`pub(crate)`)를 직접 쓴다.
+///
 /// `write`·`try_read`는 할당·락·시스템콜이 없다. `read`는 재시도 중 `yield_now`를 부르므로 비RT 독자만 쓴다(워커는 쓰는
 /// 쪽이다 — `tests/architecture.rs`의 워커 락 검사가 워커 디렉터리의 `.read(`를 막는다).
 #[derive(Debug)]
@@ -83,11 +88,16 @@ impl<const N: usize> Default for SeqCell<N> {
 const SPINS_BEFORE_YIELD: usize = 64;
 
 impl<const N: usize> SeqCell<N> {
-    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨져 독자가 섞인 한 벌을 받는다). 타입으로 막지 않으므로 규약이다:
-    /// 감싸는 타입이 작성자 하나를 `&mut self`로 보장하는 곳에서만 부른다 — `MediaStatsCell`(`PeerMedia::publish`),
-    /// `band`의 `MetronomeRt::publish`. 새 사용자도 작성 끝을 하나로 묶을 것. (⑩-1에서 `pub(crate)` → `pub`: `band`의
-    /// `metronome::sched`가 크레이트 밖이 됐다.)
-    pub fn write(&self, w: &[u64; N]) {
+    /// (읽는 쪽 칸, 작성 끝 하나). 크레이트 밖에서 칸에 쓰는 유일한 길이다. 칸은 `Arc`로 나눠 갖는다(만들 때 한 번 할당 —
+    /// 엔진 시작 같은 제어 평면에서 부른다).
+    pub fn pair() -> (Arc<Self>, SeqWriter<N>) {
+        let cell = Arc::new(Self::default());
+        (cell.clone(), SeqWriter(cell))
+    }
+
+    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨져 독자가 섞인 한 벌을 받는다). 크레이트 밖은 `SeqWriter`로만
+    /// 쓰고, 크레이트 안에서는 작성자 하나를 `&mut self`로 보장하는 `MediaStatsCell`(`PeerMedia::publish`)만 부른다.
+    pub(crate) fn write(&self, w: &[u64; N]) {
         let v = self.ver.load(Ordering::Relaxed);
         self.ver.store(v.wrapping_add(1), Ordering::Relaxed); // 홀수: 쓰는 중
         fence(Ordering::Release); // 아래 필드 store가 홀수 버전보다 먼저 보이지 않게
@@ -126,6 +136,18 @@ impl<const N: usize> SeqCell<N> {
     }
 }
 
+/// `SeqCell`의 작성 끝(#160 리뷰 L2). `SeqCell::pair`만 만들고 `Clone`이 아니며 `write`가 `&mut self`다 — 한 칸에 작성자가
+/// 하나임이 타입으로 보장된다. 쓰기는 `SeqCell::write`와 같다(할당·락·시스템콜 없음, 기다리지 않음).
+#[derive(Debug)]
+pub struct SeqWriter<const N: usize>(Arc<SeqCell<N>>);
+
+impl<const N: usize> SeqWriter<N> {
+    /// 한 벌을 낸다.
+    pub fn write(&mut self, w: &[u64; N]) {
+        self.0.write(w);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,6 +180,16 @@ mod tests {
         assert_eq!(c.read(), frame::<5>(7));
         c.write(&[u64::MAX; 5]);
         assert_eq!(c.try_read(), Some([u64::MAX; 5]));
+    }
+
+    /// 작성 끝(`SeqWriter`)으로 쓴 것을 칸 쪽에서 읽는다(#160 리뷰 L2).
+    #[test]
+    fn seq_writer_pair_roundtrip() {
+        let (cell, mut w) = SeqCell::<4>::pair();
+        assert_eq!(cell.read(), [0; 4]);
+        w.write(&frame(3));
+        assert_eq!(cell.read(), frame::<4>(3));
+        assert_eq!(cell.try_read(), Some(frame::<4>(3)));
     }
 
     /// 발행 중(홀수 버전)이면 `try_read`는 None이고, 짝수로 돌아오면 다시 읽힌다.

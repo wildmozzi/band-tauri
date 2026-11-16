@@ -1,12 +1,12 @@
 # 엔진 아키텍처 — 목표 구조와 규칙
 
-데스크톱 엔진(`client/src-tauri/src/`)을 어떻게 나누고, 누가 누구를 알아도 되고, 스레드끼리 무엇으로 주고받는지 정한다.
+데스크톱 엔진(`client/src-tauri/` — 앱 `src/`, 엔진 `crates/band-engine/src/`, 결정적 코어 `crates/band-dsp/src/`)을 어떻게 나누고, 누가 누구를 알아도 되고, 스레드끼리 무엇으로 주고받는지 정한다.
 
 - **결정 기준**: [../ARCHITECTURE-DECISIONS.md](../ARCHITECTURE-DECISIONS.md)(ADR, 코디네이터). 이 문서는 그 결정의 상세 설계다. 다르면 ADR이 맞고 이 문서를 고친다. ADR에 없는 세부는 여기서 정한다.
 - 이 문서: **구조**(모듈 지도·계층·의존 방향·스레드·공유 상태·공개 표면)의 기준. 파일 목록은 여기 한 곳에만 둔다.
 - [native-engine-design.md](native-engine-design.md): **계약**(패킷 포맷, Tauri 커맨드, `EngineStats` JSON, 지터·믹스 동작 규칙). 이 문서는 계약을 바꾸지 않는다.
 - [engine-notes.md](engine-notes.md): 구현 메모·측정 기록.
-- 변경 규칙: 모듈 경계·의존 방향·스레드·공유 상태를 바꾸는 PR은 이 문서와 `tests/architecture.rs`를 같은 PR에서 고친다.
+- 변경 규칙: 모듈 경계·의존 방향·스레드·공유 상태를 바꾸는 PR은 이 문서와 `tests/architecture.rs`(⑩-2부터 `crates/band-engine/tests/architecture.rs`)를 같은 PR에서 고친다.
 - 상태: R-1(엔진 구조 정리)의 설계. 4절 "목표"는 R-1 ①②가 끝났을 때, 9절은 그 뒤 단계다.
 
 ## 1. 계층
@@ -176,8 +176,8 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::{wav, flac}`(⑩-0에서 1 → 2: 파일 I/O), `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1), `engine::metronome::{click, sched}`(⑥-3), `engine::wasapi::{enumerate, stream, probe}`(⑥-5) |
 | 3 | `net`, `net::{peer, relay, stun, qos}`, `net::peer::descriptor`(⑥-7), `net::txlat`(⑩-0에서 1 → 3: `Mutex`·`Instant::now`) |
 | 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), `engine::media_port`(⑩-0, 미디어 명령 큐의 제어 평면 쪽 끝 — 하네스가 쓰므로 4), 하네스 `engine::sim`(`cfg(test)`) |
-| 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `settings`, `diag`, `diag::{timeline, export}` |
-| 6 | `commands`, `lib.rs`, `main.rs` |
+| 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `settings`, `diag`, `diag::{timeline, export}`, `band-engine` 뿌리 `lib.rs`(모듈 선언뿐, ⑩-2) |
+| 6 | 앱 크레이트 `band`(⑩-2, 노드 표 `APP_NODES`): `band_lib::commands`, `band_lib`(`lib.rs`), `band_lib::main`(`main.rs`) — 엔진·dsp 크레이트에는 계층 6이 없다 |
 | 7 | 테스트 표면 `testing`(`cfg(any(test, feature = "test-support"))`, ⑨a-1) — 모든 계층을 다시 내보낸다. 맨 위라 제품 노드는 쓸 수 없다(7절) |
 
 `net::peer → engine::jitter`(3 → 1)처럼 **아래로 가는 간선은 의존 규칙상 허용**이다. 그 간선의 문제는 의존이 아니라 공유 상태(4.1절: 여러 계층이 `Peer`의 락을 직접 잡음)이고, ③이 그것을 다룬다.
@@ -188,7 +188,11 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 **`band-dsp`(⑩-1)**: `client/src-tauri/Cargo.toml`이 워크스페이스 루트이자 앱 패키지이고, 멤버 `crates/band-dsp`가 결정적 코어다 — `config`, `prio_slot`, `codec`, `resample`, `jitter`, `relay_codec`, `mixer`, `peer_media`, `stats`, `rt_timing`, `histo`, `packet`, `clock`, `media_link`, `types`(⑩-0의 dsp 예정 노드 15개). 경로는 평평하다(`band_dsp::jitter`, `band_dsp::packet`) — `engine`·`net`이 옛 경로로 다시 내보내지 않는다. 기준은 계층 번호가 아니라 성질이다(스레드를 만들지 않고, 소켓·파일·장치·OS API를 부르지 않고, 벽시계를 읽지 않는다 — `engine-stage5-10-scope.md` 제안 3). 의존은 `opus`·`rubato`·`ringbuf`·`serde`·`log`뿐이다.
 
-`tests/architecture.rs`는 파서 하나로 두 소스(`src`, `crates/band-dsp/src`)를 각자의 노드 표(`NODES`, `DSP_NODES` — 이름이 `band_dsp::`로 시작)로 본다. 앱 쪽의 `band_dsp::…` 경로는 그 노드로 가는 간선이라 계층과 `FORBIDDEN`("net은 `band_dsp::{jitter, mixer, peer_media}`를 쓰지 않는다")이 크레이트 경계를 넘어서도 선다. 반대 방향(`band-dsp` → 앱)과 `band-dsp`가 쓸 수 있는 외부 크레이트는 **컴파일러가 막는다** — 그래서 ⑩-0의 닫힘 검사(`dsp_planned_nodes_are_closed`)와 소스의 외부 크레이트 검사(`dsp_planned_nodes_use_only_dsp_crates`)는 없애고, `band-dsp/Cargo.toml`의 의존 목록을 고정하는 검사(`dsp_crate_uses_only_dsp_deps`)로 바꿨다. 시험 전용 표면은 `band-dsp`의 `test-support` 피처(앱의 `test-support`가 켠다) 뒤에 있고 `DSP_TEST_SUPPORT`로 고정한다(`dsp_test_support_items_are_listed` — 하위 파일의 `impl` 블록 안까지). 컴파일러가 막지 않는 std(스레드 생성·파일·소켓·`Instant::now`·`SystemTime`)는 `dsp_crate_has_no_thread_io_or_clock`이 막는다(예외: `SeqCell::read`의 `yield_now`). `sys::*`·`net::crypto`·`diag::mask`·`wav`·`flac`·`engine::media_port`·`net::txlat`은 `DSP_EXCLUDED`라 `band-dsp`에 같은 이름의 노드가 생기면 실패한다. 워커는 `engine::media_port`(제어 쪽 끝, 계층 4)를 쓰지 않는다(`FORBIDDEN`). 앱과 `band-engine`의 분리는 ⑩-2, 하네스 분리는 ⑩-3이다.
+`tests/architecture.rs`는 파서 하나로 두 소스(`src`, `crates/band-dsp/src`)를 각자의 노드 표(`NODES`, `DSP_NODES` — 이름이 `band_dsp::`로 시작)로 본다. 앱 쪽의 `band_dsp::…` 경로는 그 노드로 가는 간선이라 계층과 `FORBIDDEN`("net은 `band_dsp::{jitter, mixer, peer_media}`를 쓰지 않는다")이 크레이트 경계를 넘어서도 선다. 반대 방향(`band-dsp` → 앱)과 `band-dsp`가 쓸 수 있는 외부 크레이트는 **컴파일러가 막는다** — 그래서 ⑩-0의 닫힘 검사(`dsp_planned_nodes_are_closed`)와 소스의 외부 크레이트 검사(`dsp_planned_nodes_use_only_dsp_crates`)는 없애고, `band-dsp/Cargo.toml`의 의존 목록을 고정하는 검사(`dsp_crate_uses_only_dsp_deps`)로 바꿨다. 시험 전용 표면은 `band-dsp`의 `test-support` 피처(`band-engine`의 `test-support`가 켠다 — ⑩-1에서는 앱) 뒤에 있고 `DSP_TEST_SUPPORT`로 고정한다(`dsp_test_support_items_are_listed` — 하위 파일의 `impl` 블록 안까지). 컴파일러가 막지 않는 std(스레드 생성·파일·소켓·`Instant::now`·`SystemTime`)는 `dsp_crate_has_no_thread_io_or_clock`이 막는다(예외: `SeqCell::read`의 `yield_now`). `sys::*`·`net::crypto`·`diag::mask`·`wav`·`flac`·`engine::media_port`·`net::txlat`은 `DSP_EXCLUDED`라 `band-dsp`에 같은 이름의 노드가 생기면 실패한다. 워커는 `engine::media_port`(제어 쪽 끝, 계층 4)를 쓰지 않는다(`FORBIDDEN`). 하네스 분리는 ⑩-3이다.
+
+**`band-engine`(⑩-2)**: 멤버 `crates/band-engine`이 엔진이다 — `engine`·`net`·`sys`·`diag`·`manager`·`settings`·`testing`(계층 0~5와 7). 앱(`band`, 워크스페이스 루트)에는 `lib.rs`(Tauri 빌더)·`main.rs`·`commands.rs`·`build.rs`·`tauri.conf.json`만 남는다. 경로는 크레이트 이름만 바뀐다(`crate::engine::…` → 앱에서 `band_engine::engine::…`, 옛 경로 재내보내기 없음). 통합 테스트 16개(`architecture.rs` 포함)·예제 2개·fixture는 `crates/band-engine/{tests, examples}`로 옮겼다 — 앱 크레이트에는 시험이 없다. tauri·플러그인은 앱만, `cpal`·`windows`는 `band-engine`의 **백엔드 피처** 뒤다: `backend-cpal`(= `dep:cpal`; `engine::device::{cpal, select}` — `SystemBackend`는 cpal이 폴백이라 이 피처 뒤), `backend-wasapi`(= `dep:windows`; Windows에서 `engine::wasapi`), 기본 피처가 둘 다 켜고 앱은 기본으로 쓴다. `asio`는 앱 → `band-engine/asio` → `cpal/asio`·`band-dsp/asio`로 전달된다. 하네스·시험은 `default-features = false`로 백엔드 없이 빌드된다(가짜 장치 — CI `Clippy (band-engine, 백엔드 없음)`). 자기 자신 개발 의존(⑨a)은 `band-engine`으로 옮겼다(`default-features = false` — 백엔드 피처를 더하지 않는다).
+
+`tests/architecture.rs`(⑩-2부터 `crates/band-engine/tests/`)는 파서 하나로 세 소스를 본다: `crates/band-engine/src`(`NODES`, 접두 없음, 뿌리 `band_engine`), `crates/band-dsp/src`(`DSP_NODES`), 앱 `src`(`APP_NODES` — `band_lib::commands` 등 계층 6). 앱의 `band_engine::…`·`band_dsp::…` 경로는 그 노드로 가는 간선이라 `ADAPTER_MAY_USE`("어댑터는 제어 평면·계약 DTO만")가 크레이트 경계를 넘어서도 선다. 외부 의존 배치는 `engine_crate_deps_follow_graph`가 고정한다: 앱 `[dependencies]` = `APP_EXTERN_ALLOWED`(tauri·플러그인·serde·log·두 크레이트), `band-engine`에 tauri·빌드 스크립트 없음, `cpal`·`windows`는 선택 의존이고 각 백엔드 피처가 켜며 그 크레이트 경로는 백엔드 파일(`engine/device/cpal.rs`, `engine/wasapi/`)에서만 쓰고 모듈 선언이 피처 게이트 뒤에 있다.
 
 ### 5.3 현재 어긋남
 
@@ -208,7 +212,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 ## 6. 모듈 지도 — 현재 → 목표(R-1)
 
-한 파일은 한 가지 이유로 바뀐다. 줄 수가 아니라 **바뀌는 이유**로 나눈다.
+한 파일은 한 가지 이유로 바뀐다. 줄 수가 아니라 **바뀌는 이유**로 나눈다. 경로 기준(⑩-2): `lib.rs`·`commands.rs`는 앱(`client/src-tauri/src`), `crates/band-dsp/…`는 그대로, 나머지 접두 없는 경로는 `crates/band-engine/src` 기준이다.
 
 | 파일(목표) | 책임(한 줄) | 바뀌는 이유 |
 |---|---|---|
@@ -261,14 +265,14 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 ## 7. 공개 표면과 테스트 표면
 
-지금은 `lib.rs`가 `commands/diag/engine/manager/net`을 모두 `pub mod`로 열고, 하위 모듈도 거의 `pub mod`다. 통합 테스트(`tests/*.rs`, 별도 크레이트)와 측정 도구가 내부(`rt::{output_path, SLOT_*}`, `device::fake`, `prio`, `worker::CallbackTracker`, `metronome::{BeatScheduler, ClickRt}` 등)를 쓰기 때문이다. 측정 전용 훅과 `device::fake`는 ⑨a-2부터 `test-support` 뒤에 있다(정책 2).
+지금은 `band-engine`의 `lib.rs`가 `diag/engine/manager/net/settings/sys`를 모두 `pub mod`로 열고(⑩-2 전에는 앱 `lib.rs`가 `commands`와 함께), 하위 모듈도 거의 `pub mod`다. 통합 테스트(`tests/*.rs`, 별도 크레이트)와 측정 도구가 내부(`rt::{output_path, SLOT_*}`, `device::fake`, `prio`, `worker::CallbackTracker`, `metronome::{BeatScheduler, ClickRt}` 등)를 쓰기 때문이다. 측정 전용 훅과 `device::fake`는 ⑨a-2부터 `test-support` 뒤에 있다(정책 2).
 
 정책:
 
 1. **공개 표면**: `manager::EngineManager`, `commands`, 계약 DTO(`EngineConfig`, `EngineStats`·`PeerStats`, `LocalDescriptor`, 측정·녹음 보고). 나머지는 `pub(crate)`가 목표다.
-2. **테스트 표면**(⑨a-1): 통합 테스트·예제·측정 도구가 쓰는 내부는 `test-support` 피처(`#[cfg(any(test, feature = "test-support"))]`)의 `testing` 모듈(`src/testing.rs`) 한 곳에서 다시 내보낸다. 하위 모듈은 원래 경로를 따른다(`band_lib::testing::engine::mixer`, `…::net::peer`, `…::sys::prio`, `…::diag::mask`, `…::manager::EngineManager`). 목록에는 테스트가 실제로 쓰는 것만 둔다 — 새 테스트가 다른 내부를 쓰려면 이 목록에 더한다.
-   - 켜기: 개발 의존성 `band = { path = ".", default-features = false, features = ["test-support"] }`(자기 자신 — 개발 의존이 더하는 피처는 `test-support` 하나). 테스트·예제 타깃이 들어가는 빌드(`cargo test`, `--all-targets`, `cargo run --example`)는 디버그·릴리스 모두 늘 켜진다. 테스트 타깃이 없는 제품 구성(`cargo build`, `cargo tauri build`, `cargo clippy --lib --bins`)에는 합쳐지지 않는다(피처 리졸버 2).
-   - 지키는 검사: CI `Clippy (제품 구성, test-support 없음)`(`cargo clippy --lib --bins -- -D warnings` — 제품 코드가 `testing`이나 `test-support` 뒤 항목을 쓰면 여기서만 실패), `tests/architecture.rs`의 `tests_use_only_testing_surface`(tests/·examples/에서 `band_lib`이 나오는 곳은 모두 바로 뒤가 `::testing` — 크레이트 별칭 `use band_lib as x;`는 실패, `testing` 별칭 `use band_lib::testing as t;`는 허용, ⑨a-2)와 계층 7 노드 `testing`(5.1절).
+2. **테스트 표면**(⑨a-1): 통합 테스트·예제·측정 도구가 쓰는 내부는 `test-support` 피처(`#[cfg(any(test, feature = "test-support"))]`)의 `testing` 모듈(`crates/band-engine/src/testing.rs`, ⑩-2 전에는 앱 `src/testing.rs`) 한 곳에서 다시 내보낸다. 하위 모듈은 원래 경로를 따른다(`band_engine::testing::engine::mixer`, `…::net::peer`, `…::sys::prio`, `…::diag::mask`, `…::manager::EngineManager`). 목록에는 테스트가 실제로 쓰는 것만 둔다 — 새 테스트가 다른 내부를 쓰려면 이 목록에 더한다.
+   - 켜기: `band-engine`의 개발 의존성 `band-engine = { path = ".", default-features = false, features = ["test-support"] }`(자기 자신 — 개발 의존이 더하는 피처는 `test-support` 하나, 백엔드 피처는 더하지 않는다. ⑩-2에서 앱에서 옮김 — 앱에는 시험이 없어 `test-support` 피처도 없다). 테스트·예제 타깃이 들어가는 빌드(`cargo test`, `--all-targets`, `cargo run --example`)는 디버그·릴리스 모두 늘 켜진다. 테스트 타깃이 없는 제품 구성(`cargo build`, `cargo tauri build`, `cargo clippy --lib --bins`)에는 합쳐지지 않는다(피처 리졸버 2).
+   - 지키는 검사: CI `Clippy (제품 구성, test-support 없음)`(`cargo clippy --lib --bins -- -D warnings` — 제품 코드가 `testing`이나 `test-support` 뒤 항목을 쓰면 여기서만 실패), `tests/architecture.rs`의 `tests_use_only_testing_surface`(`band-engine`의 tests/·examples/에서 `band_engine`이 나오는 곳은 모두 바로 뒤가 `::testing` — 크레이트 별칭 `use band_engine as x;`는 실패, `testing` 별칭 `use band_engine::testing as t;`는 허용, ⑨a-2·⑩-2)와 계층 7 노드 `testing`(5.1절).
    - **측정·테스트 전용 훅**(⑨a-2): 예전 `#[doc(hidden)] pub` 15개 — `Engine::{force_auto_opus, worker_media_peers, take_worker_timing, take_send_path_diag}`, `NetShared::{set_force_auto_opus, send_audio}`, `Net::take_send_path_diag`, `Peer::{force_path, shares_tx_seq_with}`, `prio::{set_engine_promotion, set_engine_promotion_parts}`, `codec::opus_decoders_created`, `MetronomeCtl`의 `plan_gens`·`take_plan_retries` — 는 `#[cfg(any(test, feature = "test-support"))]` 뒤에 있다. 제품 빌드에는 없다. 훅이 읽고 쓰는 원자값·카운터(`force_auto_opus` 깃발, `ENGINE_PROMOTION`·`ENGINE_TIMER`, 송신 경로 진단·디코더 수·워커 미디어 피어 수 카운터)는 게이트하지 **않는다**: 제품 코드가 읽거나(워커의 `force_auto_opus()` 읽기 — 제품에서는 늘 `false`, `engine_promotion_enabled` — 늘 켬) 갱신하는 자리가 워커·송신 경로 안에 있어, 게이트하면 그 경로에 cfg 분기가 생기고 테스트 빌드와 제품 빌드의 동작이 갈린다. 남는 비용은 원자값 하나씩이다. 예외(의도적인 피처 분기): 워커 반복 시간 기록 `DIAG_TIMING = cfg!(feature = "test-support")`(`worker/mod.rs`, ③c)은 반복마다 시계를 더 읽는 비용이라 제품 빌드에서 일부러 끈다 — 테스트 빌드의 워커는 이 기록만큼 제품과 다르다(fixture 하네스는 워커 스레드를 돌리지 않아 영향 없음). `NetShared::force_auto_opus()`(읽기)는 제품 워커가 쓰므로 훅이 아니라 `pub(crate)`.
    - `device::fake`: `#[cfg(any(test, feature = "test-support"))]`(⑨a-2에서 `debug_assertions` 조건을 뺐다). 예제·측정은 개발 의존이 `test-support`를 켜므로 디버그·릴리스 모두 쓸 수 있고, 제품 디버그 빌드(`npm run dev:tauri`)는 릴리스와 같은 표면이 된다 — 제품 코드가 가짜 장치를 쓰면 디버그에서도 컴파일 실패(`cargo clippy --lib --bins`). `--features test-support`는 이제 어느 명령에도 따로 줄 필요가 없다.
 3. **R-1 ①②의 가시성**: 새 하위 모듈은 private, 형제 간에는 `pub(super)`. **기존 공개 경로는 `pub use`로 유지**한다(예: `engine::jitter::{JitterBuffer, JitterSettings, JitterStats, shift_one, MAX_CORR_RATE, TARGET_GRID, correction_*}`, `engine::worker::{CallbackTracker, OUT_CHUNK, …}`). 그래서 ①②는 `tests/`를 바꾸지 않는다. 하네스가 쓰는 워커 내부(폴링 주기 등)는 `pub(in crate::engine)`.
@@ -320,8 +324,8 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 크레이트 | 내용 | 의존 |
 |---|---|---|
 | `band-dsp` | **⑩-1 완료**(`crates/band-dsp`, 5.2절 `DSP_NODES`): `config`, `packet`, `codec`, `resample`, `jitter`, `mixer`, `net::clock`, `relay_codec`, 통계 카운터(`stats`·`prio_slot`·`rt_timing`·`histo`), `peer_media`(코어), `media_link`, `types`. **스레드를 만들지 않고 소켓·파일·장치·OS API를 부르지 않으며 벽시계를 읽지 않는다.** `crypto`(OS 난수)·`sys`·`wav`·`flac`·`diag::mask`는 `band-engine`(⑩-0, `engine-stage5-10-scope.md` 7절) | opus, rubato, ringbuf, serde, log |
-| `band-engine` | 계층 2~5: RT·장치, 네트워크, 워커, 제어 평면 | `band-dsp`, cpal, windows |
-| 앱(`band`) | 계층 6: Tauri 어댑터 | `band-engine`, tauri |
+| `band-engine` | **⑩-2 완료**(`crates/band-engine`, 5.2절): 계층 0~5와 7(`engine`·`net`·`sys`·`diag`·`manager`·`settings`·`testing`) — RT·장치, 네트워크, 워커, 제어 평면. 통합 테스트·예제·fixture 포함 | `band-dsp`, windows-sys, 암호·zip·flacenc 등, **피처 뒤** cpal(`backend-cpal`)·windows(`backend-wasapi`) |
+| 앱(`band`) | 계층 6: Tauri 어댑터(`lib.rs`·`main.rs`·`commands.rs`·`build.rs`·`tauri.conf.json`, ⑩-2) | `band-engine`(기본 피처 = 백엔드 둘), `band-dsp`, tauri·플러그인 |
 
 - 결정적 하네스(`engine/sim`)는 lib 안 `cfg(test)`가 아니라 `band-dsp`(와 워커 공급 로직)를 쓰는 별도 dev 크레이트/tests로 옮긴다 → 60분 하네스가 cpal·tauri 없이 컴파일되어 CI·로컬 메모리 부담이 준다. 워커 공급(`PeerFeed`, `DeviceClock`)이 장치 의존 없이 `band-dsp` 쪽에 설 수 있는지는 ②b·③ 뒤에 정한다.
 - 분리 뒤 `tests/architecture.rs`는 크레이트마다 노드 표를 따로 갖고 파서는 하나다. 위 크레이트 → 아래 크레이트 간선(`band_dsp::…`)은 계속 본다(`FORBIDDEN` "net은 미디어 상태를 모른다"가 그 간선이다). 아래 → 위는 컴파일러가 막는다(5.2절).

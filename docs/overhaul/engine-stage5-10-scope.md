@@ -363,6 +363,11 @@ band-dsp                 config · packet · codec · resample · jitter · rela
 - `tests/architecture.rs`: `band-engine/tests`에 하나 두고 `band-dsp/src`와 자기 `src`를 각각의 `NODES`로 본다(파서 766줄을 복사하지 않는다). 크레이트 사이 간선은 보지 않는다 — 컴파일러가 막는다.
   - **⑩-1에서 한 것**: 지금은 앱 크레이트의 `tests/`에 있고(⑩-2에서 `band-engine/tests`로), 파서 하나가 `src`(`NODES`)와 `crates/band-dsp/src`(`DSP_NODES`, 이름 `band_dsp::…`)를 본다. **위 → 아래 간선(`band_dsp::…`)은 계속 본다**: `FORBIDDEN`의 "net은 `band_dsp::{jitter, mixer, peer_media}`를 쓰지 않는다"(③)가 바로 그 간선이라 보지 않으면 규칙이 사라진다. 아래 → 위(`band-dsp` → 앱)는 의존이 없어 컴파일러가 막는다. ⑩-0의 `dsp_planned_nodes_are_closed`·`dsp_planned_nodes_use_only_dsp_crates`(소스의 `krate::` 탐색)는 같은 이유로 없애고, `band-dsp/Cargo.toml`의 `[dependencies]` = 위 표의 다섯임을 고정하는 `dsp_crate_uses_only_dsp_deps`로 바꿨다(새 의존을 더하면 실패 → 제안 3의 정의를 다시 본다). `DSP_EXCLUDED`는 "`band-dsp`에 같은 이름 노드가 생기면 실패"(`dsp_excluded_nodes_stay_in_band`)로 남겼다. `DSP_BOUNDARY`는 처리 뒤 `DSP_TEST_SUPPORT`(시험 전용 표면 래칫, 아래 7.3 표의 `test-support` 넷 + 피처 전달 하나)가 됐다 — 하위 파일의 `impl` 블록 안(`jitter/target.rs`의 `impl JitterBuffer` 등, 타입이 공개라 밖에서 부를 수 있다)과 `feature = "test-support"`·`all(…)` 꼴 게이트도 본다(#160 리뷰 M1). 컴파일러가 막지 않는 std 쪽 정의(스레드 생성·파일·소켓·프로세스·환경·`Instant::now`·`SystemTime`)는 `dsp_crate_has_no_thread_io_or_clock`이 비시험 코드에서 막는다(예외는 `SeqCell::read`의 `yield_now` 하나, #160 리뷰 L1). 의존 목록 읽기는 점 표기 섹션(`[dependencies.x]`)도 본다(L3). 워커 락 검사(`worker_thread_code_outside_worker_dir_waits_for_no_lock`)의 `jitter/` 9개 파일은 새 경로(`crates/band-dsp/src/jitter/`)를 본다(변이로 확인). RT 정적 검사(#154)의 대상(`rt.rs`·`metronome/click.rs`·`wasapi/{stream, format}.rs`)은 옮기지 않았다.
 - **워크스페이스 명령(⑩-1)**: `[workspace] members = [".", "crates/band-dsp"]`에 `default-members`도 같은 둘로 뒀다. 루트가 패키지인 워크스페이스에서 `cargo test`는 기본으로 루트 패키지만 돌기 때문이다 — `default-members` 덕에 `cargo test`·`cargo clippy --all-targets`·`cargo clippy --lib --bins`·`cargo check --release --examples`·`cargo nextest run`(CI realtime 잡)이 `--workspace` 없이 두 크레이트를 본다(로컬 확인: `band_dsp` 단위 시험 94개 + 무시 1개가 `cargo test`에, nextest 목록에 95개). CI 명령·`CLAUDE.md` 명령 줄은 그대로다. `long-sim` 잡의 `cargo test --lib long_sim_6peers_60min`은 `band-dsp` lib 시험 바이너리도 돌지만 이름이 걸리지 않아 0개다.
+- **⑩-2에서 한 것**: 앱의 `lib.rs`·`main.rs`·`commands.rs`·`build.rs`·`tauri.conf.json`만 워크스페이스 루트(`band`)에 남기고 `engine`·`net`·`sys`·`diag`·`manager`·`settings`·`testing`을 `crates/band-engine/src`로(`git mv`, 경로는 앱 쪽 `crate::engine::…` → `band_engine::engine::…`만, 옛 경로 재내보내기 없음). 통합 테스트 15개 + `architecture.rs`, 예제 2개, fixture 3개(`sim-report-short-5min.json`·`sim-churn.json`·`send-column-pcm16.sha256`, 같은 blob — `CARGO_MANIFEST_DIR` 기준이라 함께)를 `crates/band-engine/{tests, examples}`로. `net/relay.rs`의 `include_str!` 상대 경로(릴레이 토큰 벡터)만 두 단 깊어졌다.
+  - 외부 의존(위 표): 앱 = tauri·플러그인 다섯·`serde`·`serde_json`·`log`·`band-engine`·`band-dsp`(`tests/architecture.rs`의 `APP_EXTERN_ALLOWED`로 고정). 나머지 엔진 의존과 개발 의존(`claxon`·`md-5`·`band-relay`·`tokio`·`hound`)은 `band-engine`으로. `cpal`·`windows`는 `band-engine`의 선택 의존(7.4절 피처). `Cargo.lock`은 `band-engine` 항목 추가와 `band`의 의존 목록 이동뿐이고 버전 변화는 없다.
+  - 자기 자신 개발 의존(⑨a)은 `band-engine`으로 옮겼다: `band-engine = { path = ".", default-features = false, features = ["test-support"] }` — 백엔드 피처를 더하지 않는다. 앱에는 시험이 없어 `test-support` 피처도 없다(앱 → 엔진으로 넘길 일이 없다). `band-engine`의 `test-support`가 `band-dsp/test-support`를 켠다(`dsp_test_support_items_are_listed`가 이 매니페스트를 본다).
+  - `default-members`는 셋(`.`, `crates/band-engine`, `crates/band-dsp`) — CI `rust` 잡 명령과 `CLAUDE.md` 명령 줄은 그대로다.
+  - `tests/architecture.rs`는 `crates/band-engine/tests/` 하나에서 세 소스를 본다(파서 하나): `band-engine/src`(`NODES`, 이름 접두 없음 — 옮기기 전 이름 그대로, 뿌리 `lib.rs`는 새 노드 `band_engine`(5)), `band-dsp/src`(`DSP_NODES`), 앱 `src`(`APP_NODES` = `band_lib`·`band_lib::commands`·`band_lib::main`, 계층 6). 앱의 `band_engine::…` 경로는 이 크레이트 노드로 가는 간선이라 `ADAPTER_MAY_USE`가 그대로 선다(간선 목록이 옮기기 전과 같다 — `band_lib::commands → {manager, settings, diag, …}` 15개). 옛 앱 뿌리 노드 `crate`·`commands`·`main`은 `APP_NODES`로 바뀌었다. 새 검사 `engine_crate_deps_follow_graph`(외부 의존 배치·백엔드 게이트).
 
 ### 7.3 ⑩-0 — 분리 전 정리(같은 크레이트 안에서)
 
@@ -375,7 +380,7 @@ band-dsp                 config · packet · codec · resample · jitter · rela
 | `histo::{bucket_of, bucket_lower, quantile_us}` | `pub(crate)` | `net::txlat` | `pub` |
 | `histo::bucket_value` | `pub(crate)` | `net::txlat` 시험 | `pub`(또는 그 대조를 `histo` 시험으로 옮기고 `pub(crate)` 유지) |
 | `PeerMedia::{take_feed_resampler, put_feed_resampler, ingest, note_audio, publish}` | `pub(crate)` | `worker::peer_sources`(+ `ingest`는 `sim::tune`) | `pub` |
-| `SeqCell::write` | `pub(crate)` | `metronome::sched` | `pub`(단일 작성자 규약은 감싸는 타입 `MediaStatsCell`·`MetronomeRt`와 문서로) |
+| `SeqCell::write` | `pub(crate)` | `metronome::sched` | `pub`(단일 작성자 규약은 감싸는 타입 `MediaStatsCell`·`MetronomeRt`와 문서로). **⑩-2**: 작성 끝 타입 `SeqWriter`(`SeqCell::pair`가 하나만 만들고 `Clone` 아님, `write(&mut self)`)를 두고 `SeqCell::write`는 다시 `pub(crate)`(#160 리뷰 L2). `MetronomeRt`가 `SeqWriter`를 갖는다. `MediaStatsCell`은 크레이트 안이라 칸을 `PeerMedia` 안에 그대로 두고 `pub(crate)` `write`를 쓴다(#141 M-1에서 걱정한 "칸마다 `Arc`"는 메트로놈 칸 하나에만 생긴다) |
 | `PeerMedia::{jitter, rx_dropped}` | `cfg(test)` | `sim::tune` | `#[cfg(any(test, feature = "test-support"))] pub` |
 | `PeerMedia::has_feed_resampler` | `cfg(test)` | `worker` 시험 | 같음 |
 | `MediaPortRt::drain` | `cfg(test)` | `media_port` 시험 | 같음(또는 그 시험을 `media_rings`로 `peer_media` 안에 둠) |
@@ -442,6 +447,10 @@ A를 권한다. 이유:
 
 CI: `long-sim` 잡이 `cargo test --lib long_sim_6peers_60min`(`ci.yml:179-182`) 대신 `cargo test -p band-sim long_sim_6peers_60min -- --ignored`("나"이면 위 명령). 앱 크레이트를 빌드하지 않으므로 그 잡에서 `client/dist`(`tauri-build`가 요구한다)를 만드는 단계가 필요 없어진다.
 
+**⑩-2에서 한 것(백엔드 피처)**: `band-engine`의 피처 `backend-cpal = ["dep:cpal"]`(`engine::device::cpal`과 `engine::device::select` — `SystemBackend`는 cpal이 폴백이자 Windows 밖의 유일한 길이라 이 피처 뒤에 둔다. 그 안의 자체 WASAPI 부분은 `cfg(all(windows, feature = "backend-wasapi"))`), `backend-wasapi = ["dep:windows"]`(`engine::wasapi`, `testing`의 재노출도 같은 게이트), `default = ["backend-cpal", "backend-wasapi"]`, `asio = ["backend-cpal", "cpal/asio", "band-dsp/asio"]`. 앱은 `band-engine`을 기본 피처로 쓰고(`SystemBackend`가 필요하다) 앱의 `asio = ["band-engine/asio"]`. `windows-sys`(`sys::prio`·`sys::cpu`·`net::qos`)는 백엔드와 무관해 피처 뒤에 두지 않았다(7.2 표). 예제 둘은 실제 장치를 열므로 `required-features`(`measure_smoke` = `backend-cpal`, `wasapi_probe` = 둘 다)로 백엔드 없는 구성에서 빠진다.
+- **하네스·시험은 백엔드 없이 된다**: `cargo clippy -p band-engine --no-default-features --features test-support --all-targets -- -D warnings` 녹색, `cargo test -p band-engine --no-default-features --features test-support`에서 lib(하네스 포함)·통합 시험 15개가 모두 컴파일·통과한다 — 통합 시험은 전부 가짜 장치를 쓴다. 위 표 "가"의 "백엔드가 필요한 `loopback` 등"은 실제로는 없다(예제만 필요). 이 구성은 CI `rust` 잡의 `Clippy (band-engine, 백엔드 없음)` 단계가 지킨다. `cargo tree -p band-engine --no-default-features -e normal`에 `cpal`·`windows`·`tauri`가 없다.
+- CI: `long-sim`·`soak` 잡은 `-p band-engine`(백엔드 켬 — 그릇과 `--no-default-features`는 ⑩-3에서 잰다)으로 바꾸고 프런트 `dist` 자리 표시 단계를 뺐다. `realtime` 잡은 `default-members` 전체를 그대로 본다(앱 lib 시험 바이너리가 함께 빌드되므로 `dist` 단계 유지).
+
 ### 7.5 PR 분할·위험·증거
 
 | PR | 내용 | 증거 |
@@ -469,6 +478,13 @@ CI: `long-sim` 잡이 `cargo test --lib long_sim_6peers_60min`(`ci.yml:179-182`)
 - 표 밖에서 나온 것 하나: `config::DriverKind::supported()`가 `cfg!(feature = "asio")`를 읽는다. `band-dsp`에 빈 피처 `asio`를 두고 `band`의 `asio = ["cpal/asio", "band-dsp/asio"]`가 켠다(장치 코드가 아니라 목록 플래그다).
 - `band-dsp` 개발 의존 `rand`·`sha2`·`serde_json`(지터 단위 시험). `jitter-trace.sha256` fixture는 `env!("CARGO_MANIFEST_DIR")` 기준이라 `crates/band-dsp/tests/fixtures/`로 옮겼다(같은 blob). `Cargo.lock`은 `band-dsp` 항목 추가와 `band`의 직접 의존 `opus`·`rubato` 제거뿐 — 버전 변화 없음.
 - 증거: fixture 4종 바이트 동일(`long_sim_6peers_5min`, `churn_add_remove_events_match_fixture`, `trace_fixture_matches`, `send_column_pcm16_matches_reference_and_fixture`), `rt_alloc` 3개 통과, 60분 하네스 리포트가 develop과 `wallSeconds`만 다름(GOAL 전 항목 PASS), `cpu_profile`(release) 2회 평균이 6구성 모두 develop ±5% 안, 루프백 같은 범위(수치는 ⑩-1 PR 본문).
+
+**⑩-2 한 일**(위 표의 ⑩-2 행, 내용은 7.2·7.4절의 "⑩-2에서 한 것"):
+
+- 앱/`band-engine` 분리(`git mv`, 경로 치환), 백엔드 피처 둘, 통합 테스트·예제·fixture 이동, `architecture.rs`가 세 크레이트를 본다(간선 284개 — 옮기기 전과 같은 집합, 앱 노드 이름만 `band_lib::…`), 새 검사 `engine_crate_deps_follow_graph`. #160 리뷰 L2: `SeqCell` 작성 끝 `SeqWriter`(7.3 표).
+- 증거: fixture 4종 바이트 동일(파일은 R100 이동, 비교 시험 통과 — 백엔드 없는 구성에서도), `rt_alloc` 통과, 60분 하네스 리포트가 develop과 `wallSeconds`만 다름, 루프백 같은 범위, `cargo tauri build --debug --no-bundle` 통과(수치는 ⑩-2 PR 본문). release 시험 빌드의 `band_lib` 출력 이름 충돌 경고(cargo #6313, ⑨a 자기 개발 의존)는 사라졌다 — 자기 개발 의존이 `band-engine`(rlib뿐)으로 옮겨 갔기 때문이다.
+- **[사람]**: `npm run dev:tauri` 앱 실행, `cargo tauri build` 설치본, `cargo build --features asio`(절차는 PR 본문).
+- 공유 `target-dir` 주의(이 작업에서 발견): 워크트리 둘이 서로 다른 브랜치를 같은 `target-dir`로 빌드하면 같은 상대 경로의 경로 크레이트(`band`, `crates/band-dsp`)는 메타데이터 해시가 같아(cargo는 경로 의존을 워크스페이스 기준 상대 경로로 해시한다) 산출물을 덮어쓰고, 증분 빌드가 다른 워크트리의 산출물을 쓸 수 있다(실제로 E0432·E0624가 났다). 전/후 비교는 블록으로 나눠 각 블록 앞에서 소스를 touch해 다시 빌드했고, 실행 파일은 복사해 두고 돌렸다.
 
 ### 7.6 빌드 시간 영향 — 추정
 
@@ -502,7 +518,18 @@ CI: `long-sim` 잡이 `cargo test --lib long_sim_6peers_60min`(`ci.yml:179-182`)
 
 읽는 법: 증분은 시험 바이너리 17개의 링크가 대부분이라 차이가 1~2초 안이다(7.6 추정 "재컴파일 양은 비슷하고 … 워커·net만 고친 경우 `band-dsp`를 다시 컴파일하지 않는다"와 맞다 — 지터를 고치면 `band-dsp` → 앱 순서로 둘 다 다시 되므로 1~2초 늘었다). 비증분 재컴파일은 두 크레이트가 병렬로 돌아 4~5초 줄었다. 링크가 가벼워지는 효과는 앱(tauri)이 빠지는 ⑩-2·⑩-3에서 나온다.
 
-(추정 당시에는 초 단위를 재지 않았다.) ⑩-3 본문에 넣을 측정: (1) `cargo test -p band-sim --no-run` 깨끗한 빌드 시간·최대 메모리 vs 지금의 `cargo test --lib --no-run`, (2) `jitter/target.rs` 한 줄 고친 뒤 5분 하네스가 뜨기까지의 시간 전/후, (3) CI `long-sim`·`rust` 잡 시간 전/후(`cargo build --timings`).
+**⑩-2 측정**(같은 기계, develop `0021bcd`와 블록으로 번갈아 2회, 동시 작업 중, `cargo test --no-run` 디버그 — 이제 `default-members` 셋, 의존은 캐시됨. 공유 `target-dir`에서 두 워크트리의 같은 상대 경로 크레이트가 산출물을 덮어쓰므로 블록마다 소스를 touch해 먼저 다시 빌드했다 — 7.5절 ⑩-2 한 일):
+
+| 경우 | develop | ⑩-2 |
+|---|---|---|
+| 자기 크레이트 전부 비증분 재컴파일(`CARGO_INCREMENTAL=0`, 뿌리 touch) | 38.9 · 39.6초 | 24.2 · 22.5초 |
+| 지터 한 파일(`jitter/target.rs`) touch 후 증분 | 14.0 · 14.4초 | 10.8 · 10.7초 |
+| 워커 한 파일(`worker/mod.rs`) touch 후 증분 | 15.1 · 13.6초 | 10.0 · 10.0초 |
+| 커맨드(`src/commands.rs`, 앱) touch 후 증분 | 13.6 · 13.7초 | 5.1 · 5.2초 |
+
+읽는 법: 7.6 추정의 "엔진 통합 테스트: tauri 쪽 311개가 빠진다"가 링크에서 나왔다 — 시험 바이너리 17개(통합 16 — `architecture` 포함 — + `band_engine` lib)가 이제 tauri 없는 `band_engine`과 링크하고, tauri와 링크하는 것은 시험 0개인 앱 lib·bin 바이너리 둘뿐이다. 증분은 3~4초, 비증분 재컴파일은 약 16초 줄었다. 앱만 고치면(`commands.rs`) 엔진 시험 바이너리를 다시 링크하지 않아 5초다.
+
+(추정 당시에는 초 단위를 재지 않았다.) ⑩-3 본문에 넣을 측정: (1) `cargo test -p band-sim --no-run`(또는 `-p band-engine --no-default-features --features test-support`) 깨끗한 빌드 시간·최대 메모리 vs 지금의 `cargo test -p band-engine --lib --no-run`, (2) `jitter/target.rs` 한 줄 고친 뒤 5분 하네스가 뜨기까지의 시간 전/후, (3) CI `long-sim`·`rust` 잡 시간 전/후(`cargo build --timings`).
 
 ## 8. `tests/architecture.rs` 예외 10개 — 어느 단계에서 없어지나
 
