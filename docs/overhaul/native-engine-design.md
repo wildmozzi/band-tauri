@@ -277,6 +277,12 @@ off len 필드
 3. 시그널링으로 교환 후 양쪽이 `engine_add_peer(peer_id, descriptor)` 호출.
 4. 피어 상태기계: `Connecting` → 모든 후보로 Hello를 100ms 간격 송신(최대 10초). Hello/HelloAck를 받으면 그 출발 주소를 확정 경로로 기록(LAN 우선: LAN 후보가 응답하면 public보다 우선). → `Connected`.
 5. `Connected`: 1초 keepalive(Ping), 500ms 간격 RTT 측정(EWMA). 5초 무응답 → `Reconnecting`(다시 Hello) → 15초 → `Failed`.
+   - **연결 결과 기록**(P1-18, `net/connlog.rs`): 제어 스레드가 20ms 틱마다 피어 상태(상태·경로 종류·`started`·`connected_at`·`bye`)를 `ConnTracker`에 넘기고, 바뀐 곳에서 이벤트 `{ 시각, peerId, phase, outcome, ms }`를 Net의 최근 128개 링에 넣는다(바뀐 틱에만 벽시계를 읽고 로그 락을 잡는다). RT 콜백·워커·수신 경로에는 아무것도 추가하지 않는다. 진단 타임라인 `conn`(4절 "진단 내보내기")으로만 나가고 `EngineStats`·Tauri 커맨드는 바뀌지 않는다.
+     - `connect`: 피어 항목의 첫 시도. 결과 = 처음 `Connected`가 된 경로(`lan`/`public`/`relay`, ms = `connected_at − started` = `connectMs`) 또는 `Connecting` 시간 초과(`failed`, 약 10초).
+     - `reconnect`: `Connected` → `Reconnecting`에서 시작한 시도. 다시 `Connected`가 된 경로 또는 `failed`(ms는 틱에서 본 시각, ±20ms).
+     - `failed` 뒤 나중에 붙으면 같은 시도의 결과를 한 번 더 남긴다(ms는 같은 시작부터). `switch`: `Connected` 중 경로 종류가 바뀜(ms = 직전 경로에 머문 시간).
+     - 상대 Bye로 `Failed`가 된 것과 연결 전에 제거된 피어는 남기지 않는다. 같은 peerId라도 교체(add_peer)되면 새 시도다.
+     - 검증: `net::connlog::tests`(가상 시각 — 첫 연결 정확 시각, 시간 초과 뒤 늦은 릴레이 성공, 재연결·전환, Bye·제거·교체), `tests/relay.rs`의 NAT 흉내(`NatBox`, 목적지별 안쪽 소켓 + 매핑 소켓 + 필터): 포트 제한 콘 쌍(B가 300ms 늦게 시작해 A의 Hello가 B의 NAT에서 버려진 상태)은 홀펀칭으로 `connect → public`, 대칭형↔콘·대칭형↔대칭형은 직접 Hello가 모두 버려지고 `connect → relay`(1.5초 폴백 뒤) — 양쪽 엔진 로그와 진단 타임라인 JSONL에 남는지 본다. 로컬 UDP 흉내라 실제 공유기·LTE 성공률은 [사람] 실측(P1-8·P1-4d) 몫이다.
 6. `engine_remove_peer` 또는 `engine_stop` 시 Bye 송신.
 7. **릴레이 폴백**(P1-4b, relay-design.md). TURN 대신 자체 UDP 릴레이를 쓴다.
    - 등록: 서버 `relay-token`을 받으면 프론트가 `engine_set_relay`를 부른다. 엔진은 RelayBind → CookieRequired → 쿠키 Bind → Ok로 등록하고 10초마다 keepalive한다. `bindKey`가 있으면 모든 Bind 끝에 Bind MAC을 붙인다(relay-design 2.1.1, 등록 가로채기 방지). 릴레이 경로 피어가 1초 넘게 조용하면 keepalive를 1초마다 당겨 보낸다. 그래서 릴레이 재시작·NAT 재바인딩은 CookieRequired를 받아 곧바로 재등록된다. Ack가 3번 연속 없으면 `unreachable`(계속 재시도), 토큰이 만료되면 `expired`(새 토큰 전까지 Bind 중지).
@@ -511,7 +517,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 **진단 내보내기(P2-5, `diag/`)**
 - 기록: `band-diag` 스레드가 1초마다 `EngineManager::snapshot()`(엔진 슬롯 락 안에서 `Engine::stats()`, UI의 `engine_stats`와 같은 경로)으로 샘플을 링 버퍼(3600개 = 60분)에 넣는다. 엔진이 없으면 기록하지 않고, 엔진이 사라진 순간 `running:false` 정지 표시 샘플을 한 번 넣는다. RT 콜백 경로에는 아무것도 추가하지 않는다.
-- 샘플(JSONL 한 줄): `t`(유닉스 ms), `running`, `network`(합주/테스트, 정지 표시 샘플은 끝난 세션 값), `session`(`EngineManager` generation — 값이 바뀐 곳이 엔진 재시작 경계로, 누적 카운터가 0부터 다시 센다), `EngineStats`의 장치·지연·xrun·스트림 오류 값, `peers[]`(`peer` 가명, `state`, `path`, `rttMs`, `jitterMs`, `bufferMs`, `playoutMs`, `lossPct`, `late`·`concealed` 누적, `level`, 에코 상태, `txCodec`·`txCodecAuto`·`txCodecReason`·`remoteLossPct`), `relay`(주소는 대역만, `autoOpus` 포함).
+- 샘플(JSONL 한 줄): `t`(유닉스 ms), `running`, `network`(합주/테스트, 정지 표시 샘플은 끝난 세션 값), `session`(`EngineManager` generation — 값이 바뀐 곳이 엔진 재시작 경계로, 누적 카운터가 0부터 다시 센다), `EngineStats`의 장치·지연·xrun·스트림 오류 값, `peers[]`(`peer` 가명, `state`, `path`, `rttMs`, `jitterMs`, `bufferMs`, `playoutMs`, `lossPct`, `late`·`concealed` 누적, `level`, 에코 상태, `txCodec`·`txCodecAuto`·`txCodecReason`·`remoteLossPct`), `relay`(주소는 대역만, `autoOpus` 포함), `conn[]`(P1-18, 직전 샘플 뒤로 생긴 연결 이벤트 — `t` 이벤트 시각, `peer` 가명, `phase` = `connect`|`reconnect`|`switch`, `result` = `lan`|`public`|`relay`|`failed`, `ms`; 3절 5. 이벤트가 없으면 키가 없어 기존 줄과 같다). 스냅샷은 Net의 최근 이벤트를 모두 주고 기록 쪽이 (세션, seq)로 이미 넣은 것을 거른다. 엔진 정지 직전 1초 안의 이벤트는 다음 기록 전에 엔진이 사라지면 빠질 수 있다.
 - zip: `README.txt`, `meta.json`(앱 이름·버전, OS 종류·아키텍처·버전, 내보낸 시각, 타임라인 범위), `engine.json`(현재 또는 마지막 세션 `EngineConfig`, 마지막 샘플, `engine_list_devices` 결과), `timeline.jsonl`, `logs/*.log`(앱 로그 끝부분 최대 2MB, 마스킹).
 - 마스킹: IPv4 앞 두 옥텟(`a.b.x.x`)·IPv6 앞 두 그룹, 이메일·JWT·32자 이상 토큰 덩어리 제거, UUID·피어 id는 `id-` + SHA-256 앞 8 hex(같은 id는 같은 값, 솔트 없는 짧은 해시라 후보 id를 알면 되돌릴 수 있음 — 익명화가 아니라 가명), 사용자 폴더 이름(`C:\Users\<이름>`, `/Users/<이름>`, `/home/<이름>`, 공백 포함 다음 구분자까지) 제거. 32자 이상 덩어리라도 `/` 2개 이상과 `-`·`_`가 함께 있는 경로 조각은 남긴다(조각 하나가 16자 이상 숫자+문자면 가림). 오디오 장치 이름은 진단에 필요해 그대로 둔다.
 - 저장: 확장자를 `.zip`으로 바꾼 이름이 이미 있으면 `-1`, `-2`…를 붙인다(대화상자가 덮어쓰기를 확인하지 않은 파일). 같은 폴더의 `.part` 임시 파일에 쓴 뒤 이름을 바꾼다. zip 압축은 타임라인 락 밖에서 한다.

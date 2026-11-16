@@ -169,9 +169,16 @@ pub struct EngineSnapshot {
     pub network: bool,
     /// 엔진 세션 번호(`EngineManager` generation, 시작·정지마다 증가)
     pub session: u64,
+    /// 최근 연결 이벤트(P1-18, `Engine::conn_events`). 진단이 `seq`로 이미 기록한 것을 거른다.
+    pub conn_events: Vec<crate::net::connlog::ConnEvent>,
 }
 
 impl Engine {
+    /// 피어별 연결 시도 → 결과(P1-18, net 제어 스레드가 기록). 네트워크 없는 엔진이면 빈 목록.
+    pub fn conn_events(&self) -> Vec<crate::net::connlog::ConnEvent> {
+        self.net.as_ref().map_or_else(Vec::new, |n| n.conn_events())
+    }
+
     pub fn stats(&self) -> EngineStats {
         let c = &self.counters;
         let in_buf = match c.in_cb_frames.load(Ordering::Relaxed) {

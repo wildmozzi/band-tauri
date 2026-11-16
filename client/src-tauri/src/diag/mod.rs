@@ -16,7 +16,7 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::engine::config::EngineConfig;
 use crate::engine::report::EngineSnapshot;
-use timeline::{Sample, Timeline, DEFAULT_CAPACITY, SAMPLE_INTERVAL_MS};
+use timeline::{ConnSample, Sample, Timeline, DEFAULT_CAPACITY, SAMPLE_INTERVAL_MS};
 
 struct Inner {
     timeline: Timeline,
@@ -26,6 +26,8 @@ struct Inner {
     last_session: (bool, u64),
     /// 현재 또는 마지막 세션의 설정
     last_config: Option<EngineConfig>,
+    /// 이미 기록한 연결 이벤트의 (세션, 최대 seq). 스냅샷은 최근 이벤트를 모두 주므로 새 것만 넣는다(P1-18).
+    conn_seen: (u64, u64),
 }
 
 pub struct Diagnostics {
@@ -59,6 +61,7 @@ impl Diagnostics {
                 was_active: false,
                 last_session: (false, 0),
                 last_config: None,
+                conn_seen: (0, 0),
             }),
             busy: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -72,7 +75,13 @@ impl Diagnostics {
         let mut g = self.inner.lock();
         match snap {
             Some(s) => {
-                g.timeline.push(Sample::from_stats(now_ms, s.network, s.session, &s.stats));
+                let mut sample = Sample::from_stats(now_ms, s.network, s.session, &s.stats);
+                // 세션이 바뀌면(엔진 재시작 = 새 Net) seq가 1부터 다시 센다
+                let after = if g.conn_seen.0 == s.session { g.conn_seen.1 } else { 0 };
+                sample.conn = s.conn_events.iter().filter(|e| e.seq > after).map(ConnSample::from_event).collect();
+                let max_seq = s.conn_events.iter().map(|e| e.seq).max().unwrap_or(0).max(after);
+                g.conn_seen = (s.session, max_seq);
+                g.timeline.push(sample);
                 g.last_config = Some(s.config);
                 g.last_session = (s.network, s.session);
                 g.was_active = true;
@@ -134,7 +143,43 @@ mod tests {
     fn snap(running: bool) -> EngineSnapshot {
         let mut stats = EngineStats::stopped();
         stats.running = running;
-        EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 7 }
+        EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 7, conn_events: vec![] }
+    }
+
+    #[test]
+    fn conn_events_recorded_once_per_session() {
+        use crate::net::connlog::{ConnLog, ConnOutcome, ConnPhase};
+        let mut log = ConnLog::default();
+        log.push(1_500, "peer-bob", ConnPhase::Connect, ConnOutcome::Relay, 1_834);
+        let with = |log: &ConnLog, session| EngineSnapshot { session, conn_events: log.events(), ..snap(true) };
+        let d = Diagnostics::new(10);
+        d.record(2_000, Some(with(&log, 7)));
+        d.record(3_000, Some(with(&log, 7))); // 같은 이벤트: 다시 넣지 않음
+        log.push(3_200, "peer-bob", ConnPhase::Switch, ConnOutcome::Public, 1_200);
+        d.record(4_000, Some(with(&log, 7)));
+        // 재시작: 새 Net의 seq는 1부터
+        let mut fresh = ConnLog::default();
+        fresh.push(4_500, "peer-bob", ConnPhase::Connect, ConnOutcome::Failed, 10_000);
+        d.record(5_000, Some(with(&fresh, 9)));
+        d.with_timeline(|tl, _, _| {
+            let got: Vec<Vec<(u64, ConnPhase, ConnOutcome, u32)>> =
+                tl.iter().map(|s| s.conn.iter().map(|c| (c.t, c.phase, c.result, c.ms)).collect()).collect();
+            assert_eq!(
+                got,
+                vec![
+                    vec![(1_500, ConnPhase::Connect, ConnOutcome::Relay, 1_834)],
+                    vec![],
+                    vec![(3_200, ConnPhase::Switch, ConnOutcome::Public, 1_200)],
+                    vec![(4_500, ConnPhase::Connect, ConnOutcome::Failed, 10_000)],
+                ]
+            );
+            let jsonl = timeline::to_jsonl(tl);
+            let lines: Vec<&str> = jsonl.lines().collect();
+            assert!(lines[0].contains(r#""conn":[{"t":1500,"peer":"id-"#), "{}", lines[0]);
+            assert!(lines[0].contains(r#""phase":"connect","result":"relay","ms":1834}]"#), "{}", lines[0]);
+            assert!(!jsonl.contains("peer-bob"), "피어 id는 가명");
+            assert!(!lines[1].contains(r#""conn""#), "이벤트 없는 샘플엔 conn 키가 없다(기존 줄 형식)");
+        });
     }
 
     #[test]

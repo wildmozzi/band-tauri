@@ -326,6 +326,7 @@ impl EngineManager {
             config: e.config().clone(),
             network: e.has_network(),
             session: s.generation,
+            conn_events: e.conn_events(),
         })
     }
 

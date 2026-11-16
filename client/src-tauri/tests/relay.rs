@@ -17,10 +17,13 @@
 //! - PCM16 + 릴레이 피어가 늘어 상한(2Mbps)의 90%에 닿으면 릴레이 피어에게 Opus로 자동 전환하고, 줄면 hold 뒤 복귀(P1-4c).
 //! - 릴레이는 Bind MAC을 요구한다(2.1.1). 엔진은 서버가 준 bindKey로 MAC을 붙여 등록한다.
 //! - 직접 Hello의 출발 주소를 릴레이로 위장해도 경로 태그(AAD)로 걸러 릴레이 경로가 서지 않는다(4.1).
+//! - NAT 흉내(P1-18, `NatBox`): 포트 제한 콘 쌍은 홀펀칭으로 직접(public), 대칭형이 끼면 릴레이로 폴백하고
+//!   연결 결과(`connect` → public/relay, ms)가 엔진 연결 로그와 진단 타임라인에 남는다.
 //!
 //! ## 두 단계(P3-0a, tests/loopback.rs와 같은 규칙)
 //! - **결정적**(기본 `cargo test`): `relay_fallback_then_promotion_flow`(폴백·승격·강등 흐름),
-//!   `relay_ack_from_other_address_is_ignored`. 대기는 상태 조건·받은 패킷 수, 벽시계는 행 감지 상한뿐이다.
+//!   `relay_ack_from_other_address_is_ignored`, `port_restricted_cone_pair_connects_direct_and_logs_result`,
+//!   `symmetric_nat_falls_back_to_relay_and_logs_result`. 대기는 상태 조건·받은 패킷 수, 벽시계는 행 감지 상한뿐이다.
 //! - **실시간**(`#[ignore = "realtime: ..."]`): 연결·승격·강등·재등록 시간, 은닉률·연속성, 토큰 수명(초 단위 벽시계)을
 //!   재는 나머지. CI `realtime` 잡이 하나씩 3회까지 돌린다. 경로·등록 상태 기계는 ignore 사유의 net::peer /
 //!   net::relay 단위 테스트(가상 시간 주입)가 결정적 짝이다. 로컬: `cargo test --test relay -- --ignored --test-threads 1`.
@@ -36,7 +39,11 @@ use band_lib::engine::config::{CodecKind, EngineConfig};
 use band_lib::engine::device::fake::FakeBackend;
 use band_lib::engine::mixer::MixControls;
 use band_lib::net::types::{PathKind, PeerStateKind};
+use band_lib::engine::report::EngineSnapshot;
 use band_lib::engine::Engine;
+use band_lib::diag::timeline::to_jsonl;
+use band_lib::diag::Diagnostics;
+use band_lib::net::connlog::{ConnOutcome, ConnPhase};
 use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
 use band_lib::net::types::RelayStateKind;
 use band_lib::net::{NetOptions, RelaySetting};
@@ -969,4 +976,230 @@ fn relay_ack_from_other_address_is_ignored() {
     ack[16] = 0;
     fake_relay.send_to(&ack, engine_addr).unwrap();
     assert!(wait_relay_state(&e, RelayStateKind::Bound, HANG), "릴레이 주소에서 온 Ack는 받는다");
+}
+
+// ---------------------------------------------------------------------------- NAT 흉내(P1-18)
+
+/// 흉내 내는 NAT 종류. 모두 127.0.0.1 위라 주소 제한은 곧 포트 제한이다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NatKind {
+    /// 포트 제한 콘: 목적지와 무관하게 매핑 하나(공인 주소 = STUN이 본 주소). 엔진이 먼저 보낸 (주소, 포트)에서 온 것만 들인다.
+    PortRestrictedCone,
+    /// 대칭형: 목적지마다 다른 매핑(포트). STUN이 본 주소(`advertised`)는 STUN 서버 쪽 매핑이라 다른 곳에서 온 것은 버린다.
+    Symmetric,
+}
+
+/// 엔진 하나 앞의 NAT. 엔진은 같은 기계라 송신을 가로챌 수 없으므로, 바깥 목적지 D마다 안쪽 소켓 `route(D)`를 두고
+/// 엔진은 그 주소를 D로 안다(후보·릴레이 주소로 넘긴다). 안쪽 소켓에 엔진이 보낸 것은 매핑 소켓(콘 = 공용, 대칭형 = D 전용)으로
+/// D에 나가고 그 (매핑, D)가 열린다. 바깥 소켓에 온 것은 열린 (매핑, 출발지)일 때만 그 출발지의 안쪽 소켓에서 엔진으로 간다.
+struct NatBox {
+    kind: NatKind,
+    engine: SocketAddr,
+    /// STUN이 알려 줄 공인 주소 = 매핑 소켓 0
+    advertised: SocketAddr,
+    exts: Vec<UdpSocket>,
+    /// (안쪽 소켓, 매핑 소켓 번호, 바깥 목적지)
+    routes: Vec<(UdpSocket, usize, SocketAddr)>,
+    stop: Arc<AtomicBool>,
+    /// 필터에 걸려 버린 바깥 패킷 수
+    dropped: Arc<AtomicUsize>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl NatBox {
+    fn new(kind: NatKind, engine: SocketAddr) -> NatBox {
+        let ext = UdpSocket::bind("127.0.0.1:0").unwrap();
+        ext.set_nonblocking(true).unwrap();
+        let advertised = ext.local_addr().unwrap();
+        NatBox {
+            kind,
+            engine,
+            advertised,
+            exts: vec![ext],
+            routes: Vec::new(),
+            stop: Arc::new(AtomicBool::new(false)),
+            dropped: Arc::new(AtomicUsize::new(0)),
+            thread: None,
+        }
+    }
+
+    /// 바깥 목적지 `dest`로 가는 안쪽 주소(엔진이 `dest` 대신 쓴다). `start` 전에 모두 만든다.
+    fn route(&mut self, dest: SocketAddr) -> SocketAddr {
+        let inner = UdpSocket::bind("127.0.0.1:0").unwrap();
+        inner.set_nonblocking(true).unwrap();
+        let ext = match self.kind {
+            NatKind::PortRestrictedCone => 0,
+            NatKind::Symmetric => {
+                let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+                s.set_nonblocking(true).unwrap();
+                self.exts.push(s);
+                self.exts.len() - 1
+            }
+        };
+        let addr = inner.local_addr().unwrap();
+        self.routes.push((inner, ext, dest));
+        addr
+    }
+
+    fn start(&mut self) {
+        let (exts, routes) = (std::mem::take(&mut self.exts), std::mem::take(&mut self.routes));
+        let (engine, stop, dropped) = (self.engine, self.stop.clone(), self.dropped.clone());
+        self.thread = Some(std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            let mut opened = vec![false; routes.len()];
+            while !stop.load(Ordering::Relaxed) {
+                for (i, (inner, ext, dest)) in routes.iter().enumerate() {
+                    while let Ok((n, from)) = inner.recv_from(&mut buf) {
+                        if from == engine {
+                            let _ = exts[*ext].send_to(&buf[..n], *dest);
+                            opened[i] = true;
+                        }
+                    }
+                }
+                for (x, sock) in exts.iter().enumerate() {
+                    while let Ok((n, from)) = sock.recv_from(&mut buf) {
+                        match routes.iter().position(|(_, e, d)| *e == x && *d == from) {
+                            Some(i) if opened[i] => {
+                                let _ = routes[i].0.send_to(&buf[..n], engine);
+                            }
+                            _ => {
+                                dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_micros(200));
+            }
+        }));
+    }
+}
+
+impl Drop for NatBox {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+struct NatPair {
+    a: Engine,
+    b: Engine,
+    nat_a: NatBox,
+    nat_b: NatBox,
+    sink_b: Arc<Mutex<Vec<f32>>>,
+}
+
+/// A(사인, NAT `ka` 뒤) → B(NAT `kb` 뒤). 서로의 후보는 상대 NAT의 공인 주소(STUN이 본 주소, kind public) 하나,
+/// 릴레이도 각자의 NAT을 거친다. B는 A보다 `stagger` 늦게 add_peer한다(그동안 A의 Hello는 B의 NAT에서 버려진다).
+fn nat_pair(relay: &RelayServer, ka: NatKind, kb: NatKind, stagger: Duration) -> NatPair {
+    let backend_b = FakeBackend::silence(48_000);
+    let sink_b = backend_b.sink.clone();
+    let a = Engine::start(config(), Arc::new(sine_backend()), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(config(), Arc::new(backend_b), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let mut nat_a = NatBox::new(ka, local_addr(&a));
+    let mut nat_b = NatBox::new(kb, local_addr(&b));
+    let (a_to_b, a_to_relay) = (nat_a.route(nat_b.advertised), nat_a.route(relay.addr));
+    let (b_to_a, b_to_relay) = (nat_b.route(nat_a.advertised), nat_b.route(relay.addr));
+    nat_a.start();
+    nat_b.start();
+    let cand = |d: &LocalDescriptor, addr: SocketAddr| LocalDescriptor {
+        candidates: vec![Candidate { kind: CandidateKind::Public, addr: addr.to_string() }],
+        ..d.clone()
+    };
+    a.add_peer("bob".into(), &cand(b.descriptor().unwrap(), a_to_b)).unwrap();
+    std::thread::sleep(stagger);
+    b.add_peer("alice".into(), &cand(a.descriptor().unwrap(), b_to_a)).unwrap();
+    set_relay(&a, a_to_relay, &relay_token(&a, "user-alice", 600), Some(600)).unwrap();
+    set_relay(&b, b_to_relay, &relay_token(&b, "user-bob", 600), Some(600)).unwrap();
+    NatPair { a, b, nat_a, nat_b, sink_b }
+}
+
+fn nat_path_is(e: &Engine, kind: PathKind) -> bool {
+    peer_path(e) == Some((PeerStateKind::Connected, Some(kind)))
+}
+
+/// 엔진 연결 이벤트 중 첫 `connect` 결과(결과, ms). 제어 틱(20ms)이 연결을 보고 기록하므로, 경로 상태가 선 직후면
+/// 아직 없을 수 있어 행 감지 상한까지 기다린다.
+fn first_connect(e: &Engine) -> Option<(ConnOutcome, u32)> {
+    let get = || e.conn_events().iter().find(|ev| ev.phase == ConnPhase::Connect).map(|ev| (ev.outcome, ev.ms));
+    wait_until(HANG, || get().is_some());
+    get()
+}
+
+/// 진단 타임라인(diag zip의 `timeline.jsonl`)에 연결 결과가 남는지: 엔진 스냅샷을 진단 기록에 두 번 넣고 JSONL을 본다.
+fn diag_jsonl(e: &Engine) -> String {
+    let d = Diagnostics::new(10);
+    let snap = |e: &Engine| EngineSnapshot { stats: e.stats(), config: e.config().clone(), network: true, session: 1, conn_events: e.conn_events() };
+    d.record(1, Some(snap(e)));
+    d.record(2, Some(snap(e)));
+    d.with_timeline(|tl, _, _| to_jsonl(tl))
+}
+
+/// 결정적(P1-18, GOAL 3-1): 양쪽 포트 제한 콘 NAT → 홀펀칭으로 직접(public) 연결하고 결과가 진단에 남는다.
+/// 먼저 보낸 쪽의 Hello는 상대 NAT에서 버려지지만, 상대도 보내면서 매핑이 열려 양쪽이 붙는다. 릴레이도 등록돼 있지만
+/// 직접 경로가 1.5초 안에 서므로 릴레이로 가지 않는다. 대기는 상태 조건, 벽시계는 행 감지 상한뿐이다.
+#[test]
+fn port_restricted_cone_pair_connects_direct_and_logs_result() {
+    let _g = RT_LOCK.lock();
+    let relay = RelayServer::start();
+    // B가 300ms 늦게 시작: 그동안 A의 Hello(100ms 간격)는 B의 NAT이 버린다 — 필터가 실제로 걸린 상태에서 홀펀칭
+    let p = nat_pair(&relay, NatKind::PortRestrictedCone, NatKind::PortRestrictedCone, Duration::from_millis(300));
+    assert!(
+        wait_until(HANG, || nat_path_is(&p.a, PathKind::Public) && nat_path_is(&p.b, PathKind::Public)).is_some(),
+        "콘 NAT 쌍이 직접 연결되지 않음: A {:?} B {:?}",
+        peer_path(&p.a),
+        peer_path(&p.b)
+    );
+    assert!(wait_sound(&p.sink_b, 0, HANG).is_some(), "직접 경로 소리 없음");
+    assert!(p.nat_b.dropped.load(Ordering::Relaxed) > 0, "B가 보내기 전 A의 Hello는 B의 NAT에서 버려져야 한다");
+    assert_eq!(relay.stats.forwarded_packets.load(Ordering::Relaxed), 0, "직접 경로로 붙었으면 릴레이를 거치지 않는다");
+    for (name, e) in [("A", &p.a), ("B", &p.b)] {
+        let c = first_connect(e);
+        assert!(matches!(c, Some((ConnOutcome::Public, _))), "{name} 연결 결과: {c:?} / {:?}", e.conn_events());
+        let jsonl = diag_jsonl(e);
+        assert!(jsonl.contains(r#""phase":"connect","result":"public""#), "{name} 진단 타임라인에 연결 결과 없음: {jsonl}");
+        assert_eq!(jsonl.matches(r#""phase":"connect""#).count(), 1, "같은 이벤트는 한 번만 기록");
+    }
+    println!(
+        "콘↔콘: A {:?} B {:?}, NAT 필터 폐기 A {} B {}",
+        first_connect(&p.a),
+        first_connect(&p.b),
+        p.nat_a.dropped.load(Ordering::Relaxed),
+        p.nat_b.dropped.load(Ordering::Relaxed)
+    );
+}
+
+/// 결정적(P1-18, GOAL 3-5): 대칭형 NAT이 끼면 상대가 아는 공인 주소(STUN 매핑)로는 들어올 수 없고, 대칭형 쪽이 보내는
+/// 매핑은 상대 NAT이 모르는 포트라 직접 경로가 끝내 서지 않는다 → 릴레이로 폴백하고 그 결과(`relay`, 릴레이 Hello는
+/// 시작 1.5초 뒤부터)가 진단에 남는다. 대칭형↔포트 제한 콘, 대칭형↔대칭형 두 쌍.
+#[test]
+fn symmetric_nat_falls_back_to_relay_and_logs_result() {
+    let _g = RT_LOCK.lock();
+    for (ka, kb) in [(NatKind::Symmetric, NatKind::PortRestrictedCone), (NatKind::Symmetric, NatKind::Symmetric)] {
+        let relay = RelayServer::start();
+        let p = nat_pair(&relay, ka, kb, Duration::ZERO);
+        assert!(
+            wait_until(HANG, || nat_path_is(&p.a, PathKind::Relay) && nat_path_is(&p.b, PathKind::Relay)).is_some(),
+            "{ka:?}↔{kb:?}: 릴레이로 연결되지 않음: A {:?} B {:?}",
+            peer_path(&p.a),
+            peer_path(&p.b)
+        );
+        assert!(wait_sound(&p.sink_b, 0, HANG).is_some(), "{ka:?}↔{kb:?}: 릴레이 경유 소리 없음");
+        assert!(relay.stats.forwarded_packets.load(Ordering::Relaxed) > 0, "소리는 릴레이를 거쳐야 한다");
+        let dropped = p.nat_a.dropped.load(Ordering::Relaxed) + p.nat_b.dropped.load(Ordering::Relaxed);
+        assert!(dropped > 0, "{ka:?}↔{kb:?}: 직접 Hello는 NAT 필터에서 버려져야 한다");
+        for (name, e) in [("A", &p.a), ("B", &p.b)] {
+            let c = first_connect(e);
+            assert!(matches!(c, Some((ConnOutcome::Relay, _))), "{ka:?}↔{kb:?} {name} 연결 결과: {c:?} / {:?}", e.conn_events());
+            assert!(e.conn_events().iter().all(|ev| ev.outcome != ConnOutcome::Failed), "실패 기록 없음: {:?}", e.conn_events());
+            let jsonl = diag_jsonl(e);
+            assert!(jsonl.contains(r#""phase":"connect","result":"relay""#), "{name} 진단 타임라인에 연결 결과 없음: {jsonl}");
+        }
+        // A가 먼저 add_peer했으므로 A 쪽 릴레이 연결은 A의 폴백 시작(1.5초) 뒤다
+        let (_, ms_a) = first_connect(&p.a).unwrap();
+        assert!(ms_a >= 1_500, "{ka:?}↔{kb:?}: 릴레이 폴백은 1.5초 뒤부터: {ms_a}ms");
+        println!("{ka:?}↔{kb:?}: A {:?} B {:?}, NAT 필터 폐기 {dropped}", first_connect(&p.a), first_connect(&p.b));
+    }
 }
