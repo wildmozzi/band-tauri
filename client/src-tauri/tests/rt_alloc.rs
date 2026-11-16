@@ -1,14 +1,17 @@
 //! RT 콜백 경로 무할당 보증(P1-10, CLAUDE.md "rt.rs: 할당 금지").
 //!
 //! 이 테스트 바이너리 전용 카운팅 글로벌 할당자로, 지금 스레드가 "콜백 안"이라고 표시한 동안의 할당·재할당만 센다
-//! (다른 스레드나 준비 단계 할당은 세지 않는다). `rt.rs`의 `InputRt`/`OutputRt::process`를 주요 분기가 모두 돌게(소스 8개 활성, 언더런·DRAIN,
+//! (다른 스레드나 준비 단계 할당은 세지 않는다). 카운터도 스레드별이다(P3-17): 예전에는 표시는 스레드별인데 카운터가
+//! 프로세스 전역 원자값이라, 같은 바이너리의 다른 시험(`counting_allocator_detects_allocation` 등)이 병렬 스레드에서
+//! 자기 표시 구간 안에 할당하면 그 수가 이 구간의 전후 차이에 섞여 거짓 실패했다(로컬 6회 중 1회).
+//!`rt.rs`의 `InputRt`/`OutputRt::process`를 주요 분기가 모두 돌게(소스 8개 활성, 언더런·DRAIN,
 //! 측정 녹음·자극·출력 대체, 메트로놈 클릭, 믹스 탭 가득 참, 실행시간 기록) 여러 번 부르고 할당 0을 단언한다.
 //! 범위는 `process`까지다. 백엔드 쪽(cpal 데이터 콜백 클로저, 자체 WASAPI 루프의 `GetBuffer`↔`process` 사이 포맷 변환,
 //! 가짜 장치)은 들어 있지 않다.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use band_lib::engine::metronome::ClickShared;
@@ -19,16 +22,16 @@ use ringbuf::traits::{Consumer, Producer};
 
 struct Counting;
 
-static ALLOCS: AtomicU64 = AtomicU64::new(0);
-
 thread_local! {
-    // const 초기화·Drop 없는 Cell이라 접근해도 할당하지 않는다(할당자 안에서 써도 재귀 없음).
+    // const 초기화·Drop 없는 Cell이라 접근해도 할당하지 않는다(할당자 안에서 써도 재귀 없음, 스레드 종료 중에도 접근 가능).
     static IN_RT: Cell<bool> = const { Cell::new(false) };
+    // 이 스레드가 표시 구간 안에서 한 할당 수. 다른 스레드의 할당은 여기에 섞이지 않는다(P3-17).
+    static RT_ALLOCS: Cell<u64> = const { Cell::new(0) };
 }
 
 fn note() {
     if IN_RT.with(|f| f.get()) {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        RT_ALLOCS.with(|n| n.set(n.get() + 1));
     }
 }
 
@@ -56,11 +59,11 @@ static GLOBAL: Counting = Counting;
 
 /// `f`를 "콜백 안"으로 표시하고 돌린다. 그동안 이 스레드의 할당 수를 돌려준다.
 fn rt_allocs(f: impl FnOnce()) -> u64 {
-    let before = ALLOCS.load(Ordering::Relaxed);
+    let before = RT_ALLOCS.with(|n| n.get());
     IN_RT.with(|x| x.set(true));
     f();
     IN_RT.with(|x| x.set(false));
-    ALLOCS.load(Ordering::Relaxed) - before
+    RT_ALLOCS.with(|n| n.get()) - before
 }
 
 #[test]
@@ -71,6 +74,36 @@ fn counting_allocator_detects_allocation() {
         drop(v);
     });
     assert!(n >= 1, "카운터가 할당을 못 봄");
+}
+
+/// P3-17 회귀: 다른 스레드가 자기 표시 구간 안에서 할당하는 동안 이 스레드의 표시 구간(원자값 스핀만, 할당 없음)은
+/// 0이어야 한다. 예전 전역 카운터에서는 상대의 1000회가 그대로 섞였다(병렬 시험 간 거짓 실패의 결정적 재현).
+#[test]
+fn counter_is_per_thread() {
+    use std::sync::atomic::AtomicU8;
+    let phase = Arc::new(AtomicU8::new(0)); // 0 대기 → 1 측정 중 → 2 상대 끝
+    let p = phase.clone();
+    let other = std::thread::spawn(move || {
+        while p.load(Ordering::Acquire) != 1 {
+            std::hint::spin_loop();
+        }
+        let n = rt_allocs(|| {
+            for i in 0..1000u32 {
+                drop(std::hint::black_box(vec![i; 4]));
+            }
+        });
+        p.store(2, Ordering::Release);
+        n
+    });
+    let mine = rt_allocs(|| {
+        phase.store(1, Ordering::Release);
+        while phase.load(Ordering::Acquire) != 2 {
+            std::hint::spin_loop();
+        }
+    });
+    let theirs = other.join().unwrap();
+    assert!(theirs >= 1000, "상대 스레드 할당이 잡혀야 함({theirs})");
+    assert_eq!(mine, 0, "다른 스레드의 할당 {mine}회가 이 스레드 구간에 섞였다");
 }
 
 #[test]
