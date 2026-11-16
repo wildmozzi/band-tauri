@@ -1216,3 +1216,296 @@ fn parser_resolves_paths() {
     let decl = "#[cfg(test)]\nmod tests;\nuse crate::x;\n";
     assert_eq!(without_unit_tests(decl), decl);
 }
+
+// ============================================================================
+// 워커 디렉터리 밖의 워커·RT 스레드 코드(#151 리뷰 L-1, #152 리뷰 L3)
+// ============================================================================
+
+/// 주석·문자열을 지운 코드에서 `impl 이름 {` 블록(본문 중괄호 짝까지). 제네릭·트레이트 impl은 대상이 아니다.
+fn impl_block(code: &str, ty: &str) -> Option<String> {
+    let head = format!("impl {ty}");
+    let mut from = 0;
+    while let Some(off) = code[from..].find(&head) {
+        let at = from + off + head.len();
+        from = at;
+        let rest = code[at..].trim_start();
+        if !rest.starts_with('{') {
+            continue;
+        }
+        let open = code.len() - rest.len();
+        let mut depth = 0;
+        for (k, c) in code[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(code[open..=open + k].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// 워커 스레드에서 도는데 `engine/worker/` 밖에 있는 코드. (파일, `impl` 블록 — `None`이면 파일 전체).
+/// - `metronome/click.rs`: 출력 콜백(RT) 쪽 클릭. 락이 하나도 없어야 한다(RT 검사도 본다).
+/// - `metronome/sched.rs`의 `impl MetronomeRt`: 워커 쪽 끝(`refresh_plan`은 `try_lock`만). 같은 파일의
+///   `impl MetronomeCtl`(`set_plan`·`stats`)은 커맨드 스레드라 `.lock()`이 정당하므로 블록만 자른다.
+/// - `jitter/`: 워커 소유 `JitterBuffer`(`WORKER_OWNED`). 지터 상태는 워커만 만진다.
+const WORKER_THREAD_CODE: &[(&str, Option<&str>)] = &[
+    ("engine/metronome/click.rs", None),
+    ("engine/metronome/sched.rs", Some("MetronomeRt")),
+    ("engine/jitter/conceal.rs", None),
+    ("engine/jitter/correction.rs", None),
+    ("engine/jitter/delay.rs", None),
+    ("engine/jitter/late_budget.rs", None),
+    ("engine/jitter/mod.rs", None),
+    ("engine/jitter/playout.rs", None),
+    ("engine/jitter/stats.rs", None),
+    ("engine/jitter/target.rs", None),
+    ("engine/jitter/tuning.rs", None),
+];
+
+/// 기다리지 않는데 `WAITING_LOCK_CALLS` 문자열에 걸리는 호출(공백을 지운 꼴, 근거).
+const WORKER_THREAD_NOT_WAITING: &[(&str, &str)] =
+    &[("self.ctl.report.write(", "MetronomeRt::publish — SeqCell 작성자 쪽(seq 올리고 쓰기, 기다리지 않음). 작성자는 &mut self 하나")];
+
+fn worker_thread_lock_violations(rel: &str, src: &str, block: Option<&str>) -> Vec<String> {
+    let code = strip(without_unit_tests(src));
+    let part = match block {
+        None => code,
+        Some(ty) => match impl_block(&code, ty) {
+            Some(b) => b,
+            None => return vec![format!("{rel}: `impl {ty}` 블록을 못 찾음(이름이 바뀌었으면 WORKER_THREAD_CODE를 고칠 것)")],
+        },
+    };
+    let mut flat: String = part.chars().filter(|c| !c.is_whitespace()).collect();
+    for (ok, _) in WORKER_THREAD_NOT_WAITING {
+        flat = flat.replace(ok, "");
+    }
+    let at = block.map(|b| format!(" impl {b}")).unwrap_or_default();
+    waiting_lock_calls(&flat).into_iter().map(|l| format!("{rel}{at}: {l}")).collect()
+}
+
+/// 워커 디렉터리 밖이지만 워커·RT 스레드에서 도는 코드에도 기다리는 락이 없다(#151 리뷰 L-1).
+/// `worker_dir_waits_for_no_lock`과 같은 문자열 검사. 지터 디렉터리는 새 파일이 생기면 목록에 넣어야 한다(파일 수 확인).
+#[test]
+fn worker_thread_code_outside_worker_dir_waits_for_no_lock() {
+    let mut jitter = Vec::new();
+    rs_files(&src_dir().join("engine/jitter"), &mut jitter);
+    let listed = WORKER_THREAD_CODE.iter().filter(|(f, _)| f.starts_with("engine/jitter/")).count();
+    assert_eq!(jitter.len(), listed + 1, "engine/jitter/ 파일이 늘거나 줄었다(tests.rs 빼고 WORKER_THREAD_CODE에 맞출 것): {jitter:?}");
+    let mut bad = Vec::new();
+    for (rel, block) in WORKER_THREAD_CODE {
+        let src = std::fs::read_to_string(src_dir().join(rel)).unwrap();
+        if !unit_tests_at_end(&src) {
+            bad.push(format!("{rel}: 단위 테스트 모듈 뒤에 코드가 있다(검사가 보지 못한다)"));
+        }
+        bad.extend(worker_thread_lock_violations(rel, &src, *block));
+    }
+    assert!(bad.is_empty(), "워커·RT 스레드 코드에 기다리는 락 호출이 있다(원자값·try_lock으로 바꿀 것): {bad:?}");
+}
+
+/// 위 검사기의 음성 확인.
+#[test]
+fn worker_thread_scanner_catches_variants() {
+    let sched = "impl MetronomeCtl { fn stats(&self) { let s = self.stats.lock(); } }\n\
+                 impl MetronomeRt {\n fn refresh_plan(&self) { if let Some(p) = self.ctl.plan.try_lock() {} }\n \
+                 fn publish(&mut self) { self.ctl.report.write(&x); }\n}\n";
+    assert!(worker_thread_lock_violations("s", sched, Some("MetronomeRt")).is_empty(), "MetronomeCtl의 lock은 보지 않는다");
+    let bad = sched.replace("self.ctl.plan.try_lock()", "Some(self.ctl.plan.lock())");
+    assert_eq!(worker_thread_lock_violations("s", &bad, Some("MetronomeRt")), ["s impl MetronomeRt: .lock("]);
+    let bad = sched.replace("self.ctl.report.write(&x)", "self.ctl.other.write()");
+    assert_eq!(worker_thread_lock_violations("s", &bad, Some("MetronomeRt")), ["s impl MetronomeRt: .write("], "허용은 그 호출 하나뿐");
+    assert_eq!(worker_thread_lock_violations("s", sched, Some("Gone")).len(), 1, "블록을 못 찾으면 실패");
+    assert_eq!(worker_thread_lock_violations("c", "fn begin(&mut self) { let g = m.lock(); }", None), ["c: .lock("]);
+    assert_eq!(impl_block("impl<T> A for B { } impl A { fn f() { {} } } x", "A").as_deref(), Some("{ fn f() { {} } }"));
+}
+
+/// RT 경로(오디오 콜백·WASAPI 이벤트 루프)에서 금지하는 것(CLAUDE.md "rt.rs와 cpal 콜백 경로: 할당·락·시스템콜·로그·panic
+/// 금지"). 주석·문자열을 지우고 공백을 지운 함수 본문에서 찾는 문자열이다. **재발 방지용 문자열 검사**다 — 부르는 함수 안
+/// (ringbuf `push_slice`, `AtomicF32` 등)과 배열 인덱스 panic은 보지 않는다. 런타임 무할당은 `tests/rt_alloc.rs`가 본다.
+/// `Instant::now()`는 허용한다(Windows `QueryPerformanceCounter`, 사용자 모드 읽기 — 콜백 시간 계측 `rt_timing`).
+const RT_FORBIDDEN: &[(&str, &[&str])] = &[
+    (
+        "할당",
+        &[
+            "Vec::",
+            "vec!",
+            "Box::",
+            "String::",
+            "format!",
+            ".to_string(",
+            ".to_owned(",
+            ".to_vec(",
+            ".collect",
+            ".into_boxed_slice(",
+            "Arc::new",
+            "Rc::new",
+            ".clone(",
+            ".push(",
+            ".insert(",
+            ".extend(",
+            ".reserve(",
+            "HashMap",
+            "BTreeMap",
+        ],
+    ),
+    ("락", &["Mutex", "RwLock", "Condvar", ".try_lock(", ".try_read(", ".try_write("]),
+    ("로그", &["log::", "println!", "eprintln!", "print!", "dbg!", "info!(", "warn!(", "error!(", "debug!(", "trace!("]),
+    ("panic", &["panic!", ".unwrap()", ".expect(", "unreachable!", "todo!", "unimplemented!", "assert!", "assert_eq!", "assert_ne!"]),
+    ("시스템콜", &["thread::", "sleep(", "std::fs", "File::", "SystemTime", "std::process", "std::env", "std::net", "std::io", "Command::"]),
+];
+
+/// RT 함수 본문에서 대문자로 시작하는 이름의 호출(`Xxx(`, `.Xxx(`) 중 허용하는 것 — 열거형·`Option`·`Result` 생성자.
+const RT_CONSTRUCTOR_CALLS: &[&str] = &["Some", "Ok", "Err", "F32", "I32", "I16", "Ready", "DeviceLost", "Failed"];
+
+/// WASAPI 이벤트 루프가 정당하게 부르는 Win32·COM 호출(대문자 이름) — 근거. 여기 없는 대문자 호출(`Sleep`, `CreateEventW`,
+/// `CoCreateInstance`, `Initialize` …)은 실패한다(#152 리뷰 L3).
+const WASAPI_LOOP_SYSCALLS: &[(&str, &str)] = &[
+    ("WaitForMultipleObjects", "이벤트 대기 — 이벤트 구동 모드에서 루프의 박자(주기마다 커널 대기가 본질)"),
+    ("GetNextPacketSize", "캡처 패킷 크기 — 캡처 버퍼 교환"),
+    ("GetBuffer", "캡처·렌더 버퍼 받기 — WASAPI의 유일한 데이터 경로"),
+    ("ReleaseBuffer", "캡처·렌더 버퍼 돌려주기 — 위와 짝"),
+    ("GetCurrentPadding", "공유 모드 빈 칸 계산(렌더), 이벤트가 멈췄을 때 장치 무효화 확인(`check`)"),
+    ("Stop", "일시 오류가 RESTART_AFTER번 이어졌을 때의 복구(`restart`: Stop → Reset → prefill → Start). 실패 경로에서만"),
+    ("Reset", "위 복구"),
+    ("Start", "위 복구"),
+];
+
+/// 금지 문자열에 걸리지만 정당한 RT 호출(공백을 지운 꼴, 근거). 본문에서 지운 뒤 검사한다.
+const RT_ALLOWED_CALLS: &[(&str, &str)] =
+    &[("io.wait(WAIT_TIMEOUT_MS)", "drive_loop의 LoopIo::wait — 락이 아니라 WaitForMultipleObjects 이벤트 대기(WASAPI_LOOP_SYSCALLS)")];
+
+enum RtPick {
+    /// 파일의 모든 함수(새 함수는 기본 RT). 목록은 제어 평면에서 한 번 도는 생성·연결 함수.
+    AllExcept(&'static [&'static str]),
+    /// 이 함수들만(같은 이름이 여럿이면 모두). 못 찾으면 실패.
+    Only(&'static [&'static str]),
+}
+
+const RT_CODE: &[(&str, RtPick)] = &[
+    ("engine/rt.rs", RtPick::AllExcept(&["measure_path", "input_ring", "output_path", "new", "attach_measure", "attach_click", "attach_record"])),
+    ("engine/metronome/click.rs", RtPick::AllExcept(&["click_wave", "new", "default"])),
+    // 이벤트 루프(`run_loop` → `drive_loop` → `WasapiIo::{wait, service, check, restart}` → `service_*` → `feed_input`·`fill_output`).
+    // 열기(`open`·`open_*`·`start`)와 `open_engine_streams`의 스레드 준비·종료 로그는 루프 밖이다.
+    (
+        "engine/wasapi/stream.rs",
+        RtPick::Only(&[
+            "run_loop",
+            "drive_loop",
+            "on_error",
+            "streams",
+            "wait",
+            "service",
+            "check",
+            "restart",
+            "prefill",
+            "chunk_samples",
+            "service_capture",
+            "service_render",
+            "from_raw",
+            "feed_input",
+            "fill_output",
+        ]),
+    ),
+    ("engine/wasapi/format.rs", RtPick::Only(&["i24_to_f32", "f32_to_i24"])),
+];
+
+/// 대문자로 시작하는 이름 바로 뒤 `(`(공백을 지운 본문).
+fn capitalized_calls(flat: &str) -> BTreeSet<String> {
+    let b = flat.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = BTreeSet::new();
+    for (k, _) in flat.match_indices('(') {
+        if let Some(s) = (0..k).rev().take_while(|&j| ident(b[j])).last() {
+            if b[s].is_ascii_uppercase() {
+                out.insert(flat[s..k].to_string());
+            }
+        }
+    }
+    out
+}
+
+fn rt_violations(rel: &str, src: &str, pick: &RtPick) -> Vec<String> {
+    let bodies = fn_bodies(&strip(without_unit_tests(src)));
+    let mut bad = Vec::new();
+    let chosen: Vec<&(String, String)> = match pick {
+        RtPick::AllExcept(skip) => bodies.iter().filter(|(n, _)| !skip.contains(&n.as_str())).collect(),
+        RtPick::Only(names) => {
+            for n in *names {
+                if !bodies.iter().any(|(b, _)| b == n) {
+                    bad.push(format!("{rel}: {n} 함수를 못 찾음(이름이 바뀌었으면 RT_CODE를 고칠 것)"));
+                }
+            }
+            bodies.iter().filter(|(n, _)| names.contains(&n.as_str())).collect()
+        }
+    };
+    for (name, body) in chosen {
+        let mut body = body.clone();
+        for (ok, _) in RT_ALLOWED_CALLS {
+            body = body.replace(ok, "");
+        }
+        for (kind, pats) in RT_FORBIDDEN {
+            for p in *pats {
+                if body.contains(p) {
+                    bad.push(format!("{rel} {name}: {kind} {p}"));
+                }
+            }
+        }
+        for l in waiting_lock_calls(&body) {
+            bad.push(format!("{rel} {name}: 락 {l}"));
+        }
+        for c in capitalized_calls(&body) {
+            if !RT_CONSTRUCTOR_CALLS.contains(&c.as_str()) && !WASAPI_LOOP_SYSCALLS.iter().any(|(s, _)| *s == c) {
+                bad.push(format!("{rel} {name}: 허용 목록 밖 호출 {c}("));
+            }
+        }
+    }
+    bad
+}
+
+/// RT 경로 정적 검사: `rt.rs`, 출력 콜백의 클릭(`metronome/click.rs`), 자체 WASAPI 이벤트 루프(`wasapi/stream.rs`·`format.rs`의
+/// 변환)에 할당·락·로그·panic·시스템콜 문자열이 없다. WASAPI 루프의 Win32·COM 호출은 `WASAPI_LOOP_SYSCALLS`만(#152 리뷰 L3).
+#[test]
+fn rt_paths_have_no_alloc_lock_log_panic_syscall() {
+    let mut bad = Vec::new();
+    for (rel, pick) in RT_CODE {
+        let src = std::fs::read_to_string(src_dir().join(rel)).unwrap();
+        if !unit_tests_at_end(&src) {
+            bad.push(format!("{rel}: 단위 테스트 모듈 뒤에 코드가 있다(검사가 보지 못한다)"));
+        }
+        bad.extend(rt_violations(rel, &src, pick));
+    }
+    assert!(bad.is_empty(), "RT 경로에 금지 호출이 있다(CLAUDE.md: 할당·락·시스템콜·로그·panic 금지): {bad:?}");
+}
+
+/// 위 검사기의 음성 확인.
+#[test]
+fn rt_scanner_catches_variants() {
+    let all = RtPick::AllExcept(&["new"]);
+    let hit = |body: &str| rt_violations("r", &format!("fn new() {{ let v = Vec::new(); }}\nfn process(&mut self) {{ {body} }}"), &all);
+    assert!(hit("let x = self.a.load(Ordering::Relaxed); let t0 = Instant::now(); if let Some(v) = o { Ok(()) } else { Err(e) }").is_empty());
+    assert_eq!(hit("let v: Vec<f32> = Vec :: with_capacity(4);"), ["r process: 할당 Vec::"]);
+    assert_eq!(hit("let s = format!(\"{}\", 1);"), ["r process: 할당 format!"]);
+    assert_eq!(hit("log::warn!(\"x\");"), ["r process: 로그 log::", "r process: 로그 warn!("]);
+    assert_eq!(hit("let a = b.get(0).unwrap();"), ["r process: panic .unwrap()"]);
+    assert_eq!(hit("std::thread::sleep(d);"), ["r process: 시스템콜 thread::", "r process: 시스템콜 sleep("]);
+    assert_eq!(hit("let g = self.m.lock();"), ["r process: 락 .lock("]);
+    assert_eq!(hit("if let Some(g) = self.m.try_lock() {}"), ["r process: 락 .try_lock("]);
+    assert_eq!(hit("unsafe { Sleep(1) };"), ["r process: 허용 목록 밖 호출 Sleep("]);
+    assert_eq!(hit("let e = unsafe { CreateEventW(None, false, false, None) };"), ["r process: 허용 목록 밖 호출 CreateEventW("]);
+    assert!(hit("match io.wait(WAIT_TIMEOUT_MS) {}").is_empty(), "허용 목록의 이벤트 대기");
+    assert_eq!(hit("cv.wait(&mut g);"), ["r process: 락 .wait("]);
+    assert!(hit("unsafe { cap.GetBuffer(&mut p)?; cap.ReleaseBuffer(n)?; WaitForMultipleObjects(&h, false, 2) };").is_empty());
+    // 주석·문자열 안, 제외한 함수, 단위 테스트 모듈은 보지 않는다
+    assert!(hit("/* Vec::new() */ let s = \"format! .lock(\"; // log::x").is_empty());
+    let only = RtPick::Only(&["service", "gone"]);
+    let src = "fn open() { log::info!(\"\"); }\nfn service(&self) { }\n#[cfg(test)]\nmod tests {\n fn service() { panic!(); }\n}\n";
+    assert_eq!(rt_violations("w", src, &only), ["w: gone 함수를 못 찾음(이름이 바뀌었으면 RT_CODE를 고칠 것)"]);
+    let calls = capitalized_calls("a.GetBuffer(1);Some(x);x.get(1);T::from_f32(v);");
+    assert_eq!(calls, ["GetBuffer".to_string(), "Some".to_string()].into_iter().collect());
+}

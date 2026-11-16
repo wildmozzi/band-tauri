@@ -66,7 +66,7 @@
 | ID | 내용 | 조치 | 검증 |
 |---|---|---|---|
 | H1 | 모니터/믹스 탭 FIFO 상한 3프레임 < 콜백 버스트 → 10ms마다 끊김 | `LocalFifo`: 입력 1콜백의 최대 방출량 `ceil(in_burst/F)·F`(패턴 주기 lcm(in_burst, F))와 출력 버스트로 상한을 산정. 시작 수위 = out + in + F + 2청크(초과분은 시작 시 버림) | 단위: 버퍼 128~1024 × 프레임 2.5~10ms 8조합 무음·불연속 0. 통합: 리뷰 매트릭스 7조합(480/2.5ms, 1024/5ms 포함) 무음 0·불연속 0·FIFO 언더런 0 |
-| H2 | cpal 0.15 WASAPI는 공유 모드 고정, `bufferSize` 요청이 사실상 무시(콜백 ≈10ms) | **P1-0에서 해결**: 자체 WASAPI 백엔드(`engine/wasapi.rs`). 이 PC 실측: 독점 출력 3.00ms·입력 2.00ms, `estLatencyMs` 7.50ms(아래 "P1-0" 절) | `examples/wasapi_probe.rs` 실행 결과 |
+| H2 | cpal 0.15 WASAPI는 공유 모드 고정, `bufferSize` 요청이 사실상 무시(콜백 ≈10ms) | **P1-0에서 해결**: 자체 WASAPI 백엔드(`engine/wasapi/`). 이 PC 실측: 독점 출력 3.00ms·입력 2.00ms, `estLatencyMs` 7.50ms(아래 "P1-0" 절) | `examples/wasapi_probe.rs` 실행 결과 |
 | H3 | `engine_start`가 엔진 락을 쥔 채 STUN/장치 열기로 수 초 블로킹, 동기 커맨드가 UI 스레드 정지 | `EngineManager`: 시작/정지는 락 밖, 세대 번호로 취소. 모든 커맨드 `async`, 블로킹 작업은 `spawn_blocking` | 통합: 장치 열기 1.5초 지연 중 `stats` 응답 50ms 미만, 시작 중 `stop` 시 그 시작 취소 |
 | M1 | 출력이 네트워크 프레임 단위로 생산되어 최대 1프레임 지연 | 64샘플 청크로 생산, 링 목표 = 장치 버퍼 + 청크 | 임펄스 지연 실측 |
 | M2 | 드리프트 0에서도 보정이 수백 회 진동 | 깊이를 버스트 종료 시 장치 클럭으로 1회 측정 + 데드밴드/히스테리시스 + 목표 양자화 히스테리시스 + 프레임 전체 램프 | 단위: 드리프트 0, 7조합에서 보정 0회. 통합: 지터 없는 링크 4조합에서 정착 후 보정 0회(리뷰 실측 281~852회) |
@@ -252,7 +252,7 @@ GOAL 1절 정의(`estLatencyMs` = 입력 버퍼 + 프레임 + 출력 링 + 출�
 
 수정 후 `callback_mix_phase_sweep_no_premature_concealment`(실시간, 3설정 × 3위상)와 `callback_mix_sim_phase_and_buffer_matrix`(결정적, 6조합 × 4위상)에서 은닉·마감 채움·보정이 모두 0이다.
 
-### 자체 WASAPI 백엔드 (`engine/wasapi.rs`)
+### 자체 WASAPI 백엔드 (`engine/wasapi/`)
 
 - **독점**: 이벤트 구동, `GetDevicePeriod` 최소 주기. 포맷은 독점 지원 포맷 중 48k → 44.1k → 96k → 88.2k, f32 → 정수 32(유효 32/24) → 24비트 패킹 → 16비트, 채널은 믹스 포맷 채널 → 2 → 필요 채널, 채널 마스크는 믹스 마스크 → 기본/DIRECTOUT 순이다. `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED`면 실패한 클라이언트를 해제한 뒤 장치가 준 크기로 주기를 다시 계산해 새 클라이언트로 재초기화한다. 최소 주기를 거절하면(`AUDCLNT_E_INVALID_DEVICE_PERIOD`/`ENDPOINT_CREATE_FAILED`) 기본 주기로 한 번 더 독점을 시도한다.
 - **저지연 공유**: `IAudioClient3::GetSharedModeEnginePeriod`의 최소값으로 `InitializeSharedAudioStream`, 믹스 포맷 그대로. 렌더는 이벤트마다 한 주기만 채워 장치 큐를 한 주기 근처로 둔다.
@@ -325,7 +325,7 @@ GOAL 1절 정의(`estLatencyMs` = 입력 버퍼 + 프레임 + 출력 링 + 출�
 - **장시간 xrun**: 독점 30분 xrun 0(GOAL 2절)은 실장비 장시간 시험이 필요하다.
 - **ASIO**: SDK가 없어 여전히 컴파일하지 못했다. ASIO도 같은 콜백 구동 믹스를 쓰므로 128/2.5ms에서 7.83ms가 되어야 한다(가짜 장치 계산).
 
-## P1-1: 지연 측정 도구 (`engine/measure.rs`, docs/MEASURE.md)
+## P1-1: 지연 측정 도구 (`engine/measure/`, docs/MEASURE.md)
 
 ### 설계 요점
 
@@ -541,7 +541,8 @@ GOAL 1절 정의(`estLatencyMs` = 입력 버퍼 + 프레임 + 출력 링 + 출�
 - 지연 측정(P1-1): 입력·출력 콜백에 추가된 것은 측정 요청 번호(원자값) 비교, 시작 위치 기록(원자값), 사전 할당 자극/녹음 링 push/pop, 사전 할당 스크래치(256프레임)뿐이다. 측정 중에도 믹스와 탭은 그대로 돌고 장치 기록만 자극으로 바꾼다.
 - `engine/rt.rs`의 `process` 경로에는 할당, 락, 로그, 시스템콜이 없다. 출력 콜백의 소스 믹스(P1-0)도 사전할당 소스 링 8개·스크래치·원자값(게인, 레벨, 언더런 프레임, 슬롯 상태, 콜백 시작/끝 카운터)만 쓴다. 스크래치 버퍼(256프레임)는 콜백 클로저가 소유하고, 인덱싱은 `get`/`get_mut`으로 panic을 피한다. 링은 ringbuf 0.4 `HeapRb`(wait-free SPSC)를 쓴다. 오버런 시 `vacant_len()`(원자 읽기)으로 프레임 단위만 기록한다.
 - cpal 에러 콜백은 `stream_errors` 원자값만 올리고, 워커가 로그를 남긴다.
-- 예외: cpal 백엔드 내부(WASAPI 이벤트 대기 등)는 우리 코드가 아니다. 자체 WASAPI 루프(`engine/wasapi.rs`)는 우리 코드이며 WASAPI 호출·이벤트 대기만 시스템콜로 허용한다(할당·락·로그 없음, 오류는 루프 밖에서 로그).
+- 예외: cpal 백엔드 내부(WASAPI 이벤트 대기 등)는 우리 코드가 아니다. 자체 WASAPI 루프(`engine/wasapi/stream.rs`의 `run_loop` → `drive_loop` → `service_*`)는 우리 코드이며 WASAPI 호출·이벤트 대기만 시스템콜로 허용한다(할당·락·로그 없음, 오류는 루프 밖에서 로그).
+- 정적 검사: `tests/architecture.rs`의 `rt_paths_have_no_alloc_lock_log_panic_syscall`이 `rt.rs`(생성·연결 함수 제외), `metronome/click.rs`의 콜백 쪽, WASAPI 루프 함수(`wasapi/stream.rs`)와 24비트 변환(`wasapi/format.rs`)의 본문에서 할당·락·로그·panic·시스템콜 문자열을 찾는다. 루프가 부를 수 있는 Win32·COM 호출은 근거와 함께 `WASAPI_LOOP_SYSCALLS`(이벤트 대기, `GetBuffer`/`ReleaseBuffer`, `GetNextPacketSize`, `GetCurrentPadding`, 복구용 `Stop`/`Reset`/`Start`)에 있고, 그 밖의 대문자 호출(`Sleep` 등)은 실패한다. 문자열 검사라 부르는 함수 안과 인덱스 panic은 보지 않는다 — 런타임 무할당은 `tests/rt_alloc.rs`.
 
 ## 미검증 항목
 
