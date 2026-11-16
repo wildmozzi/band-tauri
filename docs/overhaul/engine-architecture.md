@@ -327,7 +327,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `band-engine` | **⑩-2 완료**(`crates/band-engine`, 5.2절): 계층 0~5와 7(`engine`·`net`·`sys`·`diag`·`manager`·`settings`·`testing`) — RT·장치, 네트워크, 워커, 제어 평면. 통합 테스트·예제·fixture 포함 | `band-dsp`, windows-sys, 암호·zip·flacenc 등, **피처 뒤** cpal(`backend-cpal`)·windows(`backend-wasapi`) |
 | 앱(`band`) | 계층 6: Tauri 어댑터(`lib.rs`·`main.rs`·`commands.rs`·`build.rs`·`tauri.conf.json`, ⑩-2) | `band-engine`(기본 피처 = 백엔드 둘), `band-dsp`, tauri·플러그인 |
 
-- 결정적 하네스(`engine/sim`)는 lib 안 `cfg(test)`가 아니라 `band-dsp`(와 워커 공급 로직)를 쓰는 별도 dev 크레이트/tests로 옮긴다 → 60분 하네스가 cpal·tauri 없이 컴파일되어 CI·로컬 메모리 부담이 준다. 워커 공급(`PeerFeed`, `DeviceClock`)이 장치 의존 없이 `band-dsp` 쪽에 설 수 있는지는 ②b·③ 뒤에 정한다.
+- 결정적 하네스(`engine/sim`)는 lib 안 `cfg(test)`가 아니라 `band-dsp`(와 워커 공급 로직)를 쓰는 별도 dev 크레이트/tests로 옮긴다 → 60분 하네스가 cpal·tauri 없이 컴파일되어 CI·로컬 메모리 부담이 준다. 워커 공급(`PeerFeed`, `DeviceClock`)이 장치 의존 없이 `band-dsp` 쪽에 설 수 있는지는 ②b·③ 뒤에 정한다. **⑩-3에서 한 것**: `band-engine`의 테스트 타깃 `crates/band-engine/tests/sim`(백엔드 피처 없이 `--no-default-features --features test-support`) — 공급은 `band-dsp`로 내리지 않았고 별도 크레이트도 두지 않았다(빌드 시간이 같았다, `engine-stage5-10-scope.md` 7.4·7.6절).
 - 분리 뒤 `tests/architecture.rs`는 크레이트마다 노드 표를 따로 갖고 파서는 하나다. 위 크레이트 → 아래 크레이트 간선(`band_dsp::…`)은 계속 본다(`FORBIDDEN` "net은 미디어 상태를 모른다"가 그 간선이다). 아래 → 위는 컴파일러가 막는다(5.2절).
 
 ### 9.1 단계별 동작 불변 증거(각 단계 PR 본문에 이 표를 전/후 수치로 채운다)
@@ -357,7 +357,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 지터 버퍼 적응(목표 추정·가감속·은닉)은 도착 통계로 | WebRTC NetEQ | 같은 구성. NetEQ는 장치 스레드가 `GetAudio`(10ms)로 당길 때 디코드까지 하지만, 여기서는 디코드·은닉·보정을 워커가 하고 RT 콜백에는 PCM 링만 준다 — RT 실행시간이 코덱·패킷 수와 무관 |
 | 상태마다 쓰는 쪽은 하나(single writer) | lock-free 설계 일반 | RT 경계(링·원자값)는 지킨다. 피어 미디어 상태는 ③에서 워커 단일 소유가 됐다. `Peer`의 net 상태는 Mutex로 여러 스레드가 쓰지만, 워커가 보는 값은 ③c에서 가드가 발행하는 스냅샷이다(4.1절 끝 표). 원격 손실 보고는 단일 작성자 seqlock |
 | 의존은 정책 → 메커니즘 한 방향, 순환 없음 | Clean Architecture 의존 규칙, 비순환 의존 원칙(ADP) | 5절 규칙을 `tests/architecture.rs`가 검사, 현재 예외는 단계와 함께 관리 |
-| 결정적 시뮬레이션으로 동작 고정 | NetEQ 시뮬레이터, 가상 시간 하네스 | `engine/sim`(5분 기본 테스트, 60분 야간), 리포트 숫자가 같으면 동작 불변 |
+| 결정적 시뮬레이션으로 동작 고정 | NetEQ 시뮬레이터, 가상 시간 하네스 | `crates/band-engine/tests/sim`(5분 기본 테스트, 60분 야간), 리포트 숫자가 같으면 동작 불변 |
 
 ## 11. 엔진 수명 상태기계
 

@@ -14,7 +14,7 @@
 | ⑦ | 재배치 | `commands.rs`의 로직(릴레이 DNS, 게인 자르기, 녹음 폴더 설정)을 `manager`·`settings`로 | 2 | 2 | ⑤, ⑥의 `device` | 앱 실행 |
 | ⑧ | 재배치 | `JitterBuffer` 79필드를 하위 상태 구조체 5개로. `manager`의 수명 상태를 enum으로 | 3 | 0 | ③c(#124 `restart`) | — |
 | ⑨a | 재배치 | 테스트 표면을 `testing` 모듈 한 곳으로, 측정 훅을 `test-support` 뒤로, 이름 정리 | 2 | 0 | ⑥ | — |
-| ⑩ | 크레이트 | `band-dsp` / `band-engine` / 앱. 하네스는 `band-engine`을 장치 백엔드 피처 없이 쓰는 테스트 타깃(별도 크레이트 `band-sim`으로 둘지는 ⑩-3에서 재서 정한다, 7.4절) | 4 | (크레이트 사이는 컴파일러가) | ⑤~⑨a 전부 | 앱 빌드·실행 |
+| ⑩ | 크레이트 | `band-dsp` / `band-engine` / 앱. 하네스는 `band-engine`을 장치 백엔드 피처 없이 쓰는 테스트 타깃(⑩-3에서 재서 `band-engine/tests/sim`으로 정했다 — 별도 크레이트 없음, 7.4절) | 4 | (크레이트 사이는 컴파일러가) | ⑤~⑨a 전부 | 앱 빌드·실행 |
 | ⑨b | 재배치 | 크레이트별 `pub(crate)` 좁히기 | 2 | 0 | ⑩ | — |
 
 `tests/architecture.rs`의 `EXCEPTIONS` 10개는 ⑤(3)·⑥(5)·⑦(2)에서 0이 된다(8절). ②b·⑧·⑨·⑩은 예외를 줄이지 않는다.
@@ -343,7 +343,7 @@ band-dsp                 config · packet · codec · resample · jitter · rela
                          peer_media(코어) · clock · media_link · types · 히스토그램 칸 함수
      opus, rubato, ringbuf, serde, log
 
-하네스 (테스트 전용)     engine/sim/{tune, long, loss_codec} + fixture — 크레이트 `band-sim` 또는 `band-engine/tests`의 테스트 타깃(7.4절)
+하네스 (테스트 전용)     band-engine/tests/sim/{tune, long, loss_codec} + fixture — `band-engine`의 테스트 타깃 `sim`(⑩-3, 7.4절)
      band-engine(default-features = false, features = ["test-support"]), band-dsp, rand, serde_json
 ```
 
@@ -357,7 +357,7 @@ band-dsp                 config · packet · codec · resample · jitter · rela
 | `windows-sys` | `sys/prio.rs`, `sys/cpu.rs`, `net/qos.rs` | `band-engine` |
 | `opus`·`rubato` | `engine/codec.rs`, `engine/resample.rs` | `band-dsp`(⑩-1 완료 — 앱 `Cargo.toml`에서 직접 의존을 뺐다) |
 
-- 워크스페이스: `client/src-tauri/Cargo.toml`이 워크스페이스 루트이자 앱 패키지, 멤버는 `crates/band-dsp`·`crates/band-engine`(+ 7.4절에서 별도 크레이트로 정해지면 `crates/band-sim`). Tauri CLI는 `src-tauri/Cargo.toml`을 그대로 본다. 워크트리 공유 `target-dir`(상위 `.cargo/config.toml`)은 영향받지 않는다. `[profile.*]`(`flacenc` 최적화, release `lto` 등)는 워크스페이스 루트에만 둘 수 있으므로 그대로 루트에 남는다.
+- 워크스페이스: `client/src-tauri/Cargo.toml`이 워크스페이스 루트이자 앱 패키지, 멤버는 `crates/band-dsp`·`crates/band-engine`(7.4절: 하네스는 별도 크레이트가 아니라 `band-engine`의 테스트 타깃 — ⑩-3). Tauri CLI는 `src-tauri/Cargo.toml`을 그대로 본다. 워크트리 공유 `target-dir`(상위 `.cargo/config.toml`)은 영향받지 않는다. `[profile.*]`(`flacenc` 최적화, release `lto` 등)는 워크스페이스 루트에만 둘 수 있으므로 그대로 루트에 남는다.
 - `band-dsp` 안의 모듈 경로는 `engine::`·`net::` 접두를 떼고 평평하게(`band_dsp::jitter`, `band_dsp::packet`). `band-engine`이 옛 경로로 다시 내보내지 않는다(④와 같은 이유 — 경로가 둘이 되면 다음 정리가 번거롭다).
 - 통합 테스트 14개(+ `architecture.rs`)와 예제 2개는 전부 엔진·net 내부를 쓴다 → `band-engine/tests`·`examples`로. 앱 크레이트에는 테스트가 없다.
 - `tests/architecture.rs`: `band-engine/tests`에 하나 두고 `band-dsp/src`와 자기 `src`를 각각의 `NODES`로 본다(파서 766줄을 복사하지 않는다). 크레이트 사이 간선은 보지 않는다 — 컴파일러가 막는다.
@@ -451,6 +451,12 @@ CI: `long-sim` 잡이 `cargo test --lib long_sim_6peers_60min`(`ci.yml:179-182`)
 - **하네스·시험은 백엔드 없이 된다**: `cargo clippy -p band-engine --no-default-features --features test-support --all-targets -- -D warnings` 녹색, `cargo test -p band-engine --no-default-features --features test-support`에서 lib(하네스 포함)·통합 시험 15개가 모두 컴파일·통과한다 — 통합 시험은 전부 가짜 장치를 쓴다. 위 표 "가"의 "백엔드가 필요한 `loopback` 등"은 실제로는 없다(예제만 필요). 이 구성은 CI `rust` 잡의 `Clippy (band-engine, 백엔드 없음)` 단계가 지킨다. `cargo tree -p band-engine --no-default-features -e normal`에 `cpal`·`windows`·`tauri`가 없다.
 - CI: `long-sim`·`soak` 잡은 `-p band-engine`(백엔드 켬 — 그릇과 `--no-default-features`는 ⑩-3에서 잰다)으로 바꾸고 프런트 `dist` 자리 표시 단계를 뺐다. `realtime` 잡은 `default-members` 전체를 그대로 본다(앱 lib 시험 바이너리가 함께 빌드되므로 `dist` 단계 유지).
 
+**⑩-3에서 정한 것(그릇) — "나"**: 하네스는 `band-engine`의 테스트 타깃 `sim`(`crates/band-engine/tests/sim/{main, tune, long, loss_codec}.rs`)이다. 크레이트는 셋 그대로다(D0-2). 두 그릇을 같은 기계에서 번갈아 쟀고(7.6절 "⑩-3 측정") 차이가 잡음 안이었다 — 하네스만: 깨끗한 빌드 "가" 11.8·11.0초 / "나" 12.0·12.4초, 지터 한 파일 증분 2.6·2.6 / 2.8·2.7초. 워크스페이스 `cargo test --no-run`: "가" 31.2·33.2초 / "나" 30.9·32.1초. 같은 이유로 예상과도 맞다: 두 그릇 모두 `band-engine`(백엔드 없음 + `test-support`) rlib 하나와 시험 바이너리 하나를 만들고, 워크스페이스 빌드에서는 둘 다 피처가 합쳐진 `band-engine` 하나와 링크한다(위 표 "가"를 고를 조건 "`band-engine`을 두 번 빌드하는 비용"은 두 그릇에 똑같이 생긴다).
+- 실행: `cargo test -p band-engine --no-default-features --features test-support --test sim`(60분: `… --test sim long_sim_6peers_60min -- --ignored --nocapture`). `--no-default-features`를 빼면 백엔드가 켜진 채 빌드된다(결과는 같고 더 컴파일할 뿐). 기본 `cargo test`(`default-members`)도 이 타깃을 돈다 — 워크스페이스 시험이 하네스를 빠뜨리지 않는다(5분 하네스·churn fixture 비교 포함).
+- 계수 할당자(옛 `engine/sim/alloc.rs`)는 `testing::alloc`(`Counting`·`counted`)이 됐다. 글로벌 할당자는 최종 바이너리가 정하므로 `band-engine` 단위 시험 바이너리(`cfg(test)` 정적 변수, 워커 시험이 쓴다)와 `sim`(`tests/sim/main.rs`)이 각각 건다.
+- 하네스가 쓰는 워커 내부는 `test-support`에서만 크레이트 밖에 보인다(⑨a `testing`과 같은 문): `worker::{PeerSources, PeerSourcesParts, PeerRound, POLL, FINE_POLL}`은 재노출을 `cfg`로 둘(제품 = `pub(crate)`·`pub(super)`, `test-support` = `pub`), 표 접근자 넷(`table_len`·`media_at`·`feed_margin`·`feed_slot`)은 `cfg(test)` → `cfg(any(test, feature = "test-support")) pub`. `POLL`·`FINE_POLL`은 재노출할 수 있게 `worker/clock.rs`로 옮겼다(값 동일). `testing::engine`에 `media_port`를 더했다. `band-dsp`의 시험 훅(`PeerMedia::{jitter, rx_dropped}`)은 그대로이고 `DSP_TEST_SUPPORT`의 사용처만 `tests/sim/tune.rs`로 바꿨다.
+- CI: `long-sim`·`soak` 잡은 `-p band-engine --no-default-features --features test-support`(`long-sim`은 `--test sim`)로 백엔드 없이 빌드한다 — 앱도 백엔드도 빌드하지 않으므로 프런트 `dist` 단계는 필요 없다(⑩-2에서 이미 뺐다). `realtime` 잡의 nextest 필터에 `!binary(sim)`을 더했다: 하네스가 lib 안에 있을 때는 `kind(lib)`이라 필터 밖이었는데 테스트 타깃(`kind(test)`)이 되며 그 ignore(60분 long·`rx_hold_sensitivity` 측정)가 실시간 잡으로 들어오게 됐기 때문이다(`cargo nextest list`로 확인).
+
 ### 7.5 PR 분할·위험·증거
 
 | PR | 내용 | 증거 |
@@ -485,6 +491,13 @@ CI: `long-sim` 잡이 `cargo test --lib long_sim_6peers_60min`(`ci.yml:179-182`)
 - 증거: fixture 4종 바이트 동일(파일은 R100 이동, 비교 시험 통과 — 백엔드 없는 구성에서도), `rt_alloc` 통과, 60분 하네스 리포트가 develop과 `wallSeconds`만 다름, 루프백 같은 범위, `cargo tauri build --debug --no-bundle` 통과(수치는 ⑩-2 PR 본문). release 시험 빌드의 `band_lib` 출력 이름 충돌 경고(cargo #6313, ⑨a 자기 개발 의존)는 사라졌다 — 자기 개발 의존이 `band-engine`(rlib뿐)으로 옮겨 갔기 때문이다.
 - **[사람]**: `npm run dev:tauri` 앱 실행, `cargo tauri build` 설치본, `cargo build --features asio`(절차는 PR 본문).
 - 공유 `target-dir` 주의(이 작업에서 발견): 워크트리 둘이 서로 다른 브랜치를 같은 `target-dir`로 빌드하면 같은 상대 경로의 경로 크레이트(`band`, `crates/band-dsp`)는 메타데이터 해시가 같아(cargo는 경로 의존을 워크스페이스 기준 상대 경로로 해시한다) 산출물을 덮어쓰고, 증분 빌드가 다른 워크트리의 산출물을 쓸 수 있다(실제로 E0432·E0624가 났다). 전/후 비교는 블록으로 나눠 각 블록 앞에서 소스를 touch해 다시 빌드했고, 실행 파일은 복사해 두고 돌렸다.
+
+**⑩-3 한 일**(위 표의 ⑩-3 행, 그릇 결정은 7.4절 "⑩-3에서 정한 것"):
+
+- 하네스 이동(`git mv`, R100에 가까운 이동 — 바뀐 줄은 `use` 경로 `crate::engine::…` → `band_engine::testing::engine::…`과 계수 함수 경로, 문서 주석), 계수 할당자 `testing::alloc`, 워커 내부 `test-support` 재노출(7.4절).
+- `tests/architecture.rs`: `engine::sim` 노드 제거, `DSP_TEST_SUPPORT` 사용처 경로, `tests_use_only_testing_surface`는 `tests/sim/`도 본다(하위 디렉터리 포함). **#161 리뷰 L-2**: RT 정적 검사(`RT_CODE`)가 `band-dsp`에서 RT가 부르는 함수(`mixer::soft_clip`, `stats::AtomicF32::{load, store}`, `rt_timing::RtTiming::{record_out, record_in}`·`nanos`, `histo::bucket_of`)를 본다(경로가 `crates/`로 시작하면 워크스페이스 기준). `RT_COMMON_NAMES`에 `take`(`Iterator::take`와 `RtTiming::take`의 이름 겹침). 변이: `soft_clip`에 `Box::new` → 실패(`할당 Box::`), `record_out`에 `log::trace!` → 실패, `jitter/playout.rs` `pop`에 `Box::new`(워커 경로, RT 아님) → 정적 검사는 통과하고 하네스 `sim`의 워커 무할당 단언 11개가 실패(계수 할당자가 시험 바이너리에서 걸렸다는 확인이기도 하다).
+- **#161 리뷰 L-1**: `device/select.rs`의 `DriverKind` import를 `cfg(all(windows, feature = "backend-wasapi"))` 뒤로. CI `rust` 잡에 `Clippy (band-engine, cpal 백엔드만)`(`cargo clippy -p band-engine --no-default-features --features backend-cpal -- -D warnings`) 단계.
+- 증거: fixture 4종 바이트 동일(파일은 옮기지 않았다 — "나"라 `band-engine/tests/fixtures` 그대로, 비교 시험 통과), 시험 수 동일(`band_engine` lib 249/무시 6 → 234/4, `sim` 15/2), 60분 하네스 리포트가 develop과 `wallSeconds`만 다름, 두 그릇 빌드 시간(7.6절), CI 시간 전/후(PR 본문). 동작 불변(시험 코드 이동·가시성·CI)이라 루프백·`cpu_profile`은 생략했다 — 제품 빌드의 코드는 `POLL`·`FINE_POLL`의 정의 위치와 import 하나만 바뀌었다.
 
 ### 7.6 빌드 시간 영향 — 추정
 
@@ -530,6 +543,23 @@ CI: `long-sim` 잡이 `cargo test --lib long_sim_6peers_60min`(`ci.yml:179-182`)
 읽는 법: 7.6 추정의 "엔진 통합 테스트: tauri 쪽 311개가 빠진다"가 링크에서 나왔다 — 시험 바이너리 17개(통합 16 — `architecture` 포함 — + `band_engine` lib)가 이제 tauri 없는 `band_engine`과 링크하고, tauri와 링크하는 것은 시험 0개인 앱 lib·bin 바이너리 둘뿐이다. 증분은 3~4초, 비증분 재컴파일은 약 16초 줄었다. 앱만 고치면(`commands.rs`) 엔진 시험 바이너리를 다시 링크하지 않아 5초다.
 
 (추정 당시에는 초 단위를 재지 않았다.) ⑩-3 본문에 넣을 측정: (1) `cargo test -p band-sim --no-run`(또는 `-p band-engine --no-default-features --features test-support`) 깨끗한 빌드 시간·최대 메모리 vs 지금의 `cargo test -p band-engine --lib --no-run`, (2) `jitter/target.rs` 한 줄 고친 뒤 5분 하네스가 뜨기까지의 시간 전/후, (3) CI `long-sim`·`rust` 잡 시간 전/후(`cargo build --timings`).
+
+**⑩-3 측정**(같은 기계, develop `09c2fc7`과 블록으로 번갈아, 동시 작업 중, 디버그 `--no-run`, 의존은 캐시됨 — 공유 `target-dir`이라 의존까지 지우는 깨끗한 빌드는 하지 않았다. "깨끗한" = `cargo clean -p band-engine -p band-dsp`(+ `band-sim`·`band`) 뒤. 증분 = 그 뒤 `band-dsp/src/jitter/target.rs` touch, 다시 `band-engine/src/engine/worker/mod.rs` touch. "가"는 `crates/band-sim`(같은 `tests/sim`과 fixture 복사, 의존 `band-engine` 백엔드 없음 + `test-support`)을 임시로 만들어 쟀고 커밋하지 않았다. 최대 메모리는 재지 않았다):
+
+| 하네스가 뜨기까지 | 깨끗한 빌드 | 지터 증분 | 워커 증분 |
+|---|---|---|---|
+| develop: `-p band-engine --lib`(백엔드 켬, 지금의 long-sim 명령) | 24.8 · 22.2 · 24.4초 | 4.2 · 4.2 · 4.0초 | 3.9 · 3.9 · 4.0초 |
+| develop: `-p band-engine --no-default-features --features test-support --lib` | 22.3초 | 3.9초 | 3.7초 |
+| ⑩-3 "나": `-p band-engine --no-default-features --features test-support --test sim` | 12.0 · 12.4 · 13.0초 | 2.8 · 2.7 · 2.8초 | 2.5 · 2.5 · 2.5초 |
+| ⑩-3 "가": `-p band-sim` | 11.8 · 11.0초 | 2.6 · 2.6초 | 2.5 · 2.3초 |
+
+| 워크스페이스 `cargo test --no-run`(`default-members`) | 깨끗한 빌드 | 지터 증분 | 워커 증분 |
+|---|---|---|---|
+| develop | 31.9 · 32.0초 | 9.9 · 10.7초 | 10.1 · 10.2초 |
+| ⑩-3 "나" | 30.9 · 32.1 · 32.8초 | 10.9 · 11.1 · 10.5초 | 10.4 · 10.5 · 10.8초 |
+| ⑩-3 "가"(`band-sim`을 `default-members`에, `band-engine/tests/sim`은 치움) | 31.2 · 33.2초 | 10.6 · 11.0초 | 10.3 · 11.4초 |
+
+읽는 법: "가"와 "나"는 잡음 안에서 같다 → "나"(7.4절). 하네스만 빌드하는 시간은 develop의 `--lib`보다 절반 남짓이다 — `--lib`는 개발 의존(자기 자신, `test-support`)인 `band_engine` rlib과 `cfg(test)` lib 시험 바이너리(단위 시험 2백여 개 포함)를 둘 다 컴파일하지만, `--test sim`은 rlib 하나와 하네스만 컴파일한다. 의존(외부 크레이트)까지 지우는 깨끗한 빌드에서는 여기에 cpal·windows 쪽(`cargo tree -p band-engine -e normal,dev` 146 → 백엔드 없음 129 패키지)이 더 빠진다. 워크스페이스 빌드는 같은 것을 컴파일하므로(하네스가 lib 시험 바이너리에서 `sim` 시험 바이너리로 옮겨 갔을 뿐) 그대로다.
 
 ## 8. `tests/architecture.rs` 예외 10개 — 어느 단계에서 없어지나
 
