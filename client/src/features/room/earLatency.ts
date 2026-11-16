@@ -15,8 +15,15 @@ export type EarLatencyLocal = Pick<EngineStats, 'devicePeriodMs'> | null | undef
 export interface EarLatencyEstimate {
   /** 추정 입→귀(ms). RTT를 모르거나 아직 재생 전(`playoutMs` = 0)이면 null */
   totalMs: number | null
-  /** 빠진 항(상대 입력 버퍼·상대 프레임·내 출력 버퍼 중 하나라도)이 있어 실제보다 작게 나올 수 있는 근사 — "≈"로 표시 */
+  /**
+   * 빠지거나 하한인 항(상대 입력 버퍼·상대 프레임·내 출력 버퍼 중 하나라도 모름, 상대 입력 버퍼 포화, 에코 측정 중)이 있어
+   * 실제보다 작게 나올 수 있는 근사 — "≈"로 표시
+   */
   approx: boolean
+  /** 상대 입력 버퍼 보고가 u16 µs 상한(65.535ms)에 포화 — 실제는 그 이상(하한값) */
+  remoteInputSaturated: boolean
+  /** 내가 이 피어로 에코 측정 중(`peerEchoing`) — 받는 오디오가 되돌아오는 내 소리라 `remoteFrameMs`는 상대 몫이 아니다(생략) */
+  echoMeasuring: boolean
   /** 이 피어 소리를 재생 중(`playoutMs` > 0, 필드 없는 옛 엔진은 true로 본다) */
   playing: boolean
   /** 편도 근사 = RTT / 2 */
@@ -30,6 +37,12 @@ export interface EarLatencyEstimate {
   /** 내 출력 장치 버퍼를 따로 더했으면 그 값(`playoutMs`가 없는 옛 엔진 폴백에서만). `playoutMs`에 이미 들어 있으면 null */
   outputMs: number | null
 }
+
+/**
+ * 상대 입력 버퍼 보고의 포화값(ms). 엔진 계약(설계 2절 Ping 입력 버퍼 블록): u16 µs, 65535에서 포화 = "65.535ms 이상".
+ * 포화 아래 값은 정수 µs라 바로 아래 값은 65.534 — f32 반올림을 피해 그 사이를 경계로 둔다.
+ */
+export const REMOTE_INPUT_SATURATED_MS = 65.5345
 
 const finite = (v: number | null | undefined): v is number => typeof v === 'number' && Number.isFinite(v)
 const positive = (v: number | null | undefined): number | null => (finite(v) && v > 0 ? v : null)
@@ -48,13 +61,20 @@ const positive = (v: number | null | undefined): number | null => (finite(v) && 
  * | 상대 송신 프레임 | `PeerStats.remoteFrameMs`(받은 Audio 헤더, P2-8b) | 생략, approx |
  * | 내 지터 버퍼 + 출력 장치 버퍼 | `PeerStats.playoutMs`(벽시계 버퍼 지연 + 장치 출력 버퍼) | `bufferMs` + `EngineStats.devicePeriodMs` 폴백(없으면 생략, approx) |
  *
- * 모든 항이 있으면 "≈"를 떼고 정확값으로 표시한다. 그래도 드라이버가 숨긴 장치 지연과 상대 인코딩·송신 큐 시간(보통 1ms 미만)은
- * 들어 있지 않다. 에코 측정(`EchoReport.mouthToEarMs`)이 실측 기준이다.
+ * 모든 항이 있으면 "≈"를 뗀다 — 엔진이 보고하는 항을 모두 더한 추정이라는 뜻이지 실측값은 아니다. 드라이버가 숨긴 장치 지연,
+ * 상대 워커 주기(입력 링 → 인코딩 대기)·인코딩·송신 큐 시간(보통 1ms 미만), RTT/2의 대칭 가정은 들어 있지 않다.
+ * 에코 측정(`EchoReport.mouthToEarMs`)이 실측 기준이다.
+ *
+ * "≈"를 다시 붙이는 경우(값이 하한일 뿐이라):
+ * - 상대 입력 버퍼가 포화값(65.535ms, 계약: u16 µs 포화 = "그 이상") — 더하되 근사로 둔다.
+ * - 내가 이 피어로 에코 측정 중(`peerEchoing`) — 받는 오디오가 되돌아오는 내 소리라 `remoteFrameMs`는 내 프레임이다. 생략한다.
  */
 export function estimateEarLatencyMs(ps: PeerStats, local: EarLatencyLocal): EarLatencyEstimate {
-  const frame = positive(ps.remoteFrameMs)
+  const echoMeasuring = ps.peerEchoing === true
+  const frame = echoMeasuring ? null : positive(ps.remoteFrameMs)
   const input = positive(ps.remoteInputBufferMs)
-  let approx = frame === null || input === null
+  const remoteInputSaturated = input !== null && input >= REMOTE_INPUT_SATURATED_MS
+  let approx = frame === null || input === null || remoteInputSaturated
   let playout: number
   let output: number | null = null
   if (finite(ps.playoutMs)) {
@@ -69,7 +89,18 @@ export function estimateEarLatencyMs(ps: PeerStats, local: EarLatencyLocal): Ear
   const playing = !finite(ps.playoutMs) || ps.playoutMs > 0
   const oneWay = finite(ps.rttMs) ? ps.rttMs / 2 : null
   const totalMs = oneWay === null || !playing ? null : oneWay + (input ?? 0) + (frame ?? 0) + playout + (output ?? 0)
-  return { totalMs, approx, playing, oneWayMs: oneWay, remoteInputMs: input, remoteFrameMs: frame, playoutMs: playout, outputMs: output }
+  return {
+    totalMs,
+    approx,
+    remoteInputSaturated,
+    echoMeasuring,
+    playing,
+    oneWayMs: oneWay,
+    remoteInputMs: input,
+    remoteFrameMs: frame,
+    playoutMs: playout,
+    outputMs: output,
+  }
 }
 
 /** 색 구간(EAR_LATENCY_THRESHOLDS). 값이 없으면 null */
@@ -93,11 +124,11 @@ export function earLatencyTitleLines(est: EarLatencyEstimate): string[] {
   return [
     `입→귀 추정: ${est.totalMs !== null ? `${est.approx ? '≈ ' : ''}${ms1(est.totalMs)}` : est.oneWayMs === null ? '— (RTT 없음)' : '— (재생 전)'}`,
     `  편도(RTT/2): ${est.oneWayMs === null ? '--' : ms1(est.oneWayMs)}`,
-    `  상대 입력 버퍼: ${est.remoteInputMs === null ? '모름(생략)' : ms1(est.remoteInputMs)}`,
-    `  상대 프레임: ${est.remoteFrameMs === null ? '모름(생략)' : ms1(est.remoteFrameMs)}`,
+    `  상대 입력 버퍼: ${est.remoteInputMs === null ? '모름(생략)' : `${ms1(est.remoteInputMs)}${est.remoteInputSaturated ? ' 이상(보고 상한)' : ''}`}`,
+    `  상대 프레임: ${est.echoMeasuring ? '에코 측정 중(생략)' : est.remoteFrameMs === null ? '모름(생략)' : ms1(est.remoteFrameMs)}`,
     `  내 재생(지터 버퍼+출력): ${ms1(est.playoutMs)}${est.outputMs !== null ? ` + 출력 ${ms1(est.outputMs)}` : ''}`,
     est.approx
-      ? '  ※ 모르는 항이 빠진 추정입니다. 정확한 값은 에코 측정.'
-      : '  ※ 드라이버가 숨긴 장치 지연·상대 인코딩은 빠집니다. 실측은 에코 측정.',
+      ? '  ※ 모르거나 하한인 항이 있는 추정입니다(실제는 더 클 수 있음). 실측은 에코 측정.'
+      : '  ※ 엔진이 보고하는 항을 모두 더한 추정입니다. 드라이버가 숨긴 장치 지연·상대 인코딩 대기·RTT 비대칭은 빠집니다. 실측은 에코 측정.',
   ]
 }
