@@ -364,7 +364,22 @@ band-dsp                 config · packet · codec · resample · jitter · rela
 
 ### 7.3 ⑩-0 — 분리 전 정리(같은 크레이트 안에서)
 
-크레이트를 가르기 전에 7.1절의 "나눈다"·"아니오"를 지금 크레이트 안에서 옮겨 둔다. 그러면 ⑩-1은 디렉터리 이동과 `use` 치환만 남는다.
+크레이트를 가르기 전에 7.1절의 "나눈다"·"아니오"를 지금 크레이트 안에서 옮겨 둔다. 그러면 ⑩-1에는 디렉터리 이동·`use` 치환과 **경계 항목 처리**(아래 표)만 남는다(#159 리뷰 M1).
+
+**경계 항목**: 크레이트를 가르면 `pub(crate)`는 크레이트 밖에서 안 보이고, `band-dsp`의 `#[cfg(test)]`는 `band-engine` 시험 빌드에서 꺼진다. dsp 예정 노드의 `pub(crate)`·(부모가 dsp 밖인) `pub(super)`·시험 전용 항목 가운데 dsp 밖이 쓰는 것은 `tests/architecture.rs`의 `DSP_BOUNDARY`에 고정했다 — 새로 생기거나 없어지면 `dsp_boundary_items_are_listed`가 실패하고, 적힌 사용처가 실제로 부르는지도 본다. 지금 목록(⑩-1 처리):
+
+| 항목 | 종류 | dsp 밖 사용처 | ⑩-1 |
+|---|---|---|---|
+| `histo::{bucket_of, bucket_lower, quantile_us}` | `pub(crate)` | `net::txlat` | `pub` |
+| `histo::bucket_value` | `pub(crate)` | `net::txlat` 시험 | `pub`(또는 그 대조를 `histo` 시험으로 옮기고 `pub(crate)` 유지) |
+| `PeerMedia::{take_feed_resampler, put_feed_resampler, ingest, note_audio, publish}` | `pub(crate)` | `worker::peer_sources`(+ `ingest`는 `sim::tune`) | `pub` |
+| `SeqCell::write` | `pub(crate)` | `metronome::sched` | `pub`(단일 작성자 규약은 감싸는 타입 `MediaStatsCell`·`MetronomeRt`와 문서로) |
+| `PeerMedia::{jitter, rx_dropped}` | `cfg(test)` | `sim::tune` | `#[cfg(any(test, feature = "test-support"))] pub` |
+| `PeerMedia::has_feed_resampler` | `cfg(test)` | `worker` 시험 | 같음 |
+| `MediaPortRt::drain` | `cfg(test)` | `media_port` 시험 | 같음(또는 그 시험을 `media_rings`로 `peer_media` 안에 둠) |
+| `codec::opus_decoders_created` | `cfg(any(test, feature = "test-support"))` | `tests/rt_alloc.rs` | cfg 그대로, 피처 전달만 |
+
+`band-dsp`에 `test-support` 피처를 두고 `band-engine`의 `test-support`가 `band-dsp/test-support`를 켠다. ⑩-0에서 `cfg(test)` 훅을 미리 `test-support`로 바꾸지 않은 이유: 지금은 `pub(crate)`라 통합 시험용 lib 빌드(`test-support` 켬)에서 안 쓰여 `dead_code` 경고(`-D warnings`)가 난다 — `pub`이 되는 ⑩-1에서 함께 바꾼다. 같은 이름의 흔한 메서드(`write`·`drain`·`publish`)가 많아 사용처를 이름으로 전수 탐지하면 오탐이 많다 — 그래서 항목 쪽을 래칫으로 고정했고, 목록에 없는 새 사용처는 ⑩-1에서 컴파일러가 알려 준다(항목은 이미 `pub`·`test-support` 처리 대상이다).
 
 | 옮기는 것 | 지금 | 뒤(⑩-0) | 한 일(⑩-0 PR) |
 |---|---|---|---|
@@ -430,7 +445,7 @@ CI: `long-sim` 잡이 `cargo test --lib long_sim_6peers_60min`(`ci.yml:179-182`)
 | PR | 내용 | 증거 |
 |---|---|---|
 | ⑩-0 | 7.3절(같은 크레이트 안 정리) + "dsp 예정 노드" 검사 | 공통 + fixture 동일 + `rt_alloc` |
-| ⑩-1 | `band-dsp` 추출(디렉터리 이동, `use crate::engine::jitter` → `use band_dsp::jitter` 치환) | 공통 + fixture 동일 + `cpu_profile`(release, ±5%) + 60분 하네스 1회 |
+| ⑩-1 | `band-dsp` 추출(디렉터리 이동, `use crate::engine::jitter` → `use band_dsp::jitter` 치환) + 경계 항목 처리(7.3절 `DSP_BOUNDARY` 표: `pub(crate)` → `pub`, 시험 훅 → `test-support` 피처, `band-engine/test-support` → `band-dsp/test-support` 전달, `band-dsp` dev-dependency `rand`·`sha2`·`serde_json`) | 공통 + fixture 동일 + `cpu_profile`(release, ±5%) + 60분 하네스 1회 |
 | ⑩-2 | 앱과 `band-engine` 분리(`commands`·`lib`·`main`·`build.rs`가 앱에 남고 나머지가 `crates/band-engine`으로), 백엔드 피처 | 공통 + `npm run build` + `npm run dev:tauri`·`cargo tauri build` **[사람]**(앱 실행, 설치본) + `cargo build --features asio` **[사람]** |
 | ⑩-3 | 하네스 추출(별도 크레이트 `band-sim`인지 `band-engine/tests` 타깃인지 빌드 시간을 재서 정한다, 7.4절), CI(`long-sim` 잡, `cargo test --workspace`) | fixture 동일(위치만 이동), 60분 하네스 1회, 두 형태의 빌드 시간 비교, CI 시간 전/후 |
 

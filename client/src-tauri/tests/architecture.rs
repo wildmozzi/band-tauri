@@ -130,6 +130,9 @@ const FORBIDDEN: &[(&str, &str, &str)] = &[
     ("net", "engine::mixer", "③-b"),
     // net은 수신 큐(`net::media_link`)에 넣기만 한다. 피어 미디어 상태는 워커 소유(③-a3).
     ("net", "engine::peer_media", "③-a3"),
+    // 워커는 미디어 명령 큐의 워커 쪽 끝(`peer_media::MediaPortRt`)만 쥔다. 제어 쪽 끝(`MediaPort`: Mutex·수면)은 계층 4지만
+    // (하네스가 쓰므로, ⑩-0) 워커 반복에서 부르면 안 된다 — `worker_dir_waits_for_no_lock`은 래퍼 안의 락을 보지 못한다(#159 L2).
+    ("engine::worker", "engine::media_port", "⑩-0"),
 ];
 
 /// dsp 예정 노드(엔진 ⑩, `engine-stage5-10-scope.md` 7.1·7.2절, ADR 제안 3): 스레드를 만들지 않고, 소켓·파일·장치·OS API를
@@ -172,6 +175,34 @@ const DSP_EXCLUDED: &[&str] = &[
     // 제어 쪽 끝(Mutex·수면·시계), 송신 지연·락 대기 계측(Mutex·Instant::now).
     "engine::media_port",
     "net::txlat",
+];
+
+/// dsp 예정 노드의 경계 항목(#159 리뷰 M1): 크레이트를 가르면 안 보이게 되는데 dsp 밖이 쓰는 것 — `pub(crate)`, 부모가 dsp 밖인
+/// `pub(super)`, 시험에서만 켜지는(`cfg(test)`·`cfg(any(test, feature = "test-support"))`) 비공개 아닌 항목.
+/// (파일(`src` 기준), 이름, 종류, 쓰는 dsp 밖 파일(매니페스트 기준, 쉼표), ⑩-1 처리). 종류: `crate` = `pub(crate)`, `test` = 시험 전용.
+/// ⑩-1 처리: `pub` = 경계를 넘으므로 `pub`으로. `test-support` = `#[cfg(any(test, feature = "test-support"))] pub`으로 바꾸고
+/// `band-dsp`에 `test-support` 피처를 두어 `band-engine/test-support`가 전달한다(`band-dsp`의 `cfg(test)`는 `band-engine` 시험
+/// 빌드에서 꺼진다). ⑩-0에서 미리 바꾸지 않는 이유: 지금 `test-support`로 켜면 통합 시험용 lib 빌드에서 `pub(crate)` 항목이 안 쓰여
+/// `dead_code`가 된다(`pub`이 되는 ⑩-1에서 함께 바꾼다).
+/// 검사(`dsp_boundary_items_are_listed`): 실제 경계 항목 = 이 목록(새 항목이 생기면 실패 → 여기 적고 ⑩-1 처리를 정한다, 없어지면
+/// 지운다), 적힌 사용처는 실제로 그 이름을 부른다. 같은 이름이 흔한 메서드(`write`·`drain`·`publish`)라 사용처 전수 탐지는
+/// 이름 매칭으로 정확하지 않다 — 그래서 항목 쪽을 래칫으로 고정하고, ⑩-1에서는 컴파일러가 남은 사용처를 마저 알려 준다.
+const DSP_BOUNDARY: &[(&str, &str, &str, &str, &str)] = &[
+    ("engine/codec.rs", "opus_decoders_created", "test", "tests/rt_alloc.rs", "test-support(이미 cfg가 맞다 — 피처 전달만)"),
+    ("engine/histo.rs", "bucket_of", "crate", "src/net/txlat.rs", "pub"),
+    ("engine/histo.rs", "bucket_lower", "crate", "src/net/txlat.rs", "pub"),
+    ("engine/histo.rs", "bucket_value", "crate", "src/net/txlat.rs", "pub(쓰는 곳은 txlat 시험뿐 — 그 대조를 histo 시험으로 옮기면 pub(crate) 유지)"),
+    ("engine/histo.rs", "quantile_us", "crate", "src/net/txlat.rs", "pub"),
+    ("engine/peer_media.rs", "take_feed_resampler", "crate", "src/engine/worker/peer_sources.rs", "pub"),
+    ("engine/peer_media.rs", "put_feed_resampler", "crate", "src/engine/worker/peer_sources.rs", "pub"),
+    ("engine/peer_media.rs", "has_feed_resampler", "test", "src/engine/worker/tests.rs", "test-support"),
+    ("engine/peer_media.rs", "ingest", "crate", "src/engine/worker/peer_sources.rs, src/engine/sim/tune.rs", "pub"),
+    ("engine/peer_media.rs", "note_audio", "crate", "src/engine/worker/peer_sources.rs", "pub"),
+    ("engine/peer_media.rs", "publish", "crate", "src/engine/worker/peer_sources.rs", "pub"),
+    ("engine/peer_media.rs", "jitter", "test", "src/engine/sim/tune.rs", "test-support"),
+    ("engine/peer_media.rs", "rx_dropped", "test", "src/engine/sim/tune.rs", "test-support"),
+    ("engine/peer_media.rs", "drain", "test", "src/engine/media_port.rs", "test-support(또는 MediaPortRt 시험을 media_rings로 peer_media 안에 둠)"),
+    ("engine/stats.rs", "write", "crate", "src/engine/metronome/sched.rs", "pub(단일 작성자 규약은 문서·감싸는 타입으로 — MediaStatsCell·MetronomeRt)"),
 ];
 
 /// dsp 예정 노드가 쓸 수 있는 외부 크레이트(7.2절 그래프의 `band-dsp` 의존). 단위 테스트(`rand`·`sha2`·`serde_json` 등)는 보지 않는다.
@@ -728,7 +759,7 @@ fn forbidden_edges_absent() {
             }
         }
     }
-    assert!(bad.is_empty(), "금지 간선(FORBIDDEN) — net은 미디어 상태를 직접 쓰지 않는다:\n{}", bad.join("\n"));
+    assert!(bad.is_empty(), "금지 간선(FORBIDDEN) — net은 미디어 상태를, 워커는 미디어 명령 큐의 제어 쪽 끝을 직접 쓰지 않는다:\n{}", bad.join("\n"));
 }
 
 /// dsp 예정 노드에서 집합 밖 노드로 가는 간선.
@@ -762,24 +793,151 @@ fn extern_crates() -> BTreeSet<String> {
     out
 }
 
-/// 코드(주석·문자열을 지운 것)에서 `krate::`로 쓰인 외부 크레이트 가운데 `allowed`에 없는 것.
+/// 코드(주석·문자열을 지운 것)에서 쓰인 외부 크레이트 가운데 `allowed`에 없는 것. 경로(`krate::…`, `::krate::…`)와
+/// 경로 없는 가져오기(`use krate;`, `use krate as x;`, `extern crate krate;`, #159 리뷰 L1)를 본다.
 fn extern_uses(code: &str, crates: &BTreeSet<String>, allowed: &[&str]) -> BTreeSet<String> {
     let b = code.as_bytes();
     let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
     let mut out = BTreeSet::new();
     for k in crates.iter().filter(|k| !allowed.contains(&k.as_str())) {
-        let pat = format!("{k}::");
         let mut from = 0;
-        while let Some(i) = code[from..].find(&pat).map(|i| i + from) {
-            // 앞이 식별자 문자나 `::`(다른 경로의 한 마디)가 아니어야 크레이트 이름이다(`::sha2::`는 절대 경로라 잡는다).
-            let in_path = i >= 2 && &code[i - 2..i] == "::" && (i == 2 || ident(b[i - 3]));
-            if (i == 0 || !ident(b[i - 1])) && !in_path {
+        while let Some(i) = code[from..].find(k.as_str()).map(|i| i + from) {
+            from = i + k.len();
+            let end = i + k.len();
+            // 낱말 경계: 앞뒤가 식별자 문자가 아니어야 한다.
+            if (i > 0 && ident(b[i - 1])) || (end < b.len() && ident(b[end])) {
+                continue;
+            }
+            // 앞이 `a::`(다른 경로의 한 마디)이면 크레이트 이름이 아니다. `::krate`(절대 경로)는 크레이트다.
+            let lead = if i >= 2 && &code[i - 2..i] == "::" {
+                if i > 2 && ident(b[i - 3]) {
+                    continue;
+                }
+                i - 2
+            } else {
+                i
+            };
+            let path = code[end..].starts_with("::");
+            let before = code[..lead].trim_end();
+            let imported = before.ends_with("use") && (before.len() == 3 || !ident(b[before.len() - 4]))
+                || before.ends_with("extern crate");
+            if path || imported {
                 out.insert(k.clone());
             }
-            from = i + pat.len();
         }
     }
     out
+}
+
+/// 코드(주석·문자열·파일 끝 단위 시험을 지운 것)의 경계 항목: (이름, 종류). `root`면 노드의 뿌리 파일(부모 모듈이 dsp 밖)이라
+/// `pub(super)`·시험 전용 `pub`도 경계를 넘는다. 하위 파일(`jitter/conceal.rs` 등)은 비공개 모듈 안이라 `pub(crate)`만 본다.
+fn boundary_items(code: &str, root: bool) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    let mut gated = false;
+    for line in code.lines().map(str::trim) {
+        let mut l = line;
+        while l.starts_with("#[") {
+            if l.starts_with("#[cfg(test)]") || l.starts_with("#[cfg(any(test") {
+                gated = true;
+            }
+            match l.find(']') {
+                // 속성 안의 `]`(`#[cfg(any(test, feature = ""))]`는 없다 — 문자열은 지워졌다)까지 넘긴다.
+                Some(e) => l = l[e + 1..].trim_start(),
+                None => break,
+            }
+        }
+        if l.is_empty() || l.starts_with("#[") {
+            continue;
+        }
+        let (vis, rest) = if let Some(r) = l.strip_prefix("pub(crate) ") {
+            ("crate", r)
+        } else if let Some(r) = l.strip_prefix("pub(super) ") {
+            ("super", r)
+        } else if let Some(r) = l.strip_prefix("pub ") {
+            ("pub", r)
+        } else {
+            ("", l)
+        };
+        let mut rest = rest;
+        for q in ["const fn ", "unsafe fn ", "async fn "] {
+            if rest.starts_with(q) {
+                rest = &rest[q.len() - 3..];
+            }
+        }
+        let item = ["fn ", "const ", "static ", "struct ", "enum ", "type ", "trait "].iter().find_map(|k| rest.strip_prefix(k));
+        let was_gated = std::mem::take(&mut gated);
+        let Some(item) = item else { continue };
+        let name: String = item.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        let kind = match vis {
+            _ if was_gated && root && !vis.is_empty() => "test",
+            "crate" => "crate",
+            "super" if root => "super",
+            _ => continue,
+        };
+        if !name.is_empty() {
+            out.push((name, kind));
+        }
+    }
+    out
+}
+
+/// ⑩-0(#159 리뷰 M1): dsp 예정 노드의 경계 항목은 `DSP_BOUNDARY`와 같다(⑩-1에서 처리할 목록). 적힌 사용처는 실제로 부른다.
+#[test]
+fn dsp_boundary_items_are_listed() {
+    let mut found = BTreeSet::new();
+    for (f, module) in source_files() {
+        if module.last().is_some_and(|m| m == "tests") {
+            continue;
+        }
+        let Some(node) = node_of(&module).filter(|n| DSP_PLANNED.contains(n)) else { continue };
+        let root = module.join("::") == node;
+        let rel = f.strip_prefix(src_dir()).unwrap_or(&f).display().to_string().replace('\\', "/");
+        let text = std::fs::read_to_string(&f).expect("읽기");
+        for (name, kind) in boundary_items(&strip(without_unit_tests(&text)), root) {
+            found.insert((rel.clone(), name, kind.to_string()));
+        }
+    }
+    let listed: BTreeSet<(String, String, String)> =
+        DSP_BOUNDARY.iter().map(|(f, n, k, _, _)| (f.to_string(), n.to_string(), k.to_string())).collect();
+    let new: Vec<String> = found.difference(&listed).map(|(f, n, k)| format!("  {f}: {n} ({k})")).collect();
+    let gone: Vec<String> = listed.difference(&found).map(|(f, n, k)| format!("  {f}: {n} ({k})")).collect();
+    assert!(
+        new.is_empty(),
+        "dsp 예정 노드에 새 경계 항목(pub(crate)·pub(super)·시험 전용) — DSP_BOUNDARY에 쓰는 곳과 ⑩-1 처리를 적을 것:\n{}",
+        new.join("\n")
+    );
+    assert!(gone.is_empty(), "DSP_BOUNDARY의 항목이 없어졌다(경계를 넘지 않게 됨) — 목록에서 지울 것:\n{}", gone.join("\n"));
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (f, name, _, users, how) in DSP_BOUNDARY {
+        assert!(!how.is_empty(), "{f}: {name} — ⑩-1 처리가 비었다");
+        for u in users.split(", ") {
+            let in_dsp = u.strip_prefix("src/").and_then(|r| {
+                let m = module_of_file(&src_dir().join(r));
+                node_of(&m).map(|n| DSP_PLANNED.contains(&n))
+            });
+            assert_ne!(in_dsp, Some(true), "{f}: {name} — 사용처 {u}는 dsp 예정 노드다(경계 밖이 아니다)");
+            let code = strip(&std::fs::read_to_string(manifest.join(u)).unwrap_or_else(|e| panic!("{u}: {e}")));
+            let calls = [format!(".{name}("), format!("{name}("), format!("{name}::<")];
+            assert!(calls.iter().any(|c| code.contains(c.as_str())), "{f}: {name} — 적힌 사용처 {u}가 부르지 않는다(목록 갱신)");
+        }
+    }
+}
+
+/// 변이: `pub(crate)`, 뿌리 파일의 `pub(super)`·시험 전용 `pub`을 잡고, 비공개 시험 도우미·하위 파일의 `pub(super)`·보통 `pub`은 잡지 않는다.
+#[test]
+fn dsp_boundary_scanner_catches_variants() {
+    let code = "pub(crate) fn a() {}\npub(super) const B: u8 = 0;\n#[cfg(test)]\n#[inline]\npub fn c() {}\n\
+                #[cfg(any(test, feature = \"\"))]\npub(crate) fn d() {}\n#[cfg(test)]\nfn e() {}\npub fn f() {}\n\
+                #[derive(Debug)]\npub(crate) struct G;\npub(crate) const fn h() {}\nimpl X {\n    #[cfg(test)]\n    pub fn i(&self) {}\n}\n";
+    let got = boundary_items(code, true);
+    let want: Vec<(String, &str)> =
+        [("a", "crate"), ("B", "super"), ("c", "test"), ("d", "test"), ("G", "crate"), ("h", "crate"), ("i", "test")]
+            .iter()
+            .map(|(n, k)| (n.to_string(), *k))
+            .collect();
+    assert_eq!(got, want);
+    let sub: Vec<String> = boundary_items(code, false).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(sub, ["a", "d", "G", "h"], "하위 파일: pub(crate)만(시험 전용이어도 pub(crate)면 잡는다)");
 }
 
 /// ⑩-0: dsp 예정 노드는 집합 밖을 쓰지 않는다(⑩-1에서 `band-dsp`로 떼어낼 수 있다). `sys`·`net::crypto` 등을 쓰면 실패.
@@ -852,6 +1010,12 @@ fn dsp_scanner_catches_variants() {
     assert_eq!(f("let m = ::parking_lot::Mutex::new(0);"), BTreeSet::from(["parking_lot".to_string()]));
     assert!(f("use ringbuf::HeapRb; fn a() { log::warn!(\"x\"); }").is_empty());
     assert!(f("use crate::engine::rand::x; let v = operand::y; // rand::z\nlet s = \"sha2::A\";").is_empty());
+    // 경로 없는 가져오기(#159 L1)
+    assert_eq!(f("use sha2 as h;\nfn d() { h::Sha256::new(); }"), BTreeSet::from(["sha2".to_string()]));
+    assert_eq!(f("use rand;"), BTreeSet::from(["rand".to_string()]));
+    assert_eq!(f("extern crate parking_lot;"), BTreeSet::from(["parking_lot".to_string()]));
+    assert_eq!(f("use ::sha2 as h;"), BTreeSet::from(["sha2".to_string()]));
+    assert!(f("let rand = 1; let sha2x = rand + 1; fn reuse(rand: u8) {} let x = misuse;").is_empty());
 }
 
 /// 워커 단독 소유 미디어 상태 타입(엔진 ③). 락 안에 들어가면 안 된다. `PeerMediaShared`(원자값만)는 다른 이름이라 해당 없음.
