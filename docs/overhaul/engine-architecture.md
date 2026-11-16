@@ -54,9 +54,9 @@
 | 스레드 | 만드는 곳 | 소유자·수명 | 우선순위 | 정지 |
 |---|---|---|---|---|
 | RT 입력·출력 콜백 | cpal/ASIO 드라이버 | 스트림 가드(`band-audio`가 소유) | 드라이버(cpal WASAPI는 TIME_CRITICAL) | 스트림 drop |
-| `band-wasapi` | `wasapi.rs` | 자체 WASAPI 스트림, 엔진 수명 | MMCSS Pro Audio | stop 원자값 + 이벤트, join |
-| `band-wasapi-watch` | `wasapi.rs` | 기본 장치 변경 감시(0.5초) | 기본 | stop 원자값, join |
-| `band-wasapi-enum`, `band-wasapi-probe` | `wasapi.rs` | 장치 열거·프로브(COM 격리), 호출 동안 | 기본 | 끝나면 join |
+| `band-wasapi` | `wasapi/stream.rs` | 자체 WASAPI 스트림, 엔진 수명 | MMCSS Pro Audio | stop 원자값 + 이벤트, join |
+| `band-wasapi-watch` | `wasapi/stream.rs` | 기본 장치 변경 감시(0.5초) | 기본 | stop 원자값, join |
+| `band-wasapi-enum`, `band-wasapi-probe` | `wasapi/{enumerate, probe}.rs` | 장치 열거·프로브(COM 격리), 호출 동안 | 기본 | 끝나면 join |
 | `band-audio` | `engine/mod.rs` | 장치 열기·스트림 가드 소유(cpal `Stream`이 `!Send`, ASIO/COM), 엔진 수명 | 기본 | `audio_stop` 원자값, join |
 | `band-worker` | `engine/mod.rs` | 엔진 워커, 엔진 수명 | MMCSS Pro Audio(준RT) | `worker_stop` 원자값, join |
 | `band-mix-tap` | `engine/mod.rs` | 믹스 탭 구독 동안 | 기본 | stop 원자값, join(탭 링 소비자를 돌려받음) |
@@ -124,7 +124,7 @@
 
 ### 4.2 RT 경로 불변 조건
 
-RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASIO 콜백과 `band-wasapi`의 `GetBuffer`~`ReleaseBuffer` 구간, 그 안에서 부르는 `mixer`·`metronome::click::ClickRt`·`record`의 RT 함수.
+RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASIO 콜백과 `band-wasapi`의 `GetBuffer`~`ReleaseBuffer` 구간(`wasapi::stream`의 이벤트 루프와 `wasapi::format`의 24비트 변환), 그 안에서 부르는 `mixer`·`metronome::click::ClickRt`·`record`의 RT 함수.
 
 1. 힙 할당, 락(Mutex·RwLock·채널), 시스템콜·로그, panic 가능 코드 금지. 인덱스는 사전 검증 또는 `get`.
    예외: `Instant::now`(QPC), `band-wasapi`의 WASAPI 호출·이벤트 대기(계약 문서 1.1절과 같음).
@@ -172,8 +172,8 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 계층 | 노드 |
 |---|---|
 | 0 | `engine::config`, `net::packet`, `sys`, `sys::{prio, cpu, time}`(④) |
-| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4), `engine::metronome::plan`(⑥-3) |
-| 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1), `engine::metronome::{click, sched}`(⑥-3) |
+| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4), `engine::metronome::plan`(⑥-3), `engine::wasapi::format`(⑥-5) |
+| 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1), `engine::metronome::{click, sched}`(⑥-3), `engine::wasapi::{enumerate, stream, probe}`(⑥-5) |
 | 3 | `net`, `net::{peer, relay, stun, qos}` |
 | 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), 하네스 `engine::sim`(`cfg(test)`) |
 | 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `settings`, `diag`, `diag::{timeline, export}` |
@@ -199,7 +199,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 |---|---|---|
 | `Peer`가 net 상태와 미디어 상태를 함께 가진 공용 구조체(필드 전부 `pub`, Mutex 5개 + 원자값). net·워커·통계·커맨드가 직접 잠근다. single writer가 아니다 | `net/peer.rs` | ③ |
 | ~~지터 락 접근자 7곳, 기본 우선순위 스레드가 준RT 락을 잡음~~ | (③-a3에서 해소: 지터 버퍼는 워커 단독 소유) | ③ 완료 |
-| 큰 파일: `wasapi.rs` 1.9k(열거·프로브 + 스트림), ~~`net/mod.rs` 1.3k(송신 + 수신 루프 + 제어 루프)~~(⑥-6에서 `net/{mod, send, recv_loop, control_loop}`로 나눔), `net/peer.rs` 1.2k | | ⑥ |
+| 큰 파일: ~~`wasapi.rs` 1.9k~~(⑥-5에서 `wasapi/{format, enumerate, stream, probe}`로 해소), ~~`net/mod.rs` 1.3k(송신 + 수신 루프 + 제어 루프)~~(⑥-6에서 `net/{mod, send, recv_loop, control_loop}`로 나눔), `net/peer.rs` 1.2k | | ⑥ |
 
 ## 6. 모듈 지도 — 현재 → 목표(R-1)
 
@@ -213,7 +213,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/mod.rs` | `Engine` 파사드: 스레드 소유, 공개 API, 통계 조립 | 엔진 API |
 | `engine/config.rs` | `EngineConfig`, 검증, 상수 | 설정 계약 |
 | `engine/device.rs` | `AudioBackend`, 백엔드 선택, cpal 백엔드(ASIO 우회), 가짜 장치 | 장치 지원 |
-| `engine/wasapi.rs` | 자체 WASAPI(이벤트 구동 독점, IAudioClient3), 열거, 프로브 | WASAPI |
+| `engine/wasapi/{mod, format, enumerate, stream, probe}.rs` | 자체 WASAPI(이벤트 구동 독점, IAudioClient3): 형식·24비트 변환·오류 분류(`format`), COM 보조·열거(`enumerate`), 스트림·이벤트 루프·엔진용 열기·기본 장치 감시(`stream`, RT 포함), 스모크 프로브(`probe`). `mod.rs`는 옛 경로 `engine::wasapi::…`를 `pub use`로 유지 | WASAPI |
 | `engine/rt.rs` | RT 콜백(입력 → 링, 소스 링 → 믹스 → 출력) | RT 믹스 |
 | `engine/resample.rs` | 장치 레이트 ↔ 48kHz | 리샘플 |
 | `engine/codec.rs` | Opus / PCM16 | 코덱 |

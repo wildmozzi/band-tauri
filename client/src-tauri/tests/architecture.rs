@@ -49,6 +49,7 @@ const NODES: &[(&str, u8)] = &[
     ("diag::mask", 1),
     ("engine::measure::analysis", 1),
     ("engine::metronome::plan", 1),
+    ("engine::wasapi::format", 1),
     // 2 E 장치 I/O·RT
     ("engine::rt", 2),
     ("engine::device", 2),
@@ -57,6 +58,9 @@ const NODES: &[(&str, u8)] = &[
     ("engine::device::select", 2),
     ("engine::device::fake", 2),
     ("engine::wasapi", 2),
+    ("engine::wasapi::enumerate", 2),
+    ("engine::wasapi::stream", 2),
+    ("engine::wasapi::probe", 2),
     ("engine::record", 2),
     ("engine::record::rt_ring", 2),
     ("engine::record::marks", 2),
