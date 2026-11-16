@@ -891,7 +891,7 @@ mod tests {
         });
         let got = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("워커 쪽 끝이 계획 락을 기다린다");
         drop(held);
-        let (mut rt, mut mine) = t.join().unwrap();
+        let (rt, mut mine) = t.join().unwrap();
         assert_eq!(got, ((1, p1), None));
         assert_eq!(ctl.take_plan_retries(), 2);
         rt.refresh_plan(&mut mine);
