@@ -1154,7 +1154,23 @@ fn port_restricted_cone_pair_connects_direct_and_logs_result() {
     );
     assert!(wait_sound(&p.sink_b, 0, HANG).is_some(), "직접 경로 소리 없음");
     assert!(p.nat_b.dropped.load(Ordering::Relaxed) > 0, "B가 보내기 전 A의 Hello는 B의 NAT에서 버려져야 한다");
+    // 릴레이 미사용은 폴백 시작(1.5초)을 넘겨서 봐야 의미가 있다(#145 L-5). 고정 sleep 대신 진행량: B 출력이 연결 뒤
+    // 2.5초 분량(48kHz 스테레오) 더 쌓일 때까지 기다린다. 그동안 경로가 계속 public이고 릴레이 전달·경로 전환이 없어야 한다.
+    let from = p.sink_b.lock().len();
+    let mut path_ok = true;
+    assert!(
+        wait_until(HANG, || {
+            path_ok &= nat_path_is(&p.a, PathKind::Public) && nat_path_is(&p.b, PathKind::Public);
+            p.sink_b.lock().len() >= from + 48_000 * 2 * 5 / 2
+        })
+        .is_some(),
+        "B 출력이 진행하지 않음"
+    );
+    assert!(path_ok, "직접 연결 뒤 경로가 바뀜: A {:?} B {:?}", p.a.conn_events(), p.b.conn_events());
     assert_eq!(relay.stats.forwarded_packets.load(Ordering::Relaxed), 0, "직접 경로로 붙었으면 릴레이를 거치지 않는다");
+    for (name, e) in [("A", &p.a), ("B", &p.b)] {
+        assert!(e.conn_events().iter().all(|ev| ev.phase != ConnPhase::Switch), "{name} 경로 전환 없음: {:?}", e.conn_events());
+    }
     for (name, e) in [("A", &p.a), ("B", &p.b)] {
         let c = first_connect(e);
         assert!(matches!(c, Some((ConnOutcome::Public, _))), "{name} 연결 결과: {c:?} / {:?}", e.conn_events());
@@ -1202,4 +1218,50 @@ fn symmetric_nat_falls_back_to_relay_and_logs_result() {
         assert!(ms_a >= 1_500, "{ka:?}↔{kb:?}: 릴레이 폴백은 1.5초 뒤부터: {ms_a}ms");
         println!("{ka:?}↔{kb:?}: A {:?} B {:?}, NAT 필터 폐기 {dropped}", first_connect(&p.a), first_connect(&p.b));
     }
+}
+
+/// 결정적(P1-18, #145 M-1): 결과가 나기 전에 끝난 시도는 `aborted` + 시작부터 ms로 남는다 — 연결 중 피어 제거,
+/// 연결 중 엔진 정지(정지 뒤 `conn_events`가 정지한 Net의 마지막 이벤트를 준다). 상대 후보는 아무것도 돌려주지 않는
+/// 소켓이라 시간 초과(10초) 전에 끝난다. 대기는 그 소켓이 받은 Hello 수(진행량)다.
+#[test]
+fn unfinished_attempts_are_logged_aborted_on_remove_and_stop() {
+    let _g = RT_LOCK.lock();
+    let mut a = Engine::start(config(), Arc::new(sine_backend()), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(config(), Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let hole = UdpSocket::bind("127.0.0.1:0").unwrap();
+    hole.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    let desc = LocalDescriptor {
+        candidates: vec![Candidate { kind: CandidateKind::Lan, addr: hole.local_addr().unwrap().to_string() }],
+        ..b.descriptor().unwrap().clone()
+    };
+    let wait_hellos = |n: usize| {
+        let (mut got, mut buf, t0) = (0, [0u8; 2048], Instant::now());
+        while got < n {
+            assert!(t0.elapsed() < HANG, "Hello가 오지 않음");
+            if hole.recv_from(&mut buf).is_ok() {
+                got += 1;
+            }
+        }
+    };
+    let aborted = |e: &Engine, id: &str| e.conn_events().into_iter().find(|ev| ev.peer_id == id && ev.outcome == ConnOutcome::Aborted);
+
+    // 연결 중 제거(Hello 3번 ≈ 200ms 이상)
+    a.add_peer("bob".into(), &desc).unwrap();
+    wait_hellos(3);
+    a.remove_peer("bob").unwrap();
+    assert!(wait_until(HANG, || aborted(&a, "bob").is_some()).is_some(), "제거된 시도가 남지 않음: {:?}", a.conn_events());
+    let ev = aborted(&a, "bob").unwrap();
+    assert_eq!(ev.phase, ConnPhase::Connect);
+    assert!(ev.ms >= 150 && ev.ms < 10_000, "시작부터 ms: {}", ev.ms);
+
+    // 연결 중 엔진 정지
+    a.add_peer("carol".into(), &desc).unwrap();
+    wait_hellos(3);
+    a.stop();
+    let ev = aborted(&a, "carol").expect("정지로 끝난 시도가 남지 않음");
+    assert_eq!(ev.phase, ConnPhase::Connect);
+    assert!(ev.ms >= 150 && ev.ms < 10_000, "시작부터 ms: {}", ev.ms);
+    assert!(a.conn_events().iter().all(|ev| ev.outcome != ConnOutcome::Failed), "실패가 아니다: {:?}", a.conn_events());
+    let jsonl = diag_jsonl(&a);
+    assert_eq!(jsonl.matches(r#""result":"aborted""#).count(), 2, "{jsonl}");
 }

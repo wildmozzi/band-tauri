@@ -173,10 +173,19 @@ pub struct EngineSnapshot {
     pub conn_events: Vec<crate::net::connlog::ConnEvent>,
 }
 
+/// 정지한 엔진의 마지막 연결 이벤트(P1-18, #145 M-1). 정지 때 생긴 `aborted`는 엔진이 사라진 뒤라 스냅샷으로는
+/// 볼 수 없으므로 `EngineManager`가 정지하며 남기고 진단 기록이 한 번 가져간다.
+pub struct EndedConn {
+    /// 그 엔진의 세션 번호(스냅샷의 `session`과 같은 값).
+    pub session: u64,
+    pub events: Vec<crate::net::connlog::ConnEvent>,
+}
+
 impl Engine {
-    /// 피어별 연결 시도 → 결과(P1-18, net 제어 스레드가 기록). 네트워크 없는 엔진이면 빈 목록.
+    /// 피어별 연결 시도 → 결과(P1-18, net 제어 스레드가 기록). 정지 뒤에는 정지한 Net의 마지막 이벤트,
+    /// 네트워크 없는 엔진이면 빈 목록.
     pub fn conn_events(&self) -> Vec<crate::net::connlog::ConnEvent> {
-        self.net.as_ref().map_or_else(Vec::new, |n| n.conn_events())
+        self.net.as_ref().map_or_else(|| self.ended_conn.clone(), |n| n.conn_events())
     }
 
     pub fn stats(&self) -> EngineStats {

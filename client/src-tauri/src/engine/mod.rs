@@ -77,6 +77,8 @@ pub struct Engine {
     audio_stop: Arc<AtomicBool>,
     audio: Option<JoinHandle<()>>,
     net: Option<Net>,
+    /// 정지한 Net의 마지막 연결 이벤트(P1-18, 정지 때 `aborted`까지 포함). `stop` 뒤 `conn_events`가 이것을 준다.
+    ended_conn: Vec<crate::net::connlog::ConnEvent>,
     /// 출력 콜백이 장치 레이트로 채우는 믹스 탭 링의 소비자. 구독 중에는 탭 스레드가 가진다.
     tap_cons: Mutex<Option<HeapCons<f32>>>,
     tap_thread: Option<TapThread>,
@@ -195,6 +197,7 @@ impl Engine {
             audio_stop,
             audio: Some(audio),
             net: None,
+            ended_conn: Vec::new(),
             tap_cons: Mutex::new(Some(feed.tap)),
             tap_thread: None,
             measure_sh,
@@ -562,6 +565,8 @@ impl Engine {
         }
         if let Some(mut n) = self.net.take() {
             n.stop();
+            // 제어 스레드가 끝나며 남긴 `aborted`까지 들고 있는다(관리자가 진단에 넘긴다, P1-18).
+            self.ended_conn = n.conn_events();
         }
         // 워커가 끝났으므로 반환 큐에 남은 것과 등록부를 여기(제어 평면)에서 해제한다.
         self.media_port.reclaim();

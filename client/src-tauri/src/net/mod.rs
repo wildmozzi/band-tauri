@@ -456,12 +456,12 @@ impl Net {
         self.shared.qos_stats.lock().clone()
     }
 
-    /// 직전 창의 송신 큐 지연(`EngineStats.sendQueue`).
     /// 최근 연결 이벤트(P1-18, 오래된 것부터, 최대 `connlog::LOG_CAPACITY`개). 진단 기록용.
     pub fn conn_events(&self) -> Vec<connlog::ConnEvent> {
         self.shared.conn_log.lock().events()
     }
 
+    /// 직전 창의 송신 큐 지연(`EngineStats.sendQueue`).
     pub fn send_queue_stats(&self) -> txlat::SendQueueStats {
         self.shared.send_latency.last()
     }
@@ -1118,6 +1118,9 @@ fn control_loop(s: &NetShared) {
     *s.qos_stats.lock() = qos.stats();
     let mut qos_dests: Vec<SocketAddr> = Vec::with_capacity(MAX_PEERS + 1);
     let mut conns = connlog::ConnTracker::default();
+    // 연결 결과 기록(P1-18): 이벤트가 있을 때만 벽시계를 읽고 로그 락을 잡는다.
+    let mut unix_ms = crate::sys::time::unix_ms;
+    let mut push = |at: u64, id: &str, phase, outcome, ms| s.conn_log.lock().push(at, id, phase, outcome, ms);
     while !s.stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         let peers = s.peers.read().clone();
@@ -1153,14 +1156,12 @@ fn control_loop(s: &NetShared) {
                     path: c.path.map(|(_, k)| k),
                     started: c.started,
                     connected_at: c.connected_at,
+                    lost_at: c.last_rx.map(|t| t + peer::LOST_AFTER),
                     bye: c.bye,
                 };
                 (a, c.path, c.last_rx, c.state == PeerStateKind::Failed, view)
             };
-            // 연결 결과 기록(P1-18): 바뀐 틱에만 벽시계를 읽고 로그 락을 잡는다.
-            conns.observe(p.id(), view, now, &mut crate::sys::time::unix_ms, &mut |at, id, phase, outcome, ms| {
-                s.conn_log.lock().push(at, id, phase, outcome, ms);
-            });
+            conns.observe(p.id(), view, now, &mut connlog::Sink { unix_ms: &mut unix_ms, log: &mut push });
             if action.hello_direct {
                 for addr in p.hello_targets(relay) {
                     s.send_ctrl(p, PacketType::Hello, s.now_us32(), s.local_peer_id.as_bytes(), addr, false);
@@ -1199,11 +1200,13 @@ fn control_loop(s: &NetShared) {
                 }
             }
         }
-        conns.end();
+        conns.end(now, &mut connlog::Sink { unix_ms: &mut unix_ms, log: &mut push });
         // 표 복사본은 자기 전에 놓는다: 빠진 피어를 20ms 더 쥐지 않게(#126 리뷰 H-1).
         drop(peers);
         std::thread::sleep(Duration::from_millis(20));
     }
+    // Net 정지: 결과 전인 시도는 `aborted`로 남긴다(#145 M-1). 엔진 관리자가 정지 뒤 이 로그를 넘겨받아 진단에 준다.
+    conns.finish(Instant::now(), &mut connlog::Sink { unix_ms: &mut unix_ms, log: &mut push });
 }
 
 #[cfg(test)]

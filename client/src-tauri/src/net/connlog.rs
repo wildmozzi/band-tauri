@@ -5,14 +5,18 @@
 //! 진단 기록 스레드가 1초마다 스냅샷으로 읽어 `seq`로 이미 본 것을 거른다(`diag::Diagnostics::record`).
 //! RT 콜백·워커·수신 경로에는 아무것도 추가하지 않는다.
 //!
-//! 기록하는 것(설계 문서 4절 "진단 내보내기"):
+//! 기록하는 것(설계 문서 3절 5 "연결 결과 기록"). **시도 하나에 결과는 정확히 하나**다(`connect`·`reconnect`):
 //! - `connect`: 피어 항목(add_peer)의 첫 시도. 결과는 처음 `Connected`가 된 경로(lan/public/relay) — 걸린 시간은
 //!   `ConnState.connected_at − started`(= `PeerStats.connectMs`) — 또는 `Connecting` 시간 초과(`failed`, 시작부터).
-//! - `reconnect`: `Connected` → `Reconnecting`(무수신)에서 시작한 시도. 다시 `Connected`가 된 경로 또는 `failed`.
-//!   시작·끝은 제어 틱에서 본 시각이라 ±1틱(20ms).
-//! - `failed` 뒤에도 엔진은 계속 찾는다. 나중에 붙으면 같은 시도의 결과를 한 번 더 남긴다(걸린 시간은 같은 시작부터).
+//! - `reconnect`: `Connected`에서 수신이 끊겨 다시 찾는 시도. 시작은 마지막 수신 + `LOST_AFTER`(부르는 쪽이
+//!   `ConnView::lost_at`으로 준다, 지금보다 늦으면 지금 — 경로 해제처럼 무수신이 아닌 전환). 즉 실제 끊김 시간보다
+//!   `LOST_AFTER`(5초)만큼 짧다. 끝은 제어 틱에서 본 시각(±20ms). 결과는 다시 붙은 경로 또는 `failed`.
+//! - `aborted`: 결과가 나기 전에 시도가 끝남 — 피어 제거·교체(Bye를 받지 않음) 또는 엔진(Net) 정지. ms = 시작부터.
+//!   빼면 "연결 중"에 사용자가 나간 시도가 분모에서 빠져 성공률이 위로 치우친다(#145 리뷰 M-1).
+//! - `recover`: `failed`로 끝난 뒤에도 엔진은 계속 찾는다. 나중에 붙으면 그 경로를 `recover`로 남긴다(ms = 실패부터).
+//!   새 시도가 아니다 — 집계는 `connect`·`reconnect`만 시도로 센다. 실패 뒤 찾다가 제거·정지되면 남기지 않는다.
 //! - `switch`: `Connected` 중 경로 종류가 바뀜(직접 ↔ 릴레이, LAN ↔ public). `ms` = 직전 경로에 머문 시간.
-//! - 상대가 Bye를 보내 `Failed`가 된 것은 연결 실패가 아니라 남기지 않는다. 연결 전에 제거된 피어도 남기지 않는다.
+//! - 상대가 Bye를 보낸 피어(정상 퇴장)는 실패·중단을 남기지 않는다.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -29,6 +33,8 @@ pub const LOG_CAPACITY: usize = 128;
 pub enum ConnPhase {
     Connect,
     Reconnect,
+    /// `failed` 뒤 늦게 붙음(새 시도 아님).
+    Recover,
     Switch,
 }
 
@@ -39,6 +45,8 @@ pub enum ConnOutcome {
     Public,
     Relay,
     Failed,
+    /// 결과 전에 피어 제거·교체 또는 엔진 정지.
+    Aborted,
 }
 
 impl From<PathKind> for ConnOutcome {
@@ -61,7 +69,7 @@ pub struct ConnEvent {
     pub peer_id: String,
     pub phase: ConnPhase,
     pub outcome: ConnOutcome,
-    /// 시도 시작 → 결과(ms). `switch`면 직전 경로에 머문 시간.
+    /// 시도 시작 → 결과(ms). `switch`면 직전 경로에 머문 시간, `recover`면 실패부터.
     pub ms: u32,
 }
 
@@ -94,7 +102,32 @@ pub struct ConnView {
     pub path: Option<PathKind>,
     pub started: Instant,
     pub connected_at: Option<Instant>,
+    /// 마지막 수신 + `LOST_AFTER`(수신이 없었으면 None). 재연결 시도의 시작.
+    pub lost_at: Option<Instant>,
     pub bye: bool,
+}
+
+/// 이벤트를 내보낼 곳: 이벤트가 있을 때만 벽시계를 읽고(`unix_ms`) 로그에 넣는다(`log`).
+pub struct Sink<'a> {
+    pub unix_ms: &'a mut dyn FnMut() -> u64,
+    pub log: &'a mut dyn FnMut(u64, &str, ConnPhase, ConnOutcome, u32),
+}
+
+impl Sink<'_> {
+    fn emit(&mut self, id: &str, phase: ConnPhase, outcome: ConnOutcome, ms: u32) {
+        let at = (self.unix_ms)();
+        (self.log)(at, id, phase, outcome, ms);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Pending {
+    /// 결과가 아직 없는 시도(시작 시각).
+    Attempt(ConnPhase, Instant),
+    /// `failed`를 남긴 뒤 계속 찾는 중(실패 시각) — 붙으면 `recover`, 끝나면 기록 없음.
+    AfterFailure(Instant),
+    /// 연결됨(지금 경로로 바뀐 시각).
+    Connected(Instant),
 }
 
 #[derive(Debug)]
@@ -102,16 +135,11 @@ struct Track {
     id: String,
     /// 피어 항목 식별(같은 peerId라도 교체되면 `started`가 다르다).
     started: Instant,
-    phase: ConnPhase,
-    /// 진행 중인 시도의 시작(연결됐으면 None).
-    attempt: Option<Instant>,
-    /// 이 시도에서 `failed`를 이미 남겼다.
-    failed_logged: bool,
-    last_state: PeerStateKind,
+    pending: Pending,
     last_path: Option<PathKind>,
-    /// 지금 경로 종류로 바뀐 시각(`switch`의 `ms`).
-    path_since: Option<Instant>,
-    /// 이번 틱에 본 피어(아니면 지운다).
+    /// 마지막으로 본 Bye 수신 여부(제거될 때 정상 퇴장인지).
+    bye: bool,
+    /// 이번 틱에 본 피어(아니면 끝난 것으로 본다).
     seen: bool,
 }
 
@@ -133,20 +161,17 @@ impl ConnTracker {
         }
     }
 
-    /// 피어 하나를 본다. 바뀐 곳이 있으면 `log`에 넣는다. `unix_ms`는 이벤트가 있을 때만 부른다.
-    pub fn observe(&mut self, id: &str, v: ConnView, now: Instant, unix_ms: &mut impl FnMut() -> u64, log: &mut impl FnMut(u64, &str, ConnPhase, ConnOutcome, u32)) {
+    /// 피어 하나를 본다. 바뀐 곳이 있으면 `sink`로 낸다.
+    pub fn observe(&mut self, id: &str, v: ConnView, now: Instant, sink: &mut Sink<'_>) {
         let i = match self.tracks.iter().position(|t| t.started == v.started && t.id == id) {
             Some(i) => i,
             None => {
                 self.tracks.push(Track {
                     id: id.to_owned(),
                     started: v.started,
-                    phase: ConnPhase::Connect,
-                    attempt: Some(v.started),
-                    failed_logged: false,
-                    last_state: PeerStateKind::Connecting,
+                    pending: Pending::Attempt(ConnPhase::Connect, v.started),
                     last_path: None,
-                    path_since: None,
+                    bye: false,
                     seen: true,
                 });
                 self.tracks.len() - 1
@@ -154,53 +179,74 @@ impl ConnTracker {
         };
         let t = &mut self.tracks[i];
         t.seen = true;
-        let mut emit = |phase, outcome, ms| log(unix_ms(), id, phase, outcome, ms);
-        match v.state {
-            PeerStateKind::Connected => {
-                if let (Some(start), Some(kind)) = (t.attempt, v.path) {
+        t.bye = v.bye;
+        // 재연결 시도의 시작: 마지막 수신 + LOST_AFTER, 지금보다 늦으면(무수신이 아닌 전환) 지금
+        let lost_start = || v.lost_at.filter(|&l| l <= now).unwrap_or(now);
+        match (v.state, v.path) {
+            (PeerStateKind::Connected, Some(kind)) => match t.pending {
+                Pending::Attempt(phase, start) => {
                     // 첫 연결은 수신 스레드가 기록한 정확한 시각(connectMs와 같은 값), 그 뒤는 틱 시각
-                    let end = match (t.phase, v.connected_at) {
+                    let end = match (phase, v.connected_at) {
                         (ConnPhase::Connect, Some(at)) => at,
                         _ => now,
                     };
-                    emit(t.phase, kind.into(), ms_between(start, end));
-                    t.attempt = None;
-                    t.failed_logged = false;
-                    t.path_since = Some(end);
-                } else if let (Some(prev), Some(kind)) = (t.last_path, v.path) {
-                    if prev != kind && t.last_state == PeerStateKind::Connected {
-                        emit(ConnPhase::Switch, kind.into(), t.path_since.map_or(0, |s| ms_between(s, now)));
-                        t.path_since = Some(now);
+                    sink.emit(id, phase, kind.into(), ms_between(start, end));
+                    t.pending = Pending::Connected(end);
+                }
+                Pending::AfterFailure(failed_at) => {
+                    sink.emit(id, ConnPhase::Recover, kind.into(), ms_between(failed_at, now));
+                    t.pending = Pending::Connected(now);
+                }
+                Pending::Connected(since) => {
+                    if t.last_path.is_some_and(|prev| prev != kind) {
+                        sink.emit(id, ConnPhase::Switch, kind.into(), ms_between(since, now));
+                        t.pending = Pending::Connected(now);
                     }
                 }
-            }
-            PeerStateKind::Reconnecting => {
-                if t.attempt.is_none() {
-                    t.phase = ConnPhase::Reconnect;
-                    t.attempt = Some(now);
+            },
+            (PeerStateKind::Reconnecting, _) => {
+                if let Pending::Connected(_) = t.pending {
+                    t.pending = Pending::Attempt(ConnPhase::Reconnect, lost_start());
                 }
             }
-            PeerStateKind::Failed => {
-                if t.attempt.is_none() {
-                    // Connected에서 틱 사이에 바로 Failed(틱을 건너뛴 경우)
-                    t.phase = ConnPhase::Reconnect;
-                    t.attempt = Some(now);
-                }
-                if !t.failed_logged && !v.bye {
-                    let start = t.attempt.unwrap_or(now);
-                    emit(t.phase, ConnOutcome::Failed, ms_between(start, now));
-                    t.failed_logged = true;
+            (PeerStateKind::Failed, _) => {
+                let (phase, start) = match t.pending {
+                    Pending::Attempt(phase, start) => (phase, start),
+                    // Connected에서 틱 사이에 바로 Failed(틱을 건너뜀): 시작은 끊긴 시점
+                    Pending::Connected(_) => (ConnPhase::Reconnect, lost_start()),
+                    Pending::AfterFailure(_) => {
+                        t.last_path = v.path;
+                        return;
+                    }
+                };
+                if v.bye {
+                    // 정상 퇴장: 실패가 아니다. 이 항목으로는 더 남기지 않는다.
+                    t.pending = Pending::AfterFailure(now);
+                } else {
+                    sink.emit(id, phase, ConnOutcome::Failed, ms_between(start, now));
+                    t.pending = Pending::AfterFailure(now);
                 }
             }
-            PeerStateKind::Connecting => {}
+            // Connecting, 또는 경로 없는 Connected(없는 상태)
+            _ => {}
         }
-        t.last_state = v.state;
         t.last_path = v.path;
     }
 
-    /// 틱 끝: 이번 틱에 안 보인(제거·교체된) 피어를 잊는다.
-    pub fn end(&mut self) {
+    /// 틱 끝: 이번 틱에 안 보인(제거·교체된) 피어를 잊는다. 결과 전인 시도는 `aborted`로 남긴다(Bye 받은 피어 제외).
+    pub fn end(&mut self, now: Instant, sink: &mut Sink<'_>) {
+        for t in self.tracks.iter().filter(|t| !t.seen) {
+            if let (Pending::Attempt(phase, start), false) = (t.pending, t.bye) {
+                sink.emit(&t.id, phase, ConnOutcome::Aborted, ms_between(start, now));
+            }
+        }
         self.tracks.retain(|t| t.seen);
+    }
+
+    /// Net 정지: 남은 모든 피어를 끝난 것으로 본다(결과 전 시도는 `aborted`).
+    pub fn finish(&mut self, now: Instant, sink: &mut Sink<'_>) {
+        self.begin();
+        self.end(now, sink);
     }
 }
 
@@ -222,17 +268,34 @@ mod tests {
         fn at(&self, ms: u64) -> Instant {
             self.t0 + Duration::from_millis(ms)
         }
-        fn tick(&mut self, now_ms: u64, peers: &[(&str, ConnView)]) {
+        fn with_sink(&mut self, now_ms: u64, f: impl FnOnce(&mut ConnTracker, Instant, &mut Sink<'_>)) {
             let now = self.at(now_ms);
-            self.tr.begin();
             let log = &mut self.log;
-            for (id, v) in peers {
-                self.tr.observe(id, *v, now, &mut || 1_000_000 + now_ms, &mut |at, id, ph, out, ms| log.push(at, id, ph, out, ms));
-            }
-            self.tr.end();
+            let mut unix = || 1_000_000 + now_ms;
+            let mut push = |at, id: &str, ph, out, ms| log.push(at, id, ph, out, ms);
+            let mut sink = Sink { unix_ms: &mut unix, log: &mut push };
+            f(&mut self.tr, now, &mut sink);
+        }
+        fn tick(&mut self, now_ms: u64, peers: &[(&str, ConnView)]) {
+            let peers = peers.to_vec();
+            self.with_sink(now_ms, |tr, now, sink| {
+                tr.begin();
+                for (id, v) in &peers {
+                    tr.observe(id, *v, now, sink);
+                }
+                tr.end(now, sink);
+            });
+        }
+        fn stop(&mut self, now_ms: u64) {
+            self.with_sink(now_ms, |tr, now, sink| tr.finish(now, sink));
         }
         fn view(&self, state: PeerStateKind, path: Option<PathKind>, connected_ms: Option<u64>) -> ConnView {
-            ConnView { state, path, started: self.t0, connected_at: connected_ms.map(|m| self.at(m)), bye: false }
+            ConnView { state, path, started: self.t0, connected_at: connected_ms.map(|m| self.at(m)), lost_at: None, bye: false }
+        }
+        /// 마지막 수신이 `rx_ms`였던 상태(lost_at = rx + 5초).
+        fn lost(&self, mut v: ConnView, rx_ms: u64) -> ConnView {
+            v.lost_at = Some(self.at(rx_ms + 5_000));
+            v
         }
         fn got(&self) -> Vec<(ConnPhase, ConnOutcome, u32)> {
             self.log.events().iter().map(|e| (e.phase, e.outcome, e.ms)).collect()
@@ -256,28 +319,42 @@ mod tests {
         assert_eq!((e.seq, e.at_ms, e.peer_id.as_str()), (1, 1_000_040, "bob"));
     }
 
+    /// 시도 하나에 결과 하나: 시간 초과로 `connect failed`가 난 뒤 늦게 붙으면 `recover`(새 시도 아님, 실패부터 ms).
     #[test]
-    fn connect_timeout_is_failed_then_late_relay_success() {
+    fn late_success_after_failure_is_recover_not_second_result() {
         let mut h = H::new();
         h.tick(0, &[("bob", h.view(S::Connecting, None, None))]);
         h.tick(10_000, &[("bob", h.view(S::Failed, None, None))]);
         h.tick(10_020, &[("bob", h.view(S::Failed, None, None))]);
         h.tick(12_000, &[("bob", h.view(S::Connected, Some(PathKind::Relay), Some(11_990)))]);
-        assert_eq!(h.got(), vec![(P::Connect, O::Failed, 10_000), (P::Connect, O::Relay, 11_990)]);
+        assert_eq!(h.got(), vec![(P::Connect, O::Failed, 10_000), (P::Recover, O::Relay, 2_000)]);
+        let attempts = h.got().iter().filter(|(p, _, _)| matches!(p, P::Connect | P::Reconnect)).count();
+        assert_eq!(attempts, 1);
+    }
+
+    /// 실패 뒤 계속 찾다가 제거·정지되면 아무것도 더 남기지 않는다(그 시도의 결과는 이미 `failed`).
+    #[test]
+    fn removed_while_probing_after_failure_adds_nothing() {
+        let mut h = H::new();
+        h.tick(0, &[("bob", h.view(S::Connecting, None, None))]);
+        h.tick(10_000, &[("bob", h.view(S::Failed, None, None))]);
+        h.tick(15_000, &[]);
+        h.stop(16_000);
+        assert_eq!(h.got(), vec![(P::Connect, O::Failed, 10_000)]);
     }
 
     #[test]
-    fn reconnect_and_switch() {
+    fn reconnect_starts_at_loss_and_switch() {
         let mut h = H::new();
         h.tick(0, &[("bob", h.view(S::Connected, Some(PathKind::Public), Some(0)))]);
         // 직접 → 릴레이 강등(Connected 유지)
         h.tick(3_000, &[("bob", h.view(S::Connected, Some(PathKind::Relay), Some(0)))]);
-        // 무수신 → Reconnecting → 2초 뒤 릴레이로 다시 연결
-        h.tick(8_000, &[("bob", h.view(S::Reconnecting, Some(PathKind::Relay), Some(0)))]);
+        // 마지막 수신 3s → 8s에 Reconnecting(시작 = 3s + 5s) → 10s에 릴레이로 다시 연결
+        h.tick(8_020, &[("bob", h.lost(h.view(S::Reconnecting, Some(PathKind::Relay), Some(0)), 3_000))]);
         h.tick(10_000, &[("bob", h.view(S::Connected, Some(PathKind::Relay), Some(0)))]);
-        // 다시 잃고 실패
-        h.tick(20_000, &[("bob", h.view(S::Reconnecting, Some(PathKind::Relay), Some(0)))]);
-        h.tick(30_000, &[("bob", h.view(S::Failed, Some(PathKind::Relay), Some(0)))]);
+        // 다시 잃고(마지막 수신 15s) 실패
+        h.tick(20_000, &[("bob", h.lost(h.view(S::Reconnecting, Some(PathKind::Relay), Some(0)), 15_000))]);
+        h.tick(30_000, &[("bob", h.lost(h.view(S::Failed, Some(PathKind::Relay), Some(0)), 15_000))]);
         assert_eq!(
             h.got(),
             vec![
@@ -289,8 +366,59 @@ mod tests {
         );
     }
 
+    /// 틱을 건너뛰어 Connected에서 바로 Failed를 보면 ms는 0이 아니라 끊긴 시점(마지막 수신 + 5초)부터다(#145 L-4).
     #[test]
-    fn bye_failure_and_removed_peer_not_logged_replaced_peer_is_new_attempt() {
+    fn skipped_tick_connected_to_failed_uses_loss_time() {
+        let mut h = H::new();
+        h.tick(0, &[("bob", h.view(S::Connected, Some(PathKind::Lan), Some(0)))]);
+        // 절전 등으로 20초 동안 틱이 없었다. 마지막 수신 1s.
+        h.tick(21_000, &[("bob", h.lost(h.view(S::Failed, Some(PathKind::Lan), Some(0)), 1_000))]);
+        assert_eq!(h.got(), vec![(P::Connect, O::Lan, 0), (P::Reconnect, O::Failed, 15_000)]);
+    }
+
+    /// 결과 전 시도가 끝나면 `aborted` + 시작부터 ms(#145 M-1): 연결 중 제거, 재연결 중 제거, 교체, 엔진 정지.
+    #[test]
+    fn unfinished_attempts_are_aborted_on_remove_replace_and_stop() {
+        let mut h = H::new();
+        let b = |h: &H, ms| {
+            let mut v = h.view(S::Connecting, None, None);
+            v.started = h.at(ms);
+            v
+        };
+        // alice: 연결 중 4초에 제거
+        let alice = b(&h, 0);
+        h.tick(0, &[("alice", alice)]);
+        h.tick(4_000, &[]);
+        // bob: 연결 → 재연결 중(마지막 수신 2s) 9s에 제거
+        h.tick(5_000, &[("bob", h.view(S::Connected, Some(PathKind::Lan), Some(5_000)))]);
+        h.tick(8_000, &[("bob", h.lost(h.view(S::Reconnecting, Some(PathKind::Lan), Some(5_000)), 2_000))]);
+        h.tick(9_000, &[]);
+        // carol: 연결 중 같은 id로 교체(새 started) → 옛 시도 aborted, 새 시도는 이어서
+        let c1 = b(&h, 10_000);
+        h.tick(10_000, &[("carol", c1)]);
+        let c2 = b(&h, 11_000);
+        h.tick(11_000, &[("carol", c2)]);
+        // 엔진 정지 13s: carol 새 시도 aborted(시작 11s부터)
+        h.stop(13_000);
+        assert_eq!(
+            h.got(),
+            vec![
+                (P::Connect, O::Aborted, 4_000),
+                (P::Connect, O::Lan, 5_000),
+                (P::Reconnect, O::Aborted, 2_000),
+                (P::Connect, O::Aborted, 1_000),
+                (P::Connect, O::Aborted, 2_000),
+            ]
+        );
+        // 연결된 피어의 정지는 남기지 않는다
+        let mut h = H::new();
+        h.tick(0, &[("bob", h.view(S::Connected, Some(PathKind::Lan), Some(0)))]);
+        h.stop(1_000);
+        assert_eq!(h.got(), vec![(P::Connect, O::Lan, 0)]);
+    }
+
+    #[test]
+    fn bye_is_not_failure_or_abort_and_replaced_peer_is_new_attempt() {
         let mut h = H::new();
         h.tick(0, &[("bob", h.view(S::Connected, Some(PathKind::Lan), Some(0)))]);
         let mut bye = h.view(S::Failed, Some(PathKind::Lan), Some(0));
@@ -305,6 +433,14 @@ mod tests {
         again.path = Some(PathKind::Public);
         again.connected_at = Some(h.at(2_150));
         h.tick(2_160, &[("bob", again)]);
+        // 연결 중 Bye를 받고 제거된 피어도 aborted가 아니다
+        let mut d = h.view(S::Connecting, None, None);
+        d.started = h.at(3_000);
+        h.tick(3_000, &[("dave", d)]);
+        d.bye = true;
+        d.state = S::Failed;
+        h.tick(3_500, &[("dave", d)]);
+        h.tick(3_520, &[]);
         assert_eq!(h.got(), vec![(P::Connect, O::Lan, 0), (P::Connect, O::Public, 150)]);
     }
 
