@@ -1150,6 +1150,34 @@ fn first_audio_and_connect_ms_reported() {
     assert_eq!((again.connect_ms, again.first_audio_ms), (Some(connect), Some(first)), "한 번 정한 값은 그대로");
 }
 
+/// P2-8b: 상대 송신 프레임(Audio 헤더 frame_code)과 상대 입력 장치 버퍼(Ping 입력 버퍼 블록)가 `PeerStats`에 선다.
+/// 양쪽 설정을 다르게 해 각자 **상대** 값을 보는지 확인한다(결정적: 임계 ms 없음, 값은 설정에서 정확히 나온다).
+#[test]
+fn remote_frame_and_input_buffer_reported() {
+    let _g = RT_LOCK.lock();
+    let a = Engine::start(config(256, 10.0), Arc::new(sine_backend()), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(config(128, 2.5), Arc::new(sine_backend()), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let (addr_a, addr_b) = (local_addr(&a), local_addr(&b));
+    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), addr_b)).unwrap();
+    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), addr_a)).unwrap();
+    assert!(wait_connected(&a, HANG) && wait_connected(&b, HANG), "연결 실패");
+    let mut got = [(None, None); 2];
+    let ok = wait_until(HANG, || {
+        for (i, e) in [&a, &b].into_iter().enumerate() {
+            let s = e.stats();
+            got[i] = s.peers.first().map_or((None, None), |p| (p.remote_frame_ms, p.remote_input_buffer_ms));
+        }
+        got.iter().all(|g| g.0.is_some() && g.1.is_some())
+    });
+    assert!(ok, "상대 프레임·입력 버퍼가 서지 않음: {got:?}");
+    // 가짜 장치 콜백 = 요청 버퍼 크기(48k). µs로 내려 보내므로(정수) 1µs 안.
+    let close = |x: Option<f32>, y: f32| x.is_some_and(|x| (x - y).abs() < 0.002);
+    assert_eq!(got[1].0, Some(10.0), "B가 보는 A 프레임: {got:?}");
+    assert!(close(got[1].1, 256.0 / 48.0), "B가 보는 A 입력 버퍼: {got:?}");
+    assert_eq!(got[0].0, Some(2.5), "A가 보는 B 프레임: {got:?}");
+    assert!(close(got[0].1, 128.0 / 48.0), "A가 보는 B 입력 버퍼: {got:?}");
+}
+
 /// GOAL 3-6의 로컬 몫: 루프백 직접 연결에서 add_peer → 첫 소리 ≤ 1초.
 #[test]
 #[ignore = "realtime: 결정적 짝 first_audio_and_connect_ms_reported, net::peer::tests::connected_at_is_first_connect_only, engine::peer_media::tests::first_audio_recorded_once_relative_to_add"]

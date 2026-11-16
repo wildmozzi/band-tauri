@@ -191,6 +191,10 @@ export interface PeerStats {
   connectMs?: number | null
   /** engine_add_peer → 이 피어의 실제 소리가 처음 재생된 순간(ms, P1-20). 아직이면 null. 리셋 규칙은 connectMs와 같다 */
   firstAudioMs?: number | null
+  /** 상대 송신 프레임(ms, P2-8b): 이 피어에게서 받은 Audio 헤더 값(2.5 | 5 | 10). 아직 못 받았거나 옛 엔진이면 null/없음 */
+  remoteFrameMs?: number | null
+  /** 상대 입력 장치 버퍼(ms, P2-8b): 이 피어가 Ping으로 알려 온 그쪽 실측 콜백 크기. 옛 엔진이거나 보고가 3초 넘게 없으면 null/없음 */
+  remoteInputBufferMs?: number | null
 }
 
 // ============================================================================

@@ -43,7 +43,7 @@ export function RemotePerformerItem({
   const { state, stateInfo, isActive } = remotePeerStatus(isPerformer, ps)
   // 'failed'(릴레이까지 실패) 안내 또는 릴레이 경로 지연 안내
   const pathHint = state ? peerPathHint(state, ps?.path, engineStats?.relay, relayError) : null
-  // 상대 입력 → 내 귀 추정(P2-8). 엔진 통계만으로 계산, 상대 프레임은 엔진이 주지 않아 생략(≈)
+  // 상대 입력 → 내 귀 추정(P2-8). 엔진 통계만으로 계산. 상대 입력 버퍼·프레임(P2-8b)이 다 있으면 정확값, 하나라도 없으면 ≈
   const ear = ps ? estimateEarLatencyMs(ps, engineStats) : null
 
   return (

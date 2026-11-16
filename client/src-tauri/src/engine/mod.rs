@@ -231,7 +231,18 @@ impl Engine {
             if opts.cancel.is_none() {
                 opts.cancel = cancel.clone();
             }
-            engine.net = Some(Net::start(peer_id, &opts)?); // 실패 시 engine drop이 오디오 정리
+            let net = Net::start(peer_id, &opts)?; // 실패 시 engine drop이 오디오 정리
+            // 내 입력 장치 버퍼를 Ping에 싣는다(P2-8b): 상대의 입→귀 추정용. 실측 콜백 크기(아직 없으면 요청값) —
+            // `EngineStats.estLatencyMs`의 입력 몫과 같은 값이다. 제어 스레드가 원자값만 읽는다.
+            let (c, rate, req) = (counters.clone(), info.in_rate.max(1), info.buffer_frames);
+            net.shared().set_input_buffer_source(Box::new(move || {
+                let frames = match c.in_cb_frames.load(Ordering::Relaxed) {
+                    0 => req,
+                    n => n,
+                };
+                (frames as u64 * 1_000_000 / rate as u64).min(u32::MAX as u64) as u32
+            }));
+            engine.net = Some(net);
         }
         if cancelled() {
             return Err("엔진 시작이 취소되었습니다".into());

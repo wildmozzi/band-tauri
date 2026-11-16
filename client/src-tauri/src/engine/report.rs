@@ -81,6 +81,12 @@ pub struct PeerStats {
     /// `engine_add_peer` → 이 피어의 실제(은닉이 아닌) 소리가 처음 재생 링에 들어간 순간(ms, P1-20). 아직이면 null.
     /// 리셋 규칙은 `connectMs`와 같다(지터 재시작·경로 전환으로 다시 재지 않는다).
     pub first_audio_ms: Option<f32>,
+    /// 상대 송신 프레임(ms, P2-8b): 이 피어에게서 마지막으로 받은 Audio 헤더 `frame_code`(2.5 | 5 | 10). 아직 못 받았으면 null.
+    /// 내가 에코 측정 중이면 그 피어가 되돌리는 내 패킷의 프레임이다.
+    pub remote_frame_ms: Option<f32>,
+    /// 상대 입력 장치 버퍼(ms, P2-8b): 이 피어가 Ping 입력 버퍼 블록으로 알려 온 그쪽 실측 콜백 크기(65.535ms 포화).
+    /// 옛 엔진이거나 보고가 3초 넘게 없으면 null. 드라이버가 숨긴 입력 지연은 들어 있지 않다.
+    pub remote_input_buffer_ms: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -249,6 +255,12 @@ impl Engine {
                             };
                             ((c & TX_CODEC_SENT != 0).then_some(kind), reason)
                         };
+                        let remote_input_buffer_ms = ns
+                            .remote_in_buf
+                            .filter(|(_, at)| now.saturating_duration_since(*at) <= relay_codec::REPORT_STALE)
+                            .map(|(us, _)| us as f32 / 1000.0);
+                        let remote_frame_ms =
+                            config::frame_samples_from_code(ns.rx_frame_code).map(|n| n as f32 / config::INTERNAL_RATE as f32 * 1000.0);
                         let remote = ns
                             .remote_loss
                             .filter(|(_, at)| now.saturating_duration_since(*at) <= relay_codec::REPORT_STALE)
@@ -280,6 +292,8 @@ impl Engine {
                             remote_conceal_pct: remote.map(|r| r.conceal_pct),
                             connect_ms: ns.connect_ms,
                             first_audio_ms,
+                            remote_frame_ms,
+                            remote_input_buffer_ms,
                         })
                     })
                     .collect()
@@ -413,6 +427,8 @@ mod tests {
                 remote_conceal_pct: Some(2.6),
                 connect_ms: Some(95.5),
                 first_audio_ms: None,
+                remote_frame_ms: Some(2.5),
+                remote_input_buffer_ms: None,
             }],
             ..EngineStats::stopped()
         };
@@ -427,6 +443,7 @@ mod tests {
         assert!(j.contains("\"path\":\"lan\""));
         assert!(j.contains("\"rttMs\":null"));
         assert!(j.contains("\"connectMs\":95.5") && j.contains("\"firstAudioMs\":null"), "{j}");
+        assert!(j.contains("\"remoteFrameMs\":2.5") && j.contains("\"remoteInputBufferMs\":null"), "{j}");
         assert!(j.contains("\"relay\":null") && j.contains("\"qos\":null") && j.contains("\"sendQueue\":null"), "{j}");
         assert_eq!(serde_json::to_string(&PathKind::Relay).unwrap(), "\"relay\"");
         assert!(j.contains("\"cpu\":{\"workerPct\":null"), "{j}");

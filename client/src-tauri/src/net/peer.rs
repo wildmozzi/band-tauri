@@ -548,8 +548,13 @@ impl TickAction {
 /// 에코 블록 없이 이 블록만 오면 첫 바이트가 `ECHO_TAG`가 아니므로 빈 평문(flags 0)과 같게 처리한다.
 pub const LOSS_TAG: u8 = 0x4C;
 pub const LOSS_REPORT_BYTES: usize = 5;
-/// Ping 평문 최대 길이(에코 6 + 손실 5).
-pub const PING_PLAIN_MAX: usize = ECHO_PAYLOAD_BYTES + LOSS_REPORT_BYTES;
+/// Ping 평문의 입력 버퍼 블록 태그(P2-8b, 설계 2절). 블록 = `[INBUF_TAG, in_buf_us(u16 BE)]`(3바이트): 보낸 쪽 입력 장치
+/// 버퍼(실측 콜백 크기, µs, 65535에서 포화). 에코·손실 블록 **뒤**에 붙는다 — 옛 엔진의 에코·손실 파서는 블록 뒤 바이트를
+/// 무시하고, 앞 블록 없이 이 블록만 오면 첫 바이트가 그들 태그가 아니므로 빈 평문과 같다. 받는 쪽은 상대 입→귀 추정에 쓴다.
+pub const INBUF_TAG: u8 = 0x49;
+pub const INBUF_BYTES: usize = 3;
+/// Ping 평문 최대 길이(에코 6 + 손실 5 + 입력 버퍼 3).
+pub const PING_PLAIN_MAX: usize = ECHO_PAYLOAD_BYTES + LOSS_REPORT_BYTES + INBUF_BYTES;
 
 /// 받는 쪽이 본 그 피어 스트림의 최근 5초 손실률·은닉률(%, 지터 버퍼 `loss_pct`·`conceal_pct`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -597,6 +602,34 @@ pub fn ping_plain(echo: Option<[u8; ECHO_PAYLOAD_BYTES]>, loss: Option<LossRepor
         n += LOSS_REPORT_BYTES;
     }
     n
+}
+
+/// `ping_plain`이 채운 평문(길이 `n`) 뒤에 입력 버퍼 블록을 붙인다(P2-8b). `in_buf_us` 0은 모름 → 붙이지 않는다.
+/// 65535µs 넘는 값은 65535로 포화한다. 반환 = 새 길이.
+pub fn append_input_buffer(out: &mut [u8; PING_PLAIN_MAX], n: usize, in_buf_us: u32) -> usize {
+    if in_buf_us == 0 || n + INBUF_BYTES > PING_PLAIN_MAX {
+        return n;
+    }
+    let b = (in_buf_us.min(u16::MAX as u32) as u16).to_be_bytes();
+    out[n..n + INBUF_BYTES].copy_from_slice(&[INBUF_TAG, b[0], b[1]]);
+    n + INBUF_BYTES
+}
+
+/// Ping 평문에서 입력 버퍼 블록(µs, 없거나 0이면 None). 앞의 에코(6)·손실(5) 블록은 건너뛴다. 잘린 블록·모르는 태그는
+/// 무시하고 블록 뒤 바이트는 확장용으로 무시한다.
+pub fn parse_ping_input_buffer(plain: &[u8]) -> Option<u16> {
+    let rest = match plain {
+        [ECHO_TAG, _, _, _, _, _, rest @ ..] => rest,
+        _ => plain,
+    };
+    let rest = match rest {
+        [LOSS_TAG, _, _, _, _, rest @ ..] => rest,
+        _ => rest,
+    };
+    match rest {
+        [INBUF_TAG, a, b, ..] => Some(u16::from_be_bytes([*a, *b])).filter(|&v| v > 0),
+        _ => None,
+    }
 }
 
 /// Ping 평문의 에코 제어 태그. 평문 = `[ECHO_TAG, flags, delay_us(u32 BE)]`(6바이트). 빈 평문 = flags 0.
@@ -892,6 +925,11 @@ pub struct Peer {
     clock: Mutex<super::clock::ClockSync>,
     /// 이 피어가 Ping으로 알려 온, 내 소리의 수신 손실 보고와 받은 시각(P1-4e). 손실 피드백 Opus 전환의 입력.
     remote_loss: RemoteLossCell,
+    /// 이 피어가 Ping으로 알려 온 그쪽 입력 장치 버퍼(P2-8b): 0 = 없음, 아니면 `(받은 ms(born 기준) + 1) << 16 | µs`.
+    /// 쓰는 쪽은 수신 스레드 하나, 읽는 쪽(통계)은 락 없이 한 번에 읽는다.
+    remote_in_buf: AtomicU64,
+    /// 이 피어에게서 마지막으로 받은 Audio 헤더 `frame_code`(0 = 아직 없음). 상대 송신 프레임(P2-8b).
+    rx_frame_code: AtomicU8,
 }
 
 /// `Peer::tx_codec` 비트: 보낸 적 있음 / Opus / 릴레이 대역 때문에 자동 전환한 Opus(P1-4c) /
@@ -915,6 +953,10 @@ pub struct PeerNetStats {
     pub remote_loss: Option<(LossReport, Instant)>,
     /// add_peer → 처음 Connected(ms, P1-20). 아직 연결 전이면 None.
     pub connect_ms: Option<f32>,
+    /// 이 피어가 Ping으로 알려 온 그쪽 입력 장치 버퍼(µs)와 받은 시각(P2-8b). 옛 엔진이면 None.
+    pub remote_in_buf: Option<(u16, Instant)>,
+    /// 이 피어에게서 마지막으로 받은 Audio 헤더 `frame_code`(0 = 아직 없음, P2-8b).
+    pub rx_frame_code: u8,
 }
 
 pub struct PeerSetup<'a> {
@@ -955,6 +997,8 @@ impl Peer {
             echo: Mutex::new(EchoState::default()),
             clock: Mutex::new(super::clock::ClockSync::new()),
             remote_loss: RemoteLossCell::default(),
+            remote_in_buf: AtomicU64::new(0),
+            rx_frame_code: AtomicU8::new(0),
         })
     }
 
@@ -1021,6 +1065,8 @@ impl Peer {
             tx_codec: self.tx_codec.load(Ordering::Relaxed),
             remote_loss: self.remote_loss(),
             connect_ms,
+            remote_in_buf: self.remote_input_buffer(),
+            rx_frame_code: self.rx_frame_code.load(Ordering::Relaxed),
         }
     }
 
@@ -1032,6 +1078,7 @@ impl Peer {
     /// 수신 오디오를 피어별 수신 큐에 넣는다(가득 차면 버리고 센다). `recv_loop` 경로(`handle_packet`)에서만 부른다 —
     /// 다른 스레드가 부르면 SPSC가 Mutex로 직렬화될 뿐 깨지지는 않지만 무경쟁 가정이 깨진다(③-a3 리뷰 항목).
     pub(super) fn push_audio(&self, hdr: &super::packet::Header, payload: &[u8], arrival_us: u64) {
+        self.rx_frame_code.store(hdr.frame_code, Ordering::Relaxed);
         self.media.lock().push(hdr, payload, arrival_us);
     }
 
@@ -1078,6 +1125,19 @@ impl Peer {
     /// 이 피어가 Pong에 시계를 싣지 않는 엔진(옛 버전)으로 보이는지(PR #34 L4, `ClockSync::unsupported`). 워커 전용(위와 같음).
     pub(crate) fn clock_unsupported(&self, w: &mut super::txlat::LockWait, site: &super::txlat::LockSite) -> bool {
         w.lock(&self.clock, site).unsupported()
+    }
+
+    /// 이 피어가 Ping으로 알려 온 그쪽 입력 장치 버퍼(µs)와 받은 시각(P2-8b, 락 없음).
+    pub fn remote_input_buffer(&self) -> Option<(u16, Instant)> {
+        match self.remote_in_buf.load(Ordering::Relaxed) {
+            0 => None,
+            v => Some((v as u16, self.born + Duration::from_millis((v >> 16) - 1))),
+        }
+    }
+
+    pub(super) fn set_remote_input_buffer(&self, us: u16, at: Instant) {
+        let ms = (at.saturating_duration_since(self.born).as_millis() as u64).min((1u64 << 47) - 2);
+        self.remote_in_buf.store(((ms + 1) << 16) | us as u64, Ordering::Relaxed);
     }
 
     pub(super) fn set_remote_loss(&self, r: LossReport, at: Instant) {
@@ -1703,7 +1763,7 @@ mod tests {
         // 에코 블록 + 손실 보고: 에코는 그대로(옛 엔진은 뒤 바이트 무시), 손실 보고도 읽힌다
         let echo = [ECHO_TAG, ECHO_FLAG_REQUEST, 0, 0, 0, 7];
         let n = ping_plain(Some(echo), Some(rep), &mut buf);
-        assert_eq!(n, PING_PLAIN_MAX);
+        assert_eq!(n, ECHO_PAYLOAD_BYTES + LOSS_REPORT_BYTES);
         let mut e = EchoState::default();
         e.on_ping(&buf[..n], now);
         assert!(e.remote_requesting(now));
@@ -1720,5 +1780,71 @@ mod tests {
         let wild = LossReport { loss_pct: f32::NAN, conceal_pct: 400.0 }.encode();
         assert_eq!(LossReport::parse_ping(&wild), Some(LossReport { loss_pct: 0.0, conceal_pct: 100.0 }));
         assert_eq!(LossReport::parse_ping(&[LOSS_TAG, 0xFF, 0xFF, 0, 0]).unwrap().loss_pct, 100.0);
+    }
+
+    /// P2-8b: 입력 버퍼 블록. (1) 블록 없는 옛 Ping → None, (2) 옛 파서(에코·손실)는 새 Ping을 그대로 읽는다,
+    /// (3) u16 µs 포화, 모르는 태그·잘린 블록 무시.
+    #[test]
+    fn input_buffer_block_roundtrip_and_old_engine_compat() {
+        let now = Instant::now();
+        let rep = LossReport { loss_pct: 2.37, conceal_pct: 2.5 };
+        let echo = [ECHO_TAG, ECHO_FLAG_REQUEST, 0, 0, 0, 7];
+        let mut buf = [0u8; PING_PLAIN_MAX];
+        // (1) 옛 엔진 Ping: 빈 평문·에코만·손실만·에코+손실 — 입력 버퍼 없음
+        assert_eq!(parse_ping_input_buffer(&[]), None);
+        assert_eq!(parse_ping_input_buffer(&echo), None);
+        let n = ping_plain(Some(echo), Some(rep), &mut buf);
+        assert_eq!(parse_ping_input_buffer(&buf[..n]), None);
+        let n = ping_plain(None, Some(rep), &mut buf);
+        assert_eq!(parse_ping_input_buffer(&buf[..n]), None);
+        // 모든 조합에서 새 블록이 읽히고, 옛 파서(에코 플래그·손실 보고)는 같은 값을 본다
+        for (e, l) in [(None, None), (Some(echo), None), (None, Some(rep)), (Some(echo), Some(rep))] {
+            let n0 = ping_plain(e, l, &mut buf);
+            let n = append_input_buffer(&mut buf, n0, 2667);
+            assert_eq!(n, n0 + INBUF_BYTES);
+            assert!(n <= PING_PLAIN_MAX);
+            assert_eq!(parse_ping_input_buffer(&buf[..n]), Some(2667), "{e:?} {l:?}");
+            // (2) 옛 손실 파서: 블록 뒤 바이트 무시, 손실 블록 없으면 None
+            assert_eq!(LossReport::parse_ping(&buf[..n]), l);
+            // (2) 옛 에코 파서: 에코 블록이 없으면 첫 바이트가 INBUF_TAG라 빈 평문(flags 0)과 같다
+            let mut st = EchoState { enabled: true, remote_request_at: Some(now), ..Default::default() };
+            st.on_ping(&buf[..n], now);
+            assert_eq!(st.remote_requesting(now), e.is_some(), "{e:?} {l:?}");
+        }
+        // 0 = 모름 → 싣지 않는다
+        let n0 = ping_plain(None, Some(rep), &mut buf);
+        assert_eq!(append_input_buffer(&mut buf, n0, 0), n0);
+        // (3) 포화: 65535µs 넘으면 65535, 받을 때 0은 None
+        let n = append_input_buffer(&mut buf, 0, 200_000);
+        assert_eq!(parse_ping_input_buffer(&buf[..n]), Some(u16::MAX));
+        let n = append_input_buffer(&mut buf, 0, u32::MAX);
+        assert_eq!(parse_ping_input_buffer(&buf[..n]), Some(u16::MAX));
+        assert_eq!(parse_ping_input_buffer(&[INBUF_TAG, 0, 0]), None);
+        // 잘린 블록·모르는 태그·확장 바이트
+        assert_eq!(parse_ping_input_buffer(&[INBUF_TAG, 1]), None);
+        assert_eq!(parse_ping_input_buffer(&[0x55, 1, 2]), None);
+        assert_eq!(parse_ping_input_buffer(&[INBUF_TAG, 0x0A, 0x6B, 0xAA, 0xBB]), Some(2667));
+        // 잘린 손실 블록 뒤라면 손실 블록으로 보지 않고 태그를 그대로 본다(INBUF가 아니므로 None)
+        assert_eq!(parse_ping_input_buffer(&[LOSS_TAG, 0, 1]), None);
+        // 가득 찬 평문에는 더 붙이지 않는다
+        let n = ping_plain(Some(echo), Some(rep), &mut buf);
+        let n = append_input_buffer(&mut buf, n, 1000);
+        assert_eq!(n, PING_PLAIN_MAX);
+        assert_eq!(append_input_buffer(&mut buf, n, 1000), n);
+        // 태그가 다른 블록·예약 태그와 겹치지 않는다(에코 0xEC, 손실 0x4C, Pong 시계 0xC1)
+        assert!(![ECHO_TAG, LOSS_TAG, 0xC1].contains(&INBUF_TAG));
+    }
+
+    #[test]
+    fn remote_input_buffer_and_frame_code_cells() {
+        let p = test_peer();
+        let born = p.born;
+        let ns = p.net_stats(born);
+        assert_eq!((ns.remote_in_buf, ns.rx_frame_code), (None, 0));
+        let at = born + Duration::from_millis(1234);
+        p.set_remote_input_buffer(2667, at);
+        assert_eq!(p.remote_input_buffer(), Some((2667, at)));
+        p.set_remote_input_buffer(u16::MAX, born);
+        assert_eq!(p.remote_input_buffer(), Some((u16::MAX, born)));
     }
 }
