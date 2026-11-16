@@ -93,7 +93,7 @@ pub struct WorkerStats {
     /// 입력 또는 출력 콜백이 1초 넘게 멈췄다(장치 분리 등). 다시 돌면 false.
     pub device_stalled: AtomicBool,
     /// 워커 스레드 우선순위 설정 결과(P1-2).
-    pub thread_prio: crate::sys::prio::PrioSlot,
+    pub thread_prio: crate::engine::prio_slot::PrioSlot,
     /// 워커의 피어 미디어 표 길이(명령을 비운 직후, 엔진 ③). 진단·테스트: 표에 죽은 항목이 남는지 직접 본다.
     pub media_peers: AtomicU64,
     /// 워커 반복 본문 시간(수면 제외)과 반복 시작 간격 분포(엔진 ③c 측정, 진단 전용 — 측정 시험이 비운다).

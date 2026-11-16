@@ -1479,7 +1479,7 @@ fn est_latency_budget_table() {
 
 #[test]
 fn thread_priority_reported_and_timer_released_on_stop() {
-    use band_lib::testing::sys::prio::ThreadPriority;
+    use band_lib::testing::engine::prio_slot::ThreadPriority;
     let _g = RT_LOCK.lock();
     for _ in 0..3 {
         let (mut a, b, _p, _sink) = connect_pair(config(480, 5.0), sine_backend(), FakeBackend::silence(48_000), None);
@@ -1547,7 +1547,7 @@ fn rt_priority_before_after() {
                 let stop_probe = Arc::new(AtomicBool::new(false));
                 let sp = stop_probe.clone();
                 let probe = std::thread::spawn(move || {
-                    let slot = prio::PrioSlot::default();
+                    let slot = band_lib::testing::engine::prio_slot::PrioSlot::default();
                     let _g = prio::promote_engine_thread(&slot);
                     let mut over = Vec::with_capacity(100_000);
                     while !sp.load(Ordering::Relaxed) {

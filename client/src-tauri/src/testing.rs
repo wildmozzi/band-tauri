@@ -13,8 +13,8 @@ pub mod engine {
     #[cfg(windows)]
     pub use crate::engine::wasapi;
     pub use crate::engine::{
-        codec, config, cpuprof, device, jitter, measure, metronome, mixer, record, relay_codec, report, rt, stats, wav,
-        worker, Engine,
+        codec, config, cpuprof, device, jitter, measure, metronome, mixer, prio_slot, record, relay_codec, report, rt,
+        stats, wav, worker, Engine,
     };
 }
 

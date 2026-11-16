@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use band_lib::testing::sys::prio::ThreadPriority;
+use band_lib::testing::engine::prio_slot::ThreadPriority;
 use band_lib::testing::net::{Net, NetOptions};
 
 #[test]

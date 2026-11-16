@@ -13,12 +13,12 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::net::txlat::{bucket_lower, bucket_of, quantile_us, BUCKETS};
+use super::histo::{bucket_lower, bucket_of, quantile_us, BUCKETS};
 
 /// RT 콜백 실행시간 누적(콜백 → 통계 조회). 모두 원자값이다.
 #[derive(Debug)]
 pub struct RtTiming {
-    /// 출력 콜백 실행시간 칸(µs, `net::txlat`과 같은 칸: 1µs 칸 0..16µs, 그 위 상대 오차 ≤ 12.5%).
+    /// 출력 콜백 실행시간 칸(µs, `engine::histo` — `net::txlat`과 같은 칸: 1µs 칸 0..16µs, 그 위 상대 오차 ≤ 12.5%).
     out_buckets: Box<[AtomicU32]>,
     out_max_us: AtomicU64,
     in_max_us: AtomicU64,

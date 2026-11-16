@@ -364,17 +364,34 @@ band-dsp                 config · packet · codec · resample · jitter · rela
 
 ### 7.3 ⑩-0 — 분리 전 정리(같은 크레이트 안에서)
 
-크레이트를 가르기 전에 7.1절의 "나눈다"·"아니오"를 지금 크레이트 안에서 옮겨 둔다. 그러면 ⑩-1은 디렉터리 이동과 `use` 치환만 남는다.
+크레이트를 가르기 전에 7.1절의 "나눈다"·"아니오"를 지금 크레이트 안에서 옮겨 둔다. 그러면 ⑩-1에는 디렉터리 이동·`use` 치환과 **경계 항목 처리**(아래 표)만 남는다(#159 리뷰 M1).
 
-| 옮기는 것 | 지금 | 뒤(⑩-0) |
-|---|---|---|
-| `PrioSlot`·`ThreadPriority` | `sys/prio.rs:8-64` | `engine/stats.rs` 옆(dsp 예정). `sys::prio`는 `pub use`하지 않고 쓰는 쪽을 고친다 |
-| `MediaPort`(제어 쪽) | `engine/peer_media.rs:302-345` | `engine/media_port.rs`(계층 5). 링 생성 함수는 dsp 쪽에 남겨 날것의 끝 셋을 돌려준다 |
-| `LockWait`·`SendLatency`·`SendQueueStats` | `net/txlat.rs` | 그대로 `net::txlat`(계층 3으로 올림). 칸 함수 넷만 새 `engine/histo.rs`(계층 1)로 |
-| `wav`·`flac` | 계층 1 노드 | 계층 2로 재분류(`NODES`만 고친다. ⑥-1 뒤에는 `record/` 아래로 넣어도 된다) |
-| `sys::*` | 계층 0 | 그대로 두되 문서의 계층 0 정의를 "공용 기초(플랫폼 호출 포함)"로 고친다. dsp가 `sys`를 쓰지 않음을 `FORBIDDEN`에 임시로 적는다 |
+**경계 항목**: 크레이트를 가르면 `pub(crate)`는 크레이트 밖에서 안 보이고, `band-dsp`의 `#[cfg(test)]`는 `band-engine` 시험 빌드에서 꺼진다. dsp 예정 노드의 `pub(crate)`·(부모가 dsp 밖인) `pub(super)`·시험 전용 항목 가운데 dsp 밖이 쓰는 것은 `tests/architecture.rs`의 `DSP_BOUNDARY`에 고정했다 — 새로 생기거나 없어지면 `dsp_boundary_items_are_listed`가 실패하고, 적힌 사용처가 실제로 부르는지도 본다. 지금 목록(⑩-1 처리):
 
-`architecture.rs`에 "dsp 예정 노드 집합"을 상수로 두고 그 집합에서 밖으로 나가는 간선이 0임을 검사하면, ⑩-1 전에 분리 가능 여부가 CI로 확인된다.
+| 항목 | 종류 | dsp 밖 사용처 | ⑩-1 |
+|---|---|---|---|
+| `histo::{bucket_of, bucket_lower, quantile_us}` | `pub(crate)` | `net::txlat` | `pub` |
+| `histo::bucket_value` | `pub(crate)` | `net::txlat` 시험 | `pub`(또는 그 대조를 `histo` 시험으로 옮기고 `pub(crate)` 유지) |
+| `PeerMedia::{take_feed_resampler, put_feed_resampler, ingest, note_audio, publish}` | `pub(crate)` | `worker::peer_sources`(+ `ingest`는 `sim::tune`) | `pub` |
+| `SeqCell::write` | `pub(crate)` | `metronome::sched` | `pub`(단일 작성자 규약은 감싸는 타입 `MediaStatsCell`·`MetronomeRt`와 문서로) |
+| `PeerMedia::{jitter, rx_dropped}` | `cfg(test)` | `sim::tune` | `#[cfg(any(test, feature = "test-support"))] pub` |
+| `PeerMedia::has_feed_resampler` | `cfg(test)` | `worker` 시험 | 같음 |
+| `MediaPortRt::drain` | `cfg(test)` | `media_port` 시험 | 같음(또는 그 시험을 `media_rings`로 `peer_media` 안에 둠) |
+| `codec::opus_decoders_created` | `cfg(any(test, feature = "test-support"))` | `tests/rt_alloc.rs` | cfg 그대로, 피처 전달만 |
+
+`band-dsp`에 `test-support` 피처를 두고 `band-engine`의 `test-support`가 `band-dsp/test-support`를 켠다. ⑩-0에서 `cfg(test)` 훅을 미리 `test-support`로 바꾸지 않은 이유: 지금은 `pub(crate)`라 통합 시험용 lib 빌드(`test-support` 켬)에서 안 쓰여 `dead_code` 경고(`-D warnings`)가 난다 — `pub`이 되는 ⑩-1에서 함께 바꾼다. 같은 이름의 흔한 메서드(`write`·`drain`·`publish`)가 많아 사용처를 이름으로 전수 탐지하면 오탐이 많다 — 그래서 항목 쪽을 래칫으로 고정했고, 목록에 없는 새 사용처는 ⑩-1에서 컴파일러가 알려 준다(항목은 이미 `pub`·`test-support` 처리 대상이다).
+
+| 옮기는 것 | 지금 | 뒤(⑩-0) | 한 일(⑩-0 PR) |
+|---|---|---|---|
+| `PrioSlot`·`ThreadPriority` | `sys/prio.rs:8-64` | `engine/stats.rs` 옆(dsp 예정). `sys::prio`는 `pub use`하지 않고 쓰는 쪽을 고친다 | 새 `engine/prio_slot.rs`(**계층 0** — `sys::prio`(0)가 쓰므로 `stats.rs`(1) 안에 두면 위 계층 사용이 된다). 쓰는 쪽 8곳(`stats`·`worker`·`net`·`report`·`device::select`·`wasapi::stream`, 통합 테스트 2) 경로만. `ThreadPriorityStats`(보고 DTO)는 `sys::prio`에 남음 |
+| `MediaPort`(제어 쪽) | `engine/peer_media.rs:302-345` | `engine/media_port.rs`(계층 5). 링 생성 함수는 dsp 쪽에 남겨 날것의 끝 셋을 돌려준다 | `engine/media_port.rs`(**계층 4** — 하네스 `engine::sim`(4)이 `media_port()`·`reserve_cmd`를 쓴다). `MediaPort`·`MEDIA_CMD_WAIT`·`media_port()`, 시험 셋. `peer_media::media_rings()`가 (명령 생산자, 반환 소비자, `MediaPortRt`)를 돌려준다. `peer_media`에서 `parking_lot` 의존이 빠졌다 |
+| `LockWait`·`SendLatency`·`SendQueueStats` | `net/txlat.rs` | 그대로 `net::txlat`(계층 3으로 올림). 칸 함수 넷만 새 `engine/histo.rs`(계층 1)로 | 그대로. `BUCKETS`·`bucket_of`·`bucket_lower`·`quantile_us`와 그것이 쓰는 `bucket_value`·칸 상수 |
+| `wav`·`flac` | 계층 1 노드 | 계층 2로 재분류(`NODES`만 고친다. ⑥-1 뒤에는 `record/` 아래로 넣어도 된다) | `NODES`만(파일 위치 그대로) |
+| `sys::*` | 계층 0 | 그대로 두되 문서의 계층 0 정의를 "공용 기초(플랫폼 호출 포함)"로 고친다. dsp가 `sys`를 쓰지 않음을 `FORBIDDEN`에 임시로 적는다 | 정의 문구 고침. `FORBIDDEN` 대신 아래 닫힘 검사(`sys`를 포함해 집합 밖 전부를 막는다) |
+
+`architecture.rs`에 "dsp 예정 노드 집합"(`DSP_PLANNED`)을 상수로 두고 그 집합에서 밖으로 나가는 간선이 0임을 검사한다(`dsp_planned_nodes_are_closed`) → ⑩-1 전에 분리 가능 여부가 CI로 확인된다. 7.1절 표의 "아니오"와 제어 쪽은 `DSP_EXCLUDED`라 집합에 넣으면 실패한다. 외부 크레이트도 본다(`dsp_planned_nodes_use_only_dsp_crates`): dsp 예정 파일(단위 테스트 제외)이 쓰는 것은 `opus`·`rubato`·`ringbuf`·`serde`·`log`뿐 — **`sha2`·`rand`를 직접 쓰는 곳은 없다**(7.2절의 미확인 항목). 단위 테스트(`jitter/tests.rs`)는 `rand`·`sha2`·`serde_json`을 쓰므로 ⑩-1에서 `band-dsp`의 개발 의존이 된다. 한 가지 남은 OS 호출: `SeqCell::read`(`stats.rs`, 비RT 독자의 seqlock 재시도)의 `std::thread::yield_now` — 스케줄러 양보라 스레드 생성·I/O·시계는 아니므로 그대로 둔다.
+
+`relay_codec`의 시각 인자(`Instant` → `now_us: u64`, 7.1절 선택)는 ⑩-0에서 **하지 않았다**: `LossCodecPolicy::update`의 손실 보고 시각이 net 수신 스레드가 적은 `Instant`(`NetStats.remote_loss`)이고 `report.rs`도 같은 값을 `REPORT_STALE`로 거르므로, µs로 바꾸려면 net·worker·report가 같은 epoch를 나눠야 한다(경계 변환은 epoch 앞 시각의 포화로 판정이 달라질 수 있어 "동작 불변"이 구조상 보장되지 않는다). 하네스는 지금도 `Instant` 원점 + 가상 오프셋으로 결정적으로 돈다. ⑩-1에 필요하지 않다(`Instant`는 `std`라 dsp가 써도 된다 — 읽지만 않으면 된다).
 
 ### 7.4 하네스 — `band-engine`을 백엔드 피처 없이 쓴다
 
@@ -428,7 +445,7 @@ CI: `long-sim` 잡이 `cargo test --lib long_sim_6peers_60min`(`ci.yml:179-182`)
 | PR | 내용 | 증거 |
 |---|---|---|
 | ⑩-0 | 7.3절(같은 크레이트 안 정리) + "dsp 예정 노드" 검사 | 공통 + fixture 동일 + `rt_alloc` |
-| ⑩-1 | `band-dsp` 추출(디렉터리 이동, `use crate::engine::jitter` → `use band_dsp::jitter` 치환) | 공통 + fixture 동일 + `cpu_profile`(release, ±5%) + 60분 하네스 1회 |
+| ⑩-1 | `band-dsp` 추출(디렉터리 이동, `use crate::engine::jitter` → `use band_dsp::jitter` 치환) + 경계 항목 처리(7.3절 `DSP_BOUNDARY` 표: `pub(crate)` → `pub`, 시험 훅 → `test-support` 피처, `band-engine/test-support` → `band-dsp/test-support` 전달, `band-dsp` dev-dependency `rand`·`sha2`·`serde_json`) | 공통 + fixture 동일 + `cpu_profile`(release, ±5%) + 60분 하네스 1회 |
 | ⑩-2 | 앱과 `band-engine` 분리(`commands`·`lib`·`main`·`build.rs`가 앱에 남고 나머지가 `crates/band-engine`으로), 백엔드 피처 | 공통 + `npm run build` + `npm run dev:tauri`·`cargo tauri build` **[사람]**(앱 실행, 설치본) + `cargo build --features asio` **[사람]** |
 | ⑩-3 | 하네스 추출(별도 크레이트 `band-sim`인지 `band-engine/tests` 타깃인지 빌드 시간을 재서 정한다, 7.4절), CI(`long-sim` 잡, `cargo test --workspace`) | fixture 동일(위치만 이동), 60분 하네스 1회, 두 형태의 빌드 시간 비교, CI 시간 전/후 |
 
