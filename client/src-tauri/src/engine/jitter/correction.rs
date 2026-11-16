@@ -1,6 +1,7 @@
-//! 깊이 측정(`end_burst`)과 데드밴드 보정: 비율 상한 리샘플러(`RateShifter`), 샘플 시프트 유틸.
+//! 깊이 측정(`end_burst`)과 데드밴드 보정: 상태는 `DepthCtl`(엔진 ⑧(b)), 비율 상한 리샘플러(`RateShifter`), 샘플 시프트 유틸.
 
-use super::{Correction, JitterBuffer, State};
+use super::stats::RateRing;
+use super::{samples_per_ms, JitterBuffer, State, LOSS_WINDOW_MAX, MAX_PKT_FRAME};
 use crate::engine::config::INTERNAL_RATE;
 
 /// 깊이 EWMA 계수(버스트당 1회 측정).
@@ -81,85 +82,182 @@ impl RateShifter {
 /// 벽시계 깊이 최솟값 버킷 길이(µs). 보고값은 직전+현재 버킷의 최솟값(0.5~1초).
 const WALL_BUCKET_US: u64 = 500_000;
 
-impl JitterBuffer {
-    /// 보정 데드밴드(샘플): (버림 진입, 삽입 진입, 버림 해제, 삽입 해제). 삽입 쪽(깊이 부족 = 은닉 위험)은 좁게,
-    /// 버림 쪽(깊이 초과 = 지연)은 넓게 둔다. 삽입 진입 문턱은 목표에 포함된다(`target_samples`).
-    pub(super) fn deadbands(&self) -> (f64, f64, f64, f64) {
-        let f = self.frame() as f64;
-        let spm = Self::samples_per_ms();
-        let enter_drop = (f / 2.0).clamp(spm, 2.5 * spm);
-        let enter_ins = (f / 8.0).clamp(0.25 * spm, spm);
-        (enter_drop, enter_ins, (enter_drop / 4.0).max(4.0), (enter_ins / 4.0).max(4.0))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Correction {
+    Idle,
+    Drop,
+    Insert,
+}
+
+/// `DepthCtl`의 힙 버퍼 묶음(`Buffers`의 일부). 재시작은 `DepthCtl::reclaim`으로 지금 것을 되돌려 다시 쓴다(할당·해제 없음).
+pub(super) struct DepthBufs {
+    shift_buf: Vec<f32>,
+    corr_ring: RateRing,
+}
+
+impl DepthBufs {
+    pub(super) fn alloc() -> Self {
+        Self { shift_buf: vec![0.0; (MAX_PKT_FRAME + 4) * 2], corr_ring: RateRing::new(LOSS_WINDOW_MAX) }
+    }
+}
+
+/// 깊이 측정·보정 상태(엔진 ⑧(b)): 깊이 EWMA, 보정 모드(데드밴드·`chase`), 패킷 단위 버림(trimming), 비율 리샘플러,
+/// 벽시계 깊이 최솟값, 재생 시작 여유. 메서드는 필요한 값(측정 깊이, 오차·문턱, 창 크기, 입력 프레임)을 인자로 받고
+/// `JitterBuffer`를 모른다.
+pub(super) struct DepthCtl {
+    depth_ewma: Option<f64>,
+    /// 이미 꺼냈지만 아직 재생되지 않은 샘플 수(48k). 콜백 구동 믹스에서 소스 링·리샘플러에 있는 양.
+    /// 깊이는 실제 재생 위치(소스 링의 머리)를 기준으로 잰다.
+    ahead: f64,
+    correction: Correction,
+    drop_frames_pending: usize,
+    trimming: bool,
+    /// 목표가 내려가거나 소비자 요구가 바뀐 뒤 해제 문턱까지 보정 중(데드밴드 무시). 목표 쪽(`TargetEst`의
+    /// `note_target`·`set_consumer_lead` 반환값)이 `set_chase`로 켜고 `update`가 해제 문턱 안에서 끈다(⑧(a)에서 정함).
+    chase: bool,
+    shifter: RateShifter,
+    /// 리샘플러 출력 스크래치.
+    shift_buf: Vec<f32>,
+    /// 보정 모드였던 패킷 비율 창(H1 통계).
+    corr_ring: RateRing,
+    max_corr_cents: f32,
+    wall_bucket_start: u64,
+    wall_cur_min: f64,
+    wall_prev_min: f64,
+    /// 재생 시작 직후 여유(샘플)와 그 끝 시각(µs, 장치 클럭). 출력 콜백 시각 추정(`DeviceClock`)이 이른 콜백을
+    /// 아직 못 본 첫 콜백들에서 소스 링이 모자라지 않게 한다. 끝나면 `chase`로 목표까지 내려간다.
+    start_pad: f64,
+    start_pad_until_us: u64,
+}
+
+impl DepthCtl {
+    pub(super) fn new(b: DepthBufs) -> Self {
+        Self {
+            depth_ewma: None,
+            ahead: 0.0,
+            correction: Correction::Idle,
+            drop_frames_pending: 0,
+            trimming: false,
+            chase: false,
+            shifter: RateShifter::default(),
+            shift_buf: b.shift_buf,
+            corr_ring: b.corr_ring,
+            max_corr_cents: 0.0,
+            wall_bucket_start: 0,
+            wall_cur_min: f64::INFINITY,
+            wall_prev_min: f64::INFINITY,
+            start_pad: 0.0,
+            start_pad_until_us: 0,
+        }
     }
 
-    /// 소비자가 재생 위치를 `samples`만큼 옮겼음을 알린다(깊이 추정에 바로 반영). 워커가 언더런 뒤 건너뛰기를
-    /// 늘어난 목표만큼 덜 하면 깊이가 그만큼 즉시 커진다. EWMA가 이를 천천히 따라가는 동안 오차를 잘못 읽어
-    /// 삽입 보정이 끼지 않게 한다.
-    pub fn shift_depth(&mut self, samples: f64) {
+    /// 재시작: 버퍼를 꺼내 `DepthBufs::alloc()`과 같은 내용으로 되돌린다(할당·해제 없음).
+    pub(super) fn reclaim(&mut self) -> DepthBufs {
+        let mut shift_buf = std::mem::take(&mut self.shift_buf);
+        shift_buf.fill(0.0);
+        DepthBufs { shift_buf, corr_ring: RateRing::take_reset(&mut self.corr_ring) }
+    }
+
+    /// 스트림 리셋(재버퍼·먼 미래 seq): 리샘플러·벽시계 최솟값·깊이 EWMA·보정 모드·패킷 버림을 버린다.
+    pub(super) fn reset_stream(&mut self) {
+        self.shifter.reset();
+        self.wall_cur_min = f64::INFINITY;
+        self.wall_prev_min = f64::INFINITY;
+        self.depth_ewma = None;
+        self.reset_mode();
+    }
+
+    /// 보정 모드·패킷 버림만 대기로(재생 시작).
+    pub(super) fn reset_mode(&mut self) {
+        self.correction = Correction::Idle;
+        self.drop_frames_pending = 0;
+        self.trimming = false;
+    }
+
+    pub(super) fn ewma(&self) -> Option<f64> {
+        self.depth_ewma
+    }
+
+    pub(super) fn set_ewma(&mut self, d: f64) {
+        self.depth_ewma = Some(d);
+    }
+
+    /// 깊이 EWMA에 `x`를 더한다(측정 전이면 그대로).
+    pub(super) fn add_ewma(&mut self, x: f64) {
         if let Some(e) = self.depth_ewma.as_mut() {
-            *e += samples;
+            *e += x;
         }
     }
 
-    /// 현재 재생 위치 기준 깊이(샘플). 재생 위치(소스 링 머리)의 ts = 다음에 꺼낼 샘플의 ts − 이미
-    /// 꺼냈지만 재생 전인 양(`ahead`). 링에 있는 샘플이 더 오래되었으므로 깊이는 그만큼 크다.
-    pub(super) fn depth_now(&self, now_us: u64) -> f64 {
-        let next_ts = self.fifo_end_ts - (self.fifo.len() / 2) as i64;
-        (Self::now_samples(now_us) - next_ts - self.delay.min_transit()) as f64 + self.ahead
-    }
-
-    /// 다음 seq의 시작 타임스탬프 기준 깊이(버퍼링 중 판단용). 소스 링에 이전 스트림이 남아 있으면
-    /// 그만큼 늦게 재생되므로 깊이에 더한다.
-    pub(super) fn depth_if_start(&self, now_us: u64) -> Option<f64> {
-        let slot = &self.slots[Self::slot_index(self.next_seq)];
-        if !(slot.valid && slot.seq == self.next_seq) {
-            return None;
+    /// 깊이 EWMA에서 `x`를 뺀다(측정 전이면 그대로).
+    pub(super) fn sub_ewma(&mut self, x: f64) {
+        if let Some(e) = self.depth_ewma.as_mut() {
+            *e -= x;
         }
-        Some((Self::now_samples(now_us) - self.ts_ext(slot.ts) - self.delay.min_transit()) as f64 + self.ahead)
     }
 
-    /// 출력 버스트 종료. `now_us`는 출력 콜백 시각 추정치(장치 클럭 기준).
-    /// `wall_us`는 워커가 실제로 깨어난 벽시계 시각이다. 이것으로 잰 깊이는 기상 지연만큼 크게 나오므로,
-    /// 1초 창의 최솟값이 장치 클럭 추정과 **독립적인** 실제 재생 지연이 된다(PR #5 H-1: 클럭 추정이
-    /// 틀려 지연이 몰래 늘어나는 경우를 통계로 드러낸다).
-    ///
-    /// `ahead`: 이미 꺼냈지만 아직 재생되지 않은 샘플 수(48k 환산). 콜백 구동 믹스에서는 소스 링과
-    /// 출력 리샘플러에 있는 양이다. 깊이는 실제 재생 위치를 기준으로 재므로 이것을 뺀다. 그래서
-    /// `bufferMs`는 소스 링까지 포함한 수신측 버퍼 지연이다.
-    pub fn end_burst(&mut self, now_us: u64, wall_us: u64, ahead: f64) {
+    /// 측정 깊이 `d`로 EWMA를 갱신하고 새 값을 돌려준다.
+    pub(super) fn measure(&mut self, d: f64) -> f64 {
+        let e = match self.depth_ewma {
+            None => d,
+            Some(e) => e + (d - e) * DEPTH_ALPHA,
+        };
+        self.depth_ewma = Some(e);
+        e
+    }
+
+    pub(super) fn ahead(&self) -> f64 {
+        self.ahead
+    }
+
+    pub(super) fn set_ahead(&mut self, ahead: f64) {
         self.ahead = ahead.max(0.0);
-        match self.state {
-            State::Buffering => self.try_start(now_us),
-            State::Playing => {
-                if self.start_pad > 0.0 && now_us >= self.start_pad_until_us {
-                    self.start_pad = 0.0;
-                    self.after_target_change();
-                }
-                let dw = self.depth_now(wall_us);
-                if wall_us.saturating_sub(self.wall_bucket_start) >= WALL_BUCKET_US {
-                    self.wall_prev_min = self.wall_cur_min;
-                    self.wall_cur_min = f64::INFINITY;
-                    self.wall_bucket_start = wall_us;
-                }
-                self.wall_cur_min = self.wall_cur_min.min(dw);
-                let d = self.depth_now(now_us);
-                let e = match self.depth_ewma {
-                    None => d,
-                    Some(e) => e + (d - e) * DEPTH_ALPHA,
-                };
-                self.depth_ewma = Some(e);
-                self.update_correction(e);
-            }
-        }
     }
 
-    fn update_correction(&mut self, ewma: f64) {
-        let f = self.frame() as f64;
-        let target = self.target_samples();
-        let err = ewma - target;
+    /// 벽시계 기준 깊이 `dw`(벽시계 시각 `wall_us`)를 0.5초 버킷 최솟값에 넣는다.
+    pub(super) fn note_wall(&mut self, dw: f64, wall_us: u64) {
+        if wall_us.saturating_sub(self.wall_bucket_start) >= WALL_BUCKET_US {
+            self.wall_prev_min = self.wall_cur_min;
+            self.wall_cur_min = f64::INFINITY;
+            self.wall_bucket_start = wall_us;
+        }
+        self.wall_cur_min = self.wall_cur_min.min(dw);
+    }
+
+    /// 직전+현재 버킷의 벽시계 깊이 최솟값(없으면 무한대).
+    pub(super) fn wall_min(&self) -> f64 {
+        self.wall_cur_min.min(self.wall_prev_min)
+    }
+
+    pub(super) fn start_pad(&self) -> f64 {
+        self.start_pad
+    }
+
+    /// 재생 시작 여유 `pad`(샘플)를 `until_us`까지 둔다.
+    pub(super) fn begin_start_pad(&mut self, pad: f64, until_us: u64) {
+        self.start_pad = pad;
+        self.start_pad_until_us = until_us;
+    }
+
+    /// 재생 시작 여유가 끝났으면 걷고 `true`(목표가 바뀐다 — 호출한 쪽이 `after_target_change`).
+    pub(super) fn expire_start_pad(&mut self, now_us: u64) -> bool {
+        if self.start_pad > 0.0 && now_us >= self.start_pad_until_us {
+            self.start_pad = 0.0;
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn set_chase(&mut self) {
+        self.chase = true;
+    }
+
+    /// 보정 판단(버스트당 1회): 오차 `err` = 깊이 EWMA − 목표, 데드밴드 `bands` = (버림 진입, 삽입 진입, 버림 해제,
+    /// 삽입 해제), 프레임 `f`, 실제 쌓인 양의 목표 초과분 `queued_excess`.
+    pub(super) fn update(&mut self, err: f64, bands: (f64, f64, f64, f64), f: f64, queued_excess: f64) {
         // 데드밴드(비대칭, P1-5): 버림 진입 F/2를 1ms~2.5ms로 제한(10ms 프레임에서 목표 +5ms까지 머물지 않게, PR #5 L-1),
         // 삽입 진입은 F/8을 0.25~1ms로 제한하고 목표에 포함한다(깊이가 목표 − 삽입 진입까지 내려가도 지터 추정 + lead 이상).
-        let (enter_drop, enter_ins, exit_drop, exit_ins) = self.deadbands();
+        let (enter_drop, enter_ins, exit_drop, exit_ins) = bands;
         // 소비자 요구로 목표가 바뀐 직후에는 해제 문턱 밖의 오차부터 따라간다(P1-13, `set_consumer_lead`).
         // 목표가 내려간 직후(`after_target_change`)에도 같은 방식으로 버림 데드밴드 안에 지연을 남기지 않는다(P1-5).
         if self.chase && ((err >= 0.0 && err <= exit_drop) || (err < 0.0 && -err <= exit_ins)) {
@@ -175,7 +273,6 @@ impl JitterBuffer {
         };
         // 패킷 단위 버림(히스테리시스): 추정 깊이와 실제 쌓인 양이 모두 목표를 3F 이상 넘으면
         // 시작하고, 둘 중 하나가 목표 + F 안으로 들어오면 멈춘다. 버스트당 최대 1패킷.
-        let queued_excess = self.queued_samples() - target;
         if !self.trimming && err >= 3.0 * f && queued_excess >= 3.0 * f {
             self.trimming = true;
         } else if self.trimming && (err < f || queued_excess < f) {
@@ -184,52 +281,162 @@ impl JitterBuffer {
         self.drop_frames_pending = usize::from(self.trimming);
     }
 
-    /// 샘플 단위 보정(H1): 방금 생산한 `dec_buf`의 프레임을 보정 모드에 따라 리샘플한다. 반환: (출력 프레임 수, `shift_buf`를 쓸지).
+    /// 패킷 단위 버림이 걸려 있나.
+    pub(super) fn drop_pending(&self) -> bool {
+        self.drop_frames_pending > 0
+    }
+
+    /// 걸린 패킷 버림 하나를 쓴다.
+    pub(super) fn take_drop(&mut self) {
+        self.drop_frames_pending -= 1;
+    }
+
+    /// 샘플 단위 보정(H1): 방금 생산한 프레임 `src`(frames×ch)를 보정 모드에 따라 리샘플한다(창 크기 `win`패킷).
+    /// 반환: (출력 프레임 수, `shifted`를 쓸지, 줄어든 샘플 수 d(늘었으면 음수)).
+    pub(super) fn correct_rate(&mut self, src: &[f32], frames: usize, ch: usize, win: usize) -> (usize, bool, f64) {
+        self.corr_ring.push(self.correction != Correction::Idle, win);
+        // 비율 상한 리샘플러(H1): 버림 1 + r, 삽입 1 − r. 보정이 끝나면 위상이 정수가 될 때까지 같은 방향으로 이어 간다.
+        let rstep = match self.correction {
+            Correction::Drop => 1.0 + MAX_CORR_RATE,
+            Correction::Insert => 1.0 - MAX_CORR_RATE,
+            Correction::Idle => {
+                let fr = self.shifter.pos - self.shifter.pos.round();
+                // 정수 위상(−1 또는 0)이면 보간 없이 원 샘플을 그대로 낸다(−1은 1샘플 지연된 무손실 상태).
+                if fr.abs() < PHASE_SNAP || self.shifter.settle > 64 {
+                    self.shifter.pos = self.shifter.pos.round();
+                    self.shifter.settle = 0;
+                    1.0
+                } else {
+                    self.shifter.settle += 1;
+                    self.shifter.last_step
+                }
+            }
+        };
+        if rstep != 1.0 || !self.shifter.idle() {
+            if self.correction != Correction::Idle {
+                self.shifter.settle = 0;
+            }
+            let out_frames = self.shifter.process(src, ch, frames, &mut self.shift_buf, rstep);
+            let d = frames as f64 - out_frames as f64;
+            if let Some(e) = self.depth_ewma.as_mut() {
+                *e -= d;
+            }
+            let cents = (1200.0 * rstep.log2()).abs() as f32;
+            self.max_corr_cents = self.max_corr_cents.max(cents);
+            (out_frames, true, d)
+        } else {
+            for c in 0..ch {
+                self.shifter.prev[c] = src[(frames - 1) * ch + c];
+            }
+            (frames, false, 0.0)
+        }
+    }
+
+    /// 리샘플러 출력(`n`샘플).
+    pub(super) fn shifted(&self, n: usize) -> &[f32] {
+        &self.shift_buf[..n]
+    }
+
+    pub(super) fn corr_pct(&self) -> f32 {
+        self.corr_ring.pct()
+    }
+
+    pub(super) fn max_corr_cents(&self) -> f32 {
+        self.max_corr_cents
+    }
+
+    /// 시험: 보정 비율 창이 `new` 직후와 같은가.
+    #[cfg(test)]
+    pub(super) fn is_fresh(&self) -> bool {
+        self.corr_ring.is_fresh()
+    }
+
+    /// 시험: 패킷 단위 버림 하나를 건다.
+    #[cfg(test)]
+    pub(super) fn force_drop(&mut self) {
+        self.drop_frames_pending = 1;
+    }
+}
+
+impl JitterBuffer {
+    /// 보정 데드밴드(샘플): (버림 진입, 삽입 진입, 버림 해제, 삽입 해제). 삽입 쪽(깊이 부족 = 은닉 위험)은 좁게,
+    /// 버림 쪽(깊이 초과 = 지연)은 넓게 둔다. 삽입 진입 문턱은 목표에 포함된다(`target_samples`).
+    pub(super) fn deadbands(&self) -> (f64, f64, f64, f64) {
+        let f = self.frame() as f64;
+        let spm = samples_per_ms();
+        let enter_drop = (f / 2.0).clamp(spm, 2.5 * spm);
+        let enter_ins = (f / 8.0).clamp(0.25 * spm, spm);
+        (enter_drop, enter_ins, (enter_drop / 4.0).max(4.0), (enter_ins / 4.0).max(4.0))
+    }
+
+    /// 소비자가 재생 위치를 `samples`만큼 옮겼음을 알린다(깊이 추정에 바로 반영). 워커가 언더런 뒤 건너뛰기를
+    /// 늘어난 목표만큼 덜 하면 깊이가 그만큼 즉시 커진다. EWMA가 이를 천천히 따라가는 동안 오차를 잘못 읽어
+    /// 삽입 보정이 끼지 않게 한다.
+    pub fn shift_depth(&mut self, samples: f64) {
+        self.depth.add_ewma(samples);
+    }
+
+    /// 현재 재생 위치 기준 깊이(샘플). 재생 위치(소스 링 머리)의 ts = 다음에 꺼낼 샘플의 ts − 이미
+    /// 꺼냈지만 재생 전인 양(`ahead`). 링에 있는 샘플이 더 오래되었으므로 깊이는 그만큼 크다.
+    pub(super) fn depth_now(&self, now_us: u64) -> f64 {
+        let next_ts = self.fifo_end_ts - (self.fifo.len() / 2) as i64;
+        (Self::now_samples(now_us) - next_ts - self.delay.min_transit()) as f64 + self.depth.ahead()
+    }
+
+    /// 다음 seq의 시작 타임스탬프 기준 깊이(버퍼링 중 판단용). 소스 링에 이전 스트림이 남아 있으면
+    /// 그만큼 늦게 재생되므로 깊이에 더한다.
+    pub(super) fn depth_if_start(&self, now_us: u64) -> Option<f64> {
+        let slot = &self.slots[Self::slot_index(self.next_seq)];
+        if !(slot.valid && slot.seq == self.next_seq) {
+            return None;
+        }
+        Some((Self::now_samples(now_us) - self.ts_ext(slot.ts) - self.delay.min_transit()) as f64 + self.depth.ahead())
+    }
+
+    /// 출력 버스트 종료. `now_us`는 출력 콜백 시각 추정치(장치 클럭 기준).
+    /// `wall_us`는 워커가 실제로 깨어난 벽시계 시각이다. 이것으로 잰 깊이는 기상 지연만큼 크게 나오므로,
+    /// 1초 창의 최솟값이 장치 클럭 추정과 **독립적인** 실제 재생 지연이 된다(PR #5 H-1: 클럭 추정이
+    /// 틀려 지연이 몰래 늘어나는 경우를 통계로 드러낸다).
+    ///
+    /// `ahead`: 이미 꺼냈지만 아직 재생되지 않은 샘플 수(48k 환산). 콜백 구동 믹스에서는 소스 링과
+    /// 출력 리샘플러에 있는 양이다. 깊이는 실제 재생 위치를 기준으로 재므로 이것을 뺀다. 그래서
+    /// `bufferMs`는 소스 링까지 포함한 수신측 버퍼 지연이다.
+    pub fn end_burst(&mut self, now_us: u64, wall_us: u64, ahead: f64) {
+        self.depth.set_ahead(ahead);
+        match self.state {
+            State::Buffering => self.try_start(now_us),
+            State::Playing => {
+                if self.depth.expire_start_pad(now_us) {
+                    self.after_target_change();
+                }
+                let dw = self.depth_now(wall_us);
+                self.depth.note_wall(dw, wall_us);
+                let d = self.depth_now(now_us);
+                let e = self.depth.measure(d);
+                self.update_correction(e);
+            }
+        }
+    }
+
+    fn update_correction(&mut self, ewma: f64) {
+        let f = self.frame() as f64;
+        let target = self.target_samples();
+        let err = ewma - target;
+        let bands = self.deadbands();
+        let queued_excess = self.queued_samples() - target;
+        self.depth.update(err, bands, f, queued_excess);
+    }
+
+    /// 샘플 단위 보정(H1): 방금 생산한 프레임(`Concealer`의 출력)을 보정 모드에 따라 리샘플한다.
+    /// 반환: (출력 프레임 수, `DepthCtl::shifted`를 쓸지).
     pub(super) fn correct_rate(&mut self, frames: usize, ch: usize) -> (usize, bool) {
         let win = self.rate_window();
-        self.corr_ring.push(self.correction != Correction::Idle, win);
-        // 샘플 단위 보정
-        let mut out_frames = frames;
-        let mut use_shift = false;
-        {
-            // 비율 상한 리샘플러(H1): 버림 1 + r, 삽입 1 − r. 보정이 끝나면 위상이 정수가 될 때까지 같은 방향으로 이어 간다.
-            let rstep = match self.correction {
-                Correction::Drop => 1.0 + MAX_CORR_RATE,
-                Correction::Insert => 1.0 - MAX_CORR_RATE,
-                Correction::Idle => {
-                    let fr = self.shifter.pos - self.shifter.pos.round();
-                    // 정수 위상(−1 또는 0)이면 보간 없이 원 샘플을 그대로 낸다(−1은 1샘플 지연된 무손실 상태).
-                    if fr.abs() < PHASE_SNAP || self.shifter.settle > 64 {
-                        self.shifter.pos = self.shifter.pos.round();
-                        self.shifter.settle = 0;
-                        1.0
-                    } else {
-                        self.shifter.settle += 1;
-                        self.shifter.last_step
-                    }
-                }
-            };
-            if rstep != 1.0 || !self.shifter.idle() {
-                if self.correction != Correction::Idle {
-                    self.shifter.settle = 0;
-                }
-                out_frames = self.shifter.process(&self.dec_buf[..frames * ch], ch, frames, &mut self.shift_buf, rstep);
-                use_shift = true;
-                let d = frames as f64 - out_frames as f64;
-                if d > 0.0 {
-                    self.stats.samples_dropped += d as u64;
-                } else {
-                    self.stats.samples_inserted += (-d) as u64;
-                }
-                if let Some(e) = self.depth_ewma.as_mut() {
-                    *e -= d;
-                }
-                let cents = (1200.0 * rstep.log2()).abs() as f32;
-                self.max_corr_cents = self.max_corr_cents.max(cents);
+        let (out_frames, use_shift, d) = self.depth.correct_rate(self.conceal.frame_out(frames * ch), frames, ch, win);
+        if use_shift {
+            if d > 0.0 {
+                self.stats.samples_dropped += d as u64;
             } else {
-                for c in 0..ch {
-                    self.shifter.prev[c] = self.dec_buf[(frames - 1) * ch + c];
-                }
+                self.stats.samples_inserted += (-d) as u64;
             }
         }
         (out_frames, use_shift)
@@ -244,7 +451,7 @@ impl JitterBuffer {
 
     /// 깊이 오차(샘플, 깊이 EWMA − 목표). 재생 중이 아니면 0.
     pub fn depth_error(&self) -> f64 {
-        match (self.state, self.depth_ewma) {
+        match (self.state, self.depth.ewma()) {
             (State::Playing, Some(e)) => e - self.target_samples(),
             _ => 0.0,
         }

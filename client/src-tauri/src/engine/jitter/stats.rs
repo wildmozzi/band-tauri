@@ -1,6 +1,6 @@
 //! 지터 버퍼 통계: 누적 카운터·비율 창과 표시용 스냅샷.
 
-use super::{JitterBuffer, State};
+use super::{samples_per_ms, JitterBuffer, State};
 
 /// 최근 N개 bool 중 true 비율(손실·은닉 창).
 pub(super) struct RateRing {
@@ -27,6 +27,13 @@ impl RateRing {
         (self.pos, self.len, self.hits) = (0, 0, 0);
     }
 
+    /// 재시작(`Buffers` 회수): `r`을 꺼내 `reset`한 것을 돌려주고 자리에는 빈 링(`new(0)`, 할당 없음)을 둔다.
+    pub(super) fn take_reset(r: &mut RateRing) -> RateRing {
+        let mut r = std::mem::replace(r, RateRing::new(0));
+        r.reset();
+        r
+    }
+
     pub(super) fn push(&mut self, v: bool, win: usize) {
         let cap = self.ring.len();
         let win = win.clamp(1, cap);
@@ -45,7 +52,7 @@ impl RateRing {
         }
     }
 
-    fn pct(&self) -> f32 {
+    pub(super) fn pct(&self) -> f32 {
         if self.len == 0 {
             0.0
         } else {
@@ -109,23 +116,23 @@ impl JitterStats {
 
 impl JitterBuffer {
     pub fn stats(&self) -> JitterStats {
-        let spm = Self::samples_per_ms() as f32;
+        let spm = samples_per_ms() as f32;
         let mut s = self.stats;
         s.buffer_ms = if self.state == State::Playing {
-            self.depth_ewma.unwrap_or(0.0) as f32 / spm
+            self.depth.ewma().unwrap_or(0.0) as f32 / spm
         } else {
             0.0
         };
         s.target_ms = self.target_samples() as f32 / spm;
-        let wall = self.wall_cur_min.min(self.wall_prev_min);
+        let wall = self.depth.wall_min();
         s.wall_buffer_ms = if self.state == State::Playing && wall.is_finite() { wall as f32 / spm } else { 0.0 };
         s.jitter_ms = self.delay.rfc_jitter() as f32 / spm;
-        s.loss_pct = self.loss.pct();
-        s.conceal_pct = self.conceal.pct();
+        s.loss_pct = self.conceal.loss_pct();
+        s.conceal_pct = self.conceal.conceal_pct();
         s.lead_ms = self.target.consumer_lead() as f32 / spm;
         s.jitter_est_ms = self.jitter_est() as f32 / spm;
-        s.corr_time_pct = self.corr_ring.pct();
-        s.max_corr_cents = self.max_corr_cents;
+        s.corr_time_pct = self.depth.corr_pct();
+        s.max_corr_cents = self.depth.max_corr_cents();
         s.tail_ms = self.late.tail_extra() as f32 / spm;
         s.min_transit = self.delay.min_transit();
         s

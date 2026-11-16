@@ -1,14 +1,14 @@
-//! 재생: 시작, 패킷 생산(디코드·FEC/PLC·PCM 페이드), 패킷 버림, 언더런 정산.
+//! 재생: 시작, 패킷 생산(슬롯 → 디코드·FEC/PLC·PCM 페이드 → 보정 → FIFO), 패킷 버림, 언더런 정산.
+//!
+//! 디코드·은닉 상태는 `Concealer`(`conceal.rs`), 깊이·보정 상태는 `DepthCtl`(`correction.rs`)에 있다. 여기의
+//! `impl JitterBuffer`는 슬롯·seq·FIFO와 두 묶음을 잇는 조립이다(엔진 ⑧(b)).
 
-use super::{seq_diff, Correction, JitterBuffer, State, SLOT_COUNT};
-use crate::engine::codec::Decoder;
+use super::{samples_per_ms, seq_diff, JitterBuffer, State, SLOT_COUNT};
 
 /// 언더런 은닉이 이 시간(ms) 이상 지속되면 재버퍼링.
 const STARVE_RESET_MS: f64 = 200.0;
 /// 재생 시작 직후 목표에 min(1프레임, 2.5ms)을 더해 두는 시간(µs).
 const START_PAD_US: u64 = 1_000_000;
-/// 패킷 단위 버림 시 크로스페이드 길이(샘플).
-const DROP_XFADE: usize = 48;
 
 impl JitterBuffer {
     /// 은닉 없이(실제 받은 데이터로만) 지금 꺼낼 수 있는 프레임 수(최소 보장치). 콜백 구동 믹스에서 워커는
@@ -21,7 +21,7 @@ impl JitterBuffer {
         let fifo = self.fifo.len() / 2;
         // 다음 패킷이 있으면 패킷 하나(보정으로 최대 2샘플 줄어듦)를 더 꺼낼 수 있다. 패킷 단위 버림이
         // 걸려 있으면 그다음 패킷까지 있어야 은닉이 끼지 않는다.
-        if self.slot_has(self.next_seq) && (self.drop_frames_pending == 0 || self.slot_has(self.next_seq.wrapping_add(1))) {
+        if self.slot_has(self.next_seq) && (!self.depth.drop_pending() || self.slot_has(self.next_seq.wrapping_add(1))) {
             fifo + self.slots[Self::slot_index(self.next_seq)].frame.saturating_sub(2)
         } else {
             fifo
@@ -50,8 +50,7 @@ impl JitterBuffer {
     /// 버퍼링 → 재생 전환. 시작 깊이를 목표에 정확히 맞춘다(초과분은 건너뜀).
     pub(super) fn try_start(&mut self, now_us: u64) {
         self.skip_missing_head();
-        self.start_pad = (self.frame() as f64).min(2.5 * Self::samples_per_ms());
-        self.start_pad_until_us = now_us + START_PAD_US;
+        self.depth.begin_start_pad((self.frame() as f64).min(2.5 * samples_per_ms()), now_us + START_PAD_US);
         self.late.skip_start();
         let target = self.target_samples();
         let Some(depth) = self.depth_if_start(now_us) else {
@@ -73,18 +72,15 @@ impl JitterBuffer {
         self.fifo_end_ts = self.ts_ext(slot.ts);
         self.fifo.clear();
         self.state = State::Playing;
-        self.correction = Correction::Idle;
-        self.drop_frames_pending = 0;
-        self.trimming = false;
-        self.conceal_run = 0;
-        self.starve_samples = 0;
-        self.underrun_debt = 0;
+        self.depth.reset_mode();
+        self.conceal.reset_run();
         // 첫 패킷의 앞부분을 잘라 깊이 = 목표
         if self.produce_packet() {
             let cut = (excess.round().max(0.0) as usize).min(self.fifo.len() / 2);
             self.fifo.drain(..cut * 2);
         }
-        self.depth_ewma = Some(self.depth_now(now_us));
+        let d = self.depth_now(now_us);
+        self.depth.set_ewma(d);
     }
 
     /// 버퍼링 중 시작 seq가 없고 뒤 패킷이 있으면 처음 존재하는 seq로 시작점을 옮긴다.
@@ -107,7 +103,7 @@ impl JitterBuffer {
 
     /// 5초 창 크기(패킷).
     pub(super) fn rate_window(&self) -> usize {
-        (5000.0 * Self::samples_per_ms()) as usize / self.frame()
+        (5000.0 * samples_per_ms()) as usize / self.frame()
     }
 
     fn push_loss(&mut self, lost: bool) {
@@ -115,17 +111,7 @@ impl JitterBuffer {
             self.late.note_lost();
         }
         let win = self.rate_window();
-        self.loss.push(lost, win);
-    }
-
-    fn ensure_decoder(&mut self, opus: bool, ch: usize) {
-        if !self.decoder.as_ref().is_some_and(|d| d.matches(opus, ch)) {
-            // 처음·재시작 뒤·코덱 변경: 풀과 주고받는다(새로 만든 것과 같은 상태, 워커에서 할당·해제 없음 — 엔진 ③c).
-            if let Some(old) = self.decoder.take() {
-                self.decoders.give(old);
-            }
-            self.decoder = self.decoders.take(opus, ch);
-        }
+        self.conceal.push_loss(lost, win);
     }
 
     /// 패킷 단위 버림: 디코더 상태 유지를 위해 디코드하고, 다음 프레임과 크로스페이드할
@@ -139,28 +125,16 @@ impl JitterBuffer {
                 (s.flags & 1 != 0, s.flags & 2 != 0, s.len, s.frame)
             };
             let ch = if stereo { 2 } else { 1 };
-            self.ensure_decoder(opus, ch);
-            let n = pframe * ch;
-            let ok = match self.decoder.as_mut() {
-                Some(d) => d.decode(&self.slots[idx].data[..len], &mut self.xfade_buf[..n]).unwrap_or(0) == pframe,
-                None => false,
-            };
-            if ok {
-                self.xfade_len = DROP_XFADE.min(pframe);
-                self.xfade_ch = ch;
-            }
+            self.conceal.decode_dropped(&self.slots[idx].data[..len], opus, ch, pframe);
             self.slots[idx].valid = false;
             // 늦게 온 패킷을 버리면(H1 또는 trimming) 앞서 낸 언더런 은닉이 그 자리를 메운 것이다.
-            if self.underrun_debt > 0 {
-                self.underrun_debt -= 1;
+            if self.conceal.pay_one() {
                 self.note_late();
             }
         }
         self.next_seq = seq.wrapping_add(1);
         let f = self.frame() as f64;
-        if let Some(e) = self.depth_ewma.as_mut() {
-            *e -= f;
-        }
+        self.depth.sub_ewma(f);
     }
 
     /// 이중 은닉 제거(P1-6a): 언더런 은닉(seq k 유지)을 낸 뒤 k 없이 뒤 패킷이 도착해 k가 손실로 판정되면, 그
@@ -170,11 +144,11 @@ impl JitterBuffer {
     /// `insert`에서 `late`로 세고 지연 통계에는 그대로 반영된다.
     fn settle_underrun_debt(&mut self) {
         while self.state == State::Playing
-            && self.underrun_debt > 0
+            && self.conceal.has_debt()
             && !self.slot_has(self.next_seq)
             && self.has_later_packet()
         {
-            self.underrun_debt -= 1;
+            self.conceal.pay_one();
             self.next_seq = self.next_seq.wrapping_add(1);
             self.stats.concealed_loss += 1;
             self.push_loss(true);
@@ -192,18 +166,16 @@ impl JitterBuffer {
             let f = self.frame() as f64;
             let back = (self.fifo_end_ts - self.ts_ext(self.slots[Self::slot_index(self.next_seq)].ts)) as f64;
             if back >= f / 2.0 {
-                let err = self.depth_ewma.map(|e| e + back - self.target_samples()).unwrap_or(0.0);
+                let err = self.depth.ewma().map(|e| e + back - self.target_samples()).unwrap_or(0.0);
                 if err >= f / 2.0 {
-                    if let Some(e) = self.depth_ewma.as_mut() {
-                        *e += back; // drop_one_packet이 F를 뺀다: 순증 back − F ≈ 0
-                    }
+                    self.depth.add_ewma(back); // drop_one_packet이 F를 뺀다: 순증 back − F ≈ 0
                     self.drop_one_packet();
                     self.stats.late_dropped += 1;
                 }
             }
         }
-        if self.drop_frames_pending > 0 && self.has_later_packet() && self.slot_has(self.next_seq) {
-            self.drop_frames_pending -= 1;
+        if self.depth.drop_pending() && self.has_later_packet() && self.slot_has(self.next_seq) {
+            self.depth.take_drop();
             self.drop_one_packet();
             self.stats.dropped_frames += 1;
         }
@@ -223,105 +195,53 @@ impl JitterBuffer {
                 (s.flags & 1 != 0, s.flags & 2 != 0, s.len, s.frame, s.ts)
             };
             ch = if stereo { 2 } else { 1 };
-            self.ensure_decoder(opus, ch);
-            let out = &mut self.dec_buf[..pframe * ch];
-            let decoded = match self.decoder.as_mut() {
-                Some(d) => d.decode(&self.slots[idx].data[..len], out).unwrap_or(0),
-                None => 0,
-            };
-            if decoded != pframe {
-                out.fill(0.0);
-            }
-            // 패킷 버림 직후: 버린 프레임 앞부분 → 새 프레임으로 크로스페이드
-            if self.xfade_len > 0 && self.xfade_ch == ch {
-                let l = self.xfade_len;
-                for i in 0..l {
-                    let w = (i + 1) as f32 / (l + 1) as f32;
-                    for c in 0..ch {
-                        let k = i * ch + c;
-                        out[k] = self.xfade_buf[k] * (1.0 - w) + out[k] * w;
-                    }
-                }
-            }
-            self.xfade_len = 0;
+            // 디코드(실패면 무음) + 버림 직후 크로스페이드 + 직전 프레임 갱신
+            self.conceal.decode_packet(&self.slots[idx].data[..len], opus, ch, pframe);
             frames = pframe;
             self.slots[idx].valid = false;
             self.next_seq = seq.wrapping_add(1);
             self.fifo_end_ts = self.ts_ext(ts) + pframe as i64;
-            self.last_frame[..frames * ch].copy_from_slice(&self.dec_buf[..frames * ch]);
-            self.last_frame_valid = true;
-            self.pkt_channels = ch;
-            self.conceal_run = 0;
-            self.starve_samples = 0;
             // 늦게 온 패킷을 재생하면 타임라인이 되감기고(깊이 +debt·F) 그 몫은 샘플 보정이 되돌린다.
-            if self.underrun_debt > 0 {
-                self.underrun_debt = 0;
+            if self.conceal.clear_debt() {
                 self.note_late();
             }
             self.push_loss(false);
             let win = self.rate_window();
-            self.conceal.push(false, win);
+            self.conceal.push_conceal(false, win);
         } else {
             let lost = self.has_later_packet();
-            if !lost {
-                // 언더런: seq 전진 없이 은닉 프레임 삽입
-                self.starve_samples += f;
-                if self.starve_samples as f64 > STARVE_RESET_MS * Self::samples_per_ms() {
-                    self.stats.rebuffers += 1;
-                    let keep_next = self.next_seq;
-                    self.reset_stream();
-                    self.has_stream = true;
-                    self.next_seq = keep_next;
-                    self.highest = keep_next.wrapping_sub(1);
-                    return false;
-                }
+            // 언더런: seq 전진 없이 은닉 프레임 삽입
+            if !lost && self.conceal.starve(f, STARVE_RESET_MS * samples_per_ms()) {
+                self.stats.rebuffers += 1;
+                let keep_next = self.next_seq;
+                self.reset_stream();
+                self.has_stream = true;
+                self.next_seq = keep_next;
+                self.highest = keep_next.wrapping_sub(1);
+                return false;
             }
-            ch = self.pkt_channels;
             frames = f;
-            let out = &mut self.dec_buf[..frames * ch];
-            let mut ok = false;
-            if let Some(dec) = self.decoder.as_mut() {
-                if matches!(dec, Decoder::Opus { .. }) {
-                    let next = seq.wrapping_add(1);
-                    let ns = &self.slots[Self::slot_index(next)];
-                    let r = if lost && ns.valid && ns.seq == next {
-                        dec.decode_fec(&ns.data[..ns.len], out)
-                    } else {
-                        dec.decode_plc(out)
-                    };
-                    ok = r.map(|n| n == frames).unwrap_or(false);
-                }
-            }
-            if !ok {
-                // PCM(또는 디코더 없음): 직전 프레임 페이드아웃 1회, 이후 무음
-                if self.conceal_run == 0 && self.last_frame_valid {
-                    let lf = &self.last_frame[..frames * ch];
-                    for (i, (o, s)) in out.iter_mut().zip(lf).enumerate() {
-                        let g = 1.0 - (i / ch) as f32 / frames as f32;
-                        *o = s * g;
-                    }
-                } else {
-                    out.fill(0.0);
-                }
-            }
-            self.xfade_len = 0;
-            self.conceal_run += 1;
+            // Opus 손실 은닉은 다음 패킷이 있으면 그 FEC로
+            let next = seq.wrapping_add(1);
+            let ns = &self.slots[Self::slot_index(next)];
+            let fec = (lost && ns.valid && ns.seq == next).then(|| &ns.data[..ns.len]);
+            ch = self.conceal.conceal_frame(frames, fec);
             self.stats.concealed += 1;
             let win = self.rate_window();
-            self.conceal.push(true, win);
+            self.conceal.push_conceal(true, win);
             if lost {
                 self.stats.concealed_loss += 1;
                 self.next_seq = seq.wrapping_add(1);
                 self.push_loss(true);
             } else {
-                self.underrun_debt += 1;
+                self.conceal.add_debt();
             }
             self.fifo_end_ts += frames as i64;
         }
         self.stats.produced += 1;
 
         let (out_frames, use_shift) = self.correct_rate(frames, ch);
-        let src: &[f32] = if use_shift { &self.shift_buf[..out_frames * ch] } else { &self.dec_buf[..out_frames * ch] };
+        let src: &[f32] = if use_shift { self.depth.shifted(out_frames * ch) } else { self.conceal.frame_out(out_frames * ch) };
         // 스테레오로 FIFO에 적재. fifo_end_ts는 원래 프레임 끝 그대로 두므로 1샘플 버리면
         // 재생 위치가 1 앞당겨진다(깊이 -1).
         if ch == 2 {

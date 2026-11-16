@@ -6,8 +6,9 @@
 //! - `delay.rs`: 지연 통계(`DelayStats`: transit 창, 최소 transit·분위수, RFC 지터)
 //! - `target.rs`: 목표 깊이 추정(`TargetEst`: 짧은 창·버스트·긴 창, 경로 변경)과 목표 합성
 //! - `late_budget.rs`: 늦은 패킷 예산(`LateBudget`: `tail_extra`)
-//! - `playout.rs`: 재생 시작, 패킷 생산(디코드·FEC/PLC·PCM 페이드), 버림, 언더런 정산
-//! - `correction.rs`: 깊이 측정(`end_burst`)·데드밴드 보정·비율 리샘플러, 샘플 시프트 유틸
+//! - `playout.rs`: 재생 시작, 패킷 생산(슬롯 → 디코드/은닉 → 보정 → FIFO), 버림, 언더런 정산
+//! - `conceal.rs`: 디코드·은닉(`Concealer`: 디코더 풀, FEC/PLC·PCM 페이드, 버림 크로스페이드, 언더런 빚, 손실·은닉 창)
+//! - `correction.rs`: 깊이 측정(`end_burst`)·데드밴드 보정(`DepthCtl`)·비율 리샘플러, 샘플 시프트 유틸
 //! - `stats.rs`: `JitterStats`, 비율 창, 통계 스냅샷
 //! - `tests.rs`: 결정적 단위 시뮬레이션
 //!
@@ -61,6 +62,7 @@
 //!   패킷을 그대로 재생하므로 깊이가 늘어난다. 200ms 이상 지속되면 재버퍼링.
 //! - 이미 재생 지난 seq는 폐기하고 `late` 증가.
 
+mod conceal;
 mod correction;
 mod delay;
 mod late_budget;
@@ -73,7 +75,6 @@ mod tuning;
 
 use std::collections::VecDeque;
 
-use super::codec::Decoder;
 use super::config::{frame_samples_from_code, INTERNAL_RATE, MAX_PAYLOAD_BYTES};
 use crate::net::packet::Header;
 
@@ -81,10 +82,10 @@ pub use correction::{correction_catch_up_secs, correction_exit_ms, shift_n, shif
 pub use stats::JitterStats;
 pub use tuning::{JitterSettings, JitterTuning};
 
-use correction::RateShifter;
+use conceal::{ConcealBufs, Concealer};
+use correction::{DepthBufs, DepthCtl};
 use delay::DelayStats;
 use late_budget::LateBudget;
-use stats::RateRing;
 use target::TargetEst;
 
 /// 슬롯 링 크기: 2의 거듭제곱(u32 seq 랩에서도 슬롯 충돌 없음, 리뷰 L1). 2.5ms 기준 2.56초.
@@ -123,13 +124,6 @@ enum State {
     Playing,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Correction {
-    Idle,
-    Drop,
-    Insert,
-}
-
 pub struct JitterBuffer {
     settings: JitterSettings,
     slots: Vec<Slot>,
@@ -138,10 +132,6 @@ pub struct JitterBuffer {
     has_stream: bool,
     highest: u32,
 
-    decoder: Option<Decoder>,
-    /// 쓰지 않는 Opus 디코더(모노·스테레오). 만들 때(제어 평면) 미리 할당해 두고, 재시작·코덱 변경 때 `decoder`와 주고받는다 —
-    /// 워커에서 디코더를 만들거나 버리지 않는다(엔진 ③c, #124 리뷰 M-2).
-    decoders: DecoderPool,
     /// 디코드된 스테레오 인터리브 샘플 FIFO.
     fifo: VecDeque<f32>,
     /// FIFO 끝 샘플 다음 위치의 타임스탬프(확장).
@@ -160,117 +150,34 @@ pub struct JitterBuffer {
     target: TargetEst,
     /// 늦은 패킷 예산(도착 쪽, `late_budget.rs`).
     late: LateBudget,
-    /// 목표가 내려가거나 소비자 요구가 바뀐 뒤 해제 문턱까지 보정 중(데드밴드 무시). `TargetEst`가 사건(`note_target`·
-    /// `set_consumer_lead`의 반환값)을 알리고 보정(`correction.rs`)이 읽고 끈다 — 보정 상태라 ⑧(b)에서 `DepthCtl`로 간다.
-    chase: bool,
-
-    depth_ewma: Option<f64>,
-    /// 이미 꺼냈지만 아직 재생되지 않은 샘플 수(48k). 콜백 구동 믹스에서 소스 링·리샘플러에 있는 양.
-    /// 깊이는 실제 재생 위치(소스 링의 머리)를 기준으로 잰다.
-    ahead: f64,
-    correction: Correction,
-    drop_frames_pending: usize,
-    trimming: bool,
-    shifter: RateShifter,
-    /// 보정 모드였던 패킷 비율 창(H1 통계).
-    corr_ring: RateRing,
-    max_corr_cents: f32,
-    wall_bucket_start: u64,
-    wall_cur_min: f64,
-    wall_prev_min: f64,
+    /// 깊이 측정·보정(재생 쪽, `correction.rs`). `chase`·재생 시작 여유도 여기 있다.
+    depth: DepthCtl,
+    /// 디코드·은닉(재생 쪽, `conceal.rs`).
+    conceal: Concealer,
+    /// 마지막으로 받은 패킷의 프레임(샘플).
     pkt_frame: usize,
-    pkt_channels: usize,
-
-    // 은닉
-    last_frame: Vec<f32>,
-    last_frame_valid: bool,
-    conceal_run: usize,
-    starve_samples: usize,
-    /// 아직 seq와 짝지어지지 않은 언더런 은닉 프레임 수(P1-6a). 언더런 은닉은 seq를 유지한 채 재생 타임라인을
-    /// F만큼 소비한다. 그 seq가 결국 손실로 판정되면(뒤 패킷 도착) 이미 낸 언더런 은닉이 그 자리를 메운 것이므로
-    /// 손실 은닉을 또 만들지 않고 seq만 넘긴다(이중 은닉 제거, `settle_underrun_debt`). 실제 패킷을 재생하면 0
-    /// (되감긴 타임라인은 샘플 보정이 되돌린다), 패킷을 버리면(H1 늦은 패킷·trimming) 1 줄어든다.
-    /// 단위는 프레임 수이고 스킵은 seq 단위다: 언더런 중에 송신 프레임 크기가 바뀌면(2.5 ↔ 5ms) 그 차이만큼
-    /// 타임라인이 어긋나며, 이 어긋남은 깊이 보정(샘플 단위)이 흡수한다(드물고 작다, PR #58 L3).
-    underrun_debt: usize,
-
-    // 스크래치
-    dec_buf: Vec<f32>,
-    shift_buf: Vec<f32>,
-    xfade_buf: Vec<f32>,
-    xfade_len: usize,
-    xfade_ch: usize,
-
-    // 손실·은닉 창
-    loss: RateRing,
-    conceal: RateRing,
-    /// 재생 시작 직후 여유(샘플)와 그 끝 시각(µs, 장치 클럭). 출력 콜백 시각 추정(`DeviceClock`)이 이른 콜백을
-    /// 아직 못 본 첫 콜백들에서 소스 링이 모자라지 않게 한다. 끝나면 `chase`로 목표까지 내려간다.
-    start_pad: f64,
-    start_pad_until_us: u64,
 
     stats: JitterStats,
+}
+
+/// 1ms당 샘플 수(48k). 하위 묶음도 쓴다(`JitterBuffer`를 거치지 않게, #142 리뷰 L1).
+fn samples_per_ms() -> f64 {
+    INTERNAL_RATE as f64 / 1000.0
 }
 
 fn seq_diff(a: u32, b: u32) -> i32 {
     a.wrapping_sub(b) as i32
 }
 
-/// Opus 디코더 풀(모노·스테레오 한 개씩, 엔진 ③c #124 리뷰 M-2). PCM 디코더는 힙이 없어 그때그때 만든다.
-/// 꺼낼 때 `OPUS_RESET_STATE`로 새로 만든 것과 같은 상태로 만든다(`codec::tests::opus_reset_equals_fresh_decoder`).
-#[derive(Default)]
-struct DecoderPool {
-    opus: [Option<Decoder>; 2],
-}
-
-impl DecoderPool {
-    fn alloc() -> Self {
-        Self { opus: [Decoder::new(true, 1).ok(), Decoder::new(true, 2).ok()] }
-    }
-
-    fn slot(opus: bool, ch: usize) -> Option<usize> {
-        (opus && (1..=2).contains(&ch)).then(|| ch - 1)
-    }
-
-    /// 이 종류의 디코더(새것과 같은 상태). 풀에 있으면 할당 없음. 초기화가 실패한 것은 버리고 새로 만든다(드묾).
-    fn take(&mut self, opus: bool, ch: usize) -> Option<Decoder> {
-        if let Some(i) = Self::slot(opus, ch) {
-            if let Some(mut d) = self.opus[i].take() {
-                if d.reset() {
-                    return Some(d);
-                }
-            }
-            // 정상 흐름(give 뒤 take)에서는 오지 않는다: 미리 만들기 실패나 reset 실패 뒤 — 워커에서 할당한다(#126 리뷰 L-4).
-            log::warn!("지터 버퍼 디코더 풀이 비어 Opus 디코더를 새로 만든다(ch {ch})");
-        }
-        Decoder::new(opus, ch).ok()
-    }
-
-    /// 다 쓴 디코더를 돌려준다(Opus는 자리가 비었으면 보관, PCM은 힙이 없어 그냥 놓는다).
-    fn give(&mut self, d: Decoder) {
-        if let Some(i) = Self::slot(d.is_opus(), d.channels()) {
-            if self.opus[i].is_none() {
-                self.opus[i] = Some(d);
-            }
-        }
-    }
-}
-
 /// 지터 버퍼의 힙 버퍼 묶음. `new`는 새로 할당하고, `restart`는 지금 것을 꺼내 처음 상태로 되돌려 다시 쓴다
 /// (엔진 ③c: 재시작은 워커에서 적용되므로 할당·해제가 없어야 한다). 필드 초기값은 `from_buffers` 한 곳에만 있다.
 struct Buffers {
     slots: Vec<Slot>,
-    decoders: DecoderPool,
     fifo: VecDeque<f32>,
     scratch: Vec<i64>,
     block_rel: Vec<i64>,
-    corr_ring: RateRing,
-    last_frame: Vec<f32>,
-    dec_buf: Vec<f32>,
-    shift_buf: Vec<f32>,
-    xfade_buf: Vec<f32>,
-    loss: RateRing,
-    conceal: RateRing,
+    depth: DepthBufs,
+    conceal: ConcealBufs,
 }
 
 impl Buffers {
@@ -279,60 +186,31 @@ impl Buffers {
             slots: (0..SLOT_COUNT)
                 .map(|_| Slot { seq: 0, valid: false, len: 0, flags: 0, frame: 0, ts: 0, data: vec![0u8; MAX_PAYLOAD_BYTES].into_boxed_slice() })
                 .collect(),
-            decoders: DecoderPool::alloc(),
             fifo: VecDeque::with_capacity(MAX_PKT_FRAME * 16 * 2),
             scratch: Vec::with_capacity(DELAY_WINDOW),
             block_rel: Vec::with_capacity(BLOCK_SAMPLES_MAX),
-            corr_ring: RateRing::new(LOSS_WINDOW_MAX),
-            last_frame: vec![0.0; MAX_PKT_FRAME * 2],
-            dec_buf: vec![0.0; MAX_PKT_FRAME * 2],
-            shift_buf: vec![0.0; (MAX_PKT_FRAME + 4) * 2],
-            xfade_buf: vec![0.0; MAX_PKT_FRAME * 2],
-            loss: RateRing::new(LOSS_WINDOW_MAX),
-            conceal: RateRing::new(LOSS_WINDOW_MAX),
+            depth: DepthBufs::alloc(),
+            conceal: ConcealBufs::alloc(),
         }
     }
 
     /// `jb`의 버퍼를 꺼내 `alloc()`과 같은 내용으로 되돌린다(할당·해제 없음 — 빈 `Vec`/`RateRing`은 할당하지 않는다).
     /// 슬롯 `data`는 지우지 않는다: 읽는 곳은 모두 쓴 길이 `[..len]`까지이고(`insert`가 먼저 쓴다) `len`·`valid`를 0으로 돌린다.
-    /// 디코더는 풀로 돌려준다(꺼낼 때 상태를 초기화한다 — 새로 만든 것과 같다). 재시작 직후 `decoder`는
-    /// `new`처럼 비어 있으므로 첫 디코드 전까지의 동작(디코더 PLC 없음)이 새 버퍼와 같다.
+    /// 하위 묶음의 버퍼는 각 묶음의 `take_*`/`reclaim`이 되돌린다(디코더는 풀로 — `Concealer::reclaim`).
     fn reclaim(jb: &mut JitterBuffer) -> Self {
         let mut slots = std::mem::take(&mut jb.slots);
         for s in &mut slots {
             (s.seq, s.valid, s.len, s.flags, s.frame, s.ts) = (0, false, 0, 0, 0, 0);
         }
-        let mut decoders = std::mem::take(&mut jb.decoders);
-        if let Some(d) = jb.decoder.take() {
-            decoders.give(d);
-        }
         let mut fifo = std::mem::take(&mut jb.fifo);
         fifo.clear();
-        let scratch = jb.delay.take_scratch();
-        let block_rel = jb.target.take_block_rel();
-        let zeroed = |v: &mut Vec<f32>| {
-            let mut v = std::mem::take(v);
-            v.fill(0.0);
-            v
-        };
-        let reset = |r: &mut RateRing| {
-            let mut r = std::mem::replace(r, RateRing::new(0));
-            r.reset();
-            r
-        };
         Self {
             slots,
-            decoders,
             fifo,
-            scratch,
-            block_rel,
-            corr_ring: reset(&mut jb.corr_ring),
-            last_frame: zeroed(&mut jb.last_frame),
-            dec_buf: zeroed(&mut jb.dec_buf),
-            shift_buf: zeroed(&mut jb.shift_buf),
-            xfade_buf: zeroed(&mut jb.xfade_buf),
-            loss: reset(&mut jb.loss),
-            conceal: reset(&mut jb.conceal),
+            scratch: jb.delay.take_scratch(),
+            block_rel: jb.target.take_block_rel(),
+            depth: jb.depth.reclaim(),
+            conceal: jb.conceal.reclaim(),
         }
     }
 }
@@ -350,8 +228,6 @@ impl JitterBuffer {
             next_seq: 0,
             has_stream: false,
             highest: 0,
-            decoder: None,
-            decoders: b.decoders,
             fifo: b.fifo,
             fifo_end_ts: 0,
             have_ts: false,
@@ -361,40 +237,11 @@ impl JitterBuffer {
             tuning: JitterTuning::from_profile(settings.profile),
             target: TargetEst::new(b.block_rel),
             late: LateBudget::new(),
-            chase: false,
-            depth_ewma: None,
-            ahead: 0.0,
-            correction: Correction::Idle,
-            drop_frames_pending: 0,
-            trimming: false,
-            shifter: RateShifter::default(),
-            corr_ring: b.corr_ring,
-            max_corr_cents: 0.0,
-            wall_bucket_start: 0,
-            wall_cur_min: f64::INFINITY,
-            wall_prev_min: f64::INFINITY,
+            depth: DepthCtl::new(b.depth),
+            conceal: Concealer::new(b.conceal),
             pkt_frame: 240,
-            pkt_channels: 1,
-            last_frame: b.last_frame,
-            last_frame_valid: false,
-            conceal_run: 0,
-            starve_samples: 0,
-            underrun_debt: 0,
-            dec_buf: b.dec_buf,
-            shift_buf: b.shift_buf,
-            xfade_buf: b.xfade_buf,
-            xfade_len: 0,
-            xfade_ch: 0,
-            loss: b.loss,
-            conceal: b.conceal,
-            start_pad: 0.0,
-            start_pad_until_us: 0,
             stats: JitterStats::default(),
         }
-    }
-
-    fn samples_per_ms() -> f64 {
-        INTERNAL_RATE as f64 / 1000.0
     }
 
     fn now_samples(now_us: u64) -> i64 {
@@ -437,24 +284,14 @@ impl JitterBuffer {
     }
 
     fn reset_stream(&mut self) {
-        self.shifter.reset();
+        self.depth.reset_stream();
         for s in &mut self.slots {
             s.valid = false;
         }
-        self.wall_cur_min = f64::INFINITY;
-        self.wall_prev_min = f64::INFINITY;
         self.state = State::Buffering;
         self.has_stream = false;
         self.fifo.clear();
-        self.depth_ewma = None;
-        self.correction = Correction::Idle;
-        self.drop_frames_pending = 0;
-        self.trimming = false;
-        self.conceal_run = 0;
-        self.starve_samples = 0;
-        self.underrun_debt = 0;
-        self.last_frame_valid = false;
-        self.xfade_len = 0;
+        self.conceal.reset_stream();
         self.reset_tail(true);
     }
 

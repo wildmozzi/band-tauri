@@ -1,3 +1,4 @@
+use super::correction::RateShifter;
 use super::*;
 use super::late_budget::{LATE_BUDGET_LOSSY_MAX, LATE_SKIP_BLOCKS};
 use crate::engine::codec::Encoder;
@@ -441,7 +442,7 @@ fn debt_case(codec: CodecKind, seq0: u32, arrive: &dyn Fn(usize) -> Option<usize
         dropped_frames: s.dropped_frames - s0.dropped_frames,
         samples_dropped: s.samples_dropped - s0.samples_dropped,
         rebuffers: s.rebuffers - s0.rebuffers,
-        debt: jb.underrun_debt,
+        debt: jb.conceal.debt(),
         depth_change: jb.depth_error() - d0,
     }
 }
@@ -503,8 +504,8 @@ fn underrun_debt_edge_cases() {
                 _ => Some(i),
             }, &mut |tick, jb| {
                 if tick == k + 3 {
-                    assert_eq!(jb.underrun_debt, 2);
-                    jb.drop_frames_pending = 1;
+                    assert_eq!(jb.conceal.debt(), 2);
+                    jb.depth.force_drop();
                 }
             });
             assert_eq!((r.concealed, r.loss, r.dropped_frames, r.debt), (2, 1, 1, 0), "trimming 뒤 debt {ctx}: {r:?}");
@@ -997,8 +998,8 @@ fn restart_matches_fresh_buffer() {
             dirty.restart();
             assert!(dirty.slots.iter().all(|s| !s.valid && s.len == 0 && s.seq == 0 && s.flags == 0 && s.frame == 0 && s.ts == 0));
             assert!(dirty.fifo.is_empty() && dirty.delay.scratch_is_empty() && dirty.target.block_len() == 0);
-            assert!(dirty.loss.is_fresh() && dirty.conceal.is_fresh() && dirty.corr_ring.is_fresh());
-            assert!(dirty.decoder.is_none(), "재시작 직후 디코더는 new처럼 비어 있다");
+            assert!(dirty.conceal.is_fresh() && dirty.depth.is_fresh());
+            assert!(!dirty.conceal.has_decoder(), "재시작 직후 디코더는 new처럼 비어 있다");
             let mut fresh = JitterBuffer::new(settings);
             let mut tx2 = Sender::new(codec, 240, seq0, 123_456);
             let (mut o1, mut o2) = (vec![0f32; 480], vec![0f32; 480]);
@@ -1071,4 +1072,120 @@ fn decoder_pool_switches_codecs_like_fresh() {
         }
         assert!(jb.is_playing(), "{codec:?} ch {ch}");
     }
+}
+
+/// 결정적 trace fixture(엔진 ⑧(b) 준비, #142 리뷰 L3): 5분 하네스·churn fixture가 덮지 않는 분기 — 경로 단계 하강(지연
+/// 통계 리셋·유예), `set_profile`(작은·큰 변화), `set_consumer_lead`, `restart`, 버스트, 몰려 온 백로그(패킷 버림·trimming),
+/// 단절(언더런·재버퍼), 프레임 크기·코덱 변경(디코더 풀), 드리프트(샘플 보정) — 을 한 입력 열로 돌려 출력 열의 해시를
+/// `tests/fixtures/jitter-trace.sha256`과 비교한다. 구조 정리 PR은 이 값을 바꾸지 않는다(5분 fixture와 같은 규칙,
+/// 달라지면 버그). 의도한 동작 변경만 `SIM_UPDATE_FIXTURE=1`로 다시 쓰고 PR 본문에 적는다.
+/// - `pcm16`: PCM16만 — 매 버스트의 출력 샘플(비트) + 목표 + 통계 + 재생 여부. PCM16은 기계와 무관하다.
+/// - `opus-control`: Opus ↔ PCM16 전환 — 출력 샘플은 빼고(Opus 부동소수는 CPU에 따라 다를 수 있다) 제어 값만.
+fn trace_hash(opus: bool) -> String {
+    use sha2::{Digest, Sha256};
+    const SECONDS: f64 = 60.0;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    jb.set_consumer_lead(72.0);
+
+    // 송신: 2.5 → 5 → 2.5ms 프레임, +300ppm 드리프트. opus면 코덱을 Opus → PCM16 → Opus로 바꾼다.
+    let codec_at = |s: f64| if opus && !(14.0..27.0).contains(&s) { CodecKind::Opus } else { CodecKind::Pcm16 };
+    let frame_at = |s: f64| if (9.0..21.0).contains(&s) { 240 } else { 120 };
+    let mut tx = Sender::new(codec_at(0.0), frame_at(0.0), u32::MAX - 300, u32::MAX - 40_000);
+    let mut arrivals: Vec<(f64, Header, Vec<u8>)> = Vec::new();
+    let mut t = 0.0;
+    while t < SECONDS * 1e6 {
+        let s = t / 1e6;
+        let (codec, frame) = (codec_at(s), frame_at(s));
+        if (codec == CodecKind::Opus) != tx.opus {
+            tx = Sender::new(codec, frame, tx.seq, tx.ts);
+        }
+        tx.frame = frame;
+        let (h, pk) = tx.next();
+        // 지연: 경로 40ms → 15초에 5ms(단계 하강), 버스트(6~7초 +25ms), 백로그(20.0~20.3초 송신분이 20.3초에 몰려 도착),
+        // 단절(26.0~26.4초 모두 손실), 평시 손실 2%·지터 균등 0~6ms(재정렬 포함), 36초부터 꼬리 긴 지터(지수, 평균 3ms —
+        // 늦은 패킷 예산 `tail_extra` 조정).
+        let base = if s < 15.0 { 40_000.0 } else { 5_000.0 };
+        let spike = if (6.0..7.0).contains(&s) { 25_000.0 } else { 0.0 };
+        let lost = (26.0..26.4).contains(&s) || rng.gen::<f64>() < 0.02;
+        let u = rng.gen::<f64>();
+        let j = if s >= 36.0 { -(1.0 - u).ln() * 3000.0 } else { u * 6000.0 };
+        let at = if (20.0..20.3).contains(&s) { 20.3e6 + base } else { t + base + spike + j };
+        if !lost {
+            arrivals.push((at, h, pk));
+        }
+        t += frame as f64 / 48000.0 * 1e6 / (1.0 + 300e-6);
+    }
+    arrivals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+    // 수신: 5ms 버스트(240프레임)를 64프레임씩 pop, 이미 꺼낸 양·워커 기상 지연을 흉내 낸다.
+    // 제어: 8초 lead 120, 12초 lead 60, 17초 큰 프로필 변경(1.0), 23초 작은 변화(0.9), 25초 0.0, 30초 restart(워커처럼 lead 다시 알림),
+    // 33초 0.5.
+    let mut h = Sha256::new();
+    let mut out = vec![0f32; 128];
+    let mut ai = 0;
+    let mut tick = 0u64;
+    let mut events: Vec<(f64, u8)> = vec![(8.0, 0), (12.0, 1), (17.0, 2), (23.0, 3), (25.0, 4), (30.0, 5), (33.0, 6)];
+    events.reverse();
+    loop {
+        let bt = tick as f64 * 5000.0;
+        if bt >= SECONDS * 1e6 {
+            break;
+        }
+        while events.last().is_some_and(|e| bt >= e.0 * 1e6) {
+            match events.pop().unwrap().1 {
+                0 => jb.set_consumer_lead(120.0),
+                1 => jb.set_consumer_lead(60.0),
+                2 => jb.set_profile(1.0),
+                3 => jb.set_profile(0.9),
+                4 => jb.set_profile(0.0),
+                5 => {
+                    jb.restart();
+                    jb.set_consumer_lead(72.0);
+                }
+                _ => jb.set_profile(0.5),
+            }
+        }
+        while ai < arrivals.len() && arrivals[ai].0 <= bt {
+            let (at, hd, pk) = &arrivals[ai];
+            jb.insert(hd, pk, *at as u64);
+            ai += 1;
+        }
+        let mut left = 240;
+        while left > 0 {
+            let n = left.min(64);
+            jb.pop(&mut out[..n * 2]);
+            if !opus {
+                for x in &out[..n * 2] {
+                    h.update(x.to_bits().to_le_bytes());
+                }
+            }
+            left -= n;
+        }
+        let ahead = (tick % 3) as f64 * 16.0;
+        jb.end_burst(bt as u64, bt as u64 + (tick % 4) * 300, ahead);
+        h.update(jb.target_samples().to_bits().to_le_bytes());
+        h.update(jb.depth_error().to_bits().to_le_bytes());
+        h.update([jb.is_playing() as u8]);
+        h.update((jb.real_frames() as u64).to_le_bytes());
+        h.update(format!("{:?}", jb.stats()).as_bytes());
+        tick += 1;
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn trace_fixture_matches() {
+    let got = format!("pcm16 {}\nopus-control {}\n", trace_hash(false), trace_hash(true));
+    // 두 번 돌려도 같아야 한다(결정적).
+    assert_eq!(got, format!("pcm16 {}\nopus-control {}\n", trace_hash(false), trace_hash(true)), "trace가 결정적이지 않다");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("jitter-trace.sha256");
+    if std::env::var_os("SIM_UPDATE_FIXTURE").is_some() {
+        std::fs::write(&path, &got).unwrap();
+        return;
+    }
+    let want = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("기준값 {} 읽기 실패({e}) — SIM_UPDATE_FIXTURE=1로 만든다", path.display()))
+        .replace("\r\n", "\n");
+    assert_eq!(want, got, "지터 trace가 기준값과 다르다(동작 변경) — fixture를 갱신하지 말 것(구조 정리 PR)");
 }

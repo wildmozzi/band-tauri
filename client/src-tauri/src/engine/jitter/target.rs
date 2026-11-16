@@ -1,11 +1,11 @@
 //! 목표 깊이 추정(P1-5): 짧은 창·버스트·긴 창, 경로 변경, 목표 합성.
 //!
 //! 상태는 `TargetEst`(엔진 ⑧(a))에 있다. `TargetEst`의 메서드는 필요한 값(지연 통계, 계수, 프레임)을 인자로 받고
-//! `JitterBuffer`를 모른다. 여러 묶음을 잇는 조립(`record_delay`·`target_samples`·`after_target_change` 등)은
+//! `JitterBuffer`를 모른다(1ms당 샘플 수도 모듈 함수 `samples_per_ms`로, ⑧(b)). 여러 묶음을 잇는 조립(`record_delay`·`target_samples`·`after_target_change` 등)은
 //! 아래 `impl JitterBuffer`에 있다.
 
 use super::delay::DelayStats;
-use super::{JitterBuffer, JitterTuning, BLOCK_SAMPLES_MAX, BURST_WIN, LONG_BLOCKS_MAX, TARGET_GRID};
+use super::{samples_per_ms, JitterBuffer, JitterTuning, BLOCK_SAMPLES_MAX, BURST_WIN, LONG_BLOCKS_MAX, TARGET_GRID};
 
 /// 버스트 감지 창 안에서 필요한 초과 패킷 수.
 const BURST_COUNT: usize = 3;
@@ -147,7 +147,7 @@ impl TargetEst {
         let rel = (transit - min_transit).max(0);
         self.recent_rel[self.recent_pos] = rel;
         self.recent_pos = (self.recent_pos + 1) % BURST_WIN;
-        let spm = JitterBuffer::samples_per_ms();
+        let spm = samples_per_ms();
         let spike = (frame as f64 / 2.0).max(spm) * tuning.burst_scale;
         // 판정 기준은 j가 아니라 짧은 창 p99와 j 중 큰 값: 꼬리가 긴 지터에서 분위수 너머 패킷은 늘 있다(M1).
         let base = self.jitter_est(min_transit, tuning.long_weight).max(delay.q99_rel());
@@ -156,10 +156,11 @@ impl TargetEst {
         let recent = |i: usize| self.recent_rel[(self.recent_pos + BURST_WIN - 1 - i) % BURST_WIN];
         // 창에 표본이 50개 미만이면(재생 시작·경로 변경 직후) p99 기준이 아직 없어 정상 지터도 버스트로 본다.
         let m = if delay.count() >= 50 { n.min(BURST_CLUSTER) } else { 0 };
-        let over: Vec<i64> = (0..m).map(recent).filter(|&r| r as f64 > base + spike).collect();
+        // 넘은 패킷 수와 그 최댓값(할당 없이, #142 리뷰 L2). rel ≥ 0이라 최댓값의 시작값 0은 결과를 바꾸지 않는다.
+        let (over, peak) = (0..m).map(recent).filter(|&r| r as f64 > base + spike).fold((0usize, 0i64), |(n, mx), r| (n + 1, mx.max(r)));
         let mut event = false;
-        if over.len() >= BURST_COUNT {
-            let peak = over.iter().copied().max().unwrap_or(0) as f64;
+        if over >= BURST_COUNT {
+            let peak = peak as f64;
             let level = min_transit + grid_up(peak) as i64;
             if self.burst_abs.is_none_or(|a| level > a) {
                 event = true;
@@ -253,7 +254,7 @@ impl TargetEst {
 impl JitterBuffer {
     /// 목표 상·하한(샘플). 하한은 `jitter_min_ms`(0이면 없음), 상한은 `jitter_max_ms`(하한 이상).
     fn target_limits(&self) -> (f64, f64) {
-        let spm = Self::samples_per_ms();
+        let spm = samples_per_ms();
         let lo = (self.settings.min_ms.max(0.0) as f64 * spm).max(0.0);
         let hi = (self.settings.max_ms as f64 * spm).max(lo);
         (lo, hi)
@@ -269,7 +270,7 @@ impl JitterBuffer {
     pub fn target_samples(&self) -> f64 {
         let (lo, hi) = self.target_limits();
         let (_, enter_ins, _, _) = self.deadbands();
-        let pad = self.tuning.pad_frames * self.frame() as f64 + self.start_pad;
+        let pad = self.tuning.pad_frames * self.frame() as f64 + self.depth.start_pad();
         (self.jitter_est() + self.target.consumer_lead() + enter_ins + pad + self.late.tail_extra().min(self.frame() as f64)).clamp(lo, hi)
     }
 
@@ -279,7 +280,7 @@ impl JitterBuffer {
     /// 오차도 해제 문턱까지 보정한다(`chase`): 여유가 데드밴드보다 작게 줄면 깊이가 내려오지 않아 지연이 남았다.
     pub fn set_consumer_lead(&mut self, samples: f64) {
         if self.target.set_consumer_lead(samples) {
-            self.chase = true;
+            self.depth.set_chase();
         }
         let t = self.target_samples();
         self.target.set_last_target(t);
@@ -315,7 +316,7 @@ impl JitterBuffer {
     pub(super) fn after_target_change(&mut self) {
         let t = self.target_samples();
         if self.target.note_target(t) {
-            self.chase = true;
+            self.depth.set_chase();
         }
     }
 
@@ -326,7 +327,7 @@ impl JitterBuffer {
         // 되어 창이 빠질 때까지(+ hold) 목표가 옛 경로 지연만큼 남는다. 최소 지연보다 max(5ms, F) 넘게 이르면
         // 지연 통계를 새 경로부터 다시 모은다(깊이 초과분은 패킷 단위 버림이 걷어 낸다). 지터가 큰 회선에서 잘못
         // 걸리지 않도록 문턱은 현재 지터 폭(분위수)보다도 크고, 창에 표본이 50개 이상일 때만 본다.
-        let step = (5.0 * Self::samples_per_ms()).max(self.frame() as f64).max(self.delay.q_rel()) as i64;
+        let step = (5.0 * samples_per_ms()).max(self.frame() as f64).max(self.delay.q_rel()) as i64;
         if self.delay.count() >= 50 && transit < self.delay.min_transit() - step {
             self.reset_delay_stats(now_us);
             // 유예 비교 문턱은 리셋 전 값으로 고정한다(PR #20 M2: 리셋 뒤 q가 0으로 다시 계산되면 문턱이 max(5ms, F)로
