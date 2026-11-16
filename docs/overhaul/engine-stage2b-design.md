@@ -166,7 +166,7 @@ pub fn run(mut self) {
             }
         }
         let t = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);  // :664-668
-        self.metro.service(&c.info, &c.counters, &t);                 // :344
+        self.metro.service(&c.info, &c.counters, &t, self.net.as_ref().map(|n| &n.table.copy)); // :344 (②b-6b: 피어 표 복사본)
         let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &t, self.echo.tap_mut());  // :345
         self.local.service(&c.info, &c.counters, &c.controls, &c.stats, c.epoch); // :346
         self.local.track_occupancy(&c.stats, self.capture.pending48());           // :347
@@ -503,7 +503,7 @@ D1의 규칙("워커는 기본 우선순위 스레드와 락을 나누지 않는
 
 | 조건 | 락 대기 p99 · 최대(µs) 전 | 후 | 워커 본문 최대(µs) 전 | 후 | b 은닉 / 10s 전 | 후 |
 |---|---|---|---|---|---|---|
-| 메트로놈 + CPU | (측정) | 0 · 0 | (측정) | CPU 포화 창 범위 | (측정) | (측정) |
+| 메트로놈 + CPU | ②b-0(#131): 368~1344 · 15252~39375. ②b-6b와 같은 시간대의 develop: 864~2432 · 4501~13943 | **0 · 0**(6창 모두. 계획 `try_lock` 실패 1483~1918반복/10초 — 기다리지 않음) | #131: 15304~39458. 같은 시간대: 4672~14019 | 754~1617(조용함 1016~1152, CPU 포화 549~861) | #131: 10~27. 같은 시간대: 10~18 | **0**(6창 모두) |
 | 에코 측정 + CPU | (측정) | 0 · 0 | (측정) | CPU 포화 창 범위 | (측정) | (측정) |
 
 "후" 수치를 읽을 때: 메트로놈 조건은 계획 둘을 번갈아 넣으므로 워커가 계획이 바뀐 반복마다 `ref_peer_id`를 `clone_from` 한다(두 계획의 기준 피어가 `Some` ↔ `None`으로 다르면 할당·해제). 락 대기가 0이어도 **할당자 경합**이 워커 본문 최대에 섞일 수 있다. 그래서 (1) 두 계획의 `ref_peer_id`를 같게 둔 창과 다르게 둔 창을 따로 재고, (2) "후"의 본문 최대가 CPU 포화 창 범위를 넘으면 락이 아니라 이 할당인지부터 가른다(락 대기 지표가 0인지로 구분된다).
