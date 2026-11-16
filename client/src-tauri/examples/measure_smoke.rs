@@ -9,10 +9,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use band_lib::engine::config::{DriverKind, EngineConfig};
-use band_lib::engine::device::system::SystemBackend;
-use band_lib::manager::EngineManager;
-use band_lib::net::NetOptions;
+use band_lib::testing::engine::config::{DriverKind, EngineConfig};
+use band_lib::testing::engine::device::system::SystemBackend;
+use band_lib::testing::manager::EngineManager;
+use band_lib::testing::net::NetOptions;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -23,7 +23,7 @@ fn main() {
     };
     let runs: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5);
     let buffer: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(128);
-    let device = args.next().map(|n| band_lib::engine::device::device_id(driver, &n));
+    let device = args.next().map(|n| band_lib::testing::engine::device::device_id(driver, &n));
     let cfg = EngineConfig {
         input_driver: driver,
         output_driver: driver,
@@ -35,7 +35,7 @@ fn main() {
     };
     let backend = Arc::new(SystemBackend::new());
     {
-        use band_lib::engine::device::AudioBackend;
+        use band_lib::testing::engine::device::AudioBackend;
         match backend.list_devices() {
             Ok(list) => {
                 for d in list.iter().filter(|d| d.driver == driver) {

@@ -11,15 +11,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::config::{CodecKind, EngineConfig};
-use band_lib::engine::device::fake::FakeBackend;
-use band_lib::engine::mixer::MixControls;
-use band_lib::engine::record::{RecordOptions, TrackKind};
-use band_lib::net::types::PeerStateKind;
-use band_lib::engine::wav::RecordFormat;
-use band_lib::engine::Engine;
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::NetOptions;
+use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_lib::testing::engine::device::fake::FakeBackend;
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::engine::record::{RecordOptions, TrackKind};
+use band_lib::testing::net::types::PeerStateKind;
+use band_lib::testing::engine::wav::RecordFormat;
+use band_lib::testing::engine::Engine;
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::NetOptions;
 use parking_lot::Mutex;
 
 static RT_LOCK: Mutex<()> = Mutex::new(());
@@ -119,7 +119,7 @@ fn records_local_and_peer_tracks_aligned() {
     let folder = PathBuf::from(&sum.folder);
     let file = |k: TrackKind| folder.join(&sum.tracks.iter().find(|t| t.kind == k).unwrap().file);
     let peer = sum.tracks.iter().find(|t| t.kind == TrackKind::Peer).unwrap();
-    assert_eq!(peer.peer_id.as_deref(), Some(band_lib::diag::mask::pseudonymize("alice").as_str()), "피어 id는 가명(PR #62 L5)");
+    assert_eq!(peer.peer_id.as_deref(), Some(band_lib::testing::diag::mask::pseudonymize("alice").as_str()), "피어 id는 가명(PR #62 L5)");
     assert!(peer.file.ends_with("앨리스.wav"), "{}", peer.file);
 
     let me = read_left(&file(TrackKind::Local));
@@ -352,7 +352,7 @@ fn lossy_proxy(a: SocketAddr, b: SocketAddr, every: usize, armed: Arc<std::sync:
     let st = stop.clone();
     let ar = armed;
     std::thread::spawn(move || {
-        let _prio = band_lib::sys::prio::promote_current_thread();
+        let _prio = band_lib::testing::sys::prio::promote_current_thread();
         let mut buf = [0u8; 2048];
         let mut k = 0usize;
         while !st.load(Ordering::Relaxed) {

@@ -13,16 +13,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::config::{CodecKind, EngineConfig};
-use band_lib::engine::device::fake::FakeBackend;
-use band_lib::net::media_link::{media_link, PeerKey};
-use band_lib::engine::mixer::MixControls;
-use band_lib::net::types::{PathKind, PeerStateKind};
-use band_lib::engine::Engine;
-use band_lib::net::crypto::KeyPair;
-use band_lib::net::packet::{Header, PacketType};
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::{Net, NetOptions};
+use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_lib::testing::engine::device::fake::FakeBackend;
+use band_lib::testing::net::media_link::{media_link, PeerKey};
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::net::types::{PathKind, PeerStateKind};
+use band_lib::testing::engine::Engine;
+use band_lib::testing::net::crypto::KeyPair;
+use band_lib::testing::net::packet::{Header, PacketType};
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::{Net, NetOptions};
 use parking_lot::Mutex;
 
 

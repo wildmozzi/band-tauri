@@ -15,17 +15,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::codec::Encoder;
-use band_lib::engine::config::{CodecKind, EngineConfig};
-use band_lib::engine::cpuprof::CpuStats;
-use band_lib::sys::cpu::{cycle_pct, process_cycles, tsc_now};
-use band_lib::engine::device::fake::FakeBackend;
-use band_lib::engine::mixer::MixControls;
-use band_lib::engine::relay_codec::CodecReason;
-use band_lib::net::types::PeerStateKind;
-use band_lib::engine::Engine;
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::NetOptions;
+use band_lib::testing::engine::codec::Encoder;
+use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_lib::testing::engine::cpuprof::CpuStats;
+use band_lib::testing::sys::cpu::{cycle_pct, process_cycles, tsc_now};
+use band_lib::testing::engine::device::fake::FakeBackend;
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::engine::relay_codec::CodecReason;
+use band_lib::testing::net::types::PeerStateKind;
+use band_lib::testing::engine::Engine;
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::NetOptions;
 
 const PEERS: usize = 6;
 const MEASURE: Duration = Duration::from_secs(12);
@@ -228,7 +228,7 @@ fn six_peer_full_mesh_cpu() {
 #[test]
 #[ignore = "측정: release 권장(약 40초)"]
 fn restart_cost_on_worker() {
-    use band_lib::engine::jitter::{JitterBuffer, JitterSettings};
+    use band_lib::testing::engine::jitter::{JitterBuffer, JitterSettings};
     // (1) restart 1회 시간
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     let mut us: Vec<f64> = (0..300)

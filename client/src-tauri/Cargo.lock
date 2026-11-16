@@ -177,6 +177,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 name = "band"
 version = "0.1.0"
 dependencies = [
+ "band",
  "band-relay",
  "base64 0.22.1",
  "chacha20poly1305",

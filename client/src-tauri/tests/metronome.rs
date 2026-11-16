@@ -19,12 +19,12 @@ use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use band_lib::engine::metronome::{measured_hidden_out_us, BeatScheduler, ClickRt, ClickShared, MetronomePlan, OutClock};
-use band_lib::engine::mixer::MixControls;
-use band_lib::engine::rt::{output_path, OutputRt};
-use band_lib::engine::stats::AudioCounters;
-use band_lib::engine::worker::CallbackTracker;
-use band_lib::net::clock::ClockSync;
+use band_lib::testing::engine::metronome::{measured_hidden_out_us, BeatScheduler, ClickRt, ClickShared, MetronomePlan, OutClock};
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::engine::rt::{output_path, OutputRt};
+use band_lib::testing::engine::stats::AudioCounters;
+use band_lib::testing::engine::worker::CallbackTracker;
+use band_lib::testing::net::clock::ClockSync;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
 
@@ -525,14 +525,14 @@ mod engines {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use band_lib::engine::config::{CodecKind, EngineConfig};
-    use band_lib::engine::device::fake::FakeBackend;
-    use band_lib::engine::metronome::MetronomeConfig;
-    use band_lib::engine::mixer::MixControls;
-    use band_lib::net::types::PeerStateKind;
-    use band_lib::engine::Engine;
-    use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-    use band_lib::net::{clock_payload, parse_clock_payload, NetOptions};
+    use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+    use band_lib::testing::engine::device::fake::FakeBackend;
+    use band_lib::testing::engine::metronome::MetronomeConfig;
+    use band_lib::testing::engine::mixer::MixControls;
+    use band_lib::testing::net::types::PeerStateKind;
+    use band_lib::testing::engine::Engine;
+    use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+    use band_lib::testing::net::{clock_payload, parse_clock_payload, NetOptions};
 
     fn silent() -> FakeBackend {
         FakeBackend::new(48_000, Arc::new(|_: u64, _: usize, buf: &mut [f32]| buf.fill(0.0)))

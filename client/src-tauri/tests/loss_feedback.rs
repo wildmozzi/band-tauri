@@ -9,14 +9,14 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use band_lib::engine::config::{CodecKind, EngineConfig};
-use band_lib::engine::device::fake::FakeBackend;
-use band_lib::engine::mixer::MixControls;
-use band_lib::engine::relay_codec::CodecReason;
-use band_lib::engine::report::PeerStats;
-use band_lib::engine::Engine;
-use band_lib::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_lib::net::NetOptions;
+use band_lib::testing::engine::config::{CodecKind, EngineConfig};
+use band_lib::testing::engine::device::fake::FakeBackend;
+use band_lib::testing::engine::mixer::MixControls;
+use band_lib::testing::engine::relay_codec::CodecReason;
+use band_lib::testing::engine::report::PeerStats;
+use band_lib::testing::engine::Engine;
+use band_lib::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_lib::testing::net::NetOptions;
 
 /// A ↔ B 직접 경로 프록시. A가 pa로 보내면 pb에서 B로, B가 pb로 보내면 pa에서 A로. A→B Audio(type 1)는
 /// `drop_every`(0 = 끔)개마다 1개 버린다.
@@ -41,7 +41,7 @@ impl LossyProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let (de, dr, st) = (drop_every.clone(), dropped.clone(), stop.clone());
         let thread = std::thread::spawn(move || {
-            let _prio = band_lib::sys::prio::promote_current_thread();
+            let _prio = band_lib::testing::sys::prio::promote_current_thread();
             let mut buf = [0u8; 2048];
             let mut audio = 0u32;
             while !st.load(Ordering::Relaxed) {

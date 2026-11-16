@@ -178,6 +178,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), 하네스 `engine::sim`(`cfg(test)`) |
 | 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `settings`, `diag`, `diag::{timeline, export}` |
 | 6 | `commands`, `lib.rs`, `main.rs` |
+| 7 | 테스트 표면 `testing`(`cfg(any(test, feature = "test-support"))`, ⑨a-1) — 모든 계층을 다시 내보낸다. 맨 위라 제품 노드는 쓸 수 없다(7절) |
 
 `net::peer → engine::jitter`(3 → 1)처럼 **아래로 가는 간선은 의존 규칙상 허용**이다. 그 간선의 문제는 의존이 아니라 공유 상태(4.1절: 여러 계층이 `Peer`의 락을 직접 잡음)이고, ③이 그것을 다룬다.
 
@@ -197,7 +198,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 | 어긋남 | 위치 | 단계 |
 |---|---|---|
-| `Peer`가 net 상태와 미디어 상태를 함께 가진 공용 구조체(필드 전부 `pub`, Mutex 5개 + 원자값). net·워커·통계·커맨드가 직접 잠근다. single writer가 아니다 | `net/peer.rs` | ③ |
+| `Peer`가 net 상태와 미디어 상태를 함께 가진 공용 구조체(필드 전부 `pub`, Mutex 5개 + 원자값). net·워커·통계·커맨드가 직접 잠근다. single writer가 아니다 | `net/peer/mod.rs` | ③ |
 | ~~지터 락 접근자 7곳, 기본 우선순위 스레드가 준RT 락을 잡음~~ | (③-a3에서 해소: 지터 버퍼는 워커 단독 소유) | ③ 완료 |
 | 큰 파일: ~~`wasapi.rs` 1.9k~~(⑥-5에서 `wasapi/{format, enumerate, stream, probe}`로 해소), ~~`net/mod.rs` 1.3k(송신 + 수신 루프 + 제어 루프)~~(⑥-6에서 `net/{mod, send, recv_loop, control_loop}`로 나눔), ~~`net/peer.rs` 1.8k~~(⑥-7에서 `net/peer/{mod, descriptor, conn, ping}`으로 나눔) | | ⑥ |
 
@@ -260,9 +261,12 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 정책:
 
 1. **공개 표면**: `manager::EngineManager`, `commands`, 계약 DTO(`EngineConfig`, `EngineStats`·`PeerStats`, `LocalDescriptor`, 측정·녹음 보고). 나머지는 `pub(crate)`가 목표다.
-2. **테스트 표면**: 통합 테스트·측정 도구가 쓰는 내부는 `test-support` 피처(`#[cfg(any(test, feature = "test-support"))]`)의 `testing` 모듈 한 곳에서 다시 내보낸다. 개발 의존성에서 `band = { path = ".", features = ["test-support"] }`로 켠다. `device::fake`는 ②a에서 먼저 옮겼다: `#[cfg(any(test, debug_assertions, feature = "test-support"))]` — 디버그 빌드·단위 테스트에는 늘 있고, 릴리스 제품 빌드에는 없으며, 릴리스 측정(`cpu_profile`)은 `--features test-support`로 켠다(없으면 `compile_error!`로 안내). 나머지(측정 훅, `testing` 모듈)는 ⑨.
+2. **테스트 표면**(⑨a-1): 통합 테스트·예제·측정 도구가 쓰는 내부는 `test-support` 피처(`#[cfg(any(test, feature = "test-support"))]`)의 `testing` 모듈(`src/testing.rs`) 한 곳에서 다시 내보낸다. 하위 모듈은 원래 경로를 따른다(`band_lib::testing::engine::mixer`, `…::net::peer`, `…::sys::prio`, `…::diag::mask`, `…::manager::EngineManager`). 목록에는 테스트가 실제로 쓰는 것만 둔다 — 새 테스트가 다른 내부를 쓰려면 이 목록에 더한다.
+   - 켜기: 개발 의존성 `band = { path = ".", features = ["test-support"] }`(자기 자신). 테스트·예제 타깃이 들어가는 빌드(`cargo test`, `--all-targets`, `cargo run --example`)는 디버그·릴리스 모두 늘 켜진다. 테스트 타깃이 없는 제품 구성(`cargo build`, `cargo tauri build`, `cargo clippy --lib --bins`)에는 합쳐지지 않는다(피처 리졸버 2).
+   - 지키는 검사: CI `Clippy (제품 구성, test-support 없음)`(`cargo clippy --lib --bins -- -D warnings` — 제품 코드가 `testing`이나 `test-support` 뒤 항목을 쓰면 여기서만 실패), `tests/architecture.rs`의 `tests_use_only_testing_surface`(tests/·examples/는 `band_lib::testing::`만)와 계층 7 노드 `testing`(5.1절).
+   - `device::fake`는 ②a에서 먼저 옮겼다: `#[cfg(any(test, debug_assertions, feature = "test-support"))]` — 디버그 빌드·단위 테스트에는 늘 있고, 릴리스 제품 빌드에는 없다. `debug_assertions` 조건을 남길지와 측정 훅 게이트는 ⑨a-2.
 3. **R-1 ①②의 가시성**: 새 하위 모듈은 private, 형제 간에는 `pub(super)`. **기존 공개 경로는 `pub use`로 유지**한다(예: `engine::jitter::{JitterBuffer, JitterSettings, JitterStats, shift_one, MAX_CORR_RATE, TARGET_GRID, correction_*}`, `engine::worker::{CallbackTracker, OUT_CHUNK, …}`). 그래서 ①②는 `tests/`를 바꾸지 않는다. 하네스가 쓰는 워커 내부(폴링 주기 등)는 `pub(in crate::engine)`.
-4. ⑨에서 영향받는 테스트: `loopback`·`cpu_profile`·`measure`·`record`·`metronome`·`rt_alloc`·`net_recv`·`nonce`·`peer_key`·`send_queue`·`relay`·`loss_feedback`·`stun`(목록은 `grep -h "band_lib::" tests/*.rs`).
+4. ⑨a-1에서 `use`를 바꾼 테스트: `loopback`·`cpu_profile`·`measure`·`record`·`metronome`·`rt_alloc`·`net_recv`·`nonce`·`peer_key`·`send_queue`·`send_column`·`relay`·`loss_feedback`·`soak`·`stun`, 예제 `measure_smoke`·`wasapi_probe`.
 5. 이름: `EngineManager::test_start/test_stop`은 제품 기능(네트워크 없는 모니터 모드)이다. 테스트 전용으로 오해되지 않게 ⑨에서 `start_monitor_only` 등으로 바꾼다(커맨드 이름 `engine_test_start`는 계약이라 유지).
 
 ## 8. 에러 타입
