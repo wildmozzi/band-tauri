@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
+use parking_lot::{Mutex, MutexGuard};
 use serde::Serialize;
 
 /// 분위수를 계산하는 창(통계는 직전 창 기준).
@@ -137,7 +137,7 @@ impl SendLatency {
     }
 }
 
-/// 워커 반복 한 번이 다른 스레드가 쥔 락을 기다린 시간 합(엔진 ③c 측정 — 송신 경로는 ③c 뒤 락이 없고, 남은 것은 에코 프로브·메트로놈).
+/// 워커 반복 한 번이 다른 스레드가 쥔 락을 기다린 시간 합(엔진 ③c 측정 — 송신 경로는 ③c 뒤 락이 없고, ②b 뒤로 남은 것은 기준 피어의 `Peer.clock` 하나다 — MMCSS끼리).
 /// 먼저 `try_*`로 잡아 보고 못 잡을 때만 시계를 읽으므로, 경합이 없으면 비용은 성공하는 try 한 번이다.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct LockWait {
@@ -186,18 +186,6 @@ impl LockWait {
         }
         let t = Instant::now();
         let g = m.lock();
-        self.add(t, site);
-        g
-    }
-
-    /// 읽기 락(피어 표). `lock`과 같은 방식.
-    #[inline]
-    pub(crate) fn read<'a, T>(&mut self, m: &'a RwLock<T>, site: &LockSite) -> RwLockReadGuard<'a, T> {
-        if let Some(g) = m.try_read() {
-            return g;
-        }
-        let t = Instant::now();
-        let g = m.read();
         self.add(t, site);
         g
     }
@@ -301,11 +289,6 @@ mod tests {
         assert_eq!(s.contended, 1);
         assert!(s.max_us >= 10_000 && s.total_us >= 10_000, "{s:?}");
         assert_eq!(site.take(), LockSiteWait::default());
-        // 읽기 락도 같은 방식(경합이 없으면 0)
-        let rw = RwLock::new(0u32);
-        let mut w = LockWait::default();
-        drop(w.read(&rw, &site));
-        assert_eq!((w.ns, w.contended), (0, 0));
     }
 
     #[test]

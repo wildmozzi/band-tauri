@@ -963,6 +963,50 @@ fn send_path_scanner_catches_variants() {
     assert_eq!(send_path_lock_violations("fn x() {}").len(), SEND_PATH_FNS.len(), "함수를 못 찾으면 실패");
 }
 
+/// 워커가 **기다리는** 락 호출(엔진 ②b-6b, 설계 7.1절). `try_lock`·`try_read`·`try_write`는 기다리지 않으므로 걸리지 않는다
+/// (`.try_lock(`에는 `.lock(`이 없다). `.read(`는 `RwLock` 읽기뿐 아니라 seqlock 칸의 `SeqCell::read`·`MediaStatsCell::read`도
+/// 잡는다 — 거짓 양성이 아니다: 그 둘은 재시도하며 `yield_now`를 부르는 **비RT 독자 전용**이고 워커는 그 칸의 작성자다
+/// (읽어야 하면 `try_read`). 진단 래퍼 `LockWait::lock(..)`·`read(..)`도 같은 문자열이라 함께 걸린다.
+const WAITING_LOCK_CALLS: &[&str] = &[".lock(", ".read(", ".write("];
+
+/// 주석·문자열을 지운 본문에서 기다리는 락 호출을 찾는다(공백 무시).
+fn waiting_lock_calls(code: &str) -> Vec<&'static str> {
+    let flat: String = strip(code).chars().filter(|c| !c.is_whitespace()).collect();
+    WAITING_LOCK_CALLS.iter().copied().filter(|l| flat.contains(l)).collect()
+}
+
+/// 엔진 ②b 완료 조건(설계 7.1절·8절): `src/engine/worker/`(tests.rs 제외) 안에 기다리는 락 호출이 없다. 예외 0.
+/// **재발 방지용**이다 — 워커 파일이 직접 쓰는 락만 본다. 워커가 부르는 메서드 안의 락(`Peer.clock` 등)은 폭주 시험의
+/// 락 대기 계측(`send_path_storm_measure`)과 `engine-architecture.md` 4.1절 표가 맡는다.
+#[test]
+fn worker_dir_waits_for_no_lock() {
+    let dir = src_dir().join("engine/worker");
+    let mut files = Vec::new();
+    rs_files(&dir, &mut files);
+    assert!(files.len() >= 10, "워커 파일을 못 찾음: {files:?}");
+    let mut bad = Vec::new();
+    for f in files.iter().filter(|f| f.file_name().is_some_and(|n| n != "tests.rs")) {
+        let src = std::fs::read_to_string(f).unwrap();
+        for l in waiting_lock_calls(without_unit_tests(&src)) {
+            bad.push(format!("{}: {l}", f.file_name().unwrap().to_string_lossy()));
+        }
+    }
+    assert!(bad.is_empty(), "워커 디렉터리에 기다리는 락 호출이 있다(원자값·큐·try_lock으로 바꿀 것): {bad:?}");
+}
+
+/// 위 검사기의 음성 확인.
+#[test]
+fn worker_lock_scanner_catches_variants() {
+    assert_eq!(waiting_lock_calls("fn a(&self) { let p = self.ctl.plan.lock(); }"), [".lock("]);
+    assert_eq!(waiting_lock_calls("fn a(&self) { let p = self.net.peers
+    .read(); }"), [".read("]);
+    assert_eq!(waiting_lock_calls("fn a(&self) { *self.x . write() = 1; let s = cell.read(); }"), [".read(", ".write("]);
+    assert_eq!(waiting_lock_calls("fn a(&mut self, w: &mut LockWait) { let g = w.lock(&self.m, site); }"), [".lock("]);
+    // 기다리지 않는 것, 주석·문자열 안의 것은 걸리지 않는다
+    let ok = "fn a(&self) { if let Some(p) = self.plan.try_lock() {} let _ = t.try_read(); let _ = t.try_write();               /* x.lock() */ log::warn!(\".lock( .read(\"); } // m.write()";
+    assert!(waiting_lock_calls(ok).is_empty());
+}
+
 #[test]
 fn exception_list_is_a_ratchet() {
     assert_eq!(

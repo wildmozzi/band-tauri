@@ -37,7 +37,7 @@ use super::config::{frame_code_from_samples, EngineConfig, INTERNAL_RATE};
 use super::device::StreamInfo;
 
 use super::measure::{EchoPortRt, EchoRt};
-use super::metronome::MetronomeCtl;
+use super::metronome::MetronomeRt;
 use super::mixer::MixControls;
 use super::record::MarkSink;
 use super::rt::{SourceBank, LOCAL_SOURCE, MAX_SOURCES, SLOT_ACTIVE};
@@ -99,23 +99,18 @@ pub struct WorkerStats {
     /// 워커 반복 본문 시간(수면 제외)과 반복 시작 간격 분포(엔진 ③c 측정, 진단 전용 — 측정 시험이 비운다).
     pub iter_body: crate::net::txlat::SendLatency,
     pub iter_period: crate::net::txlat::SendLatency,
-    /// 반복마다 남은 락(에코 프로브·메트로놈)에서 기다린 합과, 본문에서 그것을 뺀 값(락 밖 비용, #122 리뷰 M3).
+    /// 반복마다 남은 락(`Peer.clock`)에서 기다린 합과, 본문에서 그것을 뺀 값(락 밖 비용, #122 리뷰 M3).
     pub iter_lock_wait: crate::net::txlat::SendLatency,
     pub iter_unlocked: crate::net::txlat::SendLatency,
-    /// 남은 락을 자리별로(엔진 ②b 측정, 설계 4.3절): 기다린 횟수·합·최대. ②b-5·②b-6b가 없앨 락들이다.
+    /// 남은 락을 자리별로(엔진 ②b 측정, 설계 4.3절): 기다린 횟수·합·최대.
     pub lock_sites: WorkerLockSites,
 }
 
-/// 워커가 기본 우선순위 스레드와 나누는 남은 락의 자리별 대기 기록(진단 전용, `Engine::take_worker_timing`).
+/// 워커가 기다릴 수 있는 남은 락의 자리별 대기 기록(진단 전용, `Engine::take_worker_timing`). 엔진 ②b-6b 뒤로
+/// **기본 우선순위 스레드와 나누는 락은 없다**(에코 프로브 ②b-5, 메트로놈 계획·루프백 보정·상태 보고·피어 표 읽기 락 ②b-6b).
 #[derive(Debug, Default)]
 pub struct WorkerLockSites {
-    /// 메트로놈 계획 락 — 반복마다.
-    pub metro_plan: crate::net::txlat::LockSite,
-    /// 메트로놈 루프백 보정 락 — 반복마다.
-    pub metro_offset: crate::net::txlat::LockSite,
-    /// 메트로놈 상태 보고 락 — 100ms마다.
-    pub metro_stats: crate::net::txlat::LockSite,
-    /// 기준 피어 시계 조회의 피어 표 읽기 락 — 기준 피어를 따르는 동안 반복마다.
+    /// 기준 피어의 `Peer.clock` — 기준 피어를 따르는 동안 반복마다. 나누는 상대는 `band-net-recv`뿐이다(둘 다 MMCSS).
     pub peer_clock: crate::net::txlat::LockSite,
 }
 
@@ -146,8 +141,8 @@ pub struct WorkerParams {
     /// 에코 측정(P1-1) 프로브 큐의 워커 쪽 끝(엔진 ②b-5): 프로브를 받으면 그 피어에게 내 입력 대신 무음 + 클릭을 보내고,
     /// 그 피어 소리의 재생 시각을 모은다.
     pub echo: EchoPortRt,
-    /// 공유 메트로놈 계획·상태(P2-3).
-    pub metronome: Arc<MetronomeCtl>,
+    /// 공유 메트로놈 계획·상태(P2-3)의 워커 쪽 끝(엔진 ②b-6b: 기다리지 않는다).
+    pub metronome: MetronomeRt,
     /// 녹음 마커 큐(P2-4a): 녹음 중이면 피어별 은닉·버림을 출력 타임라인 위치로 넣는다.
     pub rec_marks: Arc<MarkSink>,
     /// 피어 미디어 명령 큐의 워커 쪽 끝(추가·제거, 엔진 ③-a2).
@@ -214,12 +209,12 @@ fn chunk_dev(info: &StreamInfo) -> u64 {
 struct NetSide {
     /// 송신 단계(프레임 → 인코드 → 송신).
     send: SendPath,
-    /// 피어 표 복사본. 송신에 빌려 준다(②b-6b부터 메트로놈에도).
+    /// 피어 표 복사본. 송신(`&mut`)과 메트로놈(`&`, 기준 피어 찾기)에 빌려 준다.
     table: PeerTable,
 }
 
 /// 조정자가 갖는 피어 표 복사본(엔진 ③c)과 그것을 맞추는 net.
-/// 단계에는 이 묶음이 아니라 안의 복사본만 빌려 준다(`SendPath`: 송신·자동 코덱이 락 없이 본다).
+/// 단계에는 이 묶음이 아니라 안의 복사본만 빌려 준다(`SendPath`: 송신·자동 코덱, `MetronomeStage`: 기준 피어 — 락 없이 본다).
 struct PeerTable {
     net: Arc<NetShared>,
     copy: PeerTableCopy,
@@ -250,8 +245,8 @@ pub struct Worker {
     watch: DeviceWatch,
     /// 에코 프로브의 워커 쪽 끝과 지금 쥔 프로브. 송신(클릭 프레임)과 피어 공급(재생 시각 탭)에 빌려 준다.
     echo: EchoRt,
-    /// 이번 반복에 남은 락(메트로놈)에서 기다린 시간(엔진 ③c 측정 — 본문에서 빼서 락 밖 비용을 본다).
-    /// 락을 잡는 단계 메서드에 빌려 준다.
+    /// 이번 반복에 남은 락(`Peer.clock`, MMCSS끼리)에서 기다린 시간(엔진 ③c 측정 — 본문에서 빼서 락 밖 비용을 본다).
+    /// 그 락을 잡는 단계 메서드(`MetronomeStage::service`)에 빌려 준다.
     lock_wait: LockWait,
 }
 
@@ -298,7 +293,7 @@ impl Worker {
             capture,
             net: net_side,
             clock: CallbackTracker::new(info.out_rate),
-            metro: MetronomeStage::new(metronome, net),
+            metro: MetronomeStage::new(metronome),
             peers: PeerSources::new(PeerSourcesParts { prods: peer_prods, port: media_port, settings: media_settings, rec_marks }),
             local,
             watch: DeviceWatch::new(),
@@ -349,7 +344,7 @@ impl Worker {
             }
             // 인자 평가 순서 = 읽는 순서: 벽시계 → 출력 버스트 → (observe 안) 콜백 카운터.
             let timing = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);
-            self.metro.service(&c.info, &c.counters, &c.stats, &timing, &mut self.lock_wait);
+            self.metro.service(&c.info, &c.counters, &c.stats, &timing, self.net.as_ref().map(|n| &n.table.copy), &mut self.lock_wait);
             let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &timing, self.echo.tap_mut());
             self.local.service(&c.info, &c.counters, &c.controls, &c.bank.slots[LOCAL_SOURCE], &c.stats, c.epoch);
             self.local.track_occupancy(c.info.out_rate, &c.stats, self.capture.pending48());
