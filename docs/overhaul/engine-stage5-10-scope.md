@@ -247,13 +247,15 @@ ADR은 `{table, punch, loss_report}`라 적었다. 실제 파일에는 피어 **
 
 ### 5.2 `manager`의 수명 상태
 
-지금 표현(`manager.rs:23-31`): `Slot { engine: Option<Engine>, generation, starting: bool, monitor_before_test, cancel: Option<Arc<AtomicBool>> }`.
+**완료(#146)**: `Phase::{Idle, Starting { cancel }, Running(Box<Engine>)}`(`Engine`이 커서 clippy `large_enum_variant` — 박싱, 시작당 할당 1회·비RT). 아래 줄 번호는 이 문서를 쓸 때의 것이라 지금 코드와 맞지 않는다(위치는 함수 이름으로 찾는다).
+
+착수 전 표현(`manager.rs:23-31`): `Slot { engine: Option<Engine>, generation, starting: bool, monitor_before_test, cancel: Option<Arc<AtomicBool>> }`.
 
 | 문서 11절 상태 | 지금 조합 | 뒤 |
 |---|---|---|
 | Idle | `engine = None`, `starting = false` | `Phase::Idle` |
 | Starting | `starting = true`, `engine = None`, `cancel = Some` | `Phase::Starting { cancel }` |
-| Running | `engine = Some` | `Phase::Running(Engine)` |
+| Running | `engine = Some` | `Phase::Running(Box<Engine>)` |
 | Degraded | `engine = Some` + 엔진이 `deviceLost` 보고 | `Phase::Running` 그대로. Degraded는 **엔진이 보고하는 값**이지 `manager`가 전이시키는 상태가 아니다(11절 "누가 전이시키는가") — enum에 넣지 않고 `EngineSnapshot`에서 읽는 것으로 문서를 맞춘다 |
 | Stopping | 슬롯에서 꺼낸 지역 변수(`drop(old)`, `manager.rs:174`, `:223`, `:237`) | 그대로(락 밖 join이 요점이다) |
 

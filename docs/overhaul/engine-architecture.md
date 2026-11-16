@@ -346,7 +346,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 ## 11. 엔진 수명 상태기계
 
-지금 규칙은 `manager.rs`(슬롯·세대 번호), `Engine`(스레드 소유·`deviceLost` 보고), 프론트 `performSession.ts`(시그널링·재시작 판단)에 흩어져 있다. 상태와 전이를 여기 한 곳에 둔다. ⑧에서 `manager`가 이 상태를 명시적 enum으로 갖는다(지금은 `Slot { engine, starting, generation, cancel }` 조합으로 표현).
+지금 규칙은 `manager.rs`(슬롯·세대 번호), `Engine`(스레드 소유·`deviceLost` 보고), 프론트 `performSession.ts`(시그널링·재시작 판단)에 흩어져 있다. 상태와 전이를 여기 한 곳에 둔다. ⑧부터 `manager`가 전이시키는 상태는 명시적 enum `Phase::{Idle, Starting { cancel }, Running(Box<Engine>)}`이다(`Slot { phase, generation, monitor_before_test }`). Degraded는 enum에 없다 — 엔진이 보고하는 값이라 `EngineSnapshot`(`stats.deviceLost`)에서 읽는다. Stopping도 enum에 없다 — `Phase::leave`로 꺼낸 엔진을 락 밖에서 정지하는 지역 변수다(`retire`: join, 합주 엔진이면 마지막 연결 이벤트를 `ended_conn`에 남김, 세션 = 증가 전 세대. `test_stop`은 net 없는 엔진만 꺼내므로 그냥 drop).
 
 ```text
           start(cfg, peer?) / test_start(cfg)            Engine::start 성공(세대 일치)
@@ -362,11 +362,11 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 | 상태 | 뜻 | `manager` 표현 | 보고 |
 |---|---|---|---|
-| Idle | 엔진 없음 | `engine = None`, `starting = false` | 커맨드가 "실행 중이 아님" |
-| Starting | 장치 열기·STUN·스레드 시작 중(블로킹, `start_lock` 직렬화) | `starting = true`, `cancel = Some` | 커맨드가 "시작 중" |
-| Running | 정상 | `engine = Some` | `running = true` |
-| Degraded | 장치 분실(콜백 1초 정지, WASAPI 무효화 HRESULT, 기본 장치 변경). 엔진 객체는 남음 | `engine = Some` | `deviceLost = true`, `running = false` |
-| Stopping | 슬롯에서 꺼낸 엔진을 락 밖에서 drop(join) | 슬롯 밖 지역 변수 | — |
+| Idle | 엔진 없음 | `Phase::Idle` | 커맨드가 "실행 중이 아님" |
+| Starting | 장치 열기·STUN·스레드 시작 중(블로킹, `start_lock` 직렬화) | `Phase::Starting { cancel }` | 커맨드가 "시작 중" |
+| Running | 정상 | `Phase::Running(Box<Engine>)` | `running = true` |
+| Degraded | 장치 분실(콜백 1초 정지, WASAPI 무효화 HRESULT, 기본 장치 변경). 엔진 객체는 남음 | `Phase::Running` 그대로(enum 밖, `EngineSnapshot`에서 읽음) | `deviceLost = true`, `running = false` |
+| Stopping | 슬롯에서 꺼낸 엔진을 락 밖에서 정지(`retire`: join + 합주 엔진의 마지막 연결 이벤트) | 슬롯 밖 지역 변수(`Phase::leave`가 돌려준 엔진) | — |
 
 - **세대 번호**: `start`/`stop`마다 오른다. 블로킹 시작이 끝났을 때 세대가 다르면 결과를 버리고(`start_lock`을 쥔 채 정지해 장치를 놓은 뒤) "취소됨"을 돌려준다. 이전 시작은 `cancel` 원자값으로 일찍 포기한다.
 - **누가 전이시키는가**: Idle↔Starting↔Running·Stopping은 커맨드(`manager`). Running↔Degraded는 엔진 스레드(워커의 장치 감시, `band-wasapi`)가 원자값으로 보고만 하고, 정지·재시작 결정은 프론트(`performSession`: `running=false`가 이어지면 정지, L7)가 한다. 엔진이 스스로 재시작하지 않는다(자체 WASAPI의 일시 오류 스트림 재시작은 Running 안의 일).
