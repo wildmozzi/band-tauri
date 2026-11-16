@@ -1,3 +1,4 @@
+use super::correction::RateShifter;
 use super::*;
 use super::late_budget::{LATE_BUDGET_LOSSY_MAX, LATE_SKIP_BLOCKS};
 use crate::engine::codec::Encoder;
@@ -441,7 +442,7 @@ fn debt_case(codec: CodecKind, seq0: u32, arrive: &dyn Fn(usize) -> Option<usize
         dropped_frames: s.dropped_frames - s0.dropped_frames,
         samples_dropped: s.samples_dropped - s0.samples_dropped,
         rebuffers: s.rebuffers - s0.rebuffers,
-        debt: jb.underrun_debt,
+        debt: jb.conceal.debt(),
         depth_change: jb.depth_error() - d0,
     }
 }
@@ -503,8 +504,8 @@ fn underrun_debt_edge_cases() {
                 _ => Some(i),
             }, &mut |tick, jb| {
                 if tick == k + 3 {
-                    assert_eq!(jb.underrun_debt, 2);
-                    jb.drop_frames_pending = 1;
+                    assert_eq!(jb.conceal.debt(), 2);
+                    jb.depth.force_drop();
                 }
             });
             assert_eq!((r.concealed, r.loss, r.dropped_frames, r.debt), (2, 1, 1, 0), "trimming 뒤 debt {ctx}: {r:?}");
@@ -997,8 +998,8 @@ fn restart_matches_fresh_buffer() {
             dirty.restart();
             assert!(dirty.slots.iter().all(|s| !s.valid && s.len == 0 && s.seq == 0 && s.flags == 0 && s.frame == 0 && s.ts == 0));
             assert!(dirty.fifo.is_empty() && dirty.delay.scratch_is_empty() && dirty.target.block_len() == 0);
-            assert!(dirty.loss.is_fresh() && dirty.conceal.is_fresh() && dirty.corr_ring.is_fresh());
-            assert!(dirty.decoder.is_none(), "재시작 직후 디코더는 new처럼 비어 있다");
+            assert!(dirty.conceal.is_fresh() && dirty.depth.is_fresh());
+            assert!(!dirty.conceal.has_decoder(), "재시작 직후 디코더는 new처럼 비어 있다");
             let mut fresh = JitterBuffer::new(settings);
             let mut tx2 = Sender::new(codec, 240, seq0, 123_456);
             let (mut o1, mut o2) = (vec![0f32; 480], vec![0f32; 480]);
