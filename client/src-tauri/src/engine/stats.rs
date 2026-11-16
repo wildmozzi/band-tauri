@@ -1,6 +1,6 @@
 //! 원자 카운터(RT·워커 공유). 프론트로 나가는 보고 DTO는 `engine::report`(설계 문서 4절).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// f32를 비트로 저장하는 원자값. RT 콜백에서 안전하게 쓸 수 있다.
 #[derive(Debug, Default)]
@@ -58,9 +58,72 @@ pub struct AudioCounters {
     pub rt_timing: crate::engine::rt_timing::RtTiming,
 }
 
+/// seqlock 칸: 버전 + `[AtomicU64; N]`(②b-6a, `engine-stage2b-design.md` 3.2절·6.1절). 쓰는 쪽은 하나뿐이고 기다리지
+/// 않는다. 읽는 쪽은 발행 중이면 다시 읽는다. 필드가 전부 원자값이라 `unsafe`가 없다(찢긴 읽기도 정의된 동작이고,
+/// 버전 비교가 한 벌임을 보장한다). 값의 칸 배치와 단일 작성자 보장은 감싸는 타입이 맡는다(`peer_media::MediaStatsCell`).
+/// `write`·`try_read`는 할당·락·시스템콜이 없다. `read`는 재시도 중 `yield_now`를 부르므로 비RT 독자만 쓴다.
+pub struct SeqCell<const N: usize> {
+    ver: AtomicU32,
+    words: [AtomicU64; N],
+}
+
+impl<const N: usize> Default for SeqCell<N> {
+    /// 전부 0, 버전 0(짝수 = 읽을 수 있음).
+    fn default() -> Self {
+        Self { ver: AtomicU32::new(0), words: std::array::from_fn(|_| AtomicU64::new(0)) }
+    }
+}
+
+/// 읽기에서 바쁜 재시도를 이만큼 한 뒤에는 `yield_now`로 쓰는 쪽(워커)에 CPU를 넘긴다. 발행은 수십 ns이고 간격은
+/// 워커 반복(≥150µs)이라 실제로는 1~2회에 끝난다.
+const SPINS_BEFORE_YIELD: usize = 64;
+
+impl<const N: usize> SeqCell<N> {
+    /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨진다). 감싸는 타입이 자기 `write`를 private으로 두고
+    /// 작성자 하나를 타입으로 보장한다.
+    pub fn write(&self, w: &[u64; N]) {
+        let v = self.ver.load(Ordering::Relaxed);
+        self.ver.store(v.wrapping_add(1), Ordering::Relaxed); // 홀수: 쓰는 중
+        fence(Ordering::Release); // 아래 필드 store가 홀수 버전보다 먼저 보이지 않게
+        for (a, &x) in self.words.iter().zip(w) {
+            a.store(x, Ordering::Relaxed);
+        }
+        self.ver.store(v.wrapping_add(2), Ordering::Release); // 짝수: 한 벌 완성
+    }
+
+    /// 한 번 읽어 본다. 발행 중이었거나 그 사이 발행이 끼었으면 None.
+    pub fn try_read(&self) -> Option<[u64; N]> {
+        let v1 = self.ver.load(Ordering::Acquire);
+        if v1 & 1 != 0 {
+            return None;
+        }
+        let w: [u64; N] = std::array::from_fn(|i| self.words[i].load(Ordering::Relaxed));
+        fence(Ordering::Acquire); // 필드 load가 아래 버전 load보다 뒤로 가지 않게
+        (self.ver.load(Ordering::Relaxed) == v1).then_some(w)
+    }
+
+    /// 일관된 한 벌. 성공할 때까지 다시 읽는다(찢긴 값은 절대 돌려주지 않는다). `SPINS_BEFORE_YIELD`회마다
+    /// `yield_now` — 쓰는 쪽이 발행 도중 선점됐으면 그 스레드가 마치게 한다. 비RT 독자만 부른다(RT 경로는 `try_read`).
+    pub fn read(&self) -> [u64; N] {
+        let mut spins = 0;
+        loop {
+            if let Some(w) = self.try_read() {
+                return w;
+            }
+            spins += 1;
+            if spins % SPINS_BEFORE_YIELD == 0 {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn atomic_f32_roundtrip() {
@@ -68,5 +131,85 @@ mod tests {
         assert_eq!(a.load(), 0.25);
         a.store(-1.5);
         assert_eq!(a.load(), -1.5);
+    }
+
+    /// n번째 한 벌: 칸 i = n·(i+1). 첫 칸이 n이다.
+    fn frame<const N: usize>(n: u64) -> [u64; N] {
+        std::array::from_fn(|i| n.wrapping_mul(i as u64 + 1))
+    }
+
+    /// 한 벌 = 모든 칸이 같은 n에서 나왔다. 쓰기 전 기본값(전부 0)도 n = 0인 한 벌이다.
+    fn assert_whole<const N: usize>(w: &[u64; N]) {
+        assert_eq!(*w, frame::<N>(w[0]), "찢긴 한 벌");
+    }
+
+    #[test]
+    fn seq_cell_roundtrip() {
+        let c = SeqCell::<5>::default();
+        assert_eq!(c.read(), [0; 5]);
+        assert_eq!(c.try_read(), Some([0; 5]));
+        c.write(&frame(7));
+        assert_eq!(c.read(), frame::<5>(7));
+        c.write(&[u64::MAX; 5]);
+        assert_eq!(c.try_read(), Some([u64::MAX; 5]));
+    }
+
+    /// 발행 중(홀수 버전)이면 `try_read`는 None이고, 짝수로 돌아오면 다시 읽힌다.
+    #[test]
+    fn seq_cell_try_read_refuses_while_writing() {
+        let c = SeqCell::<3>::default();
+        c.ver.store(1, Ordering::Relaxed);
+        assert_eq!(c.try_read(), None);
+        c.ver.store(2, Ordering::Release);
+        assert_eq!(c.try_read(), Some([0; 3]));
+    }
+
+    /// 쉬지 않는 쓰는 스레드 하나 + 읽는 스레드 넷(`read` 둘, `try_read` 둘): 돌려받은 값은 언제나 한 벌이다.
+    /// 칸이 64개라 쓰기 한 번이 길어 찢길 틈이 넓다(`MediaStatsCell`의 27칸보다 거센 조건).
+    #[test]
+    fn seq_cell_never_torn_under_write_storm() {
+        const N: usize = 64;
+        let c = Arc::new(SeqCell::<N>::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let start = Arc::new(std::sync::Barrier::new(5));
+        let writer = {
+            let (c, stop, start) = (c.clone(), stop.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                let mut n = 1u64;
+                while !stop.load(Ordering::Relaxed) {
+                    c.write(&frame::<N>(n));
+                    n += 1;
+                    if n.is_multiple_of(256) {
+                        std::thread::yield_now();
+                    }
+                }
+                n
+            })
+        };
+        let readers: Vec<_> = (0..4u32)
+            .map(|k| {
+                let (c, start) = (c.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    let (mut full, mut ok) = (0u64, 0u64);
+                    for _ in 0..20_000 {
+                        if k.is_multiple_of(2) {
+                            assert_whole(&c.read());
+                            full += 1;
+                        } else if let Some(w) = c.try_read() {
+                            assert_whole(&w);
+                            ok += 1;
+                        }
+                    }
+                    (full, ok)
+                })
+            })
+            .collect();
+        let (full, _ok) = readers.into_iter().map(|r| r.join().unwrap()).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        stop.store(true, Ordering::Relaxed);
+        assert!(writer.join().unwrap() > 1, "쓰기가 돌지 않았다");
+        assert_eq!(full, 40_000, "read()는 언제나 한 벌을 돌려준다");
+        assert_whole(&c.try_read().expect("쓰기가 없을 때 try_read는 성공한다"));
     }
 }

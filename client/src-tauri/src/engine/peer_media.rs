@@ -7,7 +7,7 @@
 //! - 명령(③-a2): 프로필은 `MediaSettings.profile` 원자값, 재시작은 세대 카운터, 추가·제거는 SPSC 명령 큐
 //!   (`MediaPort` → 워커의 `MediaPortRt`, 용량 16). 응답은 없고, 제거된 항목은 반환 큐로 제어 평면에 돌아와 해제된다.
 
-use std::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard};
@@ -16,7 +16,7 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use super::jitter::{JitterBuffer, JitterSettings, JitterStats};
 use super::mixer::PeerMixCtl;
-use super::stats::AtomicF32;
+use super::stats::{AtomicF32, SeqCell};
 use crate::net::media_link::{MediaRx, PeerKey};
 
 /// 피어 하나의 미디어 통계 한 벌(워커가 발행한 스냅샷).
@@ -112,67 +112,35 @@ fn unpack(w: &[u64; STAT_WORDS]) -> MediaStats {
 }
 
 /// `MediaStats` seqlock(설계 3.2절). 쓰는 쪽은 워커 하나뿐이고 기다리지 않는다. 읽는 쪽은 발행 중이면 다시 읽는다.
-/// 필드가 전부 원자값이라 `unsafe`가 없다(찢긴 읽기도 정의된 동작이고, 버전 비교가 한 벌임을 보장한다).
+/// 알고리즘은 `SeqCell`(`engine::stats`, ②b-6a)이고, 이 셀은 칸 배치(`pack`/`unpack`)와 단일 작성자 보장을 더한다.
 /// 누적 카운터는 짝으로 쓰이므로(`produced − concealed`) 한 벌 일관성이 필요하다.
-pub struct MediaStatsCell {
-    ver: AtomicU32,
-    words: [AtomicU64; STAT_WORDS],
-}
+pub struct MediaStatsCell(SeqCell<STAT_WORDS>);
 
 impl Default for MediaStatsCell {
     fn default() -> Self {
-        let cell = Self { ver: AtomicU32::new(0), words: std::array::from_fn(|_| AtomicU64::new(0)) };
+        let cell = Self(SeqCell::default());
         cell.write(&MediaStats::default());
         cell
     }
 }
-
-/// 읽기에서 바쁜 재시도를 이만큼 한 뒤에는 `yield_now`로 쓰는 쪽(워커)에 CPU를 넘긴다. 발행은 수십 ns이고 간격은
-/// 워커 반복(≥150µs)이라 실제로는 1~2회에 끝난다.
-const SPINS_BEFORE_YIELD: usize = 64;
 
 impl MediaStatsCell {
     /// 쓰기. 쓰는 스레드는 하나여야 한다(둘이면 버전이 깨진다). 부르는 곳은 워커 단독 소유 `PeerMedia::publish(&mut self)`
     /// 하나이고, `PeerMediaShared`는 `PeerMedia::new`가 짝으로만 만들며 `PeerMedia.shared`는 private이다 — 한 셀에 작성자가
     /// 하나임이 타입으로 보장된다(#116 L-1, #118 L-3, #124 L-4·L-5).
     fn write(&self, s: &MediaStats) {
-        let w = pack(s);
-        let v = self.ver.load(Ordering::Relaxed);
-        self.ver.store(v.wrapping_add(1), Ordering::Relaxed); // 홀수: 쓰는 중
-        fence(Ordering::Release); // 아래 필드 store가 홀수 버전보다 먼저 보이지 않게
-        for (a, x) in self.words.iter().zip(w) {
-            a.store(x, Ordering::Relaxed);
-        }
-        self.ver.store(v.wrapping_add(2), Ordering::Release); // 짝수: 한 벌 완성
+        self.0.write(&pack(s));
     }
 
     /// 한 번 읽어 본다. 발행 중이었거나 그 사이 발행이 끼었으면 None.
     pub fn try_read(&self) -> Option<MediaStats> {
-        let v1 = self.ver.load(Ordering::Acquire);
-        if v1 & 1 != 0 {
-            return None;
-        }
-        let w: [u64; STAT_WORDS] = std::array::from_fn(|i| self.words[i].load(Ordering::Relaxed));
-        fence(Ordering::Acquire); // 필드 load가 아래 버전 load보다 뒤로 가지 않게
-        (self.ver.load(Ordering::Relaxed) == v1).then(|| unpack(&w))
+        self.0.try_read().map(|w| unpack(&w))
     }
 
-    /// 일관된 한 벌. 성공할 때까지 다시 읽는다(찢긴 값은 절대 돌려주지 않는다). `SPINS_BEFORE_YIELD`회마다
-    /// `yield_now` — 쓰는 쪽이 발행 도중 선점됐으면 그 스레드가 마치게 한다. 비RT 독자(커맨드·`band-diag`·
-    /// 측정)만 부른다. RT 경로가 읽어야 한다면 `try_read`만 쓴다(이 셀은 지금 RT 경로에서 쓰지 않는다).
+    /// 일관된 한 벌(`SeqCell::read` — 찢긴 값은 절대 돌려주지 않는다). 비RT 독자(커맨드·`band-diag`·측정)만 부른다.
+    /// RT 경로가 읽어야 한다면 `try_read`만 쓴다(이 셀은 지금 RT 경로에서 쓰지 않는다).
     pub fn read(&self) -> MediaStats {
-        let mut spins = 0;
-        loop {
-            if let Some(s) = self.try_read() {
-                return s;
-            }
-            spins += 1;
-            if spins % SPINS_BEFORE_YIELD == 0 {
-                std::thread::yield_now();
-            } else {
-                std::hint::spin_loop();
-            }
-        }
+        unpack(&self.0.read())
     }
 }
 
