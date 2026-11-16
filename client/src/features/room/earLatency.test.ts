@@ -6,6 +6,7 @@ import {
   earLatencyTitleLines,
   estimateEarLatencyMs,
   formatEarLatency,
+  REMOTE_INPUT_SATURATED_MS,
 } from './earLatency'
 
 const peer = (over: Partial<PeerStats> = {}): PeerStats => ({
@@ -103,6 +104,47 @@ describe('estimateEarLatencyMs (P2-8)', () => {
     const exact = estimateEarLatencyMs(peer({ rttMs: 8, bufferMs: 6, remoteFrameMs: 5, remoteInputBufferMs: 2 }), { devicePeriodMs: 3 })
     expect(exact.totalMs).toBe(20)
     expect(exact.approx).toBe(false)
+  })
+
+  it('상대 입력 버퍼 포화값(65.535ms = "그 이상")이면 더하되 ≈, 툴팁에 "이상"', () => {
+    const est = estimateEarLatencyMs(peer({ rttMs: 10, playoutMs: 12, remoteFrameMs: 5, remoteInputBufferMs: 65.535 }), null)
+    expect(est.remoteInputSaturated).toBe(true)
+    expect(est.approx).toBe(true)
+    expect(est.totalMs).toBeCloseTo(5 + 65.535 + 5 + 12)
+    expect(formatEarLatency(est)).toBe('귀까지 ≈ 88 ms')
+    expect(earLatencyTitleLines(est).join('\n')).toContain('65.5ms 이상(보고 상한)')
+    // f32를 거친 값(65.53500366)도 포화로 본다
+    expect(estimateEarLatencyMs(peer({ playoutMs: 12, remoteFrameMs: 5, remoteInputBufferMs: Math.fround(65.535) }), null).remoteInputSaturated).toBe(true)
+    // 바로 아래 값(65534µs)은 정확한 보고
+    const below = estimateEarLatencyMs(peer({ playoutMs: 12, remoteFrameMs: 5, remoteInputBufferMs: Math.fround(65.534) }), null)
+    expect(below.remoteInputSaturated).toBe(false)
+    expect(below.approx).toBe(false)
+    expect(REMOTE_INPUT_SATURATED_MS).toBeGreaterThan(65.534)
+    expect(REMOTE_INPUT_SATURATED_MS).toBeLessThan(65.535)
+  })
+
+  it('내 에코 측정 중(peerEchoing)이면 받는 프레임은 내 것 — 상대 프레임을 생략하고 ≈', () => {
+    const over = { rttMs: 10, playoutMs: 12, remoteFrameMs: 5, remoteInputBufferMs: 2.5 }
+    const est = estimateEarLatencyMs(peer({ ...over, peerEchoing: true }), null)
+    expect(est.echoMeasuring).toBe(true)
+    expect(est.remoteFrameMs).toBeNull()
+    expect(est.totalMs).toBeCloseTo(19.5)
+    expect(est.approx).toBe(true)
+    expect(earLatencyTitleLines(est).join('\n')).toContain('에코 측정 중(생략)')
+    // 측정이 끝나면(peerEchoing false·없음) 다시 정확한 항으로
+    const after = estimateEarLatencyMs(peer({ ...over, peerEchoing: false }), null)
+    expect(after.echoMeasuring).toBe(false)
+    expect(after.approx).toBe(false)
+    // 내가 상대 소리를 되돌려 주는 중(echoActive)이면 받는 프레임은 여전히 상대 것
+    expect(estimateEarLatencyMs(peer({ ...over, echoActive: true }), null).approx).toBe(false)
+  })
+
+  it('≈ 없는 값의 툴팁도 "추정"이라 쓰고 빠진 항을 적는다(정확값으로 읽히지 않게)', () => {
+    const est = estimateEarLatencyMs(peer({ rttMs: 10, playoutMs: 12, remoteFrameMs: 5, remoteInputBufferMs: 2.5 }), null)
+    const lines = earLatencyTitleLines(est)
+    const note = lines[lines.length - 1]
+    expect(note).toContain('추정')
+    expect(note).toContain('RTT 비대칭')
   })
 
   it('잘못된 상대 값(0·NaN·음수)은 무시', () => {

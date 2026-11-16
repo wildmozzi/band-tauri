@@ -262,7 +262,7 @@ off len 필드
 - Ping 평문: 없음, 또는 **에코 제어 6바이트**(P1-1) `[0xEC, flags, delay_us(u32 BE)]`. RTT는 헤더 timestamp를 쓴다.
 - **Ping 손실 보고**(P1-4e): Ping 평문에 `[0x4C, loss(u16 BE), conceal(u16 BE)]` 5바이트를 덧붙인다(단위 0.01%, 0..100%). 보낸 쪽이 **받는 쪽의 스트림을** 재생하며 잰 최근 5초 손실률(지터 버퍼 `loss_pct`)·은닉률(`conceal_pct`)이다. 그 피어 지터 버퍼가 재생 중일 때만 싣는다. 에코 블록이 있으면 그 **뒤**에 붙는다(평문 최대 11바이트). 받는 쪽은 에코 블록(`0xEC`로 시작하는 6바이트)을 건너뛰고 태그를 본다. 모르는 태그·잘린 블록은 무시하고, 블록 뒤 바이트는 확장용으로 무시한다.
   - 구버전 호환: 옛 엔진의 에코 파서는 `[0xEC, flags, d×4, ..]`만 보고 뒤를 무시한다. 손실 블록만 오면 첫 바이트가 `0xEC`가 아니므로 빈 평문(flags 0)과 같다. 그래서 새 → 옛은 에코 동작이 그대로이고, 옛 → 새는 보고가 없으므로 손실 피드백 전환이 일어나지 않는다. Pong 평문(시계, 정확히 9바이트로 읽음)은 옛 엔진이 길이가 다르면 시계 표본을 버리므로 확장하지 않았다.
-- **Ping 입력 버퍼 블록**(P2-8b): Ping 평문 끝(에코·손실 블록 **뒤**)에 `[0x49, in_buf_us(u16 BE)]` 3바이트를 덧붙인다. 보낸 쪽의 입력 장치 버퍼 = 실측 입력 콜백 크기(아직 콜백 전이면 요청 버퍼 크기, `EngineStats.estLatencyMs`의 입력 몫과 같은 값), µs, 65535에서 포화. 받는 쪽은 `PeerStats.remoteInputBufferMs`(입→귀 추정의 상대 몫)로 쓴다. 엔진 없이 쓰는 Net(시험·도구)처럼 모르면 싣지 않는다(0은 "모름"). 값은 제어 스레드가 Ping마다 원자값 하나를 읽어 만든다(RT 경로 무관).
+- **Ping 입력 버퍼 블록**(P2-8b): Ping 평문 끝(에코·손실 블록 **뒤**)에 `[0x49, in_buf_us(u16 BE)]` 3바이트를 덧붙인다. 보낸 쪽의 입력 장치 버퍼 = 실측 입력 콜백 크기(아직 콜백 전이면 요청 버퍼 크기, `EngineStats.estLatencyMs`의 입력 몫과 같은 값), µs, 65535에서 포화(65535 = "65.535ms 이상"이라 받는 쪽은 하한으로 다룬다). 받는 쪽은 `PeerStats.remoteInputBufferMs`(입→귀 추정의 상대 몫)로 쓴다. 엔진 없이 쓰는 Net(시험·도구)처럼 모르면 싣지 않는다(0은 "모름"). 값은 제어 스레드가 Ping마다 원자값 하나를 읽어 만든다(RT 경로 무관).
   - 평문 최대 = 에코 6 + 손실 5 + 입력 버퍼 3 = 14바이트(봉인 패킷 18 + 14 + 16 = 48바이트). 태그 `0x49`는 에코 `0xEC`·손실 `0x4C`·Pong 시계 `0xC1`과 겹치지 않는다.
   - 받는 쪽 파서: 에코 블록(`0xEC` + 5)과 손실 블록(`0x4C` + 4)을 차례로 건너뛰고 `0x49`를 본다. 잘린 블록·모르는 태그는 무시, 블록 뒤 바이트는 확장용으로 무시. 값 0은 없음으로 본다.
   - 구버전 호환: 옛 엔진의 에코 파서는 `[0xEC, ..]`가 아니면 flags 0, 손실 파서는 `[0x4C, 4바이트, ..]` 뒤를 무시하므로 새 Ping을 그대로 읽는다(앞 블록이 없으면 첫 바이트가 `0x49`라 빈 평문과 같다). 옛 → 새는 블록이 없어 `remoteInputBufferMs`가 null이다. 시험: `net::peer::tests::input_buffer_block_roundtrip_and_old_engine_compat`.
@@ -466,11 +466,11 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 `PeerStats.playoutMs` = 벽시계로 잰 버퍼 지연(소스 링 포함, 최근 0.5~1초 최솟값) + 장치 출력 버퍼.
 - 장치 클럭 추정과 독립적이다. 그래서 `bufferMs`(클럭 추정 기준 목표 제어값)와 비교하면 숨은 지연 누적을 탐지할 수 있다.
 - 재생 전에는 0이다.
-- 클라이언트 추정식(P2-8, `client/src/features/room/earLatency.ts`): 멤버 카드의 입→귀 = `rttMs`/2 + `remoteInputBufferMs` + `remoteFrameMs` + `playoutMs`(0이면 재생 전이라 표시 안 함, 필드 없는 옛 엔진은 `bufferMs` + `EngineStats.devicePeriodMs`). 상대 두 값(P2-8b)이 모두 있으면 정확값으로, 하나라도 없으면(옛 엔진 상대, 아직 오디오·Ping 전) 있는 항만 더해 "≈"로 표시한다. 그래도 드라이버가 숨긴 장치 지연과 상대 인코딩·송신 큐(`sendQueue`, 보통 1ms 미만)는 빠지며, 실측 기준은 에코 측정 `mouthToEarMs`다.
+- 클라이언트 추정식(P2-8, `client/src/features/room/earLatency.ts`): 멤버 카드의 입→귀 = `rttMs`/2 + `remoteInputBufferMs` + `remoteFrameMs` + `playoutMs`(0이면 재생 전이라 표시 안 함, 필드 없는 옛 엔진은 `bufferMs` + `EngineStats.devicePeriodMs`). 상대 두 값(P2-8b)이 모두 있으면 "≈" 없이(엔진이 보고하는 항을 모두 더한 추정이지 실측값은 아니다), 하나라도 없으면(옛 엔진 상대, 아직 오디오·Ping 전) 있는 항만 더해 "≈"로 표시한다. 값이 하한일 뿐일 때도 "≈"다: `remoteInputBufferMs`가 포화값 65.535ms이면 더하되 근사로 두고, 내가 그 피어로 에코 측정 중(`peerEchoing`)이면 `remoteFrameMs`가 내 프레임이라 생략한다. "≈"가 없어도 드라이버가 숨긴 장치 지연, 상대 워커 주기(입력 링 → 인코딩 대기)·인코딩·송신 큐(`sendQueue`, 보통 1ms 미만), RTT/2의 대칭 가정은 빠지며, 실측 기준은 에코 측정 `mouthToEarMs`다.
 
 `PeerStats.remoteFrameMs`·`remoteInputBufferMs`(P2-8b, 상대 입력 → 내 귀 경로의 상대 몫):
-- `remoteFrameMs` = 이 피어에게서 마지막으로 받은 Audio 헤더 `frame_samples / 120`(2절, 포맷 변경 없음)을 ms로(2.5 | 5 | 10). 수신 스레드가 패킷마다 원자값에 적는다. 아직 오디오를 못 받았으면 null. 내가 그 피어로 에코 측정 중이면 그 피어가 되돌리는 **내** 패킷의 프레임이다.
-- `remoteInputBufferMs` = 이 피어가 Ping 입력 버퍼 블록(2절)으로 알려 온 그쪽 입력 장치 버퍼(ms, 65.535ms 포화). 옛 엔진(블록 없음)이거나 마지막 보고가 3초(`REPORT_STALE`) 넘었으면 null. 드라이버가 숨긴 입력 지연(루프백 보정값)은 들어 있지 않다.
+- `remoteFrameMs` = 이 피어에게서 마지막으로 받은 Audio 헤더 `frame_samples / 120`(2절, 포맷 변경 없음)을 ms로(2.5 | 5 | 10). 수신 스레드가 패킷마다 원자값과 비교해 바뀌었을 때만 적는다. 아직 오디오를 못 받았으면 null. 내가 그 피어로 에코 측정 중이면 그 피어가 되돌리는 **내** 패킷의 프레임이다(클라이언트 추정식은 이때 이 값을 생략한다).
+- `remoteInputBufferMs` = 이 피어가 Ping 입력 버퍼 블록(2절)으로 알려 온 그쪽 입력 장치 버퍼(ms, 65.535ms 포화 — 이 값이면 "그 이상"인 하한). 옛 엔진(블록 없음)이거나 마지막 보고가 3초(`REPORT_STALE`) 넘었으면 null. 드라이버가 숨긴 입력 지연(루프백 보정값)은 들어 있지 않다.
 - 시험: `tests/loopback.rs` `remote_frame_and_input_buffer_reported`(A 256/10ms ↔ B 128/2.5ms, 각자 상대 값을 정확히 본다), `engine::report::tests::serializes_camel_case`, 클라이언트 `earLatency.test.ts`.
 
 `deviceLost`: 장치를 잃었다. 이때 `running`은 false다. 그래서 프론트의 "running=false 연속 → 엔진 정지" 감지가 그대로 동작한다. 자동 재열기는 아직 없다.

@@ -379,7 +379,10 @@ impl Peer {
     /// 수신 오디오를 피어별 수신 큐에 넣는다(가득 차면 버리고 센다). `recv_loop` 경로(`handle_packet`)에서만 부른다 —
     /// 다른 스레드가 부르면 SPSC가 Mutex로 직렬화될 뿐 깨지지는 않지만 무경쟁 가정이 깨진다(③-a3 리뷰 항목).
     pub(super) fn push_audio(&self, hdr: &super::packet::Header, payload: &[u8], arrival_us: u64) {
-        self.rx_frame_code.store(hdr.frame_code, Ordering::Relaxed);
+        // 프레임은 거의 바뀌지 않는다 — 같으면 쓰지 않아 패킷마다 캐시라인을 더럽히지 않는다(P2-8b 리뷰 Low-3)
+        if self.rx_frame_code.load(Ordering::Relaxed) != hdr.frame_code {
+            self.rx_frame_code.store(hdr.frame_code, Ordering::Relaxed);
+        }
         self.media.lock().push(hdr, payload, arrival_us);
     }
 
