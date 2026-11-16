@@ -70,15 +70,15 @@ const MARGIN_HOLD_US: u64 = 10_000_000;
 const MARGIN_STEP_US: u64 = 2_000_000;
 
 impl PeerFeed {
-    pub fn new(slot: usize, out_rate: u32, shared: &SourceShared) -> Result<Self, String> {
-        Ok(Self {
-            slot,
-            rs: StreamResampler::new(INTERNAL_RATE, out_rate, 2)?,
-            seen_underrun: shared.underrun_frames.load(Ordering::Relaxed),
-            margin: 0,
-            margin_at_us: 0,
-            margin_step_us: 0,
-        })
+    /// `rs` = 48k → 장치 레이트 스테레오 리샘플러. 제어 평면이 만들어 `PeerMedia`에 실어 보낸 것을 받는다 — 여기(워커의 슬롯
+    /// 배정)서는 할당하지 않는다(엔진 ⑧ 후속).
+    pub fn new(slot: usize, rs: StreamResampler, shared: &SourceShared) -> Self {
+        Self { slot, rs, seen_underrun: shared.underrun_frames.load(Ordering::Relaxed), margin: 0, margin_at_us: 0, margin_step_us: 0 }
+    }
+
+    /// 공급을 끝내고 리샘플러를 내놓는다(제거·정지: `PeerMedia`에 되실어 반환 큐로 — 해제는 제어 평면).
+    pub(super) fn into_resampler(self) -> StreamResampler {
+        self.rs
     }
 
     /// 여유 상한(장치 프레임): 다음 콜백 소비량과 `(F + 2ms)/2 × 배율` 중 작은 값(최소 청크 하나).

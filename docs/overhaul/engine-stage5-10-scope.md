@@ -248,7 +248,7 @@ ADR은 `{table, punch, loss_report}`라 적었다. 실제 파일에는 피어 **
 - PR 2개: (a) `DelayStats`·`TargetEst`·`LateBudget`(도착 쪽: `insert`가 부르는 것), (b) `DepthCtl`·`Concealer`(재생 쪽: `pop`·`end_burst`가 부르는 것).
 - 증거: 5분 fixture 바이트 동일(여기서는 fixture가 **실증**이다 — 하네스가 지터 버퍼를 직접 돈다), `jitter/tests.rs`, 60분 하네스 1회, `cpu_profile`(구조체 배치가 바뀌어 캐시 동작이 달라질 수 있다, ±5%).
 - 위험: 필드를 묶으면 빌림이 나뉘어 컴파일은 쉬워지지만, 메서드를 옮기다 갱신 순서가 바뀌면 fixture가 잡는다. 달라지면 버그(fixture 갱신 금지).
-- 후속(②b에서 넘어온 것): 새 피어의 `PeerFeed` 리샘플러를 제어 평면에서 만들어 `PeerMedia`에 실어 보내기 — 워커의 피어 추가 때 할당 1회를 없앤다. `PeerFeed::new` 서명과 하네스·단위 테스트가 바뀌므로 ⑧(b)와 함께 fixture 아래에서 한다.
+- 후속(②b에서 넘어온 것): 새 피어의 `PeerFeed` 리샘플러를 제어 평면에서 만들어 `PeerMedia`에 실어 보내기 — 워커의 피어 추가 때 할당 1회를 없앤다. `PeerFeed::new` 서명과 하네스·단위 테스트가 바뀌므로 ⑧(b)와 함께 fixture 아래에서 한다. 〔완료 — ⑧ 후속 PR〕 할당뿐 아니라 해제(제거·정지)도 제어 평면으로 옮겼다: `engine-architecture.md` 4.3절 1.
 
 ### 5.2 `manager`의 수명 상태
 

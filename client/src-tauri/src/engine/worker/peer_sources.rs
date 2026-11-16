@@ -7,6 +7,10 @@
 //!    `PeerFeed::service` → 녹음 마커 → `publish`. 슬롯이 없는 피어도 `ingest`·`publish`는 한다.
 //!
 //! 표는 하나다(엔진 ②b-4): 피어 하나 = 미디어(지터 버퍼·수신 큐 소비자) + 공급 상태(슬롯·리샘플러, 슬롯을 못 받았으면 없음).
+//! 리샘플러는 미디어가 싣고 온 것을 슬롯 배정 때 공급 상태로 옮기고, 제거·정지 때 미디어에 되실어 반환 큐로 보낸다 — 이 단계는
+//! 피어 추가·제거에서 할당도 해제도 하지 않는다(엔진 ⑧ 후속, `sim::tune`의 churn 시험이 할당 계수로 지킨다).
+//! 예외 하나: 반환 큐가 가득 차 있으면 `give_back`이 그 항목을 여기(워커)서 해제하고 경고를 남긴다 — 제어 평면이 규약대로
+//! 비우는 한 닿지 않는다(`peer_media::MEDIA_RET_CAPACITY`).
 //! 피어 하나의 공급 규칙은 `peer_feed.rs`(`PeerFeed`)다.
 //! 바뀌는 이유: 피어 수명(추가·제거·슬롯), 공급 순서, 녹음 마커. 모르는 것: net, 코덱 설정, 로컬 경로.
 
@@ -62,8 +66,9 @@ pub(crate) struct PeerSources {
     /// 워커가 혼자 가지는 피어 표(명령 큐로만 바뀐다, 엔진 ③-a2·a3). net 피어 표와 같은 순서(추가 순, 제거는 그 자리를 뺀다 —
     /// 순서를 바꾸지 않는다, J4).
     table: Vec<PeerSource>,
-    /// 이번 반복에 제거된 피어의 공급 상태. 슬롯 배정이 끝난 뒤 `DRAIN`으로 바꾸고 버린다(그 반복에는 슬롯을 쥐고 있다).
-    released: Vec<PeerFeed>,
+    /// 이번 반복에 제거된 피어가 쥐고 있던 슬롯 번호. 슬롯 배정이 끝난 뒤 `DRAIN`으로 바꾼다(그 반복에는 슬롯을 쥐고 있다).
+    /// 리샘플러는 여기 남지 않는다 — 제거할 때 미디어에 되실어 반환 큐로 보냈다.
+    released: Vec<usize>,
     /// 피어 미디어 명령 큐의 워커 쪽 끝(추가·제거, 엔진 ③-a2).
     port: MediaPortRt,
     /// 지터 프로필(원자값, 반복마다 비교해 적용).
@@ -74,6 +79,7 @@ pub(crate) struct PeerSources {
     chunk_buf: Vec<f32>,
     tmp: Vec<f32>,
     slot_full_logged: bool,
+    rate_mismatch_logged: bool,
 }
 
 impl PeerSources {
@@ -88,23 +94,25 @@ impl PeerSources {
             chunk_buf: vec![0.0; OUT_CHUNK * 2],
             tmp: vec![0.0; 8192],
             slot_full_logged: false,
+            rate_mismatch_logged: false,
         }
     }
 
     /// 미디어 명령(추가·제거)을 끝까지 비워 표에 반영한다(엔진 ③-a2). 추가는 표 끝에, 제거는 그 자리를 뺀다(순서 유지).
-    /// 제거한 미디어는 반환 큐로 보내고(해제는 제어 평면), 공급 상태는 `released`로 옮긴다 — 슬롯은 `sync_slots`가 배정을
-    /// 끝낸 뒤에 놓는다. 모르는 키의 제거는 무시한다.
+    /// 제거한 미디어는 공급 리샘플러를 되실어 반환 큐로 보내고(해제는 제어 평면), 슬롯 번호는 `released`로 옮긴다 — 슬롯은
+    /// `sync_slots`가 배정을 끝낸 뒤에 놓는다. 모르는 키의 제거는 무시한다.
     fn apply_commands(&mut self) {
         while let Some(cmd) = self.port.next_cmd() {
             match cmd {
                 MediaCmd::Add(media) => self.table.push(PeerSource { media, feed: None }),
                 MediaCmd::Remove(key) => {
                     if let Some(i) = self.table.iter().position(|p| p.media.shared().key == key) {
-                        let p = self.table.remove(i);
-                        if let Some(f) = p.feed {
-                            self.released.push(f);
+                        let PeerSource { mut media, feed } = self.table.remove(i);
+                        if let Some(f) = feed {
+                            self.released.push(f.slot);
+                            media.put_feed_resampler(f.into_resampler());
                         }
-                        self.port.give_back(p.media);
+                        let _ = self.port.give_back(media);
                     }
                 }
             }
@@ -113,35 +121,40 @@ impl PeerSources {
 
     /// 표와 소스 슬롯을 맞춘다: 슬롯이 없는 피어에(표 순서대로) 가장 낮은 빈 슬롯을 배정하고, 그 뒤에 이번 반복에 제거된
     /// 피어의 슬롯을 `DRAIN`으로 바꾼다. 제거된 피어의 슬롯은 이 반복에는 쓰이지 않는다(콜백이 비워 `FREE`가 된 뒤에 재사용).
+    /// 리샘플러는 미디어가 싣고 온 것을 옮겨 쓴다(할당 없음). 그 리샘플러의 출력 레이트가 `out_rate`와 다르면(엔진이 자기
+    /// `StreamInfo.out_rate`로 만들므로 생기지 않는다 — 방어) 슬롯을 주지 않는다: 워커에서 새로 만들지 않는다.
     fn sync_slots(&mut self, bank: &SourceBank, out_rate: u32) {
         for i in 0..self.table.len() {
             if self.table[i].feed.is_some() {
                 continue;
             }
-            let used = |s: usize| self.table.iter().filter_map(|p| p.feed.as_ref()).chain(self.released.iter()).any(|f| f.slot == s);
+            let used = |s: usize| self.table.iter().filter_map(|p| p.feed.as_ref().map(|f| f.slot)).chain(self.released.iter().copied()).any(|x| x == s);
             let free = (1..MAX_SOURCES).find(|&s| !used(s) && bank.slots[s].state.load(Ordering::Acquire) == SLOT_FREE);
-            let m = self.table[i].media.shared();
             let Some(slot) = free else {
                 if !self.slot_full_logged {
-                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", m.peer_id);
+                    log::warn!("출력 소스 슬롯이 부족합니다(피어 {})", self.table[i].media.shared().peer_id);
                     self.slot_full_logged = true;
                 }
                 continue;
             };
-            let sh = &bank.slots[slot];
-            // 드문 할당(워커 스레드): 새 피어의 `PeerFeed`(리샘플러). engine-architecture.md 4.3절 1.
-            match PeerFeed::new(slot, out_rate, sh) {
-                Ok(f) => {
-                    sh.playing.store(false, Ordering::Relaxed);
-                    sh.occupant.store(m.ssrc, Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
-                    sh.state.store(SLOT_ACTIVE, Ordering::Release);
-                    self.table[i].feed = Some(f);
+            let p = &mut self.table[i];
+            // 미디어가 싣고 온 리샘플러를 옮긴다(할당 없음, engine-architecture.md 4.3절 1).
+            let Some(rs) = p.media.take_feed_resampler(out_rate) else {
+                if !self.rate_mismatch_logged {
+                    log::error!("피어 {}의 공급 리샘플러가 출력 레이트 {out_rate}Hz와 맞지 않습니다(소리 없음 — 이후 같은 경고는 생략)", p.media.shared().peer_id);
+                    self.rate_mismatch_logged = true;
                 }
-                Err(e) => log::error!("피어 출력 소스 생성 실패: {e}"),
-            }
+                continue;
+            };
+            let sh = &bank.slots[slot];
+            let f = PeerFeed::new(slot, rs, sh);
+            sh.playing.store(false, Ordering::Relaxed);
+            sh.occupant.store(p.media.shared().ssrc, Ordering::Relaxed); // 녹음 트랙 구분(P2-4), ACTIVE(Release) 전에
+            sh.state.store(SLOT_ACTIVE, Ordering::Release);
+            p.feed = Some(f);
         }
-        for f in self.released.drain(..) {
-            let sh = &bank.slots[f.slot];
+        for slot in self.released.drain(..) {
+            let sh = &bank.slots[slot];
             sh.playing.store(false, Ordering::Relaxed);
             sh.state.store(SLOT_DRAIN, Ordering::Release);
         }
@@ -218,12 +231,22 @@ impl PeerSources {
         PeerRound { urgent }
     }
 
-    /// 정지: 피어 슬롯을 닫는다(콜백이 아직 돌면 남은 소리를 버린다).
-    pub(super) fn close(&mut self, bank: &SourceBank) {
-        for f in self.table.iter_mut().filter_map(|p| p.feed.take()).chain(self.released.drain(..)) {
-            let sh = &bank.slots[f.slot];
+    /// 정지: 피어 슬롯을 닫고(콜백이 아직 돌면 남은 소리를 버린다), 표에 남은 피어를 리샘플러를 되실어 모두 반환 큐로
+    /// 보낸다 — 해제는 워커가 끝난 뒤 제어 평면(`Engine::stop`의 `reclaim`)이 한다. 워커 스레드는 끝나면서도 피어 상태를
+    /// 해제하지 않는다(엔진 ⑧ 후속. 전에는 표에 남은 지터 버퍼·리샘플러가 워커 스레드에서 해제됐다).
+    pub(crate) fn close(&mut self, bank: &SourceBank) {
+        let drain = |slot: usize| {
+            let sh = &bank.slots[slot];
             sh.playing.store(false, Ordering::Relaxed);
             sh.state.store(SLOT_DRAIN, Ordering::Release);
+        };
+        self.released.drain(..).for_each(drain);
+        for PeerSource { mut media, feed } in self.table.drain(..) {
+            if let Some(f) = feed {
+                drain(f.slot);
+                media.put_feed_resampler(f.into_resampler());
+            }
+            let _ = self.port.give_back(media);
         }
     }
 

@@ -82,7 +82,7 @@
 | 레벨·xrun·재생 프레임·콜백 시작/끝·실행시간 | RT | 워커, 통계 | `AudioCounters` 원자값 | 워커는 콜백 시작=끝일 때만 링 점유량과 짝지음 |
 | 믹스 탭·녹음 샘플 | RT 출력 | `band-mix-tap`, `band-record` | SPSC 링 | 느리면 RT가 버리고 센다 |
 | 피어별 수신 큐(`net::media_link`) | net 수신(`MediaTx::push`, `Peer` 안 무경쟁 `Mutex`) | 워커(`PeerMedia::ingest`) | SPSC 링 128 × 1,192B(사전할당) | 가득 차면 새 패킷을 버리고 `rx_dropped`로 센다(③-a3) |
-| 피어별 `JitterBuffer` | 워커만(`PeerMedia` 안, `insert`·`pop`·`end_burst`·`restart`·`set_profile`) | 워커만 | 단독 소유(락 없음) | 생성·해제는 제어 평면(명령·반환 큐). `tests/architecture.rs`가 `Mutex<JitterBuffer>`를 막는다(③-a3) |
+| 피어별 `JitterBuffer` | 워커만(`PeerMedia` 안, `insert`·`pop`·`end_burst`·`restart`·`set_profile`) | 워커만 | 단독 소유(락 없음) | 생성·해제는 제어 평면(명령·반환 큐). 공급 리샘플러도 같은 `PeerMedia`에 실려 오가며 워커가 슬롯을 준 동안만 `PeerFeed`가 쥔다(⑧ 후속). `tests/architecture.rs`가 `Mutex<JitterBuffer>`를 막는다(③-a3) |
 | 피어 미디어 명령: 추가·제거(`MediaCmd`)와 반환 | 커맨드(`add/remove_peer`) / 워커(반환) | 워커 / 커맨드·통계(`reclaim`) | SPSC 링 용량 16(생산자는 `Mutex<HeapProd>`, 제어 평면끼리만) | 소유 이전(`PeerMedia`). 해제는 제어 평면에서(③-a2) |
 | 지터 프로필·재시작 요청 | 커맨드(`MediaSettings.profile`), 에코 측정(`restart_req` +1) | 워커(반복마다 비교) | `AtomicF32` / `AtomicU32` 세대 | 응답 없음(③-a2) |
 | 피어 미디어 통계 스냅샷(`MediaStatsCell`)·손실 보고(`LossCell`) | 워커(피어마다 `service` 직후) | 통계(`Engine::stats`·`peer_jitter_stats`), net 제어(Ping 손실 보고), 에코 측정(버퍼 깊이) | seqlock(버전 + 필드별 원자값) / `AtomicU64` 하나 | 쓰는 쪽은 워커 하나, 읽는 쪽은 락 없음(③-a1) |
@@ -136,7 +136,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 워커는 은닉 마감(다음 출력 콜백 − 1.5ms)을, net 수신은 패킷 도착 시각 기록을 지켜야 한다. RT만큼 엄격하지 않지만 다음을 지킨다.
 
-1. **할당은 시작·재구성 때만**(버퍼는 `Worker::new`에서 사전할당). 반복 중 할당은 이벤트 드문 경로만 허용하고 목록으로 관리한다 — 현재: 메트로놈 계획이 바뀔 때 `ref_peer_id` 문자열 복사(`clone_from` — 기준 피어가 `None` ↔ `Some`으로 바뀌거나 더 긴 id로 바뀔 때만 할당·해제), 새 피어의 `AutoTx`(id `clone`), 새 피어의 `PeerFeed`(리샘플러, `PeerSources`가 슬롯을 배정할 때 — 제어 평면으로 옮기는 것은 ⑧ 후속), `Net::peers()`의 `Vec` 복제(측정·통계 경로), 에코 측정 시작·끝의 지터 재시작(`JitterBuffer::restart` — ③-a2부터 워커에서 적용, 측정당 2회). 에코 프로브 관련 할당은 0이다(②b-5: 인코더·버퍼는 측정 스레드가 미리 만든다). ②에서 워커 루프의 매 반복 경로에 할당이 없음을 유지한다.
+1. **할당은 시작·재구성 때만**(버퍼는 `Worker::new`에서 사전할당). 반복 중 할당은 이벤트 드문 경로만 허용하고 목록으로 관리한다 — 현재: 메트로놈 계획이 바뀔 때 `ref_peer_id` 문자열 복사(`clone_from` — 기준 피어가 `None` ↔ `Some`으로 바뀌거나 더 긴 id로 바뀔 때만 할당·해제), 새 피어의 `AutoTx`(id `clone`), `Net::peers()`의 `Vec` 복제(측정·통계 경로), 에코 측정 시작·끝의 지터 재시작(`JitterBuffer::restart` — ③-a2부터 워커에서 적용, 측정당 2회). 에코 프로브 관련 할당은 0이다(②b-5: 인코더·버퍼는 측정 스레드가 미리 만든다). **피어 소스 단계(`PeerSources`)의 피어 추가·제거·정지도 할당·해제 0이다(⑧ 후속)**: 공급 리샘플러(48k → 장치 레이트)는 제어 평면(`PeerMedia::new`, `add_peer`의 커맨드 스레드)이 `StreamInfo.out_rate`로 만들어 `PeerMedia`에 실어 보내고, 워커는 슬롯을 배정할 때 그것을 `PeerFeed`로 옮기기만 한다. 제거 때는 리샘플러를 `PeerMedia`에 되실어 반환 큐로 보내고, 정지 때(`PeerSources::close`)는 표에 남은 피어를 모두 같은 방식으로 반환 큐에 넣는다 — 해제는 제어 평면의 `MediaPort::reclaim`(`add_peer`·`remove_peer`·`stats`·`stop` — `stats`는 프론트가 주기적으로 부르므로 추가·제거가 한동안 없어도 반환 큐가 비워진다)이 한다. 장치 출력 레이트는 엔진 수명 동안 고정이므로(바꾸면 엔진을 다시 시작하고 피어도 다시 추가된다) 실린 리샘플러의 레이트는 워커의 레이트와 같다. 다르면(방어) 워커는 새로 만들지 않고 그 피어에 슬롯을 주지 않는다(수신·통계는 계속, 소리 없음, 에러 로그 한 번). 반환 큐 용량은 32(`MEDIA_RET_CAPACITY` = 명령 큐 16의 2배)다: 제어 호출은 직렬이고 `add_peer`·`remove_peer`는 `reclaim` 뒤에 `Remove`를 많아야 하나 넣으므로(`stats`의 `reclaim`은 점유를 더 줄일 뿐이다) 마지막 `reclaim` 뒤 돌아올 수 있는 것은 17개, 정지 때 표에 남은 것(≤ `MAX_PEERS` + 1)을 더해도 차지 않는다. 그래도 차 있으면 워커에서 해제하고 경고를 남긴다(누수는 없다). 증거: `sim::tune::run_multi`가 `PeerSources::service`·`close` 호출을 계수 할당자(`sim/alloc.rs`)로 감싸 할당·재할당·해제 0을 단언한다 — 5분·60분 하네스와 churn 시험(실행 중 추가 3·제거 4)이 모두 이 단언 아래에서 돈다. ②에서 워커 루프의 매 반복 경로에 할당이 없음을 유지한다.
 2. **락은 짧게**: 잡은 채 블로킹 I/O·로그·할당을 하지 않는다. 예외: 워커의 `send_to`(UDP, 논블로킹에 가까움, 송신 큐 지연으로 잰다).
 3. **우선순위 역전**: 워커·net 수신은 MMCSS로 올라가 있고 커맨드·`band-diag`는 기본 우선순위다. `parking_lot`은 우선순위 상속이 없으므로 기본 우선순위 스레드가 준RT와 같은 락을 잡을 때 그 안에서는 복사만 한다(`stats()` 스냅샷). **워커는 기본 우선순위 스레드와 락을 나누며 기다리지 않는다**(ADR D1): 지터 락은 ③(통계 = seqlock 스냅샷, 프로필·재시작 = 원자값, 추가·제거 = 명령 큐, 삽입 = 수신 큐), 송신 경로는 ③c(복사본·스냅샷), 에코 프로브와 메트로놈은 ②b(소유 이전 큐 / 세대 + `try_lock`·원자값·seqlock 칸)에서 없앴다. 새 공유 상태도 같은 기준으로 고른다: 값만 바뀌면 원자값, 한 벌이어야 하면 seqlock 칸(`SeqCell`), 소유권이 넘어가면 큐, 드물게 바뀌는 큰 값이면 세대 + `try_lock` 복사. 남은 것(`Peer.clock` — MMCSS끼리, 로그)은 4.1절 끝 표.
 4. 로그는 레이트 제한(1000회에 1번 등).
@@ -234,12 +234,13 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/worker/send.rs` | `SendPath`: 프레임 → 인코드 → `send_audio`, 에코 클릭 스트림. 네트워크가 있을 때만 존재 | 코덱·패킷 플래그·송신 API |
 | `engine/worker/auto_codec.rs` | `AutoCodec`(`SendPath`의 부속): 피어별 자동 Opus 송신 상태(`relay_codec` 정책 연동) | 자동 전환 |
 | `engine/worker/peer_sources.rs` | `PeerSources`: 피어 미디어 표(명령 큐)·슬롯 배정·피어별 공급 순서·녹음 마커 | 피어 수명, 공급 순서 |
-| `engine/worker/peer_feed.rs` | `PeerFeed`: 피어 하나의 지터 → 소스 링 공급 | 콜백 구동 믹스 규칙 |
+| `engine/worker/peer_feed.rs` | `PeerFeed`: 피어 하나의 지터 → 소스 링 공급(리샘플러는 `PeerMedia`가 싣고 온 것) | 콜백 구동 믹스 규칙 |
 | `engine/worker/local_path.rs` | `LocalPath`: 로컬 모니터·탭 공급, 여유 적응, 점유 통계 | 모니터 경로 |
 | `engine/worker/local.rs` | `LocalFifo`(로컬 입력 FIFO, 수위 제어) | FIFO 수위 규칙 |
 | `engine/worker/metronome_stage.rs` | `MetronomeStage`: 메트로놈 박 예약 입력(시계 추정·숨은 출력 지연)·상태 보고 | 메트로놈 스케줄 |
 | `engine/worker/device_watch.rs` | `DeviceWatch`: 장치 멈춤 감시·스트림 에러 로그 | 장치 감시 |
 | `engine/sim/{mod,tune,long,loss_codec}.rs` | 가상 시간 결정적 하네스(`cfg(test)`): 6피어 5·60분, 손실 피드백 | 하네스 시나리오 |
+| `engine/sim/alloc.rs` | 단위 테스트 바이너리의 계수 할당자(`cfg(test)`): 표시 구간 안의 할당·해제를 스레드별로 센다 — 하네스가 워커 단계의 할당·해제 0을 단언(⑧ 후속) | 워커 무할당 증거 |
 | `engine/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
 | `engine/stats.rs`, `rt_timing.rs`, `report.rs` | RT·워커 원자 통계 카운터, RT 콜백 타이밍, 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
 | `engine/measure/{mod, analysis, loopback, echo}.rs` | 지연 측정: 신호 처리·분석·판정(`analysis`), 하드웨어 루프백 작업(`loopback`), 에코 프로브·측정 스레드 ↔ 워커 큐·작업(`echo`). `mod.rs`는 옛 경로 `engine::measure::…`를 `pub use`로 유지 | 측정 |

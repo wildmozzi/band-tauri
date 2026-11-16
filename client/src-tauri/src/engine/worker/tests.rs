@@ -289,6 +289,68 @@ use crate::engine::jitter::{JitterSettings, JitterStats};
 use crate::engine::rt::output_path;
 use crate::net::packet::{Header, PacketType};
 
+/// 출력 레이트 불일치(엔진 ⑧ 후속): 실려 온 공급 리샘플러의 레이트가 워커의 장치 레이트와 다르면 워커는 **새로 만들지 않고**
+/// 그 피어에 슬롯을 주지 않는다(표에는 남아 `ingest`·`publish`는 계속한다). 맞는 피어는 가장 낮은 빈 슬롯을 받는다. 제거하면
+/// 둘 다 리샘플러를 실은 채 반환 큐로 돌아가 제어 평면에서 해제된다. 이 모든 워커 단계 호출에서 할당·해제는 0이다.
+#[test]
+fn mismatched_feed_resampler_gets_no_slot_and_worker_never_allocates() {
+    use crate::engine::peer_media::{media_port, MediaCmd, MediaSettings, PeerMedia};
+    use crate::engine::record::MarkSink;
+    use crate::engine::sim::alloc::counted;
+    use ringbuf::traits::Producer;
+    use crate::net::media_link::{media_link, PeerKey};
+    let counters = Arc::new(AudioCounters::default());
+    let (_rt, feed) = output_path(counters.clone(), Arc::new(MixControls::default()));
+    let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+    let (port, port_rt) = media_port();
+    let mut prods = feed.prods;
+    let bank = feed.bank;
+    let mut sources = PeerSources::new(PeerSourcesParts { prods: prods.split_off(1), port: port_rt, settings: Arc::new(MediaSettings::new(js)), rec_marks: Arc::new(MarkSink::default()) });
+    let wstats = WorkerStats::default();
+    let mut tracker = CallbackTracker::new(48_000);
+    let mk = |k: u64, rate: u32| {
+        let key = PeerKey::from_raw(k);
+        let (tx, rx) = media_link(key);
+        let (s, m) = PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, rx, rate).unwrap();
+        (s, m, tx)
+    };
+    let (bad, bad_m, _tx1) = mk(1, 44_100);
+    let (good, good_m, _tx2) = mk(2, 48_000);
+    {
+        let mut cmd = port.lock_cmd();
+        assert!(cmd.try_push(MediaCmd::Add(bad_m)).is_ok());
+        assert!(cmd.try_push(MediaCmd::Add(good_m)).is_ok());
+    }
+    let mut allocs = 0;
+    let mut step = |sources: &mut PeerSources, t: u64| {
+        let timing = tracker.observe(&counters, t, 128, 48_000);
+        counted(|| sources.service(&bank, &counters, &wstats, 48_000, &timing, None)).1
+    };
+    for t in [1_000, 2_000, 3_000] {
+        allocs += step(&mut sources, t);
+    }
+    assert_eq!(sources.table_len(), 2);
+    assert_eq!(sources.feed_slot(0), None, "레이트가 다른 피어는 슬롯이 없다");
+    assert_eq!(sources.feed_slot(1), Some(1), "맞는 피어는 가장 낮은 빈 슬롯");
+    assert!(sources.media_at(0).has_feed_resampler(), "쓰지 않은 리샘플러는 그대로 실려 있다");
+    assert!(!sources.media_at(1).has_feed_resampler(), "슬롯을 받은 피어의 리샘플러는 공급 상태가 쥔다");
+    assert_eq!(bank.slots[1].state.load(Ordering::Acquire), SLOT_ACTIVE);
+    assert_eq!(bank.slots[2].state.load(Ordering::Acquire), crate::engine::rt::SLOT_FREE);
+    {
+        let mut cmd = port.lock_cmd();
+        assert!(cmd.try_push(MediaCmd::Remove(bad.key)).is_ok());
+        assert!(cmd.try_push(MediaCmd::Remove(good.key)).is_ok());
+    }
+    allocs += step(&mut sources, 4_000);
+    assert_eq!(sources.table_len(), 0);
+    assert_eq!(bank.slots[1].state.load(Ordering::Acquire), crate::engine::rt::SLOT_DRAIN);
+    // 반환 큐에 살아 있다(등록부 + 반환 큐의 PeerMedia) → reclaim에서 해제
+    assert_eq!((Arc::strong_count(&bad), Arc::strong_count(&good)), (2, 2));
+    port.reclaim();
+    assert_eq!((Arc::strong_count(&bad), Arc::strong_count(&good)), (1, 1));
+    assert_eq!(allocs, 0, "워커 단계가 할당·해제를 했다");
+}
+
 #[derive(Clone, Copy)]
 struct FeedSim {
     in_buf: usize,
@@ -343,7 +405,7 @@ fn run_feed_sim(p: FeedSim) -> FeedSimResult {
     let sh = &feed.bank.slots[slot];
     sh.set_gains((1.0, 1.0), (1.0, 1.0));
     sh.state.store(SLOT_ACTIVE, Ordering::Release);
-    let mut pf = PeerFeed::new(slot, 48_000, sh).unwrap();
+    let mut pf = PeerFeed::new(slot, crate::engine::resample::StreamResampler::new(INTERNAL_RATE, 48_000, 2).unwrap(), sh);
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     let mut tracker = CallbackTracker::new(48_000);
     let mut enc = SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap();

@@ -6,6 +6,8 @@
 //! - 통계와 손실 보고는 워커가 발행한 스냅샷(seqlock·원자값)으로만 읽는다(③-a1).
 //! - 명령(③-a2): 프로필은 `MediaSettings.profile` 원자값, 재시작은 세대 카운터, 추가·제거는 SPSC 명령 큐
 //!   (`MediaPort` → 워커의 `MediaPortRt`, 용량 16). 응답은 없고, 제거된 항목은 반환 큐로 제어 평면에 돌아와 해제된다.
+//! - 공급 리샘플러(48k → 장치 레이트, 엔진 ⑧ 후속)도 `PeerMedia`가 싣고 간다: 제어 평면에서 만들고, 워커가 슬롯을 배정할 때
+//!   꺼내 쓰고, 제거·정지 때 되실어 반환 큐로 돌려보낸다. 워커는 피어 추가·제거에서 할당도 해제도 하지 않는다.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -15,7 +17,9 @@ use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use super::jitter::{JitterBuffer, JitterSettings, JitterStats};
+use super::config::INTERNAL_RATE;
 use super::mixer::PeerMixCtl;
+use super::resample::StreamResampler;
 use super::stats::{AtomicF32, SeqCell};
 use crate::net::media_link::{MediaRx, PeerKey};
 
@@ -195,6 +199,9 @@ pub struct PeerMedia {
     profile_applied: u32,
     /// 첫 실제 오디오를 재생 링에 넣은 시각(엔진 epoch µs, 0 = 아직). 이 항목의 수명 동안 한 번만 정한다(P1-20).
     first_audio_us: u64,
+    /// 공급 리샘플러(48k → 장치 출력 레이트, 스테레오). 제어 평면에서 만들어 싣고 온다. 워커가 소스 슬롯을 배정하면 꺼내
+    /// `PeerFeed`가 쥐고(None), 제거·정지 때 되실어 보낸다 — 할당·해제는 둘 다 제어 평면이다(엔진 ⑧ 후속).
+    feed_rs: Option<StreamResampler>,
 }
 
 impl PeerMedia {
@@ -208,11 +215,33 @@ impl PeerMedia {
     /// 작성자(`PeerMedia`, `Clone` 아님, `publish(&mut self)`)가 정확히 하나다 — seqlock 단일 작성자가 모듈 규약이 아니라
     /// 타입으로 보장된다(#116 L-1, #118 리뷰 L-3).
     /// `added_us`: `add_peer` 시각(엔진 epoch µs, `firstAudioMs` 기준, P1-20).
-    pub fn new(key: PeerKey, peer_id: String, ssrc: u32, added_us: u64, settings: JitterSettings, rx: MediaRx) -> (Arc<PeerMediaShared>, Box<Self>) {
+    /// `out_rate`: 이 피어를 받을 워커의 장치 출력 레이트(`StreamInfo.out_rate` — 엔진 수명 동안 고정). 공급 리샘플러를 여기서
+    /// 만든다(엔진 ⑧ 후속). 만들 수 없으면 에러 — 워커에 닿기 전에 호출자에게 돌아간다.
+    pub fn new(key: PeerKey, peer_id: String, ssrc: u32, added_us: u64, settings: JitterSettings, rx: MediaRx, out_rate: u32) -> Result<(Arc<PeerMediaShared>, Box<Self>), String> {
+        let feed_rs = Some(StreamResampler::new(INTERNAL_RATE, out_rate, 2)?);
         let shared = Arc::new(PeerMediaShared::new(key, peer_id, ssrc, added_us));
         let restart_seen = shared.restart_req.load(Ordering::Acquire);
-        let me = Box::new(Self { shared: shared.clone(), rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits(), first_audio_us: 0 });
-        (shared, me)
+        let me = Box::new(Self { shared: shared.clone(), rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits(), first_audio_us: 0, feed_rs });
+        Ok((shared, me))
+    }
+
+    /// 워커의 슬롯 배정: 싣고 온 공급 리샘플러를 꺼낸다(옮기기만 한다 — 할당 없음). 출력 레이트가 워커의 장치 레이트와 다르면
+    /// 꺼내지 않는다(None): 그 피어는 슬롯 없이 `ingest`·`publish`만 하고, 리샘플러는 그대로 실려 있다가 제거 때 돌아간다.
+    /// 이미 꺼냈으면 None.
+    pub(crate) fn take_feed_resampler(&mut self, out_rate: u32) -> Option<StreamResampler> {
+        self.feed_rs.take_if(|rs| rs.out_rate() == out_rate)
+    }
+
+    /// 제거·정지: 공급에 쓰던 리샘플러를 되싣는다(해제는 반환 큐를 거쳐 제어 평면에서).
+    pub(crate) fn put_feed_resampler(&mut self, rs: StreamResampler) {
+        debug_assert!(self.feed_rs.is_none(), "공급 리샘플러는 피어당 하나다");
+        self.feed_rs = Some(rs);
+    }
+
+    /// 공급 리샘플러가 실려 있는가(하네스·테스트).
+    #[cfg(test)]
+    pub(crate) fn has_feed_resampler(&self) -> bool {
+        self.feed_rs.is_some()
     }
 
     /// 워커 반복의 앞부분(그 피어의 `service` 바로 앞, 설계 2.4절·4절):
@@ -285,10 +314,18 @@ pub struct MediaPortRt {
     ret: HeapProd<Box<PeerMedia>>,
 }
 
+/// 반환 큐 용량. 제어 평면이 살아 있는 동안 가득 차지 않게 잡는다: 제어 호출은 직렬이고(`EngineManager` 슬롯 락)
+/// `add_peer`·`remove_peer`는 맨 앞에서 `reclaim`한 뒤 `Remove`를 많아야 하나 넣는다. 그래서 마지막 `reclaim` 뒤에 워커가
+/// 돌려보낼 수 있는 것은 그때 명령 큐에 있던 `Remove`(≤ 16) + 그 호출이 넣은 하나 = 17개까지다. 엔진 정지 때는 워커가 표에
+/// 남은 피어(≤ `MAX_PEERS` + 교체 중 하나)를 마저 돌려보낸다 — 17 + 6 ≤ 32. `Engine::stats`(`report.rs`, 프론트가 주기적으로
+/// 부른다)와 `stop`도 `reclaim`하므로 실제 점유는 이보다 훨씬 낮다. 넘치는 경우(이 규약이 깨졌을 때)의 처리는
+/// `MediaPortRt::give_back`.
+pub const MEDIA_RET_CAPACITY: usize = 2 * MEDIA_CMD_CAPACITY;
+
 /// 명령·반환 링을 여기서 사전할당한다.
 pub fn media_port() -> (MediaPort, MediaPortRt) {
     let (cp, cc) = HeapRb::<MediaCmd>::new(MEDIA_CMD_CAPACITY).split();
-    let (rp, rc) = HeapRb::<Box<PeerMedia>>::new(MEDIA_CMD_CAPACITY).split();
+    let (rp, rc) = HeapRb::<Box<PeerMedia>>::new(MEDIA_RET_CAPACITY).split();
     (MediaPort { cmd: Mutex::new(cp), ret: Mutex::new(rc) }, MediaPortRt { cmd: cc, ret: rp })
 }
 
@@ -315,7 +352,7 @@ impl MediaPort {
         Ok(cmd)
     }
 
-    /// 워커가 돌려보낸 항목을 비운다(지터 버퍼·수신 큐 해제는 여기, 제어 평면 스레드에서).
+    /// 워커가 돌려보낸 항목을 비운다(지터 버퍼·수신 큐·공급 리샘플러 해제는 여기, 제어 평면 스레드에서).
     pub fn reclaim(&self) {
         let mut ret = self.ret.lock();
         while ret.try_pop().is_some() {}
@@ -324,7 +361,7 @@ impl MediaPort {
 
 impl MediaPortRt {
     /// 워커 반복 맨 앞: 명령을 끝까지 비워 표에 반영한다. `table`은 용량을 미리 잡아 둔 `Vec`이다.
-    /// 제거한 항목은 반환 큐로 보낸다(가득 차 있으면 그 자리에서 해제 — 드문 경로). 모르는 키의 제거는 무시한다.
+    /// 제거한 항목은 반환 큐로 보낸다. 모르는 키의 제거는 무시한다.
     #[cfg(test)]
     pub fn drain(&mut self, table: &mut Vec<Box<PeerMedia>>) {
         while let Some(cmd) = self.next_cmd() {
@@ -333,7 +370,7 @@ impl MediaPortRt {
                 MediaCmd::Remove(key) => {
                     if let Some(i) = table.iter().position(|m| m.shared.key == key) {
                         let m = table.remove(i);
-                        self.give_back(m);
+                        let _ = self.give_back(m);
                     }
                 }
             }
@@ -346,9 +383,17 @@ impl MediaPortRt {
         self.cmd.try_pop()
     }
 
-    /// 제거한 미디어를 반환 큐로 보낸다(해제는 제어 평면에서). 가득 차 있으면 그 자리에서 해제된다 — 드문 경로.
-    pub fn give_back(&mut self, m: Box<PeerMedia>) {
-        let _ = self.ret.try_push(m);
+    /// 제거한 미디어를 반환 큐로 보낸다(해제는 제어 평면에서). 반환 큐는 제어 평면이 규약대로 비우는 한 차지 않는다
+    /// (`MEDIA_RET_CAPACITY`). 그래도 가득 차 있으면 그 자리(워커)에서 해제한다 — 누수보다 낫고, 규약이 깨진 것이므로 경고를
+    /// 남긴다. 돌려보냈으면 true.
+    pub fn give_back(&mut self, m: Box<PeerMedia>) -> bool {
+        match self.ret.try_push(m) {
+            Ok(()) => true,
+            Err(m) => {
+                log::warn!("미디어 반환 큐가 가득 참: 피어 {}의 상태를 워커에서 해제합니다", m.shared.peer_id);
+                false
+            }
+        }
     }
 }
 
@@ -513,7 +558,7 @@ mod tests {
     fn media(key: u64, profile: f32) -> (Box<PeerMedia>, MediaTx) {
         let k = PeerKey::from_raw(key);
         let (tx, rx) = media_link(k);
-        (PeerMedia::new(k, format!("p{key}"), key as u32, 0, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile }, rx).1, tx)
+        (PeerMedia::new(k, format!("p{key}"), key as u32, 0, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile }, rx, 48_000).unwrap().1, tx)
     }
 
     /// 재시작 요청은 세대가 바뀐 반복에 한 번만 적용되고, 여러 요청은 한 번으로 합쳐진다.
@@ -533,7 +578,7 @@ mod tests {
     #[test]
     fn first_audio_recorded_once_relative_to_add() {
         let (_tx, rx) = media_link(PeerKey::from_raw(3));
-        let (s, mut pm) = PeerMedia::new(PeerKey::from_raw(3), "p3".into(), 3, 1_000_000, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }, rx);
+        let (s, mut pm) = PeerMedia::new(PeerKey::from_raw(3), "p3".into(), 3, 1_000_000, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }, rx, 48_000).unwrap();
         pm.publish();
         assert_eq!(s.stats().first_audio_ms(s.added_us), None);
         pm.note_audio(1_250_500);
@@ -564,7 +609,7 @@ mod tests {
         let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
         let mk = |k: u64| {
             let key = PeerKey::from_raw(k);
-            PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, media_link(key).1)
+            PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, media_link(key).1, 48_000).unwrap()
         };
         let ((a, ma), (b, mb)) = (mk(10), mk(11));
         {
@@ -606,6 +651,48 @@ mod tests {
         let mut n = 0;
         pm.rx.drain(|_| n += 1);
         assert_eq!(n, 0);
+    }
+
+    /// 공급 리샘플러(엔진 ⑧ 후속): 제어 평면에서 만든 것이 실려 가고, 워커의 장치 레이트와 맞을 때만 꺼내진다. 맞지 않으면
+    /// 그대로 실려 있다(워커는 새로 만들지 않는다). 꺼낸 것은 되실을 수 있다. 만들 수 없는 레이트는 `new`가 에러를 낸다.
+    #[test]
+    fn feed_resampler_rides_with_media_and_is_taken_only_at_matching_rate() {
+        let k = PeerKey::from_raw(7);
+        let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+        let (_s, mut pm) = PeerMedia::new(k, "p7".into(), 7, 0, js, media_link(k).1, 44_100).unwrap();
+        assert!(pm.has_feed_resampler());
+        assert!(pm.take_feed_resampler(48_000).is_none(), "레이트가 다르면 꺼내지 않는다");
+        assert!(pm.has_feed_resampler(), "꺼내지 않은 것은 그대로 실려 있다");
+        let rs = pm.take_feed_resampler(44_100).expect("맞는 레이트");
+        assert_eq!(rs.out_rate(), 44_100);
+        assert!(!rs.is_passthrough());
+        assert!(pm.take_feed_resampler(44_100).is_none(), "한 번만");
+        pm.put_feed_resampler(rs);
+        assert!(pm.has_feed_resampler());
+        assert!(PeerMedia::new(k, "p7".into(), 7, 0, js, media_link(k).1, 0).is_err(), "만들 수 없는 레이트는 제어 평면에서 에러");
+    }
+
+    /// 반환 큐는 명령 큐보다 크다(`MEDIA_RET_CAPACITY` 근거): 명령 큐를 가득 채운 제거 + 하나 + 정지 때 남은 피어가 한꺼번에
+    /// 돌아와도 넘치지 않고, 정말 가득 차면 `give_back`이 false를 돌려준다(그 항목은 그 자리에서 해제 — 누수 없음).
+    #[test]
+    fn return_queue_holds_a_full_command_queue_of_removes_plus_stop_leftovers() {
+        let (port, mut rt) = media_port();
+        let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+        let mk = |k: u64| {
+            let key = PeerKey::from_raw(k);
+            PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, media_link(key).1, 48_000).unwrap()
+        };
+        let mut shared = Vec::new();
+        for k in 0..MEDIA_RET_CAPACITY as u64 {
+            let (s, m) = mk(k + 1);
+            assert!(rt.give_back(m), "{k}번째는 들어가야 한다");
+            shared.push(s);
+        }
+        let (s, m) = mk(999);
+        assert!(!rt.give_back(m), "가득 찬 반환 큐");
+        assert_eq!(Arc::strong_count(&s), 1, "넘친 항목은 새지 않고 그 자리에서 해제된다");
+        port.reclaim();
+        assert!(shared.iter().all(|s| Arc::strong_count(s) == 1), "나머지는 reclaim에서 해제");
     }
 
     /// 명령 큐는 용량에서 막힌다(엔진은 넣기 전에 빈칸을 확인한다).
