@@ -128,7 +128,7 @@ pub struct EngineStats {
     /// 송신 큐 지연: 프레임 생성(인코딩 전) → 피어별 send_to 완료, 직전 2초 창(P1-3, 네트워크 미시작이면 null).
     pub send_queue: Option<crate::net::txlat::SendQueueStats>,
     /// 공유 메트로놈 상태(P2-3).
-    pub metronome: super::metronome::MetronomeStats,
+    pub metronome: super::metronome::plan::MetronomeStats,
     /// 워커 CPU%, RT 콜백 사용률·실행시간 분위수(직전 2초 창, P1-10).
     pub cpu: super::cpuprof::CpuStats,
     /// 합주 녹음 상태(P2-4). 녹음 중이 아니면 null.

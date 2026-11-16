@@ -311,7 +311,7 @@ pub struct OutputRt {
     level_acc: [f32; MAX_SOURCES],
     measure: Option<MeasureOut>,
     /// 공유 메트로놈 클릭(P2-3). 장치 출력에만 섞고 믹스 탭에는 넣지 않는다.
-    click: Option<super::metronome::ClickRt>,
+    click: Option<super::metronome::click::ClickRt>,
     /// 합주 녹음 핸드오프(P2-4). 녹음 중일 때만 소스별 샘플(게인 전)과 믹스를 녹음 링에 넣는다.
     rec: Option<super::record::rt_ring::RecordPortRt>,
 }
@@ -356,7 +356,7 @@ impl OutputRt {
     }
 
     /// 메트로놈 클릭 생성기를 붙인다(엔진 시작 시, 장치를 열기 전).
-    pub fn attach_click(&mut self, c: super::metronome::ClickRt) {
+    pub fn attach_click(&mut self, c: super::metronome::click::ClickRt) {
         self.click = Some(c);
     }
 

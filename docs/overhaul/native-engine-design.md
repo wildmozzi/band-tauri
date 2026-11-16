@@ -91,7 +91,7 @@
 - PCM16: 리틀엔디안 인터리브. **모노 설정이면 1채널만 보낸다**(복제 금지).
 - 패킷 페이로드가 1200바이트를 넘지 않게 한다(PCM16 stereo 10ms = 1920B → 금지 조합. config 검증에서 거부하거나 PCM은 frame ≤5ms로 제한).
 
-### 1.4 공유 메트로놈 (P2-3, `engine/metronome.rs`, `net/clock.rs`)
+### 1.4 공유 메트로놈 (P2-3, `engine/metronome/{click, plan, sched}.rs`, `net/clock.rs`)
 
 방장이 BPM·박자·시작을 정하고, 연주자마다 엔진이 **로컬에서** 클릭을 만든다(클릭 오디오는 네트워크로 보내지 않는다).
 
