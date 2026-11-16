@@ -129,7 +129,7 @@ pub struct NetShared {
     epoch: Instant,
     stop: AtomicBool,
     /// 수신 스레드 우선순위 설정 결과(P1-2).
-    pub recv_prio: crate::sys::prio::PrioSlot,
+    pub recv_prio: crate::engine::prio_slot::PrioSlot,
     allow_loopback: bool,
     /// UDP 릴레이 클라이언트(P1-4b). 토큰을 받기 전에는 None.
     relay: Mutex<Option<RelayClient>>,

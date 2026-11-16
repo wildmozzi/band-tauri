@@ -319,7 +319,7 @@ impl Engine {
             backend: self.info.backend_label(),
             thread_priority: prio::ThreadPriorityStats {
                 worker: ws.thread_prio.load(),
-                net_recv: self.net.as_ref().map(|n| n.shared().recv_prio.load()).unwrap_or(prio::ThreadPriority::Unmanaged),
+                net_recv: self.net.as_ref().map(|n| n.shared().recv_prio.load()).unwrap_or(super::prio_slot::ThreadPriority::Unmanaged),
                 audio: c.audio_thread.load(),
                 timer_1ms: self.timer.as_ref().is_some_and(|t| t.active()),
             },

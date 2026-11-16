@@ -18,8 +18,8 @@
 | 4 | **C 워커 파이프라인**(준RT 데이터 평면) | 입력 → 리샘플 → 인코드 → 송신, 지터 → 디코드·은닉 → 소스 링 공급, 로컬 모니터, 메트로놈 박 예약, 에코 프로브 | `band-worker` |
 | 3 | **D 네트워크** | UDP 소켓, 피어 테이블·홀펀칭, 릴레이, STUN, QoS | `band-net-recv`, `band-net-ctrl`, `band-stun-dns` |
 | 2 | **E 장치 I/O·RT** | 장치 열기·스트림 스레드, RT 콜백(입력 → 링, 소스 링 → 믹스 → 출력), 녹음 RT 링, 메트로놈 클릭 | RT 콜백, `band-wasapi*`, `band-record` |
-| 1 | 알고리즘·상태 | 스레드·소켓 없는 로직과 자료구조: 코덱, 리샘플러, 지터 버퍼, 믹서 함수, 코덱 전환 정책, 시계 추정, 암호, 통계 카운터, 가명화 | (부르는 쪽 스레드) |
-| 0 | 공용 기초 | 설정·상수(`config`), 패킷 형식(`packet`), 스레드 우선순위(`prio`) | — |
+| 1 | 알고리즘·상태 | 스레드·소켓 없는 로직과 자료구조: 코덱, 리샘플러, 지터 버퍼, 믹서 함수, 코덱 전환 정책, 시계 추정, 암호, 통계 카운터, 히스토그램 칸, 가명화 | (부르는 쪽 스레드) |
+| 0 | 공용 기초(플랫폼 호출 포함) | 설정·상수(`config`), 패킷 형식(`packet`), 스레드 우선순위 결과 슬롯(`engine::prio_slot`), OS 호출(`sys::{prio, cpu, time}` — MMCSS·타이머 해상도·스레드 시간·벽시계) | — |
 
 계층은 **노드(파일 단위 모듈) 단위**로 매긴다(5.1절 표). 한 파일이 여러 계층 항목을 가지면(아래 "혼합 파일") 가장 위 계층으로 두고, 그 파일 때문에 생기는 어긋남을 예외로 적은 뒤 9절 ⑥에서 쪼갠다.
 
@@ -171,11 +171,11 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 | 계층 | 노드 |
 |---|---|
-| 0 | `engine::config`, `net::packet`, `sys`, `sys::{prio, cpu, time}`(④) |
-| 1 | `engine::{codec, resample, wav, flac, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `net::{clock, crypto, txlat, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4), `engine::metronome::plan`(⑥-3), `engine::wasapi::format`(⑥-5), `net::peer::ping`(⑥-7) |
-| 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1), `engine::metronome::{click, sched}`(⑥-3), `engine::wasapi::{enumerate, stream, probe}`(⑥-5) |
-| 3 | `net`, `net::{peer, relay, stun, qos}`, `net::peer::descriptor`(⑥-7) |
-| 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), 하네스 `engine::sim`(`cfg(test)`) |
+| 0 | `engine::config`, `net::packet`, `engine::prio_slot`(⑩-0), `sys`, `sys::{prio, cpu, time}`(④) |
+| 1 | `engine::{codec, resample, jitter, relay_codec, mixer, stats, rt_timing, peer_media}`(③), `engine::histo`(⑩-0), `net::{clock, crypto, types, media_link}`(③), `net::connlog`(P1-18), `diag::mask`, `engine::measure::analysis`(⑥-4), `engine::metronome::plan`(⑥-3), `engine::wasapi::format`(⑥-5), `net::peer::ping`(⑥-7) |
+| 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::{wav, flac}`(⑩-0에서 1 → 2: 파일 I/O), `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1), `engine::metronome::{click, sched}`(⑥-3), `engine::wasapi::{enumerate, stream, probe}`(⑥-5) |
+| 3 | `net`, `net::{peer, relay, stun, qos}`, `net::peer::descriptor`(⑥-7), `net::txlat`(⑩-0에서 1 → 3: `Mutex`·`Instant::now`) |
+| 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4), `engine::media_port`(⑩-0, 미디어 명령 큐의 제어 평면 쪽 끝 — 하네스가 쓰므로 4), 하네스 `engine::sim`(`cfg(test)`) |
 | 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `manager`, `settings`, `diag`, `diag::{timeline, export}` |
 | 6 | `commands`, `lib.rs`, `main.rs` |
 | 7 | 테스트 표면 `testing`(`cfg(any(test, feature = "test-support"))`, ⑨a-1) — 모든 계층을 다시 내보낸다. 맨 위라 제품 노드는 쓸 수 없다(7절) |
@@ -185,6 +185,8 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 ### 5.2 크레이트 분리
 
 컴파일러가 순환을 막는 유일한 방법은 크레이트 분리다. 마지막 단계 ⑩으로 한다(9절: `band-dsp` · `band-engine` · 앱 3개). 그 전까지는 이 테스트가 막는다.
+
+**dsp 예정 노드(⑩-0)**: `tests/architecture.rs`의 `DSP_PLANNED`가 ⑩-1에서 `band-dsp`가 될 노드 집합이다 — `engine::{config, prio_slot, codec, resample, jitter, relay_codec, mixer, peer_media, stats, rt_timing, histo}`, `net::{packet, clock, media_link, types}`. 기준은 계층 번호가 아니라 성질이다(스레드를 만들지 않고, 소켓·파일·장치·OS API를 부르지 않고, 벽시계를 읽지 않는다 — `engine-stage5-10-scope.md` 제안 3). 검사 둘: 이 집합에서 밖으로 나가는 간선 0(`dsp_planned_nodes_are_closed`), 이 집합의 파일(단위 테스트 제외)이 쓰는 외부 크레이트는 `opus`·`rubato`·`ringbuf`·`serde`·`log`뿐(`dsp_planned_nodes_use_only_dsp_crates`). 계층 0·1이라도 `sys::*`·`net::crypto`·`diag::mask`·`wav`·`flac`(이제 계층 2)와 `engine::media_port`·`net::txlat`(제어 쪽)은 `DSP_EXCLUDED`라 집합에 넣으면 실패한다. 남은 계층 1 노드(`net::connlog`·`net::peer::ping`·`engine::device::types`·`engine::measure::analysis`·`engine::metronome::plan`·`engine::wasapi::format`)는 순수하지만 dsp가 쓰지 않으므로 `band-engine`에 남는다.
 
 ### 5.3 현재 어긋남
 
@@ -249,7 +251,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/record.rs`, `wav.rs`, `flac.rs` | 합주 녹음: RT 링·핸드오프, 쓰기 스레드, WAV/RF64·FLAC | 녹음 |
 | `engine/prio.rs`, `cpuprof.rs` | 스레드 우선순위·타이머 해상도, CPU 측정 | 플랫폼 |
 | `net/{mod, send, recv_loop, control_loop}.rs` | UDP 소켓·`Net` 수명·피어 표·에코/피어 조회 API·시계 페이로드(`mod`), 봉인·제어 패킷·Audio 팬아웃·에코 반사(`send`), 수신 스레드·패킷 처리(`recv_loop`), 제어 스레드(`control_loop`). `impl NetShared`를 네 파일에 나눠 쓰므로 노드는 `net` 하나 | 네트워크 |
-| `net/{clock, packet, crypto, peer, stun, relay, qos, txlat}.rs` | 시계 오프셋, 패킷, 암호, 피어 테이블·홀펀칭, STUN, 릴레이, DSCP, 송신 큐 지연 | 각 프로토콜 |
+| `net/{clock, packet, crypto, peer, stun, relay, qos, txlat}.rs` | 시계 오프셋, 패킷, 암호, 피어 테이블·홀펀칭, STUN, 릴레이, DSCP, 송신 큐 지연(칸 함수는 `engine/histo.rs`, ⑩-0) | 각 프로토콜 |
 | `diag/{mod, timeline, mask, export}.rs` | 진단 기록 스레드, 링 버퍼, 마스킹, zip | 진단 |
 
 워커 하위 모듈(단계) 사이 공유 상태는 **명시적으로** 넘긴다(②b, [engine-stage2b-design.md](engine-stage2b-design.md) 2.2절): 읽기 전용 문맥(설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop)은 조정자만 갖는 `WorkerCtx`이고, **조정자가 거기서 쓰는 값만 꺼내 단계 메서드의 인자로 준다**(단계는 `&WorkerCtx`를 받지 않는다). `WorkerParams`는 `Worker::new`의 입력일 뿐이다 — 소유권이 넘어가는 끝(`in_cons`·`prods`·`media_port`)이 섞여 있어 단계에 그대로 줄 수 없다. `net`은 쓰는 단계만 생성 때 받아 갖는다. 단계 사이 값은 반환값·인자(`FeedTiming`, 48k 블록·프레임, `PeerRound.urgent`, 입력 쪽 대기량). 전역 상태는 없다.
@@ -314,7 +316,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 | 크레이트 | 내용 | 의존 |
 |---|---|---|
-| `band-dsp` | 계층 0·1: `config`, `packet`, `crypto`, `codec`, `resample`, `jitter`, `mixer`(함수), `net::clock`, `relay_codec`, 통계 카운터. **스레드·소켓·장치 없음** | opus, rubato 등 순수 라이브러리 |
+| `band-dsp` | dsp 예정 노드(5.2절, `DSP_PLANNED`): `config`, `packet`, `codec`, `resample`, `jitter`, `mixer`, `net::clock`, `relay_codec`, 통계 카운터(`stats`·`prio_slot`·`rt_timing`·`histo`), `peer_media`(코어), `media_link`, `types`. **스레드를 만들지 않고 소켓·파일·장치·OS API를 부르지 않으며 벽시계를 읽지 않는다.** `crypto`(OS 난수)·`sys`·`wav`·`flac`·`diag::mask`는 `band-engine`(⑩-0, `engine-stage5-10-scope.md` 7절) | opus, rubato, ringbuf, serde, log |
 | `band-engine` | 계층 2~5: RT·장치, 네트워크, 워커, 제어 평면 | `band-dsp`, cpal, windows |
 | 앱(`band`) | 계층 6: Tauri 어댑터 | `band-engine`, tauri |
 

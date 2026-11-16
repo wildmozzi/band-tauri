@@ -657,7 +657,7 @@ pub fn open_engine_streams(
             Err(message) => {
                 // 이 스레드는 곧 끝나고 MMCSS 등록도 풀린다. 다음 시도(다른 모드 또는 cpal 폴백)가 다시 적기 전까지
                 // 오디오 스레드는 우리가 관리하지 않는 상태다(리뷰 M1). send보다 먼저 적어 받는 쪽이 이 값을 본다.
-                c.audio_thread.store(crate::sys::prio::ThreadPriority::Unmanaged);
+                c.audio_thread.store(crate::engine::prio_slot::ThreadPriority::Unmanaged);
                 let _ = tx.send(Err(OpenFailure { message, rts: Some(Box::new((input, output))) }));
                 return;
             }
@@ -996,7 +996,7 @@ mod tests {
     fn failed_open_resets_audio_priority_to_unmanaged() {
         // 리뷰 M1: 열기 실패 후 cpal로 폴백하면 오디오 스레드 상태가 mmcss로 남으면 안 된다.
         use crate::engine::mixer::MixControls;
-        use crate::sys::prio::ThreadPriority;
+        use crate::engine::prio_slot::ThreadPriority;
         use crate::engine::rt::{input_ring, output_path};
         let counters = Arc::new(AudioCounters::default());
         let (p, _c) = input_ring();

@@ -53,7 +53,7 @@ pub struct AudioCounters {
     /// 장치가 SILENT로 표시한 캡처 패킷 수.
     pub input_silent_packets: AtomicU64,
     /// 오디오 I/O 스레드의 우선순위 설정 결과(자체 WASAPI가 적는다; cpal·가짜 장치는 `Unmanaged`).
-    pub audio_thread: crate::sys::prio::PrioSlot,
+    pub audio_thread: super::prio_slot::PrioSlot,
     /// 입·출력 콜백 실행시간 히스토그램(P1-10). 콜백은 원자 덧셈만 한다.
     pub rt_timing: crate::engine::rt_timing::RtTiming,
 }

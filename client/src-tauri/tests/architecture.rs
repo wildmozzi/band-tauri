@@ -21,9 +21,11 @@ use std::path::{Path, PathBuf};
 
 /// 노드 → (계층, 이름). 계층 번호가 작을수록 아래(기초)다. 문서 5절 표와 같다.
 const NODES: &[(&str, u8)] = &[
-    // 0 공용 기초
+    // 0 공용 기초(플랫폼 호출 포함 — `sys::*`는 OS API를 부르므로 dsp 예정 집합에는 들지 않는다, ⑩-0)
     ("engine::config", 0),
     ("net::packet", 0),
+    // 스레드 우선순위 결과 슬롯(원자값·enum). `sys::prio`(OS 호출)가 쓰고 `engine::stats`가 필드로 갖는다(⑩-0에서 `sys::prio`에서 옮김).
+    ("engine::prio_slot", 0),
     ("sys", 0),
     ("sys::prio", 0),
     ("sys::cpu", 0),
@@ -31,8 +33,6 @@ const NODES: &[(&str, u8)] = &[
     // 1 알고리즘·상태(스레드·소켓 없음)
     ("engine::codec", 1),
     ("engine::resample", 1),
-    ("engine::wav", 1),
-    ("engine::flac", 1),
     ("engine::device::types", 1),
     ("engine::jitter", 1),
     ("engine::relay_codec", 1),
@@ -40,11 +40,12 @@ const NODES: &[(&str, u8)] = &[
     ("engine::peer_media", 1),
     ("engine::stats", 1),
     ("engine::rt_timing", 1),
+    // 지연 히스토그램 칸 함수(순수). `rt_timing`·`net::txlat`이 쓴다(⑩-0에서 `net::txlat`에서 옮김).
+    ("engine::histo", 1),
     ("net::clock", 1),
     ("net::connlog", 1),
     ("net::crypto", 1),
     ("net::media_link", 1),
-    ("net::txlat", 1),
     ("net::types", 1),
     // Ping 평문 조립·해석과 에코 상태(순수 — 소켓·스레드·락 없음, ⑥-7). 하네스(`sim/loss_codec.rs`)가 쓴다.
     ("net::peer::ping", 1),
@@ -54,6 +55,9 @@ const NODES: &[(&str, u8)] = &[
     ("engine::wasapi::format", 1),
     // 2 E 장치 I/O·RT
     ("engine::rt", 2),
+    // 녹음 파일 쓰기(파일 I/O·벽시계, 녹음 쓰기 스레드 전용). ⑩-0에서 계층 1에서 올림(`engine-stage5-10-scope.md` 7.1절).
+    ("engine::wav", 2),
+    ("engine::flac", 2),
     ("engine::device", 2),
     ("engine::device::backend", 2),
     ("engine::device::cpal", 2),
@@ -79,12 +83,17 @@ const NODES: &[(&str, u8)] = &[
     ("net::relay", 3),
     ("net::stun", 3),
     ("net::qos", 3),
+    // 송신 큐 지연·락 대기 계측(`Mutex`·`Instant::now`). 칸 함수는 `engine::histo`로 내리고 나머지는 계층 3(⑩-0).
+    ("net::txlat", 3),
     // 4 C 워커 파이프라인
     ("engine::worker", 4),
     ("engine::sim", 4),
     ("engine::measure", 4),
     ("engine::measure::loopback", 4),
     ("engine::measure::echo", 4),
+    // 미디어 명령 큐의 제어 평면 쪽 끝(`MediaPort`: Mutex·수면·시계). 링은 `engine::peer_media`(dsp 예정)가 만든다(⑩-0).
+    // 문서 7.3절 처음 안은 계층 5였으나 하네스(`engine::sim`, 계층 4)가 쓰므로 4.
+    ("engine::media_port", 4),
     // 5 B 제어 평면
     ("engine", 5),
     ("engine::cpuprof", 5),
@@ -122,6 +131,51 @@ const FORBIDDEN: &[(&str, &str, &str)] = &[
     // net은 수신 큐(`net::media_link`)에 넣기만 한다. 피어 미디어 상태는 워커 소유(③-a3).
     ("net", "engine::peer_media", "③-a3"),
 ];
+
+/// dsp 예정 노드(엔진 ⑩, `engine-stage5-10-scope.md` 7.1·7.2절, ADR 제안 3): 스레드를 만들지 않고, 소켓·파일·장치·OS API를
+/// 부르지 않고, 벽시계를 읽지 않는 코드. ⑩-1에서 이 집합이 그대로 `band-dsp` 크레이트가 된다. 그러려면 이 집합 밖으로 나가는
+/// 간선이 없어야 한다(`dsp_planned_nodes_are_closed`). 계층 0·1이라도 `DSP_EXCLUDED`는 들지 않는다. 계층 1의 나머지
+/// (`net::connlog`·`net::peer::ping`·`engine::device::types`·`engine::measure::analysis`·`engine::metronome::plan`·
+/// `engine::wasapi::format`)는 7.2절 그래프대로 `band-engine`에 남는다(순수하지만 dsp가 쓰지 않는다).
+const DSP_PLANNED: &[&str] = &[
+    "engine::config",
+    "net::packet",
+    "engine::prio_slot",
+    "engine::codec",
+    "engine::resample",
+    "engine::jitter",
+    "engine::relay_codec",
+    "engine::mixer",
+    "engine::peer_media",
+    "engine::stats",
+    "engine::rt_timing",
+    "engine::histo",
+    "net::clock",
+    "net::media_link",
+    "net::types",
+];
+
+/// dsp 예정 집합에 넣으면 안 되는 노드(7.1절 표의 "아니오"와 "나눈다"의 제어 쪽). 실수로 `DSP_PLANNED`에 넣으면 실패한다.
+const DSP_EXCLUDED: &[&str] = &[
+    // OS 난수(키 생성). engine에 남겨 dsp에서 암호 의존을 뺀다(PR #125 검토 L10).
+    "net::crypto",
+    // 파일 I/O·벽시계(녹음 쓰기 스레드).
+    "engine::wav",
+    "engine::flac",
+    // OS 호출(MMCSS·타이머 해상도·스레드 시간·벽시계).
+    "sys",
+    "sys::prio",
+    "sys::cpu",
+    "sys::time",
+    // `regex`·`sha2`. 쓰는 곳이 record·diag뿐.
+    "diag::mask",
+    // 제어 쪽 끝(Mutex·수면·시계), 송신 지연·락 대기 계측(Mutex·Instant::now).
+    "engine::media_port",
+    "net::txlat",
+];
+
+/// dsp 예정 노드가 쓸 수 있는 외부 크레이트(7.2절 그래프의 `band-dsp` 의존). 단위 테스트(`rand`·`sha2`·`serde_json` 등)는 보지 않는다.
+const DSP_EXTERN_ALLOWED: &[&str] = &["opus", "rubato", "ringbuf", "serde", "log"];
 
 /// 어댑터(계층 6)가 쓸 수 있는 노드: 제어 평면과 계약 DTO(설정·보고·디스크립터)를 가진 모듈만. 로직은 제어 평면에서 부른다.
 const ADAPTER_MAY_USE: &[&str] = &[
@@ -675,6 +729,129 @@ fn forbidden_edges_absent() {
         }
     }
     assert!(bad.is_empty(), "금지 간선(FORBIDDEN) — net은 미디어 상태를 직접 쓰지 않는다:\n{}", bad.join("\n"));
+}
+
+/// dsp 예정 노드에서 집합 밖 노드로 가는 간선.
+fn dsp_escapes(edges: &BTreeMap<(&str, &str), BTreeSet<String>>) -> Vec<String> {
+    edges
+        .keys()
+        .filter(|(from, to)| DSP_PLANNED.contains(from) && !DSP_PLANNED.contains(to))
+        .map(|&(from, to)| format!("  {from} → {to} [{}]", files_of(edges, (from, to))))
+        .collect()
+}
+
+/// `Cargo.toml`의 `[dependencies]`·`[target.*.dependencies]` 이름(`-` → `_`). 개발·빌드 의존은 뺀다.
+fn extern_crates() -> BTreeSet<String> {
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).expect("Cargo.toml");
+    let mut out = BTreeSet::new();
+    let mut in_deps = false;
+    for l in text.lines().map(str::trim) {
+        if l.starts_with('[') {
+            in_deps = l == "[dependencies]" || (l.starts_with("[target.") && l.ends_with(".dependencies]"));
+            continue;
+        }
+        if in_deps && !l.starts_with('#') {
+            if let Some((name, _)) = l.split_once('=') {
+                let name = name.trim();
+                if !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+                    out.insert(name.replace('-', "_"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 코드(주석·문자열을 지운 것)에서 `krate::`로 쓰인 외부 크레이트 가운데 `allowed`에 없는 것.
+fn extern_uses(code: &str, crates: &BTreeSet<String>, allowed: &[&str]) -> BTreeSet<String> {
+    let b = code.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = BTreeSet::new();
+    for k in crates.iter().filter(|k| !allowed.contains(&k.as_str())) {
+        let pat = format!("{k}::");
+        let mut from = 0;
+        while let Some(i) = code[from..].find(&pat).map(|i| i + from) {
+            // 앞이 식별자 문자나 `::`(다른 경로의 한 마디)가 아니어야 크레이트 이름이다(`::sha2::`는 절대 경로라 잡는다).
+            let in_path = i >= 2 && &code[i - 2..i] == "::" && (i == 2 || ident(b[i - 3]));
+            if (i == 0 || !ident(b[i - 1])) && !in_path {
+                out.insert(k.clone());
+            }
+            from = i + pat.len();
+        }
+    }
+    out
+}
+
+/// ⑩-0: dsp 예정 노드는 집합 밖을 쓰지 않는다(⑩-1에서 `band-dsp`로 떼어낼 수 있다). `sys`·`net::crypto` 등을 쓰면 실패.
+#[test]
+fn dsp_planned_nodes_are_closed() {
+    for n in DSP_PLANNED {
+        assert!(NODES.iter().any(|(k, _)| k == n), "DSP_PLANNED의 노드가 NODES에 없음: {n}");
+        assert!(!DSP_EXCLUDED.contains(n), "DSP_PLANNED에 넣으면 안 되는 노드(DSP_EXCLUDED): {n}");
+    }
+    for n in DSP_EXCLUDED {
+        assert!(NODES.iter().any(|(k, _)| k == n), "DSP_EXCLUDED의 노드가 NODES에 없음: {n}");
+    }
+    let bad = dsp_escapes(&edges());
+    assert!(bad.is_empty(), "dsp 예정 노드가 집합 밖을 쓴다(⑩-0, engine-stage5-10-scope.md 7.3절):\n{}", bad.join("\n"));
+}
+
+/// ⑩-0: dsp 예정 노드가 쓰는 외부 크레이트는 `DSP_EXTERN_ALLOWED`뿐(7.2절 — `sha2`·`rand`·`parking_lot` 등을 직접 쓰지 않는다).
+#[test]
+fn dsp_planned_nodes_use_only_dsp_crates() {
+    let crates = extern_crates();
+    for k in ["sha2", "rand", "parking_lot", "opus", "windows_sys", "x25519_dalek"] {
+        assert!(crates.contains(k), "Cargo.toml 의존 읽기: {k} 없음 {crates:?}");
+    }
+    let mut bad = Vec::new();
+    let mut seen = 0;
+    for (f, module) in source_files() {
+        if module.last().is_some_and(|m| m == "tests") || !node_of(&module).is_some_and(|n| DSP_PLANNED.contains(&n)) {
+            continue;
+        }
+        seen += 1;
+        let text = std::fs::read_to_string(&f).expect("읽기");
+        let used = extern_uses(&strip(without_unit_tests(&text)), &crates, DSP_EXTERN_ALLOWED);
+        if !used.is_empty() {
+            bad.push(format!("  {}: {used:?}", f.strip_prefix(src_dir()).unwrap_or(&f).display()));
+        }
+    }
+    assert!(seen >= DSP_PLANNED.len(), "dsp 예정 노드 파일을 다 보지 못했다: {seen}");
+    assert!(bad.is_empty(), "dsp 예정 노드가 band-dsp 의존 밖의 외부 크레이트를 쓴다(DSP_EXTERN_ALLOWED):\n{}", bad.join("\n"));
+}
+
+/// 변이: dsp 예정 노드에서 `sys`·`net::crypto`·제어 쪽 노드를 쓰면 잡히고, 집합 안·밖→안 간선은 잡히지 않는다.
+/// 외부 크레이트 검사는 `sha2`·`rand`·`parking_lot`을 잡고, 허용 크레이트·다른 경로의 한 마디·주석·문자열은 잡지 않는다.
+#[test]
+fn dsp_scanner_catches_variants() {
+    let mk = |pairs: &[(&'static str, &'static str)]| -> BTreeMap<(&'static str, &'static str), BTreeSet<String>> {
+        pairs.iter().map(|&k| (k, BTreeSet::from(["x.rs".to_string()]))).collect()
+    };
+    for bad in [
+        ("engine::stats", "sys::prio"),
+        ("engine::jitter", "net::crypto"),
+        ("engine::rt_timing", "net::txlat"),
+        ("engine::peer_media", "engine::media_port"),
+        ("net::types", "sys::time"),
+        ("engine::codec", "engine::wav"),
+    ] {
+        assert_eq!(dsp_escapes(&mk(&[bad])).len(), 1, "{bad:?}");
+    }
+    let ok = mk(&[
+        ("engine::stats", "engine::prio_slot"),
+        ("engine::rt_timing", "engine::histo"),
+        ("net::txlat", "engine::histo"),
+        ("sys::prio", "engine::prio_slot"),
+    ]);
+    assert!(dsp_escapes(&ok).is_empty());
+    let crates: BTreeSet<String> = ["sha2", "rand", "parking_lot", "ringbuf", "log"].iter().map(|s| s.to_string()).collect();
+    let f = |code: &str| extern_uses(&strip(code), &crates, DSP_EXTERN_ALLOWED);
+    assert_eq!(f("use sha2::{Digest, Sha256};"), BTreeSet::from(["sha2".to_string()]));
+    assert_eq!(f("fn k() { let r = rand::random::<u8>(); }"), BTreeSet::from(["rand".to_string()]));
+    assert_eq!(f("use parking_lot::Mutex;"), BTreeSet::from(["parking_lot".to_string()]));
+    assert_eq!(f("let m = ::parking_lot::Mutex::new(0);"), BTreeSet::from(["parking_lot".to_string()]));
+    assert!(f("use ringbuf::HeapRb; fn a() { log::warn!(\"x\"); }").is_empty());
+    assert!(f("use crate::engine::rand::x; let v = operand::y; // rand::z\nlet s = \"sha2::A\";").is_empty());
 }
 
 /// 워커 단독 소유 미디어 상태 타입(엔진 ③). 락 안에 들어가면 안 된다. `PeerMediaShared`(원자값만)는 다른 이름이라 해당 없음.

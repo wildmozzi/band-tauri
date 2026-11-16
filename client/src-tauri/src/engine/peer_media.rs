@@ -5,15 +5,14 @@
 //! - `PeerMediaShared`(믹스 제어·통계 스냅샷·재시작 요청, 전부 원자값): 제어 평면(엔진 등록부)과 워커가 `Arc`로 나눈다.
 //! - 통계와 손실 보고는 워커가 발행한 스냅샷(seqlock·원자값)으로만 읽는다(③-a1).
 //! - 명령(③-a2): 프로필은 `MediaSettings.profile` 원자값, 재시작은 세대 카운터, 추가·제거는 SPSC 명령 큐
-//!   (`MediaPort` → 워커의 `MediaPortRt`, 용량 16). 응답은 없고, 제거된 항목은 반환 큐로 제어 평면에 돌아와 해제된다.
+//!   (`engine::media_port::MediaPort` → 워커의 `MediaPortRt`, 용량 16. 링은 `media_rings`가 여기서 만든다). 응답은 없고, 제거된 항목은 반환 큐로 제어 평면에 돌아와 해제된다.
 //! - 공급 리샘플러(48k → 장치 레이트, 엔진 ⑧ 후속)도 `PeerMedia`가 싣고 간다: 제어 평면에서 만들고, 워커가 슬롯을 배정할 때
 //!   꺼내 쓰고, 제거·정지 때 되실어 반환 큐로 돌려보낸다. 워커는 피어 추가·제거에서 할당도 해제도 하지 않는다.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use parking_lot::{Mutex, MutexGuard};
-use ringbuf::traits::{Consumer, Observer, Producer, Split};
+use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use super::jitter::{JitterBuffer, JitterSettings, JitterStats};
@@ -302,12 +301,6 @@ pub enum MediaCmd {
 /// 명령 큐 용량. 워커가 반복(≤ 약 1ms)마다 비우므로 차는 것은 워커가 멈췄을 때뿐이다.
 pub const MEDIA_CMD_CAPACITY: usize = 16;
 
-/// 제어 평면 쪽 끝: 명령 생산자(커맨드 스레드가 여럿이라 Mutex, 제어 평면끼리만 다툰다)와 반환 큐 소비자.
-pub struct MediaPort {
-    cmd: Mutex<HeapProd<MediaCmd>>,
-    ret: Mutex<HeapCons<Box<PeerMedia>>>,
-}
-
 /// 워커 쪽 끝.
 pub struct MediaPortRt {
     cmd: HeapCons<MediaCmd>,
@@ -322,41 +315,12 @@ pub struct MediaPortRt {
 /// `MediaPortRt::give_back`.
 pub const MEDIA_RET_CAPACITY: usize = 2 * MEDIA_CMD_CAPACITY;
 
-/// 명령·반환 링을 여기서 사전할당한다.
-pub fn media_port() -> (MediaPort, MediaPortRt) {
+/// 명령·반환 링을 여기서 사전할당하고 날것의 끝 셋을 돌려준다: 명령 생산자·반환 소비자(제어 평면 쪽, `engine::media_port`가
+/// 감싼다)와 워커 쪽 끝.
+pub fn media_rings() -> (HeapProd<MediaCmd>, HeapCons<Box<PeerMedia>>, MediaPortRt) {
     let (cp, cc) = HeapRb::<MediaCmd>::new(MEDIA_CMD_CAPACITY).split();
     let (rp, rc) = HeapRb::<Box<PeerMedia>>::new(MEDIA_RET_CAPACITY).split();
-    (MediaPort { cmd: Mutex::new(cp), ret: Mutex::new(rc) }, MediaPortRt { cmd: cc, ret: rp })
-}
-
-/// 명령 큐에 빈칸이 생기기를 기다리는 상한. 워커는 반복(≤ 약 1ms)마다 비우므로, 이만큼 차 있으면 워커가 멈춘 것이다.
-pub const MEDIA_CMD_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
-
-impl MediaPort {
-    /// 명령 큐 생산자를 잡는다. 여러 명령을 한 번에 넣을 때는 빈칸(`vacant_len`)을 먼저 확인한다.
-    pub fn lock_cmd(&self) -> MutexGuard<'_, HeapProd<MediaCmd>> {
-        self.cmd.lock()
-    }
-
-    /// 빈칸이 `n`개 이상인 생산자. 커맨드가 몰려(한 워커 반복 안에 16개 넘게) 차 있으면 워커가 비울 때까지
-    /// `MEDIA_CMD_WAIT`까지 기다린다(제어 평면 스레드라 잠깐 자도 된다). 그래도 차 있으면 워커가 멈춘 것 → 에러.
-    pub fn reserve_cmd(&self, n: usize) -> Result<MutexGuard<'_, HeapProd<MediaCmd>>, String> {
-        let t0 = std::time::Instant::now();
-        let mut cmd = self.cmd.lock();
-        while cmd.vacant_len() < n {
-            if t0.elapsed() >= MEDIA_CMD_WAIT {
-                return Err("오디오 워커가 응답하지 않습니다(미디어 명령 큐가 가득 참)".into());
-            }
-            MutexGuard::unlocked(&mut cmd, || std::thread::sleep(std::time::Duration::from_millis(1)));
-        }
-        Ok(cmd)
-    }
-
-    /// 워커가 돌려보낸 항목을 비운다(지터 버퍼·수신 큐·공급 리샘플러 해제는 여기, 제어 평면 스레드에서).
-    pub fn reclaim(&self) {
-        let mut ret = self.ret.lock();
-        while ret.try_pop().is_some() {}
-    }
+    (cp, rc, MediaPortRt { cmd: cc, ret: rp })
 }
 
 impl MediaPortRt {
@@ -601,32 +565,6 @@ mod tests {
         assert_eq!(jb.tuning(), crate::engine::jitter::JitterTuning::from_profile(0.1));
     }
 
-    /// 추가 → 제거: 표에서 빠진 항목은 반환 큐로 가서 제어 평면에서 해제된다. 모르는 키의 제거는 무시한다.
-    #[test]
-    fn media_port_moves_ownership_and_returns_removed() {
-        let (port, mut rt) = media_port();
-        let mut table = Vec::with_capacity(MEDIA_CMD_CAPACITY);
-        let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
-        let mk = |k: u64| {
-            let key = PeerKey::from_raw(k);
-            PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, media_link(key).1, 48_000).unwrap()
-        };
-        let ((a, ma), (b, mb)) = (mk(10), mk(11));
-        {
-            let mut cmd = port.lock_cmd();
-            assert!(cmd.try_push(MediaCmd::Add(ma)).is_ok());
-            assert!(cmd.try_push(MediaCmd::Add(mb)).is_ok());
-            assert!(cmd.try_push(MediaCmd::Remove(PeerKey::from_raw(99))).is_ok());
-            assert!(cmd.try_push(MediaCmd::Remove(a.key)).is_ok());
-        }
-        rt.drain(&mut table);
-        assert_eq!(table.iter().map(|m| m.shared.key).collect::<Vec<_>>(), vec![b.key]);
-        // 반환 큐에 있는 동안은 워커가 놓은 참조가 남아 있다(엔진 등록부 a, 반환 큐의 PeerMedia)
-        assert_eq!(Arc::strong_count(&a), 2);
-        port.reclaim();
-        assert_eq!(Arc::strong_count(&a), 1, "해제는 제어 평면의 reclaim에서");
-    }
-
     /// `ingest`는 큐를 끝까지 비워 지터 버퍼에 넣고, `publish`는 큐 넘침(`rx_dropped`)과 재생 여부를 발행한다.
     #[test]
     fn ingest_drains_queue_and_publish_reports_rx_dropped() {
@@ -670,40 +608,5 @@ mod tests {
         pm.put_feed_resampler(rs);
         assert!(pm.has_feed_resampler());
         assert!(PeerMedia::new(k, "p7".into(), 7, 0, js, media_link(k).1, 0).is_err(), "만들 수 없는 레이트는 제어 평면에서 에러");
-    }
-
-    /// 반환 큐는 명령 큐보다 크다(`MEDIA_RET_CAPACITY` 근거): 명령 큐를 가득 채운 제거 + 하나 + 정지 때 남은 피어가 한꺼번에
-    /// 돌아와도 넘치지 않고, 정말 가득 차면 `give_back`이 false를 돌려준다(그 항목은 그 자리에서 해제 — 누수 없음).
-    #[test]
-    fn return_queue_holds_a_full_command_queue_of_removes_plus_stop_leftovers() {
-        let (port, mut rt) = media_port();
-        let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
-        let mk = |k: u64| {
-            let key = PeerKey::from_raw(k);
-            PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, media_link(key).1, 48_000).unwrap()
-        };
-        let mut shared = Vec::new();
-        for k in 0..MEDIA_RET_CAPACITY as u64 {
-            let (s, m) = mk(k + 1);
-            assert!(rt.give_back(m), "{k}번째는 들어가야 한다");
-            shared.push(s);
-        }
-        let (s, m) = mk(999);
-        assert!(!rt.give_back(m), "가득 찬 반환 큐");
-        assert_eq!(Arc::strong_count(&s), 1, "넘친 항목은 새지 않고 그 자리에서 해제된다");
-        port.reclaim();
-        assert!(shared.iter().all(|s| Arc::strong_count(s) == 1), "나머지는 reclaim에서 해제");
-    }
-
-    /// 명령 큐는 용량에서 막힌다(엔진은 넣기 전에 빈칸을 확인한다).
-    #[test]
-    fn media_cmd_queue_is_bounded() {
-        let (port, _rt) = media_port();
-        let mut cmd = port.lock_cmd();
-        for i in 0..MEDIA_CMD_CAPACITY {
-            assert!(cmd.try_push(MediaCmd::Remove(PeerKey::from_raw(i as u64 + 1))).is_ok());
-        }
-        assert_eq!(cmd.vacant_len(), 0);
-        assert!(cmd.try_push(MediaCmd::Remove(PeerKey::from_raw(100))).is_err());
     }
 }

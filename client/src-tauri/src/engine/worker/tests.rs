@@ -294,7 +294,8 @@ use crate::net::packet::{Header, PacketType};
 /// 둘 다 리샘플러를 실은 채 반환 큐로 돌아가 제어 평면에서 해제된다. 이 모든 워커 단계 호출에서 할당·해제는 0이다.
 #[test]
 fn mismatched_feed_resampler_gets_no_slot_and_worker_never_allocates() {
-    use crate::engine::peer_media::{media_port, MediaCmd, MediaSettings, PeerMedia};
+    use crate::engine::media_port::media_port;
+    use crate::engine::peer_media::{MediaCmd, MediaSettings, PeerMedia};
     use crate::engine::record::MarkSink;
     use crate::engine::sim::alloc::counted;
     use ringbuf::traits::Producer;

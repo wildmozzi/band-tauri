@@ -20,7 +20,8 @@ use crate::engine::worker::{CallbackTracker, PeerSources, PeerSourcesParts, Work
 use crate::engine::codec::Encoder as SimEncoder;
 use crate::engine::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
 use crate::engine::jitter::{JitterSettings, JitterStats};
-use crate::engine::peer_media::{media_port, MediaCmd, MediaSettings, PeerMedia};
+use crate::engine::media_port::media_port;
+use crate::engine::peer_media::{MediaCmd, MediaSettings, PeerMedia};
 use crate::engine::record::MarkSink;
 use crate::net::media_link::{media_link, PeerKey};
 use crate::engine::rt::{output_path, SLOT_DRAIN, SLOT_FREE};
