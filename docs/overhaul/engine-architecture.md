@@ -120,7 +120,7 @@
 | 녹음 마커 `MarkSink` | 녹음 중 은닉·버림이 있을 때 | `try_lock` | `band-record` |
 | 로그 싱크(`log::`) | 상태가 바뀔 때만: 장치 멈춤·복귀, 스트림 에러, 슬롯 부족, 인코드 실패(레이트 제한) | 기다린다 | 로그를 쓰는 모든 스레드(기본 우선순위 포함) — 드물지만 남아 있다. 없애는 것은 ②b 범위가 아니다 |
 
-지키는 방법 셋([engine-stage2b-design.md](engine-stage2b-design.md) 7.1절): ① `tests/architecture.rs`의 `worker_dir_waits_for_no_lock` — `src/engine/worker/`(tests.rs 제외)에 `.lock(`·`.read(`·`.write(` 호출이 없다(예외 0. 워커 파일이 **직접** 쓰는 락만 본다 — 재발 방지용), ② 폭주 시험 `send_path_storm_measure`의 락 대기 계측(워커가 부르는 메서드 안의 락까지 잰다 — 주 증거), ③ 이 표. `Peer.clock` 대기는 측정 빌드(`test-support`)에서 반복마다 `WorkerStats.iter_lock_wait`와 자리별 기록(`lock_sites.peer_clock`)으로, 계획 `try_lock` 실패는 `WorkerTiming.sites.plan_retries`로 잰다.
+지키는 방법 셋([engine-stage2b-design.md](engine-stage2b-design.md) 7.1절): ① `tests/architecture.rs`의 `worker_dir_waits_for_no_lock` — `src/engine/worker/`(tests.rs 제외)에 `.lock(`·`.read(`·`.write(` 호출이 없다(예외 0. 워커 파일이 **직접** 쓰는 락만 본다 — 재발 방지용. 워커 디렉터리 밖에서 워커·RT 스레드가 도는 `metronome/click.rs`, `metronome/sched.rs`의 `impl MetronomeRt`, `jitter/`는 `worker_thread_code_outside_worker_dir_waits_for_no_lock`이 같은 방식으로 본다), ② 폭주 시험 `send_path_storm_measure`의 락 대기 계측(워커가 부르는 메서드 안의 락까지 잰다 — 주 증거), ③ 이 표. `Peer.clock` 대기는 측정 빌드(`test-support`)에서 반복마다 `WorkerStats.iter_lock_wait`와 자리별 기록(`lock_sites.peer_clock`)으로, 계획 `try_lock` 실패는 `WorkerTiming.sites.plan_retries`로 잰다.
 
 ### 4.2 RT 경로 불변 조건
 
