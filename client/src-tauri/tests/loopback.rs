@@ -467,30 +467,51 @@ fn link_matrix_clean_network_no_concealment_no_corrections() {
         bb.seed = 9;
         let (a, b, _p, sink_b) = connect_pair(config(buf, frame_ms), ba, bb, None);
         let start = sink_b.lock().len() / 2;
-        // 3초~9초를 0.25초 간격으로 관찰한다. 콜백 기상 지연(1ms)과 송신 버스트 때문에 p95가 프레임 경계를
+        // 워밍업 3초 뒤 0.25초 간격으로 관찰한다. 콜백 기상 지연(1ms)과 송신 버스트 때문에 p95가 프레임 경계를
         // 넘나들면 목표가 한 단계 바뀔 수 있다(목표 재설정 → 정당한 보정). 이 테스트가 확인하는 것은
         // "드리프트 0이면 목표가 고정된 동안 보정이 없다"는 것이므로, 목표가 바뀐 구간과 그 뒤 따라잡기
         // 구간(목표 차이 ÷ 패킷당 최소 보정 속도 + 여유)은 세지 않는다(PR #5 M-1).
+        //
+        // 관찰 창의 시작과 길이는 고정 시각이 아니라 조건으로 정한다(P3-16). 고정 창(3~9초)은 부하가 높을 때 두 가지로
+        // 거짓 실패했다(동시 빌드 + 코어 수만큼 바쁜 루프로 재현, PR 본문):
+        // (1) 워밍업 중(창 시작 직전)의 목표 재설정 따라잡기가 창 앞부분으로 넘어온다. 창 안에서 목표가 바뀐 적이 없으니
+        //     "목표 고정 중 보정"으로 셌다 — 0.25초마다 30·31·31·8샘플 = 보정 속도 상한(0.25% × 48k = 120샘플/초) 그대로이고
+        //     buffer가 목표까지 오르며 멈춘다. #134·#139의 480/5 실패 33·146·237회가 이 크기다.
+        // (2) 목표가 여러 번 바뀌면 제외 구간이 길어져 6초 창에 고정 구간 3초가 안 남는다(128/5에서 2.8초).
+        // 그래서 (1) 시작 전에 "0.5초 동안 보정·목표 변화 없음"(정착)을 기다리고(상한 10초), (2) 목표 고정 구간이 3초 이상이고
+        // 관찰이 6초 이상일 때까지 관찰을 늘린다(상한 15초). 판정(엄격 구성: 목표 고정 중 보정 정확히 0)은 그대로다.
+        // 목표가 그대로인데 계속 보정하는 회귀(리뷰 M4류)는 정착하지 못하거나(엄격 구성은 그 자체로 실패) 정착 뒤 창에서 보정이
+        // 생겨 실패한다 — 정착을 기다리는 것은 앞선 재설정의 따라잡기가 끝나기를 기다리는 것뿐이다.
         std::thread::sleep(Duration::from_millis(3000));
-        let mut snaps: Vec<(Instant, jitter_stats::JitterStats)> = Vec::new();
-        for _ in 0..24 {
-            snaps.push((Instant::now(), b.peer_jitter_stats()[0].1));
+        let snap_now = || (Instant::now(), b.peer_jitter_stats()[0].1);
+        let settle_t0 = Instant::now();
+        let mut prev = snap_now();
+        let mut quiet = 0;
+        let settled = loop {
             std::thread::sleep(Duration::from_millis(250));
-        }
-        let xruns = b.stats().xruns;
-        let snap = sink_b.lock().clone();
-        drop(a);
-        drop(b);
-        let c = analyze(&snap, start + 48_000 * 3 / 2);
-        let (first, last) = (snaps[0].1, snaps[snaps.len() - 1].1);
+            let cur = snap_now();
+            let still = cur.1.corrections() == prev.1.corrections() && (cur.1.target_ms - prev.1.target_ms).abs() <= 0.01;
+            quiet = if still { quiet + 1 } else { 0 };
+            prev = cur;
+            if quiet >= 2 {
+                break true;
+            }
+            if settle_t0.elapsed() >= Duration::from_secs(10) {
+                break false;
+            }
+        };
+        let settle_secs = settle_t0.elapsed().as_secs_f64();
+        let mut snaps: Vec<(Instant, jitter_stats::JitterStats)> = vec![prev];
         let mut stable_corr = 0;
         let mut stable_secs = 0.0;
         let mut retarget_until: Option<Instant> = None;
         // 절대 목표(샘플) = 최소 transit + 목표. 관찰 구간에서 움직인 경로 길이(오르내림 합)를 함께 잰다.
         let abs_of = |s: &jitter_stats::JitterStats| s.min_transit as f64 + s.target_ms as f64 * 48.0;
         let mut abs_path = 0.0;
-        for w in snaps.windows(2) {
-            let ((t0, s0), (t1, s1)) = (w[0], w[1]);
+        while snaps.len() < 25 || (stable_secs < 3.0 && snaps.len() < 61) {
+            std::thread::sleep(Duration::from_millis(250));
+            snaps.push(snap_now());
+            let ((t0, s0), (t1, s1)) = (snaps[snaps.len() - 2], snaps[snaps.len() - 1]);
             abs_path += (abs_of(&s1) - abs_of(&s0)).abs();
             if (s1.target_ms - s0.target_ms).abs() > 0.01 {
                 // 목표가 바뀌었다: 깊이를 새 목표까지 옮기는 데 걸리는 시간 + 0.5초는 제외한다.
@@ -510,9 +531,22 @@ fn link_matrix_clean_network_no_concealment_no_corrections() {
             stable_corr += s1.corrections() - s0.corrections();
             stable_secs += (t1 - t0).as_secs_f64();
         }
+        let xruns = b.stats().xruns;
+        let snap = sink_b.lock().clone();
+        drop(a);
+        drop(b);
+        let c = analyze(&snap, start + 48_000 * 3 / 2);
+        let (first, last) = (snaps[0].1, snaps[snaps.len() - 1].1);
+        let obs_secs = (snaps[snaps.len() - 1].0 - snaps[0].0).as_secs_f64();
+        // 실패 시 원인을 바로 읽도록 구간별 (시각 s, 목표 ms, 보정 증분)을 남긴다.
+        let trace: Vec<String> = snaps
+            .windows(2)
+            .map(|w| format!("{:.2}:{:.2}:+{}", (w[1].0 - snaps[0].0).as_secs_f64(), w[1].1.target_ms, w[1].1.corrections() - w[0].1.corrections()))
+            .collect();
         let corr = last.corrections() - first.corrections();
         println!(
-            "LINK buf {buf} / {frame_ms}ms: 불연속 {} 무음 {}, concealed(3~9s) {}, 목표 {:.1}→{:.1}ms, 목표 고정 {stable_secs:.1}s 동안 보정 {stable_corr}, 전체 보정 {corr}(절대 목표 이동 {:.0}샘플, min {:+.2}ms, 최대 {:.1}센트), buffer {:.1}ms, xruns {xruns}",
+            "LINK buf {buf} / {frame_ms}ms: 정착 {settle_secs:.2}s({}), 관찰 {obs_secs:.1}s, 불연속 {} 무음 {}, concealed(관찰) {}, 목표 {:.1}→{:.1}ms, 목표 고정 {stable_secs:.1}s 동안 보정 {stable_corr}, 전체 보정 {corr}(절대 목표 이동 {:.0}샘플, min {:+.2}ms, 최대 {:.1}센트), buffer {:.1}ms, xruns {xruns}",
+            if settled { "정착" } else { "상한" },
             c.discontinuities,
             c.silent_runs,
             last.concealed - first.concealed,
@@ -524,13 +558,14 @@ fn link_matrix_clean_network_no_concealment_no_corrections() {
             last.buffer_ms,
         );
         if strict {
-            assert!(stable_secs >= 3.0, "buf {buf} / {frame_ms}ms: 목표가 고정된 구간이 3초 이상 있어야 함({stable_secs:.1}s)");
-            assert_eq!(stable_corr, 0, "buf {buf} / {frame_ms}ms: 드리프트 0, 목표 고정 중 보정 {stable_corr}회");
+            assert!(settled, "buf {buf} / {frame_ms}ms: 드리프트 0인데 10초 동안 보정·목표 변화가 0.5초도 멈추지 않음");
+            assert!(stable_secs >= 3.0, "buf {buf} / {frame_ms}ms: 목표가 고정된 구간이 3초 이상 있어야 함({stable_secs:.1}s / 관찰 {obs_secs:.1}s), 구간 {trace:?}");
+            assert_eq!(stable_corr, 0, "buf {buf} / {frame_ms}ms: 드리프트 0, 목표 고정 중 보정 {stable_corr}회, 구간 {trace:?}");
         } else {
             // 드리프트 0이면 깊이를 옮길 이유는 기준(절대 목표)의 이동뿐이다: 보정량은 관찰 구간의 절대 목표 경로 길이를 넘지
             // 않는다(+ 관찰 시작 전 이동의 따라잡기 몫 1격자). 리뷰 M4류 회귀(목표·기준이 그대로인데 계속 보정)는 이 상한을 넘는다.
             let bound = abs_path + jitter_stats::TARGET_GRID;
-            assert!(corr as f64 <= bound, "buf {buf} / {frame_ms}ms: 보정 {corr}샘플이 절대 목표 이동 {abs_path:.0}샘플(+격자)로 설명되지 않음");
+            assert!(corr as f64 <= bound, "buf {buf} / {frame_ms}ms: 보정 {corr}샘플이 절대 목표 이동 {abs_path:.0}샘플(+격자)로 설명되지 않음, 구간 {trace:?}");
         }
         // 보정은 속도 상한 리샘플러로만 한다(국소 피치 ≤ 4.3센트, 지속음 JND 5~10센트 아래).
         assert!(last.max_corr_cents <= 4.4, "buf {buf} / {frame_ms}ms: 보정 피치 {:.1}센트", last.max_corr_cents);
