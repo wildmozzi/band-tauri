@@ -45,7 +45,7 @@ use crate::sys::prio;
 use config::{EngineConfig, INTERNAL_RATE};
 use device::{AudioBackend, StreamInfo};
 use jitter::JitterSettings;
-use measure::{EchoJob, EchoProbe, LoopbackJob};
+use measure::{EchoJob, LoopbackJob};
 use mixer::{clamp_gain, MixControls};
 use peer_media::{media_port, MediaCmd, MediaPort, MediaSettings, PeerMedia, PeerMediaShared};
 use ringbuf::traits::Producer;
@@ -83,8 +83,8 @@ pub struct Engine {
     /// 지연 측정(P1-1): RT 끝점 제어와 측정 스레드 쪽 링 끝점(측정 중에는 비어 있음).
     measure_sh: Arc<rt::MeasureShared>,
     measure_ends: Arc<Mutex<Option<rt::MeasureEnds>>>,
-    /// 에코 측정 상태(워커와 공유).
-    probe: Arc<Mutex<Option<EchoProbe>>>,
+    /// 에코 측정 프로브 큐의 측정 스레드 쪽 끝(엔진 ②b-5). 프로브는 측정 스레드가 만들어 워커에 넘기고 돌려받는다.
+    echo: Arc<measure::EchoPort>,
     /// 엔진 수명 동안 쥐는 1ms 타이머 해상도(P1-2). `stop`에서 놓는다.
     timer: Option<prio::TimerResolution>,
     /// 공유 메트로놈(P2-3): 계획·상태(워커와 공유).
@@ -142,7 +142,7 @@ impl Engine {
         // 녹음 핸드오프(링은 녹음 시작 때 할당해 넘긴다)
         let (rec_rt, rec_ctl) = record::record_port();
         output.attach_record(rec_rt);
-        let probe = Arc::new(Mutex::new(None));
+        let (echo, echo_rt) = measure::echo_port();
         let (media_port, media_port_rt) = media_port();
 
         // 오디오 스레드: 스트림을 열고 정지 신호까지 소유한다(cpal::Stream은 !Send).
@@ -199,7 +199,7 @@ impl Engine {
             tap_thread: None,
             measure_sh,
             measure_ends: Arc::new(Mutex::new(Some(measure_ends))),
-            probe: probe.clone(),
+            echo: Arc::new(echo),
             timer: Some(timer),
             metronome: metronome.clone(),
             epoch: Instant::now(),
@@ -248,7 +248,7 @@ impl Engine {
             stop: engine.worker_stop.clone(),
             stats: engine.worker_stats.clone(),
             epoch,
-            probe,
+            echo: echo_rt,
             metronome,
             rec_marks: engine.recorder.lock().marks(),
             media_port: media_port_rt,
@@ -451,7 +451,8 @@ impl Engine {
         let media = self.media.lock().iter().find(|m| m.peer_id == peer_id).cloned().ok_or("알 수 없는 피어")?;
         let (in_ms, out_ms) = self.buffer_ms();
         Ok(EchoJob {
-            probe: self.probe.clone(),
+            port: self.echo.clone(),
+            stream: measure::EchoStream { codec: self.cfg.codec, channels: self.cfg.channels as usize, opus_bitrate: self.cfg.opus_bitrate(), frame_samples: self.cfg.frame_samples() },
             net,
             peer_id: peer_id.to_string(),
             peer_ssrc: media.ssrc,

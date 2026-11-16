@@ -36,7 +36,7 @@ use ringbuf::{HeapCons, HeapProd};
 use super::config::{frame_code_from_samples, EngineConfig, INTERNAL_RATE};
 use super::device::StreamInfo;
 
-use super::measure::EchoProbe;
+use super::measure::{EchoPortRt, EchoRt};
 use super::metronome::MetronomeCtl;
 use super::mixer::MixControls;
 use super::record::MarkSink;
@@ -109,10 +109,6 @@ pub struct WorkerStats {
 /// 워커가 기본 우선순위 스레드와 나누는 남은 락의 자리별 대기 기록(진단 전용, `Engine::take_worker_timing`).
 #[derive(Debug, Default)]
 pub struct WorkerLockSites {
-    /// 에코 프로브 락 — 캡처 프레임마다(클릭 프레임 생성).
-    pub probe_send: crate::net::txlat::LockSite,
-    /// 에코 프로브 락 — 반복마다, 전 피어 공급 동안 쥔다(재생 시각 탭).
-    pub probe_feed: crate::net::txlat::LockSite,
     /// 메트로놈 계획 락 — 반복마다.
     pub metro_plan: crate::net::txlat::LockSite,
     /// 메트로놈 루프백 보정 락 — 반복마다.
@@ -147,8 +143,9 @@ pub struct WorkerParams {
     pub stats: Arc<WorkerStats>,
     /// 지터 버퍼 수신 시각과 같은 기준(µs)의 시계.
     pub epoch: Instant,
-    /// 에코 측정(P1-1): 있으면 그 피어에게 내 입력 대신 무음 + 클릭을 보내고, 그 피어 소리의 재생 시각을 모은다.
-    pub probe: Arc<parking_lot::Mutex<Option<EchoProbe>>>,
+    /// 에코 측정(P1-1) 프로브 큐의 워커 쪽 끝(엔진 ②b-5): 프로브를 받으면 그 피어에게 내 입력 대신 무음 + 클릭을 보내고,
+    /// 그 피어 소리의 재생 시각을 모은다.
+    pub echo: EchoPortRt,
     /// 공유 메트로놈 계획·상태(P2-3).
     pub metronome: Arc<MetronomeCtl>,
     /// 녹음 마커 큐(P2-4a): 녹음 중이면 피어별 은닉·버림을 출력 타임라인 위치로 넣는다.
@@ -239,7 +236,7 @@ impl PeerTable {
     }
 }
 
-/// 조정자. 필드 = 문맥 + 단계들 + 조정자가 갖고 단계에 빌려 주는 것(`net` 안의 피어 표 복사본·`lock_wait`).
+/// 조정자. 필드 = 문맥 + 단계들 + 조정자가 갖고 단계에 빌려 주는 것(`echo`·`net` 안의 피어 표 복사본·`lock_wait`).
 pub struct Worker {
     ctx: WorkerCtx,
     capture: Capture,
@@ -251,7 +248,9 @@ pub struct Worker {
     peers: PeerSources,
     local: LocalPath,
     watch: DeviceWatch,
-    /// 이번 반복에 남은 락(에코 프로브·메트로놈)에서 기다린 시간(엔진 ③c 측정 — 본문에서 빼서 락 밖 비용을 본다).
+    /// 에코 프로브의 워커 쪽 끝과 지금 쥔 프로브. 송신(클릭 프레임)과 피어 공급(재생 시각 탭)에 빌려 준다.
+    echo: EchoRt,
+    /// 이번 반복에 남은 락(메트로놈)에서 기다린 시간(엔진 ③c 측정 — 본문에서 빼서 락 밖 비용을 본다).
     /// 락을 잡는 단계 메서드에 빌려 준다.
     lock_wait: LockWait,
 }
@@ -263,7 +262,7 @@ const MAX_DEVICE_RATE: u32 = 384_000;
 impl Worker {
     /// 리샘플러/인코더 생성. 실패하면 엔진 시작을 실패시킨다(리뷰 M10).
     pub fn new(p: WorkerParams) -> Result<Self, String> {
-        let WorkerParams { cfg, info, in_cons, mut prods, bank, counters, controls, net, stop, stats, epoch, probe, metronome, rec_marks, media_port, media_settings } = p;
+        let WorkerParams { cfg, info, in_cons, mut prods, bank, counters, controls, net, stop, stats, epoch, echo, metronome, rec_marks, media_port, media_settings } = p;
         let frame = cfg.frame_samples();
         let ich = cfg.channels as usize;
         for (what, r) in [("입력", info.in_rate), ("출력", info.out_rate)] {
@@ -285,7 +284,7 @@ impl Worker {
         // 인코더를 만든 뒤 코드를 쓴다 — 그래서 코드 계산은 여기서 하되 에러는 인코더 뒤에 낸다.
         let frame_code = frame_code_from_samples(frame);
         let net_side = match &net {
-            Some(net) => Some(NetSide { send: SendPath::new(net.clone(), &cfg, epoch, frame_code, probe.clone())?, table: PeerTable::new(net.clone()) }),
+            Some(net) => Some(NetSide { send: SendPath::new(net.clone(), &cfg, epoch, frame_code)?, table: PeerTable::new(net.clone()) }),
             None => {
                 frame_code.ok_or("잘못된 프레임 크기")?;
                 None
@@ -300,9 +299,10 @@ impl Worker {
             net: net_side,
             clock: CallbackTracker::new(info.out_rate),
             metro: MetronomeStage::new(metronome, net),
-            peers: PeerSources::new(PeerSourcesParts { prods: peer_prods, port: media_port, settings: media_settings, rec_marks, probe }),
+            peers: PeerSources::new(PeerSourcesParts { prods: peer_prods, port: media_port, settings: media_settings, rec_marks }),
             local,
             watch: DeviceWatch::new(),
+            echo: EchoRt::new(echo),
             lock_wait: Default::default(),
             ctx: WorkerCtx { cfg, info, counters, controls, bank, stats, epoch, stop },
         })
@@ -325,6 +325,8 @@ impl Worker {
                 c.stats.iter_period.record(start - last_start);
             }
             last_start = start;
+            // 에코 프로브: 측정 스레드가 넘긴 프로브를 받고, 측정 번호에 묶인 신호(클릭 시작·탭 끝·반환)를 적용한다(락 없음).
+            self.echo.poll();
             // 피어 표 복사본은 송신과 무관하게 반복마다 맞춘다: 캡처가 멈춰도(장치 분리) 빠진 피어가 쌓이지 않게(#126 리뷰 M-1).
             if let Some(n) = self.net.as_mut() {
                 n.table.refresh();
@@ -342,13 +344,13 @@ impl Worker {
             while let Some(frame) = self.capture.next_frame() {
                 // 네트워크가 없으면 프레임은 버려진다(전에는 `ts`만 올렸다 — 송신에서만 쓰는 값이라 관찰되지 않는다).
                 if let Some(n) = self.net.as_mut() {
-                    n.send.send_frame(frame, pass_at, &mut n.table.copy, &c.stats, &mut self.lock_wait);
+                    n.send.send_frame(frame, pass_at, &mut n.table.copy, self.echo.probe_mut());
                 }
             }
             // 인자 평가 순서 = 읽는 순서: 벽시계 → 출력 버스트 → (observe 안) 콜백 카운터.
             let timing = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);
             self.metro.service(&c.info, &c.counters, &c.stats, &timing, &mut self.lock_wait);
-            let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &timing, &mut self.lock_wait);
+            let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &timing, self.echo.tap_mut());
             self.local.service(&c.info, &c.counters, &c.controls, &c.bank.slots[LOCAL_SOURCE], &c.stats, c.epoch);
             self.local.track_occupancy(c.info.out_rate, &c.stats, self.capture.pending48());
             self.watch.check(&c.counters, &c.stats, c.epoch);
@@ -364,6 +366,8 @@ impl Worker {
             std::thread::sleep(if round.urgent { FINE_POLL } else { POLL });
         }
         self.peers.close(&c.bank);
+        // 쥐고 있는 프로브를 측정 스레드로 돌려준다(엔진 정지 중 측정).
+        self.echo.close();
         log::info!("워커 종료");
     }
 }

@@ -43,7 +43,7 @@
 출력  (RT 출력 콜백) 소스 링들 → 게인·팬(원자값) → 마스터·soft clip → 장치 ─┬→ 믹스 탭 링 → band-mix-tap → 관람자 브릿지
                                                                      ├→ 녹음 링(소스별) → band-record → 파일
                                                                      └→ 메트로놈 클릭(장치 출력에만)
-제어  커맨드 → manager → Engine → 원자값(게인·뮤트·모니터) / Mutex(메트로놈 계획·에코 프로브·루프백 보정) / net API
+제어  커맨드 → manager → Engine → 원자값(게인·뮤트·모니터) / Mutex(메트로놈 계획·루프백 보정) / 에코 프로브 큐(소유 이전, ②b-5) / net API
 통계  RT·워커·net 원자값 + 피어별 미디어 통계 스냅샷(seqlock, 워커 발행) → Engine::stats()가 EngineStats로 조립 → 커맨드·band-diag
 ```
 
@@ -92,7 +92,7 @@
 | `MediaSettings`(지터 최소·최대·프로필) | 커맨드 | 커맨드(새 피어 생성) | 프로필 `AtomicF32` | 엔진 소유(③-b). net은 미디어 설정을 갖지 않는다 |
 | `relay` | 커맨드 | net(릴레이 송신) | Mutex | |
 | 메트로놈 계획·상태·루프백 보정 | 커맨드 / 워커 | 워커 / 커맨드 | Mutex(세대 번호 비교 뒤 복사) | 워커는 반복마다 짧게 |
-| 에코 프로브 | 측정 | 워커 | `Mutex<Option<EchoProbe>>` | 워커가 공급 동안 잡음 |
+| 에코 프로브 | 측정(`EchoPort`: 만들기·설치·회수·해제) | 워커(`EchoRt`: 반복마다 `poll`) | 명령·반환 SPSC 링 용량 2(`Box<EchoProbe>` 소유 이전) + 측정 번호에 묶인 원자값(`EchoCtl`: 클릭 시작·탭 끝·반환) | 워커는 락·할당 없음. `EchoPort`의 `Mutex` 둘은 측정 스레드만 잡는다(②b-5, [engine-stage2b-design.md](engine-stage2b-design.md) 3절) |
 | 녹음 마커 | 워커 | `band-record` | `MarkSink`(Mutex 큐) | 녹음 중에만 |
 | 워커 통계 | 워커 | 통계 | 원자값(`WorkerStats`) | |
 | 정지 신호 | 제어 | 각 스레드 | `AtomicBool` + join | 수신은 빈 데이터그램으로 깨움 |
@@ -111,7 +111,7 @@
 
 | 락 | 워커가 잡는 곳·빈도 | 같은 락을 잡는 기본 우선순위 스레드 |
 |---|---|---|
-| 에코 `probe` | 반복마다, 캡처 프레임마다 | 측정 |
+| (에코 `probe` — ②b-5에서 없어졌다: 프로브는 측정 동안 워커가 소유한다) | — | — |
 | 메트로놈 `plan`·`stats`·`loopback_offset_ms` | 반복마다, 100ms | 커맨드, 통계(`Engine::stats`가 `metronome.stats`를 잡는다) |
 | 메트로놈 기준 피어 시계(`net.peer_clock` → `peers` 읽기 + `Peer.clock`) | 메트로놈이 기준 피어로 도는 동안 반복마다 | 커맨드 `add_peer`·`remove_peer`, `band-net-recv`(Pong) |
 | 녹음 마커 `MarkSink` | 녹음 중 은닉·버림이 있을 때 | `band-record` |

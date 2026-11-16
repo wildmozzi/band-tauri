@@ -1900,7 +1900,7 @@ fn send_path_storm_measure() {
         }
     }
     rows.sort_by_key(|r| conds.iter().position(|c| c.name == r.cond));
-    println!("| 창(10s, 128 / 2.5ms) | 남은 락 대기/반복 p99·최대 (µs) | 본문 p99·최대 (µs) | 본문−락 최대 (µs) | 간격 p99·최대 (µs) | sendQueue p99 중앙값·최대, 최대 (µs) | 복사본 갱신 / 옛 복사본 프레임 / 건너뜀 | b 마감 채움 | b 은닉 / 생산 | 연산(추가·제거 / echo / stats) | 락 자리별 대기 횟수·최대µs(프로브 송신 / 프로브 공급 / 계획 / 보정 / 상태 / 피어 시계) | 늦은 클릭 | 연산(계획 / 보정 / 에코 측정) |");
+    println!("| 창(10s, 128 / 2.5ms) | 남은 락 대기/반복 p99·최대 (µs) | 본문 p99·최대 (µs) | 본문−락 최대 (µs) | 간격 p99·최대 (µs) | sendQueue p99 중앙값·최대, 최대 (µs) | 복사본 갱신 / 옛 복사본 프레임 / 건너뜀 | b 마감 채움 | b 은닉 / 생산 | 연산(추가·제거 / echo / stats) | 락 자리별 대기 횟수·최대µs(계획 / 보정 / 상태 / 피어 시계 — 에코 프로브 락은 ②b-5에서 없어짐) | 늦은 클릭 | 연산(계획 / 보정 / 에코 측정) |");
     println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for r in &rows {
         println!(
@@ -1910,7 +1910,7 @@ fn send_path_storm_measure() {
             r.b_fills, r.b_conc, r.b_prod, r.ops.0, r.ops.1, r.ops.2,
             {
                 let s = &r.sites;
-                [s.probe_send, s.probe_feed, s.metro_plan, s.metro_offset, s.metro_stats, s.peer_clock].map(|w| format!("{}·{}", w.contended, w.max_us)).join(" / ")
+                [s.metro_plan, s.metro_offset, s.metro_stats, s.peer_clock].map(|w| format!("{}·{}", w.contended, w.max_us)).join(" / ")
             },
             r.late_clicks, r.ops2.0, r.ops2.1, r.ops2.2
         );
