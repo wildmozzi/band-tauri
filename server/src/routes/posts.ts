@@ -82,7 +82,7 @@ export function createPostsRouter(
   router.post('/', ...createLimits, async (req, res) => {
     const parsed = createPostBody.safeParse(req.body ?? {})
     if (!parsed.success) {
-      res.status(400).json({ success: false, error: '입력값이 올바르지 않습니다.', issues: postFieldIssues(parsed.error) })
+      res.status(400).json({ success: false, error: '입력값이 올바르지 않습니다.', issues: postFieldIssues(parsed.error, req.body ?? {}) })
       return
     }
     try {
@@ -99,7 +99,7 @@ export function createPostsRouter(
     const params = postIdParams.safeParse(req.params)
     const body = updatePostBody.safeParse(req.body ?? {})
     if (!params.success || !body.success) {
-      res.status(400).json({ success: false, error: '입력값이 올바르지 않습니다.', issues: body.success ? [] : postFieldIssues(body.error) })
+      res.status(400).json({ success: false, error: '입력값이 올바르지 않습니다.', issues: body.success ? [] : postFieldIssues(body.error, req.body ?? {}) })
       return
     }
     try {
