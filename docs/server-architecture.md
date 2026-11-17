@@ -193,6 +193,7 @@ const handlers: Record<string, Handler> = {
   'metronome': handleMetronome,                                                 // metronome
   'chat': handleChat,                                                           // chat
   'request-perform': handleRequestPerform, 'approve-perform': handleApprovePerform,  // requests … 요청 계열 8개
+  'demote-performer': handleDemotePerformer,                                    // requests (P2-9 연주자 내리기)
 }
 ```
 

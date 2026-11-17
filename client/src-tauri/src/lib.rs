@@ -2,6 +2,9 @@
 //! `band_dsp`(`docs/overhaul/engine-stage5-10-scope.md` 7.2절).
 
 pub mod commands;
+// 프론트 계약 대조(커맨드 목록·계약 타입 필드 vs engineApi.ts·설계 문서) — 시험 전용
+#[cfg(test)]
+mod contract_tests;
 
 use tauri::Manager;
 
