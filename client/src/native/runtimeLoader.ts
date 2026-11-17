@@ -138,6 +138,7 @@ function deferredMixBridge(make: () => MixBridge | null): MixBridge {
       handleAnswer: (from, answer) => pick().broadcaster.handleAnswer(from, answer),
       handleCandidate: (from, candidate) => pick().broadcaster.handleCandidate(from, candidate),
       hasPeer: (viewerId) => pick().broadcaster.hasPeer(viewerId),
+      onRelayRateLimited: () => pick().broadcaster.onRelayRateLimited(),
     },
   }
 }

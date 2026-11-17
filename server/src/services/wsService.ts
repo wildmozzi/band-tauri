@@ -6,7 +6,7 @@ import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
 import type { RoomMeta } from '../repositories/roomRepository'
 import { defaultScryptGate, ipBucket } from '../lib/roomPassword'
-import { AUTH_TIMEOUT_MS, MAX_MESSAGE_BYTES, MAX_PENDING_MESSAGES, type Msg } from '../signaling/protocol'
+import { AUTH_TIMEOUT_MS, MAX_MESSAGE_BYTES, MAX_PENDING_MESSAGES, MAX_PENDING_RELAY_BYTES, MAX_PENDING_RELAY_MESSAGES, MAX_RELAY_MESSAGE_BYTES, type Msg } from '../signaling/protocol'
 import { DEFAULT_LIMITS, type Client, type WsDeps, type WsLimits, type WsOptions } from '../signaling/types'
 import { TokenBucket } from '../signaling/rateLimit'
 import { createMetronome } from '../signaling/metronome'
@@ -23,6 +23,7 @@ import { handleLeave } from '../signaling/membership'
 import { createResume, suspendOnClose } from '../signaling/resume'
 import { AUTH_RATE_LIMITED, cachedTokenVerifier } from '../signaling/auth'
 import { dispatch, type ConnCtx, type SignalingServices } from '../signaling/dispatch'
+import { RELAY_MESSAGE_TYPES, takeRelayMessage } from '../signaling/viewerRelay'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -60,6 +61,13 @@ import { dispatch, type ConnCtx, type SignalingServices } from '../signaling/dis
  * - 중계하는 descriptor는 서버가 아는 필드(ssrc, key, candidates 원소의 {kind, addr}까지)만 검증해 다시 구성하고 `from`은 서버가 붙인다.
  * - 한계: 서버 인스턴스 1대 가정(P3-10g 정원과 같음). 여러 대로 늘리면 방 단위 상태(바인딩·정원·승인)를 공유 저장소로 옮겨야 한다.
  */
+
+/** 수신 프레임 원문 바이트(ws RawData: Buffer | ArrayBuffer | Buffer[]) */
+function rawBytes(raw: RawData): number {
+  if (Buffer.isBuffer(raw)) return raw.length
+  if (Array.isArray(raw)) return raw.reduce((a, b) => a + b.length, 0)
+  return raw.byteLength
+}
 
 // S1(docs/server-architecture.md 3절): 클로저 밖 순수 코드는 signaling/*로 옮겼다. 기존 import 경로를 유지하는 재수출
 export type { RoomMeta }
@@ -229,8 +237,11 @@ export function initializeWebSocket(
           ip,
           chain: Promise.resolve(),
           pending: 0,
+          pendingRelay: 0,
+          pendingRelayBytes: 0,
           isAlive: true,
           msgBucket: new TokenBucket(limits.msgBurst, limits.msgPerSec),
+          relayBucket: new TokenBucket(limits.relayMsgBurst, limits.relayMsgPerSec),
           chatBucket: new TokenBucket(limits.chatBurst, limits.chatPerSec),
           joinBucket: new TokenBucket(limits.joinBurst, limits.joinPerSec),
           authBucket: new TokenBucket(limits.authBurst, limits.authPerSec),
@@ -264,23 +275,29 @@ export function initializeWebSocket(
     /** 메시지 rate limit (M3). 통과하면 true */
     const allowMessage = (msg: Msg): boolean => {
       const client = ctx.client
-      let ok = client.conn.msgBucket.take()
+      // 관람 중계는 일반 버킷 대신 중계 버킷(방송 담당은 방 인원에 비례) — 쌍별·대상별 전달 한도는 viewerRelay에서 그대로
+      let ok = RELAY_MESSAGE_TYPES.has(msg.type) ? takeRelayMessage(client, registry, limits) : client.conn.msgBucket.take()
       if (ok && msg.type === 'chat') ok = client.conn.chatBucket.take()
       if (ok && (msg.type === 'join' || msg.type === 'leave')) ok = client.conn.joinBucket.take()
       if (ok) return true
+      noteDropped(msg.type)
+      return false
+    }
 
+    /** 속도 제한으로 버린 메시지 하나: dropped를 세고(maxDropped면 1008), 1초에 한 번 rate-limited로 알린다 */
+    const noteDropped = (type: string): void => {
+      const client = ctx.client
       client.conn.dropped++
       if (client.conn.dropped >= limits.maxDropped) {
         console.warn(`[WS] ${ctx.id.slice(0, 8)} exceeded rate limit repeatedly - closing`)
         ws.close(1008, 'Rate limit exceeded')
-        return false
+        return
       }
       const now = Date.now()
       if (now - client.conn.lastRateLimitNotice > 1000) {
         client.conn.lastRateLimitNotice = now
-        send(ws, { type: 'error', code: 'rate-limited', message: '메시지를 너무 많이 보냈습니다.', rejectedType: msg.type })
+        send(ws, { type: 'error', code: 'rate-limited', message: '메시지를 너무 많이 보냈습니다.', rejectedType: type })
       }
-      return false
     }
 
     /**
@@ -310,21 +327,44 @@ export function initializeWebSocket(
         return ignoreFrame() // JSON 파싱 실패는 무시(속도 제한에는 센다)
       }
 
+      const relay = RELAY_MESSAGE_TYPES.has(msg.type)
+      const bytes = rawBytes(raw)
+      // 중계 원문 크기 상한(#215 리뷰 H1): 본문 상한(16KB)을 넘는 중계는 어차피 버려지지만, 줄에 서면 체인이 풀릴 때까지 객체째 남는다
+      if (relay && bytes > MAX_RELAY_MESSAGE_BYTES) return noteDropped(msg.type)
+
       if (!allowMessage(msg)) return
 
-      if (ctx.client.conn.pending >= MAX_PENDING_MESSAGES) {
+      // 관람 중계는 처리 대기 상한(MAX_PENDING_MESSAGES)에 세지 않는다: 방송 담당이 관람자 여럿에게 offer·ICE를 한꺼번에 보내면
+      // 한 번 읽기에 100개를 넘어 1008로 끊겼다(서버 부하 발굴). 대신 중계 전용 대기 상한(개수·원문 바이트, #215 리뷰 H1)을 쓰고,
+      // 넘으면 끊지 않고 버린다(속도 제한 버림으로 세어 maxDropped면 1008). 순서는 그대로 같은 체인에서 지킨다
+      if (relay && (ctx.client.conn.pendingRelay >= MAX_PENDING_RELAY_MESSAGES || ctx.client.conn.pendingRelayBytes + bytes > MAX_PENDING_RELAY_BYTES)) {
+        return noteDropped(msg.type)
+      }
+      const counted = !relay
+      if (counted && ctx.client.conn.pending >= MAX_PENDING_MESSAGES) {
         console.warn(`[WS] ${ctx.id.slice(0, 8)} too many pending messages - closing`)
         ws.close(1008, 'Too many pending messages')
         return
       }
-      ctx.client.conn.pending++
+      if (counted) ctx.client.conn.pending++
+      else {
+        ctx.client.conn.pendingRelay++
+        ctx.client.conn.pendingRelayBytes += bytes
+      }
       // 메시지를 순차 처리 (auth 검증/DB 조회 같은 비동기 작업 중에도 순서 유지).
       // 콜백 안의 ctx.client·ctx.id는 실행 시점 값이다(원래 클로저 변수와 같음: 재개 뒤면 옛 Client)
       // 세션 재개(P1-16)로 Client가 새 연결로 넘어갔으면 옛 연결에 남은 메시지는 처리하지 않는다(conn.ws가 이 소켓이 아님)
       ctx.client.conn.chain = ctx.client.conn.chain
         .then(() => (getClient(ctx.id) === ctx.client && ctx.client.conn.ws === ws ? dispatch(ctx, msg) : undefined))
         .catch(err => console.error('[ERROR] Failed to handle message:', err))
-        .finally(() => { if (ctx.client.conn.ws === ws) ctx.client.conn.pending-- }) // 넘어간 뒤의 옛 연결 몫은 새 연결 카운터에서 빼지 않는다
+        .finally(() => {
+          if (ctx.client.conn.ws !== ws) return
+          if (counted) ctx.client.conn.pending--
+          else {
+            ctx.client.conn.pendingRelay--
+            ctx.client.conn.pendingRelayBytes -= bytes
+          }
+        }) // 넘어간 뒤의 옛 연결 몫은 새 연결 카운터에서 빼지 않는다
     })
 
     // 소켓 에러(예: maxPayload 초과 1009)를 처리하지 않으면 프로세스가 죽는다

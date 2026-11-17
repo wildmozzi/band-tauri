@@ -32,7 +32,7 @@ export type PerformSessionApi = Pick<
   | 'dispose'
 >
 export type MixSourceApi = Pick<MixSource, 'acquire' | 'invalidate' | 'resume'>
-export type MixBroadcasterApi = Pick<MixBroadcaster, 'start' | 'stop' | 'syncViewers' | 'handleAnswer' | 'handleCandidate' | 'hasPeer'>
+export type MixBroadcasterApi = Pick<MixBroadcaster, 'start' | 'stop' | 'syncViewers' | 'handleAnswer' | 'handleCandidate' | 'hasPeer' | 'onRelayRateLimited'>
 
 export const NO_ENGINE_MESSAGE = '오디오 엔진 시작 실패: 이 환경에서는 오디오 엔진을 쓸 수 없습니다(데스크톱 앱 전용).'
 /** 데스크톱 앱인데 엔진 런타임 묶음을 불러오지 못했다(연주 시작 때 다시 불러와도 실패) */
@@ -156,6 +156,7 @@ export class IdleMixBroadcaster implements MixBroadcasterApi {
   syncViewers(): void {}
   async handleAnswer(): Promise<void> {}
   async handleCandidate(): Promise<void> {}
+  onRelayRateLimited(): void {}
   hasPeer(): boolean {
     return false
   }

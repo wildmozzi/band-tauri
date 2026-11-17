@@ -19,6 +19,16 @@ export const MAX_SDP_LENGTH = 16 * 1024
 export const MAX_ICE_CANDIDATE_LENGTH = 1024
 export const MAX_ICE_FIELD_LENGTH = 256
 export const MAX_PENDING_MESSAGES = 100
+/**
+ * 관람 중계(offer·answer·ice-candidate) 한 메시지의 원문(JSON) 바이트 상한. 본문 상한(MAX_SDP_LENGTH 16KB) + 봉투·이스케이프 여유.
+ * 넘으면 파싱 뒤 줄에 세우지 않고 버린다(속도 제한 버림으로 센다) — 중계는 처리 대기 상한(MAX_PENDING_MESSAGES) 밖이라, 64KB짜리가
+ * 체인 정지(auth·DB) 동안 쌓여 메모리를 묶지 못하게(#215 리뷰 H1). 실제 오디오 전용 SDP는 1~4KB다
+ */
+export const MAX_RELAY_MESSAGE_BYTES = 20 * 1024
+/** 연결 하나가 처리 대기열(체인)에 세워 둘 수 있는 관람 중계 수·원문 바이트 합 상한(#215 리뷰 H1). 넘으면 버린다(속도 제한 버림으로 센다).
+ *  관람자 14명에게 offer + ICE 12개를 한꺼번에 보내는 방송 담당이 약 180개·60KB라 여유가 크다 */
+export const MAX_PENDING_RELAY_MESSAGES = 500
+export const MAX_PENDING_RELAY_BYTES = 1024 * 1024
 export const MAX_ROOM_ID_LENGTH = 128
 export const MAX_NICKNAME_LENGTH = 50
 export const MAX_CHAT_LENGTH = 1000

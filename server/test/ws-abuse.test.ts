@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'http'
 import { WebSocket, type WebSocketServer } from 'ws'
 import { initializeWebSocket, type WsDeps, type WsOptions } from '../src/services/wsService'
-import { MAX_BUFFERED_BYTES } from '../src/signaling/protocol'
+import { MAX_BUFFERED_BYTES, MAX_PENDING_RELAY_MESSAGES, MAX_RELAY_MESSAGE_BYTES } from '../src/signaling/protocol'
 import { createCapacity } from '../src/signaling/capacity'
 import { createPerformers } from '../src/signaling/performers'
 import { createRegistry } from '../src/signaling/registry'
@@ -81,7 +81,7 @@ async function hostWithViewers(url: string, n: number, roomId = 'r'): Promise<{ 
 const pause = (c: TestClient) => (c.ws as unknown as { _socket: { pause(): void } })._socket.pause()
 const resume = (c: TestClient) => (c.ws as unknown as { _socket: { resume(): void } })._socket.resume()
 const offerOf = (to: string, sdpBytes: number) => ({ type: 'offer', to, offer: { type: 'offer', sdp: 'a'.repeat(sdpBytes) } })
-const RELAXED_RELAY = { relayPerTargetBurst: 1e6, relayPerTargetPerSec: 1e6, relayInBytesBurst: 1e9, relayInBytesPerSec: 1e9, relayPairBytesBurst: 1e9, relayPairBytesPerSec: 1e9 }
+const RELAXED_RELAY = { relayMsgBurst: 1e6, relayMsgPerSec: 1e6, relayPerTargetBurst: 1e6, relayPerTargetPerSec: 1e6, relayInBytesBurst: 1e9, relayInBytesPerSec: 1e9, relayPairBytesBurst: 1e9, relayPairBytesPerSec: 1e9 }
 
 describe('slow reader', () => {
   it('terminates a connection that stops reading once its send buffer passes the cap', async () => {
@@ -147,7 +147,7 @@ describe('viewer relay abuse (#184 review M: targeted kick of a performer)', () 
   })
 
   it('limits messages per sender → target but lets a normal ICE trickle through', async () => {
-    const url = await startWs({ msgBurst: 10_000, msgPerSec: 10_000 })
+    const url = await startWs({ msgBurst: 10_000, msgPerSec: 10_000, relayMsgBurst: 10_000, relayMsgPerSec: 10_000 })
     const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
     for (let i = 0; i < 60; i++) host.send({ type: 'ice-candidate', to: viewer.id, candidate: { candidate: `candidate:${i}`, sdpMid: '0' } })
     host.send({ type: 'ping' })
@@ -157,6 +157,102 @@ describe('viewer relay abuse (#184 review M: targeted kick of a performer)', () 
     const got = viewer.inbox.filter(m => m.type === 'ice-candidate').length
     assert.ok(got >= 30, `a normal trickle (30) passes: got ${got}`)
     assert.ok(got <= DEFAULT_LIMITS.relayPerTargetBurst + 2, `burst is capped: got ${got}`)
+  })
+})
+
+describe('viewer relay burst (server load discovery: many viewers join at once)', () => {
+  /** 방장 1명 + 로그인 관람자 n명(익명 상한과 무관하게) */
+  async function hostWithLoggedInViewers(url: string, n: number, roomId: string) {
+    const host = await client(url)
+    host.send({ type: 'auth', accessToken: 'tok:host' })
+    host.send({ type: 'join', roomId })
+    assert.ok(await host.waitFor(m => m.type === 'room-state'))
+    const viewers: TestClient[] = []
+    for (let i = 0; i < n; i++) {
+      const v = await client(url)
+      v.send({ type: 'auth', accessToken: `tok:burst-viewer-${i}` })
+      v.send({ type: 'join', roomId })
+      assert.ok(await host.waitFor(m => m.type === 'participant-joined' && m.participant.oderId === v.id))
+      viewers.push(v)
+    }
+    return { host, viewers }
+  }
+
+  it('lets the broadcaster send an offer and 12 candidates to 14 viewers at once with the default limits', async () => {
+    // 일반 버킷(40)이었을 때는 14 × 13 = 182개 중 약 68%가 버려졌다(docs/overhaul/server-load-2026-11-18.md)
+    const url = await startWs()
+    const { host, viewers } = await hostWithLoggedInViewers(url, 14, 'burst')
+    for (const v of viewers) {
+      host.send(offerOf(v.id, 2400))
+      for (let i = 0; i < 12; i++) host.send({ type: 'ice-candidate', to: v.id, candidate: { candidate: `candidate:${i}`, sdpMid: '0' } })
+    }
+    host.send({ type: 'ping' })
+    assert.ok(await host.waitFor(m => m.type === 'pong'))
+    for (const v of viewers) {
+      assert.ok(await waitFor(() => v.inbox.filter(m => m.type === 'ice-candidate').length === 12), `viewer got all 12 candidates (${v.inbox.filter(m => m.type === 'ice-candidate').length})`)
+      assert.ok(v.has(m => m.type === 'offer'))
+    }
+    assert.ok(!host.has(m => m.type === 'error' && m.code === 'rate-limited'), 'no rate-limited notice for the broadcaster')
+  })
+
+  it('a viewer keeps the base relay budget (same as the general bucket) and is told when it overflows', async () => {
+    const url = await startWs()
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1, 'base')
+    for (let i = 0; i < DEFAULT_LIMITS.relayMsgBurst + 20; i++) viewer.send({ type: 'ice-candidate', to: host.id, candidate: { candidate: `candidate:${i}`, sdpMid: '0' } })
+    assert.ok(await viewer.waitFor(m => m.type === 'error' && m.code === 'rate-limited' && m.rejectedType === 'ice-candidate'))
+    await new Promise(r => setTimeout(r, 100))
+    assert.ok(host.inbox.filter(m => m.type === 'ice-candidate').length <= DEFAULT_LIMITS.relayMsgBurst + 2)
+  })
+})
+
+
+describe('relay messages queued behind a stalled chain (#215 review H1)', () => {
+  /** 'slow' 방의 방 정보 조회가 release()까지 멈춘다 — 그동안 이 연결의 체인(순차 처리)이 막힌다 */
+  async function startStalling(limits: WsOptions['limits']) {
+    let release!: () => void
+    const stalled = new Promise<void>(r => { release = r })
+    const server = createServer()
+    const deps: Partial<WsDeps> = {
+      hasBackend: true,
+      verifyToken: testVerifier,
+      fetchRoomMeta: async (roomId) => { if (roomId === 'slow') await stalled; return { hostId: 'host', freeJoin: true } },
+      updateParticipants: async () => {},
+    }
+    const wss = initializeWebSocket(server, null, { env: { NODE_ENV: 'test' }, limits, deps })
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()))
+    servers.push({ server, wss })
+    return { url: `ws://127.0.0.1:${(server.address() as { port: number }).port}`, release }
+  }
+  const relaxed = { relayMsgBurst: 1e6, relayMsgPerSec: 1e6, maxDropped: 1e6 }
+  const ice = (to: string, pad = 0) => ({ type: 'ice-candidate', to, candidate: { candidate: 'candidate:1', sdpMid: '0' }, pad: 'x'.repeat(pad) })
+
+  it('drops relay messages over the raw size cap instead of queueing them', async () => {
+    const { url, release } = await startStalling(relaxed)
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
+    host.send(ice(viewer.id, MAX_RELAY_MESSAGE_BYTES)) // 원문이 상한을 넘는다(본문은 정상)
+    assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'rate-limited' && m.rejectedType === 'ice-candidate'))
+    host.send(ice(viewer.id))
+    assert.ok(await viewer.waitFor(m => m.type === 'ice-candidate'))
+    assert.equal(viewer.inbox.filter(m => m.type === 'ice-candidate').length, 1, 'only the small one was relayed')
+    release()
+  })
+
+  it('caps the relay messages and bytes a connection can park while its chain is stalled (reviewer probe)', async () => {
+    const { url, release } = await startStalling(relaxed)
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
+    host.send({ type: 'join', roomId: 'slow' }) // 체인이 여기서 멈춘다
+    // 버킷은 사실상 무제한 — 대기 상한만이 막을 수 있다. 개수 상한 넘게, 바이트 상한 넘게 보낸다
+    for (let i = 0; i < MAX_PENDING_RELAY_MESSAGES + 50; i++) host.send(ice(viewer.id))
+    assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'rate-limited' && m.rejectedType === 'ice-candidate'), 'count cap while stalled')
+    release()
+    // 바이트 상한: 15KB × 100 = 1.5MB > 1MB
+    const s2 = await startStalling(relaxed)
+    const p2 = await hostWithViewers(s2.url, 1)
+    p2.host.send({ type: 'join', roomId: 'slow' })
+    for (let i = 0; i < 100; i++) p2.host.send(ice(p2.viewers[0].id, 15 * 1024))
+    assert.ok(await p2.host.waitFor(m => m.type === 'error' && m.code === 'rate-limited'), 'byte cap while stalled')
+    assert.equal(p2.host.closedCode, null, 'dropping does not close the connection by itself')
+    s2.release()
   })
 })
 
@@ -174,7 +270,7 @@ describe('viewer relay fairness (#187 review M: targeted broadcast denial)', () 
   })
 
   it('one viewer flooding answers cannot use up the budget other viewers need to reach the performer', async () => {
-    const url = await startWs({ msgBurst: 1000, msgPerSec: 1000 })
+    const url = await startWs({ msgBurst: 1000, msgPerSec: 1000, relayMsgBurst: 1000, relayMsgPerSec: 1000 })
     const { host, viewers: [attacker, legit] } = await hostWithViewers(url, 2)
     for (let i = 0; i < 40; i++) attacker.send(answerOf(host.id, 15 * 1024))
     attacker.send({ type: 'ping' })
