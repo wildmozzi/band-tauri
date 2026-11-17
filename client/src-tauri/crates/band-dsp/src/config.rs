@@ -34,7 +34,7 @@ impl DriverKind {
 }
 
 /// 지원 드라이버 목록(지연 낮은 순). `asio` = ASIO 포함 빌드인가.
-pub fn supported_drivers(asio: bool) -> Vec<DriverKind> {
+pub(crate) fn supported_drivers(asio: bool) -> Vec<DriverKind> {
     let mut v = Vec::with_capacity(3);
     if asio {
         v.push(DriverKind::Asio);
@@ -139,7 +139,7 @@ impl EngineConfig {
     }
 
     /// 이 설정에서 나올 수 있는 최대 페이로드 크기(바이트).
-    pub fn max_payload_bytes(&self) -> usize {
+    pub(crate) fn max_payload_bytes(&self) -> usize {
         match self.codec {
             CodecKind::Pcm16 => self.frame_samples() * self.channels as usize * 2,
             // CBR 기준 비트레이트 × 프레임 길이. VBR 변동은 인코더 출력 버퍼 크기로 상한을 건다.

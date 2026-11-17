@@ -43,27 +43,27 @@ use std::time::{Duration, Instant};
 use crate::config::{HEADER_BYTES, TAG_BYTES};
 use crate::types::{BUDGET_CLEAR, BUDGET_WARN, DATA_PREFIX_BYTES, RELAY_BUDGET_BPS, RELAY_BUDGET_PPS};
 
-pub const HOLD_MIN: Duration = Duration::from_secs(10);
-pub const HOLD_MAX: Duration = Duration::from_secs(120);
+pub(crate) const HOLD_MIN: Duration = Duration::from_secs(10);
+pub(crate) const HOLD_MAX: Duration = Duration::from_secs(120);
 /// 복귀 뒤 이 시간 안에 다시 켜지면 플래핑으로 보고 `hold`를 늘린다.
-pub const FLAP_WINDOW: Duration = Duration::from_secs(30);
+pub(crate) const FLAP_WINDOW: Duration = Duration::from_secs(30);
 /// PCM으로 이만큼 안정하면 `hold`를 최소로 되돌린다.
-pub const STABLE_RESET: Duration = Duration::from_secs(60);
+pub(crate) const STABLE_RESET: Duration = Duration::from_secs(60);
 /// 측정으로 켜진 "넘은 부하"를 복귀 뒤 이만큼 기억한다(재진입 때 측정 없이 바로 켠다).
 /// 낮은 한도는 대개 운영 설정이라 오래 유지되지만, 일시적 원인이었을 수도 있어 무기한 기억하지는 않는다.
-pub const LEARNED_TRIP_TTL: Duration = Duration::from_secs(300);
+pub(crate) const LEARNED_TRIP_TTL: Duration = Duration::from_secs(300);
 /// 측정으로 켜진 경우, 복귀 문턱 = 넘은 부하 × 이 값(측정 한도가 예상보다 낮을 때).
 const MEASURED_EXIT_RATIO: f32 = 0.85;
 
 /// 손실 피드백: 보고 손실이 이 값(%) 이상으로 `LOSS_ENTER_SUSTAIN` 이어지면 Opus로.
-pub const LOSS_ENTER_PCT: f32 = 2.0;
-pub const LOSS_ENTER_SUSTAIN: Duration = Duration::from_secs(1);
+pub(crate) const LOSS_ENTER_PCT: f32 = 2.0;
+pub(crate) const LOSS_ENTER_SUSTAIN: Duration = Duration::from_secs(1);
 /// 손실 피드백: 보고 손실이 이 값(%) 아래로 `hold` 이어지면 PCM16으로.
 pub const LOSS_EXIT_PCT: f32 = 1.0;
 /// 이보다 오래된 보고는 없는 것으로 본다(Ping 500ms × 6).
 pub const REPORT_STALE: Duration = Duration::from_secs(3);
 /// 켜진 동안 보고가 이만큼 없으면 근거 없음으로 보고 복귀 쪽으로 센다(그 전에는 복귀를 시작하지 않는다).
-pub const REPORT_GIVE_UP: Duration = Duration::from_secs(30);
+pub(crate) const REPORT_GIVE_UP: Duration = Duration::from_secs(30);
 /// 릴레이 부하로만 켜졌을 때의 인코더 예상 손실(%) — 설정 Opus(1.3절)와 같다.
 pub const DEFAULT_OPUS_LOSS_PERC: u8 = 5;
 
@@ -120,7 +120,7 @@ pub fn auto_opus_perc(loss_on: bool, on_relay_path: bool, reported_loss_pct: Opt
 /// 복귀 hold와 플래핑 규칙(두 정책 공통): 복귀한 지 `FLAP_WINDOW` 안에 다시 켜지면 hold를 두 배로(최대 `HOLD_MAX`),
 /// 꺼진 채 `STABLE_RESET` 지나면 `HOLD_MIN`으로.
 #[derive(Debug, Clone)]
-pub struct Hysteresis {
+pub(crate) struct Hysteresis {
     hold: Duration,
     last_exit: Option<Instant>,
 }
@@ -132,7 +132,7 @@ impl Default for Hysteresis {
 }
 
 impl Hysteresis {
-    pub fn hold(&self) -> Duration {
+    pub(crate) fn hold(&self) -> Duration {
         self.hold
     }
 
@@ -180,7 +180,7 @@ pub struct RelayCodecPolicy {
     /// 측정으로 켜졌던 "넘은 부하"(예상 PCM 부하). 복귀 뒤 `LEARNED_TRIP_TTL` 동안 재진입 문턱으로 쓴다.
     learned_trip: Option<f32>,
     /// 켜진 횟수(진단용).
-    pub switches: u64,
+    pub(crate) switches: u64,
 }
 
 impl Default for RelayCodecPolicy {
@@ -194,12 +194,13 @@ impl RelayCodecPolicy {
         self.active
     }
 
-    pub fn hold(&self) -> Duration {
+    #[cfg(test)]
+    pub(crate) fn hold(&self) -> Duration {
         self.hy.hold()
     }
 
     /// 복귀 문턱(예상 PCM 부하가 이 아래로 `hold` 동안 이어져야 PCM16으로 돌아간다).
-    pub fn exit_threshold(&self) -> f32 {
+    pub(crate) fn exit_threshold(&self) -> f32 {
         BUDGET_CLEAR.min(self.trip_load * MEASURED_EXIT_RATIO)
     }
 
@@ -262,7 +263,7 @@ pub struct LossCodecPolicy {
     below_since: Option<Instant>,
     hy: Hysteresis,
     /// 켜진 횟수(진단용).
-    pub switches: u64,
+    pub(crate) switches: u64,
 }
 
 impl LossCodecPolicy {
@@ -270,7 +271,8 @@ impl LossCodecPolicy {
         self.active
     }
 
-    pub fn hold(&self) -> Duration {
+    #[cfg(test)]
+    pub(crate) fn hold(&self) -> Duration {
         self.hy.hold()
     }
 

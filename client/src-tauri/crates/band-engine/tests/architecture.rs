@@ -188,12 +188,19 @@ const DSP_EXCLUDED: &[&str] = &[
 /// ⑩-0의 나머지 경계 항목(`pub(crate)` 9개 — `histo`의 칸 함수 셋, `PeerMedia`의 공급·수신 다섯, `SeqCell::write`)은 `pub`이 됐다.
 /// `histo::bucket_value`는 쓰는 곳이 `net::txlat` 시험의 대조 하나라 그 대조를 `histo` 시험으로 옮기고 `pub(crate)`로 남겼다.
 /// `pub(crate)`가 크레이트 밖에서 안 보이는 것은 이제 컴파일러가 막으므로 목록으로 고정하지 않는다.
+///
+/// ⑨b-1(공개 표면 좁히기, 6.3절): `band-dsp` 밖(이 크레이트·앱·하네스)이 쓰지 않는 `pub`은 `pub(crate)`로 내렸다. 밖에서는
+/// 시험만 쓰고 `band-dsp` 안에서는 안 쓰는 항목은 여기로 옮겼다(`JitterStats::corrections`). 안에서도 쓰는 항목(하네스가 직접
+/// 모는 `JitterBuffer::{new, insert, stats}`·`JitterStats`의 칸 등)은 `pub`으로 남는다 — 가시성을 피처로 가를 수 없다.
+/// 모듈 단위는 `dsp_public_surface_is_used_outside`가 지킨다.
 const DSP_TEST_SUPPORT: &[(&str, &str, &str)] = &[
     ("codec.rs", "opus_decoders_created", "tests/rt_alloc.rs"),
     ("peer_media.rs", "has_feed_resampler", "src/engine/worker/tests.rs"),
     ("peer_media.rs", "jitter", "tests/sim/tune.rs"),
     ("peer_media.rs", "rx_dropped", "tests/sim/tune.rs"),
     ("peer_media.rs", "drain", "src/engine/media_port.rs"),
+    // ⑨b-1: 밖은 시험만 부른다(제품 보고는 `MediaStats`의 칸을 읽는다).
+    ("jitter/stats.rs", "corrections", "src/engine/worker/tests.rs, tests/loopback.rs"),
 ];
 
 /// `band-dsp`의 `[dependencies]`(7.2절 그래프). 개발 의존(`rand`·`sha2`·`serde_json` — 지터 단위 테스트)은 보지 않는다.
@@ -1008,6 +1015,22 @@ fn dsp_excluded_nodes_stay_in_band() {
         let moved = format!("{DSP_ROOT}::{last}");
         assert!(!DSP_NODES.iter().any(|(k, _)| *k == moved), "band-dsp에 넣으면 안 되는 노드가 생겼다(DSP_EXCLUDED): {moved}");
     }
+}
+
+/// ⑨b-1(6.3절): `band-dsp`의 공개 표면 = `band-dsp` 밖(이 크레이트·앱)이 쓰는 것. 항목 단위는 `band-dsp`의
+/// `#![warn(unreachable_pub)]`(CI `-D warnings`)와 컴파일러가 맡고(밖이 쓰지 않는 `pub`은 `pub(crate)` — 다시 넓히면
+/// 컴파일러는 막지 않으므로 리뷰 몫), 여기서는 그 린트가 켜져 있는지와 모듈 단위를 본다: 뿌리의 `pub mod`마다 `band-dsp` 밖
+/// 노드에서 들어오는 간선이 있다(아무도 안 쓰는 모듈은 `mod`로).
+#[test]
+fn dsp_public_surface_is_used_outside() {
+    let lib = std::fs::read_to_string(dsp_src_dir().join("lib.rs")).expect("band-dsp lib.rs");
+    assert!(lib.lines().any(|l| l.trim() == "#![warn(unreachable_pub)]"), "band-dsp lib.rs에 #![warn(unreachable_pub)]가 없다");
+    let mods: Vec<&str> = lib.lines().filter_map(|l| l.trim().strip_prefix("pub mod ")?.strip_suffix(';')).collect();
+    assert!(mods.len() >= DSP_NODES.len() / 2, "band-dsp pub mod 읽기: {mods:?}");
+    let e = edges();
+    let outside = |to: &str| e.keys().any(|(from, t)| !from.starts_with(DSP_ROOT) && *t == to);
+    let unused: Vec<&str> = mods.iter().copied().filter(|m| !outside(&format!("{DSP_ROOT}::{m}"))).collect();
+    assert!(unused.is_empty(), "band-dsp 밖이 쓰지 않는 pub mod — mod로 내릴 것: {unused:?}");
 }
 
 /// ⑩-1: `band-dsp`의 외부 의존은 `DSP_EXTERN_ALLOWED`와 같다(7.2절). ⑩-0의 `dsp_planned_nodes_use_only_dsp_crates`(소스에서

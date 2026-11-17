@@ -1,6 +1,6 @@
 import type { Ctx } from './ctx'
 import type { Performers } from './performers'
-import { isNonEmptyString, type InstrumentChangeRequest, type Msg, type PerformRequest } from './protocol'
+import { isNonEmptyString, rejectReason, type InstrumentChangeRequest, type Msg, type PerformRequest } from './protocol'
 import { isAuthenticated, send, type Registry } from './registry'
 import type { Client } from './types'
 import type { RoomMetaStore } from './roomMeta'
@@ -163,7 +163,7 @@ export async function handleRejectPerform(ctx: Ctx<RequestsSvc>, msg: Msg) {
   requests.splice(requestIndex, 1)
   console.log(`[REJECT-PERFORM] Host rejected ${targetId.slice(0, 8)} (${request.nickname})`)
   const target = getRoomPeer(client, targetId)
-  const reason = (typeof msg.reason === 'string' ? msg.reason.trim().slice(0, 200) : '') || '방장이 요청을 거절했습니다.'
+  const reason = rejectReason(msg.reason, '방장이 요청을 거절했습니다.')
   if (target) send(target.conn.ws, { type: 'perform-request-rejected', reason, instrument: request.instrument })
   return
 }
@@ -245,7 +245,8 @@ export async function handleRejectInstrumentChange(ctx: Ctx<RequestsSvc>, msg: M
   if (requestIndex === -1) return
   requests.splice(requestIndex, 1)
   const target = getRoomPeer(client, targetId)
-  const reason = typeof msg.reason === 'string' ? msg.reason.slice(0, 200) : '방장이 악기 변경을 거절했습니다.'
+  // P2-11: reject-perform과 같은 규칙(trim·200자·빈 사유는 기본 문구). 전에는 trim 없이 잘라 빈 문자열·공백도 그대로 보냈다.
+  const reason = rejectReason(msg.reason, '방장이 악기 변경을 거절했습니다.')
   if (target) send(target.conn.ws, { type: 'instrument-change-rejected', reason })
   return
 }
