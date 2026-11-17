@@ -118,7 +118,7 @@ impl Diagnostics {
                 let fresh = g.take_new_conn(s.session, &s.conn_events);
                 sample.conn = std::mem::take(&mut g.pending_conn);
                 sample.conn.extend(fresh);
-                g.timeline.push(sample);
+                g.timeline.push_folding(sample, Sample::fold_dropped);
                 g.last_config = Some(s.config);
                 g.last_session = (s.network, s.session);
                 g.was_active = true;
@@ -127,7 +127,7 @@ impl Diagnostics {
                 let (network, session) = g.last_session;
                 let mut sample = Sample::stopped(now_ms, network, session);
                 sample.conn = std::mem::take(&mut g.pending_conn);
-                g.timeline.push(sample);
+                g.timeline.push_folding(sample, Sample::fold_dropped);
                 g.was_active = false;
             }
             None => {}
@@ -228,6 +228,45 @@ mod tests {
             assert_eq!(cp(3), Some(serde_json::json!({"worker": [30, 0, 0], "netRecv": [2, 0, 0]})), "재시작은 0부터");
             assert_eq!(cp(4), None);
             assert_eq!(cp(5), Some(serde_json::json!({"worker": [60, 0, 0], "netRecv": [4, 0, 0]})));
+        });
+    }
+
+    /// 60분 링이 넘쳐 앞 샘플을 버려도 보이는 세션 첫 줄의 corePlacement는 시작부터다 — 버린 구간 값이 같은 세션의 다음 줄에
+    /// 합쳐진다(#203 리뷰 L1). 그래서 세션의 줄을 모두 더하면 시작부터의 누적이다. 다른 세션 샘플에는 합치지 않는다.
+    #[test]
+    fn ring_overflow_keeps_session_first_line_from_start() {
+        use crate::sys::placement::{CorePlacementStats, ThreadPlacement};
+        let at = |session, w: u64| {
+            let mut s = snap(true);
+            s.session = session;
+            s.stats.core_placement = Some(CorePlacementStats { worker: ThreadPlacement::from_counts(w, 0, w / 10), net_recv: None });
+            s
+        };
+        let d = Diagnostics::new(3);
+        // 세션 5: 누적 10, 25, 45, 70, 100 (구간 10, 15, 20, 25, 30)
+        for (i, w) in [10u64, 25, 45, 70, 100].into_iter().enumerate() {
+            d.record(1_000 * (i as u64 + 1), Some(at(5, w)));
+        }
+        let worker = |line: &str| serde_json::from_str::<serde_json::Value>(line).unwrap()["corePlacement"]["worker"].clone();
+        d.with_timeline(|tl, _, _| {
+            assert_eq!(tl.dropped(), 2);
+            let jsonl = timeline::to_jsonl(tl);
+            let lines: Vec<&str> = jsonl.lines().collect();
+            assert_eq!(worker(lines[0]), serde_json::json!([45, 0, 4]), "보이는 첫 줄 = 시작부터(버린 10·15 + 20, LP-E 1+1+2)");
+            assert_eq!(worker(lines[1]), serde_json::json!([25, 0, 3]));
+            assert_eq!(worker(lines[2]), serde_json::json!([30, 0, 3]));
+            assert_eq!(timeline::session_placement(tl, 5).unwrap().worker, [100, 0, 10], "줄 합 = 누적");
+        });
+        // 세션이 바뀌면 버린 앞 세션 값은 새 세션 줄에 합치지 않는다
+        d.record(6_000, None);
+        d.record(7_000, Some(at(6, 8)));
+        d.record(8_000, Some(at(6, 9)));
+        d.with_timeline(|tl, _, _| {
+            let jsonl = timeline::to_jsonl(tl);
+            let lines: Vec<&str> = jsonl.lines().collect();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(lines[0]).unwrap()["running"], false);
+            assert_eq!(worker(lines[1]), serde_json::json!([8, 0, 0]));
+            assert_eq!(timeline::session_placement(tl, 6).unwrap().worker, [9, 0, 0]);
         });
     }
 

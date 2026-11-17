@@ -241,6 +241,16 @@ impl PlacementWindow {
         Self { worker: s.worker.counts, net_recv: s.net_recv.map(|r| r.counts) }
     }
 
+    /// 두 구간의 합(진단 링 넘침 합치기·세션 누적, P1-21a). 수신 스레드는 한쪽에만 있으면 그쪽 값.
+    pub(crate) fn plus(&self, o: &Self) -> Self {
+        let a = |x: [u64; 3], y: [u64; 3]| [x[0] + y[0], x[1] + y[1], x[2] + y[2]];
+        let net_recv = match (self.net_recv, o.net_recv) {
+            (Some(x), Some(y)) => Some(a(x, y)),
+            (x, y) => x.or(y),
+        };
+        Self { worker: a(self.worker, o.worker), net_recv }
+    }
+
     /// `prev`(같은 세션의 직전 누적) 뒤로 늘어난 수. 카운터는 세션 안에서 줄지 않지만 0에서 멈춘다.
     pub(crate) fn since(&self, prev: &Self) -> Self {
         let d = |a: [u64; 3], b: [u64; 3]| [a[0].saturating_sub(b[0]), a[1].saturating_sub(b[1]), a[2].saturating_sub(b[2])];
