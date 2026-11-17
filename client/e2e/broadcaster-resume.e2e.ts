@@ -1,7 +1,8 @@
 /**
  * 방송 담당 연주자(데스크톱 앱)의 시그널링 재개 (fix/broadcaster-resume).
  * 끊긴 동안 clientId가 비어 isBroadcaster가 꺼져도 방송(관람자 PC)을 멈추지 않고, 같은 clientId로 재개되면 그대로 둔다
- * (관람자는 끊긴 줄 모른다 — 서버가 participant-left를 보내지 않음). 재개에 실패하면(새 clientId) 관람자 PC를 닫고 새 id로 다시 offer.
+ * (관람자는 끊긴 줄 모른다 — 서버가 participant-left를 보내지 않음). 재개에 실패하면(새 clientId) 방송을 멈추고, 엔진이 새 id로
+ * 다시 뜨면(start-performing 뒤) 다시 offer한다.
  *
  * 앱은 가짜 Tauri로 연주를 시작하고 실제 MixBroadcaster가 offer한다(믹스는 무음 AudioWorklet). 관람자는 테스트가 같은 페이지의
  * 보조 RTCPeerConnection(window.__e2eViewer)으로 흉내 내고, mock 시그널링이 둘 사이 메시지를 옮긴다.
@@ -123,5 +124,9 @@ test.describe('방송 담당 연주자의 시그널링 재개', () => {
     expect(mock.signaling.clientIdsIn(ROCK_ROOM.id)[0]).not.toBe(oldId)
     await expect.poll(() => appCloses(page)).toBeGreaterThanOrEqual(1)
     await answerOffer(page, mock, 2)
+    // 새 id의 offer는 엔진 재시작 뒤 start-performing 다음에만 나간다(서버는 연주자 아닌 쪽 offer를 버린다, #195 리뷰 L-1).
+    // mock도 그 전에 온 offer를 위반으로 기록한다
+    const order = mock.signaling.received.map(m => m.type).filter(t => t === 'offer' || t === 'start-performing')
+    expect(order).toEqual(['start-performing', 'offer', 'start-performing', 'offer'])
   })
 })

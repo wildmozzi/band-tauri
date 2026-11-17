@@ -542,17 +542,16 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     heldViewerIdRef.current = null
     if (held !== null && !keepHeldViewer(held, id, resumed)) viewer.closeAll()
     // 방송 담당이 끊겼다 돌아옴: 같은 id로 재개면 관람자 PC를 그대로 둔다(peers도 유지해 두었으므로 syncViewers가 아무것도 바꾸지 않고,
-    // room-state가 그 사이 나간 관람자만 뺀다). 새 id면 관람자는 옛 id의 연결을 버리므로 닫고 새 id로 다시 offer한다
+    // room-state가 그 사이 나간 관람자만 뺀다).
+    // 참고(#195 리뷰 L-2): 서버 재개는 welcome(임시 id) → welcome(재개 id) 순이라, 임시 id 동안 broadcasterOf가 나를 담당으로 보고
+    // 방송 효과가 start()(이미 active라 syncViewers no-op)를 한 번 부를 수 있다. 유지 중이라 stop()은 막혀 있어 무해하다.
+    // 새 id(재개 실패)나 그 사이 연주가 멈춤·담당이 바뀜이면 방송을 멈추기만 한다. 새 id면 아래 session.welcome이 엔진을
+    // 다시 시작하고(phase idle → running, start-performing), 그때 방송 효과가 start()로 새 id에서 다시 offer한다.
+    // 여기서 바로 offer하면 서버가 아직 연주자가 아닌(start-performing 전) 새 id의 offer를 버린다 (#195 리뷰 L-1)
     const heldBroadcast = heldBroadcastIdRef.current
     heldBroadcastIdRef.current = null
-    if (heldBroadcast !== null) {
-      if (!store.getSnapshot().derived.isBroadcaster) {
-        // 끊긴 사이 연주가 멈췄거나 방송 담당이 바뀌었다(멈춤 효과는 유지 중이라 건너뛰었다)
-        broadcaster.stop()
-      } else if (!keepHeldViewer(heldBroadcast, id, resumed)) {
-        broadcaster.resetPeers()
-        broadcaster.syncViewers(viewersRef.current)
-      }
+    if (heldBroadcast !== null && (!store.getSnapshot().derived.isBroadcaster || !keepHeldViewer(heldBroadcast, id, resumed))) {
+      broadcaster.stop()
     }
     selfIdRef.current = id
     // resumed && 같은 id → 엔진 유지 + descriptor 재전송, 아니면 새 id로 엔진 재시작
