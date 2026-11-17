@@ -16,6 +16,7 @@ use band_dsp::codec::Encoder;
 use band_dsp::config::{CodecKind, EngineConfig};
 use band_engine::testing::engine::cpuprof::CpuStats;
 use band_engine::testing::sys::cpu::{cycle_pct, process_cycles, tsc_now};
+use band_engine::testing::sys::placement::set_high_qos;
 use band_engine::testing::engine::device::fake::FakeBackend;
 use band_dsp::mixer::MixControls;
 use band_dsp::relay_codec::CodecReason;
@@ -63,6 +64,30 @@ struct Row {
     per_node_pct: f32,
     conceal_max: f32,
     xruns: u64,
+    /// 측정 창 동안 6엔진 합 코어 배치(P1-21): [워커, 수신] × [P, E, LP-E] 표본 수. 비Windows는 None.
+    placement: Option<[[f64; 3]; 2]>,
+}
+
+/// `EngineStats.corePlacement`(누적)에서 [워커, 수신] × [P, E, LP-E] 표본 수. 계약 JSON으로 읽는다(공개 표면을 늘리지 않음).
+fn placement_counts(s: &band_engine::testing::engine::report::EngineStats) -> Option<[[f64; 3]; 2]> {
+    let v = serde_json::to_value(s).ok()?;
+    let cp = v.get("corePlacement")?;
+    let one = |t: &serde_json::Value| -> [f64; 3] {
+        let n = t.get("samples").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        ["pPct", "ePct", "lpEPct"].map(|k| n * t.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) / 100.0)
+    };
+    Some([one(cp.get("worker")?), cp.get("netRecv").map(one).unwrap_or([0.0; 3])])
+}
+
+fn sum_placement(stats: &[band_engine::testing::engine::report::EngineStats]) -> Option<[[f64; 3]; 2]> {
+    let mut acc = [[0.0; 3]; 2];
+    for s in stats {
+        let p = placement_counts(s)?;
+        for (a, b) in acc.iter_mut().flatten().zip(p.iter().flatten()) {
+            *a += b;
+        }
+    }
+    Some(acc)
 }
 
 fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
@@ -106,6 +131,7 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
     }
     // 창 회전과 xrun 기준(연결·예열 구간 제외)
     let x0: u64 = engines.iter().map(|e| e.stats().xruns).sum();
+    let pl0 = sum_placement(&engines.iter().map(|e| e.stats()).collect::<Vec<_>>());
     let (p0, k0) = (process_cycles(), tsc_now());
     std::thread::sleep(MEASURE);
     let stats: Vec<_> = engines.iter().map(|e| e.stats()).collect();
@@ -127,6 +153,13 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
         conceal_max: stats.iter().flat_map(|s| s.peers.iter().map(|p| p.conceal_pct)).fold(0.0, f32::max),
         // 측정 창 안의 xrun만(연결·예열 구간 제외, 리뷰 L1)
         xruns: stats.iter().map(|s| s.xruns).sum::<u64>().saturating_sub(x0),
+        placement: sum_placement(&stats).zip(pl0).map(|(a, b)| {
+            let mut d = [[0.0; 3]; 2];
+            for ((x, a), b) in d.iter_mut().flatten().zip(a.iter().flatten()).zip(b.iter().flatten()) {
+                *x = a - b;
+            }
+            d
+        }),
     };
     for mut e in engines {
         e.stop();
@@ -137,6 +170,10 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
 #[test]
 #[ignore = "측정 도구: cargo test --release --test cpu_profile -- --ignored --nocapture"]
 fn six_peer_full_mesh_cpu() {
+    // P1-21 2단계 비교: `BAND_HIGH_QOS=1`이면 워커·수신 스레드의 EcoQoS를 끈다(기본 꺼짐).
+    let high_qos = std::env::var("BAND_HIGH_QOS").is_ok_and(|v| v == "1");
+    set_high_qos(high_qos);
+    println!("HighQoS(EcoQoS 끔): {high_qos}");
     // RT 콜백 타이머 비용(QPC)
     let n = 1_000_000;
     let t = Instant::now();
@@ -213,6 +250,17 @@ fn six_peer_full_mesh_cpu() {
             r.conceal_max,
             r.xruns
         );
+    }
+    // 코어 배치(P1-21): 측정 창 동안 6엔진 합, 스레드별 P / E / LP-E 비율(%)과 표본 수. 비Windows는 줄 없음.
+    for r in &rows {
+        if let Some(p) = r.placement {
+            let pct = |t: [f64; 3]| {
+                let n: f64 = t.iter().sum();
+                let f = |x: f64| if n > 0.0 { (x * 100.0 / n).max(0.0) } else { 0.0 };
+                format!("P {:.1} / E {:.1} / LP-E {:.1} (n {:.0})", f(t[0]), f(t[1]), f(t[2]), n)
+            };
+            println!("배치 | {} | 워커 {} | 수신 {}", r.label, pct(p[0]), pct(p[1]));
+        }
     }
 }
 

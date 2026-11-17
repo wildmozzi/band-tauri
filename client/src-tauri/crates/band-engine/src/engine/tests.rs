@@ -237,3 +237,26 @@ fn worker_iteration_counter_ignores_other_threads() {
     run_iters(&[&a], 200);
     assert_eq!(allocs(&a).0 - a0, 0);
 }
+
+/// 코어 배치(P1-21): 워커 반복·수신 루프가 표본을 세고 `EngineStats.corePlacement`로 나간다(Windows). 비Windows는 null.
+#[test]
+fn core_placement_is_reported_for_worker_and_recv() {
+    let a = start("pa", CodecKind::Opus);
+    let b = start("pb", CodecKind::Opus);
+    a.add_peer("pb".into(), &desc_of(&b)).unwrap();
+    b.add_peer("pa".into(), &desc_of(&a)).unwrap();
+    wait_until(|| connected(&a, 1) && connected(&b, 1));
+    run_iters(&[&a], 200);
+    let s = a.stats();
+    if cfg!(windows) {
+        let cp = s.core_placement.expect("Windows는 코어 배치를 보고한다");
+        assert!(cp.worker.samples >= 200, "워커 표본 {}", cp.worker.samples);
+        assert!((cp.worker.p_pct + cp.worker.e_pct + cp.worker.lp_e_pct - 100.0).abs() < 0.01);
+        let r = cp.net_recv.expect("네트워크 엔진은 수신 스레드 배치가 있다");
+        assert!(r.samples > 0, "수신 표본 0");
+        let j = serde_json::to_string(&s).unwrap();
+        assert!(j.contains("\"corePlacement\":{\"worker\":{\"samples\":") && j.contains("\"lpEPct\""), "{j}");
+    } else {
+        assert!(s.core_placement.is_none());
+    }
+}

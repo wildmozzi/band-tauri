@@ -126,6 +126,8 @@ pub struct NetShared {
     stop: AtomicBool,
     /// 수신 스레드 우선순위 설정 결과(P1-2).
     pub recv_prio: band_dsp::prio_slot::PrioSlot,
+    /// 수신 스레드의 코어 배치 표본(P1-21): 수신 루프가 깨어날 때마다 센다.
+    pub(crate) recv_placement: crate::sys::placement::PlacementCounts,
     allow_loopback: bool,
     /// UDP 릴레이 클라이언트(P1-4b). 토큰을 받기 전에는 None.
     relay: Mutex<Option<RelayClient>>,
@@ -282,6 +284,7 @@ impl Net {
             qos_stats: Mutex::new(qos::QosStats::default()),
             conn_log: Mutex::new(connlog::ConnLog::default()),
             recv_prio: Default::default(),
+            recv_placement: Default::default(),
             input_buffer_us: std::sync::OnceLock::new(),
         });
 
@@ -292,6 +295,8 @@ impl Net {
                 .name("band-net-recv".into())
                 .spawn(move || {
                     let _prio = crate::sys::prio::promote_engine_thread(&s.recv_prio);
+                    crate::sys::placement::init();
+                    crate::sys::placement::apply_thread_qos();
                     recv_loop(&s)
                 })
                 .map_err(|e| format!("수신 스레드 생성 실패: {e}"))?,

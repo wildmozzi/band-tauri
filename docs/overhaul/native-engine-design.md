@@ -409,7 +409,9 @@ type QosMarking = 'pending' | 'ef' | 'voice' | 'none'
 interface QosStats { marking: QosMarking; ipTos: boolean; qwave: boolean; flows: number; efFlows: number; failed: number; lastError: string | null }
 interface SendQueueStats { p50Ms: number; p99Ms: number; maxMs: number; packets: number }
 interface CpuStats { workerPct: number | null; callbackLoadPct: number; callbackP50Us: number; callbackP99Us: number; callbackMaxUs: number; callbackP99PeriodPct: number; inputCallbackMaxUs: number; callbacks: number; windowMs: number }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null; recording: RecordStats | null; cpu: CpuStats }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null; recording: RecordStats | null; cpu: CpuStats; corePlacement: CorePlacementStats | null }
+interface CorePlacementStats { worker: ThreadPlacement; netRecv: ThreadPlacement | null }
+interface ThreadPlacement { samples: number; pPct: number; ePct: number; lpEPct: number }
 type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
 interface ThreadPriorityStats { worker: ThreadPriority; netRecv: ThreadPriority; audio: ThreadPriority; timer1ms: boolean }
 type RecordFormat = 'wav24' | 'wavF32' | 'flac'  // flac: P2-4a, 24비트 무손실 `.flac`
@@ -506,6 +508,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 `devicePeriodMs`: 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기(독점: 버퍼 = 주기, 저지연 공유: 엔진 주기), cpal·가짜 장치는 실측 콜백 크기다.
 
 `threadPriority`: 스레드 우선순위 설정 결과(P1-2, 1.1절). `worker`·`netRecv`·`audio`(오디오 I/O 스레드) 각각 `mmcss`(MMCSS "Pro Audio" 등록) | `elevated`(MMCSS 실패, `THREAD_PRIORITY_HIGHEST`) | `failed`(둘 다 실패, 기본 우선순위) | `unmanaged`(우리가 설정하지 않음: 네트워크 없음, cpal·ASIO·가짜 장치) | `disabled`(측정용으로 끔) | `unsupported`(Windows 아님). `timer1ms`: 엔진이 1ms 타이머 해상도를 쥐고 있다. 정지 상태면 모두 `unmanaged`/false.
+
+`corePlacement`(P1-21 1단계, `sys/placement.rs`): 하이브리드 CPU(P/E/LP-E)에서 워커·네트워크 수신 스레드가 어느 종류 코어에서 돌았는지. 엔진 시작 뒤 누적 표본 수(`samples`)와 종류별 비율(`pPct`·`ePct`·`lpEPct`, 합 100). 표본: 워커는 반복마다(수면 뒤 본문 시작), 수신 스레드는 패킷을 받아 깨어날 때마다 `GetCurrentProcessorNumberEx`(사용자 모드 읽기, 할당·락 없음)로 지금 코어를 읽는다. RT 콜백에서는 읽지 않는다. 코어 종류 표는 스레드 시작 때 한 번 `GetSystemCpuSetInformation`으로 만든다: 효율 등급(`EfficiencyClass`) 최고 = P, 나머지 중 P와 마지막 단계 캐시(LLC)를 함께 쓰는 것 = E, 따로 쓰는 가장 작은 섬 = LP-E(Intel Core Ultra 저전력 섬). 등급이 하나뿐이면 모두 P. `netRecv`는 네트워크 없이 시작하면 null이고, 비Windows는 `corePlacement` 자체가 null이다. 진단 타임라인 샘플에도 같은 값이 들어간다(비Windows는 키 없음). 근거: `docs/overhaul/cpu-quiet-2026-11-17.md` 4절 2번(코어 고정 없이 워커 CPU가 1.6~2배로 갈림).
 
 `backend`: 실제로 열린 오디오 백엔드. `wasapiExclusive`(자체 독점) | `wasapiShared3`(자체 IAudioClient3 저지연 공유) | `cpalWasapi`(cpal 공유 폴백) | `cpalAsio` | `fake`(테스트). 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
 
