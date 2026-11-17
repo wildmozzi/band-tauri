@@ -136,6 +136,12 @@ export interface CpuStats {
   callbacks: number
   /** 창 길이(ms). 0이면 아직 첫 창 전 */
   windowMs: number
+  /** 워커 수면 overshoot(요청보다 늦게 깬 양) 중앙값·p99·최대(µs, P2-17c). 옛 엔진이면 없음 */
+  workerWakeP50Us?: number
+  workerWakeP99Us?: number
+  workerWakeMaxUs?: number
+  /** 은닉 마감 여유(µs, 고정 1500). 대략 150µs + overshoot p99 + 워커 반복 시간을 덮어야 한다 */
+  deadlineGuardUs?: number
 }
 
 /** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token/expiresIn */

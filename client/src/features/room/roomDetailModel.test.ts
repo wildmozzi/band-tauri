@@ -48,6 +48,11 @@ describe('roomDetailModel', () => {
     expect(cpuTitle(cpu)).toContain('20/42/120µs')
     expect(cpuTitle({ ...cpu, workerPct: null })).toContain('측정 불가')
     expect(cpuTitle(cpu)).toContain('앱 전체 CPU가 아닙니다')
+    // P2-17c: 워커 기상 지연은 새 엔진만(옛 엔진은 줄 없음)
+    expect(cpuTitle(cpu)).not.toContain('워커 기상 지연')
+    expect(cpuTitle({ ...cpu, workerWakeP50Us: 544.2, workerWakeP99Us: 672, workerWakeMaxUs: 1234, deadlineGuardUs: 1500 })).toContain(
+      '워커 기상 지연(수면 초과) p50/p99/최대: 544/672/1234µs · 은닉 마감 여유 1.5ms',
+    )
   })
 
   it('formatMs: 유한값만 ms로, 나머지는 --', () => {

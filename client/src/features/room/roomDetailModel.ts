@@ -68,6 +68,13 @@ export function cpuTitle(cpu: CpuStats): string {
     `p99 / 장치 주기: ${cpu.callbackP99PeriodPct.toFixed(1)}%`,
     `입력 콜백 최대: ${Math.round(cpu.inputCallbackMaxUs)}µs`,
     `창: ${(cpu.windowMs / 1000).toFixed(1)}초, 콜백 ${cpu.callbacks}회`,
+    // P2-17c: 워커 수면 overshoot와 은닉 마감 여유(옛 엔진은 필드 없음 → 줄 없음)
+    ...(cpu.workerWakeP99Us != null
+      ? [
+          `워커 기상 지연(수면 초과) p50/p99/최대: ${Math.round(cpu.workerWakeP50Us ?? 0)}/${Math.round(cpu.workerWakeP99Us)}/${Math.round(cpu.workerWakeMaxUs ?? 0)}µs` +
+            (cpu.deadlineGuardUs ? ` · 은닉 마감 여유 ${(cpu.deadlineGuardUs / 1000).toFixed(1)}ms` : ''),
+        ]
+      : []),
   ].join('\n')
 }
 

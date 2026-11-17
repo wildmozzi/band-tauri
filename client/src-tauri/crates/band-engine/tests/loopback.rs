@@ -386,6 +386,11 @@ fn loopback_loss5_jitter20_drift() {
         stats_b.est_latency_ms, stats_b.xruns, rtt_a
     );
     println!("믹스 탭 청크: {mix_chunks}");
+    let cpu = &stats_b.cpu;
+    println!(
+        "B 워커 수면 overshoot p50/p99/최대 {:.0}/{:.0}/{:.0}µs, 은닉 마감 여유 {:.0}µs (P2-17c)",
+        cpu.worker_wake_p50_us, cpu.worker_wake_p99_us, cpu.worker_wake_max_us, cpu.deadline_guard_us
+    );
     println!("trace: {:?}", trace.iter().map(|t| (t.0 as f32, t.1)).collect::<Vec<_>>());
 
     assert!(continuity > 0.97, "출력 연속성 부족: {continuity}");
@@ -406,6 +411,8 @@ fn loopback_loss5_jitter20_drift() {
     assert!(mix_chunks >= 400, "믹스 탭은 20ms마다(12초 ≈ 600개): {mix_chunks}");
     assert_eq!(bad_chunks.load(Ordering::Relaxed), 0);
     assert!(rtt_a.is_some(), "RTT 측정");
+    // P2-17c 진단: 12초 실행이면 2초 창이 돌았고 워커는 수천 번 잤다 — overshoot 분포와 마감 여유가 채워진다.
+    assert!(cpu.window_ms > 0.0 && cpu.worker_wake_max_us >= cpu.worker_wake_p99_us && cpu.deadline_guard_us == 1500.0, "{cpu:?}");
 
     drop(proxy);
     drop(a);
