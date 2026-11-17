@@ -88,6 +88,11 @@ export interface PerformersSvc {
   insecureDevMode: boolean
 }
 
+/** start-performing이 쓰는 조각: 연주를 시작하면 내 대기 중 참여 요청을 지운다(free_join에서 승인 없이 시작한 경우). 구조 타입 이유는 아래와 같다 */
+export interface StartPerformingSvc extends PerformersSvc {
+  requests: { dropPerformRequest(roomId: string, clientId: string, host: Client | null): void }
+}
+
 /**
  * stop-performing이 쓰는 조각: 연주를 멈추면 그 사람의 대기 중 악기 변경 요청을 지운다(방장에게 instrument-change-request-cancelled).
  * requests는 같은 계층이고 requests → performers 간선이 있어 import하지 않고 쓰는 함수만 구조 타입으로 받는다(순환 방지,
@@ -98,10 +103,10 @@ export interface StopPerformingSvc extends PerformersSvc {
 }
 
 /** `start-performing` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
-export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
+export async function handleStartPerforming(ctx: Ctx<StartPerformingSvc>, msg: Msg) {
   const { ws, client, id } = ctx
   const roomId = client.member.roomId
-  const { roomMemberIds, getClient, broadcastToRoom } = ctx.svc.registry
+  const { roomMemberIds, getClient, broadcastToRoom, findRoomHost } = ctx.svc.registry
   const { canStartPerforming } = ctx.svc.performers
   const { limits, insecureDevMode } = ctx.svc
   if (!roomId) return
@@ -110,7 +115,24 @@ export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
     send(ws, { type: 'error', code: 'login-required', message: '연주하려면 로그인이 필요합니다.' })
     return
   }
-  if (!(await canStartPerforming(client, roomId)) || client.member.roomId !== roomId) {
+  // 권한 확인(방 정보 조회)을 기다리는 동안 방장이 내릴 수 있다: 내리기가 cancelledStart를 켜면 시작하지 않는다
+  // (대상은 이미 demoted-to-viewer를 받았다). 이미 연주 중인 재전송은 내리기가 평소처럼 처리한다
+  const starting = !client.perform.isPerforming
+  if (starting) {
+    client.perform.starting = true
+    client.perform.cancelledStart = false
+  }
+  let allowed: boolean
+  try {
+    allowed = await canStartPerforming(client, roomId)
+  } finally {
+    if (starting) client.perform.starting = false
+  }
+  if (starting && client.perform.cancelledStart) {
+    client.perform.cancelledStart = false
+    return
+  }
+  if (!allowed || client.member.roomId !== roomId) {
     send(ws, { type: 'error', code: 'perform-not-approved', message: '방장의 승인이 필요합니다.' })
     return
   }
@@ -127,6 +149,8 @@ export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
   }
   client.perform.isPerforming = true
   client.perform.instrument = typeof msg.instrument === 'string' ? msg.instrument.slice(0, 50) : undefined
+  // free_join 방에서 참여 요청을 보낸 뒤 승인 없이 바로 시작했다: 방장 화면에 남은 요청을 지운다
+  ctx.svc.requests.dropPerformRequest(roomId, id, findRoomHost(roomId))
   const nickname = sanitizeNickname(msg.nickname)
   if (nickname) client.member.nickname = nickname
   // 클라이언트 isHost는 무시 (서버 판정)

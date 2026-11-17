@@ -43,7 +43,7 @@
 2. **`handleJoin`**(E)이 D(방 정보를 캐시 없이 새로 읽음)·H(`dropMetronomeIfHostChanged`: join이 이양 감지 시점)·F(`hasApproval`로 정원 검사 생략, 재접속 때 승인 유예 해제)·G(방 이동 때 `clearNative`)·C(중복 연결 정리 때 `suspended` 삭제)를 부른다. **마지막 `await` 뒤부터 `rooms`에 추가할 때까지가 동기 구간**이라 동시 입장이 정원을 넘지 못한다(`room-capacity.test.ts` "concurrent joins never exceed the capacity"). 모듈을 나눠도 이 구간에 `await`가 끼면 안 된다.
 3. **`native-descriptor`**(G)가 H를 두 번 건드린다: 방장 ssrc가 바뀌면 메트로놈을 지우고 정지를 알리고, 그다음 `replayMetronome`을 `void`로 띄운다(DB 조회가 descriptor 중계를 늦추지 않게). 그리고 릴레이 토큰을 **중계보다 먼저** 보낸다.
 4. **`approve-perform`**(I)이 F의 `approvals`를 쓰고, **`approve-instrument-change`**(I)가 `Client.instrument`(F)를 쓴다.
-5. **`stop-performing`**(F)이 G의 `nativeSsrc`를 지운다(연주자가 아니면 토큰 갱신 불가). 또 I의 대기 중 악기 변경 요청을 지우고 방장에게 `instrument-change-request-cancelled`를 보낸다(`requests.dropInstrumentChange`, 구조 타입 `StopPerformingSvc`로 받아 F → I 간선을 만들지 않음 — 시그널링 상태 점검).
+5. **`stop-performing`**(F)이 G의 `nativeSsrc`를 지운다(연주자가 아니면 토큰 갱신 불가). 또 I의 대기 중 악기 변경 요청을 지우고 방장에게 `instrument-change-request-cancelled`를 보낸다. 반대로 **`start-performing`**(F)은 성공하면 I의 내 대기 중 참여 요청을 지운다(`dropPerformRequest` → `perform-request-cancelled`, free_join에서 승인 없이 시작한 경우 — `StartPerformingSvc`). 권한 확인 await 중에는 `Client.perform.starting`을 켜 두고, 그 사이 내리기(I)가 `cancelledStart`로 시작을 취소한다(`requests.dropInstrumentChange`, 구조 타입 `StopPerformingSvc`로 받아 F → I 간선을 만들지 않음 — 시그널링 상태 점검).
 6. **세션 재개**(C)가 A의 연결 상태(체인·대기 수·버킷)를 새 소켓에서 옛 `Client`로 옮기고, 연결 클로저의 `client`·`id` 변수를 **바꿔 끼운다**. 그 뒤 모든 핸들러는 옛 `Client`를 본다. E(`sendRoomState`)와 H(`pendingMetronomeStop`)도 부른다.
 7. **유예 중인 `Client`는 `clients`와 `rooms`에 남는다.** 그래서 정원(E)·연주자 상한(F)·키/ssrc 바인딩(G)·메트로놈(H)이 유예 중에도 유지된다. 소켓이 닫혀 있어 `send`는 조용히 버려진다.
 8. **`isPerformer`**(= 연주 중이거나 방장)를 F·G·H·K가 모두 중계 대상 판정에 쓴다.
