@@ -16,9 +16,11 @@ import './LatencyMeasure.css'
 
 /**
  * 피어 에코 측정(연주자 채널 메뉴)은 연주 중(데스크톱 앱)에만 그린다 — 웹 첫 묶음에서 빼고, 데스크톱 앱은 첫 그리기 전에
- * preloadSettingsPerformerUi()로 받아 둔다(features/room의 preloadPerformerUi가 같이 부른다).
+ * preloadSettingsPerformerUi()로 받아 둔다(main.tsx가 features/room의 preloadPerformerUi와 같이 부른다).
  */
 const echoMeasure = preloadableModule(() => import('./EchoMeasure'))
 export const EchoMeasure = echoMeasure.component('EchoMeasure')
-export const preloadSettingsPerformerUi = (): Promise<unknown> => echoMeasure.preload()
+export async function preloadSettingsPerformerUi(): Promise<void> {
+  await echoMeasure.preload()
+}
 export { UpdateNotice } from './UpdateNotice'
