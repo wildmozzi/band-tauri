@@ -33,7 +33,7 @@
   - 워커는 출력 콜백 시작/끝 카운터가 같고, 링 점유량을 읽은 뒤에도 바뀌지 않았을 때만 깊이 측정·마감 판단을 한다. 콜백 직후의 링 점유량을 이전 콜백의 마감 시각과 짝지으면 한 주기 이르게 은닉한다.
   - 콜백이 링 부족으로 0을 채우면(워커 마감 놓침, 콜백 몰림) 그 프레임 수만큼 워커가 스트림을 건너뛴다. 그래서 재생 시각이 장치 시각에 붙어 있고 언더런마다 지연이 쌓이지 않는다.
   - 피어 적응 여유(M4): 언더런마다 피어별 여유를 청크(64샘플)씩 늘린다. 상한은 `min(다음 콜백 소비량, (frame + 2ms)/2 × 프로필 배율)`이라 목표 추가분 2·여유가 1프레임 + 2ms(균형)를 넘지 않는다. 마지막 언더런 뒤 10초 × 배율 동안 유지하고, 그 뒤 2초마다 청크씩 줄인다(**P1-5**, PR #16 M3: 이전에는 상한이 콜백 소비량, 10초마다 청크라 10ms 버퍼에서 +19.6ms·복귀 75초 이상). 여유만큼 선행량 상한·은닉 판단량(`다음 콜백 소비량 + 여유`)을 늘리고 은닉 마감을 앞당긴다. 마감에 실제 패킷이 와 있으려면 재생 위치 기준 깊이가 `지터 추정 + 1.5ms + 2·여유` 이상이어야 하므로 워커가 이 요구(`lead = 마감 여유 + 2·여유`)를 지터 버퍼에 알리고 목표에 반영한다(**P1-13**, 1.2절). 여유가 늘 때는 언더런으로 이미 늦어진 만큼을 늘어난 목표(상한 적용 후)만큼 건너뛰지 않고 남겨 새 목표 깊이를 만든다. 남긴 0 채움이 늘어난 목표보다 모자라면 나머지는 삽입 램프로 채우는데, 그동안 워커는 **유효 여유** `여유 − 깊이 부족분/2`로 마감·채울 양을 정해 깊이 조건을 지킨다(P1-5, PR #16 M1: 이전에는 이 구간에 마감 채움 은닉이 났다). 언더런이 없으면 여유 0, 목표·지연은 그대로다.
-  - 로컬 소스(모니터·탭): 로컬 FIFO가 입·출력 클럭 차를 흡수하므로, 소스 링은 콜백이 소비한 만큼 `장치 버퍼 1개 + 청크 + 적응 여유`(xrun 시 청크씩 증가, 최대 장치 버퍼 1개, 10초 무사고 시 감소)로 다시 채운다. 모니터 경로는 GOAL 지표 밖이다.
+  - 로컬 소스(모니터·탭): 로컬 FIFO가 입·출력 클럭 차를 흡수하므로, 소스 링은 콜백이 소비한 만큼 `장치 버퍼 1개 + 청크 + 적응 여유`(로컬 슬롯 언더런 시 청크씩 증가 — 전역 xrun(피어 소스 부족·입력 오버런)에는 반응하지 않음, 최대 장치 버퍼 1개, 10초 무사고 시 감소)로 다시 채운다. 모니터 경로는 GOAL 지표 밖이다.
   - 게인·팬·뮤트·모니터 설정은 워커가 소스별 원자값으로 넣고, 소스 레벨은 콜백이 원자값으로 알린다. 피어가 빠지면 슬롯을 `DRAIN`으로 바꾸고, 콜백이 남은 샘플을 버린 뒤 비운다.
   - 출력 레이트가 48kHz가 아니면 워커가 소스마다 48k → 장치 레이트로 리샘플해 넣는다. 믹스 탭은 장치 레이트로 나오고 탭 스레드가 48kHz로 되돌린다.
 - 깊이 측정과 로컬 FIFO 판단에 쓰는 시각은 워커 기상 시각이 아니라 **출력 콜백 시각 추정치**다.
@@ -44,7 +44,7 @@
   - 크기는 입력 방출 패턴(주기 lcm(입력 버퍼, 리샘플 청크))에서 산정한다.
   - 입·출력 장치 클럭 차는 수위 제어(1샘플 단위, 최대 500ppm)로 흡수한다.
   - 언더런 때 늘린 여유는 10초 무사고마다 되돌린다.
-- 입력 또는 출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화 HRESULT(`AUDCLNT_E_DEVICE_INVALIDATED`, `AUDCLNT_E_SERVICE_NOT_RUNNING`, `AUDCLNT_E_RESOURCES_INVALIDATED`)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 그 밖의 WASAPI 호출 실패는 일시 오류로 보고 `streamErrors`만 올린 뒤 다음 이벤트를 기다린다. 같은 방향이 연속 4회 실패하면 그 스트림을 재시작(Stop/Reset/Start, `streamRestarts`)하고, 성공 없이 재시작이 3회 이어지거나 연속 50회 실패하면 `streamFailed=true`, `running=false`로 멈춘다.
+- 입력 또는 출력 콜백이 1초 넘게 멈추거나, 한 방향이 워커 감시 시작(장치 Start와 STUN이 끝난 뒤 워커의 첫 반복) 뒤 5초 동안 첫 콜백을 한 번도 받지 못하면(열기 직후·첫 콜백 전 분리. 거짓 양성은 프론트가 세션을 끝내 되돌릴 수 없으므로 보통의 첫 콜백(수 ms)보다 크게 잡았고, 방향별 첫 콜백 지연은 로그 "첫 출력/입력 콜백: 감시 시작 뒤 N ms"로 진단 내보내기에 남는다) 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화 HRESULT(`AUDCLNT_E_DEVICE_INVALIDATED`, `AUDCLNT_E_SERVICE_NOT_RUNNING`, `AUDCLNT_E_RESOURCES_INVALIDATED`)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 그 밖의 WASAPI 호출 실패는 일시 오류로 보고 `streamErrors`만 올린 뒤 다음 이벤트를 기다린다. 같은 방향이 연속 4회 실패하면 그 스트림을 재시작(Stop/Reset/Start, `streamRestarts`)하고, 성공 없이 재시작이 3회 이어지거나 연속 50회 실패하면 `streamFailed=true`, `running=false`로 멈춘다.
 - 워커, net 수신, 자체 WASAPI 스레드는 스레드 시작 시 MMCSS "Pro Audio"에 등록하고(`AvSetMmThreadCharacteristicsW` + `AvSetMmThreadPriority(HIGH)`, 스레드 종료 시 `AvRevertMmThreadCharacteristics`) FTZ/DAZ를 켠다. 등록이 실패하면 `THREAD_PRIORITY_HIGHEST`로 대신하고, 그것도 실패하면 기본 우선순위로 계속 돈다. 결과는 로그와 `EngineStats.threadPriority`에 남는다(P1-2).
   - cpal WASAPI 콜백 스레드는 cpal(0.15)이 `THREAD_PRIORITY_TIME_CRITICAL`로 올리고, ASIO 콜백 스레드는 드라이버가 관리한다. RT 콜백 안에서는 시스템콜을 하지 않으므로 우리가 따로 등록하지 않는다(`threadPriority.audio = unmanaged`). cpal은 자체 WASAPI가 실패했을 때의 폴백이다.
   - 엔진이 도는 동안(`Engine::start` ~ `stop`) 시스템 타이머 해상도를 1ms로 쥔다(`timeBeginPeriod(1)`/`timeEndPeriod(1)`). 프로세스 안 참조 카운트로 감싸 처음 쥘 때만 begin, 마지막에 놓을 때만 end를 부르므로 반복 시작·정지와 중첩 엔진에도 짝이 맞는다. begin이 실패하면 end를 부르지 않는다.
@@ -490,7 +490,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 시험: `tests/loopback.rs` `remote_frame_and_input_buffer_reported`(A 256/10ms ↔ B 128/2.5ms, 각자 상대 값을 정확히 본다), `engine::report::tests::serializes_camel_case`, 클라이언트 `earLatency.test.ts`.
 
 `deviceLost`: 장치를 잃었다. 이때 `running`은 false다. 그래서 프론트의 "running=false 연속 → 엔진 정지" 감지가 그대로 동작한다. 자동 재열기는 아직 없다.
-- 입력 또는 출력 콜백이 1초 넘게 멈추면 켜지고, 콜백이 다시 돌면 꺼진다.
+- 입력 또는 출력 콜백이 1초 넘게 멈추거나 한 방향이 워커 감시 시작(장치 Start·STUN 뒤) 뒤 5초 동안 첫 콜백을 받지 못하면 켜지고, 콜백이 다시 돌면 꺼진다.
 - 자체 WASAPI 백엔드는 장치 무효화(WASAPI 호출 실패)와, 기본 장치로 연 방향의 기본 장치 변경도 바로 알린다. 이 경우 엔진을 다시 시작할 때까지 켜져 있다(다시 시작하면 새 기본 장치로 열린다).
 
 `streamErrors`: 스트림 에러 누적 횟수(cpal 에러 콜백, 자체 WASAPI 호출 실패; 재시도로 넘어간 일시 오류 포함, 정보용).
