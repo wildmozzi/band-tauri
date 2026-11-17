@@ -1,6 +1,6 @@
 //! 릴레이 입력 퍼징(P2 발굴 — 네트워크 파서). Windows에서 cargo-fuzz(libFuzzer)를 쓰기 어려워 시드 고정 무작위 입력으로 대신한다.
 //!
-//! 기본 `cargo test`는 짧게 돈다. 긴 판: `cargo test --release --test fuzz -- --ignored`(반복 수는 `BAND_FUZZ_ITERS`).
+//! 기본 `cargo test`는 짧게 돈다. 긴 판: `BAND_FUZZ_LONG=1 cargo test --release --test fuzz -- --ignored`(반복 수는 `BAND_FUZZ_ITERS`).
 //!
 //! 방에 정상 등록한 두 멤버(A, B) 옆에서 무작위 바이트·바꾼 Bind/RelayData·다른 주소에서 그대로 다시 보낸 Bind(쿠키 포함)를
 //! 넣는다. 판정: panic 없음, 등록은 A·B뿐(새 주소 등록 0 — 재생·위조로 경로 가로채기 없음), Ack는 보낸 주소로만·요청보다 작게
@@ -16,6 +16,16 @@ use band_relay::{Limits, Outcome, Relay, Stats};
 
 const SECRET: &[u8] = b"fuzz-secret-0123456789abcdef-0123456789";
 const NOW_UNIX: u64 = 1_800_000_000;
+
+/// 긴 판은 `BAND_FUZZ_LONG=1`일 때만 돈다. CI realtime 잡(`--run-ignored only`, debug·직렬)이 `#[ignore]`를 모두 돌리므로
+/// 가드가 없으면 수십 분이 더해진다(#190 리뷰 H1). 가드에 걸리면 아무것도 하지 않고 통과한다.
+fn long_enabled(name: &str) -> bool {
+    let on = std::env::var_os("BAND_FUZZ_LONG").is_some_and(|v| v == "1");
+    if !on {
+        eprintln!("{name}: BAND_FUZZ_LONG=1이 아니라 건너뜀");
+    }
+    on
+}
 
 fn iters(default: usize) -> usize {
     std::env::var("BAND_FUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -206,8 +216,11 @@ fn fuzz_relay_handle() {
 }
 
 #[test]
-#[ignore = "긴 퍼징: cargo test --release --test fuzz -- --ignored"]
+#[ignore = "긴 퍼징: BAND_FUZZ_LONG=1 cargo test --release --test fuzz -- --ignored"]
 fn fuzz_relay_handle_long() {
+    if !long_enabled("fuzz_relay_handle_long") {
+        return;
+    }
     for s in 0..4 {
         relay_fuzz(0x2E1A_1000 + s, iters(1_000_000), s % 2 == 0);
     }

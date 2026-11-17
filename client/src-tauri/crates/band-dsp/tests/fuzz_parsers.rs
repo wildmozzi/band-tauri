@@ -1,6 +1,6 @@
 //! 입력 파서 퍼징(P2 발굴 — 네트워크 파서). Windows에서 cargo-fuzz(libFuzzer)를 쓰기 어려워 시드 고정 무작위 바이트로 대신한다.
 //!
-//! 기본 `cargo test`는 짧게(수 초) 돈다. 긴 판: `cargo test -p band-dsp --release --test fuzz_parsers -- --ignored`.
+//! 기본 `cargo test`는 짧게(수 초) 돈다. 긴 판: `BAND_FUZZ_LONG=1 cargo test -p band-dsp --release --test fuzz_parsers -- --ignored`.
 //! 반복 수는 `BAND_FUZZ_ITERS`로 바꿀 수 있다(짧은 판·긴 판 모두에 곱해지는 배수가 아니라 그 값 자체).
 //!
 //! 대상: 엔진 패킷 헤더(`packet::Header::parse`)와, 인증을 통과한 **악의적 피어**가 보낼 수 있는 임의 헤더 필드·페이로드를
@@ -12,6 +12,16 @@ use band_dsp::jitter::{JitterBuffer, JitterSettings};
 use band_dsp::packet::{Header, PacketType, FLAG_OPUS, FLAG_STEREO, MAGIC, VERSION};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+
+/// 긴 판은 `BAND_FUZZ_LONG=1`일 때만 돈다. CI realtime 잡(`--run-ignored only`, debug·직렬)이 `#[ignore]`를 모두 돌리므로
+/// 가드가 없으면 수십 분이 더해진다(#190 리뷰 H1). 가드에 걸리면 아무것도 하지 않고 통과한다.
+fn long_enabled(name: &str) -> bool {
+    let on = std::env::var_os("BAND_FUZZ_LONG").is_some_and(|v| v == "1");
+    if !on {
+        eprintln!("{name}: BAND_FUZZ_LONG=1이 아니라 건너뜀");
+    }
+    on
+}
 
 fn iters(default: usize) -> usize {
     std::env::var("BAND_FUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -60,8 +70,11 @@ fn header_parse_random_bytes() {
 }
 
 #[test]
-#[ignore = "긴 퍼징: cargo test --release --test fuzz_parsers -- --ignored"]
+#[ignore = "긴 퍼징: BAND_FUZZ_LONG=1 cargo test -p band-dsp --release --test fuzz_parsers -- --ignored"]
 fn header_parse_random_bytes_long() {
+    if !long_enabled("header_parse_random_bytes_long") {
+        return;
+    }
     header_parse_fuzz(0xB4ED_1001, iters(5_000_000));
 }
 
@@ -163,26 +176,40 @@ fn jitter_survives_hostile_peer() {
 }
 
 #[test]
-#[ignore = "긴 퍼징: cargo test --release --test fuzz_parsers -- --ignored"]
+#[ignore = "긴 퍼징: BAND_FUZZ_LONG=1 cargo test -p band-dsp --release --test fuzz_parsers -- --ignored"]
 fn jitter_survives_hostile_peer_long() {
+    if !long_enabled("jitter_survives_hostile_peer_long") {
+        return;
+    }
     for s in 0..16u64 {
         jitter_hostile_fuzz(0x717E_1000 + s, iters(200_000));
     }
 }
 
-/// 상한(`MAX_PAYLOAD_BYTES`)을 넘는 페이로드는 슬롯 복사 전에 버린다(경계값 회귀).
+/// 상한(`MAX_PAYLOAD_BYTES`)을 넘는 페이로드는 슬롯 복사 전에 버린다(경계값 회귀): 통계·상태가 새 버퍼와 같고, 상한 그대로는 받는다.
 #[test]
-fn jitter_rejects_oversized_payload_without_panic() {
-    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
-    let h = Header { ptype: PacketType::Audio, ssrc: 1, seq: 5, timestamp: 0, flags: 0, frame_code: 2 };
-    for len in [MAX_PAYLOAD_BYTES, MAX_PAYLOAD_BYTES + 1, 4096] {
-        jb.insert(&h, &vec![0x7f; len], 0);
-    }
-    let h = Header { flags: FLAG_OPUS | FLAG_STEREO, frame_code: 4, seq: 6, ..h };
-    jb.insert(&h, &[], 0);
+fn jitter_rejects_oversized_payload() {
+    let settings = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+    // 같은 pop·end_burst를 받되 insert는 받지 않는 기준 버퍼(목표 계산은 소비 패턴으로도 바뀐다)
+    let mut reference = JitterBuffer::new(settings);
+    let mut jb = JitterBuffer::new(settings);
     let mut out = [0f32; 960];
-    for t in 0..50u64 {
-        jb.pop(&mut out);
-        jb.end_burst(t * 5000, t * 5000, 0.0);
+    for (i, len) in [MAX_PAYLOAD_BYTES + 1, 4096].into_iter().enumerate() {
+        for k in 0..40u32 {
+            let h = Header { ptype: PacketType::Audio, ssrc: 1, seq: 5 + k, timestamp: k * 240, flags: FLAG_OPUS | FLAG_STEREO, frame_code: 2 };
+            jb.insert(&h, &vec![0x7f; len], u64::from(k) * 5000);
+            for b in [&mut jb, &mut reference] {
+                b.pop(&mut out);
+                b.end_burst(u64::from(k) * 5000, u64::from(k) * 5000, 0.0);
+            }
+        }
+        assert!(!jb.is_playing(), "{i}: 상한 초과 패킷으로 재생 시작");
+        assert_eq!(jb.stats(), reference.stats(), "{i}: 상한 초과 패킷이 통계에 들어감");
     }
+    let h = Header { ptype: PacketType::Audio, ssrc: 1, seq: 100, timestamp: 0, flags: 0, frame_code: 2 };
+    jb.insert(&h, &vec![0x7f; MAX_PAYLOAD_BYTES], 300_000);
+    for b in [&mut jb, &mut reference] {
+        b.end_burst(300_000, 300_000, 0.0);
+    }
+    assert_ne!(jb.stats(), reference.stats(), "상한 그대로의 패킷은 받는다(시험이 거름을 지나는지 확인)");
 }

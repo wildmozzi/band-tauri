@@ -1,6 +1,6 @@
 //! 네트워크 입력 퍼징(P2 발굴 — 네트워크 파서). Windows에서 cargo-fuzz(libFuzzer)를 쓰기 어려워 시드 고정 무작위 입력으로 대신한다.
 //!
-//! 기본 `cargo test`는 짧게 돈다. 긴 판: `cargo test -p band-engine --release --lib fuzz -- --ignored`
+//! 기본 `cargo test`는 짧게 돈다. 긴 판: `BAND_FUZZ_LONG=1 cargo test -p band-engine --release --lib fuzz -- --ignored`
 //! (반복 수는 `BAND_FUZZ_ITERS`로 바꾼다).
 //!
 //! - `handle_packet` 끝에서 끝: 키를 아는 상대(피어)로서 새 패킷·그대로 다시 보낸 패킷·한 바이트라도 바꾼 패킷·무작위 바이트를
@@ -24,6 +24,16 @@ use crate::net::crypto::{KeyPair, PacketCipher};
 use crate::net::peer::{self, Candidate, CandidateKind, EchoState, LocalDescriptor, LossReport, Peer};
 use crate::net::relay::{AckAction, RelayClient, RelayToken};
 use crate::net::{parse_clock_payload, stun, Net, NetOptions, NetShared};
+
+/// 긴 판은 `BAND_FUZZ_LONG=1`일 때만 돈다. CI realtime 잡(`--run-ignored only`, debug·직렬)이 `#[ignore]`를 모두 돌리므로
+/// 가드가 없으면 수십 분이 더해진다(#190 리뷰 H1). 가드에 걸리면 아무것도 하지 않고 통과한다.
+fn long_enabled(name: &str) -> bool {
+    let on = std::env::var_os("BAND_FUZZ_LONG").is_some_and(|v| v == "1");
+    if !on {
+        eprintln!("{name}: BAND_FUZZ_LONG=1이 아니라 건너뜀");
+    }
+    on
+}
 
 fn iters(default: usize) -> usize {
     std::env::var("BAND_FUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -239,7 +249,15 @@ fn handle_packet_fuzz(seed: u64, n: usize) {
             got_audio += drain_audio(&mut rig.media, &mut want_audio, seed, i);
         }
     }
-    got_pongs.extend(rig.drain_replies());
+    // 루프백 UDP는 사실상 동기지만, 마지막 Pong이 아직 소켓에 없을 수 있어 기대한 수가 모일 때까지(최대 2초) 다시 읽는다(#190 리뷰 L5).
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        got_pongs.extend(rig.drain_replies());
+        if got_pongs.len() >= want_pongs.len() || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::yield_now();
+    }
     got_audio += drain_audio(&mut rig.media, &mut want_audio, seed, n);
     assert!(want_audio.is_empty(), "seed {seed:#x}: 새 Audio {}개가 수신 큐에 없음", want_audio.len());
     let got: BTreeSet<u32> = got_pongs.iter().copied().collect();
@@ -293,8 +311,11 @@ fn fuzz_handle_packet_accepts_only_fresh_authentic() {
 }
 
 #[test]
-#[ignore = "긴 퍼징: cargo test -p band-engine --release --lib fuzz -- --ignored"]
+#[ignore = "긴 퍼징: BAND_FUZZ_LONG=1 cargo test -p band-engine --release --lib fuzz -- --ignored"]
 fn fuzz_handle_packet_accepts_only_fresh_authentic_long() {
+    if !long_enabled("fuzz_handle_packet_accepts_only_fresh_authentic_long") {
+        return;
+    }
     for s in 0..8u64 {
         handle_packet_fuzz(0xF022_1000 + s, iters(100_000));
     }
@@ -327,8 +348,11 @@ fn fuzz_crypto_open_rejects_mutations() {
 }
 
 #[test]
-#[ignore = "긴 퍼징: cargo test -p band-engine --release --lib fuzz -- --ignored"]
+#[ignore = "긴 퍼징: BAND_FUZZ_LONG=1 cargo test -p band-engine --release --lib fuzz -- --ignored"]
 fn fuzz_crypto_open_rejects_mutations_long() {
+    if !long_enabled("fuzz_crypto_open_rejects_mutations_long") {
+        return;
+    }
     crypto_fuzz(0xC0DE_1001, iters(1_000_000));
 }
 
@@ -416,23 +440,28 @@ fn fuzz_pure_parsers() {
 }
 
 #[test]
-#[ignore = "긴 퍼징: cargo test -p band-engine --release --lib fuzz -- --ignored"]
+#[ignore = "긴 퍼징: BAND_FUZZ_LONG=1 cargo test -p band-engine --release --lib fuzz -- --ignored"]
 fn fuzz_pure_parsers_long() {
+    if !long_enabled("fuzz_pure_parsers_long") {
+        return;
+    }
     parsers_fuzz(0x9A25_1001, iters(2_000_000));
 }
 
-/// 오래 걸리지 않는다: 한 패킷 처리가 1ms를 넘지 않는다(무한 루프·이상 경로 감지 — 짧은 판의 평균).
+/// 오래 걸리지 않는다(무한 루프·이상 경로 감지): 변조 패킷 하나 처리가 50ms를 넘지 않는다(최댓값 — 느린 CI 여유 포함).
 #[test]
 fn fuzz_handle_packet_is_fast() {
     let mut rig = Rig::new();
     let mut rng = StdRng::seed_from_u64(0xFA57);
     let p = rig.seal(PacketType::Ping, 1, 0, 0, &[]);
-    let t = Instant::now();
+    let mut worst = Duration::ZERO;
     for _ in 0..2_000 {
         let m = mutate(&mut rng, &p);
+        let t = Instant::now();
         rig.feed(&m, rig.from);
+        worst = worst.max(t.elapsed());
     }
-    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert!(worst < Duration::from_millis(50), "가장 느린 패킷 {worst:?}");
 }
 
 /// Pong 시계(상대가 정하는 u64)가 극단값이어도: 오프셋 추정은 유한하고, 기준 피어로 따르는 메트로놈 스케줄러(`tick`의 다음 박 찾기
