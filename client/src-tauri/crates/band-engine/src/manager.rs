@@ -33,8 +33,9 @@ use crate::net::{NetOptions, RelaySetting};
 enum Phase {
     #[default]
     Idle,
-    /// 장치 열기·STUN·스레드 시작 중(블로킹, `start_lock` 직렬화). `cancel`은 그 시작의 취소 플래그.
-    Starting { cancel: Arc<AtomicBool> },
+    /// 장치 열기·STUN·스레드 시작 중(블로킹, `start_lock` 직렬화). `cancel`은 그 시작의 취소 플래그,
+    /// `network`는 합주 시작인지(false = 테스트 모드 — `stop_monitor_only`가 취소할 수 있는 시작).
+    Starting { cancel: Arc<AtomicBool>, network: bool },
     Running(Box<Engine>),
 }
 
@@ -44,7 +45,7 @@ impl Phase {
     fn leave(&mut self) -> Option<Engine> {
         match std::mem::take(self) {
             Phase::Idle => None,
-            Phase::Starting { cancel } => {
+            Phase::Starting { cancel, .. } => {
                 cancel.store(true, Ordering::SeqCst);
                 None
             }
@@ -240,7 +241,7 @@ impl EngineManager {
             s.generation += 1;
             // 진행 중인 이전 시작은 취소하고, 실행 중이던 엔진은 꺼내 락 밖에서 정지한다(retire)
             let old = s.phase.leave();
-            s.phase = Phase::Starting { cancel: cancel.clone() };
+            s.phase = Phase::Starting { cancel: cancel.clone(), network: peer_id.is_some() };
             if peer_id.is_some() {
                 self.restore_monitor(&mut s);
             } else {
@@ -273,7 +274,14 @@ impl EngineManager {
         // 세대가 같으면 그 사이 아무도 슬롯을 바꾸지 않았다: 아직 이 시작의 Starting이다
         debug_assert!(matches!(s.phase, Phase::Starting { .. }));
         s.phase = Phase::Idle;
-        let engine = result?;
+        let engine = match result {
+            Ok(e) => e,
+            Err(e) => {
+                // 테스트 모드가 강제로 켠 모니터를 되돌린다(엔진이 없는데 켜진 채 남지 않게). 합주 시작은 이미 복원했다.
+                self.restore_monitor(&mut s);
+                return Err(e);
+            }
+        };
         // 같은 장치 구성에서 잰 루프백 보정값이 있으면 메트로놈 출력 지연 보정에 쓴다(PR #34 M2(a))
         if let Some((key, o)) = self.loopback_cal.lock().clone() {
             if engine.device_key() == key {
@@ -317,11 +325,18 @@ impl EngineManager {
         std::mem::take(&mut *self.ended_conn.lock())
     }
 
-    /// 테스트 모드 엔진만 정지한다.
+    /// 테스트 모드 엔진만 정지한다. 테스트 모드 시작이 진행 중이면 그 시작을 취소한다(세대를 올려 늦게 끝난 결과를
+    /// 버린다) — 전에는 `Running`만 보고 아무것도 하지 않아, 시작이 끝난 뒤 테스트 엔진(모니터 켬)이 그대로 돌았다.
     pub fn stop_monitor_only(&self) {
         let old = {
             let mut s = self.slot.lock();
-            if s.phase.engine().is_some_and(|e| !e.has_network()) {
+            let test_mode = match &s.phase {
+                Phase::Running(e) => !e.has_network(),
+                Phase::Starting { network, .. } => !network,
+                Phase::Idle => false,
+            };
+            if test_mode {
+                s.generation += 1;
                 self.restore_monitor(&mut s);
                 s.phase.leave()
             } else {
@@ -419,7 +434,7 @@ mod tests {
     /// 지금 `Starting`인 시작의 취소 플래그(같은 Arc). Starting이 아니면 실패.
     fn starting_cancel(m: &EngineManager) -> Arc<AtomicBool> {
         match &m.slot.lock().phase {
-            Phase::Starting { cancel } => cancel.clone(),
+            Phase::Starting { cancel, .. } => cancel.clone(),
             _ => panic!("Starting이 아님"),
         }
     }
@@ -465,7 +480,7 @@ mod tests {
         let mut p = Phase::Idle;
         assert!(p.leave().is_none());
         let cancel = Arc::new(AtomicBool::new(false));
-        p = Phase::Starting { cancel: cancel.clone() };
+        p = Phase::Starting { cancel: cancel.clone(), network: false };
         assert!(p.leave().is_none());
         assert!(cancel.load(Ordering::SeqCst), "Starting을 떠나면 그 시작을 취소");
         assert!(matches!(p, Phase::Idle));
@@ -563,12 +578,50 @@ mod tests {
     }
 
     #[test]
+    fn stop_monitor_only_cancels_test_start_but_not_network_start() {
+        // 테스트 모드 시작 중 테스트 정지: Starting → Idle, 늦게 끝난 시작은 버리고 모니터는 원래 값으로
+        let (gate, held, b) = gated();
+        let m = Arc::new(EngineManager::new(Arc::new(b), net()));
+        let m1 = m.clone();
+        let t = std::thread::spawn(move || m1.start_monitor_only(cfg()));
+        assert!(gate.wait_entered(1, HANG));
+        let cancel = starting_cancel(&m);
+        assert!(m.controls().monitor_enabled.load(Ordering::Relaxed));
+        m.stop_monitor_only();
+        assert!(cancel.load(Ordering::SeqCst), "테스트 정지가 진행 중인 테스트 시작을 취소하지 않음");
+        assert_eq!(phase(&m), P::Idle);
+        assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed), "모니터 복원");
+        gate.release();
+        assert_eq!(t.join().unwrap().unwrap_err(), "엔진 시작이 취소되었습니다");
+        assert_eq!(phase(&m), P::Idle, "늦게 끝난 테스트 시작이 엔진을 되살리면 안 됨");
+        assert!(!held.load(Ordering::SeqCst), "버린 결과의 장치는 닫혔다");
+
+        // 합주 시작 중에는 테스트 정지가 아무것도 하지 않는다
+        gate.close();
+        let n = gate.entered();
+        let m2 = m.clone();
+        let t = std::thread::spawn(move || m2.start(cfg(), "me".into()));
+        assert!(gate.wait_entered(n + 1, HANG));
+        let cancel = starting_cancel(&m);
+        m.stop_monitor_only();
+        assert!(!cancel.load(Ordering::SeqCst));
+        assert_eq!(phase(&m), P::Starting);
+        gate.release();
+        assert!(t.join().unwrap().is_ok());
+        assert_eq!(phase(&m), P::Running);
+        m.stop();
+    }
+
+    #[test]
     fn failed_start_returns_to_idle() {
         // Starting → 실패 → Idle
         let mut b = FakeBackend::silence(48_000);
         b.exclusive = Some(Arc::new(AtomicBool::new(true))); // 이미 다른 곳이 쥔 장치
         let m = EngineManager::new(Arc::new(b), net());
+        assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed));
         assert!(m.start_monitor_only(cfg()).is_err());
+        assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed), "테스트 모드 시작이 실패하면 강제로 켠 모니터를 되돌린다");
+        assert!(m.slot.lock().monitor_before_test.is_none());
         assert_eq!(phase(&m), P::Idle);
         assert!(!m.is_starting());
         assert!(!m.stats().running);
