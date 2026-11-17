@@ -1,9 +1,11 @@
+/// <reference types="vitest/config" />
 import { defineConfig, type PluginOption } from 'vite'
 import react from '@vitejs/plugin-react'
 import basicSsl from '@vitejs/plugin-basic-ssl'
 import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { bandServerProxy } from './vite/bandServerProxy'
+import { SUPABASE_SLIM_ALIAS } from './vite/supabaseSlim'
 
 // 개발 서버 HTTPS
 // - client/certs/{key,cert}.pem 이 있으면 그 인증서를 사용 (mkcert 권장, README 참고)
@@ -21,6 +23,10 @@ if (!hasLocalCert) plugins.push(basicSsl())
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins,
+  // supabase-js의 storage·functions를 빈 구현으로(첫 묶음 축소, vite/supabaseSlim.ts). 테스트(vitest)도 같은 별칭
+  resolve: { alias: SUPABASE_SLIM_ALIAS },
+  // vitest는 node_modules를 변환 없이 불러와 위 별칭이 supabase-js 안쪽 import에 안 걸린다 — supabase-js만 변환해 번들과 같게
+  test: { server: { deps: { inline: ['@supabase/supabase-js'] } } },
   server: {
     host: true,  // LAN에서 접근 가능하도록
     port: 5173,

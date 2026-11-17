@@ -59,19 +59,12 @@ vi.mock('../../../native/useNativeSession', () => ({
   // 실제 훅처럼 세션 상태는 돌려주지 않는다(Provider는 스토어 미러에서 읽는다)
   useNativeSession: () => ({ session: h.session as unknown as PerformSession }),
 }))
-vi.mock('../../../native/mixBridge', () => ({
-  MixSource: class {
-    invalidate() {}
-    resume() {}
-  },
-  MixBroadcaster: class {
-    stop() {}
-    start = async () => {}
-    syncViewers() {}
-    hasPeer() {
-      return false
-    }
-  },
+// 엔진 믹스 소스·관람 방송 (Provider는 runtimeLoader.createMixBridge로 만든다)
+vi.mock('../../../native/runtimeLoader', () => ({
+  createMixBridge: () => ({
+    mixSource: { invalidate() {}, resume() {} },
+    broadcaster: { stop() {}, start: async () => {}, syncViewers() {}, hasPeer: () => false },
+  }),
 }))
 vi.mock('./useSignaling', async (importOriginal) => {
   const { useRef } = await import('react')

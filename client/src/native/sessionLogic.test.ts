@@ -1,13 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { LocalDescriptor } from './engineApi'
-import {
-  NativeSignalMachine,
-  broadcastTransition,
-  computeViewers,
-  isValidDescriptor,
-  selectBroadcaster,
-  type SessionAction,
-} from './sessionLogic'
+import { broadcastTransition, computeViewers, selectBroadcaster } from './broadcastLogic'
+import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
 
 const desc = (ssrc: number): LocalDescriptor => ({
   ssrc,

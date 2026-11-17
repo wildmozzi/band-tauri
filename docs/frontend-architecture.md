@@ -39,6 +39,7 @@
 
 왜 이 방향인가:
 - **native는 기능 아래에 있다.** 엔진 브릿지는 "합주실" 화면이 없어도 성립해야 하고(측정 도구·설정 화면·테스트에서도 쓴다), 엔진 계약이 바뀔 때 고칠 곳이 한 폴더로 모인다. 그래서 native는 React 없이 테스트 가능한 컨트롤러(클래스·순수 함수)를 중심에 두고, React 연결은 얇은 훅 하나(`useNativeSession`)로 끝낸다.
+- **데스크톱 전용 엔진 런타임은 지연 묶음(웹 관람 묶음 분리).** 연주 세션 본체(`performSession`·상태기계 `sessionLogic`)와 관람 방송(`mixBridge`)은 `native/nativeRuntime` 묶음에만 있고, `native/runtimeLoader`가 데스크톱 앱에서만 동적 import한다. 데스크톱 앱은 `main.tsx`에서 이 묶음을 받은 뒤 첫 그리기를 해 합주실이 처음부터 진짜 세션을 갖는다(연주 시작 경로·타이밍 불변). 웹은 받지 않고 시작한 적 없는 세션과 똑같이 동작하는 `idleSession`을 쓴다(같은지 `idleSession.test.ts`가 비교). 데스크톱에서 불러오기에 실패하면 엔진 없는 세션으로 시작하되 연주 시작 때 다시 불러와 성공하면 진짜 세션·방송으로 넘어간다(`DeferredPerformSession`), 다시 실패하면 앱 재시작 안내. 그래서 이 네 모듈은 그 묶음 밖에서 **값으로 정적 import하지 않는다**(`import type`은 괜찮다, `nativeSplit.test.ts`가 검사). 하위 의존까지 첫 화면 JS에 없는지와 첫 화면 JS gzip 상한은 e2e `bundle-budget.e2e.ts`가 빌드 산출물로 검사한다. 웹·데스크톱이 같이 쓰는 신호 해석·문구는 `performSignals`, 방송 담당 선정은 `broadcastLogic`에 둔다.
 - **shared는 맨 아래.** shared가 기능을 알면 "공용"이 아니다. 기능 하나만 쓰는 코드는 shared로 올리지 않는다(쓰는 곳이 둘이 된 뒤에 올린다).
 - **기능끼리는 공개 API(`index.ts`)로만.** 내부 파일 이름·구조를 바꿔도 다른 기능이 깨지지 않는다. 기능 간 의존은 **비순환**이어야 한다(순환이면 둘 중 하나의 책임이 잘못 나뉜 것).
 
@@ -168,7 +169,7 @@ client/src/
 
 - **공개 API는 `index.ts` 하나.** 다른 기능·app이 쓰는 것만 다시 내보낸다(화면 컴포넌트, Provider, 훅, 다른 기능이 쓰는 타입·순수 함수). 내부 전용은 내보내지 않는다.
 - **평평하게 시작한다.** 파일이 15~20개를 넘으면 `components/`·`hooks/`·`state/`로 나눈다(지금은 `room`만). 한 곳에서만 쓰는 래퍼·팩토리·추상 계층을 만들지 않는다.
-- **서버 호출은 기능 안에.** HTTP/Supabase 호출 모듈(`roomApi`, `communityApi`, `paymentApi` …)과 그 query 훅(`queries.ts`)은 그 기능 폴더에 둔다. 모든 기능이 쓰는 클라이언트(`supabaseClient`, `apiUrl`, `authHeaders`)만 shared.
+- **서버 호출은 기능 안에.** HTTP/Supabase 호출 모듈(`roomApi`, `communityApi`, `paymentApi` …)과 그 query 훅(`queries.ts`)은 그 기능 폴더에 둔다. 모든 기능이 쓰는 클라이언트(`supabaseClient`, `apiUrl`, `authHeaders`)만 shared. 클라이언트는 Supabase의 auth·postgrest·realtime만 쓴다 — storage·functions는 빌드에서 빈 구현으로 바꿔 첫 묶음에서 뺐다(`client/vite/supabaseSlim.ts`; 쓰면 바로 오류, 파일 업로드는 서버 서명 URL). 쓰게 되면 그 경로만 원래 패키지를 동적 import하고 별칭을 정리한다.
 - **CSS는 그 화면 옆에.** 디자인 토큰(`shared/ui/tokens.css`)과 전역 스타일(`app/App.css`, `app/index.css`)만 밖에 둔다. 지금 앱은 모든 화면을 즉시 import하므로 CSS가 한 번들로 합쳐지고, **파일 사이 우선순위는 import 순서(모듈 방문 순서)를 따른다.** 같은 선택자를 두 파일에서 정의하지 말 것(③ 후속 정리 대상).
 
 ## 6. 경계 규칙과 강제

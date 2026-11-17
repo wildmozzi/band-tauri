@@ -23,8 +23,8 @@ import {
   metronomeErrorFromCode,
   saveMetronomeGain,
 } from '../../../native/metronomeLogic'
-import { MixBroadcaster, MixSource } from '../../../native/mixBridge'
-import { isEngineDescriptorErrorCode } from '../../../native/performSession'
+import { createMixBridge } from '../../../native/runtimeLoader'
+import { isEngineDescriptorErrorCode } from '../../../native/performSignals'
 import {
   MAX_PERFORMERS,
   engineErrorMessage,
@@ -220,13 +220,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   })
   const mixer = useWebAudioMixer(store)
 
-  const [{ mixSource, broadcaster }] = useState(() => {
-    const source = new MixSource()
-    return {
-      mixSource: source,
-      broadcaster: new MixBroadcaster(source, send, (n) => store.patch('local', { broadcastViewerCount: n })),
-    }
-  })
+  // 엔진 믹스 소스·관람 방송: 데스크톱 앱만 진짜(지연 로드된 엔진 런타임), 웹은 열리지 않는 빈 것 (native/runtimeLoader)
+  const [{ mixSource, broadcaster }] = useState(() =>
+    createMixBridge(send, (n) => store.patch('local', { broadcastViewerCount: n })),
+  )
 
   const resolveRecordingSource = async (): Promise<RecordingSource | null> => {
     if (session.getState().phase === 'running') {
