@@ -181,13 +181,13 @@ impl LateBudget {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct LateProbe {
-    pub tail_extra: f64,
-    pub tail_fresh: usize,
-    pub loss_count: usize,
-    pub pkts_block: u32,
-    pub late_block: u32,
-    pub tail_skip: u32,
-    pub late_rates: [f64; LATE_BLOCKS],
+    pub(crate) tail_extra: f64,
+    pub(crate) tail_fresh: usize,
+    pub(crate) loss_count: usize,
+    pub(crate) pkts_block: u32,
+    pub(crate) late_block: u32,
+    pub(crate) tail_skip: u32,
+    pub(crate) late_rates: [f64; LATE_BLOCKS],
 }
 
 /// 시험용 들여다보기·조작(`jitter::tests`).

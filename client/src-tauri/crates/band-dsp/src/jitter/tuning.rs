@@ -13,32 +13,32 @@ pub struct JitterSettings {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JitterTuning {
     /// 지연 분위수: 0 → 0.90, 0.5 → 0.95, 1 → 0.99.
-    pub quantile: f64,
+    pub(crate) quantile: f64,
     /// 목표에 더하는 여유(프레임 배수): 0.5 이하 0, 1 → 0.5F.
-    pub pad_frames: f64,
+    pub(crate) pad_frames: f64,
     /// 짧은 창 추정을 내리기 전 유지 시간(ms): 1s / 2s / 4s(균형 = 이전 고정값 2s). 반복 스파이크는 긴 창이 맡는다.
-    pub hold_ms: f64,
+    pub(crate) hold_ms: f64,
     /// 버스트 상향 유지 시간(ms, 마지막 버스트 패킷 이후): 0.5s / 2s / 4s(6초 간격 스파이크를 이어 붙이지 않게, M4).
-    pub burst_hold_ms: f64,
+    pub(crate) burst_hold_ms: f64,
     /// 긴 창 블록 수(1초 블록): 5 / 12 / 20. 순위는 `max(3, ceil(블록 수/6))`(3 / 3 / 4) — 안정 쪽에서도 창 안 블록의
     /// 1/6 이상이 높아야 덮는다(PR #20 M4: 30블록·3순위에서는 스파이크 3번이 30초 동안 목표를 붙잡아 0.5→1 구간이 절벽).
-    pub long_blocks: usize,
+    pub(crate) long_blocks: usize,
     /// 피어 적응 여유(언더런) 유지·상한 배율(워커 `PeerFeed`): 0.5 / 1 / 2.
     pub margin_scale: f64,
     /// 긴 창(반복 스파이크) 초과분 반영 비율: 0.25 이하 0, 0.5 → 1/6, 1 → 1/2(선형). 스파이크 시작은 어차피 은닉되므로
     /// 전부 덮어도 은닉 이득이 작고(M4 시나리오 0.03%p) 지연은 스파이크 높이만큼 는다.
-    pub long_weight: f64,
+    pub(crate) long_weight: f64,
     /// 버스트 판정 문턱 배율(`max(F/2, 1ms)`에 곱함): 1.5 / 1 / 0.5. 저지연은 분위수가 낮아 꼬리 패킷이 문턱을 자주
     /// 넘으므로 문턱을 높여 진짜 스파이크에만 반응한다.
-    pub burst_scale: f64,
+    pub(crate) burst_scale: f64,
     /// 은닉 목표(비율, P1-6b): 0 → 3%, 0.5 → 1.3%, 1 → 0.6%. 늦은 패킷 예산 = 이 값 − 실제 손실률(은닉 목표의
     /// 1/4 ~ 3/4로 제한). 마감을 놓친 뒤 도착한 패킷 비율이 예산을 넘으면 목표에 깊이를 더한다(`tail_extra`).
     /// 균형 1.3%는 GOAL 2절(손실 1%에서 은닉 ≤ 1.5%)에 0.2%p 여유를 둔 값이다.
-    pub conceal_target: f64,
+    pub(crate) conceal_target: f64,
 }
 
 impl JitterTuning {
-    pub fn from_profile(profile: f32) -> Self {
+    pub(crate) fn from_profile(profile: f32) -> Self {
         let p = if profile.is_finite() { profile.clamp(0.0, 1.0) as f64 } else { 0.5 };
         let quantile = if p <= 0.5 { 0.90 + 0.1 * p } else { 0.95 + 0.08 * (p - 0.5) };
         Self {

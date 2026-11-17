@@ -70,7 +70,8 @@ impl ClockSync {
     }
 
     /// 지금까지 받은 표본 수.
-    pub fn samples(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn samples(&self) -> u64 {
         self.samples
     }
 

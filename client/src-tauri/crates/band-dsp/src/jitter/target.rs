@@ -289,7 +289,7 @@ impl JitterBuffer {
     /// '저지연 ↔ 안정' 프로필 변경(0..1). 다음 통계 갱신부터 새 계수로 목표를 계산한다.
     /// 짧은 창 추정은 새 분위수가 더 높을 때만 바로 올리고, 낮으면 정상 hold를 거쳐 내려간다(PR #20 M3: 슬라이더를
     /// 움직일 때마다 hold 중이던 추정이 바로 떨어져 은닉이 날 수 있었다). 같은 값이면 아무것도 하지 않는다.
-    pub fn set_profile(&mut self, profile: f32) {
+    pub(crate) fn set_profile(&mut self, profile: f32) {
         let tuning = JitterTuning::from_profile(profile);
         if tuning == self.tuning {
             self.settings.profile = profile;
