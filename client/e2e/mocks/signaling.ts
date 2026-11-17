@@ -75,6 +75,19 @@ interface Conn {
 export class FakeSignaling {
   /** 클라이언트가 보낸 메시지 전부 (도착 순) */
   readonly received: SignalMessage[] = []
+  /**
+   * 진단용 시간순 기록(P2-18f): 연결 수락·거부·닫힘, 받은 메시지(→), 보낸 메시지(←, error면 code), 테스트가 바꾼 mock 상태.
+   * 실패한 테스트에 첨부된다(e2e/test.ts) — 비동기 순서(연결 닫힘·join 도착)가 얽힌 flaky를 trace 없이도 읽을 수 있게
+   */
+  private readonly events: string[] = []
+  private readonly t0 = Date.now()
+  private log(line: string) {
+    this.events.push(`${String(Date.now() - this.t0).padStart(6)}ms ${line}`)
+  }
+  /** 진단용 시간순 기록 (한 줄에 하나) */
+  timeline(): string {
+    return this.events.join('\n')
+  }
   private conns: Conn[] = []
   private rooms = new Map<string, FakeRoomConfig>()
   private limiters = new Map<string, PasswordAttemptLimiter>()
@@ -124,6 +137,7 @@ export class FakeSignaling {
 
   /** 다음 join n번의 방 조회가 실패한다(DB 일시 장애) — 서버처럼 room-unavailable{retryAfterMs} (#189 리뷰 H-1) */
   failNextRoomLookups(n = 1, retryAfterMs = 500) {
+    this.log(`[test] failNextRoomLookups(${n})`)
     this.lookupFailures = n
     this.lookupRetryAfterMs = retryAfterMs
   }
@@ -151,6 +165,7 @@ export class FakeSignaling {
    * up으로 되돌리면 다음 재연결부터 평소처럼 받는다(세션 재개는 흉내 내지 않는다 — 새 clientId + rejoin join → room-state).
    */
   setDown(down: boolean) {
+    this.log(`[test] setDown(${down})`)
     this.down = down
     if (!down) return
     for (const c of this.conns) void c.ws.close({ code: SERVER_RESTART_CLOSE_CODE, reason: 'e2e down' })
@@ -163,6 +178,7 @@ export class FakeSignaling {
   }
 
   private send(c: Conn, msg: ServerMessage) {
+    this.log(`${c.clientId} ← ${msg.type}${msg.type === 'error' ? ` ${msg.code}` : ''}`)
     c.ws.send(JSON.stringify(msg))
   }
 
@@ -179,12 +195,15 @@ export class FakeSignaling {
   private accept(ws: WebSocketRoute) {
     if (this.down) {
       this.refused++
+      this.log('연결 거부(down)')
       void ws.close({ code: SERVER_RESTART_CLOSE_CODE, reason: 'e2e down' })
       return
     }
     const conn: Conn = { ws, clientId: `e2e-client-${++this.seq}`, userId: null, roomId: null, performing: false }
     this.conns.push(conn)
+    this.log(`${conn.clientId} 연결`)
     ws.onClose(() => {
+      this.log(`${conn.clientId} 닫힘`)
       this.conns = this.conns.filter(c => c !== conn)
     })
     this.send(conn, { type: 'welcome', clientId: conn.clientId })
@@ -197,6 +216,7 @@ export class FakeSignaling {
         return
       }
       this.received.push(msg)
+      this.log(`${conn.clientId} → ${msg.type}${msg.type === 'join' ? ` ${msg.isRejoin ? 'rejoin' : 'first'}` : ''}`)
       this.handle(conn, msg)
     })
   }

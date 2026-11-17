@@ -240,6 +240,8 @@ test.describe('웹 관람: 방 종료', () => {
     mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
     await page.goto(`/rooms/${ROCK_ROOM.id}`)
     await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
+    // 첫 join이 mock에 도착해 입장한 뒤에 방을 지운다(아니면 첫 입장이 room-not-found가 되어 재입장 경로를 보지 못한다, P2-18f)
+    await expect.poll(() => mock.signaling.clientIdsIn(ROCK_ROOM.id).length).toBe(1)
 
     // 방장이 방을 지워도 서버는 알리지 않는다 — 관람자는 화면을 그대로 본다
     mock.signaling.endRoom(ROCK_ROOM.id)
@@ -262,6 +264,9 @@ test.describe('웹 관람: 방 조회 일시 실패 (#189 리뷰 H-1)', () => {
     await page.goto(`/rooms/${ROCK_ROOM.id}`)
     const title = page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })
     await expect(title).toBeVisible()
+    // 제목은 Supabase 조회로 뜬다 — 시그널링 첫 join이 아직 도착하지 않았을 수 있다. 첫 join이 failNextRoomLookups 뒤에
+    // 도착하면 실패 하나를 먼저 써 버려 join이 3에서 멈췄다(P2-18f, 약 1/500). mock이 입장을 처리한 뒤에 실패를 건다
+    await expect.poll(() => mock.signaling.clientIdsIn(ROCK_ROOM.id).length).toBe(1)
 
     mock.signaling.failNextRoomLookups(2)
     mock.signaling.setDown(true)
