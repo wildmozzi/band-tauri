@@ -491,7 +491,10 @@ export interface ThreadPriorityStats {
   timer1ms: boolean
 }
 
-/** 스레드 하나의 코어 배치(설계 문서 4절 `corePlacement`). 비율은 %(합 100) */
+/**
+ * 스레드 하나의 코어 배치(설계 문서 4절 `corePlacement`). 엔진 시작부터 누적, 비율은 %(합 100).
+ * 표본은 깨어남 가중(워커 반복·수신 패킷마다)이라 실행 시간 비율이 아니다. 구간 값은 진단 타임라인(`[P, E, LP-E]` 구간 수)에 있다.
+ */
 export interface ThreadPlacement {
   samples: number
   pPct: number
