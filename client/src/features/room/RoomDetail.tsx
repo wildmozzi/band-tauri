@@ -22,6 +22,7 @@ import { PerformersPanel } from './components/PerformersPanel'
 import { MixerPanel } from './components/MixerPanel'
 import { ChatPanel } from './components/ChatPanel'
 import { ReconnectBanner } from './components/ReconnectBanner'
+import { DeviceNoticeBanner } from './components/DeviceNoticeBanner'
 import './RoomDetail.css'
 
 /**
@@ -179,6 +180,8 @@ export function RoomDetail() {
     <div className="live-room" onClick={resumeAllAudioContexts}>
       {/* 시그널링 재연결 중·포기 안내 (평상시에는 그리지 않는다) */}
       <ReconnectBanner />
+      {/* 오디오 장치 분실 뒤 엔진 자동 재시작 안내 (평상시에는 그리지 않는다) */}
+      <DeviceNoticeBanner />
       {/* 방장: 새 연주 참여 요청 알림 */}
       {isHost && requestNotice && !showPendingRequests && (
         <RequestNoticeToast

@@ -212,6 +212,14 @@ export function useRoomPerform() {
   }
 }
 
+const selectDeviceNotice = (s: RoomSnapshot) => ({ deviceNotice: s.perform.deviceNotice ?? null })
+
+/** 오디오 장치 분실 뒤 자동 재시작 안내(없으면 null) — DeviceNoticeBanner */
+export function useDeviceNotice(): string | null {
+  const { store } = useRoomRuntime()
+  return useRoomSelector(store, selectDeviceNotice).deviceNotice
+}
+
 /** 공유 메트로놈과 내 클릭 볼륨 */
 export function useRoomMetronome() {
   const { store, actions } = useRoomRuntime()
