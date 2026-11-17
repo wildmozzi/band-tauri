@@ -16,7 +16,7 @@
 - server: `npm run build`, `npm test`(node:test)
 - 데스크톱 실행: 루트에서 `npm run dev:tauri`
 
-- 디스크: Orca 작업자 워크트리(`%USERPROFILE%\orca\workspaces\band-tauri\*`)는 상위 `.cargo/config.toml`로 Rust 빌드 산출물을 `C:/Users/jwshin/.cargo-target/band-tauri` 하나에 공유한다. 워크트리 안에 `target/`을 따로 만들지 말 것(`CARGO_TARGET_DIR`을 덮어쓰지 말 것).
+- 디스크·빌드 폴더(2026-11-17 변경): Orca 작업자 워크트리(`%USERPROFILE%\orca\workspaces\band-tauri\*`)는 워크트리마다 Rust 빌드 산출물을 `C:/Users/jwshin/.cargo-target/band-tauri-wt/<워크트리 이름>`에 따로 둔다 — 코디네이터가 워크트리를 만들 때 그 워크트리 루트에 `.cargo/config.toml`(`[build] target-dir`, git 제외)을 써 두고, 워크트리를 지울 때 그 폴더도 지운다. 크레이트 분리(⑩) 뒤 같은 target을 다른 브랜치가 공유하면 산출물이 섞여(E0432/E0624·엉뚱한 fixture 경로) 생긴 결정이다. 워크트리 안에 `target/`을 만들지 말 것, `CARGO_TARGET_DIR`을 따로 덮어쓰지 말 것(워크트리 설정이 정한다). Rust를 빌드하는 작업자는 동시에 3명까지(폴더 하나 약 10GB). 상위 `.cargo/config.toml`의 공유 폴더(`band-tauri`)는 워크트리 설정이 없을 때의 기본값으로 남는다.
 
 ## 코드 규칙
 - `engine/rt.rs`와 cpal 콜백 경로: 할당·락·시스템콜·로그·panic 금지. 사전할당 SPSC 링과 원자값만.
