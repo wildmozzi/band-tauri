@@ -79,7 +79,11 @@ export function createPerformers(roomMeta: RoomMetaStore, insecureDevMode: boole
     const approved = approvedInstrument(roomId, client.auth.userId)
     if (approved === undefined || approved === requested) return requested
     const meta = await getRoomMetaOrNull(roomId)
-    return meta?.freeJoin ? requested : approved
+    if (!meta?.freeJoin) return approved
+    // free_join에서 본인이 바꾼 악기를 승인 기록에도 반영한다: 방이 다시 승인제로 바뀐 뒤 재전송(#208)이 옛 승인 악기로
+    // 조용히 되돌려지지 않게 (#225 리뷰 L-2)
+    if (requested !== undefined) updateApprovedInstrument(roomId, client.auth.userId, requested)
+    return requested
   }
 
   /**
@@ -152,7 +156,7 @@ export async function handleStartPerforming(ctx: Ctx<StartPerformingSvc>, msg: M
     return
   }
   // 권한 확인(방 정보 조회)을 기다리는 동안 방장이 내릴 수 있다: 내리기가 cancelledStart를 켜면 시작하지 않는다
-  // (대상은 이미 demoted-to-viewer를 받았다). 이미 연주 중인 재전송은 내리기가 평소처럼 처리한다.
+  // (대상은 이미 demoted-to-viewer를 받았다). 이미 연주 중인 재전송은 await 뒤에 아직 연주 중인지 다시 본다(아래 wasPerforming 검사).
   // 한계(#199 리뷰 L-2): 세션 재개(resume.attachSession)는 새 소켓의 체인을 옛 Client에 붙이므로 옛 소켓에서 진행 중이던 start와
   // 재개 뒤 다시 보낸 start가 동시에 await할 수 있고, 두 start가 이 플래그(boolean)를 함께 쓴다 — 먼저 끝난 쪽이 starting을 내리거나
   // cancelledStart를 소비하면 다른 쪽의 경합 처리는 빠진다. 창은 canStartPerforming이 방 정보를 조회하는 경우(승인 기록 없음·방장 아님,
@@ -176,6 +180,10 @@ export async function handleStartPerforming(ctx: Ctx<StartPerformingSvc>, msg: M
     client.perform.cancelledStart = false
     return
   }
+  // 연주 중 재전송인데 await(방 정보 조회 — 승인 악기와 다른 악기를 보냈거나 free_join 방) 사이에 내려졌거나 멈췄거나 방을 옮겼다:
+  // 조용히 버린다. 그대로 두면 아래가 isPerforming을 되살려 승인 기록·엔진 바인딩 없는 유령 연주자가 남았다 (#225 리뷰 M-1).
+  // 내리기는 이미 demoted-to-viewer·performer-updated(false)를 보냈다
+  if (!starting && (!client.perform.isPerforming || client.member.roomId !== roomId)) return
   if (!allowed || client.member.roomId !== roomId) {
     send(ws, { type: 'error', code: 'perform-not-approved', message: '방장의 승인이 필요합니다.' })
     return

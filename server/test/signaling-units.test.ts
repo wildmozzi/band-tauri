@@ -15,7 +15,7 @@ import { createRoomMeta } from '../src/signaling/roomMeta'
 import { createRequests, handleDemotePerformer, type DemoteSvc } from '../src/signaling/requests'
 import { createCapacity } from '../src/signaling/capacity'
 import { createPassword } from '../src/signaling/password'
-import { createPerformers } from '../src/signaling/performers'
+import { createPerformers, handleStartPerforming, type StartPerformingSvc } from '../src/signaling/performers'
 import { DEFAULT_LIMITS } from '../src/signaling/types'
 import { ScryptGate, hashRoomPassword } from '../src/lib/roomPassword'
 import { createMetronome, metronomeHostChanged } from '../src/signaling/metronome'
@@ -413,6 +413,8 @@ describe('performers', () => {
     const free = createPerformers(meta(true), false)
     free.setApproval('r', 'm', null, 'guitar')
     assert.equal(await free.instrumentForStart(m, 'r', 'synth'), 'synth')
+    // free_join에서 바꾼 악기는 승인 기록에도 반영된다 — 방이 승인제로 돌아가도 옛 악기로 되돌리지 않는다 (#225 리뷰 L-2)
+    assert.equal(free.approvedInstrument('r', 'm'), 'synth')
     const dev = createPerformers(meta(false), true)
     dev.setApproval('r', 'm', null, 'guitar')
     assert.equal(await dev.instrumentForStart(m, 'r', 'synth'), 'synth')
@@ -789,5 +791,66 @@ describe('relay bucket farming (#215 review M1)', () => {
     let n = 0
     while (takeRelayMessage(viewer, { roomSize: () => 20 }, limits)) n++
     assert.equal(n, DEFAULT_LIMITS.relayMsgBurst)
+  })
+})
+
+describe('start-performing resend vs demote race (#225 review M-1)', () => {
+  /**
+   * 승인 악기와 다른 악기로 보낸 연주 중 재전송은 방 정보를 조회한다(instrumentForStart). 그 조회를 막아 두고 그 사이 방장이 내린다.
+   * 방장 확인(requireHost)은 막히지 않는 별도 roomMeta로 해서 내리기가 먼저 끝나게 한다.
+   */
+  function raceRoom(freeJoin: boolean) {
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    const meta = { hostId: 'uh', freeJoin }
+    const gated: WsDeps = { hasBackend: true, verifyToken: async () => null, fetchRoomMeta: async () => { await gate; return meta }, updateParticipants: async () => {} }
+    const open: WsDeps = { ...gated, fetchRoomMeta: async () => meta }
+    const registry = createRegistry()
+    const hostMeta = createRoomMeta(open, false)
+    const performers = createPerformers(createRoomMeta(gated, false), false)
+    const svc: DemoteSvc & StartPerformingSvc = {
+      registry,
+      roomMeta: hostMeta,
+      requests: createRequests(),
+      performers,
+      nativeSession: createNativeSession(registry, {}),
+      metronome: createMetronome(registry, hostMeta, open, DEFAULT_LIMITS),
+      limits: DEFAULT_LIMITS,
+      insecureDevMode: false,
+    }
+    const host = fakeClient('h', { userId: 'uh', isHost: true })
+    const p = fakeClient('p', { userId: 'up', isPerforming: true, instrument: 'bass', nativeActive: true, nativeSsrc: 2 })
+    const q = fakeClient('q', { userId: 'uq', isPerforming: true, instrument: 'keys' })
+    seat(registry, 'r', host, p, q)
+    performers.setApproval('r', 'up', null, 'bass')
+    const ctx = <S>(c: Client): Ctx<S> => ({ ws: c.conn.ws, ip: c.conn.ip, client: c, id: c.id, svc: svc as unknown as S })
+    return { svc, host, p, q, release, ctx }
+  }
+
+  for (const freeJoin of [false, true]) {
+    it(`a demote during the lookup is not undone by the resend (${freeJoin ? 'free_join' : 'approval room'})`, async () => {
+      const { host, p, q, release, ctx } = raceRoom(freeJoin)
+      const start = handleStartPerforming(ctx<StartPerformingSvc>(p), { type: 'start-performing', instrument: 'drums' })
+      await sleep(10)
+      await handleDemotePerformer(ctx<DemoteSvc>(host), { type: 'demote-performer', targetId: 'p' })
+      assert.equal(p.perform.isPerforming, false)
+      sentTo(q).length = 0
+      release()
+      await start
+      assert.equal(p.perform.isPerforming, false, 'no ghost performer')
+      assert.equal(p.perform.instrument, undefined)
+      assert.deepEqual(sentTo(q), [], 'no performer-updated(true) after the demote')
+      assert.ok(!sentTo(p).some(m => m.type === 'error'))
+    })
+  }
+
+  it('without a demote the resend still completes after the lookup', async () => {
+    const { p, q, release, ctx } = raceRoom(false)
+    const start = handleStartPerforming(ctx<StartPerformingSvc>(p), { type: 'start-performing', instrument: 'drums' })
+    release()
+    await start
+    assert.equal(p.perform.isPerforming, true)
+    assert.equal(p.perform.instrument, 'bass', 'approved instrument kept')
+    assert.equal(sentTo(q).at(-1)?.instrument, 'bass')
   })
 })
