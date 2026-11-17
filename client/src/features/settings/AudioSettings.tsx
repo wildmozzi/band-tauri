@@ -28,6 +28,7 @@ import { DevServerSettingsSection } from './DevServerSettings'
 import { useLivePeerStats } from './hooks/useLivePeerStats'
 import { useDebouncedJitterProfile } from './hooks/useDebouncedJitterProfile'
 import {
+  bufferFrameHint,
   formatTestDevice,
   formatTestLatency,
   inputChannelOptions,
@@ -172,6 +173,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
   const unsupportedReasons = drivers.flatMap((d) => (d.reason ? [d.reason] : []))
   // 기본값은 공유지만 합주에는 독점을 권한다(P1-19) — 공유일 때 눈에 띄게
   const exclusiveHint = exclusiveModeHint(config, supportedDrivers)
+  const frameHint = bufferFrameHint(config, selectedInputDevice?.sampleRates)
 
   return wrap(
     <>
@@ -319,6 +321,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             ))}
           </select>
         </div>
+        {frameHint && <p className="setting-hint" data-testid="buffer-frame-hint">{frameHint}</p>}
         <div className="settings-row">
           <label htmlFor="codec">코덱</label>
           <select

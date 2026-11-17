@@ -140,6 +140,8 @@ pub struct JitterBuffer {
     fifo: VecDeque<f32>,
     /// FIFO 끝 샘플 다음 위치의 타임스탬프(확장).
     fifo_end_ts: i64,
+    /// 재생 시작 페이드인에서 이미 처리한 프레임 수(`playout::START_FADE`이면 끝남). 첫 패킷이 짧게 남아도 다음 패킷에서 이어 건다.
+    start_fade_done: usize,
 
     // 타임스탬프 언랩
     have_ts: bool,
@@ -237,6 +239,7 @@ impl JitterBuffer {
             highest: 0,
             fifo: b.fifo,
             fifo_end_ts: 0,
+            start_fade_done: playout::START_FADE,
             have_ts: false,
             last_ts: 0,
             ts_ext_base: 0,

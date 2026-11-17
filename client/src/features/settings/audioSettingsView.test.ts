@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  bufferFrameHint,
   formatTestDevice,
   formatTestLatency,
   inputChannelOptions,
@@ -68,5 +69,33 @@ describe('audioSettingsView', () => {
     expect(formatTestLatency(3.14159)).toBe('3.1ms')
     expect(formatTestLatency(undefined)).toBe('--')
     expect(formatTestDevice(48000, 128)).toBe('48kHz · 버퍼 128')
+  })
+})
+
+describe('bufferFrameHint (P2-17d ③)', () => {
+  it('2.5ms 프레임 + 버퍼 64 초과면 64 권장 안내', () => {
+    const h = bufferFrameHint({ bufferSize: 128, frameMs: 2.5, inputDriver: 'wasapiShared' })
+    expect(h).toContain('64')
+    expect(h).toContain('2.7ms')
+    expect(bufferFrameHint({ bufferSize: 256, frameMs: 2.5, inputDriver: 'wasapiShared' })).toContain('5.3ms')
+  })
+  it('버퍼 64 이하이거나 2.5ms 프레임이 아니면 안내 없음', () => {
+    expect(bufferFrameHint({ bufferSize: 64, frameMs: 2.5, inputDriver: 'wasapiShared' })).toBeNull()
+    expect(bufferFrameHint({ bufferSize: 32, frameMs: 2.5, inputDriver: 'wasapiShared' })).toBeNull()
+    expect(bufferFrameHint({ bufferSize: 128, frameMs: 5, inputDriver: 'wasapiShared' })).toBeNull()
+    expect(bufferFrameHint({ bufferSize: 512, frameMs: 10, inputDriver: 'wasapiShared' })).toBeNull()
+  })
+})
+
+describe('bufferFrameHint 장치 레이트·ASIO (#196 리뷰 L4)', () => {
+  it('48k를 지원하면 48k로, 아니면 장치 레이트로 ms를 계산', () => {
+    const base = { bufferSize: 128, frameMs: 2.5, inputDriver: 'wasapiShared' } as const
+    expect(bufferFrameHint(base, [44_100, 48_000])).toContain('2.7ms')
+    expect(bufferFrameHint(base, [44_100])).toContain('2.9ms')
+    expect(bufferFrameHint(base, [])).toContain('2.7ms')
+  })
+  it('ASIO면 제어판 확인 안내를 덧붙인다', () => {
+    expect(bufferFrameHint({ bufferSize: 128, frameMs: 2.5, inputDriver: 'asio' })).toContain('제어판')
+    expect(bufferFrameHint({ bufferSize: 128, frameMs: 2.5, inputDriver: 'wasapiExclusive' })).not.toContain('제어판')
   })
 })
