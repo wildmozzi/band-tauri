@@ -75,3 +75,40 @@ export function coerceToSupportedDrivers(config: EngineConfig, supported: readon
     notice: `저장된 드라이버(${names})는 이 배포본에 포함되어 있지 않아 ${driverLabel(alt)} 모드로 바꿨습니다. 장치 선택을 확인해주세요.`,
   }
 }
+
+export interface ExclusiveModeHint {
+  /** 공유 모드라 눈에 띄게 보일 안내인지(독점이면 확인 문구만) */
+  emphasized: boolean
+  text: string
+  /** 한 번에 독점으로 바꾸는 버튼을 보일지(WASAPI 공유일 때만) */
+  canSwitch: boolean
+}
+
+/** 독점 모드 권장 문구(지연 이득) — GOAL 1절의 WASAPI 로컬 지연 목표(독점 ≤15ms, 공유 ≤30ms) */
+export const EXCLUSIVE_RECOMMEND_TEXT =
+  '합주에는 WASAPI 독점 모드를 권장합니다. 공유 모드보다 지연이 짧습니다(로컬 처리 지연 목표: 독점 15ms 이하, 공유 30ms 이하).'
+/** 독점 모드 주의(다른 앱 소리 막힘) */
+export const EXCLUSIVE_CAUTION_TEXT =
+  '단, 독점 모드에서는 이 앱이 장치를 혼자 쓰므로 그동안 브라우저·메신저 등 다른 앱의 소리가 이 장치로 나오지 않습니다.'
+
+/**
+ * 오디오 설정 화면의 WASAPI 독점 모드 권장 안내(P1-19, 순수 함수).
+ * 기본값은 공유(다른 앱 소리를 막지 않기 위해)이고, 독점은 권장 설정이다.
+ * - 입력·출력 중 하나라도 WASAPI 공유 → 눈에 띄는 권장 안내 + 바꾸기 버튼
+ * - WASAPI 독점만 씀 → 다른 앱 소리 막힘 확인 문구
+ * - ASIO만 씀, 또는 이 배포본에 독점이 없음 → 안내 없음(null)
+ */
+export function exclusiveModeHint(
+  config: Pick<EngineConfig, 'inputDriver' | 'outputDriver'>,
+  supported: readonly DriverKind[] | null,
+): ExclusiveModeHint | null {
+  if (!isDriverSupported(supported, 'wasapiExclusive')) return null
+  const drivers = [config.inputDriver, config.outputDriver]
+  if (drivers.includes('wasapiShared')) {
+    return { emphasized: true, text: `지금은 WASAPI 공유 모드입니다. ${EXCLUSIVE_RECOMMEND_TEXT} ${EXCLUSIVE_CAUTION_TEXT}`, canSwitch: !drivers.includes('asio') }
+  }
+  if (drivers.includes('wasapiExclusive')) {
+    return { emphasized: false, text: `WASAPI 독점 모드(권장)입니다. ${EXCLUSIVE_CAUTION_TEXT}`, canSwitch: false }
+  }
+  return null
+}

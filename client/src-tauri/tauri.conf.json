@@ -85,7 +85,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRFMDQ2ODhCOUM1MjU2MjkKUldRcFZsS2NpMmdFVGl1T25VWU94SzhVVjJvNmdvY2tIK1QwMHV0S0h1MjZxbm0rYVRZbGFzNUsK",
       "endpoints": [
-        "https://github.com/exception-busters/band-tauri/releases/latest/download/latest.json"
+        "https://github.com/wildmozzi/band-tauri/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
