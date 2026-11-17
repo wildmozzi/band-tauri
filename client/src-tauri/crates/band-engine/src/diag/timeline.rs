@@ -169,6 +169,9 @@ pub struct Sample {
     pub(crate) stream_failed: bool,
     pub(crate) peers: Vec<PeerSample>,
     pub(crate) relay: Option<RelaySample>,
+    /// 워커·수신 스레드의 코어 배치(P1-21, 시작부터 누적). 비Windows는 줄에 넣지 않는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) core_placement: Option<crate::sys::placement::CorePlacementStats>,
     /// 직전 샘플 뒤로 생긴 연결 이벤트(P1-18). 없으면 줄에 넣지 않는다(기존 줄 형식 그대로).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) conn: Vec<ConnSample>,
@@ -234,6 +237,7 @@ impl Sample {
                 over_budget: r.over_budget,
                 auto_opus: r.auto_opus,
             }),
+            core_placement: s.core_placement,
             conn: Vec::new(),
         }
     }

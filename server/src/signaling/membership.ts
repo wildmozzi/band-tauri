@@ -5,7 +5,7 @@ import type { NativeSession } from './nativeSession'
 import type { Password } from './password'
 import type { Performers } from './performers'
 import {
-  MAX_ROOM_ID_LENGTH, PARTICIPANT_UPDATE_DEBOUNCE_MS,
+  MAX_ROOM_ID_LENGTH, PARTICIPANT_UPDATE_DEBOUNCE_MS, ROOM_UNAVAILABLE_RETRY_MS,
   isNonEmptyString, sanitizeNickname, type Msg,
 } from './protocol'
 import { send, type Registry } from './registry'
@@ -136,12 +136,21 @@ export interface JoinPlan {
  */
 async function checkRoom(ctx: Ctx<MembershipSvc>, roomId: string): Promise<JoinPlan | null> {
   const { ws, client } = ctx
-  const { getRoomMetaOrNull } = ctx.svc.roomMeta
+  const { getRoomMeta } = ctx.svc.roomMeta
   const { dropMetronomeIfHostChanged } = ctx.svc.metronome
   const { limits } = ctx.svc
 
   let capacity = limits.maxRoomParticipants
-  const meta = await getRoomMetaOrNull(roomId, 0)
+  let meta: Awaited<ReturnType<typeof getRoomMeta>>
+  try {
+    meta = await getRoomMeta(roomId, 0)
+  } catch (err) {
+    // 조회 실패(DB 타임아웃·5xx)는 "방 없음"이 아니다: 재시도 가능한 코드로 알린다. room-not-found를 받은 클라이언트는
+    // 보던 방이 종료된 것으로 보고 연주 세션을 끝내므로, 재배포 직후 재입장이 몰릴 때의 일시 실패로 합주를 끊지 않게 (#189 리뷰 H-1)
+    console.warn('[DB] room lookup failed on join:', err instanceof Error ? err.message : err)
+    send(ws, { type: 'error', code: 'room-unavailable', roomId, retryAfterMs: ROOM_UNAVAILABLE_RETRY_MS, message: '합주실 정보를 불러오지 못했습니다. 잠시 후 다시 시도합니다.' })
+    return null
+  }
   if (!meta) {
     send(ws, { type: 'error', code: 'room-not-found', message: '방을 찾을 수 없습니다.' })
     return null

@@ -28,6 +28,8 @@ export const REJOIN_WINDOW_MS = 60_000
 export const APPROVAL_GRACE_MS = 60_000
 export const TOKEN_EXPIRY_GRACE_MS = 60_000
 export const PARTICIPANT_UPDATE_DEBOUNCE_MS = 1000
+/** join 중 방 조회가 실패했을 때(room-unavailable) 클라이언트에게 권하는 재시도 간격 */
+export const ROOM_UNAVAILABLE_RETRY_MS = 2000
 
 /** 길이 제한이 있는 비어 있지 않은 문자열 (S3: wsService에서 이동, 순수) */
 export function isNonEmptyString(v: unknown, max = 256): v is string {
@@ -116,7 +118,7 @@ export type ServerError =
   | ErrorOf<'room-not-found'>
   | ErrorOf<'password-required', { roomId: string }>
   | ErrorOf<'password-invalid', { roomId: string; remainingAttempts: number }>
-  | ErrorOf<'password-rate-limited' | 'password-busy', { roomId: string; retryAfterMs: number }>
+  | ErrorOf<'password-rate-limited' | 'password-busy' | 'room-unavailable', { roomId: string; retryAfterMs: number }>
   | ErrorOf<'room-full', { reason: 'room-full' | 'anonymous-limit'; roomId: string; maxParticipants: number }>
   | ErrorOf<'login-required' | 'perform-not-approved' | 'room-full-performers' | 'descriptor-invalid' | 'key-conflict' | 'ssrc-conflict' | 'metronome-invalid' | 'metronome-host-only' | 'demote-not-performer'>
 

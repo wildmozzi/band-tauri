@@ -322,6 +322,8 @@ export interface EngineStats {
   backend?: string
   /** 스레드 우선순위 설정 결과(MMCSS 등록 여부, 1ms 타이머) */
   threadPriority?: ThreadPriorityStats
+  /** 하이브리드 CPU 코어 배치(P1-21): 워커·수신 스레드가 P/E/LP-E 코어에서 돈 비율(시작부터 누적). 비Windows·옛 엔진은 null/없음 */
+  corePlacement?: CorePlacementStats | null
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
@@ -481,6 +483,20 @@ export interface ThreadPriorityStats {
   /** 오디오 I/O 스레드. 자체 WASAPI만 등록하고 cpal·ASIO는 unmanaged(백엔드가 관리) */
   audio: ThreadPriority
   timer1ms: boolean
+}
+
+/** 스레드 하나의 코어 배치(설계 문서 4절 `corePlacement`). 비율은 %(합 100) */
+export interface ThreadPlacement {
+  samples: number
+  pPct: number
+  ePct: number
+  lpEPct: number
+}
+
+export interface CorePlacementStats {
+  worker: ThreadPlacement
+  /** 네트워크 없이 시작한 엔진은 null */
+  netRecv: ThreadPlacement | null
 }
 
 // ============================================================================
