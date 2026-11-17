@@ -298,11 +298,15 @@ fn with_candidate(d: &LocalDescriptor, addr: SocketAddr) -> LocalDescriptor {
     LocalDescriptor { candidates: vec![Candidate { kind: CandidateKind::Lan, addr: addr.to_string() }], ..d.clone() }
 }
 
-/// 방향마다 고정 지연을 넣는 UDP 프록시.
+const PING_TYPE: u8 = band_dsp::packet::PacketType::Ping as u8;
+
+/// 방향마다 고정 지연을 넣는 UDP 프록시. `drop_a_ping`이 켜져 있는 동안 A → B Ping(헤더 평문 바이트 3 = 4)을 버린다
+/// (에코 요청 해제 Ping 유실 재현).
 struct DelayProxy {
     pa: SocketAddr,
     pb: SocketAddr,
     stop: Arc<AtomicBool>,
+    drop_a_ping: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -315,6 +319,8 @@ impl DelayProxy {
         let (pa, pb) = (sa.local_addr().unwrap(), sb.local_addr().unwrap());
         let stop = Arc::new(AtomicBool::new(false));
         let st = stop.clone();
+        let drop_a_ping = Arc::new(AtomicBool::new(false));
+        let dp = drop_a_ping.clone();
         let thread = std::thread::spawn(move || {
             let _prio = band_engine::testing::sys::prio::promote_current_thread();
             let mut queue: std::collections::VecDeque<(Instant, bool, Vec<u8>)> = Default::default();
@@ -322,6 +328,9 @@ impl DelayProxy {
             while !st.load(Ordering::Relaxed) {
                 for (sock, from_a) in [(&sa, true), (&sb, false)] {
                     while let Ok((n, _)) = sock.recv_from(&mut buf) {
+                        if from_a && n > 3 && buf[3] == PING_TYPE && dp.load(Ordering::Relaxed) {
+                            continue;
+                        }
                         queue.push_back((Instant::now() + delay, from_a, buf[..n].to_vec()));
                     }
                 }
@@ -337,7 +346,7 @@ impl DelayProxy {
                 std::thread::sleep(Duration::from_micros(100));
             }
         });
-        DelayProxy { pa, pb, stop, thread: Some(thread) }
+        DelayProxy { pa, pb, stop, drop_a_ping, thread: Some(thread) }
     }
 }
 
@@ -498,6 +507,41 @@ fn echo_requires_consent_and_times_out() {
     assert!(a.echo_job("nobody").is_err());
 }
 
+type Sink = Arc<Mutex<Vec<f32>>>;
+
+/// A 입력 사인(440Hz, 진폭 0.5)·B 입력 무음, 편도 100ms 프록시로 연결하고 양방향 오디오가 흐를 때까지 기다린다.
+fn sine_pair() -> (Engine, Engine, Sink, Sink, DelayProxy) {
+    let sine: Arc<SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+        for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+            let t = (start + i as u64) as f64 / 48_000.0;
+            frame.fill((t * 440.0 * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5);
+        }
+    });
+    let backend_a = FakeBackend::new(48_000, sine);
+    let sink_a = backend_a.sink.clone();
+    let backend_b = FakeBackend::silence(48_000);
+    let sink_b = backend_b.sink.clone();
+    let a = Engine::start(config(128), Arc::new(backend_a), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(config(128), Arc::new(backend_b), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let proxy = DelayProxy::start(local_addr(&a), local_addr(&b), Duration::from_millis(100));
+    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), proxy.pa)).unwrap();
+    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), proxy.pb)).unwrap();
+    wait_connected(&a);
+    wait_connected(&b);
+    assert!(wait_until(HANG, || real_frames(&a) >= 320 && real_frames(&b) >= 320), "양방향 오디오가 흐르지 않음");
+    (a, b, sink_a, sink_b, proxy)
+}
+
+fn peak_of(sink: &Sink, from: usize, to: usize) -> f32 {
+    let s = sink.lock();
+    s[from.min(s.len())..to.min(s.len())].iter().fold(0f32, |m, x| m.max(x.abs()))
+}
+
+/// 스테레오 인터리브 샘플 수(48k).
+fn frames(ms: usize) -> usize {
+    ms * 48 * 2
+}
+
 /// 엔진 ②b-5(설계 3.3절 H1): 에코 측정이 결과를 거둔 뒤에도 **상대가 반사를 멈출 때까지** 측정 대상 피어에게는 무음이 나간다.
 /// 프로브를 결과 수거 시점에 거두면(탭 끝 = 반환) 그때부터 내 실제 소리가 상대에게 나간다 — 요청 해제 Ping이 유실되면
 /// 상대는 다음 Ping까지 그것을 내게 되돌린다.
@@ -514,34 +558,12 @@ fn echo_requires_consent_and_times_out() {
 /// 수백 ms라 반환 시점에는 이미 B에 내 소리가 닿아 있다.
 ///
 /// A의 출력(되돌아온 소리)도 본다. 다만 그쪽 단언 (2)는 **요청 해제 Ping이 제때 닿는 이 시험에서는 변이를 못 잡는다**:
-/// B가 Ping을 내 실제 소리보다 먼저 받아 바로 반사를 멈추기 때문이다. Ping 유실 상황의 A 쪽 관찰은 하지 않는다.
+/// B가 Ping을 내 실제 소리보다 먼저 받아 바로 반사를 멈추기 때문이다. Ping 유실 상황의 A 쪽 관찰은 `echo_lost_release_ping_keeps_my_echo_silent`가 한다.
 #[test]
 #[ignore = "realtime: 결정적 짝 engine::measure::echo::tests::echo_rt_follows_measure_signals(탭을 꺼도 프로브는 stop까지 워커에 남는다)"]
 fn echo_target_gets_silence_until_peer_stops_echoing() {
     let _g = RT_LOCK.lock();
-    let sine: Arc<SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
-        for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
-            let t = (start + i as u64) as f64 / 48_000.0;
-            frame.fill((t * 440.0 * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5);
-        }
-    });
-    let backend_a = FakeBackend::new(48_000, sine);
-    let sink_a = backend_a.sink.clone();
-    let backend_b = FakeBackend::silence(48_000);
-    let sink_b = backend_b.sink.clone();
-    let a = Engine::start(config(128), Arc::new(backend_a), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
-    let b = Engine::start(config(128), Arc::new(backend_b), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
-    let _proxy = DelayProxy::start(local_addr(&a), local_addr(&b), Duration::from_millis(100));
-    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), _proxy.pa)).unwrap();
-    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), _proxy.pb)).unwrap();
-    wait_connected(&a);
-    wait_connected(&b);
-    assert!(wait_until(HANG, || real_frames(&a) >= 320 && real_frames(&b) >= 320), "양방향 오디오가 흐르지 않음");
-    let peak_of = |sink: &Arc<Mutex<Vec<f32>>>, from: usize, to: usize| -> f32 {
-        let s = sink.lock();
-        s[from.min(s.len())..to.min(s.len())].iter().fold(0f32, |m, x| m.max(x.abs()))
-    };
-    let frames = |ms: usize| ms * 48 * 2; // 스테레오 인터리브 샘플 수
+    let (a, b, sink_a, sink_b, _proxy) = sine_pair();
     // 측정 전: A는 B의 무음만 듣고, B는 A의 사인을 듣는다(B 쪽 관찰이 공허하지 않다는 확인)
     let n_before = sink_a.lock().len();
     assert!(peak_of(&sink_a, n_before.saturating_sub(9_600), n_before) < 0.02, "측정 전 A의 출력은 무음(B의 입력)");
@@ -592,5 +614,63 @@ fn echo_target_gets_silence_until_peer_stops_echoing() {
     // 창 시작 = 반환 150ms 전: 마지막 클릭의 반사는 그 전에 다 돌아왔다.
     let late = peak_of(&sink_a, n_return.saturating_sub(frames(150)), n_return + frames(300));
     assert!(late < 0.02, "상대가 반사를 멈추기 전에 내 실제 소리가 나갔다가 되돌아왔다: 최대 {late}");
+    drop(a);
+}
+
+/// #140 리뷰 L3 후속(②b-5): **요청 해제 Ping이 유실**되어 상대가 반사를 계속하는 동안에도 내 출력(되돌아오는 소리)은 무음이다.
+/// A는 상대가 "반사를 멈췄다"고 알려 올 때까지 프로브를 쥐고 대상에게 무음을 보내기 때문이다.
+///
+/// 재현: B가 반사를 시작하고 1.5초 뒤부터 B가 반사를 멈출 때까지 프록시가 A → B Ping을 모두 버린다. B는 마지막 요청 Ping
+/// 뒤 `ECHO_LAPSE`(3초)까지 반사를 계속하므로 반사는 측정 결과 수거(동의 + 설치 1.5초 + 클릭·듣기 약 1.3초) 뒤로 1초 이상
+/// 이어진다. 그 끝은 A의 `ECHO_STOP_WAIT`(4초) 안이다.
+/// - 올바른 구현: 그동안 A는 무음을 보내므로 B가 되돌리는 것도 무음 → B가 반사를 멈춘 무렵 A의 출력은 무음.
+/// - 프로브를 결과 수거 때 거두는 구현(`run_inner`의 `tap_off` → `stop`): 수거 직후부터 사인이 B로 가고 B가 그것을
+///   반사를 멈출 때까지 되돌린다 → B가 멈추기 전 0.5초 ~ 멈춘 뒤 0.15초 창에 사인이 들린다(이 변이에서 실패함을 확인했다).
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::echo::tests::echo_rt_follows_measure_signals(탭을 꺼도 프로브는 stop까지 워커에 남는다)"]
+fn echo_lost_release_ping_keeps_my_echo_silent() {
+    let _g = RT_LOCK.lock();
+    let (a, b, sink_a, _sink_b, proxy) = sine_pair();
+    let b = Arc::new(Mutex::new(b));
+    let stop = Arc::new(AtomicBool::new(false));
+    let acc = auto_accept(b.clone(), stop.clone());
+    // B의 반사 시작 → 1.5초 뒤 A → B Ping 버리기 시작 → B가 반사를 멈추면 버리기를 끝내고 그 순간의 A 출력 위치를 돌려준다.
+    let watch = {
+        let (b, sink_a, stop, drop_ping) = (b.clone(), sink_a.clone(), stop.clone(), proxy.drop_a_ping.clone());
+        std::thread::spawn(move || {
+            let mut on_at: Option<Instant> = None;
+            while !stop.load(Ordering::Relaxed) {
+                let active = b.lock().stats().peers.iter().any(|p| p.peer_id == "alice" && p.echo_active);
+                match on_at {
+                    None if active => on_at = Some(Instant::now()),
+                    Some(t) if active && t.elapsed() >= Duration::from_millis(1500) => drop_ping.store(true, Ordering::Relaxed),
+                    Some(t) if !active => {
+                        let dropped = drop_ping.swap(false, Ordering::Relaxed);
+                        return Some((sink_a.lock().len(), dropped, t.elapsed()));
+                    }
+                    _ => {}
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            None
+        })
+    };
+    let n_start = sink_a.lock().len();
+    let rep = a.echo_job("bob").unwrap().run(3, Duration::from_secs(5), &AtomicBool::new(false)).unwrap();
+    let n_return = sink_a.lock().len();
+    stop.store(true, Ordering::Relaxed);
+    assert!(acc.join().unwrap());
+    let (na_off, dropped, reflect_for) = watch.join().unwrap().expect("B가 반사를 시작했다가 멈추는 것을 보지 못함");
+    eprintln!("Ping 유실: B 반사 {reflect_for:?}, {rep:?}");
+    assert!(dropped, "A → B Ping을 버리기 전에 B가 반사를 멈췄다(재현 실패)");
+    // 반사는 결과 수거(동의 + 1.5초 + 약 1.3초) 뒤로 이어져야 이 시험이 의미가 있다: 마지막 요청 Ping(≥ 1.0초) + 3초
+    assert!(reflect_for >= Duration::from_millis(3_800), "B 반사가 너무 일찍 끝났다: {reflect_for:?}");
+    assert!(rep.detected_runs >= 2, "{rep:?}");
+    // 반사 경로는 내 실제 소리를 나른다(프로브 설치 전에 나간 사인, 공허함 방지)
+    let early = peak_of(&sink_a, n_start, n_start + frames(1_000));
+    assert!(early > 0.2, "측정 초반에 되돌아온 내 소리가 들려야 한다: 최대 {early}");
+    assert!(wait_until(HANG, || sink_a.lock().len() >= na_off.max(n_return) + frames(300)), "A 출력이 진행하지 않음");
+    let late = peak_of(&sink_a, na_off.saturating_sub(frames(500)), na_off + frames(150));
+    assert!(late < 0.02, "요청 해제 Ping이 유실된 동안 내 실제 소리가 상대에게 나갔다가 되돌아왔다: 최대 {late}");
     drop(a);
 }

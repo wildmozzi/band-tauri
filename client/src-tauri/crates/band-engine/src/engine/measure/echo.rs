@@ -43,6 +43,23 @@ fn prefaulted<T: Copy + From<f32>>(cap: usize) -> Vec<T> {
     v
 }
 
+/// 탭 넘침이 분석에 닿았는가(#140 리뷰 L3). 넘치면 그 뒤 샘플은 버려지므로 마지막으로 담긴 샘플 시각이 탭의 끝이다.
+/// 마지막 클릭의 분석 창(`송신 + MAX_ECHO_MS`)과 상관에 필요한 템플릿 길이·검출 여유(`ECHO_WINDOW_TAIL_US`)를 다 담았으면
+/// 넘친 샘플은 어느 창에도 안 들어가 결과에 영향이 없다 — 그때는 판정을 낮추지 않는다. 클릭이 하나도 안 나갔거나
+/// 탭이 비었으면 보수적으로 "닿았다"로 본다.
+fn overflow_cut_window(overflow: u64, emitted_us: &[f64], arrival_us: &[f64]) -> bool {
+    if overflow == 0 {
+        return false;
+    }
+    match (emitted_us.last(), arrival_us.last()) {
+        (Some(&e), Some(&end)) => end < e + MAX_ECHO_MS * 1000.0 + ECHO_WINDOW_TAIL_US,
+        _ => true,
+    }
+}
+
+/// 분석 창 끝 뒤로 탭이 더 담고 있어야 하는 길이(µs): 클릭 템플릿 5ms + 검출 여유 2ms(`analyze_echo`의 `guard`) + 1ms.
+const ECHO_WINDOW_TAIL_US: f64 = 8_000.0;
+
 /// 클릭을 `runs`회 보낸 뒤 돌아오기를 듣는 시간(초).
 fn echo_listen_s(runs: u32) -> f64 {
     runs as f64 * CLICK_INTERVAL as f64 / INTERNAL_RATE as f64 + MAX_ECHO_MS / 1000.0 + 0.1
@@ -457,7 +474,7 @@ impl EchoJob {
         let probe = probe.ok_or(WORKER_UNRESPONSIVE)?;
         let per = analyze_echo(&probe.emitted_us, &probe.arrivals, &probe.arrival_us);
         let mut rep = self.report(per, m.delay_us, m.rtt, m.jitter, m.path);
-        if probe.overflow > 0 && rep.verdict == MeasureVerdict::Ok {
+        if overflow_cut_window(probe.overflow, &probe.emitted_us, &probe.arrival_us) && rep.verdict == MeasureVerdict::Ok {
             rep.verdict = MeasureVerdict::Unstable;
         }
         Ok(rep)
@@ -809,7 +826,27 @@ mod tests {
         assert_eq!((p.arrivals.len(), p.arrival_us.len()), (cap, cap));
         assert_eq!((p.arrivals.capacity(), p.arrival_us.capacity()), caps, "버퍼가 늘지 않았다");
         assert!(p.overflow > 0);
+        // 시각이 모두 0인 탭은 어느 클릭의 창도 담지 못한다 → 넘침이 분석에 닿음
+        p.emitted_us.push(0.0);
+        assert!(overflow_cut_window(p.overflow, &p.emitted_us, &p.arrival_us));
         // 클릭 송신 시각도 용량(상한 20) 안에서만
         assert!(p.emitted_us.capacity() >= ECHO_MAX_RUNS as usize);
+    }
+
+    /// L3: 넘침은 마지막 클릭의 분석 창(+ 템플릿 꼬리)을 자를 때만 판정을 낮춘다.
+    #[test]
+    fn overflow_lowers_verdict_only_when_window_is_cut() {
+        let emitted = [100_000.0, 400_000.0];
+        let full_end = 400_000.0 + MAX_ECHO_MS * 1000.0 + ECHO_WINDOW_TAIL_US;
+        // 넘침 없음 → 탭이 짧아도 이 함수로는 낮추지 않는다(검출 실패는 분석이 따로 판정)
+        assert!(!overflow_cut_window(0, &emitted, &[0.0, 1.0]));
+        // 창을 다 담은 뒤 넘침 → 영향 없음
+        assert!(!overflow_cut_window(5, &emitted, &[0.0, full_end]));
+        assert!(!overflow_cut_window(5, &emitted, &[0.0, full_end + 400_000.0]));
+        // 창 끝 바로 앞에서 끊김 → 불안정
+        assert!(overflow_cut_window(5, &emitted, &[0.0, full_end - 1.0]));
+        // 클릭이 안 나갔거나 탭이 비었으면 보수적으로 낮춘다
+        assert!(overflow_cut_window(5, &[], &[0.0, full_end]));
+        assert!(overflow_cut_window(5, &emitted, &[]));
     }
 }
