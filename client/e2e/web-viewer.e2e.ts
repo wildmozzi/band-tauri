@@ -171,9 +171,9 @@ test.describe('웹 관람: 로그인 관람자의 세션 재개 (수신 연결 �
     await expect.poll(() => mock.signaling.messages('auth').some(m => m.resumeClientId === clientId)).toBe(true)
     await expect(page.locator('.reconnect-banner')).toHaveCount(0, { timeout: 10_000 })
     await expect.poll(() => mock.signaling.clientIdsIn(ROCK_ROOM.id)).toEqual([clientId])
-    // 끊긴 동안·재개 뒤 모두 LIVE, 연주자 쪽 연결도 그대로. 새 answer 없음(재협상 없음)
+    // 재개 뒤 LIVE, 연주자 쪽 연결도 그대로(ICE가 잠깐 흔들릴 수 있어 poll, #192 리뷰 L-3). 새 answer 없음(재협상 없음)
     await expect(liveBadge(page)).toHaveText('● LIVE')
-    expect(await perfState(page)).toBe('connected')
+    await expect.poll(() => perfState(page)).toBe('connected')
     // 재개 뒤 room-state·채팅까지 처리된 시점에도 관람 PC를 닫지 않았고 새 answer도 없다
     mock.signaling.pushChat(ROCK_ROOM.id, REMOTE_PERFORMER, '재개 뒤 채팅')
     await expect(page.getByText('재개 뒤 채팅')).toBeVisible()
@@ -198,6 +198,7 @@ test.describe('웹 관람: 로그인 관람자의 세션 재개 (수신 연결 �
   })
 
   test('재개에 실패하면(서버 재시작 — 새 clientId) 지금처럼 닫고 새 offer로 다시 협상한다', async ({ page, mock }) => {
+    await trackViewerCloses(page)
     await mock.loginAs(BOB)
     mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
     await page.goto(`/rooms/${ROCK_ROOM.id}`)
@@ -205,8 +206,9 @@ test.describe('웹 관람: 로그인 관람자의 세션 재개 (수신 연결 �
     const [oldId] = mock.signaling.clientIdsIn(ROCK_ROOM.id)
     mock.signaling.setDown(true)
     await expect(page.locator('.reconnect-banner')).toBeVisible()
-    // 끊긴 동안은 유지(재개될 수도 있으므로)
-    await expect(liveBadge(page)).toHaveText('● LIVE')
+    // 끊긴 동안은 PC를 유지하되(재개될 수도 있으므로) 표시는 '연결 중' (#192 리뷰 L-1)
+    await expect(liveBadge(page)).toHaveText('연결 중')
+    expect(await viewerCloses(page)).toBe(0)
     mock.signaling.setDown(false) // setDown은 재개를 받아 주지 않는다 → 새 clientId
     await expect(page.locator('.reconnect-banner')).toHaveCount(0, { timeout: 10_000 })
     await expect.poll(() => mock.signaling.clientIdsIn(ROCK_ROOM.id).length).toBe(1)
@@ -214,6 +216,22 @@ test.describe('웹 관람: 로그인 관람자의 세션 재개 (수신 연결 �
     await expect(liveBadge(page)).not.toHaveText('● LIVE')
     await negotiate(page, mock)
     await expect(liveBadge(page)).toHaveText('● LIVE')
+  })
+})
+
+test.describe('웹 관람: 로그인 관람자 재개 뒤 입장 거부 (#192 리뷰 M-1)', () => {
+  test('재개 사이 방이 종료됐으면 유지한 수신 연결을 닫고 종료 안내를 보인다(안내 뒤에서 소리가 나지 않음)', async ({ page, mock }) => {
+    await trackViewerCloses(page)
+    await mock.loginAs(BOB)
+    mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    await negotiate(page, mock)
+    await expect(liveBadge(page)).toHaveText('● LIVE')
+
+    mock.signaling.endRoom(ROCK_ROOM.id)
+    mock.signaling.dropForResume(false) // 재개는 되지만 이어지는 rejoin join은 room-not-found
+    await expect(page.getByRole('alert')).toHaveText('합주실이 종료되었거나 찾을 수 없습니다.', { timeout: 10_000 })
+    await expect.poll(() => viewerCloses(page)).toBe(1)
   })
 })
 

@@ -145,12 +145,15 @@ describe('reduceRoomSignal — 입장 오류', () => {
     for (const r of [first, spent]) {
       expect(r.effects).not.toContainEqual({ type: 'stop-session' })
       expect(r.effects).not.toContainEqual({ type: 'stop-broadcast' })
+      expect(r.effects.some((e) => e.type === 'keep-viewers')).toBe(false) // 일시 오류: 유지한 관람 수신은 그대로
     }
   })
 
   it('방 없음(room-not-found)은 재연결 중이어도 엔진·방송을 멈춘다(보던 방이 종료됨)', () => {
     const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-not-found', message: 'x' }, ctx({ rejoining: true }))
     expect(r.effects).toContainEqual({ type: 'stop-session' })
+    // 재개로 유지한 관람 수신도 닫는다 (#192 리뷰 M-1)
+    expect(r.effects).toContainEqual({ type: 'keep-viewers', peerIds: [] })
     expect(r.patch?.connection?.joinError?.code).toBe('room-not-found')
   })
 
