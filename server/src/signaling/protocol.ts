@@ -5,7 +5,19 @@
  */
 
 export const MAX_MESSAGE_BYTES = 64 * 1024
+/**
+ * 연결 하나의 보내기 대기열(ws.bufferedAmount) 상한. 읽지 않는(느린) 수신자에게 중계가 쌓이면 서버 메모리가 끝없이 늘어
+ * 256MB VM이 OOM으로 죽는다(모든 방 합주 끊김). 정상 시그널링은 수십 KB를 넘지 않으므로 넘으면 그 연결을 끊는다(registry.send).
+ */
+export const MAX_BUFFERED_BYTES = 1024 * 1024
 export const AUTH_TIMEOUT_MS = 5000
+/**
+ * 관람 WebRTC 중계 본문 상한 (#184 리뷰 M). 앱의 오디오 전용 SDP는 수 KB(후보는 trickle로 따로 보냄)라 16KB면 넉넉하다.
+ * 후보 한 줄(candidate:…)은 수백 바이트. 넘으면 중계하지 않는다.
+ */
+export const MAX_SDP_LENGTH = 16 * 1024
+export const MAX_ICE_CANDIDATE_LENGTH = 1024
+export const MAX_ICE_FIELD_LENGTH = 256
 export const MAX_PENDING_MESSAGES = 100
 export const MAX_ROOM_ID_LENGTH = 128
 export const MAX_NICKNAME_LENGTH = 50
@@ -86,6 +98,11 @@ export interface EngineCandidate { kind: 'lan' | 'public'; addr: string }
 // 모양의 기준은 서버 코드와 test/fixtures/ws-transcript.json이다. 서버 send는 아직 이 타입으로 검사하지 않는다
 // (S3은 위치만 옮겨 아직 하지 않음 — S4 이후). 지금은 e2e mock(client/e2e/mocks/signaling.ts)이 이 타입으로 맞춰 mock이 서버와 어긋나면 e2e tsc가 실패한다.
 
+/** 관람 중계 본문: RTCSessionDescriptionInit 중 type·sdp (type은 offer|answer|pranswer|rollback) */
+export interface SessionDescription { type?: string; sdp: string }
+/** 관람 중계 본문: RTCIceCandidateInit 중 candidate(빈 문자열 = 후보 끝)·sdpMid·sdpMLineIndex(0..65535)·usernameFragment */
+export interface IceCandidate { candidate: string; sdpMid?: string | null; sdpMLineIndex?: number | null; usernameFragment?: string | null }
+
 export interface EngineDescriptor {
   ssrc: number
   key: string
@@ -119,8 +136,10 @@ export type ServerMessage =
   | { type: 'participant-left'; oderId: string }
   | ({ type: 'performer-updated'; nickname: string; instrument?: string; isPerforming: boolean; isHost?: boolean } & FromSender)
   | ({ type: 'chat'; message: string; nickname: string; timestamp: number } & FromSender)
-  /** 관람 WebRTC 중계: 클라이언트 메시지를 그대로 넘기고 from만 서버가 덮어쓴다 */
-  | { type: 'offer' | 'answer' | 'ice-candidate'; from: string; to: string; [field: string]: unknown }
+  /** 관람 WebRTC 중계: 서버가 아는 필드만으로 다시 구성한다(viewerRelay.buildViewerSignal). from은 서버의 clientId */
+  | { type: 'offer'; from: string; to: string; offer: SessionDescription }
+  | { type: 'answer'; from: string; to: string; answer: SessionDescription }
+  | { type: 'ice-candidate'; from: string; to: string; candidate: IceCandidate }
   | { type: 'native-descriptor'; from: string; descriptor: EngineDescriptor }
   | { type: 'native-leave'; from: string }
   | { type: 'relay-token'; token: string; bindKey: string; addr: string; ssrc: number; expiresAt: number; expiresIn: number; serverNow: number }

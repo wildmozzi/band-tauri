@@ -240,6 +240,16 @@ export function useRoomTelemetry<K extends keyof RoomTelemetry>(...keys: K[]): P
   return useRoomSelector(store, selector)
 }
 
+/**
+ * 엔진 통계(500ms)에서 필요한 조각만 구독한다. 고른 값이 얕은 비교로 같으면(예: 녹음 안 할 때 recording=null,
+ * 메트로놈 동기·지연 보정값) 통계 틱이 와도 다시 그리지 않는다. pick은 모듈 수준 함수처럼 고정된 참조를 넘긴다.
+ */
+export function useRoomEngineStats<T>(pick: (stats: EngineStats | null) => T): T {
+  const { store } = useRoomRuntime()
+  const selector = useMemo(() => (s: RoomSnapshot) => pick(s.perform.stats), [pick])
+  return useRoomSelector(store, selector)
+}
+
 /** 관람 수신·개인 믹서: 표시용 연결 상태, 수신 스트림, 믹서 설정·마스터 */
 export function useRoomMixer() {
   const { store, actions } = useRoomRuntime()

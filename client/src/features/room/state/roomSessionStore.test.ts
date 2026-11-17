@@ -52,7 +52,10 @@ describe('RoomSessionStore', () => {
     const after = store.getSnapshot().derived
     expect(after.peerInstruments).toBe(before.peerInstruments)
     expect(after.viewers).toBe(before.viewers)
-    expect(after.peerEngineStats).not.toBe(before.peerEngineStats)
+    // 피어 통계 값은 그대로(입력 레벨만 바뀜) → 같은 참조, 내 레벨은 바뀜
+    expect(after.peerEngineStats).toBe(before.peerEngineStats)
+    expect(after.audioLevels).not.toBe(before.audioLevels)
+    expect(after.audioLevels.me).toBe(90)
   })
 
   it('표시용 연결 상태: 시작 중 → connecting, 안내 오류 → error, 아니면 관람 수신 상태', () => {

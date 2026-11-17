@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RoomSessionStore, RoomSnapshot } from './roomSessionStore'
-import { useRoomSelector } from './useRoomSelector'
+import { shallowEqual, useRoomSelector } from './useRoomSelector'
 
 export interface MixSettings {
   volume: number // 0 ~ 1
@@ -21,11 +21,44 @@ interface Nodes {
   audio: HTMLAudioElement
   source: MediaStreamAudioSourceNode
   analyser: AnalyserNode
+  /** 레벨 측정용 버퍼 (66ms 틱마다 새로 만들지 않는다) */
+  levelBuf: Uint8Array<ArrayBuffer>
   gain: GainNode
   panner: StereoPannerNode
 }
 
 const LEVEL_INTERVAL_MS = 66
+
+/** 피어별 레벨(0..100)과 최댓값. 노드마다 미리 만든 버퍼를 다시 쓴다(틱마다 할당하지 않게) */
+export function measureLevels(
+  nodes: Map<string, { analyser: Pick<AnalyserNode, 'getByteFrequencyData'>; levelBuf: Uint8Array<ArrayBuffer> }>,
+): { levels: Record<string, number>; max: number } {
+  const levels: Record<string, number> = {}
+  let max = 0
+  nodes.forEach((n, peerId) => {
+    const data = n.levelBuf
+    n.analyser.getByteFrequencyData(data)
+    let sum = 0
+    for (let i = 0; i < data.length; i++) sum += data[i]
+    const avg = data.length > 0 ? sum / data.length : 0
+    const level = Math.min(100, Math.round((avg / 256) * 150))
+    levels[peerId] = level
+    max = Math.max(max, level)
+  })
+  return { levels, max }
+}
+
+/**
+ * 레벨 측정 한 번의 스토어 패치. 피어 레벨이 그대로면(무음·같은 값) 이전 객체를 유지해 레벨 구독자가
+ * 66ms마다 다시 그리지 않게 한다(마스터 레벨도 같으면 patchSlice가 알림 자체를 건너뛴다).
+ */
+export function levelsPatch(
+  cur: Record<string, number>,
+  levels: Record<string, number>,
+  masterLevel: number,
+): { audioLevels?: Record<string, number>; masterLevel: number } {
+  return shallowEqual(cur, levels) ? { masterLevel } : { audioLevels: levels, masterLevel }
+}
 
 const selectRemoteAudioMap = (s: RoomSnapshot) => s.viewer.remoteAudioMap
 const selectMixer = (s: RoomSnapshot) => s.mixer
@@ -105,7 +138,7 @@ export function useWebAudioMixer(store: RoomSessionStore) {
       panner.connect(ctx.destination)
       if (recordingDestRef.current) panner.connect(recordingDestRef.current)
 
-      const nodes: Nodes = { stream, audio, source, analyser, gain, panner }
+      const nodes: Nodes = { stream, audio, source, analyser, levelBuf: new Uint8Array(analyser.frequencyBinCount), gain, panner }
       nodesRef.current.set(peerId, nodes)
       applyNode(peerId, nodes)
     } catch (err) {
@@ -134,17 +167,8 @@ export function useWebAudioMixer(store: RoomSessionStore) {
       return
     }
     const timer = setInterval(() => {
-      const levels: Record<string, number> = {}
-      let max = 0
-      nodesRef.current.forEach((n, peerId) => {
-        const data = new Uint8Array(n.analyser.frequencyBinCount)
-        n.analyser.getByteFrequencyData(data)
-        const avg = data.reduce((a, b) => a + b, 0) / data.length
-        const level = Math.min(100, Math.round((avg / 256) * 150))
-        levels[peerId] = level
-        max = Math.max(max, level)
-      })
-      store.patch('levels', { audioLevels: levels, masterLevel: max })
+      const { levels, max } = measureLevels(nodesRef.current)
+      store.patch('levels', (cur) => levelsPatch(cur.audioLevels, levels, max))
     }, LEVEL_INTERVAL_MS)
     return () => clearInterval(timer)
   }, [nodeCount, store])

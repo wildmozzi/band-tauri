@@ -1,0 +1,34 @@
+--- a/client/src-tauri/crates/band-engine/tests/cpu_profile.rs
++++ b/client/src-tauri/crates/band-engine/tests/cpu_profile.rs
+@@ -106,10 +106,12 @@
+     }
+     // 창 회전과 xrun 기준(연결·예열 구간 제외)
+     let x0: u64 = engines.iter().map(|e| e.stats().xruns).sum();
++    for e in &engines { let _ = e.take_worker_timing(); }
+     let (p0, k0) = (process_cycles(), tsc_now());
+     std::thread::sleep(MEASURE);
+     let stats: Vec<_> = engines.iter().map(|e| e.stats()).collect();
+     let (p1, k1) = (process_cycles(), tsc_now());
++    let wts: Vec<_> = engines.iter().map(|e| e.take_worker_timing()).collect();
+     let cpus: Vec<CpuStats> = stats.iter().map(|s| s.cpu).collect();
+     for c in &cpus {
+         assert!(c.window_ms >= MEASURE.as_millis() as f32 * 0.9, "창 회전: {c:?}");
+@@ -128,6 +130,18 @@
+         // 측정 창 안의 xrun만(연결·예열 구간 제외, 리뷰 L1)
+         xruns: stats.iter().map(|s| s.xruns).sum::<u64>().saturating_sub(x0),
+     };
++    {
++        let n = wts.len() as f32;
++        let b50 = wts.iter().map(|w| w.body.p50_ms).sum::<f32>() / n * 1000.0;
++        let b99 = wts.iter().map(|w| w.body.p99_ms).sum::<f32>() / n * 1000.0;
++        let bmax = wts.iter().map(|w| w.body.max_ms).fold(0.0, f32::max) * 1000.0;
++        let iters = wts.iter().map(|w| w.body.packets as f32).sum::<f32>() / n;
++        let per50 = wts.iter().map(|w| w.period.p50_ms).sum::<f32>() / n * 1000.0;
++        println!("CSV|{}|{:.3}|{:.3}|{:.3}|{:.4}|{:.1}|{:.1}|{:.1}|{:.3}|{:.1}|{:.1}|{:.1}|{:.0}|{:.1}|{:.1}|{:.1}|{}",
++            row.label, row.me.worker_pct.unwrap_or(f32::NAN), row.worker_avg, row.worker_max, row.load_avg,
++            row.me.callback_p50_us, row.me.callback_p99_us, row.p99_max, row.per_node_pct,
++            b50, b99, bmax, iters, per50, wts[0].body.p50_ms * 1000.0, wts[0].body.p99_ms * 1000.0, row.xruns);
++    }
+     for mut e in engines {
+         e.stop();
+     }

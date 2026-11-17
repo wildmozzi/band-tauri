@@ -72,7 +72,22 @@ export function createRoomMeta(deps: WsDeps, insecureDevMode: boolean) {
     roomMetaInflight.delete(roomId)
   }
 
-  return { getRoomMeta, getRoomMetaOrNull, checkHost, refreshHost, forget }
+  /**
+   * 사람이 없는 방의 오래된 캐시 정리 (하트비트). forget은 방이 빌 때만 불려, 입장이 거부된 방(없는 방 id·비밀번호·정원)의
+   * 캐시는 끝없이 쌓였다. 사람이 있는 방은 DB 장애 때 마지막 값으로 권한을 판단하므로(checkHost) 지우지 않는다.
+   */
+  function sweep(now: number, isActive: (roomId: string) => boolean) {
+    for (const [roomId, entry] of roomMetaCache) {
+      if (now - entry.fetchedAt > ROOM_META_TTL_MS && !isActive(roomId)) roomMetaCache.delete(roomId)
+    }
+  }
+
+  /** 테스트·관측용: 캐시된 방 수 */
+  function cacheSize(): number {
+    return roomMetaCache.size
+  }
+
+  return { getRoomMeta, getRoomMetaOrNull, checkHost, refreshHost, forget, sweep, cacheSize }
 }
 
 export type RoomMetaStore = ReturnType<typeof createRoomMeta>

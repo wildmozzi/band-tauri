@@ -13,7 +13,7 @@ const room = vi.hoisted(() => ({
   engineStats: null as Partial<EngineStats> | null,
   isPerforming: true,
 }))
-vi.mock('../state/roomHooks', () => ({ useRoomPerform: () => room, useRoomMetronome: () => room, useRoomTelemetry: () => room }))
+vi.mock('../state/roomHooks', () => ({ useRoomPerform: () => room, useRoomMetronome: () => room, useRoomEngineStats: (pick: (s: unknown) => unknown) => pick(room.engineStats) }))
 
 import { MetronomePanel } from './MetronomePanel'
 

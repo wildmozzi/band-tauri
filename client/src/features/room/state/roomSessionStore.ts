@@ -15,6 +15,7 @@ import type { JoinError } from '../../rooms'
 import type { ChatMessage } from './chatModel'
 import { initialPerformRequestState, type InstrumentChangeRequest, type MyRequestStatus, type PerformRequestState } from './performRequestState'
 import { mergeSelfPerformer, type PeerInstrument } from './roomState'
+import { shallowEqual } from './shallowEqual'
 import type { Recording } from './useRecording'
 import type { SignalStatus } from './useSignaling'
 import type { PeerNetworkStats, RtcStatus } from './useViewerAudio'
@@ -196,17 +197,26 @@ function createDeriver(): (s: RoomState) => RoomDerived {
   )
   const performerIdsOf = memoLast((peerInstruments: Record<string, PeerInstrument>) => Object.keys(peerInstruments))
   const viewersOf = memoLast((peers: string[], performerIds: string[], clientId: string | null) => computeViewers(peers, performerIds, clientId))
+  // 통계 틱(500ms)마다 엔진이 새 객체를 주지만 값이 그대로인 피어·레벨은 이전 참조를 유지한다.
+  // 그래야 그 값을 고른 구독자가 무음·정지 상태에서 틱마다 다시 그리지 않는다
+  let lastPeerStats: Record<string, PeerStats> = {}
   const peerStatsOf = memoLast((stats: EngineStats | null) => {
     const map: Record<string, PeerStats> = {}
-    for (const ps of stats?.peers ?? []) map[ps.peerId] = ps
-    return map
+    for (const ps of stats?.peers ?? []) {
+      const prev = lastPeerStats[ps.peerId]
+      map[ps.peerId] = prev && shallowEqual(prev, ps) ? prev : ps
+    }
+    lastPeerStats = shallowEqual(lastPeerStats, map) ? lastPeerStats : map
+    return lastPeerStats
   })
+  let lastEngineLevels: Record<string, number> = {}
   const levelsOf = memoLast((running: boolean, stats: EngineStats | null, webLevels: Record<string, number>, clientId: string | null) => {
     if (!running) return webLevels
     const levels: Record<string, number> = {}
     for (const ps of stats?.peers ?? []) levels[ps.peerId] = Math.min(100, Math.round(ps.level * 100))
     if (clientId && stats) levels[clientId] = Math.min(100, Math.round(stats.inputLevel * 100))
-    return levels
+    lastEngineLevels = shallowEqual(lastEngineLevels, levels) ? lastEngineLevels : levels
+    return lastEngineLevels
   })
 
   return (s) => {

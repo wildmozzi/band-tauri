@@ -151,6 +151,12 @@ export function ipBucket(ip: string): string {
   const t = tail ? tail.split(':') : []
   // 끝에 IPv4 표기가 붙은 경우는 하위 64비트라 /64 계산에 영향 없음
   const groups = bare.includes('::') ? [...h, ...Array(8 - h.length - t.length).fill('0'), ...t] : h
+  // 16진 표기의 IPv4 매핑 주소(::ffff:7f00:1 = 127.0.0.1)는 IPv4로 센다. 안 그러면 /64(0:0:0:0)로 묶여
+  // 모든 매핑 주소가 한 단위가 된다(#184 리뷰 L). 점 표기 매핑 주소는 위에서 처리했다
+  const n = groups.map(g => parseInt(g || '0', 16))
+  if (groups.length === 8 && n.slice(0, 5).every(x => x === 0) && n[5] === 0xffff) {
+    return [n[6] >> 8, n[6] & 0xff, n[7] >> 8, n[7] & 0xff].join('.')
+  }
   return groups.slice(0, 4).map(g => parseInt(g || '0', 16).toString(16)).join(':') + '::/64'
 }
 

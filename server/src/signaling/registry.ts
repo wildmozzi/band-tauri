@@ -1,5 +1,5 @@
 import type { WebSocket } from 'ws'
-import type { Participant } from './protocol'
+import { MAX_BUFFERED_BYTES, type Participant } from './protocol'
 import type { Client } from './types'
 
 /**
@@ -8,10 +8,18 @@ import type { Client } from './types'
  * 유예 중인 Client도 clients·rooms에 남는다(1.2-7): 정원·바인딩·메트로놈이 유예 중에도 유지된다.
  */
 
+/**
+ * 보내기. 수신자가 읽지 않아 대기열이 MAX_BUFFERED_BYTES를 넘으면 보내지 않고 그 연결을 끊는다(terminate — close 프레임도
+ * 대기열 뒤에 서므로 버퍼를 바로 풀려면 소켓을 닫아야 한다). 끊긴 연결은 close 핸들러가 평소처럼 유예·퇴장 처리한다.
+ */
 export function send(ws: WebSocket, data: unknown) {
-  if (ws.readyState === ws.OPEN) {
-    ws.send(JSON.stringify(data))
+  if (ws.readyState !== ws.OPEN) return
+  if (ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+    console.warn(`[WS] send buffer over ${MAX_BUFFERED_BYTES} bytes (client not reading) - terminating`)
+    ws.terminate()
+    return
   }
+  ws.send(JSON.stringify(data))
 }
 
 export const isAuthenticated = (c: Client) => c.auth.state === 'authenticated' && !!c.auth.userId

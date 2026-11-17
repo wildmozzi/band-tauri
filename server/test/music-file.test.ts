@@ -111,6 +111,19 @@ describe('DELETE /api/music/file/:filename', () => {
   })
 })
 
+describe('500 responses hide internal error messages', () => {
+  it('does not leak the server path when deleting fails', async () => {
+    // 디렉터리는 unlinkSync가 EPERM/EISDIR로 실패하고, 그 메시지에는 서버 절대 경로가 들어 있다
+    fs.mkdirSync(path.join(uploadDir, '999_dir.xml'))
+    uploads.recordUploadOwner('999_dir.xml', 'alice')
+    const r = await fetch(`${url}/api/music/file/999_dir.xml`, { method: 'DELETE', headers: bearer('alice') })
+    assert.equal(r.status, 500)
+    const body = await r.json() as { success: boolean; error: string }
+    assert.deepEqual(body, { success: false, error: '파일을 삭제하지 못했습니다.' })
+    assert.ok(!JSON.stringify(body).includes(uploadDir) && !/EPERM|EISDIR|unlink/.test(body.error))
+  })
+})
+
 describe('uploads (M6)', () => {
   it('rejects anonymous uploads before storing the file', async () => {
     const before = fs.readdirSync(uploadDir).length
