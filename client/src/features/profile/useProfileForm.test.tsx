@@ -110,4 +110,18 @@ describe('useProfileForm', () => {
     expect(result.current.profilePhoto).toBe('')
     expect(auth.refreshSession).not.toHaveBeenCalled()
   })
+
+  it('업로드 중 화면을 떠나면 상태 갱신·알림 없이 세션 갱신만 한다 (리뷰 L4)', async () => {
+    let finish!: (url: string) => void
+    avatar.upload.mockImplementationOnce(() => new Promise<string>(r => { finish = r }))
+    const { result, unmount } = renderHook(() => useProfileForm(makeUser({ nickname: 'n' })))
+    let pending!: Promise<void>
+    act(() => { pending = result.current.handlePhotoChange(pick(new File([new Uint8Array(8)], 'me.png', { type: 'image/png' }))) })
+    expect(result.current.isUploadingPhoto).toBe(true)
+    unmount()
+    finish('https://api.example/api/storage/avatars/u1/2-y.webp')
+    await pending
+    expect(auth.refreshSession).toHaveBeenCalledTimes(1)
+    expect(window.alert).not.toHaveBeenCalled()
+  })
 })

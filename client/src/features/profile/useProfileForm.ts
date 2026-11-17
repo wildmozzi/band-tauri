@@ -6,7 +6,7 @@ import { checkAvatar, uploadAvatar } from './avatarApi'
 import {
   bioFromMetadata,
   metadataNickname as nicknameFromMetadata,
-  profilePhotoFromMetadata,
+  profilePhotoOf,
   snsLinksFromMetadata,
 } from './profileForm'
 
@@ -26,8 +26,14 @@ export function useProfileForm(user: User) {
   const [originalNickname, setOriginalNickname] = useState('')
   const [bio, setBio] = useState(bioFromMetadata(user?.user_metadata))
   const [snsLinks, setSnsLinks] = useState(snsLinksFromMetadata(user?.user_metadata))
-  const [profilePhoto, setProfilePhoto] = useState(profilePhotoFromMetadata(user?.user_metadata))
+  const [profilePhoto, setProfilePhoto] = useState(profilePhotoOf(user))
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false)
+  // 업로드 도중 화면을 떠나면 상태 갱신·알림을 하지 않는다 (리뷰 L4). 세션 갱신은 계속 — 내비게이션 사진이 바뀌어야 한다
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   // 닉네임: user_metadata 우선, 없으면 profiles 테이블에서 가져온다
   const metadataNickname = nicknameFromMetadata(user?.user_metadata)
@@ -53,7 +59,7 @@ export function useProfileForm(user: User) {
   }
 
   /**
-   * 사진 변경 (P2-12): 서버 서명 URL로 Storage에 올리고, 서버가 user_metadata에 URL만 기록한다.
+   * 사진 변경 (P2-12): 서버 서명 URL로 Storage에 올리고, 서버가 app_metadata에 URL만 기록한다.
    * 사진(base64)을 metadata에 넣지 않는다 — JWT가 커져 모든 요청·WS 인증이 무거워진다.
    */
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -75,17 +81,21 @@ export function useProfileForm(user: User) {
       return
     }
 
+    if (isUploadingPhoto) {
+      reset()
+      return
+    }
     setIsUploadingPhoto(true)
     try {
       const url = await uploadAvatar(file)
-      setProfilePhoto(url)
-      // 서버가 바꾼 user_metadata를 새 토큰으로 받는다 (실패해도 사진은 저장됨 — 다음 토큰 갱신 때 반영)
+      if (mountedRef.current) setProfilePhoto(url)
+      // 서버가 바꾼 app_metadata를 새 토큰으로 받는다 (실패해도 사진은 저장됨 — 다음 토큰 갱신 때 반영)
       await profileApi.refreshSession().catch(err => console.warn('세션 갱신 실패:', err))
     } catch (err) {
       console.error('Failed to update profile photo:', err)
-      alert(err instanceof Error && err.message ? err.message : '프로필 사진 업데이트에 실패했습니다.')
+      if (mountedRef.current) alert(err instanceof Error && err.message ? err.message : '프로필 사진 업데이트에 실패했습니다.')
     } finally {
-      setIsUploadingPhoto(false)
+      if (mountedRef.current) setIsUploadingPhoto(false)
       reset()
     }
   }

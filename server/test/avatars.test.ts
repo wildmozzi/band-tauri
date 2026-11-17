@@ -13,7 +13,7 @@ import { getBearerToken, setTokenVerifier } from '../src/lib/auth'
 import { AVATAR_MAX_BYTES, avatarViewUrl } from '../src/lib/avatarStorage'
 import { profilePhotoMetadataPatch, type ProfilePhotoMetadata } from '../src/services/profilePhotoService'
 import type { StorageAdapter } from '../src/storage/types'
-import { bearer, testVerifier } from './helpers'
+import { bearer, sleep, testVerifier } from './helpers'
 import { memoryStorage } from './fakes/memoryStorage'
 
 const UID = '11111111-2222-3333-4444-555555555555'
@@ -59,6 +59,7 @@ describe('프로필 사진 업로드 (/api/storage/avatars)', () => {
 
   /** 서명 URL 발급 → (클라이언트 PUT 대신) pending에 직접 기록 → key */
   async function uploadPending(body: Buffer, contentType = 'image/png', uid = UID): Promise<string> {
+    await sleep(3) // key의 업로드 시각(ms)이 겹치지 않게 — 정리·409 판단이 시각 순서를 쓴다
     const r = await call(s.url, '/upload-url', { contentType, size: body.length }, bearer(uid))
     assert.equal(r.status, 200)
     const j = await r.json() as { key: string }
@@ -125,6 +126,30 @@ describe('프로필 사진 업로드 (/api/storage/avatars)', () => {
     assert.equal((await call(s.url, '/complete', { key: `${UID}/1700000000000-00000000-0000-0000-0000-000000000000.gif` }, bearer(UID))).status, 400)
   })
 
+  it('재호출·동시 complete가 더 새 사진을 지우거나 덮지 않는다 (리뷰 L1)', async () => {
+    const a = await uploadPending(PNG)
+    const b = await uploadPending(PNG)
+    // B가 먼저 끝남 → A는 B보다 오래된 업로드
+    assert.equal((await call(s.url, '/complete', { key: b }, bearer(UID))).status, 200)
+    const late = await call(s.url, '/complete', { key: a }, bearer(UID))
+    assert.equal(late.status, 409)
+    assert.ok(mem.objects.has(b), '더 새 사진은 남는다')
+    assert.equal(m.writes.length, 1)
+    assert.equal(m.writes[0].url, avatarViewUrl(mem.adapter, b))
+
+    // B 다음 C 완료 → B 삭제. B 재호출은 캐시 없이 저장소를 보고 404 (지워진 사진을 기록하지 않음)
+    const c = await uploadPending(PNG)
+    assert.equal((await call(s.url, '/complete', { key: c }, bearer(UID))).status, 200)
+    assert.ok(!mem.objects.has(b))
+    assert.equal((await call(s.url, '/complete', { key: b }, bearer(UID))).status, 404)
+    assert.ok(mem.objects.has(c))
+    assert.equal(m.writes.at(-1)!.url, avatarViewUrl(mem.adapter, c))
+
+    // 같은 key 재호출(멱등): 최종 경로가 있으면 200, 자기 자신은 지우지 않는다
+    assert.equal((await call(s.url, '/complete', { key: c }, bearer(UID))).status, 200)
+    assert.ok(mem.objects.has(c))
+  })
+
   it('지우기: metadata를 비우고 본인 사진만 지운다', async () => {
     const mine = await uploadPending(PNG)
     await call(s.url, '/complete', { key: mine }, bearer(UID))
@@ -162,8 +187,9 @@ describe('JWT 크기 (P2-12)', () => {
     const storage = memoryStorage('avatars').adapter
     const key = `${UID}/1700000000000-00000000-0000-0000-0000-000000000000.webp`
     const patch = profilePhotoMetadataPatch(avatarViewUrl(storage, key, 'https://api.example'))
-    assert.equal(patch.profile_photo, null, '예전 base64 키(profile_photo)는 null로 지운다')
-    assert.match(patch.profile_photo_url!, /^https:\/\/api\.example\/api\/storage\/avatars\//)
+    assert.deepEqual(patch.user_metadata, { profile_photo: null }, '예전 base64 키(profile_photo)는 null로 지운다')
+    assert.ok(!('profile_photo_url' in patch.user_metadata), 'URL은 사용자가 덮어쓸 수 없는 app_metadata에만 (리뷰 M1)')
+    assert.match(patch.app_metadata.profile_photo_url!,/^https:\/\/api\.example\/api\/storage\/avatars\//)
     const json = JSON.stringify(patch)
     assert.ok(!json.includes('data:'), 'data: URL이 metadata에 들어가면 안 된다')
     // URL 하나는 수백 바이트 — JWT에 붙어도 서버 토큰 상한(8KB)과 멀다
@@ -174,7 +200,7 @@ describe('JWT 크기 (P2-12)', () => {
     const base64Photo = `data:image/jpeg;base64,${Buffer.alloc(100 * 1024).toString('base64')}`
     const fakeJwt = `h.${Buffer.from(JSON.stringify({ user_metadata: { profile_photo: base64Photo } })).toString('base64url')}.s`
     assert.equal(getBearerToken(`Bearer ${fakeJwt}`), null)
-    const smallJwt = `h.${Buffer.from(JSON.stringify({ user_metadata: profilePhotoMetadataPatch('https://api.example/api/storage/avatars/u/x.webp') })).toString('base64url')}.s`
+    const smallJwt = `h.${Buffer.from(JSON.stringify(profilePhotoMetadataPatch('https://api.example/api/storage/avatars/u/x.webp'))).toString('base64url')}.s`
     assert.equal(getBearerToken(`Bearer ${smallJwt}`), smallJwt)
   })
 })

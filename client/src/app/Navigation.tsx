@@ -4,7 +4,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../features/auth'
 import { AudioSettings } from '../features/settings'
 import { PlanStatus } from '../features/payment'
-import { profilePhotoFromMetadata } from '../features/profile'
+import { profilePhotoOf } from '../features/profile'
 import { SERVICE_NAME } from '../shared/lib/brand'
 import './Navigation.css'
 
@@ -13,8 +13,8 @@ export function Navigation() {
   const navigate = useNavigate()
   const [showAudioSettings, setShowAudioSettings] = useState(false)
   const navRef = useRef<HTMLElement | null>(null)
-  // 서버가 기록한 사진 URL만 (예전 base64 user_metadata.profile_photo는 무시, P2-12)
-  const profilePhoto = profilePhotoFromMetadata(user?.user_metadata)
+  // 서버가 기록한 사진 URL만 (서버만 쓰는 app_metadata, P2-12)
+  const profilePhoto = profilePhotoOf(user)
 
   // 내비게이션 높이를 CSS 변수로 알린다 — 합주실이 남은 화면 높이에 맞춰 채팅 입력창을 첫 화면에 둔다 (P3-12 ⑨)
   useLayoutEffect(() => {

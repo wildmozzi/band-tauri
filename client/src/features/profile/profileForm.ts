@@ -34,11 +34,12 @@ export function snsLinksFromMetadata(meta: ProfileMetadata): SnsLinks {
 }
 
 /**
- * 프로필 사진 URL (P2-12): 서버가 기록한 `profile_photo_url`(http/https)만 쓴다.
- * 예전 base64 값(`profile_photo`, data: URL)은 읽지 않는다 → 기본 아바타. 새로 올리거나 지우면 서버가 그 키를 지운다.
+ * 프로필 사진 URL (P2-12): 서버가 **app_metadata**에 기록한 `profile_photo_url`(http/https)만 쓴다.
+ * app_metadata는 서버(service_role)만 쓸 수 있다 — user_metadata는 사용자가 직접 바꿀 수 있어 읽지 않는다(리뷰 M1).
+ * 예전 base64 값(user_metadata.profile_photo)도 읽지 않는다 → 기본 아바타 (로그인 시 정리: features/auth legacyProfilePhoto).
  */
-export function profilePhotoFromMetadata(meta: ProfileMetadata): string {
-  const url = meta?.profile_photo_url
+export function profilePhotoOf(user: { app_metadata?: ProfileMetadata } | null | undefined): string {
+  const url = user?.app_metadata?.profile_photo_url
   return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : ''
 }
 

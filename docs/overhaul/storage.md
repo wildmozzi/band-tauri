@@ -57,10 +57,10 @@ Supabase 무료 한도(Storage 1GB, Egress 5GB/월)를 넘기 전에 env 전환�
 이제 업로드 절차는 게시글 이미지와 같다(pending → `/complete` 검증 → 최종 경로). 다른 점:
 
 1. `POST /api/storage/avatars/upload-url` (인증, `{contentType, size}`): jpg/png/webp, **2MB**. 사용자별 24시간 20회.
-2. `POST /api/storage/avatars/complete {key}`: 검증을 통과하면 서버가 service_role로 `user_metadata.profile_photo_url`(조회 URL)을 쓰고 예전 `profile_photo`(base64) 키를 지운다. 이어서 그 사용자 폴더의 예전 사진을 지운다. 클라이언트는 `refreshSession()`으로 새 토큰을 받는다.
+2. `POST /api/storage/avatars/complete {key}`: 검증을 통과하면 서버가 service_role로 **`app_metadata.profile_photo_url`**(조회 URL)을 쓰고 user_metadata의 예전 `profile_photo`(base64) 키를 지운다. 이어서 그 사용자 폴더에서 **이 사진보다 먼저 올린** 사진만 지운다. 같은 폴더에 더 새 사진이 이미 있으면(동시·재호출) 기록하지 않고 409. 검증 캐시는 쓰지 않는다(재호출은 최종 경로를 다시 확인). 클라이언트는 `refreshSession()`으로 새 토큰을 받는다.
 3. `DELETE /api/storage/avatars`: 사진 지우기(metadata 비움 + 파일 삭제). 지금 화면에는 버튼이 없다.
 4. `GET /api/storage/avatars/<key>`: 공개 URL이 없을 때 서명 GET으로 302.
-5. 읽기: 클라이언트는 `profile_photo_url`(http/https)만 표시하고 예전 base64는 무시한다(기본 아바타). 남은 base64는 migrations 014로 지운다([사람]).
+5. 읽기: 클라이언트는 `app_metadata.profile_photo_url`(http/https)만 표시한다(`profilePhotoOf`). user_metadata는 사용자가 `auth.updateUser`로 마음대로 쓸 수 있어 사진 URL 출처로 쓰지 않는다 — app_metadata는 service_role만 쓴다. 예전 base64는 무시(기본 아바타)하고, 로그인 때 클라이언트가 Supabase에 직접 지운다(토큰이 8KB를 넘어 우리 서버가 401인 사용자도 복구됨). 새 앱으로 로그인하지 않은 사용자의 base64는 migrations 014로 지운다([사람]).
 6. pending 정리는 게시글 이미지와 같은 규칙(매시 20분, 3시간 지난 미검증 업로드). 참조되지 않는 최종 사진은 그 사용자의 다음 업로드·삭제 때 지운다.
 7. 운영 준비([사람], migrations README 014): supabase 드라이버면 `avatars` 공개 버킷(2MB, jpeg/png/webp, 클라이언트 쓰기 정책 없음), s3 드라이버면 버킷 CORS가 `avatars/`에도 적용되는지 확인.
 

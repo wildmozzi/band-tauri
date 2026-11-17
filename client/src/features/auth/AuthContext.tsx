@@ -3,6 +3,7 @@ import type { User } from '@supabase/supabase-js'
 import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
 import { authApi, useResetQueryCacheOnUserChange } from './queries'
 import { profileApi } from './profileQueries'
+import { useLegacyProfilePhotoCleanup } from './legacyProfilePhoto'
 import { AuthContext, type AuthAlert, type SignUpData } from './useAuth'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -13,6 +14,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // 로그아웃·계정 전환 시 이전 사용자의 서버 상태(Query 캐시)를 비운다 (P3-3d)
   useResetQueryCacheOnUserChange(user?.id ?? null, loading)
+  // 예전 base64 프로필 사진이 user_metadata(=JWT)에 남아 있으면 Supabase에 직접 지운다 (P2-12 리뷰 M2)
+  useLegacyProfilePhotoCleanup(user)
 
   useEffect(() => {
     if (!isSupabaseConfigured()) {

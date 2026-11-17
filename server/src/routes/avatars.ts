@@ -4,7 +4,7 @@ import { requireAuth } from '../lib/auth'
 import { AVATAR_MAX_BYTES } from '../lib/avatarStorage'
 import { POST_IMAGE_UPLOAD_TTL_SEC, POST_IMAGE_VIEW_TTL_SEC, isPostImageOwner, newPostImageKey, postImageKeyFromParams } from '../lib/imageStorage'
 import type { StorageAdapter } from '../storage/types'
-import { UploadQuota, VerifiedKeys, pendingKeyOf } from '../services/postImageService'
+import { UploadQuota, pendingKeyOf } from '../services/postImageService'
 import { completeAvatarUpload, removeAvatar, type ProfilePhotoMetadata } from '../services/profilePhotoService'
 import { avatarUploadBody, postImageCompleteBody } from './schemas'
 
@@ -14,7 +14,8 @@ export const AVATAR_QUOTA = { maxCount: 20, maxBytes: 20 * AVATAR_MAX_BYTES }
 /**
  * 프로필 사진 API (P2-12) — /api/storage/avatars
  * - POST   /upload-url  (인증) 서명 PUT URL 발급 — `pending/<key>`, 2MB·jpg/png/webp, 사용자별 24h 상한
- * - POST   /complete    (인증) 업로드 검증 → 최종 경로 → user_metadata.profile_photo_url 기록(예전 base64 키 삭제) → 예전 사진 삭제
+ * - POST   /complete    (인증) 업로드 검증 → 최종 경로 → app_metadata.profile_photo_url 기록(user_metadata의 예전 base64 키 삭제) → 더 오래된 사진 삭제.
+ *                         더 새 사진이 이미 있으면 409(동시·재호출, 리뷰 L1)
  * - DELETE /            (인증) 사진 지우기 (metadata 비움 + 사진 삭제)
  * - GET    /:owner/:file  조회 → 서명 GET URL로 302 (공개 URL이 없는 저장소용)
  * 신원은 JWT(requireAuth)로만 정한다 — 요청 본문의 userId·경로는 쓰지 않는다.
@@ -22,11 +23,10 @@ export const AVATAR_QUOTA = { maxCount: 20, maxBytes: 20 * AVATAR_MAX_BYTES }
 export function createAvatarRouter(
   storage: StorageAdapter | null,
   meta: ProfilePhotoMetadata | null,
-  opts: { rateLimits?: boolean; quota?: UploadQuota; verified?: VerifiedKeys; perUserPerMinute?: number } = {},
+  opts: { rateLimits?: boolean; quota?: UploadQuota; perUserPerMinute?: number } = {},
 ) {
   const router = Router()
   const quota = opts.quota ?? new UploadQuota(AVATAR_QUOTA)
-  const verified = opts.verified ?? new VerifiedKeys()
   const passthrough = (_req: Request, _res: Response, next: NextFunction) => next()
   const limitMessage = { success: false, error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' }
   const ipLimiter = opts.rateLimits === false
@@ -76,7 +76,7 @@ export function createAvatarRouter(
     const parsed = postImageCompleteBody.safeParse(req.body)
     if (!parsed.success) return res.status(400).json({ success: false, error: '잘못된 요청입니다.' })
     try {
-      const r = await completeAvatarUpload(storage, meta, res.locals.userId as string, parsed.data.key, verified)
+      const r = await completeAvatarUpload(storage, meta, res.locals.userId as string, parsed.data.key)
       if (!r.ok) return res.status(r.status).json({ success: false, error: r.error })
       return res.json({ success: true, url: r.url })
     } catch (e) {

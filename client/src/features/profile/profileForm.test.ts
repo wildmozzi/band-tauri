@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   bioFromMetadata,
   metadataNickname,
-  profilePhotoFromMetadata,
+  profilePhotoOf,
   snsLinksFromMetadata,
   tabFromQuery,
 } from './profileForm'
@@ -26,15 +26,16 @@ describe('user_metadata → 폼 값', () => {
     expect(snsLinksFromMetadata(null)).toEqual({ instagram: '', youtube: '', twitter: '' })
   })
 
-  it('프로필 사진은 서버가 기록한 URL만 — 예전 base64(profile_photo)는 무시 (P2-12)', () => {
-    expect(profilePhotoFromMetadata(meta)).toBe('')
-    expect(profilePhotoFromMetadata({ profile_photo: 'data:image/png;base64,AAAA' })).toBe('')
-    expect(profilePhotoFromMetadata({ profile_photo_url: 'https://api.example/api/storage/avatars/u/x.webp', profile_photo: 'data:x' }))
-      .toBe('https://api.example/api/storage/avatars/u/x.webp')
-    expect(profilePhotoFromMetadata({ profile_photo_url: 'data:image/png;base64,AAAA' })).toBe('')
-    expect(profilePhotoFromMetadata({ profile_photo_url: 'javascript:alert(1)' })).toBe('')
-    expect(profilePhotoFromMetadata({ profile_photo_url: 42 })).toBe('')
-    expect(profilePhotoFromMetadata(undefined)).toBe('')
+  it('프로필 사진은 서버만 쓰는 app_metadata의 URL만 — user_metadata(사용자가 직접 쓸 수 있음)·예전 base64는 무시 (P2-12, 리뷰 M1)', () => {
+    const url = 'https://api.example/api/storage/avatars/u/x.webp'
+    expect(profilePhotoOf({ app_metadata: { profile_photo_url: url } })).toBe(url)
+    // 사용자가 auth.updateUser로 user_metadata에 넣은 값은 표시하지 않는다
+    expect(profilePhotoOf({ app_metadata: {}, user_metadata: { profile_photo_url: 'https://evil.example/pixel.png' } } as never)).toBe('')
+    expect(profilePhotoOf({ app_metadata: {}, user_metadata: { profile_photo: 'data:image/png;base64,AAAA' } } as never)).toBe('')
+    expect(profilePhotoOf({ app_metadata: { profile_photo_url: 'data:image/png;base64,AAAA' } })).toBe('')
+    expect(profilePhotoOf({ app_metadata: { profile_photo_url: 'javascript:alert(1)' } })).toBe('')
+    expect(profilePhotoOf({ app_metadata: { profile_photo_url: 42 } })).toBe('')
+    expect(profilePhotoOf(null)).toBe('')
   })
 
   it('닉네임은 빈 값이면 undefined(profiles 조회 신호)', () => {
