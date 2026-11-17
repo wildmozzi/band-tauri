@@ -6,7 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RoomSessionStore, RoomSnapshot } from './roomSessionStore'
-import { useRoomSelector } from './useRoomSelector'
+import { shallowEqual, useRoomSelector } from './useRoomSelector'
 
 export interface MixSettings {
   volume: number // 0 ~ 1
@@ -26,6 +26,18 @@ interface Nodes {
 }
 
 const LEVEL_INTERVAL_MS = 66
+
+/**
+ * 레벨 측정 한 번의 스토어 패치. 피어 레벨이 그대로면(무음·같은 값) 이전 객체를 유지해 레벨 구독자가
+ * 66ms마다 다시 그리지 않게 한다(마스터 레벨도 같으면 patchSlice가 알림 자체를 건너뛴다).
+ */
+export function levelsPatch(
+  cur: Record<string, number>,
+  levels: Record<string, number>,
+  masterLevel: number,
+): { audioLevels?: Record<string, number>; masterLevel: number } {
+  return shallowEqual(cur, levels) ? { masterLevel } : { audioLevels: levels, masterLevel }
+}
 
 const selectRemoteAudioMap = (s: RoomSnapshot) => s.viewer.remoteAudioMap
 const selectMixer = (s: RoomSnapshot) => s.mixer
@@ -144,7 +156,7 @@ export function useWebAudioMixer(store: RoomSessionStore) {
         levels[peerId] = level
         max = Math.max(max, level)
       })
-      store.patch('levels', { audioLevels: levels, masterLevel: max })
+      store.patch('levels', (cur) => levelsPatch(cur.audioLevels, levels, max))
     }, LEVEL_INTERVAL_MS)
     return () => clearInterval(timer)
   }, [nodeCount, store])

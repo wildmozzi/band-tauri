@@ -90,7 +90,9 @@ export function useViewerAudio(opts: {
     setRemoteAudioMap({})
     setNetworkStats({})
     setStatus('idle')
-  }, [closeFrom, setRemoteAudioMap, setNetworkStats, setStatus])
+    // 닫은 연결의 실패 안내를 남기지 않는다(퇴장 뒤 다른 방·연주 시작 뒤에 옛 안내가 보이지 않게)
+    setError(null)
+  }, [closeFrom, setRemoteAudioMap, setNetworkStats, setStatus, setError])
 
   const hasPeer = useCallback((peerId: string) => pcsRef.current.has(peerId), [])
 
@@ -130,15 +132,21 @@ export function useViewerAudio(opts: {
       refreshStatus()
     }
 
+    // 협상 중에 새 offer(재협상·방송 인계)나 퇴장으로 이 연결이 닫혔는지. 닫혔으면 조용히 그만둔다 —
+    // 실패 처리(closeFrom)가 같은 발신자의 새 연결을 닫거나 새 연결에 실패 안내를 덮어쓰지 않게
+    const superseded = () => pcsRef.current.get(from)?.pc !== pc
     try {
       await pc.setRemoteDescription(offer)
       for (const c of incoming.pending) await pc.addIceCandidate(c).catch(() => {})
       incoming.pending = []
       const answer = await pc.createAnswer()
+      if (superseded()) return
       const tuned = { type: answer.type, sdp: tuneOpusSdp(answer.sdp ?? '', { stereo: true }) }
       await pc.setLocalDescription(tuned)
+      if (superseded()) return
       optsRef.current.send({ type: 'answer', to: from, answer: tuned })
     } catch (err) {
+      if (superseded()) return
       console.error('[Viewer] offer 처리 실패:', err)
       setError('방송 연결 협상에 실패했습니다.')
       closeFrom(from)
@@ -198,6 +206,10 @@ export function useViewerAudio(opts: {
         } catch {
           update[peerId] = UNKNOWN_STATS
         }
+      }
+      // getStats를 기다리는 사이 닫힌 연결(방송 인계·퇴장)의 통계는 다시 넣지 않는다
+      for (const peerId of Object.keys(update)) {
+        if (!pcsRef.current.has(peerId)) delete update[peerId]
       }
       if (Object.keys(update).length > 0) setNetworkStats((prev) => ({ ...prev, ...update }))
     }

@@ -203,6 +203,20 @@ describe('RoomProvider', () => {
     stop.mockRestore()
   })
 
+  it('내려진 뒤(엔진 정지 안내)·관람 연결 실패 뒤 퇴장하면 다음 방에 옛 안내가 남지 않는다', () => {
+    const clear = vi.spyOn(h.session, 'clearError').mockImplementation(() => h.session.set({ error: null }))
+    act(() => joinRoom('r1'))
+    // 내려짐: 세션은 이미 idle이고 안내만 남아 있다(stop은 idle이면 error를 지우지 않는다)
+    act(() => h.session.set({ phase: 'idle', error: DEMOTED_MESSAGE }))
+    act(() => store.patch('viewer', { error: '방송 연결에 실패했습니다. 잠시 후 다시 연결됩니다.' }))
+    expect(store.getSnapshot().derived.rtcError).toBe(DEMOTED_MESSAGE)
+    act(() => leaveRoom())
+    act(() => joinRoom('r2'))
+    expect(store.getSnapshot().derived.rtcError).toBeNull()
+    expect(store.getSnapshot().derived.rtcStatus).toBe('idle')
+    clear.mockRestore()
+  })
+
   it('방장 명령 demotePerformer는 demote-performer {targetId}를 보낸다', () => {
     act(() => joinRoom('r1'))
     act(() => actions.demotePerformer('a'))
