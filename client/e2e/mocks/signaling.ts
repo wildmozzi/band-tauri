@@ -15,7 +15,7 @@
  * 처리하지 않는 메시지 타입은 위반으로 기록한다(앱이 새 메시지를 보내기 시작하면 테스트가 알게).
  * 관람 WebRTC(answer·ice-candidate)는 서버 중계 코드(server/src/signaling/viewerRelay.ts buildViewerSignal — 본문 형식·
  * UTF-8 크기 상한)를 그대로 써서 검사한다: 서버가 조용히 버릴 모양이면 위반이다(#184·#187 제한 아래에서 협상이 되는지).
- * 관람자는 offer를 보내지 않는다(서버가 연주자 아닌 쪽 offer를 버린다) — offer는 처리하지 않는 타입이라 위반으로 잡힌다.
+ * offer는 연주자(start-performing을 보낸 연결)만 보낸다(서버가 연주자 아닌 쪽 offer를 버린다) — 관람자의 offer는 위반이다.
  *
  * 보내는 메시지는 서버의 송신 메시지 타입(server/src/signaling/protocol.ts ServerMessage)으로 검사한다:
  * 서버 계약에서 필드가 바뀌면 e2e tsc(npm run e2e:typecheck)가 실패한다(docs/server-architecture.md 3.3절).
@@ -55,7 +55,7 @@ export const RATE_LIMIT_RETRY_MS = DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs
 
 /** 이 mock이 처리하는 클라이언트 → 서버 메시지 */
 // 연주(데스크톱 앱, e2e/mocks/tauri.ts로 흉내 낼 때만 온다): 기록만 — 서버의 중계·응답은 흉내 내지 않는다
-const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping', 'start-performing', 'stop-performing', 'native-leave', 'native-descriptor', 'relay-token-request', 'metronome', 'demote-performer', 'answer', 'ice-candidate'])
+const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping', 'start-performing', 'stop-performing', 'native-leave', 'native-descriptor', 'relay-token-request', 'metronome', 'demote-performer', 'offer', 'answer', 'ice-candidate'])
 
 /** setDown이 연결을 끊을 때 쓰는 코드 (1012 Service Restart — 앱은 비정상 닫힘으로 보고 재연결한다) */
 const SERVER_RESTART_CLOSE_CODE = 1012
@@ -239,11 +239,12 @@ export class FakeSignaling {
       case 'leave':
         conn.roomId = null
         return
+      case 'offer':
       case 'answer':
       case 'ice-candidate': {
-        // 서버 중계와 같은 검사: 방 안에서, 서버가 다시 구성할 수 있는 모양이어야 한다
+        // 서버 중계와 같은 검사: 방 안에서, 서버가 다시 구성할 수 있는 모양이어야 하고, offer는 연주자만
         const to = typeof msg.to === 'string' ? msg.to : ''
-        if (!conn.roomId || !to || !buildViewerSignal(msg, conn.clientId, to)) {
+        if (!conn.roomId || !to || !buildViewerSignal(msg, conn.clientId, to) || (msg.type === 'offer' && !conn.performing)) {
           this.violations.push(`서버가 버릴 관람 중계 메시지: ${msg.type} ${JSON.stringify(msg).slice(0, 200)}`)
         }
         return

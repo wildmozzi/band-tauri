@@ -10,6 +10,14 @@ export function holdViewerOnClose(opts: { loggedIn: boolean; selfId: string | nu
   return opts.loggedIn && opts.selfId !== null && opts.hasViewer ? opts.selfId : null
 }
 
+/**
+ * 끊길 때 방송 담당 연주자: 방송(관람자 PC)을 유지해 둘 clientId. 연주자는 로그인 사용자라 서버가 재개해 준다.
+ * 재개되면 관람자 쪽은 끊긴 줄 모르므로(participant-left 없음) 그대로 듣는다. 유지하지 않으면 null
+ */
+export function holdBroadcastOnClose(opts: { isBroadcaster: boolean; selfId: string | null }): string | null {
+  return opts.isBroadcaster && opts.selfId !== null ? opts.selfId : null
+}
+
 /** 다시 ready가 됐을 때: 유지해 둔 연결을 계속 쓸지 (같은 clientId로 재개됐을 때만) */
 export function keepHeldViewer(held: string | null, readyId: string, resumed: boolean): boolean {
   return held !== null && resumed && readyId === held

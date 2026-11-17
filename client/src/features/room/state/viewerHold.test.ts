@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { holdViewerOnClose, keepHeldViewer } from './viewerHold'
+import { holdBroadcastOnClose, holdViewerOnClose, keepHeldViewer } from './viewerHold'
 
 describe('관람 수신 유지 (시그널링 재개)', () => {
   it('로그인 관람자가 수신 중에 끊기면 지금 clientId로 유지해 둔다', () => {
@@ -9,6 +9,11 @@ describe('관람 수신 유지 (시그널링 재개)', () => {
     expect(holdViewerOnClose({ loggedIn: false, selfId: 'c1', hasViewer: true })).toBeNull()
     expect(holdViewerOnClose({ loggedIn: true, selfId: 'c1', hasViewer: false })).toBeNull()
     expect(holdViewerOnClose({ loggedIn: true, selfId: null, hasViewer: true })).toBeNull()
+  })
+  it('방송 담당이면 끊길 때 방송(관람자 PC)을 유지해 둔다', () => {
+    expect(holdBroadcastOnClose({ isBroadcaster: true, selfId: 'p1' })).toBe('p1')
+    expect(holdBroadcastOnClose({ isBroadcaster: false, selfId: 'p1' })).toBeNull()
+    expect(holdBroadcastOnClose({ isBroadcaster: true, selfId: null })).toBeNull()
   })
   it('같은 clientId로 재개됐을 때만 계속 쓴다', () => {
     expect(keepHeldViewer('c1', 'c1', true)).toBe(true)

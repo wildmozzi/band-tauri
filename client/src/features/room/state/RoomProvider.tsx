@@ -44,7 +44,7 @@ import { useRecording, type RecordingSource } from './useRecording'
 import { useRoomSelector } from './useRoomSelector'
 import { useSignaling, type SignalPayload } from './useSignaling'
 import { useViewerAudio } from './useViewerAudio'
-import { holdViewerOnClose, keepHeldViewer } from './viewerHold'
+import { holdBroadcastOnClose, holdViewerOnClose, keepHeldViewer } from './viewerHold'
 import { useWebAudioMixer } from './useWebAudioMixer'
 
 const BROADCAST_RESYNC_MS = 5000
@@ -73,6 +73,11 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   userIdRef.current = user?.id
   /** 마지막으로 ready가 된 내 clientId (끊긴 뒤 handleClosed가 clientId를 비워도 남는다) */
   const selfIdRef = useRef<string | null>(null)
+  /**
+   * 끊길 때 방송(관람자 PC)을 유지해 둔 clientId. 끊긴 동안은 clientId가 비어 isBroadcaster가 꺼지지만 방송을 멈추지 않고,
+   * 다음 ready가 같은 id의 재개면 그대로, 아니면 관람자 PC를 닫고 새 id로 다시 offer한다
+   */
+  const heldBroadcastIdRef = useRef<string | null>(null)
   /** 끊길 때 관람 수신을 유지해 둔 clientId — 다음 ready가 같은 id의 재개면 유지, 아니면 닫는다 */
   const heldViewerIdRef = useRef<string | null>(null)
 
@@ -257,6 +262,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       clearBusyRetry()
       // 방 id를 먼저 비워야 시작 중인 엔진이 완료 시 "퇴장함"을 보고 스스로 내려간다 (H2)
       store.patch('connection', { currentRoomId: null, joinError: null, roomJoined: false })
+      heldBroadcastIdRef.current = null
       heldViewerIdRef.current = null
       broadcaster.stop()
       // leave가 participant-left로 전파되므로 native-leave/stop-performing은 따로 보내지 않는다
@@ -357,6 +363,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
           return
         }
         store.patch('connection', { joinError: null })
+        // 수동 재시도는 자동 재시도 횟수를 처음부터 다시 쓴다 (#189 리뷰 L-6)
+        clearBusyRetry()
         sendJoin()
         store.patch('connection', { joinFeedback: '룸 입장 시도 중...' })
       },
@@ -378,6 +386,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         const { viewer: v, restartSignaling: restart } = d()
         rejoiningRef.current = false
         clearBusyRetry()
+        heldBroadcastIdRef.current = null
         heldViewerIdRef.current = null
         broadcaster.stop()
         v.closeAll()
@@ -392,6 +401,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
 
       startPerforming,
       stopPerforming: async () => {
+        heldBroadcastIdRef.current = null
         broadcaster.stop()
         await d().session.stop({ notify: true })
       },
@@ -531,6 +541,18 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     const held = heldViewerIdRef.current
     heldViewerIdRef.current = null
     if (held !== null && !keepHeldViewer(held, id, resumed)) viewer.closeAll()
+    // 방송 담당이 끊겼다 돌아옴: 같은 id로 재개면 관람자 PC를 그대로 둔다(peers도 유지해 두었으므로 syncViewers가 아무것도 바꾸지 않고,
+    // room-state가 그 사이 나간 관람자만 뺀다).
+    // 참고(#195 리뷰 L-2): 서버 재개는 welcome(임시 id) → welcome(재개 id) 순이라, 임시 id 동안 broadcasterOf가 나를 담당으로 보고
+    // 방송 효과가 start()(이미 active라 syncViewers no-op)를 한 번 부를 수 있다. 유지 중이라 stop()은 막혀 있어 무해하다.
+    // 새 id(재개 실패)나 그 사이 연주가 멈춤·담당이 바뀜이면 방송을 멈추기만 한다. 새 id면 아래 session.welcome이 엔진을
+    // 다시 시작하고(phase idle → running, start-performing), 그때 방송 효과가 start()로 새 id에서 다시 offer한다.
+    // 여기서 바로 offer하면 서버가 아직 연주자가 아닌(start-performing 전) 새 id의 offer를 버린다 (#195 리뷰 L-1)
+    const heldBroadcast = heldBroadcastIdRef.current
+    heldBroadcastIdRef.current = null
+    if (heldBroadcast !== null && (!store.getSnapshot().derived.isBroadcaster || !keepHeldViewer(heldBroadcast, id, resumed))) {
+      broadcaster.stop()
+    }
     selfIdRef.current = id
     // resumed && 같은 id → 엔진 유지 + descriptor 재전송, 아니면 새 id로 엔진 재시작
     void session.welcome(id, resumed)
@@ -539,7 +561,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   onClosedRef.current = () => {
     // 방 안에서 끊겼으면 다음 ready에서 다시 입장한다 ("다시 입장"으로 연 연결이면 일반 입장 그대로)
     if (store.getSnapshot().connection.currentRoomId !== null && joinOnReadyRef.current === 'none') joinOnReadyRef.current = 'rejoin'
-    store.patch('connection', { peers: [] })
+    // 방송 담당이면 재개를 기다리며 방송을 유지한다(아래 방송 효과가 isBroadcaster=false여도 멈추지 않음). 관람자 목록(peers)도
+    // 비우지 않는다 — 비우면 재개 직후 room-state 전에 syncViewers([])가 관람자 PC를 모두 닫는다
+    heldBroadcastIdRef.current = holdBroadcastOnClose({ isBroadcaster: isBroadcasterRef.current, selfId: selfIdRef.current })
+    if (heldBroadcastIdRef.current === null) store.patch('connection', { peers: [] })
     // 로그인 관람자는 세션 재개(같은 clientId)를 요청하므로 관람 수신 연결을 유지해 둔다(재개되면 재협상 없이 소리가 이어진다).
     // 익명은 재개가 없어(서버는 인증 사용자만 유예) 지금 닫는다. 재개 여부는 onReady에서 판정한다
     heldViewerIdRef.current = holdViewerOnClose({ loggedIn: !!userIdRef.current, selfId: selfIdRef.current, hasViewer: viewer.hasAny() })
@@ -552,6 +577,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     // 재연결 예산(35초, 서버 세션 유예 30초 + 여유)을 넘겼다: 서버 쪽 세션은 이미 정리됐으므로 엔진도 멈춘다.
     // 다른 창·기기에 밀려났을 때(replaced)도 같다: 서버 쪽 세션은 이미 정리됐다.
     // 화면은 signalStatus='gave-up'/'replaced'를 보고 "다시 입장" 안내를 띄운다.
+    heldBroadcastIdRef.current = null
     broadcaster.stop()
     heldViewerIdRef.current = null
     viewer.closeAll()
@@ -636,6 +662,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const { isBroadcaster, viewers } = view
   const viewersRef = useRef(viewers)
   viewersRef.current = viewers
+  const isBroadcasterRef = useRef(isBroadcaster)
+  isBroadcasterRef.current = isBroadcaster
 
   useEffect(() => {
     if (isBroadcaster) {
@@ -643,7 +671,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         console.error('[MixBridge] 방송 시작 실패:', err)
         store.patch('local', { localError: `관람자 방송 시작 실패: ${engineErrorMessage(err)}` })
       })
-    } else {
+    } else if (heldBroadcastIdRef.current === null) {
+      // 끊겨 재개를 기다리는 동안(clientId가 비어 isBroadcaster=false)은 멈추지 않는다 — 재개 판정은 onReady
       broadcaster.stop()
     }
   }, [isBroadcaster, broadcaster, store])

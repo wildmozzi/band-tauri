@@ -131,13 +131,13 @@ describe('reduceRoomSignal — 입장 오류', () => {
   })
 
   it('방 조회 실패(room-unavailable, #189 리뷰 H-1): 재연결 중이면 화면·엔진을 그대로 두고 조용히 재시도한다', () => {
-    const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1', retryAfterMs: 2000 }, ctx({ rejoining: true }))
+    const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1', retryAfterMs: 2000 }, ctx({ rejoining: true, random: () => 0.5 }))
     expect(r.patch).toBeNull()
     expect(r.effects).toEqual([{ type: 'schedule-busy-retry', roomId: 'r1', delayMs: 2000 }])
   })
 
   it('room-unavailable: 첫 입장이면 안내 + 재시도, 재시도를 다 쓰면 안내만. 어느 경우도 엔진을 멈추지 않는다', () => {
-    const first = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1', retryAfterMs: 2000 }, ctx())
+    const first = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1', retryAfterMs: 2000 }, ctx({ random: () => 0.5 }))
     expect(first.patch?.connection?.joinError?.code).toBe('room-unavailable')
     expect(first.effects).toContainEqual({ type: 'schedule-busy-retry', roomId: 'r1', delayMs: 2000 })
     const spent = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1' }, ctx({ rejoining: true, busyRetryCount: MAX_BUSY_RETRIES }))
@@ -147,6 +147,26 @@ describe('reduceRoomSignal — 입장 오류', () => {
       expect(r.effects).not.toContainEqual({ type: 'stop-broadcast' })
       expect(r.effects.some((e) => e.type === 'keep-viewers')).toBe(false) // 일시 오류: 유지한 관람 수신은 그대로
     }
+  })
+
+  it('room-unavailable 재시도 간격은 ±50% 흩는다(재배포 직후 동시 재입장 몰림 방지, #189 리뷰 L-5). password-busy는 그대로', () => {
+    const delay = (code: string, random: number) => {
+      const r = reduceRoomSignal(inRoom(), { type: 'error', code, roomId: 'r1', retryAfterMs: 2000 }, ctx({ random: () => random }))
+      return (r.effects.find((e) => e.type === 'schedule-busy-retry') as { delayMs: number }).delayMs
+    }
+    expect(delay('room-unavailable', 0)).toBe(1000)
+    expect(delay('room-unavailable', 0.5)).toBe(2000)
+    expect(delay('room-unavailable', 0.999)).toBe(2998)
+    expect(delay('password-busy', 0)).toBe(2000)
+  })
+
+  it('자동 재시도를 다 쓰면 joinError.autoRetry=false — 수동 재시도 안내 (#189 리뷰 L-6)', () => {
+    const retrying = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1' }, ctx({ random: () => 0.5 }))
+    expect(retrying.patch?.connection?.joinError?.autoRetry).toBe(true)
+    const spent = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1' }, ctx({ busyRetryCount: MAX_BUSY_RETRIES }))
+    expect(spent.patch?.connection?.joinError?.autoRetry).toBe(false)
+    const notRetryable = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-full', roomId: 'r1' }, ctx())
+    expect(notRetryable.patch?.connection?.joinError).not.toHaveProperty('autoRetry')
   })
 
   it('방 없음(room-not-found)은 재연결 중이어도 엔진·방송을 멈춘다(보던 방이 종료됨)', () => {
