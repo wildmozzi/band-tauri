@@ -602,6 +602,9 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 연주자 상한 6은 `start-performing`에서 따로 강제한다(`room-full-performers`, 유예 중인 연주자 포함). join은 항상 관람으로 들어오므로 연주자 자리는 그때 센다.
 - 연주 참여 요청: `perform-request-sent` `{ instrument, hostOnline }`(같은 요청 재전송에도 다시 보냄), `perform-request-rejected` `{ reason, instrument }`, 익명 요청에는 `request-perform-error` `{ code: 'login-required' }`도 보낸다. 승인(`perform-request-approved`)을 받은 앱은 바로 엔진을 시작한다(웹은 앱 안내).
 - 악기 변경 요청: 거절이면 `instrument-change-rejected` `{ reason }`.
+- 연주 중 악기 변경 규칙(P2-21b): 승인제 방(`free_join` 아님)에서 방장이 아닌 연주자의 악기는 **방장이 승인한 악기**다 — `approve-perform`의 요청 악기, 그 뒤 `approve-instrument-change`의 새 악기. 이 사람이 `start-performing`을 다른 `instrument`로 보내면(연주 중 재전송이든 멈췄다 다시 시작이든) 서버는 보낸 악기를 무시하고 **다른 참가자에게** 승인 악기로 `performer-updated`를 보낸다(보낸 사람에게는 오류도 확정 메시지도 보내지 않는다 — 정상 앱은 아래 이유로 어긋나지 않는다). 오류를 보내지 않는 이유: 정상 앱의 재전송(엔진 재시작, 새 clientId 재개)은 승인 악기를 그대로 보내고(`instrument-change-approved`를 받으면 재시작용 악기도 바꾼다), 변경 승인과 엇갈려 옛 악기로 보낸 재전송도 승인 악기로 맞춰진다. 바꾸려면 `request-instrument-change` → 방장 승인만 쓴다.
+  - 방장은 자기 악기를 `start-performing` 재전송으로 바로 바꿀 수 있다(앱 UI는 연주 중 악기 선택을 열지 않는다). `free_join` 방은 설계상 승인 없는 방이라 연주자 본인이 `start-performing` 재전송으로 바로 바꿀 수 있다(승인 기록이 있어도). 이때 승인 기록의 악기도 새 악기로 바꿔, 방 설정이 다시 승인제로 바뀐 뒤의 재전송이 옛 승인 악기로 되돌리지 않는다.
+  - 승인 악기와 다른 악기의 재전송은 방 정보(free_join 여부)를 조회한다. 그 사이 방장이 내리거나 본인이 멈추거나 방을 옮겼으면 그 재전송은 조용히 버린다(연주 상태를 되살리지 않는다). 개발용 insecure 모드도 보낸 악기를 쓴다.
 - 거절 사유 규칙(P2-11, `reject-perform`·`reject-instrument-change` 공통, `protocol.rejectReason`): 방장이 보낸 `reason`을 앞뒤 공백을 빼고 200자로 자른다. 문자열이 아니거나 비면 기본 문구(연주 요청 "방장이 요청을 거절했습니다.", 악기 변경 "방장이 악기 변경을 거절했습니다.")를 넣는다. 그래서 받는 쪽 `reason`은 늘 비어 있지 않은 문자열이다.
 - **관람자로 내리기**(P2-9, `requests.handleDemotePerformer`): 방장이 `demote-performer { targetId }`를 보낸다.
   - 권한: 보낸 사람이 DB `rooms.host_id`의 방장이어야 한다(다른 방장 조작과 같은 `requireHost`, 방 정보 캐시 최대 30초). 아니거나 `targetId`가 문자열이 아니면 응답 없이 무시한다.

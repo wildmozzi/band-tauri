@@ -80,7 +80,7 @@ describe('performer limit (max 6)', async () => {
     await sleep(50)
     assert.ok(!players[0].has(m => m.type === 'performer-updated' && m.oderId === seventh.id))
 
-    // 이미 연주 중인 사람의 재전송(악기 갱신)은 허용
+    // 이미 연주 중인 사람의 재전송(악기 갱신)은 허용 — free_join 방이라 본인이 바꿀 수 있다(승인제 방은 승인 악기 유지, P2-21b: ws.test.ts)
     players[0].send({ type: 'start-performing', instrument: 'keys' })
     assert.ok(await seventh.waitFor(m => m.type === 'performer-updated' && m.oderId === players[0].id && m.instrument === 'keys'))
     assert.ok(!players[0].has(m => m.code === 'room-full-performers'))

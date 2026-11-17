@@ -149,7 +149,7 @@ export async function handleApprovePerform(ctx: Ctx<RequestsSvc>, msg: Msg) {
   if (requestIndex === -1) return
   const request = requests[requestIndex]
   requests.splice(requestIndex, 1)
-  if (target.auth.userId) setApproval(roomId, target.auth.userId, null)
+  if (target.auth.userId) setApproval(roomId, target.auth.userId, null, request.instrument)
   console.log(`[APPROVE-PERFORM] Host approved ${target.id.slice(0, 8)} (${request.nickname}) for ${request.instrument}`)
   send(target.conn.ws, { type: 'perform-request-approved', instrument: request.instrument })
   return
@@ -232,6 +232,8 @@ export async function handleApproveInstrumentChange(ctx: Ctx<RequestsSvc>, msg: 
   const request = requests[requestIndex]
   requests.splice(requestIndex, 1)
   target.perform.instrument = request.newInstrument
+  // 승인 악기도 바꾼다: 이후 start-performing 재전송(엔진 재시작 등)이 새 악기로 유지된다 (P2-21b)
+  ctx.svc.performers.updateApprovedInstrument(roomId, target.auth.userId, request.newInstrument)
   send(target.conn.ws, { type: 'instrument-change-approved', newInstrument: request.newInstrument })
   for (const peer of roomMembers(roomId)) {
     if (peer.id !== target.id) send(peer.conn.ws, { type: 'participant-instrument-changed', oderId: target.id, instrument: request.newInstrument })
