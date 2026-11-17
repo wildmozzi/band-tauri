@@ -243,7 +243,8 @@ export const communityApi = {
       .single()
 
     if (error) {
-      if (error.code === 'PGRST116') return null // Not found
+      // 없음, 또는 uuid 형식이 아닌 id(잘린 링크·오타 — 22P02)도 "그런 글 없음" (#197 리뷰 L-1)
+      if (error.code === 'PGRST116' || error.code === '22P02') return null
       throw error
     }
 

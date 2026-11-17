@@ -60,11 +60,13 @@ describe('uploadAvatar', () => {
   it('서버 오류 메시지를 그대로 던진다', async () => {
     const fetchImpl = vi.fn(async () => json(429, { success: false, error: '오늘 프로필 사진을 바꿀 수 있는 횟수를 넘었습니다.' })) as unknown as typeof fetch
     await expect(uploadAvatar(webp(), fetchImpl)).rejects.toThrow(/횟수/)
+    await expect(uploadAvatar(webp(), fetchImpl)).rejects.toMatchObject({ kind: 'server', status: 429 })
   })
 
   it('오프라인·서버 다운(fetch 실패)이면 "Failed to fetch" 대신 연결 안내를 던진다', async () => {
     const offline = vi.fn(async () => { throw new TypeError('Failed to fetch') }) as unknown as typeof fetch
     await expect(uploadAvatar(webp(), offline)).rejects.toThrow('서버에 연결할 수 없습니다')
+    await expect(uploadAvatar(webp(), offline)).rejects.toMatchObject({ kind: 'network' })
     const putOffline = vi.fn(async (url: RequestInfo | URL) => {
       if (String(url).endsWith('/upload-url')) return json(200, { success: true, key: 'k', upload: { url: 'https://store/x', method: 'PUT', headers: {} } })
       throw new TypeError('Failed to fetch')

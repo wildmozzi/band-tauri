@@ -209,6 +209,15 @@ describe('방 상세 재입장 (리뷰 L1)', () => {
     expect(result.current.room?.id).toBe('r1')
   })
 
+  it('uuid 형식이 아닌 id(잘린 초대 링크·오타 — PostgREST 22P02)는 일시 오류가 아니라 없는 방: 목록으로 (#197 리뷰 L-1)', async () => {
+    sb.mock!.setResult('rpc:get_room', { error: { code: '22P02', message: 'invalid input syntax for type uuid' } })
+    const { wrapper } = createQueryWrapper()
+    const { result } = renderHook(() => useRoomDetailData('not-a-uuid'), { wrapper })
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith('/rooms'))
+    expect(result.current.loadError).toBe(false)
+    expect(sb.mock!.calls.some(c => c.table === 'rooms')).toBe(false) // 폴백 select까지 가지 않는다
+  })
+
   it('캐시 없이 처음 여는데 일시적 조회 오류면 목록으로 가지 않고 오류 + 다시 시도', async () => {
     sb.mock!.setResult('rpc:get_room', { error: { message: 'no fn' } })
     sb.mock!.setResult('rooms', { error: { message: 'network' } })
