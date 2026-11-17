@@ -137,7 +137,9 @@ pub(super) struct PeerOut {
     pub tx_sent: u64,
     pub tx_lost: u64,
     pub tx_outage: u64,
-    /// 끝난 세션(이탈한 `PeerMedia`)의 마지막 통계(`rejoins`, 혼돈). 지금 세션은 `js`.
+    /// 세션(`PeerMedia`)마다 마지막 통계, 시작 순서대로(`rejoins`, 혼돈). 이탈한 세션은 이탈 때, 끝까지 남은 세션은 끝에 넣는다 —
+    /// 세션마다 정확히 한 번(#185 리뷰 L2: 전에는 끝난 세션만 넣고 `js`를 덧붙여 써서, 이탈한 채 끝나면 마지막 세션을 두 번 셌다).
+    /// `js`는 마지막 세션의 통계다.
     pub sessions: Vec<JitterStats>,
     /// 망이 만든 중복 사본 수(`dup`).
     pub tx_dup: u64,
@@ -251,6 +253,9 @@ struct TxState {
     block_no: u64,
     /// Gilbert–Elliott 나쁨 상태.
     ge_bad: bool,
+    /// 혼돈 입력(`dup`·`reorder`) 전용 난수(#185 리뷰 M1): `rng`와 따로 뽑아, 켜도 손실·지터 난수열이 그대로다 —
+    /// 같은 시드의 "혼돈 없는 같은 회선"과 손실·지터 실현이 같다.
+    chaos_rng: rand::rngs::StdRng,
 }
 
 pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
@@ -333,6 +338,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             block: Vec::new(),
             block_no: 0,
             ge_bad: false,
+            chaos_rng: rand::rngs::StdRng::seed_from_u64(np.seed ^ 0xC4A0_5000),
         });
     }
     let mut tracker = CallbackTracker::new(48_000);
@@ -448,12 +454,12 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                 };
                 let mut delay = 200 + jitter + spike + path_extra;
                 if let Some((pr, max)) = np.reorder {
-                    if tx.rng.gen_bool(pr) {
-                        delay += tx.rng.gen_range(0..max.max(1));
+                    if tx.chaos_rng.gen_bool(pr) {
+                        delay += tx.chaos_rng.gen_range(0..max.max(1));
                     }
                 }
                 let dup_extra = match np.dup {
-                    Some((pr, max)) if tx.rng.gen_bool(pr) => Some(tx.rng.gen_range(0..max.max(1))),
+                    Some((pr, max)) if tx.chaos_rng.gen_bool(pr) => Some(tx.chaos_rng.gen_range(0..max.max(1))),
                     _ => None,
                 };
                 // 기존 시나리오의 난수 순서를 바꾸지 않도록 새 조건(버스트·단절)은 쓸 때만 난수를 뽑는다.
@@ -603,6 +609,8 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         let _ = pm.ingest(profile);
         assert_eq!(pm.rx_dropped(), 0, "하네스에서 수신 큐가 넘쳤다(피어 {i})");
         outs[i].js = pm.jitter().stats();
+        let last = outs[i].js;
+        outs[i].sessions.push(last);
     }
     // 정지(엔진 ⑧ 후속): 워커는 표에 남은 피어를 리샘플러째 반환 큐로 보내고(할당·해제 0), 해제는 제어 평면의 `reclaim`이 한다.
     // 실행 중 제거된 피어는 이미 `reclaim`됐거나 아직 반환 큐에 있다 — 어느 쪽이든 워커가 해제한 것은 없다.

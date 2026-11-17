@@ -370,6 +370,42 @@ fn late_packets_discarded() {
     assert_eq!(jb.stats().late, before + 1);
 }
 
+/// #185 리뷰 L3: 재버퍼(언더런 200ms) 뒤 버퍼링 중에 직전에 재생한 패킷의 사본이 오면, 전에는 되감기 한도(back_limit) 안이라
+/// 시작점을 그 seq로 되감아 이미 재생한 소리를 다시 재생했다. 사본은 버리고 시작점·통계를 그대로 둔다.
+#[test]
+fn duplicate_after_rebuffer_does_not_rewind() {
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    let mut tx = Sender::new(CodecKind::Pcm16, 240, 10, 0);
+    let pkts: Vec<_> = (0..40).map(|_| tx.next()).collect();
+    let mut out = vec![0f32; 480];
+    let mut t = 0u64;
+    for (h, p) in pkts.iter().take(30) {
+        jb.insert(h, p, t);
+        jb.pop(&mut out);
+        jb.end_burst(t, t, 0.0);
+        t += 5000;
+    }
+    assert!(jb.is_playing());
+    // 패킷이 끊겨 언더런 은닉이 200ms를 넘으면 재버퍼링(시작점 = 다음에 올 seq)
+    while jb.stats().rebuffers == 0 {
+        jb.pop(&mut out);
+        jb.end_burst(t, t, 0.0);
+        t += 5000;
+        assert!(t < 2_000_000, "재버퍼링이 일어나지 않았다");
+    }
+    assert!(!jb.is_playing());
+    let (next, before) = (jb.next_seq, jb.stats());
+    assert_eq!(next, pkts[30].0.seq, "재버퍼링 뒤 시작점");
+    // 이미 재생한 29의 사본: 되감지 않고 아무것도 세지 않는다
+    jb.insert(&pkts[29].0, &pkts[29].1, t);
+    assert_eq!(jb.next_seq, next, "사본이 시작점을 되감았다");
+    assert!(!jb.slot_has(pkts[29].0.seq), "사본을 슬롯에 다시 넣었다");
+    assert_eq!(jb.stats().late, before.late);
+    // 진짜 다음 패킷은 그대로 받는다
+    jb.insert(&pkts[30].0, &pkts[30].1, t);
+    assert!(jb.slot_has(pkts[30].0.seq));
+}
+
 /// P1-6a: 손실된 k의 마감에 k+1이 아직 없으면 언더런 은닉 1프레임만 나가고, k+1이 도착하면 그 은닉을 k의 손실
 /// 은닉으로 재해석한다(손실 1건 = 은닉 1프레임, 깊이 증가 없음). k가 손실이 아니라 늦게 오면 언더런 은닉으로 남는다.
 #[test]

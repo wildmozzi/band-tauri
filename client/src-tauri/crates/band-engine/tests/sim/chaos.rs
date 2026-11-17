@@ -16,7 +16,7 @@
 //! cargo test -p band-engine --no-default-features --features test-support --test sim chaos_six_peers_10min -- --ignored --nocapture
 //! ```
 
-use super::tune::{median, run_multi, JitDist, MultiSim, NetPeer, PeerOut};
+use super::tune::{median, run_multi, JitDist, MultiOut, MultiSim, NetPeer, PeerOut};
 
 fn us(s: f64) -> u64 {
     (s * 1e6) as u64
@@ -110,6 +110,18 @@ fn chaos_reorder_storm() {
     assert_eq!(r.xruns, 0);
 }
 
+/// 사본이 있는 실행이 사본 없는 같은 회선(같은 시드 — 사본 난수는 따로 뽑으므로 손실·지터 실현이 같다, #185 리뷰 M1)과
+/// 지터 버퍼 상태가 같아야 한다. 사본은 원본보다 먼저 오지 않고 받은 seq의 사본은 아무것도 바꾸지 않으므로 정확히 같다.
+fn assert_same_line(label: &str, clean: &MultiOut, dupd: &MultiOut) {
+    let (c, d) = (&clean.peers[0], &dupd.peers[0]);
+    assert_eq!((c.tx_sent, c.tx_lost), (d.tx_sent, d.tx_lost), "{label}: 망 손실 실현이 다르다(사본 난수가 손실 난수열을 밀었다)");
+    let key = |p: &PeerOut| (p.js.late, p.js.concealed, p.js.concealed_loss, p.js.produced, p.js.late_dropped, p.js.rebuffers, p.js.samples_dropped, p.js.samples_inserted);
+    assert_eq!(key(c), key(d), "{label}: 사본이 지터 버퍼 통계를 바꿨다");
+    let bufs = |p: &PeerOut| p.trace.iter().map(|x| x.1.to_bits()).collect::<Vec<_>>();
+    assert!(bufs(c) == bufs(d), "{label}: 사본이 bufferMs 궤적을 바꿨다");
+    assert_eq!(dupd.xruns, 0);
+}
+
 /// 중복: 패킷 20%가 사본 하나를 원본 + U(0..20ms) 뒤에 더 받는다(경로 전환 유예 동안 릴레이·직접 둘 다 받기 등 — 오디오
 /// 패킷은 net에 재전송 창이 없어 사본이 지터 버퍼까지 간다). 사본은 소리를 바꾸지 않아야 하고, 지연·은닉이 중복 없는 같은
 /// 회선(같은 시드)과 같아야 한다.
@@ -138,9 +150,7 @@ fn chaos_duplicates_do_not_inflate() {
         jc.tail_ms,
         jd.tail_ms
     );
-    assert!((b.buf_med - a.buf_med).abs() <= 0.5, "중복이 지연을 바꿨다: {:.2} → {:.2}ms", a.buf_med, b.buf_med);
-    assert!(b.conceal_pct <= a.conceal_pct + 0.1, "중복이 은닉을 늘렸다: {:.2} → {:.2}%", a.conceal_pct, b.conceal_pct);
-    assert_eq!(dupd.xruns, 0);
+    assert_same_line("중복", &clean, &dupd);
 }
 
 /// 수백 ms 버스트 손실: 10s·20s·30s에 200·500·800ms 동안 아무것도 오지 않는다(손실 1% 회선). 공백은 은닉(또는 재버퍼링)으로
@@ -256,16 +266,18 @@ fn chaos_churn_rejoin() {
     line("재접속 중 고정 피어 0", &steady);
     for i in [1usize, 2] {
         let p = &r.peers[i];
-        let sess: Vec<_> = p.sessions.iter().chain(std::iter::once(&p.js)).collect();
+        let sess = &p.sessions;
         let silent = sess.iter().filter(|s| s.produced == 0).count();
         let conc: u64 = sess.iter().map(|s| s.concealed).sum();
         let prod: u64 = sess.iter().map(|s| s.produced).sum();
         println!("CHAOS 재접속 피어 {i}: 세션 {}, 재생 못 한 세션 {silent}, 은닉 {conc}/{prod} 프레임", sess.len());
         assert_eq!(silent, 0, "피어 {i}: 재생을 시작하지 못한 세션");
+        // 의도된 엄격함: 무손실·지터 1ms 회선은 세션마다 은닉 0이다. 지터 버퍼 튜닝(시작 여유·목표)을 바꾸는 PR은 재측정해 맞출 것.
         assert_eq!(conc, 0, "피어 {i}: 무손실 회선 세션에서 은닉");
     }
     assert_eq!(joins(1), 8);
     assert_eq!(joins(2), 20);
+    // 의도된 엄격함(피어 간 간섭은 0이어야 한다). 튜닝 변경 시 재측정.
     assert_eq!(steady.conceal_pct, 0.0, "다른 피어의 이탈·재접속이 고정 피어에 은닉을 만들었다");
     assert_eq!(r.xruns, 0);
 }
@@ -292,6 +304,7 @@ fn chaos_large_clock_drift() {
             r.xruns
         );
         assert!((last.buf_med - first.buf_med).abs() <= 1.0, "드리프트 {drift}: 지연 누적 {:.2} → {:.2}", first.buf_med, last.buf_med);
+        // 의도된 엄격함: 무손실 회선에서 드리프트 보정(≤ 0.25%)은 은닉을 만들지 않는다. 보정 규칙·튜닝 변경 시 재측정.
         assert!(last.conceal_pct == 0.0, "드리프트 {drift}: 은닉 {:.2}%", last.conceal_pct);
         assert_eq!(r.xruns, 0);
     }
@@ -348,7 +361,8 @@ fn run_six(seconds: f64) {
         let grow = if i == 4 { 15.0 } else { 2.0 };
         assert!(last.buf_med <= first.buf_med + grow, "#{i}: 지연 누적 {:.2} → {:.2}", first.buf_med, last.buf_med);
         // 지연 급변(#3)은 올라가는 계단에서 +130ms를 약 1초 쥔다(`chaos_delay_jump_20_150_20`) — 상한(80ms)을 넘는 유일한 경우.
-        let cap = if i == 3 { 140.0 } else { 80.5 };
+        // #3 실측 135.8ms(60s)/136.5ms(600s) — 계단 크기(130ms) + 목표 근처라 여유를 15ms 둔다(#185 리뷰 L4). 튜닝 변경 시 재측정.
+        let cap = if i == 3 { 150.0 } else { 80.5 };
         assert!(whole.buf_max <= cap, "#{i}: bufferMs 최대 {:.2}", whole.buf_max);
     }
     // 피어 0·1(손실 ≤ 1%, 사건 없음): GOAL 2절 은닉 ≤ 1.5%
@@ -387,7 +401,5 @@ fn chaos_stale_replays() {
     println!("CHAOS 오래된 사본: 사본 {}, 늦은 패킷 {} → {}, 늦은 패킷 예산 {:.2} → {:.2}ms", rep.peers[0].tx_dup, clean.peers[0].js.late, rep.peers[0].js.late, clean.peers[0].js.tail_ms, rep.peers[0].js.tail_ms);
     // 2초 = 800패킷(F 2.5ms) < 슬롯 1024: 사본으로 판별돼 늦은 패킷으로 세지 않는다. 슬롯 창보다 오래된 사본은 여전히 늦은 패킷이다
     // (net에 오디오 재전송 창을 두는 것은 백로그 후보).
-    assert_eq!(rep.peers[0].js.late, clean.peers[0].js.late, "오래된 사본을 늦은 패킷으로 셌다");
-    assert!((b.buf_med - a.buf_med).abs() <= 0.5, "오래된 사본이 지연을 바꿨다: {:.2} → {:.2}ms", a.buf_med, b.buf_med);
-    assert_eq!(rep.xruns, 0);
+    assert_same_line("오래된 사본", &clean, &rep);
 }
