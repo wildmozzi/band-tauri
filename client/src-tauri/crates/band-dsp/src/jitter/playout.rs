@@ -9,6 +9,8 @@ use super::{samples_per_ms, seq_diff, JitterBuffer, State, SLOT_COUNT};
 const STARVE_RESET_MS: f64 = 200.0;
 /// 재생 시작 직후 목표에 min(1프레임, 2.5ms)을 더해 두는 시간(µs).
 const START_PAD_US: u64 = 1_000_000;
+/// 재생 시작 페이드인 길이(샘플, 1ms). 재합류·버림 크로스페이드와 같다.
+const START_FADE: usize = 48;
 
 impl JitterBuffer {
     /// 은닉 없이(실제 받은 데이터로만) 지금 꺼낼 수 있는 프레임 수(최소 보장치). 콜백 구동 믹스에서 워커는
@@ -78,6 +80,12 @@ impl JitterBuffer {
         if self.produce_packet() {
             let cut = (excess.round().max(0.0) as usize).min(self.fifo.len() / 2);
             self.fifo.drain(..cut * 2);
+            // 재생 시작(처음·재버퍼·스트림 리셋 뒤): 직전 출력은 무음이므로 첫 샘플부터 신호면 계단(클릭)이 된다. 자른 뒤 남은
+            // 머리를 짧게 페이드인한다(P2-17d ①). 깊이·타이밍은 그대로다(샘플 값만 바뀜).
+            let l = START_FADE.min(self.fifo.len() / 2);
+            for (i, s) in self.fifo.iter_mut().take(l * 2).enumerate() {
+                *s *= (i / 2 + 1) as f32 / (l + 1) as f32;
+            }
         }
         let d = self.depth_now(now_us);
         self.depth.set_ewma(d);

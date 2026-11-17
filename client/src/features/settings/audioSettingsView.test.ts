@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  bufferFrameHint,
   formatTestDevice,
   formatTestLatency,
   inputChannelOptions,
@@ -68,5 +69,20 @@ describe('audioSettingsView', () => {
     expect(formatTestLatency(3.14159)).toBe('3.1ms')
     expect(formatTestLatency(undefined)).toBe('--')
     expect(formatTestDevice(48000, 128)).toBe('48kHz · 버퍼 128')
+  })
+})
+
+describe('bufferFrameHint (P2-17d ③)', () => {
+  it('2.5ms 프레임 + 버퍼 64 초과면 64 권장 안내', () => {
+    const h = bufferFrameHint({ bufferSize: 128, frameMs: 2.5 })
+    expect(h).toContain('64')
+    expect(h).toContain('2.7ms')
+    expect(bufferFrameHint({ bufferSize: 256, frameMs: 2.5 })).toContain('5.3ms')
+  })
+  it('버퍼 64 이하이거나 2.5ms 프레임이 아니면 안내 없음', () => {
+    expect(bufferFrameHint({ bufferSize: 64, frameMs: 2.5 })).toBeNull()
+    expect(bufferFrameHint({ bufferSize: 32, frameMs: 2.5 })).toBeNull()
+    expect(bufferFrameHint({ bufferSize: 128, frameMs: 5 })).toBeNull()
+    expect(bufferFrameHint({ bufferSize: 512, frameMs: 10 })).toBeNull()
   })
 })

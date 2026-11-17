@@ -61,3 +61,14 @@ export function formatTestLatency(ms: number | undefined): string {
 export function formatTestDevice(sampleRate: number, deviceBuffer: number): string {
   return `${sampleRate / 1000}kHz · 버퍼 ${deviceBuffer}`
 }
+
+/**
+ * 장치 버퍼·네트워크 프레임 조합 안내(P2-17d ③). 2.5ms 프레임은 장치 버퍼 64 이하에서 효과가 크다: 내 입력 콜백이 버퍼 단위로
+ * 프레임을 몰아 보내므로, 버퍼가 프레임(120샘플)보다 크면 상대 쪽 지터 버퍼가 그 몰림(≈ 버퍼 길이)만큼 더 기다린다
+ * (시뮬레이션: 망 지터 0에서도 입력 128 → 지터 추정 약 2.7ms, 64 → 1.5ms). 안내만 하고 값은 바꾸지 않는다.
+ */
+export function bufferFrameHint(config: Pick<EngineConfig, 'bufferSize' | 'frameMs'>): string | null {
+  if (config.frameMs !== 2.5 || config.bufferSize <= 64) return null
+  const ms = ((config.bufferSize * 1000) / 48_000).toFixed(1)
+  return `2.5ms 프레임은 장치 버퍼 64 이하에서 효과가 큽니다. 버퍼 ${config.bufferSize}이면 패킷이 ${ms}ms 단위로 몰려 나가 상대 쪽 지터 버퍼가 그만큼 더 기다리므로, 지연을 줄이려면 버퍼를 64로 낮추세요(끊기면 다시 올리세요).`
+}

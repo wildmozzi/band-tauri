@@ -1281,8 +1281,8 @@ struct SeamPlan {
     min_ms: f32,
 }
 
-/// 계획대로 1.5초 보내고 받으며(기본 망 지연 1ms) 0.2초 뒤부터의 출력에서 채널별 샘플 간 최대 계단과 통계를 낸다.
-fn seam_run(plan: SeamPlan) -> (f32, JitterStats) {
+/// 계획대로 1.5초 보내고 받으며(기본 망 지연 1ms) `from_us` 뒤부터의 출력에서 채널별 샘플 간 최대 계단과 통계를 낸다.
+fn seam_run(plan: SeamPlan, from_us: u64) -> (f32, JitterStats) {
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: plan.min_ms, max_ms: 80.0, profile: 0.5 });
     let (f0, st0) = (plan.shape)(0);
     let mut tx = Sender::new(plan.codec, f0, 0, 0);
@@ -1312,7 +1312,7 @@ fn seam_run(plan: SeamPlan) -> (f32, JitterStats) {
         }
         jb.pop(&mut out);
         jb.end_burst(t, t, 0.0);
-        if t >= 200_000 {
+        if t >= from_us {
             l.extend(out.iter().step_by(2).copied());
             r.extend(out.iter().skip(1).step_by(2).copied());
         }
@@ -1348,7 +1348,7 @@ fn pcm_concealment_has_no_click_at_start_or_rejoin() {
         ("Opus F240 손실 1(대조군)", SeamPlan { codec: CodecKind::Opus, shape: |_| (240, false), lost: |k| k == 200, delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
     ];
     for (name, plan) in cases {
-        let (max_step, st) = seam_run(plan);
+        let (max_step, st) = seam_run(plan, 200_000);
         assert!(st.concealed >= 1, "{name}: 은닉이 일어나야 함");
         assert_eq!(st.rebuffers, 0, "{name}: 재버퍼 없음");
         assert!(max_step <= 2.0 * normal, "{name}: 최대 계단 {max_step:.4} > 2 × 정상 {normal:.4}(클릭), 통계 {st:?}");
@@ -1384,4 +1384,27 @@ fn pcm_rejoin_crossfade_does_not_survive_stream_reset() {
         c.frame_out(120)[0]
     };
     assert_eq!(decode_after(true), fresh, "리셋 뒤 첫 패킷은 새 스트림과 같아야 함");
+}
+
+/// 재생 시작 계단(P2-17d ①): 버퍼링 중 무음 → 첫 패킷이 바로 신호로 뛰지 않게 시작 머리를 1ms 페이드인한다. 처음 시작과
+/// 긴 단절 뒤 재버퍼(리셋) 시작 둘 다. 전에는 첫 샘플에서 최대 진폭 0.5 가까이(정상 계단의 2~8배) 뛰었다.
+#[test]
+fn playback_start_fades_in_from_silence() {
+    let normal = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0 * 0.5;
+    let no_delay = |_: usize| 0u64;
+    let pcm = CodecKind::Pcm16;
+    let cases: [(&str, SeamPlan); 4] = [
+        ("처음 시작 F120", SeamPlan { codec: pcm, shape: |_| (120, false), lost: |_| false, delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        ("처음 시작 F240 스테레오", SeamPlan { codec: pcm, shape: |_| (240, true), lost: |_| false, delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        // 송신 200~299번(250ms) 단절 → 언더런 200ms 넘어 재버퍼 → 다시 시작.
+        ("단절 뒤 재버퍼 F120", SeamPlan { codec: pcm, shape: |_| (120, false), lost: |k| (200..300).contains(&k), delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        ("처음 시작 Opus F240", SeamPlan { codec: CodecKind::Opus, shape: |_| (240, false), lost: |_| false, delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+    ];
+    for (name, plan) in cases {
+        let (max_step, st) = seam_run(plan, 0);
+        if name.contains("재버퍼") {
+            assert!(st.rebuffers >= 1, "{name}: 재버퍼가 일어나야 함 {st:?}");
+        }
+        assert!(max_step <= 2.0 * normal, "{name}: 최대 계단 {max_step:.4} > 2 × 정상 {normal:.4}(시작 클릭)");
+    }
 }

@@ -6,8 +6,10 @@ use std::collections::VecDeque;
 
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
 
-/// 리샘플러 입력 청크(프레임). 작을수록 지연이 짧다(48 = 1ms@48k).
-pub const CHUNK: usize = 48;
+/// 리샘플러 입력 청크(프레임). 청크가 찰 때까지 입력이 묵으므로(0 ~ 청크−1 프레임) 작을수록 지연이 짧다. 16(0.33ms@48k):
+/// 48(1ms)보다 44.1k 장치 종단 지연이 약 0.5ms 짧고(버퍼 128·2.5ms, 가짜 장치 A/B 3회) CPU 차이는 0.01%p 안이다(P2-17d ②).
+/// 워커 출력 청크(`OUT_CHUNK` 64)·흔한 장치 버퍼(64·128·256)의 약수라 그 경로에서는 묵는 프레임이 0이다.
+pub const CHUNK: usize = 16;
 
 pub struct StreamResampler {
     channels: usize,
