@@ -112,6 +112,9 @@ jobs:
               - 'client/!(src-tauri)/**'
               # src/app/tauriCsp.test.ts가 읽는다
               - 'client/src-tauri/tauri.conf.json'
+              # 루트 scripts/*.test.mjs(버전 올리기·CPU 비교 통계, P1-21b)는 client 잡에서 돈다. cpu-compare 시험이 원자료 CSV를 읽는다.
+              - 'scripts/**'
+              - 'docs/overhaul/cpu-quiet-2026-11-17-runs.csv'
               - 'server/src/lib/**'
               - 'package.json'
               - 'package-lock.json'
@@ -505,6 +508,9 @@ jobs:
         timeout-minutes: 5
         run: npm run lint
         working-directory: client
+      - name: Repo scripts tests (scripts/*.test.mjs)
+        timeout-minutes: 3
+        run: node --test scripts/*.test.mjs
 
   e2e:
     # 웹(비 Tauri) E2E: Playwright + chromium. Supabase(Auth/REST/Realtime)·서버 API·시그널링 WS·토스 SDK는

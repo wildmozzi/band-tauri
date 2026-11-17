@@ -464,7 +464,7 @@ fn echo_round_trip_reflects_proxy_delay() {
     };
     let near = measure(5);
     let far = measure(25);
-    for r in [&near, &far] {
+    for (r, one_way_ms) in [(&near, 5.0f64), (&far, 25.0)] {
         eprintln!(
             "에코: 왕복 {:?} 편도 {:?} 핑 {:?} 지터 {} 상대 {:.3} 잔차 {:?} 입→귀 {:?} {:?}",
             r.round_trip_ms, r.one_way_ms, r.network_rtt_ms, r.jitter_buffer_ms, r.peer_echo_delay_ms, r.residual_ms, r.mouth_to_ear_ms, r.runs
@@ -478,7 +478,18 @@ fn echo_round_trip_reflects_proxy_delay() {
         // 잔차에는 클릭이 놓인 입력 버스트 위상(≤ 입력 버퍼)과 지터 버퍼 평균·순간값 차이가 남는다.
         // 잔차 = 왕복 − (프레임 + 핑 RTT + 상대 처리 + 지터 버퍼 평균). 클릭이 놓인 입력 버스트 위상(≤ 입력 버퍼)과
         // 지터 버퍼 순간값·평균 차이가 남는다.
-        assert!(r.residual_ms.unwrap().abs() < 5.0, "{r:?}");
+        //
+        // 핑 RTT 상한(P1-21b, #204 리뷰 L1): 왕복은 클릭 6회의 중앙값이지만 핑 RTT는 Ping/Pong 몇 개의 지수 평균(α 0.5,
+        // `net/peer/conn.rs`)이라 CPU 포화에서 일반 우선순위 프록시 스레드가 Ping 하나만 늦춰도 RTT만 부푼다. 로컬 부하(바쁜
+        // 스레드 14): 왕복 22~23 / 62~64ms는 그대로인데 핑이 24~30 / 58~68ms(평소 11.5~12.3 / 51.5~52.0)로 잔차 −5 ~ −17ms,
+        // 다시 재도 부하가 이어지면 그대로였다(6회 중 3회 실패). 이 시험은 진짜 망 RTT를 안다(프록시 편도 × 2). 그래서 잔차를 볼 때
+        // 핑 RTT를 "프록시 RTT + 3ms"(평소 오버헤드 1.5~2.3ms — 로컬·CI 측정 — 에 여유)로 자른다. 핑이 부풀지 않으면 값은 그대로이고,
+        // 양의 잔차(오디오 경로가 예산보다 느림 = 회귀 신호)나 핑이 정상인데 음인 잔차는 여전히 실패한다. 엔진이 보고하는
+        // `residual_ms` 자체는 바꾸지 않는다(앱 화면 값).
+        let rtt = r.network_rtt_ms.unwrap() as f64;
+        let rtt_cap = 2.0 * one_way_ms + 3.0;
+        let residual = r.residual_ms.unwrap() + (rtt - rtt_cap).max(0.0);
+        assert!(residual.abs() < 5.0, "잔차 {residual:.2}ms(보고 {:?}, 핑 {rtt:.2} → 상한 {rtt_cap}): {r:?}", r.residual_ms);
     }
     // 프록시 편도 지연 20ms 차이 → 왕복 40ms + 두 측정의 지터 버퍼 평균 차, 편도 추정은 그 절반.
     // 왕복에는 지터 버퍼가 들어 있고, 지터 버퍼는 러너 스케줄링 지터를 따라 측정마다 다르다(P2-17f: CI 1회 3연속 실패 —

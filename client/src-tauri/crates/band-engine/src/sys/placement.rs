@@ -106,6 +106,29 @@ pub fn set_high_qos(enabled: bool) {
     HIGH_QOS.store(enabled, Ordering::Relaxed);
 }
 
+/// LP-E를 뺀 논리 프로세서(P+E)의 친화성 마스크(그룹 0). 그룹이 둘 이상이거나 표가 비면 None.
+/// 하이브리드가 아니면 전부(= 고정해도 바뀌는 것 없음).
+pub(crate) fn mask_without_lpe(cpus: &[CpuSetEntry]) -> Option<u64> {
+    if cpus.is_empty() || cpus.iter().any(|c| c.group != 0 || c.number >= 64) {
+        return None;
+    }
+    let mask = cpus.iter().zip(classify(cpus)).filter(|(_, k)| *k != CoreKind::LowPowerEfficiency).fold(0u64, |m, (c, _)| m | 1 << c.number);
+    (mask != 0).then_some(mask)
+}
+
+/// 측정 도구용 코어 고정(P1-21b, ADR D6): 이 프로세스(이후 만드는 스레드 포함)를 친화성 마스크 `mask`(그룹 0)에 묶는다.
+/// `None`이면 LP-E를 뺀 P+E(`mask_without_lpe`) — `cpu-quiet-2026-11-17.md`의 `start /affinity FFF`(225H)를 기계마다 자동으로.
+/// 반환: 적용한 마스크. 제품 빌드에는 없다(측정 빌드 `test-support`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_process(mask: Option<u64>) -> Result<u64, String> {
+    let mask = match mask {
+        Some(m) => m,
+        None => mask_without_lpe(&os::cpu_sets()).ok_or("코어 표를 만들 수 없다(비Windows·프로세서 그룹 둘 이상)")?,
+    };
+    os::set_process_affinity(mask)?;
+    Ok(mask)
+}
+
 /// 지금 스레드에 HighQoS 옵션을 적용한다(옵션이 꺼져 있으면 아무것도 안 함). 스레드 시작 때 한 번, 루프 앞에서. 반환: 적용했는가.
 pub(crate) fn apply_thread_qos() -> bool {
     if !HIGH_QOS.load(Ordering::Relaxed) {
@@ -255,6 +278,18 @@ mod os {
         unsafe { SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, std::ptr::addr_of!(st).cast(), std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32) != 0 }
     }
 
+    /// 프로세스 친화성 마스크(측정 도구용 코어 고정).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn set_process_affinity(mask: u64) -> Result<(), String> {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessAffinityMask};
+        // SAFETY: 현재 프로세스 의사 핸들과 마스크 값 하나.
+        if unsafe { SetProcessAffinityMask(GetCurrentProcess(), mask as usize) } != 0 {
+            Ok(())
+        } else {
+            Err(format!("SetProcessAffinityMask(0x{mask:X}) 실패: {}", std::io::Error::last_os_error()))
+        }
+    }
+
     /// 지금 스레드가 도는 논리 프로세서(그룹, 번호). 사용자 모드 읽기(시스템콜·할당 없음).
     #[inline]
     pub(super) fn current_processor() -> Option<(u16, u8)> {
@@ -275,6 +310,11 @@ mod os {
 
     pub(super) fn disable_power_throttling() -> bool {
         false
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn set_process_affinity(_mask: u64) -> Result<(), String> {
+        Err("코어 고정은 Windows만 지원한다(taskset 등을 쓸 것)".into())
     }
 
     #[inline]
@@ -308,6 +348,18 @@ mod tests {
         use CoreKind::*;
         let want = [Performance, Performance, Efficiency, Efficiency, Efficiency, Efficiency, Efficiency, Efficiency, Efficiency, Efficiency, Performance, Performance, LowPowerEfficiency, LowPowerEfficiency];
         assert_eq!(k, want);
+    }
+
+    /// 코어 고정 마스크(P1-21b): 225H는 LP-E 12·13을 뺀 0xFFF(`cpu-quiet-2026-11-17.md`의 `start /affinity FFF`와 같다).
+    #[test]
+    fn affinity_mask_excludes_lpe() {
+        assert_eq!(mask_without_lpe(&core_ultra_225h()), Some(0xFFF));
+        let sym: Vec<_> = (0..8u8).map(|n| e(n, 0, 0)).collect();
+        assert_eq!(mask_without_lpe(&sym), Some(0xFF), "하이브리드 아님 → 전부");
+        assert_eq!(mask_without_lpe(&[]), None);
+        let mut two_groups = sym.clone();
+        two_groups[7].group = 1;
+        assert_eq!(mask_without_lpe(&two_groups), None, "그룹 둘 이상은 마스크로 고정 불가");
     }
 
     #[test]
