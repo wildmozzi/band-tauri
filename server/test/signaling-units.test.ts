@@ -23,6 +23,7 @@ import { createNativeSession } from '../src/signaling/nativeSession'
 import { admitToRoom, handleLeave, type MembershipSvc } from '../src/signaling/membership'
 import type { Ctx } from '../src/signaling/ctx'
 import { createResume } from '../src/signaling/resume'
+import { rejectReason } from '../src/signaling/protocol'
 import { sleep } from './helpers'
 
 const OPEN = 1
@@ -589,5 +590,17 @@ describe('state ownership (S4-3)', () => {
         assert.ok(typeof value === 'function', `${name}.${key} must be a function, not shared state`)
       }
     }
+  })
+})
+
+describe('rejectReason (P2-11)', () => {
+  const FALLBACK = '기본 문구'
+  it('reject-perform·reject-instrument-change 공통 규칙: trim, 200자, 빈 사유는 기본 문구', () => {
+    assert.equal(rejectReason(undefined, FALLBACK), FALLBACK)
+    assert.equal(rejectReason(42, FALLBACK), FALLBACK)
+    assert.equal(rejectReason('', FALLBACK), FALLBACK)
+    assert.equal(rejectReason('   ', FALLBACK), FALLBACK)
+    assert.equal(rejectReason('  다음 곡에  ', FALLBACK), '다음 곡에')
+    assert.equal(rejectReason(' ' + 'a'.repeat(300), FALLBACK), 'a'.repeat(200))
   })
 })
