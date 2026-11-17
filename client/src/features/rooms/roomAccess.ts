@@ -32,7 +32,8 @@ export function validateRoomPasswordInput(raw: string): string | null {
   return null
 }
 
-export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited' | 'password-busy' | 'room-full'
+/** room-not-found: 방이 없다 — 보고 있던 방이 종료(삭제)된 뒤 재연결하면 받는다(서버 membership checkRoom) */
+export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited' | 'password-busy' | 'room-full' | 'room-not-found'
 
 export interface JoinError {
   code: JoinErrorCode
@@ -53,11 +54,11 @@ export interface JoinError {
  * room-full은 항상, 재연결 중 거부는 자동 재시도하는 password-busy 말고 모두.
  */
 export function joinErrorStopsSession(e: JoinError, rejoining: boolean): boolean {
-  if (e.code === 'room-full') return true
+  if (e.code === 'room-full' || e.code === 'room-not-found') return true
   return rejoining && e.code !== 'password-busy'
 }
 
-const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited', 'password-busy', 'room-full'])
+const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited', 'password-busy', 'room-full', 'room-not-found'])
 
 /** 서버 error 메시지 중 입장(비밀번호·정원) 관련이면 JoinError로 */
 export function joinErrorFromSignal(p: { type: string; [k: string]: unknown }): JoinError | null {
@@ -89,6 +90,8 @@ export function describeJoinError(e: JoinError): string {
         ? `비밀번호를 너무 많이 틀렸습니다. 약 ${min}분 뒤에 다시 시도하세요.`
         : '비밀번호를 너무 많이 틀렸습니다. 잠시 후 다시 시도하세요.'
     }
+    case 'room-not-found':
+      return '합주실이 종료되었거나 찾을 수 없습니다.'
     case 'room-full': {
       const lost = e.afterReconnect ? '연결이 끊긴 사이 자리를 잃었습니다. ' : ''
       if (e.reason === 'anonymous-limit') {
