@@ -28,7 +28,10 @@ export function Community() {
     posts,
     popularPosts,
     loading,
+    loadError,
+    retry,
     trendingTags,
+    trendingError,
     handleLike,
     handleTagClick,
   } = useCommunityFeed()
@@ -248,6 +251,11 @@ export function Community() {
                 <div style={{ padding: 'var(--space-10)', textAlign: 'center', color: 'var(--white-a50)' }}>
                   로딩 중...
                 </div>
+              ) : loadError ? (
+                <div role="alert" style={{ padding: 'var(--space-10)', textAlign: 'center', color: 'var(--white-a50)' }}>
+                  게시물을 불러오지 못했습니다. 인터넷 연결을 확인하고 다시 시도해주세요.{' '}
+                  <button type="button" className="btn-secondary" onClick={retry}>다시 시도</button>
+                </div>
               ) : posts.length === 0 ? (
                 <div style={{ padding: 'var(--space-10)', textAlign: 'center', color: 'var(--white-a50)' }}>
                   {selectedTag
@@ -367,7 +375,9 @@ export function Community() {
           >
             <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: 'var(--space-3)' }}>트렌딩 태그</h3>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-              {trendingTags.length === 0 ? (
+              {trendingError && trendingTags.length === 0 ? (
+                <p style={{ color: 'var(--white-a50)', fontSize: '14px' }}>태그를 불러오지 못했습니다.</p>
+              ) : trendingTags.length === 0 ? (
                 <p style={{ color: 'var(--white-a50)', fontSize: '14px' }}>첫 게시물을 남겨주세요.</p>
               ) : (
                 trendingTags.map(({ tag, count }) => (

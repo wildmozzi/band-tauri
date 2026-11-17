@@ -53,7 +53,10 @@ export async function setRoomPassword(roomId: string, password: string | null): 
   return hasPassword
 }
 
-/** id로 방 하나 조회 (비공개 방 포함). 없으면 null. 마이그레이션 008 전이면 일반 select로 폴백 */
+/** PostgREST: uuid 형식이 아닌 id(잘린 초대 링크·오타) — 일시 오류가 아니라 "그런 방 없음"이다 (#197 리뷰 L-1) */
+export const INVALID_UUID_CODE = '22P02'
+
+/** id로 방 하나 조회 (비공개 방 포함). 없으면(형식이 틀린 id 포함) null. 마이그레이션 008 전이면 일반 select로 폴백 */
 export async function fetchRoomById(roomId: string): Promise<RoomRecord | null> {
   if (!supabase) return null
   const rpc = await supabase.rpc('get_room', { p_room_id: roomId })
@@ -61,7 +64,9 @@ export async function fetchRoomById(roomId: string): Promise<RoomRecord | null> 
     const rows = (rpc.data ?? []) as RoomRecord[]
     return rows[0] ?? null
   }
+  if (rpc.error.code === INVALID_UUID_CODE) return null
   const { data, error } = await supabase.from('rooms').select('*').eq('id', roomId).maybeSingle()
+  if (error?.code === INVALID_UUID_CODE) return null
   if (error) throw error
   return (data as RoomRecord | null) ?? null
 }
