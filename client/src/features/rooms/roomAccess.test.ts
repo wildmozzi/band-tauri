@@ -83,6 +83,14 @@ describe('joinErrorFromSignal / describeJoinError', () => {
     expect(joinErrorStopsSession(e('password-required'), false)).toBe(false)
     expect(joinErrorStopsSession(e('password-busy'), true)).toBe(false)
   })
+  it('방이 없음(room-not-found — 보던 방이 종료된 뒤 재입장)을 입장 오류로 보고 세션을 멈춘다', () => {
+    // 서버(membership checkRoom)는 roomId 없이 보낸다
+    const e = joinErrorFromSignal({ type: 'error', code: 'room-not-found', message: '방을 찾을 수 없습니다.' })
+    expect(e).toMatchObject({ code: 'room-not-found', roomId: null })
+    expect(describeJoinError(e!)).toContain('종료')
+    expect(joinErrorStopsSession(e!, false)).toBe(true)
+    expect(joinErrorStopsSession(e!, true)).toBe(true)
+  })
   it('남은 시도 횟수와 대기 시간을 보여준다', () => {
     expect(describeJoinError({ code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null })).toContain('2회')
     expect(describeJoinError({ code: 'password-rate-limited', roomId: ID, remainingAttempts: null, retryAfterMs: 125_000 })).toContain('3분')
