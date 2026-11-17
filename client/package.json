@@ -19,7 +19,7 @@
     "e2e:styles": "npm run e2e:build && playwright test -c e2e/tools/style-snapshot.config.ts"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.81.1",
+    "@supabase/supabase-js": "2.87.3",
     "@tanstack/react-query": "^5.107.1",
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-process": "^2.4.0",

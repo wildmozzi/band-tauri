@@ -169,7 +169,7 @@ client/src/
 
 - **공개 API는 `index.ts` 하나.** 다른 기능·app이 쓰는 것만 다시 내보낸다(화면 컴포넌트, Provider, 훅, 다른 기능이 쓰는 타입·순수 함수). 내부 전용은 내보내지 않는다.
 - **평평하게 시작한다.** 파일이 15~20개를 넘으면 `components/`·`hooks/`·`state/`로 나눈다(지금은 `room`만). 한 곳에서만 쓰는 래퍼·팩토리·추상 계층을 만들지 않는다.
-- **서버 호출은 기능 안에.** HTTP/Supabase 호출 모듈(`roomApi`, `communityApi`, `paymentApi` …)과 그 query 훅(`queries.ts`)은 그 기능 폴더에 둔다. 모든 기능이 쓰는 클라이언트(`supabaseClient`, `apiUrl`, `authHeaders`)만 shared.
+- **서버 호출은 기능 안에.** HTTP/Supabase 호출 모듈(`roomApi`, `communityApi`, `paymentApi` …)과 그 query 훅(`queries.ts`)은 그 기능 폴더에 둔다. 모든 기능이 쓰는 클라이언트(`supabaseClient`, `apiUrl`, `authHeaders`)만 shared. 클라이언트는 Supabase의 auth·postgrest·realtime만 쓴다 — storage·functions는 빌드에서 빈 구현으로 바꿔 첫 묶음에서 뺐다(`client/vite/supabaseSlim.ts`; 쓰면 바로 오류, 파일 업로드는 서버 서명 URL). 쓰게 되면 그 경로만 원래 패키지를 동적 import하고 별칭을 정리한다.
 - **CSS는 그 화면 옆에.** 디자인 토큰(`shared/ui/tokens.css`)과 전역 스타일(`app/App.css`, `app/index.css`)만 밖에 둔다. 지금 앱은 모든 화면을 즉시 import하므로 CSS가 한 번들로 합쳐지고, **파일 사이 우선순위는 import 순서(모듈 방문 순서)를 따른다.** 같은 선택자를 두 파일에서 정의하지 말 것(③ 후속 정리 대상).
 
 ## 6. 경계 규칙과 강제

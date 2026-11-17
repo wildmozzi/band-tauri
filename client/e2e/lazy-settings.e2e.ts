@@ -27,6 +27,8 @@ test('"지연 측정 열기" 이벤트는 모달을 처음 열 때(지연 로딩
   await installFakeTauri(page, { engine_list_devices: [] })
   await page.setViewportSize({ width: 1280, height: 600 })
   await page.goto('/rooms')
+  // 데스크톱 앱은 엔진 런타임을 받은 뒤 그린다(#216) — 내비게이션(이벤트를 듣는 곳)이 그려진 뒤에 보낸다
+  await expect(page.getByRole('button', { name: '오디오 설정' })).toBeVisible()
   await page.evaluate(() => window.dispatchEvent(new Event('band:open-latency-measure')))
   const section = page.locator('#latency-measure')
   await expect(section).toBeAttached()
