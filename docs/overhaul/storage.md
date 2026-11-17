@@ -9,6 +9,7 @@ Supabase 무료 한도(Storage 1GB, Egress 5GB/월)를 넘기 전에 env 전환�
 |---|---|---|---|
 | `audio-stems` | 음원분리 스템 (`${userId}/${separationId}/${stem}.ogg\|wav`) | 같은 이름 버킷 | `S3_BUCKET` 안 `audio-stems/` 접두사 |
 | `post-images` | 게시글 이미지 (`${userId}/${ms}-${uuid}.${ext}`) | 같은 이름 버킷 | `S3_BUCKET` 안 `post-images/` 접두사 |
+| `avatars` | 프로필 사진 (P2-12, key 형식은 게시글 이미지와 같음) | 같은 이름 버킷 (migrations 014) | `S3_BUCKET` 안 `avatars/` 접두사 |
 
 - 서버 코드: `server/src/storage/` — `StorageAdapter`(put/get/head/서명 GET·PUT URL/publicUrl/delete/list), `SupabaseStorageAdapter`(기본), `S3Adapter`(`@aws-sdk/client-s3`).
 - 드라이버 선택: `STORAGE_DRIVER=supabase|s3` (설정이 틀리면 서버가 기동 시 실패한다. Supabase로 조용히 떨어지지 않는다). env 목록은 `server/.env.example`.
@@ -49,6 +50,19 @@ Supabase 무료 한도(Storage 1GB, Egress 5GB/월)를 넘기 전에 env 전환�
   - 지우기 직전 key마다 그 key를 가리킬 수 있는 URL 형태(현재 조회 URL, API 라우트, Supabase 공개 URL)로 게시글을 다시 확인한다. 확인이 실패한 key는 남긴다.
 - 미검증(pending) 업로드 정리: 매시 15분, 업로드된 지 3시간(서명 업로드 유효기간 2h보다 길게)이 지난 `pending/` 객체를 지운다. 게시글에 붙일 수 없는 임시 객체라 항상 켜져 있다.
 - **한계 (M3)**: `posts`는 클라이언트가 Supabase에 직접 쓰므로, 악의적 클라이언트는 `/resolve`를 건너뛰고 pending의 Supabase 공개 URL을 저장할 수 있다. 그 객체는 3시간 안에 지워진다. 완전히 막으려면 게시글 쓰기를 서버로 옮기거나 `posts.images` 검사 트리거(운영 DB 변경, 사람 승인)가 필요하다. 그 전까지는 아래 버킷 제한이 실제 방어선이다.
+
+### 프로필 사진 (P2-12)
+
+예전 클라이언트는 사진을 base64로 auth `user_metadata.profile_photo`에 넣었다 → JWT가 커져 모든 API·WS 인증이 무거워지고, 서버 토큰 상한(8KB, `getBearerToken`)을 넘으면 인증이 거부됐다.
+이제 업로드 절차는 게시글 이미지와 같다(pending → `/complete` 검증 → 최종 경로). 다른 점:
+
+1. `POST /api/storage/avatars/upload-url` (인증, `{contentType, size}`): jpg/png/webp, **2MB**. 사용자별 24시간 20회.
+2. `POST /api/storage/avatars/complete {key}`: 검증을 통과하면 서버가 service_role로 `user_metadata.profile_photo_url`(조회 URL)을 쓰고 예전 `profile_photo`(base64) 키를 지운다. 이어서 그 사용자 폴더의 예전 사진을 지운다. 클라이언트는 `refreshSession()`으로 새 토큰을 받는다.
+3. `DELETE /api/storage/avatars`: 사진 지우기(metadata 비움 + 파일 삭제). 지금 화면에는 버튼이 없다.
+4. `GET /api/storage/avatars/<key>`: 공개 URL이 없을 때 서명 GET으로 302.
+5. 읽기: 클라이언트는 `profile_photo_url`(http/https)만 표시하고 예전 base64는 무시한다(기본 아바타). 남은 base64는 migrations 014로 지운다([사람]).
+6. pending 정리는 게시글 이미지와 같은 규칙(매시 20분, 3시간 지난 미검증 업로드). 참조되지 않는 최종 사진은 그 사용자의 다음 업로드·삭제 때 지운다.
+7. 운영 준비([사람], migrations README 014): supabase 드라이버면 `avatars` 공개 버킷(2MB, jpeg/png/webp, 클라이언트 쓰기 정책 없음), s3 드라이버면 버킷 CORS가 `avatars/`에도 적용되는지 확인.
 
 ## R2로 옮기는 순서 ([사람])
 

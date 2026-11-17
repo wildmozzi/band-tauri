@@ -228,6 +228,20 @@ UPDATE public.posts p
  WHERE u.id = p.author_id AND p.author_name = split_part(u.email, '@', 1);
 ```
 
+## 🖼️ 014: 프로필 사진 버킷 + 예전 base64 사진 정리 (P2-12)
+
+`014_avatars_bucket.sql` — **운영 실행은 사람 승인 후**. 한 트랜잭션, 재실행 안전.
+프로필 사진을 base64로 auth `user_metadata.profile_photo`에 넣던 방식을 없앤다(사진이 JWT에 실려 요청·WS 인증이 무겁고, 서버 토큰 상한 8KB를 넘으면 인증 실패).
+이제 사진은 `avatars` 버킷에 서버 서명 URL로 올리고, 서버가 `user_metadata.profile_photo_url`에 URL만 쓴다(`/api/storage/avatars`, docs/overhaul/storage.md).
+
+1. [ ] 서버 배포 (`/api/storage/avatars` — 버킷이 없으면 업로드 URL 발급이 500으로 실패할 뿐 다른 기능엔 영향 없음)
+2. [ ] **supabase 드라이버일 때** 014 실행 → `avatars` 버킷(공개 읽기, 2MB, jpeg/png/webp). **쓰기 정책(INSERT/UPDATE)은 만들지 않는다** — 서명 PUT은 정책 없이 동작하고, 정책이 있으면 서버 검증을 건너뛴 업로드가 생긴다.
+   s3 드라이버(R2 등)면 버킷 생성 부분은 필요 없다(`S3_BUCKET` 안 `avatars/` 접두사). 대신 버킷 CORS(PUT·GET, content-type)가 `avatars/`에도 적용되는지 확인한다.
+   014 뒷부분(base64 정리 UPDATE)은 드라이버와 무관하게 필요하다.
+3. [ ] 확인: 파일 끝 확인 쿼리 — 버킷 1행, data: 사진 0행, avatars 쓰기 정책 없음
+4. [ ] 새 클라이언트 배포. 예전 클라이언트는 여전히 base64를 metadata에 쓸 수 있다(새 클라이언트는 읽지 않음) → 예전 앱이 사라질 때까지 014의 UPDATE 부분은 다시 실행해도 된다
+5. [ ] 실기기 확인: 프로필 화면에서 사진 변경 → 내비게이션 아이콘 표시, 다시 로그인해도 유지, 개발자 도구에서 access token 길이가 수 KB 이하
+
 ## 🔄 롤백 (필요시)
 
 마이그레이션을 되돌려야 하는 경우:

@@ -10,7 +10,10 @@ const auth = vi.hoisted(() => ({
   saveProfile: vi.fn<(v: unknown) => Promise<void>>(async () => undefined),
   syncMetadata: vi.fn(),
   updateMetadata: vi.fn<(v: unknown) => Promise<void>>(async () => undefined),
+  refreshSession: vi.fn<() => Promise<void>>(async () => undefined),
 }))
+const avatar = vi.hoisted(() => ({ upload: vi.fn<(f: File) => Promise<string>>(async () => 'https://api.example/api/storage/avatars/u1/1-x.webp') }))
+vi.mock('./avatarApi', async (orig) => ({ ...(await orig<typeof import('./avatarApi')>()), uploadAvatar: avatar.upload }))
 vi.mock('../auth', () => ({
   useProfileNicknameQuery: (userId: string | undefined, enabled: boolean) => {
     auth.nicknameQuery(userId, enabled)
@@ -18,6 +21,7 @@ vi.mock('../auth', () => ({
   },
   useSaveProfileMutation: () => ({ isPending: false, mutateAsync: auth.saveProfile }),
   useUpdateUserMetadataMutation: () => ({ mutate: auth.syncMetadata, mutateAsync: auth.updateMetadata }),
+  profileApi: { refreshSession: auth.refreshSession },
 }))
 vi.mock('../../shared/lib/supabaseClient', () => ({ isSupabaseConfigured: () => true }))
 
@@ -76,5 +80,34 @@ describe('useProfileForm', () => {
     // 저장한 닉네임이 새 기준: 취소해도 유지
     act(() => result.current.handleCancel())
     expect(result.current.nickname).toBe('새닉')
+  })
+
+  const pick = (file: File) => ({ target: { files: [file], value: 'C:/fake/' + file.name } }) as unknown as React.ChangeEvent<HTMLInputElement>
+
+  it('사진 변경: Storage 업로드 후 서버가 준 URL을 쓰고 세션을 새로 받는다 — metadata에 사진을 직접 넣지 않는다 (P2-12)', async () => {
+    const { result } = renderHook(() => useProfileForm(makeUser({ nickname: 'n', profile_photo: 'data:image/png;base64,OLD' })))
+    expect(result.current.profilePhoto).toBe('')
+    const ev = pick(new File([new Uint8Array(8)], 'me.webp', { type: 'image/webp' }))
+    await act(() => result.current.handlePhotoChange(ev))
+    expect(avatar.upload).toHaveBeenCalledTimes(1)
+    expect(result.current.profilePhoto).toBe('https://api.example/api/storage/avatars/u1/1-x.webp')
+    expect(auth.refreshSession).toHaveBeenCalledTimes(1)
+    expect(auth.updateMetadata).not.toHaveBeenCalled()
+    expect(auth.syncMetadata).not.toHaveBeenCalled()
+    expect(ev.target.value).toBe('')
+    expect(result.current.isUploadingPhoto).toBe(false)
+  })
+
+  it('형식이 맞지 않으면 올리지 않고 알린다, 업로드 실패도 알린다', async () => {
+    const { result } = renderHook(() => useProfileForm(makeUser({ nickname: 'n' })))
+    await act(() => result.current.handlePhotoChange(pick(new File(['GIF89a'], 'a.gif', { type: 'image/gif' }))))
+    expect(avatar.upload).not.toHaveBeenCalled()
+    expect(window.alert).toHaveBeenCalledWith(expect.stringMatching(/jpg, png, webp/))
+
+    avatar.upload.mockRejectedValueOnce(new Error('저장소가 설정되지 않았습니다.'))
+    await act(() => result.current.handlePhotoChange(pick(new File([new Uint8Array(8)], 'me.png', { type: 'image/png' }))))
+    expect(window.alert).toHaveBeenLastCalledWith('저장소가 설정되지 않았습니다.')
+    expect(result.current.profilePhoto).toBe('')
+    expect(auth.refreshSession).not.toHaveBeenCalled()
   })
 })

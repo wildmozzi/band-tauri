@@ -116,6 +116,8 @@ export class VerifiedKeys {
 
 const MAGIC_BYTES = 16
 
+const POST_IMAGE_LIMITS = { maxBytes: POST_IMAGE_MAX_BYTES, types: Object.keys(POST_IMAGE_TYPES) as PostImageType[] }
+
 /**
  * 클라이언트가 서명 URL(pending 경로)로 올린 뒤 서버가 확인한다:
  * 본인 경로·서버 형식 key, 존재, 크기 상한, 저장된 Content-Type, 앞부분 매직 바이트(Range 읽기 — 전체를 받지 않음).
@@ -127,12 +129,17 @@ export async function verifyPostImageUpload(
   userId: string,
   key: string,
   verified: VerifiedKeys = new VerifiedKeys(),
+  /** 크기 상한·허용 형식. 기본은 게시글 이미지, 프로필 사진(P2-12)은 더 좁다 */
+  limits: { maxBytes: number; types: readonly PostImageType[] } = POST_IMAGE_LIMITS,
 ): Promise<VerifyResult> {
   if (typeof key !== 'string' || !key.startsWith(`${userId}/`) || !isServerPostImageKey(key)) {
     return { ok: false, status: 400, error: '잘못된 이미지 key입니다.', deleted: false }
   }
-  if (verified.has(key)) return { ok: true }
   const mime = mimeOfServerKey(key)!
+  if (!limits.types.includes(mime)) {
+    return { ok: false, status: 400, error: '지원하지 않는 이미지 형식입니다.', deleted: false }
+  }
+  if (verified.has(key)) return { ok: true }
   const pending = pendingKeyOf(key)
 
   const head = await storage.head(pending)
@@ -146,7 +153,7 @@ export async function verifyPostImageUpload(
   }
 
   let reason: string | null = null
-  if (head.size <= 0 || head.size > POST_IMAGE_MAX_BYTES) reason = '이미지 크기가 허용 범위를 벗어났습니다.'
+  if (head.size <= 0 || head.size > limits.maxBytes) reason = '이미지 크기가 허용 범위를 벗어났습니다.'
   else if (head.contentType && head.contentType.split(';')[0].trim().toLowerCase() !== mime) reason = '이미지 형식이 요청과 다릅니다.'
   else {
     const prefix = await storage.getRange(pending, 0, MAGIC_BYTES - 1)

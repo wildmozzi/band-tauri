@@ -11,6 +11,8 @@ import { resolveCorsOrigin } from './lib/securityConfig'
 import { apiLimiter, paymentLimiter } from './lib/rateLimits'
 import { UPLOAD_DIR } from './lib/uploads'
 import { createStorageRouter } from './routes/storage'
+import { createAvatarRouter } from './routes/avatars'
+import { supabaseProfilePhotoMetadata, type ProfilePhotoMetadata } from './services/profilePhotoService'
 import { getDefaultStorage } from './storage/config'
 import { createSupabaseStorageAdapter } from './storage/supabaseAdapter'
 import { supabaseAdmin } from './lib/supabase'
@@ -39,6 +41,10 @@ export interface AppOptions {
   postUserLimits?: Partial<PostUserLimits>
   /** 게시글 쓰기 저장소 (테스트에서 메모리 주입). 기본: Supabase service_role */
   postRepository?: PostRepository | null
+  /** 프로필 사진 저장소 (테스트에서 가짜 주입). 기본: STORAGE_DRIVER 설정의 avatars (P2-12) */
+  avatarStorage?: StorageAdapter | null
+  /** 프로필 사진 URL 기록(auth user_metadata) (테스트에서 가짜 주입). 기본: Supabase service_role */
+  profilePhotoMetadata?: ProfilePhotoMetadata | null
   /** 테스트에서만 false (한 IP에서 많은 요청을 보낸다). 기본: 켬 */
   rateLimits?: boolean
 }
@@ -94,6 +100,13 @@ export function createApp(options: AppOptions = {}) {
       imageStorage,
     ),
     { rateLimits: options.rateLimits, userLimits: options.postUserLimits },
+  ))
+  app.use('/api/storage/avatars', createAvatarRouter(
+    options.avatarStorage !== undefined ? options.avatarStorage : getDefaultStorage('avatars'),
+    options.profilePhotoMetadata !== undefined
+      ? options.profilePhotoMetadata
+      : supabaseAdmin ? supabaseProfilePhotoMetadata(supabaseAdmin) : null,
+    { rateLimits: options.rateLimits },
   ))
   app.use('/api/storage', createStorageRouter(
     imageStorage,

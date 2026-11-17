@@ -34,6 +34,7 @@ function ProfileContent({ user }: { user: User }) {
     bio, setBio,
     snsLinks, setSnsLinks,
     profilePhoto,
+    isUploadingPhoto,
     handlePhotoClick,
     handlePhotoChange,
     handleSave,
@@ -97,7 +98,8 @@ function ProfileContent({ user }: { user: User }) {
                   className="profile-photo-wrapper"
                   onMouseEnter={() => setIsHoveringPhoto(true)}
                   onMouseLeave={() => setIsHoveringPhoto(false)}
-                  onClick={handlePhotoClick}
+                  onClick={isUploadingPhoto ? undefined : handlePhotoClick}
+                  aria-busy={isUploadingPhoto}
                 >
                   <div className="profile-photo">
                     {profilePhoto ? (
@@ -108,15 +110,15 @@ function ProfileContent({ user }: { user: User }) {
                       </div>
                     )}
                   </div>
-                  {isHoveringPhoto && (
+                  {(isHoveringPhoto || isUploadingPhoto) && (
                     <div className="photo-edit-overlay">
-                      <span className="edit-icon">✏️</span>
+                      <span className="edit-icon">{isUploadingPhoto ? '⏳' : '✏️'}</span>
                     </div>
                   )}
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/jpeg,image/png,image/webp"
                     onChange={handlePhotoChange}
                     style={{ display: 'none' }}
                   />

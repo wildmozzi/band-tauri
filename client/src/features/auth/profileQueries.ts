@@ -80,6 +80,15 @@ export const profileApi = {
     if (error) throw error
   },
 
+  /**
+   * 서버가 user_metadata를 바꾼 뒤(프로필 사진 P2-12) 새 토큰·user를 받는다.
+   * onAuthStateChange(TOKEN_REFRESHED)로 AuthContext의 user가 갱신된다
+   */
+  async refreshSession(): Promise<void> {
+    const { error } = await requireClient().auth.refreshSession()
+    if (error) throw error
+  },
+
   /** 프로필 저장: user_metadata(실패 시 throw) + profiles.nickname(실패는 로그만 — 기존 동작) */
   async saveProfile(userId: string, form: ProfileForm): Promise<void> {
     await profileApi.updateUserMetadata({ ...form })

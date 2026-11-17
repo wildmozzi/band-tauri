@@ -33,8 +33,13 @@ export function snsLinksFromMetadata(meta: ProfileMetadata): SnsLinks {
   }
 }
 
+/**
+ * 프로필 사진 URL (P2-12): 서버가 기록한 `profile_photo_url`(http/https)만 쓴다.
+ * 예전 base64 값(`profile_photo`, data: URL)은 읽지 않는다 → 기본 아바타. 새로 올리거나 지우면 서버가 그 키를 지운다.
+ */
 export function profilePhotoFromMetadata(meta: ProfileMetadata): string {
-  return text(meta, 'profile_photo')
+  const url = meta?.profile_photo_url
+  return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : ''
 }
 
 /** 닉네임은 user_metadata 우선 — 빈 값이면 undefined(그때만 profiles 테이블을 조회) */
