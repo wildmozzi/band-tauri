@@ -172,6 +172,8 @@ pub(super) fn recv_loop(s: &NetShared) {
     while !s.stop.load(Ordering::Relaxed) {
         match s.socket.recv_from(&mut buf) {
             Ok((n, from)) => {
+                // 코어 배치 표본(P1-21): 패킷을 처리하려고 깨어난 순간의 코어. 시간 초과로 깬 반복은 세지 않는다.
+                s.recv_placement.sample();
                 if n <= MAX_PACKET_BYTES {
                     s.handle_packet(&mut buf[..n], from);
                 }
@@ -181,3 +183,6 @@ pub(super) fn recv_loop(s: &NetShared) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

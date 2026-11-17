@@ -47,8 +47,8 @@ flacenc = { version = "0.5", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # 워커/수신 스레드 MMCSS("Pro Audio") 등록, 엔진 실행 중 타이머 해상도 1ms(timeBeginPeriod)
-# + 오디오 소켓 DSCP 마킹(qWAVE, P1-3). 백엔드와 무관하게 쓴다(sys::prio·sys::cpu·net::qos).
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_NetworkManagement_QoS", "Win32_Networking_WinSock", "Win32_System_IO"] }
+# + 오디오 소켓 DSCP 마킹(qWAVE, P1-3) + 코어 배치 기록(CPU set·현재 프로세서, P1-21). 백엔드와 무관하게 쓴다(sys::prio·sys::cpu·sys::placement·net::qos).
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Media", "Win32_System_Threading", "Win32_System_Kernel", "Win32_System_SystemInformation", "Win32_System_WindowsProgramming", "Win32_NetworkManagement_QoS", "Win32_Networking_WinSock", "Win32_System_IO"] }
 # 자체 WASAPI 백엔드(독점 이벤트 모드, IAudioClient3 저지연 공유 모드). `backend-wasapi` 피처 뒤. 0.62는 Tauri가 이미 쓰는 버전이다.
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",

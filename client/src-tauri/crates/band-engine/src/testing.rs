@@ -111,6 +111,9 @@ pub mod sys {
     pub mod prio {
         pub use crate::sys::prio::{promote_current_thread, promote_engine_thread, set_engine_promotion, set_engine_promotion_parts};
     }
+    pub mod placement {
+        pub use crate::sys::placement::set_high_qos;
+    }
 }
 
 /// 진단(`crate::diag`)에서 테스트가 쓰는 것.

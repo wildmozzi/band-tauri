@@ -36,6 +36,7 @@ const NODES: &[(&str, u8)] = &[
     ("sys", 0),
     ("sys::prio", 0),
     ("sys::cpu", 0),
+    ("sys::placement", 0),
     ("sys::time", 0),
     // 1 알고리즘·상태(스레드·소켓 없음). 이 크레이트에 남은 것 — `band-dsp`가 쓰지 않는 순수 노드와 OS 난수·정규식을 쓰는 노드.
     ("engine::device::types", 1),
@@ -170,6 +171,7 @@ const DSP_EXCLUDED: &[&str] = &[
     "sys",
     "sys::prio",
     "sys::cpu",
+    "sys::placement",
     "sys::time",
     // `regex`·`sha2`. 쓰는 곳이 record·diag뿐.
     "diag::mask",

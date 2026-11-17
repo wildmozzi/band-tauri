@@ -44,6 +44,7 @@ import { useRecording, type RecordingSource } from './useRecording'
 import { useRoomSelector } from './useRoomSelector'
 import { useSignaling, type SignalPayload } from './useSignaling'
 import { useViewerAudio } from './useViewerAudio'
+import { holdViewerOnClose, keepHeldViewer } from './viewerHold'
 import { useWebAudioMixer } from './useWebAudioMixer'
 
 const BROADCAST_RESYNC_MS = 5000
@@ -70,6 +71,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   audioSettingsRef.current = audioSettings
   const userIdRef = useRef(user?.id)
   userIdRef.current = user?.id
+  /** 마지막으로 ready가 된 내 clientId (끊긴 뒤 handleClosed가 clientId를 비워도 남는다) */
+  const selfIdRef = useRef<string | null>(null)
+  /** 끊길 때 관람 수신을 유지해 둔 clientId — 다음 ready가 같은 id의 재개면 유지, 아니면 닫는다 */
+  const heldViewerIdRef = useRef<string | null>(null)
 
   // 게스트 닉네임은 세션 동안 고정
   const [guestSuffix] = useState(() => Math.random().toString(36).slice(2, 6))
@@ -252,6 +257,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       clearBusyRetry()
       // 방 id를 먼저 비워야 시작 중인 엔진이 완료 시 "퇴장함"을 보고 스스로 내려간다 (H2)
       store.patch('connection', { currentRoomId: null, joinError: null, roomJoined: false })
+      heldViewerIdRef.current = null
       broadcaster.stop()
       // leave가 participant-left로 전파되므로 native-leave/stop-performing은 따로 보내지 않는다
       void s.stop({ notify: false })
@@ -372,6 +378,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         const { viewer: v, restartSignaling: restart } = d()
         rejoiningRef.current = false
         clearBusyRetry()
+        heldViewerIdRef.current = null
         broadcaster.stop()
         v.closeAll()
         joinOnReadyRef.current = 'fresh'
@@ -518,6 +525,13 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     // 재개면 다음 room-state(서버가 재개 알림으로 보냄)에서 내 연주 상태를 서버 기준으로 맞춘다 (#180 리뷰 M-1)
     verifySelfRef.current = resumed
     if (join) send(join)
+    // 끊길 때 유지해 둔 관람 수신(로그인 관람자): 같은 clientId로 재개됐으면 그대로 둔다 — 연주자 앱은 재개를 모르므로
+    // (participant-left/joined 없음) 다시 offer하지 않고, 미디어(P2P)는 시그널링과 무관하게 이어진다. 재개가 아니면(새 clientId)
+    // 연주자 앱이 새 id에 새로 offer하므로 옛 연결을 닫는다
+    const held = heldViewerIdRef.current
+    heldViewerIdRef.current = null
+    if (held !== null && !keepHeldViewer(held, id, resumed)) viewer.closeAll()
+    selfIdRef.current = id
     // resumed && 같은 id → 엔진 유지 + descriptor 재전송, 아니면 새 id로 엔진 재시작
     void session.welcome(id, resumed)
   }
@@ -526,7 +540,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     // 방 안에서 끊겼으면 다음 ready에서 다시 입장한다 ("다시 입장"으로 연 연결이면 일반 입장 그대로)
     if (store.getSnapshot().connection.currentRoomId !== null && joinOnReadyRef.current === 'none') joinOnReadyRef.current = 'rejoin'
     store.patch('connection', { peers: [] })
-    viewer.closeAll()
+    // 로그인 관람자는 세션 재개(같은 clientId)를 요청하므로 관람 수신 연결을 유지해 둔다(재개되면 재협상 없이 소리가 이어진다).
+    // 익명은 재개가 없어(서버는 인증 사용자만 유예) 지금 닫는다. 재개 여부는 onReady에서 판정한다
+    heldViewerIdRef.current = holdViewerOnClose({ loggedIn: !!userIdRef.current, selfId: selfIdRef.current, hasViewer: viewer.hasAny() })
+    if (heldViewerIdRef.current === null) viewer.closeAll()
     // 엔진(UDP 메시)은 유지한다. 재연결/세션 재개 여부는 onReady에서 결정 (M6)
     session.connectionLost()
   }
@@ -536,6 +553,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     // 다른 창·기기에 밀려났을 때(replaced)도 같다: 서버 쪽 세션은 이미 정리됐다.
     // 화면은 signalStatus='gave-up'/'replaced'를 보고 "다시 입장" 안내를 띄운다.
     broadcaster.stop()
+    heldViewerIdRef.current = null
+    viewer.closeAll()
     void session.stop({ notify: false })
   }
 
@@ -557,7 +576,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         retry.timer = setTimeout(() => {
           retry.timer = null
           if (store.getSnapshot().connection.currentRoomId !== e.roomId) return
-          const join = buildJoinMessageRef.current(false)
+          // 재연결 중이면 rejoin 그대로 다시 보낸다(방 조회 실패 room-unavailable 재시도)
+          const join = buildJoinMessageRef.current(rejoiningRef.current)
           if (join && isOpen()) send(join)
         }, e.delayMs)
         return
@@ -565,6 +585,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       case 'performer-appeared': session.performerAppeared(e.peerId); return
       case 'peer-gone': session.peerGone(e.peerId); return
       case 'close-viewer': viewer.closeFrom(e.peerId); return
+      case 'keep-viewers': viewer.closeExcept(e.peerIds); return
       case 'viewer-offer': void viewer.handleOffer(e.from, e.offer); return
       case 'broadcast-answer': void broadcaster.handleAnswer(e.from, e.answer); return
       case 'ice-candidate':
