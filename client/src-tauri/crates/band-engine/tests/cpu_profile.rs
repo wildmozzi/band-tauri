@@ -7,6 +7,9 @@
 //!
 //! 실행(수치는 release 기준이 의미 있다):
 //! `cargo test --release --test cpu_profile -- --ignored --nocapture`
+//!
+//! 전·후 비교(ADR D6, P1-21b): `BAND_CPU_PIN=pe`(LP-E를 뺀 P+E에 고정 — 반복당 비용) / 비움(고정 없음 — 배치 확률)으로 돌리고,
+//! 구성마다 찍는 `CSV|` 줄(열 이름 `CSVHEAD|`)을 `scripts/cpu-compare.mjs`가 모아 통계를 낸다. 방법: `docs/overhaul/cpu-measure.md`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,7 +19,7 @@ use band_dsp::codec::Encoder;
 use band_dsp::config::{CodecKind, EngineConfig};
 use band_engine::testing::engine::cpuprof::CpuStats;
 use band_engine::testing::sys::cpu::{cycle_pct, process_cycles, tsc_now};
-use band_engine::testing::sys::placement::set_high_qos;
+use band_engine::testing::sys::placement::{pin_process, set_high_qos};
 use band_engine::testing::engine::device::fake::FakeBackend;
 use band_dsp::mixer::MixControls;
 use band_dsp::relay_codec::CodecReason;
@@ -64,6 +67,9 @@ struct Row {
     per_node_pct: f32,
     conceal_max: f32,
     xruns: u64,
+    /// 측정 창(12초) 워커 반복 본문(`iter_body`, 수면 제외) p50·p99(6엔진 평균, µs)·최대(6엔진 최대, µs)·반복 수(6엔진 평균),
+    /// 반복 간격 p50(µs). ADR D6 비교 측정의 보조 지표(P1-21b — `cpu-quiet-2026-11-17.md` 측정 패치를 정식으로).
+    body: [f32; 5],
     /// 측정 창 동안 6엔진 합 코어 배치(P1-21): [워커, 수신] × [P, E, LP-E] 표본 수. 비Windows는 None.
     placement: Option<[[f64; 3]; 2]>,
 }
@@ -132,10 +138,14 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
     // 창 회전과 xrun 기준(연결·예열 구간 제외)
     let x0: u64 = engines.iter().map(|e| e.stats().xruns).sum();
     let pl0 = sum_placement(&engines.iter().map(|e| e.stats()).collect::<Vec<_>>());
+    for e in &engines {
+        let _ = e.take_worker_timing();
+    }
     let (p0, k0) = (process_cycles(), tsc_now());
     std::thread::sleep(MEASURE);
     let stats: Vec<_> = engines.iter().map(|e| e.stats()).collect();
     let (p1, k1) = (process_cycles(), tsc_now());
+    let wts: Vec<_> = engines.iter().map(|e| e.take_worker_timing()).collect();
     let cpus: Vec<CpuStats> = stats.iter().map(|s| s.cpu).collect();
     for c in &cpus {
         assert!(c.window_ms >= MEASURE.as_millis() as f32 * 0.9, "창 회전: {c:?}");
@@ -153,6 +163,16 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
         conceal_max: stats.iter().flat_map(|s| s.peers.iter().map(|p| p.conceal_pct)).fold(0.0, f32::max),
         // 측정 창 안의 xrun만(연결·예열 구간 제외, 리뷰 L1)
         xruns: stats.iter().map(|s| s.xruns).sum::<u64>().saturating_sub(x0),
+        body: {
+            let avg = |v: Vec<f32>| v.iter().sum::<f32>() / v.len() as f32;
+            [
+                avg(wts.iter().map(|w| w.body.p50_ms * 1000.0).collect()),
+                avg(wts.iter().map(|w| w.body.p99_ms * 1000.0).collect()),
+                wts.iter().map(|w| w.body.max_ms * 1000.0).fold(0.0, f32::max),
+                avg(wts.iter().map(|w| w.body.packets as f32).collect()),
+                avg(wts.iter().map(|w| w.period.p50_ms * 1000.0).collect()),
+            ]
+        },
         placement: sum_placement(&stats).zip(pl0).map(|(a, b)| {
             let mut d = [[0.0; 3]; 2];
             for ((x, a), b) in d.iter_mut().flatten().zip(a.iter().flatten()).zip(b.iter().flatten()) {
@@ -174,6 +194,17 @@ fn six_peer_full_mesh_cpu() {
     let high_qos = std::env::var("BAND_HIGH_QOS").is_ok_and(|v| v == "1");
     set_high_qos(high_qos);
     println!("HighQoS(EcoQoS 끔): {high_qos}");
+    // P1-21b(ADR D6): `BAND_CPU_PIN=pe`면 프로세스를 LP-E를 뺀 P+E 코어에 고정한다(전·후 비교 측정용 — 반복당 비용만 본다).
+    // `0x…`이면 그 마스크(그룹 0). 비우거나 `none`이면 고정 없음(배치 확률 쪽 회귀를 보는 반복 측정용). 엔진 시작 전에 정한다.
+    let pin = match std::env::var("BAND_CPU_PIN").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+        "" | "none" => "none".to_string(),
+        "pe" => format!("0x{:X}", pin_process(None).expect("BAND_CPU_PIN=pe")),
+        m => {
+            let mask = u64::from_str_radix(m.trim_start_matches("0x"), 16).expect("BAND_CPU_PIN: pe | none | 0x<16진 마스크>");
+            format!("0x{:X}", pin_process(Some(mask)).expect("BAND_CPU_PIN 마스크"))
+        }
+    };
+    println!("코어 고정: {pin}");
     // RT 콜백 타이머 비용(QPC)
     let n = 1_000_000;
     let t = Instant::now();
@@ -186,6 +217,8 @@ fn six_peer_full_mesh_cpu() {
     println!("Instant::now() 1회 ≈ {per_call_ns:.1}ns (논리 코어 {})", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0));
 
     // P1-4f M1: Opus 인코딩 1회 비용(단일 스레드, 음악 같은 화음+잡음 신호). 피어별 인코더 5개 × 프레임률이 1코어의 몇 %인지.
+    // mono 2.5ms 값은 실행 사이 기계 속도 기준값으로 `CSV|` 줄에도 싣는다(P1-21b).
+    let mut opus_ref_us = f64::NAN;
     for (ch, frame) in [(1usize, 120usize), (2, 120), (1, 240), (2, 240)] {
         let bitrate = if ch == 2 { 160_000 } else { 96_000 };
         let mut enc = Encoder::new(CodecKind::Opus, ch, bitrate).unwrap();
@@ -209,6 +242,9 @@ fn six_peer_full_mesh_cpu() {
         }
         let us = t.elapsed().as_secs_f64() * 1e6 / frames as f64;
         let fps = 48_000.0 / frame as f64;
+        if (ch, frame) == (1, 120) {
+            opus_ref_us = us;
+        }
         println!(
             "Opus 인코딩 1회({}, {:.1}ms): {us:.1}µs → 피어 5명 개별 = 1코어의 {:.2}% (4코어 기준 {:.2}%)",
             if ch == 2 { "stereo 160k" } else { "mono 96k" },
@@ -261,6 +297,34 @@ fn six_peer_full_mesh_cpu() {
             };
             println!("배치 | {} | 워커 {} | 수신 {}", r.label, pct(p[0]), pct(p[1]));
         }
+    }
+    // 기계가 읽는 줄(P1-21b, ADR D6): `scripts/cpu-compare.mjs`가 실행마다 모아 전·후 쌍별 차를 낸다. 열 이름은 `CSVHEAD|`.
+    // 워커 LP-E 비율은 고정 없는 반복에서 "느린 코어에 놓인 실행"을 가르는 데 쓴다(비Windows는 빈 값).
+    println!("CSVHEAD|config|pin|high_qos|opus_ref_us|worker_pct_e0|worker_pct_avg6|worker_pct_max6|cb_load_avg_pct|cb_p50_us_e0|cb_p99_us_e0|cb_p99_us_max6|per_node_pct|iter_body_p50_us_avg6|iter_body_p99_us_avg6|iter_body_max_us_max6|iters_avg6|iter_period_p50_us_avg6|worker_lpe_pct|netrecv_lpe_pct|xruns");
+    for r in &rows {
+        let lpe = |t: [f64; 3]| {
+            let n: f64 = t.iter().sum();
+            if n > 0.0 { format!("{:.1}", (t[2] * 100.0 / n).max(0.0)) } else { String::new() }
+        };
+        let (wl, nl) = r.placement.map(|p| (lpe(p[0]), lpe(p[1]))).unwrap_or_default();
+        println!(
+            "CSV|{}|{pin}|{high_qos}|{opus_ref_us:.1}|{:.3}|{:.3}|{:.3}|{:.4}|{:.1}|{:.1}|{:.1}|{:.3}|{:.1}|{:.1}|{:.1}|{:.0}|{:.1}|{wl}|{nl}|{}",
+            r.label,
+            r.me.worker_pct.unwrap_or(f32::NAN),
+            r.worker_avg,
+            r.worker_max,
+            r.load_avg,
+            r.me.callback_p50_us,
+            r.me.callback_p99_us,
+            r.p99_max,
+            r.per_node_pct,
+            r.body[0],
+            r.body[1],
+            r.body[2],
+            r.body[3],
+            r.body[4],
+            r.xruns
+        );
     }
 }
 
