@@ -178,8 +178,9 @@ export function useViewerAudio(opts: {
       const update: Record<string, PeerNetworkStats> = {}
       /** 측정한 연결 — 같은 발신자가 재협상하면 id는 같고 연결만 바뀌므로 id가 아니라 연결로 대조한다 */
       const measured = new Map<string, RTCPeerConnection>()
-      // 측정 시작 시점의 연결 목록으로 돈다. 살아 있는 Map을 await 사이에 돌면 재협상으로 다시 넣은 같은 id(새 연결)를
-      // 한 번 더 만나 그 결과가 옛 연결의 측정을 덮는다
+      // 측정 시작 시점의 연결 목록으로 돈다(측정 도중 새로 생긴·바뀐 연결은 다음 틱에 잰다). 옛 연결 값이 새지 않게 하는 것은
+      // 아래 연결 대조다 — 살아 있는 Map을 돌면 재협상으로 맨 끝에 다시 넣은 같은 id를 우연히 한 번 더 만나 새 연결 값으로
+      // 덮이던 것이 그 역할을 대신했을 뿐이다(#186 리뷰).
       for (const [peerId, { pc }] of [...pcsRef.current.entries()]) {
         measured.set(peerId, pc)
         if (pc.connectionState !== 'connected') {
@@ -226,8 +227,14 @@ export function useViewerAudio(opts: {
       }
       if (Object.keys(update).length > 0) setNetworkStats((prev) => ({ ...prev, ...update }))
     }
+    // getStats가 2초 넘게 걸리면 다음 틱을 건너뛴다: 겹쳐 돌면 앞 측정이 뒤 측정보다 늦게 끝나 같은 연결의 더 오래된 값으로 덮는다
+    let measuring = false
     const timer = setInterval(() => {
-      if (pcsRef.current.size > 0) void measure()
+      if (measuring || pcsRef.current.size === 0) return
+      measuring = true
+      void measure().finally(() => {
+        measuring = false
+      })
     }, 2000)
     return () => clearInterval(timer)
   }, [setNetworkStats])
