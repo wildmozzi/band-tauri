@@ -32,8 +32,11 @@ export function validateRoomPasswordInput(raw: string): string | null {
   return null
 }
 
-/** room-not-found: 방이 없다 — 보고 있던 방이 종료(삭제)된 뒤 재연결하면 받는다(서버 membership checkRoom) */
-export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited' | 'password-busy' | 'room-full' | 'room-not-found'
+/**
+ * room-not-found: 방이 없다 — 보고 있던 방이 종료(삭제)된 뒤 재연결하면 받는다(서버 membership checkRoom).
+ * room-unavailable: 서버의 방 조회가 실패했다(DB 일시 장애) — 방이 없다는 뜻이 아니므로 세션을 유지하고 자동 재시도한다(#189 리뷰 H-1)
+ */
+export type JoinErrorCode = 'password-required' | 'password-invalid' | 'password-rate-limited' | 'password-busy' | 'room-full' | 'room-not-found' | 'room-unavailable'
 
 export interface JoinError {
   code: JoinErrorCode
@@ -51,14 +54,19 @@ export interface JoinError {
 /**
  * 입장 거부 시 연주 세션(엔진·방송)을 멈춰야 하는지 (PR #23 M3).
  * 방 밖으로 밀려나면 서버가 연주 메시지를 거부하므로 엔진을 띄워 둘 이유가 없다.
- * room-full은 항상, 재연결 중 거부는 자동 재시도하는 password-busy 말고 모두.
+ * room-full·room-not-found는 항상, 재연결 중 거부는 자동 재시도하는 일시 오류(password-busy·room-unavailable) 말고 모두.
  */
 export function joinErrorStopsSession(e: JoinError, rejoining: boolean): boolean {
   if (e.code === 'room-full' || e.code === 'room-not-found') return true
-  return rejoining && e.code !== 'password-busy'
+  return rejoining && !isRetryableJoinError(e)
 }
 
-const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited', 'password-busy', 'room-full', 'room-not-found'])
+/** 같은 조건으로 자동 재시도하는 일시 오류 (서버가 retryAfterMs를 준다) */
+export function isRetryableJoinError(e: JoinError): boolean {
+  return e.code === 'password-busy' || e.code === 'room-unavailable'
+}
+
+const JOIN_ERROR_CODES = new Set<string>(['password-required', 'password-invalid', 'password-rate-limited', 'password-busy', 'room-full', 'room-not-found', 'room-unavailable'])
 
 /** 서버 error 메시지 중 입장(비밀번호·정원) 관련이면 JoinError로 */
 export function joinErrorFromSignal(p: { type: string; [k: string]: unknown }): JoinError | null {
@@ -92,6 +100,8 @@ export function describeJoinError(e: JoinError): string {
     }
     case 'room-not-found':
       return '합주실이 종료되었거나 찾을 수 없습니다.'
+    case 'room-unavailable':
+      return '합주실 정보를 불러오지 못했습니다. 잠시 후 자동으로 다시 시도합니다.'
     case 'room-full': {
       const lost = e.afterReconnect ? '연결이 끊긴 사이 자리를 잃었습니다. ' : ''
       if (e.reason === 'anonymous-limit') {

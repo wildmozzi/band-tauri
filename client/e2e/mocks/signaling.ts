@@ -1,7 +1,7 @@
 /**
  * 가짜 시그널링 서버 (server/src/services/wsService.ts의 메시지 순서를 따른다).
  *   연결 → welcome{clientId} → (클라이언트 auth) → auth-result{authenticated}
- *   join → 방(rooms 행)이 없으면 room-not-found (서버 membership checkRoom)
+ *   join → 방 조회 실패(failNextRoomLookups)면 room-unavailable{retryAfterMs}, 방(rooms 행)이 없으면 room-not-found (서버 membership checkRoom)
  *        → 비밀번호 방이면 password-required / password-invalid{remainingAttempts} / password-rate-limited{retryAfterMs}
  *        → 정원(rooms.max_participants, 관람 포함, 서버 상한 20)이 찼으면 room-full{maxParticipants} (방장은 예외, P3-12b)
  *        → 통과하면 room-state{participants, peerIds, isHost}
@@ -82,6 +82,8 @@ export class FakeSignaling {
   /** 재개를 받아 줄 옛 clientId → 방·서버 기준 연주 상태 (dropForResume) */
   private resumable = new Map<string, { roomId: string; isPerforming: boolean }>()
   private down = false
+  private lookupFailures = 0
+  private lookupRetryAfterMs = 500
   /** down 동안 받자마자 닫은 연결 수 (앱의 재연결 시도) */
   refused = 0
 
@@ -111,15 +113,19 @@ export class FakeSignaling {
   }
 
   /**
-   * 방 종료 흉내: rooms 행을 지우고(방장이 방 삭제) 지금 연결을 끊는다. 앱은 재연결해 rejoin join을 보내고,
-   * 서버처럼 room-not-found를 받는다(보던 방이 사라진 관람 화면).
+   * 방 종료 흉내: rooms 행만 지운다(방장이 Supabase로 방 삭제). 실제 서버도 방 안 연결에 아무것도 보내지 않고 끊지도 않으므로,
+   * 관람자는 다음 재연결의 rejoin join에서야 room-not-found를 받는다(재연결은 setDown 등으로 따로 일으킨다, #189 리뷰 L-3).
    */
   endRoom(roomId: string) {
     const rows = this.db.table('rooms')
     const i = rows.findIndex(r => r.id === roomId)
     if (i >= 0) rows.splice(i, 1)
-    for (const c of this.conns) if (c.roomId === roomId) void c.ws.close({ code: SERVER_RESTART_CLOSE_CODE, reason: 'e2e room ended' })
-    this.conns = this.conns.filter(c => c.roomId !== roomId)
+  }
+
+  /** 다음 join n번의 방 조회가 실패한다(DB 일시 장애) — 서버처럼 room-unavailable{retryAfterMs} (#189 리뷰 H-1) */
+  failNextRoomLookups(n = 1, retryAfterMs = 500) {
+    this.lookupFailures = n
+    this.lookupRetryAfterMs = retryAfterMs
   }
 
   /** 서버 송신 메시지 하나를 그 방의 모든 연결에 보낸다 (예: 방장이 나를 내렸을 때의 demoted-to-viewer, P2-9) */
@@ -272,6 +278,11 @@ export class FakeSignaling {
 
   private join(conn: Conn, msg: SignalMessage) {
     const roomId = String(msg.roomId)
+    if (this.lookupFailures > 0) {
+      this.lookupFailures--
+      this.send(conn, { type: 'error', code: 'room-unavailable', roomId, retryAfterMs: this.lookupRetryAfterMs, message: '합주실 정보를 불러오지 못했습니다. 잠시 후 다시 시도합니다.' })
+      return
+    }
     const room = this.db.table('rooms').find(r => r.id === roomId)
     const config = this.rooms.get(roomId) ?? {}
     if (!room) {

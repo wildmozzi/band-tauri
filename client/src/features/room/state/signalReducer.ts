@@ -7,7 +7,7 @@
  *
  * 신뢰 규칙: 발신자는 서버가 붙인 `from`/`oderId`만 쓴다.
  */
-import { joinErrorFromSignal, joinErrorStopsSession } from '../../rooms'
+import { isRetryableJoinError, joinErrorFromSignal, joinErrorStopsSession } from '../../rooms'
 import { appendChat, type ChatMessage } from './chatModel'
 import {
   INSTRUMENT_CHANGE_RESULT_MS,
@@ -198,13 +198,18 @@ function reduceJoinError(s: RoomState, p: SignalPayload, ctx: SignalContext): Si
   if (roomId && je.code === 'password-invalid') effects.push({ type: 'forget-password', roomId })
   if (je.code === 'password-required' || je.code === 'password-invalid') effects.push({ type: 'clear-password' })
   const rejoining = ctx.rejoining
-  if (je.code !== 'password-busy') effects.push({ type: 'set-rejoining', value: false })
+  const retryable = isRetryableJoinError(je)
+  if (!retryable) effects.push({ type: 'set-rejoining', value: false })
   // 방 밖으로 밀려났다: 엔진·방송을 멈춘다 (서버는 방 밖 연결의 연주 메시지를 거부한다)
   if (joinErrorStopsSession(je, rejoining)) effects.push({ type: 'stop-broadcast' }, { type: 'stop-session' })
-  // 서버 혼잡/방 준비 중: 같은 비밀번호로 몇 번 자동 재시도
-  if (je.code === 'password-busy' && roomId && ctx.busyRetryCount < MAX_BUSY_RETRIES) {
+  // 서버 혼잡/방 준비 중/방 조회 실패: 같은 조건(비밀번호)으로 몇 번 자동 재시도
+  const willRetry = retryable && !!roomId && ctx.busyRetryCount < MAX_BUSY_RETRIES
+  if (willRetry && roomId) {
     effects.push({ type: 'schedule-busy-retry', roomId, delayMs: Math.min(Math.max(je.retryAfterMs ?? 1000, 500), 10_000) })
   }
+  // 방 안에서 재연결하다 방 조회가 잠깐 실패했다: 합주실 화면(연주·관람)을 그대로 두고 조용히 다시 시도한다.
+  // 재시도를 다 쓰면 아래처럼 안내 화면을 보인다 (#189 리뷰 H-1)
+  if (je.code === 'room-unavailable' && rejoining && willRetry) return { handled: true, patch: null, effects }
   return {
     handled: true,
     patch: {

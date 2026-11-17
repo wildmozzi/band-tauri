@@ -61,7 +61,8 @@ async function negotiate(page: Page, mock: MockBackend) {
 
   // 후보 교환: 연결될 때까지 양쪽으로 옮긴다
   let sentPerf = 0
-  let sentViewer = mock.signaling.messages('ice-candidate').length
+  const candsBefore = mock.signaling.messages('ice-candidate').length
+  let sentViewer = candsBefore
   await expect.poll(async () => {
     const perfCands = await page.evaluate(() => window.__e2ePerfCands ?? [])
     for (; sentPerf < perfCands.length; sentPerf++) {
@@ -73,14 +74,32 @@ async function negotiate(page: Page, mock: MockBackend) {
     }
     return page.evaluate(() => window.__e2ePerf!.connectionState)
   }, { timeout: 15_000 }).toBe('connected')
-  // 관람자가 보낸 후보 수는 서버의 보낸 사람→대상 버스트(40) 안
-  expect(mock.signaling.messages('ice-candidate').length).toBeLessThanOrEqual(40)
+  // 이번 협상에서 관람자가 보낸 후보 수는 서버의 보낸 사람→대상 버스트(40) 안
+  expect(mock.signaling.messages('ice-candidate').length - candsBefore).toBeLessThanOrEqual(40)
 }
 
 const liveBadge = (page: Page) => page.locator('.live-badge')
 
+/**
+ * 앱(관람자)이 닫은 RTCPeerConnection 수를 센다(연주자 흉내 PC는 빼고). ICE consent 만료(수 초~)를 기다리지 않고
+ * 관람자가 수신 연결을 닫았는지 바로 본다 (#189 리뷰 L-1). goto 전에 부른다
+ */
+async function trackViewerCloses(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __e2eViewerCloses: number; __e2ePerf?: RTCPeerConnection }
+    w.__e2eViewerCloses = 0
+    const close = RTCPeerConnection.prototype.close
+    RTCPeerConnection.prototype.close = function (this: RTCPeerConnection) {
+      if (this !== w.__e2ePerf && this.connectionState !== 'closed') w.__e2eViewerCloses++
+      return close.call(this)
+    }
+  })
+}
+const viewerCloses = (page: Page) => page.evaluate(() => (window as unknown as { __e2eViewerCloses: number }).__e2eViewerCloses)
+
 test.describe('웹 관람: 방송 수신 (WebRTC)', () => {
   test('연주자 offer에 answer해 LIVE가 되고, 연주자가 내려가면 연결을 닫고 대기로 돌아온다', async ({ page, mock }) => {
+    await trackViewerCloses(page)
     mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
     await page.goto(`/rooms/${ROCK_ROOM.id}`)
     await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
@@ -96,8 +115,8 @@ test.describe('웹 관람: 방송 수신 (WebRTC)', () => {
     })
     await expect(liveBadge(page)).toHaveText('대기')
     await expect(page.locator('.performers-panel')).not.toContainText(REMOTE_PERFORMER.nickname)
-    // 관람자가 수신 연결을 닫았다 → 연주자 쪽 연결도 끊긴다
-    await expect.poll(() => page.evaluate(() => window.__e2ePerf!.connectionState), { timeout: 15_000 }).not.toBe('connected')
+    // 관람자가 수신 연결을 닫았다
+    await expect.poll(() => viewerCloses(page)).toBe(1)
   })
 
   test('연주자가 아닌 참가자의 offer는 받지 않는다(answer 없음)', async ({ page, mock }) => {
@@ -107,7 +126,9 @@ test.describe('웹 관람: 방송 수신 (WebRTC)', () => {
     const [viewerId] = mock.signaling.clientIdsIn(ROCK_ROOM.id)
     const offer = await performerOffer(page)
     mock.signaling.pushToRoom(ROCK_ROOM.id, { type: 'offer', from: 'peer-viewer-2', to: viewerId, offer })
-    await page.waitForTimeout(500)
+    // 같은 소켓으로 뒤이어 보낸 채팅이 보이면 앞의 offer도 처리가 끝났다(고정 대기 대신 양성 신호, #189 리뷰 L-2)
+    mock.signaling.pushChat(ROCK_ROOM.id, REMOTE_PERFORMER, 'offer 다음 채팅')
+    await expect(page.getByText('offer 다음 채팅')).toBeVisible()
     expect(mock.signaling.messages('answer')).toHaveLength(0)
     await expect(liveBadge(page)).toHaveText('대기')
   })
@@ -138,13 +159,47 @@ test.describe('웹 관람: 방 종료', () => {
     await page.goto(`/rooms/${ROCK_ROOM.id}`)
     await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
 
+    // 방장이 방을 지워도 서버는 알리지 않는다 — 관람자는 화면을 그대로 본다
     mock.signaling.endRoom(ROCK_ROOM.id)
+    await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
+    // 다음 재연결(망 끊김·서버 재시작)의 rejoin에서 room-not-found
+    mock.signaling.setDown(true)
+    mock.signaling.setDown(false)
     await expect(page.getByRole('alert')).toHaveText('합주실이 종료되었거나 찾을 수 없습니다.', { timeout: 10_000 })
-    // 재입장은 한 번만 시도한다(종료된 방을 계속 두드리지 않는다)
-    await page.waitForTimeout(500)
+    // 재입장은 한 번만 시도한다(종료된 방을 계속 두드리지 않는다). 재시도 간격(가장 짧은 0.5초)보다 넉넉히 본다
+    await page.waitForTimeout(2000)
     expect(mock.signaling.messages('join')).toHaveLength(2)
     await page.getByRole('button', { name: '목록으로' }).click()
     await expect(page).toHaveURL(/\/rooms$/)
+  })
+})
+
+test.describe('웹 관람: 방 조회 일시 실패 (#189 리뷰 H-1)', () => {
+  test('재연결 중 서버의 방 조회가 실패하면(room-unavailable) 화면을 유지하고 자동 재시도해 다시 들어온다', async ({ page, mock }) => {
+    mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    const title = page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })
+    await expect(title).toBeVisible()
+
+    mock.signaling.failNextRoomLookups(2)
+    mock.signaling.setDown(true)
+    mock.signaling.setDown(false)
+    // rejoin 1 + 자동 재시도 2 = join 4회(첫 입장 포함)
+    await expect.poll(() => mock.signaling.messages('join').length, { timeout: 10_000 }).toBe(4)
+    await expect(page.locator('.reconnect-banner')).toHaveCount(0)
+    await expect(title).toBeVisible()
+    await expect(page.locator('.performers-panel')).toContainText(REMOTE_PERFORMER.nickname)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    expect(mock.signaling.messages('join').slice(1).every(j => j.isRejoin === true)).toBe(true)
+  })
+
+  test('첫 입장에서 방 조회가 실패하면 안내를 보이고 자동으로 다시 시도해 들어온다', async ({ page, mock }) => {
+    mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
+    mock.signaling.failNextRoomLookups(1, 1500)
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    await expect(page.getByRole('alert')).toHaveText('합주실 정보를 불러오지 못했습니다. 잠시 후 자동으로 다시 시도합니다.')
+    await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.performers-panel')).toContainText(REMOTE_PERFORMER.nickname)
   })
 })
 
