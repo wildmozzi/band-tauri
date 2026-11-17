@@ -65,6 +65,7 @@ jobs:
     outputs:
       engine: ${{ github.event_name != 'pull_request' || steps.f.outputs.engine == 'true' }}
       relay: ${{ github.event_name != 'pull_request' || steps.f.outputs.relay == 'true' }}
+      loom: ${{ github.event_name != 'pull_request' || steps.f.outputs.loom == 'true' }}
       client: ${{ github.event_name != 'pull_request' || steps.f.outputs.client == 'true' }}
       server: ${{ github.event_name != 'pull_request' || steps.f.outputs.server == 'true' }}
     steps:
@@ -74,9 +75,17 @@ jobs:
         id: f
         timeout-minutes: 3
         with:
+          # 각 필터의 패턴은 OR다(predicate-quantifier 기본값 some). 그래서 `!x/**` 같은 부정 패턴은 "x 밖의 모든 파일"과 맞아
+          # 필터를 늘 참으로 만든다 — 제외가 필요하면 extglob `!(...)`로 한 경로 마디 안에서 뺀다(client 참고).
+          # 경로 밖 파일을 읽는 의존(`include_str!`·`readFileSync`·path 의존)도 여기 적는다 — 빠지면 그 파일만 바꾼 PR에서 시험이 안 돈다.
           filters: |
             engine:
               - 'client/src-tauri/**'
+              # band-engine의 개발 의존 `band-relay`(tests/relay.rs가 실제 릴레이를 같은 프로세스에서 띄운다)
+              - 'relay/src/**'
+              - 'relay/Cargo.toml'
+              # 토큰 공용 벡터: band-engine net/relay.rs 시험이 include_str!로 읽는다(relay·server 시험도 같은 파일)
+              - 'docs/overhaul/relay-token-vectors.json'
               - '.github/workflows/ci.yml'
             relay:
               - 'relay/**'
@@ -85,10 +94,24 @@ jobs:
               # 같이 옮긴 media_link·clock은 relay/가 쓰지 않아 넣지 않는다(#160 리뷰 L4).
               - 'client/src-tauri/crates/band-dsp/src/types.rs'
               - 'client/src-tauri/crates/band-dsp/src/packet.rs'
+              # relay/src/{relay,token}.rs 시험이 include_str!로 읽는다
+              - 'docs/overhaul/relay-token-vectors.json'
+              - '.github/workflows/ci.yml'
+            loom:
+              # SeqCell 메모리 순서 모델 검사(loom 잡). 시험·대상은 stats.rs, loom 의존·cfg 선언은 Cargo.toml, 버전은 Cargo.lock.
+              # lib.rs는 모듈 선언·크레이트 cfg — `--cfg loom` 빌드가 크레이트 전체를 컴파일하므로 같이 본다.
+              - 'client/src-tauri/crates/band-dsp/src/stats.rs'
+              - 'client/src-tauri/crates/band-dsp/src/lib.rs'
+              - 'client/src-tauri/crates/band-dsp/Cargo.toml'
+              - 'client/src-tauri/Cargo.lock'
               - '.github/workflows/ci.yml'
             client:
-              - 'client/**'
-              - '!client/src-tauri/**'
+              # client/ 아래에서 src-tauri만 뺀다: 루트 파일(client/*)과 src-tauri가 아닌 디렉터리 전부.
+              # 예전 `'!client/src-tauri/**'`는 OR라 docs만 바꾼 PR에서도 참이었다(#170 리뷰 후속).
+              - 'client/*'
+              - 'client/!(src-tauri)/**'
+              # src/app/tauriCsp.test.ts가 읽는다
+              - 'client/src-tauri/tauri.conf.json'
               - 'server/src/lib/**'
               - 'package.json'
               - 'package-lock.json'
@@ -96,6 +119,8 @@ jobs:
             server:
               - 'server/**'
               - 'docs/migrations/**'
+              # test/relay-token.test.ts가 읽는다
+              - 'docs/overhaul/relay-token-vectors.json'
               - 'package.json'
               - 'package-lock.json'
               - '.github/workflows/ci.yml'
@@ -228,6 +253,43 @@ jobs:
         run: cargo test -p band-engine --no-default-features --features test-support
         env:
           SIM_REPORT_DIR: ${{ runner.temp }}/sim-report
+
+  loom:
+    # SeqCell(band-dsp stats.rs) seqlock의 메모리 순서를 loom으로 모든 인터리빙에 걸쳐 검사한다(#173, #141 리뷰 L-2).
+    # 모델 검사는 OS 무관이라 ubuntu에서 돈다(Windows 러너를 쓰지 않는다). 결정적이다 — 같은 코드면 결과가 같으므로
+    # 야간 반복은 두지 않고, 필터(loom)에 걸린 PR과 develop push·수동 실행에서만 돈다.
+    # RUSTFLAGS(`--cfg loom`)가 달라 다른 잡의 산출물을 쓸 수 없다: 캐시 키를 따로 둔다(rust-cache는 RUSTFLAGS도 키에 넣는다).
+    name: Loom (SeqCell 메모리 순서)
+    needs: changes
+    if: needs.changes.outputs.loom == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: client/src-tauri
+    env:
+      RUSTFLAGS: --cfg loom
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
+        with:
+          workspaces: client/src-tauri
+          key: loom
+      - name: Clippy (band-dsp, --cfg loom)
+        # loom 시험 모듈과 `seq_hint`·`seq_fence` 별칭의 loom 쪽 cfg는 이 구성에서만 컴파일된다.
+        timeout-minutes: 10
+        run: cargo clippy -p band-dsp --release --lib --tests -- -D warnings
+      - name: Loom 모델 검사
+        # 제품 시험(찢긴 읽기 없음)과 변이 시험(`loom_mutant_*`: 순서를 하나씩 약하게 한 복사본을 loom이 잡는지).
+        timeout-minutes: 10
+        run: cargo test -p band-dsp --release --lib loom
 
   long-sim:
     # 장시간 시뮬레이션(P1-6): 6피어 풀메시 60분 가상 시간(결정적, 디버그 빌드 로컬 약 8분 — 러너는 더 느릴 수 있다). GOAL 1·2절 수치를 자동 판정해
