@@ -1189,3 +1189,46 @@ fn trace_fixture_matches() {
         .replace("\r\n", "\n");
     assert_eq!(want, got, "지터 trace가 기준값과 다르다(동작 변경) — fixture를 갱신하지 말 것(구조 정리 PR)");
 }
+
+/// PCM 은닉의 이음매: 손실 은닉 시작(직전 프레임 페이드)과 재합류(은닉 뒤 첫 실제 패킷)에 계단(클릭)이 없다.
+/// 전에는 직전 프레임을 머리부터 반복해 은닉 첫 샘플에서, 페이드·무음 뒤 새 패킷 첫 샘플에서 진폭의 최대 95%만큼
+/// 뛰었다(정상 최대 계단의 9~16배). Opus는 디코더 PLC가 이어 주므로 대조군으로 같은 기준을 본다.
+#[test]
+fn pcm_concealment_has_no_click_at_start_or_rejoin() {
+    // 440Hz 진폭 0.5 사인의 샘플 간 최대 차.
+    let normal = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0 * 0.5;
+    for (codec, frame, lose) in [
+        (CodecKind::Pcm16, 120usize, 1usize),
+        (CodecKind::Pcm16, 120, 2),
+        (CodecKind::Pcm16, 240, 1),
+        (CodecKind::Pcm16, 240, 3),
+        (CodecKind::Opus, 240, 1),
+    ] {
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+        let mut tx = Sender::new(codec, frame, 0, 0);
+        let pkt_us = frame as u64 * 1000 / 48;
+        let mut out = vec![0f32; 64 * 2];
+        let mut stream = Vec::new();
+        let (mut t, mut send_t, mut k) = (0u64, 0u64, 0usize);
+        // 송신 200번째부터 `lose`개를 잃는다(재생 시작 뒤 0.5초 이상).
+        while t < 1_500_000 {
+            while send_t <= t {
+                let p = tx.next();
+                if !(200..200 + lose).contains(&k) {
+                    jb.insert(&p.0, &p.1, send_t + 1000);
+                }
+                k += 1;
+                send_t += pkt_us;
+            }
+            jb.pop(&mut out);
+            jb.end_burst(t, t, 0.0);
+            if t >= 200_000 {
+                stream.extend(out.iter().step_by(2).copied());
+            }
+            t += 64 * 1000 / 48;
+        }
+        assert!(jb.stats().concealed >= lose as u64, "{codec:?} F{frame}: 은닉이 일어나야 함");
+        let max_step = stream.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+        assert!(max_step <= 2.0 * normal, "{codec:?} F{frame} 손실 {lose}: 최대 계단 {max_step:.4} > 2 × 정상 {normal:.4}(클릭)");
+    }
+}

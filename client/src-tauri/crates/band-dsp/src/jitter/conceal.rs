@@ -84,6 +84,12 @@ pub(super) struct Concealer {
     pkt_channels: usize,
     last_frame: Vec<f32>,
     last_frame_valid: bool,
+    /// `last_frame`의 프레임 수(마지막 디코드 패킷).
+    last_frame_len: usize,
+    /// 직전 출력이 PCM 은닉(페이드·무음)이었다 — 다음 실제 패킷 앞부분을 `pcm_tail`에서 이어 붙인다(재합류 클릭 제거).
+    pcm_concealed: bool,
+    /// PCM 은닉 프레임의 마지막 샘플(채널별).
+    pcm_tail: [f32; 2],
     conceal_run: usize,
     starve_samples: usize,
     /// 아직 seq와 짝지어지지 않은 언더런 은닉 프레임 수(P1-6a). 언더런 은닉은 seq를 유지한 채 재생 타임라인을
@@ -112,6 +118,9 @@ impl Concealer {
             pkt_channels: 1,
             last_frame: b.last_frame,
             last_frame_valid: false,
+            last_frame_len: 0,
+            pcm_concealed: false,
+            pcm_tail: [0.0; 2],
             conceal_run: 0,
             starve_samples: 0,
             underrun_debt: 0,
@@ -209,7 +218,21 @@ impl Concealer {
             }
         }
         self.xfade_len = 0;
+        // PCM 은닉(페이드·무음) 뒤 첫 실제 프레임: 은닉의 마지막 샘플에서 새 프레임으로 이어 붙인다. 바로 붙이면 무음 → 신호
+        // 계단이 클릭이 된다(재합류 클릭). 은닉 프레임 뒤 늦게 온 같은 패킷을 재생할 때(되감김)도 같다.
+        if self.pcm_concealed {
+            let l = DROP_XFADE.min(pframe);
+            for i in 0..l {
+                let w = (i + 1) as f32 / (l + 1) as f32;
+                for c in 0..ch {
+                    let k = i * ch + c;
+                    out[k] = self.pcm_tail[c.min(1)] * (1.0 - w) + out[k] * w;
+                }
+            }
+            self.pcm_concealed = false;
+        }
         self.last_frame[..pframe * ch].copy_from_slice(&self.dec_buf[..pframe * ch]);
+        self.last_frame_len = pframe;
         self.last_frame_valid = true;
         self.pkt_channels = ch;
         self.conceal_run = 0;
@@ -238,16 +261,23 @@ impl Concealer {
             }
         }
         if !ok {
-            // PCM(또는 디코더 없음): 직전 프레임 페이드아웃 1회, 이후 무음
+            // PCM(또는 디코더 없음): 직전 프레임을 뒤집어(끝 샘플부터 거꾸로) 페이드아웃 1회, 이후 무음. 뒤집으면 첫 은닉
+            // 샘플이 직전 출력의 마지막 샘플과 같아 이음매에 계단이 없다(그대로 반복하면 프레임 머리로 뛰어 클릭이 났다).
             if self.conceal_run == 0 && self.last_frame_valid {
-                let lf = &self.last_frame[..frames * ch];
-                for (i, (o, s)) in out.iter_mut().zip(lf).enumerate() {
-                    let g = 1.0 - (i / ch) as f32 / frames as f32;
-                    *o = s * g;
+                let len = self.last_frame_len;
+                for i in 0..frames {
+                    let g = 1.0 - i as f32 / frames as f32;
+                    for c in 0..ch {
+                        out[i * ch + c] = if i < len { self.last_frame[(len - 1 - i) * ch + c] * g } else { 0.0 };
+                    }
                 }
             } else {
                 out.fill(0.0);
             }
+            for c in 0..ch.min(2) {
+                self.pcm_tail[c] = out[(frames - 1) * ch + c];
+            }
+            self.pcm_concealed = true;
         }
         self.xfade_len = 0;
         self.conceal_run += 1;
