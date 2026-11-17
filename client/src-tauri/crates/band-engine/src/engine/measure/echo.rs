@@ -475,12 +475,18 @@ impl EchoJob {
         let m = res?;
         // 프로브(수집 버퍼)를 못 받으면 수집한 값은 버린다. 받은 프로브는 여기(측정 스레드)에서 해제된다.
         let probe = probe.ok_or(WORKER_UNRESPONSIVE)?;
+        Ok(self.finish(&probe, m))
+    }
+
+    /// 회수한 프로브와 듣기 끝의 재료로 보고서를 만든다(`run`의 마지막 단계). 탭 넘침이 마지막 클릭의 분석 창을 잘랐으면
+    /// Ok를 불안정으로 낮춘다(#140 리뷰 L3). 넘침 위치를 정한 프로브로 판정을 결정적으로 보는 시험이 이 함수를 지난다(#167 리뷰 L3).
+    fn finish(&self, probe: &EchoProbe, m: EchoMaterials) -> EchoReport {
         let per = analyze_echo(&probe.emitted_us, &probe.arrivals, &probe.arrival_us);
         let mut rep = self.report(per, m.delay_us, m.rtt, m.jitter, m.path);
         if overflow_cut_window(probe.overflow, &probe.emitted_us, &probe.arrival_us) && rep.verdict == MeasureVerdict::Ok {
             rep.verdict = MeasureVerdict::Unstable;
         }
-        Ok(rep)
+        rep
     }
 
     fn sleep(&self, d: Duration, cancel: &AtomicBool) -> Result<(), String> {
@@ -851,5 +857,99 @@ mod tests {
         // 클릭이 안 나갔거나 탭이 비었으면 보수적으로 낮춘다
         assert!(overflow_cut_window(5, &[], &[0.0, full_end]));
         assert!(overflow_cut_window(5, &emitted, &[]));
+    }
+
+    /// 측정 스레드가 `run` 끝에 쓰는 작업. `finish`는 망·미디어를 건드리지 않지만 `EchoJob`은 둘을 쥐어야 한다 — 실제
+    /// 소켓(포트 0, STUN 없음)과 피어 미디어 상태를 만들어 넣는다.
+    fn test_job() -> (EchoJob, crate::net::Net) {
+        use band_dsp::jitter::JitterSettings;
+        use band_dsp::media_link::{media_link, PeerKey};
+        let opts = crate::net::NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
+        let net = crate::net::Net::start("me".into(), &opts).unwrap();
+        let key = PeerKey::from_raw(1);
+        let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
+        let (media, _worker_side) = band_dsp::peer_media::PeerMedia::new(key, "b".into(), 1, 0, js, media_link(key).1, 48_000).unwrap();
+        let (port, _rt) = echo_port();
+        let job = EchoJob {
+            port: Arc::new(port),
+            net: net.shared().clone(),
+            peer_id: "b".into(),
+            peer_ssrc: 1,
+            media,
+            stream: EchoStream { codec: CodecKind::Pcm16, channels: 1, opus_bitrate: 0, frame_samples: 120 },
+            frame_ms: 2.5,
+            local_latency_ms: 10.0,
+            input_buffer_ms: 2.5,
+            output_buffer_ms: 2.5,
+        };
+        (job, net)
+    }
+
+    /// 듣기 끝의 재료: 상대 처리 1ms(정상 범위), 핑 RTT 20ms.
+    fn materials() -> EchoMaterials {
+        EchoMaterials { delay_us: 1_000, rtt: Some(20.0), jitter: 5.0, path: None }
+    }
+
+    /// 실제 프로브(클릭 `RUNS`회, 23.4ms 늦게 되돌아온 스트림)를 워커가 `record`로 채운다. 탭 상한을 낮춰 탭이 `end_us`
+    /// (워커 epoch, 클릭 송신과 같은 시계)에서 넘치게 한다 — 그 뒤 샘플은 버려지고 `overflow`가 오른다.
+    const RUNS: u32 = 3;
+    const DELAY_US: f64 = 23_400.0;
+    fn probe_overflowing_at(end_us: f64) -> Box<EchoProbe> {
+        let mut p = EchoProbe::new(1, "b".into(), 1, EchoStream { codec: CodecKind::Pcm16, channels: 1, opus_bitrate: 0, frame_samples: 120 }, RUNS).unwrap();
+        p.start_clicks(RUNS);
+        let f = 120;
+        let mut frame = vec![0f32; f];
+        let mut stream = Vec::new();
+        let mut now = 0.0;
+        // 마지막 클릭 창 끝(+꼬리)을 넉넉히 넘는 길이: 클릭 RUNS+2개분
+        for _ in 0..((RUNS as usize + 2) * CLICK_INTERVAL as usize / f) {
+            now += f as f64 * 1e6 / 48_000.0;
+            p.fill_frame(&mut frame, now);
+            stream.extend_from_slice(&frame);
+        }
+        assert_eq!(p.emitted_us.len(), RUNS as usize);
+        // 탭은 DELAY_US부터 담으므로 end_us까지 담을 샘플 수
+        let cap = ((end_us - DELAY_US) * 48_000.0 / 1e6) as usize;
+        assert!(cap < stream.len() && cap <= p.tap_cap, "넘치도록 상한을 낮춘다: {cap} / {} / {}", stream.len(), p.tap_cap);
+        p.tap_cap = cap;
+        let stereo: Vec<f32> = stream.iter().flat_map(|&v| [v, v]).collect();
+        for (n, ch) in stereo.chunks(128).enumerate() {
+            p.record(ch, DELAY_US + (n * 64) as f64 * 1e6 / 48_000.0);
+        }
+        assert_eq!(p.arrivals.len(), cap);
+        assert!(p.overflow > 0, "탭이 넘쳤다");
+        p
+    }
+
+    /// #167 리뷰 L3: `run`이 프로브를 회수한 뒤 지나는 `finish`까지 본다. 클릭은 셋 다 검출되고(분석만으로는 Ok) 탭이 넘친
+    /// 위치만 다르다 — 마지막 클릭 창(+꼬리) 안에서 넘치면 불안정, 창 뒤에서 넘치면 Ok. 같은 잘린 탭이라도 넘침이 없으면
+    /// 낮추지 않는다(넘침 때문에 낮춘 것이다).
+    /// 변이: `finish`에서 낮추기를 빼면 ①이, 예전 `overflow > 0` 판정으로 되돌리면 ②가 실패한다.
+    #[test]
+    fn finish_lowers_verdict_only_when_overflow_cuts_last_window() {
+        let (job, _net) = test_job();
+        let last = (RUNS - 1) as f64 * CLICK_INTERVAL as f64 * 1e6 / 48_000.0;
+        let window_end = last + MAX_ECHO_MS * 1000.0 + ECHO_WINDOW_TAIL_US;
+
+        // ① 창 안에서 넘침: 마지막 클릭의 반사(+23.4ms)와 템플릿은 담았지만 창 끝(+280ms+8ms) 전에 끊김 → 불안정
+        let cut = probe_overflowing_at(last + 100_000.0);
+        assert!(cut.arrival_us.last().is_some_and(|&t| t < window_end));
+        let rep = job.finish(&cut, materials());
+        assert_eq!(rep.detected_runs, RUNS, "클릭은 셋 다 검출된다: {rep:?}");
+        assert!(rep.spread_ms.is_some_and(|s| s < 0.1), "흩어짐으로는 Ok: {rep:?}");
+        assert_eq!(rep.verdict, MeasureVerdict::Unstable, "창을 자른 넘침은 판정을 낮춘다: {rep:?}");
+
+        // ② 창 뒤에서 넘침: 넘친 샘플은 어느 창에도 안 들어간다 → Ok
+        let intact = probe_overflowing_at(window_end + 30_000.0);
+        assert!(intact.arrival_us.last().is_some_and(|&t| t >= window_end));
+        let rep = job.finish(&intact, materials());
+        assert_eq!(rep.detected_runs, RUNS, "{rep:?}");
+        assert_eq!(rep.verdict, MeasureVerdict::Ok, "창 뒤 넘침은 판정에 영향이 없다: {rep:?}");
+        assert!(rep.round_trip_ms.is_some_and(|v| (v - 23.4).abs() < 0.05), "{rep:?}");
+
+        // ③ ①과 같은 탭인데 넘침이 없으면(탭이 거기까지만 켜졌다) 낮추지 않는다
+        let mut short = probe_overflowing_at(last + 100_000.0);
+        short.overflow = 0;
+        assert_eq!(job.finish(&short, materials()).verdict, MeasureVerdict::Ok);
     }
 }
