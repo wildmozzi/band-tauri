@@ -577,6 +577,8 @@ settings.rs	method	current
 settings.rs	method	new
 settings.rs	method	set
 settings.rs	struct	RecordDir
+sys/alloc.rs	fn	counted
+sys/alloc.rs	struct	Counting
 sys/cpu.rs	fn	cycle_pct
 sys/cpu.rs	fn	process_cycles
 sys/cpu.rs	fn	tsc_now

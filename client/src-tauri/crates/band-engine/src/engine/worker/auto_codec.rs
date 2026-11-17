@@ -23,10 +23,10 @@ const AUTO_CODEC_CHECK: Duration = Duration::from_millis(200);
 
 /// 피어 하나의 Opus 자동 전환 송신 상태(PCM16 설정, P1-4c·P1-4e). 키는 `PeerFeed`와 같은 `PeerKey`.
 struct AutoTx {
+    /// 피어 키. 에코 측정 클릭 스트림 대상인지도 이것으로 가린다(L2 — 전에는 피어 id 문자열을 복제해 쥐었다, 엔진 ⑧ 후속).
     key: PeerKey,
-    /// 피어 id(에코 측정 클릭 스트림 대상인지 가릴 때, L2).
-    id: String,
     enc: Encoder,
+    /// 인코더와 짝으로 풀에서 꺼내고 돌려준다(새 피어에서 워커가 할당하지 않게, 엔진 ⑧ 후속).
     payload: Vec<u8>,
     /// 이번 프레임의 Opus 페이로드 길이(대상이 아니거나 인코드 실패면 None → 설정 코덱으로 보낸다).
     len: Option<usize>,
@@ -43,13 +43,12 @@ struct AutoTx {
 }
 
 impl AutoTx {
-    fn new(key: PeerKey, id: String, mut enc: Encoder) -> Self {
+    fn new(key: PeerKey, (mut enc, payload): Spare) -> Self {
         let _ = enc.set_loss_perc(DEFAULT_OPUS_LOSS_PERC);
         Self {
             key,
-            id,
             enc,
-            payload: vec![0u8; MAX_PAYLOAD_BYTES],
+            payload,
             len: None,
             loss: LossCodecPolicy::default(),
             loss_on: false,
@@ -61,14 +60,27 @@ impl AutoTx {
     }
 }
 
+/// 풀에 쉬는 인코더와 그 페이로드 버퍼(`MAX_PAYLOAD_BYTES`).
+type Spare = (Encoder, Vec<u8>);
+
+/// `auto`·`pool`의 용량: 피어 수 + 교체 중 하나(같은 peerId를 다시 추가하면 다음 점검까지 옛 키의 `AutoTx`가 남는다).
+/// 이만큼 미리 잡아 두어 `push`가 재할당하지 않는다.
+const AUTO_SLOTS: usize = MAX_PEERS + 1;
+
+/// 새 인코더 + 페이로드 버퍼.
+fn spare(ich: usize, bitrate: u32) -> Result<Spare, String> {
+    Ok((Encoder::new(CodecKind::Opus, ich, bitrate)?, vec![0u8; MAX_PAYLOAD_BYTES]))
+}
+
 /// 네트워크가 있고 설정 코덱이 PCM16일 때만 있다(`SendPath.auto: Option<AutoCodec>`).
 pub(super) struct AutoCodec {
     frame: usize,
     ich: usize,
     bitrate: u32,
     auto: Vec<AutoTx>,
-    /// 미리 만들어 둔 Opus 인코더(피어 수만큼, 시작 시). 새 피어가 자동 전환 대상이 될 때 생성 지연이 없게 한다.
-    pool: Vec<Encoder>,
+    /// 미리 만들어 둔 Opus 인코더와 페이로드 버퍼(피어 수만큼, 시작 시). 새 피어가 자동 전환 대상이 될 때 생성 지연이 없고
+    /// 워커가 할당하지 않게 한다(엔진 ⑧ 후속). 사라진 피어의 것은 여기로 돌아온다.
+    pool: Vec<Spare>,
     flags: u8,
     /// 직전 캡처 프레임(전환 시 인코더 예열용).
     relay_prev: Vec<f32>,
@@ -79,15 +91,15 @@ pub(super) struct AutoCodec {
 impl AutoCodec {
     /// `frame` = 프레임 크기(48k 프레임 수), `ich` = 내부 채널 수, `bitrate` = Opus 비트레이트.
     pub(super) fn new(frame: usize, ich: usize, bitrate: u32) -> Result<Self, String> {
-        let mut pool = Vec::with_capacity(MAX_PEERS);
+        let mut pool = Vec::with_capacity(AUTO_SLOTS);
         for _ in 0..MAX_PEERS {
-            pool.push(Encoder::new(CodecKind::Opus, ich, bitrate)?);
+            pool.push(spare(ich, bitrate)?);
         }
         Ok(Self {
             frame,
             ich,
             bitrate,
-            auto: Vec::with_capacity(MAX_PEERS),
+            auto: Vec::with_capacity(AUTO_SLOTS),
             pool,
             flags: FLAG_OPUS | if ich == 2 { FLAG_STEREO } else { 0 },
             relay_prev: vec![0.0; frame * ich],
@@ -139,18 +151,19 @@ impl AutoCodec {
             let idx = match auto.iter().position(|a| a.key == key) {
                 Some(i) => i,
                 None => {
-                    let enc = match pool.pop() {
-                        Some(e) => e,
-                        None => match Encoder::new(CodecKind::Opus, ich, bitrate) {
-                            Ok(e) => e,
+                    // 새 피어: 풀에서 인코더·버퍼를 꺼낸다(할당 없음, 엔진 ⑧ 후속). 풀이 비는 것은 피어 `MAX_PEERS`명이 다
+                    // 있는데 교체가 겹쳐 옛 키가 아직 남은 때뿐이다 — 그때만 워커가 새로 만든다(드문 할당, 4.3절 1).
+                    let sp = match pool.pop() {
+                        Some(s) => s,
+                        None => match spare(ich, bitrate) {
+                            Ok(s) => s,
                             Err(e) => {
                                 log::warn!("{}: 자동 전환용 Opus 인코더 생성 실패: {e}", peer.id());
                                 continue;
                             }
                         },
                     };
-                    // 드문 할당(워커 스레드): 새 피어의 `AutoTx`(id 문자열·페이로드 버퍼). engine-architecture.md 4.3절 1.
-                    auto.push(AutoTx::new(key, peer.id().to_string(), enc));
+                    auto.push(AutoTx::new(key, sp));
                     auto.len() - 1
                 }
             };
@@ -186,20 +199,20 @@ impl AutoCodec {
                 i += 1;
             } else {
                 let a = self.auto.swap_remove(i);
-                self.pool.push(a.enc);
+                self.pool.push((a.enc, a.payload));
             }
         }
     }
 
     /// 자동 전환 대상 피어마다 이 프레임을 그 피어 전용 Opus 인코더로 인코드한다(대상이 아니면 건너뜀).
-    /// `alt_peer` = 에코 측정 클릭 스트림을 받는 피어: 그동안은 설정 코덱(클릭)이 가므로 인코드하지 않고,
+    /// `alt_peer` = 에코 측정 클릭 스트림을 받는 피어의 키: 그동안은 설정 코덱(클릭)이 가므로 인코드하지 않고,
     /// 측정이 끝나 다시 대상이 되면 새 스트림으로 초기화·예열한다(#66 리뷰 L2).
     /// `encode_errors` = 송신 경로와 함께 세는 로그 빈도 제한 카운터(`SendPath`가 빌려 준다).
-    pub(super) fn encode_frames(&mut self, frame: &[f32], alt_peer: Option<&str>, encode_errors: &mut u64) {
+    pub(super) fn encode_frames(&mut self, frame: &[f32], alt_peer: Option<PeerKey>, encode_errors: &mut u64) {
         let relay_on = self.relay_policy.active();
         for a in &mut self.auto {
             a.len = None;
-            let want = auto_reason(relay_on, a.on_relay, a.loss_on).is_some() && alt_peer != Some(a.id.as_str());
+            let want = auto_reason(relay_on, a.on_relay, a.loss_on).is_some() && alt_peer != Some(a.key);
             if want && !a.encoding {
                 // 새 스트림: 상태 초기화 + 직전 프레임으로 예열(출력 버림). 첫 패킷이 Opus 알고리즘 지연(2.5ms)만큼
                 // 0으로 시작하지 않고 직전 소리에서 이어진다(전환 구간 불연속 3 → 1, 은닉 0).

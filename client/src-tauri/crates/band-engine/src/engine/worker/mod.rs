@@ -105,6 +105,12 @@ pub struct WorkerStats {
     pub(crate) iter_unlocked: crate::net::txlat::SendLatency,
     /// 남은 락을 자리별로(엔진 ②b 측정, 설계 4.3절): 기다린 횟수·합·최대.
     pub(crate) lock_sites: WorkerLockSites,
+    /// 워커 반복(수면 제외) 안에서 이 워커 스레드가 한 할당·재할당·해제 누계와 반복 수(시험 구성만, 엔진 ⑧ 후속). 계수
+    /// 할당자(`sys::alloc::Counting`)가 걸린 바이너리 — 이 크레이트의 단위 시험 바이너리 — 에서만 0이 아닐 수 있다.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) iter_allocs: AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) iters: AtomicU64,
 }
 
 /// 워커가 기다릴 수 있는 남은 락의 자리별 대기 기록(진단 전용, `Engine::take_worker_timing`). 엔진 ②b-6b 뒤로
@@ -313,57 +319,77 @@ impl Worker {
     pub(crate) fn run(mut self) {
         let _prio = crate::sys::prio::promote_engine_thread(&self.ctx.stats.thread_prio);
         log::info!("워커 시작: frame {} ch {}", self.ctx.cfg.frame_samples(), self.ctx.cfg.channels);
-        let c = &self.ctx;
         let mut last_start = Instant::now();
-        while !c.stop.load(Ordering::Relaxed) {
-            let start = Instant::now();
-            if DIAG_TIMING {
-                c.stats.iter_period.record(start - last_start);
-            }
-            last_start = start;
-            // 에코 프로브: 측정 스레드가 넘긴 프로브를 받고, 측정 번호에 묶인 신호(클릭 시작·탭 끝·반환)를 적용한다(락 없음).
-            self.echo.poll();
-            // 피어 표 복사본은 송신과 무관하게 반복마다 맞춘다: 캡처가 멈춰도(장치 분리) 빠진 피어가 쌓이지 않게(#126 리뷰 M-1).
-            if let Some(n) = self.net.as_mut() {
-                n.table.refresh();
-            }
-            self.local.configure(&c.info, &c.counters, self.capture.granularity());
-            // 송신 큐 지연의 시작점(P1-3, 리뷰 M1): 이 패스에서 링을 비우기 직전 시각. 이번 패스에서 완성되는 프레임은
-            // 모두 이 시각을 쓴다 — 같은 패스의 뒤 프레임은 앞 프레임의 인코딩·송신을 기다린 시간까지 포함된다.
-            // (캡처에 남는 것은 프레임 미만이므로, 여기서 나가는 프레임의 마지막 샘플은 모두 이번 패스에 들어왔다.)
-            let pass_at = Instant::now();
-            self.capture.fill();
-            let muted = c.controls.input_muted.load(Ordering::Relaxed);
-            while let Some(block) = self.capture.next_block(muted) {
-                self.local.push(block);
-            }
-            while let Some(frame) = self.capture.next_frame() {
-                // 네트워크가 없으면 프레임은 버려진다(전에는 `ts`만 올렸다 — 송신에서만 쓰는 값이라 관찰되지 않는다).
-                if let Some(n) = self.net.as_mut() {
-                    n.send.send_frame(frame, pass_at, &mut n.table.copy, self.echo.probe_mut());
-                }
-            }
-            // 인자 평가 순서 = 읽는 순서: 벽시계 → 출력 버스트 → (observe 안) 콜백 카운터.
-            let timing = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);
-            self.metro.service(&c.info, &c.counters, &c.stats, &timing, self.net.as_ref().map(|n| &n.table.copy), &mut self.lock_wait);
-            let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &timing, self.echo.tap_mut());
-            self.local.service(&c.info, &c.counters, &c.controls, &c.bank.slots[LOCAL_SOURCE], &c.stats, c.epoch);
-            self.local.track_occupancy(c.info.out_rate, &c.stats, self.capture.pending48());
-            self.watch.check(&c.counters, &c.stats, c.epoch);
-            let waited = std::time::Duration::from_nanos(std::mem::take(&mut self.lock_wait).ns);
-            if DIAG_TIMING {
-                let body = start.elapsed();
-                let s = &c.stats;
-                s.iter_body.record(body);
-                s.iter_lock_wait.record(waited);
-                s.iter_unlocked.record(body.saturating_sub(waited));
-            }
+        // 할당 계수(시험 구성만, 엔진 ⑧ 후속): 반복 하나 전체(수면 제외)를 이 스레드의 계수 구간으로 감싼다. 계수는 스레드별이라
+        // 다른 스레드(제어 평면·net·RT)의 할당은 섞이지 않는다. `stats`는 루프 밖에서 한 번 복제한다.
+        #[cfg(any(test, feature = "test-support"))]
+        let stats = self.ctx.stats.clone();
+        while !self.ctx.stop.load(Ordering::Relaxed) {
+            #[cfg(any(test, feature = "test-support"))]
+            let urgent = {
+                let (urgent, n) = crate::sys::alloc::counted(|| self.iterate(&mut last_start));
+                stats.iter_allocs.fetch_add(n, Ordering::Relaxed);
+                stats.iters.fetch_add(1, Ordering::Relaxed);
+                urgent
+            };
+            #[cfg(not(any(test, feature = "test-support")))]
+            let urgent = self.iterate(&mut last_start);
             // 은닉 마감이 가까우면 짧게 잔다(Windows 고해상도 타이머라도 0.5ms 폴링은 마감을 넘길 수 있다).
-            std::thread::sleep(if round.urgent { FINE_POLL } else { POLL });
+            std::thread::sleep(if urgent { FINE_POLL } else { POLL });
         }
+        let c = &self.ctx;
         self.peers.close(&c.bank);
         // 쥐고 있는 프로브를 측정 스레드로 돌려준다(엔진 정지 중 측정).
         self.echo.close();
         log::info!("워커 종료");
+    }
+
+    /// 워커 반복 하나(수면 제외). 순서 규칙은 `run`의 주석이 계약이다. 돌려주는 값은 은닉 마감이 가까운지(`urgent`, 다음 수면
+    /// 길이). 정상 구간에서 이 호출 전체는 할당·재할당·해제 0이다(엔진 ⑧ 후속, `engine::alloc_tests`).
+    fn iterate(&mut self, last_start: &mut Instant) -> bool {
+        let c = &self.ctx;
+        let start = Instant::now();
+        if DIAG_TIMING {
+            c.stats.iter_period.record(start - *last_start);
+        }
+        *last_start = start;
+        // 에코 프로브: 측정 스레드가 넘긴 프로브를 받고, 측정 번호에 묶인 신호(클릭 시작·탭 끝·반환)를 적용한다(락 없음).
+        self.echo.poll();
+        // 피어 표 복사본은 송신과 무관하게 반복마다 맞춘다: 캡처가 멈춰도(장치 분리) 빠진 피어가 쌓이지 않게(#126 리뷰 M-1).
+        if let Some(n) = self.net.as_mut() {
+            n.table.refresh();
+        }
+        self.local.configure(&c.info, &c.counters, self.capture.granularity());
+        // 송신 큐 지연의 시작점(P1-3, 리뷰 M1): 이 패스에서 링을 비우기 직전 시각. 이번 패스에서 완성되는 프레임은
+        // 모두 이 시각을 쓴다 — 같은 패스의 뒤 프레임은 앞 프레임의 인코딩·송신을 기다린 시간까지 포함된다.
+        // (캡처에 남는 것은 프레임 미만이므로, 여기서 나가는 프레임의 마지막 샘플은 모두 이번 패스에 들어왔다.)
+        let pass_at = Instant::now();
+        self.capture.fill();
+        let muted = c.controls.input_muted.load(Ordering::Relaxed);
+        while let Some(block) = self.capture.next_block(muted) {
+            self.local.push(block);
+        }
+        while let Some(frame) = self.capture.next_frame() {
+            // 네트워크가 없으면 프레임은 버려진다(전에는 `ts`만 올렸다 — 송신에서만 쓰는 값이라 관찰되지 않는다).
+            if let Some(n) = self.net.as_mut() {
+                n.send.send_frame(frame, pass_at, &mut n.table.copy, self.echo.probe_mut());
+            }
+        }
+        // 인자 평가 순서 = 읽는 순서: 벽시계 → 출력 버스트 → (observe 안) 콜백 카운터.
+        let timing = self.clock.observe(&c.counters, c.wall_us(), out_burst_dev(&c.info, &c.counters) as usize, c.info.out_rate);
+        self.metro.service(&c.info, &c.counters, &c.stats, &timing, self.net.as_ref().map(|n| &n.table.copy), &mut self.lock_wait);
+        let round = self.peers.service(&c.bank, &c.counters, &c.stats, c.info.out_rate, &timing, self.echo.tap_mut());
+        self.local.service(&c.info, &c.counters, &c.controls, &c.bank.slots[LOCAL_SOURCE], &c.stats, c.epoch);
+        self.local.track_occupancy(c.info.out_rate, &c.stats, self.capture.pending48());
+        self.watch.check(&c.counters, &c.stats, c.epoch);
+        let waited = std::time::Duration::from_nanos(std::mem::take(&mut self.lock_wait).ns);
+        if DIAG_TIMING {
+            let body = start.elapsed();
+            let s = &c.stats;
+            s.iter_body.record(body);
+            s.iter_lock_wait.record(waited);
+            s.iter_unlocked.record(body.saturating_sub(waited));
+        }
+        round.urgent
     }
 }
