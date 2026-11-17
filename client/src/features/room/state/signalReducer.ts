@@ -205,7 +205,8 @@ function reduceJoinError(s: RoomState, p: SignalPayload, ctx: SignalContext): Si
   const retryable = isRetryableJoinError(je)
   if (!retryable) effects.push({ type: 'set-rejoining', value: false })
   // 방 밖으로 밀려났다: 엔진·방송을 멈춘다 (서버는 방 밖 연결의 연주 메시지를 거부한다)
-  if (joinErrorStopsSession(je, rejoining)) effects.push({ type: 'stop-broadcast' }, { type: 'stop-session' })
+  // 관람 수신도 닫는다: 재개로 유지해 둔 연결이 입장 오류 화면 뒤에서 계속 소리를 내지 않게 (#192 리뷰 M-1)
+  if (joinErrorStopsSession(je, rejoining)) effects.push({ type: 'stop-broadcast' }, { type: 'stop-session' }, { type: 'keep-viewers', peerIds: [] })
   // 서버 혼잡/방 준비 중/방 조회 실패: 같은 조건(비밀번호)으로 몇 번 자동 재시도
   const willRetry = retryable && !!roomId && ctx.busyRetryCount < MAX_BUSY_RETRIES
   if (willRetry && roomId) {

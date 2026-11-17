@@ -263,6 +263,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       // 방 id를 먼저 비워야 시작 중인 엔진이 완료 시 "퇴장함"을 보고 스스로 내려간다 (H2)
       store.patch('connection', { currentRoomId: null, joinError: null, roomJoined: false })
       heldBroadcastIdRef.current = null
+      heldViewerIdRef.current = null
       broadcaster.stop()
       // leave가 participant-left로 전파되므로 native-leave/stop-performing은 따로 보내지 않는다
       void s.stop({ notify: false })
@@ -386,6 +387,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         rejoiningRef.current = false
         clearBusyRetry()
         heldBroadcastIdRef.current = null
+        heldViewerIdRef.current = null
         broadcaster.stop()
         v.closeAll()
         joinOnReadyRef.current = 'fresh'
