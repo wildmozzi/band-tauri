@@ -102,8 +102,10 @@ impl LocalPath {
         let mon = if controls.monitor_enabled.load(Ordering::Relaxed) { controls.monitor_gain.load() } else { 0.0 };
         sh.set_gains((mon, mon), (1.0, 1.0));
         let chunk_dev = chunk_dev(info);
-        self.adapt_safety(sh.underrun_frames.load(Ordering::Relaxed), out_burst_dev(info, counters), epoch.elapsed(), chunk_dev);
-        let target = out_burst_dev(info, counters) + chunk_dev + self.safety;
+        // 여유 판단과 목표 수위는 같은 출력 버스트 값을 쓴다(한 번 읽음). 아래 상한(`max_chunks`)은 전처럼 따로 읽는다.
+        let out_burst = out_burst_dev(info, counters);
+        self.adapt_safety(sh.underrun_frames.load(Ordering::Relaxed), out_burst, epoch.elapsed(), chunk_dev);
+        let target = out_burst + chunk_dev + self.safety;
         if self.fill() >= target {
             return;
         }

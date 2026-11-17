@@ -44,7 +44,7 @@
   - 크기는 입력 방출 패턴(주기 lcm(입력 버퍼, 리샘플 청크))에서 산정한다.
   - 입·출력 장치 클럭 차는 수위 제어(1샘플 단위, 최대 500ppm)로 흡수한다.
   - 언더런 때 늘린 여유는 10초 무사고마다 되돌린다.
-- 입력 또는 출력 콜백이 1초 넘게 멈추거나, 한 방향이 엔진 시작 뒤 3초 동안 첫 콜백을 한 번도 받지 못하면(열기 직후·첫 콜백 전 분리) 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화 HRESULT(`AUDCLNT_E_DEVICE_INVALIDATED`, `AUDCLNT_E_SERVICE_NOT_RUNNING`, `AUDCLNT_E_RESOURCES_INVALIDATED`)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 그 밖의 WASAPI 호출 실패는 일시 오류로 보고 `streamErrors`만 올린 뒤 다음 이벤트를 기다린다. 같은 방향이 연속 4회 실패하면 그 스트림을 재시작(Stop/Reset/Start, `streamRestarts`)하고, 성공 없이 재시작이 3회 이어지거나 연속 50회 실패하면 `streamFailed=true`, `running=false`로 멈춘다.
+- 입력 또는 출력 콜백이 1초 넘게 멈추거나, 한 방향이 워커 감시 시작(장치 Start와 STUN이 끝난 뒤 워커의 첫 반복) 뒤 5초 동안 첫 콜백을 한 번도 받지 못하면(열기 직후·첫 콜백 전 분리. 거짓 양성은 프론트가 세션을 끝내 되돌릴 수 없으므로 보통의 첫 콜백(수 ms)보다 크게 잡았고, 방향별 첫 콜백 지연은 로그 "첫 출력/입력 콜백: 감시 시작 뒤 N ms"로 진단 내보내기에 남는다) 장치를 잃은 것으로 보고 `deviceLost=true`, `running=false`로 보고한다. 자체 WASAPI는 장치 무효화 HRESULT(`AUDCLNT_E_DEVICE_INVALIDATED`, `AUDCLNT_E_SERVICE_NOT_RUNNING`, `AUDCLNT_E_RESOURCES_INVALIDATED`)와 기본 장치 변경(기본 장치로 연 방향, 0.5초 감시)을 바로 `deviceLost`로 알린다. 그 밖의 WASAPI 호출 실패는 일시 오류로 보고 `streamErrors`만 올린 뒤 다음 이벤트를 기다린다. 같은 방향이 연속 4회 실패하면 그 스트림을 재시작(Stop/Reset/Start, `streamRestarts`)하고, 성공 없이 재시작이 3회 이어지거나 연속 50회 실패하면 `streamFailed=true`, `running=false`로 멈춘다.
 - 워커, net 수신, 자체 WASAPI 스레드는 스레드 시작 시 MMCSS "Pro Audio"에 등록하고(`AvSetMmThreadCharacteristicsW` + `AvSetMmThreadPriority(HIGH)`, 스레드 종료 시 `AvRevertMmThreadCharacteristics`) FTZ/DAZ를 켠다. 등록이 실패하면 `THREAD_PRIORITY_HIGHEST`로 대신하고, 그것도 실패하면 기본 우선순위로 계속 돈다. 결과는 로그와 `EngineStats.threadPriority`에 남는다(P1-2).
   - cpal WASAPI 콜백 스레드는 cpal(0.15)이 `THREAD_PRIORITY_TIME_CRITICAL`로 올리고, ASIO 콜백 스레드는 드라이버가 관리한다. RT 콜백 안에서는 시스템콜을 하지 않으므로 우리가 따로 등록하지 않는다(`threadPriority.audio = unmanaged`). cpal은 자체 WASAPI가 실패했을 때의 폴백이다.
   - 엔진이 도는 동안(`Engine::start` ~ `stop`) 시스템 타이머 해상도를 1ms로 쥔다(`timeBeginPeriod(1)`/`timeEndPeriod(1)`). 프로세스 안 참조 카운트로 감싸 처음 쥘 때만 begin, 마지막에 놓을 때만 end를 부르므로 반복 시작·정지와 중첩 엔진에도 짝이 맞는다. begin이 실패하면 end를 부르지 않는다.
@@ -490,7 +490,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 시험: `tests/loopback.rs` `remote_frame_and_input_buffer_reported`(A 256/10ms ↔ B 128/2.5ms, 각자 상대 값을 정확히 본다), `engine::report::tests::serializes_camel_case`, 클라이언트 `earLatency.test.ts`.
 
 `deviceLost`: 장치를 잃었다. 이때 `running`은 false다. 그래서 프론트의 "running=false 연속 → 엔진 정지" 감지가 그대로 동작한다. 자동 재열기는 아직 없다.
-- 입력 또는 출력 콜백이 1초 넘게 멈추거나 한 방향이 시작 뒤 3초 동안 첫 콜백을 받지 못하면 켜지고, 콜백이 다시 돌면 꺼진다.
+- 입력 또는 출력 콜백이 1초 넘게 멈추거나 한 방향이 워커 감시 시작(장치 Start·STUN 뒤) 뒤 5초 동안 첫 콜백을 받지 못하면 켜지고, 콜백이 다시 돌면 꺼진다.
 - 자체 WASAPI 백엔드는 장치 무효화(WASAPI 호출 실패)와, 기본 장치로 연 방향의 기본 장치 변경도 바로 알린다. 이 경우 엔진을 다시 시작할 때까지 켜져 있다(다시 시작하면 새 기본 장치로 열린다).
 
 `streamErrors`: 스트림 에러 누적 횟수(cpal 에러 콜백, 자체 WASAPI 호출 실패; 재시도로 넘어간 일시 오류 포함, 정보용).

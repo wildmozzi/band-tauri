@@ -10,15 +10,22 @@ use band_dsp::stats::AudioCounters;
 
 /// 콜백이 이 시간 동안 멈추면 장치를 잃은 것으로 본다.
 const DEVICE_STALL: Duration = Duration::from_secs(1);
-/// 첫 콜백을 이 시간(감시 첫 반복부터) 안에 한 번도 받지 못한 방향도 장치를 잃은 것으로 본다. 장치 분리가 열기 직후·첫 콜백
-/// 전에 일어나면 누적 프레임이 0에 머물러 `DEVICE_STALL` 규칙(0이면 멈춤 아님)에 걸리지 않았다. 첫 콜백까지 걸리는
-/// 시간(드라이버 시작·공유 모드 첫 주기)보다 넉넉하게 잡는다.
-const FIRST_CALLBACK_TIMEOUT: Duration = Duration::from_secs(3);
+/// 첫 콜백을 이 시간 안에 한 번도 받지 못한 방향도 장치를 잃은 것으로 본다. 기준 시각은 **워커 감시 시작**(첫 `check`)이다 —
+/// 장치 Start(cpal `play`, 자체 WASAPI `Start`)와 STUN이 모두 끝난 뒤라 실제 여유는 "스트림 Start 뒤 이 시간 + STUN"이다.
+/// 장치 분리가 열기 직후·첫 콜백 전에 일어나면 누적 프레임이 0에 머물러 `DEVICE_STALL` 규칙(0이면 멈춤 아님)에 걸리지 않았다.
+/// 거짓 양성은 되돌릴 수 없다(프론트가 `running=false` 2회 연속이면 연주를 끝낸다) — 그래서 보통의 첫 콜백(수 ms)보다
+/// 훨씬 넉넉하게 5초로 잡고, 실제 첫 콜백 지연은 방향마다 한 번 로그로 남긴다(진단 내보내기에 들어간다).
+const FIRST_CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 방향(진단·로그용).
+const DIRS: [&str; 2] = ["출력", "입력"];
 
 #[derive(Debug, Default)]
 pub(super) struct DeviceWatch {
     /// 첫 `check_at` 시각(아직 안 불렸으면 None). 콜백이 한 번도 안 돈 방향의 기준 시각이다.
     started_at: Option<Duration>,
+    /// 방향별(출력, 입력) 첫 콜백이 보일 때까지 걸린 시간(감시 시작 기준, 감시 전에 이미 돌았으면 0). 아직이면 None.
+    first_cb: [Option<Duration>; 2],
     last_played: u64,
     last_played_at: Duration,
     last_captured: u64,
@@ -36,11 +43,20 @@ impl DeviceWatch {
         self.check_at(counters, stats, epoch.elapsed());
     }
 
-    /// 입력·출력 콜백이 1초 넘게 멈추면 장치를 잃은 것으로 본다(리뷰 M9 / PR #5 M-2).
-    /// cpal 에러 콜백은 비치명 에러도 보내므로 그것만으로는 판단하지 않는다.
+    /// 입력·출력 콜백이 1초 넘게 멈추거나, 한 방향이 감시 시작 뒤 `FIRST_CALLBACK_TIMEOUT` 동안 첫 콜백을 받지 못하면
+    /// 장치를 잃은 것으로 본다(리뷰 M9 / PR #5 M-2). cpal 에러 콜백은 비치명 에러도 보내므로 그것만으로는 판단하지 않는다.
     fn check_at(&mut self, counters: &AudioCounters, stats: &WorkerStats, now: Duration) {
         let played = counters.out_played_frames.load(Ordering::Relaxed);
         let captured = counters.in_captured_frames.load(Ordering::Relaxed);
+        let started = *self.started_at.get_or_insert(now);
+        // 첫 콜백 지연(진단): 방향마다 처음 0이 아니게 보인 반복에서 한 번 남긴다.
+        for (i, count) in [played, captured].into_iter().enumerate() {
+            if count > 0 && self.first_cb[i].is_none() {
+                let d = now.saturating_sub(started);
+                self.first_cb[i] = Some(d);
+                log::info!("첫 {} 콜백: 감시 시작 뒤 {:.1}ms", DIRS[i], d.as_secs_f64() * 1e3);
+            }
+        }
         if played != self.last_played {
             self.last_played = played;
             self.last_played_at = now;
@@ -49,7 +65,6 @@ impl DeviceWatch {
             self.last_captured = captured;
             self.last_captured_at = now;
         }
-        let started = *self.started_at.get_or_insert(now);
         // 한 번이라도 돈 방향: 마지막 진행 뒤 `DEVICE_STALL`. 한 번도 안 돈 방향: 감시 시작 뒤 `FIRST_CALLBACK_TIMEOUT`.
         let dir_stalled = |count: u64, last_at: Duration| {
             if count > 0 {
@@ -113,7 +128,7 @@ mod tests {
         assert!(stalled(&s), "입력만 1초 넘게 멈춤");
     }
 
-    /// 첫 콜백 전 분실: 한 방향이 한 번도 돌지 않으면 감시 시작 뒤 3초가 넘을 때 멈춤으로 본다(전에는 영원히 아님).
+    /// 첫 콜백 전 분실: 한 방향이 한 번도 돌지 않으면 감시 시작 뒤 5초가 넘을 때 멈춤으로 본다(전에는 영원히 아님).
     #[test]
     fn direction_that_never_starts_is_stalled_after_timeout() {
         let (c, s) = (AudioCounters::default(), WorkerStats::default());
@@ -122,26 +137,28 @@ mod tests {
         let stalled = |s: &WorkerStats| s.device_stalled.load(Ordering::Relaxed);
         w.check_at(&c, &s, ms(1_000));
         // 출력만 돌고 입력은 첫 콜백이 오지 않는다
-        for t in (1_010..=4_000).step_by(10) {
+        for t in (1_010..=6_000).step_by(10) {
             c.out_played_frames.fetch_add(480, Ordering::Relaxed);
             w.check_at(&c, &s, ms(t));
-            assert!(!stalled(&s), "{t}ms: 첫 콜백 대기 3초 안은 멈춤이 아님");
+            assert!(!stalled(&s), "{t}ms: 첫 콜백 대기 5초 안은 멈춤이 아님");
         }
         c.out_played_frames.fetch_add(480, Ordering::Relaxed);
-        w.check_at(&c, &s, ms(4_001));
-        assert!(stalled(&s), "입력 첫 콜백이 3초 넘게 없으면 장치 분실");
+        w.check_at(&c, &s, ms(6_001));
+        assert!(stalled(&s), "입력 첫 콜백이 5초 넘게 없으면 장치 분실");
         // 늦게라도 돌기 시작하면 재개
         c.in_captured_frames.store(480, Ordering::Relaxed);
         c.out_played_frames.fetch_add(480, Ordering::Relaxed);
-        w.check_at(&c, &s, ms(4_010));
+        w.check_at(&c, &s, ms(6_010));
         assert!(!stalled(&s));
+        // 첫 콜백 지연(진단): 출력은 첫 반복 직후(10ms), 입력은 늦게 돈 시각(5,010ms)
+        assert_eq!(w.first_cb, [Some(ms(10)), Some(ms(5_010))]);
         // 둘 다 한 번도 안 돌아도 같다
         let (c2, s2) = (AudioCounters::default(), WorkerStats::default());
         let mut w2 = DeviceWatch::new();
         w2.check_at(&c2, &s2, ms(0));
-        w2.check_at(&c2, &s2, ms(3_000));
+        w2.check_at(&c2, &s2, ms(5_000));
         assert!(!stalled(&s2));
-        w2.check_at(&c2, &s2, ms(3_001));
+        w2.check_at(&c2, &s2, ms(5_001));
         assert!(stalled(&s2));
     }
 

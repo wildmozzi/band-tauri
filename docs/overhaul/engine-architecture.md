@@ -380,7 +380,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | Idle | 엔진 없음 | `Phase::Idle` | 커맨드가 "실행 중이 아님" |
 | Starting | 장치 열기·STUN·스레드 시작 중(블로킹, `start_lock` 직렬화) | `Phase::Starting { cancel, network }` | 커맨드가 "시작 중" |
 | Running | 정상 | `Phase::Running(Box<Engine>)` | `running = true` |
-| Degraded | 장치 분실(콜백 1초 정지·시작 뒤 3초 첫 콜백 없음, WASAPI 무효화 HRESULT, 기본 장치 변경). 엔진 객체는 남음 | `Phase::Running` 그대로(enum 밖, `EngineSnapshot`에서 읽음) | `deviceLost = true`, `running = false` |
+| Degraded | 장치 분실(콜백 1초 정지·워커 감시 시작(장치 Start·STUN 뒤) 뒤 5초 첫 콜백 없음, WASAPI 무효화 HRESULT, 기본 장치 변경). 엔진 객체는 남음 | `Phase::Running` 그대로(enum 밖, `EngineSnapshot`에서 읽음) | `deviceLost = true`, `running = false` |
 | Stopping | 슬롯에서 꺼낸 엔진을 락 밖에서 정지(`retire`: join + 합주 엔진의 마지막 연결 이벤트) | 슬롯 밖 지역 변수(`Phase::leave`가 돌려준 엔진) | — |
 
 - **세대 번호**: `start`/`stop`마다 오른다. 블로킹 시작이 끝났을 때 세대가 다르면 결과를 버리고(`start_lock`을 쥔 채 정지해 장치를 놓은 뒤) "취소됨"을 돌려준다. 이전 시작은 `cancel` 원자값으로 일찍 포기한다.
