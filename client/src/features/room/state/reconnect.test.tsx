@@ -41,19 +41,12 @@ vi.mock('../../../native/updater', () => ({ appUpdater: { setInRoom: () => {} } 
 vi.mock('../../../native/useNativeSession', () => ({
   useNativeSession: () => ({ session: h.session as unknown as PerformSession }),
 }))
-vi.mock('../../../native/mixBridge', () => ({
-  MixSource: class {
-    invalidate() {}
-    resume() {}
-  },
-  MixBroadcaster: class {
-    stop() {}
-    start = async () => {}
-    syncViewers() {}
-    hasPeer() {
-      return false
-    }
-  },
+// 엔진 믹스 소스·관람 방송 (Provider는 runtimeLoader.createMixBridge로 만든다)
+vi.mock('../../../native/runtimeLoader', () => ({
+  createMixBridge: () => ({
+    mixSource: { invalidate() {}, resume() {} },
+    broadcaster: { stop() {}, start: async () => {}, syncViewers() {}, hasPeer: () => false },
+  }),
 }))
 // 로그인 상태 (토큰이 있어야 resumeClientId를 보낸다)
 vi.mock('../../../shared/lib/supabaseClient', () => ({

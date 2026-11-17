@@ -28,6 +28,30 @@ import {
 import { parseRelayToken, relayNeedsNewToken, relayRefreshDelayMs } from './relayLogic'
 import { newFirstAudioTrack, noteAddPeer, notePeerLeft, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
+import {
+  performErrorFromCode,
+  KEY_CONFLICT_MESSAGE,
+  KEY_CONFLICT_REPEAT_MESSAGE,
+  DESCRIPTOR_INVALID_MESSAGE,
+  DEVICE_RECOVERING_MESSAGE,
+  DEVICE_RECOVERED_MESSAGE,
+  DEVICE_RECOVERED_DEFAULT_MESSAGE,
+  DEVICE_LOST_FAILED_MESSAGE,
+  DEVICE_LOST_REPEAT_MESSAGE,
+} from './performSignals'
+// 연주 신호 해석·안내 문구는 웹 첫 묶음에도 실리는 가벼운 모듈에 있다(웹 관람 묶음 분리). 기존 import 경로를 위해 다시 내보낸다
+export {
+  performErrorFromCode,
+  isEngineDescriptorErrorCode,
+  KEY_CONFLICT_MESSAGE,
+  KEY_CONFLICT_REPEAT_MESSAGE,
+  DESCRIPTOR_INVALID_MESSAGE,
+  DEVICE_RECOVERING_MESSAGE,
+  DEVICE_RECOVERED_MESSAGE,
+  DEVICE_RECOVERED_DEFAULT_MESSAGE,
+  DEVICE_LOST_FAILED_MESSAGE,
+  DEVICE_LOST_REPEAT_MESSAGE,
+} from './performSignals'
 
 export interface EngineBackend {
   start(config: EngineConfig, peerId: string): Promise<LocalDescriptor>
@@ -107,39 +131,6 @@ export interface PerformSessionOptions {
   deviceNoticeMs?: number
 }
 
-/** 서버 에러 코드 → 사용자 메시지. 연주 상태 롤백 대상이면 rollback=true */
-export function performErrorFromCode(code: unknown, serverMessage?: unknown): { message: string; rollback: boolean } | null {
-  const msg = typeof serverMessage === 'string' && serverMessage ? serverMessage : null
-  switch (code) {
-    case 'perform-not-approved':
-      return { message: msg ?? '방장의 승인이 필요합니다. 연주 참여를 요청해주세요.', rollback: true }
-    case 'room-full-performers':
-      return { message: msg ?? '연주자 자리가 가득 찼습니다.', rollback: true }
-    case 'login-required':
-      return { message: msg ?? '연주하려면 로그인이 필요합니다.', rollback: true }
-    default:
-      return null
-  }
-}
-
-/**
- * 엔진 descriptor에 대한 서버 거부 코드(연주 거부가 아님 → 방송은 유지, 세션이 엔진만 처리).
- * - ssrc-conflict / key-conflict(P1-1c: 같은 방 다른 사용자가 이미 쓰는 엔진 공개키): 엔진을 새 ssrc·키로 재시작
- * - descriptor-invalid: 서버가 descriptor 형식(키·ssrc·후보)을 거부 → 엔진 정지 후 안내
- */
-export function isEngineDescriptorErrorCode(code: unknown): boolean {
-  return code === 'ssrc-conflict' || code === 'key-conflict' || code === 'descriptor-invalid'
-}
-
-export const KEY_CONFLICT_MESSAGE = '같은 합주실의 다른 사용자가 이 엔진 키를 먼저 등록해, 엔진을 새 키로 다시 시작했습니다.'
-export const KEY_CONFLICT_REPEAT_MESSAGE = '엔진 키 충돌이 반복되어 연주를 중단했습니다. 다시 시작해주세요.'
-export const DESCRIPTOR_INVALID_MESSAGE = '서버가 엔진 연결 정보를 거부해 연주를 중단했습니다. 연주를 다시 시작해주세요.'
-export const DEVICE_RECOVERING_MESSAGE = '오디오 장치가 바뀌어(헤드폰 연결·분리, 샘플레이트 변경 등) 엔진을 다시 시작하는 중입니다…'
-export const DEVICE_RECOVERED_MESSAGE = '오디오 장치가 바뀌어 엔진을 다시 시작했습니다. 합주는 계속됩니다.'
-export const DEVICE_RECOVERED_DEFAULT_MESSAGE = '쓰던 오디오 장치를 열 수 없어 기본 장치로 다시 시작했습니다. 오디오 설정을 확인하세요.'
-export const DEVICE_LOST_FAILED_MESSAGE = '오디오 장치를 다시 열지 못해 연주를 중단했습니다. 장치 연결과 오디오 설정을 확인한 뒤 다시 시작해주세요.'
-export const DEVICE_LOST_REPEAT_MESSAGE = '오디오 장치가 계속 바뀌어 연주를 중단했습니다. 장치 연결을 확인한 뒤 다시 시작해주세요.'
-
 /** 같은 드라이버의 기본 장치(장치 id null, 입력 채널 처음부터) — 쓰던 장치가 사라졌을 때 */
 export function withDefaultDevices(config: EngineConfig): EngineConfig {
   return {
@@ -172,6 +163,8 @@ export class PerformSession {
   /** 마지막 relay-token-request 시각(ms) — 엔진 상태로 인한 즉시 요청의 간격 제한 */
   private lastRelayRequestAt = -Infinity
   private deadStats = 0
+  /** 통계 요청이 진행 중(느린 응답): 다음 틱은 건너뛴다 — 같은 표본으로 deadStats·deviceLostPolls를 두 번 세지 않고 블로킹 풀에 쌓지 않는다(#214 리뷰 L4) */
+  private statsInFlight = false
   /** 마지막 key-conflict 재시작 시각(ms) — 반복 재시작 방지 */
   private lastKeyConflictAt = -Infinity
   /** 따르는 방장 메트로놈(from = 방장 엔진 peerId) */
@@ -676,11 +669,15 @@ export class PerformSession {
     const gen = this.gen
     // 통계 요청은 명령 큐 밖이라 그사이 재추가와 겹칠 수 있다: 요청 순간의 add 시각과 비교한다(#120 L-4)
     const addedAtAtRequest = this.firstAudio?.addedAt
+    if (this.statsInFlight) return
     let stats: EngineStats
+    this.statsInFlight = true
     try {
       stats = await this.engine.stats()
     } catch {
       return
+    } finally {
+      this.statsInFlight = false
     }
     if (gen !== this.gen || this.state.phase !== 'running') return
     if (!stats.running) {

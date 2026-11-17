@@ -186,11 +186,41 @@ export class FakeSupabase {
     return fulfillJson(route, 404, { msg: 'e2e mock: unhandled auth path' })
   }
 
+  /** 지금 구독 중인 postgres_changes 채널(조인 응답 때 준 바인딩 id·테이블) */
+  private realtimeSubs: { ws: WebSocketRoute; topic: string; joinRef: string | null; asArray: boolean; bindings: { id: number; table: string }[] }[] = []
+
   /**
-   * Realtime(Phoenix) 최소 구현: join/heartbeat/access_token에 ok로 답한다.
+   * 테이블 변경을 구독자에게 보낸다(실제 Realtime의 postgres_changes 메시지 형식). 보낸 채널 수를 돌려준다.
+   * 메모리 DB는 직접 고친 뒤 부른다 — 앱은 이 알림을 받고 다시 조회한다.
+   */
+  pushTableChange(table: string, type: 'INSERT' | 'UPDATE' | 'DELETE', record: Row): number {
+    let sent = 0
+    for (const sub of this.realtimeSubs) {
+      const ids = sub.bindings.filter(b => b.table === table || b.table === '*').map(b => b.id)
+      if (ids.length === 0) continue
+      const payload = {
+        ids,
+        data: { schema: 'public', table, commit_timestamp: new Date().toISOString(), type, columns: [], record, old_record: {}, errors: null },
+      }
+      sub.ws.send(JSON.stringify(sub.asArray ? [sub.joinRef, null, sub.topic, 'postgres_changes', payload] : { join_ref: sub.joinRef, ref: null, topic: sub.topic, event: 'postgres_changes', payload }))
+      sent++
+    }
+    return sent
+  }
+
+  /** 지금 postgres_changes를 구독 중인 채널 수 */
+  realtimeSubscriptions(table: string): number {
+    return this.realtimeSubs.filter(s => s.bindings.some(b => b.table === table)).length
+  }
+
+  /**
+   * Realtime(Phoenix) 최소 구현: join/heartbeat/access_token에 ok로 답하고, postgres_changes 구독을 기억한다(pushTableChange).
    * vsn 1.0.0(JSON 객체)과 2.0.0(배열) 직렬화를 모두 받는다.
    */
   private handleRealtime(ws: WebSocketRoute) {
+    ws.onClose(() => {
+      this.realtimeSubs = this.realtimeSubs.filter(s => s.ws !== ws)
+    })
     ws.onMessage(message => {
       if (typeof message !== 'string') return
       let parsed: unknown
@@ -208,10 +238,20 @@ export class FakeSupabase {
       let response: Record<string, unknown> = {}
       if (msg.event === 'phx_join') {
         const config = (msg.payload as { config?: { postgres_changes?: Row[] } })?.config
-        response = {
-          postgres_changes: (config?.postgres_changes ?? []).map((pc, i) => ({ ...pc, id: 1000 + i })),
+        const changes = (config?.postgres_changes ?? []).map((pc, i) => ({ ...pc, id: 1000 + i }))
+        response = { postgres_changes: changes }
+        this.realtimeSubs = this.realtimeSubs.filter(s => !(s.ws === ws && s.topic === msg.topic))
+        if (changes.length > 0) {
+          this.realtimeSubs.push({
+            ws,
+            topic: msg.topic,
+            joinRef: msg.join_ref ?? null,
+            asArray,
+            bindings: changes.map(c => ({ id: c.id, table: String((c as Row).table ?? '*') })),
+          })
         }
       }
+      if (msg.event === 'phx_leave') this.realtimeSubs = this.realtimeSubs.filter(s => !(s.ws === ws && s.topic === msg.topic))
       const reply = { status: 'ok', response }
       ws.send(
         JSON.stringify(
