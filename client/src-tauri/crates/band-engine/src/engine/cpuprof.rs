@@ -50,6 +50,10 @@ pub struct CpuStats {
     pub worker_wake_max_us: f32,
     /// 지금 쓰는 은닉 마감 여유(µs, `DEADLINE_GUARD_US` — 고정값).
     pub deadline_guard_us: f32,
+    /// 직전 창의 워커 기다림 중 `FINE_POLL` 수면·돌기 비율(%, P2-17g `Nap::pick`). 나머지는 `POLL`이다. 하네스(6피어 60분)는
+    /// 2.2~2.9% / 0.5~0.6%였다 — 실기 비중과 다른 기계의 꼬리를 모아 `POLL_TAIL_US`·돌기 문턱을 확인하는 진단이다.
+    pub(crate) worker_fine_nap_pct: f32,
+    pub(crate) worker_spin_pct: f32,
 }
 
 /// 창 회전 상태(엔진이 Mutex로 쥔다, 비RT).
@@ -60,20 +64,23 @@ pub(crate) struct CpuSampler {
     tsc: Option<u64>,
     /// 직전 회전 시점의 워커 누적 사이클.
     worker_cycles: Option<u64>,
+    /// 직전 회전 시점의 워커 기다림 누계 [`POLL`, `FINE_POLL`, 돌기].
+    naps: [u64; 3],
     last: CpuStats,
 }
 
 impl CpuSampler {
     /// `now`·`tsc` = 엔진 시작(워커 스레드 생성 전). 워커 사이클 기준은 0이다(새 스레드).
     pub(crate) fn new(now: Instant, tsc: Option<u64>) -> Self {
-        Self { at: now, tsc, worker_cycles: Some(0), last: CpuStats::default() }
+        Self { at: now, tsc, worker_cycles: Some(0), naps: [0; 3], last: CpuStats::default() }
     }
 
     /// 창이 지났으면 회전해 새 통계를, 아니면 직전 통계를 돌려준다. `tsc` = 지금 TSC(`tsc_now`),
     /// `worker_cycles` = 워커 누적 사이클(`thread_cycles`), `period_us` = 장치 출력 주기.
-    /// `wake` = 워커 수면 overshoot 분포(창마다 비운다), `guard_us` = 은닉 마감 여유.
+    /// `wake` = 워커 수면 overshoot 분포(창마다 비운다), `guard_us` = 은닉 마감 여유, `naps` = 워커 기다림 누계
+    /// [`POLL`, `FINE_POLL`, 돌기](`WorkerStats::naps`).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn sample(&mut self, now: Instant, timing: &RtTiming, tsc: Option<u64>, worker_cycles: Option<u64>, period_us: f32, wake: &SendLatency, guard_us: u64) -> CpuStats {
+    pub(crate) fn sample(&mut self, now: Instant, timing: &RtTiming, tsc: Option<u64>, worker_cycles: Option<u64>, period_us: f32, wake: &SendLatency, guard_us: u64, naps: [u64; 3]) -> CpuStats {
         let win = now.saturating_duration_since(self.at);
         if win < WINDOW {
             return self.last;
@@ -85,6 +92,9 @@ impl CpuSampler {
         self.at = now;
         self.tsc = tsc;
         self.worker_cycles = worker_cycles;
+        let d: [u64; 3] = std::array::from_fn(|i| naps[i].saturating_sub(self.naps[i]));
+        self.naps = naps;
+        let total = d.iter().sum::<u64>().max(1) as f32;
         self.last = CpuStats {
             worker_pct,
             callback_load_pct: rt.load_pct,
@@ -99,6 +109,8 @@ impl CpuSampler {
             worker_wake_p99_us: w.p99_ms * 1000.0,
             worker_wake_max_us: w.max_ms * 1000.0,
             deadline_guard_us: guard_us as f32,
+            worker_fine_nap_pct: d[1] as f32 * 100.0 / total,
+            worker_spin_pct: d[2] as f32 * 100.0 / total,
         };
         self.last
     }
@@ -118,32 +130,35 @@ mod tests {
         let w = SendLatency::new();
         w.record(Duration::from_micros(300));
         // 창 전: 아직 빈 통계, 칸은 그대로
-        assert_eq!(s.sample(t0 + Duration::from_secs(1), &t, Some(6_000), Some(100), 2000.0, &w, 1500), CpuStats::default());
-        let c = s.sample(t0 + Duration::from_secs(2), &t, Some(7_000), Some(200), 2000.0, &w, 1500);
+        assert_eq!(s.sample(t0 + Duration::from_secs(1), &t, Some(6_000), Some(100), 2000.0, &w, 1500, [0; 3]), CpuStats::default());
+        let c = s.sample(t0 + Duration::from_secs(2), &t, Some(7_000), Some(200), 2000.0, &w, 1500, [90, 8, 2]);
         assert_eq!(c.callbacks, 1);
         assert_eq!(c.window_ms, 2000.0);
         // 수면 overshoot는 창마다 비운다(P2-17c): 첫 창에 300µs 하나, 다음 창은 0
         assert!((c.worker_wake_max_us - 300.0).abs() < 1.0 && c.worker_wake_p99_us > 250.0, "{c:?}");
         assert_eq!(c.deadline_guard_us, 1500.0);
+        // 기다림 비율은 창 증분으로 낸다(P2-17g): 첫 창 POLL 90·FINE 8·돌기 2
+        assert_eq!((c.worker_fine_nap_pct, c.worker_spin_pct), (8.0, 2.0));
         assert!((c.worker_pct.unwrap() - 10.0).abs() < 1e-3, "200 / 2000 TSC = 10%: {c:?}");
         assert!((c.callback_p99_period_pct - 5.0).abs() < 0.7, "100µs / 2ms: {c:?}");
         // 다음 창 전에는 같은 값, 다음 창은 증분
-        assert_eq!(s.sample(t0 + Duration::from_secs(3), &t, Some(8_000), Some(900), 2000.0, &w, 1500), c);
-        let d = s.sample(t0 + Duration::from_secs(4), &t, Some(9_000), Some(300), 2000.0, &w, 1500);
+        assert_eq!(s.sample(t0 + Duration::from_secs(3), &t, Some(8_000), Some(900), 2000.0, &w, 1500, [95, 9, 3]), c);
+        let d = s.sample(t0 + Duration::from_secs(4), &t, Some(9_000), Some(300), 2000.0, &w, 1500, [170, 18, 12]);
+        assert_eq!((d.worker_fine_nap_pct, d.worker_spin_pct), (10.0, 10.0), "증분 80·10·10: {d:?}");
         assert!((d.worker_pct.unwrap() - 5.0).abs() < 1e-3, "{d:?}");
         assert_eq!(d.callbacks, 0);
         assert_eq!(d.worker_wake_max_us, 0.0);
         // 워커 사이클이나 TSC를 못 읽으면 null(다음 창도 기준이 없어 null)
-        let e = s.sample(t0 + Duration::from_secs(6), &t, Some(11_000), None, 0.0, &w, 1500);
+        let e = s.sample(t0 + Duration::from_secs(6), &t, Some(11_000), None, 0.0, &w, 1500, [0; 3]);
         assert_eq!(e.worker_pct, None);
         assert_eq!(e.callback_p99_period_pct, 0.0);
-        assert_eq!(s.sample(t0 + Duration::from_secs(8), &t, None, Some(400), 0.0, &w, 1500).worker_pct, None);
+        assert_eq!(s.sample(t0 + Duration::from_secs(8), &t, None, Some(400), 0.0, &w, 1500, [0; 3]).worker_pct, None);
     }
 
     #[test]
     fn serializes_camel_case() {
         let j = serde_json::to_string(&CpuStats::default()).unwrap();
-        for k in ["workerPct\":null", "callbackLoadPct", "callbackP50Us", "callbackP99Us", "callbackMaxUs", "callbackP99PeriodPct", "inputCallbackMaxUs", "callbacks", "windowMs", "workerWakeP50Us", "workerWakeP99Us", "workerWakeMaxUs", "deadlineGuardUs"] {
+        for k in ["workerPct\":null", "callbackLoadPct", "callbackP50Us", "callbackP99Us", "callbackMaxUs", "callbackP99PeriodPct", "inputCallbackMaxUs", "callbacks", "windowMs", "workerWakeP50Us", "workerWakeP99Us", "workerWakeMaxUs", "deadlineGuardUs", "workerFineNapPct", "workerSpinPct"] {
             assert!(j.contains(k), "{k}: {j}");
         }
     }

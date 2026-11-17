@@ -22,25 +22,25 @@
       "event": "join",
       "peer": 3,
       "slot": null,
-      "tUs": 5000512
+      "tUs": 5000252
     },
     {
       "event": "slot",
       "peer": 3,
       "slot": 4,
-      "tUs": 5000512
+      "tUs": 5000252
     },
     {
       "event": "leave",
       "peer": 1,
       "slot": null,
-      "tUs": 10000291
+      "tUs": 10000365
     },
     {
       "event": "drain",
       "peer": 1,
       "slot": 2,
-      "tUs": 10000291
+      "tUs": 10000365
     },
     {
       "event": "free",
@@ -52,37 +52,37 @@
       "event": "join",
       "peer": 4,
       "slot": null,
-      "tUs": 15000659
+      "tUs": 15000025
     },
     {
       "event": "slot",
       "peer": 4,
       "slot": 2,
-      "tUs": 15000659
+      "tUs": 15000025
     },
     {
       "event": "leave",
       "peer": 0,
       "slot": null,
-      "tUs": 20000620
+      "tUs": 20000168
     },
     {
       "event": "join",
       "peer": 5,
       "slot": null,
-      "tUs": 20000620
+      "tUs": 20000168
     },
     {
       "event": "slot",
       "peer": 5,
       "slot": 5,
-      "tUs": 20000620
+      "tUs": 20000168
     },
     {
       "event": "drain",
       "peer": 0,
       "slot": 1,
-      "tUs": 20000620
+      "tUs": 20000168
     },
     {
       "event": "free",
@@ -94,13 +94,13 @@
       "event": "leave",
       "peer": 2,
       "slot": null,
-      "tUs": 25000010
+      "tUs": 25000204
     },
     {
       "event": "drain",
       "peer": 2,
       "slot": 3,
-      "tUs": 25000010
+      "tUs": 25000204
     },
     {
       "event": "free",
@@ -112,13 +112,13 @@
       "event": "leave",
       "peer": 3,
       "slot": null,
-      "tUs": 30000008
+      "tUs": 30000628
     },
     {
       "event": "drain",
       "peer": 3,
       "slot": 4,
-      "tUs": 30000008
+      "tUs": 30000628
     },
     {
       "event": "free",
@@ -143,31 +143,31 @@
       "targetMs": "5.312"
     },
     {
-      "bufferMs": "5.479",
+      "bufferMs": "5.521",
       "concealed": 0,
       "margin": 0,
       "produced": 9998,
       "targetMs": "5.312"
     },
     {
-      "bufferMs": "5.396",
+      "bufferMs": "5.417",
       "concealed": 0,
       "margin": 0,
       "produced": 10000,
       "targetMs": "5.312"
     },
     {
-      "bufferMs": "5.459",
+      "bufferMs": "5.418",
       "concealed": 0,
       "margin": 0,
       "produced": 8000,
       "targetMs": "5.312"
     },
     {
-      "bufferMs": "5.476",
+      "bufferMs": "5.519",
       "concealed": 0,
       "margin": 0,
-      "produced": 5998,
+      "produced": 6000,
       "targetMs": "5.312"
     }
   ]

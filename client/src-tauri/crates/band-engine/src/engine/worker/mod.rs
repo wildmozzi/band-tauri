@@ -9,7 +9,7 @@
 //! - 깊이 측정 시각은 워커 기상 시각이 아니라 `DeviceClock`이 추정한 출력 콜백 시각이다.
 //!
 //! ## 구조(엔진 ②b, `docs/overhaul/engine-stage2b-design.md`)
-//! `Worker`는 **조정자**다: 단계 구조체를 정해진 순서로 부르고 단계 사이 값(48k 블록, `FeedTiming`, `urgent`,
+//! `Worker`는 **조정자**다: 단계 구조체를 정해진 순서로 부르고 단계 사이 값(48k 블록, `FeedTiming`, `deadline_us`,
 //! 입력 쪽 대기량)을 인자·반환값으로 넘긴다. 단계는 서로의 필드를 읽지 않고, 읽기 전용 문맥(`WorkerCtx`) 전체가 아니라
 //! 쓰는 값만 인자로 받는다.
 //!
@@ -74,7 +74,7 @@ use send::SendPath;
 
 // 하네스(`tests/sim`, ⑩-3)가 워커와 같은 단계(`PeerSources`, ②b-3)와 폴링 주기를 쓴다. `worker`는 `pub(crate)` 모듈이라 이 `pub`은
 // 크레이트 밖에서는 `testing::engine::worker`(`test-support`)로만 보인다(⑨b-2 — 그 전에는 피처로 가시성을 갈랐다).
-pub use clock::{FINE_POLL, POLL};
+pub use clock::{Nap, FINE_POLL, POLL};
 pub use peer_sources::{PeerSources, PeerSourcesParts};
 // 메트로놈 단계 시험 입구(`tests/metronome.rs`가 실제 단계를 피어 표 복사본 경로로 돌린다). 제품 빌드에는 없다.
 #[cfg(any(test, feature = "test-support"))]
@@ -108,6 +108,9 @@ pub struct WorkerStats {
     /// 워커 수면 overshoot(요청한 `POLL`·`FINE_POLL`보다 늦게 깬 양) 분포(P2-17c, 제품 빌드에서도 켬 — 원자 덧셈 두 번).
     /// 은닉 마감 여유(`DEADLINE_GUARD_US`)가 이 기계의 기상 지연을 덮는지 보는 진단이다(`EngineStats.cpu.workerWake*`).
     pub(crate) sleep_over: crate::net::txlat::SendLatency,
+    /// 워커 기다림 누계 [`POLL`, `FINE_POLL`, 돌기](P2-17g `Nap::pick`, 원자 덧셈 하나). `EngineStats.cpu.workerFineNapPct`·
+    /// `workerSpinPct`(창 비율)로 나간다.
+    pub(crate) naps: [AtomicU64; 3],
     /// 반복마다 남은 락(`Peer.clock`)에서 기다린 합과, 본문에서 그것을 뺀 값(락 밖 비용, #122 리뷰 M3).
     pub(crate) iter_lock_wait: crate::net::txlat::SendLatency,
     pub(crate) iter_unlocked: crate::net::txlat::SendLatency,
@@ -337,16 +340,28 @@ impl Worker {
         let stats = self.ctx.stats.clone();
         while !self.ctx.stop.load(Ordering::Relaxed) {
             #[cfg(any(test, feature = "test-support"))]
-            let urgent = {
-                let (urgent, n) = crate::sys::alloc::counted(|| self.iterate(&mut last_start));
+            let deadline = {
+                let (deadline, n) = crate::sys::alloc::counted(|| self.iterate(&mut last_start));
                 stats.iter_allocs.fetch_add(n, Ordering::Relaxed);
                 stats.iters.fetch_add(1, Ordering::Relaxed);
-                urgent
+                deadline
             };
             #[cfg(not(any(test, feature = "test-support")))]
-            let urgent = self.iterate(&mut last_start);
-            // 은닉 마감이 가까우면 짧게 잔다(Windows 고해상도 타이머라도 0.5ms 폴링은 마감을 넘길 수 있다).
-            let nap = if urgent { FINE_POLL } else { POLL };
+            let deadline = self.iterate(&mut last_start);
+            // 은닉 마감이 가까우면 짧게 자고, 아주 가까우면 자지 않고 마감까지 돈다(P2-17g, `Nap::pick`): 수면 overshoot 꼬리가
+            // 다음 콜백을 넘지 않게. 돌기는 최대 `FINE_POLL`이다.
+            let pick = Nap::pick(self.ctx.wall_us(), deadline);
+            self.ctx.stats.naps[pick.index()].fetch_add(1, Ordering::Relaxed);
+            let nap = match pick {
+                Nap::Spin { until_us } => {
+                    while self.ctx.wall_us() < until_us {
+                        std::hint::spin_loop();
+                    }
+                    continue;
+                }
+                Nap::Fine => FINE_POLL,
+                Nap::Poll => POLL,
+            };
             let slept_at = Instant::now();
             std::thread::sleep(nap);
             self.ctx.stats.sleep_over.record(slept_at.elapsed().saturating_sub(nap));
@@ -358,9 +373,9 @@ impl Worker {
         log::info!("워커 종료");
     }
 
-    /// 워커 반복 하나(수면 제외). 순서 규칙은 `run`의 주석이 계약이다. 돌려주는 값은 은닉 마감이 가까운지(`urgent`, 다음 수면
-    /// 길이). 정상 구간에서 이 호출 전체는 할당·재할당·해제 0이다(엔진 ⑧ 후속, `engine::alloc_tests`).
-    fn iterate(&mut self, last_start: &mut Instant) -> bool {
+    /// 워커 반복 하나(수면 제외). 순서 규칙은 `run`의 주석이 계약이다. 돌려주는 값은 가장 이른 은닉 마감(`deadline_us`, 다음
+    /// 기다림을 고른다). 정상 구간에서 이 호출 전체는 할당·재할당·해제 0이다(엔진 ⑧ 후속, `engine::alloc_tests`).
+    fn iterate(&mut self, last_start: &mut Instant) -> Option<u64> {
         let c = &self.ctx;
         let start = Instant::now();
         if DIAG_TIMING {
@@ -406,6 +421,6 @@ impl Worker {
             s.iter_lock_wait.record(waited);
             s.iter_unlocked.record(body.saturating_sub(waited));
         }
-        round.urgent
+        round.deadline_us
     }
 }

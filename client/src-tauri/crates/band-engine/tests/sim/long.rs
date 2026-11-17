@@ -122,12 +122,16 @@ impl Known {
 /// 기존 PASS는 깊이가 데드밴드만큼(−0.2ms) 목표 아래 머문 덕이었다. 꼬리 긴 지터(지수) 회선은 1절 '안정 회선' 대상에서
 /// 빼기로 했다(P1-6d 사용자 결정, 2026-11-12: 합주 기본 환경은 유선 LAN). 백로그 후보: "tail_extra가 꼬리 긴 회선에서 1절
 /// 한도를 넘김(P1-6d 범위 밖, 낮음)".
+///
+/// P2-17g(워커 기다림 `Nap::pick`) 뒤 11.69 → 12.17ms(시드 6). 마감 근처 기상이 촘촘해져 은닉이 마감 시각에 더 정확히
+/// 일어나면, 이 꼬리 긴 회선의 늦은 패킷이 더 자주 '늦음'으로 잡혀 늦은 패킷 예산이 목표를 조금 더 높게 둔다. 시드 1..10에서 이 값은
+/// 이전 규칙 평균 11.78(11.41~12.06), `Nap::pick` 평균 11.98ms(11.63~12.35) — 평균 +0.2ms, 시드 흩어짐 ±0.3ms. 60분은 PASS(`long` None 유지).
 const KNOWN_1: &[Known] = &[Known {
     metric: Metric::GoalDelayLast,
-    short: Some(11.725),
+    short: Some(12.17),
     long: None,
     tol: 0.1,
-    why: "P1-6d 결정(꼬리 지터 회선은 1절 안정 회선 대상 밖) — 기존에도 마지막 창 목표(≈11.87ms)가 한도(11.68ms)를 넘고 깊이가 데드밴드 덕에 통과하던 회선, 계단 감지(P2-16b)·빠른 내림(P2-16c) 뒤 0.05ms 초과",
+    why: "P1-6d 결정(꼬리 지터 회선은 1절 안정 회선 대상 밖) — 기존에도 마지막 창 목표(≈11.87ms)가 한도(11.68ms)를 넘고 깊이가 데드밴드 덕에 통과하던 회선, 계단 감지(P2-16b)·빠른 내림(P2-16c) 뒤 0.05ms 초과, 워커 기다림 선택(P2-17g) 뒤 시드 6에서 12.17ms(10시드 평균 +0.2ms)",
 }];
 
 struct Spec {
@@ -761,6 +765,9 @@ fn run_report_wake(tag: &str, seconds: f64, wake: WakeModel) -> (Value, Vec<Stri
     std::fs::write(&md_path, &rep.md).unwrap();
     std::fs::write(dir.join(format!("sim-report-{tag}.json")), serde_json::to_string_pretty(&rep.json).unwrap()).unwrap();
     println!("{}\n리포트: {}", rep.md, md_path.display());
+    let [np, nf, ns] = out.naps;
+    let total = (np + nf + ns).max(1) as f64;
+    println!("워커 기다림(P2-17g): POLL {np} ({:.2}%), FINE_POLL {nf} ({:.2}%), 돌기 {ns} ({:.3}%)", np as f64 * 100.0 / total, nf as f64 * 100.0 / total, ns as f64 * 100.0 / total);
     if !out.xrun_us.is_empty() {
         let at: Vec<String> = out.xrun_us.iter().map(|&t| format!("{:.3}", t as f64 / 1e6)).collect();
         println!("xrun 시각(s, 워커 사건 기준): {}", at.join(", "));

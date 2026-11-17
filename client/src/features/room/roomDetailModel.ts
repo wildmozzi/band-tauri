@@ -75,6 +75,10 @@ export function cpuTitle(cpu: CpuStats): string {
             (cpu.deadlineGuardUs ? ` · 은닉 마감 여유 ${(cpu.deadlineGuardUs / 1000).toFixed(1)}ms` : ''),
         ]
       : []),
+    // P2-17g: 마감 근처 기다림 비율(옛 엔진은 필드 없음 → 줄 없음)
+    ...(cpu.workerSpinPct != null
+      ? [`워커 마감 근처 기다림: 짧은 수면 ${(cpu.workerFineNapPct ?? 0).toFixed(1)}% · 돌기 ${cpu.workerSpinPct.toFixed(2)}%`]
+      : []),
   ].join('\n')
 }
 

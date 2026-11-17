@@ -1,11 +1,40 @@
 use super::*;
-use super::clock::DeviceClock;
+use super::clock::{DeviceClock, POLL_TAIL_US};
 use band_dsp::jitter::JitterBuffer;
 use super::local::{gcd, lcm};
 use band_dsp::config::MAX_PAYLOAD_BYTES;
 use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
 use std::time::Duration;
+
+#[test]
+fn nap_pick_keeps_sleep_tails_before_callback() {
+    // P2-17g: 마감까지 남은 시간(µs)으로 기다림을 고른다. 경계 = POLL + POLL_TAIL_US(1500) / FINE_POLL(150).
+    let (poll, fine) = (POLL.as_micros() as u64, FINE_POLL.as_micros() as u64);
+    let now = 10_000_000;
+    assert_eq!(Nap::pick(now, None), Nap::Poll, "모자란 피어 없음");
+    assert_eq!(Nap::pick(now, Some(now + poll + POLL_TAIL_US + 1)), Nap::Poll);
+    assert_eq!(Nap::pick(now, Some(now + poll + POLL_TAIL_US)), Nap::Fine, "POLL 꼬리 창 안");
+    assert_eq!(Nap::pick(now, Some(now + fine)), Nap::Fine);
+    assert_eq!(Nap::pick(now, Some(now + fine - 1)), Nap::Spin { until_us: now + fine - 1 });
+    assert_eq!(Nap::pick(now, Some(now + 1)), Nap::Spin { until_us: now + 1 });
+    assert_eq!(Nap::pick(now, Some(now)), Nap::Fine, "마감이 지났는데 모자람(콜백 도중) — 돌지 않음");
+    assert_eq!(Nap::pick(now, Some(now - 500)), Nap::Fine);
+    // 마감 전 모든 남은 시간에서: 수면을 고르면, 그 수면의 실측 최대 overshoot(225H 유휴, `tests/sim/tune.rs` `WAKE_POLL`·
+    // `WAKE_FINE`의 100% 값)로 늦게 깨도 다음 콜백(= 마감 + 여유) 전이어야 한다. 돌기는 마감 시각에 깬다.
+    const POLL_OVER_MAX_US: u64 = 2004;
+    const FINE_OVER_MAX_US: u64 = 1469;
+    let guard = DEADLINE_GUARD_US;
+    for left in 1..=5_000u64 {
+        let next_cb = now + left + guard;
+        let wake = match Nap::pick(now, Some(now + left)) {
+            Nap::Poll => now + poll + POLL_OVER_MAX_US,
+            Nap::Fine => now + fine + FINE_OVER_MAX_US,
+            Nap::Spin { until_us } => until_us,
+        };
+        assert!(wake < next_cb, "마감까지 {left}µs: 최악 기상 {}µs 뒤 > 다음 콜백 {}µs 뒤", wake - now, next_cb - now);
+    }
+}
 
 #[test]
 fn batched_frames_share_pass_start_for_send_queue() {
@@ -528,9 +557,13 @@ fn run_feed_sim(p: FeedSim) -> FeedSimResult {
                 res.wall_trace.push((t as f64 / 1e6, jb.stats().wall_buffer_ms));
                 next_trace += 500_000;
             }
-            // Worker::run과 같은 폴링: 은닉 마감이 가까우면(urgent) FINE_POLL, 아니면 POLL. 여기에 기상 지연.
-            let poll = if ev.urgent { FINE_POLL } else { POLL }.as_micros() as u64;
-            t_w = t + poll + if p.worker_jitter_us > 0 { rng.gen_range(0..p.worker_jitter_us) } else { 0 };
+            // Worker::run과 같은 기다림(`Nap::pick`, P2-17g): 수면이면 기상 지연을 더하고, 돌기면 마감 시각에 깬다.
+            let jitter = if p.worker_jitter_us > 0 { rng.gen_range(0..p.worker_jitter_us) } else { 0 };
+            t_w = match Nap::pick(t, ev.deadline_us) {
+                Nap::Spin { until_us } => until_us,
+                Nap::Fine => t + FINE_POLL.as_micros() as u64 + jitter,
+                Nap::Poll => t + POLL.as_micros() as u64 + jitter,
+            };
         }
     }
     res.js = jb.stats();

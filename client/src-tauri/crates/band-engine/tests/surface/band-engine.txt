@@ -422,6 +422,7 @@ engine/wasapi/probe.rs	struct	ProbeReport
 engine/wav.rs	enum	RecordFormat
 engine/worker/clock.rs	const	FINE_POLL
 engine/worker/clock.rs	const	POLL
+engine/worker/clock.rs	enum	Nap
 engine/worker/clock.rs	field	cb_seq
 engine/worker/clock.rs	field	dev_now_us
 engine/worker/clock.rs	field	out_burst
@@ -429,6 +430,7 @@ engine/worker/clock.rs	field	out_rate
 engine/worker/clock.rs	field	played
 engine/worker/clock.rs	method	new
 engine/worker/clock.rs	method	observe
+engine/worker/clock.rs	method	pick
 engine/worker/clock.rs	struct	CallbackTracker
 engine/worker/clock.rs	struct	FeedTiming
 engine/worker/metronome_stage.rs	method	click
@@ -441,14 +443,15 @@ engine/worker/mod.rs	struct	WorkerStats
 engine/worker/mod.rs	use	CallbackTracker
 engine/worker/mod.rs	use	FINE_POLL
 engine/worker/mod.rs	use	MetronomeStageProbe
+engine/worker/mod.rs	use	Nap
 engine/worker/mod.rs	use	POLL
 engine/worker/mod.rs	use	PeerSources
 engine/worker/mod.rs	use	PeerSourcesParts
+engine/worker/peer_sources.rs	field	deadline_us
 engine/worker/peer_sources.rs	field	port
 engine/worker/peer_sources.rs	field	prods
 engine/worker/peer_sources.rs	field	rec_marks
 engine/worker/peer_sources.rs	field	settings
-engine/worker/peer_sources.rs	field	urgent
 engine/worker/peer_sources.rs	method	close
 engine/worker/peer_sources.rs	method	feed_margin
 engine/worker/peer_sources.rs	method	feed_slot

@@ -142,6 +142,9 @@ export interface CpuStats {
   workerWakeMaxUs?: number
   /** 은닉 마감 여유(µs, 고정 1500). 대략 150µs + overshoot p99 + 워커 반복 시간을 덮어야 한다 */
   deadlineGuardUs?: number
+  /** 직전 창 워커 기다림 중 FINE_POLL 수면·마감 직전 돌기 비율(%, P2-17g). 나머지는 POLL. 옛 엔진이면 없음 */
+  workerFineNapPct?: number
+  workerSpinPct?: number
 }
 
 /** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token/expiresIn */

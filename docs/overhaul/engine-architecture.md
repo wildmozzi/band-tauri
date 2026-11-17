@@ -238,7 +238,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `crates/band-dsp/src/jitter/stats.rs` | `JitterStats`, 비율 창, 통계 스냅샷 | 통계 필드 |
 | `crates/band-dsp/src/jitter/tests.rs` | 결정적 단위 시뮬레이션, 지터 trace fixture(`crates/band-dsp/tests/fixtures/jitter-trace.sha256`, ⑧(b), ⑩-1에서 바이트 그대로 옮김) | |
 | `engine/worker/mod.rs` | `Worker` 조립·루프(단계를 순서대로 부르는 조정자), 정지 | 단계 순서 |
-| `engine/worker/clock.rs` | 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`), 워커 폴링 주기(`POLL`·`FINE_POLL`) | 시각 추정 |
+| `engine/worker/clock.rs` | 출력 콜백 시각 추정(`DeviceClock`, `CallbackTracker`, `FeedTiming`), 워커 폴링 주기(`POLL`·`FINE_POLL`)와 기다림 선택(`Nap::pick`, P2-17g) | 시각 추정 |
 | `engine/worker/capture.rs` | `Capture`: 입력 링 → 리샘플 → 48k 블록·프레임 | 입력 장치 형식·리샘플·프레임 크기 |
 | `engine/worker/send.rs` | `SendPath`: 프레임 → 인코드 → `send_audio`, 에코 클릭 스트림. 네트워크가 있을 때만 존재 | 코덱·패킷 플래그·송신 API |
 | `engine/worker/auto_codec.rs` | `AutoCodec`(`SendPath`의 부속): 피어별 자동 Opus 송신 상태(`relay_codec` 정책 연동) | 자동 전환 |
@@ -261,7 +261,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `net/{crypto, peer, stun, relay, qos, txlat}.rs`, `crates/band-dsp/src/{clock, packet}.rs` | 암호, 피어 테이블·홀펀칭, STUN, 릴레이, DSCP, 송신 큐 지연(칸 함수는 `band_dsp::histo`) / 시계 오프셋, 패킷 | 각 프로토콜 |
 | `diag/{mod, timeline, mask, export}.rs` | 진단 기록 스레드, 링 버퍼, 마스킹, zip | 진단 |
 
-워커 하위 모듈(단계) 사이 공유 상태는 **명시적으로** 넘긴다(②b, [engine-stage2b-design.md](engine-stage2b-design.md) 2.2절): 읽기 전용 문맥(설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop)은 조정자만 갖는 `WorkerCtx`이고, **조정자가 거기서 쓰는 값만 꺼내 단계 메서드의 인자로 준다**(단계는 `&WorkerCtx`를 받지 않는다). `WorkerParams`는 `Worker::new`의 입력일 뿐이다 — 소유권이 넘어가는 끝(`in_cons`·`prods`·`media_port`)이 섞여 있어 단계에 그대로 줄 수 없다. `net`은 쓰는 단계만 생성 때 받아 갖는다. 단계 사이 값은 반환값·인자(`FeedTiming`, 48k 블록·프레임, `PeerRound.urgent`, 입력 쪽 대기량). 전역 상태는 없다.
+워커 하위 모듈(단계) 사이 공유 상태는 **명시적으로** 넘긴다(②b, [engine-stage2b-design.md](engine-stage2b-design.md) 2.2절): 읽기 전용 문맥(설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop)은 조정자만 갖는 `WorkerCtx`이고, **조정자가 거기서 쓰는 값만 꺼내 단계 메서드의 인자로 준다**(단계는 `&WorkerCtx`를 받지 않는다). `WorkerParams`는 `Worker::new`의 입력일 뿐이다 — 소유권이 넘어가는 끝(`in_cons`·`prods`·`media_port`)이 섞여 있어 단계에 그대로 줄 수 없다. `net`은 쓰는 단계만 생성 때 받아 갖는다. 단계 사이 값은 반환값·인자(`FeedTiming`, 48k 블록·프레임, `PeerRound.deadline_us`, 입력 쪽 대기량). 전역 상태는 없다.
 
 ## 7. 공개 표면과 테스트 표면
 

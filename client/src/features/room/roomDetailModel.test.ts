@@ -53,6 +53,9 @@ describe('roomDetailModel', () => {
     expect(cpuTitle({ ...cpu, workerWakeP50Us: 544.2, workerWakeP99Us: 672, workerWakeMaxUs: 1234, deadlineGuardUs: 1500 })).toContain(
       '워커 기상 지연(수면 초과) p50/p99/최대: 544/672/1234µs · 은닉 마감 여유 1.5ms',
     )
+    // P2-17g: 마감 근처 기다림 비율도 새 엔진만
+    expect(cpuTitle(cpu)).not.toContain('마감 근처 기다림')
+    expect(cpuTitle({ ...cpu, workerFineNapPct: 2.234, workerSpinPct: 0.5 })).toContain('워커 마감 근처 기다림: 짧은 수면 2.2% · 돌기 0.50%')
   })
 
   it('formatMs: 유한값만 ms로, 나머지는 --', () => {

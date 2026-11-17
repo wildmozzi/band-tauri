@@ -241,6 +241,7 @@ impl Engine {
             device_period_ms * 1000.0,
             &ws.sleep_over,
             super::worker::DEADLINE_GUARD_US,
+            std::array::from_fn(|i| ws.naps[i].load(Ordering::Relaxed)),
         );
         let peers = self
             .net
