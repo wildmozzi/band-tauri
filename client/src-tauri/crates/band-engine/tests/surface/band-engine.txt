@@ -492,6 +492,7 @@ manager.rs	method	start_generation
 manager.rs	method	start_monitor_only
 manager.rs	method	stats
 manager.rs	method	stop
+manager.rs	method	stop_if_generation
 manager.rs	method	stop_monitor_only
 manager.rs	method	take_ended_conn
 manager.rs	method	with_engine

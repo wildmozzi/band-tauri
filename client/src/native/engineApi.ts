@@ -715,9 +715,15 @@ export function engineRecordFolder(): Promise<string> {
   return invoke<string>('engine_record_folder')
 }
 
+/** `engine_record_pick_folder` 결과. saveError: 고른 폴더를 앱 설정에 남기지 못함(이번 실행만 그 폴더, 다음 실행은 이전 폴더·기본) */
+export interface RecordFolderPick {
+  folder: string
+  saveError?: string | null
+}
+
 /** 녹음 저장 폴더 고르기(폴더 대화상자, 선택은 앱 설정에 남는다). 취소하면 null */
-export function engineRecordPickFolder(): Promise<string | null> {
-  return invoke<string | null>('engine_record_pick_folder')
+export function engineRecordPickFolder(): Promise<RecordFolderPick | null> {
+  return invoke<RecordFolderPick | null>('engine_record_pick_folder')
 }
 
 /** 녹음 시작(P2-4): 저장 폴더 아래 세션 폴더에 트랙별 WAV(내 입력, 피어별, 선택: 믹스) */

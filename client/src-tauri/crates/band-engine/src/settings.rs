@@ -39,7 +39,9 @@ impl RecordDir {
         default()
     }
 
-    /// 고른 폴더로 바꾸고 설정 파일에 남긴다. 저장에 실패해도 이번 실행 동안은 고른 폴더를 쓴다(오류는 돌려준다).
+    /// 고른 폴더로 바꾸고 설정 파일에 남긴다. 저장에 실패해도 이번 실행 동안은 고른 폴더를 쓴다(오류는 돌려준다 — 어댑터가
+    /// 프론트에 안내한다). 같은 폴더의 임시 파일에 쓰고 sync한 뒤 바꿔 넣는다(#212): 쓰는 도중 앱이 죽거나 디스크가 차도 옛 설정은
+    /// 그대로다(전에는 제자리 `write`라 잘린 파일이 남아 다음 실행이 기본 폴더로 돌아갔다).
     pub fn set(&self, path: PathBuf) -> std::io::Result<()> {
         *self.picked.lock() = Some(path.clone());
         let Some(f) = &self.config_file else {
@@ -48,8 +50,28 @@ impl RecordDir {
         if let Some(dir) = f.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(f, serde_json::json!({ "folder": path }).to_string())
+        write_replace(f, serde_json::json!({ "folder": path }).to_string().as_bytes())
     }
+}
+
+/// `f`를 `bytes`로 바꿔 넣는다: 임시 파일(`<이름>.tmp`)에 쓰고 sync → rename(Windows는 기존 파일을 바꿔 넣는다). 실패하면
+/// 임시 파일을 지우고 `f`는 손대지 않는다.
+fn write_replace(f: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp_name = f.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = f.with_file_name(tmp_name);
+    let res = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, f)
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
 }
 
 #[cfg(test)]
@@ -115,6 +137,28 @@ mod tests {
         let p = dir.join("picked");
         mem.set(p.clone()).unwrap();
         assert_eq!(mem.current(fallback).unwrap(), p);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #212: 설정은 임시 파일 + 바꿔 넣기로 쓴다. 덮어쓰기가 되고 임시 파일이 남지 않으며, 쓰기에 실패하면(여기서는 임시 파일 자리가
+    /// 폴더라 만들 수 없음) 옛 설정 파일이 그대로 남고 오류를 돌려준다(이번 실행은 고른 폴더를 쓴다).
+    #[test]
+    fn record_dir_write_replaces_atomically() {
+        let dir = tmp_dir("atomic");
+        let file = dir.join(RECORD_DIR_FILE);
+        let tmp = dir.join(format!("{RECORD_DIR_FILE}.tmp"));
+        let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
+        let r = RecordDir::new(Some(file.clone()));
+        r.set(a).unwrap();
+        r.set(b.clone()).unwrap();
+        assert!(!tmp.exists(), "임시 파일이 남았다");
+        assert_eq!(RecordDir::new(Some(file.clone())).current(fallback).unwrap(), b, "덮어쓰기");
+        let before = std::fs::read(&file).unwrap();
+        std::fs::create_dir_all(&tmp).unwrap(); // 임시 파일을 만들 수 없게
+        assert!(r.set(c.clone()).is_err(), "저장 실패는 오류로 돌려준다");
+        assert_eq!(r.current(fallback).unwrap(), c, "이번 실행은 고른 폴더");
+        assert_eq!(std::fs::read(&file).unwrap(), before, "실패해도 옛 설정 파일은 그대로");
+        assert_eq!(RecordDir::new(Some(file)).current(fallback).unwrap(), b);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

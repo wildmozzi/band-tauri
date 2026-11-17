@@ -43,6 +43,27 @@ impl EngineState {
     pub fn manager(&self) -> Arc<EngineManager> {
         self.0.clone()
     }
+
+    /// 웹뷰 페이지를 새로 읽기 시작했다(`lib.rs` `on_page_load`, 발굴 3차). 처음 열 때는 엔진이 없어 아무것도 하지 않는다.
+    /// 다시 읽었으면(F5·Ctrl+R — 릴리스 WebView2도 브라우저 단축키가 켜져 있다, 웹뷰 프로세스 복구) 앞 페이지가 띄운 엔진은
+    /// 새 페이지가 모르는 고아다: 마이크 송신·녹음 쓰기·테스트 모드 강제 모니터가 UI 없이 이어진다. 정지해(녹음은 마무리,
+    /// 모니터 설정 복원) 새 페이지가 처음 상태에서 시작하게 한다. 블로킹(join)이므로 UI 스레드가 아닌 곳에서 부른다.
+    ///
+    /// `gen`은 다시 읽기를 시작한 순간의 세대(`reload_generation`, 메인 스레드에서 바로 뜬다). 새 페이지가 그 뒤 이미 start했으면
+    /// 그 엔진은 건드리지 않고, 정지가 먼저면 새 start는 옛 엔진이 장치를 놓을 때까지 기다린다(`EngineManager::stop_if_generation`).
+    /// 반환: 실행(또는 시작) 중이던 엔진을 정지했다.
+    pub fn stop_orphaned(&self, gen: u64) -> bool {
+        let stopped = self.0.stop_if_generation(gen);
+        if stopped {
+            log::warn!("페이지를 다시 읽었습니다: 앞 페이지가 띄운 오디오 엔진을 정지했습니다(녹음 중이었으면 마무리)");
+        }
+        stopped
+    }
+
+    /// 지금 세대(`stop_orphaned`에 넘긴다). 슬롯 락만 잠깐 잡는다 — 메인 스레드에서 불러도 된다.
+    pub fn reload_generation(&self) -> u64 {
+        self.0.start_generation()
+    }
 }
 
 /// 진단 타임라인(P2-5). 기록 스레드는 `lib.rs` setup에서 띄운다.
@@ -351,13 +372,22 @@ pub async fn engine_record_folder(app: tauri::AppHandle, dirs: State<'_, RecordD
     current_record_dir(&app, &dirs).map(|p| p.to_string_lossy().into_owned())
 }
 
+/// `engine_record_pick_folder` 결과. `save_error`: 고른 폴더를 앱 설정에 남기지 못했다(이번 실행 동안은 그 폴더를 쓰지만 다음
+/// 실행에는 이전 폴더·기본으로 돌아간다 — 프론트가 안내한다, #212).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordFolderPick {
+    pub folder: String,
+    pub save_error: Option<String>,
+}
+
 /// 녹음 저장 폴더 고르기(폴더 대화상자). 취소하면 `null`.
 #[tauri::command]
 pub async fn engine_record_pick_folder(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     dirs: State<'_, RecordDirState>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<RecordFolderPick>, String> {
     use tauri_plugin_dialog::DialogExt;
     let dirs = dirs.inner().clone();
     blocking(move || {
@@ -370,10 +400,11 @@ pub async fn engine_record_pick_folder(
             return Ok(None);
         };
         let path = picked.into_path().map_err(|e| format!("폴더 경로 오류: {e}"))?;
-        if let Err(e) = dirs.0.set(path.clone()) {
+        let save_error = dirs.0.set(path.clone()).err().map(|e| {
             log::warn!("녹음 폴더 설정 저장 실패: {e}");
-        }
-        Ok(Some(path.to_string_lossy().into_owned()))
+            e.to_string()
+        });
+        Ok(Some(RecordFolderPick { folder: path.to_string_lossy().into_owned(), save_error }))
     })
     .await
 }
@@ -406,4 +437,35 @@ pub async fn engine_record_set_track_names(
 pub async fn engine_record_stop(state: State<'_, EngineState>) -> Result<RecordSummary, String> {
     let m = state.0.clone();
     blocking(move || m.record_stop()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use band_engine::testing::engine::device::fake::{FakeBackend, SourceFn};
+    use std::sync::atomic::Ordering;
+
+    /// 발굴 3차: 페이지를 다시 읽으면 앞 페이지가 띄운 엔진(여기서는 테스트 모드 + 녹음)을 정지한다. 녹음은 마무리되고
+    /// (session.json), 테스트 모드가 강제로 켠 모니터는 원래 값으로 돌아간다. 엔진이 없으면(처음 열 때) 아무것도 하지 않는다.
+    #[test]
+    fn page_reload_stops_orphaned_engine_and_finishes_recording() {
+        let src: Arc<SourceFn> = Arc::new(|_: u64, _: usize, b: &mut [f32]| b.fill(0.1));
+        let state = EngineState(Arc::new(EngineManager::new(Arc::new(FakeBackend::new(48_000, src)), NetOptions::default())));
+        let m = state.manager();
+        assert!(!state.stop_orphaned(state.reload_generation()), "엔진이 없으면 아무것도 하지 않는다");
+        m.set_monitor(false, 1.0);
+        m.start_monitor_only(EngineConfig { buffer_size: 128, ..Default::default() }).unwrap();
+        assert!(m.controls().monitor_enabled.load(Ordering::Relaxed), "테스트 모드는 모니터를 켠다");
+        let dir = std::env::temp_dir().join(format!("band-app-reload-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let st = m.record_start(RecordOptions::default(), &dir).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert!(state.stop_orphaned(state.reload_generation()), "실행 중이던 엔진을 정지했다");
+        assert!(m.with_engine(|_| Ok(())).is_err() && !m.is_starting(), "엔진이 남았다");
+        assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed), "모니터 설정이 복원되지 않았다");
+        assert!(std::path::Path::new(&st.folder).join("session.json").exists(), "녹음이 마무리되지 않았다");
+        assert!(!state.stop_orphaned(state.reload_generation()), "두 번째는 할 일이 없다");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

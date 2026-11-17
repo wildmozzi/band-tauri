@@ -21,6 +21,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::EngineState::default())
         .manage(commands::DiagState::default())
+        // 페이지를 다시 읽으면(F5·Ctrl+R 등) 앞 페이지의 엔진을 정지한다(`EngineState::stop_orphaned`, 발굴 3차). 콜백은 메인
+        // 스레드라 정지(join·녹음 마무리)는 별도 스레드에서.
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                let engine = webview.state::<commands::EngineState>().inner().clone();
+                // 세대는 지금 뜬다: 정지 스레드가 늦게 돌아도 그 사이 새 페이지가 띄운 엔진은 건드리지 않는다(#212)
+                let gen = engine.reload_generation();
+                std::thread::spawn(move || engine.stop_orphaned(gen));
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::engine_list_devices,
             commands::engine_supported_drivers,
