@@ -16,7 +16,7 @@
 
 | # | 우선 | 대상 | 내용 | 실제 영향 판단 | 필요한 일 |
 |---|---|---|---|---|---|
-| 1 | 중간 | server `zod` 3.25.76 | GHSA-mrhx-c7xc-m3w5(High): 큰 제약 컬렉션 검증 시 메모리 소모. 3.x에는 수정 없음 | JSON 본문 1MB 상한(`express.json`)이 크기를 묶는다. 스키마는 `routes/schemas.ts` 하나 | zod 4 메이저(스키마 API 변경 확인) |
+| 1 | ~~중간~~ 고침(chore/zod4) | server `zod` 3.25.76 → 4.6.7 | GHSA-mrhx-c7xc-m3w5(High): 큰 제약 컬렉션 검증 시 메모리 소모. 3.x에는 수정 없음 | JSON 본문 1MB 상한(`express.json`)이 크기를 묶는다. 스키마는 `routes/schemas.ts` 하나 | zod 4 메이저(스키마 API 변경 확인) |
 | 2 | 중간 | client 개발 도구 `vitest` 2 / `vite` 5 | vitest·tinypool critical(UI 서버·프로토타입 오염), vite·esbuild 개발 서버 경로 노출 | **개발 서버·시험 실행에만** 있다. 배포 번들에는 없다. 개발 기계를 로컬 밖에 노출하지 않으면 영향 없음 | vite 8 + @vitejs/plugin-react 6 + vitest 5 메이저 묶음(설정·플러그인 호환) |
 | 3 | 낮음 | client 개발 `@typescript-eslint` 6 / `eslint` 8 | minimatch·micromatch ReDoS(린트 도구) | 개발 도구, 신뢰하는 소스만 읽음 | typescript-eslint 8 + eslint 9/10(flat config 전환) |
 | 4 | 낮음 | client `opensheetmusicdisplay` 1.9.9 → 선택 의존 `gl@9.0.0-rc.10` → node-gyp 12 → tinyglobby → `picomatch` ≤4.0.7 | GHSA-fc5q-39xc-vjpf ReDoS. **수정 버전 미배포**(최신 4.0.7) | 설치 시 네이티브 빌드 도구 체인. 브라우저 번들에는 없다. OSMD 1.9.9가 `gl` rc를 선택 의존으로 지정 | picomatch 수정 배포 뒤 `npm update`. 또는 OSMD 2.x 메이저(데모 악보 화면 `ScoreDisplay`) |

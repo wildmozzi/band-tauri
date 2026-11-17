@@ -8,6 +8,12 @@ import { ROOM_CAPACITY_MAX, ROOM_CAPACITY_MIN } from '../lib/roomCapacity'
 
 const shortString = z.string().min(1).max(200)
 
+/**
+ * id 경로 파라미터(UUID 모양). zod 4의 `z.uuid()`는 RFC 9562 버전·변형 비트까지 보지만 zod 3의 `.uuid()`는 8-4-4-4-12 hex 모양만 봤다 —
+ * 같은 동작을 위해 `z.guid()`(zod 4에서 예전 규칙)를 쓴다. 실제 DB id(gen_random_uuid)는 둘 다 통과한다
+ */
+const idString = z.guid()
+
 /** 서버 발급 orderId 형식 (토스 규칙: 영문·숫자·-·_ 6~64자) */
 const orderIdString = z.string().regex(/^[A-Za-z0-9_-]{6,64}$/)
 
@@ -43,7 +49,7 @@ export const uploadFilenameParams = z.object({
 })
 
 export const separationIdParams = z.object({
-  id: z.string().uuid(),
+  id: idString,
 })
 
 /** 방 생성 (P2-6). host_id는 받지 않는다 — 토큰의 userId가 방장 */
@@ -64,7 +70,7 @@ export const createRoomBody = z.object({
 })
 
 export const roomIdParams = z.object({
-  id: z.string().uuid(),
+  id: idString,
 })
 
 export const setRoomPasswordBody = z.object({
@@ -140,8 +146,22 @@ export function postFieldLabel(field: string): string {
   return POST_FIELD_LABELS[field] ?? field
 }
 
-/** zod 오류 → 필드별 이유 (게시글 400 응답의 issues, PR #25 M2) */
-export function postFieldIssues(error: z.ZodError): FieldIssue[] {
+/** 입력 객체에서 path의 값(없으면 undefined) — 필드가 빠졌는지 보려고(zod 4 issue에는 받은 값이 없다) */
+function valueAt(input: unknown, path: readonly PropertyKey[]): unknown {
+  let v = input
+  for (const k of path) {
+    if (v === null || typeof v !== 'object') return undefined
+    v = (v as Record<PropertyKey, unknown>)[k]
+  }
+  return v
+}
+
+/**
+ * zod 오류 → 필드별 이유 (게시글 400 응답의 issues, PR #25 M2). `input`은 검증한 원래 본문이다 — 필드가 빠졌을 때(받은 값 undefined)
+ * "입력하세요"로 안내하려고 쓴다. 문구·순서는 클라이언트 계약이고 zod 3 때와 같다(test/schemas-boundary.test.ts가 고정).
+ * zod 4 대응: 목록 밖 값 code `invalid_value`(3: invalid_enum_value), 상한 종류 `origin`(3: type), 받은 값은 input에서 본다(3: received)
+ */
+export function postFieldIssues(error: z.ZodError, input?: unknown): FieldIssue[] {
   const out: FieldIssue[] = []
   const seen = new Set<string>()
   for (const issue of error.issues) {
@@ -152,9 +172,10 @@ export function postFieldIssues(error: z.ZodError): FieldIssue[] {
     if (issue.code === 'too_small') message = inArray ? `${label}에 빈 값이 있습니다.` : `${label}을(를) 입력하세요.`
     else if (issue.code === 'too_big') {
       const max = Number(issue.maximum)
-      message = issue.type === 'array' ? `${label}은(는) 최대 ${max}개까지입니다.` : inArray ? `${label}은(는) 하나에 최대 ${max}자까지입니다.` : `${label}은(는) 최대 ${max}자까지입니다.`
-    } else if (issue.code === 'invalid_enum_value') message = `${label}: 선택할 수 없는 값입니다.`
-    else if (issue.code === 'invalid_type' && issue.received === 'undefined') message = `${label}을(를) 입력하세요.`
+      message = issue.origin === 'array' ? `${label}은(는) 최대 ${max}개까지입니다.` : inArray ? `${label}은(는) 하나에 최대 ${max}자까지입니다.` : `${label}은(는) 최대 ${max}자까지입니다.`
+    } else if (issue.code === 'invalid_value' && typeof valueAt(input, issue.path) === 'string') message = `${label}: 선택할 수 없는 값입니다.`
+    // 문자열이 아닌 값(숫자·null 등)은 zod 4도 invalid_value지만 zod 3은 invalid_type이었다 → 아래 "형식" 문구(#224 리뷰 L-1)
+    else if (issue.code === 'invalid_type' && valueAt(input, issue.path) === undefined) message = `${label}을(를) 입력하세요.`
     else message = `${label} 형식이 올바르지 않습니다.`
     const k = `${field}|${message}`
     if (seen.has(k)) continue
@@ -165,5 +186,5 @@ export function postFieldIssues(error: z.ZodError): FieldIssue[] {
 }
 
 export const postIdParams = z.object({
-  id: z.string().uuid(),
+  id: idString,
 })

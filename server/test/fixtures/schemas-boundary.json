@@ -1,0 +1,621 @@
+{
+  "confirm ok + extra keys dropped": {
+    "ok": true,
+    "data": {
+      "paymentKey": "pk",
+      "orderId": "order_123",
+      "planType": "pro",
+      "amount": 9900
+    }
+  },
+  "confirm amount float": {
+    "ok": false
+  },
+  "confirm amount zero": {
+    "ok": false
+  },
+  "confirm amount string": {
+    "ok": false
+  },
+  "confirm orderId short": {
+    "ok": false
+  },
+  "confirm orderId bad char": {
+    "ok": false
+  },
+  "confirm paymentKey too long": {
+    "ok": false
+  },
+  "confirm planType free": {
+    "ok": false
+  },
+  "confirm empty": {
+    "ok": false
+  },
+  "createOrder ok": {
+    "ok": true,
+    "data": {
+      "planType": "standard"
+    }
+  },
+  "createOrder bad": {
+    "ok": false
+  },
+  "orderIdParams ok": {
+    "ok": true,
+    "data": {
+      "orderId": "A-b_123456"
+    }
+  },
+  "orderIdParams too long": {
+    "ok": false
+  },
+  "cancel empty": {
+    "ok": true,
+    "data": {}
+  },
+  "cancel reason wrong type → catch": {
+    "ok": true,
+    "data": {
+      "paymentKey": "pk"
+    }
+  },
+  "cancel reason ok": {
+    "ok": true,
+    "data": {
+      "cancelReason": "단순 변심"
+    }
+  },
+  "cancel paymentKey too long": {
+    "ok": false
+  },
+  "changePlan free": {
+    "ok": true,
+    "data": {
+      "newPlan": "free"
+    }
+  },
+  "changePlan bad": {
+    "ok": false
+  },
+  "uploadFilename ok": {
+    "ok": true,
+    "data": {
+      "filename": "song.mp3"
+    }
+  },
+  "uploadFilename empty": {
+    "ok": false
+  },
+  "uploadFilename 256": {
+    "ok": false
+  },
+  "separationId v4": {
+    "ok": true,
+    "data": {
+      "id": "3f2a1c9e-1111-4a2b-9c3d-123456789abc"
+    }
+  },
+  "separationId nil": {
+    "ok": true,
+    "data": {
+      "id": "00000000-0000-0000-0000-000000000000"
+    }
+  },
+  "separationId nonRfc": {
+    "ok": true,
+    "data": {
+      "id": "12345678-1234-1234-1234-123456789abc"
+    }
+  },
+  "separationId upper": {
+    "ok": true,
+    "data": {
+      "id": "3F2A1C9E-1111-4A2B-9C3D-123456789ABC"
+    }
+  },
+  "separationId short": {
+    "ok": false
+  },
+  "separationId junk": {
+    "ok": false
+  },
+  "roomId v4": {
+    "ok": true,
+    "data": {
+      "id": "3f2a1c9e-1111-4a2b-9c3d-123456789abc"
+    }
+  },
+  "roomId nil": {
+    "ok": true,
+    "data": {
+      "id": "00000000-0000-0000-0000-000000000000"
+    }
+  },
+  "roomId nonRfc": {
+    "ok": true,
+    "data": {
+      "id": "12345678-1234-1234-1234-123456789abc"
+    }
+  },
+  "roomId upper": {
+    "ok": true,
+    "data": {
+      "id": "3F2A1C9E-1111-4A2B-9C3D-123456789ABC"
+    }
+  },
+  "roomId short": {
+    "ok": false
+  },
+  "roomId junk": {
+    "ok": false
+  },
+  "postId v4": {
+    "ok": true,
+    "data": {
+      "id": "3f2a1c9e-1111-4a2b-9c3d-123456789abc"
+    }
+  },
+  "postId nil": {
+    "ok": true,
+    "data": {
+      "id": "00000000-0000-0000-0000-000000000000"
+    }
+  },
+  "postId nonRfc": {
+    "ok": true,
+    "data": {
+      "id": "12345678-1234-1234-1234-123456789abc"
+    }
+  },
+  "postId upper": {
+    "ok": true,
+    "data": {
+      "id": "3F2A1C9E-1111-4A2B-9C3D-123456789ABC"
+    }
+  },
+  "postId short": {
+    "ok": false
+  },
+  "postId junk": {
+    "ok": false
+  },
+  "createRoom minimal (defaults)": {
+    "ok": true,
+    "data": {
+      "title": "합주방",
+      "description": null,
+      "genre": null,
+      "maxParticipants": 8,
+      "tags": [],
+      "freeJoin": true,
+      "isPrivate": false,
+      "instrumentSlots": []
+    }
+  },
+  "createRoom full": {
+    "ok": true,
+    "data": {
+      "title": "Jam",
+      "description": null,
+      "genre": "rock",
+      "maxParticipants": 6,
+      "tags": [
+        "a",
+        "b"
+      ],
+      "freeJoin": false,
+      "isPrivate": true,
+      "instrumentSlots": [
+        {
+          "instrument": "guitar",
+          "count": 2
+        }
+      ],
+      "password": "pw"
+    }
+  },
+  "createRoom description null": {
+    "ok": true,
+    "data": {
+      "title": "x",
+      "description": null,
+      "genre": null,
+      "maxParticipants": 8,
+      "tags": [],
+      "freeJoin": true,
+      "isPrivate": false,
+      "instrumentSlots": []
+    }
+  },
+  "createRoom blank title": {
+    "ok": false
+  },
+  "createRoom title 101": {
+    "ok": false
+  },
+  "createRoom capacity too big": {
+    "ok": false
+  },
+  "createRoom capacity float": {
+    "ok": false
+  },
+  "createRoom tag empty after trim": {
+    "ok": false
+  },
+  "createRoom 21 tags": {
+    "ok": false
+  },
+  "createRoom slot count 11": {
+    "ok": false
+  },
+  "createRoom password null": {
+    "ok": true,
+    "data": {
+      "title": "x",
+      "description": null,
+      "genre": null,
+      "maxParticipants": 8,
+      "tags": [],
+      "freeJoin": true,
+      "isPrivate": false,
+      "instrumentSlots": [],
+      "password": null
+    }
+  },
+  "createRoom password 257": {
+    "ok": false
+  },
+  "setRoomPassword null": {
+    "ok": true,
+    "data": {
+      "password": null
+    }
+  },
+  "setRoomPassword empty": {
+    "ok": true,
+    "data": {
+      "password": ""
+    }
+  },
+  "setRoomPassword missing": {
+    "ok": false
+  },
+  "postImageUpload ok": {
+    "ok": true,
+    "data": {
+      "contentType": "image/gif",
+      "size": 1000
+    }
+  },
+  "postImageUpload svg": {
+    "ok": false
+  },
+  "postImageUpload size 0": {
+    "ok": false
+  },
+  "postImageUpload size huge": {
+    "ok": true,
+    "data": {
+      "contentType": "image/png",
+      "size": 9007199254740991
+    }
+  },
+  "avatarUpload gif": {
+    "ok": false
+  },
+  "avatarUpload ok": {
+    "ok": true,
+    "data": {
+      "contentType": "image/webp",
+      "size": 10
+    }
+  },
+  "postImageComplete ok": {
+    "ok": true,
+    "data": {
+      "key": "a/b.png"
+    }
+  },
+  "postImageComplete empty": {
+    "ok": false
+  },
+  "postImageResolve ok": {
+    "ok": true,
+    "data": {
+      "urls": [
+        "https://x/a.png"
+      ]
+    }
+  },
+  "postImageResolve 21": {
+    "ok": false
+  },
+  "createPost minimal (defaults)": {
+    "ok": true,
+    "data": {
+      "title": "제목",
+      "content": "내용",
+      "tags": [],
+      "images": [],
+      "instrument": "other",
+      "category": "general"
+    }
+  },
+  "createPost empty": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "title",
+        "message": "제목을(를) 입력하세요."
+      },
+      {
+        "field": "content",
+        "message": "내용을(를) 입력하세요."
+      }
+    ]
+  },
+  "createPost blank title": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "title",
+        "message": "제목을(를) 입력하세요."
+      }
+    ]
+  },
+  "createPost title 201": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "title",
+        "message": "제목은(는) 최대 200자까지입니다."
+      }
+    ]
+  },
+  "createPost content too long": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "content",
+        "message": "내용은(는) 최대 20000자까지입니다."
+      }
+    ]
+  },
+  "createPost 21 tags": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "tags",
+        "message": "태그은(는) 최대 20개까지입니다."
+      }
+    ]
+  },
+  "createPost tag too long": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "tags",
+        "message": "태그은(는) 하나에 최대 50자까지입니다."
+      }
+    ]
+  },
+  "createPost blank tag": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "tags",
+        "message": "태그에 빈 값이 있습니다."
+      }
+    ]
+  },
+  "createPost 6 images": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "images",
+        "message": "이미지은(는) 최대 5개까지입니다."
+      }
+    ]
+  },
+  "createPost empty image": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "images",
+        "message": "이미지에 빈 값이 있습니다."
+      }
+    ]
+  },
+  "createPost bad instrument": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "instrument",
+        "message": "악기: 선택할 수 없는 값입니다."
+      }
+    ]
+  },
+  "createPost bad category": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "category",
+        "message": "카테고리: 선택할 수 없는 값입니다."
+      }
+    ]
+  },
+  "createPost wrong types": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "title",
+        "message": "제목 형식이 올바르지 않습니다."
+      },
+      {
+        "field": "content",
+        "message": "내용 형식이 올바르지 않습니다."
+      },
+      {
+        "field": "tags",
+        "message": "태그 형식이 올바르지 않습니다."
+      },
+      {
+        "field": "images",
+        "message": "이미지 형식이 올바르지 않습니다."
+      }
+    ]
+  },
+  "createPost title null": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "title",
+        "message": "제목 형식이 올바르지 않습니다."
+      }
+    ]
+  },
+  "createPost instrument number": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "instrument",
+        "message": "악기 형식이 올바르지 않습니다."
+      }
+    ]
+  },
+  "createPost category null": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "category",
+        "message": "카테고리 형식이 올바르지 않습니다."
+      }
+    ]
+  },
+  "createPost instrument object": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "instrument",
+        "message": "악기 형식이 올바르지 않습니다."
+      }
+    ]
+  },
+  "createPost category array": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "category",
+        "message": "카테고리 형식이 올바르지 않습니다."
+      }
+    ]
+  },
+  "createPost many issues": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "title",
+        "message": "제목을(를) 입력하세요."
+      },
+      {
+        "field": "content",
+        "message": "내용은(는) 최대 20000자까지입니다."
+      },
+      {
+        "field": "tags",
+        "message": "태그에 빈 값이 있습니다."
+      },
+      {
+        "field": "tags",
+        "message": "태그은(는) 하나에 최대 50자까지입니다."
+      },
+      {
+        "field": "instrument",
+        "message": "악기: 선택할 수 없는 값입니다."
+      },
+      {
+        "field": "category",
+        "message": "카테고리: 선택할 수 없는 값입니다."
+      }
+    ]
+  },
+  "updatePost empty ok": {
+    "ok": true,
+    "data": {}
+  },
+  "updatePost legacy values ok": {
+    "ok": true,
+    "data": {
+      "title": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "tags": [
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t",
+        "t"
+      ],
+      "instrument": "flute"
+    }
+  },
+  "updatePost too big": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "title",
+        "message": "제목은(는) 최대 10000자까지입니다."
+      },
+      {
+        "field": "images",
+        "message": "이미지은(는) 최대 100개까지입니다."
+      }
+    ]
+  },
+  "updatePost empty image": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "images",
+        "message": "이미지에 빈 값이 있습니다."
+      }
+    ]
+  },
+  "updatePost wrong types": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "title",
+        "message": "제목 형식이 올바르지 않습니다."
+      },
+      {
+        "field": "tags",
+        "message": "태그 형식이 올바르지 않습니다."
+      }
+    ]
+  }
+}
