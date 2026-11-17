@@ -130,6 +130,7 @@ engine/media_port.rs	struct	MediaPort
 engine/metronome/click.rs	field	clicks
 engine/metronome/click.rs	field	late
 engine/metronome/click.rs	field	next
+engine/metronome/click.rs	field	shifted
 engine/metronome/click.rs	field	skipped
 engine/metronome/click.rs	field	step
 engine/metronome/click.rs	method	new
