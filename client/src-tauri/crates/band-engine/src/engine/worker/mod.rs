@@ -108,6 +108,9 @@ pub struct WorkerStats {
     /// 워커 수면 overshoot(요청한 `POLL`·`FINE_POLL`보다 늦게 깬 양) 분포(P2-17c, 제품 빌드에서도 켬 — 원자 덧셈 두 번).
     /// 은닉 마감 여유(`DEADLINE_GUARD_US`)가 이 기계의 기상 지연을 덮는지 보는 진단이다(`EngineStats.cpu.workerWake*`).
     pub(crate) sleep_over: crate::net::txlat::SendLatency,
+    /// 워커 기다림 누계 [`POLL`, `FINE_POLL`, 돌기](P2-17g `Nap::pick`, 원자 덧셈 하나). `EngineStats.cpu.workerFineNapPct`·
+    /// `workerSpinPct`(창 비율)로 나간다.
+    pub(crate) naps: [AtomicU64; 3],
     /// 반복마다 남은 락(`Peer.clock`)에서 기다린 합과, 본문에서 그것을 뺀 값(락 밖 비용, #122 리뷰 M3).
     pub(crate) iter_lock_wait: crate::net::txlat::SendLatency,
     pub(crate) iter_unlocked: crate::net::txlat::SendLatency,
@@ -347,7 +350,9 @@ impl Worker {
             let deadline = self.iterate(&mut last_start);
             // 은닉 마감이 가까우면 짧게 자고, 아주 가까우면 자지 않고 마감까지 돈다(P2-17g, `Nap::pick`): 수면 overshoot 꼬리가
             // 다음 콜백을 넘지 않게. 돌기는 최대 `FINE_POLL`이다.
-            let nap = match Nap::pick(self.ctx.wall_us(), deadline) {
+            let pick = Nap::pick(self.ctx.wall_us(), deadline);
+            self.ctx.stats.naps[pick.index()].fetch_add(1, Ordering::Relaxed);
+            let nap = match pick {
                 Nap::Spin { until_us } => {
                     while self.ctx.wall_us() < until_us {
                         std::hint::spin_loop();

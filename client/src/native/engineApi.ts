@@ -142,6 +142,9 @@ export interface CpuStats {
   workerWakeMaxUs?: number
   /** 은닉 마감 여유(µs, 고정 1500). 대략 150µs + overshoot p99 + 워커 반복 시간을 덮어야 한다 */
   deadlineGuardUs?: number
+  /** 직전 창 워커 기다림 중 FINE_POLL 수면·마감 직전 돌기 비율(%, P2-17g). 나머지는 POLL. 옛 엔진이면 없음 */
+  workerFineNapPct?: number
+  workerSpinPct?: number
 }
 
 /** engine_set_relay 인자: 서버 relay-token 메시지의 addr/token/expiresIn */
@@ -491,7 +494,10 @@ export interface ThreadPriorityStats {
   timer1ms: boolean
 }
 
-/** 스레드 하나의 코어 배치(설계 문서 4절 `corePlacement`). 비율은 %(합 100) */
+/**
+ * 스레드 하나의 코어 배치(설계 문서 4절 `corePlacement`). 엔진 시작부터 누적, 비율은 %(합 100).
+ * 표본은 깨어남 가중(워커 반복·수신 패킷마다)이라 실행 시간 비율이 아니다. 구간 값은 진단 타임라인(`[P, E, LP-E]` 구간 수)에 있다.
+ */
 export interface ThreadPlacement {
   samples: number
   pPct: number

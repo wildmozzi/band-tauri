@@ -66,6 +66,8 @@ pub(super) struct NetPeer {
     pub reorder: Option<(f64, u64)>,
     /// 지터 분포 급변(혼돈): 이 시각(µs)부터 분포를 바꾼다. 크기는 `net_jitter_us`·`steps`를 그대로 따른다.
     pub dist_switch: Option<(u64, JitDist)>,
+    /// 지터 분포 여러 번 바꾸기(P2-16c): (시각 µs, 분포) — 그 시각 이후 마지막 항목이 `dist_switch`보다 우선한다.
+    pub dist_steps: Vec<(u64, JitDist)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -77,7 +79,7 @@ pub(super) enum JitDist {
 
 impl NetPeer {
     pub fn new(frame: usize, seed: u64) -> Self {
-        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None, rejoins: Vec::new(), dup: None, reorder: None, dist_switch: None }
+        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None, rejoins: Vec::new(), dup: None, reorder: None, dist_switch: None, dist_steps: Vec::new() }
     }
 }
 
@@ -108,7 +110,8 @@ pub(super) enum WakeModel {
     /// U(0..`worker_jitter_us`) — 수면 길이와 무관. 기존 시나리오·fixture의 모델(기본 300µs, 실측보다 낙관적).
     Uniform,
     /// 실측 분위표(`WAKE_FINE`/`WAKE_POLL`)에서 역CDF 선형 보간으로 뽑는다 — `FINE_POLL`·`POLL` 수면마다 다른 분포.
-    /// `worker_jitter_us`는 쓰지 않는다.
+    /// `worker_jitter_us`는 쓰지 않는다. 한계: 수면마다 독립 표본이라 꼬리가 몰려 나는 현상(코어 파킹·전원 상태 전환 동안
+    /// 연속 늦은 기상)은 재현하지 않고, 분위표는 기계 한 대 유휴 측정이다 — 실제보다 낙관적일 수도 비관적일 수도 있다.
     Measured,
 }
 
@@ -479,6 +482,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     Some((ts, d)) if t >= ts => d,
                     _ => np.dist,
                 };
+                let dist = np.dist_steps.iter().rev().find(|s| t >= s.0).map_or(dist, |s| s.1);
                 let jitter = match dist {
                     JitDist::Uniform => tx.rng.gen_range(0..jit_us.max(100)),
                     JitDist::Exp => (-(1.0 - tx.rng.gen::<f64>()).ln() * jit_us as f64) as u64,
@@ -807,10 +811,11 @@ fn tune_six_peers_simultaneous() {
 /// PR #16 M2: 드리프트(±200ppm)가 있으면 깊이는 삽입 진입 문턱만큼 목표 밑에 머문다. 삽입 문턱을 목표에 넣었으므로
 /// 여유를 학습한 뒤(이른 콜백 + 워커 기상 지연 → 언더런) 드리프트 아래에서도 언더런 콜백 밖의 은닉이 없어야 한다.
 ///
-/// P2-17g: 실행 18개(30초씩)에서 언더런 콜백 밖 은닉을 **합계 1회까지** 허용한다(이전: 실행마다 0). 마감 근처 기다림이
-/// 촘촘해지면(`Nap::pick`) 마감 뒤 첫 기상이 마감에 더 가까워져, 늦은 패킷을 기다려 주던 우연한 여유가 줄어든다. 시드 0..30
-/// (180실행) 스윕에서 언더런 콜백 밖 은닉은 이전 0, `POLL_TAIL_US` 1000µs 4, 600µs 7회였다 — 실행당 많아야 1회(30초 중 프레임
-/// 하나)이고 꼬리 값에 단조롭지 않은 궤적 민감 사건이다. M2가 막는 것(깊이 부족으로 은닉이 계속 쌓임)은 실행당 0~1로 여전히 잡힌다.
+/// P2-17g: 언더런 콜백 밖 은닉을 **실행당 1회, 18실행 합계 2회까지** 허용한다(이전: 실행마다 0). M2가 막는 것(깊이 부족으로
+/// 은닉이 계속 쌓임)은 실행당 ≥ 2로 잡힌다. 마감 근처 기다림이 촘촘해지면(`Nap::pick`) 마감 뒤 첫 기상이 마감에 더 가까워져,
+/// 늦은 패킷을 기다려 주던 우연한 여유가 줄어 단발 은닉이 가끔 난다. 기준선(develop `1fa14d1` + P2-17g, 시드 0..30 = 180실행,
+/// 위상 `900 × 시드`): 이전 규칙 0, `Nap::pick` 4회(모두 −200ppm, 실행당 1, xrun 합계 278 vs 279). 실행당 약 2.2%라
+/// 18실행 기대값 0.4, 합계 ≥ 3일 확률(포아송) 약 0.8%다. 리뷰(#209)의 다른 위상 식 스윕에서는 이전 1 / 이후 3이었다.
 #[test]
 fn tune_margin_with_drift_no_steady_concealment() {
     let (mut runs, mut learned, mut conc) = (0, 0, 0usize);
@@ -846,7 +851,7 @@ fn tune_margin_with_drift_no_steady_concealment() {
         }
     }
     println!("TUNE M2: {runs}실행 중 여유 학습 {learned}, 언더런 콜백 밖 은닉 {conc}");
-    assert!(conc <= 1, "언더런 콜백 밖 은닉 합계 {conc} > 1 ({runs}실행)");
+    assert!(conc <= 2, "언더런 콜백 밖 은닉 합계 {conc} > 2 ({runs}실행)");
     assert!(learned >= 4, "여유 학습이 일어나야 함(전제): {learned}");
 }
 

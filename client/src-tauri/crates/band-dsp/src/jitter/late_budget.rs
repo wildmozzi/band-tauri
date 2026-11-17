@@ -149,6 +149,12 @@ impl LateBudget {
         if self.tail_fresh >= LATE_UP_BLOCKS && avg(LATE_UP_BLOCKS) > budget {
             let d = grid_up(mu * (avg(LATE_UP_BLOCKS) / budget).ln()).clamp(TARGET_GRID, LATE_STEP_MAX);
             self.tail_extra = (self.tail_extra + d).min(frame);
+        } else if self.tail_extra > 0.0 && self.tail_fresh >= LATE_UP_BLOCKS && avg(LATE_UP_BLOCKS) == 0.0 {
+            // 빠른 내림(P2-16c): 올림과 같은 블록 수(5) 동안 늦은 도착이 하나도 없으면 예산을 전혀 쓰지 않은 것이다(지터가
+            // 좋아짐 — 파레토 3ms → 균등 0.5ms 뒤 `tail_extra` 2.25ms가 10블록마다 0.25ms씩 내려 1분 넘게 남았다). 절반씩
+            // 내린다(격자로 올림, 1ms 상한). 늦은 도착이 조금이라도 있는 회선은 아래 느린 내림 그대로다.
+            let d = grid_up(self.tail_extra / 2.0).clamp(TARGET_GRID, LATE_STEP_MAX);
+            self.tail_extra = (self.tail_extra - d).max(0.0);
         } else if self.tail_fresh >= LATE_DOWN_BLOCKS && avg(LATE_DOWN_BLOCKS) < budget * LATE_DOWN_FRAC {
             // 내림은 절반 걸음: 예산 아래로 얼마나 내려왔는지(최소 예산/4로 잘라) 기준.
             let r = (budget * LATE_DOWN_FRAC / avg(LATE_DOWN_BLOCKS).max(budget / 4.0)).ln();
@@ -250,7 +256,8 @@ impl JitterBuffer {
     /// - 재생 시작·경로 변경 뒤 `LATE_SKIP_BLOCKS`개 블록은 판단에서 뺀다(L3). 경로 변경·스트림 리셋·큰 프로필 변경은 초기화(L2).
     /// - 올림: 조정 뒤 `LATE_UP_BLOCKS`개 평균이 예산을 넘으면 μ·ln(평균/예산)(격자 0.25ms ~ 1ms). μ는 꼬리 척도로
     ///   RFC 3550 지터를 쓴다(지수 꼬리면 늦은 비율 ∝ exp(−여유/μ)이라 한두 번에 수렴).
-    /// - 내림: 조정 뒤 `LATE_DOWN_BLOCKS`개 평균이 예산 × `LATE_DOWN_FRAC` 아래면 그 절반 걸음.
+    /// - 빠른 내림(P2-16c): 조정 뒤 `LATE_UP_BLOCKS`개 블록에 늦은 도착이 하나도 없으면 `tail_extra`의 절반(격자 올림, ≤ 1ms).
+    /// - 내림: 그 밖에 조정 뒤 `LATE_DOWN_BLOCKS`개 평균이 예산 × `LATE_DOWN_FRAC` 아래면 μ·ln(예산 × `LATE_DOWN_FRAC` / 평균)의 절반 걸음.
     /// - 상한은 1프레임(지터 버퍼 추가 지연 증가 ≤ 1프레임).
     pub(super) fn close_late_block(&mut self) {
         if self.late.close_block(self.tuning.conceal_target, self.delay.rfc_jitter(), self.frame() as f64) {

@@ -444,7 +444,7 @@ jobs:
         # 앱 lib 시험 바이너리(시험 0개)도 함께 빌드되므로 위 dist 자리 표시가 남는다.
         run: cargo nextest run --no-run
       - name: Realtime tests (직렬, 3회까지)
-        # 37개 직렬 약 22분(2026-11-13, ③c 측정 시험 추가 뒤) + 재시도 여유. 넘으면 시험 구성 재검토
+        # 42개 직렬(2026-11-18 nextest list, wake_latency 제외 뒤 — 37개일 때 약 22분, 2026-11-13) + 재시도 여유. 넘으면 시험 구성 재검토
         timeout-minutes: 35
         run: cargo nextest run -E '(kind(test) & !binary(soak) & !binary(sim) & !binary(wake_latency)) | (kind(lib) & test(/::realtime_/))' --run-ignored only --retries 2 --test-threads 1 --no-fail-fast --success-output final --failure-output immediate-final
 

@@ -34,6 +34,15 @@ pub enum Nap {
 }
 
 impl Nap {
+    /// 통계 칸 번호(`WorkerStats::naps`): 0 `POLL`, 1 `FINE_POLL`, 2 돌기.
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Nap::Poll => 0,
+            Nap::Fine => 1,
+            Nap::Spin { .. } => 2,
+        }
+    }
+
     /// `now_us` = 지금 벽시계(워커 epoch µs), `deadline_us` = 모자란 피어 중 가장 이른 은닉 마감(`None` = 모자란 피어 없음).
     pub fn pick(now_us: u64, deadline_us: Option<u64>) -> Nap {
         let Some(d) = deadline_us else { return Nap::Poll };

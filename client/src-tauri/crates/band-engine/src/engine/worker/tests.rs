@@ -20,11 +20,20 @@ fn nap_pick_keeps_sleep_tails_before_callback() {
     assert_eq!(Nap::pick(now, Some(now + 1)), Nap::Spin { until_us: now + 1 });
     assert_eq!(Nap::pick(now, Some(now)), Nap::Fine, "마감이 지났는데 모자람(콜백 도중) — 돌지 않음");
     assert_eq!(Nap::pick(now, Some(now - 500)), Nap::Fine);
-    // 수면을 고른 경우 다음 콜백(= 마감 + 여유 1.5ms) 전에 깨려면 overshoot가 이만큼까지 허용된다: POLL 2.5ms, FINE 1.5ms.
+    // 마감 전 모든 남은 시간에서: 수면을 고르면, 그 수면의 실측 최대 overshoot(225H 유휴, `tests/sim/tune.rs` `WAKE_POLL`·
+    // `WAKE_FINE`의 100% 값)로 늦게 깨도 다음 콜백(= 마감 + 여유) 전이어야 한다. 돌기는 마감 시각에 깬다.
+    const POLL_OVER_MAX_US: u64 = 2004;
+    const FINE_OVER_MAX_US: u64 = 1469;
     let guard = DEADLINE_GUARD_US;
-    let poll_room = (poll + POLL_TAIL_US + 1) + guard - poll;
-    let fine_room = fine + guard - fine;
-    assert!(poll_room > 2_000 && fine_room >= 1_500, "POLL {poll_room}µs, FINE {fine_room}µs");
+    for left in 1..=5_000u64 {
+        let next_cb = now + left + guard;
+        let wake = match Nap::pick(now, Some(now + left)) {
+            Nap::Poll => now + poll + POLL_OVER_MAX_US,
+            Nap::Fine => now + fine + FINE_OVER_MAX_US,
+            Nap::Spin { until_us } => until_us,
+        };
+        assert!(wake < next_cb, "마감까지 {left}µs: 최악 기상 {}µs 뒤 > 다음 콜백 {}µs 뒤", wake - now, next_cb - now);
+    }
 }
 
 #[test]

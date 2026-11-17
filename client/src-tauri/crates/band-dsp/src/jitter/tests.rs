@@ -501,7 +501,8 @@ fn probe_review() {
 ///   그 뒤는 버스트·긴 창이 맡는다(평균 목표 43 / 7.7 / 39ms — 은닉 대신 지연을 내주는 이전 맞교환으로 돌아감).
 /// - 0.7s +30ms /3s: 0.98 / 1.10 / 0.98. 1s +30ms /4s: 0.71 / 0.71 / 0.71.
 /// - 0.6s 공백 + 앞뒤 늦은 패킷: 계단 오판정(지연 창 리셋) 0 / 9 / 0(L1 최소 패킷 수).
-/// - +130ms 계단(10~20s): 0.93 / 1.22 / 0.90, 늦은 버림 109 / 174 / 103(M1 깊이 EWMA 재설정).
+/// - +130ms 계단(10~20s): 0.93 / 1.22 / 0.90, 늦은 버림 109 / 174 / 103(M1 깊이 EWMA 재설정). P2-16e(판정 전 구간의 늦은
+///   패킷 버림이 감시 중 최소 지연을 잠정 바닥으로 봄): 0.44%, 늦은 버림 1 — 남은 은닉은 130ms 공백 몫이다.
 /// - 램프 +40ms/4s 반복: 0.93 / 0.86 / 0.77.
 #[test]
 fn delay_step_review_probes() {
@@ -520,7 +521,7 @@ fn delay_step_review_probes() {
     let (_, _, _, r) = get("0.6s 공백 + 앞뒤 +10ms /5s");
     assert_eq!(r, 0, "손실 공백을 사이에 둔 늦은 패킷 몇 개로 계단 판정");
     let (c, _, ld, _) = get("계단 +130ms 10~20s");
-    assert!(c <= 0.93 && ld <= 109, "+130ms 계단 은닉 {c:.2}% 늦은 버림 {ld}(계단 감지 전보다 나빠지면 안 됨)");
+    assert!(c <= 0.5 && ld <= 2, "+130ms 계단 은닉 {c:.2}% 늦은 버림 {ld}(판정 전 버림↔은닉 교대, P2-16e)");
     let (c, _, _, _) = get("램프 +40ms/4s 반복");
     assert!(c <= 0.93, "램프 은닉 {c:.2}%");
 }
@@ -533,6 +534,42 @@ fn big_step_no_conceal_after_rebase() {
     let (a, b) = (at(10.8), at(13.0));
     assert_eq!(b.concealed - a.concealed, 0, "계단 판정 뒤 은닉 {} 프레임", b.concealed - a.concealed);
     assert_eq!(b.late_dropped - a.late_dropped, 0);
+}
+
+/// P2-16e: +130ms 계단의 판정 전 구간(공백이 끝난 ≈10.15s ~ 판정 ≈10.7s)에도 "늦은 패킷 버림 → 다음 프레임 은닉" 교대가 없다.
+/// 전에는 깊이를 옛 최소 지연 기준(≈128ms, 목표 상한 80ms)으로 보아 5ms마다 늦은 패킷 하나를 버리고 한 프레임을 은닉했다
+/// (이 구간 은닉 ≈100, 늦은 버림 ≈100). 지금은 감시 중 최소 지연을 잠정 바닥으로 보고 늦은 패킷을 재생해 쿠션을 쌓는다.
+#[test]
+fn big_step_no_alternation_before_detection() {
+    let (tr, _) = step_run_full(&|t| if (10.0..20.0).contains(&t) { 130.0 } else { 0.0 }, 12.0);
+    let at = |t: f64| tr.iter().find(|x| x.0 >= t).unwrap().1;
+    let (a, b) = (at(10.2), at(10.8));
+    let (c, ld) = (b.concealed - a.concealed, b.late_dropped - a.late_dropped);
+    assert!(c <= 2 && ld == 0, "판정 전 구간 은닉 {c} 늦은 버림 {ld}");
+}
+
+/// P2-16e(#205 리뷰 L2): 목표 상한(80ms)을 넘는 짧은 반복 스파이크(계단 아님, 판정 전에 끝남)는 이 규칙이 가장 크게 바꾸는 경우다.
+/// 감시 중 늦은 패킷을 버리지 않고 재생해 버림↔은닉 교대가 스파이크마다 없어진다(은닉 8.74 → 5.50%, 9.06 → 5.70%; 늦은 버림
+/// 715 → 13, 738 → 18). 쿠션은 실제 도착 지연을 넘지 못하고, 스파이크가 끝나면 패킷 단위 버림이 걷어 내므로 버퍼 평균은 늘지 않아야
+/// 한다(66.00 → 66.12, 75.70 → 75.78ms). 잠정 바닥 규칙을 손볼 때 팽창 회귀를 잡는다.
+#[test]
+fn short_spikes_over_cap_no_alternation_no_bloat() {
+    type Case = (&'static str, Box<dyn Fn(f64) -> f64>, f64, f64);
+    let cases: Vec<Case> = vec![
+        ("0.4s +130ms /4s", Box::new(|t: f64| if t > 5.0 && (t % 4.0) < 0.4 { 130.0 } else { 0.0 }), 6.0, 67.5),
+        ("0.3s +100ms /3s", Box::new(|t: f64| if t > 5.0 && (t % 3.0) < 0.3 { 100.0 } else { 0.0 }), 6.2, 77.2),
+    ];
+    for (name, f, conc_max, buf_max) in cases {
+        let (tr, s) = step_run_full(&*f, 60.0);
+        let s5 = tr.iter().find(|x| x.0 >= 5.0).unwrap().1;
+        let conc = (s.concealed - s5.concealed) as f64 * 100.0 / (s.produced - s5.produced).max(1) as f64;
+        let ld = s.late_dropped - s5.late_dropped;
+        let after: Vec<_> = tr.iter().filter(|x| x.0 >= 5.0).collect();
+        let buf = after.iter().map(|x| x.1.buffer_ms as f64).sum::<f64>() / after.len() as f64;
+        println!("{name}: 은닉 {conc:.2}% 늦은 버림 {ld} bufferMs 평균 {buf:.2}");
+        assert!(conc <= conc_max && ld <= 30, "{name}: 은닉 {conc:.2}% 늦은 버림 {ld}(버림↔은닉 교대)");
+        assert!(buf <= buf_max, "{name}: bufferMs 평균 {buf:.2}ms(잠정 바닥 재생으로 버퍼 팽창)");
+    }
 }
 
 /// P2-16b: 경로 지연이 10초에 +60ms 오른 채로 남으면(계단) 0.5초 뒤 지연 통계를 새 지연에서 다시 모으고 목표가 계단 전 값으로
@@ -757,6 +794,54 @@ fn late_budget_tracks_tail_jitter_only() {
     let u = run(false, 3.0, 0.01, false);
     assert_eq!(u.tail_extra_ms, 0.0, "균등 지터 + 손실 1%: tail_extra {:.2}ms", u.tail_extra_ms);
     assert!(u.conceal_after_5s < 1.5, "균등 지터 + 손실 1%: 은닉 {:.2}%", u.conceal_after_5s);
+}
+
+/// P2-16c: 5블록(올림과 같은 수) 동안 늦은 도착이 하나도 없으면 `tail_extra`를 절반씩(격자 올림) 내린다 — 지터가 좋아진 뒤
+/// 예산이 10블록마다 0.25ms씩 1분 넘게 남던 것. 늦은 도착이 조금이라도 있으면 전처럼 느린 내림(10블록)이다.
+#[test]
+fn late_budget_fast_decay_only_without_late_packets() {
+    use super::late_budget::LateBudget;
+    let block = |lb: &mut LateBudget, late: u32| {
+        for _ in 0..200 {
+            lb.note_pkt(true);
+        }
+        for _ in 0..late {
+            lb.note_late(true);
+        }
+        lb.close_block(0.013, 24.0, 120.0); // F 2.5ms: 상한 120샘플
+    };
+    let raised = || {
+        let mut lb = LateBudget::new();
+        for _ in 0..40 {
+            block(&mut lb, 10); // 5% 늦음 ≫ 예산 → 올림
+        }
+        lb
+    };
+    let mut lb = raised();
+    let top = lb.probe().tail_extra;
+    assert_eq!(top, 120.0, "올림 전제(1프레임 상한)");
+    // 늦은 도착 0: 5블록마다 절반(격자 12샘플로 올림, 한 걸음 최대 48샘플 = 1ms): 120 → 72 → 36 → 12 → 0
+    let mut fast = Vec::new();
+    for i in 1..=25 {
+        block(&mut lb, 0);
+        if i % 5 == 0 {
+            fast.push(lb.probe().tail_extra);
+        }
+    }
+    println!("빠른 내림: {top} → {fast:?}");
+    assert_eq!(fast, vec![72.0, 36.0, 12.0, 0.0, 0.0], "빠른 내림");
+    // 블록마다 늦은 도착 1개(200개 중 0.5%): 손실 0이면 예산 = 은닉 목표 1.3% × 상한 3/4 = 0.975%, 내림 문턱은 그 0.6배
+    // 0.585%라 느린 내림(10블록마다 μ 걸음, 격자 12샘플)만 걸리고 빠른 내림(늦은 도착 0)은 걸리지 않는다.
+    let mut lb = raised();
+    let mut slow = Vec::new();
+    for i in 1..=25 {
+        block(&mut lb, 1);
+        if i % 5 == 0 {
+            slow.push(lb.probe().tail_extra);
+        }
+    }
+    println!("느린 내림: {top} → {slow:?}");
+    assert_eq!(slow, vec![120.0, 108.0, 108.0, 96.0, 96.0], "늦은 도착이 있으면 10블록마다 한 걸음(12샘플)");
 }
 
 /// P1-6c(PR #65 리뷰 M1·M2): 예산은 손실의 연속 함수다. 손실 < 0.975%는 P1-6b와 같고(손실 1% → 0.325%), 그 위는
