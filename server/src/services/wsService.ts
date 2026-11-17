@@ -12,7 +12,7 @@ import { TokenBucket } from '../signaling/rateLimit'
 import { createMetronome } from '../signaling/metronome'
 import { clientIp } from '../signaling/connection'
 import { supabaseDeps } from '../signaling/supabaseDeps'
-import { createRegistry, send } from '../signaling/registry'
+import { createRegistry, send, type ActivityCounts } from '../signaling/registry'
 import { createRoomMeta } from '../signaling/roomMeta'
 import { createRequests } from '../signaling/requests'
 import { createCapacity } from '../signaling/capacity'
@@ -68,6 +68,15 @@ export { MAX_ENGINE_CANDIDATES, parseCandidates, parseEngineKey } from '../signa
 export { parseMetronomeState } from '../signaling/metronome'
 export { jwtExpiryMs } from '../signaling/auth'
 export { roomDeps } from '../signaling/roomDeps'
+export type { ActivityCounts } from '../signaling/registry'
+
+/** 서버별 운영 집계 함수 (P1-17①). 상태 맵은 내보내지 않고 숫자만 돌려주는 함수를 건다 */
+const activityByServer = new WeakMap<WebSocketServer, () => ActivityCounts>()
+
+/** 이 WS 서버의 지금 활성 방·연주자·관람자 수 (배포 전 확인용, GET /api/ops/activity). 모르는 서버면 null */
+export function wsActivity(wss: WebSocketServer): ActivityCounts | null {
+  return activityByServer.get(wss)?.() ?? null
+}
 
 
 export function initializeWebSocket(
@@ -108,6 +117,7 @@ export function initializeWebSocket(
 
   // maxPayload 초과 시 ws가 연결을 1009로 끊는다
   const wss = new WebSocketServer({ server, maxPayload: MAX_MESSAGE_BYTES })
+  activityByServer.set(wss, () => registry.activityCounts(resume.isSuspended))
 
   if (insecureDevMode) {
     console.warn('[WS][SECURITY] INSECURE dev mode (NODE_ENV=development, ALLOW_INSECURE_WS=1, no Supabase): client-sent userId/isHost are trusted.')
