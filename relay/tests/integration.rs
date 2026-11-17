@@ -267,3 +267,36 @@ async fn oversized_datagrams_do_not_stall_relay() {
     assert!(errs >= 24, "큰 데이터그램이 수신 오류가 되지 않음({errs}) — 시험 조건 확인");
     assert!(worst < Duration::from_millis(20), "큰 데이터그램 24개 뒤 keepalive 응답 {worst:?}(오류마다 쉼)");
 }
+
+/// 감사 L3: 메트릭 HTTP 동시 연결은 `METRICS_MAX_CONNECTIONS`까지만 받는다. 연결을 열어 두기만 하는 상대가 상한을 채우면 그
+/// 다음 연결은 응답 없이 닫히고, 그 연결들이 닫히면 다시 응답한다(전에는 연결마다 태스크를 만들어 무한히 쌓였다).
+#[tokio::test]
+async fn metrics_connections_are_capped() {
+    async fn get(addr: std::net::SocketAddr, path: &str) -> String {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _ = s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await;
+        let mut resp = Vec::new();
+        let _ = timeout(Duration::from_secs(2), s.read_to_end(&mut resp)).await;
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(server::serve_metrics(listener, Arc::new(Stats::default())));
+    let mut idle = Vec::new();
+    for _ in 0..server::METRICS_MAX_CONNECTIONS {
+        idle.push(TcpStream::connect(addr).await.unwrap());
+    }
+    // 서버가 위 연결들을 모두 받아 자리를 잡을 때까지(받기 순서는 연결 순서)
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let over = get(addr, "/healthz").await;
+    assert!(!over.contains("200 OK"), "상한을 넘는 연결에 응답함: {over:?}");
+    drop(idle);
+    let t = Instant::now();
+    loop {
+        if get(addr, "/healthz").await.contains("200 OK") {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(3), "자리가 돌아오지 않음");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

@@ -1,5 +1,6 @@
 //! 소켓 루프와 메트릭 HTTP 엔드포인트.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +18,22 @@ const SWEEP_EVERY: Duration = Duration::from_secs(1);
 
 /// 연속 수신 오류가 이만큼이면 1ms 쉰다(지속 오류에서 바쁜 루프 방지)
 const RECV_ERROR_BACKOFF_AFTER: u32 = 64;
+
+/// 메트릭 HTTP 동시 연결 상한. 넘는 연결은 응답 없이 바로 닫는다(감사 L3 — 연결을 열어 두기만 해도 태스크·메모리가 쌓였다).
+/// 스크레이프·헬스체크는 동시에 몇 개뿐이다.
+pub const METRICS_MAX_CONNECTIONS: usize = 16;
+
+/// 메트릭 HTTP 요청 읽기·응답 쓰기 각각의 시한(쓰기 시한은 감사 L3 — 읽지 않는 상대가 쓰기 태스크를 붙잡지 않게)
+const METRICS_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 메트릭 연결 하나의 자리(놓으면 수를 줄인다)
+struct MetricsSlot(Arc<AtomicUsize>);
+
+impl Drop for MetricsSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -86,13 +103,22 @@ pub async fn run_udp(sock: UdpSocket, mut relay: Relay) {
 }
 
 /// `GET /metrics`(Prometheus 텍스트), `GET /healthz`. 최소 HTTP/1.1 구현.
+/// 동시 연결은 [`METRICS_MAX_CONNECTIONS`]까지, 읽기·쓰기는 각각 [`METRICS_IO_TIMEOUT`] 안에서만 기다린다.
 pub async fn serve_metrics(listener: TcpListener, stats: Arc<Stats>) -> std::io::Result<()> {
+    let active = Arc::new(AtomicUsize::new(0));
     loop {
         let (mut conn, _) = listener.accept().await?;
+        if active.fetch_add(1, Ordering::AcqRel) >= METRICS_MAX_CONNECTIONS {
+            active.fetch_sub(1, Ordering::AcqRel);
+            drop(conn);
+            continue;
+        }
+        let slot = MetricsSlot(active.clone());
         let stats = stats.clone();
         tokio::spawn(async move {
+            let _slot = slot;
             let mut req = [0u8; 1024];
-            let n = match tokio::time::timeout(Duration::from_secs(5), conn.read(&mut req)).await {
+            let n = match tokio::time::timeout(METRICS_IO_TIMEOUT, conn.read(&mut req)).await {
                 Ok(Ok(n)) => n,
                 _ => return,
             };
@@ -108,8 +134,11 @@ pub async fn serve_metrics(listener: TcpListener, stats: Arc<Stats>) -> std::io:
                 "HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            let _ = conn.write_all(resp.as_bytes()).await;
-            let _ = conn.shutdown().await;
+            let _ = tokio::time::timeout(METRICS_IO_TIMEOUT, async {
+                conn.write_all(resp.as_bytes()).await?;
+                conn.shutdown().await
+            })
+            .await;
         });
     }
 }
