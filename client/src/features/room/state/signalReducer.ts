@@ -64,6 +64,8 @@ export interface SignalContext {
    */
   verifySelfPerforming?: boolean
   now: () => number
+  /** 0 이상 1 미만 난수 (재시도 간격 jitter). 없으면 Math.random */
+  random?: () => number
   makeChatId: (senderId: string, timestamp: number) => string
 }
 
@@ -207,7 +209,10 @@ function reduceJoinError(s: RoomState, p: SignalPayload, ctx: SignalContext): Si
   // 서버 혼잡/방 준비 중/방 조회 실패: 같은 조건(비밀번호)으로 몇 번 자동 재시도
   const willRetry = retryable && !!roomId && ctx.busyRetryCount < MAX_BUSY_RETRIES
   if (willRetry && roomId) {
-    effects.push({ type: 'schedule-busy-retry', roomId, delayMs: Math.min(Math.max(je.retryAfterMs ?? 1000, 500), 10_000) })
+    let delayMs = je.retryAfterMs ?? 1000
+    // 방 조회 실패는 재배포 직후 모든 연결이 동시에 재입장하며 몰린 탓일 수 있다: ±50% 흩어 다시 몰리지 않게 (#189 리뷰 L-5)
+    if (je.code === 'room-unavailable') delayMs = Math.round(delayMs * (0.5 + (ctx.random ?? Math.random)()))
+    effects.push({ type: 'schedule-busy-retry', roomId, delayMs: Math.min(Math.max(delayMs, 500), 10_000) })
   }
   // 방 안에서 재연결하다 방 조회가 잠깐 실패했다: 합주실 화면(연주·관람)을 그대로 두고 조용히 다시 시도한다.
   // 재시도를 다 쓰면 아래처럼 안내 화면을 보인다 (#189 리뷰 H-1)
@@ -215,7 +220,12 @@ function reduceJoinError(s: RoomState, p: SignalPayload, ctx: SignalContext): Si
   return {
     handled: true,
     patch: {
-      connection: { ...s.connection, joinError: rejoining ? { ...je, afterReconnect: true } : je, joinFeedback: '', roomJoined: false },
+      connection: {
+        ...s.connection,
+        joinError: { ...je, ...(rejoining ? { afterReconnect: true } : {}), ...(retryable ? { autoRetry: willRetry } : {}) },
+        joinFeedback: '',
+        roomJoined: false,
+      },
     },
     effects,
   }

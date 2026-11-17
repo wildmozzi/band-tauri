@@ -49,6 +49,8 @@ export interface JoinError {
   reason?: string | null
   /** 재연결 중 다시 입장하다 거부됨 (끊긴 사이 자리를 잃음, PR #23 M3) */
   afterReconnect?: boolean
+  /** 일시 오류(password-busy·room-unavailable)를 클라이언트가 자동으로 다시 시도하는 중인가. false면 재시도를 다 썼다 → 수동 재시도 안내 (#189 리뷰 L-6) */
+  autoRetry?: boolean
 }
 
 /**
@@ -91,7 +93,9 @@ export function describeJoinError(e: JoinError): string {
         ? `비밀번호가 올바르지 않습니다. (남은 시도 ${e.remainingAttempts}회)`
         : '비밀번호가 올바르지 않습니다.'
     case 'password-busy':
-      return '서버가 혼잡하거나 합주실을 준비 중입니다. 잠시 후 자동으로 다시 시도합니다.'
+      return e.autoRetry === false
+        ? '서버가 혼잡하거나 합주실을 준비 중입니다. 잠시 후 다시 입장해 주세요.'
+        : '서버가 혼잡하거나 합주실을 준비 중입니다. 잠시 후 자동으로 다시 시도합니다.'
     case 'password-rate-limited': {
       const min = e.retryAfterMs !== null ? Math.max(1, Math.ceil(e.retryAfterMs / 60_000)) : null
       return min !== null
@@ -101,7 +105,9 @@ export function describeJoinError(e: JoinError): string {
     case 'room-not-found':
       return '합주실이 종료되었거나 찾을 수 없습니다.'
     case 'room-unavailable':
-      return '합주실 정보를 불러오지 못했습니다. 잠시 후 자동으로 다시 시도합니다.'
+      return e.autoRetry === false
+        ? '합주실 정보를 불러오지 못했습니다. 잠시 후 [다시 시도]를 눌러 주세요.'
+        : '합주실 정보를 불러오지 못했습니다. 잠시 후 자동으로 다시 시도합니다.'
     case 'room-full': {
       const lost = e.afterReconnect ? '연결이 끊긴 사이 자리를 잃었습니다. ' : ''
       if (e.reason === 'anonymous-limit') {

@@ -101,6 +101,13 @@ describe('joinErrorFromSignal / describeJoinError', () => {
     expect(describeJoinError(e)).toContain('다시 시도')
     expect(isRetryableJoinError(joinErrorFromSignal({ type: 'error', code: 'room-not-found' })!)).toBe(false)
   })
+  it('자동 재시도를 다 썼으면(autoRetry=false) "자동으로 다시 시도" 대신 수동 재시도 안내 (#189 리뷰 L-6)', () => {
+    const base = { roomId: ID, remainingAttempts: null, retryAfterMs: 2000 }
+    expect(describeJoinError({ ...base, code: 'room-unavailable', autoRetry: true })).toContain('자동으로')
+    expect(describeJoinError({ ...base, code: 'room-unavailable', autoRetry: false })).toContain('[다시 시도]')
+    expect(describeJoinError({ ...base, code: 'room-unavailable', autoRetry: false })).not.toContain('자동')
+    expect(describeJoinError({ ...base, code: 'password-busy', autoRetry: false })).not.toContain('자동')
+  })
   it('남은 시도 횟수와 대기 시간을 보여준다', () => {
     expect(describeJoinError({ code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null })).toContain('2회')
     expect(describeJoinError({ code: 'password-rate-limited', roomId: ID, remainingAttempts: null, retryAfterMs: 125_000 })).toContain('3분')

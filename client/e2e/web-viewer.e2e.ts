@@ -267,6 +267,25 @@ test.describe('웹 관람: 방 조회 일시 실패 (#189 리뷰 H-1)', () => {
   })
 })
 
+test.describe('웹 관람: 방 조회 실패가 계속될 때 (#189 리뷰 L-6)', () => {
+  test('자동 재시도를 다 쓰면 수동 재시도 안내, [다시 시도]가 횟수를 새로 시작해 들어온다', async ({ page, mock }) => {
+    mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
+    mock.signaling.failNextRoomLookups(100)
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    // 첫 입장 1 + 자동 재시도 5(MAX_BUSY_RETRIES) = join 6회, 그다음은 수동 안내
+    await expect(page.getByRole('alert')).toHaveText('합주실 정보를 불러오지 못했습니다. 잠시 후 [다시 시도]를 눌러 주세요.', { timeout: 15_000 })
+    expect(mock.signaling.messages('join')).toHaveLength(6)
+
+    // 아직 실패 중: 수동 재시도도 실패하면 다시 자동 재시도(횟수가 새로 시작)
+    await page.getByRole('button', { name: '다시 시도' }).click()
+    await expect.poll(() => mock.signaling.messages('join').length).toBeGreaterThanOrEqual(8)
+    // DB가 돌아오면 다음 재시도에서 들어온다
+    mock.signaling.failNextRoomLookups(0)
+    await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.performers-panel')).toContainText(REMOTE_PERFORMER.nickname)
+  })
+})
+
 test.describe('웹 관람: 모바일 폭', () => {
   for (const loggedIn of [false, true]) {
     test(`390px에서 가로 스크롤 없이 방 제목·연주자·관람 상태가 보인다 (${loggedIn ? '로그인' : '익명'})`, async ({ page, mock }) => {

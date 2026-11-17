@@ -362,6 +362,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
           return
         }
         store.patch('connection', { joinError: null })
+        // 수동 재시도는 자동 재시도 횟수를 처음부터 다시 쓴다 (#189 리뷰 L-6)
+        clearBusyRetry()
         sendJoin()
         store.patch('connection', { joinFeedback: '룸 입장 시도 중...' })
       },
