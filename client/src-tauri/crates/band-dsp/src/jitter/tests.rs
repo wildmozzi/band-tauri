@@ -548,6 +548,30 @@ fn big_step_no_alternation_before_detection() {
     assert!(c <= 2 && ld == 0, "판정 전 구간 은닉 {c} 늦은 버림 {ld}");
 }
 
+/// P2-16e(#205 리뷰 L2): 목표 상한(80ms)을 넘는 짧은 반복 스파이크(계단 아님, 판정 전에 끝남)는 이 규칙이 가장 크게 바꾸는 경우다.
+/// 감시 중 늦은 패킷을 버리지 않고 재생해 버림↔은닉 교대가 스파이크마다 없어진다(은닉 8.74 → 5.50%, 9.06 → 5.70%; 늦은 버림
+/// 715 → 13, 738 → 18). 쿠션은 실제 도착 지연을 넘지 못하고, 스파이크가 끝나면 패킷 단위 버림이 걷어 내므로 버퍼 평균은 늘지 않아야
+/// 한다(66.00 → 66.12, 75.70 → 75.78ms). 잠정 바닥 규칙을 손볼 때 팽창 회귀를 잡는다.
+#[test]
+fn short_spikes_over_cap_no_alternation_no_bloat() {
+    type Case = (&'static str, Box<dyn Fn(f64) -> f64>, f64, f64);
+    let cases: Vec<Case> = vec![
+        ("0.4s +130ms /4s", Box::new(|t: f64| if t > 5.0 && (t % 4.0) < 0.4 { 130.0 } else { 0.0 }), 6.0, 67.5),
+        ("0.3s +100ms /3s", Box::new(|t: f64| if t > 5.0 && (t % 3.0) < 0.3 { 100.0 } else { 0.0 }), 6.2, 77.2),
+    ];
+    for (name, f, conc_max, buf_max) in cases {
+        let (tr, s) = step_run_full(&*f, 60.0);
+        let s5 = tr.iter().find(|x| x.0 >= 5.0).unwrap().1;
+        let conc = (s.concealed - s5.concealed) as f64 * 100.0 / (s.produced - s5.produced).max(1) as f64;
+        let ld = s.late_dropped - s5.late_dropped;
+        let after: Vec<_> = tr.iter().filter(|x| x.0 >= 5.0).collect();
+        let buf = after.iter().map(|x| x.1.buffer_ms as f64).sum::<f64>() / after.len() as f64;
+        println!("{name}: 은닉 {conc:.2}% 늦은 버림 {ld} bufferMs 평균 {buf:.2}");
+        assert!(conc <= conc_max && ld <= 30, "{name}: 은닉 {conc:.2}% 늦은 버림 {ld}(버림↔은닉 교대)");
+        assert!(buf <= buf_max, "{name}: bufferMs 평균 {buf:.2}ms(잠정 바닥 재생으로 버퍼 팽창)");
+    }
+}
+
 /// P2-16b: 경로 지연이 10초에 +60ms 오른 채로 남으면(계단) 0.5초 뒤 지연 통계를 새 지연에서 다시 모으고 목표가 계단 전 값으로
 /// 돌아온다. 전에는 버스트로 보아 목표가 상한 근처에 수 초 머물렀다.
 #[test]
