@@ -281,8 +281,11 @@ async function runScenario(): Promise<Step[]> {
   await step('p1: request-instrument-change', 'p1', { type: 'request-instrument-change', newInstrument: 'bass' })
   await step('host: approve-instrument-change p1', 'host', () => ({ type: 'approve-instrument-change', targetId: idOf('p1') }))
   await step('p2: request-instrument-change', 'p2', { type: 'request-instrument-change', newInstrument: 'keys' })
-  await step('host: reject-instrument-change p2', 'host', () => ({ type: 'reject-instrument-change', targetId: idOf('p2'), reason: 'no' }))
+  await step('host: reject-instrument-change p2', 'host', () => ({ type: 'reject-instrument-change', targetId: idOf('p2'), reason: '  no  ' }))
   await step('p2: request-instrument-change again', 'p2', { type: 'request-instrument-change', newInstrument: 'synth' })
+  // P2-11: 공백뿐인 사유는 reject-perform처럼 기본 문구로 바뀐다
+  await step('host: reject-instrument-change p2 (blank reason)', 'host', () => ({ type: 'reject-instrument-change', targetId: idOf('p2'), reason: '   ' }))
+  await step('p2: request-instrument-change third', 'p2', { type: 'request-instrument-change', newInstrument: 'synth' })
   await step('p2: cancel-instrument-change-request', 'p2', { type: 'cancel-instrument-change-request' })
   await step('viewer: request-instrument-change (not performing, ignored)', 'viewer', { type: 'request-instrument-change', newInstrument: 'tuba' })
 

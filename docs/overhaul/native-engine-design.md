@@ -567,7 +567,9 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 방장은 항상 입장(정원 밖 — 비방장이 정원을 다 채운 뒤 방장이 들어오면 정원+1). 세션 재개 유예 중인 연결은 자리를 유지하고(다른 사람이 그 자리로 못 들어옴), 같은 사용자의 새 연결은 기존 연결을 대체하므로 새 자리로 세지 않는다.
   - 정원 검사와 방 추가 사이에 await가 없어 동시 입장 경합에서도 정원을 넘지 않는다(서버 인스턴스 1대 기준). 실패한 join은 지금 있는 방을 바꾸지 않는다.
   - 연주자 상한 6은 `start-performing`에서 따로 강제한다(`room-full-performers`, 유예 중인 연주자 포함). join은 항상 관람으로 들어오므로 연주자 자리는 그때 센다.
-- 연주 참여 요청: `perform-request-sent` `{ instrument, hostOnline }`(같은 요청 재전송에도 다시 보냄), `perform-request-rejected` `{ reason, instrument }`(빈 사유는 기본 문구), 익명 요청에는 `request-perform-error` `{ code: 'login-required' }`도 보낸다. 승인(`perform-request-approved`)을 받은 앱은 바로 엔진을 시작한다(웹은 앱 안내).
+- 연주 참여 요청: `perform-request-sent` `{ instrument, hostOnline }`(같은 요청 재전송에도 다시 보냄), `perform-request-rejected` `{ reason, instrument }`, 익명 요청에는 `request-perform-error` `{ code: 'login-required' }`도 보낸다. 승인(`perform-request-approved`)을 받은 앱은 바로 엔진을 시작한다(웹은 앱 안내).
+- 악기 변경 요청: 거절이면 `instrument-change-rejected` `{ reason }`.
+- 거절 사유 규칙(P2-11, `reject-perform`·`reject-instrument-change` 공통, `protocol.rejectReason`): 방장이 보낸 `reason`을 앞뒤 공백을 빼고 200자로 자른다. 문자열이 아니거나 비면 기본 문구(연주 요청 "방장이 요청을 거절했습니다.", 악기 변경 "방장이 악기 변경을 거절했습니다.")를 넣는다. 그래서 받는 쪽 `reason`은 늘 비어 있지 않은 문자열이다.
 - 중계 시 서버가 `from`을 붙인다(클라이언트가 보낸 `from`은 무시).
 - **공유 메트로놈**(P2-3, 1.4절): `metronome` `{ state: { running, bpm, beatsPerBar, startUs } }`.
   - 서버 검증: 보낸 사람이 인증된 연주자이고, 엔진을 켰고(`native-descriptor`를 보낸 상태), **방장**이어야 한다. 방장 여부는 DB `rooms.host_id`로 다시 확인한다(방 정보 캐시 최대 2초, PR #53 M1). DB 조회가 실패하면 마지막으로 읽은 값으로 권한만 판단하고 이양 판단(정지)은 하지 않는다.

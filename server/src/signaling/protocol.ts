@@ -10,6 +10,7 @@ export const MAX_PENDING_MESSAGES = 100
 export const MAX_ROOM_ID_LENGTH = 128
 export const MAX_NICKNAME_LENGTH = 50
 export const MAX_CHAT_LENGTH = 1000
+export const MAX_REJECT_REASON_LENGTH = 200
 export const ROOM_META_TTL_MS = 30_000
 export const REJOIN_WINDOW_MS = 60_000
 export const APPROVAL_GRACE_MS = 60_000
@@ -25,6 +26,15 @@ export function sanitizeNickname(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined
   const trimmed = v.trim().slice(0, MAX_NICKNAME_LENGTH)
   return trimmed || undefined
+}
+
+/**
+ * 방장 거절 사유(`reject-perform`·`reject-instrument-change` 공통, P2-11): 문자열이 아니거나
+ * 앞뒤 공백을 뺀 값이 비면 `fallback`, 아니면 앞뒤 공백을 뺀 앞 200자.
+ * 받는 쪽 UI가 빈 사유·공백 사유를 따로 걸러내지 않아도 서버가 늘 보여줄 문구를 채운다.
+ */
+export function rejectReason(v: unknown, fallback: string): string {
+  return (typeof v === 'string' ? v.trim().slice(0, MAX_REJECT_REASON_LENGTH) : '') || fallback
 }
 
 export interface Participant {

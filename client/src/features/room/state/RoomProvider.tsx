@@ -447,7 +447,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       },
       rejectInstrumentChange: (targetId, reason) => {
         if (!d().isOpen()) return
-        d().send({ type: 'reject-instrument-change', targetId, reason })
+        const trimmed = reason?.trim()
+        d().send({ type: 'reject-instrument-change', targetId, ...(trimmed ? { reason: trimmed.slice(0, 200) } : {}) })
         store.patch('requests', (r) => ({ pendingInstrumentChanges: r.pendingInstrumentChanges.filter((x) => x.oderId !== targetId) }))
       },
       requestInstrumentChange: (newInstrument) => {
