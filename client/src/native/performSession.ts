@@ -29,7 +29,7 @@ import { parseRelayToken, relayNeedsNewToken, relayRefreshDelayMs } from './rela
 import { newFirstAudioTrack, noteAddPeer, notePeerLeft, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
 import {
-  performErrorFromCode,
+  performErrorFromCode,
   KEY_CONFLICT_MESSAGE,
   KEY_CONFLICT_REPEAT_MESSAGE,
   DESCRIPTOR_INVALID_MESSAGE,
