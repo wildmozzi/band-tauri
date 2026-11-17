@@ -11,6 +11,13 @@ export const MAX_MESSAGE_BYTES = 64 * 1024
  */
 export const MAX_BUFFERED_BYTES = 1024 * 1024
 export const AUTH_TIMEOUT_MS = 5000
+/**
+ * 관람 WebRTC 중계 본문 상한 (#184 리뷰 M). 앱의 오디오 전용 SDP는 수 KB(후보는 trickle로 따로 보냄)라 16KB면 넉넉하다.
+ * 후보 한 줄(candidate:…)은 수백 바이트. 넘으면 중계하지 않는다.
+ */
+export const MAX_SDP_LENGTH = 16 * 1024
+export const MAX_ICE_CANDIDATE_LENGTH = 1024
+export const MAX_ICE_FIELD_LENGTH = 256
 export const MAX_PENDING_MESSAGES = 100
 export const MAX_ROOM_ID_LENGTH = 128
 export const MAX_NICKNAME_LENGTH = 50

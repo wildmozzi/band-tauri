@@ -153,8 +153,24 @@ export function initializeWebSocket(
   }, limits.heartbeatMs)
   heartbeat.unref?.()
 
+  // ---------- 전체 송신 대기열 상한 (#184 리뷰 L) ----------
+  const bufferWatch = setInterval(() => {
+    let total = 0
+    for (const ws of wss.clients) total += ws.bufferedAmount
+    if (total <= limits.maxTotalBufferedBytes) return
+    const heavy = [...wss.clients].filter(ws => ws.bufferedAmount > 0).sort((a, b) => b.bufferedAmount - a.bufferedAmount)
+    for (const ws of heavy) {
+      if (total <= limits.maxTotalBufferedBytes) break
+      total -= ws.bufferedAmount
+      console.warn(`[WS] total send buffer over ${limits.maxTotalBufferedBytes} bytes - terminating a connection holding ${ws.bufferedAmount}`)
+      ws.terminate()
+    }
+  }, 1000)
+  bufferWatch.unref?.()
+
   wss.on('close', () => {
     clearInterval(heartbeat)
+    clearInterval(bufferWatch)
     for (const t of participantTimers.values()) clearTimeout(t)
     resume.clearTimers()
   })
@@ -164,6 +180,12 @@ export function initializeWebSocket(
   })
 
   wss.on('connection', (ws, req) => {
+    // wss.clients에는 이 연결이 이미 들어 있다
+    if (wss.clients.size > limits.maxConnections) {
+      console.warn(`[WS] server full (${limits.maxConnections} connections)`)
+      ws.close(1013, 'Server busy')
+      return
+    }
     const ip = clientIp(req, env)
     const ipKey = ipBucket(ip)
     const ipCount = (connectionsPerIp.get(ipKey) || 0) + 1

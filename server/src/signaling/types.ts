@@ -30,8 +30,24 @@ export interface WsLimits {
   /** auth 토큰 버킷 — auth마다 Supabase getUser를 부르므로 연결당 횟수를 묶는다(서버 보안 점검: 증폭 방지) */
   authBurst: number
   authPerSec: number
+  /** 관람 WebRTC 중계: 보낸 사람 → 대상 하나당 메시지 버킷 (ICE trickle 한 번이 수십 개) */
+  relayPerTargetBurst: number
+  relayPerTargetPerSec: number
+  /**
+   * 관람 WebRTC 중계: 대상 하나가 받는 중계 바이트 버킷(보낸 사람 전체 합). 송신 대기열 상한(MAX_BUFFERED_BYTES 1MB)보다
+   * 작게 잡아, 여러 관람자가 한 연주자에게 중계를 몰아 보내도 그 연주자의 대기열을 채워 끊기게 하지 못한다(#184 리뷰 M)
+   */
+  relayInBytesBurst: number
+  relayInBytesPerSec: number
   /** IP당 동시 연결 수 */
   maxConnectionsPerIp: number
+  /** 서버 전체 동시 연결 수 (fly services.concurrency hard_limit 1000과 같음). 넘으면 1013 */
+  maxConnections: number
+  /**
+   * 서버 전체 송신 대기열(bufferedAmount 합) 상한. 연결당 1MB 상한만으로는 연결 수만큼(최대 1GB) 쌓일 수 있어
+   * 256MB VM을 지킨다: 1초마다 합을 보고 넘으면 가장 많이 쌓인 연결부터 끊는다(#184 리뷰 L)
+   */
+  maxTotalBufferedBytes: number
   /** 이만큼 메시지를 버리면 연결 종료 */
   maxDropped: number
   heartbeatMs: number
@@ -66,7 +82,13 @@ export const DEFAULT_LIMITS: WsLimits = {
   joinPerSec: 0.2,
   authBurst: 5,
   authPerSec: 0.1,
+  relayPerTargetBurst: 40,
+  relayPerTargetPerSec: 10,
+  relayInBytesBurst: 512 * 1024,
+  relayInBytesPerSec: 64 * 1024,
   maxConnectionsPerIp: 20,
+  maxConnections: 1000,
+  maxTotalBufferedBytes: 64 * 1024 * 1024,
   maxDropped: 200,
   maxPerformers: 6,
   maxRoomParticipants: ROOM_CAPACITY_MAX,
@@ -119,6 +141,11 @@ export interface Client {
     /** 토큰 만료 시각(ms). 알 수 없으면 null */
     tokenExp: number | null
     expiryTimer?: ReturnType<typeof setTimeout>
+  }
+  /** viewerRelay: 관람 중계 속도 제한(처음 중계할 때 만든다). out = 대상 clientId → 버킷, inBytes = 이 연결이 받는 중계 바이트 */
+  relay?: {
+    out: Map<string, TokenBucket>
+    inBytes: TokenBucket
   }
   /** resume: 재개 유예 */
   resume: {

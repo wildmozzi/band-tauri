@@ -16,6 +16,7 @@ import { createPerformers } from '../src/signaling/performers'
 import { createRegistry } from '../src/signaling/registry'
 import { createRoomMeta } from '../src/signaling/roomMeta'
 import { DEFAULT_LIMITS } from '../src/signaling/types'
+import { ipBucket } from '../src/lib/roomPassword'
 import { connect, testVerifier, waitFor, type TestClient } from './helpers'
 
 const servers: { server: Server; wss: WebSocketServer }[] = []
@@ -60,30 +61,122 @@ after(() => {
   }
 })
 
+/** 방장(연주자) 1명 + 익명 관람자 n명이 같은 방에 들어온 상태 */
+async function hostWithViewers(url: string, n: number, roomId = 'r'): Promise<{ host: TestClient; viewers: TestClient[] }> {
+  const host = await client(url)
+  host.send({ type: 'auth', accessToken: 'tok:host' })
+  host.send({ type: 'join', roomId })
+  assert.ok(await host.waitFor(m => m.type === 'room-state'))
+  const viewers: TestClient[] = []
+  for (let i = 0; i < n; i++) {
+    const v = await client(url) // 익명 관람자: 끊기면 유예 없이 곧바로 participant-left
+    v.send({ type: 'auth' })
+    v.send({ type: 'join', roomId })
+    assert.ok(await host.waitFor(m => m.type === 'participant-joined' && m.participant.oderId === v.id))
+    viewers.push(v)
+  }
+  return { host, viewers }
+}
+
+const pause = (c: TestClient) => (c.ws as unknown as { _socket: { pause(): void } })._socket.pause()
+const resume = (c: TestClient) => (c.ws as unknown as { _socket: { resume(): void } })._socket.resume()
+const offerOf = (to: string, sdpBytes: number) => ({ type: 'offer', to, offer: { type: 'offer', sdp: 'a'.repeat(sdpBytes) } })
+const RELAXED_RELAY = { relayPerTargetBurst: 1e6, relayPerTargetPerSec: 1e6, relayInBytesBurst: 1e9, relayInBytesPerSec: 1e9 }
+
 describe('slow reader', () => {
   it('terminates a connection that stops reading once its send buffer passes the cap', async () => {
-    const url = await startWs({ msgBurst: 10_000, msgPerSec: 10_000 })
-    const host = await client(url)
-    host.send({ type: 'auth', accessToken: 'tok:host' })
-    host.send({ type: 'join', roomId: 'r' })
-    assert.ok(await host.waitFor(m => m.type === 'room-state'))
-    const viewer = await client(url) // 익명 관람자: 끊기면 유예 없이 곧바로 participant-left
-    viewer.send({ type: 'auth' })
-    viewer.send({ type: 'join', roomId: 'r' })
-    assert.ok(await host.waitFor(m => m.type === 'participant-joined'))
-    ;(viewer.ws as unknown as { _socket: { pause(): void } })._socket.pause()
+    const url = await startWs({ msgBurst: 10_000, msgPerSec: 10_000, ...RELAXED_RELAY })
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
+    pause(viewer)
 
-    // 방장(연주자) → 관람자 60KB offer. 커널 버퍼가 차면 서버 대기열이 쌓이고, 상한을 넘으면 서버가 끊는다
-    const offer = { type: 'offer', to: viewer.id, sdp: 'a'.repeat(60 * 1024) }
-    const total = Math.ceil((MAX_BUFFERED_BYTES * 16) / (60 * 1024))
+    // 방장 → 관람자 15KB offer. 커널 버퍼가 차면 서버 대기열이 쌓이고, 상한을 넘으면 서버가 끊는다
+    const offer = offerOf(viewer.id, 15 * 1024)
+    const total = Math.ceil((MAX_BUFFERED_BYTES * 16) / (15 * 1024))
     let left = false
     for (let i = 0; i < total && !left; i++) {
       host.send(offer)
-      if (i % 20 === 19) left = await waitFor(() => host.has(m => m.type === 'participant-left' && m.oderId === viewer.id), 50)
+      if (i % 50 === 49) left = await waitFor(() => host.has(m => m.type === 'participant-left' && m.oderId === viewer.id), 50)
     }
     assert.ok(left || await host.waitFor(m => m.type === 'participant-left' && m.oderId === viewer.id, 5000),
       'server dropped the non-reading viewer')
     assert.equal(host.closedCode, null, 'the sender stays connected')
+  })
+
+  it('terminates the heaviest connections when the total send buffer passes the server cap', async () => {
+    // 연결당 상한(1MB)보다 작은 전체 상한: 1초 감시가 대기열이 가장 큰 연결을 끊는다
+    const url = await startWs({ msgBurst: 10_000, msgPerSec: 10_000, maxTotalBufferedBytes: 256 * 1024, ...RELAXED_RELAY })
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
+    pause(viewer)
+    // 서버 쪽 대기열이 전체 상한(256KB)은 넘고 연결당 상한(1MB)에는 못 미치는 동안만 보낸다 → 전체 상한 감시만 끊을 수 있다
+    const wss = servers[servers.length - 1].wss
+    const maxBuffered = () => Math.max(0, ...[...wss.clients].map(ws => ws.bufferedAmount))
+    for (let i = 0; i < 2000 && maxBuffered() < 300 * 1024; i++) {
+      host.send(offerOf(viewer.id, 15 * 1024))
+      if (i % 5 === 4) await new Promise(r => setTimeout(r, 5))
+    }
+    assert.ok(maxBuffered() < MAX_BUFFERED_BYTES, `stopped below the per-connection cap (${maxBuffered()})`)
+    assert.ok(await host.waitFor(m => m.type === 'participant-left' && m.oderId === viewer.id, 3000))
+    assert.equal(host.closedCode, null)
+  })
+})
+
+describe('viewer relay abuse (#184 review M: targeted kick of a performer)', () => {
+  it('anonymous viewers flooding offers cannot fill a performer send buffer', async () => {
+    // 기본 속도 제한 그대로. 연주자가 잠시 읽지 못하는(느린 회선) 동안 관람자 둘이 큰 offer를 최대 속도로 보낸다
+    const url = await startWs()
+    const { host, viewers } = await hostWithViewers(url, 2)
+    host.send({ type: 'start-performing', instrument: 'drums' })
+    await new Promise(r => setTimeout(r, 100))
+    pause(host)
+    const end = Date.now() + 3000
+    while (Date.now() < end) {
+      for (const v of viewers) {
+        v.send(offerOf(host.id, 60 * 1024)) // 크기 상한(16KB) 초과 — 중계 안 됨
+        v.send(offerOf(host.id, 16 * 1024 - 16)) // 상한 안 — 대상 바이트 버킷이 막는다
+      }
+      await new Promise(r => setTimeout(r, 50))
+    }
+    resume(host)
+    host.send({ type: 'ping' })
+    assert.ok(await host.waitFor(m => m.type === 'pong', 5000), 'performer connection survived')
+    assert.equal(host.closedCode, null)
+    const relayedBytes = host.inbox.filter(m => m.type === 'offer').reduce((a, m) => a + m.offer.sdp.length, 0)
+    assert.ok(relayedBytes <= DEFAULT_LIMITS.relayInBytesBurst + DEFAULT_LIMITS.relayInBytesPerSec * 4,
+      `relayed ${relayedBytes} bytes`)
+    assert.ok(host.inbox.every(m => m.type !== 'offer' || m.offer.sdp.length < 16 * 1024), 'oversized offers are dropped')
+  })
+
+  it('limits messages per sender → target but lets a normal ICE trickle through', async () => {
+    const url = await startWs({ msgBurst: 10_000, msgPerSec: 10_000 })
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
+    for (let i = 0; i < 60; i++) host.send({ type: 'ice-candidate', to: viewer.id, candidate: { candidate: `candidate:${i}`, sdpMid: '0' } })
+    host.send({ type: 'ping' })
+    assert.ok(await host.waitFor(m => m.type === 'pong'))
+    await waitFor(() => viewer.inbox.filter(m => m.type === 'ice-candidate').length >= DEFAULT_LIMITS.relayPerTargetBurst)
+    await new Promise(r => setTimeout(r, 100))
+    const got = viewer.inbox.filter(m => m.type === 'ice-candidate').length
+    assert.ok(got >= 30, `a normal trickle (30) passes: got ${got}`)
+    assert.ok(got <= DEFAULT_LIMITS.relayPerTargetBurst + 2, `burst is capped: got ${got}`)
+  })
+})
+
+describe('server-wide connection cap', () => {
+  it('rejects connections over maxConnections with 1013', async () => {
+    const url = await startWs({ maxConnections: 2 })
+    assert.equal(await tryConnect(url, {}), 'open')
+    assert.equal(await tryConnect(url, {}), 'open')
+    assert.equal(await tryConnect(url, {}), 1013)
+  })
+})
+
+describe('ipBucket', () => {
+  it('maps hex IPv4-mapped IPv6 to the IPv4 address instead of a shared /64', () => {
+    assert.equal(ipBucket('::ffff:7f00:1'), '127.0.0.1')
+    assert.equal(ipBucket('0:0:0:0:0:ffff:c000:201'), '192.0.2.1')
+    assert.equal(ipBucket('::FFFF:C000:0201'), '192.0.2.1')
+    assert.equal(ipBucket('::ffff:192.0.2.1'), '192.0.2.1')
+    assert.equal(ipBucket('2001:db8:1:2::5'), '2001:db8:1:2::/64')
+    assert.equal(ipBucket('::1'), '0:0:0:0::/64')
   })
 })
 
