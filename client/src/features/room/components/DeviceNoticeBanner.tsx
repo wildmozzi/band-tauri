@@ -1,4 +1,4 @@
-import { DEVICE_RECOVERING_MESSAGE } from '../../../native/performSession'
+import { DEVICE_RECOVERING_MESSAGE } from '../../../native/performSignals'
 import { useDeviceNotice } from '../state/roomHooks'
 import './ReconnectBanner.css'
 
