@@ -288,15 +288,66 @@ async fn metrics_connections_are_capped() {
     }
     // 서버가 위 연결들을 모두 받아 자리를 잡을 때까지(받기 순서는 연결 순서)
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let over = get(addr, "/healthz").await;
-    assert!(!over.contains("200 OK"), "상한을 넘는 연결에 응답함: {over:?}");
+    // 상한이 찬 동안: 메트릭은 답하지 않고(예비 자리의 503), 헬스체크는 예비 자리에서 답한다(#201 리뷰 L4)
+    let over = get(addr, "/metrics").await;
+    assert!(!over.contains("200 OK") && !over.contains("relay_"), "상한을 넘는 메트릭 요청에 응답함: {over:?}");
+    let hz = get(addr, "/healthz").await;
+    assert!(hz.contains("200 OK"), "상한이 찬 동안 헬스체크가 굶음: {hz:?}");
+    // 예비 자리까지 열어 두기만 하면 그다음은 응답 없이 닫힌다(무한 증가 없음)
+    let mut idle2 = Vec::new();
+    for _ in 0..server::METRICS_HEALTHZ_RESERVE {
+        idle2.push(TcpStream::connect(addr).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let none = get(addr, "/healthz").await;
+    assert!(none.is_empty(), "상한+예비를 넘는 연결에 응답함: {none:?}");
+    drop(idle2);
     drop(idle);
     let t = Instant::now();
     loop {
-        if get(addr, "/healthz").await.contains("200 OK") {
+        if get(addr, "/metrics").await.contains("200 OK") {
             break;
         }
         assert!(t.elapsed() < Duration::from_secs(3), "자리가 돌아오지 않음");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+/// #201 리뷰 L1(Windows): 수신 **오류만** 오는 폭주(2048B 넘는 데이터그램 → WSAEMSGSIZE)에서도 정리가 돈다. 정리 마감은 루프
+/// 머리에서 보므로 오류 갈래(`continue`)도 덮인다. 리눅스는 큰 데이터그램이 잘린 채 `Ok`로 오므로 위 쓰레기 폭주 시험과 같다.
+#[cfg(windows)]
+#[tokio::test]
+async fn sweep_runs_under_error_only_flood() {
+    let limits = Limits { registration_ttl: Duration::from_millis(200), ..Limits::default() };
+    let (relay, stats) = start_relay(limits).await;
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    assert_eq!(bind_client(&a, relay, "room-e", "a", 0xE1).await[16], 0);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let floods: Vec<_> = (0..6)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = s.send_to(&[0u8; 2100], relay);
+                }
+            })
+        })
+        .collect();
+    let t = Instant::now();
+    let mut swept = false;
+    while t.elapsed() < Duration::from_secs(4) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if stats.registrations.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            swept = true;
+            break;
+        }
+    }
+    let errs = stats.recv_errors.load(std::sync::atomic::Ordering::Relaxed);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for f in floods {
+        f.join().unwrap();
+    }
+    assert!(errs > 1_000, "오류 폭주가 충분하지 않음({errs}) — 시험 조건 확인");
+    assert!(swept, "오류만 오는 폭주 중 만료 등록이 정리되지 않음(errs {errs}, {:?})", t.elapsed());
 }
