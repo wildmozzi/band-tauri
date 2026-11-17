@@ -575,6 +575,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - `password-rate-limited` `{ roomId, retryAfterMs }` — (방, 사용자) 5회 · (방, IPv4 또는 IPv6 /64) 20회 · (방 전체) 100회 / 15분 초과. 익명은 IP(/64) 단위로 센다.
   - `password-busy` `{ roomId, retryAfterMs }` — scrypt 대기열이 가득 참(동시 2개, 대기 16개) 또는 비밀번호 방을 만드는 중(`has_password`인데 해시 없음). 시도 횟수는 차감하지 않으며 클라이언트가 자동 재시도한다.
   - 비밀번호는 6~64자(NFC 기준), scrypt N=2^14·r=8·p=5(16MiB/회).
+  - 방 확인(비밀번호 방이 아니어도 모든 join): 방이 없으면 `room-not-found` `{}` — 클라이언트는 보던 방이 종료된 것으로 보고 연주·관람 세션을 끝내고 안내한다. 방 조회 자체가 실패하면(DB 타임아웃·5xx) `room-unavailable` `{ roomId, retryAfterMs }` — 방이 없다는 뜻이 아니므로 클라이언트는 세션을 유지하고 `password-busy`처럼 자동 재시도한다(#189 리뷰 H-1).
   - 실패한 join은 지금 있는 방을 바꾸지 않는다. 이미 그 방에 있는 연결의 재 join(세션 재개)은 다시 묻지 않는다.
   - 비공개 방(`rooms.is_private`)은 목록(RLS)에서만 숨긴다. 방 id(초대 링크/방 코드)로는 `get_room(id)`로 조회·입장한다.
 - 방 정원(P3-12b): `join` 시 서버가 `rooms.max_participants`(관람 포함. 값이 없거나 서버 상한 20보다 크면 20)를 강제한다. 초과면 `error` `room-full` `{ roomId, maxParticipants, reason }`(`reason`: `room-full` | `anonymous-limit`). UI 라벨은 "최대 인원 (관람 포함)"(`roomModel.MAX_PARTICIPANTS_LABEL`).

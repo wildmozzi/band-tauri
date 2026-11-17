@@ -1,7 +1,8 @@
 /**
  * 가짜 시그널링 서버 (server/src/services/wsService.ts의 메시지 순서를 따른다).
  *   연결 → welcome{clientId} → (클라이언트 auth) → auth-result{authenticated}
- *   join → 비밀번호 방이면 password-required / password-invalid{remainingAttempts} / password-rate-limited{retryAfterMs}
+ *   join → 방 조회 실패(failNextRoomLookups)면 room-unavailable{retryAfterMs}, 방(rooms 행)이 없으면 room-not-found (서버 membership checkRoom)
+ *        → 비밀번호 방이면 password-required / password-invalid{remainingAttempts} / password-rate-limited{retryAfterMs}
  *        → 정원(rooms.max_participants, 관람 포함, 서버 상한 20)이 찼으면 room-full{maxParticipants} (방장은 예외, P3-12b)
  *        → 통과하면 room-state{participants, peerIds, isHost}
  *   chat → 기록만(서버는 보낸 사람에게 되돌려주지 않는다). 원격 채팅은 pushChat으로 주입
@@ -12,6 +13,9 @@
  *   서버 의미: 시도를 먼저 세고 remaining = max - count. 5번째 오답은 password-invalid{remainingAttempts: 0},
  *   6번째 시도에서 password-rate-limited.
  * 처리하지 않는 메시지 타입은 위반으로 기록한다(앱이 새 메시지를 보내기 시작하면 테스트가 알게).
+ * 관람 WebRTC(answer·ice-candidate)는 서버 중계 코드(server/src/signaling/viewerRelay.ts buildViewerSignal — 본문 형식·
+ * UTF-8 크기 상한)를 그대로 써서 검사한다: 서버가 조용히 버릴 모양이면 위반이다(#184·#187 제한 아래에서 협상이 되는지).
+ * 관람자는 offer를 보내지 않는다(서버가 연주자 아닌 쪽 offer를 버린다) — offer는 처리하지 않는 타입이라 위반으로 잡힌다.
  *
  * 보내는 메시지는 서버의 송신 메시지 타입(server/src/signaling/protocol.ts ServerMessage)으로 검사한다:
  * 서버 계약에서 필드가 바뀌면 e2e tsc(npm run e2e:typecheck)가 실패한다(docs/server-architecture.md 3.3절).
@@ -23,6 +27,7 @@ import {
   PasswordAttemptLimiter,
 } from '../../../server/src/lib/roomPassword'
 import type { ServerMessage } from '../../../server/src/signaling/protocol'
+import { buildViewerSignal } from '../../../server/src/signaling/viewerRelay'
 import { SIGNALING_URL } from '../env'
 import type { Violations } from './http'
 import type { MemoryPostgrest } from './postgrest'
@@ -50,7 +55,7 @@ export const RATE_LIMIT_RETRY_MS = DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs
 
 /** 이 mock이 처리하는 클라이언트 → 서버 메시지 */
 // 연주(데스크톱 앱, e2e/mocks/tauri.ts로 흉내 낼 때만 온다): 기록만 — 서버의 중계·응답은 흉내 내지 않는다
-const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping', 'start-performing', 'stop-performing', 'native-leave', 'native-descriptor', 'relay-token-request', 'metronome', 'demote-performer'])
+const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping', 'start-performing', 'stop-performing', 'native-leave', 'native-descriptor', 'relay-token-request', 'metronome', 'demote-performer', 'answer', 'ice-candidate'])
 
 /** setDown이 연결을 끊을 때 쓰는 코드 (1012 Service Restart — 앱은 비정상 닫힘으로 보고 재연결한다) */
 const SERVER_RESTART_CLOSE_CODE = 1012
@@ -77,6 +82,8 @@ export class FakeSignaling {
   /** 재개를 받아 줄 옛 clientId → 방·서버 기준 연주 상태 (dropForResume) */
   private resumable = new Map<string, { roomId: string; isPerforming: boolean }>()
   private down = false
+  private lookupFailures = 0
+  private lookupRetryAfterMs = 500
   /** down 동안 받자마자 닫은 연결 수 (앱의 재연결 시도) */
   refused = 0
 
@@ -98,6 +105,27 @@ export class FakeSignaling {
       if (c.roomId !== roomId) continue
       this.send(c, { type: 'chat', message, nickname: from.nickname, timestamp: Date.now(), oderId: from.oderId, from: from.oderId })
     }
+  }
+
+  /** 그 방에 들어와 있는 연결의 clientId (관람 WebRTC offer의 to) */
+  clientIdsIn(roomId: string): string[] {
+    return this.conns.filter(c => c.roomId === roomId).map(c => c.clientId)
+  }
+
+  /**
+   * 방 종료 흉내: rooms 행만 지운다(방장이 Supabase로 방 삭제). 실제 서버도 방 안 연결에 아무것도 보내지 않고 끊지도 않으므로,
+   * 관람자는 다음 재연결의 rejoin join에서야 room-not-found를 받는다(재연결은 setDown 등으로 따로 일으킨다, #189 리뷰 L-3).
+   */
+  endRoom(roomId: string) {
+    const rows = this.db.table('rooms')
+    const i = rows.findIndex(r => r.id === roomId)
+    if (i >= 0) rows.splice(i, 1)
+  }
+
+  /** 다음 join n번의 방 조회가 실패한다(DB 일시 장애) — 서버처럼 room-unavailable{retryAfterMs} (#189 리뷰 H-1) */
+  failNextRoomLookups(n = 1, retryAfterMs = 500) {
+    this.lookupFailures = n
+    this.lookupRetryAfterMs = retryAfterMs
   }
 
   /** 서버 송신 메시지 하나를 그 방의 모든 연결에 보낸다 (예: 방장이 나를 내렸을 때의 demoted-to-viewer, P2-9) */
@@ -211,6 +239,15 @@ export class FakeSignaling {
       case 'leave':
         conn.roomId = null
         return
+      case 'answer':
+      case 'ice-candidate': {
+        // 서버 중계와 같은 검사: 방 안에서, 서버가 다시 구성할 수 있는 모양이어야 한다
+        const to = typeof msg.to === 'string' ? msg.to : ''
+        if (!conn.roomId || !to || !buildViewerSignal(msg, conn.clientId, to)) {
+          this.violations.push(`서버가 버릴 관람 중계 메시지: ${msg.type} ${JSON.stringify(msg).slice(0, 200)}`)
+        }
+        return
+      }
       default:
         // chat·연주 메시지: 기록만 (received)
         return
@@ -241,14 +278,23 @@ export class FakeSignaling {
 
   private join(conn: Conn, msg: SignalMessage) {
     const roomId = String(msg.roomId)
+    if (this.lookupFailures > 0) {
+      this.lookupFailures--
+      this.send(conn, { type: 'error', code: 'room-unavailable', roomId, retryAfterMs: this.lookupRetryAfterMs, message: '합주실 정보를 불러오지 못했습니다. 잠시 후 다시 시도합니다.' })
+      return
+    }
     const room = this.db.table('rooms').find(r => r.id === roomId)
     const config = this.rooms.get(roomId) ?? {}
-    const isHost = conn.userId !== null && room?.host_id === conn.userId
+    if (!room) {
+      this.send(conn, { type: 'error', code: 'room-not-found', message: '방을 찾을 수 없습니다.' })
+      return
+    }
+    const isHost = conn.userId !== null && room.host_id === conn.userId
 
     if (config.password && !isHost && !this.checkPassword(conn, roomId, config.password, msg.password)) return
 
     const participants = config.participants ?? []
-    const max = typeof room?.max_participants === 'number' ? Math.min(room.max_participants, 20) : 20
+    const max = typeof room.max_participants === 'number' ? Math.min(room.max_participants, 20) : 20
     if (!isHost && participants.length >= max) {
       this.send(conn, { type: 'error', code: 'room-full', reason: 'room-full', roomId, maxParticipants: max, message: `합주실 정원(${max}명)이 가득 찼습니다.` })
       return
