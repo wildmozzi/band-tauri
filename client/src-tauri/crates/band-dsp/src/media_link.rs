@@ -26,10 +26,6 @@ impl PeerKey {
     pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
-
-    pub const fn raw(self) -> u64 {
-        self.0
-    }
 }
 
 /// 워커가 발행하는 "이 피어 스트림의 수신 손실 보고"(Ping에 싣는다, P1-4e). 원자값 하나라 net 제어 스레드가 락 없이
@@ -54,14 +50,14 @@ impl LossCell {
         }
     }
 
-    pub fn set(&self, r: Option<(f32, f32)>) {
+    pub(crate) fn set(&self, r: Option<(f32, f32)>) {
         let v = r.map_or(LOSS_NONE, |(l, c)| ((l.to_bits() as u64) << 32) | c.to_bits() as u64);
         self.0.store(v, Ordering::Relaxed);
     }
 }
 
 /// 수신 큐 용량(패킷). 견딜 워커 정지 100ms × 최대 400패킷/s(2.5ms 프레임) × 여유 2 = 80 → 2의 거듭제곱(설계 2.2절).
-pub const AUDIO_QUEUE_PACKETS: usize = 128;
+pub(crate) const AUDIO_QUEUE_PACKETS: usize = 128;
 
 /// 수신 큐 원소: 헤더 + 도착 시각 + 평문 페이로드(최대 크기 내장). 메모리 1,192B.
 #[derive(Clone, Copy)]
@@ -89,7 +85,6 @@ pub struct MediaTx {
 
 /// 엔진 쪽 끝(소비자). 워커 단독 소유 `PeerMedia` 안에 있다.
 pub struct MediaRx {
-    key: PeerKey,
     cons: HeapCons<AudioPacket>,
     dropped: Arc<AtomicU64>,
     loss: Arc<LossCell>,
@@ -100,7 +95,7 @@ pub fn media_link(key: PeerKey) -> (MediaTx, MediaRx) {
     let (prod, cons) = HeapRb::<AudioPacket>::new(AUDIO_QUEUE_PACKETS).split();
     let dropped = Arc::new(AtomicU64::new(0));
     let loss = Arc::new(LossCell::default());
-    (MediaTx { key, prod, dropped: dropped.clone(), loss: loss.clone() }, MediaRx { key, cons, dropped, loss })
+    (MediaTx { key, prod, dropped: dropped.clone(), loss: loss.clone() }, MediaRx { cons, dropped, loss })
 }
 
 impl MediaTx {
@@ -128,10 +123,6 @@ impl MediaTx {
 }
 
 impl MediaRx {
-    pub fn key(&self) -> PeerKey {
-        self.key
-    }
-
     /// 큐를 끝까지 비우며 들어온 순서대로 `f`에 넘긴다(원소를 복사하지 않는다). 반환: 꺼낸 개수.
     pub fn drain(&mut self, mut f: impl FnMut(&AudioPacket)) -> usize {
         let n = {
@@ -143,12 +134,12 @@ impl MediaRx {
         n
     }
 
-    pub fn set_loss_report(&self, r: Option<(f32, f32)>) {
+    pub(crate) fn set_loss_report(&self, r: Option<(f32, f32)>) {
         self.loss.set(r);
     }
 
     /// 큐가 가득 차 버린 패킷 수(누적).
-    pub fn dropped(&self) -> u64 {
+    pub(crate) fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 }
@@ -183,7 +174,7 @@ mod tests {
     #[test]
     fn queue_keeps_order_and_contents() {
         let (mut tx, mut rx) = media_link(PeerKey::from_raw(3));
-        assert_eq!((tx.key(), rx.key()), (PeerKey::from_raw(3), PeerKey::from_raw(3)));
+        assert_eq!(tx.key(), PeerKey::from_raw(3));
         for i in 0..5u32 {
             assert!(tx.push(&hdr(i), &[i as u8; 3][..i as usize % 4], 1000 + i as u64));
         }

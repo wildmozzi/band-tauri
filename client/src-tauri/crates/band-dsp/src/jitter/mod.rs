@@ -300,11 +300,6 @@ impl JitterBuffer {
         self.pkt_frame.max(1)
     }
 
-    /// 목표 중 소비자 요구 깊이(샘플). 진단·통계용(`lead_ms`).
-    pub fn extra_target(&self) -> f64 {
-        self.target.consumer_lead()
-    }
-
     /// 패킷 프레임(샘플, 48k).
     pub fn frame_samples(&self) -> usize {
         self.frame()

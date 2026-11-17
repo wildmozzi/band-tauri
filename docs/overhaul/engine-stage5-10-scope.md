@@ -302,6 +302,8 @@ PR 2개: (1) `testing` 모듈 + 테스트 `use` 전환(기계적, 통합 테스�
 
 크레이트마다 `pub`을 줄인다. `band-engine`의 공개 표면 = 앱이 쓰는 것(`EngineManager`, 계약 DTO, `diag`, `settings`) + `testing`. `band-dsp`의 공개 표면 = `band-engine`·하네스가 쓰는 것. `unreachable_pub` 린트를 크레이트별로 켜서 남은 것을 찾는다. PR 2개(크레이트당 하나).
 
+- **⑨b-1 `band-dsp`(완료)**: `#![warn(unreachable_pub)]`을 `lib.rs`에 켰다 — 다만 이 린트는 "크레이트 밖에서 **닿을 수 없는** `pub`"만 잡고, 모듈이 모두 `pub mod`인 `band-dsp`에서는 처음부터 0건이었다(닿을 수 있지만 아무도 안 쓰는 `pub`은 못 잡는다). 그래서 실제 좁히기는 컴파일러로 했다: 비시험 `pub`을 모두 `pub(crate)`로 내린 뒤 `cargo check --workspace --all-targets`의 가시성 오류(E0603·E0624·E0616·E0364/5, private type)가 나는 정의만 `pub`으로 되돌렸다. 결과: `pub` → `pub(crate)` 68개(그중 10개는 `band-dsp` 단위 시험만 써서 `#[cfg(test)]`도 — `mixer::{add_stereo, add_stereo_lr, add_internal, rms}`, `ClockSync::samples`, `Header::{is_opus, is_stereo}`, `MediaStatsCell::try_read`, `{RelayCodecPolicy, LossCodecPolicy}::hold`), 어디서도 안 쓰던 7개 삭제(`Encoder::channels`, `JitterBuffer::extra_target`, `PeerKey::raw`, `MediaRx::key`(와 읽히지 않던 칸), `mixer::{scale, soft_clip_buf}`, `StreamResampler::discard`), 밖에서 시험만 쓰고 안에서는 안 쓰는 `JitterStats::corrections`는 `test-support` 뒤(`DSP_TEST_SUPPORT`에 추가). 남은 `pub`(뿌리 `pub mod` 15 포함 296줄)은 `band-engine`이 쓰거나, 밖에서는 하네스·시험만 쓰지만 `band-dsp` 안에서도 쓰는 것(`JitterBuffer::{new, insert, restart, stats}`, `JitterStats`의 칸, `AudioPacket::{hdr, arrival_us, payload}`, `MediaRx::drain`, `EngineConfig`의 DTO 칸, `TARGET_GRID`, `loss_opus_perc`) — 가시성은 피처로 가를 수 없어 `pub`으로 둔다. 모듈 단위는 `tests/architecture.rs`의 `dsp_public_surface_is_used_outside`(린트가 켜져 있고, 뿌리의 `pub mod`마다 `band-dsp` 밖 노드의 간선이 있다)가 지킨다.
+
 ⑩ 앞에 하지 않는 이유는 9절 제안 5.
 
 ## 7. ⑩ — 크레이트 분리

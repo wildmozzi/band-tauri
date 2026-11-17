@@ -28,7 +28,7 @@ impl Default for PeerMixCtl {
 }
 
 impl PeerMixCtl {
-    pub fn effective_gain(&self) -> f32 {
+    pub(crate) fn effective_gain(&self) -> f32 {
         if self.muted.load(Ordering::Relaxed) {
             0.0
         } else {
@@ -54,13 +54,14 @@ pub fn clamp_pan(p: f32) -> f32 {
 
 /// Equal-power 팬. L² + R² = 2로 일정하며 중앙(0)에서 (1, 1)이 되도록 √2로 정규화했다
 /// (팬을 쓰지 않는 기본 상태의 음량이 바뀌지 않게). 끝(±1)에서는 한쪽 √2, 반대쪽 0.
-pub fn pan_gains(pan: f32) -> (f32, f32) {
+pub(crate) fn pan_gains(pan: f32) -> (f32, f32) {
     let theta = (clamp_pan(pan) + 1.0) * std::f32::consts::FRAC_PI_4;
     (theta.cos() * std::f32::consts::SQRT_2, theta.sin() * std::f32::consts::SQRT_2)
 }
 
 /// 스테레오 버스에 스테레오 소스를 L/R 게인으로 더한다.
-pub fn add_stereo_lr(bus: &mut [f32], src: &[f32], gl: f32, gr: f32) {
+#[cfg(test)]
+pub(crate) fn add_stereo_lr(bus: &mut [f32], src: &[f32], gl: f32, gr: f32) {
     if gl == 0.0 && gr == 0.0 {
         return;
     }
@@ -71,7 +72,7 @@ pub fn add_stereo_lr(bus: &mut [f32], src: &[f32], gl: f32, gr: f32) {
 }
 
 /// 클릭 볼륨 기본값(메트로놈 클릭 게인 `MixControls::click_gain`의 처음 값).
-pub const DEFAULT_CLICK_GAIN: f32 = 0.8;
+pub(crate) const DEFAULT_CLICK_GAIN: f32 = 0.8;
 
 /// 엔진 전역 믹스 제어값. 엔진 재시작 간에도 유지된다.
 #[derive(Debug)]
@@ -108,7 +109,8 @@ pub fn clamp_gain(g: f32) -> f32 {
 }
 
 /// 스테레오 버스에 스테레오 소스를 gain으로 더한다.
-pub fn add_stereo(bus: &mut [f32], src: &[f32], gain: f32) {
+#[cfg(test)]
+pub(crate) fn add_stereo(bus: &mut [f32], src: &[f32], gain: f32) {
     if gain == 0.0 {
         return;
     }
@@ -118,7 +120,8 @@ pub fn add_stereo(bus: &mut [f32], src: &[f32], gain: f32) {
 }
 
 /// 내부 채널 수(1/2) 소스를 스테레오 버스에 더한다.
-pub fn add_internal(bus: &mut [f32], src: &[f32], src_channels: usize, gain: f32) {
+#[cfg(test)]
+pub(crate) fn add_internal(bus: &mut [f32], src: &[f32], src_channels: usize, gain: f32) {
     if gain == 0.0 {
         return;
     }
@@ -128,14 +131,6 @@ pub fn add_internal(bus: &mut [f32], src: &[f32], src_channels: usize, gain: f32
         for (b, s) in bus.as_chunks_mut::<2>().0.iter_mut().zip(src) {
             b[0] += s * gain;
             b[1] += s * gain;
-        }
-    }
-}
-
-pub fn scale(buf: &mut [f32], gain: f32) {
-    if gain != 1.0 {
-        for x in buf {
-            *x *= gain;
         }
     }
 }
@@ -155,14 +150,9 @@ pub fn soft_clip(x: f32) -> f32 {
     }
 }
 
-pub fn soft_clip_buf(buf: &mut [f32]) {
-    for x in buf {
-        *x = soft_clip(*x);
-    }
-}
-
 /// 0..1 선형 RMS.
-pub fn rms(buf: &[f32]) -> f32 {
+#[cfg(test)]
+pub(crate) fn rms(buf: &[f32]) -> f32 {
     if buf.is_empty() {
         return 0.0;
     }

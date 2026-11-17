@@ -36,12 +36,6 @@ impl Encoder {
         }
     }
 
-    pub fn channels(&self) -> usize {
-        match self {
-            Encoder::Opus { channels, .. } | Encoder::Pcm16 { channels } => *channels,
-        }
-    }
-
     /// Opus 예상 손실(%, `OPUS_SET_PACKET_LOSS_PERC`). 할당 없음(인코더 ctl). PCM16이면 무시.
     pub fn set_loss_perc(&mut self, pct: u8) -> Result<(), String> {
         match self {
@@ -82,17 +76,17 @@ pub fn opus_decoders_created() -> u64 {
     OPUS_DECODERS_CREATED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-pub enum Decoder {
+pub(crate) enum Decoder {
     Opus { dec: opus::Decoder, channels: usize },
     Pcm16 { channels: usize },
 }
 
 impl Decoder {
-    pub fn is_opus(&self) -> bool {
+    pub(crate) fn is_opus(&self) -> bool {
         matches!(self, Decoder::Opus { .. })
     }
 
-    pub fn new(opus: bool, channels: usize) -> Result<Self, String> {
+    pub(crate) fn new(opus: bool, channels: usize) -> Result<Self, String> {
         if opus {
             let ch = if channels == 2 { opus::Channels::Stereo } else { opus::Channels::Mono };
             let dec = opus::Decoder::new(INTERNAL_RATE, ch)
@@ -107,21 +101,21 @@ impl Decoder {
     /// 새로 만든 디코더와 같은 상태로(Opus `OPUS_RESET_STATE`, 할당 없음 — 지터 버퍼 디코더 풀, 엔진 ③c).
     /// 실패하면 false — 옛 상태가 남았을 수 있으니 부르는 쪽이 버린다(#124 리뷰 L-2).
     #[must_use]
-    pub fn reset(&mut self) -> bool {
+    pub(crate) fn reset(&mut self) -> bool {
         match self {
             Decoder::Opus { dec, .. } => dec.reset_state().is_ok(),
             Decoder::Pcm16 { .. } => true,
         }
     }
 
-    pub fn matches(&self, opus: bool, channels: usize) -> bool {
+    pub(crate) fn matches(&self, opus: bool, channels: usize) -> bool {
         match self {
             Decoder::Opus { channels: c, .. } => opus && *c == channels,
             Decoder::Pcm16 { channels: c } => !opus && *c == channels,
         }
     }
 
-    pub fn channels(&self) -> usize {
+    pub(crate) fn channels(&self) -> usize {
         match self {
             Decoder::Opus { channels, .. } | Decoder::Pcm16 { channels } => *channels,
         }
@@ -129,7 +123,7 @@ impl Decoder {
 
     /// 패킷 디코드. `out`은 정확히 한 프레임(frame_samples × channels) 크기여야 한다.
     /// 반환값은 채널당 샘플 수.
-    pub fn decode(&mut self, payload: &[u8], out: &mut [f32]) -> Result<usize, String> {
+    pub(crate) fn decode(&mut self, payload: &[u8], out: &mut [f32]) -> Result<usize, String> {
         match self {
             Decoder::Opus { dec, .. } => {
                 dec.decode_float(payload, out, false).map_err(|e| format!("Opus 디코드 실패: {e}"))
@@ -146,7 +140,7 @@ impl Decoder {
     }
 
     /// Opus 전용: 다음 패킷의 in-band FEC로 손실 프레임 복원.
-    pub fn decode_fec(&mut self, next_payload: &[u8], out: &mut [f32]) -> Result<usize, String> {
+    pub(crate) fn decode_fec(&mut self, next_payload: &[u8], out: &mut [f32]) -> Result<usize, String> {
         match self {
             Decoder::Opus { dec, .. } => {
                 dec.decode_float(next_payload, out, true).map_err(|e| format!("Opus FEC 실패: {e}"))
@@ -156,7 +150,7 @@ impl Decoder {
     }
 
     /// Opus 전용: 디코더 PLC.
-    pub fn decode_plc(&mut self, out: &mut [f32]) -> Result<usize, String> {
+    pub(crate) fn decode_plc(&mut self, out: &mut [f32]) -> Result<usize, String> {
         match self {
             Decoder::Opus { dec, .. } => {
                 dec.decode_float(&[], out, false).map_err(|e| format!("Opus PLC 실패: {e}"))

@@ -46,7 +46,7 @@ impl StreamResampler {
     }
 
     /// 출력 레이트(Hz).
-    pub fn out_rate(&self) -> u32 {
+    pub(crate) fn out_rate(&self) -> u32 {
         self.to_rate
     }
 
@@ -100,12 +100,6 @@ impl StreamResampler {
             *o = s;
         }
         frames
-    }
-
-    /// 출력 FIFO에서 앞쪽 프레임을 버린다(드리프트로 쌓인 경우).
-    pub fn discard(&mut self, frames: usize) {
-        let n = (frames * self.channels).min(self.out.len());
-        self.out.drain(..n);
     }
 }
 

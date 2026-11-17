@@ -29,9 +29,9 @@ pub struct MediaStats {
     pub playing: bool,
     pub js: JitterStats,
     /// 수신 큐가 가득 차 버린 패킷 수(③-a3부터. 그 전에는 0).
-    pub rx_dropped: u64,
+    pub(crate) rx_dropped: u64,
     /// 이 피어의 실제(은닉이 아닌) 오디오가 처음 재생 링에 들어간 시각(엔진 epoch µs, P1-20). 0 = 아직.
-    pub first_audio_us: u64,
+    pub(crate) first_audio_us: u64,
 }
 
 impl MediaStats {
@@ -117,7 +117,7 @@ fn unpack(w: &[u64; STAT_WORDS]) -> MediaStats {
 /// `MediaStats` seqlock(설계 3.2절). 쓰는 쪽은 워커 하나뿐이고 기다리지 않는다. 읽는 쪽은 발행 중이면 다시 읽는다.
 /// 알고리즘은 `SeqCell`(`engine::stats`, ②b-6a)이고, 이 셀은 칸 배치(`pack`/`unpack`)와 단일 작성자 보장을 더한다.
 /// 누적 카운터는 짝으로 쓰이므로(`produced − concealed`) 한 벌 일관성이 필요하다.
-pub struct MediaStatsCell(SeqCell<STAT_WORDS>);
+pub(crate) struct MediaStatsCell(SeqCell<STAT_WORDS>);
 
 impl Default for MediaStatsCell {
     fn default() -> Self {
@@ -136,13 +136,14 @@ impl MediaStatsCell {
     }
 
     /// 한 번 읽어 본다. 발행 중이었거나 그 사이 발행이 끼었으면 None.
-    pub fn try_read(&self) -> Option<MediaStats> {
+    #[cfg(test)]
+    pub(crate) fn try_read(&self) -> Option<MediaStats> {
         self.0.try_read().map(|w| unpack(&w))
     }
 
     /// 일관된 한 벌(`SeqCell::read` — 찢긴 값은 절대 돌려주지 않는다). 비RT 독자(커맨드·`band-diag`·측정)만 부른다.
     /// RT 경로가 읽어야 한다면 `try_read`만 쓴다(이 셀은 지금 RT 경로에서 쓰지 않는다).
-    pub fn read(&self) -> MediaStats {
+    pub(crate) fn read(&self) -> MediaStats {
         unpack(&self.0.read())
     }
 }

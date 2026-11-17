@@ -450,7 +450,7 @@ impl JitterBuffer {
     }
 
     /// 깊이 오차(샘플, 깊이 EWMA − 목표). 재생 중이 아니면 0.
-    pub fn depth_error(&self) -> f64 {
+    pub(crate) fn depth_error(&self) -> f64 {
         match (self.state, self.depth.ewma()) {
             (State::Playing, Some(e)) => e - self.target_samples(),
             _ => 0.0,

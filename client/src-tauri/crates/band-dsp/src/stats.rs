@@ -108,7 +108,7 @@ impl<const N: usize> SeqCell<N> {
     }
 
     /// 한 번 읽어 본다. 발행 중이었거나 그 사이 발행이 끼었으면 None.
-    pub fn try_read(&self) -> Option<[u64; N]> {
+    pub(crate) fn try_read(&self) -> Option<[u64; N]> {
         let v1 = self.ver.load(Ordering::Acquire);
         if v1 & 1 != 0 {
             return None;
