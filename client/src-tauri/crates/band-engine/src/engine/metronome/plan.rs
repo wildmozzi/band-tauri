@@ -170,6 +170,18 @@ mod tests {
         assert_eq!(p.ref_peer_id, None);
     }
 
+    /// 계약(`engine_set_metronome` 반환값)의 `refPeerId`는 문자열 또는 null이다 — `Arc<str>`를 문자열로 내는 것은 serde `rc`
+    /// 피처 하나뿐이라 모양을 고정한다(#168 리뷰 L-2).
+    #[test]
+    fn plan_serializes_ref_peer_id_as_string() {
+        let p = MetronomePlan { ref_peer_id: Some("host".into()), ..MetronomePlan::default() };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["refPeerId"], serde_json::json!("host"));
+        assert_eq!(v, serde_json::json!({ "running": false, "bpm": 120.0, "beatsPerBar": 4, "startUs": 0.0, "refPeerId": "host" }));
+        let none = serde_json::to_value(MetronomePlan::default()).unwrap();
+        assert_eq!(none["refPeerId"], serde_json::Value::Null);
+    }
+
     #[test]
     fn loopback_offset_splits_into_output_share() {
         // PR #34 M2(a): offset = 숨은 입력 + 숨은 출력
