@@ -10,22 +10,24 @@
     "underrunMaxPct": 0.5
   },
   "fails": [],
-  "goalAllPass": true,
-  "knownShortfalls": [],
+  "goalAllPass": false,
+  "knownShortfalls": [
+    "#1 1절 지터 버퍼 지연(마지막 창 bufferMs) 11.72ms > 11.68ms — P1-6d 결정(꼬리 지터 회선은 1절 안정 회선 대상 밖) — 기존에도 마지막 창 목표(≈11.87ms)가 한도(11.68ms)를 넘고 깊이가 데드밴드 덕에 통과하던 회선, 계단 감지(P2-16b) 뒤 0.04ms 초과 (기준값 11.72ms ± 0.1ms)"
+  ],
   "pass": true,
   "peers": [
     {
       "accumulation": {
-        "deltaMs": 0.0740671157836914,
+        "deltaMs": 0.03229236602783203,
         "firstWindowBufferMs": 7.134266376495361,
-        "lastWindowBufferMs": 7.208333492279053,
+        "lastWindowBufferMs": 7.166558742523193,
         "offsetFirstMs": 1.5092663764953613,
-        "offsetLastMs": 1.5833334922790527,
+        "offsetLastMs": 1.5415587425231934,
         "pass": true
       },
       "bufferMs": {
-        "median": 7.1666388511657715,
-        "p95": 8.038543701171875
+        "median": 7.158797740936279,
+        "p95": 8.020833015441895
       },
       "conceal": {
         "actualLossPct": 0.9298450258290285,
@@ -37,12 +39,12 @@
         "underrunLimitPct": 0.5,
         "underrunPct": 0.0
       },
-      "corrections": 2379,
+      "corrections": 2400,
       "driftPpm": 170.0,
       "frameMs": 5.0,
       "goalDelay": {
         "bufferMs": 7.134266376495361,
-        "lastBufferMs": 7.208333492279053,
+        "lastBufferMs": 7.166558742523193,
         "lastOneFramePlusP95Ms": 8.059350967407227,
         "lastWithin": true,
         "oneFramePlusP95Ms": 8.080558776855469,
@@ -78,55 +80,62 @@
     },
     {
       "accumulation": {
-        "deltaMs": 0.06266403198242188,
+        "deltaMs": 0.14158916473388672,
         "firstWindowBufferMs": 11.583333015441895,
-        "lastWindowBufferMs": 11.645997047424316,
+        "lastWindowBufferMs": 11.724922180175781,
         "offsetFirstMs": -0.21531295776367188,
-        "offsetLastMs": -0.22292423248291016,
+        "offsetLastMs": -0.20479774475097656,
         "pass": true
       },
       "bufferMs": {
-        "median": 12.217568397521973,
-        "p95": 22.041854858398438
+        "median": 12.250182151794434,
+        "p95": 22.187501907348633
       },
       "conceal": {
         "actualLossPct": 0.4801040225382166,
         "limitPct": 1.5,
-        "lossPct": 1.0383253295755845,
+        "lossPct": 1.0253082414016872,
         "pass": true,
-        "pct": 1.0568668533180057,
-        "pctWithEvents": 1.0643069067825848,
+        "pct": 1.0475572448317418,
+        "pctWithEvents": 1.0608203677510608,
         "underrunLimitPct": 0.5,
-        "underrunPct": 0.018541523742421153
+        "underrunPct": 0.022249003430054697
       },
-      "corrections": 7082,
+      "corrections": 7222,
       "driftPpm": -200.0,
       "frameMs": 5.0,
       "goalDelay": {
         "bufferMs": 11.583333015441895,
-        "lastBufferMs": 11.645997047424316,
+        "lastBufferMs": 11.724922180175781,
         "lastOneFramePlusP95Ms": 11.680976867675781,
-        "lastWithin": true,
+        "lastWithin": false,
         "oneFramePlusP95Ms": 11.675993919372559,
         "within": true
       },
       "index": 1,
-      "known": [],
+      "known": [
+        {
+          "base": 11.725,
+          "metric": "GoalDelayLast",
+          "tol": 0.1,
+          "why": "P1-6d 결정(꼬리 지터 회선은 1절 안정 회선 대상 밖) — 기존에도 마지막 창 목표(≈11.87ms)가 한도(11.68ms)를 넘고 깊이가 데드밴드 덕에 통과하던 회선, 계단 감지(P2-16b) 뒤 0.04ms 초과"
+        }
+      ],
       "lateDropped": 13,
       "line": "F 5.0ms, 장치 96샘플, 드리프트 -200ppm, 지터 Exp 2.0ms, 손실 0.5%, 계단@90s(+8ms, 지터 4.0ms), 계단@180s(+0ms, 지터 2.0ms)",
       "maxCorrCents": 4.3335041999816895,
       "outOfBand": {
-        "maxRunAtS": 89.600511,
-        "maxRunS": 3.499631999999997,
+        "maxRunAtS": 182.200213,
+        "maxRunS": 3.0999520000000076,
         "pass": true,
-        "pct": 2.965517241379305,
-        "totalS": 8.599999999999985
+        "pct": 3.1034482758620636,
+        "totalS": 8.999999999999984
       },
       "rebuffers": 0,
       "recoverPass": true,
       "recoveries": [],
       "tail": {
-        "adjusts": 27,
+        "adjusts": 25,
         "resets": 0
       },
       "targetFirst": {
@@ -136,20 +145,20 @@
         "targetMs": 11.666666984558105
       },
       "targetMsMedian": 12.375,
-      "verdict": "PASS"
+      "verdict": "FAIL(알려진)"
     },
     {
       "accumulation": {
-        "deltaMs": 0.3796873092651367,
+        "deltaMs": 0.3958311080932617,
         "firstWindowBufferMs": 10.395833015441895,
-        "lastWindowBufferMs": 10.775520324707031,
+        "lastWindowBufferMs": 10.791664123535156,
         "offsetFirstMs": 0.9791688919067383,
-        "offsetLastMs": 1.3781232833862305,
+        "offsetLastMs": 1.3863945007324219,
         "pass": true
       },
       "bufferMs": {
-        "median": 10.612875938415527,
-        "p95": 11.664820671081543
+        "median": 10.605472564697266,
+        "p95": 11.645827293395996
       },
       "conceal": {
         "actualLossPct": 1.4913932445718285,
@@ -166,7 +175,7 @@
       "frameMs": 5.0,
       "goalDelay": {
         "bufferMs": 10.395833015441895,
-        "lastBufferMs": 10.775520324707031,
+        "lastBufferMs": 10.791664123535156,
         "lastOneFramePlusP95Ms": 11.722026824951172,
         "lastWithin": true,
         "oneFramePlusP95Ms": 11.745000839233398,
@@ -202,33 +211,33 @@
     },
     {
       "accumulation": {
-        "deltaMs": 0.0814218521118164,
+        "deltaMs": 0.054268836975097656,
         "firstWindowBufferMs": 8.606072425842285,
-        "lastWindowBufferMs": 8.687494277954102,
+        "lastWindowBufferMs": 8.660341262817383,
         "offsetFirstMs": -0.020844459533691406,
-        "offsetLastMs": 0.043547630310058594,
+        "offsetLastMs": 0.03849029541015625,
         "pass": true
       },
       "bufferMs": {
-        "median": 8.638689994812012,
-        "p95": 9.080653190612793
+        "median": 8.632101058959961,
+        "p95": 9.086660385131836
       },
       "conceal": {
         "actualLossPct": 1.0466780473505424,
         "limitPct": 1.5,
-        "lossPct": 1.0532396264561472,
+        "lossPct": 1.0484259170116492,
         "pass": true,
-        "pct": 1.0532396264561472,
-        "pctWithEvents": 1.0532396264561472,
+        "pct": 1.0484259170116492,
+        "pctWithEvents": 1.0484259170116492,
         "underrunLimitPct": 0.5,
         "underrunPct": 0.0
       },
-      "corrections": 2213,
+      "corrections": 2180,
       "driftPpm": -120.0,
       "frameMs": 2.5,
       "goalDelay": {
         "bufferMs": 8.606072425842285,
-        "lastBufferMs": 8.687494277954102,
+        "lastBufferMs": 8.660341262817383,
         "lastOneFramePlusP95Ms": 8.81570053100586,
         "lastWithin": true,
         "oneFramePlusP95Ms": 8.844608306884766,
@@ -240,8 +249,8 @@
       "line": "F 2.5ms, 장치 128샘플, 드리프트 -120ppm, 지터 Uniform 5.0ms, 손실 1.0%, 단절 5s@150s, 단절 5s@255s",
       "maxCorrCents": 4.3335041999816895,
       "outOfBand": {
-        "maxRunAtS": 255.300274,
-        "maxRunS": 4.799748999999997,
+        "maxRunAtS": 150.300443,
+        "maxRunS": 4.800093000000009,
         "pass": true,
         "pct": 3.3103448275862006,
         "totalS": 9.599999999999982
@@ -251,11 +260,11 @@
       "recoveries": [
         {
           "outageEndS": 155.0,
-          "recoverS": 0.10070699999999988
+          "recoverS": 0.10057199999999966
         },
         {
           "outageEndS": 260.0,
-          "recoverS": 0.10039699999998675
+          "recoverS": 0.10072300000001633
         }
       ],
       "tail": {
@@ -273,16 +282,16 @@
     },
     {
       "accumulation": {
-        "deltaMs": 0.3839454650878906,
+        "deltaMs": 0.39624738693237305,
         "firstWindowBufferMs": 6.7291646003723145,
-        "lastWindowBufferMs": 7.113110065460205,
+        "lastWindowBufferMs": 7.1254119873046875,
         "offsetFirstMs": 1.2705631256103516,
-        "offsetLastMs": 1.738110065460205,
+        "offsetLastMs": 1.7504119873046875,
         "pass": true
       },
       "bufferMs": {
-        "median": 6.823678970336914,
-        "p95": 35.6875
+        "median": 6.828277111053467,
+        "p95": 35.70820999145508
       },
       "conceal": {
         "actualLossPct": 0.47664283452494044,
@@ -294,12 +303,12 @@
         "underrunLimitPct": 0.5,
         "underrunPct": 0.0
       },
-      "corrections": 2757,
+      "corrections": 2749,
       "driftPpm": 60.0,
       "frameMs": 5.0,
       "goalDelay": {
         "bufferMs": 6.7291646003723145,
-        "lastBufferMs": 7.113110065460205,
+        "lastBufferMs": 7.1254119873046875,
         "lastOneFramePlusP95Ms": 8.011699676513672,
         "lastWithin": true,
         "oneFramePlusP95Ms": 7.993800163269043,
@@ -314,8 +323,8 @@
         "maxRunAtS": 81.20023,
         "maxRunS": 1.0003159999999895,
         "pass": true,
-        "pct": 2.1724137931034457,
-        "totalS": 6.299999999999994
+        "pct": 2.2068965517241357,
+        "totalS": 6.399999999999993
       },
       "rebuffers": 0,
       "recoverPass": true,
@@ -335,16 +344,16 @@
     },
     {
       "accumulation": {
-        "deltaMs": -0.018691062927246094,
+        "deltaMs": 0.04523944854736328,
         "firstWindowBufferMs": 9.018621444702148,
-        "lastWindowBufferMs": 8.999930381774902,
+        "lastWindowBufferMs": 9.063860893249512,
         "offsetFirstMs": -0.35637855529785156,
-        "offsetLastMs": -0.37506961822509766,
+        "offsetLastMs": -0.3111391067504883,
         "pass": true
       },
       "bufferMs": {
-        "median": 9.0625,
-        "p95": 14.874999046325684
+        "median": 9.083366394042969,
+        "p95": 14.833332061767578
       },
       "conceal": {
         "actualLossPct": 1.9613493812510594,
@@ -356,12 +365,12 @@
         "underrunLimitPct": 0.5,
         "underrunPct": 0.0
       },
-      "corrections": 2357,
+      "corrections": 2354,
       "driftPpm": -160.0,
       "frameMs": 5.0,
       "goalDelay": {
         "bufferMs": 9.018621444702148,
-        "lastBufferMs": 8.999930381774902,
+        "lastBufferMs": 9.063860893249512,
         "lastOneFramePlusP95Ms": 11.932807922363281,
         "lastWithin": true,
         "oneFramePlusP95Ms": 11.938994407653809,
@@ -376,8 +385,8 @@
         "maxRunAtS": 75.300542,
         "maxRunS": 4.799877,
         "pass": true,
-        "pct": 1.827586206896551,
-        "totalS": 5.299999999999997
+        "pct": 1.8620689655172402,
+        "totalS": 5.399999999999997
       },
       "rebuffers": 1,
       "recoverPass": true,

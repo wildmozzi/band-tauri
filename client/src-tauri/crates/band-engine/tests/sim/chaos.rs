@@ -202,10 +202,19 @@ fn chaos_delay_jump_20_150_20() {
             p.js.late_dropped,
             r.xruns
         );
-        // 올라가는 계단은 지터 버퍼가 버스트(스파이크)로 본다: 약 1초 동안 +130ms를 쥐었다가 놓고, 목표가 3초쯤 상한(80ms)에
-        // 머문 뒤 보정(0.25%)으로 내려온다. 버스트 복귀 기준(`tune_jitter_burst_up_and_return`: ≤ 8s)과 같은 한도.
-        assert!(rec_up <= 8.0, "F {frame}: 150ms로 올라간 뒤 복구 {rec_up:.1}s");
-        assert!(rec_down <= 3.0, "F {frame}: 20ms로 내려온 뒤 복구 {rec_down:.1}s");
+        // 올라가는 계단(P2-16b): 처음 0.5초(`STEP_UP_US`)는 버스트와 구분할 수 없어 버스트로 본다(목표 상한 80ms, 옛 최소 지연
+        // 기준이라 bufferMs ≈ 135ms로 읽힘). 그 뒤 경로 지연 상승으로 판정해 지연 통계를 새 지연에서 다시 모으고 짧은 창·긴 창을
+        // 계단 전 값으로 되돌린다. 전에는 목표가 3초쯤 80ms에 머물고 깊이를 키웠다가 보정으로 내려와 복귀 2.7s(F 2.5ms)·
+        // 4.9s(F 5ms)였다. 지금 0.8s/0.8s.
+        let hot = |a: f64, b: f64| p.trace.iter().filter(|x| x.0 >= a && x.0 < b && x.2 > pre.tgt_med + 3.0).count() as f64 * 0.1;
+        let tgt_hot = hot(10.0, 20.0);
+        let buf_hot = p.trace.iter().filter(|x| x.0 >= 10.0 && x.0 < 20.0 && x.1 > 80.0).count() as f64 * 0.1;
+        println!("CHAOS 지연 급변 F {frame}: 목표 > 기준+3ms {tgt_hot:.1}s, bufferMs > 80ms {buf_hot:.1}s");
+        assert!(rec_up <= 1.5, "F {frame}: 150ms로 올라간 뒤 복구 {rec_up:.1}s");
+        assert!(tgt_hot <= 1.0, "F {frame}: 계단 뒤 목표가 {tgt_hot:.1}s 동안 올라 있었다(버스트로 해석)");
+        assert!(buf_hot <= 1.0, "F {frame}: 계단 뒤 bufferMs > 80ms {buf_hot:.1}s");
+        assert!(up.underrun_pct <= 1.5, "F {frame}: 150ms 구간 언더런 은닉 {:.2}%(130ms 공백 몫만)", up.underrun_pct);
+        assert!(rec_down <= 1.5, "F {frame}: 20ms로 내려온 뒤 복구 {rec_down:.1}s");
         assert!((tail.buf_med - pre.buf_med).abs() <= 1.5, "F {frame}: 급변 뒤 지연이 남았다 {:.2} → {:.2}", pre.buf_med, tail.buf_med);
         assert_eq!(r.xruns, 0);
     }
