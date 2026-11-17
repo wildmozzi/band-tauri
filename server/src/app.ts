@@ -21,6 +21,8 @@ import type { UploadQuota } from './services/postImageService'
 import { createPostsRouter, type PostUserLimits } from './routes/posts'
 import { createPostService } from './services/postService'
 import { createPostRepository, type PostRepository } from './repositories/postRepository'
+import { createOpsRouter } from './routes/ops'
+import type { ActivityCounts } from './signaling/registry'
 
 export interface AppOptions {
   /** 결제/구독 서비스 (테스트에서 저장소·결제대행 목 주입). 기본: Supabase 저장소 */
@@ -43,8 +45,12 @@ export interface AppOptions {
   postRepository?: PostRepository | null
   /** 프로필 사진 저장소 (테스트에서 가짜 주입). 기본: STORAGE_DRIVER 설정의 avatars (P2-12) */
   avatarStorage?: StorageAdapter | null
-  /** 프로필 사진 URL 기록(auth user_metadata) (테스트에서 가짜 주입). 기본: Supabase service_role */
+  /** 프로필 사진 URL 기록(auth app_metadata) (테스트에서 가짜 주입). 기본: Supabase service_role */
   profilePhotoMetadata?: ProfilePhotoMetadata | null
+  /** 운영 집계(GET /api/ops/activity, P1-17①). 기본: 없음(503). index.ts가 WS 서버를 만든 뒤 값을 돌려준다 */
+  activity?: () => ActivityCounts | null
+  /** 운영 경로가 읽는 환경변수(OPS_TOKEN) — 테스트 주입. 기본: process.env */
+  opsEnv?: Record<string, string | undefined>
   /** 테스트에서만 false (한 IP에서 많은 요청을 보낸다). 기본: 켬 */
   rateLimits?: boolean
 }
@@ -93,6 +99,7 @@ export function createApp(options: AppOptions = {}) {
   app.use('/api/music', musicRoutes)
   app.use('/api/payment', limit ?? paymentLimiter, createPaymentRouter(options.subscriptionService, options.paymentOrderService))
   app.use('/api/rooms', createRoomsRouter(options.roomService))
+  app.use('/api/ops', createOpsRouter(options.activity ?? (() => null), options.opsEnv))
   const imageStorage = options.imageStorage !== undefined ? options.imageStorage : getDefaultStorage('post-images')
   app.use('/api/posts', createPostsRouter(
     createPostService(

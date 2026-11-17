@@ -9,6 +9,7 @@
         "start": "node dist/index.js",
         "migrate:stems": "tsx scripts/migrate-stems-to-opus.ts",
         "migrate:storage": "tsx scripts/migrate-storage.ts",
+        "ops:active": "tsx scripts/ops-active.ts",
         "test": "node --import tsx --test --test-concurrency=1 \"test/**/*.test.ts\""
     },
     "keywords": [],

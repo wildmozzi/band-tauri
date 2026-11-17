@@ -1,5 +1,7 @@
 # Database Migration Guide
 
+> 운영 반영(007~013)의 전체 순서·백업·확인·되돌리기는 [../DEPLOY-CUTOVER.md](../DEPLOY-CUTOVER.md)에 한데 모았다. 아래 각 절은 마이그레이션별 세부 점검의 원본이다.
+
 ## 📝 마이그레이션 실행 방법
 
 ### 1단계: Supabase Dashboard 접속
@@ -163,7 +165,8 @@ posts INSERT/UPDATE 정책과 권한을 없앤다. 조회·삭제·좋아요·�
 
 5. [ ] post-images 버킷 INSERT 정책 제거 (P3-10b): Storage 정책 확인 → 쓰기 정책 삭제
    ```sql
-   SELECT policyname, cmd, roles FROM pg_policies
+   -- 정의(qual·with_check)까지 결과를 저장한 뒤 DROP한다(되돌리기용, DEPLOY-CUTOVER.md 6단계)
+   SELECT policyname, cmd, roles, permissive, qual, with_check FROM pg_policies
     WHERE schemaname = 'storage' AND tablename = 'objects' AND cmd IN ('INSERT', 'UPDATE', 'ALL')
       AND (coalesce(qual, '') || coalesce(with_check, '')) ILIKE '%post-images%';
    -- 나온 정책마다: DROP POLICY "<policyname>" ON storage.objects;
