@@ -125,24 +125,24 @@ impl NetShared {
 
     /// 지금 오디오를 릴레이로 보내는 피어 수와, 릴레이 송신량이 상한의 90%를 넘었는지(Opus 자동 전환 입력, P1-4c).
     /// 워커가 부른다: 피어 표는 워커 복사본으로, 상한 초과는 제어 스레드가 발행한 원자값으로 본다(락 없음, 엔진 ③c).
-    pub fn relay_audio_load(&self, copy: &PeerTableCopy) -> (usize, bool) {
+    pub(crate) fn relay_audio_load(&self, copy: &PeerTableCopy) -> (usize, bool) {
         let n = copy.peers().iter().filter(|p| p.sends_audio_via_relay()).count();
         (n, self.relay_over_budget.load(Ordering::Relaxed))
     }
 
     /// 워커의 Opus 자동 전환 상태(`RelayStats.autoOpus`).
-    pub fn set_relay_auto_opus(&self, on: bool) {
+    pub(crate) fn set_relay_auto_opus(&self, on: bool) {
         self.relay_auto_opus.store(on, Ordering::Relaxed);
     }
 
     /// 워커: 자동 전환 대상 목록을 바로 다시 봐야 하는지(읽으면 내린다).
-    pub fn take_auto_refresh(&self) -> bool {
+    pub(crate) fn take_auto_refresh(&self) -> bool {
         self.auto_refresh.load(Ordering::Relaxed) && self.auto_refresh.swap(false, Ordering::Relaxed)
     }
 
     /// 측정 도구 전용(P1-4f M1): 모든 피어를 손실 피드백 전환 상태로 강제한다(PCM16 설정에서만 의미가 있다).
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_force_auto_opus(&self, on: bool) {
+    pub(crate) fn set_force_auto_opus(&self, on: bool) {
         self.force_auto_opus.store(on, Ordering::Relaxed);
     }
 
@@ -251,10 +251,10 @@ impl NetShared {
 /// PCM16 설정의 피어별 Opus 자동 전환 페이로드(워커가 그 피어 전용 인코더로 만든 이 프레임, P1-4c·P1-4e).
 #[derive(Debug, Clone, Copy)]
 pub struct AutoPayload<'a> {
-    pub payload: &'a [u8],
-    pub flags: u8,
-    pub reason: CodecReason,
+    pub(crate) payload: &'a [u8],
+    pub(crate) flags: u8,
+    pub(crate) reason: CodecReason,
 }
 
 /// `send_audio`의 자동 전환 조회: (피어, 지금 경로) → 그 피어에게 보낼 자동 전환 페이로드.
-pub type AutoFn<'f, 'a> = &'f dyn Fn(&Peer, PathKind) -> Option<AutoPayload<'a>>;
+pub(crate) type AutoFn<'f, 'a> = &'f dyn Fn(&Peer, PathKind) -> Option<AutoPayload<'a>>;

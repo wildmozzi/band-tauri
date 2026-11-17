@@ -52,8 +52,8 @@ impl<'a> CounterClock<'a> {
 // ============================================================================
 
 /// 자극: 100ms 선형 처프 200Hz → min(12kHz, 0.45·레이트), −10dBFS 부근(진폭 0.3), 5ms 페이드.
-pub const STIM_SECONDS: f64 = 0.1;
-pub const STIM_AMP: f32 = 0.3;
+pub(crate) const STIM_SECONDS: f64 = 0.1;
+pub(crate) const STIM_AMP: f32 = 0.3;
 /// 자극 전에 녹음하는 잡음 구간.
 const PREROLL: Duration = Duration::from_millis(60);
 /// 반복 사이 쉬는 시간(잔향 소멸).
@@ -69,12 +69,12 @@ pub struct LoopbackReport {
     pub detected_runs: u32,
     /// 검출된 반복의 중앙값·최소·최대·표준편차(ms).
     pub round_trip_ms: Option<f64>,
-    pub min_ms: Option<f64>,
-    pub max_ms: Option<f64>,
-    pub std_dev_ms: Option<f64>,
-    pub sample_rate: u32,
-    pub input_buffer_frames: u32,
-    pub output_buffer_frames: u32,
+    pub(crate) min_ms: Option<f64>,
+    pub(crate) max_ms: Option<f64>,
+    pub(crate) std_dev_ms: Option<f64>,
+    pub(crate) sample_rate: u32,
+    pub(crate) input_buffer_frames: u32,
+    pub(crate) output_buffer_frames: u32,
     /// 장치 버퍼만으로 본 왕복(입력 버퍼 + 출력 버퍼, ms).
     pub buffer_round_trip_ms: f64,
     /// 드라이버 보고 지연(ms). 알 수 없으면 null(cpal WASAPI, 가짜 장치).
@@ -89,17 +89,17 @@ pub struct LoopbackReport {
     pub driver_error_ms: Option<f64>,
     /// 보정한 로컬 지연 = `estLatencyMs` + 보정값.
     pub corrected_est_latency_ms: Option<f64>,
-    pub backend: String,
+    pub(crate) backend: String,
 }
 
 /// 루프백 측정 작업. 엔진 락 밖에서 돈다(측정 중에도 `engine_stats` 등이 막히지 않게).
 pub struct LoopbackJob {
-    pub sh: Arc<MeasureShared>,
-    pub ends: Arc<Mutex<Option<MeasureEnds>>>,
-    pub counters: Arc<AudioCounters>,
-    pub info: StreamInfo,
-    pub est_latency_ms: f32,
-    pub backend: String,
+    pub(crate) sh: Arc<MeasureShared>,
+    pub(crate) ends: Arc<Mutex<Option<MeasureEnds>>>,
+    pub(crate) counters: Arc<AudioCounters>,
+    pub(crate) info: StreamInfo,
+    pub(crate) est_latency_ms: f32,
+    pub(crate) backend: String,
 }
 
 impl LoopbackJob {

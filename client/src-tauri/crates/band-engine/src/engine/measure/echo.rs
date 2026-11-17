@@ -20,7 +20,7 @@ use crate::net::NetShared;
 // ============================================================================
 
 /// 클릭 간격(48k 샘플) = 300ms. 프레임 크기(120/240/480)의 배수라 클릭이 늘 프레임 시작에 놓인다.
-pub const CLICK_INTERVAL: u64 = 14_400;
+pub(crate) const CLICK_INTERVAL: u64 = 14_400;
 /// 에코가 시작된 뒤 지터 버퍼를 다시 채우고 통계가 안정될 때까지 기다리는 시간.
 const ECHO_SETTLE: Duration = Duration::from_millis(1500);
 /// 측정 끝에 상대가 에코를 멈출 때까지 기다리는 최대 시간(그동안 상대에게는 무음을 보낸다).
@@ -31,7 +31,7 @@ const ECHO_RETURN_WAIT: Duration = Duration::from_millis(200);
 /// 재생 시각 탭 버퍼 여유(듣는 시간에 더하는 초).
 const ECHO_TAP_SLACK_S: f64 = 0.5;
 /// 한 측정의 클릭 수 상한.
-pub const ECHO_MAX_RUNS: u32 = 20;
+pub(crate) const ECHO_MAX_RUNS: u32 = 20;
 const WORKER_UNRESPONSIVE: &str = "오디오 워커가 응답하지 않습니다";
 
 /// 용량 `cap`의 빈 버퍼. 측정 스레드에서 **미리 한 번 만져 둔다** — `with_capacity`만 하면 워커가 처음 채울 때 4KB마다
@@ -57,8 +57,8 @@ fn echo_listen_s(runs: u32) -> f64 {
 pub struct EchoProbe {
     /// 측정 번호(1부터, 측정마다 +1). 워커는 이것으로 `EchoCtl`의 신호가 이 프로브의 것인지 판정한다.
     id: u32,
-    pub peer_id: String,
-    pub peer_ssrc: u32,
+    pub(crate) peer_id: String,
+    pub(crate) peer_ssrc: u32,
     /// 클릭 스트림 전용 인코더(설정 코덱과 같은 인자). 다른 피어와 코덱 상태를 섞지 않는다.
     enc: Encoder,
     ich: usize,
@@ -71,20 +71,20 @@ pub struct EchoProbe {
     until_next: u64,
     cursor: Option<usize>,
     /// 클릭 송신 시각(워커 epoch µs, 프레임 시작 = 송신 시각 − 프레임 길이). 용량 = 클릭 수 상한.
-    pub emitted_us: Vec<f64>,
+    pub(crate) emitted_us: Vec<f64>,
     /// 켜져 있으면 워커가 그 피어의 소스 링에 넣는 샘플(모노)과 재생(쓰기) 예정 시각을 모은다.
-    pub tap: bool,
-    pub arrivals: Vec<f32>,
-    pub arrival_us: Vec<f64>,
+    pub(crate) tap: bool,
+    pub(crate) arrivals: Vec<f32>,
+    pub(crate) arrival_us: Vec<f64>,
     /// 탭 버퍼가 차서 버린 샘플 수(0이 아니면 측정이 불안정하다).
-    pub overflow: u64,
+    pub(crate) overflow: u64,
     /// 탭 버퍼 상한(샘플). 두 `Vec`의 실제 용량은 이 이상이다 — 넘침은 이 값으로 판정한다(용량이 서로 달라도 늘지 않게).
     tap_cap: usize,
 }
 
 impl EchoProbe {
     /// 측정 스레드에서 만든다. `runs` = 보낼 클릭 수(탭 버퍼 크기).
-    pub fn new(id: u32, peer_id: String, peer_ssrc: u32, stream: EchoStream, runs: u32) -> Result<Box<Self>, String> {
+    pub(crate) fn new(id: u32, peer_id: String, peer_ssrc: u32, stream: EchoStream, runs: u32) -> Result<Box<Self>, String> {
         let EchoStream { codec, channels, opus_bitrate: bitrate, frame_samples: frame } = stream;
         let ich = channels.max(1);
         let tap_cap = ((echo_listen_s(runs) + ECHO_TAP_SLACK_S) * INTERNAL_RATE as f64) as usize;
@@ -111,7 +111,7 @@ impl EchoProbe {
     }
 
     /// 다음 프레임 경계부터 `n`개 클릭을 보낸다.
-    pub fn start_clicks(&mut self, n: u32) {
+    pub(crate) fn start_clicks(&mut self, n: u32) {
         self.clicks_started = true;
         self.clicks_left = n;
         self.until_next = 0;
@@ -121,7 +121,8 @@ impl EchoProbe {
         self.tap = true;
     }
 
-    pub fn clicks_done(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn clicks_done(&self) -> bool {
         self.clicks_left == 0 && self.cursor.is_none()
     }
 
@@ -152,7 +153,7 @@ impl EchoProbe {
 
     /// 워커(송신): 이 피어에게 보낼 프레임(무음 + 클릭)을 만들어 전용 인코더로 인코드한다. 반환: 대상 피어 id와 페이로드
     /// (인코드 실패면 None — 그 프레임은 그 피어에게 평소 소리가 간다, 전과 같다). `now_us` = 송신 시각(워커 epoch).
-    pub fn encode_next(&mut self, now_us: f64) -> Option<EchoProbeFrame<'_>> {
+    pub(crate) fn encode_next(&mut self, now_us: f64) -> Option<EchoProbeFrame<'_>> {
         let mut frame = std::mem::take(&mut self.frame);
         self.fill_frame(&mut frame, now_us);
         let n = self.enc.encode(&frame, &mut self.payload);
@@ -161,7 +162,7 @@ impl EchoProbe {
     }
 
     /// 워커(공급): 소스 링에 넣는 48k 스테레오 청크와 첫 샘플의 재생(쓰기) 예정 시각.
-    pub fn record(&mut self, stereo: &[f32], first_us: f64) {
+    pub(crate) fn record(&mut self, stereo: &[f32], first_us: f64) {
         if !self.tap {
             return;
         }
@@ -179,25 +180,25 @@ impl EchoProbe {
 
 /// 클릭 스트림의 형식(설정 코덱과 같다 — 전에 워커가 클릭용 인코더를 만들던 인자).
 #[derive(Debug, Clone, Copy)]
-pub struct EchoStream {
-    pub codec: CodecKind,
+pub(crate) struct EchoStream {
+    pub(crate) codec: CodecKind,
     /// 내부 채널 수.
-    pub channels: usize,
-    pub opus_bitrate: u32,
+    pub(crate) channels: usize,
+    pub(crate) opus_bitrate: u32,
     /// 프레임 크기(48k 프레임 수).
-    pub frame_samples: usize,
+    pub(crate) frame_samples: usize,
 }
 
 /// `EchoProbe::encode_next`가 빌려 주는 것: 클릭 스트림을 받을 피어와 이번 프레임의 페이로드.
-pub struct EchoProbeFrame<'a> {
-    pub peer_id: &'a str,
-    pub payload: &'a [u8],
+pub(crate) struct EchoProbeFrame<'a> {
+    pub(crate) peer_id: &'a str,
+    pub(crate) payload: &'a [u8],
 }
 
 /// 측정 스레드 → 워커 신호(원자값만). 셋 다 **측정 번호에 묶인 상태**다(사건이 아니다): 측정 스레드만 쓰고 번호는 늘기만
 /// 한다. 워커는 반복마다 쥔 프로브의 번호와 비교하므로 설치와 신호를 어느 순서로 보아도 결과가 같다 — 놓칠 수 없다.
 #[derive(Debug, Default)]
-pub struct EchoCtl {
+pub(crate) struct EchoCtl {
     /// 측정 번호 << 32 | 횟수: "이 번호의 측정은 클릭 n회를 시작한다".
     clicks: AtomicU64,
     /// "이 번호까지는 탭을 끈다"(결과 수거 시점). 프로브는 워커에 남는다.
@@ -211,7 +212,7 @@ const ECHO_QUEUE: usize = 2;
 
 /// 측정 스레드 쪽 끝(엔진이 갖고 `EchoJob`에 `Arc`로 준다). `Mutex` 둘은 측정 스레드만 잡는다(`Sync`여야 해서 있을 뿐) —
 /// 워커는 잡지 않는다.
-pub struct EchoPort {
+pub(crate) struct EchoPort {
     cmd: Mutex<HeapProd<Box<EchoProbe>>>,
     ret: Mutex<HeapCons<Box<EchoProbe>>>,
     ctl: Arc<EchoCtl>,
@@ -220,14 +221,14 @@ pub struct EchoPort {
 }
 
 /// 워커 쪽 끝.
-pub struct EchoPortRt {
+pub(crate) struct EchoPortRt {
     cmd: HeapCons<Box<EchoProbe>>,
     ret: HeapProd<Box<EchoProbe>>,
     ctl: Arc<EchoCtl>,
 }
 
 /// 명령·반환 링을 여기서 사전할당한다.
-pub fn echo_port() -> (EchoPort, EchoPortRt) {
+pub(crate) fn echo_port() -> (EchoPort, EchoPortRt) {
     let (cp, cc) = HeapRb::<Box<EchoProbe>>::new(ECHO_QUEUE).split();
     let (rp, rc) = HeapRb::<Box<EchoProbe>>::new(ECHO_QUEUE).split();
     let ctl = Arc::new(EchoCtl::default());
@@ -236,41 +237,41 @@ pub fn echo_port() -> (EchoPort, EchoPortRt) {
 
 impl EchoPort {
     /// 측정 시작: 이미 측정 중이면 거부하고, 아니면 새 측정 번호를 준다. 끝나면 반드시 `end`.
-    pub fn begin(&self) -> Result<u32, String> {
+    pub(crate) fn begin(&self) -> Result<u32, String> {
         if self.busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return Err("이미 에코 측정 중입니다".into());
         }
         Ok(self.next_id.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
-    pub fn end(&self) {
+    pub(crate) fn end(&self) {
         self.busy.store(false, Ordering::Release);
     }
 
     /// 프로브를 워커에 넘긴다. 먼저 반환 큐를 비운다(지난 측정이 제때 못 받은 프로브가 뒤늦게 와 있을 수 있다 — 여기,
     /// 측정 스레드에서 해제된다). 명령 큐가 차 있으면 워커가 멈춘 것이다(프로브는 여기서 해제).
-    pub fn install(&self, probe: Box<EchoProbe>) -> Result<(), String> {
+    pub(crate) fn install(&self, probe: Box<EchoProbe>) -> Result<(), String> {
         while self.ret.lock().try_pop().is_some() {}
         self.cmd.lock().try_push(probe).map_err(|_| WORKER_UNRESPONSIVE.to_string())
     }
 
     /// 측정 `id`의 클릭 `n`회를 시작하라.
-    pub fn start_clicks(&self, id: u32, n: u32) {
+    pub(crate) fn start_clicks(&self, id: u32, n: u32) {
         self.ctl.clicks.store((id as u64) << 32 | n as u64, Ordering::Release);
     }
 
     /// 측정 `id`까지는 탭을 꺼라(프로브는 워커에 남는다).
-    pub fn tap_off(&self, id: u32) {
+    pub(crate) fn tap_off(&self, id: u32) {
         self.ctl.tap_off.fetch_max(id, Ordering::AcqRel);
     }
 
     /// 측정 `id`까지는 프로브를 돌려 달라.
-    pub fn stop(&self, id: u32) {
+    pub(crate) fn stop(&self, id: u32) {
         self.ctl.stop.fetch_max(id, Ordering::AcqRel);
     }
 
     /// 워커가 돌려준 측정 `id`의 프로브를 `timeout`까지 기다려 받는다(1ms 간격). 그보다 오래된 것은 여기서 버린다.
-    pub fn recover(&self, id: u32, timeout: Duration) -> Option<Box<EchoProbe>> {
+    pub(crate) fn recover(&self, id: u32, timeout: Duration) -> Option<Box<EchoProbe>> {
         let t0 = Instant::now();
         loop {
             while let Some(p) = self.ret.lock().try_pop() {
@@ -288,13 +289,13 @@ impl EchoPort {
 
 /// 워커가 갖는 에코 상태(조정자 소유): 큐의 워커 쪽 끝 + 지금 쥔 프로브. "본 세대"를 기억하는 필드는 없다 — 판정은 전부
 /// "쥔 프로브의 번호와 `EchoCtl`의 비교"다.
-pub struct EchoRt {
+pub(crate) struct EchoRt {
     port: EchoPortRt,
     probe: Option<Box<EchoProbe>>,
 }
 
 impl EchoRt {
-    pub fn new(port: EchoPortRt) -> Self {
+    pub(crate) fn new(port: EchoPortRt) -> Self {
         Self { port, probe: None }
     }
 
@@ -303,7 +304,7 @@ impl EchoRt {
     /// ② 쥔 프로브의 번호 ≤ `stop`이면 반환 큐로 돌려주고 끝(방금 받은 것도 마찬가지 — 설치보다 취소가 먼저 보였어도 갇히지 않는다)
     /// ③ 번호 ≤ `tap_off`이면 탭을 끈다
     /// ④ `clicks`의 번호가 같고 아직 시작하지 않았으면(탭을 끄라는 신호가 없을 때만) 클릭을 시작한다
-    pub fn poll(&mut self) {
+    pub(crate) fn poll(&mut self) {
         if self.probe.is_none() {
             self.probe = self.port.cmd.try_pop();
         }
@@ -331,17 +332,17 @@ impl EchoRt {
     }
 
     /// 송신: 프로브가 있으면 그 피어에게 내 입력 대신 무음 + 클릭을 보낸다.
-    pub fn probe_mut(&mut self) -> Option<&mut EchoProbe> {
+    pub(crate) fn probe_mut(&mut self) -> Option<&mut EchoProbe> {
         self.probe.as_deref_mut()
     }
 
     /// 공급: 탭이 켜져 있을 때만(그 피어 소리의 재생 시각을 모은다).
-    pub fn tap_mut(&mut self) -> Option<&mut EchoProbe> {
+    pub(crate) fn tap_mut(&mut self) -> Option<&mut EchoProbe> {
         self.probe.as_deref_mut().filter(|p| p.tap)
     }
 
     /// 워커가 루프를 나갈 때: 쥔 프로브와 명령 큐에 남은 것을 반환 큐로(측정 스레드가 해제한다).
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         while let Some(p) = self.probe.take().or_else(|| self.port.cmd.try_pop()) {
             if self.port.ret.try_push(p).is_err() {
                 break; // 반환 큐가 찼다: 남은 것은 큐·워커와 함께 해제된다(엔진 정지 중)
@@ -355,8 +356,8 @@ impl EchoRt {
 #[serde(rename_all = "camelCase")]
 pub struct EchoReport {
     pub verdict: MeasureVerdict,
-    pub message: String,
-    pub peer_id: String,
+    pub(crate) message: String,
+    pub(crate) peer_id: String,
     /// 클릭마다 왕복(ms), 못 찾으면 null.
     pub runs: Vec<Option<f64>>,
     pub detected_runs: u32,
@@ -365,13 +366,13 @@ pub struct EchoReport {
     /// 단일 이상치로 뺀 클릭 수(0 또는 1, `single_outlier`).
     pub excluded_runs: u32,
     /// 뺀 클릭의 `runs` 인덱스.
-    pub outlier_index: Option<u32>,
+    pub(crate) outlier_index: Option<u32>,
     /// 네트워크 포함 왕복 중앙값(ms): 프레임 + 망 왕복 + 상대 되돌리기 + 내 지터 버퍼(소스 링 포함).
     /// 중앙값·최소·최대·표준편차는 뺀 클릭을 제외한 값이다.
     pub round_trip_ms: Option<f64>,
-    pub min_ms: Option<f64>,
-    pub max_ms: Option<f64>,
-    pub std_dev_ms: Option<f64>,
+    pub(crate) min_ms: Option<f64>,
+    pub(crate) max_ms: Option<f64>,
+    pub(crate) std_dev_ms: Option<f64>,
     /// 판정에 쓴 흩어짐(최대 − 최소, ms). `ECHO_UNSTABLE_SPREAD_MS`보다 크면 불안정.
     pub spread_ms: Option<f64>,
     /// 상대가 보고한 로컬 처리 지연(되돌리기, ms).
@@ -382,34 +383,34 @@ pub struct EchoReport {
     pub network_rtt_ms: Option<f32>,
     /// 측정 중 내 지터 버퍼(`bufferMs`, 소스 링 포함).
     pub jitter_buffer_ms: f32,
-    pub frame_ms: f32,
+    pub(crate) frame_ms: f32,
     /// 내 로컬 처리 지연(`estLatencyMs`)과 그 장치 버퍼 몫.
-    pub local_latency_ms: f32,
-    pub input_buffer_ms: f32,
-    pub output_buffer_ms: f32,
+    pub(crate) local_latency_ms: f32,
+    pub(crate) input_buffer_ms: f32,
+    pub(crate) output_buffer_ms: f32,
     /// 입→귀 추정(GOAL 1절) = 왕복 − 상대 처리 − 핑 RTT/2 + 입력 버퍼 + 출력 버퍼
     /// = 입력 버퍼 + 프레임 + 망 편도 + 지터 버퍼 + 출력 버퍼(상대도 나와 같은 설정이라고 가정).
     pub mouth_to_ear_ms: Option<f64>,
     /// 설명되지 않는 몫 = 왕복 − (프레임 + 핑 RTT + 상대 처리 + 지터 버퍼). 0에 가까우면 통계가 맞다.
     pub residual_ms: Option<f64>,
-    pub path: Option<band_dsp::types::PathKind>,
+    pub(crate) path: Option<band_dsp::types::PathKind>,
 }
 
 /// 에코 측정 작업(측정하는 쪽). 엔진 락 밖에서 돈다.
 pub struct EchoJob {
     /// 에코 프로브 큐의 측정 스레드 쪽 끝(엔진 ②b-5).
-    pub port: Arc<EchoPort>,
-    pub net: Arc<NetShared>,
-    pub peer_id: String,
-    pub peer_ssrc: u32,
+    pub(crate) port: Arc<EchoPort>,
+    pub(crate) net: Arc<NetShared>,
+    pub(crate) peer_id: String,
+    pub(crate) peer_ssrc: u32,
     /// 측정 대상 피어의 미디어 상태(지터 재시작·버퍼 깊이 수집, 엔진 ③).
     pub media: Arc<band_dsp::peer_media::PeerMediaShared>,
     /// 클릭 스트림 형식(설정 코덱과 같다).
-    pub stream: EchoStream,
-    pub frame_ms: f32,
-    pub local_latency_ms: f32,
-    pub input_buffer_ms: f32,
-    pub output_buffer_ms: f32,
+    pub(crate) stream: EchoStream,
+    pub(crate) frame_ms: f32,
+    pub(crate) local_latency_ms: f32,
+    pub(crate) input_buffer_ms: f32,
+    pub(crate) output_buffer_ms: f32,
 }
 
 /// 듣기가 끝난 시점에 net·통계에서 읽은 재료(분석은 프로브를 회수한 뒤에 한다).

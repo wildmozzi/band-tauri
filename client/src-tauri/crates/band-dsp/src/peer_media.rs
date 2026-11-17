@@ -28,8 +28,6 @@ pub struct MediaStats {
     /// 지터 버퍼가 재생 중인가.
     pub playing: bool,
     pub js: JitterStats,
-    /// 수신 큐가 가득 차 버린 패킷 수(③-a3부터. 그 전에는 0).
-    pub(crate) rx_dropped: u64,
     /// 이 피어의 실제(은닉이 아닌) 오디오가 처음 재생 링에 들어간 시각(엔진 epoch µs, P1-20). 0 = 아직.
     pub(crate) first_audio_us: u64,
 }
@@ -41,16 +39,15 @@ impl MediaStats {
     }
 }
 
-/// `MediaStats`의 원자값 칸 수: `JitterStats` 24필드 + playing + rx_dropped + first_audio_us. 필드가 늘면 `unpack`의 구조체 식이
+/// `MediaStats`의 원자값 칸 수: `JitterStats` 24필드 + playing + first_audio_us. 필드가 늘면 `unpack`의 구조체 식이
 /// 컴파일되지 않으므로 `pack`·`unpack`을 함께 고친다.
-const STAT_WORDS: usize = 27;
+const STAT_WORDS: usize = 26;
 
 fn pack(s: &MediaStats) -> [u64; STAT_WORDS] {
     let j = &s.js;
     let f = |v: f32| v.to_bits() as u64;
     [
         s.playing as u64,
-        s.rx_dropped,
         f(j.buffer_ms),
         f(j.target_ms),
         f(j.jitter_ms),
@@ -83,34 +80,33 @@ fn unpack(w: &[u64; STAT_WORDS]) -> MediaStats {
     let f = |v: u64| f32::from_bits(v as u32);
     MediaStats {
         playing: w[0] != 0,
-        rx_dropped: w[1],
         js: JitterStats {
-            buffer_ms: f(w[2]),
-            target_ms: f(w[3]),
-            jitter_ms: f(w[4]),
-            loss_pct: f(w[5]),
-            late: w[6],
-            concealed: w[7],
-            concealed_loss: w[8],
-            produced: w[9],
-            dropped_frames: w[10],
-            samples_dropped: w[11],
-            samples_inserted: w[12],
-            rebuffers: w[13],
-            conceal_pct: f(w[14]),
-            lead_ms: f(w[15]),
-            jitter_est_ms: f(w[16]),
-            corr_time_pct: f(w[17]),
-            max_corr_cents: f(w[18]),
-            late_dropped: w[19],
-            burst_events: w[20],
-            wall_buffer_ms: f(w[21]),
-            tail_ms: f(w[22]),
-            tail_adjusts: w[23],
-            tail_resets: w[24],
-            min_transit: w[25] as i64,
+            buffer_ms: f(w[1]),
+            target_ms: f(w[2]),
+            jitter_ms: f(w[3]),
+            loss_pct: f(w[4]),
+            late: w[5],
+            concealed: w[6],
+            concealed_loss: w[7],
+            produced: w[8],
+            dropped_frames: w[9],
+            samples_dropped: w[10],
+            samples_inserted: w[11],
+            rebuffers: w[12],
+            conceal_pct: f(w[13]),
+            lead_ms: f(w[14]),
+            jitter_est_ms: f(w[15]),
+            corr_time_pct: f(w[16]),
+            max_corr_cents: f(w[17]),
+            late_dropped: w[18],
+            burst_events: w[19],
+            wall_buffer_ms: f(w[20]),
+            tail_ms: f(w[21]),
+            tail_adjusts: w[22],
+            tail_resets: w[23],
+            min_transit: w[24] as i64,
         },
-        first_audio_us: w[26],
+        first_audio_us: w[25],
     }
 }
 
@@ -276,7 +272,7 @@ impl PeerMedia {
     pub fn publish(&mut self) {
         let js = self.jitter.stats();
         let playing = self.jitter.is_playing();
-        self.shared.stats.write(&MediaStats { playing, js, rx_dropped: self.rx.dropped(), first_audio_us: self.first_audio_us });
+        self.shared.stats.write(&MediaStats { playing, js, first_audio_us: self.first_audio_us });
         self.rx.set_loss_report(playing.then_some((js.loss_pct, js.conceal_pct)));
     }
 
@@ -421,7 +417,7 @@ mod tests {
             tail_resets: 11,
             min_transit: -123_456,
         };
-        MediaStats { playing: n % 2 == 1, js, rx_dropped: n * 7, first_audio_us: n * 11 }
+        MediaStats { playing: n % 2 == 1, js, first_audio_us: n * 11 }
     }
 
     #[test]
@@ -566,7 +562,7 @@ mod tests {
         assert_eq!(jb.tuning(), crate::jitter::JitterTuning::from_profile(0.1));
     }
 
-    /// `ingest`는 큐를 끝까지 비워 지터 버퍼에 넣고, `publish`는 큐 넘침(`rx_dropped`)과 재생 여부를 발행한다.
+    /// `ingest`는 큐를 끝까지 비워 지터 버퍼에 넣고, `publish`는 재생 여부를 발행한다. 큐 넘침은 `PeerMedia::rx_dropped`(하네스·시험)로 본다 — 발행 칸(`MediaStats::rx_dropped`)은 밖에서 읽는 곳이 없어 ⑨b-2에서 지웠다(#165 리뷰 L1).
     #[test]
     fn ingest_drains_queue_and_publish_reports_rx_dropped() {
         use crate::media_link::AUDIO_QUEUE_PACKETS;
@@ -583,7 +579,7 @@ mod tests {
         assert!(jb.stats().late == 0);
         pm.publish();
         let s = pm.shared.stats();
-        assert_eq!(s.rx_dropped, 3);
+        assert_eq!(pm.rx_dropped(), 3);
         assert_eq!(s.playing, pm.jitter().is_playing());
         assert_eq!(tx.loss_cell().get().is_some(), s.playing);
         // 다시 비우면 남은 것이 없다

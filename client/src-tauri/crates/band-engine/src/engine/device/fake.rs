@@ -83,7 +83,7 @@ pub type SourceFn = dyn Fn(u64, usize, &mut [f32]) + Send + Sync;
 
 #[derive(Clone)]
 pub struct FakeBackend {
-    pub in_rate: u32,
+    pub(crate) in_rate: u32,
     pub out_rate: u32,
     pub channels: usize,
     /// 입력 콜백 크기. None이면 설정의 bufferSize.
@@ -100,12 +100,12 @@ pub struct FakeBackend {
     /// 출력 콜백이 격자보다 0..이 값(µs) **이르게** 불린다(실장비 WASAPI 독점 프로브의 이른 콜백, PR #11 M3).
     /// `wake_jitter_us`와 합치면 격자 기준 ± 지터. 재생 시각(sink 모델)은 격자 그대로다.
     pub out_early_us: u64,
-    pub open_delay: Duration,
+    pub(crate) open_delay: Duration,
     /// 있으면 장치 열기가 이 문을 지난다(`OpenGate`).
     pub open_gate: Option<Arc<OpenGate>>,
     /// 이 시간 뒤 스트림 에러 1회 보고(장치 분리 흉내).
     pub error_after: Option<Duration>,
-    pub source: Arc<SourceFn>,
+    pub(crate) source: Arc<SourceFn>,
     /// 출력 콜백이 기록한 샘플(인터리브, `channels`채널).
     pub sink: Arc<Mutex<Vec<f32>>>,
     pub record_output: bool,

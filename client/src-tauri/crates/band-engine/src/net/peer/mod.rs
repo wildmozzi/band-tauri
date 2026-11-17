@@ -4,10 +4,10 @@
 //! 옛 경로(`net::peer::{LocalDescriptor, ConnState, ping_plain, …}`)는 아래 `pub use`로 그대로 쓴다.
 
 mod conn;
-pub mod descriptor;
-pub mod ping;
+pub(crate) mod descriptor;
+pub(crate) mod ping;
 
-pub use conn::*;
+pub(crate) use conn::*;
 pub use descriptor::*;
 pub use ping::*;
 
@@ -22,7 +22,7 @@ use super::crypto::{KeyPair, PacketCipher, KEY_BYTES};
 use band_dsp::media_link::{LossCell, MediaTx, PeerKey};
 use band_dsp::types::{PathKind, PeerStateKind};
 
-pub const MAX_PEER_ID_BYTES: usize = 64;
+pub(crate) const MAX_PEER_ID_BYTES: usize = 64;
 
 
 // ============================================================================
@@ -235,40 +235,40 @@ pub struct Peer {
 
 /// `Peer::tx_codec` 비트: 보낸 적 있음 / Opus / 릴레이 대역 때문에 자동 전환한 Opus(P1-4c) /
 /// 수신 손실 피드백으로 자동 전환한 Opus(P1-4e). AUTO와 AUTO_LOSS가 둘 다 서면 이유는 릴레이 부하로 보인다.
-pub const TX_CODEC_SENT: u8 = 0x80;
-pub const TX_CODEC_OPUS: u8 = 0x01;
-pub const TX_CODEC_AUTO: u8 = 0x02;
-pub const TX_CODEC_AUTO_LOSS: u8 = 0x04;
+pub(crate) const TX_CODEC_SENT: u8 = 0x80;
+pub(crate) const TX_CODEC_OPUS: u8 = 0x01;
+pub(crate) const TX_CODEC_AUTO: u8 = 0x02;
+pub(crate) const TX_CODEC_AUTO_LOSS: u8 = 0x04;
 
 /// `PeerStats`의 net 몫(상태·경로·RTT·에코·송신 코덱 비트·원격 손실 보고)을 값으로 담는다.
 #[derive(Clone, Copy, Debug)]
-pub struct PeerNetStats {
-    pub state: PeerStateKind,
-    pub path: Option<PathKind>,
-    pub rtt_ms: Option<f32>,
-    pub echo_requested: bool,
-    pub echo_active: bool,
-    pub peer_echoing: bool,
+pub(crate) struct PeerNetStats {
+    pub(crate) state: PeerStateKind,
+    pub(crate) path: Option<PathKind>,
+    pub(crate) rtt_ms: Option<f32>,
+    pub(crate) echo_requested: bool,
+    pub(crate) echo_active: bool,
+    pub(crate) peer_echoing: bool,
     /// `TX_CODEC_*` 비트.
-    pub tx_codec: u8,
-    pub remote_loss: Option<(LossReport, Instant)>,
+    pub(crate) tx_codec: u8,
+    pub(crate) remote_loss: Option<(LossReport, Instant)>,
     /// add_peer → 처음 Connected(ms, P1-20). 아직 연결 전이면 None.
-    pub connect_ms: Option<f32>,
+    pub(crate) connect_ms: Option<f32>,
     /// 이 피어가 Ping으로 알려 온 그쪽 입력 장치 버퍼(µs)와 받은 시각(P2-8b). 옛 엔진이면 None.
-    pub remote_in_buf: Option<(u16, Instant)>,
+    pub(crate) remote_in_buf: Option<(u16, Instant)>,
     /// 이 피어에게서 마지막으로 받은 Audio 헤더 `frame_code`(0 = 아직 없음, P2-8b).
-    pub rx_frame_code: u8,
+    pub(crate) rx_frame_code: u8,
 }
 
-pub struct PeerSetup<'a> {
-    pub keys: &'a KeyPair,
-    pub my_ssrc: u32,
-    pub allow_loopback: bool,
+pub(crate) struct PeerSetup<'a> {
+    pub(crate) keys: &'a KeyPair,
+    pub(crate) my_ssrc: u32,
+    pub(crate) allow_loopback: bool,
 }
 
 impl Peer {
     /// `media`: 엔진이 만든 이 피어의 수신 큐 생산자(`media_link`).
-    pub fn new(id: String, desc: &LocalDescriptor, setup: &PeerSetup<'_>, media: MediaTx, now: Instant) -> Result<Self, String> {
+    pub(crate) fn new(id: String, desc: &LocalDescriptor, setup: &PeerSetup<'_>, media: MediaTx, now: Instant) -> Result<Self, String> {
         if id.is_empty() || id.len() > MAX_PEER_ID_BYTES {
             return Err("peerId는 1..64바이트여야 합니다".into());
         }
@@ -307,17 +307,17 @@ impl Peer {
         &self.id
     }
 
-    pub fn ssrc(&self) -> u32 {
+    pub(crate) fn ssrc(&self) -> u32 {
         self.ssrc
     }
 
-    pub fn public_key(&self) -> &[u8; KEY_BYTES] {
+    pub(crate) fn public_key(&self) -> &[u8; KEY_BYTES] {
         &self.public_key
     }
 
     /// 오디오를 보낼 수 있으면 지금 경로(주소, 종류). 락 없이 스냅샷에서 읽는다(엔진 ③c — 워커 송신 경로·자동 코덱).
     /// 스냅샷에 담을 수 없는 경로(IPv6, 지금은 생기지 않음)면 `try_lock`으로 직접 보고, 락이 바쁘면 기다리지 않고 None.
-    pub fn route(&self) -> Option<(SocketAddr, PathKind)> {
+    pub(crate) fn route(&self) -> Option<(SocketAddr, PathKind)> {
         self.send_route().unwrap_or(None)
     }
 
@@ -330,23 +330,23 @@ impl Peer {
     }
 
     /// 지금 오디오를 릴레이로 보내는 중인가(자동 코덱·릴레이 부하 계산).
-    pub fn sends_audio_via_relay(&self) -> bool {
+    pub(crate) fn sends_audio_via_relay(&self) -> bool {
         self.route().is_some_and(|(_, k)| k == PathKind::Relay)
     }
 
     /// 이 피어가 Ping으로 알려 온 내 소리의 수신 손실 보고와 받은 시각(락 없음, 엔진 ③c).
-    pub fn remote_loss(&self) -> Option<(LossReport, Instant)> {
+    pub(crate) fn remote_loss(&self) -> Option<(LossReport, Instant)> {
         self.remote_loss.read().map(|(r, ns)| (r, self.born + Duration::from_nanos(ns)))
     }
 
     /// 지금 이 피어의 오디오를 되돌려 보내는 중인가(에코 반사). 락 없이 반사 마감과 비교한다(엔진 ③c) —
     /// `EchoState::reflecting(now)`과 같은 답(`echo_deadline_ns`).
-    pub fn reflecting(&self, now: Instant) -> bool {
+    pub(crate) fn reflecting(&self, now: Instant) -> bool {
         before_deadline(self.echo_snap.load(Ordering::Acquire), now, self.born)
     }
 
     /// `PeerStats`의 net 몫을 값으로.
-    pub fn net_stats(&self, now: Instant) -> PeerNetStats {
+    pub(crate) fn net_stats(&self, now: Instant) -> PeerNetStats {
         let (state, path, rtt_ms, connect_ms) = {
             let c = self.conn.lock();
             let connect_ms = c.connected_at.map(|t| t.saturating_duration_since(c.started).as_secs_f32() * 1000.0);
@@ -372,7 +372,7 @@ impl Peer {
     }
 
     /// 이 피어 미디어 상태의 키(엔진 등록부·워커와 짝짓는 값).
-    pub fn key(&self) -> PeerKey {
+    pub(crate) fn key(&self) -> PeerKey {
         self.key
     }
 
@@ -432,7 +432,7 @@ impl Peer {
     }
 
     /// 이 피어가 Ping으로 알려 온 그쪽 입력 장치 버퍼(µs)와 받은 시각(P2-8b, 락 없음).
-    pub fn remote_input_buffer(&self) -> Option<(u16, Instant)> {
+    pub(crate) fn remote_input_buffer(&self) -> Option<(u16, Instant)> {
         match self.remote_in_buf.load(Ordering::Relaxed) {
             0 => None,
             v => Some((v as u16, self.born + Duration::from_millis((v >> 16) - 1))),
@@ -482,7 +482,7 @@ impl Peer {
 
     /// 직접 Hello를 보낼 주소들: 모든 후보 + (다르면) 현재 직접 경로 + 리바인딩 후보 주소. 최대 10개.
     /// 릴레이 주소는 빠진다(릴레이로는 RelayData로 따로 보낸다).
-    pub fn hello_targets(&self, relay: Option<SocketAddr>) -> Vec<SocketAddr> {
+    pub(crate) fn hello_targets(&self, relay: Option<SocketAddr>) -> Vec<SocketAddr> {
         let mut v: Vec<SocketAddr> = self.candidates.iter().map(|(a, _)| *a).collect();
         let c = self.conn.lock();
         let direct_path = c.path.filter(|(_, k)| *k != PathKind::Relay).map(|(a, _)| a);

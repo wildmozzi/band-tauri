@@ -9,6 +9,6 @@ pub fn unix_ms() -> u64 {
 }
 
 /// 지금 Unix 시각(초). 시계가 1970년 전이면 0.
-pub fn unix_secs() -> u64 {
+pub(crate) fn unix_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

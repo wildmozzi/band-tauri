@@ -46,18 +46,19 @@
 //! DISCONTINUITY는 장치가 늘 켜는 값이라 세지 않는다.
 
 // 형식 값 타입·24비트 변환(RT)·HRESULT 분류. COM 객체를 만들지 않는다.
-pub mod format;
+pub(crate) mod format;
 // COM 보조와 장치 열거.
-pub mod enumerate;
+pub(crate) mod enumerate;
 // 한 방향 스트림, 이벤트 루프(RT), 엔진용 열기·기본 장치 감시.
-pub mod stream;
-// 스모크 테스트(`examples/wasapi_probe.rs`만 쓴다).
-pub mod probe;
+pub(crate) mod stream;
+// 스모크 테스트(`examples/wasapi_probe.rs`만 쓴다 — 제품 빌드에는 없다, ⑨b-2).
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod probe;
 
-pub use enumerate::{device_infos, enumerate_endpoints, Endpoint, Shared3Periods};
-pub use format::{classify, f32_to_i24, fallback_modes, i24_to_f32, ErrClass, SampleKind, ShareMode, StreamFormat};
-pub use probe::{probe_stream, ProbeReport};
-pub use stream::{
-    drive_loop, open_engine_streams, run_loop, DevBuf, DirStream, LoopEnd, LoopIo, OpenFailure, WaitResult, FAIL_AFTER, MAX_RESTARTS,
-    RESTART_AFTER,
-};
+pub(crate) use enumerate::device_infos;
+pub use enumerate::enumerate_endpoints;
+pub(crate) use format::fallback_modes;
+pub use format::ShareMode;
+#[cfg(any(test, feature = "test-support"))]
+pub use probe::probe_stream;
+pub(crate) use stream::open_engine_streams;

@@ -9,7 +9,7 @@ const DEPTH_ALPHA: f64 = 0.05;
 /// 샘플 단위 보정(버림·삽입)의 최대 속도(비율, PR #20 H1). 0.25% = 1200·log2(1.0025) ≈ 4.3센트: 지속음 피치 JND
 /// (약 5–10센트) 아래다. 드리프트(±200ppm = 0.02%)는 이 속도의 1/12로 충분히 덮는다. 이전에는 패킷마다 1–2샘플을
 /// 그 패킷 안에서 보정해 2.5ms 프레임에서 14–29센트였다. 더 큰 오차는 패킷 단위 버림(트리밍)과 늦은 패킷 손실 처리가 맡는다.
-pub const MAX_CORR_RATE: f64 = 0.0025;
+pub(crate) const MAX_CORR_RATE: f64 = 0.0025;
 
 /// 샘플 보정으로 깊이를 `samples`(48k)만큼 옮기는 데 걸리는 이론 시간(초): `samples / (MAX_CORR_RATE × 48000)`.
 /// 테스트가 목표 변경 뒤 수렴 시간 상한과 보정 제외 창을 이 값으로 계산한다(엔진 사양을 그대로 따름).
@@ -467,7 +467,7 @@ pub fn shift_one(src: &[f32], ch: usize, frames: usize, dst: &mut [f32], drop: b
 
 /// `delta`샘플만큼 늘이거나(+) 줄인다(−). 출력 길이 = frames + delta. 읽기 위치를 프레임 전체에 걸쳐
 /// 선형으로 |delta|만큼 시프트한다. 국소 피치 편차는 |delta|/frames. `frames > |delta| + 1`.
-pub fn shift_n(src: &[f32], ch: usize, frames: usize, dst: &mut [f32], delta: i32) {
+pub(crate) fn shift_n(src: &[f32], ch: usize, frames: usize, dst: &mut [f32], delta: i32) {
     let n = delta.unsigned_abs() as usize;
     let drop = delta < 0;
     let out_frames = if drop { frames - n } else { frames + n };

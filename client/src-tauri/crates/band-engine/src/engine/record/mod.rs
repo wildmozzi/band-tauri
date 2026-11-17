@@ -14,15 +14,18 @@
 //! 무음이다. 정지하면 모든 트랙을 같은 길이로 맞춘다. 같은 피어(peerId)가 다시 들어오면 같은 트랙에 이어 쓴다.
 
 mod marks;
-pub mod rt_ring;
+pub(crate) mod rt_ring;
 // 계약 DTO(녹음 옵션·통계·요약) — 어댑터가 이 노드만 쓴다(⑦-2, ADAPTER_MAY_USE).
 pub mod sidecar;
 mod writer;
 
-pub use marks::{MarkEvent, MarkKind, MarkSink};
-pub use rt_ring::{record_port, RecBlock, RecordPortCtl, RecordPortRt, RecordRt, RecordRtShared};
-pub use sidecar::{default_session_name, sanitize_name, MarkerTrack, MarkersFile, RecordMarker, RecordOptions, RecordStats, RecordSummary, RecordTrack, TrackKind};
-pub use writer::{PeerResolver, Recorder, StopJob};
+pub(crate) use marks::{MarkEvent, MarkKind};
+pub use marks::MarkSink;
+pub use rt_ring::record_port;
+pub(crate) use sidecar::{RecordStats, RecordSummary};
+pub use sidecar::{RecordOptions, TrackKind};
+pub(crate) use writer::PeerResolver;
+pub use writer::Recorder;
 
 #[cfg(test)]
 mod tests;

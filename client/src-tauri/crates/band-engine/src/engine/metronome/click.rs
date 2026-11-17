@@ -8,9 +8,9 @@ use band_dsp::config::INTERNAL_RATE;
 use band_dsp::stats::AtomicF32;
 
 /// 다음 클릭 없음.
-pub const NO_CLICK: u64 = u64::MAX;
+pub(crate) const NO_CLICK: u64 = u64::MAX;
 /// 클릭 파형 길이(48kHz 샘플) = 30ms.
-pub const CLICK_LEN: usize = 1440;
+pub(crate) const CLICK_LEN: usize = 1440;
 
 pub(super) fn encode(frame: u64, accent: bool) -> u64 {
     (frame << 1) | accent as u64
@@ -21,7 +21,7 @@ pub(super) fn decode(v: u64) -> (u64, bool) {
 }
 
 /// 클릭 파형(48kHz): 사인 버스트, 1ms 상승 + 6ms 지수 감쇠. 첫 샘플부터 0이 아니다(시작 위치 판정용).
-pub fn click_wave(freq_hz: f32, amp: f32) -> Box<[f32]> {
+pub(crate) fn click_wave(freq_hz: f32, amp: f32) -> Box<[f32]> {
     let r = INTERNAL_RATE as f32;
     (0..CLICK_LEN)
         .map(|n| {
@@ -74,7 +74,7 @@ impl ClickRt {
 
     /// RT: 콜백 시작. `before` = 이 콜백 첫 프레임 위치, `frames` = 이 콜백 프레임 수.
     /// `audible = false`(측정 자극이 장치 출력을 대신하는 중)이면 이번 콜백에 걸린 클릭을 소비만 하고 세지 않는다(PR #34 L1).
-    pub fn begin(&mut self, before: u64, frames: usize, audible: bool) {
+    pub(crate) fn begin(&mut self, before: u64, frames: usize, audible: bool) {
         self.start = None;
         self.step = self.sh.step.load();
         if self.step.is_nan() || self.step <= 0.0 {
@@ -112,7 +112,7 @@ impl ClickRt {
 
     /// RT: 콜백 안 `i`번째 프레임의 클릭 샘플(게인 전).
     #[inline]
-    pub fn sample(&mut self, i: usize) -> f32 {
+    pub(crate) fn sample(&mut self, i: usize) -> f32 {
         if let Some((at, accent, pos)) = self.start {
             if at == i {
                 self.playing = Some((accent, pos));

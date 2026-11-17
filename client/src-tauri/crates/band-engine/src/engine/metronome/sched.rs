@@ -16,22 +16,22 @@ const STALE_SKIP_S: f64 = 0.005;
 /// 워커가 0.1초마다(또는 계획이 바뀐 반복에) 내는 상태 한 벌. 전부 수·불리언이라 seqlock 칸(`SeqCell`)에 싣는다.
 /// `MetronomeStats`에서 `ref_peer_id`(문자열 — 제어 쪽 계획에서 읽는다)와 클릭 카운터(`ClickShared` 원자값)를 뺀 것.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct MetroReport {
+pub(crate) struct MetroReport {
     /// 워커가 적용한 계획 세대.
-    pub applied_gen: u64,
-    pub running: bool,
-    pub synced: bool,
-    pub bpm: f64,
-    pub beats_per_bar: u32,
-    pub start_us: f64,
-    pub clock_offset_ms: Option<f64>,
-    pub clock_rtt_ms: Option<f64>,
-    pub drift_ppm: Option<f64>,
-    pub beat: Option<u64>,
-    pub output_latency_ms: Option<f64>,
-    pub output_latency_source: Option<OutputLatencySource>,
-    pub ref_clock_unsupported: bool,
-    pub clock_extrapolation_ms: Option<f64>,
+    pub(crate) applied_gen: u64,
+    pub(crate) running: bool,
+    pub(crate) synced: bool,
+    pub(crate) bpm: f64,
+    pub(crate) beats_per_bar: u32,
+    pub(crate) start_us: f64,
+    pub(crate) clock_offset_ms: Option<f64>,
+    pub(crate) clock_rtt_ms: Option<f64>,
+    pub(crate) drift_ppm: Option<f64>,
+    pub(crate) beat: Option<u64>,
+    pub(crate) output_latency_ms: Option<f64>,
+    pub(crate) output_latency_source: Option<OutputLatencySource>,
+    pub(crate) ref_clock_unsupported: bool,
+    pub(crate) clock_extrapolation_ms: Option<f64>,
 }
 
 /// `MetroReport` 칸 수.
@@ -122,7 +122,7 @@ const NO_LOOPBACK_OFFSET: u64 = u64::MAX;
 ///
 /// 제어 쪽 끝이다. 워커 쪽 끝 `MetronomeRt`와 짝으로만 만든다(`pair`).
 #[derive(Debug)]
-pub struct MetronomeCtl {
+pub(crate) struct MetronomeCtl {
     /// (세대, 계획). 제어 평면끼리만 기다린다(`set_plan`, `stats`의 `ref_peer_id` 복제).
     plan: Mutex<(u64, MetronomePlan)>,
     /// `plan.0`의 사본. `set_plan`이 락 안에서 새 세대를 쓴 뒤 발행한다.
@@ -131,7 +131,7 @@ pub struct MetronomeCtl {
     plan_retries: AtomicU64,
     /// 상태 보고 칸(읽는 쪽). 작성 끝(`SeqWriter`)은 `MetronomeRt`가 갖는다.
     report: Arc<SeqCell<REPORT_WORDS>>,
-    pub click: Arc<ClickShared>,
+    pub(crate) click: Arc<ClickShared>,
     /// 이 장치 구성의 루프백 보정값 `offsetMs`의 `f64` 비트(PR #34 M2(a)). 드라이버가 출력 지연을 보고하지 않을 때 쓴다.
     loopback_offset: AtomicU64,
 }
@@ -139,7 +139,7 @@ pub struct MetronomeCtl {
 /// `MetronomeCtl`의 워커 쪽 끝. `Clone`이 아니고 `pair`가 하나만 만든다 — 상태 보고 칸의 작성자가 하나임이 타입으로
 /// 보장된다(`publish(&mut self)`, #141 리뷰 M-1). 모든 메서드는 기다리지 않는다(원자값·`try_lock`).
 #[derive(Debug)]
-pub struct MetronomeRt {
+pub(crate) struct MetronomeRt {
     ctl: Arc<MetronomeCtl>,
     /// 상태 보고 칸의 작성 끝(하나뿐 — `SeqCell::pair`).
     report: SeqWriter<REPORT_WORDS>,
@@ -147,7 +147,7 @@ pub struct MetronomeRt {
 
 impl MetronomeCtl {
     /// (제어 쪽 끝, 워커 쪽 끝).
-    pub fn pair() -> (Arc<Self>, MetronomeRt) {
+    pub(crate) fn pair() -> (Arc<Self>, MetronomeRt) {
         let (report_cell, report) = SeqCell::pair();
         let ctl = Arc::new(Self {
             plan: Mutex::default(),
@@ -161,7 +161,7 @@ impl MetronomeCtl {
     }
 
     /// 루프백 보정값 설정·해제. 범위 밖이면 거부한다.
-    pub fn set_loopback_offset(&self, offset_ms: Option<f64>) -> Result<(), String> {
+    pub(crate) fn set_loopback_offset(&self, offset_ms: Option<f64>) -> Result<(), String> {
         if let Some(o) = offset_ms {
             if !o.is_finite() || !(MIN_LOOPBACK_OFFSET_MS..=MAX_LOOPBACK_OFFSET_MS).contains(&o) {
                 return Err(format!("offsetMs는 {MIN_LOOPBACK_OFFSET_MS}..{MAX_LOOPBACK_OFFSET_MS}ms여야 합니다"));
@@ -171,14 +171,14 @@ impl MetronomeCtl {
         Ok(())
     }
 
-    pub fn loopback_offset_ms(&self) -> Option<f64> {
+    pub(crate) fn loopback_offset_ms(&self) -> Option<f64> {
         match self.loopback_offset.load(Ordering::Acquire) {
             NO_LOOPBACK_OFFSET => None,
             b => Some(f64::from_bits(b)),
         }
     }
 
-    pub fn set_plan(&self, plan: MetronomePlan) {
+    pub(crate) fn set_plan(&self, plan: MetronomePlan) {
         let mut p = self.plan.lock();
         p.0 += 1;
         p.1 = plan;
@@ -187,7 +187,7 @@ impl MetronomeCtl {
 
     /// `EngineStats.metronome`. 수 필드는 워커가 마지막으로 **적용한** 계획과 계산값(칸 한 벌)이고, `ref_peer_id`만 제어 쪽
     /// 계획에서 읽는다 — `set_plan` 직후 워커 반복 1회(약 1ms) 동안 수 필드보다 한 발 앞설 수 있다(계약 문서 4절).
-    pub fn stats(&self) -> MetronomeStats {
+    pub(crate) fn stats(&self) -> MetronomeStats {
         let r = MetroReport::unpack(&self.report.read());
         let ref_peer_id = self.plan.lock().1.ref_peer_id.clone();
         MetronomeStats {
@@ -212,14 +212,14 @@ impl MetronomeCtl {
     }
 
     /// (지금 계획 세대, 워커가 마지막 보고에 실은 적용 세대). 진단·테스트: 워커가 새 계획을 적용했는지 본다.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn plan_gens(&self) -> (u64, u64) {
+    #[cfg(test)]
+    pub(crate) fn plan_gens(&self) -> (u64, u64) {
         (self.plan_gen.load(Ordering::Acquire), MetroReport::unpack(&self.report.read()).applied_gen)
     }
 
     /// 워커가 계획 `try_lock`에 실패한 반복 수를 돌려주고 비운다(진단·테스트).
     #[cfg(any(test, feature = "test-support"))]
-    pub fn take_plan_retries(&self) -> u64 {
+    pub(crate) fn take_plan_retries(&self) -> u64 {
         self.plan_retries.swap(0, Ordering::Relaxed)
     }
 }
@@ -227,7 +227,7 @@ impl MetronomeCtl {
 impl MetronomeRt {
     /// 반복마다. 세대가 `mine.0`과 같으면 원자 읽기 하나로 끝난다. 다르면 `try_lock`으로 복사한다 — 못 잡으면(제어 스레드가
     /// `set_plan`·`stats` 중) 옛 계획으로 이번 반복을 돌고 다음 반복에 다시 본다. 할당은 `ref_peer_id` 문자열이 길어질 때뿐.
-    pub fn refresh_plan(&self, mine: &mut (u64, MetronomePlan)) {
+    pub(crate) fn refresh_plan(&self, mine: &mut (u64, MetronomePlan)) {
         let c = &self.ctl;
         if c.plan_gen.load(Ordering::Acquire) == mine.0 {
             return;
@@ -245,16 +245,16 @@ impl MetronomeRt {
         m.ref_peer_id.clone_from(&src.ref_peer_id);
     }
 
-    pub fn loopback_offset_ms(&self) -> Option<f64> {
+    pub(crate) fn loopback_offset_ms(&self) -> Option<f64> {
         self.ctl.loopback_offset_ms()
     }
 
-    pub fn click(&self) -> &ClickShared {
+    pub(crate) fn click(&self) -> &ClickShared {
         &self.ctl.click
     }
 
     /// 상태 한 벌을 낸다(기다리지 않는다). `&mut self` + `Clone` 아님 = 작성자 하나.
-    pub fn publish(&mut self, r: &MetroReport) {
+    pub(crate) fn publish(&mut self, r: &MetroReport) {
         self.report.write(&r.pack());
     }
 }
@@ -281,7 +281,7 @@ pub struct OutClock {
 /// 드라이버 보고 출력 지연(장치 프레임, 0 = 모름)에서 숨은 출력 지연(µs)을 구한다.
 /// 보고값은 "콜백이 넘긴 버퍼가 들리기까지"이고 이미 버퍼 1개(콜백 크기)를 포함하므로 그만큼 뺀다.
 /// 반환: `None` = 드라이버가 알려 주지 않음(보정 0).
-pub fn hidden_out_latency_us(reported_frames: u32, burst_frames: u64, rate: f64) -> Option<f64> {
+pub(crate) fn hidden_out_latency_us(reported_frames: u32, burst_frames: u64, rate: f64) -> Option<f64> {
     if reported_frames == 0 || rate <= 0.0 {
         return None;
     }
@@ -292,12 +292,12 @@ impl OutClock {
     /// 장치 프레임 J가 귀에 닿는 시각(내 시계 µs). 콜백이 프레임 [b, b+n)을 쓰는 시각은 `m + (b+n)/r`이고
     /// (`m` = `DeviceClock`의 `벽시계 − 재생/레이트` 최솟값), 그 버퍼는 장치 출력 버퍼 1개(n)와
     /// 숨은 출력 지연(`extra_out_us`) 뒤에 울린다. 따라서 귀 시각 = `m + (J + 2n)/r + extra`.
-    pub fn ear_time_us(&self, frame: f64) -> f64 {
+    pub(crate) fn ear_time_us(&self, frame: f64) -> f64 {
         self.dev_now_us + (frame + 2.0 * self.burst as f64 - self.played as f64) * 1e6 / self.rate + self.extra_out_us
     }
 
     /// 귀 시각 `t_us`에 울릴 장치 프레임.
-    pub fn frame_for(&self, t_us: f64) -> f64 {
+    pub(crate) fn frame_for(&self, t_us: f64) -> f64 {
         (t_us - self.extra_out_us - self.dev_now_us) * self.rate / 1e6 + self.played as f64 - 2.0 * self.burst as f64
     }
 

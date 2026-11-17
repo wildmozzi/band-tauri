@@ -9,7 +9,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
 use band_dsp::packet::Header;
 use band_dsp::config::{HEADER_BYTES, MAX_PACKET_BYTES, TAG_BYTES};
 
-pub const KEY_BYTES: usize = 32;
+pub(crate) const KEY_BYTES: usize = 32;
 
 /// 세션 키쌍(X25519). descriptor의 `key`는 공개키다.
 ///
@@ -55,7 +55,7 @@ impl KeyPair {
 /// 안전 번호(SAS): SHA-256("band-sas-v1" ‖ 작은 공개키 ‖ 큰 공개키)의 앞 10바이트를 5자리 숫자 4묶음으로.
 /// 순서와 무관하므로 양쪽이 같은 값을 얻는다. 시그널링 서버가 descriptor의 키를 바꿔치기하면 두 사람의
 /// 값이 달라진다(PR #5 M-3).
-pub fn safety_code(a: &[u8; KEY_BYTES], b: &[u8; KEY_BYTES]) -> String {
+pub(crate) fn safety_code(a: &[u8; KEY_BYTES], b: &[u8; KEY_BYTES]) -> String {
     use sha2::Digest;
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     let mut h = sha2::Sha256::new();
@@ -96,11 +96,12 @@ pub struct PacketCipher {
 }
 
 impl PacketCipher {
-    pub fn new(key: &[u8; KEY_BYTES]) -> Self {
+    pub(crate) fn new(key: &[u8; KEY_BYTES]) -> Self {
         Self { aead: ChaCha20Poly1305::new(Key::from_slice(key)) }
     }
 
-    pub fn random_key() -> [u8; KEY_BYTES] {
+    #[cfg(test)]
+    pub(crate) fn random_key() -> [u8; KEY_BYTES] {
         use rand::RngCore;
         let mut k = [0u8; KEY_BYTES];
         rand::rngs::OsRng.fill_bytes(&mut k);

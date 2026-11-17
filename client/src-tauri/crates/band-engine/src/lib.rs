@@ -7,6 +7,11 @@
 //! `backend-wasapi`(Windows에서 `engine::wasapi`). 하네스·시험은 `default-features = false`로 백엔드 없이 쓴다(가짜 장치,
 //! `test-support`).
 
+// ⑨b-2(engine-stage5-10-scope.md 6.3절): 크레이트 밖에서 닿지 않는 `pub`을 잡는다. `test-support` 구성에서만 켠다 — 시험만 쓰는
+// 항목(`testing`이 다시 내보내는 것)은 제품 구성에서는 밖에서 닿지 않지만 `pub`이어야 해서(가시성은 피처로 가를 수 없다).
+// CI의 `cargo clippy --all-targets`(자기 자신 개발 의존이 `test-support`를 켠다)가 `-D warnings`로 지킨다.
+#![cfg_attr(feature = "test-support", warn(unreachable_pub))]
+
 pub mod diag;
 pub mod engine;
 pub mod manager;

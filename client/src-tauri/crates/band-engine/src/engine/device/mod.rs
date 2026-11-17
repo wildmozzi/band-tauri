@@ -16,7 +16,7 @@
 //! `cpal`(cpal 구현), `select`(자체 WASAPI 우선·cpal 폴백), `fake`(가짜 장치). 여기에는 `mod`와 `pub use`만 둔다 —
 //! 자식이 이 파일의 항목을 쓰면 부모↔자식 순환이다. 엔진 밖(어댑터·테스트)은 옛 경로 `engine::device::…`로 쓴다.
 
-pub mod backend;
+pub(crate) mod backend;
 pub mod types;
 
 // ============================================================================
@@ -24,7 +24,7 @@ pub mod types;
 // ============================================================================
 
 #[cfg(feature = "backend-cpal")]
-pub mod cpal;
+pub(crate) mod cpal;
 
 // ============================================================================
 // 시스템 백엔드: 자체 WASAPI 우선, cpal 폴백 (P1-0). cpal이 폴백이자 Windows 밖의 유일한 길이라 `backend-cpal`
@@ -41,11 +41,8 @@ pub mod select;
 // 제품 빌드(디버그·릴리스 모두)에는 들어가지 않는다: 단위 테스트, 또는 `test-support` 피처에서만 컴파일된다(⑨a-2).
 // 테스트·예제 빌드는 Cargo.toml의 자기 자신 개발 의존이 늘 켠다(engine-architecture.md 7절).
 #[cfg(any(test, feature = "test-support"))]
-pub mod fake;
+pub(crate) mod fake;
 
-#[cfg(feature = "backend-cpal")]
-pub use self::cpal as cpal_backend;
-#[cfg(feature = "backend-cpal")]
-pub use self::select as system;
 pub use backend::AudioBackend;
-pub use types::{choose_rate, device_id, device_name_from_id, device_tag, BackendKind, DeviceInfo, StreamInfo, ID_SEP};
+pub(crate) use types::{DeviceInfo, StreamInfo};
+pub use types::device_id;

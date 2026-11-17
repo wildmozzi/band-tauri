@@ -37,7 +37,7 @@ pub(super) fn lcm(a: usize, b: usize) -> usize {
 /// 나오므로, 최솟값이 아니라 lcm(in_burst, out_burst) 주기를 덮는 창의 **평균**을 제어한다.
 /// 목표 평균 = release/2 + 2청크 → 최악 위상의 최솟값도 약 2청크 여유. 목표보다 크면 1샘플씩
 /// 버리고 작으면 넣는다(히스테리시스, 10ms당 최대 1샘플, 청크 전체 램프).
-pub struct LocalFifo {
+pub(crate) struct LocalFifo {
     buf: VecDeque<f32>,
     playing: bool,
     priming: bool,
@@ -56,9 +56,9 @@ pub struct LocalFifo {
     mode: LocalMode,
     since_corr: usize,
     take_buf: Vec<f32>,
-    pub corrections: u64,
-    pub underruns: u64,
-    pub overflows: u64,
+    pub(crate) corrections: u64,
+    pub(crate) underruns: u64,
+    pub(crate) overflows: u64,
     configured: (usize, usize, usize),
 }
 
@@ -70,7 +70,7 @@ const LOCAL_MAX_PPM: f64 = 500.0;
 const LOCAL_MARGIN_DECAY_SAMPLES: usize = 480_000;
 
 impl LocalFifo {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut f = Self {
             buf: VecDeque::with_capacity(48_000 * 2),
             playing: false,
@@ -100,7 +100,7 @@ impl LocalFifo {
     }
 
     /// 버스트 크기(48k 프레임 환산)와 네트워크 프레임으로 상한/창을 다시 계산한다.
-    pub fn configure(&mut self, in_burst: usize, out_burst: usize, frame: usize) {
+    pub(crate) fn configure(&mut self, in_burst: usize, out_burst: usize, frame: usize) {
         let key = (in_burst.max(1), out_burst.max(1), frame.max(1));
         if key == self.configured {
             return;
@@ -160,19 +160,21 @@ impl LocalFifo {
         }
     }
 
-    pub fn cap_frames(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn cap_frames(&self) -> usize {
         self.cap
     }
 
-    pub fn margin(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn margin(&self) -> usize {
         self.margin
     }
 
-    pub fn frames(&self) -> usize {
+    pub(crate) fn frames(&self) -> usize {
         self.buf.len() / 2
     }
 
-    pub fn push(&mut self, stereo: &[f32]) {
+    pub(crate) fn push(&mut self, stereo: &[f32]) {
         self.buf.extend(stereo.iter().copied());
         let len = self.buf.len() / 2;
         if len > self.cap {
@@ -183,7 +185,7 @@ impl LocalFifo {
     }
 
     /// `out.len()/2` 프레임을 채운다.
-    pub fn pull(&mut self, out: &mut [f32]) {
+    pub(crate) fn pull(&mut self, out: &mut [f32]) {
         let n = out.len() / 2;
         if !self.playing {
             if self.frames() >= self.start_level {
@@ -262,7 +264,7 @@ impl LocalFifo {
     }
 
     /// 출력 버스트 종료 시 호출.
-    pub fn end_burst(&mut self) {
+    pub(crate) fn end_burst(&mut self) {
         if !self.playing {
             return;
         }

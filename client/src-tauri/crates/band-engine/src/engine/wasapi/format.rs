@@ -25,7 +25,7 @@ pub enum ShareMode {
 
 /// 열기 시도 순서(L3): 요청 그대로 → 한 방향만 저지연 공유로(다른 앱이 한쪽만 쥐고 있어도 다른 쪽 독점 유지)
 /// → 둘 다 저지연 공유. 그다음은 호출자가 cpal로 폴백한다.
-pub fn fallback_modes(mi: ShareMode, mo: ShareMode) -> Vec<(ShareMode, ShareMode)> {
+pub(crate) fn fallback_modes(mi: ShareMode, mo: ShareMode) -> Vec<(ShareMode, ShareMode)> {
     use ShareMode::{Exclusive, Shared3};
     let mut v = vec![(mi, mo)];
     let mut add = |m: (ShareMode, ShareMode)| {
@@ -42,7 +42,7 @@ pub fn fallback_modes(mi: ShareMode, mo: ShareMode) -> Vec<(ShareMode, ShareMode
 }
 
 impl ShareMode {
-    pub fn backend(self) -> BackendKind {
+    pub(crate) fn backend(self) -> BackendKind {
         match self {
             ShareMode::Exclusive => BackendKind::WasapiExclusive,
             ShareMode::Shared3 => BackendKind::WasapiShared3,
@@ -199,7 +199,7 @@ impl StreamFormat {
 const I24_SCALE: f32 = 8_388_608.0; // 2^23
 
 /// 24비트 패킹(리틀 엔디언 3바이트) → f32. `dst.len()`과 `src.len() / 3` 중 작은 만큼 변환하고 그 수를 돌려준다.
-pub fn i24_to_f32(src: &[u8], dst: &mut [f32]) -> usize {
+pub(crate) fn i24_to_f32(src: &[u8], dst: &mut [f32]) -> usize {
     let mut n = 0;
     for (b, d) in src.as_chunks::<3>().0.iter().zip(dst.iter_mut()) {
         // 상위 3바이트에 놓고 산술 시프트로 부호 확장
@@ -211,7 +211,7 @@ pub fn i24_to_f32(src: &[u8], dst: &mut [f32]) -> usize {
 }
 
 /// f32 → 24비트 패킹. [-1, 1]로 자르고 반올림한다. 변환한 샘플 수를 돌려준다.
-pub fn f32_to_i24(src: &[f32], dst: &mut [u8]) -> usize {
+pub(crate) fn f32_to_i24(src: &[f32], dst: &mut [u8]) -> usize {
     let mut n = 0;
     for (s, b) in src.iter().zip(dst.as_chunks_mut::<3>().0.iter_mut()) {
         let v = (s.clamp(-1.0, 1.0) * I24_SCALE).round().clamp(-I24_SCALE, I24_SCALE - 1.0) as i32;
@@ -228,7 +228,7 @@ pub fn f32_to_i24(src: &[f32], dst: &mut [u8]) -> usize {
 
 /// 루프 오류 분류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrClass {
+pub(crate) enum ErrClass {
     /// 장치가 사라짐/무효화: `deviceLost`.
     DeviceLost,
     /// 복구 불가(메모리 부족): 스트림 중단.
@@ -237,7 +237,7 @@ pub enum ErrClass {
     Transient,
 }
 
-pub fn classify(code: HRESULT) -> ErrClass {
+pub(crate) fn classify(code: HRESULT) -> ErrClass {
     if code == AUDCLNT_E_DEVICE_INVALIDATED || code == AUDCLNT_E_SERVICE_NOT_RUNNING || code == AUDCLNT_E_RESOURCES_INVALIDATED {
         ErrClass::DeviceLost
     } else if code == E_OUTOFMEMORY {

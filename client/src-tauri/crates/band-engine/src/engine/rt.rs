@@ -24,11 +24,11 @@ use band_dsp::stats::{AtomicF32, AudioCounters};
 const RT_CHUNK_FRAMES: usize = 256;
 
 /// 링 용량: 192kHz × 2ch × 0.25초. 장치 레이트와 무관하게 충분하다.
-pub const RING_CAPACITY: usize = 192_000 / 4 * 2;
+pub(crate) const RING_CAPACITY: usize = 192_000 / 4 * 2;
 
 /// 제곱합 → 0..1 선형 RMS. 샘플이 없으면 0.
 #[inline]
-pub fn rms_of(sum_sq: f32, count: usize) -> f32 {
+pub(crate) fn rms_of(sum_sq: f32, count: usize) -> f32 {
     if count == 0 {
         0.0
     } else {
@@ -96,9 +96,9 @@ impl RtSample for u16 {
 // ============================================================================
 
 /// 측정 자극 링 용량(장치 레이트 모노 샘플): 192kHz에서 0.25초.
-pub const STIM_RING_CAPACITY: usize = 192_000 / 4;
+pub(crate) const STIM_RING_CAPACITY: usize = 192_000 / 4;
 /// 측정 녹음 링 용량(장치 레이트 모노 샘플): 192kHz에서 0.5초. 측정 스레드가 계속 비운다.
-pub const CAPTURE_RING_CAPACITY: usize = 192_000 / 2;
+pub(crate) const CAPTURE_RING_CAPACITY: usize = 192_000 / 2;
 
 /// 측정 제어(측정 스레드 ↔ 입·출력 콜백). 모두 원자값이다.
 ///
@@ -112,13 +112,13 @@ pub struct MeasureShared {
     pub stim_req: AtomicU32,
     pub stim_ack: AtomicU32,
     /// 자극 첫 샘플의 출력 프레임 위치(`out_played_frames` 기준).
-    pub stim_start: AtomicU64,
+    pub(crate) stim_start: AtomicU64,
     /// 녹음 켜기/끄기 요청. `cap_on`을 먼저 쓰고 `cap_req`를 올린다.
     pub cap_on: AtomicBool,
     pub cap_req: AtomicU32,
     pub cap_ack: AtomicU32,
     /// 녹음 첫 샘플의 입력 프레임 위치(`in_captured_frames` 기준).
-    pub cap_start: AtomicU64,
+    pub(crate) cap_start: AtomicU64,
 }
 
 /// 입력 콜백 쪽 측정 끝점: 라우팅된 첫 입력 채널(원본, 뮤트 무관)을 녹음 링에 넣는다.
@@ -242,11 +242,12 @@ pub struct InputRt {
     measure: Option<MeasureIn>,
 }
 
-pub use band_dsp::config::{LOCAL_SOURCE, MAX_SOURCES};
+pub use band_dsp::config::MAX_SOURCES;
+pub use band_dsp::config::LOCAL_SOURCE;
 /// 소스 링 용량(장치 레이트 스테레오 샘플): 192kHz에서 0.1초.
-pub const SOURCE_RING_CAPACITY: usize = 192_000 / 10 * 2;
+pub(crate) const SOURCE_RING_CAPACITY: usize = 192_000 / 10 * 2;
 /// 믹스 탭 링 용량(장치 레이트 스테레오 샘플): 192kHz에서 0.5초.
-pub const TAP_RING_CAPACITY: usize = 192_000 / 2 * 2;
+pub(crate) const TAP_RING_CAPACITY: usize = 192_000 / 2 * 2;
 
 /// 슬롯 상태: 비어 있음(콜백이 읽지 않음).
 pub const SLOT_FREE: u8 = 0;
@@ -260,20 +261,20 @@ pub const SLOT_DRAIN: u8 = 2;
 pub struct SourceShared {
     pub state: AtomicU8,
     /// 출력 버스 게인(L, R). 로컬은 모니터 게인, 피어는 gain·pan·mute.
-    pub bus_l: AtomicF32,
-    pub bus_r: AtomicF32,
+    pub(crate) bus_l: AtomicF32,
+    pub(crate) bus_r: AtomicF32,
     /// 믹스 탭 게인(L, R). 로컬은 1(모니터 설정 무관), 피어는 버스와 같음.
-    pub tap_l: AtomicF32,
-    pub tap_r: AtomicF32,
+    pub(crate) tap_l: AtomicF32,
+    pub(crate) tap_r: AtomicF32,
     /// true일 때만 링 부족을 언더런(xrun)으로 센다. 워커가 재생 중인 소스에만 켠다.
     pub playing: AtomicBool,
     /// 재생 중 링이 모자라 0으로 채운 누적 장치 프레임. 워커는 같은 양을 스트림에서 건너뛰어
     /// 재생 시각을 장치 시각에 붙여 둔다(언더런 때 지연이 쌓이지 않음).
-    pub underrun_frames: AtomicU64,
+    pub(crate) underrun_frames: AtomicU64,
     /// 콜백 1회분 소스 RMS(0..1).
-    pub level: AtomicF32,
+    pub(crate) level: AtomicF32,
     /// 슬롯 점유자(피어 ssrc, 로컬은 0). 워커가 `SLOT_ACTIVE`로 바꾸기 전에 넣는다. 녹음 트랙 구분용(P2-4).
-    pub occupant: AtomicU32,
+    pub(crate) occupant: AtomicU32,
 }
 
 impl SourceShared {
@@ -395,7 +396,7 @@ impl InputRt {
     }
 
     /// 라우팅에 필요한 최소 장치 채널 수.
-    pub fn required_device_channels(&self) -> usize {
+    pub(crate) fn required_device_channels(&self) -> usize {
         self.route[..self.route_len].iter().copied().max().unwrap_or(0) + 1
     }
 

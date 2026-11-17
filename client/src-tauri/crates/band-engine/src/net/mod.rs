@@ -1,12 +1,12 @@
 //! UDP 소켓과 송수신/제어 스레드 (설계 문서 1.1, 2, 3절).
 
-pub mod connlog;
-pub mod crypto;
+pub(crate) mod connlog;
+pub(crate) mod crypto;
 pub mod peer;
-pub mod qos;
-pub mod relay;
-pub mod stun;
-pub mod txlat;
+pub(crate) mod qos;
+pub(crate) mod relay;
+pub(crate) mod stun;
+pub(crate) mod txlat;
 mod control_loop;
 mod recv_loop;
 mod send;
@@ -29,7 +29,7 @@ use band_dsp::types::{PathKind, RelayStats, DATA_PREFIX_BYTES};
 
 use control_loop::control_loop;
 use recv_loop::recv_loop;
-pub use send::{AutoFn, AutoPayload};
+pub(crate) use send::AutoPayload;
 
 /// 릴레이 접두부를 둘 자리까지 포함한 송신 버퍼 크기.
 const SEND_BUF_BYTES: usize = DATA_PREFIX_BYTES + MAX_PACKET_BYTES;
@@ -96,8 +96,8 @@ impl Default for NetOptions {
 
 pub struct NetShared {
     socket: UdpSocket,
-    pub local_peer_id: String,
-    pub ssrc: u32,
+    pub(crate) local_peer_id: String,
+    pub(crate) ssrc: u32,
     keys: KeyPair,
     seq_ctrl: [AtomicU32; 6],
     peers: RwLock<Vec<Arc<Peer>>>,
@@ -155,7 +155,7 @@ pub struct NetShared {
 }
 
 /// `NetShared::set_input_buffer_source`의 함수 꼴.
-pub type InputBufferFn = Box<dyn Fn() -> u32 + Send + Sync>;
+pub(crate) type InputBufferFn = Box<dyn Fn() -> u32 + Send + Sync>;
 
 /// 워커가 들고 있는 피어 표 복사본(엔진 ③c, ADR D1). 세대가 바뀐 반복에서만 다시 복사한다(`NetShared::refresh_copy`).
 /// 빠진 항목 해제(`retired_peers`)는 **워커 복사본**(`for_worker`)이 맞춘 세대만 기준으로 한다. 다른 복사본(`Default`, 시험·도구의
@@ -175,11 +175,11 @@ impl Default for PeerTableCopy {
 
 impl PeerTableCopy {
     /// 워커가 엔진 수명 동안 쥐는 복사본(맞춘 세대를 발행해 빠진 항목 해제의 기준이 된다).
-    pub fn for_worker() -> Self {
+    pub(crate) fn for_worker() -> Self {
         Self { publishes: true, ..Self::default() }
     }
 
-    pub fn peers(&self) -> &[Arc<Peer>] {
+    pub(crate) fn peers(&self) -> &[Arc<Peer>] {
         &self.peers
     }
 }
@@ -336,7 +336,7 @@ impl Net {
 
     /// `add_peer`와 같고, 핸드셰이크 경과·`connectMs`의 기준 시각(`ConnState.started`)을 호출자가 준다. 엔진은
     /// `firstAudioMs`의 기준(`added_us`)과 같은 `Instant`를 넘겨 두 지표의 기준을 맞춘다(P1-20, #120 L-3).
-    pub fn add_peer_at(&self, peer_id: String, desc: &LocalDescriptor, media: MediaTx, added: Instant) -> Result<Option<PeerKey>, String> {
+    pub(crate) fn add_peer_at(&self, peer_id: String, desc: &LocalDescriptor, media: MediaTx, added: Instant) -> Result<Option<PeerKey>, String> {
         let setup = PeerSetup {
             keys: &self.shared.keys,
             my_ssrc: self.shared.ssrc,
@@ -403,7 +403,7 @@ impl Net {
 
     /// 피어와의 안전 번호(SAS). 양쪽 공개키로 계산하므로 두 사람이 같은 값을 보면 키가 바꿔치기되지
     /// 않은 것이다(시그널링 서버 중간자 탐지, PR #5 M-3).
-    pub fn safety_code(&self, peer_id: &str) -> Result<String, String> {
+    pub(crate) fn safety_code(&self, peer_id: &str) -> Result<String, String> {
         let peer = self.peers().into_iter().find(|p| p.id() == peer_id).ok_or("알 수 없는 피어")?;
         Ok(crypto::safety_code(&self.shared.keys.public_bytes(), peer.public_key()))
     }
@@ -411,7 +411,7 @@ impl Net {
     /// 릴레이 설정/갱신/해제(설계 4절 `engine_set_relay`). 같은 주소면 등록을 유지한 채 토큰만 바꾼다(갱신).
     /// 토큰의 ssrc는 이 엔진의 ssrc와 같아야 한다. 만료는 로컬 벽시계로 거부하지 않는다(M1, 판정은 릴레이).
     /// 주소가 바뀌거나 해제되면 릴레이 경로 피어를 새 주소로 옮기거나(해제면) 다시 찾게 한다(M3).
-    pub fn set_relay(&self, relay: Option<RelaySetting<'_>>) -> Result<(), String> {
+    pub(crate) fn set_relay(&self, relay: Option<RelaySetting<'_>>) -> Result<(), String> {
         let now = Instant::now();
         let Some(cfg) = relay else {
             let old = self.shared.relay.lock().take().map(|c| c.addr);
@@ -451,22 +451,22 @@ impl Net {
     }
 
     /// 지금 릴레이가 `host` 문자열로 설정돼 있으면 그 주소.
-    pub fn relay_addr_for_host(&self, host: &str) -> Option<SocketAddr> {
+    pub(crate) fn relay_addr_for_host(&self, host: &str) -> Option<SocketAddr> {
         self.shared.relay.lock().as_ref().filter(|c| c.host == host).map(|c| c.addr)
     }
 
-    pub fn relay_stats(&self) -> Option<RelayStats> {
+    pub(crate) fn relay_stats(&self) -> Option<RelayStats> {
         let auto_opus = self.shared.relay_auto_opus.load(Ordering::Relaxed);
         self.shared.relay.lock().as_ref().map(|c| RelayStats { auto_opus, ..c.stats() })
     }
 
     /// DSCP 마킹 상태(`EngineStats.qos`).
-    pub fn qos_stats(&self) -> qos::QosStats {
+    pub(crate) fn qos_stats(&self) -> qos::QosStats {
         self.shared.qos_stats.lock().clone()
     }
 
     /// 최근 연결 이벤트(P1-18, 오래된 것부터, 최대 `connlog::LOG_CAPACITY`개). 진단 기록용.
-    pub fn conn_events(&self) -> Vec<connlog::ConnEvent> {
+    pub(crate) fn conn_events(&self) -> Vec<connlog::ConnEvent> {
         self.shared.conn_log.lock().events()
     }
 
@@ -477,7 +477,7 @@ impl Net {
 
     /// 송신 경로 진단(엔진 ③c)의 지난 호출 이후 값을 돌려주고 비운다(진단·테스트 전용).
     #[cfg(any(test, feature = "test-support"))]
-    pub fn take_send_path_diag(&self) -> SendPathDiag {
+    pub(crate) fn take_send_path_diag(&self) -> SendPathDiag {
         let s = &self.shared;
         SendPathDiag {
             copy_refreshes: s.copy_refreshes.swap(0, Ordering::Relaxed),
@@ -541,7 +541,7 @@ impl NetShared {
     /// 같은 키를 다시 만들 때 `AUDIO_SEQ_HANDOVER_GAP`(65,536프레임)만큼 띄우므로 nonce가 겹치지 않는다. 방금 들어온
     /// 피어는 몇 프레임 늦게 보이지만, 핸드셰이크가 끝나야 경로가 생기므로(수 ms 이상) 첫 소리 시각은 같다.
     /// 할당 없음: 복사본은 `MAX_PEERS + 1` 용량으로 미리 잡혀 있고, 빠진 항목의 마지막 `Arc`는 `retired_peers`가 쥔다.
-    pub fn refresh_copy(&self, c: &mut PeerTableCopy) {
+    pub(crate) fn refresh_copy(&self, c: &mut PeerTableCopy) {
         if self.peers_gen.load(Ordering::Acquire) == c.gen {
             return;
         }
@@ -631,17 +631,17 @@ impl NetShared {
     }
 
     /// (피어가 나를 에코 중인가, 피어가 보고한 처리 지연 µs).
-    pub fn remote_echo(&self, peer_id: &str) -> Result<(bool, u32), String> {
+    pub(crate) fn remote_echo(&self, peer_id: &str) -> Result<(bool, u32), String> {
         let p = self.peer_by_id(peer_id)?;
         let e = p.echo();
         Ok((e.remote_echoing(Instant::now()), e.remote_delay_us))
     }
 
-    pub fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
+    pub(crate) fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
         self.peer_by_id(peer_id).ok().and_then(|p| p.conn().rtt_ms)
     }
 
-    pub fn peer_path(&self, peer_id: &str) -> Option<PathKind> {
+    pub(crate) fn peer_path(&self, peer_id: &str) -> Option<PathKind> {
         self.peer_by_id(peer_id).ok().and_then(|p| p.conn().path.map(|(_, k)| k))
     }
 
@@ -651,31 +651,25 @@ impl NetShared {
         live.or_else(|| self.retired_ssrc_ids.lock().get(&ssrc).cloned())
     }
 
-    pub fn for_each_peer(&self, mut f: impl FnMut(&Peer)) {
-        for p in self.peers.read().iter() {
-            f(p);
-        }
-    }
-
     /// 지터 버퍼/워커가 쓰는 공통 시계(µs).
     /// 내 입력 장치 버퍼(µs, 0 = 모름)를 읽는 함수를 정한다(P2-8b, 한 번만 — 두 번째부터는 무시). Ping마다 제어 스레드가
     /// 부르므로 원자값 읽기 정도로 가벼워야 한다.
-    pub fn set_input_buffer_source(&self, f: InputBufferFn) {
+    pub(crate) fn set_input_buffer_source(&self, f: InputBufferFn) {
         let _ = self.input_buffer_us.set(f);
     }
 
-    pub fn now_us(&self) -> u64 {
+    pub(crate) fn now_us(&self) -> u64 {
         self.epoch.elapsed().as_micros() as u64
     }
 
-    pub fn epoch(&self) -> Instant {
+    pub(crate) fn epoch(&self) -> Instant {
         self.epoch
     }
 }
 
 /// Pong 평문의 시계 태그(P2-3, 설계 2절). 평문 = `[CLOCK_TAG, now_us(u64 BE)]`(9바이트).
-pub const CLOCK_TAG: u8 = 0xC1;
-pub const CLOCK_PAYLOAD_BYTES: usize = 9;
+pub(crate) const CLOCK_TAG: u8 = 0xC1;
+pub(crate) const CLOCK_PAYLOAD_BYTES: usize = 9;
 
 /// Pong 평문: 응답자 시계(µs, Net epoch 기준).
 pub fn clock_payload(now_us: u64) -> [u8; CLOCK_PAYLOAD_BYTES] {

@@ -44,14 +44,14 @@ pub struct PeerStats {
     pub state: PeerStateKind,
     pub path: Option<PathKind>,
     pub rtt_ms: Option<f32>,
-    pub jitter_ms: f32,
+    pub(crate) jitter_ms: f32,
     pub buffer_ms: f32,
     /// 지터 버퍼 목표 깊이(ms): 지터 추정 + 은닉 마감 여유 + 피어 적응 여유(언더런) + 프로필 여유(P1-5).
     pub target_ms: f32,
     /// 최근 5초 은닉 비율(%, 손실 + 늦은 패킷 + 언더런). GOAL 2절 "은닉 프레임 비율".
     pub conceal_pct: f32,
     /// 최근 5초 중 깊이 보정(샘플 버림·삽입) 모드였던 패킷 비율(%, PR #20 H1).
-    pub corr_time_pct: f32,
+    pub(crate) corr_time_pct: f32,
     /// 깊이 보정의 최대 국소 피치 편차(센트, 재생 시작 이후). 비율 상한 0.25%라 약 4.3센트 이하.
     pub max_corr_cents: f32,
     pub loss_pct: f32,
@@ -76,7 +76,7 @@ pub struct PeerStats {
     /// 이 피어가 Ping으로 알려 온 **내 소리의** 수신 손실률·은닉률(%, 그쪽 최근 5초). 보고가 3초 넘게 없으면 null
     /// (옛 엔진, 그쪽 재생 전). 손실 피드백 Opus 전환의 입력(P1-4e).
     pub remote_loss_pct: Option<f32>,
-    pub remote_conceal_pct: Option<f32>,
+    pub(crate) remote_conceal_pct: Option<f32>,
     /// `engine_add_peer` → 이 피어와 처음 Connected(ms, P1-20). 아직이면 null. 이 항목(add_peer 1회)에서 한 번 정하면
     /// 재연결·경로 전환(릴레이 ↔ 직접)에도 그대로다. 같은 peerId를 다시 추가하면 새로 잰다.
     pub connect_ms: Option<f32>,
@@ -138,7 +138,7 @@ pub struct EngineStats {
 }
 
 impl EngineStats {
-    pub fn stopped() -> Self {
+    pub(crate) fn stopped() -> Self {
         Self {
             running: false,
             sample_rate: 0,
@@ -185,8 +185,8 @@ pub struct EngineSnapshot {
 /// 볼 수 없으므로 `EngineManager`가 정지하며 남기고 진단 기록이 한 번 가져간다.
 pub struct EndedConn {
     /// 그 엔진의 세션 번호(스냅샷의 `session`과 같은 값).
-    pub session: u64,
-    pub events: Vec<crate::net::connlog::ConnEvent>,
+    pub(crate) session: u64,
+    pub(crate) events: Vec<crate::net::connlog::ConnEvent>,
 }
 
 impl Engine {

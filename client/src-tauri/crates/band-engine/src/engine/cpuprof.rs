@@ -20,7 +20,7 @@ use crate::sys::cpu::cycle_pct;
 use band_dsp::rt_timing::RtTiming;
 
 /// 통계 창. 송신 큐 지연(`sendQueue`)과 같다.
-pub const WINDOW: Duration = crate::net::txlat::WINDOW;
+pub(crate) const WINDOW: Duration = crate::net::txlat::WINDOW;
 
 /// 프론트로 나가는 CPU 통계(`EngineStats.cpu`, 직전 창).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
@@ -37,7 +37,7 @@ pub struct CpuStats {
     /// 출력 콜백 p99 / 장치 출력 주기(%). 100에 가까우면 마감을 놓친다.
     pub callback_p99_period_pct: f32,
     /// 입력 콜백 1회 실행시간 최대(µs).
-    pub input_callback_max_us: f32,
+    pub(crate) input_callback_max_us: f32,
     /// 창 안의 출력 콜백 수(0이면 콜백 값은 의미 없음).
     pub callbacks: u32,
     /// 창 길이(ms). 0이면 아직 첫 창이 끝나지 않았다.
@@ -46,7 +46,7 @@ pub struct CpuStats {
 
 /// 창 회전 상태(엔진이 Mutex로 쥔다, 비RT).
 #[derive(Debug)]
-pub struct CpuSampler {
+pub(crate) struct CpuSampler {
     at: Instant,
     /// 직전 회전 시점의 TSC(창 분모).
     tsc: Option<u64>,
@@ -57,13 +57,13 @@ pub struct CpuSampler {
 
 impl CpuSampler {
     /// `now`·`tsc` = 엔진 시작(워커 스레드 생성 전). 워커 사이클 기준은 0이다(새 스레드).
-    pub fn new(now: Instant, tsc: Option<u64>) -> Self {
+    pub(crate) fn new(now: Instant, tsc: Option<u64>) -> Self {
         Self { at: now, tsc, worker_cycles: Some(0), last: CpuStats::default() }
     }
 
     /// 창이 지났으면 회전해 새 통계를, 아니면 직전 통계를 돌려준다. `tsc` = 지금 TSC(`tsc_now`),
     /// `worker_cycles` = 워커 누적 사이클(`thread_cycles`), `period_us` = 장치 출력 주기.
-    pub fn sample(&mut self, now: Instant, timing: &RtTiming, tsc: Option<u64>, worker_cycles: Option<u64>, period_us: f32) -> CpuStats {
+    pub(crate) fn sample(&mut self, now: Instant, timing: &RtTiming, tsc: Option<u64>, worker_cycles: Option<u64>, period_us: f32) -> CpuStats {
         let win = now.saturating_duration_since(self.at);
         if win < WINDOW {
             return self.last;

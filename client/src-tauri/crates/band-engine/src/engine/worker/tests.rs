@@ -1,4 +1,5 @@
 use super::*;
+use super::clock::DeviceClock;
 use band_dsp::jitter::JitterBuffer;
 use super::local::{gcd, lcm};
 use band_dsp::config::MAX_PAYLOAD_BYTES;

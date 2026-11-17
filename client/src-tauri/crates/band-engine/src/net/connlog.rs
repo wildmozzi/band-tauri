@@ -26,7 +26,7 @@ use serde::Serialize;
 use band_dsp::types::{PathKind, PeerStateKind};
 
 /// 링 용량(최근 이벤트 수). 피어 5명이 1초에 여러 번 바뀌어도 진단 기록(1초 간격)이 놓치지 않을 만큼.
-pub const LOG_CAPACITY: usize = 128;
+pub(crate) const LOG_CAPACITY: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,9 +63,9 @@ impl From<PathKind> for ConnOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnEvent {
     /// Net 수명 동안 1부터 늘어나는 번호(진단 기록이 이미 본 것을 거르는 데 쓴다).
-    pub seq: u64,
+    pub(crate) seq: u64,
     /// 유닉스 시각(ms).
-    pub at_ms: u64,
+    pub(crate) at_ms: u64,
     pub peer_id: String,
     pub phase: ConnPhase,
     pub outcome: ConnOutcome,
@@ -75,13 +75,13 @@ pub struct ConnEvent {
 
 /// 최근 이벤트 링.
 #[derive(Debug, Default)]
-pub struct ConnLog {
+pub(crate) struct ConnLog {
     buf: VecDeque<ConnEvent>,
     next_seq: u64,
 }
 
 impl ConnLog {
-    pub fn push(&mut self, at_ms: u64, peer_id: &str, phase: ConnPhase, outcome: ConnOutcome, ms: u32) {
+    pub(crate) fn push(&mut self, at_ms: u64, peer_id: &str, phase: ConnPhase, outcome: ConnOutcome, ms: u32) {
         if self.buf.len() == LOG_CAPACITY {
             self.buf.pop_front();
         }
@@ -90,27 +90,27 @@ impl ConnLog {
     }
 
     /// 지금 링에 있는 이벤트(오래된 것부터).
-    pub fn events(&self) -> Vec<ConnEvent> {
+    pub(crate) fn events(&self) -> Vec<ConnEvent> {
         self.buf.iter().cloned().collect()
     }
 }
 
 /// 제어 틱마다 넘기는 피어 상태(`ConnState`에서 읽은 값).
 #[derive(Debug, Clone, Copy)]
-pub struct ConnView {
-    pub state: PeerStateKind,
-    pub path: Option<PathKind>,
-    pub started: Instant,
-    pub connected_at: Option<Instant>,
+pub(crate) struct ConnView {
+    pub(crate) state: PeerStateKind,
+    pub(crate) path: Option<PathKind>,
+    pub(crate) started: Instant,
+    pub(crate) connected_at: Option<Instant>,
     /// 마지막 수신 + `LOST_AFTER`(수신이 없었으면 None). 재연결 시도의 시작.
-    pub lost_at: Option<Instant>,
-    pub bye: bool,
+    pub(crate) lost_at: Option<Instant>,
+    pub(crate) bye: bool,
 }
 
 /// 이벤트를 내보낼 곳: 이벤트가 있을 때만 벽시계를 읽고(`unix_ms`) 로그에 넣는다(`log`).
-pub struct Sink<'a> {
-    pub unix_ms: &'a mut dyn FnMut() -> u64,
-    pub log: &'a mut dyn FnMut(u64, &str, ConnPhase, ConnOutcome, u32),
+pub(crate) struct Sink<'a> {
+    pub(crate) unix_ms: &'a mut dyn FnMut() -> u64,
+    pub(crate) log: &'a mut dyn FnMut(u64, &str, ConnPhase, ConnOutcome, u32),
 }
 
 impl Sink<'_> {
@@ -149,20 +149,20 @@ fn ms_between(from: Instant, to: Instant) -> u32 {
 
 /// 피어 상태 변화를 이벤트로 바꾼다. 제어 스레드 하나가 소유한다(락 없음).
 #[derive(Debug, Default)]
-pub struct ConnTracker {
+pub(crate) struct ConnTracker {
     tracks: Vec<Track>,
 }
 
 impl ConnTracker {
     /// 틱 시작.
-    pub fn begin(&mut self) {
+    pub(crate) fn begin(&mut self) {
         for t in &mut self.tracks {
             t.seen = false;
         }
     }
 
     /// 피어 하나를 본다. 바뀐 곳이 있으면 `sink`로 낸다.
-    pub fn observe(&mut self, id: &str, v: ConnView, now: Instant, sink: &mut Sink<'_>) {
+    pub(crate) fn observe(&mut self, id: &str, v: ConnView, now: Instant, sink: &mut Sink<'_>) {
         let i = match self.tracks.iter().position(|t| t.started == v.started && t.id == id) {
             Some(i) => i,
             None => {
@@ -234,7 +234,7 @@ impl ConnTracker {
     }
 
     /// 틱 끝: 이번 틱에 안 보인(제거·교체된) 피어를 잊는다. 결과 전인 시도는 `aborted`로 남긴다(Bye 받은 피어 제외).
-    pub fn end(&mut self, now: Instant, sink: &mut Sink<'_>) {
+    pub(crate) fn end(&mut self, now: Instant, sink: &mut Sink<'_>) {
         for t in self.tracks.iter().filter(|t| !t.seen) {
             if let (Pending::Attempt(phase, start), false) = (t.pending, t.bye) {
                 sink.emit(&t.id, phase, ConnOutcome::Aborted, ms_between(start, now));
@@ -244,7 +244,7 @@ impl ConnTracker {
     }
 
     /// Net 정지: 남은 모든 피어를 끝난 것으로 본다(결과 전 시도는 `aborted`).
-    pub fn finish(&mut self, now: Instant, sink: &mut Sink<'_>) {
+    pub(crate) fn finish(&mut self, now: Instant, sink: &mut Sink<'_>) {
         self.begin();
         self.end(now, sink);
     }

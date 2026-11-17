@@ -21,7 +21,7 @@ pub fn pseudonymize(id: &str) -> String {
 }
 
 /// `ip:port`(또는 `[v6]:port`, IP만) 주소를 대역으로. IP가 아니면(호스트 이름 등) 텍스트 마스킹만 적용한다.
-pub fn mask_addr(addr: &str) -> String {
+pub(crate) fn mask_addr(addr: &str) -> String {
     mask_text(addr)
 }
 
@@ -39,7 +39,7 @@ static IPV6: OnceLock<Regex> = OnceLock::new();
 static IPV4: OnceLock<Regex> = OnceLock::new();
 
 /// 자유 텍스트(로그 등)의 개인정보·비밀값을 가린다.
-pub fn mask_text(s: &str) -> String {
+pub(crate) fn mask_text(s: &str) -> String {
     let s = re(&JWT, r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*").replace_all(s, "<jwt>");
     let s = re(&EMAIL, r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}").replace_all(&s, "<email>");
     // Windows는 대소문자 무시, macOS/Linux 홈은 정확히. 이름은 다음 구분자·줄바꿈·파일명 금지 문자까지(공백 포함).

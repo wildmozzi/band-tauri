@@ -31,7 +31,7 @@ pub struct ThreadPriorityStats {
 }
 
 impl ThreadPriorityStats {
-    pub fn stopped() -> Self {
+    pub(crate) fn stopped() -> Self {
         Self {
             worker: ThreadPriority::Unmanaged,
             net_recv: ThreadPriority::Unmanaged,
@@ -48,10 +48,10 @@ impl ThreadPriorityStats {
 /// MMCSS/우선순위 OS 호출. 핸들 0은 실패.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct ThreadApi {
-    pub register: fn() -> usize,
-    pub set_high: fn(usize) -> bool,
-    pub revert: fn(usize),
-    pub raise: fn() -> bool,
+    pub(crate) register: fn() -> usize,
+    pub(crate) set_high: fn(usize) -> bool,
+    pub(crate) revert: fn(usize),
+    pub(crate) raise: fn() -> bool,
 }
 
 #[cfg(windows)]
@@ -61,32 +61,32 @@ mod os {
         SetThreadPriority, AVRT_PRIORITY_HIGH, THREAD_PRIORITY_HIGHEST,
     };
 
-    pub fn register() -> usize {
+    pub(crate) fn register() -> usize {
         let name: Vec<u16> = "Pro Audio\0".encode_utf16().collect();
         let mut index = 0u32;
         // SAFETY: name은 NUL 종료 UTF-16 문자열이고 index는 유효한 출력 포인터다.
         let h = unsafe { AvSetMmThreadCharacteristicsW(name.as_ptr(), &mut index) };
         h as usize
     }
-    pub fn set_high(h: usize) -> bool {
+    pub(crate) fn set_high(h: usize) -> bool {
         // SAFETY: h는 register가 돌려준 유효한 MMCSS 핸들이다.
         unsafe { AvSetMmThreadPriority(h as _, AVRT_PRIORITY_HIGH) != 0 }
     }
-    pub fn revert(h: usize) {
+    pub(crate) fn revert(h: usize) {
         // SAFETY: h는 register가 돌려준 유효한 핸들이고 한 번만 해제한다.
         unsafe {
             AvRevertMmThreadCharacteristics(h as _);
         }
     }
-    pub fn raise() -> bool {
+    pub(crate) fn raise() -> bool {
         // SAFETY: GetCurrentThread는 의사 핸들을 돌려주며 항상 유효하다.
         unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) != 0 }
     }
-    pub fn time_begin(ms: u32) -> bool {
+    pub(crate) fn time_begin(ms: u32) -> bool {
         // SAFETY: 인자 검사만 하는 단순 호출. TIMERR_NOERROR(0)이면 성공.
         unsafe { windows_sys::Win32::Media::timeBeginPeriod(ms) == 0 }
     }
-    pub fn time_end(ms: u32) {
+    pub(crate) fn time_end(ms: u32) {
         // SAFETY: 성공한 timeBeginPeriod(ms)와 짝으로만 부른다.
         unsafe {
             windows_sys::Win32::Media::timeEndPeriod(ms);
@@ -123,7 +123,7 @@ pub fn set_engine_promotion_parts(mmcss: bool, timer_1ms: bool) {
     ENGINE_TIMER.store(timer_1ms, Ordering::SeqCst);
 }
 
-pub fn engine_promotion_enabled() -> bool {
+pub(crate) fn engine_promotion_enabled() -> bool {
     ENGINE_PROMOTION.load(Ordering::SeqCst)
 }
 
@@ -146,7 +146,8 @@ impl AudioThreadGuard {
         Self { status, mmcss, revert, _not_send: PhantomData }
     }
 
-    pub fn status(&self) -> ThreadPriority {
+    #[cfg(any(test, all(windows, feature = "backend-wasapi")))]
+    pub(crate) fn status(&self) -> ThreadPriority {
         self.status
     }
 }
@@ -208,8 +209,8 @@ impl Drop for AudioThreadGuard {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct TimerApi {
-    pub begin: fn(u32) -> bool,
-    pub end: fn(u32),
+    pub(crate) begin: fn(u32) -> bool,
+    pub(crate) end: fn(u32),
 }
 
 /// 프로세스 안 1ms 타이머 참조 카운트. 0→1에서 begin, 1→0에서 end를 부른다.
@@ -231,13 +232,13 @@ static TIMER_REFS: TimerRefs = TimerRefs::new();
 const TIMER_MS: u32 = 1;
 
 /// 엔진 수명 동안 쥐는 1ms 타이머 해상도. drop하면 놓는다(한 번만).
-pub struct TimerResolution {
+pub(crate) struct TimerResolution {
     held: Option<(&'static TimerRefs, &'static TimerApi)>,
 }
 
 impl TimerResolution {
     /// 타이머 측정 스위치가 켜져 있고 Windows면 1ms 해상도를 요청한다. 실패해도 엔진은 돈다(`active()`가 false).
-    pub fn acquire() -> Self {
+    pub(crate) fn acquire() -> Self {
         #[cfg(windows)]
         if engine_timer_enabled() {
             let t = Self::acquire_with(&TIMER_REFS, &OS_TIMER);
@@ -259,7 +260,7 @@ impl TimerResolution {
         Self { held: Some((refs, api)) }
     }
 
-    pub fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         self.held.is_some()
     }
 }
@@ -278,7 +279,7 @@ impl Drop for TimerResolution {
 
 /// MXCSR의 FTZ(bit 15)와 DAZ(bit 6)를 켠다(현재 스레드에만 적용).
 #[allow(deprecated)]
-pub fn enable_flush_denormals() {
+pub(crate) fn enable_flush_denormals() {
     #[cfg(target_arch = "x86_64")]
     // SAFETY: MXCSR 읽기/쓰기는 x86_64에서 항상 사용 가능하며 FTZ/DAZ 비트만 바꾼다.
     unsafe {

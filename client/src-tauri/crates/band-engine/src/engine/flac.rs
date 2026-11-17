@@ -20,16 +20,16 @@ use flacenc::error::{Verified, Verify};
 use flacenc::source::{Context, Fill, FrameBuf};
 
 /// 블록 크기(프레임). libFLAC 기본(-5)과 같다.
-pub const BLOCK_FRAMES: usize = 4096;
+pub(crate) const BLOCK_FRAMES: usize = 4096;
 const BITS: usize = 24;
 /// `fLaC` + 메타데이터 블록 머리(4) + STREAMINFO(34).
-pub const FLAC_HEADER_LEN: u64 = 42;
+pub(crate) const FLAC_HEADER_LEN: u64 = 42;
 /// 인코딩한 바이트를 이만큼 모아 한 번에 쓴다.
 const OUT_BATCH: usize = 1 << 20;
 const HEADER_REFRESH: Duration = Duration::from_secs(5);
 
 /// STREAMINFO 포함 파일 머리 42바이트. `frame_size`가 (0, 0)이면 "모름", `md5`가 0이면 "계산 안 함".
-pub fn flac_header(rate: u32, channels: u16, block: u16, frame_size: (u32, u32), total: u64, md5: [u8; 16]) -> [u8; 42] {
+pub(crate) fn flac_header(rate: u32, channels: u16, block: u16, frame_size: (u32, u32), total: u64, md5: [u8; 16]) -> [u8; 42] {
     let mut h = [0u8; 42];
     h[..4].copy_from_slice(b"fLaC");
     // 마지막 메타데이터 블록(1) + 형식 0(STREAMINFO), 길이 34
@@ -51,7 +51,7 @@ pub fn flac_header(rate: u32, channels: u16, block: u16, frame_size: (u32, u32),
     h
 }
 
-pub struct FlacWriter<F: Write + Seek = File> {
+pub(crate) struct FlacWriter<F: Write + Seek = File> {
     f: F,
     cfg: Verified<flacenc::config::Encoder>,
     info: StreamInfo,
@@ -74,13 +74,13 @@ pub struct FlacWriter<F: Write + Seek = File> {
 }
 
 impl FlacWriter<File> {
-    pub fn create(path: &Path, channels: u16, rate: u32) -> std::io::Result<Self> {
+    pub(crate) fn create(path: &Path, channels: u16, rate: u32) -> std::io::Result<Self> {
         Self::new(File::create(path)?, channels, rate)
     }
 
     /// 남은 블록을 인코딩해 쓰고 STREAMINFO(총 샘플·MD5)를 확정한 뒤 디스크에 내린다. 실패하면
     /// [`Self::finish_best_effort`]로 닫고 그 오류를 돌려준다. 반환: 파일 크기.
-    pub fn finish(mut self) -> std::io::Result<u64> {
+    pub(crate) fn finish(mut self) -> std::io::Result<u64> {
         if let Err(e) = self.finish_inner() {
             self.finish_best_effort();
             return Err(e);
@@ -91,7 +91,7 @@ impl FlacWriter<File> {
 
     /// 쓰기 실패 뒤 마무리: 못 쓴 바이트는 버리고 마지막으로 성공한 프레임 경계로 파일을 자른 뒤 STREAMINFO를
     /// 그 길이에 맞춘다(헤더 덮어쓰기는 새 공간이 필요 없다). 반환: 파일 크기.
-    pub fn finish_best_effort(self) -> u64 {
+    pub(crate) fn finish_best_effort(self) -> u64 {
         let (file, total) = self.close_lossy();
         if file.set_len(total).is_err() {
             log::warn!("녹음 FLAC 자르기 실패(헤더는 갱신됨)");
@@ -106,7 +106,7 @@ fn enc_err(e: impl std::fmt::Display) -> std::io::Error {
 }
 
 impl<F: Write + Seek> FlacWriter<F> {
-    pub fn new(mut f: F, channels: u16, rate: u32) -> std::io::Result<Self> {
+    pub(crate) fn new(mut f: F, channels: u16, rate: u32) -> std::io::Result<Self> {
         let ch = channels.clamp(1, 8) as usize;
         let cfg = flacenc::config::Encoder::default().into_verified().map_err(|(_, e)| enc_err(e))?;
         let info = StreamInfo::new(rate as usize, ch, BITS).map_err(enc_err)?;
@@ -132,17 +132,18 @@ impl<F: Write + Seek> FlacWriter<F> {
     }
 
     /// 쓴(인코딩해 내보낸) 바이트(헤더 제외). 압축 크기라 녹음 용량 표시에 쓴다.
-    pub fn data_bytes(&self) -> u64 {
+    pub(crate) fn data_bytes(&self) -> u64 {
         self.committed_bytes - FLAC_HEADER_LEN + self.out.len() as u64
     }
 
     /// 받은 프레임 수(아직 블록에 모으는 중인 것 포함).
-    pub fn frames(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn frames(&self) -> u64 {
         self.committed_frames + self.out_frames + (self.pending.len() / self.channels as usize) as u64
     }
 
     /// 인터리브 f32 샘플을 쓴다(길이는 채널 수의 배수). ±1 밖은 자르고 24비트로 양자화한다(WAV 24와 같은 값).
-    pub fn write(&mut self, samples: &[f32]) -> std::io::Result<()> {
+    pub(crate) fn write(&mut self, samples: &[f32]) -> std::io::Result<()> {
         let block = BLOCK_FRAMES * self.channels as usize;
         for &v in samples {
             let v = if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
@@ -159,7 +160,7 @@ impl<F: Write + Seek> FlacWriter<F> {
     }
 
     /// 무음 `frames`프레임.
-    pub fn write_silence(&mut self, mut frames: u64) -> std::io::Result<()> {
+    pub(crate) fn write_silence(&mut self, mut frames: u64) -> std::io::Result<()> {
         const Z: [f32; 4096] = [0.0; 4096];
         let ch = self.channels as u64;
         let step = Z.len() as u64 / ch;

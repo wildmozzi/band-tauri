@@ -26,7 +26,7 @@ pub fn tsc_now() -> Option<u64> {
 
 /// 스레드의 누적 사이클(TSC 단위, 커널+사용자). 지원하지 않으면 None.
 #[cfg(all(windows, target_arch = "x86_64"))]
-pub fn thread_cycles<T>(h: &JoinHandle<T>) -> Option<u64> {
+pub(crate) fn thread_cycles<T>(h: &JoinHandle<T>) -> Option<u64> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::WindowsProgramming::QueryThreadCycleTime;
     let mut c = 0u64;
@@ -36,12 +36,13 @@ pub fn thread_cycles<T>(h: &JoinHandle<T>) -> Option<u64> {
 }
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
-pub fn thread_cycles<T>(_h: &JoinHandle<T>) -> Option<u64> {
+pub(crate) fn thread_cycles<T>(_h: &JoinHandle<T>) -> Option<u64> {
     None
 }
 
 /// 현재 프로세스의 누적 사이클(TSC 단위, 모든 스레드). 측정 도구용. 지원하지 않으면 None.
 #[cfg(all(windows, target_arch = "x86_64"))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn process_cycles() -> Option<u64> {
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     use windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime;
@@ -52,6 +53,7 @@ pub fn process_cycles() -> Option<u64> {
 }
 
 #[cfg(not(all(windows, target_arch = "x86_64")))]
+#[cfg(any(test, feature = "test-support"))]
 pub fn process_cycles() -> Option<u64> {
     None
 }

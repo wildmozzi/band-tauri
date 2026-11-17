@@ -59,7 +59,7 @@ const MEASURED_EXIT_RATIO: f32 = 0.85;
 pub(crate) const LOSS_ENTER_PCT: f32 = 2.0;
 pub(crate) const LOSS_ENTER_SUSTAIN: Duration = Duration::from_secs(1);
 /// 손실 피드백: 보고 손실이 이 값(%) 아래로 `hold` 이어지면 PCM16으로.
-pub const LOSS_EXIT_PCT: f32 = 1.0;
+pub(crate) const LOSS_EXIT_PCT: f32 = 1.0;
 /// 이보다 오래된 보고는 없는 것으로 본다(Ping 500ms × 6).
 pub const REPORT_STALE: Duration = Duration::from_secs(3);
 /// 켜진 동안 보고가 이만큼 없으면 근거 없음으로 보고 복귀 쪽으로 센다(그 전에는 복귀를 시작하지 않는다).

@@ -8,75 +8,75 @@ use band_dsp::types::{PathKind, PeerStateKind};
 
 use super::descriptor::{CandidateKind, MAX_CANDIDATES};
 
-pub const HELLO_INTERVAL: Duration = Duration::from_millis(100);
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-pub const PING_INTERVAL: Duration = Duration::from_millis(500);
-pub const LOST_AFTER: Duration = Duration::from_secs(5);
-pub const FAIL_AFTER: Duration = Duration::from_secs(15);
+pub(crate) const HELLO_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const PING_INTERVAL: Duration = Duration::from_millis(500);
+pub(crate) const LOST_AFTER: Duration = Duration::from_secs(5);
+pub(crate) const FAIL_AFTER: Duration = Duration::from_secs(15);
 /// 확정 경로가 아닌 같은 주소에서 인증된 Hello가 이만큼 연속으로 오면 경로를 옮긴다(NAT 리바인딩).
-pub const REBIND_HELLOS: u32 = 5;
+pub(crate) const REBIND_HELLOS: u32 = 5;
 /// HelloAck 최소 간격(리뷰 L6: 재전송 Hello로 인한 반사 제한).
-pub const HELLO_ACK_MIN_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) const HELLO_ACK_MIN_INTERVAL: Duration = Duration::from_millis(50);
 /// 직접 연결이 이 시간 안에 안 되면 릴레이로도 Hello를 보낸다(P1-4b, GOAL 3절 "입장 후 3초").
-pub const RELAY_FALLBACK_AFTER: Duration = Duration::from_millis(1500);
+pub(crate) const RELAY_FALLBACK_AFTER: Duration = Duration::from_millis(1500);
 /// 직접 경로에서 이 시간 동안 아무것도 못 받으면 릴레이로도 Hello를 보낸다(끊김 전에 대체 경로 확보).
-pub const RELAY_PROBE_AFTER: Duration = Duration::from_millis(1500);
+pub(crate) const RELAY_PROBE_AFTER: Duration = Duration::from_millis(1500);
 /// 릴레이 경로에서 직접 경로를 백그라운드로 다시 찾는 간격.
-pub const DIRECT_PROBE_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const DIRECT_PROBE_INTERVAL: Duration = Duration::from_secs(1);
 /// `Failed` 뒤에도 이 간격으로 직접·릴레이 Hello를 계속 보낸다(늦게 열린 릴레이/경로로 회복).
-pub const FAILED_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+pub(crate) const FAILED_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 /// 경로를 바꾼 뒤 이전 경로로 오는 인증 패킷(비행 중)을 받아 주는 시간(무끊김 전환).
-pub const PATH_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const PATH_GRACE: Duration = Duration::from_secs(2);
 /// 릴레이 → 직접 승격 조건(PR #10 M2 히스테리시스): 같은 직접 주소에서 HelloAck(왕복 확인)가 이만큼, 간격
 /// `PROMOTE_MAX_GAP` 이하로 끊김 없이, `PROMOTE_STABLE` 이상 이어져야 한다(1초 탐색 → 약 2초).
-pub const PROMOTE_ACKS: u32 = 3;
-pub const PROMOTE_STABLE: Duration = Duration::from_secs(2);
-pub const PROMOTE_MAX_GAP: Duration = Duration::from_millis(1500);
+pub(crate) const PROMOTE_ACKS: u32 = 3;
+pub(crate) const PROMOTE_STABLE: Duration = Duration::from_secs(2);
+pub(crate) const PROMOTE_MAX_GAP: Duration = Duration::from_millis(1500);
 /// 직접 경로 RTT가 릴레이 경유 종단 RTT보다 이만큼 넘게 크면 승격하지 않는다(ms).
-pub const PROMOTE_RTT_MARGIN_MS: f32 = 10.0;
+pub(crate) const PROMOTE_RTT_MARGIN_MS: f32 = 10.0;
 /// 직접 → 릴레이 강등 뒤 승격을 미루는 최소 시간. 승격 후 `FLAP_WINDOW` 안에 다시 강등되면(플래핑) 두 배씩
 /// 늘려 `RELAY_HOLD_MAX`까지.
-pub const RELAY_HOLD_MIN: Duration = Duration::from_secs(5);
-pub const RELAY_HOLD_MAX: Duration = Duration::from_secs(60);
-pub const FLAP_WINDOW: Duration = Duration::from_secs(30);
+pub(crate) const RELAY_HOLD_MIN: Duration = Duration::from_secs(5);
+pub(crate) const RELAY_HOLD_MAX: Duration = Duration::from_secs(60);
+pub(crate) const FLAP_WINDOW: Duration = Duration::from_secs(30);
 
 fn seq_newer(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
 }
 
 #[derive(Debug, Clone)]
-pub struct ConnState {
-    pub state: PeerStateKind,
-    pub path: Option<(SocketAddr, PathKind)>,
-    pub started: Instant,
+pub(crate) struct ConnState {
+    pub(crate) state: PeerStateKind,
+    pub(crate) path: Option<(SocketAddr, PathKind)>,
+    pub(crate) started: Instant,
     /// 이 항목(add_peer)에서 처음 Connected가 된 시각(P1-20 `connectMs`). 한 번 정하면 재연결·경로 전환에도 그대로다.
-    pub connected_at: Option<Instant>,
-    pub last_rx: Option<Instant>,
-    pub last_hello: Option<Instant>,
-    pub last_ping: Option<Instant>,
+    pub(crate) connected_at: Option<Instant>,
+    pub(crate) last_rx: Option<Instant>,
+    pub(crate) last_hello: Option<Instant>,
+    pub(crate) last_ping: Option<Instant>,
     /// 주소별 마지막 HelloAck 시각(PR #5 L-4: 두 후보 경로가 서로를 굶기지 않게 주소 단위로 제한).
-    pub last_acks: Vec<(SocketAddr, Instant)>,
-    pub rtt_ms: Option<f32>,
+    pub(crate) last_acks: Vec<(SocketAddr, Instant)>,
+    pub(crate) rtt_ms: Option<f32>,
     /// 경로가 아닌 주소에서 연속으로 온 인증된 Hello (주소, 횟수).
-    pub rebind: Option<(SocketAddr, u32)>,
+    pub(crate) rebind: Option<(SocketAddr, u32)>,
     /// 제어 패킷 타입별 최대 seq (재전송 방어, 리뷰 L5).
     ctrl_seq: [Option<u32>; 6],
     /// 이 피어와 릴레이 경유 Hello/HelloAck가 오간 적이 있다(릴레이로 온 인증 패킷 수용).
-    pub relay_confirmed: bool,
+    pub(crate) relay_confirmed: bool,
     /// 릴레이 경로 중 직접 주소에서 인증된 Hello가 왔다. 그 주소에서 Hello 외 인증 패킷이 오면 상대가
     /// 직접 경로로 승격한 것이므로 따라 승격한다.
-    pub direct_hint: Option<SocketAddr>,
+    pub(crate) direct_hint: Option<SocketAddr>,
     /// 직전 경로와 바꾼 시각(PATH_GRACE 동안 수신 허용).
-    pub prev_path: Option<(SocketAddr, Instant)>,
+    pub(crate) prev_path: Option<(SocketAddr, Instant)>,
     /// 상대가 Bye를 보냈다(더 탐색하지 않음).
-    pub bye: bool,
+    pub(crate) bye: bool,
     last_direct_probe: Option<Instant>,
     /// 릴레이 경로 중 직접 주소의 연속 HelloAck(승격 히스테리시스).
     direct_probe: Option<DirectProbe>,
     /// 이 시각 전에는 직접 경로로 승격하지 않는다(강등 직후·플래핑).
-    pub promote_hold_until: Option<Instant>,
+    pub(crate) promote_hold_until: Option<Instant>,
     /// 최근 연속 플래핑 횟수(승격 후 FLAP_WINDOW 안에 강등).
-    pub flaps: u32,
+    pub(crate) flaps: u32,
     last_promote: Option<Instant>,
 }
 
@@ -91,7 +91,7 @@ struct DirectProbe {
 
 /// Hello/HelloAck 처리 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandshakeOutcome {
+pub(crate) enum HandshakeOutcome {
     /// 경로 확정/유지 또는 전환.
     Accepted,
     /// 확정 경로가 아닌 주소: 상태·last_rx는 건드리지 않는다.
@@ -99,7 +99,7 @@ pub enum HandshakeOutcome {
 }
 
 impl ConnState {
-    pub fn new(now: Instant) -> Self {
+    pub(crate) fn new(now: Instant) -> Self {
         Self {
             state: PeerStateKind::Connecting,
             path: None,
@@ -157,7 +157,7 @@ impl ConnState {
 
     /// 릴레이 주소가 `old` → `new`로 바뀜(None = 해제, M3). 릴레이 경로면 새 주소로 옮기고(해제면 경로를 비우고
     /// 직접 경로를 다시 찾는다), 옛 주소에서 비행 중인 패킷은 PATH_GRACE 동안 받는다.
-    pub fn relay_moved(&mut self, old: SocketAddr, new: Option<SocketAddr>, now: Instant) {
+    pub(crate) fn relay_moved(&mut self, old: SocketAddr, new: Option<SocketAddr>, now: Instant) {
         if self.path != Some((old, PathKind::Relay)) {
             if new.is_none() {
                 self.relay_confirmed = false;
@@ -188,17 +188,17 @@ impl ConnState {
         self.direct_hint = None;
     }
 
-    pub fn path_kind(&self) -> Option<PathKind> {
+    pub(crate) fn path_kind(&self) -> Option<PathKind> {
         self.path.map(|(_, k)| k)
     }
 
     /// 같은 세션(같은 키)의 피어를 다시 추가할 때 재전송 창을 이어받는다(PR #5 L-2).
-    pub fn inherit_replay_window(&mut self, old: &ConnState) {
+    pub(crate) fn inherit_replay_window(&mut self, old: &ConnState) {
         self.ctrl_seq = old.ctrl_seq;
     }
 
     /// 제어 패킷 seq가 이전보다 새로우면 기록하고 true. 재전송(같거나 옛 seq)은 false.
-    pub fn accept_ctrl_seq(&mut self, t: PacketType, seq: u32) -> bool {
+    pub(crate) fn accept_ctrl_seq(&mut self, t: PacketType, seq: u32) -> bool {
         let slot = &mut self.ctrl_seq[(t as usize - 1).min(5)];
         match *slot {
             Some(m) if !seq_newer(seq, m) => false,
@@ -215,7 +215,8 @@ impl ConnState {
     /// - 릴레이 경로인데 직접 주소: HelloAck(왕복 확인)가 승격 조건(`direct_ack_promotes`: 연속 3회·2초 안정·
     ///   RTT·강등 유예)을 채우면 직접 경로로 승격. 그 전까지(와 Hello)는 힌트만 남기고 무시.
     /// - Connected인데 다른 직접 주소 → 같은 주소에서 `REBIND_HELLOS`회 연속이면 전환, 아니면 무시.
-    pub fn on_handshake(
+    #[cfg(test)]
+    pub(crate) fn on_handshake(
         &mut self,
         from: SocketAddr,
         is_ack: bool,
@@ -227,7 +228,7 @@ impl ConnState {
     }
 
     /// `on_handshake` + HelloAck로 잰 그 경로의 왕복 시간(`ack_rtt`, Hello timestamp 에코).
-    pub fn on_handshake_rtt(
+    pub(crate) fn on_handshake_rtt(
         &mut self,
         from: SocketAddr,
         is_ack: bool,
@@ -300,7 +301,7 @@ impl ConnState {
     /// - 확정 경로 → 생존 갱신.
     /// - 릴레이 경로인데 `direct_hint` 주소 → 상대가 직접 경로로 승격했다(우리 HelloAck가 닿았다): 따라 승격.
     /// - 릴레이가 확인된 피어의 릴레이 주소, 직전 경로(PATH_GRACE 이내) → 데이터만 받는다(생존은 갱신하지 않음).
-    pub fn accept_rx(&mut self, from: SocketAddr, cands: &[(SocketAddr, CandidateKind)], relay: Option<SocketAddr>, now: Instant) -> bool {
+    pub(crate) fn accept_rx(&mut self, from: SocketAddr, cands: &[(SocketAddr, CandidateKind)], relay: Option<SocketAddr>, now: Instant) -> bool {
         if self.is_path(from) {
             self.on_rx_from_path(now);
             return true;
@@ -320,7 +321,7 @@ impl ConnState {
     }
 
     /// `to`로 HelloAck를 보내도 되는지(주소별 간격 제한). 기억하는 주소는 후보 수만큼으로 제한한다.
-    pub fn ack_allowed(&mut self, to: SocketAddr, now: Instant) -> bool {
+    pub(crate) fn ack_allowed(&mut self, to: SocketAddr, now: Instant) -> bool {
         if let Some(e) = self.last_acks.iter_mut().find(|(a, _)| *a == to) {
             if now.duration_since(e.1) < HELLO_ACK_MIN_INTERVAL {
                 return false;
@@ -340,7 +341,7 @@ impl ConnState {
 
     /// 확정 경로에서 인증된 패킷 수신. 경로가 살아 있으므로 리바인딩 카운트를 지운다(PR #5 L-3:
     /// "연속 5회"가 Ping/Audio에 끼어든 Hello로 누적되지 않게).
-    pub fn on_rx_from_path(&mut self, now: Instant) {
+    pub(crate) fn on_rx_from_path(&mut self, now: Instant) {
         self.rebind = None;
         self.last_rx = Some(now);
         if self.state == PeerStateKind::Reconnecting {
@@ -348,7 +349,7 @@ impl ConnState {
         }
     }
 
-    pub fn on_rtt_sample(&mut self, rtt_ms: f32) {
+    pub(crate) fn on_rtt_sample(&mut self, rtt_ms: f32) {
         if !(0.0..10_000.0).contains(&rtt_ms) {
             return;
         }
@@ -358,16 +359,16 @@ impl ConnState {
         });
     }
 
-    pub fn is_path(&self, from: SocketAddr) -> bool {
+    pub(crate) fn is_path(&self, from: SocketAddr) -> bool {
         self.path.is_some_and(|(a, _)| a == from)
     }
 
-    pub fn can_send_audio(&self) -> bool {
+    pub(crate) fn can_send_audio(&self) -> bool {
         self.path.is_some() && matches!(self.state, PeerStateKind::Connected | PeerStateKind::Reconnecting)
     }
 
     /// 제어 틱. 해야 할 송신을 돌려준다. `relay_ready`=이 엔진이 릴레이에 등록되어 있다.
-    pub fn tick(&mut self, now: Instant, relay_ready: bool) -> TickAction {
+    pub(crate) fn tick(&mut self, now: Instant, relay_ready: bool) -> TickAction {
         let mut a = TickAction::default();
         let since_rx = now.duration_since(self.last_rx.unwrap_or(self.started));
         if self.state == PeerStateKind::Connected && since_rx >= LOST_AFTER {
@@ -440,17 +441,20 @@ fn direct_kind(from: SocketAddr, cands: &[(SocketAddr, CandidateKind)]) -> PathK
 
 /// 이번 틱에 보낼 것.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct TickAction {
+pub(crate) struct TickAction {
     /// 직접 후보(와 현재 직접 경로·리바인딩 후보)로 Hello.
-    pub hello_direct: bool,
+    pub(crate) hello_direct: bool,
     /// 릴레이 경유 Hello(RelayData).
-    pub hello_relay: bool,
+    pub(crate) hello_relay: bool,
     /// 확정 경로로 Ping.
-    pub ping: bool,
+    pub(crate) ping: bool,
 }
 
 impl TickAction {
-    pub const NONE: TickAction = TickAction { hello_direct: false, hello_relay: false, ping: false };
-    pub const HELLO: TickAction = TickAction { hello_direct: true, hello_relay: false, ping: false };
-    pub const PING: TickAction = TickAction { hello_direct: false, hello_relay: false, ping: true };
+    #[cfg(test)]
+    pub(crate) const NONE: TickAction = TickAction { hello_direct: false, hello_relay: false, ping: false };
+    #[cfg(test)]
+    pub(crate) const HELLO: TickAction = TickAction { hello_direct: true, hello_relay: false, ping: false };
+    #[cfg(test)]
+    pub(crate) const PING: TickAction = TickAction { hello_direct: false, hello_relay: false, ping: true };
 }

@@ -12,7 +12,7 @@ use band_dsp::config::INTERNAL_RATE;
 // ============================================================================
 
 /// 선형 처프(양끝 Hann 페이드). `amp`는 최대 진폭.
-pub fn chirp(rate: u32, dur_s: f64, f0: f64, f1: f64, amp: f32, fade_s: f64) -> Vec<f32> {
+pub(crate) fn chirp(rate: u32, dur_s: f64, f0: f64, f1: f64, amp: f32, fade_s: f64) -> Vec<f32> {
     let r = rate.max(1) as f64;
     let n = (dur_s * r).round().max(2.0) as usize;
     let fade = ((fade_s * r).round() as usize).min(n / 2);
@@ -34,7 +34,7 @@ pub fn chirp(rate: u32, dur_s: f64, f0: f64, f1: f64, amp: f32, fade_s: f64) -> 
 }
 
 /// 상호상관 `c[l] = Σ x[n + l]·t[n]`, l = 0..=x.len() − t.len() (FFT). `x`가 `t`보다 짧으면 빈 벡터.
-pub fn xcorr(x: &[f32], t: &[f32]) -> Vec<f32> {
+pub(crate) fn xcorr(x: &[f32], t: &[f32]) -> Vec<f32> {
     if t.is_empty() || x.len() < t.len() {
         return Vec::new();
     }
@@ -58,24 +58,24 @@ pub fn xcorr(x: &[f32], t: &[f32]) -> Vec<f32> {
 
 /// 상관 피크 하나.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Detection {
+pub(crate) struct Detection {
     /// `x`에서 템플릿 시작이 맞는 위치(샘플, 포물선 보간).
-    pub lag: f64,
+    pub(crate) lag: f64,
     /// 피크 |c| / 피크 주변을 뺀 상관 RMS. 무신호·잡음이면 작다.
-    pub ratio: f32,
+    pub(crate) ratio: f32,
     /// 정규화 상관계수 |c| / (‖t‖·‖x 구간‖). 0..1.
-    pub coeff: f32,
+    pub(crate) coeff: f32,
     /// 극성이 뒤집혀 도착했다(케이블/장치 위상 반전).
-    pub inverted: bool,
+    pub(crate) inverted: bool,
 }
 
 /// 루프백 판정 문턱: 피크/잡음 비, 상관계수.
-pub const MIN_RATIO: f32 = 10.0;
-pub const MIN_COEFF: f32 = 0.2;
+pub(crate) const MIN_RATIO: f32 = 10.0;
+pub(crate) const MIN_COEFF: f32 = 0.2;
 
 /// `c`(`xcorr` 결과)의 `[lo, hi)`에서 가장 큰 |c|를 찾는다. 잡음 RMS는 같은 범위에서 피크 앞 `guard_before`,
 /// 뒤 `guard_after` 샘플을 뺀 나머지로 잰다(잔향·부엽 제외).
-pub fn detect_in(c: &[f32], x: &[f32], t: &[f32], lo: usize, hi: usize, guard_before: usize, guard_after: usize) -> Option<Detection> {
+pub(crate) fn detect_in(c: &[f32], x: &[f32], t: &[f32], lo: usize, hi: usize, guard_before: usize, guard_after: usize) -> Option<Detection> {
     let hi = hi.min(c.len());
     if lo >= hi {
         return None;
@@ -119,7 +119,7 @@ pub fn detect_in(c: &[f32], x: &[f32], t: &[f32], lo: usize, hi: usize, guard_be
 }
 
 /// (중앙값, 최소, 최대, 표준편차). 빈 입력이면 None.
-pub fn summarize(v: &[f64]) -> Option<(f64, f64, f64, f64)> {
+pub(crate) fn summarize(v: &[f64]) -> Option<(f64, f64, f64, f64)> {
     if v.is_empty() {
         return None;
     }
@@ -147,12 +147,12 @@ pub enum MeasureVerdict {
 }
 
 /// 루프백: 반복 간 차이(최대 − 최소)가 이보다 크면 불안정.
-pub const UNSTABLE_SPREAD_MS: f64 = 1.0;
+pub(crate) const UNSTABLE_SPREAD_MS: f64 = 1.0;
 /// 에코: 클릭마다 입력 버스트 위상(≤ 입력 버퍼)과 지터 버퍼 보정(데드밴드 ≤ 프레임/2)이 달라 깨끗한 회선에서도
 /// 2~3ms 흩어진다. 이보다 크면 불안정. 흩어짐은 단일 이상치(`single_outlier`)를 뺀 값으로 잰다.
 pub const ECHO_UNSTABLE_SPREAD_MS: f64 = 5.0;
 /// 에코 이상치 제외: 검출이 이만큼 이상일 때만 1개를 뺄 수 있다(뺀 뒤에도 4개 이상이 남아 중앙값·흩어짐이 의미 있게).
-pub const ECHO_OUTLIER_MIN_RUNS: usize = 5;
+pub(crate) const ECHO_OUTLIER_MIN_RUNS: usize = 5;
 
 /// 정렬된 비어 있지 않은 슬라이스의 중앙값.
 fn median_sorted(s: &[f64]) -> f64 {
@@ -172,7 +172,7 @@ fn median_sorted(s: &[f64]) -> f64 {
 ///
 /// MAD(3σ) 기준은 표본 6~8개에서 너무 엄격했다: 실시간 측정에서 나머지 흩어짐 2.9ms·한 값만 2.75ms 낮게 튄
 /// `[65.05, 59.39, 63.96, 62.14, 64.66, 62.23]`이 3·1.4826·MAD = 4.85ms 기준을 못 넘어 불안정으로 남았다.
-pub fn single_outlier(v: &[f64]) -> Option<usize> {
+pub(crate) fn single_outlier(v: &[f64]) -> Option<usize> {
     if v.len() < ECHO_OUTLIER_MIN_RUNS {
         return None;
     }
@@ -193,25 +193,25 @@ pub fn single_outlier(v: &[f64]) -> Option<usize> {
 
 /// 에코 클릭 결과 요약(판정 포함, 상대 보고값 검사 전).
 #[derive(Debug, Clone, PartialEq)]
-pub struct EchoSummary {
-    pub verdict: MeasureVerdict,
+pub(crate) struct EchoSummary {
+    pub(crate) verdict: MeasureVerdict,
     /// 보낸 클릭 수.
-    pub runs: usize,
+    pub(crate) runs: usize,
     /// 검출된 클릭 수.
-    pub detected: usize,
+    pub(crate) detected: usize,
     /// 통계·판정에 쓴 클릭 수(= 검출 − 제외).
-    pub used: usize,
+    pub(crate) used: usize,
     /// 이상치로 뺀 클릭의 인덱스(클릭 순서 기준).
-    pub outlier: Option<usize>,
+    pub(crate) outlier: Option<usize>,
     /// 쓴 값의 (중앙값, 최소, 최대, 표준편차).
-    pub stats: Option<(f64, f64, f64, f64)>,
+    pub(crate) stats: Option<(f64, f64, f64, f64)>,
     /// 판정에 쓴 흩어짐(쓴 값의 최대 − 최소).
-    pub spread: Option<f64>,
+    pub(crate) spread: Option<f64>,
 }
 
 /// 클릭별 왕복(None = 미검출)을 요약·판정한다. 단일 이상치(`single_outlier`)는 빼고 본다. 과반 조건도 뺀 뒤의
 /// 개수(`used`)로 본다 — 이상치는 유효한 측정이 아니다.
-pub fn echo_summary(per: &[Option<f64>]) -> EchoSummary {
+pub(crate) fn echo_summary(per: &[Option<f64>]) -> EchoSummary {
     let idx: Vec<usize> = per.iter().enumerate().filter_map(|(i, v)| v.map(|_| i)).collect();
     let vals: Vec<f64> = per.iter().flatten().copied().collect();
     let out = single_outlier(&vals);
@@ -230,7 +230,7 @@ pub fn echo_summary(per: &[Option<f64>]) -> EchoSummary {
 }
 
 /// 에코 판정 메시지(UI에 그대로 보인다). `Unstable`은 원인(검출 부족 / 흩어짐)을 나눠 다시 재라고 안내한다.
-pub fn echo_message(s: &EchoSummary, one_way: Option<f64>, peer_bogus_delay_us: Option<u32>) -> String {
+pub(crate) fn echo_message(s: &EchoSummary, one_way: Option<f64>, peer_bogus_delay_us: Option<u32>) -> String {
     let excl = if s.outlier.is_some() { ", 튄 값 1개 제외" } else { "" };
     if let Some(d) = peer_bogus_delay_us {
         return format!(
@@ -286,9 +286,9 @@ fn verdict_with(runs: usize, detected: usize, clipped: bool, spread: Option<f64>
 pub(super) const CANCELLED: &str = "측정이 취소되었습니다";
 
 /// 이보다 긴 왕복은 찾지 않는다(장치 안전 여유 포함 넉넉히).
-pub const MAX_LOOPBACK_MS: f64 = 400.0;
+pub(crate) const MAX_LOOPBACK_MS: f64 = 400.0;
 /// 이 진폭 이상이면 클리핑으로 본다.
-pub const CLIP_LEVEL: f32 = 0.99;
+pub(crate) const CLIP_LEVEL: f32 = 0.99;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -298,7 +298,7 @@ pub struct LoopbackRun {
     pub peak_ratio: f32,
     pub correlation: f32,
     pub clipped: bool,
-    pub inverted: bool,
+    pub(crate) inverted: bool,
     /// 녹음 최대 진폭(0..1).
     pub input_peak: f32,
 }
@@ -309,7 +309,7 @@ pub(super) fn ms(frames: u32, rate: u32) -> f64 {
 
 /// 녹음 한 번 분석. `cap[k]`는 입력 프레임 `cap_start + k`다.
 #[allow(clippy::too_many_arguments)]
-pub fn analyze_loopback(
+pub(crate) fn analyze_loopback(
     cap: &[f32],
     stim: &[f32],
     rate: f64,
@@ -349,20 +349,20 @@ pub fn analyze_loopback(
 }
 
 /// 클릭 템플릿(48kHz): 5ms 처프 500Hz → 9kHz, Hann 페이드 1ms, 진폭 0.5. 코덱(Opus)을 지나도 상관 피크가 날카롭다.
-pub fn click_template() -> Vec<f32> {
+pub(crate) fn click_template() -> Vec<f32> {
     chirp(INTERNAL_RATE, 0.005, 500.0, 9_000.0, 0.5, 0.001)
 }
 
 /// 이보다 긴 에코 왕복은 찾지 않는다(클릭 간격보다 짧아야 클릭이 섞이지 않는다).
-pub const MAX_ECHO_MS: f64 = 280.0;
+pub(crate) const MAX_ECHO_MS: f64 = 280.0;
 /// 상대가 보고하는 되돌리기 처리 지연 상한(µs). 넘으면 잘라 쓰고 불안정으로 표시한다.
-pub const MAX_PEER_ECHO_DELAY_US: u32 = 50_000;
+pub(crate) const MAX_PEER_ECHO_DELAY_US: u32 = 50_000;
 /// 에코 판정 문턱(코덱을 지나므로 루프백보다 낮게).
-pub const ECHO_MIN_RATIO: f32 = 8.0;
-pub const ECHO_MIN_COEFF: f32 = 0.3;
+pub(crate) const ECHO_MIN_RATIO: f32 = 8.0;
+pub(crate) const ECHO_MIN_COEFF: f32 = 0.3;
 /// 돌아온 클릭 검출: 송신 시각마다 `[송신 + 1ms, 송신 + MAX_ECHO_MS]` 창에서 상관 피크를 찾는다.
 /// 반환: 클릭마다 왕복(ms), 못 찾으면 None.
-pub fn analyze_echo(emitted_us: &[f64], arrivals: &[f32], arrival_us: &[f64]) -> Vec<Option<f64>> {
+pub(crate) fn analyze_echo(emitted_us: &[f64], arrivals: &[f32], arrival_us: &[f64]) -> Vec<Option<f64>> {
     let tmpl = click_template();
     let c = xcorr(arrivals, &tmpl);
     let step = 1e6 / INTERNAL_RATE as f64;
