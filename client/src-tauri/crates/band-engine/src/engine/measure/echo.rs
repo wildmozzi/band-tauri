@@ -57,7 +57,9 @@ fn overflow_cut_window(overflow: u64, emitted_us: &[f64], arrival_us: &[f64]) ->
     }
 }
 
-/// 분석 창 끝 뒤로 탭이 더 담고 있어야 하는 길이(µs): 클릭 템플릿 5ms + 검출 여유 2ms(`analyze_echo`의 `guard`) + 1ms.
+/// 분석 창 끝 뒤로 탭이 더 담고 있어야 하는 길이(µs). 창 끝 근처 피크의 상관에는 클릭 템플릿 5ms(240샘플)와 포물선
+/// 보간용 1샘플이 더 필요하다. `analyze_echo`의 `guard`(2ms)는 `[lo, hi)` 안에서만 쓰여 창 뒤 샘플을 요구하지 않는다.
+/// 8ms는 템플릿 5ms에 여유 3ms를 더한 보수적 값이다.
 const ECHO_WINDOW_TAIL_US: f64 = 8_000.0;
 
 /// 클릭을 `runs`회 보낸 뒤 돌아오기를 듣는 시간(초).

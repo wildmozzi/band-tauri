@@ -620,21 +620,34 @@ fn echo_target_gets_silence_until_peer_stops_echoing() {
 /// #140 리뷰 L3 후속(②b-5): **요청 해제 Ping이 유실**되어 상대가 반사를 계속하는 동안에도 내 출력(되돌아오는 소리)은 무음이다.
 /// A는 상대가 "반사를 멈췄다"고 알려 올 때까지 프로브를 쥐고 대상에게 무음을 보내기 때문이다.
 ///
-/// 재현: B가 반사를 시작하고 1.5초 뒤부터 B가 반사를 멈출 때까지 프록시가 A → B Ping을 모두 버린다. B는 마지막 요청 Ping
-/// 뒤 `ECHO_LAPSE`(3초)까지 반사를 계속하므로 반사는 측정 결과 수거(동의 + 설치 1.5초 + 클릭·듣기 약 1.3초) 뒤로 1초 이상
-/// 이어진다. 그 끝은 A의 `ECHO_STOP_WAIT`(4초) 안이다.
+/// 재현: B가 반사를 시작하고 `LOST_PING_DROP_AFTER`(2초) 뒤부터 B가 반사를 멈출 때까지 프록시가 A → B Ping을 모두 버린다.
+/// B는 마지막 요청 Ping 뒤 `ECHO_LAPSE`(3초)까지 반사를 계속하므로 반사는 측정 결과 수거(동의 + 설치 1.5초 + 클릭·듣기
+/// 약 1.3초) 뒤로 1.5초 이상 이어진다. 그 끝은 A의 `ECHO_STOP_WAIT`(4초, 결과 수거 뒤 시작) 안이다. 시간 여유는 상수 주석.
 /// - 올바른 구현: 그동안 A는 무음을 보내므로 B가 되돌리는 것도 무음 → B가 반사를 멈춘 무렵 A의 출력은 무음.
 /// - 프로브를 결과 수거 때 거두는 구현(`run_inner`의 `tap_off` → `stop`): 수거 직후부터 사인이 B로 가고 B가 그것을
-///   반사를 멈출 때까지 되돌린다 → B가 멈추기 전 0.5초 ~ 멈춘 뒤 0.15초 창에 사인이 들린다(이 변이에서 실패함을 확인했다).
+///   반사를 멈출 때까지 되돌린다 → B가 멈추기 전 `LOST_PING_LATE_BEFORE` ~ 멈춘 뒤 0.15초 창에 사인이 들린다(이 변이에서
+///   실패함을 확인했다).
 #[test]
 #[ignore = "realtime: 결정적 짝 engine::measure::echo::tests::echo_rt_follows_measure_signals(탭을 꺼도 프로브는 stop까지 워커에 남는다)"]
 fn echo_lost_release_ping_keeps_my_echo_silent() {
+    // 시각은 모두 B의 반사 시작(on) 기준. Ping 간격 500ms(`PING_INTERVAL`), `ECHO_LAPSE` 3초, `ECHO_SETTLE` 1.5초,
+    // 클릭 간격 0.3초, 편도 0.1초(`sine_pair`).
+    // - 버리기 시작 2초: 마지막으로 닿은 요청 Ping은 on + [1.5, 2.0]초 → B는 on + [4.5, 5.0]초에 멈춘다. 결과 수거
+    //   (on + 약 2.8초)보다 1.7초 이상 뒤라 변이의 누출 구간이 길고, A가 B의 멈춤을 아는 시각(최대 on + 약 5.6초)은
+    //   A의 `ECHO_STOP_WAIT` 마감(결과 수거 + 4초 = on + 6.8초 이후, A가 늦을수록 늦어진다)보다 1.2초 이상 앞이다.
+    const LOST_PING_DROP_AFTER: Duration = Duration::from_millis(2_000);
+    // - 반사 하한 4초: 이론 하한 4.5초에서 넷 스레드의 Ping 송신·관찰 지연 0.5초를 뺀 값. 못 미치면 "재현 실패"다.
+    const LOST_PING_MIN_REFLECT: Duration = Duration::from_millis(4_000);
+    // - late 창 시작 = B가 멈추기 0.3초 전 ≥ on + 4.2초. 정상 구현에서도 들리는 마지막 클릭 반사(동의 인지 0~0.5초 + 설치
+    //   1.5초 + 셋째 클릭 0.6초 + 왕복 약 0.25초 = on + 최대 약 2.85초)보다 1.35초 이상 뒤라, 측정 스레드가 CI 부하로 그만큼
+    //   밀려야 겹친다. 변이는 결과 수거 직후(on + 약 3.0초)부터 B가 멈출 때까지 새므로 이 창에 여전히 걸린다.
+    const LOST_PING_LATE_BEFORE_MS: usize = 300;
     let _g = RT_LOCK.lock();
     let (a, b, sink_a, _sink_b, proxy) = sine_pair();
     let b = Arc::new(Mutex::new(b));
     let stop = Arc::new(AtomicBool::new(false));
     let acc = auto_accept(b.clone(), stop.clone());
-    // B의 반사 시작 → 1.5초 뒤 A → B Ping 버리기 시작 → B가 반사를 멈추면 버리기를 끝내고 그 순간의 A 출력 위치를 돌려준다.
+    // B의 반사 시작 → LOST_PING_DROP_AFTER 뒤 A → B Ping 버리기 시작 → B가 반사를 멈추면 버리기를 끝내고 그 순간의 A 출력 위치를 돌려준다.
     let watch = {
         let (b, sink_a, stop, drop_ping) = (b.clone(), sink_a.clone(), stop.clone(), proxy.drop_a_ping.clone());
         std::thread::spawn(move || {
@@ -643,7 +656,7 @@ fn echo_lost_release_ping_keeps_my_echo_silent() {
                 let active = b.lock().stats().peers.iter().any(|p| p.peer_id == "alice" && p.echo_active);
                 match on_at {
                     None if active => on_at = Some(Instant::now()),
-                    Some(t) if active && t.elapsed() >= Duration::from_millis(1500) => drop_ping.store(true, Ordering::Relaxed),
+                    Some(t) if active && t.elapsed() >= LOST_PING_DROP_AFTER => drop_ping.store(true, Ordering::Relaxed),
                     Some(t) if !active => {
                         let dropped = drop_ping.swap(false, Ordering::Relaxed);
                         return Some((sink_a.lock().len(), dropped, t.elapsed()));
@@ -663,14 +676,23 @@ fn echo_lost_release_ping_keeps_my_echo_silent() {
     let (na_off, dropped, reflect_for) = watch.join().unwrap().expect("B가 반사를 시작했다가 멈추는 것을 보지 못함");
     eprintln!("Ping 유실: B 반사 {reflect_for:?}, {rep:?}");
     assert!(dropped, "A → B Ping을 버리기 전에 B가 반사를 멈췄다(재현 실패)");
-    // 반사는 결과 수거(동의 + 1.5초 + 약 1.3초) 뒤로 이어져야 이 시험이 의미가 있다: 마지막 요청 Ping(≥ 1.0초) + 3초
-    assert!(reflect_for >= Duration::from_millis(3_800), "B 반사가 너무 일찍 끝났다: {reflect_for:?}");
+    // 반사는 결과 수거(동의 + 1.5초 + 약 1.3초) 뒤로 이어져야 이 시험이 의미가 있다(재현 확인).
+    assert!(reflect_for >= LOST_PING_MIN_REFLECT, "B 반사가 너무 일찍 끝났다(재현 실패): {reflect_for:?}");
     assert!(rep.detected_runs >= 2, "{rep:?}");
     // 반사 경로는 내 실제 소리를 나른다(프로브 설치 전에 나간 사인, 공허함 방지)
     let early = peak_of(&sink_a, n_start, n_start + frames(1_000));
     assert!(early > 0.2, "측정 초반에 되돌아온 내 소리가 들려야 한다: 최대 {early}");
     assert!(wait_until(HANG, || sink_a.lock().len() >= na_off.max(n_return) + frames(300)), "A 출력이 진행하지 않음");
-    let late = peak_of(&sink_a, na_off.saturating_sub(frames(500)), na_off + frames(150));
-    assert!(late < 0.02, "요청 해제 Ping이 유실된 동안 내 실제 소리가 상대에게 나갔다가 되돌아왔다: 최대 {late}");
+    let from = na_off.saturating_sub(frames(LOST_PING_LATE_BEFORE_MS));
+    let late = peak_of(&sink_a, from, na_off + frames(150));
+    // 실패 때 클릭 반사(측정 스레드 지연)인지 사인 누출인지 가를 수 있게 창 위치를 측정 시작 기준 초로 함께 적는다.
+    let sec = |n: usize| n.saturating_sub(n_start) as f64 / frames(1_000) as f64;
+    assert!(
+        late < 0.02,
+        "요청 해제 Ping이 유실된 동안 내 실제 소리가 상대에게 나갔다가 되돌아왔다: 최대 {late}, 창 {:.2}~{:.2}초(측정 시작 기준), 결과 반환 {:.2}초, B 반사 {reflect_for:?}, {rep:?}",
+        sec(from),
+        sec(na_off + frames(150)),
+        sec(n_return)
+    );
     drop(a);
 }
