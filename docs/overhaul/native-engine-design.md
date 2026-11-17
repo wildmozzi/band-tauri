@@ -597,6 +597,11 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - **관람자로 내리기**(P2-9, `requests.handleDemotePerformer`): 방장이 `demote-performer { targetId }`를 보낸다.
   - 권한: 보낸 사람이 DB `rooms.host_id`의 방장이어야 한다(다른 방장 조작과 같은 `requireHost`, 방 정보 캐시 최대 30초). 아니거나 `targetId`가 문자열이 아니면 응답 없이 무시한다.
   - 대상이 같은 방에서 연주 중(`start-performing` 뒤)이고 방장이 아닌 참가자가 아니면 보낸 사람에게 `error { code: 'demote-not-performer' }`.
+  - 대상이 `start-performing`을 보냈고 서버가 아직 권한 확인(방 정보 조회)을 기다리는 중이면, 그 시작을 취소하고 내린 것으로 처리한다: 승인 기록·대기 중 요청을 지우고 대상에게 `demoted-to-viewer`만 보낸다(아직 연주자가 아니라 `performer-updated`·`native-leave`는 없다). 전에는 방장이 `demote-not-performer`를 받고 대상은 곧이어 연주를 시작했다.
+    이 경합 창은 `canStartPerforming`이 방 정보를 조회할 때(승인 기록이 없고 방장이 아닌 경우 — `free_join` 방)만 열린다. 승인된 사용자·방장은 조회 없이 통과하므로 승인제 방에서는 생기지 않는다.
+- **연주 시작·중단과 대기 중 요청**(방장이 관찰하는 알림):
+  - `start-performing`이 성공하면 그 사람의 대기 중 참여 요청을 지우고 방장에게 `perform-request-cancelled { oderId }`(`free_join` 방에서 요청을 보낸 뒤 승인 없이 바로 시작한 경우). 요청자 앱은 연주가 시작되면 자기 요청 상태를 스스로 비운다.
+  - `stop-performing`은 그 사람의 대기 중 악기 변경 요청을 지우고 방장에게 `instrument-change-request-cancelled { oderId }`. 요청자 앱은 연주가 끝나면 자기 악기 변경 요청 상태를 스스로 비운다.
   - 처리 순서(= 받는 메시지 순서):
     1. 대상의 승인 기록 삭제 — 승인제 방이면 다시 연주하려면 새 참여 요청이 필요하다(`free_join` 방은 바로 다시 시작할 수 있다).
     2. 대상의 대기 중 요청 취소(퇴장 정리와 같은 `requests.onLeave`) → 방장에게 `perform-request-cancelled`, `instrument-change-request-cancelled`(있는 것만). 연주 중에도 참여 요청을 보낼 수 있어서, 남겨 두면 방장이 그 요청을 승인할 때 곧바로 다시 승인된다.

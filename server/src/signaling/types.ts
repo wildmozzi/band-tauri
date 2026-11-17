@@ -177,6 +177,12 @@ export interface Client {
   perform: {
     isPerforming: boolean
     instrument?: string
+    /**
+     * start-performing이 권한 확인(방 정보 조회 await)을 기다리는 중. 그 사이 방장이 내리면(demote) cancelledStart를 켜고
+     * 시작을 취소한다 — 아니면 방장은 demote-not-performer를 받고 대상은 곧이어 연주를 시작했다(시그널링 상태 점검)
+     */
+    starting?: boolean
+    cancelledStart?: boolean
   }
   /** nativeSession: 엔진 바인딩. stop-performing이 ssrc를 지운다 — 1.2-5 */
   native: {

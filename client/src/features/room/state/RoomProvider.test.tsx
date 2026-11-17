@@ -238,6 +238,25 @@ describe('RoomProvider', () => {
     clear.mockRestore()
   })
 
+  it('연주가 끝나면 내 악기 변경 요청 상태(변경 요청 중)를 비운다 — 서버도 stop-performing에서 요청을 지운다', () => {
+    act(() => joinRoom('r1'))
+    act(() => h.session.set({ phase: 'running', instrument: 'bass' }))
+    message({ type: 'instrument-change-request-sent', newInstrument: 'guitar' })
+    expect(store.getSnapshot().requests.myInstrumentChangeStatus).toBe('pending')
+    act(() => h.session.set({ phase: 'idle', instrument: null }))
+    expect(store.getSnapshot().requests.myInstrumentChangeStatus).toBe('none')
+  })
+
+  it('연주가 시작되면 내 참여 요청 상태(승인 대기 중)를 비운다 — 서버도 start-performing 성공 때 요청을 지운다 (#199 L-1)', () => {
+    act(() => joinRoom('r1'))
+    act(() => store.patch('requests', (r) => ({ perform: { ...r.perform, myStatus: 'pending' as const, myInstrument: 'bass', requestOutstanding: true } })))
+    act(() => h.session.set({ phase: 'running', instrument: 'bass' }))
+    expect(store.getSnapshot().requests.perform).toMatchObject({ myStatus: 'none', requestOutstanding: false })
+    // 연주를 멈춰도 "승인 대기 중"이 다시 보이지 않는다
+    act(() => h.session.set({ phase: 'idle', instrument: null }))
+    expect(store.getSnapshot().requests.perform.myStatus).toBe('none')
+  })
+
   it('방장 명령 demotePerformer는 demote-performer {targetId}를 보낸다', () => {
     act(() => joinRoom('r1'))
     act(() => actions.demotePerformer('a'))

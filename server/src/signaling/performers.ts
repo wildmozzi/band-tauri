@@ -88,11 +88,25 @@ export interface PerformersSvc {
   insecureDevMode: boolean
 }
 
+/** start-performing이 쓰는 조각: 연주를 시작하면 내 대기 중 참여 요청을 지운다(free_join에서 승인 없이 시작한 경우). 구조 타입 이유는 아래와 같다 */
+export interface StartPerformingSvc extends PerformersSvc {
+  requests: { dropPerformRequest(roomId: string, clientId: string, host: Client | null): void }
+}
+
+/**
+ * stop-performing이 쓰는 조각: 연주를 멈추면 그 사람의 대기 중 악기 변경 요청을 지운다(방장에게 instrument-change-request-cancelled).
+ * requests는 같은 계층이고 requests → performers 간선이 있어 import하지 않고 쓰는 함수만 구조 타입으로 받는다(순환 방지,
+ * requests.DemoteSvc와 같은 방식 — 전체 모양은 dispatch.ts가 검사)
+ */
+export interface StopPerformingSvc extends PerformersSvc {
+  requests: { dropInstrumentChange(roomId: string, clientId: string, host: Client | null): void }
+}
+
 /** `start-performing` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
-export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
+export async function handleStartPerforming(ctx: Ctx<StartPerformingSvc>, msg: Msg) {
   const { ws, client, id } = ctx
   const roomId = client.member.roomId
-  const { roomMemberIds, getClient, broadcastToRoom } = ctx.svc.registry
+  const { roomMemberIds, getClient, broadcastToRoom, findRoomHost } = ctx.svc.registry
   const { canStartPerforming } = ctx.svc.performers
   const { limits, insecureDevMode } = ctx.svc
   if (!roomId) return
@@ -101,7 +115,28 @@ export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
     send(ws, { type: 'error', code: 'login-required', message: '연주하려면 로그인이 필요합니다.' })
     return
   }
-  if (!(await canStartPerforming(client, roomId)) || client.member.roomId !== roomId) {
+  // 권한 확인(방 정보 조회)을 기다리는 동안 방장이 내릴 수 있다: 내리기가 cancelledStart를 켜면 시작하지 않는다
+  // (대상은 이미 demoted-to-viewer를 받았다). 이미 연주 중인 재전송은 내리기가 평소처럼 처리한다.
+  // 한계(#199 리뷰 L-2): 세션 재개(resume.attachSession)는 새 소켓의 체인을 옛 Client에 붙이므로 옛 소켓에서 진행 중이던 start와
+  // 재개 뒤 다시 보낸 start가 동시에 await할 수 있고, 두 start가 이 플래그(boolean)를 함께 쓴다 — 먼저 끝난 쪽이 starting을 내리거나
+  // cancelledStart를 소비하면 다른 쪽의 경합 처리는 빠진다. 창은 canStartPerforming이 방 정보를 조회하는 경우(승인 기록 없음·방장 아님,
+  // 즉 free_join이거나 어차피 거절될 때)만 열려 실해가 없다. 필요해지면 boolean 대신 시작 세대 번호로 바꾼다
+  const starting = !client.perform.isPerforming
+  if (starting) {
+    client.perform.starting = true
+    client.perform.cancelledStart = false
+  }
+  let allowed: boolean
+  try {
+    allowed = await canStartPerforming(client, roomId)
+  } finally {
+    if (starting) client.perform.starting = false
+  }
+  if (starting && client.perform.cancelledStart) {
+    client.perform.cancelledStart = false
+    return
+  }
+  if (!allowed || client.member.roomId !== roomId) {
     send(ws, { type: 'error', code: 'perform-not-approved', message: '방장의 승인이 필요합니다.' })
     return
   }
@@ -118,6 +153,8 @@ export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
   }
   client.perform.isPerforming = true
   client.perform.instrument = typeof msg.instrument === 'string' ? msg.instrument.slice(0, 50) : undefined
+  // free_join 방에서 참여 요청을 보낸 뒤 승인 없이 바로 시작했다: 방장 화면에 남은 요청을 지운다
+  ctx.svc.requests.dropPerformRequest(roomId, id, findRoomHost(roomId))
   const nickname = sanitizeNickname(msg.nickname)
   if (nickname) client.member.nickname = nickname
   // 클라이언트 isHost는 무시 (서버 판정)
@@ -127,12 +164,14 @@ export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
 }
 
 /** `stop-performing` — S3: 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
-export function handleStopPerforming(ctx: Ctx<PerformersSvc>, _msg: Msg) {
+export function handleStopPerforming(ctx: Ctx<StopPerformingSvc>, _msg: Msg) {
   const { client, id } = ctx
   const roomId = client.member.roomId
-  const { broadcastToRoom } = ctx.svc.registry
+  const { broadcastToRoom, findRoomHost } = ctx.svc.registry
   if (!roomId) return
 
+  // 연주를 멈춘 사람의 악기 변경 요청은 의미가 없다 — 방장 화면에 남아 승인되면 연주하지 않는 사람의 악기가 바뀌었다
+  ctx.svc.requests.dropInstrumentChange(roomId, id, findRoomHost(roomId))
   client.perform.isPerforming = false
   client.perform.instrument = undefined
   // 연주자가 아니게 되면 ssrc를 잊는다(토큰 갱신 불가 → 기존 토큰 만료와 함께 릴레이 슬롯 해제)

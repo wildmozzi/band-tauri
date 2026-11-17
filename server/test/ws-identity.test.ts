@@ -364,6 +364,26 @@ describe('instrument change request flows', async () => {
     assert.deepEqual(all.map(types), [[], [], []])
   })
 
+  it('5b. stop-performing with a pending request cancels it (host is told); a later approve does nothing', async () => {
+    const { roomId, host, perf, viewer, all } = await band()
+    perf.send({ type: 'request-instrument-change', newInstrument: 'bass' })
+    await settleAll(perf, all)
+    clear(...all)
+    perf.send({ type: 'stop-performing' })
+    await settleAll(perf, all)
+    // 연주를 멈춘 사람의 악기 변경 요청은 의미가 없다: 방장 화면에서 지운다(내리기·퇴장과 같음)
+    assert.ok(host.has(m => m.type === 'instrument-change-request-cancelled' && m.oderId === perf.id))
+    assert.ok(!viewer.has(m => m.type === 'instrument-change-request-cancelled'))
+
+    clear(...all)
+    host.send({ type: 'approve-instrument-change', targetId: perf.id })
+    await settleAll(host, all)
+    assert.deepEqual(all.map(types), [[], [], []])
+    // 늦게 들어온 방장도 지운 요청을 받지 않는다
+    const lateHost = await enter(url, 'tok:host', roomId)
+    assert.ok(!lateHost.has(m => m.type === 'instrument-change-request-received'))
+  })
+
   it('6. leave with a pending request cancels it; a host who joins later receives queued requests', async () => {
     const { host, perf, viewer, all } = await band()
     perf.send({ type: 'request-instrument-change', newInstrument: 'bass' })

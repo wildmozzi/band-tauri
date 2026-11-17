@@ -19,6 +19,12 @@ export function createRequests() {
    * 순서: perform-request-cancelled → instrument-change-request-cancelled. host는 퇴장 처리한 뒤의 방장(없으면 null).
    */
   function onLeave(roomId: string, clientId: string, host: Client | null) {
+    dropPerformRequest(roomId, clientId, host)
+    dropInstrumentChange(roomId, clientId, host)
+  }
+
+  /** 대기 중인 참여 요청을 지우고 방장에게 perform-request-cancelled (onLeave 첫째 단계, free_join에서 바로 연주를 시작했을 때) */
+  function dropPerformRequest(roomId: string, clientId: string, host: Client | null) {
     const requests = performRequests.get(roomId)
     if (requests) {
       const idx = requests.findIndex(r => r.oderId === clientId)
@@ -27,7 +33,6 @@ export function createRequests() {
         if (host) send(host.conn.ws, { type: 'perform-request-cancelled', oderId: clientId })
       }
     }
-    dropInstrumentChange(roomId, clientId, host)
   }
 
   /** 대기 중인 악기 변경 요청을 지우고 방장에게 instrument-change-request-cancelled (onLeave 둘째 단계) */
@@ -69,7 +74,7 @@ export function createRequests() {
     return { perform: performRequests.get(roomId) || [], instrument: instrumentChangeRequests.get(roomId) || [] }
   }
 
-  return { performList, instrumentList, pendingFor, onLeave, onRoomEmpty }
+  return { performList, instrumentList, pendingFor, onLeave, onRoomEmpty, dropInstrumentChange, dropPerformRequest }
 }
 
 export type Requests = ReturnType<typeof createRequests>
@@ -309,6 +314,17 @@ export async function handleDemotePerformer(ctx: Ctx<DemoteSvc>, msg: Msg) {
   const { roomId, targetId } = host
 
   const target = getRoomPeer(client, targetId)
+  if (target && !target.member.isHost && !target.perform.isPerforming && target.perform.starting) {
+    // 대상이 연주를 시작하는 중(권한 확인 await): 그 시작을 취소하고 내린 것으로 처리한다(시그널링 상태 점검).
+    // 아직 연주자가 아니라 엔진 바인딩·performer-updated·native-leave는 없다. 승인·요청은 아래와 같이 지운다
+    console.log(`[DEMOTE-PERFORMER] Host demoted ${target.id.slice(0, 8)} while starting - start cancelled`)
+    target.perform.cancelledStart = true
+    clearApproval(roomId, target.auth.userId)
+    onLeave(roomId, target.id, client)
+    if (target.conn.ws.readyState === target.conn.ws.OPEN) send(target.conn.ws, { type: 'demoted-to-viewer' })
+    else target.resume.pendingDemoted = true
+    return
+  }
   if (!target || !target.perform.isPerforming || target.member.isHost) {
     send(ws, { type: 'error', code: 'demote-not-performer', message: '연주 중인 참가자만 관람자로 내릴 수 있습니다.' })
     return
