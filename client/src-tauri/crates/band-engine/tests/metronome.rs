@@ -188,7 +188,7 @@ impl SimPeer {
     }
 
     /// 워커 반복(참 시각 `tau`): 콜백 시각 추정 → 스케줄.
-    fn poll(&mut self, tau: f64, plan: &MetronomePlan, offset: Option<f64>) {
+    fn poll(&mut self, tau: f64, gen: u64, plan: &MetronomePlan, offset: Option<f64>) {
         let wall = self.sys_us(tau).max(0.0) as u64;
         let t = self.tracker.observe(&self.counters, wall, self.spec.buffer, self.spec.rate);
         if t.cb_seq.is_none() {
@@ -203,7 +203,7 @@ impl SimPeer {
             }
         };
         let clock = OutClock { dev_now_us: t.dev_now_us as f64, played: t.played, rate: t.out_rate as f64, burst: t.out_burst as u64, extra_out_us };
-        self.sched.tick(1, plan, offset, &clock, &self.click);
+        self.sched.tick(gen, plan, offset, &clock, &self.click);
     }
 }
 
@@ -255,9 +255,9 @@ fn run(sc: &Scenario) -> Outcome {
             b.callback(tau);
         } else if tau == a.next_poll_us {
             if tau >= start_tau {
-                a.poll(tau, &plan_a, Some(0.0));
+                a.poll(tau, 1, &plan_a, Some(0.0));
             } else {
-                a.poll(tau, &MetronomePlan::default(), Some(0.0));
+                a.poll(tau, 1, &MetronomePlan::default(), Some(0.0));
             }
             a.next_poll_us = tau + 500.0 + rng.f() * 700.0;
         } else if tau == b.next_poll_us {
@@ -265,9 +265,9 @@ fn run(sc: &Scenario) -> Outcome {
             let off = clock.estimate(now_b).map(|e| e.offset_us);
             if tau >= start_tau + 150_000.0 {
                 // 시그널링이 150ms 뒤 도착
-                b.poll(tau, &plan_b, off);
+                b.poll(tau, 1, &plan_b, off);
             } else {
-                b.poll(tau, &MetronomePlan::default(), off);
+                b.poll(tau, 1, &MetronomePlan::default(), off);
             }
             b.next_poll_us = tau + 500.0 + rng.f() * 700.0;
         } else if tau == next_ping {
@@ -514,6 +514,102 @@ fn follower_recovers_quickly_after_callback_gap() {
         },
     );
     assert!(o.skipped <= 2, "공백 동안 건너뛴 클릭 {}", o.skipped);
+}
+
+// ============================================================================
+// 계획 세대 변경(#143 리뷰 L-5): 박 직전에 계획이 바뀌어도 새 계획의 박이면 울린다
+// ============================================================================
+
+/// 방장 하나(시스템 시계 = 참 시간, 48k/128)를 돌리며 참 시각 `changes[i].0`마다 계획 세대를 올리고 `changes[i].1`로 바꾼다.
+/// 반환: (클릭이 귀에 닿은 참 시각들, 늦은 클릭, 건너뛴 클릭).
+fn run_host_with_plan_changes(first: MetronomePlan, changes: &[(f64, MetronomePlan)], end_us: f64) -> (Vec<f64>, u64, u64) {
+    let mut rng = Rng(0x5EED_0000_0143_0005);
+    let mut a = SimPeer::new(spec(0.0, 0.0, 48_000, 0.0, 128, 1_000.0), 0x0143_0005_ABCD_EF01);
+    let (mut gen, mut plan) = (1, first);
+    let mut next = 0;
+    loop {
+        let tau = a.next_cb_us.min(a.next_poll_us);
+        if tau > end_us {
+            break;
+        }
+        if tau == a.next_cb_us {
+            a.callback(tau);
+            continue;
+        }
+        while next < changes.len() && changes[next].0 <= tau {
+            gen += 1;
+            plan = changes[next].1.clone();
+            next += 1;
+        }
+        a.poll(tau, gen, &plan, Some(0.0));
+        a.next_poll_us = tau + 500.0 + rng.f() * 700.0;
+    }
+    assert_eq!(a.tap_nonzero, 0, "믹스 탭에 클릭");
+    (a.onsets, a.click.late.load(Ordering::Relaxed), a.click.skipped.load(Ordering::Relaxed))
+}
+
+const L5_START_US: f64 = 1_000_000.0;
+
+fn l5_plan(bpm: f64, beats_per_bar: u32) -> MetronomePlan {
+    MetronomePlan { running: true, bpm, beats_per_bar, start_us: L5_START_US, ref_peer_id: None }
+}
+
+/// 클릭 시각들이 기대 박 시각들과 하나씩 짝지어지는지(±0.1ms).
+fn assert_onsets(name: &str, onsets: &[f64], expected: &[f64]) {
+    let got: Vec<String> = onsets.iter().map(|t| format!("{:.1}", (t - L5_START_US) / 1000.0)).collect();
+    println!("{name}: 클릭(박 0 기준 ms) {got:?}");
+    assert_eq!(onsets.len(), expected.len(), "{name}: 클릭 수 — 받은 {got:?}");
+    for (i, (t, e)) in onsets.iter().zip(expected).enumerate() {
+        assert!((t - e).abs() < 100.0, "{name}: {i}번째 클릭 {:.3}ms, 기대 {:.3}ms", (t - L5_START_US) / 1000.0, (e - L5_START_US) / 1000.0);
+    }
+}
+
+#[test]
+fn same_plan_resent_just_before_beat_keeps_that_beat() {
+    // 박 k(1..=19)의 귀 시각 k ms 전에 같은 계획을 다시 넣는다. 1~12ms 전은 클릭이 이미 가드(콜백 2개 + 2ms ≈ 12.7ms) 안이다.
+    // 전에는 세대가 바뀌면 그 클릭을 거두고 다음 박부터 올려 5~12ms 쪽 박(박 5~12)이 빠졌다(1~4ms 전이면 콜백이 이미 가져감).
+    let p = l5_plan(120.0, 4);
+    let period = p.period_us();
+    let changes: Vec<_> = (1..=19u64).map(|k| (L5_START_US + k as f64 * period - k as f64 * 1000.0, p.clone())).collect();
+    let (onsets, late, skipped) = run_host_with_plan_changes(p, &changes, L5_START_US + 19.5 * period);
+    let expected: Vec<f64> = (0..=19u64).map(|k| L5_START_US + k as f64 * period).collect();
+    assert_onsets("같은 계획 재전송", &onsets, &expected);
+    assert_eq!((late, skipped), (0, 0));
+}
+
+#[test]
+fn grid_preserving_plan_change_keeps_beat_and_takes_new_accent() {
+    // 박마다 8ms 전(가드 안)에 박자만 4 ↔ 3으로 바꾼다(박 격자는 같음): 박은 빠지지 않는다. 강박 비트는 스케줄러 단위 시험이 본다.
+    let period = l5_plan(120.0, 4).period_us();
+    let changes: Vec<_> = (1..=9u64).map(|k| (L5_START_US + k as f64 * period - 8000.0, l5_plan(120.0, if k % 2 == 1 { 3 } else { 4 }))).collect();
+    let (onsets, late, _) = run_host_with_plan_changes(l5_plan(120.0, 4), &changes, L5_START_US + 9.5 * period);
+    let expected: Vec<f64> = (0..=9u64).map(|k| L5_START_US + k as f64 * period).collect();
+    assert_onsets("박자 변경", &onsets, &expected);
+    assert_eq!(late, 0);
+}
+
+#[test]
+fn plan_change_just_before_beat_drops_it_only_if_not_a_new_beat() {
+    let p120 = l5_plan(120.0, 4);
+    // 박 4(2000ms) 5ms 전에 BPM 90(667ms 간격)으로: 2000ms는 새 계획의 박 3 → 울리고 그 뒤는 새 간격.
+    let p90 = l5_plan(90.0, 4);
+    let at = L5_START_US + 2_000_000.0 - 5000.0;
+    let (onsets, late, _) = run_host_with_plan_changes(p120.clone(), &[(at, p90.clone())], L5_START_US + 3_400_000.0);
+    let mut expected: Vec<f64> = (0..=4u64).map(|k| L5_START_US + k as f64 * 500_000.0).collect();
+    expected.extend((4..=5u64).map(|k| L5_START_US + k as f64 * p90.period_us()));
+    assert_onsets("BPM 90(박 겹침)", &onsets, &expected);
+    assert_eq!(late, 0);
+    // BPM 100(600ms 간격): 2000ms는 새 계획의 박이 아니다 → 거두고 새 계획의 다음 박 2400ms부터.
+    let (onsets, late, _) = run_host_with_plan_changes(p120.clone(), &[(at, l5_plan(100.0, 4))], L5_START_US + 3_300_000.0);
+    let mut expected: Vec<f64> = (0..=3u64).map(|k| L5_START_US + k as f64 * 500_000.0).collect();
+    expected.extend([2_400_000.0, 3_000_000.0].map(|t| L5_START_US + t));
+    assert_onsets("BPM 100(박 안 겹침)", &onsets, &expected);
+    assert_eq!(late, 0);
+    // 정지: 박 4 5ms 전에 멈추면 박 4는 울리지 않는다. 100ms 뒤 같은 계획으로 다시 켜면 박 5부터.
+    let stopped = MetronomePlan { running: false, ..p120.clone() };
+    let (onsets, _, _) = run_host_with_plan_changes(p120.clone(), &[(at, stopped), (at + 100_000.0, p120.clone())], L5_START_US + 2_700_000.0);
+    let expected: Vec<f64> = [0u64, 1, 2, 3, 5].iter().map(|&k| L5_START_US + k as f64 * 500_000.0).collect();
+    assert_onsets("정지 후 재시작", &onsets, &expected);
 }
 
 // ============================================================================
