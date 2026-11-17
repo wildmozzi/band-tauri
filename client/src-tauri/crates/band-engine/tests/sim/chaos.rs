@@ -220,6 +220,33 @@ fn chaos_delay_jump_20_150_20() {
     }
 }
 
+/// 지연 계단 + 순서 뒤바뀜(P2-16e): 20 → 150ms 계단에 패킷 30%가 U(0..6ms) 더 늦는다(지터 2ms). 계단 판정 전 0.5초에 묶여 오는
+/// 패킷이 생기면 늦은 패킷 버림(H1)이 옛 최소 지연 기준 깊이(≈130ms, 목표 상한 80ms)로 늦은 패킷을 버리고 다음 프레임을 은닉했다
+/// (P2-16e 전: 늦어서 버림 F 2.5ms 3 / F 5ms 1, 10~11s 은닉 62 / 28). 지금은 감시 중 최소 지연을 잠정 바닥으로 보아 버리지 않는다
+/// (0 / 0, 56 / 27 — 남은 은닉은 130ms 공백 몫).
+#[test]
+fn chaos_delay_jump_reordered() {
+    for frame in [120usize, 240] {
+        let mut np = base_peer(frame, 504);
+        np.reorder = Some((0.3, 6_000));
+        np.steps = vec![(0, 20_000, 2000), (us(10.0), 150_000, 2000), (us(20.0), 20_000, 2000)];
+        let r = run_multi(&MultiSim::new(25.0, vec![np]));
+        let p = &r.peers[0];
+        let up = window(p, 10.0, 20.0);
+        println!(
+            "CHAOS 지연 급변+뒤바뀜 F {frame}: 10~11s 은닉 이벤트 {}, 11~20s {}, 늦어서 버림 {}, 150ms 구간 언더런 {:.2}%, xruns {}",
+            p.conceal_between(us(10.0), us(11.0)),
+            p.conceal_between(us(11.0), us(20.0)),
+            p.js.late_dropped,
+            up.underrun_pct,
+            r.xruns
+        );
+        assert_eq!(p.js.late_dropped, 0, "F {frame}: 계단 판정 전 늦은 패킷 버림");
+        assert!(up.underrun_pct <= 1.4, "F {frame}: 150ms 구간 언더런 은닉 {:.2}%", up.underrun_pct);
+        assert_eq!(r.xruns, 0);
+    }
+}
+
 /// 지터 분포 급변: 균등 1ms → 15s에 파레토(척도 3ms, 꼬리 김) / 반대로 파레토 3ms → 균등 0.5ms. 나빠지면 목표가 올라가
 /// 은닉이 짧게 끝나야 하고, 좋아지면 목표가 다시 내려와야 한다(옛 꼬리를 오래 끌지 않음).
 #[test]

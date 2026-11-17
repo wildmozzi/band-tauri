@@ -187,7 +187,11 @@ impl JitterBuffer {
             let f = self.frame() as f64;
             let back = (self.fifo_end_ts - self.ts_ext(self.slots[Self::slot_index(self.next_seq)].ts)) as f64;
             if back >= f / 2.0 {
-                let err = self.depth.ewma().map(|e| e + back - self.target_samples()).unwrap_or(0.0);
+                // 지연 계단 감시 중(판정 전 0.5초)에는 깊이를 옛 최소 지연이 아니라 감시 중 최소 지연 기준으로 본다(P2-16e). 옛 기준
+                // 깊이는 계단 크기만큼 부풀어(+130ms 계단에서 ≈128ms, 목표 상한 80ms) 늦은 패킷을 버리고 다음 프레임을 은닉하는
+                // 교대가 판정까지 이어졌다(실제 쌓인 양은 0). 잠정 바닥 기준이면 늦은 패킷을 재생해 그만큼 쿠션을 쌓는다.
+                let shift = self.target.step_floor_shift(self.delay.min_transit());
+                let err = self.depth.ewma().map(|e| e - shift + back - self.target_samples()).unwrap_or(0.0);
                 if err >= f / 2.0 {
                     self.depth.add_ewma(back); // drop_one_packet이 F를 뺀다: 순증 back − F ≈ 0
                     self.drop_one_packet();
