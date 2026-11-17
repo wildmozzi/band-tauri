@@ -16,7 +16,11 @@
 //! 뒤에 있고 이 크레이트의 `test-support`가 켠다.
 
 /// 워커 경로 할당·해제 계수 할당자(엔진 ⑧ 후속). 하네스(`tests/sim`)와 이 크레이트의 단위 테스트가 글로벌 할당자로 건다(⑩-3).
-pub mod alloc;
+/// 정의는 `sys::alloc`(계층 0)이다 — 워커 루프(계층 4)가 시험 구성에서 반복 하나를 계수 구간으로 감싸므로(엔진 ⑧ 후속) 테스트
+/// 표면(7)에 두면 위 계층 사용이 된다. 테스트·하네스는 지금처럼 이 경로로 쓴다.
+pub mod alloc {
+    pub use crate::sys::alloc::{counted, Counting};
+}
 
 /// 엔진(`crate::engine`)에서 테스트가 쓰는 것. `worker`의 `PeerSources`·`PeerSourcesParts`·`POLL`·`FINE_POLL`은 이 구성
 /// (`test-support`)에서만 크레이트 밖에 보인다(하네스 `tests/sim`, ⑩-3).

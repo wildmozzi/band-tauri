@@ -83,7 +83,9 @@ impl SendPath {
         });
         if let Some(auto) = self.auto.as_mut() {
             auto.update(&self.net, peers, self.epoch.elapsed());
-            auto.encode_frames(frame, alt.map(|(id, _)| id), &mut self.encode_errors);
+            // 클릭 스트림을 받는 피어를 키로(같은 표 복사본에서 peerId는 하나다 — 교체는 net 표에서 한 번에 바뀐다).
+            let alt_key = alt.and_then(|(id, _)| peers.peers().iter().find(|p| p.id() == id).map(|p| p.key()));
+            auto.encode_frames(frame, alt_key, &mut self.encode_errors);
         }
         let auto = self.auto.as_ref();
         let lookup = |p: &Peer, kind: PathKind| -> Option<AutoPayload<'_>> { auto?.lookup(p, kind) };

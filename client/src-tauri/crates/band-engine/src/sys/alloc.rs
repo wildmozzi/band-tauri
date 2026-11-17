@@ -5,9 +5,13 @@
 //! 지금 스레드가 `counted` 구간 안일 때의 할당·재할당·**해제**만 센다. 표시도 카운터도 스레드별이라(`tests/rt_alloc.rs`와 같은
 //! 방식, P3-17) 병렬로 도는 다른 시험의 할당이 섞이지 않는다. 구간 밖에서는 스레드 로컬 `Cell` 하나를 읽고 `System`에 넘길 뿐이다.
 //!
-//! 쓰는 곳: 하네스 `tests/sim/tune.rs`의 `run_multi`가 워커 단계 호출(`PeerSources::service`·`close`)만 구간으로 감싼다 — 하네스
-//! 자신의 할당(패킷 `Vec`, 통계 표본)과 제어 평면 몫(`PeerMedia::new`, `MediaPort::reclaim`)은 구간 밖이다. 워커 단위 시험
-//! (`worker/tests.rs`의 레이트 불일치 시험)도 같은 방식으로 쓴다.
+//! 쓰는 곳:
+//! - 워커 루프(`Worker::run`, 시험 구성): 반복 하나 전체(수면 제외)를 구간으로 감싸 `WorkerStats::iter_allocs`에 더한다 —
+//!   `engine/tests.rs`가 시작·워밍업 뒤 정상 구간과 사건(피어 추가·교체·제거, 코덱 전환, 메트로놈, 녹음, 에코 측정) 동안 0을
+//!   단언한다. 그래서 정의가 계층 0(`sys`)에 있다(`testing::alloc`이 다시 내보낸다 — 워커가 테스트 표면(7)을 쓰면 위 계층 사용).
+//! - 하네스 `tests/sim/tune.rs`의 `run_multi`가 워커 단계 호출(`PeerSources::service`·`close`)만 구간으로 감싼다 — 하네스
+//!   자신의 할당(패킷 `Vec`, 통계 표본)과 제어 평면 몫(`PeerMedia::new`, `MediaPort::reclaim`)은 구간 밖이다. 워커 단위 시험
+//!   (`worker/tests.rs`의 레이트 불일치 시험)도 같은 방식으로 쓴다.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

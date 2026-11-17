@@ -595,3 +595,6 @@ impl Drop for Engine {
         self.stop();
     }
 }
+
+#[cfg(test)]
+mod tests;
