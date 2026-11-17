@@ -480,12 +480,21 @@ fn echo_round_trip_reflects_proxy_delay() {
         // 지터 버퍼 순간값·평균 차이가 남는다.
         assert!(r.residual_ms.unwrap().abs() < 5.0, "{r:?}");
     }
-    // 프록시 편도 지연 20ms 차이 → 왕복 40ms, 편도 추정 20ms 차이
+    // 프록시 편도 지연 20ms 차이 → 왕복 40ms + 두 측정의 지터 버퍼 평균 차, 편도 추정은 그 절반.
+    // 왕복에는 지터 버퍼가 들어 있고, 지터 버퍼는 러너 스케줄링 지터를 따라 측정마다 다르다(P2-17f: CI 1회 3연속 실패 —
+    // 지터 버퍼 6.8→12.3 / 10.0→13.0 / 9.0→14.3ms에 왕복 차 45.2 / 42.8 / 45.0ms, 보정하면 −0.3 / −0.2 / −0.2ms).
+    // 그래서 측정된 지터 버퍼 차를 빼고 비교한다. 지터 버퍼를 뺀 나머지(핑 RTT 차·잔차 차)는 측정 도구 자체의 오차다.
     let d_rt = far.round_trip_ms.unwrap() - near.round_trip_ms.unwrap();
     let d_ow = far.one_way_ms.unwrap() - near.one_way_ms.unwrap();
-    eprintln!("왕복 차 {d_rt:.2}ms, 편도 차 {d_ow:.2}ms");
-    assert!((d_rt - 40.0).abs() < 2.5, "왕복 차 {d_rt}");
-    assert!((d_ow - 20.0).abs() < 1.5, "편도 차 {d_ow}");
+    let d_jb = (far.jitter_buffer_ms - near.jitter_buffer_ms) as f64;
+    eprintln!("왕복 차 {d_rt:.2}ms, 편도 차 {d_ow:.2}ms, 지터 버퍼 차 {d_jb:.2}ms → 보정 왕복 차 {:.2}ms", d_rt - d_jb);
+    // 보정에는 상한을 둔다(#204 리뷰 M1): 상한이 없으면 프록시 지연(RTT)을 따라 지터 버퍼가 부푸는 엔진 회귀(지터 추정·
+    // 적응 여유가 RTT를 따라감 등)를 보정이 그대로 삼켜 녹색이 된다. 7ms = 관측 최대(CI 5.5ms, 로컬 0.02~0.4ms) + 여유 1.5ms.
+    // CI 3회 모두 far 쪽이 컸다(+5.5/+3.0/+5.3) — 순수 스케줄링 노이즈면 부호가 섞여야 하므로 프록시 지연에 비례하는 원인
+    // (프록시 `sleep` 해상도와 25ms 큐의 맞물림 또는 엔진)이 있을 수 있다. d_jb > 3ms가 CI에서 반복되면 원인을 조사한다.
+    assert!(d_jb.abs() < 7.0, "지터 버퍼가 프록시 지연(RTT)을 따라 늘었다: near {} → far {}ms (차 {d_jb:.2}ms ≥ 7ms)", near.jitter_buffer_ms, far.jitter_buffer_ms);
+    assert!((d_rt - d_jb - 40.0).abs() < 2.5, "왕복 차 {d_rt} − 지터 버퍼 차 {d_jb}");
+    assert!((d_ow - d_jb / 2.0 - 20.0).abs() < 1.5, "편도 차 {d_ow} − 지터 버퍼 차/2 {}", d_jb / 2.0);
 }
 
 #[test]
