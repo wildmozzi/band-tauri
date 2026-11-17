@@ -12,7 +12,9 @@
 
 /** Supabase에서 옮겨 올 논리 버킷 (이전 스크립트 대상). 프로필 사진(P2-12)은 처음부터 서버 경유라 이전 대상이 아니다 */
 export const LOGICAL_BUCKETS = ['audio-stems', 'post-images'] as const
-export type LogicalBucket = typeof LOGICAL_BUCKETS[number] | 'avatars'
+/** 이전 스크립트(scripts/migrate-storage.ts)가 다루는 버킷 */
+export type MigratableBucket = typeof LOGICAL_BUCKETS[number]
+export type LogicalBucket = MigratableBucket | 'avatars'
 
 export type StorageDriver = 'supabase' | 's3'
 

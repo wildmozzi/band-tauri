@@ -31,12 +31,12 @@ import { POST_IMAGE_ROUTE, postImageKeyFromParams } from '../src/lib/imageStorag
 import { readStorageConfig } from '../src/storage/config'
 import { createS3StorageAdapter } from '../src/storage/s3Adapter'
 import { createSupabaseStorageAdapter } from '../src/storage/supabaseAdapter'
-import { LOGICAL_BUCKETS, type LogicalBucket, type StorageAdapter, type StoredObject } from '../src/storage/types'
+import { LOGICAL_BUCKETS, type MigratableBucket, type StorageAdapter, type StoredObject } from '../src/storage/types'
 
 export interface Args {
   apply: boolean
   deleteSource: boolean
-  buckets: LogicalBucket[]
+  buckets: MigratableBucket[]
   limit: number | null
 }
 
@@ -47,7 +47,7 @@ export function parseArgs(argv: string[]): Args {
     if (a === '--apply') args.apply = true
     else if (a === '--delete-source') args.deleteSource = true
     else if (a === '--bucket') {
-      const b = argv[++i] as LogicalBucket
+      const b = argv[++i] as MigratableBucket
       if (!LOGICAL_BUCKETS.includes(b)) throw new Error(`--bucket must be one of ${LOGICAL_BUCKETS.join(', ')}`)
       args.buckets = [b]
     } else if (a === '--limit') {
@@ -85,7 +85,7 @@ export function planCopy(source: StoredObject[], targetSizes: Map<string, number
 }
 
 /** Supabase 공개 URL → 그 버킷의 key (아니면 null) */
-export function supabaseKeyFromUrl(url: string, bucket: LogicalBucket): string | null {
+export function supabaseKeyFromUrl(url: string, bucket: MigratableBucket): string | null {
   const marker = `/storage/v1/object/public/${bucket}/`
   let pathname: string
   try {
@@ -106,7 +106,7 @@ export function supabaseKeyFromUrl(url: string, bucket: LogicalBucket): string |
  * Supabase Storage URL의 모든 형태(public/sign/authenticated, render/image) → 그 버킷 key.
  * 삭제 판단(참조 확인)용 — 넓게 잡는다 (리뷰2 L1)
  */
-export function supabaseKeyFromAnyUrl(url: string, bucket: LogicalBucket): string | null {
+export function supabaseKeyFromAnyUrl(url: string, bucket: MigratableBucket): string | null {
   let pathname: string
   try {
     pathname = new URL(url).pathname
@@ -185,12 +185,12 @@ export interface MigrationDb {
    * knownUrls: 이번 실행에서 그 key를 가리키던 것으로 본 URL 문자열들 (정확 일치 검사용).
    * 확신할 수 없으면 true(지우지 않음)
    */
-  isSourceKeyReferenced(bucket: LogicalBucket, key: string, knownUrls: string[]): Promise<boolean>
+  isSourceKeyReferenced(bucket: MigratableBucket, key: string, knownUrls: string[]): Promise<boolean>
 }
 
 export interface MigrationDeps {
-  source: (bucket: LogicalBucket) => StorageAdapter
-  target: (bucket: LogicalBucket) => StorageAdapter
+  source: (bucket: MigratableBucket) => StorageAdapter
+  target: (bucket: MigratableBucket) => StorageAdapter
   db: MigrationDb
   /** 이미지 조회 URL (공개 URL이 없으면 PUBLIC_API_URL 리다이렉트). 둘 다 없으면 null → 이미지 DB 갱신 불가 */
   imageViewUrl: ((key: string) => string) | null
@@ -198,7 +198,7 @@ export interface MigrationDeps {
 }
 
 export interface BucketReport {
-  bucket: LogicalBucket
+  bucket: MigratableBucket
   objects: number
   bytes: number
   toCopy: number
@@ -397,7 +397,7 @@ export async function migrate(args: Args, deps: MigrationDeps): Promise<BucketRe
 }
 
 /** DB가 지금 원본(Supabase) URL로 가리키는 모든 key와 그 URL들 (폴더·확장자·URL 형태와 무관하게) */
-export async function sourceReferencedKeys(bucket: LogicalBucket, db: MigrationDb): Promise<{ keys: Set<string>; urls: Map<string, Set<string>> }> {
+export async function sourceReferencedKeys(bucket: MigratableBucket, db: MigrationDb): Promise<{ keys: Set<string>; urls: Map<string, Set<string>> }> {
   const keys = new Set<string>()
   const urls = new Map<string, Set<string>>()
   const add = (u: string) => {
