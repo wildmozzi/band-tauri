@@ -21,6 +21,7 @@ export function useCommunityFeed() {
   const { refetch } = postsQuery
   const retry = useCallback(() => { void refetch() }, [refetch])
   const trendingTags = trendingQuery.data ?? []
+  const trendingError = trendingQuery.isError && !trendingQuery.data
 
   useEffect(() => {
     if (postsQuery.error) console.error('Failed to fetch posts:', postsQuery.error)
@@ -62,6 +63,7 @@ export function useCommunityFeed() {
     loadError,
     retry,
     trendingTags,
+    trendingError,
     handleLike,
     handleTagClick,
   }

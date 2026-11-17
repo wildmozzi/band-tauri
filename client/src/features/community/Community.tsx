@@ -31,6 +31,7 @@ export function Community() {
     loadError,
     retry,
     trendingTags,
+    trendingError,
     handleLike,
     handleTagClick,
   } = useCommunityFeed()
@@ -374,7 +375,9 @@ export function Community() {
           >
             <h3 style={{ fontSize: '16px', fontWeight: '600', marginBottom: 'var(--space-3)' }}>트렌딩 태그</h3>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-2)' }}>
-              {trendingTags.length === 0 ? (
+              {trendingError && trendingTags.length === 0 ? (
+                <p style={{ color: 'var(--white-a50)', fontSize: '14px' }}>태그를 불러오지 못했습니다.</p>
+              ) : trendingTags.length === 0 ? (
                 <p style={{ color: 'var(--white-a50)', fontSize: '14px' }}>첫 게시물을 남겨주세요.</p>
               ) : (
                 trendingTags.map(({ tag, count }) => (

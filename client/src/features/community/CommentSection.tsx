@@ -5,6 +5,9 @@ import { formatRelativeTime } from './postLogic'
 
 interface CommentSectionProps {
   comments: Comment[]
+  /** 댓글 조회 실패(받은 목록 없음) — 개수 대신 오류 + 다시 시도 */
+  loadError?: boolean
+  onRetry?: () => void
   user: { id: string; email?: string } | null
   /** 최상위 댓글 작성. 성공 시 true */
   onAdd: (content: string) => Promise<boolean>
@@ -14,7 +17,7 @@ interface CommentSectionProps {
 }
 
 /** 댓글 입력 폼 + 댓글 목록. */
-export function CommentSection({ comments, user, onAdd, onReply, onEdit, onDelete }: CommentSectionProps) {
+export function CommentSection({ comments, loadError = false, onRetry, user, onAdd, onReply, onEdit, onDelete }: CommentSectionProps) {
   const [newComment, setNewComment] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -34,8 +37,14 @@ export function CommentSection({ comments, user, onAdd, onReply, onEdit, onDelet
       {/* 댓글 입력 */}
       <div style={{ padding: '28px' }}>
         <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: 'var(--space-4)' }}>
-          댓글 {comments.length}개
+          {loadError ? '댓글' : `댓글 ${comments.length}개`}
         </h3>
+        {loadError && (
+          <p role="alert" style={{ color: 'var(--white-a50)', fontSize: '14px', marginBottom: 'var(--space-4)' }}>
+            댓글을 불러오지 못했습니다.{' '}
+            {onRetry && <button type="button" className="btn-secondary" onClick={onRetry}>다시 시도</button>}
+          </p>
+        )}
         {user ? (
           <div>
             <textarea

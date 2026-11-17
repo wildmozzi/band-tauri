@@ -39,7 +39,7 @@ export function RoomDetail() {
   const { pendingRequests, requestNotice, dismissRequestNotice, approveRequest, rejectRequest, pendingInstrumentChanges, approveInstrumentChange, rejectInstrumentChange, requestInstrumentChange } = useRoomRequests()
   const { recordings, deleteRecording } = useRoomRecordings()
 
-  const { room, loading, hostNickname } = useRoomDetailData(roomId)
+  const { room, loading, hostNickname, loadError, retry } = useRoomDetailData(roomId)
   useRoomPresence(roomId, room)
 
   // 연주자 여부는 엔진 상태에서 파생 (엔진 시작 실패 시 자동으로 관람자로 남는다)
@@ -118,7 +118,14 @@ export function RoomDetail() {
   }
 
   if (!room) {
-    return null
+    if (!loadError) return null
+    return (
+      <div className="error-state" role="alert">
+        <p>합주실 정보를 불러오지 못했습니다. 인터넷 연결을 확인하고 다시 시도해주세요.</p>
+        <button type="button" onClick={retry}>다시 시도</button>
+        <button type="button" onClick={() => navigate('/rooms')}>목록으로</button>
+      </div>
+    )
   }
 
   // 방 안에서 끊긴 경우(재연결 중·포기)는 화면을 그대로 두고 상단 띠(ReconnectBanner)로 알린다 (P1-15b).

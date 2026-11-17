@@ -209,6 +209,23 @@ describe('방 상세 재입장 (리뷰 L1)', () => {
     expect(result.current.room?.id).toBe('r1')
   })
 
+  it('캐시 없이 처음 여는데 일시적 조회 오류면 목록으로 가지 않고 오류 + 다시 시도', async () => {
+    sb.mock!.setResult('rpc:get_room', { error: { message: 'no fn' } })
+    sb.mock!.setResult('rooms', { error: { message: 'network' } })
+    const { wrapper } = createQueryWrapper()
+    const { result } = renderHook(() => useRoomDetailData('r1'), { wrapper })
+
+    await waitFor(() => expect(result.current.loadError).toBe(true))
+    expect(navigate).not.toHaveBeenCalled()
+    expect(result.current.room).toBeNull()
+
+    // 복구 뒤 다시 시도하면 방을 받는다
+    sb.mock!.setResult('rpc:get_room', { data: [dbRow()] })
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.room?.id).toBe('r1'))
+    expect(result.current.loadError).toBe(false)
+  })
+
   it('방장 닉네임 조회가 실패하면 재시도 없이 바로 알 수 없음 (리뷰 L3)', async () => {
     sb.mock!.setResult('rpc:get_room', { data: [dbRow()] })
     sb.mock!.setResult('profiles', { error: { message: 'rls' } })

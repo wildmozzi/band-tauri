@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import type { Comment } from './communityApi'
@@ -38,15 +38,20 @@ export function usePostDetail(postId: string | undefined, user: CommunityUser | 
   const deleteComment = useDeleteCommentMutation()
   const deletePostMutation = useDeletePostMutation()
 
-  // 게시물이 없거나 불러오지 못하면 목록으로
+  // 게시물이 정말 없으면(조회 성공·null) 목록으로. 일시적 조회 오류(오프라인·DB 장애)면 이동하지 않고
+  // 오류 + 다시 시도를 보인다(링크로 들어온 사람이 말없이 목록으로 가지 않게)
   useEffect(() => {
-    if (postQuery.isError) {
-      console.error('Failed to fetch post:', postQuery.error)
-      navigate('/community')
-    } else if (postQuery.isSuccess && postQuery.data === null) {
-      navigate('/community')
-    }
-  }, [postQuery.isError, postQuery.isSuccess, postQuery.data, postQuery.error, navigate])
+    if (postQuery.isSuccess && postQuery.data === null) navigate('/community')
+  }, [postQuery.isSuccess, postQuery.data, navigate])
+
+  useEffect(() => {
+    if (postQuery.isError) console.error('Failed to fetch post:', postQuery.error)
+  }, [postQuery.isError, postQuery.error])
+
+  const { refetch: refetchPost } = postQuery
+  const { refetch: refetchComments } = commentsQuery
+  const retryPost = useCallback(() => { void refetchPost(); void refetchComments() }, [refetchPost, refetchComments])
+  const retryComments = useCallback(() => { void refetchComments() }, [refetchComments])
 
   useEffect(() => {
     if (commentsQuery.error) console.error('Failed to fetch comments:', commentsQuery.error)
@@ -134,7 +139,14 @@ export function usePostDetail(postId: string | undefined, user: CommunityUser | 
     post,
     comments: commentsQuery.data ?? EMPTY_COMMENTS,
     loading: postQuery.isPending,
+    /** 게시물을 받지 못했는데 일시 오류로 실패했다 */
+    loadError: postQuery.isError && !postQuery.data,
+    retryPost,
+    /** 댓글을 받지 못했는데 실패했다 — "댓글 0개"가 아니라 오류로 보인다 */
+    commentsError: commentsQuery.isError && !commentsQuery.data,
+    retryComments,
     trendingTags: trendingQuery.data ?? EMPTY_TAGS,
+    trendingError: trendingQuery.isError && !trendingQuery.data,
     deleting: deletePostMutation.isPending,
     handleLike,
     addComment,
