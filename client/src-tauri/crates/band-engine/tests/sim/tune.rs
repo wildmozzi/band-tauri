@@ -108,7 +108,8 @@ pub(super) enum WakeModel {
     /// U(0..`worker_jitter_us`) — 수면 길이와 무관. 기존 시나리오·fixture의 모델(기본 300µs, 실측보다 낙관적).
     Uniform,
     /// 실측 분위표(`WAKE_FINE`/`WAKE_POLL`)에서 역CDF 선형 보간으로 뽑는다 — `FINE_POLL`·`POLL` 수면마다 다른 분포.
-    /// `worker_jitter_us`는 쓰지 않는다.
+    /// `worker_jitter_us`는 쓰지 않는다. 한계: 수면마다 독립 표본이라 꼬리가 몰려 나는 현상(코어 파킹·전원 상태 전환 동안
+    /// 연속 늦은 기상)은 재현하지 않고, 분위표는 기계 한 대 유휴 측정이다 — 실제보다 낙관적일 수도 비관적일 수도 있다.
     Measured,
 }
 
