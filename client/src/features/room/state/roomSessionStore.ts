@@ -10,7 +10,7 @@
 import type { EngineStats, PeerStats } from '../../../native/engineApi'
 import type { MetronomeView } from '../../../native/metronomeLogic'
 import type { PerformState } from '../../../native/performSession'
-import { computeViewers, selectBroadcaster } from '../../../native/sessionLogic'
+import { computeViewers, selectBroadcaster } from '../../../native/broadcastLogic'
 import type { JoinError } from '../../rooms'
 import type { ChatMessage } from './chatModel'
 import { initialPerformRequestState, type InstrumentChangeRequest, type MyRequestStatus, type PerformRequestState } from './performRequestState'
