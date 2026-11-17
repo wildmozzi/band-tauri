@@ -27,6 +27,7 @@ import { separationIdParams, uploadFilenameParams } from './schemas'
  * 음원분리 결과 저장·조회·삭제는 StemSeparationService → stem_separations repository / StorageAdapter.
  * 스템 다운로드 URL은 서명 GET URL(만료 STEM_URL_TTL_SEC)로 내려준다.
  */
+// 500 응답에는 고정 문구만 보낸다. 내부 예외 메시지(파일 경로·DB·외부 API 응답)는 console.error 로그에만 남긴다(서버 보안 점검).
 const router = express.Router()
 const stems = getDefaultStemSeparationService()
 
@@ -230,7 +231,7 @@ router.post('/upload-score', uploadLimiter, requireAuth, upload.single('file'), 
     }
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: '파일 처리 중 오류가 발생했습니다.'
     })
   }
 })
@@ -266,7 +267,7 @@ router.get('/file/:filename', requireAuth, (req: Request, res: Response) => {
     console.error('[Music Download] 오류:', error)
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: '파일을 내려받지 못했습니다.'
     })
   }
 })
@@ -308,7 +309,7 @@ router.delete('/file/:filename', requireAuth, (req: Request, res: Response) => {
     console.error('[Music Delete] 오류:', error)
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: '파일을 삭제하지 못했습니다.'
     })
   }
 })
@@ -427,7 +428,7 @@ router.post('/separate-stems', uploadLimiter, requireAuth, upload.single('file')
     console.error('[Music Separate] 오류:', error)
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: '음원 분리 중 오류가 발생했습니다.'
     })
   }
 })
@@ -451,7 +452,8 @@ router.get('/stem-history', async (req: Request, res: Response) => {
     const separations = await stems.listHistory(userId)
     return res.json({ success: true, separations })
   } catch (error) {
-    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+    console.error('[Stem History] 오류:', error)
+    return res.status(500).json({ success: false, error: '분리 기록을 불러오지 못했습니다.' })
   }
 })
 
@@ -480,7 +482,8 @@ router.delete('/stem-separation/:id', async (req: Request, res: Response) => {
     return res.json({ success: true, message: '분리 결과가 삭제되었습니다.' })
   } catch (error) {
     if (error instanceof ServiceError) return res.status(error.status).json(error.body)
-    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+    console.error('[Stem Delete] 오류:', error)
+    return res.status(500).json({ success: false, error: '분리 결과를 삭제하지 못했습니다.' })
   }
 })
 

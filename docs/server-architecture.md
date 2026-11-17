@@ -31,7 +31,7 @@
 | H | **메트로놈** | 메트로놈 계약, 방장 이양 정책 | `metronome` 분기, `parseMetronomeState`, `replayMetronome`, `dropMetronomeIfHostChanged`, `broadcastMetronomeStop` | `metronomes`, `Client.pendingMetronomeStop` |
 | I | **참여 요청·악기 변경 요청** | 요청 UX | `request-perform`, `approve/reject/cancel-perform*`, `*-instrument-change*` 분기, `demote-performer`(P2-9: F·G·H 상태를 정리 — 엔진·메트로놈은 svc 구조 타입으로 부른다) | `performRequests`, `instrumentChangeRequests`, `approvals`(쓰기), `Client.instrument`(쓰기) |
 | J | **채팅** | 채팅 정책 | `chat` 분기 | 없음(중계만) |
-| K | **관람 WebRTC 중계** | 관람 방송 방식 | `offer`·`answer`·`ice-candidate` 분기 | 없음(중계만) |
+| K | **관람 WebRTC 중계** | 관람 방송 방식 | `offer`·`answer`·`ice-candidate` 분기 | `Client.relay`(중계 속도 제한: 보낸 사람→대상 메시지 버킷, 대상이 받는 바이트 버킷 — 표적 강퇴 방지) |
 | L | **정기 작업** | 운영 정책 | `heartbeat`(핑 + `seatHolds` 만료 정리), `scheduleParticipantUpdate` 디바운스, 토큰 만료 타이머, 유예 타이머, auth 타이머 | 위 묶음들의 상태 |
 
 ### 1.2 묶음 사이 결합 지점
@@ -363,7 +363,7 @@ S2가 가장 크다. 리뷰가 어려우면 모듈 두세 개씩 나눠 올린�
 
 ### 4.2 서버 권위(신원 불신)가 구조에 주는 제약
 
-- 중계 메시지는 **받은 것을 넘기지 않고 서버가 다시 만든다**(descriptor·chat·metronome). 그래서 `protocol.ts`의 송신 타입이 실제 계약이고, 핸들러는 그 타입의 객체를 새로 구성한다. `offer`/`answer`/`ice-candidate`만 `{ ...msg, from: id }`로 통째로 넘긴다(SDP는 서버가 해석하지 않음, `from`은 덮어씀) — 지금 동작이고 바꾸지 않는다.
+- 중계 메시지는 **받은 것을 넘기지 않고 서버가 다시 만든다**(descriptor·chat·metronome). 그래서 `protocol.ts`의 송신 타입이 실제 계약이고, 핸들러는 그 타입의 객체를 새로 구성한다. `offer`/`answer`/`ice-candidate`도 `{ type, to, from, offer|answer|candidate }`로 다시 만든다(서버 보안 점검 — 전에는 `{ ...msg, from: id }`로 통째로 넘겨 클라이언트가 덧붙인 필드가 상대에게 갔다). 본문은 RTC 초기화 객체의 알려진 키만 남기고 형식만 본다(SDP 내용은 해석하지 않음). 형식이 틀리면 중계하지 않는다.
 - `userId`를 쓰는 곳을 `auth` 하나로 좁히면(2.2절) "클라이언트 값이 신원으로 새는 경로"를 코드 검색 한 번으로 감사할 수 있다.
 
 ### 4.3 하지 않는 것 (과한 추상화 금지, D0-2)

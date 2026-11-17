@@ -37,7 +37,7 @@ async function startWs(limits: WsOptions['limits'] = {}, env: Record<string, str
   const server = createServer()
   const wss = initializeWebSocket(server, null, {
     env: { NODE_ENV: 'test', ...env },
-    limits: { joinBurst: 100, joinPerSec: 100, maxConnectionsPerIp: 200, ...limits },
+    limits: { joinBurst: 100, joinPerSec: 100, maxConnectionsPerIp: 200, authIpBurst: 1000, authIpPerSec: 1000, ...limits },
     deps: {
       hasBackend: true,
       verifyToken: testVerifier,
