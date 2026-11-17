@@ -17,8 +17,19 @@ export function checkAvatar(file: File): string | null {
   return null
 }
 
+const NETWORK_ERROR = '서버에 연결할 수 없습니다. 인터넷 연결을 확인하고 다시 시도해주세요.'
+
+/** fetch가 응답 없이 실패하면(오프라인·서버 다운) 사용자 문구로 — 아니면 화면에 "Failed to fetch"가 그대로 뜬다 */
+async function fetchOrNetworkError(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetchImpl(url, init)
+  } catch {
+    throw new Error(NETWORK_ERROR)
+  }
+}
+
 async function postJson(fetchImpl: typeof fetch, url: string, body: unknown) {
-  const res = await fetchImpl(url, {
+  const res = await fetchOrNetworkError(fetchImpl, url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify(body),
@@ -39,7 +50,7 @@ export async function uploadAvatar(file: File, fetchImpl: typeof fetch = fetch):
     throw new Error((issued.data.error as string) || `업로드 URL 발급 실패 (${issued.res.status})`)
   }
 
-  const put = await fetchImpl(upload.url, { method: upload.method, headers: upload.headers, body: file })
+  const put = await fetchOrNetworkError(fetchImpl, upload.url, { method: upload.method, headers: upload.headers, body: file })
   if (!put.ok) throw new Error(`사진 업로드 실패 (${put.status})`)
 
   const done = await postJson(fetchImpl, `${apiBase}/api/storage/avatars/complete`, { key: issued.data.key })

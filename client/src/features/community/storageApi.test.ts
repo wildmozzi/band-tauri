@@ -7,7 +7,7 @@ vi.mock('../../shared/lib/authHeaders', () => ({
   authHeaders: async () => ({ Authorization: 'Bearer tok' }),
 }))
 
-import { absoluteImageUrl, checkPostImage, uploadPostImage, POST_IMAGE_MAX_BYTES } from './storageApi'
+import { absoluteImageUrl, checkPostImage, ImageUploadError, uploadPostImage, POST_IMAGE_MAX_BYTES } from './storageApi'
 
 const png = (size = 8) => new File([new Uint8Array(size)], 'a.png', { type: 'image/png' })
 
@@ -95,6 +95,20 @@ describe('uploadPostImage', () => {
       return new Response(null, { status: 200 })
     })
     await expect(uploadPostImage(png(), rejected as unknown as typeof fetch)).rejects.toThrow('일치하지 않습니다')
+  })
+
+  it('throws ImageUploadError carrying the server reason and status (daily quota 429) so the form shows it', async () => {
+    const quota = vi.fn(async () => json(429, { success: false, error: '오늘 올릴 수 있는 이미지 수·용량을 넘었습니다. 내일 다시 시도해주세요.' }))
+    const err = await uploadPostImage(png(), quota as unknown as typeof fetch).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ImageUploadError)
+    expect(err).toMatchObject({ status: 429, message: '오늘 올릴 수 있는 이미지 수·용량을 넘었습니다. 내일 다시 시도해주세요.' })
+  })
+
+  it('maps a network failure (offline / server down) to a user message instead of "Failed to fetch"', async () => {
+    const offline = vi.fn(async () => { throw new TypeError('Failed to fetch') })
+    const err = await uploadPostImage(png(), offline as unknown as typeof fetch).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ImageUploadError)
+    expect((err as Error).message).toContain('서버에 연결할 수 없습니다')
   })
 
   it('does not call the server for invalid files', async () => {

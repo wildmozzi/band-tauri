@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../auth'
 import { usePostsQuery, useToggleLikeMutation, useTrendingTagsQuery } from './queries'
 import type { Post } from './communityApi'
@@ -16,6 +16,10 @@ export function useCommunityFeed() {
   const toggleLike = useToggleLikeMutation()
   const posts: Post[] = useMemo(() => postsQuery.data ?? [], [postsQuery.data])
   const loading = postsQuery.isPending
+  // 글 목록을 못 받았는데 조회가 실패했다(오프라인·DB 장애): "게시물이 없습니다"가 아니라 오류로 보여 준다
+  const loadError = postsQuery.isError && !postsQuery.data
+  const { refetch } = postsQuery
+  const retry = useCallback(() => { void refetch() }, [refetch])
   const trendingTags = trendingQuery.data ?? []
 
   useEffect(() => {
@@ -55,6 +59,8 @@ export function useCommunityFeed() {
     posts,
     popularPosts: popular,
     loading,
+    loadError,
+    retry,
     trendingTags,
     handleLike,
     handleTagClick,

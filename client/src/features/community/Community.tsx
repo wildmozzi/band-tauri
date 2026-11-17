@@ -28,6 +28,8 @@ export function Community() {
     posts,
     popularPosts,
     loading,
+    loadError,
+    retry,
     trendingTags,
     handleLike,
     handleTagClick,
@@ -247,6 +249,11 @@ export function Community() {
               {loading ? (
                 <div style={{ padding: 'var(--space-10)', textAlign: 'center', color: 'var(--white-a50)' }}>
                   로딩 중...
+                </div>
+              ) : loadError ? (
+                <div role="alert" style={{ padding: 'var(--space-10)', textAlign: 'center', color: 'var(--white-a50)' }}>
+                  게시물을 불러오지 못했습니다. 인터넷 연결을 확인하고 다시 시도해주세요.{' '}
+                  <button type="button" className="btn-secondary" onClick={retry}>다시 시도</button>
                 </div>
               ) : posts.length === 0 ? (
                 <div style={{ padding: 'var(--space-10)', textAlign: 'center', color: 'var(--white-a50)' }}>
