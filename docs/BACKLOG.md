@@ -103,7 +103,7 @@
 | P2-18c | **[결정]** 익명 관람자에게도 세션 재개(토큰)를 줄지 — 지금은 끊길 때마다 새 id라 연주자 앱이 재협상, 관람 오디오 수 초 무음 / 관람자 쪽 재요청(viewer-retry) 신호 | 결정 후 서버·클라이언트 | 대기 (사용자 결정) |
 | P2-18d | **[결정]** 관람자 ICE에 STUN만 있고 TURN 없음 → 대칭 NAT·회사망 관람 실패. TURN(coturn 자체 운영 / Cloudflare 등 외부 서비스) 단기 자격 서버 발급 — 외부 서비스·비용 | **[사람]** LTE 테더링·회사망에서 관람 | 대기 (사용자 결정) |
 | P2-18e | **[사람]** 실제 연주자 앱 ↔ Vercel 웹 관람 실망 청취, 재연결 뒤 재offer 시간, iOS Safari 자동재생·오디오 잠금 해제(e2e는 Chromium만) | 확인 | 대기 |
-| P2-19 | 발굴 파서 퍼징(시드 고정, 테스트만): 패킷 헤더·지터·handle_packet 끝에서 끝·open 변조·STUN·Ping/Pong·릴레이 Ack/토큰·relay handle — 긴 판(수백만 입력) 결함 0 | --ignored 긴 판 | 진행 (PR #190 리뷰 중) |
+| P2-19 | 발굴 파서 퍼징(시드 고정, 테스트만): 패킷 헤더·지터·handle_packet 끝에서 끝·open 변조·STUN·Ping/Pong·릴레이 Ack/토큰·relay handle — 긴 판(수백만 입력) 결함 0 | BAND_FUZZ_LONG=1 긴 판 | 완료(PR #190, 2026-11-17) |
 | P2-19b | 제어 seq를 출발지 확인(accept_rx) 전에 소모 → 다른 주소 사본이 진짜 Ping/Pong/Bye seq를 먹음(Low) / 오디오 재생 사본이 수신 링 128칸 차지(Low) — 피어별 오디오 seq 창 | 회귀 테스트 | 진행 (작업자 w-d-fuzz) |
 | P3-13 | 데모 ScoreDisplay 정리(#105 발견): 첫 렌더·리사이즈의 페이지 분할 규칙 통일(지금 창 크기를 조금 바꾸면 페이지 수가 달라짐), 커서 effect가 측정·페이지마다 rAF 루프 재생성·매 프레임 Math.random 로그, console.log 과다 | scoreLayout 테스트 | 완료(#163 — computePageLayout 하나로 통일, SVG 사용자 좌표→CSS px 배율 변환(리뷰 H1), 커서 img style.top으로 자동 넘김, ResizeObserver+500ms 디바운스, 로그 제거; **[사람]** 데모 화면: 페이지 수·자동 넘김·2쪽 이후 커서·리사이즈) |
 | P3-14 | e2e `port.test.ts` 동시 포트 테스트 flaky(#105 발견) — 원인 확인 후 결정적으로 | 20회 반복 녹색 | 완료(#114 — pick-port 잠금 원자 생성(link)·죽은 잠금 회수 직렬화, 제품 코드 버그였음; 부하 12병렬 100회 녹색) |
