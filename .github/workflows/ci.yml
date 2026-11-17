@@ -177,6 +177,58 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  rust-linux:
+    # 비Windows 엔진 구성(⑨b-1·⑨b-2 리뷰): `band-engine`의 `cfg(not(windows))` 경로와 Windows 밖 기본 장치 구성(cpal만 — 자체 WASAPI는
+    # `cfg(windows)`)이 컴파일되는지 본다. 앱(`band`, tauri — WebKitGTK 등 시스템 의존과 프런트 dist가 필요)은 빌드하지 않는다:
+    # 모든 명령에 `-p`를 붙여 `default-members`의 앱을 빼고, dist 자리 표시도 두지 않는다(앱을 빌드하면 여기서 실패한다).
+    # 타깃 OS는 Windows이므로 실시간(`#[ignore = "realtime"]`)·장시간 시험은 돌리지 않는다 — 결정적 시험만.
+    # 경로 필터는 Windows `rust` 잡과 같은 `engine`이다.
+    name: Rust engine (Linux, 비Windows 구성)
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+        working-directory: client/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - name: System deps (ALSA — cpal 리눅스 백엔드)
+        # cpal의 리눅스 기본 호스트(ALSA)가 `alsa-sys`로 libasound를 pkg-config로 찾는다. opus(audiopus_sys)는 러너에 있는 CMake로 빌드한다.
+        timeout-minutes: 5
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
+        with:
+          workspaces: client/src-tauri
+          key: linux
+      - name: Test (band-dsp)
+        timeout-minutes: 15
+        run: cargo test -p band-dsp
+      - name: Clippy (band-engine, 기본 피처)
+        # 리눅스에서 기본 피처 = cpal + `backend-wasapi`(켜도 `cfg(windows)` 밖이라 아무것도 더하지 않는다, band-engine Cargo.toml 주석).
+        # `feature = "backend-wasapi"`만 보고 `windows`를 쓰는 코드가 생기면 여기서만 실패한다.
+        timeout-minutes: 20
+        run: cargo clippy -p band-engine --all-targets -- -D warnings
+      - name: Clippy (band-engine, cpal 백엔드만)
+        timeout-minutes: 20
+        run: cargo clippy -p band-engine --no-default-features --features backend-cpal,test-support --all-targets -- -D warnings
+      - name: Clippy (band-engine, 백엔드 없음)
+        timeout-minutes: 20
+        run: cargo clippy -p band-engine --no-default-features --features test-support --all-targets -- -D warnings
+      - name: Test (band-engine, 백엔드 없음, 결정적)
+        # 가짜 장치·하네스(`sim`)·릴레이 폴백 등 결정적 시험. 실시간 시험은 ignore라 돌지 않는다.
+        timeout-minutes: 25
+        run: cargo test -p band-engine --no-default-features --features test-support
+        env:
+          SIM_REPORT_DIR: ${{ runner.temp }}/sim-report
+
   long-sim:
     # 장시간 시뮬레이션(P1-6): 6피어 풀메시 60분 가상 시간(결정적, 디버그 빌드 로컬 약 8분 — 러너는 더 느릴 수 있다). GOAL 1·2절 수치를 자동 판정해
     # Markdown·JSON 리포트를 남긴다. 야간 schedule과 수동 실행(long_sim 입력)에서만 돈다.

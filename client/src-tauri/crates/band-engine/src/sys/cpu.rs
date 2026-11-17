@@ -61,8 +61,6 @@ pub fn process_cycles() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, Instant};
 
     #[test]
     fn cycle_pct_edges() {
@@ -85,8 +83,9 @@ mod tests {
     #[test]
     #[ignore = "realtime: 벽시계·스케줄러 의존 — CI realtime 잡에서 직렬 실행"]
     fn realtime_cycles_track_sleepy_busy_thread() {
-        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::Arc;
+        use std::time::{Duration, Instant};
         for (sleep_us, busy_us) in [(1000u64, 200u64), (5000, 500), (2500, 1000)] {
             let stop = Arc::new(AtomicBool::new(false));
             let busy_ns = Arc::new(AtomicU64::new(0));
