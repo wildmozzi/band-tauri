@@ -57,6 +57,15 @@ pub(super) struct NetPeer {
     pub join_us: u64,
     /// 실행 중 제거(②b-3b): 이 시각 이후 첫 워커 사건 직전에 `Remove`를 넣는다. 그 뒤 도착한 패킷은 버린다.
     pub leave_us: Option<u64>,
+    /// 반복 이탈·재접속(혼돈 시나리오): (이탈 µs, 재접속 µs) 목록. 이탈은 `leave_us`와 같고, 재접속은 새 키·새 `PeerMedia`로
+    /// 다시 `Add`한다(엔진에서 피어가 제거된 뒤 다시 들어오는 것과 같다 — 송신 쪽 seq·ts는 이어진다). `leave_us`와 같이 쓰지 않는다.
+    pub rejoins: Vec<(u64, u64)>,
+    /// 중복(혼돈): (확률, 추가 지연 상한 µs). 패킷마다 이 확률로 사본 하나를 원본 지연 + U(0..상한) 뒤에 더 보낸다.
+    pub dup: Option<(f64, u64)>,
+    /// 순서 뒤바뀜(혼돈): (확률, 추가 지연 상한 µs). 패킷마다 이 확률로 U(0..상한)만큼 더 늦게 보낸다(뒤 패킷에 추월당한다).
+    pub reorder: Option<(f64, u64)>,
+    /// 지터 분포 급변(혼돈): 이 시각(µs)부터 분포를 바꾼다. 크기는 `net_jitter_us`·`steps`를 그대로 따른다.
+    pub dist_switch: Option<(u64, JitDist)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -68,7 +77,7 @@ pub(super) enum JitDist {
 
 impl NetPeer {
     pub fn new(frame: usize, seed: u64) -> Self {
-        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None }
+        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None, rejoins: Vec::new(), dup: None, reorder: None, dist_switch: None }
     }
 }
 
@@ -128,6 +137,12 @@ pub(super) struct PeerOut {
     pub tx_sent: u64,
     pub tx_lost: u64,
     pub tx_outage: u64,
+    /// 세션(`PeerMedia`)마다 마지막 통계, 시작 순서대로(`rejoins`, 혼돈). 이탈한 세션은 이탈 때, 끝까지 남은 세션은 끝에 넣는다 —
+    /// 세션마다 정확히 한 번(#185 리뷰 L2: 전에는 끝난 세션만 넣고 `js`를 덧붙여 써서, 이탈한 채 끝나면 마지막 세션을 두 번 셌다).
+    /// `js`는 마지막 세션의 통계다.
+    pub sessions: Vec<JitterStats>,
+    /// 망이 만든 중복 사본 수(`dup`).
+    pub tx_dup: u64,
 }
 
 /// 100ms 표본: 시각(s), bufferMs, targetMs, 재생 중 여부, 누적 은닉·생산 프레임.
@@ -238,6 +253,9 @@ struct TxState {
     block_no: u64,
     /// Gilbert–Elliott 나쁨 상태.
     ge_bad: bool,
+    /// 혼돈 입력(`dup`·`reorder`) 전용 난수(#185 리뷰 M1): `rng`와 따로 뽑아, 켜도 손실·지터 난수열이 그대로다 —
+    /// 같은 시드의 "혼돈 없는 같은 회선"과 손실·지터 실현이 같다.
+    chaos_rng: rand::rngs::StdRng,
 }
 
 pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
@@ -274,7 +292,12 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
     // (피어, 슬롯, DRAIN을 봤는가): 제거한 피어의 슬롯이 DRAIN → FREE로 가는 것을 본다.
     let mut draining: Vec<(usize, usize, bool)> = Vec::new();
     let mut churn: Vec<(u64, usize, ChurnEv)> = Vec::new();
-    let churning = p.peers.iter().any(|np| np.join_us > 0 || np.leave_us.is_some());
+    let churning = p.peers.iter().any(|np| np.join_us > 0 || np.leave_us.is_some() || !np.rejoins.is_empty());
+    assert!(p.peers.iter().all(|np| np.rejoins.is_empty() || np.leave_us.is_none()), "rejoins와 leave_us는 같이 쓰지 않는다");
+    // 재접속(혼돈): 피어마다 지금 키, 다음 rejoins 번호, 이탈해 반환된 옛 공유 쪽(끝에 누수 확인).
+    let mut keys: Vec<PeerKey> = (0..n).map(|i| PeerKey::from_raw(i as u64 + 1)).collect();
+    let mut rj = vec![0usize; n];
+    let mut retired = Vec::new();
     let mut mtxs = Vec::new();
     let mut txs = Vec::new();
     // 워커 단계(`PeerSources::service`·`close`) 안에서 일어난 할당·재할당·해제 수(엔진 ⑧ 후속). 0이어야 한다.
@@ -315,6 +338,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             block: Vec::new(),
             block_no: 0,
             ge_bad: false,
+            chaos_rng: rand::rngs::StdRng::seed_from_u64(np.seed ^ 0xC4A0_5000),
         });
     }
     let mut tracker = CallbackTracker::new(48_000);
@@ -419,12 +443,25 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                 if let Some(&(_, extra, j)) = np.steps.iter().rev().find(|s| t >= s.0) {
                     (path_extra, jit_us) = (extra, j);
                 }
-                let jitter = match np.dist {
+                let dist = match np.dist_switch {
+                    Some((ts, d)) if t >= ts => d,
+                    _ => np.dist,
+                };
+                let jitter = match dist {
                     JitDist::Uniform => tx.rng.gen_range(0..jit_us.max(100)),
                     JitDist::Exp => (-(1.0 - tx.rng.gen::<f64>()).ln() * jit_us as f64) as u64,
                     JitDist::Pareto => (jit_us as f64 * 1.5 * ((1.0 - tx.rng.gen::<f64>()).powf(-1.0 / 2.5) - 1.0)).min(200_000.0) as u64,
                 };
-                let delay = 200 + jitter + spike + path_extra;
+                let mut delay = 200 + jitter + spike + path_extra;
+                if let Some((pr, max)) = np.reorder {
+                    if tx.chaos_rng.gen_bool(pr) {
+                        delay += tx.chaos_rng.gen_range(0..max.max(1));
+                    }
+                }
+                let dup_extra = match np.dup {
+                    Some((pr, max)) if tx.chaos_rng.gen_bool(pr) => Some(tx.chaos_rng.gen_range(0..max.max(1))),
+                    _ => None,
+                };
                 // 기존 시나리오의 난수 순서를 바꾸지 않도록 새 조건(버스트·단절)은 쓸 때만 난수를 뽑는다.
                 let mut lost = np.loss > 0.0 && tx.rng.gen_bool(np.loss);
                 if let Some((p_gb, p_bg)) = np.burst {
@@ -440,6 +477,10 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     o.tx_lost += 1;
                 } else {
                     pending.push((t + delay, pi, h, payload[..nb].to_vec()));
+                    if let Some(extra) = dup_extra {
+                        o.tx_dup += 1;
+                        pending.push((t + delay + extra, pi, h, payload[..nb].to_vec()));
+                    }
                 }
                 tx.seq = tx.seq.wrapping_add(1);
                 tx.ts = tx.ts.wrapping_add(np.frame as u32);
@@ -468,11 +509,29 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                         order.push(i);
                         churn.push((t, i, ChurnEv::Join));
                     }
-                    if !left[i] && p.peers[i].leave_us.is_some_and(|l| t >= l) {
+                    let rejoin_at = p.peers[i].rejoins.get(rj[i]).copied();
+                    if left[i] && rejoin_at.is_some_and(|r| t >= r.1) {
+                        // 재접속: 새 키·새 PeerMedia(제어 평면 할당 — 워커 계수 밖). 옛 공유 쪽은 누수 확인용으로 남긴다.
+                        rj[i] += 1;
+                        let key = PeerKey::from_raw(i as u64 + 1 + 16 * rj[i] as u64);
+                        let (mtx, mrx) = media_link(key);
+                        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, t, settings, mrx, 48_000).expect("48k 통과 리샘플러");
+                        shared.mix.gain.store(0.15);
+                        retired.push(std::mem::replace(&mut shareds[i], shared));
+                        mtxs[i] = mtx;
+                        keys[i] = key;
+                        let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Add(media));
+                        order.push(i);
+                        left[i] = false;
+                        seen_conc[i] = 0;
+                        churn.push((t, i, ChurnEv::Join));
+                    } else if !left[i] && (p.peers[i].leave_us.is_some_and(|l| t >= l) || rejoin_at.is_some_and(|r| t >= r.0)) {
                         if let Some(pos) = order.iter().position(|&x| x == i) {
                             // 마지막 통계는 제거 직전 것(이전 워커 사건의 결과)
                             outs[i].js = sources.media_at(pos).jitter().stats();
-                            let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Remove(PeerKey::from_raw(i as u64 + 1)));
+                            let last = outs[i].js;
+                            outs[i].sessions.push(last);
+                            let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Remove(keys[i]));
                             order.remove(pos);
                             left[i] = true;
                             churn.push((t, i, ChurnEv::Leave));
@@ -489,7 +548,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
             // 명령은 그 반복에 적용된다(J1): 표 길이·순서가 바로 맞고, 새 피어는 슬롯을 받고, 제거된 피어의 슬롯은 DRAIN이다.
             assert_eq!(sources.table_len(), order.len(), "t={t}: 워커 표 길이");
             for (pos, &i) in order.iter().enumerate() {
-                assert_eq!(sources.media_at(pos).shared().key, PeerKey::from_raw(i as u64 + 1), "t={t}: 표 순서");
+                assert_eq!(sources.media_at(pos).shared().key, keys[i], "t={t}: 표 순서");
                 if slot_of[i].is_none() {
                     if let Some(s) = sources.feed_slot(pos) {
                         slot_of[i] = Some(s);
@@ -550,6 +609,8 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
         let _ = pm.ingest(profile);
         assert_eq!(pm.rx_dropped(), 0, "하네스에서 수신 큐가 넘쳤다(피어 {i})");
         outs[i].js = pm.jitter().stats();
+        let last = outs[i].js;
+        outs[i].sessions.push(last);
     }
     // 정지(엔진 ⑧ 후속): 워커는 표에 남은 피어를 리샘플러째 반환 큐로 보내고(할당·해제 0), 해제는 제어 평면의 `reclaim`이 한다.
     // 실행 중 제거된 피어는 이미 `reclaim`됐거나 아직 반환 큐에 있다 — 어느 쪽이든 워커가 해제한 것은 없다.
@@ -563,6 +624,9 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
     for (i, s) in shareds.iter().enumerate() {
         let never_joined = waiting[i].is_some();
         assert_eq!(Arc::strong_count(s), 1 + usize::from(never_joined), "피어 {i}: 반환 큐를 비운 뒤 남은 참조(누수)");
+    }
+    for (k, s) in retired.iter().enumerate() {
+        assert_eq!(Arc::strong_count(s), 1, "재접속 전 세션 {k}: 반환 큐를 비운 뒤 남은 참조(누수)");
     }
     assert_eq!(worker_allocs, 0, "워커 단계(PeerSources::service·close)가 할당·해제를 {worker_allocs}회 했다");
     MultiOut { peers: outs, xruns: counters.xruns.load(Ordering::Relaxed), xrun_us, churn }

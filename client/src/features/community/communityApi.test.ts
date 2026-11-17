@@ -24,6 +24,15 @@ afterEach(() => {
 })
 
 describe('communityApi', () => {
+  it('getPost: 없음(PGRST116)과 uuid 형식이 아닌 id(22P02, 잘린 링크)는 null, 그 밖의 오류는 throw (#197 리뷰 L-1)', async () => {
+    sb.mock!.setResult('posts', { error: { code: '22P02', message: 'invalid input syntax for type uuid' } })
+    await expect(communityApi.getPost('not-a-uuid')).resolves.toBeNull()
+    sb.mock!.setResult('posts', { error: { code: 'PGRST116', message: 'no rows' } })
+    await expect(communityApi.getPost('gone')).resolves.toBeNull()
+    sb.mock!.setResult('posts', { error: { code: '08006', message: 'connection failure' } })
+    await expect(communityApi.getPost('p')).rejects.toMatchObject({ code: '08006' })
+  })
+
   it('getPosts: 악기·태그 필터를 걸고, 로그인 사용자의 좋아요 여부를 붙이며 null 컬럼을 채운다', async () => {
     sb.mock!.setResult('posts', { data: [row('p1'), row('p2', { likes_count: 4, tags: ['jazz'] })] })
     sb.mock!.setResult('post_likes', { data: [{ post_id: 'p2' }] })

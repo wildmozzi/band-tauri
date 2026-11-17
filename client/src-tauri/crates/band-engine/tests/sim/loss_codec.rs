@@ -6,7 +6,7 @@
 //!
 //! 지표(출력 L 채널, 100ms 칸):
 //! - 은닉률: 은닉 프레임 / 생산 프레임(GOAL 2절 지표). 손실 은닉은 손실을 따라가므로 코덱으로는 거의 안 바뀐다.
-//! - 불연속: 인접 샘플 차 > 문턱(원신호 최대 기울기 × 2, 최소 0.05). PCM 은닉(직전 프레임 페이드 반복)의 접합부가 여기 걸린다.
+//! - 불연속: 인접 샘플 차 > 문턱(원신호 최대 기울기 × 2, 최소 0.05). PCM 은닉의 접합부 계단(재합류 클릭)을 잡는 지표다 — 이음매를 이어 붙인 뒤(perf/d-explore)로는 0이다.
 //! - 끊김(ms/s): |x| < 1e-3이 1ms 넘게 이어진 구간(원신호에는 없다 — `music_signal_has_transients_and_no_gaps`).
 //!   PCM은 연속 손실 둘째부터 무음.
 //!
@@ -481,9 +481,10 @@ fn loss_feedback_sim() {
     check_policy(&rows);
     for r in rows.iter().filter(|r| r.fb.on_s.is_some()) {
         let name = r.s.name;
-        // 품질: 정상 톤에서는 Opus PLC가 PCM 페이드 반복보다 접합 불연속·무음이 훨씬 적다
-        assert!(r.auto.disc_per_s < r.pcm.disc_per_s * 0.5, "{name}: 불연속 {:.1} vs PCM {:.1}", r.auto.disc_per_s, r.pcm.disc_per_s);
-        assert!(r.auto.gap_ms_per_s <= r.pcm.gap_ms_per_s, "{name}: 끊김 {:.2} vs PCM {:.2}", r.auto.gap_ms_per_s, r.pcm.gap_ms_per_s);
+        // 품질: PCM 은닉도 이음매를 이어 붙이므로(뒤집은 페이드·재합류 크로스페이드) 접합 불연속은 둘 다 거의 없다.
+        // 정상 톤에서 Opus PLC의 이득은 끊김(무음)이다 — PCM은 페이드 뒤 무음, PLC는 소리를 이어 간다.
+        assert!(r.auto.disc_per_s <= r.pcm.disc_per_s, "{name}: 불연속 {:.1} vs PCM {:.1}", r.auto.disc_per_s, r.pcm.disc_per_s);
+        assert!(r.auto.gap_ms_per_s < r.pcm.gap_ms_per_s * 0.5, "{name}: 끊김 {:.2} vs PCM {:.2}", r.auto.gap_ms_per_s, r.pcm.gap_ms_per_s);
     }
 }
 

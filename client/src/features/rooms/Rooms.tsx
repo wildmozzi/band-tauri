@@ -16,8 +16,8 @@ import './Rooms.css'
 export function Rooms() {
   const { user } = useAuth()
   const navigate = useNavigate()
-  const { rooms, loading, roomFilter, setRoomFilter, filteredRooms } = useRoomList()
-  const { myRooms, myRoomsLoading, fetchMyRooms, deleteMyRoom, patchMyRoom } = useMyRooms(user?.id)
+  const { rooms, loading, loadError, retry, roomFilter, setRoomFilter, filteredRooms } = useRoomList()
+  const { myRooms, myRoomsLoading, myRoomsError, fetchMyRooms, deleteMyRoom, patchMyRoom } = useMyRooms(user?.id)
   const editor = useRoomEditor(user?.id, patchMyRoom)
   const { expandedTags, toggleTagsExpanded } = useExpandedTags()
   const [showMyRooms, setShowMyRooms] = useState(false)
@@ -71,6 +71,8 @@ export function Rooms() {
         <MyRoomsModal
           myRooms={myRooms}
           loading={myRoomsLoading}
+          loadError={myRoomsError}
+          onRetry={() => { void fetchMyRooms() }}
           expandedTags={expandedTags}
           onToggleTags={toggleTagsExpanded}
           onClose={() => setShowMyRooms(false)}
@@ -127,6 +129,11 @@ export function Rooms() {
       <div className="rooms-grid">
         {loading ? (
           <div className="empty-state">방 목록을 불러오는 중...</div>
+        ) : loadError ? (
+          <div className="empty-state" role="alert">
+            합주실 목록을 불러오지 못했습니다. 인터넷 연결을 확인하고 다시 시도해주세요.{' '}
+            <button type="button" className="btn-secondary" onClick={retry}>다시 시도</button>
+          </div>
         ) : filteredRooms.length === 0 ? (
           <div className="empty-state">
             {rooms.length === 0

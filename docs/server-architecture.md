@@ -31,7 +31,7 @@
 | H | **메트로놈** | 메트로놈 계약, 방장 이양 정책 | `metronome` 분기, `parseMetronomeState`, `replayMetronome`, `dropMetronomeIfHostChanged`, `broadcastMetronomeStop` | `metronomes`, `Client.pendingMetronomeStop` |
 | I | **참여 요청·악기 변경 요청** | 요청 UX | `request-perform`, `approve/reject/cancel-perform*`, `*-instrument-change*` 분기, `demote-performer`(P2-9: F·G·H 상태를 정리 — 엔진·메트로놈은 svc 구조 타입으로 부른다) | `performRequests`, `instrumentChangeRequests`, `approvals`(쓰기), `Client.instrument`(쓰기) |
 | J | **채팅** | 채팅 정책 | `chat` 분기 | 없음(중계만) |
-| K | **관람 WebRTC 중계** | 관람 방송 방식 | `offer`·`answer`·`ice-candidate` 분기 | 없음(중계만) |
+| K | **관람 WebRTC 중계** | 관람 방송 방식 | `offer`·`answer`·`ice-candidate` 분기 | `Client.relay`(중계 속도 제한: 보낸 사람→대상 메시지 버킷, 대상이 받는 바이트 버킷 — 표적 강퇴 방지) |
 | L | **정기 작업** | 운영 정책 | `heartbeat`(핑 + `seatHolds` 만료 정리), `scheduleParticipantUpdate` 디바운스, 토큰 만료 타이머, 유예 타이머, auth 타이머 | 위 묶음들의 상태 |
 
 ### 1.2 묶음 사이 결합 지점
@@ -53,7 +53,7 @@
 
 - 한 메시지의 규칙을 고치려면 1,586줄 클로저 전체의 변수를 알아야 한다. 상태 맵 13개와 `Client` 필드 25개를 누구나 읽고 쓴다.
 - 묶음별로 따로 테스트할 수 없다. 모든 테스트가 실제 WS 서버를 띄우는 통합 테스트다(그 자체는 좋지만, 순수 로직 — 정원 계산·이양 판정 — 까지 소켓과 `sleep`으로만 검증한다).
-- `handleLeave`·`handleJoin`의 결합이 암묵적이라, 새 방 단위 상태를 더할 때 정리 누락이 생기기 쉽다. 실제로 만료된 `recentlyLeft` 항목과 만료된 `approvals` 항목은 같은 사용자가 다시 올 때만 지워지고 정기 정리가 없다(`seatHolds`만 하트비트에서 정리). 동작 변경이라 구조 정리 밖에서 고친다(4.4절).
+- `handleLeave`·`handleJoin`의 결합이 암묵적이라, 새 방 단위 상태를 더할 때 정리 누락이 생기기 쉽다. 실제로 만료된 `recentlyLeft` 항목과 만료된 `approvals` 항목은 같은 사용자가 다시 올 때만 지워지고 정기 정리가 없다(`seatHolds`만 하트비트에서 정리). 동작 변경이라 구조 정리 밖에서 고친다(4.4절). — 고침(4.4절 2).
 
 ## 2. 현재 구조 (S0~S4 결과)
 
@@ -363,7 +363,7 @@ S2가 가장 크다. 리뷰가 어려우면 모듈 두세 개씩 나눠 올린�
 
 ### 4.2 서버 권위(신원 불신)가 구조에 주는 제약
 
-- 중계 메시지는 **받은 것을 넘기지 않고 서버가 다시 만든다**(descriptor·chat·metronome). 그래서 `protocol.ts`의 송신 타입이 실제 계약이고, 핸들러는 그 타입의 객체를 새로 구성한다. `offer`/`answer`/`ice-candidate`만 `{ ...msg, from: id }`로 통째로 넘긴다(SDP는 서버가 해석하지 않음, `from`은 덮어씀) — 지금 동작이고 바꾸지 않는다.
+- 중계 메시지는 **받은 것을 넘기지 않고 서버가 다시 만든다**(descriptor·chat·metronome). 그래서 `protocol.ts`의 송신 타입이 실제 계약이고, 핸들러는 그 타입의 객체를 새로 구성한다. `offer`/`answer`/`ice-candidate`도 `{ type, to, from, offer|answer|candidate }`로 다시 만든다(서버 보안 점검 — 전에는 `{ ...msg, from: id }`로 통째로 넘겨 클라이언트가 덧붙인 필드가 상대에게 갔다). 본문은 RTC 초기화 객체의 알려진 키만 남기고 형식만 본다(SDP 내용은 해석하지 않음). 형식이 틀리면 중계하지 않는다.
 - `userId`를 쓰는 곳을 `auth` 하나로 좁히면(2.2절) "클라이언트 값이 신원으로 새는 경로"를 코드 검색 한 번으로 감사할 수 있다.
 
 ### 4.3 하지 않는 것 (과한 추상화 금지, D0-2)
@@ -381,6 +381,6 @@ S2가 가장 크다. 리뷰가 어려우면 모듈 두세 개씩 나눠 올린�
 읽으면서 발견한 것이다. 구조 PR에 섞지 않는다. 합주 목표와 관련된 것은 [reviews/2026-11-12-goal-gap.md](reviews/2026-11-12-goal-gap.md)에 백로그 제안으로 적었다.
 
 1. **반쯤 끊긴 연결에서 세션 재개 실패**: 재개는 서버가 소켓 닫힘을 **본 뒤에만**(`suspended`에 있을 때만) 된다. 클라이언트 쪽 망이 끊겨 서버가 아직 닫힘을 모르는 동안(하트비트 30초 주기 — 감지까지 최대 60초) 클라이언트가 새 소켓으로 `resumeClientId`를 보내면 재개되지 않고 새 clientId가 된다. 클라이언트는 엔진을 재시작한다(오디오 끊김). 고치려면 "같은 userId의 살아 있는 옛 연결"도 재개 대상으로 삼아야 한다 — `resume` 모듈의 정책 변경. **고침(P1-16)**: 2.6절 재개 대상 판정 ②.
-2. 만료된 `recentlyLeft`·`approvals` 항목의 정기 정리 없음(1.3절). `capacity.sweep`·`performers.sweep`을 하트비트에서 부르면 된다.
+2. 만료된 `recentlyLeft`·`approvals` 항목의 정기 정리 없음(1.3절). `capacity.sweep`·`performers.sweep`을 하트비트에서 부르면 된다. **고침(fix/d-server-audit)**: 하트비트가 `capacity.sweep`(자리 예약·재입장 기록)·`performers.sweep`(만료된 승인 유예)·`roomMeta.sweep`(사람 없는 방의 30초 지난 캐시 — 입장 거부된 방 id가 쌓이던 것)을 부른다.
 3. 방장 이양 기능이 생기면 그 경로에서 `metronome.dropIfHostChanged`를 바로 부른다(P2-3b, 이미 백로그).
 4. 운영 문서에 "시그널링 1대 고정"과 "배포는 합주 중인 방이 없을 때"를 적는다(2.4절). **적음(P1-17①)**: [RELEASE.md](RELEASE.md) 4절.

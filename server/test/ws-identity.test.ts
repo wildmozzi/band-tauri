@@ -405,15 +405,39 @@ describe('viewerRelay: from is set by the server, targets outside the room are u
     clear(host, viewer)
 
     host.send({ type: 'offer', to: viewer.id, from: 'spoofed-id', offer: { sdp: 'o' } })
-    host.send({ type: 'ice-candidate', to: viewer.id, from: viewer.id, candidate: { c: 1 } })
+    host.send({ type: 'ice-candidate', to: viewer.id, from: viewer.id, candidate: { candidate: 'candidate:1', sdpMid: '0' } })
     viewer.send({ type: 'answer', to: host.id, from: host.id, answer: { sdp: 'a' } })
     await settleAll(host, [viewer])
     await settleAll(viewer, [host])
     assert.deepEqual(viewer.inbox, [
       { type: 'offer', to: viewer.id, from: host.id, offer: { sdp: 'o' } },
-      { type: 'ice-candidate', to: viewer.id, from: host.id, candidate: { c: 1 } },
+      { type: 'ice-candidate', to: viewer.id, from: host.id, candidate: { candidate: 'candidate:1', sdpMid: '0' } },
     ])
     assert.deepEqual(host.inbox, [{ type: 'answer', to: host.id, from: viewer.id, answer: { sdp: 'a' } }])
+  })
+
+  it('rebuilds relayed signals from known fields only and drops malformed bodies', async () => {
+    const r = room('free')
+    const host = await enter(url, 'tok:host', r)
+    const viewer = await enter(url, null, r)
+    host.send({ type: 'start-performing', instrument: 'drums' })
+    await settleAll(host, [viewer])
+    clear(host, viewer)
+
+    // 클라이언트가 덧붙인 필드(oderId·isHost·userId, 본문 안의 여분 키)는 버린다
+    host.send({ type: 'offer', to: viewer.id, oderId: 'spoof', isHost: true, userId: 'x', offer: { type: 'offer', sdp: 'o', extra: 'y' } })
+    host.send({ type: 'ice-candidate', to: viewer.id, candidate: { candidate: '', sdpMid: null, sdpMLineIndex: 0, junk: 1 } })
+    // 형식이 틀린 본문은 중계하지 않는다
+    host.send({ type: 'offer', to: viewer.id, offer: { sdp: 1 } })
+    host.send({ type: 'offer', to: viewer.id, offer: { type: 'evil', sdp: 'o' } })
+    host.send({ type: 'offer', to: viewer.id })
+    host.send({ type: 'ice-candidate', to: viewer.id, candidate: { c: 1 } })
+    host.send({ type: 'ice-candidate', to: viewer.id, candidate: { candidate: 'c', sdpMLineIndex: -1 } })
+    await settleAll(host, [viewer])
+    assert.deepEqual(viewer.inbox, [
+      { type: 'offer', to: viewer.id, from: host.id, offer: { type: 'offer', sdp: 'o' } },
+      { type: 'ice-candidate', to: viewer.id, from: host.id, candidate: { candidate: '', sdpMid: null, sdpMLineIndex: 0 } },
+    ])
   })
 
   it('does not relay to a client in another room or to/from a client outside any room', async () => {
@@ -426,7 +450,7 @@ describe('viewerRelay: from is set by the server, targets outside the room are u
     const all = [hostA, viewerB, lobby]
 
     hostA.send({ type: 'offer', to: viewerB.id, offer: { sdp: 'o' } })
-    hostA.send({ type: 'ice-candidate', to: lobby.id, candidate: { c: 1 } })
+    hostA.send({ type: 'ice-candidate', to: lobby.id, candidate: { candidate: 'candidate:1', sdpMid: '0' } })
     viewerB.send({ type: 'answer', to: hostA.id, answer: { sdp: 'a' } })
     lobby.send({ type: 'offer', to: hostA.id, offer: { sdp: 'x' } })
     await settleAll(hostA, all)

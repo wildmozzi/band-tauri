@@ -4,10 +4,12 @@
  */
 import { getApiUrl } from '../../shared/lib/apiUrl'
 import { authHeaders } from '../../shared/lib/authHeaders'
+import { fetchForUpload, UploadError } from '../../shared/lib/uploadError'
 
 /** 서버 상한과 같게 유지 (server/src/lib/imageStorage.ts). 서버가 최종 판단한다 */
 export const POST_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 export const POST_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] as const
+
 
 interface UploadUrlResponse {
   success: boolean
@@ -35,33 +37,33 @@ export function absoluteImageUrl(url: string, apiBase: string = getApiUrl()): st
 /** 게시글 이미지 업로드 → 게시글에 저장할 조회 URL */
 export async function uploadPostImage(file: File, fetchImpl: typeof fetch = fetch): Promise<string> {
   const problem = checkPostImage(file)
-  if (problem) throw new Error(problem)
+  if (problem) throw new UploadError(problem, 'invalid')
 
   const apiBase = getApiUrl()
-  const res = await fetchImpl(`${apiBase}/api/storage/post-images/upload-url`, {
+  const res = await fetchForUpload(fetchImpl, `${apiBase}/api/storage/post-images/upload-url`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify({ contentType: file.type, size: file.size }),
   })
   const data = (await res.json().catch(() => ({}))) as Partial<UploadUrlResponse>
   if (!res.ok || !data.success || !data.upload || !data.key) {
-    throw new Error(data.error || `이미지 업로드 URL 발급 실패 (${res.status})`)
+    throw new UploadError(data.error || `이미지 업로드 URL 발급 실패 (${res.status})`, 'server', res.status)
   }
 
-  const put = await fetchImpl(data.upload.url, { method: data.upload.method, headers: data.upload.headers, body: file })
-  if (!put.ok) throw new Error(`이미지 업로드 실패 (${put.status})`)
+  const put = await fetchForUpload(fetchImpl, data.upload.url, { method: data.upload.method, headers: data.upload.headers, body: file })
+  if (!put.ok) throw new UploadError(`이미지 업로드 실패 (${put.status})`, 'server', put.status)
 
   // 서버가 올라간 파일의 크기·형식·내용을 확인한다 (실패하면 서버가 지움)
-  const done = await fetchImpl(`${apiBase}/api/storage/post-images/complete`, {
+  const done = await fetchForUpload(fetchImpl, `${apiBase}/api/storage/post-images/complete`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
     body: JSON.stringify({ key: data.key }),
   })
   const doneData = (await done.json().catch(() => ({}))) as { success?: boolean; url?: string; error?: string }
   if (!done.ok || !doneData.success) {
-    throw new Error(doneData.error || `이미지 확인 실패 (${done.status})`)
+    throw new UploadError(doneData.error || `이미지 확인 실패 (${done.status})`, 'server', done.status)
   }
 
-  if (!doneData.url) throw new Error('이미지 확인 응답에 URL이 없습니다.')
+  if (!doneData.url) throw new UploadError('이미지 확인 응답에 URL이 없습니다.', 'server', done.status)
   return absoluteImageUrl(doneData.url, apiBase)
 }

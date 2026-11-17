@@ -62,6 +62,7 @@ function fakeClient(id: string, over: FakeOver = {}): Client {
       msgBucket: new TokenBucket(1, 1),
       chatBucket: new TokenBucket(1, 1),
       joinBucket: new TokenBucket(1, 1),
+      authBucket: new TokenBucket(1, 1),
       dropped: 0,
       lastRateLimitNotice: 0,
     },

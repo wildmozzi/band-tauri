@@ -5,7 +5,7 @@
 //! 아래 `impl JitterBuffer`에 있다.
 
 use super::delay::DelayStats;
-use super::{samples_per_ms, JitterBuffer, JitterTuning, BLOCK_SAMPLES_MAX, BURST_WIN, LONG_BLOCKS_MAX, TARGET_GRID};
+use super::{samples_per_ms, JitterBuffer, JitterTuning, State, BLOCK_SAMPLES_MAX, BURST_WIN, LONG_BLOCKS_MAX, TARGET_GRID};
 
 /// 버스트 감지 창 안에서 필요한 초과 패킷 수.
 const BURST_COUNT: usize = 3;
@@ -17,6 +17,26 @@ const BLOCK_US: u64 = 1_000_000;
 const LONG_RANK: usize = 3;
 /// 경로 변경(지연 급감)으로 통계를 다시 모은 뒤, 옛 경로로 늦게 오는 패킷을 통계에서 빼는 시간(µs).
 const PATH_GRACE_US: u64 = 200_000;
+/// 지연 계단 상승(P2-16b): 모든 패킷이 계단 시작 때의 최소 지연 + 문턱보다 이만큼(µs) 늦게 이어 오면 경로 지연이 오른
+/// 것으로 보고 지연 통계를 새 지연에서 다시 모은다. 와이파이 스파이크(0.3초 +30ms, 장시간 하네스 #4·`tune_jitter_burst_up_and_return`)는
+/// 버스트로 남도록 그보다 길게 둔다.
+const STEP_UP_US: u64 = 500_000;
+/// 계단으로 판정한 뒤 이 시간(µs) 안에 지연이 다시 내려오면(경로 변경 하강) 그 "계단"은 긴 스파이크였다(#194 리뷰 M2).
+const STEP_RETURN_US: u64 = 3_000_000;
+/// 긴 스파이크가 되돌아온 뒤(또는 그 억제 중 다시 하강이 오면) 이 시간(µs) 동안 계단 감지를 끈다. 반복되는 긴 스파이크
+/// (2초 +60ms를 6초마다 등)를 매번 계단으로 처리하면 긴 창이 스파이크를 배우지 못해 은닉이 는다(0.90 → 1.38%) — 억제 중에는
+/// 계단 감지 전처럼 버스트·긴 창이 맡는다.
+const STEP_SUPPRESS_US: u64 = 60_000_000;
+
+/// `track_step_up` 결과.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum StepWatch {
+    Idle,
+    /// 이 패킷으로 감시를 시작했다(호출한 쪽이 늦은 패킷 예산 스냅숏을 뜬다).
+    Started,
+    /// 계단으로 판정했다.
+    Detected,
+}
 /// 프로필 변경 때 `tail_extra`까지 비우는 은닉 목표 변화 배율(P1-6c, PR #65 리뷰 L2). 이보다 작은 변화는 늦은 비율만 비운다.
 const TAIL_RESET_RATIO: f64 = 1.5;
 
@@ -50,6 +70,17 @@ pub(super) struct TargetEst {
     path_reset_until_us: u64,
     /// 경로 변경 유예 동안의 비교 문턱(샘플, 리셋 전 값).
     path_grace_step: i64,
+    /// 지연 계단 상승 감시(P2-16b): 시작 시각(이때부터 모든 패킷이 `step_floor`보다 늦다), 그때의 최소 지연 + 문턱(절대 transit),
+    /// 그때의 짧은 창 추정, 그 뒤 쌓은 긴 창 블록 수. 계단으로 판정되면 계단 표본에 오염된 추정을 되돌린다.
+    step_since_us: Option<u64>,
+    step_floor: i64,
+    step_short_cap: f64,
+    step_blocks: usize,
+    /// 감시 중 받은 패킷 수(#194 리뷰 L1: 공백을 사이에 둔 패킷 몇 개로 판정하지 않게).
+    step_pkts: usize,
+    /// 마지막 계단 판정 시각과 계단 감지 억제 끝 시각(µs, M2).
+    step_detected_us: Option<u64>,
+    step_suppress_until_us: u64,
 }
 
 impl TargetEst {
@@ -72,6 +103,13 @@ impl TargetEst {
             consumer_lead: 0.0,
             path_reset_until_us: 0,
             path_grace_step: 0,
+            step_since_us: None,
+            step_floor: 0,
+            step_short_cap: -1.0,
+            step_blocks: 0,
+            step_pkts: 0,
+            step_detected_us: None,
+            step_suppress_until_us: 0,
         }
     }
 
@@ -193,6 +231,9 @@ impl TargetEst {
             self.block_q[self.block_pos] = *q as f64;
             self.block_pos = (self.block_pos + 1) % LONG_BLOCKS_MAX;
             self.block_count = (self.block_count + 1).min(LONG_BLOCKS_MAX);
+            if self.step_since_us.is_some() {
+                self.step_blocks += 1;
+            }
         }
         self.block_rel.clear();
         self.block_start_us = Some(now_us);
@@ -236,8 +277,63 @@ impl TargetEst {
         now_us < self.path_reset_until_us && transit > min_transit + self.path_grace_step
     }
 
+    /// 지연 계단 상승 감시(P2-16b, 패킷마다 `record_delay`에서). `armed`(창이 찼다)일 때 최소 지연 + `step`보다 늦은 패킷이
+    /// 오면 감시를 시작하고, 그 뒤 `step_floor` 이하 패킷이 하나라도 오면 그만둔다(버스트·꼬리 지터는 사이사이 바닥 근처 패킷이
+    /// 있다). `STEP_UP_US` 동안 끊기지 않으면 `true` — 호출한 쪽이 지연 통계를 다시 모으고 `undo_step`으로 오염을 되돌린다.
+    /// 문턱·바닥은 시작 때 값으로 고정한다(계단 표본이 들어오면 분위수가 부풀고, 창이 옛 표본을 다 밀어내면 최솟값이 오른다).
+    /// 판정에는 그 동안 받은 패킷이 `STEP_UP_US`어치 패킷 수(`frame` 기준)의 절반 이상이어야 한다(L1). 긴 스파이크가 되돌아온
+    /// 뒤의 억제 시간(`note_path_drop`)에는 감시를 시작하지 않는다(M2).
+    pub(super) fn track_step_up(&mut self, transit: i64, now_us: u64, min_transit: i64, step: i64, armed: bool, frame: usize) -> StepWatch {
+        match self.step_since_us {
+            Some(since) if transit > self.step_floor => {
+                self.step_pkts += 1;
+                let need = (STEP_UP_US as f64 * samples_per_ms() / 1000.0 / frame.max(1) as f64 / 2.0) as usize;
+                if now_us.saturating_sub(since) >= STEP_UP_US && self.step_pkts >= need {
+                    self.step_since_us = None;
+                    self.step_detected_us = Some(now_us);
+                    return StepWatch::Detected;
+                }
+            }
+            Some(_) => self.step_since_us = None,
+            None if armed && now_us >= self.step_suppress_until_us && transit > min_transit + step => {
+                self.step_since_us = Some(now_us);
+                self.step_floor = min_transit + step;
+                self.step_short_cap = self.short_cap;
+                self.step_blocks = 0;
+                self.step_pkts = 1;
+                return StepWatch::Started;
+            }
+            None => {}
+        }
+        StepWatch::Idle
+    }
+
+    /// 경로 변경(지연 하강)이 왔다(M2): 계단 판정 뒤 `STEP_RETURN_US` 안이면 그 계단은 긴 스파이크였으므로, 또는 이미 억제
+    /// 중이면 반복되는 스파이크가 이어지므로 `STEP_SUPPRESS_US` 동안 계단 감지를 끈다.
+    pub(super) fn note_path_drop(&mut self, now_us: u64) {
+        let spike = self.step_detected_us.is_some_and(|d| now_us.saturating_sub(d) <= STEP_RETURN_US);
+        if spike || now_us < self.step_suppress_until_us {
+            self.step_suppress_until_us = now_us + STEP_SUPPRESS_US;
+        }
+        self.step_detected_us = None;
+    }
+
+    /// 지연 계단으로 판정된 뒤: 짧은 창 추정을 계단 전 값으로, 계단 뒤 쌓은 긴 창 블록(옛 최소 지연 기준이라 계단 크기만큼
+    /// 부풀었다)을 버린다. 버스트 수준·현재 블록은 `reset_path`가 비운다.
+    pub(super) fn undo_step(&mut self, long_blocks: usize) {
+        self.short_cap = self.step_short_cap;
+        self.short_lower_since = None;
+        for _ in 0..self.step_blocks.min(self.block_count) {
+            self.block_pos = (self.block_pos + LONG_BLOCKS_MAX - 1) % LONG_BLOCKS_MAX;
+            self.block_count -= 1;
+        }
+        self.step_blocks = 0;
+        self.update_long_cap(long_blocks);
+    }
+
     /// 경로 변경: 절대 지연에 묶인 것(버스트 절대 수준, 현재 블록)만 버리고 짧은 창 추정은 정상 hold로 내려가게 한다.
     pub(super) fn reset_path(&mut self, now_us: u64) {
+        self.step_since_us = None;
         self.short_lower_since = Some(now_us);
         self.burst_abs = None;
         self.recent_rel = [0; BURST_WIN];
@@ -328,7 +424,9 @@ impl JitterBuffer {
         // 지연 통계를 새 경로부터 다시 모은다(깊이 초과분은 패킷 단위 버림이 걷어 낸다). 지터가 큰 회선에서 잘못
         // 걸리지 않도록 문턱은 현재 지터 폭(분위수)보다도 크고, 창에 표본이 50개 이상일 때만 본다.
         let step = (5.0 * samples_per_ms()).max(self.frame() as f64).max(self.delay.q_rel()) as i64;
+        let mut stepped_up = false;
         if self.delay.count() >= 50 && transit < self.delay.min_transit() - step {
+            self.target.note_path_drop(now_us);
             self.reset_delay_stats(now_us);
             // 유예 비교 문턱은 리셋 전 값으로 고정한다(PR #20 M2: 리셋 뒤 q가 0으로 다시 계산되면 문턱이 max(5ms, F)로
             // 줄어 새 경로의 정상 지터 패킷까지 옛 경로로 보고 빼 버렸다).
@@ -336,9 +434,36 @@ impl JitterBuffer {
         } else if self.target.is_old_path(now_us, transit, self.delay.min_transit()) {
             // 경로 변경 직후 옛 경로로 오던(이미 보낸) 패킷: 새 경로 통계에 넣지 않는다.
             return;
+        } else if let w @ (StepWatch::Started | StepWatch::Detected) =
+            self.target.track_step_up(transit, now_us, self.delay.min_transit(), step, self.delay.count() >= 50, self.frame())
+        {
+            if w == StepWatch::Started {
+                self.late_at_step = self.late;
+            } else {
+                // 지연 계단 상승(P2-16b): 0.5초 동안 모든 패킷이 옛 최소 지연 + 문턱보다 늦었다 — 버스트가 아니라 경로 지연이 올랐다.
+                // 계단 표본은 옛 최소 지연 기준으로 계단 크기만큼의 "지터"로 보여 버스트 수준·짧은 창·긴 창 블록을 부풀리고(목표가
+                // 상한 80ms에 수 초 머묾), 최소 지연이 창에 남는 동안 깊이를 계단 크기만큼 크게 쟀다. 경로 변경(지연 급감)과 같이
+                // 지연 통계를 새 지연에서 다시 모으고, 짧은 창·긴 창은 계단 전 값으로 되돌린다(상대 지터는 그대로라고 본다).
+                // 경로 변경과 달리 늦은 패킷 예산(`tail_extra`·손실 링)은 남긴다: 같은 경로의 지연만 올랐으므로 꼬리 모양은 그대로다
+                // (비우면 꼬리 긴 회선에서 예산을 다시 쌓는 동안 늦은 패킷 은닉이 는다 — 장시간 하네스 #1). 계단 구간 블록은 판단에서 뺀다.
+                // 감시 동안 닫힌 늦은 패킷 블록(계단 공백의 늦은 도착·버림이 든)도 판단에서 되돌린다(#194 리뷰 L2).
+                self.delay.reset();
+                self.target.reset_path(now_us);
+                self.target.undo_step(self.tuning.long_blocks);
+                self.late = self.late_at_step;
+                self.late.skip_start();
+                stepped_up = true;
+            }
         }
         if self.delay.push(transit, self.tuning.quantile) {
             self.target.update_short_cap(self.delay.q_rel(), now_us, self.tuning.hold_ms);
+        }
+        if stepped_up && self.state == State::Playing {
+            // 깊이 EWMA를 새 최소 지연(방금 이 표본으로 다시 계산) 기준 깊이로 다시 잡는다(#194 리뷰 M1). EWMA는 옛 최소 지연
+            // 기준이라 계단 크기만큼 깊게 남아 있고, 늦은 패킷 버림(H1: EWMA + 되감김 − 목표 ≥ F/2)이 목표가 내려간 뒤에도
+            // EWMA가 식을 때까지(+130ms 계단에서 약 0.4초) "버림 → 은닉 → 버림"을 2프레임마다 이어 갔다.
+            let d = self.depth_now(now_us);
+            self.depth.set_ewma(d);
         }
         if self.target.detect_burst(transit, now_us, &self.delay, self.frame(), &self.tuning) {
             self.stats.burst_events += 1;

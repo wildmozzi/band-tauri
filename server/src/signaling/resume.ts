@@ -123,6 +123,7 @@ export function attachSession(ctx: Ctx<ResumeSvc>, old: Client): Client {
   old.conn.msgBucket = temp.conn.msgBucket
   old.conn.chatBucket = temp.conn.chatBucket
   old.conn.joinBucket = temp.conn.joinBucket
+  old.conn.authBucket = temp.conn.authBucket
   old.conn.dropped = 0
 
   removeClient(temp.id)

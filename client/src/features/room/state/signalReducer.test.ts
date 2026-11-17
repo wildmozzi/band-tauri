@@ -130,6 +130,53 @@ describe('reduceRoomSignal — 입장 오류', () => {
     expect(capped.effects).toEqual([])
   })
 
+  it('방 조회 실패(room-unavailable, #189 리뷰 H-1): 재연결 중이면 화면·엔진을 그대로 두고 조용히 재시도한다', () => {
+    const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1', retryAfterMs: 2000 }, ctx({ rejoining: true, random: () => 0.5 }))
+    expect(r.patch).toBeNull()
+    expect(r.effects).toEqual([{ type: 'schedule-busy-retry', roomId: 'r1', delayMs: 2000 }])
+  })
+
+  it('room-unavailable: 첫 입장이면 안내 + 재시도, 재시도를 다 쓰면 안내만. 어느 경우도 엔진을 멈추지 않는다', () => {
+    const first = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1', retryAfterMs: 2000 }, ctx({ random: () => 0.5 }))
+    expect(first.patch?.connection?.joinError?.code).toBe('room-unavailable')
+    expect(first.effects).toContainEqual({ type: 'schedule-busy-retry', roomId: 'r1', delayMs: 2000 })
+    const spent = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1' }, ctx({ rejoining: true, busyRetryCount: MAX_BUSY_RETRIES }))
+    expect(spent.patch?.connection?.joinError?.code).toBe('room-unavailable')
+    for (const r of [first, spent]) {
+      expect(r.effects).not.toContainEqual({ type: 'stop-session' })
+      expect(r.effects).not.toContainEqual({ type: 'stop-broadcast' })
+      expect(r.effects.some((e) => e.type === 'keep-viewers')).toBe(false) // 일시 오류: 유지한 관람 수신은 그대로
+    }
+  })
+
+  it('room-unavailable 재시도 간격은 ±50% 흩는다(재배포 직후 동시 재입장 몰림 방지, #189 리뷰 L-5). password-busy는 그대로', () => {
+    const delay = (code: string, random: number) => {
+      const r = reduceRoomSignal(inRoom(), { type: 'error', code, roomId: 'r1', retryAfterMs: 2000 }, ctx({ random: () => random }))
+      return (r.effects.find((e) => e.type === 'schedule-busy-retry') as { delayMs: number }).delayMs
+    }
+    expect(delay('room-unavailable', 0)).toBe(1000)
+    expect(delay('room-unavailable', 0.5)).toBe(2000)
+    expect(delay('room-unavailable', 0.999)).toBe(2998)
+    expect(delay('password-busy', 0)).toBe(2000)
+  })
+
+  it('자동 재시도를 다 쓰면 joinError.autoRetry=false — 수동 재시도 안내 (#189 리뷰 L-6)', () => {
+    const retrying = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1' }, ctx({ random: () => 0.5 }))
+    expect(retrying.patch?.connection?.joinError?.autoRetry).toBe(true)
+    const spent = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1' }, ctx({ busyRetryCount: MAX_BUSY_RETRIES }))
+    expect(spent.patch?.connection?.joinError?.autoRetry).toBe(false)
+    const notRetryable = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-full', roomId: 'r1' }, ctx())
+    expect(notRetryable.patch?.connection?.joinError).not.toHaveProperty('autoRetry')
+  })
+
+  it('방 없음(room-not-found)은 재연결 중이어도 엔진·방송을 멈춘다(보던 방이 종료됨)', () => {
+    const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-not-found', message: 'x' }, ctx({ rejoining: true }))
+    expect(r.effects).toContainEqual({ type: 'stop-session' })
+    // 재개로 유지한 관람 수신도 닫는다 (#192 리뷰 M-1)
+    expect(r.effects).toContainEqual({ type: 'keep-viewers', peerIds: [] })
+    expect(r.patch?.connection?.joinError?.code).toBe('room-not-found')
+  })
+
   it('처리 순서: 입장 오류 코드가 아닌 error는 참가자 단계의 서버 에러로', () => {
     const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'rate-limited', message: 'x' }, ctx())
     expect(r.effects).toEqual([{ type: 'server-error', code: 'rate-limited', message: 'x' }])
@@ -150,7 +197,12 @@ describe('reduceRoomSignal — 참가자·WebRTC', () => {
     }, ctx())
     expect(r.patch?.connection).toMatchObject({ peers: ['a', 'b'], isRoomHost: true, roomJoined: true, joinError: null, joinFeedback: '룸 입장 완료 · 동시 연결 3명' })
     expect(Object.keys(r.patch!.roster!)).toEqual(['a'])
-    expect(r.effects).toEqual([{ type: 'set-rejoining', value: false }, { type: 'clear-busy-retry' }, { type: 'remember-password', roomId: 'r1' }])
+    expect(r.effects).toEqual([{ type: 'set-rejoining', value: false }, { type: 'clear-busy-retry' }, { type: 'keep-viewers', peerIds: ['a'] }, { type: 'remember-password', roomId: 'r1' }])
+  })
+
+  it('room-state: 관람 수신은 지금 연주 중인 발신자 것만 남긴다(재개로 유지한 연결의 연주자가 그새 내려간 경우)', () => {
+    const r = reduceRoomSignal(inRoom({ roster: { a: guitar } }), { type: 'room-state', peerIds: ['a'], participants: [{ oderId: 'a', isPerforming: false }] }, ctx())
+    expect(r.effects).toContainEqual({ type: 'keep-viewers', peerIds: [] })
   })
 
   it('participant-left: 피어·연주자·요청 정리 후 엔진 피어 제거와 관람 수신 닫기', () => {

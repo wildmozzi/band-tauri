@@ -8,7 +8,7 @@ use std::time::Instant;
 use band_dsp::config::MAX_PACKET_BYTES;
 
 use band_dsp::packet::{self, Header, PacketType};
-use super::peer::{self, HandshakeOutcome, Peer};
+use super::peer::{self, HandshakeOutcome, Peer, SeqVerdict};
 use super::relay::{self, AckAction};
 use band_dsp::types::PeerStateKind;
 use super::{clock_payload, parse_clock_payload, NetShared};
@@ -88,8 +88,10 @@ impl NetShared {
                 return;
             }
         }
-        if h.ptype != PacketType::Audio && !peer.conn().accept_ctrl_seq(h.ptype, h.seq) {
-            return; // 재전송된 제어 패킷(리뷰 L5)
+        // Hello/HelloAck: 출발 주소 규칙은 핸드셰이크(`on_handshake_rtt`) 안이라 위 검사 뒤 여기서 seq를 수락한다(리뷰 L5).
+        // 그 밖의 패킷은 아래에서 seq 확인 → 출발 주소 확인(`accept_rx`) → seq 소모 순서다(#190 L1).
+        if is_hello && !peer.conn().accept_ctrl_seq(h.ptype, h.seq) {
+            return; // 재전송된 Hello/HelloAck
         }
         match h.ptype {
             PacketType::Hello | PacketType::HelloAck => {
@@ -115,9 +117,17 @@ impl NetShared {
             other => {
                 {
                     let mut c = peer.conn();
+                    // 재전송(제어: 옛 seq, Audio: 창 안 중복·창보다 옛 사본, P2-16c)은 `accept_rx`의 부수 효과(생존 갱신·승격)
+                    // 전에 버리고, seq는 출발 주소까지 통과한 뒤에만 소모한다 — 경로가 아닌 주소의 사본이 진짜 패킷을 막지 않게.
+                    let verdict = c.rx_seq_check(other, h.seq);
+                    if verdict != SeqVerdict::Fresh {
+                        c.note_seq_drop(verdict);
+                        return;
+                    }
                     if !c.accept_rx(from, peer.candidates(), relay, now) {
                         return;
                     }
+                    c.commit_rx_seq(other, h.seq);
                     match other {
                         PacketType::Pong => {
                             let t3 = self.now_us();
@@ -172,6 +182,8 @@ pub(super) fn recv_loop(s: &NetShared) {
     while !s.stop.load(Ordering::Relaxed) {
         match s.socket.recv_from(&mut buf) {
             Ok((n, from)) => {
+                // 코어 배치 표본(P1-21): 패킷을 처리하려고 깨어난 순간의 코어. 시간 초과로 깬 반복은 세지 않는다.
+                s.recv_placement.sample();
                 if n <= MAX_PACKET_BYTES {
                     s.handle_packet(&mut buf[..n], from);
                 }
@@ -181,3 +193,9 @@ pub(super) fn recv_loop(s: &NetShared) {
         }
     }
 }
+
+#[cfg(test)]
+mod replay_tests;
+
+#[cfg(test)]
+mod tests;

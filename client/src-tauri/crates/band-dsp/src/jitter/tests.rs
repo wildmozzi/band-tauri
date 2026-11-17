@@ -3,7 +3,7 @@ use super::*;
 use super::late_budget::{LATE_BUDGET_LOSSY_MAX, LATE_SKIP_BLOCKS};
 use crate::codec::Encoder;
 use crate::config::{frame_code_from_samples, CodecKind};
-use crate::packet::{PacketType, FLAG_OPUS};
+use crate::packet::{PacketType, FLAG_OPUS, FLAG_STEREO};
 use rand::{Rng, SeedableRng};
 
 struct Sender {
@@ -13,6 +13,9 @@ struct Sender {
     ts: u32,
     phase: f64,
     opus: bool,
+    /// PCM16 스테레오(R = L보다 `r_phase`주기 앞선 사인). 기본 모노.
+    stereo: bool,
+    r_phase: f64,
 }
 
 impl Sender {
@@ -24,12 +27,18 @@ impl Sender {
             ts: ts0,
             phase: 0.0,
             opus: codec == CodecKind::Opus,
+            stereo: false,
+            r_phase: 0.25,
         }
     }
     fn next(&mut self) -> (Header, Vec<u8>) {
-        let mut pcm = vec![0f32; self.frame];
-        for s in pcm.iter_mut() {
-            *s = (self.phase * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5;
+        let ch = if self.stereo { 2 } else { 1 };
+        let mut pcm = vec![0f32; self.frame * ch];
+        for f in pcm.chunks_exact_mut(ch) {
+            f[0] = (self.phase * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5;
+            if ch == 2 {
+                f[1] = ((self.phase + self.r_phase) * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5;
+            }
             self.phase = (self.phase + 440.0 / 48000.0).fract();
         }
         let mut buf = vec![0u8; MAX_PAYLOAD_BYTES];
@@ -40,7 +49,7 @@ impl Sender {
             ssrc: 1,
             seq: self.seq,
             timestamp: self.ts,
-            flags: if self.opus { FLAG_OPUS } else { 0 },
+            flags: if self.opus { FLAG_OPUS } else { 0 } | if self.stereo { FLAG_STEREO } else { 0 },
             frame_code: frame_code_from_samples(self.frame).unwrap(),
         };
         self.seq = self.seq.wrapping_add(1);
@@ -69,6 +78,8 @@ struct Sim {
     exp_jitter: bool,
     /// 늦은 패킷 예산을 끈다(은닉 목표 100% → 예산이 늘 늦은 비율보다 커서 `tail_extra` 0). 비교용.
     late_budget_off: bool,
+    /// 0보다 크면 모든 패킷의 사본을 원본 + U(0, dup_ms) 뒤에 한 번 더 받는다(혼돈 d-chaos: 중복).
+    dup_ms: f64,
 }
 
 impl Default for Sim {
@@ -86,6 +97,7 @@ impl Default for Sim {
             tx_burst: 0,
             exp_jitter: false,
             late_budget_off: false,
+            dup_ms: 0.0,
         }
     }
 }
@@ -128,6 +140,8 @@ fn simulate(p: Sim) -> SimResult {
     let mut t = 0.0;
     let mut k = 0u64;
     let mut net_lost = 0u64;
+    // 사본 지연은 따로 뽑는다(같은 시드의 중복 없는 실행과 손실·지터가 같게).
+    let mut dup_rng = rand::rngs::StdRng::seed_from_u64(p.seed ^ 0xD0B);
     while t < p.seconds * 1e6 {
         let (h, pk) = tx.next();
         // 송신측 장치 버스트: tx_burst마다 몰아서 나감
@@ -143,6 +157,9 @@ fn simulate(p: Sim) -> SimResult {
             let u = rng.gen::<f64>();
             let j = if p.exp_jitter { -(1.0 - u).ln() } else { u };
             let d = base_us + j * p.jitter_ms * 1000.0;
+            if p.dup_ms > 0.0 {
+                arrivals.push((send_t + d + dup_rng.gen::<f64>() * p.dup_ms * 1000.0, h, pk.clone()));
+            }
             arrivals.push((send_t + d, h, pk));
         }
         t += send_period_us;
@@ -275,6 +292,23 @@ fn reordering_handled() {
     assert!(ratio < 0.03, "순서 뒤바뀜에서 은닉 비율 {ratio} {:?}", r.stats);
 }
 
+/// 중복(혼돈 d-chaos): 이미 재생한 패킷의 사본은 늦은 패킷이 아니다. 전에는 늦은 패킷으로 세어 늦은 패킷 예산·목표가
+/// 사본 지연만큼 올랐다(`tests/sim`의 `chaos_duplicates_do_not_inflate`: bufferMs 5.7 → 17ms). 소리·지연·통계가 중복 없는
+/// 같은 회선과 같아야 한다.
+#[test]
+fn duplicates_of_played_packets_are_ignored() {
+    let base = Sim { frame: 120, burst: 128, jitter_ms: 1.0, loss: 0.01, seconds: 20.0, seed: 9, ..Default::default() };
+    let clean = simulate(base);
+    let dup = simulate(Sim { dup_ms: 20.0, ..base });
+    let (a, b) = (clean.stats, dup.stats);
+    println!("중복 없음 {a:?}
+중복 {b:?}");
+    assert_eq!(b.late, a.late, "사본을 늦은 패킷으로 셌다");
+    assert!((b.target_ms - a.target_ms).abs() < 0.3, "사본이 목표를 올렸다: {:.2} → {:.2}", a.target_ms, b.target_ms);
+    assert_eq!(b.concealed, a.concealed);
+    assert_eq!(b.produced, a.produced);
+}
+
 fn drift_case(ppm: f64, burst: usize) {
     let r = simulate(Sim { burst, drift_ppm: ppm, jitter_ms: 5.0, seconds: 60.0, seed: 4, ..Default::default() });
     let s = r.stats;
@@ -324,7 +358,9 @@ fn late_packets_discarded() {
     let pkts: Vec<_> = (0..20).map(|_| tx.next()).collect();
     let mut out = vec![0f32; 480];
     let mut t = 0u64;
-    for (h, p) in pkts.iter().take(10) {
+    // 패킷 2는 손실(은닉)로 지나가고 나중에 늦게 온다. 이미 받아 재생한 패킷의 사본은 늦은 패킷이 아니다
+    // (`duplicates_of_played_packets_are_ignored`).
+    for (h, p) in pkts.iter().take(10).enumerate().filter(|(i, _)| *i != 2).map(|(_, x)| x) {
         jb.insert(h, p, t);
         jb.pop(&mut out);
         jb.end_burst(t, t, 0.0);
@@ -336,8 +372,189 @@ fn late_packets_discarded() {
         t += 5000;
     }
     let before = jb.stats().late;
+    jb.insert(&pkts[2].0, &pkts[2].1, t);
+    assert_eq!(jb.stats().late, before + 1);
+    // 재생한 패킷 0의 사본은 세지 않는다
     jb.insert(&pkts[0].0, &pkts[0].1, t);
     assert_eq!(jb.stats().late, before + 1);
+}
+
+/// #185 리뷰 L3: 재버퍼(언더런 200ms) 뒤 버퍼링 중에 직전에 재생한 패킷의 사본이 오면, 전에는 되감기 한도(back_limit) 안이라
+/// 시작점을 그 seq로 되감아 이미 재생한 소리를 다시 재생했다. 사본은 버리고 시작점·통계를 그대로 둔다.
+#[test]
+fn duplicate_after_rebuffer_does_not_rewind() {
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    let mut tx = Sender::new(CodecKind::Pcm16, 240, 10, 0);
+    let pkts: Vec<_> = (0..40).map(|_| tx.next()).collect();
+    let mut out = vec![0f32; 480];
+    let mut t = 0u64;
+    for (h, p) in pkts.iter().take(30) {
+        jb.insert(h, p, t);
+        jb.pop(&mut out);
+        jb.end_burst(t, t, 0.0);
+        t += 5000;
+    }
+    assert!(jb.is_playing());
+    // 패킷이 끊겨 언더런 은닉이 200ms를 넘으면 재버퍼링(시작점 = 다음에 올 seq)
+    while jb.stats().rebuffers == 0 {
+        jb.pop(&mut out);
+        jb.end_burst(t, t, 0.0);
+        t += 5000;
+        assert!(t < 2_000_000, "재버퍼링이 일어나지 않았다");
+    }
+    assert!(!jb.is_playing());
+    let (next, before) = (jb.next_seq, jb.stats());
+    assert_eq!(next, pkts[30].0.seq, "재버퍼링 뒤 시작점");
+    // 이미 재생한 29의 사본: 되감지 않고 아무것도 세지 않는다
+    jb.insert(&pkts[29].0, &pkts[29].1, t);
+    assert_eq!(jb.next_seq, next, "사본이 시작점을 되감았다");
+    assert!(!jb.slot_has(pkts[29].0.seq), "사본을 슬롯에 다시 넣었다");
+    assert_eq!(jb.stats().late, before.late);
+    // 진짜 다음 패킷은 그대로 받는다
+    jb.insert(&pkts[30].0, &pkts[30].1, t);
+    assert!(jb.slot_has(pkts[30].0.seq));
+}
+
+/// 지연 계단 상승 감지(P2-16b) 시험 회선: 2.5ms 프레임, 기본 지연 20ms + 지터 U(0..1ms), `extra(s)`만큼 추가 지연. 5ms마다
+/// 도착분을 넣고 2.5ms씩 두 번 꺼낸다. (시각 s, 목표 ms, 지연 창 표본 수)를 0.1초마다 돌려준다.
+fn step_run(extra: &dyn Fn(f64) -> f64, seconds: f64) -> (Vec<(f64, f32, usize)>, JitterStats) {
+    let (full, s) = step_run_full(extra, seconds);
+    (full.iter().map(|x| (x.0, x.1.target_ms, x.2)).collect(), s)
+}
+
+/// `step_run`과 같은 회선, 0.1초마다 (시각 s, 통계, 지연 창 표본 수).
+fn step_run_full(extra: &dyn Fn(f64) -> f64, seconds: f64) -> (Vec<(f64, JitterStats, usize)>, JitterStats) {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    jb.set_consumer_lead(72.0);
+    let mut tx = Sender::new(CodecKind::Pcm16, 120, 1000, 0);
+    let mut arrivals: Vec<(f64, Header, Vec<u8>)> = Vec::new();
+    let mut t = 0.0;
+    while t < seconds * 1e6 {
+        let (h, pk) = tx.next();
+        // 추가 지연이 음수면 그 패킷은 손실(공백 시나리오).
+        let (e, u) = (extra(t / 1e6), rng.gen::<f64>());
+        if e >= 0.0 {
+            arrivals.push((t + 20_000.0 + e * 1000.0 + u * 1000.0, h, pk));
+        }
+        t += 2500.0;
+    }
+    arrivals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let (mut out, mut ai, mut trace) = (vec![0f32; 240], 0, Vec::new());
+    let mut bt = 0u64;
+    while (bt as f64) < seconds * 1e6 {
+        while ai < arrivals.len() && arrivals[ai].0 <= bt as f64 {
+            jb.insert(&arrivals[ai].1, &arrivals[ai].2, arrivals[ai].0 as u64);
+            ai += 1;
+        }
+        jb.pop(&mut out);
+        jb.pop(&mut out);
+        jb.end_burst(bt, bt, 0.0);
+        if bt.is_multiple_of(100_000) {
+            trace.push((bt as f64 / 1e6, jb.stats(), jb.delay.count()));
+        }
+        bt += 5000;
+    }
+    (trace, jb.stats())
+}
+
+/// #194 리뷰 탐침 시나리오(60초, 2.5ms 프레임): (이름, 추가 지연 ms 함수 — 음수는 손실).
+type Probe = (&'static str, Box<dyn Fn(f64) -> f64>);
+
+fn probe_scenarios() -> Vec<Probe> {
+    vec![
+        ("1s 스파이크 +30ms /4s", Box::new(|t: f64| if t > 5.0 && (t % 4.0) < 1.0 { 30.0 } else { 0.0 })),
+        ("0.7s 스파이크 +30ms /3s", Box::new(|t: f64| if t > 5.0 && (t % 3.0) < 0.7 { 30.0 } else { 0.0 })),
+        ("2s 스파이크 +60ms /6s", Box::new(|t: f64| if t > 5.0 && (t % 6.0) < 2.0 { 60.0 } else { 0.0 })),
+        ("0.6s 공백 + 앞뒤 +10ms /5s", Box::new(|t: f64| {
+            let r = t % 5.0;
+            if t <= 5.0 { 0.0 } else if r < 0.6 { -1.0 } else if r < 0.61 || r > 4.99 { 10.0 } else { 0.0 }
+        })),
+        ("계단 +130ms 10~20s", Box::new(|t: f64| if (10.0..20.0).contains(&t) { 130.0 } else { 0.0 })),
+        ("램프 +40ms/4s 반복", Box::new(|t: f64| if t > 5.0 { (t % 4.0) * 10.0 } else { 0.0 })),
+    ]
+}
+
+/// 탐침 지표(5초 이후): 은닉 %, 평균 목표 ms, 늦은 패킷 버림, 지연 창 리셋(표본 수 감소) 횟수.
+fn probe_metrics(extra: &dyn Fn(f64) -> f64) -> (f64, f64, u64, usize) {
+    let (tr, s) = step_run_full(extra, 60.0);
+    let s5 = tr.iter().find(|x| x.0 >= 5.0).unwrap().1;
+    let conc = (s.concealed - s5.concealed) as f64 * 100.0 / (s.produced - s5.produced).max(1) as f64;
+    let after: Vec<_> = tr.iter().filter(|x| x.0 >= 5.0).collect();
+    let tgt = after.iter().map(|x| x.1.target_ms as f64).sum::<f64>() / after.len() as f64;
+    let resets = after.windows(2).filter(|w| w[1].2 < w[0].2).count();
+    (conc, tgt, s.late_dropped - s5.late_dropped, resets)
+}
+
+#[test]
+#[ignore]
+fn probe_review() {
+    for (name, f) in probe_scenarios() {
+        let (c, t, ld, r) = probe_metrics(&*f);
+        println!("PROBE {name}: 은닉 {c:.2}% 평균 목표 {t:.2}ms 늦은 버림 {ld} 창 리셋 {r}");
+    }
+}
+
+/// #194 리뷰 탐침의 회귀 고정(결정적 — 지터 튜닝을 바꾸는 PR은 재측정해 맞출 것). 기준: 계단 감지 전(P2-16b 전) / PR 첫 판 /
+/// 지금(5초 이후 은닉 %):
+/// - 반복 긴 스파이크(2s +60ms /6s): 0.98 / 1.51 / 1.04 — 첫 스파이크만 계단으로 처리하고 되돌아오면 60초 감지 억제(M2),
+///   그 뒤는 버스트·긴 창이 맡는다(평균 목표 43 / 7.7 / 39ms — 은닉 대신 지연을 내주는 이전 맞교환으로 돌아감).
+/// - 0.7s +30ms /3s: 0.98 / 1.10 / 0.98. 1s +30ms /4s: 0.71 / 0.71 / 0.71.
+/// - 0.6s 공백 + 앞뒤 늦은 패킷: 계단 오판정(지연 창 리셋) 0 / 9 / 0(L1 최소 패킷 수).
+/// - +130ms 계단(10~20s): 0.93 / 1.22 / 0.90, 늦은 버림 109 / 174 / 103(M1 깊이 EWMA 재설정).
+/// - 램프 +40ms/4s 반복: 0.93 / 0.86 / 0.77.
+#[test]
+fn delay_step_review_probes() {
+    let m: Vec<_> = probe_scenarios().iter().map(|(n, f)| (*n, probe_metrics(&**f))).collect();
+    for (n, (c, t, ld, r)) in &m {
+        println!("{n}: 은닉 {c:.2}% 목표 {t:.2}ms 늦은 버림 {ld} 창 리셋 {r}");
+    }
+    let get = |name: &str| m.iter().find(|x| x.0 == name).unwrap().1;
+    let (c, _, _, _) = get("1s 스파이크 +30ms /4s");
+    assert!(c <= 0.75, "1s 스파이크 은닉 {c:.2}%");
+    let (c, _, _, _) = get("0.7s 스파이크 +30ms /3s");
+    assert!(c <= 1.0, "0.7s 스파이크 은닉 {c:.2}%");
+    let (c, t, _, r) = get("2s 스파이크 +60ms /6s");
+    assert!(c <= 1.1, "반복 긴 스파이크 은닉 {c:.2}%(계단 감지가 긴 창 학습을 지움)");
+    assert!(r <= 11 && t > 30.0, "반복 긴 스파이크: 첫 번째 뒤 계단 감지가 억제돼야 한다(창 리셋 {r}, 목표 {t:.1}ms)");
+    let (_, _, _, r) = get("0.6s 공백 + 앞뒤 +10ms /5s");
+    assert_eq!(r, 0, "손실 공백을 사이에 둔 늦은 패킷 몇 개로 계단 판정");
+    let (c, _, ld, _) = get("계단 +130ms 10~20s");
+    assert!(c <= 0.93 && ld <= 109, "+130ms 계단 은닉 {c:.2}% 늦은 버림 {ld}(계단 감지 전보다 나빠지면 안 됨)");
+    let (c, _, _, _) = get("램프 +40ms/4s 반복");
+    assert!(c <= 0.93, "램프 은닉 {c:.2}%");
+}
+
+/// M1: +130ms 계단에서 계단 판정(약 10.7s) 뒤에는 "버림 → 은닉" 반복이 없다(전에는 깊이 EWMA가 식는 0.4초 동안 이어짐).
+#[test]
+fn big_step_no_conceal_after_rebase() {
+    let (tr, _) = step_run_full(&|t| if (10.0..20.0).contains(&t) { 130.0 } else { 0.0 }, 14.0);
+    let at = |t: f64| tr.iter().find(|x| x.0 >= t).unwrap().1;
+    let (a, b) = (at(10.8), at(13.0));
+    assert_eq!(b.concealed - a.concealed, 0, "계단 판정 뒤 은닉 {} 프레임", b.concealed - a.concealed);
+    assert_eq!(b.late_dropped - a.late_dropped, 0);
+}
+
+/// P2-16b: 경로 지연이 10초에 +60ms 오른 채로 남으면(계단) 0.5초 뒤 지연 통계를 새 지연에서 다시 모으고 목표가 계단 전 값으로
+/// 돌아온다. 전에는 버스트로 보아 목표가 상한 근처에 수 초 머물렀다.
+#[test]
+fn delay_step_up_rebases_quickly() {
+    let (trace, s) = step_run(&|t| if t >= 10.0 { 60.0 } else { 0.0 }, 16.0);
+    let before = trace.iter().filter(|x| x.0 > 8.0 && x.0 < 10.0).map(|x| x.1).fold(0.0, f32::max);
+    let high: Vec<f64> = trace.iter().filter(|x| x.0 >= 10.0 && x.1 > before + 1.0).map(|x| x.0).collect();
+    println!("계단: 계단 전 목표 {before:.2}ms, 목표가 +1ms 넘은 표본 {:?}, {s:?}", high);
+    assert!(!high.is_empty(), "계단 시작은 버스트로 보여야 한다(구분 불가 구간)");
+    assert!(high.iter().all(|&t| t < 10.8), "계단 뒤 목표가 0.8초 넘게 올라 있었다: {high:?}");
+    // 지연 창이 계단에서 다시 모였다
+    assert!(trace.iter().any(|x| x.0 > 10.0 && x.0 < 11.0 && x.2 < 200), "지연 통계를 다시 모으지 않았다");
+}
+
+/// P2-16b 오탐 방지: 0.3초 스파이크(+30ms, 와이파이 버스트)는 계단이 아니다 — 지연 창을 버리지 않고 버스트로 처리한다.
+#[test]
+fn short_spike_is_not_a_delay_step() {
+    let (trace, s) = step_run(&|t| if (10.0..10.3).contains(&t) { 30.0 } else { 0.0 }, 14.0);
+    assert!(trace.iter().filter(|x| x.0 > 5.0).all(|x| x.2 == 200), "스파이크에 지연 창을 다시 모았다(계단 오탐)");
+    assert!(s.burst_events > 0, "스파이크는 버스트로 감지돼야 한다: {s:?}");
 }
 
 /// P1-6a: 손실된 k의 마감에 k+1이 아직 없으면 언더런 은닉 1프레임만 나가고, k+1이 도착하면 그 은닉을 k의 손실
@@ -1188,4 +1405,125 @@ fn trace_fixture_matches() {
         .unwrap_or_else(|e| panic!("기준값 {} 읽기 실패({e}) — SIM_UPDATE_FIXTURE=1로 만든다", path.display()))
         .replace("\r\n", "\n");
     assert_eq!(want, got, "지터 trace가 기준값과 다르다(동작 변경) — fixture를 갱신하지 말 것(구조 정리 PR)");
+}
+
+/// PCM 은닉 이음매 시험의 송신 계획(패킷 번호 k마다).
+#[derive(Clone, Copy)]
+struct SeamPlan {
+    codec: CodecKind,
+    /// k번 패킷의 (프레임, 스테레오).
+    shape: fn(usize) -> (usize, bool),
+    /// 잃는 패킷.
+    lost: fn(usize) -> bool,
+    /// 추가 망 지연(µs, 늦게 오는 패킷 — 언더런 은닉 뒤 되감김 재생 또는 늦은 패킷 버림).
+    delay_us: fn(usize) -> u64,
+    /// 스테레오 R의 위상 앞섬(주기). 모노 ↔ 스테레오 전환 시험은 0(R = L, 전환 자체가 신호 계단이 되지 않게).
+    r_phase: f64,
+    /// 지터 버퍼 최소 깊이(ms). 0이면 자동. 손실 뒤 패킷이 은닉 판단 전에 와 있어야 하는 경우(L2: 은닉 프레임 = 새 프레임 크기)에 쓴다.
+    min_ms: f32,
+}
+
+/// 계획대로 1.5초 보내고 받으며(기본 망 지연 1ms) 0.2초 뒤부터의 출력에서 채널별 샘플 간 최대 계단과 통계를 낸다.
+fn seam_run(plan: SeamPlan) -> (f32, JitterStats) {
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: plan.min_ms, max_ms: 80.0, profile: 0.5 });
+    let (f0, st0) = (plan.shape)(0);
+    let mut tx = Sender::new(plan.codec, f0, 0, 0);
+    tx.stereo = st0;
+    tx.r_phase = plan.r_phase;
+    let mut arrivals: Vec<(u64, Header, Vec<u8>)> = Vec::new();
+    let mut send_t = 0u64;
+    for k in 0..800 {
+        let (f, st) = (plan.shape)(k);
+        tx.frame = f;
+        tx.stereo = st;
+        let p = tx.next();
+        if !(plan.lost)(k) {
+            arrivals.push((send_t + 1000 + (plan.delay_us)(k), p.0, p.1));
+        }
+        send_t += f as u64 * 1000 / 48;
+    }
+    arrivals.sort_by_key(|a| a.0);
+    let mut out = vec![0f32; 64 * 2];
+    let (mut l, mut r) = (Vec::new(), Vec::new());
+    let (mut t, mut next) = (0u64, 0usize);
+    while t < 1_500_000 {
+        while next < arrivals.len() && arrivals[next].0 <= t {
+            let (at, h, p) = &arrivals[next];
+            jb.insert(h, p, *at);
+            next += 1;
+        }
+        jb.pop(&mut out);
+        jb.end_burst(t, t, 0.0);
+        if t >= 200_000 {
+            l.extend(out.iter().step_by(2).copied());
+            r.extend(out.iter().skip(1).step_by(2).copied());
+        }
+        t += 64 * 1000 / 48;
+    }
+    let step = |v: &[f32]| v.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+    (step(&l).max(step(&r)), jb.stats())
+}
+
+/// PCM 은닉의 이음매: 손실 은닉 시작(직전 프레임 페이드)과 재합류(은닉 뒤 첫 실제 패킷)에 계단(클릭)이 없다.
+/// 전에는 직전 프레임을 머리부터 반복해 은닉 첫 샘플에서, 페이드·무음 뒤 새 패킷 첫 샘플에서 진폭의 최대 95%만큼
+/// 뛰었다(정상 최대 계단의 9~16배). Opus는 디코더 PLC가 이어 주므로 대조군으로 같은 기준을 본다.
+/// #188 리뷰 L3: 스테레오 채널 정렬, 손실 → 1패킷 → 재손실, 언더런 은닉 뒤 늦은 패킷(되감김 재생·버림), 손실 직전 프레임
+/// 크기 변경(L2), 모노 은닉 → 스테레오 재합류(L1)까지.
+#[test]
+fn pcm_concealment_has_no_click_at_start_or_rejoin() {
+    // 440Hz 진폭 0.5 사인의 샘플 간 최대 차.
+    let normal = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0 * 0.5;
+    let none = |_: usize| false;
+    let no_delay = |_: usize| 0u64;
+    let pcm = CodecKind::Pcm16;
+    let cases: [(&str, SeamPlan); 11] = [
+        ("모노 F120 손실 1", SeamPlan { codec: pcm, shape: |_| (120, false), lost: |k| k == 200, delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        ("모노 F120 손실 2", SeamPlan { codec: pcm, shape: |_| (120, false), lost: |k| (200..202).contains(&k), delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        ("모노 F240 손실 1", SeamPlan { codec: pcm, shape: |_| (240, false), lost: |k| k == 200, delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        ("모노 F240 손실 3", SeamPlan { codec: pcm, shape: |_| (240, false), lost: |k| (200..203).contains(&k), delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        ("스테레오 F120 손실 1·2", SeamPlan { codec: pcm, shape: |_| (120, true), lost: |k| k == 200 || (300..302).contains(&k), delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        ("손실 → 1패킷 → 재손실", SeamPlan { codec: pcm, shape: |_| (120, false), lost: |k| k == 200 || k == 202 || k == 204, delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        ("스테레오 손실 → 1패킷 → 재손실", SeamPlan { codec: pcm, shape: |_| (240, true), lost: |k| k == 200 || k == 202, delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+        ("늦은 패킷(언더런 은닉 뒤 도착)", SeamPlan { codec: pcm, shape: |_| (120, false), lost: none, delay_us: |k| if k == 200 { 4000 } else if k == 300 { 9000 } else { 0 }, r_phase: 0.25, min_ms: 0.0 }),
+        ("손실 직전 프레임 2.5 → 5ms(L2)", SeamPlan { codec: pcm, shape: |k| (if k < 200 { 120 } else { 240 }, false), lost: |k| k == 200, delay_us: no_delay, r_phase: 0.25, min_ms: 12.0 }),
+        ("모노 은닉 → 스테레오 재합류(L1)", SeamPlan { codec: pcm, shape: |k| (240, !(150..200).contains(&k)), lost: |k| k == 120 || k == 199, delay_us: no_delay, r_phase: 0.0, min_ms: 0.0 }),
+        ("Opus F240 손실 1(대조군)", SeamPlan { codec: CodecKind::Opus, shape: |_| (240, false), lost: |k| k == 200, delay_us: no_delay, r_phase: 0.25, min_ms: 0.0 }),
+    ];
+    for (name, plan) in cases {
+        let (max_step, st) = seam_run(plan);
+        assert!(st.concealed >= 1, "{name}: 은닉이 일어나야 함");
+        assert_eq!(st.rebuffers, 0, "{name}: 재버퍼 없음");
+        assert!(max_step <= 2.0 * normal, "{name}: 최대 계단 {max_step:.4} > 2 × 정상 {normal:.4}(클릭), 통계 {st:?}");
+    }
+}
+
+/// 스트림 리셋(재버퍼·먼 미래 seq) 뒤 첫 패킷은 직전 PCM 은닉 이력과 무관하게 새 스트림처럼 시작한다(#188 리뷰 M1):
+/// 리셋 전 은닉 꼬리에서 이어 붙이는 크로스페이드가 남으면 리셋 뒤 동작이 직전 코덱·은닉 이력에 따라 달라진다.
+#[test]
+fn pcm_rejoin_crossfade_does_not_survive_stream_reset() {
+    use super::conceal::{ConcealBufs, Concealer};
+    let mut enc = Encoder::new(CodecKind::Pcm16, 1, 0).unwrap();
+    let mut pkt = vec![0u8; MAX_PAYLOAD_BYTES];
+    let n = enc.encode(&[0.5f32; 120], &mut pkt).unwrap();
+    let pkt = &pkt[..n];
+    let decode_after = |reset: bool| {
+        let mut c = Concealer::new(ConcealBufs::alloc());
+        c.decode_packet(pkt, false, 1, 120);
+        c.conceal_frame(120, None);
+        c.conceal_frame(120, None); // 페이드 뒤 무음: 꼬리 0
+        if reset {
+            c.reset_stream();
+        }
+        c.decode_packet(pkt, false, 1, 120);
+        c.frame_out(120)[0]
+    };
+    // 리셋 없이: 은닉 꼬리(0)에서 이어 붙여 첫 샘플이 작다(재합류 크로스페이드).
+    assert!(decode_after(false) < 0.05, "재합류 크로스페이드가 있어야 함: {}", decode_after(false));
+    // 리셋 뒤: 새 스트림과 같다(디코드 값 그대로).
+    let fresh = {
+        let mut c = Concealer::new(ConcealBufs::alloc());
+        c.decode_packet(pkt, false, 1, 120);
+        c.frame_out(120)[0]
+    };
+    assert_eq!(decode_after(true), fresh, "리셋 뒤 첫 패킷은 새 스트림과 같아야 함");
 }

@@ -53,6 +53,8 @@ export function useMyRooms(userId: string | undefined) {
   return {
     myRooms: myRoomsQuery.data ?? EMPTY,
     myRoomsLoading: myRoomsQuery.isFetching,
+    /** 조회 실패(받은 목록 없음) — 빈 목록("아직 만든 합주실이 없습니다")과 구분해 보여 준다 */
+    myRoomsError: myRoomsQuery.isError && !myRoomsQuery.data,
     fetchMyRooms,
     deleteMyRoom,
     patchMyRoom,

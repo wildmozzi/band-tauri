@@ -112,6 +112,8 @@ const LATE_BLOCKS: usize = 16;
 struct Slot {
     seq: u32,
     valid: bool,
+    /// 이 슬롯에 `seq`가 실제로 쓰였다(소비해도 그대로 — 사본 판별용). 처음·`restart`에서만 false: 그때 `seq` 0은 받은 적 없는 값이다.
+    written: bool,
     len: usize,
     flags: u8,
     frame: usize,
@@ -152,6 +154,9 @@ pub struct JitterBuffer {
     target: TargetEst,
     /// 늦은 패킷 예산(도착 쪽, `late_budget.rs`).
     late: LateBudget,
+    /// 지연 계단 감시를 시작할 때의 늦은 패킷 예산(#194 리뷰 L2): 계단으로 판정되면 감시 동안 닫힌 블록(계단 공백의 늦은
+    /// 도착·버림)을 판단에서 되돌리려고 이 값으로 돌린다.
+    late_at_step: LateBudget,
     /// 깊이 측정·보정(재생 쪽, `correction.rs`). `chase`·재생 시작 여유도 여기 있다.
     depth: DepthCtl,
     /// 디코드·은닉(재생 쪽, `conceal.rs`).
@@ -186,7 +191,7 @@ impl Buffers {
     fn alloc() -> Self {
         Self {
             slots: (0..SLOT_COUNT)
-                .map(|_| Slot { seq: 0, valid: false, len: 0, flags: 0, frame: 0, ts: 0, data: vec![0u8; MAX_PAYLOAD_BYTES].into_boxed_slice() })
+                .map(|_| Slot { seq: 0, valid: false, written: false, len: 0, flags: 0, frame: 0, ts: 0, data: vec![0u8; MAX_PAYLOAD_BYTES].into_boxed_slice() })
                 .collect(),
             fifo: VecDeque::with_capacity(MAX_PKT_FRAME * 16 * 2),
             scratch: Vec::with_capacity(DELAY_WINDOW),
@@ -202,7 +207,7 @@ impl Buffers {
     fn reclaim(jb: &mut JitterBuffer) -> Self {
         let mut slots = std::mem::take(&mut jb.slots);
         for s in &mut slots {
-            (s.seq, s.valid, s.len, s.flags, s.frame, s.ts) = (0, false, 0, 0, 0, 0);
+            (s.seq, s.valid, s.written, s.len, s.flags, s.frame, s.ts) = (0, false, false, 0, 0, 0, 0);
         }
         let mut fifo = std::mem::take(&mut jb.fifo);
         fifo.clear();
@@ -239,6 +244,7 @@ impl JitterBuffer {
             tuning: JitterTuning::from_profile(settings.profile),
             target: TargetEst::new(b.block_rel),
             late: LateBudget::new(),
+            late_at_step: LateBudget::new(),
             depth: DepthCtl::new(b.depth),
             conceal: Concealer::new(b.conceal),
             pkt_frame: 240,
@@ -323,6 +329,14 @@ impl JitterBuffer {
 
         if self.has_stream {
             let d = seq_diff(seq, self.next_seq);
+            // 이미 받아 재생(또는 시작·버림으로 지나감)한 seq의 사본: 슬롯에 그 seq가 남아 있다(소비는 `valid`만 끈다).
+            // 오디오 패킷에는 net의 재전송 창이 없어(경로 전환 유예 중 두 경로 수신 등) 사본이 여기까지 온다. 늦은 패킷으로
+            // 세면 늦은 패킷 예산·목표가 사본 지연만큼 오르고(혼돈 시나리오 `chaos_duplicates_do_not_inflate`: 5.7 → 17ms),
+            // 버퍼링 중에는 시작점을 옛 seq로 되감는다 — 소리에 영향이 없으므로 아무것도 세지 않고 버린다.
+            let s = &self.slots[Self::slot_index(seq)];
+            if d < 0 && s.written && s.seq == seq && !s.valid {
+                return;
+            }
             if d < 0 {
                 // 버퍼링 중에는 순서가 뒤바뀐 직전 패킷만 시작점을 당긴다(재전송으로 크게
                 // 되돌리는 것을 막기 위해 목표 깊이 이내로 제한, 리뷰 L5).
@@ -361,6 +375,7 @@ impl JitterBuffer {
         }
         slot.seq = seq;
         slot.valid = true;
+        slot.written = true;
         slot.len = payload.len();
         slot.flags = hdr.flags;
         slot.frame = frame;

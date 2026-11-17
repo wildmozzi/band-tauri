@@ -67,7 +67,15 @@ export function createPerformers(roomMeta: RoomMetaStore, insecureDevMode: boole
     }
   }
 
-  return { hasApproval, setApproval, clearApproval, canStartPerforming, onLeave, releaseGraceOnRejoin }
+  /** 만료된 승인 유예 정리 (하트비트). 끊긴 뒤 돌아오지 않은 사용자의 승인은 읽을 때만 지워져 쌓였다 */
+  function sweep(now: number) {
+    for (const [roomId, m] of approvals) {
+      for (const [uid, exp] of m) if (exp !== null && exp <= now) m.delete(uid)
+      if (m.size === 0) approvals.delete(roomId)
+    }
+  }
+
+  return { hasApproval, setApproval, clearApproval, canStartPerforming, onLeave, releaseGraceOnRejoin, sweep }
 }
 
 export type Performers = ReturnType<typeof createPerformers>
