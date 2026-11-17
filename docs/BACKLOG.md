@@ -105,7 +105,7 @@
 | P2-18c | **[결정]** 익명 관람자에게도 세션 재개(토큰)를 줄지 — 지금은 끊길 때마다 새 id라 연주자 앱이 재협상, 관람 오디오 수 초 무음 / 관람자 쪽 재요청(viewer-retry) 신호 | 결정 후 서버·클라이언트 | 대기 (사용자 결정) |
 | P2-18d | **[결정]** 관람자 ICE에 STUN만 있고 TURN 없음 → 대칭 NAT·회사망 관람 실패. TURN(coturn 자체 운영 / Cloudflare 등 외부 서비스) 단기 자격 서버 발급 — 외부 서비스·비용 | **[사람]** LTE 테더링·회사망에서 관람 | 대기 (사용자 결정) |
 | P2-18e | **[사람]** 실제 연주자 앱 ↔ Vercel 웹 관람 실망 청취, 재연결 뒤 재offer 시간, iOS Safari 자동재생·오디오 잠금 해제(e2e는 Chromium만) | 확인 | 대기 |
-| P2-18f | e2e flaky: web-viewer.e2e.ts:260 익명 관람자 room-unavailable 자동 재시도(join 4회 기대에 3회, 약 830회 중 1회) — 후보: 재시도 타이머가 isOpen() false면 join 버리고 재예약 안 함 / mock setDown 비동기 close 순서. 진단 보강·원인 수정 | --repeat-each 반복 | 대기 (낮음) |
+| P2-18f | e2e flaky: web-viewer.e2e.ts:260 익명 관람자 room-unavailable 자동 재시도(join 4회 기대에 3회, 약 830회 중 1회) — 후보: 재시도 타이머가 isOpen() false면 join 버리고 재예약 안 함 / mock setDown 비동기 close 순서. 진단 보강·원인 수정 | --repeat-each 반복 | 완료(PR #198, 2026-11-17 — 원인: 제목(Supabase)이 먼저 뜨고 첫 join이 늦으면 실패 주입을 먼저 소모, 입장 확인 뒤 주입·실패 시 시그널링 타임라인 첨부) |
 | P2-19 | 발굴 파서 퍼징(시드 고정, 테스트만): 패킷 헤더·지터·handle_packet 끝에서 끝·open 변조·STUN·Ping/Pong·릴레이 Ack/토큰·relay handle — 긴 판(수백만 입력) 결함 0 | BAND_FUZZ_LONG=1 긴 판 | 완료(PR #190, 2026-11-17) |
 | P2-19b | 제어 seq를 출발지 확인(accept_rx) 전에 소모 → 다른 주소 사본이 진짜 Ping/Pong/Bye seq를 먹음(Low) / 오디오 재생 사본이 수신 링 128칸 차지(Low) — 피어별 오디오 seq 창 | 회귀 테스트 | 완료(PR #193, 2026-11-17 — 제어 seq 출발지 확인 뒤 소모, 오디오 피어별 1024비트 재전송 창, PeerStats rxDupDropped·rxStaleDropped) |
 | P2-20 | 발굴 합주실 밖 흐름: 목록 조회 실패가 빈 목록으로 보임 → 오류+다시 시도, 업로드 거절 이유(429/413/401/503) 표시·오프라인 안내, 합주실·게시글 상세 일시 오류 시 말없이 목록으로 튕김 → 진짜 없음(RoomNotFoundError·22P02 잘린 링크)만 이동, 댓글·인기 태그·분리 기록 오류 표시 | vitest·e2e | 완료(PR #197, 2026-11-17; **[사람]** 비행기 모드·Vercel 웹에서 오류 문구·버튼, 모바일 폭 줄바꿈) |
