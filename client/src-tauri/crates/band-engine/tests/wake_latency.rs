@@ -39,10 +39,15 @@ fn report(label: &str, (mut fine, mut poll): (Vec<u64>, Vec<u64>)) {
         let (p50, p99, p999, max) = (q(v, 0.5), q(v, 0.99), q(v, 0.999), *v.iter().max().unwrap());
         println!("| {label} | {name} | {n} | {p50} | {p99} | {p999} | {max} |");
     }
+    // 하네스 기상 모델(`tests/sim/tune.rs` `WAKE_FINE`/`WAKE_POLL`)에 옮기는 분위표(P2-17f)
+    for (name, v) in [("FINE_POLL", &mut fine), ("POLL", &mut poll)] {
+        let qs: Vec<String> = [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99, 0.999, 1.0].iter().map(|&p| format!("({p}, {})", if p == 0.0 { *v.iter().min().unwrap() } else { q(v, p) })).collect();
+        println!("  {label} {name} 분위: [{}]", qs.join(", "));
+    }
 }
 
 #[test]
-#[ignore]
+#[ignore = "측정: 유휴·부하 각 20초, 판정 없음(realtime CI 필터에서도 뺀다)"]
 fn worker_wake_overshoot() {
     let secs = std::env::var("WAKE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(20.0);
     println!("| 조건 | 수면 | 표본 | p50 µs | p99 µs | p99.9 µs | 최대 µs |\n|---|---|---|---|---|---|---|");

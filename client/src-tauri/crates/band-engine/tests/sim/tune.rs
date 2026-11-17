@@ -85,7 +85,10 @@ pub(super) struct MultiSim {
     pub out_buf: usize,
     pub out_phase_us: u64,
     pub seconds: f64,
+    /// 워커 기상 지연 상한(µs): `wake`가 `Uniform`일 때 수면 뒤 U(0..이 값)만큼 늦게 깬다.
     pub worker_jitter_us: u64,
+    /// 워커 기상 지연 모델(P2-17f). 기본은 `Uniform`(기존 시나리오·fixture 그대로).
+    pub wake: WakeModel,
     pub out_early_us: u64,
     pub dev_late_us: u64,
     /// (주기 µs, 멈춤 µs, 끝 µs)
@@ -99,6 +102,31 @@ pub(super) struct MultiSim {
     pub rx_hold_us: u64,
 }
 
+/// 워커 기상 지연 모델(P2-17f).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum WakeModel {
+    /// U(0..`worker_jitter_us`) — 수면 길이와 무관. 기존 시나리오·fixture의 모델(기본 300µs, 실측보다 낙관적).
+    Uniform,
+    /// 실측 분위표(`WAKE_FINE`/`WAKE_POLL`)에서 역CDF 선형 보간으로 뽑는다 — `FINE_POLL`·`POLL` 수면마다 다른 분포.
+    /// `worker_jitter_us`는 쓰지 않는다.
+    Measured,
+}
+
+/// `FINE_POLL`(150µs) 수면 overshoot 분위표(누적 확률, µs). 실측: `tests/wake_latency.rs`, Intel Core Ultra 5 225H(하이브리드),
+/// MMCSS·HighQoS 끔, release, 유휴 20초(표본 6687, 2026-11-18). 부하 조건보다 꼬리가 길어 유휴를 쓴다(p99 956 vs 854µs).
+/// PR #200 측정(p50 399 / p99 898 / 최대 1337µs)과 같은 모양이다.
+pub(super) const WAKE_FINE: &[(f64, u64)] = &[(0.0, 59), (0.1, 357), (0.25, 377), (0.5, 395), (0.75, 416), (0.9, 500), (0.99, 956), (0.999, 1317), (1.0, 1469)];
+/// `POLL`(500µs) 수면 overshoot 분위표(같은 측정, 표본 15602).
+pub(super) const WAKE_POLL: &[(f64, u64)] = &[(0.0, 12), (0.1, 476), (0.25, 506), (0.5, 523), (0.75, 554), (0.9, 634), (0.99, 998), (0.999, 1420), (1.0, 2004)];
+
+/// 분위표의 역CDF(구간 선형): u ∈ [0, 1) → overshoot µs. 결정적(시드 RNG의 u만 쓴다).
+pub(super) fn wake_overshoot(table: &[(f64, u64)], u: f64) -> u64 {
+    let i = table.iter().position(|&(q, _)| q > u).unwrap_or(table.len() - 1).max(1);
+    let ((q0, v0), (q1, v1)) = (table[i - 1], table[i]);
+    let f = ((u - q0) / (q1 - q0)).clamp(0.0, 1.0);
+    (v0 as f64 + f * (v1 as f64 - v0 as f64)).round() as u64
+}
+
 impl MultiSim {
     pub fn new(seconds: f64, peers: Vec<NetPeer>) -> Self {
         Self {
@@ -106,6 +134,7 @@ impl MultiSim {
             out_phase_us: 700,
             seconds,
             worker_jitter_us: 300,
+            wake: WakeModel::Uniform,
             out_early_us: 0,
             dev_late_us: 500,
             out_stall: None,
@@ -595,7 +624,12 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                 next_trace += 100_000;
             }
             let poll = if urgent { FINE_POLL } else { POLL }.as_micros() as u64;
-            t_w = t + poll + if p.worker_jitter_us > 0 { rng.gen_range(0..p.worker_jitter_us) } else { 0 };
+            t_w = t + poll
+                + match p.wake {
+                    WakeModel::Uniform if p.worker_jitter_us > 0 => rng.gen_range(0..p.worker_jitter_us),
+                    WakeModel::Uniform => 0,
+                    WakeModel::Measured => wake_overshoot(if urgent { WAKE_FINE } else { WAKE_POLL }, rng.gen::<f64>()),
+                };
         }
     }
     for (pos, &i) in order.iter().enumerate() {
@@ -950,4 +984,79 @@ fn churn_add_remove_events_match_fixture() {
     }
     let want = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
     assert!(got == want, "피어 추가·제거 사건 열이 fixture({})와 다르다 — 구조 정리 PR은 이 값을 바꾸지 않는다.\n--- 지금 ---\n{got}", path.display());
+}
+
+// ----------------------------------------------------------------------------
+// 워커 기상 지연 실측 모델(P2-17f)
+// ----------------------------------------------------------------------------
+
+/// 분위표 역CDF: 끝점·분위점을 그대로 지나고, 시드 RNG로 뽑은 표본의 분위가 표와 맞는다(모델 자체 검증).
+#[test]
+fn wake_model_matches_measured_quantiles() {
+    for table in [WAKE_FINE, WAKE_POLL] {
+        for w in table.windows(2) {
+            assert!(w[0].0 < w[1].0 && w[0].1 <= w[1].1, "분위표는 증가해야 한다: {w:?}");
+        }
+        for &(q, v) in &table[..table.len() - 1] {
+            assert_eq!(wake_overshoot(table, q), v, "분위 {q}");
+        }
+        assert_eq!(wake_overshoot(table, 1.0 - 1e-12), table[table.len() - 1].1);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut v: Vec<u64> = (0..200_000).map(|_| wake_overshoot(table, rng.gen::<f64>())).collect();
+        v.sort_unstable();
+        for &(q, want) in &table[1..table.len() - 1] {
+            let got = v[(v.len() as f64 * q) as usize];
+            assert!(got.abs_diff(want) <= want / 20 + 5, "분위 {q}: 표본 {got} vs 표 {want}");
+        }
+    }
+}
+
+/// 1실행(F·기상 모델, 지터 1ms·손실 1%·60초): (bufferMs 중앙값, 1F + p95 − bufferMs = GOAL 1절 여유 ms, 은닉 %, xrun, 적응 여유).
+fn wake_run(frame: usize, wake: WakeModel, worker_jitter_us: u64, seed: u64) -> (f32, f32, f64, u64, usize) {
+    let mut np = NetPeer::new(frame, 60 + seed);
+    np.net_jitter_us = 1000;
+    np.loss = 0.01;
+    let mut sim = MultiSim::new(60.0, vec![np]);
+    sim.wake = wake;
+    sim.worker_jitter_us = worker_jitter_us;
+    sim.seed = 11 + seed;
+    let r = run_multi(&sim);
+    let p = &r.peers[0];
+    let (buf, p95) = (p.median_buffer(5.0, 60.0), p.median_p95(5.0, 60.0));
+    (buf, ms(frame) + p95 - buf, p.conceal_pct(), r.xruns, p.margin)
+}
+
+/// 실측 기상 모델에서도 LAN 기준 설정(F 2.5/5ms·in128·out128, 지터 1ms, 손실 1%)이 GOAL 1절(bufferMs ≤ 1F + p95)과
+/// 2절(은닉 ≤ 1.5%, xrun 0)을 지킨다. 은닉 마감 여유 1.5ms(`DEADLINE_GUARD_US`)가 실측 p99(956µs) + `FINE_POLL`을 덮는다는 근거.
+#[test]
+fn tune_measured_wake_keeps_goal() {
+    for frame in [120usize, 240] {
+        let (buf, margin, conc, xruns, adapt) = wake_run(frame, WakeModel::Measured, 0, 0);
+        println!("TUNE 실측 기상 F {frame}: bufferMs {buf:.2}, 1절 여유 {margin:.2}ms, 은닉 {conc:.2}%, xrun {xruns}, 적응 여유 {adapt}");
+        assert!(margin >= 0.0, "F {frame}: GOAL 1절 여유 {margin:.2}ms");
+        assert!(conc <= 1.5, "F {frame}: 은닉 {conc:.2}%");
+        assert_eq!(xruns, 0, "F {frame}: xrun");
+    }
+}
+
+/// 측정 도구(P2-17f): 기상 모델(기존 U(0..300µs) / 실측 분위표 / PR #200의 대용 U(0..1000µs))별 GOAL 1절 여유(1F + p95 −
+/// bufferMs 중앙값)·은닉·xrun·적응 여유를 3시드로 낸다. 표만 출력한다:
+/// `cargo test -p band-engine --release --test sim wake_model_goal_margin_sweep -- --ignored --nocapture`
+#[test]
+#[ignore = "측정: 60초 × 2프레임 × 3모델 × 3시드"]
+fn wake_model_goal_margin_sweep() {
+    println!("| F ms | 기상 모델 | bufferMs | 1절 여유 ms 평균 (최소) | 은닉 % | xrun 합 | 적응 여유 최대 |\n|---|---|---|---|---|---|---|");
+    for frame in [120usize, 240] {
+        for (name, wake, wj) in [("U(0..300µs)", WakeModel::Uniform, 300u64), ("실측 분위표", WakeModel::Measured, 0), ("U(0..1000µs)", WakeModel::Uniform, 1000)] {
+            let runs: Vec<_> = (0..3u64).map(|seed| wake_run(frame, wake, wj, seed)).collect();
+            let n = runs.len() as f32;
+            let buf = runs.iter().map(|r| r.0).sum::<f32>() / n;
+            let margin = runs.iter().map(|r| r.1).sum::<f32>() / n;
+            let mmin = runs.iter().map(|r| r.1).fold(f32::INFINITY, f32::min);
+            let conc = runs.iter().map(|r| r.2).sum::<f64>() / runs.len() as f64;
+            let xr: u64 = runs.iter().map(|r| r.3).sum();
+            let adapt = runs.iter().map(|r| r.4).max().unwrap_or(0);
+            println!("| {:.1} | {name} | {buf:.2} | {margin:.2} ({mmin:.2}) | {conc:.2} | {xr} | {adapt} |", ms(frame));
+        }
+    }
 }

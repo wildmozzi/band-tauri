@@ -14,7 +14,7 @@
 //! - 짧은 버전(5분)은 기본 `cargo test`에서 돈다.
 //! - 60분 전체: `cargo test -p band-engine --no-default-features --features test-support --test sim long_sim_6peers_60min -- --ignored --nocapture` (CI 야간 잡 `long-sim`).
 
-use super::tune::{run_multi, JitDist, MultiOut, MultiSim, NetPeer, PeerOut, Sample};
+use super::tune::{run_multi, JitDist, MultiOut, MultiSim, NetPeer, PeerOut, Sample, WakeModel};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 
@@ -737,10 +737,19 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
 }
 
 fn run_and_report(tag: &str, seconds: f64) -> Value {
+    let (json, fails, md_path) = run_report_wake(tag, seconds, WakeModel::Uniform);
+    assert!(fails.is_empty(), "GOAL 미달 {}건: {:?} (리포트 {})", fails.len(), fails, md_path.display());
+    json
+}
+
+/// 시나리오를 워커 기상 모델을 골라 돌리고 리포트(Markdown·JSON)를 쓴다(P2-17f). 판정 실패 목록을 돌려줄 뿐 단언하지 않는다 —
+/// fixture·야간 60분(`run_and_report`)은 `Uniform`으로 돌고 실패하면 단언하고, 실측 모델(`wake_measured_6peers_*`)은 측정만 한다.
+fn run_report_wake(tag: &str, seconds: f64, wake: WakeModel) -> (Value, Vec<String>, std::path::PathBuf) {
     let specs = scenario(seconds);
     let mut sim = MultiSim::new(seconds, specs.iter().map(|s| s.np.clone()).collect());
     sim.settle_us = (SETTLE_S * 1e6) as u64;
     sim.seed = 6;
+    sim.wake = wake;
     let t0 = std::time::Instant::now();
     let out = run_multi(&sim);
     let wall_s = t0.elapsed().as_secs_f64();
@@ -752,8 +761,11 @@ fn run_and_report(tag: &str, seconds: f64) -> Value {
     std::fs::write(&md_path, &rep.md).unwrap();
     std::fs::write(dir.join(format!("sim-report-{tag}.json")), serde_json::to_string_pretty(&rep.json).unwrap()).unwrap();
     println!("{}\n리포트: {}", rep.md, md_path.display());
-    assert!(rep.fails.is_empty(), "GOAL 미달 {}건: {:?} (리포트 {})", rep.fails.len(), rep.fails, md_path.display());
-    rep.json
+    if !out.xrun_us.is_empty() {
+        let at: Vec<String> = out.xrun_us.iter().map(|&t| format!("{:.3}", t as f64 / 1e6)).collect();
+        println!("xrun 시각(s, 워커 사건 기준): {}", at.join(", "));
+    }
+    (rep.json, rep.fails, md_path)
 }
 
 /// 동작 불변 기준값(engine-architecture.md 9.1절): 리포트 JSON에서 실행 시간(`wallSeconds`)을 뺀 나머지가
@@ -796,6 +808,25 @@ fn long_sim_6peers_5min() {
 #[ignore = "long: 6피어 60분 가상 시간(디버그 로컬 약 8분) — 야간 CI long-sim 잡에서 실행"]
 fn long_sim_6peers_60min() {
     run_and_report("long-60min", 3600.0);
+}
+
+/// 측정 도구(P2-17f): 6피어 5분을 실측 워커 기상 모델(`WakeModel::Measured`)로 돌려 같은 판정표를 낸다(fixture·단언 없음).
+/// 2026-11-18(시드 6~11): 1절 여유는 두 모델이 시드 흩어짐 안에서 같고, xrun은 실측 모델에서만 난다(시드 6개 중 3개에서 1~2회) —
+/// 마감 근처가 아닌 반복의 `POLL` 수면이 꼬리(≥ 1.8ms)로 늦게 깨면 urgent 판정 창(여유 + `POLL`)을 넘는다(엔진 후속 후보).
+/// `cargo test -p band-engine --release --test sim wake_measured_6peers_5min -- --ignored --nocapture`
+#[test]
+#[ignore = "측정: 6피어 5분, 실측 기상 모델 — 판정표만"]
+fn wake_measured_6peers_5min() {
+    let (_, fails, _) = run_report_wake("short-5min-measured-wake", 300.0, WakeModel::Measured);
+    println!("실측 기상 모델 판정 실패 {}건: {fails:?}", fails.len());
+}
+
+/// 측정 도구(P2-17f): 6피어 60분, 실측 워커 기상 모델(판정표만). 2026-11-18: xrun 9회, 그 밖의 GOAL 항목은 PASS.
+#[test]
+#[ignore = "측정: 6피어 60분 가상 시간, 실측 기상 모델 — 판정표만"]
+fn wake_measured_6peers_60min() {
+    let (_, fails, _) = run_report_wake("long-60min-measured-wake", 3600.0, WakeModel::Measured);
+    println!("실측 기상 모델 판정 실패 {}건: {fails:?}", fails.len());
 }
 
 /// 지연 민감도(엔진 ③-a3, 설계 6.4절 (4)): 5분 시나리오를 패킷이 도착하고도 `rx_hold_us`만큼 더 큐에 묵은 뒤에야

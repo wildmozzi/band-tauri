@@ -480,12 +480,16 @@ fn echo_round_trip_reflects_proxy_delay() {
         // 지터 버퍼 순간값·평균 차이가 남는다.
         assert!(r.residual_ms.unwrap().abs() < 5.0, "{r:?}");
     }
-    // 프록시 편도 지연 20ms 차이 → 왕복 40ms, 편도 추정 20ms 차이
+    // 프록시 편도 지연 20ms 차이 → 왕복 40ms + 두 측정의 지터 버퍼 평균 차, 편도 추정은 그 절반.
+    // 왕복에는 지터 버퍼가 들어 있고, 지터 버퍼는 러너 스케줄링 지터를 따라 측정마다 다르다(P2-17f: CI 1회 3연속 실패 —
+    // 지터 버퍼 6.8→12.3 / 10.0→13.0 / 9.0→14.3ms에 왕복 차 45.2 / 42.8 / 45.0ms, 보정하면 −0.3 / −0.2 / −0.2ms).
+    // 그래서 측정된 지터 버퍼 차를 빼고 비교한다. 지터 버퍼를 뺀 나머지(핑 RTT 차·잔차 차)는 측정 도구 자체의 오차다.
     let d_rt = far.round_trip_ms.unwrap() - near.round_trip_ms.unwrap();
     let d_ow = far.one_way_ms.unwrap() - near.one_way_ms.unwrap();
-    eprintln!("왕복 차 {d_rt:.2}ms, 편도 차 {d_ow:.2}ms");
-    assert!((d_rt - 40.0).abs() < 2.5, "왕복 차 {d_rt}");
-    assert!((d_ow - 20.0).abs() < 1.5, "편도 차 {d_ow}");
+    let d_jb = (far.jitter_buffer_ms - near.jitter_buffer_ms) as f64;
+    eprintln!("왕복 차 {d_rt:.2}ms, 편도 차 {d_ow:.2}ms, 지터 버퍼 차 {d_jb:.2}ms → 보정 왕복 차 {:.2}ms", d_rt - d_jb);
+    assert!((d_rt - d_jb - 40.0).abs() < 2.5, "왕복 차 {d_rt} − 지터 버퍼 차 {d_jb}");
+    assert!((d_ow - d_jb / 2.0 - 20.0).abs() < 1.5, "편도 차 {d_ow} − 지터 버퍼 차/2 {}", d_jb / 2.0);
 }
 
 #[test]
