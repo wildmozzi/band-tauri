@@ -317,6 +317,14 @@ async function runScenario(): Promise<Step[]> {
   await step('viewer: join vault wrong password', 'viewer', { type: 'join', roomId: 'vault', password: 'wrong-password' })
   await step('viewer: join vault (move)', 'viewer', { type: 'join', roomId: 'vault', password: VAULT_PASSWORD, nickname: 'Viewer' })
 
+  // ---------- 관람자로 내리기 (P2-9) ----------
+  await step('p1: demote-performer host (not host, ignored)', 'p1#resumed', () => ({ type: 'demote-performer', targetId: idOf('host') }))
+  await step('host: demote-performer anon (demote-not-performer)', 'host', () => ({ type: 'demote-performer', targetId: idOf('anon') }))
+  // 재개한 p1의 clientId는 옛 id다(TestClient.id는 재개 전 임시 id)
+  await step('host: demote-performer p1', 'host', { type: 'demote-performer', targetId: oldP1 })
+  await step('p1: start-performing after demote (perform-not-approved)', 'p1#resumed', { type: 'start-performing', instrument: 'bass' })
+  await step('p1: native-descriptor after demote (ignored)', 'p1#resumed', { type: 'native-descriptor', descriptor: { ssrc: 102, key: engineKey(102), candidates: [] } })
+
   // ---------- 전원 퇴장 ----------
   await step('host: native-leave', 'host', { type: 'native-leave' })
   await step('anon: leave', 'anon', { type: 'leave' })

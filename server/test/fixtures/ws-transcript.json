@@ -1783,17 +1783,93 @@
     }
   },
   {
-    "step": "host: native-leave",
+    "step": "p1: demote-performer host (not host, ignored)",
+    "received": {
+      "host": [],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": []
+    }
+  },
+  {
+    "step": "host: demote-performer anon (demote-not-performer)",
+    "received": {
+      "host": [
+        {
+          "type": "error",
+          "code": "demote-not-performer",
+          "message": "연주 중인 참가자만 관람자로 내릴 수 있습니다."
+        }
+      ],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": []
+    }
+  },
+  {
+    "step": "host: demote-performer p1",
+    "received": {
+      "host": [
+        {
+          "type": "performer-updated",
+          "nickname": "P1",
+          "isPerforming": false,
+          "oderId": "c2",
+          "from": "c2"
+        },
+        {
+          "type": "native-leave",
+          "from": "c2"
+        }
+      ],
+      "viewer": [],
+      "anon": [
+        {
+          "type": "performer-updated",
+          "nickname": "P1",
+          "isPerforming": false,
+          "oderId": "c2",
+          "from": "c2"
+        }
+      ],
+      "p1#resumed": [
+        {
+          "type": "demoted-to-viewer"
+        }
+      ]
+    }
+  },
+  {
+    "step": "p1: start-performing after demote (perform-not-approved)",
     "received": {
       "host": [],
       "viewer": [],
       "anon": [],
       "p1#resumed": [
         {
-          "type": "native-leave",
-          "from": "c1"
+          "type": "error",
+          "code": "perform-not-approved",
+          "message": "방장의 승인이 필요합니다."
         }
       ]
+    }
+  },
+  {
+    "step": "p1: native-descriptor after demote (ignored)",
+    "received": {
+      "host": [],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": []
+    }
+  },
+  {
+    "step": "host: native-leave",
+    "received": {
+      "host": [],
+      "viewer": [],
+      "anon": [],
+      "p1#resumed": []
     }
   },
   {

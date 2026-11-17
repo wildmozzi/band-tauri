@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { EngineStats, PeerStats } from '../../../native/engineApi'
 
 // 에코 측정 메뉴는 이 테스트 대상이 아니다
@@ -74,5 +74,52 @@ describe('RemotePerformerItem 입→귀 추정 지연 (P2-8)', () => {
   it('피어 통계가 없으면(관람·연결 전) 표시하지 않는다', () => {
     renderItem(undefined)
     expect(screen.queryByTestId('ear-latency')).toBeNull()
+  })
+})
+
+describe('RemotePerformerItem 관람자로 내리기 (P2-9)', () => {
+  afterEach(() => cleanup())
+
+  function renderWithDemote(onDemote?: () => void) {
+    return render(
+      <RemotePerformerItem
+        oderId="bob"
+        peerInfo={{ peerId: 'bob', instrument: 'bass', nickname: '밥', isHost: false }}
+        isPerformer={false}
+        isBroadcaster={false}
+        ps={undefined}
+        engineStats={null}
+        relayError={null}
+        muted={false}
+        onToggleMute={() => {}}
+        onDemote={onDemote}
+        rowRef={() => {}}
+      />,
+    )
+  }
+
+  it('방장 화면(onDemote 있음)에만 버튼, 확인 단계를 거쳐야 보낸다', () => {
+    const onDemote = vi.fn()
+    renderWithDemote(onDemote)
+    fireEvent.click(screen.getByRole('button', { name: '관람자로 내리기' }))
+    expect(onDemote).not.toHaveBeenCalled()
+    expect(screen.getByRole('alertdialog').textContent).toContain('밥님의 연주를 멈추고 관람자로 내릴까요?')
+    fireEvent.click(screen.getByRole('button', { name: '내리기' }))
+    expect(onDemote).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+  })
+
+  it('취소하면 보내지 않고 버튼으로 돌아간다', () => {
+    const onDemote = vi.fn()
+    renderWithDemote(onDemote)
+    fireEvent.click(screen.getByRole('button', { name: '관람자로 내리기' }))
+    fireEvent.click(screen.getByRole('button', { name: '취소' }))
+    expect(onDemote).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: '관람자로 내리기' })).toBeTruthy()
+  })
+
+  it('방장이 아니면(onDemote 없음) 버튼이 없다', () => {
+    renderWithDemote(undefined)
+    expect(screen.queryByRole('button', { name: '관람자로 내리기' })).toBeNull()
   })
 })

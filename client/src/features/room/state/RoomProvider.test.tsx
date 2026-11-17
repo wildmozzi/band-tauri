@@ -100,12 +100,14 @@ import {
   type RoomActions,
 } from './roomHooks'
 import type { RoomSessionStore } from './roomSessionStore'
+import { DEMOTED_MESSAGE } from './signalReducer'
 
 const renders = { chat: 0, mini: 0, detail: 0, stats: 0, levels: 0, connection: 0, banner: 0 }
 let joinRoom: RoomActions['joinRoom'] = () => {}
 let leaveRoom: RoomActions['leaveRoom'] = () => {}
 let peers: string[] = []
 let store: RoomSessionStore
+let actions: RoomActions
 
 function ChatProbe() {
   renders.chat++
@@ -142,6 +144,7 @@ function ConnectionProbe() {
 }
 function StoreGrab() {
   store = useContext(RoomRuntimeContext)!.store
+  actions = useContext(RoomRuntimeContext)!.actions
   return null
 }
 
@@ -187,6 +190,22 @@ describe('RoomProvider', () => {
     act(() => leaveRoom())
     expect(h.signaling.send).toHaveBeenLastCalledWith({ type: 'leave' })
     expect(h.setInRoom).toHaveBeenLastCalledWith(false)
+  })
+
+  it('관람자로 내려지면(P2-9) 엔진을 알림 없이 멈추고 안내한다 — native-leave·stop-performing은 보내지 않는다', () => {
+    const stop = vi.spyOn(h.session, 'stop')
+    act(() => joinRoom('r1'))
+    h.signaling.send.mockClear()
+    message({ type: 'demoted-to-viewer' })
+    expect(stop).toHaveBeenCalledWith({ notify: false, error: DEMOTED_MESSAGE })
+    expect(h.signaling.send).not.toHaveBeenCalled()
+    stop.mockRestore()
+  })
+
+  it('방장 명령 demotePerformer는 demote-performer {targetId}를 보낸다', () => {
+    act(() => joinRoom('r1'))
+    act(() => actions.demotePerformer('a'))
+    expect(h.signaling.send).toHaveBeenLastCalledWith({ type: 'demote-performer', targetId: 'a' })
   })
 
   it('room-state 메시지가 스토어를 거쳐 화면에 반영된다', () => {

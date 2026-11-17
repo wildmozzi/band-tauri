@@ -586,6 +586,18 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 연주 참여 요청: `perform-request-sent` `{ instrument, hostOnline }`(같은 요청 재전송에도 다시 보냄), `perform-request-rejected` `{ reason, instrument }`, 익명 요청에는 `request-perform-error` `{ code: 'login-required' }`도 보낸다. 승인(`perform-request-approved`)을 받은 앱은 바로 엔진을 시작한다(웹은 앱 안내).
 - 악기 변경 요청: 거절이면 `instrument-change-rejected` `{ reason }`.
 - 거절 사유 규칙(P2-11, `reject-perform`·`reject-instrument-change` 공통, `protocol.rejectReason`): 방장이 보낸 `reason`을 앞뒤 공백을 빼고 200자로 자른다. 문자열이 아니거나 비면 기본 문구(연주 요청 "방장이 요청을 거절했습니다.", 악기 변경 "방장이 악기 변경을 거절했습니다.")를 넣는다. 그래서 받는 쪽 `reason`은 늘 비어 있지 않은 문자열이다.
+- **관람자로 내리기**(P2-9, `requests.handleDemotePerformer`): 방장이 `demote-performer { targetId }`를 보낸다.
+  - 권한: 보낸 사람이 DB `rooms.host_id`의 방장이어야 한다(다른 방장 조작과 같은 `requireHost`, 방 정보 캐시 최대 30초). 아니거나 `targetId`가 문자열이 아니면 응답 없이 무시한다.
+  - 대상이 같은 방에서 연주 중(`start-performing` 뒤)이고 방장이 아닌 참가자가 아니면 보낸 사람에게 `error { code: 'demote-not-performer' }`.
+  - 처리 순서(= 받는 메시지 순서):
+    1. 대상의 승인 기록 삭제 — 승인제 방이면 다시 연주하려면 새 참여 요청이 필요하다(`free_join` 방은 바로 다시 시작할 수 있다).
+    2. 대상의 대기 중 악기 변경 요청 취소 → 방장에게 `instrument-change-request-cancelled`.
+    3. 대상의 연주 상태(`stop-performing`과 같음)와 엔진 바인딩(키·ssrc — 릴레이 토큰 갱신 불가)을 지우고, 대상이 켠 메트로놈이 있으면 지운다(방장만 켤 수 있으므로 실제로는 없음).
+    4. 대상에게 `demoted-to-viewer {}`. 세션 재개 유예 중이면 재개할 때(`room-state` 뒤) 보낸다.
+    5. 대상 외 전원에게 `performer-updated { oderId: 대상, from: 대상, nickname, isPerforming: false }`(`stop-performing`과 같은 모양).
+    6. 다른 연주자·엔진을 켠 참가자에게 `native-leave { from: 대상 }` — 대상 클라이언트를 기다리지 않고 각 엔진이 곧바로 대상 피어를 뺀다.
+  - 대상 앱은 `demoted-to-viewer`를 받으면 엔진·방송을 멈추고(`native-leave`·`stop-performing`은 보내지 않음 — 서버가 이미 처리했다) 관람 모드로 돌아가 "방장이 관람자로 전환했습니다" 안내를 띄운다. 내 참여 요청·악기 변경 상태도 비운다.
+  - 방장 화면: 연주자 행의 "관람자로 내리기" → 같은 행의 확인 단계("내리기"/"취소") 뒤에만 보낸다.
 - 중계 시 서버가 `from`을 붙인다(클라이언트가 보낸 `from`은 무시).
 - **공유 메트로놈**(P2-3, 1.4절): `metronome` `{ state: { running, bpm, beatsPerBar, startUs } }`.
   - 서버 검증: 보낸 사람이 인증된 연주자이고, 엔진을 켰고(`native-descriptor`를 보낸 상태), **방장**이어야 한다. 방장 여부는 DB `rooms.host_id`로 다시 확인한다(방 정보 캐시 최대 2초, PR #53 M1). DB 조회가 실패하면 마지막으로 읽은 값으로 권한만 판단하고 이양 판단(정지)은 하지 않는다.
@@ -606,7 +618,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 ## 6. 프론트 흐름
 
 - 연주 시작(앱): `engine_start` → descriptor를 `native-descriptor`로 브로드캐스트. 새 연주자가 들어오거나 `native-descriptor`를 받으면 `engine_add_peer`, 아직 내 descriptor를 그 피어에게 안 보냈으면 `to`로 보낸다(양방향 동시 펀칭).
-- 연주자 이탈/`native-leave`/WS `leave` → `engine_remove_peer`.
+- 연주자 이탈/`native-leave`/WS `leave`/연주 중단·관람자로 내려짐(`performer-updated` isPerforming=false) → `engine_remove_peer`.
 - `relay-token { token, bindKey, addr, ssrc, expiresAt, expiresIn, serverNow }`(내 엔진 ssrc와 같을 때만) → `engine_set_relay({ addr, token, expiresInSec, bindKey })`. `bindKey`는 옛 서버면 없다.
   - 남은 수명은 `expiresIn` → `expiresAt - serverNow` → (옛 서버) `expiresAt - 내 시계` 순으로 정한다. 내 PC 시계는 쓰지 않는다(M1).
   - 받은 시각 + 남은 수명 기준 만료 60초 전(수명이 짧으면 절반 지점)에 `relay-token-request`를 보낸다. WS가 잠시 끊겨도 버틸 여유를 두려는 것이다(L4). 응답이 없으면 10초마다 다시 요청한다.

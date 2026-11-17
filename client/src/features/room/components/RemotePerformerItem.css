@@ -58,3 +58,52 @@
 .performer-latency .ear-latency.poor {
   color: var(--error);
 }
+
+/* 방장: 관람자로 내리기 (P2-9) — 행 안 버튼 + 행 아래 확인 줄 */
+.performer-demote-btn {
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  background: var(--white-a10);
+  border: 1px solid var(--white-a20);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.performer-demote-btn:hover {
+  background: var(--red-400-a20);
+  border-color: var(--red-400-a40);
+}
+
+.performer-demote-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 6px 8px;
+  font-size: 0.8rem;
+  background: var(--red-400-a20);
+  border: 1px solid var(--red-400-a40);
+  border-radius: var(--radius-sm);
+}
+
+.performer-demote-confirm span {
+  flex: 1 1 100%;
+}
+
+.performer-demote-confirm button {
+  padding: 3px 10px;
+  font-size: 0.8rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--white-a20);
+  background: var(--white-a10);
+  cursor: pointer;
+}
+
+.performer-demote-confirm .performer-demote-yes {
+  background: var(--error);
+  border-color: var(--error);
+  color: var(--white);
+}

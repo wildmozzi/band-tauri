@@ -12,7 +12,7 @@ import type { Client, WsDeps } from '../src/signaling/types'
 import { TokenBucket } from '../src/signaling/rateLimit'
 import { createRegistry, isAuthenticated, isPerformer, send } from '../src/signaling/registry'
 import { createRoomMeta } from '../src/signaling/roomMeta'
-import { createRequests } from '../src/signaling/requests'
+import { createRequests, handleDemotePerformer, type DemoteSvc } from '../src/signaling/requests'
 import { createCapacity } from '../src/signaling/capacity'
 import { createPassword } from '../src/signaling/password'
 import { createPerformers } from '../src/signaling/performers'
@@ -575,6 +575,86 @@ describe('membership (S4-2)', () => {
     assert.equal(svc.registry.roomSize('r'), 0)
     assert.equal(svc.registry.hasRoom('r'), false, 'empty room removed')
     assert.equal(svc.requests.performList('r'), undefined)
+  })
+})
+
+/** demote-performer용 서비스: DB 방장은 uh (백엔드 있음, 실제 팩토리) */
+function demoteSvc(): DemoteSvc {
+  const registry = createRegistry()
+  const deps: WsDeps = { hasBackend: true, verifyToken: async () => null, fetchRoomMeta: async () => ({ hostId: 'uh', freeJoin: false }), updateParticipants: async () => {} }
+  const roomMeta = createRoomMeta(deps, false)
+  return {
+    registry,
+    roomMeta,
+    requests: createRequests(),
+    performers: createPerformers(roomMeta, false),
+    nativeSession: createNativeSession(registry, {}),
+    metronome: createMetronome(registry, roomMeta, deps, DEFAULT_LIMITS),
+  }
+}
+
+describe('demote-performer (P2-9)', () => {
+  const ctxFor = (svc: DemoteSvc, c: Client): Ctx<DemoteSvc> => ({ ws: c.conn.ws, ip: c.conn.ip, client: c, id: c.id, svc })
+
+  function room() {
+    const svc = demoteSvc()
+    const host = fakeClient('h', { userId: 'uh', isHost: true, nativeActive: true, nativeSsrc: 1 })
+    const p = fakeClient('p', { userId: 'up', isPerforming: true, instrument: 'bass', nativeActive: true, nativeSsrc: 2, nativeKey: 'kp' })
+    const q = fakeClient('q', { userId: 'uq', isPerforming: true, instrument: 'keys', nativeActive: true, nativeSsrc: 3 })
+    const v = fakeClient('v', { userId: 'uv' })
+    seat(svc.registry, 'r', host, p, q, v)
+    svc.performers.setApproval('r', 'up', null)
+    return { svc, host, p, q, v }
+  }
+
+  it('host: clears approval·instrument request·engine binding, tells the target, then the room, then engines', async () => {
+    const { svc, host, p, q, v } = room()
+    svc.requests.instrumentList('r', true).push({ oderId: 'p', nickname: 'P', currentInstrument: 'bass', newInstrument: 'drums', timestamp: 0 })
+    await handleDemotePerformer(ctxFor(svc, host), { type: 'demote-performer', targetId: 'p' })
+
+    assert.equal(p.perform.isPerforming, false)
+    assert.equal(p.perform.instrument, undefined)
+    assert.deepEqual(p.native, { active: false, ssrc: undefined, key: undefined })
+    assert.equal(svc.performers.hasApproval('r', 'up'), false, 'needs a new request to perform again')
+    assert.equal(svc.requests.instrumentList('r')?.length, 0)
+    assert.deepEqual(sentTo(p), [{ type: 'demoted-to-viewer' }])
+    assert.deepEqual(sentTo(host).map(m => m.type), ['instrument-change-request-cancelled', 'performer-updated', 'native-leave'])
+    assert.deepEqual(sentTo(q).map(m => m.type), ['performer-updated', 'native-leave'])
+    assert.deepEqual(sentTo(v).map(m => m.type), ['performer-updated'], 'viewers get no engine message')
+    assert.deepEqual(sentTo(q)[0], { type: 'performer-updated', nickname: 'N-p', isPerforming: false, oderId: 'p', from: 'p' })
+    assert.deepEqual(sentTo(q)[1], { type: 'native-leave', from: 'p' })
+  })
+
+  it('a non-host (DB) is ignored even if its client claims isHost', async () => {
+    const { svc, p, q } = room()
+    q.member.isHost = true // 클라이언트·이전 값 무시: DB 방장은 uh
+    await handleDemotePerformer(ctxFor(svc, q), { type: 'demote-performer', targetId: 'p' })
+    assert.equal(p.perform.isPerforming, true)
+    assert.deepEqual(sentTo(p), [])
+    assert.deepEqual(sentTo(q), [])
+    assert.equal(q.member.isHost, false)
+  })
+
+  it('rejects a target that is not performing, the host itself, another room member or a missing id', async () => {
+    const { svc, host, v } = room()
+    const other = fakeClient('o', { userId: 'uo', isPerforming: true })
+    seat(svc.registry, 'r2', other)
+    for (const targetId of ['v', 'h', 'o', 'nobody']) {
+      await handleDemotePerformer(ctxFor(svc, host), { type: 'demote-performer', targetId })
+    }
+    assert.deepEqual(sentTo(host).map(m => m.code), ['demote-not-performer', 'demote-not-performer', 'demote-not-performer', 'demote-not-performer'])
+    assert.equal(other.perform.isPerforming, true)
+    assert.deepEqual(sentTo(v), [])
+    await handleDemotePerformer(ctxFor(svc, host), { type: 'demote-performer' })
+    assert.equal(sentTo(host).length, 4, 'no targetId: ignored like other host actions')
+  })
+
+  it('a target in resume grace (socket closed) gets the notice on resume instead', async () => {
+    const { svc, host, p } = room()
+    ;(p.conn.ws as unknown as FakeWs).readyState = CLOSED
+    await handleDemotePerformer(ctxFor(svc, host), { type: 'demote-performer', targetId: 'p' })
+    assert.equal(p.resume.pendingDemoted, true)
+    assert.equal(p.perform.isPerforming, false)
   })
 })
 

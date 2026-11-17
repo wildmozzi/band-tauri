@@ -41,7 +41,7 @@ export function PerformersPanel({
   const { myInstrument, canPerform, broadcasterId, relayError } = useRoomPerform()
   const { peerEngineStats, engineStats } = useRoomTelemetry('peerEngineStats', 'engineStats')
   const { mixSettingsMap, setMixMuted } = useRoomMixer()
-  const { pendingRequests } = useRoomRequests()
+  const { pendingRequests, demotePerformer } = useRoomRequests()
 
   return (
     <aside className="performers-panel">
@@ -74,6 +74,7 @@ export function PerformersPanel({
               relayError={relayError}
               muted={muted}
               onToggleMute={() => setMixMuted(oderId, !muted)}
+              onDemote={isHost && !peerInfo.isHost ? () => demotePerformer(oderId) : undefined}
               rowRef={(el) => { performerRefs.current[oderId] = el }}
             />
           )

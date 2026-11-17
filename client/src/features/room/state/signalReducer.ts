@@ -47,6 +47,8 @@ export type RoomEffect =
   /** 악기 변경 결과 표시 후 기본 상태로 */
   | { type: 'reset-instrument-change-after'; ms: number }
   | { type: 'server-error'; code: unknown; message: unknown }
+  /** 방장이 나를 관람자로 내렸다(P2-9): 엔진 세션을 알림 없이 멈추고 안내 (서버가 이미 연주 상태를 지웠다) */
+  | { type: 'demoted'; message: string }
 
 export interface SignalContext {
   selfId: string | null
@@ -66,6 +68,9 @@ export interface SignalResult {
 }
 
 export const MAX_BUSY_RETRIES = 5
+
+/** 관람자로 내려졌을 때 안내 (P2-9). 연주 오류 자리(ParticipationToggle)에 보인다 */
+export const DEMOTED_MESSAGE = '방장이 나를 관람자로 전환했습니다. 다시 연주하려면 연주 참여를 요청하세요.'
 
 interface ParticipantPayload {
   oderId: string
@@ -150,6 +155,13 @@ function reduceRequests(s: RoomState, p: SignalPayload): SignalResult | null {
       return done({ ...req, myInstrumentChangeStatus: 'rejected' }, [
         { type: 'reset-instrument-change-after', ms: INSTRUMENT_CHANGE_RESULT_MS.rejected },
       ])
+    case 'demoted-to-viewer':
+      // 방장이 관람자로 내렸다(P2-9): 내 참여 요청·악기 변경 상태를 비우고 방송·엔진을 멈춘다(native-leave·stop-performing은
+      // 보내지 않는다 — 서버가 이미 연주 상태를 지우고 다른 연주자에게 알렸다)
+      return done(
+        { ...req, perform: performRequestReducer(req.perform, { type: 'cancelled' }), myInstrumentChangeStatus: 'none', myNewInstrument: null },
+        [{ type: 'stop-broadcast' }, { type: 'demoted', message: DEMOTED_MESSAGE }],
+      )
     case 'participant-instrument-changed': {
       if (typeof p.oderId !== 'string' || typeof p.instrument !== 'string') return done(null)
       const prev = s.roster[p.oderId]

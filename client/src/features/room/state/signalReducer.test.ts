@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { initialRoomState, type RoomState } from './roomSessionStore'
-import { MAX_BUSY_RETRIES, reduceRoomSignal, type SignalContext } from './signalReducer'
+import { DEMOTED_MESSAGE, MAX_BUSY_RETRIES, reduceRoomSignal, type SignalContext } from './signalReducer'
 import type { PeerInstrument } from './roomState'
 
 const ctx = (over: Partial<SignalContext> = {}): SignalContext => ({
@@ -50,6 +50,28 @@ describe('reduceRoomSignal — 요청', () => {
     ])
     const no = reduceRoomSignal(inRoom(), { type: 'instrument-change-rejected' }, ctx())
     expect(no.effects).toEqual([{ type: 'reset-instrument-change-after', ms: 3000 }])
+  })
+
+  it('관람자로 내려짐(P2-9): 내 요청·악기 변경 상태를 비우고 방송 정지 + 알림 없는 엔진 정지·안내', () => {
+    const s = inRoom()
+    s.requests = {
+      ...s.requests,
+      perform: { ...s.requests.perform, myStatus: 'approved', myInstrument: 'bass', requestOutstanding: true },
+      myInstrumentChangeStatus: 'pending',
+      myNewInstrument: 'keys',
+    }
+    const r = reduceRoomSignal(s, { type: 'demoted-to-viewer' }, ctx())
+    expect(r.handled).toBe(true)
+    expect(r.patch?.requests?.perform).toMatchObject({ myStatus: 'none', myInstrument: null, requestOutstanding: false })
+    expect(r.patch?.requests?.myInstrumentChangeStatus).toBe('none')
+    expect(r.patch?.requests?.myNewInstrument).toBeNull()
+    expect(r.effects).toEqual([{ type: 'stop-broadcast' }, { type: 'demoted', message: DEMOTED_MESSAGE }])
+  })
+
+  it('다른 사람이 내려지면 performer-updated(isPerforming=false)로 연주자 목록에서 빠지고 엔진 피어도 정리', () => {
+    const r = reduceRoomSignal(inRoom({ roster: { a: guitar } }), { type: 'performer-updated', oderId: 'a', from: 'a', nickname: 'A', isPerforming: false }, ctx())
+    expect(r.patch?.roster).toEqual({})
+    expect(r.effects).toEqual([{ type: 'peer-gone', peerId: 'a' }, { type: 'close-viewer', peerId: 'a' }])
   })
 
   it('다른 연주자의 악기 변경은 아는 연주자일 때만 반영', () => {

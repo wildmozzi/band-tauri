@@ -439,6 +439,11 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         reduceRequests({ type: 'cancelled' })
       },
       dismissRejection: () => reduceRequests({ type: 'cancelled' }),
+      /** 방장: 연주자를 관람자로 내린다(P2-9). 화면 반영은 서버의 performer-updated로 한다 */
+      demotePerformer: (targetId) => {
+        if (!d().isOpen()) return
+        d().send({ type: 'demote-performer', targetId })
+      },
       approveInstrumentChange: (targetId) => {
         if (!d().isOpen()) return
         d().send({ type: 'approve-instrument-change', targetId })
@@ -562,6 +567,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         timersRef.current.push(setTimeout(() => store.patch('requests', { myInstrumentChangeStatus: 'none', myNewInstrument: null }), e.ms))
         return
       case 'server-error': console.warn('[WS] 서버 에러:', e.code, e.message); return
+      case 'demoted': void session.stop({ notify: false, error: e.message }); return
     }
   }
 

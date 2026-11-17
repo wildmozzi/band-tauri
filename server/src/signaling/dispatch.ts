@@ -8,8 +8,8 @@ import { handleStartPerforming, handleStopPerforming, type PerformersSvc } from 
 import type { Msg } from './protocol'
 import { send } from './registry'
 import {
-  handleApproveInstrumentChange, handleApprovePerform, handleCancelInstrumentChangeRequest, handleCancelPerformRequest,
-  handleRejectInstrumentChange, handleRejectPerform, handleRequestInstrumentChange, handleRequestPerform, type RequestsSvc,
+  handleApproveInstrumentChange, handleApprovePerform, handleCancelInstrumentChangeRequest, handleCancelPerformRequest, handleDemotePerformer,
+  handleRejectInstrumentChange, handleRejectPerform, handleRequestInstrumentChange, handleRequestPerform, type DemoteSvc, type RequestsSvc,
 } from './requests'
 import type { Env } from './types'
 import { handleViewerSignal } from './viewerRelay'
@@ -30,6 +30,10 @@ export interface SignalingServices extends AuthSvc, PerformersSvc, NativeSession
 export type ConnCtx = Ctx<SignalingServices>
 
 type Handler = (ctx: ConnCtx, msg: Msg) => void | Promise<void>
+
+/** DemoteSvc는 엔진·메트로놈을 구조 타입으로 적어 extends에 넣으면 충돌한다 — 대신 전체 모양이 그 조각을 만족하는지 검사 */
+type _DemoteSvcFits = SignalingServices extends DemoteSvc ? true : never
+const _demoteSvcFits: _DemoteSvcFits = true
 
 /**
  * 메시지 종류 → 핸들러. `ping`·`auth`와 auth 게이트는 표 앞에서 처리한다(dispatch).
@@ -56,6 +60,7 @@ const handlers: Record<string, Handler> = Object.assign(Object.create(null) as R
   'approve-instrument-change': handleApproveInstrumentChange,
   'reject-instrument-change': handleRejectInstrumentChange,
   'cancel-instrument-change-request': handleCancelInstrumentChangeRequest,
+  'demote-performer': handleDemotePerformer,
   'leave': handleLeaveMessage,
 } satisfies Record<string, Handler>)
 

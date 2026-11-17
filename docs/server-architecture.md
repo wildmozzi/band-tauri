@@ -29,7 +29,7 @@
 | F | **연주자 상태·승인** | 연주 권한 규칙(방장/free_join/승인, 6명 상한) | `start-performing`·`stop-performing` 분기, `canStartPerforming`, `hasApproval`/`setApproval`/`clearApproval`, `isPerformer` | `approvals`, `Client.{isPerforming,instrument}` |
 | G | **연주 세션(엔진)** | 엔진 계약(descriptor 형식, 키·ssrc 바인딩, 릴레이 토큰) | `native-descriptor`·`native-leave`·`relay-token-request` 분기, `parseEngineKey`, `parseCandidates`, `keyTakenInRoom`, `ssrcTakenInRoom`, `sendRelayToken`, `clearNative` | `Client.{nativeActive,nativeSsrc,nativeKey}`, `relayConfig`(env) |
 | H | **메트로놈** | 메트로놈 계약, 방장 이양 정책 | `metronome` 분기, `parseMetronomeState`, `replayMetronome`, `dropMetronomeIfHostChanged`, `broadcastMetronomeStop` | `metronomes`, `Client.pendingMetronomeStop` |
-| I | **참여 요청·악기 변경 요청** | 요청 UX | `request-perform`, `approve/reject/cancel-perform*`, `*-instrument-change*` 분기 | `performRequests`, `instrumentChangeRequests`, `approvals`(쓰기), `Client.instrument`(쓰기) |
+| I | **참여 요청·악기 변경 요청** | 요청 UX | `request-perform`, `approve/reject/cancel-perform*`, `*-instrument-change*` 분기, `demote-performer`(P2-9: F·G·H 상태를 정리 — 엔진·메트로놈은 svc 구조 타입으로 부른다) | `performRequests`, `instrumentChangeRequests`, `approvals`(쓰기), `Client.instrument`(쓰기) |
 | J | **채팅** | 채팅 정책 | `chat` 분기 | 없음(중계만) |
 | K | **관람 WebRTC 중계** | 관람 방송 방식 | `offer`·`answer`·`ice-candidate` 분기 | 없음(중계만) |
 | L | **정기 작업** | 운영 정책 | `heartbeat`(핑 + `seatHolds` 만료 정리), `scheduleParticipantUpdate` 디바운스, 토큰 만료 타이머, 유예 타이머, auth 타이머 | 위 묶음들의 상태 |
@@ -141,7 +141,7 @@ interface Client {
   id: string
   conn:    { ws, ip, chain, pending, isAlive, msgBucket, chatBucket, joinBucket, dropped, lastRateLimitNotice }  // connection(조립부)
   auth:    { state, userId, tokenExp, expiryTimer }                                                              // auth
-  resume:  { timer, pendingMetronomeStop }                                                                       // resume
+  resume:  { timer, pendingMetronomeStop, pendingDemoted }                                                       // resume (pendingDemoted: P2-9, requests가 켬)
   member:  { roomId, nickname, isHost }                                                                          // membership (isHost는 roomMeta.checkHost도 갱신)
   perform: { isPerforming, instrument }                                                                          // performers
   native:  { active, ssrc, key }                                                                                 // nativeSession

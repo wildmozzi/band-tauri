@@ -50,7 +50,7 @@ export const RATE_LIMIT_RETRY_MS = DEFAULT_PASSWORD_ATTEMPT_LIMITS.windowMs
 
 /** 이 mock이 처리하는 클라이언트 → 서버 메시지 */
 // 연주(데스크톱 앱, e2e/mocks/tauri.ts로 흉내 낼 때만 온다): 기록만 — 서버의 중계·응답은 흉내 내지 않는다
-const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping', 'start-performing', 'stop-performing', 'native-leave', 'native-descriptor', 'relay-token-request', 'metronome'])
+const HANDLED_TYPES = new Set(['auth', 'join', 'leave', 'chat', 'ping', 'start-performing', 'stop-performing', 'native-leave', 'native-descriptor', 'relay-token-request', 'metronome', 'demote-performer'])
 
 /** setDown이 연결을 끊을 때 쓰는 코드 (1012 Service Restart — 앱은 비정상 닫힘으로 보고 재연결한다) */
 const SERVER_RESTART_CLOSE_CODE = 1012
@@ -94,6 +94,11 @@ export class FakeSignaling {
       if (c.roomId !== roomId) continue
       this.send(c, { type: 'chat', message, nickname: from.nickname, timestamp: Date.now(), oderId: from.oderId, from: from.oderId })
     }
+  }
+
+  /** 서버 송신 메시지 하나를 그 방의 모든 연결에 보낸다 (예: 방장이 나를 내렸을 때의 demoted-to-viewer, P2-9) */
+  pushToRoom(roomId: string, msg: ServerMessage) {
+    for (const c of this.conns) if (c.roomId === roomId) this.send(c, msg)
   }
 
   /**
