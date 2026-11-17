@@ -15,18 +15,20 @@
 | 1 | **백업** | — | — |
 | 2 | 마이그레이션 **007 → 008 → 009 → 010** (운영에 없는 것만) | P3-5a, P3-5d | 쉬움~중간 |
 | 3 | **서버 배포**(`main` 병합 → fly 자동 배포) + fly secrets | P3-5a, P0-8, P3-10g | 쉬움(이전 이미지) |
-| 4 | **새 클라이언트 배포**(웹·데스크톱·indigomuse.art) → **구버전 소멸 대기**(최소 7일) | P0-8 | 웹 쉬움 / 데스크톱 어려움 |
+| 4 | **새 클라이언트 배포**(웹·데스크톱·indigomuse.art) → **구버전 소멸 확인**(참여자 재설치 확인 + 최소 7일) | P0-8 | 웹 쉬움 / 데스크톱 어려움 |
 | 5 | **011**(anon의 profiles 민감 컬럼·함수 노출 차단) | P3-5e | 중간 |
 | 6 | **012** + post-images 버킷 INSERT 정책 제거(한 묶음) | P3-10e, P3-10b | 중간 |
 | 7 | (독립) **013**(방 정원 CHECK 2~20) | P3-10g | 쉬움 |
 
 왜 이 순서인가:
+- **3단계 서버 배포 순간부터 구버전 데스크톱은 합주를 못 한다(첫 컷오버 한정, 가장 큰 단절).** 새 서버 시그널링은 `auth` 메시지의 JWT(`accessToken`)로 신원을 정하고(server/src/signaling/auth.ts), 없으면 익명 관람자로만 받는다(연주 요청·연주 시작·엔진 시그널링 불가). `origin/main` 데스크톱에는 `accessToken` 전송이 없다. 게다가 **`origin/main` 데스크톱에는 자동 업데이터가 없다** → 기다려도 사라지지 않고, 참여자가 새 설치본을 **직접** 받아 설치해야 한다.
+  서버에는 "구버전 클라이언트 감지 → 업데이트 안내" 메시지가 **없다**(연주 시도 시 `login-required` 오류만 보내고, 구버전이 이를 표시하는지는 보장 못 함). 그래서 안내는 서버 배포 **전** 공지(0단계 5)로 한다. 데모 단계(실사용자 0)라 공지 대상은 테스트 참여자다.
 - **007·009는 서버보다 먼저**: 새 서버는 결제·구독·주문을 DB에 저장한다. 테이블이 없으면 결제 API가 503(메모리 폴백 없음).
 - **008은 서버보다 먼저(직전)**: 새 서버는 008이 없어도 동작(공개·비밀번호 없는 방만)하지만, 비공개/비밀번호 방이 503이 된다. 반대로 008은 클라이언트의 직접 방 생성(`rooms_insert_authenticated`)을 없애므로 **방 생성을 서버(`POST /api/rooms`)로 하는 새 서버·클라이언트가 곧바로 따라와야 한다** → 2·3·4단계를 같은 작업 창에서.
 - **010은 새 클라이언트보다 먼저**: 새 클라이언트는 `posts.likes_count`를 직접 쓰지 않는다. 010(집계 트리거) 없이 내면 좋아요 수가 갱신되지 않는다. 010은 구버전 클라이언트에도 안전.
 - **011은 구버전 소멸 뒤**: 구버전 웹(band-web)·데스크톱은 댓글 조회에서 `profiles.email`을 읽는다. 011 즉시 `42501 permission denied`로 댓글이 깨진다(PR #18 H1).
 - **012는 구버전 소멸 뒤**: 구버전은 posts를 직접 INSERT/UPDATE한다. 012 즉시 글쓰기·수정이 깨진다. 버킷 INSERT 정책이 남으면 012의 검증 보장이 성립하지 않으므로 같이 한다.
-- **011 뒤에 007~010을 또 실행했다면 011을 다시 실행**(새 함수의 기본 권한 회수).
+- **011 뒤에 007~010(특히 008·010 — 함수를 만드는 것)을 또 실행했다면 011을 다시 실행**(새 함수의 기본 권한 회수. README·백로그는 "008/010"으로 적는다 — 같은 규칙).
 
 ---
 
@@ -49,7 +51,10 @@
    특히 010: `post_likes`에 대시보드에서 만든 집계 트리거가 있으면 010이 중단된다 → 미리 처리 방법을 정한다.
 3. [ ] fly secrets 준비(값은 비밀번호 관리자에, 문서·커밋 금지): `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `TOSS_PAYMENTS_SECRET_KEY`(테스트 키), `CORS_ORIGINS`, `PUBLIC_API_URL`(없으면 배포 워크플로가 막는다), `OPS_TOKEN`(RELEASE.md 4절). 미리 넣을 때는 `fly secrets set ... --stage`(즉시 재시작하지 않음).
 4. [ ] 데스크톱 릴리스 준비: GitHub Secrets/Variables(RELEASE.md 1절), 버전 올림(`scripts/bump-version.mjs`).
-5. [ ] 작업 시간대 결정: 사용자가 적은 시간. 테스트 참여자에게 공지(서버 재시작으로 합주가 끊긴다).
+5. [ ] 작업 시간대 결정: 사용자가 적은 시간. **서버 배포 전에** 테스트 참여자에게 공지:
+   - 서버 재시작으로 합주가 끊긴다.
+   - **이번 서버부터 옛 데스크톱(자동 업데이트 없는 버전)으로는 합주할 수 없다** → 새 설치본 다운로드 링크(GitHub Releases의 `Band_<버전>_x64-setup.exe`)와 설치 방법(서명 없음 → SmartScreen "추가 정보 → 실행", RELEASE.md 3절)을 함께 보낸다. 새 설치본부터는 자동 업데이트된다.
+   - 그래서 4단계 데스크톱 릴리스(Publish)를 **3단계 전에 준비**해 링크를 공지에 넣는 편이 좋다(새 데스크톱은 새 서버에만 붙으므로 사용은 3단계 뒤부터).
 
 ## 1. 백업 (작업 당일, 마이그레이션 직전)
 
@@ -60,6 +65,7 @@
   $env:SUPABASE_DB_URL = "<postgres 연결 문자열>"
   pg_dump $env:SUPABASE_DB_URL -Fc --no-owner -n public -f "band-backup-$(Get-Date -Format yyyyMMdd-HHmm).dump"
   pg_dump $env:SUPABASE_DB_URL --schema-only -n public -f "band-schema-before.sql"   # 비교용
+  pg_dump $env:SUPABASE_DB_URL --schema-only -n storage -f "band-storage-schema-before.sql"   # storage 정책 정의(6단계 되돌리기용)
   ```
   auth·storage 스키마는 Dashboard 백업에 맡긴다(이 컷오버는 public 스키마와 storage 정책만 바꾼다 — 6단계에서 지우는 버킷 정책은 지우기 전 정의를 기록). 확인: `pg_restore -l <파일> | Select-String "TABLE DATA" | Measure-Object` 가 0이 아닌지. 백업 파일은 리포 밖 안전한 곳에.
 - 백업 복원은 **마지막 수단**이다(백업 이후 쓰인 데이터가 사라진다). 단계별 되돌리기를 먼저 쓴다.
@@ -72,9 +78,9 @@
 
 | 순서 | 파일 | 실행 직후 확인 | 되돌리기 |
 |---|---|---|---|
-| 1 | `007_subscriptions.sql` | `SELECT to_regclass('public.subscriptions'), to_regclass('public.payments');` 둘 다 not null. `has_table_privilege('anon','public.payments','SELECT')` = false | 구서버는 안 쓰므로 **그대로 둬도 무해**. 꼭 지워야 하면(데이터 없을 때만) `DROP TABLE public.payments, public.subscriptions CASCADE; DROP FUNCTION public.record_confirmed_payment(UUID,TEXT,TEXT,TEXT,INTEGER,INTEGER), public.cancel_subscription(UUID,BOOLEAN,TEXT);` |
+| 1 | `007_subscriptions.sql` | `SELECT to_regclass('public.subscriptions'), to_regclass('public.payments');` 둘 다 not null. `has_table_privilege('anon','public.payments','SELECT')` = false | 구서버는 안 쓰므로 **기본은 그대로 둔다**(무해). 꼭 지워야 하면 먼저 `SELECT (SELECT count(*) FROM public.payments), (SELECT count(*) FROM public.subscriptions);` → **둘 다 0일 때만** `DROP TABLE public.payments, public.subscriptions CASCADE; DROP FUNCTION public.record_confirmed_payment(UUID,TEXT,TEXT,TEXT,INTEGER,INTEGER), public.cancel_subscription(UUID,BOOLEAN,TEXT);` |
 | 2 | `008_room_privacy.sql` | `SELECT policyname, cmd FROM pg_policies WHERE tablename='rooms';` → `rooms_insert_authenticated` 없음, `rooms_select_visible`·`rooms_update_host` 있음. `SELECT * FROM public.get_room('<아는 방 id>');` 1행 | 구버전 클라이언트 방 생성을 되살려야 하면: `CREATE POLICY "rooms_insert_authenticated" ON public.rooms FOR INSERT WITH CHECK (auth.role() = 'authenticated');` (002와 같음). 컬럼·room_secrets는 남겨도 구서버에 무해 |
-| 3 | `009_payment_orders.sql` | `SELECT to_regclass('public.payment_orders');` not null | 그대로 둬도 무해. 지우려면 `DROP TABLE public.payment_orders;` |
+| 3 | `009_payment_orders.sql` | `SELECT to_regclass('public.payment_orders');` not null | **기본은 그대로 둔다**(무해). 지우려면 먼저 `SELECT count(*) FROM public.payment_orders;` → **0일 때만** `DROP TABLE public.payment_orders;` |
 | 4 | `010_post_likes_count.sql` | README "010 실행 후 확인" 쿼리(집계 불일치 0행, 트리거 3개) | `DROP TRIGGER post_likes_sync_count ON public.post_likes; DROP TRIGGER comments_sync_count ON public.comments; DROP TRIGGER posts_guard_counters ON public.posts;` (함수는 남아도 무해). 중복 좋아요 삭제·집계 재계산은 되돌리지 않는다(백업에서만) |
 
 - 010은 한 트랜잭션 + `lock_timeout 5s`. 실패하면 전체 롤백이니 트래픽이 적을 때 다시 실행.
@@ -82,6 +88,7 @@
 
 ## 3. 서버 배포 (P3-5a, P0-8)
 
+0. [ ] 시그널링 1대 확인: `fly machines list -a band-server` → `started` 1대(RELEASE.md 4절 3-1). 2대 이상이면 합주 상태가 나뉘고 연주 인원 확인도 틀린다 → 1대로 맞춘 뒤(사람 결정) 진행.
 1. [ ] fly secrets 확인(이름만): `fly secrets list -a band-server` — 0단계 목록이 다 있는지. 없으면 `fly secrets set NAME=<값> -a band-server --stage`.
 2. [ ] **연주 인원 0 확인**(구버전 서버 — DB/`fly logs` 방식). [RELEASE.md](RELEASE.md) 4절 체크리스트 1~4.
 3. [ ] `develop` → `main` PR 병합(사람 승인). `server/**` 변경이 있으므로 "Deploy Server to Fly.io"가 바로 돈다.
@@ -101,9 +108,10 @@
 
 1. [ ] 웹(관람): Vercel(indigomuse.art)이 **band-tauri 리포 Root=client**로 연결돼 있는지(P0-8). `main` 병합으로 배포되면 사이트에서 로그인·방 목록·관람 입장 확인.
 2. [ ] **indigomuse.art의 band-web 구버전 분리**(P0-8): band-tauri 배포가 확인된 뒤 band-web 프로젝트를 Vercel에서 분리·비공개/아카이브.
-3. [ ] 데스크톱: 태그 릴리스 → draft 확인 → Publish(RELEASE.md 2절). 기존 설치본에서 업데이트 배너·설치 확인.
-4. [ ] **구버전 소멸 대기** — 판단 기준(README 012 절과 같음, 둘 다):
-   - 배포 후 **최소 7일** 경과
+3. [ ] 데스크톱: 태그 릴리스 → draft 확인 → Publish(RELEASE.md 2절). **첫 컷오버에서는 기존 설치본(`origin/main`)에 업데이터가 없어 업데이트 배너가 뜨지 않는다** → 새 설치본을 직접 설치해 확인하고, 참여자에게 설치 안내(0단계 5). 업데이트 배너 확인은 그 다음 릴리스부터.
+4. [ ] **구버전 소멸 확인** — 판단 기준(모두):
+   - **데스크톱: 참여자 전원이 새 설치본으로 재설치했는지 확인**(첫 컷오버는 자동 업데이트가 없으므로 날짜로는 판단할 수 없다 — 참여자 목록으로 직접 확인. 새 서버 로그의 `[AUTH] ... authenticated`가 모든 참여자에게서 나오는지가 보조 지표)
+   - 배포 후 **최소 7일** 경과(README 012 절)
    - 최근 3일간 새 `posts` 행 수 = 같은 기간 서버 로그의 `POST /api/posts` 201 수(직접 INSERT한 글 없음):
      `SELECT count(*) FROM posts WHERE created_at > now() - interval '3 days';`
    - (보조) 최근 3일간 새 방이 모두 서버 경로로 생겼는지 — 008 이후 직접 생성은 불가하므로 `fly logs`에 방 생성 실패 신고가 없는지
@@ -140,12 +148,13 @@
 README "012" 절의 체크리스트가 원본이다(실행 전 조건 1~4 → 실행 5~6 → 확인 7~9). 요약:
 
 1. [ ] 실행 전: 3단계 서버(`/api/posts`) 배포됨, 4단계 구버전 소멸 기준 충족, 입력 규칙 밖 예전 글 수 확인(참고용).
-2. [ ] 버킷 쓰기 정책 확인 → `DROP POLICY "<이름>" ON storage.objects;`
+2. [ ] 버킷 쓰기 정책 조회 — **정의(qual·with_check)까지 결과를 저장**(CSV 내보내기 또는 복사해 작업 기록에 붙임). 1단계 `band-storage-schema-before.sql`에도 있는지 확인
    ```sql
-   SELECT policyname, cmd, roles FROM pg_policies
+   SELECT policyname, cmd, roles, permissive, qual, with_check FROM pg_policies
     WHERE schemaname = 'storage' AND tablename = 'objects' AND cmd IN ('INSERT', 'UPDATE', 'ALL')
       AND (coalesce(qual, '') || coalesce(with_check, '')) ILIKE '%post-images%';
    ```
+   [ ] 저장했으면 나온 정책마다 `DROP POLICY "<policyname>" ON storage.objects;`
 3. [ ] `012_posts_server_writes.sql` 실행. `FOR ALL policy` 오류면 그 정책을 검토한 뒤 다시.
 4. [ ] 확인:
    ```sql
@@ -162,7 +171,7 @@ README "012" 절의 체크리스트가 원본이다(실행 전 조건 1~4 → �
      WITH CHECK (auth.role() = 'authenticated' AND auth.uid() = author_id);
    CREATE POLICY "posts_update_author" ON public.posts FOR UPDATE USING (auth.uid() = author_id);
    ```
-   버킷 정책은 지우기 전에 `pg_policies` 결과(정의)를 기록해 두고, 필요하면 같은 정의로 다시 만든다.
+   버킷 정책은 6-2에서 저장한 정의로 다시 만든다: `CREATE POLICY "<policyname>" ON storage.objects AS <permissive> FOR <cmd> TO <roles> USING (<qual>) WITH CHECK (<with_check>);` (값이 NULL인 절은 뺀다).
 
 ## 7. 013 — 방 정원 CHECK 2~20 (P3-10g, 독립)
 

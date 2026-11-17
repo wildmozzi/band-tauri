@@ -11,11 +11,14 @@ import type { WebSocketServer } from 'ws'
 import { createApp } from '../src/app'
 import { initializeWebSocket, wsActivity, type ActivityCounts, type RoomMeta } from '../src/services/wsService'
 import { isOpsAuthorized, resolveOpsToken } from '../src/routes/ops'
-import { check, evaluate, parseActivity } from '../scripts/ops-active'
+import { check, evaluate, isSafeOpsUrl, parseActivity } from '../scripts/ops-active'
 import { authJoin, connect, testVerifier, waitFor, type TestClient } from './helpers'
 
 const TOKEN = 'ops-test-token-0123456789abcdef-XYZ' // 32자 이상 (테스트 전용 값)
-const ROOMS: Record<string, RoomMeta> = { 'room-secret-id': { hostId: 'host-user', freeJoin: false } }
+const ROOMS: Record<string, RoomMeta> = {
+  'room-secret-id': { hostId: 'host-user', freeJoin: false },
+  'free-room': { hostId: 'absent-host', freeJoin: true },
+}
 
 const servers: Server[] = []
 const wsServers: WebSocketServer[] = []
@@ -138,6 +141,18 @@ describe('실제 WS 서버 집계', () => {
     host.send({ type: 'leave' })
     assert.ok(await waitFor(() => wsActivity(wss)?.activeRooms === 0), 'leave·유예 만료 뒤 활성 방 0')
     assert.deepEqual(wsActivity(wss), { activeRooms: 0, performers: 0, viewers: 0, resuming: 0, connections: 2 })
+
+    // 방장이 아닌 참가자: 관람자로 들어와 연주를 시작하면(free_join) 연주자로 센다, 멈추면 다시 관람자
+    const player = await connect(`ws://${addr}`)
+    clients.push(player)
+    await authJoin(player, 'tok:player-user', 'free-room')
+    assert.deepEqual(wsActivity(wss), { activeRooms: 1, performers: 0, viewers: 1, resuming: 0, connections: 3 })
+    player.send({ type: 'start-performing', instrument: 'guitar' })
+    assert.ok(await waitFor(() => wsActivity(wss)?.performers === 1), '비방장 연주자도 performers')
+    assert.deepEqual(wsActivity(wss), { activeRooms: 1, performers: 1, viewers: 0, resuming: 0, connections: 3 })
+    player.send({ type: 'stop-performing' })
+    assert.ok(await waitFor(() => wsActivity(wss)?.performers === 0), '연주를 멈추면 관람자')
+    assert.equal(wsActivity(wss)?.viewers, 1)
   })
 })
 
@@ -181,6 +196,31 @@ describe('scripts/ops-active.ts 판정', () => {
     assert.deepEqual(seen, { url: 'https://ops.example.invalid/api/ops/activity', auth: `Bearer ${TOKEN}` })
     assert.equal(v.code, 0)
     assert.ok(!v.lines.join('\n').includes(TOKEN))
+  })
+
+  it('OPS_URL: https만(로컬 http 예외), 아니면 요청 없이 2', async () => {
+    assert.equal(isSafeOpsUrl('https://band.example.invalid'), true)
+    assert.equal(isSafeOpsUrl('http://127.0.0.1:8080'), true)
+    assert.equal(isSafeOpsUrl('http://localhost:8080'), true)
+    assert.equal(isSafeOpsUrl('http://band.example.invalid'), false)
+    assert.equal(isSafeOpsUrl('ftp://band.example.invalid'), false)
+    assert.equal(isSafeOpsUrl('band.example.invalid'), false)
+    let called = false
+    const v = await check({ OPS_URL: 'http://band.example.invalid', OPS_TOKEN: TOKEN }, [], async () => {
+      called = true
+      return { status: 200, json: async () => COUNTS }
+    })
+    assert.equal(v.code, 2)
+    assert.equal(called, false, '평문 http로 토큰을 보내지 않는다')
+  })
+
+  it('리다이렉트는 따라가지 않는다(redirect: error)', async () => {
+    let redirect: string | undefined
+    await check({ OPS_URL: 'https://ops.example.invalid', OPS_TOKEN: TOKEN }, [], async (_url, init) => {
+      redirect = init.redirect
+      return { status: 200, json: async () => COUNTS }
+    })
+    assert.equal(redirect, 'error')
   })
 
   it('실제 HTTP 왕복: 서버 경로 + 스크립트', async () => {

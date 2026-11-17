@@ -66,7 +66,19 @@ export function evaluate(a: Activity, strict = false): Verdict {
   return { code: 0, lines }
 }
 
-type Fetch = (url: string, init: { headers: Record<string, string>; signal?: AbortSignal }) => Promise<{
+/** 토큰을 보내도 되는 주소인가: https, 또는 로컬 개발(http://localhost·127.0.0.1·[::1]) */
+export function isSafeOpsUrl(base: string): boolean {
+  let u: URL
+  try {
+    u = new URL(base)
+  } catch {
+    return false
+  }
+  if (u.protocol === 'https:') return true
+  return u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)
+}
+
+type Fetch = (url: string, init: { headers: Record<string, string>; signal?: AbortSignal; redirect?: 'error' }) => Promise<{
   status: number
   json: () => Promise<unknown>
 }>
@@ -82,11 +94,15 @@ export async function check(
   if (!base || !token) {
     return { code: 2, lines: ['확인 실패: OPS_URL(서버 공개 주소)과 OPS_TOKEN(운영자 토큰) 환경변수가 필요합니다.'] }
   }
+  if (!isSafeOpsUrl(base)) {
+    return { code: 2, lines: ['확인 실패: OPS_URL은 https:// 주소여야 합니다(토큰이 평문으로 나가지 않게, http는 localhost만).'] }
+  }
   let res: Awaited<ReturnType<Fetch>>
   try {
     res = await fetchImpl(`${base}/api/ops/activity`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(10_000),
+      redirect: 'error', // 리다이렉트로 토큰이 다른 곳에 가거나 떼이는 일 없이 실패(2)
     })
   } catch (err) {
     return { code: 2, lines: [`확인 실패: ${base}에 연결할 수 없습니다 (${err instanceof Error ? err.message : String(err)}).`] }
@@ -111,5 +127,9 @@ if (require.main === module) {
   check(process.env, process.argv.slice(2)).then(v => {
     for (const l of v.lines) (v.code === 0 ? console.log : console.error)(l)
     process.exitCode = v.code
+  }).catch(err => {
+    // 예기치 않은 오류도 "확인 실패"(2) — 1(연주 중)과 섞이지 않게
+    console.error(`확인 실패: ${err instanceof Error ? err.message : String(err)}`)
+    process.exitCode = 2
   })
 }

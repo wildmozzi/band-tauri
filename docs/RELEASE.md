@@ -161,6 +161,7 @@ fly secrets set OPS_TOKEN=$t -a band-server --stage   # --stage: 지금 재시�
 1. [ ] `develop` CI 녹색, 바꾼 서버 PR의 리뷰 지적 해소
 2. [ ] DB 마이그레이션이 같이 가는가? → 그렇다면 [DEPLOY-CUTOVER.md](DEPLOY-CUTOVER.md) 순서(마이그레이션이 먼저인지 나중인지)를 확인
 3. [ ] fly secrets 사전 조건(예: `PUBLIC_API_URL` — 워크플로 preflight가 막는다)
+3-1. [ ] **시그널링 1대 확인**: `fly machines list -a band-server` → `started` 머신이 **정확히 1대**. 2대 이상이면 `/api/ops/activity`는 로드밸런서가 고른 한 대의 숫자만 보여 주므로 "연주 중인데 0" 오판이 난다 → 배포 중단, 1대로 줄일지(`fly scale count 1`, 설정 변경) 사람이 정한다. fly는 첫 배포 때 HA용으로 2대를 만들 수 있다
 4. [ ] **연주 인원 확인** — 0명이어야 다음 단계로
    ```powershell
    cd server
@@ -169,6 +170,7 @@ fly secrets set OPS_TOKEN=$t -a band-server --stage   # --stage: 지금 재시�
    npm run ops:active                              # 관람자도 끊지 않으려면: npm run ops:active -- --strict
    ```
    종료 코드 `0` 배포 가능 · `1` 연주 중(배포 금지) · `2` 확인 실패(배포 금지). 토큰은 출력되지 않는다.
+   `OPS_URL`은 `https://`만 받는다(토큰이 평문으로 나가지 않게 — `http://`는 localhost·127.0.0.1만 허용). 리다이렉트는 따라가지 않고 실패(2)로 본다.
    PowerShell 기록에 남기 싫으면 PowerShell 7에서 `$env:OPS_TOKEN = Read-Host -MaskInput` 으로 넣는다.
 5. [ ] 0이면 **바로**(몇 분 안에) `main` 병합·push. 시간이 지났으면 4를 다시 한다
 6. [ ] GitHub Actions "Deploy Server to Fly.io" 성공 확인, `GET /health` 200, `npm run ops:active`가 다시 응답하는지(배포 직후 0)
