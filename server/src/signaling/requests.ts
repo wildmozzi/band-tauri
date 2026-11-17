@@ -69,7 +69,7 @@ export function createRequests() {
     return { perform: performRequests.get(roomId) || [], instrument: instrumentChangeRequests.get(roomId) || [] }
   }
 
-  return { performList, instrumentList, pendingFor, onLeave, onRoomEmpty }
+  return { performList, instrumentList, pendingFor, onLeave, onRoomEmpty, dropInstrumentChange }
 }
 
 export type Requests = ReturnType<typeof createRequests>

@@ -88,6 +88,15 @@ export interface PerformersSvc {
   insecureDevMode: boolean
 }
 
+/**
+ * stop-performing이 쓰는 조각: 연주를 멈추면 그 사람의 대기 중 악기 변경 요청을 지운다(방장에게 instrument-change-request-cancelled).
+ * requests는 같은 계층이고 requests → performers 간선이 있어 import하지 않고 쓰는 함수만 구조 타입으로 받는다(순환 방지,
+ * requests.DemoteSvc와 같은 방식 — 전체 모양은 dispatch.ts가 검사)
+ */
+export interface StopPerformingSvc extends PerformersSvc {
+  requests: { dropInstrumentChange(roomId: string, clientId: string, host: Client | null): void }
+}
+
 /** `start-performing` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
 export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
   const { ws, client, id } = ctx
@@ -127,12 +136,14 @@ export async function handleStartPerforming(ctx: Ctx<PerformersSvc>, msg: Msg) {
 }
 
 /** `stop-performing` — S3: 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
-export function handleStopPerforming(ctx: Ctx<PerformersSvc>, _msg: Msg) {
+export function handleStopPerforming(ctx: Ctx<StopPerformingSvc>, _msg: Msg) {
   const { client, id } = ctx
   const roomId = client.member.roomId
-  const { broadcastToRoom } = ctx.svc.registry
+  const { broadcastToRoom, findRoomHost } = ctx.svc.registry
   if (!roomId) return
 
+  // 연주를 멈춘 사람의 악기 변경 요청은 의미가 없다 — 방장 화면에 남아 승인되면 연주하지 않는 사람의 악기가 바뀌었다
+  ctx.svc.requests.dropInstrumentChange(roomId, id, findRoomHost(roomId))
   client.perform.isPerforming = false
   client.perform.instrument = undefined
   // 연주자가 아니게 되면 ssrc를 잊는다(토큰 갱신 불가 → 기존 토큰 만료와 함께 릴레이 슬롯 해제)

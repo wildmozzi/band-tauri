@@ -4,7 +4,7 @@ import type { Ctx } from './ctx'
 import { handleJoin, handleLeaveMessage } from './membership'
 import { handleMetronome, type MetronomeSvc } from './metronome'
 import { handleNativeDescriptor, handleNativeLeave, handleRelayTokenRequest, type NativeSessionSvc } from './nativeSession'
-import { handleStartPerforming, handleStopPerforming, type PerformersSvc } from './performers'
+import { handleStartPerforming, handleStopPerforming, type PerformersSvc, type StopPerformingSvc } from './performers'
 import type { Msg } from './protocol'
 import { send } from './registry'
 import {
@@ -34,6 +34,8 @@ type Handler = (ctx: ConnCtx, msg: Msg) => void | Promise<void>
 /** DemoteSvc는 엔진·메트로놈을 구조 타입으로 적어 extends에 넣으면 충돌한다 — 대신 전체 모양이 그 조각을 만족하는지 검사 */
 type _DemoteSvcFits = SignalingServices extends DemoteSvc ? true : never
 const _demoteSvcFits: _DemoteSvcFits = true
+type _StopPerformingSvcFits = SignalingServices extends StopPerformingSvc ? true : never
+const _stopPerformingSvcFits: _StopPerformingSvcFits = true
 
 /**
  * 메시지 종류 → 핸들러. `ping`·`auth`와 auth 게이트는 표 앞에서 처리한다(dispatch).

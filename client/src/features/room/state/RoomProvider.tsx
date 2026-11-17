@@ -178,6 +178,16 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     setEngineInUse(phase !== 'idle')
   }, [phase, setEngineInUse])
 
+  // 연주가 끝나면(직접 중단·엔진 정지·포기) 내 악기 변경 요청 상태를 비운다. 서버도 stop-performing에서 그 요청을 지운다 —
+  // 남겨 두면 다시 연주를 시작했을 때 이미 없는 요청이 "변경 요청 중"으로 보인다(시그널링 상태 점검)
+  useEffect(() => {
+    if (phase !== 'idle') return
+    const r = store.getSnapshot().requests
+    if (r.myInstrumentChangeStatus !== 'none' || r.myNewInstrument !== null) {
+      store.patch('requests', { myInstrumentChangeStatus: 'none', myNewInstrument: null })
+    }
+  }, [phase, store])
+
   // 악기 변경 결과 표시 타이머
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
   useEffect(() => {
