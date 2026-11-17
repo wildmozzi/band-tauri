@@ -44,6 +44,67 @@ fn seq_newer(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
 }
 
+/// Audio 재전송 창(패킷 수). 지터 버퍼 슬롯 창(1024 = F 2.5ms 2.56초)과 같다. 최고 seq보다 이만큼 이상 옛 패킷은 늦은 패킷이든
+/// 사본이든 재생에 쓸 수 없으므로 버리고, 창 안에서는 이미 받은 seq(망 중복·경로 전환 유예의 두 경로 사본·재생 공격)를 버린다.
+/// AEAD는 위조만 막고 재전송은 막지 않는다(P2-16c, #190).
+pub(crate) const AUDIO_REPLAY_WINDOW: u32 = 1024;
+const AUDIO_WINDOW_WORDS: usize = AUDIO_REPLAY_WINDOW as usize / 64;
+
+/// 피어 하나(수신 키 하나)의 Audio seq 슬라이딩 창. 비트 `s % 창` = seq `s`를 받았음(창 안의 seq에서만 뜻이 있다).
+/// 2^32가 창 크기로 나누어떨어지므로 seq 랩어라운드에서도 자리가 이어진다. 사전할당 배열이라 수신 경로에서 할당하지 않는다.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AudioSeqWindow {
+    highest: Option<u32>,
+    bits: [u64; AUDIO_WINDOW_WORDS],
+}
+
+impl AudioSeqWindow {
+    fn bit(seq: u32) -> (usize, u64) {
+        let i = (seq % AUDIO_REPLAY_WINDOW) as usize;
+        (i / 64, 1u64 << (i % 64))
+    }
+
+    /// 받아도 되는가(상태를 바꾸지 않는다): 처음, 최고보다 새로움, 또는 창 안에서 아직 받지 않음.
+    pub(crate) fn fresh(&self, seq: u32) -> bool {
+        let Some(h) = self.highest else { return true };
+        let d = seq.wrapping_sub(h) as i32;
+        if d > 0 {
+            return true;
+        }
+        if d.unsigned_abs() >= AUDIO_REPLAY_WINDOW {
+            return false;
+        }
+        let (w, b) = Self::bit(seq);
+        self.bits[w] & b == 0
+    }
+
+    /// `fresh`가 참인 seq를 받았다고 기록한다. 최고 seq가 앞으로 가면 그 사이 칸(이제 창 밖으로 밀린 옛 seq의 칸)을 비운다.
+    pub(crate) fn commit(&mut self, seq: u32) {
+        match self.highest {
+            None => {
+                self.bits = [0; AUDIO_WINDOW_WORDS];
+                self.highest = Some(seq);
+            }
+            Some(h) => {
+                let d = seq.wrapping_sub(h) as i32;
+                if d > 0 {
+                    if d as u32 >= AUDIO_REPLAY_WINDOW {
+                        self.bits = [0; AUDIO_WINDOW_WORDS];
+                    } else {
+                        for k in 1..=d as u32 {
+                            let (w, b) = Self::bit(h.wrapping_add(k));
+                            self.bits[w] &= !b;
+                        }
+                    }
+                    self.highest = Some(seq);
+                }
+            }
+        }
+        let (w, b) = Self::bit(seq);
+        self.bits[w] |= b;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ConnState {
     pub(crate) state: PeerStateKind,
@@ -61,6 +122,8 @@ pub(crate) struct ConnState {
     pub(crate) rebind: Option<(SocketAddr, u32)>,
     /// 제어 패킷 타입별 최대 seq (재전송 방어, 리뷰 L5).
     ctrl_seq: [Option<u32>; 6],
+    /// Audio seq 재전송 창(P2-16c).
+    audio_seq: AudioSeqWindow,
     /// 이 피어와 릴레이 경유 Hello/HelloAck가 오간 적이 있다(릴레이로 온 인증 패킷 수용).
     pub(crate) relay_confirmed: bool,
     /// 릴레이 경로 중 직접 주소에서 인증된 Hello가 왔다. 그 주소에서 Hello 외 인증 패킷이 오면 상대가
@@ -112,6 +175,7 @@ impl ConnState {
             rtt_ms: None,
             rebind: None,
             ctrl_seq: [None; 6],
+            audio_seq: AudioSeqWindow::default(),
             relay_confirmed: false,
             direct_hint: None,
             prev_path: None,
@@ -195,17 +259,35 @@ impl ConnState {
     /// 같은 세션(같은 키)의 피어를 다시 추가할 때 재전송 창을 이어받는다(PR #5 L-2).
     pub(crate) fn inherit_replay_window(&mut self, old: &ConnState) {
         self.ctrl_seq = old.ctrl_seq;
+        self.audio_seq = old.audio_seq;
     }
 
-    /// 제어 패킷 seq가 이전보다 새로우면 기록하고 true. 재전송(같거나 옛 seq)은 false.
+    /// 제어 패킷 seq가 이전보다 새로우면 기록하고 true. 재전송(같거나 옛 seq)은 false. Hello/HelloAck용(출발 주소 검사가
+    /// 핸드셰이크 규칙 안에 있다). 그 밖의 패킷은 `rx_seq_fresh` → `accept_rx` → `commit_rx_seq` 순서로 쓴다.
     pub(crate) fn accept_ctrl_seq(&mut self, t: PacketType, seq: u32) -> bool {
-        let slot = &mut self.ctrl_seq[(t as usize - 1).min(5)];
-        match *slot {
-            Some(m) if !seq_newer(seq, m) => false,
-            _ => {
-                *slot = Some(seq);
-                true
-            }
+        let fresh = self.rx_seq_fresh(t, seq);
+        if fresh {
+            self.commit_rx_seq(t, seq);
+        }
+        fresh
+    }
+
+    /// 이 seq를 받아도 되는가(상태 불변): Audio는 슬라이딩 창, 제어 패킷은 타입별 최고 seq보다 새로움.
+    /// 출발 주소 확인(`accept_rx`) **전에** 보고, 소모(`commit_rx_seq`)는 그 **뒤에** 한다 — 경로가 아닌 주소에서 온 사본이
+    /// seq를 먼저 써 버려 늦게 온 진짜 패킷이 재전송으로 버려지지 않게(#190 L1), 그리고 재전송본이 `accept_rx`의 부수 효과
+    /// (생존 갱신·직접 경로 승격)를 일으키지 않게 한다.
+    pub(crate) fn rx_seq_fresh(&self, t: PacketType, seq: u32) -> bool {
+        match t {
+            PacketType::Audio => self.audio_seq.fresh(seq),
+            _ => self.ctrl_seq[(t as usize - 1).min(5)].is_none_or(|m| seq_newer(seq, m)),
+        }
+    }
+
+    /// `rx_seq_fresh`가 참이고 `accept_rx`를 통과한 패킷의 seq를 기록한다.
+    pub(crate) fn commit_rx_seq(&mut self, t: PacketType, seq: u32) {
+        match t {
+            PacketType::Audio => self.audio_seq.commit(seq),
+            _ => self.ctrl_seq[(t as usize - 1).min(5)] = Some(seq),
         }
     }
 
