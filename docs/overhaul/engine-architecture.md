@@ -361,7 +361,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 
 ## 11. 엔진 수명 상태기계
 
-지금 규칙은 `manager.rs`(슬롯·세대 번호), `Engine`(스레드 소유·`deviceLost` 보고), 프론트 `performSession.ts`(시그널링·재시작 판단)에 흩어져 있다. 상태와 전이를 여기 한 곳에 둔다. ⑧부터 `manager`가 전이시키는 상태는 명시적 enum `Phase::{Idle, Starting { cancel }, Running(Box<Engine>)}`이다(`Slot { phase, generation, monitor_before_test }`). Degraded는 enum에 없다 — 엔진이 보고하는 값이라 `EngineSnapshot`(`stats.deviceLost`)에서 읽는다. Stopping도 enum에 없다 — `Phase::leave`로 꺼낸 엔진을 락 밖에서 정지하는 지역 변수다(`retire`: join, 합주 엔진이면 마지막 연결 이벤트를 `ended_conn`에 남김, 세션 = 증가 전 세대. `stop_monitor_only`는 net 없는 엔진만 꺼내므로 그냥 drop).
+지금 규칙은 `manager.rs`(슬롯·세대 번호), `Engine`(스레드 소유·`deviceLost` 보고), 프론트 `performSession.ts`(시그널링·재시작 판단)에 흩어져 있다. 상태와 전이를 여기 한 곳에 둔다. ⑧부터 `manager`가 전이시키는 상태는 명시적 enum `Phase::{Idle, Starting { cancel, network }, Running(Box<Engine>)}`이다(`Slot { phase, generation, monitor_before_test }`). Degraded는 enum에 없다 — 엔진이 보고하는 값이라 `EngineSnapshot`(`stats.deviceLost`)에서 읽는다. Stopping도 enum에 없다 — `Phase::leave`로 꺼낸 엔진을 락 밖에서 정지하는 지역 변수다(`retire`: join, 합주 엔진이면 마지막 연결 이벤트를 `ended_conn`에 남김, 세션 = 증가 전 세대. `stop_monitor_only`는 net 없는 엔진만 꺼내므로 그냥 drop하고, 테스트 모드 시작(`Starting { network: false }`)이면 세대를 올려 그 시작을 취소한다 — 합주 시작은 건드리지 않는다).
 
 ```text
           start(cfg, peer?) / start_monitor_only(cfg)    Engine::start 성공(세대 일치)
@@ -378,7 +378,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 상태 | 뜻 | `manager` 표현 | 보고 |
 |---|---|---|---|
 | Idle | 엔진 없음 | `Phase::Idle` | 커맨드가 "실행 중이 아님" |
-| Starting | 장치 열기·STUN·스레드 시작 중(블로킹, `start_lock` 직렬화) | `Phase::Starting { cancel }` | 커맨드가 "시작 중" |
+| Starting | 장치 열기·STUN·스레드 시작 중(블로킹, `start_lock` 직렬화) | `Phase::Starting { cancel, network }` | 커맨드가 "시작 중" |
 | Running | 정상 | `Phase::Running(Box<Engine>)` | `running = true` |
 | Degraded | 장치 분실(콜백 1초 정지, WASAPI 무효화 HRESULT, 기본 장치 변경). 엔진 객체는 남음 | `Phase::Running` 그대로(enum 밖, `EngineSnapshot`에서 읽음) | `deviceLost = true`, `running = false` |
 | Stopping | 슬롯에서 꺼낸 엔진을 락 밖에서 정지(`retire`: join + 합주 엔진의 마지막 연결 이벤트) | 슬롯 밖 지역 변수(`Phase::leave`가 돌려준 엔진) | — |
@@ -390,7 +390,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 사례 | 전이 | 비고 |
 |---|---|---|
 | 연주 시작 / 테스트 모드 | Idle → Starting → Running | 테스트 모드는 net 없음, 모니터 강제 켬(끝나면 복원) |
-| 시작 중 다시 시작·정지 | Starting → (세대 불일치) → 새 Starting / Idle | 이전 결과 버림 |
+| 시작 중 다시 시작·정지 | Starting → (세대 불일치) → 새 Starting / Idle | 이전 결과 버림. 테스트 모드 시작 중 `stop_monitor_only`도 같다(합주 시작 중이면 무시) |
 | 장치 분리 | Running → Degraded → (프론트) stop → Idle | 장치가 돌아오면 Degraded → Running |
 | `ssrc-conflict` / `key-conflict` | Running → Stopping → Starting → Running(새 ssrc·키) | 프론트 `performSession.restart`. key-conflict가 30초 안에 반복되면 Idle |
 | WS 재연결 실패(새 clientId) | Running → 재시작(위와 같음) | `resumed`면 엔진 유지(전이 없음) |
