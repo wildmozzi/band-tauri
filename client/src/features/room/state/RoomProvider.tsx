@@ -658,6 +658,11 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     const from = typeof p.from === 'string' ? p.from : null
     if (from && from === self) return
 
+    // 서버가 관람 중계(offer·ice-candidate)를 속도 제한으로 버렸다: 방송을 늦춰 보내고 answer가 없는 관람자에게 다시 offer
+    if (p.type === 'error' && p.code === 'rate-limited' && (p.rejectedType === 'offer' || p.rejectedType === 'ice-candidate')) {
+      broadcaster.onRelayRateLimited()
+    }
+
     // native-descriptor / native-leave / relay-token / 연주 거부 에러(perform-not-approved, room-full-performers,
     // login-required) / ssrc-conflict·key-conflict(엔진 재시작만)·descriptor-invalid(엔진 정지·안내) — 연주 거부가 아니므로 방송은 유지
     if (session.handleSignal(p)) {

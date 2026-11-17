@@ -31,7 +31,7 @@
 | H | **메트로놈** | 메트로놈 계약, 방장 이양 정책 | `metronome` 분기, `parseMetronomeState`, `replayMetronome`, `dropMetronomeIfHostChanged`, `broadcastMetronomeStop` | `metronomes`, `Client.pendingMetronomeStop` |
 | I | **참여 요청·악기 변경 요청** | 요청 UX | `request-perform`, `approve/reject/cancel-perform*`, `*-instrument-change*` 분기, `demote-performer`(P2-9: F·G·H 상태를 정리 — 엔진·메트로놈은 svc 구조 타입으로 부른다) | `performRequests`, `instrumentChangeRequests`, `approvals`(쓰기), `Client.instrument`(쓰기) |
 | J | **채팅** | 채팅 정책 | `chat` 분기 | 없음(중계만) |
-| K | **관람 WebRTC 중계** | 관람 방송 방식 | `offer`·`answer`·`ice-candidate` 분기 | `Client.relay`(중계 속도 제한: 보낸 사람→대상 메시지 버킷, 대상이 받는 바이트 버킷 — 표적 강퇴 방지) |
+| K | **관람 WebRTC 중계** | 관람 방송 방식 | `offer`·`answer`·`ice-candidate` 분기 | `Client.relay`(중계 속도 제한: 보낸 사람→대상 메시지 버킷, 대상이 받는 바이트 버킷 — 표적 강퇴 방지), `Client.conn.relayBucket`(중계 메시지 수: 일반 `msgBucket` 대신. 관람자는 일반과 같은 40·20/s, 연주자는 방 인원 1명당 +20·+2/s — 관람자가 한꺼번에 붙어도 방송 담당이 offer·ICE를 버리지 않게, `takeRelayMessage`. 중계는 처리 대기 상한 `MAX_PENDING_MESSAGES`에도 세지 않는다 — 버킷이 상한을 정함. 근거: [overhaul/server-load-2026-11-18.md](overhaul/server-load-2026-11-18.md)) |
 | L | **정기 작업** | 운영 정책 | `heartbeat`(핑 + `seatHolds` 만료 정리), `scheduleParticipantUpdate` 디바운스, 토큰 만료 타이머, 유예 타이머, auth 타이머 | 위 묶음들의 상태 |
 
 ### 1.2 묶음 사이 결합 지점
@@ -139,7 +139,7 @@ server/src/signaling/
 // signaling/types.ts (S4-3, 설계대로)
 interface Client {
   id: string
-  conn:    { ws, ip, chain, pending, isAlive, msgBucket, chatBucket, joinBucket, dropped, lastRateLimitNotice }  // connection(조립부)
+  conn:    { ws, ip, chain, pending, isAlive, msgBucket, relayBucket, chatBucket, joinBucket, dropped, lastRateLimitNotice }  // connection(조립부)
   auth:    { state, userId, tokenExp, expiryTimer }                                                              // auth
   resume:  { timer, pendingMetronomeStop, pendingDemoted }                                                       // resume (pendingDemoted: P2-9, requests가 켬)
   member:  { roomId, nickname, isHost }                                                                          // membership (isHost는 roomMeta.checkHost도 갱신)
@@ -200,7 +200,7 @@ const handlers: Record<string, Handler> = {
 - **선행 조건은 핸들러 안에 둔다.** "방 안인가", "인증됐는가", "연주자인가"를 표의 속성으로 올리고 싶어지지만, 지금 코드는 같은 조건의 실패를 메시지마다 다르게 다룬다(`start-performing`은 `login-required` 에러, `native-descriptor`는 조용히 무시, `request-perform`은 에러 두 개). 속성으로 올리면 그 차이를 다시 예외로 뚫어야 한다. 대신 `registry`의 한 줄 판정 함수(`isAuthenticated(client)`, `isPerformer(client)`, `isInRoom(roomId, id)`)를 핸들러 첫 줄에서 부른다.
 - 승인 계열 네 개가 공유하는 방장 재확인(`refreshHost` 뒤 `client.roomId !== roomId` 재검사)은 `requests` 안의 `requireHost(ctx)` 도우미 하나다.
 - **`ctx`는 연결의 "현재 Client"를 가리키는 가변 참조**다: `{ ws, ip, client, id, svc }`(S3, `ctx.ts`). `ws`·`ip`는 이 연결의 것이라 바뀌지 않고, 자기에게 보내는 응답은 `client.ws`가 아니라 `ctx.ws`로 보낸다(재개 뒤 `client.ws`는 새 연결 소켓일 수 있다). `svc`는 서버 인스턴스 하나의 공용 서비스 객체로 모든 연결이 같은 참조를 가진다. 타입은 `Ctx<S>`로 매개변수화해 계층 2 모듈은 자기가 쓰는 조각(`…Svc`)만 적고, 전체 모양 `SignalingServices`는 `dispatch`(계층 4)가 정한다 — `ctx`가 계층 2의 타입을 import하면 의존 방향이 거꾸로 서기 때문이다. 세션 재개는 S3까지 조립부(wsService)에 있다가 S4-1에서 `resume.ts`로 옮겼다(`auth`가 import해서 부른다, 위 2.1절 계층 3 순서). 세션 재개가 `client`를 바꿔 끼우기 때문에(1.2-6) 핸들러가 `Client`를 직접 캡처하면 안 된다. 핸들러 안에서 `const client = ctx.client`로 잡은 값은 그 메시지 처리 동안만 쓴다(재개는 `auth` 메시지 처리 중에만 일어나고 체인이 순차라 안전하다).
-- 속도 제한·대기 상한·JSON 파싱·순차 체인은 `connection`에 남는다. `dispatch`는 체인 안에서 불린다.
+- 속도 제한·대기 상한·JSON 파싱·순차 체인은 `connection`에 남는다. `dispatch`는 체인 안에서 불린다. 단 관람 중계(`offer`·`answer`·`ice-candidate`)는 일반 버킷 대신 K의 `takeRelayMessage`(연결의 중계 버킷, 연주자는 방 인원에 비례)를 쓰고 처리 대기 상한에 세지 않는다 — 순서는 같은 체인에서 지킨다.
 
 ### 2.4 단일 인스턴스 가정의 한계
 

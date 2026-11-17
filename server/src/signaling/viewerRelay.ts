@@ -18,6 +18,22 @@ export interface ViewerRelaySvc {
   limits: WsLimits
 }
 
+/** 관람 중계 메시지 종류 — 일반 메시지 버킷 대신 중계 버킷(`takeRelayMessage`)을 쓴다 */
+export const RELAY_MESSAGE_TYPES: ReadonlySet<string> = new Set(['offer', 'answer', 'ice-candidate'])
+
+/**
+ * 관람 중계 메시지 하나를 연결의 중계 버킷에서 꺼낸다(조립부의 속도 제한, 파싱 뒤·처리 전). 관람자는 기본 크기(일반 버킷과 같다),
+ * 연주자(방송 담당 후보)는 방 인원(자기 제외) 1명당 `relayMsgBurstPerPeer`·`relayMsgPerSecPerPeer`를 더한다 — 관람자가 한꺼번에
+ * 붙어도(서버 재시작 뒤 재접속, 방장 엔진 재시작 뒤 전원 재offer) offer 1 + ICE N개를 관람자마다 보낼 수 있게.
+ * 대상에게 실제로 넘기는 양은 handleViewerSignal의 쌍별·대상별 버킷이 그대로 묶는다(표적 강퇴·폭주 방어 #184·#187 불변).
+ */
+export function takeRelayMessage(client: Client, registry: Pick<Registry, 'roomSize'>, limits: WsLimits): boolean {
+  const roomId = client.member.roomId
+  const peers = roomId && isPerformer(client) ? Math.max(0, registry.roomSize(roomId) - 1) : 0
+  client.conn.relayBucket.resize(limits.relayMsgBurst + peers * limits.relayMsgBurstPerPeer, limits.relayMsgPerSec + peers * limits.relayMsgPerSecPerPeer)
+  return client.conn.relayBucket.take()
+}
+
 /** 보낸 사람 하나가 버킷을 들고 있는 대상 수 상한(방 정원 20보다 크게). 넘으면 비우고 새로 센다(메모리 상한) */
 const MAX_RELAY_TARGETS = 64
 

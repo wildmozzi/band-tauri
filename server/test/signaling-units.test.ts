@@ -60,6 +60,7 @@ function fakeClient(id: string, over: FakeOver = {}): Client {
       pending: 0,
       isAlive: true,
       msgBucket: new TokenBucket(1, 1),
+      relayBucket: new TokenBucket(1, 1),
       chatBucket: new TokenBucket(1, 1),
       joinBucket: new TokenBucket(1, 1),
       authBucket: new TokenBucket(1, 1),
@@ -713,5 +714,19 @@ describe('rejectReason (P2-11)', () => {
     assert.equal(truncateCodePoints('🎸🥁', 2), '🎸')
     assert.equal(truncateCodePoints('🎸🥁', 1), '')
     assert.equal(truncateCodePoints('abc', 2), 'ab')
+  })
+})
+
+describe('TokenBucket.resize (relay bucket sized by room)', () => {
+  it('credits growth at once, trims on shrink, and keeps the rate in between', () => {
+    const b = new TokenBucket(2, 0)
+    assert.ok(b.take() && b.take() && !b.take())
+    b.resize(5, 0) // 3명 몫이 늘었다 → 바로 3개
+    assert.ok(b.take() && b.take() && b.take() && !b.take())
+    b.resize(5, 0) // 같은 크기: 아무것도 안 함
+    assert.ok(!b.take())
+    const full = new TokenBucket(10, 0)
+    full.resize(3, 0) // 줄면 남은 토큰을 새 크기로 자른다
+    assert.ok(full.take() && full.take() && full.take() && !full.take())
   })
 })

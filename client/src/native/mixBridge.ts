@@ -333,6 +333,12 @@ export interface MixBroadcasterOptions {
   createPeerConnection?: () => PeerConnectionLike
   /** offer 후 이 시간 안에 connected가 안 되면 닫고 다음 sync에서 다시 offer (M3) */
   connectTimeoutMs?: number
+  /** 서버가 중계 메시지를 버렸다고 알린 뒤(`onRelayRateLimited`) 늦춰 보내는 시간(기본 10초) */
+  relayBackoffMs?: number
+  /** 늦춰 보내는 동안 중계 메시지 간격(기본 50ms = 20/s, 서버 기본 중계 버킷 속도) */
+  relayPacedIntervalMs?: number
+  /** 알림 뒤 answer가 아직 없는 관람자에게 offer를 다시 보내기까지(기본 1초) */
+  relayReofferDelayMs?: number
 }
 
 interface ViewerPeer {
@@ -350,6 +356,14 @@ export class MixBroadcaster {
   private wantedViewers: string[] = []
   private readonly createPc: () => PeerConnectionLike
   private readonly connectTimeoutMs: number
+  private readonly relayBackoffMs: number
+  private readonly relayPacedIntervalMs: number
+  private readonly relayReofferDelayMs: number
+  /** 이 시각(ms)까지 중계 메시지를 늦춰 보낸다(서버 rate-limited 뒤) */
+  private pacedUntil = 0
+  private relayQueue: Parameters<SendFn>[0][] = []
+  private drainTimer: ReturnType<typeof setTimeout> | null = null
+  private reofferTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly source: MixSource,
@@ -359,6 +373,9 @@ export class MixBroadcaster {
   ) {
     this.createPc = opts.createPeerConnection ?? (() => new RTCPeerConnection({ iceServers: ICE_SERVERS }) as unknown as PeerConnectionLike)
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 15_000
+    this.relayBackoffMs = opts.relayBackoffMs ?? 10_000
+    this.relayPacedIntervalMs = opts.relayPacedIntervalMs ?? 50
+    this.relayReofferDelayMs = opts.relayReofferDelayMs ?? 1_000
   }
 
   get isActive(): boolean {
@@ -403,6 +420,11 @@ export class MixBroadcaster {
     if (!this.active && !this.lease) return
     this.active = false
     for (const id of [...this.peers.keys()]) this.closePeer(id)
+    this.relayQueue = []
+    this.pacedUntil = 0
+    if (this.drainTimer) clearTimeout(this.drainTimer)
+    if (this.reofferTimer) clearTimeout(this.reofferTimer)
+    this.drainTimer = this.reofferTimer = null
     this.lease?.release()
     this.lease = null
   }
@@ -453,7 +475,7 @@ export class MixBroadcaster {
       pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] })
     }
     pc.onicecandidate = (e) => {
-      if (e.candidate) this.send({ type: 'ice-candidate', to: viewerId, candidate: e.candidate.toJSON() })
+      if (e.candidate) this.sendRelay({ type: 'ice-candidate', to: viewerId, candidate: e.candidate.toJSON() })
     }
     pc.onconnectionstatechange = () => {
       if (this.peers.get(viewerId)?.pc !== pc) return
@@ -478,17 +500,60 @@ export class MixBroadcaster {
       const tuned = { type: offer.type, sdp: tuneOpusSdp(offer.sdp ?? '', { stereo: true, maxBitrate: 128000 }) }
       await pc.setLocalDescription(tuned)
       if (this.peers.get(viewerId)?.pc !== pc) return
-      this.send({ type: 'offer', to: viewerId, offer: tuned })
+      this.sendRelay({ type: 'offer', to: viewerId, offer: tuned })
     } catch (err) {
       console.warn('[MixBridge] offer 생성 실패:', viewerId.slice(0, 8), err)
       if (this.peers.get(viewerId)?.pc === pc) this.closePeer(viewerId)
     }
   }
 
+  /**
+   * 서버가 이 연결의 관람 중계 메시지(offer·ice-candidate)를 속도 제한으로 버렸다(`error` `rate-limited`). 어느 메시지가 버려졌는지는
+   * 모른다. 그래서 relayBackoffMs 동안 중계를 relayPacedIntervalMs 간격으로 늦춰 보내고, relayReofferDelayMs 뒤 answer가 아직 없는
+   * 관람자(offer가 버려졌을 가능성)에게 offer를 다시 보낸다. answer가 온 관람자는 후보 일부가 빠져도 상대 후보로 이어지거나
+   * 연결 시간 초과(M3) 뒤 주기 sync가 다시 시도한다. 서버의 중계 버킷이 관람자 수에 비례하므로 정상이면 오지 않는다(옛 서버 대비).
+   */
+  onRelayRateLimited(): void {
+    if (!this.active) return
+    this.pacedUntil = Date.now() + this.relayBackoffMs
+    if (this.reofferTimer) return
+    this.reofferTimer = setTimeout(() => {
+      this.reofferTimer = null
+      if (!this.active || !this.lease) return
+      for (const [id, peer] of [...this.peers]) {
+        if (peer.pc.remoteDescription || peer.pc.connectionState === 'connected') continue
+        this.closePeer(id)
+        void this.offerTo(id)
+      }
+    }, this.relayReofferDelayMs)
+  }
+
+  /** 관람 중계 메시지 보내기: 평소에는 바로, rate-limited 뒤 relayBackoffMs 동안은 줄을 세워 일정 간격으로 */
+  private sendRelay(m: Parameters<SendFn>[0]): void {
+    if (Date.now() >= this.pacedUntil && this.relayQueue.length === 0) {
+      this.send(m)
+      return
+    }
+    this.relayQueue.push(m)
+    this.scheduleDrain()
+  }
+
+  private scheduleDrain(): void {
+    if (this.drainTimer) return
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = null
+      const m = this.relayQueue.shift()
+      if (m) this.send(m)
+      if (this.relayQueue.length) this.scheduleDrain()
+    }, this.relayPacedIntervalMs)
+  }
+
   private closePeer(viewerId: string): void {
     const peer = this.peers.get(viewerId)
     if (!peer) return
     this.peers.delete(viewerId)
+    // 닫힌 연결 몫으로 줄 선 중계는 버린다(새 offer가 새 후보를 만든다)
+    if (this.relayQueue.length) this.relayQueue = this.relayQueue.filter((m) => m.to !== viewerId)
     if (peer.timer) clearTimeout(peer.timer)
     peer.pc.onicecandidate = null
     peer.pc.onconnectionstatechange = null

@@ -307,3 +307,58 @@ describe('MixBroadcaster', () => {
     expect(b.isActive).toBe(false)
   })
 })
+
+describe('MixBroadcaster 중계 속도 제한 대응(서버 부하 발굴)', () => {
+  function paced() {
+    FakePc.all = []
+    const deps = new FakeGraphDeps()
+    const src = new MixSource(deps)
+    const sent: Record<string, unknown>[] = []
+    const b = new MixBroadcaster(src, (p) => sent.push(p), undefined, {
+      createPeerConnection: () => new FakePc() as unknown as PeerConnectionLike,
+      connectTimeoutMs: 10_000,
+      relayBackoffMs: 200,
+      relayPacedIntervalMs: 10,
+      relayReofferDelayMs: 30,
+    })
+    return { b, sent }
+  }
+
+  it('rate-limited 뒤에는 중계를 일정 간격으로 늦춰 보내고, answer가 없는 관람자에게만 offer를 다시 보낸다', async () => {
+    const { b, sent } = paced()
+    await b.start(['v1', 'v2'])
+    await flush()
+    expect(sent.filter((m) => m.type === 'offer')).toHaveLength(2)
+    // v1은 answer를 받았다 → 다시 offer하지 않는다
+    await b.handleAnswer('v1', { type: 'answer', sdp: 'v=0\r\n' })
+    b.onRelayRateLimited()
+    // 늦춰 보내는 동안의 ICE는 바로 나가지 않고 줄을 선다
+    FakePc.all[0].onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'c1' }) } })
+    FakePc.all[0].onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'c2' }) } })
+    expect(sent.filter((m) => m.type === 'ice-candidate')).toHaveLength(0)
+    await sleep(15)
+    expect(sent.filter((m) => m.type === 'ice-candidate')).toHaveLength(1)
+    await sleep(60)
+    expect(sent.filter((m) => m.type === 'ice-candidate')).toHaveLength(2)
+    // 1회 재offer: v2만(옛 PC는 닫힘)
+    const offers = sent.filter((m) => m.type === 'offer').map((m) => m.to)
+    expect(offers).toEqual(['v1', 'v2', 'v2'])
+    expect(FakePc.all[1].closed).toBe(true)
+    expect(b.hasPeer('v1') && b.hasPeer('v2')).toBe(true)
+    b.stop()
+  })
+
+  it('평소(rate-limited 없음)에는 바로 보내고, stop은 줄과 타이머를 비운다', async () => {
+    const { b, sent } = paced()
+    await b.start(['v1'])
+    await flush()
+    FakePc.all[0].onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'c1' }) } })
+    expect(sent.filter((m) => m.type === 'ice-candidate')).toHaveLength(1)
+    b.onRelayRateLimited()
+    FakePc.all[0].onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'c2' }) } })
+    b.stop()
+    await sleep(60)
+    expect(sent.filter((m) => m.type === 'ice-candidate')).toHaveLength(1)
+    expect(sent.filter((m) => m.type === 'offer')).toHaveLength(1)
+  })
+})

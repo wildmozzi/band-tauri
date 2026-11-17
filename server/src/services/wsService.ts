@@ -23,6 +23,7 @@ import { handleLeave } from '../signaling/membership'
 import { createResume, suspendOnClose } from '../signaling/resume'
 import { AUTH_RATE_LIMITED, cachedTokenVerifier } from '../signaling/auth'
 import { dispatch, type ConnCtx, type SignalingServices } from '../signaling/dispatch'
+import { RELAY_MESSAGE_TYPES, takeRelayMessage } from '../signaling/viewerRelay'
 
 /**
  * 시그널링 WebSocket 서버 (설계: docs/overhaul/native-engine-design.md 5절)
@@ -231,6 +232,7 @@ export function initializeWebSocket(
           pending: 0,
           isAlive: true,
           msgBucket: new TokenBucket(limits.msgBurst, limits.msgPerSec),
+          relayBucket: new TokenBucket(limits.relayMsgBurst, limits.relayMsgPerSec),
           chatBucket: new TokenBucket(limits.chatBurst, limits.chatPerSec),
           joinBucket: new TokenBucket(limits.joinBurst, limits.joinPerSec),
           authBucket: new TokenBucket(limits.authBurst, limits.authPerSec),
@@ -264,7 +266,8 @@ export function initializeWebSocket(
     /** 메시지 rate limit (M3). 통과하면 true */
     const allowMessage = (msg: Msg): boolean => {
       const client = ctx.client
-      let ok = client.conn.msgBucket.take()
+      // 관람 중계는 일반 버킷 대신 중계 버킷(방송 담당은 방 인원에 비례) — 쌍별·대상별 전달 한도는 viewerRelay에서 그대로
+      let ok = RELAY_MESSAGE_TYPES.has(msg.type) ? takeRelayMessage(client, registry, limits) : client.conn.msgBucket.take()
       if (ok && msg.type === 'chat') ok = client.conn.chatBucket.take()
       if (ok && (msg.type === 'join' || msg.type === 'leave')) ok = client.conn.joinBucket.take()
       if (ok) return true
@@ -312,19 +315,23 @@ export function initializeWebSocket(
 
       if (!allowMessage(msg)) return
 
-      if (ctx.client.conn.pending >= MAX_PENDING_MESSAGES) {
+      // 관람 중계는 처리 대기 상한(MAX_PENDING_MESSAGES)에 세지 않는다: 방송 담당이 관람자 여럿에게 offer·ICE를 한꺼번에 보내면
+      // 한 번 읽기에 100개를 넘어 1008로 끊겼다(서버 부하 발굴). 중계는 이미 중계 버킷(방 인원에 비례, 상한 있음)이 묶고, 처리도
+      // 동기라 대기열을 오래 붙들지 않는다. 순서는 그대로 같은 체인에서 지킨다
+      const counted = !RELAY_MESSAGE_TYPES.has(msg.type)
+      if (counted && ctx.client.conn.pending >= MAX_PENDING_MESSAGES) {
         console.warn(`[WS] ${ctx.id.slice(0, 8)} too many pending messages - closing`)
         ws.close(1008, 'Too many pending messages')
         return
       }
-      ctx.client.conn.pending++
+      if (counted) ctx.client.conn.pending++
       // 메시지를 순차 처리 (auth 검증/DB 조회 같은 비동기 작업 중에도 순서 유지).
       // 콜백 안의 ctx.client·ctx.id는 실행 시점 값이다(원래 클로저 변수와 같음: 재개 뒤면 옛 Client)
       // 세션 재개(P1-16)로 Client가 새 연결로 넘어갔으면 옛 연결에 남은 메시지는 처리하지 않는다(conn.ws가 이 소켓이 아님)
       ctx.client.conn.chain = ctx.client.conn.chain
         .then(() => (getClient(ctx.id) === ctx.client && ctx.client.conn.ws === ws ? dispatch(ctx, msg) : undefined))
         .catch(err => console.error('[ERROR] Failed to handle message:', err))
-        .finally(() => { if (ctx.client.conn.ws === ws) ctx.client.conn.pending-- }) // 넘어간 뒤의 옛 연결 몫은 새 연결 카운터에서 빼지 않는다
+        .finally(() => { if (counted && ctx.client.conn.ws === ws) ctx.client.conn.pending-- }) // 넘어간 뒤의 옛 연결 몫은 새 연결 카운터에서 빼지 않는다
     })
 
     // 소켓 에러(예: maxPayload 초과 1009)를 처리하지 않으면 프로세스가 죽는다

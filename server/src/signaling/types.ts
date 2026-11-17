@@ -42,6 +42,16 @@ export interface WsLimits {
    */
   relayInBytesBurst: number
   relayInBytesPerSec: number
+  /**
+   * 관람 WebRTC 중계(offer·answer·ice-candidate) 메시지 수 버킷 — 일반 msgBucket 대신 쓴다(서버 부하 발굴: 관람자 여럿이 한꺼번에
+   * 붙으면 방송 담당이 관람자마다 offer 1 + ICE N개를 보내야 해서 일반 버킷 40에 걸려 27~68%가 버려졌다).
+   * 관람자(연주자 아님)는 기본값만(= 일반 버킷과 같은 40, 20/s). 연주자는 방 인원(자기 제외) 1명당 PerPeer만큼 더한다 —
+   * 사람이 들어오면 그만큼 버스트를 바로 더 받는다(TokenBucket.resize). 실제 전달은 아래 쌍별·대상별 버킷(#184·#187)이 그대로 묶는다
+   */
+  relayMsgBurst: number
+  relayMsgPerSec: number
+  relayMsgBurstPerPeer: number
+  relayMsgPerSecPerPeer: number
   /** 관람 WebRTC 중계: 보낸 사람 → 대상 쌍 하나의 바이트 버킷 (정상 흐름은 offer·answer 수 KB + 후보 몇 개) */
   relayPairBytesBurst: number
   relayPairBytesPerSec: number
@@ -96,6 +106,10 @@ export const DEFAULT_LIMITS: WsLimits = {
   relayInBytesPerSec: 64 * 1024,
   relayPairBytesBurst: 64 * 1024,
   relayPairBytesPerSec: 8 * 1024,
+  relayMsgBurst: 40,
+  relayMsgPerSec: 20,
+  relayMsgBurstPerPeer: 20,
+  relayMsgPerSecPerPeer: 2,
   maxConnectionsPerIp: 20,
   maxConnections: 1000,
   maxTotalBufferedBytes: 64 * 1024 * 1024,
@@ -137,6 +151,8 @@ export interface Client {
     pending: number
     isAlive: boolean
     msgBucket: TokenBucket
+    /** 관람 중계 메시지 버킷(WsLimits.relayMsg*) — 연주자는 방 인원에 따라 크기가 바뀐다(viewerRelay.takeRelayMessage) */
+    relayBucket: TokenBucket
     chatBucket: TokenBucket
     joinBucket: TokenBucket
     authBucket: TokenBucket
