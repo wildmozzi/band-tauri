@@ -90,9 +90,9 @@
 | P2-14c | **[결정]** 익명 관람자 채팅 허용 여부(chat.ts:16 로그인 확인 없음) / 내리기·퇴장 뒤 릴레이 토큰 최대 120초 유효 — 회수 메시지 또는 TTL 단축(설계 문서 변경) | 결정 후 | 대기 (사용자 결정) |
 | P2-14d | **[사람]** 운영 DB RLS가 마이그레이션 SQL과 같은지 pg_policies 대조(작업자는 운영 DB 접속 안 함) | 대조 결과 | 대기 |
 | P2-15 | 발굴 엔진 감사: stop_monitor_only가 테스트 시작 중(Starting)엔 무동작 → 테스트 엔진 계속 돎, 로컬 모니터 safety가 전역 xruns에 반응, DeviceWatch 첫 콜백 전 분실 미보고, start_inner 실패 시 모니터 강제 켬 잔류 (큰 결함 없음 — 랩어라운드·슬롯 재사용·파서 경계 등 확인) | 단위 시험 | 진행 (PR #183; **[사람]** 시작 직후 USB 분리 시 deviceLost) |
-| P2-16 | 발굴 혼돈 시험: 지터 버퍼가 재생한 패킷의 사본을 늦은 패킷으로 셈(High — 중복 20%에서 bufferMs 5.69→17.22ms) 수정 + tests/sim chaos.rs 시나리오 9종(순서 폭주·중복·버스트 손실·지연 급변·분포 급변·재접속 28회·±1000ppm·6피어 10분) | 시나리오 수치 표, fixture 불변 | 진행 (PR #185 리뷰 중) |
+| P2-16 | 발굴 혼돈 시험: 지터 버퍼가 재생한 패킷의 사본을 늦은 패킷으로 셈(High — 중복 20%에서 bufferMs 5.69→17.22ms) 수정 + tests/sim chaos.rs 시나리오 9종(순서 폭주·중복·버스트 손실·지연 급변·분포 급변·재접속 28회·±1000ppm·6피어 10분) | 시나리오 수치 표, fixture 불변 | 완료(PR #185, 2026-11-17 — 재버퍼 뒤 사본이 시작점을 되감아 재재생하던 경로도 막힘) |
 | P2-16b | 지연 계단 상승(20→150ms)을 버스트로 해석 — 약 1초간 bufferMs 135ms(max_ms 80 초과), 목표 80ms에 3초 고정, 복귀 2.7/4.9초(Medium). 블록 최솟값 transit 계단 감지 시 reset_path로 새 지연에 즉시 맞춤 | chaos_delay_jump_20_150_20 rec_up·buf_max | 대기 (#185 뒤) |
-| P2-16c | 지터 개선(파레토3→균등0.5) 30초 뒤에도 +1.3ms — 꼬리 추정 감쇠 가속 검토(Low) / 오디오 replay 창 없음: 2.56초보다 오래된 사본은 late로 통계 오염 — 피어별 오디오 seq 슬라이딩 창(Low, net/recv_loop.rs:91) | chaos_jitter_distribution_switch, chaos_stale_replays 확장 | 대기 |
+| P2-16c | 지터 개선(파레토3→균등0.5) 30초 뒤에도 +1.3ms — 꼬리 추정 감쇠 가속 검토(Low) / 오디오 replay 창 없음: 2.56초보다 오래된 사본은 late로 통계 오염 — 피어별 오디오 seq 슬라이딩 창(Low, net/recv_loop.rs:91) | chaos_jitter_distribution_switch, chaos_stale_replays 확장 | 진행 (오래된 사본은 recv_loop 오디오 seq 창 — 퍼징 후속 작업자) |
 | P2-17 | 발굴 성능 탐색: PCM16 은닉 시작·재합류 클릭(High, 초저지연 프리셋 — 손실마다 계단 0.27~0.48 두 번) 수정. 정보: 1코어 기준 Opus 인코드 3.8%(모노)/8.3%(스테레오), 디코드 0.6/3.3%, 리샘플 1.2%, ChaCha 2.2µs/패킷 — GOAL 15% 대비 여유 커서 CPU 최적화 불필요 | sim 불연속/s → 0 | 진행 (PR #188 리뷰 중; **[사람]** 초저지연 프리셋 손실 회선 청취로 틱 소리 사라짐) |
 | P2-17b | **[결정]** Opus in-band FEC가 실제로 없음(CELT 전용 모드라 decode_fec == PLC, 측정 20/20, codec.rs:21) — GOAL 문구 정정 / RED류 중복 전송(계약 변경, 대역폭↑) | 손실 sim 은닉 품질 | 대기 (사용자 결정) |
 | P2-17c | LAN 목표의 고정 guard 1.5ms(worker/peer_feed.rs:22, sim F120/in128에서 GOAL 1절 여유 0~0.22ms) — 워커 기상 지연 실측으로 guard 적응(은닉 트레이드오프) | sim + **[사람]** 실장비 | 대기 (Medium) |
@@ -102,6 +102,8 @@
 | P2-18c | **[결정]** 익명 관람자에게도 세션 재개(토큰)를 줄지 — 지금은 끊길 때마다 새 id라 연주자 앱이 재협상, 관람 오디오 수 초 무음 / 관람자 쪽 재요청(viewer-retry) 신호 | 결정 후 서버·클라이언트 | 대기 (사용자 결정) |
 | P2-18d | **[결정]** 관람자 ICE에 STUN만 있고 TURN 없음 → 대칭 NAT·회사망 관람 실패. TURN(coturn 자체 운영 / Cloudflare 등 외부 서비스) 단기 자격 서버 발급 — 외부 서비스·비용 | **[사람]** LTE 테더링·회사망에서 관람 | 대기 (사용자 결정) |
 | P2-18e | **[사람]** 실제 연주자 앱 ↔ Vercel 웹 관람 실망 청취, 재연결 뒤 재offer 시간, iOS Safari 자동재생·오디오 잠금 해제(e2e는 Chromium만) | 확인 | 대기 |
+| P2-19 | 발굴 파서 퍼징(시드 고정, 테스트만): 패킷 헤더·지터·handle_packet 끝에서 끝·open 변조·STUN·Ping/Pong·릴레이 Ack/토큰·relay handle — 긴 판(수백만 입력) 결함 0 | --ignored 긴 판 | 진행 (PR #190 리뷰 중) |
+| P2-19b | 제어 seq를 출발지 확인(accept_rx) 전에 소모 → 다른 주소 사본이 진짜 Ping/Pong/Bye seq를 먹음(Low) / 오디오 재생 사본이 수신 링 128칸 차지(Low) — 피어별 오디오 seq 창 | 회귀 테스트 | 진행 (작업자 w-d-fuzz) |
 | P3-13 | 데모 ScoreDisplay 정리(#105 발견): 첫 렌더·리사이즈의 페이지 분할 규칙 통일(지금 창 크기를 조금 바꾸면 페이지 수가 달라짐), 커서 effect가 측정·페이지마다 rAF 루프 재생성·매 프레임 Math.random 로그, console.log 과다 | scoreLayout 테스트 | 완료(#163 — computePageLayout 하나로 통일, SVG 사용자 좌표→CSS px 배율 변환(리뷰 H1), 커서 img style.top으로 자동 넘김, ResizeObserver+500ms 디바운스, 로그 제거; **[사람]** 데모 화면: 페이지 수·자동 넘김·2쪽 이후 커서·리사이즈) |
 | P3-14 | e2e `port.test.ts` 동시 포트 테스트 flaky(#105 발견) — 원인 확인 후 결정적으로 | 20회 반복 녹색 | 완료(#114 — pick-port 잠금 원자 생성(link)·죽은 잠금 회수 직렬화, 제품 코드 버그였음; 부하 12병렬 100회 녹색) |
 | P3-15 | `sys::cpu::tests::cycles_track_sleepy_busy_thread` 부하 의존 flaky(전체 병렬 --lib 실행에서만 실패, 단독 통과; #131 리뷰) — 실시간 묶음(ignore realtime)으로 옮기거나 직렬화 | 병렬 --lib 20회 녹색 | 완료(#135 — realtime_ 시험으로 직렬 realtime 잡에서, 잡 필터에 lib realtime_ 포함) |
