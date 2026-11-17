@@ -102,15 +102,29 @@ export function createCapacity(registry: Registry, limits: WsLimits) {
     recentlyLeft.get(roomId)!.set(userId, expiresAt)
   }
 
-  /** 만료된 자리 예약 정리 (하트비트, L4) */
+  /**
+   * 만료된 자리 예약·재입장 기록 정리 (하트비트, L4). 재입장 기록은 다시 들어오지 않은 사용자 몫이 소비되지 않고
+   * 남으므로 여기서 지운다(전에는 seatHolds만 지워 recentlyLeft가 (방, 사용자)마다 끝없이 늘었다).
+   */
   function sweep(now: number) {
-    for (const [roomId, holds] of seatHolds) {
-      for (const [uid, exp] of holds) if (exp <= now) holds.delete(uid)
-      if (holds.size === 0) seatHolds.delete(roomId)
+    for (const map of [seatHolds, recentlyLeft]) {
+      for (const [roomId, entries] of map) {
+        for (const [uid, exp] of entries) if (exp <= now) entries.delete(uid)
+        if (entries.size === 0) map.delete(roomId)
+      }
     }
   }
 
-  return { checkCapacity, hasSeatHold, hold, clearSeatHold, noteLeft, consumeRejoin, onLeave, sweep }
+  /** 테스트·관측용: 남아 있는 자리 예약·재입장 기록 수 */
+  function size(): { seatHolds: number; recentlyLeft: number } {
+    let holds = 0
+    let left = 0
+    for (const m of seatHolds.values()) holds += m.size
+    for (const m of recentlyLeft.values()) left += m.size
+    return { seatHolds: holds, recentlyLeft: left }
+  }
+
+  return { checkCapacity, hasSeatHold, hold, clearSeatHold, noteLeft, consumeRejoin, onLeave, sweep, size }
 }
 
 export type Capacity = ReturnType<typeof createCapacity>
