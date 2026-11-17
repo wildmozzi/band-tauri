@@ -168,7 +168,12 @@ export function useViewerAudio(opts: {
   useEffect(() => {
     const measure = async () => {
       const update: Record<string, PeerNetworkStats> = {}
-      for (const [peerId, { pc }] of pcsRef.current.entries()) {
+      /** 측정한 연결 — 같은 발신자가 재협상하면 id는 같고 연결만 바뀌므로 id가 아니라 연결로 대조한다 */
+      const measured = new Map<string, RTCPeerConnection>()
+      // 측정 시작 시점의 연결 목록으로 돈다. 살아 있는 Map을 await 사이에 돌면 재협상으로 다시 넣은 같은 id(새 연결)를
+      // 한 번 더 만나 그 결과가 옛 연결의 측정을 덮는다
+      for (const [peerId, { pc }] of [...pcsRef.current.entries()]) {
+        measured.set(peerId, pc)
         if (pc.connectionState !== 'connected') {
           update[peerId] = UNKNOWN_STATS
           continue
@@ -207,9 +212,9 @@ export function useViewerAudio(opts: {
           update[peerId] = UNKNOWN_STATS
         }
       }
-      // getStats를 기다리는 사이 닫힌 연결(방송 인계·퇴장)의 통계는 다시 넣지 않는다
+      // getStats를 기다리는 사이 닫히거나(방송 인계·퇴장) 같은 발신자의 새 연결로 바뀐(재협상) 연결의 통계는 넣지 않는다
       for (const peerId of Object.keys(update)) {
-        if (!pcsRef.current.has(peerId)) delete update[peerId]
+        if (pcsRef.current.get(peerId)?.pc !== measured.get(peerId)) delete update[peerId]
       }
       if (Object.keys(update).length > 0) setNetworkStats((prev) => ({ ...prev, ...update }))
     }

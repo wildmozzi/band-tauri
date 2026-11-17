@@ -135,4 +135,33 @@ describe('useViewerAudio', () => {
     })
     expect(store.getSnapshot().viewer.networkStats).toEqual({})
   })
+
+  it('통계를 기다리는 사이 같은 발신자가 재협상하면 옛 연결의 통계를 새 연결 자리에 넣지 않는다', async () => {
+    vi.useFakeTimers()
+    const { store, viewer } = setup()
+    let p!: Promise<void>
+    act(() => {
+      p = viewer().handleOffer('a', offer)
+    })
+    await act(async () => {
+      FakePc.all[0].remoteSdp!.resolve()
+      await p
+    })
+    const oldPc = FakePc.all[0]
+    oldPc.connectionState = 'connected'
+    act(() => {
+      vi.advanceTimersByTime(2000)
+    })
+    expect(oldPc.stats).not.toBeNull()
+    // 재협상: 같은 id 'a'로 새 연결 (옛 연결은 닫힘)
+    act(() => {
+      void viewer().handleOffer('a', offer)
+    })
+    expect(FakePc.all).toHaveLength(2)
+    expect(viewer().hasPeer('a')).toBe(true)
+    await act(async () => {
+      oldPc.stats!.resolve(new Map())
+    })
+    expect(store.getSnapshot().viewer.networkStats).toEqual({})
+  })
 })
