@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { SupabaseClient } from '@supabase/supabase-js'
 import { isInsecureDevMode } from '../lib/securityConfig'
 import type { RoomMeta } from '../repositories/roomRepository'
-import { defaultScryptGate } from '../lib/roomPassword'
+import { defaultScryptGate, ipBucket } from '../lib/roomPassword'
 import { AUTH_TIMEOUT_MS, MAX_MESSAGE_BYTES, MAX_PENDING_MESSAGES, type Msg } from '../signaling/protocol'
 import { DEFAULT_LIMITS, type WsDeps, type WsLimits, type WsOptions } from '../signaling/types'
 import { TokenBucket } from '../signaling/rateLimit'
@@ -105,6 +105,7 @@ export function initializeWebSocket(
   const metronome = createMetronome(registry, roomMeta, deps, limits)
   const nativeSession = createNativeSession(registry, env)
   const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** IP(IPv4) 또는 IPv6 /64 → 동시 연결 수. IPv6는 한 사용자가 /64를 통째로 받아 주소를 바꿔 가며 상한을 넘을 수 있어 묶는다 */
   const connectionsPerIp = new Map<string, number>()
   const resume = createResume(registry)
 
@@ -133,6 +134,8 @@ export function initializeWebSocket(
   const heartbeat = setInterval(() => {
     const now = Date.now()
     capacity.sweep(now)
+    performers.sweep(now)
+    roomMeta.sweep(now, hasRoom)
     for (const c of allClients()) {
       if (resume.isSuspended(c.id)) continue // 이미 끊긴 연결 (재개 대기)
       if (!c.conn.isAlive) {
@@ -162,13 +165,14 @@ export function initializeWebSocket(
 
   wss.on('connection', (ws, req) => {
     const ip = clientIp(req, env)
-    const ipCount = (connectionsPerIp.get(ip) || 0) + 1
+    const ipKey = ipBucket(ip)
+    const ipCount = (connectionsPerIp.get(ipKey) || 0) + 1
     if (ipCount > limits.maxConnectionsPerIp) {
-      console.warn(`[WS] too many connections from ${ip}`)
+      console.warn(`[WS] too many connections from ${ipKey}`)
       ws.close(1008, 'Too many connections')
       return
     }
-    connectionsPerIp.set(ip, ipCount)
+    connectionsPerIp.set(ipKey, ipCount)
 
     // 연결 문맥 (S3). 세션 재개 시 ctx.client·ctx.id가 이전 Client로 교체되므로 모든 핸들러·콜백은 호출 시점에 ctx에서 읽는다
     const newId = uuidv4()
@@ -238,16 +242,31 @@ export function initializeWebSocket(
       return false
     }
 
+    /**
+     * 처리하지 않는 프레임(바이너리·깨진 JSON·type 없음)도 일반 버킷을 쓴다. 전에는 rate limit 앞에서 조용히 버려
+     * 한 연결이 64KB 깨진 JSON을 초당 1500개씩 보내도 끊기지 않고 이벤트 루프를 수백 ms씩 막았다(서버 보안 점검).
+     */
+    const ignoreFrame = (): void => {
+      const client = ctx.client
+      if (client.conn.msgBucket.take()) return
+      client.conn.dropped++
+      if (client.conn.dropped >= limits.maxDropped) {
+        console.warn(`[WS] ${ctx.id.slice(0, 8)} flooded invalid frames - closing`)
+        ws.close(1008, 'Rate limit exceeded')
+      }
+    }
+
     ws.on('message', (raw: RawData, isBinary: boolean) => {
-      if (isBinary) return
+      if (ws.readyState !== ws.OPEN) return // 닫는 중(속도 제한 1008 등): 상대가 close를 무시하고 계속 보내도 파싱하지 않는다
+      if (isBinary) return ignoreFrame()
       let msg: Msg
       try {
         const parsed: unknown = JSON.parse(raw.toString())
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return
-        if (typeof (parsed as { type?: unknown }).type !== 'string') return
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return ignoreFrame()
+        if (typeof (parsed as { type?: unknown }).type !== 'string') return ignoreFrame()
         msg = parsed as Msg
       } catch {
-        return // JSON 파싱 실패는 무시
+        return ignoreFrame() // JSON 파싱 실패는 무시(속도 제한에는 센다)
       }
 
       if (!allowMessage(msg)) return
@@ -279,9 +298,9 @@ export function initializeWebSocket(
       const takenOver = client.conn.ws !== ws
       clearTimeout(authTimer)
       if (!takenOver && client.auth.expiryTimer) clearTimeout(client.auth.expiryTimer)
-      const n = (connectionsPerIp.get(ip) || 1) - 1
-      if (n <= 0) connectionsPerIp.delete(ip)
-      else connectionsPerIp.set(ip, n)
+      const n = (connectionsPerIp.get(ipKey) || 1) - 1
+      if (n <= 0) connectionsPerIp.delete(ipKey)
+      else connectionsPerIp.set(ipKey, n)
 
       // 이미 다른 연결로 대체/정리된 Client (중복 연결 제거, 세션 재개로 넘어감 등)
       if (takenOver || getClient(id) !== client) return

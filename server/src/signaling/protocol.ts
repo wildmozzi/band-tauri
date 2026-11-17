@@ -5,6 +5,11 @@
  */
 
 export const MAX_MESSAGE_BYTES = 64 * 1024
+/**
+ * 연결 하나의 보내기 대기열(ws.bufferedAmount) 상한. 읽지 않는(느린) 수신자에게 중계가 쌓이면 서버 메모리가 끝없이 늘어
+ * 256MB VM이 OOM으로 죽는다(모든 방 합주 끊김). 정상 시그널링은 수십 KB를 넘지 않으므로 넘으면 그 연결을 끊는다(registry.send).
+ */
+export const MAX_BUFFERED_BYTES = 1024 * 1024
 export const AUTH_TIMEOUT_MS = 5000
 export const MAX_PENDING_MESSAGES = 100
 export const MAX_ROOM_ID_LENGTH = 128

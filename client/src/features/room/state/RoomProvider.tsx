@@ -172,7 +172,13 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
   useEffect(() => {
     const timers = timersRef.current
-    return () => timers.forEach(clearTimeout)
+    // password-busy 자동 재입장 예약도 함께 지운다(언마운트 뒤 join을 보내지 않게)
+    const busyRetry = busyRetryRef
+    return () => {
+      timers.forEach(clearTimeout)
+      if (busyRetry.current.timer) clearTimeout(busyRetry.current.timer)
+      busyRetry.current = { count: 0, timer: null }
+    }
   }, [])
 
   // --- 브라우저 미디어 ---
@@ -249,6 +255,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       broadcaster.stop()
       // leave가 participant-left로 전파되므로 native-leave/stop-performing은 따로 보내지 않는다
       void s.stop({ notify: false })
+      // 이미 멈춘 엔진의 안내(내려짐·엔진 멈춤·시작 실패·재연결 시간 초과)를 다음 방으로 끌고 가지 않는다
+      s.clearError()
       v.closeAll()
       m.reset()
       rec.stopRecording()

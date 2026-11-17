@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { useRoomPerform, useRoomMetronome, useRoomTelemetry } from '../state/roomHooks'
+import { useRoomPerform, useRoomMetronome, useRoomEngineStats } from '../state/roomHooks'
+import { pickMetronomeSync } from '../state/engineStatsPicks'
 import {
   DEFAULT_METRONOME_BEATS,
   DEFAULT_METRONOME_BPM,
@@ -22,7 +23,7 @@ const SYNC_TIMEOUT_MS = 5000
 export function MetronomePanel({ isHost }: { isHost: boolean }) {
   const { isPerforming } = useRoomPerform()
   const { metronome, setHostMetronome, metronomeVolume, metronomeMuted, setMetronomeVolume } = useRoomMetronome()
-  const { engineStats } = useRoomTelemetry('engineStats')
+  const { synced, latencyFields, outputLatencyMs, outputLatencySource } = useRoomEngineStats(pickMetronomeSync)
   // 입력 중에는 문자열로 두고(빈 칸 = 0이 상태로 들어가지 않게), 적용·blur 때 범위로 자른다(PR #36 L4)
   const [bpmText, setBpmText] = useState(String(DEFAULT_METRONOME_BPM))
   const bpmValid = bpmText.trim() !== '' && Number.isFinite(Number(bpmText))
@@ -31,9 +32,8 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
   const [busy, setBusy] = useState(false)
   const running = metronome?.running ?? false
   const following = running && metronome?.leaderId != null
-  const synced = engineStats?.metronome?.synced ?? false
   // 출력 지연 보정 상태(P2-3c): 드라이버 보고 / 루프백 측정 / 없음. 옛 엔진(필드 없음)이면 표시하지 않는다
-  const latency = engineStats?.metronome && 'outputLatencySource' in engineStats.metronome ? outputLatencyView(engineStats.metronome) : null
+  const latency = latencyFields ? outputLatencyView({ outputLatencyMs, outputLatencySource }) : null
   // 따르기 시작한 뒤 한참 지나도 시계 표본이 없으면(옛 엔진 방장·연결 문제) 안내를 바꾼다(PR #36 L2)
   const [syncTimedOut, setSyncTimedOut] = useState(false)
   const waitingSync = following && !synced
