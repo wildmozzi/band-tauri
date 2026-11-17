@@ -181,3 +181,6 @@ pub(super) fn recv_loop(s: &NetShared) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
