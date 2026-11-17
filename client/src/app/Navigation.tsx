@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { LATENCY_MEASURE_SECTION_ID, OPEN_LATENCY_MEASURE_EVENT } from '../native/loopbackOffsetStore'
 import { Link, useNavigate } from 'react-router-dom'
 import { useAuth } from '../features/auth'
@@ -32,7 +32,14 @@ export function Navigation() {
   useEffect(() => {
     const open = () => {
       setShowAudioSettings(true)
-      requestAnimationFrame(() => document.getElementById(LATENCY_MEASURE_SECTION_ID)?.scrollIntoView({ block: 'start' }))
+      // 모달은 지연 로딩이라 처음 열 때는 그 절이 몇 프레임 뒤에 생긴다 — 생길 때까지(최대 약 2초) 기다렸다가 스크롤
+      let tries = 120
+      const scroll = () => {
+        const el = document.getElementById(LATENCY_MEASURE_SECTION_ID)
+        if (el) el.scrollIntoView({ block: 'start' })
+        else if (--tries > 0) requestAnimationFrame(scroll)
+      }
+      requestAnimationFrame(scroll)
     }
     window.addEventListener(OPEN_LATENCY_MEASURE_EVENT, open)
     return () => window.removeEventListener(OPEN_LATENCY_MEASURE_EVENT, open)
@@ -51,7 +58,9 @@ export function Navigation() {
     <>
       {/* 오디오 설정 모달 - nav 바깥에 렌더링 */}
       {showAudioSettings && (
-        <AudioSettings isModal onClose={() => setShowAudioSettings(false)} />
+        <Suspense fallback={null}>
+          <AudioSettings isModal onClose={() => setShowAudioSettings(false)} />
+        </Suspense>
       )}
 
       <nav className="top-nav" ref={navRef}>
