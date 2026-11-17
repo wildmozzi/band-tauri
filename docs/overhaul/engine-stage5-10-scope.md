@@ -145,11 +145,11 @@
 |---|---|---|
 | `click`(2, RT) | `NO_CLICK`·`CLICK_LEN`·`encode`·`decode`(`pub(super)` — `sched`가 씀)·`click_wave`·`ClickShared`·`ClickRt` | 이동만. 단위 테스트(RT 클릭 3개) |
 | `plan`(1) | `MIN_BPM`·`MAX_BPM`·`MAX_BEATS_PER_BAR`·`DEFAULT_START_LEAD_US`·`MIN_LOOPBACK_OFFSET_MS`·`MAX_LOOPBACK_OFFSET_MS`·`MAX_MEASURED_HIDDEN_OUT_US`, `MetronomeConfig`·`MetronomePlan`·`MetronomeStats`·`OutputLatencySource`·`measured_hidden_out_us`·`choose_hidden_out` | 값 타입·검증. `serde`만 쓴다 |
-| `sched`(2) | `STALE_SKIP_S`, `MetroReport`(상태 칸 한 벌: `REPORT_WORDS`·플래그 비트·`pack`·`unpack`), `NO_LOOPBACK_OFFSET`, `MetronomeCtl`(계획 `Mutex<(세대, 계획)>` + `plan_gen` 원자값 + `try_lock` 재시도 수, 상태 `SeqCell`, 루프백 보정 원자값)·`MetronomeRt`(워커 쪽 끝), `OutClock`·`hidden_out_latency_us`·`BeatScheduler` | `click`(`ClickShared`·`encode`·`decode`·`NO_CLICK`)과 `plan`(계획·상태 타입·루프백 한계)을 쓴다 |
+| `sched`(2) | `MAX_SHIFT_S`·`ADOPT_FRAC`·`MIN_GAP_S`·`SHIFT_COUNT_S`(시계 점프 규칙, #168 L-3 후속 — 전에는 `STALE_SKIP_S`), `MetroReport`(상태 칸 한 벌: `REPORT_WORDS`·플래그 비트·`pack`·`unpack`), `NO_LOOPBACK_OFFSET`, `MetronomeCtl`(계획 `Mutex<(세대, 계획)>` + `plan_gen` 원자값 + `try_lock` 재시도 수, 상태 `SeqCell`, 루프백 보정 원자값)·`MetronomeRt`(워커 쪽 끝), `OutClock`·`hidden_out_latency_us`·`BeatScheduler` | `click`(`ClickShared`·`encode`·`decode`·`NO_CLICK`)과 `plan`(계획·상태 타입·루프백 한계)을 쓴다 |
 
 처음 표와 다른 점(②b-6b #143 뒤 코드 기준):
 - ②b-6b가 더한 `MetroReport`·`MetronomeRt`는 `sched`에 둔다. `MetroReport`의 `pack`·`unpack`·`REPORT_WORDS`는 `MetronomeCtl`의 `SeqCell` 칸 형식이라 같은 파일에 두면 비공개로 남는다(`plan`에 두면 `pub(super)`가 셋 늘고 계층 1 값 타입이 칸 형식을 안다).
-- `STALE_SKIP_S`는 `BeatScheduler`만 쓴다(`ClickRt`는 쓰지 않는다) — `click`이 아니라 `sched`에 비공개로 둔다.
+- `STALE_SKIP_S`(지금은 `MAX_SHIFT_S` 등)는 `BeatScheduler`만 쓴다(`ClickRt`는 쓰지 않는다) — `click`이 아니라 `sched`에 비공개로 둔다.
 - 단위 테스트 `loopback_offset_splits_into_output_share`는 앞 절반(`measured_hidden_out_us`·`choose_hidden_out`, 비공개 `MAX_MEASURED_HIDDEN_OUT_US`를 씀)을 `plan`에 남기고, 커맨드 범위 검사(`MetronomeCtl::pair`) 절반을 `sched::tests::loopback_offset_command_range`로 나눴다. 단언문은 그대로다.
 
 `mixer → metronome`: `MixControls`가 클릭 게인 기본값을 `metronome::DEFAULT_CLICK_GAIN`에서 가져왔다(쓰는 곳은 이 한 군데). 상수를 `mixer.rs`로 옮겼다 — 클릭 게인 원자값의 주인이 `MixControls`이므로 기본값도 거기 있는 것이 맞다. `metronome`은 이 상수를 다시 내보내지 않는다(쓰는 곳 없음). 이것이 마지막 간선 예외라 `EXCEPTIONS`는 0, `OPEN_STAGES`에서 ⑥을 지웠다.

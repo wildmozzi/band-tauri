@@ -71,7 +71,7 @@ pub mod engine {
         pub use crate::engine::wav::RecordFormat;
     }
     pub mod worker {
-        pub use crate::engine::worker::{CallbackTracker, PeerSources, PeerSourcesParts, WorkerStats, FINE_POLL, POLL};
+        pub use crate::engine::worker::{CallbackTracker, MetronomeStageProbe, PeerSources, PeerSourcesParts, WorkerStats, FINE_POLL, POLL};
     }
 }
 

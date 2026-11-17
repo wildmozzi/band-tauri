@@ -128,11 +128,27 @@
   - 워커만 읽는다(뮤텍스, 반복마다). 출력 콜백 경로는 바뀌지 않는다(클릭 프레임 계산만 이동).
   - **콜백 공백**(PR #34 M3): `DeviceClock`은 2초 창 최솟값 외에 0.15초 짧은 창 최솟값을 본다. 짧은 창 전체가 긴 창보다 3ms 넘게 떠 있으면 공백(장치 일시 중단·스트림 재시작·긴 xrun)으로 보고 창을 리셋한다. 공백 뒤 0.15~0.3초 안에 재수렴한다(이전에는 최대 2초 동안 공백만큼 늦은 클릭). 워커 기상 지연 스파이크는 같은 짧은 창의 다른 관측이 최솟값을 끌어내려 리셋을 일으키지 않는다.
 - 워커는 다음 클릭 하나를 `ClickShared::next`(원자 u64 = `프레임 << 1 | 강박`)에 올린다(CAS). 콜백이 가져가면 다음 박을 올린다.
-  - 시계 추정이 바뀌면 올려 둔 클릭을 다시 맞춘다. 단 옛 위치와 새 위치가 모두 `재생 프레임 + 콜백 2개 + 2ms` 너머일 때만이다. 콜백과 경합해도 클릭이 사라지거나 두 번 울리지 않는다.
   - 이미 지난 박(늦게 받은 시작, 새 BPM)은 건너뛰고 다음 박부터 낸다. 강박 = 마디 첫 박(k mod 박자 = 0).
-  - 올려 둔 클릭의 제 시각이 다시 계산해 보니 이미 5ms 넘게 지났으면(콜백 공백 뒤) 울리지 않고 거둔 뒤 다음 박을 올린다(`skippedClicks`).
   - 시간축이 없으면(기준 피어 표본 없음, `synced=false`) 클릭을 내지 않는다.
-- 같은 계획을 다시 받으면(세대 번호) 올려 둔 클릭을 거두고 처음부터 다시 맞춘다.
+- **시계 추정이 뛸 때**(`BeatScheduler`, #168 리뷰 L-3): 올려 둔 박의 자리는 반복마다 지금 시계·계획으로 다시 계산한다. 시계 추정 갱신(동기), 기준 피어 변경, 큰 오프셋 보정, 콜백 공백 뒤 장치 시계 재수렴, 계획 변경이 모두 같은 규칙을 탄다.
+  - 가드 = `재생 프레임 + 콜백 2개 + 2ms`. 가드 너머는 다음 콜백 2개가 가져가지 않는 구간이라 언제든 옮길 수 있다(콜백과 CAS가 겹쳐도 그 콜백은 건너뛰고 새 자리에서 제때 울린다). 가드 안 클릭의 자리는 다시 쓰지 않는다(겹치면 늦은 클릭이 된다).
+  - 새 자리가 가드 너머면 거기로 옮긴다. 시계가 뒤로 뛰어(박이 밀림) 곧 울릴 클릭도 옮긴다.
+  - 새 자리가 가드 안(이미 지났거나 너무 가까움)이면 늦게 울린다. 가드 너머 클릭은 가드에 붙이고(올림 1프레임 포함 ≈ 20ms 이하), 가드 안 클릭은 옛 자리에 둔다. 단 새 자리보다 **20ms**(`MAX_SHIFT_S`) 넘게 늦어지면 그 박은 빼고(`skippedClicks`) 다음 박부터 새 시계로 맞춘다(재정렬 1회). 새 자리에서 1ms 넘게 어긋나게 울리기로 한 박은 박마다 한 번 `shiftedClicks`로 센다(#176 리뷰 M-3).
+  - **이중 클릭 금지**: 마지막 클릭에서 **100ms**(`MIN_GAP_S`) 안에 올 박은 고를 때도, 올려 둔 클릭을 옮기거나 둘 때도(`follow`) 내지 않고 빼서 센다(`skippedClicks`). 박 간격은 300BPM에서도 200ms라 정상 박에는 걸리지 않는다.
+  - **같은 박 판정**(세대가 바뀔 때): 마지막 클릭이 새 계획의 박 k에서 20ms 안이고, 새 박이 강박이면 클릭도 강박이었으면 그 박은 이미 울린 것이다(다시 울리지도 세지도 않음). 시각만 가까운 다른 박(템포 변경·재시작의 새 박 0)은 같은 박이 아니다 — 100ms 넘게 떨어졌으면 울리고, 안이면 빼고 센다.
+  - 세대가 바뀌어 올려 둔 클릭이 새 계획의 박 k가 됐어도 그보다 앞에 아직 울릴 수 있는 새 박(가드 너머, 지난 박 뒤)이 있으면 거두고 그 박부터 고른다(재시작의 새 박 0이 옛 박 사이에 올 때).
+  - #176 첫 판은 하한을 "박 간격의 절반"으로 두어, 템포를 내리거나 다시 켤 때 따르는 쪽(시그널링 80~250ms)에서 새 박 0을 셈 없이 지웠다(6~57%, 리뷰 H-1). 올려 둔 클릭을 옮기는 `follow`에는 하한이 없어 240→60 재전송에서 14~25ms 플램이 났다(리뷰 M-1, develop에도 있음).
+  - 결과: 박이 빠지는 것은 새 자리가 20ms 넘게 지났거나(+20ms 넘는 점프가 곧 울릴 박에 걸림, 콜백 공백) 마지막 클릭과 100ms 안인 경우뿐이고, 모두 `skippedClicks`로 센다. 20ms~100ms 뒤로 뛴 시계와 세대 변경이 겹쳐 옛 자리에 이미 울린 박도 새 자리에서 20ms 넘게 어긋났으므로 빠진 박으로 센다(새 자리가 마지막 클릭과 100ms 안이라 빼고 셈). 이중 클릭(100ms 안 두 번)은 없다. 그 밖의 박은 새 자리에서 최대 min(|점프|, 20ms) 어긋나고(`shiftedClicks`), 다음 박부터 새 자리다.
+  - **남은 한계**(#176 재리뷰):
+    - **큰 역방향 점프 + 세대 변경**: 박을 가져간 직후 기준 시계 추정이 **100ms 넘게 뒤로** 뛰고 세대가 바뀌면, 같은 박이 새 자리에서 한 번 더 울릴 수 있다. 이때는 어떤 카운터도 늘지 않는다. 100ms 넘게 떨어지므로 이중 클릭(플램)은 아니다. 같은 박 판정(20ms)을 넓히면 템포 변경의 새 박 0을 셈 없이 지우게 되어(#176 리뷰 H-1) 넓히지 않았다.
+    - **늦게 받은 계획**: 계획이 새 박 0의 가드(콜백 2개 + 2ms, 48k/128에서 약 12.7ms) 안에 도착하면 박 0은 셈 없이 빠지고 첫 클릭이 박 1(약박)이 된다. 방장이 새 박 0을 지금 + 300ms로 정하므로(`performSession`), 따르는 쪽 시그널링 지연이 약 287ms 이상일 때다. 기존 동작이고, 고르기가 가드 안 박을 이미 지난 박(늦게 받은 시작)으로 보기 때문이다. 이 박을 세거나 가드에 붙여 울리는 것, 300ms 앞당김을 따르는 쪽 지연 상한과 맞추는 것은 후속이다.
+  - 왜 "당겨진(어긋난) 박"이 "빠진 박"보다 덜 나쁜가, 단 20ms까지:
+    - 등간격 소리열에서 한 음의 시각 어긋남은 IOI의 약 2.5%(120BPM에서 약 12ms)보다 작으면 잘 알아채지 못한다(Friberg & Sundberg 1995). 맞춰 치는 사람은 어긋남을 1~2박 안에 위상 보정으로 흡수한다(Repp 2005 탭핑 문헌 정리). 그래서 작은 어긋남은 박 하나가 통째로 없는 것보다 덜 들린다. 빠진 클릭은 바로 들리고, 강박이면 마디 세기를 놓칠 수 있다.
+    - 반대로 수십 ms 어긋난 클릭은 플램(겹친 박)처럼 들리고 연주자 위상을 그만큼 잘못된 쪽으로 끈다. 연주자는 박 하나가 없어도 속 박(continuation)으로 이어 가므로, 그때는 틀린 단서보다 단서가 없는 편이 낫다.
+    - 한도 20ms는 합주에서 같은 박으로 듣는 어긋남의 흔한 범위(약 20~30ms)의 아래쪽이고, GOAL의 편도 목표(≤ 25ms)와 같은 크기다. 실제 점프는 대부분 이보다 작다(시계 추정 갱신은 1ms 안쪽, 기준 피어 변경 뒤 추정 오차는 RTT 비대칭/2).
+    - 가장 나쁜 것은 이중 클릭(100ms 안에 두 번 — 플램)이라 어떤 경우에도 내지 않는다. 새 계획의 강박(박 0)을 약박 클릭과 같은 박으로 치지 않는 것도 같은 이유다(마디 첫 박을 잃지 않게, 잃으면 센다).
+  - 세대가 바뀌면(계획 재전송·변경, 기준 피어 변경) 올려 둔 클릭은 새 계획의 가장 가까운 박(박 간격의 1/4 안, `ADOPT_FRAC`)으로 이름을 바꾸고 위 규칙으로 자리·강박을 맞춘다. 그보다 멀면 새 계획에 없는 박이라 거둔다. 가드 안 클릭의 강박 비트는 다음 콜백 2개 밖일 때만 고친다(#168 리뷰 L-1).
+  - 전에는: 가드 너머 클릭이 5ms 넘게 늦어지면 무조건 뺐고(콜백 공백 규칙이 시계 점프에도 걸림), 가드 안 클릭은 시계가 50ms 뛰어도 옛 자리에 울렸으며, 세대가 바뀔 때는 박 자리 ±1ms 밖이면 거둬 곧 울릴 박이 빠졌다. 시험: `tests/metronome.rs`의 `clock_step_near_beat_neither_drops_nor_doubles`(점프 ±0.5·2·10·50ms × 박 앞 1~100ms × 같은 세대/세대 변경, 208경우 — 옛 코드 32경우 위반)와 `stage_ref_peer_change_with_clock_error_neither_drops_nor_doubles`(실제 `MetronomeStage`, 기준 피어 변경 + 새 기준 시계 오차, 117경우 — 옛 코드 26경우 위반), #176 리뷰 반영 뒤 30·120·300BPM 432경우, `time_signature_change_with_clock_step_keeps_beats_and_new_accents`(4→3 + 점프 77경우, 강박 확인), `tempo_change_rings_new_downbeat_or_counts_it`(120→120·120→100·120→90·100→120·240→60·300·30·30→120 × 시그널링 0·80·150·250ms × 적용 시각 40곳 = 1,280경우, 새 박 0이 강박으로 울리거나 셈 — #176 첫 판 293경우·develop 45경우 위반). 온셋 검출이 80ms 안 클릭을 하나로 합치므로 울린 클릭 수(`clicks`) = 온셋 수도 확인한다(리뷰 M-2).
 
 **클릭 생성**(출력 콜백, `ClickRt`)
 - 파형: 48kHz로 미리 계산한 30ms 사인 버스트(강박 1760Hz·0.6, 약박 1100Hz·0.45, 1ms 상승 + 6ms 감쇠)다. 장치 레이트로는 보폭 `48000/레이트`(원자값)와 선형 보간으로 읽는다.
@@ -144,7 +160,7 @@
   - **믹스 탭(관람 방송·녹음)과 측정 자극에는 들어가지 않는다**(설정 없음, 항상 제외).
 - 클릭 볼륨·뮤트는 로컬 전용이다(`engine_set_metronome_gain`, 기본 0.8). `MixControls`에 있어 엔진 재시작 간에도 유지된다.
 
-**정확도**(`tests/metronome.rs`, 가상 시간 2피어 시뮬레이션, 실제 `OutputRt`·`CallbackTracker`·`ClockSync`·`BeatScheduler` 사용)
+**정확도**(`tests/metronome.rs`, 가상 시간 2피어 시뮬레이션, 실제 `OutputRt`·`CallbackTracker`·`ClockSync`·`BeatScheduler` 사용. 기준 피어 변경은 실제 `MetronomeStage`를 시험 입구 `testing::engine::worker::MetronomeStageProbe`(피어 표 복사본·`Peer.clock_estimate` 경로)로 돌린다)
 - 시스템 시계 ±200ppm, 장치 클럭 별도 어긋남, 서로 다른 레이트·버퍼(48k/128 ↔ 44.1k/441, 96k/256), 편도 큐잉 지수분포, 대칭 RTT 계단(3 → 15 → 4ms) 조건에서 같은 박의 귀 도착 시각 차 **최대 0.84ms**(수락 기준 ≤ 2ms)다. 늦은 클릭 0, 믹스 탭 클릭 0이다.
 - 콜백 지터(PR #34 M1): 장치 프레임 시계는 하드웨어가 정하고 콜백만 공칭 시각에서 흔들린다.
   - 한쪽만 공칭 ±1ms 균등 + 44.1k 441/440 버스트 교대: **최대 1.29ms**, 평균 +0.86ms. `DeviceClock`이 가장 이른 콜백을 기준으로 삼아 대칭 지터의 진폭만큼 치우친다(최악 경우). 지터가 ±2ms를 넘는 장치에서는 2ms를 넘을 수 있다(그때는 최소제곱 직선 추정을 검토).
@@ -152,7 +168,7 @@
 - 숨은 출력 지연(M2): 한쪽 10ms, 드라이버 보고 → **최대 0.14ms**. 보고 없음 → 평균 +9.97ms(그대로 어긋남, 위 한계).
   - 보고 없음 + 루프백 보정값(M2(a), 측정 오차 +0.3ms 포함): 숨은 입력 10ms(대칭) → **최대 0.29ms**. 숨은 입력 8ms(약한 비대칭) → **최대 0.96ms**(평균 +0.82ms). 숨은 입력 2ms(강한 비대칭) → 최대 3.96ms(평균 +3.82ms, (출력 − 입력)/2 한계, 보정 안 함 +10ms보다는 작다).
   - 두 피어 모두 보고 없음(숨은 4+4ms ↔ 12+12ms, 48k/256 ↔ 44.1k/441): 보정 안 함 평균 +7.88ms → 각자 루프백 보정 **최대 0.58ms**.
-- 콜백 공백(M3): 따르는 쪽 장치 300ms 정지 후 재개 → 재개 0.6초 뒤부터 **최대 0.51ms**, 공백 중 클릭 1개 건너뜀.
+- 콜백 공백(M3): 따르는 쪽 장치 300ms 정지 후 재개 → 재개 0.6초 뒤부터 **최대 0.51ms**, 공백 중 클릭 1개 건너뜀(뺀 박은 `skippedClicks`, 1.4절 "시계 추정이 뛸 때").
 - 시뮬레이션이 덮지 않는 것: 드라이버 보고도 루프백 보정값도 없는 숨은 출력 지연, 입·출력 숨은 지연의 실제 비대칭 크기, 경로 비대칭. 피어마다 다르면 그만큼 어긋난다. 실장비 2대 청취 확인은 [사람] 항목이다.
 
 ### 1.5 합주 녹음 (P2-4, `engine/record.rs`, `engine/wav.rs`, `engine/flac.rs`)
@@ -405,7 +421,7 @@ interface RecordMarker { kind: 'conceal' | 'drop' | 'underrun'; start: number; e
 interface RecordMarkersFile { sampleRate: number; mergeGapFrames: number; accuracyFrames: number; lostEvents: number; overflowEvents?: number; tracks: { file: string; name: string; kind: RecordTrack['kind']; peerId: string | null; markers: RecordMarker[] }[] }
 interface MetronomeConfig { running: boolean; bpm: number; beatsPerBar: number; startUs?: number | null; refPeerId?: string | null }  // bpm 20..300, beatsPerBar 1..16, startUs = 기준 엔진 시계 µs
 interface MetronomePlan { running: boolean; bpm: number; beatsPerBar: number; startUs: number; refPeerId: string | null }
-interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; outputLatencyMs: number | null; outputLatencySource: 'driver' | 'loopback' | null; refClockUnsupported: boolean; clockExtrapolationMs: number | null }
+interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs: number | null; clockRttMs: number | null; driftPpm: number | null; beat: number | null; clicks: number; lateClicks: number; skippedClicks: number; shiftedClicks: number; outputLatencyMs: number | null; outputLatencySource: 'driver' | 'loopback' | null; refClockUnsupported: boolean; clockExtrapolationMs: number | null }
 ```
 
 | 커맨드 | 인자 | 반환 |
@@ -425,7 +441,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_safety_code` | `{ peerId: string }` | `string` — 그 피어와의 안전 번호("12345 67890 13579 24680"). 양쪽이 같으면 키 바꿔치기 없음(2절 신뢰 가정) |
 | `engine_set_monitor` | `{ enabled: boolean, gain: number }` | `null` |
 | `engine_set_master_gain` | `{ gain: number }` | `null` |
-| `engine_set_metronome` | `{ metronome: MetronomeConfig }` | `MetronomePlan` — 공유 메트로놈(P2-3, 1.4절). 방장은 `refPeerId` 없이 부른다(`startUs`를 비우면 지금 + 300ms, 반환한 `startUs`를 방에 알린다). 다른 연주자는 `refPeerId` = 방장 엔진 peerId, `startUs` = 방장이 알린 값으로 부른다(그때 `startUs` 필수). 기준 피어가 아직 없거나 시계 표본이 없으면 `synced=false`로 기다린다. 네트워크 없는 엔진(테스트 모드)은 `refPeerId` 없이만 된다(혼자 연습). 다시 부르면 새 계획으로 바로 바뀐다 — 이미 곧 울릴(콜백 2개 + 2ms 안) 클릭은 새 계획에서도 박 자리(±1ms)면 그대로 울리고(강박 여부는 새 계획대로), 아니면 울리지 않는다(같은 계획을 다시 넣어도 박이 빠지지 않는다) |
+| `engine_set_metronome` | `{ metronome: MetronomeConfig }` | `MetronomePlan` — 공유 메트로놈(P2-3, 1.4절). 방장은 `refPeerId` 없이 부른다(`startUs`를 비우면 지금 + 300ms, 반환한 `startUs`를 방에 알린다). 다른 연주자는 `refPeerId` = 방장 엔진 peerId, `startUs` = 방장이 알린 값으로 부른다(그때 `startUs` 필수). 기준 피어가 아직 없거나 시계 표본이 없으면 `synced=false`로 기다린다. 네트워크 없는 엔진(테스트 모드)은 `refPeerId` 없이만 된다(혼자 연습). 다시 부르면 새 계획으로 바로 바뀐다 — 올려 둔 클릭은 새 계획의 가장 가까운 박(박 간격 1/4 안)이면 그 박의 새 자리로 옮기거나 최대 약 20ms 어긋난 채 울리고(강박 여부는 새 계획대로), 아니면 울리지 않는다. 같은 계획을 다시 넣거나 기준 피어를 바꿔도 박이 빠지거나 두 번 울리지 않는다(새 자리가 이미 20ms 넘게 지났거나 마지막 클릭과 100ms 안인 박만 빼고 `skippedClicks`, 1.4절 "시계 추정이 뛸 때") |
 | `engine_set_metronome_gain` | `{ gain: number, muted: boolean }` | `null` — 클릭 볼륨(0..4, 기본 0.8)·뮤트. 내 장치 출력에만 적용(믹스 탭·방송·녹음에는 클릭이 없음), 엔진 재시작 간 유지 |
 | `engine_set_loopback_offset` | `{ offsetMs: number \| null }` | `null` — 메트로놈 숨은 출력 지연 보정용 루프백 보정값(PR #34 M2(a), 1.4절). `offsetMs` = `engine_measure_loopback` 결과의 `offsetMs`(-50..200, 밖이면 오류). 실행 중인 엔진에 적용하고(엔진이 없으면 오류) 그 장치 구성(1.4절 키)에 묶어 기억한다(같은 구성으로 다시 시작하는 엔진에도 적용). null = 해제. 루프백 측정이 `ok`면 엔진이 같은 일을 자동으로 하므로, 앱 재시작 뒤 저장값을 다시 넣거나 끌 때 쓴다. 드라이버가 출력 지연을 보고하면 드라이버 값이 우선 |
 | `engine_stats` | — | `EngineStats` |
@@ -450,7 +466,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - 콜백 구동 믹스(1.1절)에는 믹스된 출력 링이 없으므로 출력 링 항은 0이다. 출력 콜백이 꺼내는 피어 소스 링은 지터 버퍼 깊이(`bufferMs`)에 포함되어 목표로 제어된다. 그래서 입→귀 지연 = 송신측 `estLatencyMs`의 입력+프레임 몫 + 망 + 수신측 `bufferMs` + 수신측 출력 버퍼다. 공유 클럭 종단 실측이 `estLatencyMs + bufferMs + 1ms`를 넘지 않음을 통합 테스트로 확인한다.
 - 장치 버퍼 값은 실측 콜백 크기를 쓴다.
 
-`EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`·`skippedClicks`(엔진 수명 누적, 1.4절), `outputLatencyMs`(클릭 시각에 반영한 숨은 출력 지연, null = 드라이버 보고·루프백 보정값 모두 없어 보정 안 됨)·`outputLatencySource`(`driver` | `loopback` | null), `refClockUnsupported`(기준 피어가 시계를 싣지 않는 옛 엔진, 1.4절), `clockExtrapolationMs`(시계 추정 외삽 거리, 진단용). 워커가 0.1초마다 갱신한다. 수 필드는 워커가 낸 한 벌(서로 일관된 값)이다. **`refPeerId`만** 제어 쪽의 지금 계획에서 읽으므로 `engine_set_metronome` 직후 워커 반복 1회(약 1ms, 드물게 제어 스레드가 선점된 동안 더) 동안 다른 필드보다 한 발 앞설 수 있다(엔진 ②b-6b — 워커가 계획·상태 락을 기다리지 않게 한 결과다).
+`EngineStats.metronome`(P2-3): 마지막으로 적용된 계획 + `synced`(시간축 있음, 방장은 항상 true), `clockOffsetMs`(기준 피어 시계 − 내 시계), `clockRttMs`(오프셋 추정에 쓴 최소 RTT), `driftPpm`, `beat`(올려 둔 박 번호), `clicks`·`lateClicks`·`skippedClicks`(뺀 박: 새 자리가 20ms 넘게 지났거나 마지막 클릭과 100ms 안)·`shiftedClicks`(새 자리에서 1ms 넘게 어긋나게 울린 박)(엔진 수명 누적, 1.4절), `outputLatencyMs`(클릭 시각에 반영한 숨은 출력 지연, null = 드라이버 보고·루프백 보정값 모두 없어 보정 안 됨)·`outputLatencySource`(`driver` | `loopback` | null), `refClockUnsupported`(기준 피어가 시계를 싣지 않는 옛 엔진, 1.4절), `clockExtrapolationMs`(시계 추정 외삽 거리, 진단용). 워커가 0.1초마다 갱신한다. 수 필드는 워커가 낸 한 벌(서로 일관된 값)이다. **`refPeerId`만** 제어 쪽의 지금 계획에서 읽으므로 `engine_set_metronome` 직후 워커 반복 1회(약 1ms, 드물게 제어 스레드가 선점된 동안 더) 동안 다른 필드보다 한 발 앞설 수 있다(엔진 ②b-6b — 워커가 계획·상태 락을 기다리지 않게 한 결과다).
 
 `EngineStats.recording`(P2-4): 녹음 중이 아니면(또는 정지·마무리 중이면) null. `durationSec` = 녹음 타임라인 길이(쓴 블록 기준), `bytes` = 지금까지 쓴 오디오 바이트(모든 트랙, 헤더 제외), `tracks` = 만든 트랙 수, `droppedFrames` = 녹음 링이 모자라 버린 프레임(녹음 품질 지표, 0이 정상), `error` = 실패 메시지(트랙 생성 실패면 그 트랙만 빠지고 계속, 쓰기 실패면 그 뒤로 저장 안 됨, 1.5절).
 

@@ -452,8 +452,10 @@ export interface MetronomeStats extends MetronomePlan {
   beat: number | null
   clicks: number
   lateClicks: number
-  /** 콜백 공백 뒤 제 시각이 지나 건너뛴 클릭 수 */
+  /** 뺀 박 수: 새 자리가 20ms 넘게 지났거나(콜백 공백·시계 점프·계획 변경) 마지막 클릭과 100ms 안(이중 클릭 방지) */
   skippedClicks: number
+  /** 새 자리에서 1ms 넘게 어긋나게(최대 약 20ms) 울리기로 한 클릭 수(시계 점프·계획 변경·콜백 공백) */
+  shiftedClicks: number
   /** 클릭 시각에 반영한 숨은 출력 지연(ms). null = 드라이버 보고도 루프백 보정값도 없어 보정 안 됨(루프백 측정 안내) */
   outputLatencyMs: number | null
   /** `outputLatencyMs`의 출처: 드라이버 보고 / 루프백 측정 보정값. null = 보정 안 됨 */

@@ -96,8 +96,10 @@ pub struct MetronomeStats {
     pub(crate) beat: Option<u64>,
     pub clicks: u64,
     pub late_clicks: u64,
-    /// 콜백 공백 뒤 제 시각이 지나 건너뛴 클릭 수.
+    /// 뺀 박 수: 새 자리가 20ms 넘게 지났거나(콜백 공백·시계 점프·계획 변경) 마지막 클릭과 100ms 안(이중 클릭 방지).
     pub(crate) skipped_clicks: u64,
+    /// 새 자리에서 1ms 넘게 어긋나게(최대 약 20ms) 울리기로 한 클릭 수(시계 점프·계획 변경·콜백 공백, #176 리뷰 M-3).
+    pub(crate) shifted_clicks: u64,
     /// 클릭 시각에 반영한 숨은 출력 지연(ms). 출처는 `output_latency_source`.
     /// null = 드라이버 보고도 루프백 측정도 없어 보정 안 됨(cpal WASAPI 등). UI가 "루프백 측정으로 보정"을 안내할 수 있다.
     pub output_latency_ms: Option<f64>,

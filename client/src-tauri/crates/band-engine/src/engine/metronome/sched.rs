@@ -10,11 +10,19 @@ use super::click::{decode, encode, ClickShared, NO_CLICK};
 use super::plan::{MetronomePlan, MetronomeStats, OutputLatencySource, MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OFFSET_MS};
 use band_dsp::stats::{SeqCell, SeqWriter};
 
-/// 올려 둔 클릭의 제 시각이 이만큼(초) 넘게 지났다고 다시 계산되면(콜백 공백 뒤) 울리지 않고 건너뛴다.
-const STALE_SKIP_S: f64 = 0.005;
-/// 계획 세대가 바뀔 때 올려 둔 클릭을 새 계획의 박으로 보고 그대로 두는 허용 오차(초). 같은 계획을 다시 넣으면
-/// 반올림 1프레임 안이고, 시계 추정이 그 사이 움직여도 정렬 목표(2ms)의 절반 안이면 같은 박이다.
-const GEN_KEEP_TOL_S: f64 = 0.001;
+/// 올려 둔 박의 자리가 옮겨질 때(기준 시계 추정이 뜀 — 동기 갱신·기준 피어 변경, 콜백 공백 뒤 장치 시계 재수렴, 계획 변경)
+/// 그 박을 새 자리에서 이만큼(초)까지 어긋나게 울린다. 새 자리가 이미 지나 이보다 늦게밖에 울릴 수 없으면 그 박은 빼고
+/// (`skippedClicks`) 다음 박부터 새 시계로 맞춘다(재정렬 1회). 근거는 설계 1.4절 "시계 추정이 뛸 때".
+const MAX_SHIFT_S: f64 = 0.020;
+/// 세대가 바뀐 반복에서 올려 둔 클릭을 새 계획의 가장 가까운 박으로 보는 범위(박 간격 비율). 그 박의 새 자리로 옮기고
+/// (`MAX_SHIFT_S` 규칙), 넘으면 새 계획에 없는 박이라 거둔다.
+const ADOPT_FRAC: f64 = 0.25;
+/// 두 클릭 사이 최소 간격(초). 이보다 가까운 두 클릭은 이중 클릭(플램)이라, 마지막 클릭에서 이 안에 올 박은 내지 않고 빼서 센다
+/// (`skippedClicks`). 박 간격은 300BPM에서도 200ms라 정상 박에는 걸리지 않는다. 박 간격 비율(전: 1/2)로 두면 템포를 내린
+/// 새 계획의 박 0까지 셈 없이 지웠다(#176 리뷰 H-1).
+const MIN_GAP_S: f64 = 0.100;
+/// 새 자리에서 이만큼(초) 넘게 어긋나게 울리기로 한 박을 `shiftedClicks`로 센다(정렬 목표 2ms의 절반).
+const SHIFT_COUNT_S: f64 = 0.001;
 
 /// 워커가 0.1초마다(또는 계획이 바뀐 반복에) 내는 상태 한 벌. 전부 수·불리언이라 seqlock 칸(`SeqCell`)에 싣는다.
 /// `MetronomeStats`에서 `ref_peer_id`(문자열 — 제어 쪽 계획에서 읽는다)와 클릭 카운터(`ClickShared` 원자값)를 뺀 것.
@@ -239,6 +247,7 @@ impl MetronomeCtl {
             clicks: self.click.clicks.load(Ordering::Relaxed),
             late_clicks: self.click.late.load(Ordering::Relaxed),
             skipped_clicks: self.click.skipped.load(Ordering::Relaxed),
+            shifted_clicks: self.click.shifted.load(Ordering::Relaxed),
             output_latency_ms: r.output_latency_ms,
             output_latency_source: r.output_latency_source,
             ref_clock_unsupported: r.ref_clock_unsupported,
@@ -348,7 +357,11 @@ pub struct BeatScheduler {
     gen: u64,
     /// 올려 둔 클릭: (박 번호, 올린 원자값).
     pending: Option<(u64, u64)>,
+    /// 올려 둔 클릭을 새 자리에서 어긋나게 울리기로 하고 이미 `shifted`에 셌다(박마다 한 번).
+    pending_shifted: bool,
     last_beat: Option<u64>,
+    /// 마지막으로 콜백이 가져간 클릭: (귀 시각(내 시계 µs), 강박). 세대가 바뀌어도 남는다(박 번호와 달리 시각은 계획과 무관).
+    last_click: Option<(f64, bool)>,
 }
 
 impl BeatScheduler {
@@ -362,44 +375,122 @@ impl BeatScheduler {
         }
     }
 
-    /// 계획 세대가 바뀐 반복: 올려 둔 클릭이 새 계획에서도 박 자리(±`GEN_KEEP_TOL_S`)면 그 박으로 이름만 바꿔 둔다 —
-    /// 강박 여부가 달라졌으면 강박 비트만 CAS로 고친다. 단 클릭이 콜백 2개 안(곧 시작하거나 진행 중인 콜백이 가져갈 구간)이면
-    /// 고치지 않고 옛 강박으로 울린다: 콜백의 `load`와 CAS 사이에 워커 CAS가 끼면 콜백 CAS가 실패해 다음 콜백에서 늦은
-    /// 클릭이 되기 때문이다(#168 리뷰 L-1). 콜백 2개 ~ 가드 구간에서도 시각 추정이 어긋나 겹치면 같은 결과(늦은 클릭 1)가
-    /// 날 수 있지만, 그 구간은 다음 콜백이 가져가지 않는다.
-    /// 아니면 거둔다(새 계획에 없는 박은 울리지 않는다).
-    ///
-    /// 전에는 세대가 바뀌면 무조건 거뒀다: 클릭이 이미 가드(콜백 2개 + 2ms) 안이면 새 `k_min`이 그 박을 건너뛰어,
-    /// 같은 계획을 다시 넣어도 박 하나가 빠졌다(#143 리뷰 L-5). 가드 밖 클릭은 거둔 뒤 같은 자리에 다시 올려 결과가 같았다.
-    fn adopt_pending(&mut self, plan: &MetronomePlan, offset: f64, clock: &OutClock, sh: &ClickShared) {
-        let Some((_, raw)) = self.pending else {
-            return;
-        };
-        let (frame, accent) = decode(raw);
-        let period = plan.period_us();
-        // 이 클릭이 귀에 닿는 기준 시계 시각 → 새 계획의 가장 가까운 박
-        let k = ((clock.ear_time_us(frame as f64) + offset - plan.start_us) / period).round();
-        let on_beat = k >= 0.0
-            && (clock.frame_for(plan.start_us + k * period - offset).round() - frame as f64).abs() <= clock.rate * GEN_KEEP_TOL_S;
-        if !on_beat {
-            self.withdraw(sh);
-            return;
-        }
-        let k = k as u64;
-        let want = k.is_multiple_of(plan.beats_per_bar as u64);
-        let soon = (frame as f64) < clock.played as f64 + 2.0 * clock.burst as f64;
-        if want == accent || soon {
-            self.pending = Some((k, raw));
-            return;
-        }
-        let v = encode(frame, want);
-        if sh.next.compare_exchange(raw, v, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-            self.pending = Some((k, v));
-        } else {
-            // 그 사이 콜백이 가져갔다(옛 강박 비트로 울림)
-            self.pending = None;
+    /// 올려 둔 클릭을 콜백이 가져갔다(울림). `numbered` = 박 번호가 지금 계획 것이다(세대가 바뀐 반복이면 아니다 — 시각만 남긴다).
+    fn taken(&mut self, k: u64, raw: u64, clock: &OutClock, numbered: bool) {
+        self.pending = None;
+        if numbered {
             self.last_beat = Some(k);
         }
+        let (frame, accent) = decode(raw);
+        self.last_click = Some((clock.ear_time_us(frame as f64), accent));
+    }
+
+    /// 다음 클릭이 이 귀 시각(내 시계 µs)보다 앞이면 이중 클릭이다(마지막 클릭 + `MIN_GAP_S`).
+    fn not_before_us(&self) -> f64 {
+        self.last_click.map_or(f64::NEG_INFINITY, |(t, _)| t + MIN_GAP_S * 1e6)
+    }
+
+    /// 박 `k`를 빼고 센다(`skippedClicks`): 새 자리가 `MAX_SHIFT_S` 넘게 지났거나 마지막 클릭과 `MIN_GAP_S` 안이다.
+    fn skip(&mut self, k: u64, sh: &ClickShared) {
+        self.pending = None;
+        self.last_beat = Some(k);
+        sh.skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 계획 세대가 바뀐 반복: 올려 둔 클릭이 새 계획의 어느 박 근처(박 간격의 `ADOPT_FRAC` 안)면 그 박으로 이름을 바꾼다 —
+    /// 자리·강박은 이어서 `follow`가 새 계획대로 맞춘다. 아니면 거둔다(새 계획에 없는 박은 울리지 않는다). 거두는 CAS가 실패하면
+    /// 그 사이 콜백이 가져간 것이라(울림) 마지막 클릭으로 적는다(#176 리뷰 L-2).
+    ///
+    /// 처음(#143)에는 세대가 바뀌면 무조건 거둬, 클릭이 이미 가드(콜백 2개 + 2ms) 안이면 같은 계획을 다시 넣어도 박이 빠졌다
+    /// (#143 리뷰 L-5). #168은 박 자리 ±1ms 안만 남겨, 그 사이 시계 추정이 1ms 넘게 움직이면(기준 피어 변경 등) 여전히 빠졌다
+    /// (#168 리뷰 L-3). 이제 박의 동일성은 "가장 가까운 새 박"으로 정하고, 자리가 얼마나 옮겨졌는지는 `follow`의 규칙 하나가 다룬다.
+    fn adopt_pending(&mut self, plan: &MetronomePlan, offset: f64, clock: &OutClock, sh: &ClickShared) {
+        let Some((old_k, raw)) = self.pending else {
+            return;
+        };
+        let frame = decode(raw).0 as f64;
+        let period = plan.period_us();
+        // 이 클릭이 귀에 닿는 기준 시계 시각 → 새 계획의 가장 가까운 박
+        let k = ((clock.ear_time_us(frame) + offset - plan.start_us) / period).round();
+        let near = k >= 0.0 && (clock.frame_for(plan.start_us + k * period - offset) - frame).abs() <= clock.rate * period * 1e-6 * ADOPT_FRAC;
+        if near {
+            self.pending = Some((k as u64, raw));
+        } else if sh.next.compare_exchange(raw, NO_CLICK, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            self.pending = None;
+        } else {
+            self.taken(old_k, raw, clock, false);
+        }
+    }
+
+    /// 세대가 바뀐 반복: 마지막 클릭이 새 계획의 박 k와 **같은 박**(새 자리에서 `MAX_SHIFT_S` 안, 새 박이 강박이면 클릭도 강박)이면 그 박은
+    /// 이미 울렸다(`last_beat = k`, 다시 울리지 않고 세지도 않음). 아니면 지난 박 번호는 없다. 시각만 가까운 새 계획의 다른 박
+    /// (템포 변경·재시작의 새 박 0)은 같은 박이 아니다 — 마지막 클릭과 `MIN_GAP_S` 안이면 빼고 센다(#176 리뷰 H-1).
+    fn match_last_click(&mut self, plan: &MetronomePlan, offset: f64) {
+        self.last_beat = None;
+        let Some((t, accent)) = self.last_click else {
+            return;
+        };
+        let period = plan.period_us();
+        let k = ((t + offset - plan.start_us) / period).round();
+        if k >= 0.0
+            && (plan.start_us + k * period - offset - t).abs() <= MAX_SHIFT_S * 1e6
+            && (accent || !(k as u64).is_multiple_of(plan.beats_per_bar as u64))
+        {
+            self.last_beat = Some(k as u64);
+        }
+    }
+
+    /// 올려 둔 박 `k`(아직 콜백이 가져가지 않음)를 지금 시계·계획의 자리 `new`(장치 프레임)와 강박 `want`로 맞춘다.
+    /// 반환: 아직 올려 둔 박이 있다(없으면 호출자가 다음 박을 고른다).
+    ///
+    /// 가드(`OutClock::guard`) 너머로는 언제든 옮길 수 있다: 다음 콜백 2개가 가져가지 않는 구간이라, 콜백의 `load`와 CAS 사이에
+    /// 워커 CAS가 끼어도 콜백은 이번에 건너뛰고 새 자리에서 제때 울린다. 가드 안에서 자리를 다시 쓰면 그 경합이 늦은 클릭이 되므로
+    /// 가드 안 클릭의 자리는 건드리지 않는다(강박만, 다음 콜백 2개 밖에서 — #168 리뷰 L-1).
+    /// - 새 자리가 가드 너머: 거기로. 시계가 뒤로 뛰어 박이 밀리면 곧 울릴 클릭도 옮긴다(전에는 옛 자리에 일찍 울렸다).
+    /// - 새 자리가 가드 안이고 클릭은 가드 너머: 가드에 붙여 늦게 울린다(늦음 ≲ `MAX_SHIFT_S`, 올림 1프레임). 더 늦으면 뺀다.
+    /// - 둘 다 가드 안: 옛 자리에 울린다(새 자리에서 `MAX_SHIFT_S` 안일 때). 그보다 늦은 자리면 거둔다(뺀 박).
+    /// - 어느 경우든 울릴 자리가 마지막 클릭과 `MIN_GAP_S` 안이면 거둔다(뺀 박, #176 리뷰 M-1 — 템포를 크게 내린 재전송의 플램).
+    ///
+    /// 새 자리에서 `SHIFT_COUNT_S` 넘게 어긋나게 울리기로 한 박은 박마다 한 번 `shifted`로 센다(#176 리뷰 M-3).
+    fn follow(&mut self, k: u64, raw: u64, new: f64, want: bool, clock: &OutClock, sh: &ClickShared) -> bool {
+        let (frame, accent) = decode(raw);
+        let old = frame as f64;
+        let guard = clock.guard();
+        let max_shift = clock.rate * MAX_SHIFT_S;
+        let mut v = if new >= guard {
+            encode(new as u64, want)
+        } else if old >= guard {
+            if guard - new <= max_shift {
+                encode(guard.ceil() as u64, want)
+            } else {
+                NO_CLICK
+            }
+        } else if old - new > max_shift {
+            NO_CLICK
+        } else if want != accent && old >= clock.played as f64 + 2.0 * clock.burst as f64 {
+            encode(frame, want)
+        } else {
+            raw
+        };
+        if v != NO_CLICK && clock.ear_time_us(decode(v).0 as f64) < self.not_before_us() {
+            v = NO_CLICK;
+        }
+        if v != raw && sh.next.compare_exchange(raw, v, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+            // 그 사이 콜백이 가져갔다(옛 값으로 울림)
+            self.taken(k, raw, clock, true);
+            return false;
+        }
+        if v == NO_CLICK {
+            // 늦은 클릭·이중 클릭을 내지 않고 빼고 다음 박부터 맞춘다.
+            self.skip(k, sh);
+            return false;
+        }
+        self.pending = Some((k, v));
+        if !self.pending_shifted && (decode(v).0 as f64 - new).abs() > clock.rate * SHIFT_COUNT_S {
+            self.pending_shifted = true;
+            sh.shifted.fetch_add(1, Ordering::Relaxed);
+        }
+        true
     }
 
     /// 반복마다 호출. `offset_us` = 기준 시계 − 내 시계(방장 0, 모르면 None). 반환: 올려 둔 박 번호.
@@ -419,52 +510,54 @@ impl BeatScheduler {
             }
             return self.pending.map(|p| p.0);
         }
-        let period = plan.period_us();
-        let beat_frame = |k: u64| clock.frame_for(plan.start_us + k as f64 * period - offset).round();
-        let guard = clock.guard();
-        if regen {
-            self.adopt_pending(plan, offset, clock, sh);
-        }
         if let Some((k, raw)) = self.pending {
             if sh.next.load(Ordering::Acquire) != raw {
-                // 콜백이 가져갔다(울림)
-                self.last_beat = Some(k);
-                self.pending = None;
-            } else {
-                // 시계 추정이 바뀌었으면 아직 멀리 있는 클릭만 다시 맞춘다(울리기 직전 값은 건드리지 않음).
-                let old = decode(raw).0 as f64;
-                let new = beat_frame(k);
-                if !(old >= guard && new < guard && old - new > clock.rate * STALE_SKIP_S) {
-                    if new != old && old >= guard && new >= guard {
-                        let v = encode(new as u64, decode(raw).1);
-                        if sh.next.compare_exchange(raw, v, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-                            self.pending = Some((k, v));
-                        }
-                    }
-                    return Some(k);
-                }
-                // 콜백 공백 뒤 시계가 다시 잡혀 보니 이 박의 제 시각이 이미 지났다(PR #34 M3):
-                // 공백만큼 늦은 클릭을 내지 않고 건너뛴 뒤 다음 박을 올린다.
-                self.pending = None;
-                self.last_beat = Some(k);
-                if sh.next.compare_exchange(raw, NO_CLICK, Ordering::AcqRel, Ordering::Relaxed).is_err() {
-                    return Some(k); // 그 사이 콜백이 가져갔다(울림)
-                }
-                sh.skipped.fetch_add(1, Ordering::Relaxed);
+                // 콜백이 가져갔다(울림). 세대가 바뀐 반복이면 박 번호는 옛 계획 것이라 시각만 남긴다.
+                self.taken(k, raw, clock, !regen);
             }
         }
-        // 다음 박: 지난 박 다음, 그리고 지금 올려도 늦지 않은 첫 박(0 이상).
+        let period = plan.period_us();
+        let bpb = plan.beats_per_bar as u64;
+        let beat_frame = |k: u64| clock.frame_for(plan.start_us + k as f64 * period - offset).round();
+        let guard = clock.guard();
         let t_guard_ref = clock.ear_time_us(guard) + offset;
         let k_min = ((t_guard_ref - plan.start_us) / period).ceil().max(0.0) as u64;
+        if regen {
+            self.adopt_pending(plan, offset, clock, sh);
+            self.match_last_click(plan, offset);
+            // 올려 둔 클릭이 새 계획의 박 k가 됐어도, 그보다 앞에 아직 울릴 수 있는 새 박이 있으면(템포 변경·재시작의 새 박 0이
+            // 옛 박 사이에 옴) 거두고 그 박부터 고른다 — 아니면 새 박 0이 셈 없이 사라진다(#176 리뷰 H-1).
+            if let Some((k, raw)) = self.pending {
+                let first = self.last_beat.map_or(k_min, |l| (l + 1).max(k_min));
+                if first < k {
+                    if sh.next.compare_exchange(raw, NO_CLICK, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                        self.pending = None;
+                    } else {
+                        self.taken(k, raw, clock, true);
+                    }
+                }
+            }
+        }
+        if let Some((k, raw)) = self.pending {
+            if self.follow(k, raw, beat_frame(k), k.is_multiple_of(bpb), clock, sh) {
+                return Some(k);
+            }
+        }
+        // 다음 박: 지난 박 다음, 지금 올려도 늦지 않은 첫 박(0 이상). 마지막 클릭과 `MIN_GAP_S` 안인 박은 빼고 센다.
         let mut k = self.last_beat.map_or(k_min, |l| (l + 1).max(k_min));
+        let not_before = self.not_before_us();
         let mut f = beat_frame(k);
-        while f < guard {
+        while f < guard || clock.ear_time_us(f) < not_before {
+            if f >= guard {
+                self.skip(k, sh);
+            }
             k += 1;
             f = beat_frame(k);
         }
-        let v = encode(f as u64, k.is_multiple_of(plan.beats_per_bar as u64));
+        let v = encode(f as u64, k.is_multiple_of(bpb));
         if sh.next.compare_exchange(NO_CLICK, v, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
             self.pending = Some((k, v));
+            self.pending_shifted = false;
             Some(k)
         } else {
             None
@@ -655,10 +748,17 @@ mod tests {
         let now = sh.next.load(Ordering::Relaxed);
         assert_eq!(s.tick(3, &p3, Some(0.0), &c, &sh), Some(4));
         assert_eq!(sh.next.load(Ordering::Relaxed), now);
-        // 시작 시각이 2ms 당겨진 계획: 이 자리는 새 계획의 박이 아니고 새 박 4는 가드 안 → 거두고 다음 박(가드 밖)을 올린다
+        // 시작 시각이 2ms 당겨진 계획(#168 리뷰 L-3): 가장 가까운 새 박은 여전히 박 4이고 새 자리도 가드 안이다 — 자리를 다시 쓰지
+        // 않고 옛 자리에 울린다(새 자리보다 2ms 늦음 ≤ `MAX_SHIFT_S`). 전에는 ±1ms 밖이라 거둬 박 4가 빠졌다.
         let moved = MetronomePlan { start_us: p3.start_us - 2000.0, ..p3.clone() };
-        assert_eq!(s.tick(4, &moved, Some(0.0), &c, &sh), Some(5));
+        assert_eq!(s.tick(4, &moved, Some(0.0), &c, &sh), Some(4));
+        assert_eq!(sh.next.load(Ordering::Relaxed), now);
+        assert_eq!(sh.skipped.load(Ordering::Relaxed), 0);
+        // 30ms 당겨진 계획: 옛 자리에 울리면 새 자리보다 30ms 늦다(> 20ms) → 빼고(건너뜀 1) 다음 박(가드 밖)을 올린다
+        let far = MetronomePlan { start_us: p3.start_us - 30_000.0, ..p3.clone() };
+        assert_eq!(s.tick(5, &far, Some(0.0), &c, &sh), Some(5));
         assert!(decode(sh.next.load(Ordering::Relaxed)).0 as f64 >= c.guard());
+        assert_eq!(sh.skipped.load(Ordering::Relaxed), 1);
         // 콜백 2개 안(곧 가져갈 구간)의 클릭은 박자가 바뀌어도 강박 비트를 고치지 않는다(#168 리뷰 L-1 — 콜백 CAS와 겹침 방지)
         let mut s = BeatScheduler::new();
         let soon = encode(c.played + c.burst, true);
@@ -704,6 +804,128 @@ mod tests {
             ctl.set_plan(with(&format!("p{i}")));
         }
         assert_eq!(ctl.retired.lock().len(), RETIRED_CAP);
+    }
+
+    /// #168 리뷰 L-3: 콜백이 박 4를 가져간 직후(워커가 아직 못 본 사이) 세대가 바뀌고 시계가 10ms 뒤로 뛰면, 새 시계로 박 4의
+    /// 자리는 가드 너머라 다시 고를 수 있다. 박 번호를 잊은 세대 변경 뒤에도 마지막 클릭 시각이 남아 박 4를 다시 울리지 않는다.
+    #[test]
+    fn regen_right_after_taken_click_does_not_replay_it() {
+        let sh = ClickShared::default();
+        let mut s = BeatScheduler::new();
+        let c = clock(48_000);
+        let p = plan(120.0, c.ear_time_us(c.guard()) + 3000.0 - 2_000_000.0);
+        assert_eq!(s.tick(1, &p, Some(0.0), &c, &sh), Some(4));
+        sh.next.store(NO_CLICK, Ordering::Release); // 콜백이 가져감
+        assert_eq!(s.tick(2, &p, Some(-10_000.0), &c, &sh), Some(5), "박 4를 두 번 울리지 않는다");
+        let (f5, _) = decode(sh.next.load(Ordering::Relaxed));
+        assert!((c.ear_time_us(f5 as f64) - (p.start_us + 2_500_000.0 + 10_000.0)).abs() < 1e6 / 48_000.0);
+        // 박 번호는 새 계획 것으로: 같은 격자를 박 0이 두 박 늦은 계획으로 다시 넣고, 그 직전에 콜백이 가져갔으면 다음 박은
+        // 새 번호 3(= 옛 박 5)이다. 옛 번호(4)를 지난 박으로 남기면 새 박 3·4가 빠진다.
+        let mut s = BeatScheduler::new();
+        sh.next.store(NO_CLICK, Ordering::Release);
+        assert_eq!(s.tick(1, &p, Some(0.0), &c, &sh), Some(4));
+        sh.next.store(NO_CLICK, Ordering::Release);
+        let shifted = MetronomePlan { start_us: p.start_us + 1_000_000.0, ..p.clone() };
+        assert_eq!(s.tick(2, &shifted, Some(0.0), &c, &sh), Some(3));
+    }
+
+    /// 시계가 뒤로 뛰어(박이 밀림) 가드 안 클릭의 새 자리가 가드 너머가 되면 옮긴다 — 전에는 옛 자리에 일찍 울렸다.
+    /// 새 자리도 가드 안이면 그대로 둔다(옛 자리에 울림, 어긋남은 가드 폭 안).
+    #[test]
+    fn backward_step_moves_in_guard_click_later() {
+        let sh = ClickShared::default();
+        let mut s = BeatScheduler::new();
+        let c = clock(48_000);
+        let p = plan(120.0, c.ear_time_us(c.guard()) + 3000.0 - 2_000_000.0);
+        assert_eq!(s.tick(1, &p, Some(0.0), &c, &sh), Some(4));
+        let f4 = decode(sh.next.load(Ordering::Relaxed)).0;
+        // 4ms 지나 클릭이 가드 안(콜백 2개 밖)
+        let later = OutClock { played: c.played + 192, dev_now_us: c.dev_now_us + 4000.0, ..c };
+        assert!((f4 as f64) < later.guard() && f4 >= later.played + 2 * later.burst);
+        let raw = sh.next.load(Ordering::Relaxed);
+        assert_eq!(s.tick(1, &p, Some(-500.0), &later, &sh), Some(4));
+        assert_eq!(sh.next.load(Ordering::Relaxed), raw, "0.5ms 밀림: 새 자리도 가드 안 → 그대로");
+        assert_eq!(s.tick(1, &p, Some(-10_000.0), &later, &sh), Some(4));
+        assert_eq!(decode(sh.next.load(Ordering::Relaxed)), (f4 + 480, true), "10ms 밀림: 새 자리(가드 너머)로");
+        assert_eq!(sh.skipped.load(Ordering::Relaxed), 0);
+    }
+
+    /// #176 리뷰 H-1: 템포를 내린 새 계획의 박 0이 마지막 클릭에서 새 박 간격의 절반(333ms) 안이어도 100ms 넘게 떨어졌으면 울린다.
+    /// 100ms 안이면 빼고 센다(셈 없이 지우지 않는다).
+    #[test]
+    fn tempo_change_rings_new_downbeat_unless_within_min_gap() {
+        for (lead_ms, want, skipped) in [(300.0, Some(0), 0), (60.0, Some(1), 1)] {
+            let sh = ClickShared::default();
+            let mut s = BeatScheduler::new();
+            let c = clock(48_000);
+            let p = plan(120.0, c.ear_time_us(c.guard()) + 3000.0 - 2_000_000.0);
+            assert_eq!(s.tick(1, &p, Some(0.0), &c, &sh), Some(4));
+            let t4 = c.ear_time_us(decode(sh.next.load(Ordering::Relaxed)).0 as f64);
+            sh.next.store(NO_CLICK, Ordering::Release); // 콜백이 박 4를 가져감
+            let p90 = MetronomePlan { bpm: 90.0, start_us: t4 + lead_ms * 1000.0, ..p.clone() };
+            assert_eq!(s.tick(2, &p90, Some(0.0), &c, &sh), want, "새 박 0이 박 4 {lead_ms}ms 뒤");
+            assert_eq!(sh.skipped.load(Ordering::Relaxed), skipped);
+            let (f, accent) = decode(sh.next.load(Ordering::Relaxed));
+            assert_eq!(accent, want == Some(0));
+            assert!(c.ear_time_us(f as f64) - t4 >= 100_000.0);
+        }
+    }
+
+    /// 약박(박 5)이 울린 10ms 뒤에 새 계획의 박 0(강박)이 오면 같은 박으로 치지 않는다(강박을 약박으로 울린 셈이 된다) —
+    /// 이중 클릭이 될 만큼 가까우므로 빼고 센다. 새 박이 약박이면 같은 박으로 쳐 다시 울리지도 세지도 않는다.
+    #[test]
+    fn same_beat_match_needs_accent_for_new_downbeat() {
+        for (bpb, want_skipped) in [(4, 1), (3, 0)] {
+            let sh = ClickShared::default();
+            let mut s = BeatScheduler::new();
+            let c = clock(48_000);
+            let p = plan(120.0, c.ear_time_us(c.guard()) + 3000.0 - 2_500_000.0);
+            assert_eq!(s.tick(1, &p, Some(0.0), &c, &sh), Some(5));
+            let t5 = c.ear_time_us(decode(sh.next.load(Ordering::Relaxed)).0 as f64);
+            sh.next.store(NO_CLICK, Ordering::Release); // 약박 5가 울림
+            // 새 계획: 박 0(bpb 4) 또는 박 2(bpb 3, 약박)가 박 5의 10ms 뒤
+            let shift = if bpb == 4 { 0.0 } else { 2.0 * 500_000.0 };
+            let p2 = MetronomePlan { beats_per_bar: bpb, start_us: t5 + 10_000.0 - shift, ..p.clone() };
+            let next = s.tick(2, &p2, Some(0.0), &c, &sh);
+            assert_eq!(sh.skipped.load(Ordering::Relaxed), want_skipped, "박자 {bpb}");
+            assert_eq!(next, Some(if bpb == 4 { 1 } else { 3 }));
+        }
+    }
+
+    /// #176 리뷰 M-1: 올려 둔 클릭을 옮긴(또는 둔) 자리가 마지막 클릭과 100ms 안이면 거두고 센다(플램 방지) — 고르기뿐 아니라
+    /// `follow`에도 같은 하한.
+    #[test]
+    fn follow_withdraws_click_within_min_gap_of_last_click() {
+        let sh = ClickShared::default();
+        let mut s = BeatScheduler::new();
+        let c = clock(48_000);
+        let p = plan(120.0, c.ear_time_us(c.played as f64) + 200_000.0);
+        assert_eq!(s.tick(1, &p, Some(0.0), &c, &sh), Some(0));
+        let f0 = decode(sh.next.load(Ordering::Relaxed)).0;
+        // 마지막 클릭이 박 0 자리 40ms 앞에 울렸다고 둔다(크게 내린 템포의 재전송이 옛 박을 새 박 0으로 바꾼 경우와 같은 모양)
+        s.last_click = Some((c.ear_time_us(f0 as f64) - 40_000.0, false));
+        assert_eq!(s.tick(1, &p, Some(0.0), &c, &sh), Some(1), "박 0은 빼고 박 1");
+        assert_eq!(sh.skipped.load(Ordering::Relaxed), 1);
+        assert_eq!(decode(sh.next.load(Ordering::Relaxed)).0, f0 + 24_000);
+    }
+
+    /// #176 리뷰 M-3: 새 자리에서 어긋나게(가드에 붙여 늦게) 울리기로 한 박은 박마다 한 번 `shifted`로 센다.
+    #[test]
+    fn shifted_click_is_counted_once() {
+        let sh = ClickShared::default();
+        let mut s = BeatScheduler::new();
+        let c = clock(48_000);
+        let p = plan(120.0, c.ear_time_us(c.guard()) + 3000.0 - 2_000_000.0);
+        assert_eq!(s.tick(1, &p, Some(0.0), &c, &sh), Some(4));
+        // 10ms 당겨짐: 새 자리는 가드 안(7ms 앞) → 가드에 붙여 약 7ms 늦게
+        assert_eq!(s.tick(1, &p, Some(10_000.0), &c, &sh), Some(4));
+        assert_eq!(decode(sh.next.load(Ordering::Relaxed)).0, c.guard().ceil() as u64);
+        assert_eq!(s.tick(1, &p, Some(10_000.0), &c, &sh), Some(4));
+        assert_eq!((sh.shifted.load(Ordering::Relaxed), sh.skipped.load(Ordering::Relaxed)), (1, 0));
+        // 다음 박은 제자리 → 더 세지 않는다
+        sh.next.store(NO_CLICK, Ordering::Release);
+        assert_eq!(s.tick(1, &p, Some(10_000.0), &c, &sh), Some(5));
+        assert_eq!(sh.shifted.load(Ordering::Relaxed), 1);
     }
 
     #[test]

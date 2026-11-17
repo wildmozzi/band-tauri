@@ -45,13 +45,15 @@ pub struct ClickShared {
     pub clicks: AtomicU64,
     /// 늦게 시작한 클릭 수(파형 중간부터 울렸거나 통째로 놓침).
     pub late: AtomicU64,
-    /// 콜백 공백 뒤 제 시각이 이미 지나 건너뛴 클릭 수(PR #34 M3).
+    /// 뺀 박 수: 새 자리가 20ms 넘게 지났거나(콜백 공백·시계 점프·계획 변경) 마지막 클릭과 100ms 안(이중 클릭 방지)(PR #34 M3, #176).
     pub skipped: AtomicU64,
+    /// 새 자리에서 1ms 넘게 어긋나게(최대 약 20ms) 울리기로 한 클릭 수(시계 점프·계획 변경·콜백 공백, #176 리뷰 M-3).
+    pub shifted: AtomicU64,
 }
 
 impl Default for ClickShared {
     fn default() -> Self {
-        Self { next: AtomicU64::new(NO_CLICK), step: AtomicF32::new(1.0), clicks: AtomicU64::new(0), late: AtomicU64::new(0), skipped: AtomicU64::new(0) }
+        Self { next: AtomicU64::new(NO_CLICK), step: AtomicF32::new(1.0), clicks: AtomicU64::new(0), late: AtomicU64::new(0), skipped: AtomicU64::new(0), shifted: AtomicU64::new(0) }
     }
 }
 

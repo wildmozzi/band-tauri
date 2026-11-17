@@ -302,3 +302,45 @@ fn metronome_plan_refresh_does_not_allocate_or_free() {
         assert_eq!(mine.1.ref_peer_id.as_deref(), *plans.last().unwrap());
     }
 }
+
+/// #168 리뷰 L-3 후속: 실제 메트로놈 단계(`MetronomeStageProbe` — 계획 세대·피어 표 복사본·`Peer.clock_estimate`)가 기준 피어
+/// 변경(새 기준 시계 추정 10ms 어긋남)과 같은 세대 안의 시계 추정 변화(새 표본이 50ms 어긋남)를 따라 박을 옮기고·빼는 동안
+/// 워커 쪽 `service`가 할당·해제를 하지 않는다. 출력 콜백(`OutputRt` + `ClickRt`)이 실제로 클릭을 가져간다.
+#[test]
+fn metronome_stage_follows_clock_jump_and_ref_change_without_allocating() {
+    use band_engine::testing::engine::metronome::{ClickRt, MetronomePlan};
+    use band_engine::testing::engine::worker::{CallbackTracker, MetronomeStageProbe};
+
+    let mut probe = MetronomeStageProbe::new(&["host", "host2"], 48_000, 128).unwrap();
+    let counters = Arc::new(AudioCounters::default());
+    let (mut out, _feed) = rt::output_path(counters.clone(), Arc::new(MixControls::default()));
+    let click = probe.click();
+    out.attach_click(ClickRt::new(click.clone()));
+    let mut tracker = CallbackTracker::new(48_000);
+    let mut buf = vec![0.0f32; 256];
+    const D_US: f64 = 5_000_000.0;
+    let host = |t: f64| t + 40_000.0;
+    let p1 = MetronomePlan { running: true, bpm: 240.0, beats_per_bar: 4, start_us: host(1_000_000.0), ref_peer_id: Some("host".into()) };
+    let p2 = MetronomePlan { ref_peer_id: Some("host2".into()), start_us: p1.start_us + D_US, ..p1.clone() };
+    probe.ctl().set_plan(p1);
+    let mut allocs = 0;
+    let mut next_ping = 0.0;
+    for step in 0..2400u64 {
+        let wall = step as f64 * 1e6 * 128.0 / 48_000.0 + 1000.0;
+        // host2 시계 추정: 기준 피어로 바꿀 때(1.6초) 10ms 어긋남, 3초부터 새 표본이 50ms 어긋남(같은 세대 안 추정 변화)
+        let err = if wall < 3_000_000.0 { 10_000.0 } else { 50_000.0 };
+        if wall >= next_ping {
+            assert!(probe.clock_sample("host", wall, wall + 200.0, host(wall + 100.0)));
+            assert!(probe.clock_sample("host2", wall, wall + 200.0, host(wall + 100.0) + D_US + err));
+            next_ping = wall + 500_000.0;
+        }
+        if step == 600 {
+            probe.ctl().set_plan(p2.clone());
+        }
+        out.process(&mut buf, 2);
+        let t = tracker.observe(&counters, wall as u64 + 300, 128, 48_000);
+        allocs += rt_allocs(|| probe.service(&t));
+    }
+    assert_eq!(allocs, 0, "메트로놈 단계가 할당·해제를 했다");
+    assert!(click.clicks.load(Ordering::Relaxed) >= 15, "클릭 {}", click.clicks.load(Ordering::Relaxed));
+}

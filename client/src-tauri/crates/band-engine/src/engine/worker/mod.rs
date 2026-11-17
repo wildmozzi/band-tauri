@@ -76,6 +76,9 @@ use send::SendPath;
 // 크레이트 밖에서는 `testing::engine::worker`(`test-support`)로만 보인다(⑨b-2 — 그 전에는 피처로 가시성을 갈랐다).
 pub use clock::{FINE_POLL, POLL};
 pub use peer_sources::{PeerSources, PeerSourcesParts};
+// 메트로놈 단계 시험 입구(`tests/metronome.rs`가 실제 단계를 피어 표 복사본 경로로 돌린다). 제품 빌드에는 없다.
+#[cfg(any(test, feature = "test-support"))]
+pub use metronome_stage::MetronomeStageProbe;
 
 /// 출력 생산 단위(48kHz 프레임). 1.33ms.
 pub(crate) const OUT_CHUNK: usize = 64;
