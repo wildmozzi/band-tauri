@@ -86,12 +86,14 @@ vi.mock('./useSignaling', async (importOriginal) => {
 })
 
 import { FloatingMiniPlayer } from '../components/FloatingMiniPlayer'
+import { pickMetronomeSync, pickRecordStats } from './engineStatsPicks'
 import { ReconnectBanner } from '../components/ReconnectBanner'
 import { RoomProvider } from './RoomProvider'
 import {
   RoomRuntimeContext,
   useRoomChat,
   useRoomConnection,
+  useRoomEngineStats,
   useRoomMixer,
   useRoomPerform,
   useRoomRecordings,
@@ -102,7 +104,7 @@ import {
 import type { RoomSessionStore } from './roomSessionStore'
 import { DEMOTED_MESSAGE } from './signalReducer'
 
-const renders = { chat: 0, mini: 0, detail: 0, stats: 0, levels: 0, connection: 0, banner: 0 }
+const renders = { chat: 0, mini: 0, detail: 0, stats: 0, levels: 0, connection: 0, banner: 0, metro: 0, rec: 0, peerStats: 0 }
 let joinRoom: RoomActions['joinRoom'] = () => {}
 let leaveRoom: RoomActions['leaveRoom'] = () => {}
 let peers: string[] = []
@@ -134,6 +136,22 @@ function LevelsProbe() {
   useRoomTelemetry('audioLevels')
   return null
 }
+/** MetronomePanel·NativeRecordingControl과 같은 조각, 연주자 패널의 피어 통계 */
+function MetroProbe() {
+  renders.metro++
+  useRoomEngineStats(pickMetronomeSync)
+  return null
+}
+function RecProbe() {
+  renders.rec++
+  useRoomEngineStats(pickRecordStats)
+  return null
+}
+function PeerStatsProbe() {
+  renders.peerStats++
+  useRoomTelemetry('peerEngineStats')
+  return null
+}
 function ConnectionProbe() {
   renders.connection++
   const c = useRoomConnection()
@@ -151,7 +169,7 @@ function StoreGrab() {
 const message = (p: SignalPayload) => act(() => h.signaling.handlers!.onMessage(p))
 
 beforeEach(() => {
-  Object.assign(renders, { chat: 0, mini: 0, detail: 0, stats: 0, levels: 0, connection: 0, banner: 0 })
+  Object.assign(renders, { chat: 0, mini: 0, detail: 0, stats: 0, levels: 0, connection: 0, banner: 0, metro: 0, rec: 0, peerStats: 0 })
   h.providerRenders = 0
   h.signaling.send.mockClear()
   h.setInRoom.mockClear()
@@ -172,6 +190,9 @@ beforeEach(() => {
         </Profiler>
         <StatsProbe />
         <LevelsProbe />
+        <MetroProbe />
+        <RecProbe />
+        <PeerStatsProbe />
         <ConnectionProbe />
       </RoomProvider>
     </MemoryRouter>,
@@ -203,6 +224,20 @@ describe('RoomProvider', () => {
     stop.mockRestore()
   })
 
+  it('내려진 뒤(엔진 정지 안내)·관람 연결 실패 뒤 퇴장하면 다음 방에 옛 안내가 남지 않는다', () => {
+    const clear = vi.spyOn(h.session, 'clearError').mockImplementation(() => h.session.set({ error: null }))
+    act(() => joinRoom('r1'))
+    // 내려짐: 세션은 이미 idle이고 안내만 남아 있다(stop은 idle이면 error를 지우지 않는다)
+    act(() => h.session.set({ phase: 'idle', error: DEMOTED_MESSAGE }))
+    act(() => store.patch('viewer', { error: '방송 연결에 실패했습니다. 잠시 후 다시 연결됩니다.' }))
+    expect(store.getSnapshot().derived.rtcError).toBe(DEMOTED_MESSAGE)
+    act(() => leaveRoom())
+    act(() => joinRoom('r2'))
+    expect(store.getSnapshot().derived.rtcError).toBeNull()
+    expect(store.getSnapshot().derived.rtcStatus).toBe('idle')
+    clear.mockRestore()
+  })
+
   it('방장 명령 demotePerformer는 demote-performer {targetId}를 보낸다', () => {
     act(() => joinRoom('r1'))
     act(() => actions.demotePerformer('a'))
@@ -232,6 +267,63 @@ describe('RoomProvider', () => {
     expect(renders.connection).toBe(before.connection)
     expect(renders.banner).toBe(before.banner)
     expect(h.providerRenders).toBe(providerBefore)
+  })
+
+  it('통계 틱마다 박·클릭 수만 바뀌면 메트로놈·녹음 조각 구독자는 다시 그리지 않고, 동기·녹음 시간이 바뀌면 그린다', () => {
+    const metro = (beat: number, synced = true) => ({
+      synced, beat, clicks: beat, outputLatencyMs: 3.5, outputLatencySource: 'driver', running: true, bpm: 120, beatsPerBar: 4, startUs: 0,
+    })
+    const rec = (durationSec: number) => ({ folder: 'f', format: 'wav24', sampleRate: 48000, durationSec, bytes: 1, tracks: 1, droppedFrames: 0, error: null })
+    act(() => joinRoom('r1'))
+    act(() => h.session.set({ phase: 'running', instrument: 'guitar', stats: { peers: [], inputLevel: 0, outputLevel: 0, metronome: metro(0), recording: null } }))
+    const before = { ...renders }
+    for (let i = 1; i <= 5; i++) {
+      act(() => h.session.set({ stats: { peers: [], inputLevel: i / 10, outputLevel: 0, metronome: metro(i), recording: null } }))
+    }
+    expect(renders.stats - before.stats).toBe(5) // engineStats 전체 구독자는 매번
+    expect(renders.metro).toBe(before.metro)
+    expect(renders.rec).toBe(before.rec)
+    act(() => h.session.set({ stats: { peers: [], inputLevel: 0, outputLevel: 0, metronome: metro(6, false), recording: rec(1) } }))
+    expect(renders.metro - before.metro).toBe(1)
+    expect(renders.rec - before.rec).toBe(1)
+    // 같은 녹음 상태가 새 객체로 다시 와도 그대로
+    act(() => h.session.set({ stats: { peers: [], inputLevel: 0, outputLevel: 0, metronome: metro(7, false), recording: rec(1) } }))
+    expect(renders.rec - before.rec).toBe(1)
+    act(() => h.session.set({ stats: { peers: [], inputLevel: 0, outputLevel: 0, metronome: metro(8, false), recording: rec(2) } }))
+    expect(renders.rec - before.rec).toBe(2)
+  })
+
+  it('엔진 통계가 새 객체로 와도 피어 통계·레벨 값이 그대로면 그 구독자는 다시 그리지 않는다', () => {
+    const peer = (level: number) => ({ peerId: 'a', state: 'connected', path: 'lan', rttMs: 5, jitterMs: 1, bufferMs: 10, level }) as never
+    act(() => joinRoom('r1'))
+    act(() => h.session.set({ phase: 'running', instrument: 'guitar', stats: { peers: [peer(0)], inputLevel: 0, outputLevel: 0 } }))
+    const before = { ...renders }
+    const peerStatsBefore = store.getSnapshot().derived.peerEngineStats
+    for (let i = 0; i < 5; i++) {
+      act(() => h.session.set({ stats: { peers: [peer(0)], inputLevel: 0, outputLevel: 0 } }))
+    }
+    expect(renders.stats - before.stats).toBe(5)
+    expect(renders.peerStats).toBe(before.peerStats)
+    expect(renders.levels).toBe(before.levels)
+    expect(store.getSnapshot().derived.peerEngineStats).toBe(peerStatsBefore)
+    act(() => h.session.set({ stats: { peers: [peer(0.5)], inputLevel: 0, outputLevel: 0 } }))
+    expect(renders.peerStats - before.peerStats).toBe(1)
+    expect(renders.levels - before.levels).toBe(1)
+    expect(store.getSnapshot().derived.audioLevels).toEqual({ a: 50 })
+  })
+
+  it('password-busy 재입장 예약은 Provider가 내려가면 취소된다(언마운트 뒤 join을 보내지 않는다)', () => {
+    vi.useFakeTimers()
+    try {
+      act(() => joinRoom('r1'))
+      message({ type: 'error', code: 'password-busy', retryAfterMs: 1000 })
+      h.signaling.send.mockClear()
+      cleanup()
+      vi.advanceTimersByTime(10_000)
+      expect(h.signaling.send).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('웹 믹서 레벨(66ms)이 바뀌면 레벨을 구독한 컴포넌트만 다시 그린다 — 미니 플레이어·화면 본체·Provider는 0', () => {

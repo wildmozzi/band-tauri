@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { useRoomPerform, useRoomTelemetry } from '../state/roomHooks'
+import { useRoomPerform, useRoomEngineStats } from '../state/roomHooks'
+import { pickRecordStats } from '../state/engineStatsPicks'
 import {
   engineRecordFolder,
   engineRecordPickFolder,
@@ -44,12 +45,12 @@ export function NativeRecordingControl({
   roomTitle?: string | null
 }) {
   const { isPerforming } = useRoomPerform()
-  const { engineStats } = useRoomTelemetry('engineStats')
+  // 녹음 통계만 구독: 녹음하지 않을 때(null)는 통계 틱에 다시 그리지 않는다
+  const polled = useRoomEngineStats(pickRecordStats)
   // 시작 응답(다음 통계 폴링 전까지 녹음 중으로 보이게)과 내가 정지한 세션 폴더(정지 전에 출발한 폴링 응답이
   // 늦게 와도 다시 녹음 중으로 보이지 않게) — PR #49 M2
   const [started, setStarted] = useState<RecordStats | null>(null)
   const [stoppedFolder, setStoppedFolder] = useState<string | null>(null)
-  const polled = engineStats?.recording ?? null
   const live = polled && polled.folder !== stoppedFolder ? polled : null
   const rec = live ?? started
   const recording = rec != null
