@@ -2,7 +2,10 @@
 //!
 //! 모든 커맨드는 `async`다. Tauri 2에서 동기 커맨드는 메인(UI) 스레드에서 돌기 때문이다.
 //! 블로킹 작업(장치 열기/열거, STUN, 스레드 join)은 `spawn_blocking`으로 옮기고, 엔진 락은
-//! 짧게만 잡는다(리뷰 H3).
+//! 짧게만 잡는다(리뷰 H3). **엔진 슬롯 락(`with_engine`·`stats`·`set_loopback_offset`)이나 디스크를 건드리는 커맨드는 모두
+//! `blocking` 안에서 부른다**(P2-24b): 슬롯 락은 다른 커맨드의 `with_engine` 클로저(피어 추가의 약 1.4MB 할당·명령 큐 대기,
+//! 믹스 구독 해제의 탭 스레드 join)가 쥔 동안 기다리므로, async 런타임 스레드에서 잡으면 그동안 다른 커맨드·IPC가 밀렸다.
+//! 원자값만 쓰는 커맨드(뮤트·모니터·게인·측정 취소)는 그대로 둔다. 시험 `commands::tests::lock_and_io_commands_run_on_blocking_pool`.
 //!
 //! `engine_subscribe_mix`는 JSON이 아닌 raw 바이트(`InvokeResponseBody::Raw`, f32 LE 인터리브)로 보낸다.
 
@@ -136,7 +139,8 @@ pub async fn engine_test_stop(state: State<'_, EngineState>) -> Result<(), Strin
 
 #[tauri::command]
 pub async fn engine_add_peer(state: State<'_, EngineState>, peer_id: String, descriptor: LocalDescriptor) -> Result<(), String> {
-    state.0.with_engine(|e| e.add_peer(peer_id, &descriptor))
+    let m = state.0.clone();
+    blocking(move || m.with_engine(|e| e.add_peer(peer_id, &descriptor))).await
 }
 
 /// 릴레이 설정(설계 4절). 서버의 `relay-token { token, addr }`을 받을 때마다(최초·갱신) 부른다. `null`이면 해제.
@@ -170,7 +174,8 @@ pub async fn engine_set_relay(state: State<'_, EngineState>, relay: Option<Relay
 
 #[tauri::command]
 pub async fn engine_remove_peer(state: State<'_, EngineState>, peer_id: String) -> Result<(), String> {
-    state.0.with_engine(|e| e.remove_peer(&peer_id))
+    let m = state.0.clone();
+    blocking(move || m.with_engine(|e| e.remove_peer(&peer_id))).await
 }
 
 #[tauri::command]
@@ -181,19 +186,22 @@ pub async fn engine_set_peer_gain(
     muted: bool,
     pan: Option<f32>,
 ) -> Result<(), String> {
-    state.0.with_engine(|e| e.set_peer_gain(&peer_id, gain, muted, pan))
+    let m = state.0.clone();
+    blocking(move || m.with_engine(|e| e.set_peer_gain(&peer_id, gain, muted, pan))).await
 }
 
 /// 피어와의 안전 번호(5자리×4). 두 연주자가 같은 숫자를 보면 시그널링 서버가 키를 바꿔치기하지 않은 것이다.
 #[tauri::command]
 pub async fn engine_safety_code(state: State<'_, EngineState>, peer_id: String) -> Result<String, String> {
-    state.0.with_engine(|e| e.safety_code(&peer_id))
+    let m = state.0.clone();
+    blocking(move || m.with_engine(|e| e.safety_code(&peer_id))).await
 }
 
 /// 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필을 실행 중에 바꾼다(P1-5). 다음 `engine_start`에는 `EngineConfig.jitterProfile`을 쓴다.
 #[tauri::command]
 pub async fn engine_set_jitter_profile(state: State<'_, EngineState>, profile: f32) -> Result<(), String> {
-    state.0.with_engine(|e| e.set_jitter_profile(profile))
+    let m = state.0.clone();
+    blocking(move || m.with_engine(|e| e.set_jitter_profile(profile))).await
 }
 
 #[tauri::command]
@@ -218,7 +226,8 @@ pub async fn engine_set_master_gain(state: State<'_, EngineState>, gain: f32) ->
 /// 방장 엔진 peerId와 방장이 알린 `startUs`로 부른다. 적용된 계획을 돌려준다(방장은 이것을 방에 알린다).
 #[tauri::command]
 pub async fn engine_set_metronome(state: State<'_, EngineState>, metronome: MetronomeConfig) -> Result<MetronomePlan, String> {
-    state.0.with_engine(|e| e.set_metronome(metronome))
+    let m = state.0.clone();
+    blocking(move || m.with_engine(|e| e.set_metronome(metronome))).await
 }
 
 /// 메트로놈 클릭 볼륨·뮤트(로컬 전용, 엔진 재시작 간 유지).
@@ -232,12 +241,14 @@ pub async fn engine_set_metronome_gain(state: State<'_, EngineState>, gain: f32,
 /// 루프백 측정이 정상이면 엔진이 자동으로 기억하므로, 앱이 저장해 둔 값을 다시 넣거나 끌 때(null) 쓴다.
 #[tauri::command]
 pub async fn engine_set_loopback_offset(state: State<'_, EngineState>, offset_ms: Option<f64>) -> Result<(), String> {
-    state.0.set_loopback_offset(offset_ms)
+    let m = state.0.clone();
+    blocking(move || m.set_loopback_offset(offset_ms)).await
 }
 
 #[tauri::command]
 pub async fn engine_stats(state: State<'_, EngineState>) -> Result<EngineStats, String> {
-    Ok(state.0.stats())
+    let m = state.0.clone();
+    blocking(move || Ok(m.stats())).await
 }
 
 /// 하드웨어 루프백 지연 측정(P1-1). 실행 중인 엔진(보통 테스트 모드)에서 출력 → 입력 케이블로 왕복을 잰다.
@@ -251,7 +262,8 @@ pub async fn engine_measure_loopback(state: State<'_, EngineState>, runs: Option
 /// 에코 모드 동의/해제(에코하는 쪽). 켜기는 그 피어가 에코를 요청 중일 때만 된다(양측 합의).
 #[tauri::command]
 pub async fn engine_set_echo_mode(state: State<'_, EngineState>, peer_id: String, enabled: bool) -> Result<(), String> {
-    state.0.with_engine(|e| e.set_echo_mode(&peer_id, enabled))
+    let m = state.0.clone();
+    blocking(move || m.with_engine(|e| e.set_echo_mode(&peer_id, enabled))).await
 }
 
 /// 에코 피어 측정(측정하는 쪽). 그 피어에게 에코를 요청하고 동의를 `waitMs`(기본 30000)까지 기다린 뒤
@@ -277,13 +289,17 @@ pub async fn engine_cancel_measure(state: State<'_, EngineState>) -> Result<(), 
 
 #[tauri::command]
 pub async fn engine_subscribe_mix(state: State<'_, EngineState>, on_chunk: Channel<InvokeResponseBody>) -> Result<(), String> {
-    state.0.with_engine(|e| {
-        e.subscribe_mix(Box::new(move |bytes| {
-            if let Err(err) = on_chunk.send(InvokeResponseBody::Raw(bytes)) {
-                log::warn!("믹스 청크 전송 실패: {err}");
-            }
-        }))
+    let m = state.0.clone();
+    blocking(move || {
+        m.with_engine(|e| {
+            e.subscribe_mix(Box::new(move |bytes| {
+                if let Err(err) = on_chunk.send(InvokeResponseBody::Raw(bytes)) {
+                    log::warn!("믹스 청크 전송 실패: {err}");
+                }
+            }))
+        })
     })
+    .await
 }
 
 #[tauri::command]
@@ -369,7 +385,9 @@ fn current_record_dir(app: &tauri::AppHandle, dirs: &RecordDirState) -> Result<s
 /// 현재 녹음 저장 폴더(고르지 않았으면 기본 폴더).
 #[tauri::command]
 pub async fn engine_record_folder(app: tauri::AppHandle, dirs: State<'_, RecordDirState>) -> Result<String, String> {
-    current_record_dir(&app, &dirs).map(|p| p.to_string_lossy().into_owned())
+    // 처음 부를 때 설정 파일을 읽는다(디스크 I/O)
+    let dirs = dirs.inner().clone();
+    blocking(move || current_record_dir(&app, &dirs).map(|p| p.to_string_lossy().into_owned())).await
 }
 
 /// `engine_record_pick_folder` 결과. `save_error`: 고른 폴더를 앱 설정에 남기지 못했다(이번 실행 동안은 그 폴더를 쓰지만 다음
@@ -417,9 +435,13 @@ pub async fn engine_record_start(
     dirs: State<'_, RecordDirState>,
     options: Option<RecordOptions>,
 ) -> Result<RecordStats, String> {
-    let dir = current_record_dir(&app, &dirs)?;
     let m = state.0.clone();
-    blocking(move || m.record_start(options.unwrap_or_default(), &dir)).await
+    let dirs = dirs.inner().clone();
+    blocking(move || {
+        let dir = current_record_dir(&app, &dirs)?;
+        m.record_start(options.unwrap_or_default(), &dir)
+    })
+    .await
 }
 
 /// 녹음 중 피어 트랙 이름 추가(peerId → 표시 이름). 녹음 중에 들어온 연주자 트랙도 닉네임으로 저장된다.
@@ -467,5 +489,93 @@ mod tests {
         assert!(std::path::Path::new(&st.folder).join("session.json").exists(), "녹음이 마무리되지 않았다");
         assert!(!state.stop_orphaned(state.reload_generation()), "두 번째는 할 일이 없다");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `body[open]`이 `(`일 때 짝 `)`의 위치(괄호 깊이만 센다 — 이 파일의 문자열에는 짝 없는 괄호가 없다).
+    fn close_paren(body: &str, open: usize) -> usize {
+        let mut depth = 0i32;
+        for (i, c) in body[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return open + i;
+                    }
+                }
+                _ => {}
+            }
+        }
+        body.len()
+    }
+
+    /// 이름이 `fn `/`async fn ` 뒤에 오는 함수들의 (이름, 본문) — 시그니처는 빼고 `{` 뒤부터 다음 `\n}\n`(또는 들여쓴 `\n    }\n`)까지.
+    fn functions(src: &str, marker: &str, indent_end: &str) -> Vec<(String, String)> {
+        src.split(marker)
+            .skip(1)
+            .map(|chunk| {
+                let name = chunk.split(['(', '<']).next().unwrap_or("").trim().to_string();
+                let body = chunk.split(indent_end).next().unwrap_or(chunk);
+                let body = body.split_once('{').map_or(body, |(_, b)| b);
+                (name, body.to_string())
+            })
+            .collect()
+    }
+
+    /// P2-24b: async 커맨드 본문에서 엔진 슬롯 락·디스크를 건드리는 호출은 `blocking(..)` 호출의 **괄호 안**에만 온다(소스 검사 —
+    /// 새 커맨드가 `state.0.with_engine(..)`을 async 스레드에서 바로 부르면 실패한다). #214 리뷰 L2: 첫 `blocking(` 위치만 보면
+    /// `blocking(..).await?; state.0.with_engine(..)`이 통과했다 — 괄호 깊이로 범위를 잰다. 그런 호출을 하는 동기 헬퍼(`fn`)도
+    /// 검사 대상 이름에 더한다(한 단계: 헬퍼를 async 스레드에서 부르면 실패).
+    #[test]
+    fn lock_and_io_commands_run_on_blocking_pool() {
+        let src = include_str!("commands.rs").lines().collect::<Vec<_>>().join("\n");
+        let body_end = src.find("#[cfg(test)]").unwrap_or(src.len());
+        let src = &src[..body_end];
+        let mut guarded: Vec<String> =
+            ["with_engine(", ".stats()", "set_loopback_offset(", "record_start(", "list_devices(", "dirs.0.current("].iter().map(|s| s.to_string()).collect();
+        // `dirs.0.current(`는 녹음 폴더 설정 파일 읽기(디스크). 동기 헬퍼: 최상위 `fn`과 impl 안 `pub fn`(들여쓰기 4칸), `blocking` 자신은 뺀다.
+        let helpers: Vec<(String, String)> =
+            functions(src, "\nfn ", "\n}\n").into_iter().chain(functions(src, "\n    pub fn ", "\n    }\n")).filter(|(n, _)| n != "blocking").collect();
+        for (name, body) in &helpers {
+            if guarded.iter().any(|g| body.contains(g.as_str())) {
+                guarded.push(format!("{name}("));
+            }
+        }
+        assert!(guarded.iter().any(|g| g == "current_record_dir("), "동기 헬퍼 감지가 깨졌다: {guarded:?}");
+        let mut bad = Vec::new();
+        let mut checked = 0;
+        for (name, body) in functions(src, "pub async fn ", "\n}\n") {
+            let ranges: Vec<(usize, usize)> = body
+                .match_indices("blocking(")
+                .map(|(at, m)| {
+                    let open = at + m.len() - 1;
+                    (open, close_paren(&body, open))
+                })
+                .collect();
+            for g in &guarded {
+                for (at, _) in body.match_indices(g.as_str()) {
+                    checked += 1;
+                    if !ranges.iter().any(|&(s, e)| s < at && at < e) {
+                        bad.push(format!("{name}: {g}"));
+                    }
+                }
+            }
+        }
+        assert!(checked >= 15, "검사 대상이 너무 적다({checked}) — 소스 형태가 바뀌었으면 시험을 고칠 것");
+        assert!(bad.is_empty(), "async 런타임 스레드에서 엔진 락·디스크를 잡는 커맨드: {bad:?}");
+    }
+
+    /// 위 소스 검사가 실제로 잡는지: blocking 뒤에 락을 잡는 형태·동기 헬퍼 경유를 넣은 가짜 소스로 같은 판정을 돌린다.
+    #[test]
+    fn source_check_catches_lock_after_blocking() {
+        let body = "\n    let m = state.0.clone();\n    blocking(move || m.stop()).await?;\n    state.0.with_engine(|e| e.x())\n";
+        let open = body.find("blocking(").unwrap() + "blocking".len();
+        let close = close_paren(body, open);
+        let at = body.find("with_engine(").unwrap();
+        assert!(at > close, "blocking 괄호 밖의 락 호출을 안으로 보았다");
+        let inside = "\n    blocking(move || m.with_engine(|e| e.add((1, 2)))).await\n";
+        let open = inside.find("blocking(").unwrap() + "blocking".len();
+        let at = inside.find("with_engine(").unwrap();
+        assert!(open < at && at < close_paren(inside, open), "괄호 안의 호출을 밖으로 보았다");
     }
 }

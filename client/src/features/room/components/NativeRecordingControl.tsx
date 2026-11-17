@@ -60,6 +60,8 @@ export function NativeRecordingControl({
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // 폴더 고르기·저장 경고(녹음 결과 오류와 따로 — 다음에 폴더를 잘 고르면 지운다, #214 리뷰 L3)
+  const [folderWarning, setFolderWarning] = useState<string | null>(null)
   // 내가 정지하지 않았는데 녹음이 사라지면(엔진 정지·장치 분리) 엔진이 이미 마무리했다
   const lastFolderRef = useRef<string | null>(null)
   const stoppingRef = useRef(false)
@@ -141,10 +143,12 @@ export function NativeRecordingControl({
       const p = await engineRecordPickFolder()
       if (!p) return
       setFolder(p.folder)
-      // 고른 폴더는 이번 실행 동안 쓰지만 설정에 남지 않았다(#212: 전에는 로그에만 남아 다음 실행에 말없이 이전 폴더로 돌아갔다)
-      setNotice(p.saveError ? `이 폴더를 설정에 저장하지 못했습니다(이번 실행 동안만 사용): ${p.saveError}` : null)
+      setFolderWarning(null)
+      // 고른 폴더는 이번 실행 동안 쓰지만 설정에 남지 않았다(#212: 전에는 로그에만 남아 다음 실행에 말없이 이전 폴더로 돌아갔다).
+      // 경고 줄로 보이고, 직전 녹음 안내("저장됨 · 세션 폴더")는 지우지 않는다(#212 리뷰 L4 — 방금 녹음한 위치를 잃지 않게).
+      if (p.saveError) setFolderWarning(`이 폴더를 설정에 저장하지 못했습니다(이번 실행 동안만 사용): ${p.saveError}`)
     } catch (e) {
-      setError(`폴더를 고를 수 없습니다: ${engineErrorMessage(e)}`)
+      setFolderWarning(`폴더를 고를 수 없습니다: ${engineErrorMessage(e)}`)
     }
   }
 
@@ -200,6 +204,7 @@ export function NativeRecordingControl({
       </div>
       {warning && <p className="recording-warning" role="alert">{warning}</p>}
       {error && <p className="recording-warning" role="alert">{error}</p>}
+      {folderWarning && <p className="recording-warning" role="alert">{folderWarning}</p>}
       {notice && !recording && <p className="recording-notice">{notice}</p>}
       <p className="recording-hint">
         내 입력과 연주자별 소리를 따로 WAV·FLAC으로 저장합니다(같은 타임라인, 메트로놈 클릭 제외). 끊김(은닉·버림) 구간은 세션 폴더의 markers.json에 남습니다.

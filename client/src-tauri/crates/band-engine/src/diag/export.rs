@@ -258,14 +258,7 @@ pub fn target_path(picked: PathBuf) -> PathBuf {
 
 /// 같은 폴더의 임시 파일에 쓴 뒤 이름을 바꾼다(쓰다 실패해도 잘린 zip이 남지 않게).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".part");
-    let tmp = PathBuf::from(tmp);
-    let result = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    crate::sys::fs::write_replace(path, bytes, ".part")
 }
 
 /// zip 안 파일 이름: 경로 구분자·상위 경로 없이.

@@ -50,28 +50,8 @@ impl RecordDir {
         if let Some(dir) = f.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        write_replace(f, serde_json::json!({ "folder": path }).to_string().as_bytes())
+        crate::sys::fs::write_replace(f, serde_json::json!({ "folder": path }).to_string().as_bytes(), ".tmp")
     }
-}
-
-/// `f`를 `bytes`로 바꿔 넣는다: 임시 파일(`<이름>.tmp`)에 쓰고 sync → rename(Windows는 기존 파일을 바꿔 넣는다). 실패하면
-/// 임시 파일을 지우고 `f`는 손대지 않는다.
-fn write_replace(f: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut tmp_name = f.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(".tmp");
-    let tmp = f.with_file_name(tmp_name);
-    let res = (|| {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, f)
-    })();
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    res
 }
 
 #[cfg(test)]

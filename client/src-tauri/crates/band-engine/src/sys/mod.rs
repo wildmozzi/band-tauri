@@ -4,6 +4,8 @@
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod alloc;
 pub(crate) mod cpu;
+// 파일 바꿔 넣기(임시 파일 + sync + rename): 설정·진단 내보내기.
+pub(crate) mod fs;
 // 하이브리드 CPU 코어 배치 기록(P1-21).
 pub(crate) mod placement;
 pub(crate) mod prio;
