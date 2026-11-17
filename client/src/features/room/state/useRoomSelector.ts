@@ -1,15 +1,8 @@
 import { useCallback, useRef, useSyncExternalStore } from 'react'
 import type { RoomSessionStore, RoomSnapshot } from './roomSessionStore'
+import { shallowEqual } from './shallowEqual'
 
-/** 얕은 비교: 같은 키에 같은 참조면 같다 (배열·객체 모두) */
-export function shallowEqual(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) return true
-  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false
-  const ka = Object.keys(a)
-  const kb = Object.keys(b)
-  if (ka.length !== kb.length) return false
-  return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && Object.is((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
-}
+export { shallowEqual }
 
 /**
  * 스토어에서 조각 하나를 구독한다. 선택 결과가 얕은 비교로 같으면 이전 결과(같은 참조)를 돌려줘서 다시 그리지 않는다.
