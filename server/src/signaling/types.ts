@@ -30,6 +30,9 @@ export interface WsLimits {
   /** auth 토큰 버킷 — auth마다 Supabase getUser를 부르므로 연결당 횟수를 묶는다(서버 보안 점검: 증폭 방지) */
   authBurst: number
   authPerSec: number
+  /** auth getUser(캐시 미스) IP(IPv4 또는 IPv6 /64) 버킷 — 연결을 새로 만들어 연결별 버킷을 우회하는 것을 막는다(#187 리뷰 M) */
+  authIpBurst: number
+  authIpPerSec: number
   /** 관람 WebRTC 중계: 보낸 사람 → 대상 하나당 메시지 버킷 (ICE trickle 한 번이 수십 개) */
   relayPerTargetBurst: number
   relayPerTargetPerSec: number
@@ -39,6 +42,9 @@ export interface WsLimits {
    */
   relayInBytesBurst: number
   relayInBytesPerSec: number
+  /** 관람 WebRTC 중계: 보낸 사람 → 대상 쌍 하나의 바이트 버킷 (정상 흐름은 offer·answer 수 KB + 후보 몇 개) */
+  relayPairBytesBurst: number
+  relayPairBytesPerSec: number
   /** IP당 동시 연결 수 */
   maxConnectionsPerIp: number
   /** 서버 전체 동시 연결 수 (fly services.concurrency hard_limit 1000과 같음). 넘으면 1013 */
@@ -82,10 +88,14 @@ export const DEFAULT_LIMITS: WsLimits = {
   joinPerSec: 0.2,
   authBurst: 5,
   authPerSec: 0.1,
+  authIpBurst: 20,
+  authIpPerSec: 1,
   relayPerTargetBurst: 40,
   relayPerTargetPerSec: 10,
   relayInBytesBurst: 512 * 1024,
   relayInBytesPerSec: 64 * 1024,
+  relayPairBytesBurst: 64 * 1024,
+  relayPairBytesPerSec: 8 * 1024,
   maxConnectionsPerIp: 20,
   maxConnections: 1000,
   maxTotalBufferedBytes: 64 * 1024 * 1024,
@@ -144,7 +154,8 @@ export interface Client {
   }
   /** viewerRelay: 관람 중계 속도 제한(처음 중계할 때 만든다). out = 대상 clientId → 버킷, inBytes = 이 연결이 받는 중계 바이트 */
   relay?: {
-    out: Map<string, TokenBucket>
+    /** 대상 clientId → (메시지 버킷, 바이트 버킷) — 보낸 사람·대상 쌍마다 따로(#187 리뷰 M: 한 공격자가 대상 합계 예산을 독차지하지 못하게) */
+    out: Map<string, { msgs: TokenBucket; bytes: TokenBucket }>
     inBytes: TokenBucket
   }
   /** resume: 재개 유예 */

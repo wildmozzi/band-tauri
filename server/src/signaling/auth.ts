@@ -22,6 +22,9 @@ export function jwtExpiryMs(token: string): number | null {
   }
 }
 
+/** auth 검증 속도 제한에 걸려 getUser를 부르지 않았다 */
+export const AUTH_RATE_LIMITED = Symbol('auth-rate-limited')
+
 /** 검증된 토큰 캐시 기본값: 30초, 1000개 */
 export const TOKEN_CACHE_TTL_MS = 30_000
 export const TOKEN_CACHE_MAX = 1000
@@ -30,20 +33,22 @@ export const TOKEN_CACHE_MAX = 1000
  * verifyToken(Supabase getUser — 네트워크 왕복)을 감싸는 짧은 캐시 (서버 보안 점검: auth 증폭 방지).
  * - 같은 토큰을 여러 연결이 동시에·반복해 보내도 getUser는 한 번: 진행 중인 조회는 함께 기다리고,
  *   성공 결과는 min(TTL, JWT exp)까지 재사용한다. 키는 토큰의 SHA-256(긴 토큰 문자열을 그대로 쥐지 않음).
- * - 실패(null)는 캐시하지 않는다(일시 장애를 굳히지 않음). 무작위 토큰 폭주는 연결별 auth 버킷이 막는다.
+ * - 실패(null)는 캐시하지 않는다(일시 장애를 굳히지 않음).
+ * - allowMiss: 실제로 verify(getUser)를 부를 때만 묻는다(캐시 적중·진행 중 조회 공유는 묻지 않음). false면 부르지 않고
+ *   AUTH_RATE_LIMITED. 같은 토큰을 다시 보내는 정상 재인증(SIGNED_IN·TOKEN_REFRESHED)은 버킷을 쓰지 않는다(#187 리뷰 M).
  * - 한계: 로그아웃(세션 폐기)한 토큰도 캐시에 있으면 최대 TTL 동안 WS auth가 통과한다. 원래도 WS는 연결 뒤 재검증하지 않는다.
  */
 export function cachedTokenVerifier(
   verify: (token: string) => Promise<string | null>,
   opts: { ttlMs?: number; max?: number; now?: () => number } = {},
-): (token: string) => Promise<string | null> {
+): (token: string, allowMiss?: () => boolean) => Promise<string | null | typeof AUTH_RATE_LIMITED> {
   const ttlMs = opts.ttlMs ?? TOKEN_CACHE_TTL_MS
   const max = opts.max ?? TOKEN_CACHE_MAX
   const now = opts.now ?? Date.now
   const cache = new Map<string, { uid: string; until: number }>()
   const inflight = new Map<string, Promise<string | null>>()
 
-  return async (token: string) => {
+  return async (token: string, allowMiss?: () => boolean) => {
     const key = createHash('sha256').update(token).digest('base64')
     const hit = cache.get(key)
     if (hit) {
@@ -52,6 +57,7 @@ export function cachedTokenVerifier(
     }
     const pending = inflight.get(key)
     if (pending) return pending
+    if (allowMiss && !allowMiss()) return AUTH_RATE_LIMITED
     const p = verify(token).then(uid => {
       const exp = jwtExpiryMs(token)
       const until = Math.min(now() + ttlMs, exp ?? Infinity)
@@ -70,6 +76,16 @@ export function cachedTokenVerifier(
 export interface AuthSvc extends ResumeSvc {
   deps: WsDeps
   insecureDevMode: boolean
+  /**
+   * auth 토큰 검증: 캐시(cachedTokenVerifier) + 캐시 미스일 때만 연결별·IP(/64)별 버킷(조립부가 만든다).
+   * AUTH_RATE_LIMITED면 getUser를 부르지 않았다.
+   */
+  verifyAuth: (client: Client, token: string) => Promise<string | null | typeof AUTH_RATE_LIMITED>
+}
+
+/** auth 검증이 속도 제한에 걸렸음을 알린다(클라이언트는 다음 토큰 이벤트 때 다시 보낸다) */
+function sendAuthRateLimited(ctx: Ctx<AuthSvc>) {
+  send(ctx.ws, { type: 'error', code: 'rate-limited', message: '인증 요청이 너무 많습니다.', rejectedType: 'auth' })
 }
 
 /**
@@ -118,7 +134,8 @@ export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
   // 재인증 (L1): 같은 사용자의 갱신 토큰이면 만료 연장, 방 밖의 익명 연결은 로그인으로 승격
   if (client.auth.state === 'authenticated' || client.auth.state === 'anonymous') {
     if (insecureDevMode || !isNonEmptyString(token, 8192)) return
-    const uid = await deps.verifyToken(token)
+    const uid = await ctx.svc.verifyAuth(client, token)
+    if (uid === AUTH_RATE_LIMITED) return sendAuthRateLimited(ctx)
     if (!uid) return
     if (client.auth.state === 'authenticated' && uid === client.auth.userId) {
       client.auth.tokenExp = jwtExpiryMs(token)
@@ -136,7 +153,9 @@ export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
 
   client.auth.state = 'verifying'
   if (isNonEmptyString(token, 8192) && deps.hasBackend) {
-    const uid = await deps.verifyToken(token)
+    const verified = await ctx.svc.verifyAuth(client, token)
+    if (verified === AUTH_RATE_LIMITED) sendAuthRateLimited(ctx)
+    const uid = verified === AUTH_RATE_LIMITED ? null : verified
     // 세션 재개: 이전 clientId의 주인이 같은 userId(JWT)이고, 유예시간 안(suspended에 남아 있음)이거나
     // 서버가 아직 닫힘을 모르는 살아 있는 연결일 때(P1-16 — 옛 소켓은 attachSession이 끊는다)
     const resumeId = msg.resumeClientId

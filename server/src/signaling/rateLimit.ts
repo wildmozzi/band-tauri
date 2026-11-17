@@ -4,6 +4,12 @@ export class TokenBucket {
   constructor(private capacity: number, private perSec: number) {
     this.tokens = capacity
   }
+  /** 가득 찼는지(오래 안 쓴 버킷 정리용) */
+  isFull(): boolean {
+    const now = Date.now()
+    return this.tokens + ((now - this.last) / 1000) * this.perSec >= this.capacity
+  }
+
   /** n개(기본 1)를 꺼낸다. 모자라면 꺼내지 않고 false (바이트 단위 버킷은 n = 바이트 수) */
   take(n = 1): boolean {
     const now = Date.now()

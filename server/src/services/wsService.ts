@@ -1,4 +1,4 @@
-import { WebSocketServer, type RawData } from 'ws'
+import { WebSocketServer, type RawData, type WebSocket } from 'ws'
 import { Server as HttpServer } from 'http'
 import { Server as HttpsServer } from 'https'
 import { v4 as uuidv4 } from 'uuid'
@@ -7,7 +7,7 @@ import { isInsecureDevMode } from '../lib/securityConfig'
 import type { RoomMeta } from '../repositories/roomRepository'
 import { defaultScryptGate, ipBucket } from '../lib/roomPassword'
 import { AUTH_TIMEOUT_MS, MAX_MESSAGE_BYTES, MAX_PENDING_MESSAGES, type Msg } from '../signaling/protocol'
-import { DEFAULT_LIMITS, type WsDeps, type WsLimits, type WsOptions } from '../signaling/types'
+import { DEFAULT_LIMITS, type Client, type WsDeps, type WsLimits, type WsOptions } from '../signaling/types'
 import { TokenBucket } from '../signaling/rateLimit'
 import { createMetronome } from '../signaling/metronome'
 import { clientIp } from '../signaling/connection'
@@ -21,7 +21,7 @@ import { createPerformers } from '../signaling/performers'
 import { createNativeSession } from '../signaling/nativeSession'
 import { handleLeave } from '../signaling/membership'
 import { createResume, suspendOnClose } from '../signaling/resume'
-import { cachedTokenVerifier } from '../signaling/auth'
+import { AUTH_RATE_LIMITED, cachedTokenVerifier } from '../signaling/auth'
 import { dispatch, type ConnCtx, type SignalingServices } from '../signaling/dispatch'
 
 /**
@@ -80,6 +80,14 @@ export function wsActivity(wss: WebSocketServer): ActivityCounts | null {
 }
 
 
+/** 받아들이지 않는 연결: 닫힘 코드는 보내되(클라이언트가 사유를 안다) 상대가 close에 답하지 않아도 곧 끊는다.
+ *  close만 하면 ws가 최대 30초 wss.clients에 남겨 전체 정원을 차지한다(#187 리뷰 L) */
+const REJECT_TERMINATE_MS = 1000
+function rejectConnection(ws: WebSocket, code: number, reason: string) {
+  ws.close(code, reason)
+  setTimeout(() => ws.terminate(), REJECT_TERMINATE_MS).unref?.()
+}
+
 export function initializeWebSocket(
   server: HttpServer | HttpsServer,
   supabase: SupabaseClient | null,
@@ -88,7 +96,18 @@ export function initializeWebSocket(
   const env = options.env ?? process.env
   const baseDeps: WsDeps = { ...supabaseDeps(supabase), ...options.deps }
   // 같은 토큰의 getUser 반복·동시 호출을 한 번으로 (서버 보안 점검: auth 증폭 방지)
-  const deps: WsDeps = { ...baseDeps, verifyToken: cachedTokenVerifier(baseDeps.verifyToken) }
+  const deps: WsDeps = baseDeps
+  const tokenVerifier = cachedTokenVerifier(deps.verifyToken)
+  /** IP(/64) → auth getUser 버킷. 하트비트가 가득 찬(오래 안 쓴) 것을 지운다 */
+  const authIpBuckets = new Map<string, TokenBucket>()
+  /** 캐시 미스(실제 getUser)일 때만 연결별·IP별 버킷을 쓴다 (#187 리뷰 M) */
+  const verifyAuth = (client: Client, token: string): Promise<string | null | typeof AUTH_RATE_LIMITED> =>
+    tokenVerifier(token, () => {
+      const key = ipBucket(client.conn.ip)
+      let bucket = authIpBuckets.get(key)
+      if (!bucket) authIpBuckets.set(key, bucket = new TokenBucket(limits.authIpBurst, limits.authIpPerSec))
+      return client.conn.authBucket.take() && bucket.take()
+    })
   const limits: WsLimits = { ...DEFAULT_LIMITS, ...options.limits }
   const scryptGate = options.scryptGate ?? defaultScryptGate
 
@@ -116,7 +135,7 @@ export function initializeWebSocket(
   const svc: SignalingServices = {
     env, deps, limits, insecureDevMode,
     registry, roomMeta, requests, capacity, password, performers, metronome, nativeSession, resume,
-    participantTimers,
+    participantTimers, verifyAuth,
   }
 
   // maxPayload 초과 시 ws가 연결을 1009로 끊는다
@@ -135,6 +154,7 @@ export function initializeWebSocket(
     const now = Date.now()
     capacity.sweep(now)
     performers.sweep(now)
+    for (const [key, bucket] of authIpBuckets) if (bucket.isFull()) authIpBuckets.delete(key)
     roomMeta.sweep(now, hasRoom)
     for (const c of allClients()) {
       if (resume.isSuspended(c.id)) continue // 이미 끊긴 연결 (재개 대기)
@@ -183,7 +203,7 @@ export function initializeWebSocket(
     // wss.clients에는 이 연결이 이미 들어 있다
     if (wss.clients.size > limits.maxConnections) {
       console.warn(`[WS] server full (${limits.maxConnections} connections)`)
-      ws.close(1013, 'Server busy')
+      rejectConnection(ws, 1013, 'Server busy')
       return
     }
     const ip = clientIp(req, env)
@@ -191,7 +211,7 @@ export function initializeWebSocket(
     const ipCount = (connectionsPerIp.get(ipKey) || 0) + 1
     if (ipCount > limits.maxConnectionsPerIp) {
       console.warn(`[WS] too many connections from ${ipKey}`)
-      ws.close(1008, 'Too many connections')
+      rejectConnection(ws, 1008, 'Too many connections')
       return
     }
     connectionsPerIp.set(ipKey, ipCount)
@@ -247,7 +267,6 @@ export function initializeWebSocket(
       let ok = client.conn.msgBucket.take()
       if (ok && msg.type === 'chat') ok = client.conn.chatBucket.take()
       if (ok && (msg.type === 'join' || msg.type === 'leave')) ok = client.conn.joinBucket.take()
-      if (ok && msg.type === 'auth') ok = client.conn.authBucket.take()
       if (ok) return true
 
       client.conn.dropped++

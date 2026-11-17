@@ -81,7 +81,7 @@ async function hostWithViewers(url: string, n: number, roomId = 'r'): Promise<{ 
 const pause = (c: TestClient) => (c.ws as unknown as { _socket: { pause(): void } })._socket.pause()
 const resume = (c: TestClient) => (c.ws as unknown as { _socket: { resume(): void } })._socket.resume()
 const offerOf = (to: string, sdpBytes: number) => ({ type: 'offer', to, offer: { type: 'offer', sdp: 'a'.repeat(sdpBytes) } })
-const RELAXED_RELAY = { relayPerTargetBurst: 1e6, relayPerTargetPerSec: 1e6, relayInBytesBurst: 1e9, relayInBytesPerSec: 1e9 }
+const RELAXED_RELAY = { relayPerTargetBurst: 1e6, relayPerTargetPerSec: 1e6, relayInBytesBurst: 1e9, relayInBytesPerSec: 1e9, relayPairBytesBurst: 1e9, relayPairBytesPerSec: 1e9 }
 
 describe('slow reader', () => {
   it('terminates a connection that stops reading once its send buffer passes the cap', async () => {
@@ -160,12 +160,67 @@ describe('viewer relay abuse (#184 review M: targeted kick of a performer)', () 
   })
 })
 
+describe('viewer relay fairness (#187 review M: targeted broadcast denial)', () => {
+  const answerOf = (to: string, sdpBytes: number) => ({ type: 'answer', to, answer: { type: 'answer', sdp: 'a'.repeat(sdpBytes) } })
+
+  it('does not relay an offer from a non-performer to a performer, but relays answers and candidates', async () => {
+    const url = await startWs()
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
+    viewer.send(offerOf(host.id, 1000))
+    viewer.send(answerOf(host.id, 1000))
+    viewer.send({ type: 'ice-candidate', to: host.id, candidate: { candidate: 'candidate:1', sdpMid: '0' } })
+    assert.ok(await host.waitFor(m => m.type === 'ice-candidate'))
+    assert.deepEqual(host.inbox.filter(m => ['offer', 'answer', 'ice-candidate'].includes(m.type)).map(m => m.type), ['answer', 'ice-candidate'])
+  })
+
+  it('one viewer flooding answers cannot use up the budget other viewers need to reach the performer', async () => {
+    const url = await startWs({ msgBurst: 1000, msgPerSec: 1000 })
+    const { host, viewers: [attacker, legit] } = await hostWithViewers(url, 2)
+    for (let i = 0; i < 40; i++) attacker.send(answerOf(host.id, 15 * 1024))
+    attacker.send({ type: 'ping' })
+    assert.ok(await attacker.waitFor(m => m.type === 'pong'))
+    legit.send(answerOf(host.id, 3000))
+    for (let i = 0; i < 5; i++) legit.send({ type: 'ice-candidate', to: host.id, candidate: { candidate: `candidate:${i}`, sdpMid: '0' } })
+    assert.ok(await host.waitFor(m => m.type === 'ice-candidate' && m.from === legit.id && m.candidate.candidate === 'candidate:4'))
+    assert.ok(host.has(m => m.type === 'answer' && m.from === legit.id), 'legit answer arrived')
+    const fromAttacker = host.inbox.filter(m => m.type === 'answer' && m.from === attacker.id).length
+    assert.ok(fromAttacker <= Math.ceil(DEFAULT_LIMITS.relayPairBytesBurst / (15 * 1024)) + 1, `attacker relayed ${fromAttacker} answers`)
+  })
+
+  it('measures relay size in UTF-8 bytes', async () => {
+    const url = await startWs()
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
+    // 6000자 × 3바이트 = 18KB > 16KB (UTF-16 길이로는 6000이라 전에는 통과)
+    host.send({ type: 'offer', to: viewer.id, offer: { type: 'offer', sdp: '가'.repeat(6000) } })
+    host.send({ type: 'offer', to: viewer.id, offer: { type: 'offer', sdp: '가'.repeat(5000) } })
+    assert.ok(await viewer.waitFor(m => m.type === 'offer'))
+    await new Promise(r => setTimeout(r, 100))
+    assert.deepEqual(viewer.inbox.filter(m => m.type === 'offer').map(m => m.offer.sdp.length), [5000])
+  })
+})
+
 describe('server-wide connection cap', () => {
   it('rejects connections over maxConnections with 1013', async () => {
     const url = await startWs({ maxConnections: 2 })
     assert.equal(await tryConnect(url, {}), 'open')
     assert.equal(await tryConnect(url, {}), 'open')
     assert.equal(await tryConnect(url, {}), 1013)
+  })
+
+  it('terminates a rejected connection even if the peer ignores the close frame', async () => {
+    const url = await startWs({ maxConnections: 1 })
+    assert.equal(await tryConnect(url, {}), 'open')
+    // 응답하지 않는 상대: 원시 TCP로 업그레이드만 하고 아무것도 읽지 않는다 → 서버가 1초 뒤 소켓을 끊어야 한다
+    const net = await import('node:net')
+    const { port } = new URL(url)
+    const sock = net.connect(Number(port), '127.0.0.1')
+    let ended = false
+    sock.on('close', () => { ended = true })
+    sock.on('error', () => {})
+    sock.resume() // 읽기는 하되 close 프레임에 답하지 않는다
+    sock.write(['GET / HTTP/1.1', 'Host: x', 'Upgrade: websocket', 'Connection: Upgrade', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version: 13', '', ''].join(String.fromCharCode(13, 10)))
+    assert.ok(await waitFor(() => ended, 3000), 'server terminated the rejected socket')
+    sock.destroy()
   })
 })
 

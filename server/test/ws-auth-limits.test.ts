@@ -105,3 +105,35 @@ describe('auth rate limit per connection', () => {
     assert.equal(calls, 1)
   })
 })
+
+describe('auth rate limit counts only real lookups (#187 review M)', () => {
+  it('re-sending the same token (SIGNED_IN / TOKEN_REFRESHED) never hits the bucket', async () => {
+    let calls = 0
+    const url = await startWs(async (tok) => { calls++; return testVerifier(tok) }, { msgBurst: 1000, msgPerSec: 1000 })
+    const c = await connect(url)
+    opened.push(c)
+    for (let i = 0; i < 20; i++) c.send({ type: 'auth', accessToken: 'tok:same' })
+    assert.ok(await waitFor(() => c.inbox.filter(m => m.type === 'auth-result').length === 20))
+    assert.equal(calls, 1)
+    assert.ok(!c.has(m => m.type === 'error' && m.code === 'rate-limited'), 'no rate-limited error')
+    // 버킷이 그대로라 진짜 갱신 토큰(새 토큰)도 통과한다
+    c.send({ type: 'auth', accessToken: 'tok:same' + '' })
+    c.send({ type: 'auth', accessToken: 'tok:other-not-same-user' })
+    assert.ok(await waitFor(() => calls === 2))
+  })
+
+  it('reconnecting does not reset the per-IP lookup budget', async () => {
+    let calls = 0
+    const url = await startWs(async (tok) => { calls++; return null }, { msgBurst: 1000, msgPerSec: 1000 })
+    let n = 0
+    for (let k = 0; k < 10; k++) { // 연결 → 무작위 토큰 5개 → 끊기 반복
+      const c = await connect(url)
+      for (let i = 0; i < 5; i++) c.send({ type: 'auth', accessToken: `tok:rand${n++}` })
+      c.send({ type: 'ping' })
+      await c.waitFor(m => m.type === 'pong')
+      c.ws.terminate()
+    }
+    assert.ok(calls <= DEFAULT_LIMITS.authIpBurst + 3, `getUser calls from one IP: ${calls} (50 attempts)`)
+    assert.ok(calls >= DEFAULT_LIMITS.authIpBurst - 1)
+  })
+})
