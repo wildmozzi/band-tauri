@@ -32,6 +32,8 @@ struct Inner {
     conn_seen: Vec<(u64, u64)>,
     /// 다음 샘플에 붙일 연결 이벤트(정지한 엔진의 마지막 이벤트).
     pending_conn: Vec<ConnSample>,
+    /// 직전 샘플의 (세션, 코어 배치 누적 수) — 다음 샘플을 구간 값으로 만드는 기준(P1-21 후속).
+    last_placement: Option<(u64, crate::sys::placement::PlacementWindow)>,
 }
 
 /// 기억하는 세션 수(`conn_seen`).
@@ -89,6 +91,7 @@ impl Diagnostics {
                 last_config: None,
                 conn_seen: Vec::new(),
                 pending_conn: Vec::new(),
+                last_placement: None,
             }),
             busy: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -103,6 +106,14 @@ impl Diagnostics {
         match snap {
             Some(s) => {
                 let mut sample = Sample::from_stats(now_ms, s.network, s.session, &s.stats);
+                // 코어 배치는 구간 값으로(#191 리뷰 L1): 같은 세션의 직전 누적과 차분한다. 세션이 바뀌면 카운터가 0부터라 그대로.
+                let cum = sample.core_placement;
+                if let (Some(c), Some((sess, prev))) = (cum, g.last_placement) {
+                    if sess == s.session {
+                        sample.core_placement = Some(c.since(&prev));
+                    }
+                }
+                g.last_placement = cum.map(|c| (s.session, c));
                 // 세션마다(엔진 재시작 = 새 Net) seq가 1부터 다시 센다
                 let fresh = g.take_new_conn(s.session, &s.conn_events);
                 sample.conn = std::mem::take(&mut g.pending_conn);
@@ -185,6 +196,39 @@ mod tests {
         let mut stats = EngineStats::stopped();
         stats.running = running;
         EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 7, conn_events: vec![] }
+    }
+
+    /// 타임라인 `corePlacement`는 같은 세션의 직전 샘플 뒤로 센 구간 수다(#191 리뷰 L1). 세션 첫 샘플·재시작 첫 샘플은 시작부터,
+    /// 정지 표시 샘플과 배치가 없는 엔진(비Windows)은 키가 없다. 계약 `EngineStats.corePlacement`(누적 비율)는 그대로다.
+    #[test]
+    fn core_placement_is_interval_counts_per_session() {
+        use crate::sys::placement::{CorePlacementStats, ThreadPlacement};
+        let at = |session, w: [u64; 3], r: [u64; 3]| {
+            let mut s = snap(true);
+            s.session = session;
+            s.stats.core_placement = Some(CorePlacementStats {
+                worker: ThreadPlacement::from_counts(w[0], w[1], w[2]),
+                net_recv: Some(ThreadPlacement::from_counts(r[0], r[1], r[2])),
+            });
+            s
+        };
+        let d = Diagnostics::new(10);
+        d.record(1_000, Some(at(7, [100, 0, 0], [10, 0, 0])));
+        d.record(2_000, Some(at(7, [150, 40, 10], [10, 5, 0])));
+        d.record(3_000, None);
+        d.record(4_000, Some(at(9, [30, 0, 0], [2, 0, 0])));
+        d.record(5_000, Some(snap(true))); // 배치 없음(비Windows) → 키 없음, 다음 차분 기준도 지움
+        d.record(6_000, Some(at(9, [60, 0, 0], [4, 0, 0])));
+        d.with_timeline(|tl, _, _| {
+            let lines: Vec<String> = timeline::to_jsonl(tl).lines().map(str::to_owned).collect();
+            let cp = |i: usize| serde_json::from_str::<serde_json::Value>(&lines[i]).unwrap().get("corePlacement").cloned();
+            assert_eq!(cp(0), Some(serde_json::json!({"worker": [100, 0, 0], "netRecv": [10, 0, 0]})));
+            assert_eq!(cp(1), Some(serde_json::json!({"worker": [50, 40, 10], "netRecv": [0, 5, 0]})));
+            assert_eq!(cp(2), None, "정지 표시 샘플");
+            assert_eq!(cp(3), Some(serde_json::json!({"worker": [30, 0, 0], "netRecv": [2, 0, 0]})), "재시작은 0부터");
+            assert_eq!(cp(4), None);
+            assert_eq!(cp(5), Some(serde_json::json!({"worker": [60, 0, 0], "netRecv": [4, 0, 0]})));
+        });
     }
 
     #[test]

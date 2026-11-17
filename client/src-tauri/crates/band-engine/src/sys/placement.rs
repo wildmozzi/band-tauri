@@ -9,7 +9,9 @@
 //!
 //! 종류 판정(`classify`): 효율 등급(`EfficiencyClass`)이 가장 높은 것 = P. 나머지 중 P와 마지막 단계 캐시(LLC)를 함께 쓰는 것 = E,
 //! 따로 쓰는 것 = LP-E(Intel Core Ultra의 저전력 섬 — 225H에서 LP 12·13, 효율 등급은 E와 같은 0). 등급이 하나뿐이면(하이브리드
-//! 아님) 모두 P다.
+//! 아님) 모두 P다. 단 LP-E는 **P와 LLC를 함께 쓰는 E 클러스터가 있거나, P와 따로 쓰는 섬이 둘 이상일 때만** 나온다 — 비P 코어가
+//! P와 다른 LLC 섬 하나에만 있는 구성(예: Lunar Lake 4P + 4LP-E, P/E가 CCX로 갈린 AMD Zen5/Zen5c)은 그 섬을 E로 센다.
+//! LLC·효율 등급만으로는 "저전력 섬"과 "따로 떨어진 E 클러스터"를 가를 수 없어서다(#191 리뷰 L3).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -198,6 +200,10 @@ impl PlacementCounts {
 }
 
 /// 스레드 하나의 코어 배치(`EngineStats.corePlacement.*`): 시작부터 누적 표본 수와 종류별 비율(%).
+///
+/// 표본은 **깨어남 가중**이다(시간 가중 아님): 워커는 반복마다, 수신 스레드는 패킷마다 한 번 센다. 그래서 비율은
+/// "깨어난 순간 그 종류 코어에 있던 빈도"이고 실행 시간 비율이 아니다 — 반복이 잦은 구간(촘촘한 폴링·패킷 몰림)의 코어로
+/// 치우칠 수 있다. 실행 시간으로 읽으려면 같은 구간의 `cpu.workerPct`와 함께 본다(#191 리뷰 L2).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadPlacement {
@@ -205,13 +211,39 @@ pub(crate) struct ThreadPlacement {
     pub(crate) p_pct: f32,
     pub(crate) e_pct: f32,
     pub(crate) lp_e_pct: f32,
+    /// 원시 표본 수 [P, E, LP-E](누적). 계약 JSON에는 넣지 않는다 — 진단 타임라인의 구간 차분(`PlacementWindow`)에만 쓴다.
+    #[serde(skip)]
+    pub(crate) counts: [u64; 3],
 }
 
 impl ThreadPlacement {
-    fn from_counts(p: u64, e: u64, lp_e: u64) -> Self {
+    pub(crate) fn from_counts(p: u64, e: u64, lp_e: u64) -> Self {
         let n = p + e + lp_e;
         let pct = |x: u64| if n == 0 { 0.0 } else { (x as f64 * 100.0 / n as f64) as f32 };
-        Self { samples: n, p_pct: pct(p), e_pct: pct(e), lp_e_pct: pct(lp_e) }
+        Self { samples: n, p_pct: pct(p), e_pct: pct(e), lp_e_pct: pct(lp_e), counts: [p, e, lp_e] }
+    }
+}
+
+/// 진단 타임라인 샘플의 `corePlacement`(P1-21 후속, #191 리뷰 L1·L4): 스레드별 원시 표본 수 `[P, E, LP-E]`.
+/// 기록기(`diag`)가 같은 엔진 세션의 직전 샘플과 차분해 **구간 값**(직전 샘플 뒤로 센 수)으로 넣는다 — 누적 비율은 긴 연주
+/// 중간의 배치 변화를 희석하기 때문이다. 정수 배열이라 줄당 크기도 비율 객체보다 작다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PlacementWindow {
+    pub(crate) worker: [u64; 3],
+    pub(crate) net_recv: Option<[u64; 3]>,
+}
+
+impl PlacementWindow {
+    /// 엔진 시작부터 누적한 수.
+    pub(crate) fn cumulative(s: &CorePlacementStats) -> Self {
+        Self { worker: s.worker.counts, net_recv: s.net_recv.map(|r| r.counts) }
+    }
+
+    /// `prev`(같은 세션의 직전 누적) 뒤로 늘어난 수. 카운터는 세션 안에서 줄지 않지만 0에서 멈춘다.
+    pub(crate) fn since(&self, prev: &Self) -> Self {
+        let d = |a: [u64; 3], b: [u64; 3]| [a[0].saturating_sub(b[0]), a[1].saturating_sub(b[1]), a[2].saturating_sub(b[2])];
+        Self { worker: d(self.worker, prev.worker), net_recv: self.net_recv.map(|r| d(r, prev.net_recv.unwrap_or([0; 3]))) }
     }
 }
 
@@ -393,7 +425,10 @@ mod tests {
             c.add(k);
         }
         let s = ThreadPlacement::from_counts(c.p.load(Ordering::Relaxed), c.e.load(Ordering::Relaxed), c.lp_e.load(Ordering::Relaxed));
-        assert_eq!(s, ThreadPlacement { samples: 4, p_pct: 50.0, e_pct: 25.0, lp_e_pct: 25.0 });
+        assert_eq!(s, ThreadPlacement { samples: 4, p_pct: 50.0, e_pct: 25.0, lp_e_pct: 25.0, counts: [2, 1, 1] });
+        // 원시 수는 계약 JSON에 나가지 않는다
+        let j = serde_json::to_string(&s).unwrap();
+        assert!(!j.contains("counts"), "{j}");
         assert_eq!(ThreadPlacement::from_counts(0, 0, 0).p_pct, 0.0);
     }
 

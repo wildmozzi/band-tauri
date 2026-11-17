@@ -27,6 +27,9 @@ const STEP_RETURN_US: u64 = 3_000_000;
 /// (2초 +60ms를 6초마다 등)를 매번 계단으로 처리하면 긴 창이 스파이크를 배우지 못해 은닉이 는다(0.90 → 1.38%) — 억제 중에는
 /// 계단 감지 전처럼 버스트·긴 창이 맡는다.
 const STEP_SUPPRESS_US: u64 = 60_000_000;
+/// 계단 감시가 이만큼(패킷) 이상 끊김 없이 이어지면 판정 전이라도 늦은 패킷 버림(H1)은 감시 중 최소 지연을 잠정 바닥으로 본다(P2-16e).
+/// 꼬리 지터의 따로 떨어진 늦은 패킷(감시를 1~2개로 시작했다 끊음)은 H1이 그대로 버리게, 버스트 판정 군집(`BURST_CLUSTER`)과 같은 4.
+const STEP_PROVISIONAL_PKTS: usize = BURST_CLUSTER;
 
 /// `track_step_up` 결과.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -78,6 +81,9 @@ pub(super) struct TargetEst {
     step_blocks: usize,
     /// 감시 중 받은 패킷 수(#194 리뷰 L1: 공백을 사이에 둔 패킷 몇 개로 판정하지 않게).
     step_pkts: usize,
+    /// 감시 중 받은 패킷의 최소 transit(P2-16e). 감시가 `STEP_PROVISIONAL_PKTS`개 이상 이어지면 늦은 패킷 버림(H1)이 깊이를
+    /// 이 값 기준으로 본다(`step_floor_shift`).
+    step_min: i64,
     /// 마지막 계단 판정 시각과 계단 감지 억제 끝 시각(µs, M2).
     step_detected_us: Option<u64>,
     step_suppress_until_us: u64,
@@ -108,6 +114,7 @@ impl TargetEst {
             step_short_cap: -1.0,
             step_blocks: 0,
             step_pkts: 0,
+            step_min: 0,
             step_detected_us: None,
             step_suppress_until_us: 0,
         }
@@ -287,6 +294,7 @@ impl TargetEst {
         match self.step_since_us {
             Some(since) if transit > self.step_floor => {
                 self.step_pkts += 1;
+                self.step_min = self.step_min.min(transit);
                 let need = (STEP_UP_US as f64 * samples_per_ms() / 1000.0 / frame.max(1) as f64 / 2.0) as usize;
                 if now_us.saturating_sub(since) >= STEP_UP_US && self.step_pkts >= need {
                     self.step_since_us = None;
@@ -301,11 +309,21 @@ impl TargetEst {
                 self.step_short_cap = self.short_cap;
                 self.step_blocks = 0;
                 self.step_pkts = 1;
+                self.step_min = transit;
                 return StepWatch::Started;
             }
             None => {}
         }
         StepWatch::Idle
+    }
+
+    /// 감시 중인 지연 상승을 늦은 패킷 버림(H1)이 잠정 바닥으로 볼 깊이 차감분(샘플, P2-16e): 감시가 `STEP_PROVISIONAL_PKTS`개
+    /// 이상 끊김 없이 이어졌으면 감시 중 최소 transit − `min_transit`, 아니면 0.
+    pub(super) fn step_floor_shift(&self, min_transit: i64) -> f64 {
+        match self.step_since_us {
+            Some(_) if self.step_pkts >= STEP_PROVISIONAL_PKTS => (self.step_min - min_transit).max(0) as f64,
+            _ => 0.0,
+        }
     }
 
     /// 경로 변경(지연 하강)이 왔다(M2): 계단 판정 뒤 `STEP_RETURN_US` 안이면 그 계단은 긴 스파이크였으므로, 또는 이미 억제
