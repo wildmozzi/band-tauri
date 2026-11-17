@@ -26,6 +26,9 @@ const DETACH_WAIT: Duration = Duration::from_millis(1000);
 /// 100ms 안의 이벤트는 바로 합치므로, 이만큼 차려면 100ms 넘게 떨어진 끊김이 1만 번 있어야 한다.
 const MARK_TRACK_CAP: usize = 10_000;
 
+/// 쓰기 스레드가 한 바퀴에 갚는 앞 무음(초, `Writer::fill_owed`).
+const FILL_SECONDS_PER_PASS: u64 = 10;
+
 /// 합치는 중인 구간 하나(절대 타임라인 위치).
 #[derive(Debug, Clone, Copy)]
 struct MarkIv {
@@ -363,8 +366,13 @@ struct Track {
     /// 피어 트랙을 이름 없이(peerId 가명) 만들었다 → 정지 때 이름이 생겼으면 파일을 바꾼다.
     unnamed: bool,
     w: Option<TrackWriter>,
-    /// 쓴 프레임(타임라인 기준, 무음 포함).
+    /// 타임라인 기준 길이(무음 포함). 아직 파일에 안 쓴 `owed`·`spill`도 들어 있다.
     frames: u64,
+    /// 아직 쓰지 못한 앞 무음(프레임). 늦게 들어온 피어(녹음 60분 뒤 등)의 앞 무음을 한 번에 쓰면 쓰기 스레드가 수 초 멈춰
+    /// 녹음 링(3초)이 넘친다 — `fill_owed`가 한 바퀴에 `FILL_FRAMES_PER_PASS`씩 갚는다.
+    owed: u64,
+    /// `owed`를 갚는 동안 들어온 이 트랙 샘플(인터리브). 다 갚으면 이어 쓴다.
+    spill: Vec<f32>,
 }
 
 struct Writer {
@@ -492,9 +500,48 @@ impl Writer {
             if stopping {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(20));
+            // 갚을 앞 무음이 남았으면 쉬지 않고 다음 바퀴(링도 그 사이 비운다).
+            if !self.fill_owed(self.fill_per_pass()) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
         self.finish()
+    }
+
+    /// 한 바퀴에 갚는 앞 무음(프레임): 10초어치. FLAC 인코딩 약 10ms·WAV 24비트 약 2.9MB라 링(3초)을 비우는 주기를 늦추지 않는다.
+    fn fill_per_pass(&self) -> u64 {
+        u64::from(self.rate) * FILL_SECONDS_PER_PASS
+    }
+
+    /// 트랙들의 앞 무음(`owed`)을 합쳐 `budget`프레임까지 쓰고, 다 갚은 트랙은 모아 둔 샘플(`spill`)을 이어 쓴다.
+    /// 반환: 아직 갚을 것이 남았다.
+    fn fill_owed(&mut self, mut budget: u64) -> bool {
+        let mut err = None;
+        for t in &mut self.tracks {
+            let Some(w) = t.w.as_mut() else { continue };
+            if t.owed > 0 && budget > 0 {
+                let n = t.owed.min(budget);
+                if let Err(e) = w.write_silence(n) {
+                    err = Some(format!("{}: {e}", t.meta.file));
+                    break;
+                }
+                t.owed -= n;
+                budget -= n;
+            }
+            if t.owed == 0 && !t.spill.is_empty() {
+                if let Err(e) = w.write(&t.spill) {
+                    err = Some(format!("{}: {e}", t.meta.file));
+                    break;
+                }
+                t.spill.clear();
+                t.spill.shrink_to(0);
+            }
+        }
+        if let Some(e) = err {
+            self.fail(e);
+            return false;
+        }
+        self.tracks.iter().any(|t| t.w.is_some() && (t.owed > 0 || !t.spill.is_empty()))
     }
 
     fn fail(&mut self, e: String) {
@@ -506,6 +553,8 @@ impl Writer {
             if let Some(w) = t.w.take() {
                 let _ = w.finish();
             }
+            t.spill = Vec::new();
+            t.owed = 0;
         }
     }
 
@@ -538,7 +587,11 @@ impl Writer {
                     self.write_track(i, rel, b.frames as u64);
                 }
             }
-            self.end = self.end.max(rel + b.frames as u64);
+            // 쓰기 실패(디스크 가득 등) 뒤에는 파일이 닫혀 더 늘지 않는다: 길이(통계 `durationSec`·요약·session.json)도 멈춘다.
+            // 전에는 링을 비우는 동안 계속 늘어 요약이 파일보다 길게 보고했다(발굴 2차).
+            if self.failed.is_none() {
+                self.end = self.end.max(rel + b.frames as u64);
+            }
         }
         self.shared.frames.store(self.end, Ordering::Relaxed);
         let bytes = self.tracks.iter().filter_map(|t| t.w.as_ref()).map(|w| w.data_bytes()).sum();
@@ -594,7 +647,7 @@ impl Writer {
         };
         match TrackWriter::create(&self.folder.join(&file), self.format, 2, self.rate) {
             Ok(w) => {
-                self.tracks.push(Track { key, meta: RecordTrack { kind, name, file, peer_id }, idx, unnamed: false, w: Some(w), frames: 0 });
+                self.tracks.push(Track { key, meta: RecordTrack { kind, name, file, peer_id }, idx, unnamed: false, w: Some(w), frames: 0, owed: 0, spill: Vec::new() });
                 self.shared.tracks.store(self.tracks.len() as u32, Ordering::Relaxed);
                 Some(self.tracks.len() - 1)
             }
@@ -611,19 +664,32 @@ impl Writer {
         }
     }
 
-    /// `buf`(프레임 `frames`)를 타임라인 `rel`에 쓴다. 앞이 비었으면 무음으로 채운다.
+    /// `buf`(프레임 `frames`)를 타임라인 `rel`에 쓴다. 앞이 비었으면 무음으로 채운다. 빈 곳이 한 바퀴 몫(`fill_per_pass`)보다
+    /// 길면(늦게 들어온·다시 들어온 피어) 무음은 `owed`로 미뤄 `fill_owed`가 나눠 쓰고, 그동안 샘플은 `spill`에 모은다.
     fn write_track(&mut self, i: usize, rel: u64, frames: u64) {
+        let per_pass = self.fill_per_pass();
         let Some(t) = self.tracks.get_mut(i) else { return };
         let Some(w) = t.w.as_mut() else { return };
         let mut res = Ok(());
+        let deferred = t.owed > 0 || !t.spill.is_empty();
         if rel > t.frames {
-            res = w.write_silence(rel - t.frames);
+            let gap = rel - t.frames;
+            if deferred || gap > per_pass {
+                t.owed += gap;
+            } else {
+                res = w.write_silence(gap);
+            }
             t.frames = rel;
         }
         // 겹치는 앞부분(있을 수 없지만)은 건너뛴다.
         let skip = (t.frames - rel).min(frames) as usize;
         if res.is_ok() && skip < frames as usize {
-            res = w.write(&self.buf[skip * 2..frames as usize * 2]);
+            let data = &self.buf[skip * 2..frames as usize * 2];
+            if t.owed > 0 || !t.spill.is_empty() {
+                t.spill.extend_from_slice(data);
+            } else {
+                res = w.write(data);
+            }
             t.frames = rel + frames;
         }
         if let Err(e) = res {
@@ -696,6 +762,8 @@ impl Writer {
     }
 
     fn finish(mut self) -> RecordSummary {
+        // 링은 더 차지 않으므로 남은 앞 무음·모은 샘플을 한 번에 쓴다(실패하면 `fail`이 파일을 닫는다).
+        self.fill_owed(u64::MAX);
         let end = self.end;
         let mut bytes = 0;
         let mut err = self.failed.clone().or_else(|| self.track_error.clone());
@@ -749,6 +817,100 @@ impl Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ringbuf::traits::Producer;
+
+    /// 발굴 2차(녹음): 쓰기가 실패하면(디스크 가득 등) 파일은 닫히고 길이도 멈춘다. 전에는 링을 비우는 동안 `end`가 계속 늘어
+    /// 녹음 통계 `durationSec`·요약·session.json이 실제 파일보다 길게 보고했다.
+    #[test]
+    fn duration_stops_at_write_failure() {
+        let rate = 48_000u32;
+        let dir = std::env::temp_dir().join(format!("band-rec-failstop-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut s_p, s_c, mut b_p, b_c) = alloc_rings(rate, false);
+        let shared = Arc::new(WriterShared::default());
+        let opts = RecordOptions { format: RecordFormat::Wav24, ..Default::default() };
+        let mut w = Writer::new(&opts, dir.clone(), rate, s_c, b_c, Box::new(|_| None), shared.clone(), Arc::default(), Arc::new(MarkSink::default()), 0);
+        let n = 480u64;
+        let mut push = |k: u64| {
+            s_p.push_slice(&vec![0.25f32; n as usize * 2]);
+            let b = RecBlock { pos: k * n, frames: n as u32, mask: 1 << LOCAL_SOURCE, ..Default::default() };
+            assert!(b_p.try_push(b).is_ok());
+        };
+        push(0);
+        push(1);
+        w.drain();
+        w.fail("디스크 가득(시험)".into());
+        for k in 2..12 {
+            push(k);
+        }
+        w.drain();
+        assert_eq!(shared.frames.load(Ordering::Relaxed), 2 * n, "실패 뒤 길이가 늘었다");
+        let sum = w.finish();
+        assert!(sum.error.is_some());
+        assert!((sum.duration_sec - (2 * n) as f64 / f64::from(rate)).abs() < 1e-9, "요약 길이 {}", sum.duration_sec);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 발굴 2차(녹음): 녹음 1분 뒤 처음 들어온 피어의 앞 무음을 한 번에 쓰지 않는다. 전에는 `drain` 한 번이 그 무음을 다 썼다
+    /// — FLAC 무음 인코딩이 1분에 약 0.054초(release)라 60분 뒤 들어오면 쓰기 스레드가 3초 넘게 멈추고, 그동안 녹음 링(3초)이
+    /// 넘쳐 출력 콜백이 모든 트랙의 청크를 버렸다. 지금은 한 바퀴에 10초어치만 갚고 그동안 온 샘플은 모아 뒀다 이어 쓴다.
+    /// 결과 파일의 정렬(같은 길이, 피어 소리가 타임라인 위치에 있음)은 그대로다.
+    #[test]
+    fn late_peer_silence_is_filled_in_slices() {
+        let rate = 48_000u32;
+        let dir = std::env::temp_dir().join(format!("band-rec-fill-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut s_p, s_c, mut b_p, b_c) = alloc_rings(rate, false);
+        let opts = RecordOptions { format: RecordFormat::Wav24, ..Default::default() };
+        let resolve: PeerResolver = Box::new(|ssrc| (ssrc == 7).then(|| "peer-a".to_string()));
+        let mut w = Writer::new(&opts, dir.clone(), rate, s_c, b_c, resolve, Arc::default(), Arc::default(), Arc::new(MarkSink::default()), 0);
+        let n = 480usize;
+        let mut push = |pos: u64, peer: bool| {
+            let mut occ = [0u32; MAX_SOURCES];
+            s_p.push_slice(&vec![0.25f32; n * 2]);
+            let mut mask = 1u16 << LOCAL_SOURCE;
+            if peer {
+                s_p.push_slice(&vec![-0.5f32; n * 2]);
+                mask |= 1 << 1;
+                occ[1] = 7;
+            }
+            assert!(b_p.try_push(RecBlock { pos, frames: n as u32, mask, mix: false, occ, short: [0; MAX_SOURCES] }).is_ok());
+        };
+        // 로컬은 처음부터, 피어는 1분 뒤 처음(그 사이 로컬도 비어 있다고 둔다 — 버린 청크와 같은 꼴)
+        let late = u64::from(rate) * 60;
+        push(0, false);
+        push(late, true);
+        push(late + n as u64, true);
+        w.drain();
+        let per_pass = w.fill_per_pass();
+        let written = |w: &Writer| w.tracks.iter().map(|t| t.w.as_ref().map_or(0, |x| x.data_bytes()) / 6).collect::<Vec<_>>();
+        assert!(written(&w).iter().all(|&f| f <= n as u64), "drain이 앞 무음을 한 번에 썼다: {:?}", written(&w));
+        assert!(w.fill_owed(per_pass), "1분 무음은 한 바퀴에 끝나지 않는다");
+        let total: u64 = written(&w).iter().sum();
+        assert!(total <= n as u64 + per_pass, "한 바퀴에 {total}프레임(상한 {per_pass})");
+        let mut passes = 1;
+        while w.fill_owed(per_pass) {
+            passes += 1;
+            assert!(passes < 100);
+        }
+        let sum = w.finish();
+        assert!(sum.error.is_none(), "{:?}", sum.error);
+        let end = late as usize + 2 * n;
+        for t in &sum.tracks {
+            let mut r = hound::WavReader::open(dir.join(&t.file)).unwrap();
+            let s: Vec<i32> = r.samples::<i32>().map(|v| v.unwrap()).collect();
+            assert_eq!(s.len() / 2, end, "{}: 모든 트랙 길이가 같다", t.file);
+            if t.kind == TrackKind::Peer {
+                assert!(s[..late as usize * 2].iter().all(|&v| v == 0), "피어 앞은 무음");
+                assert!(s[late as usize * 2] < -4_000_000 && s[end * 2 - 1] < -4_000_000, "피어 소리가 타임라인 위치에 있다");
+            } else {
+                assert!(s[0] > 2_000_000 && s[n * 2] == 0 && s[late as usize * 2] > 2_000_000, "로컬 정렬");
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// PR #62 M2: 마커는 들어오는 대로 합쳐 메모리가 이벤트 수가 아니라 구간 수에 비례하고, 구간은 상한에서 멈춘다.
     #[test]
