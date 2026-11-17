@@ -498,6 +498,50 @@ describe('PerformSession 피어/엔진 상태', () => {
     expect(session.getState().metronome ?? null).toBeNull()
   })
 
+  it('장치 분실 재시작 중 시그널링이 재개(같은 id)되면 엔진을 따로 다시 열지 않는다 — 재시작이 한 번만 연다 (#208 재리뷰 L-6)', async () => {
+    const { session, start, engine } = setup({ others: ['B'] })
+    await start()
+    await loseDevice(session, engine)
+    expect(session.getState().phase).toBe('restarting')
+    await session.welcome('me', true)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    await sleep(30)
+    expect(engine.calls.filter((c) => c.startsWith('start:'))).toEqual(['start:me', 'start:me'])
+    expect(engine.calls.filter((c) => c === 'stop').length).toBeLessThanOrEqual(1)
+  })
+
+  it('장치 분실 재시작 중 새 clientId로 다시 붙으면 재시작이 새 id로 연다(한 번만) (#208 재리뷰 L-6)', async () => {
+    const { session, start, engine, env } = setup()
+    await start()
+    await loseDevice(session, engine)
+    env.selfId = 'me2'
+    await session.welcome('me2', false)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    await sleep(30)
+    expect(engine.calls.filter((c) => c.startsWith('start:'))).toEqual(['start:me', 'start:me2'])
+    expect(session.getState().sessionId).toBe('me2')
+  })
+
+  it('ssrc 충돌 재시작이 엔진을 열지 못하면 정지하고 서버에 연주 중단을 알린다 (#208 재리뷰 L-7)', async () => {
+    const { session, start, engine, types } = setup()
+    await start()
+    engine.startFailures = 1
+    session.handleSignal({ type: 'error', code: 'ssrc-conflict' })
+    await vi.waitFor(() => expect(session.getState().phase).toBe('idle'))
+    expect(session.getState().error).toContain('오디오 엔진 시작 실패')
+    expect(types().slice(-2)).toEqual(['native-leave', 'stop-performing'])
+  })
+
+  it('새 clientId 재시작이 성공하면 연주 중단을 알리지 않는다', async () => {
+    const { session, start, engine, types, env } = setup()
+    await start()
+    env.selfId = 'me2'
+    await session.welcome('me2', false)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    expect(types()).not.toContain('stop-performing')
+    expect(engine.calls.filter((c) => c.startsWith('start:'))).toEqual(['start:me', 'start:me2'])
+  })
+
   it('복구되지 않는 스트림 오류(streamFailed)는 장치 분실과 달리 지금처럼 정지한다', async () => {
     const { session, start, engine } = setup()
     await start()

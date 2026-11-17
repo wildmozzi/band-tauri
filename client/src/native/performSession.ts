@@ -277,7 +277,10 @@ export class PerformSession {
         if (gen === this.gen) {
           // 장치 분실 재시작의 시도 실패는 오류로 보이지 않는다 — 다음 시도(기본 장치)를 하거나 전부 실패하면 안내한다 (#208 리뷰 L-4)
           if (this.recoveringDevice) this.setState({ phase: 'restarting' })
-          else this.setState({ phase: 'idle', instrument: null, sessionId: null, error: `오디오 엔진 시작 실패: ${errorText(err)}` })
+          else {
+            if (!userInitiated) this.restartFailedUnannounced = true
+            this.setState({ phase: 'idle', instrument: null, sessionId: null, error: `오디오 엔진 시작 실패: ${errorText(err)}` })
+          }
         }
         return false
       }
@@ -288,9 +291,11 @@ export class PerformSession {
         await this.engine.stop().catch(() => {})
         if (gen === this.gen) {
           this.gen++
-          if (this.recoveringDevice && !stale) {
+          // 장치 재시작 중이고 아직 같은 방이면(새 clientId로 바뀐 것뿐) 다음 시도가 새 id로 연다
+          if (this.recoveringDevice && this.env.getRoomId() === roomId) {
             this.setState({ phase: 'restarting' })
           } else {
+            if (!userInitiated && !stale) this.restartFailedUnannounced = true
             this.setState({
               phase: 'idle',
               instrument: null,
@@ -491,6 +496,10 @@ export class PerformSession {
   async welcome(clientId: string, resumed: boolean): Promise<void> {
     this.clearReconnectTimer()
     if (this.state.phase === 'idle') return
+    // 장치 분실 재시작 중이면 그 재시작에 맡긴다: 재시작은 엔진을 열 때 지금 clientId를 읽어 start-performing·descriptor를
+    // 다시 알리므로 재개(같은 id)든 새 id든 따로 다시 열 필요가 없다. 여기서 또 열면 재시작이 그 엔진을 끄고 다시 열어
+    // 피어 재연결이 한 번 더 일어났다 (#208 재리뷰 L-6)
+    if (this.recoveringDevice) return
     if (resumed && clientId === this.state.sessionId && this.state.phase === 'running') {
       this.runActions(this.machine.reannounce(this.env.getOtherPerformers()))
       return
@@ -505,8 +514,19 @@ export class PerformSession {
       await this.stop({ notify: false })
       return
     }
-    await this.restartWith(last)
+    const ok = await this.restartWith(last)
+    // 다시 열지 못해 멈췄다(엔진 시작 실패 등): 재시작 앞 정지는 서버에 알리지 않았으므로 지금 알린다 —
+    // 아니면 서버는 계속 연주자로 알고 다른 사람에게 이 사람이 연주 중으로 보였다 (#208 재리뷰 L-7).
+    // 그사이 사용자가 멈췄거나(이미 알림) 장치 재시작이 이어받았으면 보내지 않는다
+    if (!ok && this.state.phase === 'idle' && !this.recoveringDevice && this.restartFailedUnannounced) {
+      this.env.send({ type: 'native-leave' })
+      this.env.send({ type: 'stop-performing' })
+    }
+    this.restartFailedUnannounced = false
   }
+
+  /** startEngine이 재시작 경로(userInitiated=false)에서 실패해 idle로 끝났다 — restart()가 서버에 알릴지 판단 */
+  private restartFailedUnannounced = false
 
   /** 방장 메트로놈을 기억해 둔 채 알림 없이 엔진을 멈춘다(재시작 앞 단계) */
   private async stopForRestart(): Promise<void> {
@@ -713,14 +733,22 @@ export class PerformSession {
     // 참고(#208 리뷰 L-5): 기본 장치로 대체해 성공하면 lastStart가 기본 장치 설정이 된다 — 이후 재시작(ssrc/clientId)도
     // 지금 실제로 쓰는 장치로 연다(사라진 장치를 다시 고르지 않음). 사용자가 다시 시작하면 그때 설정을 쓴다
     const hasExplicitDevice = last.config.inputDevice !== null || last.config.outputDevice !== null
+    let retriedForNewId = false
     for (let i = 0; i < this.deviceRecoveryDelays.length; i++) {
       const useDefault = hasExplicitDevice && i === this.deviceRecoveryDelays.length - 1
       const opts: StartOptions = useDefault ? { ...last, config: withDefaultDevices(last.config) } : last
       if (this.getState().phase === 'running') await this.stopForRestart() // getState: 위 guard의 좁힘을 피해 await 뒤 실제 값
       await new Promise((r) => setTimeout(r, this.deviceRecoveryDelays[i]))
       if (!this.recoveringDevice) return // 그 사이 사용자가 멈추거나 나갔다
+      const idBefore = this.env.getSelfId()
       const ok = await this.restartWith(opts)
       if (!this.recoveringDevice) return
+      // 시도 중에 clientId가 바뀌어(재연결) 버려진 시도는 세지 않고 같은 시도를 한 번 더 한다(새 id로)
+      if (!ok && this.env.getSelfId() !== idBefore && !retriedForNewId) {
+        retriedForNewId = true
+        i--
+        continue
+      }
       if (ok) {
         this.recoveringDevice = false
         this.setDeviceNotice(useDefault ? DEVICE_RECOVERED_DEFAULT_MESSAGE : DEVICE_RECOVERED_MESSAGE, this.deviceNoticeMs)
