@@ -1097,11 +1097,13 @@ fn public_surface_and_signatures(dir: &Path, skip: &[&str]) -> (BTreeSet<(String
                         s.push(' ');
                         s.push_str(n);
                     }
-                    add_sig(s.split('{').next().unwrap());
+                    add_sig(&without_param_names(s.split('{').next().unwrap()));
                 } else if *k != "mod " {
                     add_sig(after);
                 }
-                push(k.trim(), name);
+                // 들여 쓴 `fn`은 `impl`·`trait` 안의 메서드(인라인 모듈 안 자유 함수도 여기로 — 더 느슨한 쪽).
+                let kind = if *k == "fn " && line.starts_with([' ', '\t']) { "method" } else { k.trim() };
+                push(kind, name);
             } else if rest.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && word(&rest).len() < rest.len() && rest[word(&rest).len()..].trim_start().starts_with(':') {
                 add_sig(&rest[word(&rest).len()..]);
                 push("field", word(&rest));
@@ -1150,6 +1152,79 @@ fn use_leaves(tree: &str) -> Vec<String> {
     out
 }
 
+/// 함수 시그니처에서 인자 이름(`이름:` — `::`가 아닌 `:` 앞 단어)을 지운다. 타입만 남겨 `sig`에 인자 이름이 섞이지 않게
+/// 한다(#169 리뷰 L2).
+fn without_param_names(sig: &str) -> String {
+    let b = sig.as_bytes();
+    let mut out = String::with_capacity(sig.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c.is_ascii_alphanumeric() || c == '_' {
+            let start = i;
+            while i < b.len() && ((b[i] as char).is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let mut j = i;
+            while j < b.len() && b[j] == b' ' {
+                j += 1;
+            }
+            let is_param = b.get(j) == Some(&b':') && b.get(j + 1) != Some(&b':') && (start == 0 || b[start - 1] != b':');
+            if !is_param {
+                out.push_str(&sig[start..i]);
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 디렉터리들의 코드(주석·문자열 제외)에서 **경로·호출로** 쓰인 식별자: `::이름`, `이름(`(메서드 호출 `.이름(`·정의 `fn 이름(`
+/// 제외), `use` 문 안의 이름. 지역 변수·인자처럼 같은 낱말이 우연히 나오는 것은 세지 않는다 — 최상위 `fn`의 "밖에서 씀"
+/// 판정에 쓴다(#169 리뷰 L2).
+fn path_or_call_identifiers(dirs: &[PathBuf], skip_file: &str) -> BTreeSet<String> {
+    let mut files = Vec::new();
+    for d in dirs {
+        rs_files(d, &mut files);
+    }
+    let mut out = BTreeSet::new();
+    for f in files.iter().filter(|f| !f.ends_with(skip_file)) {
+        let code = strip(&std::fs::read_to_string(f).unwrap());
+        let b = code.as_bytes();
+        let mut in_use = false;
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i] as char;
+            if c == ';' {
+                in_use = false;
+            }
+            if !(c.is_ascii_alphanumeric() || c == '_') {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < b.len() && ((b[i] as char).is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let w = &code[start..i];
+            if w == "use" {
+                in_use = true;
+                continue;
+            }
+            let before = code[..start].trim_end();
+            let after = code[i..].trim_start();
+            let by_path = before.ends_with("::");
+            let by_call = after.starts_with('(') && !before.ends_with('.') && !before.ends_with("fn");
+            if in_use || by_path || by_call {
+                out.insert(w.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// 디렉터리들의 코드(주석·문자열 제외)에 나오는 식별자 전부.
 fn identifiers(dirs: &[PathBuf], skip_file: &str) -> BTreeSet<String> {
     let mut files = Vec::new();
@@ -1182,7 +1257,8 @@ const SURFACE_SIG_ONLY: &[(&str, &str, &str)] = &[
 ///    리뷰에서 공개 표면 변화로 보인다). 다시 쓰기: `BAND_SURFACE_BLESS=1 cargo test -p band-engine --test architecture public_surface`.
 /// 2. 목록의 이름마다 크레이트 밖(`band-dsp` → `band-engine`의 src·tests·examples와 앱 src, `band-engine` → 앱 src와 이 크레이트의
 ///    tests·examples)의 코드에 그 식별자가 한 번 이상 나온다(`SURFACE_SIG_ONLY` 제외). 밖에서 안 쓰는 `pub fn`을 더하면 1·2 둘 다로
-///    실패한다. 이름 단위라 흔한 메서드 이름(`new`)은 2를 늘 통과한다 — 그 몫은 1(목록 고정)과 컴파일러다.
+///    실패한다. 최상위 `fn`은 경로·호출로 쓰여야 한다(`path_or_call_identifiers` — 같은 낱말의 지역 변수·인자로는 통과하지 않는다,
+///    #169 리뷰 L2). 메서드·칸·타입은 이름 단위라 흔한 이름(`new`)은 2를 늘 통과한다 — 그 몫은 1(목록 diff를 리뷰가 본다)과 컴파일러다.
 /// 3. 두 크레이트 모두 `unreachable_pub`가 켜져 있다(`band-dsp`는 늘, `band-engine`은 `test-support` 구성 — `lib.rs` 주석).
 #[test]
 fn public_surface_is_fixed_and_used_outside() {
@@ -1196,7 +1272,8 @@ fn public_surface_is_fixed_and_used_outside() {
         ("band-dsp", dsp_src_dir(), &[], vec![src_dir(), me.join("tests"), me.join("examples"), app_src_dir()]),
         ("band-engine", src_dir(), &["testing"], vec![me.join("tests"), me.join("examples"), app_src_dir()]),
     ];
-    let bless = std::env::var_os("BAND_SURFACE_BLESS").is_some();
+    // 값이 정확히 `1`일 때만 다시 쓴다(셸에 남은 `=0`·빈 값으로 고정이 꺼지지 않게, #169 리뷰 L1).
+    let bless = std::env::var("BAND_SURFACE_BLESS").as_deref() == Ok("1");
     let mut problems = Vec::new();
     for (krate, dir, skip, outside) in crates {
         let actual = public_surface(&dir, skip);
@@ -1204,8 +1281,14 @@ fn public_surface_is_fixed_and_used_outside() {
         let path = surface_file(krate);
         if bless {
             let head = format!("# {krate} 공개 표면(⑨b-2). `tests/architecture.rs`의 `public_surface_is_fixed_and_used_outside`가 만든다 — 손으로 고치지 말 것.\n");
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, head + &text).unwrap();
+            let new = head + &text;
+            let old = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+            if old != new {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &new).unwrap();
+                // 다시 쓴 실행은 통과시키지 않는다 — diff를 보고 커밋한 뒤 BLESS 없이 다시 돌린다.
+                problems.push(format!("{krate}: 목록을 다시 썼다 — `git diff {}`를 확인하고 커밋할 것", path.display()));
+            }
         }
         let listed: BTreeSet<(String, String, String)> = std::fs::read_to_string(&path)
             .unwrap_or_default()
@@ -1223,10 +1306,13 @@ fn public_surface_is_fixed_and_used_outside() {
             problems.push(format!("{krate}: 목록에만 있는 pub(좁혔으면 목록을 다시 쓸 것): {e:?}"));
         }
         let ids = identifiers(&outside, "architecture.rs");
+        let calls = path_or_call_identifiers(&outside, "architecture.rs");
         let (_, sig) = public_surface_and_signatures(&dir, skip);
         for (f, k, n) in &actual {
             let name = n.rsplit("::").next().unwrap();
-            if name == "*" || ids.contains(name) || sig.contains(name) || SURFACE_SIG_ONLY.iter().any(|(c, s, _)| *c == krate && s == n) {
+            // 최상위 `fn`은 경로·호출로 쓰여야 한다(같은 낱말의 지역 변수·인자로는 통과하지 않는다). 메서드·칸·타입은 이름 단위.
+            let used = if k == "fn" { calls.contains(name) } else { ids.contains(name) };
+            if name == "*" || used || sig.contains(name) || SURFACE_SIG_ONLY.iter().any(|(c, s, _)| *c == krate && s == n) {
                 continue;
             }
             problems.push(format!("{krate}: 밖에서 이름을 부르지 않는 pub — pub(crate)로 내릴 것: {f} {k} {n}"));

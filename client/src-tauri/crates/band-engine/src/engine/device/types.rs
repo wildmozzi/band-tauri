@@ -70,7 +70,7 @@ pub struct StreamInfo {
 }
 
 /// 장치 이름(또는 엔드포인트 ID)의 안정적인 64비트 태그(FNV-1a). `StreamInfo`를 `Copy`로 두려고 문자열 대신 쓴다.
-#[cfg(any(test, feature = "backend-cpal", feature = "test-support"))]
+#[cfg(any(test, feature = "backend-cpal", feature = "test-support", all(windows, feature = "backend-wasapi")))]
 pub(crate) fn device_tag(name: &str) -> u64 {
     name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3))
 }
@@ -97,7 +97,7 @@ pub fn device_id(driver: DriverKind, name: &str) -> String {
 }
 
 /// id에서 장치 이름 부분. 접두사가 없으면 전체를 이름으로 본다.
-#[cfg(any(test, feature = "backend-cpal"))]
+#[cfg(any(test, feature = "backend-cpal", all(windows, feature = "backend-wasapi")))]
 pub(crate) fn device_name_from_id(id: &str) -> &str {
     id.split_once(ID_SEP).map(|(_, n)| n).unwrap_or(id)
 }

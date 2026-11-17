@@ -150,6 +150,12 @@ jobs:
         # 기본(둘 다)·없음과 함께 이 조합도 본다 — `backend-wasapi` 게이트 안에서만 쓰는 import가 밖에 남으면 여기서만 실패한다(#161 리뷰 L-1).
         timeout-minutes: 20
         run: cargo clippy -p band-engine --no-default-features --features backend-cpal -- -D warnings
+      - name: Check (band-engine, 자체 WASAPI 백엔드만)
+        # `backend-wasapi`만 켠 구성도 피처 조합 계약(7.4절)이다. 장치 선택(`select`, cpal 폴백)이 없어 wasapi 쪽이 쓰이지 않으므로
+        # 미사용 경고는 피할 수 없다 — clippy `-D warnings`가 아니라 컴파일만 본다(`backend-wasapi` 안에서 쓰는 항목이 다른 피처
+        # 게이트 뒤로 들어가면 E0432로 실패한다, #169 리뷰 M1).
+        timeout-minutes: 20
+        run: cargo check -p band-engine --no-default-features --features backend-wasapi
       - name: Check (릴리스 예제)
         # 예제는 개발 의존으로 `test-support`가 켜진 채 디버그·릴리스 모두 빌드돼야 한다(⑨a-2). 위 `--all-targets`는 디버그만 본다 —
         # `debug_assertions`에 기대는 cfg가 다시 생기면 여기서 실패한다(#158 리뷰 L3).
