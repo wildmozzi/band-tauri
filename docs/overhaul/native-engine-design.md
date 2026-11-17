@@ -495,7 +495,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - `remoteInputBufferMs` = 이 피어가 Ping 입력 버퍼 블록(2절)으로 알려 온 그쪽 입력 장치 버퍼(ms, 65.535ms 포화 — 이 값이면 "그 이상"인 하한). 옛 엔진(블록 없음)이거나 마지막 보고가 3초(`REPORT_STALE`) 넘었으면 null. 드라이버가 숨긴 입력 지연(루프백 보정값)은 들어 있지 않다.
 - 시험: `tests/loopback.rs` `remote_frame_and_input_buffer_reported`(A 256/10ms ↔ B 128/2.5ms, 각자 상대 값을 정확히 본다), `engine::report::tests::serializes_camel_case`, 클라이언트 `earLatency.test.ts`.
 
-`deviceLost`: 장치를 잃었다. 이때 `running`은 false다. 엔진은 스스로 다시 열지 않는다. 프론트(`performSession.pollStats`)가 `deviceLost && !streamFailed`를 보면 합주를 끝내지 않고 엔진만 다시 연다(#206 후보).
+`deviceLost`: 장치를 잃었다. 이때 `running`은 false다. 엔진은 스스로 다시 열지 않는다. 프론트(`performSession.pollStats`)가 `deviceLost && !streamFailed`를 **2회 연속**(콜백 1초 멈춤도 deviceLost로 보였다가 곧 풀리므로 디바운스) 보면 합주를 끝내지 않고 엔진만 다시 연다(#206 후보, #208).
+  - 다시 여는 동안 세션 phase는 `restarting`이다. 화면은 연주자 상태(내 항목·악기)를 유지하고, 엔진에 묶인 것(관람 방송·레벨)은 꺼 둔다. 그동안 사용자의 연주 시작은 무시하고, 연주 중단(관람자로 전환·퇴장)은 재시작을 취소하고 서버에 `native-leave`·`stop-performing`을 보낸다. 시도 실패 오류는 보이지 않는다.
   - 서버 세션·연주자 상태는 그대로 둔다(`stop-performing`·`native-leave`를 보내지 않고 같은 clientId로 다시 `start-performing` + 새 descriptor). 관람 방송은 엔진이 다시 뜨면 방송 담당이 다시 offer한다.
   - 같은 설정으로 다시 시도하고, 장치를 지정했다면 마지막 시도는 기본 장치(`inputDevice`·`outputDevice` null, 입력 채널 처음부터)로 연다(기본 2회, 0.5초·1.5초 뒤).
   - 모두 실패하면 정지하고 서버에 알린다(`native-leave`·`stop-performing`). 60초 안에 장치 분실이 3번을 넘으면 장치가 계속 흔들리는 것으로 보고 재시작하지 않고 정지한다.

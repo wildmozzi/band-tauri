@@ -53,7 +53,11 @@ export interface SessionEnv {
   getOtherPerformers(): string[]
 }
 
-export type PerformPhase = 'idle' | 'starting' | 'running'
+/**
+ * restarting: 서버 세션은 그대로 두고 엔진만 다시 여는 중(장치 분실 자동 재시작, ssrc/key 충돌·새 clientId 재시작).
+ * 화면은 연주자 상태를 유지하고(악기·연주자 항목), 사용자의 연주 시작은 무시, 연주 중단은 재시작을 취소하고 서버에 알린다 (#208 리뷰 M-1)
+ */
+export type PerformPhase = 'idle' | 'starting' | 'restarting' | 'running'
 
 export interface PerformState {
   phase: PerformPhase
@@ -181,6 +185,8 @@ export class PerformSession {
   private firstAudio: FirstAudioTrack | null = null
   /** 장치 분실 자동 재시작 중. 바깥(사용자·퇴장)에서 stop하면 false가 되어 재시작을 그만둔다 */
   private recoveringDevice = false
+  /** deviceLost를 연속으로 본 폴링 수(디바운스) */
+  private deviceLostPolls = 0
   /** 최근 장치 분실 시각들(반복 판정) */
   private deviceLostTimes: number[] = []
   private deviceNoticeTimer: ReturnType<typeof setTimeout> | null = null
@@ -241,7 +247,12 @@ export class PerformSession {
   private async startEngine(opts: StartOptions, userInitiated: boolean): Promise<boolean> {
     if (this.state.phase === 'running') return true
     if (this.state.phase === 'starting') return false
-    if (userInitiated) this.lastKeyConflictAt = -Infinity
+    // 재시작 중에는 사용자의 시작을 받지 않는다(재시작이 그 엔진을 끄고 옛 설정으로 다시 열던 경합, #208 리뷰 M-1)
+    if (this.state.phase === 'restarting' && userInitiated) return false
+    if (userInitiated) {
+      this.lastKeyConflictAt = -Infinity
+      this.hostedMetronomeForRestart = null // 옛 재시작이 남긴 방장 메트로놈을 새 세션에 켜지 않는다 (#208 리뷰 L-2)
+    }
     const selfId = this.env.getSelfId()
     const roomId = this.env.getRoomId()
     if (!selfId || !roomId) {
@@ -251,7 +262,9 @@ export class PerformSession {
 
     const gen = ++this.gen
     this.lastStart = opts
-    this.setState({ phase: 'starting', error: null, instrument: opts.instrument, sessionId: selfId })
+    // 재시작 중이면 'restarting'을 유지한다(연주자 화면 유지). 사용자 시작은 'starting'
+    const restarting = this.state.phase === 'restarting'
+    this.setState({ phase: restarting ? 'restarting' : 'starting', error: null, instrument: opts.instrument, sessionId: selfId })
     // 연주 시작(P1-20): 지금 알고 있는 연주자는 이 시각부터, 뒤에 들어오는 연주자는 처음 추가한 시각부터 잰다
     this.firstAudio = newFirstAudioTrack(this.now(), this.env.getOtherPerformers())
 
@@ -261,7 +274,11 @@ export class PerformSession {
       try {
         descriptor = await this.engine.start(opts.config, selfId)
       } catch (err) {
-        if (gen === this.gen) this.setState({ phase: 'idle', instrument: null, sessionId: null, error: `오디오 엔진 시작 실패: ${errorText(err)}` })
+        if (gen === this.gen) {
+          // 장치 분실 재시작의 시도 실패는 오류로 보이지 않는다 — 다음 시도(기본 장치)를 하거나 전부 실패하면 안내한다 (#208 리뷰 L-4)
+          if (this.recoveringDevice) this.setState({ phase: 'restarting' })
+          else this.setState({ phase: 'idle', instrument: null, sessionId: null, error: `오디오 엔진 시작 실패: ${errorText(err)}` })
+        }
         return false
       }
 
@@ -271,17 +288,22 @@ export class PerformSession {
         await this.engine.stop().catch(() => {})
         if (gen === this.gen) {
           this.gen++
-          this.setState({
-            phase: 'idle',
-            instrument: null,
-            sessionId: null,
-            error: stale ? null : '엔진이 올바르지 않은 연결 정보를 반환했습니다.',
-          })
+          if (this.recoveringDevice && !stale) {
+            this.setState({ phase: 'restarting' })
+          } else {
+            this.setState({
+              phase: 'idle',
+              instrument: null,
+              sessionId: null,
+              error: stale ? null : '엔진이 올바르지 않은 연결 정보를 반환했습니다.',
+            })
+          }
         }
         return false
       }
 
       this.deadStats = 0
+      this.deviceLostPolls = 0
       this.localSsrc = descriptor.ssrc
       this.setState({ phase: 'running' })
       // 엔진이 뜬 뒤에 연주 시작 알림 → descriptor 브로드캐스트 (서버가 연주자로 인정해야 중계함)
@@ -296,15 +318,20 @@ export class PerformSession {
 
   /**
    * notify=true면 native-leave + stop-performing 전송.
-   * keepDeviceRecovery는 장치 분실 재시작이 안에서 부르는 정지만 쓴다 — 그 밖의 정지(사용자·퇴장·다른 오류)는 재시작을 그만두게 한다
+   * forRestart는 재시작(장치 분실·ssrc/key 충돌·새 clientId)이 안에서 부르는 정지만 쓴다: phase를 'restarting'으로 두고(악기 유지)
+   * 서버에 알리지 않는다. 그 밖의 정지(사용자·퇴장·다른 오류)는 진행 중인 재시작을 그만두게 하고, 재시작 중이었으면 서버에도 알린다
    */
-  async stop(opts: { notify?: boolean; error?: string | null; keepDeviceRecovery?: boolean } = {}): Promise<void> {
-    const { notify = true, error = null } = opts
-    if (!opts.keepDeviceRecovery && this.recoveringDevice) {
-      this.recoveringDevice = false
-      this.setDeviceNotice(null)
+  async stop(opts: { notify?: boolean; error?: string | null; forRestart?: boolean } = {}): Promise<void> {
+    const { notify = true, error = null, forRestart = false } = opts
+    if (!forRestart) {
+      if (this.recoveringDevice) {
+        this.recoveringDevice = false
+        this.setDeviceNotice(null)
+      }
+      this.hostedMetronomeForRestart = null // (#208 리뷰 L-2)
     }
-    const wasRunning = this.state.phase === 'running'
+    // 재시작 중(서버는 아직 연주자로 안다)에 멈추면 서버에도 연주 중단을 알린다
+    const wasRunning = this.state.phase === 'running' || (this.state.phase === 'restarting' && !forRestart)
     if (this.state.phase === 'idle') {
       if (error) this.setState({ error })
       return
@@ -319,7 +346,8 @@ export class PerformSession {
     // 연주자가 아니면 서버가 메트로놈을 보내지 않으므로 잊는다(다시 시작하면 서버가 현재 상태를 보내 준다)
     this.firstAudio = null
     this.remoteMetronome = null
-    this.setState({ phase: 'idle', instrument: null, sessionId: null, stats: null, error, relayError: null, metronome: null, firstAudio: null })
+    if (forRestart) this.setState({ phase: 'restarting', stats: null, error, relayError: null, metronome: null, firstAudio: null })
+    else this.setState({ phase: 'idle', instrument: null, sessionId: null, stats: null, error, relayError: null, metronome: null, firstAudio: null })
     if (wasRunning) {
       if (notify) {
         this.env.send({ type: 'native-leave' })
@@ -490,12 +518,12 @@ export class PerformSession {
       this.hostedMetronomeForRestart = hosted
       this.env.send({ type: 'metronome', state: { running: false, bpm: hosted.bpm, beatsPerBar: hosted.beatsPerBar, startUs: 0 } })
     }
-    await this.stop({ notify: false, keepDeviceRecovery: true })
+    await this.stop({ notify: false, forRestart: true })
   }
 
   /** 엔진을 (멈추고) opts로 다시 시작. 성공하면 true */
   private async restartWith(opts: StartOptions): Promise<boolean> {
-    if (this.state.phase !== 'idle') await this.stopForRestart()
+    if (this.state.phase === 'running' || this.state.phase === 'starting') await this.stopForRestart()
     const ok = await this.startEngine(opts, false)
     const hosted = this.hostedMetronomeForRestart
     if (ok) this.hostedMetronomeForRestart = null
@@ -638,11 +666,18 @@ export class PerformSession {
     if (!stats.running) {
       // 장치 분실(헤드폰 연결로 기본 장치 변경, 공유 모드 포맷 변경, USB 분리): 합주를 끝내지 않고 엔진만 다시 연다.
       // 복구되지 않는 스트림 오류(streamFailed)와 원인 모를 정지는 아래처럼 정지한다 (#206 후보, 엔진 계약 native-engine-design.md deviceLost)
+      // 한 번의 통계로는 재시작하지 않는다: 콜백이 잠깐(1초) 멈춘 것도 deviceLost로 보이고 곧 풀린다 —
+      // 재시작은 피어 재연결·메트로놈 새 박 0·녹음 종료를 부르므로 deadStatsThreshold번 연속일 때만 (#208 리뷰 L-1)
       if (stats.deviceLost && !stats.streamFailed && this.lastStart) {
         this.deadStats = 0
-        void this.recoverFromDeviceLoss()
+        this.deviceLostPolls++
+        if (this.deviceLostPolls >= this.deadStatsThreshold) {
+          this.deviceLostPolls = 0
+          void this.recoverFromDeviceLoss()
+        }
         return
       }
+      this.deviceLostPolls = 0
       this.deadStats++
       if (this.deadStats >= this.deadStatsThreshold) {
         await this.stop({ notify: true, error: '오디오 엔진이 멈췄습니다 (장치 분리 등). 연주를 다시 시작해주세요.' })
@@ -650,6 +685,7 @@ export class PerformSession {
       return
     }
     this.deadStats = 0
+    this.deviceLostPolls = 0
     if (this.firstAudio) this.firstAudio = noteStats(this.firstAudio, stats.peers, addedAtAtRequest)
     this.setState({ stats, firstAudio: summarizeFirstAudio(this.firstAudio, stats.peers) })
     this.maybeRequestRelayTokenFor(stats)
@@ -674,11 +710,13 @@ export class PerformSession {
 
     this.recoveringDevice = true
     this.setDeviceNotice(DEVICE_RECOVERING_MESSAGE)
+    // 참고(#208 리뷰 L-5): 기본 장치로 대체해 성공하면 lastStart가 기본 장치 설정이 된다 — 이후 재시작(ssrc/clientId)도
+    // 지금 실제로 쓰는 장치로 연다(사라진 장치를 다시 고르지 않음). 사용자가 다시 시작하면 그때 설정을 쓴다
     const hasExplicitDevice = last.config.inputDevice !== null || last.config.outputDevice !== null
     for (let i = 0; i < this.deviceRecoveryDelays.length; i++) {
       const useDefault = hasExplicitDevice && i === this.deviceRecoveryDelays.length - 1
       const opts: StartOptions = useDefault ? { ...last, config: withDefaultDevices(last.config) } : last
-      if (this.getState().phase !== 'idle') await this.stopForRestart() // getState: 위 guard의 좁힘을 피해 await 뒤 실제 값
+      if (this.getState().phase === 'running') await this.stopForRestart() // getState: 위 guard의 좁힘을 피해 await 뒤 실제 값
       await new Promise((r) => setTimeout(r, this.deviceRecoveryDelays[i]))
       if (!this.recoveringDevice) return // 그 사이 사용자가 멈추거나 나갔다
       const ok = await this.restartWith(opts)

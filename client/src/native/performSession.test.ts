@@ -366,17 +366,26 @@ describe('PerformSession 피어/엔진 상태', () => {
     expect(session.getState().firstAudio).toBeNull()
   })
 
+  /** 엔진이 장치를 잃었다: 통계가 deviceLost를 2번 연속 보고해야 재시작한다(디바운스) */
+  async function loseDevice(session: PerformSession, engine: FakeEngine) {
+    engine.statsRunning = false
+    engine.deviceLost = true
+    engine.running = false
+    await session.pollStats()
+    await session.pollStats()
+    // 다시 연 엔진은 정상 통계를 낸다
+    engine.statsRunning = true
+    engine.deviceLost = false
+  }
+
   it('장치 분실(deviceLost): 정지하지 않고 엔진만 같은 설정으로 다시 열고 안내한다 — 서버에 연주 중단을 알리지 않는다', async () => {
     const { session, start, engine, types, sent } = setup({ others: ['B'] })
     await start()
     const sentBefore = sent.length
-    engine.statsRunning = false
-    engine.deviceLost = true
-    engine.running = false // 엔진은 장치를 잃고 멈췄다
-    await session.pollStats()
+    await loseDevice(session, engine)
     expect(session.getState().deviceNotice).toBe(DEVICE_RECOVERING_MESSAGE)
-    engine.statsRunning = true
-    engine.deviceLost = false
+    // 재시작하는 동안 연주자 상태(악기)를 유지한다 — 화면이 관람자로 바뀌지 않는다 (#208 리뷰 M-1)
+    expect(session.getState()).toMatchObject({ phase: 'restarting', instrument: 'guitar', error: null })
     await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
     expect(session.getState()).toMatchObject({ error: null, instrument: 'guitar', deviceNotice: DEVICE_RECOVERED_MESSAGE })
     expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(2)
@@ -390,29 +399,45 @@ describe('PerformSession 피어/엔진 상태', () => {
     await vi.waitFor(() => expect(session.getState().deviceNotice).toBeNull())
   })
 
-  it('장치 분실: 지정한 장치를 다시 열지 못하면 기본 장치로 다시 시작하고 안내한다', async () => {
+  it('deviceLost가 한 번 보이고 곧 풀리면(콜백 순간 정지) 재시작하지 않는다 (#208 리뷰 L-1)', async () => {
+    const { session, start, engine } = setup()
+    await start()
+    engine.statsRunning = false
+    engine.deviceLost = true
+    await session.pollStats()
+    engine.statsRunning = true
+    engine.deviceLost = false
+    await session.pollStats()
+    engine.statsRunning = false
+    engine.deviceLost = true
+    await session.pollStats() // 연속이 아니므로 다시 1번째
+    await sleep(30)
+    expect(session.getState().phase).toBe('running')
+    expect(session.getState().deviceNotice ?? null).toBeNull()
+    expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(1)
+  })
+
+  it('장치 분실: 지정한 장치를 다시 열지 못하면 기본 장치로 다시 시작하고, 실패한 시도의 오류는 보이지 않는다', async () => {
     const { session, start, engine } = setup()
     const chosen = { ...DEFAULT_ENGINE_CONFIG, inputDevice: 'usb-in', outputDevice: 'usb-out', channels: 1 as const, inputChannels: [1] as [number] }
     await start(chosen)
-    engine.statsRunning = false
-    engine.deviceLost = true
-    engine.running = false
     engine.startFailures = 1 // 같은 장치로는 실패(USB 분리)
-    await session.pollStats()
+    const errors: (string | null)[] = []
+    session.subscribe((st) => errors.push(st.error))
+    await loseDevice(session, engine)
     await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
     expect(engine.startConfigs[1]).toMatchObject({ inputDevice: 'usb-in', outputDevice: 'usb-out' })
     expect(engine.startConfigs[2]).toMatchObject({ inputDevice: null, outputDevice: null, inputChannels: [0] })
     expect(session.getState().deviceNotice).toBe(DEVICE_RECOVERED_DEFAULT_MESSAGE)
+    // 첫 시도 실패("오디오 엔진 시작 실패")는 재시작 중 안내와 함께 보이지 않는다 (#208 리뷰 L-4)
+    expect(errors.every((e) => e === null)).toBe(true)
   })
 
   it('장치 분실: 재시작이 모두 실패하면 정지하고 서버에 알리며 안내한다', async () => {
     const { session, start, engine, types } = setup()
     await start()
-    engine.statsRunning = false
-    engine.deviceLost = true
-    engine.running = false
     engine.startFailures = 5
-    await session.pollStats()
+    await loseDevice(session, engine)
     await vi.waitFor(() => expect(session.getState().error).toBe(DEVICE_LOST_FAILED_MESSAGE))
     expect(session.getState()).toMatchObject({ phase: 'idle', deviceNotice: null })
     expect(types().slice(-2)).toEqual(['native-leave', 'stop-performing'])
@@ -422,34 +447,55 @@ describe('PerformSession 피어/엔진 상태', () => {
     const { session, start, engine, clock } = setup()
     await start()
     for (let i = 0; i < 3; i++) {
-      engine.statsRunning = false
-      engine.deviceLost = true
-      engine.running = false
       clock.now += 1000
-      await session.pollStats()
-      engine.statsRunning = true
-      engine.deviceLost = false
+      await loseDevice(session, engine)
       await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
     }
-    engine.statsRunning = false
-    engine.deviceLost = true
     clock.now += 1000
-    await session.pollStats()
+    await loseDevice(session, engine)
     await vi.waitFor(() => expect(session.getState().phase).toBe('idle'))
     expect(session.getState().error).toBe(DEVICE_LOST_REPEAT_MESSAGE)
   })
 
-  it('장치 분실 재시작 중에 사용자가 멈추면 재시작을 그만둔다', async () => {
-    const { session, start, engine } = setup()
+  it('장치 분실 재시작 중에 사용자가 멈추면 재시작을 그만두고 서버에 연주 중단을 알린다', async () => {
+    const { session, start, engine, types } = setup()
     await start()
-    engine.statsRunning = false
-    engine.deviceLost = true
-    engine.running = false
-    await session.pollStats()
+    await loseDevice(session, engine)
+    expect(session.getState().phase).toBe('restarting')
     await session.stop()
     await sleep(30)
     expect(session.getState()).toMatchObject({ phase: 'idle', deviceNotice: null })
     expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(1)
+    // 재시작 중에도 서버는 연주자로 알고 있었다 → 사용자의 중단은 알린다
+    expect(types().slice(-2)).toEqual(['native-leave', 'stop-performing'])
+  })
+
+  it('장치 분실 재시작 중의 사용자 연주 시작은 무시된다 — 재시작이 그 엔진을 끄고 옛 설정으로 다시 열던 경합 (#208 리뷰 M-1)', async () => {
+    const { session, start, engine } = setup()
+    await start()
+    await loseDevice(session, engine)
+    expect(await session.start({ instrument: 'drums', config: DEFAULT_ENGINE_CONFIG, nickname: 'n', isHost: false })).toBe(false)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    // 시작은 재시작 하나뿐(사용자 시작이 엔진을 열었다 닫히지 않음)
+    expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(2)
+    expect(session.getState().instrument).toBe('guitar')
+  })
+
+  it('재시작 중 사용자가 멈추면 기억해 둔 방장 메트로놈을 지운다 — 다음 재시작이 옛 BPM을 저절로 켜지 않는다 (#208 리뷰 L-2)', async () => {
+    const { session, start, engine, sent } = setup()
+    await start()
+    await session.setHostMetronome(true, 100, 4)
+    await loseDevice(session, engine)
+    await session.stop()
+    await sleep(30)
+    // 다시 시작한 뒤 ssrc 충돌 재시작이 일어나도 메트로놈을 켜지 않는다
+    await start()
+    const metroBefore = sent.filter((m) => m.type === 'metronome').length
+    session.handleSignal({ type: 'error', code: 'ssrc-conflict' })
+    await vi.waitFor(() => expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(3))
+    await flush()
+    expect(sent.filter((m) => m.type === 'metronome').length).toBe(metroBefore)
+    expect(session.getState().metronome ?? null).toBeNull()
   })
 
   it('복구되지 않는 스트림 오류(streamFailed)는 장치 분실과 달리 지금처럼 정지한다', async () => {
