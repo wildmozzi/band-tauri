@@ -12,26 +12,29 @@ use band_dsp::stats::{SeqCell, SeqWriter};
 
 /// 올려 둔 클릭의 제 시각이 이만큼(초) 넘게 지났다고 다시 계산되면(콜백 공백 뒤) 울리지 않고 건너뛴다.
 const STALE_SKIP_S: f64 = 0.005;
+/// 계획 세대가 바뀔 때 올려 둔 클릭을 새 계획의 박으로 보고 그대로 두는 허용 오차(초). 같은 계획을 다시 넣으면
+/// 반올림 1프레임 안이고, 시계 추정이 그 사이 움직여도 정렬 목표(2ms)의 절반 안이면 같은 박이다.
+const GEN_KEEP_TOL_S: f64 = 0.001;
 
 /// 워커가 0.1초마다(또는 계획이 바뀐 반복에) 내는 상태 한 벌. 전부 수·불리언이라 seqlock 칸(`SeqCell`)에 싣는다.
 /// `MetronomeStats`에서 `ref_peer_id`(문자열 — 제어 쪽 계획에서 읽는다)와 클릭 카운터(`ClickShared` 원자값)를 뺀 것.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(crate) struct MetroReport {
+pub struct MetroReport {
     /// 워커가 적용한 계획 세대.
-    pub(crate) applied_gen: u64,
-    pub(crate) running: bool,
-    pub(crate) synced: bool,
-    pub(crate) bpm: f64,
-    pub(crate) beats_per_bar: u32,
-    pub(crate) start_us: f64,
-    pub(crate) clock_offset_ms: Option<f64>,
-    pub(crate) clock_rtt_ms: Option<f64>,
-    pub(crate) drift_ppm: Option<f64>,
-    pub(crate) beat: Option<u64>,
-    pub(crate) output_latency_ms: Option<f64>,
-    pub(crate) output_latency_source: Option<OutputLatencySource>,
-    pub(crate) ref_clock_unsupported: bool,
-    pub(crate) clock_extrapolation_ms: Option<f64>,
+    pub applied_gen: u64,
+    pub running: bool,
+    pub synced: bool,
+    pub bpm: f64,
+    pub beats_per_bar: u32,
+    pub start_us: f64,
+    pub clock_offset_ms: Option<f64>,
+    pub clock_rtt_ms: Option<f64>,
+    pub drift_ppm: Option<f64>,
+    pub beat: Option<u64>,
+    pub output_latency_ms: Option<f64>,
+    pub output_latency_source: Option<OutputLatencySource>,
+    pub ref_clock_unsupported: bool,
+    pub clock_extrapolation_ms: Option<f64>,
 }
 
 /// `MetroReport` 칸 수.
@@ -122,8 +125,8 @@ const NO_LOOPBACK_OFFSET: u64 = u64::MAX;
 ///
 /// 제어 쪽 끝이다. 워커 쪽 끝 `MetronomeRt`와 짝으로만 만든다(`pair`).
 #[derive(Debug)]
-pub(crate) struct MetronomeCtl {
-    /// (세대, 계획). 제어 평면끼리만 기다린다(`set_plan`, `stats`의 `ref_peer_id` 복제).
+pub struct MetronomeCtl {
+    /// (세대, 계획). 제어 평면끼리만 기다린다(`set_plan`, `stats`의 `ref_peer_id` 참조 복제).
     plan: Mutex<(u64, MetronomePlan)>,
     /// `plan.0`의 사본. `set_plan`이 락 안에서 새 세대를 쓴 뒤 발행한다.
     plan_gen: AtomicU64,
@@ -134,12 +137,20 @@ pub(crate) struct MetronomeCtl {
     pub(crate) click: Arc<ClickShared>,
     /// 이 장치 구성의 루프백 보정값 `offsetMs`의 `f64` 비트(PR #34 M2(a)). 드라이버가 출력 지연을 보고하지 않을 때 쓴다.
     loopback_offset: AtomicU64,
+    /// 계획에서 내려온 옛 `ref_peer_id`: (그 문자열이 계획에서 빠진 세대, 문자열). 워커가 그 세대 이상을 적용했다고
+    /// 보고하면(워커 복사본이 더는 쥐지 않음) 제어 평면이 놓는다 — 워커가 옛 문자열의 마지막 참조가 되어 해제하지 않게
+    /// (#168 리뷰 M-1). 워커는 이 칸을 보지 않는다. 용량 `RETIRED_CAP`은 `pair`에서 미리 잡는다.
+    retired: Mutex<Vec<(u64, Arc<str>)>>,
 }
+
+/// `MetronomeCtl::retired` 상한. 워커가 이만큼의 계획 변경을 적용하지 못한 채(멈춤·정지) 더 쌓이면 가장 옛 것부터 놓는다 —
+/// 그때만 워커가 마지막 참조일 수 있다(워커가 그 문자열을 아직 쥐고 있을 때).
+const RETIRED_CAP: usize = 16;
 
 /// `MetronomeCtl`의 워커 쪽 끝. `Clone`이 아니고 `pair`가 하나만 만든다 — 상태 보고 칸의 작성자가 하나임이 타입으로
 /// 보장된다(`publish(&mut self)`, #141 리뷰 M-1). 모든 메서드는 기다리지 않는다(원자값·`try_lock`).
 #[derive(Debug)]
-pub(crate) struct MetronomeRt {
+pub struct MetronomeRt {
     ctl: Arc<MetronomeCtl>,
     /// 상태 보고 칸의 작성 끝(하나뿐 — `SeqCell::pair`).
     report: SeqWriter<REPORT_WORDS>,
@@ -147,7 +158,7 @@ pub(crate) struct MetronomeRt {
 
 impl MetronomeCtl {
     /// (제어 쪽 끝, 워커 쪽 끝).
-    pub(crate) fn pair() -> (Arc<Self>, MetronomeRt) {
+    pub fn pair() -> (Arc<Self>, MetronomeRt) {
         let (report_cell, report) = SeqCell::pair();
         let ctl = Arc::new(Self {
             plan: Mutex::default(),
@@ -156,6 +167,7 @@ impl MetronomeCtl {
             report: report_cell,
             click: Arc::default(),
             loopback_offset: AtomicU64::new(NO_LOOPBACK_OFFSET),
+            retired: Mutex::new(Vec::with_capacity(RETIRED_CAP)),
         });
         (ctl.clone(), MetronomeRt { ctl, report })
     }
@@ -178,18 +190,41 @@ impl MetronomeCtl {
         }
     }
 
-    pub(crate) fn set_plan(&self, plan: MetronomePlan) {
-        let mut p = self.plan.lock();
-        p.0 += 1;
-        p.1 = plan;
-        self.plan_gen.store(p.0, Ordering::Release);
+    /// 새 계획을 넣고 세대를 발행한다. `ref_peer_id` 문자열은 워커가 해제하지 않게 다룬다(#168 리뷰 M-1):
+    /// - 지금 계획과 같은 문자열이면 지금의 `Arc`를 그대로 쓴다(새 `Arc`는 부른 쪽이 놓는다) — 같은 피어 재전송은 워커 쪽 변화 0.
+    /// - 다르면 옛 `Arc`를 `retired`로 옮기고, 워커가 그 세대 이상을 적용했다고 보고한 뒤의 `set_plan`에서 놓는다.
+    pub fn set_plan(&self, mut plan: MetronomePlan) {
+        // 락 밖에서 읽는다(보고가 늦으면 더 작게 보일 뿐 — 놓는 시점이 늦어지는 쪽이라 안전하다).
+        let applied = MetroReport::unpack(&self.report.read()).applied_gen;
+        let (gen, old) = {
+            let mut p = self.plan.lock();
+            if plan.ref_peer_id.as_deref() == p.1.ref_peer_id.as_deref() {
+                plan.ref_peer_id.clone_from(&p.1.ref_peer_id);
+            }
+            p.0 += 1;
+            let gen = p.0;
+            let old = std::mem::replace(&mut p.1, plan).ref_peer_id;
+            let still = old.as_ref().is_some_and(|o| p.1.ref_peer_id.as_ref().is_some_and(|n| Arc::ptr_eq(o, n)));
+            self.plan_gen.store(gen, Ordering::Release);
+            (gen, if still { None } else { old })
+        };
+        let mut r = self.retired.lock();
+        r.retain(|(g, _)| *g > applied);
+        if let Some(o) = old {
+            if r.len() == RETIRED_CAP {
+                r.remove(0);
+            }
+            r.push((gen, o));
+        }
     }
 
     /// `EngineStats.metronome`. 수 필드는 워커가 마지막으로 **적용한** 계획과 계산값(칸 한 벌)이고, `ref_peer_id`만 제어 쪽
     /// 계획에서 읽는다 — `set_plan` 직후 워커 반복 1회(약 1ms) 동안 수 필드보다 한 발 앞설 수 있다(계약 문서 4절).
     pub(crate) fn stats(&self) -> MetronomeStats {
         let r = MetroReport::unpack(&self.report.read());
-        let ref_peer_id = self.plan.lock().1.ref_peer_id.clone();
+        // 락 안은 참조 수 증가 하나(할당 없음, #143 리뷰 L-4). 계약의 문자열은 락 밖에서 만든다.
+        let ref_peer = self.plan.lock().1.ref_peer_id.clone();
+        let ref_peer_id = ref_peer.as_deref().map(String::from);
         MetronomeStats {
             running: r.running,
             synced: r.synced,
@@ -226,8 +261,8 @@ impl MetronomeCtl {
 
 impl MetronomeRt {
     /// 반복마다. 세대가 `mine.0`과 같으면 원자 읽기 하나로 끝난다. 다르면 `try_lock`으로 복사한다 — 못 잡으면(제어 스레드가
-    /// `set_plan`·`stats` 중) 옛 계획으로 이번 반복을 돌고 다음 반복에 다시 본다. 할당은 `ref_peer_id` 문자열이 길어질 때뿐.
-    pub(crate) fn refresh_plan(&self, mine: &mut (u64, MetronomePlan)) {
+    /// `set_plan`·`stats` 중) 옛 계획으로 이번 반복을 돌고 다음 반복에 다시 본다. 할당 없음(`ref_peer_id`는 `Arc<str>` — 참조 수만 바뀐다).
+    pub fn refresh_plan(&self, mine: &mut (u64, MetronomePlan)) {
         let c = &self.ctl;
         if c.plan_gen.load(Ordering::Acquire) == mine.0 {
             return;
@@ -242,7 +277,7 @@ impl MetronomeRt {
         m.bpm = src.bpm;
         m.beats_per_bar = src.beats_per_bar;
         m.start_us = src.start_us;
-        m.ref_peer_id.clone_from(&src.ref_peer_id);
+        m.ref_peer_id.clone_from(&src.ref_peer_id); // `Arc` 참조 수(옛 값의 마지막 참조였다면 여기서 해제)
     }
 
     pub(crate) fn loopback_offset_ms(&self) -> Option<f64> {
@@ -254,7 +289,7 @@ impl MetronomeRt {
     }
 
     /// 상태 한 벌을 낸다(기다리지 않는다). `&mut self` + `Clone` 아님 = 작성자 하나.
-    pub(crate) fn publish(&mut self, r: &MetroReport) {
+    pub fn publish(&mut self, r: &MetroReport) {
         self.report.write(&r.pack());
     }
 }
@@ -327,11 +362,51 @@ impl BeatScheduler {
         }
     }
 
+    /// 계획 세대가 바뀐 반복: 올려 둔 클릭이 새 계획에서도 박 자리(±`GEN_KEEP_TOL_S`)면 그 박으로 이름만 바꿔 둔다 —
+    /// 강박 여부가 달라졌으면 강박 비트만 CAS로 고친다. 단 클릭이 콜백 2개 안(곧 시작하거나 진행 중인 콜백이 가져갈 구간)이면
+    /// 고치지 않고 옛 강박으로 울린다: 콜백의 `load`와 CAS 사이에 워커 CAS가 끼면 콜백 CAS가 실패해 다음 콜백에서 늦은
+    /// 클릭이 되기 때문이다(#168 리뷰 L-1). 콜백 2개 ~ 가드 구간에서도 시각 추정이 어긋나 겹치면 같은 결과(늦은 클릭 1)가
+    /// 날 수 있지만, 그 구간은 다음 콜백이 가져가지 않는다.
+    /// 아니면 거둔다(새 계획에 없는 박은 울리지 않는다).
+    ///
+    /// 전에는 세대가 바뀌면 무조건 거뒀다: 클릭이 이미 가드(콜백 2개 + 2ms) 안이면 새 `k_min`이 그 박을 건너뛰어,
+    /// 같은 계획을 다시 넣어도 박 하나가 빠졌다(#143 리뷰 L-5). 가드 밖 클릭은 거둔 뒤 같은 자리에 다시 올려 결과가 같았다.
+    fn adopt_pending(&mut self, plan: &MetronomePlan, offset: f64, clock: &OutClock, sh: &ClickShared) {
+        let Some((_, raw)) = self.pending else {
+            return;
+        };
+        let (frame, accent) = decode(raw);
+        let period = plan.period_us();
+        // 이 클릭이 귀에 닿는 기준 시계 시각 → 새 계획의 가장 가까운 박
+        let k = ((clock.ear_time_us(frame as f64) + offset - plan.start_us) / period).round();
+        let on_beat = k >= 0.0
+            && (clock.frame_for(plan.start_us + k * period - offset).round() - frame as f64).abs() <= clock.rate * GEN_KEEP_TOL_S;
+        if !on_beat {
+            self.withdraw(sh);
+            return;
+        }
+        let k = k as u64;
+        let want = k.is_multiple_of(plan.beats_per_bar as u64);
+        let soon = (frame as f64) < clock.played as f64 + 2.0 * clock.burst as f64;
+        if want == accent || soon {
+            self.pending = Some((k, raw));
+            return;
+        }
+        let v = encode(frame, want);
+        if sh.next.compare_exchange(raw, v, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            self.pending = Some((k, v));
+        } else {
+            // 그 사이 콜백이 가져갔다(옛 강박 비트로 울림)
+            self.pending = None;
+            self.last_beat = Some(k);
+        }
+    }
+
     /// 반복마다 호출. `offset_us` = 기준 시계 − 내 시계(방장 0, 모르면 None). 반환: 올려 둔 박 번호.
     pub fn tick(&mut self, gen: u64, plan: &MetronomePlan, offset_us: Option<f64>, clock: &OutClock, sh: &ClickShared) -> Option<u64> {
-        if gen != self.gen {
+        let regen = gen != self.gen;
+        if regen {
             self.gen = gen;
-            self.withdraw(sh);
             self.last_beat = None;
         }
         let (true, Some(offset)) = (plan.running, offset_us) else {
@@ -339,11 +414,17 @@ impl BeatScheduler {
             return None;
         };
         if clock.dev_now_us <= 0.0 || clock.rate <= 0.0 {
+            if regen {
+                self.withdraw(sh);
+            }
             return self.pending.map(|p| p.0);
         }
         let period = plan.period_us();
         let beat_frame = |k: u64| clock.frame_for(plan.start_us + k as f64 * period - offset).round();
         let guard = clock.guard();
+        if regen {
+            self.adopt_pending(plan, offset, clock, sh);
+        }
         if let Some((k, raw)) = self.pending {
             if sh.next.load(Ordering::Acquire) != raw {
                 // 콜백이 가져갔다(울림)
@@ -548,6 +629,81 @@ mod tests {
         let s = ctl.stats();
         assert_eq!((s.bpm, s.ref_peer_id), (90.0, None));
         assert_eq!(ctl.plan_gens(), (2, 1));
+    }
+
+    /// #143 리뷰 L-5: 가드 안 클릭은 세대가 바뀌어도 새 계획의 박이면 남고(강박 비트는 새 계획대로), 아니면 거둔다.
+    #[test]
+    fn regen_keeps_near_click_on_new_grid_and_fixes_accent() {
+        let sh = ClickShared::default();
+        let mut s = BeatScheduler::new();
+        let c = clock(48_000);
+        // 박 4(강박, 박자 4)가 가드 안(가드보다 귀 시각 1ms 앞 — 콜백 2개 밖)에 오도록
+        let p4 = plan(120.0, c.ear_time_us(c.guard()) - 1000.0 - 4.0 * 500_000.0);
+        s.last_beat = Some(3);
+        let f4 = p4.start_us + 2_000_000.0;
+        let raw = encode(c.frame_for(f4).round() as u64, true);
+        sh.next.store(raw, Ordering::Release);
+        s.pending = Some((4, raw));
+        s.gen = 1;
+        assert!(decode(raw).0 < c.guard() as u64);
+        assert!(decode(raw).0 >= c.played + 2 * c.burst);
+        // 박자만 3으로: 같은 프레임, 박 4는 약박
+        let p3 = MetronomePlan { beats_per_bar: 3, ..p4.clone() };
+        assert_eq!(s.tick(2, &p3, Some(0.0), &c, &sh), Some(4));
+        assert_eq!(decode(sh.next.load(Ordering::Relaxed)), (decode(raw).0, false));
+        // 같은 계획 다시: 그대로
+        let now = sh.next.load(Ordering::Relaxed);
+        assert_eq!(s.tick(3, &p3, Some(0.0), &c, &sh), Some(4));
+        assert_eq!(sh.next.load(Ordering::Relaxed), now);
+        // 시작 시각이 2ms 당겨진 계획: 이 자리는 새 계획의 박이 아니고 새 박 4는 가드 안 → 거두고 다음 박(가드 밖)을 올린다
+        let moved = MetronomePlan { start_us: p3.start_us - 2000.0, ..p3.clone() };
+        assert_eq!(s.tick(4, &moved, Some(0.0), &c, &sh), Some(5));
+        assert!(decode(sh.next.load(Ordering::Relaxed)).0 as f64 >= c.guard());
+        // 콜백 2개 안(곧 가져갈 구간)의 클릭은 박자가 바뀌어도 강박 비트를 고치지 않는다(#168 리뷰 L-1 — 콜백 CAS와 겹침 방지)
+        let mut s = BeatScheduler::new();
+        let soon = encode(c.played + c.burst, true);
+        let p_soon = plan(120.0, c.ear_time_us((c.played + c.burst) as f64) - 4.0 * 500_000.0);
+        sh.next.store(soon, Ordering::Release);
+        s.pending = Some((4, soon));
+        s.gen = 1;
+        let p_soon3 = MetronomePlan { beats_per_bar: 3, ..p_soon };
+        assert_eq!(s.tick(2, &p_soon3, Some(0.0), &c, &sh), Some(4));
+        assert_eq!(sh.next.load(Ordering::Relaxed), soon, "곧 울릴 클릭은 옛 강박 그대로");
+    }
+
+    /// #168 리뷰 M-1: 같은 문자열 재전송은 지금의 `Arc`를 재사용하고, 바뀐 문자열의 옛 `Arc`는 워커가 그 세대를 적용했다고
+    /// 보고한 뒤에 제어 평면이 놓는다(워커가 마지막 참조가 되지 않는다). 해제 0 자체는 `tests/rt_alloc.rs`가 할당 계수로 본다.
+    #[test]
+    fn set_plan_reuses_same_ref_and_retires_old_until_applied() {
+        let (ctl, mut rt) = MetronomeCtl::pair();
+        let mut mine = (0, MetronomePlan::default());
+        let with = |id: &str| MetronomePlan { ref_peer_id: Some(id.into()), ..plan(120.0, 0.0) };
+        let apply = |rt: &mut MetronomeRt, mine: &mut (u64, MetronomePlan)| {
+            rt.refresh_plan(mine);
+            rt.publish(&MetroReport { applied_gen: mine.0, ..Default::default() });
+        };
+        ctl.set_plan(with("host"));
+        apply(&mut rt, &mut mine);
+        let first = mine.1.ref_peer_id.clone().unwrap();
+        // 같은 문자열 재전송: 같은 Arc
+        ctl.set_plan(with("host"));
+        apply(&mut rt, &mut mine);
+        assert!(Arc::ptr_eq(mine.1.ref_peer_id.as_ref().unwrap(), &first));
+        assert!(ctl.retired.lock().is_empty());
+        // 다른 문자열: 옛 Arc는 retired로(워커가 아직 옛 세대)
+        ctl.set_plan(with("bob"));
+        assert_eq!(ctl.retired.lock().len(), 1);
+        drop(first);
+        // 워커가 적용하면 옛 Arc의 참조는 retired 하나뿐 — 다음 set_plan이 놓는다
+        apply(&mut rt, &mut mine);
+        assert_eq!(Arc::strong_count(&ctl.retired.lock()[0].1), 1);
+        ctl.set_plan(with("bob"));
+        assert!(ctl.retired.lock().is_empty());
+        // 상한: 워커가 적용하지 않은 채 계속 바뀌면 RETIRED_CAP에서 멈춘다
+        for i in 0..40 {
+            ctl.set_plan(with(&format!("p{i}")));
+        }
+        assert_eq!(ctl.retired.lock().len(), RETIRED_CAP);
     }
 
     #[test]

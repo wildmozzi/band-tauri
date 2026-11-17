@@ -44,7 +44,8 @@ pub mod engine {
     }
     pub mod metronome {
         pub use crate::engine::metronome::{
-            measured_hidden_out_us, BeatScheduler, ClickRt, ClickShared, MetronomeConfig, MetronomePlan, OutClock, OutputLatencySource,
+            measured_hidden_out_us, BeatScheduler, ClickRt, ClickShared, MetroReport, MetronomeConfig, MetronomeCtl, MetronomePlan, OutClock,
+            OutputLatencySource,
         };
     }
     pub mod record {

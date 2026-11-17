@@ -49,7 +49,7 @@ impl MetronomeStage {
         let site = &stats.lock_sites.peer_clock;
         let (gen, plan) = (self.plan.0, &self.plan.1);
         let ref_peer = match (&plan.ref_peer_id, peers) {
-            (Some(id), Some(c)) if plan.running => c.peers().iter().find(|p| p.id() == id),
+            (Some(id), Some(c)) if plan.running => c.peers().iter().find(|p| p.id() == &**id),
             _ => None,
         };
         let est = ref_peer.and_then(|p| p.clock_estimate(t.wall_us, lock_wait, site));

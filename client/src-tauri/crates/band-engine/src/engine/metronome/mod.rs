@@ -19,6 +19,8 @@ pub(crate) use plan::{choose_hidden_out, MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OF
 pub use plan::{MetronomePlan, OutputLatencySource};
 pub use plan::MetronomeConfig;
 pub use plan::measured_hidden_out_us;
-pub(crate) use sched::{hidden_out_latency_us, MetroReport, MetronomeCtl, MetronomeRt};
+pub(crate) use sched::{hidden_out_latency_us, MetronomeRt};
+pub use sched::MetronomeCtl;
+pub use sched::MetroReport;
 pub use sched::OutClock;
 pub use sched::BeatScheduler;

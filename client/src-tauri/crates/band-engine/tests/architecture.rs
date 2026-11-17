@@ -1250,6 +1250,11 @@ fn identifiers(dirs: &[PathBuf], skip_file: &str) -> BTreeSet<String> {
 const SURFACE_SIG_ONLY: &[(&str, &str, &str)] = &[
     ("band-engine", "Ring", "`Timeline`(= `Ring<Sample>`, pub(crate) 별칭)으로 `testing::diag::timeline::to_jsonl`의 인자"),
     ("band-engine", "AutoPayload", "`AutoFn`(pub(crate) 별칭)의 반환으로 `NetShared::send_audio_timed`(시험 훅)의 인자"),
+    // `tests/rt_alloc.rs`(#168)가 `MetroReport { applied_gen, running, ..Default::default() }`로 만든다 — 구조체 갱신 문법은 칸이
+    // 모두 보여야 한다(E0451). 아래 셋은 그 문법 때문에만 `pub`이다.
+    ("band-engine", "clock_rtt_ms", "`MetroReport` 칸 — `..Default::default()` 갱신 문법(tests/rt_alloc.rs)"),
+    ("band-engine", "clock_extrapolation_ms", "`MetroReport` 칸 — `..Default::default()` 갱신 문법(tests/rt_alloc.rs)"),
+    ("band-engine", "ref_clock_unsupported", "`MetroReport` 칸 — `..Default::default()` 갱신 문법(tests/rt_alloc.rs)"),
 ];
 
 /// ⑨b-2(6.3절, #165 리뷰 M1): 두 크레이트의 공개 표면을 **항목 단위로** 고정한다.

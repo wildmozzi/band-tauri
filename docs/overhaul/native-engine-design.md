@@ -425,7 +425,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_safety_code` | `{ peerId: string }` | `string` — 그 피어와의 안전 번호("12345 67890 13579 24680"). 양쪽이 같으면 키 바꿔치기 없음(2절 신뢰 가정) |
 | `engine_set_monitor` | `{ enabled: boolean, gain: number }` | `null` |
 | `engine_set_master_gain` | `{ gain: number }` | `null` |
-| `engine_set_metronome` | `{ metronome: MetronomeConfig }` | `MetronomePlan` — 공유 메트로놈(P2-3, 1.4절). 방장은 `refPeerId` 없이 부른다(`startUs`를 비우면 지금 + 300ms, 반환한 `startUs`를 방에 알린다). 다른 연주자는 `refPeerId` = 방장 엔진 peerId, `startUs` = 방장이 알린 값으로 부른다(그때 `startUs` 필수). 기준 피어가 아직 없거나 시계 표본이 없으면 `synced=false`로 기다린다. 네트워크 없는 엔진(테스트 모드)은 `refPeerId` 없이만 된다(혼자 연습). 다시 부르면 새 계획으로 바로 바뀐다 |
+| `engine_set_metronome` | `{ metronome: MetronomeConfig }` | `MetronomePlan` — 공유 메트로놈(P2-3, 1.4절). 방장은 `refPeerId` 없이 부른다(`startUs`를 비우면 지금 + 300ms, 반환한 `startUs`를 방에 알린다). 다른 연주자는 `refPeerId` = 방장 엔진 peerId, `startUs` = 방장이 알린 값으로 부른다(그때 `startUs` 필수). 기준 피어가 아직 없거나 시계 표본이 없으면 `synced=false`로 기다린다. 네트워크 없는 엔진(테스트 모드)은 `refPeerId` 없이만 된다(혼자 연습). 다시 부르면 새 계획으로 바로 바뀐다 — 이미 곧 울릴(콜백 2개 + 2ms 안) 클릭은 새 계획에서도 박 자리(±1ms)면 그대로 울리고(강박 여부는 새 계획대로), 아니면 울리지 않는다(같은 계획을 다시 넣어도 박이 빠지지 않는다) |
 | `engine_set_metronome_gain` | `{ gain: number, muted: boolean }` | `null` — 클릭 볼륨(0..4, 기본 0.8)·뮤트. 내 장치 출력에만 적용(믹스 탭·방송·녹음에는 클릭이 없음), 엔진 재시작 간 유지 |
 | `engine_set_loopback_offset` | `{ offsetMs: number \| null }` | `null` — 메트로놈 숨은 출력 지연 보정용 루프백 보정값(PR #34 M2(a), 1.4절). `offsetMs` = `engine_measure_loopback` 결과의 `offsetMs`(-50..200, 밖이면 오류). 실행 중인 엔진에 적용하고(엔진이 없으면 오류) 그 장치 구성(1.4절 키)에 묶어 기억한다(같은 구성으로 다시 시작하는 엔진에도 적용). null = 해제. 루프백 측정이 `ok`면 엔진이 같은 일을 자동으로 하므로, 앱 재시작 뒤 저장값을 다시 넣거나 끌 때 쓴다. 드라이버가 출력 지연을 보고하면 드라이버 값이 우선 |
 | `engine_stats` | — | `EngineStats` |

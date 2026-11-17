@@ -1701,7 +1701,7 @@ fn stats_storm_does_not_disturb_playout() {
 /// ②b 조건(engine-stage2b-design.md 4.3절 — ②b-5·②b-6b가 없앤 락의 "전"·"후". 지금 코드는 "후"다):
 /// - 메트로놈 + CPU: a가 b를 기준 피어로 따라 메트로놈을 돌리는 동안 `set_metronome`(두 계획을 번갈아, 쉬지 않고) 1개,
 ///   `stats()` 1개, `set_loopback_offset` 0.5ms 간격 1개 + CPU 포화. 두 계획의 기준 피어가 같은 창과 다른 창(계획이
-///   바뀐 반복마다 워커가 `ref_peer_id`를 할당·해제 — 락 대기와 할당자 경합을 가른다)을 따로 잰다.
+///   바뀐 반복마다 워커가 `ref_peer_id`를 바꾼다 — #143 L-4부터 `Arc<str>` 참조 수만 바뀌어 할당은 없다)을 따로 잰다.
 /// - 에코 측정 + CPU: a가 b를 에코 측정(20회)하기를 되풀이하는 동안 `stats()` 1개 + CPU 포화. 측정 스레드는 평소대로다.
 ///
 /// `SEND_STORM_ONLY`(쉼표로 나눈 조건 이름 일부)를 주면 그 조건만 돈다.
