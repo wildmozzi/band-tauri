@@ -15,9 +15,14 @@ export interface ConsoleErrors {
 
 export const test = base.extend<{ mock: MockBackend; consoleErrors: ConsoleErrors }>({
   mock: [
-    async ({ context }, use) => {
+    async ({ context }, use, testInfo) => {
       const mock = await installMocks(context)
       await use(mock)
+      // 실패하면 시그널링 시간순 기록을 첨부한다(P2-18f: 비동기 순서가 얽힌 flaky 진단)
+      if (testInfo.status !== testInfo.expectedStatus) {
+        const timeline = mock.signaling.timeline()
+        if (timeline) await testInfo.attach('signaling-timeline.txt', { body: timeline, contentType: 'text/plain' })
+      }
       expect(mock.violations, 'mock이 처리하지 못했거나 차단한 요청').toEqual([])
     },
     { auto: true },
