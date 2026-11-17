@@ -110,6 +110,7 @@ pub fn set_high_qos(enabled: bool) {
 
 /// LP-E를 뺀 논리 프로세서(P+E)의 친화성 마스크(그룹 0). 그룹이 둘 이상이거나 표가 비면 None.
 /// 하이브리드가 아니면 전부(= 고정해도 바뀌는 것 없음).
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn mask_without_lpe(cpus: &[CpuSetEntry]) -> Option<u64> {
     if cpus.is_empty() || cpus.iter().any(|c| c.group != 0 || c.number >= 64) {
         return None;
