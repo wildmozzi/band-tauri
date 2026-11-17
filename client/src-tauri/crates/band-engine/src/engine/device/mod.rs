@@ -45,4 +45,6 @@ pub(crate) mod fake;
 
 pub use backend::AudioBackend;
 pub(crate) use types::{DeviceInfo, StreamInfo};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use types::BackendKind;
 pub use types::device_id;

@@ -486,6 +486,36 @@ impl Net {
         }
     }
 
+    /// 시험 입구(test-support, `MetronomeStageProbe`): 스레드를 멈춘 루프백 `Net`에 피어 `ids`를 등록한다(연결·송수신 없음).
+    /// 피어 시계는 `inject_clock_sample`로만 바뀐다 — 가상 시간 시험이 실제 `Peer`·피어 표 복사본 경로를 탈 수 있게.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn stopped_with_peers(ids: &[&str]) -> Result<Net, String> {
+        let opts = NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
+        let mut n = Net::start("probe".into(), &opts)?;
+        n.stop();
+        for (i, id) in ids.iter().enumerate() {
+            let desc = LocalDescriptor {
+                ssrc: 100 + i as u32,
+                key: LocalDescriptor::encode_key(&KeyPair::generate().public_bytes()),
+                candidates: vec![Candidate { kind: CandidateKind::Lan, addr: "127.0.0.1:9".into() }],
+            };
+            n.add_peer((*id).into(), &desc, band_dsp::media_link::media_link(PeerKey::from_raw(i as u64 + 1)).0)?;
+        }
+        Ok(n)
+    }
+
+    /// 시험 입구(test-support): 피어 `id`의 시계 추정기에 표본 하나를 넣는다 — 수신 스레드가 시계 실은 Pong에서 하는 일
+    /// (`recv_loop`의 `on_sample`). 피어가 없으면 false.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn inject_clock_sample(&self, id: &str, t0_us: f64, t3_us: f64, remote_us: f64) -> bool {
+        let peers = self.shared.peers.read();
+        let Some(p) = peers.iter().find(|p| p.id() == id) else {
+            return false;
+        };
+        p.clock().on_sample(t0_us, t3_us, remote_us);
+        true
+    }
+
     pub fn stop(&mut self) {
         if self.shared.stop.swap(true, Ordering::SeqCst) {
             return;

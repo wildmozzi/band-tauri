@@ -94,3 +94,76 @@ impl MetronomeStage {
         }
     }
 }
+
+/// 시험 입구(엔진 ⑨a 방식, `test-support`): 실제 `MetronomeStage`를 워커와 같은 입력 경로로 돌린다 — 계획은 `MetronomeCtl`
+/// (세대 + `try_lock` 복사본), 기준 피어 시계는 워커처럼 피어 표 **복사본**에서 찾은 `Peer`의 `clock_estimate`, 숨은 출력 지연은
+/// 드라이버 보고 없음(루프백 보정값은 `ctl`로 넣을 수 있다). `tests/metronome.rs`가 가상 시간(`CallbackTracker`의 `FeedTiming`)으로 부른다.
+/// 네트워크는 스레드를 멈춘 실제 `Net`에 피어만 등록한다(`Net::stopped_with_peers`). 시계 표본은 `clock_sample`로 넣는다.
+#[cfg(any(test, feature = "test-support"))]
+pub struct MetronomeStageProbe {
+    stage: MetronomeStage,
+    ctl: std::sync::Arc<crate::engine::metronome::MetronomeCtl>,
+    net: crate::net::Net,
+    copy: PeerTableCopy,
+    info: StreamInfo,
+    counters: AudioCounters,
+    stats: WorkerStats,
+    lock_wait: LockWait,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl MetronomeStageProbe {
+    /// `peers` = 등록할 피어 id(기준 피어 후보). `out_rate`·`buffer` = 장치 출력 레이트·버퍼(프레임).
+    pub fn new(peers: &[&str], out_rate: u32, buffer: u32) -> Result<Self, String> {
+        use crate::engine::device::BackendKind;
+        let (ctl, rt) = crate::engine::metronome::MetronomeCtl::pair();
+        let net = crate::net::Net::stopped_with_peers(peers)?;
+        let mut copy = PeerTableCopy::for_worker();
+        net.shared().refresh_copy(&mut copy);
+        let info = StreamInfo {
+            in_rate: out_rate,
+            out_rate,
+            in_channels: 2,
+            out_channels: 2,
+            buffer_frames: buffer,
+            in_backend: BackendKind::Fake,
+            out_backend: BackendKind::Fake,
+            in_period_frames: buffer,
+            out_period_frames: buffer,
+            in_reported_latency_frames: 0,
+            out_reported_latency_frames: 0,
+            in_device_tag: 0,
+            out_device_tag: 0,
+        };
+        Ok(Self {
+            stage: MetronomeStage::new(rt),
+            ctl,
+            net,
+            copy,
+            info,
+            counters: AudioCounters::default(),
+            stats: WorkerStats::default(),
+            lock_wait: LockWait::default(),
+        })
+    }
+
+    /// 계획을 넣는 제어 쪽 끝(`set_plan`). 엔진이 `engine_set_metronome`에서 부르는 것과 같다.
+    pub fn ctl(&self) -> &std::sync::Arc<crate::engine::metronome::MetronomeCtl> {
+        &self.ctl
+    }
+
+    /// 출력 콜백(`ClickRt`)에 붙일 클릭 공유 상태(이 단계가 클릭을 올리는 곳).
+    pub fn click(&self) -> std::sync::Arc<crate::engine::metronome::ClickShared> {
+        self.ctl.click.clone()
+    }
+
+    /// 피어 `peer`의 시계 표본(내 시계 `t0`·`t3`, 그쪽 시계 `remote`, µs). 피어가 없으면 false.
+    pub fn clock_sample(&self, peer: &str, t0_us: f64, t3_us: f64, remote_us: f64) -> bool {
+        self.net.inject_clock_sample(peer, t0_us, t3_us, remote_us)
+    }
+
+    /// 워커 반복 한 번의 메트로놈 단계(`Worker`가 `FeedTiming`을 만든 뒤 부르는 것과 같다).
+    pub fn service(&mut self, t: &FeedTiming) {
+        self.stage.service(&self.info, &self.counters, &self.stats, t, Some(&self.copy), &mut self.lock_wait);
+    }
+}

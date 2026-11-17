@@ -426,9 +426,16 @@ engine/worker/clock.rs	method	new
 engine/worker/clock.rs	method	observe
 engine/worker/clock.rs	struct	CallbackTracker
 engine/worker/clock.rs	struct	FeedTiming
+engine/worker/metronome_stage.rs	method	click
+engine/worker/metronome_stage.rs	method	clock_sample
+engine/worker/metronome_stage.rs	method	ctl
+engine/worker/metronome_stage.rs	method	new
+engine/worker/metronome_stage.rs	method	service
+engine/worker/metronome_stage.rs	struct	MetronomeStageProbe
 engine/worker/mod.rs	struct	WorkerStats
 engine/worker/mod.rs	use	CallbackTracker
 engine/worker/mod.rs	use	FINE_POLL
+engine/worker/mod.rs	use	MetronomeStageProbe
 engine/worker/mod.rs	use	POLL
 engine/worker/mod.rs	use	PeerSources
 engine/worker/mod.rs	use	PeerSourcesParts

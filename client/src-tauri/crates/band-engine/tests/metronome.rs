@@ -23,7 +23,7 @@ use band_engine::testing::engine::metronome::{measured_hidden_out_us, BeatSchedu
 use band_dsp::mixer::MixControls;
 use band_engine::testing::engine::rt::{output_path, OutputRt};
 use band_dsp::stats::AudioCounters;
-use band_engine::testing::engine::worker::CallbackTracker;
+use band_engine::testing::engine::worker::{CallbackTracker, MetronomeStageProbe};
 use band_dsp::clock::ClockSync;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
@@ -106,10 +106,14 @@ struct SimPeer {
 
 impl SimPeer {
     fn new(spec: PeerSpec, seed: u64) -> Self {
+        Self::with_click(spec, seed, Arc::new(ClickShared::default()))
+    }
+
+    /// 클릭 공유 상태를 밖에서 받는다(메트로놈 단계 시험 입구 `MetronomeStageProbe`가 클릭을 올리는 곳).
+    fn with_click(spec: PeerSpec, seed: u64, click: Arc<ClickShared>) -> Self {
         let counters = Arc::new(AudioCounters::default());
         let controls = Arc::new(MixControls::default());
         let (mut out, feed) = output_path(counters.clone(), controls);
-        let click = Arc::new(ClickShared::default());
         click.step.store(48_000.0 / spec.rate as f32);
         out.attach_click(ClickRt::new(click.clone()));
         Self {
@@ -610,6 +614,185 @@ fn plan_change_just_before_beat_drops_it_only_if_not_a_new_beat() {
     let (onsets, _, _) = run_host_with_plan_changes(p120.clone(), &[(at, stopped), (at + 100_000.0, p120.clone())], L5_START_US + 2_700_000.0);
     let expected: Vec<f64> = [0u64, 1, 2, 3, 5].iter().map(|&k| L5_START_US + k as f64 * 500_000.0).collect();
     assert_onsets("정지 후 재시작", &onsets, &expected);
+}
+
+// ============================================================================
+// 시계 추정 계단(#168 리뷰 L-3): 곧 울릴 박 근처에서 기준 시계 추정이 뛰어도 박이 빠지거나 두 번 울리지 않는다
+// ============================================================================
+
+/// 시계 계단 때 박을 제자리에서 어긋나게 울려도 되는 최대 폭(ms) — `sched.rs`의 `MAX_SHIFT_S`(20ms)와 같다.
+/// 이보다 늦게밖에 울릴 수 없는 박은 빼고(`skippedClicks`) 다음 박부터 새 시계로 맞춘다.
+const MAX_SHIFT_MS: f64 = 20.0;
+/// 콜백이 클릭을 가져가는 때는 귀 시각보다 최대 콜백 2개(128프레임 × 2 @48k = 5.33ms) 앞이다. 계단 시각에서 이만큼 안의 박은
+/// 계단 전에 이미 가져갔을 수 있다(옛 시계 자리에 울려도 된다).
+const TAKEN_BEFORE_MS: f64 = 5.4;
+
+/// 방장 하나(48k/128)가 오프셋 0으로 돌다가 참 시각 `at`에 오프셋을 `jump_us`로 바꾼다. `regen`이면 같은 시각에 계획 세대도 올린다
+/// (기준 피어 변경·계획 재전송과 겹친 경우 — 계획 내용은 같다). 반환: (클릭 귀 시각들, 늦은 클릭, 건너뛴 클릭).
+fn run_offset_step(at: f64, jump_us: f64, regen: bool, end_us: f64) -> (Vec<f64>, u64, u64) {
+    let mut rng = Rng(0x5EED_0000_0168_0003);
+    let mut a = SimPeer::new(spec(0.0, 0.0, 48_000, 0.0, 128, 1_000.0), 0x0168_0003_ABCD_EF01);
+    let p = l5_plan(120.0, 4);
+    loop {
+        let tau = a.next_cb_us.min(a.next_poll_us);
+        if tau > end_us {
+            break;
+        }
+        if tau == a.next_cb_us {
+            a.callback(tau);
+            continue;
+        }
+        let stepped = tau >= at;
+        a.poll(tau, if regen && stepped { 2 } else { 1 }, &p, Some(if stepped { jump_us } else { 0.0 }));
+        a.next_poll_us = tau + 500.0 + rng.f() * 700.0;
+    }
+    assert_eq!(a.tap_nonzero, 0, "믹스 탭에 클릭");
+    (a.onsets, a.click.late.load(Ordering::Relaxed), a.click.skipped.load(Ordering::Relaxed))
+}
+
+/// 계단 하나의 결과를 규칙에 대 본다. 어긋나면 이유 목록.
+/// - 박마다 클릭은 많아야 하나(이중 클릭 없음), 클릭 간격 ≥ 박 간격의 절반.
+/// - 계단 전에 가져갔을 수 있는 박(옛 귀 시각 ≤ 계단 + 5.4ms)은 옛 자리, 그 밖에는 새 자리(±0.1ms).
+/// - 계단 뒤 첫 박(경계 박)만 새 자리에서 min(|점프|, 20ms)까지 어긋나도 된다.
+/// - 빠져도 되는 박은 경계 박 하나, 그것도 점프가 20ms를 넘어 박이 당겨질 때(새 자리가 이미 20ms 넘게 지남)뿐이다. 그때 건너뜀 1.
+fn step_violations(at: f64, jump_us: f64, onsets: &[f64], late: u64, skipped: u64, last_beat: u64) -> Vec<String> {
+    let period = l5_plan(120.0, 4).period_us();
+    let old = |k: u64| L5_START_US + k as f64 * period;
+    let new = |k: u64| old(k) - jump_us;
+    let boundary = (0..).find(|&k| old(k) > at).unwrap();
+    let mut bad = Vec::new();
+    if late != 0 {
+        bad.push(format!("늦은 클릭 {late}"));
+    }
+    for w in onsets.windows(2) {
+        if w[1] - w[0] < period / 2.0 {
+            bad.push(format!("이중 클릭: {:.1}ms, {:.1}ms", (w[0] - L5_START_US) / 1000.0, (w[1] - L5_START_US) / 1000.0));
+        }
+    }
+    let mut missing = 0;
+    for k in 0..=last_beat {
+        let hits: Vec<f64> = onsets.iter().copied().filter(|t| ((t - L5_START_US) / period).round() as i64 == k as i64).collect();
+        let Some(&t) = hits.first() else {
+            missing += 1;
+            if !(k == boundary && jump_us > MAX_SHIFT_MS * 1000.0) {
+                bad.push(format!("박 {k} 빠짐"));
+            }
+            continue;
+        };
+        let at_old = (t - old(k)).abs() < 100.0 && old(k) <= at + TAKEN_BEFORE_MS * 1000.0;
+        let at_new = (t - new(k)).abs() < 100.0 && old(k) > at;
+        let shifted = k == boundary && (t - new(k)).abs() <= jump_us.abs().min(MAX_SHIFT_MS * 1000.0) + 100.0;
+        if !(at_old || at_new || shifted) {
+            bad.push(format!("박 {k}: {:.2}ms(옛 {:.2}, 새 {:.2})", (t - L5_START_US) / 1000.0, (old(k) - L5_START_US) / 1000.0, (new(k) - L5_START_US) / 1000.0));
+        }
+    }
+    if skipped != missing {
+        bad.push(format!("건너뜀 {skipped} ≠ 빠진 박 {missing}"));
+    }
+    bad
+}
+
+#[test]
+fn clock_step_near_beat_neither_drops_nor_doubles() {
+    // 박 4(2000ms)의 d ms 전에 기준 시계 추정이 J만큼 뛴다(J > 0: 박이 당겨짐, J < 0: 밀림). 같은 세대(동기 갱신)와 세대 변경(기준 피어
+    // 변경·재전송과 겹침) 둘 다. d는 콜백이 이미 가져갔을 구간(1·3·5ms), 가드(콜백 2개 + 2ms ≈ 7.3ms) 안팎, 먼 박까지 훑는다.
+    // 전에는: 같은 세대에서 가드 바로 밖 클릭이 5ms 넘게 당겨지면 빠졌고(+10ms), 가드 안 클릭은 옛 자리에 울렸으며(−50ms면 50ms 일찍),
+    // 세대 변경 때는 1ms 넘게 움직인 곧 울릴 박이 빠지거나(+2ms) 이미 울린 박이 다시 울렸다(−10ms).
+    let period = l5_plan(120.0, 4).period_us();
+    let beat4 = L5_START_US + 4.0 * period;
+    let end = L5_START_US + 8.5 * period;
+    let mut failures = Vec::new();
+    let mut cases = 0;
+    for regen in [false, true] {
+        for jump_ms in [0.5, -0.5, 2.0, -2.0, 10.0, -10.0, 50.0, -50.0] {
+            for d_ms in [1.0, 3.0, 5.0, 6.5, 8.0, 9.5, 12.0, 15.0, 20.0, 30.0, 45.0, 60.0, 100.0] {
+                cases += 1;
+                let at = beat4 - d_ms * 1000.0;
+                let (onsets, late, skipped) = run_offset_step(at, jump_ms * 1000.0, regen, end);
+                let bad = step_violations(at, jump_ms * 1000.0, &onsets, late, skipped, 8);
+                if !bad.is_empty() {
+                    failures.push(format!("{} J={jump_ms:+}ms d={d_ms}ms: {}", if regen { "세대" } else { "동기" }, bad.join("; ")));
+                }
+            }
+        }
+    }
+    for f in &failures {
+        println!("{f}");
+    }
+    assert!(failures.is_empty(), "{}/{cases} 경우가 규칙을 어김:\n{}", failures.len(), failures.join("\n"));
+}
+
+// ============================================================================
+// 실제 메트로놈 단계(`MetronomeStage`, #143 후속): 계획 세대·피어 표 복사본·`Peer.clock_estimate` 경로로 같은 규칙
+// ============================================================================
+
+/// `MetronomeStageProbe`(test-support)를 타는 방장 아닌 연주자 하나. 내 시스템 시계 = 참 시각, 48k/128.
+/// 피어 `host`·`host2`의 시계 = 참 시각 + 40ms(+ `host2`는 5초 + `err_us`). 500ms마다 둘 다에게 Ping(왕복 200µs, 대칭).
+/// 기준 피어 `host`로 시작해 참 시각 `at`에 기준 피어를 `host2`로 바꾼다(`startUs`도 host2 시계로 — 의도한 박 격자는 같다).
+/// `host2` 시계 추정이 `err_us`만큼 어긋나 있으면 내 시계에서 새 박 자리가 그만큼 당겨진다(점프 J = `err_us`).
+fn run_stage_ref_change(at: f64, err_us: f64, end_us: f64) -> (Vec<f64>, u64, u64) {
+    const D_US: f64 = 5_000_000.0;
+    let mut probe = MetronomeStageProbe::new(&["host", "host2"], 48_000, 128).unwrap();
+    let mut a = SimPeer::with_click(spec(0.0, 0.0, 48_000, 0.0, 128, 1_000.0), 0x0168_0003_5747_0001, probe.click());
+    let mut rng = Rng(0x5EED_0000_0168_5747);
+    let host = |tau: f64| tau + 40_000.0;
+    let host2 = |tau: f64| tau + 40_000.0 + D_US + err_us;
+    let p1 = MetronomePlan { ref_peer_id: Some("host".into()), start_us: host(L5_START_US), ..l5_plan(120.0, 4) };
+    let p2 = MetronomePlan { ref_peer_id: Some("host2".into()), start_us: host(L5_START_US) + D_US, ..p1.clone() };
+    probe.ctl().set_plan(p1);
+    let mut switched = false;
+    let mut next_ping = 0.0;
+    loop {
+        let tau = a.next_cb_us.min(a.next_poll_us).min(next_ping);
+        if tau > end_us {
+            break;
+        }
+        if tau == a.next_cb_us {
+            a.callback(tau);
+        } else if tau == next_ping {
+            // 표본은 바로 넣는다(t3 = t0 + 200µs가 아직 미래여도 추정기는 시각만 본다)
+            assert!(probe.clock_sample("host", tau, tau + 200.0, host(tau + 100.0)));
+            assert!(probe.clock_sample("host2", tau, tau + 200.0, host2(tau + 100.0)));
+            next_ping = tau + 500_000.0;
+        } else {
+            if !switched && tau >= at {
+                probe.ctl().set_plan(p2.clone());
+                switched = true;
+            }
+            let wall = a.sys_us(tau).max(0.0) as u64;
+            let t = a.tracker.observe(&a.counters, wall, a.spec.buffer, a.spec.rate);
+            probe.service(&t);
+            a.next_poll_us = tau + 500.0 + rng.f() * 700.0;
+        }
+    }
+    assert_eq!(a.tap_nonzero, 0, "믹스 탭에 클릭");
+    (a.onsets, a.click.late.load(Ordering::Relaxed), a.click.skipped.load(Ordering::Relaxed))
+}
+
+#[test]
+fn stage_ref_peer_change_with_clock_error_neither_drops_nor_doubles() {
+    // 실제 단계: 기준 피어가 바뀌는 순간(새 세대) 새 기준 시계 추정이 J만큼 어긋나 있다. 박 4 d ms 전에 바꾼다.
+    // 규칙은 스케줄러 시험(`clock_step_near_beat_neither_drops_nor_doubles`)과 같다.
+    let period = l5_plan(120.0, 4).period_us();
+    let beat4 = L5_START_US + 4.0 * period;
+    let end = L5_START_US + 8.5 * period;
+    let mut failures = Vec::new();
+    let mut cases = 0;
+    for jump_ms in [0.0, 0.5, -0.5, 2.0, -2.0, 10.0, -10.0, 50.0, -50.0] {
+        for d_ms in [1.0, 3.0, 5.0, 6.5, 8.0, 9.5, 12.0, 15.0, 20.0, 30.0, 45.0, 60.0, 100.0] {
+            cases += 1;
+            let at = beat4 - d_ms * 1000.0;
+            let (onsets, late, skipped) = run_stage_ref_change(at, jump_ms * 1000.0, end);
+            let bad = step_violations(at, jump_ms * 1000.0, &onsets, late, skipped, 8);
+            if !bad.is_empty() {
+                failures.push(format!("단계 J={jump_ms:+}ms d={d_ms}ms: {}", bad.join("; ")));
+            }
+        }
+    }
+    for f in &failures {
+        println!("{f}");
+    }
+    assert!(failures.is_empty(), "{}/{cases} 경우가 규칙을 어김:\n{}", failures.len(), failures.join("\n"));
 }
 
 // ============================================================================
