@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   initialPerformRequestState as init,
   isPerformRequestSignal,
+  MAX_REJECT_REASON_LENGTH,
+  rejectReasonPayload,
   performRequestReducer as reduce,
   type PerformRequest,
   type PerformRequestAction,
@@ -111,5 +113,19 @@ describe('공통', () => {
     expect(isPerformRequestSignal('request-perform-error')).toBe(true)
     expect(isPerformRequestSignal('instrument-change-approved')).toBe(false)
     expect(isPerformRequestSignal('error')).toBe(false)
+  })
+})
+
+describe('rejectReasonPayload', () => {
+  it('공백·빈 사유는 생략, 아니면 trim', () => {
+    expect(rejectReasonPayload(undefined)).toEqual({})
+    expect(rejectReasonPayload('   ')).toEqual({})
+    expect(rejectReasonPayload('  다음 곡에  ')).toEqual({ reason: '다음 곡에' })
+  })
+  it('200 코드 유닛까지 자르고 경계의 서로게이트 쌍은 반쪽을 남기지 않는다', () => {
+    expect(MAX_REJECT_REASON_LENGTH).toBe(200)
+    expect(rejectReasonPayload('a'.repeat(300))).toEqual({ reason: 'a'.repeat(200) })
+    expect(rejectReasonPayload('a'.repeat(199) + '🎸b')).toEqual({ reason: 'a'.repeat(199) })
+    expect(rejectReasonPayload('a'.repeat(198) + '🎸b')).toEqual({ reason: 'a'.repeat(198) + '🎸' })
   })
 })
