@@ -389,6 +389,34 @@ describe('performers', () => {
     assert.equal(await dev.canStartPerforming(fakeClient('d'), 'r'), true)
     assert.equal(await dev.canStartPerforming(fakeClient('d', { authState: 'anonymous' }), 'r'), false)
   })
+
+  it('instrumentForStart (P2-21b): approval rooms keep the host-approved instrument; host, free_join, dev mode take the sent one', async () => {
+    const locked = createPerformers(meta(false), false)
+    const m = fakeClient('m', { userId: 'm' })
+    locked.setApproval('r', 'm', null, 'guitar')
+    assert.equal(await locked.instrumentForStart(m, 'r', 'drums'), 'guitar')
+    assert.equal(await locked.instrumentForStart(m, 'r', 'guitar'), 'guitar')
+    // 유예 걸기·풀기는 승인 악기를 유지한다
+    locked.setApproval('r', 'm', Date.now() + 60_000)
+    locked.releaseGraceOnRejoin('r', 'm')
+    assert.equal(locked.approvedInstrument('r', 'm'), 'guitar')
+    // 변경 승인 뒤에는 새 악기
+    locked.updateApprovedInstrument('r', 'm', 'bass')
+    assert.equal(await locked.instrumentForStart(m, 'r', 'guitar'), 'bass')
+    // 만료된 승인·승인 기록 없는 사용자는 승인 악기가 없다(시작 자체는 canStartPerforming이 막는다)
+    locked.setApproval('r', 'x', Date.now() - 1, 'keys')
+    assert.equal(locked.approvedInstrument('r', 'x'), undefined)
+    locked.updateApprovedInstrument('r', 'nobody', 'keys')
+    assert.equal(locked.approvedInstrument('r', 'nobody'), undefined)
+    assert.equal(await locked.instrumentForStart(fakeClient('h', { userId: 'host', isHost: true }), 'r', 'keys'), 'keys')
+
+    const free = createPerformers(meta(true), false)
+    free.setApproval('r', 'm', null, 'guitar')
+    assert.equal(await free.instrumentForStart(m, 'r', 'synth'), 'synth')
+    const dev = createPerformers(meta(false), true)
+    dev.setApproval('r', 'm', null, 'guitar')
+    assert.equal(await dev.instrumentForStart(m, 'r', 'synth'), 'synth')
+  })
 })
 
 describe('metronome', () => {

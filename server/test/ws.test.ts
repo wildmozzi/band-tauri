@@ -127,6 +127,103 @@ describe('H1: start-performing requires host / free_join / approval', async () =
   })
 })
 
+describe('P2-21b: instrument change while performing needs host approval in an approval room', async () => {
+  const url = await startWs(backend())
+
+  /** pred에 맞는 메시지가 올 때까지 기다려 그 메시지를 돌려준다 */
+  async function found(c: TestClient, pred: (m: any) => boolean) {
+    assert.ok(await c.waitFor(pred))
+    return c.inbox.find(pred)
+  }
+
+  /** 방장·승인받은 연주자(guitar)·관찰자를 locked 방에 세운다 */
+  async function approvedPerformer(tag: string) {
+    const host = await client(url)
+    const member = await client(url)
+    const watcher = await client(url)
+    await authJoin(host, 'tok:host', 'locked')
+    await authJoin(member, `tok:${tag}`, 'locked')
+    await authJoin(watcher, `tok:${tag}-watch`, 'locked')
+    member.send({ type: 'request-perform', instrument: 'guitar' })
+    await host.waitFor(m => m.type === 'perform-request-received')
+    host.send({ type: 'approve-perform', targetId: member.id })
+    await member.waitFor(m => m.type === 'perform-request-approved')
+    member.send({ type: 'start-performing', instrument: 'guitar' })
+    assert.ok(await watcher.waitFor(m => m.type === 'performer-updated' && m.oderId === member.id && m.instrument === 'guitar'))
+    return { host, member, watcher }
+  }
+
+  it('ignores a different instrument in a start-performing resend and keeps the approved one', async () => {
+    const { member, watcher } = await approvedPerformer('p21a')
+    watcher.inbox.length = 0
+    member.send({ type: 'start-performing', instrument: 'drums' })
+    const upd = await found(watcher, m => m.type === 'performer-updated' && m.oderId === member.id)
+    assert.equal(upd.instrument, 'guitar')
+    assert.ok(!member.has(m => m.type === 'error'), 'resend is not an error (legit resends carry the approved instrument)')
+    // 새로 들어온 사람에게도 승인 악기로 보인다
+    const late = await client(url)
+    await authJoin(late, 'tok:p21a-late', 'locked')
+    const state = late.inbox.find(m => m.type === 'room-state')
+    assert.equal(state.participants.find((p: any) => p.oderId === member.id)?.instrument, 'guitar')
+
+    // 멈췄다 다시 시작해도 승인 없이는 바꿀 수 없다(승인 기록은 연주 중단으로 지워지지 않는다)
+    member.send({ type: 'stop-performing' })
+    await watcher.waitFor(m => m.type === 'performer-updated' && m.oderId === member.id && m.isPerforming === false)
+    watcher.inbox.length = 0
+    member.send({ type: 'start-performing', instrument: 'keys' })
+    const again = await found(watcher, m => m.type === 'performer-updated' && m.oderId === member.id && m.isPerforming === true)
+    assert.equal(again.instrument, 'guitar')
+  })
+
+  it('allows the change through request-instrument-change → host approval, and later resends keep the new instrument', async () => {
+    const { host, member, watcher } = await approvedPerformer('p21b')
+    member.send({ type: 'request-instrument-change', newInstrument: 'bass' })
+    await host.waitFor(m => m.type === 'instrument-change-request-received')
+    host.send({ type: 'approve-instrument-change', targetId: member.id })
+    assert.ok(await member.waitFor(m => m.type === 'instrument-change-approved' && m.newInstrument === 'bass'))
+    assert.ok(await watcher.waitFor(m => m.type === 'participant-instrument-changed' && m.instrument === 'bass'))
+
+    // 엔진 재시작 재전송(승인 악기 그대로)은 그대로, 승인과 엇갈린 옛 악기 재전송은 승인 악기로 맞춘다
+    watcher.inbox.length = 0
+    member.send({ type: 'start-performing', instrument: 'guitar' })
+    const upd = await found(watcher, m => m.type === 'performer-updated' && m.oderId === member.id)
+    assert.equal(upd.instrument, 'bass')
+    watcher.inbox.length = 0
+    member.send({ type: 'start-performing', instrument: 'bass' })
+    const same = await found(watcher, m => m.type === 'performer-updated' && m.oderId === member.id)
+    assert.equal(same.instrument, 'bass')
+  })
+
+  it('lets the host change their own instrument directly', async () => {
+    const host = await client(url)
+    const watcher = await client(url)
+    await authJoin(host, 'tok:host', 'locked')
+    await authJoin(watcher, 'tok:p21c-watch', 'locked')
+    host.send({ type: 'start-performing', instrument: 'drums' })
+    await watcher.waitFor(m => m.type === 'performer-updated' && m.oderId === host.id && m.instrument === 'drums')
+    host.send({ type: 'start-performing', instrument: 'keys' })
+    assert.ok(await watcher.waitFor(m => m.type === 'performer-updated' && m.oderId === host.id && m.instrument === 'keys'))
+  })
+
+  it('lets a free_join performer change freely, even with an approval record', async () => {
+    const host = await client(url)
+    const a = await client(url)
+    const b = await client(url)
+    await authJoin(host, 'tok:host', 'free')
+    await authJoin(a, 'tok:p21d', 'free')
+    await authJoin(b, 'tok:p21d-watch', 'free')
+    // free_join 방에서도 요청·승인은 가능하다(승인 악기가 남는다) — 그래도 본인이 바꿀 수 있다
+    a.send({ type: 'request-perform', instrument: 'guitar' })
+    await host.waitFor(m => m.type === 'perform-request-received')
+    host.send({ type: 'approve-perform', targetId: a.id })
+    await a.waitFor(m => m.type === 'perform-request-approved')
+    a.send({ type: 'start-performing', instrument: 'guitar' })
+    await b.waitFor(m => m.type === 'performer-updated' && m.oderId === a.id && m.instrument === 'guitar')
+    a.send({ type: 'start-performing', instrument: 'synth' })
+    assert.ok(await b.waitFor(m => m.type === 'performer-updated' && m.oderId === a.id && m.instrument === 'synth'))
+  })
+})
+
 describe('#189 review H-1: a failed room lookup is not "room not found"', async () => {
   let failNext = 0
   const options = backend()
