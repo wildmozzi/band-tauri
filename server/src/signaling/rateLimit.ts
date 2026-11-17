@@ -1,17 +1,17 @@
 export class TokenBucket {
   private tokens: number
   private last = Date.now()
+  /** 이 버킷이 가졌던 최대 용량(resize의 토큰 더하기 기준, #215 리뷰 M1). 생성자에서 정한다(필드 초기화 순서 — TS2729) */
+  private peak: number
   constructor(private capacity: number, private perSec: number) {
     this.tokens = capacity
+    this.peak = capacity
   }
   /** 가득 찼는지(오래 안 쓴 버킷 정리용) */
   isFull(): boolean {
     const now = Date.now()
     return this.tokens + ((now - this.last) / 1000) * this.perSec >= this.capacity
   }
-
-  /** 이 버킷이 가졌던 최대 용량(resize의 토큰 더하기 기준, #215 리뷰 M1) */
-  private peak = this.capacity
 
   /**
    * 크기·속도를 바꾼다(관람 중계 버킷 — 방 인원에 따라). 작아지면 남은 토큰을 새 크기로 자른다. 커질 때 토큰은 **이 버킷이 가졌던
