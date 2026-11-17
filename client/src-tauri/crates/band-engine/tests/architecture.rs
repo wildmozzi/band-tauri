@@ -2124,7 +2124,7 @@ const RT_SAME_NAME_CALLS: &[(&str, &str, &str, &str)] = &[
 /// RT_CODE 파일이 경로(`use`·본문 경로)로 쓰는 RT_CODE 밖의 타입(같은 크레이트·`band-dsp`, #162 리뷰 L-1): (파일, 타입, 수신자, 근거).
 /// 그 타입의 메서드(고유·트레이트 impl)는 RT로 보지 않는다 — RT 본문이 부르면 실패한다. 수신자가 `None`이면 메서드 이름으로
 /// 보고(`rt_uncovered_callees`), `Some(필드)`면 이름이 원자값 등과 겹쳐 `.필드.메서드(`·`타입::메서드(` 꼴로만 본다.
-/// 여기 없는 타입을 RT_CODE 파일이 새로 쓰면 실패한다. 상수(대문자 이름)와 열거형 변형은 데이터라 보지 않는다. 함수는 목록 없이
+/// 여기 없는 타입을 RT_CODE 파일이 새로 쓰면 실패한다. 상수(정의 파일의 `const`·`static`, #166 리뷰 L-2)와 열거형 변형은 데이터라 보지 않는다. 함수는 목록 없이
 /// 이름으로 본다(`band_dsp::config::frame_code_from_samples(…)`를 RT 본문이 부르면 실패).
 const RT_EXTERNAL_TYPES: &[(&str, &str, Option<&[&str]>, &str)] = &[
     ("crates/band-dsp/src/config.rs", "EngineConfig", None, "`stream.rs` 장치 열기(`open_engine_streams`)의 인자. RT 본문은 메서드를 부르지 않는다"),
@@ -2281,7 +2281,7 @@ fn rt_uncovered_callees(rt: &[(String, String, String)], others: &[(String, BTre
         let mut body = body.clone();
         for (file, f, form, _) in RT_SAME_NAME_CALLS {
             if file == rel && f == name {
-                body = body.replace(form, "");
+                body = remove_bounded(&body, form);
             }
         }
         let body = &body;
@@ -2302,13 +2302,85 @@ fn rt_uncovered_callees(rt: &[(String, String, String)], others: &[(String, BTre
     bad
 }
 
-/// 상수 이름(대문자·숫자·`_`만, 첫 글자 대문자) — 데이터라 RT 호출 검사에서 보지 않는다.
+/// `form`을 지운다. 단 `form`이 식별자 문자로 시작하면 앞 글자가 식별자 문자가 아닌 자리만(#166 리뷰 L-4 —
+/// `FailState::default(` 면제가 `MyFailState::default(`의 뒷부분을 지우지 않게).
+fn remove_bounded(body: &str, form: &str) -> String {
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let check = form.as_bytes().first().is_some_and(|&c| ident(c));
+    let b = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut last = 0;
+    for (at, _) in body.match_indices(form) {
+        if at < last || (check && at > 0 && ident(b[at - 1])) {
+            continue;
+        }
+        out.push_str(&body[last..at]);
+        last = at + form.len();
+    }
+    out.push_str(&body[last..]);
+    out
+}
+
+/// 상수 이름 꼴(대문자·숫자·`_`만, 첫 글자 대문자).
 fn is_const_name(s: &str) -> bool {
     s.starts_with(|c: char| c.is_ascii_uppercase()) && s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// 정의 파일(주석·문자열을 지운 코드)에 `const 이름:`·`static 이름:`이 있는 상수 — 데이터라 RT 호출 검사에서 보지 않는다.
+/// 이름 꼴만으로 고르면 대문자 약어 타입(`PCM`)이 빠져나간다(#166 리뷰 L-2).
+fn is_defined_const(item: &str, def_code: &str) -> bool {
+    let one = def_code.split_whitespace().collect::<Vec<_>>().join(" ").replace(" :", ":");
+    is_const_name(item) && ["const", "static", "static mut"].iter().any(|k| find_word(&one, &format!("{k} {item}:")).is_some())
+}
+
+/// `use` 문의 항목: (경로, 이 파일에서 부르는 이름 — `as` 별칭이면 별칭, 아니면 마지막 마디). `use m::{self, x}`의 `self`는
+/// 모듈 `m`으로 본다. `as _`는 이름이 없다(빈 문자열).
+fn use_items(code: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut base = 0;
+    while let Some(i) = find_word(&code[base..], "use ") {
+        let at = base + i;
+        let after = &code[at + 4..];
+        let end = after.find(';').unwrap_or(after.len());
+        let mut v = Vec::new();
+        // `expand_use`는 ` as ` 뒤를 버린다 — 별칭을 마디로 바꿔 넘긴 뒤 다시 가른다(#166 리뷰 L-1)
+        expand_use(&after[..end].replace(" as ", "::__as__::"), "", &mut v);
+        for p in v {
+            let (path, alias) = match p.split_once("::__as__::") {
+                Some((a, b)) => (a.to_string(), Some(b.trim().to_string())),
+                None => (p, None),
+            };
+            let path = path.strip_suffix("::self").map(str::to_string).unwrap_or(path);
+            let local = alias.unwrap_or_else(|| path.rsplit("::").next().unwrap_or("").to_string());
+            out.push((path, if local == "_" { String::new() } else { local }));
+        }
+        base = at + 4 + end;
+    }
+    out
+}
+
+/// RT 본문이 함수를 값으로 넘기는지(`and_then(f)`, `map(m::f)`, `g(a, f)`): 이름 앞이 `(`·`,`·`::`이고 뒤가 `)`·`,`(#166 리뷰 L-1).
+/// RT_CODE 밖 함수 이름에만 쓴다(지역 변수 이름과 겹치는 대상 파일 함수 이름에는 쓰지 않는다).
+fn rt_fn_values(rt: &[(String, String, String)], fns: &[(String, BTreeSet<String>)]) -> Vec<String> {
+    let mut bad = Vec::new();
+    for (rel, name, body) in rt {
+        for (orel, names) in fns {
+            for n in names {
+                let hit = body.match_indices(n.as_str()).any(|(at, _)| {
+                    let (pre, post) = (&body[..at], &body[at + n.len()..]);
+                    (pre.ends_with('(') || pre.ends_with(',') || pre.ends_with("::")) && (post.starts_with(')') || post.starts_with(','))
+                });
+                if hit {
+                    bad.push(format!("{rel} {name}: RT로 보지 않는 {orel}의 {n} 를 값으로 넘긴다"));
+                }
+            }
+        }
+    }
+    bad
+}
+
 /// RT_CODE 밖 항목의 RT 검사 재료(#162 리뷰 L-1). `files`: (RT_CODE 파일, 원문), `defs`: 모듈 경로 → 그 모듈 파일(`rel_of` 꼴),
-/// `type_src`: `RT_EXTERNAL_TYPES` 파일 → 원문. RT_CODE 파일이 경로(`use`·본문 — `crate::`·`super::`·`band_dsp::`)로 쓰는 항목을
+/// `type_src`: 정의 파일 → 원문(없으면 디스크에서 읽는다). RT_CODE 파일이 경로(`use`·본문 — `crate::`·`super::`·`band_dsp::`)로 쓰는 항목을
 /// 그 정의 파일로 해석해, 정의 파일이 RT_CODE 밖이면
 /// - 함수(소문자 이름)는 "RT로 보지 않는 이름"이 된다(`band_dsp::config::frame_code_from_samples`),
 /// - 타입은 `RT_EXTERNAL_TYPES`에 있어야 하고 그 메서드도 RT로 보지 않는다(수신자 `None`이면 이름, `Some`이면 `.필드.메서드(`·`타입::메서드(` 꼴),
@@ -2320,24 +2392,60 @@ fn rt_external_items(
     files: &[(String, String)],
     defs: &BTreeMap<Vec<String>, String>,
     type_src: &BTreeMap<String, String>,
-) -> (Vec<(String, BTreeSet<String>)>, Vec<(String, String)>, Vec<String>) {
+) -> (Vec<(String, BTreeSet<String>)>, Vec<(String, BTreeSet<String>)>, Vec<(String, String)>, Vec<String>) {
     let listed: BTreeSet<&str> = RT_CODE.iter().map(|(r, _, _)| *r).collect();
     let (mut fns, mut bad) = (BTreeMap::<String, BTreeSet<String>>::new(), Vec::new());
     let mut used = BTreeSet::new();
+    let mut def_code: BTreeMap<String, String> = BTreeMap::new();
     for (rel, src) in files {
         let code = strip(without_unit_tests(src));
         let children = declared_children(&code);
         let module = module_of_file(&rt_code_path(rel));
-        for (_, path) in raw_paths(&code, &children) {
+        // (절대 경로, 이 파일에서 부르는 다른 이름 — `use … as 별칭`)
+        let mut refs: Vec<(Vec<String>, Option<String>)> = Vec::new();
+        refs.extend(raw_paths(&code, &children).into_iter().filter_map(|(_, p)| resolve(&p, &module, &children)).map(|a| (a, None)));
+        let b = code.as_bytes();
+        for (path, local) in use_items(&code) {
             let Some(abs) = resolve(&path, &module, &children) else { continue };
+            if !defs.contains_key(&abs) {
+                refs.push((abs, Some(local)));
+                continue;
+            }
+            // 모듈을 가져와 `모듈::함수(…)`로 부르는 꼴(#166 리뷰 M-1): 본문의 `별칭::…` 경로를 그 모듈 기준으로 푼다
+            if local.is_empty() {
+                continue;
+            }
+            let pat = format!("{local}::");
+            for (at, _) in code.match_indices(&pat) {
+                if at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_' || b[at - 1] == b':') {
+                    continue;
+                }
+                let rest: String = code[at + pat.len()..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':').collect();
+                let mut a = abs.clone();
+                a.extend(rest.split("::").filter(|s| !s.is_empty()).map(str::to_string));
+                refs.push((a, None));
+            }
+        }
+        for (abs, alias) in refs {
+            if defs.contains_key(&abs) {
+                continue; // 모듈 자체(`use band_dsp::config;`) — 위에서 그 모듈 경로로 풀었다
+            }
             let Some(k) = (1..abs.len()).rev().find(|&k| defs.contains_key(&abs[..k])) else { continue };
             let def = &defs[&abs[..k]];
             let item = abs[k].as_str();
-            if listed.contains(def.as_str()) || is_const_name(item) {
+            if listed.contains(def.as_str()) {
+                continue;
+            }
+            let dc = def_code.entry(def.clone()).or_insert_with(|| {
+                strip(without_unit_tests(&type_src.get(def).cloned().unwrap_or_else(|| std::fs::read_to_string(rt_code_path(def)).unwrap_or_default())))
+            });
+            if is_defined_const(item, dc) {
                 continue;
             }
             if item.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') {
-                fns.entry(def.clone()).or_default().insert(item.to_string());
+                let e = fns.entry(def.clone()).or_default();
+                e.insert(item.to_string());
+                e.extend(alias.filter(|a| !a.is_empty()));
             } else if RT_EXTERNAL_TYPES.iter().any(|(f, t, _, _)| f == def && *t == item) {
                 used.insert((def.clone(), item.to_string()));
             } else {
@@ -2345,7 +2453,8 @@ fn rt_external_items(
             }
         }
     }
-    let mut others: Vec<(String, BTreeSet<String>)> = fns.into_iter().collect();
+    let fns: Vec<(String, BTreeSet<String>)> = fns.into_iter().collect();
+    let mut others = fns.clone();
     let mut forms = Vec::new();
     for (f, ty, receivers, _) in RT_EXTERNAL_TYPES {
         if !used.contains(&(f.to_string(), ty.to_string())) {
@@ -2363,7 +2472,9 @@ fn rt_external_items(
             }
         }
     }
-    (others, forms, bad)
+    bad.sort();
+    bad.dedup();
+    (others, fns, forms, bad)
 }
 
 /// RT 경로 정적 검사: `rt.rs`, 출력 콜백의 클릭(`metronome/click.rs`), 녹음 탭 끝점(`record/rt_ring.rs`), RT가 부르는 `band-dsp` 함수(⑩-3),
@@ -2392,9 +2503,10 @@ fn rt_paths_have_no_alloc_lock_log_panic_syscall() {
     let defs: BTreeMap<Vec<String>, String> = source_files().into_iter().map(|(f, m)| (m, rel_of(&f))).collect();
     let type_src: BTreeMap<String, String> =
         RT_EXTERNAL_TYPES.iter().map(|(f, ..)| (f.to_string(), std::fs::read_to_string(rt_code_path(f)).unwrap_or_default())).collect();
-    let (ext, forms, ext_bad) = rt_external_items(&files, &defs, &type_src);
+    let (ext, ext_fns, forms, ext_bad) = rt_external_items(&files, &defs, &type_src);
     bad.extend(ext_bad);
     others.extend(ext);
+    bad.extend(rt_fn_values(&rt, &ext_fns));
     for (rel, name, body) in &rt {
         for (what, form) in &forms {
             if body.contains(form.as_str()) {
@@ -2492,7 +2604,11 @@ fn rt_scanner_catches_variants() {
     .map(|(m, f)| (m.into_iter().map(String::from).collect(), f.to_string()))
     .collect();
     let type_src: BTreeMap<String, String> = [
-        ("crates/band-dsp/src/config.rs", "impl EngineConfig { pub fn validate(&self) {} }\nimpl Default for EngineConfig { fn default() -> Self { x } }"),
+        (
+            "crates/band-dsp/src/config.rs",
+            "pub const MAX_SOURCES: usize = 8;\npub struct PCM;\n\
+             impl EngineConfig { pub fn validate(&self) {} }\nimpl Default for EngineConfig { fn default() -> Self { x } }",
+        ),
         ("crates/band-dsp/src/prio_slot.rs", "impl PrioSlot { pub fn load(&self) {} }"),
     ]
     .into_iter()
@@ -2501,7 +2617,7 @@ fn rt_scanner_catches_variants() {
     let src = "use band_dsp::config::{frame_code_from_samples, EngineConfig, MAX_SOURCES};\nuse band_dsp::jitter::JitterBuffer;\n\
                use band_dsp::mixer::{mix_into, MixControls};\n\
                fn f() { let _ = band_dsp::prio_slot::ThreadPriority::Unmanaged; let _ = band_dsp::config::frame_samples_from_code(1); }\n";
-    let (names, forms, bad) = rt_external_items(&[("engine/rt.rs".to_string(), src.to_string())], &defs, &type_src);
+    let (names, _, forms, bad) = rt_external_items(&[("engine/rt.rs".to_string(), src.to_string())], &defs, &type_src);
     let has = |file: &str, n: &str| names.iter().any(|(f, ns)| f == file && ns.contains(n));
     assert!(has("crates/band-dsp/src/config.rs", "frame_code_from_samples") && has("crates/band-dsp/src/config.rs", "frame_samples_from_code"));
     assert!(has("crates/band-dsp/src/config.rs EngineConfig", "validate") && has("crates/band-dsp/src/config.rs EngineConfig", "default"));
@@ -2512,6 +2628,27 @@ fn rt_scanner_catches_variants() {
     assert!(bad.iter().any(|b| b.contains("PrioSlot를 RT_CODE 파일이 쓰지 않는다")), "쓰지 않는 목록 항목");
     assert!(!bad.iter().any(|b| b.contains("EngineConfig를") || b.contains("ThreadPriority를")), "쓰는 목록 항목");
     assert!(is_const_name("MAX_SOURCES") && is_const_name("I24") && !is_const_name("EngineConfig") && !is_const_name("load"));
+    // #166 리뷰: 모듈 가져오기(M-1), `as` 별칭·함수 값(L-1), 대문자 약어 타입(L-2)
+    let src = "use band_dsp::config;\nuse band_dsp::config::frame_code_from_samples as fcs;\nuse band_dsp::config::PCM;\n\
+               fn f() { let _ = config::frame_samples_from_code(1); let _ = config::MAX_SOURCES; }\n";
+    let (names, fns, _, bad) = rt_external_items(&[("engine/rt.rs".to_string(), src.to_string())], &defs, &type_src);
+    let has = |n: &str| names.iter().any(|(f, ns)| f == "crates/band-dsp/src/config.rs" && ns.contains(n));
+    assert!(has("frame_samples_from_code") && has("fcs") && has("frame_code_from_samples"), "{names:?}");
+    assert!(!has("config") && !has("MAX_SOURCES"), "모듈 이름·상수는 함수가 아니다: {names:?}");
+    assert!(bad.iter().any(|b| b.contains("의 타입 PCM을 쓴다")), "대문자 약어 타입은 상수가 아니다: {bad:?}");
+    let rt = |body: &str| vec![("engine/rt.rs".to_string(), "process".to_string(), body.to_string())];
+    assert_eq!(rt_fn_values(&rt("letx=Some(n).and_then(band_dsp::config::frame_samples_from_code);"), &fns).len(), 1);
+    assert_eq!(rt_fn_values(&rt("letx=o.map(fcs).unwrap_or(0);g(a,fcs,b);"), &fns).len(), 1, "이름당 하나");
+    assert!(rt_fn_values(&rt("letfcs_n=fcs2(1);letx=y.fcs;"), &fns).is_empty());
+    assert_eq!(use_items("use a::{self, b as c, d};\nuse e::f as _;"), [
+        ("a".to_string(), "a".to_string()),
+        ("a::b".to_string(), "c".to_string()),
+        ("a::d".to_string(), "d".to_string()),
+        ("e::f".to_string(), String::new())
+    ]);
+    // 면제 꼴은 식별자 경계에서만 지운다(#166 리뷰 L-4)
+    assert_eq!(remove_bounded("a=FailState::default();b=MyFailState::default();", "FailState::default("), "a=);b=MyFailState::default();");
+    assert_eq!(remove_bounded("x.enumerate().take(n)", ".enumerate().take("), "xn)");
 }
 
 /// 엔진 R-1 ⑨a: 통합 테스트·예제는 내부를 `band_engine::testing::…`으로만 쓴다(engine-stage5-10-scope.md 6.2절).
