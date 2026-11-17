@@ -23,7 +23,7 @@ import { createNativeSession } from '../src/signaling/nativeSession'
 import { admitToRoom, handleLeave, type MembershipSvc } from '../src/signaling/membership'
 import type { Ctx } from '../src/signaling/ctx'
 import { createResume } from '../src/signaling/resume'
-import { rejectReason } from '../src/signaling/protocol'
+import { rejectReason, truncateCodePoints } from '../src/signaling/protocol'
 import { sleep } from './helpers'
 
 const OPEN = 1
@@ -602,5 +602,20 @@ describe('rejectReason (P2-11)', () => {
     assert.equal(rejectReason('   ', FALLBACK), FALLBACK)
     assert.equal(rejectReason('  다음 곡에  ', FALLBACK), '다음 곡에')
     assert.equal(rejectReason(' ' + 'a'.repeat(300), FALLBACK), 'a'.repeat(200))
+  })
+
+  it('200 경계에 걸린 이모지(서로게이트 쌍)는 반쪽을 남기지 않고 통째로 뺀다', () => {
+    assert.equal(rejectReason('a'.repeat(199) + '🎸b', FALLBACK), 'a'.repeat(199))
+    // 경계 안에 다 들어가면 그대로
+    assert.equal(rejectReason('a'.repeat(198) + '🎸b', FALLBACK), 'a'.repeat(198) + '🎸')
+  })
+
+  it('truncateCodePoints: 짧으면 그대로, 쌍 사이를 자르지 않는다', () => {
+    assert.equal(truncateCodePoints('🎸🥁', 10), '🎸🥁')
+    assert.equal(truncateCodePoints('🎸🥁', 4), '🎸🥁')
+    assert.equal(truncateCodePoints('🎸🥁', 3), '🎸')
+    assert.equal(truncateCodePoints('🎸🥁', 2), '🎸')
+    assert.equal(truncateCodePoints('🎸🥁', 1), '')
+    assert.equal(truncateCodePoints('abc', 2), 'ab')
   })
 })

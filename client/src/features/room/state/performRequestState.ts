@@ -141,6 +141,24 @@ export function performRequestReducer(s: PerformRequestState, a: PerformRequestA
   }
 }
 
+/** 거절 사유 최대 길이(UTF-16 코드 유닛). 서버 `MAX_REJECT_REASON_LENGTH`(server/src/signaling/protocol.ts)와 같은 값 */
+export const MAX_REJECT_REASON_LENGTH = 200
+
+/**
+ * `reject-perform`·`reject-instrument-change` 송신 페이로드의 사유 부분: 앞뒤 공백을 빼고 비면 생략,
+ * 아니면 앞 200 코드 유닛(경계에 서로게이트 쌍이 걸리면 반쪽을 버려 코드 포인트 경계에서 자름).
+ */
+export function rejectReasonPayload(reason: string | undefined): { reason?: string } {
+  const trimmed = reason?.trim()
+  if (!trimmed) return {}
+  let end = Math.min(trimmed.length, MAX_REJECT_REASON_LENGTH)
+  if (end < trimmed.length) {
+    const code = trimmed.charCodeAt(end - 1)
+    if (code >= 0xd800 && code <= 0xdbff) end -= 1
+  }
+  return { reason: trimmed.slice(0, end) }
+}
+
 /** 방장이 고를 수 있는 거절 사유 */
 export const REJECT_REASON_PRESETS = [
   '지금은 연주자를 받지 않습니다',

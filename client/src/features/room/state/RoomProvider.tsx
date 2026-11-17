@@ -35,7 +35,7 @@ import {
 } from '../../../native/engineApi'
 import { appUpdater } from '../../../native/updater'
 import { appendChat, makeChatId } from './chatModel'
-import { initialPerformRequestState, performRequestReducer, type PerformRequestAction } from './performRequestState'
+import { initialPerformRequestState, performRequestReducer, rejectReasonPayload, type PerformRequestAction } from './performRequestState'
 import { RoomRuntimeContext, type RoomActions, type RoomRuntime } from './roomHooks'
 import { initialRoomState, RoomSessionStore, type RoomSnapshot } from './roomSessionStore'
 import { canReenter } from './reconnectBanner'
@@ -426,8 +426,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       },
       rejectRequest: (targetId, reason) => {
         if (!d().isOpen()) return
-        const trimmed = reason?.trim()
-        d().send({ type: 'reject-perform', targetId, ...(trimmed ? { reason: trimmed.slice(0, 200) } : {}) })
+        d().send({ type: 'reject-perform', targetId, ...rejectReasonPayload(reason) })
         reduceRequests({ type: 'resolved', targetId })
       },
       requestPerform: (instrument) => {
@@ -447,8 +446,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       },
       rejectInstrumentChange: (targetId, reason) => {
         if (!d().isOpen()) return
-        const trimmed = reason?.trim()
-        d().send({ type: 'reject-instrument-change', targetId, ...(trimmed ? { reason: trimmed.slice(0, 200) } : {}) })
+        d().send({ type: 'reject-instrument-change', targetId, ...rejectReasonPayload(reason) })
         store.patch('requests', (r) => ({ pendingInstrumentChanges: r.pendingInstrumentChanges.filter((x) => x.oderId !== targetId) }))
       },
       requestInstrumentChange: (newInstrument) => {

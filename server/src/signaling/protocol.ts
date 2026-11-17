@@ -29,12 +29,22 @@ export function sanitizeNickname(v: unknown): string | undefined {
 }
 
 /**
+ * 앞 `max` UTF-16 코드 유닛까지 자르되 코드 포인트 경계를 지킨다: 경계에 서로게이트 쌍(이모지 등)이
+ * 걸리면 짝 잃은 상위 서로게이트를 버린다(결과는 `max` 유닛 이하, 깨진 글자 없음).
+ */
+export function truncateCodePoints(s: string, max: number): string {
+  if (s.length <= max) return s
+  const code = s.charCodeAt(max - 1)
+  return s.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max)
+}
+
+/**
  * 방장 거절 사유(`reject-perform`·`reject-instrument-change` 공통, P2-11): 문자열이 아니거나
- * 앞뒤 공백을 뺀 값이 비면 `fallback`, 아니면 앞뒤 공백을 뺀 앞 200자.
+ * 앞뒤 공백을 뺀 값이 비면 `fallback`, 아니면 앞뒤 공백을 뺀 앞 200 코드 유닛(코드 포인트 경계에서 자름).
  * 받는 쪽 UI가 빈 사유·공백 사유를 따로 걸러내지 않아도 서버가 늘 보여줄 문구를 채운다.
  */
 export function rejectReason(v: unknown, fallback: string): string {
-  return (typeof v === 'string' ? v.trim().slice(0, MAX_REJECT_REASON_LENGTH) : '') || fallback
+  return (typeof v === 'string' ? truncateCodePoints(v.trim(), MAX_REJECT_REASON_LENGTH) : '') || fallback
 }
 
 export interface Participant {
