@@ -34,6 +34,9 @@ class FakeEngine implements EngineBackend {
   maxActive = 0
   /** 다음 start를 수동으로 끝내고 싶으면 true */
   holdStart = false
+  /** 통계 응답을 붙잡는다(느린 engine_stats, #214 리뷰 L4) — `releaseStats`로 푼다 */
+  holdStats = false
+  releaseStats: (() => void) | null = null
   private release: (() => void) | null = null
   peerStats: PeerStats[] = []
   startFail: string | null = null
@@ -116,7 +119,10 @@ class FakeEngine implements EngineBackend {
     })
   }
   stats() {
-    return this.track('stats', async () => ({ ...stats(this.statsRunning), relay: this.relayStats, peers: this.peerStats, deviceLost: this.deviceLost, streamFailed: this.streamFailed }))
+    return this.track('stats', async () => {
+      if (this.holdStats) await new Promise<void>((r) => { this.releaseStats = r })
+      return { ...stats(this.statsRunning), relay: this.relayStats, peers: this.peerStats, deviceLost: this.deviceLost, streamFailed: this.streamFailed }
+    })
   }
 }
 
@@ -343,6 +349,28 @@ describe('PerformSession 피어/엔진 상태', () => {
     expect(session.getState().phase).toBe('idle')
     expect(session.getState().error).toContain('엔진이 멈췄')
     expect(types().slice(-2)).toEqual(['native-leave', 'stop-performing'])
+  })
+
+  it('#214 L4: 통계 응답이 느리면 다음 틱은 건너뛴다(요청 1개만, 같은 표본을 두 번 세지 않음)', async () => {
+    const { session, start, engine } = setup()
+    await start()
+    engine.statsRunning = false
+    engine.holdStats = true
+    const first = session.pollStats()
+    await flush()
+    // 응답 전 틱 3번: 새 요청을 보내지 않는다
+    await session.pollStats()
+    await session.pollStats()
+    await session.pollStats()
+    expect(engine.calls.filter((c) => c === 'stats')).toHaveLength(1)
+    engine.holdStats = false
+    engine.releaseStats?.()
+    await first
+    // running=false 표본은 한 번만 셌다(임계 2): 아직 연주 중
+    expect(session.getState().phase).toBe('running')
+    await session.pollStats()
+    expect(engine.calls.filter((c) => c === 'stats')).toHaveLength(2)
+    expect(session.getState().phase).toBe('idle')
   })
 
   it('P1-20: 연주 시작 → 첫 피어 소리 = (add_peer 시각 − 시작) + 엔진 firstAudioMs, 가장 빠른/늦은 피어', async () => {

@@ -655,8 +655,21 @@ export function engineSetLoopbackOffset(offsetMs: number | null): Promise<null> 
   return invoke<null>('engine_set_loopback_offset', { offsetMs })
 }
 
+/** 진행 중인 `engine_stats` 호출(모든 호출자가 나눠 쓴다). */
+let statsInFlight: Promise<EngineStats> | null = null
+
+/**
+ * 엔진 통계. 앞선 호출이 아직 끝나지 않았으면 새로 보내지 않고 그 응답을 함께 기다린다(#214 리뷰 L4): 커맨드는 Rust
+ * blocking 풀에서 엔진 슬롯 락을 기다리므로(피어 추가·탭 join 중), 폴러 여럿(연주 세션 500ms·피어 통계 1초·테스트 모드)이
+ * 응답보다 빨리 보내면 블로킹 스레드가 쌓였다. 폴러는 각자 진행 중이면 그 틱을 건너뛴다(같은 표본을 두 번 세지 않게).
+ */
 export function engineStats(): Promise<EngineStats> {
-  return invoke<EngineStats>('engine_stats')
+  if (statsInFlight) return statsInFlight
+  const p = invoke<EngineStats>('engine_stats').finally(() => {
+    if (statsInFlight === p) statsInFlight = null
+  })
+  statsInFlight = p
+  return p
 }
 
 /**

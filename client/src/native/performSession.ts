@@ -163,6 +163,8 @@ export class PerformSession {
   /** 마지막 relay-token-request 시각(ms) — 엔진 상태로 인한 즉시 요청의 간격 제한 */
   private lastRelayRequestAt = -Infinity
   private deadStats = 0
+  /** 통계 요청이 진행 중(느린 응답): 다음 틱은 건너뛴다 — 같은 표본으로 deadStats·deviceLostPolls를 두 번 세지 않고 블로킹 풀에 쌓지 않는다(#214 리뷰 L4) */
+  private statsInFlight = false
   /** 마지막 key-conflict 재시작 시각(ms) — 반복 재시작 방지 */
   private lastKeyConflictAt = -Infinity
   /** 따르는 방장 메트로놈(from = 방장 엔진 peerId) */
@@ -667,11 +669,15 @@ export class PerformSession {
     const gen = this.gen
     // 통계 요청은 명령 큐 밖이라 그사이 재추가와 겹칠 수 있다: 요청 순간의 add 시각과 비교한다(#120 L-4)
     const addedAtAtRequest = this.firstAudio?.addedAt
+    if (this.statsInFlight) return
     let stats: EngineStats
+    this.statsInFlight = true
     try {
       stats = await this.engine.stats()
     } catch {
       return
+    } finally {
+      this.statsInFlight = false
     }
     if (gen !== this.gen || this.state.phase !== 'running') return
     if (!stats.running) {
