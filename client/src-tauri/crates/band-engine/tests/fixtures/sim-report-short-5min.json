@@ -26,7 +26,7 @@
         "pass": true
       },
       "bufferMs": {
-        "median": 7.158797740936279,
+        "median": 7.165730953216553,
         "p95": 8.020833015441895
       },
       "conceal": {
@@ -89,19 +89,19 @@
       },
       "bufferMs": {
         "median": 12.250182151794434,
-        "p95": 22.187501907348633
+        "p95": 22.14600944519043
       },
       "conceal": {
         "actualLossPct": 0.4801040225382166,
         "limitPct": 1.5,
-        "lossPct": 1.0253082414016872,
+        "lossPct": 1.023454157782516,
         "pass": true,
-        "pct": 1.0475572448317418,
-        "pctWithEvents": 1.0608203677510608,
+        "pct": 1.0457031612125707,
+        "pctWithEvents": 1.0642701900852105,
         "underrunLimitPct": 0.5,
         "underrunPct": 0.022249003430054697
       },
-      "corrections": 7222,
+      "corrections": 7220,
       "driftPpm": -200.0,
       "frameMs": 5.0,
       "goalDelay": {
@@ -128,14 +128,14 @@
         "maxRunAtS": 182.200213,
         "maxRunS": 3.0999520000000076,
         "pass": true,
-        "pct": 3.1034482758620636,
-        "totalS": 8.999999999999984
+        "pct": 2.896551724137926,
+        "totalS": 8.399999999999986
       },
       "rebuffers": 0,
       "recoverPass": true,
       "recoveries": [],
       "tail": {
-        "adjusts": 25,
+        "adjusts": 26,
         "resets": 0
       },
       "targetFirst": {
@@ -157,7 +157,7 @@
         "pass": true
       },
       "bufferMs": {
-        "median": 10.605472564697266,
+        "median": 10.60537338256836,
         "p95": 11.645827293395996
       },
       "conceal": {
@@ -219,7 +219,7 @@
         "pass": true
       },
       "bufferMs": {
-        "median": 8.632101058959961,
+        "median": 8.634490013122559,
         "p95": 9.086660385131836
       },
       "conceal": {
@@ -232,7 +232,7 @@
         "underrunLimitPct": 0.5,
         "underrunPct": 0.0
       },
-      "corrections": 2180,
+      "corrections": 2179,
       "driftPpm": -120.0,
       "frameMs": 2.5,
       "goalDelay": {
@@ -290,7 +290,7 @@
         "pass": true
       },
       "bufferMs": {
-        "median": 6.828277111053467,
+        "median": 6.814226150512695,
         "p95": 35.70820999145508
       },
       "conceal": {
@@ -352,7 +352,7 @@
         "pass": true
       },
       "bufferMs": {
-        "median": 9.083366394042969,
+        "median": 9.084198951721191,
         "p95": 14.833332061767578
       },
       "conceal": {

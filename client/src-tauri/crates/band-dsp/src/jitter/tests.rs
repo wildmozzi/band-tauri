@@ -409,6 +409,12 @@ fn duplicate_after_rebuffer_does_not_rewind() {
 /// 지연 계단 상승 감지(P2-16b) 시험 회선: 2.5ms 프레임, 기본 지연 20ms + 지터 U(0..1ms), `extra(s)`만큼 추가 지연. 5ms마다
 /// 도착분을 넣고 2.5ms씩 두 번 꺼낸다. (시각 s, 목표 ms, 지연 창 표본 수)를 0.1초마다 돌려준다.
 fn step_run(extra: &dyn Fn(f64) -> f64, seconds: f64) -> (Vec<(f64, f32, usize)>, JitterStats) {
+    let (full, s) = step_run_full(extra, seconds);
+    (full.iter().map(|x| (x.0, x.1.target_ms, x.2)).collect(), s)
+}
+
+/// `step_run`과 같은 회선, 0.1초마다 (시각 s, 통계, 지연 창 표본 수).
+fn step_run_full(extra: &dyn Fn(f64) -> f64, seconds: f64) -> (Vec<(f64, JitterStats, usize)>, JitterStats) {
     let mut rng = rand::rngs::StdRng::seed_from_u64(7);
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     jb.set_consumer_lead(72.0);
@@ -417,7 +423,11 @@ fn step_run(extra: &dyn Fn(f64) -> f64, seconds: f64) -> (Vec<(f64, f32, usize)>
     let mut t = 0.0;
     while t < seconds * 1e6 {
         let (h, pk) = tx.next();
-        arrivals.push((t + 20_000.0 + extra(t / 1e6) * 1000.0 + rng.gen::<f64>() * 1000.0, h, pk));
+        // 추가 지연이 음수면 그 패킷은 손실(공백 시나리오).
+        let (e, u) = (extra(t / 1e6), rng.gen::<f64>());
+        if e >= 0.0 {
+            arrivals.push((t + 20_000.0 + e * 1000.0 + u * 1000.0, h, pk));
+        }
         t += 2500.0;
     }
     arrivals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -432,11 +442,88 @@ fn step_run(extra: &dyn Fn(f64) -> f64, seconds: f64) -> (Vec<(f64, f32, usize)>
         jb.pop(&mut out);
         jb.end_burst(bt, bt, 0.0);
         if bt.is_multiple_of(100_000) {
-            trace.push((bt as f64 / 1e6, jb.stats().target_ms, jb.delay.count()));
+            trace.push((bt as f64 / 1e6, jb.stats(), jb.delay.count()));
         }
         bt += 5000;
     }
     (trace, jb.stats())
+}
+
+/// #194 리뷰 탐침 시나리오(60초, 2.5ms 프레임): (이름, 추가 지연 ms 함수 — 음수는 손실).
+type Probe = (&'static str, Box<dyn Fn(f64) -> f64>);
+
+fn probe_scenarios() -> Vec<Probe> {
+    vec![
+        ("1s 스파이크 +30ms /4s", Box::new(|t: f64| if t > 5.0 && (t % 4.0) < 1.0 { 30.0 } else { 0.0 })),
+        ("0.7s 스파이크 +30ms /3s", Box::new(|t: f64| if t > 5.0 && (t % 3.0) < 0.7 { 30.0 } else { 0.0 })),
+        ("2s 스파이크 +60ms /6s", Box::new(|t: f64| if t > 5.0 && (t % 6.0) < 2.0 { 60.0 } else { 0.0 })),
+        ("0.6s 공백 + 앞뒤 +10ms /5s", Box::new(|t: f64| {
+            let r = t % 5.0;
+            if t <= 5.0 { 0.0 } else if r < 0.6 { -1.0 } else if r < 0.61 || r > 4.99 { 10.0 } else { 0.0 }
+        })),
+        ("계단 +130ms 10~20s", Box::new(|t: f64| if (10.0..20.0).contains(&t) { 130.0 } else { 0.0 })),
+        ("램프 +40ms/4s 반복", Box::new(|t: f64| if t > 5.0 { (t % 4.0) * 10.0 } else { 0.0 })),
+    ]
+}
+
+/// 탐침 지표(5초 이후): 은닉 %, 평균 목표 ms, 늦은 패킷 버림, 지연 창 리셋(표본 수 감소) 횟수.
+fn probe_metrics(extra: &dyn Fn(f64) -> f64) -> (f64, f64, u64, usize) {
+    let (tr, s) = step_run_full(extra, 60.0);
+    let s5 = tr.iter().find(|x| x.0 >= 5.0).unwrap().1;
+    let conc = (s.concealed - s5.concealed) as f64 * 100.0 / (s.produced - s5.produced).max(1) as f64;
+    let after: Vec<_> = tr.iter().filter(|x| x.0 >= 5.0).collect();
+    let tgt = after.iter().map(|x| x.1.target_ms as f64).sum::<f64>() / after.len() as f64;
+    let resets = after.windows(2).filter(|w| w[1].2 < w[0].2).count();
+    (conc, tgt, s.late_dropped - s5.late_dropped, resets)
+}
+
+#[test]
+#[ignore]
+fn probe_review() {
+    for (name, f) in probe_scenarios() {
+        let (c, t, ld, r) = probe_metrics(&*f);
+        println!("PROBE {name}: 은닉 {c:.2}% 평균 목표 {t:.2}ms 늦은 버림 {ld} 창 리셋 {r}");
+    }
+}
+
+/// #194 리뷰 탐침의 회귀 고정(결정적 — 지터 튜닝을 바꾸는 PR은 재측정해 맞출 것). 기준: 계단 감지 전(P2-16b 전) / PR 첫 판 /
+/// 지금(5초 이후 은닉 %):
+/// - 반복 긴 스파이크(2s +60ms /6s): 0.98 / 1.51 / 1.04 — 첫 스파이크만 계단으로 처리하고 되돌아오면 60초 감지 억제(M2),
+///   그 뒤는 버스트·긴 창이 맡는다(평균 목표 43 / 7.7 / 39ms — 은닉 대신 지연을 내주는 이전 맞교환으로 돌아감).
+/// - 0.7s +30ms /3s: 0.98 / 1.10 / 0.98. 1s +30ms /4s: 0.71 / 0.71 / 0.71.
+/// - 0.6s 공백 + 앞뒤 늦은 패킷: 계단 오판정(지연 창 리셋) 0 / 9 / 0(L1 최소 패킷 수).
+/// - +130ms 계단(10~20s): 0.93 / 1.22 / 0.90, 늦은 버림 109 / 174 / 103(M1 깊이 EWMA 재설정).
+/// - 램프 +40ms/4s 반복: 0.93 / 0.86 / 0.77.
+#[test]
+fn delay_step_review_probes() {
+    let m: Vec<_> = probe_scenarios().iter().map(|(n, f)| (*n, probe_metrics(&**f))).collect();
+    for (n, (c, t, ld, r)) in &m {
+        println!("{n}: 은닉 {c:.2}% 목표 {t:.2}ms 늦은 버림 {ld} 창 리셋 {r}");
+    }
+    let get = |name: &str| m.iter().find(|x| x.0 == name).unwrap().1;
+    let (c, _, _, _) = get("1s 스파이크 +30ms /4s");
+    assert!(c <= 0.75, "1s 스파이크 은닉 {c:.2}%");
+    let (c, _, _, _) = get("0.7s 스파이크 +30ms /3s");
+    assert!(c <= 1.0, "0.7s 스파이크 은닉 {c:.2}%");
+    let (c, t, _, r) = get("2s 스파이크 +60ms /6s");
+    assert!(c <= 1.1, "반복 긴 스파이크 은닉 {c:.2}%(계단 감지가 긴 창 학습을 지움)");
+    assert!(r <= 11 && t > 30.0, "반복 긴 스파이크: 첫 번째 뒤 계단 감지가 억제돼야 한다(창 리셋 {r}, 목표 {t:.1}ms)");
+    let (_, _, _, r) = get("0.6s 공백 + 앞뒤 +10ms /5s");
+    assert_eq!(r, 0, "손실 공백을 사이에 둔 늦은 패킷 몇 개로 계단 판정");
+    let (c, _, ld, _) = get("계단 +130ms 10~20s");
+    assert!(c <= 0.93 && ld <= 109, "+130ms 계단 은닉 {c:.2}% 늦은 버림 {ld}(계단 감지 전보다 나빠지면 안 됨)");
+    let (c, _, _, _) = get("램프 +40ms/4s 반복");
+    assert!(c <= 0.93, "램프 은닉 {c:.2}%");
+}
+
+/// M1: +130ms 계단에서 계단 판정(약 10.7s) 뒤에는 "버림 → 은닉" 반복이 없다(전에는 깊이 EWMA가 식는 0.4초 동안 이어짐).
+#[test]
+fn big_step_no_conceal_after_rebase() {
+    let (tr, _) = step_run_full(&|t| if (10.0..20.0).contains(&t) { 130.0 } else { 0.0 }, 14.0);
+    let at = |t: f64| tr.iter().find(|x| x.0 >= t).unwrap().1;
+    let (a, b) = (at(10.8), at(13.0));
+    assert_eq!(b.concealed - a.concealed, 0, "계단 판정 뒤 은닉 {} 프레임", b.concealed - a.concealed);
+    assert_eq!(b.late_dropped - a.late_dropped, 0);
 }
 
 /// P2-16b: 경로 지연이 10초에 +60ms 오른 채로 남으면(계단) 0.5초 뒤 지연 통계를 새 지연에서 다시 모으고 목표가 계단 전 값으로
