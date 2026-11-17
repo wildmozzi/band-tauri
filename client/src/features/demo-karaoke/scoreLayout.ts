@@ -16,43 +16,47 @@ export interface SystemBox {
 }
 
 /**
- * 첫 렌더 분할: 페이지 시작 y부터 이 줄 아래끝까지가 A4 높이를 넘으면 이 줄에서 새 페이지.
- * 첫 페이지는 0에서 시작. lastBottom은 마지막 줄 아래끝(로그용).
+ * 줄 분할: 페이지 시작 y부터 이 줄 아래끝까지(줄 사이 간격 포함)가 페이지 높이를 넘으면 이 줄에서 새 페이지.
+ * 첫 페이지는 0에서 시작하고, 첫 줄은 커도 첫 페이지에 둔다. 딱 맞으면(=) 같은 페이지.
  */
-export function pageBreaksByBottom(systems: SystemBox[], a4Height: number): { breaks: number[]; lastBottom: number } {
-  const breaks: number[] = [0] // 첫 페이지 시작
-  let lastBottom = 0
-  systems.forEach((system, index) => {
-    const bottom = system.y + system.height
-    // 현재 페이지에 이 system을 추가하면 A4 높이를 넘는지 확인
-    const pageStartY = breaks[breaks.length - 1]
-    if (index > 0 && bottom - pageStartY > a4Height) {
-      // 새 페이지 시작
-      breaks.push(system.y)
-    }
-    lastBottom = bottom
-  })
-  return { breaks, lastBottom }
-}
-
-/** 리사이즈 분할: 줄 높이를 쌓아 A4 높이를 넘으면 이 줄에서 새 페이지(줄 사이 간격은 세지 않음) */
-export function pageBreaksByHeight(systems: SystemBox[], a4Height: number): number[] {
+export function pageBreaksByBottom(systems: SystemBox[], pageHeight: number): number[] {
   const breaks: number[] = [0]
-  let currentPageHeight = 0
   systems.forEach((system, index) => {
-    if (index > 0 && currentPageHeight + system.height > a4Height) {
+    const pageStartY = breaks[breaks.length - 1]
+    if (index > 0 && system.y + system.height - pageStartY > pageHeight) {
       breaks.push(system.y)
-      currentPageHeight = system.height
-    } else {
-      currentPageHeight += system.height
     }
   })
   return breaks
 }
 
-/** 줄을 못 찾았을 때: 전체 높이를 A4 높이로 나눈 페이지 수(올림) */
-export function fallbackPageCount(svgHeight: number, a4Height: number): number {
-  return Math.ceil(svgHeight / a4Height)
+/** 줄을 못 찾았을 때: 전체 높이를 페이지 높이로 나눈 페이지 수(올림, 최소 1) */
+export function fallbackPageCount(contentHeight: number, pageHeight: number): number {
+  if (!(pageHeight > 0) || !(contentHeight > 0)) return 1
+  return Math.max(1, Math.ceil(contentHeight / pageHeight))
+}
+
+export interface PageLayout {
+  /** 한 페이지(보이는 창) 높이 = 컨테이너 너비 기준 A4 */
+  pageHeight: number
+  /** 페이지별 시작 y(SVG 좌표). 길이가 페이지 수 */
+  breaks: number[]
+}
+
+/**
+ * 페이지 레이아웃 — 첫 렌더와 리사이즈가 같은 규칙을 쓴다(P3-13).
+ * 기준 너비는 항상 컨테이너 너비(보이는 창 높이와 같은 기준), 분할은 줄 아래끝 기준(pageBreaksByBottom).
+ * 줄을 못 찾으면 전체 높이를 페이지 높이로 균등 분할. 너비가 0 이하(숨김 등)면 한 페이지.
+ */
+export function computePageLayout(systems: SystemBox[], containerWidth: number, contentHeight: number): PageLayout {
+  const pageHeight = a4HeightFor(Math.max(0, containerWidth))
+  if (!(pageHeight > 0)) return { pageHeight, breaks: [0] }
+  if (systems.length > 0) {
+    const sorted = [...systems].sort((a, b) => a.y - b.y)
+    return { pageHeight, breaks: pageBreaksByBottom(sorted, pageHeight) }
+  }
+  const count = fallbackPageCount(contentHeight, pageHeight)
+  return { pageHeight, breaks: Array.from({ length: count }, (_, i) => i * pageHeight) }
 }
 
 /** 플레이어 마디 번호 → 악보 마디 목록 안 인덱스(0..count-1로 자름) */
@@ -75,15 +79,13 @@ export function pageForY(pageBreaks: number[], y: number, margin = 50): number {
  * 렌더된 SVG에서 악보 줄(system) 요소 찾기 — 여러 셀렉터를 차례로 시도
  * 1) osmd_system으로 시작하는 id 2) vf-stave 클래스(VexFlow) 3) 'svg > g > g' 중 높이 50 초과·y(10px 반올림)가 다른 것, y 순
  */
-export function findScoreSystems(svg: Element, log: (label: string, count: number) => void = () => {}): Element[] {
+export function findScoreSystems(svg: Element): Element[] {
   // 시도 1: osmd_system으로 시작하는 ID
   let systems: Element[] = Array.from(svg.querySelectorAll('g[id^="osmd_system"]'))
-  log('osmd_system', systems.length)
 
   // 시도 2: vf-stave 클래스 (VexFlow 기반)
   if (systems.length === 0) {
     systems = Array.from(svg.querySelectorAll('g.vf-stave'))
-    log('vf-stave', systems.length)
   }
 
   // 시도 3: 최상위 g 요소들 중 y 좌표가 다른 것들 (악보 줄로 추정)
@@ -108,7 +110,6 @@ export function findScoreSystems(svg: Element, log: (label: string, count: numbe
       const bboxB = (b as SVGGraphicsElement).getBBox()
       return bboxA.y - bboxB.y
     })
-    log('by position', systems.length)
   }
 
   return systems

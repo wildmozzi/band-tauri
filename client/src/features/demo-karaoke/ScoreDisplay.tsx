@@ -1,14 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
 import {
-  a4HeightFor,
   clampMeasureIndex,
-  fallbackPageCount,
+  computePageLayout,
   findScoreSystems,
-  pageBreaksByBottom,
-  pageBreaksByHeight,
   pageForY,
   systemBoxes,
+  type PageLayout,
 } from './scoreLayout'
 
 interface ScoreDisplayProps {
@@ -18,6 +16,12 @@ interface ScoreDisplayProps {
   onError?: (error: Error) => void
 }
 
+/** 렌더 전(악보 없음) 레이아웃 — 한 페이지 */
+const INITIAL_LAYOUT: PageLayout = { pageHeight: 1100, breaks: [0] }
+
+/** OSMD autoResize가 다시 그린 뒤 측정하도록 마지막 resize 이벤트 후 기다리는 시간 */
+const RESIZE_SETTLE_MS = 500
+
 /**
  * OpenSheetMusicDisplay를 사용한 악보 시각화 컴포넌트
  * 페이지 단위로 표시
@@ -26,18 +30,22 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
   const containerRef = useRef<HTMLDivElement>(null)
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null)
   const [currentPage, setCurrentPage] = useState(0)
-  const [totalPages, setTotalPages] = useState(0)
+  const [layout, setLayout] = useState<PageLayout>(INITIAL_LAYOUT)
   const [svgElement, setSvgElement] = useState<SVGElement | null>(null)
-  const [pageHeight, setPageHeight] = useState(1100)
-  const [pageBreaks, setPageBreaks] = useState<number[]>([0])
   const [maxRealValue, setMaxRealValue] = useState(0)
   const [measureStarts, setMeasureStarts] = useState<number[]>([])
+  const totalPages = layout.breaks.length
+  const pageHeight = layout.pageHeight
 
   // 하이라이트 점프 및 깜빡임 방지를 위한 Ref
   const lastTargetTimeRef = useRef(0)
   const currentProgressRef = useRef(0)
   const currentMeasureRef = useRef(0)
   const lastMeasureIndexRef = useRef(-1)
+  // 커서 rAF 루프가 읽는 값 — 루프를 다시 만들지 않도록 ref로 넘긴다(P3-13)
+  const pageBreaksRef = useRef<number[]>(INITIAL_LAYOUT.breaks)
+  const currentPageRef = useRef(0)
+  const svgElementRef = useRef<SVGElement | null>(null)
 
   // musicXmlUrl 변경 시(새 악보) 상태 및 Ref 초기화
   useEffect(() => {
@@ -52,6 +60,40 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
     currentProgressRef.current = currentProgress
     currentMeasureRef.current = currentMeasure
   }, [currentProgress, currentMeasure])
+
+  useEffect(() => {
+    pageBreaksRef.current = layout.breaks
+    currentPageRef.current = currentPage
+    svgElementRef.current = svgElement
+  }, [layout, currentPage, svgElement])
+
+  /**
+   * 지금 그려진 SVG를 재서 페이지 레이아웃 갱신 — 첫 렌더와 리사이즈가 같은 함수·같은 규칙(computePageLayout).
+   * OSMD가 다시 그리면 SVG 요소가 바뀔 수 있어 매번 컨테이너에서 새로 찾는다.
+   */
+  const measureLayout = useCallback(() => {
+    const container = containerRef.current
+    if (!container) return
+    const svg = container.querySelector('svg')
+    if (!svg) {
+      setSvgElement(null)
+      setLayout(INITIAL_LAYOUT)
+      setCurrentPage(0)
+      return
+    }
+    let contentHeight = 0
+    try {
+      contentHeight = svg.getBBox().height
+    } catch {
+      contentHeight = svg.getBoundingClientRect().height
+    }
+    const next = computePageLayout(systemBoxes(findScoreSystems(svg)), container.clientWidth, contentHeight)
+    setSvgElement(svg)
+    setLayout(next)
+    setCurrentPage(p => Math.min(p, next.breaks.length - 1))
+    // 분할이 바뀌었으니 다음 프레임에 커서 위치로 페이지를 다시 판정
+    lastMeasureIndexRef.current = -1
+  }, [])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -87,7 +129,7 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
           if (cursor) {
             cursor.hide()
           }
-        } catch (e) {
+        } catch {
           // 이미 정리된 상태라면 무시
         }
       }
@@ -106,7 +148,6 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
 
     const loadScore = async () => {
       try {
-        console.log('[ScoreDisplay] Loading MusicXML:', musicXmlUrl)
         setMaxRealValue(0) // 새 악보 로드 시 초기화
 
         await osmdRef.current!.load(musicXmlUrl)
@@ -127,8 +168,6 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
 
           // 커서 기반으로 마디 데이터 추출 (정확도 보장)
           try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- OSMD 커서 내부 API는 타입 미제공
-            const cursor = osmd.cursor as any
             if (cursor) {
               cursor.hide()
               cursor.reset()
@@ -156,73 +195,18 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
               cursor.reset()
               setMaxRealValue(lastValue)
               setMeasureStarts(starts)
-              console.log(`[ScoreDisplay] Cursor-based calc done. Measures: ${starts.length}, Max: ${lastValue.toFixed(2)}`)
             }
           } catch (e) {
             console.warn('[ScoreDisplay] Failed to calculate measures via cursor:', e)
           }
 
-          console.log('[ScoreDisplay] Render completed, setting timeout...')
-
           // 렌더링 완료 후 약간의 대기
           await new Promise(resolve => setTimeout(resolve, 500))
 
-          console.log('[ScoreDisplay] Starting page calculation, isCancelled:', isCancelled)
-
-          if (!isCancelled && containerRef.current) {
-            const svg = containerRef.current.querySelector('svg')
-            console.log('[ScoreDisplay] SVG found:', !!svg)
-
-            if (svg) {
-              setSvgElement(svg as SVGElement)
-
-              // System(악보 줄) 요소들 찾기 - 여러 가능한 셀렉터 시도
-              const systems = findScoreSystems(svg, (label, count) =>
-                console.log(`[ScoreDisplay] Found systems (${label}):`, count))
-
-              if (systems.length > 0) {
-                // SVG의 실제 크기 가져오기
-                const svgBBox = svg.getBBox()
-                const svgWidth = svgBBox.width
-                const svgHeight = svgBBox.height
-
-                // A4 비율: 210mm x 297mm = 1:1.414
-                // SVG 너비를 기준으로 A4 높이 계산
-                const a4Height = a4HeightFor(svgWidth)
-
-                console.log('[ScoreDisplay] SVG size:', svgWidth, 'x', svgHeight, 'A4 height:', a4Height)
-
-                // 각 system의 y 위치를 기준으로 페이지 분할
-                const { breaks: pageBreaks, lastBottom: lastSystemBottom } = pageBreaksByBottom(systemBoxes(systems), a4Height)
-
-                const calculatedPages = pageBreaks.length
-                setTotalPages(calculatedPages)
-                setCurrentPage(0)
-                setPageHeight(a4Height)
-                setPageBreaks(pageBreaks)
-
-                console.log('[ScoreDisplay] Pages:', calculatedPages, 'Breaks:', pageBreaks, 'Last system bottom:', lastSystemBottom)
-              } else {
-                // System을 못 찾으면 기존 방식 사용
-                const svgHeight = svg.getBoundingClientRect().height
-                const containerWidth = containerRef.current.clientWidth
-                const a4Height = a4HeightFor(containerWidth)
-                const calculatedPages = fallbackPageCount(svgHeight, a4Height)
-
-                setTotalPages(calculatedPages)
-                setCurrentPage(0)
-                setPageHeight(a4Height)
-                console.log('[ScoreDisplay] Fallback - SVG height:', svgHeight, 'Pages:', calculatedPages)
-              }
-            } else {
-              setTotalPages(1)
-              console.log('[ScoreDisplay] No SVG found, defaulting to 1 page')
-            }
-          } else {
-            console.log('[ScoreDisplay] Cancelled or containerRef is null')
+          if (!isCancelled) {
+            setCurrentPage(0)
+            measureLayout()
           }
-
-          console.log('[ScoreDisplay] Score rendered successfully')
         }
       } catch (error) {
         if (!isCancelled) {
@@ -239,28 +223,35 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
     return () => {
       isCancelled = true
     }
-  }, [musicXmlUrl, onError])
+  }, [musicXmlUrl, onError, measureLayout])
 
-  // 페이지 변경 시 SVG 위치 이동 (pageBreaks 기준)
+  // 페이지 변경 시 SVG 위치 이동 (pageBreaks 기준). 한 페이지가 되면 이동을 되돌린다.
   useEffect(() => {
-    if (!svgElement || totalPages <= 1) return
+    if (!svgElement) return
+    const offsetY = totalPages > 1 ? -(layout.breaks[currentPage] ?? 0) : 0
 
-    const offsetY = -pageBreaks[currentPage]
-
-    svgElement.style.transform = `translateY(${offsetY}px)`
+    svgElement.style.transform = offsetY === 0 ? '' : `translateY(${offsetY}px)`
     svgElement.style.transition = 'transform 0.3s ease'
+  }, [currentPage, totalPages, svgElement, layout])
 
-    console.log('[ScoreDisplay] Moving to page', currentPage + 1, 'offset:', offsetY)
-  }, [currentPage, totalPages, svgElement, pageBreaks])
-
-  // 진행률에 따른 커서 이동 (최적화된 방식)
+  // 진행률에 따른 커서 이동 — 루프는 악보(마디 목록)가 바뀔 때만 새로 만든다.
+  // 페이지·분할·SVG는 ref로 읽어 페이지가 넘어가거나 리사이즈돼도 루프를 다시 만들지 않는다(P3-13).
   useEffect(() => {
     if (!osmdRef.current || !osmdRef.current.Sheet || maxRealValue === 0) return
 
     const osmd = osmdRef.current
     let animationFrameId: number
+    let warned = false // 실패 로그는 루프당 한 번만(매 프레임 반복 방지)
+    const warnOnce = (msg: string, e: unknown) => {
+      if (warned) return
+      warned = true
+      console.warn(msg, e)
+    }
 
     const updateCursor = () => {
+      // 다음 프레임을 먼저 예약 — 커서가 아직 준비 안 돼 일찍 돌아가도 루프가 끊기지 않는다
+      // (전에는 effect가 마디마다 다시 만들어져 우연히 되살아났다)
+      animationFrameId = requestAnimationFrame(updateCursor)
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- OSMD 커서 내부 API는 타입 미제공
         const cursor = osmd.cursor as any
@@ -274,16 +265,10 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
         }
 
         // 1. 목표 마디 인덱스 결정 (플레이어의 마디 번호를 물리적 순서로 취급)
-        const playerBarIndex = currentMeasureRef.current
-        const targetIndex = clampMeasureIndex(playerBarIndex, measureStarts.length)
+        const targetIndex = clampMeasureIndex(currentMeasureRef.current, measureStarts.length)
 
         const targetTime = measureStarts[targetIndex]
         const currentTs = cursor.Iterator.currentTimeStamp?.RealValue || 0
-
-        // 디버깅 로그 (샘플링)
-        if (Math.random() < 0.05) {
-          console.log(`[ScoreDisplay] PDF Sync - BarIdx: ${playerBarIndex}, TargetTime: ${targetTime.toFixed(2)}, CurrentTime: ${currentTs.toFixed(2)}`)
-        }
 
         // 2. 방향 결정 및 이동 (목표 시간으로 강제 스냅)
         if (Math.abs(targetTime - currentTs) > 0.01) {
@@ -327,44 +312,41 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
             }
           }
         } catch (e) {
-          if (Math.random() < 0.05) console.warn('[ScoreDisplay] Box styling failed:', e)
+          warnOnce('[ScoreDisplay] Box styling failed:', e)
         }
 
         // 4. 페이지 자동 전환 제어
-        const currentMeasure = cursor.Iterator.CurrentMeasure
-        if (currentMeasure) {
-          const mIdx = currentMeasure.MeasureNumber || currentMeasure.measureNumberInternal || 0
+        const measureObj = cursor.Iterator.CurrentMeasure
+        if (measureObj) {
+          const mIdx = measureObj.MeasureNumber || measureObj.measureNumberInternal || 0
 
-          // 마디 번호가 바뀌었을 때만 로직 수행
+          // 마디 번호가 바뀌었을 때(또는 분할이 바뀐 직후)만 로직 수행
           if (mIdx !== lastMeasureIndexRef.current) {
             lastMeasureIndexRef.current = mIdx
 
             // 현재 커서의 수직 위치(y)를 확인하여 페이지 전환 여부 결정
             try {
               const cursorElement = cursor.cursorElement
-              if (cursorElement && svgElement) {
-                const cursorBBox = cursorElement.getBBox()
-                const cursorY = cursorBBox.y
+              if (cursorElement && svgElementRef.current) {
+                const cursorY = cursorElement.getBBox().y
 
-                // 어느 페이지에 속하는지 계산 (민감도 보정)
-                const targetPage = pageForY(pageBreaks, cursorY, 50) // 10 -> 50으로 마진 확대 (더 빨리 인식)
+                // 어느 페이지에 속하는지 계산 (민감도 보정: 마진 50 → 더 빨리 인식)
+                const targetPage = pageForY(pageBreaksRef.current, cursorY, 50)
 
-                if (targetPage !== currentPage) {
-                  console.log(`[ScoreDisplay] Auto switching to page ${targetPage + 1} (measure: ${mIdx})`)
+                if (targetPage !== currentPageRef.current) {
+                  currentPageRef.current = targetPage
                   setCurrentPage(targetPage)
                 }
               }
-            } catch (e) {
+            } catch {
               // getBBox 실패 시 무시
             }
           }
         }
 
       } catch (e) {
-        console.warn('[ScoreDisplay] Cursor update failed:', e)
+        warnOnce('[ScoreDisplay] Cursor update failed:', e)
       }
-
-      animationFrameId = requestAnimationFrame(updateCursor)
     }
 
     animationFrameId = requestAnimationFrame(updateCursor)
@@ -372,38 +354,24 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
     return () => {
       cancelAnimationFrame(animationFrameId)
     }
-  }, [maxRealValue, measureStarts, svgElement, pageBreaks, currentPage, currentMeasure])
+  }, [maxRealValue, measureStarts])
 
-  // 화면 리사이즈 시 페이지 재계산
+  // 화면 리사이즈 시 페이지 재계산 — 첫 렌더와 같은 measureLayout. OSMD autoResize 재렌더가 끝난 뒤 한 번만 잰다.
   useEffect(() => {
-    if (!containerRef.current || !svgElement) return
+    if (!svgElement) return
 
+    let timer: ReturnType<typeof setTimeout> | undefined
     const handleResize = () => {
-      // System(악보 줄) 요소들 찾기 - 여러 가능한 셀렉터 시도
-      const systems = findScoreSystems(svgElement)
-
-      if (systems.length > 0) {
-        const containerWidth = containerRef.current!.clientWidth
-        const a4Height = a4HeightFor(containerWidth)
-
-        const pageBreaks = pageBreaksByHeight(systemBoxes(systems), a4Height)
-
-        const calculatedPages = pageBreaks.length
-        setPageHeight(a4Height)
-        setTotalPages(calculatedPages)
-        setPageBreaks(pageBreaks)
-
-        if (currentPage >= calculatedPages) {
-          setCurrentPage(calculatedPages - 1)
-        }
-
-        console.log('[ScoreDisplay] Resized - pages:', calculatedPages, 'breaks:', pageBreaks)
-      }
+      if (timer !== undefined) clearTimeout(timer)
+      timer = setTimeout(measureLayout, RESIZE_SETTLE_MS)
     }
 
     window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [svgElement, currentPage])
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }, [svgElement, measureLayout])
 
   const handlePrevPage = () => {
     if (currentPage > 0) {
