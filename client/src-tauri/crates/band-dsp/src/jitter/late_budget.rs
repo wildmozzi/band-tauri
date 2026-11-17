@@ -256,7 +256,8 @@ impl JitterBuffer {
     /// - 재생 시작·경로 변경 뒤 `LATE_SKIP_BLOCKS`개 블록은 판단에서 뺀다(L3). 경로 변경·스트림 리셋·큰 프로필 변경은 초기화(L2).
     /// - 올림: 조정 뒤 `LATE_UP_BLOCKS`개 평균이 예산을 넘으면 μ·ln(평균/예산)(격자 0.25ms ~ 1ms). μ는 꼬리 척도로
     ///   RFC 3550 지터를 쓴다(지수 꼬리면 늦은 비율 ∝ exp(−여유/μ)이라 한두 번에 수렴).
-    /// - 내림: 조정 뒤 `LATE_DOWN_BLOCKS`개 평균이 예산 × `LATE_DOWN_FRAC` 아래면 그 절반 걸음.
+    /// - 빠른 내림(P2-16c): 조정 뒤 `LATE_UP_BLOCKS`개 블록에 늦은 도착이 하나도 없으면 `tail_extra`의 절반(격자 올림, ≤ 1ms).
+    /// - 내림: 그 밖에 조정 뒤 `LATE_DOWN_BLOCKS`개 평균이 예산 × `LATE_DOWN_FRAC` 아래면 μ·ln(예산 × `LATE_DOWN_FRAC` / 평균)의 절반 걸음.
     /// - 상한은 1프레임(지터 버퍼 추가 지연 증가 ≤ 1프레임).
     pub(super) fn close_late_block(&mut self) {
         if self.late.close_block(self.tuning.conceal_target, self.delay.rfc_jitter(), self.frame() as f64) {

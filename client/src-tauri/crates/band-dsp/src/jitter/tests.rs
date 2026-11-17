@@ -759,8 +759,6 @@ fn late_budget_tracks_tail_jitter_only() {
     assert!(u.conceal_after_5s < 1.5, "균등 지터 + 손실 1%: 은닉 {:.2}%", u.conceal_after_5s);
 }
 
-/// P1-6c(PR #65 리뷰 M1·M2): 예산은 손실의 연속 함수다. 손실 < 0.975%는 P1-6b와 같고(손실 1% → 0.325%), 그 위는
-/// 0.4%까지 선형으로 풀리며, 어디서도 하네스 GOAL 밖 회선 기준의 손실 너머 몫(0.5%p)에 닿지 않는다.
 /// P2-16c: 5블록(올림과 같은 수) 동안 늦은 도착이 하나도 없으면 `tail_extra`를 절반씩(격자 올림) 내린다 — 지터가 좋아진 뒤
 /// 예산이 10블록마다 0.25ms씩 1분 넘게 남던 것. 늦은 도착이 조금이라도 있으면 전처럼 느린 내림(10블록)이다.
 #[test]
@@ -795,7 +793,8 @@ fn late_budget_fast_decay_only_without_late_packets() {
     }
     println!("빠른 내림: {top} → {fast:?}");
     assert_eq!(fast, vec![72.0, 36.0, 12.0, 0.0, 0.0], "빠른 내림");
-    // 블록마다 늦은 도착 1개(0.5% — 예산 1.3%의 0.6배 아래): 빠른 내림 없이 느린 내림만
+    // 블록마다 늦은 도착 1개(200개 중 0.5%): 손실 0이면 예산 = 은닉 목표 1.3% × 상한 3/4 = 0.975%, 내림 문턱은 그 0.6배
+    // 0.585%라 느린 내림(10블록마다 μ 걸음, 격자 12샘플)만 걸리고 빠른 내림(늦은 도착 0)은 걸리지 않는다.
     let mut lb = raised();
     let mut slow = Vec::new();
     for i in 1..=25 {
@@ -805,10 +804,11 @@ fn late_budget_fast_decay_only_without_late_packets() {
         }
     }
     println!("느린 내림: {top} → {slow:?}");
-    assert!(slow.iter().all(|&x| x >= top - 3.0 * 48.0), "늦은 도착이 있으면 10블록마다 한 걸음: {slow:?}");
-    assert!(slow[1] > fast[1], "늦은 도착이 있으면 빠른 내림이 걸리지 않는다: {slow:?} vs {fast:?}");
+    assert_eq!(slow, vec![120.0, 108.0, 108.0, 96.0, 96.0], "늦은 도착이 있으면 10블록마다 한 걸음(12샘플)");
 }
 
+/// P1-6c(PR #65 리뷰 M1·M2): 예산은 손실의 연속 함수다. 손실 < 0.975%는 P1-6b와 같고(손실 1% → 0.325%), 그 위는
+/// 0.4%까지 선형으로 풀리며, 어디서도 하네스 GOAL 밖 회선 기준의 손실 너머 몫(0.5%p)에 닿지 않는다.
 #[test]
 fn late_budget_is_continuous_in_loss() {
     let lb = late_budget::LateBudget::budget;
