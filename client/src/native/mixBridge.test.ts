@@ -254,6 +254,20 @@ describe('MixBroadcaster', () => {
     expect(sent.filter((m) => m.type === 'offer')).toHaveLength(2)
   })
 
+  it('resetPeers: 관람자 연결을 모두 닫고 방송은 유지 — 다음 sync에서 다시 offer (방송 담당 재개 실패)', async () => {
+    const { b, sent, deps } = broadcaster({ timeout: 10_000 })
+    await b.start(['v1', 'v2'])
+    await flush()
+    b.resetPeers()
+    expect(FakePc.all.every((pc) => pc.closed)).toBe(true)
+    expect(b.viewerIds).toEqual([])
+    b.syncViewers(['v1', 'v2'])
+    await flush()
+    expect(sent.filter((m) => m.type === 'offer')).toHaveLength(4)
+    expect(deps.unsubscribes).toBe(0) // 믹스 구독(lease)은 그대로
+    b.stop()
+  })
+
   it('M3: 연결되면 시간 초과로 닫지 않는다', async () => {
     const { b } = broadcaster({ timeout: 20 })
     await b.start(['v1'])

@@ -471,6 +471,14 @@ export class MixBroadcaster {
     }
   }
 
+  /**
+   * 관람자 연결을 모두 닫는다(방송 담당은 유지). 내 clientId가 바뀌어(세션 재개 실패) 관람자가 옛 id의 연결을 버릴 때 —
+   * 다음 syncViewers가 새 id로 다시 offer한다
+   */
+  resetPeers(): void {
+    for (const id of [...this.peers.keys()]) this.closePeer(id)
+  }
+
   private closePeer(viewerId: string): void {
     const peer = this.peers.get(viewerId)
     if (!peer) return
