@@ -258,6 +258,9 @@ pub(crate) struct PeerNetStats {
     pub(crate) remote_in_buf: Option<(u16, Instant)>,
     /// 이 피어에게서 마지막으로 받은 Audio 헤더 `frame_code`(0 = 아직 없음, P2-8b).
     pub(crate) rx_frame_code: u8,
+    /// 재전송 창에서 버린 수신 패킷(누적, #193 리뷰 L1).
+    pub(crate) rx_dup_dropped: u64,
+    pub(crate) rx_stale_dropped: u64,
 }
 
 pub(crate) struct PeerSetup<'a> {
@@ -347,10 +350,10 @@ impl Peer {
 
     /// `PeerStats`의 net 몫을 값으로.
     pub(crate) fn net_stats(&self, now: Instant) -> PeerNetStats {
-        let (state, path, rtt_ms, connect_ms) = {
+        let (state, path, rtt_ms, connect_ms, rx_dup_dropped, rx_stale_dropped) = {
             let c = self.conn.lock();
             let connect_ms = c.connected_at.map(|t| t.saturating_duration_since(c.started).as_secs_f32() * 1000.0);
-            (c.state, c.path.map(|(_, k)| k), c.rtt_ms, connect_ms)
+            (c.state, c.path.map(|(_, k)| k), c.rtt_ms, connect_ms, c.rx_dup_dropped, c.rx_stale_dropped)
         };
         let (echo_requested, echo_active, peer_echoing) = {
             let e = self.echo.lock();
@@ -368,6 +371,8 @@ impl Peer {
             connect_ms,
             remote_in_buf: self.remote_input_buffer(),
             rx_frame_code: self.rx_frame_code.load(Ordering::Relaxed),
+            rx_dup_dropped,
+            rx_stale_dropped,
         }
     }
 

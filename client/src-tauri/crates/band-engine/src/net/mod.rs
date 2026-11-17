@@ -119,6 +119,10 @@ pub struct NetShared {
     /// 같은 키로 피어를 다시 만들면 여기서 이어 간다 → 같은 (키, nonce)가 세션 동안 반복되지 않는다(PR #13 H1).
     /// 크기는 세션 중 만난 피어 descriptor 수 수준이다.
     tx_seq_retired: Mutex<std::collections::HashMap<TxKeyId, u32>>,
+    /// 수신 쪽 짝: 목록에서 뺀(제거·교체) 피어의 키별 재전송 창(제어 seq + Audio 창). 같은 키로 다시 만들면 이어받아, 그 전에
+    /// 엿본 사본을 첫 패킷으로 재생하지 못하게 한다(#193 리뷰 L2: 상대 `Net`은 그대로인데 우리가 지웠다가 다시 넣는 경우).
+    /// Net 수명 내내 지우지 않으며 크기는 `tx_seq_retired`와 같다(키 하나에 약 160B).
+    rx_replay_retired: Mutex<std::collections::HashMap<TxKeyId, peer::ReplayWindow>>,
     /// 목록에서 빠진(제거·교체된) 피어의 ssrc → peerId. 녹음 쓰기 스레드가 블록을 늦게 비울 때 이미 떠난 피어도
     /// 같은 peerId 트랙으로 묶게 한다(P2-4, PR #47 M3). Net 수명 내내 지우지 않으며 크기는 만난 피어 수 수준이다.
     retired_ssrc_ids: Mutex<std::collections::HashMap<u32, String>>,
@@ -266,6 +270,7 @@ impl Net {
             route_skips: AtomicU64::new(0),
             relay_over_budget: AtomicBool::new(false),
             tx_seq_retired: Mutex::new(std::collections::HashMap::new()),
+            rx_replay_retired: Mutex::new(std::collections::HashMap::new()),
             retired_ssrc_ids: Mutex::new(std::collections::HashMap::new()),
             epoch: Instant::now(),
             stop: AtomicBool::new(false),
@@ -355,13 +360,12 @@ impl Net {
             let old = peers.remove(i);
             self.shared.retire_tx_seq(&old);
             replaced = Some(old.key());
-            // 같은 세션(같은 공개키)이면 제어 패킷 재전송 창을 이어받는다. 새 키(상대 재시작)면 seq가
-            // 처음부터 다시 시작하므로 이어받지 않는다(PR #5 L-2).
-            if old.public_key() == peer.public_key() {
-                let old_conn = old.conn();
-                peer.conn().inherit_replay_window(&old_conn);
-            }
             retire = Some(old);
+        }
+        // 같은 세션(같은 공개키·ssrc)이면 재전송 창(제어 seq + Audio 창)을 이어받는다 — 교체든(방금 `retire_tx_seq`가 옛 항목의
+        // 창을 기록했다), 제거 뒤 재추가든(#193 리뷰 L2). 새 키(상대 재시작)면 seq가 처음부터 다시 시작하므로 표에 없다(PR #5 L-2).
+        if let Some(w) = self.shared.rx_replay_retired.lock().get(&key) {
+            peer.conn().inherit_replay(w);
         }
         // 송신 카운터(PR #13 H1, P1-1b): 같은 키의 살아 있는 다른 항목이 있으면 그 카운터를 같이 쓴다(카운터가
         // 둘이 되면 nonce가 겹친다). 없고 이 키로 전에 보낸 적이 있으면(교체, 제거 후 재추가) 그 최고 수위 + 여유에서 이어 간다.
@@ -554,6 +558,8 @@ impl NetShared {
         // 한 키의 seq는 시작점에서 단조 증가(u32 랩, 400pps에서 124일)하므로 마지막 기록이 곧 최고 수위다.
         m.insert((*p.public_key(), p.ssrc()), next);
         drop(m);
+        let w = p.conn().replay_window();
+        self.rx_replay_retired.lock().insert((*p.public_key(), p.ssrc()), w);
         self.retired_ssrc_ids.lock().insert(p.ssrc(), p.id().to_string());
     }
 

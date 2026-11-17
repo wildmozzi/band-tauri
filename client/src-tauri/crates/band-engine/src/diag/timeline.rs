@@ -100,6 +100,9 @@ pub(crate) struct PeerSample {
     /// 옛 엔진·보고 전이면 null. 에코 측정 중(`peerEchoing`) `remoteFrameMs`는 되돌아오는 내 프레임일 수 있다.
     pub(crate) remote_frame_ms: Option<f32>,
     pub(crate) remote_input_buffer_ms: Option<f32>,
+    /// net 재전송 창에서 버린 수신 패킷(누적, #193): 사본·재전송 / Audio 창보다 옛 것. 망 중복·이중 경로·재생 확인용.
+    pub(crate) rx_dup_dropped: u64,
+    pub(crate) rx_stale_dropped: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -219,6 +222,8 @@ impl Sample {
                     first_audio_ms: p.first_audio_ms,
                     remote_frame_ms: p.remote_frame_ms,
                     remote_input_buffer_ms: p.remote_input_buffer_ms,
+                    rx_dup_dropped: p.rx_dup_dropped,
+                    rx_stale_dropped: p.rx_stale_dropped,
                 })
                 .collect(),
             relay: s.relay.as_ref().map(|r| RelaySample {
@@ -321,6 +326,8 @@ pub(super) mod tests {
             first_audio_ms: Some(180.5),
             remote_frame_ms: Some(5.0),
             remote_input_buffer_ms: Some(2.67),
+            rx_dup_dropped: 4,
+            rx_stale_dropped: 1,
         });
         s.relay = Some(RelayStats {
             state: RelayStateKind::Bound,
@@ -348,6 +355,7 @@ pub(super) mod tests {
         assert!(line.contains("\"autoOpus\":true"), "{line}");
         assert!(line.contains("\"connectMs\":120.0") && line.contains("\"firstAudioMs\":180.5"), "{line}");
         assert!(line.contains("\"remoteFrameMs\":5.0") && line.contains("\"remoteInputBufferMs\":2.67"), "{line}");
+        assert!(line.contains("\"rxDupDropped\":4") && line.contains("\"rxStaleDropped\":1"), "{line}");
     }
 
     /// 옛 엔진(두 값 없음)이면 키는 남고 값이 null이다.

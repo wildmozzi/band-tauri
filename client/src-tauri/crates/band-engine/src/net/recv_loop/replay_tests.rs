@@ -245,3 +245,84 @@ fn audio_seq_window_unit() {
     // 절반 넘게 떨어진 seq(i32 음수 끝)는 옛 것으로 본다
     assert!(!w.fresh((1u32 << 20).wrapping_add(1 << 31)));
 }
+
+/// #193 리뷰 L1: 재전송 창에서 버린 패킷을 센다 — 사본·재전송(`Dup`)과 Audio 창보다 옛 것(`Stale`). `PeerStats`로 나간다.
+#[test]
+fn seq_window_drops_are_counted() {
+    let (mut rig, mut media) = Rig::new();
+    let counts = |rig: &Rig| {
+        let ns = rig.peer().net_stats(std::time::Instant::now());
+        (ns.rx_dup_dropped, ns.rx_stale_dropped)
+    };
+    assert_eq!(counts(&rig), (0, 0));
+    rig.feed(&rig.audio(100), rig.from);
+    rig.feed(&rig.audio(100), rig.from); // 사본
+    rig.feed(&rig.audio(100 + AUDIO_REPLAY_WINDOW), rig.from);
+    rig.feed(&rig.audio(99), rig.from); // 창 밖(옛)
+    let ping = rig.seal(PacketType::Ping, 5, 0, &[]);
+    rig.feed(&ping, rig.from);
+    rig.feed(&ping, rig.from); // 제어 재전송
+    let stray = SocketAddr::from(([127, 0, 0, 1], 9));
+    rig.feed(&rig.audio(101 + AUDIO_REPLAY_WINDOW), stray); // 출발지 거부는 재전송 창 폐기가 아니다
+    assert_eq!(counts(&rig), (2, 1));
+    assert_eq!(drained(&mut media), [100, 100 + AUDIO_REPLAY_WINDOW]);
+}
+
+/// #193 리뷰 L2: 수신 쪽에서 같은 키 피어를 **제거한 뒤 다시 추가**해도(교체가 아님) 창을 이어받아, 그 전에 엿본 사본을 받지 않는다.
+#[test]
+fn audio_window_survives_remove_then_readd_same_key() {
+    let (mut rig, mut media) = Rig::new();
+    let old = rig.audio(8_000);
+    rig.feed(&old, rig.from);
+    assert_eq!(drained(&mut media), [8_000]);
+    let ping = rig.seal(PacketType::Ping, 9, 0, &[]);
+    rig.feed(&ping, rig.from);
+    rig.replies();
+    rig.net.remove_peer("peer");
+    let mut media = rig.add();
+    rig.feed(&old, rig.from);
+    rig.feed(&ping, rig.from);
+    assert!(rig.replies().is_empty(), "제거 전 Ping 재전송 수락");
+    rig.feed(&rig.audio(8_001), rig.from);
+    assert_eq!(drained(&mut media), [8_001], "제거 전 사본 수락");
+}
+
+/// 창 판정을 단순 모델(받은 seq 집합 + 최고 seq)과 무작위로 대조한다. 창 안 점프의 워드 단위 비우기(#193 리뷰 L3)가 경계
+/// (워드 경계·원형 끝·정확히 창 크기)에서 비트를 남기거나 더 지우지 않는지 본다.
+#[test]
+fn audio_seq_window_matches_model() {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x5EA1);
+    for round in 0..200 {
+        let mut w = AudioSeqWindow::default();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut top: Option<u32> = None;
+        let mut s: u32 = if round % 2 == 0 { rng.gen() } else { u32::MAX - 3000 };
+        for _ in 0..3000 {
+            s = match rng.gen_range(0..10) {
+                0 => s.wrapping_add(rng.gen_range(1..=2 * AUDIO_REPLAY_WINDOW)),
+                1 => s.wrapping_sub(rng.gen_range(0..=AUDIO_REPLAY_WINDOW + 5)),
+                2 => s.wrapping_add([63, 64, 65, 127, 128, AUDIO_REPLAY_WINDOW - 1, AUDIO_REPLAY_WINDOW][rng.gen_range(0..7)]),
+                _ => s.wrapping_add(rng.gen_range(0..3)),
+            };
+            let model_fresh = match top {
+                None => true,
+                Some(h) => {
+                    let d = s.wrapping_sub(h) as i32;
+                    d > 0 || (d.unsigned_abs() < AUDIO_REPLAY_WINDOW && !seen.contains(&s))
+                }
+            };
+            assert_eq!(w.fresh(s), model_fresh, "round {round} seq {s} top {top:?}");
+            if model_fresh {
+                w.commit(s);
+                seen.insert(s);
+                if top.is_none_or(|h| (s.wrapping_sub(h) as i32) > 0) {
+                    top = Some(s);
+                }
+                // 모델은 창 안의 것만 기억하면 된다(밖은 Stale로 판정되므로)
+                let h = top.unwrap();
+                seen.retain(|&x| h.wrapping_sub(x) < AUDIO_REPLAY_WINDOW);
+            }
+        }
+    }
+}

@@ -50,6 +50,21 @@ fn seq_newer(a: u32, b: u32) -> bool {
 pub(crate) const AUDIO_REPLAY_WINDOW: u32 = 1024;
 const AUDIO_WINDOW_WORDS: usize = AUDIO_REPLAY_WINDOW as usize / 64;
 
+/// 수신 seq 판정(재전송 창). `Dup` = 이미 받은 seq(창 안 Audio 사본, 이전 이하 제어 seq), `Stale` = Audio 창보다 옛 seq.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeqVerdict {
+    Fresh,
+    Dup,
+    Stale,
+}
+
+/// 같은 키 피어의 재전송 창 사본(제어 seq + Audio 창). 교체 때 옛 항목에서, 제거 뒤 재추가 때 `Net`의 은퇴 표에서 이어받는다.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReplayWindow {
+    ctrl_seq: [Option<u32>; 6],
+    audio_seq: AudioSeqWindow,
+}
+
 /// 피어 하나(수신 키 하나)의 Audio seq 슬라이딩 창. 비트 `s % 창` = seq `s`를 받았음(창 안의 seq에서만 뜻이 있다).
 /// 2^32가 창 크기로 나누어떨어지므로 seq 랩어라운드에서도 자리가 이어진다. 사전할당 배열이라 수신 경로에서 할당하지 않는다.
 #[derive(Debug, Clone, Copy, Default)]
@@ -64,18 +79,36 @@ impl AudioSeqWindow {
         (i / 64, 1u64 << (i % 64))
     }
 
-    /// 받아도 되는가(상태를 바꾸지 않는다): 처음, 최고보다 새로움, 또는 창 안에서 아직 받지 않음.
-    pub(crate) fn fresh(&self, seq: u32) -> bool {
-        let Some(h) = self.highest else { return true };
+    /// 판정(상태를 바꾸지 않는다): 처음·최고보다 새로움·창 안에서 아직 받지 않음은 `Fresh`.
+    pub(crate) fn check(&self, seq: u32) -> SeqVerdict {
+        let Some(h) = self.highest else { return SeqVerdict::Fresh };
         let d = seq.wrapping_sub(h) as i32;
         if d > 0 {
-            return true;
+            return SeqVerdict::Fresh;
         }
         if d.unsigned_abs() >= AUDIO_REPLAY_WINDOW {
-            return false;
+            return SeqVerdict::Stale;
         }
         let (w, b) = Self::bit(seq);
-        self.bits[w] & b == 0
+        if self.bits[w] & b == 0 { SeqVerdict::Fresh } else { SeqVerdict::Dup }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fresh(&self, seq: u32) -> bool {
+        self.check(seq) == SeqVerdict::Fresh
+    }
+
+    /// 비트 자리 `from`부터(창 안 위치, 원형) `count`개를 비운다. 워드 단위(#193 리뷰 L3) — 최대 17워드.
+    fn clear_run(&mut self, from: u32, mut count: u32) {
+        let mut pos = from % AUDIO_REPLAY_WINDOW;
+        while count > 0 {
+            let (w, bit) = ((pos / 64) as usize, pos % 64);
+            let n = count.min(64 - bit);
+            let mask = if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << bit };
+            self.bits[w] &= !mask;
+            pos = (pos + n) % AUDIO_REPLAY_WINDOW;
+            count -= n;
+        }
     }
 
     /// `fresh`가 참인 seq를 받았다고 기록한다. 최고 seq가 앞으로 가면 그 사이 칸(이제 창 밖으로 밀린 옛 seq의 칸)을 비운다.
@@ -91,10 +124,7 @@ impl AudioSeqWindow {
                     if d as u32 >= AUDIO_REPLAY_WINDOW {
                         self.bits = [0; AUDIO_WINDOW_WORDS];
                     } else {
-                        for k in 1..=d as u32 {
-                            let (w, b) = Self::bit(h.wrapping_add(k));
-                            self.bits[w] &= !b;
-                        }
+                        self.clear_run(h.wrapping_add(1), d as u32);
                     }
                     self.highest = Some(seq);
                 }
@@ -124,6 +154,9 @@ pub(crate) struct ConnState {
     ctrl_seq: [Option<u32>; 6],
     /// Audio seq 재전송 창(P2-16c).
     audio_seq: AudioSeqWindow,
+    /// 재전송 창에서 버린 수신 패킷(누적, #193 리뷰 L1): 사본·재전송(`Dup`)과 Audio 창보다 옛 것(`Stale`). `PeerStats.rxDupDropped`·`rxStaleDropped`.
+    pub(crate) rx_dup_dropped: u64,
+    pub(crate) rx_stale_dropped: u64,
     /// 이 피어와 릴레이 경유 Hello/HelloAck가 오간 적이 있다(릴레이로 온 인증 패킷 수용).
     pub(crate) relay_confirmed: bool,
     /// 릴레이 경로 중 직접 주소에서 인증된 Hello가 왔다. 그 주소에서 Hello 외 인증 패킷이 오면 상대가
@@ -176,6 +209,8 @@ impl ConnState {
             rebind: None,
             ctrl_seq: [None; 6],
             audio_seq: AudioSeqWindow::default(),
+            rx_dup_dropped: 0,
+            rx_stale_dropped: 0,
             relay_confirmed: false,
             direct_hint: None,
             prev_path: None,
@@ -257,33 +292,58 @@ impl ConnState {
     }
 
     /// 같은 세션(같은 키)의 피어를 다시 추가할 때 재전송 창을 이어받는다(PR #5 L-2).
+    #[cfg(test)]
     pub(crate) fn inherit_replay_window(&mut self, old: &ConnState) {
-        self.ctrl_seq = old.ctrl_seq;
-        self.audio_seq = old.audio_seq;
+        self.inherit_replay(&old.replay_window());
+    }
+
+    /// 이 항목의 재전송 창 사본(제거할 때 `Net`이 키별로 보관한다).
+    pub(crate) fn replay_window(&self) -> ReplayWindow {
+        ReplayWindow { ctrl_seq: self.ctrl_seq, audio_seq: self.audio_seq }
+    }
+
+    pub(crate) fn inherit_replay(&mut self, w: &ReplayWindow) {
+        self.ctrl_seq = w.ctrl_seq;
+        self.audio_seq = w.audio_seq;
     }
 
     /// 제어 패킷 seq가 이전보다 새로우면 기록하고 true. 재전송(같거나 옛 seq)은 false. Hello/HelloAck용(출발 주소 검사가
-    /// 핸드셰이크 규칙 안에 있다). 그 밖의 패킷은 `rx_seq_fresh` → `accept_rx` → `commit_rx_seq` 순서로 쓴다.
+    /// 핸드셰이크 규칙 안에 있다). 그 밖의 패킷은 `rx_seq_check` → `accept_rx` → `commit_rx_seq` 순서로 쓴다.
     pub(crate) fn accept_ctrl_seq(&mut self, t: PacketType, seq: u32) -> bool {
-        let fresh = self.rx_seq_fresh(t, seq);
-        if fresh {
-            self.commit_rx_seq(t, seq);
+        match self.rx_seq_check(t, seq) {
+            SeqVerdict::Fresh => {
+                self.commit_rx_seq(t, seq);
+                true
+            }
+            v => {
+                self.note_seq_drop(v);
+                false
+            }
         }
-        fresh
     }
 
     /// 이 seq를 받아도 되는가(상태 불변): Audio는 슬라이딩 창, 제어 패킷은 타입별 최고 seq보다 새로움.
     /// 출발 주소 확인(`accept_rx`) **전에** 보고, 소모(`commit_rx_seq`)는 그 **뒤에** 한다 — 경로가 아닌 주소에서 온 사본이
     /// seq를 먼저 써 버려 늦게 온 진짜 패킷이 재전송으로 버려지지 않게(#190 L1), 그리고 재전송본이 `accept_rx`의 부수 효과
     /// (생존 갱신·직접 경로 승격)를 일으키지 않게 한다.
-    pub(crate) fn rx_seq_fresh(&self, t: PacketType, seq: u32) -> bool {
+    pub(crate) fn rx_seq_check(&self, t: PacketType, seq: u32) -> SeqVerdict {
         match t {
-            PacketType::Audio => self.audio_seq.fresh(seq),
-            _ => self.ctrl_seq[(t as usize - 1).min(5)].is_none_or(|m| seq_newer(seq, m)),
+            PacketType::Audio => self.audio_seq.check(seq),
+            _ if self.ctrl_seq[(t as usize - 1).min(5)].is_none_or(|m| seq_newer(seq, m)) => SeqVerdict::Fresh,
+            _ => SeqVerdict::Dup,
         }
     }
 
-    /// `rx_seq_fresh`가 참이고 `accept_rx`를 통과한 패킷의 seq를 기록한다.
+    /// 재전송 창에서 버린 패킷을 센다.
+    pub(crate) fn note_seq_drop(&mut self, v: SeqVerdict) {
+        match v {
+            SeqVerdict::Dup => self.rx_dup_dropped += 1,
+            SeqVerdict::Stale => self.rx_stale_dropped += 1,
+            SeqVerdict::Fresh => {}
+        }
+    }
+
+    /// `rx_seq_check`가 참이고 `accept_rx`를 통과한 패킷의 seq를 기록한다.
     pub(crate) fn commit_rx_seq(&mut self, t: PacketType, seq: u32) {
         match t {
             PacketType::Audio => self.audio_seq.commit(seq),

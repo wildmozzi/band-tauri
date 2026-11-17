@@ -8,7 +8,7 @@ use std::time::Instant;
 use band_dsp::config::MAX_PACKET_BYTES;
 
 use band_dsp::packet::{self, Header, PacketType};
-use super::peer::{self, HandshakeOutcome, Peer};
+use super::peer::{self, HandshakeOutcome, Peer, SeqVerdict};
 use super::relay::{self, AckAction};
 use band_dsp::types::PeerStateKind;
 use super::{clock_payload, parse_clock_payload, NetShared};
@@ -119,7 +119,12 @@ impl NetShared {
                     let mut c = peer.conn();
                     // 재전송(제어: 옛 seq, Audio: 창 안 중복·창보다 옛 사본, P2-16c)은 `accept_rx`의 부수 효과(생존 갱신·승격)
                     // 전에 버리고, seq는 출발 주소까지 통과한 뒤에만 소모한다 — 경로가 아닌 주소의 사본이 진짜 패킷을 막지 않게.
-                    if !c.rx_seq_fresh(other, h.seq) || !c.accept_rx(from, peer.candidates(), relay, now) {
+                    let verdict = c.rx_seq_check(other, h.seq);
+                    if verdict != SeqVerdict::Fresh {
+                        c.note_seq_drop(verdict);
+                        return;
+                    }
+                    if !c.accept_rx(from, peer.candidates(), relay, now) {
                         return;
                     }
                     c.commit_rx_seq(other, h.seq);
