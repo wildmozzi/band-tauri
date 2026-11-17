@@ -4,6 +4,9 @@ import { DEFAULT_ENGINE_CONFIG } from '../../native/engineConfig'
 import {
   coerceToSupportedDrivers,
   driverChoices,
+  EXCLUSIVE_CAUTION_TEXT,
+  EXCLUSIVE_RECOMMEND_TEXT,
+  exclusiveModeHint,
   fallbackDriver,
   isDriverSupported,
   unsupportedDriverReason,
@@ -56,5 +59,42 @@ describe('driverSupport', () => {
     expect(coerceToSupportedDrivers(cfg, null)).toEqual({ config: cfg, notice: null })
     expect(coerceToSupportedDrivers(cfg, ALL).config).toBe(cfg)
     expect(coerceToSupportedDrivers(cfg, []).config).toBe(cfg)
+  })
+})
+
+describe('exclusiveModeHint (P1-19)', () => {
+  it('기본값(WASAPI 공유)이면 눈에 띄게 독점을 권하고 지연 이득과 다른 앱 소리 막힘을 함께 말한다', () => {
+    const h = exclusiveModeHint(DEFAULT_ENGINE_CONFIG, ALL)
+    expect(DEFAULT_ENGINE_CONFIG.inputDriver).toBe('wasapiShared')
+    expect(h).not.toBeNull()
+    expect(h!.emphasized).toBe(true)
+    expect(h!.canSwitch).toBe(true)
+    expect(h!.text).toContain('지금은 WASAPI 공유 모드입니다')
+    expect(h!.text).toContain('WASAPI 독점 모드를 권장합니다')
+    expect(h!.text).toContain('독점 15ms 이하, 공유 30ms 이하')
+    expect(h!.text).toContain('다른 앱의 소리가 이 장치로 나오지 않습니다')
+  })
+
+  it('한쪽만 공유여도 권한다, ASIO가 섞이면 한 번에 바꾸기 버튼은 없다', () => {
+    expect(exclusiveModeHint({ inputDriver: 'wasapiExclusive', outputDriver: 'wasapiShared' }, ALL)?.canSwitch).toBe(true)
+    const mixed = exclusiveModeHint({ inputDriver: 'asio', outputDriver: 'wasapiShared' }, ALL)
+    expect(mixed?.emphasized).toBe(true)
+    expect(mixed?.canSwitch).toBe(false)
+  })
+
+  it('독점이면 강조 없이 다른 앱 소리 막힘만 확인시킨다', () => {
+    const h = exclusiveModeHint({ inputDriver: 'wasapiExclusive', outputDriver: 'wasapiExclusive' }, NO_ASIO)
+    expect(h).toEqual({ emphasized: false, canSwitch: false, text: `WASAPI 독점 모드(권장)입니다. ${EXCLUSIVE_CAUTION_TEXT}` })
+  })
+
+  it('ASIO만 쓰거나 배포본에 독점이 없으면 안내하지 않는다', () => {
+    expect(exclusiveModeHint({ inputDriver: 'asio', outputDriver: 'asio' }, ALL)).toBeNull()
+    expect(exclusiveModeHint(DEFAULT_ENGINE_CONFIG, ['wasapiShared'])).toBeNull()
+    expect(exclusiveModeHint(DEFAULT_ENGINE_CONFIG, null)?.emphasized).toBe(true)
+  })
+
+  it('권장 문구는 공유를 기본값으로 둔 이유와 어긋나지 않는다(권장일 뿐 강제 아님)', () => {
+    expect(EXCLUSIVE_RECOMMEND_TEXT).toContain('권장')
+    expect(EXCLUSIVE_CAUTION_TEXT).toContain('다른 앱')
   })
 })

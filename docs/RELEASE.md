@@ -7,7 +7,7 @@ Windows 우선. 설치본은 NSIS(`Band_<버전>_x64-setup.exe`), 자동 업데�
 | 항목 | 위치 |
 |---|---|
 | 앱 버전(단일 출처) | `client/src-tauri/tauri.conf.json` `version` — `scripts/bump-version.mjs`로 `Cargo.toml`/`Cargo.lock`/`client/package.json`/`package-lock.json` 동기화 |
-| 업데이터 엔드포인트 | `https://github.com/exception-busters/band-tauri/releases/latest/download/latest.json` (`tauri.conf.json` `plugins.updater.endpoints`) |
+| 업데이터 엔드포인트 | `https://github.com/wildmozzi/band-tauri/releases/latest/download/latest.json` (`tauri.conf.json` `plugins.updater.endpoints`) |
 | 업데이터 공개키 | `tauri.conf.json` `plugins.updater.pubkey` (minisign) |
 | 업데이터 개인키 | **리포 밖**: 생성자 PC `%USERPROFILE%\.tauri\band-updater.key` (+ 비밀번호 `band-updater.key.password`) → GitHub Secrets |
 | 릴리스 워크플로 | `.github/workflows/release.yml` (`v*` 태그 push → draft 릴리스) |

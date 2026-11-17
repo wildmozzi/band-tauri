@@ -951,3 +951,29 @@
 .settings-row select + select {
   margin-left: 8px;
 }
+
+/* WASAPI 독점 모드 권장 안내 (P1-19) */
+.exclusive-hint {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-secondary, #cbd5e1);
+  font-size: 0.85rem;
+}
+
+.exclusive-hint p {
+  margin: 0;
+}
+
+.exclusive-hint.emphasized {
+  border-color: var(--warning);
+  background: rgba(251, 191, 36, 0.12);
+  color: var(--warning);
+  font-weight: 500;
+}
+
+.exclusive-switch-btn {
+  margin-top: 8px;
+}

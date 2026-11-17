@@ -19,7 +19,7 @@ import {
   jitterProfileLabel,
   type EnginePresetId,
 } from '../../native/engineConfig'
-import { driverChoices } from './driverSupport'
+import { driverChoices, exclusiveModeHint } from './driverSupport'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
 import { DesktopDownloadButton } from '../../shared/ui/DesktopDownloadButton'
 import { Modal } from '../../shared/ui'
@@ -170,6 +170,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     </option>
   ))
   const unsupportedReasons = drivers.flatMap((d) => (d.reason ? [d.reason] : []))
+  // 기본값은 공유지만 합주에는 독점을 권한다(P1-19) — 공유일 때 눈에 띄게
+  const exclusiveHint = exclusiveModeHint(config, supportedDrivers)
 
   return wrap(
     <>
@@ -201,6 +203,24 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           </div>
         </div>
       </section>
+
+      {exclusiveHint && (
+        <div
+          className={`exclusive-hint ${exclusiveHint.emphasized ? 'emphasized' : ''}`}
+          role={exclusiveHint.emphasized ? 'note' : undefined}
+          data-testid="exclusive-hint"
+        >
+          <p>{exclusiveHint.text}</p>
+          {exclusiveHint.canSwitch && (
+            <button
+              className="exclusive-switch-btn"
+              onClick={() => updateConfig({ inputDriver: 'wasapiExclusive', outputDriver: 'wasapiExclusive' })}
+            >
+              WASAPI 독점으로 바꾸기
+            </button>
+          )}
+        </div>
+      )}
 
       {/* 드라이버 + 장치 */}
       <section className="settings-section">
