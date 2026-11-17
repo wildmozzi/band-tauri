@@ -10,7 +10,7 @@ const STARVE_RESET_MS: f64 = 200.0;
 /// 재생 시작 직후 목표에 min(1프레임, 2.5ms)을 더해 두는 시간(µs).
 const START_PAD_US: u64 = 1_000_000;
 /// 재생 시작 페이드인 길이(샘플, 1ms). 재합류·버림 크로스페이드와 같다.
-const START_FADE: usize = 48;
+pub(super) const START_FADE: usize = 48;
 
 impl JitterBuffer {
     /// 은닉 없이(실제 받은 데이터로만) 지금 꺼낼 수 있는 프레임 수(최소 보장치). 콜백 구동 믹스에서 워커는
@@ -76,19 +76,32 @@ impl JitterBuffer {
         self.state = State::Playing;
         self.depth.reset_mode();
         self.conceal.reset_run();
-        // 첫 패킷의 앞부분을 잘라 깊이 = 목표
+        // 첫 패킷의 앞부분을 잘라 깊이 = 목표. 자르기 전에는 페이드를 걸지 않는다(끝난 상태로 두고 생산).
+        self.start_fade_done = START_FADE;
         if self.produce_packet() {
             let cut = (excess.round().max(0.0) as usize).min(self.fifo.len() / 2);
             self.fifo.drain(..cut * 2);
-            // 재생 시작(처음·재버퍼·스트림 리셋 뒤): 직전 출력은 무음이므로 첫 샘플부터 신호면 계단(클릭)이 된다. 자른 뒤 남은
-            // 머리를 짧게 페이드인한다(P2-17d ①). 깊이·타이밍은 그대로다(샘플 값만 바뀜).
-            let l = START_FADE.min(self.fifo.len() / 2);
-            for (i, s) in self.fifo.iter_mut().take(l * 2).enumerate() {
-                *s *= (i / 2 + 1) as f32 / (l + 1) as f32;
-            }
         }
+        // 재생 시작(처음·재버퍼·스트림 리셋 뒤): 시작 직전 출력은 언제나 무음이다(Buffering 동안 `pop`이 0을 채운다). 첫 샘플부터
+        // 신호면 계단(클릭)이 되므로 자른 뒤 남은 머리부터 `START_FADE` 프레임을 페이드인한다(P2-17d ①). 첫 패킷이 짧게 남았거나
+        // 다 잘려 FIFO가 비었으면 나머지는 다음 패킷들에서 이어 건다(`produce_packet`, #196 리뷰 L1). 깊이·타이밍은 그대로다.
+        self.start_fade_done = 0;
+        self.continue_start_fade(0);
         let d = self.depth_now(now_us);
         self.depth.set_ewma(d);
+    }
+
+    /// FIFO의 프레임 `from`부터 시작 페이드인을 이어 건다(남은 프레임이 없으면 아무것도 안 함, 할당 없음).
+    pub(super) fn continue_start_fade(&mut self, from: usize) {
+        let total = self.fifo.len() / 2;
+        let mut f = from;
+        while self.start_fade_done < START_FADE && f < total {
+            let g = (self.start_fade_done + 1) as f32 / (START_FADE + 1) as f32;
+            self.fifo[f * 2] *= g;
+            self.fifo[f * 2 + 1] *= g;
+            self.start_fade_done += 1;
+            f += 1;
+        }
     }
 
     /// 버퍼링 중 시작 seq가 없고 뒤 패킷이 있으면 처음 존재하는 seq로 시작점을 옮긴다.
@@ -252,6 +265,7 @@ impl JitterBuffer {
         let src: &[f32] = if use_shift { self.depth.shifted(out_frames * ch) } else { self.conceal.frame_out(out_frames * ch) };
         // 스테레오로 FIFO에 적재. fifo_end_ts는 원래 프레임 끝 그대로 두므로 1샘플 버리면
         // 재생 위치가 1 앞당겨진다(깊이 -1).
+        let appended_at = self.fifo.len() / 2;
         if ch == 2 {
             self.fifo.extend(src.iter().copied());
         } else {
@@ -259,6 +273,10 @@ impl JitterBuffer {
                 self.fifo.push_back(s);
                 self.fifo.push_back(s);
             }
+        }
+        // 재생 시작 페이드인이 아직 남았으면(첫 패킷이 짧게 남았거나 다 잘림) 방금 넣은 프레임에 이어 건다.
+        if self.start_fade_done < START_FADE {
+            self.continue_start_fade(appended_at);
         }
         true
     }

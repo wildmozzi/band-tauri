@@ -1408,3 +1408,27 @@ fn playback_start_fades_in_from_silence() {
         assert!(max_step <= 2.0 * normal, "{name}: 최대 계단 {max_step:.4} > 2 × 정상 {normal:.4}(시작 클릭)");
     }
 }
+
+/// 시작 페이드인이 첫 패킷의 남은 길이에 묶이지 않는다(#196 리뷰 L1): 자른 뒤 남은 머리가 48프레임보다 짧거나 FIFO가 비었으면
+/// 나머지 램프를 다음에 넣은 프레임에 이어 건다. 램프는 끝까지 단조 증가하고 48프레임 뒤는 원래 값이다.
+#[test]
+fn start_fade_continues_across_packets() {
+    for first in [0usize, 10, 47, 48, 100] {
+        let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+        jb.fifo.clear();
+        jb.fifo.extend(std::iter::repeat_n(1.0f32, first * 2));
+        jb.start_fade_done = 0;
+        jb.continue_start_fade(0);
+        // 다음 패킷(120프레임)을 넣고 이어 건다(produce_packet과 같은 순서).
+        let at = jb.fifo.len() / 2;
+        jb.fifo.extend(std::iter::repeat_n(1.0f32, 240));
+        jb.continue_start_fade(at);
+        let l: Vec<f32> = jb.fifo.iter().step_by(2).copied().collect();
+        let r: Vec<f32> = jb.fifo.iter().skip(1).step_by(2).copied().collect();
+        assert_eq!(l, r, "first {first}: 채널이 같게");
+        for (i, &v) in l.iter().enumerate() {
+            let want = if i < 48 { (i + 1) as f32 / 49.0 } else { 1.0 };
+            assert!((v - want).abs() < 1e-6, "first {first}: 프레임 {i} = {v} (기대 {want})");
+        }
+    }
+}

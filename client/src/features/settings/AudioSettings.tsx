@@ -173,7 +173,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
   const unsupportedReasons = drivers.flatMap((d) => (d.reason ? [d.reason] : []))
   // 기본값은 공유지만 합주에는 독점을 권한다(P1-19) — 공유일 때 눈에 띄게
   const exclusiveHint = exclusiveModeHint(config, supportedDrivers)
-  const frameHint = bufferFrameHint(config)
+  const frameHint = bufferFrameHint(config, selectedInputDevice?.sampleRates)
 
   return wrap(
     <>
