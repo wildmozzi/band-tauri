@@ -22,10 +22,17 @@ export async function installFakeTauri(page: Page, responses: FakeTauriResponses
     let nextId = 1
     const w = window as unknown as Record<string, unknown>
     w.__e2eTauriCalls = calls
+    // 테스트가 실행 중에 응답을 바꿀 수 있게(setTauriResponse — 예: 엔진 통계를 장치 분실로)
+    w.__e2eTauriResponses = canned
     w.isTauri = true
     w.__TAURI_INTERNALS__ = {
       invoke: async (cmd: string) => {
         calls.push(cmd)
+        // 실제 엔진처럼: 새로 시작하면 통계가 정상으로(테스트가 __engineStatsAfterStart로 지정, 한 번만)
+        if (cmd === 'engine_start' && Object.prototype.hasOwnProperty.call(canned, '__engineStatsAfterStart')) {
+          canned.engine_stats = canned.__engineStatsAfterStart
+          delete canned.__engineStatsAfterStart
+        }
         return Object.prototype.hasOwnProperty.call(canned, cmd) ? structuredClone(canned[cmd]) : null
       },
       transformCallback: (cb: (v: unknown) => void) => {
@@ -38,6 +45,14 @@ export async function installFakeTauri(page: Page, responses: FakeTauriResponses
       metadata: { currentWindow: { label: 'main' }, currentWebview: { windowLabel: 'main', label: 'main' } },
     }
   }, responses as Record<string, unknown>)
+}
+
+/** 실행 중에 커맨드 응답을 바꾼다(다음 호출부터) */
+export function setTauriResponse(page: Page, cmd: string, value: unknown): Promise<void> {
+  return page.evaluate(([c, v]) => {
+    const canned = (window as unknown as { __e2eTauriResponses: Record<string, unknown> }).__e2eTauriResponses
+    canned[c as string] = v
+  }, [cmd, value] as const)
 }
 
 /** 지금까지 앱이 부른 Tauri 커맨드 */

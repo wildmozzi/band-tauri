@@ -254,6 +254,22 @@ describe('MixBroadcaster', () => {
     expect(sent.filter((m) => m.type === 'offer')).toHaveLength(2)
   })
 
+  it('엔진 정지(invalidate)로 믹스 소스 열기가 취소되면 start는 오류 없이 끝나고 방송은 꺼진 채 — 다시 start하면 연다', async () => {
+    const { b, deps, src, sent } = broadcaster()
+    deps.holdGraph = true
+    const p = b.start(['v1'])
+    await flush()
+    src.invalidate() // 장치 분실 재시작 등으로 엔진이 멈춤
+    deps.finishGraph()
+    await expect(p).resolves.toBeUndefined()
+    expect(sent.filter((m) => m.type === 'offer')).toHaveLength(0)
+    deps.holdGraph = false
+    await b.start(['v1']) // 엔진이 다시 뜨면 방송 효과가 다시 부른다
+    await flush()
+    expect(sent.filter((m) => m.type === 'offer')).toHaveLength(1)
+    b.stop()
+  })
+
   it('M3: 연결되면 시간 초과로 닫지 않는다', async () => {
     const { b } = broadcaster({ timeout: 20 })
     await b.start(['v1'])
