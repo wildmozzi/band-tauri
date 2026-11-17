@@ -1389,6 +1389,47 @@
     }
   },
   {
+    "step": "host: reject-instrument-change p2 (blank reason)",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [
+        {
+          "type": "instrument-change-rejected",
+          "reason": "방장이 악기 변경을 거절했습니다."
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
+    "step": "p2: request-instrument-change third",
+    "received": {
+      "host": [
+        {
+          "type": "instrument-change-request-received",
+          "request": {
+            "oderId": "c3",
+            "nickname": "P2",
+            "currentInstrument": "bass",
+            "newInstrument": "synth",
+            "timestamp": "<t>"
+          }
+        }
+      ],
+      "p1": [],
+      "p2": [
+        {
+          "type": "instrument-change-request-sent",
+          "newInstrument": "synth"
+        }
+      ],
+      "viewer": [],
+      "anon": []
+    }
+  },
+  {
     "step": "p2: cancel-instrument-change-request",
     "received": {
       "host": [
