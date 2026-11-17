@@ -491,26 +491,71 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// P2-24b: async 커맨드 본문에서 엔진 슬롯 락·디스크를 건드리는 호출은 `blocking(` 뒤에만 온다(소스 검사 — 새 커맨드가
-    /// `state.0.with_engine(..)`을 async 스레드에서 바로 부르면 실패한다).
+    /// `body[open]`이 `(`일 때 짝 `)`의 위치(괄호 깊이만 센다 — 이 파일의 문자열에는 짝 없는 괄호가 없다).
+    fn close_paren(body: &str, open: usize) -> usize {
+        let mut depth = 0i32;
+        for (i, c) in body[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return open + i;
+                    }
+                }
+                _ => {}
+            }
+        }
+        body.len()
+    }
+
+    /// 이름이 `fn `/`async fn ` 뒤에 오는 함수들의 (이름, 본문) — 시그니처는 빼고 `{` 뒤부터 다음 `\n}\n`(또는 들여쓴 `\n    }\n`)까지.
+    fn functions(src: &str, marker: &str, indent_end: &str) -> Vec<(String, String)> {
+        src.split(marker)
+            .skip(1)
+            .map(|chunk| {
+                let name = chunk.split(['(', '<']).next().unwrap_or("").trim().to_string();
+                let body = chunk.split(indent_end).next().unwrap_or(chunk);
+                let body = body.split_once('{').map_or(body, |(_, b)| b);
+                (name, body.to_string())
+            })
+            .collect()
+    }
+
+    /// P2-24b: async 커맨드 본문에서 엔진 슬롯 락·디스크를 건드리는 호출은 `blocking(..)` 호출의 **괄호 안**에만 온다(소스 검사 —
+    /// 새 커맨드가 `state.0.with_engine(..)`을 async 스레드에서 바로 부르면 실패한다). #214 리뷰 L2: 첫 `blocking(` 위치만 보면
+    /// `blocking(..).await?; state.0.with_engine(..)`이 통과했다 — 괄호 깊이로 범위를 잰다. 그런 호출을 하는 동기 헬퍼(`fn`)도
+    /// 검사 대상 이름에 더한다(한 단계: 헬퍼를 async 스레드에서 부르면 실패).
     #[test]
     fn lock_and_io_commands_run_on_blocking_pool() {
         let src = include_str!("commands.rs").lines().collect::<Vec<_>>().join("\n");
         let body_end = src.find("#[cfg(test)]").unwrap_or(src.len());
         let src = &src[..body_end];
-        const GUARDED: [&str; 6] = ["with_engine(", ".stats()", "set_loopback_offset(", "current_record_dir(", "record_start(", "list_devices("];
+        let mut guarded: Vec<String> =
+            ["with_engine(", ".stats()", "set_loopback_offset(", "record_start(", "list_devices(", "dirs.0.current("].iter().map(|s| s.to_string()).collect();
+        // `dirs.0.current(`는 녹음 폴더 설정 파일 읽기(디스크). 동기 헬퍼: 최상위 `fn`과 impl 안 `pub fn`(들여쓰기 4칸), `blocking` 자신은 뺀다.
+        let helpers: Vec<(String, String)> =
+            functions(src, "\nfn ", "\n}\n").into_iter().chain(functions(src, "\n    pub fn ", "\n    }\n")).filter(|(n, _)| n != "blocking").collect();
+        for (name, body) in &helpers {
+            if guarded.iter().any(|g| body.contains(g.as_str())) {
+                guarded.push(format!("{name}("));
+            }
+        }
+        assert!(guarded.iter().any(|g| g == "current_record_dir("), "동기 헬퍼 감지가 깨졌다: {guarded:?}");
         let mut bad = Vec::new();
         let mut checked = 0;
-        for chunk in src.split("pub async fn ").skip(1) {
-            let name = chunk.split(['(', '<']).next().unwrap_or("").to_string();
-            let body = chunk.split("\n}\n").next().unwrap_or(chunk);
-            // 시그니처(이름에 `list_devices` 등이 들어 있다)는 빼고 본문만 본다
-            let body = body.split_once('{').map_or(body, |(_, b)| b);
-            let first_blocking = body.find("blocking(").unwrap_or(usize::MAX);
-            for g in GUARDED {
-                if let Some(at) = body.find(g) {
+        for (name, body) in functions(src, "pub async fn ", "\n}\n") {
+            let ranges: Vec<(usize, usize)> = body
+                .match_indices("blocking(")
+                .map(|(at, m)| {
+                    let open = at + m.len() - 1;
+                    (open, close_paren(&body, open))
+                })
+                .collect();
+            for g in &guarded {
+                for (at, _) in body.match_indices(g.as_str()) {
                     checked += 1;
-                    if at < first_blocking {
+                    if !ranges.iter().any(|&(s, e)| s < at && at < e) {
                         bad.push(format!("{name}: {g}"));
                     }
                 }
@@ -518,5 +563,19 @@ mod tests {
         }
         assert!(checked >= 15, "검사 대상이 너무 적다({checked}) — 소스 형태가 바뀌었으면 시험을 고칠 것");
         assert!(bad.is_empty(), "async 런타임 스레드에서 엔진 락·디스크를 잡는 커맨드: {bad:?}");
+    }
+
+    /// 위 소스 검사가 실제로 잡는지: blocking 뒤에 락을 잡는 형태·동기 헬퍼 경유를 넣은 가짜 소스로 같은 판정을 돌린다.
+    #[test]
+    fn source_check_catches_lock_after_blocking() {
+        let body = "\n    let m = state.0.clone();\n    blocking(move || m.stop()).await?;\n    state.0.with_engine(|e| e.x())\n";
+        let open = body.find("blocking(").unwrap() + "blocking".len();
+        let close = close_paren(body, open);
+        let at = body.find("with_engine(").unwrap();
+        assert!(at > close, "blocking 괄호 밖의 락 호출을 안으로 보았다");
+        let inside = "\n    blocking(move || m.with_engine(|e| e.add((1, 2)))).await\n";
+        let open = inside.find("blocking(").unwrap() + "blocking".len();
+        let at = inside.find("with_engine(").unwrap();
+        assert!(open < at && at < close_paren(inside, open), "괄호 안의 호출을 밖으로 보았다");
     }
 }

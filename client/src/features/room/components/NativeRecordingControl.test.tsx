@@ -79,6 +79,18 @@ describe('NativeRecordingControl', () => {
     fireEvent.click(screen.getByRole('button', { name: /폴더 변경/ }))
     expect(await screen.findByText(/E:\\Rec/)).toBeTruthy()
     expect(await screen.findByText(/저장하지 못했습니다.*Access is denied/)).toBeTruthy()
+    // #214 리뷰 L3: 다른 폴더를 골라 저장에 성공하면 경고가 사라진다(고르기 실패 경고도 같다)
+    api.engineRecordPickFolder.mockResolvedValueOnce({ folder: 'F:\\Rec', saveError: null })
+    fireEvent.click(screen.getByRole('button', { name: /폴더 변경/ }))
+    expect(await screen.findByText(/F:\\Rec/)).toBeTruthy()
+    expect(screen.queryByText(/저장하지 못했습니다/)).toBeNull()
+    api.engineRecordPickFolder.mockRejectedValueOnce('대화상자 오류')
+    fireEvent.click(screen.getByRole('button', { name: /폴더 변경/ }))
+    expect(await screen.findByText(/폴더를 고를 수 없습니다: 대화상자 오류/)).toBeTruthy()
+    api.engineRecordPickFolder.mockResolvedValueOnce({ folder: 'G:\\Rec', saveError: null })
+    fireEvent.click(screen.getByRole('button', { name: /폴더 변경/ }))
+    expect(await screen.findByText(/G:\\Rec/)).toBeTruthy()
+    expect(screen.queryByText(/폴더를 고를 수 없습니다/)).toBeNull()
   })
 
   it('폴더를 바꿔도 직전 녹음 안내(저장된 세션 폴더)는 남는다(#212 리뷰 L4)', async () => {
