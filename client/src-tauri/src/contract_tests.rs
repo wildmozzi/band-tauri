@@ -227,45 +227,46 @@ fn doc_fields(doc: &str, name: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// 계약 타입 (Rust 구조체, TS interface) 짝. `MarkerTrack`은 TS에서 인라인 타입이라 따로 본다.
+const CONTRACT_PAIRS: [(&str, &str); 28] = [
+    ("EngineStats", "EngineStats"),
+    ("PeerStats", "PeerStats"),
+    ("RelayStats", "RelayStats"),
+    ("QosStats", "QosStats"),
+    ("SendQueueStats", "SendQueueStats"),
+    ("CpuStats", "CpuStats"),
+    ("ThreadPriorityStats", "ThreadPriorityStats"),
+    ("ThreadPlacement", "ThreadPlacement"),
+    ("CorePlacementStats", "CorePlacementStats"),
+    ("DeviceInfo", "DeviceInfo"),
+    ("EngineConfig", "EngineConfig"),
+    ("Candidate", "Candidate"),
+    ("LocalDescriptor", "LocalDescriptor"),
+    ("RelayArgs", "RelayConfig"),
+    ("LoopbackRun", "LoopbackRun"),
+    ("LoopbackReport", "LoopbackReport"),
+    ("EchoReport", "EchoReport"),
+    ("RecordOptions", "RecordOptions"),
+    ("RecordStats", "RecordStats"),
+    ("RecordTrack", "RecordTrack"),
+    ("RecordSummary", "RecordSummary"),
+    ("RecordMarker", "RecordMarker"),
+    ("MarkersFile", "RecordMarkersFile"),
+    ("RecordFolderPick", "RecordFolderPick"),
+    ("MetronomeConfig", "MetronomeConfig"),
+    ("MetronomePlan", "MetronomePlan"),
+    ("MetronomeStats", "MetronomeStats"),
+    ("MarkerTrack", "RecordMarkerTrackShape"),
+];
+
 #[test]
 fn contract_types_match_engine_api_and_design_doc() {
-    // (Rust 구조체, TS interface)
-    const PAIRS: [(&str, &str); 28] = [
-        ("EngineStats", "EngineStats"),
-        ("PeerStats", "PeerStats"),
-        ("RelayStats", "RelayStats"),
-        ("QosStats", "QosStats"),
-        ("SendQueueStats", "SendQueueStats"),
-        ("CpuStats", "CpuStats"),
-        ("ThreadPriorityStats", "ThreadPriorityStats"),
-        ("ThreadPlacement", "ThreadPlacement"),
-        ("CorePlacementStats", "CorePlacementStats"),
-        ("DeviceInfo", "DeviceInfo"),
-        ("EngineConfig", "EngineConfig"),
-        ("Candidate", "Candidate"),
-        ("LocalDescriptor", "LocalDescriptor"),
-        ("RelayArgs", "RelayConfig"),
-        ("LoopbackRun", "LoopbackRun"),
-        ("LoopbackReport", "LoopbackReport"),
-        ("EchoReport", "EchoReport"),
-        ("RecordOptions", "RecordOptions"),
-        ("RecordStats", "RecordStats"),
-        ("RecordTrack", "RecordTrack"),
-        ("RecordSummary", "RecordSummary"),
-        ("RecordMarker", "RecordMarker"),
-        ("MarkersFile", "RecordMarkersFile"),
-        ("RecordFolderPick", "RecordFolderPick"),
-        ("MetronomeConfig", "MetronomeConfig"),
-        ("MetronomePlan", "MetronomePlan"),
-        ("MetronomeStats", "MetronomeStats"),
-        ("MarkerTrack", "RecordMarkerTrackShape"),
-    ];
     let srcs = rust_sources();
     let ts = read("client/src/native/engineApi.ts");
     let doc = read("docs/overhaul/native-engine-design.md");
     let mut problems = Vec::new();
     let mut doc_checked = 0;
-    for (rs, tsn) in PAIRS {
+    for (rs, tsn) in CONTRACT_PAIRS {
         // MarkersFile.tracks의 원소는 TS에서 인라인 타입이다 — 그 필드는 아래에서 따로 본다
         if tsn == "RecordMarkerTrackShape" {
             let r: BTreeSet<String> = rust_fields(&srcs, rs).into_iter().collect();
@@ -301,4 +302,221 @@ fn contract_types_match_engine_api_and_design_doc() {
     }
     assert!(doc_checked >= 20, "문서 interface 발췌를 {doc_checked}개만 찾았다 — 문서 형태가 바뀌었으면 시험을 고칠 것");
     assert!(problems.is_empty(), "계약 어긋남:\n{}", problems.join("\n"));
+}
+
+/// 필드 하나의 null·선택 여부.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Kind {
+    /// Rust: `Option<T>`. TS·문서: 타입에 `null`이 있다.
+    nullable: bool,
+    /// Rust: `#[serde(default)]`(필드 또는 구조체). TS·문서: `name?:`.
+    optional: bool,
+}
+
+/// Rust 구조체 필드별 `Option` 여부와 serde 기본값(필드·구조체 `#[serde(default)]`). `#[serde(skip)]` 필드는 뺀다.
+fn rust_kinds(srcs: &[String], name: &str) -> Vec<(String, Kind)> {
+    let heads = [format!("pub struct {name} {{"), format!("pub(crate) struct {name} {{")];
+    let (src, at, head) = srcs
+        .iter()
+        .find_map(|s| heads.iter().find_map(|h| s.find(h.as_str()).map(|i| (s, i, h.len()))))
+        .unwrap_or_else(|| panic!("구조체 {name} 없음"));
+    // 구조체 바로 위 속성 줄들(빈 줄·주석 전까지)에 `#[serde(default)]`가 있으면 모든 필드가 기본값을 가진다
+    let struct_default = src[..at].lines().rev().take_while(|l| l.trim_start().starts_with("#[") || l.trim_start().starts_with("///")).any(|l| l.contains("#[serde(") && (l.contains("(default") || l.contains(", default") || l.contains("default,")));
+    let body = &src[at + head..];
+    let body = &body[..body.find("\n}").expect("구조체 닫힘 없음")];
+    let mut out = Vec::new();
+    let (mut skip, mut default) = (false, false);
+    for l in body.lines() {
+        let t = l.trim_start();
+        if t.starts_with("#[serde(skip)]") || t.starts_with("#[serde(skip_serializing)]") {
+            skip = true;
+            continue;
+        }
+        if t.starts_with("#[serde(") && t.contains("default") {
+            default = true;
+            continue;
+        }
+        if l.starts_with("    ") && !l.starts_with("     ") && !t.starts_with("//") && !t.starts_with('#') {
+            let t = t.strip_prefix("pub(crate) ").or_else(|| t.strip_prefix("pub ")).unwrap_or(t);
+            if let Some((ident, ty)) = t.split_once(':') {
+                if !ident.is_empty() && ident.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                    if !skip {
+                        out.push((camel(ident), Kind { nullable: ty.trim_start().starts_with("Option<"), optional: default || struct_default }));
+                    }
+                    skip = false;
+                    default = false;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 타입 글 `T | null` 등에 최상위 `null`이 있는가(제네릭·객체 안의 null은 보지 않음).
+fn has_top_null(ty: &str) -> bool {
+    let mut depth = 0i32;
+    let mut tok = String::new();
+    let mut toks = Vec::new();
+    for c in ty.chars() {
+        match c {
+            '<' | '{' | '(' | '[' => depth += 1,
+            '>' | '}' | ')' | ']' => depth -= 1,
+            '|' if depth == 0 => {
+                toks.push(std::mem::take(&mut tok));
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            tok.push(c);
+        }
+    }
+    toks.push(tok);
+    toks.iter().any(|t| t.trim() == "null")
+}
+
+/// TS interface 필드별 `?`·`| null`(`extends` 부모 포함). 2칸 들여쓰기 한 줄 필드만.
+fn ts_kinds(ts: &str, name: &str) -> Vec<(String, Kind)> {
+    let head = format!("export interface {name} ");
+    let at = ts.find(&head).unwrap_or_else(|| panic!("engineApi.ts에 interface {name} 없음"));
+    let rest = &ts[at + head.len()..];
+    let (decl, body) = rest.split_once('{').expect("interface 여는 괄호 없음");
+    let body = &body[..body.find("\n}").expect("interface 닫힘 없음")];
+    let mut out: Vec<(String, Kind)> = body
+        .lines()
+        .filter(|l| l.starts_with("  ") && !l.starts_with("   "))
+        .filter_map(|l| {
+            let (n, ty) = l.trim_start().split_once(':')?;
+            let optional = n.ends_with('?');
+            let n = n.trim_end_matches('?');
+            (!n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric())).then(|| (n.to_string(), Kind { nullable: has_top_null(ty.split("//").next().unwrap_or(ty)), optional }))
+        })
+        .collect();
+    if let Some(parent) = decl.trim().strip_prefix("extends ") {
+        out.extend(ts_kinds(ts, parent.trim()));
+    }
+    out
+}
+
+/// 설계 문서 `interface NAME { … }` 발췌의 최상위 필드별 `?`·`| null`(중첩 객체 타입은 통째로 하나의 타입 글).
+fn doc_kinds(doc: &str, name: &str) -> Option<Vec<(String, Kind)>> {
+    let head = format!("interface {name} ");
+    let at = doc.find(&head)?;
+    let rest = &doc[at + head.len()..];
+    let open = rest.find('{')?;
+    // 최상위 `;`·줄바꿈으로 필드를 나눈다(중첩 `{ }`·`< >` 안의 `;`는 나누지 않음)
+    let mut depth = 0i32;
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut in_comment = false;
+    let chars: Vec<char> = rest[open + 1..].chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_comment {
+            if c == '\n' {
+                in_comment = false;
+            } else {
+                i += 1;
+                continue;
+            }
+        }
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            in_comment = true;
+            i += 2;
+            continue;
+        }
+        match c {
+            '{' | '<' | '(' => depth += 1,
+            '}' if depth == 0 => {
+                parts.push(std::mem::take(&mut cur));
+                break;
+            }
+            '}' | '>' | ')' => depth -= 1,
+            ';' | '\n' if depth == 0 => {
+                parts.push(std::mem::take(&mut cur));
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+        i += 1;
+    }
+    let mut out = Vec::new();
+    for p in parts {
+        if let Some((n, ty)) = p.trim().split_once(':') {
+            let optional = n.trim().ends_with('?');
+            let n = n.trim().trim_end_matches('?');
+            if !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric()) {
+                out.push((n.to_string(), Kind { nullable: has_top_null(ty), optional }));
+            }
+        }
+    }
+    Some(out)
+}
+
+/// 계약 감사 2차: 필드의 null·선택 여부.
+/// - 엔진 → 프론트(출력) 타입: Rust `Option` ⇔ TS 타입에 `null`. `?`는 옛 엔진 호환으로 어느 쪽이든 허용한다.
+/// - 프론트 → 엔진(입력) 타입(`EngineConfig`·`RecordOptions`·`MetronomeConfig`·`RelayArgs`): `Option`이 아닌 필드는 TS에서
+///   `null`일 수 없고(serde가 거부), 기본값(`#[serde(default)]`)도 없으면 빠뜨릴 수 없다(`?` 금지).
+/// - 문서 `interface` 발췌: `| null`은 TS와 같아야 하고, `?`는 입력 타입이면 같아야 한다. 출력 타입은 문서가 엔진 계약(늘 보냄)을
+///   적고 TS가 옛 엔진 호환으로 `?`를 더 다는 것을 허용한다(EngineStats·PeerStats 등 41필드, 계약 감사 2차 보고).
+#[test]
+fn contract_field_nullability_matches() {
+    const INPUTS: [&str; 4] = ["EngineConfig", "RecordOptions", "MetronomeConfig", "RelayArgs"];
+    let srcs = rust_sources();
+    let ts = read("client/src/native/engineApi.ts");
+    let doc = read("docs/overhaul/native-engine-design.md");
+    let mut problems = Vec::new();
+    let mut checked = 0;
+    for (rs, tsn) in CONTRACT_PAIRS {
+        if tsn == "RecordMarkerTrackShape" {
+            continue;
+        }
+        let r = rust_kinds(&srcs, rs);
+        let t: std::collections::BTreeMap<String, Kind> = ts_kinds(&ts, tsn).into_iter().collect();
+        for (f, rk) in &r {
+            let Some(tk) = t.get(f) else { continue }; // 이름 차이는 위 시험이 본다
+            checked += 1;
+            if INPUTS.contains(&rs) {
+                if !rk.nullable && tk.nullable {
+                    problems.push(format!("{tsn}.{f}: Rust는 Option이 아닌데 TS가 null을 허용(입력 — 엔진이 거부)"));
+                }
+                if !rk.nullable && !rk.optional && tk.optional {
+                    problems.push(format!("{tsn}.{f}: Rust에 기본값이 없는데 TS가 선택(?)(입력 — 빠뜨리면 엔진이 거부)"));
+                }
+            } else if rk.nullable != tk.nullable {
+                problems.push(format!(
+                    "{tsn}.{f}: Rust {} ↔ TS {}",
+                    if rk.nullable { "Option(null 가능)" } else { "null 아님" },
+                    if tk.nullable { "| null" } else { "null 없음" }
+                ));
+            }
+        }
+        if let Some(d) = doc_kinds(&doc, tsn) {
+            let input = INPUTS.contains(&rs);
+            for (f, dk) in d {
+                if let Some(tk) = t.get(&f) {
+                    // null 여부는 늘 같아야 한다. `?`는 입력 타입이면 같아야 하고, 출력 타입이면 문서가 TS보다 엄격해도 된다
+                    // (엔진은 늘 보내는데 TS가 옛 엔진 호환으로 `?`를 단 필드 — 문서는 엔진 계약을 적는다). 문서만 `?`이면 어긋남.
+                    let optional_bad = if input { dk.optional != tk.optional } else { dk.optional && !tk.optional };
+                    if dk.nullable != tk.nullable || optional_bad {
+                        problems.push(format!("문서 interface {tsn}.{f}: 문서 {dk:?} ↔ TS {tk:?}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked >= 200, "비교한 필드가 {checked}개뿐 — 파서가 깨졌으면 시험을 고칠 것");
+    assert!(problems.is_empty(), "null·선택 여부 어긋남({}건):\n{}", problems.len(), problems.join("\n"));
+}
+
+#[test]
+fn has_top_null_ignores_nested() {
+    assert!(has_top_null(" number | null"));
+    assert!(has_top_null(" null | 'a'"));
+    assert!(!has_top_null(" Record<string, string | null>"));
+    assert!(!has_top_null(" { peerId: string | null }[]"));
+    assert!(!has_top_null(" nullish"));
 }
