@@ -318,6 +318,21 @@ impl EngineManager {
     ///
     /// 반환: 엔진(또는 시작)을 정지했다. 처음 열 때(Idle)는 세대도 올리지 않는다. 블로킹이므로 비UI 스레드에서 부른다.
     pub fn stop_if_generation(&self, gen: u64) -> bool {
+        // 앞 페이지의 시작이 아직 진행 중(장치 열기·STUN)이면 끝나기를 기다리지 않고 바로 취소한다(#212 리뷰 L2). 그 시작은
+        // `start_lock`을 쥔 채 결과를 버리고 장치를 놓으므로, 아래에서 `start_lock`을 한 번 잡아 그것이 끝날 때까지만 기다린다
+        // (그동안 들어온 새 start도 같은 자리에서 기다린다).
+        {
+            let mut s = self.slot.lock();
+            if s.generation == gen && matches!(s.phase, Phase::Starting { .. }) {
+                s.generation += 1;
+                self.restore_monitor(&mut s);
+                let none = s.phase.leave(); // Starting을 떠나면 cancel만 세우고 엔진은 없다
+                drop(s);
+                debug_assert!(none.is_none());
+                drop(self.start_lock.lock());
+                return true;
+            }
+        }
         let _serial = self.start_lock.lock();
         let (old_session, old) = {
             let mut s = self.slot.lock();
@@ -705,6 +720,24 @@ mod tests {
         }
         m.stop();
         assert!(!held.load(Ordering::SeqCst));
+
+        // (4) #212 리뷰 L2: 앞 페이지의 시작이 장치 열기에서 멈춰 있으면 끝나기를 기다리지 않고 바로 취소한다
+        gate.close();
+        let n = gate.entered();
+        let m1 = m.clone();
+        let a = std::thread::spawn(move || m1.start_monitor_only(cfg()));
+        assert!(gate.wait_entered(n + 1, HANG));
+        let cancel = starting_cancel(&m);
+        let gen = m.start_generation();
+        let m2 = m.clone();
+        let t = std::thread::spawn(move || m2.stop_if_generation(gen));
+        assert!(wait_until(|| cancel.load(Ordering::SeqCst)), "진행 중인 시작을 바로 취소하지 않았다(끝나기를 기다림)");
+        assert_eq!(phase(&m), P::Idle);
+        gate.release();
+        assert!(t.join().unwrap());
+        assert_eq!(a.join().unwrap().unwrap_err(), "엔진 시작이 취소되었습니다");
+        assert_eq!(phase(&m), P::Idle);
+        assert!(!held.load(Ordering::SeqCst), "버린 시작의 장치는 닫혔다");
     }
 
     #[test]

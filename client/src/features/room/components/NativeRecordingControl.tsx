@@ -141,8 +141,9 @@ export function NativeRecordingControl({
       const p = await engineRecordPickFolder()
       if (!p) return
       setFolder(p.folder)
-      // 고른 폴더는 이번 실행 동안 쓰지만 설정에 남지 않았다(#212: 전에는 로그에만 남아 다음 실행에 말없이 이전 폴더로 돌아갔다)
-      setNotice(p.saveError ? `이 폴더를 설정에 저장하지 못했습니다(이번 실행 동안만 사용): ${p.saveError}` : null)
+      // 고른 폴더는 이번 실행 동안 쓰지만 설정에 남지 않았다(#212: 전에는 로그에만 남아 다음 실행에 말없이 이전 폴더로 돌아갔다).
+      // 경고 줄로 보이고, 직전 녹음 안내("저장됨 · 세션 폴더")는 지우지 않는다(#212 리뷰 L4 — 방금 녹음한 위치를 잃지 않게).
+      if (p.saveError) setError(`이 폴더를 설정에 저장하지 못했습니다(이번 실행 동안만 사용): ${p.saveError}`)
     } catch (e) {
       setError(`폴더를 고를 수 없습니다: ${engineErrorMessage(e)}`)
     }

@@ -81,6 +81,21 @@ describe('NativeRecordingControl', () => {
     expect(await screen.findByText(/저장하지 못했습니다.*Access is denied/)).toBeTruthy()
   })
 
+  it('폴더를 바꿔도 직전 녹음 안내(저장된 세션 폴더)는 남는다(#212 리뷰 L4)', async () => {
+    room.engineStats = { recording: live }
+    api.engineRecordStop.mockResolvedValue({ ...live, channels: 2, startedAtMs: 0, tracks: [], error: null })
+    const { rerender } = render(<NativeRecordingControl peers={[]} />)
+    fireEvent.click(screen.getByRole('button', { name: /녹음 정지/ }))
+    await vi.waitFor(() => expect(api.engineRecordStop).toHaveBeenCalledTimes(1))
+    room.engineStats = { recording: null }
+    rerender(<NativeRecordingControl peers={[]} />)
+    expect(await screen.findByText(/저장됨 · 0트랙/)).toBeTruthy()
+    api.engineRecordPickFolder.mockResolvedValueOnce({ folder: 'D:\\Other', saveError: null })
+    fireEvent.click(screen.getByRole('button', { name: /폴더 변경/ }))
+    expect(await screen.findByText(/D:\\Other/)).toBeTruthy()
+    expect(screen.getByText(/저장됨 · 0트랙/)).toBeTruthy()
+  })
+
   it('엔진이 꺼져 있으면 시작할 수 없고, 엔진 정지로 끝난 녹음을 알린다', async () => {
     room.engineStats = { recording: live }
     const { rerender } = render(<NativeRecordingControl peers={[]} />)
