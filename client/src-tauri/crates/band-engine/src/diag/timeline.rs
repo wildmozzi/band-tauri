@@ -34,12 +34,24 @@ impl<T> Ring<T> {
         Self { cap, buf: VecDeque::with_capacity(cap), dropped: 0 }
     }
 
+    /// 합치기 없이 넣는다(시험용 — 기록기는 `push_folding`).
+    #[cfg(test)]
     pub(crate) fn push(&mut self, v: T) {
-        if self.buf.len() == self.cap {
-            self.buf.pop_front();
-            self.dropped += 1;
-        }
+        self.push_folding(v, |_, _| {});
+    }
+
+    /// `push`와 같지만, 가득 차서 가장 오래된 항목을 버릴 때 `fold(버린 것, 새 맨 앞)`을 부른다 — 버린 항목의 구간 값을 다음
+    /// 항목에 합쳐 "맨 앞 = 시작부터"를 지키는 데 쓴다(`Sample::fold_dropped`). 용량 1이면 새 항목이 곧 맨 앞이다.
+    pub(crate) fn push_folding(&mut self, v: T, fold: impl FnOnce(T, &mut T)) {
         self.buf.push_back(v);
+        if self.buf.len() > self.cap {
+            if let Some(old) = self.buf.pop_front() {
+                self.dropped += 1;
+                if let Some(front) = self.buf.front_mut() {
+                    fold(old, front);
+                }
+            }
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -170,8 +182,9 @@ pub struct Sample {
     pub(crate) peers: Vec<PeerSample>,
     pub(crate) relay: Option<RelaySample>,
     /// 워커·수신 스레드의 코어 배치 표본 수 `[P, E, LP-E]`(P1-21). 기록기가 넣는 타임라인 샘플은 **구간 값**(같은 세션의 직전
-    /// 샘플 뒤로 센 수, 세션 첫 샘플은 시작부터), `from_stats`만으로 만든 샘플(내보내기 `lastStats`)은 시작부터 누적이다.
-    /// 비Windows는 줄에 넣지 않는다.
+    /// 샘플 뒤로 센 수)이고, 타임라인에 보이는 세션 첫 줄은 시작부터다 — 60분 링이 넘쳐 앞 샘플을 버릴 때 그 수를 같은 세션의
+    /// 다음 샘플에 합친다(`fold_dropped`). 그래서 한 세션의 줄을 모두 더하면 시작부터의 누적이다. 내보내기 `lastStats`는 늘
+    /// 시작부터 누적이다(`session_placement`). 비Windows는 줄에 넣지 않는다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) core_placement: Option<crate::sys::placement::PlacementWindow>,
     /// 직전 샘플 뒤로 생긴 연결 이벤트(P1-18). 없으면 줄에 넣지 않는다(기존 줄 형식 그대로).
@@ -248,6 +261,33 @@ impl Sample {
     pub(crate) fn stopped(t: u64, network: bool, session: u64) -> Self {
         Self::from_stats(t, network, session, &EngineStats::stopped())
     }
+
+    /// 링이 넘쳐 버린 샘플(`dropped`)의 코어 배치 구간 값을 같은 세션의 다음 샘플(`next`)에 합친다(P1-21a — 넘친 뒤에도 보이는
+    /// 세션 첫 줄이 시작부터가 되게). 다른 세션이거나 어느 쪽이든 배치가 없으면 그대로 둔다(배치 없는 샘플 뒤의 값은 기록기가
+    /// 이미 시작부터로 넣는다). 누적 카운터(`xruns` 등)는 원래 누적이라 손대지 않는다.
+    pub(crate) fn fold_dropped(dropped: Self, next: &mut Self) {
+        if dropped.session != next.session {
+            return;
+        }
+        if let (Some(d), Some(n)) = (dropped.core_placement, next.core_placement.as_mut()) {
+            *n = n.plus(&d);
+        }
+    }
+}
+
+/// 타임라인에서 세션 `session`의 코어 배치를 시작부터 누적한다(P1-21a — 엔진이 사라진 뒤 내보내는 `engine.json` `lastStats`용).
+/// 실행 중 샘플의 구간 값을 더하고, 배치 없는 실행 중 샘플을 만나면 다시 센다(기록기가 그 뒤 값을 시작부터로 넣으므로). 정지
+/// 표시 샘플은 건너뛴다. 그 세션에 배치가 없으면 None.
+pub(crate) fn session_placement(tl: &Timeline, session: u64) -> Option<crate::sys::placement::PlacementWindow> {
+    let mut acc: Option<crate::sys::placement::PlacementWindow> = None;
+    for s in tl.iter().filter(|s| s.session == session && s.running) {
+        acc = match (acc, s.core_placement) {
+            (Some(a), Some(c)) => Some(a.plus(&c)),
+            (None, Some(c)) => Some(c),
+            (_, None) => None,
+        };
+    }
+    acc
 }
 
 /// 엔진 통계 타임라인.

@@ -17,7 +17,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use super::mask::mask_text;
-use super::timeline::{to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
+use super::timeline::{session_placement, to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
 use super::Diagnostics;
 use band_dsp::config::EngineConfig;
 use crate::engine::device::DeviceInfo;
@@ -25,6 +25,10 @@ use crate::engine::report::EngineSnapshot;
 
 /// 로그 전체 상한(마스킹 전 바이트). 최신 파일의 끝부분부터 채운다.
 pub(crate) const LOG_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+
+/// `meta.json`의 `format`. 1 → 2(P1-21a): 타임라인 `corePlacement`가 비율 객체(#191)에서 구간 표본 수 `[P, E, LP-E]`(#203)로
+/// 바뀌었고, `engine.json` `lastStats.corePlacement`는 늘 세션 시작부터 누적이다.
+pub(crate) const FORMAT: u32 = 2;
 
 pub(crate) const README_TEXT: &str = "Band 진단 자료 (P2-5)
 
@@ -35,6 +39,9 @@ engine.json     엔진 설정(버퍼·프레임·코덱·지터 범위), 마지�
 timeline.jsonl  1초 간격 엔진 통계(최근 최대 60분): 백엔드·장치 버퍼·지연·xrun·스트림 오류,
                 피어별 경로(lan/public/relay)·RTT·지터·버퍼·재생 지연·손실·늦음·은닉(누적)
                 session 값이 바뀐 곳은 엔진 재시작이라 누적 값이 0부터 다시 셉니다.
+                corePlacement(Windows)는 워커·수신 스레드가 깨어날 때 P/E/LP-E 코어 중 어디에 있었는지 센
+                [P, E, LP-E] 표본 수입니다. 줄마다 직전 줄 뒤로 센 구간 값이고(실행 시간이 아니라 깨어난 횟수),
+                세션의 줄을 모두 더하면 시작부터의 누적입니다. engine.json lastStats의 corePlacement는 누적입니다.
 logs/           최근 앱 로그(마스킹됨)
 
 넣지 않거나 가린 것
@@ -200,11 +207,18 @@ pub fn build(
     let logs = log_dir.map(|d| collect_logs(d, LOG_BUDGET_BYTES)).unwrap_or_default();
     let os = OsInfo::current();
     // 타임라인 락 안에서는 필요한 값만 꺼내고, 압축(로그 최대 2MB)은 락 밖에서 한다(기록 스레드를 막지 않게).
+    // 엔진이 없을 때 `lastStats`는 타임라인 마지막 샘플이다. 엔진이 막 사라진 뒤 정지 표시 전(최대 1초)이면 그것이 실행 중 샘플이라
+    // `corePlacement`가 구간 값이 된다(#203 리뷰 L2). 그래서 그 세션의 줄을 더해 늘 시작부터 누적으로 맞춘다(현재 엔진의
+    // `from_stats`와 같은 뜻 — 정지 표시 샘플이 마지막이어도 직전 세션의 누적이 들어간다).
     let (timeline_info, timeline_jsonl, last_sample, last_config) = diag.with_timeline(|tl, last_config, _| {
-        (TimelineInfo::of(tl), to_jsonl(tl), tl.last().cloned(), last_config.cloned())
+        let last = tl.last().cloned().map(|mut s| {
+            s.core_placement = session_placement(tl, s.session);
+            s
+        });
+        (TimelineInfo::of(tl), to_jsonl(tl), last, last_config.cloned())
     });
     let meta = Meta {
-        format: 1,
+        format: FORMAT,
         app,
         os,
         exported_at: now_ms,
@@ -343,7 +357,7 @@ mod tests {
 
     fn meta(tl: &Timeline) -> Meta {
         Meta {
-            format: 1,
+            format: FORMAT,
             app: AppInfo { name: "Band".into(), version: "0.1.0".into() },
             os: OsInfo { family: "windows".into(), arch: "x86_64".into(), version: None },
             exported_at: 0,
@@ -514,8 +528,9 @@ mod tests {
         let bytes = build(None, devices, &d, app, Some(&dir), 1_794_388_087_123).unwrap();
         std::fs::remove_dir_all(&dir).ok();
         let expected = [
-            ("README.txt", "36644f90258d9b366f050b8c914136b227880623d709ee4ee1f013897dae7223"),
-            ("meta.json", "9f50cc67df0cdc8a7cb437b7ac8a920b527faa9466fb04ba0fbc4874096abe3c"),
+            // P1-21a: README에 corePlacement 설명, meta.format 1 → 2(의도한 변경 — engine.json·timeline.jsonl 해시는 그대로)
+            ("README.txt", "53892e8d86178fe2d6875d8489e2f0bdbd8108ee1e19e9029e3a7e835c0b31a6"),
+            ("meta.json", "867d233d696502bd59c5633c283b652e9262fafe3ea585ca3bbc247a158a6aee"),
             ("engine.json", "eff8c630e2dfc6b97ac0f06328dff69d196a03a6087e1b0049ce0309cc36370e"),
             ("timeline.jsonl", "3439e58dad4fa31e0ad39d03171b9c5752e3ed097d82404a7ba3fee74224769a"),
             ("logs/Band.log", "6774d10d922e095e6e4dab8cd7dc9a152b767e4d69a2c4af13ffe7cc8359e982"),
@@ -548,6 +563,39 @@ mod tests {
         assert_eq!(e["devices"], serde_json::json!([]));
         assert_eq!(e["devicesError"], "열거 실패");
         assert!(z.by_name("logs/Band.log").is_err(), "log_dir 없으면 로그 없음");
+    }
+
+    /// 엔진이 막 사라지고 정지 표시 전(최대 1초)에 내보내면 마지막 샘플이 실행 중 샘플이다. 그래도 `lastStats.corePlacement`는
+    /// 구간 값이 아니라 세션 시작부터 누적이다(#203 리뷰 L2). 정지 표시가 마지막이어도 직전 세션 누적이 들어간다. meta.format 2.
+    #[test]
+    fn last_stats_core_placement_is_cumulative_after_engine_gone() {
+        use crate::engine::report::EngineStats;
+        use crate::sys::placement::{CorePlacementStats, ThreadPlacement};
+        let at = |w: [u64; 3]| {
+            let mut stats = EngineStats::stopped();
+            stats.running = true;
+            stats.core_placement = Some(CorePlacementStats { worker: ThreadPlacement::from_counts(w[0], w[1], w[2]), net_recv: Some(ThreadPlacement::from_counts(w[0], 0, 0)) });
+            EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 4, conn_events: vec![] }
+        };
+        let d = Diagnostics::new(10);
+        d.record(1_000, Some(at([100, 0, 0])));
+        d.record(2_000, Some(at([150, 30, 20])));
+        let last = |d: &Diagnostics| -> (serde_json::Value, serde_json::Value) {
+            let app = AppInfo { name: "Band".into(), version: "0.1.0".into() };
+            let mut z = zip::ZipArchive::new(Cursor::new(build(None, Ok(Vec::new()), d, app, None, 2_500).unwrap())).unwrap();
+            let (mut e, mut m) = (String::new(), String::new());
+            z.by_name("engine.json").unwrap().read_to_string(&mut e).unwrap();
+            z.by_name("meta.json").unwrap().read_to_string(&mut m).unwrap();
+            let e: serde_json::Value = serde_json::from_str(&e).unwrap();
+            (e["lastStats"]["corePlacement"].clone(), serde_json::from_str::<serde_json::Value>(&m).unwrap()["format"].clone())
+        };
+        // 정지 표시 전: 마지막 줄은 구간 값 [50, 30, 20]이지만 lastStats는 누적
+        let (cp, format) = last(&d);
+        assert_eq!(cp, serde_json::json!({"worker": [150, 30, 20], "netRecv": [150, 0, 0]}));
+        assert_eq!(format, 2);
+        // 정지 표시 뒤
+        d.record(3_000, None);
+        assert_eq!(last(&d).0, serde_json::json!({"worker": [150, 30, 20], "netRecv": [150, 0, 0]}));
     }
 
     /// 진단 zip의 timeline.jsonl 피어 샘플과 engine.json 마지막 샘플에 입→귀 추정 항(P2-8b)이 들어간다.
