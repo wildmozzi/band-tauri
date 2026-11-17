@@ -78,7 +78,9 @@ use std::collections::VecDeque;
 use crate::config::{frame_samples_from_code, INTERNAL_RATE, MAX_PAYLOAD_BYTES};
 use crate::packet::Header;
 
-pub use correction::{correction_catch_up_secs, correction_exit_ms, shift_n, shift_one, MAX_CORR_RATE};
+pub use correction::{correction_catch_up_secs, correction_exit_ms, shift_one};
+#[cfg(test)]
+use correction::MAX_CORR_RATE;
 pub use stats::JitterStats;
 pub use tuning::{JitterSettings, JitterTuning};
 

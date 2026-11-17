@@ -29,7 +29,7 @@ pub const FINE_POLL: Duration = Duration::from_micros(150);
 ///
 /// 이전 구현은 소비 샘플 수(`out_consumed`)와 전역 최솟값 + 500ppm 누설을 써서, 출력 언더런마다
 /// 결손이 0.5ms/s로만 회복되어 실제 지연이 조용히 쌓였다(PR #5 리뷰 H-1).
-pub struct DeviceClock {
+pub(crate) struct DeviceClock {
     rate: f64,
     bucket_start_us: f64,
     cur_min: f64,
@@ -38,7 +38,7 @@ pub struct DeviceClock {
     short_start_us: f64,
     short_min: f64,
     /// 공백 감지로 창을 리셋한 횟수(진단·테스트용).
-    pub resets: u64,
+    pub(crate) resets: u64,
 }
 
 const CLOCK_BUCKET_US: f64 = 500_000.0;
@@ -50,7 +50,7 @@ const CLOCK_SHORT_US: f64 = 150_000.0;
 const CLOCK_GAP_US: f64 = 3_000.0;
 
 impl DeviceClock {
-    pub fn new(rate: u32) -> Self {
+    pub(crate) fn new(rate: u32) -> Self {
         Self {
             rate: rate.max(1) as f64,
             bucket_start_us: 0.0,
@@ -64,7 +64,7 @@ impl DeviceClock {
     }
 
     /// `played_frames`: 출력 콜백이 지금까지 장치에 내보낸 프레임 수. 반환: 마지막 콜백 시각 추정(µs).
-    pub fn update(&mut self, wall_us: u64, played_frames: u64) -> u64 {
+    pub(crate) fn update(&mut self, wall_us: u64, played_frames: u64) -> u64 {
         let wall = wall_us as f64;
         if played_frames == 0 {
             return wall_us;
@@ -109,13 +109,13 @@ impl DeviceClock {
 #[derive(Debug, Clone, Copy)]
 pub struct FeedTiming {
     /// 지난 반복 이후 출력 콜백이 돌았다(이번 반복에서 깊이를 잰다).
-    pub new_callback: bool,
+    pub(crate) new_callback: bool,
     /// 마지막 출력 콜백 시각 추정치(장치 클럭, µs).
     pub dev_now_us: u64,
     /// 워커가 실제로 깨어난 시각(µs).
-    pub wall_us: u64,
+    pub(crate) wall_us: u64,
     /// 다음 출력 콜백 예상 시각(µs).
-    pub next_cb_us: u64,
+    pub(crate) next_cb_us: u64,
     /// 다음 콜백이 꺼낼 장치 프레임 수.
     pub out_burst: usize,
     /// `dev_now_us`에 대응하는 누적 재생 프레임(그 콜백 끝).

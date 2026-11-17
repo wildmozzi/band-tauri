@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::net::crypto::KEY_BYTES;
 
 /// descriptor 후보 수 상한(리뷰 M8: Hello 반사 폭주 방지).
-pub const MAX_CANDIDATES: usize = 8;
+pub(crate) const MAX_CANDIDATES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,7 +37,7 @@ pub struct LocalDescriptor {
 
 /// 후보 주소 검증(리뷰 M8). 0.0.0.0, 멀티캐스트, 브로드캐스트, 포트 0, IPv6(소켓이 IPv4),
 /// 그리고 (허용하지 않으면) 루프백을 거부한다.
-pub fn validate_candidate(addr: &SocketAddr, allow_loopback: bool) -> Result<(), String> {
+pub(crate) fn validate_candidate(addr: &SocketAddr, allow_loopback: bool) -> Result<(), String> {
     if addr.port() == 0 {
         return Err(format!("후보 포트 0: {addr}"));
     }
@@ -68,7 +68,7 @@ impl LocalDescriptor {
     }
 
     /// 후보 파싱과 검증. 상한 초과나 잘못된 주소가 있으면 descriptor 전체를 거부한다.
-    pub fn validated_candidates(&self, allow_loopback: bool) -> Result<Vec<(SocketAddr, CandidateKind)>, String> {
+    pub(crate) fn validated_candidates(&self, allow_loopback: bool) -> Result<Vec<(SocketAddr, CandidateKind)>, String> {
         if self.candidates.len() > MAX_CANDIDATES {
             return Err(format!("후보가 너무 많습니다({}개 > {MAX_CANDIDATES})", self.candidates.len()));
         }

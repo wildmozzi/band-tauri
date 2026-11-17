@@ -12,7 +12,7 @@ use serde::Serialize;
 use band_dsp::histo::{bucket_lower, bucket_of, quantile_us, BUCKETS};
 
 /// 분위수를 계산하는 창(통계는 직전 창 기준).
-pub const WINDOW: Duration = Duration::from_secs(2);
+pub(crate) const WINDOW: Duration = Duration::from_secs(2);
 
 /// 프론트로 나가는 송신 큐 지연 통계(`EngineStats.sendQueue`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
@@ -28,7 +28,7 @@ pub struct SendQueueStats {
     pub packets: u32,
 }
 
-pub struct SendLatency {
+pub(crate) struct SendLatency {
     buckets: Box<[AtomicU32]>,
     max_us: AtomicU64,
     last: Mutex<SendQueueStats>,
@@ -47,20 +47,20 @@ impl Default for SendLatency {
 }
 
 impl SendLatency {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { buckets: (0..BUCKETS).map(|_| AtomicU32::new(0)).collect(), max_us: AtomicU64::new(0), last: Mutex::new(SendQueueStats::default()) }
     }
 
     /// 패킷 하나의 지연 기록(송신 경로, 원자값만).
     #[inline]
-    pub fn record(&self, d: Duration) {
+    pub(crate) fn record(&self, d: Duration) {
         let us = d.as_micros().min(u64::MAX as u128) as u64;
         self.buckets[bucket_of(us)].fetch_add(1, Ordering::Relaxed);
         self.max_us.fetch_max(us, Ordering::Relaxed);
     }
 
     /// 현재 창을 비우고 분위수를 계산해 스냅샷으로 둔다(제어 스레드).
-    pub fn rotate(&self) -> SendQueueStats {
+    pub(crate) fn rotate(&self) -> SendQueueStats {
         let mut counts = [0u32; BUCKETS];
         let mut total: u64 = 0;
         for (c, b) in counts.iter_mut().zip(self.buckets.iter()) {
@@ -81,7 +81,7 @@ impl SendLatency {
         s
     }
 
-    pub fn last(&self) -> SendQueueStats {
+    pub(crate) fn last(&self) -> SendQueueStats {
         *self.last.lock()
     }
 }
@@ -90,14 +90,14 @@ impl SendLatency {
 /// 먼저 `try_*`로 잡아 보고 못 잡을 때만 시계를 읽으므로, 경합이 없으면 비용은 성공하는 try 한 번이다.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct LockWait {
-    pub ns: u64,
-    pub contended: u32,
+    pub(crate) ns: u64,
+    pub(crate) contended: u32,
 }
 
 /// 락 하나(자리)에서 워커가 기다린 기록(엔진 ②b 측정, 진단 전용): 기다린 횟수·합·최대. 기다렸을 때만 쓴다(원자값).
 /// 측정 시험이 `take`로 읽고 비운다.
 #[derive(Debug, Default)]
-pub struct LockSite {
+pub(crate) struct LockSite {
     contended: AtomicU64,
     total_ns: AtomicU64,
     max_ns: AtomicU64,
@@ -107,7 +107,7 @@ pub struct LockSite {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LockSiteWait {
     pub contended: u64,
-    pub total_us: u64,
+    pub(crate) total_us: u64,
     pub max_us: u64,
 }
 
@@ -118,7 +118,8 @@ impl LockSite {
         self.max_ns.fetch_max(ns, Ordering::Relaxed);
     }
 
-    pub fn take(&self) -> LockSiteWait {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn take(&self) -> LockSiteWait {
         LockSiteWait {
             contended: self.contended.swap(0, Ordering::Relaxed),
             total_us: self.total_ns.swap(0, Ordering::Relaxed) / 1000,

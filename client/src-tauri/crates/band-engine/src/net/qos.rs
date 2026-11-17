@@ -16,14 +16,14 @@ use std::net::{SocketAddr, UdpSocket};
 use serde::Serialize;
 
 /// Expedited Forwarding(RFC 3246).
-pub const DSCP_EF: u8 = 46;
+pub(crate) const DSCP_EF: u8 = 46;
 /// IP 헤더 TOS 바이트(DSCP는 상위 6비트).
-pub const TOS_EF: u32 = (DSCP_EF as u32) << 2;
+pub(crate) const TOS_EF: u32 = (DSCP_EF as u32) << 2;
 
 /// 요약된 마킹 상태.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum QosMarking {
+pub(crate) enum QosMarking {
     /// 아직 송신 목적지가 없다(Windows: 플로 대기).
     #[default]
     Pending,
@@ -41,20 +41,20 @@ pub enum QosMarking {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QosStats {
-    pub marking: QosMarking,
+    pub(crate) marking: QosMarking,
     /// `IP_TOS = 0xB8` setsockopt 성공 여부(Windows는 성공해도 무시될 수 있다).
     pub ip_tos: bool,
     /// qWAVE 핸들을 얻었다(Windows 전용, 그 밖에는 false).
-    pub qwave: bool,
+    pub(crate) qwave: bool,
     /// qWAVE 플로가 걸린 송신 목적지 수.
-    pub flows: u32,
+    pub(crate) flows: u32,
     /// 그중 DSCP 46 지정에 성공한 수.
-    pub ef_flows: u32,
+    pub(crate) ef_flows: u32,
     /// 플로 추가에 실패한 목적지 수(재시도하지 않음, 목적지가 바뀌면 새로 시도).
-    pub failed: u32,
+    pub(crate) failed: u32,
     /// 지금 남아 있는 실패 사유(없으면 null): 소켓·핸들 단계 실패, 또는 현재 목적지 중 플로 추가/DSCP 지정에
     /// 실패한 것의 사유. 실패한 목적지가 빠지면 함께 지워진다(이력 아님).
-    pub last_error: Option<String>,
+    pub(crate) last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +83,7 @@ fn classify(qwave: bool, dests: usize, flows: u32, ef_flows: u32) -> QosMarking 
     }
 }
 
-pub struct Qos {
+pub(crate) struct Qos {
     ip_tos: bool,
     flows: HashMap<SocketAddr, Flow>,
     /// 소켓·핸들 단계의 실패(엔진 수명 동안 유지).
@@ -94,7 +94,7 @@ pub struct Qos {
 
 impl Qos {
     /// 소켓에 `IP_TOS`를 걸고(Windows는 qWAVE 핸들도 연다). 어떤 실패도 엔진을 멈추지 않는다.
-    pub fn new(socket: &UdpSocket) -> Self {
+    pub(crate) fn new(socket: &UdpSocket) -> Self {
         let mut base_error = None;
         let ip_tos = match socket2::SockRef::from(socket).set_tos_v4(TOS_EF) {
             Ok(()) => true,
@@ -123,7 +123,7 @@ impl Qos {
     }
 
     /// 지금 오디오를 보내는 목적지 집합에 플로를 맞춘다(없는 것 추가, 빠진 것 제거). 바뀌면 true.
-    pub fn sync(&mut self, dests: &[SocketAddr]) -> bool {
+    pub(crate) fn sync(&mut self, dests: &[SocketAddr]) -> bool {
         let mut changed = false;
         // 빠진 목적지만 골라 지운다(매 틱 할당 없음: 대부분 틱은 바뀐 것이 없다)
         while let Some(&a) = self.flows.keys().find(|a| !dests.contains(a)) {
@@ -178,7 +178,7 @@ impl Qos {
     #[cfg(not(windows))]
     fn remove_flow(&mut self, _f: Flow) {}
 
-    pub fn stats(&self) -> QosStats {
+    pub(crate) fn stats(&self) -> QosStats {
         #[cfg(windows)]
         let (qwave, marking, flows, ef_flows, failed) = {
             let flows = self.flows.values().filter(|f| f.id.is_some()).count() as u32;
@@ -228,13 +228,13 @@ mod win {
     }
 
     /// qWAVE 핸들과 대상 소켓. 소켓은 `NetShared`가 소유하며 이 객체(제어 스레드 지역)보다 오래 산다.
-    pub struct Qwave {
+    pub(crate) struct Qwave {
         handle: HANDLE,
         socket: SOCKET,
     }
 
     impl Qwave {
-        pub fn open(socket: &UdpSocket) -> Result<Self, String> {
+        pub(crate) fn open(socket: &UdpSocket) -> Result<Self, String> {
             let ver = QOS_VERSION { MajorVersion: 1, MinorVersion: 0 };
             let mut handle: HANDLE = std::ptr::null_mut();
             // SAFETY: 유효한 버전 구조체와 출력 포인터.
@@ -244,7 +244,7 @@ mod win {
             Ok(Self { handle, socket: socket.as_raw_socket() as SOCKET })
         }
 
-        pub fn add(&self, a: SocketAddr) -> Result<u32, String> {
+        pub(crate) fn add(&self, a: SocketAddr) -> Result<u32, String> {
             let SocketAddr::V4(v4) = a else {
                 return Err("qWAVE: IPv6 목적지는 다루지 않음".into());
             };
@@ -263,7 +263,7 @@ mod win {
             Ok(id)
         }
 
-        pub fn set_dscp(&self, id: u32, dscp: u8) -> Result<(), String> {
+        pub(crate) fn set_dscp(&self, id: u32, dscp: u8) -> Result<(), String> {
             let v: u32 = dscp as u32;
             // SAFETY: 4바이트 값 포인터, 동기 호출(overlapped 없음).
             let ok = unsafe { QOSSetFlow(self.handle, id, QOSSetOutgoingDSCPValue, std::mem::size_of::<u32>() as u32, &v as *const u32 as *const _, 0, std::ptr::null_mut()) };
@@ -273,7 +273,7 @@ mod win {
             Ok(())
         }
 
-        pub fn remove(&self, id: u32) {
+        pub(crate) fn remove(&self, id: u32) {
             // SAFETY: 이 핸들로 만든 플로 id.
             unsafe { QOSRemoveSocketFromFlow(self.handle, self.socket, id, 0) };
         }

@@ -35,30 +35,30 @@ pub(super) const SCRATCH_SAMPLES: usize = 192_000 / 20 * 8;
 /// 이벤트 대기 타임아웃. 이 시간 동안 이벤트가 없으면 스트림 상태를 확인한다(L1).
 const WAIT_TIMEOUT_MS: u32 = 100;
 /// 같은 방향 연속 일시 오류가 이 횟수면 그 스트림을 재시작한다.
-pub const RESTART_AFTER: u32 = 4;
+pub(crate) const RESTART_AFTER: u32 = 4;
 /// 성공한 서비스 없이 재시작이 이 횟수 이어지면 치명.
-pub const MAX_RESTARTS: u32 = 3;
+pub(crate) const MAX_RESTARTS: u32 = 3;
 /// 연속 일시 오류(재시작 실패 포함)가 이 횟수면 치명(독점 2~3ms 주기 ≈ 0.1~0.15초).
-pub const FAIL_AFTER: u32 = 50;
+pub(crate) const FAIL_AFTER: u32 = 50;
 
 // ============================================================================
 // 한 방향 스트림
 // ============================================================================
 
 /// 열린 한 방향(캡처 또는 렌더) 스트림. 만든 스레드에서만 쓴다.
-pub struct DirStream {
+pub(crate) struct DirStream {
     client: IAudioClient,
     render: Option<IAudioRenderClient>,
     capture: Option<IAudioCaptureClient>,
     event: HANDLE,
-    pub format: StreamFormat,
-    pub mode: ShareMode,
+    pub(crate) format: StreamFormat,
+    pub(crate) mode: ShareMode,
     /// 장치 버퍼 크기(프레임).
-    pub buffer_frames: u32,
+    pub(crate) buffer_frames: u32,
     /// 이벤트 주기(프레임). 독점은 버퍼 크기와 같다.
-    pub period_frames: u32,
-    pub endpoint_id: String,
-    pub name: String,
+    pub(crate) period_frames: u32,
+    pub(crate) endpoint_id: String,
+    pub(crate) name: String,
     started: bool,
 }
 
@@ -76,7 +76,7 @@ impl Drop for DirStream {
 
 impl DirStream {
     /// 엔드포인트를 지정한 모드로 연다. `min_channels`: 필요한 최소 장치 채널 수(입력 라우팅).
-    pub fn open(en: &IMMDeviceEnumerator, is_input: bool, name: Option<&str>, mode: ShareMode, min_channels: u16) -> Result<Self, String> {
+    pub(crate) fn open(en: &IMMDeviceEnumerator, is_input: bool, name: Option<&str>, mode: ShareMode, min_channels: u16) -> Result<Self, String> {
         let dev = find_device(en, is_input, name)?;
         let endpoint_id = endpoint_id(&dev);
         let dev_name = friendly_name(&dev);
@@ -111,7 +111,7 @@ impl DirStream {
         Ok(s)
     }
 
-    pub fn period_ms(&self) -> f64 {
+    pub(crate) fn period_ms(&self) -> f64 {
         self.period_frames as f64 * 1000.0 / self.format.rate.max(1) as f64
     }
 
@@ -151,7 +151,7 @@ impl DirStream {
     }
 
     /// `GetStreamLatency`(ms). 실패하면 0.
-    pub fn stream_latency_ms(&self) -> f64 {
+    pub(crate) fn stream_latency_ms(&self) -> f64 {
         // SAFETY: 초기화된 클라이언트.
         unsafe { self.client.GetStreamLatency() }.map(|h| h as f64 / 10_000.0).unwrap_or(0.0)
     }
@@ -235,7 +235,7 @@ fn open_shared3(dev: &IMMDevice, min_channels: u16) -> Result<(IAudioClient, Str
 // ============================================================================
 
 /// 장치 버퍼 뷰. 24비트 패킹은 루프가 f32로 변환해 넘기므로 여기에 없다.
-pub enum DevBuf<'a> {
+pub(crate) enum DevBuf<'a> {
     F32(&'a mut [f32]),
     I32(&'a mut [i32]),
     I16(&'a mut [i16]),
@@ -260,7 +260,7 @@ impl DevBuf<'_> {
 
 /// 루프 종료 사유.
 #[derive(Debug)]
-pub enum LoopEnd {
+pub(crate) enum LoopEnd {
     Stopped,
     /// 장치 분리·무효화(`deviceLost`).
     DeviceLost(windows::core::Error),
@@ -270,7 +270,7 @@ pub enum LoopEnd {
 
 /// 이벤트 대기 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WaitResult {
+pub(crate) enum WaitResult {
     Timeout,
     /// 신호가 온 스트림 인덱스.
     Ready(usize),
@@ -279,7 +279,7 @@ pub enum WaitResult {
 }
 
 /// 이벤트 루프가 쓰는 장치 I/O. 실제 구현은 `WasapiIo`, 테스트는 가짜 HRESULT 시퀀스.
-pub trait LoopIo {
+pub(crate) trait LoopIo {
     fn streams(&self) -> usize;
     fn wait(&mut self, timeout_ms: u32) -> WaitResult;
     /// 신호가 온 스트림 처리(캡처: 쌓인 패킷 전부, 렌더: 한 주기).
@@ -337,7 +337,7 @@ fn on_error(io: &mut impl LoopIo, idx: usize, e: windows::core::Error, st: &mut 
 }
 
 /// 오류 정책 루프(H1). RT 경로: 할당·락·로그 없음(오류 생성 시 `windows::core::Error`만 예외).
-pub fn drive_loop(io: &mut impl LoopIo, stop: &AtomicBool, counters: &AudioCounters) -> LoopEnd {
+pub(crate) fn drive_loop(io: &mut impl LoopIo, stop: &AtomicBool, counters: &AudioCounters) -> LoopEnd {
     let n = io.streams().min(2);
     if n == 0 {
         return LoopEnd::Stopped;
@@ -439,7 +439,7 @@ impl<C: FnMut(DevBuf<'_>), R: FnMut(DevBuf<'_>) -> bool> LoopIo for WasapiIo<'_,
 
 /// 입·출력 이벤트 루프. `on_capture(buf)`, `on_render(buf) -> 무음 플래그`.
 /// RT 경로: 할당·락·로그 없음(오류는 반환값으로). `scratch`는 미리 할당한 f32 버퍼.
-pub fn run_loop(
+pub(crate) fn run_loop(
     input: Option<&DirStream>,
     output: Option<&DirStream>,
     stop: &AtomicBool,
@@ -597,9 +597,9 @@ fn fill_output(rt: &mut OutputRt, buf: DevBuf<'_>, ch: usize) {
 // ============================================================================
 
 /// 열기 실패. RT 상태를 돌려받으면 다른 백엔드로 다시 시도할 수 있다.
-pub struct OpenFailure {
-    pub message: String,
-    pub rts: Option<Box<(InputRt, OutputRt)>>,
+pub(crate) struct OpenFailure {
+    pub(crate) message: String,
+    pub(crate) rts: Option<Box<(InputRt, OutputRt)>>,
 }
 
 struct WasapiGuard {
@@ -617,7 +617,7 @@ impl Drop for WasapiGuard {
 }
 
 /// 입·출력을 각 모드로 연다. 성공하면 재생이 시작된 상태로 돌아온다.
-pub fn open_engine_streams(
+pub(crate) fn open_engine_streams(
     cfg: &EngineConfig,
     modes: (ShareMode, ShareMode),
     input: InputRt,

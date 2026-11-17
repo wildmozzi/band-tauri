@@ -27,11 +27,11 @@
 //! `왕복 = 프레임 + 망 왕복 + B 되돌리기 처리 + A 지터 버퍼(소스 링 포함)`.
 
 // 순수 계산(신호 처리·분석·판정). `loopback`·`echo`가 쓴다(형제 간선은 이 방향뿐).
-pub mod analysis;
+pub(crate) mod analysis;
 // 에코 피어: 워커가 쥐는 프로브와 측정 스레드 ↔ 워커 큐, 측정 작업. 워커는 `measure::echo::…`로 쓴다.
-pub mod echo;
+pub(crate) mod echo;
 // 하드웨어 루프백 측정 작업.
-pub mod loopback;
+pub(crate) mod loopback;
 
 pub use analysis::*;
 pub use echo::*;

@@ -5,15 +5,15 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 /// BPM 범위.
-pub const MIN_BPM: f64 = 20.0;
-pub const MAX_BPM: f64 = 300.0;
+pub(crate) const MIN_BPM: f64 = 20.0;
+pub(crate) const MAX_BPM: f64 = 300.0;
 /// 박자(마디당 박) 범위.
-pub const MAX_BEATS_PER_BAR: u32 = 16;
+pub(crate) const MAX_BEATS_PER_BAR: u32 = 16;
 /// 방장이 시작 시각을 정하지 않으면 지금 + 이만큼(µs). 다른 연주자에게 시그널링이 닿을 여유.
-pub const DEFAULT_START_LEAD_US: f64 = 300_000.0;
+pub(crate) const DEFAULT_START_LEAD_US: f64 = 300_000.0;
 /// 루프백 보정값 `offsetMs`로 받을 수 있는 범위(ms). 측정 오차로 음수가 나올 수 있다.
-pub const MIN_LOOPBACK_OFFSET_MS: f64 = -50.0;
-pub const MAX_LOOPBACK_OFFSET_MS: f64 = 200.0;
+pub(crate) const MIN_LOOPBACK_OFFSET_MS: f64 = -50.0;
+pub(crate) const MAX_LOOPBACK_OFFSET_MS: f64 = 200.0;
 /// 루프백에서 구한 숨은 출력 지연 상한(µs).
 const MAX_MEASURED_HIDDEN_OUT_US: f64 = 100_000.0;
 
@@ -53,7 +53,7 @@ impl Default for MetronomePlan {
 
 impl MetronomePlan {
     /// 검증 후 계획으로. `now_us` = 내 엔진 시계.
-    pub fn from_config(c: MetronomeConfig, now_us: f64) -> Result<Self, String> {
+    pub(crate) fn from_config(c: MetronomeConfig, now_us: f64) -> Result<Self, String> {
         if !c.bpm.is_finite() || !(MIN_BPM..=MAX_BPM).contains(&c.bpm) {
             return Err(format!("BPM은 {MIN_BPM}..{MAX_BPM}이어야 합니다"));
         }
@@ -79,34 +79,34 @@ impl MetronomePlan {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetronomeStats {
-    pub running: bool,
+    pub(crate) running: bool,
     /// 시간축이 잡혔다(방장이거나, 기준 피어와 시계 표본이 있음). false면 클릭을 내지 않는다.
     pub synced: bool,
-    pub bpm: f64,
-    pub beats_per_bar: u32,
-    pub start_us: f64,
-    pub ref_peer_id: Option<String>,
+    pub(crate) bpm: f64,
+    pub(crate) beats_per_bar: u32,
+    pub(crate) start_us: f64,
+    pub(crate) ref_peer_id: Option<String>,
     /// 기준 피어 시계 − 내 시계(ms). 방장이면 0.
     pub clock_offset_ms: Option<f64>,
     /// 시계 추정에 쓴 최소 RTT(ms).
-    pub clock_rtt_ms: Option<f64>,
+    pub(crate) clock_rtt_ms: Option<f64>,
     /// 추정 시계 드리프트(ppm).
-    pub drift_ppm: Option<f64>,
+    pub(crate) drift_ppm: Option<f64>,
     /// 마지막으로 예약한 박 번호(0부터).
-    pub beat: Option<u64>,
+    pub(crate) beat: Option<u64>,
     pub clicks: u64,
     pub late_clicks: u64,
     /// 콜백 공백 뒤 제 시각이 지나 건너뛴 클릭 수.
-    pub skipped_clicks: u64,
+    pub(crate) skipped_clicks: u64,
     /// 클릭 시각에 반영한 숨은 출력 지연(ms). 출처는 `output_latency_source`.
     /// null = 드라이버 보고도 루프백 측정도 없어 보정 안 됨(cpal WASAPI 등). UI가 "루프백 측정으로 보정"을 안내할 수 있다.
     pub output_latency_ms: Option<f64>,
     /// `output_latency_ms`의 출처(드라이버 보고 / 루프백 측정). null = 보정 안 됨.
     pub output_latency_source: Option<OutputLatencySource>,
     /// 기준 피어가 Pong에 시계를 싣지 않는 옛 엔진이다(PR #34 L4). 이 계획으로는 `synced`가 영원히 false다.
-    pub ref_clock_unsupported: bool,
+    pub(crate) ref_clock_unsupported: bool,
     /// 시계 추정 직선의 무게중심에서 지금까지의 외삽 거리(ms, PR #34 L6). 기울기 오차 × 이 거리가 오프셋 오차가 된다.
-    pub clock_extrapolation_ms: Option<f64>,
+    pub(crate) clock_extrapolation_ms: Option<f64>,
 }
 
 /// 숨은 출력 지연 보정의 출처.
@@ -140,7 +140,7 @@ pub fn measured_hidden_out_us(offset_ms: f64, hidden_in_us: Option<f64>) -> f64 
 }
 
 /// 숨은 출력 지연 선택: 드라이버 보고가 있으면 그것(직접 출력 쪽 값), 없으면 루프백 측정에서 나눈 값.
-pub fn choose_hidden_out(driver_us: Option<f64>, loopback_us: Option<f64>) -> Option<(f64, OutputLatencySource)> {
+pub(crate) fn choose_hidden_out(driver_us: Option<f64>, loopback_us: Option<f64>) -> Option<(f64, OutputLatencySource)> {
     driver_us
         .map(|h| (h, OutputLatencySource::Driver))
         .or_else(|| loopback_us.map(|h| (h, OutputLatencySource::Loopback)))

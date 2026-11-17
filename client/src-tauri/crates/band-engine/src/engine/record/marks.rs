@@ -8,7 +8,7 @@ use serde::Serialize;
 /// 녹음 마커 종류(P2-4a, `markers.json`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub enum MarkKind {
+pub(crate) enum MarkKind {
     /// 지터 버퍼 은닉(손실 PLC·FEC, 늦은 패킷 자리의 언더런 은닉). 워커가 은닉 카운터 증가분을 기록한다.
     Conceal,
     /// 버림: 지연을 줄이려 패킷 프레임을 버렸거나(`droppedFrames`), 출력 언더런 뒤 스트림을 건너뜀. 길이 없는 지점.
@@ -19,11 +19,11 @@ pub enum MarkKind {
 
 /// 워커가 녹음 쓰기 스레드에 넘기는 마커 이벤트(위치는 출력 타임라인 `out_played_frames` 기준 장치 프레임).
 #[derive(Debug, Clone, Copy)]
-pub struct MarkEvent {
-    pub ssrc: u32,
-    pub kind: MarkKind,
-    pub start: u64,
-    pub frames: u64,
+pub(crate) struct MarkEvent {
+    pub(crate) ssrc: u32,
+    pub(crate) kind: MarkKind,
+    pub(crate) start: u64,
+    pub(crate) frames: u64,
 }
 
 /// 워커 → 녹음 쓰기 스레드 마커 큐. 녹음 중에만 켜지고, 시작할 때 용량을 미리 잡는다. 워커는 `try_lock`으로
@@ -42,11 +42,11 @@ pub(super) const MARK_CAP: usize = 1024;
 impl MarkSink {
     /// 녹음 중(마커를 모으는 중)인가.
     #[inline]
-    pub fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         self.on.load(Ordering::Acquire)
     }
 
-    pub fn push(&self, e: MarkEvent) {
+    pub(crate) fn push(&self, e: MarkEvent) {
         if let Some(mut q) = self.q.try_lock() {
             if q.len() < q.capacity() {
                 q.push(e);

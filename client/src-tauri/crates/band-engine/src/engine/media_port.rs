@@ -23,11 +23,12 @@ pub fn media_port() -> (MediaPort, MediaPortRt) {
 }
 
 /// 명령 큐에 빈칸이 생기기를 기다리는 상한. 워커는 반복(≤ 약 1ms)마다 비우므로, 이만큼 차 있으면 워커가 멈춘 것이다.
-pub const MEDIA_CMD_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+pub(crate) const MEDIA_CMD_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl MediaPort {
     /// 명령 큐 생산자를 잡는다. 여러 명령을 한 번에 넣을 때는 빈칸(`vacant_len`)을 먼저 확인한다.
-    pub fn lock_cmd(&self) -> MutexGuard<'_, HeapProd<MediaCmd>> {
+    #[cfg(test)]
+    pub(crate) fn lock_cmd(&self) -> MutexGuard<'_, HeapProd<MediaCmd>> {
         self.cmd.lock()
     }
 

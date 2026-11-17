@@ -134,7 +134,7 @@ pub struct MetronomeCtl {
     plan_retries: AtomicU64,
     /// 상태 보고 칸(읽는 쪽). 작성 끝(`SeqWriter`)은 `MetronomeRt`가 갖는다.
     report: Arc<SeqCell<REPORT_WORDS>>,
-    pub click: Arc<ClickShared>,
+    pub(crate) click: Arc<ClickShared>,
     /// 이 장치 구성의 루프백 보정값 `offsetMs`의 `f64` 비트(PR #34 M2(a)). 드라이버가 출력 지연을 보고하지 않을 때 쓴다.
     loopback_offset: AtomicU64,
     /// 계획에서 내려온 옛 `ref_peer_id`: (그 문자열이 계획에서 빠진 세대, 문자열). 워커가 그 세대 이상을 적용했다고
@@ -173,7 +173,7 @@ impl MetronomeCtl {
     }
 
     /// 루프백 보정값 설정·해제. 범위 밖이면 거부한다.
-    pub fn set_loopback_offset(&self, offset_ms: Option<f64>) -> Result<(), String> {
+    pub(crate) fn set_loopback_offset(&self, offset_ms: Option<f64>) -> Result<(), String> {
         if let Some(o) = offset_ms {
             if !o.is_finite() || !(MIN_LOOPBACK_OFFSET_MS..=MAX_LOOPBACK_OFFSET_MS).contains(&o) {
                 return Err(format!("offsetMs는 {MIN_LOOPBACK_OFFSET_MS}..{MAX_LOOPBACK_OFFSET_MS}ms여야 합니다"));
@@ -183,7 +183,7 @@ impl MetronomeCtl {
         Ok(())
     }
 
-    pub fn loopback_offset_ms(&self) -> Option<f64> {
+    pub(crate) fn loopback_offset_ms(&self) -> Option<f64> {
         match self.loopback_offset.load(Ordering::Acquire) {
             NO_LOOPBACK_OFFSET => None,
             b => Some(f64::from_bits(b)),
@@ -220,7 +220,7 @@ impl MetronomeCtl {
 
     /// `EngineStats.metronome`. 수 필드는 워커가 마지막으로 **적용한** 계획과 계산값(칸 한 벌)이고, `ref_peer_id`만 제어 쪽
     /// 계획에서 읽는다 — `set_plan` 직후 워커 반복 1회(약 1ms) 동안 수 필드보다 한 발 앞설 수 있다(계약 문서 4절).
-    pub fn stats(&self) -> MetronomeStats {
+    pub(crate) fn stats(&self) -> MetronomeStats {
         let r = MetroReport::unpack(&self.report.read());
         // 락 안은 참조 수 증가 하나(할당 없음, #143 리뷰 L-4). 계약의 문자열은 락 밖에서 만든다.
         let ref_peer = self.plan.lock().1.ref_peer_id.clone();
@@ -247,14 +247,14 @@ impl MetronomeCtl {
     }
 
     /// (지금 계획 세대, 워커가 마지막 보고에 실은 적용 세대). 진단·테스트: 워커가 새 계획을 적용했는지 본다.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn plan_gens(&self) -> (u64, u64) {
+    #[cfg(test)]
+    pub(crate) fn plan_gens(&self) -> (u64, u64) {
         (self.plan_gen.load(Ordering::Acquire), MetroReport::unpack(&self.report.read()).applied_gen)
     }
 
     /// 워커가 계획 `try_lock`에 실패한 반복 수를 돌려주고 비운다(진단·테스트).
     #[cfg(any(test, feature = "test-support"))]
-    pub fn take_plan_retries(&self) -> u64 {
+    pub(crate) fn take_plan_retries(&self) -> u64 {
         self.plan_retries.swap(0, Ordering::Relaxed)
     }
 }
@@ -280,11 +280,11 @@ impl MetronomeRt {
         m.ref_peer_id.clone_from(&src.ref_peer_id); // `Arc` 참조 수(옛 값의 마지막 참조였다면 여기서 해제)
     }
 
-    pub fn loopback_offset_ms(&self) -> Option<f64> {
+    pub(crate) fn loopback_offset_ms(&self) -> Option<f64> {
         self.ctl.loopback_offset_ms()
     }
 
-    pub fn click(&self) -> &ClickShared {
+    pub(crate) fn click(&self) -> &ClickShared {
         &self.ctl.click
     }
 
@@ -316,7 +316,7 @@ pub struct OutClock {
 /// 드라이버 보고 출력 지연(장치 프레임, 0 = 모름)에서 숨은 출력 지연(µs)을 구한다.
 /// 보고값은 "콜백이 넘긴 버퍼가 들리기까지"이고 이미 버퍼 1개(콜백 크기)를 포함하므로 그만큼 뺀다.
 /// 반환: `None` = 드라이버가 알려 주지 않음(보정 0).
-pub fn hidden_out_latency_us(reported_frames: u32, burst_frames: u64, rate: f64) -> Option<f64> {
+pub(crate) fn hidden_out_latency_us(reported_frames: u32, burst_frames: u64, rate: f64) -> Option<f64> {
     if reported_frames == 0 || rate <= 0.0 {
         return None;
     }
@@ -327,12 +327,12 @@ impl OutClock {
     /// 장치 프레임 J가 귀에 닿는 시각(내 시계 µs). 콜백이 프레임 [b, b+n)을 쓰는 시각은 `m + (b+n)/r`이고
     /// (`m` = `DeviceClock`의 `벽시계 − 재생/레이트` 최솟값), 그 버퍼는 장치 출력 버퍼 1개(n)와
     /// 숨은 출력 지연(`extra_out_us`) 뒤에 울린다. 따라서 귀 시각 = `m + (J + 2n)/r + extra`.
-    pub fn ear_time_us(&self, frame: f64) -> f64 {
+    pub(crate) fn ear_time_us(&self, frame: f64) -> f64 {
         self.dev_now_us + (frame + 2.0 * self.burst as f64 - self.played as f64) * 1e6 / self.rate + self.extra_out_us
     }
 
     /// 귀 시각 `t_us`에 울릴 장치 프레임.
-    pub fn frame_for(&self, t_us: f64) -> f64 {
+    pub(crate) fn frame_for(&self, t_us: f64) -> f64 {
         (t_us - self.extra_out_us - self.dev_now_us) * self.rate / 1e6 + self.played as f64 - 2.0 * self.burst as f64
     }
 

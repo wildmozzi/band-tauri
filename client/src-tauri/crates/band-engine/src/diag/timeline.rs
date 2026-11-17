@@ -15,9 +15,9 @@ use crate::net::connlog::{ConnEvent, ConnOutcome, ConnPhase};
 use band_dsp::types::{PathKind, PeerStateKind, RelayStateKind};
 
 /// 기본 기록 간격(ms).
-pub const SAMPLE_INTERVAL_MS: u64 = 1000;
+pub(crate) const SAMPLE_INTERVAL_MS: u64 = 1000;
 /// 기본 용량: 1초 간격 60분.
-pub const DEFAULT_CAPACITY: usize = 3600;
+pub(crate) const DEFAULT_CAPACITY: usize = 3600;
 
 /// 용량이 정해진 링 버퍼. 가득 차면 가장 오래된 항목을 버린다. 순서는 넣은 순서(오래된 것 → 최신)다.
 #[derive(Debug)]
@@ -29,12 +29,12 @@ pub struct Ring<T> {
 }
 
 impl<T> Ring<T> {
-    pub fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         let cap = cap.max(1);
         Self { cap, buf: VecDeque::with_capacity(cap), dropped: 0 }
     }
 
-    pub fn push(&mut self, v: T) {
+    pub(crate) fn push(&mut self, v: T) {
         if self.buf.len() == self.cap {
             self.buf.pop_front();
             self.dropped += 1;
@@ -42,27 +42,28 @@ impl<T> Ring<T> {
         self.buf.push_back(v);
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.buf.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
         self.buf.is_empty()
     }
 
-    pub fn capacity(&self) -> usize {
+    pub(crate) fn capacity(&self) -> usize {
         self.cap
     }
 
-    pub fn dropped(&self) -> u64 {
+    pub(crate) fn dropped(&self) -> u64 {
         self.dropped
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
         self.buf.iter()
     }
 
-    pub fn last(&self) -> Option<&T> {
+    pub(crate) fn last(&self) -> Option<&T> {
         self.buf.back()
     }
 }
@@ -70,67 +71,67 @@ impl<T> Ring<T> {
 /// 피어 한 명의 통계 샘플(PeerStats에서 진단에 쓰는 값만, id는 가명).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct PeerSample {
+pub(crate) struct PeerSample {
     /// `pseudonymize(peerId)` — 같은 id는 같은 값(다른 연주자의 내보내기와 맞춰 볼 수 있다).
-    pub peer: String,
-    pub state: PeerStateKind,
-    pub path: Option<PathKind>,
-    pub rtt_ms: Option<f32>,
-    pub jitter_ms: f32,
-    pub buffer_ms: f32,
-    pub playout_ms: f32,
-    pub loss_pct: f32,
+    pub(crate) peer: String,
+    pub(crate) state: PeerStateKind,
+    pub(crate) path: Option<PathKind>,
+    pub(crate) rtt_ms: Option<f32>,
+    pub(crate) jitter_ms: f32,
+    pub(crate) buffer_ms: f32,
+    pub(crate) playout_ms: f32,
+    pub(crate) loss_pct: f32,
     /// 누적 값(차분은 분석 때 계산)
-    pub late: u64,
-    pub concealed: u64,
-    pub level: f32,
-    pub echo_active: bool,
-    pub peer_echoing: bool,
+    pub(crate) late: u64,
+    pub(crate) concealed: u64,
+    pub(crate) level: f32,
+    pub(crate) echo_active: bool,
+    pub(crate) peer_echoing: bool,
     /// 그 피어에게 보낸 내 소리의 코덱과 릴레이 자동 Opus 여부(P1-4c, 전환 시점 확인용)
-    pub tx_codec: Option<CodecKind>,
-    pub tx_codec_auto: bool,
+    pub(crate) tx_codec: Option<CodecKind>,
+    pub(crate) tx_codec_auto: bool,
     /// 자동 전환 이유와 상대가 보고한 내 소리의 수신 손실(P1-4e, 손실 피드백 전환 확인용)
-    pub tx_codec_reason: Option<CodecReason>,
-    pub remote_loss_pct: Option<f32>,
+    pub(crate) tx_codec_reason: Option<CodecReason>,
+    pub(crate) remote_loss_pct: Option<f32>,
     /// 입장 → 연결·첫 소리(ms, P1-20). 한 번 정하면 그 피어 항목 동안 그대로다.
-    pub connect_ms: Option<f32>,
-    pub first_audio_ms: Option<f32>,
+    pub(crate) connect_ms: Option<f32>,
+    pub(crate) first_audio_ms: Option<f32>,
     /// 상대가 보내는 프레임(ms)과 상대가 Ping으로 보고한 입력 버퍼(ms, 65.535 = 보고 상한 이상) — 입→귀 추정 항(P2-8b).
     /// 옛 엔진·보고 전이면 null. 에코 측정 중(`peerEchoing`) `remoteFrameMs`는 되돌아오는 내 프레임일 수 있다.
-    pub remote_frame_ms: Option<f32>,
-    pub remote_input_buffer_ms: Option<f32>,
+    pub(crate) remote_frame_ms: Option<f32>,
+    pub(crate) remote_input_buffer_ms: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct RelaySample {
-    pub state: RelayStateKind,
+pub(crate) struct RelaySample {
+    pub(crate) state: RelayStateKind,
     /// 대역만(`a.b.x.x:port`)
-    pub addr: String,
-    pub rtt_ms: Option<f32>,
-    pub tx_kbps: f32,
-    pub over_budget: bool,
-    pub auto_opus: bool,
+    pub(crate) addr: String,
+    pub(crate) rtt_ms: Option<f32>,
+    pub(crate) tx_kbps: f32,
+    pub(crate) over_budget: bool,
+    pub(crate) auto_opus: bool,
 }
 
 /// 연결 시도 → 결과 하나(P1-18, `net::connlog`). 그 이벤트가 난 뒤 첫 샘플의 `conn`에 들어간다.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ConnSample {
+pub(crate) struct ConnSample {
     /// 이벤트 시각(유닉스 ms) — 샘플의 `t`보다 최대 1초 앞선다.
-    pub t: u64,
+    pub(crate) t: u64,
     /// `pseudonymize(peerId)`(`peers[].peer`와 같은 값)
-    pub peer: String,
+    pub(crate) peer: String,
     /// `connect`(첫 시도) | `reconnect`(무수신 뒤 다시 찾음) | `switch`(연결 중 경로 종류 바뀜)
-    pub phase: ConnPhase,
+    pub(crate) phase: ConnPhase,
     /// `lan` | `public` | `relay` | `failed`
-    pub result: ConnOutcome,
+    pub(crate) result: ConnOutcome,
     /// 시도 시작 → 결과(ms). `switch`면 직전 경로에 머문 시간.
-    pub ms: u32,
+    pub(crate) ms: u32,
 }
 
 impl ConnSample {
-    pub fn from_event(e: &ConnEvent) -> Self {
+    pub(crate) fn from_event(e: &ConnEvent) -> Self {
         Self { t: e.at_ms, peer: pseudonymize(&e.peer_id), phase: e.phase, result: e.outcome, ms: e.ms }
     }
 }
@@ -140,39 +141,39 @@ impl ConnSample {
 #[serde(rename_all = "camelCase")]
 pub struct Sample {
     /// 유닉스 시각(ms, UTC)
-    pub t: u64,
-    pub running: bool,
+    pub(crate) t: u64,
+    pub(crate) running: bool,
     /// 합주(네트워크) 세션이면 true, 테스트 모드면 false. 정지 표시 샘플은 직전 세션 값을 유지한다.
-    pub network: bool,
+    pub(crate) network: bool,
     /// 엔진 세션 번호(시작마다 바뀜). 값이 바뀐 곳이 엔진 재시작 경계라, 누적 카운터(`xruns`, `late`, `concealed`)가
     /// 거기서 0부터 다시 센다. 1초 안에 재시작해 정지 표시 샘플이 없어도 경계가 보인다.
-    pub session: u64,
-    pub backend: String,
-    pub sample_rate: u32,
-    pub device_buffer: u32,
-    pub device_period_ms: f32,
-    pub est_latency_ms: f32,
-    pub monitor_latency_ms: f32,
-    pub input_level: f32,
-    pub output_level: f32,
+    pub(crate) session: u64,
+    pub(crate) backend: String,
+    pub(crate) sample_rate: u32,
+    pub(crate) device_buffer: u32,
+    pub(crate) device_period_ms: f32,
+    pub(crate) est_latency_ms: f32,
+    pub(crate) monitor_latency_ms: f32,
+    pub(crate) input_level: f32,
+    pub(crate) output_level: f32,
     /// 누적 값
-    pub xruns: u64,
-    pub stream_errors: u32,
-    pub stream_restarts: u32,
-    pub input_discontinuities: u64,
-    pub input_silent_packets: u64,
-    pub device_lost: bool,
-    pub stream_failed: bool,
-    pub peers: Vec<PeerSample>,
-    pub relay: Option<RelaySample>,
+    pub(crate) xruns: u64,
+    pub(crate) stream_errors: u32,
+    pub(crate) stream_restarts: u32,
+    pub(crate) input_discontinuities: u64,
+    pub(crate) input_silent_packets: u64,
+    pub(crate) device_lost: bool,
+    pub(crate) stream_failed: bool,
+    pub(crate) peers: Vec<PeerSample>,
+    pub(crate) relay: Option<RelaySample>,
     /// 직전 샘플 뒤로 생긴 연결 이벤트(P1-18). 없으면 줄에 넣지 않는다(기존 줄 형식 그대로).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub conn: Vec<ConnSample>,
+    pub(crate) conn: Vec<ConnSample>,
 }
 
 impl Sample {
     /// 엔진 통계에서 샘플을 만든다(피어 id·릴레이 주소 마스킹).
-    pub fn from_stats(t: u64, network: bool, session: u64, s: &EngineStats) -> Self {
+    pub(crate) fn from_stats(t: u64, network: bool, session: u64, s: &EngineStats) -> Self {
         Self {
             t,
             running: s.running,
@@ -233,13 +234,13 @@ impl Sample {
     }
 
     /// 엔진이 없어진(정지) 시점 표시용 샘플. `network`·`session`은 방금 끝난 세션 값이다.
-    pub fn stopped(t: u64, network: bool, session: u64) -> Self {
+    pub(crate) fn stopped(t: u64, network: bool, session: u64) -> Self {
         Self::from_stats(t, network, session, &EngineStats::stopped())
     }
 }
 
 /// 엔진 통계 타임라인.
-pub type Timeline = Ring<Sample>;
+pub(crate) type Timeline = Ring<Sample>;
 
 /// 타임라인을 JSONL(샘플 한 줄씩, 오래된 것부터)로.
 pub fn to_jsonl(tl: &Timeline) -> String {

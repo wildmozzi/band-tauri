@@ -84,11 +84,12 @@ const NODES: &[(&str, u8)] = &[
     ("engine::measure", 4),
     ("engine::measure::loopback", 4),
     ("engine::measure::echo", 4),
-    // 미디어 명령 큐의 제어 평면 쪽 끝(`MediaPort`: Mutex·수면·시계). 링은 `band_dsp::peer_media`가 만든다(⑩-0).
-    // 문서 7.3절 처음 안은 계층 5였으나 하네스(당시 `engine::sim`, 계층 4)가 쓰므로 4. 하네스는 ⑩-3에서 테스트 타깃(`tests/sim`)이 됐다 —
-    // 계층은 그대로 둔다(⑩-3은 위치만 옮긴다. 제품 코드에서 쓰는 곳은 `engine`(5)뿐이라 5로 올려도 되는지는 ⑨b에서 본다).
-    ("engine::media_port", 4),
     // 5 B 제어 평면
+    // 미디어 명령 큐의 제어 평면 쪽 끝(`MediaPort`: Mutex·수면·시계). 링은 `band_dsp::peer_media`가 만든다(⑩-0). ⑩-0~⑩-3에는
+    // 하네스(당시 `engine::sim`, 계층 4)가 써서 계층 4였다. 하네스가 테스트 타깃(`tests/sim`, `testing` 경유)으로 나간 뒤 제품에서
+    // 쓰는 곳은 `engine`(5)뿐이라 ⑨b-2에서 문서 7.3절 처음 안대로 5로 올렸다 — 이제 워커(4)가 부르면 계층 규칙으로 실패한다
+    // (전에는 `FORBIDDEN`의 `engine::worker → engine::media_port`가 막았다, #159 L2).
+    ("engine::media_port", 5),
     ("engine", 5),
     ("engine::cpuprof", 5),
     ("engine::report", 5),
@@ -154,9 +155,7 @@ const FORBIDDEN: &[(&str, &str, &str)] = &[
     ("net", "band_dsp::mixer", "③-b"),
     // net은 수신 큐(`band_dsp::media_link`)에 넣기만 한다. 피어 미디어 상태는 워커 소유(③-a3).
     ("net", "band_dsp::peer_media", "③-a3"),
-    // 워커는 미디어 명령 큐의 워커 쪽 끝(`band_dsp::peer_media::MediaPortRt`)만 쥔다. 제어 쪽 끝(`MediaPort`: Mutex·수면)은 계층 4지만
-    // (하네스가 쓰므로, ⑩-0) 워커 반복에서 부르면 안 된다 — `worker_dir_waits_for_no_lock`은 래퍼 안의 락을 보지 못한다(#159 L2).
-    ("engine::worker", "engine::media_port", "⑩-0"),
+    // ⑩-0~⑨b-1의 `engine::worker → engine::media_port`(#159 L2)는 ⑨b-2에서 `media_port`를 계층 5로 올려 계층 규칙이 대신한다.
 ];
 
 /// `band-dsp`로 옮기면 안 되는 노드(7.1절 표의 "아니오"와 "나눈다"의 제어 쪽). 이 크레이트의 `NODES`에 있어야 하고, 같은 이름의
@@ -1017,10 +1016,9 @@ fn dsp_excluded_nodes_stay_in_band() {
     }
 }
 
-/// ⑨b-1(6.3절): `band-dsp`의 공개 표면 = `band-dsp` 밖(이 크레이트·앱)이 쓰는 것. 항목 단위는 `band-dsp`의
-/// `#![warn(unreachable_pub)]`(CI `-D warnings`)와 컴파일러가 맡고(밖이 쓰지 않는 `pub`은 `pub(crate)` — 다시 넓히면
-/// 컴파일러는 막지 않으므로 리뷰 몫), 여기서는 그 린트가 켜져 있는지와 모듈 단위를 본다: 뿌리의 `pub mod`마다 `band-dsp` 밖
-/// 노드에서 들어오는 간선이 있다(아무도 안 쓰는 모듈은 `mod`로).
+/// ⑨b-1(6.3절): `band-dsp`의 공개 표면 = `band-dsp` 밖(이 크레이트·앱)이 쓰는 것. 여기서는 린트가 켜져 있는지와 모듈 단위를
+/// 본다: 뿌리의 `pub mod`마다 `band-dsp` 밖 노드에서 들어오는 간선이 있다(아무도 안 쓰는 모듈은 `mod`로). 항목 단위는
+/// `public_surface_is_fixed_and_used_outside`(⑨b-2, #165 리뷰 M1).
 #[test]
 fn dsp_public_surface_is_used_outside() {
     let lib = std::fs::read_to_string(dsp_src_dir().join("lib.rs")).expect("band-dsp lib.rs");
@@ -1031,6 +1029,321 @@ fn dsp_public_surface_is_used_outside() {
     let outside = |to: &str| e.keys().any(|(from, t)| !from.starts_with(DSP_ROOT) && *t == to);
     let unused: Vec<&str> = mods.iter().copied().filter(|m| !outside(&format!("{DSP_ROOT}::{m}"))).collect();
     assert!(unused.is_empty(), "band-dsp 밖이 쓰지 않는 pub mod — mod로 내릴 것: {unused:?}");
+}
+
+/// 공개 표면 목록 파일(⑨b-2). 크레이트마다 `tests/surface/<크레이트>.txt`, 한 줄에 `파일<TAB>종류<TAB>이름`.
+fn surface_file(krate: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("surface").join(format!("{krate}.txt"))
+}
+
+/// 소스 디렉터리의 `pub` 선언(정확히 `pub` — `pub(crate)`·`pub(super)`는 뺀다): (파일, 종류, 이름). 종류는 `fn`·`struct`·
+/// `enum`·`const`·`static`·`type`·`trait`·`mod`·`use`(다시 내보낸 이름, 글롭은 `경로::*`)·`field`(구조체 칸). 주석·문자열과
+/// 인라인 시험 모듈(`#[cfg(test)] mod … { }`), 파일로 뗀 시험 모듈(`tests.rs`, `tests/`)은 보지 않는다. `skip`으로 시작하는
+/// 상대 경로도 뺀다(`band-engine`의 `testing` — 그 목록은 `testing_surface_is_item_level`이 본다).
+fn public_surface(dir: &Path, skip: &[&str]) -> BTreeSet<(String, String, String)> {
+    public_surface_and_signatures(dir, skip).0
+}
+
+/// `public_surface`와, 그 `pub` 선언들의 시그니처(함수의 인자·반환·제약, 칸·상수·타입 별칭의 타입)에 나오는 식별자.
+fn public_surface_and_signatures(dir: &Path, skip: &[&str]) -> (BTreeSet<(String, String, String)>, BTreeSet<String>) {
+    let mut files = Vec::new();
+    rs_files(dir, &mut files);
+    let mut out = BTreeSet::new();
+    let mut sig = BTreeSet::new();
+    let mut add_sig = |text: &str| {
+        for w in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if !w.is_empty() {
+                sig.insert(w.to_string());
+            }
+        }
+    };
+    for f in files {
+        let rel = f.strip_prefix(dir).unwrap().display().to_string().replace('\\', "/");
+        if skip.iter().any(|s| rel.starts_with(s)) || rel.ends_with("/tests.rs") || rel.contains("/tests/") {
+            continue;
+        }
+        let code = without_inline_test_mods(&std::fs::read_to_string(&f).unwrap());
+        let mut lines = code.lines();
+        while let Some(line) = lines.next() {
+            let Some(rest) = line.trim().strip_prefix("pub ") else { continue };
+            let mut rest = rest.to_string();
+            for q in ["const fn ", "unsafe fn ", "async fn ", "unsafe impl "] {
+                if let Some(r) = rest.strip_prefix(q) {
+                    rest = format!("{}{r}", &q[q.len() - 3..]);
+                }
+            }
+            let word = |s: &str| s.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect::<String>();
+            let mut push = |kind: &str, name: String| {
+                assert!(!name.is_empty(), "{rel}: 이름 읽기 실패: {line}");
+                out.insert((rel.clone(), kind.to_string(), name));
+            };
+            if let Some(tree) = rest.strip_prefix("use ") {
+                let mut stmt = tree.to_string();
+                while !stmt.contains(';') {
+                    stmt.push(' ');
+                    stmt.push_str(lines.next().expect("use 끝"));
+                }
+                for leaf in use_leaves(stmt.split(';').next().unwrap()) {
+                    push("use", leaf);
+                }
+            } else if let Some(k) = ["fn ", "struct ", "enum ", "const ", "static ", "type ", "trait ", "mod ", "union "].iter().find(|k| rest.starts_with(**k)) {
+                let name = word(&rest[k.len()..]);
+                let after = &rest[k.len() + name.len()..];
+                if *k == "fn " {
+                    // 시그니처: 본문 `{`까지, 본문이 없으면 줄 끝 `;`까지(여러 줄). 배열 타입 `[u8; N]`의 `;`에서 끊지 않는다.
+                    let mut s = after.to_string();
+                    while !s.contains('{') && !s.trim_end().ends_with(';') {
+                        let Some(n) = lines.next() else { break };
+                        s.push(' ');
+                        s.push_str(n);
+                    }
+                    add_sig(&without_param_names(s.split('{').next().unwrap()));
+                } else if *k != "mod " {
+                    add_sig(after);
+                }
+                // 들여 쓴 `fn`은 `impl`·`trait` 안의 메서드(인라인 모듈 안 자유 함수도 여기로 — 더 느슨한 쪽).
+                let kind = if *k == "fn " && line.starts_with([' ', '\t']) { "method" } else { k.trim() };
+                push(kind, name);
+            } else if rest.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') && word(&rest).len() < rest.len() && rest[word(&rest).len()..].trim_start().starts_with(':') {
+                add_sig(&rest[word(&rest).len()..]);
+                push("field", word(&rest));
+            } else {
+                panic!("{rel}: 읽지 못한 pub 선언(파서를 고칠 것): {line}");
+            }
+        }
+    }
+    (out, sig)
+}
+
+/// `use` 나무의 잎 이름(별칭이 있으면 별칭, 글롭은 `경로::*`, `self`는 앞 마디).
+fn use_leaves(tree: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    fn go(t: &str, prefix: &str, out: &mut Vec<String>) {
+        let t = t.trim();
+        if let Some(open) = t.find('{') {
+            let head = join(prefix, t[..open].trim().trim_end_matches("::"));
+            let inner = &t[open + 1..t.rfind('}').unwrap_or(t.len())];
+            let (mut depth, mut start) = (0, 0);
+            for (i, c) in inner.char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    ',' if depth == 0 => {
+                        go(&inner[start..i], &head, out);
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            go(&inner[start..], &head, out);
+        } else if !t.is_empty() {
+            let mut it = t.split(" as ");
+            let path = join(prefix, it.next().unwrap().trim());
+            let name = match it.next() {
+                Some(a) => a.trim().to_string(),
+                None if path.ends_with("::*") => path.clone(),
+                None if path.ends_with("::self") => path.trim_end_matches("::self").rsplit("::").next().unwrap().to_string(),
+                None => path.rsplit("::").next().unwrap().to_string(),
+            };
+            out.push(name);
+        }
+    }
+    go(tree, "", &mut out);
+    out
+}
+
+/// 함수 시그니처에서 인자 이름(`이름:` — `::`가 아닌 `:` 앞 단어)을 지운다. 타입만 남겨 `sig`에 인자 이름이 섞이지 않게
+/// 한다(#169 리뷰 L2).
+fn without_param_names(sig: &str) -> String {
+    let b = sig.as_bytes();
+    let mut out = String::with_capacity(sig.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c.is_ascii_alphanumeric() || c == '_' {
+            let start = i;
+            while i < b.len() && ((b[i] as char).is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let mut j = i;
+            while j < b.len() && b[j] == b' ' {
+                j += 1;
+            }
+            let is_param = b.get(j) == Some(&b':') && b.get(j + 1) != Some(&b':') && (start == 0 || b[start - 1] != b':');
+            if !is_param {
+                out.push_str(&sig[start..i]);
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 디렉터리들의 코드(주석·문자열 제외)에서 **경로·호출로** 쓰인 식별자: `::이름`, `이름(`(메서드 호출 `.이름(`·정의 `fn 이름(`
+/// 제외), `use` 문 안의 이름. 지역 변수·인자처럼 같은 낱말이 우연히 나오는 것은 세지 않는다 — 최상위 `fn`의 "밖에서 씀"
+/// 판정에 쓴다(#169 리뷰 L2).
+fn path_or_call_identifiers(dirs: &[PathBuf], skip_file: &str) -> BTreeSet<String> {
+    let mut files = Vec::new();
+    for d in dirs {
+        rs_files(d, &mut files);
+    }
+    let mut out = BTreeSet::new();
+    for f in files.iter().filter(|f| !f.ends_with(skip_file)) {
+        let code = strip(&std::fs::read_to_string(f).unwrap());
+        let b = code.as_bytes();
+        let mut in_use = false;
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i] as char;
+            if c == ';' {
+                in_use = false;
+            }
+            if !(c.is_ascii_alphanumeric() || c == '_') {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < b.len() && ((b[i] as char).is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let w = &code[start..i];
+            if w == "use" {
+                in_use = true;
+                continue;
+            }
+            let before = code[..start].trim_end();
+            let after = code[i..].trim_start();
+            let by_path = before.ends_with("::");
+            let by_call = after.starts_with('(') && !before.ends_with('.') && !before.ends_with("fn");
+            if in_use || by_path || by_call {
+                out.insert(w.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// 디렉터리들의 코드(주석·문자열 제외)에 나오는 식별자 전부.
+fn identifiers(dirs: &[PathBuf], skip_file: &str) -> BTreeSet<String> {
+    let mut files = Vec::new();
+    for d in dirs {
+        rs_files(d, &mut files);
+    }
+    let mut out = BTreeSet::new();
+    for f in files.iter().filter(|f| !f.ends_with(skip_file)) {
+        let code = strip(&std::fs::read_to_string(f).unwrap());
+        for w in code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if !w.is_empty() {
+                out.insert(w.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// 밖에서 이름을 부르지 않고 공개 시그니처에도 나오지 않지만 `pub`이어야 하는 항목: (크레이트, 이름, 이유). 공개 시그니처
+/// (함수 인자·반환·제약, 칸·상수·별칭 타입)에 나오는 타입은 자동으로 통과한다 — 밖에서 그 값을 받거나 넘기므로 `pub(crate)`면
+/// `private_interfaces`다. 열거형 변형의 값 타입이나 `pub(crate)` 타입 별칭(별칭은 `pub`이면 `unreachable_pub`)처럼 파서가
+/// 시그니처로 읽지 않는 자리에만 나오는 것을 여기 적는다.
+const SURFACE_SIG_ONLY: &[(&str, &str, &str)] = &[
+    ("band-engine", "Ring", "`Timeline`(= `Ring<Sample>`, pub(crate) 별칭)으로 `testing::diag::timeline::to_jsonl`의 인자"),
+    ("band-engine", "AutoPayload", "`AutoFn`(pub(crate) 별칭)의 반환으로 `NetShared::send_audio_timed`(시험 훅)의 인자"),
+    // `tests/rt_alloc.rs`(#168)가 `MetroReport { applied_gen, running, ..Default::default() }`로 만든다 — 구조체 갱신 문법은 칸이
+    // 모두 보여야 한다(E0451). 아래 셋은 그 문법 때문에만 `pub`이다.
+    ("band-engine", "clock_rtt_ms", "`MetroReport` 칸 — `..Default::default()` 갱신 문법(tests/rt_alloc.rs)"),
+    ("band-engine", "clock_extrapolation_ms", "`MetroReport` 칸 — `..Default::default()` 갱신 문법(tests/rt_alloc.rs)"),
+    ("band-engine", "ref_clock_unsupported", "`MetroReport` 칸 — `..Default::default()` 갱신 문법(tests/rt_alloc.rs)"),
+];
+
+/// ⑨b-2(6.3절, #165 리뷰 M1): 두 크레이트의 공개 표면을 **항목 단위로** 고정한다.
+/// 1. 실제 `pub` 선언 집합 = `tests/surface/<크레이트>.txt`(목록에 없는 `pub`을 더하거나 목록 항목을 내리면 실패 — 목록 diff가
+///    리뷰에서 공개 표면 변화로 보인다). 다시 쓰기: `BAND_SURFACE_BLESS=1 cargo test -p band-engine --test architecture public_surface`.
+/// 2. 목록의 이름마다 크레이트 밖(`band-dsp` → `band-engine`의 src·tests·examples와 앱 src, `band-engine` → 앱 src와 이 크레이트의
+///    tests·examples)의 코드에 그 식별자가 한 번 이상 나온다(`SURFACE_SIG_ONLY` 제외). 밖에서 안 쓰는 `pub fn`을 더하면 1·2 둘 다로
+///    실패한다. 최상위 `fn`은 경로·호출로 쓰여야 한다(`path_or_call_identifiers` — 같은 낱말의 지역 변수·인자로는 통과하지 않는다,
+///    #169 리뷰 L2). 메서드·칸·타입은 이름 단위라 흔한 이름(`new`)은 2를 늘 통과한다 — 그 몫은 1(목록 diff를 리뷰가 본다)과 컴파일러다.
+/// 3. 두 크레이트 모두 `unreachable_pub`가 켜져 있다(`band-dsp`는 늘, `band-engine`은 `test-support` 구성 — `lib.rs` 주석).
+#[test]
+fn public_surface_is_fixed_and_used_outside() {
+    let engine_lib = std::fs::read_to_string(src_dir().join("lib.rs")).unwrap();
+    assert!(
+        engine_lib.lines().any(|l| l.trim() == "#![cfg_attr(feature = \"test-support\", warn(unreachable_pub))]"),
+        "band-engine lib.rs에 unreachable_pub(test-support 구성)가 없다"
+    );
+    let me = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let crates: [(&str, PathBuf, &[&str], Vec<PathBuf>); 2] = [
+        ("band-dsp", dsp_src_dir(), &[], vec![src_dir(), me.join("tests"), me.join("examples"), app_src_dir()]),
+        ("band-engine", src_dir(), &["testing"], vec![me.join("tests"), me.join("examples"), app_src_dir()]),
+    ];
+    // 값이 정확히 `1`일 때만 다시 쓴다(셸에 남은 `=0`·빈 값으로 고정이 꺼지지 않게, #169 리뷰 L1).
+    let bless = std::env::var("BAND_SURFACE_BLESS").as_deref() == Ok("1");
+    let mut problems = Vec::new();
+    for (krate, dir, skip, outside) in crates {
+        let actual = public_surface(&dir, skip);
+        let text: String = actual.iter().map(|(f, k, n)| format!("{f}\t{k}\t{n}\n")).collect();
+        let path = surface_file(krate);
+        if bless {
+            let head = format!("# {krate} 공개 표면(⑨b-2). `tests/architecture.rs`의 `public_surface_is_fixed_and_used_outside`가 만든다 — 손으로 고치지 말 것.\n");
+            let new = head + &text;
+            let old = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+            if old != new {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &new).unwrap();
+                // 다시 쓴 실행은 통과시키지 않는다 — diff를 보고 커밋한 뒤 BLESS 없이 다시 돌린다.
+                problems.push(format!("{krate}: 목록을 다시 썼다 — `git diff {}`를 확인하고 커밋할 것", path.display()));
+            }
+        }
+        let listed: BTreeSet<(String, String, String)> = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|l| {
+                let mut p = l.split('\t').map(str::to_string);
+                (p.next().unwrap(), p.next().unwrap_or_default(), p.next().unwrap_or_default())
+            })
+            .collect();
+        for e in actual.difference(&listed) {
+            problems.push(format!("{krate}: 목록에 없는 pub(새 공개 표면 — 정말 밖에서 쓰면 목록을 다시 쓸 것): {e:?}"));
+        }
+        for e in listed.difference(&actual) {
+            problems.push(format!("{krate}: 목록에만 있는 pub(좁혔으면 목록을 다시 쓸 것): {e:?}"));
+        }
+        let ids = identifiers(&outside, "architecture.rs");
+        let calls = path_or_call_identifiers(&outside, "architecture.rs");
+        let (_, sig) = public_surface_and_signatures(&dir, skip);
+        for (f, k, n) in &actual {
+            let name = n.rsplit("::").next().unwrap();
+            // 최상위 `fn`은 경로·호출로 쓰여야 한다(같은 낱말의 지역 변수·인자로는 통과하지 않는다). 메서드·칸·타입은 이름 단위.
+            let used = if k == "fn" { calls.contains(name) } else { ids.contains(name) };
+            if name == "*" || used || sig.contains(name) || SURFACE_SIG_ONLY.iter().any(|(c, s, _)| *c == krate && s == n) {
+                continue;
+            }
+            problems.push(format!("{krate}: 밖에서 이름을 부르지 않는 pub — pub(crate)로 내릴 것: {f} {k} {n}"));
+        }
+    }
+    for (c, n, _) in SURFACE_SIG_ONLY {
+        let dir = if *c == "band-dsp" { dsp_src_dir() } else { src_dir() };
+        assert!(public_surface(&dir, &["testing"]).iter().any(|(_, _, x)| x == n), "SURFACE_SIG_ONLY의 {c} {n}이 공개 표면에 없다 — 지울 것");
+    }
+    assert!(problems.is_empty(), "공개 표면 래칫:\n{}", problems.join("\n"));
+}
+
+/// 파서 변이 확인: `pub` 종류마다 읽고, `pub(crate)`·시험 모듈·주석은 뺀다.
+#[test]
+fn public_surface_scanner_catches_variants() {
+    let dir = std::env::temp_dir().join(format!("band-surface-scan-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lib.rs"),
+        "pub mod a;\npub(crate) fn hidden() {}\n// pub fn in_comment() {}\npub const fn k() {}\npub use x::{y as z, w::{self, v}, g::*};\n\
+         pub struct S {\n    pub field_a: u8,\n    pub(crate) field_b: u8,\n}\n#[cfg(test)]\nmod tests {\n    pub fn in_test() {}\n}\npub trait T {}\n",
+    )
+    .unwrap();
+    let got: Vec<String> = public_surface(&dir, &[]).into_iter().map(|(_, k, n)| format!("{k} {n}")).collect();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(got, ["field field_a", "fn k", "mod a", "struct S", "trait T", "use v", "use w", "use x::g::*", "use z"]);
 }
 
 /// ⑩-1: `band-dsp`의 외부 의존은 `DSP_EXTERN_ALLOWED`와 같다(7.2절). ⑩-0의 `dsp_planned_nodes_use_only_dsp_crates`(소스에서
@@ -1093,7 +1406,7 @@ const BACKENDS: &[Backend] = &[
         dep: "cpal",
         allow: "engine/device/cpal.rs",
         decl_file: "engine/device/mod.rs",
-        decls: &["pub mod cpal;", "pub mod select;", "pub use self::cpal as cpal_backend;", "pub use self::select as system;"],
+        decls: &["pub(crate) mod cpal;", "pub mod select;"],
         gate: "#[cfg(feature = \"backend-cpal\")]",
     },
     Backend {
@@ -1101,7 +1414,7 @@ const BACKENDS: &[Backend] = &[
         dep: "windows",
         allow: "engine/wasapi/",
         decl_file: "engine/mod.rs",
-        decls: &["pub mod wasapi;"],
+        decls: &["pub(crate) mod wasapi;"],
         gate: "#[cfg(all(windows, feature = \"backend-wasapi\"))]",
     },
 ];
@@ -2680,4 +2993,42 @@ fn tests_use_only_testing_surface() {
     // 이 파일은 검사 문자열("band_engine")을 담고 있으므로 뺀다.
     bad.retain(|loc| !loc.starts_with(&format!("tests{}architecture.rs", std::path::MAIN_SEPARATOR)));
     assert!(bad.is_empty(), "tests/·examples/에서 `band_engine::testing::` 밖의 경로를 쓴다: {bad:?}");
+}
+
+/// ⑨b-2(#156 리뷰 L3): `testing`은 **항목 단위로** 다시 내보낸다. `src/testing.rs`의 `pub use crate::…` 잎마다
+/// (1) 모듈이 아니고(`crate::engine::rt`처럼 모듈을 통째로 내보내면 그 모듈의 `pub` 전부가 시험 표면이 된다 — 하위 모듈은
+/// `pub mod rt { pub use …::{항목}; }`처럼 같은 이름의 모듈로 둔다), 글롭이 아니며, (2) 그 이름을 tests/·examples/가 부른다
+/// (안 쓰는 재노출은 지운다).
+#[test]
+fn testing_surface_is_item_level() {
+    let text = strip(&std::fs::read_to_string(src_dir().join("testing.rs")).unwrap());
+    let mut leaves = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("pub use ") {
+        let stmt = &rest[i + "pub use ".len()..];
+        let end = stmt.find(';').expect("use 끝");
+        let mut paths = Vec::new();
+        expand_use(&stmt[..end], "", &mut paths);
+        leaves.extend(paths);
+        rest = &stmt[end..];
+    }
+    assert!(leaves.len() > 40, "testing.rs 재노출 읽기: {leaves:?}");
+    let me = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ids = identifiers(&[me.join("tests"), me.join("examples")], "architecture.rs");
+    let mut bad = Vec::new();
+    for p in &leaves {
+        let segs: Vec<&str> = p.split("::").collect();
+        if segs.first() != Some(&"crate") || p.ends_with('*') {
+            bad.push(format!("{p}: crate:: 경로의 항목만(글롭 금지)"));
+            continue;
+        }
+        let rel = segs[1..].join("/");
+        if src_dir().join(format!("{rel}.rs")).exists() || src_dir().join(&rel).join("mod.rs").exists() {
+            bad.push(format!("{p}: 모듈을 통째로 내보낸다 — 항목 단위로"));
+        }
+        if !ids.contains(*segs.last().unwrap()) {
+            bad.push(format!("{p}: tests/·examples/가 쓰지 않는다 — 지울 것"));
+        }
+    }
+    assert!(bad.is_empty(), "testing 재노출:\n{}", bad.join("\n"));
 }

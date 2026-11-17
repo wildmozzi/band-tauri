@@ -37,8 +37,6 @@ pub struct Shared3Periods {
 /// 장치(엔드포인트) 정보.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
-    /// WASAPI 엔드포인트 ID.
-    pub endpoint_id: String,
     pub name: String,
     pub is_input: bool,
     pub is_default: bool,
@@ -217,7 +215,6 @@ fn describe_endpoint(dev: &IMMDevice, is_input: bool, default_id: Option<&str>) 
     let id = endpoint_id(dev);
     let mut ep = Endpoint {
         is_default: default_id == Some(id.as_str()),
-        endpoint_id: id,
         name: friendly_name(dev),
         is_input,
         mix: None,
@@ -290,7 +287,7 @@ pub fn enumerate_endpoints() -> Result<Vec<Endpoint>, String> {
 }
 
 /// 엔드포인트 → 프론트 `DeviceInfo`(공유 1개 + 독점 지원 시 독점 1개). id는 cpal과 같은 `wasapi::<이름>`.
-pub fn device_infos(eps: &[Endpoint]) -> Vec<DeviceInfo> {
+pub(crate) fn device_infos(eps: &[Endpoint]) -> Vec<DeviceInfo> {
     let mut out = Vec::new();
     for ep in eps {
         let mix_rate = ep.mix.map(|f| f.rate).unwrap_or(48_000);
@@ -336,7 +333,6 @@ mod tests {
     #[test]
     fn device_infos_list_shared_and_exclusive() {
         let ep = Endpoint {
-            endpoint_id: "{x}".into(),
             name: "Speakers".into(),
             is_input: false,
             is_default: true,

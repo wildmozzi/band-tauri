@@ -4,11 +4,11 @@
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-pub const DEFAULT_STUN_SERVERS: [&str; 2] = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
+pub(crate) const DEFAULT_STUN_SERVERS: [&str; 2] = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
 
 const MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xa4, 0x42];
 
-pub fn build_request(txn_id: &[u8; 12]) -> [u8; 20] {
+pub(crate) fn build_request(txn_id: &[u8; 12]) -> [u8; 20] {
     let mut r = [0u8; 20];
     r[0..2].copy_from_slice(&[0x00, 0x01]); // Binding Request
     r[4..8].copy_from_slice(&MAGIC_COOKIE);
@@ -17,7 +17,7 @@ pub fn build_request(txn_id: &[u8; 12]) -> [u8; 20] {
 }
 
 /// Binding Success Response에서 (XOR-)MAPPED-ADDRESS를 꺼낸다. IPv4만.
-pub fn parse_response(buf: &[u8], txn_id: &[u8; 12]) -> Option<SocketAddr> {
+pub(crate) fn parse_response(buf: &[u8], txn_id: &[u8; 12]) -> Option<SocketAddr> {
     if buf.len() < 20 || buf[0] != 0x01 || buf[1] != 0x01 {
         return None;
     }
@@ -127,35 +127,6 @@ pub fn query_many(
         }
     }
     found
-}
-
-/// 소켓으로 STUN 서버에 질의. 수신 스레드 시작 전에만 호출한다(소켓 타임아웃을 바꾼다).
-pub fn query(socket: &UdpSocket, server: &str, timeout: Duration) -> Option<SocketAddr> {
-    let server_addr = server.to_socket_addrs().ok()?.find(|a| a.is_ipv4())?;
-    let txn_id: [u8; 12] = rand::random();
-    let req = build_request(&txn_id);
-    let deadline = Instant::now() + timeout;
-    let mut buf = [0u8; 512];
-    for _attempt in 0..2 {
-        socket.send_to(&req, server_addr).ok()?;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return None;
-            }
-            socket.set_read_timeout(Some(left.min(Duration::from_millis(500)))).ok()?;
-            match socket.recv_from(&mut buf) {
-                Ok((n, _)) => {
-                    if let Some(a) = parse_response(&buf[..n], &txn_id) {
-                        return Some(a);
-                    }
-                }
-                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
-                Err(_) => continue, // Windows WSAECONNRESET 등
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

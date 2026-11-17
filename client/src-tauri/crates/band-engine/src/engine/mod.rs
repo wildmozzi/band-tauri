@@ -4,19 +4,19 @@
 //! 워커 1개, 네트워크 수신/제어 스레드, (구독 시) 믹스 탭 스레드.
 //! `Engine::stop`(또는 drop)은 모든 스레드를 멈추고 join한다.
 
-pub mod cpuprof;
+pub(crate) mod cpuprof;
 pub mod device;
-pub mod flac;
+pub(crate) mod flac;
 pub mod measure;
-pub mod media_port;
+pub(crate) mod media_port;
 pub mod metronome;
 pub mod record;
 pub mod report;
-pub mod rt;
+pub(crate) mod rt;
 #[cfg(all(windows, feature = "backend-wasapi"))]
-pub mod wasapi;
-pub mod wav;
-pub mod worker;
+pub(crate) mod wasapi;
+pub(crate) mod wav;
+pub(crate) mod worker;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -49,10 +49,10 @@ use worker::{Worker, WorkerParams, WorkerStats};
 const _: () = assert!(band_dsp::peer_media::MEDIA_RET_CAPACITY >= band_dsp::peer_media::MEDIA_CMD_CAPACITY + crate::net::MAX_PEERS + 2);
 
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
-pub type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
+pub(crate) type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
 
 /// 믹스 탭 청크 크기(프레임) = 20ms.
-pub const MIX_CHUNK_FRAMES: usize = 960;
+pub(crate) const MIX_CHUNK_FRAMES: usize = 960;
 
 struct TapThread {
     stop: Arc<AtomicBool>,
@@ -113,7 +113,7 @@ impl Engine {
     }
 
     /// `cancel`이 켜지면 단계 사이(장치 열기 후, STUN 중)에서 일찍 포기한다. 이미 연 장치는 닫고 돌아온다.
-    pub fn start_cancellable(
+    pub(crate) fn start_cancellable(
         cfg: EngineConfig,
         backend: Arc<dyn AudioBackend>,
         controls: Arc<MixControls>,
@@ -286,7 +286,7 @@ impl Engine {
         &self.cfg
     }
 
-    pub fn has_network(&self) -> bool {
+    pub(crate) fn has_network(&self) -> bool {
         self.net.is_some()
     }
 
@@ -409,7 +409,7 @@ impl Engine {
     /// 숨은 지연 보정값이 유효한 장치 구성 키(설계 1.4절). 숨은 지연(실측 − 콜백 크기)에 영향을 주는 값을 모두 넣는다:
     /// 드라이버·실제 백엔드(자체 WASAPI/cpal 폴백)·실제로 연 장치(기본 장치면 그때 고른 장치)·요청 버퍼 크기·in/out 레이트.
     /// 버퍼를 바꾸면 엔드포인트 버퍼·드라이버 여유가 달라질 수 있어 다시 재야 한다(PR #57 M1).
-    pub fn device_key(&self) -> String {
+    pub(crate) fn device_key(&self) -> String {
         let (c, i) = (&self.cfg, &self.info);
         format!(
             "{:?}|{:?}|{:?}|{:?}|{:016x}|{:016x}|{}|{}|{}",
@@ -433,7 +433,7 @@ impl Engine {
     }
 
     /// 녹음 중 피어 트랙 이름 추가(늦게 들어온 연주자, 1.5절).
-    pub fn record_set_track_names(&self, names: std::collections::HashMap<String, String>) -> Result<(), String> {
+    pub(crate) fn record_set_track_names(&self, names: std::collections::HashMap<String, String>) -> Result<(), String> {
         self.recorder.lock().set_track_names(names)
     }
 

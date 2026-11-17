@@ -179,7 +179,7 @@ fn merge_marks(acc: &MarkAcc, origin: u64, end: u64, rate: u32) -> Vec<RecordMar
 }
 
 /// 피어 ssrc → peerId.
-pub type PeerResolver = Box<dyn Fn(u32) -> Option<String> + Send>;
+pub(crate) type PeerResolver = Box<dyn Fn(u32) -> Option<String> + Send>;
 
 #[derive(Default)]
 struct WriterShared {
@@ -239,18 +239,18 @@ impl Recorder {
         Self { port, rate, session: None, marks: Arc::new(MarkSink::default()), inflight: Arc::new(InFlight::default()) }
     }
 
-    pub fn is_recording(&self) -> bool {
+    pub(crate) fn is_recording(&self) -> bool {
         self.session.is_some()
     }
 
     /// 워커가 은닉·버림 마커를 넣는 큐(P2-4a). 엔진 시작 때 워커에 넘긴다.
-    pub fn marks(&self) -> Arc<MarkSink> {
+    pub(crate) fn marks(&self) -> Arc<MarkSink> {
         self.marks.clone()
     }
 
     /// 락 밖에서 마무리 중인 정지([`StopJob`])가 모두 끝날 때까지 기다린다(최대 `timeout`). 반환: 다 끝났다.
     /// 이 함수는 `Recorder` 락을 잡은 채 부르지 말 것 — [`Recorder::waiter`]로 받은 것을 락 밖에서 부른다.
-    pub fn waiter(&self) -> impl Fn(Duration) -> bool + Send + 'static {
+    pub(crate) fn waiter(&self) -> impl Fn(Duration) -> bool + Send + 'static {
         let f = self.inflight.clone();
         move |timeout| {
             let deadline = Instant::now() + timeout;
@@ -316,7 +316,7 @@ impl Recorder {
     /// 콜백이 돌려준 녹음 끝점(링)을 거둬 해제한다.
     /// 녹음 중 피어 트랙 이름을 더한다(늦게 들어온 연주자, PR #49 M1). 앞으로 만들 트랙은 이 이름을 쓰고,
     /// 이름 없이(peerId 가명) 만든 트랙은 정지할 때 이 이름으로 파일을 바꾼다. 녹음 중이 아니면 에러.
-    pub fn set_track_names(&self, names: HashMap<String, String>) -> Result<(), String> {
+    pub(crate) fn set_track_names(&self, names: HashMap<String, String>) -> Result<(), String> {
         let s = self.session.as_ref().ok_or("녹음 중이 아닙니다")?;
         s.shared.names.lock().extend(names);
         Ok(())
@@ -333,7 +333,7 @@ impl Recorder {
         r
     }
 
-    pub fn stats(&self) -> Option<RecordStats> {
+    pub(crate) fn stats(&self) -> Option<RecordStats> {
         let s = self.session.as_ref()?;
         Some(RecordStats {
             folder: s.folder.to_string_lossy().into_owned(),

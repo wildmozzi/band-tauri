@@ -24,9 +24,9 @@ use crate::engine::device::DeviceInfo;
 use crate::engine::report::EngineSnapshot;
 
 /// 로그 전체 상한(마스킹 전 바이트). 최신 파일의 끝부분부터 채운다.
-pub const LOG_BUDGET_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const LOG_BUDGET_BYTES: usize = 2 * 1024 * 1024;
 
-pub const README_TEXT: &str = "Band 진단 자료 (P2-5)
+pub(crate) const README_TEXT: &str = "Band 진단 자료 (P2-5)
 
 이 파일은 합주 중 끊김·지연 원인을 찾기 위한 자료입니다. 개발자에게 보내 주세요.
 
@@ -57,16 +57,16 @@ pub struct AppInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OsInfo {
+pub(crate) struct OsInfo {
     /// `windows` | `macos` | `linux` …
-    pub family: String,
-    pub arch: String,
+    pub(crate) family: String,
+    pub(crate) arch: String,
     /// 예: `Microsoft Windows [Version 10.0.26100.1234]`(얻지 못하면 null)
-    pub version: Option<String>,
+    pub(crate) version: Option<String>,
 }
 
 impl OsInfo {
-    pub fn current() -> Self {
+    pub(crate) fn current() -> Self {
         Self {
             family: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
@@ -95,18 +95,18 @@ fn os_version() -> Option<String> {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TimelineInfo {
-    pub interval_ms: u64,
-    pub capacity: usize,
-    pub samples: usize,
+pub(crate) struct TimelineInfo {
+    pub(crate) interval_ms: u64,
+    pub(crate) capacity: usize,
+    pub(crate) samples: usize,
     /// 용량 초과로 버린 샘플 수
-    pub dropped: u64,
-    pub first_t: Option<u64>,
-    pub last_t: Option<u64>,
+    pub(crate) dropped: u64,
+    pub(crate) first_t: Option<u64>,
+    pub(crate) last_t: Option<u64>,
 }
 
 impl TimelineInfo {
-    pub fn of(tl: &Timeline) -> Self {
+    pub(crate) fn of(tl: &Timeline) -> Self {
         Self {
             interval_ms: SAMPLE_INTERVAL_MS,
             capacity: tl.capacity(),
@@ -120,45 +120,46 @@ impl TimelineInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Meta {
-    pub format: u32,
-    pub app: AppInfo,
-    pub os: OsInfo,
-    pub exported_at: u64,
-    pub exported_at_iso: String,
-    pub timeline: TimelineInfo,
+pub(crate) struct Meta {
+    pub(crate) format: u32,
+    pub(crate) app: AppInfo,
+    pub(crate) os: OsInfo,
+    pub(crate) exported_at: u64,
+    pub(crate) exported_at_iso: String,
+    pub(crate) timeline: TimelineInfo,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EngineInfo {
+pub(crate) struct EngineInfo {
     /// 지금 엔진이 돌고 있는지(아니면 아래 값은 마지막 세션 것)
-    pub active: bool,
+    pub(crate) active: bool,
     /// 현재 또는 마지막 세션의 엔진 설정(장치 id = 장치 이름)
-    pub config: Option<EngineConfig>,
+    pub(crate) config: Option<EngineConfig>,
     /// 마지막 통계(피어 id·릴레이 주소 마스킹)
-    pub last_stats: Option<Sample>,
-    pub devices: Vec<DeviceInfo>,
+    pub(crate) last_stats: Option<Sample>,
+    pub(crate) devices: Vec<DeviceInfo>,
     /// 장치 열거 실패 사유
-    pub devices_error: Option<String>,
+    pub(crate) devices_error: Option<String>,
 }
 
 /// zip에 들어갈 내용 전부(이미 마스킹된 값).
-pub struct Bundle {
-    pub meta: Meta,
-    pub engine: EngineInfo,
-    pub timeline_jsonl: String,
+pub(crate) struct Bundle {
+    pub(crate) meta: Meta,
+    pub(crate) engine: EngineInfo,
+    pub(crate) timeline_jsonl: String,
     /// (파일 이름, 마스킹된 내용)
-    pub logs: Vec<(String, String)>,
+    pub(crate) logs: Vec<(String, String)>,
 }
 
 impl Bundle {
-    pub fn new(meta: Meta, engine: EngineInfo, timeline: &Timeline, logs: Vec<(String, String)>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(meta: Meta, engine: EngineInfo, timeline: &Timeline, logs: Vec<(String, String)>) -> Self {
         Self { meta, engine, timeline_jsonl: to_jsonl(timeline), logs }
     }
 
     /// zip 바이트로. 항목 순서: README, meta, engine, timeline, logs.
-    pub fn to_zip(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn to_zip(&self) -> Result<Vec<u8>, String> {
         fn err(e: impl std::fmt::Display) -> String {
             format!("진단 zip 작성 실패: {e}")
         }
@@ -265,7 +266,7 @@ fn sanitize_name(name: &str) -> String {
 
 /// 로그 폴더의 `*.log`(회전된 파일 포함)를 최신 것부터 `budget` 바이트까지 끝부분만 읽어 마스킹한다.
 /// 결과는 오래된 파일 → 최신 파일 순서.
-pub fn collect_logs(dir: &Path, budget: usize) -> Vec<(String, String)> {
+pub(crate) fn collect_logs(dir: &Path, budget: usize) -> Vec<(String, String)> {
     let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut files: Vec<_> = rd
         .filter_map(|e| e.ok())
@@ -294,7 +295,7 @@ pub fn collect_logs(dir: &Path, budget: usize) -> Vec<(String, String)> {
 }
 
 /// 바이트의 끝 `max`바이트를 줄 단위로 잘라 문자열로(앞쪽 잘린 줄은 버린다). (내용, 사용한 바이트)
-pub fn tail_text(bytes: &[u8], max: usize) -> (String, usize) {
+pub(crate) fn tail_text(bytes: &[u8], max: usize) -> (String, usize) {
     if bytes.len() <= max {
         return (String::from_utf8_lossy(bytes).into_owned(), bytes.len());
     }
@@ -306,7 +307,7 @@ pub fn tail_text(bytes: &[u8], max: usize) -> (String, usize) {
 }
 
 /// 유닉스 ms → `YYYY-MM-DDTHH:MM:SS.mmmZ`.
-pub fn iso_utc(ms: u64) -> String {
+pub(crate) fn iso_utc(ms: u64) -> String {
     let secs = ms / 1000;
     let (h, mi, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
     let (y, mo, d) = civil_from_days((secs / 86_400) as i64);

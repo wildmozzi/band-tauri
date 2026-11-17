@@ -19,20 +19,20 @@ use super::{OUT_CHUNK, POLL};
 /// 출력 콜백 마감 여유(µs): 다음 콜백 예상 시각보다 이만큼 앞에서 은닉을 결정한다.
 /// 워커 폴링(0.5ms)과 Windows 기상 지연을 덮는다. 지터 목표(`ceil(p95/F)+1`프레임)의 +1프레임(≥ 2.5ms)이
 /// 이 여유보다 커서 정상 상태에서는 마감 전에 실제 패킷이 이미 와 있다(engine-notes "콜백 구동 믹스").
-pub const DEADLINE_GUARD_US: u64 = 1500;
+pub(crate) const DEADLINE_GUARD_US: u64 = 1500;
 
 
 /// `PeerFeed::service` 한 번의 결과(진단용).
 #[derive(Debug, Default, Clone, Copy)]
-pub struct FeedEvents {
+pub(crate) struct FeedEvents {
     /// 마감에 쫓겨 은닉으로 채웠다.
-    pub deadline_fill: bool,
+    pub(crate) deadline_fill: bool,
     /// 콜백이 0으로 채워 건너뛴 장치 프레임.
-    pub skipped_frames: u64,
+    pub(crate) skipped_frames: u64,
     /// 링이 다음 콜백에 모자라고 은닉 마감이 한 폴링 주기 안이다. 워커는 짧게 자서 마감을 놓치지 않는다.
-    pub urgent: bool,
+    pub(crate) urgent: bool,
     /// 이번 반복에 실제(은닉이 아닌) 오디오를 소스 링에 넣었다(P1-20 `firstAudioMs`).
-    pub real_audio: bool,
+    pub(crate) real_audio: bool,
 }
 
 /// 피어 하나의 출력 소스: 소스 링 슬롯 + 48k → 장치 레이트 리샘플러.
@@ -52,7 +52,7 @@ pub struct FeedEvents {
 ///    상한은 `min(다음 콜백 소비량, (F + 2ms)/2 × 프로필 배율)`이라 목표 추가분 2·여유가 1프레임 + 2ms를 넘지 않는다
 ///    (P1-5, PR #16 M3: 이전 상한은 콜백 소비량이라 10ms 버퍼에서 +19.6ms). 마지막 언더런 뒤 `MARGIN_HOLD_US` × 배율
 ///    동안 유지하고, 그 뒤 `MARGIN_STEP_US`마다 청크씩 줄인다(이전: 10초마다 청크 → 480프레임이면 75초).
-pub struct PeerFeed {
+pub(crate) struct PeerFeed {
     pub(super) slot: usize,
     rs: StreamResampler,
     seen_underrun: u64,
@@ -72,7 +72,7 @@ const MARGIN_STEP_US: u64 = 2_000_000;
 impl PeerFeed {
     /// `rs` = 48k → 장치 레이트 스테레오 리샘플러. 제어 평면이 만들어 `PeerMedia`에 실어 보낸 것을 받는다 — 여기(워커의 슬롯
     /// 배정)서는 할당하지 않는다(엔진 ⑧ 후속).
-    pub fn new(slot: usize, rs: StreamResampler, shared: &SourceShared) -> Self {
+    pub(crate) fn new(slot: usize, rs: StreamResampler, shared: &SourceShared) -> Self {
         Self { slot, rs, seen_underrun: shared.underrun_frames.load(Ordering::Relaxed), margin: 0, margin_at_us: 0, margin_step_us: 0 }
     }
 
@@ -98,12 +98,9 @@ impl PeerFeed {
     }
 
     /// 현재 적응 여유(장치 프레임, 진단·테스트용).
-    pub fn margin(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn margin(&self) -> usize {
         self.margin
-    }
-
-    pub fn slot(&self) -> usize {
-        self.slot
     }
 
     /// 링 + 리샘플러 출력에 있는 장치 프레임.
@@ -142,7 +139,7 @@ impl PeerFeed {
     /// 확인한다. 돌았다면(링은 이미 비었는데 마감 시각은 이전 콜백 기준) 깊이 측정과 마감 판단을 이번
     /// 반복에서 하지 않는다. 이 검사가 없으면 한 주기 이르게 은닉했다(위상에 따라 수 초에 수 회).
     #[allow(clippy::too_many_arguments)]
-    pub fn service(
+    pub(crate) fn service(
         &mut self,
         jb: &mut JitterBuffer,
         prod: &mut HeapProd<f32>,

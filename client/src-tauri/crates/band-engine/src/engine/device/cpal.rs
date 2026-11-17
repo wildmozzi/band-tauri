@@ -25,7 +25,7 @@ static ASIO_CACHE: Mutex<Vec<DeviceInfo>> = Mutex::new(Vec::new());
 
 const PROBE_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
 
-pub struct CpalBackend;
+pub(crate) struct CpalBackend;
 
 struct Streams {
     _input: cpal::Stream,

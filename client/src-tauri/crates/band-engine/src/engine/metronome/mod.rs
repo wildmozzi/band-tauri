@@ -9,14 +9,18 @@
 //! - 클릭은 장치 출력에만 섞는다. 믹스 탭(관람 방송·녹음)과 측정 자극에는 들어가지 않는다.
 
 // RT 클릭(출력 콜백) — `rt.rs`가 이 노드만 쓴다.
-pub mod click;
+pub(crate) mod click;
 // 계약 DTO·검증 — 보고(`engine::report`)·어댑터가 이 노드만 쓴다.
 pub mod plan;
-pub mod sched;
+pub(crate) mod sched;
 
-pub use click::{click_wave, ClickRt, ClickShared, CLICK_LEN, NO_CLICK};
-pub use plan::{
-    choose_hidden_out, measured_hidden_out_us, MetronomeConfig, MetronomePlan, MetronomeStats, OutputLatencySource, DEFAULT_START_LEAD_US,
-    MAX_BEATS_PER_BAR, MAX_BPM, MAX_LOOPBACK_OFFSET_MS, MIN_BPM, MIN_LOOPBACK_OFFSET_MS,
-};
-pub use sched::{hidden_out_latency_us, BeatScheduler, MetroReport, MetronomeCtl, MetronomeRt, OutClock};
+pub use click::{ClickRt, ClickShared};
+pub(crate) use plan::{choose_hidden_out, MAX_LOOPBACK_OFFSET_MS, MIN_LOOPBACK_OFFSET_MS};
+pub use plan::{MetronomePlan, OutputLatencySource};
+pub use plan::MetronomeConfig;
+pub use plan::measured_hidden_out_us;
+pub(crate) use sched::{hidden_out_latency_us, MetronomeRt};
+pub use sched::MetronomeCtl;
+pub use sched::MetroReport;
+pub use sched::OutClock;
+pub use sched::BeatScheduler;

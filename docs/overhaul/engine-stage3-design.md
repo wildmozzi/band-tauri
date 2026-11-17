@@ -223,7 +223,7 @@ pub struct Peer {
 
 - SPSC에서 생산자는 오래된 것을 꺼낼 수 없다(꺼내면 소비자와 경쟁). 그래서 "오래된 것을 버린다"는 선택지는 락이나 MPMC가 필요하다 — 채택하지 않는다.
 - 결과: 워커가 100ms 넘게 멈췄다 돌아오면 가장 오래된 128개를 받는다. 대부분 재생 시각이 지나 지터 버퍼가 패킷 단위로 버리고(`dropped_frames`), 버려진 뒤쪽은 seq 구멍 → 손실 은닉으로 처리된다. 지금(무제한 삽입, 슬롯 1024개)보다 회복 직후 은닉이 조금 많을 수 있지만 이 상황은 이미 100ms 넘는 소리 공백이다. RT 입력 링이 넘칠 때 버리고 세는 것과 같은 규칙이다.
-- `dropped`는 `MediaStats.rx_dropped`로 `peer_jitter_stats()`에 실린다(진단·테스트). Tauri `PeerStats` 계약에는 넣지 않는다(계약 불변). 버려진 패킷은 `lossPct`·`concealPct`에 손실로 이미 드러난다.
+- `dropped`는 `MediaStats.rx_dropped`로 `peer_jitter_stats()`에 실린다(진단·테스트). *(⑨b-2에서 바뀜: 밖에서 읽는 곳이 없어 발행 칸 `MediaStats.rx_dropped`를 지웠다. 하네스·시험은 `PeerMedia::rx_dropped`(`test-support`)로 본다. `MediaRx`의 계수는 그대로다.)* Tauri `PeerStats` 계약에는 넣지 않는다(계약 불변). 버려진 패킷은 `lossPct`·`concealPct`에 손실로 이미 드러난다.
 
 ### 2.3 push
 
@@ -302,11 +302,11 @@ for media in 워커의 미디어 표:
 pub struct MediaStats {
     pub playing: bool,
     pub js: JitterStats,        // jitter.rs:281-323의 25필드 그대로(값 타입, 변경 없음)
-    pub rx_dropped: u64,        // 수신 큐 넘침(2.2절)
+    pub rx_dropped: u64,        // 수신 큐 넘침(2.2절) — ⑨b-2에서 삭제(위 2.2절 주석)
 }
 ```
 
-`MediaStatsCell`은 **seqlock**이다: 버전 `AtomicU32` 하나 + 칸 26개의 `AtomicU64` 배열(`JitterStats` 24필드 + `playing` + `rx_dropped`. `f32`는 비트를, `i64`는 `as u64`를, `bool`은 0/1을 넣는다 — 같은 타입 배열이라 `pack`/`unpack` 두 함수로 끝난다. ③-a1 구현).
+`MediaStatsCell`은 **seqlock**이다: 버전 `AtomicU32` 하나 + 칸 26개의 `AtomicU64` 배열(`JitterStats` 24필드 + `playing` + `rx_dropped`(⑨b-2에서 `rx_dropped`를 지우고 `first_audio_us`(P1-20)를 더해 지금은 26칸 = 24 + `playing` + `first_audio_us`). `f32`는 비트를, `i64`는 `as u64`를, `bool`은 0/1을 넣는다 — 같은 타입 배열이라 `pack`/`unpack` 두 함수로 끝난다. ③-a1 구현).
 
 ```text
 쓰기(워커만):  v = ver(Relaxed); ver = v+1 (홀수, Relaxed); fence(Release); 칸 26개 store(Relaxed); ver = v+2 (짝수, Release)

@@ -5,8 +5,8 @@
 //! `diag`는 `manager`를 모른다(엔진 ⑤). 입력 타입은 `engine::report::EngineSnapshot`. RT 콜백(`engine/rt.rs`)에는 아무것도 추가하지 않는다.
 
 pub mod export;
-pub mod mask;
-pub mod timeline;
+pub(crate) mod mask;
+pub(crate) mod timeline;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -125,7 +125,7 @@ impl Diagnostics {
 
     /// 정지한 엔진의 마지막 연결 이벤트(정지 때 `aborted` 포함, #145 M-1). 아직 기록하지 않은 것만 다음 샘플
     /// (보통 정지 표시 샘플)에 붙인다.
-    pub fn record_ended(&self, ended: Vec<EndedConn>) {
+    pub(crate) fn record_ended(&self, ended: Vec<EndedConn>) {
         let mut g = self.inner.lock();
         for e in ended {
             let fresh = g.take_new_conn(e.session, &e.events);

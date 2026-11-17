@@ -27,14 +27,14 @@ pub enum RecordFormat {
 
 impl RecordFormat {
     /// 트랙 파일 확장자.
-    pub fn extension(self) -> &'static str {
+    pub(crate) fn extension(self) -> &'static str {
         match self {
             RecordFormat::Flac => "flac",
             RecordFormat::Wav24 | RecordFormat::WavF32 => "wav",
         }
     }
 
-    pub fn bytes_per_sample(self) -> u16 {
+    pub(crate) fn bytes_per_sample(self) -> u16 {
         match self {
             RecordFormat::Wav24 | RecordFormat::Flac => 3,
             RecordFormat::WavF32 => 4,
@@ -50,7 +50,7 @@ const FMT_EXT_LEN: u32 = 40;
 const SUBTYPE_TAIL: [u8; 12] = [0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71];
 
 /// 채널 수의 기본 스피커 배치(`dwChannelMask`). 모노 = 가운데(FC), 스테레오 = FL|FR, 그 이상은 표준 순서 앞에서부터.
-pub fn channel_mask(channels: u16) -> u32 {
+pub(crate) fn channel_mask(channels: u16) -> u32 {
     match channels {
         1 => 0x4,
         2..=18 => (1u32 << channels) - 1,
@@ -64,7 +64,7 @@ pub fn channel_mask(channels: u16) -> u32 {
 /// fmt는 늘 `WAVE_FORMAT_EXTENSIBLE`(0xFFFE, 40바이트)이다(PR #47 L3): MS 규격이 16비트 초과·float·3채널 이상에
 /// 권장하고, 일부 구형 리더·하드웨어 레코더는 24비트 `WAVE_FORMAT_PCM`을 거부한다. float는 비PCM이라 `fact`도 둔다.
 /// 배치: `RIFF|RF64` 12 + `JUNK|ds64` 36 + `fmt ` 48 + (float면 `fact` 12) + `data` 8 = 24비트 104, float 116바이트.
-pub fn header_bytes(fmt: RecordFormat, channels: u16, rate: u32, data_bytes: u64) -> Vec<u8> {
+pub(crate) fn header_bytes(fmt: RecordFormat, channels: u16, rate: u32, data_bytes: u64) -> Vec<u8> {
     let bps = fmt.bytes_per_sample();
     let block_align = channels * bps;
     let float = fmt == RecordFormat::WavF32;
@@ -113,7 +113,7 @@ pub fn header_bytes(fmt: RecordFormat, channels: u16, rate: u32, data_bytes: u64
 }
 
 /// 인터리브 f32(채널 수 자유)를 받아 WAV로 쓴다. `F`는 테스트에서 실패 주입용으로 바꾼다.
-pub struct WavWriter<F: Write + Seek = File> {
+pub(crate) struct WavWriter<F: Write + Seek = File> {
     f: BufWriter<F>,
     fmt: RecordFormat,
     channels: u16,
@@ -125,12 +125,12 @@ pub struct WavWriter<F: Write + Seek = File> {
 }
 
 impl WavWriter<File> {
-    pub fn create(path: &Path, fmt: RecordFormat, channels: u16, rate: u32) -> std::io::Result<Self> {
+    pub(crate) fn create(path: &Path, fmt: RecordFormat, channels: u16, rate: u32) -> std::io::Result<Self> {
         Self::new(File::create(path)?, fmt, channels, rate)
     }
 
     /// 헤더 크기를 확정하고 디스크에 내린다. 실패하면(디스크 가득 등) [`Self::finish_best_effort`]로 닫고 그 오류를 돌려준다.
-    pub fn finish(mut self) -> std::io::Result<u64> {
+    pub(crate) fn finish(mut self) -> std::io::Result<u64> {
         if let Err(e) = self.write_header().and_then(|_| self.f.flush()) {
             self.finish_best_effort();
             return Err(e);
@@ -141,7 +141,7 @@ impl WavWriter<File> {
 
     /// 쓰기 실패 뒤 마무리: 버퍼에 남은(못 쓴) 데이터는 버리고, 디스크에 실제로 있는 프레임 수로 헤더를 고친 뒤
     /// 파일을 거기까지 자른다. 헤더 덮어쓰기는 새 공간이 필요 없어 디스크가 가득 차도 된다. 반환: 파일 크기.
-    pub fn finish_best_effort(self) -> u64 {
+    pub(crate) fn finish_best_effort(self) -> u64 {
         let (file, total) = self.close_lossy();
         if file.set_len(total).is_err() {
             log::warn!("녹음 파일 자르기 실패(헤더는 갱신됨)");
@@ -152,7 +152,7 @@ impl WavWriter<File> {
 }
 
 impl<F: Write + Seek> WavWriter<F> {
-    pub fn new(inner: F, fmt: RecordFormat, channels: u16, rate: u32) -> std::io::Result<Self> {
+    pub(crate) fn new(inner: F, fmt: RecordFormat, channels: u16, rate: u32) -> std::io::Result<Self> {
         let mut f = BufWriter::with_capacity(1 << 20, inner);
         let h = header_bytes(fmt, channels, rate, 0);
         f.write_all(&h)?;
@@ -160,16 +160,17 @@ impl<F: Write + Seek> WavWriter<F> {
     }
 
     /// 쓴 오디오 바이트(헤더 제외).
-    pub fn data_bytes(&self) -> u64 {
+    pub(crate) fn data_bytes(&self) -> u64 {
         self.data_bytes
     }
 
-    pub fn frames(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn frames(&self) -> u64 {
         self.data_bytes / (self.channels * self.fmt.bytes_per_sample()) as u64
     }
 
     /// 인터리브 샘플을 쓴다(길이는 채널 수의 배수).
-    pub fn write(&mut self, samples: &[f32]) -> std::io::Result<()> {
+    pub(crate) fn write(&mut self, samples: &[f32]) -> std::io::Result<()> {
         self.buf.clear();
         match self.fmt {
             // Flac은 `flac.rs`가 쓴다(여기 오면 24비트 PCM으로).
@@ -198,7 +199,7 @@ impl<F: Write + Seek> WavWriter<F> {
     }
 
     /// 무음 `frames`프레임을 쓴다.
-    pub fn write_silence(&mut self, mut frames: u64) -> std::io::Result<()> {
+    pub(crate) fn write_silence(&mut self, mut frames: u64) -> std::io::Result<()> {
         const Z: [f32; 4096] = [0.0; 4096];
         let ch = self.channels as u64;
         let step = Z.len() as u64 / ch;

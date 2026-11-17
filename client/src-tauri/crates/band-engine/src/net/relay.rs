@@ -25,43 +25,43 @@ use sha2::Sha256;
 use band_dsp::packet::{MAGIC, VERSION};
 use band_dsp::types::{RelayStateKind, RelayStats, BUDGET_CLEAR, BUDGET_WARN, RELAY_BUDGET_BPS, RELAY_BUDGET_PPS};
 
-pub const TYPE_RELAY_BIND: u8 = 7;
+pub(crate) const TYPE_RELAY_BIND: u8 = 7;
 pub const TYPE_RELAY_DATA: u8 = 8;
-pub const TYPE_RELAY_BIND_ACK: u8 = 9;
-pub const BIND_HEADER_BYTES: usize = 18;
-pub const COOKIE_BYTES: usize = 16;
+pub(crate) const TYPE_RELAY_BIND_ACK: u8 = 9;
+pub(crate) const BIND_HEADER_BYTES: usize = 18;
+pub(crate) const COOKIE_BYTES: usize = 16;
 /// RelayBind flags bit0: 끝에 Bind MAC 16B (relay-design 2.1.1)
-pub const BIND_FLAG_MAC: u8 = 0x01;
-pub const BIND_MAC_BYTES: usize = 16;
-pub const BIND_KEY_BYTES: usize = 32;
-pub const ACK_BYTES: usize = 50;
-pub const TOKEN_MIN_BYTES: usize = 49;
-pub const TOKEN_MAX_BYTES: usize = 257;
+pub(crate) const BIND_FLAG_MAC: u8 = 0x01;
+pub(crate) const BIND_MAC_BYTES: usize = 16;
+pub(crate) const BIND_KEY_BYTES: usize = 32;
+pub(crate) const ACK_BYTES: usize = 50;
+pub(crate) const TOKEN_MIN_BYTES: usize = 49;
+pub(crate) const TOKEN_MAX_BYTES: usize = 257;
 const TOKEN_MAC_BYTES: usize = 32;
 /// RelayBind 최대 길이(헤더 + 최대 토큰 + 쿠키 + MAC).
-pub const BIND_MAX_BYTES: usize = BIND_HEADER_BYTES + TOKEN_MAX_BYTES + COOKIE_BYTES + BIND_MAC_BYTES;
+pub(crate) const BIND_MAX_BYTES: usize = BIND_HEADER_BYTES + TOKEN_MAX_BYTES + COOKIE_BYTES + BIND_MAC_BYTES;
 
 /// 등록 후 keepalive 간격(계약 2.1).
-pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+pub(crate) const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// 릴레이 경로 피어가 조용할 때 당겨 보내는 keepalive 간격.
-pub const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const PROBE_INTERVAL: Duration = Duration::from_secs(1);
 /// 미등록(Binding/Unreachable) 상태의 재시도 간격.
-pub const BIND_RETRY: Duration = Duration::from_millis(500);
+pub(crate) const BIND_RETRY: Duration = Duration::from_millis(500);
 /// 거절(RoomFull 등) 뒤 재시도 간격.
-pub const REJECT_RETRY: Duration = Duration::from_secs(5);
+pub(crate) const REJECT_RETRY: Duration = Duration::from_secs(5);
 /// CookieRequired에 대한 즉시 재전송 최소 간격(응답 폭주 방지).
-pub const COOKIE_RESEND_MIN: Duration = Duration::from_millis(100);
+pub(crate) const COOKIE_RESEND_MIN: Duration = Duration::from_millis(100);
 /// 연속 무응답 Bind가 이만큼이면 `Unreachable`.
-pub const UNREACHABLE_AFTER: u32 = 3;
+pub(crate) const UNREACHABLE_AFTER: u32 = 3;
 
 /// 검증된 릴레이 토큰(서명은 확인할 수 없다 — 구조, ssrc, 만료만 본다).
 #[derive(Clone, PartialEq, Eq)]
-pub struct RelayToken {
-    pub bytes: Vec<u8>,
-    pub expires_at: u64,
-    pub ssrc: u32,
+pub(crate) struct RelayToken {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) expires_at: u64,
+    pub(crate) ssrc: u32,
     /// 이 토큰의 Bind MAC 키(서버 `relay-token.bindKey`, 2.1.1). None이면 MAC 없이 Bind.
-    pub bind_key: Option<[u8; BIND_KEY_BYTES]>,
+    pub(crate) bind_key: Option<[u8; BIND_KEY_BYTES]>,
 }
 
 /// `{:?}`로 찍혀도 bindKey(비밀)와 토큰 바이트가 로그·진단에 들어가지 않게 가린다(PR #40 리뷰 L1).
@@ -79,14 +79,14 @@ impl std::fmt::Debug for RelayToken {
 
 impl RelayToken {
     /// base64url(패딩 유무 무관) 토큰을 해석한다. 토큰의 ssrc는 이 엔진의 ssrc와 같아야 한다.
-    pub fn parse(b64: &str, my_ssrc: u32) -> Result<Self, String> {
+    pub(crate) fn parse(b64: &str, my_ssrc: u32) -> Result<Self, String> {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(b64.trim().trim_end_matches('='))
             .map_err(|e| format!("릴레이 토큰 base64 오류: {e}"))?;
         Self::from_bytes(bytes, my_ssrc)
     }
 
-    pub fn from_bytes(bytes: Vec<u8>, my_ssrc: u32) -> Result<Self, String> {
+    pub(crate) fn from_bytes(bytes: Vec<u8>, my_ssrc: u32) -> Result<Self, String> {
         let len = bytes.len();
         if !(TOKEN_MIN_BYTES..=TOKEN_MAX_BYTES).contains(&len) || bytes[0] != 1 {
             return Err("릴레이 토큰 형식 오류".into());
@@ -110,7 +110,7 @@ impl RelayToken {
 }
 
 /// 서버가 준 Bind MAC 키(base64url, 패딩 유무 무관, 32바이트).
-pub fn parse_bind_key(b64: &str) -> Result<[u8; BIND_KEY_BYTES], String> {
+pub(crate) fn parse_bind_key(b64: &str) -> Result<[u8; BIND_KEY_BYTES], String> {
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(b64.trim().trim_end_matches('='))
         .map_err(|e| format!("릴레이 bindKey base64 오류: {e}"))?;
@@ -130,7 +130,7 @@ fn bind_mac(key: &[u8; BIND_KEY_BYTES], msg: &[u8]) -> [u8; BIND_MAC_BYTES] {
 /// 토큰 만료 시각(단조 시계). 서버가 준 남은 수명(`expires_in`, 발급 시각 기준)이 있으면 받은 시각 + 그 값을 쓴다
 /// (클라이언트 시계 오차와 무관, M1). 없으면(옛 서버) 로컬 시계로 계산하되, 로컬 시계로 이미 만료면 None —
 /// 시계가 빠른 PC에서 멀쩡한 토큰을 버리지 않고 판정을 릴레이에 맡긴다.
-pub fn token_deadline(token: &RelayToken, expires_in: Option<Duration>, now: Instant, now_unix: u64) -> Option<Instant> {
+pub(crate) fn token_deadline(token: &RelayToken, expires_in: Option<Duration>, now: Instant, now_unix: u64) -> Option<Instant> {
     match expires_in {
         Some(d) => Some(now + d),
         None => token.expires_at.checked_sub(now_unix).filter(|s| *s > 0).map(|s| now + Duration::from_secs(s)),
@@ -138,7 +138,7 @@ pub fn token_deadline(token: &RelayToken, expires_in: Option<Duration>, now: Ins
 }
 
 /// 릴레이 주소 검증: IPv4(소켓이 IPv4), 0.0.0.0/멀티캐스트/브로드캐스트/포트 0 거부, 루프백은 테스트 옵션에서만.
-pub fn validate_relay_addr(addr: &SocketAddr, allow_loopback: bool) -> Result<(), String> {
+pub(crate) fn validate_relay_addr(addr: &SocketAddr, allow_loopback: bool) -> Result<(), String> {
     match addr.ip() {
         IpAddr::V4(v4) if addr.port() != 0 && !v4.is_unspecified() && !v4.is_multicast() && !v4.is_broadcast() => {
             if v4.is_loopback() && !allow_loopback {
@@ -152,37 +152,37 @@ pub fn validate_relay_addr(addr: &SocketAddr, allow_loopback: bool) -> Result<()
 
 /// Ack 처리 결과.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AckAction {
+pub(crate) enum AckAction {
     None,
     /// 쿠키를 붙여 즉시 다시 Bind.
     SendBind,
 }
 
 #[derive(Debug, Clone)]
-pub struct RelayClient {
+pub(crate) struct RelayClient {
     /// 프론트가 준 `host:port` 문자열(같은 문자열이면 DNS를 다시 풀지 않는다, M3).
-    pub host: String,
-    pub addr: SocketAddr,
+    pub(crate) host: String,
+    pub(crate) addr: SocketAddr,
     token: RelayToken,
     /// 토큰 만료 시각(단조 시계 — 받은 시각 + 남은 수명). None이면 만료 판정을 릴레이에 맡긴다.
     deadline: Option<Instant>,
     cookie: Option<[u8; COOKIE_BYTES]>,
-    pub state: RelayStateKind,
+    pub(crate) state: RelayStateKind,
     /// 마지막 거절 상태 코드(1=RoomFull 2=SsrcConflict 4=ServerFull).
-    pub reject: Option<u8>,
+    pub(crate) reject: Option<u8>,
     last_bind: Option<Instant>,
     /// 마지막 Bind 이후 받은 Ack 없이 보낸 Bind 수.
     unacked: u32,
     seq: u32,
-    pub rtt_ms: Option<f32>,
+    pub(crate) rtt_ms: Option<f32>,
     /// 릴레이가 관측한 내 출발 주소(STUN 보조 정보).
-    pub observed: Option<SocketAddr>,
+    pub(crate) observed: Option<SocketAddr>,
     tx_kbps: f32,
     over_budget: bool,
 }
 
 impl RelayClient {
-    pub fn new(host: String, addr: SocketAddr, token: RelayToken, deadline: Option<Instant>) -> Self {
+    pub(crate) fn new(host: String, addr: SocketAddr, token: RelayToken, deadline: Option<Instant>) -> Self {
         Self {
             host,
             addr,
@@ -201,12 +201,8 @@ impl RelayClient {
         }
     }
 
-    pub fn token(&self) -> &RelayToken {
-        &self.token
-    }
-
     /// 새 토큰(갱신). 같은 주소면 등록을 유지한 채 다음 Bind에서 교체되고, 만료/거절 상태였으면 다시 등록한다.
-    pub fn set_token(&mut self, token: RelayToken, deadline: Option<Instant>) {
+    pub(crate) fn set_token(&mut self, token: RelayToken, deadline: Option<Instant>) {
         self.token = token;
         self.deadline = deadline;
         self.last_bind = None; // 즉시 Bind
@@ -216,16 +212,16 @@ impl RelayClient {
         }
     }
 
-    pub fn ready(&self) -> bool {
+    pub(crate) fn ready(&self) -> bool {
         self.state == RelayStateKind::Bound
     }
 
     /// 측정 송신량이 상한의 90%를 넘음(`stats()`와 달리 할당 없이 — 워커 루프가 200ms마다 읽는다).
-    pub fn over_budget(&self) -> bool {
+    pub(crate) fn over_budget(&self) -> bool {
         self.over_budget
     }
 
-    pub fn stats(&self) -> RelayStats {
+    pub(crate) fn stats(&self) -> RelayStats {
         RelayStats {
             state: self.state,
             addr: self.addr.to_string(),
@@ -237,7 +233,7 @@ impl RelayClient {
     }
 
     /// 최근 `elapsed` 동안 릴레이로 보낸 바이트·패킷 수를 반영한다(제어 스레드가 약 1초마다).
-    pub fn record_tx(&mut self, bytes: u64, packets: u64, elapsed: Duration) {
+    pub(crate) fn record_tx(&mut self, bytes: u64, packets: u64, elapsed: Duration) {
         let secs = elapsed.as_secs_f32();
         if secs <= 0.0 {
             return;
@@ -254,7 +250,7 @@ impl RelayClient {
     }
 
     /// 제어 틱. Bind를 보내야 하면 true. `probe`=릴레이 경로 피어가 조용함(빨리 확인).
-    pub fn tick(&mut self, now: Instant, probe: bool) -> bool {
+    pub(crate) fn tick(&mut self, now: Instant, probe: bool) -> bool {
         if self.deadline.is_some_and(|d| now >= d) {
             self.state = RelayStateKind::Expired;
             return false;
@@ -274,7 +270,7 @@ impl RelayClient {
     }
 
     /// RelayBind를 `out`에 쓰고 길이를 돌려준다. `timestamp`는 Ack에 에코되어 RTT 측정에 쓰인다.
-    pub fn write_bind(&mut self, now: Instant, my_ssrc: u32, timestamp: u32, out: &mut [u8; BIND_MAX_BYTES]) -> usize {
+    pub(crate) fn write_bind(&mut self, now: Instant, my_ssrc: u32, timestamp: u32, out: &mut [u8; BIND_MAX_BYTES]) -> usize {
         self.seq = self.seq.wrapping_add(1);
         self.last_bind = Some(now);
         self.unacked = self.unacked.saturating_add(1);
@@ -304,7 +300,7 @@ impl RelayClient {
     }
 
     /// RelayBindAck 처리. 호출자는 출발 주소가 `self.addr`인지 먼저 확인한다.
-    pub fn on_ack(&mut self, buf: &[u8], my_ssrc: u32, now: Instant, now_us32: u32) -> AckAction {
+    pub(crate) fn on_ack(&mut self, buf: &[u8], my_ssrc: u32, now: Instant, now_us32: u32) -> AckAction {
         if buf.len() != ACK_BYTES || buf[0..2] != MAGIC || buf[2] != VERSION || buf[3] != TYPE_RELAY_BIND_ACK {
             return AckAction::None;
         }
@@ -363,7 +359,7 @@ impl RelayClient {
 }
 
 /// RelayData 접두부를 `out[..8]`에 쓴다(원본 엔진 패킷은 `out[8..]`에 이미 있어야 한다).
-pub fn write_data_prefix(dest_ssrc: u32, out: &mut [u8]) {
+pub(crate) fn write_data_prefix(dest_ssrc: u32, out: &mut [u8]) {
     out[0..2].copy_from_slice(&MAGIC);
     out[2] = VERSION;
     out[3] = TYPE_RELAY_DATA;
@@ -371,7 +367,7 @@ pub fn write_data_prefix(dest_ssrc: u32, out: &mut [u8]) {
 }
 
 /// 릴레이 주소 문자열(`host:port`)을 IPv4 소켓 주소로 해석한다(DNS 조회 — 블로킹).
-pub fn resolve_relay_addr(addr: &str) -> Result<SocketAddr, String> {
+pub(crate) fn resolve_relay_addr(addr: &str) -> Result<SocketAddr, String> {
     use std::net::ToSocketAddrs;
     let addrs = addr.to_socket_addrs().map_err(|e| format!("릴레이 주소 해석 실패({addr}): {e}"))?;
     addrs.into_iter().find(|a| a.is_ipv4()).ok_or_else(|| format!("릴레이 주소에 IPv4가 없습니다: {addr}"))

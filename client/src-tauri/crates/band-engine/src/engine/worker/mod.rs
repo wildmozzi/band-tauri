@@ -59,9 +59,10 @@ mod send;
 #[cfg(test)]
 mod tests;
 
-pub use clock::{CallbackTracker, DeviceClock, FeedTiming};
-pub use local::LocalFifo;
-pub use peer_feed::{FeedEvents, PeerFeed, DEADLINE_GUARD_US};
+pub(crate) use clock::FeedTiming;
+pub use clock::CallbackTracker;
+pub(crate) use local::LocalFifo;
+pub(crate) use peer_feed::PeerFeed;
 
 use capture::Capture;
 #[cfg(test)]
@@ -71,53 +72,47 @@ use local_path::LocalPath;
 use metronome_stage::MetronomeStage;
 use send::SendPath;
 
-// 하네스(`tests/sim`, ⑩-3)가 워커와 같은 단계(`PeerSources`, ②b-3)와 폴링 주기를 쓴다. 제품 빌드에서는 크레이트 안(`pub(crate)`)·
-// 엔진 안(`pub(super)`)에만 보이고, 시험 빌드(`test-support`)에서만 `pub`이다 — 시험은 `testing::engine::worker`로 쓴다(⑨a와 같은 문).
-#[cfg(not(any(test, feature = "test-support")))]
-pub(crate) use peer_sources::{PeerSources, PeerSourcesParts};
-#[cfg(any(test, feature = "test-support"))]
-pub use peer_sources::{PeerRound, PeerSources, PeerSourcesParts};
-#[cfg(not(any(test, feature = "test-support")))]
-pub(super) use clock::{FINE_POLL, POLL};
-#[cfg(any(test, feature = "test-support"))]
+// 하네스(`tests/sim`, ⑩-3)가 워커와 같은 단계(`PeerSources`, ②b-3)와 폴링 주기를 쓴다. `worker`는 `pub(crate)` 모듈이라 이 `pub`은
+// 크레이트 밖에서는 `testing::engine::worker`(`test-support`)로만 보인다(⑨b-2 — 그 전에는 피처로 가시성을 갈랐다).
 pub use clock::{FINE_POLL, POLL};
+pub use peer_sources::{PeerSources, PeerSourcesParts};
 
 /// 출력 생산 단위(48kHz 프레임). 1.33ms.
-pub const OUT_CHUNK: usize = 64;
+pub(crate) const OUT_CHUNK: usize = 64;
 
 /// 워커 → 엔진 통계 공유값.
 #[derive(Debug, Default)]
 pub struct WorkerStats {
     /// 모니터 경로 점유량 시간평균(µs): 입력 리샘플러 + 로컬 FIFO + 로컬 리샘플러 + 로컬 소스 링.
-    pub monitor_occupancy_us: AtomicU64,
-    pub local_corrections: AtomicU64,
-    pub local_underruns: AtomicU64,
+    pub(crate) monitor_occupancy_us: AtomicU64,
+    pub(crate) local_corrections: AtomicU64,
+    pub(crate) local_underruns: AtomicU64,
     /// 피어 소스를 출력 콜백 마감 직전에 은닉으로 채운 횟수(패킷이 마감까지 안 옴).
-    pub deadline_fills: AtomicU64,
+    pub(crate) deadline_fills: AtomicU64,
     /// 피어 소스 링이 모자라 콜백이 0을 채우고, 그만큼 스트림을 건너뛴 장치 프레임 누적(워커 마감 놓침).
-    pub skipped_frames: AtomicU64,
+    pub(crate) skipped_frames: AtomicU64,
     /// 입력 또는 출력 콜백이 1초 넘게 멈췄다(장치 분리 등). 다시 돌면 false.
-    pub device_stalled: AtomicBool,
+    pub(crate) device_stalled: AtomicBool,
     /// 워커 스레드 우선순위 설정 결과(P1-2).
-    pub thread_prio: band_dsp::prio_slot::PrioSlot,
+    pub(crate) thread_prio: band_dsp::prio_slot::PrioSlot,
     /// 워커의 피어 미디어 표 길이(명령을 비운 직후, 엔진 ③). 진단·테스트: 표에 죽은 항목이 남는지 직접 본다.
-    pub media_peers: AtomicU64,
+    pub(crate) media_peers: AtomicU64,
     /// 워커 반복 본문 시간(수면 제외)과 반복 시작 간격 분포(엔진 ③c 측정, 진단 전용 — 측정 시험이 비운다).
-    pub iter_body: crate::net::txlat::SendLatency,
-    pub iter_period: crate::net::txlat::SendLatency,
+    pub(crate) iter_body: crate::net::txlat::SendLatency,
+    pub(crate) iter_period: crate::net::txlat::SendLatency,
     /// 반복마다 남은 락(`Peer.clock`)에서 기다린 합과, 본문에서 그것을 뺀 값(락 밖 비용, #122 리뷰 M3).
-    pub iter_lock_wait: crate::net::txlat::SendLatency,
-    pub iter_unlocked: crate::net::txlat::SendLatency,
+    pub(crate) iter_lock_wait: crate::net::txlat::SendLatency,
+    pub(crate) iter_unlocked: crate::net::txlat::SendLatency,
     /// 남은 락을 자리별로(엔진 ②b 측정, 설계 4.3절): 기다린 횟수·합·최대.
-    pub lock_sites: WorkerLockSites,
+    pub(crate) lock_sites: WorkerLockSites,
 }
 
 /// 워커가 기다릴 수 있는 남은 락의 자리별 대기 기록(진단 전용, `Engine::take_worker_timing`). 엔진 ②b-6b 뒤로
 /// **기본 우선순위 스레드와 나누는 락은 없다**(에코 프로브 ②b-5, 메트로놈 계획·루프백 보정·상태 보고·피어 표 읽기 락 ②b-6b).
 #[derive(Debug, Default)]
-pub struct WorkerLockSites {
+pub(crate) struct WorkerLockSites {
     /// 기준 피어의 `Peer.clock` — 기준 피어를 따르는 동안 반복마다. 나누는 상대는 `band-net-recv`뿐이다(둘 다 MMCSS).
-    pub peer_clock: crate::net::txlat::LockSite,
+    pub(crate) peer_clock: crate::net::txlat::LockSite,
 }
 
 /// 워커 반복 시간 분포 기록(엔진 ③c 측정, #122 리뷰 Low): 측정 빌드(`test-support`)에서만. 출시 빌드는 시계를 더 읽지 않는다.
@@ -130,31 +125,31 @@ const DIAG_TIMING: bool = cfg!(feature = "test-support");
 
 /// `Worker::new`의 입력. 소유권이 넘어가는 끝(`in_cons`·`prods`·`media_port`)과 공유 읽기 전용 값이 섞여 있으므로 단계에
 /// 그대로 주지 않는다 — `Worker::new`가 `WorkerCtx`(조정자 묶음)와 단계들에 나눠 준다.
-pub struct WorkerParams {
-    pub cfg: EngineConfig,
-    pub info: StreamInfo,
-    pub in_cons: HeapCons<f32>,
+pub(crate) struct WorkerParams {
+    pub(crate) cfg: EngineConfig,
+    pub(crate) info: StreamInfo,
+    pub(crate) in_cons: HeapCons<f32>,
     /// 소스 링 생산자(슬롯별)와 공유 상태. 믹스 탭 소비자는 엔진이 가진다.
-    pub prods: Vec<HeapProd<f32>>,
-    pub bank: Arc<SourceBank>,
-    pub counters: Arc<AudioCounters>,
-    pub controls: Arc<MixControls>,
-    pub net: Option<Arc<NetShared>>,
-    pub stop: Arc<AtomicBool>,
-    pub stats: Arc<WorkerStats>,
+    pub(crate) prods: Vec<HeapProd<f32>>,
+    pub(crate) bank: Arc<SourceBank>,
+    pub(crate) counters: Arc<AudioCounters>,
+    pub(crate) controls: Arc<MixControls>,
+    pub(crate) net: Option<Arc<NetShared>>,
+    pub(crate) stop: Arc<AtomicBool>,
+    pub(crate) stats: Arc<WorkerStats>,
     /// 지터 버퍼 수신 시각과 같은 기준(µs)의 시계.
-    pub epoch: Instant,
+    pub(crate) epoch: Instant,
     /// 에코 측정(P1-1) 프로브 큐의 워커 쪽 끝(엔진 ②b-5): 프로브를 받으면 그 피어에게 내 입력 대신 무음 + 클릭을 보내고,
     /// 그 피어 소리의 재생 시각을 모은다.
-    pub echo: EchoPortRt,
+    pub(crate) echo: EchoPortRt,
     /// 공유 메트로놈 계획·상태(P2-3)의 워커 쪽 끝(엔진 ②b-6b: 기다리지 않는다).
-    pub metronome: MetronomeRt,
+    pub(crate) metronome: MetronomeRt,
     /// 녹음 마커 큐(P2-4a): 녹음 중이면 피어별 은닉·버림을 출력 타임라인 위치로 넣는다.
-    pub rec_marks: Arc<MarkSink>,
+    pub(crate) rec_marks: Arc<MarkSink>,
     /// 피어 미디어 명령 큐의 워커 쪽 끝(추가·제거, 엔진 ③-a2).
-    pub media_port: MediaPortRt,
+    pub(crate) media_port: MediaPortRt,
     /// 지터 프로필(원자값, 워커가 반복마다 비교해 적용).
-    pub media_settings: Arc<MediaSettings>,
+    pub(crate) media_settings: Arc<MediaSettings>,
 }
 
 /// 조정자(`Worker::run`)의 읽기 전용 묶음: 설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop(모두 `Arc`·`Copy`·불변).
@@ -238,7 +233,7 @@ impl PeerTable {
 }
 
 /// 조정자. 필드 = 문맥 + 단계들 + 조정자가 갖고 단계에 빌려 주는 것(`echo`·`net` 안의 피어 표 복사본·`lock_wait`).
-pub struct Worker {
+pub(crate) struct Worker {
     ctx: WorkerCtx,
     capture: Capture,
     /// 송신 단계 + 피어 표 복사본. 네트워크가 있을 때만(없으면 캡처 프레임은 버려진다).
@@ -262,7 +257,7 @@ const MAX_DEVICE_RATE: u32 = 384_000;
 
 impl Worker {
     /// 리샘플러/인코더 생성. 실패하면 엔진 시작을 실패시킨다(리뷰 M10).
-    pub fn new(p: WorkerParams) -> Result<Self, String> {
+    pub(crate) fn new(p: WorkerParams) -> Result<Self, String> {
         let WorkerParams { cfg, info, in_cons, mut prods, bank, counters, controls, net, stop, stats, epoch, echo, metronome, rec_marks, media_port, media_settings } = p;
         let frame = cfg.frame_samples();
         let ich = cfg.channels as usize;
@@ -315,7 +310,7 @@ impl Worker {
     /// - `clock.observe`(`FeedTiming`)는 캡처·인코드·송신 **뒤**, 메트로놈·피어 공급 **앞**에서 한 번(J5). 앞으로 옮기면 실시간
     ///   은닉 마감 판단이 송신 시간만큼 이르게 된다.
     /// - 로컬 FIFO는 `configure` → `push`(블록마다) → `service` 순.
-    pub fn run(mut self) {
+    pub(crate) fn run(mut self) {
         let _prio = crate::sys::prio::promote_engine_thread(&self.ctx.stats.thread_prio);
         log::info!("워커 시작: frame {} ch {}", self.ctx.cfg.frame_samples(), self.ctx.cfg.channels);
         let c = &self.ctx;

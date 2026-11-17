@@ -86,6 +86,8 @@ pub struct MediaTx {
 /// 엔진 쪽 끝(소비자). 워커 단독 소유 `PeerMedia` 안에 있다.
 pub struct MediaRx {
     cons: HeapCons<AudioPacket>,
+    // 읽는 곳은 하네스·시험(`PeerMedia::rx_dropped`)뿐 — 발행 칸은 ⑨b-2에서 지웠다(#165 리뷰 L1). 송신 쪽 계수는 제품에서도 그대로 센다.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     dropped: Arc<AtomicU64>,
     loss: Arc<LossCell>,
 }
@@ -139,6 +141,7 @@ impl MediaRx {
     }
 
     /// 큐가 가득 차 버린 패킷 수(누적).
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }

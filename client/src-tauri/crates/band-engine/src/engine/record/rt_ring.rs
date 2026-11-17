@@ -16,27 +16,27 @@ const MIN_CHUNK_FRAMES: usize = 16;
 
 /// 콜백 청크 하나의 머리.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct RecBlock {
+pub(crate) struct RecBlock {
     /// 청크 첫 프레임의 출력 타임라인 위치(`out_played_frames` 기준 장치 프레임).
-    pub pos: u64,
-    pub frames: u32,
+    pub(crate) pos: u64,
+    pub(crate) frames: u32,
     /// 샘플 링에 이 청크 샘플이 들어간 슬롯(비트). 슬롯 순서대로 `frames × 2`씩 들어 있다.
-    pub mask: u16,
+    pub(crate) mask: u16,
     /// 슬롯 샘플 뒤에 믹스(탭 버스) `frames × 2`가 있다.
-    pub mix: bool,
+    pub(crate) mix: bool,
     /// 슬롯 점유자(피어 ssrc, 로컬 슬롯은 0).
-    pub occ: [u32; MAX_SOURCES],
+    pub(crate) occ: [u32; MAX_SOURCES],
     /// 슬롯별로 이 청크 끝에서 링이 모자라 0으로 채운 프레임(재생 중 언더런, P2-4a 마커).
-    pub short: [u16; MAX_SOURCES],
+    pub(crate) short: [u16; MAX_SOURCES],
 }
 
 /// RT와 제어 쪽이 함께 보는 녹음 통계.
 #[derive(Debug, Default)]
-pub struct RecordRtShared {
+pub(crate) struct RecordRtShared {
     /// 녹음 링이 모자라 버린 프레임(녹음 품질 지표). 그 자리는 무음으로 채워진다.
-    pub dropped_frames: AtomicU64,
+    pub(crate) dropped_frames: AtomicU64,
     /// 콜백이 이 녹음 끝점을 돌려줬다(그 뒤로는 링에 쓰지 않음). 쓰기 스레드는 이것을 보고 남은 것을 비운다.
-    pub detached: AtomicBool,
+    pub(crate) detached: AtomicBool,
 }
 
 /// 정지 중(락 밖에서 마무리 중)인 녹음 수. 엔진 정지·앱 종료가 그 마무리를 기다린다(PR #47 L4).
@@ -58,7 +58,7 @@ impl Drop for InFlightGuard {
 }
 
 /// 출력 콜백이 쓰는 녹음 끝점(녹음 하나당 하나).
-pub struct RecordRt {
+pub(crate) struct RecordRt {
     pub(super) samples: HeapProd<f32>,
     pub(super) blocks: HeapProd<RecBlock>,
     pub(super) include_mix: bool,
@@ -70,7 +70,7 @@ pub struct RecordRt {
 impl RecordRt {
     /// RT: 청크 시작. 최악의 경우만큼 자리가 없으면 이 청크를 버린다.
     #[inline]
-    pub fn begin(&mut self, pos: u64, n: usize) {
+    pub(crate) fn begin(&mut self, pos: u64, n: usize) {
         let need = n * 2 * (MAX_SOURCES + 1);
         self.open = self.samples.vacant_len() >= need && self.blocks.vacant_len() >= 1;
         if !self.open {
@@ -81,7 +81,7 @@ impl RecordRt {
 
     /// RT: 슬롯 하나가 이 청크에 재생한 샘플(`n × 2`, 게인 전). `short`: 그중 끝에서 링 부족으로 0을 채운 프레임.
     #[inline]
-    pub fn source(&mut self, slot: usize, occupant: u32, data: &[f32], short: usize) {
+    pub(crate) fn source(&mut self, slot: usize, occupant: u32, data: &[f32], short: usize) {
         if !self.open || slot >= MAX_SOURCES {
             return;
         }
@@ -98,7 +98,7 @@ impl RecordRt {
     /// RT: 청크 끝. 믹스(클릭 없는 탭 버스)를 붙이고 머리를 넣는다. 콜백은 청크마다 반드시 부른다(PR #47 L1).
     /// 믹스 길이가 청크와 다르면 믹스만 빼고 머리를 넣는다(그 자리는 쓰기 스레드가 무음으로 채움 — 링이 어긋나지 않음).
     #[inline]
-    pub fn finish(&mut self, mix: &[f32]) {
+    pub(crate) fn finish(&mut self, mix: &[f32]) {
         if !self.open {
             return;
         }
@@ -122,7 +122,7 @@ pub struct RecordPortRt {
 impl RecordPortRt {
     /// RT: 콜백 시작마다 부른다. 새 녹음을 받고, 정지 요청이면 돌려준다(해제는 비RT에서).
     #[inline]
-    pub fn poll(&mut self) {
+    pub(crate) fn poll(&mut self) {
         if self.active.is_none() {
             self.active = self.inbox.try_pop();
         }
@@ -139,7 +139,7 @@ impl RecordPortRt {
     }
 
     #[inline]
-    pub fn active(&mut self) -> Option<&mut RecordRt> {
+    pub(crate) fn active(&mut self) -> Option<&mut RecordRt> {
         self.active.as_mut()
     }
 }
