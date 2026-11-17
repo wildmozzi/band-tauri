@@ -4,7 +4,7 @@
  * 웹에서는 연주(엔진)를 시작할 수 없어 PerformSession은 늘 idle이다. 그래서 웹 관람 첫 묶음에는 엔진 세션 본체
  * (PerformSession·sessionLogic·mixBridge, 지연 로드 — runtimeLoader)를 싣지 않고, 시작한 적 없는 PerformSession과
  * 똑같이 동작하는 이 클래스를 쓴다. 같은 동작인지는 idleSession.test.ts가 같은 입력을 둘 다에 넣어 비교한다.
- * 데스크톱 앱이 엔진 런타임을 불러오지 못했을 때(그럴 일은 없어야 한다)도 이것으로 떨어진다 — 연주 시작은 오류로 끝난다.
+ * 데스크톱 앱이 엔진 런타임을 불러오지 못했을 때(그럴 일은 없어야 한다)는 runtimeLoader가 이것을 감싸 연주 시작 때 다시 불러온다.
  */
 import type { MixBroadcaster, MixLease, MixSource } from './mixBridge'
 import { metronomeErrorFromCode, parseMetronomeSignal, type MetronomeSignalState } from './metronomeLogic'
@@ -35,11 +35,16 @@ export type MixSourceApi = Pick<MixSource, 'acquire' | 'invalidate' | 'resume'>
 export type MixBroadcasterApi = Pick<MixBroadcaster, 'start' | 'stop' | 'syncViewers' | 'handleAnswer' | 'handleCandidate' | 'hasPeer'>
 
 export const NO_ENGINE_MESSAGE = '오디오 엔진 시작 실패: 이 환경에서는 오디오 엔진을 쓸 수 없습니다(데스크톱 앱 전용).'
+/** 데스크톱 앱인데 엔진 런타임 묶음을 불러오지 못했다(연주 시작 때 다시 불러와도 실패) */
+export const RUNTIME_LOAD_FAILED_MESSAGE = '오디오 엔진 시작 실패: 엔진 모듈을 불러오지 못했습니다. 다시 시도하고, 계속되면 앱을 다시 시작해주세요.'
 
 export class IdlePerformSession implements PerformSessionApi {
   private state: PerformState = { phase: 'idle', instrument: null, sessionId: null, error: null, stats: null, inputMuted: false }
   private listeners = new Set<(s: PerformState) => void>()
   private remoteMetronome: { from: string; state: MetronomeSignalState } | null = null
+
+  /** startError: 연주 시작이 끝나는 오류 문구(웹은 NO_ENGINE_MESSAGE, 데스크톱 로드 실패는 RUNTIME_LOAD_FAILED_MESSAGE) */
+  constructor(private readonly startError: string = NO_ENGINE_MESSAGE) {}
 
   getState(): PerformState {
     return this.state
@@ -56,7 +61,7 @@ export class IdlePerformSession implements PerformSessionApi {
   }
 
   async start(): Promise<boolean> {
-    this.setState({ error: NO_ENGINE_MESSAGE })
+    this.setState({ error: this.startError })
     return false
   }
 

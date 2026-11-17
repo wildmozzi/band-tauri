@@ -59,13 +59,19 @@ const SCRIPT: Array<[string, (s: PerformSessionApi) => unknown]> = [
   ['setPeerGain', (s) => s.setPeerGain('A', 0.5, false, 0)],
   ['setInputMuted 켬', (s) => s.setInputMuted(true)],
   ['setInputMuted 끔', (s) => s.setInputMuted(false)],
+  // 아래 단계는 원격 메트로놈이 켜진 채로도 넣는다 — idle에서 연결 끊김·재개·정지가 메트로놈을 건드리게 바뀌면 드러난다 (#216 리뷰 L-2)
   ['connectionLost', (s) => s.connectionLost()],
-  ['welcome', (s) => s.welcome('me', true)],
+  ['metronome A 켬(연결 끊김 전)', (s) => s.handleSignal(metronome('A', true))],
+  ['connectionLost(메트로놈 켠 채)', (s) => s.connectionLost()],
+  ['welcome 같은 id(메트로놈 켠 채)', (s) => s.welcome('me', true)],
+  ['welcome 새 id(메트로놈 켠 채)', (s) => s.welcome('me2', false)],
   ['setHostMetronome', (s) => s.setHostMetronome(true, 120, 4)],
   ['pollStats', (s) => s.pollStats()],
-  ['stop 오류 없이', (s) => s.stop({ notify: true })],
+  ['stop 오류 없이(메트로놈 켠 채)', (s) => s.stop({ notify: true })],
+  ['performerAppeared(메트로놈 켠 채)', (s) => s.performerAppeared('B')],
   ['stop 오류와 함께', (s) => s.stop({ notify: false, error: '중단됨' })],
-  ['dispose', (s) => s.dispose()],
+  ['dispose(메트로놈 켠 채)', (s) => s.dispose()],
+  ['peerGone A(dispose 뒤)', (s) => s.peerGone('A')],
 ]
 
 describe('IdlePerformSession = 시작한 적 없는 PerformSession', () => {

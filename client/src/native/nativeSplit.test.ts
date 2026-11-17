@@ -1,7 +1,8 @@
 /**
  * 웹 관람 묶음 분리 규칙(docs/frontend-architecture.md 1절): 데스크톱 전용 엔진 런타임(연주 세션 본체·상태기계·관람 방송)은
  * runtimeLoader가 동적 import하는 nativeRuntime 묶음에만 있어야 한다. 다른 코드가 값으로 정적 import하면 웹 첫 묶음에
- * 다시 실린다(타입만 쓰는 `import type`은 빌드에서 지워지므로 괜찮다). 실제로 안 받는지는 e2e native-split이 본다.
+ * 다시 실린다(타입만 쓰는 `import type`은 빌드에서 지워지므로 괜찮다). 실제로 안 받는지는 e2e native-split이,
+ * 하위 의존(relayLogic 등)까지 첫 화면 JS에 없는지는 e2e bundle-budget(빌드 산출물 검사)이 본다.
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -31,8 +32,9 @@ describe('엔진 런타임은 지연 묶음에만', () => {
     for (const file of sourceFiles(SRC)) {
       const rel = relative(SRC, file).replace(/\\/g, '/')
       const text = readFileSync(file, 'utf8')
-      for (const m of text.matchAll(/^(import|export)\s+(?!type\b)[^;]*?from\s+'([^']+)'/gms)) {
-        const name = m[2].split('/').pop()!
+      // 값 import·re-export(`from '…'`)와 부수효과 import(`import '…'`) 모두. 확장자를 붙인 경로('./performSession.ts')도 (#216 리뷰 L-3)
+      for (const m of text.matchAll(/^(import|export)\s+(?!type\b)(?:[^;'"]*?from\s+)?['"]([^'"]+)['"]/gms)) {
+        const name = m[2].split('/').pop()!.replace(/\.(ts|tsx|js|mjs)$/, '')
         const allowed = RUNTIME_ONLY[name]
         if (allowed && !allowed.includes(rel)) offenders.push(`${rel} → ${m[2]}`)
       }

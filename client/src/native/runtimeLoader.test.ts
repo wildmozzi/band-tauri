@@ -45,7 +45,7 @@ describe('runtimeLoader', () => {
     expect(bridge.broadcaster).toBeInstanceOf(MixBroadcaster)
   })
 
-  it('데스크톱 앱에서 불러오기에 실패하면 null(엔진 없는 세션으로 떨어짐)이고 다음 preload가 다시 시도한다', async () => {
+  it('데스크톱 앱에서 불러오기에 실패하면 엔진 없는 세션으로 시작하고, 연주 시작이 다시 불러와 성공하면 진짜 세션으로 넘어간다', async () => {
     native.app = true
     vi.doMock('./nativeRuntime', () => {
       throw new Error('청크 없음')
@@ -54,10 +54,34 @@ describe('runtimeLoader', () => {
     const loader = await import('./runtimeLoader')
     await expect(loader.preloadNativeRuntime()).resolves.toBeNull()
     expect(error).toHaveBeenCalled()
-    const { IdlePerformSession } = await import('./idleSession')
-    expect(loader.createPerformSession(env)).toBeInstanceOf(IdlePerformSession)
-    vi.doUnmock('./nativeRuntime')
-    await expect(loader.preloadNativeRuntime()).resolves.not.toBeNull()
+    const { RUNTIME_LOAD_FAILED_MESSAGE } = await import('./idleSession')
+    const session = loader.createPerformSession(env)
+    expect(session).toBeInstanceOf(loader.DeferredPerformSession)
+    const bridge = loader.createMixBridge(() => {}, () => {})
+    const seen: string[] = []
+    session.subscribe((st) => seen.push(`${st.phase}:${st.error ?? ''}`))
+    const opts = { instrument: 'guitar', config: {} as never, nickname: 'n', isHost: false }
+
+    // 다시 불러와도 실패: 앱 재시작 안내(웹 문구 아님)
+    await expect(session.start(opts)).resolves.toBe(false)
+    expect(session.getState().error).toBe(RUNTIME_LOAD_FAILED_MESSAGE)
+    await expect(bridge.mixSource.acquire()).rejects.toThrow('믹스 구독 실패')
+
+    // 다시 불러와 성공: 그때부터 진짜 세션(가짜 런타임)이 연주를 시작하고, 구독자도 그쪽 상태를 받는다. 방송도 진짜로 넘어간다
+    const realStart = vi.fn(async () => true)
+    const realState = { phase: 'running', instrument: 'guitar', sessionId: 'me', error: null, stats: null, inputMuted: false }
+    const realAcquire = vi.fn(async () => ({ stream: 'mix', release: () => {} }))
+    vi.doMock('./nativeRuntime', () => ({
+      createPerformSession: () => ({ getState: () => realState, subscribe: () => () => {}, start: realStart, handleSignal: () => true }),
+      createMixBridge: () => ({ mixSource: { acquire: realAcquire }, broadcaster: {} }),
+    }))
+    await expect(session.start(opts)).resolves.toBe(true)
+    expect(realStart).toHaveBeenCalledWith(opts)
+    expect(session.getState()).toBe(realState)
+    expect(seen[seen.length - 1]).toBe('running:')
+    expect(session.handleSignal({ type: 'native-descriptor' })).toBe(true)
+    await expect(bridge.mixSource.acquire()).resolves.toMatchObject({ stream: 'mix' })
+    expect(realAcquire).toHaveBeenCalledOnce()
     error.mockRestore()
   })
 })
