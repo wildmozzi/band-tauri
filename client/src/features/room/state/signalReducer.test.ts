@@ -150,7 +150,12 @@ describe('reduceRoomSignal — 참가자·WebRTC', () => {
     }, ctx())
     expect(r.patch?.connection).toMatchObject({ peers: ['a', 'b'], isRoomHost: true, roomJoined: true, joinError: null, joinFeedback: '룸 입장 완료 · 동시 연결 3명' })
     expect(Object.keys(r.patch!.roster!)).toEqual(['a'])
-    expect(r.effects).toEqual([{ type: 'set-rejoining', value: false }, { type: 'clear-busy-retry' }, { type: 'remember-password', roomId: 'r1' }])
+    expect(r.effects).toEqual([{ type: 'set-rejoining', value: false }, { type: 'clear-busy-retry' }, { type: 'keep-viewers', peerIds: ['a'] }, { type: 'remember-password', roomId: 'r1' }])
+  })
+
+  it('room-state: 관람 수신은 지금 연주 중인 발신자 것만 남긴다(재개로 유지한 연결의 연주자가 그새 내려간 경우)', () => {
+    const r = reduceRoomSignal(inRoom({ roster: { a: guitar } }), { type: 'room-state', peerIds: ['a'], participants: [{ oderId: 'a', isPerforming: false }] }, ctx())
+    expect(r.effects).toContainEqual({ type: 'keep-viewers', peerIds: [] })
   })
 
   it('participant-left: 피어·연주자·요청 정리 후 엔진 피어 제거와 관람 수신 닫기', () => {

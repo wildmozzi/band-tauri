@@ -36,6 +36,8 @@ export type RoomEffect =
   | { type: 'performer-appeared'; peerId: string }
   | { type: 'peer-gone'; peerId: string }
   | { type: 'close-viewer'; peerId: string }
+  /** 관람 수신 연결 중 이 연주자들 것만 남기고 닫는다 (room-state: 세션 재개로 유지한 연결의 발신자가 그새 내려갔으면 닫기) */
+  | { type: 'keep-viewers'; peerIds: string[] }
   | { type: 'viewer-offer'; from: string; offer: RTCSessionDescriptionInit }
   | { type: 'broadcast-answer'; from: string; answer: RTCSessionDescriptionInit }
   /** 방송 담당이 그 피어에 연결 중이면 방송 쪽, 아니면 관람 수신 쪽 */
@@ -233,7 +235,7 @@ function reduceParticipants(s: RoomState, p: SignalPayload, ctx: SignalContext):
       for (const part of participants) {
         if (part.isPerforming && part.instrument && part.oderId !== self) roster[part.oderId] = performerOf({ ...part, instrument: part.instrument })
       }
-      const effects: RoomEffect[] = [{ type: 'set-rejoining', value: false }, { type: 'clear-busy-retry' }]
+      const effects: RoomEffect[] = [{ type: 'set-rejoining', value: false }, { type: 'clear-busy-retry' }, { type: 'keep-viewers', peerIds: Object.keys(roster) }]
       if (conn.currentRoomId) effects.push({ type: 'remember-password', roomId: conn.currentRoomId })
       // 재개했는데 서버는 내가 연주자가 아니라고 한다(끊긴 사이 내려졌는데 알림이 유실됨 등): 아무도 못 듣는 "연주 중"으로 남지 않게 멈춘다
       const ghost = ctx.verifySelfPerforming === true && p.isPerforming === false && s.perform.phase === 'running'
