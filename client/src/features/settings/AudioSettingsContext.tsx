@@ -283,12 +283,18 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isTesting) return
     let cancelled = false
+    // 앞 요청이 아직이면(느린 응답) 이번 주기는 건너뛰고 마지막 표시를 둔다(#214 리뷰 L4)
+    let inFlight = false
     const timer = setInterval(async () => {
+      if (inFlight) return
+      inFlight = true
       try {
         const s = await engineStats()
         if (!cancelled) setTestStats(s)
       } catch {
         // 무시
+      } finally {
+        inFlight = false
       }
     }, TEST_POLL_MS)
     return () => {

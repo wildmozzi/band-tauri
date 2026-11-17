@@ -69,4 +69,25 @@ describe('useLivePeerStats', () => {
     vi.advanceTimersByTime(PEER_STATS_POLL_MS * 2)
     expect(engine.engineStats).toHaveBeenCalledTimes(2)
   })
+
+  it('응답이 느리면 그동안의 주기는 건너뛰고 마지막 표시를 유지한다(#214 리뷰 L4)', async () => {
+    const { result } = renderHook(() => useLivePeerStats(true))
+    await act(async () => {})
+    expect(result.current).toEqual([{ peerId: 'peer-1' }])
+    let resolve: (v: unknown) => void = () => {}
+    engine.engineStats.mockImplementationOnce(() => new Promise((r) => { resolve = r }) as never)
+    await act(async () => {
+      vi.advanceTimersByTime(PEER_STATS_POLL_MS * 4)
+    })
+    expect(engine.engineStats).toHaveBeenCalledTimes(2) // 처음 + 느린 요청 하나(그 뒤 3주기는 건너뜀)
+    expect(result.current).toEqual([{ peerId: 'peer-1' }]) // 진단 표시는 그대로
+    await act(async () => {
+      resolve({ peers: [{ peerId: 'peer-2' }] })
+    })
+    expect(result.current).toEqual([{ peerId: 'peer-2' }])
+    await act(async () => {
+      vi.advanceTimersByTime(PEER_STATS_POLL_MS)
+    })
+    expect(engine.engineStats).toHaveBeenCalledTimes(3) // 응답 뒤에는 다시 주기마다
+  })
 })

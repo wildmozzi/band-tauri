@@ -12,12 +12,18 @@ export function useLivePeerStats(enabled: boolean): PeerStats[] {
       return
     }
     let cancelled = false
+    // 앞 요청이 아직이면(느린 응답) 이번 주기는 건너뛰고 마지막 표시를 그대로 둔다(#214 리뷰 L4)
+    let inFlight = false
     const poll = async () => {
+      if (inFlight) return
+      inFlight = true
       try {
         const s = await engineStats()
         if (!cancelled) setPeers(s.peers)
       } catch {
         // 엔진이 막 멈춘 경우 등: 다음 주기에 다시
+      } finally {
+        inFlight = false
       }
     }
     void poll()
