@@ -36,27 +36,48 @@ export function fallbackPageCount(contentHeight: number, pageHeight: number): nu
   return Math.max(1, Math.ceil(contentHeight / pageHeight))
 }
 
+/**
+ * SVG 사용자 좌표 → CSS px 배율. OSMD는 SVG를 CSS 크기(10·단위·zoom)로 잡고 viewBox를 크기÷zoom으로 둔다 —
+ * 그래서 getBBox() 값은 CSS px ÷ zoom이다. 렌더된 너비 ÷ viewBox 너비로 구하고, 못 구하면 1(viewBox 없음 = 같은 단위).
+ */
+export function userToCssScale(renderedWidth: number, viewBoxWidth: number): number {
+  if (!(renderedWidth > 0) || !(viewBoxWidth > 0)) return 1
+  return renderedWidth / viewBoxWidth
+}
+
+/** 줄 박스를 배율 k로 변환(사용자 좌표 → CSS px) */
+export function scaleBoxes(systems: SystemBox[], k: number): SystemBox[] {
+  return systems.map(s => ({ y: s.y * k, height: s.height * k }))
+}
+
 export interface PageLayout {
-  /** 한 페이지(보이는 창) 높이 = 컨테이너 너비 기준 A4 */
+  /** 컨테이너(보이는 창) 높이, CSS px = 컨테이너 너비 기준 A4 */
   pageHeight: number
-  /** 페이지별 시작 y(SVG 좌표). 길이가 페이지 수 */
+  /** 페이지별 시작 y(CSS px, SVG 위끝 기준) — translateY에 그대로 쓴다. 길이가 페이지 수 */
   breaks: number[]
 }
 
 /**
- * 페이지 레이아웃 — 첫 렌더와 리사이즈가 같은 규칙을 쓴다(P3-13).
- * 기준 너비는 항상 컨테이너 너비(보이는 창 높이와 같은 기준), 분할은 줄 아래끝 기준(pageBreaksByBottom).
- * 줄을 못 찾으면 전체 높이를 페이지 높이로 균등 분할. 너비가 0 이하(숨김 등)면 한 페이지.
+ * 페이지 레이아웃 — 첫 렌더와 리사이즈가 같은 규칙을 쓴다(P3-13). **입력은 모두 CSS px**(줄 박스는 scaleBoxes로 변환해 넘긴다).
+ * 컨테이너 높이 = 컨테이너 너비 기준 A4, 악보가 실제로 보이는 높이 = 그 높이 − verticalInset(위아래 패딩, border-box).
+ * 분할은 보이는 높이 기준 줄 아래끝 규칙(pageBreaksByBottom). 줄을 못 찾으면 전체 높이를 균등 분할.
+ * 너비가 0 이하(숨김 등)거나 보이는 높이가 0 이하면 한 페이지.
  */
-export function computePageLayout(systems: SystemBox[], containerWidth: number, contentHeight: number): PageLayout {
+export function computePageLayout(
+  systems: SystemBox[],
+  containerWidth: number,
+  contentHeight: number,
+  verticalInset = 0,
+): PageLayout {
   const pageHeight = a4HeightFor(Math.max(0, containerWidth))
-  if (!(pageHeight > 0)) return { pageHeight, breaks: [0] }
+  const visible = pageHeight - Math.max(0, verticalInset)
+  if (!(visible > 0)) return { pageHeight, breaks: [0] }
   if (systems.length > 0) {
     const sorted = [...systems].sort((a, b) => a.y - b.y)
-    return { pageHeight, breaks: pageBreaksByBottom(sorted, pageHeight) }
+    return { pageHeight, breaks: pageBreaksByBottom(sorted, visible) }
   }
-  const count = fallbackPageCount(contentHeight, pageHeight)
-  return { pageHeight, breaks: Array.from({ length: count }, (_, i) => i * pageHeight) }
+  const count = fallbackPageCount(contentHeight, visible)
+  return { pageHeight, breaks: Array.from({ length: count }, (_, i) => i * visible) }
 }
 
 /** 플레이어 마디 번호 → 악보 마디 목록 안 인덱스(0..count-1로 자름) */

@@ -9,6 +9,8 @@ import {
   findScoreSystems,
   pageBreaksByBottom,
   pageForY,
+  scaleBoxes,
+  userToCssScale,
   type SystemBox,
 } from './scoreLayout'
 
@@ -74,9 +76,34 @@ describe('scoreLayout', () => {
     }
   })
 
-  it('computePageLayout: 첫 렌더·리사이즈가 같은 입력이면 같은 결과(단일 규칙)', () => {
-    const systems = rows(12, 110, 30, 80)
-    expect(computePageLayout(systems, 640, 0)).toEqual(computePageLayout(systems.map(s => ({ ...s })), 640, 0))
+  it('userToCssScale: 렌더 너비 ÷ viewBox 너비, 못 구하면 1', () => {
+    // OSMD zoom 0.6: CSS 600px, viewBox 1000
+    expect(userToCssScale(600, 1000)).toBeCloseTo(0.6)
+    expect(userToCssScale(600, 0)).toBe(1)
+    expect(userToCssScale(0, 1000)).toBe(1)
+  })
+
+  it('단위: zoom 0.6 사용자 좌표 줄을 CSS로 바꿔 분할 — 바꾸지 않으면 페이지가 ~1.67배', () => {
+    // CSS 기준 줄 높이 60, 간격 12 → 사용자 좌표로는 100, 20 (÷0.6)
+    const user = rows(20, 100, 20)
+    const k = userToCssScale(600, 1000)
+    const width = 300 / A4_RATIO // 보이는 높이 300 CSS px
+    const css = computePageLayout(scaleBoxes(user, k), width, 0)
+    // CSS: 줄 72px 간격 → 한 페이지에 4줄(아래끝 3·72+60=276 ≤ 300, 다음 348 > 300)
+    expect(css.breaks.length).toBe(5)
+    expect(css.breaks[1]).toBeCloseTo(4 * 72)
+    // breaks는 CSS px라 translateY와 같은 단위 — 각 줄 경계와 일치
+    css.breaks.slice(1).forEach(b => expect(scaleBoxes(user, k).some(s => Math.abs(s.y - b) < 1e-9)).toBe(true))
+    const mixed = computePageLayout(user, width, 0) // 단위 혼합(이전 버그)
+    expect(mixed.breaks.length).toBeGreaterThan(css.breaks.length * 1.5)
+  })
+
+  it('computePageLayout: 위아래 패딩만큼 보이는 높이가 줄어 분할', () => {
+    const systems = [{ y: 0, height: 100 }, { y: 200, height: 100 }] // 아래끝 300
+    const width = 300 / A4_RATIO
+    expect(computePageLayout(systems, width, 0, 0).breaks).toEqual([0])
+    expect(computePageLayout(systems, width, 0, 32).breaks).toEqual([0, 200])
+    expect(computePageLayout(systems, width, 0, 1000).breaks).toEqual([0]) // 보이는 높이 ≤ 0
   })
 
   it('computePageLayout: 줄이 없으면 높이 균등 분할, 너비 0이면 한 페이지', () => {

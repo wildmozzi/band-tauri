@@ -5,8 +5,10 @@ import {
   computePageLayout,
   findScoreSystems,
   pageForY,
+  scaleBoxes,
   systemBoxes,
   type PageLayout,
+  userToCssScale,
 } from './scoreLayout'
 
 interface ScoreDisplayProps {
@@ -75,19 +77,21 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
     const container = containerRef.current
     if (!container) return
     const svg = container.querySelector('svg')
-    if (!svg) {
-      setSvgElement(null)
-      setLayout(INITIAL_LAYOUT)
-      setCurrentPage(0)
-      return
-    }
-    let contentHeight = 0
-    try {
-      contentHeight = svg.getBBox().height
-    } catch {
-      contentHeight = svg.getBoundingClientRect().height
-    }
-    const next = computePageLayout(systemBoxes(findScoreSystems(svg)), container.clientWidth, contentHeight)
+    // OSMD 재렌더 도중 잠깐 SVG가 없을 수 있다 — 이전 레이아웃을 그대로 두고 다음 측정을 기다린다
+    if (!svg) return
+    // 단위를 CSS px로 맞춘다: 줄 박스(getBBox)는 SVG 사용자 좌표(CSS px ÷ zoom)라 배율 k를 곱한다
+    const rect = svg.getBoundingClientRect() // translateY는 너비·높이에 영향 없음
+    const k = userToCssScale(rect.width, svg.viewBox?.baseVal?.width ?? 0)
+    const cs = getComputedStyle(container)
+    const padY = cs.boxSizing === 'border-box'
+      ? (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0)
+      : 0
+    const next = computePageLayout(
+      scaleBoxes(systemBoxes(findScoreSystems(svg)), k),
+      container.clientWidth,
+      rect.height,
+      padY,
+    )
     setSvgElement(svg)
     setLayout(next)
     setCurrentPage(p => Math.min(p, next.breaks.length - 1))
@@ -290,11 +294,20 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
 
         try {
           const mObj = cursor.Iterator.CurrentMeasure
-          const cursorElement = cursor.cursorElement as SVGRectElement
+          // OSMD 커서는 컨테이너에 absolute로 붙는 <img>(SVG 요소 아님) — top/left/z-index는 OSMD가 넣는다
+          const cursorElement = cursor.cursorElement as HTMLImageElement | undefined
 
           if (mObj && cursorElement) {
-            // 매우 강한 스타일 주입 (OSMD 내부 설정을 무시하도록 !important 사용)
-            cursorElement.setAttribute('style', 'display: block !important; fill: rgba(255, 255, 0, 0.45) !important; stroke: none !important; opacity: 1 !important; visibility: visible !important;')
+            // 보이기만 강제한다. style 전체를 덮어쓰면 OSMD의 position·top·left·z-index가 지워진다(M2)
+            cursorElement.style.setProperty('display', 'block', 'important')
+            cursorElement.style.setProperty('opacity', '1', 'important')
+            cursorElement.style.setProperty('visibility', 'visible', 'important')
+            // 커서는 SVG 밖이라 페이지 이동(translateY)을 따로 따라가야 악보와 맞는다
+            const svgTransform = svgElementRef.current?.style.transform ?? ''
+            if (cursorElement.style.transform !== svgTransform) {
+              cursorElement.style.transform = svgTransform
+              cursorElement.style.transition = 'transform 0.3s ease'
+            }
 
             // 너비 계산 (GraphicalMeasures 우선)
             // eslint-disable-next-line @typescript-eslint/no-explicit-any -- OSMD 커서 내부 API는 타입 미제공
@@ -326,9 +339,12 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
 
             // 현재 커서의 수직 위치(y)를 확인하여 페이지 전환 여부 결정
             try {
-              const cursorElement = cursor.cursorElement
+              const cursorElement = cursor.cursorElement as HTMLImageElement | undefined
               if (cursorElement && svgElementRef.current) {
-                const cursorY = cursorElement.getBBox().y
+                // <img>라 getBBox가 없다(M1) — OSMD가 넣는 style.top(CSS px, SVG 위끝 기준, translate 전)을 쓴다.
+                // breaks도 CSS px라 같은 단위
+                const top = parseFloat(cursorElement.style.top)
+                const cursorY = Number.isFinite(top) ? top : cursorElement.offsetTop
 
                 // 어느 페이지에 속하는지 계산 (민감도 보정: 마진 50 → 더 빨리 인식)
                 const targetPage = pageForY(pageBreaksRef.current, cursorY, 50)
@@ -338,8 +354,8 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
                   setCurrentPage(targetPage)
                 }
               }
-            } catch {
-              // getBBox 실패 시 무시
+            } catch (e) {
+              warnOnce('[ScoreDisplay] Auto page switch failed:', e)
             }
           }
         }
@@ -356,19 +372,33 @@ export function ScoreDisplay({ musicXmlUrl, currentProgress = 0, currentMeasure 
     }
   }, [maxRealValue, measureStarts])
 
-  // 화면 리사이즈 시 페이지 재계산 — 첫 렌더와 같은 measureLayout. OSMD autoResize 재렌더가 끝난 뒤 한 번만 잰다.
+  // 리사이즈 시 페이지 재계산 — 첫 렌더와 같은 measureLayout. OSMD autoResize 재렌더가 끝난 뒤 한 번만 잰다.
+  // window resize와 함께 컨테이너 너비 변화(사이드 패널 등)도 본다. 높이는 우리가 pageHeight로 바꾸므로 무시.
+  // 악보가 그려진 뒤(svgElement)에만 구독하고, 측정이 SVG를 잠깐 못 찾아도 svgElement를 비우지 않아 구독이 유지된다.
   useEffect(() => {
-    if (!svgElement) return
+    const container = containerRef.current
+    if (!svgElement || !container) return
 
     let timer: ReturnType<typeof setTimeout> | undefined
-    const handleResize = () => {
+    const schedule = () => {
       if (timer !== undefined) clearTimeout(timer)
       timer = setTimeout(measureLayout, RESIZE_SETTLE_MS)
     }
 
-    window.addEventListener('resize', handleResize)
+    let lastWidth = container.clientWidth
+    const observer = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(() => {
+        const width = container.clientWidth
+        if (width === lastWidth) return
+        lastWidth = width
+        schedule()
+      })
+    observer?.observe(container)
+    window.addEventListener('resize', schedule)
     return () => {
-      window.removeEventListener('resize', handleResize)
+      observer?.disconnect()
+      window.removeEventListener('resize', schedule)
       if (timer !== undefined) clearTimeout(timer)
     }
   }, [svgElement, measureLayout])
