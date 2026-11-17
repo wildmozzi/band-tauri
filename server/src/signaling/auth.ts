@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import type { Ctx } from './ctx'
 import { TOKEN_EXPIRY_GRACE_MS, isNonEmptyString, type Msg } from './protocol'
 import { isAuthenticated, send } from './registry'
@@ -18,6 +19,50 @@ export function jwtExpiryMs(token: string): number | null {
     return typeof payload.exp === 'number' ? payload.exp * 1000 : null
   } catch {
     return null
+  }
+}
+
+/** 검증된 토큰 캐시 기본값: 30초, 1000개 */
+export const TOKEN_CACHE_TTL_MS = 30_000
+export const TOKEN_CACHE_MAX = 1000
+
+/**
+ * verifyToken(Supabase getUser — 네트워크 왕복)을 감싸는 짧은 캐시 (서버 보안 점검: auth 증폭 방지).
+ * - 같은 토큰을 여러 연결이 동시에·반복해 보내도 getUser는 한 번: 진행 중인 조회는 함께 기다리고,
+ *   성공 결과는 min(TTL, JWT exp)까지 재사용한다. 키는 토큰의 SHA-256(긴 토큰 문자열을 그대로 쥐지 않음).
+ * - 실패(null)는 캐시하지 않는다(일시 장애를 굳히지 않음). 무작위 토큰 폭주는 연결별 auth 버킷이 막는다.
+ * - 한계: 로그아웃(세션 폐기)한 토큰도 캐시에 있으면 최대 TTL 동안 WS auth가 통과한다. 원래도 WS는 연결 뒤 재검증하지 않는다.
+ */
+export function cachedTokenVerifier(
+  verify: (token: string) => Promise<string | null>,
+  opts: { ttlMs?: number; max?: number; now?: () => number } = {},
+): (token: string) => Promise<string | null> {
+  const ttlMs = opts.ttlMs ?? TOKEN_CACHE_TTL_MS
+  const max = opts.max ?? TOKEN_CACHE_MAX
+  const now = opts.now ?? Date.now
+  const cache = new Map<string, { uid: string; until: number }>()
+  const inflight = new Map<string, Promise<string | null>>()
+
+  return async (token: string) => {
+    const key = createHash('sha256').update(token).digest('base64')
+    const hit = cache.get(key)
+    if (hit) {
+      if (hit.until > now()) return hit.uid
+      cache.delete(key)
+    }
+    const pending = inflight.get(key)
+    if (pending) return pending
+    const p = verify(token).then(uid => {
+      const exp = jwtExpiryMs(token)
+      const until = Math.min(now() + ttlMs, exp ?? Infinity)
+      if (uid && until > now()) {
+        if (cache.size >= max) cache.delete(cache.keys().next().value as string) // 가장 오래 넣은 것부터
+        cache.set(key, { uid, until })
+      }
+      return uid
+    }).finally(() => inflight.delete(key))
+    inflight.set(key, p)
+    return p
   }
 }
 

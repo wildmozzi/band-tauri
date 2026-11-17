@@ -21,6 +21,7 @@ import { createPerformers } from '../signaling/performers'
 import { createNativeSession } from '../signaling/nativeSession'
 import { handleLeave } from '../signaling/membership'
 import { createResume, suspendOnClose } from '../signaling/resume'
+import { cachedTokenVerifier } from '../signaling/auth'
 import { dispatch, type ConnCtx, type SignalingServices } from '../signaling/dispatch'
 
 /**
@@ -85,7 +86,9 @@ export function initializeWebSocket(
   options: WsOptions = {},
 ): WebSocketServer {
   const env = options.env ?? process.env
-  const deps: WsDeps = { ...supabaseDeps(supabase), ...options.deps }
+  const baseDeps: WsDeps = { ...supabaseDeps(supabase), ...options.deps }
+  // 같은 토큰의 getUser 반복·동시 호출을 한 번으로 (서버 보안 점검: auth 증폭 방지)
+  const deps: WsDeps = { ...baseDeps, verifyToken: cachedTokenVerifier(baseDeps.verifyToken) }
   const limits: WsLimits = { ...DEFAULT_LIMITS, ...options.limits }
   const scryptGate = options.scryptGate ?? defaultScryptGate
 
@@ -184,6 +187,7 @@ export function initializeWebSocket(
           msgBucket: new TokenBucket(limits.msgBurst, limits.msgPerSec),
           chatBucket: new TokenBucket(limits.chatBurst, limits.chatPerSec),
           joinBucket: new TokenBucket(limits.joinBurst, limits.joinPerSec),
+          authBucket: new TokenBucket(limits.authBurst, limits.authPerSec),
           dropped: 0,
           lastRateLimitNotice: 0,
         },
@@ -217,6 +221,7 @@ export function initializeWebSocket(
       let ok = client.conn.msgBucket.take()
       if (ok && msg.type === 'chat') ok = client.conn.chatBucket.take()
       if (ok && (msg.type === 'join' || msg.type === 'leave')) ok = client.conn.joinBucket.take()
+      if (ok && msg.type === 'auth') ok = client.conn.authBucket.take()
       if (ok) return true
 
       client.conn.dropped++

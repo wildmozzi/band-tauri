@@ -86,6 +86,11 @@ export interface EngineCandidate { kind: 'lan' | 'public'; addr: string }
 // 모양의 기준은 서버 코드와 test/fixtures/ws-transcript.json이다. 서버 send는 아직 이 타입으로 검사하지 않는다
 // (S3은 위치만 옮겨 아직 하지 않음 — S4 이후). 지금은 e2e mock(client/e2e/mocks/signaling.ts)이 이 타입으로 맞춰 mock이 서버와 어긋나면 e2e tsc가 실패한다.
 
+/** 관람 중계 본문: RTCSessionDescriptionInit 중 type·sdp (type은 offer|answer|pranswer|rollback) */
+export interface SessionDescription { type?: string; sdp: string }
+/** 관람 중계 본문: RTCIceCandidateInit 중 candidate(빈 문자열 = 후보 끝)·sdpMid·sdpMLineIndex(0..65535)·usernameFragment */
+export interface IceCandidate { candidate: string; sdpMid?: string | null; sdpMLineIndex?: number | null; usernameFragment?: string | null }
+
 export interface EngineDescriptor {
   ssrc: number
   key: string
@@ -119,8 +124,10 @@ export type ServerMessage =
   | { type: 'participant-left'; oderId: string }
   | ({ type: 'performer-updated'; nickname: string; instrument?: string; isPerforming: boolean; isHost?: boolean } & FromSender)
   | ({ type: 'chat'; message: string; nickname: string; timestamp: number } & FromSender)
-  /** 관람 WebRTC 중계: 클라이언트 메시지를 그대로 넘기고 from만 서버가 덮어쓴다 */
-  | { type: 'offer' | 'answer' | 'ice-candidate'; from: string; to: string; [field: string]: unknown }
+  /** 관람 WebRTC 중계: 서버가 아는 필드만으로 다시 구성한다(viewerRelay.buildViewerSignal). from은 서버의 clientId */
+  | { type: 'offer'; from: string; to: string; offer: SessionDescription }
+  | { type: 'answer'; from: string; to: string; answer: SessionDescription }
+  | { type: 'ice-candidate'; from: string; to: string; candidate: IceCandidate }
   | { type: 'native-descriptor'; from: string; descriptor: EngineDescriptor }
   | { type: 'native-leave'; from: string }
   | { type: 'relay-token'; token: string; bindKey: string; addr: string; ssrc: number; expiresAt: number; expiresIn: number; serverNow: number }

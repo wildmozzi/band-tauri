@@ -27,6 +27,9 @@ export interface WsLimits {
   /** join/leave 토큰 버킷 (DB 쓰기 증폭 방지) */
   joinBurst: number
   joinPerSec: number
+  /** auth 토큰 버킷 — auth마다 Supabase getUser를 부르므로 연결당 횟수를 묶는다(서버 보안 점검: 증폭 방지) */
+  authBurst: number
+  authPerSec: number
   /** IP당 동시 연결 수 */
   maxConnectionsPerIp: number
   /** 이만큼 메시지를 버리면 연결 종료 */
@@ -61,6 +64,8 @@ export const DEFAULT_LIMITS: WsLimits = {
   chatPerSec: 2,
   joinBurst: 5,
   joinPerSec: 0.2,
+  authBurst: 5,
+  authPerSec: 0.1,
   maxConnectionsPerIp: 20,
   maxDropped: 200,
   maxPerformers: 6,
@@ -102,6 +107,7 @@ export interface Client {
     msgBucket: TokenBucket
     chatBucket: TokenBucket
     joinBucket: TokenBucket
+    authBucket: TokenBucket
     dropped: number
     lastRateLimitNotice: number
   }
