@@ -157,6 +157,7 @@ test.describe('웹 관람: 로그인 관람자의 세션 재개 (수신 연결 �
   const perfState = (page: Page) => page.evaluate(() => window.__e2ePerf!.connectionState)
 
   test('같은 clientId로 재개되면 수신 연결을 유지하고 다시 협상하지 않는다(LIVE 유지)', async ({ page, mock }) => {
+    await trackViewerCloses(page)
     await mock.loginAs(BOB)
     mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
     await page.goto(`/rooms/${ROCK_ROOM.id}`)
@@ -173,12 +174,16 @@ test.describe('웹 관람: 로그인 관람자의 세션 재개 (수신 연결 �
     // 끊긴 동안·재개 뒤 모두 LIVE, 연주자 쪽 연결도 그대로. 새 answer 없음(재협상 없음)
     await expect(liveBadge(page)).toHaveText('● LIVE')
     expect(await perfState(page)).toBe('connected')
-    await page.waitForTimeout(500)
+    // 재개 뒤 room-state·채팅까지 처리된 시점에도 관람 PC를 닫지 않았고 새 answer도 없다
+    mock.signaling.pushChat(ROCK_ROOM.id, REMOTE_PERFORMER, '재개 뒤 채팅')
+    await expect(page.getByText('재개 뒤 채팅')).toBeVisible()
+    expect(await viewerCloses(page)).toBe(0)
     expect(mock.signaling.messages('answer')).toHaveLength(answers)
     await expect(liveBadge(page)).toHaveText('● LIVE')
   })
 
   test('재개됐지만 그 사이 연주자가 내려갔으면(room-state에 없음) 유지한 연결을 닫는다', async ({ page, mock }) => {
+    await trackViewerCloses(page)
     await mock.loginAs(BOB)
     mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
     await page.goto(`/rooms/${ROCK_ROOM.id}`)
@@ -189,7 +194,7 @@ test.describe('웹 관람: 로그인 관람자의 세션 재개 (수신 연결 �
     mock.signaling.dropForResume(false)
     await expect(page.locator('.reconnect-banner')).toHaveCount(0, { timeout: 10_000 })
     await expect(liveBadge(page)).toHaveText('대기')
-    await expect.poll(() => perfState(page), { timeout: 15_000 }).not.toBe('connected')
+    await expect.poll(() => viewerCloses(page)).toBe(1)
   })
 
   test('재개에 실패하면(서버 재시작 — 새 clientId) 지금처럼 닫고 새 offer로 다시 협상한다', async ({ page, mock }) => {
