@@ -2,3 +2,4 @@
 export { RoomDetail } from './RoomDetail'
 export { FloatingMiniPlayer } from './components/FloatingMiniPlayer'
 export { RoomProvider } from './state/RoomProvider'
+export { preloadPerformerUi } from './components/performerUiLoader'

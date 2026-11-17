@@ -1,16 +1,18 @@
 /**
  * 엔진 런타임 묶음 분리(perf/web-native-split): 연주 세션 본체·관람 방송(nativeRuntime-*.js)은 데스크톱 앱에서만 받는다.
  * 웹 관람(합주실 첫 화면)은 받지 않고, 데스크톱 앱(가짜 Tauri)은 첫 그리기 전에 받아 두어 연주 시작이 그대로 된다.
+ * 연주자 전용 UI(performerUi-*.js: 내 채널·메트로놈·엔진 녹음·진단 줄, EchoMeasure-*.js: 피어 에코 측정)도 같다(perf/performer-ui-lazy).
  */
 import { BOB, REMOTE_PERFORMER, ROCK_ROOM } from './fixtures'
 import { installFakeTauri, tauriCalls } from './mocks/tauri'
 import { expect, test } from './test'
 
 const isRuntimeChunk = (url: string) => /\/assets\/nativeRuntime-[^/]+\.js$/.test(url)
+const performerUiChunk = (url: string) => url.match(/\/assets\/(performerUi|EchoMeasure)-[^/]+\.js$/)?.[1] ?? null
 
-test('웹 관람: 합주실 첫 화면에서 엔진 런타임 묶음을 받지 않는다', async ({ page, mock }) => {
+test('웹 관람: 합주실 첫 화면에서 엔진 런타임·연주자 전용 UI 묶음을 받지 않는다', async ({ page, mock }) => {
   const requested: string[] = []
-  page.on('request', r => { if (isRuntimeChunk(r.url())) requested.push(r.url()) })
+  page.on('request', r => { if (isRuntimeChunk(r.url()) || performerUiChunk(r.url())) requested.push(r.url()) })
   mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
   await page.goto(`/rooms/${ROCK_ROOM.id}`)
   await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
@@ -18,9 +20,14 @@ test('웹 관람: 합주실 첫 화면에서 엔진 런타임 묶음을 받지 �
   expect(requested).toEqual([])
 })
 
-test('데스크톱 앱: 엔진 런타임을 받아 두고, 연주 참여가 엔진을 바로 시작한다', async ({ page, mock }) => {
+test('데스크톱 앱: 엔진 런타임·연주자 전용 UI를 받아 두고, 연주 참여가 엔진을 바로 시작한다', async ({ page, mock }) => {
   const requested: string[] = []
-  page.on('request', r => { if (isRuntimeChunk(r.url())) requested.push(r.url()) })
+  const performerUi: string[] = []
+  page.on('request', r => {
+    if (isRuntimeChunk(r.url())) requested.push(r.url())
+    const ui = performerUiChunk(r.url())
+    if (ui) performerUi.push(ui)
+  })
   await installFakeTauri(page, {
     engine_start: { ssrc: 1234, key: 'e2e-key', candidates: [{ kind: 'lan', addr: '192.168.0.10:50000' }] },
     engine_stats: { running: true, sampleRate: 48000, deviceBuffer: 128, inputLevel: 0, outputLevel: 0, xruns: 0, estLatencyMs: 8, devicePeriodMs: 2.7, peers: [] },
@@ -30,11 +37,49 @@ test('데스크톱 앱: 엔진 런타임을 받아 두고, 연주 참여가 엔�
   await page.goto(`/rooms/${ROCK_ROOM.id}`)
   await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
   expect(requested).toHaveLength(1)
+  // 연주자 전용 UI 두 묶음도 첫 그리기 전에 받아 둔다
+  expect([...performerUi].sort()).toEqual(['EchoMeasure', 'performerUi'])
 
   await page.getByRole('button', { name: /연주 참여하기/ }).click()
   await page.locator('.instrument-select-modal .instrument-option:not(.disabled)').first().click()
   await expect.poll(() => mock.signaling.messages('start-performing').length).toBe(1)
   expect((await tauriCalls(page)).filter(c => c === 'engine_start')).toHaveLength(1)
   await expect(page.getByRole('button', { name: /관람자로 전환/ })).toBeVisible()
+  // 연주자 전용 UI(공유 메트로놈·내 채널)가 그려진다 — 더 받지 않는다
+  await expect(page.locator('.metronome-panel')).toBeVisible()
+  await expect(page.locator('.mic-toggle')).toBeVisible()
   expect(requested).toHaveLength(1)
+  expect(performerUi).toHaveLength(2)
+})
+
+test('데스크톱 앱: 연주자 UI 묶음을 못 받아도 앱은 돌고, 그 자리에 안내·다시 시도가 보이며 다시 시도로 회복한다 (#221 리뷰 M-1)', async ({ page, mock, consoleErrors }) => {
+  // 받기 실패를 일부러 일으킨다(미리 받기·그릴 때 받기 모두). 그 실패 로그는 예상된 것이다
+  consoleErrors.allow(/데스크톱 묶음 미리 받기 실패|불러오기 실패|Failed to fetch dynamically imported module|net::ERR_FAILED|The above error occurred/)
+  let block = true
+  await page.route(/\/assets\/performerUi-[^/]+\.js$/, route => (block ? route.abort() : route.continue()))
+  await installFakeTauri(page, {
+    engine_start: { ssrc: 1234, key: 'e2e-key', candidates: [{ kind: 'lan', addr: '192.168.0.10:50000' }] },
+    engine_stats: { running: true, sampleRate: 48000, deviceBuffer: 128, inputLevel: 0, outputLevel: 0, xruns: 0, estLatencyMs: 8, devicePeriodMs: 2.7, peers: [] },
+  })
+  mock.signaling.setRoom(ROCK_ROOM.id, { participants: [] })
+  await mock.loginAs(BOB)
+  await page.goto(`/rooms/${ROCK_ROOM.id}`)
+  await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
+
+  await page.getByRole('button', { name: /연주 참여하기/ }).click()
+  await page.locator('.instrument-select-modal .instrument-option:not(.disabled)').first().click()
+  await expect.poll(() => mock.signaling.messages('start-performing').length).toBe(1)
+  // 앱은 살아 있다(연주자 화면·관람자 전환 버튼), 못 받은 조각 자리에만 안내
+  await expect(page.getByRole('button', { name: /관람자로 전환/ })).toBeVisible()
+  const alerts = page.locator('.preload-error')
+  await expect(alerts.first()).toContainText('이 화면을 불러오지 못했습니다')
+  await expect(page.locator('.metronome-panel')).toHaveCount(0)
+
+  // 다시 받을 수 있게 되면 다시 시도로 회복한다
+  block = false
+  const count = await alerts.count()
+  for (let i = 0; i < count; i++) await alerts.first().getByRole('button', { name: '다시 시도' }).click()
+  await expect(page.locator('.metronome-panel')).toBeVisible()
+  await expect(page.locator('.mic-toggle')).toBeVisible()
+  await expect(alerts).toHaveCount(0)
 })

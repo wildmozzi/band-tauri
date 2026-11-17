@@ -2,7 +2,10 @@ import { useRoomTelemetry, useRoomMixer, useRoomRecording, useRoomConnection, us
 import { BroadcastMixerChannel, MyMixerChannel, PeerMixerChannel } from './MixerChannels'
 import { DEFAULT_MIX, formatDuration, formatPan, levelClass, performerName } from '../roomDetailModel'
 import { DiagnosticsExport } from '../../settings'
-import { NativeRecordingControl } from './NativeRecordingControl'
+import { NativeRecordingControl } from './performerUiLoader'
+// 연주자 전용 UI의 CSS는 첫 묶음에 예전 자리 그대로 둔다(JS만 지연 — performerUiLoader). 지연 CSS로 옮기면 App.css 뒤로 가
+// 같은 요소의 공용 클래스(performer-item·btn-primary·level-meter 등)와 동점 규칙의 승패가 바뀔 수 있다
+import './NativeRecordingControl.css'
 import { isNativeApp } from '../../../native/engineApi'
 import './MixerPanel.css'
 
