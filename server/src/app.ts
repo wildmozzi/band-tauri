@@ -11,6 +11,8 @@ import { resolveCorsOrigin } from './lib/securityConfig'
 import { apiLimiter, paymentLimiter } from './lib/rateLimits'
 import { UPLOAD_DIR } from './lib/uploads'
 import { createStorageRouter } from './routes/storage'
+import { createAvatarRouter } from './routes/avatars'
+import { supabaseProfilePhotoMetadata, type ProfilePhotoMetadata } from './services/profilePhotoService'
 import { getDefaultStorage } from './storage/config'
 import { createSupabaseStorageAdapter } from './storage/supabaseAdapter'
 import { supabaseAdmin } from './lib/supabase'
@@ -41,6 +43,10 @@ export interface AppOptions {
   postUserLimits?: Partial<PostUserLimits>
   /** 게시글 쓰기 저장소 (테스트에서 메모리 주입). 기본: Supabase service_role */
   postRepository?: PostRepository | null
+  /** 프로필 사진 저장소 (테스트에서 가짜 주입). 기본: STORAGE_DRIVER 설정의 avatars (P2-12) */
+  avatarStorage?: StorageAdapter | null
+  /** 프로필 사진 URL 기록(auth app_metadata) (테스트에서 가짜 주입). 기본: Supabase service_role */
+  profilePhotoMetadata?: ProfilePhotoMetadata | null
   /** 운영 집계(GET /api/ops/activity, P1-17①). 기본: 없음(503). index.ts가 WS 서버를 만든 뒤 값을 돌려준다 */
   activity?: () => ActivityCounts | null
   /** 운영 경로가 읽는 환경변수(OPS_TOKEN) — 테스트 주입. 기본: process.env */
@@ -101,6 +107,13 @@ export function createApp(options: AppOptions = {}) {
       imageStorage,
     ),
     { rateLimits: options.rateLimits, userLimits: options.postUserLimits },
+  ))
+  app.use('/api/storage/avatars', createAvatarRouter(
+    options.avatarStorage !== undefined ? options.avatarStorage : getDefaultStorage('avatars'),
+    options.profilePhotoMetadata !== undefined
+      ? options.profilePhotoMetadata
+      : supabaseAdmin ? supabaseProfilePhotoMetadata(supabaseAdmin) : null,
+    { rateLimits: options.rateLimits },
   ))
   app.use('/api/storage', createStorageRouter(
     imageStorage,

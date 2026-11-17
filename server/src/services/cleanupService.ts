@@ -77,6 +77,8 @@ export async function cleanupPendingImages(storage: StorageAdapter | null = getD
 
 export function scheduleCleanup(supabase: SupabaseClient) {
   cron.schedule('15 * * * *', () => cleanupPendingImages())
+  // 프로필 사진(P2-12)도 같은 pending → 검증 절차라 미검증 업로드를 같은 규칙으로 정리한다
+  cron.schedule('20 * * * *', () => cleanupPendingImages(getDefaultStorage('avatars')))
   cron.schedule('0 3 * * *', () => cleanupExpiredSeparations(supabase))
   cron.schedule('30 3 * * *', () => cleanupOrphanImages(supabase))
   console.log('[Cleanup] 매일 새벽 3시 만료 파일 정리 스케줄 등록됨')

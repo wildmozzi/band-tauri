@@ -78,7 +78,13 @@ export const postImageUploadBody = z.object({
   size: z.number().int().positive(),
 })
 
-/** 게시글 이미지 업로드 완료 확인 (P3-10 리뷰 M2) */
+/** 프로필 사진 서명 업로드 URL 요청 (P2-12). 정지 이미지만, 크기는 서버 상한(AVATAR_MAX_BYTES)으로 검증 */
+export const avatarUploadBody = z.object({
+  contentType: z.enum(['image/jpeg', 'image/png', 'image/webp']),
+  size: z.number().int().positive(),
+})
+
+/** 게시글 이미지·프로필 사진 업로드 완료 확인 (P3-10 리뷰 M2) */
 export const postImageCompleteBody = z.object({
   key: z.string().min(1).max(200),
 })
