@@ -97,7 +97,9 @@ export function handleViewerSignal(ctx: Ctx<ViewerRelaySvc>, msg: Msg) {
     if (!out) return
     const data = JSON.stringify(out)
     if (!allowRelay(client, target, Buffer.byteLength(data), ctx.svc.limits)) return
-    console.log(`[SIGNAL] ${msg.type} from ${id.slice(0, 8)} to ${target.id.slice(0, 8)}`)
+    // offer·answer만 남긴다: ice-candidate는 관람 연결 하나에 양방향 수~수십 개라 로그의 대부분(동시 재접속 때 약 80%)을
+    // 차지하고, console 쓰기가 서버 CPU 자기 시간의 약 7%였다(docs/overhaul/server-load-2026-11-18.md). 연결 흐름은 offer·answer로 보인다
+    if (msg.type !== 'ice-candidate') console.log(`[SIGNAL] ${msg.type} from ${id.slice(0, 8)} to ${target.id.slice(0, 8)}`)
     send(target.conn.ws, out)
   }
 }
