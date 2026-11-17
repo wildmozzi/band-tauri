@@ -1,6 +1,6 @@
 //! 녹음 쓰기 스레드(`band-record`)와 제어(`Recorder`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ const DETACH_WAIT: Duration = Duration::from_millis(1000);
 /// 100ms 안의 이벤트는 바로 합치므로, 이만큼 차려면 100ms 넘게 떨어진 끊김이 1만 번 있어야 한다.
 const MARK_TRACK_CAP: usize = 10_000;
 
-/// 쓰기 스레드가 한 바퀴에 갚는 앞 무음(초, `Writer::fill_owed`).
+/// 쓰기 스레드가 한 바퀴에 쓰는 밀린 구간(초, `Writer::fill_pending`).
 const FILL_SECONDS_PER_PASS: u64 = 10;
 
 /// 합치는 중인 구간 하나(절대 타임라인 위치).
@@ -366,13 +366,69 @@ struct Track {
     /// 피어 트랙을 이름 없이(peerId 가명) 만들었다 → 정지 때 이름이 생겼으면 파일을 바꾼다.
     unnamed: bool,
     w: Option<TrackWriter>,
-    /// 타임라인 기준 길이(무음 포함). 아직 파일에 안 쓴 `owed`·`spill`도 들어 있다.
+    /// 타임라인 기준 길이(무음 포함). 아직 파일에 안 쓴 `pending`도 들어 있다.
     frames: u64,
-    /// 아직 쓰지 못한 앞 무음(프레임). 늦게 들어온 피어(녹음 60분 뒤 등)의 앞 무음을 한 번에 쓰면 쓰기 스레드가 수 초 멈춰
-    /// 녹음 링(3초)이 넘친다 — `fill_owed`가 한 바퀴에 `FILL_FRAMES_PER_PASS`씩 갚는다.
-    owed: u64,
-    /// `owed`를 갚는 동안 들어온 이 트랙 샘플(인터리브). 다 갚으면 이어 쓴다.
-    spill: Vec<f32>,
+    /// 아직 파일에 안 쓴 구간(도착 순서 그대로). 늦게 들어온 피어(녹음 60분 뒤 등)의 앞 무음을 한 번에 쓰면 쓰기 스레드가
+    /// 수 초 멈춰 녹음 링(3초)이 넘친다 — 긴 빈 곳은 여기 무음 구간으로 두고 `fill_pending`이 한 바퀴에
+    /// `FILL_SECONDS_PER_PASS`어치씩 쓴다. 비어 있지 않은 동안 오는 빈 곳·샘플은 모두 뒤에 이어 붙여 순서를 지킨다
+    /// (#206 리뷰 H: 빈 곳을 무음 합계 하나에 더하면 그 앞 샘플이 빈 곳만큼 늦은 자리에 써졌다).
+    pending: VecDeque<Seg>,
+}
+
+/// 아직 쓰지 않은 트랙 구간.
+enum Seg {
+    /// 무음(프레임).
+    Silence(u64),
+    /// 인터리브 스테레오 샘플과 이미 쓴 앞부분(샘플 수).
+    Samples(Vec<f32>, usize),
+}
+
+impl Track {
+    fn push_silence(&mut self, frames: u64) {
+        if let Some(Seg::Silence(n)) = self.pending.back_mut() {
+            *n += frames;
+        } else {
+            self.pending.push_back(Seg::Silence(frames));
+        }
+    }
+
+    fn push_samples(&mut self, data: &[f32]) {
+        if let Some(Seg::Samples(v, _)) = self.pending.back_mut() {
+            v.extend_from_slice(data);
+        } else {
+            self.pending.push_back(Seg::Samples(data.to_vec(), 0));
+        }
+    }
+
+    /// 앞 구간부터 `budget`프레임까지(무음·샘플 모두) 쓴다. 반환: 쓴 프레임.
+    fn write_pending(&mut self, budget: u64) -> std::io::Result<u64> {
+        let Some(w) = self.w.as_mut() else { return Ok(0) };
+        let mut left = budget;
+        while left > 0 {
+            let Some(seg) = self.pending.front_mut() else { break };
+            let done = match seg {
+                Seg::Silence(n) => {
+                    let k = (*n).min(left);
+                    w.write_silence(k)?;
+                    *n -= k;
+                    left -= k;
+                    *n == 0
+                }
+                Seg::Samples(v, off) => {
+                    let rest = (v.len() - *off) / 2;
+                    let k = (rest as u64).min(left) as usize;
+                    w.write(&v[*off..*off + k * 2])?;
+                    *off += k * 2;
+                    left -= k as u64;
+                    *off >= v.len()
+                }
+            };
+            if done {
+                self.pending.pop_front();
+            }
+        }
+        Ok(budget - left)
+    }
 }
 
 struct Writer {
@@ -500,48 +556,40 @@ impl Writer {
             if stopping {
                 break;
             }
-            // 갚을 앞 무음이 남았으면 쉬지 않고 다음 바퀴(링도 그 사이 비운다).
-            if !self.fill_owed(self.fill_per_pass()) {
+            // 밀린 구간이 남았으면 쉬지 않고 다음 바퀴(링도 그 사이 비운다).
+            if !self.fill_pending(self.fill_per_pass()) {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
         self.finish()
     }
 
-    /// 한 바퀴에 갚는 앞 무음(프레임): 10초어치. FLAC 인코딩 약 10ms·WAV 24비트 약 2.9MB라 링(3초)을 비우는 주기를 늦추지 않는다.
+    /// 한 바퀴에 쓰는 밀린 구간(프레임): 10초어치. 무음이면 FLAC 인코딩 약 10ms·WAV 24비트 약 2.9MB라 링(3초)을 비우는 주기를
+    /// 늦추지 않는다. 밀린 샘플(실제 소리)도 같은 예산에 든다(#206 리뷰 L1).
     fn fill_per_pass(&self) -> u64 {
         u64::from(self.rate) * FILL_SECONDS_PER_PASS
     }
 
-    /// 트랙들의 앞 무음(`owed`)을 합쳐 `budget`프레임까지 쓰고, 다 갚은 트랙은 모아 둔 샘플(`spill`)을 이어 쓴다.
-    /// 반환: 아직 갚을 것이 남았다.
-    fn fill_owed(&mut self, mut budget: u64) -> bool {
+    /// 트랙들의 밀린 구간(`pending`, 도착 순서)을 합쳐 `budget`프레임까지 쓴다. 반환: 아직 남았다.
+    fn fill_pending(&mut self, mut budget: u64) -> bool {
         let mut err = None;
         for t in &mut self.tracks {
-            let Some(w) = t.w.as_mut() else { continue };
-            if t.owed > 0 && budget > 0 {
-                let n = t.owed.min(budget);
-                if let Err(e) = w.write_silence(n) {
-                    err = Some(format!("{}: {e}", t.meta.file));
-                    break;
-                }
-                t.owed -= n;
-                budget -= n;
+            if budget == 0 {
+                break;
             }
-            if t.owed == 0 && !t.spill.is_empty() {
-                if let Err(e) = w.write(&t.spill) {
+            match t.write_pending(budget) {
+                Ok(n) => budget -= n,
+                Err(e) => {
                     err = Some(format!("{}: {e}", t.meta.file));
                     break;
                 }
-                t.spill.clear();
-                t.spill.shrink_to(0);
             }
         }
         if let Some(e) = err {
             self.fail(e);
             return false;
         }
-        self.tracks.iter().any(|t| t.w.is_some() && (t.owed > 0 || !t.spill.is_empty()))
+        self.tracks.iter().any(|t| t.w.is_some() && !t.pending.is_empty())
     }
 
     fn fail(&mut self, e: String) {
@@ -553,8 +601,7 @@ impl Writer {
             if let Some(w) = t.w.take() {
                 let _ = w.finish();
             }
-            t.spill = Vec::new();
-            t.owed = 0;
+            t.pending = VecDeque::new();
         }
     }
 
@@ -588,7 +635,8 @@ impl Writer {
                 }
             }
             // 쓰기 실패(디스크 가득 등) 뒤에는 파일이 닫혀 더 늘지 않는다: 길이(통계 `durationSec`·요약·session.json)도 멈춘다.
-            // 전에는 링을 비우는 동안 계속 늘어 요약이 파일보다 길게 보고했다(발굴 2차).
+            // 전에는 링을 비우는 동안 계속 늘어 요약이 파일보다 길게 보고했다(발굴 2차). 근사다(#206 리뷰 L2): 밀린 구간(`pending`)을
+            // 쓰는 중에 실패하면 그 몫은 길이에 들었지만 파일에는 없고, 트랙마다 닫힌 길이도 다를 수 있다(실패 시점까지 쓴 만큼).
             if self.failed.is_none() {
                 self.end = self.end.max(rel + b.frames as u64);
             }
@@ -647,7 +695,7 @@ impl Writer {
         };
         match TrackWriter::create(&self.folder.join(&file), self.format, 2, self.rate) {
             Ok(w) => {
-                self.tracks.push(Track { key, meta: RecordTrack { kind, name, file, peer_id }, idx, unnamed: false, w: Some(w), frames: 0, owed: 0, spill: Vec::new() });
+                self.tracks.push(Track { key, meta: RecordTrack { kind, name, file, peer_id }, idx, unnamed: false, w: Some(w), frames: 0, pending: VecDeque::new() });
                 self.shared.tracks.store(self.tracks.len() as u32, Ordering::Relaxed);
                 Some(self.tracks.len() - 1)
             }
@@ -665,18 +713,20 @@ impl Writer {
     }
 
     /// `buf`(프레임 `frames`)를 타임라인 `rel`에 쓴다. 앞이 비었으면 무음으로 채운다. 빈 곳이 한 바퀴 몫(`fill_per_pass`)보다
-    /// 길면(늦게 들어온·다시 들어온 피어) 무음은 `owed`로 미뤄 `fill_owed`가 나눠 쓰고, 그동안 샘플은 `spill`에 모은다.
+    /// 길면(늦게 들어온·다시 들어온 피어) 무음 구간을 `pending`에 두고, 그 뒤로 오는 빈 곳·샘플도 도착 순서대로 이어 붙인다
+    /// (`fill_pending`이 나눠 쓴다).
     fn write_track(&mut self, i: usize, rel: u64, frames: u64) {
         let per_pass = self.fill_per_pass();
         let Some(t) = self.tracks.get_mut(i) else { return };
-        let Some(w) = t.w.as_mut() else { return };
+        if t.w.is_none() {
+            return;
+        }
         let mut res = Ok(());
-        let deferred = t.owed > 0 || !t.spill.is_empty();
         if rel > t.frames {
             let gap = rel - t.frames;
-            if deferred || gap > per_pass {
-                t.owed += gap;
-            } else {
+            if !t.pending.is_empty() || gap > per_pass {
+                t.push_silence(gap);
+            } else if let Some(w) = t.w.as_mut() {
                 res = w.write_silence(gap);
             }
             t.frames = rel;
@@ -685,9 +735,9 @@ impl Writer {
         let skip = (t.frames - rel).min(frames) as usize;
         if res.is_ok() && skip < frames as usize {
             let data = &self.buf[skip * 2..frames as usize * 2];
-            if t.owed > 0 || !t.spill.is_empty() {
-                t.spill.extend_from_slice(data);
-            } else {
+            if !t.pending.is_empty() {
+                t.push_samples(data);
+            } else if let Some(w) = t.w.as_mut() {
                 res = w.write(data);
             }
             t.frames = rel + frames;
@@ -762,8 +812,8 @@ impl Writer {
     }
 
     fn finish(mut self) -> RecordSummary {
-        // 링은 더 차지 않으므로 남은 앞 무음·모은 샘플을 한 번에 쓴다(실패하면 `fail`이 파일을 닫는다).
-        self.fill_owed(u64::MAX);
+        // 링은 더 차지 않으므로 밀린 구간을 순서대로 한 번에 쓴다(실패하면 `fail`이 파일을 닫는다).
+        self.fill_pending(u64::MAX);
         let end = self.end;
         let mut bytes = 0;
         let mut err = self.failed.clone().or_else(|| self.track_error.clone());
@@ -852,6 +902,60 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// 트랙 파일을 읽어 왼쪽 채널 24비트 값으로(WAV·FLAC).
+    fn read_left(path: &Path) -> Vec<i32> {
+        let s: Vec<i32> = if path.extension().is_some_and(|e| e == "flac") {
+            claxon::FlacReader::open(path).unwrap().samples().map(|v| v.unwrap()).collect()
+        } else {
+            hound::WavReader::open(path).unwrap().samples::<i32>().map(|v| v.unwrap()).collect()
+        };
+        s.as_chunks::<2>().0.iter().map(|c| c[0]).collect()
+    }
+
+    /// #206 리뷰 H: 긴 앞 무음을 갚는 동안 같은 트랙에 두 번째 빈 곳(청크 버림·슬롯 잠깐 비재생·재입장)이 생겨도 순서가 지켜진다.
+    /// 리뷰어 재현: 피어 블록 하나@0 → 60초 빈 곳 → A@late → 한 블록 빈 곳 → B@late+2n. 첫 판(빈 곳을 무음 합계에 더함)은
+    /// `[무음 60초 + n][A][B]`로 써서 A가 n프레임 늦은 자리에 들어갔다. FLAC은 블록(4096) 경계에 걸치게 `late`를 어긋나게 둔다.
+    #[test]
+    fn second_gap_while_paying_keeps_order() {
+        for format in [RecordFormat::Wav24, RecordFormat::Flac] {
+            let rate = 48_000u32;
+            let dir = std::env::temp_dir().join(format!("band-rec-order-{format:?}-{}", std::process::id()));
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::create_dir_all(&dir).unwrap();
+            let (mut s_p, s_c, mut b_p, b_c) = alloc_rings(rate, false);
+            let opts = RecordOptions { format, ..Default::default() };
+            let resolve: PeerResolver = Box::new(|ssrc| (ssrc == 7).then(|| "peer-a".to_string()));
+            let mut w = Writer::new(&opts, dir.clone(), rate, s_c, b_c, resolve, Arc::default(), Arc::default(), Arc::new(MarkSink::default()), 0);
+            let n = 480usize;
+            let mut push = |pos: u64, v: f32| {
+                let mut occ = [0u32; MAX_SOURCES];
+                occ[1] = 7;
+                s_p.push_slice(&vec![v; n * 2]);
+                assert!(b_p.try_push(RecBlock { pos, frames: n as u32, mask: 1 << 1, mix: false, occ, short: [0; MAX_SOURCES] }).is_ok());
+            };
+            let late = u64::from(rate) * 60 + 123;
+            push(0, -0.25);
+            push(late, -0.5); // A
+            w.drain();
+            assert!(w.fill_pending(w.fill_per_pass()), "앞 무음을 갚는 중이어야 한다");
+            push(late + 2 * n as u64, -0.75); // B: 그 앞 한 블록이 빈 곳
+            w.drain();
+            while w.fill_pending(w.fill_per_pass()) {}
+            let sum = w.finish();
+            assert!(sum.error.is_none(), "{format:?}: {:?}", sum.error);
+            let s = read_left(&dir.join(&sum.tracks[0].file));
+            let (late, n) = (late as usize, n);
+            assert_eq!(s.len(), late + 3 * n, "{format:?}: 길이");
+            let q = |v: f32| (v * 8_388_607.0).round() as i32;
+            assert!(s[..n].iter().all(|&x| x == q(-0.25)), "{format:?}: 첫 블록");
+            assert!(s[n..late].iter().all(|&x| x == 0), "{format:?}: 앞 무음");
+            assert!(s[late..late + n].iter().all(|&x| x == q(-0.5)), "{format:?}: A가 제자리(late)에 있어야 한다");
+            assert!(s[late + n..late + 2 * n].iter().all(|&x| x == 0), "{format:?}: 두 번째 빈 곳은 A 뒤 무음");
+            assert!(s[late + 2 * n..].iter().all(|&x| x == q(-0.75)), "{format:?}: B");
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
     /// 발굴 2차(녹음): 녹음 1분 뒤 처음 들어온 피어의 앞 무음을 한 번에 쓰지 않는다. 전에는 `drain` 한 번이 그 무음을 다 썼다
     /// — FLAC 무음 인코딩이 1분에 약 0.054초(release)라 60분 뒤 들어오면 쓰기 스레드가 3초 넘게 멈추고, 그동안 녹음 링(3초)이
     /// 넘쳐 출력 콜백이 모든 트랙의 청크를 버렸다. 지금은 한 바퀴에 10초어치만 갚고 그동안 온 샘플은 모아 뒀다 이어 쓴다.
@@ -887,11 +991,11 @@ mod tests {
         let per_pass = w.fill_per_pass();
         let written = |w: &Writer| w.tracks.iter().map(|t| t.w.as_ref().map_or(0, |x| x.data_bytes()) / 6).collect::<Vec<_>>();
         assert!(written(&w).iter().all(|&f| f <= n as u64), "drain이 앞 무음을 한 번에 썼다: {:?}", written(&w));
-        assert!(w.fill_owed(per_pass), "1분 무음은 한 바퀴에 끝나지 않는다");
+        assert!(w.fill_pending(per_pass), "1분 무음은 한 바퀴에 끝나지 않는다");
         let total: u64 = written(&w).iter().sum();
         assert!(total <= n as u64 + per_pass, "한 바퀴에 {total}프레임(상한 {per_pass})");
         let mut passes = 1;
-        while w.fill_owed(per_pass) {
+        while w.fill_pending(per_pass) {
             passes += 1;
             assert!(passes < 100);
         }
