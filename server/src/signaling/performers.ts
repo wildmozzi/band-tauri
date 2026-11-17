@@ -116,7 +116,11 @@ export async function handleStartPerforming(ctx: Ctx<StartPerformingSvc>, msg: M
     return
   }
   // 권한 확인(방 정보 조회)을 기다리는 동안 방장이 내릴 수 있다: 내리기가 cancelledStart를 켜면 시작하지 않는다
-  // (대상은 이미 demoted-to-viewer를 받았다). 이미 연주 중인 재전송은 내리기가 평소처럼 처리한다
+  // (대상은 이미 demoted-to-viewer를 받았다). 이미 연주 중인 재전송은 내리기가 평소처럼 처리한다.
+  // 한계(#199 리뷰 L-2): 세션 재개(resume.attachSession)는 새 소켓의 체인을 옛 Client에 붙이므로 옛 소켓에서 진행 중이던 start와
+  // 재개 뒤 다시 보낸 start가 동시에 await할 수 있고, 두 start가 이 플래그(boolean)를 함께 쓴다 — 먼저 끝난 쪽이 starting을 내리거나
+  // cancelledStart를 소비하면 다른 쪽의 경합 처리는 빠진다. 창은 canStartPerforming이 방 정보를 조회하는 경우(승인 기록 없음·방장 아님,
+  // 즉 free_join이거나 어차피 거절될 때)만 열려 실해가 없다. 필요해지면 boolean 대신 시작 세대 번호로 바꾼다
   const starting = !client.perform.isPerforming
   if (starting) {
     client.perform.starting = true

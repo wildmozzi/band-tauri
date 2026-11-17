@@ -188,6 +188,17 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     }
   }, [phase, store])
 
+  // 연주가 시작되면(어느 경로든 — 연주 참여·승인 뒤 자동 시작·엔진 재시작) 내 참여 요청 상태를 비운다. 서버도 start-performing
+  // 성공 때 내 대기 중 요청을 지운다(free_join에서 요청 뒤 바로 시작). 남겨 두면 연주를 멈췄을 때 서버에 없는 요청이
+  // "방장 승인 대기 중"으로 보인다 (#199 리뷰 L-1)
+  useEffect(() => {
+    if (phase !== 'running') return
+    const perform = store.getSnapshot().requests.perform
+    if (perform.myStatus !== 'none' || perform.requestOutstanding) {
+      store.patch('requests', (r) => ({ perform: performRequestReducer(r.perform, { type: 'started' }) }))
+    }
+  }, [phase, store])
+
   // 악기 변경 결과 표시 타이머
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
   useEffect(() => {
