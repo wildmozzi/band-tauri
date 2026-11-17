@@ -475,6 +475,42 @@
       }
     ]
   },
+  "createPost instrument number": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "instrument",
+        "message": "악기 형식이 올바르지 않습니다."
+      }
+    ]
+  },
+  "createPost category null": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "category",
+        "message": "카테고리 형식이 올바르지 않습니다."
+      }
+    ]
+  },
+  "createPost instrument object": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "instrument",
+        "message": "악기 형식이 올바르지 않습니다."
+      }
+    ]
+  },
+  "createPost category array": {
+    "ok": false,
+    "issues": [
+      {
+        "field": "category",
+        "message": "카테고리 형식이 올바르지 않습니다."
+      }
+    ]
+  },
   "createPost many issues": {
     "ok": false,
     "issues": [

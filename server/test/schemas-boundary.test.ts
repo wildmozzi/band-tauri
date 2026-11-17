@@ -104,6 +104,11 @@ const CASES: [string, Schema, unknown, boolean?][] = [
   ['createPost bad category', createPostBody, { title: 't', content: 'c', category: 'spam' }, true],
   ['createPost wrong types', createPostBody, { title: 1, content: true, tags: 'x', images: {} }, true],
   ['createPost title null', createPostBody, { title: null, content: 'c' }, true],
+  // 목록 필드에 문자열이 아닌 값(#224 리뷰 L-1: zod 4는 invalid_value, zod 3은 invalid_type → "형식" 문구)
+  ['createPost instrument number', createPostBody, { title: 't', content: 'c', instrument: 3 }, true],
+  ['createPost category null', createPostBody, { title: 't', content: 'c', category: null }, true],
+  ['createPost instrument object', createPostBody, { title: 't', content: 'c', instrument: { v: 'guitar' } }, true],
+  ['createPost category array', createPostBody, { title: 't', content: 'c', category: ['general'] }, true],
   ['createPost many issues', createPostBody, { title: '', content: long(20_001), tags: ['', long(60)], instrument: 'x', category: 'y' }, true],
   ['updatePost empty ok', updatePostBody, {}, true],
   ['updatePost legacy values ok', updatePostBody, { title: long(500), tags: Array.from({ length: 30 }, () => 't'), instrument: 'flute' }, true],

@@ -173,7 +173,8 @@ export function postFieldIssues(error: z.ZodError, input?: unknown): FieldIssue[
     else if (issue.code === 'too_big') {
       const max = Number(issue.maximum)
       message = issue.origin === 'array' ? `${label}은(는) 최대 ${max}개까지입니다.` : inArray ? `${label}은(는) 하나에 최대 ${max}자까지입니다.` : `${label}은(는) 최대 ${max}자까지입니다.`
-    } else if (issue.code === 'invalid_value') message = `${label}: 선택할 수 없는 값입니다.`
+    } else if (issue.code === 'invalid_value' && typeof valueAt(input, issue.path) === 'string') message = `${label}: 선택할 수 없는 값입니다.`
+    // 문자열이 아닌 값(숫자·null 등)은 zod 4도 invalid_value지만 zod 3은 invalid_type이었다 → 아래 "형식" 문구(#224 리뷰 L-1)
     else if (issue.code === 'invalid_type' && valueAt(input, issue.path) === undefined) message = `${label}을(를) 입력하세요.`
     else message = `${label} 형식이 올바르지 않습니다.`
     const k = `${field}|${message}`
