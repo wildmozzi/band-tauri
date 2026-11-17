@@ -41,6 +41,8 @@ export interface RequestsSlice {
   pendingInstrumentChanges: InstrumentChangeRequest[]
   myInstrumentChangeStatus: MyRequestStatus
   myNewInstrument: string | null
+  /** 방장: 마지막 방장 조작(관람자로 내리기)이 거절된 안내. 없으면 null */
+  hostActionError: string | null
 }
 
 export interface ViewerSlice {
@@ -153,6 +155,7 @@ export function initialRoomState(over: Partial<RoomState> = {}): RoomState {
       pendingInstrumentChanges: [],
       myInstrumentChangeStatus: 'none',
       myNewInstrument: null,
+      hostActionError: null,
     },
     viewer: { remoteAudioMap: {}, status: 'idle', error: null, networkStats: {} },
     mixer: { mixSettingsMap: {}, masterVolume: 1, masterMuted: false, masterPan: 0 },

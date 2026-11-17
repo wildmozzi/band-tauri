@@ -101,7 +101,7 @@ export type ServerError =
   | ErrorOf<'password-invalid', { roomId: string; remainingAttempts: number }>
   | ErrorOf<'password-rate-limited' | 'password-busy', { roomId: string; retryAfterMs: number }>
   | ErrorOf<'room-full', { reason: 'room-full' | 'anonymous-limit'; roomId: string; maxParticipants: number }>
-  | ErrorOf<'login-required' | 'perform-not-approved' | 'room-full-performers' | 'descriptor-invalid' | 'key-conflict' | 'ssrc-conflict' | 'metronome-invalid' | 'metronome-host-only'>
+  | ErrorOf<'login-required' | 'perform-not-approved' | 'room-full-performers' | 'descriptor-invalid' | 'key-conflict' | 'ssrc-conflict' | 'metronome-invalid' | 'metronome-host-only' | 'demote-not-performer'>
 
 /** 방 안 브로드캐스트(broadcastToRoom)가 붙이는 보낸 사람 표시. 둘 다 보낸 사람의 clientId */
 type FromSender = { oderId: string; from: string }
@@ -113,7 +113,8 @@ export type ServerMessage =
   /** 앱 수준 ping에 대한 응답 (P1-15) */
   | { type: 'pong' }
   | ServerError
-  | { type: 'room-state'; participants: Participant[]; peerIds: string[]; isHost: boolean }
+  /** isPerforming: 받는 사람 자신의 연주 상태(서버 기준, P2-9) */
+  | { type: 'room-state'; participants: Participant[]; peerIds: string[]; isHost: boolean; isPerforming: boolean }
   | ({ type: 'participant-joined'; participant: Participant; rejoin: boolean } & FromSender)
   | { type: 'participant-left'; oderId: string }
   | ({ type: 'performer-updated'; nickname: string; instrument?: string; isPerforming: boolean; isHost?: boolean } & FromSender)
@@ -136,3 +137,5 @@ export type ServerMessage =
   | { type: 'instrument-change-rejected'; reason: string }
   | { type: 'instrument-change-request-cancelled'; oderId: string }
   | { type: 'participant-instrument-changed'; oderId: string; instrument: string }
+  /** 방장이 나를 관람자로 내렸다 (P2-9): 엔진 연주를 멈추고 관람 모드로 */
+  | { type: 'demoted-to-viewer' }

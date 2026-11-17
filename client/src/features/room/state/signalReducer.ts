@@ -47,6 +47,8 @@ export type RoomEffect =
   /** 악기 변경 결과 표시 후 기본 상태로 */
   | { type: 'reset-instrument-change-after'; ms: number }
   | { type: 'server-error'; code: unknown; message: unknown }
+  /** 방장이 나를 관람자로 내렸다(P2-9): 엔진 세션을 알림 없이 멈추고 안내 (서버가 이미 연주 상태를 지웠다) */
+  | { type: 'demoted'; message: string }
 
 export interface SignalContext {
   selfId: string | null
@@ -54,6 +56,11 @@ export interface SignalContext {
   rejoining: boolean
   /** password-busy 자동 재시도 횟수 */
   busyRetryCount: number
+  /**
+   * 세션 재개 직후의 room-state인가 (P2-9, #180 리뷰 M-1). 그렇다면 room-state.isPerforming(서버 기준 내 연주 상태)으로
+   * 엔진을 맞춘다. 재개가 아닌 입장의 room-state는 막 다시 시작한 엔진의 start-performing보다 먼저 처리됐을 수 있어 보지 않는다
+   */
+  verifySelfPerforming?: boolean
   now: () => number
   makeChatId: (senderId: string, timestamp: number) => string
 }
@@ -66,6 +73,20 @@ export interface SignalResult {
 }
 
 export const MAX_BUSY_RETRIES = 5
+
+/** 관람자로 내려졌을 때 안내 (P2-9). 연주 오류 자리(ParticipationToggle)에 보인다 */
+export const DEMOTED_MESSAGE = '방장이 나를 관람자로 전환했습니다. 다시 연주하려면 "연주 참여하기"를 누르세요(승인제 방은 방장 승인이 필요합니다).'
+
+/** 재개 뒤 서버 기준으로 내가 연주자가 아닐 때 (내리기 알림 유실 등, #180 리뷰 M-1) */
+export const LOST_PERFORMER_MESSAGE = '연결이 끊긴 사이 연주자 자리가 해제되었습니다(방장이 관람자로 전환했을 수 있습니다). 다시 연주하려면 "연주 참여하기"를 누르세요.'
+
+/** 방장: demote-not-performer를 받았을 때 (#180 리뷰 L-4) */
+export const DEMOTE_FAILED_MESSAGE = '이미 연주를 멈췄거나 나간 참가자라 관람자로 내리지 못했습니다.'
+
+/** 관람자로 내려졌을 때 비우는 내 요청 상태 (참여 요청·악기 변경) */
+function clearMyRequests(req: RoomState['requests']): RoomState['requests'] {
+  return { ...req, perform: performRequestReducer(req.perform, { type: 'cancelled' }), myInstrumentChangeStatus: 'none', myNewInstrument: null }
+}
 
 interface ParticipantPayload {
   oderId: string
@@ -150,6 +171,12 @@ function reduceRequests(s: RoomState, p: SignalPayload): SignalResult | null {
       return done({ ...req, myInstrumentChangeStatus: 'rejected' }, [
         { type: 'reset-instrument-change-after', ms: INSTRUMENT_CHANGE_RESULT_MS.rejected },
       ])
+    case 'demoted-to-viewer':
+      // 방장이 관람자로 내렸다(P2-9): 내 참여 요청·악기 변경 상태를 비우고 방송·엔진을 멈춘다(native-leave·stop-performing은
+      // 보내지 않는다 — 서버가 이미 연주 상태를 지우고 다른 연주자에게 알렸다)
+      // 엔진이 이미 멈춰 있으면 할 일이 없다(늦게 온 중복 알림이 새로 보낸 참여 요청을 지우지 않게)
+      if (s.perform.phase === 'idle') return done(null)
+      return done(clearMyRequests(req), [{ type: 'stop-broadcast' }, { type: 'demoted', message: DEMOTED_MESSAGE }])
     case 'participant-instrument-changed': {
       if (typeof p.oderId !== 'string' || typeof p.instrument !== 'string') return done(null)
       const prev = s.roster[p.oderId]
@@ -208,9 +235,13 @@ function reduceParticipants(s: RoomState, p: SignalPayload, ctx: SignalContext):
       }
       const effects: RoomEffect[] = [{ type: 'set-rejoining', value: false }, { type: 'clear-busy-retry' }]
       if (conn.currentRoomId) effects.push({ type: 'remember-password', roomId: conn.currentRoomId })
+      // 재개했는데 서버는 내가 연주자가 아니라고 한다(끊긴 사이 내려졌는데 알림이 유실됨 등): 아무도 못 듣는 "연주 중"으로 남지 않게 멈춘다
+      const ghost = ctx.verifySelfPerforming === true && p.isPerforming === false && s.perform.phase === 'running'
+      if (ghost) effects.push({ type: 'stop-broadcast' }, { type: 'demoted', message: LOST_PERFORMER_MESSAGE })
       return {
         handled: true,
         patch: {
+          ...(ghost ? { requests: clearMyRequests(s.requests) } : {}),
           connection: {
             ...conn,
             ...(typeof p.isHost === 'boolean' ? { isRoomHost: p.isHost } : {}),
@@ -289,7 +320,12 @@ function reduceParticipants(s: RoomState, p: SignalPayload, ctx: SignalContext):
       return { handled: true, patch: ensurePeer(from), effects: [{ type: 'ice-candidate', from, candidate: p.candidate as RTCIceCandidateInit }] }
 
     case 'error':
-      return { handled: true, patch: null, effects: [{ type: 'server-error', code: p.code, message: p.message }] }
+      return {
+        handled: true,
+        // 방장: 내리기가 거절됐다(대상이 이미 연주를 멈췄거나 나감) — 패널에 안내 (#180 리뷰 L-4)
+        patch: p.code === 'demote-not-performer' ? { requests: { ...s.requests, hostActionError: DEMOTE_FAILED_MESSAGE } } : null,
+        effects: [{ type: 'server-error', code: p.code, message: p.message }],
+      }
 
     default:
       return null

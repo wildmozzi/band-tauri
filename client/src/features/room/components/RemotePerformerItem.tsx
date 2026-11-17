@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { EchoMeasure } from '../../settings'
 import type { PeerInstrument } from '../state/roomHooks'
 import type { EngineStats, PeerStats } from '../../../native/engineApi'
@@ -12,7 +13,7 @@ import {
 } from '../roomDetailModel'
 import './RemotePerformerItem.css'
 
-/** 연주자 목록의 상대 연주자 행: 피어 상태 배지, 경로 안내, 입→귀 추정 지연(RTT는 툴팁), 음소거, 에코 측정 */
+/** 연주자 목록의 상대 연주자 행: 피어 상태 배지, 경로 안내, 입→귀 추정 지연(RTT는 툴팁), 음소거, 에코 측정, (방장) 관람자로 내리기 */
 export function RemotePerformerItem({
   oderId,
   peerInfo,
@@ -23,6 +24,7 @@ export function RemotePerformerItem({
   relayError,
   muted,
   onToggleMute,
+  onDemote,
   rowRef,
 }: {
   oderId: string
@@ -36,6 +38,8 @@ export function RemotePerformerItem({
   relayError: string | null
   muted: boolean
   onToggleMute: () => void
+  /** 방장 화면에서만: 이 연주자를 관람자로 내린다(P2-9). 확인 단계를 거친 뒤 부른다 */
+  onDemote?: () => void
   rowRef: (el: HTMLDivElement | null) => void
 }) {
   const instInfo = instrumentInfo(peerInfo.instrument)
@@ -45,6 +49,8 @@ export function RemotePerformerItem({
   const pathHint = state ? peerPathHint(state, ps?.path, engineStats?.relay, relayError) : null
   // 상대 입력 → 내 귀 추정(P2-8). 엔진 통계만으로 계산. 상대 입력 버퍼·프레임(P2-8b)이 다 있으면 "≈" 없이, 하나라도 없거나 하한(포화·에코 측정 중)이면 ≈
   const ear = ps ? estimateEarLatencyMs(ps, engineStats) : null
+  const [confirmDemote, setConfirmDemote] = useState(false)
+  const name = performerName(peerInfo.nickname, oderId)
 
   return (
     <div className="performer-item-wrapper" ref={rowRef}>
@@ -91,9 +97,32 @@ export function RemotePerformerItem({
         )}
         {/* 피어 메뉴: 에코 측정(네트워크 포함 왕복, 상대 동의 필요) */}
         {isPerformer && (
-          <EchoMeasure peerId={oderId} peerName={performerName(peerInfo.nickname, oderId)} stats={ps} />
+          <EchoMeasure peerId={oderId} peerName={name} stats={ps} />
+        )}
+        {/* 방장: 관람자로 내리기 (P2-9). 실수로 누르지 않게 같은 행에서 한 번 더 확인 */}
+        {onDemote && !confirmDemote && (
+          <button className="performer-demote-btn" onClick={() => setConfirmDemote(true)} title={`${name}님을 관람자로 내리기`}>
+            관람자로 내리기
+          </button>
         )}
       </div>
+      {onDemote && confirmDemote && (
+        <div className="performer-demote-confirm" role="alertdialog" aria-label="관람자로 내리기 확인">
+          <span>{name}님의 연주를 멈추고 관람자로 내릴까요?</span>
+          <button
+            className="performer-demote-yes"
+            onClick={() => {
+              setConfirmDemote(false)
+              onDemote()
+            }}
+          >
+            내리기
+          </button>
+          <button className="performer-demote-no" onClick={() => setConfirmDemote(false)}>
+            취소
+          </button>
+        </div>
+      )}
     </div>
   )
 }

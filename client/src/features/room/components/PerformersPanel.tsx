@@ -41,7 +41,7 @@ export function PerformersPanel({
   const { myInstrument, canPerform, broadcasterId, relayError } = useRoomPerform()
   const { peerEngineStats, engineStats } = useRoomTelemetry('peerEngineStats', 'engineStats')
   const { mixSettingsMap, setMixMuted } = useRoomMixer()
-  const { pendingRequests } = useRoomRequests()
+  const { pendingRequests, demotePerformer, hostActionError, dismissHostActionError } = useRoomRequests()
 
   return (
     <aside className="performers-panel">
@@ -74,6 +74,7 @@ export function PerformersPanel({
               relayError={relayError}
               muted={muted}
               onToggleMute={() => setMixMuted(oderId, !muted)}
+              onDemote={isHost && !peerInfo.isHost ? () => demotePerformer(oderId) : undefined}
               rowRef={(el) => { performerRefs.current[oderId] = el }}
             />
           )
@@ -86,6 +87,14 @@ export function PerformersPanel({
           </div>
         )}
       </div>
+
+      {/* 방장: 내리기 거절 안내 (#180 리뷰 L-4) */}
+      {isHost && hostActionError && (
+        <div className="host-action-error" role="alert">
+          <span>{hostActionError}</span>
+          <button onClick={dismissHostActionError} aria-label="안내 닫기">✕</button>
+        </div>
+      )}
 
       {/* 방장: 승인 요청 알림 (참여 버튼 위에 표시) */}
       {isHost && pendingRequests.length > 0 && (

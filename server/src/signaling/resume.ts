@@ -138,7 +138,8 @@ export function attachSession(ctx: Ctx<ResumeSvc>, old: Client): Client {
 
 /**
  * 세션 재개 2단계: 재개 알림. 방 참가자에게는 leave/joined를 보내지 않는다(그들 입장에서는 끊긴 적이 없음).
- * 순서: welcome(resumed) → auth-result(resumed) → room-state → (유예 중 이양됐으면) metronome-host-only.
+ * 순서: welcome(resumed) → auth-result(resumed) → room-state → (유예 중 이양됐으면) metronome-host-only
+ * → (유예 중 관람자로 내려졌으면) demoted-to-viewer.
  */
 export function announceResumed(ctx: Ctx<ResumeSvc>) {
   const { ws, client, id } = ctx
@@ -151,5 +152,10 @@ export function announceResumed(ctx: Ctx<ResumeSvc>) {
   if (client.resume.pendingMetronomeStop) {
     client.resume.pendingMetronomeStop = false
     send(ws, metronomeHostChanged())
+  }
+  // 유예 중에 방장이 관람자로 내렸다(P2-9): 그때 못 받은 알림을 지금 보내 엔진 연주를 멈추게 한다
+  if (client.resume.pendingDemoted) {
+    client.resume.pendingDemoted = false
+    send(ws, { type: 'demoted-to-viewer' })
   }
 }

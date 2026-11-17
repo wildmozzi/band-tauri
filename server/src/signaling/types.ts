@@ -120,6 +120,8 @@ export interface Client {
     timer?: ReturnType<typeof setTimeout>
     /** 재개 유예 중에 이양으로 내 메트로놈이 꺼졌다: 재개 때 metronome-host-only를 보낸다 (PR #53 L2). metronome이 켠다 */
     pendingMetronomeStop?: boolean
+    /** 재개 유예 중에 방장이 관람자로 내렸다: 재개 때 demoted-to-viewer를 보낸다 (P2-9). requests가 켠다 */
+    pendingDemoted?: boolean
   }
   /** membership: 방 멤버십. isHost는 roomMeta.checkHost도 갱신한다 */
   member: {

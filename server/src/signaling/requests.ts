@@ -1,7 +1,7 @@
 import type { Ctx } from './ctx'
 import type { Performers } from './performers'
 import { isNonEmptyString, rejectReason, type InstrumentChangeRequest, type Msg, type PerformRequest } from './protocol'
-import { isAuthenticated, send, type Registry } from './registry'
+import { isAuthenticated, isPerformer, send, type Registry } from './registry'
 import type { Client } from './types'
 import type { RoomMetaStore } from './roomMeta'
 
@@ -27,7 +27,11 @@ export function createRequests() {
         if (host) send(host.conn.ws, { type: 'perform-request-cancelled', oderId: clientId })
       }
     }
+    dropInstrumentChange(roomId, clientId, host)
+  }
 
+  /** 대기 중인 악기 변경 요청을 지우고 방장에게 instrument-change-request-cancelled (onLeave 둘째 단계) */
+  function dropInstrumentChange(roomId: string, clientId: string, host: Client | null) {
     const changeRequests = instrumentChangeRequests.get(roomId)
     if (changeRequests) {
       const idx = changeRequests.findIndex(r => r.oderId === clientId)
@@ -269,4 +273,63 @@ export function handleCancelInstrumentChangeRequest(ctx: Ctx<RequestsSvc>, _msg:
     }
   }
   return
+}
+
+/**
+ * 관람자로 내리기(P2-9)가 쓰는 공용 서비스 조각. 엔진·메트로놈은 같은 계층 모듈이라 import하지 않고 쓰는 함수만 구조 타입으로 적는다
+ * (requests → nativeSession·metronome 간선 없이, 설계 docs/server-architecture.md 2.1절).
+ */
+export interface DemoteSvc extends RequestsSvc {
+  nativeSession: { clearNative(c: Client): void }
+  metronome: { onEngineDown(roomId: string, clientId: string): void }
+}
+
+/**
+ * `demote-performer {targetId}` — 방장이 연주 중인 참가자를 관람자로 내린다 (P2-9, 계약: native-engine-design.md 5절).
+ * 권한은 DB 방장(requireHost, 아니면 무시 — 다른 방장 조작과 같음). 대상이 같은 방에서 연주 중인, 방장 아닌 참가자가 아니면
+ * `error demote-not-performer`. 처리 순서(= 받는 메시지 순서):
+ *   1. 승인 기록 삭제 (승인제 방이면 다시 연주하려면 새 참여 요청이 필요하다. free_join 방은 바로 다시 시작할 수 있다)
+ *   2. 대기 중 요청 취소(퇴장 정리와 같은 onLeave) → 방장에게 perform-request-cancelled, instrument-change-request-cancelled
+ *      (연주 중에도 참여 요청을 보낼 수 있어 남은 요청을 방장이 승인하면 곧바로 다시 승인되는 것을 막는다 — #180 리뷰 L-5)
+ *   3. 연주 상태 해제(stop-performing과 같음) + 엔진 바인딩 해제(ssrc·키 — 릴레이 토큰 갱신 불가) + 대상이 켠 메트로놈 삭제
+ *   4. 대상에게 demoted-to-viewer (재개 유예 중이면 재개 때 보낸다). 열린 소켓으로 보냈는데 유실된 경우는 재개 때 room-state의
+ *      isPerforming=false를 보고 대상 앱이 스스로 맞춘다(#180 리뷰 M-1)
+ *   5. 대상 외 전원에게 performer-updated(isPerforming=false) — stop-performing과 같은 모양
+ *   6. 연주자·엔진 켠 참가자에게 native-leave(from=대상) — 각 엔진이 곧바로 대상 피어를 뺀다(대상 클라이언트의 native-leave를 기다리지 않음)
+ */
+export async function handleDemotePerformer(ctx: Ctx<DemoteSvc>, msg: Msg) {
+  const { ws, client } = ctx
+  const { getRoomPeer, roomMembers, broadcastToRoom } = ctx.svc.registry
+  const { clearApproval } = ctx.svc.performers
+  const { onLeave } = ctx.svc.requests
+  // 방장 확인은 승인·거절과 같은 방 정보 캐시(최대 30초)다. 지금은 앱에 방장 이양 경로가 없어 충분하다.
+  // 이양 기능을 만들면 이 파괴적 조작은 메트로놈처럼 짧은 캐시(checkHost(client, limits.metronomeHostCheckMs))로 바꾼다 (#180 리뷰 L-3)
+  const host = await requireHost(ctx, client.member.roomId, msg)
+  if (!host) return
+  const { roomId, targetId } = host
+
+  const target = getRoomPeer(client, targetId)
+  if (!target || !target.perform.isPerforming || target.member.isHost) {
+    send(ws, { type: 'error', code: 'demote-not-performer', message: '연주 중인 참가자만 관람자로 내릴 수 있습니다.' })
+    return
+  }
+  console.log(`[DEMOTE-PERFORMER] Host demoted ${target.id.slice(0, 8)} (${target.member.nickname}) to viewer`)
+  // 1·2
+  clearApproval(roomId, target.auth.userId)
+  onLeave(roomId, target.id, client)
+  // 3
+  target.perform.isPerforming = false
+  target.perform.instrument = undefined
+  ctx.svc.nativeSession.clearNative(target)
+  ctx.svc.metronome.onEngineDown(roomId, target.id)
+  // 4
+  if (target.conn.ws.readyState === target.conn.ws.OPEN) send(target.conn.ws, { type: 'demoted-to-viewer' })
+  else target.resume.pendingDemoted = true
+  // 5
+  broadcastToRoom(roomId, target.id, { type: 'performer-updated', nickname: target.member.nickname, instrument: undefined, isPerforming: false })
+  // 6
+  for (const peer of roomMembers(roomId)) {
+    if (peer.id === target.id) continue
+    if (isPerformer(peer) || peer.native.active) send(peer.conn.ws, { type: 'native-leave', from: target.id })
+  }
 }
