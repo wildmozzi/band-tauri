@@ -274,7 +274,14 @@ impl EngineManager {
         // 세대가 같으면 그 사이 아무도 슬롯을 바꾸지 않았다: 아직 이 시작의 Starting이다
         debug_assert!(matches!(s.phase, Phase::Starting { .. }));
         s.phase = Phase::Idle;
-        let engine = result?;
+        let engine = match result {
+            Ok(e) => e,
+            Err(e) => {
+                // 테스트 모드가 강제로 켠 모니터를 되돌린다(엔진이 없는데 켜진 채 남지 않게). 합주 시작은 이미 복원했다.
+                self.restore_monitor(&mut s);
+                return Err(e);
+            }
+        };
         // 같은 장치 구성에서 잰 루프백 보정값이 있으면 메트로놈 출력 지연 보정에 쓴다(PR #34 M2(a))
         if let Some((key, o)) = self.loopback_cal.lock().clone() {
             if engine.device_key() == key {
@@ -611,7 +618,10 @@ mod tests {
         let mut b = FakeBackend::silence(48_000);
         b.exclusive = Some(Arc::new(AtomicBool::new(true))); // 이미 다른 곳이 쥔 장치
         let m = EngineManager::new(Arc::new(b), net());
+        assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed));
         assert!(m.start_monitor_only(cfg()).is_err());
+        assert!(!m.controls().monitor_enabled.load(Ordering::Relaxed), "테스트 모드 시작이 실패하면 강제로 켠 모니터를 되돌린다");
+        assert!(m.slot.lock().monitor_before_test.is_none());
         assert_eq!(phase(&m), P::Idle);
         assert!(!m.is_starting());
         assert!(!m.stats().running);
