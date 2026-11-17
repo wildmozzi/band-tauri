@@ -62,7 +62,7 @@ mod tests;
 pub(crate) use clock::FeedTiming;
 pub use clock::CallbackTracker;
 pub(crate) use local::LocalFifo;
-pub(crate) use peer_feed::PeerFeed;
+pub(crate) use peer_feed::{PeerFeed, DEADLINE_GUARD_US};
 
 use capture::Capture;
 #[cfg(test)]
@@ -105,6 +105,9 @@ pub struct WorkerStats {
     /// 워커 반복 본문 시간(수면 제외)과 반복 시작 간격 분포(엔진 ③c 측정, 진단 전용 — 측정 시험이 비운다).
     pub(crate) iter_body: crate::net::txlat::SendLatency,
     pub(crate) iter_period: crate::net::txlat::SendLatency,
+    /// 워커 수면 overshoot(요청한 `POLL`·`FINE_POLL`보다 늦게 깬 양) 분포(P2-17c, 제품 빌드에서도 켬 — 원자 덧셈 두 번).
+    /// 은닉 마감 여유(`DEADLINE_GUARD_US`)가 이 기계의 기상 지연을 덮는지 보는 진단이다(`EngineStats.cpu.workerWake*`).
+    pub(crate) sleep_over: crate::net::txlat::SendLatency,
     /// 반복마다 남은 락(`Peer.clock`)에서 기다린 합과, 본문에서 그것을 뺀 값(락 밖 비용, #122 리뷰 M3).
     pub(crate) iter_lock_wait: crate::net::txlat::SendLatency,
     pub(crate) iter_unlocked: crate::net::txlat::SendLatency,
@@ -343,7 +346,10 @@ impl Worker {
             #[cfg(not(any(test, feature = "test-support")))]
             let urgent = self.iterate(&mut last_start);
             // 은닉 마감이 가까우면 짧게 잔다(Windows 고해상도 타이머라도 0.5ms 폴링은 마감을 넘길 수 있다).
-            std::thread::sleep(if urgent { FINE_POLL } else { POLL });
+            let nap = if urgent { FINE_POLL } else { POLL };
+            let slept_at = Instant::now();
+            std::thread::sleep(nap);
+            self.ctx.stats.sleep_over.record(slept_at.elapsed().saturating_sub(nap));
         }
         let c = &self.ctx;
         self.peers.close(&c.bank);

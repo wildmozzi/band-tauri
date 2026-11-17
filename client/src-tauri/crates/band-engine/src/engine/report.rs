@@ -233,7 +233,15 @@ impl Engine {
         };
         let device_period_ms = period_frames as f32 / self.info.out_rate.max(1) as f32 * 1000.0;
         let worker_cycles = self.worker.as_ref().and_then(crate::sys::cpu::thread_cycles);
-        let cpu = self.cpu.lock().sample(Instant::now(), &c.rt_timing, crate::sys::cpu::tsc_now(), worker_cycles, device_period_ms * 1000.0);
+        let cpu = self.cpu.lock().sample(
+            Instant::now(),
+            &c.rt_timing,
+            crate::sys::cpu::tsc_now(),
+            worker_cycles,
+            device_period_ms * 1000.0,
+            &ws.sleep_over,
+            super::worker::DEADLINE_GUARD_US,
+        );
         let peers = self
             .net
             .as_ref()

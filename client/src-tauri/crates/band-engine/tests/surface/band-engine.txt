@@ -25,8 +25,12 @@ engine/cpuprof.rs	field	callback_p50_us
 engine/cpuprof.rs	field	callback_p99_period_pct
 engine/cpuprof.rs	field	callback_p99_us
 engine/cpuprof.rs	field	callbacks
+engine/cpuprof.rs	field	deadline_guard_us
 engine/cpuprof.rs	field	window_ms
 engine/cpuprof.rs	field	worker_pct
+engine/cpuprof.rs	field	worker_wake_max_us
+engine/cpuprof.rs	field	worker_wake_p50_us
+engine/cpuprof.rs	field	worker_wake_p99_us
 engine/cpuprof.rs	struct	CpuStats
 engine/device/backend.rs	trait	AudioBackend
 engine/device/fake.rs	field	channels
