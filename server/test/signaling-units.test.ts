@@ -23,6 +23,7 @@ import { createNativeSession } from '../src/signaling/nativeSession'
 import { admitToRoom, handleLeave, sendRoomState, type MembershipSvc } from '../src/signaling/membership'
 import type { Ctx } from '../src/signaling/ctx'
 import { createResume } from '../src/signaling/resume'
+import { takeRelayMessage } from '../src/signaling/viewerRelay'
 import { rejectReason, truncateCodePoints } from '../src/signaling/protocol'
 import { sleep } from './helpers'
 
@@ -58,6 +59,8 @@ function fakeClient(id: string, over: FakeOver = {}): Client {
       ip: over.ip ?? '10.0.0.1',
       chain: Promise.resolve(),
       pending: 0,
+      pendingRelay: 0,
+      pendingRelayBytes: 0,
       isAlive: true,
       msgBucket: new TokenBucket(1, 1),
       relayBucket: new TokenBucket(1, 1),
@@ -728,5 +731,35 @@ describe('TokenBucket.resize (relay bucket sized by room)', () => {
     const full = new TokenBucket(10, 0)
     full.resize(3, 0) // 줄면 남은 토큰을 새 크기로 자른다
     assert.ok(full.take() && full.take() && full.take() && !full.take())
+  })
+})
+
+describe('relay bucket farming (#215 review M1)', () => {
+  it('room members leaving and rejoining do not refill the broadcaster bucket; only the first growth past its peak adds tokens', () => {
+    const host = fakeClient('h', { roomId: 'r', isHost: true })
+    host.conn.relayBucket = new TokenBucket(DEFAULT_LIMITS.relayMsgBurst, 0)
+    const limits = { ...DEFAULT_LIMITS, relayMsgPerSec: 0, relayMsgPerSecPerPeer: 0 } // 시간 충전 없이 토큰 수만 본다
+    let size = 15
+    const reg = { roomSize: () => size }
+    const drain = () => { let n = 0; while (takeRelayMessage(host, reg, limits)) n++; return n }
+    // 관람자 14명이 처음 몰림: 기본 40 + 14 × 20 = 320 버스트(새 연결 몫)
+    assert.equal(drain(), DEFAULT_LIMITS.relayMsgBurst + 14 * DEFAULT_LIMITS.relayMsgBurstPerPeer)
+    // 전원 퇴장 → 다시 입장: 이미 가진 적 있는 용량이라 토큰을 더 받지 못한다(리뷰 재현: 순환마다 370개)
+    size = 1
+    assert.equal(drain(), 0)
+    size = 15
+    assert.equal(drain(), 0)
+    // 정원을 처음 넘게 커지면 그 몫만
+    size = 17
+    assert.equal(drain(), 2 * DEFAULT_LIMITS.relayMsgBurstPerPeer)
+  })
+
+  it('a viewer keeps the base budget regardless of room size', () => {
+    const viewer = fakeClient('v', { roomId: 'r' })
+    viewer.conn.relayBucket = new TokenBucket(DEFAULT_LIMITS.relayMsgBurst, 0)
+    const limits = { ...DEFAULT_LIMITS, relayMsgPerSec: 0 }
+    let n = 0
+    while (takeRelayMessage(viewer, { roomSize: () => 20 }, limits)) n++
+    assert.equal(n, DEFAULT_LIMITS.relayMsgBurst)
   })
 })

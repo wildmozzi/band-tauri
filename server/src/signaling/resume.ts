@@ -120,7 +120,10 @@ export function attachSession(ctx: Ctx<ResumeSvc>, old: Client): Client {
   // 이 연결에서 이미 큐에 쌓인 메시지 순서를 유지하기 위해 체인/카운터를 넘겨받는다
   old.conn.chain = temp.conn.chain
   old.conn.pending = temp.conn.pending
+  old.conn.pendingRelay = temp.conn.pendingRelay
+  old.conn.pendingRelayBytes = temp.conn.pendingRelayBytes
   old.conn.msgBucket = temp.conn.msgBucket
+  old.conn.relayBucket = temp.conn.relayBucket
   old.conn.chatBucket = temp.conn.chatBucket
   old.conn.joinBucket = temp.conn.joinBucket
   old.conn.authBucket = temp.conn.authBucket

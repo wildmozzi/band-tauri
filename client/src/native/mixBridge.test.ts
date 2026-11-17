@@ -362,3 +362,51 @@ describe('MixBroadcaster 중계 속도 제한 대응(서버 부하 발굴)', () 
     expect(sent.filter((m) => m.type === 'offer')).toHaveLength(1)
   })
 })
+
+describe('MixBroadcaster 재offer 대상(#215 리뷰 M2)', () => {
+  function make(intervalMs: number) {
+    FakePc.all = []
+    const deps = new FakeGraphDeps()
+    const src = new MixSource(deps)
+    const sent: Record<string, unknown>[] = []
+    const b = new MixBroadcaster(src, (p) => sent.push(p), undefined, {
+      createPeerConnection: () => new FakePc() as unknown as PeerConnectionLike,
+      connectTimeoutMs: 10_000,
+      relayBackoffMs: 500,
+      relayPacedIntervalMs: intervalMs,
+      relayReofferDelayMs: 30,
+    })
+    return { b, sent }
+  }
+
+  it('줄에 남아 아직 보내지 않은 offer의 관람자는 다시 만들지 않는다', async () => {
+    const { b, sent } = make(1000) // 줄이 1초에 하나씩만 나간다
+    await b.start([])
+    b.onRelayRateLimited() // 늦춰 보내기 시작
+    b.syncViewers(['v1', 'v2'])
+    await flush()
+    await sleep(60) // 재offer 시점 지남: 둘 다 줄에 있음(offerSentAt 없음)
+    expect(FakePc.all).toHaveLength(2)
+    expect(FakePc.all.some((pc) => pc.closed)).toBe(false)
+    expect(sent.filter((m) => m.type === 'offer')).toHaveLength(0)
+    b.stop()
+  })
+
+  it('늦춰 보내기 창 안에서 알림이 거듭 와도 재offer는 한 번뿐이다(옛 서버에서 진행이 멈추지 않게)', async () => {
+    const { b, sent } = make(5)
+    await b.start(['v1'])
+    await flush()
+    await sleep(40) // offer를 보낸 지 relayReofferDelayMs가 지남
+    b.onRelayRateLimited()
+    await sleep(60)
+    await flush()
+    expect(sent.filter((m) => m.type === 'offer')).toHaveLength(2) // 처음 + 재offer 1회
+    for (let i = 0; i < 3; i++) {
+      b.onRelayRateLimited() // 같은 창 안
+      await sleep(40)
+    }
+    await flush()
+    expect(sent.filter((m) => m.type === 'offer')).toHaveLength(2)
+    b.stop()
+  })
+})

@@ -149,6 +149,9 @@ export interface Client {
     /** 메시지 순차 처리 체인 (비동기 auth/DB 조회 중 순서 보장) */
     chain: Promise<void>
     pending: number
+    /** 처리 대기 중인 관람 중계 수·원문 바이트 합(중계는 pending에 세지 않고 이 상한을 따로 쓴다, #215 리뷰 H1) */
+    pendingRelay: number
+    pendingRelayBytes: number
     isAlive: boolean
     msgBucket: TokenBucket
     /** 관람 중계 메시지 버킷(WsLimits.relayMsg*) — 연주자는 방 인원에 따라 크기가 바뀐다(viewerRelay.takeRelayMessage) */

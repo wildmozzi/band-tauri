@@ -335,9 +335,9 @@ export interface MixBroadcasterOptions {
   connectTimeoutMs?: number
   /** 서버가 중계 메시지를 버렸다고 알린 뒤(`onRelayRateLimited`) 늦춰 보내는 시간(기본 10초) */
   relayBackoffMs?: number
-  /** 늦춰 보내는 동안 중계 메시지 간격(기본 50ms = 20/s, 서버 기본 중계 버킷 속도) */
+  /** 늦춰 보내는 동안 중계 메시지 간격(기본 67ms ≈ 15/s — 옛 서버의 일반 버킷 충전 20/s보다 여유, ping 등 다른 메시지 몫을 남긴다) */
   relayPacedIntervalMs?: number
-  /** 알림 뒤 answer가 아직 없는 관람자에게 offer를 다시 보내기까지(기본 1초) */
+  /** offer를 실제로 보낸 뒤 이 시간이 지나도 answer가 없는 관람자만 알림 뒤 다시 offer(기본 3초 — answer가 늦게 와 새 PC에 옛 answer가 붙지 않게) */
   relayReofferDelayMs?: number
 }
 
@@ -345,6 +345,8 @@ interface ViewerPeer {
   pc: PeerConnectionLike
   pendingCandidates: RTCIceCandidateInit[]
   timer: ReturnType<typeof setTimeout> | null
+  /** offer를 실제로 서버에 보낸 시각(ms). 줄에서 아직 나가지 않았으면 null (#215 리뷰 M2) */
+  offerSentAt: number | null
 }
 
 export class MixBroadcaster {
@@ -374,8 +376,8 @@ export class MixBroadcaster {
     this.createPc = opts.createPeerConnection ?? (() => new RTCPeerConnection({ iceServers: ICE_SERVERS }) as unknown as PeerConnectionLike)
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 15_000
     this.relayBackoffMs = opts.relayBackoffMs ?? 10_000
-    this.relayPacedIntervalMs = opts.relayPacedIntervalMs ?? 50
-    this.relayReofferDelayMs = opts.relayReofferDelayMs ?? 1_000
+    this.relayPacedIntervalMs = opts.relayPacedIntervalMs ?? 67
+    this.relayReofferDelayMs = opts.relayReofferDelayMs ?? 3_000
   }
 
   get isActive(): boolean {
@@ -468,7 +470,7 @@ export class MixBroadcaster {
     const stream = this.lease?.stream
     if (!stream) return
     const pc = this.createPc()
-    const peer: ViewerPeer = { pc, pendingCandidates: [], timer: null }
+    const peer: ViewerPeer = { pc, pendingCandidates: [], timer: null, offerSentAt: null }
     this.peers.set(viewerId, peer)
 
     for (const track of stream.getAudioTracks()) {
@@ -509,18 +511,23 @@ export class MixBroadcaster {
 
   /**
    * 서버가 이 연결의 관람 중계 메시지(offer·ice-candidate)를 속도 제한으로 버렸다(`error` `rate-limited`). 어느 메시지가 버려졌는지는
-   * 모른다. 그래서 relayBackoffMs 동안 중계를 relayPacedIntervalMs 간격으로 늦춰 보내고, relayReofferDelayMs 뒤 answer가 아직 없는
-   * 관람자(offer가 버려졌을 가능성)에게 offer를 다시 보낸다. answer가 온 관람자는 후보 일부가 빠져도 상대 후보로 이어지거나
-   * 연결 시간 초과(M3) 뒤 주기 sync가 다시 시도한다. 서버의 중계 버킷이 관람자 수에 비례하므로 정상이면 오지 않는다(옛 서버 대비).
+   * 모른다. 그래서 relayBackoffMs 동안 중계를 relayPacedIntervalMs 간격으로 늦춰 보낸다. 그리고 **늦춰 보내기 창마다 한 번**
+   * relayReofferDelayMs 뒤, offer를 **실제로 보낸 지** relayReofferDelayMs가 지났는데 answer가 없는 관람자(offer가 버려졌을 가능성)에게만
+   * offer를 다시 보낸다(#215 리뷰 M2: 줄에 남아 아직 나가지 않은 offer는 다시 만들지 않고, 창 안에서 알림이 거듭 와도 재offer를 반복하지
+   * 않는다 — 옛 서버에서 진행이 멈추지 않게). 그 밖의 관람자는 연결 시간 초과(M3) 뒤 주기 sync가 다시 시도한다(시간 기반 진행).
+   * 서버의 중계 버킷이 관람자 수에 비례하므로 새 서버에서는 정상이면 오지 않는다.
    */
   onRelayRateLimited(): void {
     if (!this.active) return
+    const inWindow = Date.now() < this.pacedUntil
     this.pacedUntil = Date.now() + this.relayBackoffMs
-    if (this.reofferTimer) return
+    if (inWindow || this.reofferTimer) return
     this.reofferTimer = setTimeout(() => {
       this.reofferTimer = null
       if (!this.active || !this.lease) return
+      const now = Date.now()
       for (const [id, peer] of [...this.peers]) {
+        if (peer.offerSentAt === null || now - peer.offerSentAt < this.relayReofferDelayMs) continue
         if (peer.pc.remoteDescription || peer.pc.connectionState === 'connected') continue
         this.closePeer(id)
         void this.offerTo(id)
@@ -528,10 +535,19 @@ export class MixBroadcaster {
     }, this.relayReofferDelayMs)
   }
 
+  /** 중계 메시지를 실제로 보낸다. offer면 그 관람자의 보낸 시각을 남긴다(재offer 대상 판정) */
+  private emitRelay(m: Parameters<SendFn>[0]): void {
+    this.send(m)
+    if (m.type === 'offer' && typeof m.to === 'string') {
+      const peer = this.peers.get(m.to)
+      if (peer) peer.offerSentAt = Date.now()
+    }
+  }
+
   /** 관람 중계 메시지 보내기: 평소에는 바로, rate-limited 뒤 relayBackoffMs 동안은 줄을 세워 일정 간격으로 */
   private sendRelay(m: Parameters<SendFn>[0]): void {
     if (Date.now() >= this.pacedUntil && this.relayQueue.length === 0) {
-      this.send(m)
+      this.emitRelay(m)
       return
     }
     this.relayQueue.push(m)
@@ -543,7 +559,7 @@ export class MixBroadcaster {
     this.drainTimer = setTimeout(() => {
       this.drainTimer = null
       const m = this.relayQueue.shift()
-      if (m) this.send(m)
+      if (m) this.emitRelay(m)
       if (this.relayQueue.length) this.scheduleDrain()
     }, this.relayPacedIntervalMs)
   }

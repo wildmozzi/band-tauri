@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'http'
 import { WebSocket, type WebSocketServer } from 'ws'
 import { initializeWebSocket, type WsDeps, type WsOptions } from '../src/services/wsService'
-import { MAX_BUFFERED_BYTES } from '../src/signaling/protocol'
+import { MAX_BUFFERED_BYTES, MAX_PENDING_RELAY_MESSAGES, MAX_RELAY_MESSAGE_BYTES } from '../src/signaling/protocol'
 import { createCapacity } from '../src/signaling/capacity'
 import { createPerformers } from '../src/signaling/performers'
 import { createRegistry } from '../src/signaling/registry'
@@ -202,6 +202,57 @@ describe('viewer relay burst (server load discovery: many viewers join at once)'
     assert.ok(await viewer.waitFor(m => m.type === 'error' && m.code === 'rate-limited' && m.rejectedType === 'ice-candidate'))
     await new Promise(r => setTimeout(r, 100))
     assert.ok(host.inbox.filter(m => m.type === 'ice-candidate').length <= DEFAULT_LIMITS.relayMsgBurst + 2)
+  })
+})
+
+
+describe('relay messages queued behind a stalled chain (#215 review H1)', () => {
+  /** 'slow' 방의 방 정보 조회가 release()까지 멈춘다 — 그동안 이 연결의 체인(순차 처리)이 막힌다 */
+  async function startStalling(limits: WsOptions['limits']) {
+    let release!: () => void
+    const stalled = new Promise<void>(r => { release = r })
+    const server = createServer()
+    const deps: Partial<WsDeps> = {
+      hasBackend: true,
+      verifyToken: testVerifier,
+      fetchRoomMeta: async (roomId) => { if (roomId === 'slow') await stalled; return { hostId: 'host', freeJoin: true } },
+      updateParticipants: async () => {},
+    }
+    const wss = initializeWebSocket(server, null, { env: { NODE_ENV: 'test' }, limits, deps })
+    await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()))
+    servers.push({ server, wss })
+    return { url: `ws://127.0.0.1:${(server.address() as { port: number }).port}`, release }
+  }
+  const relaxed = { relayMsgBurst: 1e6, relayMsgPerSec: 1e6, maxDropped: 1e6 }
+  const ice = (to: string, pad = 0) => ({ type: 'ice-candidate', to, candidate: { candidate: 'candidate:1', sdpMid: '0' }, pad: 'x'.repeat(pad) })
+
+  it('drops relay messages over the raw size cap instead of queueing them', async () => {
+    const { url, release } = await startStalling(relaxed)
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
+    host.send(ice(viewer.id, MAX_RELAY_MESSAGE_BYTES)) // 원문이 상한을 넘는다(본문은 정상)
+    assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'rate-limited' && m.rejectedType === 'ice-candidate'))
+    host.send(ice(viewer.id))
+    assert.ok(await viewer.waitFor(m => m.type === 'ice-candidate'))
+    assert.equal(viewer.inbox.filter(m => m.type === 'ice-candidate').length, 1, 'only the small one was relayed')
+    release()
+  })
+
+  it('caps the relay messages and bytes a connection can park while its chain is stalled (reviewer probe)', async () => {
+    const { url, release } = await startStalling(relaxed)
+    const { host, viewers: [viewer] } = await hostWithViewers(url, 1)
+    host.send({ type: 'join', roomId: 'slow' }) // 체인이 여기서 멈춘다
+    // 버킷은 사실상 무제한 — 대기 상한만이 막을 수 있다. 개수 상한 넘게, 바이트 상한 넘게 보낸다
+    for (let i = 0; i < MAX_PENDING_RELAY_MESSAGES + 50; i++) host.send(ice(viewer.id))
+    assert.ok(await host.waitFor(m => m.type === 'error' && m.code === 'rate-limited' && m.rejectedType === 'ice-candidate'), 'count cap while stalled')
+    release()
+    // 바이트 상한: 15KB × 100 = 1.5MB > 1MB
+    const s2 = await startStalling(relaxed)
+    const p2 = await hostWithViewers(s2.url, 1)
+    p2.host.send({ type: 'join', roomId: 'slow' })
+    for (let i = 0; i < 100; i++) p2.host.send(ice(p2.viewers[0].id, 15 * 1024))
+    assert.ok(await p2.host.waitFor(m => m.type === 'error' && m.code === 'rate-limited'), 'byte cap while stalled')
+    assert.equal(p2.host.closedCode, null, 'dropping does not close the connection by itself')
+    s2.release()
   })
 })
 
