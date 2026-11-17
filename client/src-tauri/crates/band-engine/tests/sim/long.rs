@@ -761,6 +761,9 @@ fn run_report_wake(tag: &str, seconds: f64, wake: WakeModel) -> (Value, Vec<Stri
     std::fs::write(&md_path, &rep.md).unwrap();
     std::fs::write(dir.join(format!("sim-report-{tag}.json")), serde_json::to_string_pretty(&rep.json).unwrap()).unwrap();
     println!("{}\n리포트: {}", rep.md, md_path.display());
+    let [np, nf, ns] = out.naps;
+    let total = (np + nf + ns).max(1) as f64;
+    println!("워커 기다림(P2-17g): POLL {np} ({:.2}%), FINE_POLL {nf} ({:.2}%), 돌기 {ns} ({:.3}%)", np as f64 * 100.0 / total, nf as f64 * 100.0 / total, ns as f64 * 100.0 / total);
     if !out.xrun_us.is_empty() {
         let at: Vec<String> = out.xrun_us.iter().map(|&t| format!("{:.3}", t as f64 / 1e6)).collect();
         println!("xrun 시각(s, 워커 사건 기준): {}", at.join(", "));

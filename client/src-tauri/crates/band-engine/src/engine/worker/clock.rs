@@ -12,6 +12,43 @@ use super::OUT_CHUNK;
 pub const POLL: Duration = Duration::from_micros(500);
 /// 피어 은닉 마감이 가까울 때의 폴링 주기.
 pub const FINE_POLL: Duration = Duration::from_micros(150);
+/// `POLL` 수면 overshoot 꼬리 여유(µs, P2-17g). 마감까지 `POLL` + 이 값보다 가까우면 `POLL`로 자지 않는다.
+///
+/// `POLL`로 잔 뒤 다음 콜백 전에 깨려면 overshoot ≤ (마감까지 남은 시간 − `POLL`) + 은닉 마감 여유여야 한다. 이전 창(남은 시간
+/// ≤ `POLL`이면 `FINE_POLL`)은 overshoot 1.5ms까지만 덮었는데, 실측(225H, `tests/wake_latency.rs`) `POLL` overshoot는 p99.9
+/// 1.42 / 최대 2.0ms라 하네스 실측 기상 모델 6피어 60분에서 xrun 9회가 났다(#204). 1ms를 더해 2.5ms까지 덮는다.
+pub(crate) const POLL_TAIL_US: u64 = 1000;
+
+/// 워커의 다음 기다림(P2-17g). `PeerRound::deadline_us`(가장 이른 은닉 마감)와 지금 시각으로 고른다(`Nap::pick`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nap {
+    /// `POLL` 수면 — 모자란 피어가 없거나 마감이 `POLL` + `POLL_TAIL_US`보다 멀다.
+    Poll,
+    /// `FINE_POLL` 수면 — 마감이 가깝다(또는 이미 지났는데 콜백 도중이라 채우지 못했다).
+    Fine,
+    /// 마감까지 `FINE_POLL`보다 짧게 남았다: 자지 않고 마감 시각(워커 epoch µs)까지 돈다. 그 시각에 깨는 다음 반복이 은닉으로
+    /// 채운다. `FINE_POLL` 수면 꼬리(실측 최대 1.47ms)가 마지막 수면에서 다음 콜백을 넘지 않게 한다 — 남은 시간 ≥ `FINE_POLL`
+    /// 에서만 자므로 overshoot ≤ 여유(1.5ms)면 콜백 전에 깬다. 돌기는 최대 `FINE_POLL`(150µs)이고 마감 직전까지 실제 패킷이
+    /// 오지 않은 때만이다.
+    Spin { until_us: u64 },
+}
+
+impl Nap {
+    /// `now_us` = 지금 벽시계(워커 epoch µs), `deadline_us` = 모자란 피어 중 가장 이른 은닉 마감(`None` = 모자란 피어 없음).
+    pub fn pick(now_us: u64, deadline_us: Option<u64>) -> Nap {
+        let Some(d) = deadline_us else { return Nap::Poll };
+        let left = d.saturating_sub(now_us);
+        let (poll, fine) = (POLL.as_micros() as u64, FINE_POLL.as_micros() as u64);
+        if left > poll + POLL_TAIL_US {
+            Nap::Poll
+        } else if left >= fine || left == 0 {
+            // 0: 마감이 지났는데 아직 모자라다 = 콜백 도중이라 이번 반복이 판단하지 않았다. 돌지 않고 짧게 잔다(이전과 같음).
+            Nap::Fine
+        } else {
+            Nap::Spin { until_us: d }
+        }
+    }
+}
 
 // ============================================================================
 // 장치 클럭 추정

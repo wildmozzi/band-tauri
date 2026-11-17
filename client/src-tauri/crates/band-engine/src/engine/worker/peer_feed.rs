@@ -11,7 +11,7 @@ use super::super::measure::echo::EchoProbe;
 use band_dsp::resample::StreamResampler;
 use super::super::rt::SourceShared;
 use super::clock::FeedTiming;
-use super::{OUT_CHUNK, POLL};
+use super::OUT_CHUNK;
 
 // 콜백 구동 믹스: 피어 소스 공급(PeerFeed)
 // ============================================================================
@@ -29,8 +29,9 @@ pub(crate) struct FeedEvents {
     pub(crate) deadline_fill: bool,
     /// 콜백이 0으로 채워 건너뛴 장치 프레임.
     pub(crate) skipped_frames: u64,
-    /// 링이 다음 콜백에 모자라고 은닉 마감이 한 폴링 주기 안이다. 워커는 짧게 자서 마감을 놓치지 않는다.
-    pub(crate) urgent: bool,
+    /// 링이 다음 콜백에 모자라고 이번 반복에 채우지 않았다: 은닉 마감 시각(워커 epoch µs, = 다음 콜백 − 여유). 워커는 이
+    /// 시각에 맞춰 기다림을 고른다(`Nap::pick`, P2-17g — 이전에는 마감이 한 `POLL` 안인지만 알렸다).
+    pub(crate) deadline_us: Option<u64>,
     /// 이번 반복에 실제(은닉이 아닌) 오디오를 소스 링에 넣었다(P1-20 `firstAudioMs`).
     pub(crate) real_audio: bool,
 }
@@ -237,8 +238,8 @@ impl PeerFeed {
                 self.push(&chunk[..k * 2], prod, tmp);
                 guard += 1;
             }
-        } else if short && t.wall_us + guard_us + POLL.as_micros() as u64 >= t.next_cb_us {
-            ev.urgent = true;
+        } else if short {
+            ev.deadline_us = Some(t.next_cb_us.saturating_sub(guard_us));
         }
         sh.playing.store(true, Ordering::Relaxed);
         ev

@@ -30,8 +30,8 @@ use band_dsp::stats::AudioCounters;
 /// `service` 한 번의 결과.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PeerRound {
-    /// 은닉 마감이 가까운 피어가 있다(조정자가 짧게 자야 한다).
-    pub urgent: bool,
+    /// 링이 모자란 피어 중 가장 이른 은닉 마감(워커 epoch µs). 조정자는 이것으로 다음 기다림을 고른다(`Nap::pick`, P2-17g).
+    pub deadline_us: Option<u64>,
 }
 
 /// 피어 슬롯(1..`MAX_SOURCES`)의 소스 링 생산자. 로컬 것(슬롯 0)은 `LocalPath`가 가지므로 슬롯 번호로만 접근한다.
@@ -170,7 +170,7 @@ impl PeerSources {
         self.sync_slots(bank, out_rate);
         let cb_seq = t.cb_seq;
         let consistent = || cb_seq.is_some_and(|s| counters.out_cb_begin.load(Ordering::SeqCst) == s);
-        let (mut fills, mut skipped, mut urgent) = (0u64, 0u64, false);
+        let (mut fills, mut skipped, mut deadline_us) = (0u64, 0u64, None::<u64>);
         let marks = &self.rec_marks;
         let marking = marks.active();
         let played = &counters.out_played_frames;
@@ -220,7 +220,9 @@ impl PeerSources {
             pm.publish();
             fills += u64::from(ev.deadline_fill);
             skipped += ev.skipped_frames;
-            urgent |= ev.urgent;
+            if let Some(d) = ev.deadline_us {
+                deadline_us = Some(deadline_us.map_or(d, |e: u64| e.min(d)));
+            }
         }
         if fills > 0 {
             stats.deadline_fills.fetch_add(fills, Ordering::Relaxed);
@@ -228,7 +230,7 @@ impl PeerSources {
         if skipped > 0 {
             stats.skipped_frames.fetch_add(skipped, Ordering::Relaxed);
         }
-        PeerRound { urgent }
+        PeerRound { deadline_us }
     }
 
     /// 정지: 피어 슬롯을 닫고(콜백이 아직 돌면 남은 소리를 버린다), 표에 남은 피어를 리샘플러를 되실어 모두 반환 큐로
