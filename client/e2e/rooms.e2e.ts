@@ -50,4 +50,18 @@ test.describe('합주실 목록', () => {
     expect(mock.supabase.db.count('POST', 'rpc/get_room')).toBeGreaterThan(0)
     await expect.poll(() => mock.signaling.messages('join').map(m => m.roomId)).toContain(PRIVATE_ROOM.id)
   })
+
+  test('Supabase Realtime: 다른 사람이 방을 만들면 목록이 새로고침 없이 갱신된다', async ({ page, mock }) => {
+    await page.goto('/rooms')
+    const cards = page.locator('.room-card')
+    await expect(cards).toHaveCount(3)
+    // 목록 화면이 rooms 변경을 구독했다(supabase-js realtime → 가짜 Realtime)
+    await expect.poll(() => mock.supabase.realtimeSubscriptions('rooms')).toBeGreaterThan(0)
+
+    const newRoom = { ...ROCK_ROOM, id: 'aaaaaaaa-0000-4000-8000-0000000000f1', title: '실시간으로 생긴 방', created_at: '2026-11-18T00:00:00.000Z' }
+    mock.supabase.db.table('rooms').push(newRoom)
+    expect(mock.supabase.pushTableChange('rooms', 'INSERT', newRoom)).toBeGreaterThan(0)
+    await expect(cards).toHaveCount(4)
+    await expect(cards.filter({ hasText: '실시간으로 생긴 방' })).toHaveCount(1)
+  })
 })

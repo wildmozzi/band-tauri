@@ -10,6 +10,7 @@ import react from '@vitejs/plugin-react'
 import { fileURLToPath } from 'node:url'
 import { E2E_VITE_ENV } from './env'
 import { E2E_PORT_ENV, parsePort } from './port'
+import { SUPABASE_SLIM_ALIAS } from '../vite/supabaseSlim'
 
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url))
 
@@ -32,6 +33,7 @@ function previewPort(): number {
 export default defineConfig(({ isPreview }) => ({
   root: here('..'),
   plugins: [react()],
+  resolve: { alias: SUPABASE_SLIM_ALIAS }, // 앱 빌드와 같은 supabase-js 축소(vite/supabaseSlim.ts)
   envDir: here('./no-env'),
   build: {
     outDir: here('./.dist'),
