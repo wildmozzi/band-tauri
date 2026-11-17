@@ -574,7 +574,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         retry.timer = setTimeout(() => {
           retry.timer = null
           if (store.getSnapshot().connection.currentRoomId !== e.roomId) return
-          const join = buildJoinMessageRef.current(false)
+          // 재연결 중이면 rejoin 그대로 다시 보낸다(방 조회 실패 room-unavailable 재시도)
+          const join = buildJoinMessageRef.current(rejoiningRef.current)
           if (join && isOpen()) send(join)
         }, e.delayMs)
         return

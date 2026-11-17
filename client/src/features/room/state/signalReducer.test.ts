@@ -130,6 +130,30 @@ describe('reduceRoomSignal — 입장 오류', () => {
     expect(capped.effects).toEqual([])
   })
 
+  it('방 조회 실패(room-unavailable, #189 리뷰 H-1): 재연결 중이면 화면·엔진을 그대로 두고 조용히 재시도한다', () => {
+    const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1', retryAfterMs: 2000 }, ctx({ rejoining: true }))
+    expect(r.patch).toBeNull()
+    expect(r.effects).toEqual([{ type: 'schedule-busy-retry', roomId: 'r1', delayMs: 2000 }])
+  })
+
+  it('room-unavailable: 첫 입장이면 안내 + 재시도, 재시도를 다 쓰면 안내만. 어느 경우도 엔진을 멈추지 않는다', () => {
+    const first = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1', retryAfterMs: 2000 }, ctx())
+    expect(first.patch?.connection?.joinError?.code).toBe('room-unavailable')
+    expect(first.effects).toContainEqual({ type: 'schedule-busy-retry', roomId: 'r1', delayMs: 2000 })
+    const spent = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-unavailable', roomId: 'r1' }, ctx({ rejoining: true, busyRetryCount: MAX_BUSY_RETRIES }))
+    expect(spent.patch?.connection?.joinError?.code).toBe('room-unavailable')
+    for (const r of [first, spent]) {
+      expect(r.effects).not.toContainEqual({ type: 'stop-session' })
+      expect(r.effects).not.toContainEqual({ type: 'stop-broadcast' })
+    }
+  })
+
+  it('방 없음(room-not-found)은 재연결 중이어도 엔진·방송을 멈춘다(보던 방이 종료됨)', () => {
+    const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'room-not-found', message: 'x' }, ctx({ rejoining: true }))
+    expect(r.effects).toContainEqual({ type: 'stop-session' })
+    expect(r.patch?.connection?.joinError?.code).toBe('room-not-found')
+  })
+
   it('처리 순서: 입장 오류 코드가 아닌 error는 참가자 단계의 서버 에러로', () => {
     const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'rate-limited', message: 'x' }, ctx())
     expect(r.effects).toEqual([{ type: 'server-error', code: 'rate-limited', message: 'x' }])

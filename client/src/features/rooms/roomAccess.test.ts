@@ -3,6 +3,7 @@ import {
   describeJoinError,
   forgetRoomPassword,
   inviteLink,
+  isRetryableJoinError,
   joinErrorFromSignal,
   joinErrorStopsSession,
   parseRoomCode,
@@ -90,6 +91,15 @@ describe('joinErrorFromSignal / describeJoinError', () => {
     expect(describeJoinError(e!)).toContain('종료')
     expect(joinErrorStopsSession(e!, false)).toBe(true)
     expect(joinErrorStopsSession(e!, true)).toBe(true)
+  })
+  it('방 조회 실패(room-unavailable)는 일시 오류: 세션을 멈추지 않고 재시도 대상이다 (#189 리뷰 H-1)', () => {
+    const e = joinErrorFromSignal({ type: 'error', code: 'room-unavailable', roomId: ID, retryAfterMs: 2000 })!
+    expect(e).toMatchObject({ code: 'room-unavailable', roomId: ID, retryAfterMs: 2000 })
+    expect(isRetryableJoinError(e)).toBe(true)
+    expect(joinErrorStopsSession(e, true)).toBe(false)
+    expect(joinErrorStopsSession(e, false)).toBe(false)
+    expect(describeJoinError(e)).toContain('다시 시도')
+    expect(isRetryableJoinError(joinErrorFromSignal({ type: 'error', code: 'room-not-found' })!)).toBe(false)
   })
   it('남은 시도 횟수와 대기 시간을 보여준다', () => {
     expect(describeJoinError({ code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null })).toContain('2회')

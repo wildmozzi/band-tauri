@@ -93,7 +93,8 @@ export function RoomPasswordGate({
       </div>
     )
   }
-  if (joinError.code === 'room-full') {
+  // 정원 초과·방 조회 실패(일시 — 자동 재시도를 다 쓴 경우): 안내 + 목록·다시 시도
+  if (joinError.code === 'room-full' || joinError.code === 'room-unavailable') {
     return (
       <div className="room-password-gate">
         <div className="room-password-card">

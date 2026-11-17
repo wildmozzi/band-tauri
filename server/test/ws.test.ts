@@ -127,6 +127,38 @@ describe('H1: start-performing requires host / free_join / approval', async () =
   })
 })
 
+describe('#189 review H-1: a failed room lookup is not "room not found"', async () => {
+  let failNext = 0
+  const options = backend()
+  const url = await startWs({
+    ...options,
+    deps: {
+      ...options.deps,
+      fetchRoomMeta: async (roomId) => {
+        if (failNext > 0) {
+          failNext--
+          throw new Error('db timeout')
+        }
+        return ROOMS[roomId] ?? null
+      },
+    },
+  })
+
+  it('sends a retryable room-unavailable when the DB lookup throws, then joins on retry', async () => {
+    const c = await client(url)
+    c.send({ type: 'auth', accessToken: 'tok:retry' })
+    failNext = 1
+    c.send({ type: 'join', roomId: 'free' })
+    assert.ok(await c.waitFor(m => m.type === 'error' && m.code === 'room-unavailable'))
+    const err = c.inbox.find(m => m.code === 'room-unavailable')
+    assert.equal(err.roomId, 'free')
+    assert.ok(err.retryAfterMs > 0)
+    assert.ok(!c.has(m => m.code === 'room-not-found'))
+    c.send({ type: 'join', roomId: 'free' })
+    assert.ok(await c.waitFor(m => m.type === 'room-state'))
+  })
+})
+
 describe('M2: insecureDevMode requires development + ALLOW_INSECURE_WS=1', async () => {
   const noBackend = (env: Record<string, string>): WsOptions => ({
     env,

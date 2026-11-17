@@ -17,6 +17,7 @@ export {
   inviteLink,
   joinErrorFromSignal,
   joinErrorStopsSession,
+  isRetryableJoinError,
   recallRoomPassword,
   rememberRoomPassword,
   validateRoomPasswordInput,
