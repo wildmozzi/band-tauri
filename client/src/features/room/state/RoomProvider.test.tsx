@@ -195,6 +195,7 @@ describe('RoomProvider', () => {
   it('관람자로 내려지면(P2-9) 엔진을 알림 없이 멈추고 안내한다 — native-leave·stop-performing은 보내지 않는다', () => {
     const stop = vi.spyOn(h.session, 'stop')
     act(() => joinRoom('r1'))
+    act(() => h.session.set({ phase: 'running', instrument: 'bass' }))
     h.signaling.send.mockClear()
     message({ type: 'demoted-to-viewer' })
     expect(stop).toHaveBeenCalledWith({ notify: false, error: DEMOTED_MESSAGE })

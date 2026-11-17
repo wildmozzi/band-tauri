@@ -20,7 +20,7 @@ import { DEFAULT_LIMITS } from '../src/signaling/types'
 import { ScryptGate, hashRoomPassword } from '../src/lib/roomPassword'
 import { createMetronome, metronomeHostChanged } from '../src/signaling/metronome'
 import { createNativeSession } from '../src/signaling/nativeSession'
-import { admitToRoom, handleLeave, type MembershipSvc } from '../src/signaling/membership'
+import { admitToRoom, handleLeave, sendRoomState, type MembershipSvc } from '../src/signaling/membership'
 import type { Ctx } from '../src/signaling/ctx'
 import { createResume } from '../src/signaling/resume'
 import { rejectReason, truncateCodePoints } from '../src/signaling/protocol'
@@ -607,8 +607,10 @@ describe('demote-performer (P2-9)', () => {
     return { svc, host, p, q, v }
   }
 
-  it('host: clears approval·instrument request·engine binding, tells the target, then the room, then engines', async () => {
+  it('host: clears approval·pending requests·engine binding, tells the target, then the room, then engines', async () => {
     const { svc, host, p, q, v } = room()
+    // 연주 중에도 참여 요청을 보낼 수 있다 — 남겨 두면 방장이 승인할 때 곧바로 다시 승인된다 (#180 리뷰 L-5)
+    svc.requests.performList('r', true).push({ oderId: 'p', nickname: 'P', instrument: 'bass', timestamp: 0 })
     svc.requests.instrumentList('r', true).push({ oderId: 'p', nickname: 'P', currentInstrument: 'bass', newInstrument: 'drums', timestamp: 0 })
     await handleDemotePerformer(ctxFor(svc, host), { type: 'demote-performer', targetId: 'p' })
 
@@ -617,8 +619,9 @@ describe('demote-performer (P2-9)', () => {
     assert.deepEqual(p.native, { active: false, ssrc: undefined, key: undefined })
     assert.equal(svc.performers.hasApproval('r', 'up'), false, 'needs a new request to perform again')
     assert.equal(svc.requests.instrumentList('r')?.length, 0)
+    assert.equal(svc.requests.performList('r')?.length, 0)
     assert.deepEqual(sentTo(p), [{ type: 'demoted-to-viewer' }])
-    assert.deepEqual(sentTo(host).map(m => m.type), ['instrument-change-request-cancelled', 'performer-updated', 'native-leave'])
+    assert.deepEqual(sentTo(host).map(m => m.type), ['perform-request-cancelled', 'instrument-change-request-cancelled', 'performer-updated', 'native-leave'])
     assert.deepEqual(sentTo(q).map(m => m.type), ['performer-updated', 'native-leave'])
     assert.deepEqual(sentTo(v).map(m => m.type), ['performer-updated'], 'viewers get no engine message')
     assert.deepEqual(sentTo(q)[0], { type: 'performer-updated', nickname: 'N-p', isPerforming: false, oderId: 'p', from: 'p' })
@@ -647,6 +650,18 @@ describe('demote-performer (P2-9)', () => {
     assert.deepEqual(sentTo(v), [])
     await handleDemotePerformer(ctxFor(svc, host), { type: 'demote-performer' })
     assert.equal(sentTo(host).length, 4, 'no targetId: ignored like other host actions')
+  })
+
+  it('demoted-to-viewer lost on an open socket: the room-state sent on resume tells the target it is not performing (#180 M-1)', async () => {
+    const { svc, host, p } = room()
+    await handleDemotePerformer(ctxFor(svc, host), { type: 'demote-performer', targetId: 'p' })
+    assert.equal(p.resume.pendingDemoted, undefined, 'sent right away on the open socket')
+    sentTo(p).length = 0 // 반쯤 열린 소켓: 보낸 알림이 클라이언트에 닿지 않았다
+    // 재개(announceResumed)가 보내는 room-state — 앱은 이 isPerforming으로 엔진을 맞춘다
+    sendRoomState(ctxFor(svc, p) as unknown as Ctx<MembershipSvc>, 'r')
+    assert.deepEqual(sentTo(p).map(m => [m.type, m.isPerforming]), [['room-state', false]])
+    sendRoomState(ctxFor(svc, host) as unknown as Ctx<MembershipSvc>, 'r')
+    assert.equal(sentTo(host).at(-1).isPerforming, false, 'the host here never sent start-performing')
   })
 
   it('a target in resume grace (socket closed) gets the notice on resume instead', async () => {

@@ -557,7 +557,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - `isHost`는 서버가 DB `rooms` 테이블의 호스트 컬럼과 `userId`로 판정. 클라이언트가 보낸 `isHost`/`userId`는 무시.
 - **수신 없음 감지**(P1-15): 클라이언트가 `{ type: 'ping' }`을 보내면 서버는 신원과 무관하게 `{ type: 'pong' }`으로 답한다(브라우저는 프로토콜 ping을 볼 수 없어 앱 수준 메시지를 쓴다). 클라이언트는 ready 직후 ping 한 번으로 지원 여부를 확인하고, 15초 동안 아무 메시지도 못 받으면 ping, 그 뒤 5초 안에 아무것도 오지 않으면 그 소켓을 버리고(핸들러를 떼고 `close(4000)`) 브라우저의 `onclose`를 기다리지 않고 바로 재연결 판단을 한다(반쯤 열린 연결에서는 닫기 핸드셰이크 타임아웃 약 60초 뒤에야 `onclose`가 와 서버 유예 30초를 넘기므로). pong을 한 번도 받지 못한 서버(구 서버)에는 닫지 않는다.
 - **재연결 예산**(P1-15, `client/src/features/room/state/reconnectPolicy.ts`): 방 안에서 비정상으로 닫히면(1000/1005 외, 4000 포함) 첫 닫힘부터 **35초**(서버 세션 유예 `resumeGraceMs` 30초 + 여유) 동안 0.5 → 1 → 2 → 4 → 4 …초(±20% 지터) 간격으로 다시 연결하고, 로그인 상태면 `auth.resumeClientId`로 세션 재개를 요청한다. 예산은 ready(`auth-result` 또는 구 서버 fallback)에서만 리셋하고 `onopen`만으로는 리셋하지 않는다. 한 시도가 8초 안에 열리지 않으면 닫고 다음 시도로 간다. 단절 동안 엔진(UDP 메시)은 유지하며, 예산을 넘기면 `signalStatus='gave-up'`으로 "연결이 끊겼습니다 — 다시 입장"을 안내하고 그때 엔진을 멈춘다. 같은 사용자가 다른 창·기기로 같은 방에 들어오면 서버는 옛 연결을 `close(1000, 'Duplicate connection')`으로 닫는다. 이 사유 문자열은 계약이다(클라이언트 `DUPLICATE_CONNECTION_CLOSE_REASON`). 클라이언트는 이를 `signalStatus='replaced'`로 구분해 자동 재연결하지 않고 엔진을 멈추며, "여기서 다시 입장"은 확인을 한 번 받은 뒤에만 보낸다(다른 쪽이 밀려나므로). 방 밖에서 끊긴 연결은 자동으로 다시 열지 않는다. 방을 나갈 때와 방에 들어갈 때 연결이 없으면 재개 요청 없이 새로 연다.
-- **세션 재개 조건**(서버): `auth { accessToken, resumeClientId }`의 JWT `userId`가 그 clientId의 주인과 같고, (a) 서버가 옛 소켓 닫힘을 보고 유예(`resumeGraceMs` 30초) 중이거나, (b) 서버가 아직 닫힘을 모르는 살아 있는 연결이면(P1-16, 클라이언트가 수신 없음으로 먼저 끊었을 때) 재개한다. (b)는 서버가 옛 소켓을 끊는다. 재개되면 `welcome { clientId: 옛 id, resumed: true }` → `auth-result { resumed: true }` → `room-state` 순으로 받고 같은 방 참가자에게는 participant-left/joined가 가지 않는다. 다른 사용자 토큰·토큰 없음은 재개하지 못하고 새 clientId를 받는다(옛 연결은 그대로). 메시지 모양은 바뀌지 않았다.
+- **세션 재개 조건**(서버): `auth { accessToken, resumeClientId }`의 JWT `userId`가 그 clientId의 주인과 같고, (a) 서버가 옛 소켓 닫힘을 보고 유예(`resumeGraceMs` 30초) 중이거나, (b) 서버가 아직 닫힘을 모르는 살아 있는 연결이면(P1-16, 클라이언트가 수신 없음으로 먼저 끊었을 때) 재개한다. (b)는 서버가 옛 소켓을 끊는다. 재개되면 `welcome { clientId: 옛 id, resumed: true }` → `auth-result { resumed: true }` → `room-state` 순으로 받고 같은 방 참가자에게는 participant-left/joined가 가지 않는다. 다른 사용자 토큰·토큰 없음은 재개하지 못하고 새 clientId를 받는다(옛 연결은 그대로).
+- `room-state` `{ participants(나 제외), peerIds, isHost, isPerforming }` — `isHost`·`isPerforming`은 받는 사람 자신의 서버 기준 값이다(`isPerforming`은 P2-9에서 추가). 앱은 **세션 재개 직후의 `room-state`**에서 `isPerforming=false`인데 엔진이 `running`이면 연주가 서버에서 이미 끝난 것(끊긴 사이 관람자로 내려졌거나 연주 시작 알림이 유실됨)으로 보고 엔진·방송을 알림 없이 멈추고 안내한다. 재개가 아닌 입장의 `room-state`에는 이 검사를 하지 않는다(엔진을 막 다시 시작해 `start-performing`이 아직 처리되지 않았을 수 있다).
 - 신규 메시지(같은 방 연주자에게만 중계):
   - `native-descriptor` `{ to?: string, descriptor: LocalDescriptor }` — `to` 없으면 같은 방 다른 연주자 전원. 서버는 송신자가 그 방의 연주자일 때만 중계.
     - **공개키 바인딩(P1-1c)**: 서버는 `descriptor.key`를 보낸 연결(clientId)과 JWT `userId`에 묶는다(방 단위). 거부하면 중계하지 않고 보낸 사람에게 `error`:
@@ -591,12 +592,14 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
   - 대상이 같은 방에서 연주 중(`start-performing` 뒤)이고 방장이 아닌 참가자가 아니면 보낸 사람에게 `error { code: 'demote-not-performer' }`.
   - 처리 순서(= 받는 메시지 순서):
     1. 대상의 승인 기록 삭제 — 승인제 방이면 다시 연주하려면 새 참여 요청이 필요하다(`free_join` 방은 바로 다시 시작할 수 있다).
-    2. 대상의 대기 중 악기 변경 요청 취소 → 방장에게 `instrument-change-request-cancelled`.
+    2. 대상의 대기 중 요청 취소(퇴장 정리와 같은 `requests.onLeave`) → 방장에게 `perform-request-cancelled`, `instrument-change-request-cancelled`(있는 것만). 연주 중에도 참여 요청을 보낼 수 있어서, 남겨 두면 방장이 그 요청을 승인할 때 곧바로 다시 승인된다.
     3. 대상의 연주 상태(`stop-performing`과 같음)와 엔진 바인딩(키·ssrc — 릴레이 토큰 갱신 불가)을 지우고, 대상이 켠 메트로놈이 있으면 지운다(방장만 켤 수 있으므로 실제로는 없음).
-    4. 대상에게 `demoted-to-viewer {}`. 세션 재개 유예 중이면 재개할 때(`room-state` 뒤) 보낸다.
+    4. 대상에게 `demoted-to-viewer {}`. 세션 재개 유예 중이면 재개할 때(`room-state` 뒤) 보낸다. 열린 것으로 보인 소켓(반쯤 열림)으로 보내 유실되면 다시 보내지 않는다 — 재개 때 `room-state.isPerforming=false`로 앱이 맞춘다(위 `room-state`).
     5. 대상 외 전원에게 `performer-updated { oderId: 대상, from: 대상, nickname, isPerforming: false }`(`stop-performing`과 같은 모양).
     6. 다른 연주자·엔진을 켠 참가자에게 `native-leave { from: 대상 }` — 대상 클라이언트를 기다리지 않고 각 엔진이 곧바로 대상 피어를 뺀다.
-  - 대상 앱은 `demoted-to-viewer`를 받으면 엔진·방송을 멈추고(`native-leave`·`stop-performing`은 보내지 않음 — 서버가 이미 처리했다) 관람 모드로 돌아가 "방장이 관람자로 전환했습니다" 안내를 띄운다. 내 참여 요청·악기 변경 상태도 비운다.
+  - 대상 앱은 `demoted-to-viewer`를 받으면 엔진·방송을 멈추고(`native-leave`·`stop-performing`은 보내지 않음 — 서버가 이미 처리했다) 관람 모드로 돌아가 "방장이 나를 관람자로 전환했습니다" 안내를 띄운다. 내 참여 요청·악기 변경 상태도 비운다. 엔진이 이미 멈춰 있으면(idle) 아무것도 하지 않는다.
+  - 방장 앱은 `demote-not-performer`를 받으면 연주자 패널에 "이미 연주를 멈췄거나 나간 참가자라 관람자로 내리지 못했습니다" 안내를 띄운다(닫기 가능, 다음 내리기 때 지워짐).
+  - 알려진 한계: 내려진 사람의 릴레이 토큰은 회수하지 않는다(갱신만 막힘, 최대 120초 뒤 만료). 그동안 릴레이 대역·슬롯만 쓰고, 다른 엔진은 `engine_remove_peer`로 그 피어 키를 지웠으므로 소리는 섞이지 않는다. `free_join` 방에서는 승인이 필요 없어 내려진 뒤 곧바로 다시 연주할 수 있다(재참여 쿨다운은 후속).
   - 방장 화면: 연주자 행의 "관람자로 내리기" → 같은 행의 확인 단계("내리기"/"취소") 뒤에만 보낸다.
 - 중계 시 서버가 `from`을 붙인다(클라이언트가 보낸 `from`은 무시).
 - **공유 메트로놈**(P2-3, 1.4절): `metronome` `{ state: { running, bpm, beatsPerBar, startUs } }`.

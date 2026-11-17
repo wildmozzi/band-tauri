@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { initialRoomState, type RoomState } from './roomSessionStore'
-import { DEMOTED_MESSAGE, MAX_BUSY_RETRIES, reduceRoomSignal, type SignalContext } from './signalReducer'
+import { DEMOTE_FAILED_MESSAGE, DEMOTED_MESSAGE, LOST_PERFORMER_MESSAGE, MAX_BUSY_RETRIES, reduceRoomSignal, type SignalContext } from './signalReducer'
 import type { PeerInstrument } from './roomState'
 
 const ctx = (over: Partial<SignalContext> = {}): SignalContext => ({
@@ -53,7 +53,7 @@ describe('reduceRoomSignal — 요청', () => {
   })
 
   it('관람자로 내려짐(P2-9): 내 요청·악기 변경 상태를 비우고 방송 정지 + 알림 없는 엔진 정지·안내', () => {
-    const s = inRoom()
+    const s = inRoom({ perform: { ...initialRoomState().perform, phase: 'running' } })
     s.requests = {
       ...s.requests,
       perform: { ...s.requests.perform, myStatus: 'approved', myInstrument: 'bass', requestOutstanding: true },
@@ -66,6 +66,18 @@ describe('reduceRoomSignal — 요청', () => {
     expect(r.patch?.requests?.myInstrumentChangeStatus).toBe('none')
     expect(r.patch?.requests?.myNewInstrument).toBeNull()
     expect(r.effects).toEqual([{ type: 'stop-broadcast' }, { type: 'demoted', message: DEMOTED_MESSAGE }])
+  })
+
+  it('관람자로 내려짐: 엔진이 이미 멈춰 있으면(중복·늦은 알림) 새로 보낸 참여 요청을 지우지 않고 아무것도 하지 않는다', () => {
+    const s = inRoom()
+    s.requests = { ...s.requests, perform: { ...s.requests.perform, myStatus: 'pending', myInstrument: 'bass', requestOutstanding: true } }
+    expect(reduceRoomSignal(s, { type: 'demoted-to-viewer' }, ctx())).toEqual({ handled: true, patch: null, effects: [] })
+  })
+
+  it('방장: demote-not-performer면 패널 안내를 남긴다 (#180 L-4)', () => {
+    const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'demote-not-performer', message: 'x' }, ctx())
+    expect(r.patch?.requests?.hostActionError).toBe(DEMOTE_FAILED_MESSAGE)
+    expect(reduceRoomSignal(inRoom(), { type: 'error', code: 'login-required', message: 'x' }, ctx()).patch).toBeNull()
   })
 
   it('다른 사람이 내려지면 performer-updated(isPerforming=false)로 연주자 목록에서 빠지고 엔진 피어도 정리', () => {
@@ -185,5 +197,39 @@ describe('reduceRoomSignal — 참가자·WebRTC', () => {
 
   it('모르는 메시지는 처리하지 않음', () => {
     expect(reduceRoomSignal(inRoom(), { type: 'something-new' }, ctx()).handled).toBe(false)
+  })
+})
+
+describe('reduceRoomSignal — 재개 뒤 내 연주 상태 맞추기 (P2-9, #180 M-1)', () => {
+  const running = () => {
+    const s = inRoom({ perform: { ...initialRoomState().perform, phase: 'running' } })
+    s.requests = { ...s.requests, perform: { ...s.requests.perform, myStatus: 'approved', myInstrument: 'bass' } }
+    return s
+  }
+  const roomState = (isPerforming: boolean) => ({ type: 'room-state', peerIds: ['a'], participants: [], isHost: false, isPerforming })
+
+  it('내리기 알림이 유실된 채 재개: room-state.isPerforming=false면 방송·엔진을 멈추고 안내, 내 요청 상태도 비운다', () => {
+    const r = reduceRoomSignal(running(), roomState(false), ctx({ verifySelfPerforming: true }))
+    expect(r.effects).toContainEqual({ type: 'stop-broadcast' })
+    expect(r.effects).toContainEqual({ type: 'demoted', message: LOST_PERFORMER_MESSAGE })
+    expect(r.patch?.requests?.perform.myStatus).toBe('none')
+  })
+
+  it('서버도 연주 중이라고 하면 그대로', () => {
+    const r = reduceRoomSignal(running(), roomState(true), ctx({ verifySelfPerforming: true }))
+    expect(r.effects.some((e) => e.type === 'demoted')).toBe(false)
+    expect(r.patch?.requests).toBeUndefined()
+  })
+
+  it('재개가 아닌 입장의 room-state는 보지 않는다(막 다시 시작한 엔진의 start-performing보다 먼저 처리됐을 수 있다)', () => {
+    const r = reduceRoomSignal(running(), roomState(false), ctx())
+    expect(r.effects.some((e) => e.type === 'demoted')).toBe(false)
+  })
+
+  it('isPerforming이 없는 옛 서버 room-state는 보지 않는다', () => {
+    const { isPerforming: _omit, ...old } = roomState(false)
+    void _omit
+    const r = reduceRoomSignal(running(), old, ctx({ verifySelfPerforming: true }))
+    expect(r.effects.some((e) => e.type === 'demoted')).toBe(false)
   })
 })

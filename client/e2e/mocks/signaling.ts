@@ -63,6 +63,8 @@ interface Conn {
   clientId: string
   userId: string | null
   roomId: string | null
+  /** start-performing을 받았고 stop-performing은 아직 (room-state.isPerforming) */
+  performing: boolean
 }
 
 export class FakeSignaling {
@@ -72,6 +74,8 @@ export class FakeSignaling {
   private rooms = new Map<string, FakeRoomConfig>()
   private limiters = new Map<string, PasswordAttemptLimiter>()
   private seq = 0
+  /** 재개를 받아 줄 옛 clientId → 방·서버 기준 연주 상태 (dropForResume) */
+  private resumable = new Map<string, { roomId: string; isPerforming: boolean }>()
   private down = false
   /** down 동안 받자마자 닫은 연결 수 (앱의 재연결 시도) */
   refused = 0
@@ -99,6 +103,19 @@ export class FakeSignaling {
   /** 서버 송신 메시지 하나를 그 방의 모든 연결에 보낸다 (예: 방장이 나를 내렸을 때의 demoted-to-viewer, P2-9) */
   pushToRoom(roomId: string, msg: ServerMessage) {
     for (const c of this.conns) if (c.roomId === roomId) this.send(c, msg)
+  }
+
+  /**
+   * 소켓만 끊긴 것처럼 지금 연결을 닫고, 같은 사용자의 다음 auth{resumeClientId}를 세션 재개로 받아 준다(서버 resume 흉내, P2-9 #180 M-1).
+   * 재개 알림은 서버 순서대로 welcome{resumed} → auth-result{resumed} → room-state이고, room-state.isPerforming은 `isPerforming`
+   * (예: 끊긴 사이 방장이 내렸는데 demoted-to-viewer가 유실된 경우 false).
+   */
+  dropForResume(isPerforming: boolean) {
+    for (const c of this.conns) {
+      if (c.roomId) this.resumable.set(c.clientId, { roomId: c.roomId, isPerforming })
+      void c.ws.close({ code: SERVER_RESTART_CLOSE_CODE, reason: 'e2e drop' })
+    }
+    this.conns = []
   }
 
   /**
@@ -137,7 +154,7 @@ export class FakeSignaling {
       void ws.close({ code: SERVER_RESTART_CLOSE_CODE, reason: 'e2e down' })
       return
     }
-    const conn: Conn = { ws, clientId: `e2e-client-${++this.seq}`, userId: null, roomId: null }
+    const conn: Conn = { ws, clientId: `e2e-client-${++this.seq}`, userId: null, roomId: null, performing: false }
     this.conns.push(conn)
     ws.onClose(() => {
       this.conns = this.conns.filter(c => c !== conn)
@@ -165,9 +182,26 @@ export class FakeSignaling {
       case 'auth': {
         const user = userFromToken(typeof msg.accessToken === 'string' ? msg.accessToken : undefined)
         conn.userId = user?.id ?? null
+        const resume = user && typeof msg.resumeClientId === 'string' ? this.resumable.get(msg.resumeClientId) : undefined
+        if (resume && typeof msg.resumeClientId === 'string') {
+          this.resumable.delete(msg.resumeClientId)
+          conn.clientId = msg.resumeClientId
+          conn.roomId = resume.roomId
+          conn.performing = resume.isPerforming
+          this.send(conn, { type: 'welcome', clientId: conn.clientId, resumed: true })
+          this.send(conn, { type: 'auth-result', authenticated: true, userId: conn.userId, resumed: true })
+          this.sendRoomState(conn, resume.roomId)
+          return
+        }
         this.send(conn, { type: 'auth-result', authenticated: user !== null, userId: conn.userId })
         return
       }
+      case 'start-performing':
+        conn.performing = true
+        return
+      case 'stop-performing':
+        conn.performing = false
+        return
       // 수신 없음 감지용 앱 수준 ping (P1-15, 서버 wsService와 같은 응답)
       case 'ping':
         this.send(conn, { type: 'pong' })
@@ -221,12 +255,20 @@ export class FakeSignaling {
     }
 
     conn.roomId = roomId
+    this.sendRoomState(conn, roomId)
+  }
+
+  private sendRoomState(conn: Conn, roomId: string) {
+    const room = this.db.table('rooms').find(r => r.id === roomId)
+    const isHost = conn.userId !== null && room?.host_id === conn.userId
+    const participants = this.rooms.get(roomId)?.participants ?? []
     this.send(conn, {
       type: 'room-state',
       // 서버는 isPerforming·isHost를 항상 채워 보낸다
       participants: participants.map(p => ({ isPerforming: false, isHost: false, ...p })),
       peerIds: participants.map(p => p.oderId),
       isHost,
+      isPerforming: conn.performing,
     })
   }
 }

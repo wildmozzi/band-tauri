@@ -66,6 +66,8 @@ export interface RoomActions {
   dismissRejection: () => void
   /** 방장: 연주 중인 참가자를 관람자로 내린다 (P2-9, 서버가 DB로 방장 확인) */
   demotePerformer: (oderId: string) => void
+  /** 방장: 내리기 거절 안내 닫기 */
+  dismissHostActionError: () => void
   approveInstrumentChange: (oderId: string) => void
   rejectInstrumentChange: (oderId: string, reason?: string) => void
   requestInstrumentChange: (newInstrument: string) => void
@@ -171,6 +173,7 @@ const selectRequests = (s: RoomSnapshot) => {
     pendingInstrumentChanges: r.pendingInstrumentChanges,
     myInstrumentChangeStatus: r.myInstrumentChangeStatus,
     myNewInstrument: r.myNewInstrument,
+    hostActionError: r.hostActionError,
   }
 }
 
@@ -272,6 +275,7 @@ export function useRoomRequests() {
     cancelRequest: actions.cancelRequest,
     dismissRejection: actions.dismissRejection,
     demotePerformer: actions.demotePerformer,
+    dismissHostActionError: actions.dismissHostActionError,
     approveInstrumentChange: actions.approveInstrumentChange,
     rejectInstrumentChange: actions.rejectInstrumentChange,
     requestInstrumentChange: actions.requestInstrumentChange,

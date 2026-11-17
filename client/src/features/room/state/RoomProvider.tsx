@@ -93,6 +93,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const roomPasswordRef = useRef<string | null>(null)
   /** 재연결 후 보낸 rejoin의 응답(room-state 또는 입장 거부)을 기다리는 중 (PR #23 M3) */
   const rejoiningRef = useRef(false)
+  /** 재개 직후 room-state 하나에서만 내 연주 상태를 서버와 맞춘다 */
+  const verifySelfRef = useRef(false)
   /** password-busy 자동 재시도 */
   const busyRetryRef = useRef<{ count: number; timer: ReturnType<typeof setTimeout> | null }>({ count: 0, timer: null })
   const clearBusyRetry = () => {
@@ -252,7 +254,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       rec.stopRecording()
       store.update((st) => ({
         chat: [],
-        requests: { perform: initialPerformRequestState, pendingInstrumentChanges: [], myInstrumentChangeStatus: 'none', myNewInstrument: null },
+        requests: { perform: initialPerformRequestState, pendingInstrumentChanges: [], myInstrumentChangeStatus: 'none', myNewInstrument: null, hostActionError: null },
         connection: { ...st.connection, isRoomHost: false, peers: [], joinFeedback: '' },
         roster: {},
         local: { ...st.local, localError: null },
@@ -368,7 +370,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         store.update((st) => ({
           connection: { ...st.connection, peers: [], roomJoined: false, joinError: null, joinFeedback: '룸 입장 시도 중...' },
           roster: {},
-          requests: { perform: initialPerformRequestState, pendingInstrumentChanges: [], myInstrumentChangeStatus: 'none', myNewInstrument: null },
+          requests: { perform: initialPerformRequestState, pendingInstrumentChanges: [], myInstrumentChangeStatus: 'none', myNewInstrument: null, hostActionError: null },
         }))
         restart()
       },
@@ -443,7 +445,9 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       demotePerformer: (targetId) => {
         if (!d().isOpen()) return
         d().send({ type: 'demote-performer', targetId })
+        if (store.getSnapshot().requests.hostActionError) store.patch('requests', { hostActionError: null })
       },
+      dismissHostActionError: () => store.patch('requests', { hostActionError: null }),
       approveInstrumentChange: (targetId) => {
         if (!d().isOpen()) return
         d().send({ type: 'approve-instrument-change', targetId })
@@ -503,6 +507,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     joinOnReadyRef.current = 'none'
     const join = mode === 'none' ? null : buildJoinMessageRef.current(mode === 'rejoin')
     rejoiningRef.current = !!join && mode === 'rejoin'
+    // 재개면 다음 room-state(서버가 재개 알림으로 보냄)에서 내 연주 상태를 서버 기준으로 맞춘다 (#180 리뷰 M-1)
+    verifySelfRef.current = resumed
     if (join) send(join)
     // resumed && 같은 id → 엔진 유지 + descriptor 재전송, 아니면 새 id로 엔진 재시작
     void session.welcome(id, resumed)
@@ -588,9 +594,11 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       selfId: self,
       rejoining: rejoiningRef.current,
       busyRetryCount: busyRetryRef.current.count,
+      verifySelfPerforming: verifySelfRef.current,
       now: Date.now,
       makeChatId,
     })
+    if (p.type === 'room-state') verifySelfRef.current = false
     store.update(result.patch)
     result.effects.forEach(runEffect)
   }

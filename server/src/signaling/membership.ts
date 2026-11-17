@@ -109,6 +109,8 @@ export function sendRoomState(ctx: Ctx<MembershipSvc>, roomId: string) {
     participants: others,
     peerIds: others.map(p => p.oderId),
     isHost: client.member.isHost,
+    // 내 연주 상태(서버 기준). 재개 뒤 앱이 "연주 중"으로 어긋나 있으면 이 값으로 맞춘다(P2-9, #180 리뷰 M-1)
+    isPerforming: client.perform.isPerforming,
   })
   if (client.member.isHost) {
     const pending = pendingFor(roomId)

@@ -30,7 +30,8 @@
           "type": "room-state",
           "participants": [],
           "peerIds": [],
-          "isHost": true
+          "isHost": true,
+          "isPerforming": false
         }
       ]
     }
@@ -91,7 +92,8 @@
           "peerIds": [
             "c1"
           ],
-          "isHost": false
+          "isHost": false,
+          "isPerforming": false
         }
       ]
     }
@@ -175,7 +177,8 @@
             "c1",
             "c2"
           ],
-          "isHost": false
+          "isHost": false,
+          "isPerforming": false
         }
       ]
     }
@@ -282,7 +285,8 @@
             "c2",
             "c3"
           ],
-          "isHost": false
+          "isHost": false,
+          "isPerforming": false
         }
       ]
     }
@@ -418,7 +422,8 @@
             "c3",
             "c4"
           ],
-          "isHost": false
+          "isHost": false,
+          "isPerforming": false
         }
       ]
     }
@@ -1594,7 +1599,8 @@
             "c4",
             "c5"
           ],
-          "isHost": false
+          "isHost": false,
+          "isPerforming": true
         }
       ]
     }
@@ -1643,7 +1649,8 @@
             "c4",
             "c5"
           ],
-          "isHost": false
+          "isHost": false,
+          "isPerforming": true
         }
       ]
     }
@@ -1765,7 +1772,8 @@
           "type": "room-state",
           "participants": [],
           "peerIds": [],
-          "isHost": false
+          "isHost": false,
+          "isPerforming": false
         }
       ],
       "anon": [

@@ -71,3 +71,27 @@
     order: 1;
   }
 }
+
+/* 방장: 내리기 거절 안내 (P2-9) */
+.host-action-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 6px 8px;
+  font-size: 0.8rem;
+  background: var(--red-400-a20);
+  border: 1px solid var(--red-400-a40);
+  border-radius: var(--radius-sm);
+}
+
+.host-action-error span {
+  flex: 1;
+}
+
+.host-action-error button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+}

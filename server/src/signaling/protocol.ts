@@ -113,7 +113,8 @@ export type ServerMessage =
   /** 앱 수준 ping에 대한 응답 (P1-15) */
   | { type: 'pong' }
   | ServerError
-  | { type: 'room-state'; participants: Participant[]; peerIds: string[]; isHost: boolean }
+  /** isPerforming: 받는 사람 자신의 연주 상태(서버 기준, P2-9) */
+  | { type: 'room-state'; participants: Participant[]; peerIds: string[]; isHost: boolean; isPerforming: boolean }
   | ({ type: 'participant-joined'; participant: Participant; rejoin: boolean } & FromSender)
   | { type: 'participant-left'; oderId: string }
   | ({ type: 'performer-updated'; nickname: string; instrument?: string; isPerforming: boolean; isHost?: boolean } & FromSender)
