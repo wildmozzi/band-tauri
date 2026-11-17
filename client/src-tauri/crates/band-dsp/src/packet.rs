@@ -21,9 +21,9 @@ pub const VERSION: u8 = 1;
 pub const FLAG_OPUS: u8 = 0b01;
 pub const FLAG_STEREO: u8 = 0b10;
 /// Hello/HelloAck: 보낸 쪽이 경로 종류를 표시했다(새 엔진). 헤더는 AAD라 경로상 공격자가 바꿀 수 없다.
-pub const FLAG_PATH_TAGGED: u8 = 0x80;
+pub(crate) const FLAG_PATH_TAGGED: u8 = 0x80;
 /// Hello/HelloAck: 릴레이(RelayData)로 보냈다. 태그가 있으면 수신 경로 종류(출발 주소 = 릴레이 주소)와 같아야 한다.
-pub const FLAG_VIA_RELAY: u8 = 0x40;
+pub(crate) const FLAG_VIA_RELAY: u8 = 0x40;
 
 /// Hello/HelloAck 헤더 flags (relay-design 4.1 경로 종류 위장 대응).
 pub fn path_tag(via_relay: bool) -> u8 {
@@ -46,7 +46,7 @@ pub enum PacketType {
 }
 
 impl PacketType {
-    pub fn from_u8(v: u8) -> Option<Self> {
+    pub(crate) fn from_u8(v: u8) -> Option<Self> {
         Some(match v {
             1 => Self::Audio,
             2 => Self::Hello,
@@ -101,11 +101,13 @@ impl Header {
         })
     }
 
-    pub fn is_opus(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_opus(&self) -> bool {
         self.flags & FLAG_OPUS != 0
     }
 
-    pub fn is_stereo(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_stereo(&self) -> bool {
         self.flags & FLAG_STEREO != 0
     }
 

@@ -7,6 +7,8 @@
 //!
 //! 유일한 OS 호출은 `stats::SeqCell::read`(비RT 독자의 seqlock 재시도)의 `std::thread::yield_now` — 스케줄러 양보다.
 
+#![warn(unreachable_pub)]
+
 pub mod clock;
 pub mod codec;
 pub mod config;
