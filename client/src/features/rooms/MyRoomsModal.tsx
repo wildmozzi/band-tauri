@@ -6,6 +6,9 @@ import './MyRoomsModal.css'
 interface MyRoomsModalProps {
   myRooms: MyRoom[]
   loading: boolean
+  /** 조회 실패(받은 목록 없음) */
+  loadError?: boolean
+  onRetry?: () => void
   expandedTags: Set<string>
   onToggleTags: (e: React.MouseEvent, roomId: string) => void
   onClose: () => void
@@ -19,6 +22,8 @@ interface MyRoomsModalProps {
 export function MyRoomsModal({
   myRooms,
   loading,
+  loadError = false,
+  onRetry,
   expandedTags,
   onToggleTags,
   onClose,
@@ -31,6 +36,11 @@ export function MyRoomsModal({
     <Modal className="my-rooms-modal" title="내가 만든 합주실" onClose={onClose}>
       {loading ? (
         <div className="my-rooms-loading">불러오는 중...</div>
+      ) : loadError ? (
+        <div className="my-rooms-empty" role="alert">
+          <p>내 합주실 목록을 불러오지 못했습니다. 인터넷 연결을 확인하고 다시 시도해주세요.</p>
+          {onRetry && <button type="button" onClick={onRetry} className="create-room-btn-small">다시 시도</button>}
+        </div>
       ) : myRooms.length === 0 ? (
         <div className="my-rooms-empty">
           <p>아직 만든 합주실이 없습니다.</p>

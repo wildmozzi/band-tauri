@@ -52,6 +52,8 @@ export function MusicRoom() {
   const historyQuery = useStemHistoryQuery(userId, showHistory && isLoggedIn)
   const separationHistory: StemSeparation[] = historyQuery.data ?? []
   const loadingHistory = historyQuery.isFetching
+  // 기록을 받지 못했는데 조회가 실패했다(오프라인·서버 다운) — "저장된 분리 결과가 없습니다"가 아니라 오류로
+  const historyError = historyQuery.isError && !historyQuery.data
   const deleteSeparation = useDeleteStemSeparationMutation(userId)
   const [currentSeparationId, setCurrentSeparationId] = useState<string | null>(null)
   const [loadingStemsFromHistory, setLoadingStemsFromHistory] = useState(false)
@@ -349,6 +351,8 @@ export function MusicRoom() {
                 <div className="spinner"></div>
                 <p>로딩 중...</p>
               </div>
+            ) : historyError ? (
+              <p className="history-empty" role="alert">분리 기록을 불러오지 못했습니다. 인터넷 연결을 확인하고 [새로고침]을 눌러 주세요.</p>
             ) : separationHistory.length === 0 ? (
               <p className="history-empty">저장된 분리 결과가 없습니다.</p>
             ) : (

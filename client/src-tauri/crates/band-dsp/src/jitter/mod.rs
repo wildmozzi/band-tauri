@@ -156,6 +156,9 @@ pub struct JitterBuffer {
     target: TargetEst,
     /// 늦은 패킷 예산(도착 쪽, `late_budget.rs`).
     late: LateBudget,
+    /// 지연 계단 감시를 시작할 때의 늦은 패킷 예산(#194 리뷰 L2): 계단으로 판정되면 감시 동안 닫힌 블록(계단 공백의 늦은
+    /// 도착·버림)을 판단에서 되돌리려고 이 값으로 돌린다.
+    late_at_step: LateBudget,
     /// 깊이 측정·보정(재생 쪽, `correction.rs`). `chase`·재생 시작 여유도 여기 있다.
     depth: DepthCtl,
     /// 디코드·은닉(재생 쪽, `conceal.rs`).
@@ -244,6 +247,7 @@ impl JitterBuffer {
             tuning: JitterTuning::from_profile(settings.profile),
             target: TargetEst::new(b.block_rel),
             late: LateBudget::new(),
+            late_at_step: LateBudget::new(),
             depth: DepthCtl::new(b.depth),
             conceal: Concealer::new(b.conceal),
             pkt_frame: 240,

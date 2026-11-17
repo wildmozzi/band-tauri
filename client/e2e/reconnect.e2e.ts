@@ -10,7 +10,8 @@ test.describe('시그널링 재연결 (P1-15b)', () => {
     await expect(title).toBeVisible()
     const banner = page.locator('.reconnect-banner')
     await expect(banner).toHaveCount(0)
-    expect(mock.signaling.messages('join')).toHaveLength(1)
+    // 제목(Supabase)이 보여도 첫 join은 아직 오는 중일 수 있다(P2-18f) — 한 번 읽기 대신 poll
+    await expect.poll(() => mock.signaling.messages('join').length).toBe(1)
 
     // 서버 장애: 지금 연결을 끊고 재연결 시도도 거부한다
     mock.signaling.setDown(true)

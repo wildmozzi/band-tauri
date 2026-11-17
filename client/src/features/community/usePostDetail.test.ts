@@ -38,6 +38,32 @@ beforeEach(() => {
 afterEach(() => vi.resetAllMocks())
 
 describe('usePostDetail', () => {
+  it('일시적 조회 오류면 목록으로 가지 않고 loadError, 다시 시도로 받는다. 정말 없으면(null) 목록으로', async () => {
+    api.getPost.mockRejectedValue(new Error('network'))
+    api.getComments.mockRejectedValue(new Error('network'))
+    api.getTrendingTags.mockRejectedValue(new Error('network'))
+    const { result } = renderHook(() => usePostDetail('P', null), { wrapper: createQueryWrapper().wrapper })
+    await waitFor(() => expect(result.current.loadError).toBe(true))
+    expect(result.current.commentsError).toBe(true)
+    await waitFor(() => expect(result.current.trendingError).toBe(true))
+    expect(navigate).not.toHaveBeenCalled()
+
+    api.getPost.mockResolvedValue(post('P'))
+    api.getComments.mockResolvedValue([comment('c1')])
+    act(() => result.current.retryPost())
+    await waitFor(() => expect(result.current.post?.id).toBe('P'))
+    await waitFor(() => expect(result.current.comments.map(c => c.id)).toEqual(['c1']))
+    expect(result.current.loadError).toBe(false)
+    expect(result.current.commentsError).toBe(false)
+  })
+
+  it('게시물이 정말 없으면(null) 목록으로 이동한다', async () => {
+    api.getPost.mockResolvedValue(null)
+    api.getComments.mockResolvedValue([])
+    renderHook(() => usePostDetail('gone', null), { wrapper: createQueryWrapper().wrapper })
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith('/community'))
+  })
+
   it('postId가 바뀐 뒤 늦게 도착한 이전 게시물 응답은 무시한다', async () => {
     const postA = deferred<Post>()
     const commentsA = deferred<Comment[]>()

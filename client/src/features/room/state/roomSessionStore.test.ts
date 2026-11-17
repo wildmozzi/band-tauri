@@ -69,6 +69,17 @@ describe('RoomSessionStore', () => {
     expect(store.getSnapshot().derived.rtcStatus).toBe('connecting')
   })
 
+  it('방 안에서 시그널링이 끊겨 재개를 기다리는 동안 유지한 관람 수신은 connecting으로 보인다 (#192 리뷰 L-1)', () => {
+    const store = new RoomSessionStore()
+    store.patch('viewer', { status: 'live' })
+    store.patch('connection', { currentRoomId: 'r1', signalStatus: 'connected' })
+    expect(store.getSnapshot().derived.rtcStatus).toBe('live')
+    store.patch('connection', { signalStatus: 'connecting' })
+    expect(store.getSnapshot().derived.rtcStatus).toBe('connecting')
+    store.patch('connection', { signalStatus: 'connected' })
+    expect(store.getSnapshot().derived.rtcStatus).toBe('live')
+  })
+
   it('fieldSetter는 setState처럼 이전 값 함수도 받는다', () => {
     const store = new RoomSessionStore()
     const setRecordings = store.fieldSetter('recording', 'recordingDuration')

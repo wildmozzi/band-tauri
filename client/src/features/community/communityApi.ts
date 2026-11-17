@@ -243,7 +243,8 @@ export const communityApi = {
       .single()
 
     if (error) {
-      if (error.code === 'PGRST116') return null // Not found
+      // 없음, 또는 uuid 형식이 아닌 id(잘린 링크·오타 — 22P02)도 "그런 글 없음" (#197 리뷰 L-1)
+      if (error.code === 'PGRST116' || error.code === '22P02') return null
       throw error
     }
 
@@ -434,10 +435,12 @@ export const communityApi = {
   async getTrendingTags(limit: number = 5): Promise<{ tag: string; count: number }[]> {
     const sb = requireClient()
 
-    const { data: posts } = await sb
+    const { data: posts, error } = await sb
       .from('posts')
       .select('tags')
 
+    // 조회 실패는 throw(빈 목록으로 성공 처리하면 화면이 "태그가 없습니다"를 보인다)
+    if (error) throw error
     if (!posts) return []
 
     // Count tag occurrences

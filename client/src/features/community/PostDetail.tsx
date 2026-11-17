@@ -16,7 +16,12 @@ export function PostDetail() {
     post,
     comments,
     loading,
+    loadError,
+    retryPost,
+    commentsError,
+    retryComments,
     trendingTags,
+    trendingError,
     deleting,
     handleLike,
     addComment,
@@ -38,6 +43,16 @@ export function PostDetail() {
     return (
       <div style={{ maxWidth: '1400px', margin: '0 auto', padding: 'var(--space-6)', textAlign: 'center' }}>
         <p style={{ color: 'var(--white-a50)' }}>로딩 중...</p>
+      </div>
+    )
+  }
+
+  if (!post && loadError) {
+    return (
+      <div role="alert" style={{ maxWidth: '1400px', margin: '0 auto', padding: 'var(--space-6)', textAlign: 'center' }}>
+        <p style={{ color: 'var(--white-a50)' }}>게시물을 불러오지 못했습니다. 인터넷 연결을 확인하고 다시 시도해주세요.</p>
+        <button type="button" className="btn-secondary" onClick={retryPost}>다시 시도</button>{' '}
+        <button type="button" className="btn-secondary" onClick={() => navigate('/community')}>목록으로</button>
       </div>
     )
   }
@@ -90,6 +105,8 @@ export function PostDetail() {
             />
             <CommentSection
               comments={comments}
+              loadError={commentsError}
+              onRetry={retryComments}
               user={user}
               onAdd={addComment}
               onReply={handleReply}
@@ -101,7 +118,7 @@ export function PostDetail() {
 
         {/* 사이드바 */}
         <div>
-          <TrendingTagsCard tags={trendingTags} onTagClick={() => navigate('/community')} />
+          <TrendingTagsCard tags={trendingTags} loadError={trendingError} onTagClick={() => navigate('/community')} />
         </div>
       </div>
 

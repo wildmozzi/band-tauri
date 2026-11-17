@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { uploadPostImage } from './queries'
 import { PostSaveError, type Post } from './communityApi'
+import { UploadError } from '../../shared/lib/uploadError'
 import { MAX_IMAGES, addUniqueTag, uploadSequentially, validateImageFiles } from './postLogic'
 
 interface SubmitOptions {
@@ -105,8 +106,8 @@ export function usePostForm() {
       opts.onSuccess()
     } catch (error) {
       console.error(opts.logLabel, error)
-      // 서버가 거절한 이유(예: 저장할 수 없는 이미지)는 그대로 보여준다
-      alert(error instanceof PostSaveError ? error.message : opts.failMessage)
+      // 서버가 거절한 이유(예: 저장할 수 없는 이미지, 이미지 일일 한도·용량, 로그인 필요, 연결 실패)는 그대로 보여준다
+      alert(error instanceof PostSaveError || error instanceof UploadError ? error.message : opts.failMessage)
     } finally {
       setSubmitting(false)
       setUploadProgress('')
