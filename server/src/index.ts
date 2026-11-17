@@ -5,7 +5,8 @@ import { createServer as createHttpsServer } from 'https'
 import { readFileSync, existsSync } from 'fs'
 import { createApp } from './app'
 import { supabaseAdmin as supabase } from './lib/supabase'
-import { initializeWebSocket } from './services/wsService'
+import type { WebSocketServer } from 'ws'
+import { initializeWebSocket, wsActivity } from './services/wsService'
 import { scheduleCleanup } from './services/cleanupService'
 import { getDefaultSubscriptionService, scheduleSubscriptionJobs } from './services/subscriptionService'
 import { createDefaultPaymentOrderService, scheduleOrderJobs } from './services/paymentOrderService'
@@ -17,7 +18,9 @@ requirePublicApiUrl()
 
 const PORT = Number(process.env.PORT || 8080)
 
-const app = createApp()
+// 운영 집계(GET /api/ops/activity, P1-17①)는 아래에서 WS 서버를 만든 뒤부터 값을 돌려준다
+let wss: WebSocketServer | null = null
+const app = createApp({ activity: () => (wss ? wsActivity(wss) : null) })
 
 if (supabase) {
   console.log('[DB] Supabase client initialized - participant sync enabled')
@@ -44,13 +47,13 @@ const keyPath = './certs/key.pem'
 
 if (existsSync(certPath) && existsSync(keyPath)) {
   const server = createHttpsServer({ cert: readFileSync(certPath), key: readFileSync(keyPath) }, app)
-  initializeWebSocket(server, supabase)
+  wss = initializeWebSocket(server, supabase)
   server.listen(PORT, () => {
     console.log(`WSS signaling server listening on wss://localhost:${PORT}`)
   })
 } else {
   const server = createHttpServer(app)
-  initializeWebSocket(server, supabase)
+  wss = initializeWebSocket(server, supabase)
   server.listen(PORT, () => {
     console.log(`HTTP + WS server listening on port ${PORT}`)
     console.log(`- HTTP API: http://localhost:${PORT}/api`)

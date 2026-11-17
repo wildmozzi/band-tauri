@@ -1,5 +1,7 @@
 # 데스크톱 릴리스 · 자동 업데이트 (P2-1)
 
+> 서버 배포(`main` push = fly 자동 배포)는 아래 **4절 "합주 중 배포 금지"** 체크리스트를 먼저 본다. DB 운영 컷오버 순서는 [DEPLOY-CUTOVER.md](DEPLOY-CUTOVER.md).
+
 Windows 우선. 설치본은 NSIS(`Band_<버전>_x64-setup.exe`), 자동 업데이트는 `tauri-plugin-updater` v2.
 
 ## 구성 요약
@@ -112,3 +114,71 @@ npm run tauri build
 2. `.pfx`를 base64로: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx")) | Set-Clipboard` → `WINDOWS_CERTIFICATE` 시크릿, 비밀번호는 `WINDOWS_CERTIFICATE_PASSWORD`.
 3. 태그 릴리스 후 설치본 속성 → 디지털 서명 탭에서 서명·타임스탬프 확인.
 4. EV가 아니면 SmartScreen 평판은 다운로드가 쌓여야 생긴다. 하드웨어 토큰 기반 EV/Azure Trusted Signing은 `signCommand` 방식으로 워크플로를 바꿔야 한다(현재 단계는 `.pfx` 전제).
+
+## 4. 서버 배포 — 합주 중 배포 금지 (P1-17①)
+
+`main`에 `server/**` 변경이 들어가면 `.github/workflows/deploy-server.yml`이 **바로 fly.io에 배포한다**(사람 승인 단계 없음).
+시그널링 상태는 전부 서버 메모리라 배포(머신 재시작)는 **접속자 전원의 세션을 버린다** — 연주자는 엔진을 재시작하고(오디오 끊김),
+관람자는 다시 붙는다. 재개 유예(30초)는 프로세스가 살아 있을 때만 유효하다(docs/server-architecture.md 2.4절).
+그래서 **"합주 중 배포 금지"**를 운영 규칙으로 한다. 세션 저장소·clientId 재매핑(P1-17 ②③)은 실사용자가 생기면 다시 본다.
+
+### 규칙
+- **연주자가 1명이라도 있으면 `main`에 server 변경을 병합·push하지 않는다.** 배포 시점 = `main` push 시점이다.
+- 확인할 수 없으면(스크립트 종료 코드 2) 배포하지 않는다. "모르면 하지 않는다".
+- 관람자만 있으면 배포해도 되지만 그 관람자는 재연결을 겪는다. 피할 수 있으면 `--strict`로 기다린다.
+- 시그널링 서버는 **1대 고정**이다(`fly scale count`를 늘리지 않는다). 확인 경로는 요청을 받은 머신 한 대의 숫자만 본다.
+- `fly secrets set`·`fly deploy`·머신 재시작도 같은 규칙이다(secrets 변경도 머신을 재시작한다 — 미리 넣을 때는 `--stage`).
+- 웹(Vercel)·데스크톱 릴리스는 이 규칙과 무관하다(합주는 데스크톱 엔진 + 서버 시그널링). 단 DB 마이그레이션이 함께면 [DEPLOY-CUTOVER.md](DEPLOY-CUTOVER.md) 순서를 따른다.
+
+### 연주 인원 확인 수단
+`GET /api/ops/activity` (server/src/routes/ops.ts) — 지금 서버의 **집계 숫자만** 돌려준다(방 id·사용자 정보 없음):
+
+```json
+{ "activeRooms": 1, "performers": 2, "viewers": 3, "resuming": 0, "connections": 6, "safeToDeploy": false, "timestamp": "…" }
+```
+
+| 필드 | 뜻 |
+|---|---|
+| `activeRooms` | 사람이 한 명 이상 있는 방 수 |
+| `performers` | 방 안의 연주자(연주 중이거나 방장) 수. 끊겨서 재개를 기다리는 사람 포함 |
+| `viewers` | 방 안의 관람자 수(재개 대기 포함) |
+| `resuming` | 위 둘 중 연결이 끊겨 재개 유예 중인 수 |
+| `connections` | 전체 WS 연결 수(방 밖 로비 포함) |
+| `safeToDeploy` | `performers === 0` |
+
+보호: 이용 현황(언제 몇 명이 쓰는지)도 공개할 이유가 없어 **운영자 토큰**이 필요하다. 서버 환경변수 `OPS_TOKEN`(32자 이상 무작위 값)이
+없거나 짧으면 경로가 꺼져 404, 토큰이 틀리면 401. `/api` 공용 rate limit을 받는다. 사용자 JWT·관리자 역할 체계가 아직 없어서 별도 비밀값으로 둔다.
+
+**최초 1회 [사람]** (fly 설정 변경 — 사람 승인 후):
+```powershell
+# 32바이트 무작위 값 생성 → 비밀번호 관리자에 보관. 코드·문서·커밋에 넣지 않는다
+$t = node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+fly secrets set OPS_TOKEN=$t -a band-server --stage   # --stage: 지금 재시작하지 않고 다음 배포 때 반영
+```
+> 주의: 이 경로는 이 PR이 `main`에 배포된 **뒤부터** 있다. 그 전(또는 OPS_TOKEN 반영 전) 배포는 아래 "확인 경로가 없을 때"로 확인한다.
+
+### 배포 직전 체크리스트 (`main` 병합·push 직전, 매번)
+1. [ ] `develop` CI 녹색, 바꾼 서버 PR의 리뷰 지적 해소
+2. [ ] DB 마이그레이션이 같이 가는가? → 그렇다면 [DEPLOY-CUTOVER.md](DEPLOY-CUTOVER.md) 순서(마이그레이션이 먼저인지 나중인지)를 확인
+3. [ ] fly secrets 사전 조건(예: `PUBLIC_API_URL` — 워크플로 preflight가 막는다)
+4. [ ] **연주 인원 확인** — 0명이어야 다음 단계로
+   ```powershell
+   cd server
+   $env:OPS_URL = "https://<서버 공개 주소>"      # 예: fly 앱 주소. 값은 VITE_API_URL과 같은 서버
+   $env:OPS_TOKEN = "<비밀번호 관리자의 운영자 토큰>"
+   npm run ops:active                              # 관람자도 끊지 않으려면: npm run ops:active -- --strict
+   ```
+   종료 코드 `0` 배포 가능 · `1` 연주 중(배포 금지) · `2` 확인 실패(배포 금지). 토큰은 출력되지 않는다.
+   PowerShell 기록에 남기 싫으면 PowerShell 7에서 `$env:OPS_TOKEN = Read-Host -MaskInput` 으로 넣는다.
+5. [ ] 0이면 **바로**(몇 분 안에) `main` 병합·push. 시간이 지났으면 4를 다시 한다
+6. [ ] GitHub Actions "Deploy Server to Fly.io" 성공 확인, `GET /health` 200, `npm run ops:active`가 다시 응답하는지(배포 직후 0)
+7. [ ] (선택) 데스크톱 앱으로 방 하나 만들어 입장·연주 시작까지 확인
+
+### 확인 경로가 없을 때 (이 기능이 운영에 배포되기 전, OPS_TOKEN 미설정)
+- 서버가 방 참가자 수를 DB에 쓴다(`rooms.current_participants`, 관람 포함 — 연주자/관람자 구분 없음). Supabase SQL Editor에서:
+  ```sql
+  SELECT count(*) AS active_rooms, coalesce(sum(current_participants), 0) AS people
+    FROM public.rooms WHERE current_participants > 0;
+  ```
+  0행/0명이 아니면 배포하지 않는다. 이 값은 DB 쓰기 실패 시 어긋날 수 있으니 `fly logs -a band-server`의 최근 `[JOIN]`/`[LEAVE]`·`[CONNECT]` 줄도 함께 본다.
+- 둘 다 확인할 수 없으면 사용자가 적은 시간대(예: 새벽)에 배포하고, 테스트 참여자에게 미리 알린다.

@@ -18,6 +18,20 @@ export const isAuthenticated = (c: Client) => c.auth.state === 'authenticated' &
 /** 연주자 = 연주 중이거나 방장 */
 export const isPerformer = (c: Client) => c.perform.isPerforming || c.member.isHost
 
+/** 운영 집계 숫자 (GET /api/ops/activity 응답의 본체) */
+export interface ActivityCounts {
+  /** 사람이 한 명 이상 있는 방 수 */
+  activeRooms: number
+  /** 방 안의 연주자(연주 중이거나 방장) 수 — 재개 유예 중 포함 */
+  performers: number
+  /** 방 안의 관람자 수 — 재개 유예 중 포함 */
+  viewers: number
+  /** 그중 연결이 끊겨 세션 재개를 기다리는 수 */
+  resuming: number
+  /** 전체 WS 연결 수 (방 밖 포함) */
+  connections: number
+}
+
 export function createRegistry() {
   const rooms = new Map<string, Set<string>>()
   const clients = new Map<string, Client>()
@@ -133,10 +147,36 @@ export function createRegistry() {
     return target
   }
 
+  /**
+   * 운영 집계(P1-17①, 배포 전 확인): 사람이 있는 방 수와 그 안의 연주자(isPerformer)·관람자 수. 숫자만 —
+   * 방 id·사용자 정보는 내보내지 않는다. 재개 유예 중인 Client도 방에 남아 있으므로 포함하고, 그 수는 resuming으로 따로 센다.
+   * connections는 방 밖 연결(로비 등)까지 포함한 전체 연결 수다.
+   */
+  function activityCounts(isSuspended: (clientId: string) => boolean): ActivityCounts {
+    let activeRooms = 0
+    let performers = 0
+    let viewers = 0
+    let resuming = 0
+    for (const ids of rooms.values()) {
+      let present = 0
+      for (const id of ids) {
+        const c = clients.get(id)
+        if (!c) continue
+        present++
+        if (isPerformer(c)) performers++
+        else viewers++
+        if (isSuspended(id)) resuming++
+      }
+      if (present > 0) activeRooms++
+    }
+    return { activeRooms, performers, viewers, resuming, connections: clients.size }
+  }
+
   return {
     addClient, removeClient, getClient, clientCount, allClients,
     addToRoom, removeFromRoom, hasRoom, isInRoom, roomSize, deleteRoom, roomMemberIds, roomMembers,
     broadcastLeft, getRoomParticipants, broadcastToRoom, findRoomHost, getRoomPeer,
+    activityCounts,
   }
 }
 

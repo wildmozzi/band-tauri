@@ -174,7 +174,7 @@ function handleLeave(svc, client, roomId, reason) {
 
 자리 예약 판정은 승인 기록이 있는지를 본다. `capacity`가 `performers`를 직접 부르지 않도록 `membership`이 그 값을 넘긴다(계층 2 사이 간선을 늘리지 않음).
 
-S4-3 구현 이름(위 표의 입구와 대응): registry `getClient`·`clientCount`·`allClients`·`hasRoom`·`isInRoom`·`roomSize`·`roomMemberIds`·`roomMembers`·`deleteRoom`·`broadcastLeft`, capacity `checkCapacity`·`hasSeatHold`·`hold`·`clearSeatHold`·`noteLeft`·`consumeRejoin`·`onLeave`·`sweep`(`countRoomSeats`는 내부), performers `hasApproval`·`setApproval`·`clearApproval`·`onLeave`·`releaseGraceOnRejoin`, metronome `replayMetronome`·`dropMetronomeIfHostChanged`·`onEngineRestart`·`onEngineDown`·`onMemberLeft`·`onRoomEmpty`(+ 자기 핸들러용 `isRunningBy`·`update`), requests `pendingFor`·`onLeave`·`onRoomEmpty`(+ 자기 핸들러용 `performList`·`instrumentList`), resume `drop`·`find`·`findLive`(P1-16)·`isSuspended`·`add`·`clearTimers`. 팩토리가 함수만 돌려주는지는 `signaling-units.test.ts` "state ownership"이 검사한다.
+S4-3 구현 이름(위 표의 입구와 대응): registry `getClient`·`clientCount`·`allClients`·`hasRoom`·`isInRoom`·`roomSize`·`roomMemberIds`·`roomMembers`·`deleteRoom`·`broadcastLeft`·`activityCounts`(운영 집계 숫자, P1-17①), capacity `checkCapacity`·`hasSeatHold`·`hold`·`clearSeatHold`·`noteLeft`·`consumeRejoin`·`onLeave`·`sweep`(`countRoomSeats`는 내부), performers `hasApproval`·`setApproval`·`clearApproval`·`onLeave`·`releaseGraceOnRejoin`, metronome `replayMetronome`·`dropMetronomeIfHostChanged`·`onEngineRestart`·`onEngineDown`·`onMemberLeft`·`onRoomEmpty`(+ 자기 핸들러용 `isRunningBy`·`update`), requests `pendingFor`·`onLeave`·`onRoomEmpty`(+ 자기 핸들러용 `performList`·`instrumentList`), resume `drop`·`find`·`findLive`(P1-16)·`isSuspended`·`add`·`clearTimers`. 팩토리가 함수만 돌려주는지는 `signaling-units.test.ts` "state ownership"이 검사한다.
 
 **실제(설계와 다른 점 2)**: 맵을 숨기면서 `signaling-units.test.ts`의 내부 정리 확인 3개(만료된 자리 예약이 읽을 때 지워짐, `sweep`이 빈 방 항목을 지움, 빈 승인 맵을 지움)는 맵을 직접 볼 수 없어 **공개 결과**(`hasSeatHold`·`hasApproval`이 false) 확인으로 바꿨다(S4-3 #104). "결과가 맞다"는 보지만 "맵에 항목이 남지 않는다(메모리)"는 더 이상 보지 않는다 — 검사가 약해진 부분이다. 메모리 누수 쪽은 4.4-2(정기 정리)를 고칠 때 팩토리에 크기 조회(`size()`류)를 더해 다시 덮는다.
 
@@ -222,7 +222,7 @@ const handlers: Record<string, Handler> = {
 
 인스턴스가 1대여도 생기는 한계도 있다.
 
-- **서버 재시작·배포는 모든 세션을 버린다.** 상태가 전부 메모리라 `main` 배포(fly 자동 배포)마다 접속자 전원이 새 clientId로 다시 들어오고, 연주자는 엔진을 재시작한다. 재개 유예(30초)는 프로세스가 살아 있을 때만 유효하다.
+- **서버 재시작·배포는 모든 세션을 버린다.** 상태가 전부 메모리라 `main` 배포(fly 자동 배포)마다 접속자 전원이 새 clientId로 다시 들어오고, 연주자는 엔진을 재시작한다. 재개 유예(30초)는 프로세스가 살아 있을 때만 유효하다. 운영 규칙 "합주 중 배포 금지"와 배포 전 확인 경로(`GET /api/ops/activity`, `npm run ops:active`)는 [RELEASE.md](RELEASE.md) 4절(P1-17①).
 - `fly.toml`은 `min_machines_running = 1`만 정하고 **최대 1대를 강제하지 않는다.** `fly scale count 2`를 하면 위 표가 그대로 일어난다. 운영 문서에 "시그널링은 1대 고정"을 적어야 한다(설정 변경이라 [확인]).
 - 256MB·공유 CPU 1개에 scrypt(16MiB × 동시 2)가 같이 돈다. 시그널링과 같은 이벤트 루프는 아니지만(libuv 스레드풀) 메모리는 나눠 쓴다.
 
@@ -383,4 +383,4 @@ S2가 가장 크다. 리뷰가 어려우면 모듈 두세 개씩 나눠 올린�
 1. **반쯤 끊긴 연결에서 세션 재개 실패**: 재개는 서버가 소켓 닫힘을 **본 뒤에만**(`suspended`에 있을 때만) 된다. 클라이언트 쪽 망이 끊겨 서버가 아직 닫힘을 모르는 동안(하트비트 30초 주기 — 감지까지 최대 60초) 클라이언트가 새 소켓으로 `resumeClientId`를 보내면 재개되지 않고 새 clientId가 된다. 클라이언트는 엔진을 재시작한다(오디오 끊김). 고치려면 "같은 userId의 살아 있는 옛 연결"도 재개 대상으로 삼아야 한다 — `resume` 모듈의 정책 변경. **고침(P1-16)**: 2.6절 재개 대상 판정 ②.
 2. 만료된 `recentlyLeft`·`approvals` 항목의 정기 정리 없음(1.3절). `capacity.sweep`·`performers.sweep`을 하트비트에서 부르면 된다.
 3. 방장 이양 기능이 생기면 그 경로에서 `metronome.dropIfHostChanged`를 바로 부른다(P2-3b, 이미 백로그).
-4. 운영 문서에 "시그널링 1대 고정"과 "배포는 합주 중인 방이 없을 때"를 적는다(2.4절).
+4. 운영 문서에 "시그널링 1대 고정"과 "배포는 합주 중인 방이 없을 때"를 적는다(2.4절). **적음(P1-17①)**: [RELEASE.md](RELEASE.md) 4절.
