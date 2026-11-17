@@ -124,6 +124,7 @@
 | P2-25 | 발굴 웹 초기 로딩: 오디오 설정 화면 지연 로딩(첫 화면 gzip −6.2kB, 엔트리 JS 204→199kB) | e2e | 완료(PR #213, 2026-11-18) |
 | P2-25b | 웹 관람 첫 묶음의 데스크톱 전용 native/연주자 코드(~45kB) isNativeApp 동적 import 분리, supabase-js 부분 import 효과 측정 | gzip 전후, e2e | 진행 (작업자 web) |
 | P2-25c | **[확인]** vercel.json /assets/* immutable 캐시 헤더 — Vercel 설정 변경이라 승인 후 / 엔트리 CSS 화면별 분리(Low) | 응답 헤더 | 대기 (승인 필요) |
+| P2-26 | 발굴 서버 처리량: 부하 하네스(load-signaling.ts) — 방 50×6+관람자 정상 부하에서 루프 사용률 2~3%·ping p99 1~3ms로 여유 큼, 관람 ICE 중계 로그 −45%. **[버그·높음]** 관람자 6명+ 동시 접속 시 방장 offer·ICE가 일반 메시지 버킷에 걸려 27~68% 버려짐(클라이언트 rate-limited 미처리 → 1008 위험) | 하네스 관람자 10명 버림 0 | 진행 (PR #215, 작업자 perf; **[사람]** Linux·fly에서 하네스 1회) |
 | P3-13 | 데모 ScoreDisplay 정리(#105 발견): 첫 렌더·리사이즈의 페이지 분할 규칙 통일(지금 창 크기를 조금 바꾸면 페이지 수가 달라짐), 커서 effect가 측정·페이지마다 rAF 루프 재생성·매 프레임 Math.random 로그, console.log 과다 | scoreLayout 테스트 | 완료(#163 — computePageLayout 하나로 통일, SVG 사용자 좌표→CSS px 배율 변환(리뷰 H1), 커서 img style.top으로 자동 넘김, ResizeObserver+500ms 디바운스, 로그 제거; **[사람]** 데모 화면: 페이지 수·자동 넘김·2쪽 이후 커서·리사이즈) |
 | P3-14 | e2e `port.test.ts` 동시 포트 테스트 flaky(#105 발견) — 원인 확인 후 결정적으로 | 20회 반복 녹색 | 완료(#114 — pick-port 잠금 원자 생성(link)·죽은 잠금 회수 직렬화, 제품 코드 버그였음; 부하 12병렬 100회 녹색) |
 | P3-15 | `sys::cpu::tests::cycles_track_sleepy_busy_thread` 부하 의존 flaky(전체 병렬 --lib 실행에서만 실패, 단독 통과; #131 리뷰) — 실시간 묶음(ignore realtime)으로 옮기거나 직렬화 | 병렬 --lib 20회 녹색 | 완료(#135 — realtime_ 시험으로 직렬 realtime 잡에서, 잡 필터에 lib realtime_ 포함) |
