@@ -109,6 +109,7 @@ pub struct JitterStats {
 
 impl JitterStats {
     /// 샘플/프레임 보정 총 횟수.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn corrections(&self) -> u64 {
         self.samples_dropped + self.samples_inserted + self.dropped_frames
     }
