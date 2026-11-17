@@ -135,6 +135,8 @@ pub struct EngineStats {
     pub cpu: super::cpuprof::CpuStats,
     /// 합주 녹음 상태(P2-4). 녹음 중이 아니면 null.
     pub recording: Option<super::record::RecordStats>,
+    /// 하이브리드 CPU 코어 배치(P1-21): 워커·수신 스레드가 P/E/LP-E 코어에서 돈 표본 비율(시작부터 누적). 비Windows는 null.
+    pub(crate) core_placement: Option<crate::sys::placement::CorePlacementStats>,
 }
 
 impl EngineStats {
@@ -164,6 +166,7 @@ impl EngineStats {
             metronome: Default::default(),
             cpu: Default::default(),
             recording: None,
+            core_placement: None,
         }
     }
 }
@@ -333,6 +336,10 @@ impl Engine {
             cpu,
             // 녹음 락은 짧게만 잡힌다(정지의 기다리는 단계는 락 밖). 정지를 시작하면 null.
             recording: self.recorder.lock().stats(),
+            core_placement: ws.placement.stats().map(|worker| crate::sys::placement::CorePlacementStats {
+                worker,
+                net_recv: self.net.as_ref().and_then(|n| n.shared().recv_placement.stats()),
+            }),
         }
     }
 
