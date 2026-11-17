@@ -27,3 +27,12 @@ serde_json = "1"
 asio = []
 # 통합 테스트·하네스용 훅(`cfg(any(test, feature = "test-support"))`). `band`의 `test-support`가 켠다(⑨a와 같은 문).
 test-support = []
+
+# SeqCell 메모리 순서 모델 검사(#141 리뷰 L-2). `--cfg loom` 빌드에서만 컴파일된다(`Cargo.lock`에는 항목이 생기지만 보통 빌드는
+# 받지도 빌드하지도 않는다). 실행: `RUSTFLAGS="--cfg loom" cargo test -p band-dsp --release --lib loom`(`stats.rs`의 `tests::loom`).
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[lints.rust]
+# `cfg(loom)`은 위 실행에서 RUSTFLAGS로 켠다(rustc가 모르는 cfg라 알려 둔다 — 없으면 unexpected_cfgs 경고).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }

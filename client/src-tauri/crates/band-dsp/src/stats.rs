@@ -1,7 +1,21 @@
 //! 원자 카운터(RT·워커 공유). 프론트로 나가는 보고 DTO는 `engine::report`(설계 문서 4절).
 
-use std::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+
+// `SeqCell`이 쓰는 원자 타입·fence·spin 힌트. 보통 빌드는 std 그대로(코드 경로·기계어 불변)이고, `--cfg loom`
+// 시험 빌드에서만 loom 모델 타입으로 바뀐다(#141 리뷰 L-2 — `tests::loom`이 메모리 순서를 모델 검사한다; loom은 개발 의존이라
+// 시험 밖 빌드는 `--cfg loom`이어도 std다). 다른 원자값(`AtomicF32`·`AudioCounters`)은 바꾸지 않는다.
+#[cfg(all(test, loom))]
+use loom::{
+    hint as seq_hint,
+    sync::atomic::{fence as seq_fence, AtomicU32 as SeqU32, AtomicU64 as SeqU64},
+};
+#[cfg(not(all(test, loom)))]
+use std::{
+    hint as seq_hint,
+    sync::atomic::{fence as seq_fence, AtomicU32 as SeqU32, AtomicU64 as SeqU64},
+};
 
 /// f32를 비트로 저장하는 원자값. RT 콜백에서 안전하게 쓸 수 있다.
 #[derive(Debug, Default)]
@@ -72,14 +86,14 @@ pub struct AudioCounters {
 /// 쪽이다 — `tests/architecture.rs`의 워커 락 검사가 워커 디렉터리의 `.read(`를 막는다).
 #[derive(Debug)]
 pub struct SeqCell<const N: usize> {
-    ver: AtomicU32,
-    words: [AtomicU64; N],
+    ver: SeqU32,
+    words: [SeqU64; N],
 }
 
 impl<const N: usize> Default for SeqCell<N> {
     /// 전부 0, 버전 0(짝수 = 읽을 수 있음).
     fn default() -> Self {
-        Self { ver: AtomicU32::new(0), words: std::array::from_fn(|_| AtomicU64::new(0)) }
+        Self { ver: SeqU32::new(0), words: std::array::from_fn(|_| SeqU64::new(0)) }
     }
 }
 
@@ -100,7 +114,7 @@ impl<const N: usize> SeqCell<N> {
     pub(crate) fn write(&self, w: &[u64; N]) {
         let v = self.ver.load(Ordering::Relaxed);
         self.ver.store(v.wrapping_add(1), Ordering::Relaxed); // 홀수: 쓰는 중
-        fence(Ordering::Release); // 아래 필드 store가 홀수 버전보다 먼저 보이지 않게
+        seq_fence(Ordering::Release); // 아래 필드 store가 홀수 버전보다 먼저 보이지 않게
         for (a, &x) in self.words.iter().zip(w) {
             a.store(x, Ordering::Relaxed);
         }
@@ -114,7 +128,7 @@ impl<const N: usize> SeqCell<N> {
             return None;
         }
         let w: [u64; N] = std::array::from_fn(|i| self.words[i].load(Ordering::Relaxed));
-        fence(Ordering::Acquire); // 필드 load가 아래 버전 load보다 뒤로 가지 않게
+        seq_fence(Ordering::Acquire); // 필드 load가 아래 버전 load보다 뒤로 가지 않게
         (self.ver.load(Ordering::Relaxed) == v1).then_some(w)
     }
 
@@ -130,7 +144,7 @@ impl<const N: usize> SeqCell<N> {
             if spins % SPINS_BEFORE_YIELD == 0 {
                 std::thread::yield_now();
             } else {
-                std::hint::spin_loop();
+                seq_hint::spin_loop(); // loom 빌드에서는 모델 스케줄러에 양보한다
             }
         }
     }
@@ -256,5 +270,162 @@ mod tests {
         // 한 번도 성공하지 못하려면 매번 발행과 겹쳐야 한다(쓰는 쪽은 256회마다 양보한다).
         assert!(ok > 0, "try_read가 한 번도 성공하지 못했다");
         assert_whole(&c.try_read().expect("쓰기가 없을 때 try_read는 성공한다"));
+    }
+
+    /// 메모리 순서 모델 검사(#141 리뷰 L-2). loom이 쓰는 쪽·읽는 쪽 스레드의 모든 교차와, C++11 모델이 허용하는 오래된
+    /// 값 읽기(Relaxed load가 앞선 store를 보는 경우)를 다 돌려 본다 — 위 폭풍 시험은 x86(TSO)에서만 돌아 약한 순서
+    /// 결함을 볼 수 없다. 보통 빌드에서는 컴파일되지 않는다. 실행:
+    /// `RUSTFLAGS="--cfg loom" cargo test -p band-dsp --release --lib loom`(필터 필수 — 다른 시험은 loom 모델 밖에서
+    /// loom 원자값을 만들어 실패한다).
+    ///
+    /// `mutant_*`: 같은 알고리즘의 복사본에서 순서 하나를 약하게 하면 loom이 찢긴 한 벌을 잡는다(`should_panic`). 모델이 그
+    /// 결함을 볼 수 있다는 증명이다 — 이것이 없으면 제품 코드 시험이 통과해도 "loom이 못 봐서"일 수 있다. 복사본은
+    /// 손잡이를 다 켜면 제품 코드와 같다(`mutant_all_knobs_on_passes`).
+    #[cfg(loom)]
+    mod loom {
+        use super::{assert_whole, frame};
+        use crate::stats::{seq_fence, SeqCell};
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+
+        /// 칸 수. 둘이면 "한 칸은 새 값, 한 칸은 옛 값"이 생길 수 있어 충분하고, 상태 공간이 작다.
+        const N: usize = 2;
+
+        /// 작성자 하나가 두 벌을 잇달아 내고, 읽는 쪽은 `try_read`를 두 번 한다. 돌려받은 값은 언제나 한 벌이다.
+        #[test]
+        fn loom_try_read_never_torn() {
+            loom::model(|| {
+                let (cell, mut w) = SeqCell::<N>::pair();
+                let t = loom::thread::spawn(move || {
+                    w.write(&frame(1));
+                    w.write(&frame(2));
+                });
+                for _ in 0..2 {
+                    if let Some(v) = cell.try_read() {
+                        assert_whole(&v);
+                    }
+                }
+                t.join().unwrap();
+                // 작성자가 끝난 뒤(join = happens-before)에는 반드시 마지막 한 벌이 읽힌다.
+                assert_eq!(cell.try_read(), Some(frame::<N>(2)));
+            });
+        }
+
+        /// `read`(재시도 고리)도 언제나 한 벌을 돌려주고, 작성자가 발행 도중이어도 끝난다(loom의 `spin_loop`는 양보).
+        #[test]
+        fn loom_read_never_torn() {
+            loom::model(|| {
+                let (cell, mut w) = SeqCell::<N>::pair();
+                let t = loom::thread::spawn(move || w.write(&frame(1)));
+                let v = cell.read();
+                assert_whole(&v);
+                assert!(v[0] <= 1);
+                t.join().unwrap();
+                assert_eq!(cell.read(), frame::<N>(1));
+            });
+        }
+
+        /// 변이 손잡이. 다 켜면 제품 코드(`SeqCell::write`·`try_read`)와 같다.
+        #[derive(Clone, Copy)]
+        struct Knobs {
+            /// 쓰는 쪽: 홀수 버전 뒤 Release fence.
+            writer_fence: bool,
+            /// 쓰는 쪽: 짝수 버전 store가 Release.
+            writer_release: bool,
+            /// 읽는 쪽: 첫 버전 load가 Acquire.
+            reader_acquire: bool,
+            /// 읽는 쪽: 필드 load 뒤 Acquire fence.
+            reader_fence: bool,
+            /// 읽는 쪽: 버전 재확인.
+            recheck: bool,
+        }
+
+        const ALL_ON: Knobs =
+            Knobs { writer_fence: true, writer_release: true, reader_acquire: true, reader_fence: true, recheck: true };
+
+        fn ord(strong: bool, o: Ordering) -> Ordering {
+            if strong {
+                o
+            } else {
+                Ordering::Relaxed
+            }
+        }
+
+        fn write_m(c: &SeqCell<N>, w: &[u64; N], k: Knobs) {
+            let v = c.ver.load(Ordering::Relaxed);
+            c.ver.store(v.wrapping_add(1), Ordering::Relaxed);
+            if k.writer_fence {
+                seq_fence(Ordering::Release);
+            }
+            for (a, &x) in c.words.iter().zip(w) {
+                a.store(x, Ordering::Relaxed);
+            }
+            c.ver.store(v.wrapping_add(2), ord(k.writer_release, Ordering::Release));
+        }
+
+        fn try_read_m(c: &SeqCell<N>, k: Knobs) -> Option<[u64; N]> {
+            let v1 = c.ver.load(ord(k.reader_acquire, Ordering::Acquire));
+            if v1 & 1 != 0 {
+                return None;
+            }
+            let w: [u64; N] = std::array::from_fn(|i| c.words[i].load(Ordering::Relaxed));
+            if k.reader_fence {
+                seq_fence(Ordering::Acquire);
+            }
+            (!k.recheck || c.ver.load(Ordering::Relaxed) == v1).then_some(w)
+        }
+
+        /// `loom_try_read_never_torn`과 같은 시나리오를 손잡이로 돌린다.
+        fn run_mutant(k: Knobs) {
+            loom::model(move || {
+                let c = Arc::new(SeqCell::<N>::default());
+                let wc = c.clone();
+                let t = loom::thread::spawn(move || {
+                    write_m(&wc, &frame(1), k);
+                    write_m(&wc, &frame(2), k);
+                });
+                for _ in 0..2 {
+                    if let Some(v) = try_read_m(&c, k) {
+                        assert_whole(&v);
+                    }
+                }
+                t.join().unwrap();
+            });
+        }
+
+        #[test]
+        fn loom_mutant_all_knobs_on_passes() {
+            run_mutant(ALL_ON);
+        }
+
+        #[test]
+        #[should_panic(expected = "찢긴 한 벌")]
+        fn loom_mutant_no_writer_fence_is_caught() {
+            run_mutant(Knobs { writer_fence: false, ..ALL_ON });
+        }
+
+        #[test]
+        #[should_panic(expected = "찢긴 한 벌")]
+        fn loom_mutant_relaxed_even_version_is_caught() {
+            run_mutant(Knobs { writer_release: false, ..ALL_ON });
+        }
+
+        #[test]
+        #[should_panic(expected = "찢긴 한 벌")]
+        fn loom_mutant_relaxed_first_version_load_is_caught() {
+            run_mutant(Knobs { reader_acquire: false, ..ALL_ON });
+        }
+
+        #[test]
+        #[should_panic(expected = "찢긴 한 벌")]
+        fn loom_mutant_no_reader_fence_is_caught() {
+            run_mutant(Knobs { reader_fence: false, ..ALL_ON });
+        }
+
+        #[test]
+        #[should_panic(expected = "찢긴 한 벌")]
+        fn loom_mutant_no_version_recheck_is_caught() {
+            run_mutant(Knobs { recheck: false, ..ALL_ON });
+        }
     }
 }
