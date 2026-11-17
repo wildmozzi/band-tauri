@@ -200,3 +200,154 @@ async fn replay_from_other_address_does_not_hijack() {
     assert_eq!(&buf[..n], &pkt[..]);
     assert!(timeout(Duration::from_millis(200), x.recv_from(&mut buf)).await.is_err(), "X는 오디오를 받지 않는다");
 }
+
+/// 감사(d-relay-audit) M1: 수신 소켓이 쉬지 않고 차 있어도(쓰레기 폭주·과부하) 1초 정리(만료 등록 제거·`now_unix` 갱신)가
+/// 돈다. 전에는 `biased` select가 늘 수신 갈래를 먼저 골라 정리 틱이 굶었고, 만료 등록이 쌓여 `ServerFull`·만료 토큰 수용이 됐다.
+#[tokio::test]
+async fn sweep_runs_under_sustained_flood() {
+    let limits = Limits { registration_ttl: Duration::from_millis(200), ..Limits::default() };
+    let (relay, stats) = start_relay(limits).await;
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    assert_eq!(bind_client(&a, relay, "room-f", "a", 0xF1).await[16], 0);
+    assert_eq!(stats.registrations.load(std::sync::atomic::Ordering::Relaxed), 1);
+    // 폭주: 여러 스레드가 1바이트 쓰레기(Malformed)를 쉬지 않고 보낸다
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let floods: Vec<_> = (0..6)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = s.send_to(&[0u8], relay);
+                }
+            })
+        })
+        .collect();
+    let t = Instant::now();
+    let mut swept = false;
+    while t.elapsed() < Duration::from_secs(4) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if stats.registrations.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            swept = true;
+            break;
+        }
+    }
+    let rx = stats.rx_packets.load(std::sync::atomic::Ordering::Relaxed);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for f in floods {
+        f.join().unwrap();
+    }
+    assert!(rx > 10_000, "폭주가 충분하지 않음({rx}) — 시험 조건 확인");
+    assert!(swept, "폭주 중 만료 등록이 정리되지 않음(정리 틱 굶음, rx {rx}, {:?})", t.elapsed());
+}
+
+/// 감사 L1(Windows): 2048B 넘는 데이터그램은 수신 오류(WSAEMSGSIZE)가 된다. 오류마다 1ms를 쉬면 큰 데이터그램 몇십 개로 뒤의
+/// 정상 패킷이 그만큼 늦는다 — 이제 연속 오류가 쌓일 때만 쉰다. (리눅스는 잘린 채 받아 Malformed로 버리므로 해당 없음)
+#[cfg(windows)]
+#[tokio::test]
+async fn oversized_datagrams_do_not_stall_relay() {
+    let (relay, stats) = start_relay(Limits::default()).await;
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let t = token::sign(SECRET, &Claims { expires_at: unix_now() + 600, ssrc: 0xB1, room: "room-o", client: "a" });
+    let first = send_bind(&a, relay, &t, 0xB1, None).await;
+    let cookie = ack_cookie(&first);
+    assert_eq!(send_bind(&a, relay, &t, 0xB1, Some(&cookie)).await[16], 0);
+    let big = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut worst = Duration::ZERO;
+    for _ in 0..5 {
+        // 수신 버퍼(64KB)에 들어갈 만큼 큰 데이터그램을 넣고, 바로 keepalive를 보내 응답 지연을 잰다
+        for _ in 0..24 {
+            big.send_to(&[0u8; 2100], relay).unwrap();
+        }
+        let t0 = Instant::now();
+        assert_eq!(send_bind(&a, relay, &t, 0xB1, Some(&cookie)).await[16], 0);
+        worst = worst.max(t0.elapsed());
+    }
+    let errs = stats.recv_errors.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(errs >= 24, "큰 데이터그램이 수신 오류가 되지 않음({errs}) — 시험 조건 확인");
+    assert!(worst < Duration::from_millis(20), "큰 데이터그램 24개 뒤 keepalive 응답 {worst:?}(오류마다 쉼)");
+}
+
+/// 감사 L3: 메트릭 HTTP 동시 연결은 `METRICS_MAX_CONNECTIONS`까지만 받는다. 연결을 열어 두기만 하는 상대가 상한을 채우면 그
+/// 다음 연결은 응답 없이 닫히고, 그 연결들이 닫히면 다시 응답한다(전에는 연결마다 태스크를 만들어 무한히 쌓였다).
+#[tokio::test]
+async fn metrics_connections_are_capped() {
+    async fn get(addr: std::net::SocketAddr, path: &str) -> String {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _ = s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).await;
+        let mut resp = Vec::new();
+        let _ = timeout(Duration::from_secs(2), s.read_to_end(&mut resp)).await;
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(server::serve_metrics(listener, Arc::new(Stats::default())));
+    let mut idle = Vec::new();
+    for _ in 0..server::METRICS_MAX_CONNECTIONS {
+        idle.push(TcpStream::connect(addr).await.unwrap());
+    }
+    // 서버가 위 연결들을 모두 받아 자리를 잡을 때까지(받기 순서는 연결 순서)
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // 상한이 찬 동안: 메트릭은 답하지 않고(예비 자리의 503), 헬스체크는 예비 자리에서 답한다(#201 리뷰 L4)
+    let over = get(addr, "/metrics").await;
+    assert!(!over.contains("200 OK") && !over.contains("relay_"), "상한을 넘는 메트릭 요청에 응답함: {over:?}");
+    let hz = get(addr, "/healthz").await;
+    assert!(hz.contains("200 OK"), "상한이 찬 동안 헬스체크가 굶음: {hz:?}");
+    // 예비 자리까지 열어 두기만 하면 그다음은 응답 없이 닫힌다(무한 증가 없음)
+    let mut idle2 = Vec::new();
+    for _ in 0..server::METRICS_HEALTHZ_RESERVE {
+        idle2.push(TcpStream::connect(addr).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let none = get(addr, "/healthz").await;
+    assert!(none.is_empty(), "상한+예비를 넘는 연결에 응답함: {none:?}");
+    drop(idle2);
+    drop(idle);
+    let t = Instant::now();
+    loop {
+        if get(addr, "/metrics").await.contains("200 OK") {
+            break;
+        }
+        assert!(t.elapsed() < Duration::from_secs(3), "자리가 돌아오지 않음");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// #201 리뷰 L1(Windows): 수신 **오류만** 오는 폭주(2048B 넘는 데이터그램 → WSAEMSGSIZE)에서도 정리가 돈다. 정리 마감은 루프
+/// 머리에서 보므로 오류 갈래(`continue`)도 덮인다. 리눅스는 큰 데이터그램이 잘린 채 `Ok`로 오므로 위 쓰레기 폭주 시험과 같다.
+#[cfg(windows)]
+#[tokio::test]
+async fn sweep_runs_under_error_only_flood() {
+    let limits = Limits { registration_ttl: Duration::from_millis(200), ..Limits::default() };
+    let (relay, stats) = start_relay(limits).await;
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    assert_eq!(bind_client(&a, relay, "room-e", "a", 0xE1).await[16], 0);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let floods: Vec<_> = (0..6)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = s.send_to(&[0u8; 2100], relay);
+                }
+            })
+        })
+        .collect();
+    let t = Instant::now();
+    let mut swept = false;
+    while t.elapsed() < Duration::from_secs(4) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if stats.registrations.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            swept = true;
+            break;
+        }
+    }
+    let errs = stats.recv_errors.load(std::sync::atomic::Ordering::Relaxed);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for f in floods {
+        f.join().unwrap();
+    }
+    assert!(errs > 1_000, "오류 폭주가 충분하지 않음({errs}) — 시험 조건 확인");
+    assert!(swept, "오류만 오는 폭주 중 만료 등록이 정리되지 않음(errs {errs}, {:?})", t.elapsed());
+}

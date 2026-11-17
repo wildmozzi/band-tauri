@@ -254,6 +254,8 @@ impl Relay {
             return Outcome::Drop(DropReason::UnknownDest);
         };
         match room.members.iter().find(|m| m.ssrc == dest) {
+            // 대상 등록이 만료됐으면(다음 정리 전) 떠난 주소로 보내지 않는다(감사 L2 — 그 포트를 NAT가 다른 사람에게 줬을 수 있다)
+            Some(m) if self.by_addr.get(&m.addr).is_none_or(|r| r.expires <= now) => Outcome::Drop(DropReason::UnknownDest),
             Some(m) => {
                 self.stats.forwarded_packets.fetch_add(1, Relaxed);
                 self.stats.forwarded_bytes.fetch_add((len - DATA_PREFIX_BYTES) as u64, Relaxed);
@@ -977,6 +979,24 @@ mod tests {
         r.sweep(t0 + Duration::from_secs(60));
         assert_eq!(r.registration_count(), 0);
         assert_eq!(r.stats().rooms.load(Relaxed), 0);
+    }
+
+    /// 감사 L2: 대상 멤버의 등록이 만료됐으면 정리(sweep) 전이라도 그 주소로 전달하지 않는다 — 떠난 사람의 NAT 포트가 다른
+    /// 사람에게 넘어갔을 수 있다. 대상이 keepalive로 살아 있으면 그대로 전달한다.
+    #[test]
+    fn no_forward_to_expired_member_before_sweep() {
+        let mut r = relay(Limits::default());
+        let t0 = Instant::now();
+        assert_eq!(bind(&mut r, t0, addr(1), "room", "a", 11), OK);
+        assert_eq!(bind(&mut r, t0, addr(2), "room", "b", 22), OK);
+        // b만 20초에 keepalive → 31초에는 a 만료(정리 전), b 유효
+        assert_eq!(bind(&mut r, t0 + Duration::from_secs(20), addr(2), "room", "b", 22), OK);
+        let t = t0 + Duration::from_secs(31);
+        assert_eq!(r.registration_count(), 2, "아직 정리 전");
+        assert_eq!(r.handle(t, NOW_UNIX, addr(2), &data_pkt(11, 22, 40)), Outcome::Drop(DropReason::UnknownDest));
+        // a가 다시 살아나면(같은 주소 keepalive) 다시 전달
+        assert_eq!(bind(&mut r, t, addr(1), "room", "a", 11), OK);
+        assert_eq!(r.handle(t, NOW_UNIX, addr(2), &data_pkt(11, 22, 40)), Outcome::Forward { to: addr(1), offset: 8 });
     }
 
     /// M2: 등록은 토큰 만료 시각을 넘어 유지되지 않는다 (회수 대신 짧은 TTL)
