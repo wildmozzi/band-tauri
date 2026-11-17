@@ -95,6 +95,10 @@ pub struct PeerSample {
     /// 입장 → 연결·첫 소리(ms, P1-20). 한 번 정하면 그 피어 항목 동안 그대로다.
     pub connect_ms: Option<f32>,
     pub first_audio_ms: Option<f32>,
+    /// 상대가 보내는 프레임(ms)과 상대가 Ping으로 보고한 입력 버퍼(ms, 65.535 = 보고 상한 이상) — 입→귀 추정 항(P2-8b).
+    /// 옛 엔진·보고 전이면 null. 에코 측정 중(`peerEchoing`) `remoteFrameMs`는 되돌아오는 내 프레임일 수 있다.
+    pub remote_frame_ms: Option<f32>,
+    pub remote_input_buffer_ms: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -212,6 +216,8 @@ impl Sample {
                     remote_loss_pct: p.remote_loss_pct,
                     connect_ms: p.connect_ms,
                     first_audio_ms: p.first_audio_ms,
+                    remote_frame_ms: p.remote_frame_ms,
+                    remote_input_buffer_ms: p.remote_input_buffer_ms,
                 })
                 .collect(),
             relay: s.relay.as_ref().map(|r| RelaySample {
@@ -249,7 +255,7 @@ pub fn to_jsonl(tl: &Timeline) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::engine::report::PeerStats;
     use band_dsp::types::RelayStats;
@@ -281,7 +287,7 @@ mod tests {
         assert_eq!(DEFAULT_CAPACITY as u64 * SAMPLE_INTERVAL_MS, 60 * 60 * 1000);
     }
 
-    fn stats_with_peer() -> EngineStats {
+    pub(crate) fn stats_with_peer() -> EngineStats {
         let mut s = EngineStats::stopped();
         s.running = true;
         s.backend = "wasapiExclusive".into();
@@ -340,6 +346,17 @@ mod tests {
         assert!(line.contains("\"txCodec\":\"opus\"") && line.contains("\"txCodecAuto\":true"), "{line}");
         assert!(line.contains("\"autoOpus\":true"), "{line}");
         assert!(line.contains("\"connectMs\":120.0") && line.contains("\"firstAudioMs\":180.5"), "{line}");
+        assert!(line.contains("\"remoteFrameMs\":5.0") && line.contains("\"remoteInputBufferMs\":2.67"), "{line}");
+    }
+
+    /// 옛 엔진(두 값 없음)이면 키는 남고 값이 null이다.
+    #[test]
+    fn remote_terms_are_null_when_unknown() {
+        let mut st = stats_with_peer();
+        st.peers[0].remote_frame_ms = None;
+        st.peers[0].remote_input_buffer_ms = None;
+        let line = serde_json::to_string(&Sample::from_stats(1_000, true, 1, &st)).unwrap();
+        assert!(line.contains("\"remoteFrameMs\":null") && line.contains("\"remoteInputBufferMs\":null"), "{line}");
     }
 
     #[test]

@@ -548,4 +548,38 @@ mod tests {
         assert_eq!(e["devicesError"], "열거 실패");
         assert!(z.by_name("logs/Band.log").is_err(), "log_dir 없으면 로그 없음");
     }
+
+    /// 진단 zip의 timeline.jsonl 피어 샘플과 engine.json 마지막 샘플에 입→귀 추정 항(P2-8b)이 들어간다.
+    /// 둘째 피어는 옛 엔진(두 값 없음) → null.
+    #[test]
+    fn zip_timeline_has_remote_ear_terms() {
+        use super::super::timeline::tests::stats_with_peer;
+        let d = Diagnostics::new(10);
+        let mut stats = stats_with_peer();
+        let mut old = stats.peers[0].clone();
+        old.peer_id = "old-engine-peer".into();
+        old.remote_frame_ms = None;
+        old.remote_input_buffer_ms = None;
+        stats.peers.push(old);
+        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 1, conn_events: vec![] }));
+        let app = AppInfo { name: "Band".into(), version: "0.1.0".into() };
+        let bytes = build(None, Ok(Vec::new()), &d, app, None, 2_000).unwrap();
+        let mut z = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut s = String::new();
+        z.by_name("timeline.jsonl").unwrap().read_to_string(&mut s).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let line: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let peers = line["peers"].as_array().unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0]["remoteFrameMs"], 5.0);
+        assert!((peers[0]["remoteInputBufferMs"].as_f64().unwrap() - 2.67).abs() < 1e-4);
+        assert!(peers[1]["remoteFrameMs"].is_null() && peers[1].get("remoteFrameMs").is_some());
+        assert!(peers[1]["remoteInputBufferMs"].is_null() && peers[1].get("remoteInputBufferMs").is_some());
+
+        let mut e = String::new();
+        z.by_name("engine.json").unwrap().read_to_string(&mut e).unwrap();
+        let e: serde_json::Value = serde_json::from_str(&e).unwrap();
+        assert_eq!(e["lastStats"]["peers"][0]["remoteFrameMs"], 5.0);
+    }
 }
