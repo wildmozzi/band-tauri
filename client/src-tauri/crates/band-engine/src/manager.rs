@@ -309,6 +309,30 @@ impl EngineManager {
         self.retire(old, old_session);
     }
 
+    /// 세대가 아직 `gen`이면(그 뒤 아무 start/stop도 없었으면) 엔진을 정지한다. 앱이 웹뷰 페이지를 다시 읽을 때 앞 페이지가
+    /// 띄운 엔진을 거두는 데 쓴다(#212): 다시 읽기 시작 때의 세대를 받아 별도 스레드에서 부른다.
+    /// - 새 페이지가 그 사이 이미 start했으면 세대가 달라 아무것도 하지 않는다(그 start가 옛 엔진을 이미 거뒀다 — 전에는
+    ///   늦게 도는 정지가 새 시작을 취소하거나 새 엔진을 정지할 수 있었다).
+    /// - `start_lock`을 쥔 채 정지(join·녹음 마무리)하므로, 그동안 들어온 새 start는 옛 엔진이 장치를 놓은 뒤에 연다.
+    ///   앞 페이지의 시작이 진행 중이면 그 시작이 끝나기를 기다렸다가 그 엔진을 정지한다(세대가 같다).
+    ///
+    /// 반환: 엔진(또는 시작)을 정지했다. 처음 열 때(Idle)는 세대도 올리지 않는다. 블로킹이므로 비UI 스레드에서 부른다.
+    pub fn stop_if_generation(&self, gen: u64) -> bool {
+        let _serial = self.start_lock.lock();
+        let (old_session, old) = {
+            let mut s = self.slot.lock();
+            if s.generation != gen || matches!(s.phase, Phase::Idle) {
+                return false;
+            }
+            let old_session = s.generation;
+            s.generation += 1;
+            self.restore_monitor(&mut s);
+            (old_session, s.phase.leave())
+        };
+        self.retire(old, old_session);
+        true
+    }
+
     /// 꺼낸 엔진을 정지(join)하고, 합주 엔진이면 마지막 연결 이벤트(정지 때 `aborted` 포함)를 진단용으로 남긴다
     /// (P1-18, #145 M-1). 슬롯 락 밖에서 부른다.
     fn retire(&self, old: Option<Engine>, session: u64) {
@@ -641,6 +665,46 @@ mod tests {
         // 앱 종료: 모든 상태 → Stopping → Idle(Drop)
         drop(m);
         assert!(!held.load(Ordering::SeqCst), "manager drop이 엔진을 정지");
+    }
+
+    /// #212: 페이지 다시 읽기 정지(`stop_if_generation`)는 다시 읽기 때의 세대에만 작용한다.
+    /// (1) 새 페이지가 먼저 start했으면 그 새 엔진을 건드리지 않는다(전: 늦게 돈 `stop()`이 새 엔진을 정지).
+    /// (2) 정지와 새 start가 겹쳐도 새 start는 취소되지 않고, 배타 장치를 옛 엔진이 놓은 뒤에 연다(되풀이).
+    /// (3) Idle이면 세대를 올리지 않는다.
+    #[test]
+    fn reload_stop_only_hits_the_old_generation() {
+        let (gate, held, b) = gated();
+        gate.release();
+        let m = Arc::new(EngineManager::new(Arc::new(b), net()));
+        let g0 = m.start_generation();
+        assert!(!m.stop_if_generation(g0));
+        assert_eq!(m.start_generation(), g0, "Idle이면 세대를 올리지 않는다");
+
+        // (1) 다시 읽기 → 새 페이지 start가 정지 스레드보다 먼저
+        m.start_monitor_only(cfg()).unwrap();
+        let gen = m.start_generation();
+        m.start(cfg(), "me".into()).unwrap();
+        assert!(!m.stop_if_generation(gen), "새 start 뒤에는 정지하지 않는다");
+        assert_eq!(phase(&m), P::Running);
+        assert!(m.with_engine(|e| Ok(e.has_network())).unwrap(), "새 페이지의 엔진이 그대로");
+
+        // (2) 정지와 새 start가 겹침
+        for _ in 0..10 {
+            let gen = m.start_generation();
+            let m2 = m.clone();
+            let t = std::thread::spawn(move || m2.stop_if_generation(gen));
+            let r = m.start(cfg(), "me".into());
+            let stopped = t.join().unwrap();
+            if stopped {
+                // 정지가 먼저 세대를 잡았다: 새 start는 start_lock에서 기다렸다가(옛 엔진이 장치를 놓은 뒤) 열었다
+                assert!(r.is_ok(), "정지가 먼저여도 새 start는 성공해야 한다: {r:?}");
+            } else {
+                assert!(r.is_ok(), "새 start가 먼저: {r:?}");
+            }
+            assert_eq!(phase(&m), P::Running, "새 엔진이 남아야 한다");
+        }
+        m.stop();
+        assert!(!held.load(Ordering::SeqCst));
     }
 
     #[test]

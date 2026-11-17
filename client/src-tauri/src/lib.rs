@@ -26,7 +26,9 @@ pub fn run() {
         .on_page_load(|webview, payload| {
             if payload.event() == tauri::webview::PageLoadEvent::Started {
                 let engine = webview.state::<commands::EngineState>().inner().clone();
-                std::thread::spawn(move || engine.stop_orphaned());
+                // 세대는 지금 뜬다: 정지 스레드가 늦게 돌아도 그 사이 새 페이지가 띄운 엔진은 건드리지 않는다(#212)
+                let gen = engine.reload_generation();
+                std::thread::spawn(move || engine.stop_orphaned(gen));
             }
         })
         .invoke_handler(tauri::generate_handler![

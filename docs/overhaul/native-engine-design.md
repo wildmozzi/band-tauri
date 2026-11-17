@@ -452,7 +452,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 | `engine_set_loopback_offset` | `{ offsetMs: number \| null }` | `null` — 메트로놈 숨은 출력 지연 보정용 루프백 보정값(PR #34 M2(a), 1.4절). `offsetMs` = `engine_measure_loopback` 결과의 `offsetMs`(-50..200, 밖이면 오류). 실행 중인 엔진에 적용하고(엔진이 없으면 오류) 그 장치 구성(1.4절 키)에 묶어 기억한다(같은 구성으로 다시 시작하는 엔진에도 적용). null = 해제. 루프백 측정이 `ok`면 엔진이 같은 일을 자동으로 하므로, 앱 재시작 뒤 저장값을 다시 넣거나 끌 때 쓴다. 드라이버가 출력 지연을 보고하면 드라이버 값이 우선 |
 | `engine_stats` | — | `EngineStats` |
 | `engine_record_folder` | — | `string` — 현재 녹음 저장 폴더(고른 폴더, 없으면 음악 폴더/`Band Recordings`). 1.5절 |
-| `engine_record_pick_folder` | — | `string \| null` — 폴더 대화상자(호출한 창에 모달). 고른 폴더를 앱 설정에 남기고 돌려준다. 취소하면 `null`. 경로는 프론트가 넘기지 않는다 |
+| `engine_record_pick_folder` | — | `{ folder, saveError? } \| null` — 폴더 대화상자(호출한 창에 모달). 고른 폴더를 앱 설정(`recording.json`, 임시 파일 + 바꿔 넣기)에 남기고 돌려준다. 남기지 못하면 `saveError`(이번 실행 동안만 그 폴더, 프론트가 안내, #212). 취소하면 `null`. 경로는 프론트가 넘기지 않는다 |
 | `engine_record_start` | `{ options?: RecordOptions }` | `RecordStats` — 합주 녹음 시작(P2-4, 1.5절). 실행 중인 엔진(합주·테스트 모드)에서. 저장 폴더 아래 세션 폴더를 만든다. 이미 녹음 중이거나 이전 녹음 끝점이 아직 안 돌아왔으면 에러 |
 | `engine_record_stop` | — | `RecordSummary` — 녹음 정지. 콜백 반환(최대 1초)·파일 마무리를 엔진 락 밖에서 기다린다. 녹음 중이 아니면 에러. 엔진이 멈추면 녹음은 자동으로 마무리된다(요약은 `session.json`에만) |
 | `engine_record_set_track_names` | `{ trackNames: Record<string, string> }` | `null` — 녹음 중 피어 트랙 이름(peerId → 표시 이름)을 더한다(녹음 중에 들어온 연주자, PR #49 M1). 이후 만드는 트랙은 이 이름을 쓰고, 이름 없이(peerId 가명) 만든 트랙은 정지 때 파일 이름을 바꾼다. 녹음 중이 아니면 에러. 1.5절 |
