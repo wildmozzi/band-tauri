@@ -195,6 +195,9 @@ export interface PeerStats {
   remoteFrameMs?: number | null
   /** 상대 입력 장치 버퍼(ms, P2-8b): 이 피어가 Ping으로 알려 온 그쪽 실측 콜백 크기. 옛 엔진이거나 보고가 3초 넘게 없으면 null/없음 */
   remoteInputBufferMs?: number | null
+  /** net 재전송 창에서 버린 이 피어의 수신 패킷(누적, 이 피어 항목 동안). Dup = 이미 받은 seq의 사본·재전송(망 중복·경로 전환 중 두 경로 수신·재생 공격), Stale = Audio seq 창(1024패킷)보다 옛 패킷. 수신 큐 전에 버려 late·lossPct에 없다. 옛 엔진에는 없다 */
+  rxDupDropped?: number
+  rxStaleDropped?: number
 }
 
 // ============================================================================

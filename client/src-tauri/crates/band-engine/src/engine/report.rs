@@ -89,6 +89,11 @@ pub struct PeerStats {
     /// 상대 입력 장치 버퍼(ms, P2-8b): 이 피어가 Ping 입력 버퍼 블록으로 알려 온 그쪽 실측 콜백 크기(65.535ms 포화).
     /// 옛 엔진이거나 보고가 3초 넘게 없으면 null. 드라이버가 숨긴 입력 지연은 들어 있지 않다.
     pub remote_input_buffer_ms: Option<f32>,
+    /// net 재전송 창에서 버린 이 피어의 수신 패킷(누적, 이 항목 동안, #193): 이미 받은 seq의 사본·재전송(망 중복, 경로 전환 유예의
+    /// 두 경로 수신, 재생 공격 — Audio는 창 1024 안, 제어 패킷은 이전 이하 seq)과, Audio 창보다 1024 이상 옛 패킷(사본이든 아주 늦은
+    /// 진짜 패킷이든 재생에 못 씀 — 전에는 지터 `late`로 세던 것). 수신 큐에 들어가지 않으므로 `late`·`lossPct`에는 없다.
+    pub(crate) rx_dup_dropped: u64,
+    pub(crate) rx_stale_dropped: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -299,6 +304,8 @@ impl Engine {
                             first_audio_ms,
                             remote_frame_ms,
                             remote_input_buffer_ms,
+                            rx_dup_dropped: ns.rx_dup_dropped,
+                            rx_stale_dropped: ns.rx_stale_dropped,
                         })
                     })
                     .collect()
@@ -438,12 +445,15 @@ mod tests {
                 first_audio_ms: None,
                 remote_frame_ms: Some(2.5),
                 remote_input_buffer_ms: None,
+                rx_dup_dropped: 3,
+                rx_stale_dropped: 0,
             }],
             ..EngineStats::stopped()
         };
         let j = serde_json::to_string(&s).unwrap();
         assert!(j.contains("\"echoRequested\":true") && j.contains("\"peerEchoing\":false"));
         assert!(j.contains("\"txCodec\":\"opus\"") && j.contains("\"txCodecAuto\":true"), "{j}");
+        assert!(j.contains("\"rxDupDropped\":3") && j.contains("\"rxStaleDropped\":0"), "{j}");
         assert!(j.contains("\"targetMs\":2.5") && j.contains("\"concealPct\":0.0"));
         assert!(j.contains("\"corrTimePct\":1.5") && j.contains("\"maxCorrCents\":4.3"));
         assert!(j.contains("\"estLatencyMs\""));
