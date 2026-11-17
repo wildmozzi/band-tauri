@@ -2,7 +2,7 @@ import type { MixSettings, PeerInstrument, PeerNetworkStats } from '../state/roo
 import type { EngineStats, PeerState, PeerStats } from '../../../native/engineApi'
 import type { FirstAudioSummary } from '../../../native/firstAudio'
 import { pathLabel, peerPathHint } from '../../../native/relayLogic'
-import { EngineDiagLines } from './EngineDiagLines'
+import { EngineDiagLines } from './performerUiLoader'
 import {
   INSTRUMENT_INFO,
   PEER_STATE_INFO,
