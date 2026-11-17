@@ -69,3 +69,7 @@ strip = true
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
+
+[dev-dependencies]
+# 커맨드 어댑터 시험(`commands::tests`)에서 가짜 장치 백엔드를 쓴다(테스트 빌드에서만 `test-support`가 합쳐진다, 피처 리졸버 2).
+band-engine = { path = "crates/band-engine", features = ["test-support"] }
