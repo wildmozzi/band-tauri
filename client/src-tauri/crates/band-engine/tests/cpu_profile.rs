@@ -196,7 +196,7 @@ fn six_peer_full_mesh_cpu() {
     println!("HighQoS(EcoQoS 끔): {high_qos}");
     // P1-21b(ADR D6): `BAND_CPU_PIN=pe`면 프로세스를 LP-E를 뺀 P+E 코어에 고정한다(전·후 비교 측정용 — 반복당 비용만 본다).
     // `0x…`이면 그 마스크(그룹 0). 비우거나 `none`이면 고정 없음(배치 확률 쪽 회귀를 보는 반복 측정용). 엔진 시작 전에 정한다.
-    let pin = match std::env::var("BAND_CPU_PIN").unwrap_or_default().as_str() {
+    let pin = match std::env::var("BAND_CPU_PIN").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
         "" | "none" => "none".to_string(),
         "pe" => format!("0x{:X}", pin_process(None).expect("BAND_CPU_PIN=pe")),
         m => {

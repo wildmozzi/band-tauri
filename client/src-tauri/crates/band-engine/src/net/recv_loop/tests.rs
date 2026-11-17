@@ -449,40 +449,56 @@ fn fuzz_pure_parsers_long() {
 }
 
 /// 오래 걸리지 않는다(무한 루프·이상 경로 감지). 벽시계 최댓값 하나(50ms)로 판정하면 바쁜 러너에서 패킷 하나가 선점만 돼도
-/// 실패한다(재시도 없는 `rust` 잡, #204 리뷰 L2). 이상 경로는 특정 변조 모양에서 되풀이되므로 한 번 튄 값이 아니라 분포로 본다:
-/// 1. **분위수·예산 상대 비교**: 변조 패킷 처리 p99 ≤ max(같은 실행에서 사이사이 잰 정상 Ping 처리 p50 × 20, 2ms). 정상 Ping은
-///    복호화·응답 송신(시스템콜)까지 하는 "정상 한 건의 예산"이고, 같은 시간대에 재므로 러너가 고르게 느리면 함께 느려진다.
-///    이상 경로가 변조의 1% 이상에서 나면 걸린다.
-/// 2. **선점 여유**: 50ms를 넘는 패킷은 2개까지(Windows 스케줄링 퀀텀 15.6ms — 패킷 하나가 몇 퀀텀 밀리는 것은 허용).
-/// 3. **상한**: 1초를 넘는 패킷 0(무한 루프에 가까운 단일 경로는 분위수에 안 잡혀도 여기서 걸린다).
+/// 실패한다(재시도 없는 `rust` 잡, #204 리뷰 L2). 그래서 분포와 재현성으로 본다:
+/// 1. **분위수·예산 상대 비교**: 변조 패킷 처리 p99 ≤ max(같은 시간대에 사이사이 잰 정상 Ping 처리 p50 × 20, 2ms). 정상 Ping은
+///    복호화·응답 송신(시스템콜)까지 하는 "정상 한 건의 예산"이고, 러너가 고르게 느리면 함께 느려진다. 정상 Ping은 **별도 `Rig`**에
+///    넣어 퍼징 대상의 수신 상태(생존·RTT·시계)를 예전과 같게 둔다(#207 리뷰 L3). 이상 경로가 변조의 1% 이상에서 나면 걸린다.
+/// 2. **재현성**(#207 리뷰 M2): 50ms를 넘은 패킷은 바이트를 남겨 루프 뒤에 3번 다시 넣고, 가장 빠른 것도 예산을 넘으면 실패한다.
+///    선점(Windows 퀀텀 15.6ms)은 다시 일어나지 않고, 특정 변조 모양에서만 나는 희귀한 이상 경로(2,000개 중 1~2개)는 다시 일어난다.
+/// 3. **상한**: 1초를 넘는 패킷 0.
 #[test]
 fn fuzz_handle_packet_is_fast() {
     let mut rig = Rig::new();
+    let mut base = Rig::new();
     let mut rng = StdRng::seed_from_u64(0xFA57);
     let p = rig.seal(PacketType::Ping, 1, 0, 0, &[]);
-    let (mut fuzz, mut valid) = (Vec::with_capacity(2_000), Vec::with_capacity(200));
+    let (mut fuzz, mut valid, mut slow) = (Vec::with_capacity(2_000), Vec::with_capacity(200), Vec::new());
     for i in 0..2_000u32 {
         if i % 10 == 0 {
-            let ok = rig.seal(PacketType::Ping, i, 0, 0, &[]);
+            let ok = base.seal(PacketType::Ping, i, 0, 0, &[]);
             let t = Instant::now();
-            rig.feed(&ok, rig.from);
+            base.feed(&ok, base.from);
             valid.push(t.elapsed());
         }
         let m = mutate(&mut rng, &p);
         let t = Instant::now();
         rig.feed(&m, rig.from);
-        fuzz.push(t.elapsed());
+        let d = t.elapsed();
+        if d > Duration::from_millis(50) {
+            slow.push((d, m));
+        }
+        fuzz.push(d);
     }
     fuzz.sort_unstable();
     valid.sort_unstable();
     let q = |v: &[Duration], p: f64| v[((v.len() as f64 * p).ceil() as usize).clamp(1, v.len()) - 1];
     let budget = (q(&valid, 0.5) * 20).max(Duration::from_millis(2));
-    let slow = fuzz.iter().filter(|d| **d > Duration::from_millis(50)).count();
-    let msg = format!("변조 p50 {:?} / p99 {:?} / 최대 {:?}, 정상 Ping p50 {:?} → 예산 {budget:?}, 50ms 초과 {slow}개", q(&fuzz, 0.5), q(&fuzz, 0.99), fuzz[fuzz.len() - 1], q(&valid, 0.5));
+    let msg = format!("변조 p50 {:?} / p99 {:?} / 최대 {:?}, 정상 Ping p50 {:?} → 예산 {budget:?}, 50ms 초과 {}개", q(&fuzz, 0.5), q(&fuzz, 0.99), fuzz[fuzz.len() - 1], q(&valid, 0.5), slow.len());
     eprintln!("{msg}");
     assert!(q(&fuzz, 0.99) <= budget, "이상 경로(변조 p99가 정상 처리 예산 초과): {msg}");
-    assert!(slow <= 2, "50ms 넘는 패킷이 선점 여유(2개)보다 많다: {msg}");
     assert!(fuzz[fuzz.len() - 1] < Duration::from_secs(1), "1초 넘는 패킷: {msg}");
+    for (first, m) in &slow {
+        let again = (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                rig.feed(m, rig.from);
+                t.elapsed()
+            })
+            .min()
+            .unwrap();
+        eprintln!("50ms 초과 패킷 재현 확인: 처음 {first:?} → 다시 넣은 최소 {again:?} ({}바이트)", m.len());
+        assert!(again <= budget, "느린 패킷이 재현된다(이상 경로): 처음 {first:?}, 다시 {again:?} > 예산 {budget:?}, 패킷 {m:02x?}: {msg}");
+    }
 }
 
 /// Pong 시계(상대가 정하는 u64)가 극단값이어도: 오프셋 추정은 유한하고, 기준 피어로 따르는 메트로놈 스케줄러(`tick`의 다음 박 찾기

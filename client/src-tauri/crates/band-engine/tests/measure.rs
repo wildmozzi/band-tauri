@@ -460,6 +460,13 @@ fn echo_round_trip_reflects_proxy_delay() {
             eprintln!("에코 재측정(편도 {one_way_ms}ms, 첫 측정 Unstable): {:?}", r.runs);
             return echo_once(Duration::from_millis(one_way_ms));
         }
+        // 핑 RTT가 프록시 RTT + 40ms(아래 상한 단언)를 넘으면 한 번 다시 잰다(#207 리뷰 M1의 (b)). 포화 부하(바쁜 스레드 14 = 논리
+        // 코어 수)에서는 핑 지수 평균이 한때 +46·+162ms까지 부풀었다(4회 중 2회) — 일시적이라 다시 재면 가라앉는다. 핑 RTT 보고 회귀는
+        // 측정마다 되풀이되므로 다시 재도 걸린다.
+        if r.network_rtt_ms.is_some_and(|x| x as f64 > 2.0 * one_way_ms as f64 + 40.0) {
+            eprintln!("에코 재측정(편도 {one_way_ms}ms, 핑 RTT {:?}가 프록시 RTT + 40ms 초과)", r.network_rtt_ms);
+            return echo_once(Duration::from_millis(one_way_ms));
+        }
         r
     };
     let near = measure(5);
@@ -488,8 +495,13 @@ fn echo_round_trip_reflects_proxy_delay() {
         // `residual_ms` 자체는 바꾸지 않는다(앱 화면 값).
         let rtt = r.network_rtt_ms.unwrap() as f64;
         let rtt_cap = 2.0 * one_way_ms + 3.0;
-        let residual = r.residual_ms.unwrap() + (rtt - rtt_cap).max(0.0);
-        assert!(residual.abs() < 5.0, "잔차 {residual:.2}ms(보고 {:?}, 핑 {rtt:.2} → 상한 {rtt_cap}): {r:?}", r.residual_ms);
+        let cut = (rtt - rtt_cap).max(0.0);
+        let residual = r.residual_ms.unwrap() + cut;
+        assert!(residual.abs() < 5.0, "잔차 {residual:.2}ms(보고 {:?}, 핑 {rtt:.2} → 상한 {rtt_cap}, 자른 양 {cut:.2}ms): {r:?}", r.residual_ms);
+        // 자르기가 "핑 RTT가 부풀어 보고되는" 엔진 회귀(Pong 처리 지연·Ping 타임스탬프 오류 등)를 한도 없이 지우지 않도록 느슨한
+        // 상한을 따로 둔다(#207 리뷰 M1). 부하(바쁜 스레드 14) 관측 최대 부풂: 가까움 +22.5ms(32.5 vs 10)·멂 +27.4ms(77.4 vs 50).
+        // 40ms = 관측 최대 + 여유. 평소(오버헤드 1.5~2.3ms)는 한참 아래다. 포화 부하의 일시적 부풂은 위 `measure`가 한 번 다시 잰다.
+        assert!(rtt <= 2.0 * one_way_ms + 40.0, "핑 RTT {rtt:.2}ms가 프록시 RTT {}ms + 40ms를 넘는다(자른 양 {cut:.2}ms) — RTT 보고 회귀: {r:?}", 2.0 * one_way_ms);
     }
     // 프록시 편도 지연 20ms 차이 → 왕복 40ms + 두 측정의 지터 버퍼 평균 차, 편도 추정은 그 절반.
     // 왕복에는 지터 버퍼가 들어 있고, 지터 버퍼는 러너 스케줄링 지터를 따라 측정마다 다르다(P2-17f: CI 1회 3연속 실패 —

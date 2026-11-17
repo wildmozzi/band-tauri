@@ -66,3 +66,17 @@ test('고정 없는 반복의 상태 집계: 2026-11-17 m1 높은 상태 5·7·8
   ]
   assert.deepEqual(Object.fromEntries(slowRuns(lpe)), { a: { slow: 1, n: 2 } })
 })
+
+test('세트가 섞인 원자료: --set 없이도 라운드가 덮어써지지 않고, 중복 행은 멈춘다(#207 리뷰 L1)', () => {
+  const row = (set, round, exe, v) => ({ set, round: String(round), exe, config: 'Opus 2.5ms', worker_pct_avg6: String(v) })
+  const rows = [row('pinned', 0, 'b', 10), row('pinned', 0, 'a', 10.1), row('pinned', 1, 'b', 10), row('pinned', 1, 'a', 9.9), row('unpinned', 0, 'b', 16), row('unpinned', 0, 'a', 10)]
+  const all = pairDiffs(rows, { before: 'b', after: 'a', metric: 'worker_pct_avg6' })[0]
+  assert.equal(all.n, 3, '세트별 라운드는 따로 센다')
+  assert.equal(pairDiffs(rows, { before: 'b', after: 'a', metric: 'worker_pct_avg6', set: 'pinned' })[0].n, 2)
+  assert.throws(() => pairDiffs([...rows, row('pinned', 0, 'a', 12)], { before: 'b', after: 'a', metric: 'worker_pct_avg6' }), /중복 행/)
+  const lpe = [
+    { exe: 'a', set: 'x', round: '0', worker_lpe_pct: '30' },
+    { exe: 'a', set: 'y', round: '0', worker_lpe_pct: '0' },
+  ]
+  assert.deepEqual(Object.fromEntries(slowRuns(lpe)), { a: { slow: 1, n: 2 } })
+})

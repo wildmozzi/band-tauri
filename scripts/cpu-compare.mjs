@@ -100,8 +100,13 @@ export function pairDiffs(rows, { before, after, metric, set }) {
     const k = r.config
     if (!by.has(k)) by.set(k, new Map())
     const rounds = by.get(k)
-    if (!rounds.has(r.round)) rounds.set(r.round, {})
-    rounds.get(r.round)[r.exe === before ? 'b' : 'a'] = v
+    // 라운드 키에 세트를 넣는다(#207 리뷰 L1): --set 없이 pinned·unpinned가 섞인 원자료를 읽어도 같은 라운드 번호가 덮어써지지
+    // 않고, 같은 (세트, 라운드, 실행파일, 구성)이 두 번 나오면(같은 --set으로 run을 두 번 돌림) 조용히 덮지 않고 멈춘다.
+    const rk = `${r.set ?? ''}\u0000${r.round}`
+    if (!rounds.has(rk)) rounds.set(rk, {})
+    const side = r.exe === before ? 'b' : 'a'
+    if (rounds.get(rk)[side] !== undefined) throw new Error(`중복 행: set ${r.set} 라운드 ${r.round} ${r.exe} ${k} — 같은 --set으로 run을 두 번 돌렸으면 --set이나 --out을 바꿀 것`)
+    rounds.get(rk)[side] = v
   }
   const out = []
   for (const [config, rounds] of by) {
@@ -184,6 +189,10 @@ function cmdRun(o) {
           head = Object.keys(full)
           writeFileSync(out, head.join(',') + '\n')
         }
+        // 이미 있는 --out의 열 머리가 다르면 거부한다(#207 리뷰 L2): 옛 원자료(cpu-quiet의 `bin` 등)나 열이 바뀐 버전에 덧붙이면
+        // 새 열이 소리 없이 빠진다.
+        const missing = Object.keys(full).filter((k) => !head.includes(k))
+        if (missing.length) throw new Error(`${out}의 열 머리가 이 실행과 다르다(없는 열: ${missing.join(', ')}) — 다른 --out을 쓸 것`)
         appendFileSync(out, head.map((k) => String(full[k] ?? '').replaceAll(',', ';')).join(',') + '\n')
       }
       console.log(`라운드 ${r} ${e.name}: ${rows.map((x) => `${x.config} ${x.worker_pct_avg6}%`).join(' · ')}`)
@@ -220,7 +229,7 @@ function cmdStats(o) {
 export function slowRuns(rows, { lpeThreshold = 10, stateConfig, stateMetric = 'worker_pct_avg6', stateThreshold = 12 } = {}) {
   const runs = new Map()
   for (const r of rows) {
-    const k = `${r.exe}\u0000${r.round}`
+    const k = `${r.exe}\u0000${r.set ?? ''}\u0000${r.round}`
     const cur = runs.get(k) ?? { exe: r.exe, slow: false, known: false }
     const raw = stateConfig ? (r.config === stateConfig ? r[stateMetric] : '') : r.worker_lpe_pct
     const v = Number(raw)

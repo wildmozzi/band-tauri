@@ -52,7 +52,7 @@ node scripts/cpu-compare.mjs run --exe before=… --exe after=… --pin none --r
 node scripts/cpu-compare.mjs placement --in cpu-runs.csv --set unpinned [--lpe-threshold 10]
 ```
 
-- 실행 하나의 6구성 중 하나라도 워커가 LP-E에 문턱(기본 10%) 이상 놓였으면 "느린 상태 실행"으로 센다(`worker_lpe_pct`, 측정 창 동안 코어 배치 표본 비율).
+- 실행 하나의 6구성 중 하나라도 워커가 LP-E에 문턱(기본 10%) 이상 놓였으면 "느린 상태 실행"으로 센다(`worker_lpe_pct`, 측정 창 동안 코어 배치 표본 비율). 구성 수가 늘면 "하나라도" 기준의 기본 비율도 올라가므로, 구성을 바꾼 도구 버전끼리는 횟수를 그대로 비교하지 않는다(#207 리뷰 L4).
 - 실행파일별 횟수와 쌍마다 Fisher 정확 검정 양측 p를 낸다.
 - 배치 열이 없는 옛 원자료는 `--state-config "Opus 2.5ms" --state-threshold 12`로 워커 CPU 기준 상태를 센다(cpu-quiet 2절과 같다).
 - 같은 원자료로 `stats --set unpinned`도 볼 수 있다. 다만 상태가 섞여 있어 판정에는 쓰지 않는다. 상태별로 나눠 비교하는 것은 참고용이다.
