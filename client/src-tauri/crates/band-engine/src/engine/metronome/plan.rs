@@ -1,5 +1,7 @@
 //! 메트로놈 계획·상태 값 타입과 검증(계약 DTO), 숨은 출력 지연 선택(순수 계산). 스레드·락 없음(엔진 ⑥-3).
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 /// BPM 범위.
@@ -38,7 +40,9 @@ pub struct MetronomePlan {
     pub bpm: f64,
     pub beats_per_bar: u32,
     pub start_us: f64,
-    pub ref_peer_id: Option<String>,
+    /// 공유 문자열: 복제가 참조 수 증가 하나다(할당 없음) — 제어 쪽 `stats()`의 계획 락 구간과 워커의 계획 복사(#143 리뷰 L-4).
+    /// 직렬화는 문자열 그대로(serde `rc`).
+    pub ref_peer_id: Option<Arc<str>>,
 }
 
 impl Default for MetronomePlan {
@@ -56,7 +60,7 @@ impl MetronomePlan {
         if !(1..=MAX_BEATS_PER_BAR).contains(&c.beats_per_bar) {
             return Err(format!("박자는 1..{MAX_BEATS_PER_BAR}이어야 합니다"));
         }
-        let ref_peer_id = c.ref_peer_id.filter(|s| !s.is_empty());
+        let ref_peer_id: Option<Arc<str>> = c.ref_peer_id.filter(|s| !s.is_empty()).map(Arc::from);
         let start_us = match (c.start_us, &ref_peer_id) {
             (Some(s), _) if s.is_finite() && s >= 0.0 => s,
             (Some(_), _) => return Err("startUs가 잘못되었습니다".into()),
@@ -164,6 +168,18 @@ mod tests {
         assert_eq!(p.start_us, 1000.0 + DEFAULT_START_LEAD_US);
         let p = MetronomePlan::from_config(c(90.0, 3, Some(5.0), Some("")), 0.0).unwrap();
         assert_eq!(p.ref_peer_id, None);
+    }
+
+    /// 계약(`engine_set_metronome` 반환값)의 `refPeerId`는 문자열 또는 null이다 — `Arc<str>`를 문자열로 내는 것은 serde `rc`
+    /// 피처 하나뿐이라 모양을 고정한다(#168 리뷰 L-2).
+    #[test]
+    fn plan_serializes_ref_peer_id_as_string() {
+        let p = MetronomePlan { ref_peer_id: Some("host".into()), ..MetronomePlan::default() };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["refPeerId"], serde_json::json!("host"));
+        assert_eq!(v, serde_json::json!({ "running": false, "bpm": 120.0, "beatsPerBar": 4, "startUs": 0.0, "refPeerId": "host" }));
+        let none = serde_json::to_value(MetronomePlan::default()).unwrap();
+        assert_eq!(none["refPeerId"], serde_json::Value::Null);
     }
 
     #[test]

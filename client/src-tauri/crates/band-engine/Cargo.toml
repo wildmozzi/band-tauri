@@ -11,7 +11,7 @@ publish = false
 # tauri·플러그인에 의존하지 않는다. 장치 백엔드(`cpal`, `windows`)는 피처 뒤에 있다(기본 켬) — 하네스·시험은
 # `default-features = false`로 백엔드 없이 쓴다(`tests/architecture.rs`의 `engine_crate_deps_follow_graph`가 고정한다).
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 log = "0.4"
 # 결정적 코어(코덱·지터·믹서·패킷 등, 엔진 R-1 ⑩-1)

@@ -264,3 +264,41 @@ fn jitter_restart_does_not_allocate() {
     }
     assert_eq!(band_dsp::codec::opus_decoders_created(), created0, "디코더는 풀에서만 — 재시작·코덱 변경에서 새로 만들지 않는다");
 }
+
+/// #168 리뷰 M-1: 메트로놈 계획 적용(워커의 `refresh_plan` + 상태 보고)은 `ref_peer_id`가 같은 피어로 재전송되든
+/// 바뀌든(`None` ↔ `Some`, 다른 id, 워커가 적용하기 전 두 번 연속 변경) 할당·해제 0이다. 제어 평면(`set_plan`과
+/// 엔진이 돌려준 계획 사본의 해제)은 표시 구간 밖이다.
+#[test]
+fn metronome_plan_refresh_does_not_allocate_or_free() {
+    use band_engine::testing::engine::metronome::{MetroReport, MetronomeCtl, MetronomePlan};
+
+    let (ctl, mut rt) = MetronomeCtl::pair();
+    let mut mine = (0, MetronomePlan::default());
+    let with = |id: Option<&str>| MetronomePlan { running: true, ref_peer_id: id.map(Into::into), ..MetronomePlan::default() };
+    // (이번에 넣을 계획들 — 워커가 적용하기 전에 연달아)
+    let steps: [&[Option<&str>]; 9] = [
+        &[Some("host-peer-0001")],
+        &[Some("host-peer-0001")],
+        &[None],
+        &[Some("host-peer-0001")],
+        &[Some("other-peer-0002")],
+        &[Some("other-peer-0002"), Some("host-peer-0001")],
+        &[None, Some("third-peer-0003")],
+        &[Some("third-peer-0003")],
+        &[Some("host-peer-0001"), None, Some("other-peer-0002")],
+    ];
+    for (i, plans) in steps.iter().enumerate() {
+        for id in plans.iter() {
+            // 엔진 `set_metronome`처럼 사본을 하나 돌려받아 제어 평면에서 놓는다
+            let p = with(*id);
+            ctl.set_plan(p.clone());
+            drop(p);
+        }
+        let n = rt_allocs(|| {
+            rt.refresh_plan(&mut mine);
+            rt.publish(&MetroReport { applied_gen: mine.0, running: mine.1.running, ..Default::default() });
+        });
+        assert_eq!(n, 0, "단계 {i} {plans:?}: 워커의 계획 적용이 할당·해제를 했다");
+        assert_eq!(mine.1.ref_peer_id.as_deref(), *plans.last().unwrap());
+    }
+}
