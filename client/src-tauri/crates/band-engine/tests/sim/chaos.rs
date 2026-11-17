@@ -254,9 +254,35 @@ fn chaos_jitter_distribution_switch() {
     line("분포 급변 파레토3→균등0.5 30s 뒤", &post);
     line("처음부터 균등0.5(기준)", &ref_w);
     let down_at = p.trace.iter().find(|x| x.0 >= 15.0 && x.1 <= ref_w.buf_med + 1.0).map(|x| x.0 - 15.0);
-    println!("CHAOS 분포 급변(좋아짐): 기준+1ms까지 {down_at:?}s, xruns {}", r.xruns);
-    assert!(post.buf_med <= ref_w.buf_med + 1.5, "좋아진 뒤 30s에도 옛 꼬리 지연: {:.2} vs 기준 {:.2}", post.buf_med, ref_w.buf_med);
+    let tail_at = |t: f64| p.samples.iter().rev().find(|s| s.t <= t).map_or(0.0, |s| s.tail);
+    println!("CHAOS 분포 급변(좋아짐): 기준+1ms까지 {down_at:?}s, tail 30s {:.2} / 45s {:.2}ms, xruns {}", tail_at(30.0), tail_at(45.0), r.xruns);
+    // P2-16c: 늦은 도착이 없으면 늦은 패킷 예산(`tail_extra`)을 5블록마다 절반씩 내린다. 전에는 10블록마다 0.25ms라 30초 뒤에도
+    // +1.3ms(6.61 vs 5.27ms)였다. 지금은 바뀐 지 25초 안에 예산 0, 30초 뒤 기준 +0.5ms 안.
+    assert!(post.buf_med <= ref_w.buf_med + 0.5, "좋아진 뒤 30s에도 옛 꼬리 지연: {:.2} vs 기준 {:.2}", post.buf_med, ref_w.buf_med);
+    assert_eq!(tail_at(40.0), 0.0, "좋아진 뒤 25초에 늦은 패킷 예산이 남았다");
+    assert!(down_at.is_some_and(|d| d <= 20.0), "기준 +1ms까지 {down_at:?}s");
     assert_eq!(r.xruns, 0);
+}
+
+/// P2-16c 맞교환: 좋아졌다가(15s) 다시 파레토로 나빠질 때(50s) 빠른 내림으로 비운 예산을 다시 쌓는 동안 은닉이 조금 는다.
+/// 측정(3시드 평균, 50~90s): 은닉 2.106 → 2.141%(처음 10s 2.923 → 3.032%), bufferMs 18.65 → 18.47ms. 파레토↔균등 20초마다 바뀌면
+/// 1.043 → 1.096%, bufferMs 11.98 → 11.78ms. 상한은 측정값 + 0.05%p(튜닝 변경 시 재측정).
+#[test]
+fn chaos_jitter_improve_then_worsen_tradeoff() {
+    let (mut c, mut c10) = (0.0, 0.0);
+    for seed in 0..3u64 {
+        let mut np = base_peer(120, 800 + seed);
+        np.dist = JitDist::Pareto;
+        np.net_jitter_us = 3000;
+        np.dist_steps = vec![(us(15.0), JitDist::Uniform), (us(50.0), JitDist::Pareto)];
+        np.steps = vec![(us(15.0), 0, 500), (us(50.0), 0, 3000)];
+        let r = run_multi(&MultiSim::new(90.0, vec![np]));
+        c += window(&r.peers[0], 50.0, 90.0).conceal_pct / 3.0;
+        c10 += window(&r.peers[0], 50.0, 60.0).conceal_pct / 3.0;
+        assert_eq!(r.xruns, 0);
+    }
+    println!("CHAOS 좋아짐→다시 파레토: 50~90s 은닉 {c:.3}%, 처음 10s {c10:.3}%");
+    assert!(c <= 2.19 && c10 <= 3.08, "다시 나빠질 때 은닉 {c:.3}% / 처음 10s {c10:.3}%");
 }
 
 /// 피어 반복 이탈·재접속(churn): 피어 0은 그대로, 피어 1은 3초마다 1초 나갔다 들어오기 8번, 피어 2는 0.5초 세션을 반복한다.

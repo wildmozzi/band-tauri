@@ -66,6 +66,8 @@ pub(super) struct NetPeer {
     pub reorder: Option<(f64, u64)>,
     /// 지터 분포 급변(혼돈): 이 시각(µs)부터 분포를 바꾼다. 크기는 `net_jitter_us`·`steps`를 그대로 따른다.
     pub dist_switch: Option<(u64, JitDist)>,
+    /// 지터 분포 여러 번 바꾸기(P2-16c): (시각 µs, 분포) — 그 시각 이후 마지막 항목이 `dist_switch`보다 우선한다.
+    pub dist_steps: Vec<(u64, JitDist)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -77,7 +79,7 @@ pub(super) enum JitDist {
 
 impl NetPeer {
     pub fn new(frame: usize, seed: u64) -> Self {
-        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None, rejoins: Vec::new(), dup: None, reorder: None, dist_switch: None }
+        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None, rejoins: Vec::new(), dup: None, reorder: None, dist_switch: None, dist_steps: Vec::new() }
     }
 }
 
@@ -447,6 +449,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     Some((ts, d)) if t >= ts => d,
                     _ => np.dist,
                 };
+                let dist = np.dist_steps.iter().rev().find(|s| t >= s.0).map_or(dist, |s| s.1);
                 let jitter = match dist {
                     JitDist::Uniform => tx.rng.gen_range(0..jit_us.max(100)),
                     JitDist::Exp => (-(1.0 - tx.rng.gen::<f64>()).ln() * jit_us as f64) as u64,
