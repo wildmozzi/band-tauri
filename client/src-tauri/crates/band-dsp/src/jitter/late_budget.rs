@@ -149,6 +149,12 @@ impl LateBudget {
         if self.tail_fresh >= LATE_UP_BLOCKS && avg(LATE_UP_BLOCKS) > budget {
             let d = grid_up(mu * (avg(LATE_UP_BLOCKS) / budget).ln()).clamp(TARGET_GRID, LATE_STEP_MAX);
             self.tail_extra = (self.tail_extra + d).min(frame);
+        } else if self.tail_extra > 0.0 && self.tail_fresh >= LATE_UP_BLOCKS && avg(LATE_UP_BLOCKS) == 0.0 {
+            // 빠른 내림(P2-16c): 올림과 같은 블록 수(5) 동안 늦은 도착이 하나도 없으면 예산을 전혀 쓰지 않은 것이다(지터가
+            // 좋아짐 — 파레토 3ms → 균등 0.5ms 뒤 `tail_extra` 2.25ms가 10블록마다 0.25ms씩 내려 1분 넘게 남았다). 절반씩
+            // 내린다(격자로 올림, 1ms 상한). 늦은 도착이 조금이라도 있는 회선은 아래 느린 내림 그대로다.
+            let d = grid_up(self.tail_extra / 2.0).clamp(TARGET_GRID, LATE_STEP_MAX);
+            self.tail_extra = (self.tail_extra - d).max(0.0);
         } else if self.tail_fresh >= LATE_DOWN_BLOCKS && avg(LATE_DOWN_BLOCKS) < budget * LATE_DOWN_FRAC {
             // 내림은 절반 걸음: 예산 아래로 얼마나 내려왔는지(최소 예산/4로 잘라) 기준.
             let r = (budget * LATE_DOWN_FRAC / avg(LATE_DOWN_BLOCKS).max(budget / 4.0)).ln();
