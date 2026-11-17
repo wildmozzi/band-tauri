@@ -214,6 +214,17 @@ export const defaultMixSourceDeps: MixSourceDeps = {
   unsubscribe: engineUnsubscribeMix,
 }
 
+/**
+ * 여는 동안 모두 release되거나 엔진 정지로 invalidate되어 열기를 그만뒀다 — 실패가 아니라 취소다.
+ * 방송은 엔진이 다시 뜨면 다시 시작한다(장치 분실 자동 재시작 등에서 흔하다)
+ */
+export class MixSourceReleasedError extends Error {
+  constructor() {
+    super('믹스 소스가 열리는 중에 해제되었습니다.')
+    this.name = 'MixSourceReleasedError'
+  }
+}
+
 export class MixSource {
   private graph: MixGraph | null = null
   private subscribed = false
@@ -276,7 +287,7 @@ export class MixSource {
     if (epoch !== this.epoch || this.refs === 0) {
       // 여는 동안 모두 release/invalidate됨 (M5)
       await graph.close()
-      throw new Error('믹스 소스가 열리는 중에 해제되었습니다.')
+      throw new MixSourceReleasedError()
     }
     this.graph = graph
     try {
@@ -289,7 +300,7 @@ export class MixSource {
     }
     if (epoch !== this.epoch || this.refs === 0) {
       await this.close()
-      throw new Error('믹스 소스가 열리는 중에 해제되었습니다.')
+      throw new MixSourceReleasedError()
     }
     return graph
   }
@@ -373,8 +384,11 @@ export class MixBroadcaster {
     const gen = ++this.gen
     const lease = await this.source.acquire().catch((err) => {
       if (gen === this.gen) this.active = false
+      // 열기가 취소됐다(엔진 정지로 invalidate 등): 오류가 아니다 — 엔진이 다시 뜨면 방송 효과가 다시 start한다
+      if (err instanceof MixSourceReleasedError) return null
       throw err
     })
+    if (!lease) return
     if (gen !== this.gen || !this.active) {
       lease.release()
       return

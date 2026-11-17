@@ -101,6 +101,8 @@ export interface RoomState {
 export interface RoomDerived {
   running: boolean
   starting: boolean
+  /** 엔진만 다시 여는 중(장치 분실 등) — 연주자 화면은 유지 */
+  restarting: boolean
   isPerforming: boolean
   /** 연주 세션이 idle이 아니면 그 악기 */
   myInstrument: string | null
@@ -223,13 +225,16 @@ function createDeriver(): (s: RoomState) => RoomDerived {
     const { perform: perf, connection: conn } = s
     const running = perf.phase === 'running'
     const starting = perf.phase === 'starting'
-    const peerInstruments = peerInstrumentsOf(s.roster, conn.clientId, perf.instrument, running, conn.nickname, conn.isRoomHost)
+    // 엔진만 다시 여는 중(장치 분실 등): 서버는 계속 연주자로 안다 → 내 연주자 항목·악기는 유지하고, 엔진에 묶인 것(방송·레벨)은 꺼 둔다 (#208 리뷰 M-1)
+    const restarting = perf.phase === 'restarting'
+    const peerInstruments = peerInstrumentsOf(s.roster, conn.clientId, perf.instrument, running || restarting, conn.nickname, conn.isRoomHost)
     const broadcasterId = broadcasterOf(peerInstruments)
     const performError = s.local.localError ?? perf.error
     return {
       running,
       starting,
-      isPerforming: running && perf.instrument !== null,
+      restarting,
+      isPerforming: (running || restarting) && perf.instrument !== null,
       myInstrument: perf.phase === 'idle' ? null : perf.instrument,
       peerInstruments,
       broadcasterId,
@@ -242,7 +247,7 @@ function createDeriver(): (s: RoomState) => RoomDerived {
       masterLevel: running ? Math.min(100, Math.round((perf.stats?.outputLevel ?? 0) * 100)) : s.levels.masterLevel,
       // 시그널링이 끊겨 재개를 기다리는 동안 유지한 관람 수신은 '연결 중'으로 보인다(관람자 자신의 망이 끊긴 경우가 흔해 소리가
       // 실제로 오는지 모른다, #192 리뷰 L-1). 재연결되면 다시 수신 상태 그대로
-      rtcStatus: running ? 'live' : starting ? 'connecting' : performError ? 'error'
+      rtcStatus: running ? 'live' : starting || restarting ? 'connecting' : performError ? 'error'
         : s.viewer.status === 'live' && conn.currentRoomId !== null && conn.signalStatus !== 'connected' ? 'connecting' : s.viewer.status,
       rtcError: performError ?? s.viewer.error,
     }

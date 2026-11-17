@@ -254,7 +254,7 @@ function reduceParticipants(s: RoomState, p: SignalPayload, ctx: SignalContext):
       const effects: RoomEffect[] = [{ type: 'set-rejoining', value: false }, { type: 'clear-busy-retry' }, { type: 'keep-viewers', peerIds: Object.keys(roster) }]
       if (conn.currentRoomId) effects.push({ type: 'remember-password', roomId: conn.currentRoomId })
       // 재개했는데 서버는 내가 연주자가 아니라고 한다(끊긴 사이 내려졌는데 알림이 유실됨 등): 아무도 못 듣는 "연주 중"으로 남지 않게 멈춘다
-      const ghost = ctx.verifySelfPerforming === true && p.isPerforming === false && s.perform.phase === 'running'
+      const ghost = ctx.verifySelfPerforming === true && p.isPerforming === false && (s.perform.phase === 'running' || s.perform.phase === 'restarting')
       if (ghost) effects.push({ type: 'stop-broadcast' }, { type: 'demoted', message: LOST_PERFORMER_MESSAGE })
       return {
         handled: true,

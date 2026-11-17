@@ -43,6 +43,16 @@ describe('RoomSessionStore', () => {
     expect(d.masterLevel).toBe(25)
   })
 
+  it('엔진만 다시 여는 중(restarting)에는 연주자 화면(내 항목·악기)을 유지하고 방송·레벨은 끈다 (#208 리뷰 M-1)', () => {
+    const base = initialRoomState()
+    const store = new RoomSessionStore({ ...base, connection: { ...base.connection, clientId: 'me', peers: ['v1'], nickname: '나', isRoomHost: true } })
+    store.update({ perform: { ...base.perform, phase: 'restarting', instrument: 'guitar', stats: null } })
+    const d = store.getSnapshot().derived
+    expect(d).toMatchObject({ restarting: true, running: false, isPerforming: true, myInstrument: 'guitar', rtcStatus: 'connecting' })
+    expect(Object.keys(d.peerInstruments)).toEqual(['me'])
+    expect(d.isBroadcaster).toBe(false) // 엔진이 없으니 방송은 멈춘다(다시 뜨면 다시 offer)
+  })
+
   it('엔진 통계만 바뀌면 연주자 목록 참조는 그대로', () => {
     const base = initialRoomState()
     const store = new RoomSessionStore({ ...base, connection: { ...base.connection, clientId: 'me' } })
