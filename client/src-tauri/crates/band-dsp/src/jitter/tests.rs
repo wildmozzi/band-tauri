@@ -69,6 +69,8 @@ struct Sim {
     exp_jitter: bool,
     /// 늦은 패킷 예산을 끈다(은닉 목표 100% → 예산이 늘 늦은 비율보다 커서 `tail_extra` 0). 비교용.
     late_budget_off: bool,
+    /// 0보다 크면 모든 패킷의 사본을 원본 + U(0, dup_ms) 뒤에 한 번 더 받는다(혼돈 d-chaos: 중복).
+    dup_ms: f64,
 }
 
 impl Default for Sim {
@@ -86,6 +88,7 @@ impl Default for Sim {
             tx_burst: 0,
             exp_jitter: false,
             late_budget_off: false,
+            dup_ms: 0.0,
         }
     }
 }
@@ -128,6 +131,8 @@ fn simulate(p: Sim) -> SimResult {
     let mut t = 0.0;
     let mut k = 0u64;
     let mut net_lost = 0u64;
+    // 사본 지연은 따로 뽑는다(같은 시드의 중복 없는 실행과 손실·지터가 같게).
+    let mut dup_rng = rand::rngs::StdRng::seed_from_u64(p.seed ^ 0xD0B);
     while t < p.seconds * 1e6 {
         let (h, pk) = tx.next();
         // 송신측 장치 버스트: tx_burst마다 몰아서 나감
@@ -143,6 +148,9 @@ fn simulate(p: Sim) -> SimResult {
             let u = rng.gen::<f64>();
             let j = if p.exp_jitter { -(1.0 - u).ln() } else { u };
             let d = base_us + j * p.jitter_ms * 1000.0;
+            if p.dup_ms > 0.0 {
+                arrivals.push((send_t + d + dup_rng.gen::<f64>() * p.dup_ms * 1000.0, h, pk.clone()));
+            }
             arrivals.push((send_t + d, h, pk));
         }
         t += send_period_us;
@@ -275,6 +283,23 @@ fn reordering_handled() {
     assert!(ratio < 0.03, "순서 뒤바뀜에서 은닉 비율 {ratio} {:?}", r.stats);
 }
 
+/// 중복(혼돈 d-chaos): 이미 재생한 패킷의 사본은 늦은 패킷이 아니다. 전에는 늦은 패킷으로 세어 늦은 패킷 예산·목표가
+/// 사본 지연만큼 올랐다(`tests/sim`의 `chaos_duplicates_do_not_inflate`: bufferMs 5.7 → 17ms). 소리·지연·통계가 중복 없는
+/// 같은 회선과 같아야 한다.
+#[test]
+fn duplicates_of_played_packets_are_ignored() {
+    let base = Sim { frame: 120, burst: 128, jitter_ms: 1.0, loss: 0.01, seconds: 20.0, seed: 9, ..Default::default() };
+    let clean = simulate(base);
+    let dup = simulate(Sim { dup_ms: 20.0, ..base });
+    let (a, b) = (clean.stats, dup.stats);
+    println!("중복 없음 {a:?}
+중복 {b:?}");
+    assert_eq!(b.late, a.late, "사본을 늦은 패킷으로 셌다");
+    assert!((b.target_ms - a.target_ms).abs() < 0.3, "사본이 목표를 올렸다: {:.2} → {:.2}", a.target_ms, b.target_ms);
+    assert_eq!(b.concealed, a.concealed);
+    assert_eq!(b.produced, a.produced);
+}
+
 fn drift_case(ppm: f64, burst: usize) {
     let r = simulate(Sim { burst, drift_ppm: ppm, jitter_ms: 5.0, seconds: 60.0, seed: 4, ..Default::default() });
     let s = r.stats;
@@ -324,7 +349,9 @@ fn late_packets_discarded() {
     let pkts: Vec<_> = (0..20).map(|_| tx.next()).collect();
     let mut out = vec![0f32; 480];
     let mut t = 0u64;
-    for (h, p) in pkts.iter().take(10) {
+    // 패킷 2는 손실(은닉)로 지나가고 나중에 늦게 온다. 이미 받아 재생한 패킷의 사본은 늦은 패킷이 아니다
+    // (`duplicates_of_played_packets_are_ignored`).
+    for (h, p) in pkts.iter().take(10).enumerate().filter(|(i, _)| *i != 2).map(|(_, x)| x) {
         jb.insert(h, p, t);
         jb.pop(&mut out);
         jb.end_burst(t, t, 0.0);
@@ -336,6 +363,9 @@ fn late_packets_discarded() {
         t += 5000;
     }
     let before = jb.stats().late;
+    jb.insert(&pkts[2].0, &pkts[2].1, t);
+    assert_eq!(jb.stats().late, before + 1);
+    // 재생한 패킷 0의 사본은 세지 않는다
     jb.insert(&pkts[0].0, &pkts[0].1, t);
     assert_eq!(jb.stats().late, before + 1);
 }

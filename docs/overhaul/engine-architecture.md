@@ -248,7 +248,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `engine/worker/local.rs` | `LocalFifo`(로컬 입력 FIFO, 수위 제어) | FIFO 수위 규칙 |
 | `engine/worker/metronome_stage.rs` | `MetronomeStage`: 메트로놈 박 예약 입력(시계 추정·숨은 출력 지연)·상태 보고 | 메트로놈 스케줄 |
 | `engine/worker/device_watch.rs` | `DeviceWatch`: 장치 멈춤 감시·스트림 에러 로그 | 장치 감시 |
-| `crates/band-engine/tests/sim/{main,tune,long,loss_codec}.rs` | 가상 시간 결정적 하네스(테스트 타깃 `sim`, ⑩-3 — 백엔드 없이 `cargo test -p band-engine --no-default-features --features test-support --test sim`): 6피어 5·60분, 손실 피드백 | 하네스 시나리오 |
+| `crates/band-engine/tests/sim/{main,tune,long,loss_codec,chaos}.rs` | 가상 시간 결정적 하네스(테스트 타깃 `sim`, ⑩-3 — 백엔드 없이 `cargo test -p band-engine --no-default-features --features test-support --test sim`): 6피어 5·60분, 손실 피드백, 혼돈 시나리오(순서 뒤바뀜·중복·버스트 손실·지연 급변·분포 급변·재접속·큰 드리프트·6피어 동시, 10분은 `--ignored`) | 하네스 시나리오 |
 | `sys/alloc.rs` | 시험 바이너리의 계수 할당자(`cfg(any(test, feature = "test-support"))`, `testing::alloc`으로 다시 내보냄. 단위 테스트 바이너리와 하네스 `sim`이 글로벌 할당자로 건다): 표시 구간 안의 할당·해제를 스레드별로 센다 — 워커 루프가 시험 구성에서 반복 하나 전체를 구간으로 감싸고(`engine/tests.rs`가 0을 단언), 하네스가 워커 단계의 할당·해제 0을 단언(⑧ 후속). 워커(계층 4)가 쓰므로 계층 0 | 워커 무할당 증거 |
 | `crates/band-dsp/src/mixer.rs` | 피어 gain/mute/pan, 모니터, 마스터, soft clip | 믹스 |
 | `crates/band-dsp/src/{stats, rt_timing, histo, prio_slot}.rs`, `engine/report.rs` | RT·워커 원자 통계 카운터·seqlock 칸, RT 콜백 타이밍, 지연 히스토그램 칸 함수, 스레드 우선순위 결과 슬롯 / 보고 DTO(`EngineStats`)와 `stats()` 조립 | 통계 계약 |
