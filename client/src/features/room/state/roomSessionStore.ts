@@ -240,7 +240,10 @@ function createDeriver(): (s: RoomState) => RoomDerived {
       peerEngineStats: peerStatsOf(perf.stats),
       audioLevels: levelsOf(running, perf.stats, s.levels.audioLevels, conn.clientId),
       masterLevel: running ? Math.min(100, Math.round((perf.stats?.outputLevel ?? 0) * 100)) : s.levels.masterLevel,
-      rtcStatus: running ? 'live' : starting ? 'connecting' : performError ? 'error' : s.viewer.status,
+      // 시그널링이 끊겨 재개를 기다리는 동안 유지한 관람 수신은 '연결 중'으로 보인다(관람자 자신의 망이 끊긴 경우가 흔해 소리가
+      // 실제로 오는지 모른다, #192 리뷰 L-1). 재연결되면 다시 수신 상태 그대로
+      rtcStatus: running ? 'live' : starting ? 'connecting' : performError ? 'error'
+        : s.viewer.status === 'live' && conn.currentRoomId !== null && conn.signalStatus !== 'connected' ? 'connecting' : s.viewer.status,
       rtcError: performError ?? s.viewer.error,
     }
   }

@@ -96,6 +96,14 @@ export function useViewerAudio(opts: {
 
   const hasPeer = useCallback((peerId: string) => pcsRef.current.has(peerId), [])
 
+  /** 수신 연결이 하나라도 있는지 (시그널링이 끊겼을 때 유지할 것이 있는지) */
+  const hasAny = useCallback(() => pcsRef.current.size > 0, [])
+
+  /** keep에 없는 발신자의 수신 연결을 닫는다 */
+  const closeExcept = useCallback((keep: readonly string[]) => {
+    for (const id of [...pcsRef.current.keys()]) if (!keep.includes(id)) closeFrom(id)
+  }, [closeFrom])
+
   const handleOffer = useCallback(async (from: string, offer: RTCSessionDescriptionInit) => {
     if (!optsRef.current.isAllowedSender(from)) {
       console.warn('[Viewer] 연주자가 아닌 클라이언트의 offer 무시:', from.slice(0, 8))
@@ -228,5 +236,5 @@ export function useViewerAudio(opts: {
     }
   }, [])
 
-  return { handleOffer, handleCandidate, closeFrom, closeAll, hasPeer }
+  return { handleOffer, handleCandidate, closeFrom, closeAll, closeExcept, hasAny, hasPeer }
 }
