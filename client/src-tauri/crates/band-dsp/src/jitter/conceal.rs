@@ -156,11 +156,14 @@ impl Concealer {
         }
     }
 
-    /// 스트림 리셋(재버퍼·먼 미래 seq): 은닉 연속·언더런 상태와 직전 프레임·크로스페이드를 버린다.
+    /// 스트림 리셋(재버퍼·먼 미래 seq): 은닉 연속·언더런 상태와 직전 프레임·크로스페이드(버림·PCM 재합류)를 버린다.
+    /// 리셋 뒤 첫 패킷은 은닉 이력과 무관하게 새 스트림처럼 시작한다(#188 리뷰 M1).
     pub(super) fn reset_stream(&mut self) {
         self.reset_run();
         self.last_frame_valid = false;
         self.xfade_len = 0;
+        self.pcm_concealed = false;
+        self.pcm_tail = [0.0; 2];
     }
 
     /// 재생 시작: 은닉 연속·언더런 상태만 비운다.
@@ -263,12 +266,15 @@ impl Concealer {
         if !ok {
             // PCM(또는 디코더 없음): 직전 프레임을 뒤집어(끝 샘플부터 거꾸로) 페이드아웃 1회, 이후 무음. 뒤집으면 첫 은닉
             // 샘플이 직전 출력의 마지막 샘플과 같아 이음매에 계단이 없다(그대로 반복하면 프레임 머리로 뛰어 클릭이 났다).
+            // 페이드 길이는 은닉 프레임과 직전 프레임 중 짧은 쪽: 손실 직전에 프레임 크기가 커지면(2.5 → 5ms) 직전
+            // 프레임이 끝난 자리에서 0으로 뛰지 않게 그 안에서 다 줄인다(#188 리뷰 L2).
             if self.conceal_run == 0 && self.last_frame_valid {
                 let len = self.last_frame_len;
+                let n = len.min(frames).max(1);
                 for i in 0..frames {
-                    let g = 1.0 - i as f32 / frames as f32;
+                    let g = 1.0 - i as f32 / n as f32;
                     for c in 0..ch {
-                        out[i * ch + c] = if i < len { self.last_frame[(len - 1 - i) * ch + c] * g } else { 0.0 };
+                        out[i * ch + c] = if i < n.min(len) { self.last_frame[(len - 1 - i) * ch + c] * g } else { 0.0 };
                     }
                 }
             } else {
@@ -276,6 +282,10 @@ impl Concealer {
             }
             for c in 0..ch.min(2) {
                 self.pcm_tail[c] = out[(frames - 1) * ch + c];
+            }
+            // 모노 은닉 뒤 스테레오 패킷이 오면 R도 같은 꼬리에서 잇는다(옛 스테레오 꼬리가 남지 않게, #188 리뷰 L1).
+            if ch == 1 {
+                self.pcm_tail[1] = self.pcm_tail[0];
             }
             self.pcm_concealed = true;
         }
