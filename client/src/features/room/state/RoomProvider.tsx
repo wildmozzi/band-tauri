@@ -145,13 +145,14 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const buildJoinMessageRef = useRef(buildJoinMessage)
   buildJoinMessageRef.current = buildJoinMessage
 
-  const { send, clientIdRef, isOpen, restart: restartSignaling } = useSignaling({
+  const { send, clientIdRef, isOpen, restart: restartSignaling, hasAnonResume } = useSignaling({
     onReady: (id, resumed) => onReadyRef.current(id, resumed),
     onMessage: (p) => onMessageRef.current(p),
     onClosed: () => onClosedRef.current(),
     onGaveUp: () => onGaveUpRef.current(),
     isInRoom: () => store.getSnapshot().connection.currentRoomId !== null,
     getJoinMessage: () => buildJoinMessageRef.current(false),
+    getRoomId: () => store.getSnapshot().connection.currentRoomId,
   }, store)
 
   // --- 연주 세션 (엔진) ---
@@ -583,9 +584,9 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     // 비우지 않는다 — 비우면 재개 직후 room-state 전에 syncViewers([])가 관람자 PC를 모두 닫는다
     heldBroadcastIdRef.current = holdBroadcastOnClose({ isBroadcaster: isBroadcasterRef.current, selfId: selfIdRef.current })
     if (heldBroadcastIdRef.current === null) store.patch('connection', { peers: [] })
-    // 로그인 관람자는 세션 재개(같은 clientId)를 요청하므로 관람 수신 연결을 유지해 둔다(재개되면 재협상 없이 소리가 이어진다).
-    // 익명은 재개가 없어(서버는 인증 사용자만 유예) 지금 닫는다. 재개 여부는 onReady에서 판정한다
-    heldViewerIdRef.current = holdViewerOnClose({ loggedIn: !!userIdRef.current, selfId: selfIdRef.current, hasViewer: viewer.hasAny() })
+    // 로그인 관람자, 그리고 재개 토큰을 받은 익명 관람자(P2-18c)는 세션 재개(같은 clientId)를 요청하므로 관람 수신 연결을 유지해 둔다
+    // (재개되면 재협상 없이 소리가 이어진다). 재개 수단이 없으면(구 서버 등) 지금 닫는다. 재개 여부는 onReady에서 판정한다
+    heldViewerIdRef.current = holdViewerOnClose({ canResume: !!userIdRef.current || hasAnonResume(), selfId: selfIdRef.current, hasViewer: viewer.hasAny() })
     if (heldViewerIdRef.current === null) viewer.closeAll()
     // 엔진(UDP 메시)은 유지한다. 재연결/세션 재개 여부는 onReady에서 결정 (M6)
     session.connectionLost()

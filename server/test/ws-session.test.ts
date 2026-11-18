@@ -170,8 +170,12 @@ describe('session resume', async () => {
     await sleep(500)
     assert.ok(!peer.has(m => m.type === 'participant-left' && m.oderId === oldId))
   })
+})
 
-  it('anonymous viewers are not suspended (leave is immediate)', async () => {
+describe('anonymous viewers with anonymous resume off', async () => {
+  const url = await startWs({ resumeGraceMs: 400, anonResumeGraceMs: 0 })
+
+  it('anonymous viewers are not suspended when anonResumeGraceMs is 0 (leave is immediate)', async () => {
     const peer = await client(url)
     await authJoin(peer, 'tok:peer4', 'free')
     const anon = await client(url)

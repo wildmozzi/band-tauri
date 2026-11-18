@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { holdBroadcastOnClose, holdViewerOnClose, keepHeldViewer } from './viewerHold'
 
 describe('관람 수신 유지 (시그널링 재개)', () => {
-  it('로그인 관람자가 수신 중에 끊기면 지금 clientId로 유지해 둔다', () => {
-    expect(holdViewerOnClose({ loggedIn: true, selfId: 'c1', hasViewer: true })).toBe('c1')
+  it('재개를 요청할 수 있는 관람자(로그인, 또는 익명 재개 토큰 보유 — P2-18c)가 수신 중에 끊기면 지금 clientId로 유지해 둔다', () => {
+    expect(holdViewerOnClose({ canResume: true, selfId: 'c1', hasViewer: true })).toBe('c1')
   })
-  it('익명·수신 없음·clientId 모름이면 유지하지 않는다(지금 닫는다)', () => {
-    expect(holdViewerOnClose({ loggedIn: false, selfId: 'c1', hasViewer: true })).toBeNull()
-    expect(holdViewerOnClose({ loggedIn: true, selfId: 'c1', hasViewer: false })).toBeNull()
-    expect(holdViewerOnClose({ loggedIn: true, selfId: null, hasViewer: true })).toBeNull()
+  it('재개 수단 없음·수신 없음·clientId 모름이면 유지하지 않는다(지금 닫는다)', () => {
+    expect(holdViewerOnClose({ canResume: false, selfId: 'c1', hasViewer: true })).toBeNull()
+    expect(holdViewerOnClose({ canResume: true, selfId: 'c1', hasViewer: false })).toBeNull()
+    expect(holdViewerOnClose({ canResume: true, selfId: null, hasViewer: true })).toBeNull()
   })
   it('방송 담당이면 끊길 때 방송(관람자 PC)을 유지해 둔다', () => {
     expect(holdBroadcastOnClose({ isBroadcaster: true, selfId: 'p1' })).toBe('p1')

@@ -1,4 +1,6 @@
+import { createHash, randomBytes, timingSafeEqual } from 'crypto'
 import type { WebSocket } from 'ws'
+import { ipBucket } from '../lib/roomPassword'
 import type { Ctx } from './ctx'
 import { handleLeave, sendRoomState, type MembershipSvc } from './membership'
 import { metronomeHostChanged } from './metronome'
@@ -16,6 +18,11 @@ import type { Client, WsLimits } from './types'
  *
  * P1-16: 서버가 옛 소켓의 닫힘을 아직 모르는(반쯤 열린) 연결도 재개 대상이다(findLive). 새 연결을 붙인 뒤
  * 옛 소켓을 끊는다(attachSession). 옛 소켓의 close는 `client.conn.ws`가 이미 새 소켓이라 "대체됨"으로 보고 무시한다(조립부).
+ *
+ * P2-18c: 익명 관람자도 재개한다. 신원(JWT)이 없으므로 서버가 익명 auth-result에 실어 보낸 1회용 재개 토큰
+ * (무작위 256비트, 서버는 SHA-256만 쥔다)과 그 연결이 있던 방이 맞을 때만 같은 clientId로 붙인다(findAnon).
+ * 재개 토큰은 익명 auth-result를 보낼 때마다 새로 만들어 이전 것을 무효로 한다(재개 성공 = 회전).
+ * 익명 유예는 따로 상한을 둔다(서버 전체 maxSuspendedAnonymous, IP(/64)별 maxSuspendedAnonymousPerIp) — 넘으면 바로 퇴장.
  */
 export function createResume(registry: Registry) {
   const { getClient } = registry
@@ -46,6 +53,53 @@ export function createResume(registry: Registry) {
     return c.auth.state === 'authenticated' && c.auth.userId === userId && c.conn.ws !== self ? c : null
   }
 
+  /**
+   * 익명 재개 대상(P2-18c): 이전 clientId의 Client가 익명(JWT 없음)이고, 재개 토큰과 방이 맞고,
+   * 유예 중이거나(P1-16처럼) 서버가 아직 닫힘을 모르는 다른 소켓의 연결일 때만.
+   * clientId는 같은 방 참가자에게 공개(oderId)되므로 토큰이 신원 증명이다. 틀린 시도는 토큰을 무효로 하지 않는다
+   * (clientId를 아는 사람이 일부러 틀려 남의 재개를 막지 못하게). 256비트라 추측은 불가능하다.
+   */
+  function findAnon(clientId: string, token: string, roomId: string, self: WebSocket): Client | null {
+    const c = getClient(clientId)
+    if (!c || c.auth.state !== 'anonymous' || c.auth.userId || !c.resume.anonTokenHash) return null
+    if (!c.member.roomId || c.member.roomId !== roomId) return null
+    if (!suspended.has(clientId) && c.conn.ws === self) return null
+    return timingSafeEqual(hashToken(token), c.resume.anonTokenHash) ? c : null
+  }
+
+  /** 익명 재개 토큰을 새로 만든다(이전 것은 무효). 원문은 돌려주기만 하고 Client에는 해시만 둔다 */
+  function issueAnonToken(c: Client): string {
+    const token = randomBytes(32).toString('base64url')
+    c.resume.anonTokenHash = hashToken(token)
+    return token
+  }
+
+  /** 유예 중인 익명 연결 수 (서버 전체, 이 IP(/64)) — 익명 유예 상한 판정용 */
+  function suspendedAnonymous(ip: string): { total: number; fromIp: number } {
+    const key = ipBucket(ip)
+    let total = 0
+    let fromIp = 0
+    for (const c of suspended.values()) {
+      if (c.auth.userId) continue
+      total++
+      if (ipBucket(c.conn.ip) === key) fromIp++
+    }
+    return { total, fromIp }
+  }
+
+  /**
+   * 이 방에서 같은 IP(/64)로 가장 먼저 유예에 들어간 익명 연결 (#228 리뷰 M-1). 같은 IP의 새 익명 입장이 정원·익명 상한에 걸리면
+   * membership이 이것부터 내보낸다 — 새로고침·탭 닫기로 남은 유령 자리가 그 사람(또는 같은 집 사람)을 30초 막지 않게.
+   * suspended는 넣은 순서로 돈다(Map) — 처음 만나는 것이 가장 오래됐다.
+   */
+  function oldestSuspendedAnonymous(roomId: string, ip: string): Client | null {
+    const key = ipBucket(ip)
+    for (const c of suspended.values()) {
+      if (!c.auth.userId && c.member.roomId === roomId && ipBucket(c.conn.ip) === key) return c
+    }
+    return null
+  }
+
   function isSuspended(clientId: string): boolean {
     return suspended.has(clientId)
   }
@@ -60,7 +114,11 @@ export function createResume(registry: Registry) {
     for (const c of suspended.values()) if (c.resume.timer) clearTimeout(c.resume.timer)
   }
 
-  return { drop, find, findLive, isSuspended, add, clearTimers }
+  return { drop, find, findLive, findAnon, issueAnonToken, suspendedAnonymous, oldestSuspendedAnonymous, isSuspended, add, clearTimers }
+}
+
+function hashToken(token: string): Buffer {
+  return createHash('sha256').update(token).digest()
 }
 
 export type Resume = ReturnType<typeof createResume>
@@ -83,19 +141,46 @@ function finalizeSuspended(svc: ResumeSvc, c: Client) {
 }
 
 /**
- * 소켓 닫힘(close 핸들러): 인증된 사용자가 방 안에서 끊겼으면 유예시간 동안 상태를 유지한다(참가자에게 leave 안 보냄).
- * 유예에 들어갔으면 true — 호출부는 퇴장 처리를 하지 않는다.
+ * 클라이언트가 일부러 닫은 연결의 닫힘 코드: 1000(정상 — 앱이 방을 떠나며·페이지를 내리며 닫음), 1001(going away — 브라우저가
+ * 새로고침·탭 닫기·이동 때 보냄). 망 끊김은 닫힘 프레임이 없어 1006, 수신 없음 판정은 4000이다.
  */
-export function suspendOnClose(svc: ResumeSvc, client: Client): boolean {
-  const { hasRoom } = svc.registry
+const INTENTIONAL_CLOSE_CODES = new Set([1000, 1001])
+
+/**
+ * 끊긴 연결의 유예시간(ms). 0이면 유예하지 않는다.
+ * 인증 사용자는 resumeGraceMs. 익명(P2-18c)은 재개 토큰을 받은 연결만 anonResumeGraceMs, 익명 유예 상한(전체·IP별) 안에서.
+ * 익명이 일부러 닫았으면(1000/1001 — 새로고침·탭 닫기) 유예하지 않는다(#228 리뷰 M-1): 새 페이지는 재개를 요청하지 않으므로
+ * 유예하면 30초 동안 방 자리만 잡는 유령이 된다.
+ */
+function graceFor(svc: ResumeSvc, c: Client, closeCode: number | undefined): number {
   const { limits } = svc
+  if (isAuthenticated(c)) return limits.resumeGraceMs
+  if (c.auth.state !== 'anonymous' || c.auth.userId || !c.resume.anonTokenHash || limits.anonResumeGraceMs <= 0) return 0
+  if (closeCode !== undefined && INTENTIONAL_CLOSE_CODES.has(closeCode)) return 0
+  const n = svc.resume.suspendedAnonymous(c.conn.ip)
+  if (n.total >= limits.maxSuspendedAnonymous || n.fromIp >= limits.maxSuspendedAnonymousPerIp) {
+    console.warn(`[RESUME] ${c.id.slice(0, 8)} anonymous suspend limit reached (${n.total} total, ${n.fromIp} from ip) - leaving now`)
+    return 0
+  }
+  return limits.anonResumeGraceMs
+}
+
+/**
+ * 소켓 닫힘(close 핸들러): 인증된 사용자(또는 재개 토큰을 받은 익명 관람자, P2-18c)가 방 안에서 끊겼으면
+ * 유예시간 동안 상태를 유지한다(참가자에게 leave 안 보냄). 유예에 들어갔으면 true — 호출부는 퇴장 처리를 하지 않는다.
+ * closeCode: 소켓 닫힘 코드(익명은 1000/1001이면 유예하지 않는다).
+ */
+export function suspendOnClose(svc: ResumeSvc, client: Client, closeCode?: number): boolean {
+  const { hasRoom } = svc.registry
   const roomId = client.member.roomId
-  if (!(roomId && hasRoom(roomId) && isAuthenticated(client) && limits.resumeGraceMs > 0)) return false
+  if (!(roomId && hasRoom(roomId))) return false
+  const graceMs = graceFor(svc, client, closeCode)
+  if (graceMs <= 0) return false
   const c = client
-  const timer = setTimeout(() => finalizeSuspended(svc, c), limits.resumeGraceMs)
+  const timer = setTimeout(() => finalizeSuspended(svc, c), graceMs)
   timer.unref?.()
   svc.resume.add(c, timer)
-  console.log(`[RESUME] ${c.id.slice(0, 8)} suspended for ${limits.resumeGraceMs}ms`)
+  console.log(`[RESUME] ${c.id.slice(0, 8)} ${isAuthenticated(c) ? '' : 'anonymous '}suspended for ${graceMs}ms`)
   return true
 }
 
@@ -144,13 +229,17 @@ export function attachSession(ctx: Ctx<ResumeSvc>, old: Client): Client {
  * 세션 재개 2단계: 재개 알림. 방 참가자에게는 leave/joined를 보내지 않는다(그들 입장에서는 끊긴 적이 없음).
  * 순서: welcome(resumed) → auth-result(resumed) → room-state → (유예 중 이양됐으면) metronome-host-only
  * → (유예 중 관람자로 내려졌으면) demoted-to-viewer.
+ * 익명 재개(P2-18c)는 auth-result가 authenticated:false에 새 재개 토큰(resumeToken)을 싣는다 — 쓴 토큰은 이로써 무효가 된다.
  */
 export function announceResumed(ctx: Ctx<ResumeSvc>) {
   const { ws, client, id } = ctx
   const { hasRoom } = ctx.svc.registry
-  console.log(`[RESUME] ${id.slice(0, 8)} resumed session (user ${client.auth.userId?.slice(0, 8)}, room ${client.member.roomId?.slice(0, 8) || 'none'}, performing: ${client.perform.isPerforming})`)
+  const anonymous = client.auth.state === 'anonymous'
+  console.log(`[RESUME] ${id.slice(0, 8)} resumed session (${anonymous ? 'anonymous' : `user ${client.auth.userId?.slice(0, 8)}`}, room ${client.member.roomId?.slice(0, 8) || 'none'}, performing: ${client.perform.isPerforming})`)
   send(ws, { type: 'welcome', clientId: id, resumed: true })
-  send(ws, { type: 'auth-result', authenticated: true, userId: client.auth.userId ?? null, resumed: true })
+  send(ws, anonymous
+    ? { type: 'auth-result', authenticated: false, userId: null, resumed: true, resumeToken: ctx.svc.resume.issueAnonToken(client) }
+    : { type: 'auth-result', authenticated: true, userId: client.auth.userId ?? null, resumed: true })
   if (client.member.roomId && hasRoom(client.member.roomId)) sendRoomState(ctx, client.member.roomId)
   // 유예 중에 이양으로 메트로놈이 꺼졌다: 그때 못 받은 알림을 지금 보내 내 기준 클릭도 끄게 한다(PR #53 L2)
   if (client.resume.pendingMetronomeStop) {

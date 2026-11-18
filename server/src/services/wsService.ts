@@ -33,6 +33,8 @@ import { RELAY_MESSAGE_TYPES, takeRelayMessage } from '../signaling/viewerRelay'
  * - accessToken이 없거나 검증 실패 → 익명 관람자(연주 요청/연주 시작/네이티브 시그널링 불가).
  * - auth 전에 온 다른 메시지는 거부한다. AUTH_TIMEOUT_MS 안에 auth가 없으면 익명으로 진행한다(관람자 호환).
  * - 같은 사용자의 갱신 토큰으로 재인증할 수 있다. 토큰 만료 후 유예시간까지 재인증이 없으면 4001로 끊는다.
+ * - 세션 재개: 로그인 사용자는 같은 JWT userId + resumeClientId, 익명 관람자(P2-18c)는 익명 auth-result로 받은 1회용
+ *   resumeToken + resumeClientId + resumeRoomId가 맞을 때만(signaling/resume.ts).
  *
  * 권한
  * - isHost는 DB `rooms.host_id === userId`로 서버가 판정한다(방 정보는 짧게 캐시, 승인 계열 처리 때 재확인).
@@ -267,7 +269,7 @@ export function initializeWebSocket(
       if (ctx.client.auth.state === 'pending') {
         ctx.client.auth.state = 'anonymous'
         console.log(`[AUTH] ${ctx.id.slice(0, 8)} no auth within ${AUTH_TIMEOUT_MS}ms - anonymous viewer`)
-        send(ws, { type: 'auth-result', authenticated: false })
+        send(ws, { type: 'auth-result', authenticated: false, resumeToken: resume.issueAnonToken(ctx.client) })
       }
     }, AUTH_TIMEOUT_MS)
     authTimer.unref?.()
@@ -372,7 +374,7 @@ export function initializeWebSocket(
       console.warn(`[WS] ${ctx.id.slice(0, 8)} socket error: ${err.message}`)
     })
 
-    ws.on('close', () => {
+    ws.on('close', (code: number) => {
       const client = ctx.client
       const id = ctx.id
       // 세션 재개(P1-16)가 이 Client를 새 연결로 가져갔다: 옛 소켓의 close는 새 연결의 타이머·유예·퇴장을 건드리지 않는다
@@ -389,8 +391,8 @@ export function initializeWebSocket(
       const roomId = client.member.roomId
       console.log(`[DISCONNECT] Client ${id.slice(0, 8)} disconnected. roomId: ${roomId?.slice(0, 8) || 'none'}`)
 
-      // 인증된 사용자가 방 안에서 끊김: 유예시간 동안 상태 유지 (참가자에게 leave 안 보냄)
-      if (suspendOnClose(svc, client)) return
+      // 인증된 사용자(또는 재개 토큰을 받은 익명 관람자, P2-18c)가 방 안에서 끊김: 유예시간 동안 상태 유지 (참가자에게 leave 안 보냄)
+      if (suspendOnClose(svc, client, code)) return
 
       if (roomId && hasRoom(roomId)) handleLeave(svc, client, roomId, 'close')
       client.member.roomId = undefined

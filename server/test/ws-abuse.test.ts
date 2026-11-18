@@ -30,7 +30,8 @@ async function startWs(limits: WsOptions['limits'] = {}, env: Record<string, str
     fetchRoomMeta: async () => ({ hostId: 'host', freeJoin: true }),
     updateParticipants: async () => {},
   }
-  const wss = initializeWebSocket(server, null, { env: { NODE_ENV: 'test', ...env }, limits, deps })
+  // 익명 관람자가 끊기면 곧바로 participant-left가 되게(익명 재개 유예 P2-18c는 끔) — 끊김 판정을 퇴장으로 본다
+  const wss = initializeWebSocket(server, null, { env: { NODE_ENV: 'test', ...env }, limits: { anonResumeGraceMs: 0, ...limits }, deps })
   await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()))
   servers.push({ server, wss })
   return `ws://127.0.0.1:${(server.address() as { port: number }).port}`
@@ -69,7 +70,7 @@ async function hostWithViewers(url: string, n: number, roomId = 'r'): Promise<{ 
   assert.ok(await host.waitFor(m => m.type === 'room-state'))
   const viewers: TestClient[] = []
   for (let i = 0; i < n; i++) {
-    const v = await client(url) // 익명 관람자: 끊기면 유예 없이 곧바로 participant-left
+    const v = await client(url) // 익명 관람자: 끊기면 유예 없이 곧바로 participant-left (startWs가 익명 재개 유예를 끈다)
     v.send({ type: 'auth' })
     v.send({ type: 'join', roomId })
     assert.ok(await host.waitFor(m => m.type === 'participant-joined' && m.participant.oderId === v.id))

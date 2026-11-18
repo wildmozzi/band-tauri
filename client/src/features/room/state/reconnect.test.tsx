@@ -28,7 +28,7 @@ const h = vi.hoisted(() => {
     dispose: () => {},
   }
   /** 설정하면 getSession이 이 Promise가 풀릴 때까지 기다린다 (토큰 대기 중 닫힘 재현) */
-  const auth = { tokenGate: null as Promise<void> | null }
+  const auth = { tokenGate: null as Promise<void> | null, anonymous: false }
   return { session, auth }
 })
 
@@ -54,7 +54,7 @@ vi.mock('../../../shared/lib/supabaseClient', () => ({
     auth: {
       getSession: async () => {
         if (h.auth.tokenGate) await h.auth.tokenGate
-        return { data: { session: { access_token: 'tok' } } }
+        return { data: { session: h.auth.anonymous ? null : { access_token: 'tok' } } }
       },
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }),
     },
@@ -144,6 +144,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   FakeWebSocket.reset()
   h.auth.tokenGate = null
+  h.auth.anonymous = false
   vi.stubGlobal('WebSocket', FakeWebSocket)
   stopSpy = vi.spyOn(h.session, 'stop')
   welcomeSpy = vi.spyOn(h.session, 'welcome')
@@ -628,5 +629,61 @@ describe('다시 입장 연타·누수 (P1-15b 리뷰 Low-2)', () => {
     await flush() // auth 전송 + fallback 타이머
     cleanup()
     expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('익명 관람자 세션 재개 (P2-18c)', () => {
+  it('익명 auth-result의 재개 토큰을 기억했다가 재연결 auth에 clientId·토큰·방으로 싣고, 재개되면 새 토큰으로 바꾼다', async () => {
+    h.auth.anonymous = true
+    const ws = last()
+    await act(async () => {
+      ws.open()
+      ws.recv({ type: 'welcome', clientId: 'a1' })
+    })
+    await flush()
+    expect(ws.sent.find((m) => m.type === 'auth')).toMatchObject({ type: 'auth' })
+    await act(async () => ws.recv({ type: 'auth-result', authenticated: false, userId: null, resumeToken: 't1' }))
+    await act(async () => ws.recv({ type: 'pong' }))
+    act(() => actions.joinRoom('r1'))
+    await act(async () => ws.recv({ type: 'room-state', peerIds: ['a1'], participants: [], isHost: false }))
+
+    act(() => ws.fail())
+    await advance(1000)
+    const next = last()
+    expect(next).not.toBe(ws)
+    await act(async () => {
+      next.open()
+      next.recv({ type: 'welcome', clientId: 'tmp' })
+    })
+    await flush()
+    expect(next.sent.find((m) => m.type === 'auth')).toEqual({ type: 'auth', resumeClientId: 'a1', resumeToken: 't1', resumeRoomId: 'r1' })
+    await act(async () => {
+      next.recv({ type: 'welcome', clientId: 'a1', resumed: true })
+      next.recv({ type: 'auth-result', authenticated: false, userId: null, resumed: true, resumeToken: 't2' })
+    })
+    expect(welcomeSpy).toHaveBeenLastCalledWith('a1', true)
+    // 회전된 토큰(t2)으로 다음 재개를 요청한다
+    act(() => next.fail())
+    await advance(1000)
+    const third = last()
+    await act(async () => {
+      third.open()
+      third.recv({ type: 'welcome', clientId: 'tmp2' })
+    })
+    await flush()
+    expect(third.sent.find((m) => m.type === 'auth')).toEqual({ type: 'auth', resumeClientId: 'a1', resumeToken: 't2', resumeRoomId: 'r1' })
+  })
+
+  it('페이지를 내리면(새로고침·탭 닫기) 연결을 1000으로 닫아 서버가 익명을 유예하지 않게 한다(#228 리뷰 M-1), bfcache 보관이면 두지 않는다', async () => {
+    const ws = await enterRoom()
+    const hide = (persisted: boolean) => {
+      const e = new Event('pagehide') as Event & { persisted: boolean }
+      Object.defineProperty(e, 'persisted', { value: persisted })
+      window.dispatchEvent(e)
+    }
+    act(() => hide(true))
+    expect(ws.closedWith).toBeNull()
+    act(() => hide(false))
+    expect(ws.closedWith).toBe(1000)
   })
 })

@@ -19,7 +19,8 @@ async function startWs(limits: WsOptions['limits'] = {}, deps: Partial<WsDeps> =
   const server = createServer()
   const wss = initializeWebSocket(server, null, {
     env: { NODE_ENV: 'test' },
-    limits: { joinBurst: 1000, joinPerSec: 1000, maxAnonymousPerIpPerRoom: 100, ...limits },
+    // 익명 재개 유예(P2-18c)는 끈다: 이 파일은 끊긴 익명 연결이 곧바로 퇴장하는 것으로 연결 정리를 본다
+    limits: { joinBurst: 1000, joinPerSec: 1000, maxAnonymousPerIpPerRoom: 100, anonResumeGraceMs: 0, ...limits },
     deps: {
       hasBackend: true,
       verifyToken: testVerifier,

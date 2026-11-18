@@ -141,13 +141,13 @@ test.describe('웹 관람: 방송 수신 (WebRTC)', () => {
 
     mock.signaling.setDown(true)
     await expect(page.locator('.reconnect-banner')).toBeVisible()
-    // 시그널링이 끊기면 방송 수신도 닫는다(새 clientId로 다시 협상해야 하므로) — 옛 LIVE가 남지 않는다
+    // 시그널링이 끊기면 LIVE를 내린다(익명도 재개를 기다리며 PC는 유지하지만 표시는 연결 중, P2-18c) — 옛 LIVE가 남지 않는다
     await expect(liveBadge(page)).not.toHaveText('● LIVE')
 
     mock.signaling.setDown(false)
     await expect(page.locator('.reconnect-banner')).toHaveCount(0, { timeout: 10_000 })
     await expect.poll(() => mock.signaling.clientIdsIn(ROCK_ROOM.id).length).toBe(1)
-    // 연주자 앱은 새 관람자(participant-joined)에게 다시 offer한다
+    // setDown은 재개를 받아 주지 않는다(새 clientId) → 연주자 앱은 새 관람자(participant-joined)에게 다시 offer한다
     await negotiate(page, mock)
     await expect(liveBadge(page)).toHaveText('● LIVE')
   })
@@ -216,6 +216,39 @@ test.describe('웹 관람: 로그인 관람자의 세션 재개 (수신 연결 �
     await expect(liveBadge(page)).not.toHaveText('● LIVE')
     await negotiate(page, mock)
     await expect(liveBadge(page)).toHaveText('● LIVE')
+  })
+})
+
+test.describe('웹 관람: 익명 관람자의 세션 재개 (P2-18c)', () => {
+  test('익명도 재개 토큰으로 같은 clientId로 재개되면 수신 연결을 유지하고 다시 협상하지 않는다(LIVE 유지)', async ({ page, mock }) => {
+    await trackViewerCloses(page)
+    mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    await negotiate(page, mock)
+    await expect(liveBadge(page)).toHaveText('● LIVE')
+    const answers = mock.signaling.messages('answer').length
+    const [clientId] = mock.signaling.clientIdsIn(ROCK_ROOM.id)
+    const authsBefore = mock.signaling.messages('auth').length
+
+    // 소켓만 끊김 → 앱이 resumeClientId + 익명 재개 토큰 + 방으로 다시 붙고 서버(mock)가 재개한다
+    mock.signaling.dropForResume(false)
+    await expect.poll(() => mock.signaling.messages('auth').slice(authsBefore).some(m =>
+      m.resumeClientId === clientId && typeof m.resumeToken === 'string' && m.resumeRoomId === ROCK_ROOM.id && m.accessToken === undefined)).toBe(true)
+    await expect(page.locator('.reconnect-banner')).toHaveCount(0, { timeout: 10_000 })
+    await expect.poll(() => mock.signaling.clientIdsIn(ROCK_ROOM.id)).toEqual([clientId])
+    await expect(liveBadge(page)).toHaveText('● LIVE')
+    mock.signaling.pushChat(ROCK_ROOM.id, REMOTE_PERFORMER, '익명 재개 뒤 채팅')
+    await expect(page.getByText('익명 재개 뒤 채팅')).toBeVisible()
+    expect(await viewerCloses(page)).toBe(0)
+    expect(mock.signaling.messages('answer')).toHaveLength(answers)
+    await expect(liveBadge(page)).toHaveText('● LIVE')
+
+    // 토큰은 재개마다 새 것: 두 번째 끊김도 (새 토큰으로) 재개된다
+    mock.signaling.dropForResume(false)
+    await expect(page.locator('.reconnect-banner')).toHaveCount(0, { timeout: 10_000 })
+    await expect.poll(() => mock.signaling.clientIdsIn(ROCK_ROOM.id)).toEqual([clientId])
+    await expect(liveBadge(page)).toHaveText('● LIVE')
+    expect(await viewerCloses(page)).toBe(0)
   })
 })
 

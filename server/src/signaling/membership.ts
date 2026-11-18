@@ -40,7 +40,11 @@ export interface MembershipSvc {
    * 세션 재개 유예(resume 모듈)의 해제 함수 하나. 순환 방지용 주입, 설계 2.2: resume이 membership을 import하므로
    * (계층 3 안 순서 membership < resume < auth) membership은 resume을 import하지 않고 이 구조 타입으로만 부른다.
    */
-  resume: { drop(c: Client): void }
+  resume: {
+    drop(c: Client): void
+    /** 이 방에서 같은 IP(/64)로 가장 먼저 유예에 들어간 익명 연결 (#228 리뷰 M-1) */
+    oldestSuspendedAnonymous(roomId: string, ip: string): Client | null
+  }
   /** roomId → 참가자 수 DB 갱신 디바운스 타이머 */
   participantTimers: Map<string, ReturnType<typeof setTimeout>>
 }
@@ -259,7 +263,15 @@ function passCapacity(ctx: Ctx<MembershipSvc>, roomId: string, plan: JoinPlan): 
   const { capacity } = plan
 
   const reserved = hasApproval(roomId, client.auth.userId) || hasSeatHold(roomId, client.auth.userId)
-  const rejected = plan.isHost || reserved ? null : checkCapacity(roomId, client, capacity)
+  let rejected = plan.isHost || reserved ? null : checkCapacity(roomId, client, capacity)
+  // 익명 입장이 막히면 같은 IP(/64)의 유예 중 익명(재개되지 않은 새로고침·탭 닫기 유령)부터 내보내고 다시 센다(#228 리뷰 M-1).
+  // 다른 IP의 유예는 건드리지 않는다(남의 재개를 빼앗지 않게). 동기 구간 안이다(await 없음)
+  while (rejected && !client.auth.userId) {
+    const ghost = ctx.svc.resume.oldestSuspendedAnonymous(roomId, client.conn.ip)
+    if (!ghost) break
+    evictSuspended(ctx.svc, ghost, roomId)
+    rejected = checkCapacity(roomId, client, capacity)
+  }
   if (rejected) {
     console.warn(`[JOIN] ${id.slice(0, 8)} rejected: room ${roomId.slice(0, 8)} ${rejected} (${capacity})`)
     const message = rejected === 'room-full'
@@ -270,6 +282,15 @@ function passCapacity(ctx: Ctx<MembershipSvc>, roomId: string, plan: JoinPlan): 
   }
   clearSeatHold(roomId, client.auth.userId)
   return true
+}
+
+/** 유예 중인 연결을 최종 퇴장시킨다(유예 만료와 같은 처리: leave(close) → 유예 해제 → 삭제) */
+function evictSuspended(svc: MembershipSvc, c: Client, roomId: string): void {
+  console.log(`[JOIN] evicting suspended anonymous ${c.id.slice(0, 8)} from ${roomId.slice(0, 8)} for a new connection from the same ip`)
+  svc.resume.drop(c)
+  handleLeave(svc, c, roomId, 'close')
+  c.member.roomId = undefined
+  svc.registry.removeClient(c.id)
 }
 
 /** 4단계 이동: 다른 방에 있었다면 'move'로 퇴장 처리하고 그 방의 연주·엔진 상태를 지운다 */

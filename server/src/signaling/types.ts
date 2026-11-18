@@ -77,6 +77,12 @@ export interface WsLimits {
   maxAnonymousPerIpPerRoom: number
   /** 인증된 사용자가 끊긴 뒤 세션을 재개할 수 있는 유예시간 (이 동안 방 참가자에게 leave를 보내지 않음) */
   resumeGraceMs: number
+  /** 익명 관람자의 재개 유예시간 (P2-18c, 재개 토큰이 맞을 때만 재개). 0이면 익명은 유예하지 않는다 */
+  anonResumeGraceMs: number
+  /** 서버 전체에서 동시에 유예 중일 수 있는 익명 연결 수. 넘으면 유예 없이 바로 퇴장 (P2-18c) */
+  maxSuspendedAnonymous: number
+  /** 같은 IP(/64)에서 동시에 유예 중일 수 있는 익명 연결 수 (P2-18c) */
+  maxSuspendedAnonymousPerIp: number
   /** 방 비밀번호: (방, 사용자) 허용 실패 횟수 */
   passwordMaxFailures: number
   /** 방 비밀번호: (방, IP) 허용 실패 횟수 */
@@ -119,6 +125,9 @@ export const DEFAULT_LIMITS: WsLimits = {
   maxAnonymousPerRoom: 10,
   maxAnonymousPerIpPerRoom: 2,
   resumeGraceMs: 30_000,
+  anonResumeGraceMs: 30_000,
+  maxSuspendedAnonymous: 100,
+  maxSuspendedAnonymousPerIp: 4,
   heartbeatMs: 30_000,
   passwordMaxFailures: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailures,
   passwordMaxFailuresPerIp: DEFAULT_PASSWORD_ATTEMPT_LIMITS.maxFailuresPerIp,
@@ -185,6 +194,11 @@ export interface Client {
     pendingMetronomeStop?: boolean
     /** 재개 유예 중에 방장이 관람자로 내렸다: 재개 때 demoted-to-viewer를 보낸다 (P2-9). requests가 켠다 */
     pendingDemoted?: boolean
+    /**
+     * 익명 재개 토큰의 SHA-256 (P2-18c). 익명 auth-result를 보낼 때마다 resume.issueAnonToken이 새로 만든다.
+     * 원문은 쥐지 않는다. 재개에 성공하면 새 토큰으로 바뀌어 이전 토큰은 다시 쓸 수 없다
+     */
+    anonTokenHash?: Buffer
   }
   /** membership: 방 멤버십. isHost는 roomMeta.checkHost도 갱신한다 */
   member: {
