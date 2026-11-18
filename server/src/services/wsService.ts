@@ -130,7 +130,7 @@ export function initializeWebSocket(
   const password = createPassword(limits, scryptGate)
   const performers = createPerformers(roomMeta, insecureDevMode)
   const metronome = createMetronome(registry, roomMeta, deps, limits)
-  const nativeSession = createNativeSession(registry, env)
+  const nativeSession = createNativeSession(registry, env, options.relaySender)
   const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** IP(IPv4) 또는 IPv6 /64 → 동시 연결 수. IPv6는 한 사용자가 /64를 통째로 받아 주소를 바꿔 가며 상한을 넘을 수 있어 묶는다 */
   const connectionsPerIp = new Map<string, number>()

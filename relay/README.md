@@ -7,12 +7,12 @@
 ## 구조
 
 ```
-src/token.rs    릴레이 토큰 검증 (HMAC-SHA256)
-src/packet.rs   RelayBind(7) / RelayData(8) / RelayBindAck(9)
-src/relay.rs    상태기계: 등록, 라우팅, 상한, 만료 (I/O 없음, 단위 테스트 대상)
+src/token.rs    릴레이 토큰 검증 (HMAC-SHA256), 회수 메시지 서명·검증
+src/packet.rs   RelayBind(7) / RelayData(8) / RelayBindAck(9) / RelayRevoke(10)
+src/relay.rs    상태기계: 등록, 라우팅, 상한, 만료, 회수 (I/O 없음, 단위 테스트 대상)
 src/server.rs   UDP 루프(단일 태스크), /metrics HTTP
 src/stats.rs    원자적 통계, Prometheus 출력
-tests/          실제 UDP 소켓 통합 테스트 (왕복 지연, 미인증 폐기, 대역 상한, 메트릭)
+tests/          실제 UDP 소켓 통합 테스트 (왕복 지연, 미인증 폐기, 대역 상한, 메트릭, 회수 뒤 전달 중단)
 ```
 
 ## 개발
@@ -25,6 +25,10 @@ RELAY_SECRET=$(openssl rand -hex 32) cargo run --release
 ```
 
 시그널링 서버에도 같은 `RELAY_SECRET`과 `RELAY_ADDR=<호스트>:5000`을 설정해야 연주자에게 토큰이 발급된다.
+
+## 토큰 회수 (RelayRevoke, relay-design 2.5)
+
+시그널링 서버는 연주자가 자격을 잃으면 서명된 회수 패킷(type 10)을 같은 UDP 포트(`RELAY_ADDR`)로 보낸다. 자격을 잃는 때는 내리기, 연주 중지, `native-leave`, 퇴장이다. 릴레이는 그 멤버의 등록을 바로 지우고, 회수 기준 시각(cutoff)까지 같은 토큰의 Bind를 받지 않는다. 응답은 하지 않는다. 서명 키는 `HMAC(RELAY_SECRET, "band-relay revoke v1")`라 새 비밀값·새 포트·fly 설정 변경이 없다. 회수 기록은 메모리에만 있다. 그래서 릴레이가 재시작되면 그 전 회수는 잊고, 이때는 토큰 만료(최대 120초)가 상한이다.
 
 ## 환경 변수
 

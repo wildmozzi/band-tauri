@@ -148,6 +148,8 @@ async function runScenario(): Promise<Step[]> {
   const server = createServer()
   const wss = initializeWebSocket(server, null, {
     env: { NODE_ENV: 'test', FLY_APP_NAME: 'transcript', RELAY_SECRET, RELAY_ADDR: 'relay.example:5000' },
+    // 릴레이 회수(RelayRevoke)는 WS 메시지가 아니라 UDP라 대본에 없다(relay-token.test.ts가 본다). 실제 DNS·UDP를 쓰지 않게 버린다
+    relaySender: () => {},
     limits: {
       // 표식 메시지가 일반·join 버킷을 쓰므로 넉넉히. chat은 대본의 rate-limited 경로를 위해 작게(보충은 사실상 0)
       msgBurst: 10_000,
@@ -273,8 +275,10 @@ async function runScenario(): Promise<Step[]> {
 
   // ---------- 채팅 ----------
   await step('viewer: chat', 'viewer', { type: 'chat', message: '  hello  ', from: 'spoof', nickname: 'Fake', timestamp: 1 })
-  // anon의 chat 버킷 3개 중 1개는 auth 전 chat이 썼다: 둘은 중계, 셋째는 rate-limited
-  await step('anon: chat flood (rate-limited)', 'anon',
+  // 익명 관람자는 채팅할 수 없다(P2-14c): 본인에게만 chat-login-required, 중계 없음
+  await step('anon: chat (chat-login-required)', 'anon', { type: 'chat', message: 'anon here' })
+  // viewer의 chat 버킷 3개 중 1개는 위 chat이 썼다: 둘은 중계, 셋째는 rate-limited
+  await step('viewer: chat flood (rate-limited)', 'viewer',
     { type: 'chat', message: 'one' }, { type: 'chat', message: 'two' }, { type: 'chat', message: 'three' })
 
   // ---------- 악기 변경 요청 ----------

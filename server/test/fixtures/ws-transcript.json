@@ -1177,86 +1177,102 @@
     }
   },
   {
-    "step": "anon: chat flood (rate-limited)",
+    "step": "anon: chat (chat-login-required)",
+    "received": {
+      "host": [],
+      "p1": [],
+      "p2": [],
+      "viewer": [],
+      "anon": [
+        {
+          "type": "error",
+          "code": "chat-login-required",
+          "message": "로그인하면 채팅할 수 있어요."
+        }
+      ]
+    }
+  },
+  {
+    "step": "viewer: chat flood (rate-limited)",
     "received": {
       "host": [
         {
           "type": "chat",
           "message": "one",
-          "nickname": "Anon",
+          "nickname": "Viewer",
           "timestamp": "<t>",
-          "oderId": "c5",
-          "from": "c5"
+          "oderId": "c4",
+          "from": "c4"
         },
         {
           "type": "chat",
           "message": "two",
-          "nickname": "Anon",
+          "nickname": "Viewer",
           "timestamp": "<t>",
-          "oderId": "c5",
-          "from": "c5"
+          "oderId": "c4",
+          "from": "c4"
         }
       ],
       "p1": [
         {
           "type": "chat",
           "message": "one",
-          "nickname": "Anon",
+          "nickname": "Viewer",
           "timestamp": "<t>",
-          "oderId": "c5",
-          "from": "c5"
+          "oderId": "c4",
+          "from": "c4"
         },
         {
           "type": "chat",
           "message": "two",
-          "nickname": "Anon",
+          "nickname": "Viewer",
           "timestamp": "<t>",
-          "oderId": "c5",
-          "from": "c5"
+          "oderId": "c4",
+          "from": "c4"
         }
       ],
       "p2": [
         {
           "type": "chat",
           "message": "one",
-          "nickname": "Anon",
+          "nickname": "Viewer",
           "timestamp": "<t>",
-          "oderId": "c5",
-          "from": "c5"
+          "oderId": "c4",
+          "from": "c4"
         },
         {
           "type": "chat",
           "message": "two",
-          "nickname": "Anon",
+          "nickname": "Viewer",
           "timestamp": "<t>",
-          "oderId": "c5",
-          "from": "c5"
+          "oderId": "c4",
+          "from": "c4"
         }
       ],
       "viewer": [
-        {
-          "type": "chat",
-          "message": "one",
-          "nickname": "Anon",
-          "timestamp": "<t>",
-          "oderId": "c5",
-          "from": "c5"
-        },
-        {
-          "type": "chat",
-          "message": "two",
-          "nickname": "Anon",
-          "timestamp": "<t>",
-          "oderId": "c5",
-          "from": "c5"
-        }
-      ],
-      "anon": [
         {
           "type": "error",
           "code": "rate-limited",
           "message": "메시지를 너무 많이 보냈습니다.",
           "rejectedType": "chat"
+        }
+      ],
+      "anon": [
+        {
+          "type": "chat",
+          "message": "one",
+          "nickname": "Viewer",
+          "timestamp": "<t>",
+          "oderId": "c4",
+          "from": "c4"
+        },
+        {
+          "type": "chat",
+          "message": "two",
+          "nickname": "Viewer",
+          "timestamp": "<t>",
+          "oderId": "c4",
+          "from": "c4"
         }
       ]
     }
@@ -1486,11 +1502,11 @@
         {
           "type": "answer",
           "to": "c1",
+          "from": "c4",
           "answer": {
             "type": "answer",
             "sdp": "v=0 viewer"
-          },
-          "from": "c4"
+          }
         }
       ],
       "p1": [],
@@ -1506,11 +1522,11 @@
         {
           "type": "ice-candidate",
           "to": "c1",
+          "from": "c4",
           "candidate": {
             "candidate": "candidate:1",
             "sdpMid": "0"
-          },
-          "from": "c4"
+          }
         }
       ],
       "p1": [],

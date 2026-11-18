@@ -81,6 +81,7 @@ pub async fn run_udp(sock: UdpSocket, mut relay: Relay) {
         if now >= next_sweep {
             now_unix = unix_now();
             relay.sweep(now);
+            relay.prune_revocations(now_unix);
             next_sweep = now + SWEEP_EVERY;
             sweep.reset();
         }
@@ -108,7 +109,7 @@ pub async fn run_udp(sock: UdpSocket, mut relay: Relay) {
                 let (to, out): (_, &[u8]) = match relay.handle(t0, now_unix, from, &buf[..n]) {
                     Outcome::Forward { to, offset } => (to, &buf[offset..n]),
                     Outcome::Ack { to } => (to, relay.ack()),
-                    Outcome::Drop(_) => continue,
+                    Outcome::Handled | Outcome::Drop(_) => continue,
                 };
                 if sock.send_to(out, to).await.is_err() {
                     stats.send_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

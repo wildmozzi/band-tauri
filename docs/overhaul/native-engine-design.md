@@ -237,7 +237,7 @@ off len 필드
 0   2   magic = 0x42 0x4E ("BN")
 2   1   version = 1
 3   1   type: 1=Audio 2=Hello 3=HelloAck 4=Ping 5=Pong 6=Bye
-            (7=RelayBind 8=RelayData 9=RelayBindAck 예약 — UDP 릴레이, relay-design.md. 엔진의 다른 용도 금지)
+            (7=RelayBind 8=RelayData 9=RelayBindAck 10=RelayRevoke(서버→릴레이 전용) 예약 — UDP 릴레이, relay-design.md. 엔진의 다른 용도 금지)
 4   4   sender_ssrc (u32, 세션마다 랜덤)
 8   4   seq (u32, 타입별 독립 증가)
 12  4   timestamp (u32, 48kHz 샘플 클럭; Hello/Ping은 송신측 µs 하위 32비트, HelloAck/Pong은 받은 Hello/Ping의 값을 되돌림)
@@ -583,6 +583,8 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
     - 바인딩은 연결당 키 1개(새 descriptor가 덮어씀)이고 native-leave·퇴장·방 이동·연결 최종 종료 때 풀린다. 세션 재개 유예 중에는 유지한다. 서버 인스턴스 1대 가정(정원과 같음).
     - 중계하는 descriptor는 서버가 검증한 `{ ssrc, key, candidates: [{ kind, addr }] }`만 다시 구성하고(후보 원소의 다른 필드도 버림) `from`은 서버가 붙인다. 0.0.0.0·멀티캐스트·루프백 같은 주소 의미 검사는 받는 쪽 엔진이 한다.
   - `native-leave` `{}` — 엔진 정지 알림.
+- **릴레이 토큰 즉시 회수**(P2-14c, relay-design 2.5): 서버는 자격을 잃은 연주자의 릴레이 등록을 토큰 만료(최대 120초)까지 두지 않고 바로 끊는다. `native-leave`, 연주 중단으로 연주자가 아니게 됨(`stop-performing`, 방장 제외), 관람자로 내리기(`demote-performer`), 퇴장(`leave`·방 이동·세션 재개 유예가 끝난 최종 종료) 때 그 사용자(방, userId)에게 발급한 토큰을 모두 회수하는 서명된 UDP 패킷(`RelayRevoke`)을 릴레이에 보낸다. 같은 사용자의 새 연결이 옛 연결을 대체할 때(중복 연결)와 세션 재개 유예 중에는 회수하지 않는다. WS 메시지는 바뀌지 않는다(클라이언트에게 보내는 것이 없다). 회수 뒤 다시 연주하면 새 `relay-token`의 만료는 회수 기준 시각보다 늦게 잡히고, `expiresIn`은 그 실제 남은 수명이다(같은 초에 다시 발급하면 120보다 1초 길 수 있다).
+- **채팅**(P2-14c): `chat` `{ message }`는 로그인한 연결(JWT로 검증한 `userId`)만 보낼 수 있다. 익명 관람자가 보내면 중계하지 않고 보낸 사람에게 `error { code: 'chat-login-required', message: '로그인하면 채팅할 수 있어요.' }`. 로그인 관람자·연주자는 그대로이고, 익명 관람자도 채팅은 받는다. 웹은 로그인하지 않았으면 입력창 대신 "로그인하면 채팅할 수 있어요" 안내와 로그인 링크를 보여 주고, 이 오류를 받으면(토큰 만료로 WS 인증이 익명이 된 경우 등) 같은 안내로 바꾼다. 다음 `room-state`(재입장·재연결)에서 안내를 풀고, 여전히 익명이면 서버가 다시 거절한다. 개발용 insecure 모드는 `auth`를 보낸 연결을 로그인으로 본다.
 - 기존 `p2p-discovery`, `p2p-discovery-response`는 삭제.
 - 방 비밀번호(P2-6): `join` `{ roomId, nickname?, password? }`. 해시가 `room_secrets`(마이그레이션 008)에 있는 방은 방장 외에 `password`가 필요하다. 실패 시 `error`:
   - `password-required` `{ roomId }` — 비밀번호 없음

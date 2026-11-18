@@ -123,6 +123,84 @@ pub fn bind_mac(key: &[u8; BIND_KEY_BYTES], msg: &[u8]) -> [u8; BIND_MAC_BYTES] 
     out
 }
 
+/// 회수 키 파생 라벨 (relay-design 2.5)
+pub const REVOKE_KEY_LABEL: &[u8] = b"band-relay revoke v1";
+/// RelayRevoke 고정부: magic(2) | version(1) | type(1) | cutoff(u64)
+pub const REVOKE_FIXED_BYTES: usize = 12;
+/// 최소 RelayRevoke: 고정부 + room_len + room 1 + member_len + member 1 + MAC
+pub const MIN_REVOKE_BYTES: usize = REVOKE_FIXED_BYTES + 1 + 1 + 1 + 1 + MAC_BYTES;
+pub const MAX_REVOKE_BYTES: usize = REVOKE_FIXED_BYTES + 1 + MAX_ROOM_BYTES + 1 + MAX_CLIENT_BYTES + MAC_BYTES;
+
+/// `K_revoke = HMAC-SHA256(RELAY_SECRET, "band-relay revoke v1")`. 토큰 MAC(비밀값 그대로)과 다른 키라
+/// 토큰과 회수 메시지가 서로의 서명으로 쓰일 수 없다.
+pub fn revoke_key(secret: &[u8]) -> [u8; 32] {
+    let mut m = HmacSha256::new_from_slice(secret).expect("HMAC은 모든 키 길이를 받는다");
+    m.update(REVOKE_KEY_LABEL);
+    m.finalize().into_bytes().into()
+}
+
+/// 검증된 회수 내용: 이 멤버(room, member)의 토큰 중 `expires_at <= cutoff`인 것은 모두 무효
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Revoke<'a> {
+    pub cutoff: u64,
+    pub room: &'a str,
+    pub member: &'a str,
+}
+
+/// RelayRevoke(type 10) 서명 (테스트·도구용. 운영 발급은 시그널링 서버 `relayToken.ts signRelayRevoke`)
+///
+/// ```text
+/// magic "BN" | version 1 | type 10 | cutoff(u64) | room_len | room | member_len | member | HMAC-SHA256(K_revoke, 앞 전부)
+/// ```
+pub fn sign_revoke(secret: &[u8], r: &Revoke<'_>) -> Vec<u8> {
+    assert!(!r.room.is_empty() && r.room.len() <= MAX_ROOM_BYTES);
+    assert!(!r.member.is_empty() && r.member.len() <= MAX_CLIENT_BYTES);
+    let mut out = Vec::with_capacity(MAX_REVOKE_BYTES);
+    out.extend_from_slice(&crate::packet::MAGIC);
+    out.push(crate::packet::VERSION);
+    out.push(crate::packet::TYPE_RELAY_REVOKE);
+    out.extend_from_slice(&r.cutoff.to_be_bytes());
+    out.push(r.room.len() as u8);
+    out.extend_from_slice(r.room.as_bytes());
+    out.push(r.member.len() as u8);
+    out.extend_from_slice(r.member.as_bytes());
+    let mut mac = HmacSha256::new_from_slice(&revoke_key(secret)).expect("32B 키");
+    mac.update(&out);
+    out.extend_from_slice(&mac.finalize().into_bytes());
+    out
+}
+
+/// RelayRevoke 검증: 구조 → MAC(상수 시간 비교). `key`는 [`revoke_key`]. cutoff가 지났는지는 호출부가 본다.
+pub fn verify_revoke<'a>(key: &[u8; 32], buf: &'a [u8]) -> Result<Revoke<'a>, TokenError> {
+    if buf.len() < MIN_REVOKE_BYTES
+        || buf.len() > MAX_REVOKE_BYTES
+        || !crate::packet::has_magic(buf)
+        || buf[3] != crate::packet::TYPE_RELAY_REVOKE
+    {
+        return Err(TokenError::Malformed);
+    }
+    let body_len = buf.len() - MAC_BYTES;
+    let (body, tag) = buf.split_at(body_len);
+    let room_len = body[REVOKE_FIXED_BYTES] as usize;
+    let room_start = REVOKE_FIXED_BYTES + 1;
+    if room_len == 0 || room_len > MAX_ROOM_BYTES || room_start + room_len + 1 > body_len {
+        return Err(TokenError::Malformed);
+    }
+    let member_len = body[room_start + room_len] as usize;
+    let member_start = room_start + room_len + 1;
+    if member_len == 0 || member_len > MAX_CLIENT_BYTES || member_start + member_len != body_len {
+        return Err(TokenError::Malformed);
+    }
+    let mut mac = HmacSha256::new_from_slice(key).expect("32B 키");
+    mac.update(body);
+    mac.verify_slice(tag).map_err(|_| TokenError::BadMac)?;
+    let room = std::str::from_utf8(&body[room_start..room_start + room_len]).map_err(|_| TokenError::Malformed)?;
+    let member = std::str::from_utf8(&body[member_start..body_len]).map_err(|_| TokenError::Malformed)?;
+    let mut c = [0u8; 8];
+    c.copy_from_slice(&body[4..12]);
+    Ok(Revoke { cutoff: u64::from_be_bytes(c), room, member })
+}
+
 /// 토큰 검증: 구조 → MAC(상수 시간 비교) → 만료 순서. `now_unix`는 현재 unix 초.
 pub fn verify<'a>(secret: &[u8], token: &'a [u8], now_unix: u64) -> Result<Claims<'a>, TokenError> {
     if token.len() < MIN_TOKEN_BYTES || token.len() > MAX_TOKEN_BYTES || token[0] != TOKEN_VERSION {
@@ -235,6 +313,55 @@ mod tests {
             assert_eq!(verify(secret, &t, c.expires_at), Err(TokenError::Expired), "{name}: 만료 시각에 무효");
             let key: String = bind_key(secret, &t).iter().map(|b| format!("{b:02x}")).collect();
             assert_eq!(key, v["bindKeyHex"].as_str().unwrap(), "{name}: bind key");
+        }
+    }
+
+    #[test]
+    fn revoke_roundtrip_and_forgery() {
+        let r = Revoke { cutoff: 1_900_000_120, room: "room-1", member: "user-a" };
+        let key = revoke_key(SECRET);
+        let p = sign_revoke(SECRET, &r);
+        assert_eq!(verify_revoke(&key, &p), Ok(r));
+        // 다른 비밀, 본문·태그 변조
+        assert_eq!(verify_revoke(&revoke_key(b"other-secret-xxxxxxxxxxxxxxxxxxxxxxxx"), &p), Err(TokenError::BadMac));
+        for idx in [4usize, 11, 13, p.len() - 33, p.len() - 1] {
+            let mut f = p.clone();
+            f[idx] ^= 1;
+            assert_eq!(verify_revoke(&key, &f), Err(TokenError::BadMac), "byte {idx}");
+        }
+        // 길이·type 오류
+        assert_eq!(verify_revoke(&key, &p[..p.len() - 1]), Err(TokenError::Malformed));
+        let mut f = p.clone();
+        f[3] = 7;
+        assert_eq!(verify_revoke(&key, &f), Err(TokenError::Malformed));
+        // 토큰 키(비밀값 그대로)로 만든 서명은 회수로 통하지 않는다(키 분리)
+        let body = &p[..p.len() - MAC_BYTES];
+        let mut m = HmacSha256::new_from_slice(SECRET).unwrap();
+        m.update(body);
+        let mut wrong_key = body.to_vec();
+        wrong_key.extend_from_slice(&m.finalize().into_bytes());
+        assert_eq!(verify_revoke(&key, &wrong_key), Err(TokenError::BadMac));
+    }
+
+    /// 회수 메시지 공용 벡터 (server/test/relay-token.test.ts와 같은 파일)
+    #[test]
+    fn cross_language_revoke_vectors() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../docs/overhaul/relay-token-vectors.json")).unwrap();
+        let vectors = fixture["revokes"].as_array().unwrap();
+        assert!(vectors.len() >= 2);
+        for v in vectors {
+            let name = v["name"].as_str().unwrap();
+            let secret = v["secret"].as_str().unwrap().as_bytes();
+            let r = Revoke {
+                cutoff: v["cutoff"].as_u64().unwrap(),
+                room: v["roomId"].as_str().unwrap(),
+                member: v["memberId"].as_str().unwrap(),
+            };
+            let p = sign_revoke(secret, &r);
+            let hex: String = p.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, v["hex"].as_str().unwrap(), "{name}");
+            assert_eq!(verify_revoke(&revoke_key(secret), &p), Ok(r), "{name}");
         }
     }
 

@@ -130,7 +130,7 @@ export type ServerError =
   | ErrorOf<'password-invalid', { roomId: string; remainingAttempts: number }>
   | ErrorOf<'password-rate-limited' | 'password-busy' | 'room-unavailable', { roomId: string; retryAfterMs: number }>
   | ErrorOf<'room-full', { reason: 'room-full' | 'anonymous-limit'; roomId: string; maxParticipants: number }>
-  | ErrorOf<'login-required' | 'perform-not-approved' | 'room-full-performers' | 'descriptor-invalid' | 'key-conflict' | 'ssrc-conflict' | 'metronome-invalid' | 'metronome-host-only' | 'demote-not-performer'>
+  | ErrorOf<'login-required' | 'chat-login-required' | 'perform-not-approved' | 'room-full-performers' | 'descriptor-invalid' | 'key-conflict' | 'ssrc-conflict' | 'metronome-invalid' | 'metronome-host-only' | 'demote-not-performer'>
 
 /** 방 안 브로드캐스트(broadcastToRoom)가 붙이는 보낸 사람 표시. 둘 다 보낸 사람의 clientId */
 type FromSender = { oderId: string; from: string }

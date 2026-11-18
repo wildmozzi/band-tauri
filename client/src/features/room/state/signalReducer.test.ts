@@ -80,6 +80,17 @@ describe('reduceRoomSignal — 요청', () => {
     expect(reduceRoomSignal(inRoom(), { type: 'error', code: 'login-required', message: 'x' }, ctx()).patch).toBeNull()
   })
 
+  it('익명 채팅 거절(chat-login-required, P2-14c)이면 로그인 안내로 바꾸고, 다음 room-state에서 푼다', () => {
+    const r = reduceRoomSignal(inRoom(), { type: 'error', code: 'chat-login-required', message: 'x' }, ctx())
+    expect(r.patch?.local?.chatLoginRequired).toBe(true)
+    expect(r.effects).toEqual([{ type: 'server-error', code: 'chat-login-required', message: 'x' }])
+    const rejected = inRoom({ local: { ...inRoom().local, chatLoginRequired: true } })
+    const again = reduceRoomSignal(rejected, { type: 'room-state', participants: [], peerIds: [], isHost: false }, ctx())
+    expect(again.patch?.local?.chatLoginRequired).toBe(false)
+    // 안내가 없을 때는 local 조각을 건드리지 않는다
+    expect(reduceRoomSignal(inRoom(), { type: 'room-state', participants: [], peerIds: [], isHost: false }, ctx()).patch?.local).toBeUndefined()
+  })
+
   it('다른 사람이 내려지면 performer-updated(isPerforming=false)로 연주자 목록에서 빠지고 엔진 피어도 정리', () => {
     const r = reduceRoomSignal(inRoom({ roster: { a: guitar } }), { type: 'performer-updated', oderId: 'a', from: 'a', nickname: 'A', isPerforming: false }, ctx())
     expect(r.patch?.roster).toEqual({})

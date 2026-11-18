@@ -1,11 +1,12 @@
 //! 릴레이 패킷 포맷 (docs/overhaul/relay-design.md 2절). 빅엔디안.
 //!
 //! 엔진 패킷(설계 2절)은 `magic "BN" | version 1 | type | ssrc | seq | timestamp | flags | frame` 18바이트 헤더 +
-//! 암호문 + 16B 태그다. 릴레이는 같은 magic/version에 새 type 3개를 쓴다.
+//! 암호문 + 16B 태그다. 릴레이는 같은 magic/version에 새 type 4개를 쓴다.
 //!
 //! - `RelayBind`(7): 엔진 헤더 18B(ssrc=토큰 ssrc, seq/timestamp는 클라이언트 임의, flags=0, frame=0) + 토큰 [+ 쿠키 16B]
 //! - `RelayData`(8): `magic(2) | version(1) | type=8 | dest_ssrc(4)` 8B + 원본 엔진 패킷 전체
 //! - `RelayBindAck`(9): 엔진 헤더 18B(ssrc/seq/timestamp는 Bind 그대로, flags=상태) + 본문 16B + 쿠키 16B
+//! - `RelayRevoke`(10): 시그널링 서버가 서명한 토큰 회수(`token::sign_revoke`, 2.5절). 응답하지 않는다
 
 use std::net::SocketAddr;
 
@@ -17,6 +18,8 @@ pub const TAG_BYTES: usize = 16;
 pub const TYPE_RELAY_BIND: u8 = 7;
 pub const TYPE_RELAY_DATA: u8 = 8;
 pub const TYPE_RELAY_BIND_ACK: u8 = 9;
+/// 시그널링 서버 → 릴레이: 멤버의 토큰 회수 (relay-design 2.5). 응답하지 않는다
+pub const TYPE_RELAY_REVOKE: u8 = 10;
 
 /// RelayData 접두부 길이
 pub const DATA_PREFIX_BYTES: usize = 8;

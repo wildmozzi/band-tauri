@@ -86,7 +86,8 @@ test.describe('정원 초과 (P3-12b)', () => {
 })
 
 test.describe('관람자(웹)', () => {
-  test('연주 UI 대신 데스크톱 앱 안내가 보이고, 채팅을 주고받는다', async ({ page, mock }) => {
+  test('연주 UI 대신 데스크톱 앱 안내가 보이고, 채팅을 주고받는다(로그인 관람자)', async ({ page, mock }) => {
+    await mock.loginAs(BOB) // ROCK_ROOM의 방장이 아닌 로그인 사용자
     mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
     await page.goto(`/rooms/${ROCK_ROOM.id}`)
 
@@ -115,5 +116,23 @@ test.describe('관람자(웹)', () => {
     const remote = chat.locator('.chat-message:not(.me)')
     await expect(remote.locator('.chat-nickname')).toHaveText(REMOTE_PERFORMER.nickname)
     await expect(remote.locator('.chat-text')).toHaveText('어서 오세요!')
+  })
+
+  test('로그인하지 않은 관람자는 채팅을 읽기만 하고, 입력창 대신 로그인 안내를 본다 (P2-14c)', async ({ page, mock }) => {
+    mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
+
+    const chat = page.locator('.chat-panel')
+    await expect(chat.getByRole('note')).toContainText('로그인하면 채팅할 수 있어요')
+    await expect(chat.getByPlaceholder('메시지 입력...')).toHaveCount(0)
+    await expect(chat.getByRole('button', { name: '전송' })).toHaveCount(0)
+    // 다른 사람의 채팅은 그대로 보인다
+    mock.signaling.pushChat(ROCK_ROOM.id, REMOTE_PERFORMER, '어서 오세요!')
+    await expect(chat.locator('.chat-message:not(.me) .chat-text')).toHaveText('어서 오세요!')
+    expect(mock.signaling.messages('chat')).toEqual([])
+
+    await chat.getByRole('link', { name: '로그인' }).click()
+    await expect(page).toHaveURL(/\/auth$/)
   })
 })

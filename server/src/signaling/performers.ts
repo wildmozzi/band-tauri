@@ -140,6 +140,7 @@ export interface StartPerformingSvc extends PerformersSvc {
  */
 export interface StopPerformingSvc extends PerformersSvc {
   requests: { dropInstrumentChange(roomId: string, clientId: string, host: Client | null): void }
+  nativeSession: { revokeRelay(c: Client): void }
 }
 
 /** `start-performing` — S3: wsService handleMessage의 분기 본문을 그대로 옮겼다 (분기 조건 `&& roomId`는 첫 줄로) */
@@ -225,8 +226,11 @@ export function handleStopPerforming(ctx: Ctx<StopPerformingSvc>, _msg: Msg) {
   ctx.svc.requests.dropInstrumentChange(roomId, id, findRoomHost(roomId))
   client.perform.isPerforming = false
   client.perform.instrument = undefined
-  // 연주자가 아니게 되면 ssrc를 잊는다(토큰 갱신 불가 → 기존 토큰 만료와 함께 릴레이 슬롯 해제)
-  if (!isPerformer(client)) client.native.ssrc = undefined
+  // 연주자가 아니게 되면 ssrc를 잊고(토큰 갱신 불가) 이미 발급한 릴레이 토큰을 바로 회수한다(relay-design 2.5 — 만료까지 기다리지 않음)
+  if (!isPerformer(client)) {
+    client.native.ssrc = undefined
+    ctx.svc.nativeSession.revokeRelay(client)
+  }
   console.log(`[STOP-PERFORMING] ${id.slice(0, 8)} (${client.member.nickname}) stopped performing`)
   broadcastToRoom(roomId, id, { type: 'performer-updated', oderId: id, nickname: client.member.nickname, instrument: undefined, isPerforming: false })
   return

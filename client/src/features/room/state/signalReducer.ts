@@ -260,6 +260,8 @@ function reduceParticipants(s: RoomState, p: SignalPayload, ctx: SignalContext):
         handled: true,
         patch: {
           ...(ghost ? { requests: clearMyRequests(s.requests) } : {}),
+          // 새로 들어왔다(재연결·재로그인 포함): 채팅 거절 안내를 푼다 — 여전히 익명이면 서버가 다시 거절한다
+          ...(s.local.chatLoginRequired ? { local: { ...s.local, chatLoginRequired: false } } : {}),
           connection: {
             ...conn,
             ...(typeof p.isHost === 'boolean' ? { isRoomHost: p.isHost } : {}),
@@ -341,7 +343,12 @@ function reduceParticipants(s: RoomState, p: SignalPayload, ctx: SignalContext):
       return {
         handled: true,
         // 방장: 내리기가 거절됐다(대상이 이미 연주를 멈췄거나 나감) — 패널에 안내 (#180 리뷰 L-4)
-        patch: p.code === 'demote-not-performer' ? { requests: { ...s.requests, hostActionError: DEMOTE_FAILED_MESSAGE } } : null,
+        // 익명 연결의 채팅 거절(P2-14c): 입력창 대신 로그인 안내 (로그인했지만 WS 인증이 익명으로 끝난 경우 — 토큰 만료 등)
+        patch: p.code === 'demote-not-performer'
+          ? { requests: { ...s.requests, hostActionError: DEMOTE_FAILED_MESSAGE } }
+          : p.code === 'chat-login-required'
+            ? { local: { ...s.local, chatLoginRequired: true } }
+            : null,
         effects: [{ type: 'server-error', code: p.code, message: p.message }],
       }
 

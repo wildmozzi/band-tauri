@@ -133,6 +133,8 @@ export interface WsOptions {
   deps?: Partial<WsDeps>
   limits?: Partial<WsLimits>
   env?: Env
+  /** 릴레이 제어 패킷(RelayRevoke) 송신 (테스트 주입용, 기본: RELAY_ADDR로 UDP — services/relayRevoke.ts) */
+  relaySender?: (packet: Buffer) => void
 }
 
 /**

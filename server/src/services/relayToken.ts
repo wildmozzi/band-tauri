@@ -21,7 +21,10 @@ export const RELAY_TOKEN_VERSION = 1
 const MAC_BYTES = 32
 const MAX_ROOM_BYTES = 128
 const MAX_CLIENT_BYTES = 64
-/** 기본 토큰 수명(짧게: 회수 대신 만료). 클라이언트는 expiresAt 30초 전에 `relay-token-request`로 갱신한다 */
+/**
+ * 기본 토큰 수명. 클라이언트는 만료 60초 전에 `relay-token-request`로 갱신한다. 내리기·연주 중지·퇴장 때는 회수(RelayRevoke,
+ * relay-design 2.5)로 바로 끊고, 회수가 유실되거나 릴레이가 재시작해 기록을 잊은 경우에만 이 수명이 상한이 된다
+ */
 export const DEFAULT_RELAY_TOKEN_TTL_SEC = 120
 export const MIN_RELAY_SECRET_BYTES = 32
 
@@ -76,6 +79,68 @@ export const RELAY_BIND_KEY_LABEL = 'band-relay bind v1'
 export function deriveRelayBindKey(token: Buffer, secret: string): Buffer {
   const root = createHmac('sha256', Buffer.from(secret, 'utf8')).update(RELAY_BIND_KEY_LABEL).digest()
   return createHmac('sha256', root).update(token).digest()
+}
+
+/** 회수 키 파생 라벨 (relay-design 2.5, relay/src/token.rs REVOKE_KEY_LABEL) */
+export const RELAY_REVOKE_KEY_LABEL = 'band-relay revoke v1'
+/** RelayRevoke 패킷 type (relay-design 2.5, relay/src/packet.rs TYPE_RELAY_REVOKE) */
+export const RELAY_REVOKE_TYPE = 10
+
+export interface RelayRevokeClaims {
+  roomId: string
+  memberId: string
+  /** 이 멤버의 토큰 중 expires_at ≤ cutoff(unix 초)인 것을 모두 회수한다 */
+  cutoff: number
+}
+
+function revokeKey(secret: string): Buffer {
+  return createHmac('sha256', Buffer.from(secret, 'utf8')).update(RELAY_REVOKE_KEY_LABEL).digest()
+}
+
+/**
+ * RelayRevoke(type 10) — 시그널링 서버 → 릴레이 UDP. 릴레이는 그 멤버의 등록 중 회수 대상 토큰으로 된 것을 바로 지우고
+ * cutoff까지 같은 토큰의 Bind를 받지 않는다. 응답은 없다.
+ * ```
+ * magic "BN" | version 1 | type 10 | cutoff(u64) | room_len | room | member_len | member | HMAC-SHA256(K_revoke, 앞 전부)
+ * K_revoke = HMAC-SHA256(RELAY_SECRET, "band-relay revoke v1")
+ * ```
+ * 키를 토큰 MAC(비밀값 그대로)과 나눠 토큰과 회수 메시지가 서로의 서명으로 쓰일 수 없다. 리플레이는 같은 토큰들을 다시
+ * 회수할 뿐이다(회수 뒤 발급 토큰은 만료가 cutoff보다 늦다 — nativeSession).
+ */
+export function signRelayRevoke(claims: RelayRevokeClaims, secret: string): Buffer {
+  const room = Buffer.from(claims.roomId, 'utf8')
+  const member = Buffer.from(claims.memberId, 'utf8')
+  if (room.length < 1 || room.length > MAX_ROOM_BYTES) throw new Error('roomId length out of range')
+  if (member.length < 1 || member.length > MAX_CLIENT_BYTES) throw new Error('memberId length out of range')
+  if (!Number.isInteger(claims.cutoff) || claims.cutoff < 0) throw new Error('invalid cutoff')
+  const body = Buffer.alloc(12 + 1 + room.length + 1 + member.length)
+  body[0] = 0x42
+  body[1] = 0x4e
+  body[2] = 1
+  body[3] = RELAY_REVOKE_TYPE
+  body.writeBigUInt64BE(BigInt(claims.cutoff), 4)
+  body[12] = room.length
+  room.copy(body, 13)
+  body[13 + room.length] = member.length
+  member.copy(body, 14 + room.length)
+  return Buffer.concat([body, createHmac('sha256', revokeKey(secret)).update(body).digest()])
+}
+
+/** RelayRevoke 검증 (테스트용. 운영 검증은 릴레이 `token::verify_revoke`) */
+export function verifyRelayRevoke(pkt: Buffer, secret: string): RelayRevokeClaims | null {
+  if (pkt.length < 12 + 4 + MAC_BYTES || pkt[0] !== 0x42 || pkt[1] !== 0x4e || pkt[2] !== 1 || pkt[3] !== RELAY_REVOKE_TYPE) return null
+  const bodyLen = pkt.length - MAC_BYTES
+  const roomLen = pkt[12]
+  if (roomLen < 1 || roomLen > MAX_ROOM_BYTES || 14 + roomLen > bodyLen) return null
+  const memberLen = pkt[13 + roomLen]
+  if (memberLen < 1 || memberLen > MAX_CLIENT_BYTES || 14 + roomLen + memberLen !== bodyLen) return null
+  const mac = createHmac('sha256', revokeKey(secret)).update(pkt.subarray(0, bodyLen)).digest()
+  if (!timingSafeEqual(mac, pkt.subarray(bodyLen))) return null
+  return {
+    roomId: pkt.subarray(13, 13 + roomLen).toString('utf8'),
+    memberId: pkt.subarray(14 + roomLen, bodyLen).toString('utf8'),
+    cutoff: Number(pkt.readBigUInt64BE(4)),
+  }
 }
 
 /** 검증 (테스트/진단용. 운영 검증은 릴레이가 한다) */

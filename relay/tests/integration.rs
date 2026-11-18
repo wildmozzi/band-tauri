@@ -351,3 +351,62 @@ async fn sweep_runs_under_error_only_flood() {
     assert!(errs > 1_000, "오류 폭주가 충분하지 않음({errs}) — 시험 조건 확인");
     assert!(swept, "오류만 오는 폭주 중 만료 등록이 정리되지 않음(errs {errs}, {:?})", t.elapsed());
 }
+
+/// 2.5 RelayRevoke(실제 UDP): 서버가 서명한 회수를 보내면 그 멤버의 패킷이 바로 끊기고(양방향), 같은 토큰의 keepalive에도
+/// 응답이 없다. 위조 회수는 아무것도 바꾸지 않고, 회수에는 응답하지 않는다(증폭 없음).
+#[tokio::test]
+async fn revoke_stops_forwarding_immediately() {
+    let (relay, stats) = start_relay(Limits::default()).await;
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let exp = unix_now() + 120;
+    let tok_a = token::sign(SECRET, &Claims { expires_at: exp, ssrc: 0xA, room: "room", client: "user-a" });
+    let first = send_bind(&a, relay, &tok_a, 0xA, None).await;
+    assert_eq!(send_bind(&a, relay, &tok_a, 0xA, Some(&ack_cookie(&first))).await[16], 0, "Ok");
+    bind_client(&b, relay, "room", "user-b", 0xB).await;
+
+    let mut out = Vec::new();
+    let mut buf = [0u8; 2048];
+    let pkt = engine_pkt(0xA, 1, 60);
+    write_relay_data(0xB, &pkt, &mut out);
+    a.send_to(&out, relay).await.unwrap();
+    let (n, _) = timeout(Duration::from_secs(2), b.recv_from(&mut buf)).await.expect("회수 전 전달").unwrap();
+    assert_eq!(&buf[..n], &pkt[..]);
+
+    // 위조 회수(다른 비밀): 무시
+    let forged = token::sign_revoke(b"not-the-secret-not-the-secret-not-the", &token::Revoke { cutoff: exp, room: "room", member: "user-a" });
+    server.send_to(&forged, relay).await.unwrap();
+    // 진짜 회수
+    let revoke = token::sign_revoke(SECRET, &token::Revoke { cutoff: exp, room: "room", member: "user-a" });
+    server.send_to(&revoke, relay).await.unwrap();
+    assert!(timeout(Duration::from_millis(200), server.recv_from(&mut buf)).await.is_err(), "회수에는 응답이 없어야 한다");
+    use band_relay::DropReason::*;
+    assert_eq!(stats.drops(BadRevoke), 1);
+    assert_eq!(stats.revokes.load(std::sync::atomic::Ordering::Relaxed), 1);
+
+    // A → B, B → A 모두 끊김
+    write_relay_data(0xB, &engine_pkt(0xA, 2, 60), &mut out);
+    a.send_to(&out, relay).await.unwrap();
+    write_relay_data(0xA, &engine_pkt(0xB, 2, 60), &mut out);
+    b.send_to(&out, relay).await.unwrap();
+    // A가 같은 토큰으로 keepalive → 응답 없음(재등록 불가)
+    let mut bind = Vec::new();
+    write_relay_bind(0xA, 9, 9, &tok_a, None, &mut bind);
+    a.send_to(&bind, relay).await.unwrap();
+    assert!(timeout(Duration::from_millis(300), b.recv_from(&mut buf)).await.is_err(), "회수 뒤 B에게 전달되지 않아야 한다");
+    assert!(timeout(Duration::from_millis(100), a.recv_from(&mut buf)).await.is_err(), "회수 뒤 A에게 전달·Ack가 없어야 한다");
+    assert_eq!(stats.drops(Unregistered), 1);
+    assert_eq!(stats.drops(UnknownDest), 1);
+    assert_eq!(stats.drops(RevokedToken), 1);
+
+    // 회수 뒤 발급된 토큰(만료가 cutoff보다 늦음)으로는 다시 붙는다
+    let tok_new = token::sign(SECRET, &Claims { expires_at: exp + 1, ssrc: 0xA, room: "room", client: "user-a" });
+    let first = send_bind(&a, relay, &tok_new, 0xA, None).await;
+    assert_eq!(send_bind(&a, relay, &tok_new, 0xA, Some(&ack_cookie(&first))).await[16], 0, "새 토큰 Ok");
+    let pkt = engine_pkt(0xA, 3, 60);
+    write_relay_data(0xB, &pkt, &mut out);
+    a.send_to(&out, relay).await.unwrap();
+    let (n, _) = timeout(Duration::from_secs(2), b.recv_from(&mut buf)).await.expect("새 토큰으로 전달").unwrap();
+    assert_eq!(&buf[..n], &pkt[..]);
+}
