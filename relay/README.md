@@ -61,3 +61,7 @@ fly secrets set RELAY_SECRET=<같은 값> RELAY_ADDR=<전용 IPv4>:5000 -a band-
 ```
 
 배포 후 확인: `fly logs -a band-relay`의 `[relay]` 요약 로그, fly 대시보드 메트릭(`/metrics`), `fly checks list -a band-relay`(`/healthz` 헬스체크가 6PN으로 통과하는지 — [사람] 확인).
+
+## 베이스 이미지 고정
+
+`relay/Dockerfile`(rust·debian)과 `server/Dockerfile`(node)의 `FROM`은 `태그@sha256:다이제스트`로 고정한다. 갱신: Docker Hub에서 새 구체 태그를 고른 뒤 `docker buildx imagetools inspect <이미지:태그>`(또는 `docker pull` 후 `docker inspect --format '{{index .RepoDigests 0}}'`)로 멀티아치 인덱스 다이제스트를 얻어 태그·다이제스트를 함께 바꾸고, 이미지를 빌드해 확인한 뒤 PR로 올린다.
