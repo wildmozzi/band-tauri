@@ -94,6 +94,8 @@ export class FakeSignaling {
   private seq = 0
   /** 재개를 받아 줄 옛 clientId → 방·서버 기준 연주 상태 (dropForResume) */
   private resumable = new Map<string, { roomId: string; isPerforming: boolean }>()
+  /** 익명 연결에 준 마지막 재개 토큰 (clientId → token, P2-18c). 서버처럼 줄 때마다 새 것 */
+  private anonTokens = new Map<string, string>()
   private down = false
   private lookupFailures = 0
   private lookupRetryAfterMs = 500
@@ -149,6 +151,7 @@ export class FakeSignaling {
 
   /**
    * 소켓만 끊긴 것처럼 지금 연결을 닫고, 같은 사용자의 다음 auth{resumeClientId}를 세션 재개로 받아 준다(서버 resume 흉내, P2-9 #180 M-1).
+   * 익명 연결은 auth{resumeClientId, resumeToken, resumeRoomId}의 토큰·방이 맞을 때만 재개한다(P2-18c).
    * 재개 알림은 서버 순서대로 welcome{resumed} → auth-result{resumed} → room-state이고, room-state.isPerforming은 `isPerforming`
    * (예: 끊긴 사이 방장이 내렸는데 demoted-to-viewer가 유실된 경우 false).
    */
@@ -175,6 +178,13 @@ export class FakeSignaling {
   async install(context: BrowserContext) {
     const host = new URL(SIGNALING_URL).host
     await context.routeWebSocket(url => url.host === host, ws => this.accept(ws))
+  }
+
+  /** 익명 재개 토큰을 새로 만든다(이전 것은 무효) */
+  private anonToken(c: Conn): string {
+    const token = `e2e-anon-token-${++this.seq}`
+    this.anonTokens.set(c.clientId, token)
+    return token
   }
 
   private send(c: Conn, msg: ServerMessage) {
@@ -230,18 +240,27 @@ export class FakeSignaling {
       case 'auth': {
         const user = userFromToken(typeof msg.accessToken === 'string' ? msg.accessToken : undefined)
         conn.userId = user?.id ?? null
-        const resume = user && typeof msg.resumeClientId === 'string' ? this.resumable.get(msg.resumeClientId) : undefined
-        if (resume && typeof msg.resumeClientId === 'string') {
-          this.resumable.delete(msg.resumeClientId)
-          conn.clientId = msg.resumeClientId
+        const resumeId = typeof msg.resumeClientId === 'string' ? msg.resumeClientId : null
+        const candidate = resumeId ? this.resumable.get(resumeId) : undefined
+        // 로그인: 같은 사용자면. 익명(P2-18c): 그 clientId에 준 토큰과 방이 맞을 때만
+        const anonOk = !user && !!resumeId && !!candidate && typeof msg.resumeToken === 'string'
+          && this.anonTokens.get(resumeId) === msg.resumeToken && msg.resumeRoomId === candidate.roomId
+        const resume = (user || anonOk) ? candidate : undefined
+        if (resume && resumeId) {
+          this.resumable.delete(resumeId)
+          conn.clientId = resumeId
           conn.roomId = resume.roomId
           conn.performing = resume.isPerforming
           this.send(conn, { type: 'welcome', clientId: conn.clientId, resumed: true })
-          this.send(conn, { type: 'auth-result', authenticated: true, userId: conn.userId, resumed: true })
+          this.send(conn, user
+            ? { type: 'auth-result', authenticated: true, userId: conn.userId, resumed: true }
+            : { type: 'auth-result', authenticated: false, userId: null, resumed: true, resumeToken: this.anonToken(conn) })
           this.sendRoomState(conn, resume.roomId)
           return
         }
-        this.send(conn, { type: 'auth-result', authenticated: user !== null, userId: conn.userId })
+        this.send(conn, user
+          ? { type: 'auth-result', authenticated: true, userId: conn.userId }
+          : { type: 'auth-result', authenticated: false, userId: null, resumeToken: this.anonToken(conn) })
         return
       }
       case 'start-performing':

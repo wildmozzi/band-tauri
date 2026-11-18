@@ -98,7 +98,7 @@ async function open(url: string, ip: string): Promise<TestClient> {
 }
 
 const TIME_KEYS = new Set(['timestamp', 'serverNow', 'expiresAt'])
-const TOKEN_KEYS = new Set(['token', 'bindKey'])
+const TOKEN_KEYS = new Set(['token', 'bindKey', 'resumeToken'])
 
 function normalizer(ids: string[]) {
   const norm = (v: unknown, key = ''): unknown => {

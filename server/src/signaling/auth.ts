@@ -2,7 +2,7 @@ import { createHash } from 'crypto'
 import type { Ctx } from './ctx'
 import { TOKEN_EXPIRY_GRACE_MS, isNonEmptyString, type Msg } from './protocol'
 import { isAuthenticated, send } from './registry'
-import { announceResumed, attachSession, type ResumeSvc } from './resume'
+import { announceResumed, attachSession, type Resume, type ResumeSvc } from './resume'
 import type { Client, WsDeps } from './types'
 
 /**
@@ -117,11 +117,34 @@ export function scheduleExpiryCheck(client: Client) {
   client.auth.expiryTimer.unref?.()
 }
 
-/** S3: 연결 클로저의 sendAuthResult를 그대로 옮겼다(ws·client는 ctx에서) */
-export function sendAuthResult(ctx: Ctx<{ insecureDevMode: boolean }>) {
+/**
+ * S3: 연결 클로저의 sendAuthResult를 그대로 옮겼다(ws·client는 ctx에서).
+ * P2-18c: 익명이면 새 재개 토큰(resumeToken)을 싣는다(이전 토큰은 무효)
+ */
+export function sendAuthResult(ctx: Ctx<{ insecureDevMode: boolean; resume: Pick<Resume, 'issueAnonToken'> }>) {
   const { ws, client } = ctx
   const { insecureDevMode } = ctx.svc
-  send(ws, { type: 'auth-result', authenticated: isAuthenticated(client) || (insecureDevMode && client.auth.state === 'authenticated'), userId: client.auth.userId ?? null })
+  const authenticated = isAuthenticated(client) || (insecureDevMode && client.auth.state === 'authenticated')
+  send(ws, client.auth.state === 'anonymous'
+    ? { type: 'auth-result', authenticated, userId: client.auth.userId ?? null, resumeToken: ctx.svc.resume.issueAnonToken(client) }
+    : { type: 'auth-result', authenticated, userId: client.auth.userId ?? null })
+}
+
+/**
+ * 익명 세션 재개(P2-18c): JWT 없이 온 연결이 resumeClientId·resumeToken·resumeRoomId를 보냈고, 그 clientId의 익명 Client가
+ * 같은 방에서 유예 중(또는 서버가 닫힘을 모르는 옛 소켓)이며 토큰이 맞으면 붙인다. 붙였으면 true.
+ * 재개된 연결은 여전히 익명(관람만 — 연주·채팅·방장 권한 없음)이다. 쓴 토큰은 announceResumed의 새 토큰으로 무효가 된다.
+ */
+function tryResumeAnonymous(ctx: Ctx<AuthSvc>, msg: Msg): boolean {
+  const { resumeClientId: resumeId, resumeToken, resumeRoomId } = msg
+  if (!isNonEmptyString(resumeId, 64) || !isNonEmptyString(resumeToken, 128) || !isNonEmptyString(resumeRoomId, 128)) return false
+  const old = ctx.svc.resume.findAnon(resumeId, resumeToken, resumeRoomId, ctx.ws)
+  if (!old) return false
+  const temp = attachSession(ctx, old)
+  old.auth.state = 'anonymous'
+  if (temp.auth.expiryTimer) clearTimeout(temp.auth.expiryTimer)
+  announceResumed(ctx)
+  return true
 }
 
 /** `auth` — S3: 연결 클로저의 handleAuth 본문을 그대로 옮겼다 */
@@ -177,7 +200,11 @@ export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
     client.auth.state = 'authenticated'
   }
 
-  if (client.auth.state !== 'authenticated') client.auth.state = 'anonymous'
+  if (client.auth.state !== 'authenticated') {
+    client.auth.state = 'anonymous'
+    // 익명 관람자 세션 재개(P2-18c): 신원 대신 재개 토큰으로
+    if (tryResumeAnonymous(ctx, msg)) return
+  }
   console.log(`[AUTH] ${id.slice(0, 8)} ${client.auth.state}${client.auth.userId ? ` user ${client.auth.userId.slice(0, 8)}` : ''}`)
   sendAuthResult(ctx)
 }

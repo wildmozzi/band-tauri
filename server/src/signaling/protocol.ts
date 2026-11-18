@@ -137,8 +137,12 @@ type FromSender = { oderId: string; from: string }
 
 export type ServerMessage =
   | { type: 'welcome'; clientId: string; resumed?: true }
-  /** userId: auth 타임아웃(AUTH_TIMEOUT_MS) 경로는 이 키 없이 보낸다 */
-  | { type: 'auth-result'; authenticated: boolean; userId?: string | null; resumed?: true }
+  /**
+   * userId: auth 타임아웃(AUTH_TIMEOUT_MS) 경로는 이 키 없이 보낸다.
+   * resumeToken(P2-18c): 익명(authenticated:false)일 때만. 익명 세션 재개용 1회용 토큰(무작위 256비트, base64url) —
+   * 보낼 때마다 새로 만들고 이전 것은 무효가 된다
+   */
+  | { type: 'auth-result'; authenticated: boolean; userId?: string | null; resumed?: true; resumeToken?: string }
   /** 앱 수준 ping에 대한 응답 (P1-15) */
   | { type: 'pong' }
   | ServerError

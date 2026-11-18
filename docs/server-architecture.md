@@ -72,7 +72,7 @@ server/src/signaling/
   connection.ts     A: clientIp (Fly-Client-IP 신뢰 규칙). 연결 수명 본체는 아직 조립부(wsService)에 있다 — 아래 "실제"
   rateLimit.ts      TokenBucket (순수)
   auth.ts           B: handleAuth, 재인증, 토큰 만료 타이머, jwtExpiryMs. 재개는 resume을 부른다
-  resume.ts         C: suspended(createResume: drop·find·findLive·isSuspended·add·clearTimers), suspendOnClose,
+  resume.ts         C: suspended(createResume: drop·find·findLive·findAnon·issueAnonToken·suspendedAnonymous·isSuspended·add·clearTimers), suspendOnClose,
                     attachSession(연결 상태 이식·ctx 교체), announceResumed(재개 알림)
   roomMeta.ts       D: 방 정보 캐시·진행 중 조회 합치기, checkHost
   membership.ts     E: join/leave, room-state, 중복 연결 대체, 참가자 수 DB 디바운스
@@ -141,7 +141,7 @@ interface Client {
   id: string
   conn:    { ws, ip, chain, pending, isAlive, msgBucket, relayBucket, chatBucket, joinBucket, dropped, lastRateLimitNotice }  // connection(조립부)
   auth:    { state, userId, tokenExp, expiryTimer }                                                              // auth
-  resume:  { timer, pendingMetronomeStop, pendingDemoted }                                                       // resume (pendingDemoted: P2-9, requests가 켬)
+  resume:  { timer, pendingMetronomeStop, pendingDemoted, anonTokenHash }                                                       // resume (pendingDemoted: P2-9, requests가 켬)
   member:  { roomId, nickname, isHost }                                                                          // membership (isHost는 roomMeta.checkHost도 갱신)
   perform: { isPerforming, instrument }                                                                          // performers
   native:  { active, ssrc, key }                                                                                 // nativeSession
@@ -174,7 +174,7 @@ function handleLeave(svc, client, roomId, reason) {
 
 자리 예약 판정은 승인 기록이 있는지를 본다. `capacity`가 `performers`를 직접 부르지 않도록 `membership`이 그 값을 넘긴다(계층 2 사이 간선을 늘리지 않음).
 
-S4-3 구현 이름(위 표의 입구와 대응): registry `getClient`·`clientCount`·`allClients`·`hasRoom`·`isInRoom`·`roomSize`·`roomMemberIds`·`roomMembers`·`deleteRoom`·`broadcastLeft`·`activityCounts`(운영 집계 숫자, P1-17①), capacity `checkCapacity`·`hasSeatHold`·`hold`·`clearSeatHold`·`noteLeft`·`consumeRejoin`·`onLeave`·`sweep`(`countRoomSeats`는 내부), performers `hasApproval`·`setApproval`·`clearApproval`·`onLeave`·`releaseGraceOnRejoin`, metronome `replayMetronome`·`dropMetronomeIfHostChanged`·`onEngineRestart`·`onEngineDown`·`onMemberLeft`·`onRoomEmpty`(+ 자기 핸들러용 `isRunningBy`·`update`), requests `pendingFor`·`onLeave`·`onRoomEmpty`(+ 자기 핸들러용 `performList`·`instrumentList`), resume `drop`·`find`·`findLive`(P1-16)·`isSuspended`·`add`·`clearTimers`. 팩토리가 함수만 돌려주는지는 `signaling-units.test.ts` "state ownership"이 검사한다.
+S4-3 구현 이름(위 표의 입구와 대응): registry `getClient`·`clientCount`·`allClients`·`hasRoom`·`isInRoom`·`roomSize`·`roomMemberIds`·`roomMembers`·`deleteRoom`·`broadcastLeft`·`activityCounts`(운영 집계 숫자, P1-17①), capacity `checkCapacity`·`hasSeatHold`·`hold`·`clearSeatHold`·`noteLeft`·`consumeRejoin`·`onLeave`·`sweep`(`countRoomSeats`는 내부), performers `hasApproval`·`setApproval`·`clearApproval`·`onLeave`·`releaseGraceOnRejoin`, metronome `replayMetronome`·`dropMetronomeIfHostChanged`·`onEngineRestart`·`onEngineDown`·`onMemberLeft`·`onRoomEmpty`(+ 자기 핸들러용 `isRunningBy`·`update`), requests `pendingFor`·`onLeave`·`onRoomEmpty`(+ 자기 핸들러용 `performList`·`instrumentList`), resume `drop`·`find`·`findLive`(P1-16)·`findAnon`·`issueAnonToken`·`suspendedAnonymous`(P2-18c)·`isSuspended`·`add`·`clearTimers`. 팩토리가 함수만 돌려주는지는 `signaling-units.test.ts` "state ownership"이 검사한다.
 
 **실제(설계와 다른 점 2)**: 맵을 숨기면서 `signaling-units.test.ts`의 내부 정리 확인 3개(만료된 자리 예약이 읽을 때 지워짐, `sweep`이 빈 방 항목을 지움, 빈 승인 맵을 지움)는 맵을 직접 볼 수 없어 **공개 결과**(`hasSeatHold`·`hasApproval`이 false) 확인으로 바꿨다(S4-3 #104). "결과가 맞다"는 보지만 "맵에 항목이 남지 않는다(메모리)"는 더 이상 보지 않는다 — 검사가 약해진 부분이다. 메모리 누수 쪽은 4.4-2(정기 정리)를 고칠 때 팩토리에 크기 조회(`size()`류)를 더해 다시 덮는다.
 
@@ -251,6 +251,7 @@ const handlers: Record<string, Handler> = {
 |---|---|---|---|
 | auth | `auth` 없이 온 메시지 거부, 토큰 검증 실패는 익명 | `ws.test.ts` "denies anonymous viewers even in a free_join room" | 있음. **빈 곳**: 인증된 연결이 다른 사용자의 토큰으로 재인증해도 `userId`가 바뀌지 않음, 방 안의 익명은 승격되지 않음, 만료 후 4001 |
 | resume | 다른 사용자가 `resumeClientId`로 세션을 가져가지 못함 | `ws-session.test.ts` "does not let a different user take over the session" | 있음 |
+| resume | 익명 재개는 서버가 준 1회용 토큰 + 같은 방일 때만(틀린 토큰·쓴 토큰·다른 방·만료·JWT 있는 연결 거부, P2-18c) | `ws-resume-anon.test.ts` | 있음 |
 | membership | `join`의 `userId`·`isHost`·`isRejoin` 무시 | `ws.test.ts` "client-sent identity is NOT trusted…"(env 3종), "a fake isRejoin still announces the participant", `room-password.test.ts` "does not trust client-sent isHost/userId to bypass the password" | 있음 |
 | capacity | 방장 예외·자리 예약이 JWT `userId` 기준 | `room-capacity.test.ts` "host always gets in", "a performer dropped past the resume grace gets priority…" | 있음. **빈 곳**: `isHost: true`를 보낸 비방장이 꽉 찬 방에 못 들어감 |
 | performers | `start-performing`의 `isHost` 무시, 승인은 서버 기록 | `ws.test.ts` "denies a logged-in member in a locked room without approval" | 있음 |
@@ -276,6 +277,8 @@ authenticated ─(토큰 만료 + 60초)→ 4001 종료
 
 소켓 닫힘 ─┬─ 인증됨 + 방 안 + resumeGraceMs>0 → suspended ─┬─ 30초 내 같은 userId가 resumeClientId로 auth → 재개(같은 clientId)
            │                                                └─ 만료 → leave(close) → 삭제
+           ├─ 익명 + 방 안 + 재개 토큰 발급됨 + anonResumeGraceMs>0 + 익명 유예 상한 안 → suspended   ※ P2-18c
+           │      └─ 30초 내 토큰 없는 auth { resumeClientId, resumeToken, resumeRoomId }가 맞음 → 재개(같은 clientId, 여전히 익명)
            └─ 그 밖 → leave(close) → 삭제
 
 살아 있는 연결(서버가 닫힘을 아직 모름) ── 같은 userId(JWT)가 resumeClientId로 auth → 재개(같은 clientId)   ※ P1-16
@@ -283,6 +286,8 @@ authenticated ─(토큰 만료 + 60초)→ 4001 종료
 ```
 
 **재개 대상 판정**(`resume.find` → 없으면 `resume.findLive`, auth가 부른다): ① `suspended`에 있고 `userId`가 같음, 또는 ② (P1-16) `suspended`에 없지만 `clients`에 살아 있고 인증됨(`auth.state === 'authenticated'`)이며 `userId`가 같고 이 연결 자신이 아님. 둘 다 `userId`는 이번 auth의 JWT 검증 값과 비교한다 — 다른 사용자 토큰·토큰 없음은 재개하지 못하고 옛 연결은 그대로 둔다. 붙이는 경로는 같다(`attachSession` → 인증 필드·만료 타이머 → `announceResumed`). ②일 때 `attachSession`이 `conn.ws`를 새 소켓으로 바꾼 뒤 옛 소켓을 `terminate`한다. 조립부는 `client.conn.ws !== 이 소켓`을 "넘어감"으로 보고, 옛 소켓의 close에서 만료 타이머 정리·유예·퇴장을 건너뛰고, 옛 연결 체인에 남은 메시지는 처리하지 않는다. 같은 방 참가자에게는 participant-left/joined가 가지 않는다(유예 재개와 같음). 테스트: `ws-resume-live.test.ts`.
+
+**익명 관람자 재개**(P2-18c, `resume.findAnon`, auth가 JWT 검증이 없거나 실패해 익명으로 정한 뒤 부른다): 익명에는 신원(JWT)이 없고 clientId는 같은 방 참가자에게 공개(`oderId`)되므로, 서버가 익명 `auth-result`(타임아웃 경로 포함)에 싣는 **재개 토큰**을 신원 대신 쓴다. 토큰은 무작위 256비트(base64url 43자)이고 서버는 SHA-256만 `Client.resume.anonTokenHash`에 둔다. 익명 `auth-result`를 보낼 때마다 새로 만든다 — 재개 성공도 새 토큰을 보내므로 **쓴 토큰은 다시 쓸 수 없다**. 재개 조건: 이번 auth가 익명이고(유효한 JWT가 있으면 이 경로를 타지 않는다), `resumeClientId`의 Client가 익명이며 `resumeRoomId`가 그 Client의 방과 같고, 유예 중이거나(①) 이 연결 자신이 아닌 살아 있는 연결이며(② P1-16과 같음), 토큰 해시가 상수 시간 비교로 맞을 때. 틀린 토큰은 토큰을 무효로 하지 않는다(clientId를 아는 사람이 일부러 틀려 남의 재개를 막지 못하게 — 256비트라 추측은 불가능). 재개 뒤에도 익명이라 연주·참여 요청·방장 권한은 그대로 없다(`login-required`). 유예 자원 상한: 익명 유예는 `anonResumeGraceMs`(30초, 로그인과 같음 — 클라이언트 재연결 예산 35초에 맞춤) 동안이고, 유예 중인 익명이 서버 전체 `maxSuspendedAnonymous`(100) 또는 같은 IP(/64) `maxSuspendedAnonymousPerIp`(4) 이상이면 유예 없이 바로 퇴장한다. 유예 중인 익명도 방의 익명 자리(`maxAnonymousPerRoom` 10, `maxAnonymousPerIpPerRoom` 2)를 그대로 차지한다(1.2-7). 테스트: `ws-resume-anon.test.ts`.
 
 이 판정이 필요한 이유: 클라이언트는 15초 수신 없음 + ping 5초로 먼저 끊김을 알고 재연결하지만, 서버는 하트비트(30초 주기, 감지까지 최대 60초)나 TCP 타임아웃으로만 안다. ①만 있으면 그 사이의 재연결이 새 clientId를 받아 엔진이 재시작된다(오디오 끊김, GOAL 2-6).
 

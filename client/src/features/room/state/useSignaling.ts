@@ -12,6 +12,8 @@
  * - 포기(gave-up) 뒤에는 `restart()`로 새로고침 없이 다시 연결한다(예산 리셋, 세션 재개 요청 없음 — 새 입장).
  *   방 안에서 정상 닫힘(1000/1005)이라 재연결하지 않는 경우도 화면이 갇히지 않게 gave-up으로 본다(P1-15b).
  *   단, 서버가 중복 연결 사유('Duplicate connection')로 닫았으면 replaced로 구분한다(다른 창·기기에서 입장함).
+ * - 세션 재개: 재연결 auth에 이전 clientId(resumeClientId)를 싣는다. 로그인 사용자는 JWT로, 익명 관람자는 서버가 익명 auth-result에
+ *   준 1회용 resumeToken + 지금 방(resumeRoomId)으로 증명한다(P2-18c, anonResume.ts).
  * - 방 밖에서는 끊겨도 재연결하지 않는다. 방을 나갈 때·다음 입장 때 연결이 없으면 `restart()`로 다시 연다.
  *
  * 신뢰 규칙: 중계 메시지의 `from`/`oderId`는 서버가 붙인 값만 쓴다. 클라이언트가 보낸 from/isHost/userId는 서버가 무시하며,
@@ -22,6 +24,7 @@ import type { RoomSessionStore } from './roomSessionStore'
 import { supabase } from '../../../shared/lib/supabaseClient'
 import { getSignalingUrl } from '../../../shared/lib/apiUrl'
 import { IDLE_PING_MS, PONG_TIMEOUT_MS, ReconnectBudget, STALE_CLOSE_CODE } from './reconnectPolicy'
+import { anonResumeAuth, loadAnonResume, saveAnonResume, type AnonResume } from './anonResume'
 
 /**
  * - gave-up: 재연결 예산(35초)을 다 써서 포기함 — 화면은 "다시 입장" 안내
@@ -65,6 +68,8 @@ export interface SignalingHandlers {
   isInRoom: () => boolean
   /** auth-required로 거부된 join을 다시 보내기 위한 현재 join 메시지 */
   getJoinMessage: () => SignalPayload | null
+  /** 지금 방 id (익명 세션 재개 요청의 resumeRoomId, P2-18c). 없으면 익명 재개를 요청하지 않는다 */
+  getRoomId?: () => string | null
 }
 
 export interface Signaling {
@@ -74,6 +79,11 @@ export interface Signaling {
   isOpen: () => boolean
   /** 서버가 인증된 사용자로 판정했는지 (구 서버면 null) */
   authenticated: boolean | null
+  /**
+   * 익명인데 지금 clientId로 받은 재개 토큰이 있다(P2-18c) — 끊기면 같은 clientId로 재개를 요청한다.
+   * 끊길 때 관람 수신을 유지할지 판단에 쓴다(onClosed 안에서 불러도 되게 마지막 clientId 기준)
+   */
+  hasAnonResume: () => boolean
   /**
    * 연결이 없을 때(포기·밀려남·재연결 대기 중·방 밖 끊김) 다시 연결: 대기 중인 재연결 타이머를 지우고 예산을 리셋한 뒤,
    * 이전 clientId로 재개를 요청하지 않는 새 연결을 연다.
@@ -90,6 +100,8 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
   const clientIdRef = useRef<string | null>(null)
   /** 마지막으로 받은 clientId (연결이 끊겨도 유지). 재연결 시 resumeClientId로 보내 세션 재개를 요청 */
   const lastClientIdRef = useRef<string | null>(null)
+  /** 익명 재개 토큰 (P2-18c). sessionStorage에도 둔다(탭 단위) */
+  const anonResumeRef = useRef<AnonResume | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const readyRef = useRef(false)
   const queueRef = useRef<SignalPayload[]>([])
@@ -260,9 +272,13 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
           if (disposed || wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return
           // auth는 큐를 거치지 않고 바로 보낸다.
           // 로그인 상태면 이전 clientId로 세션 재개 요청 (서버가 같은 사용자 + 30초 이내일 때만 재개, welcome에 resumed:true)
+          // 익명이면 그 clientId로 받은 재개 토큰과 지금 방으로 재개 요청(P2-18c, 서버가 토큰·방·유예시간을 확인)
+          const anonResume = accessToken
+            ? null
+            : anonResumeAuth(resumeClientId, handlersRef.current.getRoomId?.() ?? null, anonResumeRef.current ?? loadAnonResume())
           rawSend(ws, accessToken && resumeClientId
             ? { type: 'auth', accessToken, resumeClientId }
-            : { type: 'auth', accessToken })
+            : anonResume ?? { type: 'auth', accessToken })
           authTimer = setTimeout(() => {
             if (!readyRef.current && wsRef.current === ws && ws.readyState === WebSocket.OPEN) {
               console.warn('[WS] auth-result 없음 — 구 서버로 보고 진행')
@@ -309,6 +325,15 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
         if (payload.type === 'auth-result') {
           setAuthenticated(payload.authenticated === true)
           if (payload.resumed === true) resumed = true
+          // 익명 재개 토큰(P2-18c): 받을 때마다 새 것(이전 것은 서버에서 무효). 로그인 사용자로 판정되면 지운다
+          const id = clientIdRef.current
+          if (payload.authenticated !== true && typeof payload.resumeToken === 'string' && id) {
+            anonResumeRef.current = { clientId: id, token: payload.resumeToken }
+            saveAnonResume(anonResumeRef.current)
+          } else if (payload.authenticated === true && anonResumeRef.current) {
+            anonResumeRef.current = null
+            saveAnonResume(null)
+          }
           const wasReady = readyRef.current
           markReady(ws)
           // fallback으로 먼저 보낸 join이 auth-required로 거부됐으면 다시 보낸다
@@ -363,6 +388,10 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
   }, [setStatus, setClientId])
 
   const restart = useCallback(() => restartRef.current(), [])
+  const hasAnonResume = useCallback(() => {
+    const saved = anonResumeRef.current
+    return saved !== null && saved.clientId === lastClientIdRef.current
+  }, [])
 
-  return { clientIdRef, send, isOpen, authenticated, restart }
+  return { clientIdRef, send, isOpen, authenticated, restart, hasAnonResume }
 }

@@ -323,7 +323,8 @@
         {
           "type": "auth-result",
           "authenticated": false,
-          "userId": null
+          "userId": null,
+          "resumeToken": "<token>"
         }
       ]
     }
@@ -456,7 +457,8 @@
         {
           "type": "auth-result",
           "authenticated": false,
-          "userId": null
+          "userId": null,
+          "resumeToken": "<token>"
         }
       ]
     }
