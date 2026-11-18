@@ -145,7 +145,6 @@ beforeEach(() => {
   FakeWebSocket.reset()
   h.auth.tokenGate = null
   h.auth.anonymous = false
-  sessionStorage.clear()
   vi.stubGlobal('WebSocket', FakeWebSocket)
   stopSpy = vi.spyOn(h.session, 'stop')
   welcomeSpy = vi.spyOn(h.session, 'welcome')
@@ -634,7 +633,7 @@ describe('다시 입장 연타·누수 (P1-15b 리뷰 Low-2)', () => {
 })
 
 describe('익명 관람자 세션 재개 (P2-18c)', () => {
-  it('익명 auth-result의 재개 토큰을 저장했다가 재연결 auth에 clientId·토큰·방으로 싣고, 재개되면 새 토큰으로 바꾼다', async () => {
+  it('익명 auth-result의 재개 토큰을 기억했다가 재연결 auth에 clientId·토큰·방으로 싣고, 재개되면 새 토큰으로 바꾼다', async () => {
     h.auth.anonymous = true
     const ws = last()
     await act(async () => {
@@ -647,7 +646,6 @@ describe('익명 관람자 세션 재개 (P2-18c)', () => {
     await act(async () => ws.recv({ type: 'pong' }))
     act(() => actions.joinRoom('r1'))
     await act(async () => ws.recv({ type: 'room-state', peerIds: ['a1'], participants: [], isHost: false }))
-    expect(JSON.parse(sessionStorage.getItem('band.signaling.anonResume')!)).toEqual({ clientId: 'a1', token: 't1' })
 
     act(() => ws.fail())
     await advance(1000)
@@ -664,6 +662,28 @@ describe('익명 관람자 세션 재개 (P2-18c)', () => {
       next.recv({ type: 'auth-result', authenticated: false, userId: null, resumed: true, resumeToken: 't2' })
     })
     expect(welcomeSpy).toHaveBeenLastCalledWith('a1', true)
-    expect(JSON.parse(sessionStorage.getItem('band.signaling.anonResume')!)).toEqual({ clientId: 'a1', token: 't2' })
+    // 회전된 토큰(t2)으로 다음 재개를 요청한다
+    act(() => next.fail())
+    await advance(1000)
+    const third = last()
+    await act(async () => {
+      third.open()
+      third.recv({ type: 'welcome', clientId: 'tmp2' })
+    })
+    await flush()
+    expect(third.sent.find((m) => m.type === 'auth')).toEqual({ type: 'auth', resumeClientId: 'a1', resumeToken: 't2', resumeRoomId: 'r1' })
+  })
+
+  it('페이지를 내리면(새로고침·탭 닫기) 연결을 1000으로 닫아 서버가 익명을 유예하지 않게 한다(#228 리뷰 M-1), bfcache 보관이면 두지 않는다', async () => {
+    const ws = await enterRoom()
+    const hide = (persisted: boolean) => {
+      const e = new Event('pagehide') as Event & { persisted: boolean }
+      Object.defineProperty(e, 'persisted', { value: persisted })
+      window.dispatchEvent(e)
+    }
+    act(() => hide(true))
+    expect(ws.closedWith).toBeNull()
+    act(() => hide(false))
+    expect(ws.closedWith).toBe(1000)
   })
 })

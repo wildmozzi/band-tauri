@@ -19,10 +19,10 @@ const ROOMS: Record<string, RoomMeta> = {
 const servers: { server: Server; wss: WebSocketServer }[] = []
 const openClients: TestClient[] = []
 
-async function startWs(limits: WsOptions['limits'] = {}): Promise<string> {
+async function startWs(limits: WsOptions['limits'] = {}, env: Record<string, string> = {}): Promise<string> {
   const server = createServer()
   const wss = initializeWebSocket(server, null, {
-    env: { NODE_ENV: 'test' },
+    env: { NODE_ENV: 'test', ...env },
     limits: { heartbeatMs: 60_000, ...limits },
     deps: {
       hasBackend: true,
@@ -36,8 +36,8 @@ async function startWs(limits: WsOptions['limits'] = {}): Promise<string> {
   return `ws://127.0.0.1:${(server.address() as { port: number }).port}`
 }
 
-async function client(url: string) {
-  const c = await connect(url)
+async function client(url: string, ip?: string) {
+  const c = await connect(url, ip ? { 'fly-client-ip': ip } : undefined)
   openClients.push(c)
   return c
 }
@@ -50,8 +50,8 @@ function lastToken(c: TestClient): string {
 }
 
 /** 익명 관람자로 입장하고 재개 토큰을 돌려준다 */
-async function anonJoin(url: string, roomId = 'free') {
-  const c = await client(url)
+async function anonJoin(url: string, roomId = 'free', ip?: string) {
+  const c = await client(url, ip)
   await authJoin(c, null, roomId)
   return { c, token: lastToken(c) }
 }
@@ -201,5 +201,62 @@ describe('P2-18c: anonymous suspend limits', async () => {
     b.ws.terminate()
     assert.ok(await peer.waitFor(m => m.type === 'participant-left' && m.oderId === b.id, 500), 'second anonymous suspend refused')
     assert.ok(!peer.has(m => m.type === 'participant-left' && m.oderId === a.id), 'first is still suspended')
+  })
+})
+
+/**
+ * #228 리뷰 M-1: 새로고침·탭 닫기는 재개를 요청하지 않는다. 그 연결이 30초 동안 방 자리(정원·IP당 익명 상한)를 잡으면
+ * 같은 사람(또는 같은 집 사람)이 다시 못 들어온다. 일부러 닫은 익명(1000/1001)은 유예하지 않고, 같은 IP의 새 익명 입장이
+ * 상한에 걸리면 같은 IP의 유예 중 익명부터 내보낸다. 다른 IP의 유예는 건드리지 않는다.
+ */
+describe('#228 M-1: anonymous ghosts do not lock out the same viewer', async () => {
+  // fly 뒤처럼 Fly-Client-IP로 IP를 정한다(테스트에서 여러 IP 흉내). 기본 상한: 방별 익명 10, IP당 방별 익명 2
+  const url = await startWs({ anonResumeGraceMs: 5000 }, { FLY_APP_NAME: 'test' })
+
+  it('an anonymous viewer that closes on purpose (1000/1001) leaves at once, no grace', async () => {
+    const peer = await client(url)
+    await authJoin(peer, 'tok:ghost-peer1', 'free')
+    for (const code of [1000, 1001]) {
+      const { c } = await anonJoin(url, 'free', '10.0.0.1')
+      c.ws.close(code)
+      assert.ok(await peer.waitFor(m => m.type === 'participant-left' && m.oderId === c.id, 1000), `left at once on ${code}`)
+    }
+  })
+
+  it('F5 twice (abnormal closes, still suspended): the third connection from the same ip still gets in', async () => {
+    const peer = await client(url)
+    await authJoin(peer, 'tok:ghost-peer2', 'free')
+    const { c: a } = await anonJoin(url, 'free', '10.0.0.2')
+    a.ws.terminate()
+    const { c: b } = await anonJoin(url, 'free', '10.0.0.2')
+    b.ws.terminate()
+    await sleep(100)
+    assert.ok(!peer.has(m => m.type === 'participant-left' && (m.oderId === a.id || m.oderId === b.id)), 'both suspended')
+
+    const fresh = await client(url, '10.0.0.2')
+    await authJoin(fresh, null, 'free')
+    assert.ok(fresh.has(m => m.type === 'room-state'), 'joined')
+    assert.ok(!fresh.has(m => m.type === 'error' && m.code === 'room-full'))
+    // 가장 오래된 유령(a)이 먼저 나갔다. b는 아직 상한 안이라 유예가 남는다
+    assert.ok(await peer.waitFor(m => m.type === 'participant-left' && m.oderId === a.id, 500))
+    assert.ok(!peer.has(m => m.type === 'participant-left' && m.oderId === b.id))
+  })
+
+  it('does not evict another ip\'s suspended anonymous viewer', async () => {
+    const peer = await client(url)
+    await authJoin(peer, 'tok:ghost-peer3', 'other')
+    const { c: away, token } = await anonJoin(url, 'other', '10.0.0.3')
+    away.ws.terminate()
+    await sleep(50)
+    const x1 = await anonJoin(url, 'other', '10.0.0.4')
+    const x2 = await anonJoin(url, 'other', '10.0.0.4')
+    const x3 = await client(url, '10.0.0.4')
+    x3.send({ type: 'auth' })
+    x3.send({ type: 'join', roomId: 'other' })
+    assert.ok(await x3.waitFor(m => m.type === 'error' && m.code === 'room-full' && m.reason === 'anonymous-limit'), 'same-ip limit still applies')
+    assert.ok(x1.c.has(m => m.type === 'room-state') && x2.c.has(m => m.type === 'room-state'))
+    assert.ok(!peer.has(m => m.type === 'participant-left' && m.oderId === away.id), 'the other ip keeps its grace')
+    const back = await resumeAnon(url, { resumeClientId: away.id, resumeToken: token, resumeRoomId: 'other' })
+    assert.ok(back.has(m => m.type === 'welcome' && m.clientId === away.id && m.resumed === true))
   })
 })

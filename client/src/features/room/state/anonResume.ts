@@ -4,49 +4,15 @@
  * `{ type: 'auth', resumeClientId, resumeToken, resumeRoomId }`를 보내면 서버가 같은 clientId로 재개한다(유예시간 안, 같은 방일 때만).
  * 재개되면 연주자 앱은 끊긴 줄 모르므로(participant-left/joined 없음) 다시 offer하지 않고, 유지해 둔 관람 수신이 이어진다.
  *
- * 저장은 sessionStorage(탭 단위) — 다른 탭과 섞이지 않고 탭을 닫으면 사라진다. 저장소를 못 쓰면(사생활 보호 모드 등)
- * 메모리 값만 쓴다. 토큰은 받은 clientId에 묶어 두고, 다른 clientId로 재개를 요청할 때는 쓰지 않는다.
+ * 토큰은 페이지 메모리에만 둔다(저장소에 쓰지 않는다, #228 리뷰 L-1). 새로고침·새 탭은 재개하지 않는다: 새 페이지에는 관람 수신 연결이
+ * 없는데 재개되면 연주자 앱이 옛 연결을 그대로 두어 다시 offer하지 않으므로(소리 없음), 새 clientId로 들어가 새 offer를 받는 편이 낫다.
+ * 그래서 페이지를 내릴 때는 연결을 1000으로 닫아 서버가 유예하지 않게 한다(useSignaling의 pagehide, 서버 resume.graceFor).
+ * 토큰은 받은 clientId에 묶어 두고, 다른 clientId로 재개를 요청할 때는 쓰지 않는다.
  */
 
 export interface AnonResume {
   clientId: string
   token: string
-}
-
-const STORAGE_KEY = 'band.signaling.anonResume'
-
-function storage(): Storage | null {
-  try {
-    return typeof sessionStorage !== 'undefined' ? sessionStorage : null
-  } catch {
-    return null
-  }
-}
-
-export function loadAnonResume(): AnonResume | null {
-  try {
-    const raw = storage()?.getItem(STORAGE_KEY)
-    if (!raw) return null
-    const v: unknown = JSON.parse(raw)
-    if (v && typeof v === 'object' && typeof (v as AnonResume).clientId === 'string' && typeof (v as AnonResume).token === 'string') {
-      return { clientId: (v as AnonResume).clientId, token: (v as AnonResume).token }
-    }
-  } catch {
-    // 깨진 값·저장소 접근 실패: 없는 것으로 본다
-  }
-  return null
-}
-
-/** null이면 지운다(로그인 사용자로 판정됨, 새 입장) */
-export function saveAnonResume(v: AnonResume | null): void {
-  try {
-    const s = storage()
-    if (!s) return
-    if (v) s.setItem(STORAGE_KEY, JSON.stringify(v))
-    else s.removeItem(STORAGE_KEY)
-  } catch {
-    // 저장 실패는 무시 (메모리 값으로 계속)
-  }
 }
 
 /**

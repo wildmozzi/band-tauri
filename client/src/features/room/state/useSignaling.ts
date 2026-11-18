@@ -24,7 +24,7 @@ import type { RoomSessionStore } from './roomSessionStore'
 import { supabase } from '../../../shared/lib/supabaseClient'
 import { getSignalingUrl } from '../../../shared/lib/apiUrl'
 import { IDLE_PING_MS, PONG_TIMEOUT_MS, ReconnectBudget, STALE_CLOSE_CODE } from './reconnectPolicy'
-import { anonResumeAuth, loadAnonResume, saveAnonResume, type AnonResume } from './anonResume'
+import { anonResumeAuth, type AnonResume } from './anonResume'
 
 /**
  * - gave-up: 재연결 예산(35초)을 다 써서 포기함 — 화면은 "다시 입장" 안내
@@ -100,7 +100,7 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
   const clientIdRef = useRef<string | null>(null)
   /** 마지막으로 받은 clientId (연결이 끊겨도 유지). 재연결 시 resumeClientId로 보내 세션 재개를 요청 */
   const lastClientIdRef = useRef<string | null>(null)
-  /** 익명 재개 토큰 (P2-18c). sessionStorage에도 둔다(탭 단위) */
+  /** 익명 재개 토큰 (P2-18c). 페이지 메모리에만 둔다(새로고침은 재개하지 않음 — anonResume.ts) */
   const anonResumeRef = useRef<AnonResume | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const readyRef = useRef(false)
@@ -275,7 +275,7 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
           // 익명이면 그 clientId로 받은 재개 토큰과 지금 방으로 재개 요청(P2-18c, 서버가 토큰·방·유예시간을 확인)
           const anonResume = accessToken
             ? null
-            : anonResumeAuth(resumeClientId, handlersRef.current.getRoomId?.() ?? null, anonResumeRef.current ?? loadAnonResume())
+            : anonResumeAuth(resumeClientId, handlersRef.current.getRoomId?.() ?? null, anonResumeRef.current)
           rawSend(ws, accessToken && resumeClientId
             ? { type: 'auth', accessToken, resumeClientId }
             : anonResume ?? { type: 'auth', accessToken })
@@ -329,10 +329,8 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
           const id = clientIdRef.current
           if (payload.authenticated !== true && typeof payload.resumeToken === 'string' && id) {
             anonResumeRef.current = { clientId: id, token: payload.resumeToken }
-            saveAnonResume(anonResumeRef.current)
-          } else if (payload.authenticated === true && anonResumeRef.current) {
+          } else if (payload.authenticated === true) {
             anonResumeRef.current = null
-            saveAnonResume(null)
           }
           const wasReady = readyRef.current
           markReady(ws)
@@ -358,6 +356,16 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
 
     connect()
 
+    // 페이지를 내릴 때(새로고침·탭 닫기·다른 사이트로 이동) 연결을 1000으로 닫는다: 새 페이지는 재개하지 않으므로 서버가 익명을
+    // 유예해 30초 동안 방 자리를 잡지 않게 한다(#228 리뷰 M-1). 브라우저도 보통 1001로 닫지만 보장되지 않는다.
+    // bfcache로 보관되는 경우(persisted)는 그대로 둔다(돌아오면 이어서 쓴다)
+    const onPageHide = (event: PageTransitionEvent) => {
+      if (event.persisted) return
+      const ws = wsRef.current
+      if (ws && ws.readyState === WebSocket.OPEN) ws.close(1000, 'page-unload')
+    }
+    window.addEventListener('pagehide', onPageHide)
+
     restartRef.current = () => {
       if (disposed) return
       const cur = wsRef.current
@@ -373,6 +381,7 @@ export function useSignaling(handlers: SignalingHandlers, store: RoomSessionStor
 
     return () => {
       disposed = true
+      window.removeEventListener('pagehide', onPageHide)
       restartRef.current = () => {}
       if (reconnectTimer) clearTimeout(reconnectTimer)
       if (authTimer) clearTimeout(authTimer)

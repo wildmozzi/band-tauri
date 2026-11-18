@@ -87,6 +87,19 @@ export function createResume(registry: Registry) {
     return { total, fromIp }
   }
 
+  /**
+   * 이 방에서 같은 IP(/64)로 가장 먼저 유예에 들어간 익명 연결 (#228 리뷰 M-1). 같은 IP의 새 익명 입장이 정원·익명 상한에 걸리면
+   * membership이 이것부터 내보낸다 — 새로고침·탭 닫기로 남은 유령 자리가 그 사람(또는 같은 집 사람)을 30초 막지 않게.
+   * suspended는 넣은 순서로 돈다(Map) — 처음 만나는 것이 가장 오래됐다.
+   */
+  function oldestSuspendedAnonymous(roomId: string, ip: string): Client | null {
+    const key = ipBucket(ip)
+    for (const c of suspended.values()) {
+      if (!c.auth.userId && c.member.roomId === roomId && ipBucket(c.conn.ip) === key) return c
+    }
+    return null
+  }
+
   function isSuspended(clientId: string): boolean {
     return suspended.has(clientId)
   }
@@ -101,7 +114,7 @@ export function createResume(registry: Registry) {
     for (const c of suspended.values()) if (c.resume.timer) clearTimeout(c.resume.timer)
   }
 
-  return { drop, find, findLive, findAnon, issueAnonToken, suspendedAnonymous, isSuspended, add, clearTimers }
+  return { drop, find, findLive, findAnon, issueAnonToken, suspendedAnonymous, oldestSuspendedAnonymous, isSuspended, add, clearTimers }
 }
 
 function hashToken(token: string): Buffer {
@@ -128,13 +141,22 @@ function finalizeSuspended(svc: ResumeSvc, c: Client) {
 }
 
 /**
+ * 클라이언트가 일부러 닫은 연결의 닫힘 코드: 1000(정상 — 앱이 방을 떠나며·페이지를 내리며 닫음), 1001(going away — 브라우저가
+ * 새로고침·탭 닫기·이동 때 보냄). 망 끊김은 닫힘 프레임이 없어 1006, 수신 없음 판정은 4000이다.
+ */
+const INTENTIONAL_CLOSE_CODES = new Set([1000, 1001])
+
+/**
  * 끊긴 연결의 유예시간(ms). 0이면 유예하지 않는다.
  * 인증 사용자는 resumeGraceMs. 익명(P2-18c)은 재개 토큰을 받은 연결만 anonResumeGraceMs, 익명 유예 상한(전체·IP별) 안에서.
+ * 익명이 일부러 닫았으면(1000/1001 — 새로고침·탭 닫기) 유예하지 않는다(#228 리뷰 M-1): 새 페이지는 재개를 요청하지 않으므로
+ * 유예하면 30초 동안 방 자리만 잡는 유령이 된다.
  */
-function graceFor(svc: ResumeSvc, c: Client): number {
+function graceFor(svc: ResumeSvc, c: Client, closeCode: number | undefined): number {
   const { limits } = svc
   if (isAuthenticated(c)) return limits.resumeGraceMs
   if (c.auth.state !== 'anonymous' || c.auth.userId || !c.resume.anonTokenHash || limits.anonResumeGraceMs <= 0) return 0
+  if (closeCode !== undefined && INTENTIONAL_CLOSE_CODES.has(closeCode)) return 0
   const n = svc.resume.suspendedAnonymous(c.conn.ip)
   if (n.total >= limits.maxSuspendedAnonymous || n.fromIp >= limits.maxSuspendedAnonymousPerIp) {
     console.warn(`[RESUME] ${c.id.slice(0, 8)} anonymous suspend limit reached (${n.total} total, ${n.fromIp} from ip) - leaving now`)
@@ -146,12 +168,13 @@ function graceFor(svc: ResumeSvc, c: Client): number {
 /**
  * 소켓 닫힘(close 핸들러): 인증된 사용자(또는 재개 토큰을 받은 익명 관람자, P2-18c)가 방 안에서 끊겼으면
  * 유예시간 동안 상태를 유지한다(참가자에게 leave 안 보냄). 유예에 들어갔으면 true — 호출부는 퇴장 처리를 하지 않는다.
+ * closeCode: 소켓 닫힘 코드(익명은 1000/1001이면 유예하지 않는다).
  */
-export function suspendOnClose(svc: ResumeSvc, client: Client): boolean {
+export function suspendOnClose(svc: ResumeSvc, client: Client, closeCode?: number): boolean {
   const { hasRoom } = svc.registry
   const roomId = client.member.roomId
   if (!(roomId && hasRoom(roomId))) return false
-  const graceMs = graceFor(svc, client)
+  const graceMs = graceFor(svc, client, closeCode)
   if (graceMs <= 0) return false
   const c = client
   const timer = setTimeout(() => finalizeSuspended(svc, c), graceMs)

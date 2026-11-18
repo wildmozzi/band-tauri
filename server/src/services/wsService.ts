@@ -374,7 +374,7 @@ export function initializeWebSocket(
       console.warn(`[WS] ${ctx.id.slice(0, 8)} socket error: ${err.message}`)
     })
 
-    ws.on('close', () => {
+    ws.on('close', (code: number) => {
       const client = ctx.client
       const id = ctx.id
       // 세션 재개(P1-16)가 이 Client를 새 연결로 가져갔다: 옛 소켓의 close는 새 연결의 타이머·유예·퇴장을 건드리지 않는다
@@ -392,7 +392,7 @@ export function initializeWebSocket(
       console.log(`[DISCONNECT] Client ${id.slice(0, 8)} disconnected. roomId: ${roomId?.slice(0, 8) || 'none'}`)
 
       // 인증된 사용자(또는 재개 토큰을 받은 익명 관람자, P2-18c)가 방 안에서 끊김: 유예시간 동안 상태 유지 (참가자에게 leave 안 보냄)
-      if (suspendOnClose(svc, client)) return
+      if (suspendOnClose(svc, client, code)) return
 
       if (roomId && hasRoom(roomId)) handleLeave(svc, client, roomId, 'close')
       client.member.roomId = undefined
