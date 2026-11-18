@@ -20,6 +20,7 @@ import { DEFAULT_LIMITS } from '../src/signaling/types'
 import { ScryptGate, hashRoomPassword } from '../src/lib/roomPassword'
 import { createMetronome, metronomeHostChanged } from '../src/signaling/metronome'
 import { createNativeSession } from '../src/signaling/nativeSession'
+import { verifyRelayRevoke, verifyRelayToken } from '../src/services/relayToken'
 import { admitToRoom, handleLeave, sendRoomState, type MembershipSvc } from '../src/signaling/membership'
 import type { Ctx } from '../src/signaling/ctx'
 import { createResume } from '../src/signaling/resume'
@@ -521,7 +522,7 @@ describe('nativeSession', () => {
     off.sendRelayToken(performer)
     assert.deepEqual(sentTo(performer), [], 'relay not configured')
 
-    const on = createNativeSession(createRegistry(), { RELAY_SECRET: SECRET, RELAY_ADDR: 'relay.example:5000' })
+    const on = createNativeSession(createRegistry(), { RELAY_SECRET: SECRET, RELAY_ADDR: 'relay.example:5000' }, () => {})
     on.sendRelayToken(fakeClient('v', { userId: 'u', roomId: 'r', nativeSsrc: 5 }))
     on.sendRelayToken(fakeClient('n', { userId: 'u', roomId: 'r', isPerforming: true }))
     on.sendRelayToken(performer)
@@ -531,6 +532,56 @@ describe('nativeSession', () => {
     assert.equal(t.addr, 'relay.example:5000')
     assert.equal(t.ssrc, 5)
     assert.equal(t.expiresAt - t.serverNow, t.expiresIn)
+  })
+
+  it('revokeRelay (P2-14c): signs a revoke for every token issued to that member, once; reissue after it outlives the cutoff', () => {
+    const reg = createRegistry()
+    const packets: Buffer[] = []
+    const ns = createNativeSession(reg, { RELAY_SECRET: SECRET, RELAY_ADDR: 'relay.example:5000' }, p => packets.push(p))
+    const p = fakeClient('p', { userId: 'u', roomId: 'r', isPerforming: true, nativeSsrc: 5 })
+    const never = fakeClient('n', { userId: 'u2', roomId: 'r', isPerforming: true, nativeSsrc: 6 })
+    seat(reg, 'r', p, never)
+    ns.revokeRelay(never)
+    assert.equal(packets.length, 0, '토큰을 받은 적 없으면 보내지 않는다')
+
+    ns.sendRelayToken(p)
+    ns.sendRelayToken(p)
+    const issued = sentTo(p).filter(m => m.type === 'relay-token')
+    ns.revokeRelay(p)
+    ns.revokeRelay(p)
+    assert.equal(packets.length, 1, '이미 회수했으면 다시 보내지 않는다')
+    const rv = verifyRelayRevoke(packets[0], SECRET)
+    assert.deepEqual(rv, { roomId: 'r', memberId: 'u', cutoff: Math.max(...issued.map(t => t.expiresAt)) })
+    assert.equal(verifyRelayRevoke(packets[0], 'another-secret-another-secret-another'), null, '서명은 비밀값으로만')
+
+    // 회수 뒤 새 토큰은 만료가 cutoff보다 늦다(같은 초에 다시 발급해도) — 릴레이가 받는다
+    ns.sendRelayToken(p)
+    const again = sentTo(p).filter(m => m.type === 'relay-token').at(-1)
+    assert.ok(again.expiresAt > rv!.cutoff)
+    assert.equal(again.expiresAt - again.serverNow, again.expiresIn, 'expiresIn은 실제 남은 수명')
+    assert.equal(verifyRelayToken(Buffer.from(again.token, 'base64url'), SECRET, again.serverNow)?.expiresAt, again.expiresAt)
+    // 다시 회수하면 새 cutoff
+    ns.revokeRelay(p)
+    assert.equal(packets.length, 2)
+    assert.equal(verifyRelayRevoke(packets[1], SECRET)?.cutoff, again.expiresAt)
+  })
+
+  it('revokeRelay: skipped while another connection of the same user is performing in that room, and without relay config', () => {
+    const reg = createRegistry()
+    const packets: Buffer[] = []
+    const ns = createNativeSession(reg, { RELAY_SECRET: SECRET, RELAY_ADDR: 'relay.example:5000' }, p => packets.push(p))
+    const old = fakeClient('old', { userId: 'u', roomId: 'r', isPerforming: true, nativeSsrc: 5 })
+    const fresh = fakeClient('new', { userId: 'u', roomId: 'r', isPerforming: true, nativeSsrc: 5 })
+    seat(reg, 'r', old, fresh)
+    ns.sendRelayToken(old)
+    ns.revokeRelay(old)
+    assert.equal(packets.length, 0)
+
+    const off = createNativeSession(createRegistry(), {}, p => packets.push(p))
+    const c = fakeClient('c', { userId: 'u', roomId: 'r', isPerforming: true, nativeSsrc: 5 })
+    off.sendRelayToken(c)
+    off.revokeRelay(c)
+    assert.equal(packets.length, 0)
   })
 })
 

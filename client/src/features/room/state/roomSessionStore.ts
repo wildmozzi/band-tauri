@@ -80,6 +80,8 @@ export interface LocalSlice {
   metronomeVolume: number
   metronomeMuted: boolean
   broadcastViewerCount: number
+  /** 서버가 내 채팅을 chat-login-required로 거절했다(익명 연결, P2-14c) — 입력창 대신 로그인 안내. room-state(재입장·재연결)에서 풀린다 */
+  chatLoginRequired: boolean
 }
 
 export interface RoomState {
@@ -171,6 +173,7 @@ export function initialRoomState(over: Partial<RoomState> = {}): RoomState {
       metronomeVolume: 1,
       metronomeMuted: false,
       broadcastViewerCount: 0,
+      chatLoginRequired: false,
     },
     miniPlayer: { active: false },
     ...over,

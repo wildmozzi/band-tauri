@@ -1,6 +1,7 @@
 /**
- * UDP 릴레이 토큰: 서명/검증, Rust 릴레이(relay/src/token.rs)와의 바이트 호환, WS 발급 권한
+ * UDP 릴레이 토큰: 서명/검증, Rust 릴레이(relay/src/token.rs)와의 바이트 호환, WS 발급 권한, 회수(RelayRevoke, relay-design 2.5)
  */
+import { createSocket } from 'dgram'
 import { describe, it, after } from 'node:test'
 import { readFileSync } from 'fs'
 import { join } from 'path'
@@ -8,8 +9,9 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'http'
 import type { WebSocketServer } from 'ws'
 import { initializeWebSocket, type RoomMeta } from '../src/services/wsService'
-import { deriveRelayBindKey, relayConfigFromEnv, signRelayToken, verifyRelayToken } from '../src/services/relayToken'
-import { authJoin, connect, engineKey, sleep, testVerifier, type TestClient } from './helpers'
+import { deriveRelayBindKey, relayConfigFromEnv, signRelayRevoke, signRelayToken, verifyRelayRevoke, verifyRelayToken } from '../src/services/relayToken'
+import { parseRelayAddr } from '../src/services/relayRevoke'
+import { authJoin, connect, engineKey, sleep, testVerifier, waitFor, type TestClient } from './helpers'
 
 const SECRET = 'relay-test-secret-0123456789abcdef!!'
 const NOW = 1_800_000_000
@@ -56,6 +58,41 @@ describe('relay token format', () => {
     }
   })
 
+  it('matches the shared revoke vectors with the Rust relay byte-for-byte (2.5)', () => {
+    // relay/src/token.rs tests::cross_language_revoke_vectors 도 같은 파일을 읽는다
+    const fixture = JSON.parse(readFileSync(join(__dirname, '../../docs/overhaul/relay-token-vectors.json'), 'utf8'))
+    assert.ok(fixture.revokes.length >= 2)
+    for (const v of fixture.revokes) {
+      const claims = { roomId: v.roomId, memberId: v.memberId, cutoff: v.cutoff }
+      const p = signRelayRevoke(claims, v.secret)
+      assert.equal(p.toString('hex'), v.hex, v.name)
+      assert.deepEqual(verifyRelayRevoke(p, v.secret), claims, v.name)
+    }
+  })
+
+  it('revoke: forged or tampered packets do not verify', () => {
+    const p = signRelayRevoke({ roomId: 'room-1', memberId: 'user-a', cutoff: NOW + 120 }, SECRET)
+    assert.equal(verifyRelayRevoke(p, 'another-secret-another-secret-another'), null)
+    for (const idx of [3, 4, 11, 13, p.length - 33, p.length - 1]) {
+      const f = Buffer.from(p)
+      f[idx] ^= 1
+      assert.equal(verifyRelayRevoke(f, SECRET), null, 'byte ' + idx)
+    }
+    assert.equal(verifyRelayRevoke(p.subarray(0, p.length - 1), SECRET), null)
+    assert.throws(() => signRelayRevoke({ roomId: '', memberId: 'u', cutoff: 1 }, SECRET))
+    assert.throws(() => signRelayRevoke({ roomId: 'r', memberId: 'x'.repeat(65), cutoff: 1 }, SECRET))
+    assert.throws(() => signRelayRevoke({ roomId: 'r', memberId: 'u', cutoff: -1 }, SECRET))
+  })
+
+  it('parses RELAY_ADDR for the revoke sender', () => {
+    assert.deepEqual(parseRelayAddr('relay.example:5000'), { host: 'relay.example', port: 5000 })
+    assert.deepEqual(parseRelayAddr('1.2.3.4:5000'), { host: '1.2.3.4', port: 5000 })
+    assert.deepEqual(parseRelayAddr('[2001:db8::1]:5000'), { host: '2001:db8::1', port: 5000 })
+    assert.equal(parseRelayAddr('relay.example'), null)
+    assert.equal(parseRelayAddr('relay.example:0'), null)
+    assert.equal(parseRelayAddr('relay.example:70000'), null)
+  })
+
   it('reads config from env only when complete', () => {
     assert.equal(relayConfigFromEnv({}), null)
     assert.equal(relayConfigFromEnv({ RELAY_SECRET: 'short', RELAY_ADDR: 'relay:5000' }), null)
@@ -69,14 +106,16 @@ describe('relay token format', () => {
   })
 })
 
-const ROOMS: Record<string, RoomMeta> = { free: { hostId: 'host', freeJoin: true } }
+const ROOMS: Record<string, RoomMeta> = { free: { hostId: 'host', freeJoin: true }, free2: { hostId: 'host', freeJoin: true } }
 const servers: { server: Server; wss: WebSocketServer }[] = []
 const openClients: TestClient[] = []
 
-async function startWs(env: Record<string, string>): Promise<string> {
+/** relaySender 기본값은 버림(relay.example로 실제 UDP·DNS를 쓰지 않게). null이면 실제 UDP 송신기(services/relayRevoke) */
+async function startWs(env: Record<string, string>, relaySender: ((p: Buffer) => void) | null = () => {}): Promise<string> {
   const server = createServer()
   const wss = initializeWebSocket(server, null, {
     env: { NODE_ENV: 'test', ...env },
+    ...(relaySender ? { relaySender } : {}),
     deps: {
       hasBackend: true,
       verifyToken: testVerifier,
@@ -226,6 +265,101 @@ describe('relay review fixes', async () => {
     assert.notEqual(first.id, second.id)
     assert.equal(a?.memberId, 'host')
     assert.equal(b?.memberId, 'host', '릴레이가 같은 멤버로 보고 이전 슬롯을 교체')
+  })
+})
+
+describe('relay token revoke over WS (P2-14c, relay-design 2.5)', async () => {
+  const packets: Buffer[] = []
+  const url = await startWs({ RELAY_SECRET: SECRET, RELAY_ADDR: 'relay.example:5000' }, p => packets.push(p))
+  const revokes = () => packets.map(p => verifyRelayRevoke(p, SECRET))
+  const lastToken = (c: TestClient) => c.inbox.filter(m => m.type === 'relay-token').at(-1)
+
+  async function performerWithToken(token: string, ssrc: number) {
+    const c = await client(url)
+    await authJoin(c, token, 'free')
+    c.send({ type: 'start-performing', instrument: 'bass' })
+    c.send({ type: 'native-descriptor', descriptor: descriptor(ssrc) })
+    assert.ok(await c.waitFor(m => m.type === 'relay-token'))
+    return c
+  }
+
+  it('stop-performing and native-leave revoke at once (cutoff = last issued expiry); a new start gets a token past the cutoff', async () => {
+    const host = await client(url)
+    await authJoin(host, 'tok:host', 'free')
+    const p = await performerWithToken('tok:rv1', 0x501)
+    const n = packets.length
+    p.send({ type: 'stop-performing' })
+    assert.ok(await waitFor(() => packets.length === n + 1))
+    assert.deepEqual(revokes()[n], { roomId: 'free', memberId: 'rv1', cutoff: lastToken(p).expiresAt })
+    // 다시 연주를 시작하면 새 토큰의 만료는 cutoff보다 늦다
+    p.send({ type: 'start-performing', instrument: 'bass' })
+    p.send({ type: 'native-descriptor', descriptor: descriptor(0x501) })
+    assert.ok(await p.waitFor(() => p.inbox.filter(m => m.type === 'relay-token').length === 2))
+    assert.ok(lastToken(p).expiresAt > revokes()[n]!.cutoff)
+    p.send({ type: 'native-leave' })
+    assert.ok(await waitFor(() => packets.length === n + 2))
+    assert.deepEqual(revokes()[n + 1], { roomId: 'free', memberId: 'rv1', cutoff: lastToken(p).expiresAt })
+  })
+
+  it('demote by the host revokes the target', async () => {
+    const host = await client(url)
+    await authJoin(host, 'tok:host', 'free')
+    const p = await performerWithToken('tok:rv2', 0x502)
+    const n = packets.length
+    host.send({ type: 'demote-performer', targetId: p.id })
+    assert.ok(await p.waitFor(m => m.type === 'demoted-to-viewer'))
+    assert.ok(await waitFor(() => packets.length === n + 1))
+    assert.deepEqual(revokes()[n], { roomId: 'free', memberId: 'rv2', cutoff: lastToken(p).expiresAt })
+  })
+
+  it('leave and room move revoke; clients without a token never trigger one', async () => {
+    const p = await performerWithToken('tok:rv3', 0x503)
+    const viewer = await client(url)
+    await authJoin(viewer, 'tok:rv-viewer', 'free')
+    const n = packets.length
+    viewer.send({ type: 'leave' })
+    p.send({ type: 'leave' })
+    assert.ok(await waitFor(() => packets.length === n + 1))
+    await sleep(50)
+    assert.equal(packets.length, n + 1, '토큰을 받은 적 없는 관람자는 회수 없음')
+    assert.deepEqual(revokes()[n], { roomId: 'free', memberId: 'rv3', cutoff: lastToken(p).expiresAt })
+
+    const mover = await performerWithToken('tok:rv4', 0x504)
+    mover.send({ type: 'join', roomId: 'free2' })
+    assert.ok(await waitFor(() => revokes().some(r => r?.memberId === 'rv4')))
+    assert.equal(revokes().find(r => r?.memberId === 'rv4')?.roomId, 'free')
+  })
+
+  it('a duplicate connection of the same user does not revoke (the user is still there)', async () => {
+    const first = await performerWithToken('tok:rv5', 0x505)
+    const n = packets.length
+    const second = await client(url)
+    await authJoin(second, 'tok:rv5', 'free')
+    assert.ok(await waitFor(() => first.ws.readyState !== first.ws.OPEN))
+    await sleep(50)
+    assert.equal(packets.length, n)
+  })
+})
+
+describe('relay token revoke reaches the relay over real UDP', async () => {
+  const sock = createSocket('udp4')
+  await new Promise<void>(r => sock.bind(0, '127.0.0.1', () => r()))
+  const got: Buffer[] = []
+  sock.on('message', m => got.push(m))
+  after(() => sock.close())
+  const url = await startWs({ RELAY_SECRET: SECRET, RELAY_ADDR: '127.0.0.1:' + sock.address().port }, null)
+
+  it('sends a signed RelayRevoke to RELAY_ADDR (and once more for loss)', async () => {
+    const p = await client(url)
+    await authJoin(p, 'tok:host', 'free')
+    p.send({ type: 'native-descriptor', descriptor: descriptor(0x601) })
+    assert.ok(await p.waitFor(m => m.type === 'relay-token'))
+    const exp = p.inbox.find(m => m.type === 'relay-token').expiresAt
+    p.send({ type: 'native-leave' })
+    assert.ok(await waitFor(() => got.length >= 1, 2000))
+    assert.deepEqual(verifyRelayRevoke(got[0], SECRET), { roomId: 'free', memberId: 'host', cutoff: exp })
+    assert.ok(await waitFor(() => got.length >= 2, 3000), '1초 뒤 한 번 더')
+    assert.deepEqual(got[1], got[0])
   })
 })
 

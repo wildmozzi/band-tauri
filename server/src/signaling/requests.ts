@@ -287,7 +287,7 @@ export function handleCancelInstrumentChangeRequest(ctx: Ctx<RequestsSvc>, _msg:
  * (requests → nativeSession·metronome 간선 없이, 설계 docs/server-architecture.md 2.1절).
  */
 export interface DemoteSvc extends RequestsSvc {
-  nativeSession: { clearNative(c: Client): void }
+  nativeSession: { clearNative(c: Client): void; revokeRelay(c: Client): void }
   metronome: { onEngineDown(roomId: string, clientId: string): void }
 }
 
@@ -339,6 +339,7 @@ export async function handleDemotePerformer(ctx: Ctx<DemoteSvc>, msg: Msg) {
   target.perform.isPerforming = false
   target.perform.instrument = undefined
   ctx.svc.nativeSession.clearNative(target)
+  ctx.svc.nativeSession.revokeRelay(target) // 대상 엔진의 릴레이 등록을 바로 끊는다(relay-design 2.5)
   ctx.svc.metronome.onEngineDown(roomId, target.id)
   // 4
   if (target.conn.ws.readyState === target.conn.ws.OPEN) send(target.conn.ws, { type: 'demoted-to-viewer' })

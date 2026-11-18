@@ -324,6 +324,28 @@ describe('M1/M4/M3: rejoin, signaling roles, chat, rate limit', async () => {
     assert.equal(chats[0].isHost, undefined)
   })
 
+  it('P2-14c: anonymous viewers cannot chat (chat-login-required); logged-in viewers and performers can', async () => {
+    const anon = await client(url)
+    const viewer = await client(url)
+    const performer = await client(url)
+    await authJoin(anon, null, 'free')
+    await authJoin(viewer, 'tok:chatViewer', 'free')
+    await authJoin(performer, 'tok:chatPerf', 'free')
+    performer.send({ type: 'start-performing', instrument: 'bass' })
+    // 익명: 클라이언트가 신원 필드를 넣어도 JWT가 없으면 거절, 중계하지 않음
+    anon.send({ type: 'chat', message: 'anon says hi', userId: 'chatViewer', isAuthenticated: true })
+    assert.ok(await anon.waitFor(m => m.type === 'error' && m.code === 'chat-login-required'))
+    // 로그인한 관람자·연주자는 그대로
+    viewer.send({ type: 'chat', message: 'viewer says hi' })
+    performer.send({ type: 'chat', message: 'performer says hi' })
+    assert.ok(await anon.waitFor(m => m.type === 'chat' && m.message === 'viewer says hi'), '익명도 읽기는 된다')
+    assert.ok(await anon.waitFor(m => m.type === 'chat' && m.message === 'performer says hi'))
+    assert.ok(await performer.waitFor(m => m.type === 'chat' && m.message === 'viewer says hi'))
+    await sleep(50)
+    for (const c of [viewer, performer]) assert.ok(!c.has(m => m.type === 'chat' && m.message === 'anon says hi'))
+    assert.ok(!viewer.has(m => m.type === 'error'))
+  })
+
   it('rate-limits chat floods', async () => {
     const a = await client(url)
     const b = await client(url)

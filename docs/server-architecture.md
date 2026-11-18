@@ -30,7 +30,7 @@
 | G | **연주 세션(엔진)** | 엔진 계약(descriptor 형식, 키·ssrc 바인딩, 릴레이 토큰) | `native-descriptor`·`native-leave`·`relay-token-request` 분기, `parseEngineKey`, `parseCandidates`, `keyTakenInRoom`, `ssrcTakenInRoom`, `sendRelayToken`, `clearNative` | `Client.{nativeActive,nativeSsrc,nativeKey}`, `relayConfig`(env) |
 | H | **메트로놈** | 메트로놈 계약, 방장 이양 정책 | `metronome` 분기, `parseMetronomeState`, `replayMetronome`, `dropMetronomeIfHostChanged`, `broadcastMetronomeStop` | `metronomes`, `Client.pendingMetronomeStop` |
 | I | **참여 요청·악기 변경 요청** | 요청 UX | `request-perform`, `approve/reject/cancel-perform*`, `*-instrument-change*` 분기, `demote-performer`(P2-9: F·G·H 상태를 정리 — 엔진·메트로놈은 svc 구조 타입으로 부른다) | `performRequests`, `instrumentChangeRequests`, `approvals`(쓰기), `Client.instrument`(쓰기) |
-| J | **채팅** | 채팅 정책 | `chat` 분기 | 없음(중계만) |
+| J | **채팅** | 채팅 정책(로그인 사용자만 보냄, P2-14c) | `chat` 분기 | 없음(중계만) |
 | K | **관람 WebRTC 중계** | 관람 방송 방식 | `offer`·`answer`·`ice-candidate` 분기 | `Client.relay`(중계 속도 제한: 보낸 사람→대상 메시지 버킷, 대상이 받는 바이트 버킷 — 표적 강퇴 방지), `Client.conn.relayBucket`(중계 메시지 수: 일반 `msgBucket` 대신. 관람자는 일반과 같은 40·20/s, 연주자는 방 인원(rooms 멤버 수 — 익명·재개 유예 포함, 자기 제외) 1명당 +20·+2/s — 관람자가 한꺼번에 붙어도 방송 담당이 offer·ICE를 버리지 않게, `takeRelayMessage`. 커질 때 토큰은 그 연결이 가졌던 최대 용량을 처음 넘는 몫만 더한다(출입으로 토큰 농사 금지, #215 리뷰 M1). 중계는 처리 대기 상한 `MAX_PENDING_MESSAGES` 대신 중계 전용 대기 상한(`MAX_PENDING_RELAY_MESSAGES` 500개·`MAX_PENDING_RELAY_BYTES` 1MB)과 원문 크기 상한(`MAX_RELAY_MESSAGE_BYTES` 20KB)을 쓴다 — 넘으면 끊지 않고 버리고 속도 제한 버림으로 센다(#215 리뷰 H1). 쌍별 한도로 버린 중계는 `dropped`에 세지 않는다(정상 클라이언트가 닿지 않는 한도 — 파싱 비용은 원문 상한이 묶음). 근거: [overhaul/server-load-2026-11-18.md](overhaul/server-load-2026-11-18.md)) |
 | L | **정기 작업** | 운영 정책 | `heartbeat`(핑 + `seatHolds` 만료 정리), `scheduleParticipantUpdate` 디바운스, 토큰 만료 타이머, 유예 타이머, auth 타이머 | 위 묶음들의 상태 |
 
@@ -79,7 +79,7 @@ server/src/signaling/
   capacity.ts       E: countRoomSeats, checkCapacity, seatHolds, recentlyLeft (소켓 없이 테스트 가능한 계산)
   password.ts       E: checkRoomPassword (lib/roomPassword의 limiter·scrypt 게이트를 WS 에러로 잇는 얇은 층)
   performers.ts     F: start/stop-performing, 연주자 상한, approvals
-  nativeSession.ts  G: native-descriptor, native-leave, relay-token-request, 키·ssrc 바인딩, 릴레이 토큰 발급
+  nativeSession.ts  G: native-descriptor, native-leave, relay-token-request, 키·ssrc 바인딩, 릴레이 토큰 발급·회수(revokeRelay, P2-14c)
   descriptor.ts     G: parseEngineKey, parseCandidates (순수)
   metronome.ts      H: metronomes, parseMetronomeState, 중계·재전송·이양 정지
   requests.ts       I: 참여 요청, 악기 변경 요청
@@ -113,7 +113,7 @@ server/src/signaling/
 
 계층 0 안의 간선(예: `descriptor → protocol`의 타입 import, `supabaseDeps → roomDeps`)은 허용한다. 계층 0은 실행 상태가 없는 순수 코드라 서로 참조해도 결합이 생기지 않는다.
 
-`signaling` 밖으로는 `lib/*`·`repositories/*`(타입)와 `services/relayToken`만 import한다. 다른 `services/*`, 특히 `services/wsService`는 금지다(조립은 wsService → signaling 한 방향). 이것도 2.5절 검사가 허용 목록으로 강제한다.
+`signaling` 밖으로는 `lib/*`·`repositories/*`(타입)와 `services/relayToken`·`services/relayRevoke`(릴레이 회수 UDP 송신, P2-14c)만 import한다. 다른 `services/*`, 특히 `services/wsService`는 금지다(조립은 wsService → signaling 한 방향). 이것도 2.5절 검사가 허용 목록으로 강제한다.
 
 ### 2.2 공유 상태의 소유자
 
@@ -258,7 +258,7 @@ const handlers: Record<string, Handler> = {
 | requests | 승인·거절은 DB 방장만 | 승인 흐름은 `ws.test.ts` H1 안에 있음 | **빈 곳**: 비방장이 보낸 `approve-perform`/`approve-instrument-change`가 무시됨, 악기 변경 요청 흐름 전체 |
 | nativeSession | 중계 descriptor의 `from`은 서버가 붙임, 안의 `from`/`userId` 버림, 키·ssrc는 JWT 사용자에 묶임, 릴레이 토큰의 `memberId`는 검증된 `userId` | `ws.test.ts` "rejects another user's descriptor…relays server-built fields only", `relay-token.test.ts` "issues a token bound to room, verified userId, and descriptor ssrc" | 있음 |
 | metronome | 방장은 DB로 판정, `from`은 서버가 붙임 | `ws.test.ts` "relays only the host's valid metronome…" | 있음 |
-| chat | `nickname`·`from`·`timestamp`를 서버가 새로 구성 | `ws.test.ts` "rebuilds chat messages and drops non-string payloads" | 있음 |
+| chat | `nickname`·`from`·`timestamp`를 서버가 새로 구성. 보내는 사람은 JWT로 검증한 로그인 연결만(익명은 `chat-login-required`, 클라이언트가 보낸 신원 필드 무시) | `ws.test.ts` "rebuilds chat messages and drops non-string payloads", "P2-14c: anonymous viewers cannot chat" | 있음 |
 | viewerRelay | `from` 덮어씀, 방 밖·비연주자 사이 중계 차단 | `ws.test.ts` "does not relay offers between two non-performers" | 있음. **빈 곳**: 클라이언트가 보낸 `from`이 덮어써지는지, 다른 방 대상(`to`) 차단 |
 
 "빈 곳"은 테스트 이름 목록에서 찾지 못한 것이다. S0에서 채운 뒤에 코드를 옮긴다 — 옮기기 전에 그물부터 친다.

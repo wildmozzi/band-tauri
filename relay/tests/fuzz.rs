@@ -196,6 +196,8 @@ fn relay_fuzz(seed: u64, n: usize, require_bind_mac: bool) {
                 assert_eq!(&inner[4..8], &ms[src].ssrc.to_be_bytes(), "내부 ssrc 위장 전달");
                 assert_eq!(&buf[4..8], &ms[1 - src].ssrc.to_be_bytes());
             }
+            // 무작위·바꾼 입력(type 10 포함)이 서명된 회수로 통하면 안 된다
+            Outcome::Handled => panic!("seed {seed:#x} 반복 {i}: 위조 RelayRevoke를 받음 — 입력 {buf:02x?}"),
             Outcome::Drop(_) => {}
         }
         assert_eq!(relay.registration_count(), 2, "seed {seed:#x} 반복 {i}: 등록 수 변화(가로채기·해제) — 입력 {buf:02x?} from {from}");

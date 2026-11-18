@@ -45,8 +45,8 @@ const SAME_LAYER_ALLOWED = new Set([
   'auth->resume',
 ])
 
-/** signaling이 import해도 되는 `src/services/*` (2.1절: relayToken은 Rust 릴레이와 맞춘 형식이라 services에 남는다) */
-const SERVICES_ALLOWED = new Set(['relayToken'])
+/** signaling이 import해도 되는 `src/services/*` (2.1절: relayToken·relayRevoke는 Rust 릴레이와 맞춘 형식·제어 패킷 송신이라 services에 남는다) */
+const SERVICES_ALLOWED = new Set(['relayToken', 'relayRevoke'])
 
 /** `import ... from '<spec>'`, `export ... from '<spec>'`, `import('<spec>')`, `require('<spec>')` */
 function importSpecifiers(source: string): string[] {

@@ -5,7 +5,8 @@
  *        → 비밀번호 방이면 password-required / password-invalid{remainingAttempts} / password-rate-limited{retryAfterMs}
  *        → 정원(rooms.max_participants, 관람 포함, 서버 상한 20)이 찼으면 room-full{maxParticipants} (방장은 예외, P3-12b)
  *        → 통과하면 room-state{participants, peerIds, isHost}
- *   chat → 기록만(서버는 보낸 사람에게 되돌려주지 않는다). 원격 채팅은 pushChat으로 주입
+ *   chat → 기록만(서버는 보낸 사람에게 되돌려주지 않는다). 원격 채팅은 pushChat으로 주입.
+ *          익명 연결이면 서버 chat.ts처럼 error{chat-login-required}를 보내고 위반으로 기록한다(앱은 익명에게 입력창을 주지 않는다, P2-14c)
  * 방장 판정은 서버처럼 토큰의 사용자와 DB(rooms.host_id)로 한다.
  *
  * 비밀번호 실패 제한은 서버 코드(server/src/lib/roomPassword.ts의 PasswordAttemptLimiter와 운영 기본값)를
@@ -288,8 +289,14 @@ export class FakeSignaling {
         }
         return
       }
+      case 'chat':
+        if (conn.userId === null) {
+          this.violations.push(`익명 연결의 chat(서버가 거절): ${JSON.stringify(msg).slice(0, 200)}`)
+          this.send(conn, { type: 'error', code: 'chat-login-required', message: '로그인하면 채팅할 수 있어요.' })
+        }
+        return
       default:
-        // chat·연주 메시지: 기록만 (received)
+        // 연주 메시지: 기록만 (received)
         return
     }
   }

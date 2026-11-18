@@ -156,7 +156,7 @@ const selectMixer = (s: RoomSnapshot) => ({
   masterPan: s.mixer.masterPan,
 })
 
-const selectChat = (s: RoomSnapshot) => ({ chatMessages: s.chat })
+const selectChat = (s: RoomSnapshot) => ({ chatMessages: s.chat, chatLoginRequired: s.local.chatLoginRequired })
 
 const selectRequests = (s: RoomSnapshot) => {
   const r = s.requests

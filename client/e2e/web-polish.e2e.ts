@@ -3,7 +3,7 @@
  * 번호는 docs/BACKLOG.md P3-12 행의 ①~⑪.
  */
 import type { Page } from '@playwright/test'
-import { ALICE, GUITAR_POST, ROCK_ROOM } from './fixtures'
+import { ALICE, BOB, GUITAR_POST, ROCK_ROOM } from './fixtures'
 import { expect, test } from './test'
 
 /** 렌더 중 navigate() 호출 시 React Router가 남기는 경고를 모은다 (⑥) */
@@ -129,7 +129,8 @@ test('방 만들기: 최대 인원은 관람 포함, 연주자는 최대 6명이
 })
 
 for (const viewport of [{ width: 1280, height: 720 }, { width: 1366, height: 600 }, { width: 1920, height: 1080 }]) {
-  test(`합주실: 채팅 입력창이 스크롤 없이 첫 화면에 보인다 (⑨) ${viewport.width}×${viewport.height}`, async ({ page }) => {
+  test(`합주실: 채팅 입력창이 스크롤 없이 첫 화면에 보인다 (⑨) ${viewport.width}×${viewport.height}`, async ({ page, mock }) => {
+    await mock.loginAs(BOB) // 입력창은 로그인 사용자에게만 있다(P2-14c)
     await page.setViewportSize(viewport)
     await page.goto(`/rooms/${ROCK_ROOM.id}`)
     await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()

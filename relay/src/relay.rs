@@ -24,6 +24,11 @@ type HmacSha256 = Hmac<Sha256>;
 pub const COOKIE_WINDOW_SECS: u64 = 30;
 /// 출발 서브넷 버킷을 이 시간 동안 안 쓰면 정리
 const SOURCE_IDLE: Duration = Duration::from_secs(10);
+/// 회수 기록을 기억하는 최대 시간(초). 회수 cutoff는 서버가 발급한 토큰의 마지막 만료 시각이라 토큰 수명(기본 120초) 안이다.
+/// 이 값은 그보다 넉넉한 상한일 뿐이다(서버 설정 실수로 아주 먼 cutoff가 와도 기록이 오래 남지 않게)
+pub const MAX_REVOKE_HORIZON_SECS: u64 = 3600;
+/// 회수 기록 수 상한(메모리 보호). 넘치면 새 기록은 남기지 않고 지금 등록만 지운다(그 토큰은 만료까지 다시 등록될 수 있다)
+pub const MAX_REVOKED_MEMBERS: usize = 65_536;
 
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -78,6 +83,8 @@ pub enum Outcome {
     Forward { to: SocketAddr, offset: usize },
     /// [`Relay::ack`]를 `to`로 보낸다
     Ack { to: SocketAddr },
+    /// 처리했고 보낼 것이 없다 (RelayRevoke — 증폭 방지를 위해 응답하지 않는다)
+    Handled,
     Drop(DropReason),
 }
 
@@ -157,6 +164,12 @@ pub struct Relay {
     cookie_mac: HmacSha256,
     /// `K_bind = HMAC(secret, "band-relay bind v1")` — 토큰별 Bind 키 파생용
     bind_root: [u8; BIND_KEY_BYTES],
+    /// `K_revoke = HMAC(secret, "band-relay revoke v1")` — RelayRevoke 검증 키 (2.5)
+    revoke_key: [u8; 32],
+    /// 회수 기록: room → [(member, cutoff)]. 그 멤버의 `expires_at <= cutoff`인 토큰은 Bind를 받지 않는다.
+    /// cutoff가 지나면 정리한다([`Relay::prune_revocations`]). 메모리에만 있다(재시작하면 잊는다 — 2.5 한계)
+    revoked: HashMap<Box<str>, Vec<(Box<str>, u64)>>,
+    revoked_len: usize,
     limits: Limits,
     by_addr: HashMap<SocketAddr, Reg>,
     rooms: HashMap<Box<str>, Room>,
@@ -176,6 +189,9 @@ impl Relay {
         Relay {
             cookie_mac: HmacSha256::new_from_slice(&cookie_key).expect("32B 키"),
             bind_root: token::bind_root_key(&secret),
+            revoke_key: token::revoke_key(&secret),
+            revoked: HashMap::new(),
+            revoked_len: 0,
             secret,
             bind_bucket: Bucket::new(limits.max_binds_per_sec as f64, 1.0, now),
             sources: HashMap::with_capacity(256),
@@ -211,6 +227,7 @@ impl Relay {
             match buf[3] {
                 packet::TYPE_RELAY_DATA => self.handle_data(now, from, buf),
                 packet::TYPE_RELAY_BIND => self.handle_bind(now, now_unix, from, buf),
+                packet::TYPE_RELAY_REVOKE => self.handle_revoke(now, now_unix, from, buf),
                 _ => Outcome::Drop(DropReason::Malformed),
             }
         };
@@ -321,6 +338,10 @@ impl Relay {
             Err(TokenError::Expired) => return Outcome::Drop(DropReason::ExpiredToken),
             Err(_) => return Outcome::Drop(DropReason::BadToken),
         };
+        // 시그널링 서버가 회수한 토큰(2.5): 등록·갱신하지 않는다. 회수 때 이 멤버의 등록은 이미 지웠다
+        if self.is_revoked(claims.room, claims.client, claims.expires_at) {
+            return Outcome::Drop(DropReason::RevokedToken);
+        }
         // Bind MAC (2.1.1): 토큰별 키는 WS(TLS)로만 전달되므로, 캡처한 토큰으로 다른 주소에서 쿠키 왕복을 끝내도
         // 쿠키를 덮는 MAC을 만들 수 없다. MAC 없는 Bind는 전환 기간에만, 그리고 MAC으로 등록된 적 없는 멤버만 받는다.
         if has_mac {
@@ -404,6 +425,72 @@ impl Relay {
         let mut c = [0u8; COOKIE_BYTES];
         c.copy_from_slice(&full[..COOKIE_BYTES]);
         c
+    }
+
+    /// RelayRevoke (2.5): 서명을 확인하고, 그 멤버의 등록 중 회수 대상 토큰(`token_exp <= cutoff`)으로 된 것을 지우고,
+    /// 같은 토큰으로 다시 등록하지 못하게 cutoff까지 기억한다. 출발 주소는 보지 않는다(서명이 인증이다). 응답하지 않는다.
+    /// 리플레이는 같은 토큰들을 다시 회수할 뿐이다: 회수 뒤 서버가 발급하는 토큰은 만료가 cutoff보다 늦다.
+    fn handle_revoke(&mut self, now: Instant, now_unix: u64, from: SocketAddr, buf: &[u8]) -> Outcome {
+        if buf.len() < token::MIN_REVOKE_BYTES || buf.len() > token::MAX_REVOKE_BYTES {
+            return Outcome::Drop(DropReason::Malformed);
+        }
+        // HMAC 비용은 신규 Bind와 같은 버킷으로 막는다
+        if !self.take_source_bucket(now, from.ip()) || !self.bind_bucket.take(now, 1.0) {
+            return Outcome::Drop(DropReason::BindRateLimited);
+        }
+        let Ok(r) = token::verify_revoke(&self.revoke_key, buf) else {
+            return Outcome::Drop(DropReason::BadRevoke);
+        };
+        self.stats.revokes.fetch_add(1, Relaxed);
+        if let Some(room) = self.rooms.get(r.room) {
+            self.scratch.clear();
+            self.scratch.extend(room.members.iter().filter(|m| &*m.client == r.member).map(|m| m.addr));
+            for i in 0..self.scratch.len() {
+                let a = self.scratch[i];
+                if self.by_addr.get(&a).is_some_and(|reg| reg.token_exp <= r.cutoff) {
+                    self.remove_addr(a);
+                    self.stats.revoked_registrations.fetch_add(1, Relaxed);
+                }
+            }
+        }
+        if r.cutoff > now_unix {
+            self.remember_revoke(r.room, r.member, r.cutoff.min(now_unix + MAX_REVOKE_HORIZON_SECS));
+        }
+        Outcome::Handled
+    }
+
+    fn remember_revoke(&mut self, room: &str, member: &str, cutoff: u64) {
+        if let Some(e) = self.revoked.get_mut(room).and_then(|l| l.iter_mut().find(|(m, _)| &**m == member)) {
+            e.1 = e.1.max(cutoff);
+            return;
+        }
+        if self.revoked_len >= MAX_REVOKED_MEMBERS {
+            return;
+        }
+        self.revoked.entry(room.into()).or_default().push((member.into(), cutoff));
+        self.revoked_len += 1;
+    }
+
+    /// 이 토큰(멤버, 만료 시각)이 회수되었는지
+    fn is_revoked(&self, room: &str, member: &str, token_exp: u64) -> bool {
+        self.revoked.get(room).is_some_and(|l| l.iter().any(|(m, cutoff)| &**m == member && token_exp <= *cutoff))
+    }
+
+    /// cutoff가 지난 회수 기록 정리 (소켓 루프가 [`Relay::sweep`]과 함께 1초마다 호출). 그 뒤에는 회수된 토큰도 만료라 기록이 필요 없다
+    pub fn prune_revocations(&mut self, now_unix: u64) {
+        let mut removed = 0;
+        self.revoked.retain(|_, l| {
+            let before = l.len();
+            l.retain(|(_, cutoff)| *cutoff > now_unix);
+            removed += before - l.len();
+            !l.is_empty()
+        });
+        self.revoked_len -= removed;
+    }
+
+    /// 회수 기록 수 (시험·진단용)
+    pub fn revocation_count(&self) -> usize {
+        self.revoked_len
     }
 
     /// 이 멤버(room, client)의 등록 중 Bind MAC으로 등록된 것이 있는지 (하향 방지)
@@ -1088,5 +1175,85 @@ mod tests {
         assert_eq!(r.stats().drops(DropReason::BindRateLimited), 0);
         // 버킷이 그대로 남아 정상 Bind는 처리된다
         assert_eq!(r.handle(now, NOW_UNIX, addr(9), &bind_pkt("room", "x", 33, NOW_UNIX + 600)), Outcome::Ack { to: addr(9) });
+    }
+
+    fn revoke_pkt(room: &str, member: &str, cutoff: u64) -> Vec<u8> {
+        token::sign_revoke(SECRET, &token::Revoke { cutoff, room, member })
+    }
+
+    /// 2.5: 회수하면 그 멤버의 등록이 바로 사라져 오가는 패킷이 끊기고, 같은 토큰으로는 다시 등록하지 못한다.
+    /// 회수 뒤 서버가 발급한 새 토큰(만료가 cutoff보다 늦음)은 된다. 다른 멤버·다른 방은 영향이 없다.
+    #[test]
+    fn revoke_removes_registration_and_blocks_old_token() {
+        let mut r = relay(Limits::default());
+        let now = Instant::now();
+        let exp = NOW_UNIX + 120;
+        let tok_a = token("room", "a", 11, exp);
+        assert_eq!(bind_mac_tok(&mut r, now, addr(1), &tok_a, 11), OK);
+        assert_eq!(bind(&mut r, now, addr(2), "room", "b", 22), OK);
+        assert_eq!(bind(&mut r, now, addr(3), "other", "a", 33), OK);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(2), &data_pkt(11, 22, 40)), Outcome::Forward { to: addr(1), offset: 8 });
+
+        // 출발 주소는 무관(서명이 인증): 아무 주소에서 와도 받고, 응답하지 않는다
+        assert_eq!(r.handle(now, NOW_UNIX, addr(99), &revoke_pkt("room", "a", exp)), Outcome::Handled);
+        assert_eq!(r.stats().revokes.load(Relaxed), 1);
+        assert_eq!(r.stats().revoked_registrations.load(Relaxed), 1);
+        assert_eq!(r.registration_count(), 2);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(2), &data_pkt(11, 22, 40)), Outcome::Drop(DropReason::UnknownDest));
+        assert_eq!(r.handle(now, NOW_UNIX, addr(1), &data_pkt(22, 11, 40)), Outcome::Drop(DropReason::Unregistered));
+        // 같은 토큰의 keepalive·새 등록 시도는 응답 없이 폐기
+        assert_eq!(r.handle(now, NOW_UNIX, addr(1), &bind_mac_with(&tok_a, 11, None)), Outcome::Drop(DropReason::RevokedToken));
+        assert_eq!(r.handle(now, NOW_UNIX, addr(7), &bind_mac_with(&tok_a, 11, None)), Outcome::Drop(DropReason::RevokedToken));
+        // 다른 방의 같은 멤버 id는 그대로
+        assert_eq!(bind(&mut r, now, addr(4), "other", "c", 44), OK);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(4), &data_pkt(33, 44, 40)), Outcome::Forward { to: addr(3), offset: 8 });
+        // 회수 뒤 발급된 토큰(만료가 cutoff보다 늦음)은 등록된다
+        let tok_new = token("room", "a", 11, exp + 1);
+        assert_eq!(bind_mac_tok(&mut r, now, addr(1), &tok_new, 11), OK);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(2), &data_pkt(11, 22, 40)), Outcome::Forward { to: addr(1), offset: 8 });
+        // 옛 회수 메시지를 리플레이해도 새 등록은 남는다
+        assert_eq!(r.handle(now, NOW_UNIX, addr(99), &revoke_pkt("room", "a", exp)), Outcome::Handled);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(2), &data_pkt(11, 22, 40)), Outcome::Forward { to: addr(1), offset: 8 });
+        assert_eq!(r.revocation_count(), 1);
+        // cutoff가 지나면 기록을 정리한다(회수된 토큰도 그때는 만료)
+        r.prune_revocations(exp - 1);
+        assert_eq!(r.revocation_count(), 1);
+        r.prune_revocations(exp);
+        assert_eq!(r.revocation_count(), 0);
+    }
+
+    /// 위조·변조·형식 오류 회수는 응답 없이 폐기하고 등록을 건드리지 않는다
+    #[test]
+    fn forged_revoke_is_ignored() {
+        let mut r = relay(Limits::default());
+        let now = Instant::now();
+        assert_eq!(bind(&mut r, now, addr(1), "room", "a", 11), OK);
+        assert_eq!(bind(&mut r, now, addr(2), "room", "b", 22), OK);
+        let other = token::sign_revoke(b"attacker-secret-0123456789abcdef!!!!", &token::Revoke { cutoff: NOW_UNIX + 600, room: "room", member: "a" });
+        assert_eq!(r.handle(now, NOW_UNIX, addr(9), &other), Outcome::Drop(DropReason::BadRevoke));
+        let mut tampered = revoke_pkt("room", "b", NOW_UNIX + 600);
+        tampered[17] ^= 1; // member/room 바이트 변조
+        assert_eq!(r.handle(now, NOW_UNIX, addr(9), &tampered), Outcome::Drop(DropReason::BadRevoke));
+        let good = revoke_pkt("room", "a", NOW_UNIX + 600);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(9), &good[..good.len() - 1]), Outcome::Drop(DropReason::BadRevoke));
+        assert_eq!(r.handle(now, NOW_UNIX, addr(9), &good[..20]), Outcome::Drop(DropReason::Malformed));
+        assert_eq!(r.registration_count(), 2);
+        assert_eq!(r.revocation_count(), 0);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(2), &data_pkt(11, 22, 40)), Outcome::Forward { to: addr(1), offset: 8 });
+    }
+
+    /// 회수 cutoff보다 늦게 만료되는 등록(회수 뒤 발급된 토큰이 회수보다 먼저 도착 — UDP 순서 뒤바뀜)은 지우지 않는다
+    #[test]
+    fn revoke_keeps_registration_with_newer_token() {
+        let mut r = relay(Limits::default());
+        let now = Instant::now();
+        let tok = token("room", "a", 11, NOW_UNIX + 121);
+        assert_eq!(bind_tok(&mut r, now, addr(1), &tok, 11), OK);
+        assert_eq!(r.handle(now, NOW_UNIX, addr(9), &revoke_pkt("room", "a", NOW_UNIX + 120)), Outcome::Handled);
+        assert_eq!(r.registration_count(), 1);
+        assert_eq!(r.stats().revoked_registrations.load(Relaxed), 0);
+        // 이미 지난 cutoff는 기록하지 않는다
+        assert_eq!(r.handle(now, NOW_UNIX, addr(9), &revoke_pkt("room", "z", NOW_UNIX)), Outcome::Handled);
+        assert_eq!(r.revocation_count(), 1);
     }
 }

@@ -73,6 +73,7 @@ export function scheduleParticipantUpdate(svc: MembershipSvc, roomId: string) {
  *   5. 남은 사람에게 participant-left (registry)
  *   6. 나간 사람이 켠 메트로놈 삭제 (metronome)
  *   7. 방이 비면 방·요청·메트로놈·방 정보 캐시 삭제
+ *   8. 릴레이 토큰 회수(relay-design 2.5, 클라이언트 메시지 없음) — 'duplicate'는 같은 사용자가 새 연결로 그대로 있으므로 하지 않는다
  */
 export function handleLeave(svc: MembershipSvc, client: Client, roomId: string, reason: LeaveReason) {
   const { registry, performers, capacity, requests, metronome, roomMeta } = svc
@@ -99,6 +100,8 @@ export function handleLeave(svc: MembershipSvc, client: Client, roomId: string, 
     metronome.onRoomEmpty(roomId)
     roomMeta.forget(roomId)
   }
+  // 8
+  if (reason !== 'duplicate') svc.nativeSession.revokeRelay(client, roomId)
 }
 
 /** 현재 방 상태를 이 연결에 전송 (방장이면 대기 중인 요청도) */
