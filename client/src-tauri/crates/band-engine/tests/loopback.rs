@@ -863,20 +863,22 @@ fn resample_quality_44k_latency_ab() {
                 means[i].push((mean, sb.est_latency_ms as f64));
             }
         }
-        // 회차 중앙값: 한 회차의 xrun·재버퍼(깊이 +3ms)가 평균을 끌지 않게
-        let avg = |v: &[(f64, f64)], f: fn(&(f64, f64)) -> f64| {
+        // 회차 중앙값(짝수 회차면 가운데 둘의 평균): 한 회차의 xrun·재버퍼(깊이 +3ms)가 평균을 끌지 않게
+        let median = |v: &[(f64, f64)], f: fn(&(f64, f64)) -> f64| {
             let mut x: Vec<f64> = v.iter().map(f).collect();
             x.sort_by(f64::total_cmp);
-            x[x.len() / 2]
+            let m = x.len() / 2;
+            if x.len().is_multiple_of(2) { (x[m - 1] + x[m]) / 2.0 } else { x[m] }
         };
-        let (lo, hi) = (avg(&means[0], |m| m.0), avg(&means[1], |m| m.0));
-        let (elo, ehi) = (avg(&means[0], |m| m.1), avg(&means[1], |m| m.1));
+        let (lo, hi) = (median(&means[0], |m| m.0), median(&means[1], |m| m.0));
+        let (elo, ehi) = (median(&means[0], |m| m.1), median(&means[1], |m| m.1));
         println!("44.1k 버퍼 {buf} · {frame_ms}ms(회차 중앙값): 저지연 {lo:.2}ms → 고음질 {hi:.2}ms (차 {:+.2}ms), estLatencyMs 차 {:+.2}ms", hi - lo, ehi - elo);
         // estLatencyMs는 두 단계 필터 지연 차를 그대로 더한다(결정적)
         assert!((ehi - elo - 2.61).abs() < 0.1, "est 차 {:.2}", ehi - elo);
         // 실측 차: 필터 지연 차(≈2.6ms)보다 작을 수 있다 — 출력 장치 버퍼 격자(441 = 10ms)에 맞춰 재생되므로 늘어난 지연 일부가
-        // 기존 격자 여유에 흡수된다(측정: 128·2.5ms +2.4ms, 441·5ms +1.0ms). 늘기는 해야 하고 필터 지연 차 + 1ms를 넘지 않는다.
-        assert!((hi - lo) > 0.5 && (hi - lo) < ehi - elo + 1.0, "종단 차 {:.2}ms", hi - lo);
+        // 기존 격자 여유에 흡수된다(측정: 128·2.5ms +2.2~2.6ms, 441·5ms +0.9~1.2ms, 흡수 정도가 회차마다 다르다). 늘기는 해야 하고
+        // (하한 0.3ms — #229 리뷰 L2: 441에서 +0.86ms 실행이 있었다) 필터 지연 차 + 1ms를 넘지 않는다.
+        assert!((hi - lo) > 0.3 && (hi - lo) < ehi - elo + 1.0, "종단 차 {:.2}ms", hi - lo);
     }
 }
 

@@ -180,8 +180,9 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
   const frameHint = bufferFrameHint(config, selectedInputDevice?.sampleRates)
   // 출력 장치: 고른 것, 없으면(기본 장치) 기본 표시된 것
   const selectedOutputDevice = outputDevices.find((d) => (config.outputDevice ? d.id === config.outputDevice : d.isDefault))
+  // 테스트 모니터가 돌면 엔진이 실제로 보고한 품질(같은 설정으로 시작 — 설정을 바꾸면 테스트가 끝난다), 아니면 같은 식으로 예상
   const resampleHint = resampleQualityHint(
-    resolveResampleQuality(config),
+    (isTesting ? testStats?.resampler?.quality : undefined) ?? resolveResampleQuality(config),
     (config.resampleQuality ?? 'auto') === 'auto',
     selectedInputDevice?.sampleRates,
     selectedOutputDevice?.sampleRates,

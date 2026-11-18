@@ -320,6 +320,39 @@ use band_dsp::jitter::{JitterSettings, JitterStats};
 use crate::engine::rt::output_path;
 use band_dsp::packet::{Header, PacketType};
 
+/// P2-17e 리뷰 L1: 리샘플러가 실제로 도는 경로(44.1k ↔ 48k)의 `push`·`pop`이 두 품질(다항식·sinc) 모두 할당·해제 0이다.
+/// 워커 무할당 시험들은 48k(통과) 경로만 돌리므로, rubato 업그레이드 등으로 처리 경로가 할당하기 시작하면 여기서 잡는다.
+/// 입력(장치 레이트 → 48k, 모노·스테레오)과 출력(48k → 장치 레이트, 스테레오) 방향, 장치 버퍼 크기 여럿(청크 배수 아닌 441 포함).
+#[test]
+fn resampling_push_pop_never_allocates_for_both_qualities() {
+    use band_dsp::config::ResampleQuality;
+    use band_dsp::resample::StreamResampler;
+    use crate::testing::alloc::counted;
+    for q in [ResampleQuality::LowLatency, ResampleQuality::HighQuality] {
+        for (from, to, ch) in [(44_100u32, 48_000u32, 1usize), (44_100, 48_000, 2), (48_000, 44_100, 2), (96_000, 48_000, 2)] {
+            // 생성(보간표·버퍼 할당)은 구간 밖 — 엔진에서도 시작·제어 평면 몫이다.
+            let mut rs = StreamResampler::new(from, to, ch, q).unwrap();
+            let input: Vec<f32> = (0..1024 * ch).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+            let mut out = vec![0f32; 4096 * ch];
+            let mut got = 0usize;
+            let ((), n) = counted(|| {
+                // 3초 분량, 장치 버퍼 크기를 돌려 가며(청크 16의 배수가 아닌 크기 포함)
+                let mut fed = 0usize;
+                let mut k = 0usize;
+                while fed < from as usize * 3 {
+                    let frames = [64usize, 128, 441, 1024][k % 4];
+                    k += 1;
+                    rs.push(&input[..frames * ch]);
+                    fed += frames;
+                    got += rs.pop(&mut out);
+                }
+            });
+            assert_eq!(n, 0, "{q:?} {from}→{to} {ch}ch: 리샘플 경로에서 할당·해제 {n}회");
+            assert!(got > to as usize * 3 - 1024, "{q:?} {from}→{to}: 출력 {got}프레임 — 실제로 변환했는가");
+        }
+    }
+}
+
 /// 출력 레이트 불일치(엔진 ⑧ 후속): 실려 온 공급 리샘플러의 레이트가 워커의 장치 레이트와 다르면 워커는 **새로 만들지 않고**
 /// 그 피어에 슬롯을 주지 않는다(표에는 남아 `ingest`·`publish`는 계속한다). 맞는 피어는 가장 낮은 빈 슬롯을 받는다. 제거하면
 /// 둘 다 리샘플러를 실은 채 반환 큐로 돌아가 제어 평면에서 해제된다. 이 모든 워커 단계 호출에서 할당·해제는 0이다.

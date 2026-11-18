@@ -156,7 +156,8 @@ impl EngineConfig {
     }
 
     /// 실제로 쓸 리샘플러 품질(`LowLatency` 또는 `HighQuality`, `Auto`를 풀어서). `Auto`: 프레임 2.5ms(초저지연 프리셋의
-    /// 정의 — 클라이언트 `resolveResampleQuality`와 같은 규칙)면 저지연, 아니면 고음질.
+    /// 정의 — 클라이언트 `resolveResampleQuality`와 같은 식 `< 3`)면 저지연, 아니면 고음질. 식을 바꾸거나 프레임 선택지를
+    /// 늘리면 클라이언트(`client/src/native/engineConfig.ts`)도 같이 바꿀 것(#229 리뷰 L3).
     pub fn resample_quality(&self) -> ResampleQuality {
         match self.resample_quality.unwrap_or_default() {
             ResampleQuality::Auto if self.frame_ms < 3.0 => ResampleQuality::LowLatency,

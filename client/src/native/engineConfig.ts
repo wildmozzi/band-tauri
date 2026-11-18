@@ -61,12 +61,14 @@ const RESAMPLE_QUALITIES: ResampleQuality[] = RESAMPLE_QUALITY_OPTIONS.map((o) =
 
 /**
  * 실제로 쓰일 리샘플러 품질(auto를 푼 값). 엔진 `EngineConfig::resample_quality`와 같은 규칙:
- * auto면 프레임 2.5ms(초저지연 프리셋)에서 저지연, 그 밖(균형·안정·사용자 정의 5/10ms)은 고음질.
+ * auto면 프레임 3ms 미만(지금 선택지로는 2.5ms = 초저지연 프리셋)에서 저지연, 그 밖(균형·안정·사용자 정의 5/10ms)은 고음질.
+ * 표시는 엔진이 실제로 보고한 값(`EngineStats.resampler.quality`)이 있으면 그것을 쓴다 — 이 함수는 엔진 시작 전 안내용.
  */
 export function resolveResampleQuality(config: Pick<EngineConfig, 'frameMs' | 'resampleQuality'>): Exclude<ResampleQuality, 'auto'> {
   const q = config.resampleQuality ?? 'auto'
   if (q !== 'auto') return q
-  return config.frameMs === 2.5 ? 'lowLatency' : 'highQuality'
+  // 엔진과 같은 식(프레임 < 3ms). 프레임 선택지를 늘리면 엔진 쪽(band-dsp config.rs)도 같이 볼 것(#229 리뷰 L3)
+  return config.frameMs < 3 ? 'lowLatency' : 'highQuality'
 }
 
 /** 프로필 값을 0..1(0.05 단위)로 맞춘다. 숫자가 아니면 기본값 */
