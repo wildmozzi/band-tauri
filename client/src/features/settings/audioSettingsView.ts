@@ -80,3 +80,42 @@ export function bufferFrameHint(
   const asio = config.inputDriver === 'asio' ? ' ASIO는 드라이버 제어판의 버퍼 크기가 우선할 수 있으니 제어판에서도 64로 맞추세요.' : ''
   return `2.5ms 프레임은 장치 버퍼 64 이하에서 효과가 큽니다. 버퍼 ${config.bufferSize}이면 패킷이 ${ms}ms 단위로 몰려 나가 상대 쪽 지터 버퍼가 그만큼 더 기다리므로, 지연을 줄이려면 버퍼를 64로 낮추세요(끊기면 다시 올리세요).${asio}`
 }
+
+/** 장치가 48kHz로 열리는가: 지원 레이트에 48k가 있으면(엔진이 48k를 우선 연다). 모르면(목록 없음) null */
+function opensAt48k(rates: readonly number[] | undefined): boolean | null {
+  if (!rates || rates.length === 0) return null
+  return rates.includes(48_000)
+}
+
+/**
+ * 리샘플러 품질 안내(P2-17e). 입·출력 장치가 모두 48kHz로 열리면 리샘플러가 돌지 않아 설정 영향이 없다고 알린다.
+ * 아니면 실제로 쓰일 품질(auto면 풀어서)과 맞교환을 알린다. 장치 레이트를 모르면 일반 설명.
+ */
+export function resampleQualityHint(
+  resolved: 'lowLatency' | 'highQuality',
+  auto: boolean,
+  inputRates?: readonly number[],
+  outputRates?: readonly number[],
+  frameMs?: number,
+): string {
+  const inOk = opensAt48k(inputRates)
+  const outOk = opensAt48k(outputRates)
+  if (inOk === true && outOk === true) {
+    return '지금 장치는 48kHz로 열려 리샘플러가 돌지 않습니다 — 이 설정은 영향이 없습니다.'
+  }
+  const now = auto ? `자동: 지금 프리셋에서는 ${resolved === 'lowLatency' ? '저지연' : '고음질'}. ` : ''
+  const where = inOk === false || outOk === false
+    ? `${[inOk === false ? '입력' : null, outOk === false ? '출력' : null].filter(Boolean).join('·')} 장치가 48kHz가 아니라 엔진(48kHz)과 변환합니다. `
+    : '장치가 48kHz가 아니면(예: 44.1kHz) 엔진(48kHz)과 변환합니다. '
+  // 초저지연 프레임에 고음질을 직접 고른 경우(#229): 프레임(2.5ms)보다 큰 지연이 더해지고 CPU도 더 쓴다
+  const ultra = !auto && resolved === 'highQuality' && frameMs !== undefined && frameMs < 3
+    ? ' 2.5ms 프레임(초저지연)에서 고음질은 프레임 하나보다 큰 지연을 더하고 CPU도 더 씁니다 — 저사양 PC에서 끊기면 자동(저지연)으로 두세요.'
+    : ''
+  return `${now}${where}고음질은 18kHz까지 평탄하지만 변환 단계마다 약 +1.4ms(입·출력 합 약 +2.8ms), 저지연은 지연이 거의 없지만 고역이 깎이고 18kHz 위에서 잡음(에일리어싱)이 생길 수 있습니다.${ultra}`
+}
+
+/** 테스트 모니터 리샘플러 표시: "고음질 · +2.8ms" / "없음 (48kHz)" */
+export function formatTestResampler(r: { quality: 'lowLatency' | 'highQuality'; inDelayMs: number; outDelayMs: number } | null | undefined): string {
+  if (!r) return '없음 (48kHz)'
+  return `${r.quality === 'lowLatency' ? '저지연' : '고음질'} · +${(r.inDelayMs + r.outDelayMs).toFixed(1)}ms`
+}

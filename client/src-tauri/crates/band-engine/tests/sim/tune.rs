@@ -341,7 +341,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
     for (i, np) in p.peers.iter().enumerate() {
         let key = PeerKey::from_raw(i as u64 + 1);
         let (mtx, mrx) = media_link(key);
-        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, 0, settings, mrx, 48_000).expect("48k 통과 리샘플러");
+        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, 0, settings, mrx, 48_000, band_dsp::config::ResampleQuality::Auto).expect("48k 통과 리샘플러");
         // 슬롯 게인: 전에는 하네스가 슬롯에 (0.15, 0.15)를 직접 썼다. 이제 `PeerSources`가 반복마다 피어 믹스 게인으로 덮어쓰므로
         // 믹스 게인을 0.15로 둔다(팬 0). 팬 법칙(cos(π/4)·√2, f32)이 정확히 1이 아니라 슬롯 게인은 0.15에서 1ulp쯤 다르다.
         // 리포트에는 영향이 없다: 슬롯 게인은 `OutputRt::mix_source`에서 버스·탭에 더할 때만 곱해지고, 언더런(xrun) 판정은
@@ -551,7 +551,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                         rj[i] += 1;
                         let key = PeerKey::from_raw(i as u64 + 1 + 16 * rj[i] as u64);
                         let (mtx, mrx) = media_link(key);
-                        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, t, settings, mrx, 48_000).expect("48k 통과 리샘플러");
+                        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, t, settings, mrx, 48_000, band_dsp::config::ResampleQuality::Auto).expect("48k 통과 리샘플러");
                         shared.mix.gain.store(0.15);
                         retired.push(std::mem::replace(&mut shareds[i], shared));
                         mtxs[i] = mtx;

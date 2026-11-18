@@ -10,6 +10,7 @@ import {
   type EngineConfig,
   type FrameMs,
   type PeerStats,
+  type ResampleQuality,
 } from './engineApi'
 
 export const DRIVER_OPTIONS: { id: DriverKind; label: string; desc: string }[] = [
@@ -46,6 +47,28 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   jitterMinMs: 0,
   jitterMaxMs: 80,
   jitterProfile: JITTER_PROFILE_DEFAULT,
+  resampleQuality: 'auto',
+}
+
+/** 리샘플러 품질 선택지(P2-17e, 오디오 설정 "리샘플러 품질") */
+export const RESAMPLE_QUALITY_OPTIONS: { id: ResampleQuality; label: string }[] = [
+  { id: 'auto', label: '자동 (프리셋 따름)' },
+  { id: 'lowLatency', label: '저지연 (다항식)' },
+  { id: 'highQuality', label: '고음질 (sinc)' },
+]
+
+const RESAMPLE_QUALITIES: ResampleQuality[] = RESAMPLE_QUALITY_OPTIONS.map((o) => o.id)
+
+/**
+ * 실제로 쓰일 리샘플러 품질(auto를 푼 값). 엔진 `EngineConfig::resample_quality`와 같은 규칙:
+ * auto면 프레임 3ms 미만(지금 선택지로는 2.5ms = 초저지연 프리셋)에서 저지연, 그 밖(균형·안정·사용자 정의 5/10ms)은 고음질.
+ * 표시는 엔진이 실제로 보고한 값(`EngineStats.resampler.quality`)이 있으면 그것을 쓴다 — 이 함수는 엔진 시작 전 안내용.
+ */
+export function resolveResampleQuality(config: Pick<EngineConfig, 'frameMs' | 'resampleQuality'>): Exclude<ResampleQuality, 'auto'> {
+  const q = config.resampleQuality ?? 'auto'
+  if (q !== 'auto') return q
+  // 엔진과 같은 식(프레임 < 3ms). 프레임 선택지를 늘리면 엔진 쪽(band-dsp config.rs)도 같이 볼 것(#229 리뷰 L3)
+  return config.frameMs < 3 ? 'lowLatency' : 'highQuality'
 }
 
 /** 프로필 값을 0..1(0.05 단위)로 맞춘다. 숫자가 아니면 기본값 */
@@ -277,6 +300,8 @@ function sanitizeEngineConfig(raw: Record<string, unknown>): EngineConfig {
     jitterMinMs: clampJitter(num(raw.jitterMinMs, d.jitterMinMs ?? 0)),
     jitterMaxMs: clampJitter(num(raw.jitterMaxMs, d.jitterMaxMs ?? 80)),
     jitterProfile: clampJitterProfile(raw.jitterProfile),
+    // 옛 설정(필드 없음)·모르는 값은 auto(P2-17e)
+    resampleQuality: RESAMPLE_QUALITIES.includes(raw.resampleQuality as ResampleQuality) ? (raw.resampleQuality as ResampleQuality) : 'auto',
   }
   if (isValidOpusBitrate(raw.opusBitrate)) config.opusBitrate = raw.opusBitrate
   if (typeof raw.udpPort === 'number' && raw.udpPort > 0 && raw.udpPort < 65536) config.udpPort = raw.udpPort

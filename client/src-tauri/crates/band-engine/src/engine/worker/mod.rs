@@ -291,8 +291,9 @@ impl Worker {
         let peer_prods = prods.split_off(LOCAL_SOURCE + 1);
         let local_prod = prods.pop().ok_or("소스 링 수가 맞지 않습니다")?;
         // 실패 순서는 전과 같다: 입력 리샘플러 → 로컬 리샘플러 → 설정 코덱 인코더 → 프레임 크기 → 자동 전환 인코더 풀.
-        let capture = Capture::new(in_cons, info.in_rate, ich, frame)?;
-        let local = LocalPath::new(ich, info.out_rate, local_prod)?;
+        let quality = cfg.resample_quality();
+        let capture = Capture::new(in_cons, info.in_rate, ich, frame, quality)?;
+        let local = LocalPath::new(ich, info.out_rate, local_prod, quality)?;
         // 프레임 크기 검증은 네트워크가 없어도 한다(전과 같다). 인코더가 먼저 실패하면 그 에러가 먼저 나가게 `SendPath::new` 안에서
         // 인코더를 만든 뒤 코드를 쓴다 — 그래서 코드 계산은 여기서 하되 에러는 인코더 뒤에 낸다.
         let frame_code = frame_code_from_samples(frame);

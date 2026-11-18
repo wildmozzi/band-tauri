@@ -13,7 +13,7 @@ use ringbuf::traits::{Observer, Producer};
 use ringbuf::HeapProd;
 
 use super::{chunk_dev, in_burst48, out_burst_dev, to48, LocalFifo, WorkerStats, OUT_CHUNK};
-use band_dsp::config::INTERNAL_RATE;
+use band_dsp::config::{ResampleQuality, INTERNAL_RATE};
 use crate::engine::device::StreamInfo;
 use band_dsp::mixer::MixControls;
 use band_dsp::resample::StreamResampler;
@@ -39,11 +39,11 @@ pub(super) struct LocalPath {
 }
 
 impl LocalPath {
-    pub(super) fn new(ich: usize, out_rate: u32, prod: HeapProd<f32>) -> Result<Self, String> {
+    pub(super) fn new(ich: usize, out_rate: u32, prod: HeapProd<f32>, quality: ResampleQuality) -> Result<Self, String> {
         Ok(Self {
             ich,
             local: LocalFifo::new(),
-            local_rs: StreamResampler::new(INTERNAL_RATE, out_rate, 2)?,
+            local_rs: StreamResampler::new(INTERNAL_RATE, out_rate, 2, quality)?,
             local_buf: vec![0.0; OUT_CHUNK * 2],
             stereo_buf: vec![0.0; 2048 * 2],
             tmp: vec![0.0; 8192],
@@ -177,7 +177,7 @@ mod tests {
         let (_rt, mut feed) = output_path(counters.clone(), controls.clone());
         let stats = WorkerStats::default();
         let prod = feed.prods.remove(LOCAL_SOURCE);
-        let mut lp = LocalPath::new(2, 48_000, prod).unwrap();
+        let mut lp = LocalPath::new(2, 48_000, prod, ResampleQuality::Auto).unwrap();
         let (info, epoch) = (info(), Instant::now());
         let sh = &feed.bank.slots[LOCAL_SOURCE];
         lp.service(&info, &counters, &controls, sh, &stats, epoch);

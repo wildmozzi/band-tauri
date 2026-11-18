@@ -51,6 +51,19 @@ pub enum CodecKind {
     Pcm16,
 }
 
+/// 장치 레이트 ↔ 48kHz 리샘플러 품질(P2-17e). 장치가 48kHz면 리샘플러가 돌지 않아 영향이 없다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResampleQuality {
+    /// 프리셋을 따른다: 프레임 2.5ms(초저지연 프리셋)면 저지연, 아니면 고음질(`EngineConfig::resample_quality`).
+    #[default]
+    Auto,
+    /// Septic 다항식: 필터 지연 0.1ms 안, 18kHz −1.5~2.4dB·23kHz 에일리어싱 −3.7dB.
+    LowLatency,
+    /// sinc 128탭: 18kHz까지 평탄, 단계당 +1.3~1.5ms.
+    HighQuality,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineConfig {
@@ -74,6 +87,9 @@ pub struct EngineConfig {
     pub jitter_profile: Option<f32>,
     #[serde(default)]
     pub udp_port: Option<u16>,
+    /// 리샘플러 품질(P2-17e). 없으면 `Auto`(프리셋을 따름).
+    #[serde(default)]
+    pub resample_quality: Option<ResampleQuality>,
 }
 
 impl Default for EngineConfig {
@@ -93,6 +109,7 @@ impl Default for EngineConfig {
             jitter_max_ms: None,
             jitter_profile: None,
             udp_port: None,
+            resample_quality: None,
         }
     }
 }
@@ -136,6 +153,17 @@ impl EngineConfig {
 
     pub fn jitter_profile(&self) -> f32 {
         self.jitter_profile.unwrap_or(0.5)
+    }
+
+    /// 실제로 쓸 리샘플러 품질(`LowLatency` 또는 `HighQuality`, `Auto`를 풀어서). `Auto`: 프레임 2.5ms(초저지연 프리셋의
+    /// 정의 — 클라이언트 `resolveResampleQuality`와 같은 식 `< 3`)면 저지연, 아니면 고음질. 식을 바꾸거나 프레임 선택지를
+    /// 늘리면 클라이언트(`client/src/native/engineConfig.ts`)도 같이 바꿀 것(#229 리뷰 L3).
+    pub fn resample_quality(&self) -> ResampleQuality {
+        match self.resample_quality.unwrap_or_default() {
+            ResampleQuality::Auto if self.frame_ms < 3.0 => ResampleQuality::LowLatency,
+            ResampleQuality::Auto => ResampleQuality::HighQuality,
+            q => q,
+        }
     }
 
     /// 이 설정에서 나올 수 있는 최대 페이로드 크기(바이트).
@@ -239,6 +267,24 @@ mod tests {
         for p in [-0.1, 1.5, f32::NAN] {
             assert!(EngineConfig { jitter_profile: Some(p), ..Default::default() }.validate().is_err(), "{p}");
         }
+    }
+
+    #[test]
+    fn resample_quality_auto_follows_preset_and_old_config_is_auto() {
+        // 옛 설정(필드 없음)은 Auto
+        let c: EngineConfig = serde_json::from_str(&serde_json::to_string(&EngineConfig::default()).unwrap().replace(",\"resampleQuality\":null", "")).unwrap();
+        assert_eq!(c.resample_quality, None);
+        assert_eq!(c.resample_quality(), ResampleQuality::HighQuality, "기본(5ms) 자동 = 고음질");
+        let at = |frame_ms: f32, q: Option<ResampleQuality>| EngineConfig { frame_ms, resample_quality: q, ..Default::default() }.resample_quality();
+        assert_eq!(at(2.5, None), ResampleQuality::LowLatency, "초저지연 프리셋(2.5ms) 자동 = 저지연");
+        assert_eq!(at(2.5, Some(ResampleQuality::Auto)), ResampleQuality::LowLatency);
+        assert_eq!(at(10.0, Some(ResampleQuality::Auto)), ResampleQuality::HighQuality);
+        assert_eq!(at(2.5, Some(ResampleQuality::HighQuality)), ResampleQuality::HighQuality, "사용자 선택이 이긴다");
+        assert_eq!(at(10.0, Some(ResampleQuality::LowLatency)), ResampleQuality::LowLatency);
+        // 직렬화 이름(계약)
+        let j: EngineConfig = serde_json::from_str(&serde_json::to_string(&EngineConfig::default()).unwrap().replace("\"resampleQuality\":null", "\"resampleQuality\":\"highQuality\"")).unwrap();
+        assert_eq!(j.resample_quality, Some(ResampleQuality::HighQuality));
+        assert!(serde_json::to_string(&ResampleQuality::LowLatency).unwrap() == "\"lowLatency\"");
     }
 
     #[test]

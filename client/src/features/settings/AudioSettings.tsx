@@ -4,7 +4,7 @@
  */
 import { useEffect } from 'react'
 import { useAudioSettings } from './AudioSettingsContext'
-import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs } from '../../native/engineApi'
+import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs, type ResampleQuality } from '../../native/engineApi'
 import {
   BUFFER_OPTIONS,
   DRIVER_OPTIONS,
@@ -12,11 +12,13 @@ import {
   FRAME_OPTIONS,
   JITTER_MAX_LIMIT_MS,
   JITTER_PROFILE_DEFAULT,
+  RESAMPLE_QUALITY_OPTIONS,
   bufferMs,
   clampJitterProfile,
   estimatePayloadBytes,
   formatPeerJitter,
   jitterProfileLabel,
+  resolveResampleQuality,
   type EnginePresetId,
 } from '../../native/engineConfig'
 import { driverChoices, exclusiveModeHint } from './driverSupport'
@@ -31,6 +33,7 @@ import {
   bufferFrameHint,
   formatTestDevice,
   formatTestLatency,
+  formatTestResampler,
   inputChannelOptions,
   isClipping,
   levelPercent,
@@ -38,6 +41,7 @@ import {
   parseJitterMs,
   payloadAllowed,
   peerLabel,
+  resampleQualityHint,
   withLeftInputChannel,
   withRightInputChannel,
   type PayloadPatch,
@@ -174,6 +178,16 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
   // 기본값은 공유지만 합주에는 독점을 권한다(P1-19) — 공유일 때 눈에 띄게
   const exclusiveHint = exclusiveModeHint(config, supportedDrivers)
   const frameHint = bufferFrameHint(config, selectedInputDevice?.sampleRates)
+  // 출력 장치: 고른 것, 없으면(기본 장치) 기본 표시된 것
+  const selectedOutputDevice = outputDevices.find((d) => (config.outputDevice ? d.id === config.outputDevice : d.isDefault))
+  // 테스트 모니터가 돌면 엔진이 실제로 보고한 품질(같은 설정으로 시작 — 설정을 바꾸면 테스트가 끝난다), 아니면 같은 식으로 예상
+  const resampleHint = resampleQualityHint(
+    (isTesting ? testStats?.resampler?.quality : undefined) ?? resolveResampleQuality(config),
+    (config.resampleQuality ?? 'auto') === 'auto',
+    selectedInputDevice?.sampleRates,
+    selectedOutputDevice?.sampleRates,
+    config.frameMs,
+  )
 
   return wrap(
     <>
@@ -348,6 +362,19 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             </option>
           </select>
         </div>
+        <div className="settings-row">
+          <label htmlFor="resample-quality">리샘플러 품질</label>
+          <select
+            id="resample-quality"
+            value={config.resampleQuality ?? 'auto'}
+            onChange={(e) => updateConfig({ resampleQuality: e.target.value as ResampleQuality })}
+          >
+            {RESAMPLE_QUALITY_OPTIONS.map((o) => (
+              <option key={o.id} value={o.id}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        <p className="setting-hint" data-testid="resample-quality-hint">{resampleHint}</p>
         <p className={`setting-hint ${payloadBytes > MAX_PAYLOAD_BYTES ? 'error' : ''}`}>
           패킷 페이로드 약 {payloadBytes}B / 최대 {MAX_PAYLOAD_BYTES}B
           {config.codec === 'pcm16' && ' · PCM16 스테레오는 프레임 5ms 이하만 가능'}
@@ -483,6 +510,10 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
               <div className="stat-item">
                 <span className="stat-label">장치</span>
                 <span className="stat-value">{formatTestDevice(testStats.sampleRate, testStats.deviceBuffer)}</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">리샘플러</span>
+                <span className="stat-value">{formatTestResampler(testStats.resampler)}</span>
               </div>
               <div className="stat-item">
                 <span className="stat-label">xrun</span>
