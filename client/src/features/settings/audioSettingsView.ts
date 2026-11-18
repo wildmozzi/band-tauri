@@ -96,6 +96,7 @@ export function resampleQualityHint(
   auto: boolean,
   inputRates?: readonly number[],
   outputRates?: readonly number[],
+  frameMs?: number,
 ): string {
   const inOk = opensAt48k(inputRates)
   const outOk = opensAt48k(outputRates)
@@ -106,7 +107,11 @@ export function resampleQualityHint(
   const where = inOk === false || outOk === false
     ? `${[inOk === false ? '입력' : null, outOk === false ? '출력' : null].filter(Boolean).join('·')} 장치가 48kHz가 아니라 엔진(48kHz)과 변환합니다. `
     : '장치가 48kHz가 아니면(예: 44.1kHz) 엔진(48kHz)과 변환합니다. '
-  return `${now}${where}고음질은 18kHz까지 평탄하지만 변환 단계마다 약 +1.4ms(입·출력 합 약 +2.8ms), 저지연은 지연이 거의 없지만 고역이 깎이고 18kHz 위에서 잡음(에일리어싱)이 생길 수 있습니다.`
+  // 초저지연 프레임에 고음질을 직접 고른 경우(#229): 프레임(2.5ms)보다 큰 지연이 더해지고 CPU도 더 쓴다
+  const ultra = !auto && resolved === 'highQuality' && frameMs !== undefined && frameMs < 3
+    ? ' 2.5ms 프레임(초저지연)에서 고음질은 프레임 하나보다 큰 지연을 더하고 CPU도 더 씁니다 — 저사양 PC에서 끊기면 자동(저지연)으로 두세요.'
+    : ''
+  return `${now}${where}고음질은 18kHz까지 평탄하지만 변환 단계마다 약 +1.4ms(입·출력 합 약 +2.8ms), 저지연은 지연이 거의 없지만 고역이 깎이고 18kHz 위에서 잡음(에일리어싱)이 생길 수 있습니다.${ultra}`
 }
 
 /** 테스트 모니터 리샘플러 표시: "고음질 · +2.8ms" / "없음 (48kHz)" */

@@ -355,14 +355,23 @@ mod tests {
                 let input: Vec<f32> = (0..from as usize * 2).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
                 let mut out = vec![0f32; 8192];
                 let t = std::time::Instant::now();
+                // 장치 버퍼 128프레임 한 번(push + pop)의 최악 시간 — 워커 반복 하나에서 이 단계가 차지하는 몫
+                let mut worst = std::time::Duration::ZERO;
                 for _ in 0..secs {
                     for c in input.chunks(128 * 2) {
+                        let t1 = std::time::Instant::now();
                         r.push(c);
                         while r.pop(&mut out) > 0 {}
+                        worst = worst.max(t1.elapsed());
                     }
                 }
                 let pct = t.elapsed().as_secs_f64() / secs as f64 * 100.0;
-                println!("{q:?} {from}→{to} 스테레오: CPU {pct:.3}% (1코어, 실시간 대비)");
+                let period_us = 128.0 * 1e6 / from as f64;
+                println!(
+                    "{q:?} {from}→{to} 스테레오: CPU {pct:.3}% (1코어, 실시간 대비), 128프레임당 평균 {:.1}µs 최악 {:.1}µs (주기 {period_us:.0}µs)",
+                    pct / 100.0 * period_us,
+                    worst.as_secs_f64() * 1e6
+                );
             }
         }
     }

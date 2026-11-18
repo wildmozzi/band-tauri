@@ -860,11 +860,12 @@ fn resample_quality_44k_latency_ab() {
                     sa.xruns,
                     sb.xruns
                 );
-                means[i].push((mean, sb.est_latency_ms as f64));
+                means[i].push((mean, sb.est_latency_ms as f64, js.buffer_ms as f64, (sa.xruns + sb.xruns) as f64));
             }
         }
         // 회차 중앙값(짝수 회차면 가운데 둘의 평균): 한 회차의 xrun·재버퍼(깊이 +3ms)가 평균을 끌지 않게
-        let median = |v: &[(f64, f64)], f: fn(&(f64, f64)) -> f64| {
+        type Row = (f64, f64, f64, f64);
+        let median = |v: &[Row], f: fn(&Row) -> f64| {
             let mut x: Vec<f64> = v.iter().map(f).collect();
             x.sort_by(f64::total_cmp);
             let m = x.len() / 2;
@@ -872,13 +873,26 @@ fn resample_quality_44k_latency_ab() {
         };
         let (lo, hi) = (median(&means[0], |m| m.0), median(&means[1], |m| m.0));
         let (elo, ehi) = (median(&means[0], |m| m.1), median(&means[1], |m| m.1));
-        println!("44.1k 버퍼 {buf} · {frame_ms}ms(회차 중앙값): 저지연 {lo:.2}ms → 고음질 {hi:.2}ms (차 {:+.2}ms), estLatencyMs 차 {:+.2}ms", hi - lo, ehi - elo);
+        let (blo, bhi) = (median(&means[0], |m| m.2), median(&means[1], |m| m.2));
+        let (xlo, xhi) = (median(&means[0], |m| m.3), median(&means[1], |m| m.3));
+        // 지터 버퍼 깊이 차(xrun·재버퍼로 회차마다 달라짐)를 뺀 차 = 리샘플러가 더한 지연
+        let adj = (hi - lo) - (bhi - blo);
+        println!(
+            "44.1k 버퍼 {buf} · {frame_ms}ms(회차 중앙값): 저지연 {lo:.2}ms → 고음질 {hi:.2}ms (차 {:+.2}ms, bufferMs 차 {:+.2} 뺀 차 {adj:+.2}ms), estLatencyMs 차 {:+.2}ms, xruns(A+B) 저지연 {xlo} 고음질 {xhi}",
+            hi - lo,
+            bhi - blo,
+            ehi - elo
+        );
+        // #229 realtime 실패(디버그 빌드에서 rubato sinc가 최적화 없이 돌아 스테이지당 1코어 ~10%, xrun 93~313·bufferMs ~20ms)의
+        // 회귀 검사: 고음질이 저지연보다 xrun을 눈에 띄게 더 내면 안 된다(디버그 빌드에서는 저지연도 2.5ms에서 몇 번 낸다).
+        assert!(xhi <= xlo + 10.0, "고음질 xrun {xhi} > 저지연 {xlo} + 10 — 리샘플러 비용으로 워커가 마감을 놓침(rubato opt-level 확인)");
         // estLatencyMs는 두 단계 필터 지연 차를 그대로 더한다(결정적)
         assert!((ehi - elo - 2.61).abs() < 0.1, "est 차 {:.2}", ehi - elo);
         // 실측 차: 필터 지연 차(≈2.6ms)보다 작을 수 있다 — 출력 장치 버퍼 격자(441 = 10ms)에 맞춰 재생되므로 늘어난 지연 일부가
         // 기존 격자 여유에 흡수된다(측정: 128·2.5ms +2.2~2.6ms, 441·5ms +0.9~1.2ms, 흡수 정도가 회차마다 다르다). 늘기는 해야 하고
-        // (하한 0.3ms — #229 리뷰 L2: 441에서 +0.86ms 실행이 있었다) 필터 지연 차 + 1ms를 넘지 않는다.
-        assert!((hi - lo) > 0.3 && (hi - lo) < ehi - elo + 1.0, "종단 차 {:.2}ms", hi - lo);
+        // (하한 0.3ms — #229 리뷰 L2: 441에서 +0.86ms 실행이 있었다) 필터 지연 차 + 2ms를 넘지 않는다(디버그 빌드 xrun 회차 흔들림 —
+        // 로컬 디버그 +2.6~3.6ms). 지터 버퍼 깊이 차는 뺀다. 고친 버그는 +5.9~17ms였다.
+        assert!(adj > 0.3 && adj < ehi - elo + 2.0, "종단 차(bufferMs 차 뺌) {adj:.2}ms, 그대로 {:.2}ms", hi - lo);
     }
 }
 

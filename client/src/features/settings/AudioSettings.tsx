@@ -186,6 +186,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     (config.resampleQuality ?? 'auto') === 'auto',
     selectedInputDevice?.sampleRates,
     selectedOutputDevice?.sampleRates,
+    config.frameMs,
   )
 
   return wrap(

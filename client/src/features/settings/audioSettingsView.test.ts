@@ -116,6 +116,12 @@ describe('P2-17e: 리샘플러 품질 안내', () => {
     expect(both).toContain('입력·출력 장치가')
     expect(both).not.toContain('자동')
   })
+  it('2.5ms 프레임에 고음질을 직접 고르면 부담을 알린다(auto·48k·5ms는 아님)', () => {
+    expect(resampleQualityHint('highQuality', false, [44_100], [44_100], 2.5)).toContain('저사양 PC')
+    expect(resampleQualityHint('highQuality', false, [44_100], [44_100], 5)).not.toContain('저사양 PC')
+    expect(resampleQualityHint('lowLatency', true, [44_100], [44_100], 2.5)).not.toContain('저사양 PC')
+    expect(resampleQualityHint('highQuality', false, [48_000], [48_000], 2.5)).not.toContain('저사양 PC')
+  })
   it('장치 레이트를 모르면 일반 설명', () => {
     expect(resampleQualityHint('highQuality', false)).toContain('장치가 48kHz가 아니면')
     expect(resampleQualityHint('highQuality', false, [48_000], [])).toContain('장치가 48kHz가 아니면')

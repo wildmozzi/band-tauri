@@ -60,6 +60,11 @@ opt-level = 3
 [profile.dev.package.crc]
 opt-level = 3
 
+# 리샘플러(P2-17e, #229 realtime 실패 원인): sinc 128탭은 opt-level 0에서 스테레오 한 단계가 1코어의 약 10%(릴리스 0.2%의 50배)라
+# 가짜 장치 44.1k 2.5ms 프레임에서 워커가 마감을 놓쳤다(CI realtime 잡은 디버그 빌드, dev:tauri도 디버그). rubato만 최적화한다.
+[profile.dev.package.rubato]
+opt-level = 3
+
 [profile.release]
 panic = "abort"
 codegen-units = 1
