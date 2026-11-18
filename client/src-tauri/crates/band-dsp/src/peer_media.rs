@@ -16,7 +16,7 @@ use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 use crate::jitter::{JitterBuffer, JitterSettings, JitterStats};
-use crate::config::INTERNAL_RATE;
+use crate::config::{ResampleQuality, INTERNAL_RATE};
 use crate::mixer::PeerMixCtl;
 use crate::resample::StreamResampler;
 use crate::stats::{AtomicF32, SeqCell};
@@ -213,8 +213,10 @@ impl PeerMedia {
     /// `added_us`: `add_peer` 시각(엔진 epoch µs, `firstAudioMs` 기준, P1-20).
     /// `out_rate`: 이 피어를 받을 워커의 장치 출력 레이트(`StreamInfo.out_rate` — 엔진 수명 동안 고정). 공급 리샘플러를 여기서
     /// 만든다(엔진 ⑧ 후속). 만들 수 없으면 에러 — 워커에 닿기 전에 호출자에게 돌아간다.
-    pub fn new(key: PeerKey, peer_id: String, ssrc: u32, added_us: u64, settings: JitterSettings, rx: MediaRx, out_rate: u32) -> Result<(Arc<PeerMediaShared>, Box<Self>), String> {
-        let feed_rs = Some(StreamResampler::new(INTERNAL_RATE, out_rate, 2)?);
+    /// `quality`: 공급 리샘플러 품질(P2-17e, 엔진 설정의 `EngineConfig::resample_quality()`). 48k 장치면 통과라 상관없다.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(key: PeerKey, peer_id: String, ssrc: u32, added_us: u64, settings: JitterSettings, rx: MediaRx, out_rate: u32, quality: ResampleQuality) -> Result<(Arc<PeerMediaShared>, Box<Self>), String> {
+        let feed_rs = Some(StreamResampler::new(INTERNAL_RATE, out_rate, 2, quality)?);
         let shared = Arc::new(PeerMediaShared::new(key, peer_id, ssrc, added_us));
         let restart_seen = shared.restart_req.load(Ordering::Acquire);
         let me = Box::new(Self { shared: shared.clone(), rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits(), first_audio_us: 0, feed_rs });
@@ -519,7 +521,7 @@ mod tests {
     fn media(key: u64, profile: f32) -> (Box<PeerMedia>, MediaTx) {
         let k = PeerKey::from_raw(key);
         let (tx, rx) = media_link(k);
-        (PeerMedia::new(k, format!("p{key}"), key as u32, 0, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile }, rx, 48_000).unwrap().1, tx)
+        (PeerMedia::new(k, format!("p{key}"), key as u32, 0, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile }, rx, 48_000, crate::config::ResampleQuality::Auto).unwrap().1, tx)
     }
 
     /// 재시작 요청은 세대가 바뀐 반복에 한 번만 적용되고, 여러 요청은 한 번으로 합쳐진다.
@@ -539,7 +541,7 @@ mod tests {
     #[test]
     fn first_audio_recorded_once_relative_to_add() {
         let (_tx, rx) = media_link(PeerKey::from_raw(3));
-        let (s, mut pm) = PeerMedia::new(PeerKey::from_raw(3), "p3".into(), 3, 1_000_000, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }, rx, 48_000).unwrap();
+        let (s, mut pm) = PeerMedia::new(PeerKey::from_raw(3), "p3".into(), 3, 1_000_000, JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 }, rx, 48_000, crate::config::ResampleQuality::Auto).unwrap();
         pm.publish();
         assert_eq!(s.stats().first_audio_ms(s.added_us), None);
         pm.note_audio(1_250_500);
@@ -594,7 +596,7 @@ mod tests {
     fn feed_resampler_rides_with_media_and_is_taken_only_at_matching_rate() {
         let k = PeerKey::from_raw(7);
         let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
-        let (_s, mut pm) = PeerMedia::new(k, "p7".into(), 7, 0, js, media_link(k).1, 44_100).unwrap();
+        let (_s, mut pm) = PeerMedia::new(k, "p7".into(), 7, 0, js, media_link(k).1, 44_100, crate::config::ResampleQuality::Auto).unwrap();
         assert!(pm.has_feed_resampler());
         assert!(pm.take_feed_resampler(48_000).is_none(), "레이트가 다르면 꺼내지 않는다");
         assert!(pm.has_feed_resampler(), "꺼내지 않은 것은 그대로 실려 있다");
@@ -604,6 +606,6 @@ mod tests {
         assert!(pm.take_feed_resampler(44_100).is_none(), "한 번만");
         pm.put_feed_resampler(rs);
         assert!(pm.has_feed_resampler());
-        assert!(PeerMedia::new(k, "p7".into(), 7, 0, js, media_link(k).1, 0).is_err(), "만들 수 없는 레이트는 제어 평면에서 에러");
+        assert!(PeerMedia::new(k, "p7".into(), 7, 0, js, media_link(k).1, 0, crate::config::ResampleQuality::Auto).is_err(), "만들 수 없는 레이트는 제어 평면에서 에러");
     }
 }

@@ -343,7 +343,7 @@ fn mismatched_feed_resampler_gets_no_slot_and_worker_never_allocates() {
     let mk = |k: u64, rate: u32| {
         let key = PeerKey::from_raw(k);
         let (tx, rx) = media_link(key);
-        let (s, m) = PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, rx, rate).unwrap();
+        let (s, m) = PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, rx, rate, band_dsp::config::ResampleQuality::Auto).unwrap();
         (s, m, tx)
     };
     let (bad, bad_m, _tx1) = mk(1, 44_100);
@@ -437,7 +437,7 @@ fn run_feed_sim(p: FeedSim) -> FeedSimResult {
     let sh = &feed.bank.slots[slot];
     sh.set_gains((1.0, 1.0), (1.0, 1.0));
     sh.state.store(SLOT_ACTIVE, Ordering::Release);
-    let mut pf = PeerFeed::new(slot, band_dsp::resample::StreamResampler::new(INTERNAL_RATE, 48_000, 2).unwrap(), sh);
+    let mut pf = PeerFeed::new(slot, band_dsp::resample::StreamResampler::new(INTERNAL_RATE, 48_000, 2, band_dsp::config::ResampleQuality::Auto).unwrap(), sh);
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
     let mut tracker = CallbackTracker::new(48_000);
     let mut enc = SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap();

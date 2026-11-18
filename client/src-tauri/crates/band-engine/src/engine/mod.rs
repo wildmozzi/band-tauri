@@ -32,7 +32,7 @@ use band_dsp::media_link::{media_link, PeerKey};
 use crate::net::peer::LocalDescriptor;
 use crate::net::{Net, NetOptions};
 use crate::sys::prio;
-use band_dsp::config::{EngineConfig, INTERNAL_RATE};
+use band_dsp::config::{EngineConfig, ResampleQuality, INTERNAL_RATE};
 use device::{AudioBackend, StreamInfo};
 use band_dsp::jitter::JitterSettings;
 use measure::{EchoJob, LoopbackJob};
@@ -305,7 +305,7 @@ impl Engine {
         // 같은 값을 쓴다(장치·레이트를 바꾸면 엔진을 다시 시작하고 피어도 다시 추가된다). 만들 수 없으면 net에 넣기 전에 에러.
         // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB, 공급 리샘플러)는 여기, 락 밖에서 할당한다. 워커는 추가·제거·재시작 어디서도 할당·해제하지 않는다(재시작은 제자리 초기화, 디코더는 여기서 미리 만든 Opus 모노·스테레오 풀과 주고받는다 — 코덱이 바뀌어도 새로 만들지 않음, ③c `tests/rt_alloc.rs`; 해제는 반환 큐를 거쳐 제어 평면에서).
         let (tx, rx) = media_link(key);
-        let (media, worker_side) = PeerMedia::new(key, peer_id.clone(), desc.ssrc, added_us, settings, rx, self.info.out_rate)?;
+        let (media, worker_side) = PeerMedia::new(key, peer_id.clone(), desc.ssrc, added_us, settings, rx, self.info.out_rate, self.cfg.resample_quality())?;
         // 등록부 락 안에서 믹스 설정 복사 → net 교체 → 등록부 교체: 겹친 set_peer_gain은 옛 것에 쓰여 복사로 넘어가거나
         // 새 것에 쓰인다(설계 7.3절). 복사는 net에 넣기 전에 해서 워커가 새 항목을 기본 게인으로 보는 순간이 없다.
         let mut reg = self.media.lock();
@@ -496,7 +496,8 @@ impl Engine {
     pub fn subscribe_mix(&mut self, mut cb: MixCallback) -> Result<(), String> {
         self.unsubscribe_mix();
         let mut cons = self.tap_cons.lock().take().ok_or("믹스 탭을 쓸 수 없습니다")?;
-        let mut rs = match StreamResampler::new(self.info.out_rate, INTERNAL_RATE, 2) {
+        // 믹스 탭(관람 송출·녹음 쪽)은 지연보다 음질이라 설정과 상관없이 sinc(P2-17e). 장치가 48k면 통과.
+        let mut rs = match StreamResampler::new(self.info.out_rate, INTERNAL_RATE, 2, ResampleQuality::HighQuality) {
             Ok(r) => r,
             Err(e) => {
                 *self.tap_cons.lock() = Some(cons);

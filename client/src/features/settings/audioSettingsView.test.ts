@@ -3,6 +3,7 @@ import {
   bufferFrameHint,
   formatTestDevice,
   formatTestLatency,
+  formatTestResampler,
   inputChannelOptions,
   isClipping,
   levelPercent,
@@ -10,6 +11,7 @@ import {
   parseJitterMs,
   payloadAllowed,
   peerLabel,
+  resampleQualityHint,
   withLeftInputChannel,
   withRightInputChannel,
 } from './audioSettingsView'
@@ -97,5 +99,31 @@ describe('bufferFrameHint 장치 레이트·ASIO (#196 리뷰 L4)', () => {
   it('ASIO면 제어판 확인 안내를 덧붙인다', () => {
     expect(bufferFrameHint({ bufferSize: 128, frameMs: 2.5, inputDriver: 'asio' })).toContain('제어판')
     expect(bufferFrameHint({ bufferSize: 128, frameMs: 2.5, inputDriver: 'wasapiExclusive' })).not.toContain('제어판')
+  })
+})
+
+describe('P2-17e: 리샘플러 품질 안내', () => {
+  it('입·출력 장치가 모두 48kHz로 열리면 영향 없음', () => {
+    const h = resampleQualityHint('highQuality', true, [44_100, 48_000], [48_000])
+    expect(h).toContain('영향이 없습니다')
+  })
+  it('48kHz가 아닌 장치를 짚고, auto면 실제 품질을 알린다', () => {
+    const h = resampleQualityHint('lowLatency', true, [44_100], [48_000])
+    expect(h).toContain('자동: 지금 프리셋에서는 저지연')
+    expect(h).toContain('입력 장치가 48kHz가 아니라')
+    expect(h).not.toContain('영향이 없습니다')
+    const both = resampleQualityHint('highQuality', false, [44_100], [44_100])
+    expect(both).toContain('입력·출력 장치가')
+    expect(both).not.toContain('자동')
+  })
+  it('장치 레이트를 모르면 일반 설명', () => {
+    expect(resampleQualityHint('highQuality', false)).toContain('장치가 48kHz가 아니면')
+    expect(resampleQualityHint('highQuality', false, [48_000], [])).toContain('장치가 48kHz가 아니면')
+  })
+  it('테스트 모니터 표시', () => {
+    expect(formatTestResampler(null)).toBe('없음 (48kHz)')
+    expect(formatTestResampler(undefined)).toBe('없음 (48kHz)')
+    expect(formatTestResampler({ quality: 'highQuality', inDelayMs: 1.44, outDelayMs: 1.32 })).toBe('고음질 · +2.8ms')
+    expect(formatTestResampler({ quality: 'lowLatency', inDelayMs: 0.08, outDelayMs: 0 })).toBe('저지연 · +0.1ms')
   })
 })

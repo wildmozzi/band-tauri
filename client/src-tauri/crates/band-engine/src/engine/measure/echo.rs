@@ -868,7 +868,7 @@ mod tests {
         let net = crate::net::Net::start("me".into(), &opts).unwrap();
         let key = PeerKey::from_raw(1);
         let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
-        let (media, _worker_side) = band_dsp::peer_media::PeerMedia::new(key, "b".into(), 1, 0, js, media_link(key).1, 48_000).unwrap();
+        let (media, _worker_side) = band_dsp::peer_media::PeerMedia::new(key, "b".into(), 1, 0, js, media_link(key).1, 48_000, band_dsp::config::ResampleQuality::Auto).unwrap();
         let (port, _rt) = echo_port();
         let job = EchoJob {
             port: Arc::new(port),

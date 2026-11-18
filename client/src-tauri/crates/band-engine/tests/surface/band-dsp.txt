@@ -26,6 +26,7 @@ config.rs	const	MAX_SOURCES
 config.rs	const	TAG_BYTES
 config.rs	enum	CodecKind
 config.rs	enum	DriverKind
+config.rs	enum	ResampleQuality
 config.rs	field	buffer_size
 config.rs	field	channels
 config.rs	field	codec
@@ -39,6 +40,7 @@ config.rs	field	jitter_profile
 config.rs	field	opus_bitrate
 config.rs	field	output_device
 config.rs	field	output_driver
+config.rs	field	resample_quality
 config.rs	field	udp_port
 config.rs	fn	frame_code_from_samples
 config.rs	fn	frame_samples_from_code
@@ -47,6 +49,7 @@ config.rs	method	jitter_max_ms
 config.rs	method	jitter_min_ms
 config.rs	method	jitter_profile
 config.rs	method	opus_bitrate
+config.rs	method	resample_quality
 config.rs	method	supported
 config.rs	method	validate
 config.rs	struct	EngineConfig
@@ -232,6 +235,7 @@ relay_codec.rs	struct	LossCodecPolicy
 relay_codec.rs	struct	PolicyInputs
 relay_codec.rs	struct	RelayCodecPolicy
 resample.rs	const	CHUNK
+resample.rs	fn	filter_delay_ms
 resample.rs	method	available
 resample.rs	method	is_passthrough
 resample.rs	method	new

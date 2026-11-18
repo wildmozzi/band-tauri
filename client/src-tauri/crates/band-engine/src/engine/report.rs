@@ -96,6 +96,18 @@ pub struct PeerStats {
     pub(crate) rx_stale_dropped: u64,
 }
 
+/// 장치 레이트 ↔ 48kHz 리샘플러 상태(P2-17e).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResamplerStats {
+    /// 실제로 쓰는 품질(`lowLatency` | `highQuality` — `auto`를 푼 값).
+    pub quality: config::ResampleQuality,
+    /// 입력 단계(장치 → 48k) 필터 지연(ms). 입력 장치가 48kHz면 0.
+    pub in_delay_ms: f32,
+    /// 출력 단계(48k → 장치) 필터 지연(ms). 출력 장치가 48kHz면 0.
+    pub out_delay_ms: f32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStats {
@@ -122,6 +134,9 @@ pub struct EngineStats {
     pub input_silent_packets: u64,
     /// 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기, cpal·가짜 장치는 실측 콜백 크기.
     pub device_period_ms: f32,
+    /// 리샘플러(P2-17e). 입·출력 장치가 모두 48kHz면(리샘플 없음 — 품질 설정 영향 없음) 또는 정지 상태면 null.
+    /// 필터 지연은 `estLatencyMs`·`monitorLatencyMs`에 들어 있다.
+    pub resampler: Option<ResamplerStats>,
     /// 실제로 열린 오디오 백엔드: `wasapiExclusive` | `wasapiShared3`(IAudioClient3 저지연 공유) |
     /// `cpalWasapi` | `cpalAsio` | `fake`. 입·출력이 다르면 `입력/출력`. 정지 상태면 빈 문자열.
     pub backend: String,
@@ -162,6 +177,7 @@ impl EngineStats {
             input_discontinuities: 0,
             input_silent_packets: 0,
             device_period_ms: 0.0,
+            resampler: None,
             backend: String::new(),
             thread_priority: crate::sys::prio::ThreadPriorityStats::stopped(),
             peers: Vec::new(),
@@ -198,6 +214,20 @@ pub struct EndedConn {
 }
 
 impl Engine {
+    /// 리샘플러 상태(P2-17e): 입·출력 레이트가 모두 48k면 None.
+    pub(crate) fn resampler_stats(&self) -> Option<ResamplerStats> {
+        let (i, o) = (self.info.in_rate, self.info.out_rate);
+        if i == config::INTERNAL_RATE && o == config::INTERNAL_RATE {
+            return None;
+        }
+        let quality = self.cfg.resample_quality();
+        Some(ResamplerStats {
+            quality,
+            in_delay_ms: band_dsp::resample::filter_delay_ms(i, config::INTERNAL_RATE, quality),
+            out_delay_ms: band_dsp::resample::filter_delay_ms(config::INTERNAL_RATE, o, quality),
+        })
+    }
+
     /// 피어별 연결 시도 → 결과(P1-18, net 제어 스레드가 기록). 정지 뒤에는 정지한 Net의 마지막 이벤트,
     /// 네트워크 없는 엔진이면 빈 목록.
     pub fn conn_events(&self) -> Vec<crate::net::connlog::ConnEvent> {
@@ -221,9 +251,12 @@ impl Engine {
         // GOAL 1절 정의: 입력 장치 버퍼 + 프레임 + 출력 링 + 장치 출력 버퍼(네트워크 경로의 로컬 몫, 첫 샘플 기준).
         // 콜백 구동 믹스(P1-0)에는 믹스된 출력 링이 없다. 출력 콜백이 피어 소스 링에서 바로 꺼내고,
         // 소스 링에 머무는 시간은 지터 버퍼 깊이(`PeerStats.bufferMs`)에 포함되어 목표로 제어된다.
-        let est = in_ms + frame_ms + out_ms;
+        // 리샘플러 필터 지연(P2-17e, 장치가 48k면 0): 입력 단계는 송신·모니터 경로, 출력 단계는 수신·모니터 경로에 든다.
+        let resampler = self.resampler_stats();
+        let (rs_in_ms, rs_out_ms) = resampler.map_or((0.0, 0.0), |r| (r.in_delay_ms, r.out_delay_ms));
+        let est = in_ms + rs_in_ms + frame_ms + rs_out_ms + out_ms;
         // 모니터 경로(내 소리 → 내 귀): 입력 버퍼 + 로컬 FIFO·로컬 소스 링 점유량 시간평균 + 출력 버퍼(임펄스 실측으로 검증).
-        let monitor = in_ms + ws.monitor_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0 + out_ms;
+        let monitor = in_ms + rs_in_ms + ws.monitor_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0 + rs_out_ms + out_ms;
         let stream_errors = c.stream_errors.load(Ordering::Relaxed);
         let device_lost = ws.device_stalled.load(Ordering::Relaxed) || c.device_lost.load(Ordering::Relaxed);
         let stream_failed = c.stream_failed.load(Ordering::Relaxed);
@@ -337,6 +370,7 @@ impl Engine {
             input_discontinuities: c.input_discontinuities.load(Ordering::Relaxed),
             input_silent_packets: c.input_silent_packets.load(Ordering::Relaxed),
             device_period_ms,
+            resampler,
             backend: self.info.backend_label(),
             thread_priority: prio::ThreadPriorityStats {
                 worker: ws.thread_prio.load(),

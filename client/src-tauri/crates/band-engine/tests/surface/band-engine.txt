@@ -284,6 +284,7 @@ engine/report.rs	field	echo_active
 engine/report.rs	field	echo_requested
 engine/report.rs	field	est_latency_ms
 engine/report.rs	field	first_audio_ms
+engine/report.rs	field	in_delay_ms
 engine/report.rs	field	input_discontinuities
 engine/report.rs	field	input_level
 engine/report.rs	field	input_silent_packets
@@ -295,6 +296,7 @@ engine/report.rs	field	max_corr_cents
 engine/report.rs	field	metronome
 engine/report.rs	field	monitor_latency_ms
 engine/report.rs	field	network
+engine/report.rs	field	out_delay_ms
 engine/report.rs	field	output_level
 engine/report.rs	field	path
 engine/report.rs	field	peer_clock
@@ -305,11 +307,13 @@ engine/report.rs	field	period
 engine/report.rs	field	plan_retries
 engine/report.rs	field	playout_ms
 engine/report.rs	field	qos
+engine/report.rs	field	quality
 engine/report.rs	field	recording
 engine/report.rs	field	relay
 engine/report.rs	field	remote_frame_ms
 engine/report.rs	field	remote_input_buffer_ms
 engine/report.rs	field	remote_loss_pct
+engine/report.rs	field	resampler
 engine/report.rs	field	rtt_ms
 engine/report.rs	field	running
 engine/report.rs	field	sample_rate
@@ -340,6 +344,7 @@ engine/report.rs	struct	EndedConn
 engine/report.rs	struct	EngineSnapshot
 engine/report.rs	struct	EngineStats
 engine/report.rs	struct	PeerStats
+engine/report.rs	struct	ResamplerStats
 engine/report.rs	struct	WorkerLockWaits
 engine/report.rs	struct	WorkerTiming
 engine/rt.rs	const	SLOT_ACTIVE

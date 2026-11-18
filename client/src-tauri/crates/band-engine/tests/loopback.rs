@@ -762,22 +762,31 @@ fn impulse_latency_matches_estimate() {
     }
 }
 
+type LinkLatency = (Vec<f64>, band_engine::testing::engine::report::EngineStats, band_engine::testing::engine::report::EngineStats, jitter_stats::JitterStats);
+
 /// A(입력 임펄스) → B(출력) 종단 간 지연을 공유 클럭으로 잰다. 반환: (지연 목록 ms, A stats, B stats, B 지터 통계).
-fn link_impulse_latency(
-    cfg: EngineConfig,
-    seconds: u64,
-) -> (Vec<f64>, band_engine::testing::engine::report::EngineStats, band_engine::testing::engine::report::EngineStats, jitter_stats::JitterStats) {
-    const PERIOD: u64 = 9_601; // 0.2초, 장치 버퍼·프레임과 서로소
+fn link_impulse_latency(cfg: EngineConfig, seconds: u64) -> LinkLatency {
+    link_impulse_latency_at(cfg, seconds, 48_000, None)
+}
+
+/// `link_impulse_latency`를 장치 레이트 `rate`(두 장치 모두)로. `buffer`: 장치 버퍼(프레임, None = 설정값).
+/// 리샘플러가 임펄스를 sinc 모양으로 퍼뜨리므로 문턱(0.3)을 넘은 뒤 300프레임 안의 최댓값 위치를 도착으로 본다(군지연).
+fn link_impulse_latency_at(cfg: EngineConfig, seconds: u64, rate: u32, buffer: Option<usize>) -> LinkLatency {
+    const PERIOD: u64 = 9_601; // 48k에서 0.2초, 장치 버퍼·프레임과 서로소
     let src: Arc<band_engine::testing::engine::device::fake::SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
         for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
             frame.fill(if (start + i as u64) % PERIOD == 100 { 0.9 } else { 0.0 });
         }
     });
     let t0 = Instant::now();
-    let mut ba = FakeBackend::new(48_000, src);
+    let mut ba = FakeBackend::new(rate, src);
     ba.t0 = Some(t0);
     ba.wake_jitter_us = 300;
-    let mut bb = FakeBackend::silence(48_000);
+    ba.in_buffer = buffer;
+    ba.out_buffer = buffer;
+    let mut bb = FakeBackend::silence(rate);
+    bb.in_buffer = buffer;
+    bb.out_buffer = buffer;
     bb.t0 = Some(t0);
     bb.out_phase_us = 700;
     bb.wake_jitter_us = 300;
@@ -792,21 +801,83 @@ fn link_impulse_latency(
     drop(a);
     drop(b);
     let origin = origin.load(Ordering::SeqCst) as f64;
+    let r = rate as f64;
+    let frames = out.as_chunks::<2>().0;
     let mut lat = Vec::new();
     let mut last_k = None;
-    for (j, f) in out.as_chunks::<2>().0.iter().enumerate() {
-        if f[0] > 0.5 {
-            let t_play = phase + (origin + j as f64) / 48_000.0;
-            let k = ((t_play * 48_000.0 - 100.0) / PERIOD as f64).floor() as i64;
+    let mut j = 0;
+    while j < frames.len() {
+        if frames[j][0] > 0.3 {
+            // 300프레임 안의 최댓값 = 임펄스 도착
+            let end = (j + 300).min(frames.len());
+            let jm = (j..end).max_by(|&a, &b| frames[a][0].total_cmp(&frames[b][0])).unwrap_or(j);
+            let t_play = phase + (origin + jm as f64) / r;
+            let k = ((t_play * r - 100.0) / PERIOD as f64).floor() as i64;
             // 연결·버퍼링 안정화 뒤(3초 이후)만
             if k >= 0 && last_k != Some(k) && t_play > 3.0 {
-                let t_cap = (k as f64 * PERIOD as f64 + 100.0) / 48_000.0;
+                let t_cap = (k as f64 * PERIOD as f64 + 100.0) / r;
                 lat.push((t_play - t_cap) * 1000.0);
                 last_k = Some(k);
             }
+            j = end;
+        } else {
+            j += 1;
         }
     }
     (lat, sa, sb, js)
+}
+
+/// P2-17e 측정: 44.1kHz 가짜 장치 A→B 종단 지연, 리샘플러 품질 저지연 ↔ 고음질(같은 실행에서 교차 `RESAMPLE_AB_ROUNDS`회).
+/// 고음질은 입력(A)·출력(B) 두 단계 필터 지연(≈ 1.44 + 1.32ms)만큼 늘어야 하고, 그 증가분이 `estLatencyMs`에도 보여야 한다.
+/// 실행: `cargo test --release --test loopback resample_quality_44k_latency_ab -- --ignored --nocapture`
+#[test]
+#[ignore = "realtime: 결정적 짝 band_dsp resample::tests::{frequency_response_table, filter_delay_matches_resampler}"]
+fn resample_quality_44k_latency_ab() {
+    use band_dsp::config::ResampleQuality;
+    let _g = RT_LOCK.lock();
+    let rounds: usize = std::env::var("RESAMPLE_AB_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    for (buf, frame_ms) in [(128u32, 2.5f32), (441, 5.0)] {
+        let mut means = [Vec::new(), Vec::new()];
+        for _ in 0..rounds {
+            for (i, q) in [ResampleQuality::LowLatency, ResampleQuality::HighQuality].into_iter().enumerate() {
+                let cfg = EngineConfig { codec: CodecKind::Pcm16, resample_quality: Some(q), ..config(buf, frame_ms) };
+                let (lat, sa, sb, js) = link_impulse_latency_at(cfg, 8, 44_100, Some(buf as usize));
+                assert!(lat.len() >= 10, "임펄스 검출 {}", lat.len());
+                let mean = lat.iter().sum::<f64>() / lat.len() as f64;
+                let rs = sb.resampler.expect("44.1k 장치면 resampler 통계");
+                assert_eq!(rs.quality, q);
+                println!(
+                    "44.1k 버퍼 {buf} · {frame_ms}ms {q:?}: 종단 평균 {mean:.2}ms (범위 {:.2}..{:.2}, n={}), A est {:.2} B est {:.2}, 필터 지연 입 {:.2} 출 {:.2}ms, B bufferMs {:.2}, 은닉 {}, xruns A {} B {}",
+                    lat.iter().cloned().fold(f64::MAX, f64::min),
+                    lat.iter().cloned().fold(0.0, f64::max),
+                    lat.len(),
+                    sa.est_latency_ms,
+                    sb.est_latency_ms,
+                    rs.in_delay_ms,
+                    rs.out_delay_ms,
+                    js.buffer_ms,
+                    js.concealed,
+                    sa.xruns,
+                    sb.xruns
+                );
+                means[i].push((mean, sb.est_latency_ms as f64));
+            }
+        }
+        // 회차 중앙값: 한 회차의 xrun·재버퍼(깊이 +3ms)가 평균을 끌지 않게
+        let avg = |v: &[(f64, f64)], f: fn(&(f64, f64)) -> f64| {
+            let mut x: Vec<f64> = v.iter().map(f).collect();
+            x.sort_by(f64::total_cmp);
+            x[x.len() / 2]
+        };
+        let (lo, hi) = (avg(&means[0], |m| m.0), avg(&means[1], |m| m.0));
+        let (elo, ehi) = (avg(&means[0], |m| m.1), avg(&means[1], |m| m.1));
+        println!("44.1k 버퍼 {buf} · {frame_ms}ms(회차 중앙값): 저지연 {lo:.2}ms → 고음질 {hi:.2}ms (차 {:+.2}ms), estLatencyMs 차 {:+.2}ms", hi - lo, ehi - elo);
+        // estLatencyMs는 두 단계 필터 지연 차를 그대로 더한다(결정적)
+        assert!((ehi - elo - 2.61).abs() < 0.1, "est 차 {:.2}", ehi - elo);
+        // 실측 차: 필터 지연 차(≈2.6ms)보다 작을 수 있다 — 출력 장치 버퍼 격자(441 = 10ms)에 맞춰 재생되므로 늘어난 지연 일부가
+        // 기존 격자 여유에 흡수된다(측정: 128·2.5ms +2.4ms, 441·5ms +1.0ms). 늘기는 해야 하고 필터 지연 차 + 1ms를 넘지 않는다.
+        assert!((hi - lo) > 0.5 && (hi - lo) < ehi - elo + 1.0, "종단 차 {:.2}ms", hi - lo);
+    }
 }
 
 #[test]

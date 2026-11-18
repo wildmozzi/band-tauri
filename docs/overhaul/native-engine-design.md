@@ -37,7 +37,13 @@
   - 워커 기다림 선택 `Nap::pick`(P2-17g, `engine/worker/clock.rs`): `PeerSources::service`는 링이 모자란 피어 중 가장 이른 은닉 마감(`PeerRound.deadline_us` = 다음 콜백 − 여유)을 돌려주고(이전: 마감이 `POLL` 안인지 `urgent`만), 조정자는 지금 시각에서 마감까지 남은 시간으로 고른다. 남은 시간 > `POLL` + `POLL_TAIL_US`(1ms)면 `POLL`, `FINE_POLL` 이상(또는 0 = 콜백 도중이라 판단 못 함)이면 `FINE_POLL`, 그 사이(0 < 남은 시간 < 150µs)면 자지 않고 마감까지 돈다(최대 150µs). 그래서 수면을 고른 반복은 overshoot가 `POLL` 2.5ms·`FINE_POLL` 1.5ms까지여도 다음 콜백 전에 깬다(실측 최대 2.0 / 1.47ms). 실측 모델 6피어 60분 xrun 9 → **0**(GOAL 전 항목 PASS), 기본 모델 60분도 xrun 0·PASS. 대가: 마감 뒤 첫 기상이 마감에 가까워져 늦은 패킷을 기다려 주던 우연한 여유가 줄어든다 — 5분 fixture 은닉은 피어별 −0.013~+0.009%p, 꼬리 긴 지터 회선 #1(1절 대상 밖, P1-6d)의 마지막 창 bufferMs는 늦은 패킷 예산이 목표를 조금 높게 두어 시드 1..10 평균 11.78 → 11.98ms(+0.2ms, 시드 흩어짐 ±0.3ms, 알려진 미달 기준값 12.17ms로 갱신), M2 시험 180실행 스윕의 언더런 콜백 밖 단발 은닉 0 → 4. 6피어 60분 반복 중 `FINE_POLL` 2.2~2.9%·돌기 0.5~0.6%(하네스). 실기 비중은 `EngineStats.cpu.workerFineNapPct`·`workerSpinPct`(창 비율)로 본다. 기본 모델·fixture는 U(0..300µs) 그대로다.
   - 로컬 소스(모니터·탭): 로컬 FIFO가 입·출력 클럭 차를 흡수하므로, 소스 링은 콜백이 소비한 만큼 `장치 버퍼 1개 + 청크 + 적응 여유`(로컬 슬롯 언더런 시 청크씩 증가 — 전역 xrun(피어 소스 부족·입력 오버런)에는 반응하지 않음, 최대 장치 버퍼 1개, 10초 무사고 시 감소)로 다시 채운다. 모니터 경로는 GOAL 지표 밖이다.
   - 게인·팬·뮤트·모니터 설정은 워커가 소스별 원자값으로 넣고, 소스 레벨은 콜백이 원자값으로 알린다. 피어가 빠지면 슬롯을 `DRAIN`으로 바꾸고, 콜백이 남은 샘플을 버린 뒤 비운다.
-  - 출력 레이트가 48kHz가 아니면 워커가 소스마다 48k → 장치 레이트로 리샘플해 넣는다. 믹스 탭은 장치 레이트로 나오고 탭 스레드가 48kHz로 되돌린다. 리샘플은 rubato `FastFixedIn`(7차 다항식, 필터 지연 ≈0.07ms)이고 입력 청크는 16프레임이다(청크가 찰 때까지 묵는 양이 지연이 됨 — 48에서 16으로 줄여 44.1k 장치 종단 지연 약 −0.5ms, P2-17d).
+  - 출력 레이트가 48kHz가 아니면 워커가 소스마다 48k → 장치 레이트로 리샘플해 넣는다. 믹스 탭은 장치 레이트로 나오고 탭 스레드가 48kHz로 되돌린다. 입력 청크는 16프레임이다(청크가 찰 때까지 묵는 양이 지연이 됨 — 48에서 16으로 줄여 44.1k 장치 종단 지연 약 −0.5ms, P2-17d).
+  - **리샘플 품질(P2-17e)**: `EngineConfig.resampleQuality`. `lowLatency` = rubato `FastFixedIn` 7차 다항식, `highQuality` = rubato `SincFixedIn` 128탭(BlackmanHarris², 차단 0.92 × 낮은 쪽 나이퀴스트, 선형 보간표 256배). `auto`(기본, 필드 없는 옛 설정 포함)는 프레임 2.5ms(초저지연 프리셋)면 `lowLatency`, 아니면 `highQuality`다. 입력·로컬 모니터·피어 공급 리샘플러가 이 품질을 쓰고, 믹스 탭(48k로 되돌리는 쪽)은 지연과 상관없어 늘 sinc다. 필터 표·버퍼는 생성 때 모두 할당하고(피어 공급용은 제어 평면 `PeerMedia::new`), 워커의 `push`·`pop`은 할당이 없다. 실제 품질과 단계별 필터 지연은 `EngineStats.resampler`(48k 장치면 null)로 보이고, 필터 지연은 `estLatencyMs`·`monitorLatencyMs`에 더한다. 측정(`band-dsp` `resample::tests::frequency_response_table`·`cpu_bench`, release, 스테레오, 1코어 실시간 대비):
+
+    | 품질 | 필터 지연 44.1→48 / 48→44.1 | 15k | 18k | 20k | 23k 이미지(44.1→48) | 23k 에일리어싱(48→44.1) | CPU |
+    |---|---|---|---|---|---|---|---|
+    | lowLatency(다항식) | 0.08 / 0.07ms | −0.86 / −0.51dB | −2.43 / −1.52dB | −4.22 / −2.71dB | −8.4dB | −3.7dB | 0.12~0.13% |
+    | highQuality(sinc 128) | 1.44 / 1.32ms | 0.00 / 0.00dB | 0.00 / 0.00dB | −3.04 / −3.23dB | −110dB | −136dB | 0.19~0.22% |
 - 깊이 측정과 로컬 FIFO 판단에 쓰는 시각은 워커 기상 시각이 아니라 **출력 콜백 시각 추정치**다.
   - 추정의 입력은 출력 콜백이 장치에 내보낸 누적 프레임 수(`out_played_frames`, 언더런으로 0을 채운 부분 포함)다.
   - 추정치 = 최근 2초 창(0.5초 버킷 4개)에서 본 `벽시계 − 재생 프레임/레이트`의 최솟값 + 재생 프레임 시각이다.
@@ -400,7 +406,9 @@ interface EngineConfig {
   jitterMinMs?: number; jitterMaxMs?: number
   jitterProfile?: number        // 0(저지연)..1(안정), 기본 0.5. 1.2절
   udpPort?: number
+  resampleQuality?: ResampleQuality   // 기본 'auto'. 1절 "리샘플 품질"
 }
+type ResampleQuality = 'auto' | 'lowLatency' | 'highQuality'
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
 interface PeerStats { peerId: string; state: PeerState; path: 'lan' | 'public' | 'relay' | null; rttMs: number | null; jitterMs: number; bufferMs: number; targetMs: number; concealPct: number; corrTimePct: number; maxCorrCents: number; lossPct: number; late: number; concealed: number; level: number; playoutMs: number; echoRequested: boolean; echoActive: boolean; peerEchoing: boolean; txCodec: 'opus' | 'pcm16' | null; txCodecAuto: boolean; txCodecReason: 'relayLoad' | 'lossFeedback' | null; remoteLossPct: number | null; remoteConcealPct: number | null; connectMs: number | null; firstAudioMs: number | null; remoteFrameMs: number | null; remoteInputBufferMs: number | null; rxDupDropped: number; rxStaleDropped: number 
@@ -414,7 +422,8 @@ type QosMarking = 'pending' | 'ef' | 'voice' | 'none'
 interface QosStats { marking: QosMarking; ipTos: boolean; qwave: boolean; flows: number; efFlows: number; failed: number; lastError: string | null }
 interface SendQueueStats { p50Ms: number; p99Ms: number; maxMs: number; packets: number }
 interface CpuStats { workerPct: number | null; callbackLoadPct: number; callbackP50Us: number; callbackP99Us: number; callbackMaxUs: number; callbackP99PeriodPct: number; inputCallbackMaxUs: number; callbacks: number; windowMs: number; workerWakeP50Us: number; workerWakeP99Us: number; workerWakeMaxUs: number; deadlineGuardUs: number; workerFineNapPct: number; workerSpinPct: number }
-interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null; recording: RecordStats | null; cpu: CpuStats; corePlacement: CorePlacementStats | null }
+interface EngineStats { running: boolean; sampleRate: number; deviceBuffer: number; inputLevel: number; outputLevel: number; xruns: number; estLatencyMs: number; monitorLatencyMs: number; streamErrors: number; deviceLost: boolean; streamFailed: boolean; streamRestarts: number; inputDiscontinuities: number; inputSilentPackets: number; devicePeriodMs: number; resampler: ResamplerStats | null; backend: string; threadPriority: ThreadPriorityStats; peers: PeerStats[]; relay: RelayStats | null; metronome: MetronomeStats; qos: QosStats | null; sendQueue: SendQueueStats | null; recording: RecordStats | null; cpu: CpuStats; corePlacement: CorePlacementStats | null }
+interface ResamplerStats { quality: 'lowLatency' | 'highQuality'; inDelayMs: number; outDelayMs: number }
 interface CorePlacementStats { worker: ThreadPlacement; netRecv: ThreadPlacement | null }
 interface ThreadPlacement { samples: number; pPct: number; ePct: number; lpEPct: number }
 type ThreadPriority = 'unmanaged' | 'mmcss' | 'elevated' | 'failed' | 'disabled' | 'unsupported'
@@ -469,7 +478,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 - `PeerStats.targetMs` = 지터 버퍼 목표 깊이(1.2절 최종 목표). `bufferMs`가 이 값을 따라간다. `concealPct` = 최근 5초 은닉 프레임 / 생산 프레임(%, 손실 + 늦은 패킷 + 언더런, GOAL 2절 지표). `corrTimePct` = 최근 5초 중 깊이 보정(샘플 버림·삽입) 모드였던 패킷 비율(%), `maxCorrCents` = 재생 시작 이후 보정의 최대 국소 피치 편차(센트, 상한 약 4.3).
 - `engine_subscribe_mix` 채널은 JSON 배열이 아닌 **raw 바이트**(`tauri::ipc::InvokeResponseBody::Raw`, f32 LE 인터리브)로 보낸다.
 
-`estLatencyMs`(GOAL 1절 정의) = 입력 장치 버퍼 + 프레임 + 출력 링 + 장치 출력 버퍼. 네트워크를 제외한, 네트워크 경로 중 내 쪽의 로컬 처리 지연이며 첫 샘플 기준이다. 장치 내부의 숨은 버퍼(WASAPI 공유 모드 엔진 버퍼 등)는 포함하지 않는다.
+`estLatencyMs`(GOAL 1절 정의) = 입력 장치 버퍼 + 프레임 + 출력 링 + 장치 출력 버퍼(+ 장치가 48kHz가 아니면 입·출력 리샘플러 필터 지연 `EngineStats.resampler`, P2-17e). 네트워크를 제외한, 네트워크 경로 중 내 쪽의 로컬 처리 지연이며 첫 샘플 기준이다. 장치 내부의 숨은 버퍼(WASAPI 공유 모드 엔진 버퍼 등)는 포함하지 않는다.
 - 콜백 구동 믹스(1.1절)에는 믹스된 출력 링이 없으므로 출력 링 항은 0이다. 출력 콜백이 꺼내는 피어 소스 링은 지터 버퍼 깊이(`bufferMs`)에 포함되어 목표로 제어된다. 그래서 입→귀 지연 = 송신측 `estLatencyMs`의 입력+프레임 몫 + 망 + 수신측 `bufferMs` + 수신측 출력 버퍼다. 공유 클럭 종단 실측이 `estLatencyMs + bufferMs + 1ms`를 넘지 않음을 통합 테스트로 확인한다.
 - 장치 버퍼 값은 실측 콜백 크기를 쓴다.
 
@@ -477,7 +486,7 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 
 `EngineStats.recording`(P2-4): 녹음 중이 아니면(또는 정지·마무리 중이면) null. `durationSec` = 녹음 타임라인 길이(쓴 블록 기준), `bytes` = 지금까지 쓴 오디오 바이트(모든 트랙, 헤더 제외), `tracks` = 만든 트랙 수, `droppedFrames` = 녹음 링이 모자라 버린 프레임(녹음 품질 지표, 0이 정상), `error` = 실패 메시지(트랙 생성 실패면 그 트랙만 빠지고 계속, 쓰기 실패면 그 뒤로 저장 안 됨, 1.5절).
 
-`monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·로컬 소스 링) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
+`monitorLatencyMs` = 입력 장치 버퍼 + 모니터 경로 점유량 시간평균(입력 리샘플러·로컬 FIFO·로컬 소스 링) + 리샘플러 필터 지연(입·출력, 48k 장치면 0, P2-17e) + 장치 출력 버퍼. 내 소리가 내 귀에 오는 지연이며 첫 샘플 기준이다. 평균 샘플 지연은 이 값보다 (입력 버퍼 + 출력 버퍼)/2 작다(임펄스 실측으로 검증).
 
 `PeerStats.connectMs`·`firstAudioMs`(P1-20, GOAL 3-6 "입장 후 3초 이내 소리"의 엔진 몫): 기준은 그 피어의 `engine_add_peer` 시각(엔진 시계 = net epoch 단조 µs). 두 지표는 같은 `Instant` 하나(미디어 `added_us` = net `ConnState.started`)를 기준으로 쓴다. 아직이면 null.
 - `connectMs` = add_peer → 그 피어와 처음 `connected`가 된 순간. net이 Hello/HelloAck를 받아들여 상태를 바꿀 때 `ConnState.connected_at`에 남긴다(수신 스레드, RT 아님).
@@ -670,6 +679,6 @@ interface MetronomeStats extends MetronomePlan { synced: boolean; clockOffsetMs:
 ## 7. 품질 기준
 
 - `cargo clippy --all-targets -- -D warnings` 통과, `cargo test` 통과.
-- 단위 테스트: packet 왕복/변조 거부, crypto, jitter(지터·손실·순서뒤바뀜·드리프트 ±200ppm 시 깊이 수렴), mixer, resample 길이 보존, config 검증.
+- 단위 테스트: packet 왕복/변조 거부, crypto, jitter(지터·손실·순서뒤바뀜·드리프트 ±200ppm 시 깊이 수렴), mixer, resample 길이 보존·품질별 주파수 응답(15/18/20kHz, 23kHz 이미지·에일리어싱)·필터 지연, config 검증.
 - 통합 테스트(`tests/loopback.rs`): 엔진 2개를 오디오 장치 없이(가짜 장치 훅) 같은 머신 UDP로 연결, 손실 5%·지터 20ms 주입 프록시 경유, 사인파 전송 후 수신 측 연속성/지연 상한 검증.
 - 프론트: `npm run build`(tsc 포함), `npm run lint` 통과.

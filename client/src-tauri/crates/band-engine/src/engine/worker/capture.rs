@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use ringbuf::traits::Consumer;
 use ringbuf::HeapCons;
 
-use band_dsp::config::INTERNAL_RATE;
+use band_dsp::config::{ResampleQuality, INTERNAL_RATE};
 use band_dsp::resample::{StreamResampler, CHUNK as RESAMPLE_CHUNK};
 
 pub(super) struct Capture {
@@ -52,11 +52,11 @@ pub(super) fn drain_frames(acc: &mut VecDeque<f32>, frame: &mut [f32], pass_at: 
 
 impl Capture {
     /// `frame` = 프레임 크기(48k 프레임 수).
-    pub(super) fn new(in_cons: HeapCons<f32>, in_rate: u32, ich: usize, frame: usize) -> Result<Self, String> {
+    pub(super) fn new(in_cons: HeapCons<f32>, in_rate: u32, ich: usize, frame: usize, quality: ResampleQuality) -> Result<Self, String> {
         Ok(Self {
             ich,
             in_cons,
-            in_rs: StreamResampler::new(in_rate, INTERNAL_RATE, ich)?,
+            in_rs: StreamResampler::new(in_rate, INTERNAL_RATE, ich, quality)?,
             in_tmp: vec![0.0; 4096],
             in48_buf: vec![0.0; 2048 * ich],
             cap_acc: VecDeque::with_capacity((frame + 4096) * ich),
@@ -125,7 +125,7 @@ mod tests {
         for ich in [1usize, 2] {
             let frame = 120;
             let (mut prod, cons) = input_ring();
-            let mut cap = Capture::new(cons, 48_000, ich, frame).unwrap();
+            let mut cap = Capture::new(cons, 48_000, ich, frame, ResampleQuality::Auto).unwrap();
             assert_eq!(cap.granularity(), 1);
             let mut all: Vec<f32> = Vec::new();
             let mut got = Vec::new();
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn resampled_input_reports_chunk_granularity() {
         let (_prod, cons) = input_ring();
-        let cap = Capture::new(cons, 44_100, 1, 120).unwrap();
+        let cap = Capture::new(cons, 44_100, 1, 120, ResampleQuality::Auto).unwrap();
         assert_eq!(cap.granularity(), RESAMPLE_CHUNK);
     }
 }

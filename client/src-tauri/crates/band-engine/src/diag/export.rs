@@ -524,7 +524,8 @@ mod tests {
             // P1-21a: README에 corePlacement 설명, meta.format 1 → 2(의도한 변경 — engine.json·timeline.jsonl 해시는 그대로)
             ("README.txt", "53892e8d86178fe2d6875d8489e2f0bdbd8108ee1e19e9029e3a7e835c0b31a6"),
             ("meta.json", "867d233d696502bd59c5633c283b652e9262fafe3ea585ca3bbc247a158a6aee"),
-            ("engine.json", "eff8c630e2dfc6b97ac0f06328dff69d196a03a6087e1b0049ce0309cc36370e"),
+            // P2-17e: engine.json의 config에 resampleQuality(null), stats에 resampler(null)가 생김(의도한 변경)
+            ("engine.json", "0ef44a4721cd5611ce168d55901d4dab2add7c75a7de49675cd57f418ed69c52"),
             ("timeline.jsonl", "3439e58dad4fa31e0ad39d03171b9c5752e3ed097d82404a7ba3fee74224769a"),
             ("logs/Band.log", "6774d10d922e095e6e4dab8cd7dc9a152b767e4d69a2c4af13ffe7cc8359e982"),
         ];

@@ -13,6 +13,7 @@ import {
   migrateLegacySettings,
   normalizeInputChannels,
   parseStoredSettings,
+  resolveResampleQuality,
   toStored,
   validateEngineConfig,
 } from './engineConfig'
@@ -247,5 +248,30 @@ describe('P1-5: 지터 프로필(저지연 ↔ 안정)', () => {
     expect(formatPeerJitter({ bufferMs: 5.31, targetMs: 5.25, concealPct: 0.12 })).toBe('버퍼 5.3ms / 목표 5.3ms · 은닉 0.1%')
     expect(formatPeerJitter({ bufferMs: 5.31, targetMs: 5.25, concealPct: 0.12, corrTimePct: 8.4 })).toBe('버퍼 5.3ms / 목표 5.3ms · 은닉 0.1% · 보정 8%')
     expect(formatPeerJitter({ bufferMs: 5 })).toBe('버퍼 5.0ms')
+  })
+})
+
+describe('P2-17e: 리샘플러 품질', () => {
+  it('auto는 프리셋을 따른다: 초저지연(2.5ms) = 저지연, 균형·안정 = 고음질', () => {
+    expect(resolveResampleQuality(applyPreset(DEFAULT_ENGINE_CONFIG, 'ultraLow'))).toBe('lowLatency')
+    expect(resolveResampleQuality(applyPreset(DEFAULT_ENGINE_CONFIG, 'balanced'))).toBe('highQuality')
+    expect(resolveResampleQuality(applyPreset(DEFAULT_ENGINE_CONFIG, 'stable'))).toBe('highQuality')
+    expect(resolveResampleQuality({ frameMs: 5 })).toBe('highQuality')
+  })
+  it('사용자 선택은 프리셋보다 우선하고 프리셋을 바꿔도 유지된다', () => {
+    const cfg: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, resampleQuality: 'highQuality' }
+    const ultra = applyPreset(cfg, 'ultraLow')
+    expect(ultra.resampleQuality).toBe('highQuality')
+    expect(resolveResampleQuality(ultra)).toBe('highQuality')
+    expect(resolveResampleQuality({ frameMs: 10, resampleQuality: 'lowLatency' })).toBe('lowLatency')
+    expect(matchPreset(ultra)).toBe('ultraLow')
+  })
+  it('옛 설정(필드 없음)·모르는 값은 auto, 아는 값은 그대로', () => {
+    const old: Partial<EngineConfig> = { ...DEFAULT_ENGINE_CONFIG }
+    delete old.resampleQuality
+    expect(parseStoredSettings({ version: 2, engine: old }).config.resampleQuality).toBe('auto')
+    expect(parseStoredSettings({ version: 2, engine: { ...old, resampleQuality: 'sinc512' } }).config.resampleQuality).toBe('auto')
+    expect(parseStoredSettings({ version: 2, engine: { ...old, resampleQuality: 'lowLatency' } }).config.resampleQuality).toBe('lowLatency')
+    expect(migrateLegacySettings({ driver: 'ASIO' }).resampleQuality).toBe('auto')
   })
 })

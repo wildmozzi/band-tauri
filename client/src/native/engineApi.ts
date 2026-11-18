@@ -29,6 +29,14 @@ export type CodecKind = 'opus' | 'pcm16'
 /** PCM16 설정에서 피어별 Opus 자동 전환 이유: 릴레이 대역 부하(P1-4c) / 상대가 보고한 수신 손실(P1-4e) */
 export type TxCodecReason = 'relayLoad' | 'lossFeedback'
 
+/**
+ * 장치 레이트 ↔ 48kHz 리샘플러 품질(P2-17e). 장치가 48kHz면 리샘플러가 돌지 않아 영향이 없다.
+ * - `auto`: 프리셋을 따른다 — 프레임 2.5ms(초저지연 프리셋)면 저지연, 아니면 고음질(엔진 `EngineConfig::resample_quality`)
+ * - `lowLatency`: 다항식(필터 지연 0.1ms 안, 18kHz −1.5~2.4dB, 23kHz 에일리어싱 큼)
+ * - `highQuality`: sinc 128탭(18kHz까지 평탄, 단계당 +1.3~1.5ms — 44.1k 입·출력 합 약 +2.8ms)
+ */
+export type ResampleQuality = 'auto' | 'lowLatency' | 'highQuality'
+
 export interface EngineConfig {
   inputDriver: DriverKind
   outputDriver: DriverKind
@@ -48,6 +56,8 @@ export interface EngineConfig {
   /** 지터 버퍼 '저지연(0) ↔ 안정(1)' 프로필, 기본 0.5(균형). 실행 중 변경은 engineSetJitterProfile */
   jitterProfile?: number
   udpPort?: number
+  /** 리샘플러 품질(P2-17e). 없으면 auto */
+  resampleQuality?: ResampleQuality
 }
 
 export interface Candidate {
@@ -301,6 +311,16 @@ export interface EchoReport {
  */
 export type AudioBackendKind = 'wasapiExclusive' | 'wasapiShared3' | 'cpalWasapi' | 'cpalAsio' | 'fake'
 
+/** 리샘플러 상태(P2-17e). 필터 지연은 estLatencyMs·monitorLatencyMs에 들어 있다 */
+export interface ResamplerStats {
+  /** 실제로 쓰는 품질(auto를 푼 값) */
+  quality: Exclude<ResampleQuality, 'auto'>
+  /** 입력 단계(장치 → 48k) 필터 지연(ms). 입력 장치가 48kHz면 0 */
+  inDelayMs: number
+  /** 출력 단계(48k → 장치) 필터 지연(ms). 출력 장치가 48kHz면 0 */
+  outDelayMs: number
+}
+
 export interface EngineStats {
   /** 오디오 장치를 잃으면(콜백 정지) false */
   running: boolean
@@ -327,6 +347,8 @@ export interface EngineStats {
   inputSilentPackets?: number
   /** 실제 출력 장치 주기(ms). 자체 WASAPI는 장치에 설정된 주기, cpal은 실측 콜백 크기 */
   devicePeriodMs?: number
+  /** 리샘플러(P2-17e). 입·출력 장치가 모두 48kHz(리샘플 없음)거나 정지 상태면 null, 옛 엔진이면 없음 */
+  resampler?: ResamplerStats | null
   /** 실제로 열린 오디오 백엔드(`AudioBackendKind`, 입·출력이 다르면 `입력/출력`). 정지 상태면 빈 문자열 */
   backend?: string
   /** 스레드 우선순위 설정 결과(MMCSS 등록 여부, 1ms 타이머) */

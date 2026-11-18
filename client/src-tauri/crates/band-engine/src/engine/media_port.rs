@@ -70,7 +70,7 @@ mod tests {
         let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
         let mk = |k: u64| {
             let key = PeerKey::from_raw(k);
-            PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, media_link(key).1, 48_000).unwrap()
+            PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, media_link(key).1, 48_000, band_dsp::config::ResampleQuality::Auto).unwrap()
         };
         let ((a, ma), (b, mb)) = (mk(10), mk(11));
         {
@@ -96,7 +96,7 @@ mod tests {
         let js = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 };
         let mk = |k: u64| {
             let key = PeerKey::from_raw(k);
-            PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, media_link(key).1, 48_000).unwrap()
+            PeerMedia::new(key, format!("p{k}"), k as u32, 0, js, media_link(key).1, 48_000, band_dsp::config::ResampleQuality::Auto).unwrap()
         };
         let mut shared = Vec::new();
         for k in 0..MEDIA_RET_CAPACITY as u64 {
