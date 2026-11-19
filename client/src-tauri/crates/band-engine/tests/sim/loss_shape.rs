@@ -107,6 +107,9 @@ fn loss_shape_margin_predicts_1f_late_misses() {
             let r = run_multi(&MultiSim::new(30.0, vec![mk(Some(0.02))]));
             let js = &r.peers[0].js;
             let ge_f = js.shape.margin_at_least(f_ms).unwrap();
+            // 근사(#230 재리뷰 L4): `late_runs` 합은 연속 **수**(패킷 수 아님)이고, 늦춤 없는 놓침(`base_late`)은 **다른 실행**에서
+            // 빼 쓴다. 지금 시나리오는 1F 늦춤이 거의 단발이고 `base_late`가 0이라 영향이 없다 — 지터가 큰 시나리오를 더하면
+            // 늦춘 seq만 따로 세는 쪽으로 바꿀 것.
             let late: u64 = js.shape.late_runs.iter().sum::<u64>().saturating_sub(base_late);
             let delayed = r.peers[0].tx_late_1f;
             let miss = late as f64 / delayed.max(1) as f64;
