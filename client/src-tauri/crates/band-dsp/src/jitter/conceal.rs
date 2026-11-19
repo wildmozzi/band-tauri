@@ -4,6 +4,7 @@
 //! 재생 쪽(`pop` → `produce_packet`)만 부른다. 메서드는 필요한 값(페이로드, 코덱·채널·프레임, 창 크기)을 인자로 받고
 //! `JitterBuffer`를 모른다. 슬롯·seq·FIFO·통계 카운터·늦은 패킷 예산은 `playout.rs`의 `impl JitterBuffer`가 다룬다.
 
+use super::shape::ConcealKind;
 use super::stats::RateRing;
 use super::{LOSS_WINDOW_MAX, MAX_PKT_FRAME};
 use crate::codec::Decoder;
@@ -249,11 +250,12 @@ impl Concealer {
     }
 
     /// 은닉 프레임 `frames`개를 `dec_buf`에 만든다(채널 수는 마지막 패킷). Opus는 `fec`(손실 뒤 다음 패킷)가 있으면 FEC,
-    /// 없으면 PLC. PCM(또는 디코더 없음·실패)은 직전 프레임 페이드아웃 1회, 이후 무음. 반환: 채널 수.
-    pub(super) fn conceal_frame(&mut self, frames: usize, fec: Option<&[u8]>) -> usize {
+    /// 없으면 PLC. PCM(또는 디코더 없음·실패)은 직전 프레임 페이드아웃 1회, 이후 무음. 반환: 채널 수와 실제로 쓴 방식(P2-17h).
+    pub(super) fn conceal_frame(&mut self, frames: usize, fec: Option<&[u8]>) -> (usize, ConcealKind) {
         let ch = self.pkt_channels;
         let out = &mut self.dec_buf[..frames * ch];
         let mut ok = false;
+        let mut kind = ConcealKind::Pcm;
         if let Some(dec) = self.decoder.as_mut() {
             if matches!(dec, Decoder::Opus { .. }) {
                 let r = match fec {
@@ -261,6 +263,9 @@ impl Concealer {
                     None => dec.decode_plc(out),
                 };
                 ok = r.map(|n| n == frames).unwrap_or(false);
+                if ok {
+                    kind = if fec.is_some() { ConcealKind::Fec } else { ConcealKind::Plc };
+                }
             }
         }
         if !ok {
@@ -291,7 +296,7 @@ impl Concealer {
         }
         self.xfade_len = 0;
         self.conceal_run += 1;
-        ch
+        (ch, kind)
     }
 
     /// 방금 만든 프레임(`dec_buf`, `n`샘플).

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
-use crate::jitter::{JitterBuffer, JitterSettings, JitterStats};
+use crate::jitter::{JitterBuffer, JitterSettings, JitterStats, LossShapeStats, MARGIN_BUCKETS, RUN_BUCKETS};
 use crate::config::{ResampleQuality, INTERNAL_RATE};
 use crate::mixer::PeerMixCtl;
 use crate::resample::StreamResampler;
@@ -39,11 +39,42 @@ impl MediaStats {
     }
 }
 
-/// `MediaStats`의 원자값 칸 수: `JitterStats` 24필드 + playing + first_audio_us. 필드가 늘면 `unpack`의 구조체 식이
-/// 컴파일되지 않으므로 `pack`·`unpack`을 함께 고친다.
-const STAT_WORDS: usize = 26;
+/// `MediaStats`의 원자값 칸 수: `JitterStats` 스칼라 24필드 + playing + first_audio_us + 손실 모양(`SHAPE_WORDS`).
+/// 필드가 늘면 `unpack`의 구조체 식이 컴파일되지 않으므로 `pack`·`unpack`을 함께 고친다.
+const BASE_WORDS: usize = 26;
+/// `LossShapeStats`: frame_ms + 연속 길이 두 벌 + 17+ 패킷 합 + 도착 여유 + 은닉 방식 4.
+const SHAPE_WORDS: usize = 1 + 2 * RUN_BUCKETS + 1 + MARGIN_BUCKETS + 4;
+const STAT_WORDS: usize = BASE_WORDS + SHAPE_WORDS;
 
 fn pack(s: &MediaStats) -> [u64; STAT_WORDS] {
+    let mut w = [0u64; STAT_WORDS];
+    w[..BASE_WORDS].copy_from_slice(&pack_base(s));
+    let sh = &s.js.shape;
+    let mut i = BASE_WORDS;
+    let mut put = |v: u64| {
+        w[i] = v;
+        i += 1;
+    };
+    put(sh.frame_ms.to_bits() as u64);
+    sh.loss_runs.iter().chain(&sh.late_runs).chain(&sh.arrival_margin).for_each(|&v| put(v));
+    [sh.loss_long_pkts, sh.conceal_fec, sh.conceal_plc, sh.conceal_pcm, sh.conceal_underrun].into_iter().for_each(&mut put);
+    w
+}
+
+fn unpack_shape(w: &[u64]) -> LossShapeStats {
+    let mut it = w.iter().copied();
+    let mut next = || it.next().unwrap_or(0);
+    let mut sh = LossShapeStats { frame_ms: f32::from_bits(next() as u32), ..LossShapeStats::default() };
+    sh.loss_runs.iter_mut().chain(sh.late_runs.iter_mut()).chain(sh.arrival_margin.iter_mut()).for_each(|v| *v = next());
+    sh.loss_long_pkts = next();
+    sh.conceal_fec = next();
+    sh.conceal_plc = next();
+    sh.conceal_pcm = next();
+    sh.conceal_underrun = next();
+    sh
+}
+
+fn pack_base(s: &MediaStats) -> [u64; BASE_WORDS] {
     let j = &s.js;
     let f = |v: f32| v.to_bits() as u64;
     [
@@ -105,6 +136,7 @@ fn unpack(w: &[u64; STAT_WORDS]) -> MediaStats {
             tail_adjusts: w[22],
             tail_resets: w[23],
             min_transit: w[24] as i64,
+            shape: unpack_shape(&w[BASE_WORDS..]),
         },
         first_audio_us: w[25],
     }
@@ -418,6 +450,17 @@ mod tests {
             tail_adjusts: 10,
             tail_resets: 11,
             min_transit: -123_456,
+            shape: LossShapeStats {
+                frame_ms: 2.5,
+                loss_runs: [n, 1, 2, 3, 4, 5],
+                loss_long_pkts: n + 99,
+                late_runs: [6, 7, 8, 9, 10, n + 2],
+                arrival_margin: [11, 12, 13, 14, 15, 16, 17, 18, 19, n + 3],
+                conceal_fec: 20,
+                conceal_plc: 21,
+                conceal_pcm: 22,
+                conceal_underrun: 23,
+            },
         };
         MediaStats { playing: n % 2 == 1, js, first_audio_us: n * 11 }
     }

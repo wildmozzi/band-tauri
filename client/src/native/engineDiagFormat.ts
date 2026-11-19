@@ -2,7 +2,7 @@
  * 합주실 진단 줄(P1-12b): 스레드 우선순위·QoS 마킹·오디오 백엔드.
  * 실장비 테스트에서 개발자 도구 `engine_stats` 없이 화면에서 읽도록 한다. CPU 줄은 P1-10(roomDetailModel.formatCpu).
  */
-import type { QosStats, ThreadPriority, ThreadPriorityStats } from './engineApi'
+import type { LossShapeStats, QosStats, ThreadPriority, ThreadPriorityStats } from './engineApi'
 
 export const THREAD_PRIORITY_LABEL: Record<ThreadPriority, string> = {
   unmanaged: '백엔드',
@@ -67,4 +67,46 @@ export function qosTitle(q: QosStats): string {
 /** 백엔드 이름(입·출력이 다르면 "입력/출력"). 빈 문자열·없음이면 null */
 export function formatBackend(backend: string | null | undefined): string | null {
   return backend ? `백엔드 ${backend}` : null
+}
+
+/** 손실 모양 연속 길이 버킷(패킷, P2-17h) */
+export const LOSS_RUN_BUCKETS = ['1', '2', '3–4', '5–8', '9–16', '17+'] as const
+/** 도착 여유 버킷(ms, P2-17h) */
+export const ARRIVAL_MARGIN_BUCKETS = ['<0', '0–0.5', '0.5–1', '1–2', '2–2.5', '2.5–3', '3–5', '5–7.5', '7.5–10', '≥10'] as const
+/** 도착 여유 버킷의 아래 경계(ms). 첫 버킷(<0)은 경계 없음 */
+const MARGIN_LOWER = [-Infinity, 0, 0.5, 1, 2, 2.5, 3, 5, 7.5, 10]
+
+const pct = (n: number, total: number) => (total > 0 ? `${((n * 100) / total).toFixed(1)}%` : '-')
+
+/** 여유가 `ms` 이상인 수(경계가 버킷 경계와 맞을 때만, 아니면 null) */
+function marginAtLeast(m: number[], ms: number): number | null {
+  const i = MARGIN_LOWER.findIndex((e) => Math.abs(e - ms) < 1e-3)
+  return i < 0 ? null : m.slice(i).reduce((a, b) => a + b, 0)
+}
+
+/**
+ * 손실 모양 진단 줄(P2-17h, 피어 통계 툴팁): 손실·마감 놓침 연속 길이 표, 도착 여유(늦음 / 1프레임·2프레임 이상 비율), 은닉 방식.
+ * 도착 여유는 직접 잰 "은닉 마감 − 도착"이고, ≥ 1F 비율이 "1프레임 늦게 보낸 복사본/FEC가 마감 안에 드는 비율"이다. 프레임이
+ * 버킷 경계(2.5·5·10ms)가 아니면(128샘플 2.67ms 등) 그 비율은 셀 수 없다고 적는다. 옛 엔진(필드 없음)이면 빈 배열
+ */
+export function lossShapeLines(sh: LossShapeStats | null | undefined): string[] {
+  if (!sh) return []
+  const runs = (r: number[], longPkts?: number) =>
+    LOSS_RUN_BUCKETS.map((b, i) => `${b}:${r[i] ?? 0}${i === LOSS_RUN_BUCKETS.length - 1 && longPkts ? `(${longPkts}패킷)` : ''}`).join(' ')
+  const m = sh.arrivalMargin
+  const total = m.reduce((a, b) => a + b, 0)
+  const f = sh.frameMs
+  const margin = [`늦음 ${pct(m[0] ?? 0, total)}`]
+  for (const [k, label] of [[1, '1F'], [2, '2F']] as const) {
+    const ms = Number((f * k).toFixed(2))
+    const n = marginAtLeast(m, f * k)
+    if (n !== null) margin.push(`≥${label}(${ms}ms) ${pct(n, total)}`)
+    else if (k === 1) margin.push(`≥1F(${ms}ms) 버킷 경계 아님`)
+  }
+  return [
+    `손실 연속(패킷): ${runs(sh.lossRuns, sh.lossLongPkts)}`,
+    `마감 놓침 연속(패킷): ${runs(sh.lateRuns)}`,
+    `도착 여유(마감−도착, ${total}개): ${margin.join(' · ')}`,
+    `은닉 방식: FEC ${sh.concealFec} · PLC ${sh.concealPlc} · PCM ${sh.concealPcm} (언더런 ${sh.concealUnderrun})`,
+  ]
 }

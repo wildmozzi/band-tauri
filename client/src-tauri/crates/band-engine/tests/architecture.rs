@@ -2237,6 +2237,7 @@ const WORKER_THREAD_CODE: &[(&str, Option<&str>)] = &[
     ("crates/band-dsp/src/jitter/late_budget.rs", None),
     ("crates/band-dsp/src/jitter/mod.rs", None),
     ("crates/band-dsp/src/jitter/playout.rs", None),
+    ("crates/band-dsp/src/jitter/shape.rs", None),
     ("crates/band-dsp/src/jitter/stats.rs", None),
     ("crates/band-dsp/src/jitter/target.rs", None),
     ("crates/band-dsp/src/jitter/tuning.rs", None),

@@ -6,7 +6,7 @@ use ringbuf::traits::{Observer, Producer};
 use ringbuf::HeapProd;
 
 use band_dsp::config::INTERNAL_RATE;
-use band_dsp::jitter::JitterBuffer;
+use band_dsp::jitter::{DeadlineClock, JitterBuffer};
 use super::super::measure::echo::EchoProbe;
 use band_dsp::resample::StreamResampler;
 use super::super::rt::SourceShared;
@@ -209,6 +209,11 @@ impl PeerFeed {
         let short_dev = (short48 / 2.0 * t.out_rate as f64 / INTERNAL_RATE as f64).ceil() as usize;
         let m_eff = self.margin.saturating_sub(short_dev);
         let lead_cap = t.out_burst + 2 * t.chunk_dev() + m_eff;
+        // 은닉 판단 기준(아래 (2)): 콜백 `guard_us` 전에 링이 `need`보다 적으면 은닉한다. 지터 버퍼에 같은 기준을 알려
+        // 꺼내는 패킷마다 실제 은닉 마감 − 도착을 잰다(P2-17h 도착 여유, 통계 전용 — 재생 동작 불변).
+        let need = t.out_burst + m_eff;
+        let guard_us = DEADLINE_GUARD_US + m_eff as u64 * 1_000_000 / t.out_rate.max(1) as u64;
+        self.set_deadline_clock(jb, prod, t, need, guard_us, consistent);
         while self.dev_ahead(prod) < lead_cap && prod.vacant_len() >= OUT_CHUNK * 4 {
             let k = jb.real_frames().min(OUT_CHUNK);
             if k == 0 {
@@ -222,11 +227,10 @@ impl PeerFeed {
             ev.real_audio = true;
         }
         // (2) 은닉은 마감 직전에만, 다음 콜백에 모자란 만큼만(+ 적응 여유)
-        let need = t.out_burst + m_eff;
-        let guard_us = DEADLINE_GUARD_US + m_eff as u64 * 1_000_000 / t.out_rate.max(1) as u64;
         let short = self.dev_ahead(prod) < need;
         if short && t.wall_us + guard_us >= t.next_cb_us && consistent() {
             ev.deadline_fill = true;
+            self.set_deadline_clock(jb, prod, t, need, guard_us, consistent);
             let mut guard = 0;
             while self.dev_ahead(prod) < need && guard < 64 && jb.is_playing() {
                 let deficit = t.dev_to_48((need - self.dev_ahead(prod)) as f64).ceil() as usize;
@@ -241,7 +245,24 @@ impl PeerFeed {
         } else if short {
             ev.deadline_us = Some(t.next_cb_us.saturating_sub(guard_us));
         }
+        // 다음 반복의 건너뛰기 `pop`(언더런 뒤)과 재생 시작은 마감이 없다 — 세지 않게 지운다.
+        jb.set_deadline_clock(None);
         sh.playing.store(true, Ordering::Relaxed);
         ev
+    }
+
+    /// 지터 버퍼에 은닉 마감 시계를 알린다(P2-17h 도착 여유). 장치 클럭 추정 전(`next_cb_us` 0)이면 지운다.
+    /// 링 점유량을 읽는 동안 콜백이 돌았으면(`consistent()` 거짓) `ahead`는 이미 그 콜백 몫이 빠졌는데 `next_cb_us`는 아직 그
+    /// 콜백을 가리켜 마감이 한 주기 이르게 잡힌다 — 그 반복은 표본을 버린다(#230 재리뷰 L1, 은닉 판단 (2)와 같은 기준).
+    fn set_deadline_clock(&self, jb: &mut JitterBuffer, prod: &HeapProd<f32>, t: &FeedTiming, need: usize, guard_us: u64, consistent: &dyn Fn() -> bool) {
+        let clock = (t.next_cb_us > 0).then(|| DeadlineClock {
+            next_cb_us: t.next_cb_us as f64,
+            period_us: t.out_burst as f64 * 1e6 / t.out_rate.max(1) as f64,
+            burst: t.dev_to_48(t.out_burst as f64),
+            ahead: t.dev_to_48(self.dev_ahead(prod) as f64) + self.rs.pending_input() as f64,
+            need: t.dev_to_48(need as f64),
+            guard_us: guard_us as f64,
+        });
+        jb.set_deadline_clock(clock.filter(|_| consistent()));
     }
 }

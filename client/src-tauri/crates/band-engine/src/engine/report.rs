@@ -94,6 +94,9 @@ pub struct PeerStats {
     /// 진짜 패킷이든 재생에 못 씀 — 전에는 지터 `late`로 세던 것). 수신 큐에 들어가지 않으므로 `late`·`lossPct`에는 없다.
     pub(crate) rx_dup_dropped: u64,
     pub(crate) rx_stale_dropped: u64,
+    /// 손실 모양·은닉 방식·도착 여유(P2-17h, FEC/중복 전송 결정용 측정 — 설계 1.2절 "손실 모양 통계"). 이 피어 항목 동안 누적
+    /// (지터 재시작에도 유지). 연속 길이는 seq가 256패킷 창을 벗어날 때 확정되므로 최근 0.6초쯤은 아직 들어 있지 않다.
+    pub loss_shape: band_dsp::jitter::LossShapeStats,
 }
 
 /// 장치 레이트 ↔ 48kHz 리샘플러 상태(P2-17e).
@@ -348,6 +351,7 @@ impl Engine {
                             remote_input_buffer_ms,
                             rx_dup_dropped: ns.rx_dup_dropped,
                             rx_stale_dropped: ns.rx_stale_dropped,
+                            loss_shape: js.shape,
                         })
                     })
                     .collect()
@@ -490,6 +494,7 @@ mod tests {
                 remote_input_buffer_ms: None,
                 rx_dup_dropped: 3,
                 rx_stale_dropped: 0,
+                loss_shape: Default::default(),
             }],
             ..EngineStats::stopped()
         };

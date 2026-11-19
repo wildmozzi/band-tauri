@@ -68,6 +68,9 @@ pub(super) struct NetPeer {
     pub dist_switch: Option<(u64, JitDist)>,
     /// 지터 분포 여러 번 바꾸기(P2-16c): (시각 µs, 분포) — 그 시각 이후 마지막 항목이 `dist_switch`보다 우선한다.
     pub dist_steps: Vec<(u64, JitDist)>,
+    /// 1프레임 늦춤(P2-17h 도착 여유 검증): 패킷마다 이 확률로 정확히 한 프레임(F) 더 늦게 보낸다 — "1F 늦은 복사본"이 제때
+    /// 드는지를 직접 재는 실험. 늦춘 수는 `tx_late_1f`.
+    pub late_1f: Option<f64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -79,7 +82,7 @@ pub(super) enum JitDist {
 
 impl NetPeer {
     pub fn new(frame: usize, seed: u64) -> Self {
-        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None, rejoins: Vec::new(), dup: None, reorder: None, dist_switch: None, dist_steps: Vec::new() }
+        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None, rejoins: Vec::new(), dup: None, reorder: None, dist_switch: None, dist_steps: Vec::new(), late_1f: None }
     }
 }
 
@@ -175,6 +178,8 @@ pub(super) struct PeerOut {
     pub sessions: Vec<JitterStats>,
     /// 망이 만든 중복 사본 수(`dup`).
     pub tx_dup: u64,
+    /// `late_1f`로 한 프레임 늦춘 패킷 수.
+    pub tx_late_1f: u64,
 }
 
 /// 100ms 표본: 시각(s), bufferMs, targetMs, 재생 중 여부, 누적 은닉·생산 프레임.
@@ -494,6 +499,10 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                         delay += tx.chaos_rng.gen_range(0..max.max(1));
                     }
                 }
+                let late_1f = np.late_1f.is_some_and(|pr| tx.chaos_rng.gen_bool(pr));
+                if late_1f {
+                    delay += (np.frame as f64 / RATE * 1e6).round() as u64;
+                }
                 let dup_extra = match np.dup {
                     Some((pr, max)) if tx.chaos_rng.gen_bool(pr) => Some(tx.chaos_rng.gen_range(0..max.max(1))),
                     _ => None,
@@ -513,6 +522,7 @@ pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
                     o.tx_lost += 1;
                 } else {
                     pending.push((t + delay, pi, h, payload[..nb].to_vec()));
+                    o.tx_late_1f += late_1f as u64;
                     if let Some(extra) = dup_extra {
                         o.tx_dup += 1;
                         pending.push((t + delay + extra, pi, h, payload[..nb].to_vec()));

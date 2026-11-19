@@ -1,5 +1,6 @@
 //! 지터 버퍼 통계: 누적 카운터·비율 창과 표시용 스냅샷.
 
+use super::shape::LossShapeStats;
 use super::{samples_per_ms, JitterBuffer, State};
 
 /// 최근 N개 bool 중 true 비율(손실·은닉 창).
@@ -105,6 +106,9 @@ pub struct JitterStats {
     /// `min_transit + target`이다: 창의 가장 이른 표본이 빠져 min이 오르면 깊이는 바로 줄고 짧은 창 추정은 hold로
     /// 남아 절대 목표가 오른다(보정으로 따라감). 측정용(P3-0d, `link_matrix`). Tauri `PeerStats`에는 노출하지 않는다.
     pub min_transit: i64,
+    /// 손실 모양·은닉 방식·도착 여유(P2-17h, `shape.rs`). 연속 길이는 seq가 256패킷 창(`shape::SHAPE_HORIZON`) 밖으로 나가거나 스트림이
+    /// 리셋될 때 확정되므로 최근 256패킷(2.5ms 기준 0.64초)의 손실은 아직 들어 있지 않다.
+    pub shape: LossShapeStats,
 }
 
 impl JitterStats {
@@ -136,6 +140,7 @@ impl JitterBuffer {
         s.max_corr_cents = self.depth.max_corr_cents();
         s.tail_ms = self.late.tail_extra() as f32 / spm;
         s.min_transit = self.delay.min_transit();
+        s.shape.frame_ms = self.frame() as f32 / spm;
         s
     }
 }

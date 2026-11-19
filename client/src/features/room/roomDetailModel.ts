@@ -1,5 +1,6 @@
 // 합주실 상세(RoomDetail) 화면의 타입·상수·순수 함수.
 import type { CpuStats, PeerState, PeerStats } from '../../native/engineApi'
+import { lossShapeLines } from '../../native/engineDiagFormat'
 import { RELAY_PATH_HINT, pathLabel } from '../../native/relayLogic'
 import type { DetailRoom, InstrumentSlot } from '../rooms'
 export type { DetailRoom, InstrumentSlot }
@@ -104,6 +105,7 @@ export function peerStatsTitle(ps: PeerStats): string {
     `손실: ${ps.lossPct.toFixed(1)}%`,
     `늦은 패킷: ${ps.late} · 은닉: ${ps.concealed}`,
     ...peerCodecLines(ps),
+    ...lossShapeLines(ps.lossShape),
   ].join('\n')
 }
 
