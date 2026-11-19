@@ -406,7 +406,7 @@ pub(super) mod tests {
         assert!(line.contains("\"connectMs\":120.0") && line.contains("\"firstAudioMs\":180.5"), "{line}");
         assert!(line.contains("\"remoteFrameMs\":5.0") && line.contains("\"remoteInputBufferMs\":2.67"), "{line}");
         assert!(line.contains("\"rxDupDropped\":4") && line.contains("\"rxStaleDropped\":1"), "{line}");
-        assert!(line.contains("\"lossShape\":{\"frameMs\":2.5,\"lossRuns\":[3,1,0,0,0,0],\"lateRuns\":[0,0,0,0,0,0]"), "{line}");
+        assert!(line.contains("\"lossShape\":{\"frameMs\":2.5,\"lossRuns\":[3,1,0,0,0,0],\"lossLongPkts\":0,\"lateRuns\":[0,0,0,0,0,0]"), "{line}");
         assert!(line.contains("\"concealFec\":2"), "{line}");
     }
 

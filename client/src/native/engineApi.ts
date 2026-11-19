@@ -227,9 +227,11 @@ export interface LossShapeStats {
   frameMs: number
   /** 끝내 안 온 seq의 연속 길이 히스토그램(버킷 1, 2, 3–4, 5–8, 9–16, 17+ 패킷 — engineDiagFormat LOSS_RUN_BUCKETS). 최근 256패킷 안의 손실은 아직 확정 전이라 없다 */
   lossRuns: number[]
+  /** lossRuns 17+ 버킷 연속들의 패킷 수 합(긴 버스트 손실 수를 정확히). 옛 엔진에는 없다 */
+  lossLongPkts?: number
   /** 도착했지만 재생 마감을 놓친 seq의 연속 길이 히스토그램(같은 버킷) */
   lateRuns: number[]
-  /** 도착 시 깊이 여유(ms, 버킷 <0, 0–0.5, 0.5–1, 1–2, 2–2.5, 2.5–3, 3–5, 5–7.5, 7.5–10, ≥10 — ARRIVAL_MARGIN_BUCKETS) 히스토그램. 보수적(하한) 추정 — 실제 마감은 0..출력 콜백 주기만큼 더 늦다 */
+  /** 도착 여유 = 직접 잰 "은닉 마감 − 도착"(ms, 버킷 <0, 0–0.5, 0.5–1, 1–2, 2–2.5, 2.5–3, 3–5, 5–7.5, 7.5–10, ≥10 — ARRIVAL_MARGIN_BUCKETS) 히스토그램. 꺼낸 패킷마다(제때 재생 ≥ 0) + 마감 놓친 패킷마다(< 0). ≥ F 비율 = 1프레임 늦은 복사본/FEC가 마감 안에 드는 비율 */
   arrivalMargin: number[]
   /** 은닉 방식별 프레임 수(합 = concealed): Opus FEC 디코드 / Opus PLC / PCM 페이드·무음 */
   concealFec: number

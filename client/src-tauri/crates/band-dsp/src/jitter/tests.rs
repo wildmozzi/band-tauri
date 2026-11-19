@@ -184,6 +184,8 @@ fn simulate(p: Sim) -> SimResult {
             jb.insert(h, pk, *at as u64);
             ai += 1;
         }
+        // 콜백 = 이 버스트(링 없음): 꺼내는 데이터의 은닉 마감은 지금(도착 여유 측정, P2-17h — 재생 동작에는 안 쓴다).
+        jb.set_deadline_clock(Some(DeadlineClock { next_cb_us: bt, period_us: burst_period_us, burst: p.burst as f64, ahead: 0.0, need: p.burst as f64, guard_us: 0.0 }));
         let mut left = p.burst;
         while left > 0 {
             let n = left.min(p.chunk);
@@ -203,6 +205,7 @@ fn simulate(p: Sim) -> SimResult {
             }
             left -= n;
         }
+        jb.set_deadline_clock(None);
         jb.end_burst(bt as u64, bt as u64, 0.0);
         if jb.is_playing() {
             started = true;
@@ -682,6 +685,7 @@ fn debt_case(codec: CodecKind, seq0: u32, arrive: &dyn Fn(usize) -> Option<usize
             hook(tick, &mut jb);
         }
         jb.pop(&mut out);
+        jb.set_deadline_clock(None); // 워커처럼: 재생 시작(`end_burst`)에는 마감이 없다
         jb.end_burst(tick as u64 * 5000, tick as u64 * 5000, 0.0);
         let s = jb.stats();
         assert!(s.concealed_loss <= s.concealed, "{s:?}");
@@ -1681,6 +1685,8 @@ fn shape_case(codec: CodecKind, arrive: &dyn Fn(usize) -> Option<usize>) -> (Jit
         for &i in arrivals {
             jb.insert(&pkts[i].0, &pkts[i].1, tick as u64 * 5000);
         }
+        // 이 틱의 pop이 곧 재생(링 없음): 꺼내는 패킷의 마감은 이 틱이다. 같은 틱에 온 패킷은 여유 0.
+        jb.set_deadline_clock(Some(DeadlineClock { next_cb_us: tick as f64 * 5000.0, period_us: 5000.0, burst: 240.0, ahead: 0.0, need: 240.0, guard_us: 0.0 }));
         jb.pop(&mut out);
         jb.end_burst(tick as u64 * 5000, tick as u64 * 5000, 0.0);
     }
@@ -1736,10 +1742,17 @@ fn shape_late_arrivals_are_deadline_misses_not_losses() {
     assert_eq!(sh.loss_runs, [0; RUN_BUCKETS], "{sh:?}");
     assert_eq!(sh.late_runs, [1, 0, 0, 0, 0, 0], "{sh:?}");
     assert_eq!(sh.conceal_underrun, 1);
-    // 1틱(5ms = F) 늦은 패킷: 도착 여유는 음수로 세지만 이 틀에서는 제때 재생된다. 여유는 버스트 직후 깊이 기준이라 실제 마감이
-    // 출력 콜백 주기(여기서는 5ms)만큼까지 더 늦을 수 있는 보수적(하한) 추정이다(`shape.rs`).
+    // 도착 여유는 직접 잰 "마감 − 도착"이다(#230 리뷰 H1). 이 틀은 패킷 i를 틱 i+1에 꺼내므로 제때 온 패킷의 여유는 정확히
+    // 1F(5ms, 5–7.5 버킷) — 1F 늦은 복사본이 딱 마감에 든다(재생 시작 전 버퍼링 중에 온 패킷은 더 크다).
+    let (s, sh) = shape_case(CodecKind::Pcm16, &|i| Some(i));
+    let n = sh.arrival_margin[shape::margin_bucket(5.0)];
+    assert_eq!((s.concealed, sh.arrival_margin[..shape::margin_bucket(5.0)].iter().sum::<u64>()), (0, 0), "{sh:?}");
+    assert!(n >= 110, "{sh:?}");
+    // 1틱(5ms = F) 늦은 패킷: 제때 재생되고(은닉 0) 여유 0(0–0.5 버킷, ≥0)으로 센다. 이전 정의(도착 시 깊이 여유 하한)는 이
+    // 패킷을 음수로 셌다.
     let (s, sh) = shape_case(CodecKind::Pcm16, &|i| Some(if i == k { k + 1 } else { i }));
-    assert_eq!((s.late, s.concealed, sh.arrival_margin[0]), (0, 0, 1), "{s:?}");
+    assert_eq!((s.late, s.concealed), (0, 0), "{s:?}");
+    assert_eq!((sh.arrival_margin[0], sh.arrival_margin[shape::margin_bucket(0.0)], sh.arrival_margin[shape::margin_bucket(5.0)]), (0, 1, n - 1), "{sh:?}");
     assert_eq!(sh.late_runs, [0; RUN_BUCKETS], "{sh:?}");
 }
 
@@ -1768,12 +1781,12 @@ fn shape_margin_reflects_jitter_and_counts_survive_restart() {
     assert_eq!(sh.arrival_margin[0], 0, "{sh:?}");
     assert!(sh.arrival_margin.iter().sum::<u64>() > 700, "{sh:?}");
     assert_eq!(sh.loss_runs, [0; RUN_BUCKETS]);
-    // 균등 지터 U(0, 4ms): 여유가 넓게 퍼진다(목표 = p95 근처라 상당수가 2.5ms 미만).
+    // 균등 지터 U(0, 4ms): 여유가 지터 폭만큼 여러 버킷에 퍼진다. 이 틀의 소비자는 버스트 시각에 바로 은닉하므로(guard 0)
+    // 목표에 든 소비자 요구(1.5ms)도 여유로 남는다.
     let r = simulate(Sim { jitter_ms: 4.0, seconds: 6.0, ..Default::default() });
     let m = r.stats.shape.arrival_margin;
     let total: u64 = m.iter().sum();
-    let ge_2_5: u64 = m[5..].iter().sum();
-    assert!(total > 1000 && ge_2_5 > 0 && ge_2_5 < total, "{m:?}");
+    assert!(total > 1000 && m[0] == 0 && m.iter().filter(|&&v| v * 20 > total).count() >= 3, "{m:?}");
     // restart는 누적 통계(손실 모양 포함)를 유지하고 진행 중인 연속을 확정한다.
     let (_, before) = shape_case(CodecKind::Pcm16, &|i| (i != 50).then_some(i));
     let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });

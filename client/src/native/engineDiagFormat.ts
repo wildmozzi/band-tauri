@@ -78,31 +78,35 @@ const MARGIN_LOWER = [-Infinity, 0, 0.5, 1, 2, 2.5, 3, 5, 7.5, 10]
 
 const pct = (n: number, total: number) => (total > 0 ? `${((n * 100) / total).toFixed(1)}%` : '-')
 
-/** 여유가 `ms` 이상인 도착 수(경계가 버킷 경계와 맞을 때만, 아니면 null) */
+/** 여유가 `ms` 이상인 수(경계가 버킷 경계와 맞을 때만, 아니면 null) */
 function marginAtLeast(m: number[], ms: number): number | null {
-  const i = MARGIN_LOWER.indexOf(ms)
+  const i = MARGIN_LOWER.findIndex((e) => Math.abs(e - ms) < 1e-3)
   return i < 0 ? null : m.slice(i).reduce((a, b) => a + b, 0)
 }
 
 /**
  * 손실 모양 진단 줄(P2-17h, 피어 통계 툴팁): 손실·마감 놓침 연속 길이 표, 도착 여유(늦음 / 1프레임·2프레임 이상 비율), 은닉 방식.
- * 도착 여유 ≥ 1F 비율은 "1프레임 늦게 보낸 복사본/FEC가 마감 안에 드는 비율"의 하한 추정이다. 옛 엔진(필드 없음)이면 빈 배열
+ * 도착 여유는 직접 잰 "은닉 마감 − 도착"이고, ≥ 1F 비율이 "1프레임 늦게 보낸 복사본/FEC가 마감 안에 드는 비율"이다. 프레임이
+ * 버킷 경계(2.5·5·10ms)가 아니면(128샘플 2.67ms 등) 그 비율은 셀 수 없다고 적는다. 옛 엔진(필드 없음)이면 빈 배열
  */
 export function lossShapeLines(sh: LossShapeStats | null | undefined): string[] {
   if (!sh) return []
-  const runs = (r: number[]) => LOSS_RUN_BUCKETS.map((b, i) => `${b}:${r[i] ?? 0}`).join(' ')
+  const runs = (r: number[], longPkts?: number) =>
+    LOSS_RUN_BUCKETS.map((b, i) => `${b}:${r[i] ?? 0}${i === LOSS_RUN_BUCKETS.length - 1 && longPkts ? `(${longPkts}패킷)` : ''}`).join(' ')
   const m = sh.arrivalMargin
   const total = m.reduce((a, b) => a + b, 0)
   const f = sh.frameMs
   const margin = [`늦음 ${pct(m[0] ?? 0, total)}`]
   for (const [k, label] of [[1, '1F'], [2, '2F']] as const) {
+    const ms = Number((f * k).toFixed(2))
     const n = marginAtLeast(m, f * k)
-    if (n !== null) margin.push(`≥${label}(${f * k}ms) ${pct(n, total)}`)
+    if (n !== null) margin.push(`≥${label}(${ms}ms) ${pct(n, total)}`)
+    else if (k === 1) margin.push(`≥1F(${ms}ms) 버킷 경계 아님`)
   }
   return [
-    `손실 연속(패킷): ${runs(sh.lossRuns)}`,
+    `손실 연속(패킷): ${runs(sh.lossRuns, sh.lossLongPkts)}`,
     `마감 놓침 연속(패킷): ${runs(sh.lateRuns)}`,
-    `도착 여유(${total}개): ${margin.join(' · ')}`,
+    `도착 여유(마감−도착, ${total}개): ${margin.join(' · ')}`,
     `은닉 방식: FEC ${sh.concealFec} · PLC ${sh.concealPlc} · PCM ${sh.concealPcm} (언더런 ${sh.concealUnderrun})`,
   ]
 }

@@ -83,7 +83,7 @@ use crate::packet::Header;
 pub use correction::{correction_catch_up_secs, correction_exit_ms, shift_one};
 #[cfg(test)]
 use correction::MAX_CORR_RATE;
-pub use shape::{LossShapeStats, MARGIN_BUCKETS, MARGIN_EDGES_MS, RUN_BUCKETS};
+pub use shape::{DeadlineClock, LossShapeStats, ShapeEstimate, MARGIN_BUCKETS, MARGIN_EDGES_MS, RUN_BUCKETS};
 pub use stats::JitterStats;
 pub use tuning::{JitterSettings, JitterTuning};
 
@@ -122,6 +122,8 @@ struct Slot {
     flags: u8,
     frame: usize,
     ts: u32,
+    /// 도착 시각(µs, `insert`의 `now_us`). 도착 여유 직접 측정용(P2-17h).
+    arrival_us: u64,
     data: Box<[u8]>,
 }
 
@@ -173,6 +175,11 @@ pub struct JitterBuffer {
     stats: JitterStats,
     /// 손실 모양 추적(seq별 결과 링, P2-17h). 히스토그램은 `stats.shape`에 쌓는다.
     shape: ShapeTracker,
+    /// 소비자의 은닉 마감 시계(`set_deadline_clock`)와 그 뒤 `pop`한 양(48k 샘플). 도착 여유 측정 전용 — 재생 동작에 안 쓴다.
+    clock: Option<DeadlineClock>,
+    clock_popped: f64,
+    /// 언더런 은닉 빚의 맨 앞 seq(`next_seq`)의 은닉 마감(µs): 그 seq가 늦게 오면 `마감 − 도착`(음수)을 센다.
+    debt_deadline: Option<f64>,
 }
 
 /// 1ms당 샘플 수(48k). 하위 묶음도 쓴다(`JitterBuffer`를 거치지 않게, #142 리뷰 L1).
@@ -199,7 +206,7 @@ impl Buffers {
     fn alloc() -> Self {
         Self {
             slots: (0..SLOT_COUNT)
-                .map(|_| Slot { seq: 0, valid: false, written: false, len: 0, flags: 0, frame: 0, ts: 0, data: vec![0u8; MAX_PAYLOAD_BYTES].into_boxed_slice() })
+                .map(|_| Slot { seq: 0, valid: false, written: false, len: 0, flags: 0, frame: 0, ts: 0, arrival_us: 0, data: vec![0u8; MAX_PAYLOAD_BYTES].into_boxed_slice() })
                 .collect(),
             fifo: VecDeque::with_capacity(MAX_PKT_FRAME * 16 * 2),
             scratch: Vec::with_capacity(DELAY_WINDOW),
@@ -215,7 +222,7 @@ impl Buffers {
     fn reclaim(jb: &mut JitterBuffer) -> Self {
         let mut slots = std::mem::take(&mut jb.slots);
         for s in &mut slots {
-            (s.seq, s.valid, s.written, s.len, s.flags, s.frame, s.ts) = (0, false, false, 0, 0, 0, 0);
+            (s.seq, s.valid, s.written, s.len, s.flags, s.frame, s.ts, s.arrival_us) = (0, false, false, 0, 0, 0, 0, 0);
         }
         let mut fifo = std::mem::take(&mut jb.fifo);
         fifo.clear();
@@ -259,6 +266,9 @@ impl JitterBuffer {
             pkt_frame: 240,
             stats: JitterStats::default(),
             shape: ShapeTracker::new(),
+            clock: None,
+            clock_popped: 0.0,
+            debt_deadline: None,
         }
     }
 
@@ -304,6 +314,7 @@ impl JitterBuffer {
 
     fn reset_stream(&mut self) {
         self.shape.flush(&mut self.stats.shape);
+        self.debt_deadline = None;
         self.depth.reset_stream();
         for s in &mut self.slots {
             s.valid = false;
@@ -357,8 +368,9 @@ impl JitterBuffer {
                     self.next_seq = seq;
                 } else {
                     self.stats.late += 1;
-                    self.note_margin(hdr.timestamp, now_us);
-                    self.shape.arrived_late(seq);
+                    // 마감을 놓쳤다: 넘긴 seq면 그 마감 기준 음수, 마감을 모르면(링 밖·시계 없음) 크기 없이 <0 버킷.
+                    let d = self.shape.arrived_late(seq);
+                    self.note_slack(d.map_or(-1.0, |d| d - now_us as f64), false);
                     // 블록 경계(`record_delay`) 뒤에 세어 늦은 도착과 분모가 같은 블록에 들어가게 한다.
                     self.record_delay(hdr.timestamp, now_us);
                     self.note_late();
@@ -394,10 +406,10 @@ impl JitterBuffer {
         slot.flags = hdr.flags;
         slot.frame = frame;
         slot.ts = hdr.timestamp;
+        slot.arrival_us = now_us;
         slot.data[..payload.len()].copy_from_slice(payload);
         self.pkt_frame = frame;
 
-        self.note_margin(hdr.timestamp, now_us);
         self.record_delay(hdr.timestamp, now_us);
         self.note_pkt();
     }
@@ -417,23 +429,42 @@ impl JitterBuffer {
         s.valid && s.seq == seq
     }
 
-    /// 도착 여유 기록(P2-17h, `shape.rs`): 재생 중이면 이 패킷의 재생 마감까지 남은 시간(`depth − rel − lead`)을 버킷에 센다.
-    /// `record_delay` 전에 부른다(이 표본이 들어가기 전의 최소 transit 기준).
-    fn note_margin(&mut self, ts: u32, now_us: u64) {
-        if self.state != State::Playing || !self.have_ts {
-            return;
+    /// 소비자(워커)의 은닉 마감 시계를 알린다(P2-17h 도착 여유 직접 측정, `shape::DeadlineClock`). 이 뒤 `pop`으로 꺼내는 패킷마다
+    /// "마감 − 도착"을 센다. `None`이면(재생 시작·언더런 뒤 건너뛰기, 시계 추정 전) 세지 않는다. 재생 동작에는 영향이 없다.
+    pub fn set_deadline_clock(&mut self, clock: Option<DeadlineClock>) {
+        self.clock = clock;
+        self.clock_popped = 0.0;
+    }
+
+    /// FIFO 끝(다음에 생산할 패킷의 머리)의 은닉 마감(µs): 소스 링에 이미 있는 양 + 이 시계 뒤 꺼낸 양 + FIFO 점유가 그 머리의 링 위치다.
+    fn head_deadline(&self) -> Option<f64> {
+        let c = self.clock?;
+        Some(c.deadline_at(c.ahead + self.clock_popped + (self.fifo.len() / 2) as f64))
+    }
+
+    /// 도착 여유(ms 버킷) 하나를 센다. `in_time`: 제때 재생·버림(0 이상으로 — 명목 마감 뒤 워커가 실제로 깨기 전에 온 패킷),
+    /// 아니면 마감 놓침(0 미만으로).
+    fn note_slack(&mut self, slack_us: f64, in_time: bool) {
+        let ms = slack_us / 1000.0;
+        let ms = if in_time { ms.max(0.0) } else { ms.min(-1e-3) };
+        self.stats.shape.arrival_margin[shape::margin_bucket(ms)] += 1;
+    }
+
+    /// 꺼내는 seq(슬롯 `idx`)의 도착 여유를 센다. `late`: 그 자리에서 언더런 은닉이 이미 났다(마감 = 처음 은닉한 시각).
+    fn note_consumed(&mut self, idx: usize, late: bool) {
+        let arrival = self.slots[idx].arrival_us as f64;
+        if late {
+            // 마감을 놓쳤다: 처음 은닉한 시각을 모르면 크기 없이 <0 버킷.
+            let d = self.debt_deadline;
+            self.note_slack(d.map_or(-1.0, |d| d - arrival), false);
+        } else if let Some(d) = self.head_deadline() {
+            self.note_slack(d - arrival, true);
         }
-        let Some(depth) = self.depth.ewma() else {
-            return;
-        };
-        let rel = (Self::now_samples(now_us) - self.ts_ext(ts) - self.delay.min_transit()) as f64;
-        let margin_ms = (depth - rel - self.target.consumer_lead()) / samples_per_ms();
-        self.stats.shape.arrival_margin[shape::margin_bucket(margin_ms)] += 1;
     }
 
     /// 재생 쪽이 `seq`를 지나간 결과를 손실 모양 추적에 남긴다.
-    fn note_outcome(&mut self, seq: u32, o: SeqOutcome) {
-        self.shape.pass(seq, o, &mut self.stats.shape);
+    fn note_outcome(&mut self, seq: u32, o: SeqOutcome, deadline_us: Option<f64>) {
+        self.shape.pass(seq, o, deadline_us, &mut self.stats.shape);
     }
 
     /// 시험: 진행 중인 손실 모양을 확정한 통계(`stats()`는 링 안의 seq를 아직 세지 않는다).

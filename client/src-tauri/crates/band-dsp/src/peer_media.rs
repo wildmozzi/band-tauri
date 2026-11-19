@@ -42,8 +42,8 @@ impl MediaStats {
 /// `MediaStats`의 원자값 칸 수: `JitterStats` 스칼라 24필드 + playing + first_audio_us + 손실 모양(`SHAPE_WORDS`).
 /// 필드가 늘면 `unpack`의 구조체 식이 컴파일되지 않으므로 `pack`·`unpack`을 함께 고친다.
 const BASE_WORDS: usize = 26;
-/// `LossShapeStats`: frame_ms + 연속 길이 두 벌 + 도착 여유 + 은닉 방식 4.
-const SHAPE_WORDS: usize = 1 + 2 * RUN_BUCKETS + MARGIN_BUCKETS + 4;
+/// `LossShapeStats`: frame_ms + 연속 길이 두 벌 + 17+ 패킷 합 + 도착 여유 + 은닉 방식 4.
+const SHAPE_WORDS: usize = 1 + 2 * RUN_BUCKETS + 1 + MARGIN_BUCKETS + 4;
 const STAT_WORDS: usize = BASE_WORDS + SHAPE_WORDS;
 
 fn pack(s: &MediaStats) -> [u64; STAT_WORDS] {
@@ -57,7 +57,7 @@ fn pack(s: &MediaStats) -> [u64; STAT_WORDS] {
     };
     put(sh.frame_ms.to_bits() as u64);
     sh.loss_runs.iter().chain(&sh.late_runs).chain(&sh.arrival_margin).for_each(|&v| put(v));
-    [sh.conceal_fec, sh.conceal_plc, sh.conceal_pcm, sh.conceal_underrun].into_iter().for_each(&mut put);
+    [sh.loss_long_pkts, sh.conceal_fec, sh.conceal_plc, sh.conceal_pcm, sh.conceal_underrun].into_iter().for_each(&mut put);
     w
 }
 
@@ -66,6 +66,7 @@ fn unpack_shape(w: &[u64]) -> LossShapeStats {
     let mut next = || it.next().unwrap_or(0);
     let mut sh = LossShapeStats { frame_ms: f32::from_bits(next() as u32), ..LossShapeStats::default() };
     sh.loss_runs.iter_mut().chain(sh.late_runs.iter_mut()).chain(sh.arrival_margin.iter_mut()).for_each(|v| *v = next());
+    sh.loss_long_pkts = next();
     sh.conceal_fec = next();
     sh.conceal_plc = next();
     sh.conceal_pcm = next();
@@ -452,6 +453,7 @@ mod tests {
             shape: LossShapeStats {
                 frame_ms: 2.5,
                 loss_runs: [n, 1, 2, 3, 4, 5],
+                loss_long_pkts: n + 99,
                 late_runs: [6, 7, 8, 9, 10, n + 2],
                 arrival_margin: [11, 12, 13, 14, 15, 16, 17, 18, 19, n + 3],
                 conceal_fec: 20,

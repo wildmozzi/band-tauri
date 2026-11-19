@@ -99,3 +99,8 @@ required-features = ["backend-cpal"]
 [[example]]
 name = "wasapi_probe"
 required-features = ["backend-cpal", "backend-wasapi"]
+
+# 진단 내보내기의 손실 모양으로 복사·FEC 효과 추정(P2-17h [사람] 절차). 장치를 열지 않는다 — `cargo test`가 단위 시험도 돌린다.
+[[example]]
+name = "loss_shape_estimate"
+test = true

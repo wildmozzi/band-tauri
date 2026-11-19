@@ -36,6 +36,7 @@ impl JitterBuffer {
         let need = out.len() / 2;
         if self.state == State::Buffering {
             out.fill(0.0);
+            self.clock_popped += need as f64;
             return;
         }
         while self.fifo.len() / 2 < need {
@@ -48,6 +49,8 @@ impl JitterBuffer {
             *o = s;
         }
         out[avail * 2..].fill(0.0);
+        // 꺼낸 양은 소비자 링에 들어가 다음 패킷 머리를 그만큼 뒤로 민다(도착 여유 마감 계산, P2-17h).
+        self.clock_popped += need as f64;
     }
 
     /// 버퍼링 → 재생 전환. 시작 깊이를 목표에 정확히 맞춘다(초과분은 건너뜀).
@@ -77,6 +80,7 @@ impl JitterBuffer {
         self.state = State::Playing;
         self.depth.reset_mode();
         self.conceal.reset_run();
+        self.debt_deadline = None;
         // 첫 패킷의 앞부분을 잘라 깊이 = 목표. 자르기 전에는 페이드를 걸지 않는다(끝난 상태로 두고 생산).
         self.start_fade_done = START_FADE;
         if self.produce_packet() {
@@ -150,11 +154,14 @@ impl JitterBuffer {
             self.conceal.decode_dropped(&self.slots[idx].data[..len], opus, ch, pframe);
             self.slots[idx].valid = false;
             // 늦게 온 패킷을 버리면(H1 또는 trimming) 앞서 낸 언더런 은닉이 그 자리를 메운 것이다.
-            if self.conceal.pay_one() {
+            let late = self.conceal.pay_one();
+            self.note_consumed(idx, late);
+            if late {
                 self.note_late();
-                self.note_outcome(seq, SeqOutcome::Late);
+                self.note_outcome(seq, SeqOutcome::Late, None);
+                self.advance_debt_deadline();
             } else {
-                self.note_outcome(seq, SeqOutcome::Played);
+                self.note_outcome(seq, SeqOutcome::Played, None);
             }
         }
         self.next_seq = seq.wrapping_add(1);
@@ -174,11 +181,18 @@ impl JitterBuffer {
             && self.has_later_packet()
         {
             self.conceal.pay_one();
-            self.note_outcome(self.next_seq, SeqOutcome::Missing);
+            self.note_outcome(self.next_seq, SeqOutcome::Missing, self.debt_deadline);
+            self.advance_debt_deadline();
             self.next_seq = self.next_seq.wrapping_add(1);
             self.stats.concealed_loss += 1;
             self.push_loss(true);
         }
+    }
+
+    /// 빚 1을 갚은 뒤: 다음 빚 seq의 마감은 한 프레임 뒤다(빚이 없으면 지운다).
+    fn advance_debt_deadline(&mut self) {
+        let f_us = self.frame() as f64 * 1000.0 / samples_per_ms();
+        self.debt_deadline = if self.conceal.has_debt() { self.debt_deadline.map(|d| d + f_us) } else { None };
     }
 
     /// 패킷 하나만큼 FIFO에 생산. 재버퍼링으로 전환하면 false.
@@ -233,11 +247,14 @@ impl JitterBuffer {
             self.fifo_end_ts = self.ts_ext(ts) + pframe as i64;
             // 늦게 온 패킷을 재생하면 타임라인이 되감기고(깊이 +debt·F) 그 몫은 샘플 보정이 되돌린다.
             // 그 자리에서 언더런 은닉이 났으면 마감을 놓친 seq다(P2-17h).
-            if self.conceal.clear_debt() {
+            let late = self.conceal.clear_debt();
+            self.note_consumed(idx, late);
+            self.debt_deadline = None;
+            if late {
                 self.note_late();
-                self.note_outcome(seq, SeqOutcome::Late);
+                self.note_outcome(seq, SeqOutcome::Late, None);
             } else {
-                self.note_outcome(seq, SeqOutcome::Played);
+                self.note_outcome(seq, SeqOutcome::Played, None);
             }
             self.push_loss(false);
             let win = self.rate_window();
@@ -272,11 +289,16 @@ impl JitterBuffer {
             self.conceal.push_conceal(true, win);
             if lost {
                 self.stats.concealed_loss += 1;
-                self.note_outcome(seq, SeqOutcome::Missing);
+                let d = self.head_deadline();
+                self.note_outcome(seq, SeqOutcome::Missing, d);
                 self.next_seq = seq.wrapping_add(1);
                 self.push_loss(true);
             } else {
                 self.stats.shape.conceal_underrun += 1;
+                // 빚의 맨 앞 seq는 지금 마감을 놓쳤다(처음 은닉한 시각 = 그 마감). 이어지는 언더런 은닉은 같은 seq를 기다린다.
+                if !self.conceal.has_debt() {
+                    self.debt_deadline = self.head_deadline();
+                }
                 self.conceal.add_debt();
             }
             self.fifo_end_ts += frames as i64;
