@@ -1470,7 +1470,10 @@ fn trace_hash(opus: bool) -> String {
         h.update(jb.depth_error().to_bits().to_le_bytes());
         h.update([jb.is_playing() as u8]);
         h.update((jb.real_frames() as u64).to_le_bytes());
-        h.update(format!("{:?}", jb.stats()).as_bytes());
+        // 손실 모양(P2-17h)은 관측 전용 필드라 해시에서 뺀다 — 기준값이 그대로면 재생 동작이 바뀌지 않았다는 증거다.
+        let st = format!("{:?}", jb.stats());
+        let st = st.split_once(", shape: ").map(|(head, _)| format!("{head} }}")).unwrap_or(st);
+        h.update(st.as_bytes());
         tick += 1;
     }
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
@@ -1658,4 +1661,123 @@ fn start_fade_continues_across_packets() {
             assert!((v - want).abs() < 1e-6, "first {first}: 프레임 {i} = {v} (기대 {want})");
         }
     }
+}
+
+/// 손실 모양(P2-17h) 시험 틀: 5ms 프레임, 틱(5ms)마다 도착 → pop 1프레임 → end_burst(`debt_case`와 같은 구동).
+/// `arrive(i)`: 패킷 i의 도착 틱(None = 손실). 반환: 끝 통계와 진행 중인 연속까지 확정한 손실 모양.
+fn shape_case(codec: CodecKind, arrive: &dyn Fn(usize) -> Option<usize>) -> (JitterStats, LossShapeStats) {
+    const N: usize = 120;
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    let mut tx = Sender::new(codec, 240, u32::MAX - 40, 0);
+    let pkts: Vec<_> = (0..N).map(|_| tx.next()).collect();
+    let mut by_tick: Vec<Vec<usize>> = vec![Vec::new(); N + 1];
+    for i in 0..N {
+        if let Some(t) = arrive(i) {
+            by_tick[t.min(N)].push(i);
+        }
+    }
+    let mut out = vec![0f32; 480];
+    for (tick, arrivals) in by_tick.iter().enumerate().take(N) {
+        for &i in arrivals {
+            jb.insert(&pkts[i].0, &pkts[i].1, tick as u64 * 5000);
+        }
+        jb.pop(&mut out);
+        jb.end_burst(tick as u64 * 5000, tick as u64 * 5000, 0.0);
+    }
+    assert!(jb.is_playing());
+    let s = jb.stats();
+    let sh = jb.flushed_shape();
+    // 은닉 방식의 합은 은닉 프레임 수다(기존 카운터 의미 그대로).
+    assert_eq!(sh.conceal_fec + sh.conceal_plc + sh.conceal_pcm, s.concealed, "{sh:?} / {s:?}");
+    assert!(sh.conceal_underrun <= s.concealed);
+    assert_eq!(sh.frame_ms, 5.0);
+    (s, sh)
+}
+
+#[test]
+fn shape_single_and_burst_loss_runs() {
+    let k = 50;
+    // 단발 손실: k의 마감(틱 k+1의 pop)에는 k+1이 이미 와 있어 손실 은닉(seq 전진). PCM 페이드.
+    let (s, sh) = shape_case(CodecKind::Pcm16, &|i| (i != k).then_some(i));
+    assert_eq!(sh.loss_runs, [1, 0, 0, 0, 0, 0], "{sh:?}");
+    assert_eq!(sh.late_runs, [0; RUN_BUCKETS]);
+    assert_eq!((s.concealed, s.concealed_loss, sh.conceal_pcm, sh.conceal_underrun), (1, 1, 1, 0), "{sh:?}");
+    assert_eq!(sh.arrival_margin[0], 0, "제때 온 패킷만 — 늦음 없음: {sh:?}");
+    // 버스트 손실 8패킷 → 5–8 버킷 하나. PCM은 페이드 1회 후 무음(모두 PCM 은닉). 뒤 패킷이 아직 없는 자리는 언더런 은닉이고
+    // k+8 도착으로 손실로 재해석된다(`settle_underrun_debt`) — 연속 길이는 같다.
+    let (s, sh) = shape_case(CodecKind::Pcm16, &|i| (!(k..k + 8).contains(&i)).then_some(i));
+    assert_eq!(sh.loss_runs, [0, 0, 0, 1, 0, 0], "{sh:?}");
+    assert_eq!(sh.late_runs, [0; RUN_BUCKETS]);
+    assert_eq!((s.concealed, s.concealed_loss, sh.conceal_pcm), (8, 8, 8), "{sh:?}");
+    assert_eq!(sh.conceal_underrun, 7, "{sh:?}");
+    // 두 버스트(2와 17): 2 버킷 하나, 17+ 버킷 하나. 17패킷(85ms)은 재버퍼(200ms) 전이다.
+    let (_, sh) = shape_case(CodecKind::Pcm16, &|i| (!(30..32).contains(&i) && !(60..77).contains(&i)).then_some(i));
+    assert_eq!(sh.loss_runs, [0, 1, 0, 0, 0, 1], "{sh:?}");
+}
+
+#[test]
+fn shape_late_arrivals_are_deadline_misses_not_losses() {
+    let k = 50;
+    // 패킷 k가 2틱(10ms) 늦게 온다: 마감에 언더런 은닉 → k+1 도착으로 손실로 넘김 → k 도착(늦음). 손실이 아니라 마감 놓침.
+    let (s, sh) = shape_case(CodecKind::Pcm16, &|i| Some(if i == k { k + 2 } else { i }));
+    assert_eq!(s.late, 1);
+    assert_eq!(sh.loss_runs, [0; RUN_BUCKETS], "{sh:?}");
+    assert_eq!(sh.late_runs, [1, 0, 0, 0, 0, 0], "{sh:?}");
+    assert!(sh.arrival_margin[0] >= 1, "늦은 도착은 음수 여유: {sh:?}");
+    // k..k+2가 k+4에 한꺼번에 늦게 온다(k+3은 제때) → 마감 놓침 연속 3(3–4 버킷).
+    let (s, sh) = shape_case(CodecKind::Pcm16, &|i| Some(if (k..k + 3).contains(&i) { k + 4 } else { i }));
+    assert_eq!(s.late, 3);
+    assert_eq!(sh.loss_runs, [0; RUN_BUCKETS], "{sh:?}");
+    assert_eq!(sh.late_runs, [0, 0, 1, 0, 0, 0], "{sh:?}");
+    assert_eq!(sh.arrival_margin[0], 3, "{sh:?}");
+    // k와 k+1이 함께 2틱 늦게: k의 마감에 언더런 은닉 → k 도착 때 깊이가 F 늘어 k를 버린다(H1 `late_dropped`) → 마감 놓침 1.
+    let (s, sh) = shape_case(CodecKind::Pcm16, &|i| Some(if i == k || i == k + 1 { k + 2 } else { i }));
+    assert_eq!((s.late, s.late_dropped, s.concealed), (0, 1, 1), "{s:?}");
+    assert_eq!(sh.loss_runs, [0; RUN_BUCKETS], "{sh:?}");
+    assert_eq!(sh.late_runs, [1, 0, 0, 0, 0, 0], "{sh:?}");
+    assert_eq!(sh.conceal_underrun, 1);
+    // 1틱(5ms = F) 늦은 패킷: 도착 여유는 음수로 세지만 이 틀에서는 제때 재생된다. 여유는 버스트 직후 깊이 기준이라 실제 마감이
+    // 출력 콜백 주기(여기서는 5ms)만큼까지 더 늦을 수 있는 보수적(하한) 추정이다(`shape.rs`).
+    let (s, sh) = shape_case(CodecKind::Pcm16, &|i| Some(if i == k { k + 1 } else { i }));
+    assert_eq!((s.late, s.concealed, sh.arrival_margin[0]), (0, 0, 1), "{s:?}");
+    assert_eq!(sh.late_runs, [0; RUN_BUCKETS], "{sh:?}");
+}
+
+#[test]
+fn shape_opus_fec_plc_counts() {
+    let k = 50;
+    // k 손실, k+1이 미리(틱 k에) 와 있다: 손실 은닉에서 다음 패킷 FEC 디코드.
+    let (s, sh) = shape_case(CodecKind::Opus, &|i| if i == k { None } else if i == k + 1 { Some(k) } else { Some(i) });
+    assert_eq!((s.concealed, sh.conceal_fec, sh.conceal_plc, sh.conceal_pcm, sh.conceal_underrun), (1, 1, 0, 0, 0), "{sh:?}");
+    assert_eq!(sh.loss_runs, [1, 0, 0, 0, 0, 0]);
+    // k, k+1 손실, k+2가 틱 k에: k는 다음 패킷이 없어 PLC, k+1은 k+2의 FEC.
+    let (s, sh) = shape_case(CodecKind::Opus, &|i| if i == k || i == k + 1 { None } else if i == k + 2 { Some(k) } else { Some(i) });
+    assert_eq!((s.concealed, sh.conceal_fec, sh.conceal_plc, sh.conceal_pcm), (2, 1, 1, 0), "{sh:?}");
+    assert_eq!(sh.loss_runs, [0, 1, 0, 0, 0, 0]);
+    // k 손실, k+1이 늦게(틱 k+2): k의 마감에는 뒤 패킷이 없어 언더런 은닉(Opus PLC) → k+1 도착으로 손실 재해석.
+    let (s, sh) = shape_case(CodecKind::Opus, &|i| if i == k { None } else if i == k + 1 { Some(k + 2) } else { Some(i) });
+    assert_eq!((s.concealed, sh.conceal_fec, sh.conceal_plc, sh.conceal_underrun), (1, 0, 1, 1), "{sh:?}");
+    assert_eq!(sh.loss_runs, [1, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn shape_margin_reflects_jitter_and_counts_survive_restart() {
+    // 깨끗한 회선: 손실·늦음 0, 도착 여유는 모두 0 이상.
+    let r = simulate(Sim { seconds: 4.0, ..Default::default() });
+    let sh = r.stats.shape;
+    assert_eq!(sh.arrival_margin[0], 0, "{sh:?}");
+    assert!(sh.arrival_margin.iter().sum::<u64>() > 700, "{sh:?}");
+    assert_eq!(sh.loss_runs, [0; RUN_BUCKETS]);
+    // 균등 지터 U(0, 4ms): 여유가 넓게 퍼진다(목표 = p95 근처라 상당수가 2.5ms 미만).
+    let r = simulate(Sim { jitter_ms: 4.0, seconds: 6.0, ..Default::default() });
+    let m = r.stats.shape.arrival_margin;
+    let total: u64 = m.iter().sum();
+    let ge_2_5: u64 = m[5..].iter().sum();
+    assert!(total > 1000 && ge_2_5 > 0 && ge_2_5 < total, "{m:?}");
+    // restart는 누적 통계(손실 모양 포함)를 유지하고 진행 중인 연속을 확정한다.
+    let (_, before) = shape_case(CodecKind::Pcm16, &|i| (i != 50).then_some(i));
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    jb.stats.shape = before;
+    jb.restart();
+    assert_eq!(jb.stats().shape.loss_runs, before.loss_runs);
 }

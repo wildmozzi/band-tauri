@@ -38,6 +38,7 @@ meta.json       앱 버전, OS 종류·버전, 내보낸 시각, 타임라인 �
 engine.json     엔진 설정(버퍼·프레임·코덱·지터 범위), 마지막 엔진 통계, 오디오 장치 목록(이름·드라이버·채널·레이트)
 timeline.jsonl  1초 간격 엔진 통계(최근 최대 60분): 백엔드·장치 버퍼·지연·xrun·스트림 오류,
                 피어별 경로(lan/public/relay)·RTT·지터·버퍼·재생 지연·손실·늦음·은닉(누적)
+                lossShape(피어별 누적): 손실·마감 놓침 연속 길이 분포, 도착 여유 분포, 은닉 방식별 수
                 session 값이 바뀐 곳은 엔진 재시작이라 누적 값이 0부터 다시 셉니다.
                 corePlacement(Windows)는 워커·수신 스레드가 깨어날 때 P/E/LP-E 코어 중 어디에 있었는지 센
                 [P, E, LP-E] 표본 수입니다. 줄마다 직전 줄 뒤로 센 구간 값이고(실행 시간이 아니라 깨어난 횟수),
@@ -522,7 +523,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         let expected = [
             // P1-21a: README에 corePlacement 설명, meta.format 1 → 2(의도한 변경 — engine.json·timeline.jsonl 해시는 그대로)
-            ("README.txt", "53892e8d86178fe2d6875d8489e2f0bdbd8108ee1e19e9029e3a7e835c0b31a6"),
+            // P2-17h: README에 lossShape 설명 한 줄(의도한 변경 — 피어가 없는 입력이라 engine.json·timeline.jsonl 해시는 그대로)
+            ("README.txt", "797e2610e1374de6ebd1babbece5ee97e443282b06bad588e695f56ea5db2b13"),
             ("meta.json", "867d233d696502bd59c5633c283b652e9262fafe3ea585ca3bbc247a158a6aee"),
             // P2-17e: engine.json의 config에 resampleQuality(null), stats에 resampler(null)가 생김(의도한 변경)
             ("engine.json", "0ef44a4721cd5611ce168d55901d4dab2add7c75a7de49675cd57f418ed69c52"),

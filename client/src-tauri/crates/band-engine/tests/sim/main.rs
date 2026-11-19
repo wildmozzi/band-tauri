@@ -5,6 +5,7 @@
 //! - `long`: 6피어 풀메시 장시간 하네스(5분 기본 테스트, 60분은 `--ignored` 야간 잡), 리포트 Markdown·JSON.
 //! - `chaos`: 혼돈 시나리오(순서 뒤바뀜·중복·버스트 손실·지연 급변·분포 급변·재접속·큰 드리프트·6피어 동시, 10분은 `--ignored`).
 //! - `loss_codec`: 수신 손실 피드백 → 피어별 Opus 전환 시뮬레이션(P1-4e).
+//! - `loss_shape`: 무작위·버스트 손실의 손실 모양 통계 분포와 복사/FEC 효과 추정(P2-17h).
 //!
 //! 그릇(`docs/overhaul/engine-stage5-10-scope.md` 7.4절 "나"): 별도 크레이트 없이 `band-engine`의 테스트 타깃이다. 장치 백엔드
 //! (cpal·windows)와 앱(tauri) 없이 돌리려면 `--no-default-features --features test-support`를 준다:
@@ -26,4 +27,5 @@ static GLOBAL: Counting = Counting;
 mod chaos;
 mod long;
 mod loss_codec;
+mod loss_shape;
 mod tune;

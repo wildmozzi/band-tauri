@@ -115,6 +115,8 @@ pub(crate) struct PeerSample {
     /// net 재전송 창에서 버린 수신 패킷(누적, #193): 사본·재전송 / Audio 창보다 옛 것. 망 중복·이중 경로·재생 확인용.
     pub(crate) rx_dup_dropped: u64,
     pub(crate) rx_stale_dropped: u64,
+    /// 손실 모양 누적(P2-17h, `PeerStats.lossShape`와 같은 값). 실합주 뒤 진단 내보내기로 모은다.
+    pub(crate) loss_shape: band_dsp::jitter::LossShapeStats,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -242,6 +244,7 @@ impl Sample {
                     remote_input_buffer_ms: p.remote_input_buffer_ms,
                     rx_dup_dropped: p.rx_dup_dropped,
                     rx_stale_dropped: p.rx_stale_dropped,
+                    loss_shape: p.loss_shape,
                 })
                 .collect(),
             relay: s.relay.as_ref().map(|r| RelaySample {
@@ -374,6 +377,7 @@ pub(super) mod tests {
             remote_input_buffer_ms: Some(2.67),
             rx_dup_dropped: 4,
             rx_stale_dropped: 1,
+            loss_shape: band_dsp::jitter::LossShapeStats { frame_ms: 2.5, loss_runs: [3, 1, 0, 0, 0, 0], conceal_fec: 2, ..Default::default() },
         });
         s.relay = Some(RelayStats {
             state: RelayStateKind::Bound,
@@ -402,6 +406,8 @@ pub(super) mod tests {
         assert!(line.contains("\"connectMs\":120.0") && line.contains("\"firstAudioMs\":180.5"), "{line}");
         assert!(line.contains("\"remoteFrameMs\":5.0") && line.contains("\"remoteInputBufferMs\":2.67"), "{line}");
         assert!(line.contains("\"rxDupDropped\":4") && line.contains("\"rxStaleDropped\":1"), "{line}");
+        assert!(line.contains("\"lossShape\":{\"frameMs\":2.5,\"lossRuns\":[3,1,0,0,0,0],\"lateRuns\":[0,0,0,0,0,0]"), "{line}");
+        assert!(line.contains("\"concealFec\":2"), "{line}");
     }
 
     /// 옛 엔진(두 값 없음)이면 키는 남고 값이 null이다.

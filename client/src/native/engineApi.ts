@@ -217,6 +217,26 @@ export interface PeerStats {
   /** net 재전송 창에서 버린 이 피어의 수신 패킷(누적, 이 피어 항목 동안). Dup = 이미 받은 seq의 사본·재전송(망 중복·경로 전환 중 두 경로 수신·재생 공격), Stale = Audio seq 창(1024패킷)보다 옛 패킷. 수신 큐 전에 버려 late·lossPct에 없다. 옛 엔진에는 없다 */
   rxDupDropped?: number
   rxStaleDropped?: number
+  /** 손실 모양·은닉 방식·도착 여유(P2-17h, 이 피어 항목 동안 누적). FEC/중복 전송 결정용 측정. 옛 엔진에는 없다 */
+  lossShape?: LossShapeStats
+}
+
+/** 손실 모양 통계(P2-17h, 설계 1.2절 "손실 모양 통계") */
+export interface LossShapeStats {
+  /** 현재 수신 패킷 프레임(ms). 연속 길이(패킷) × 이 값 ≈ ms */
+  frameMs: number
+  /** 끝내 안 온 seq의 연속 길이 히스토그램(버킷 1, 2, 3–4, 5–8, 9–16, 17+ 패킷 — engineDiagFormat LOSS_RUN_BUCKETS). 최근 256패킷 안의 손실은 아직 확정 전이라 없다 */
+  lossRuns: number[]
+  /** 도착했지만 재생 마감을 놓친 seq의 연속 길이 히스토그램(같은 버킷) */
+  lateRuns: number[]
+  /** 도착 시 깊이 여유(ms, 버킷 <0, 0–0.5, 0.5–1, 1–2, 2–2.5, 2.5–3, 3–5, 5–7.5, 7.5–10, ≥10 — ARRIVAL_MARGIN_BUCKETS) 히스토그램. 보수적(하한) 추정 — 실제 마감은 0..출력 콜백 주기만큼 더 늦다 */
+  arrivalMargin: number[]
+  /** 은닉 방식별 프레임 수(합 = concealed): Opus FEC 디코드 / Opus PLC / PCM 페이드·무음 */
+  concealFec: number
+  concealPlc: number
+  concealPcm: number
+  /** 은닉 프레임 중 언더런 은닉(seq 유지) 수(방식과 겹침) */
+  concealUnderrun: number
 }
 
 // ============================================================================

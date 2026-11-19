@@ -292,6 +292,7 @@ engine/report.rs	field	late
 engine/report.rs	field	level
 engine/report.rs	field	lock_wait
 engine/report.rs	field	loss_pct
+engine/report.rs	field	loss_shape
 engine/report.rs	field	max_corr_cents
 engine/report.rs	field	metronome
 engine/report.rs	field	monitor_latency_ms

@@ -10,6 +10,7 @@
 //! - `conceal.rs`: 디코드·은닉(`Concealer`: 디코더 풀, FEC/PLC·PCM 페이드, 버림 크로스페이드, 언더런 빚, 손실·은닉 창)
 //! - `correction.rs`: 깊이 측정(`end_burst`)·데드밴드 보정(`DepthCtl`)·비율 리샘플러, 샘플 시프트 유틸
 //! - `stats.rs`: `JitterStats`, 비율 창, 통계 스냅샷
+//! - `shape.rs`: 손실 모양·은닉 방식·도착 여유 진단 통계(`LossShapeStats`, P2-17h)
 //! - `tests.rs`: 결정적 단위 시뮬레이션
 //!
 //! ## 사용법(워커, 콜백 구동 믹스)
@@ -67,6 +68,7 @@ mod correction;
 mod delay;
 mod late_budget;
 mod playout;
+mod shape;
 mod stats;
 mod target;
 #[cfg(test)]
@@ -81,6 +83,7 @@ use crate::packet::Header;
 pub use correction::{correction_catch_up_secs, correction_exit_ms, shift_one};
 #[cfg(test)]
 use correction::MAX_CORR_RATE;
+pub use shape::{LossShapeStats, MARGIN_BUCKETS, MARGIN_EDGES_MS, RUN_BUCKETS};
 pub use stats::JitterStats;
 pub use tuning::{JitterSettings, JitterTuning};
 
@@ -88,6 +91,7 @@ use conceal::{ConcealBufs, Concealer};
 use correction::{DepthBufs, DepthCtl};
 use delay::DelayStats;
 use late_budget::LateBudget;
+use shape::{SeqOutcome, ShapeTracker};
 use target::TargetEst;
 
 /// 슬롯 링 크기: 2의 거듭제곱(u32 seq 랩에서도 슬롯 충돌 없음, 리뷰 L1). 2.5ms 기준 2.56초.
@@ -167,6 +171,8 @@ pub struct JitterBuffer {
     pkt_frame: usize,
 
     stats: JitterStats,
+    /// 손실 모양 추적(seq별 결과 링, P2-17h). 히스토그램은 `stats.shape`에 쌓는다.
+    shape: ShapeTracker,
 }
 
 /// 1ms당 샘플 수(48k). 하위 묶음도 쓴다(`JitterBuffer`를 거치지 않게, #142 리뷰 L1).
@@ -252,6 +258,7 @@ impl JitterBuffer {
             conceal: Concealer::new(b.conceal),
             pkt_frame: 240,
             stats: JitterStats::default(),
+            shape: ShapeTracker::new(),
         }
     }
 
@@ -287,6 +294,7 @@ impl JitterBuffer {
     /// 지연 통계까지 모두 버리고 처음부터 다시 채운다(누적 통계 카운터는 유지). 같은 피어의 스트림 성격이
     /// 바뀔 때(에코 측정 시작/끝: 상대 오디오 ↔ 되돌아온 내 오디오) 이전 도착 시각 분포를 섞지 않으려고 쓴다.
     pub fn restart(&mut self) {
+        self.shape.flush(&mut self.stats.shape);
         let stats = self.stats;
         // 버퍼를 꺼내 처음 상태로 되돌려 다시 쓴다(엔진 ③c — 워커에서 적용되므로 할당·해제 0, `tests/rt_alloc.rs`).
         let buffers = Buffers::reclaim(self);
@@ -295,6 +303,7 @@ impl JitterBuffer {
     }
 
     fn reset_stream(&mut self) {
+        self.shape.flush(&mut self.stats.shape);
         self.depth.reset_stream();
         for s in &mut self.slots {
             s.valid = false;
@@ -348,6 +357,8 @@ impl JitterBuffer {
                     self.next_seq = seq;
                 } else {
                     self.stats.late += 1;
+                    self.note_margin(hdr.timestamp, now_us);
+                    self.shape.arrived_late(seq);
                     // 블록 경계(`record_delay`) 뒤에 세어 늦은 도착과 분모가 같은 블록에 들어가게 한다.
                     self.record_delay(hdr.timestamp, now_us);
                     self.note_late();
@@ -386,6 +397,7 @@ impl JitterBuffer {
         slot.data[..payload.len()].copy_from_slice(payload);
         self.pkt_frame = frame;
 
+        self.note_margin(hdr.timestamp, now_us);
         self.record_delay(hdr.timestamp, now_us);
         self.note_pkt();
     }
@@ -403,6 +415,32 @@ impl JitterBuffer {
     fn slot_has(&self, seq: u32) -> bool {
         let s = &self.slots[Self::slot_index(seq)];
         s.valid && s.seq == seq
+    }
+
+    /// 도착 여유 기록(P2-17h, `shape.rs`): 재생 중이면 이 패킷의 재생 마감까지 남은 시간(`depth − rel − lead`)을 버킷에 센다.
+    /// `record_delay` 전에 부른다(이 표본이 들어가기 전의 최소 transit 기준).
+    fn note_margin(&mut self, ts: u32, now_us: u64) {
+        if self.state != State::Playing || !self.have_ts {
+            return;
+        }
+        let Some(depth) = self.depth.ewma() else {
+            return;
+        };
+        let rel = (Self::now_samples(now_us) - self.ts_ext(ts) - self.delay.min_transit()) as f64;
+        let margin_ms = (depth - rel - self.target.consumer_lead()) / samples_per_ms();
+        self.stats.shape.arrival_margin[shape::margin_bucket(margin_ms)] += 1;
+    }
+
+    /// 재생 쪽이 `seq`를 지나간 결과를 손실 모양 추적에 남긴다.
+    fn note_outcome(&mut self, seq: u32, o: SeqOutcome) {
+        self.shape.pass(seq, o, &mut self.stats.shape);
+    }
+
+    /// 시험: 진행 중인 손실 모양을 확정한 통계(`stats()`는 링 안의 seq를 아직 세지 않는다).
+    #[cfg(test)]
+    pub(crate) fn flushed_shape(&mut self) -> LossShapeStats {
+        self.shape.flush(&mut self.stats.shape);
+        self.stats().shape
     }
 
     /// 녹음 마커용 누적 카운터만(은닉 패킷 수, 버린 패킷 수). `stats()`의 표시용 계산을 건너뛴다(PR #62 L3).

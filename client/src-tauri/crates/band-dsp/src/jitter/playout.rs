@@ -3,6 +3,7 @@
 //! 디코드·은닉 상태는 `Concealer`(`conceal.rs`), 깊이·보정 상태는 `DepthCtl`(`correction.rs`)에 있다. 여기의
 //! `impl JitterBuffer`는 슬롯·seq·FIFO와 두 묶음을 잇는 조립이다(엔진 ⑧(b)).
 
+use super::shape::{ConcealKind, SeqOutcome};
 use super::{samples_per_ms, seq_diff, JitterBuffer, State, SLOT_COUNT};
 
 /// 언더런 은닉이 이 시간(ms) 이상 지속되면 재버퍼링.
@@ -151,6 +152,9 @@ impl JitterBuffer {
             // 늦게 온 패킷을 버리면(H1 또는 trimming) 앞서 낸 언더런 은닉이 그 자리를 메운 것이다.
             if self.conceal.pay_one() {
                 self.note_late();
+                self.note_outcome(seq, SeqOutcome::Late);
+            } else {
+                self.note_outcome(seq, SeqOutcome::Played);
             }
         }
         self.next_seq = seq.wrapping_add(1);
@@ -170,6 +174,7 @@ impl JitterBuffer {
             && self.has_later_packet()
         {
             self.conceal.pay_one();
+            self.note_outcome(self.next_seq, SeqOutcome::Missing);
             self.next_seq = self.next_seq.wrapping_add(1);
             self.stats.concealed_loss += 1;
             self.push_loss(true);
@@ -227,8 +232,12 @@ impl JitterBuffer {
             self.next_seq = seq.wrapping_add(1);
             self.fifo_end_ts = self.ts_ext(ts) + pframe as i64;
             // 늦게 온 패킷을 재생하면 타임라인이 되감기고(깊이 +debt·F) 그 몫은 샘플 보정이 되돌린다.
+            // 그 자리에서 언더런 은닉이 났으면 마감을 놓친 seq다(P2-17h).
             if self.conceal.clear_debt() {
                 self.note_late();
+                self.note_outcome(seq, SeqOutcome::Late);
+            } else {
+                self.note_outcome(seq, SeqOutcome::Played);
             }
             self.push_loss(false);
             let win = self.rate_window();
@@ -250,15 +259,24 @@ impl JitterBuffer {
             let next = seq.wrapping_add(1);
             let ns = &self.slots[Self::slot_index(next)];
             let fec = (lost && ns.valid && ns.seq == next).then(|| &ns.data[..ns.len]);
-            ch = self.conceal.conceal_frame(frames, fec);
+            let (c, kind) = self.conceal.conceal_frame(frames, fec);
+            ch = c;
             self.stats.concealed += 1;
+            let sh = &mut self.stats.shape;
+            match kind {
+                ConcealKind::Fec => sh.conceal_fec += 1,
+                ConcealKind::Plc => sh.conceal_plc += 1,
+                ConcealKind::Pcm => sh.conceal_pcm += 1,
+            }
             let win = self.rate_window();
             self.conceal.push_conceal(true, win);
             if lost {
                 self.stats.concealed_loss += 1;
+                self.note_outcome(seq, SeqOutcome::Missing);
                 self.next_seq = seq.wrapping_add(1);
                 self.push_loss(true);
             } else {
+                self.stats.shape.conceal_underrun += 1;
                 self.conceal.add_debt();
             }
             self.fifo_end_ts += frames as i64;
