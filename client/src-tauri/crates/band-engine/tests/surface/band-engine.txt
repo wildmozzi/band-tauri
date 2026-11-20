@@ -14,8 +14,16 @@ diag/mod.rs	method	shutdown
 diag/mod.rs	method	spawn_recorder
 diag/mod.rs	method	with_timeline
 diag/mod.rs	mod	export
+diag/mod.rs	mod	report
 diag/mod.rs	struct	Diagnostics
 diag/mod.rs	struct	ExportGuard
+diag/report/mod.rs	fn	run
+diag/report/mod.rs	mod	shape
+diag/report/shape.rs	fn	fkey
+diag/report/shape.rs	fn	from_engine_json
+diag/report/shape.rs	fn	from_timeline
+diag/report/shape.rs	fn	totals
+diag/report/shape.rs	type	Shapes
 diag/timeline.rs	fn	to_jsonl
 diag/timeline.rs	struct	Ring
 diag/timeline.rs	struct	Sample

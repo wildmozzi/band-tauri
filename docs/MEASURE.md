@@ -97,6 +97,8 @@ GOAL 1절 목표: 로컬 처리 지연 ASIO 128샘플/2.5ms 프레임 ≤ 8ms, W
 
 함께 적을 것: Windows 버전, Focusrite 드라이버 버전, 앱 커밋, 케이블(라인 → 라인 / 헤드폰 → 라인 / 스피커 → 마이크).
 
+실합주 진단 zip(지터 버퍼 `bufferMs`, 은닉·손실, 처리 지연 `estLatencyMs`, 첫 소리, 연결 결과)의 수치와 GOAL 판정표는 `diag_report` 도구로 뽑는다 — 명령과 출력은 [TEST-SESSION.md 8절](TEST-SESSION.md#8-결과-기록표)의 "zip을 받은 뒤" 단락.
+
 ## 7. 문제 해결
 
 | 증상 | 원인·조치 |

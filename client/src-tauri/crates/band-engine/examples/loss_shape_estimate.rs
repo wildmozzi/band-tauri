@@ -5,6 +5,7 @@
 //! cargo run -p band-engine --example loss_shape_estimate -- <진단.zip | timeline.jsonl | engine.json> [...]
 //! ```
 //!
+//! - 누적·구간 나누기는 `diag::report::shape`(`testing::diag::report::shape`로 — 진단 보고서 도구 `diag_report`와 공유).
 //! - zip이면 안의 `timeline.jsonl`(없으면 `engine.json`)을 읽는다.
 //! - `timeline.jsonl`: 피어 샘플의 `lossShape`는 "그 피어 항목 동안 누적"이라 (세션, 피어)마다 마지막 값을 쓴다. 같은 세션에서
 //!   누적이 줄면(피어가 나갔다 다시 들어와 새 항목) 앞 구간을 따로 모아 더한다. 피어가 나간 뒤 내보내도 타임라인에는 남는다.
@@ -19,137 +20,13 @@
 //! 은닉 원인 대비). 식은 `LossShapeStats::estimate`(band-dsp `jitter/shape.rs` 머리말)와 같다. 연속 길이는 256패킷 창을 벗어나야
 //! 확정되므로 내보내기 직전 1초쯤의 손실은 빠진다 — 끝내기 전 1초 이상 정상 연주한 뒤 내보낸다.
 
-use std::collections::BTreeMap;
 use std::io::Read;
 
-use band_dsp::jitter::{LossShapeStats, MARGIN_BUCKETS, RUN_BUCKETS};
-use serde_json::Value;
-
-/// 프레임 길이 키(µs). 도착 여유 ≥F와 1F 추정은 F마다 뜻이 달라 F가 다른 통계를 한 히스토그램에 섞지 않는다(#230 재리뷰 M1).
-fn fkey(frame_ms: f32) -> u32 {
-    (frame_ms.max(0.0) * 1000.0).round() as u32
-}
-
-/// 손실 모양 항목: (이름, 프레임 키) → 같은 F 구간들의 합.
-type Shapes = BTreeMap<(String, u32), LossShapeStats>;
-
-/// 두 누적 통계의 합. 같은 F끼리만 더한다(`frame_ms`는 0이 아닌 쪽).
-fn add(a: &LossShapeStats, b: &LossShapeStats) -> LossShapeStats {
-    let mut s = *a;
-    s.frame_ms = if b.frame_ms > 0.0 { b.frame_ms } else { a.frame_ms };
-    for i in 0..RUN_BUCKETS {
-        s.loss_runs[i] += b.loss_runs[i];
-        s.late_runs[i] += b.late_runs[i];
-    }
-    for i in 0..MARGIN_BUCKETS {
-        s.arrival_margin[i] += b.arrival_margin[i];
-    }
-    s.loss_long_pkts += b.loss_long_pkts;
-    s.conceal_fec += b.conceal_fec;
-    s.conceal_plc += b.conceal_plc;
-    s.conceal_pcm += b.conceal_pcm;
-    s.conceal_underrun += b.conceal_underrun;
-    s
-}
-
-/// 누적 `a`에서 앞 구간 끝 누적 `b`를 뺀 구간 몫(`frame_ms`는 `a`의 것).
-fn sub(a: &LossShapeStats, b: &LossShapeStats) -> LossShapeStats {
-    let mut s = *a;
-    for i in 0..RUN_BUCKETS {
-        s.loss_runs[i] = a.loss_runs[i].saturating_sub(b.loss_runs[i]);
-        s.late_runs[i] = a.late_runs[i].saturating_sub(b.late_runs[i]);
-    }
-    for i in 0..MARGIN_BUCKETS {
-        s.arrival_margin[i] = a.arrival_margin[i].saturating_sub(b.arrival_margin[i]);
-    }
-    s.loss_long_pkts = a.loss_long_pkts.saturating_sub(b.loss_long_pkts);
-    s.conceal_fec = a.conceal_fec.saturating_sub(b.conceal_fec);
-    s.conceal_plc = a.conceal_plc.saturating_sub(b.conceal_plc);
-    s.conceal_pcm = a.conceal_pcm.saturating_sub(b.conceal_pcm);
-    s.conceal_underrun = a.conceal_underrun.saturating_sub(b.conceal_underrun);
-    s
-}
-
-/// 누적 크기(줄었으면 새 피어 항목).
-fn weight(s: &LossShapeStats) -> u64 {
-    s.arrival_margin.iter().sum::<u64>() + s.conceal_fec + s.conceal_plc + s.conceal_pcm
-}
-
-fn is_empty(s: &LossShapeStats) -> bool {
-    weight(s) == 0 && s.loss_runs.iter().all(|&n| n == 0) && s.late_runs.iter().all(|&n| n == 0)
-}
-
-/// 같은 (이름, F)면 더한다. 빈 구간은 버린다.
-fn insert(m: &mut Shapes, name: String, sh: LossShapeStats) {
-    if is_empty(&sh) {
-        return;
-    }
-    let e = m.entry((name, fkey(sh.frame_ms))).or_default();
-    *e = add(e, &sh);
-}
-
-fn peer_shapes(sample: &Value) -> Vec<(String, LossShapeStats)> {
-    let Some(peers) = sample.get("peers").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    peers
-        .iter()
-        .filter_map(|p| {
-            let sh = serde_json::from_value::<LossShapeStats>(p.get("lossShape")?.clone()).ok()?;
-            let name = p.get("peer").or_else(|| p.get("peerId")).and_then(Value::as_str).unwrap_or("?").to_string();
-            Some((name, sh))
-        })
-        .collect()
-}
-
-/// (세션, 피어) 하나의 구간 추적: 끝난 구간들, 현재 구간 시작 시점 누적, 마지막 누적.
-#[derive(Default)]
-struct Track {
-    done: Vec<LossShapeStats>,
-    base: LossShapeStats,
-    last: LossShapeStats,
-}
-
-/// `timeline.jsonl` → (피어(세션 표시 포함), F)별 누적 손실 모양.
-fn from_timeline(text: &str) -> Shapes {
-    let mut acc: BTreeMap<(u64, String), Track> = BTreeMap::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let session = v.get("session").and_then(Value::as_u64).unwrap_or(0);
-        for (peer, sh) in peer_shapes(&v) {
-            let e = acc.entry((session, peer)).or_default();
-            if weight(&sh) < weight(&e.last) {
-                // 누적이 줄었다 — 새 피어 항목(재입장). 앞 항목의 마지막 구간을 닫는다.
-                e.done.push(sub(&e.last, &e.base));
-                e.base = LossShapeStats::default();
-            } else if fkey(sh.frame_ms) != fkey(e.last.frame_ms) && !is_empty(&e.last) {
-                // 같은 항목 안에서 상대 프레임이 바뀌었다 — 그 시점 누적을 빼서 구간을 나눈다.
-                e.done.push(sub(&e.last, &e.base));
-                e.base = e.last;
-            }
-            e.last = sh;
-        }
-    }
-    let mut out = Shapes::new();
-    for ((session, peer), t) in acc {
-        for seg in t.done.iter().copied().chain(std::iter::once(sub(&t.last, &t.base))) {
-            insert(&mut out, format!("세션 {session} {peer}"), seg);
-        }
-    }
-    out
-}
-
-/// `engine.json` → `lastStats.peers[]`. 한 항목 안의 F 변경은 나눌 수 없다(마지막 F로 읽힌다).
-fn from_engine_json(text: &str) -> Shapes {
-    let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
-    let mut out = Shapes::new();
-    for (peer, sh) in v.get("lastStats").map(peer_shapes).unwrap_or_default() {
-        insert(&mut out, peer, sh);
-    }
-    out
-}
+use band_dsp::jitter::LossShapeStats;
+// 누적·구간 나누기는 진단 보고서 도구(`examples/diag_report.rs`)와 같이 쓴다.
+#[cfg(test)]
+use band_engine::testing::diag::report::shape::fkey;
+use band_engine::testing::diag::report::shape::{from_engine_json, from_timeline, totals, Shapes};
 
 fn load(path: &str) -> Result<Shapes, String> {
     let lower = path.to_ascii_lowercase();
@@ -168,17 +45,6 @@ fn load(path: &str) -> Result<Shapes, String> {
     }
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     Ok(if lower.ends_with(".jsonl") { from_timeline(&text) } else { from_engine_json(&text) })
-}
-
-/// F별 합(항목 수와 함께). 다른 F는 더하지 않는다.
-fn totals<'a>(items: impl IntoIterator<Item = &'a LossShapeStats>) -> BTreeMap<u32, (LossShapeStats, usize)> {
-    let mut t: BTreeMap<u32, (LossShapeStats, usize)> = BTreeMap::new();
-    for sh in items {
-        let e = t.entry(fkey(sh.frame_ms)).or_default();
-        e.0 = add(&e.0, sh);
-        e.1 += 1;
-    }
-    t
 }
 
 fn pct(v: Option<f64>) -> String {
