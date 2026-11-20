@@ -13,9 +13,9 @@ npm run e2e:typecheck
 ```
 
 ## WebKit (사파리 엔진, P3-24)
-- `npx playwright test --project=webkit` — 관람 경로 스펙만(web-viewer·mobile-layout·rooms·room-entry·reconnect·web-followup·community·home-auth).
-- **Windows용 Playwright WebKit에는 WebRTC가 없다**(RTCPeerConnection 미정의). 그래서 로컬(Windows)에서는 web-viewer의 협상 테스트가 이유와 함께 건너뛰어지고, CI(Linux) WebKit에서 실제로 돈다.
-- 나머지 스펙을 WebKit에서 돌리지 않는 이유: 시각 회귀 기준 이미지는 chromium 것뿐, 데스크톱 앱 mock(Tauri)·결제는 관람과 무관, 모달 포커스 테스트는 WebKit이 클릭으로 버튼에 포커스를 주지 않는 동작 차이(사파리도 같다), 노래방(데모)은 Tone.js가 Playwright WebKit에서 `param must be an AudioParam`로 실패(실기기 확인 전).
+- `npx playwright test --project=webkit` — 관람 경로 스펙만(web-viewer·mobile-layout·rooms·room-entry·reconnect·web-followup·community·home-auth·web-polish·ui-modal). `webkit-iphone`(iPhone 13 흉내: isMobile·hasTouch)은 mobile-layout만.
+- **Windows용 Playwright WebKit에는 WebRTC·AudioContext가 없다**. 그래서 로컬(Windows)에서는 web-viewer의 협상 테스트가 이유와 함께 건너뛰어지고, CI(Linux) WebKit에서 실제로 돈다. Windows 밖에서 RTCPeerConnection이 없으면 건너뛰지 않고 실패한다.
+- 나머지 스펙을 WebKit에서 돌리지 않는 이유: 시각 회귀 기준 이미지는 chromium 것뿐, 데스크톱 앱 mock(Tauri)·결제는 관람과 무관, 노래방(데모)은 Tone.js가 Windows Playwright WebKit에서 `param must be an AudioParam`로 실패(Web Audio가 불완전한 빌드 — 실기기 확인 전). ui-modal은 포커스 복귀를 보려고 키보드로 연다(Safari는 클릭으로 버튼에 포커스를 주지 않음).
 - 실제 iOS Safari의 자동재생·오디오 잠금 해제·실 네트워크는 대신하지 못한다 — docs/HUMAN-CHECKS.md E [사람].
 
 ## 좁은 화면 (P3-24)

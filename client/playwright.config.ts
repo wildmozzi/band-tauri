@@ -43,6 +43,7 @@ export default defineConfig({
     /*
      * 사파리 엔진(P3-24): 관람자는 iPhone(=WebKit)일 가능성이 높다. 관람 경로 스펙만 돌린다 — 익명 입장·관람 화면·
      * 가짜 방송 신호(WebRTC) 수신·재연결·좁은 화면. 나머지(데스크톱 앱 mock·결제·노래방 데모·시각 회귀 기준 이미지)는 chromium만.
+     * ui-modal은 키보드로 열어 포커스 복귀를 본다(Safari는 클릭으로 버튼에 포커스를 주지 않음).
      * 실제 iOS Safari의 자동재생·오디오 잠금 해제는 여기서 보지 못한다 — docs/HUMAN-CHECKS.md [사람]
      */
     {
@@ -57,8 +58,12 @@ export default defineConfig({
         '**/reconnect.e2e.ts',
         '**/community.e2e.ts',
         '**/home-auth.e2e.ts',
+        '**/web-polish.e2e.ts',
+        '**/ui-modal.e2e.ts',
       ],
     },
+    // iPhone 흉내(WebKit + isMobile·hasTouch·viewport meta 적용): 좁은 화면 검사만 (#244 리뷰 L-3). 실기기 대체 아님
+    { name: 'webkit-iphone', use: { ...devices['iPhone 13'] }, testMatch: ['**/mobile-layout.e2e.ts'] },
   ],
   webServer: {
     // 미리보기만 띄운다(빌드는 위 주석). 포트를 고른 직후 바인딩하므로 틈은 vite preview 기동 시간뿐

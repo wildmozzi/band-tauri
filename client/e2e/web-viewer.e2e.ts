@@ -24,8 +24,12 @@ declare global {
 async function performerOffer(page: Page): Promise<{ type: 'offer'; sdp: string }> {
   // Playwright의 Windows용 WebKit 빌드에는 WebRTC가 없다(RTCPeerConnection 미정의). 브라우저 호환 문제가 아니라 테스트 환경 한계라
   // 협상이 필요한 테스트만 건너뛴다 — Linux(CI)의 WebKit·실제 Safari에는 있다 (P3-24)
+  // 건너뛰기는 Windows에서만 — CI(Linux)에서 WebRTC가 없어지면(Playwright 업데이트 등) 조용히 건너뛰지 않고 실패한다 (#244 리뷰 L-1)
   const hasWebRtc = await page.evaluate(() => typeof RTCPeerConnection !== 'undefined')
-  test.skip(!hasWebRtc, '이 WebKit 빌드(Windows)에는 WebRTC가 없음 — CI(Linux) WebKit에서 검사')
+  if (!hasWebRtc) {
+    test.skip(process.platform === 'win32', '이 WebKit 빌드(Windows)에는 WebRTC가 없음 — CI(Linux) WebKit에서 검사')
+    throw new Error('이 브라우저에 RTCPeerConnection이 없다 — 관람 협상 e2e를 돌릴 수 없음(Windows 밖에서는 건너뛰지 않는다)')
+  }
   return page.evaluate(async () => {
     window.__e2ePerf?.close()
     const pc = new RTCPeerConnection()

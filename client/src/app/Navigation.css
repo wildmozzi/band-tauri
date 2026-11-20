@@ -157,13 +157,6 @@
     flex-shrink: 0;
   }
 
-  /* 가로 스크롤 메뉴의 오른쪽 끝을 흐리게 해 뒤에 메뉴가 더 있음을 보인다(360px에서 '노래방'이 반쯤 잘려 보이던 것, P3-24) */
-  .top-nav .nav-links {
-    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
-    mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
-    padding-right: 24px;
-  }
-
   .top-nav .nav-actions {
     gap: 10px;
     /* 좁은 폭에서 브랜드 다음 줄로 넘어가도 오른쪽에 붙어 있게 */
@@ -188,6 +181,16 @@
 
   .top-nav .user-email {
     display: none;
+  }
+}
+
+/* 가로 스크롤 메뉴의 오른쪽 끝을 흐리게 해 뒤에 메뉴가 더 있음을 보인다(360px에서 '노래방'이 반쯤 잘려 보이던 것, P3-24).
+   메뉴가 한 줄에 다 들어가는 폭(약 600px 이상)에서는 마지막 링크가 흐려지지 않게 좁은 폭에서만 (#244 리뷰 L-4) */
+@media (max-width: 600px) {
+  .top-nav .nav-links {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+    padding-right: 24px;
   }
 }
 

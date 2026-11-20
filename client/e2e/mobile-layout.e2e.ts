@@ -195,7 +195,8 @@ test.describe('좁은 화면: 합주실 목록', () => {
 
 test.describe('데스크톱 앱(연주자) 화면은 그대로 (#244 리뷰 M-2)', () => {
   // 앱 창 최소 폭이 800이라 769~1024px 규칙만 앱에 닿는다. 웹 관람의 3칸(채팅 표시)은 앱 연주자 믹서를 좁히면 안 된다
-  test('800·900·1024px에서 연주자 | 믹서 2칸, 채팅 숨김 — develop과 같은 배치', async ({ page, mock }) => {
+  test('800·900·1024px에서 연주자 | 믹서 2칸, 채팅 숨김 — develop과 같은 배치', async ({ page, mock, browserName }) => {
+    test.skip(browserName !== 'chromium', '데스크톱 앱 화면은 WebView2(Chromium)로만 그린다')
     await installFakeTauri(page, {
       engine_start: { ssrc: 1234, key: 'e2e-key', candidates: [{ kind: 'lan', addr: '192.168.0.10:50000' }] },
       engine_stats: { running: true, sampleRate: 48000, deviceBuffer: 128, inputLevel: 0, outputLevel: 0, xruns: 0, estLatencyMs: 8, devicePeriodMs: 2.7, peers: [] },

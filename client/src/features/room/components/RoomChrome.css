@@ -217,10 +217,6 @@
     min-width: 0;
   }
 
-  .live-title-area h1 {
-    overflow-wrap: anywhere;
-  }
-
   .live-header-right {
     flex-wrap: wrap;
     justify-content: flex-end;
