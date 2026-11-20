@@ -491,3 +491,130 @@ fn oversized_entry_is_an_error() {
     assert_eq!(MAX_ENTRY_BYTES, 64 << 20);
     assert!(e.contains("넘습니다"), "{e}");
 }
+
+// ---- #246 재리뷰: H1'·L1'·L2' ----
+
+/// 타임라인 줄(ms 시각). `running`·세션 1·독점.
+fn line_ms(t_ms: u64, peers: Vec<serde_json::Value>) -> String {
+    serde_json::json!({"t": T0 + t_ms, "running": true, "network": true, "session": 1, "backend": "wasapiExclusive", "xruns": 0, "peers": peers})
+        .to_string()
+        + "\n"
+}
+
+/// H1' 반례(zip E1): 600초 내내 `connected`·LAN·F 5ms(기대 재생 120000프레임)인데, 10초짜리 무수신 리셋 10번으로 produced는
+/// 100000(100초 무음). 은닉 1400·복구 후 손실 1100 → 1.40%·1.10%라 예전엔 충족. 소리 없는 시간 100초가 허용치(2% + 1s)를 넘어
+/// 판정 불가, 그 시간을 따로 보여 준다.
+#[test]
+fn silent_resets_make_conceal_unknown() {
+    let mut text = String::new();
+    let mut played = 0u64;
+    for i in 0..=600u64 {
+        let silent = i > 0 && (i - 1) % 50 >= 20 && (i - 1) % 50 < 30 && i <= 500;
+        if i > 0 && !silent {
+            played += 1;
+        }
+        let p = serde_json::json!({
+            "peer": "id-e", "state": "connected", "path": "lan", "bufferMs": 10.0, "jitterMs": 1.0, "targetMs": 10.0,
+            "concealed": 1400 * played / 500, "produced": 200 * played, "rxDupDropped": 0,
+            "lossShape": shape_json(5.0, 1100 * played / 500, 0),
+        });
+        text += &line(i, 1, "wasapiExclusive", vec![p]);
+    }
+    assert_eq!(played, 500);
+    let r = report_of("e1.zip", &text);
+    let s = &r.files[0].sessions[0];
+    let c = s.peers[0].conceal.as_ref().unwrap();
+    assert_eq!((c.produced, c.concealed), (Some(100_000), 1400));
+    assert!((c.pct.unwrap() - 1.40).abs() < 1e-9 && (c.loss_pct.unwrap() - 1.10).abs() < 1e-9, "{c:?}");
+    assert_eq!(c.playing_span_s, 600.0);
+    assert!((c.silent_s.unwrap() - 100.0).abs() < 1e-9, "{c:?}");
+    assert!((c.silent_tol_s - 13.0).abs() < 1e-9, "{c:?}");
+    let g = goal_of(&s.goal, "2-1")[0];
+    assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("무수신·리버퍼 구간 약 100s"), "{g:?}");
+    assert!(g.measured.contains("소리 없는 시간 100.0s(16.7%)"), "{g:?}");
+    // 표에도 따로 보인다
+    let md = markdown(&r);
+    assert!(md.contains("소리 없는 시간") && md.contains("100.0s(16.7%)"), "{md}");
+
+    // 상대 프레임 길이를 모르면(lossShape·remoteFrameMs 없음) 무음 시간을 확인할 수 없다 → 판정 불가
+    let mut nf = String::new();
+    for i in 0..=120u64 {
+        let p = serde_json::json!({"peer": "id-e", "state": "connected", "path": "lan", "concealed": i, "produced": 200 * i, "rxDupDropped": 0});
+        nf += &line(i, 1, "wasapiExclusive", vec![p]);
+    }
+    let r = report_of("nf.zip", &nf);
+    assert!(r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap().silent_s.is_none());
+    assert_eq!(goal_of(&r.files[0].sessions[0].goal, "2-1")[0].verdict, Verdict::Unknown);
+}
+
+/// 끊김 없는 정상 세션은 허용 오차 때문에 판정 불가로 떨어지지 않는다: 표본 시각이 0–80ms 흔들리고, 첫 연결 표본 뒤 300ms 동안
+/// 지터 버퍼를 채우고, 장치 클록이 시스템 시계보다 0.05% 느리고, 장치 주기 10ms 단위로 재생해도(F 2.5ms) 충족.
+#[test]
+fn steady_session_is_not_flagged_silent() {
+    let mut text = String::new();
+    for i in 0..=600u64 {
+        let t = i * 1000 + i * 37 % 81; // 표본 시각 0–80ms 흔들림
+        let play_ms = (t.saturating_sub(300) as f64 * 0.9995) as u64 / 10 * 10;
+        let produced = play_ms * 2 / 5; // ÷ 2.5ms
+        let p = serde_json::json!({
+            "peer": "id-s", "state": "connected", "path": "lan", "bufferMs": 6.0, "jitterMs": 1.0, "targetMs": 6.0,
+            "concealed": produced * 12 / 1000, "produced": produced, "rxDupDropped": 0,
+            "lossShape": shape_json(2.5, produced * 11 / 1000, 0),
+        });
+        text += &line_ms(t, vec![p]);
+    }
+    let r = report_of("steady.zip", &text);
+    let s = &r.files[0].sessions[0];
+    let c = s.peers[0].conceal.as_ref().unwrap();
+    let silent = c.silent_s.unwrap();
+    assert!(silent > 0.2 && silent < 1.0, "{c:?}");
+    assert!(silent < c.silent_tol_s, "{c:?}");
+    let g = goal_of(&s.goal, "2-1")[0];
+    assert_eq!(g.verdict, Verdict::Met, "{g:?}");
+}
+
+/// L1'(zip E2): 61분 `connected`인데 재생하지 않음(bufferMs 0, targetMs 0) → 1-4 충족이 아니다.
+#[test]
+fn band_does_not_count_idle_buffer_as_inside() {
+    let mut text = String::new();
+    for i in 0..3660u64 {
+        let p = serde_json::json!({"peer": "id-i", "state": "connected", "path": "lan", "bufferMs": 0.0, "targetMs": 0.0, "jitterMs": 0.0});
+        text += &line(i, 1, "wasapiExclusive", vec![p]);
+    }
+    let r = report_of("e2.zip", &text);
+    let s = &r.files[0].sessions[0];
+    assert_eq!(s.peers[0].band.as_ref().unwrap().outside_pct, 100.0);
+    assert_eq!(goal_of(&s.goal, "1-4")[0].verdict, Verdict::NotMet);
+}
+
+/// L2': 내보낼 때 아직 연결 중인 시도는 분모에 "미완"으로 든다. 미완이 모두 성공해도 98% 아래일 때만 미달, 결과에 따라 갈리면 판정
+/// 불가. 세션이 끝난 기록(마지막 줄이 실행 아님)에는 미완이 없다.
+#[test]
+fn pending_attempts_stay_in_the_denominator() {
+    let mk = |ok: usize, failed: usize, pending: usize, stopped: bool| {
+        let mut conn: Vec<_> = (0..ok).map(|k| serde_json::json!({"t": T0 + k as u64, "peer": "id-x", "phase": "connect", "result": "lan", "ms": 100})).collect();
+        conn.extend((0..failed).map(|k| serde_json::json!({"t": T0 + 500 + k as u64, "peer": "id-y", "phase": "connect", "result": "failed", "ms": 9000})));
+        let mut text = serde_json::json!({"t": T0, "running": true, "network": true, "session": 1, "backend": "wasapiExclusive", "conn": conn}).to_string() + "\n";
+        let peers: Vec<_> = (0..pending).map(|k| serde_json::json!({"peer": format!("id-p{k}"), "state": if k % 2 == 0 { "connecting" } else { "reconnecting" }})).collect();
+        text += &line(1, 1, "wasapiExclusive", peers);
+        if stopped {
+            text += &(serde_json::json!({"t": T0 + 2000, "running": false, "session": 1}).to_string() + "\n");
+        }
+        report_of("p.zip", &text)
+    };
+    // 성공 97 + 미완 3: 미완이 모두 성공이면 100%, 모두 실패면 97% → 판정 불가(예전엔 97/97 = 100% 충족)
+    let r = mk(97, 0, 3, false);
+    assert_eq!((r.conn.pending, r.conn.attempts, r.conn.attempts_lower), (3, 100, 100));
+    assert!((r.conn.success_pct.unwrap() - 97.0).abs() < 1e-9);
+    let g = goal_of(&r.goal, "3-2")[0];
+    assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
+    assert!(g.measured.contains("미완 3") && g.note.as_deref().unwrap().contains("미완"), "{g:?}");
+    assert!(markdown(&r).contains("미완 3회"));
+    // 실패 5 + 미완 1: 미완이 성공이어도 95% → 미달
+    assert_eq!(goal_of(&mk(94, 5, 1, false).goal, "3-2")[0].verdict, Verdict::NotMet);
+    // 성공 99 + 미완 1(최악 99%) → 충족
+    assert_eq!(goal_of(&mk(99, 0, 1, false).goal, "3-2")[0].verdict, Verdict::Met);
+    // 세션이 끝난 기록: 연결 중으로 남은 피어는 엔진 정지가 aborted로 남긴다 — 미완으로 세지 않는다
+    assert_eq!(mk(97, 0, 3, true).conn.pending, 0);
+}

@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use super::{fmt_s, ConnAgg, Dist, FileReport, GoalRow, PeerReport, Report, SessionReport};
+use super::{fmt_s, silent_text, ConnAgg, Dist, FileReport, GoalRow, PeerReport, Report, SessionReport};
 
 fn none() -> String {
     "없음".into()
@@ -133,7 +133,7 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
     }
     let _ = writeln!(
         out,
-        "| 피어 | 경로(연결 샘플) | RTT 중앙 | bufferMs 중앙 / p95 / 최대 | 목표 중앙 | ±3ms 밖 1분+ 구간 (최장, 밖 %, 기록, 틈) | 은닉 % ÷ 재생 프레임 (FEC / PLC / PCM · 언더런) | 손실 % (복구 후 lossShape · 엔진 평균) | 연결 / 첫 소리 |\n|---|---|---|---|---|---|---|---|---|"
+        "| 피어 | 경로(연결 샘플) | RTT 중앙 | bufferMs 중앙 / p95 / 최대 | 목표 중앙 | ±3ms 밖 1분+ 구간 (최장, 밖 %, 기록, 틈) | 은닉 % ÷ 재생 프레임 (FEC / PLC / PCM · 언더런) | 소리 없는 시간(연결 중 무수신·리버퍼) | 손실 % (복구 후 lossShape · 엔진 평균) | 연결 / 첫 소리 |\n|---|---|---|---|---|---|---|---|---|---|"
     );
     for p in peers {
         let paths = if p.paths.is_empty() { none() } else { p.paths.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ") };
@@ -150,6 +150,7 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
                 None => format!("분모 없음(은닉 {}프레임, produced 미기록)", c.concealed),
             })
             .unwrap_or_else(none);
+        let silent = p.conceal.as_ref().map(silent_text).unwrap_or_else(none);
         let loss = format!("{} · {}", pct(p.conceal.as_ref().and_then(|c| c.loss_pct)), pct(p.loss_pct_engine_mean));
         let list = |v: &[f64]| if v.is_empty() { none() } else { v.iter().map(|x| format!("{x:.0}")).collect::<Vec<_>>().join(", ") + "ms" };
         let mut first_audio = list(&p.first_audio_ms);
@@ -159,7 +160,7 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
         let entries = if p.entries > 1 { format!(" (항목 {})", p.entries) } else { String::new() };
         let _ = writeln!(
             out,
-            "| {}{entries} | {paths} | {} | {} | {} | {band} | {conceal} | {loss} | {} / {} |",
+            "| {}{entries} | {paths} | {} | {} | {} | {band} | {conceal} | {silent} | {loss} | {} / {} |",
             p.peer,
             ms(p.rtt_ms.as_ref().map(|d| d.median)),
             dist(&p.buffer_ms),
@@ -203,6 +204,9 @@ fn conn_rows(out: &mut String, s: &SessionReport) {
     }
     let relay = s.conn.iter().any(|c| c.result == "relay");
     let _ = writeln!(out, "\n릴레이 폴백: {}\n", if relay { "있음" } else { "없음" });
+    if s.pending > 0 {
+        let _ = writeln!(out, "내보낼 때 아직 연결 중인 시도(미완, 결과 없음): {}\n", s.pending);
+    }
 }
 
 fn conn_agg(out: &mut String, a: &ConnAgg) {
@@ -212,7 +216,7 @@ fn conn_agg(out: &mut String, a: &ConnAgg) {
     }
     let _ = writeln!(
         out,
-        "\n시도 {} (connect + reconnect) · 성공 {} ({}) = 직접 {} ({}) + 릴레이 {} · 실패 {} · 중단 {} · recover {} · switch {} · 릴레이로 붙은 세션 {}/{}\n",
+        "\n시도 {} (connect + reconnect + 미완) · 성공 {} ({}) = 직접 {} ({}) + 릴레이 {} · 실패 {} · 중단 {} · 미완 {} · recover {} · switch {} · 릴레이로 붙은 세션 {}/{}\n",
         a.attempts,
         a.success,
         pct(a.success_pct),
@@ -221,12 +225,20 @@ fn conn_agg(out: &mut String, a: &ConnAgg) {
         a.relay,
         a.failed,
         a.aborted,
+        a.pending,
         a.recover,
         a.switch,
         a.sessions_with_relay,
         a.sessions
     );
     let _ = writeln!(out, "- 성공률 분모에는 중단(결과 전 퇴장·엔진 정지)이 든다(`net::connlog` — 빼면 위로 치우친다). recover·switch는 시도가 아니다.");
+    if a.pending > 0 {
+        let _ = writeln!(
+            out,
+            "- 미완 {}회: 내보낼 때 아직 연결 중이라 결과가 없는 시도. 분모에 넣고 성공으로 세지 않았다 — 모두 성공했어도 98% 아래일 때만 미달로 가른다.",
+            a.pending
+        );
+    }
     let _ = writeln!(
         out,
         "- 시도는 기록 기준이다: 한 합주의 두 사람 zip을 함께 주면 같은 연결이 양쪽에서 한 번씩 세어진다. 98% 문턱은 실제 시도 하한 {}회(시간이 겹치는 다른 zip 세션은 큰 쪽만)로 가른다.",

@@ -56,6 +56,15 @@ pub(crate) mod goal {
     pub(crate) const FIRST_AUDIO_MS: f64 = 3000.0;
     /// 도구 규칙(GOAL에 없음): 은닉·지터 버퍼 판정에 필요한 최소 연결 시간(s). 이보다 짧으면 판정 불가.
     pub(crate) const MIN_JUDGE_S: f64 = 60.0;
+    /// 도구 규칙(GOAL에 없음, #246 H1'): 연결 중 재생이 멈춘 시간(기대 재생 − `produced` × F)의 허용 비율. 연결 표본 사이 시간을
+    /// 실제 기록 시각(`t`) 차이로 더하므로 1초 표본 간격의 흔들림은 합에서 상쇄된다. 남는 것은 장치 클록과 시스템 시계의 차(보통
+    /// 0.01–0.1%)와 장치 주기 단위로 재생하는 반올림(쌍마다 수 ms, 합에서 상쇄)뿐이라, 2%면 정상 세션이 떨어지지 않으면서 무수신
+    /// 리셋 몇 번(한 번에 수 초)은 잡힌다.
+    pub(crate) const SILENT_TOL_RATIO: f64 = 0.02;
+    /// 도구 규칙(GOAL에 없음, #246 H1'): 연결 구간(이어진 `connected` 표본 묶음)마다 더 봐주는 시간(s) — 시작 경계. 막 연결된 첫
+    /// 표본 뒤에는 지터 버퍼를 채우는 동안(목표 깊이 수십 ms + 첫 패킷 대기) 재생이 아직 없고, 표본 시각과 통계 스냅숏 시각도 조금
+    /// 어긋난다. 끝 경계는 다음 표본이 연결이 아니면 그 쌍을 세지 않으므로 생기지 않는다.
+    pub(crate) const SILENT_TOL_PER_RUN_S: f64 = 1.0;
     /// 도구 규칙(GOAL에 없음): 성공률 98%를 "충족"으로 가르려면 시도 50회 이상(1회 실패 = 2%p). 그보다 적으면 실패가
     /// 있어 98% 아래일 때만 "미달"이다.
     pub(crate) const MIN_ATTEMPTS_98: usize = 50;
@@ -212,6 +221,14 @@ pub(crate) struct Conceal {
     pub(crate) concealed: u64,
     /// 연결(`connected`) 샘플 시간(s, 표본 수 × 간격)
     pub(crate) connected_s: f64,
+    /// 이어진 연결 표본 쌍 사이 시간의 합(s, 기록 시각 `t` 차이) — 재생을 기대하는 시간
+    pub(crate) playing_span_s: f64,
+    /// 소리 없는 시간(s): 기대 재생 시간 − 재생 프레임 × F(같은 연결 표본 쌍에서). 200ms 넘는 무수신 뒤 지터 버퍼가 리셋되면 패킷이
+    /// 다시 와 채울 때까지 `produced`도 `concealed`도 늘지 않는다(`playout.rs` `STARVE_RESET_MS`, 피어는 계속 `connected`). 그
+    /// 시간은 은닉 %에 안 보이므로 따로 센다(#246 H1'). 쌍 하나라도 `produced`·상대 프레임 길이가 없으면 None
+    pub(crate) silent_s: Option<f64>,
+    /// 소리 없는 시간 허용치(s, `SILENT_TOL_RATIO` × 기대 시간 + 연결 구간 수 × `SILENT_TOL_PER_RUN_S`). 넘으면 2-1 판정 불가
+    pub(crate) silent_tol_s: f64,
     /// 은닉 ÷ 재생 프레임(%). `produced`가 없거나 0이면 None
     pub(crate) pct: Option<f64>,
     /// 방식별(lossShape·produced 없으면 None)
@@ -327,6 +344,9 @@ pub(crate) struct SessionReport {
     pub(crate) stream_errors: Option<u64>,
     pub(crate) peers: Vec<PeerReport>,
     pub(crate) conn: Vec<ConnRow>,
+    /// 내보낼 때 아직 연결 중(`connecting`·`reconnecting`)이던 시도 수 — 결과 이벤트가 아직 없다(#246 L2'). 세션이 끝난 기록이면
+    /// 0(엔진 정지가 남은 시도를 `aborted`로 남긴다)
+    pub(crate) pending: usize,
     pub(crate) goal: Vec<GoalRow>,
 }
 
@@ -381,7 +401,10 @@ pub(crate) struct ConnAgg {
     pub(crate) relay: usize,
     pub(crate) failed: usize,
     pub(crate) aborted: usize,
-    /// 성공 ÷ 시도(중단 포함 분모 — 빼면 "연결 중" 퇴장이 빠져 위로 치우친다, `net::connlog` 머리말)
+    /// 내보낼 때 아직 연결 중이던 시도(결과 없음) — 분모(`attempts`)에 들고 성공으로 세지 않는다. 3-2는 이들이 모두 성공·모두 실패인
+    /// 두 경우가 같은 판정일 때만 가른다(#246 L2')
+    pub(crate) pending: usize,
+    /// 성공 ÷ 시도(중단·미완 포함 분모 — 빼면 "연결 중" 퇴장이 빠져 위로 치우친다, `net::connlog` 머리말)
     pub(crate) success_pct: Option<f64>,
     /// 직접(lan/public) ÷ 시도
     pub(crate) direct_pct: Option<f64>,
@@ -527,6 +550,15 @@ struct PeerAcc {
     loss_engine: Vec<f64>,
     /// (t, 띠 밖?) — targetMs가 있는 샘플만
     band: Vec<(u64, bool)>,
+    /// 직전 표본 (t, 연결?, produced) — 소리 없는 시간 계산용
+    prev: Option<(u64, bool, Option<u64>)>,
+    /// 이어진 연결 표본 쌍: 시간 합(ms), 재생 프레임 × F 합(ms), 연결 구간 수, 지금 구간 안인지
+    play_span_ms: f64,
+    play_got_ms: f64,
+    play_runs: usize,
+    in_run: bool,
+    /// 쌍에 produced나 상대 프레임 길이가 없었다 — 소리 없는 시간을 모른다
+    play_unknown: bool,
 }
 
 /// `t`가 늘어나는 (t, 밖?) 표본 → ±3ms 밖 구간(GOAL 1-4). 1초 표본 하나가 1초다.
@@ -664,10 +696,32 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
             acc.last_idx = Some(idx);
 
             let connected = str_at(p, "state") == Some("connected");
+            // 소리 없는 시간(#246 H1'): 같은 항목에서 이어진 두 연결 표본 사이에 기대한 재생 시간과 실제 재생(produced 차분 × F)을
+            // 더한다. 쌍마다 기록 시각 차이를 쓰므로 표본 간격 흔들림은 합에서 상쇄된다. 타임라인에는 리버퍼 카운터가 없어(`rebuffers`는
+            // `JitterStats`에만 있다) 기대치 비교만으로 센다.
+            match acc.prev {
+                Some((pt, true, pp)) if connected && !new_entry => {
+                    let f = frame.or_else(|| acc.entries.last().and_then(|e| e.frame_ms));
+                    match (pp, produced, f) {
+                        (Some(a), Some(b), Some(f)) => {
+                            acc.play_span_ms += t.saturating_sub(pt) as f64;
+                            acc.play_got_ms += b.saturating_sub(a) as f64 * f;
+                        }
+                        _ => acc.play_unknown = true,
+                    }
+                    if !acc.in_run {
+                        acc.play_runs += 1;
+                        acc.in_run = true;
+                    }
+                }
+                _ => acc.in_run = false,
+            }
+            acc.prev = Some((t, connected, produced));
             let buffer = f64_at(p, "bufferMs");
             if let Some(target) = f64_at(p, "targetMs") {
-                // 재생이 멈춘(연결 아님) 표본은 띠 밖으로 센다(`tests/sim/long.rs`와 같다).
-                let inside = connected && buffer.is_some_and(|b| (b - target).abs() <= goal::BAND_MS);
+                // 재생이 멈춘 표본은 띠 밖으로 센다(`tests/sim/long.rs`와 같다): 연결이 아니거나 bufferMs 0(지터 버퍼가 `Playing`이
+                // 아니면 0을 낸다 — 목표가 3ms 이하이면 |0 − 목표| ≤ 3이라 띠 안으로 셀 뻔했다, #246 L1').
+                let inside = connected && buffer.is_some_and(|b| b > 0.0 && (b - target).abs() <= goal::BAND_MS);
                 acc.band.push((t, !inside));
                 if connected {
                     acc.target.push(target);
@@ -721,10 +775,14 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
                 let prod = produced.map(|p| p as f64);
                 // 손실 분모 = 지나간 seq 수: 언더런 은닉은 seq를 소비하지 않는다.
                 let seqs = |d: &LossShapeStats| prod.map(|p| p - d.conceal_underrun as f64);
+                let playing_span_s = a.play_span_ms / 1000.0;
                 Conceal {
                     produced,
                     concealed,
                     connected_s: a.connected as f64 * interval_ms as f64 / 1000.0,
+                    playing_span_s,
+                    silent_s: (!a.play_unknown).then(|| ((a.play_span_ms - a.play_got_ms) / 1000.0).max(0.0)),
+                    silent_tol_s: goal::SILENT_TOL_RATIO * playing_span_s + a.play_runs as f64 * goal::SILENT_TOL_PER_RUN_S,
                     pct: of(concealed as f64, prod),
                     fec_pct: delta.and_then(|d| of(d.conceal_fec as f64, prod)),
                     plc_pct: delta.and_then(|d| of(d.conceal_plc as f64, prod)),
@@ -782,6 +840,15 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
         }
     }
 
+    // 미완 시도: 세션 마지막 줄이 실행 중(내보낼 때 아직 합주 중)이면 그 줄에서 연결 중인 피어마다 결과 없는 시도가 하나 있다.
+    let pending = lines
+        .last()
+        .filter(|v| running(v))
+        .and_then(|v| v.get("peers"))
+        .and_then(Value::as_array)
+        .map(|ps| ps.iter().filter(|p| matches!(str_at(p, "state"), Some("connecting" | "reconnecting"))).count())
+        .unwrap_or(0);
+
     let est: Vec<f64> = run.iter().filter_map(|v| f64_at(v, "estLatencyMs")).filter(|x| *x > 0.0).collect();
     let mut s = SessionReport {
         session,
@@ -805,6 +872,7 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
         stream_errors: last_run.and_then(|v| u64_at(v, "streamErrors")),
         peers,
         conn,
+        pending,
         goal: Vec::new(),
     };
     s.goal = session_goal(&s, interval_ms);
@@ -814,6 +882,15 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
 fn fmt_s(s: f64) -> String {
     let s = s.round() as u64;
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+/// 소리 없는 시간 표기(2-1 행과 피어 표가 같이 쓴다).
+pub(crate) fn silent_text(c: &Conceal) -> String {
+    match c.silent_s {
+        Some(s) if c.playing_span_s > 0.0 => format!("{s:.1}s({:.1}%)", s * 100.0 / c.playing_span_s),
+        Some(s) => format!("{s:.1}s"),
+        None => "모름(produced·상대 프레임 미기록)".into(),
+    }
 }
 
 /// GOAL 2-1(손실 1% 회선에서 은닉 ≤ 1.5%) 판정. `loss_pct`는 복구 후 손실(사본·재전송으로 메운 손실은 빠짐)이다.
@@ -935,20 +1012,31 @@ fn session_goal(s: &SessionReport, interval_ms: u64) -> Vec<GoalRow> {
             Some(c) => {
                 let pct = |v: Option<f64>| v.map(|v| format!("{v:.2}%")).unwrap_or_else(|| "없음".into());
                 let measured = format!(
-                    "은닉 {} ({}/{}프레임) · 복구 후 손실 {} · 연결 {}",
+                    "은닉 {} ({}/{}프레임) · 복구 후 손실 {} · 연결 {} · 소리 없는 시간 {}",
                     pct(c.pct),
                     c.concealed,
                     c.produced.map(|n| n.to_string()).unwrap_or_else(|| "?".into()),
                     pct(c.loss_pct),
-                    fmt_s(c.connected_s)
+                    fmt_s(c.connected_s),
+                    silent_text(c)
                 );
                 let v = if c.connected_s < goal::MIN_JUDGE_S {
                     (Unknown, Some(format!("연결 {} < {}s", fmt_s(c.connected_s), goal::MIN_JUDGE_S)))
                 } else {
-                    match (c.pct, c.loss_pct) {
-                        (None, _) => (Unknown, Some("재생 프레임 수(produced) 없음(#246 이전 형식) — 은닉 비율의 분모를 몰라 판정 불가".into())),
-                        (_, None) => (Unknown, Some("lossShape 없음(P2-17h 이전) — 회선 손실을 몰라 조건 확인 불가".into())),
-                        (Some(cp), Some(l)) => conceal_verdict(cp, l, c.dup_dropped),
+                    match (c.pct, c.loss_pct, c.silent_s) {
+                        (None, _, _) => (Unknown, Some("재생 프레임 수(produced) 없음(#246 이전 형식) — 은닉 비율의 분모를 몰라 판정 불가".into())),
+                        (_, None, _) => (Unknown, Some("lossShape 없음(P2-17h 이전) — 회선 손실을 몰라 조건 확인 불가".into())),
+                        (_, _, None) => (Unknown, Some("상대 프레임 길이(lossShape·remoteFrameMs) 없음 — 재생이 멈춘 시간을 확인할 수 없어 판정 불가".into())),
+                        // 무수신 리셋 뒤 무음은 은닉에도 분모에도 들지 않는다 — 끊김이 잦은 회선이 은닉 %로는 좋아 보인다(#246 H1').
+                        (_, _, Some(silent)) if silent > c.silent_tol_s => (
+                            Unknown,
+                            Some(format!(
+                                "무수신·리버퍼 구간 약 {silent:.0}s(연결 중 재생 기대 시간의 {:.1}%, 허용 {:.0}s) — 그 시간은 은닉에도 재생 프레임에도 들지 않아 은닉 %로 가를 수 없음",
+                                silent * 100.0 / c.playing_span_s.max(1e-9),
+                                c.silent_tol_s
+                            )),
+                        ),
+                        (Some(cp), Some(l), Some(_)) => conceal_verdict(cp, l, c.dup_dropped),
                     }
                 };
                 out.push(row("2-1", &name21, t21, measured, v.0, v.1));
@@ -983,7 +1071,7 @@ pub(crate) fn aggregate_conn(files: &[FileReport]) -> ConnAgg {
     // (결과, 단계) → (시도 수, 소요 ms들)
     let mut by: BTreeMap<(usize, bool), (usize, Vec<f64>)> = BTreeMap::new();
     let (mut n_sessions, mut with_relay, mut recover, mut switch, mut unknown_results) = (0, 0, 0, 0, 0);
-    let (mut no_audio_entries, mut no_audio_short) = (0, 0);
+    let (mut no_audio_entries, mut no_audio_short, mut pending) = (0, 0, 0);
     let mut first_audio_ms = Vec::new();
     // 시도 하한용: (zip 순번, 세션 시간 범위, 그 세션 시도 수)
     let mut spans: Vec<(usize, (u64, u64), usize)> = Vec::new();
@@ -1017,6 +1105,8 @@ pub(crate) fn aggregate_conn(files: &[FileReport]) -> ConnAgg {
                 }
             }
             with_relay += usize::from(relay_here);
+            pending += s.pending;
+            attempts_here += s.pending;
             for p in &s.peers {
                 first_audio_ms.extend(&p.first_audio_ms);
                 no_audio_entries += p.no_audio_entries;
@@ -1039,7 +1129,7 @@ pub(crate) fn aggregate_conn(files: &[FileReport]) -> ConnAgg {
     let direct = n("lan") + n("public");
     let relay = n("relay");
     let (failed, aborted) = (n("failed"), n("aborted"));
-    let attempts = direct + relay + failed + aborted;
+    let attempts = direct + relay + failed + aborted + pending;
     let pct = |k: usize| (attempts > 0).then(|| k as f64 * 100.0 / attempts as f64);
     ConnAgg {
         sessions: n_sessions,
@@ -1052,6 +1142,7 @@ pub(crate) fn aggregate_conn(files: &[FileReport]) -> ConnAgg {
         relay,
         failed,
         aborted,
+        pending,
         success_pct: pct(direct + relay),
         direct_pct: pct(direct),
         recover,
@@ -1106,18 +1197,27 @@ fn conn_goal(a: &ConnAgg) -> Vec<GoalRow> {
     }
     let t32 = format!("릴레이 폴백 포함 연결 성공률 ≥ {}%", goal::CONNECT_PCT);
     let measured = format!(
-        "성공 {}/{} = {} (실패 {} · 중단 {}) · 실제 시도 하한 {}",
+        "성공 {}/{} = {} (실패 {} · 중단 {} · 미완 {}) · 실제 시도 하한 {}",
         a.success,
         a.attempts,
         pct(a.success_pct),
         a.failed,
         a.aborted,
+        a.pending,
         a.attempts_lower
     );
     let both_sides = "시도는 기록 기준 — 한 합주의 양쪽 zip이면 같은 연결이 두 번 세어진다(문턱은 하한으로)";
+    // 미완(내보낼 때 연결 중)이 모두 성공했을 때의 성공률 — 이것도 98% 아래여야 미달이다.
+    let best = (a.attempts > 0).then(|| (a.success + a.pending) as f64 * 100.0 / a.attempts as f64);
     let v32 = match a.success_pct {
         None => (Unknown, Some("conn 기록 없음".into())),
-        Some(p) if p < goal::CONNECT_PCT => (NotMet, Some(format!("중단(연결 중 퇴장·정지)도 분모에 든다 — 원인은 연결 기록 표에서. {both_sides}"))),
+        Some(_) if best.is_some_and(|b| b < goal::CONNECT_PCT) => {
+            (NotMet, Some(format!("중단(연결 중 퇴장·정지)·미완도 분모에 든다 — 원인은 연결 기록 표에서. {both_sides}")))
+        }
+        Some(p) if p < goal::CONNECT_PCT => (
+            Unknown,
+            Some(format!("내보낼 때 아직 연결 중인 시도 {}회(미완) — 결과에 따라 98% 위아래가 갈려 가를 수 없음", a.pending)),
+        ),
         Some(_) if a.unknown_results > 0 => (Unknown, Some(format!("결과를 모르는 시도 {}회(새 형식) — 성공·실패를 추측하지 않음", a.unknown_results))),
         Some(_) if a.attempts_lower < goal::MIN_ATTEMPTS_98 => (
             Unknown,
