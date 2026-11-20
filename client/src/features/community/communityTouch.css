@@ -1,0 +1,10 @@
+/*
+ * 터치 대상 44px (P3-24 후속): 커뮤니티의 버튼·입력은 모양을 인라인 style로 정한다(패딩·글자 크기).
+ * 인라인 style은 최소 크기를 정하지 않으므로 좁은 화면에서만 클래스로 최소 크기를 더한다 — 769px 이상은 그대로.
+ */
+@media (max-width: 768px) {
+  .community-touch {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

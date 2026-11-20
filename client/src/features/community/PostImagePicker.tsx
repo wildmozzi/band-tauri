@@ -85,6 +85,7 @@ export function PostImagePicker({ form, splitSections, labelStyle }: PostImagePi
         style={{ display: 'none' }}
       />
       <button
+        className="community-touch"
         type="button"
         onClick={() => fileInputRef.current?.click()}
         disabled={full}
