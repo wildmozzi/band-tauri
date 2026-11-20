@@ -82,7 +82,7 @@ export function Auth() {
       try {
         await signUp(signUpData)
         // 회원가입 성공 시 알림은 AuthContext에서 처리
-      } catch (error) {
+      } catch {
         // 에러는 AuthContext에서 처리됨
       }
     } else {
@@ -90,7 +90,7 @@ export function Auth() {
       try {
         await signIn(email, password)
         navigate(redirectTo, { replace: true })
-      } catch (error) {
+      } catch {
         // 에러는 AuthContext에서 처리됨
       }
     }

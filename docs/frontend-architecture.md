@@ -176,7 +176,7 @@ client/src/
 
 ## 6. 경계 규칙과 강제
 
-`client/.eslintrc.cjs`의 `import/no-restricted-paths`(eslint-plugin-import)로 강제한다. `npm run lint`가 실패하면 CI가 막는다.
+`client/eslint.config.js`의 `import-x/no-restricted-paths`(eslint-plugin-import-x)로 강제한다. `npm run lint`가 실패하면 CI가 막는다.
 
 | 규칙 | 위반 예 |
 |---|---|
@@ -185,10 +185,10 @@ client/src/
 | ② shared → features·native·app 금지 | `shared/ui/…`에서 `../../features/auth` |
 | ③ native → features·app 금지 | `native/…`에서 `../features/room` |
 | ④ features → app 금지 | `features/home/…`에서 `../../app/routeTable` |
-| ⑤ 기능 간 순환 금지 — `import/no-cycle`(features·native·shared 안의 모든 import 순환) | rooms → room → rooms |
+| ⑤ 기능 간 순환 금지 — `import-x/no-cycle`(features·native·shared 안의 모든 import 순환) | rooms → room → rooms |
 
 - 기능 목록은 `src/features`의 폴더에서 lint 설정이 읽어 만든다(새 기능 폴더를 만들면 자동 적용).
-- 새 의존성 근거: `eslint-plugin-import`. ESLint 기본 `no-restricted-imports`는 import **문자열**만 보므로 상대 경로(`../../rooms/x`)로 같은 위치를 가리키는 경우를 일반적으로 막을 수 없다. 이 플러그인은 경로를 실제 파일로 해석해 "어느 폴더가 어느 폴더를 쓰는가"로 판정하고, 순환 검사(`no-cycle`)도 함께 준다. 별도 경로 별칭이나 커스텀 규칙 패키지가 필요 없다.
+- 새 의존성 근거: `eslint-plugin-import-x`(eslint 10을 지원하지 않는 `eslint-plugin-import`의 포크, 같은 규칙·옵션. P3-20b에서 교체). ESLint 기본 `no-restricted-imports`는 import **문자열**만 보므로 상대 경로(`../../rooms/x`)로 같은 위치를 가리키는 경우를 일반적으로 막을 수 없다. 이 플러그인은 경로를 실제 파일로 해석해 "어느 폴더가 어느 폴더를 쓰는가"로 판정하고, 순환 검사(`no-cycle`)도 함께 준다. 별도 경로 별칭이나 커스텀 규칙 패키지가 필요 없다.
 
 ## 7. 테스트 배치
 
@@ -209,7 +209,7 @@ client/src/
 | 항목 | 내용 |
 |---|---|
 | 전역 CSS 정리 | **완료(P3-2 ③-3)** — App.css: 한 화면 전용 규칙을 화면 폴더 CSS로(home/Home·auth/Auth·rooms/Rooms·RoomCard·CreateRoom·MyRoomsModal·demo-recording/Recording·demo-mixlab/MixLab·settings/audioSettingsPanel·AudioSettingsPage·community/communityFeed·profile/profileDetails·shared/ui/modal), App.css(4,252 → 2136줄)에는 앱 셸·공용·미사용 의심 규칙이 남는다. RoomDetail.css: 한 컴포넌트 전용 규칙을 `room/components/<컴포넌트>.css` 15개로, 컴포넌트 공용·미사용 의심 규칙은 RoomDetail.css(3,323 → 1581줄)에 남김. 같은 선택자 중복 합침, 분리로 순서가 바뀌어 결과가 달라지던 규칙은 문맥 클래스로 고정. 증거: 계산 스타일 스냅샷 diff 0, 데스크톱 전용 연주 UI는 마크업 조각 비교 도구(`client/e2e/tools/markup-styles.tool.ts`) |
-| 결제 CSS 로드 위치 | **완료(P3-2 ③-2)** — 화면 전용 규칙은 각 컴포넌트가 import(`Pricing.css`·`Payment.css`는 지연 청크). 결제 화면 밖에서도 매칭되거나 같은 특이성으로 순서에 기대던 규칙은 `payment/paymentGlobal.css`로 모아 App이 예전 자리에서 import(목록은 파일 머리말·PR #(③-2)). 지연 화면의 `profile/profileGlobal.css`·`demo-karaoke/karaokeGlobal.css`도 같은 방식(routes.tsx가 import, `.eslintrc.cjs` `APP_GLOBAL_CSS`). 전역 CSS 정리 때 소유 화면으로 옮긴다 |
+| 결제 CSS 로드 위치 | **완료(P3-2 ③-2)** — 화면 전용 규칙은 각 컴포넌트가 import(`Pricing.css`·`Payment.css`는 지연 청크). 결제 화면 밖에서도 매칭되거나 같은 특이성으로 순서에 기대던 규칙은 `payment/paymentGlobal.css`로 모아 App이 예전 자리에서 import(목록은 파일 머리말·PR #(③-2)). 지연 화면의 `profile/profileGlobal.css`·`demo-karaoke/karaokeGlobal.css`도 같은 방식(routes.tsx가 import, `eslint.config.js` `APP_GLOBAL_CSS`). 전역 CSS 정리 때 소유 화면으로 옮긴다 |
 | 데모 오디오 코드 | **지연 로딩(P3-2 ③-2)** — 데모 단계라 유지. Tone.js·악보(OSMD)는 `/karaoke` 진입 때만 내려받는다(메인 청크에서 빠짐) |
 | 지연 로딩 | **완료(P3-2 ③-2)** — `app/routes.tsx`: 데모 3종·커뮤니티·프로필, `payment/lazyScreens.ts`: 요금제·결제·결제 완료/실패. 합주 경로(홈·방 목록·방 만들기·합주실·설정)는 즉시 로드. 메인 JS 2,045.67 kB → 447.31 kB. 동작 불변은 계산 스타일 스냅샷(`client/e2e/tools`)으로 확인 |
 | 큰 컴포넌트 | `MusicRoom.tsx`(760줄), `ScoreDisplay.tsx`(600줄), `AudioSettings.tsx`(520줄), `Community.tsx`(470줄), `Profile.tsx`(430줄), `CreateRoom.tsx`(400줄) — 화면 로직을 훅·순수 함수로 |

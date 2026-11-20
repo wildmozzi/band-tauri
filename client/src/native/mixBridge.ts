@@ -296,7 +296,7 @@ export class MixSource {
     } catch (err) {
       if (this.graph === graph) this.graph = null
       await graph.close()
-      throw new Error(`믹스 구독 실패: ${engineErrorMessage(err)}`)
+      throw new Error(`믹스 구독 실패: ${engineErrorMessage(err)}`, { cause: err })
     }
     if (epoch !== this.epoch || this.refs === 0) {
       await this.close()
