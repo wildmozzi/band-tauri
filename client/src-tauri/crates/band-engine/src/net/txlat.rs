@@ -1,0 +1,231 @@
+//! 송신 큐 지연 히스토그램(P1-3): 워커 패스 시작(입력 링을 비우기 직전) → 피어별 `send_to` 완료까지.
+//!
+//! 기록(`record`)은 워커 스레드의 송신 경로에서 원자 덧셈 두 번뿐이다(락·할당 없음). 제어 스레드가
+//! `WINDOW`마다 `rotate`로 현재 창을 비워 p50/p99/최대를 계산해 둔다. 통계 조회는 그 스냅샷을 읽는다.
+
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use parking_lot::{Mutex, MutexGuard};
+use serde::Serialize;
+
+use band_dsp::histo::{bucket_lower, bucket_of, quantile_us, BUCKETS};
+
+/// 분위수를 계산하는 창(통계는 직전 창 기준).
+pub(crate) const WINDOW: Duration = Duration::from_secs(2);
+
+/// 프론트로 나가는 송신 큐 지연 통계(`EngineStats.sendQueue`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendQueueStats {
+    /// 직전 창(2초) 패킷별 지연 중앙값(ms).
+    pub p50_ms: f32,
+    /// 직전 창 99백분위(ms).
+    pub p99_ms: f32,
+    /// 직전 창 최대(ms, 칸 근사 아님 — 실측).
+    pub max_ms: f32,
+    /// 직전 창에 잰 오디오 패킷 수(0이면 위 값은 의미 없음).
+    pub packets: u32,
+}
+
+pub(crate) struct SendLatency {
+    buckets: Box<[AtomicU32]>,
+    max_us: AtomicU64,
+    last: Mutex<SendQueueStats>,
+}
+
+impl std::fmt::Debug for SendLatency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendLatency").field("last", &self.last()).finish()
+    }
+}
+
+impl Default for SendLatency {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SendLatency {
+    pub(crate) fn new() -> Self {
+        Self { buckets: (0..BUCKETS).map(|_| AtomicU32::new(0)).collect(), max_us: AtomicU64::new(0), last: Mutex::new(SendQueueStats::default()) }
+    }
+
+    /// 패킷 하나의 지연 기록(송신 경로, 원자값만).
+    #[inline]
+    pub(crate) fn record(&self, d: Duration) {
+        let us = d.as_micros().min(u64::MAX as u128) as u64;
+        self.buckets[bucket_of(us)].fetch_add(1, Ordering::Relaxed);
+        self.max_us.fetch_max(us, Ordering::Relaxed);
+    }
+
+    /// 현재 창을 비우고 분위수를 계산해 스냅샷으로 둔다(제어 스레드).
+    pub(crate) fn rotate(&self) -> SendQueueStats {
+        let mut counts = [0u32; BUCKETS];
+        let mut total: u64 = 0;
+        for (c, b) in counts.iter_mut().zip(self.buckets.iter()) {
+            *c = b.swap(0, Ordering::Relaxed);
+            total += *c as u64;
+        }
+        // 창 경계 경합(리뷰 L3): `record`의 칸 증가와 `fetch_max` 사이에 회전하면 칸은 이번 창, 최대값은 다음 창으로
+        // 갈 수 있다(또는 그 반대). 그래서 실측 최대가 가장 높은 비지 않은 칸의 하한보다 작으면 하한으로 올린다.
+        let top = counts.iter().rposition(|&c| c > 0).map_or(0, bucket_lower);
+        let max_us = self.max_us.swap(0, Ordering::Relaxed).max(top);
+        let q = |p: f64| -> f32 { (quantile_us(&counts, total, max_us as f64, p) / 1000.0) as f32 };
+        let s = if total == 0 {
+            SendQueueStats::default()
+        } else {
+            SendQueueStats { p50_ms: q(0.50), p99_ms: q(0.99), max_ms: max_us as f32 / 1000.0, packets: total.min(u32::MAX as u64) as u32 }
+        };
+        *self.last.lock() = s;
+        s
+    }
+
+    pub(crate) fn last(&self) -> SendQueueStats {
+        *self.last.lock()
+    }
+}
+
+/// 워커 반복 한 번이 다른 스레드가 쥔 락을 기다린 시간 합(엔진 ③c 측정 — 송신 경로는 ③c 뒤 락이 없고, ②b 뒤로 남은 것은 기준 피어의 `Peer.clock` 하나다 — MMCSS끼리).
+/// 먼저 `try_*`로 잡아 보고 못 잡을 때만 시계를 읽으므로, 경합이 없으면 비용은 성공하는 try 한 번이다.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct LockWait {
+    pub(crate) ns: u64,
+    pub(crate) contended: u32,
+}
+
+/// 락 하나(자리)에서 워커가 기다린 기록(엔진 ②b 측정, 진단 전용): 기다린 횟수·합·최대. 기다렸을 때만 쓴다(원자값).
+/// 측정 시험이 `take`로 읽고 비운다.
+#[derive(Debug, Default)]
+pub(crate) struct LockSite {
+    contended: AtomicU64,
+    total_ns: AtomicU64,
+    max_ns: AtomicU64,
+}
+
+/// `LockSite` 스냅샷.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LockSiteWait {
+    pub contended: u64,
+    pub(crate) total_us: u64,
+    pub max_us: u64,
+}
+
+impl LockSite {
+    fn note(&self, ns: u64) {
+        self.contended.fetch_add(1, Ordering::Relaxed);
+        self.total_ns.fetch_add(ns, Ordering::Relaxed);
+        self.max_ns.fetch_max(ns, Ordering::Relaxed);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn take(&self) -> LockSiteWait {
+        LockSiteWait {
+            contended: self.contended.swap(0, Ordering::Relaxed),
+            total_us: self.total_ns.swap(0, Ordering::Relaxed) / 1000,
+            max_us: self.max_ns.swap(0, Ordering::Relaxed).div_ceil(1000),
+        }
+    }
+}
+
+impl LockWait {
+    #[inline]
+    pub(crate) fn lock<'a, T>(&mut self, m: &'a Mutex<T>, site: &LockSite) -> MutexGuard<'a, T> {
+        if let Some(g) = m.try_lock() {
+            return g;
+        }
+        let t = Instant::now();
+        let g = m.lock();
+        self.add(t, site);
+        g
+    }
+
+    fn add(&mut self, t: Instant, site: &LockSite) {
+        let ns = t.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.ns += ns;
+        self.contended += 1;
+        site.note(ns);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantiles_and_window_reset() {
+        let h = SendLatency::new();
+        // 98개 20µs, 1개 1000µs, 1개 5000µs → p50 ≈ 20µs, p99 ≈ 1ms, max = 5ms
+        for _ in 0..98 {
+            h.record(Duration::from_micros(20));
+        }
+        h.record(Duration::from_micros(1000));
+        h.record(Duration::from_micros(5000));
+        let s = h.rotate();
+        assert_eq!(s.packets, 100);
+        assert!((s.p50_ms - 0.020).abs() < 0.003, "{s:?}");
+        assert!((s.p99_ms - 1.0).abs() < 0.13, "{s:?}");
+        assert_eq!(s.max_ms, 5.0);
+        assert_eq!(h.last(), s);
+        // 다음 창은 비어 있다
+        let e = h.rotate();
+        assert_eq!(e, SendQueueStats::default());
+    }
+
+    #[test]
+    fn rotate_race_does_not_zero_quantiles() {
+        // 리뷰 L3: 칸 증가는 이번 창에, fetch_max는 회전 뒤(다음 창)에 들어간 경우를 흉내 낸다
+        let h = SendLatency::new();
+        h.buckets[bucket_of(3000)].fetch_add(1, Ordering::Relaxed);
+        let s = h.rotate();
+        assert_eq!(s.packets, 1);
+        assert!(s.p50_ms >= 2.6 && s.p99_ms >= 2.6 && s.max_ms >= 2.6, "칸 하한 아래로 깎이지 않음: {s:?}");
+        assert!(s.p50_ms <= s.max_ms && s.p99_ms <= s.max_ms, "{s:?}");
+    }
+
+    #[test]
+    fn quantile_never_exceeds_max() {
+        let h = SendLatency::new();
+        h.record(Duration::from_micros(17));
+        let s = h.rotate();
+        assert!(s.p50_ms <= s.max_ms && s.p99_ms <= s.max_ms, "{s:?}");
+    }
+
+    #[test]
+    fn lock_wait_counts_only_contention() {
+        let m = std::sync::Arc::new(Mutex::new(0u32));
+        // 경합 없음: 0µs·0회
+        let site = std::sync::Arc::new(LockSite::default());
+        let mut w = LockWait::default();
+        drop(w.lock(&m, &site));
+        assert_eq!((w.ns, w.contended), (0, 0));
+        assert_eq!(site.take(), LockSiteWait::default());
+        // 다른 스레드가 20ms 쥔 락: 대기가 잡힌다
+        let g = m.lock();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (m2, site2) = (m.clone(), site.clone());
+        let t = std::thread::spawn(move || {
+            let mut w = LockWait::default();
+            tx.send(()).unwrap();
+            drop(w.lock(&m2, &site2));
+            w
+        });
+        rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        drop(g);
+        let w = t.join().unwrap();
+        assert_eq!(w.contended, 1);
+        assert!(w.ns >= 10_000_000, "{w:?}");
+        // 자리별 기록: 한 번, 10ms 이상. 읽으면 비워진다.
+        let s = site.take();
+        assert_eq!(s.contended, 1);
+        assert!(s.max_us >= 10_000 && s.total_us >= 10_000, "{s:?}");
+        assert_eq!(site.take(), LockSiteWait::default());
+    }
+
+    #[test]
+    fn serializes_camel_case() {
+        let j = serde_json::to_string(&SendQueueStats::default()).unwrap();
+        assert!(j.contains("\"p50Ms\"") && j.contains("\"p99Ms\"") && j.contains("\"maxMs\"") && j.contains("\"packets\""), "{j}");
+    }
+}

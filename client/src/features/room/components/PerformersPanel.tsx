@@ -1,0 +1,123 @@
+import type { MutableRefObject } from 'react'
+import { useRoomPerform, useRoomTelemetry, useRoomMixer, useRoomRequests, type PeerInstrument } from '../state/roomHooks'
+import { MetronomePanel, MyPerformerItem } from './performerUiLoader'
+// 연주자 전용 UI의 CSS는 첫 묶음에 예전 자리 그대로 둔다(JS만 지연 — performerUiLoader). 지연 CSS로 옮기면 App.css 뒤로 가
+// 같은 요소의 공용 클래스(performer-item·btn-primary·level-meter 등)와 동점 규칙의 승패가 바뀔 수 있다
+import './MetronomePanel.css'
+import './MyPerformerItem.css'
+import { ParticipationToggle } from './ParticipationToggle'
+import { RemotePerformerItem } from './RemotePerformerItem'
+import './PerformersPanel.css'
+
+/** 왼쪽: 연주자 패널 (내 행, 상대 연주자, 참여 요청 알림, 참여/관람 전환) */
+export function PerformersPanel({
+  isPerformer,
+  isHost,
+  freeJoin,
+  performerCount,
+  remotePerformers,
+  roomFull,
+  performBusy,
+  performerRefs,
+  performersListRef,
+  onOpenInstrumentChange,
+  onOpenPendingRequests,
+  onBecomePerformer,
+  onBecomeViewer,
+  onStartAfterApproval,
+}: {
+  isPerformer: boolean
+  isHost: boolean
+  freeJoin: boolean
+  performerCount: number
+  remotePerformers: [string, PeerInstrument][]
+  roomFull: boolean
+  performBusy: boolean
+  performerRefs: MutableRefObject<Record<string, HTMLDivElement | null>>
+  performersListRef: MutableRefObject<HTMLDivElement | null>
+  onOpenInstrumentChange: () => void
+  onOpenPendingRequests: () => void
+  onBecomePerformer: () => void
+  onBecomeViewer: () => void
+  onStartAfterApproval: () => void
+}) {
+  const { myInstrument, canPerform, broadcasterId, relayError } = useRoomPerform()
+  const { peerEngineStats, engineStats } = useRoomTelemetry('peerEngineStats', 'engineStats')
+  const { mixSettingsMap, setMixMuted } = useRoomMixer()
+  const { pendingRequests, demotePerformer, hostActionError, dismissHostActionError } = useRoomRequests()
+
+  return (
+    <aside className="performers-panel">
+      <div className="panel-header">
+        <h2>🎸 연주자</h2>
+        <span className="performer-count">{performerCount}명</span>
+      </div>
+
+      <div className="performers-list" ref={performersListRef}>
+        {/* 내 채널 (연주자일 경우) */}
+        {isPerformer && myInstrument && (
+          <MyPerformerItem myInstrument={myInstrument} isHost={isHost} onOpenInstrumentChange={onOpenInstrumentChange} />
+        )}
+
+        {/* 공유 메트로놈 (앱 연주자, P2-3) */}
+        {isPerformer && myInstrument && canPerform && <MetronomePanel isHost={isHost} />}
+
+        {/* 다른 연주자들 (peerInstruments 기반) */}
+        {remotePerformers.map(([oderId, peerInfo]) => {
+          const muted = mixSettingsMap[oderId]?.muted ?? false
+          return (
+            <RemotePerformerItem
+              key={oderId}
+              oderId={oderId}
+              peerInfo={peerInfo}
+              isPerformer={isPerformer}
+              isBroadcaster={broadcasterId === oderId}
+              ps={isPerformer ? peerEngineStats[oderId] : undefined}
+              engineStats={engineStats}
+              relayError={relayError}
+              muted={muted}
+              onToggleMute={() => setMixMuted(oderId, !muted)}
+              onDemote={isHost && !peerInfo.isHost ? () => demotePerformer(oderId) : undefined}
+              rowRef={(el) => { performerRefs.current[oderId] = el }}
+            />
+          )
+        })}
+
+        {performerCount === 0 && (
+          <div className="no-performers">
+            <p>아직 연주자가 없습니다</p>
+            <small>{canPerform ? '첫 번째 연주자가 되어보세요!' : '연주가 시작되면 여기에 표시됩니다'}</small>
+          </div>
+        )}
+      </div>
+
+      {/* 방장: 내리기 거절 안내 (#180 리뷰 L-4) */}
+      {isHost && hostActionError && (
+        <div className="host-action-error" role="alert">
+          <span>{hostActionError}</span>
+          <button onClick={dismissHostActionError} aria-label="안내 닫기">✕</button>
+        </div>
+      )}
+
+      {/* 방장: 승인 요청 알림 (참여 버튼 위에 표시) */}
+      {isHost && pendingRequests.length > 0 && (
+        <div className="pending-requests-alert" onClick={onOpenPendingRequests}>
+          <span className="alert-badge">{pendingRequests.length}</span>
+          <span>연주 참여 요청</span>
+        </div>
+      )}
+
+      {/* 참여/관람 전환 버튼 */}
+      <ParticipationToggle
+        isPerformer={isPerformer}
+        isHost={isHost}
+        freeJoin={freeJoin}
+        roomFull={roomFull}
+        performBusy={performBusy}
+        onBecomePerformer={onBecomePerformer}
+        onBecomeViewer={onBecomeViewer}
+        onStartAfterApproval={onStartAfterApproval}
+      />
+    </aside>
+  )
+}

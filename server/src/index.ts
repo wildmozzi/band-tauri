@@ -1,57 +1,44 @@
 import 'dotenv/config'
 
-import express from 'express'
-import cors from 'cors'
 import { createServer as createHttpServer } from 'http'
 import { createServer as createHttpsServer } from 'https'
 import { readFileSync, existsSync } from 'fs'
-import { createClient } from '@supabase/supabase-js'
-import musicRoutes from './routes/music'
-import paymentRoutes from './routes/payment'
-import { initializeWebSocket } from './services/wsService'
+import { createApp } from './app'
+import { supabaseAdmin as supabase } from './lib/supabase'
+import type { WebSocketServer } from 'ws'
+import { initializeWebSocket, wsActivity } from './services/wsService'
 import { scheduleCleanup } from './services/cleanupService'
+import { getDefaultSubscriptionService, scheduleSubscriptionJobs } from './services/subscriptionService'
+import { createDefaultPaymentOrderService, scheduleOrderJobs } from './services/paymentOrderService'
+import { createRoomRepository } from './repositories/roomRepository'
+import { requirePublicApiUrl } from './lib/securityConfig'
+
+// 운영에서 PUBLIC_API_URL이 없으면 여기서 실패한다 (게시글 이미지 URL이 상대 경로로 저장되는 것을 막음)
+requirePublicApiUrl()
 
 const PORT = Number(process.env.PORT || 8080)
 
-// Express 앱 설정
-const app = express()
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}))
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
-app.use('/uploads', express.static('uploads'))
-
-// API 라우트
-app.use('/api/music', musicRoutes)
-app.use('/api/payment', paymentRoutes)
-
-// 헬스체크
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() })
-})
-
-// Supabase 초기화
-const supabaseUrl = process.env.SUPABASE_URL || ''
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY || ''
-const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null
+// 운영 집계(GET /api/ops/activity, P1-17①)는 아래에서 WS 서버를 만든 뒤부터 값을 돌려준다
+let wss: WebSocketServer | null = null
+const app = createApp({ activity: () => (wss ? wsActivity(wss) : null) })
 
 if (supabase) {
   console.log('[DB] Supabase client initialized - participant sync enabled')
-  supabase
-    .from('rooms')
-    .update({ current_participants: 0 })
-    .gt('current_participants', 0)
-    .then(({ error }) => {
-      if (error) console.error('[DB] Failed to reset participants:', error.message)
-      else console.log('[DB] All room participants reset to 0')
-    })
+  createRoomRepository(supabase)
+    .resetAllParticipantCounts()
+    .then(
+      () => console.log('[DB] All room participants reset to 0'),
+      (err) => console.error('[DB] Failed to reset participants:', err instanceof Error ? err.message : err),
+    )
   scheduleCleanup(supabase)
+  scheduleSubscriptionJobs()
+  scheduleOrderJobs(createDefaultPaymentOrderService(getDefaultSubscriptionService()))
 } else {
   console.log('[DB] Supabase not configured - participant sync disabled')
   console.log('[DB] Set SUPABASE_URL and SUPABASE_SERVICE_KEY to enable')
+  if (process.env.NODE_ENV !== 'development') {
+    console.error('[SECURITY] Supabase not configured outside development: all WS clients are anonymous and authenticated APIs return 401')
+  }
 }
 
 // HTTP/HTTPS 서버 + WebSocket 초기화
@@ -60,13 +47,13 @@ const keyPath = './certs/key.pem'
 
 if (existsSync(certPath) && existsSync(keyPath)) {
   const server = createHttpsServer({ cert: readFileSync(certPath), key: readFileSync(keyPath) }, app)
-  initializeWebSocket(server, supabase)
+  wss = initializeWebSocket(server, supabase)
   server.listen(PORT, () => {
     console.log(`WSS signaling server listening on wss://localhost:${PORT}`)
   })
 } else {
   const server = createHttpServer(app)
-  initializeWebSocket(server, supabase)
+  wss = initializeWebSocket(server, supabase)
   server.listen(PORT, () => {
     console.log(`HTTP + WS server listening on port ${PORT}`)
     console.log(`- HTTP API: http://localhost:${PORT}/api`)

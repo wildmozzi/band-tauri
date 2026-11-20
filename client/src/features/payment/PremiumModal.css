@@ -1,0 +1,196 @@
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--black-a80);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+
+/* 공용 Modal(.modal-overlay > .premium-modal-backdrop + .premium-modal): 오버레이 색·흐림은 래퍼가 그리고,
+   배경 클릭 영역은 래퍼 전체를 덮는 투명 backdrop이다 */
+.premium-modal-backdrop {
+  position: absolute;
+  inset: 0;
+}
+
+.premium-modal {
+  background: var(--ink-950);
+  border: 1px solid var(--indigo-400-a30);
+  border-radius: var(--radius-pill);
+  max-width: 500px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  position: relative;
+  box-shadow: 0 20px 40px var(--indigo-400-a20);
+}
+
+.modal-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: var(--white-a10);
+  border: none;
+  border-radius: var(--radius-round);
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--neutral-50);
+  font-size: 1.25rem;
+  transition: background 0.2s ease;
+}
+
+.modal-close:hover {
+  background: var(--white-a20);
+}
+
+/* 머리글 아이콘 — 제목(대화상자 이름)에 섞이지 않게 장식으로 그린다 */
+.premium-modal > .modal-header::before {
+  content: '✨';
+  content: '✨' / ''; /* 대체 텍스트 없음 = 스크린리더가 읽지 않는다 */
+  display: block;
+  font-size: 3rem;
+  margin-bottom: 1rem;
+}
+
+.feature-description {
+  color: var(--neutral-400);
+  line-height: 1.6;
+}
+
+.feature-description strong {
+  color: var(--indigo-400);
+}
+
+/* Plan Selector */
+.plan-selector {
+  margin-bottom: 2rem;
+}
+
+.plan-tabs {
+  display: flex;
+  background: var(--white-a05);
+  border-radius: var(--radius-xl);
+  padding: 4px;
+  margin-bottom: 1.5rem;
+}
+
+.plan-tab {
+  flex: 1;
+  padding: 0.75rem;
+  border: none;
+  background: transparent;
+  color: var(--neutral-400);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-weight: 500;
+}
+
+.plan-tab.active {
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
+  font-weight: 600;
+}
+
+.selected-plan-details {
+  background: var(--white-a05);
+  border-radius: var(--radius-xl);
+  padding: 1.5rem;
+}
+
+/* Modal Actions */
+.modal-actions {
+  margin-bottom: 2rem;
+}
+
+.upgrade-button {
+  width: 100%;
+  padding: 1rem;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
+  border: none;
+  border-radius: var(--radius-xl);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  margin-bottom: 1rem;
+}
+
+.upgrade-button:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-brand);
+}
+
+.view-all-plans {
+  display: block;
+  text-align: center;
+  color: var(--indigo-400);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s ease;
+}
+
+.view-all-plans:hover {
+  color: var(--pink-400);
+}
+
+/* Modal Benefits */
+.modal-benefits {
+  border-top: 1px solid var(--white-a10);
+  padding-top: 1.5rem;
+}
+
+.benefit-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.benefit-item:last-child {
+  margin-bottom: 0;
+}
+
+.benefit-icon {
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+.benefit-item strong {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+  color: var(--neutral-50);
+}
+
+.benefit-item p {
+  color: var(--neutral-400);
+  font-size: 0.875rem;
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .premium-modal {
+    margin: 1rem;
+    max-width: none;
+  }
+
+  .benefit-item {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+}

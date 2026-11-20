@@ -3,121 +3,83 @@ import multer from 'multer'
 import * as path from 'path'
 import * as fs from 'fs'
 import { v4 as uuidv4 } from 'uuid'
-import { createClient } from '@supabase/supabase-js'
+import { requireAuth, getUserIdFromRequest } from '../lib/auth'
+import { uploadLimiter } from '../lib/rateLimits'
+import {
+  UPLOAD_DIR,
+  ensureUploadDir,
+  resolveUploadPath,
+  recordUploadOwner,
+  getUploadOwner,
+  removeUploadOwner,
+  matchesFileSignature,
+} from '../lib/uploads'
+import { safeUnlink, tryDecodeFilename } from '../lib/files'
 import { convertMp3ToMidi } from '../services/amtService'
 import { separateAudioWithProvider, currentProvider } from '../services/demucsProvider'
+import { convertPdfToMusicXml } from '../services/omrService'
+import { ServiceError } from '../services/errors'
+import { getDefaultStemSeparationService } from '../services/stemSeparationService'
+import { separationIdParams, uploadFilenameParams } from './schemas'
 
+/**
+ * 악보/음원 API — HTTP 입출력과 입력 검증만.
+ * 음원분리 결과 저장·조회·삭제는 StemSeparationService → stem_separations repository / StorageAdapter.
+ * 스템 다운로드 URL은 서명 GET URL(만료 STEM_URL_TTL_SEC)로 내려준다.
+ */
+// 500 응답에는 고정 문구만 보낸다. 내부 예외 메시지(파일 경로·DB·외부 API 응답)는 console.error 로그에만 남긴다(서버 보안 점검).
 const router = express.Router()
+const stems = getDefaultStemSeparationService()
 
-// Multer이 latin1로 파일명을 읽는 경우 UTF-8로 변환 (이미 한글이면 그대로)
-function tryDecodeFilename(name: string): string {
-  if (/[가-힣ᄀ-ᇿ㄰-㆏]/.test(name)) return name
-  try {
-    const decoded = Buffer.from(name, 'latin1').toString('utf8')
-    if (/[가-힣ᄀ-ᇿ㄰-㆏]/.test(decoded)) return decoded
-  } catch {}
-  return name
-}
-
-const supabaseUrl = process.env.SUPABASE_URL || ''
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY || ''
-const supabaseAdmin = supabaseUrl && supabaseServiceKey
-  ? createClient(supabaseUrl, supabaseServiceKey)
-  : null
-
-if (supabaseAdmin) {
+if (stems.available) {
   console.log('[Music Routes] Supabase admin client initialized')
 } else {
   console.log('[Music Routes] Supabase not configured - stem storage disabled')
 }
 
-const UPLOAD_DIR = path.resolve(__dirname, "../../uploads")
-
-/**
- * 업로드 파일명 → 안전한 절대 경로. 경로 순회(../, 절대경로, 구분자)를 차단한다.
- * 경로 구분자(/ \), NUL, 점으로 시작하는 이름, '..' 포함을 거부한다. 실패 시 null.
- */
-function resolveUploadPath(filename: unknown): string | null {
-  if (typeof filename !== "string" || filename.length === 0 || filename.length > 255) return null
-  if (/[\/\\\0:]/.test(filename) || filename.startsWith(".") || filename.includes("..")) return null
-  const resolved = path.resolve(UPLOAD_DIR, filename)
-  if (path.dirname(resolved) !== UPLOAD_DIR) return null
-  return resolved
-}
-
-async function getUserIdFromToken(authHeader: string | string[] | undefined): Promise<string | null> {
-  const header = Array.isArray(authHeader) ? authHeader[0] : authHeader
-  if (!header?.startsWith('Bearer ') || !supabaseAdmin) return null
-
-  try {
-    const token = header.substring(7)
-    const { data: { user } } = await supabaseAdmin.auth.getUser(token)
-    return user?.id || null
-  } catch {
+/** 파일명 파라미터 검증. 실패 시 400 응답 후 null */
+function parseFilename(req: Request, res: Response): string | null {
+  const parsed = uploadFilenameParams.safeParse(req.params)
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
     return null
   }
-}
-
-async function uploadStemsToStorage(
-  stems: Record<string, string>,
-  userId: string | null,
-  separationId: string
-): Promise<Record<string, string>> {
-  if (!supabaseAdmin) throw new Error('Supabase not configured')
-
-  const folder = `${userId || 'anonymous'}/${separationId}`
-  const urls: Record<string, string> = {}
-
-  for (const [stemName, localPath] of Object.entries(stems)) {
-    if (!localPath || !fs.existsSync(localPath)) continue
-
-    try {
-      const fileBuffer = fs.readFileSync(localPath)
-      const storagePath = `${folder}/${stemName}.wav`
-
-      const { error: uploadError } = await supabaseAdmin.storage
-        .from('audio-stems')
-        .upload(storagePath, fileBuffer, { contentType: 'audio/wav', upsert: true })
-
-      if (uploadError) {
-        console.error(`[Storage] Upload failed for ${stemName}:`, uploadError)
-        continue
-      }
-
-      const { data } = supabaseAdmin.storage.from('audio-stems').getPublicUrl(storagePath)
-      urls[stemName] = data.publicUrl
-
-      fs.unlinkSync(localPath)
-      console.log(`[Storage] Uploaded ${stemName} to ${storagePath}`)
-    } catch (error) {
-      console.error(`[Storage] Error uploading ${stemName}:`, error)
-    }
-  }
-
-  return urls
+  return parsed.data.filename
 }
 
 // Multer 설정: 파일 저장 위치 및 파일명 설정
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, '../../uploads')
-    // uploads 디렉토리가 없으면 생성
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true })
-    }
-    cb(null, uploadDir)
+    ensureUploadDir()
+    cb(null, UPLOAD_DIR)
   },
   filename: (req, file, cb) => {
-    // 파일명: timestamp_uuid.ext (원본 이름은 경로 순회 위험이 있어 저장 이름에 쓰지 않는다)
-    const ext = path.extname(file.originalname).toLowerCase().replace(/[^a-z0-9.]/g, '')
-    const uniqueName = `${Date.now()}_${uuidv4()}${ext}`
-    cb(null, uniqueName)
+    // 한글 파일명 문제 해결: ASCII만 사용
+    // 원본 파일명에서 확장자 추출
+    const ext = path.extname(file.originalname)
+
+    // 원본 파일명에서 확장자를 제외한 부분 추출
+    const nameWithoutExt = path.basename(file.originalname, ext)
+
+    // 한글 및 특수문자를 제거하고 영문/숫자/하이픈/언더스코어만 남김
+    const sanitizedName = nameWithoutExt
+      .replace(/[^a-zA-Z0-9\-_]/g, '_')  // 영문, 숫자, -, _ 외 모두 _로 변경
+      .replace(/_+/g, '_')  // 연속된 _를 하나로
+      .replace(/^_|_$/g, '')  // 앞뒤 _제거
+
+    // 파일명: timestamp_sanitizedname.ext (sanitizedName이 비어있으면 timestamp만)
+    const finalName = sanitizedName
+      ? `${Date.now()}_${sanitizedName}${ext}`
+      : `${Date.now()}${ext}`
+
+    console.log(`[Multer] 원본: ${file.originalname} → 변환: ${finalName}`)
+    cb(null, finalName)
   }
 })
 
 // 파일 필터: 허용된 확장자만 업로드
 const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  const allowedExtensions = ['.xml', '.musicxml', '.mid', '.midi', '.mp3']
+  const allowedExtensions = ['.xml', '.musicxml', '.mid', '.midi', '.mp3', '.pdf']
   const ext = path.extname(file.originalname).toLowerCase()
 
   if (allowedExtensions.includes(ext)) {
@@ -140,7 +102,10 @@ const upload = multer({
  * POST /api/music/upload-score
  * 악보 파일 업로드 및 처리
  */
-router.post('/upload-score', upload.single('file'), async (req: Request, res: Response) => {
+router.post('/upload-score', uploadLimiter, requireAuth, upload.single('file'), async (req: Request, res: Response) => {
+  let uploadedFilePath: string | null = null
+  const userId = res.locals.userId as string
+
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -150,12 +115,23 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
     }
 
     const file = req.file
+    uploadedFilePath = file.path
     const ext = path.extname(file.originalname).toLowerCase()
 
     console.log(`[Music Upload] 파일 수신: ${file.originalname} (${ext})`)
 
+    // 확장자만 믿지 않고 매직 바이트 확인
+    if (!matchesFileSignature(file.path, ext)) {
+      safeUnlink(uploadedFilePath)
+      return res.status(400).json({
+        success: false,
+        error: '파일 내용이 확장자와 일치하지 않습니다.'
+      })
+    }
+
     // XML 또는 MIDI 파일인 경우: 바로 성공 응답
     if (['.xml', '.musicxml', '.mid', '.midi'].includes(ext)) {
+      recordUploadOwner(file.filename, userId)
       return res.json({
         success: true,
         fileType: ext.includes('xml') ? 'xml' : 'midi',
@@ -163,6 +139,44 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
         originalName: file.originalname,
         filePath: `/uploads/${file.filename}`,
         message: '파일 업로드 성공'
+      })
+    }
+
+    // PDF 파일인 경우: OMR을 통해 MusicXML로 변환
+    if (ext === '.pdf') {
+      console.log('[Music Upload] PDF 파일 변환 시작 (OMR)')
+
+      const omrResult = await convertPdfToMusicXml(file.path)
+
+      if (!omrResult.success || !omrResult.musicXmlPath) {
+        // 변환 실패 시 업로드된 파일 삭제
+        if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+          fs.unlinkSync(uploadedFilePath)
+        }
+
+        return res.status(500).json({
+          success: false,
+          error: `PDF 변환 실패: ${omrResult.error || 'Unknown error'}`
+        })
+      }
+
+      const xmlFileName = path.basename(omrResult.musicXmlPath)
+      recordUploadOwner(xmlFileName, userId)
+
+      // 원본 PDF 파일 삭제
+      if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+        fs.unlinkSync(uploadedFilePath)
+      }
+
+      return res.json({
+        success: true,
+        fileType: 'pdf',  // 원본이 PDF였음을 표시
+        fileName: xmlFileName,
+        originalName: file.originalname,
+        filePath: `/uploads/${xmlFileName}`,
+        message: 'PDF 악보를 MusicXML로 변환했습니다',
+        converted: true,
+        warnings: omrResult.warnings
       })
     }
 
@@ -174,7 +188,9 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
 
       if (!conversionResult.success || !conversionResult.midiPath) {
         // 변환 실패 시 업로드된 파일 삭제
-        fs.unlinkSync(file.path)
+        if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+          fs.unlinkSync(uploadedFilePath)
+        }
 
         return res.status(500).json({
           success: false,
@@ -182,10 +198,9 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
         })
       }
 
-      // 변환 성공: 원본 MP3 파일 삭제 (선택사항)
-      // fs.unlinkSync(file.path)
-
       const midiFileName = path.basename(conversionResult.midiPath)
+      recordUploadOwner(midiFileName, userId)
+      recordUploadOwner(file.filename, userId)
 
       return res.json({
         success: true,
@@ -206,9 +221,17 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
 
   } catch (error) {
     console.error('[Music Upload] 오류:', error)
+    // 에러 발생 시 업로드된 파일 정리
+    if (uploadedFilePath && fs.existsSync(uploadedFilePath)) {
+      try {
+        fs.unlinkSync(uploadedFilePath)
+      } catch (e) {
+        // 무시
+      }
+    }
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: '파일 처리 중 오류가 발생했습니다.'
     })
   }
 })
@@ -217,11 +240,17 @@ router.post('/upload-score', upload.single('file'), async (req: Request, res: Re
  * GET /api/music/file/:filename
  * 업로드된 파일 다운로드
  */
-router.get('/file/:filename', (req: Request, res: Response) => {
+router.get('/file/:filename', requireAuth, (req: Request, res: Response) => {
   try {
-    const filePath = resolveUploadPath(req.params['filename'])
+    const filename = parseFilename(req, res)
+    if (filename === null) return
+    const filePath = resolveUploadPath(filename)
     if (!filePath) {
       return res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
+    }
+
+    if (getUploadOwner(filename) !== res.locals.userId) {
+      return res.status(403).json({ success: false, error: '파일에 접근할 권한이 없습니다.' })
     }
 
     // 파일 존재 여부 확인
@@ -232,13 +261,13 @@ router.get('/file/:filename', (req: Request, res: Response) => {
       })
     }
 
-    // 파일 전송
-    res.sendFile(filePath)
+    // 파일 전송 (root 고정: 업로드 디렉터리 밖으로 나갈 수 없음)
+    res.sendFile(filename, { root: UPLOAD_DIR, dotfiles: 'deny', headers: { 'Content-Disposition': 'attachment' } })
   } catch (error) {
     console.error('[Music Download] 오류:', error)
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: '파일을 내려받지 못했습니다.'
     })
   }
 })
@@ -247,11 +276,17 @@ router.get('/file/:filename', (req: Request, res: Response) => {
  * DELETE /api/music/file/:filename
  * 업로드된 파일 삭제
  */
-router.delete('/file/:filename', (req: Request, res: Response) => {
+router.delete('/file/:filename', requireAuth, (req: Request, res: Response) => {
   try {
-    const filePath = resolveUploadPath(req.params['filename'])
+    const filename = parseFilename(req, res)
+    if (filename === null) return
+    const filePath = resolveUploadPath(filename)
     if (!filePath) {
       return res.status(400).json({ success: false, error: '잘못된 파일명입니다.' })
+    }
+
+    if (getUploadOwner(filename) !== res.locals.userId) {
+      return res.status(403).json({ success: false, error: '파일을 삭제할 권한이 없습니다.' })
     }
 
     // 파일 존재 여부 확인
@@ -264,6 +299,7 @@ router.delete('/file/:filename', (req: Request, res: Response) => {
 
     // 파일 삭제
     fs.unlinkSync(filePath)
+    removeUploadOwner(filename)
 
     return res.json({
       success: true,
@@ -273,7 +309,7 @@ router.delete('/file/:filename', (req: Request, res: Response) => {
     console.error('[Music Delete] 오류:', error)
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: '파일을 삭제하지 못했습니다.'
     })
   }
 })
@@ -282,7 +318,7 @@ router.delete('/file/:filename', (req: Request, res: Response) => {
  * POST /api/music/separate-stems
  * MP3 파일을 세션별로 분리 (vocals, drums, bass, other 등)
  */
-router.post('/separate-stems', upload.single('file'), async (req: Request, res: Response) => {
+router.post('/separate-stems', uploadLimiter, requireAuth, upload.single('file'), async (req: Request, res: Response) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -305,14 +341,14 @@ router.post('/separate-stems', upload.single('file'), async (req: Request, res: 
       })
     }
 
+    if (!matchesFileSignature(file.path, ext)) {
+      safeUnlink(file.path)
+      return res.status(400).json({ success: false, error: '파일 내용이 MP3 형식이 아닙니다.' })
+    }
+
     console.log(`[Music Separate] 음원 분리 요청: ${originalFilename} (Provider: ${currentProvider})`)
 
-    const userId = await getUserIdFromToken(req.headers.authorization)
-
-    if (!userId) {
-      fs.unlinkSync(file.path)
-      return res.status(401).json({ success: false, error: '로그인이 필요합니다.' })
-    }
+    const userId = res.locals.userId as string
 
     const separationId = uuidv4()
 
@@ -327,69 +363,35 @@ router.post('/separate-stems', upload.single('file'), async (req: Request, res: 
     }
 
     // Supabase가 설정되어 있으면 Storage에 업로드하고 DB에 저장
-    if (!supabaseAdmin) {
+    if (!stems.available) {
       console.warn('[Music Separate] Supabase 미설정 - 로컬 파일로 반환 (히스토리 저장 안 됨)')
-    }
-    if (supabaseAdmin) {
+    } else {
       try {
-        const stemUrls = await uploadStemsToStorage(
+        // DB에는 저장소 참조, 응답에는 서명 GET URL (P3-10)
+        const storageFolder = `${userId || 'anonymous'}/${separationId}`
+        const stemRefs = await stems.uploadStems(
           separationResult.stems as Record<string, string>,
           userId,
           separationId
         )
+        const stemUrls = await stems.signStems(stemRefs, storageFolder)
 
-        // 중복 파일명 처리: 같은 이름의 미만료 기록이 있으면 (2), (3)... 붙임
-        let recordFilename = originalFilename
-        try {
-          const baseExt = path.extname(originalFilename)
-          const baseName = path.basename(originalFilename, baseExt)
-          let dupQuery = supabaseAdmin
-            .from('stem_separations')
-            .select('original_filename')
-            .gt('expires_at', new Date().toISOString())
-            .ilike('original_filename', `${baseName}%`)
-          if (userId) {
-            dupQuery = dupQuery.eq('user_id', userId)
-          } else {
-            dupQuery = dupQuery.is('user_id', null)
-          }
-          const { data: existing } = await dupQuery
+        const recordFilename = await stems.resolveRecordFilename(userId, originalFilename)
 
-          const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-          const duplicates = (existing || []).filter(r => {
-            const n = tryDecodeFilename(r.original_filename)
-            if (n === originalFilename) return true
-            return new RegExp(`^${escapeRegex(baseName)} \\(\\d+\\)${escapeRegex(baseExt)}$`).test(n)
-          })
-          if (duplicates.length > 0) {
-            recordFilename = `${baseName} (${duplicates.length + 1})${baseExt}`
-          }
-        } catch (dupErr) {
-          console.warn('[DB] 중복 파일명 체크 실패, 원본 파일명 사용:', dupErr)
-        }
-
-        const { error: dbError } = await supabaseAdmin
-          .from('stem_separations')
-          .insert({
-            id: separationId,
-            user_id: userId,
-            original_filename: recordFilename,
-            original_file_size: file.size,
-            storage_folder: `${userId || 'anonymous'}/${separationId}`,
-            vocals_url: stemUrls.vocals || null,
-            drums_url: stemUrls.drums || null,
-            bass_url: stemUrls.bass || null,
-            piano_url: stemUrls.piano || null,
-            guitar_url: stemUrls.guitar || null,
-            other_url: stemUrls.other || null,
-            status: 'completed'
-          })
-
-        if (dbError) {
-          console.error('[DB] Failed to save separation record:', dbError)
-        } else {
-          console.log(`[DB] Separation record saved: ${separationId} as "${recordFilename}"`)
-        }
+        await stems.saveRecord({
+          id: separationId,
+          user_id: userId,
+          original_filename: recordFilename,
+          original_file_size: file.size,
+          storage_folder: storageFolder,
+          vocals_url: stemRefs.vocals || null,
+          drums_url: stemRefs.drums || null,
+          bass_url: stemRefs.bass || null,
+          piano_url: stemRefs.piano || null,
+          guitar_url: stemRefs.guitar || null,
+          other_url: stemRefs.other || null,
+          status: 'completed'
+        })
 
         if (fs.existsSync(file.path)) fs.unlinkSync(file.path)
 
@@ -426,7 +428,7 @@ router.post('/separate-stems', upload.single('file'), async (req: Request, res: 
     console.error('[Music Separate] 오류:', error)
     return res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: '음원 분리 중 오류가 발생했습니다.'
     })
   }
 })
@@ -437,34 +439,21 @@ router.post('/separate-stems', upload.single('file'), async (req: Request, res: 
  */
 router.get('/stem-history', async (req: Request, res: Response) => {
   try {
-    if (!supabaseAdmin) {
+    if (!stems.available) {
       return res.status(503).json({ success: false, error: 'Supabase not configured' })
     }
 
-    const userId = await getUserIdFromToken(req.headers.authorization)
+    const userId = await getUserIdFromRequest(req)
 
     if (!userId) {
       return res.status(401).json({ success: false, error: '로그인이 필요합니다.' })
     }
 
-    const query = supabaseAdmin
-      .from('stem_separations')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('status', 'completed')
-      .gt('expires_at', new Date().toISOString())
-      .order('created_at', { ascending: false })
-      .limit(50)
-
-    const { data, error } = await query
-
-    if (error) {
-      return res.status(500).json({ success: false, error: error.message })
-    }
-
-    return res.json({ success: true, separations: data || [] })
+    const separations = await stems.listHistory(userId)
+    return res.json({ success: true, separations })
   } catch (error) {
-    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+    console.error('[Stem History] 오류:', error)
+    return res.status(500).json({ success: false, error: '분리 기록을 불러오지 못했습니다.' })
   }
 })
 
@@ -474,41 +463,27 @@ router.get('/stem-history', async (req: Request, res: Response) => {
  */
 router.delete('/stem-separation/:id', async (req: Request, res: Response) => {
   try {
-    if (!supabaseAdmin) {
+    if (!stems.available) {
       return res.status(503).json({ success: false, error: 'Supabase not configured' })
     }
 
-    const { id } = req.params
-    const userId = await getUserIdFromToken(req.headers.authorization)
+    const userId = await getUserIdFromRequest(req)
+    if (!userId) {
+      return res.status(401).json({ success: false, error: '로그인이 필요합니다.' })
+    }
 
-    const { data: separation, error: fetchError } = await supabaseAdmin
-      .from('stem_separations')
-      .select('*')
-      .eq('id', id)
-      .single()
-
-    if (fetchError || !separation) {
+    // 형식이 틀린 id는 DB에 없는 것과 같다 (기존 동작: 조회 실패 → 404)
+    const parsed = separationIdParams.safeParse(req.params)
+    if (!parsed.success) {
       return res.status(404).json({ success: false, error: '분리 결과를 찾을 수 없습니다.' })
     }
 
-    if (separation.user_id && separation.user_id !== userId) {
-      return res.status(403).json({ success: false, error: '삭제 권한이 없습니다.' })
-    }
-
-    const folder = separation.storage_folder
-    const stemNames = ['vocals', 'drums', 'bass', 'piano', 'guitar', 'other']
-    await supabaseAdmin.storage.from('audio-stems').remove(stemNames.map(n => `${folder}/${n}.wav`))
-
-    const { error: deleteError } = await supabaseAdmin.from('stem_separations').delete().eq('id', id)
-
-    if (deleteError) {
-      return res.status(500).json({ success: false, error: deleteError.message })
-    }
-
-    console.log(`[Delete] Separation deleted: ${id}`)
+    await stems.deleteSeparation(userId, parsed.data.id)
     return res.json({ success: true, message: '분리 결과가 삭제되었습니다.' })
   } catch (error) {
-    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' })
+    if (error instanceof ServiceError) return res.status(error.status).json(error.body)
+    console.error('[Stem Delete] 오류:', error)
+    return res.status(500).json({ success: false, error: '분리 결과를 삭제하지 못했습니다.' })
   }
 })
 

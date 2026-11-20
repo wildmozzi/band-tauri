@@ -1,0 +1,71 @@
+# band-relay
+
+연주자 앱 사이 직접 UDP 연결이 안 될 때(대칭형 NAT, LTE) 쓰는 UDP 릴레이. 엔진 패킷(암호문)을 복호화하지 않고 같은 방의 대상에게 그대로 전달한다.
+
+계약(패킷 포맷, 토큰, 한도): [docs/overhaul/relay-design.md](../docs/overhaul/relay-design.md)
+
+## 구조
+
+```
+src/token.rs    릴레이 토큰 검증 (HMAC-SHA256), 회수 메시지 서명·검증
+src/packet.rs   RelayBind(7) / RelayData(8) / RelayBindAck(9) / RelayRevoke(10)
+src/relay.rs    상태기계: 등록, 라우팅, 상한, 만료, 회수 (I/O 없음, 단위 테스트 대상)
+src/server.rs   UDP 루프(단일 태스크), /metrics HTTP
+src/stats.rs    원자적 통계, Prometheus 출력
+tests/          실제 UDP 소켓 통합 테스트 (왕복 지연, 미인증 폐기, 대역 상한, 메트릭, 회수 뒤 전달 중단)
+```
+
+## 개발
+
+```sh
+cd relay
+cargo clippy --all-targets -- -D warnings
+cargo test -- --nocapture          # 통합 테스트가 루프백 왕복 지연을 출력
+RELAY_SECRET=$(openssl rand -hex 32) cargo run --release
+```
+
+시그널링 서버에도 같은 `RELAY_SECRET`과 `RELAY_ADDR=<호스트>:5000`을 설정해야 연주자에게 토큰이 발급된다.
+
+## 토큰 회수 (RelayRevoke, relay-design 2.5)
+
+시그널링 서버는 연주자가 자격을 잃으면 서명된 회수 패킷(type 10)을 같은 UDP 포트(`RELAY_ADDR`)로 보낸다. 자격을 잃는 때는 내리기, 연주 중지, `native-leave`, 퇴장이다. 릴레이는 그 멤버의 등록을 바로 지우고, 회수 기준 시각(cutoff)까지 같은 토큰의 Bind를 받지 않는다. 응답은 하지 않는다. 서명 키는 `HMAC(RELAY_SECRET, "band-relay revoke v1")`라 새 비밀값·새 포트·fly 설정 변경이 없다. 회수 기록은 메모리에만 있다. 그래서 릴레이가 재시작되면 그 전 회수는 잊고, 이때는 토큰 만료(최대 120초)가 상한이다.
+
+## 환경 변수
+
+| env | 기본값 | 설명 |
+|---|---|---|
+| `RELAY_SECRET` | (필수, ≥32바이트) | 시그널링 서버와 공유하는 HMAC 키. 시크릿으로만 설정 |
+| `RELAY_BIND` | `0.0.0.0:5000` | UDP 바인드. fly.io에서는 `fly-global-services:5000` |
+| `RELAY_METRICS_BIND` | `0.0.0.0:9090` | `/metrics`, `/healthz`. 빈 문자열이면 끔. fly에서는 `[::]:9090`(6PN 듀얼스택) |
+| `RELAY_MAX_BPS` | `2000000` | 클라이언트당 bit/s 상한 |
+| `RELAY_MAX_PPS` | `2500` | 클라이언트당 packet/s 상한 |
+| `RELAY_MAX_BINDS_PER_SEC` | `20000` | 신규/갱신 RelayBind 서버 전체 처리율 (keepalive 제외, 최후 방어선) |
+| `RELAY_MAX_BINDS_PER_SEC_PER_SUBNET` | `50` | 신규/갱신 RelayBind 출발 서브넷(/24, /64)당 처리율 |
+| `RELAY_MAX_REGISTRATIONS` | `20000` | 전체 등록 수 상한 (메모리 보호) |
+| `RELAY_STATS_LOG_SECS` | `60` | 요약 로그 주기, 0이면 끔 |
+| `RELAY_REQUIRE_BIND_MAC` | `0` | `1`이면 MAC 없는 신규/갱신 RelayBind를 거부한다. 구버전 클라이언트가 사라진 뒤(`relay_bind_legacy_total`이 0으로 유지) 켠다 (relay-design 2.1.1) |
+
+## 용량 (추정)
+
+단일 태스크에서 패킷마다 `send_to` syscall 1회. shared-cpu-1x에서 대략 10만 pps 안팎으로 추정(미측정). 6인 방 전원이 릴레이를 쓰면 방당 최대 ≈12k pps → 그런 방 약 8~10개가 한계.
+알람 기준 제안: `relay_processing_seconds` p99 > 1ms 또는 CPU 70%. 넘으면 `SO_REUSEPORT` 다중 소켓/`sendmmsg`를 검토.
+
+## 배포 (fly.io) — 사람 승인 후
+
+fly.io UDP 요구 사항: `fly-global-services` 주소에 바인드(fly.toml에 설정됨), 외부 포트 = 내부 포트, **전용 IPv4 필수**(공유 IPv4/IPv6로는 UDP 불가, 전용 IPv4는 유료).
+
+```sh
+cd relay
+fly apps create band-relay
+fly ips allocate-v4 -a band-relay          # 전용 IPv4 (과금)
+fly secrets set RELAY_SECRET=... -a band-relay
+fly deploy
+# 시그널링 서버
+fly secrets set RELAY_SECRET=<같은 값> RELAY_ADDR=<전용 IPv4>:5000 -a band-server
+```
+
+배포 후 확인: `fly logs -a band-relay`의 `[relay]` 요약 로그, fly 대시보드 메트릭(`/metrics`), `fly checks list -a band-relay`(`/healthz` 헬스체크가 6PN으로 통과하는지 — [사람] 확인).
+
+## 베이스 이미지 고정
+
+`relay/Dockerfile`(rust·debian)과 `server/Dockerfile`(node)의 `FROM`은 `태그@sha256:다이제스트`로 고정한다. 갱신: Docker Hub에서 새 구체 태그를 고른 뒤 `docker buildx imagetools inspect <이미지:태그>`(또는 `docker pull` 후 `docker inspect --format '{{index .RepoDigests 0}}'`)로 멀티아치 인덱스 다이제스트를 얻어 태그·다이제스트를 함께 바꾸고, 이미지를 빌드해 확인한 뒤 PR로 올린다.

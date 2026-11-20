@@ -1,0 +1,13 @@
+/* communityFeed.css — app/App.css에서 옮긴 화면 전용 규칙 (P3-2 ③-3). 순서는 원래 App.css 순서 그대로 */
+/* 커뮤니티 목록·글 상세: 본문 + 오른쪽 사이드바(트렌딩 태그). 좁은 화면에서는 한 열로 (P3-12c) */
+.community-feed-grid {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 24px;
+}
+
+@media (max-width: 1024px) {
+  .community-feed-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

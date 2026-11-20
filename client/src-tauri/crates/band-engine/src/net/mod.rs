@@ -1,0 +1,865 @@
+//! UDP 소켓과 송수신/제어 스레드 (설계 문서 1.1, 2, 3절).
+
+pub(crate) mod connlog;
+pub(crate) mod crypto;
+pub mod peer;
+pub(crate) mod qos;
+pub(crate) mod relay;
+pub(crate) mod stun;
+pub(crate) mod txlat;
+mod control_loop;
+mod recv_loop;
+mod send;
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use parking_lot::{Mutex, RwLock};
+
+use band_dsp::config::MAX_PACKET_BYTES;
+use band_dsp::media_link::{MediaTx, PeerKey};
+use crypto::KeyPair;
+use band_dsp::packet::PacketType;
+use peer::{Candidate, CandidateKind, LocalDescriptor, Peer, PeerSetup};
+use relay::{RelayClient, RelayToken};
+use band_dsp::types::{PathKind, RelayStats, DATA_PREFIX_BYTES};
+
+use control_loop::control_loop;
+use recv_loop::recv_loop;
+pub(crate) use send::AutoPayload;
+
+/// 릴레이 접두부를 둘 자리까지 포함한 송신 버퍼 크기.
+const SEND_BUF_BYTES: usize = DATA_PREFIX_BYTES + MAX_PACKET_BYTES;
+
+/// `Net::set_relay` 인자(설계 4절 `engine_set_relay`).
+#[derive(Debug, Clone, Copy)]
+pub struct RelaySetting<'a> {
+    /// 프론트가 준 `host:port` 문자열(같은 문자열이면 해석한 주소를 유지).
+    pub host: &'a str,
+    /// 해석된 IPv4 주소.
+    pub addr: SocketAddr,
+    /// 서버가 준 base64url 토큰.
+    pub token: &'a str,
+    /// 토큰 남은 수명(서버 발급 시각 기준). 받은 시각 + 이 값이 만료 시각이다(M1).
+    pub expires_in: Option<Duration>,
+    /// 토큰별 Bind MAC 키(base64url 32B, relay-design 2.1.1). None이면 MAC 없는 구버전 Bind.
+    pub bind_key: Option<&'a str>,
+}
+
+/// 원격 피어 최대 수(본인 포함 6명).
+pub const MAX_PEERS: usize = 5;
+
+/// 같은 키의 피어를 다시 만들 때(교체·제거 후 재추가) Audio seq를 이만큼 건너뛴다. 옛 객체로 아직 진행 중인
+/// 송신(워커가 쥔 `Arc`, 수신 스레드의 에코 반사)이 기록 뒤에 쓰는 seq와 겹치지 않게 한다(2.5ms 프레임 약 164초분).
+pub const AUDIO_SEQ_HANDOVER_GAP: u32 = 1 << 16;
+
+/// 수신 소켓의 읽기 타임아웃. 정지는 타임아웃이 아니라 자기 주소로 보내는 깨움 데이터그램으로 알린다(`Net::stop`).
+/// Windows에서 `SO_RCVTIMEO`가 만료되는 순간 도착한 데이터그램이 사라진다(MS 문서: 타임아웃 뒤 소켓 상태는
+/// "불확정"). 이전 값 20ms는 패킷 간격(장치 버퍼 1024 = 21.3ms마다 4~5개 몰아 송신)과 겹쳐 깨끗한 루프백에서도
+/// 수 초에 1~12개를 잃었다(P3-0d, `link_matrix` 1024/5ms 은닉). 연결 중에는 오디오·ping(500ms)이 끊이지 않으므로
+/// 1초 타임아웃은 만료되지 않는다. 깨움이 실패해도 정지는 이 시간 안에 끝난다.
+const RECV_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// 송신 키 식별자: 이 Net(키쌍·ssrc 고정)에서 A→B 키는 (상대 공개키, 상대 ssrc)로 정해진다(설계 2절 HKDF info).
+type TxKeyId = ([u8; crate::net::crypto::KEY_BYTES], u32);
+
+/// 네트워크 시작 옵션.
+#[derive(Debug, Clone)]
+pub struct NetOptions {
+    pub port: u16,
+    pub stun_servers: Vec<String>,
+    /// LAN 후보 수집 여부(모든 비루프백 IPv4).
+    pub gather_lan: bool,
+    /// 추가 후보(테스트용: 루프백 등).
+    pub extra_candidates: Vec<Candidate>,
+    /// 원격 descriptor의 루프백 후보 허용(테스트 전용, 기본 false).
+    pub allow_loopback_candidates: bool,
+    /// 켜지면 STUN 대기를 일찍 끝낸다(시작 취소, PR #5 M-4).
+    pub cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Default for NetOptions {
+    fn default() -> Self {
+        Self {
+            port: 0,
+            stun_servers: stun::DEFAULT_STUN_SERVERS.iter().map(|s| s.to_string()).collect(),
+            gather_lan: true,
+            extra_candidates: Vec::new(),
+            allow_loopback_candidates: false,
+            cancel: None,
+        }
+    }
+}
+
+pub struct NetShared {
+    socket: UdpSocket,
+    pub(crate) local_peer_id: String,
+    pub(crate) ssrc: u32,
+    keys: KeyPair,
+    seq_ctrl: [AtomicU32; 6],
+    peers: RwLock<Vec<Arc<Peer>>>,
+    /// 피어 표 세대(엔진 ③c): `peers`를 바꾸는 쓰기 락 안에서 +1. 워커는 복사본(`PeerTableCopy`)을 들고 세대가 바뀐
+    /// 반복에서만 `try_read`로 다시 복사한다 — 쓰기 락을 기다리지 않는다.
+    peers_gen: AtomicU64,
+    /// 표에서 빠진 항목(세대, 항목). 워커 복사본이 그 세대 이상으로 갱신될 때까지 여기서 쥐어, 마지막 `Arc`가 워커에서
+    /// 놓이지 않게 한다(해제는 제어 스레드). 쓰기는 `peers` 쓰기 락 안에서.
+    retired_peers: Mutex<Vec<(u64, Arc<Peer>)>>,
+    /// 워커 복사본이 마지막으로 맞춘 세대.
+    copy_gen: AtomicU64,
+    /// 진단(엔진 ③c): 복사본 갱신 수, 쓰기 락이 바빠 옛 복사본으로 보낸 프레임 수, 담을 수 없는 경로라 건너뛴 송신 수.
+    copy_refreshes: AtomicU64,
+    stale_copy_frames: AtomicU64,
+    route_skips: AtomicU64,
+    /// 릴레이 송신량이 상한의 90%를 넘음(제어 스레드가 틱마다 `relay` 락 안에서 발행 — 워커는 락 없이 읽는다, 엔진 ③c).
+    relay_over_budget: AtomicBool,
+    /// 송신 키별 Audio seq 최고 수위(다음에 쓸 값). 피어를 제거·교체할 때 기록하고 Net 수명 내내 지우지 않는다.
+    /// 같은 키로 피어를 다시 만들면 여기서 이어 간다 → 같은 (키, nonce)가 세션 동안 반복되지 않는다(PR #13 H1).
+    /// 크기는 세션 중 만난 피어 descriptor 수 수준이다.
+    tx_seq_retired: Mutex<std::collections::HashMap<TxKeyId, u32>>,
+    /// 수신 쪽 짝: 목록에서 뺀(제거·교체) 피어의 키별 재전송 창(제어 seq + Audio 창). 같은 키로 다시 만들면 이어받아, 그 전에
+    /// 엿본 사본을 첫 패킷으로 재생하지 못하게 한다(#193 리뷰 L2: 상대 `Net`은 그대로인데 우리가 지웠다가 다시 넣는 경우).
+    /// Net 수명 내내 지우지 않으며 크기는 `tx_seq_retired`와 같다(키 하나에 약 160B).
+    rx_replay_retired: Mutex<std::collections::HashMap<TxKeyId, peer::ReplayWindow>>,
+    /// 목록에서 빠진(제거·교체된) 피어의 ssrc → peerId. 녹음 쓰기 스레드가 블록을 늦게 비울 때 이미 떠난 피어도
+    /// 같은 peerId 트랙으로 묶게 한다(P2-4, PR #47 M3). Net 수명 내내 지우지 않으며 크기는 만난 피어 수 수준이다.
+    retired_ssrc_ids: Mutex<std::collections::HashMap<u32, String>>,
+    epoch: Instant,
+    stop: AtomicBool,
+    /// 수신 스레드 우선순위 설정 결과(P1-2).
+    pub recv_prio: band_dsp::prio_slot::PrioSlot,
+    /// 수신 스레드의 코어 배치 표본(P1-21): 수신 루프가 깨어날 때마다 센다.
+    pub(crate) recv_placement: crate::sys::placement::PlacementCounts,
+    allow_loopback: bool,
+    /// UDP 릴레이 클라이언트(P1-4b). 토큰을 받기 전에는 None.
+    relay: Mutex<Option<RelayClient>>,
+    /// 수신 경로에서 릴레이 패킷을 가르는 데 쓰는 릴레이 주소(`relay`와 함께 갱신).
+    relay_addr: RwLock<Option<SocketAddr>>,
+    /// 직전 릴레이 주소(주소 변경·해제 뒤). 이 주소에서 온 Hello/HelloAck는 직접 경로로 오인하지 않게 버린다.
+    prev_relay: RwLock<Option<SocketAddr>>,
+    /// 릴레이로 보낸 바이트·패킷(대역 경고 M4, 제어 스레드가 약 1초마다 비운다).
+    relay_tx_bytes: AtomicU64,
+    relay_tx_packets: AtomicU64,
+    /// 워커가 릴레이 경로 피어에게 Opus로 자동 전환해 보내는 중(P1-4c, `RelayStats.autoOpus`).
+    relay_auto_opus: AtomicBool,
+    /// 릴레이 부하 전환 중인데 자동 전환 페이로드 없이 릴레이 경로로 보낸 피어가 있었다(새 피어, 직접→릴레이 전환).
+    /// 워커가 200ms 점검을 기다리지 않고 다음 프레임에서 피어 목록을 다시 본다(P1-4f, #66 리뷰 L1).
+    auto_refresh: AtomicBool,
+    /// 측정 도구 전용: 모든 피어에게 손실 피드백 전환이 켜진 것처럼 피어별 Opus로 보낸다(P1-4f M1, `cpu_profile`).
+    force_auto_opus: AtomicBool,
+    /// 송신 큐 지연(프레임 생성 → send_to 완료, P1-3). 워커가 기록, 제어 스레드가 창을 돌린다.
+    send_latency: txlat::SendLatency,
+    /// DSCP 마킹 상태(제어 스레드가 바뀔 때 갱신).
+    qos_stats: Mutex<qos::QosStats>,
+    /// 피어별 연결 시도 → 결과(P1-18). 제어 스레드가 쓰고 진단 스냅샷이 읽는다.
+    conn_log: Mutex<connlog::ConnLog>,
+    /// 내 입력 장치 버퍼(µs, 0 = 모름)를 읽는 함수(P2-8b). 엔진이 시작 때 한 번 정하고, 제어 스레드가 Ping마다 불러
+    /// 입력 버퍼 블록에 싣는다. 없으면(엔진 없는 시험·도구) 블록을 싣지 않는다.
+    input_buffer_us: std::sync::OnceLock<InputBufferFn>,
+}
+
+/// `NetShared::set_input_buffer_source`의 함수 꼴.
+pub(crate) type InputBufferFn = Box<dyn Fn() -> u32 + Send + Sync>;
+
+/// 워커가 들고 있는 피어 표 복사본(엔진 ③c, ADR D1). 세대가 바뀐 반복에서만 다시 복사한다(`NetShared::refresh_copy`).
+/// 빠진 항목 해제(`retired_peers`)는 **워커 복사본**(`for_worker`)이 맞춘 세대만 기준으로 한다. 다른 복사본(`Default`, 시험·도구의
+/// 임시 복사본)은 그 세대를 발행하지 않는다 — 워커 복사본보다 앞서 발행하면 워커가 빠진 피어의 마지막 `Arc`를 놓게 된다
+/// (#126 리뷰 M-2). Net 하나에 워커 복사본은 하나다.
+pub struct PeerTableCopy {
+    gen: u64,
+    peers: Vec<Arc<Peer>>,
+    publishes: bool,
+}
+
+impl Default for PeerTableCopy {
+    fn default() -> Self {
+        Self { gen: u64::MAX, peers: Vec::with_capacity(MAX_PEERS + 1), publishes: false }
+    }
+}
+
+impl PeerTableCopy {
+    /// 워커가 엔진 수명 동안 쥐는 복사본(맞춘 세대를 발행해 빠진 항목 해제의 기준이 된다).
+    pub(crate) fn for_worker() -> Self {
+        Self { publishes: true, ..Self::default() }
+    }
+
+    pub(crate) fn peers(&self) -> &[Arc<Peer>] {
+        &self.peers
+    }
+}
+
+/// 송신 경로 진단(엔진 ③c, `Net::take_send_path_diag`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendPathDiag {
+    /// 피어 표 복사본을 다시 복사한 횟수(세대가 바뀌고 읽기 락을 바로 잡음).
+    pub copy_refreshes: u64,
+    /// 세대가 바뀌었지만 쓰기 락이 바빠 옛 복사본으로 보낸 프레임 수.
+    pub stale_copy_frames: u64,
+    /// 스냅샷에 담을 수 없는 경로(IPv6)인데 `conn` 락도 바빠 그 프레임을 건너뛴 송신 수(지금은 0이어야 한다).
+    pub route_skips: u64,
+}
+
+pub struct Net {
+    shared: Arc<NetShared>,
+    threads: Vec<JoinHandle<()>>,
+    pub descriptor: LocalDescriptor,
+}
+
+fn lan_addresses() -> Vec<Ipv4Addr> {
+    match if_addrs::get_if_addrs() {
+        Ok(ifs) => ifs
+            .into_iter()
+            .filter(|i| !i.is_loopback())
+            .filter_map(|i| match i.ip() {
+                IpAddr::V4(v4) if !v4.is_link_local() && !v4.is_unspecified() => Some(v4),
+                _ => None,
+            })
+            .collect(),
+        Err(e) => {
+            log::warn!("인터페이스 열거 실패: {e}");
+            Vec::new()
+        }
+    }
+}
+
+impl Net {
+    pub fn start(local_peer_id: String, opts: &NetOptions) -> Result<Net, String> {
+        if local_peer_id.is_empty() || local_peer_id.len() > peer::MAX_PEER_ID_BYTES {
+            return Err("peerId는 1..64바이트여야 합니다".into());
+        }
+        let socket = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, opts.port)))
+            .map_err(|e| format!("UDP 바인드 실패(포트 {}): {e}", opts.port))?;
+        let port = socket.local_addr().map_err(|e| e.to_string())?.port();
+
+        let mut candidates = Vec::new();
+        if opts.gather_lan {
+            for ip in lan_addresses() {
+                candidates.push(Candidate { kind: CandidateKind::Lan, addr: SocketAddr::from((ip, port)).to_string() });
+            }
+        }
+        // 두 서버에 동시에 질의(전체 1.5초 상한)
+        let servers: Vec<String> = opts.stun_servers.iter().take(2).cloned().collect();
+        for (server, a) in stun::query_many(&socket, &servers, Duration::from_millis(1500), opts.cancel.as_deref()) {
+            let s = a.to_string();
+            log::info!("STUN {server}: 공인 주소 {s}");
+            if !candidates.iter().any(|c| c.addr == s) {
+                candidates.push(Candidate { kind: CandidateKind::Public, addr: s });
+            }
+        }
+        candidates.extend(opts.extra_candidates.iter().cloned());
+        candidates.truncate(peer::MAX_CANDIDATES);
+        socket
+            .set_read_timeout(Some(RECV_TIMEOUT))
+            .map_err(|e| format!("소켓 설정 실패: {e}"))?;
+
+        let keys = KeyPair::generate();
+        let ssrc: u32 = rand::random();
+        let descriptor = LocalDescriptor { ssrc, key: LocalDescriptor::encode_key(&keys.public_bytes()), candidates };
+        let shared = Arc::new(NetShared {
+            socket,
+            local_peer_id,
+            ssrc,
+            keys,
+            seq_ctrl: Default::default(),
+            peers: RwLock::new(Vec::new()),
+            peers_gen: AtomicU64::new(0),
+            retired_peers: Mutex::new(Vec::new()),
+            copy_gen: AtomicU64::new(0),
+            copy_refreshes: AtomicU64::new(0),
+            stale_copy_frames: AtomicU64::new(0),
+            route_skips: AtomicU64::new(0),
+            relay_over_budget: AtomicBool::new(false),
+            tx_seq_retired: Mutex::new(std::collections::HashMap::new()),
+            rx_replay_retired: Mutex::new(std::collections::HashMap::new()),
+            retired_ssrc_ids: Mutex::new(std::collections::HashMap::new()),
+            epoch: Instant::now(),
+            stop: AtomicBool::new(false),
+            allow_loopback: opts.allow_loopback_candidates,
+            relay: Mutex::new(None),
+            relay_addr: RwLock::new(None),
+            prev_relay: RwLock::new(None),
+            relay_tx_bytes: AtomicU64::new(0),
+            relay_tx_packets: AtomicU64::new(0),
+            relay_auto_opus: AtomicBool::new(false),
+            auto_refresh: AtomicBool::new(false),
+            force_auto_opus: AtomicBool::new(false),
+            send_latency: txlat::SendLatency::new(),
+            qos_stats: Mutex::new(qos::QosStats::default()),
+            conn_log: Mutex::new(connlog::ConnLog::default()),
+            recv_prio: Default::default(),
+            recv_placement: Default::default(),
+            input_buffer_us: std::sync::OnceLock::new(),
+        });
+
+        let mut threads = Vec::new();
+        let s = shared.clone();
+        threads.push(
+            std::thread::Builder::new()
+                .name("band-net-recv".into())
+                .spawn(move || {
+                    let _prio = crate::sys::prio::promote_engine_thread(&s.recv_prio);
+                    crate::sys::placement::init();
+                    crate::sys::placement::apply_thread_qos();
+                    recv_loop(&s)
+                })
+                .map_err(|e| format!("수신 스레드 생성 실패: {e}"))?,
+        );
+        let s = shared.clone();
+        let spawn_ctrl = std::thread::Builder::new().name("band-net-ctrl".into()).spawn(move || control_loop(&s));
+        match spawn_ctrl {
+            Ok(h) => threads.push(h),
+            Err(e) => {
+                shared.stop.store(true, Ordering::Relaxed);
+                let _ = shared.socket.send_to(&[], (Ipv4Addr::LOCALHOST, port));
+                for t in threads {
+                    let _ = t.join();
+                }
+                return Err(format!("제어 스레드 생성 실패: {e}"));
+            }
+        }
+        log::info!("네트워크 시작: port {port}, ssrc {ssrc:08x}");
+        Ok(Net { shared, threads, descriptor })
+    }
+
+    pub fn shared(&self) -> &Arc<NetShared> {
+        &self.shared
+    }
+
+    pub fn local_port(&self) -> u16 {
+        self.shared.socket.local_addr().map(|a| a.port()).unwrap_or(0)
+    }
+
+    /// 피어 추가. 같은 peerId는 교체(재접속, gain/pan/mute 유지). 다른 peerId와 ssrc가 겹쳐도
+    /// 기존 피어를 지우지 않는다 — 수신 시 쌍별 키로 구분한다(리뷰 M7).
+    ///
+    /// 다른 peerId가 같은 키(공개키·ssrc)를 써도 거부하지 않는다(P1-1b). 거부하면 남의 descriptor를 복사해
+    /// 먼저 보낸 사람이 진짜 주인의 추가를 막을 수 있다(선점에 의한 가용성 방해). 대신 같은 키의 살아 있는
+    /// 항목들은 **송신 카운터 하나를 같이 쓰고**(nonce 유일성 유지), 수신은 키 주인이 인증된 Hello에 싣는 자기 id로
+    /// 가린다(`open_from_peers`). 개인키가 없는 선점자 항목은 핸드셰이크를 마칠 수 없어 연결되지 않는다.
+    ///
+    /// `media`: 엔진이 만든 이 피어의 수신 큐 생산자(`media_link`). 같은 peerId를 교체했으면 옛 항목의 미디어 키를 돌려준다.
+    pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor, media: MediaTx) -> Result<Option<PeerKey>, String> {
+        self.add_peer_at(peer_id, desc, media, Instant::now())
+    }
+
+    /// `add_peer`와 같고, 핸드셰이크 경과·`connectMs`의 기준 시각(`ConnState.started`)을 호출자가 준다. 엔진은
+    /// `firstAudioMs`의 기준(`added_us`)과 같은 `Instant`를 넘겨 두 지표의 기준을 맞춘다(P1-20, #120 L-3).
+    pub(crate) fn add_peer_at(&self, peer_id: String, desc: &LocalDescriptor, media: MediaTx, added: Instant) -> Result<Option<PeerKey>, String> {
+        let setup = PeerSetup {
+            keys: &self.shared.keys,
+            my_ssrc: self.shared.ssrc,
+            allow_loopback: self.shared.allow_loopback,
+        };
+        let mut peer = Peer::new(peer_id.clone(), desc, &setup, media, added)?;
+        let key = (*peer.public_key(), peer.ssrc());
+        let mut peers = self.shared.peers.write();
+        let old_idx = peers.iter().position(|p| p.id() == peer_id);
+        if peers.len() - usize::from(old_idx.is_some()) >= MAX_PEERS {
+            return Err("피어는 최대 5명(본인 포함 6명)까지입니다".into());
+        }
+        let mut replaced = None;
+        let mut retire = None;
+        if let Some(i) = old_idx {
+            let old = peers.remove(i);
+            self.shared.retire_tx_seq(&old);
+            replaced = Some(old.key());
+            retire = Some(old);
+        }
+        // 같은 세션(같은 공개키·ssrc)이면 재전송 창(제어 seq + Audio 창)을 이어받는다 — 교체든(방금 `retire_tx_seq`가 옛 항목의
+        // 창을 기록했다), 제거 뒤 재추가든(#193 리뷰 L2). 새 키(상대 재시작)면 seq가 처음부터 다시 시작하므로 표에 없다(PR #5 L-2).
+        if let Some(w) = self.shared.rx_replay_retired.lock().get(&key) {
+            peer.conn().inherit_replay(w);
+        }
+        // 송신 카운터(PR #13 H1, P1-1b): 같은 키의 살아 있는 다른 항목이 있으면 그 카운터를 같이 쓴다(카운터가
+        // 둘이 되면 nonce가 겹친다). 없고 이 키로 전에 보낸 적이 있으면(교체, 제거 후 재추가) 그 최고 수위 + 여유에서 이어 간다.
+        if let Some(live) = peers.iter().find(|p| (*p.public_key(), p.ssrc()) == key) {
+            peer.share_tx_seq(live);
+        } else if let Some(&hw) = self.shared.tx_seq_retired.lock().get(&key) {
+            peer.tx_seq().store(hw.wrapping_add(AUDIO_SEQ_HANDOVER_GAP), Ordering::Relaxed);
+        }
+        peers.push(Arc::new(peer));
+        self.shared.bump_peers_gen(retire);
+        Ok(replaced)
+    }
+
+    /// 지운 항목의 미디어 키(없던 peerId면 None).
+    pub fn remove_peer(&self, peer_id: &str) -> Option<PeerKey> {
+        let removed = {
+            let mut peers = self.shared.peers.write();
+            let removed = peers.iter().position(|p| p.id() == peer_id).map(|i| peers.remove(i));
+            // 수위 기록은 목록에서 빼는 것과 같은 write 락 안에서 한다(P1-1b, PR #13 리뷰 Low). 락을 놓은 뒤 기록하면
+            // 그 사이 같은 키의 add_peer가 옛 수위(또는 기록 없음)에서 시작해 이 객체가 이미 쓴 seq를 다시 쓸 수 있다.
+            if let Some(p) = &removed {
+                self.shared.retire_tx_seq(p);
+                self.shared.bump_peers_gen(Some(p.clone()));
+            }
+            removed
+        };
+        match removed {
+            Some(p) => {
+                self.shared.send_bye(&p);
+                Some(p.key())
+            }
+            None => None,
+        }
+    }
+
+    pub fn peers(&self) -> Vec<Arc<Peer>> {
+        self.shared.peers.read().clone()
+    }
+
+    /// 피어와의 안전 번호(SAS). 양쪽 공개키로 계산하므로 두 사람이 같은 값을 보면 키가 바꿔치기되지
+    /// 않은 것이다(시그널링 서버 중간자 탐지, PR #5 M-3).
+    pub(crate) fn safety_code(&self, peer_id: &str) -> Result<String, String> {
+        let peer = self.peers().into_iter().find(|p| p.id() == peer_id).ok_or("알 수 없는 피어")?;
+        Ok(crypto::safety_code(&self.shared.keys.public_bytes(), peer.public_key()))
+    }
+
+    /// 릴레이 설정/갱신/해제(설계 4절 `engine_set_relay`). 같은 주소면 등록을 유지한 채 토큰만 바꾼다(갱신).
+    /// 토큰의 ssrc는 이 엔진의 ssrc와 같아야 한다. 만료는 로컬 벽시계로 거부하지 않는다(M1, 판정은 릴레이).
+    /// 주소가 바뀌거나 해제되면 릴레이 경로 피어를 새 주소로 옮기거나(해제면) 다시 찾게 한다(M3).
+    pub(crate) fn set_relay(&self, relay: Option<RelaySetting<'_>>) -> Result<(), String> {
+        let now = Instant::now();
+        let Some(cfg) = relay else {
+            let old = self.shared.relay.lock().take().map(|c| c.addr);
+            if let Some(old) = old {
+                log::info!("릴레이 해제: {old}");
+                self.shared.move_relay(old, None, now);
+            }
+            return Ok(());
+        };
+        relay::validate_relay_addr(&cfg.addr, self.shared.allow_loopback)?;
+        let mut token = RelayToken::parse(cfg.token, self.shared.ssrc)?;
+        if let Some(k) = cfg.bind_key {
+            token.bind_key = Some(relay::parse_bind_key(k)?);
+        }
+        let deadline = relay::token_deadline(&token, cfg.expires_in, now, crate::sys::time::unix_secs());
+        let moved_from = {
+            let mut r = self.shared.relay.lock();
+            match r.as_mut() {
+                Some(c) if c.addr == cfg.addr => {
+                    c.host = cfg.host.to_string();
+                    c.set_token(token, deadline);
+                    return Ok(());
+                }
+                _ => {
+                    let old = r.as_ref().map(|c| c.addr);
+                    log::info!("릴레이 설정: {} ({})", cfg.addr, cfg.host);
+                    *r = Some(RelayClient::new(cfg.host.to_string(), cfg.addr, token, deadline));
+                    old
+                }
+            }
+        };
+        match moved_from {
+            Some(old) => self.shared.move_relay(old, Some(cfg.addr), now),
+            None => *self.shared.relay_addr.write() = Some(cfg.addr),
+        }
+        Ok(())
+    }
+
+    /// 지금 릴레이가 `host` 문자열로 설정돼 있으면 그 주소.
+    pub(crate) fn relay_addr_for_host(&self, host: &str) -> Option<SocketAddr> {
+        self.shared.relay.lock().as_ref().filter(|c| c.host == host).map(|c| c.addr)
+    }
+
+    pub(crate) fn relay_stats(&self) -> Option<RelayStats> {
+        let auto_opus = self.shared.relay_auto_opus.load(Ordering::Relaxed);
+        self.shared.relay.lock().as_ref().map(|c| RelayStats { auto_opus, ..c.stats() })
+    }
+
+    /// DSCP 마킹 상태(`EngineStats.qos`).
+    pub(crate) fn qos_stats(&self) -> qos::QosStats {
+        self.shared.qos_stats.lock().clone()
+    }
+
+    /// 최근 연결 이벤트(P1-18, 오래된 것부터, 최대 `connlog::LOG_CAPACITY`개). 진단 기록용.
+    pub(crate) fn conn_events(&self) -> Vec<connlog::ConnEvent> {
+        self.shared.conn_log.lock().events()
+    }
+
+    /// 직전 창의 송신 큐 지연(`EngineStats.sendQueue`).
+    pub fn send_queue_stats(&self) -> txlat::SendQueueStats {
+        self.shared.send_latency.last()
+    }
+
+    /// 송신 경로 진단(엔진 ③c)의 지난 호출 이후 값을 돌려주고 비운다(진단·테스트 전용).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn take_send_path_diag(&self) -> SendPathDiag {
+        let s = &self.shared;
+        SendPathDiag {
+            copy_refreshes: s.copy_refreshes.swap(0, Ordering::Relaxed),
+            stale_copy_frames: s.stale_copy_frames.swap(0, Ordering::Relaxed),
+            route_skips: s.route_skips.swap(0, Ordering::Relaxed),
+        }
+    }
+
+    /// 시험 입구(test-support, `MetronomeStageProbe`): 스레드를 멈춘 루프백 `Net`에 피어 `ids`를 등록한다(연결·송수신 없음).
+    /// 피어 시계는 `inject_clock_sample`로만 바뀐다 — 가상 시간 시험이 실제 `Peer`·피어 표 복사본 경로를 탈 수 있게.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn stopped_with_peers(ids: &[&str]) -> Result<Net, String> {
+        let opts = NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
+        let mut n = Net::start("probe".into(), &opts)?;
+        n.stop();
+        for (i, id) in ids.iter().enumerate() {
+            let desc = LocalDescriptor {
+                ssrc: 100 + i as u32,
+                key: LocalDescriptor::encode_key(&KeyPair::generate().public_bytes()),
+                candidates: vec![Candidate { kind: CandidateKind::Lan, addr: "127.0.0.1:9".into() }],
+            };
+            n.add_peer((*id).into(), &desc, band_dsp::media_link::media_link(PeerKey::from_raw(i as u64 + 1)).0)?;
+        }
+        Ok(n)
+    }
+
+    /// 시험 입구(test-support): 피어 `id`의 시계 추정기에 표본 하나를 넣는다 — 수신 스레드가 시계 실은 Pong에서 하는 일
+    /// (`recv_loop`의 `on_sample`). 피어가 없으면 false.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn inject_clock_sample(&self, id: &str, t0_us: f64, t3_us: f64, remote_us: f64) -> bool {
+        let peers = self.shared.peers.read();
+        let Some(p) = peers.iter().find(|p| p.id() == id) else {
+            return false;
+        };
+        p.clock().on_sample(t0_us, t3_us, remote_us);
+        true
+    }
+
+    pub fn stop(&mut self) {
+        if self.shared.stop.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let peers = self.shared.peers.read().clone();
+        for p in &peers {
+            self.shared.send_bye(p);
+        }
+        // 수신 스레드를 깨운다(빈 데이터그램은 헤더 파싱에서 버려지고, 루프는 정지 플래그를 보고 끝난다).
+        let _ = self.shared.socket.send_to(&[], (Ipv4Addr::LOCALHOST, self.local_port()));
+        for t in self.threads.drain(..) {
+            if t.join().is_err() {
+                log::error!("네트워크 스레드 패닉");
+            }
+        }
+        log::info!("네트워크 정지");
+    }
+}
+
+impl Drop for Net {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl NetShared {
+    fn now_us32(&self) -> u32 {
+        self.epoch.elapsed().as_micros() as u32
+    }
+
+    /// 피어 객체를 버릴 때 그 송신 키의 Audio seq 최고 수위를 기록한다(같은 키로 다시 만들면 이어 간다).
+    /// 기록 뒤에도 옛 객체로 보내는 패킷이 있을 수 있어 재생성 시 `AUDIO_SEQ_HANDOVER_GAP`을 더한다.
+    fn retire_tx_seq(&self, p: &Peer) {
+        let next = p.tx_seq().load(Ordering::Relaxed);
+        let mut m = self.tx_seq_retired.lock();
+        // 한 키의 seq는 시작점에서 단조 증가(u32 랩, 400pps에서 124일)하므로 마지막 기록이 곧 최고 수위다.
+        m.insert((*p.public_key(), p.ssrc()), next);
+        drop(m);
+        let w = p.conn().replay_window();
+        self.rx_replay_retired.lock().insert((*p.public_key(), p.ssrc()), w);
+        self.retired_ssrc_ids.lock().insert(p.ssrc(), p.id().to_string());
+    }
+
+    /// 피어 표를 바꾼 직후(`peers` 쓰기 락 안에서) 세대를 올리고, 빠진 항목을 워커 복사본이 따라올 때까지 쥔다.
+    fn bump_peers_gen(&self, retired: Option<Arc<Peer>>) {
+        let g = self.peers_gen.fetch_add(1, Ordering::Release) + 1;
+        if let Some(p) = retired {
+            self.retired_peers.lock().push((g, p));
+        }
+    }
+
+    /// 워커 복사본을 맞춘다(엔진 ③c). 세대가 같으면 아무것도 안 한다(원자 load 하나). 바뀌었으면 `try_read`로 다시
+    /// 복사하고, 쓰기 락이 바쁘면 **기다리지 않고** 옛 복사본을 이번 프레임에 그대로 쓴다(다음 프레임에 다시 본다).
+    /// 옛 복사본의 영향: 방금 빠진 피어에게 몇 프레임 더 보낼 수 있다 — 그 송신 키의 seq는 제거 때 기록한 수위를 넘지만,
+    /// 같은 키를 다시 만들 때 `AUDIO_SEQ_HANDOVER_GAP`(65,536프레임)만큼 띄우므로 nonce가 겹치지 않는다. 방금 들어온
+    /// 피어는 몇 프레임 늦게 보이지만, 핸드셰이크가 끝나야 경로가 생기므로(수 ms 이상) 첫 소리 시각은 같다.
+    /// 할당 없음: 복사본은 `MAX_PEERS + 1` 용량으로 미리 잡혀 있고, 빠진 항목의 마지막 `Arc`는 `retired_peers`가 쥔다.
+    pub(crate) fn refresh_copy(&self, c: &mut PeerTableCopy) {
+        if self.peers_gen.load(Ordering::Acquire) == c.gen {
+            return;
+        }
+        let Some(peers) = self.peers.try_read() else {
+            self.stale_copy_frames.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        c.peers.clear();
+        c.peers.extend(peers.iter().cloned());
+        // 쓰기 락 안에서만 오르므로 읽기 락을 쥔 동안 이 값은 복사한 표의 세대다.
+        c.gen = self.peers_gen.load(Ordering::Acquire);
+        drop(peers);
+        if c.publishes {
+            self.copy_gen.store(c.gen, Ordering::Release);
+        }
+        self.copy_refreshes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 제어 스레드: 워커 복사본이 이미 지나간 세대의 빠진 항목을 놓는다(여기가 마지막 `Arc`).
+    fn release_retired(&self) {
+        let seen = self.copy_gen.load(Ordering::Acquire);
+        let mut r = self.retired_peers.lock();
+        if r.iter().any(|(g, _)| *g <= seen) {
+            r.retain(|(g, _)| *g > seen);
+        }
+    }
+
+    fn next_ctrl_seq(&self, t: PacketType) -> u32 {
+        self.seq_ctrl[(t as usize - 1).min(5)].fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn relay_addr(&self) -> Option<SocketAddr> {
+        *self.relay_addr.read()
+    }
+
+    /// 릴레이 주소가 `old`에서 `new`로 바뀜(None = 해제). 릴레이 경로 피어는 새 주소로 옮기고(해제면 직접 경로를
+    /// 다시 찾게 하고), 옛 주소에서 비행 중인 패킷은 PATH_GRACE 동안 받는다. relay 락을 쥐지 않은 채 부른다.
+    fn move_relay(&self, old: SocketAddr, new: Option<SocketAddr>, now: Instant) {
+        *self.prev_relay.write() = Some(old);
+        *self.relay_addr.write() = new;
+        for p in self.peers.read().iter() {
+            p.conn().relay_moved(old, new, now);
+        }
+    }
+
+    fn peer_by_id(&self, peer_id: &str) -> Result<Arc<Peer>, String> {
+        self.peers.read().iter().find(|p| p.id() == peer_id).cloned().ok_or_else(|| "알 수 없는 피어".to_string())
+    }
+
+    /// 측정하는 쪽: 피어에게 에코를 요청/해제한다. 상태는 Ping에 실어 알리고, 바뀌면 바로 한 번 보낸다.
+    pub fn set_echo_request(&self, peer_id: &str, on: bool) -> Result<(), String> {
+        let p = self.peer_by_id(peer_id)?;
+        let now = Instant::now();
+        {
+            let mut e = p.echo();
+            // 서로 동시에 에코하면 둘 다 상대 패킷만 되돌리고 자기 클릭은 보내지 않아 측정이 안 된다(PR #13 L1).
+            if on && e.reflecting(now) {
+                return Err("이 연주자의 에코 측정에 응답하는 중입니다. 끝난 뒤 다시 시도하세요".into());
+            }
+            e.requesting = on;
+        }
+        self.send_ping(&p, now);
+        Ok(())
+    }
+
+    /// 에코하는 쪽: 피어의 요청에 동의(켜기)/해제. 피어가 요청 중일 때만 켤 수 있다(양측 합의).
+    pub fn set_echo_mode(&self, peer_id: &str, enabled: bool) -> Result<(), String> {
+        let p = self.peer_by_id(peer_id)?;
+        let now = Instant::now();
+        {
+            let mut e = p.echo();
+            if enabled {
+                if !e.remote_requesting(now) {
+                    return Err("상대가 에코 측정을 요청하지 않았습니다".into());
+                }
+                if e.requesting {
+                    return Err("내가 이 연주자를 측정하는 중이라 에코할 수 없습니다".into());
+                }
+                e.enabled = true;
+                e.ts_offset = None;
+            } else {
+                e.stop_reflecting();
+            }
+        }
+        self.send_ping(&p, now);
+        Ok(())
+    }
+
+    /// (피어가 나를 에코 중인가, 피어가 보고한 처리 지연 µs).
+    pub(crate) fn remote_echo(&self, peer_id: &str) -> Result<(bool, u32), String> {
+        let p = self.peer_by_id(peer_id)?;
+        let e = p.echo();
+        Ok((e.remote_echoing(Instant::now()), e.remote_delay_us))
+    }
+
+    pub(crate) fn peer_rtt_ms(&self, peer_id: &str) -> Option<f32> {
+        self.peer_by_id(peer_id).ok().and_then(|p| p.conn().rtt_ms)
+    }
+
+    pub(crate) fn peer_path(&self, peer_id: &str) -> Option<PathKind> {
+        self.peer_by_id(peer_id).ok().and_then(|p| p.conn().path.map(|(_, k)| k))
+    }
+
+    /// ssrc → peerId. 지금 목록에 없으면 전에 빠진 피어 기록에서 찾는다(녹음 트랙 이름, P2-4).
+    pub fn peer_id_for_ssrc(&self, ssrc: u32) -> Option<String> {
+        let live = self.peers.read().iter().rev().find(|p| p.ssrc() == ssrc).map(|p| p.id().to_string());
+        live.or_else(|| self.retired_ssrc_ids.lock().get(&ssrc).cloned())
+    }
+
+    /// 지터 버퍼/워커가 쓰는 공통 시계(µs).
+    /// 내 입력 장치 버퍼(µs, 0 = 모름)를 읽는 함수를 정한다(P2-8b, 한 번만 — 두 번째부터는 무시). Ping마다 제어 스레드가
+    /// 부르므로 원자값 읽기 정도로 가벼워야 한다.
+    pub(crate) fn set_input_buffer_source(&self, f: InputBufferFn) {
+        let _ = self.input_buffer_us.set(f);
+    }
+
+    pub(crate) fn now_us(&self) -> u64 {
+        self.epoch.elapsed().as_micros() as u64
+    }
+
+    pub(crate) fn epoch(&self) -> Instant {
+        self.epoch
+    }
+}
+
+/// Pong 평문의 시계 태그(P2-3, 설계 2절). 평문 = `[CLOCK_TAG, now_us(u64 BE)]`(9바이트).
+pub(crate) const CLOCK_TAG: u8 = 0xC1;
+pub(crate) const CLOCK_PAYLOAD_BYTES: usize = 9;
+
+/// Pong 평문: 응답자 시계(µs, Net epoch 기준).
+pub fn clock_payload(now_us: u64) -> [u8; CLOCK_PAYLOAD_BYTES] {
+    let mut b = [0u8; CLOCK_PAYLOAD_BYTES];
+    b[0] = CLOCK_TAG;
+    b[1..].copy_from_slice(&now_us.to_be_bytes());
+    b
+}
+
+/// Pong 평문에서 응답자 시계. 빈 평문(옛 엔진)이나 모르는 형식이면 None.
+pub fn parse_clock_payload(plain: &[u8]) -> Option<u64> {
+    match plain {
+        [CLOCK_TAG, rest @ ..] => <[u8; 8]>::try_from(rest).ok().map(u64::from_be_bytes),
+        _ => None,
+    }
+}
+
+
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    use peer::{Candidate, CandidateKind};
+
+    fn net() -> Net {
+        let opts = NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
+        Net::start("me".into(), &opts).unwrap()
+    }
+
+    fn desc(ssrc: u32) -> LocalDescriptor {
+        LocalDescriptor {
+            ssrc,
+            key: LocalDescriptor::encode_key(&KeyPair::generate().public_bytes()),
+            candidates: vec![Candidate { kind: CandidateKind::Lan, addr: "127.0.0.1:9".into() }],
+        }
+    }
+
+    fn add(n: &Net, id: &str, k: u64) {
+        n.add_peer(id.into(), &desc(k as u32 + 100), band_dsp::media_link::media_link(PeerKey::from_raw(k)).0).unwrap();
+    }
+
+    fn ids(c: &PeerTableCopy) -> Vec<String> {
+        c.peers().iter().map(|p| p.id().to_string()).collect()
+    }
+
+    /// 엔진 ③c(#122 리뷰 M1 조건): 복사본은 세대가 바뀔 때만 다시 읽고, 쓰기 락이 바쁘면 기다리지 않고 옛 복사본을 쓰며
+    /// 그 프레임을 센다. 락이 풀린 다음 갱신에서 새 피어가 보이고 빠진 피어가 사라진다. 빠진 피어의 마지막 `Arc`는
+    /// 워커 복사본이 아니라 제어 스레드(`release_retired`)가 놓는다.
+    /// net 스레드는 먼저 멈춘다: 제어 스레드가 표 복사본을 쥐거나 `release_retired`를 같이 부르면 참조 수가 스케줄링에
+    /// 달린다(#126 리뷰 H-1). 시각 단언은 두지 않는다 — 기다리지 않았다는 것은 `stale_copy_frames`가 보인다.
+    #[test]
+    fn copy_refreshes_on_generation_and_never_waits() {
+        let mut n = net();
+        n.stop();
+        let s = n.shared().clone();
+        let mut c = PeerTableCopy::for_worker();
+        add(&n, "a", 1);
+        s.refresh_copy(&mut c);
+        assert_eq!(ids(&c), ["a"]);
+        let d0 = n.take_send_path_diag();
+        assert_eq!((d0.copy_refreshes, d0.stale_copy_frames), (1, 0));
+        // 세대 그대로면 아무것도 안 한다
+        s.refresh_copy(&mut c);
+        assert_eq!(n.take_send_path_diag().copy_refreshes, 0);
+        // 쓰기 락이 바쁜 동안: 세대는 이미 올랐어도(추가 직후) 옛 복사본 그대로(try_read 실패 → 기다리지 않음)
+        add(&n, "b", 2);
+        let held = s.peers.write();
+        s.refresh_copy(&mut c);
+        s.refresh_copy(&mut c);
+        assert_eq!(ids(&c), ["a"], "옛 복사본");
+        drop(held);
+        let d = n.take_send_path_diag();
+        assert_eq!((d.copy_refreshes, d.stale_copy_frames), (0, 2));
+        s.refresh_copy(&mut c);
+        assert_eq!(ids(&c), ["a", "b"], "락이 풀리면 다음 반복에 보인다");
+        // 제거: 워커 복사본이 아직 옛 세대면 빠진 항목은 retired가 쥔다 → 복사본 갱신 뒤 제어 스레드가 놓는다
+        let a = Arc::downgrade(&c.peers()[0]);
+        n.remove_peer("a");
+        s.release_retired();
+        assert_eq!(s.retired_peers.lock().len(), 1, "복사본이 따라오기 전에는 놓지 않는다");
+        s.refresh_copy(&mut c);
+        assert_eq!(ids(&c), ["b"]);
+        assert!(a.upgrade().is_some(), "워커 복사본이 놓아도 살아 있다 — 마지막 참조는 워커 쪽이 아니다");
+        s.release_retired();
+        assert!(s.retired_peers.lock().is_empty());
+        assert!(a.upgrade().is_none(), "제어 스레드의 release_retired가 놓았다");
+        assert_eq!(n.take_send_path_diag().route_skips, 0);
+    }
+
+    /// 엔진 ②b-6b: 메트로놈의 기준 피어 시계 조회는 워커 복사본에서 찾은 `Peer`에 직접 한다 — 피어 표 락을 거치지 않으므로
+    /// 제어 스레드가 쓰기 락을 쥐고 있어도(선점된 추가·제거) 돈다. 전에는 `peers.read()`에서 그 시간만큼 기다렸다.
+    /// 별도 스레드에서 부르고 시한을 둔다: 조회가 피어 표 락을 다시 잡게 되면 걸려서 실패한다(멈추지 않는다).
+    #[test]
+    fn ref_peer_clock_reads_through_copy_while_table_is_write_locked() {
+        let mut n = net();
+        n.stop();
+        let s = n.shared().clone();
+        add(&n, "host", 1);
+        add(&n, "old", 2);
+        let mut c = PeerTableCopy::for_worker();
+        s.refresh_copy(&mut c);
+        let by_id = |c: &PeerTableCopy, id: &str| c.peers().iter().find(|p| p.id() == id).cloned().unwrap();
+        // host 시계 = 내 시계 + 40ms, 왕복 200µs. old는 시계를 싣지 않는 Pong만 보낸다.
+        for i in 0..8 {
+            let t0 = 1_000_000.0 + i as f64 * 500_000.0;
+            by_id(&c, "host").clock().on_sample(t0, t0 + 200.0, t0 + 100.0 + 40_000.0);
+        }
+        for _ in 0..64 {
+            by_id(&c, "old").clock().on_plain_pong();
+        }
+        let held = s.peers.write();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            let site = txlat::LockSite::default();
+            let mut w = txlat::LockWait::default();
+            let est = by_id(&c, "host").clock_estimate(5_000_000, &mut w, &site);
+            let old = by_id(&c, "old");
+            let r = (est, old.clock_estimate(5_000_000, &mut w, &site).is_none(), old.clock_unsupported(&mut w, &site), w.contended);
+            tx.send(r).unwrap();
+        });
+        let (est, old_none, old_unsupported, contended) =
+            rx.recv_timeout(Duration::from_secs(5)).expect("기준 피어 시계 조회가 피어 표 쓰기 락을 기다린다");
+        drop(held);
+        t.join().unwrap();
+        let est = est.expect("표본이 있으면 추정이 나온다");
+        assert!((est.offset_us - 40_000.0).abs() < 50.0, "{est:?}");
+        assert!(old_none && old_unsupported, "시계를 싣지 않는 피어");
+        assert_eq!(contended, 0, "Peer.clock은 아무도 쥐고 있지 않았다");
+    }
+
+    /// #126 리뷰 M-2: 워커 복사본이 아닌 복사본(시험·도구의 `send_audio`)은 세대를 발행하지 않는다 — 워커 복사본이
+    /// 아직 옛 세대인 동안 빠진 항목을 놓게 하지 않는다.
+    #[test]
+    fn temporary_copy_does_not_release_retired() {
+        let mut n = net();
+        n.stop();
+        let s = n.shared().clone();
+        let mut worker = PeerTableCopy::for_worker();
+        add(&n, "a", 1);
+        s.refresh_copy(&mut worker);
+        n.remove_peer("a");
+        let mut tmp = PeerTableCopy::default();
+        s.refresh_copy(&mut tmp);
+        assert!(tmp.peers().is_empty());
+        let mut buf = [0u8; MAX_PACKET_BYTES];
+        s.send_audio(&[0u8; 40], 0, 1, 0, &mut buf, None, None);
+        s.release_retired();
+        assert_eq!(s.retired_peers.lock().len(), 1, "임시 복사본이 갱신해도 워커 복사본 기준으로만 놓는다");
+        s.refresh_copy(&mut worker);
+        s.release_retired();
+        assert!(s.retired_peers.lock().is_empty());
+    }
+}

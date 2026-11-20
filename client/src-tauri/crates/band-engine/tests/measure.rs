@@ -1,0 +1,730 @@
+//! 지연 측정 도구(P1-1) 통합 테스트: 가짜 장치 하드웨어 루프백, 신호 판정, 에코 피어(고정 지연 프록시).
+//!
+//! 두 단계(P3-0, tests/loopback.rs와 같은 규칙):
+//! - **결정적**(기본 `cargo test`): 판정 종류, 거부·취소·동의 흐름, 에코 자동 종료처럼 벽시계 품질 임계가 없는 검사.
+//!   예열·연결 대기는 고정 sleep이 아니라 진행량(출력 샘플 수, 받은 프레임 수)으로 하고 벽시계는 행 감지 상한뿐이다(P3-0a).
+//! - **실시간**(`#[ignore = "realtime: ..."]`): 실제 스레드·실제 시계로 측정 정확도(ms 오차, 흩어짐 판정)를 재는 검사.
+//!   CI `realtime` 잡이 하나씩 3회까지 돌린다. ignore 사유에 같은 계산을 합성 신호로 검증하는 결정적 짝을 적었다.
+//!   로컬: `cargo test --test measure -- --ignored --test-threads 1`.
+
+use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use band_dsp::config::{CodecKind, EngineConfig};
+use band_engine::testing::engine::device::fake::{FakeBackend, SourceFn};
+use band_engine::testing::engine::measure::{LoopbackReport, MeasureVerdict, ECHO_UNSTABLE_SPREAD_MS};
+use band_dsp::mixer::MixControls;
+use band_dsp::types::PeerStateKind;
+use band_engine::testing::engine::Engine;
+use band_engine::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
+use band_engine::testing::net::NetOptions;
+use parking_lot::Mutex;
+use rand::{Rng, SeedableRng};
+
+/// 실시간 테스트끼리 CPU를 다투지 않게 직렬화한다.
+static RT_LOCK: Mutex<()> = Mutex::new(());
+
+fn config(buffer: u32) -> EngineConfig {
+    EngineConfig {
+        buffer_size: buffer,
+        frame_ms: 2.5,
+        codec: CodecKind::Opus,
+        channels: 1,
+        input_channels: vec![0],
+        ..Default::default()
+    }
+}
+
+struct Loop {
+    delay_s: f64,
+    gain: f32,
+    noise: f32,
+    connected: bool,
+}
+
+/// 출력 sink를 `delay_s` 뒤 입력으로 되돌리는 가짜 "케이블"(+ 잡음, 게인, 클리핑).
+/// 시간 모델(device.rs `fake`): 입력 샘플 i는 t0 + i/r에 캡처, sink 프레임 j는 t0 + phase + (origin + j)/r에 재생.
+fn loopback_backend(rate: u32, in_buf: usize, out_buf: usize, phase_us: u64, jitter_us: u64, l: Loop) -> FakeBackend {
+    let sink: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let origin = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (s2, o2) = (sink.clone(), origin.clone());
+    let rng = Arc::new(Mutex::new(rand::rngs::StdRng::seed_from_u64(11)));
+    let r = rate as f64;
+    let phase = phase_us as f64 / 1e6;
+    let src: Arc<SourceFn> = Arc::new(move |start: u64, ch: usize, buf: &mut [f32]| {
+        let sink = s2.lock();
+        let origin = o2.load(Ordering::SeqCst) as f64;
+        let mut rng = rng.lock();
+        for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+            let t = (start + i as u64) as f64 / r - l.delay_s;
+            let j = (t - phase) * r - origin;
+            let mut v = 0.0f32;
+            if l.connected && j >= 0.0 {
+                let j0 = j.floor() as usize;
+                let f = (j - j0 as f64) as f32;
+                if let (Some(a), Some(b)) = (sink.get(j0 * 2), sink.get((j0 + 1) * 2)) {
+                    v = a * (1.0 - f) + b * f;
+                }
+            }
+            v = v * l.gain + if l.noise > 0.0 { rng.gen_range(-l.noise..l.noise) } else { 0.0 };
+            frame.fill(v.clamp(-1.0, 1.0));
+        }
+    });
+    let mut b = FakeBackend::new(rate, src);
+    b.sink = sink;
+    b.sink_origin = origin;
+    b.in_buffer = Some(in_buf);
+    b.out_buffer = Some(out_buf);
+    b.out_phase_us = phase_us;
+    b.wake_jitter_us = jitter_us;
+    b
+}
+
+/// 결정적 테스트의 대기 상한. 판정은 조건 자체로 하고, 벽시계는 행(hang) 감지에만 쓴다.
+const HANG: Duration = Duration::from_secs(20);
+
+/// 조건이 참이 될 때까지 기다린다(고정 sleep 대신). 상한 안에 참이 되면 true.
+fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let t0 = Instant::now();
+    loop {
+        if cond() {
+            return true;
+        }
+        if t0.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// 출력 콜백이 `ms`만큼(장치 시간) 돌 때까지 기다린다 — 고정 sleep의 "예열" 대신 진행량.
+fn wait_output(sink: &Mutex<Vec<f32>>, channels: usize, rate: u32, ms: u32) {
+    let want = rate as usize * ms as usize / 1000 * channels;
+    assert!(wait_until(HANG, || sink.lock().len() >= want), "출력 콜백이 돌지 않음");
+}
+
+/// 지터 버퍼가 실제 패킷으로 만든 프레임 수(은닉 제외, 첫 피어). 벽시계 대신 "패킷을 이만큼 받았다"는 진행량 기준.
+fn real_frames(e: &Engine) -> u64 {
+    e.peer_jitter_stats().first().map(|(_, js)| js.produced.saturating_sub(js.concealed)).unwrap_or(0)
+}
+
+fn measure(backend: FakeBackend, buffer: u32, runs: u32) -> LoopbackReport {
+    let (sink, ch, rate) = (backend.sink.clone(), backend.channels, backend.out_rate);
+    let e = Engine::start(config(buffer), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
+    // 모니터를 켜 둔다: 측정 중에는 출력이 자극만 내야 한다(되먹임 없음).
+    e.controls().monitor_enabled.store(true, Ordering::Relaxed);
+    wait_output(&sink, ch, rate, 400);
+    let cancel = AtomicBool::new(false);
+    let rep = e.loopback_job().run(runs, &cancel).unwrap();
+    drop(e);
+    rep
+}
+
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::analysis::tests::{loopback_math_matches_time_model, xcorr_finds_known_offset_with_subsample_precision, noisy_loopback_detects_within_tolerance}"]
+fn loopback_known_delay_within_half_ms() {
+    let _g = RT_LOCK.lock();
+    // (레이트, 입력 버퍼, 출력 버퍼, 출력 위상 µs, 기상 지터 µs)
+    let cases = [(48_000u32, 128usize, 128usize, 0u64, 0u64), (48_000, 64, 256, 700, 300), (44_100, 128, 128, 350, 200)];
+    for (rate, ib, ob, phase, jit) in cases {
+        let delay = 0.0075;
+        let mut b = loopback_backend(rate, ib, ob, phase, jit, Loop { delay_s: delay, gain: 1.0, noise: 0.0, connected: true });
+        b.reported_latency = (ib as u32 + 20, ob as u32 + 30);
+        let rep = measure(b, ib as u32, 6);
+        let expect = (delay + ib as f64 / rate as f64) * 1000.0;
+        let rt = rep.round_trip_ms.unwrap_or(f64::NAN);
+        eprintln!("rate {rate} in {ib} out {ob}: 측정 {rt:.3}ms 기대 {expect:.3}ms {:?} {}", rep.verdict, rep.message);
+        assert_eq!(rep.verdict, MeasureVerdict::Ok, "{rep:?}");
+        // 요구는 ±0.5ms. 정밀도 회귀를 잡으려고 더 좁게 본다(이 PC 실측 오차 ≤ 0.06ms, PR #13 L7d).
+        assert!((rt - expect).abs() <= 0.2, "왕복 {rt} 기대 {expect}: {rep:?}");
+        assert_eq!(rep.detected_runs, 6);
+        // 보정값 = 실측 − 장치 버퍼 왕복, 보정 estLatency = est + 보정값
+        let buf_rt = (ib + ob) as f64 * 1000.0 / rate as f64;
+        assert!((rep.buffer_round_trip_ms - buf_rt).abs() < 1e-6);
+        assert!((rep.offset_ms.unwrap() - (rt - buf_rt)).abs() < 1e-6);
+        assert!((rep.corrected_est_latency_ms.unwrap() - (rep.est_latency_ms as f64 + rt - buf_rt)).abs() < 1e-3);
+        // 드라이버 보고 지연이 그대로 실린다
+        let drt = (ib + ob + 50) as f64 * 1000.0 / rate as f64;
+        assert!((rep.driver_round_trip_ms.unwrap() - drt).abs() < 1e-6);
+        assert!((rep.driver_error_ms.unwrap() - (rt - drt)).abs() < 1e-6);
+        assert!(rep.runs.iter().all(|r| !r.clipped && r.peak_ratio > 10.0));
+    }
+}
+
+#[test]
+fn loopback_noise_clipping_and_no_signal_verdicts() {
+    let _g = RT_LOCK.lock();
+    let mk = |l: Loop| loopback_backend(48_000, 128, 128, 0, 0, l);
+    // 케이블 없음(무음): 미검출
+    let rep = measure(mk(Loop { delay_s: 0.0075, gain: 1.0, noise: 0.0, connected: false }), 128, 3);
+    assert_eq!(rep.verdict, MeasureVerdict::NoSignal, "{rep:?}");
+    assert_eq!(rep.detected_runs, 0);
+    assert!(rep.round_trip_ms.is_none());
+    // 잡음만(케이블 없음): 미검출
+    let rep = measure(mk(Loop { delay_s: 0.0075, gain: 1.0, noise: 0.3, connected: false }), 128, 3);
+    assert_eq!(rep.verdict, MeasureVerdict::NoSignal, "{rep:?}");
+    // 케이블 + 잡음(SNR 약 15dB): 검출된다(값의 정확도·흩어짐 판정은 실시간 테스트 `loopback_with_noise_within_half_ms`).
+    let rep = measure(mk(Loop { delay_s: 0.0075, gain: 1.0, noise: 0.05, connected: true }), 128, 3);
+    assert!(rep.detected_runs > 0 && rep.round_trip_ms.is_some(), "{rep:?}");
+    assert!(matches!(rep.verdict, MeasureVerdict::Ok | MeasureVerdict::Unstable), "{rep:?}");
+    // 게인 과다: 클리핑 판정(값은 참고로 남음)
+    let rep = measure(mk(Loop { delay_s: 0.0075, gain: 4.0, noise: 0.0, connected: true }), 128, 3);
+    assert_eq!(rep.verdict, MeasureVerdict::Clipped, "{rep:?}");
+    assert!(rep.runs.iter().all(|r| r.clipped));
+}
+
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::analysis::tests::noisy_loopback_detects_within_tolerance"]
+fn loopback_with_noise_within_half_ms() {
+    let _g = RT_LOCK.lock();
+    let b = loopback_backend(48_000, 128, 128, 0, 0, Loop { delay_s: 0.0075, gain: 1.0, noise: 0.05, connected: true });
+    let rep = measure(b, 128, 3);
+    let expect = 7.5 + 128.0 / 48.0;
+    assert_eq!(rep.verdict, MeasureVerdict::Ok, "{rep:?}");
+    assert!((rep.round_trip_ms.unwrap() - expect).abs() <= 0.5, "{rep:?}");
+}
+
+#[test]
+fn loopback_rejects_mismatched_rates_and_concurrent_runs() {
+    let _g = RT_LOCK.lock();
+    let mut b = FakeBackend::silence(48_000);
+    b.out_rate = 44_100;
+    let e = Engine::start(config(128), Arc::new(b), Arc::new(MixControls::default()), None).unwrap();
+    let err = e.loopback_job().run(1, &AtomicBool::new(false)).unwrap_err();
+    assert!(err.contains("레이트"), "{err}");
+    drop(e);
+    // 취소
+    let e = Engine::start(config(128), Arc::new(FakeBackend::silence(48_000)), Arc::new(MixControls::default()), None).unwrap();
+    let cancel = AtomicBool::new(true);
+    let err = e.loopback_job().run(3, &cancel).unwrap_err();
+    assert!(err.contains("취소"), "{err}");
+    // 취소 뒤 다시 잴 수 있다(끝점 반환)
+    let rep = e.loopback_job().run(1, &AtomicBool::new(false)).unwrap();
+    assert_eq!(rep.verdict, MeasureVerdict::NoSignal);
+}
+
+#[test]
+fn loopback_refused_during_session() {
+    let _g = RT_LOCK.lock();
+    let backend = FakeBackend::silence(48_000);
+    let sink = backend.sink.clone();
+    let m = band_engine::testing::manager::EngineManager::new(Arc::new(backend), test_net());
+    m.start(config(128), "alice".into()).unwrap();
+    let err = m.measure_loopback(1).unwrap_err();
+    assert!(err.contains("합주"), "{err}");
+    m.stop();
+    // 테스트 모드에서는 된다
+    let before = sink.lock().len();
+    m.start_monitor_only(config(128)).unwrap();
+    assert!(wait_until(HANG, || sink.lock().len() >= before + 48_000 * 2 * 3 / 10), "테스트 모드 출력이 돌지 않음");
+    assert_eq!(m.measure_loopback(1).unwrap().verdict, MeasureVerdict::NoSignal);
+    m.stop();
+}
+
+#[test]
+fn loopback_offset_carries_to_session_engine_on_same_device() {
+    // PR #34 M2(a): 테스트 모드에서 넣은(또는 잰) 루프백 보정값이 같은 장치 구성의 합주 엔진 메트로놈에 이어진다.
+    use band_engine::testing::engine::metronome::OutputLatencySource;
+    let _g = RT_LOCK.lock();
+    let backend = FakeBackend::silence(48_000); // 드라이버 보고 지연 없음(cpal WASAPI처럼)
+    let m = band_engine::testing::manager::EngineManager::new(Arc::new(backend), test_net());
+    let metro = |m: &band_engine::testing::manager::EngineManager| m.stats().metronome;
+    let wait_src = |m: &band_engine::testing::manager::EngineManager, want: Option<OutputLatencySource>| {
+        wait_until(HANG, || metro(m).output_latency_source == want)
+    };
+    // 엔진이 없으면 거부
+    assert!(m.set_loopback_offset(Some(12.0)).is_err());
+    m.start_monitor_only(config(128)).unwrap();
+    assert!(wait_src(&m, None), "처음에는 보정 안 됨");
+    assert!(m.set_loopback_offset(Some(f64::NAN)).is_err());
+    m.set_loopback_offset(Some(12.0)).unwrap();
+    assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
+    assert_eq!(metro(&m).output_latency_ms, Some(6.0), "입력 쪽 보고가 없으면 반");
+    // 같은 장치로 합주 시작 → 이어서 적용
+    m.start(config(128), "alice".into()).unwrap();
+    assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
+    assert_eq!(metro(&m).output_latency_ms, Some(6.0));
+    m.stop();
+    // 다른 장치 구성이면 적용하지 않는다
+    let other = EngineConfig { output_device: Some("wasapi::다른 장치".into()), ..config(128) };
+    m.start(other, "alice".into()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(metro(&m).output_latency_source, None);
+    m.stop();
+    // 버퍼 크기가 다르면 적용하지 않는다(숨은 지연이 버퍼에 따라 바뀔 수 있음, PR #57 M1)
+    m.start(config(512), "alice".into()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(metro(&m).output_latency_source, None, "다른 버퍼에 옛 보정값 적용");
+    m.stop();
+    // 다시 원래 버퍼면 적용된다(키는 버퍼만 달랐음)
+    m.start(config(128), "alice".into()).unwrap();
+    assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
+    m.stop();
+    // 해제하면 같은 장치에서도 쓰지 않는다
+    m.start_monitor_only(config(128)).unwrap();
+    assert!(wait_src(&m, Some(OutputLatencySource::Loopback)));
+    m.set_loopback_offset(None).unwrap();
+    assert!(wait_src(&m, None));
+    m.stop();
+    m.start(config(128), "alice".into()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(metro(&m).output_latency_source, None);
+    m.stop();
+}
+
+// ============================================================================
+// 에코 피어
+// ============================================================================
+
+fn test_net() -> NetOptions {
+    NetOptions {
+        port: 0,
+        stun_servers: vec![],
+        gather_lan: false,
+        extra_candidates: vec![],
+        allow_loopback_candidates: true,
+        cancel: None,
+    }
+}
+
+fn local_addr(e: &Engine) -> SocketAddr {
+    format!("127.0.0.1:{}", e.local_port().unwrap()).parse().unwrap()
+}
+
+fn with_candidate(d: &LocalDescriptor, addr: SocketAddr) -> LocalDescriptor {
+    LocalDescriptor { candidates: vec![Candidate { kind: CandidateKind::Lan, addr: addr.to_string() }], ..d.clone() }
+}
+
+const PING_TYPE: u8 = band_dsp::packet::PacketType::Ping as u8;
+
+/// 방향마다 고정 지연을 넣는 UDP 프록시. `drop_a_ping`이 켜져 있는 동안 A → B Ping(헤더 평문 바이트 3 = 4)을 버린다
+/// (에코 요청 해제 Ping 유실 재현).
+struct DelayProxy {
+    pa: SocketAddr,
+    pb: SocketAddr,
+    stop: Arc<AtomicBool>,
+    drop_a_ping: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl DelayProxy {
+    fn start(a: SocketAddr, b: SocketAddr, delay: Duration) -> DelayProxy {
+        let sa = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sb = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sa.set_nonblocking(true).unwrap();
+        sb.set_nonblocking(true).unwrap();
+        let (pa, pb) = (sa.local_addr().unwrap(), sb.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let st = stop.clone();
+        let drop_a_ping = Arc::new(AtomicBool::new(false));
+        let dp = drop_a_ping.clone();
+        let thread = std::thread::spawn(move || {
+            let _prio = band_engine::testing::sys::prio::promote_current_thread();
+            let mut queue: std::collections::VecDeque<(Instant, bool, Vec<u8>)> = Default::default();
+            let mut buf = [0u8; 2048];
+            while !st.load(Ordering::Relaxed) {
+                for (sock, from_a) in [(&sa, true), (&sb, false)] {
+                    while let Ok((n, _)) = sock.recv_from(&mut buf) {
+                        if from_a && n > 3 && buf[3] == PING_TYPE && dp.load(Ordering::Relaxed) {
+                            continue;
+                        }
+                        queue.push_back((Instant::now() + delay, from_a, buf[..n].to_vec()));
+                    }
+                }
+                let now = Instant::now();
+                while queue.front().is_some_and(|q| q.0 <= now) {
+                    let (_, from_a, data) = queue.pop_front().unwrap();
+                    if from_a {
+                        let _ = sb.send_to(&data, b);
+                    } else {
+                        let _ = sa.send_to(&data, a);
+                    }
+                }
+                std::thread::sleep(Duration::from_micros(100));
+            }
+        });
+        DelayProxy { pa, pb, stop, drop_a_ping, thread: Some(thread) }
+    }
+}
+
+impl Drop for DelayProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+fn wait_connected(e: &Engine) {
+    let t0 = Instant::now();
+    while t0.elapsed() < HANG {
+        let s = e.stats();
+        if !s.peers.is_empty() && s.peers.iter().all(|p| p.state == PeerStateKind::Connected) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("연결 실패");
+}
+
+fn pair(delay: Duration) -> (Engine, Engine, DelayProxy) {
+    let mk = |seed| {
+        let mut b = FakeBackend::silence(48_000);
+        b.seed = seed;
+        b
+    };
+    let a = Engine::start(config(128), Arc::new(mk(1)), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(config(128), Arc::new(mk(2)), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let p = DelayProxy::start(local_addr(&a), local_addr(&b), delay);
+    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), p.pa)).unwrap();
+    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), p.pb)).unwrap();
+    wait_connected(&a);
+    wait_connected(&b);
+    (a, b, p)
+}
+
+/// B가 A의 요청을 보면 동의한다(사람이 UI에서 "허용"을 누르는 것). B 쪽 요청 표시도 확인한다.
+fn auto_accept(b: Arc<Mutex<Engine>>, stop: Arc<AtomicBool>) -> JoinHandle<bool> {
+    std::thread::spawn(move || {
+        let mut saw_request = false;
+        while !stop.load(Ordering::Relaxed) {
+            {
+                let e = b.lock();
+                let s = e.stats();
+                if let Some(p) = s.peers.iter().find(|p| p.peer_id == "alice") {
+                    if p.echo_requested {
+                        saw_request = true;
+                        e.set_echo_mode("alice", true).unwrap();
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        saw_request
+    })
+}
+
+fn echo_once(one_way: Duration) -> band_engine::testing::engine::measure::EchoReport {
+    let (a, b, _p) = pair(one_way);
+    // 동의 전에는 켤 수 없다(양측 합의)
+    let err = b.set_echo_mode("alice", true).unwrap_err();
+    assert!(err.contains("요청"), "{err}");
+    // 고정 sleep(800ms) 대신 진행량(P3-0a): 양쪽이 상대 패킷으로 프레임 320개(2.5ms × 320 = 0.8초분)를 만들 때까지.
+    assert!(wait_until(HANG, || real_frames(&a) >= 320 && real_frames(&b) >= 320), "양방향 오디오가 흐르지 않음");
+    let b = Arc::new(Mutex::new(b));
+    let stop = Arc::new(AtomicBool::new(false));
+    let acc = auto_accept(b.clone(), stop.clone());
+    let rep = a.echo_job("bob").unwrap().run(6, Duration::from_secs(5), &AtomicBool::new(false)).unwrap();
+    stop.store(true, Ordering::Relaxed);
+    assert!(acc.join().unwrap(), "B가 요청 표시(echoRequested)를 봐야 한다");
+    // 측정이 끝나면 B는 에코를 스스로 멈추고, A는 다시 B의 소리를 받는다.
+    let t0 = Instant::now();
+    loop {
+        let s = b.lock().stats();
+        let pa = s.peers.iter().find(|p| p.peer_id == "alice").unwrap();
+        if !pa.echo_active && !pa.echo_requested {
+            break;
+        }
+        assert!(t0.elapsed() < HANG, "B 에코가 꺼지지 않음");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!a.stats().peers[0].peer_echoing);
+    rep
+}
+
+/// 결정적: 동의 → 측정 → 자동 종료 흐름과 클릭 검출(정확도·흩어짐 판정은 실시간 짝에서).
+#[test]
+fn echo_flow_consent_measure_auto_stop() {
+    let _g = RT_LOCK.lock();
+    let r = echo_once(Duration::from_millis(5));
+    assert!(r.detected_runs >= 1, "{r:?}");
+    assert!(r.round_trip_ms.is_some_and(|v| v > 10.0), "왕복은 최소 프록시 왕복 10ms보다 길다: {r:?}");
+    assert!(r.peer_echo_delay_ms < 50.0, "{r:?}");
+}
+
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::echo::tests::echo_probe_emits_frame_aligned_clicks_and_detects_them(클릭 송신·검출 시각 계산), echo_flow_consent_measure_auto_stop(흐름)"]
+fn echo_round_trip_reflects_proxy_delay() {
+    let _g = RT_LOCK.lock();
+    // 호스티드 러너에서 6회 중 한 회차만 ~4ms 일찍 잡혀 흩어짐이 5.1~5.8ms로 상한(`ECHO_UNSTABLE_SPREAD_MS` 5ms)을 넘는
+    // 일이 CI 17회 중 4회 있었다(PR #71). P1-13부터 판정이 단일 이상치를 빼고 보므로(`echo_summary`, 결정적 짝
+    // `engine::measure::analysis::tests::echo_single_outlier_is_excluded`) 이 모양은 Ok다. 그래도 Unstable이면 한 번 다시 잰다(앱도
+    // "다시 재세요"라고 안내한다). 두 번 연속 Unstable이거나 검출이 모자라면 그대로 실패한다.
+    let measure = |one_way_ms: u64| {
+        let r = echo_once(Duration::from_millis(one_way_ms));
+        if r.verdict == MeasureVerdict::Unstable && r.detected_runs >= 5 {
+            eprintln!("에코 재측정(편도 {one_way_ms}ms, 첫 측정 Unstable): {:?}", r.runs);
+            return echo_once(Duration::from_millis(one_way_ms));
+        }
+        // 핑 RTT가 프록시 RTT + 40ms(아래 상한 단언)를 넘으면 한 번 다시 잰다(#207 리뷰 M1의 (b)). 포화 부하(바쁜 스레드 14 = 논리
+        // 코어 수)에서는 핑 지수 평균이 한때 +46·+162ms까지 부풀었다(4회 중 2회) — 일시적이라 다시 재면 가라앉는다. 핑 RTT 보고 회귀는
+        // 측정마다 되풀이되므로 다시 재도 걸린다.
+        if r.network_rtt_ms.is_some_and(|x| x as f64 > 2.0 * one_way_ms as f64 + 40.0) {
+            eprintln!("에코 재측정(편도 {one_way_ms}ms, 핑 RTT {:?}가 프록시 RTT + 40ms 초과)", r.network_rtt_ms);
+            return echo_once(Duration::from_millis(one_way_ms));
+        }
+        r
+    };
+    let near = measure(5);
+    let far = measure(25);
+    for (r, one_way_ms) in [(&near, 5.0f64), (&far, 25.0)] {
+        eprintln!(
+            "에코: 왕복 {:?} 편도 {:?} 핑 {:?} 지터 {} 상대 {:.3} 잔차 {:?} 입→귀 {:?} {:?}",
+            r.round_trip_ms, r.one_way_ms, r.network_rtt_ms, r.jitter_buffer_ms, r.peer_echo_delay_ms, r.residual_ms, r.mouth_to_ear_ms, r.runs
+        );
+        assert_eq!(r.verdict, MeasureVerdict::Ok, "{r:?}");
+        assert!(r.detected_runs >= 5, "{r:?}");
+        assert!(r.excluded_runs <= 1 && r.used_runs + r.excluded_runs == r.detected_runs, "{r:?}");
+        assert!(r.spread_ms.is_some_and(|s| s <= ECHO_UNSTABLE_SPREAD_MS), "{r:?}");
+        assert!(r.peer_echo_delay_ms < 1.0, "되돌리기는 디코드 없이 바로: {r:?}");
+        // 왕복 = 프레임 + 망 왕복 + 상대 처리 + 지터 버퍼(± 측정 오차)
+        // 잔차에는 클릭이 놓인 입력 버스트 위상(≤ 입력 버퍼)과 지터 버퍼 평균·순간값 차이가 남는다.
+        // 잔차 = 왕복 − (프레임 + 핑 RTT + 상대 처리 + 지터 버퍼 평균). 클릭이 놓인 입력 버스트 위상(≤ 입력 버퍼)과
+        // 지터 버퍼 순간값·평균 차이가 남는다.
+        //
+        // 핑 RTT 상한(P1-21b, #204 리뷰 L1): 왕복은 클릭 6회의 중앙값이지만 핑 RTT는 Ping/Pong 몇 개의 지수 평균(α 0.5,
+        // `net/peer/conn.rs`)이라 CPU 포화에서 일반 우선순위 프록시 스레드가 Ping 하나만 늦춰도 RTT만 부푼다. 로컬 부하(바쁜
+        // 스레드 14): 왕복 22~23 / 62~64ms는 그대로인데 핑이 24~30 / 58~68ms(평소 11.5~12.3 / 51.5~52.0)로 잔차 −5 ~ −17ms,
+        // 다시 재도 부하가 이어지면 그대로였다(6회 중 3회 실패). 이 시험은 진짜 망 RTT를 안다(프록시 편도 × 2). 그래서 잔차를 볼 때
+        // 핑 RTT를 "프록시 RTT + 3ms"(평소 오버헤드 1.5~2.3ms — 로컬·CI 측정 — 에 여유)로 자른다. 핑이 부풀지 않으면 값은 그대로이고,
+        // 양의 잔차(오디오 경로가 예산보다 느림 = 회귀 신호)나 핑이 정상인데 음인 잔차는 여전히 실패한다. 엔진이 보고하는
+        // `residual_ms` 자체는 바꾸지 않는다(앱 화면 값).
+        let rtt = r.network_rtt_ms.unwrap() as f64;
+        let rtt_cap = 2.0 * one_way_ms + 3.0;
+        let cut = (rtt - rtt_cap).max(0.0);
+        let residual = r.residual_ms.unwrap() + cut;
+        assert!(residual.abs() < 5.0, "잔차 {residual:.2}ms(보고 {:?}, 핑 {rtt:.2} → 상한 {rtt_cap}, 자른 양 {cut:.2}ms): {r:?}", r.residual_ms);
+        // 자르기가 "핑 RTT가 부풀어 보고되는" 엔진 회귀(Pong 처리 지연·Ping 타임스탬프 오류 등)를 한도 없이 지우지 않도록 느슨한
+        // 상한을 따로 둔다(#207 리뷰 M1). 부하(바쁜 스레드 14) 관측 최대 부풂: 가까움 +22.5ms(32.5 vs 10)·멂 +27.4ms(77.4 vs 50).
+        // 40ms = 관측 최대 + 여유. 평소(오버헤드 1.5~2.3ms)는 한참 아래다. 포화 부하의 일시적 부풂은 위 `measure`가 한 번 다시 잰다.
+        assert!(rtt <= 2.0 * one_way_ms + 40.0, "핑 RTT {rtt:.2}ms가 프록시 RTT {}ms + 40ms를 넘는다(자른 양 {cut:.2}ms) — RTT 보고 회귀: {r:?}", 2.0 * one_way_ms);
+    }
+    // 프록시 편도 지연 20ms 차이 → 왕복 40ms + 두 측정의 지터 버퍼 평균 차, 편도 추정은 그 절반.
+    // 왕복에는 지터 버퍼가 들어 있고, 지터 버퍼는 러너 스케줄링 지터를 따라 측정마다 다르다(P2-17f: CI 1회 3연속 실패 —
+    // 지터 버퍼 6.8→12.3 / 10.0→13.0 / 9.0→14.3ms에 왕복 차 45.2 / 42.8 / 45.0ms, 보정하면 −0.3 / −0.2 / −0.2ms).
+    // 그래서 측정된 지터 버퍼 차를 빼고 비교한다. 지터 버퍼를 뺀 나머지(핑 RTT 차·잔차 차)는 측정 도구 자체의 오차다.
+    let d_rt = far.round_trip_ms.unwrap() - near.round_trip_ms.unwrap();
+    let d_ow = far.one_way_ms.unwrap() - near.one_way_ms.unwrap();
+    let d_jb = (far.jitter_buffer_ms - near.jitter_buffer_ms) as f64;
+    eprintln!("왕복 차 {d_rt:.2}ms, 편도 차 {d_ow:.2}ms, 지터 버퍼 차 {d_jb:.2}ms → 보정 왕복 차 {:.2}ms", d_rt - d_jb);
+    // 보정에는 상한을 둔다(#204 리뷰 M1): 상한이 없으면 프록시 지연(RTT)을 따라 지터 버퍼가 부푸는 엔진 회귀(지터 추정·
+    // 적응 여유가 RTT를 따라감 등)를 보정이 그대로 삼켜 녹색이 된다. 7ms = 관측 최대(CI 5.5ms, 로컬 0.02~0.4ms) + 여유 1.5ms.
+    // CI 3회 모두 far 쪽이 컸다(+5.5/+3.0/+5.3) — 순수 스케줄링 노이즈면 부호가 섞여야 하므로 프록시 지연에 비례하는 원인
+    // (프록시 `sleep` 해상도와 25ms 큐의 맞물림 또는 엔진)이 있을 수 있다. d_jb > 3ms가 CI에서 반복되면 원인을 조사한다.
+    assert!(d_jb.abs() < 7.0, "지터 버퍼가 프록시 지연(RTT)을 따라 늘었다: near {} → far {}ms (차 {d_jb:.2}ms ≥ 7ms)", near.jitter_buffer_ms, far.jitter_buffer_ms);
+    assert!((d_rt - d_jb - 40.0).abs() < 2.5, "왕복 차 {d_rt} − 지터 버퍼 차 {d_jb}");
+    assert!((d_ow - d_jb / 2.0 - 20.0).abs() < 1.5, "편도 차 {d_ow} − 지터 버퍼 차/2 {}", d_jb / 2.0);
+}
+
+#[test]
+fn echo_requires_consent_and_times_out() {
+    let _g = RT_LOCK.lock();
+    let (a, b, _p) = pair(Duration::from_millis(2));
+    assert!(wait_until(HANG, || real_frames(&a) >= 120 && real_frames(&b) >= 120), "양방향 오디오가 흐르지 않음");
+    let t0 = Instant::now();
+    let err = a.echo_job("bob").unwrap().run(2, Duration::from_millis(1500), &AtomicBool::new(false)).unwrap_err();
+    assert!(err.contains("수락"), "{err}");
+    assert!(t0.elapsed() < HANG, "동의 대기 1.5초가 끝나지 않음(행)");
+    // B는 요청을 봤지만 동의하지 않았으므로 되돌리지 않았다. 요청이 끝나면 표시도 사라진다.
+    let t1 = Instant::now();
+    while b.stats().peers[0].echo_requested {
+        assert!(t1.elapsed() < HANG, "요청 표시가 사라지지 않음");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!b.stats().peers[0].echo_active);
+    assert!(a.echo_job("nobody").is_err());
+}
+
+type Sink = Arc<Mutex<Vec<f32>>>;
+
+/// A 입력 사인(440Hz, 진폭 0.5)·B 입력 무음, 편도 100ms 프록시로 연결하고 양방향 오디오가 흐를 때까지 기다린다.
+fn sine_pair() -> (Engine, Engine, Sink, Sink, DelayProxy) {
+    let sine: Arc<SourceFn> = Arc::new(|start: u64, ch: usize, buf: &mut [f32]| {
+        for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
+            let t = (start + i as u64) as f64 / 48_000.0;
+            frame.fill((t * 440.0 * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5);
+        }
+    });
+    let backend_a = FakeBackend::new(48_000, sine);
+    let sink_a = backend_a.sink.clone();
+    let backend_b = FakeBackend::silence(48_000);
+    let sink_b = backend_b.sink.clone();
+    let a = Engine::start(config(128), Arc::new(backend_a), Arc::new(MixControls::default()), Some(("alice".into(), test_net()))).unwrap();
+    let b = Engine::start(config(128), Arc::new(backend_b), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    let proxy = DelayProxy::start(local_addr(&a), local_addr(&b), Duration::from_millis(100));
+    a.add_peer("bob".into(), &with_candidate(b.descriptor().unwrap(), proxy.pa)).unwrap();
+    b.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), proxy.pb)).unwrap();
+    wait_connected(&a);
+    wait_connected(&b);
+    assert!(wait_until(HANG, || real_frames(&a) >= 320 && real_frames(&b) >= 320), "양방향 오디오가 흐르지 않음");
+    (a, b, sink_a, sink_b, proxy)
+}
+
+fn peak_of(sink: &Sink, from: usize, to: usize) -> f32 {
+    let s = sink.lock();
+    s[from.min(s.len())..to.min(s.len())].iter().fold(0f32, |m, x| m.max(x.abs()))
+}
+
+/// 스테레오 인터리브 샘플 수(48k).
+fn frames(ms: usize) -> usize {
+    ms * 48 * 2
+}
+
+/// 엔진 ②b-5(설계 3.3절 H1): 에코 측정이 결과를 거둔 뒤에도 **상대가 반사를 멈출 때까지** 측정 대상 피어에게는 무음이 나간다.
+/// 프로브를 결과 수거 시점에 거두면(탭 끝 = 반환) 그때부터 내 실제 소리가 상대에게 나간다 — 요청 해제 Ping이 유실되면
+/// 상대는 다음 Ping까지 그것을 내게 되돌린다.
+///
+/// A의 입력은 사인(진폭 0.5), B의 입력은 무음, 편도 100ms(= D) 프록시. **B가 받는 오디오**(B의 출력 = A의 스트림)를
+/// B가 반사를 멈춘 시점(B의 `echo_active`가 꺼진 때 = 요청 해제 Ping이 B에 닿은 때) 기준으로 본다:
+/// - 올바른 구현: A는 "B가 반사를 멈췄다"는 표시가 돌아온 뒤(B의 다음 Ping, D 이상 뒤)에야 프로브를 놓고, 그 뒤 나간
+///   사인은 다시 D 뒤에 B에 닿는다 → B가 반사를 멈춘 뒤 **2D = 200ms 이상** B의 출력은 무음이다.
+/// - 프로브를 결과 수거 때 거두는 구현(`run_inner`의 `tap_off` → `stop`): 사인이 요청 해제 Ping과 거의 같이 나가므로
+///   B가 반사를 멈춘 직후(지터 버퍼만큼 뒤)부터 들린다.
+///
+/// 그래서 "B가 반사를 멈춘 뒤 150ms 동안 B의 출력이 무음"을 단언한다(이 변이에서 실패함을 확인했다, #140 리뷰 M1).
+/// 기준을 `run()` 반환 시점으로 잡지 않는 이유: `run()`은 프로브 회수 뒤 분석까지 하고 돌아오는데 디버그 빌드에서는 분석이
+/// 수백 ms라 반환 시점에는 이미 B에 내 소리가 닿아 있다.
+///
+/// A의 출력(되돌아온 소리)도 본다. 다만 그쪽 단언 (2)는 **요청 해제 Ping이 제때 닿는 이 시험에서는 변이를 못 잡는다**:
+/// B가 Ping을 내 실제 소리보다 먼저 받아 바로 반사를 멈추기 때문이다. Ping 유실 상황의 A 쪽 관찰은 `echo_lost_release_ping_keeps_my_echo_silent`가 한다.
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::echo::tests::echo_rt_follows_measure_signals(탭을 꺼도 프로브는 stop까지 워커에 남는다)"]
+fn echo_target_gets_silence_until_peer_stops_echoing() {
+    let _g = RT_LOCK.lock();
+    let (a, b, sink_a, sink_b, _proxy) = sine_pair();
+    // 측정 전: A는 B의 무음만 듣고, B는 A의 사인을 듣는다(B 쪽 관찰이 공허하지 않다는 확인)
+    let n_before = sink_a.lock().len();
+    assert!(peak_of(&sink_a, n_before.saturating_sub(9_600), n_before) < 0.02, "측정 전 A의 출력은 무음(B의 입력)");
+    assert!(wait_until(HANG, || {
+        let n = sink_b.lock().len();
+        peak_of(&sink_b, n.saturating_sub(frames(50)), n) > 0.2
+    }), "측정 전 B는 A의 사인을 들어야 한다");
+
+    let b = Arc::new(Mutex::new(b));
+    let stop = Arc::new(AtomicBool::new(false));
+    let acc = auto_accept(b.clone(), stop.clone());
+    // B가 반사를 시작했다가 멈추는 순간의 B 출력 위치를 잡는다(1ms 간격).
+    let watch = {
+        let (b, sink_b, stop) = (b.clone(), sink_b.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut was_active = false;
+            while !stop.load(Ordering::Relaxed) {
+                let active = b.lock().stats().peers.iter().any(|p| p.peer_id == "alice" && p.echo_active);
+                if was_active && !active {
+                    return Some(sink_b.lock().len());
+                }
+                was_active |= active;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            None
+        })
+    };
+    let n_start = sink_a.lock().len();
+    let rep = a.echo_job("bob").unwrap().run(3, Duration::from_secs(5), &AtomicBool::new(false)).unwrap();
+    let (n_return, nb_return) = (sink_a.lock().len(), sink_b.lock().len());
+    stop.store(true, Ordering::Relaxed);
+    assert!(acc.join().unwrap());
+    let nb_off = watch.join().unwrap().expect("B가 반사를 시작했다가 멈추는 것을 보지 못함");
+    assert!(rep.detected_runs >= 2, "{rep:?}");
+    // (B) B가 반사를 멈춘 뒤 150ms 동안 B가 듣는 것은 무음이다: A는 그 표시가 돌아올 때까지 프로브를 쥐고 있었다.
+    assert!(wait_until(HANG, || sink_b.lock().len() >= nb_return + frames(600)), "B 출력이 진행하지 않음");
+    let b_late = peak_of(&sink_b, nb_off, nb_off + frames(150));
+    assert!(b_late < 0.02, "상대가 반사를 멈췄다는 것을 알기 전에 측정 대상에게 내 실제 소리가 나갔다: B 출력 최대 {b_late}");
+    // 측정 뒤에는 B가 다시 A의 사인을 듣는다(위 무음이 '아무것도 안 들림'이 아니라 프로브 때문이었다는 확인)
+    let b_after = peak_of(&sink_b, nb_return + frames(300), nb_return + frames(600));
+    assert!(b_after > 0.2, "측정이 끝난 뒤 B는 A의 소리를 다시 들어야 한다: 최대 {b_after}");
+    // 측정이 돌아온 뒤 0.3초를 더 본다(A 쪽)
+    assert!(wait_until(HANG, || sink_a.lock().len() >= n_return + frames(300)), "출력이 진행하지 않음");
+    // (1) 반사 경로는 내 실제 소리를 나른다: 동의 직후 프로브 설치 전에 나간 사인이 측정 초반 1초 안에 들린다
+    let early = peak_of(&sink_a, n_start, n_start + frames(1_000));
+    assert!(early > 0.2, "측정 초반에 되돌아온 내 소리가 들려야 한다(반사 경로 확인): 최대 {early}");
+    // (2) 결과 수거 무렵부터 측정이 돌아온 뒤 0.3초까지 A의 출력은 무음(Ping이 제때 닿는 경우의 확인 — 변이는 (B)가 잡는다).
+    // 창 시작 = 반환 150ms 전: 마지막 클릭의 반사는 그 전에 다 돌아왔다.
+    let late = peak_of(&sink_a, n_return.saturating_sub(frames(150)), n_return + frames(300));
+    assert!(late < 0.02, "상대가 반사를 멈추기 전에 내 실제 소리가 나갔다가 되돌아왔다: 최대 {late}");
+    drop(a);
+}
+
+/// #140 리뷰 L3 후속(②b-5): **요청 해제 Ping이 유실**되어 상대가 반사를 계속하는 동안에도 내 출력(되돌아오는 소리)은 무음이다.
+/// A는 상대가 "반사를 멈췄다"고 알려 올 때까지 프로브를 쥐고 대상에게 무음을 보내기 때문이다.
+///
+/// 재현: B가 반사를 시작하고 `LOST_PING_DROP_AFTER`(2초) 뒤부터 B가 반사를 멈출 때까지 프록시가 A → B Ping을 모두 버린다.
+/// B는 마지막 요청 Ping 뒤 `ECHO_LAPSE`(3초)까지 반사를 계속하므로 반사는 측정 결과 수거(동의 + 설치 1.5초 + 클릭·듣기
+/// 약 1.3초) 뒤로 1.5초 이상 이어진다. 그 끝은 A의 `ECHO_STOP_WAIT`(4초, 결과 수거 뒤 시작) 안이다. 시간 여유는 상수 주석.
+/// - 올바른 구현: 그동안 A는 무음을 보내므로 B가 되돌리는 것도 무음 → B가 반사를 멈춘 무렵 A의 출력은 무음.
+/// - 프로브를 결과 수거 때 거두는 구현(`run_inner`의 `tap_off` → `stop`): 수거 직후부터 사인이 B로 가고 B가 그것을
+///   반사를 멈출 때까지 되돌린다 → B가 멈추기 전 `LOST_PING_LATE_BEFORE` ~ 멈춘 뒤 0.15초 창에 사인이 들린다(이 변이에서
+///   실패함을 확인했다).
+#[test]
+#[ignore = "realtime: 결정적 짝 engine::measure::echo::tests::echo_rt_follows_measure_signals(탭을 꺼도 프로브는 stop까지 워커에 남는다)"]
+fn echo_lost_release_ping_keeps_my_echo_silent() {
+    // 시각은 모두 B의 반사 시작(on) 기준. Ping 간격 500ms(`PING_INTERVAL`), `ECHO_LAPSE` 3초, `ECHO_SETTLE` 1.5초,
+    // 클릭 간격 0.3초, 편도 0.1초(`sine_pair`).
+    // - 버리기 시작 2초: 마지막으로 닿은 요청 Ping은 on + [1.5, 2.0]초 → B는 on + [4.5, 5.0]초에 멈춘다. 결과 수거
+    //   (on + 약 2.8초)보다 1.7초 이상 뒤라 변이의 누출 구간이 길고, A가 B의 멈춤을 아는 시각(최대 on + 약 5.6초)은
+    //   A의 `ECHO_STOP_WAIT` 마감(결과 수거 + 4초 = on + 6.8초 이후, A가 늦을수록 늦어진다)보다 1.2초 이상 앞이다.
+    const LOST_PING_DROP_AFTER: Duration = Duration::from_millis(2_000);
+    // - 반사 하한 4초: 이론 하한 4.5초에서 넷 스레드의 Ping 송신·관찰 지연 0.5초를 뺀 값. 못 미치면 "재현 실패"다.
+    const LOST_PING_MIN_REFLECT: Duration = Duration::from_millis(4_000);
+    // - late 창 시작 = B가 멈추기 0.3초 전 ≥ on + 4.2초. 정상 구현에서도 들리는 마지막 클릭 반사(동의 인지 0~0.5초 + 설치
+    //   1.5초 + 셋째 클릭 0.6초 + 왕복 약 0.25초 = on + 최대 약 2.85초)보다 1.35초 이상 뒤라, 측정 스레드가 CI 부하로 그만큼
+    //   밀려야 겹친다. 변이는 결과 수거 직후(on + 약 3.0초)부터 B가 멈출 때까지 새므로 이 창에 여전히 걸린다.
+    const LOST_PING_LATE_BEFORE_MS: usize = 300;
+    let _g = RT_LOCK.lock();
+    let (a, b, sink_a, _sink_b, proxy) = sine_pair();
+    let b = Arc::new(Mutex::new(b));
+    let stop = Arc::new(AtomicBool::new(false));
+    let acc = auto_accept(b.clone(), stop.clone());
+    // B의 반사 시작 → LOST_PING_DROP_AFTER 뒤 A → B Ping 버리기 시작 → B가 반사를 멈추면 버리기를 끝내고 그 순간의 A 출력 위치를 돌려준다.
+    let watch = {
+        let (b, sink_a, stop, drop_ping) = (b.clone(), sink_a.clone(), stop.clone(), proxy.drop_a_ping.clone());
+        std::thread::spawn(move || {
+            let mut on_at: Option<Instant> = None;
+            while !stop.load(Ordering::Relaxed) {
+                let active = b.lock().stats().peers.iter().any(|p| p.peer_id == "alice" && p.echo_active);
+                match on_at {
+                    None if active => on_at = Some(Instant::now()),
+                    Some(t) if active && t.elapsed() >= LOST_PING_DROP_AFTER => drop_ping.store(true, Ordering::Relaxed),
+                    Some(t) if !active => {
+                        let dropped = drop_ping.swap(false, Ordering::Relaxed);
+                        return Some((sink_a.lock().len(), dropped, t.elapsed()));
+                    }
+                    _ => {}
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            None
+        })
+    };
+    let n_start = sink_a.lock().len();
+    let rep = a.echo_job("bob").unwrap().run(3, Duration::from_secs(5), &AtomicBool::new(false)).unwrap();
+    let n_return = sink_a.lock().len();
+    stop.store(true, Ordering::Relaxed);
+    assert!(acc.join().unwrap());
+    let (na_off, dropped, reflect_for) = watch.join().unwrap().expect("B가 반사를 시작했다가 멈추는 것을 보지 못함");
+    eprintln!("Ping 유실: B 반사 {reflect_for:?}, {rep:?}");
+    assert!(dropped, "A → B Ping을 버리기 전에 B가 반사를 멈췄다(재현 실패)");
+    // 반사는 결과 수거(동의 + 1.5초 + 약 1.3초) 뒤로 이어져야 이 시험이 의미가 있다(재현 확인).
+    assert!(reflect_for >= LOST_PING_MIN_REFLECT, "B 반사가 너무 일찍 끝났다(재현 실패): {reflect_for:?}");
+    assert!(rep.detected_runs >= 2, "{rep:?}");
+    // 반사 경로는 내 실제 소리를 나른다(프로브 설치 전에 나간 사인, 공허함 방지)
+    let early = peak_of(&sink_a, n_start, n_start + frames(1_000));
+    assert!(early > 0.2, "측정 초반에 되돌아온 내 소리가 들려야 한다: 최대 {early}");
+    assert!(wait_until(HANG, || sink_a.lock().len() >= na_off.max(n_return) + frames(300)), "A 출력이 진행하지 않음");
+    let from = na_off.saturating_sub(frames(LOST_PING_LATE_BEFORE_MS));
+    let late = peak_of(&sink_a, from, na_off + frames(150));
+    // 실패 때 클릭 반사(측정 스레드 지연)인지 사인 누출인지 가를 수 있게 창 위치를 측정 시작 기준 초로 함께 적는다.
+    let sec = |n: usize| n.saturating_sub(n_start) as f64 / frames(1_000) as f64;
+    assert!(
+        late < 0.02,
+        "요청 해제 Ping이 유실된 동안 내 실제 소리가 상대에게 나갔다가 되돌아왔다: 최대 {late}, 창 {:.2}~{:.2}초(측정 시작 기준), 결과 반환 {:.2}초, B 반사 {reflect_for:?}, {rep:?}",
+        sec(from),
+        sec(na_off + frames(150)),
+        sec(n_return)
+    );
+    drop(a);
+}

@@ -1,0 +1,83 @@
+/* InstrumentModals.css — features/room/RoomDetail.css에서 옮긴 이 컴포넌트 전용 규칙 (P3-2 ③-3). 순서는 원래 RoomDetail.css 순서 그대로 */
+/* 악기 옵션 - 현재 선택된 악기 표시 */
+.instrument-option.current {
+  border-color: var(--accent);
+  background: var(--indigo-500-a10);
+}
+
+.inst-slots.current {
+  background: var(--accent);
+  color: white;
+}
+
+/* Instrument Select Modal */
+.instrument-select-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.instrument-select-modal .modal-content {
+  position: relative;
+  background: var(--bg-panel);
+  border-radius: var(--radius-2xl);
+  width: 90%;
+  max-width: 650px !important;
+  max-height: none !important;
+  overflow: visible !important;
+}
+
+.instrument-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.instrument-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 20px 16px;
+  background: var(--white-a03);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-xl);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.instrument-option:hover:not(.disabled) {
+  border-color: var(--accent);
+  background: var(--violet-500-a10);
+  transform: translateY(-2px);
+}
+
+.instrument-option.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.inst-icon {
+  font-size: 2.5rem;
+}
+
+.inst-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.inst-slots {
+  font-size: 0.8rem;
+  padding: 4px 12px;
+  background: var(--green-400-a20);
+  color: var(--success);
+  border-radius: var(--radius-xl);
+}
+
+.inst-slots.full {
+  background: var(--red-400-a20);
+  color: var(--error);
+}

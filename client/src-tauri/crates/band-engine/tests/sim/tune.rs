@@ -1,0 +1,1098 @@
+//! 지터 버퍼 자동 튜닝(P1-5) 결정적 시나리오: 피어 여럿(최대 6) → 지터 버퍼 → PeerFeed(워커) → OutputRt(콜백).
+//!
+//! 수신 경로는 실제와 같다(엔진 ③-a3): 도착 사건에서 피어별 수신 큐(`MediaTx::push`)에 넣고, 워커 사건에서 워커와 **같은
+//! 함수** `PeerSources::service`를 부른다(엔진 ②b-3 — 명령 큐 비우기 → 슬롯 배정 → 피어마다 `ingest` → `PeerFeed::service` →
+//! `publish`). 피어는 시작 때 미디어 명령 큐에 `MediaCmd::Add`로 넣는다. 같은 시각이면 도착을 워커보다 먼저 처리한다.
+//! 그래서 5분 fixture가 `PeerSources`의 공급 조정(순서·슬롯·프로필 적용)까지 덮는다.
+//!
+//! `worker::tests::run_feed_sim`과 같은 이벤트 모델이다(가상 시간, 결정적 의사난수). 피어마다 송신 장치 클럭(드리프트),
+//! 망 지터, 손실, 지연 스파이크(와이파이 버스트)를 따로 준다. 지표는 구현과 독립적으로 잰다:
+//! - `p95`: 실제 도착 지연(transit = 도착 − ts)의 1초 블록별 p95(블록 최솟값 기준)의 중앙값. GOAL 1절 "p95 지터".
+//! - `bufferMs`: 엔진이 보고하는 `PeerStats.bufferMs`(지터 버퍼 깊이, 소스 링 포함)를 100ms마다 표본.
+//! - 은닉 비율: 정착 후 구간의 은닉 프레임 / 생산 프레임(손실 포함, GOAL 2절).
+
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use band_dsp::mixer::MixControls;
+use band_dsp::stats::AudioCounters;
+use band_engine::testing::engine::worker::{CallbackTracker, PeerSources, PeerSourcesParts, WorkerStats, Nap, FINE_POLL, POLL};
+use band_dsp::codec::Encoder as SimEncoder;
+use band_dsp::config::{frame_code_from_samples, CodecKind, MAX_PAYLOAD_BYTES};
+use band_dsp::jitter::{JitterSettings, JitterStats};
+use band_engine::testing::engine::media_port::media_port;
+use band_dsp::peer_media::{MediaCmd, MediaSettings, PeerMedia};
+use band_engine::testing::engine::record::MarkSink;
+use band_dsp::media_link::{media_link, PeerKey};
+use band_engine::testing::engine::rt::{output_path, SLOT_DRAIN, SLOT_FREE};
+use band_dsp::packet::{Header, PacketType};
+use rand::{Rng, SeedableRng};
+use ringbuf::traits::Producer;
+
+#[derive(Clone)]
+pub(super) struct NetPeer {
+    pub in_buf: usize,
+    pub frame: usize,
+    /// 송신 장치 클럭 편차(ppm, +면 송신이 빠름 → 수신 버퍼가 차오름).
+    pub drift_ppm: f64,
+    /// 망 지연 지터 U(0..이 값) µs(기본 망 지연 0.2ms에 더함).
+    pub net_jitter_us: u64,
+    pub loss: f64,
+    /// (시작 µs, 길이 µs, 추가 지연 µs): 이 구간에 보낸 패킷은 그만큼 늦게 도착한다. 끝나면 밀린 패킷과 새 패킷이 몰려온다.
+    pub spikes: Vec<(u64, u64, u64)>,
+    pub profile: f32,
+    pub seed: u64,
+    /// 망 지터 분포. 균등은 U(0, net_jitter_us), 지수는 평균 net_jitter_us, 파레토는 척도 net_jitter_us·α 2.5(꼬리 김).
+    pub dist: JitDist,
+    /// 경로 변경(µs 시각, 그 전 추가 지연 µs, 그 뒤 지터 µs): 릴레이(느리고 안정) → 직접(빠르고 다른 지터) 승격.
+    pub switch: Option<(u64, u64, u64)>,
+    /// 버스트 손실(Gilbert–Elliott, 패킷마다 전이): (좋음→나쁨 확률, 나쁨→좋음 확률). 나쁨 상태의 패킷은 모두 잃는다. `loss`와 별개.
+    pub burst: Option<(f64, f64)>,
+    /// UDP 단절(시작 µs, 길이 µs): 이 구간에 보낸 패킷은 하나도 도착하지 않는다(P1-6).
+    pub outages: Vec<(u64, u64)>,
+    /// 망 조건 계단 변화(시각 µs, 추가 지연 µs, 지터 µs): 그 시각부터 기본 지연과 지터를 바꾼다(RTT 계단). `switch`보다 우선.
+    pub steps: Vec<(u64, u64, u64)>,
+    /// 실행 중 추가(②b-3b): 이 시각(µs) 이후 첫 워커 사건 직전에 미디어 명령 큐에 `Add`를 넣는다. 0이면 시작 때(기존 시나리오).
+    /// 그 전에 도착한 이 피어의 패킷은 버린다(엔진에서는 net에 피어가 없어 버려진다).
+    pub join_us: u64,
+    /// 실행 중 제거(②b-3b): 이 시각 이후 첫 워커 사건 직전에 `Remove`를 넣는다. 그 뒤 도착한 패킷은 버린다.
+    pub leave_us: Option<u64>,
+    /// 반복 이탈·재접속(혼돈 시나리오): (이탈 µs, 재접속 µs) 목록. 이탈은 `leave_us`와 같고, 재접속은 새 키·새 `PeerMedia`로
+    /// 다시 `Add`한다(엔진에서 피어가 제거된 뒤 다시 들어오는 것과 같다 — 송신 쪽 seq·ts는 이어진다). `leave_us`와 같이 쓰지 않는다.
+    pub rejoins: Vec<(u64, u64)>,
+    /// 중복(혼돈): (확률, 추가 지연 상한 µs). 패킷마다 이 확률로 사본 하나를 원본 지연 + U(0..상한) 뒤에 더 보낸다.
+    pub dup: Option<(f64, u64)>,
+    /// 순서 뒤바뀜(혼돈): (확률, 추가 지연 상한 µs). 패킷마다 이 확률로 U(0..상한)만큼 더 늦게 보낸다(뒤 패킷에 추월당한다).
+    pub reorder: Option<(f64, u64)>,
+    /// 지터 분포 급변(혼돈): 이 시각(µs)부터 분포를 바꾼다. 크기는 `net_jitter_us`·`steps`를 그대로 따른다.
+    pub dist_switch: Option<(u64, JitDist)>,
+    /// 지터 분포 여러 번 바꾸기(P2-16c): (시각 µs, 분포) — 그 시각 이후 마지막 항목이 `dist_switch`보다 우선한다.
+    pub dist_steps: Vec<(u64, JitDist)>,
+    /// 1프레임 늦춤(P2-17h 도착 여유 검증): 패킷마다 이 확률로 정확히 한 프레임(F) 더 늦게 보낸다 — "1F 늦은 복사본"이 제때
+    /// 드는지를 직접 재는 실험. 늦춘 수는 `tx_late_1f`.
+    pub late_1f: Option<f64>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum JitDist {
+    Uniform,
+    Exp,
+    Pareto,
+}
+
+impl NetPeer {
+    pub fn new(frame: usize, seed: u64) -> Self {
+        Self { in_buf: 128, frame, drift_ppm: 0.0, net_jitter_us: 0, loss: 0.0, spikes: Vec::new(), profile: 0.5, seed, dist: JitDist::Uniform, switch: None, burst: None, outages: Vec::new(), steps: Vec::new(), join_us: 0, leave_us: None, rejoins: Vec::new(), dup: None, reorder: None, dist_switch: None, dist_steps: Vec::new(), late_1f: None }
+    }
+}
+
+pub(super) struct MultiSim {
+    pub out_buf: usize,
+    pub out_phase_us: u64,
+    pub seconds: f64,
+    /// 워커 기상 지연 상한(µs): `wake`가 `Uniform`일 때 수면 뒤 U(0..이 값)만큼 늦게 깬다.
+    pub worker_jitter_us: u64,
+    /// 워커 기상 지연 모델(P2-17f). 기본은 `Uniform`(기존 시나리오·fixture 그대로).
+    pub wake: WakeModel,
+    pub out_early_us: u64,
+    pub dev_late_us: u64,
+    /// (주기 µs, 멈춤 µs, 끝 µs)
+    pub out_stall: Option<(u64, u64, u64)>,
+    /// 지표를 재기 시작하는 시각(µs).
+    pub settle_us: u64,
+    pub seed: u64,
+    pub peers: Vec<NetPeer>,
+    /// 지연 민감도(설계 6.4절 (4)): 패킷이 도착하고도 이만큼 더 묵은 뒤에야 수신 큐에 보인다(도착 시각은 그대로).
+    /// 실제 설계는 0이다. 0이면 사건 순서가 이 필드가 없을 때와 같다.
+    pub rx_hold_us: u64,
+}
+
+/// 워커 기상 지연 모델(P2-17f).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum WakeModel {
+    /// U(0..`worker_jitter_us`) — 수면 길이와 무관. 기존 시나리오·fixture의 모델(기본 300µs, 실측보다 낙관적).
+    Uniform,
+    /// 실측 분위표(`WAKE_FINE`/`WAKE_POLL`)에서 역CDF 선형 보간으로 뽑는다 — `FINE_POLL`·`POLL` 수면마다 다른 분포.
+    /// `worker_jitter_us`는 쓰지 않는다. 한계: 수면마다 독립 표본이라 꼬리가 몰려 나는 현상(코어 파킹·전원 상태 전환 동안
+    /// 연속 늦은 기상)은 재현하지 않고, 분위표는 기계 한 대 유휴 측정이다 — 실제보다 낙관적일 수도 비관적일 수도 있다.
+    Measured,
+}
+
+/// `FINE_POLL`(150µs) 수면 overshoot 분위표(누적 확률, µs). 실측: `tests/wake_latency.rs`, Intel Core Ultra 5 225H(하이브리드),
+/// MMCSS·HighQoS 끔, release, 유휴 20초(표본 6687, 2026-11-18). 부하 조건보다 꼬리가 길어 유휴를 쓴다(p99 956 vs 854µs).
+/// PR #200 측정(p50 399 / p99 898 / 최대 1337µs)과 같은 모양이다.
+pub(super) const WAKE_FINE: &[(f64, u64)] = &[(0.0, 59), (0.1, 357), (0.25, 377), (0.5, 395), (0.75, 416), (0.9, 500), (0.99, 956), (0.999, 1317), (1.0, 1469)];
+/// `POLL`(500µs) 수면 overshoot 분위표(같은 측정, 표본 15602).
+pub(super) const WAKE_POLL: &[(f64, u64)] = &[(0.0, 12), (0.1, 476), (0.25, 506), (0.5, 523), (0.75, 554), (0.9, 634), (0.99, 998), (0.999, 1420), (1.0, 2004)];
+
+/// 분위표의 역CDF(구간 선형): u ∈ [0, 1) → overshoot µs. 결정적(시드 RNG의 u만 쓴다).
+pub(super) fn wake_overshoot(table: &[(f64, u64)], u: f64) -> u64 {
+    let i = table.iter().position(|&(q, _)| q > u).unwrap_or(table.len() - 1).max(1);
+    let ((q0, v0), (q1, v1)) = (table[i - 1], table[i]);
+    let f = ((u - q0) / (q1 - q0)).clamp(0.0, 1.0);
+    (v0 as f64 + f * (v1 as f64 - v0 as f64)).round() as u64
+}
+
+impl MultiSim {
+    pub fn new(seconds: f64, peers: Vec<NetPeer>) -> Self {
+        Self {
+            out_buf: 128,
+            out_phase_us: 700,
+            seconds,
+            worker_jitter_us: 300,
+            wake: WakeModel::Uniform,
+            out_early_us: 0,
+            dev_late_us: 500,
+            out_stall: None,
+            settle_us: 5_000_000,
+            seed: 1,
+            peers,
+            rx_hold_us: 0,
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub(super) struct PeerOut {
+    pub js: JitterStats,
+    /// 정착 시점 통계.
+    pub js_settle: JitterStats,
+    /// (s, bufferMs, targetMs) 100ms마다(재생 중일 때만).
+    pub trace: Vec<(f64, f32, f32)>,
+    /// 은닉 이벤트 시각(µs).
+    pub conceal_us: Vec<u64>,
+    /// 1초 블록별 실제 도착 지연 p95(ms, 블록 최솟값 기준).
+    pub block_p95: Vec<(f64, f32)>,
+    pub margin: usize,
+    /// 정착 후 5초마다 본 `corr_time_pct`(최근 5초 보정 모드 비율).
+    pub corr_pcts: Vec<f32>,
+    /// 100ms마다 표본(재생 여부와 무관, P1-6 장시간 지표).
+    pub samples: Vec<Sample>,
+    /// 송신 패킷 수, 망 손실(무작위+버스트) 수, 단절로 잃은 수.
+    pub tx_sent: u64,
+    pub tx_lost: u64,
+    pub tx_outage: u64,
+    /// 세션(`PeerMedia`)마다 마지막 통계, 시작 순서대로(`rejoins`, 혼돈). 이탈한 세션은 이탈 때, 끝까지 남은 세션은 끝에 넣는다 —
+    /// 세션마다 정확히 한 번(#185 리뷰 L2: 전에는 끝난 세션만 넣고 `js`를 덧붙여 써서, 이탈한 채 끝나면 마지막 세션을 두 번 셌다).
+    /// `js`는 마지막 세션의 통계다.
+    pub sessions: Vec<JitterStats>,
+    /// 망이 만든 중복 사본 수(`dup`).
+    pub tx_dup: u64,
+    /// `late_1f`로 한 프레임 늦춘 패킷 수.
+    pub tx_late_1f: u64,
+}
+
+/// 100ms 표본: 시각(s), bufferMs, targetMs, 재생 중 여부, 누적 은닉·생산 프레임.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Sample {
+    pub t: f64,
+    pub buf: f32,
+    pub tgt: f32,
+    pub playing: bool,
+    pub concealed: u64,
+    /// 누적 손실 은닉(나머지는 언더런 은닉).
+    pub concealed_loss: u64,
+    pub produced: u64,
+    /// 목표 구성(ms): 지터 추정(`jitter_est_ms`), 소비자 여유(`lead_ms`), 늦은 패킷 예산 여유(`tail_ms`). 나머지(목표 − 셋)는
+    /// 삽입 진입 문턱 + 프로필·시작 여유(P1-6c, PR #65 리뷰: 1절 초과분 분해).
+    pub jit: f32,
+    pub lead: f32,
+    pub tail: f32,
+}
+
+impl PeerOut {
+    fn in_range(&self, a: f64, b: f64) -> Vec<f32> {
+        self.trace.iter().filter(|x| x.0 >= a && x.0 < b).map(|x| x.1).collect()
+    }
+    /// 구간 [a, b) 초의 bufferMs 중앙값.
+    pub fn median_buffer(&self, a: f64, b: f64) -> f32 {
+        median(self.in_range(a, b))
+    }
+    pub fn median_p95(&self, a: f64, b: f64) -> f32 {
+        median(self.block_p95.iter().filter(|x| x.0 >= a && x.0 < b).map(|x| x.1).collect())
+    }
+    /// 정착 후 은닉 비율(%).
+    pub fn conceal_pct(&self) -> f64 {
+        let c = self.js.concealed - self.js_settle.concealed;
+        let p = self.js.produced - self.js_settle.produced;
+        c as f64 * 100.0 / p.max(1) as f64
+    }
+    /// 정착 후 보정 모드 시간 비율(%): 100ms 표본 중 보정 샘플 수가 늘어난 표본의 비율이 아니라, 엔진 통계(최근 5초)의 평균.
+    pub fn corr_time_pct(&self) -> f64 {
+        if self.corr_pcts.is_empty() {
+            return 0.0;
+        }
+        self.corr_pcts.iter().map(|&x| x as f64).sum::<f64>() / self.corr_pcts.len() as f64
+    }
+    pub fn corrections(&self) -> u64 {
+        self.js.corrections() - self.js_settle.corrections()
+    }
+    /// 시각 `t`(s) 직전 표본의 목표.
+    pub fn target_at(&self, t: f64) -> f32 {
+        self.trace.iter().rev().find(|x| x.0 <= t).map(|x| x.2).unwrap_or(0.0)
+    }
+    /// `from` 이후 처음으로 목표가 `level` 이상이 된 시각(s).
+    pub fn first_target_at_least(&self, from: f64, level: f32) -> Option<f64> {
+        self.trace.iter().find(|x| x.0 >= from && x.2 >= level).map(|x| x.0)
+    }
+    /// [from, to) 구간에서 bufferMs가 `level`을 넘은 마지막 표본 시각(s). 없으면 None.
+    pub fn last_buffer_above(&self, from: f64, to: f64, level: f32) -> Option<f64> {
+        self.trace.iter().filter(|x| x.0 >= from && x.0 < to && x.1 > level).map(|x| x.0).next_back()
+    }
+    pub fn conceal_between(&self, a_us: u64, b_us: u64) -> usize {
+        self.conceal_us.iter().filter(|&&c| c >= a_us && c < b_us).count()
+    }
+}
+
+pub(super) fn median(mut v: Vec<f32>) -> f32 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+pub(super) struct MultiOut {
+    pub peers: Vec<PeerOut>,
+    pub xruns: u64,
+    pub xrun_us: Vec<u64>,
+    /// 피어 수명 사건(②b-3b): (관찰한 사건 시각 µs, 피어 번호, 사건). 워커 사건·콜백 사건 직후에 본 것이다.
+    pub churn: Vec<(u64, usize, ChurnEv)>,
+    /// 워커 기다림 횟수 [`POLL`, `FINE_POLL`, 돌기](P2-17g `Nap::pick` — 수면 패턴 변화를 본다).
+    pub naps: [u64; 3],
+}
+
+/// 하네스가 본 피어 수명 사건(②b-3b). 슬롯 번호를 싣는다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ChurnEv {
+    /// `Add`를 넣은 워커 사건.
+    Join,
+    /// `PeerSources`가 슬롯을 배정했다(그 워커 사건 직후 처음 보임).
+    Slot(usize),
+    /// `Remove`를 넣은 워커 사건.
+    Leave,
+    /// 슬롯이 `SLOT_DRAIN`이 됐다(워커가 해제 요청).
+    Drain(usize),
+    /// 출력 콜백이 슬롯을 비워 `SLOT_FREE`가 됐다.
+    Free(usize),
+}
+
+struct TxState {
+    enc: SimEncoder,
+    rng: rand::rngs::StdRng,
+    seq: u32,
+    ts: u32,
+    acc: usize,
+    phase: f64,
+    k_in: u64,
+    period_us: f64,
+    fcode: u8,
+    /// 현재 1초 블록의 transit(µs) 목록과 블록 번호.
+    block: Vec<f64>,
+    block_no: u64,
+    /// Gilbert–Elliott 나쁨 상태.
+    ge_bad: bool,
+    /// 혼돈 입력(`dup`·`reorder`) 전용 난수(#185 리뷰 M1): `rng`와 따로 뽑아, 켜도 손실·지터 난수열이 그대로다 —
+    /// 같은 시드의 "혼돈 없는 같은 회선"과 손실·지터 실현이 같다.
+    chaos_rng: rand::rngs::StdRng,
+}
+
+pub(super) fn run_multi(p: &MultiSim) -> MultiOut {
+    const RATE: f64 = 48_000.0;
+    let n = p.peers.len();
+    assert!((1..=6).contains(&n));
+    let mut rng = rand::rngs::StdRng::seed_from_u64(p.seed);
+    let counters = Arc::new(AudioCounters::default());
+    let controls = Arc::new(MixControls::default());
+    let (mut rt, feed) = output_path(counters.clone(), controls);
+    // 워커와 같은 조립(②b-3): 슬롯 1.. 생산자와 미디어 명령 큐의 워커 쪽 끝을 `PeerSources`에 주고, 피어는 명령 큐로 넣는다.
+    // 프로필은 워커처럼 전역 한 값이다 — 한 실행 안에서 피어마다 다른 프로필을 주는 시나리오는 없다(있으면 여기서 멈춘다:
+    // `PeerSources`에 테스트 전용 입구를 내지 말고 그 시나리오만 따로 조립할 것, 설계 5.3절).
+    let profile = p.peers[0].profile;
+    assert!(p.peers.iter().all(|np| np.profile == profile), "하네스는 한 실행에 프로필 하나만 받는다");
+    let settings = JitterSettings { min_ms: 0.0, max_ms: 80.0, profile };
+    let (port, port_rt) = media_port();
+    let mut prods = feed.prods;
+    let peer_prods = prods.split_off(1);
+    let mut sources = PeerSources::new(PeerSourcesParts {
+        prods: peer_prods,
+        port: port_rt,
+        settings: Arc::new(MediaSettings::new(settings)),
+        rec_marks: Arc::new(MarkSink::default()),
+    });
+    let bank = feed.bank;
+    let wstats = WorkerStats::default();
+    // 피어 수명(②b-3b). `order` = 지금 워커 표에 있어야 하는 피어 번호(표 순서 — 추가 순, 제거는 그 자리를 뺀다).
+    // 표의 `pos`번째 = 피어 `order[pos]`. 시작 때만 넣는 기존 시나리오에서는 0..n 그대로다.
+    let mut order: Vec<usize> = Vec::new();
+    let mut waiting: Vec<Option<Box<PeerMedia>>> = Vec::new();
+    let mut left = vec![false; n];
+    let mut slot_of: Vec<Option<usize>> = vec![None; n];
+    // (피어, 슬롯, DRAIN을 봤는가): 제거한 피어의 슬롯이 DRAIN → FREE로 가는 것을 본다.
+    let mut draining: Vec<(usize, usize, bool)> = Vec::new();
+    let mut churn: Vec<(u64, usize, ChurnEv)> = Vec::new();
+    let churning = p.peers.iter().any(|np| np.join_us > 0 || np.leave_us.is_some() || !np.rejoins.is_empty());
+    assert!(p.peers.iter().all(|np| np.rejoins.is_empty() || np.leave_us.is_none()), "rejoins와 leave_us는 같이 쓰지 않는다");
+    // 재접속(혼돈): 피어마다 지금 키, 다음 rejoins 번호, 이탈해 반환된 옛 공유 쪽(끝에 누수 확인).
+    let mut keys: Vec<PeerKey> = (0..n).map(|i| PeerKey::from_raw(i as u64 + 1)).collect();
+    let mut rj = vec![0usize; n];
+    let mut retired = Vec::new();
+    let mut mtxs = Vec::new();
+    let mut txs = Vec::new();
+    // 워커 단계(`PeerSources::service`·`close`) 안에서 일어난 할당·재할당·해제 수(엔진 ⑧ 후속). 0이어야 한다.
+    let mut worker_allocs = 0u64;
+    // 제어 평면이 쥔 공유 쪽(엔진 등록부 역할): 끝에 참조 수로 누수·워커 해제가 없음을 본다.
+    let mut shareds = Vec::new();
+    for (i, np) in p.peers.iter().enumerate() {
+        let key = PeerKey::from_raw(i as u64 + 1);
+        let (mtx, mrx) = media_link(key);
+        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, 0, settings, mrx, 48_000, band_dsp::config::ResampleQuality::Auto).expect("48k 통과 리샘플러");
+        // 슬롯 게인: 전에는 하네스가 슬롯에 (0.15, 0.15)를 직접 썼다. 이제 `PeerSources`가 반복마다 피어 믹스 게인으로 덮어쓰므로
+        // 믹스 게인을 0.15로 둔다(팬 0). 팬 법칙(cos(π/4)·√2, f32)이 정확히 1이 아니라 슬롯 게인은 0.15에서 1ulp쯤 다르다.
+        // 리포트에는 영향이 없다: 슬롯 게인은 `OutputRt::mix_source`에서 버스·탭에 더할 때만 곱해지고, 언더런(xrun) 판정은
+        // 링에서 꺼낸 양(`got < want`)과 `playing`만 본다. 하네스 리포트는 지터 통계·은닉 시각·xrun 시각뿐이다(설계 5.3절).
+        shared.mix.gain.store(0.15);
+        let g = shared.mix.lr_gains();
+        assert!((g.0 - 0.15).abs() < 1e-6 && g.0 == g.1, "슬롯 게인 {g:?}");
+        shareds.push(shared);
+        // 시작 때 있는 피어는 바로 넣고(기존 시나리오 그대로), 실행 중 추가는 그 시각의 워커 사건에서 넣는다(②b-3b).
+        if np.join_us == 0 {
+            let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Add(media));
+            order.push(i);
+            waiting.push(None);
+        } else {
+            waiting.push(Some(media));
+        }
+        mtxs.push(mtx);
+        txs.push(TxState {
+            enc: SimEncoder::new(CodecKind::Pcm16, 1, 0).unwrap(),
+            rng: rand::rngs::StdRng::seed_from_u64(np.seed),
+            seq: 7 + i as u32 * 1000,
+            ts: 1000 + i as u32 * 77_777,
+            acc: 0,
+            phase: 0.0,
+            k_in: 1,
+            period_us: np.in_buf as f64 / RATE * 1e6 / (1.0 + np.drift_ppm * 1e-6),
+            fcode: frame_code_from_samples(np.frame).unwrap(),
+            block: Vec::new(),
+            block_no: 0,
+            ge_bad: false,
+            chaos_rng: rand::rngs::StdRng::seed_from_u64(np.seed ^ 0xC4A0_5000),
+        });
+    }
+    let mut tracker = CallbackTracker::new(48_000);
+    let mut dev = vec![0f32; p.out_buf * 2];
+    let mut payload = vec![0u8; MAX_PAYLOAD_BYTES];
+    let mut pending: Vec<(u64, usize, Header, Vec<u8>)> = Vec::new();
+    // rx_hold_us > 0일 때만: (보이는 시각, 피어, 헤더, 페이로드, 도착 시각)
+    let mut held: Vec<(u64, usize, Header, Vec<u8>, u64)> = Vec::new();
+    let out_period = p.out_buf as f64 / RATE * 1e6;
+    let mut k_out = 0u64;
+    let mut t_w = 0u64;
+    let end_us = (p.seconds * 1e6) as u64;
+    let mut outs: Vec<PeerOut> = vec![PeerOut::default(); n];
+    let mut seen_conc = vec![0u64; n];
+    let mut settled = false;
+    let mut next_trace = 0u64;
+    let mut xrun_us = Vec::new();
+    let mut nap_counts = [0u64; 3];
+    let mut seen_x = 0u64;
+    let jit = |k: u64, salt: u64, max: u64| -> u64 {
+        if max == 0 {
+            return 0;
+        }
+        let h = (k ^ p.seed ^ salt).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        (h >> 11) % max
+    };
+    let out_due = |k: u64| -> u64 {
+        let early = jit(k, 0, p.out_early_us.min(out_period as u64 * 9 / 10));
+        let late = jit(k, 0x5A5A_0000_0000, p.dev_late_us);
+        let nominal = (p.out_phase_us + (k as f64 * out_period) as u64).saturating_sub(early) + late;
+        match p.out_stall {
+            Some((every, len, until)) if nominal % every < len && nominal > every && nominal < until => nominal - nominal % every + len,
+            _ => nominal,
+        }
+    };
+    loop {
+        let t_ins: Vec<u64> = txs
+            .iter()
+            .enumerate()
+            .map(|(i, tx)| (tx.k_in as f64 * tx.period_us) as u64 + jit(tx.k_in, 0xA5A5_0000_0000 + i as u64, p.dev_late_us.min(tx.period_us as u64 * 9 / 10)))
+            .collect();
+        let (pi, t_in) = t_ins.iter().copied().enumerate().min_by_key(|x| x.1).unwrap();
+        let t_out = out_due(k_out);
+        let t_arr = pending.iter().map(|x| x.0).min().unwrap_or(u64::MAX);
+        let t_vis = held.iter().map(|x| x.0).min().unwrap_or(u64::MAX);
+        let t = t_in.min(t_out).min(t_arr).min(t_vis).min(t_w);
+        if t > end_us {
+            break;
+        }
+        if t == t_arr {
+            let i = pending.iter().position(|x| x.0 == t).unwrap();
+            let (_, peer, h, pl) = pending.swap_remove(i);
+            // 아직 추가 전이거나 제거된 피어의 패킷은 버린다(②b-3b — 엔진에서는 net 피어 표에 없어 버려진다)
+            if !order.contains(&peer) {
+                continue;
+            }
+            if p.rx_hold_us == 0 {
+                mtxs[peer].push(&h, &pl, t);
+            } else {
+                held.push((t + p.rx_hold_us, peer, h, pl.clone(), t));
+            }
+            // 실제 도착 지연(µs): 도착 − ts를 수신 클럭으로 환산(송신 클럭 편차는 블록 최솟값이 흡수)
+            let tx = &mut txs[peer];
+            let blk = t / 1_000_000;
+            if blk != tx.block_no {
+                if tx.block.len() > 10 && blk > 0 {
+                    let mn = tx.block.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let mut rel: Vec<f32> = tx.block.iter().map(|x| ((x - mn) / 1000.0) as f32).collect();
+                    rel.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let k = ((rel.len() as f64 * 0.95).ceil() as usize).clamp(1, rel.len()) - 1;
+                    outs[peer].block_p95.push((tx.block_no as f64, rel[k]));
+                }
+                tx.block.clear();
+                tx.block_no = blk;
+            }
+            let ts_us = h.timestamp.wrapping_sub(1000 + peer as u32 * 77_777) as f64 / RATE * 1e6 / (1.0 + p.peers[peer].drift_ppm * 1e-6);
+            tx.block.push(t as f64 - ts_us);
+        } else if t == t_vis {
+            let i = held.iter().position(|x| x.0 == t).unwrap();
+            let (_, peer, h, pl, arrival) = held.swap_remove(i);
+            mtxs[peer].push(&h, &pl, arrival);
+        } else if t == t_in {
+            let np = &p.peers[pi];
+            let tx = &mut txs[pi];
+            tx.acc += np.in_buf;
+            while tx.acc >= np.frame {
+                let f0 = 330.0 + 70.0 * pi as f64;
+                let pcm: Vec<f32> = (0..np.frame)
+                    .map(|_| {
+                        let v = (tx.phase * 2.0 * std::f64::consts::PI).sin() as f32 * 0.5;
+                        tx.phase = (tx.phase + f0 / RATE).fract();
+                        v
+                    })
+                    .collect();
+                let nb = tx.enc.encode(&pcm, &mut payload).unwrap();
+                let h = Header { ptype: PacketType::Audio, ssrc: 1 + pi as u32, seq: tx.seq, timestamp: tx.ts, flags: 0, frame_code: tx.fcode };
+                let spike: u64 = np.spikes.iter().filter(|s| t >= s.0 && t < s.0 + s.1).map(|s| s.2).sum();
+                let (mut path_extra, mut jit_us) = match np.switch {
+                    Some((ts, extra, _)) if t < ts => (extra, np.net_jitter_us),
+                    Some((_, _, after)) => (0, after),
+                    None => (0, np.net_jitter_us),
+                };
+                if let Some(&(_, extra, j)) = np.steps.iter().rev().find(|s| t >= s.0) {
+                    (path_extra, jit_us) = (extra, j);
+                }
+                let dist = match np.dist_switch {
+                    Some((ts, d)) if t >= ts => d,
+                    _ => np.dist,
+                };
+                let dist = np.dist_steps.iter().rev().find(|s| t >= s.0).map_or(dist, |s| s.1);
+                let jitter = match dist {
+                    JitDist::Uniform => tx.rng.gen_range(0..jit_us.max(100)),
+                    JitDist::Exp => (-(1.0 - tx.rng.gen::<f64>()).ln() * jit_us as f64) as u64,
+                    JitDist::Pareto => (jit_us as f64 * 1.5 * ((1.0 - tx.rng.gen::<f64>()).powf(-1.0 / 2.5) - 1.0)).min(200_000.0) as u64,
+                };
+                let mut delay = 200 + jitter + spike + path_extra;
+                if let Some((pr, max)) = np.reorder {
+                    if tx.chaos_rng.gen_bool(pr) {
+                        delay += tx.chaos_rng.gen_range(0..max.max(1));
+                    }
+                }
+                let late_1f = np.late_1f.is_some_and(|pr| tx.chaos_rng.gen_bool(pr));
+                if late_1f {
+                    delay += (np.frame as f64 / RATE * 1e6).round() as u64;
+                }
+                let dup_extra = match np.dup {
+                    Some((pr, max)) if tx.chaos_rng.gen_bool(pr) => Some(tx.chaos_rng.gen_range(0..max.max(1))),
+                    _ => None,
+                };
+                // 기존 시나리오의 난수 순서를 바꾸지 않도록 새 조건(버스트·단절)은 쓸 때만 난수를 뽑는다.
+                let mut lost = np.loss > 0.0 && tx.rng.gen_bool(np.loss);
+                if let Some((p_gb, p_bg)) = np.burst {
+                    tx.ge_bad = if tx.ge_bad { !tx.rng.gen_bool(p_bg) } else { tx.rng.gen_bool(p_gb) };
+                    lost |= tx.ge_bad;
+                }
+                let cut = np.outages.iter().any(|o| t >= o.0 && t < o.0 + o.1);
+                let o = &mut outs[pi];
+                o.tx_sent += 1;
+                if cut {
+                    o.tx_outage += 1;
+                } else if lost {
+                    o.tx_lost += 1;
+                } else {
+                    pending.push((t + delay, pi, h, payload[..nb].to_vec()));
+                    o.tx_late_1f += late_1f as u64;
+                    if let Some(extra) = dup_extra {
+                        o.tx_dup += 1;
+                        pending.push((t + delay + extra, pi, h, payload[..nb].to_vec()));
+                    }
+                }
+                tx.seq = tx.seq.wrapping_add(1);
+                tx.ts = tx.ts.wrapping_add(np.frame as u32);
+                tx.acc -= np.frame;
+            }
+            tx.k_in += 1;
+        } else if t == t_out {
+            rt.process(&mut dev, 2);
+            k_out += 1;
+            draining.retain(|&(i, s, _)| {
+                let free = bank.slots[s].state.load(Ordering::Acquire) == SLOT_FREE;
+                if free {
+                    churn.push((t, i, ChurnEv::Free(s)));
+                }
+                !free
+            });
+        } else {
+            let timing = tracker.observe(&counters, t, p.out_buf, 48_000);
+            // 워커 사건: 워커와 같은 함수. 첫 사건에서 명령 큐의 `Add`가 표에 들어가고 슬롯 1..n이 순서대로 배정된다.
+            // 피어 수명(②b-3b): 제어 평면이 이 워커 반복 직전에 명령을 넣은 것으로 본다. 반환 큐도 제어 평면처럼 비운다.
+            if churning {
+                port.reclaim();
+                for i in 0..n {
+                    if let Some(media) = waiting[i].take_if(|_| t >= p.peers[i].join_us) {
+                        let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Add(media));
+                        order.push(i);
+                        churn.push((t, i, ChurnEv::Join));
+                    }
+                    let rejoin_at = p.peers[i].rejoins.get(rj[i]).copied();
+                    if left[i] && rejoin_at.is_some_and(|r| t >= r.1) {
+                        // 재접속: 새 키·새 PeerMedia(제어 평면 할당 — 워커 계수 밖). 옛 공유 쪽은 누수 확인용으로 남긴다.
+                        rj[i] += 1;
+                        let key = PeerKey::from_raw(i as u64 + 1 + 16 * rj[i] as u64);
+                        let (mtx, mrx) = media_link(key);
+                        let (shared, media) = PeerMedia::new(key, format!("p{i}"), 1 + i as u32, t, settings, mrx, 48_000, band_dsp::config::ResampleQuality::Auto).expect("48k 통과 리샘플러");
+                        shared.mix.gain.store(0.15);
+                        retired.push(std::mem::replace(&mut shareds[i], shared));
+                        mtxs[i] = mtx;
+                        keys[i] = key;
+                        let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Add(media));
+                        order.push(i);
+                        left[i] = false;
+                        seen_conc[i] = 0;
+                        churn.push((t, i, ChurnEv::Join));
+                    } else if !left[i] && (p.peers[i].leave_us.is_some_and(|l| t >= l) || rejoin_at.is_some_and(|r| t >= r.0)) {
+                        if let Some(pos) = order.iter().position(|&x| x == i) {
+                            // 마지막 통계는 제거 직전 것(이전 워커 사건의 결과)
+                            outs[i].js = sources.media_at(pos).jitter().stats();
+                            let last = outs[i].js;
+                            outs[i].sessions.push(last);
+                            let _ = port.reserve_cmd(1).expect("명령 큐 용량(16) 안").try_push(MediaCmd::Remove(keys[i]));
+                            order.remove(pos);
+                            left[i] = true;
+                            churn.push((t, i, ChurnEv::Leave));
+                            if let Some(s) = slot_of[i].take() {
+                                draining.push((i, s, false));
+                            }
+                        }
+                    }
+                }
+            }
+            let (round, a) = band_engine::testing::alloc::counted(|| sources.service(&bank, &counters, &wstats, 48_000, &timing, None));
+            worker_allocs += a;
+            let nap = Nap::pick(t, round.deadline_us);
+            // 명령은 그 반복에 적용된다(J1): 표 길이·순서가 바로 맞고, 새 피어는 슬롯을 받고, 제거된 피어의 슬롯은 DRAIN이다.
+            assert_eq!(sources.table_len(), order.len(), "t={t}: 워커 표 길이");
+            for (pos, &i) in order.iter().enumerate() {
+                assert_eq!(sources.media_at(pos).shared().key, keys[i], "t={t}: 표 순서");
+                if slot_of[i].is_none() {
+                    if let Some(s) = sources.feed_slot(pos) {
+                        slot_of[i] = Some(s);
+                        churn.push((t, i, ChurnEv::Slot(s)));
+                    }
+                }
+            }
+            for d in draining.iter_mut().filter(|d| !d.2) {
+                if bank.slots[d.1].state.load(Ordering::Acquire) == SLOT_DRAIN {
+                    d.2 = true;
+                    churn.push((t, d.0, ChurnEv::Drain(d.1)));
+                }
+            }
+            for (pos, &i) in order.iter().enumerate() {
+                let c = sources.media_at(pos).jitter().stats().concealed;
+                if c > seen_conc[i] {
+                    outs[i].conceal_us.push(t);
+                }
+                seen_conc[i] = c;
+            }
+            let x = counters.xruns.load(Ordering::Relaxed);
+            if x > seen_x {
+                xrun_us.push(t);
+            }
+            seen_x = x;
+            if !settled && t >= p.settle_us {
+                settled = true;
+                for (pos, &i) in order.iter().enumerate() {
+                    outs[i].js_settle = sources.media_at(pos).jitter().stats();
+                }
+            }
+            if t >= next_trace {
+                for (pos, &i) in order.iter().enumerate() {
+                    let s = sources.media_at(pos).jitter().stats();
+                    let playing = sources.media_at(pos).jitter().is_playing();
+                    outs[i].samples.push(Sample { t: t as f64 / 1e6, buf: s.buffer_ms, tgt: s.target_ms, playing, concealed: s.concealed, concealed_loss: s.concealed_loss, produced: s.produced, jit: s.jitter_est_ms, lead: s.lead_ms, tail: s.tail_ms });
+                    if playing {
+                        outs[i].trace.push((t as f64 / 1e6, s.buffer_ms, s.target_ms));
+                        if t >= p.settle_us && (t - p.settle_us) % 5_000_000 < 100_000 && t > p.settle_us + 4_900_000 {
+                            outs[i].corr_pcts.push(s.corr_time_pct);
+                        }
+                    }
+                }
+                next_trace += 100_000;
+            }
+            // Worker::run과 같은 기다림(`Nap::pick`, P2-17g). 기상 지연은 수면마다 하나 뽑는다(돌기는 마감 시각에 바로 깬다 — 뽑지
+            // 않는다).
+            let fine = nap == Nap::Fine;
+            let poll = if fine { FINE_POLL } else { POLL }.as_micros() as u64;
+            t_w = match nap {
+                Nap::Spin { until_us } => {
+                    nap_counts[2] += 1;
+                    until_us
+                }
+                _ => {
+                    nap_counts[usize::from(fine)] += 1;
+                    t + poll
+                        + match p.wake {
+                            WakeModel::Uniform if p.worker_jitter_us > 0 => rng.gen_range(0..p.worker_jitter_us),
+                            WakeModel::Uniform => 0,
+                            WakeModel::Measured => wake_overshoot(if fine { WAKE_FINE } else { WAKE_POLL }, rng.gen::<f64>()),
+                        }
+                }
+            };
+        }
+    }
+    for (pos, &i) in order.iter().enumerate() {
+        if !churning {
+            // 슬롯은 추가 순서대로 1..n(전에는 하네스가 손으로 준 값)
+            assert_eq!(sources.feed_slot(pos), Some(1 + i), "피어 {i}의 슬롯");
+        }
+        outs[i].margin = sources.feed_margin(pos).expect("슬롯이 배정된 피어");
+        let pm = sources.media_at(pos);
+        // 마지막 워커 사건 뒤에 도착해 큐에 남은 것까지 넣고 잰다(이전: 도착 즉시 삽입 — 같은 상태가 된다)
+        let _ = pm.ingest(profile);
+        assert_eq!(pm.rx_dropped(), 0, "하네스에서 수신 큐가 넘쳤다(피어 {i})");
+        outs[i].js = pm.jitter().stats();
+        let last = outs[i].js;
+        outs[i].sessions.push(last);
+    }
+    // 정지(엔진 ⑧ 후속): 워커는 표에 남은 피어를 리샘플러째 반환 큐로 보내고(할당·해제 0), 해제는 제어 평면의 `reclaim`이 한다.
+    // 실행 중 제거된 피어는 이미 `reclaim`됐거나 아직 반환 큐에 있다 — 어느 쪽이든 워커가 해제한 것은 없다.
+    let ((), a) = band_engine::testing::alloc::counted(|| sources.close(&bank));
+    worker_allocs += a;
+    assert_eq!(sources.table_len(), 0);
+    for &i in &order {
+        assert_eq!(Arc::strong_count(&shareds[i]), 2, "피어 {i}: 정지 때 남은 피어는 반환 큐에 살아 있어야 한다(워커가 해제하지 않는다)");
+    }
+    port.reclaim();
+    for (i, s) in shareds.iter().enumerate() {
+        let never_joined = waiting[i].is_some();
+        assert_eq!(Arc::strong_count(s), 1 + usize::from(never_joined), "피어 {i}: 반환 큐를 비운 뒤 남은 참조(누수)");
+    }
+    for (k, s) in retired.iter().enumerate() {
+        assert_eq!(Arc::strong_count(s), 1, "재접속 전 세션 {k}: 반환 큐를 비운 뒤 남은 참조(누수)");
+    }
+    assert_eq!(worker_allocs, 0, "워커 단계(PeerSources::service·close)가 할당·해제를 {worker_allocs}회 했다");
+    MultiOut { peers: outs, xruns: counters.xruns.load(Ordering::Relaxed), xrun_us, churn, naps: nap_counts }
+}
+
+fn ms(frame: usize) -> f32 {
+    frame as f32 / 48.0
+}
+
+/// 시나리오 한 줄 요약(PR 표에 옮기는 값).
+fn report(label: &str, p: &PeerOut, frame: usize, a: f64, b: f64) -> (f32, f32) {
+    let (buf, p95) = (p.median_buffer(a, b), p.median_p95(a, b));
+    println!(
+        "TUNE {label}: bufferMs 중앙값 {buf:.2} (1F+p95 = {:.2}), 목표 {:.2}, p95 {p95:.2}ms, 은닉 {:.2}% (손실 {:.1}%), 보정 {}, 보정 시간 {:.1}%, 최대 {:.1}센트, 늦은 패킷 버림 {}, 여유 {}",
+        ms(frame) + p95,
+        p.js.target_ms,
+        p.conceal_pct(),
+        p.js.loss_pct,
+        p.corrections(),
+        p.corr_time_pct(),
+        p.js.max_corr_cents,
+        p.js.late_dropped,
+        p.margin
+    );
+    (buf, p95)
+}
+
+// ----------------------------------------------------------------------------
+// 완료 조건(P1-5)
+// ----------------------------------------------------------------------------
+
+/// 안정 회선(망 지터 ≤ 1ms): bufferMs 중앙값 ≤ 1프레임 + p95 지터(GOAL 1절). 2.5/5/10ms 프레임.
+#[test]
+fn tune_stable_line_buffer_within_goal() {
+    for (frame, in_buf, out_buf) in [(120usize, 128usize, 128usize), (240, 128, 128), (240, 480, 480), (480, 256, 256)] {
+        let mut np = NetPeer::new(frame, 3);
+        np.in_buf = in_buf;
+        np.net_jitter_us = 1000;
+        let mut sim = MultiSim::new(30.0, vec![np]);
+        sim.out_buf = out_buf;
+        let r = run_multi(&sim);
+        let p = &r.peers[0];
+        let (buf, p95) = report(&format!("안정 F {frame} in {in_buf} out {out_buf}"), p, frame, 5.0, 30.0);
+        assert!(buf <= ms(frame) + p95, "F {frame}: bufferMs {buf:.2} > 1F + p95 {:.2}", ms(frame) + p95);
+        assert_eq!(p.conceal_pct(), 0.0, "안정 회선 은닉");
+        assert_eq!(r.xruns, 0);
+    }
+}
+
+/// 손실 1%(+ 망 지터 0~5ms): 은닉 비율 ≤ 1.5%(GOAL 2절).
+#[test]
+fn tune_loss_1pct_concealment_within_goal() {
+    for (frame, jitter_us) in [(120usize, 5000u64), (240, 5000), (240, 20_000)] {
+        let mut np = NetPeer::new(frame, 17);
+        np.net_jitter_us = jitter_us;
+        np.loss = 0.01;
+        let r = run_multi(&MultiSim::new(60.0, vec![np]));
+        let p = &r.peers[0];
+        report(&format!("손실 1% F {frame} 지터 {jitter_us}µs"), p, frame, 5.0, 60.0);
+        assert!(p.conceal_pct() <= 1.5, "F {frame} 지터 {jitter_us}: 은닉 {:.2}%", p.conceal_pct());
+        // PR #20 H1: 깊이 보정의 국소 피치 편차는 비율 상한(0.25% ≈ 4.3센트)을 넘지 않는다.
+        assert!(p.js.max_corr_cents <= 4.4, "F {frame}: 최대 {:.1}센트", p.js.max_corr_cents);
+    }
+}
+
+/// 지터 버스트(10초에 0.3초 동안 +30ms): 상향 시각, 버스트 동안 은닉, 끝난 뒤 복귀 시간.
+#[test]
+fn tune_jitter_burst_up_and_return() {
+    for frame in [120usize, 240] {
+        let mut np = NetPeer::new(frame, 5);
+        np.net_jitter_us = 1000;
+        np.spikes = vec![(10_000_000, 300_000, 30_000)];
+        let r = run_multi(&MultiSim::new(40.0, vec![np]));
+        let p = &r.peers[0];
+        let base_t = p.target_at(9.9);
+        let base_b = p.median_buffer(5.0, 9.9);
+        let up = p.first_target_at_least(10.0, base_t + 15.0).map(|t| t - 10.0);
+        let back = p.last_buffer_above(10.3, 40.0, base_b + 1.0).map(|t| t - 10.3).unwrap_or(0.0);
+        let conc = p.conceal_between(10_000_000, 12_000_000);
+        let late = p.conceal_between(12_000_000, 40_000_000);
+        println!(
+            "TUNE 버스트 F {frame}: 기준 목표 {base_t:.2} 버퍼 {base_b:.2}ms, 상향까지 {up:?}s, 버스트~2s 은닉 이벤트 {conc}, 이후 {late}, 버스트 끝 → 버퍼 복귀(기준+1ms) {back:.1}s, 끝 버퍼 {:.2}/{:.2}ms",
+            p.median_buffer(35.0, 40.0),
+            p.js.target_ms
+        );
+        assert_eq!(late, 0, "버스트 2초 뒤 은닉");
+        assert!(back <= 8.0, "F {frame}: 복귀 {back:.1}s");
+        assert!((p.median_buffer(35.0, 40.0) - base_b).abs() < 1.0, "버스트 뒤 원래 지연으로");
+    }
+}
+
+/// 6피어 동시: 회선이 서로 다른 피어 6명. 피어별 목표가 자기 회선만 따른다.
+#[test]
+fn tune_six_peers_simultaneous() {
+    let mut peers = Vec::new();
+    for (i, (jit, loss, drift, spike)) in
+        [(1000u64, 0.0, 0.0, false), (1000, 0.0, 200.0, false), (5000, 0.01, -200.0, false), (20_000, 0.01, 0.0, false), (1000, 0.0, 0.0, true), (3000, 0.02, 100.0, false)]
+            .into_iter()
+            .enumerate()
+    {
+        let mut np = NetPeer::new(120, 100 + i as u64);
+        np.net_jitter_us = jit;
+        np.loss = loss;
+        np.drift_ppm = drift;
+        if spike {
+            np.spikes = vec![(12_000_000, 300_000, 30_000)];
+        }
+        peers.push(np);
+    }
+    let r = run_multi(&MultiSim::new(40.0, peers.clone()));
+    println!("TUNE 6피어: xruns {}", r.xruns);
+    for (i, p) in r.peers.iter().enumerate() {
+        let np = &peers[i];
+        let (buf, p95) = report(
+            &format!("6피어 #{i} 지터 {}µs 손실 {:.0}% 드리프트 {}ppm 스파이크 {}", np.net_jitter_us, np.loss * 100.0, np.drift_ppm, !np.spikes.is_empty()),
+            p,
+            120,
+            5.0,
+            40.0,
+        );
+        assert!(p.conceal_pct() <= np.loss * 100.0 + 0.5 + if np.spikes.is_empty() { 0.0 } else { 0.5 }, "#{i} 은닉 {:.2}%", p.conceal_pct());
+        if np.net_jitter_us <= 1000 && np.spikes.is_empty() {
+            assert!(buf <= ms(120) + p95 + 0.3, "#{i}: bufferMs {buf:.2} vs 1F+p95 {:.2}", ms(120) + p95);
+        }
+    }
+    assert_eq!(r.xruns, 0);
+}
+
+/// PR #16 M2: 드리프트(±200ppm)가 있으면 깊이는 삽입 진입 문턱만큼 목표 밑에 머문다. 삽입 문턱을 목표에 넣었으므로
+/// 여유를 학습한 뒤(이른 콜백 + 워커 기상 지연 → 언더런) 드리프트 아래에서도 언더런 콜백 밖의 은닉이 없어야 한다.
+///
+/// P2-17g: 언더런 콜백 밖 은닉을 **실행당 1회, 18실행 합계 2회까지** 허용한다(이전: 실행마다 0). M2가 막는 것(깊이 부족으로
+/// 은닉이 계속 쌓임)은 실행당 ≥ 2로 잡힌다. 마감 근처 기다림이 촘촘해지면(`Nap::pick`) 마감 뒤 첫 기상이 마감에 더 가까워져,
+/// 늦은 패킷을 기다려 주던 우연한 여유가 줄어 단발 은닉이 가끔 난다. 기준선(develop `1fa14d1` + P2-17g, 시드 0..30 = 180실행,
+/// 위상 `900 × 시드`): 이전 규칙 0, `Nap::pick` 4회(모두 −200ppm, 실행당 1, xrun 합계 278 vs 279). 실행당 약 2.2%라
+/// 18실행 기대값 0.4, 합계 ≥ 3일 확률(포아송) 약 0.8%다. 리뷰(#209)의 다른 위상 식 스윕에서는 이전 1 / 이후 3이었다.
+#[test]
+fn tune_margin_with_drift_no_steady_concealment() {
+    let (mut runs, mut learned, mut conc) = (0, 0, 0usize);
+    for drift in [200.0, -200.0] {
+        for (out_buf, wj) in [(144usize, 1300u64), (144, 1700), (128, 1300)] {
+            for seed in 0..3u64 {
+                let mut np = NetPeer::new(120, 40 + seed);
+                np.in_buf = 96;
+                np.drift_ppm = drift;
+                let mut sim = MultiSim::new(30.0, vec![np]);
+                sim.out_buf = out_buf;
+                sim.out_phase_us = 900 * seed;
+                sim.worker_jitter_us = wj;
+                sim.out_early_us = 1700;
+                sim.seed = seed * 7 + wj;
+                let r = run_multi(&sim);
+                let p = &r.peers[0];
+                runs += 1;
+                learned += usize::from(p.margin > 0 || r.xruns > 0);
+                // 언더런 콜백(3ms 창)의 은닉만 빼고 센다.
+                let c = p.conceal_us.iter().filter(|&&c| c >= 2_000_000 && !r.xrun_us.iter().any(|&x| c + 1_000 >= x && c < x + 3_000)).count();
+                conc += c;
+                println!(
+                    "TUNE M2 드리프트 {drift}ppm out {out_buf} 기상 {wj} 시드 {seed}: xruns {}, 여유 {}, 은닉(언더런 콜백 제외) {c}, buffer 중앙값 {:.2} / 목표 {:.2}ms, 보정 {}",
+                    r.xruns,
+                    p.margin,
+                    p.median_buffer(5.0, 30.0),
+                    p.js.target_ms,
+                    p.corrections()
+                );
+                assert!(c <= 1, "드리프트 {drift} out {out_buf} 기상 {wj} 시드 {seed}: 은닉 시각 {:?} xrun {:?}", p.conceal_us, r.xrun_us);
+            }
+        }
+    }
+    println!("TUNE M2: {runs}실행 중 여유 학습 {learned}, 언더런 콜백 밖 은닉 {conc}");
+    assert!(conc <= 2, "언더런 콜백 밖 은닉 합계 {conc} > 2 ({runs}실행)");
+    assert!(learned >= 4, "여유 학습이 일어나야 함(전제): {learned}");
+}
+
+/// PR #20 M1: 꼬리가 긴 지터(지수 평균 2ms, 파레토)에서 버스트 감지가 상시 발화하지 않아야 한다(목표가 창 최댓값으로
+/// 끌려가지 않음). 프로필별 bufferMs·은닉·버스트 감지 횟수.
+#[test]
+fn tune_long_tail_jitter() {
+    for dist in [JitDist::Exp, JitDist::Pareto] {
+        let mut rows = Vec::new();
+        for profile in [0.0f32, 0.5, 1.0] {
+            let mut np = NetPeer::new(120, 91);
+            np.net_jitter_us = 2000;
+            np.dist = dist;
+            np.profile = profile;
+            let r = run_multi(&MultiSim::new(40.0, vec![np]));
+            let p = &r.peers[0];
+            let (buf, _) = report(&format!("꼬리 {dist:?} 프로필 {profile}"), p, 120, 5.0, 40.0);
+            let bursts = p.js.burst_events - p.js_settle.burst_events;
+            println!("TUNE 꼬리 {dist:?} 프로필 {profile}: 정착 후 버스트 감지 {bursts}회/35s");
+            rows.push((buf, p.conceal_pct(), bursts));
+        }
+        assert!(rows[0].0 <= rows[1].0 && rows[1].0 <= rows[2].0, "{dist:?}: 지연 저지연 ≤ 균형 ≤ 안정: {rows:?}");
+        assert!(rows[1].2 <= 10, "{dist:?}: 균형 프로필 버스트 감지가 상시 발화: {rows:?}");
+    }
+}
+
+/// 프로필(저지연 0 ↔ 균형 0.5 ↔ 안정 1): 같은 회선에서 지연은 오르고 은닉은 내려간다.
+#[test]
+fn tune_profile_tradeoff() {
+    let mut rows = Vec::new();
+    for profile in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+        let mut np = NetPeer::new(120, 77);
+        np.net_jitter_us = 8000;
+        np.loss = 0.01;
+        np.spikes = vec![(10_000_000, 200_000, 20_000), (16_000_000, 200_000, 20_000), (22_000_000, 200_000, 20_000)];
+        np.profile = profile;
+        let r = run_multi(&MultiSim::new(40.0, vec![np]));
+        let p = &r.peers[0];
+        let (buf, _) = report(&format!("프로필 {profile}"), p, 120, 5.0, 40.0);
+        rows.push((buf, p.conceal_pct()));
+    }
+    for w in rows.windows(2) {
+        assert!(w[0].0 <= w[1].0 + 0.05, "지연은 프로필을 따라 오른다: {rows:?}");
+        assert!(w[0].1 + 0.05 >= w[1].1, "은닉은 프로필을 따라 내려간다: {rows:?}");
+    }
+    assert!(rows[0].0 < rows[4].0 && rows[0].1 > rows[4].1, "양 끝은 분명히 달라야 함: {rows:?}");
+    // PR #20 M4: 한 칸(0.25)에 지연이 두 배 넘게 뛰지 않는다(이전: 0.5 → 1에서 11.75 → 32.69ms).
+    for w in rows.windows(2) {
+        assert!(w[1].0 <= 2.0 * w[0].0, "프로필 한 칸에 지연 절벽: {rows:?}");
+    }
+}
+
+/// PR #20 M2: 릴레이(+20ms, 지터 1ms) → 직접(지터 8ms) 승격. 경로 변경 리셋 뒤 목표가 바닥으로 떨어지면 새 경로의 큰
+/// 지터에서 은닉이 연달아 났다. 전환 후 2초 은닉과 6초 뒤 버퍼.
+#[test]
+fn tune_path_switch_to_jittery_direct() {
+    for frame in [120usize, 240] {
+        let mut np = NetPeer::new(frame, 61);
+        np.net_jitter_us = 1000;
+        np.switch = Some((10_000_000, 20_000, 8000));
+        let r = run_multi(&MultiSim::new(20.0, vec![np]));
+        let p = &r.peers[0];
+        let c2 = p.conceal_between(10_000_000, 12_000_000);
+        let after = p.median_buffer(16.0, 20.0);
+        println!(
+            "TUNE 경로 전환 F {frame}: 전환 전 버퍼 {:.2}ms, 전환 후 2초 은닉 이벤트 {c2}, 16~20s 버퍼 {after:.2}ms / 목표 {:.2}ms, 은닉 {:.2}%",
+            p.median_buffer(5.0, 10.0),
+            p.js.target_ms,
+            p.conceal_pct()
+        );
+        assert!(after < 20.0, "F {frame}: 옛 경로 지연을 끌지 않음: {after:.2}");
+        assert!(c2 <= 6, "F {frame}: 전환 직후 은닉 {c2}");
+    }
+}
+
+/// 실행 중 피어 추가·제거(엔진 ②b-3b, #136 리뷰 M1): `PeerSources`의 명령 큐 → 표 → 슬롯 배정·해제 경로를 결정적으로 고정한다.
+/// 5분 fixture는 피어를 시작 때만 넣어 이 경로(제거, 실행 중 추가, `seen` 표시·쓸기)를 타지 않는다 — ②b-4(표 합치기)가
+/// 고치는 곳이다. 사건 시점을 단언하고(J1: 명령은 넣은 그 워커 반복에 적용된다), 사건 열과 피어별 통계를 별도 fixture
+/// (`tests/fixtures/sim-churn.json`)와 바이트 비교한다. 5분 fixture와 같은 규칙: 구조 정리 PR은 이 값을 바꾸지 않는다.
+#[test]
+fn churn_add_remove_events_match_fixture() {
+    let s = |x: f64| (x * 1e6) as u64;
+    let mut peers: Vec<NetPeer> = (0..6)
+        .map(|i| {
+            let mut np = NetPeer::new(120, 300 + i as u64);
+            np.net_jitter_us = 1000;
+            np
+        })
+        .collect();
+    // 시작: 0·1·2(슬롯 1·2·3). 3은 5초에 들어온다 → 슬롯 4. 1이 10초에 나간다 → 슬롯 2 해제.
+    // 4가 15초에 들어온다 → 가장 낮은 빈 슬롯 2. 20초: 0이 나가고 **같은 반복에** 5가 들어온다 → 0의 슬롯 1은 그 반복에는
+    // 아직 쥐고 있어(해제는 배정 뒤) 5는 슬롯 5를 받는다. 2는 25초, 3은 30초에 나간다.
+    peers[3].join_us = s(5.0);
+    peers[1].leave_us = Some(s(10.0));
+    peers[4].join_us = s(15.0);
+    peers[0].leave_us = Some(s(20.0));
+    peers[5].join_us = s(20.0);
+    peers[2].leave_us = Some(s(25.0));
+    peers[3].leave_us = Some(s(30.0));
+    let sim = MultiSim::new(35.0, peers);
+    let out = run_multi(&sim);
+    let at = |i: usize, f: &dyn Fn(&ChurnEv) -> bool| out.churn.iter().find(|e| e.1 == i && f(&e.2)).map(|e| (e.0, e.2));
+    // 시작 때 있던 피어: 첫 워커 사건에서 추가 순서대로 슬롯 1·2·3
+    let first = out.churn[0].0;
+    for i in 0..3 {
+        assert_eq!(at(i, &|e| matches!(e, ChurnEv::Slot(_))), Some((first, ChurnEv::Slot(1 + i))), "피어 {i}");
+    }
+    // 실행 중 추가: `Add`를 넣은 그 워커 사건에서 슬롯을 받는다(J1). 슬롯은 가장 낮은 빈 것.
+    for (i, slot) in [(3usize, 4usize), (4, 2), (5, 5)] {
+        let (t_join, _) = at(i, &|e| *e == ChurnEv::Join).unwrap_or_else(|| panic!("피어 {i} Join 없음: {:?}", out.churn));
+        assert!(t_join >= sim.peers[i].join_us && t_join < sim.peers[i].join_us + 2_000, "피어 {i}: 추가 시각 {t_join}");
+        assert_eq!(at(i, &|e| matches!(e, ChurnEv::Slot(_))), Some((t_join, ChurnEv::Slot(slot))), "피어 {i}: 추가한 반복에 슬롯 {slot}");
+    }
+    // 제거: `Remove`를 넣은 그 워커 사건에서 슬롯이 DRAIN, 다음 출력 콜백에서 FREE(128프레임 = 2.67ms 안).
+    for (i, slot) in [(1usize, 2usize), (0, 1), (2, 3), (3, 4)] {
+        let (t_leave, _) = at(i, &|e| *e == ChurnEv::Leave).unwrap_or_else(|| panic!("피어 {i} Leave 없음"));
+        assert_eq!(at(i, &|e| matches!(e, ChurnEv::Drain(_))), Some((t_leave, ChurnEv::Drain(slot))), "피어 {i}: 제거한 반복에 DRAIN");
+        let (t_free, ev) = at(i, &|e| matches!(e, ChurnEv::Free(_))).unwrap_or_else(|| panic!("피어 {i} Free 없음"));
+        assert_eq!(ev, ChurnEv::Free(slot));
+        assert!(t_free > t_leave && t_free <= t_leave + 2_700, "피어 {i}: DRAIN {t_leave} → FREE {t_free}");
+    }
+    // 4는 1이 비운 슬롯 2를 FREE가 된 뒤에 받았다
+    assert!(at(4, &|e| matches!(e, ChurnEv::Slot(_))).unwrap().0 > at(1, &|e| matches!(e, ChurnEv::Free(_))).unwrap().0);
+    // 남은 피어(4·5)는 끝까지 재생 중이고, 다른 피어의 추가·제거가 은닉을 만들지 않았다(무손실 회선)
+    for (i, peer) in out.peers.iter().enumerate() {
+        let js = &peer.js;
+        assert!(js.produced > 1_000, "피어 {i}: 생산 {}", js.produced);
+        assert_eq!(js.concealed, 0, "피어 {i}: 무손실 회선에서 은닉");
+    }
+    assert_eq!(out.xruns, 0);
+    let ev_json: Vec<serde_json::Value> = out
+        .churn
+        .iter()
+        .map(|&(t, i, e)| {
+            let (name, slot) = match e {
+                ChurnEv::Join => ("join", None),
+                ChurnEv::Slot(s) => ("slot", Some(s)),
+                ChurnEv::Leave => ("leave", None),
+                ChurnEv::Drain(s) => ("drain", Some(s)),
+                ChurnEv::Free(s) => ("free", Some(s)),
+            };
+            serde_json::json!({ "tUs": t, "peer": i, "event": name, "slot": slot })
+        })
+        .collect();
+    let peer_json: Vec<serde_json::Value> = out
+        .peers
+        .iter()
+        .map(|p| serde_json::json!({ "produced": p.js.produced, "concealed": p.js.concealed, "bufferMs": format!("{:.3}", p.js.buffer_ms), "targetMs": format!("{:.3}", p.js.target_ms), "margin": p.margin }))
+        .collect();
+    let got = serde_json::to_string_pretty(&serde_json::json!({ "events": ev_json, "peers": peer_json })).unwrap() + "\n";
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("sim-churn.json");
+    if std::env::var_os("SIM_UPDATE_FIXTURE").is_some() {
+        std::fs::write(&path, &got).unwrap();
+        println!("기준값 갱신: {}", path.display());
+        return;
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+    assert!(got == want, "피어 추가·제거 사건 열이 fixture({})와 다르다 — 구조 정리 PR은 이 값을 바꾸지 않는다.\n--- 지금 ---\n{got}", path.display());
+}
+
+// ----------------------------------------------------------------------------
+// 워커 기상 지연 실측 모델(P2-17f)
+// ----------------------------------------------------------------------------
+
+/// 분위표 역CDF: 끝점·분위점을 그대로 지나고, 시드 RNG로 뽑은 표본의 분위가 표와 맞는다(모델 자체 검증).
+#[test]
+fn wake_model_matches_measured_quantiles() {
+    for table in [WAKE_FINE, WAKE_POLL] {
+        for w in table.windows(2) {
+            assert!(w[0].0 < w[1].0 && w[0].1 <= w[1].1, "분위표는 증가해야 한다: {w:?}");
+        }
+        for &(q, v) in &table[..table.len() - 1] {
+            assert_eq!(wake_overshoot(table, q), v, "분위 {q}");
+        }
+        assert_eq!(wake_overshoot(table, 1.0 - 1e-12), table[table.len() - 1].1);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut v: Vec<u64> = (0..200_000).map(|_| wake_overshoot(table, rng.gen::<f64>())).collect();
+        v.sort_unstable();
+        for &(q, want) in &table[1..table.len() - 1] {
+            let got = v[(v.len() as f64 * q) as usize];
+            assert!(got.abs_diff(want) <= want / 20 + 5, "분위 {q}: 표본 {got} vs 표 {want}");
+        }
+    }
+}
+
+/// 1실행(F·기상 모델, 지터 1ms·손실 1%·60초): (bufferMs 중앙값, 1F + p95 − bufferMs = GOAL 1절 여유 ms, 은닉 %, xrun, 적응 여유).
+fn wake_run(frame: usize, wake: WakeModel, worker_jitter_us: u64, seed: u64) -> (f32, f32, f64, u64, usize) {
+    let mut np = NetPeer::new(frame, 60 + seed);
+    np.net_jitter_us = 1000;
+    np.loss = 0.01;
+    let mut sim = MultiSim::new(60.0, vec![np]);
+    sim.wake = wake;
+    sim.worker_jitter_us = worker_jitter_us;
+    sim.seed = 11 + seed;
+    let r = run_multi(&sim);
+    let p = &r.peers[0];
+    let (buf, p95) = (p.median_buffer(5.0, 60.0), p.median_p95(5.0, 60.0));
+    (buf, ms(frame) + p95 - buf, p.conceal_pct(), r.xruns, p.margin)
+}
+
+/// 실측 기상 모델에서도 LAN 기준 설정(F 2.5/5ms·in128·out128, 지터 1ms, 손실 1%)이 GOAL 1절(bufferMs ≤ 1F + p95)과
+/// 2절(은닉 ≤ 1.5%, xrun 0)을 지킨다. 은닉 마감 여유 1.5ms(`DEADLINE_GUARD_US`)가 실측 p99(956µs) + `FINE_POLL`을 덮는다는 근거.
+#[test]
+fn tune_measured_wake_keeps_goal() {
+    for frame in [120usize, 240] {
+        let (buf, margin, conc, xruns, adapt) = wake_run(frame, WakeModel::Measured, 0, 0);
+        println!("TUNE 실측 기상 F {frame}: bufferMs {buf:.2}, 1절 여유 {margin:.2}ms, 은닉 {conc:.2}%, xrun {xruns}, 적응 여유 {adapt}");
+        assert!(margin >= 0.0, "F {frame}: GOAL 1절 여유 {margin:.2}ms");
+        assert!(conc <= 1.5, "F {frame}: 은닉 {conc:.2}%");
+        assert_eq!(xruns, 0, "F {frame}: xrun");
+    }
+}
+
+/// 측정 도구(P2-17f): 기상 모델(기존 U(0..300µs) / 실측 분위표 / PR #200의 대용 U(0..1000µs))별 GOAL 1절 여유(1F + p95 −
+/// bufferMs 중앙값)·은닉·xrun·적응 여유를 3시드로 낸다. 표만 출력한다:
+/// `cargo test -p band-engine --release --test sim wake_model_goal_margin_sweep -- --ignored --nocapture`
+#[test]
+#[ignore = "측정: 60초 × 2프레임 × 3모델 × 3시드"]
+fn wake_model_goal_margin_sweep() {
+    println!("| F ms | 기상 모델 | bufferMs | 1절 여유 ms 평균 (최소) | 은닉 % | xrun 합 | 적응 여유 최대 |\n|---|---|---|---|---|---|---|");
+    for frame in [120usize, 240] {
+        for (name, wake, wj) in [("U(0..300µs)", WakeModel::Uniform, 300u64), ("실측 분위표", WakeModel::Measured, 0), ("U(0..1000µs)", WakeModel::Uniform, 1000)] {
+            let runs: Vec<_> = (0..3u64).map(|seed| wake_run(frame, wake, wj, seed)).collect();
+            let n = runs.len() as f32;
+            let buf = runs.iter().map(|r| r.0).sum::<f32>() / n;
+            let margin = runs.iter().map(|r| r.1).sum::<f32>() / n;
+            let mmin = runs.iter().map(|r| r.1).fold(f32::INFINITY, f32::min);
+            let conc = runs.iter().map(|r| r.2).sum::<f64>() / runs.len() as f64;
+            let xr: u64 = runs.iter().map(|r| r.3).sum();
+            let adapt = runs.iter().map(|r| r.4).max().unwrap_or(0);
+            println!("| {:.1} | {name} | {buf:.2} | {margin:.2} ({mmin:.2}) | {conc:.2} | {xr} | {adapt} |", ms(frame));
+        }
+    }
+}

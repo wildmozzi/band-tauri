@@ -1,0 +1,3 @@
+# CMake 4.x는 cmake_minimum_required < 3.5를 거부한다. audiopus_sys(libopus) 빌드용.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

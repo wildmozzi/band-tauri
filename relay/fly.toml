@@ -1,0 +1,46 @@
+# band-relay — UDP 릴레이 (docs/overhaul/relay-design.md)
+# 배포는 사람 승인 후에만. 사전 작업은 README "배포" 절 참고 (전용 IPv4 필요, RELAY_SECRET 시크릿).
+app = 'band-relay'
+primary_region = 'nrt'  # Tokyo (시그널링 서버와 같은 리전)
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  # fly.io UDP: 0.0.0.0이 아니라 fly-global-services에 바인드해야 응답 출발 주소가 올바르다.
+  # 외부 포트와 내부 포트가 같아야 한다(fly는 UDP 목적지 포트를 바꾸지 않음).
+  RELAY_BIND = 'fly-global-services:5000'
+  # fly 내부 스크레이프·헬스체크는 6PN(IPv6)으로 들어올 수 있으므로 듀얼스택 [::]
+  RELAY_METRICS_BIND = '[::]:9090'
+  RELAY_STATS_LOG_SECS = '60'
+
+[[services]]
+  protocol = 'udp'
+  internal_port = 5000
+  # UDP 트래픽은 머신을 깨우지 못하므로 항상 실행
+  auto_stop_machines = 'off'
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 5000
+
+# 머신 헬스체크 (/healthz, 공개 포트 아님)
+[checks]
+  [checks.health]
+    type = 'http'
+    port = 9090
+    path = '/healthz'
+    interval = '15s'
+    timeout = '2s'
+    grace_period = '10s'
+
+# Prometheus 스크레이프 (fly 내부 메트릭, 공개 포트 아님)
+[metrics]
+  port = 9090
+  path = '/metrics'
+
+[[vm]]
+  memory = '256mb'
+  cpu_kind = 'shared'
+  cpus = 1

@@ -7,6 +7,17 @@ license = "MIT"
 repository = ""
 edition = "2021"
 
+# 워크스페이스 루트이자 앱 패키지(엔진 R-1 ⑩-1·⑩-2, docs/overhaul/engine-stage5-10-scope.md 7.2절). 멤버:
+# `crates/band-engine`(엔진: 장치·RT·워커·네트워크·녹음·제어 평면), `crates/band-dsp`(결정적 코어). 앱에는 Tauri 진입점과
+# 커맨드 어댑터(`src/{lib, main, commands}.rs`)·`build.rs`·`tauri.conf.json`만 남는다 — 시험이 없다.
+# `default-members`에 셋 다 두어 이 디렉터리의 `cargo test`·`cargo clippy --all-targets`·`cargo nextest run`이 플래그 없이
+# 세 크레이트를 함께 본다. `[profile.*]`은 루트에만 둘 수 있어 아래에 그대로 있다. 빌드 산출물 위치는 상위
+# `.cargo/config.toml`(공유 target-dir)이 정한다.
+[workspace]
+members = [".", "crates/band-engine", "crates/band-dsp"]
+default-members = [".", "crates/band-engine", "crates/band-dsp"]
+resolver = "2"
+
 [lib]
 name = "band_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -15,34 +26,44 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
+tauri-plugin-log = "2"
+tauri-plugin-process = "2"
+# 진단 내보내기(P2-5): 저장 위치 대화상자. zip 작성·로그 마스킹은 band-engine(`diag::export`).
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# Audio processing (WASAPI + ASIO)
-cpal = { version = "0.15", features = ["asio"] }
-opus = "0.3"
-ringbuf = "0.3"  # Lock-free ring buffer for audio
-
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# Networking
-tokio-tungstenite = "0.21"
-
-# Error handling
-anyhow = "1"
-thiserror = "1"
-
-# Utilities
-lazy_static = "1.4"
-rand = "0.8"
-crossbeam-channel = "0.5"  # Lock-free channels for audio threads
+log = "0.4"
+# 엔진(엔진 R-1 ⑩-2). 기본 피처 = 장치 백엔드 둘(`backend-cpal`, `backend-wasapi`) — 앱은 늘 켠다.
+band-engine = { path = "crates/band-engine" }
+# 결정적 코어(설정 DTO `config` 등, 엔진 R-1 ⑩-1)
+band-dsp = { path = "crates/band-dsp" }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# 릴리스 빌드에서는 devtools 비활성. 필요 시: cargo tauri build --features devtools
+devtools = ["tauri/devtools"]
+# ASIO 지원 (CPAL_ASIO_DIR에 Steinberg ASIO SDK 필요). 기본 빌드는 WASAPI만. 엔진의 `asio`(cpal/asio, band-dsp/asio)로 넘긴다.
+asio = ["band-engine/asio"]
+
+# 디버그 빌드(dev:tauri)에서도 FLAC 녹음 인코딩이 실시간을 넉넉히 넘도록 인코더와 그 해시·CRC만 최적화한다(PR #62 M1).
+# opt-level 0이면 30초 스테레오 24비트 인코딩이 실시간 4배뿐이라 9트랙(소스 8 + 믹스) 녹음이 링을 넘친다.
+# 디버그 정보 설정(워크트리 공유 .cargo/config.toml의 profile.dev)과는 키가 겹치지 않는다.
+[profile.dev.package.flacenc]
+opt-level = 3
+
+[profile.dev.package.md-5]
+opt-level = 3
+
+[profile.dev.package.crc]
+opt-level = 3
+
+# 리샘플러(P2-17e, #229 realtime 실패 원인): sinc 128탭은 opt-level 0에서 스테레오 한 단계가 1코어의 약 10%(릴리스 0.2%의 50배)라
+# 가짜 장치 44.1k 2.5ms 프레임에서 워커가 마감을 놓쳤다(CI realtime 잡은 디버그 빌드, dev:tauri도 디버그). rubato만 최적화한다.
+[profile.dev.package.rubato]
+opt-level = 3
 
 [profile.release]
 panic = "abort"
@@ -50,3 +71,10 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+
+[dev-dependencies]
+# 커맨드 어댑터 시험(`commands::tests`)에서 가짜 장치 백엔드를 쓴다(테스트 빌드에서만 `test-support`가 합쳐진다, 피처 리졸버 2).
+band-engine = { path = "crates/band-engine", features = ["test-support"] }

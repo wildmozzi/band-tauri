@@ -1,0 +1,142 @@
+import { describe, expect, it } from 'vitest'
+import {
+  describeJoinError,
+  forgetRoomPassword,
+  inviteLink,
+  isRetryableJoinError,
+  joinErrorFromSignal,
+  joinErrorStopsSession,
+  parseRoomCode,
+  recallRoomPassword,
+  rememberRoomPassword,
+  validateRoomPasswordInput,
+} from './roomAccess'
+
+const ID = '3f2a9c1e-8b7d-4e6f-9a0b-1c2d3e4f5a6b'
+
+describe('parseRoomCode', () => {
+  it('방 코드(UUID)를 그대로 받는다 (대소문자·공백 무시)', () => {
+    expect(parseRoomCode(ID)).toBe(ID)
+    expect(parseRoomCode(`  ${ID.toUpperCase()}  `)).toBe(ID)
+  })
+  it('초대 링크에서 방 id를 꺼낸다', () => {
+    expect(parseRoomCode(`https://band.example/rooms/${ID}`)).toBe(ID)
+    expect(parseRoomCode(`https://band.example/rooms/${ID}?from=chat#x`)).toBe(ID)
+  })
+  it('알아볼 수 없으면 null', () => {
+    expect(parseRoomCode('')).toBeNull()
+    expect(parseRoomCode('hello')).toBeNull()
+    expect(parseRoomCode(`https://band.example/posts/${ID}x`)).toBeNull()
+    expect(parseRoomCode(`${ID}-extra`)).toBeNull()
+  })
+})
+
+describe('inviteLink', () => {
+  it('웹에서는 현재 origin을 쓴다', () => {
+    expect(inviteLink(ID, undefined, 'https://band.example')).toBe(`https://band.example/rooms/${ID}`)
+  })
+  it('설정된 웹 주소가 우선 (데스크톱 앱 tauri:// 대응)', () => {
+    expect(inviteLink(ID, 'https://band.example/', 'tauri://localhost')).toBe(`https://band.example/rooms/${ID}`)
+  })
+  it('웹 주소를 모르면 방 코드만', () => {
+    expect(inviteLink(ID, undefined, 'tauri://localhost')).toBe(ID)
+  })
+})
+
+describe('validateRoomPasswordInput', () => {
+  it('6~64자 (NFC 기준)', () => {
+    expect(validateRoomPasswordInput('abcde')).not.toBeNull()
+    expect(validateRoomPasswordInput('abcdef')).toBeNull()
+    // 한글 NFD(자모 분리)도 NFC 글자 수로 센다
+    expect(validateRoomPasswordInput('합주실비번이야'.normalize('NFD'))).toBeNull()
+    expect(validateRoomPasswordInput('합주실비번'.normalize('NFD'))).not.toBeNull()
+    expect(validateRoomPasswordInput('x'.repeat(64))).toBeNull()
+    expect(validateRoomPasswordInput('x'.repeat(65))).not.toBeNull()
+  })
+})
+
+describe('joinErrorFromSignal / describeJoinError', () => {
+  it('비밀번호 관련 서버 에러만 해석한다', () => {
+    expect(joinErrorFromSignal({ type: 'error', code: 'perform-not-approved' })).toBeNull()
+    expect(joinErrorFromSignal({ type: 'chat', code: 'password-invalid' })).toBeNull()
+    expect(joinErrorFromSignal({ type: 'error', code: 'password-invalid', roomId: ID, remainingAttempts: 2 })).toEqual({
+      code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null, maxParticipants: null, reason: null,
+    })
+  })
+  it('정원 초과(room-full)를 해석하고 정원을 보여준다 (P3-12b)', () => {
+    const e = joinErrorFromSignal({ type: 'error', code: 'room-full', roomId: ID, maxParticipants: 4 })
+    expect(e).toMatchObject({ code: 'room-full', roomId: ID, maxParticipants: 4 })
+    expect(describeJoinError(e!)).toContain('4명')
+    expect(describeJoinError({ code: 'room-full', roomId: null, remainingAttempts: null, retryAfterMs: null })).toContain('정원')
+  })
+  it('익명 상한·재연결 중 자리 잃음을 구분해 안내한다 (PR #23 H1·M3)', () => {
+    const anon = joinErrorFromSignal({ type: 'error', code: 'room-full', reason: 'anonymous-limit', roomId: ID, maxParticipants: 4 })
+    expect(anon?.reason).toBe('anonymous-limit')
+    expect(describeJoinError(anon!)).toContain('로그인')
+    const lost = { ...joinErrorFromSignal({ type: 'error', code: 'room-full', roomId: ID, maxParticipants: 4 })!, afterReconnect: true }
+    expect(describeJoinError(lost)).toContain('자리를 잃었습니다')
+  })
+  it('방 밖으로 밀려나면 연주 세션을 멈춘다 (PR #23 M3)', () => {
+    const e = (code: string) => joinErrorFromSignal({ type: 'error', code, roomId: ID })!
+    expect(joinErrorStopsSession(e('room-full'), false)).toBe(true)
+    expect(joinErrorStopsSession(e('room-full'), true)).toBe(true)
+    expect(joinErrorStopsSession(e('password-invalid'), true)).toBe(true)
+    expect(joinErrorStopsSession(e('password-required'), false)).toBe(false)
+    expect(joinErrorStopsSession(e('password-busy'), true)).toBe(false)
+  })
+  it('방이 없음(room-not-found — 보던 방이 종료된 뒤 재입장)을 입장 오류로 보고 세션을 멈춘다', () => {
+    // 서버(membership checkRoom)는 roomId 없이 보낸다
+    const e = joinErrorFromSignal({ type: 'error', code: 'room-not-found', message: '방을 찾을 수 없습니다.' })
+    expect(e).toMatchObject({ code: 'room-not-found', roomId: null })
+    expect(describeJoinError(e!)).toContain('종료')
+    expect(joinErrorStopsSession(e!, false)).toBe(true)
+    expect(joinErrorStopsSession(e!, true)).toBe(true)
+  })
+  it('방 조회 실패(room-unavailable)는 일시 오류: 세션을 멈추지 않고 재시도 대상이다 (#189 리뷰 H-1)', () => {
+    const e = joinErrorFromSignal({ type: 'error', code: 'room-unavailable', roomId: ID, retryAfterMs: 2000 })!
+    expect(e).toMatchObject({ code: 'room-unavailable', roomId: ID, retryAfterMs: 2000 })
+    expect(isRetryableJoinError(e)).toBe(true)
+    expect(joinErrorStopsSession(e, true)).toBe(false)
+    expect(joinErrorStopsSession(e, false)).toBe(false)
+    expect(describeJoinError(e)).toContain('다시 시도')
+    expect(isRetryableJoinError(joinErrorFromSignal({ type: 'error', code: 'room-not-found' })!)).toBe(false)
+  })
+  it('자동 재시도를 다 썼으면(autoRetry=false) "자동으로 다시 시도" 대신 수동 재시도 안내 (#189 리뷰 L-6)', () => {
+    const base = { roomId: ID, remainingAttempts: null, retryAfterMs: 2000 }
+    expect(describeJoinError({ ...base, code: 'room-unavailable', autoRetry: true })).toContain('자동으로')
+    expect(describeJoinError({ ...base, code: 'room-unavailable', autoRetry: false })).toContain('[다시 시도]')
+    expect(describeJoinError({ ...base, code: 'room-unavailable', autoRetry: false })).not.toContain('자동')
+    expect(describeJoinError({ ...base, code: 'password-busy', autoRetry: false })).not.toContain('자동')
+  })
+  it('남은 시도 횟수와 대기 시간을 보여준다', () => {
+    expect(describeJoinError({ code: 'password-invalid', roomId: ID, remainingAttempts: 2, retryAfterMs: null })).toContain('2회')
+    expect(describeJoinError({ code: 'password-rate-limited', roomId: ID, remainingAttempts: null, retryAfterMs: 125_000 })).toContain('3분')
+    expect(describeJoinError({ code: 'password-rate-limited', roomId: ID, remainingAttempts: null, retryAfterMs: 1 })).toContain('1분')
+    expect(describeJoinError({ code: 'password-required', roomId: null, remainingAttempts: null, retryAfterMs: null })).toContain('비밀번호')
+    expect(describeJoinError({ code: 'password-busy', roomId: null, remainingAttempts: null, retryAfterMs: 1000 })).toContain('다시 시도')
+    expect(joinErrorFromSignal({ type: 'error', code: 'password-busy', retryAfterMs: 2000 })?.retryAfterMs).toBe(2000)
+  })
+})
+
+describe('세션 비밀번호 기억', () => {
+  const mem = () => {
+    const m = new Map<string, string>()
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k) }
+  }
+  it('방별로 저장/조회/삭제', () => {
+    const s = mem()
+    rememberRoomPassword('a', 'pw-a', s)
+    rememberRoomPassword('b', 'pw-b', s)
+    expect(recallRoomPassword('a', s)).toBe('pw-a')
+    forgetRoomPassword('a', s)
+    expect(recallRoomPassword('a', s)).toBeNull()
+    expect(recallRoomPassword('b', s)).toBe('pw-b')
+  })
+  it('저장소가 없거나 예외를 던져도 앱이 멈추지 않는다', () => {
+    const broken = { getItem: () => { throw new Error('denied') }, setItem: () => { throw new Error('denied') }, removeItem: () => { throw new Error('denied') } }
+    expect(() => rememberRoomPassword('a', 'x', broken)).not.toThrow()
+    expect(recallRoomPassword('a', broken)).toBeNull()
+    expect(() => forgetRoomPassword('a', broken)).not.toThrow()
+    expect(recallRoomPassword('a', null)).toBeNull()
+  })
+})

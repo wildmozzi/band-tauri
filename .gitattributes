@@ -1,0 +1,48 @@
+# 줄바꿈 규칙 (chore/eol-performsession).
+# 소스·설정·문서는 저장소에 항상 LF로 둔다. text=auto(내용으로 판단)가 아니라 확장자로 text를 못박는다 —
+# auto는 짝 없는 CR이 하나라도 있으면 파일을 바이너리로 보고 CRLF를 그대로 커밋한다(performSession.ts가 그렇게 CRLF로
+# 들어가 병합 때 파일 전체가 충돌했다). Windows 작업 사본도 LF로 꺼낸다(eol=lf).
+*.ts         text eol=lf
+*.tsx        text eol=lf
+*.js         text eol=lf
+*.mjs        text eol=lf
+*.cjs        text eol=lf
+*.json       text eol=lf
+*.css        text eol=lf
+*.html       text eol=lf
+*.svg        text eol=lf
+*.md         text eol=lf
+*.rs         text eol=lf
+*.toml       text eol=lf
+*.lock       text eol=lf
+*.sql        text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+*.py         text eol=lf
+*.sh         text eol=lf
+*.xml        text eol=lf
+*.txt        text eol=lf
+*.csv        text eol=lf
+*.diff       text eol=lf
+*.example    text eol=lf
+*.sha256     text eol=lf
+.gitignore   text eol=lf
+.gitattributes text eol=lf
+.dockerignore text eol=lf
+.npmrc       text eol=lf
+Dockerfile   text eol=lf
+Dockerfile.* text eol=lf
+
+# 바이너리(줄바꿈 변환·diff 없음)
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.gif        binary
+*.webp       binary
+*.ico        binary
+*.icns       binary
+*.ogg        binary
+*.wav        binary
+*.mp3        binary
+*.woff       binary
+*.woff2      binary

@@ -8,8 +8,12 @@ const { Client } = pg
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-// Supabase PostgreSQL 연결 설정 (Transaction Pooler)
-const connectionString = 'postgresql://postgres.agpgkzgkodudpnxzbhcv:Qnsgxbmz4B5loaz5@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres'
+// DB 접속 문자열은 환경변수로만 받는다 (루트 .env.example 참고)
+const connectionString = process.env.DATABASE_URL
+if (!connectionString) {
+  console.error('❌ DATABASE_URL 환경변수가 필요합니다. 예) DATABASE_URL=postgresql://... node run-migrations.js')
+  process.exit(1)
+}
 
 async function runMigrations() {
   const client = new Client({ connectionString })
@@ -22,7 +26,7 @@ async function runMigrations() {
     // 마이그레이션 001: 테이블 생성
     console.log('📋 마이그레이션 001: 테이블 생성 실행 중...')
     const migration001 = readFileSync(
-      join(__dirname, '문서', 'migrations', '001_create_tables.sql'),
+      join(__dirname, 'docs', 'migrations', '001_create_tables.sql'),
       'utf-8'
     )
     await client.query(migration001)
@@ -31,7 +35,7 @@ async function runMigrations() {
     // 마이그레이션 002: RLS 정책 설정
     console.log('🔒 마이그레이션 002: RLS 정책 설정 실행 중...')
     const migration002 = readFileSync(
-      join(__dirname, '문서', 'migrations', '002_setup_rls.sql'),
+      join(__dirname, 'docs', 'migrations', '002_setup_rls.sql'),
       'utf-8'
     )
     await client.query(migration002)

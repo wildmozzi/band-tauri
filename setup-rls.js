@@ -2,7 +2,12 @@ import pg from 'pg'
 
 const { Client } = pg
 
-const connectionString = 'postgresql://postgres.agpgkzgkodudpnxzbhcv:Qnsgxbmz4B5loaz5@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres'
+// DB 접속 문자열은 환경변수로만 받는다 (루트 .env.example 참고)
+const connectionString = process.env.DATABASE_URL
+if (!connectionString) {
+  console.error('❌ DATABASE_URL 환경변수가 필요합니다. 예) DATABASE_URL=postgresql://... node setup-rls.js')
+  process.exit(1)
+}
 
 const rlsQueries = [
   // RLS 활성화

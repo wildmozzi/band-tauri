@@ -1,0 +1,276 @@
+/* 플로팅 미니 플레이어 - 오른쪽 아래 고정 */
+.floating-mini-player {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 1000;
+
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+
+  background: linear-gradient(135deg, var(--navy-800) 0%, var(--navy-700) 100%);
+  border: 1px solid var(--indigo-500-a30);
+  border-radius: var(--radius-2xl);
+  box-shadow:
+    0 8px 32px var(--black-a40),
+    0 0 0 1px var(--white-a05) inset;
+
+  cursor: pointer;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(10px);
+}
+
+.floating-mini-player:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 12px 40px var(--black-a50),
+    0 0 0 1px var(--indigo-500-a40) inset;
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
+/* 상태 표시 */
+.mini-player-status {
+  display: flex;
+  align-items: center;
+}
+
+.status-indicator {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  white-space: nowrap;
+}
+
+.status-indicator.live {
+  color: var(--green-400);
+  background: var(--green-400-a15);
+  animation: pulse-live 2s infinite;
+}
+
+.status-indicator.connecting {
+  color: var(--yellow-400);
+  background: var(--yellow-400-a15);
+}
+
+.status-indicator.idle {
+  color: var(--gray-400);
+  background: var(--gray-400-a15);
+}
+
+/* 시그널링 재연결 중·포기·다른 창에 밀려남 (P1-15b) — 평상시에는 DOM에 없다 */
+.mini-player-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mini-player-signal.reconnecting {
+  color: var(--yellow-400);
+}
+
+.mini-player-signal.gave-up {
+  color: var(--red-400);
+}
+
+.mini-player-signal.replaced {
+  color: var(--gray-400);
+}
+
+.mini-player-signal-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+  background: currentColor;
+}
+
+.mini-player-signal.reconnecting .mini-player-signal-dot {
+  animation: pulse-live 1.2s infinite;
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* 연주자 정보 */
+.mini-player-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.performers-preview {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.performer-icon {
+  font-size: 18px;
+  transition: transform 0.2s;
+}
+
+.performer-icon:hover {
+  transform: scale(1.2);
+}
+
+.more-performers {
+  font-size: 11px;
+  color: var(--gray-400);
+  padding: 2px 6px;
+  background: rgba(156, 163, 175, 0.2);
+  border-radius: var(--radius-lg);
+}
+
+.room-stats {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--gray-400);
+}
+
+.stat-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 컨트롤 버튼들 */
+.mini-player-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding-left: 12px;
+  border-left: 1px solid var(--white-a10);
+}
+
+.floating-mini-player .control-btn {
+  width: 32px !important;
+  height: 32px !important;
+  min-width: unset !important;
+  padding: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--white-a10);
+  color: white;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.floating-mini-player .control-btn:hover {
+  background: var(--white-a20);
+  transform: scale(1.1);
+}
+
+.floating-mini-player .control-btn.mic {
+  background: var(--green-400-a20);
+  position: relative;
+}
+
+.floating-mini-player .control-btn.mic:hover {
+  background: var(--green-400-a40);
+}
+
+.floating-mini-player .control-btn.mic.muted {
+  background: var(--red-500-a20);
+}
+
+.floating-mini-player .control-btn.mic.muted:hover {
+  background: var(--red-500-a40);
+}
+
+/* 마이크 음소거 시 대각선 빨간 줄 */
+.floating-mini-player .control-btn.mic.muted::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 45%;
+  height: 0.5px;
+  background: var(--red-500);
+  transform: translate(-50%, -50%) rotate(45deg);
+  border-radius: 1px;
+}
+
+.floating-mini-player .control-btn.mute {
+  background: var(--green-400-a20);
+}
+
+.floating-mini-player .control-btn.mute:hover {
+  background: var(--green-400-a40);
+}
+
+.floating-mini-player .control-btn.mute.muted {
+  background: var(--red-500-a20);
+}
+
+.floating-mini-player .control-btn.mute.muted:hover {
+  background: var(--red-500-a40);
+}
+
+.floating-mini-player .control-btn.exit {
+  background: var(--red-500-a20);
+}
+
+.floating-mini-player .control-btn.exit:hover {
+  background: var(--red-500-a40);
+}
+
+/* 클릭 힌트 */
+.mini-player-hint {
+  position: absolute;
+  bottom: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: var(--gray-500);
+  opacity: 0;
+  transition: opacity 0.2s;
+  white-space: nowrap;
+}
+
+.floating-mini-player:hover .mini-player-hint {
+  opacity: 1;
+}
+
+/* 반응형 - 모바일 */
+@media (max-width: 480px) {
+  .floating-mini-player {
+    bottom: 16px;
+    right: 16px;
+    left: 16px;
+    padding: 10px 14px;
+    border-radius: var(--radius-xl);
+  }
+
+  .mini-player-info {
+    flex: 1;
+  }
+
+  .status-indicator {
+    font-size: 11px;
+    padding: 3px 6px;
+  }
+
+  .performer-icon {
+    font-size: 16px;
+  }
+
+  .floating-mini-player .control-btn {
+    width: 28px !important;
+    height: 28px !important;
+    font-size: 12px;
+  }
+}

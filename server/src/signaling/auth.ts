@@ -1,0 +1,210 @@
+import { createHash } from 'crypto'
+import type { Ctx } from './ctx'
+import { TOKEN_EXPIRY_GRACE_MS, isNonEmptyString, type Msg } from './protocol'
+import { isAuthenticated, send } from './registry'
+import { announceResumed, attachSession, type Resume, type ResumeSvc } from './resume'
+import type { Client, WsDeps } from './types'
+
+/**
+ * 인증 (설계 docs/server-architecture.md 2.1절 B, 계층 3 — 계층 안 순서 membership < resume < auth).
+ * `auth` 메시지·재인증·토큰 만료 타이머. 세션 재개는 resume 모듈을 부른다(허용 간선 auth → resume, S4-1).
+ */
+
+/** JWT의 exp(초)를 ms로. 검증은 하지 않는다(verifyToken 통과 후에만 사용) */
+export function jwtExpiryMs(token: string): number | null {
+  const parts = token.split('.')
+  if (parts.length !== 3) return null
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'))
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : null
+  } catch {
+    return null
+  }
+}
+
+/** auth 검증 속도 제한에 걸려 getUser를 부르지 않았다 */
+export const AUTH_RATE_LIMITED = Symbol('auth-rate-limited')
+
+/** 검증된 토큰 캐시 기본값: 30초, 1000개 */
+export const TOKEN_CACHE_TTL_MS = 30_000
+export const TOKEN_CACHE_MAX = 1000
+
+/**
+ * verifyToken(Supabase getUser — 네트워크 왕복)을 감싸는 짧은 캐시 (서버 보안 점검: auth 증폭 방지).
+ * - 같은 토큰을 여러 연결이 동시에·반복해 보내도 getUser는 한 번: 진행 중인 조회는 함께 기다리고,
+ *   성공 결과는 min(TTL, JWT exp)까지 재사용한다. 키는 토큰의 SHA-256(긴 토큰 문자열을 그대로 쥐지 않음).
+ * - 실패(null)는 캐시하지 않는다(일시 장애를 굳히지 않음).
+ * - allowMiss: 실제로 verify(getUser)를 부를 때만 묻는다(캐시 적중·진행 중 조회 공유는 묻지 않음). false면 부르지 않고
+ *   AUTH_RATE_LIMITED. 같은 토큰을 다시 보내는 정상 재인증(SIGNED_IN·TOKEN_REFRESHED)은 버킷을 쓰지 않는다(#187 리뷰 M).
+ * - 한계: 로그아웃(세션 폐기)한 토큰도 캐시에 있으면 최대 TTL 동안 WS auth가 통과한다. 원래도 WS는 연결 뒤 재검증하지 않는다.
+ */
+export function cachedTokenVerifier(
+  verify: (token: string) => Promise<string | null>,
+  opts: { ttlMs?: number; max?: number; now?: () => number } = {},
+): (token: string, allowMiss?: () => boolean) => Promise<string | null | typeof AUTH_RATE_LIMITED> {
+  const ttlMs = opts.ttlMs ?? TOKEN_CACHE_TTL_MS
+  const max = opts.max ?? TOKEN_CACHE_MAX
+  const now = opts.now ?? Date.now
+  const cache = new Map<string, { uid: string; until: number }>()
+  const inflight = new Map<string, Promise<string | null>>()
+
+  return async (token: string, allowMiss?: () => boolean) => {
+    const key = createHash('sha256').update(token).digest('base64')
+    const hit = cache.get(key)
+    if (hit) {
+      if (hit.until > now()) return hit.uid
+      cache.delete(key)
+    }
+    const pending = inflight.get(key)
+    if (pending) return pending
+    if (allowMiss && !allowMiss()) return AUTH_RATE_LIMITED
+    const p = verify(token).then(uid => {
+      const exp = jwtExpiryMs(token)
+      const until = Math.min(now() + ttlMs, exp ?? Infinity)
+      if (uid && until > now()) {
+        if (cache.size >= max) cache.delete(cache.keys().next().value as string) // 가장 오래 넣은 것부터
+        cache.set(key, { uid, until })
+      }
+      return uid
+    }).finally(() => inflight.delete(key))
+    inflight.set(key, p)
+    return p
+  }
+}
+
+/** auth 핸들러가 쓰는 공용 서비스 조각 (전체 모양은 dispatch.ts SignalingServices) */
+export interface AuthSvc extends ResumeSvc {
+  deps: WsDeps
+  insecureDevMode: boolean
+  /**
+   * auth 토큰 검증: 캐시(cachedTokenVerifier) + 캐시 미스일 때만 연결별·IP(/64)별 버킷(조립부가 만든다).
+   * AUTH_RATE_LIMITED면 getUser를 부르지 않았다.
+   */
+  verifyAuth: (client: Client, token: string) => Promise<string | null | typeof AUTH_RATE_LIMITED>
+}
+
+/** auth 검증이 속도 제한에 걸렸음을 알린다(클라이언트는 다음 토큰 이벤트 때 다시 보낸다) */
+function sendAuthRateLimited(ctx: Ctx<AuthSvc>) {
+  send(ctx.ws, { type: 'error', code: 'rate-limited', message: '인증 요청이 너무 많습니다.', rejectedType: 'auth' })
+}
+
+/**
+ * 세션 재개: 이 연결(ctx)을 유예 중이던 이전 Client에 붙인다.
+ * 실행 순서는 S3까지 조립부에 있던 resumeSession 한 함수와 같다: 유예 해제·연결 상태 이식·임시 Client 제거·ctx 교체(resume)
+ * → 인증 필드·임시 Client의 만료 타이머 정리·만료 타이머 예약(auth 소유 필드) → 재개 알림(resume).
+ */
+function resumeSession(ctx: Ctx<AuthSvc>, old: Client, token: string) {
+  const temp = attachSession(ctx, old)
+  old.auth.state = 'authenticated'
+  old.auth.tokenExp = jwtExpiryMs(token)
+  if (temp.auth.expiryTimer) clearTimeout(temp.auth.expiryTimer)
+  scheduleExpiryCheck(old)
+  announceResumed(ctx)
+}
+
+/** S3: 연결 클로저의 함수를 그대로 옮겼다(캡처하던 값 없음) */
+export function scheduleExpiryCheck(client: Client) {
+  if (client.auth.expiryTimer) clearTimeout(client.auth.expiryTimer)
+  client.auth.expiryTimer = undefined
+  if (client.auth.tokenExp === null) return
+  const delay = Math.min(Math.max(client.auth.tokenExp + TOKEN_EXPIRY_GRACE_MS - Date.now(), 0), 2 ** 31 - 1)
+  client.auth.expiryTimer = setTimeout(() => {
+    if (client.auth.tokenExp !== null && client.auth.tokenExp + TOKEN_EXPIRY_GRACE_MS <= Date.now()) {
+      console.log(`[AUTH] ${client.id.slice(0, 8)} token expired - closing`)
+      client.conn.ws.close(4001, 'Token expired')
+    }
+  }, delay)
+  client.auth.expiryTimer.unref?.()
+}
+
+/**
+ * S3: 연결 클로저의 sendAuthResult를 그대로 옮겼다(ws·client는 ctx에서).
+ * P2-18c: 익명이면 새 재개 토큰(resumeToken)을 싣는다(이전 토큰은 무효)
+ */
+export function sendAuthResult(ctx: Ctx<{ insecureDevMode: boolean; resume: Pick<Resume, 'issueAnonToken'> }>) {
+  const { ws, client } = ctx
+  const { insecureDevMode } = ctx.svc
+  const authenticated = isAuthenticated(client) || (insecureDevMode && client.auth.state === 'authenticated')
+  send(ws, client.auth.state === 'anonymous'
+    ? { type: 'auth-result', authenticated, userId: client.auth.userId ?? null, resumeToken: ctx.svc.resume.issueAnonToken(client) }
+    : { type: 'auth-result', authenticated, userId: client.auth.userId ?? null })
+}
+
+/**
+ * 익명 세션 재개(P2-18c): JWT 없이 온 연결이 resumeClientId·resumeToken·resumeRoomId를 보냈고, 그 clientId의 익명 Client가
+ * 같은 방에서 유예 중(또는 서버가 닫힘을 모르는 옛 소켓)이며 토큰이 맞으면 붙인다. 붙였으면 true.
+ * 재개된 연결은 여전히 익명(관람만 — 연주·채팅·방장 권한 없음)이다. 쓴 토큰은 announceResumed의 새 토큰으로 무효가 된다.
+ */
+function tryResumeAnonymous(ctx: Ctx<AuthSvc>, msg: Msg): boolean {
+  const { resumeClientId: resumeId, resumeToken, resumeRoomId } = msg
+  if (!isNonEmptyString(resumeId, 64) || !isNonEmptyString(resumeToken, 128) || !isNonEmptyString(resumeRoomId, 128)) return false
+  const old = ctx.svc.resume.findAnon(resumeId, resumeToken, resumeRoomId, ctx.ws)
+  if (!old) return false
+  const temp = attachSession(ctx, old)
+  old.auth.state = 'anonymous'
+  if (temp.auth.expiryTimer) clearTimeout(temp.auth.expiryTimer)
+  announceResumed(ctx)
+  return true
+}
+
+/** `auth` — S3: 연결 클로저의 handleAuth 본문을 그대로 옮겼다 */
+export async function handleAuth(ctx: Ctx<AuthSvc>, msg: Msg) {
+  const { client, id } = ctx
+  const { deps, insecureDevMode, resume } = ctx.svc
+
+  const token = msg.accessToken
+
+  // 재인증 (L1): 같은 사용자의 갱신 토큰이면 만료 연장, 방 밖의 익명 연결은 로그인으로 승격
+  if (client.auth.state === 'authenticated' || client.auth.state === 'anonymous') {
+    if (insecureDevMode || !isNonEmptyString(token, 8192)) return
+    const uid = await ctx.svc.verifyAuth(client, token)
+    if (uid === AUTH_RATE_LIMITED) return sendAuthRateLimited(ctx)
+    if (!uid) return
+    if (client.auth.state === 'authenticated' && uid === client.auth.userId) {
+      client.auth.tokenExp = jwtExpiryMs(token)
+      scheduleExpiryCheck(client)
+    } else if (client.auth.state === 'anonymous' && !client.member.roomId) {
+      client.auth.userId = uid
+      client.auth.state = 'authenticated'
+      client.auth.tokenExp = jwtExpiryMs(token)
+      scheduleExpiryCheck(client)
+      console.log(`[AUTH] ${id.slice(0, 8)} upgraded to user ${uid.slice(0, 8)}`)
+    }
+    sendAuthResult(ctx)
+    return
+  }
+
+  client.auth.state = 'verifying'
+  if (isNonEmptyString(token, 8192) && deps.hasBackend) {
+    const verified = await ctx.svc.verifyAuth(client, token)
+    if (verified === AUTH_RATE_LIMITED) sendAuthRateLimited(ctx)
+    const uid = verified === AUTH_RATE_LIMITED ? null : verified
+    // 세션 재개: 이전 clientId의 주인이 같은 userId(JWT)이고, 유예시간 안(suspended에 남아 있음)이거나
+    // 서버가 아직 닫힘을 모르는 살아 있는 연결일 때(P1-16 — 옛 소켓은 attachSession이 끊는다)
+    const resumeId = msg.resumeClientId
+    if (uid && isNonEmptyString(resumeId, 64)) {
+      const old = resume.find(resumeId, uid) ?? resume.findLive(resumeId, uid, ctx.ws)
+      if (old) {
+        resumeSession(ctx, old, token)
+        return
+      }
+    }
+    if (uid) {
+      client.auth.userId = uid
+      client.auth.state = 'authenticated'
+      client.auth.tokenExp = jwtExpiryMs(token)
+      scheduleExpiryCheck(client)
+    }
+  } else if (insecureDevMode && isNonEmptyString(token, 8192)) {
+    // 개발 모드: 검증 불가. userId는 join 시 클라이언트 값 사용
+    client.auth.state = 'authenticated'
+  }
+
+  if (client.auth.state !== 'authenticated') {
+    client.auth.state = 'anonymous'
+    // 익명 관람자 세션 재개(P2-18c): 신원 대신 재개 토큰으로
+    if (tryResumeAnonymous(ctx, msg)) return
+  }
+  console.log(`[AUTH] ${id.slice(0, 8)} ${client.auth.state}${client.auth.userId ? ` user ${client.auth.userId.slice(0, 8)}` : ''}`)
+  sendAuthResult(ctx)
+}

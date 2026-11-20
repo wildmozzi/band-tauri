@@ -15,6 +15,27 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
+      # 운영(NODE_ENV=production) 서버는 PUBLIC_API_URL이 없으면 시작 시 종료한다(server/src/index.ts, P3-10g).
+      # fly.toml에 health check가 없어 배포가 성공으로 끝나도 머신이 재시작을 반복할 수 있으므로, 배포 전에 막는다.
+      # fly 설정은 바꾸지 않고 읽기만 한다(secrets 이름 목록 / fly.toml [env]).
+      - name: Preflight — PUBLIC_API_URL 설정 확인
+        working-directory: ./server
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if grep -Eq '^[[:space:]]*PUBLIC_API_URL[[:space:]]*=' fly.toml; then
+            echo "PUBLIC_API_URL: fly.toml [env]에 있음"
+            exit 0
+          fi
+          secrets_json="$(flyctl secrets list --json)"
+          if echo "$secrets_json" | jq -e 'any(.[]; (.Name // .name) == "PUBLIC_API_URL")' > /dev/null; then
+            echo "PUBLIC_API_URL: fly secrets에 있음"
+            exit 0
+          fi
+          echo "::error title=PUBLIC_API_URL 없음::fly 앱에 PUBLIC_API_URL이 없습니다. 이대로 배포하면 운영 서버가 시작 직후 종료(크래시 루프)합니다. 먼저 'fly secrets set PUBLIC_API_URL=https://<서버 공개 주소> -a <앱 이름>'을 실행한 뒤 이 워크플로를 다시 실행하세요 (docs/overhaul/storage.md)."
+          exit 1
+
       - run: flyctl deploy --remote-only
         working-directory: ./server
         env:

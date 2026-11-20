@@ -1,0 +1,442 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  font-family: var(--font-sans);
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--neutral-50);
+  background-color: var(--ink-950);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--ink-950);
+  /* 한국어는 어절 단위로 줄바꿈("실패했습니/다" 같은 글자 단위 줄바꿈 방지). 칸보다 긴 한 덩어리(URL·메일)는
+     overflow-wrap으로 끊는다. 채팅 본문처럼 사용자 입력은 화면별 규칙(word-break: break-word)이 이긴다 (P3-12d) */
+  word-break: keep-all;
+  overflow-wrap: anywhere; /* 띄어쓰기 없는 긴 제목이 flex·grid에서 가로로 넘치지 않게(break-word는 min-content 계산에 반영 안 됨) */
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  border: none;
+  border-radius: 14px;
+  padding: 12px 18px;
+  font-size: 1rem;
+  font-weight: 600;
+  font-family: inherit;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
+  cursor: pointer;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Premium Badge Styles */
+.premium-badge {
+  display: inline-block;
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-md);
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+/* Disabled premium controls */
+input:disabled,
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mix-control input:disabled {
+  background: var(--white-a10);
+}
+
+.mix-control label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}/* Plan
+ Status Styles */
+.plan-status-card {
+  background: var(--white-a05);
+  border: 1px solid var(--white-a10);
+  border-radius: var(--radius-xl);
+  padding: 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.plan-status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.plan-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.plan-badge {
+  padding: 0.25rem 0.75rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--neutral-950);
+}
+
+.plan-badge-compact {
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-xl);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--neutral-950);
+  transition: all 0.2s ease;
+}
+
+.upgrade-link {
+  color: var(--indigo-400);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.upgrade-link:hover {
+  color: var(--pink-400);
+}
+
+.plan-limits {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.limit-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--white-a10);
+}
+
+.limit-item:last-child {
+  border-bottom: none;
+}
+
+.limit-item.warning {
+  color: var(--amber-400);
+}
+
+.limit-label {
+  color: var(--neutral-400);
+  font-size: 0.875rem;
+}
+
+.limit-value {
+  font-weight: 500;
+  color: var(--neutral-50);
+}
+
+
+
+/* Feature Restrictions */
+.feature-locked {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 400px;
+  text-align: center;
+  padding: 2rem;
+}
+
+.lock-icon {
+  font-size: 4rem;
+  margin-bottom: 1rem;
+  opacity: 0.7;
+}
+
+.feature-restriction {
+  background: rgba(255, 193, 7, 0.1);
+  border: 1px solid rgba(255, 193, 7, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem;
+  margin-top: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--amber-400);
+}
+
+.feature-info {
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem;
+  margin-top: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--blue-400);
+}
+
+.plan-limit-info {
+  font-size: 0.75rem;
+  color: var(--neutral-400);
+  font-weight: normal;
+  margin-left: 0.5rem;
+}
+
+/* Disabled States */
+.toggle-option.disabled {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.preset-btn.locked {
+  position: relative;
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.preset-btn.locked .preset-content {
+  filter: blur(1px);
+}
+
+.lock-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 1.5rem;
+  opacity: 0.8;
+}
+
+.cloud-save-btn.disabled,
+.take-share.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: var(--white-a10);
+}
+
+.cloud-save-btn.disabled:hover,
+.take-share.disabled:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+/* User Plan Section */
+.user-plan-section {
+  margin-top: 2rem;
+}
+
+.user-plan-section .section-head {
+  margin-bottom: 1.5rem;
+}
+
+/* Navigation Plan Status */
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.plan-status-compact {
+  display: flex;
+  align-items: center;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.plan-status-compact:hover .plan-badge-compact {
+  transform: scale(1.05);
+  box-shadow: 0 2px 8px var(--black-a20);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .plan-status-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .plan-buttons {
+    flex-wrap: wrap;
+  }
+
+  .user-menu {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+}/* A
+d Banner Styles */
+.ad-banner {
+  background: linear-gradient(135deg, var(--indigo-400-a10), var(--pink-400-a10));
+  border: 1px solid var(--indigo-400-a30);
+  border-radius: var(--radius-xl);
+  padding: 1.5rem;
+  margin: 2rem 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.ad-banner::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--indigo-400), var(--pink-400));
+}
+
+.ad-banner.compact {
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.ad-content {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.ad-banner.compact .ad-content {
+  flex-direction: column;
+  text-align: center;
+  gap: 0.75rem;
+}
+
+.ad-label {
+  background: var(--indigo-400-a20);
+  color: var(--indigo-400);
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-xs);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.ad-text {
+  flex: 1;
+}
+
+.ad-text h4 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--neutral-50);
+}
+
+.ad-text p {
+  margin: 0;
+  color: var(--neutral-400);
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.ad-banner.compact .ad-text p {
+  font-size: 0.8rem;
+}
+
+.ad-cta {
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
+  padding: 0.75rem 1.5rem;
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.875rem;
+  transition: all 0.3s ease;
+  flex-shrink: 0;
+}
+
+.ad-cta:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 16px var(--indigo-400-a30);
+}
+
+.ad-cta-compact {
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 0.75rem;
+  transition: all 0.3s ease;
+}
+
+.ad-cta-compact:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px var(--indigo-400-a30);
+}
+
+/* Ad Banner Positions */
+.ad-banner.top {
+  margin-top: 0;
+  margin-bottom: 3rem;
+}
+
+.ad-banner.bottom {
+  margin-top: 3rem;
+  margin-bottom: 0;
+}
+
+.ad-banner.sidebar {
+  margin: 1rem 0;
+}
+
+/* Responsive Ad Banners */
+@media (max-width: 768px) {
+  .ad-content {
+    flex-direction: column;
+    text-align: center;
+    gap: 1rem;
+  }
+
+  .ad-text h4 {
+    font-size: 1rem;
+  }
+
+  .ad-text p {
+    font-size: 0.8rem;
+  }
+
+  .ad-cta {
+    padding: 0.625rem 1.25rem;
+    font-size: 0.8rem;
+  }
+}
+/*
+ * 키보드 포커스 표시 (P3-12c): 어두운 배경에서 브라우저 기본 포커스 링(검은 색 계열)이 거의 보이지 않는다.
+ * :where()라 명시도가 0 — 화면별로 따로 정한 포커스 스타일이 있으면 그쪽이 이긴다.
+ */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

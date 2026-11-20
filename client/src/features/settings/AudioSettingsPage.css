@@ -1,0 +1,12 @@
+/* AudioSettingsPage.css — app/App.css에서 옮긴 화면 전용 규칙 (P3-2 ③-3). 순서는 원래 App.css 순서 그대로 */
+/* Audio Settings Page */
+.audio-settings-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 32px;
+}
+
+.audio-settings-page h1 {
+  font-size: 2rem;
+  margin-bottom: 24px;
+}

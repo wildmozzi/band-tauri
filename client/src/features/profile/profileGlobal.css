@@ -1,0 +1,132 @@
+/*
+ * 프로필 CSS 중 그 화면 밖에서도 매칭되는 규칙 (P3-2 ③-2). 화면을 지연 로딩해도 전역으로, 예전과 같은 cascade 자리에서 로드한다
+ * (app이 import — .eslintrc.cjs APP_GLOBAL_CSS). 화면 전용 규칙은 화면 컴포넌트가 import하는 원래 파일에 남겼다.
+ * 여기 규칙은 선택자 클래스가 다른 화면(공용 컴포넌트·내비게이션 등)에도 있거나, 다른 파일 규칙과 같은 특이성이라 순서로 이기던 것이다
+ * — 지연 로딩 CSS는 맨 뒤에 붙어 순서가 바뀌므로 옮기면 화면이 바뀐다. 전역 CSS 정리(문서 9절) 때 소유 화면으로 옮기거나 선택자를 좁힌다.
+ */
+
+/* ===== Profile.css에서 옮김 ===== */
+.btn-primary,
+.btn-secondary {
+  padding: 0.75rem 2rem;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.btn-primary {
+  background: var(--gradient-violet);
+  color: var(--white);
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-glow-sm);
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: var(--white-a10);
+  color: var(--white);
+  border: 1px solid var(--white-a20);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--white-a20);
+}
+
+/* Navigation 프로필 아이콘 */
+.profile-icon-link {
+  display: flex;
+  align-items: center;
+  margin-right: 1rem;
+}
+
+.nav-profile-photo {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-round);
+  object-fit: cover;
+  border: 2px solid var(--white-a30);
+  transition: all 0.3s ease;
+}
+
+.nav-profile-photo:hover {
+  border-color: var(--violet-500);
+  transform: scale(1.05);
+}
+
+.nav-profile-default {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-round);
+  background: var(--gradient-violet);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  border: 2px solid var(--white-a30);
+  transition: all 0.3s ease;
+}
+
+.nav-profile-default:hover {
+  border-color: var(--violet-500);
+  transform: scale(1.05);
+}
+
+.plan-badge {
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.plan-badge.free {
+  background: linear-gradient(135deg, var(--gray-500) 0%, var(--gray-400) 100%);
+}
+
+.plan-badge.standard {
+  background: var(--gradient-violet);
+}
+
+.plan-badge.pro {
+  background: linear-gradient(135deg, #f59e0b 0%, var(--amber-400) 100%);
+  color: var(--navy-800);
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--white-a10);
+}
+
+.info-row:last-of-type {
+  border-bottom: none;
+  margin-bottom: 1.5rem;
+}
+
+.info-label {
+  color: var(--white-a60);
+}
+
+.info-value {
+  color: var(--white);
+  font-weight: 500;
+}
+
+@media (max-width: 768px) {
+
+  .btn-primary,
+  .btn-secondary {
+    width: 100%;
+  }
+}
+

@@ -1,57 +1,99 @@
-mod audio;
-mod commands;
-mod network;
+//! 앱 크레이트(엔진 R-1 ⑩-2): Tauri 진입점과 커맨드 어댑터(`commands`)만 둔다. 엔진은 `band_engine`, 결정적 코어는
+//! `band_dsp`(`docs/overhaul/engine-stage5-10-scope.md` 7.2절).
+
+pub mod commands;
+// 프론트 계약 대조(커맨드 목록·계약 타입 필드 vs engineApi.ts·설계 문서) — 시험 전용
+#[cfg(test)]
+mod contract_tests;
+
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    println!("[BAND] Starting application...");
-
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                // 진단 내보내기(P2-5)에 담을 만큼 남긴다(기본 40KB·1개는 몇 분 분량뿐)
+                .max_file_size(1_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(2))
+                .build(),
+        )
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(commands::EngineState::default())
+        .manage(commands::DiagState::default())
+        // 페이지를 다시 읽으면(F5·Ctrl+R 등) 앞 페이지의 엔진을 정지한다(`EngineState::stop_orphaned`, 발굴 3차). 콜백은 메인
+        // 스레드라 정지(join·녹음 마무리)는 별도 스레드에서.
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started {
+                let engine = webview.state::<commands::EngineState>().inner().clone();
+                // 세대는 지금 뜬다: 정지 스레드가 늦게 돌아도 그 사이 새 페이지가 띄운 엔진은 건드리지 않는다(#212)
+                let gen = engine.reload_generation();
+                std::thread::spawn(move || engine.stop_orphaned(gen));
+            }
+        })
         .invoke_handler(tauri::generate_handler![
-            // New Audio API
-            commands::start_audio,
-            commands::stop_audio,
-            commands::set_audio_peer,
-            commands::get_audio_stats,
-            commands::get_audio_devices,
-            commands::start_test_audio,
-            commands::stop_test_audio,
-            commands::refresh_audio_devices,
-            // New Network API
-            commands::init_network,
-            commands::get_network_info,
-            commands::connect_to_peer,
-            commands::disconnect_peer,
-            commands::get_peer_latencies,
-            commands::shutdown_network,
-            // Legacy (backward compatibility)
-            commands::start_native_audio,
-            commands::stop_native_audio,
-            commands::set_audio_settings,
-            commands::set_monitoring,
-            commands::get_monitoring,
-            commands::set_monitoring_volume,
-            commands::get_monitoring_volume,
-            commands::start_p2p_network,
-            commands::stop_p2p_network,
+            commands::engine_list_devices,
+            commands::engine_supported_drivers,
+            commands::engine_start,
+            commands::engine_stop,
+            commands::engine_test_start,
+            commands::engine_test_stop,
+            commands::engine_add_peer,
+            commands::engine_remove_peer,
+            commands::engine_set_relay,
+            commands::engine_set_peer_gain,
+            commands::engine_set_input_muted,
+            commands::engine_set_jitter_profile,
+            commands::engine_safety_code,
+            commands::engine_set_monitor,
+            commands::engine_set_master_gain,
+            commands::engine_set_metronome,
+            commands::engine_set_metronome_gain,
+            commands::engine_set_loopback_offset,
+            commands::engine_stats,
+            commands::engine_subscribe_mix,
+            commands::engine_unsubscribe_mix,
+            commands::engine_measure_loopback,
+            commands::engine_set_echo_mode,
+            commands::engine_measure_echo_peer,
+            commands::engine_cancel_measure,
+            commands::engine_record_folder,
+            commands::engine_record_pick_folder,
+            commands::engine_record_start,
+            commands::engine_record_stop,
+            commands::engine_record_set_track_names,
+            commands::diag_export,
         ])
         .setup(|_app| {
-            println!("[BAND] Setup started...");
-
-            // 백그라운드에서 ASIO 장치 캐시 초기화 (앱 시작 즉시)
-            audio::init_audio_cache();
-
+            // 녹음 폴더 설정(P2-4): 설정 파일 경로는 앱 설정 폴더 — AppHandle이 있어야 찾는다
+            _app.manage(commands::RecordDirState::new(_app.handle()));
+            // 엔진 통계 타임라인 기록(P2-5): 1초 간격, 최근 60분
+            let engine = _app.state::<commands::EngineState>().manager();
+            if let Err(e) = _app.state::<commands::DiagState>().spawn_recorder(engine) {
+                log::warn!("진단 기록 스레드 시작 실패: {e}");
+            }
+            // 자동 업데이트 (P2-1): 엔드포인트·공개키는 tauri.conf.json plugins.updater, 절차는 docs/RELEASE.md
+            #[cfg(desktop)]
+            _app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            // ASIO Host는 여기서(백그라운드로) 미리 만들지 않는다 — band_engine::engine::device 참고.
             #[cfg(debug_assertions)]
             {
-                use tauri::Manager;
                 if let Some(window) = _app.get_webview_window("main") {
-                    let _ = window.open_devtools();
+                    window.open_devtools();
                 }
             }
-            println!("[BAND] Setup completed");
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("Tauri 앱 초기화 실패")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // 종료 시 Bye 송신과 스레드 join
+                app.state::<commands::DiagState>().shutdown();
+                app.state::<commands::EngineState>().shutdown();
+            }
+        });
 }

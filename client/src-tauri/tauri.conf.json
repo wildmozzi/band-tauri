@@ -24,12 +24,41 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self' blob: 'wasm-unsafe-eval' https://*.tosspayments.com",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: https://*.supabase.co https://*.r2.cloudflarestorage.com https://band-server.fly.dev https://*.tosspayments.com",
+        "media-src": "'self' data: blob: mediastream: https://*.supabase.co https://*.r2.cloudflarestorage.com https://band-server.fly.dev",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost https://*.supabase.co https://*.r2.cloudflarestorage.com wss://*.supabase.co https://band-server.fly.dev wss://band-server.fly.dev https://*.tosspayments.com",
+        "frame-src": "https://*.tosspayments.com",
+        "worker-src": "'self' blob:",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'self' https://*.tosspayments.com"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "script-src": "'self' blob: 'wasm-unsafe-eval' https://*.tosspayments.com",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data: blob: https://*.supabase.co https://*.r2.cloudflarestorage.com https://band-server.fly.dev https://*.tosspayments.com http://localhost:* https://localhost:*",
+        "media-src": "'self' data: blob: mediastream: https://*.supabase.co https://*.r2.cloudflarestorage.com https://band-server.fly.dev http://localhost:* https://localhost:*",
+        "font-src": "'self' data:",
+        "connect-src": "'self' ipc: http://ipc.localhost https://*.supabase.co https://*.r2.cloudflarestorage.com wss://*.supabase.co https://band-server.fly.dev wss://band-server.fly.dev https://*.tosspayments.com http://localhost:* https://localhost:* ws://localhost:* wss://localhost:* http://127.0.0.1:* ws://127.0.0.1:*",
+        "frame-src": "https://*.tosspayments.com",
+        "worker-src": "'self' blob:",
+        "object-src": "'none'",
+        "base-uri": "'self'",
+        "form-action": "'self' https://*.tosspayments.com"
+      }
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -40,7 +69,27 @@
     "windows": {
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
-      "timestampUrl": ""
+      "timestampUrl": "",
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "Korean",
+          "English"
+        ],
+        "displayLanguageSelector": false
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRFMDQ2ODhCOUM1MjU2MjkKUldRcFZsS2NpMmdFVGl1T25VWU94SzhVVjJvNmdvY2tIK1QwMHV0S0h1MjZxbm0rYVRZbGFzNUsK",
+      "endpoints": [
+        "https://github.com/wildmozzi/band-tauri/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

@@ -1,0 +1,22 @@
+/* profileDetails.css — app/App.css에서 옮긴 화면 전용 규칙 (P3-2 ③-3). 순서는 원래 App.css 순서 그대로 */
+.detail-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.detail-item:last-child {
+  border-bottom: none;
+}
+
+.detail-item span {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.detail-item strong {
+  font-size: 1rem;
+  font-weight: 700;
+}

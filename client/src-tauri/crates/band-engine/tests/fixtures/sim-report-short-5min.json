@@ -1,0 +1,417 @@
+{
+  "criteria": {
+    "accumMaxMs": 1.0,
+    "bandGapS": 1.0,
+    "bandMaxS": 60.0,
+    "bandMs": 3.0,
+    "bandPctMax": 10.0,
+    "concealGoalPct": 1.5,
+    "recoverMaxS": 5.0,
+    "underrunMaxPct": 0.5
+  },
+  "fails": [],
+  "goalAllPass": false,
+  "knownShortfalls": [
+    "#1 1절 지터 버퍼 지연(마지막 창 bufferMs) 12.17ms > 11.68ms — P1-6d 결정(꼬리 지터 회선은 1절 안정 회선 대상 밖) — 기존에도 마지막 창 목표(≈11.87ms)가 한도(11.68ms)를 넘고 깊이가 데드밴드 덕에 통과하던 회선, 계단 감지(P2-16b)·빠른 내림(P2-16c) 뒤 0.05ms 초과, 워커 기다림 선택(P2-17g) 뒤 시드 6에서 12.17ms(10시드 평균 +0.2ms) (기준값 12.17ms ± 0.1ms)"
+  ],
+  "pass": true,
+  "peers": [
+    {
+      "accumulation": {
+        "deltaMs": 0.015009880065917969,
+        "firstWindowBufferMs": 7.130823612213135,
+        "lastWindowBufferMs": 7.145833492279053,
+        "offsetFirstMs": 1.5058236122131348,
+        "offsetLastMs": 1.5208334922790527,
+        "pass": true
+      },
+      "bufferMs": {
+        "median": 7.145833492279053,
+        "p95": 8.03558349609375
+      },
+      "conceal": {
+        "actualLossPct": 0.9298450258290285,
+        "limitPct": 1.5,
+        "lossPct": 0.9380927746163131,
+        "pass": true,
+        "pct": 0.9380927746163131,
+        "pctWithEvents": 0.9380927746163131,
+        "underrunLimitPct": 0.5,
+        "underrunPct": 0.0
+      },
+      "corrections": 2382,
+      "driftPpm": 170.0,
+      "frameMs": 5.0,
+      "goalDelay": {
+        "bufferMs": 7.130823612213135,
+        "lastBufferMs": 7.145833492279053,
+        "lastOneFramePlusP95Ms": 8.059350967407227,
+        "lastWithin": true,
+        "oneFramePlusP95Ms": 8.080558776855469,
+        "within": true
+      },
+      "index": 0,
+      "known": [],
+      "lateDropped": 0,
+      "line": "F 5.0ms, 장치 128샘플, 드리프트 +170ppm, 지터 Uniform 1.0ms, 손실 1.0%",
+      "maxCorrCents": 4.3335041999816895,
+      "outOfBand": {
+        "maxRunAtS": 0.0,
+        "maxRunS": 0.0,
+        "pass": true,
+        "pct": 0.0,
+        "totalS": 0.0
+      },
+      "rebuffers": 0,
+      "recoverPass": true,
+      "recoveries": [],
+      "tail": {
+        "adjusts": 0,
+        "resets": 0
+      },
+      "targetFirst": {
+        "jitterEstMs": 3.5,
+        "leadMs": 1.5,
+        "tailMs": 0.0,
+        "targetMs": 5.625
+      },
+      "targetMsMedian": 5.625,
+      "verdict": "PASS"
+    },
+    {
+      "accumulation": {
+        "deltaMs": 0.9033098220825195,
+        "firstWindowBufferMs": 11.26771068572998,
+        "lastWindowBufferMs": 12.1710205078125,
+        "offsetFirstMs": -0.29004859924316406,
+        "offsetLastMs": -0.20817184448242188,
+        "pass": true
+      },
+      "bufferMs": {
+        "median": 12.33493709564209,
+        "p95": 22.03971290588379
+      },
+      "conceal": {
+        "actualLossPct": 0.4801040225382166,
+        "limitPct": 1.5,
+        "lossPct": 1.034636208558926,
+        "pass": true,
+        "pct": 1.0605948231105837,
+        "pctWithEvents": 1.0590954565839859,
+        "underrunLimitPct": 0.5,
+        "underrunPct": 0.025958614551657645
+      },
+      "corrections": 6875,
+      "driftPpm": -200.0,
+      "frameMs": 5.0,
+      "goalDelay": {
+        "bufferMs": 11.26771068572998,
+        "lastBufferMs": 12.1710205078125,
+        "lastOneFramePlusP95Ms": 11.680976867675781,
+        "lastWithin": false,
+        "oneFramePlusP95Ms": 11.675993919372559,
+        "within": true
+      },
+      "index": 1,
+      "known": [
+        {
+          "base": 12.17,
+          "metric": "GoalDelayLast",
+          "tol": 0.1,
+          "why": "P1-6d 결정(꼬리 지터 회선은 1절 안정 회선 대상 밖) — 기존에도 마지막 창 목표(≈11.87ms)가 한도(11.68ms)를 넘고 깊이가 데드밴드 덕에 통과하던 회선, 계단 감지(P2-16b)·빠른 내림(P2-16c) 뒤 0.05ms 초과, 워커 기다림 선택(P2-17g) 뒤 시드 6에서 12.17ms(10시드 평균 +0.2ms)"
+        }
+      ],
+      "lateDropped": 13,
+      "line": "F 5.0ms, 장치 96샘플, 드리프트 -200ppm, 지터 Exp 2.0ms, 손실 0.5%, 계단@90s(+8ms, 지터 4.0ms), 계단@180s(+0ms, 지터 2.0ms)",
+      "maxCorrCents": 4.3335041999816895,
+      "outOfBand": {
+        "maxRunAtS": 182.200662,
+        "maxRunS": 3.0997749999999997,
+        "pass": true,
+        "pct": 2.3448275862068937,
+        "totalS": 6.799999999999992
+      },
+      "rebuffers": 0,
+      "recoverPass": true,
+      "recoveries": [],
+      "tail": {
+        "adjusts": 28,
+        "resets": 0
+      },
+      "targetFirst": {
+        "jitterEstMs": 7.75,
+        "leadMs": 1.5,
+        "tailMs": 2.0,
+        "targetMs": 11.625
+      },
+      "targetMsMedian": 12.375,
+      "verdict": "FAIL(알려진)"
+    },
+    {
+      "accumulation": {
+        "deltaMs": 0.4158611297607422,
+        "firstWindowBufferMs": 10.354975700378418,
+        "lastWindowBufferMs": 10.77083683013916,
+        "offsetFirstMs": 0.9374494552612305,
+        "offsetLastMs": 1.3740310668945312,
+        "pass": true
+      },
+      "bufferMs": {
+        "median": 10.603939056396484,
+        "p95": 11.641619682312012
+      },
+      "conceal": {
+        "actualLossPct": 1.4913932445718285,
+        "limitPct": 1.9913932445718285,
+        "lossPct": 1.4553731549179196,
+        "pass": true,
+        "pct": 1.4553731549179196,
+        "pctWithEvents": 1.4553731549179196,
+        "underrunLimitPct": 0.5,
+        "underrunPct": 0.0
+      },
+      "corrections": 2894,
+      "driftPpm": 200.0,
+      "frameMs": 5.0,
+      "goalDelay": {
+        "bufferMs": 10.354975700378418,
+        "lastBufferMs": 10.77083683013916,
+        "lastOneFramePlusP95Ms": 11.722026824951172,
+        "lastWithin": true,
+        "oneFramePlusP95Ms": 11.745000839233398,
+        "within": true
+      },
+      "index": 2,
+      "known": [],
+      "lateDropped": 0,
+      "line": "F 5.0ms, 장치 256샘플, 드리프트 +200ppm, 지터 Uniform 3.0ms, 손실 0.3% + 버스트(진입 0.40%, 평균 3.0패킷)",
+      "maxCorrCents": 4.3335041999816895,
+      "outOfBand": {
+        "maxRunAtS": 0.0,
+        "maxRunS": 0.0,
+        "pass": true,
+        "pct": 0.0,
+        "totalS": 0.0
+      },
+      "rebuffers": 0,
+      "recoverPass": true,
+      "recoveries": [],
+      "tail": {
+        "adjusts": 0,
+        "resets": 0
+      },
+      "targetFirst": {
+        "jitterEstMs": 7.25,
+        "leadMs": 1.5,
+        "tailMs": 0.0,
+        "targetMs": 9.375
+      },
+      "targetMsMedian": 9.375,
+      "verdict": "PASS"
+    },
+    {
+      "accumulation": {
+        "deltaMs": 0.07335281372070312,
+        "firstWindowBufferMs": 8.604292869567871,
+        "lastWindowBufferMs": 8.677645683288574,
+        "offsetFirstMs": 0.014426231384277344,
+        "offsetLastMs": 0.043478965759277344,
+        "pass": true
+      },
+      "bufferMs": {
+        "median": 8.63496208190918,
+        "p95": 9.096790313720703
+      },
+      "conceal": {
+        "actualLossPct": 1.0466780473505424,
+        "limitPct": 1.5,
+        "lossPct": 1.0571007711636773,
+        "pass": true,
+        "pct": 1.0580635223213857,
+        "pctWithEvents": 1.0580635223213857,
+        "underrunLimitPct": 0.5,
+        "underrunPct": 0.0009627511577082671
+      },
+      "corrections": 2188,
+      "driftPpm": -120.0,
+      "frameMs": 2.5,
+      "goalDelay": {
+        "bufferMs": 8.604292869567871,
+        "lastBufferMs": 8.677645683288574,
+        "lastOneFramePlusP95Ms": 8.81570053100586,
+        "lastWithin": true,
+        "oneFramePlusP95Ms": 8.844608306884766,
+        "within": true
+      },
+      "index": 3,
+      "known": [],
+      "lateDropped": 1,
+      "line": "F 2.5ms, 장치 128샘플, 드리프트 -120ppm, 지터 Uniform 5.0ms, 손실 1.0%, 단절 5s@150s, 단절 5s@255s",
+      "maxCorrCents": 4.3335041999816895,
+      "outOfBand": {
+        "maxRunAtS": 150.30025,
+        "maxRunS": 4.799844999999982,
+        "pass": true,
+        "pct": 3.3103448275862006,
+        "totalS": 9.599999999999982
+      },
+      "rebuffers": 2,
+      "recoverPass": true,
+      "recoveries": [
+        {
+          "outageEndS": 155.0,
+          "recoverS": 0.10069799999999418
+        },
+        {
+          "outageEndS": 260.0,
+          "recoverS": 0.10055999999997312
+        }
+      ],
+      "tail": {
+        "adjusts": 0,
+        "resets": 4
+      },
+      "targetFirst": {
+        "jitterEstMs": 6.75,
+        "leadMs": 1.5,
+        "tailMs": 0.0,
+        "targetMs": 8.5625
+      },
+      "targetMsMedian": 8.5625,
+      "verdict": "PASS"
+    },
+    {
+      "accumulation": {
+        "deltaMs": 0.3545241355895996,
+        "firstWindowBufferMs": 6.7291646003723145,
+        "lastWindowBufferMs": 7.083688735961914,
+        "offsetFirstMs": 1.2623629570007324,
+        "offsetLastMs": 1.708688735961914,
+        "pass": true
+      },
+      "bufferMs": {
+        "median": 6.807657241821289,
+        "p95": 35.79176712036133
+      },
+      "conceal": {
+        "actualLossPct": 0.47664283452494044,
+        "limitPct": 1.5,
+        "lossPct": 0.4465621619133117,
+        "pass": true,
+        "pct": 0.4465621619133117,
+        "pctWithEvents": 0.5380237972064149,
+        "underrunLimitPct": 0.5,
+        "underrunPct": 0.0
+      },
+      "corrections": 2756,
+      "driftPpm": 60.0,
+      "frameMs": 5.0,
+      "goalDelay": {
+        "bufferMs": 6.7291646003723145,
+        "lastBufferMs": 7.083688735961914,
+        "lastOneFramePlusP95Ms": 8.011699676513672,
+        "lastWithin": true,
+        "oneFramePlusP95Ms": 7.993800163269043,
+        "within": true
+      },
+      "index": 4,
+      "known": [],
+      "lateDropped": 0,
+      "line": "F 5.0ms, 장치 144샘플, 드리프트 +60ppm, 지터 Uniform 1.0ms, 손실 0.5%, 스파이크 7회(0.3s +30ms)",
+      "maxCorrCents": 4.3335041999816895,
+      "outOfBand": {
+        "maxRunAtS": 156.200206,
+        "maxRunS": 1.4003080000000012,
+        "pass": true,
+        "pct": 2.3448275862068937,
+        "totalS": 6.799999999999992
+      },
+      "rebuffers": 0,
+      "recoverPass": true,
+      "recoveries": [],
+      "tail": {
+        "adjusts": 0,
+        "resets": 0
+      },
+      "targetFirst": {
+        "jitterEstMs": 3.25,
+        "leadMs": 1.5,
+        "tailMs": 0.0,
+        "targetMs": 5.375
+      },
+      "targetMsMedian": 5.375,
+      "verdict": "PASS"
+    },
+    {
+      "accumulation": {
+        "deltaMs": 0.020833969116210938,
+        "firstWindowBufferMs": 9.020833015441895,
+        "lastWindowBufferMs": 9.041666984558105,
+        "offsetFirstMs": -0.35416698455810547,
+        "offsetLastMs": -0.33333301544189453,
+        "pass": true
+      },
+      "bufferMs": {
+        "median": 9.065199851989746,
+        "p95": 14.645844459533691
+      },
+      "conceal": {
+        "actualLossPct": 1.9613493812510594,
+        "limitPct": 2.4613493812510594,
+        "lossPct": 2.0171665389978983,
+        "pass": true,
+        "pct": 2.0171665389978983,
+        "pctWithEvents": 2.0017469791818314,
+        "underrunLimitPct": 0.5,
+        "underrunPct": 0.0
+      },
+      "corrections": 2324,
+      "driftPpm": -160.0,
+      "frameMs": 5.0,
+      "goalDelay": {
+        "bufferMs": 9.020833015441895,
+        "lastBufferMs": 9.041666984558105,
+        "lastOneFramePlusP95Ms": 11.932807922363281,
+        "lastWithin": true,
+        "oneFramePlusP95Ms": 11.938994407653809,
+        "within": true
+      },
+      "index": 5,
+      "known": [],
+      "lateDropped": 2,
+      "line": "F 5.0ms, 장치 480샘플, 드리프트 -160ppm, 지터 Uniform 2.0ms, 손실 1.5% + 버스트(진입 0.25%, 평균 2.0패킷), 단절 5s@75s, 계단@210s(+0ms, 지터 8.0ms), 계단@240s(+0ms, 지터 2.0ms)",
+      "maxCorrCents": 4.3335041999816895,
+      "outOfBand": {
+        "maxRunAtS": 75.300603,
+        "maxRunS": 4.79951300000001,
+        "pass": true,
+        "pct": 1.8620689655172402,
+        "totalS": 5.399999999999997
+      },
+      "rebuffers": 1,
+      "recoverPass": true,
+      "recoveries": [
+        {
+          "outageEndS": 80.0,
+          "recoverS": 0.10028900000000363
+        }
+      ],
+      "tail": {
+        "adjusts": 3,
+        "resets": 1
+      },
+      "targetFirst": {
+        "jitterEstMs": 7.25,
+        "leadMs": 1.5,
+        "tailMs": 0.0,
+        "targetMs": 9.375
+      },
+      "targetMsMedian": 9.375,
+      "verdict": "PASS"
+    }
+  ],
+  "resolved": [],
+  "simSeconds": 300.0,
+  "tag": "short-5min",
+  "xruns": 0
+}

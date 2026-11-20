@@ -1,0 +1,295 @@
+/* Pricing Page Styles */
+.pricing-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.pricing-hero {
+  text-align: center;
+  margin-bottom: 4rem;
+}
+
+.pricing-hero .eyebrow {
+  color: var(--indigo-400);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 1rem;
+}
+
+.pricing-hero h1 {
+  font-size: 3rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+  background: var(--gradient-brand);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.pricing-hero .lead {
+  font-size: 1.25rem;
+  color: var(--neutral-400);
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* Pricing Plans */
+.pricing-plans {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+  gap: 2rem;
+  margin-bottom: 4rem;
+}
+
+.plan-card {
+  background: var(--white-a05);
+  border: 1px solid var(--white-a10);
+  border-radius: var(--radius-pill);
+  padding: 2rem;
+  position: relative;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.plan-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 20px 40px var(--indigo-400-a10);
+}
+
+.plan-card.recommended {
+  border-color: var(--indigo-400);
+  box-shadow: 0 0 30px var(--indigo-400-a20);
+}
+
+.plan-header {
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.plan-header h3 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.plan-subtitle {
+  color: var(--neutral-400);
+  margin-bottom: 1rem;
+}
+
+.plan-button {
+  width: 100%;
+  padding: 1rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: var(--radius-xl);
+  border: none;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  margin-bottom: 1rem;
+}
+
+.free-button {
+  background: var(--white-a10);
+  color: var(--neutral-50);
+  border: 1px solid var(--white-a20);
+}
+
+.free-button:hover {
+  background: var(--white-a15);
+}
+
+.standard-button {
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
+}
+
+.standard-button:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-brand);
+}
+
+.pro-button {
+  background: linear-gradient(120deg, var(--pink-400), #ffb347);
+  color: var(--neutral-950);
+}
+
+.pro-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px var(--pink-400-a30);
+}
+
+.plan-recommendation {
+  text-align: center;
+  color: var(--neutral-400);
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+/* Comparison Table */
+.comparison-table {
+  margin-bottom: 4rem;
+}
+
+.comparison-table h2 {
+  text-align: center;
+  margin-bottom: 2rem;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.table-container {
+  overflow-x: auto;
+  border-radius: var(--radius-xl);
+  background: var(--white-a05);
+}
+
+.comparison-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.comparison-table th,
+.comparison-table td {
+  padding: 1rem;
+  text-align: left;
+  border-bottom: 1px solid var(--white-a10);
+}
+
+.comparison-table th {
+  background: var(--white-a10);
+  font-weight: 600;
+  text-align: center;
+}
+
+.comparison-table td {
+  text-align: center;
+}
+
+.feature-name {
+  text-align: left !important;
+  font-weight: 500;
+}
+
+/* FAQ Section */
+.faq-section {
+  margin-bottom: 4rem;
+}
+
+.faq-section h2 {
+  text-align: center;
+  margin-bottom: 2rem;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.faq-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 2rem;
+}
+
+.faq-item {
+  background: var(--white-a05);
+  border-radius: var(--radius-xl);
+  padding: 1.5rem;
+}
+
+.faq-item h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: var(--indigo-400);
+}
+
+.faq-item p {
+  color: var(--neutral-400);
+  line-height: 1.6;
+}
+
+/* Getting Started */
+.getting-started {
+  text-align: center;
+}
+
+.getting-started h2 {
+  margin-bottom: 2rem;
+  font-size: 2rem;
+  font-weight: 700;
+}
+
+.steps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 2rem;
+}
+
+.step-number {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-round);
+  background: var(--gradient-brand);
+  color: var(--neutral-950);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  margin: 0 auto 1rem;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .pricing-page {
+    padding: 1rem;
+  }
+
+  .pricing-hero h1 {
+    font-size: 2rem;
+  }
+
+  .pricing-plans {
+    grid-template-columns: 1fr;
+  }
+}/* Cur
+rent Plan Styles */
+.plan-button.current-plan {
+  background: var(--green-500-a20);
+  border: 2px solid var(--green-500);
+  color: var(--green-500);
+  cursor: default;
+}
+
+.plan-button.current-plan:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.plan-card.current-plan {
+  border-color: var(--green-500);
+  box-shadow: 0 0 20px var(--green-500-a20);
+}
+
+.plan-card.current-plan::before {
+  content: "현재 플랜";
+  position: absolute;
+  top: -10px;
+  left: 20px;
+  background: var(--green-500);
+  color: var(--neutral-950);
+  padding: 0.25rem 0.75rem;
+  border-radius: var(--radius-xl);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.pricing-notice {
+  max-width: 48rem;
+  margin: 0 auto 2rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--white-a12);
+  border-radius: var(--radius-xl);
+  background: var(--white-a05);
+  text-align: center;
+}
