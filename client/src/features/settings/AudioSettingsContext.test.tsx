@@ -16,6 +16,37 @@ vi.mock('../../shared/lib/supabaseClient', async () => {
 const auth = vi.hoisted(() => ({ user: { id: 'u1' } as { id: string } | null }))
 vi.mock('../auth/useAuth', () => ({ useAuth: () => ({ user: auth.user }) }))
 
+import type { DeviceInfo, DriverKind, EngineConfig } from '../../native/engineApi'
+
+// 데스크톱 앱 흉내(P2-27): 장치 목록·지원 드라이버·테스트 모니터 시작만 가짜로. 기본은 웹(native.on=false)이라 위 시험에는 영향 없음
+const native = vi.hoisted(() => ({
+  on: false,
+  devices: [] as DeviceInfo[],
+  supported: null as DriverKind[] | null,
+  testStarts: [] as EngineConfig[],
+  /** engine_list_devices 호출 수(정상 경로에 추가 IPC가 없는지) */
+  listCalls: 0,
+}))
+vi.mock('../../native/engineApi', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../native/engineApi')>()
+  return {
+    ...orig,
+    isNativeApp: () => native.on,
+    engineListDevices: async () => {
+      native.listCalls += 1
+      return native.devices
+    },
+    engineSupportedDrivers: async () => native.supported,
+    engineTestStart: async (c: EngineConfig) => {
+      native.testStarts.push(c)
+      return null
+    },
+    engineTestStop: async () => null,
+    engineStats: async () => null,
+  }
+})
+vi.mock('../../native/loopbackOffsetStore', () => ({ reapplyLoopbackOffsetInBackground: () => {} }))
+
 import { AudioSettingsProvider, useAudioSettings } from './AudioSettingsContext'
 
 function setup() {
@@ -41,6 +72,10 @@ afterEach(() => {
   vi.clearAllMocks()
   vi.restoreAllMocks()
   auth.user = { id: 'u1' }
+  native.on = false
+  native.devices = []
+  native.supported = null
+  native.testStarts = []
 })
 
 describe('AudioSettingsContext + profiles.audio_settings', () => {
@@ -130,5 +165,191 @@ describe('AudioSettingsContext + profiles.audio_settings', () => {
     expect('threadPolicy' in cache.engine).toBe(false)
     const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: Record<string, unknown> } }
     expect('threadPolicy' in payload.audio_settings.engine).toBe(false)
+  })
+})
+
+const wasapi = (id: string, isInput: boolean, channels = 2): DeviceInfo => ({
+  id, name: id.slice('wasapi::'.length), driver: 'wasapiShared', isInput, isDefault: true, channels, sampleRates: [48000],
+})
+/** 이 PC: 내장 마이크·스피커만(저장된 인터페이스 없음) */
+const LAPTOP = [wasapi('wasapi::마이크 배열', true, 1), wasapi('wasapi::스피커', false)]
+type Prepared = Awaited<ReturnType<ReturnType<typeof useAudioSettings>['prepareRunConfig']>>
+
+describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기본 장치, 저장값은 그대로', () => {
+  const SAVED = { version: 2, engine: { bufferSize: 256, inputDevice: 'wasapi::Focusrite USB', outputDevice: 'wasapi::Focusrite USB', channels: 2, inputChannels: [2, 3] } }
+
+  it('계정에서 받은 장치 id가 없으면 엔진에는 기본 장치로 넘기고, config·계정·로컬 캐시에는 원래 id를 둔다', async () => {
+    native.on = true
+    native.devices = LAPTOP
+    native.supported = ['wasapiExclusive', 'wasapiShared']
+    sb.mock!.setResult('profiles', { data: { audio_settings: SAVED } })
+    const { result } = setup()
+    await waitFor(() => expect(result.current.config.bufferSize).toBe(256))
+    await waitFor(() => expect(result.current.devices).toHaveLength(2))
+    await act(async () => {})
+
+    // 설정 화면: 저장값 그대로 + 시작 전 안내
+    expect(result.current.config.inputDevice).toBe('wasapi::Focusrite USB')
+    await waitFor(() => expect(result.current.missingDevices).toEqual({ input: 'wasapi::Focusrite USB', output: 'wasapi::Focusrite USB' }))
+    await waitFor(() => expect(result.current.fallbackNotice).toContain("'Focusrite USB'를 찾을 수 없어 기본 장치로 시작합니다"))
+
+    // 엔진 시작 직전: 이번 실행 설정
+    let run: Prepared | null = null
+    await act(async () => { run = await result.current.prepareRunConfig() })
+    expect(run!.issues).toEqual([])
+    expect(run!.config).toMatchObject({ inputDevice: null, outputDevice: null, inputChannels: [0, 0], bufferSize: 256 })
+    expect(run!.notice).toContain('기본 장치로 시작했습니다')
+    // 몇 번 알릴지는 부르는 쪽(합주실: 입장마다, 테스트 모니터: 앱 실행마다)이 정한다 — 여기서는 매번 돌려준다(#251 리뷰 Low-5)
+    await act(async () => { run = await result.current.prepareRunConfig() })
+    expect(run!.notice).toContain('기본 장치로 시작했습니다')
+
+    // 테스트 모니터도 고친 사본으로 시작
+    await act(async () => { await result.current.startTest() })
+    expect(result.current.testError).toBeNull()
+    expect(native.testStarts[native.testStarts.length - 1]).toMatchObject({ inputDevice: null, outputDevice: null })
+    await act(async () => { await result.current.stopTest() })
+
+    // 폴백은 저장하지 않는다: DB 쓰기 없음, 로컬 캐시·상태는 원래 장치
+    await act(() => new Promise((r) => setTimeout(r, 800)))
+    expect(updates()).toHaveLength(0)
+    const cache = JSON.parse(localStorage.getItem('band_engine_config_v2')!) as { engine: EngineConfig }
+    expect(cache.engine.inputDevice).toBe('wasapi::Focusrite USB')
+    expect(result.current.config.inputChannels).toEqual([2, 3])
+
+    // 사용자가 다른 값을 바꿔 저장해도 장치는 원래 값으로 올라간다(원래 PC에서 그대로 동작)
+    act(() => { result.current.updateConfig({ jitterMaxMs: 60 }) })
+    await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
+    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: EngineConfig } }
+    expect(payload.audio_settings.engine).toMatchObject({ inputDevice: 'wasapi::Focusrite USB', outputDevice: 'wasapi::Focusrite USB', inputChannels: [2, 3], jitterMaxMs: 60 })
+  })
+
+  it('이 배포본에 없는 드라이버(ASIO)도 저장값은 두고 이번 실행만 WASAPI 공유로 — 다음 편집 때 ASIO가 지워지지 않는다', async () => {
+    native.on = true
+    native.devices = LAPTOP
+    native.supported = ['wasapiExclusive', 'wasapiShared']
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 64, inputDriver: 'asio', outputDriver: 'asio', inputDevice: 'asio::X', outputDevice: 'asio::X' } } } })
+    const { result } = setup()
+    await waitFor(() => expect(result.current.config.bufferSize).toBe(64))
+    await waitFor(() => expect(result.current.supportedDrivers).not.toBeNull())
+    await act(async () => {})
+    expect(result.current.config.inputDriver).toBe('asio')
+    await waitFor(() => expect(result.current.fallbackNotice).toContain('WASAPI 공유 기본 장치로 시작합니다'))
+
+    // 장치 select는 "기본 장치"가 아니라 저장된 ASIO 장치를 "(이 PC에 없음)"으로 보인다(#251 리뷰 Low-3)
+    expect(result.current.missingDevices).toEqual({ input: 'asio::X', output: 'asio::X' })
+
+    // 드라이버 폴백을 먼저 적용해 판단하므로 시작할 때마다 장치 목록을 다시 받지 않는다(#251 리뷰 Low-2)
+    const before = native.listCalls
+    let run: Prepared | null = null
+    await act(async () => { run = await result.current.prepareRunConfig() })
+    expect(run!.config).toMatchObject({ inputDriver: 'wasapiShared', outputDriver: 'wasapiShared', inputDevice: null, outputDevice: null })
+    expect(native.listCalls).toBe(before)
+
+    act(() => { result.current.updateConfig({ jitterMaxMs: 60 }) })
+    await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
+    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: EngineConfig } }
+    expect(payload.audio_settings.engine).toMatchObject({ inputDriver: 'asio', outputDriver: 'asio', inputDevice: 'asio::X' })
+  })
+
+  it('정상 경로(저장된 장치가 모두 있음): 저장값 객체 그대로, 장치 목록 추가 조회 없음', async () => {
+    native.on = true
+    native.devices = [...LAPTOP, { ...wasapi('wasapi::Focusrite USB', true, 4), isDefault: false }, { ...wasapi('wasapi::Focusrite USB', false), isDefault: false }]
+    native.supported = ['wasapiExclusive', 'wasapiShared']
+    localStorage.setItem('band_engine_config_v2', JSON.stringify(SAVED))
+    auth.user = null
+    const { result } = setup()
+    await waitFor(() => expect(result.current.devices).toHaveLength(4))
+    await waitFor(() => expect(result.current.supportedDrivers).not.toBeNull())
+    await act(async () => {})
+    expect(result.current.missingDevices).toEqual({ input: null, output: null })
+    const before = native.listCalls
+    let run: Prepared | null = null
+    await act(async () => { run = await result.current.prepareRunConfig() })
+    expect(run!.config).toBe(result.current.config)
+    expect(run!.notice).toBeNull()
+    expect(run!.issues).toEqual([])
+    expect(native.listCalls).toBe(before)
+  })
+
+  it('저장값이 "기본 장치"인데 지금 기본 입력 장치의 채널이 모자라도 시작한다 — 입력 채널을 맞추고 저장값은 그대로(#251 리뷰 Low-4)', async () => {
+    native.on = true
+    native.devices = LAPTOP
+    native.supported = ['wasapiExclusive', 'wasapiShared']
+    localStorage.setItem('band_engine_config_v2', JSON.stringify({ version: 2, engine: { ...SAVED.engine, inputDevice: null, outputDevice: null } }))
+    auth.user = null
+    const { result } = setup()
+    await waitFor(() => expect(result.current.devices).toHaveLength(2))
+    await act(async () => {})
+    // 저장값 검증으로는 막히지만(설정 화면 표시) 엔진 시작은 이번 실행 설정으로 검증한다
+    expect(result.current.issues[0].message).toContain('입력 장치는 1채널까지만 지원합니다')
+    await act(async () => { await result.current.startTest() })
+    expect(result.current.testError).toBeNull()
+    expect(native.testStarts[native.testStarts.length - 1]).toMatchObject({ inputDevice: null, inputChannels: [0, 0] })
+    expect(result.current.fallbackNotice).toContain('입력 채널은 Ch1·Ch1로 맞춥니다.')
+    expect(result.current.config.inputChannels).toEqual([2, 3])
+    await act(async () => { await result.current.stopTest() })
+  })
+
+  it('입력 장치가 하나도 없으면 시작하지 않고 원인을 말한다', async () => {
+    native.on = true
+    native.devices = [wasapi('wasapi::스피커', false)]
+    auth.user = null
+    const { result } = setup()
+    await waitFor(() => expect(result.current.devices).toHaveLength(1))
+    let run: Prepared | null = null
+    await act(async () => { run = await result.current.prepareRunConfig() })
+    expect(run!.issues[0].message).toContain('입력 장치(WASAPI 공유)를 찾지 못했습니다')
+    expect(run!.notice).toBeNull()
+    await act(async () => { await result.current.startTest() })
+    expect(result.current.testError).toContain('입력 장치(WASAPI 공유)를 찾지 못했습니다')
+    expect(native.testStarts).toHaveLength(0)
+  })
+
+  it('앱을 켠 뒤 인터페이스를 꽂았으면 시작 전에 목록을 다시 받아 저장된 장치로 시작한다', async () => {
+    native.on = true
+    native.devices = LAPTOP
+    localStorage.setItem('band_engine_config_v2', JSON.stringify(SAVED))
+    auth.user = null
+    const { result } = setup()
+    await waitFor(() => expect(result.current.devices).toHaveLength(2))
+    native.devices = [...LAPTOP, { ...wasapi('wasapi::Focusrite USB', true, 4), isDefault: false }, { ...wasapi('wasapi::Focusrite USB', false), isDefault: false }]
+    let run: Prepared | null = null
+    await act(async () => { run = await result.current.prepareRunConfig() })
+    expect(run!.notice).toBeNull()
+    expect(run!.config).toMatchObject({ inputDevice: 'wasapi::Focusrite USB', inputChannels: [2, 3] })
+  })
+})
+
+describe('기기별 스레드 정책: 계정 전환·저장소 예외(#249 리뷰 N2)', () => {
+  it('같은 PC에서 계정을 바꿔도 이 기기의 값은 유지되고, 새 계정에도 올라가지 않는다', async () => {
+    localStorage.setItem('band_thread_policy_v1', JSON.stringify({ highQos: true, preferPCores: false }))
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 256, threadPolicy: { highQos: false, preferPCores: true } } } } })
+    const { result, rerender } = setup()
+    await waitFor(() => expect(result.current.config.bufferSize).toBe(256))
+    expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
+
+    auth.user = { id: 'u2' }
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 512, threadPolicy: { highQos: false, preferPCores: true } } } } })
+    rerender()
+    await waitFor(() => expect(result.current.config.bufferSize).toBe(512))
+    await act(async () => {})
+    expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
+
+    act(() => { result.current.updateConfig({ jitterMaxMs: 60 }) })
+    await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
+    expect(argsOf(updates()[0], 'eq')).toEqual([['id', 'u2']])
+    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: Record<string, unknown> } }
+    expect('threadPolicy' in payload.audio_settings.engine).toBe(false)
+  })
+
+  it('localStorage 읽기·쓰기가 던져도 기본값(끔)으로 시작하고 설정 변경은 동작한다', async () => {
+    auth.user = null
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('denied') })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('denied') })
+    const { result } = setup()
+    expect(result.current.config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    expect(result.current.config.bufferSize).toBe(128)
+    act(() => { result.current.updateConfig({ threadPolicy: { highQos: true, preferPCores: false } }) })
+    expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
   })
 })

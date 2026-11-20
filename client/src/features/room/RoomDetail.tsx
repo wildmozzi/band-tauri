@@ -23,6 +23,7 @@ import { MixerPanel } from './components/MixerPanel'
 import { ChatPanel } from './components/ChatPanel'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { DeviceNoticeBanner } from './components/DeviceNoticeBanner'
+import { AudioFallbackBanner } from './components/AudioFallbackBanner'
 import './RoomDetail.css'
 
 /**
@@ -183,6 +184,8 @@ export function RoomDetail() {
       <ReconnectBanner />
       {/* 오디오 장치 분실 뒤 엔진 자동 재시작 안내 (평상시에는 그리지 않는다) */}
       <DeviceNoticeBanner />
+      {/* 저장된 장치가 이 PC에 없어 기본 장치로 시작했다는 알림 (P2-27) */}
+      <AudioFallbackBanner />
       {/* 방장: 새 연주 참여 요청 알림 */}
       {isHost && requestNotice && !showPendingRequests && (
         <RequestNoticeToast

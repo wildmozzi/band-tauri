@@ -220,6 +220,15 @@ export function useDeviceNotice(): string | null {
   return useRoomSelector(store, selectDeviceNotice).deviceNotice
 }
 
+const selectAudioFallback = (s: RoomSnapshot) => ({ notice: s.derived.isPerforming ? s.local.audioFallbackNotice : null })
+
+/** 저장된 장치가 없어 기본 장치로 시작했다는 알림(연주 중일 때만, 없으면 null)과 닫기 — AudioFallbackBanner (P2-27) */
+export function useAudioFallbackNotice(): { notice: string | null; dismiss: () => void } {
+  const { store } = useRoomRuntime()
+  const { notice } = useRoomSelector(store, selectAudioFallback)
+  return { notice, dismiss: () => store.patch('local', { audioFallbackNotice: null }) }
+}
+
 /** 공유 메트로놈과 내 클릭 볼륨 */
 export function useRoomMetronome() {
   const { store, actions } = useRoomRuntime()

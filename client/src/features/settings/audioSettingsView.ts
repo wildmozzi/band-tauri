@@ -121,7 +121,10 @@ export interface ThreadPolicyStatus {
  * 스레드 정책 토글 옆 한 줄(#245 재리뷰 L2): 켠 옵션이 실제로 적용됐는지.
  * - `enabled`: 저장된 토글 값. `windows`: 이 PC가 Windows인지(모르면 null).
  * - `live`: 엔진이 돌고 있으면 그 엔진의 통계(첫 응답 전이면 `stats: null`), 꺼져 있으면 null.
+ * - `startedWith`: 돌고 있는 엔진을 시작할 때 넘긴 이 항목의 값(모르면 null/생략).
  * 엔진은 시작 때 한 번 정책을 걸므로, 실행 중 결과가 토글과 다르면 "다시 시작하면" 안내를 보인다.
+ * 단 시작할 때 넘긴 값과 실행 결과가 다르면 환경변수 `BAND_THREAD_POLICY`가 설정을 덮은 것이다(엔진 resolve_policy:
+ * 유효한 환경변수가 설정보다 우선) — 다시 시작해도 그대로이므로 그렇게 알린다(#249 리뷰 Low-1).
  * 둘 다 꺼져 있고 엔진도 꺼진 정상 상태는 null(표시 없음).
  */
 export function threadPolicyStatus(
@@ -129,6 +132,7 @@ export function threadPolicyStatus(
   enabled: boolean,
   windows: boolean | null,
   live: { stats: Pick<EngineStats, 'threadPolicy'> | null } | null,
+  startedWith: boolean | null = null,
 ): ThreadPolicyStatus | null {
   const NOT_HERE = '이 PC에서는 적용되지 않음: '
   if (!live) {
@@ -147,12 +151,24 @@ export function threadPolicyStatus(
   if (tp.netRecv) results.push(tp.netRecv[field])
   const has = (r: ThreadPolicyResult) => results.includes(r)
   if (has('pending')) return { text: '적용하는 중입니다.', tone: 'info' }
+  // 엔진이 이 항목을 걸려고 했는지(적용·실패·건너뜀). 시작 때 넘긴 값과 다르면 환경변수가 덮었다
+  const attempted = !results.every((r) => r === 'off')
+  if (startedWith !== null && attempted !== startedWith) {
+    const now = attempted ? (has('applied') ? '켜져 있습니다' : '켜려 했지만 적용되지 않았습니다') : '꺼져 있습니다'
+    return {
+      text: `환경변수 BAND_THREAD_POLICY가 이 설정보다 우선합니다 — 지금 엔진에는 ${now}. 다시 시작해도 환경변수를 지우기 전에는 이 토글이 적용되지 않습니다.`,
+      tone: 'warn',
+    }
+  }
   if (results.every((r) => r === 'off')) {
     return enabled
       ? { text: '지금 엔진에는 꺼져 있습니다 — 연주(또는 테스트 모니터)를 다시 시작하면 적용됩니다.', tone: 'info' }
       : null
   }
-  if (!enabled) return { text: '지금 엔진에는 켜져 있습니다 — 다시 시작하면 꺼집니다.', tone: 'info' }
+  if (!enabled) {
+    // 실제로 걸린 스레드가 없으면(건너뜀·실패만) 꺼진 것과 같다 — "켜져 있습니다"라고 하지 않는다(#249 리뷰 N1)
+    return has('applied') ? { text: '지금 엔진에는 켜져 있습니다 — 다시 시작하면 꺼집니다.', tone: 'info' } : null
+  }
   if (has('skipped')) {
     return { text: `${NOT_HERE}하이브리드 CPU가 아니거나 쓸 수 있는 고성능 코어가 4개 미만입니다.`, tone: 'warn' }
   }
