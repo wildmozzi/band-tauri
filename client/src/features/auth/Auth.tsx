@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from 'react'
+import { useState, useEffect, useRef, type FormEvent } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from './useAuth'
 import { SERVICE_NAME } from '../../shared/lib/brand'
@@ -95,6 +95,25 @@ export function Auth() {
       }
     }
   }
+
+  // 알림(AuthContext)은 이 화면에서만 보인다. 떠날 때 지운다 — 안 지우면 "로그아웃되었습니다."·오류 문구가
+  // 다음에 이 화면에 올 때 다시 보인다(#233 리뷰). 로그아웃 뒤 내비게이션은 홈('/')으로 가므로 "로그아웃되었습니다."는
+  // 다음에 이 화면에 왔을 때 한 번 보이고, 떠나면 사라진다.
+  // 지우기는 다음 틱으로 미루고 다시 마운트되면 취소한다: StrictMode(개발)의 마운트→정리→마운트에서 첫 정리가
+  // 막 보여 줄 알림을 지우지 않게.
+  const clearAlertTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    if (clearAlertTimer.current !== null) {
+      clearTimeout(clearAlertTimer.current)
+      clearAlertTimer.current = null
+    }
+    return () => {
+      clearAlertTimer.current = setTimeout(() => {
+        clearAlertTimer.current = null
+        setAlert(null)
+      }, 0)
+    }
+  }, [setAlert])
 
   // 이미 로그인된 경우 돌아갈 곳으로 (예: /payment?plan=… 에서 보낸 경우 결제 화면으로 — P3-12 ⑩)
   useEffect(() => {
