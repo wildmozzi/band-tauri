@@ -86,6 +86,8 @@ npm run tauri build
 ```
 `createUpdaterArtifacts: true`라서 서명 키 env가 없으면 빌드 마지막 단계에서 실패한다. 업데이트 산출물 없이 설치본만 필요하면 `npm run tauri build -- --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'`.
 
+ASIO 포함 설치본은 같은 env에서 `npm run tauri:build:asio`(= `tauri build --features asio`, LLVM과 ASIO SDK 필요 — README "요구 사항"). GitHub 릴리스 빌드에는 ASIO가 없어서, 로컬 ASIO 설치본은 더 높은 버전의 릴리스가 나오면 자동 업데이트로 ASIO 없는 빌드가 된다. ASIO가 든 설치본을 배포하려면 Steinberg 라이선스 계약이 먼저다(P1-12).
+
 산출물: `client/src-tauri/target/release/bundle/nsis/Band_<버전>_x64-setup.exe` (+ `.sig`).
 
 로컬 측정 (2026-11-10, v0.1.0, WASAPI 빌드, Authenticode 서명 없음):

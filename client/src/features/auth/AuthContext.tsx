@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { User } from '@supabase/supabase-js'
 import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
 import { authApi, useResetQueryCacheOnUserChange } from './queries'
@@ -11,6 +11,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [alert, setAlert] = useState<AuthAlert | null>(null)
   const isSupabaseReady = isSupabaseConfigured()
+  // 직전 인증 이벤트 때 로그인 상태였는지 (null = 아직 이벤트 없음)
+  const hadSession = useRef<boolean | null>(null)
 
   // 로그아웃·계정 전환 시 이전 사용자의 서버 상태(Query 캐시)를 비운다 (P3-3d)
   useResetQueryCacheOnUserChange(user?.id ?? null, loading)
@@ -40,9 +42,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const unsubscribe = authApi.onAuthStateChange((session) => {
       setUser(session?.user ?? null)
-      if (session) {
-        setAlert({ type: 'success', message: '로그인되었습니다.' })
-      }
+      // 알림은 로그인 화면에서만 보이는데, 로그인되면 그 화면을 곧바로 떠난다. 그래서 "로그인됨" 알림은
+      // 켜지 않고, 로그인 상태가 바뀌면(다른 탭에서의 로그인·로그아웃 포함) 이전 상태에서 켜진 알림을 지운다
+      // — 안 지우면 나중에 로그아웃 상태의 로그인 화면에 옛 문구가 남는다.
+      // 이 탭의 signOut()이 켜는 "로그아웃되었습니다."는 이 이벤트 뒤에 켜지므로 남는다.
+      const hasSession = session !== null
+      if (hadSession.current !== null && hadSession.current !== hasSession) setAlert(null)
+      hadSession.current = hasSession
     })
 
     return () => {
@@ -118,7 +124,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     try {
       await authApi.signIn(email.trim(), password)
-      setAlert({ type: 'success', message: '로그인 성공' })
     } catch (error) {
       setAlert({
         type: 'error',

@@ -11,6 +11,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "tauri:dev:asio": "tauri dev --features asio",
+    "tauri:build:asio": "tauri build --features asio",
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "npm run e2e:build && playwright test",

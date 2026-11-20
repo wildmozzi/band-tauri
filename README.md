@@ -35,7 +35,7 @@
 
 - Node.js 22 이상 (서버 Docker 이미지도 node:22)
 - 데스크톱 빌드: Rust stable, [Tauri 2 사전 요구 사항](https://tauri.app/start/prerequisites/)
-  - Windows: cpal `asio` 기능을 쓰므로 LLVM(clang)과 Steinberg ASIO SDK가 필요하다(`CPAL_ASIO_DIR`로 SDK 경로 지정. 루트 `asio-sdk`는 SDK용 서브모듈 자리)
+  - Windows 기본 빌드는 WASAPI만 포함한다. ASIO까지 넣으려면 `asio` 피처로 빌드한다 — 실행 `npm run dev:tauri:asio`, 설치본 `npm run tauri:build:asio`(루트에서). LLVM(clang)과 Steinberg ASIO SDK가 필요하다: `CPAL_ASIO_DIR`에 SDK 폴더 경로를 지정한다(루트 `asio-sdk/`는 git 제외 — 직접 받은 SDK를 두는 자리지만 자동으로 쓰이지는 않으니 이 변수로 가리켜야 한다). 지정하지 않으면 cpal 빌드 스크립트가 `%TEMP%asio_sdk`를 쓰고, 없으면 Steinberg에서 내려받는다(버전 고정 없음). 설치본 빌드에는 업데이터 서명 키가 필요하다 — [docs/RELEASE.md](docs/RELEASE.md) "로컬 빌드". 로컬 ASIO 설치본도 자동 업데이트 대상이라, 더 높은 버전의 GitHub 릴리스가 나오면 ASIO 없는 빌드로 바뀐다. ASIO가 든 설치본을 남에게 배포하려면 Steinberg 라이선스 계약이 필요하다(백로그 P1-12). GitHub 릴리스 빌드에는 ASIO가 없다
 - (선택) 음원 분리: Python + demucs → [docs/DEMUCS_SETUP_GUIDE.md](docs/DEMUCS_SETUP_GUIDE.md), [docs/QUICK_SETUP.md](docs/QUICK_SETUP.md)
 - (선택) PDF 악보 읽기: Java + [Audiveris](https://github.com/Audiveris/audiveris/releases)
 
