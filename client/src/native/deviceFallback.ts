@@ -12,8 +12,6 @@
 import type { DeviceInfo, DriverKind, EngineConfig } from './engineApi'
 import { BUFFER_MAX, BUFFER_MIN, DEFAULT_ENGINE_CONFIG, DRIVER_OPTIONS, normalizeInputChannels } from './engineConfig'
 
-/** 어떤 오디오 설정 화면이든 열어 달라는 이벤트(Navigation이 듣고 모달을 연다) */
-export const OPEN_AUDIO_SETTINGS_EVENT = 'band:open-audio-settings'
 
 /** 지원 안 하는 드라이버를 대신할 순서: 기본값(공유) → 독점 → ASIO */
 const DRIVER_FALLBACK_ORDER: DriverKind[] = ['wasapiShared', 'wasapiExclusive', 'asio']

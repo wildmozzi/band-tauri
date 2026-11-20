@@ -185,8 +185,8 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
 
     // 설정 화면: 저장값 그대로 + 시작 전 안내
     expect(result.current.config.inputDevice).toBe('wasapi::Focusrite USB')
-    expect(result.current.missingDevices).toEqual({ input: 'wasapi::Focusrite USB', output: 'wasapi::Focusrite USB' })
-    expect(result.current.fallbackNotice).toContain("'Focusrite USB'를 찾을 수 없어 기본 장치로 시작합니다")
+    await waitFor(() => expect(result.current.missingDevices).toEqual({ input: 'wasapi::Focusrite USB', output: 'wasapi::Focusrite USB' }))
+    await waitFor(() => expect(result.current.fallbackNotice).toContain("'Focusrite USB'를 찾을 수 없어 기본 장치로 시작합니다"))
 
     // 엔진 시작 직전: 이번 실행 설정
     let run: Prepared | null = null
@@ -201,7 +201,7 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
     // 테스트 모니터도 고친 사본으로 시작
     await act(async () => { await result.current.startTest() })
     expect(result.current.testError).toBeNull()
-    expect(native.testStarts.at(-1)).toMatchObject({ inputDevice: null, outputDevice: null })
+    expect(native.testStarts[native.testStarts.length - 1]).toMatchObject({ inputDevice: null, outputDevice: null })
     await act(async () => { await result.current.stopTest() })
 
     // 폴백은 저장하지 않는다: DB 쓰기 없음, 로컬 캐시·상태는 원래 장치
@@ -228,7 +228,7 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
     await waitFor(() => expect(result.current.supportedDrivers).not.toBeNull())
     await act(async () => {})
     expect(result.current.config.inputDriver).toBe('asio')
-    expect(result.current.fallbackNotice).toContain('WASAPI 공유 기본 장치로 시작합니다')
+    await waitFor(() => expect(result.current.fallbackNotice).toContain('WASAPI 공유 기본 장치로 시작합니다'))
 
     let run: Prepared | null = null
     await act(async () => { run = await result.current.prepareRunConfig() })

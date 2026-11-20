@@ -1,4 +1,4 @@
-import { OPEN_AUDIO_SETTINGS_EVENT } from '../../../native/deviceFallback'
+import { OPEN_AUDIO_SETTINGS_EVENT } from '../../../native/audioSettingsEvents'
 import { useAudioFallbackNotice } from '../state/roomHooks'
 import './ReconnectBanner.css'
 

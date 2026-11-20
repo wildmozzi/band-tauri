@@ -40,8 +40,19 @@ import {
 } from '../../native/engineConfig'
 import { SettingsSaveGate, TestMonitorControl } from '../../native/settingsSync'
 import { reapplyLoopbackOffsetInBackground } from '../../native/loopbackOffsetStore'
-import { fallbackNotice, needsDeviceRecheck, noDeviceMessage, resolveRunConfig, runInputDevice, type RunConfig } from '../../native/deviceFallback'
+import type { RunConfig } from '../../native/deviceFallback'
 import { loadDeviceThreadPolicy, saveDeviceThreadPolicy } from './deviceLocalSettings'
+
+/** 폴백 판단은 데스크톱 앱에서만 쓴다 — 웹 첫 화면 묶음에 싣지 않는다(bundle-budget e2e) */
+const loadDeviceFallback = () => import('../../native/deviceFallback')
+
+interface RunPreview {
+  /** 설정 화면용 시작 전 안내(저장값은 그대로). 없으면 null */
+  notice: string | null
+  /** 저장된 장치 id가 지금 장치 목록에 없는 방향 */
+  missing: { input: string | null; output: string | null }
+}
+const NO_PREVIEW: RunPreview = { notice: null, missing: { input: null, output: null } }
 
 const STORAGE_KEY = 'band_engine_config_v2'
 const SAVE_DEBOUNCE_MS = 600
@@ -253,15 +264,25 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   // 예전(P2-7)에는 여기서 config(저장값)를 지원 드라이버로 바꿔 다음 편집 때 계정에 저장됐다 — 다른 PC의 ASIO 설정을 지웠다.
   // 이제는 저장값을 두고 안내만 한다(설정 화면은 시작 전 안내, 엔진 시작 때는 prepareRunConfig가 고친 사본을 넘긴다).
   const knownDevices = devicesKnown ? devices : null
-  const runPreview = useMemo(() => resolveRunConfig(config, knownDevices, supportedDrivers), [config, knownDevices, supportedDrivers])
-  const previewNotice = useMemo(() => fallbackNotice(runPreview.fallbacks, 'future'), [runPreview])
-  const missingDevices = useMemo(() => {
-    const missing = (dir: 'input' | 'output') => {
-      const f = runPreview.fallbacks.find((x) => x.kind === 'device' && x.dir === dir)
-      return f && f.kind === 'device' ? f.savedId : null
+  const [runPreview, setRunPreview] = useState<RunPreview>(NO_PREVIEW)
+  useEffect(() => {
+    if (!isNativeMode) return
+    let cancelled = false
+    void loadDeviceFallback().then((m) => {
+      if (cancelled) return
+      const run = m.resolveRunConfig(config, knownDevices, supportedDrivers)
+      const missing = (dir: 'input' | 'output') => {
+        const f = run.fallbacks.find((x) => x.kind === 'device' && x.dir === dir)
+        return f && f.kind === 'device' ? f.savedId : null
+      }
+      setRunPreview({ notice: m.fallbackNotice(run.fallbacks, 'future'), missing: { input: missing('input'), output: missing('output') } })
+    })
+    return () => {
+      cancelled = true
     }
-    return { input: missing('input'), output: missing('output') }
-  }, [runPreview])
+  }, [isNativeMode, config, knownDevices, supportedDrivers])
+  const previewNotice = runPreview.notice
+  const missingDevices = runPreview.missing
 
   const inputDevices = useMemo(
     () => devices.filter((d) => d.isInput && d.driver === config.inputDriver),
@@ -285,6 +306,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   /** 이 앱 실행에서 이미 알린 폴백 문구(같은 폴백은 한 번만 알린다) */
   const shownNoticesRef = useRef(new Set<string>())
   const prepareRunConfig = useCallback(async (): Promise<PreparedRun> => {
+    const { needsDeviceRecheck, noDeviceMessage, resolveRunConfig, runInputDevice } = await loadDeviceFallback()
     const saved = configRef.current
     const supported = supportedPromiseRef.current ? await supportedPromiseRef.current : null
     let list = devicesRef.current
@@ -366,7 +388,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       setTestError(engineErrorMessage(err))
     }
-  }, [isNativeMode, engineInUse, config, selectedInputDevice, testControl, prepareRunConfig])
+  }, [isNativeMode, engineInUse, config, selectedInputDevice, testControl, prepareRunConfig, setTestNotice])
 
   useEffect(() => {
     if (!isTesting) return
