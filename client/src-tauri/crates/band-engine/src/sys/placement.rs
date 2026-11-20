@@ -673,6 +673,39 @@ mod tests {
         assert_eq!(performance_set_ids(&five), vec![0x100, 0x101, 0x102, 0x103]);
     }
 
+    /// 6P12T + 8E(i7-1260P형, #245 재리뷰 L1ⓐ): 물리 P 6개 → P 논리 12개를 모두 고르고 E 8개는 뺀다.
+    #[test]
+    fn performance_set_six_p_with_ht_takes_all_twelve_threads() {
+        let mut v: Vec<_> = (0..20u8).map(|n| e(n, u8::from(n < 12), 0)).collect();
+        for c in v.iter_mut() {
+            c.core = if c.number < 12 { c.number / 2 } else { c.number - 6 };
+        }
+        assert_eq!(performance_set_ids(&v), (0x100..0x10C).collect::<Vec<u32>>());
+    }
+
+    /// `CoreIndex`는 프로세서 그룹 안의 값이다(#245 재리뷰 L1ⓑ): 그룹 0의 코어 0·1과 그룹 1의 코어 0·1은 서로 다른 물리 코어
+    /// 4개로 세어 문턱을 넘는다. 같은 입력을 한 그룹에 몰면(코어 번호 중복 = HT 형제) 물리 2개라 걸지 않는다.
+    #[test]
+    fn performance_set_counts_core_index_per_group() {
+        let entry = |id: u32, group: u16, number: u8, class: u8, core: u8| CpuSetEntry {
+            id,
+            group,
+            number,
+            efficiency_class: class,
+            llc: 0,
+            core,
+            allocated_elsewhere: false,
+        };
+        let mut v = vec![entry(0x100, 0, 0, 1, 0), entry(0x101, 0, 1, 1, 1), entry(0x200, 1, 0, 1, 0), entry(0x201, 1, 1, 1, 1)];
+        v.extend((0..4u8).map(|n| entry(0x110 + u32::from(n), 0, 2 + n, 0, 2 + n)));
+        assert_eq!(performance_set_ids(&v), vec![0x100, 0x101, 0x200, 0x201]);
+        let mut one_group = v.clone();
+        for c in one_group.iter_mut() {
+            c.group = 0;
+        }
+        assert!(performance_set_ids(&one_group).is_empty(), "한 그룹이면 코어 0·1 둘뿐");
+    }
+
     /// 환경변수 값과 우선순위(PR #245 리뷰 H2): 유효한 환경변수 > 엔진 설정 > 꺼짐.
     #[test]
     fn policy_env_parses_and_overrides_config() {

@@ -100,4 +100,35 @@ describe('AudioSettingsContext + profiles.audio_settings', () => {
     await act(async () => {})
     expect(sb.mock!.client.from).not.toHaveBeenCalled()
   })
+
+  it('다른 PC에서 로그인: 서버에 옛 threadPolicy(켬)가 있어도 끔으로 시작하고, 다음 저장 때 서버에서 뺀다(#245 재리뷰 L4)', async () => {
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 256, threadPolicy: { highQos: true, preferPCores: true } } } } })
+    const { result } = setup()
+    await waitFor(() => expect(result.current.config.bufferSize).toBe(256))
+    await act(async () => {})
+    expect(result.current.config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+
+    act(() => { result.current.updateConfig({ jitterMaxMs: 60 }) })
+    await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
+    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: Record<string, unknown> } }
+    expect(payload.audio_settings.engine.jitterMaxMs).toBe(60)
+    expect('threadPolicy' in payload.audio_settings.engine).toBe(false)
+  })
+
+  it('이 PC에서 켠 값은 기기 로컬에만 저장되고 계정 로드 뒤에도 유지된다', async () => {
+    localStorage.setItem('band_thread_policy_v1', JSON.stringify({ highQos: false, preferPCores: true }))
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 256 } } } })
+    const { result } = setup()
+    await waitFor(() => expect(result.current.config.bufferSize).toBe(256))
+    await act(async () => {})
+    expect(result.current.config.threadPolicy).toEqual({ highQos: false, preferPCores: true })
+
+    act(() => { result.current.updateConfig({ threadPolicy: { highQos: true, preferPCores: true } }) })
+    await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
+    expect(JSON.parse(localStorage.getItem('band_thread_policy_v1')!)).toEqual({ highQos: true, preferPCores: true })
+    const cache = JSON.parse(localStorage.getItem('band_engine_config_v2')!) as { engine: Record<string, unknown> }
+    expect('threadPolicy' in cache.engine).toBe(false)
+    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: Record<string, unknown> } }
+    expect('threadPolicy' in payload.audio_settings.engine).toBe(false)
+  })
 })

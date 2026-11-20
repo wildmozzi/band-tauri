@@ -247,6 +247,23 @@ export function toStored(config: EngineConfig): StoredAudioSettings {
   return { version: STORED_SETTINGS_VERSION, engine: config }
 }
 
+/**
+ * 계정(profiles.audio_settings)과 그 로컬 캐시에 쓰는 형식: 기기별 필드(`threadPolicy`)를 뺀다.
+ * 스레드 정책은 이 PC의 CPU 구성에 따른 실험 옵션이라 다른 PC로 따라가면 안 된다(#245 재리뷰 L4) —
+ * 기기 로컬(`features/settings/deviceLocalSettings`)에만 저장한다. 서버에 옛 값이 있어도 읽을 때 무시하고
+ * (`withDeviceLocal`), 다음 저장 때 이 형식으로 덮어써 사라진다.
+ */
+export function toAccountStored(config: EngineConfig): StoredAudioSettings {
+  const engine: EngineConfig = { ...config }
+  delete engine.threadPolicy
+  return { version: STORED_SETTINGS_VERSION, engine }
+}
+
+/** 계정에서 읽은 설정에 이 기기의 값(스레드 정책)을 덮는다. 계정 쪽 `threadPolicy`는 쓰지 않는다 */
+export function withDeviceLocal(config: EngineConfig, threadPolicy: ThreadPolicyConfig): EngineConfig {
+  return { ...config, threadPolicy: normalizeThreadPolicy(threadPolicy) }
+}
+
 const DRIVERS: DriverKind[] = ['asio', 'wasapiShared', 'wasapiExclusive']
 const LEGACY_DRIVER_MAP: Record<string, DriverKind> = {
   Asio: 'asio',
