@@ -108,3 +108,7 @@ GOAL 1절 목표: 로컬 처리 지연 ASIO 128샘플/2.5ms 프레임 ≤ 8ms, W
 | 에코 "수락하지 않았습니다" | 상대가 30초 안에 허용하지 않았다, 또는 상대 앱이 이 기능 이전 버전이다 |
 | 에코 "불안정"(흩어짐) | 회선 지터가 크다(튄 값 1개는 이미 빼고 본 결과). 잠시 뒤 다시 재고, 계속되면 지터 버퍼·손실 표시를 함께 적는다 |
 | 에코 "불안정"(절반 이하) | 돌아온 클릭이 절반 이하 — 손실이 많다. 연결 상태(손실·은닉)를 적고 다시 잰다 |
+
+## 8. 야간 자동 측정과 알림 (long-sim·soak)
+
+GOAL 1절(지연 누적)·2절(60분 안정성)의 자동 근거는 CI 야간 실행이다: 매일 03:30 KST(`schedule`, cron `30 18 * * *`)에 `.github/workflows/ci.yml`의 `long-sim`(6피어 60분 가상 시간)과 `soak`(6엔진 실시간 60분 × 2)만 GitHub 호스팅 Windows 러너에서 돈다(코드는 `develop`, 워크플로는 기본 브랜치 `main`의 것 — main에 반영돼야 동작). 수치는 각 잡 실행 페이지의 **요약(Job summary)** 과 아티팩트(`sim-report-long-*`, `soak-report-*`)에 남는다. **알림은 리포의 GitHub 이슈(라벨 `nightly`)로 온다**: 야간 실행에서 둘 중 하나라도 실패·취소·시간 초과면 `nightly-report` 잡이 "야간 장시간 잡 실패 (long-sim·soak)" 이슈를 열고(이미 열려 있으면 댓글만), 다음 야간 실행이 모두 성공하면 "복구됨" 댓글을 달고 닫는다. 야간 실행이 아예 뜨지 않는 경우(main에서 schedule이 빠짐, 워크플로 비활성 — 공개 리포는 60일 무활동이면 자동 비활성)는 develop push마다 도는 `nightly-watch` 잡이 마지막 schedule 실행이 36시간을 넘으면 "야간 장시간 잡이 돌지 않음" 이슈를 연다(schedule 기록이 하나도 없으면 이슈 없이 로그만). 이슈 알림을 받으려면 리포를 Watch(최소 Issues)해 두면 된다. 로직은 `scripts/nightly-issue.mjs`(로컬 확인: `GITHUB_TOKEN=$(gh auth token) GITHUB_REPOSITORY=<owner/repo> node scripts/nightly-issue.mjs stale --dry-run`), 기록은 `gh run list --workflow ci.yml --event schedule`.
