@@ -19,7 +19,7 @@ export const pickMetronomeSync = (stats: EngineStats | null) => {
 export const pickRecordStats = (stats: EngineStats | null): RecordStats | null => stats?.recording ?? null
 
 /**
- * 메트로놈 동기 진단 줄(TEST-SESSION 3.5절 5번): 시계 왕복·오프셋·기울기, 늦은·뺀·옮긴 클릭.
+ * 메트로놈 동기 진단 줄(TEST-SESSION 3.5절 5번): 시계 왕복·기울기, 늦은·뺀·옮긴 클릭(+ 툴팁의 엔진 시작 시각 차 clockOffsetMs).
  * 메트로놈이 꺼졌거나 통계가 없으면 running=false라 틱마다 다시 그리지 않는다. 값은 표시 자릿수로 반올림해 같은 표시면 다시 그리지 않는다.
  */
 export const pickMetronomeDiag = (stats: EngineStats | null) => {

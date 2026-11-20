@@ -1,5 +1,6 @@
 import type { PostFormState } from './usePostForm'
 import { MAX_IMAGES } from './postLogic'
+import './communityTouch.css'
 
 interface ThumbProps {
   url: string
@@ -29,27 +30,9 @@ function ImageThumb({ url, alt, border, onRemove }: ThumbProps) {
           objectFit: 'cover',
         }}
       />
-      <button
-        type="button"
-        onClick={onRemove}
-        style={{
-          position: 'absolute',
-          top: '4px',
-          right: '4px',
-          width: '24px',
-          height: '24px',
-          borderRadius: 'var(--radius-round)',
-          border: 'none',
-          background: 'var(--black-a70)',
-          color: 'var(--white)',
-          cursor: 'pointer',
-          fontSize: '14px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
-      >
-        ×
+      {/* 겉 버튼이 눌리는 영역, 안의 점이 보이는 24px 원(좁은 화면에서 겉만 44px로 — communityTouch.css) */}
+      <button type="button" className="post-thumb-remove" aria-label="이미지 빼기" onClick={onRemove}>
+        <span className="post-thumb-remove-dot" aria-hidden="true">×</span>
       </button>
     </div>
   )

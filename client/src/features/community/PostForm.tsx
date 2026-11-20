@@ -206,6 +206,8 @@ export function PostForm({
                     #{tag}
                     <button
                       type="button"
+                      className="community-tag-remove"
+                      aria-label={`태그 ${tag} 빼기`}
                       onClick={() => form.handleRemoveTag(tag)}
                       style={{
                         background: 'none',

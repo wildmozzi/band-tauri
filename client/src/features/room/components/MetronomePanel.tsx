@@ -139,7 +139,7 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
         />
       </div>
 
-      <MetronomeSyncLine />
+      <MetronomeSyncLine isHost={isHost} />
 
       {latency && (
         <p className="metronome-hint metronome-latency" data-testid="metronome-latency" data-source={latency.source ?? 'none'}>
@@ -163,11 +163,11 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
 }
 
 /**
- * 메트로놈 동기 진단 줄(TEST-SESSION 3.5절 5번): 시계 RTT·오프셋, 늦은 클릭·뺀 박. 마우스를 올리면 엔진 필드 이름과 기울기·옮긴 클릭.
+ * 메트로놈 동기 진단 줄(TEST-SESSION 3.5절 5번): 동기 여부·시계 RTT·기울기, 늦은·뺀·옮긴 클릭. 마우스를 올리면 엔진 필드 이름과 엔진 시작 시각 차(clockOffsetMs).
  * 값이 통계 틱마다 바뀌므로 패널 전체가 아니라 이 줄만 다시 그린다.
  */
-function MetronomeSyncLine() {
-  const view = metronomeSyncView(useRoomEngineStats(pickMetronomeDiag))
+function MetronomeSyncLine({ isHost }: { isHost: boolean }) {
+  const view = metronomeSyncView(useRoomEngineStats(pickMetronomeDiag), isHost)
   if (!view) return null
   return (
     <p className={`metronome-hint metronome-sync${view.warn ? ' warn' : ''}`} data-testid="metronome-sync" title={view.title}>

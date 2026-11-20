@@ -113,6 +113,7 @@ export function Community() {
                       >
                         {post.tags.length > 0 && post.tags.map((tag, idx) => (
                           <span
+                            className="community-chip-touch"
                             key={idx}
                             onClick={() => handleTagClick(tag)}
                             style={{
@@ -131,6 +132,7 @@ export function Community() {
                           </span>
                         ))}
                         <span
+                          className="community-chip-touch"
                           style={{
                             padding: 'var(--space-1) var(--space-3)',
                             background: post.liked_by_user ? 'var(--pink-400-a25)' : 'var(--pink-400-a15)',
@@ -310,6 +312,7 @@ export function Community() {
                           className="community-post-actions"
                         >
                           <span
+                            className="community-chip-touch"
                             style={{
                               padding: 'var(--space-1) 10px',
                               background: post.liked_by_user ? 'var(--pink-400-a25)' : 'var(--pink-400-a15)',
@@ -338,6 +341,7 @@ export function Community() {
                         >
                           {post.tags.map((tag, idx) => (
                             <span
+                              className="community-chip-touch"
                               key={idx}
                               onClick={() => handleTagClick(tag)}
                               style={{
@@ -386,6 +390,7 @@ export function Community() {
               ) : (
                 trendingTags.map(({ tag, count }) => (
                   <span
+                    className="community-chip-touch"
                     key={tag}
                     onClick={() => handleTagClick(tag)}
                     style={{
