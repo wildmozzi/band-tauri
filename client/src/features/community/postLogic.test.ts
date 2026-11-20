@@ -4,6 +4,7 @@ import {
   MAX_FILE_SIZE,
   addReplyToTree,
   addUniqueTag,
+  countComments,
   countDeletedComments,
   formatRelativeTime,
   removeCommentFromTree,
@@ -96,6 +97,14 @@ describe('댓글 트리 조작', () => {
     expect(countDeletedComments(tree(), '1a-i')).toBe(1)
     expect(countDeletedComments(tree(), '2')).toBe(1)
     expect(countDeletedComments(tree(), 'nope')).toBe(0)
+  })
+
+  it('countComments: 답글(모든 깊이) 포함 개수 — 목록·DB comments_count와 같은 기준', () => {
+    expect(countComments([])).toBe(0)
+    expect(countComments(tree())).toBe(4)
+    // 운영 사례: 댓글 1 + 답글 1 → 2 (최상위만 세면 1)
+    expect(countComments([c('a', [c('a1')])])).toBe(2)
+    expect(countComments([c('r', [c('a', [c('a1'), c('a2')]), c('b', [c('b1')])]), c('s')])).toBe(7)
   })
 
   it('countDeletedComments: 형제 하위 트리를 모두 더한다', () => {

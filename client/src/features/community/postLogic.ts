@@ -116,6 +116,13 @@ function countSubtree(comment: Comment): number {
 }
 
 /**
+ * 화면에 보이는 댓글 수(답글 포함). 목록 카드·DB posts.comments_count(migration 010 트리거)와 같은 기준.
+ */
+export function countComments(comments: Comment[]): number {
+  return comments.reduce((sum, comment) => sum + countSubtree(comment), 0)
+}
+
+/**
  * 삭제로 사라지는 댓글 수. DB가 parent_id ON DELETE CASCADE라
  * 손자 이하 답글까지 함께 지워지므로 하위 트리 전체를 센다.
  */

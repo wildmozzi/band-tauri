@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { Comment } from './communityApi'
 import { CommentItem } from './CommentItem'
-import { formatRelativeTime } from './postLogic'
+import { countComments, formatRelativeTime } from './postLogic'
 
 interface CommentSectionProps {
   comments: Comment[]
@@ -37,7 +37,7 @@ export function CommentSection({ comments, loadError = false, onRetry, user, onA
       {/* 댓글 입력 */}
       <div style={{ padding: '28px' }}>
         <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: 'var(--space-4)' }}>
-          {loadError ? '댓글' : `댓글 ${comments.length}개`}
+          {loadError ? '댓글' : `댓글 ${countComments(comments)}개`}
         </h3>
         {loadError && (
           <p role="alert" style={{ color: 'var(--white-a50)', fontSize: '14px', marginBottom: 'var(--space-4)' }}>
