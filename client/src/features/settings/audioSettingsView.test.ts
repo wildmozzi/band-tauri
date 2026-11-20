@@ -187,6 +187,30 @@ describe('스레드 정책 적용 결과 한 줄(#245 재리뷰 L2)', () => {
     expect(threadPolicyStatus('preferPCores', true, true, tp(['off', 'off']))?.text).toContain('다시 시작하면 적용')
     expect(threadPolicyStatus('preferPCores', false, true, tp(['off', 'applied']))?.text).toContain('다시 시작하면 꺼집니다')
     expect(threadPolicyStatus('preferPCores', false, true, tp(['off', 'off']))).toBeNull()
+    // 시작 때 넘긴 값을 알아도 결과와 같으면 같은 안내(토글을 시작 뒤에 바꿈)
+    expect(threadPolicyStatus('preferPCores', true, true, tp(['off', 'off']), false)?.text).toContain('다시 시작하면 적용')
+    expect(threadPolicyStatus('preferPCores', false, true, tp(['off', 'applied']), true)?.text).toContain('다시 시작하면 꺼집니다')
+  })
+  it('토글을 끈 뒤 실행 결과가 건너뜀·실패뿐이면 "켜져 있습니다"라고 하지 않는다(#249 리뷰 N1)', () => {
+    expect(threadPolicyStatus('preferPCores', false, true, tp(['off', 'skipped'], ['off', 'skipped']), true)).toBeNull()
+    expect(threadPolicyStatus('highQos', false, true, tp(['failed', 'off']), true)).toBeNull()
+    expect(threadPolicyStatus('highQos', false, true, tp(['applied', 'off'], ['failed', 'off']), true)?.text).toContain('켜져 있습니다')
+  })
+  it('시작 때 넘긴 값과 실행 결과가 다르면 환경변수 BAND_THREAD_POLICY가 덮은 것 — 다시 시작 안내 대신 그렇게 알린다(#249 리뷰 Low-1)', () => {
+    // BAND_THREAD_POLICY=both, 토글 끔으로 시작 → 켜짐
+    const on = threadPolicyStatus('preferPCores', false, true, tp(['applied', 'applied']), false)
+    expect(on).toEqual({
+      text: '환경변수 BAND_THREAD_POLICY가 이 설정보다 우선합니다 — 지금 엔진에는 켜져 있습니다. 다시 시작해도 환경변수를 지우기 전에는 이 토글이 적용되지 않습니다.',
+      tone: 'warn',
+    })
+    // 켰다가 시작 뒤 껐어도 시작 때 값(끔)과 결과(켬)가 다르면 환경변수
+    expect(threadPolicyStatus('preferPCores', true, true, tp(['applied', 'applied']), false)?.text).toContain('환경변수')
+    // BAND_THREAD_POLICY=off, 토글 켬으로 시작 → 꺼짐
+    expect(threadPolicyStatus('highQos', true, true, tp(['off', 'off']), true)?.text).toContain('지금 엔진에는 꺼져 있습니다')
+    // 환경변수가 켰지만 이 PC에서 건너뜀
+    expect(threadPolicyStatus('preferPCores', false, true, tp(['off', 'skipped']), false)?.text).toContain('켜려 했지만 적용되지 않았습니다')
+    // 확인 중(pending)은 판단하지 않는다
+    expect(threadPolicyStatus('highQos', true, true, tp(['pending', 'off']), false)?.text).toContain('적용하는 중')
   })
   it('UA로 Windows 판정', () => {
     expect(isWindowsUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130')).toBe(true)

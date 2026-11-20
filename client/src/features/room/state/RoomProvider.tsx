@@ -327,11 +327,17 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         setLocalError(`오디오 설정 오류: ${settings.issues[0].message}`)
         return false
       }
+      // 저장된 장치·드라이버가 이 PC에 없으면 이번 실행만 기본 장치로(P2-27). 저장된 설정은 바꾸지 않는다
+      const run = await settings.prepareRunConfig()
+      if (run.issues.length > 0) {
+        setLocalError(`오디오 설정 오류: ${run.issues[0].message}`)
+        return false
+      }
       // 테스트 모니터가 시작 중이어도 끝난 뒤 정지된다 (L8)
       await settings.stopTest()
       const ok = await s.start({
         instrument,
-        config: settings.config,
+        config: run.config,
         nickname: conn().nickname,
         isHost: conn().isRoomHost,
       })
@@ -339,6 +345,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         // 연주자는 관람 수신을 하지 않는다
         d().viewer.closeAll()
         reduceRequests({ type: 'started' })
+        // 같은 폴백은 앱 실행마다 한 번만 알린다(prepareRunConfig) — 알릴 것이 없으면 지난 알림도 지운다
+        store.patch('local', { audioFallbackNotice: run.notice })
       }
       return ok
     }

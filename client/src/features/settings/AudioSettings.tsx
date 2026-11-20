@@ -22,6 +22,7 @@ import {
   type EnginePresetId,
 } from '../../native/engineConfig'
 import { driverChoices, exclusiveModeHint } from './driverSupport'
+import { deviceNameFromId } from '../../native/deviceFallback'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
 import { DesktopDownloadButton } from '../../shared/ui/DesktopDownloadButton'
 import { Modal } from '../../shared/ui'
@@ -87,7 +88,9 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     isSaving,
     migrated,
     supportedDrivers,
-    driverNotice,
+    fallbackNotice,
+    missingDevices,
+    engineThreadPolicy,
     isTesting,
     testStats,
     testError,
@@ -205,7 +208,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
         </div>
       )}
 
-      {driverNotice && <div className="settings-notice" data-testid="driver-notice">{driverNotice}</div>}
+      {/* 저장된 드라이버·장치를 이 PC에서 쓸 수 없음 → 이번 실행만 기본 장치(P2-27). 저장값은 그대로 */}
+      {fallbackNotice && <div className="settings-notice" data-testid="driver-notice" role="status">{fallbackNotice}</div>}
 
       {/* 프리셋 */}
       <section className="settings-section">
@@ -270,6 +274,9 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             onChange={(e) => updateConfig({ inputDevice: e.target.value || null })}
           >
             <option value="">기본 장치</option>
+            {missingDevices.input && (
+              <option value={missingDevices.input}>{deviceNameFromId(missingDevices.input)} (이 PC에서 찾을 수 없음 — 기본 장치 사용)</option>
+            )}
             {inputDevices.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.name} ({d.channels}ch){d.isDefault ? ' · 기본' : ''}
@@ -301,6 +308,9 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             onChange={(e) => updateConfig({ outputDevice: e.target.value || null })}
           >
             <option value="">기본 장치</option>
+            {missingDevices.output && (
+              <option value={missingDevices.output}>{deviceNameFromId(missingDevices.output)} (이 PC에서 찾을 수 없음 — 기본 장치 사용)</option>
+            )}
             {outputDevices.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.name}{d.isDefault ? ' · 기본' : ''}
@@ -497,7 +507,9 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           const id = `thread-policy-${o.key}`
           // 엔진이 돌고 있으면 그 엔진의 결과(테스트 모니터 또는 합주), 아니면 null
           const live = isTesting || engineInUse ? { stats: (isTesting ? testStats : liveStats) ?? null } : null
-          const status = threadPolicyStatus(o.key, policy[o.key], IS_WINDOWS, live)
+          // 돌고 있는 엔진을 시작할 때 넘긴 값 — 환경변수 BAND_THREAD_POLICY가 덮었는지 판단(#249 리뷰 Low-1)
+          const startedWith = live && engineThreadPolicy ? engineThreadPolicy[o.key] : null
+          const status = threadPolicyStatus(o.key, policy[o.key], IS_WINDOWS, live, startedWith)
           return (
             <div key={o.key}>
               <div className="settings-row">

@@ -41,41 +41,6 @@ export function driverChoices(supported: readonly DriverKind[] | null) {
   return DRIVER_OPTIONS.map((d) => ({ ...d, disabled: !isDriverSupported(supported, d.id), reason: unsupportedDriverReason(supported, d.id) }))
 }
 
-export interface DriverCoercion {
-  config: EngineConfig
-  /** 바꿨으면 안내 문구, 아니면 null(config는 같은 객체) */
-  notice: string | null
-}
-
-/**
- * 저장된 설정의 드라이버를 지원 드라이버로 되돌린다. 바뀐 쪽의 장치 id는 다른 드라이버 것이므로 비운다.
- * 지원 목록을 모르거나(null) 대체할 드라이버가 없으면 그대로 둔다.
- */
-export function coerceToSupportedDrivers(config: EngineConfig, supported: readonly DriverKind[] | null): DriverCoercion {
-  const alt = fallbackDriver(supported)
-  if (!alt) return { config, notice: null }
-  const inBad = !isDriverSupported(supported, config.inputDriver)
-  const outBad = !isDriverSupported(supported, config.outputDriver)
-  if (!inBad && !outBad) return { config, notice: null }
-  const next: EngineConfig = { ...config }
-  const replaced = new Set<DriverKind>()
-  if (inBad) {
-    replaced.add(config.inputDriver)
-    next.inputDriver = alt
-    next.inputDevice = null
-  }
-  if (outBad) {
-    replaced.add(config.outputDriver)
-    next.outputDriver = alt
-    next.outputDevice = null
-  }
-  const names = [...replaced].map(driverLabel).join(', ')
-  return {
-    config: next,
-    notice: `저장된 드라이버(${names})는 이 배포본에 포함되어 있지 않아 ${driverLabel(alt)} 모드로 바꿨습니다. 장치 선택을 확인해주세요.`,
-  }
-}
-
 export interface ExclusiveModeHint {
   /** 공유 모드라 눈에 띄게 보일 안내인지(독점이면 확인 문구만) */
   emphasized: boolean
