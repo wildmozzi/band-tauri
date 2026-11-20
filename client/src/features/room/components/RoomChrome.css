@@ -199,6 +199,43 @@
     padding: 6px 10px;
     font-size: 0.75rem;
   }
+
+  /* 360px에서 방장의 헤더 버튼(정보·방 설정·나가기)이 화면 밖으로 밀려 가로 스크롤이 생기던 것 (P3-24):
+     제목 칸은 줄어들고, 버튼 묶음은 넘치면 다음 줄 오른쪽으로 내려간다 */
+  .live-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .live-header-left {
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 8px;
+  }
+
+  .live-title-area {
+    min-width: 0;
+  }
+
+  .live-header-right {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  /* 터치 대상 44px (P3-24) */
+  .header-btn {
+    min-height: 44px;
+  }
+
+  .back-link {
+    min-width: 44px;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
 }
 
 /* ===== P2-6: 비밀번호 입장 / 초대 / 연주 요청 알림 ===== */

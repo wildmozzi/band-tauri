@@ -14,8 +14,8 @@
  * - 키: 요소의 DOM 경로(태그:형제 순번 사슬). 클래스는 키에 넣지 않는다 — 특이성 고정을 위해 클래스를 더해도 같은 요소로 비교된다
  *   (클래스 목록은 `c`로 함께 남겨 diff에 참고로 보인다).
  * - 시계 고정, Math.random은 상수(0.5) — 호출 순서와 무관하게 같은 값이 나와야 번들 구성(지연 로딩으로 라이브러리 초기화 순서가 바뀜)이
- *   달라도 게스트 닉네임·파형 같은 난수 데이터가 같다. 1280×800, 애니메이션·전환 끔(중간 값이 찍히지 않게). 폰트·네트워크가 가라앉은 뒤 덤프한다.
- * - 한계: :hover·:focus 등 상호작용 상태, 열지 않은 모달, 화면 너비별 미디어 쿼리(1280 한 폭만)는 보지 않는다.
+ *   달라도 게스트 닉네임·파형 같은 난수 데이터가 같다. 1280×800(STYLE_SNAPSHOT_VIEWPORT=900x700처럼 바꿀 수 있다), 애니메이션·전환 끔(중간 값이 찍히지 않게). 폰트·네트워크가 가라앉은 뒤 덤프한다.
+ * - 한계: :hover·:focus 등 상호작용 상태, 열지 않은 모달, 한 번에 한 폭만 본다(폭마다 따로 실행).
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -23,6 +23,7 @@ import type { Page } from '@playwright/test'
 import { ALICE, GUITAR_POST, JAZZ_ROOM, JAZZ_ROOM_PASSWORD, REMOTE_PERFORMER, ROCK_ROOM } from '../fixtures'
 import type { MockBackend } from '../mocks'
 import { fulfillJson } from '../mocks/http'
+import { installFakeTauri } from '../mocks/tauri'
 import { expect, test } from '../test'
 
 const FIXED_NOW = new Date('2026-11-10T12:00:00.000Z')
@@ -32,6 +33,8 @@ interface Screen {
   path: string
   login?: boolean
   setup?: (mock: MockBackend) => void
+  /** 페이지를 열기 전 브라우저 준비(가짜 Tauri 등) */
+  beforeGoto?: (page: Page) => Promise<void>
   /** 화면을 연 뒤 상태를 바꾸는 조작(탭 전환 등). 끝나면 ready를 다시 기다리지 않으므로 조작 안에서 기다린다 */
   act?: (page: Page) => Promise<void>
   /** 의도한 실패 응답이 남기는 콘솔 에러 */
@@ -124,6 +127,24 @@ const SCREENS: Screen[] = [
     path: `/rooms/${ROCK_ROOM.id}`,
     setup: mock => mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] }),
     ready: p => p.locator('.performers-panel').filter({ hasText: REMOTE_PERFORMER.nickname }),
+  },
+  {
+    // 데스크톱 앱(가짜 Tauri)에서 연주 참여한 연주자 화면 — 웹 관람 전용 배치 규칙(.web-room)이 앱에 닿지 않는지 (#244 리뷰 M-2)
+    name: 'room-performer-app',
+    path: `/rooms/${ROCK_ROOM.id}`,
+    login: true,
+    beforeGoto: page =>
+      installFakeTauri(page, {
+        engine_start: { ssrc: 1234, key: 'e2e-key', candidates: [{ kind: 'lan', addr: '192.168.0.10:50000' }] },
+        engine_stats: { running: true, sampleRate: 48000, deviceBuffer: 128, inputLevel: 0, outputLevel: 0, xruns: 0, estLatencyMs: 8, devicePeriodMs: 2.7, peers: [] },
+      }),
+    setup: mock => mock.signaling.setRoom(ROCK_ROOM.id, { participants: [{ ...REMOTE_PERFORMER, isHost: false }] }),
+    ready: p => p.locator('.performers-panel').filter({ hasText: REMOTE_PERFORMER.nickname }),
+    act: async page => {
+      await page.getByRole('button', { name: /연주 참여하기/ }).click()
+      await page.locator('.instrument-select-modal .instrument-option:not(.disabled)').first().click()
+      await expect(page.locator('.instrument-select-modal')).toHaveCount(0)
+    },
   },
   {
     name: 'room-detail-login',
@@ -238,7 +259,9 @@ function dumpStyles(props: readonly string[]) {
 
 const outDir = process.env.STYLE_SNAPSHOT_OUT
 
-test.use({ viewport: { width: 1280, height: 800 } })
+// 기본 1280×800. 좁은 폭 비교는 STYLE_SNAPSHOT_VIEWPORT=900x700 (#244: 데스크톱 앱 창 800~1024px)
+const [vw, vh] = (process.env.STYLE_SNAPSHOT_VIEWPORT ?? '1280x800').split('x').map(Number)
+test.use({ viewport: { width: vw, height: vh } })
 
 test.beforeEach(async ({ page }) => {
   test.skip(!outDir, 'STYLE_SNAPSHOT_OUT(덤프할 폴더)를 지정하세요')
@@ -253,6 +276,7 @@ for (const screen of SCREENS) {
     if (screen.allowConsole) consoleErrors.allow(screen.allowConsole)
     if (screen.login) await mock.loginAs(ALICE)
     screen.setup?.(mock)
+    await screen.beforeGoto?.(page)
     await page.goto(screen.path)
     await expect(screen.ready(page)).toBeVisible()
     await screen.act?.(page)

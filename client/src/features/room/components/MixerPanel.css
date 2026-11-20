@@ -152,3 +152,15 @@
     order: 2;
   }
 }
+
+/* 터치 대상 44px (P3-24): 마스터 음소거, 음량·패닝 슬라이더(손가락으로 잡을 높이) */
+@media (max-width: 768px) {
+  .mixer-master .master-mute-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .mixer-master .master-control-row input[type="range"] {
+    min-height: 32px;
+  }
+}
