@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useAuth } from '../auth'
 import { useRoomConnection, useRoomPerform, useRoomMixer, useRoomRequests, useRoomRecordings } from './state/roomHooks'
-import { MAX_PERFORMERS } from '../../native/engineApi'
+import { MAX_PERFORMERS, isNativeApp } from '../../native/engineApi'
 import { instrumentUsage } from './roomDetailModel'
 import { reconnectBannerKind } from './state/reconnectBanner'
 import { useRoomDetailData } from './hooks/useRoomDetailData'
@@ -176,8 +176,9 @@ export function RoomDetail() {
     )
   }
 
+  // web-room: 웹(관람 전용) 화면에만 거는 배치 규칙(769~1024px 채팅 3칸, P3-24). 데스크톱 앱(연주자 믹서) 배치는 그대로
   return (
-    <div className="live-room" onClick={resumeAllAudioContexts}>
+    <div className={isNativeApp() ? 'live-room' : 'live-room web-room'} onClick={resumeAllAudioContexts}>
       {/* 시그널링 재연결 중·포기 안내 (평상시에는 그리지 않는다) */}
       <ReconnectBanner />
       {/* 오디오 장치 분실 뒤 엔진 자동 재시작 안내 (평상시에는 그리지 않는다) */}

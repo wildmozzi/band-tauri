@@ -174,3 +174,21 @@
 .stat-value.approval {
   color: var(--warning);
 }
+
+/* 좁은 폰(≤480px): 4칸 격자에 값 두 개만 있어 '자유'·'승인'이 한 글자씩 세로로 줄바꿈되던 것 (P3-24) */
+@media (max-width: 480px) {
+  .room-card .room-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .room-card .stat-value {
+    white-space: nowrap;
+  }
+}
+
+/* 터치 대상 44px (P3-24) */
+@media (max-width: 768px) {
+  .room-card .room-enter-btn {
+    min-height: 44px;
+  }
+}

@@ -59,6 +59,25 @@ node scripts/cpu-compare.mjs placement --in cpu-runs.csv --set unpinned [--lpe-t
 - 느린 상태 비율이 뚜렷이 늘었다면(예: p < 0.05, 또는 n이 작아도 0/20 → 10/20 같은 큰 변화) 반복당 비용과 별개인 회귀로 보고 조사한다. 원인 후보는 수면 패턴, 스레드 우선순위·QoS, 새 스레드의 배치다.
 - 여러 기계(비하이브리드·노트북 전원 절약)에서 얼마나 갈리는지는 **[사람]** 몫이다.
 
+## 3. 스레드 정책 비교 — 같은 실행파일, 조건만 바꿔 교차 (P1-21 2단계)
+
+엔진이 환경변수 `BAND_THREAD_POLICY` = `off` | `highqos`(EcoQoS 끄기) | `pcores`(P 코어 CPU set — 스레드가 그 집합 안에 머문다) | `both`를 직접 읽는다(제품 빌드와 같은 경로. 유효한 값이면 엔진 설정보다 우선하고, 비우면 설정 기본값 = 둘 다 끔). `cpu-compare.mjs`의 `--exe 이름=경로@정책`이 그 값을 넘긴다.
+
+```sh
+X=cpu_profile-<커밋>.exe
+node scripts/cpu-compare.mjs run --exe off=$X@off --exe qos=$X@highqos --exe pcores=$X@pcores --exe both=$X@both \
+  --pin none --rounds 10 --cooldown 10 --set policy --out policy-runs.csv
+node scripts/cpu-compare.mjs summary --in policy-runs.csv --set policy            # 조건×구성별 평균 ± 표준편차 (중앙값), n
+node scripts/cpu-compare.mjs stats --in policy-runs.csv --before off --after both --set policy
+```
+
+- 조건이 넷이어도 순서는 같다(짝수 라운드 정순, 홀수 라운드 역순). 코어 고정은 하지 않는다(`--pin none`) — 정책이 바꾸는 것이 배치라서다.
+- `CSV|` 줄의 `policy`(옛 `high_qos` 자리 — 넘긴 환경변수 값, 비우면 `default`), `worker_p_pct`·`netrecv_p_pct`(측정 창에서 P 코어에 깨어난 비율), `conceal_max_pct` 열을 쓴다. 실행 출력의 `배치 |` 줄 끝에 엔진이 보고한 적용 결과(`threadPolicy`)가 찍힌다.
+- **커밋 전·후 비교(1·2절)에는 정책이 섞이지 않게 한다**(#245 리뷰 L4): `cpu-compare.mjs`는 `@정책`이 없는 `--exe`에 `BAND_THREAD_POLICY=off`를 넘긴다(셸에 남은 값·실행파일마다 다른 기본값을 막는다. 엔진 기본값 그대로 재려면 `@default`). 옛 `BAND_HIGH_QOS`·`--high-qos`는 없어졌다. `BAND_THREAD_POLICY`를 읽지 않는 옛 실행파일(#245 전)은 늘 정책 없음이다. 단 #245의 첫 커밋(`cc3ff01`)만은 기본값이 켬이고 환경변수 이름이 `qos`·`qos+pcores`였다 — 비교 대상으로 쓰지 않는다.
+- **전원을 기록한다.** 측정 도중 AC ↔ 배터리가 바뀌면 그 라운드부터 구간을 나누고, 구간별로 따로 판정한다(2026-11-20 측정은 라운드 0이 배터리·전환에 걸려 빼고 AC에서 2라운드를 더 쟀다).
+- xrun처럼 드문 꼬리는 평균이 아니라 **실행별 원값과 "xrun이 난 실행 수"**로 적는다(#245 리뷰 M2).
+- 결과: [core-placement-2026-11-20.md](core-placement-2026-11-20.md).
+
 ## 기록
 
 PR에는 다음을 적는다.

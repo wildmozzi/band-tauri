@@ -145,6 +145,11 @@
   .chat-panel {
     display: none;
   }
+
+  /* 웹 관람 화면은 769~1024px에서도 채팅을 보인다(3칸 배치는 RoomDetail.css .web-room, P3-24). 데스크톱 앱은 그대로 숨김 */
+  .web-room .chat-panel {
+    display: flex;
+  }
 }
 
 @media (max-width: 768px) {
@@ -153,5 +158,19 @@
     display: flex;
     height: 250px;
     order: 3;
+  }
+}
+
+/* 터치 대상 44px (P3-24): 채팅 입력·전송·익명 로그인 안내 */
+@media (max-width: 768px) {
+  .chat-panel .chat-input,
+  .chat-panel .chat-send-btn,
+  .chat-panel .chat-login-link {
+    min-height: 44px;
+  }
+
+  .chat-panel .chat-login-link {
+    display: inline-flex;
+    align-items: center;
   }
 }

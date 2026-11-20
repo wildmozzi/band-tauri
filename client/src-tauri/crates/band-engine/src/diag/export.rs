@@ -17,7 +17,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use super::mask::mask_text;
-use super::timeline::{session_placement, to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
+use super::timeline::{session_placement, session_policy, to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
 use super::Diagnostics;
 use band_dsp::config::EngineConfig;
 use crate::engine::device::DeviceInfo;
@@ -43,6 +43,9 @@ timeline.jsonl  1초 간격 엔진 통계(최근 최대 60분): 백엔드·장�
                 corePlacement(Windows)는 워커·수신 스레드가 깨어날 때 P/E/LP-E 코어 중 어디에 있었는지 센
                 [P, E, LP-E] 표본 수입니다. 줄마다 직전 줄 뒤로 센 구간 값이고(실행 시간이 아니라 깨어난 횟수),
                 세션의 줄을 모두 더하면 시작부터의 누적입니다. engine.json lastStats의 corePlacement는 누적입니다.
+                threadPolicy(Windows)는 워커·수신 스레드에 시작 때 건 코어 배치 정책(실험 옵션, 기본 꺼짐)의 결과입니다
+                (highQos = 전원 조절 끄기, pCores = 고성능 코어 집합에 두기; pending/off/applied/failed/skipped).
+                값이 바뀐 줄(세션 첫 줄)에만 있고, engine.json lastStats에는 늘 있습니다.
 logs/           최근 앱 로그(마스킹됨)
 
 넣지 않거나 가린 것
@@ -214,6 +217,8 @@ pub fn build(
     let (timeline_info, timeline_jsonl, last_sample, last_config) = diag.with_timeline(|tl, last_config, _| {
         let last = tl.last().cloned().map(|mut s| {
             s.core_placement = session_placement(tl, s.session);
+            // 스레드 정책은 값이 바뀐 줄에만 있다 — 마지막 샘플에는 그 세션의 값을 채운다(P1-21 2단계).
+            s.thread_policy = session_policy(tl, s.session);
             s
         });
         (TimelineInfo::of(tl), to_jsonl(tl), last, last_config.cloned())
@@ -524,10 +529,12 @@ mod tests {
         let expected = [
             // P1-21a: README에 corePlacement 설명, meta.format 1 → 2(의도한 변경 — engine.json·timeline.jsonl 해시는 그대로)
             // P2-17h: README에 lossShape 설명 한 줄(의도한 변경 — 피어가 없는 입력이라 engine.json·timeline.jsonl 해시는 그대로)
-            ("README.txt", "797e2610e1374de6ebd1babbece5ee97e443282b06bad588e695f56ea5db2b13"),
+            // P1-21 2단계: README에 threadPolicy 설명(의도한 변경 — 정지 상태 입력이라 timeline.jsonl 해시는 그대로)
+            ("README.txt", "04110be1a45d916123fb515445c7b49da26e256a3aef8e8c9818cb335519734e"),
             ("meta.json", "867d233d696502bd59c5633c283b652e9262fafe3ea585ca3bbc247a158a6aee"),
             // P2-17e: engine.json의 config에 resampleQuality(null), stats에 resampler(null)가 생김(의도한 변경)
-            ("engine.json", "0ef44a4721cd5611ce168d55901d4dab2add7c75a7de49675cd57f418ed69c52"),
+            // P1-21 2단계: engine.json의 config에 threadPolicy(null)가 생김(의도한 변경)
+            ("engine.json", "6f4c1882c00322211eedf58bc3b14dc627b1be94dd6fe9b8e77336bdd4378994"),
             ("timeline.jsonl", "3439e58dad4fa31e0ad39d03171b9c5752e3ed097d82404a7ba3fee74224769a"),
             ("logs/Band.log", "6774d10d922e095e6e4dab8cd7dc9a152b767e4d69a2c4af13ffe7cc8359e982"),
         ];

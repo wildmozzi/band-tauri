@@ -122,6 +122,10 @@ impl Engine {
     ) -> Result<Engine, String> {
         let cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
         cfg.validate()?;
+        // 워커·수신 스레드 코어 배치 정책(P1-21 2단계): 설정(기본 둘 다 꺼짐) + 환경변수 `BAND_THREAD_POLICY`. 스레드를 만들기 전에 정한다.
+        let thread_policy = crate::sys::placement::policy_for_engine(
+            cfg.thread_policy.map(|t| crate::sys::placement::PolicyChoice { high_qos: t.high_qos, p_cores: t.prefer_p_cores }).unwrap_or_default(),
+        );
         // 시작이 중간에 실패하면 drop으로 놓인다(Engine으로 옮긴 뒤에는 stop이 놓는다).
         let timer = prio::TimerResolution::acquire();
         let counters = Arc::new(AudioCounters::default());
@@ -185,7 +189,7 @@ impl Engine {
             info,
             counters: counters.clone(),
             controls: controls.clone(),
-            worker_stats: Arc::new(WorkerStats::default()),
+            worker_stats: Arc::new(WorkerStats { thread_policy: crate::sys::placement::PolicySlot::requested(thread_policy), ..Default::default() }),
             worker_stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             audio_stop,
@@ -225,7 +229,7 @@ impl Engine {
             if opts.cancel.is_none() {
                 opts.cancel = cancel.clone();
             }
-            let net = Net::start(peer_id, &opts)?; // 실패 시 engine drop이 오디오 정리
+            let net = Net::start_with_policy(peer_id, &opts, thread_policy)?; // 실패 시 engine drop이 오디오 정리
             // 내 입력 장치 버퍼를 Ping에 싣는다(P2-8b): 상대의 입→귀 추정용. 실측 콜백 크기(아직 없으면 요청값) —
             // `EngineStats.estLatencyMs`의 입력 몫과 같은 값이다. 제어 스레드가 원자값만 읽는다.
             let (c, rate, req) = (counters.clone(), info.in_rate.max(1), info.buffer_frames);

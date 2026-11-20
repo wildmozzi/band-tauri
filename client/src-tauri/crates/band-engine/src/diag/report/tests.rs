@@ -810,3 +810,27 @@ fn straddling_note_mentions_low_loss() {
     let note = g.note.as_deref().unwrap();
     assert!(note.contains("< 상한") && note.contains("도 조건 1%"), "{g:?}");
 }
+
+/// #245: threadPolicy는 값이 바뀐 줄에만 있다 — 세션 첫 줄에만 있어도 요약에 나오고, 없는 세션은 "없음".
+#[test]
+fn thread_policy_from_changed_row_only() {
+    let pol = serde_json::json!({"worker": {"highQos": "ok", "pCores": "off"}, "netRecv": null});
+    let mut text = String::new();
+    for i in 0..=5u64 {
+        let mut v: serde_json::Value = serde_json::from_str(&line(i, 1, "wasapiExclusive", vec![])).unwrap();
+        if i == 0 {
+            v["threadPolicy"] = pol.clone();
+        }
+        text += &(v.to_string() + "\n");
+    }
+    for i in 10..=12u64 {
+        text += &line(i, 2, "wasapiExclusive", vec![]);
+    }
+    let r = report_of("tp.zip", &text);
+    let ss = &r.files[0].sessions;
+    assert_eq!(ss[0].thread_policy.as_ref(), Some(&pol));
+    assert!(ss[1].thread_policy.is_none());
+    let md = markdown(&r);
+    assert!(md.contains("| threadPolicy | {"), "{md}");
+    assert!(md.contains("| threadPolicy | 없음 |"), "{md}");
+}

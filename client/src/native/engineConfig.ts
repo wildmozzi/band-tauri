@@ -11,6 +11,7 @@ import {
   type FrameMs,
   type PeerStats,
   type ResampleQuality,
+  type ThreadPolicyConfig,
 } from './engineApi'
 
 export const DRIVER_OPTIONS: { id: DriverKind; label: string; desc: string }[] = [
@@ -48,6 +49,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   jitterMaxMs: 80,
   jitterProfile: JITTER_PROFILE_DEFAULT,
   resampleQuality: 'auto',
+  threadPolicy: { highQos: false, preferPCores: false },
 }
 
 /** 리샘플러 품질 선택지(P2-17e, 오디오 설정 "리샘플러 품질") */
@@ -302,10 +304,18 @@ function sanitizeEngineConfig(raw: Record<string, unknown>): EngineConfig {
     jitterProfile: clampJitterProfile(raw.jitterProfile),
     // 옛 설정(필드 없음)·모르는 값은 auto(P2-17e)
     resampleQuality: RESAMPLE_QUALITIES.includes(raw.resampleQuality as ResampleQuality) ? (raw.resampleQuality as ResampleQuality) : 'auto',
+    // 옛 설정(필드 없음)·이상한 값은 둘 다 꺼짐(P1-21 2단계 — 실험 옵션은 명시적으로 true일 때만 켠다)
+    threadPolicy: normalizeThreadPolicy(raw.threadPolicy),
   }
   if (isValidOpusBitrate(raw.opusBitrate)) config.opusBitrate = raw.opusBitrate
   if (typeof raw.udpPort === 'number' && raw.udpPort > 0 && raw.udpPort < 65536) config.udpPort = raw.udpPort
   return fixPayload(config)
+}
+
+/** 저장된 `threadPolicy`를 정규화한다: 각 항목이 정확히 `true`일 때만 켬 */
+export function normalizeThreadPolicy(raw: unknown): ThreadPolicyConfig {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  return { highQos: r.highQos === true, preferPCores: r.preferPCores === true }
 }
 
 function clampJitter(v: number): number {

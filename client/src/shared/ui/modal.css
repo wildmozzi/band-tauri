@@ -24,3 +24,11 @@
   overflow-y: auto;
   padding: 20px;
 }
+
+/* 터치 대상 44px (P3-24): 공용 모달의 닫기 버튼 — 좁은 화면에서만 키운다(1280px 화면은 그대로) */
+@media (max-width: 768px) {
+  .modal-header .close-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

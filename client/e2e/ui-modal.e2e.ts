@@ -6,7 +6,9 @@ test('합주실 정보 모달: 대화상자로 열리고 Tab이 안에서 돌며
   mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
   await page.goto(`/rooms/${ROCK_ROOM.id}`)
   const opener = page.getByRole('button', { name: /정보/ })
-  await opener.click()
+  // 키보드로 연다: WebKit(Safari)은 클릭으로 버튼에 포커스를 주지 않아, 클릭으로 열면 닫힌 뒤 돌아갈 포커스가 없다(브라우저 동작 차이, #244 리뷰 L-2)
+  await opener.focus()
+  await page.keyboard.press('Enter')
 
   const dialog = page.getByRole('dialog', { name: '방 정보' })
   await expect(dialog).toBeVisible()
@@ -34,7 +36,9 @@ test('합주실 정보 모달: 대화상자로 열리고 Tab이 안에서 돌며
 test('오디오 설정 모달(웹): 대화상자로 열리고 Esc로 닫히며 포커스가 열기 버튼으로 돌아온다 (P3-8a)', async ({ page }) => {
   await page.goto('/')
   const opener = page.getByRole('button', { name: '오디오 설정' })
-  await opener.click()
+  // 키보드로 연다: WebKit(Safari)은 클릭으로 버튼에 포커스를 주지 않아, 클릭으로 열면 닫힌 뒤 돌아갈 포커스가 없다(브라우저 동작 차이, #244 리뷰 L-2)
+  await opener.focus()
+  await page.keyboard.press('Enter')
 
   const dialog = page.getByRole('dialog', { name: '오디오 설정' })
   await expect(dialog).toBeVisible()

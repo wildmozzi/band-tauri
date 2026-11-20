@@ -64,6 +64,19 @@ pub enum ResampleQuality {
     HighQuality,
 }
 
+/// 엔진 스레드(워커·네트워크 수신) 코어 배치 정책(P1-21 2단계, Windows). 둘 다 **실험 옵션, 기본 꺼짐** — 엔진 시작 때 한 번
+/// 적용되므로 바꾸면 엔진을 다시 시작해야 한다. 환경변수 `BAND_THREAD_POLICY`가 있으면 그것이 이긴다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadPolicyConfig {
+    /// 실행 속도 전원 조절(EcoQoS)을 끈다. 스케줄러는 여전히 코어를 자유롭게 고른다.
+    #[serde(default)]
+    pub high_qos: bool,
+    /// 고성능(P) 코어 CPU set에 둔다 — 스레드는 그 집합 안에 머문다(P 코어가 바빠도 다른 코어로 넘어가지 않는다).
+    #[serde(default)]
+    pub prefer_p_cores: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineConfig {
@@ -90,6 +103,9 @@ pub struct EngineConfig {
     /// 리샘플러 품질(P2-17e). 없으면 `Auto`(프리셋을 따름).
     #[serde(default)]
     pub resample_quality: Option<ResampleQuality>,
+    /// 엔진 스레드 코어 배치 정책(P1-21 2단계). 없으면 둘 다 꺼짐.
+    #[serde(default)]
+    pub thread_policy: Option<ThreadPolicyConfig>,
 }
 
 impl Default for EngineConfig {
@@ -110,6 +126,7 @@ impl Default for EngineConfig {
             jitter_profile: None,
             udp_port: None,
             resample_quality: None,
+            thread_policy: None,
         }
     }
 }

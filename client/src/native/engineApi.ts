@@ -37,6 +37,21 @@ export type TxCodecReason = 'relayLoad' | 'lossFeedback'
  */
 export type ResampleQuality = 'auto' | 'lowLatency' | 'highQuality'
 
+/**
+ * 엔진 스레드(워커·네트워크 수신) 코어 배치 정책(P1-21 2단계, Windows 전용). 둘 다 **실험 옵션, 기본 꺼짐**.
+ * 엔진 시작 때 한 번 적용되므로 바꾸면 엔진을 다시 시작해야 한다. 환경변수 `BAND_THREAD_POLICY`
+ * (`off` | `highqos` | `pcores` | `both`)가 있으면 이 설정보다 우선한다. 적용 결과는 `EngineStats.threadPolicy`.
+ */
+export interface ThreadPolicyConfig {
+  /** 실행 속도 전원 조절(EcoQoS)을 끈다. 스케줄러는 여전히 코어를 자유롭게 고른다 */
+  highQos: boolean
+  /**
+   * 고성능(P) 코어 CPU set에 둔다. "선호"가 아니다 — 스레드는 그 집합 안에 머물러, P 코어가 바빠도 다른 코어로 넘어가지 않는다.
+   * 하이브리드 CPU가 아니거나 물리 P 코어가 4개 미만이면 적용되지 않는다(`skipped`)
+   */
+  preferPCores: boolean
+}
+
 export interface EngineConfig {
   inputDriver: DriverKind
   outputDriver: DriverKind
@@ -58,6 +73,8 @@ export interface EngineConfig {
   udpPort?: number
   /** 리샘플러 품질(P2-17e). 없으면 auto */
   resampleQuality?: ResampleQuality
+  /** 엔진 스레드 코어 배치 정책(P1-21 2단계, 실험적). 없으면 둘 다 꺼짐 */
+  threadPolicy?: ThreadPolicyConfig
 }
 
 export interface Candidate {
@@ -377,6 +394,8 @@ export interface EngineStats {
   threadPriority?: ThreadPriorityStats
   /** 하이브리드 CPU 코어 배치(P1-21): 워커·수신 스레드가 P/E/LP-E 코어에서 돈 비율(시작부터 누적). 비Windows·옛 엔진은 null/없음 */
   corePlacement?: CorePlacementStats | null
+  /** 워커·수신 스레드에 적용한 코어 배치 정책과 결과(P1-21 2단계, 기본은 둘 다 off). 비Windows·정지 상태·옛 엔진은 null/없음 */
+  threadPolicy?: ThreadPolicyStats | null
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
@@ -553,6 +572,25 @@ export interface CorePlacementStats {
   worker: ThreadPlacement
   /** 네트워크 없이 시작한 엔진은 null */
   netRecv: ThreadPlacement | null
+}
+
+/**
+ * 스레드 정책 한 항목의 적용 결과(설계 문서 4절 `threadPolicy`): `pending` 스레드가 아직 적용 전(시작 직후 잠깐) ·
+ * `off` 옵션 꺼짐(기본) · `applied` OS 호출 성공 · `failed` 실패(무시하고 기본 스케줄링) ·
+ * `skipped` P 코어 CPU set만 — 걸 집합이 없어 걸지 않음(하이브리드 아님, 물리 P 코어 4개 미만).
+ */
+export type ThreadPolicyResult = 'pending' | 'off' | 'applied' | 'failed' | 'skipped'
+
+/** 스레드 하나에 시작 때 한 번 건 정책: HighQoS(EcoQoS 끄기)와 P 코어 CPU set(그 집합 안에 머묾) */
+export interface ThreadPolicy {
+  highQos: ThreadPolicyResult
+  pCores: ThreadPolicyResult
+}
+
+export interface ThreadPolicyStats {
+  worker: ThreadPolicy
+  /** 네트워크 없이 시작한 엔진은 null */
+  netRecv: ThreadPolicy | null
 }
 
 // ============================================================================

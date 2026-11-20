@@ -340,8 +340,10 @@
 
 /* 반응형 */
 @media (max-width: 1024px) {
+  /* minmax(0, 1fr): 1fr(=minmax(auto, 1fr))이면 가로 스크롤 탭(.profile-nav, 줄바꿈 없음)의 최소 폭만큼 칸이 늘어나
+     폰에서 화면이 약 1050px로 넓어졌다 (P3-24) */
   .profile-container {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .profile-sidebar {

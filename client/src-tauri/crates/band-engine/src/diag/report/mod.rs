@@ -908,7 +908,8 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
         config: cfg,
         est_latency_ms: Dist::of(&est),
         core_placement: placement,
-        thread_policy: last_run.and_then(|v| v.get("threadPolicy")).cloned(),
+        // #245: threadPolicy는 같은 세션에서 값이 바뀐 줄(세션 첫 줄, pending 뒤 다음 줄)에만 있다 — 그 세션의 마지막 값을 쓴다.
+        thread_policy: lines.iter().rev().find_map(|v| v.get("threadPolicy")).cloned(),
         xruns: last_run.and_then(|v| u64_at(v, "xruns")),
         xrun_steps,
         stream_errors: last_run.and_then(|v| u64_at(v, "streamErrors")),

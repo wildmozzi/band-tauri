@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
-import { bootstrap, fisherExact, pairDiffs, parseProfileOutput, readRuns, roundOrder, slowRuns, tInterval, verdict } from './cpu-compare.mjs'
+import { bootstrap, fisherExact, median, pairDiffs, parseProfileOutput, readRuns, roundOrder, slowRuns, summarize, tInterval, verdict } from './cpu-compare.mjs'
 
 const RUNS = fileURLToPath(new URL('../docs/overhaul/cpu-quiet-2026-11-17-runs.csv', import.meta.url))
 
@@ -79,4 +79,21 @@ test('세트가 섞인 원자료: --set 없이도 라운드가 덮어써지지 �
     { exe: 'a', set: 'y', round: '0', worker_lpe_pct: '0' },
   ]
   assert.deepEqual(Object.fromEntries(slowRuns(lpe)), { a: { slow: 1, n: 2 } })
+})
+
+test('조건×구성 요약: 평균·표준편차·중앙값, 빈 칸과 다른 세트는 뺀다', () => {
+  const rows = [
+    { set: 's', exe: 'off', config: 'Opus 2.5ms', worker_pct_avg6: '10' },
+    { set: 's', exe: 'off', config: 'Opus 2.5ms', worker_pct_avg6: '14' },
+    { set: 's', exe: 'off', config: 'Opus 2.5ms', worker_pct_avg6: '11' },
+    { set: 's', exe: 'off', config: 'Opus 2.5ms', worker_pct_avg6: '' },
+    { set: 's', exe: 'qos', config: 'Opus 2.5ms', worker_pct_avg6: '9' },
+    { set: 's', exe: 'qos', config: 'Opus 2.5ms', worker_pct_avg6: '13' },
+    { set: 'x', exe: 'qos', config: 'Opus 2.5ms', worker_pct_avg6: '99' },
+  ]
+  const s = summarize(rows, 'worker_pct_avg6', 's')
+  assert.deepEqual(s.map((x) => [x.exe, x.n, x.median]), [['off', 3, 11], ['qos', 2, 11]])
+  assert.equal(s[0].mean.toFixed(3), '11.667')
+  assert.equal(s[0].sd.toFixed(3), '2.082')
+  assert.equal(median([4, 1, 3, 2]), 2.5)
 })
