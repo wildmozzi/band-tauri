@@ -7,6 +7,11 @@
     "bandPctMax": 10.0,
     "concealGoalPct": 1.5,
     "recoverMaxS": 5.0,
+    "tailRatchet": {
+      "decayMaxS": 60.0,
+      "levelMaxFrames": 0.65,
+      "totalOverMs": 1.25
+    },
     "underrunMaxPct": 0.5
   },
   "fails": [],
@@ -80,6 +85,20 @@
         "tailLastMs": 0.0,
         "tailMaxMs": 0.0,
         "within": true
+      },
+      "tailRatchet": {
+        "decayLimitS": 60.0,
+        "decayS": null,
+        "decayWithin": true,
+        "judged": false,
+        "levelLimitMs": 3.25,
+        "levelMs": 0.0,
+        "levelWithin": true,
+        "totalLastWithin": true,
+        "totalOverLastMs": -0.9135174751281738,
+        "totalOverLimitMs": 1.25,
+        "totalOverMs": -0.949735164642334,
+        "totalWithin": true
       },
       "targetFirst": {
         "jitterEstMs": 3.5,
@@ -157,6 +176,20 @@
         "tailMaxMs": 5.0,
         "within": true
       },
+      "tailRatchet": {
+        "decayLimitS": 60.0,
+        "decayS": 17.900481000000013,
+        "decayWithin": true,
+        "judged": true,
+        "levelLimitMs": 3.25,
+        "levelMs": 2.25,
+        "levelWithin": true,
+        "totalLastWithin": true,
+        "totalOverLastMs": 0.49004364013671875,
+        "totalOverLimitMs": 1.25,
+        "totalOverMs": -0.4082832336425781,
+        "totalWithin": true
+      },
       "targetFirst": {
         "jitterEstMs": 7.75,
         "leadMs": 1.5,
@@ -232,6 +265,20 @@
         "tailLastMs": 0.0,
         "tailMaxMs": 0.0,
         "within": true
+      },
+      "tailRatchet": {
+        "decayLimitS": 60.0,
+        "decayS": null,
+        "decayWithin": true,
+        "judged": false,
+        "levelLimitMs": 3.25,
+        "levelMs": 0.0,
+        "levelWithin": true,
+        "totalLastWithin": true,
+        "totalOverLastMs": -0.9511899948120117,
+        "totalOverLimitMs": 1.25,
+        "totalOverMs": -1.3900251388549805,
+        "totalWithin": true
       },
       "targetFirst": {
         "jitterEstMs": 7.25,
@@ -318,6 +365,20 @@
         "tailMaxMs": 0.0,
         "within": true
       },
+      "tailRatchet": {
+        "decayLimitS": 60.0,
+        "decayS": null,
+        "decayWithin": true,
+        "judged": false,
+        "levelLimitMs": 1.625,
+        "levelMs": 0.0,
+        "levelWithin": true,
+        "totalLastWithin": true,
+        "totalOverLastMs": -0.13805484771728516,
+        "totalOverLimitMs": 1.25,
+        "totalOverMs": -0.24031543731689453,
+        "totalWithin": true
+      },
       "targetFirst": {
         "jitterEstMs": 6.75,
         "leadMs": 1.5,
@@ -393,6 +454,20 @@
         "tailLastMs": 0.0,
         "tailMaxMs": 0.0,
         "within": true
+      },
+      "tailRatchet": {
+        "decayLimitS": 60.0,
+        "decayS": null,
+        "decayWithin": true,
+        "judged": false,
+        "levelLimitMs": 3.25,
+        "levelMs": 0.0,
+        "levelWithin": true,
+        "totalLastWithin": true,
+        "totalOverLastMs": -0.9280109405517578,
+        "totalOverLimitMs": 1.25,
+        "totalOverMs": -1.2646355628967285,
+        "totalWithin": true
       },
       "targetFirst": {
         "jitterEstMs": 3.25,
@@ -474,6 +549,20 @@
         "tailLastMs": 0.0,
         "tailMaxMs": 0.5,
         "within": true
+      },
+      "tailRatchet": {
+        "decayLimitS": 60.0,
+        "decayS": 0.00041500000000382897,
+        "decayWithin": true,
+        "judged": false,
+        "levelLimitMs": 3.25,
+        "levelMs": 0.0,
+        "levelWithin": true,
+        "totalLastWithin": true,
+        "totalOverLastMs": -2.891140937805176,
+        "totalOverLimitMs": 1.25,
+        "totalOverMs": -2.918161392211914,
+        "totalWithin": true
       },
       "targetFirst": {
         "jitterEstMs": 7.25,

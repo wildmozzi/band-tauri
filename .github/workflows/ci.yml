@@ -333,6 +333,12 @@ jobs:
         run: cargo test -p band-engine --no-default-features --features test-support --test sim long_sim_6peers_60min -- --ignored --nocapture
         env:
           SIM_REPORT_DIR: ${{ runner.temp }}/sim-report
+      - name: 시드 스윕 (5분 × 10)
+        # PR CI는 5분 하네스를 시드 둘(fixture 시드 + 변형 1)만 돈다. 여기서 변형 0~9를 돌려 판정이 시드에 기대지 않는지와
+        # 꼬리 지터 피어의 늦은 패킷 예산 수준 시드 평균 래칫(작은 상승은 시드 평균으로만 잡힌다)을 본다. 60분이 실패해도 돈다.
+        if: ${{ !cancelled() }}
+        timeout-minutes: 25
+        run: cargo test -p band-engine --no-default-features --features test-support --test sim long_sim_seed_sweep_5min -- --ignored --nocapture
       - name: Job summary
         if: ${{ !cancelled() }}
         timeout-minutes: 1

@@ -41,6 +41,36 @@ const ACCUM_MAX_MS: f32 = 1.0;
 /// 은닉 비율에서 빼는 구간: 단절 시작부터 끝 + 이만큼(s).
 const OUTAGE_EXCL_S: f64 = 10.0;
 
+// ── 꼬리 지터 회선의 회귀 방지 래칫(PR #248 리뷰 M1) ──
+// **GOAL 기준이 아니다.** GOAL 1절은 꼬리 지터 회선을 대상에서 빼고 "지연이 조금 늘더라도 끊김 우선"이라고만 한다. 아래 한도는
+// 지금 엔진의 늦은 패킷 예산(`tail_extra`)이 내는 동작을 관측한 분포에 여유를 두고 묶어, 예산이 커지거나 내려오지 않는 회귀를
+// 잡는 값이다. `TailDelay`는 예산을 지연에서 빼고 `TailCap`의 한도는 코드 상한(1F)과 같아서, 그 둘만으로는 예산이 0~1F 안
+// 어디에 머무는지 아무도 보지 않았다(예산이 1F에 붙어 마지막 창 bufferMs가 +2.7ms 올라도 통과).
+// 관측 분포(2026-11-20, 꼬리 피어 #1 = F 5ms·지수 지터 2ms, 5분 시드 변형 40개 / 60분 시드 변형 10개):
+//   기본 조건 구간 예산 중앙값          5분 1.50~2.50ms(0.30~0.50F), 시드 평균 2.01ms   60분 2.00ms(전 시드)
+//   지터 계단이 풀린 뒤 0.65F 이하까지  5분 5~35s                                       60분 5~26s
+//   bufferMs − 1절 한도(첫 / 마지막 창) 5분 −1.12~+0.69 / −0.88~+0.49ms                 60분 −0.25~+0.10 / −0.16~+0.17ms
+// 변형 실험(엔진을 작업 트리에서만 바꿔 5분 시드 변형 0~4): 예산 내림을 끄면(1F에 고착 — 리뷰 M1의 변형) 수준 5.00ms·감쇠 없음·
+// 마지막 창 한도 초과 +2.47~+2.82ms로 셋 다 5/5 실패, 예산 상한을 2F로 올리면 `TailCap`이 5/5 실패. 느린 내림만 끄거나 내림
+// 문턱을 0.6 → 0.3으로 낮춘 약한 변형(수준 2.25~3.00ms, 지연 +0.3ms 안팎)은 실행 하나의 한도로는 통과하고 시드 평균
+// (`TAIL_LEVEL_MEAN_MAX_F`, 5시드 평균 2.65·2.70ms)으로 잡는다.
+// 엔진을 의도해서 바꿔 이 분포가 움직이면(예산 규칙 조정 등) 시드 스윕(`long_sim_seed_sweep_5min`·`_60min`)을 다시 돌려 한도와
+// 이 주석·GOAL-COVERAGE를 함께 고친다.
+/// 예산 수준: 기본 망 조건 구간(사건·지터 계단 구간 밖)의 예산 중앙값 상한(프레임 배수). 관측 최대 0.50F에 0.15F(5ms 프레임에서
+/// 격자 3칸 0.75ms)를 더했다. 예산이 상한에 붙으면 1.0F다.
+const TAIL_LEVEL_MAX_F: f32 = 0.65;
+/// 예산 감쇠: 꼬리가 굵어졌다 돌아온 뒤(지터 계단 하강) 예산이 `TAIL_LEVEL_MAX_F` 이하로 내려오기까지의 시간 상한(s).
+/// 관측 최대 35s. 내려오지 않으면(고착) 무한대다.
+const TAIL_DECAY_MAX_S: f64 = 60.0;
+/// 총 지연: 예산을 포함한 bufferMs 창 중앙값이 1절 한도(1F + p95 지터)를 넘는 폭의 상한(ms). 관측 최대 +0.69ms에 0.56ms를
+/// 더했다. 1절 한도 기준으로 재는 것은 시드마다 달라지는 p95 지터를 빼기 위해서다(bufferMs 자체는 10.5~12.4ms로 더 흩어진다).
+const TAIL_TOTAL_OVER_MS: f32 = 1.25;
+/// 시드 평균 래칫(시드 스윕 전용): 시드 변형 `TAIL_MEAN_MIN_SEEDS`개 이상을 돌렸을 때 꼬리 지터 피어의 예산 수준 평균 상한
+/// (프레임 배수). 실행 하나의 한도(`TAIL_LEVEL_MAX_F`)는 시드 흩어짐(±0.5ms)을 덮어야 해서 느슨하다 — 평균은 흩어짐이 작아
+/// (5분 40시드를 5개씩 묶은 평균 1.90~2.10ms = 0.38~0.42F, 60분 2.00ms) 더 작은 상승을 잡는다. 0.48F = 2.40ms.
+const TAIL_LEVEL_MEAN_MAX_F: f32 = 0.48;
+const TAIL_MEAN_MIN_SEEDS: usize = 5;
+
 /// 회선 분류 — GOAL.md 1절 **"안정 회선"의 뜻**(사용자 결정 2026-11-12, P1-6d)을 하네스 판정에 옮긴 한 곳이다.
 ///
 /// | GOAL.md 문구 | 하네스 |
@@ -48,6 +78,10 @@ const OUTAGE_EXCL_S: f64 = 10.0;
 /// | "합주의 기본 환경은 유선(LAN) 연결" — 안정 회선 | [`LineClass::Stable`]: 망 지터 분포가 유계(`JitDist::Uniform`)인 회선. 1절 "지터 버퍼 추가 지연"(중앙값 ≤ 1프레임 + p95 지터)을 첫·마지막 창에 그대로 건다. |
 /// | "지연이 가끔 크게 튀는 회선(와이파이·LTE 등 꼬리 긴 지터)은 안정 회선이 아니므로 … 기준의 대상이 아니다" | [`LineClass::Tail`]: 실행 중 한 번이라도 꼬리 긴 분포(`JitDist::Exp`·`JitDist::Pareto`)를 쓰는 회선. 1절 "지터 버퍼 추가 지연" 판정에서 뺀다. |
 /// | "그런 회선에서는 지연이 조금 늘더라도 끊김(은닉) 기준(2절)을 우선한다" | `Tail`에도 2절(은닉·언더런)과 지연 누적(±3ms 띠)은 똑같이 걸고, "조금"을 수치로 묶는다: 늦은 패킷 예산(`tail_extra`)을 뺀 bufferMs ≤ 1프레임 + p95 지터(`TailDelay`·`TailDelayLast`), 예산 ≤ 1프레임(`TailCap`), 예산을 뺀 bufferMs의 첫·마지막 창 차이 ≤ `ACCUM_MAX_MS`. 셋을 합치면 bufferMs ≤ 1절 한도 + 1프레임이고 시간이 지나도 늘지 않는다. |
+///
+/// 위 셋은 예산을 지연에서 빼므로 예산 자체가 커지는 회귀를 보지 못한다. 그래서 꼬리 지터 회선에는 **회귀 방지 래칫**(GOAL 기준이
+/// 아니다 — 지금 동작의 관측 분포 + 여유)을 더 건다: 예산 수준(`TailLevel`), 예산 감쇠(`TailDecay`), 예산을 포함한 총 bufferMs
+/// (`TailTotal`·`TailTotalLast`). 한도와 근거는 `TAIL_LEVEL_MAX_F`·`TAIL_DECAY_MAX_S`·`TAIL_TOTAL_OVER_MS`에 있다.
 ///
 /// 분류는 지터 **분포**만 본다. 와이파이 스파이크 회선(#4: 0.3초 +30ms)은 GOAL 문구로는 안정 회선이 아니지만, 스파이크 구간을
 /// 사건으로 빼고(`event_x`) 그 사이의 유선형(균등) 구간에 1절을 그대로 건다 — 문구보다 엄격한 쪽이다(5분 40시드에서 여유 ≥ 0.58ms).
@@ -85,11 +119,22 @@ impl LineClass {
         }
     }
     /// 이 분류에 거는 판정 지표. 2절(은닉·언더런)과 띠 밖 비율은 공통이고, 1절 지터 버퍼 추가 지연은 안정 회선에만,
-    /// 꼬리 지터 회선에는 그 자리에 상한 판정 셋을 건다(빼기만 하고 아무것도 안 보는 피어가 없게).
+    /// 꼬리 지터 회선에는 그 자리에 상한 판정 셋과 회귀 방지 래칫 넷을 건다(빼기만 하고 아무것도 안 보는 피어가 없게).
     fn metrics(self) -> &'static [Metric] {
         match self {
             LineClass::Stable => &[Metric::Conceal, Metric::Underrun, Metric::BandPct, Metric::GoalDelay, Metric::GoalDelayLast],
-            LineClass::Tail => &[Metric::Conceal, Metric::Underrun, Metric::BandPct, Metric::TailDelay, Metric::TailDelayLast, Metric::TailCap],
+            LineClass::Tail => &[
+                Metric::Conceal,
+                Metric::Underrun,
+                Metric::BandPct,
+                Metric::TailDelay,
+                Metric::TailDelayLast,
+                Metric::TailCap,
+                Metric::TailLevel,
+                Metric::TailDecay,
+                Metric::TailTotal,
+                Metric::TailTotalLast,
+            ],
         }
     }
 }
@@ -122,6 +167,15 @@ enum Metric {
     TailDelayLast,
     /// 꼬리 지터 회선의 늦은 패킷 예산 최댓값(ms, 정착 뒤 전 구간), 한도 1프레임.
     TailCap,
+    /// 회귀 방지 래칫(GOAL 기준 아님): 기본 망 조건 구간의 늦은 패킷 예산 중앙값(ms), 한도 `TAIL_LEVEL_MAX_F` × 프레임.
+    TailLevel,
+    /// 회귀 방지 래칫: 지터 계단이 풀린 뒤 예산이 `TailLevel` 한도 이하로 내려오기까지의 시간(s), 한도 `TAIL_DECAY_MAX_S`.
+    /// 그런 계단이 없는 회선은 0(잴 것이 없음).
+    TailDecay,
+    /// 회귀 방지 래칫: 예산을 포함한 첫 창 bufferMs 중앙값(ms), 한도 1절 한도 + `TAIL_TOTAL_OVER_MS`.
+    TailTotal,
+    /// 같은 판정을 마지막 창에.
+    TailTotalLast,
 }
 
 impl Metric {
@@ -135,12 +189,17 @@ impl Metric {
             Metric::TailDelay => "꼬리 지터 회선 지연 상한(첫 창 bufferMs − 늦은 패킷 예산)",
             Metric::TailDelayLast => "꼬리 지터 회선 지연 상한(마지막 창 bufferMs − 늦은 패킷 예산)",
             Metric::TailCap => "꼬리 지터 회선 늦은 패킷 예산 최댓값",
+            Metric::TailLevel => "꼬리 지터 회선 늦은 패킷 예산 수준(기본 조건 구간 중앙값, 회귀 래칫)",
+            Metric::TailDecay => "꼬리 지터 회선 늦은 패킷 예산 감쇠 시간(지터 계단이 풀린 뒤, 회귀 래칫)",
+            Metric::TailTotal => "꼬리 지터 회선 총 지연(첫 창 bufferMs, 회귀 래칫)",
+            Metric::TailTotalLast => "꼬리 지터 회선 총 지연(마지막 창 bufferMs, 회귀 래칫)",
         }
     }
     /// (값 단위, 허용폭 단위).
     fn unit(self) -> (&'static str, &'static str) {
         match self {
-            Metric::GoalDelay | Metric::GoalDelayLast | Metric::TailDelay | Metric::TailDelayLast | Metric::TailCap => ("ms", "ms"),
+            Metric::TailDecay => ("s", "s"),
+            Metric::GoalDelay | Metric::GoalDelayLast | Metric::TailDelay | Metric::TailDelayLast | Metric::TailCap | Metric::TailLevel | Metric::TailTotal | Metric::TailTotalLast => ("ms", "ms"),
             _ => ("%", "%p"),
         }
     }
@@ -268,6 +327,25 @@ fn describe(np: &NetPeer) -> String {
     s
 }
 
+/// 예산 수준 한도(ms): `TAIL_LEVEL_MAX_F` × 프레임.
+fn tail_level_limit(frame_ms: f32) -> f32 {
+    TAIL_LEVEL_MAX_F * frame_ms
+}
+
+/// 마지막 지터 계단 하강 시각(s): 지터가 직전 조건보다 작아지는 마지막 `steps` 항목 — 꼬리가 굵어졌다(늦은 패킷 예산이 오름)
+/// 돌아오는 시점이다. 예산 감쇠(`Metric::TailDecay`)를 여기서부터 잰다.
+fn jitter_drop_at(np: &NetPeer) -> Option<f64> {
+    let mut prev = np.net_jitter_us;
+    let mut at = None;
+    for &(t, _, j) in &np.steps {
+        if j < prev {
+            at = Some(t as f64 / 1e6);
+        }
+        prev = j;
+    }
+    at
+}
+
 fn quantile(mut v: Vec<f32>, q: f64) -> f32 {
     if v.is_empty() {
         return f32::NAN;
@@ -298,6 +376,11 @@ struct PeerResult {
     /// 첫·마지막 창에서 늦은 패킷 예산을 뺀 bufferMs 중앙값(ms, 표본마다 `buf − tail`). 예산이 0인 회선에서는 bufferMs와 같다.
     base_first: f32,
     base_last: f32,
+    /// 기본 망 조건 구간(사건 구간과 지터·지연 계단이 걸린 구간 밖)의 늦은 패킷 예산 중앙값(ms).
+    tail_base: f32,
+    /// 마지막 지터 계단 하강(꼬리가 굵어졌다 돌아옴) 뒤 예산이 `TailLevel` 한도 이하로 내려오기까지의 시간(s). 그런 계단이
+    /// 없으면 `None`, 끝까지 내려오지 않으면 무한대.
+    tail_decay_s: Option<f64>,
     /// `tail_extra` 조정 횟수, 초기화 횟수(정착 후, PR #65 리뷰 L3).
     tail_adjusts: u64,
     tail_resets: u64,
@@ -365,6 +448,10 @@ impl PeerResult {
             Metric::TailDelay => self.base_first as f64,
             Metric::TailDelayLast => self.base_last as f64,
             Metric::TailCap => self.tail_max as f64,
+            Metric::TailLevel => self.tail_base as f64,
+            Metric::TailDecay => self.tail_decay_s.unwrap_or(0.0),
+            Metric::TailTotal => self.buf_first as f64,
+            Metric::TailTotalLast => self.buf_last as f64,
         }
     }
     fn limit(&self, m: Metric) -> f64 {
@@ -378,6 +465,11 @@ impl PeerResult {
             Metric::TailDelayLast => self.goal_delay_limit_last() as f64,
             // 예산은 0.25ms 격자 값이라 f32 → f64 반올림 잡음만 허용한다.
             Metric::TailCap => self.frame_ms as f64 + 1e-3,
+            // 아래 넷은 회귀 방지 래칫이다(GOAL 기준 아님, 근거는 `TAIL_LEVEL_MAX_F` 위 주석).
+            Metric::TailLevel => tail_level_limit(self.frame_ms) as f64 + 1e-3,
+            Metric::TailDecay => TAIL_DECAY_MAX_S,
+            Metric::TailTotal => (self.goal_delay_limit() + TAIL_TOTAL_OVER_MS) as f64,
+            Metric::TailTotalLast => (self.goal_delay_limit_last() + TAIL_TOTAL_OVER_MS) as f64,
         }
     }
     fn ok(&self, m: Metric) -> bool {
@@ -448,8 +540,14 @@ fn analyze(np: &NetPeer, rule: LossRule, known: &'static [Known], p: &PeerOut, s
             prod += b.produced - a.produced;
         }
         let pct = |n: u64| n as f64 * 100.0 / prod.max(1) as f64;
-        // 손실 몫이 전체를 넘을 수 있다: 언더런 은닉이 나중에 손실로 다시 분류되면(`concealed_loss`만 늦게 오름) 그 사이에 낀
-        // 제외 구간이 한쪽만 뺀다(5분 시드 변형 10·33에서 1프레임). 뺄셈이 넘치지 않게 0으로 자른다.
+        // 손실 몫이 전체를 넘을 수 있다(PR #248 리뷰 Low — 고치지 않고 크기를 묶어 둔다). 엔진은 마감에 뒤 패킷도 없으면 언더런
+        // 은닉으로 세고(`concealed`만 +1), 나중에 그 seq를 손실로 넘길 때 손실 몫으로 다시 분류한다(`concealed_loss`만 +1, 늦게).
+        // 두 증가 사이에 제외 구간의 경계가 끼면 한 표본 쌍은 빠지고 다른 쌍은 남아 한쪽 카운터만 센다:
+        //   - 은닉은 제외 구간 안, 재분류는 밖 → 손실 몫만 +1(전체보다 커질 수 있다 — 5분 시드 변형 10·33에서 1프레임).
+        //   - 은닉은 밖, 재분류는 안 → 전체만 +1(언더런 몫이 1프레임 크게 남는다).
+        // 어긋남은 제외 구간 경계 하나에 재분류 대기 중인 프레임 수(보통 0~1)까지다. 5분 실행은 피어당 생산 약 6만 프레임·경계
+        // 14개 이하라 최악에도 0.03%p 미만이고(언더런 한도 0.5%, 관측 0.00~0.10%), 은닉 전체(`conc`)는 영향이 없다. 표본 쌍을
+        // 재분류 시점에 맞춰 옮기려면 엔진이 프레임별 분류 시각을 내보내야 해서(엔진 변경) 하네스에서는 뺄셈만 0으로 자른다.
         (pct(conc), pct(conc_loss), pct(conc.saturating_sub(conc_loss)))
     };
     let conceal_all = conceal_excl(&outage_x).0;
@@ -496,6 +594,13 @@ fn analyze(np: &NetPeer, rule: LossRule, known: &'static [Known], p: &PeerOut, s
     let tail_max = steady.iter().map(|s| s.tail).fold(0.0f32, f32::max);
     let base_first = in_win(SETTLE_S, SETTLE_S + win, &|s| s.buf - s.tail);
     let base_last = in_win(seconds - win, seconds + 1.0, &|s| s.buf - s.tail);
+    // 예산 수준: 기본 망 조건(시작 때의 지연·지터)인 구간 전체의 예산 중앙값. 계단이 걸린 구간(조건이 다름)과 사건 구간(계단
+    // 직후 10초 포함)은 뺀다 — 계단이 풀린 뒤 예산이 내려오는 구간은 들어가므로 느린 감쇠도 값을 올린다.
+    let base_cond = |t: f64| np.steps.iter().rev().find(|s| t >= s.0 as f64 / 1e6).is_none_or(|&(_, extra, j)| extra == 0 && j == np.net_jitter_us);
+    let tail_base = quantile(steady.iter().filter(|s| s.playing && quiet(s) && base_cond(s.t)).map(|s| s.tail).collect(), 0.5);
+    // 예산 감쇠: 지터 계단이 풀린 시각부터 예산이 수준 한도 이하인 첫 표본까지(0.25ms 격자 값이라 반올림 잡음만 허용).
+    let level = tail_level_limit(np.frame as f32 / 48.0) + 1e-3;
+    let tail_decay_s = jitter_drop_at(np).map(|t0| steady.iter().find(|s| s.t >= t0 && s.tail <= level).map_or(f64::INFINITY, |s| s.t - t0));
 
     PeerResult {
         desc: describe(np),
@@ -514,6 +619,8 @@ fn analyze(np: &NetPeer, rule: LossRule, known: &'static [Known], p: &PeerOut, s
         tail_max,
         base_first,
         base_last,
+        tail_base,
+        tail_decay_s,
         tail_adjusts: p.js.tail_adjusts - p.js_settle.tail_adjusts,
         tail_resets: p.js.tail_resets - p.js_settle.tail_resets,
         band_max_s,
@@ -601,7 +708,9 @@ fn judge_metric(i: usize, r: &PeerResult, m: Metric, seconds: f64, fails: &mut V
             Verdict::Known
         }
         Ratchet::New => {
-            fails.push(format!("#{i} {name} {v:.2}{u} > {lim:.2}{u}"));
+            // 감쇠 시간은 끝까지 내려오지 않으면 무한대다.
+            let vs = if v.is_finite() { format!("{v:.2}{u}") } else { "끝까지 내려오지 않음".to_string() };
+            fails.push(format!("#{i} {name} {vs} > {lim:.2}{u}"));
             Verdict::Fail
         }
         Ratchet::Worse => {
@@ -695,6 +804,13 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
         let _ = writeln!(md, "| 꼬리 지터 회선({tl}, 1절 지터 버퍼 추가 지연 대상 밖) 지연 상한: 첫 창 bufferMs − 늦은 패킷 예산 ≤ 1F + p95 지터 | 여유 ≥ 0ms | {} | {} |", slack(Metric::TailDelay), pf(all_ok(Metric::TailDelay)));
         let _ = writeln!(md, "| 꼬리 지터 회선({tl}) 지연 상한: 마지막 창 bufferMs − 늦은 패킷 예산 ≤ 1F + 마지막 창 p95 지터 | 여유 ≥ 0ms | {} | {} |", slack(Metric::TailDelayLast), pf(all_ok(Metric::TailDelayLast)));
         let _ = writeln!(md, "| 꼬리 지터 회선({tl}) 늦은 패킷 예산 최댓값(정착 뒤 전 구간) | ≤ 1F | {} | {} |", slack(Metric::TailCap), pf(all_ok(Metric::TailCap)));
+        // 회귀 방지 래칫(GOAL 기준 아님): 지금 동작의 관측 분포 + 여유.
+        let worst_of = |m: Metric| res.iter().filter(|r| r.judged(m)).map(|r| r.value(m)).fold(f64::NEG_INFINITY, f64::max);
+        let decay = worst_of(Metric::TailDecay);
+        let _ = writeln!(md, "| [회귀 래칫, GOAL 기준 아님] 꼬리 지터 회선({tl}) 늦은 패킷 예산 수준: 기본 조건 구간 중앙값 | ≤ {TAIL_LEVEL_MAX_F}F | {:.2}ms ({}) | {} |", worst_of(Metric::TailLevel), slack(Metric::TailLevel), pf(all_ok(Metric::TailLevel)));
+        let _ = writeln!(md, "| [회귀 래칫] 꼬리 지터 회선({tl}) 늦은 패킷 예산 감쇠: 지터 계단이 풀린 뒤 {TAIL_LEVEL_MAX_F}F 이하까지 | ≤ {TAIL_DECAY_MAX_S:.0}s | {} | {} |", if decay.is_finite() { format!("{decay:.1}s") } else { "내려오지 않음".into() }, pf(all_ok(Metric::TailDecay)));
+        let _ = writeln!(md, "| [회귀 래칫] 꼬리 지터 회선({tl}) 총 지연: 첫 창 bufferMs(예산 포함) ≤ 1F + p95 지터 + {TAIL_TOTAL_OVER_MS}ms | 여유 ≥ 0ms | {} | {} |", slack(Metric::TailTotal), pf(all_ok(Metric::TailTotal)));
+        let _ = writeln!(md, "| [회귀 래칫] 꼬리 지터 회선({tl}) 총 지연: 마지막 창 bufferMs(예산 포함) ≤ 1F + 마지막 창 p95 지터 + {TAIL_TOTAL_OVER_MS}ms | 여유 ≥ 0ms | {} | {} |", slack(Metric::TailTotalLast), pf(all_ok(Metric::TailTotalLast)));
     }
     let _ = writeln!(md, "| 2절 은닉 비율(무작위 손실 ≤ 1% 회선, 평시) | ≤ {CONCEAL_GOAL_PCT}% | {conc_worst:.2}% | {} |", pf(goal_conc.iter().all(|r| r.ok(Metric::Conceal))));
     let _ = writeln!(md, "| 2절 은닉 비율(버스트·2% 회선, 평시): 실제 손실 + 0.5%p 이내 | 피어별 | 아래 표 | {} |", pf(other_ok));
@@ -773,6 +889,7 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
         "\n- 정의: \"목표\" = 엔진 `PeerStats.targetMs`(지터 추정 + 소비자 여유 + 삽입 문턱). 재생이 멈춘 표본(단절 중 재버퍼)은 ±3ms 밖으로 센다.\n\
          - ±3ms 판정: GOAL 문구(\"1분 이상 머무르지 않음\")를 (1) 띠 안 복귀 {BAND_GAP_S:.0}s 이하를 무시한 최장 연속 < {BAND_MAX_S:.0}s와 (2) 띠 밖 총 비율 ≤ {BAND_PCT_MAX:.0}%(60분 중 6분)로 본다. 경계를 오가는 피어가 연속 판정을 피해 가지 않게 하기 위함.\n\
          - 회선 분류(GOAL 1절 \"안정 회선\"의 뜻, P1-6d): 망 지터 분포가 유계(균등)면 안정 회선 — 1절 지터 버퍼 추가 지연을 건다. 꼬리 긴 분포(지수·파레토)를 쓰는 회선은 1절 대상 밖이고, 대신 늦은 패킷 예산(`tail_extra`)을 뺀 bufferMs ≤ 1F + p95 지터, 예산 ≤ 1F, 예산을 뺀 bufferMs의 첫·마지막 창 차이 ≤ {ACCUM_MAX_MS:.1}ms를 건다(합치면 bufferMs ≤ 1절 한도 + 1F, 늘지 않음). 2절과 ±3ms 띠는 모든 회선에 같다.\n\
+         - 꼬리 지터 회선 회귀 래칫(**GOAL 기준 아님** — 지금 엔진 동작의 관측 분포에 여유를 둔 회귀 방지 한도, PR #248 리뷰 M1): 위 판정은 예산을 지연에서 빼므로 예산이 커지거나 내려오지 않는 회귀를 못 본다. 그래서 (1) 기본 조건 구간(사건·계단 구간 밖) 예산 중앙값 ≤ {TAIL_LEVEL_MAX_F}F, (2) 지터 계단이 풀린 뒤 예산이 그 한도 이하로 내려오기까지 ≤ {TAIL_DECAY_MAX_S:.0}s, (3) 예산을 포함한 첫·마지막 창 bufferMs ≤ 1절 한도 + {TAIL_TOTAL_OVER_MS}ms를 건다.\n\
          - 은닉 평시: 단절·스파이크 구간(끝 + 10초까지)과 계단 직후 10초를 뺀 구간. 계단 뒤 새 조건의 정상 상태는 평시로 센다.\n\
          - 은닉 = 손실 몫(마감에 그 패킷이 없고 뒤 패킷은 와 있어 seq를 넘긴 은닉 — 실제 손실 + 너무 늦게 온 패킷, 실제 Opus는 FEC/PLC) + 언더런 몫(마감에 뒤 패킷도 없음, seq 유지·깊이 +1F). 손실 몫 − 실제 손실 ≈ 늦은 패킷 몫. 언더런 예산 {UNDERRUN_MAX_PCT}% = GOAL 2절 한도 1.5% − 손실 1%.\n\
          - 복구 시간: 단절 끝(패킷 재개)부터 재생 중 + 목표 ±3ms 안이 1초 이어지기 시작한 시각까지.\n\
@@ -820,6 +937,14 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
                     "baseFirstMs": r.base_first, "baseLastMs": r.base_last, "tailFirstMs": r.tail_first, "tailLastMs": r.tail_last, "tailMaxMs": r.tail_max,
                     "within": r.ok(Metric::TailDelay), "lastWithin": r.ok(Metric::TailDelayLast), "capWithin": r.ok(Metric::TailCap),
                 },
+                // 회귀 방지 래칫(GOAL 기준 아님). 감쇠 시간은 잴 계단이 없으면 null, 내려오지 않으면 -1.
+                "tailRatchet": {
+                    "judged": r.judged(Metric::TailLevel),
+                    "levelMs": r.tail_base, "levelLimitMs": tail_level_limit(r.frame_ms), "levelWithin": r.ok(Metric::TailLevel),
+                    "decayS": r.tail_decay_s.map(|d| if d.is_finite() { d } else { -1.0 }), "decayLimitS": TAIL_DECAY_MAX_S, "decayWithin": r.ok(Metric::TailDecay),
+                    "totalOverMs": r.buf_first - r.goal_delay_limit(), "totalOverLastMs": r.buf_last - r.goal_delay_limit_last(), "totalOverLimitMs": TAIL_TOTAL_OVER_MS,
+                    "totalWithin": r.ok(Metric::TailTotal), "totalLastWithin": r.ok(Metric::TailTotalLast),
+                },
                 "targetFirst": { "targetMs": r.tgt_first, "jitterEstMs": r.jit_first, "leadMs": r.lead_first, "tailMs": r.tail_first },
                 "tail": { "adjusts": r.tail_adjusts, "resets": r.tail_resets },
                 "known": r.known.iter().filter(|k| k.base(seconds).is_some()).map(|k| json!({ "metric": format!("{:?}", k.metric), "base": k.base(seconds), "tol": k.tol, "why": k.why })).collect::<Vec<_>>(),
@@ -842,6 +967,7 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
             "bandMs": BAND_MS, "bandMaxS": BAND_MAX_S, "bandGapS": BAND_GAP_S, "bandPctMax": BAND_PCT_MAX,
             "concealGoalPct": CONCEAL_GOAL_PCT, "underrunMaxPct": UNDERRUN_MAX_PCT,
             "recoverMaxS": RECOVER_MAX_S, "accumMaxMs": ACCUM_MAX_MS,
+            "tailRatchet": { "levelMaxFrames": (TAIL_LEVEL_MAX_F as f64 * 100.0).round() / 100.0, "decayMaxS": TAIL_DECAY_MAX_S, "totalOverMs": TAIL_TOTAL_OVER_MS },
         },
         "fails": fails,
         "knownShortfalls": known,
@@ -853,7 +979,7 @@ fn build_report(tag: &str, seconds: f64, specs: &[Spec], out: &MultiOut, res: &[
 
 fn run_and_report(tag: &str, seconds: f64) -> Value {
     let (json, fails, md_path) = run_report_wake(tag, seconds, WakeModel::Uniform);
-    assert!(fails.is_empty(), "GOAL 미달 {}건: {:?} (리포트 {})", fails.len(), fails, md_path.display());
+    assert!(fails.is_empty(), "판정 실패 {}건(GOAL 미달·회귀 래칫): {:?} (리포트 {})", fails.len(), fails, md_path.display());
     json
 }
 
@@ -988,11 +1114,21 @@ fn rx_hold_sensitivity() {
 /// 시드 스윕(P1-6d·P2-16d): 시드 변형 `k = 0..n`으로 시나리오를 돌려 피어별 판정 수치를 표로 내고, 변형마다의 판정 실패
 /// 목록을 돌려준다. "이전 판정" 열은 회선 분류를 넣기 전 규칙(1절 지터 버퍼 추가 지연과 bufferMs 누적을 모든 피어에)으로 같은
 /// 수치를 다시 본 것이다 — 꼬리 지터 피어가 시드에 따라 갈리던 것을 나란히 보인다.
-fn seed_sweep(seconds: f64, n: u64) -> Vec<(u64, Vec<String>)> {
-    println!("| 시드 변형 | # | 분류 | 1절 여유 첫 / 마지막 창(ms) | 이전 판정 | 예산 뺀 여유 첫 / 마지막 창(ms) | 늦은 패킷 예산 첫 / 마지막 / 최대(ms) | 은닉 평시 (한도) | 언더런 은닉 | 지연 누적(ms) | 새 판정 |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|");
-    let mut all = Vec::new();
-    for k in 0..n {
+fn seed_sweep(seconds: f64, n: u64) -> Sweep {
+    seed_sweep_range(seconds, 0..n)
+}
+
+/// 시드 스윕 결과: 변형마다의 판정 실패 목록과, 꼬리 지터 피어의 (피어 번호, 실행별 예산 수준 ÷ 프레임).
+struct Sweep {
+    runs: Vec<(u64, Vec<String>)>,
+    tail_level_f: Vec<(usize, Vec<f32>)>,
+}
+
+fn seed_sweep_range(seconds: f64, ks: std::ops::Range<u64>) -> Sweep {
+    println!("| 시드 변형 | # | 분류 | 1절 여유 첫 / 마지막 창(ms) | 이전 판정 | 예산 뺀 여유 첫 / 마지막 창(ms) | 늦은 패킷 예산 첫 / 마지막 / 최대(ms) | 예산 수준(ms) / 감쇠(s) | 은닉 평시 (한도) | 언더런 은닉 | 지연 누적(ms) | 새 판정 |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    let mut all = Sweep { runs: Vec::new(), tail_level_f: Vec::new() };
+    for k in ks {
         let (specs, out, res) = run_seeded(seconds, WakeModel::Uniform, k);
         let rep = build_report("sweep", seconds, &specs, &out, &res, 0.0);
         for (i, r) in res.iter().enumerate() {
@@ -1001,7 +1137,7 @@ fn seed_sweep(seconds: f64, n: u64) -> Vec<(u64, Vec<String>)> {
             let tag = format!("#{i} ");
             let new_ok = !rep.fails.iter().any(|f| f.starts_with(&tag));
             println!(
-                "| {k} | {i} | {} | {s1:+.2} / {s2:+.2} | {} | {:+.2} / {:+.2} | {:.2} / {:.2} / {:.2} | {:.2}% ({:.2}%) | {:.2}% | {:+.2} | {} |",
+                "| {k} | {i} | {} | {s1:+.2} / {s2:+.2} | {} | {:+.2} / {:+.2} | {:.2} / {:.2} / {:.2} | {:.2} / {} | {:.2}% ({:.2}%) | {:.2}% | {:+.2} | {} |",
                 r.class.label(),
                 pf(old_ok),
                 r.goal_delay_limit() - r.base_first,
@@ -1009,6 +1145,8 @@ fn seed_sweep(seconds: f64, n: u64) -> Vec<(u64, Vec<String>)> {
                 r.tail_first,
                 r.tail_last,
                 r.tail_max,
+                r.tail_base,
+                r.tail_decay_s.map_or("—".into(), |d| if d.is_finite() { format!("{d:.0}") } else { "∞".into() }),
                 r.conceal_pct,
                 r.conceal_limit,
                 r.conceal_underrun_pct,
@@ -1016,28 +1154,55 @@ fn seed_sweep(seconds: f64, n: u64) -> Vec<(u64, Vec<String>)> {
                 pf(new_ok)
             );
         }
-        all.push((k, rep.fails));
+        for (i, r) in res.iter().enumerate().filter(|(_, r)| r.judged(Metric::TailLevel)) {
+            match all.tail_level_f.iter_mut().find(|x| x.0 == i) {
+                Some(x) => x.1.push(r.tail_base / r.frame_ms),
+                None => all.tail_level_f.push((i, vec![r.tail_base / r.frame_ms])),
+            }
+        }
+        all.runs.push((k, rep.fails));
+    }
+    for (i, v) in &all.tail_level_f {
+        println!("꼬리 지터 피어 #{i} 예산 수준 시드 평균 {:.3}F ({}개, 시드 평균 래칫 ≤ {TAIL_LEVEL_MEAN_MAX_F}F는 {TAIL_MEAN_MIN_SEEDS}개 이상일 때)", mean(v), v.len());
     }
     all
+}
+
+fn mean(v: &[f32]) -> f32 {
+    v.iter().sum::<f32>() / v.len().max(1) as f32
+}
+
+/// 시드 평균 래칫 위반 목록(회귀 방지 — GOAL 기준 아님): 시드가 `TAIL_MEAN_MIN_SEEDS`개 이상일 때만 본다.
+fn tail_mean_fails(levels_f: &[(usize, Vec<f32>)]) -> Vec<String> {
+    levels_f
+        .iter()
+        .filter(|(_, v)| v.len() >= TAIL_MEAN_MIN_SEEDS && mean(v) > TAIL_LEVEL_MEAN_MAX_F)
+        .map(|(i, v)| format!("#{i} 늦은 패킷 예산 수준 시드 평균 {:.3}F > {TAIL_LEVEL_MEAN_MAX_F}F({}개, 회귀 래칫)", mean(v), v.len()))
+        .collect()
 }
 
 fn sweep_n(default: u64) -> u64 {
     std::env::var("SIM_SWEEP_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-fn assert_sweep(all: &[(u64, Vec<String>)]) {
-    let bad: Vec<_> = all.iter().filter(|(_, f)| !f.is_empty()).collect();
-    assert!(bad.is_empty(), "시드 변형 {}개 중 {}개에서 판정 실패: {bad:?}", all.len(), bad.len());
+fn assert_sweep(all: &Sweep) {
+    let bad: Vec<_> = all.runs.iter().filter(|(_, f)| !f.is_empty()).collect();
+    assert!(bad.is_empty(), "시드 변형 {}개 중 {}개에서 판정 실패: {bad:?}", all.runs.len(), bad.len());
+    let mean_bad = tail_mean_fails(&all.tail_level_f);
+    assert!(mean_bad.is_empty(), "시드 평균 래칫 실패: {mean_bad:?}");
 }
 
-/// 판정이 시드 하나에 기대지 않는다(P1-6d의 남은 일): 5분 시나리오를 시드 변형 0~2로 돌려 모두 통과해야 한다. 회선 분류 전에는
-/// 꼬리 지터 피어 #1의 1절 여유가 시드마다 한도 양쪽으로 갈렸다(변형 2: 첫 창 −0.69ms). 더 많은 시드는 `long_sim_seed_sweep_5min`.
+/// 판정이 시드 하나에 기대지 않는다(P1-6d의 남은 일): 5분 시나리오를 fixture와 다른 시드(변형 1)로 돌려도 통과해야 한다. 변형 0은
+/// `long_sim_6peers_5min`이 같은 판정으로 돌리므로 여기서 다시 돌리지 않는다 — PR마다 도는 5분 실행을 하나만 더한다(PR #248 리뷰
+/// Low: 변형 0~2를 돌리던 때 CI Windows 잡이 약 1.5분 늘었다). 회선 분류 전에는 꼬리 지터 피어 #1의 1절 여유가 시드마다 한도
+/// 양쪽으로 갈렸다(변형 2: 첫 창 −0.69ms). 더 많은 시드는 `long_sim_seed_sweep_5min`(야간 CI `long-sim` 잡과 수동).
 #[test]
 fn long_sim_judgement_is_seed_stable() {
-    assert_sweep(&seed_sweep(300.0, 3));
+    assert_sweep(&seed_sweep_range(300.0, 1..2));
 }
 
-/// 시드 스윕 5분(기본 10개, `SIM_SWEEP_SEEDS`로 바꾼다 — 2026-11-20 40개 전부 통과).
+/// 시드 스윕 5분(기본 10개, `SIM_SWEEP_SEEDS`로 바꾼다 — 2026-11-20 40개 전부 통과). 실행마다의 판정에 더해 꼬리 지터 피어의
+/// 예산 수준 시드 평균 래칫(`TAIL_LEVEL_MEAN_MAX_F`)을 건다. 야간 CI `long-sim` 잡이 기본 10개를 돈다.
 /// `cargo test -p band-engine --release --no-default-features --features test-support --test sim long_sim_seed_sweep_5min -- --ignored --nocapture`
 #[test]
 #[ignore = "측정·판정: 5분 시나리오 시드 변형 10개(release 권장)"]
@@ -1082,16 +1247,29 @@ fn long_sim_line_class_follows_goal_definition() {
     for m in [Metric::GoalDelay, Metric::GoalDelayLast] {
         assert!(st.contains(&m) && !tl.contains(&m), "{m:?}는 안정 회선에만 건다");
     }
-    for m in [Metric::TailDelay, Metric::TailDelayLast, Metric::TailCap] {
+    for m in [Metric::TailDelay, Metric::TailDelayLast, Metric::TailCap, Metric::TailLevel, Metric::TailDecay, Metric::TailTotal, Metric::TailTotalLast] {
         assert!(!st.contains(&m) && tl.contains(&m), "{m:?}는 꼬리 지터 회선에만 건다");
     }
+    // 예산 감쇠 판정은 지터 계단 하강이 있어야 잴 것이 있다: 꼬리 지터 피어 #1의 60% 지점 계단(지터 4 → 2ms)이 그것이다.
+    // 시나리오를 고치다 이 계단이 사라지면 감쇠 판정이 조용히 빈 판정이 되므로 여기서 막는다.
+    assert_eq!(jitter_drop_at(&specs[1].np), Some(180.0), "#1의 지터 계단 하강(예산 감쇠 판정의 기준 시각)");
+    assert!(specs.iter().enumerate().all(|(i, s)| i == 1 || LineClass::of(&s.np) == LineClass::Stable));
+    // 오르기만 하는 계단은 하강이 아니다.
+    let mut np = NetPeer::new(240, 1);
+    np.net_jitter_us = 2000;
+    np.steps = vec![(SEC, 0, 4000)];
+    assert_eq!(jitter_drop_at(&np), None);
+    np.steps = vec![(SEC, 0, 4000), (2 * SEC, 0, 3000), (3 * SEC, 8000, 3000)];
+    assert_eq!(jitter_drop_at(&np), Some(2.0));
 }
 
 /// 꼬리 지터 회선의 상한 판정이 실제로 문다: 5분 #1의 수치에서 (가) 늦은 패킷 예산이 1프레임을 넘거나 (나) 예산을 뺀 지연이 1절
 /// 한도를 넘거나 (다) 예산을 뺀 지연이 창 사이에 쌓이면 실패하고, 예산 안에서 bufferMs가 1절 한도를 넘는 것은 통과한다.
+/// 회귀 방지 래칫(PR #248 리뷰 M1)도 문다: (라) 예산이 기본 조건 구간에서 높게 머물거나 (마) 계단이 풀린 뒤 내려오지 않거나
+/// (바) 예산을 포함한 bufferMs가 1절 한도 + `TAIL_TOTAL_OVER_MS`를 넘으면 실패한다 — (가)~(다)는 통과하는 수치에서.
 #[test]
 fn long_sim_tail_bounds_bite() {
-    // 5분 #1 시드 변형 0의 모양(F 5ms, p95 지터 6.68ms → 1절 한도 11.68ms).
+    // 5분 #1 시드 변형 0의 모양(F 5ms, p95 지터 6.68ms → 1절 한도 11.68ms, 기본 조건 예산 중앙값 2.25ms, 감쇠 18초).
     let tail = |buf_first: f32, buf_last: f32, tail_first: f32, tail_last: f32, tail_max: f32| {
         let mut np = NetPeer::new(240, 1);
         np.dist = JitDist::Exp;
@@ -1100,9 +1278,13 @@ fn long_sim_tail_bounds_bite() {
         r.p95_last = 6.68;
         (r.buf_first, r.buf_last, r.tail_first, r.tail_last, r.tail_max) = (buf_first, buf_last, tail_first, tail_last, tail_max);
         (r.base_first, r.base_last) = (buf_first - tail_first, buf_last - tail_last);
+        (r.tail_base, r.tail_decay_s) = (2.25, Some(18.0));
         r
     };
-    let ok = |r: &PeerResult| r.class.metrics().iter().all(|&m| !matches!(m, Metric::TailDelay | Metric::TailDelayLast | Metric::TailCap) || r.ok(m)) && r.accum_ok();
+    const TAIL_METRICS: [Metric; 7] = [Metric::TailDelay, Metric::TailDelayLast, Metric::TailCap, Metric::TailLevel, Metric::TailDecay, Metric::TailTotal, Metric::TailTotalLast];
+    let ok = |r: &PeerResult| r.class.metrics().iter().all(|m| !TAIL_METRICS.contains(m) || r.ok(*m)) && r.accum_ok();
+    // 이전 판정 셋(예산을 지연에서 뺀 상한)만 본 결과 — 래칫이 없던 때 통과하던 것을 가린다.
+    let old_ok = |r: &PeerResult| [Metric::TailDelay, Metric::TailDelayLast, Metric::TailCap].iter().all(|&m| r.ok(m)) && r.accum_ok();
     // 실제 수치: 마지막 창 bufferMs 12.17ms가 1절 한도(11.68ms)를 넘지만 예산 2.5ms를 빼면 9.67ms.
     let r = tail(11.27, 12.17, 2.0, 2.5, 5.0);
     assert_eq!(r.class, LineClass::Tail);
@@ -1117,6 +1299,42 @@ fn long_sim_tail_bounds_bite() {
     assert!(!tail(9.5, 12.6, 1.0, 3.0, 5.0).accum_ok());
     // 예산이 움직인 만큼만 달라진 것은 누적이 아니다.
     assert!(tail(11.0, 12.5, 1.0, 2.5, 5.0).accum_ok());
+
+    // ── 회귀 방지 래칫 ──
+    // 리뷰 M1의 고착 변형(예산 내림을 끈 엔진, 5분 #1): 예산이 1F에 붙어 마지막 창 bufferMs가 1절 한도를 2.7ms 넘는다. 예산을
+    // 빼면 9.4ms라 이전 판정 셋은 통과한다 — 래칫 셋이 각각 잡는다.
+    let mut stuck = tail(11.27, 14.4, 2.0, 5.0, 5.0);
+    (stuck.tail_base, stuck.tail_decay_s) = (4.0, Some(f64::INFINITY));
+    assert!(old_ok(&stuck), "이전 판정은 고착을 통과시켰다");
+    assert!(!stuck.ok(Metric::TailLevel) && !stuck.ok(Metric::TailDecay) && !stuck.ok(Metric::TailTotalLast) && !ok(&stuck));
+    // (라) 예산 수준만 높다: 한도 0.65F = 3.25ms. 관측 최대(2.50ms)와 격자 3칸 위(3.25ms)는 통과, 그 한 칸 위는 실패.
+    let level = |ms: f32| {
+        let mut r = tail(11.27, 12.17, 2.0, 2.5, 5.0);
+        r.tail_base = ms;
+        r
+    };
+    assert!(ok(&level(2.5)) && ok(&level(3.25)));
+    assert!(old_ok(&level(3.5)) && !level(3.5).ok(Metric::TailLevel));
+    // (마) 감쇠만 느리다 / 내려오지 않는다. 계단이 없는 회선(None)은 잴 것이 없어 통과.
+    let decay = |d: Option<f64>| {
+        let mut r = tail(11.27, 12.17, 2.0, 2.5, 5.0);
+        r.tail_decay_s = d;
+        r
+    };
+    assert!(ok(&decay(Some(35.0))) && ok(&decay(None)));
+    assert!(old_ok(&decay(Some(61.0))) && !decay(Some(61.0)).ok(Metric::TailDecay));
+    assert!(!decay(Some(f64::INFINITY)).ok(Metric::TailDecay));
+    // (바) 총 지연: 1절 한도 11.68 + 1.25 = 12.93ms. 관측 최대(한도 + 0.69ms)는 통과, 예산 안에서(≤ 1F) 그 위로 오르면 실패.
+    assert!(ok(&tail(12.37, 12.17, 3.0, 2.5, 5.0)));
+    let r = tail(13.0, 12.17, 3.75, 2.5, 5.0);
+    assert!(old_ok(&r) && !r.ok(Metric::TailTotal) && r.ok(Metric::TailTotalLast));
+    let r = tail(11.27, 13.0, 2.0, 3.75, 5.0);
+    assert!(old_ok(&r) && r.ok(Metric::TailTotal) && !r.ok(Metric::TailTotalLast));
+    // 시드 평균 래칫(스윕 전용): 실행마다 한도(0.65F) 안이어도 평균이 0.48F를 넘으면 실패. 시드가 5개 미만이면 보지 않는다.
+    // 관측(5분 변형 0~4) 0.45·0.35·0.45·0.40·0.45F는 통과, 느린 내림을 끈 변형 0.45·0.50·0.60·0.50·0.60F는 실패.
+    assert!(tail_mean_fails(&[(1, vec![0.45, 0.35, 0.45, 0.40, 0.45])]).is_empty());
+    assert_eq!(tail_mean_fails(&[(1, vec![0.45, 0.50, 0.60, 0.50, 0.60])]).len(), 1);
+    assert!(tail_mean_fails(&[(1, vec![0.60, 0.60, 0.60, 0.60])]).is_empty());
 }
 
 /// 래칫: 알려진 미달은 기준값 ± tol 안에서만 통과하고, 악화·크게 개선·해소는 모두 실패로 분류된다.
