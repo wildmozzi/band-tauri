@@ -62,6 +62,8 @@ pub(crate) fn parse_response(buf: &[u8], txn_id: &[u8; 12]) -> Option<SocketAddr
 
 /// 여러 STUN 서버에 동시에 질의한다(리뷰 L7). 응답은 트랜잭션 ID와 출발지(서버 주소)를
 /// 모두 확인한다. 전체 대기는 `timeout` 한 번이다. 수신 스레드 시작 전에만 호출한다.
+/// 제품 경로는 `query_many_from`을 쓰므로 시험(`testing::net::stun`)에서만 노출한다.
+#[cfg(any(test, feature = "test-support"))]
 pub fn query_many(
     socket: &UdpSocket,
     servers: &[String],
