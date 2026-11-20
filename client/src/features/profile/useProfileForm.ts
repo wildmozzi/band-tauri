@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import type { User } from '@supabase/supabase-js'
-import { profileApi, useProfileNicknameQuery, useSaveProfileMutation, useUpdateUserMetadataMutation } from '../auth'
+import { profileApi, profilePhotoOf, useProfileNicknameQuery, useSaveProfileMutation, useUpdateUserMetadataMutation } from '../auth'
 import { isSupabaseConfigured } from '../../shared/lib/supabaseClient'
 import { checkAvatar, uploadAvatar } from './avatarApi'
 import {
   bioFromMetadata,
   metadataNickname as nicknameFromMetadata,
-  profilePhotoOf,
   snsLinksFromMetadata,
 } from './profileForm'
 

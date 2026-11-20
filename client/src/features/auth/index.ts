@@ -8,5 +8,6 @@ export {
   useSaveProfileMutation,
   useUpdateUserMetadataMutation,
 } from './profileQueries'
+export { profilePhotoOf } from './profilePhoto'
 export { useAuth } from './useAuth'
 export { useRequireAuth } from './useRequireAuth'
