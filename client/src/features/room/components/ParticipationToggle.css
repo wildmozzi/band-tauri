@@ -106,11 +106,6 @@
   transform: translateY(-2px);
 }
 
-.role-badge.performer {
-  background: var(--green-400-a20);
-  color: var(--success);
-}
-
 .perform-error {
   margin-top: 8px;
   font-size: 0.8rem;
