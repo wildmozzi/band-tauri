@@ -226,7 +226,7 @@ xrun:
 
 ### 이 PR이 넣는 것
 
-- 두 정책을 **옵션(기본 끔)**으로: 엔진 설정 `EngineConfig.threadPolicy = { highQos, preferPCores }`(오디오 설정 "고급 — 실험적" 토글 2개, 엔진을 다시 시작하면 적용)와 환경변수 `BAND_THREAD_POLICY` = `off` | `highqos` | `pcores` | `both`(있으면 설정보다 우선, 제품 빌드에서도 읽는다).
+- 두 정책을 **옵션(기본 끔)**으로: 엔진 설정 `EngineConfig.threadPolicy = { highQos, preferPCores }`(오디오 설정 "고급 — 실험적" 토글 2개, 엔진을 다시 시작하면 적용. 기기별 설정이라 계정으로 동기화하지 않고 그 PC에만 저장하며, 토글 옆에 적용 결과를 한 줄로 보인다 — #245 재리뷰 L2·L4)와 환경변수 `BAND_THREAD_POLICY` = `off` | `highqos` | `pcores` | `both`(있으면 설정보다 우선, 제품 빌드에서도 읽는다).
 - 기본(둘 다 끔)에서는 워커·수신 스레드가 OS 호출 없이 이 PR 전과 같은 경로로 돈다(시험으로 고정).
 - b는 **물리** P 코어가 4개 이상일 때만 건다(리뷰 M1 — 하이퍼스레딩 2P4T + 8E는 논리 프로세서가 4개여도 걸지 않는다). 다른 프로세스가 독점한 CPU set은 고르지 않는다(리뷰 L2). 주차(Parked)된 코어는 가리지 않는다(실행 중 바뀌는 값). 프로세서 그룹이 둘 이상인 기계(논리 64 초과)는 시험하지 않았다.
 - 적용 결과는 `EngineStats.threadPolicy`와 진단 내보내기에 남는다(`pending` | `off` | `applied` | `failed` | `skipped`).

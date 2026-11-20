@@ -4,7 +4,7 @@
  */
 import { useEffect } from 'react'
 import { useAudioSettings } from './AudioSettingsContext'
-import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs, type ResampleQuality } from '../../native/engineApi'
+import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs, type PeerStats, type ResampleQuality } from '../../native/engineApi'
 import {
   BUFFER_OPTIONS,
   DRIVER_OPTIONS,
@@ -27,7 +27,7 @@ import { DesktopDownloadButton } from '../../shared/ui/DesktopDownloadButton'
 import { Modal } from '../../shared/ui'
 import { DiagnosticsExport } from './DiagnosticsExport'
 import { DevServerSettingsSection } from './DevServerSettings'
-import { useLivePeerStats } from './hooks/useLivePeerStats'
+import { useLiveEngineStats } from './hooks/useLivePeerStats'
 import { useDebouncedJitterProfile } from './hooks/useDebouncedJitterProfile'
 import {
   bufferFrameHint,
@@ -41,7 +41,9 @@ import {
   parseJitterMs,
   payloadAllowed,
   peerLabel,
+  isWindowsUserAgent,
   resampleQualityHint,
+  threadPolicyStatus,
   THREAD_POLICY_OPTIONS,
   withLeftInputChannel,
   withRightInputChannel,
@@ -54,6 +56,10 @@ interface AudioSettingsProps {
   onClose?: () => void
   isModal?: boolean
 }
+
+const NO_PEERS: PeerStats[] = []
+/** 이 PC가 Windows인지(스레드 정책 결과 안내용). 앱 수명 동안 바뀌지 않는다 */
+const IS_WINDOWS = isWindowsUserAgent(typeof navigator === 'undefined' ? undefined : navigator.userAgent)
 
 function LevelMeter({ value, kind }: { value: number; kind: 'input' | 'output' }) {
   const pct = levelPercent(value)
@@ -90,7 +96,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     engineInUse,
   } = useAudioSettings()
 
-  const livePeers = useLivePeerStats(isNativeMode && engineInUse)
+  const liveStats = useLiveEngineStats(isNativeMode && engineInUse)
+  const livePeers = liveStats?.peers ?? NO_PEERS
   // 슬라이더 드래그 중에는 표시만 바꾸고, 엔진 적용(IPC)은 마지막 값으로 200ms 뒤 한 번만(PR #20 M3).
   const scheduleProfileApply = useDebouncedJitterProfile()
 
@@ -483,22 +490,36 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
         <h3>고급 <span className="experimental-badge">실험적</span></h3>
         <p className="setting-hint">
           Windows 전용이고 기본은 꺼짐입니다. 바꾼 뒤 연주(또는 테스트 모니터)를 다시 시작해야 적용됩니다.
+          CPU 구성에 따른 설정이라 계정으로 다른 PC에 따라가지 않고 이 PC에만 저장됩니다.
         </p>
         {THREAD_POLICY_OPTIONS.map((o) => {
           const policy = config.threadPolicy ?? { highQos: false, preferPCores: false }
+          const id = `thread-policy-${o.key}`
+          // 엔진이 돌고 있으면 그 엔진의 결과(테스트 모니터 또는 합주), 아니면 null
+          const live = isTesting || engineInUse ? { stats: (isTesting ? testStats : liveStats) ?? null } : null
+          const status = threadPolicyStatus(o.key, policy[o.key], IS_WINDOWS, live)
           return (
             <div key={o.key}>
               <div className="settings-row">
-                <label htmlFor={`thread-policy-${o.key}`}>{o.label}</label>
+                <label htmlFor={id}>{o.label}</label>
                 <input
-                  id={`thread-policy-${o.key}`}
+                  id={id}
                   type="checkbox"
                   checked={policy[o.key]}
+                  aria-describedby={`${id}-status ${id}-effect ${id}-caution`}
                   onChange={(e) => updateConfig({ threadPolicy: { ...policy, [o.key]: e.target.checked } })}
                 />
               </div>
-              <p className="setting-hint">{o.effect}</p>
-              <p className="setting-hint">{o.caution}</p>
+              <p
+                id={`${id}-status`}
+                className={`setting-hint thread-policy-status ${status?.tone ?? ''}`}
+                data-testid={`${id}-status`}
+                aria-live="polite"
+              >
+                {status?.text ?? ''}
+              </p>
+              <p id={`${id}-effect`} className="setting-hint">{o.effect}</p>
+              <p id={`${id}-caution`} className="setting-hint">{o.caution}</p>
             </div>
           )
         })}

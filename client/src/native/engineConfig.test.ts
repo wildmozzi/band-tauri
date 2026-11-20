@@ -14,7 +14,9 @@ import {
   normalizeInputChannels,
   parseStoredSettings,
   resolveResampleQuality,
+  toAccountStored,
   toStored,
+  withDeviceLocal,
   validateEngineConfig,
 } from './engineConfig'
 import type { DeviceInfo, EngineConfig } from './engineApi'
@@ -293,5 +295,24 @@ describe('엔진 스레드 코어 배치 정책(P1-21 2단계, 실험 옵션)', 
     expect(stored.threadPolicy).toEqual(on)
     expect(applyPreset(stored, 'ultraLow').threadPolicy).toEqual(on)
     expect(parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: { preferPCores: true } } }).config.threadPolicy).toEqual({ highQos: false, preferPCores: true })
+  })
+})
+
+describe('스레드 정책은 기기별 — 계정 저장 형식에서 뺀다(#245 재리뷰 L4)', () => {
+  const on = { highQos: true, preferPCores: true }
+  it('계정 형식에는 threadPolicy가 없고 나머지는 그대로', () => {
+    const cfg: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, bufferSize: 256, threadPolicy: on }
+    const stored = toAccountStored(cfg)
+    expect(stored.version).toBe(2)
+    expect('threadPolicy' in stored.engine).toBe(false)
+    expect(stored.engine.bufferSize).toBe(256)
+    expect(cfg.threadPolicy).toEqual(on) // 원본은 건드리지 않음
+    // 다시 읽으면 끔(새 PC에서 로그인한 것과 같다)
+    expect(parseStoredSettings(stored).config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+  })
+  it('서버에 옛 값(켬)이 있어도 이 기기의 값이 이긴다', () => {
+    const fromServer = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: on } }).config
+    expect(withDeviceLocal(fromServer, { highQos: false, preferPCores: false }).threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    expect(withDeviceLocal({ ...DEFAULT_ENGINE_CONFIG }, { highQos: false, preferPCores: true }).threadPolicy).toEqual({ highQos: false, preferPCores: true })
   })
 })

@@ -1,6 +1,7 @@
 /**
  * 네이티브 엔진 오디오 설정 (EngineConfig) 상태.
  * - 저장: profiles.audio_settings = { version: 2, engine: EngineConfig } (+ localStorage 캐시)
+ * - 기기별 값(스레드 정책 `threadPolicy`)은 계정에 올리지 않고 이 PC에만 둔다(deviceLocalSettings, #245 재리뷰 L4).
  * - 구형 형식(lib/tauri.ts 시절)은 읽을 때 감지해서 새 형식으로 변환하고 다시 저장한다.
  * - 웹(비Tauri)에서는 장치 조회/테스트를 하지 않는다(연주는 앱 전용).
  */
@@ -28,7 +29,8 @@ import {
   matchPreset,
   normalizeInputChannels,
   parseStoredSettings,
-  toStored,
+  toAccountStored,
+  withDeviceLocal,
   validateEngineConfig,
   type ConfigIssue,
   type EnginePresetId,
@@ -36,6 +38,7 @@ import {
 import { SettingsSaveGate, TestMonitorControl } from '../../native/settingsSync'
 import { reapplyLoopbackOffsetInBackground } from '../../native/loopbackOffsetStore'
 import { coerceToSupportedDrivers } from './driverSupport'
+import { loadDeviceThreadPolicy, saveDeviceThreadPolicy } from './deviceLocalSettings'
 
 const STORAGE_KEY = 'band_engine_config_v2'
 const SAVE_DEBOUNCE_MS = 600
@@ -78,29 +81,32 @@ interface AudioSettingsContextType {
 
 const AudioSettingsContext = createContext<AudioSettingsContextType | null>(null)
 
-function loadLocal(): { config: EngineConfig; migrated: boolean } {
+/** 로컬 캐시(계정 설정 사본) + 이 기기의 값. 옛 캐시에 들어 있던 `threadPolicy`는 쓰지 않는다(deviceLocalSettings 참고) */
+function loadLocal(): EngineConfig {
+  let config: EngineConfig = { ...DEFAULT_ENGINE_CONFIG }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return parseStoredSettings(JSON.parse(raw))
+    if (raw) config = parseStoredSettings(JSON.parse(raw)).config
   } catch {
     // 저장소 접근 불가/손상
   }
-  return { config: { ...DEFAULT_ENGINE_CONFIG }, migrated: false }
+  return withDeviceLocal(config, loadDeviceThreadPolicy())
 }
 
 function saveLocal(config: EngineConfig) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toStored(config)))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toAccountStored(config)))
   } catch {
     // 무시
   }
+  saveDeviceThreadPolicy(config.threadPolicy)
 }
 
 export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   const [isNativeMode] = useState(isNativeApp)
   const [devices, setDevices] = useState<DeviceInfo[]>([])
-  const [config, setConfig] = useState<EngineConfig>(() => loadLocal().config)
+  const [config, setConfig] = useState<EngineConfig>(loadLocal)
   const [isLoading, setIsLoading] = useState(isNativeMode)
   const [error, setError] = useState<string | null>(null)
   const [isSaving, setIsSaving] = useState(false)
@@ -137,12 +143,14 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       try {
         if (storedData) {
           const parsed = parseStoredSettings(storedData)
-          setConfig(parsed.config)
-          saveLocal(parsed.config)
+          // 계정 값에 옛 threadPolicy가 있어도 쓰지 않고 이 기기의 값을 유지한다(#245 재리뷰 L4)
+          const next = withDeviceLocal(parsed.config, configRef.current.threadPolicy ?? loadDeviceThreadPolicy())
+          setConfig(next)
+          saveLocal(next)
           if (parsed.migrated) {
             setMigrated(true)
             // 변환 저장 실패는 무시한다(다음 변경 때 다시 저장됨 — 기존 동작)
-            await profileApi.saveAudioSettings(userId, toStored(parsed.config) as unknown as Json).catch(() => {})
+            await profileApi.saveAudioSettings(userId, toAccountStored(parsed.config) as unknown as Json).catch(() => {})
             console.log('[AudioSettings] 구형 오디오 설정을 새 형식으로 변환했습니다')
           }
         }
@@ -167,7 +175,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       if (!gate.shouldSave(userId)) return
       setIsSaving(true)
       try {
-        await profileApi.saveAudioSettings(userId, toStored(config) as unknown as Json)
+        await profileApi.saveAudioSettings(userId, toAccountStored(config) as unknown as Json)
       } catch (err) {
         console.warn('[AudioSettings] DB 저장 실패:', err)
       } finally {

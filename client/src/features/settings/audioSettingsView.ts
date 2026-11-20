@@ -1,7 +1,7 @@
 /**
  * 오디오 설정 화면(AudioSettings.tsx)의 표시·입력 계산 — UI와 분리한 순수 함수 (P3-2 ③-4, vitest로 검증).
  */
-import type { CodecKind, EngineConfig, FrameMs, PeerStats } from '../../native/engineApi'
+import type { CodecKind, EngineConfig, EngineStats, FrameMs, PeerStats, ThreadPolicyResult } from '../../native/engineApi'
 import { isPayloadAllowed } from '../../native/engineConfig'
 
 /** 레벨(0~1) → 미터 폭 %(0~100으로 자름) */
@@ -99,13 +99,77 @@ export const THREAD_POLICY_OPTIONS = [
     caution: '주의: 전력 소모와 발열이 늘 수 있습니다(배터리 사용 시간은 측정하지 않았습니다).',
   },
   {
+    // 계약 필드 이름은 `preferPCores`지만 실제 동작은 "선호"가 아니라 P 코어 집합에 묶어 두기다(#245 재리뷰 L5).
+    // 저장값·엔진 계약 호환을 위해 이름은 그대로 두고 라벨·설명으로 실제 동작을 말한다.
     key: 'preferPCores',
-    label: '엔진 스레드를 고성능 코어에 두기',
+    label: '엔진 스레드를 고성능 코어에만 묶어 두기',
     effect: '효과: 엔진 스레드가 고성능(P) 코어에서만 돕니다(측정 기계에서 엔진 CPU가 약 20% 줄었습니다).',
     caution:
       '주의: 그 코어들이 다른 오디오 프로그램(DAW 등)으로 바쁘면 다른 코어로 넘어가지 못해 끊김이 늘 수 있습니다. 하이브리드 CPU가 아니거나 고성능 코어가 4개 미만이면 적용되지 않습니다.',
   },
 ] as const
+
+export type ThreadPolicyOptionKey = (typeof THREAD_POLICY_OPTIONS)[number]['key']
+
+export interface ThreadPolicyStatus {
+  text: string
+  /** ok = 적용됨, warn = 켰지만 이 PC에서 적용되지 않음, info = 재시작·확인 중 안내 */
+  tone: 'ok' | 'warn' | 'info'
+}
+
+/**
+ * 스레드 정책 토글 옆 한 줄(#245 재리뷰 L2): 켠 옵션이 실제로 적용됐는지.
+ * - `enabled`: 저장된 토글 값. `windows`: 이 PC가 Windows인지(모르면 null).
+ * - `live`: 엔진이 돌고 있으면 그 엔진의 통계(첫 응답 전이면 `stats: null`), 꺼져 있으면 null.
+ * 엔진은 시작 때 한 번 정책을 걸므로, 실행 중 결과가 토글과 다르면 "다시 시작하면" 안내를 보인다.
+ * 둘 다 꺼져 있고 엔진도 꺼진 정상 상태는 null(표시 없음).
+ */
+export function threadPolicyStatus(
+  key: ThreadPolicyOptionKey,
+  enabled: boolean,
+  windows: boolean | null,
+  live: { stats: Pick<EngineStats, 'threadPolicy'> | null } | null,
+): ThreadPolicyStatus | null {
+  const NOT_HERE = '이 PC에서는 적용되지 않음: '
+  if (!live) {
+    if (!enabled) return null
+    if (windows === false) return { text: `${NOT_HERE}Windows 전용입니다.`, tone: 'warn' }
+    return { text: '엔진을 시작하면 적용됩니다(연주 또는 테스트 모니터).', tone: 'info' }
+  }
+  if (!live.stats) return enabled ? { text: '적용 결과를 확인하는 중입니다.', tone: 'info' } : null
+  const tp = live.stats.threadPolicy
+  if (!tp) {
+    // 실행 중인데 결과가 없음 = 비Windows(엔진이 정책을 다루지 않음)
+    return enabled ? { text: `${NOT_HERE}Windows 전용입니다.`, tone: 'warn' } : null
+  }
+  const field = key === 'highQos' ? 'highQos' : 'pCores'
+  const results: ThreadPolicyResult[] = [tp.worker[field]]
+  if (tp.netRecv) results.push(tp.netRecv[field])
+  const has = (r: ThreadPolicyResult) => results.includes(r)
+  if (has('pending')) return { text: '적용하는 중입니다.', tone: 'info' }
+  if (results.every((r) => r === 'off')) {
+    return enabled
+      ? { text: '지금 엔진에는 꺼져 있습니다 — 연주(또는 테스트 모니터)를 다시 시작하면 적용됩니다.', tone: 'info' }
+      : null
+  }
+  if (!enabled) return { text: '지금 엔진에는 켜져 있습니다 — 다시 시작하면 꺼집니다.', tone: 'info' }
+  if (has('skipped')) {
+    return { text: `${NOT_HERE}하이브리드 CPU가 아니거나 쓸 수 있는 고성능 코어가 4개 미만입니다.`, tone: 'warn' }
+  }
+  if (has('failed')) {
+    const partial = has('applied') ? '일부 엔진 스레드에만 적용됨: ' : NOT_HERE
+    return { text: `${partial}Windows 설정 호출이 실패해 기본 스케줄링으로 돕니다.`, tone: 'warn' }
+  }
+  return key === 'highQos'
+    ? { text: '적용됨 — 엔진 스레드의 전원 조절(EcoQoS)이 꺼져 있습니다.', tone: 'ok' }
+    : { text: '적용됨 — 엔진 스레드가 고성능 코어 집합 안에서만 돕니다.', tone: 'ok' }
+}
+
+/** 이 PC가 Windows인지(WebView2의 UA에 "Windows"가 들어 있다). 알 수 없으면 null */
+export function isWindowsUserAgent(ua: string | undefined): boolean | null {
+  if (!ua) return null
+  return /Windows/i.test(ua)
+}
 
 /**
  * 리샘플러 품질 안내(P2-17e). 입·출력 장치가 모두 48kHz로 열리면 리샘플러가 돌지 않아 설정 영향이 없다고 알린다.
