@@ -800,6 +800,53 @@ fn late_budget_tracks_tail_jitter_only() {
     assert!(u.conceal_after_5s < 1.5, "균등 지터 + 손실 1%: 은닉 {:.2}%", u.conceal_after_5s);
 }
 
+/// P2-16d: 안정 회선(유계 지터 — GOAL 1절 "지터 버퍼 추가 지연"의 대상)에서는 늦은 패킷 예산이 아무것도 바꾸지 않는다.
+/// 균등 지터 1·3·5ms × 손실 0·1% × 프레임 2.5·5ms × 시드 3개에서 예산을 켠 실행과 끈 실행이 `tail_extra` 0, 같은 은닉 수,
+/// 같은 버퍼 궤적을 낸다. 예산 규칙을 손볼 때 안정 회선의 1절 수치가 따라 움직이지 않는다는 근거다.
+#[test]
+fn late_budget_does_not_touch_bounded_jitter_lines() {
+    for frame in [120usize, 240] {
+        for jitter_ms in [1.0, 3.0, 5.0] {
+            for loss in [0.0, 0.01] {
+                for seed in [7u64, 11, 23] {
+                    let run = |late_budget_off: bool| simulate(Sim { frame, jitter_ms, loss, late_budget_off, seconds: 30.0, seed, ..Default::default() });
+                    let (on, off) = (run(false), run(true));
+                    let what = format!("F {frame} 균등 {jitter_ms}ms 손실 {loss} 시드 {seed}");
+                    assert_eq!(on.tail_extra_ms, 0.0, "{what}: tail_extra");
+                    assert_eq!(on.stats.tail_adjusts, 0, "{what}: 조정 횟수");
+                    assert_eq!((on.stats.concealed, on.stats.produced, on.stats.late), (off.stats.concealed, off.stats.produced, off.stats.late), "{what}: 은닉·생산·늦음");
+                    assert_eq!(on.trace, off.trace, "{what}: 버퍼 궤적");
+                }
+            }
+        }
+    }
+}
+
+/// P2-16d: 꼬리 지터 회선(GOAL 1절 대상 밖 — 끊김 우선)에서 늦은 패킷 예산의 값과 대가. 지수 지터 3ms·손실 0.5%를 프레임 2.5·5ms, 시드 3개로 돌려 실행마다: 예산이 쓰이고(조정 ≥ 1회) 1프레임 이하, 지연 대가(평균 버퍼 차이)도 1프레임
+/// 이하이며, 은닉은 예산을 끈 실행보다 적다. 즉 이 회선에서 예산을 깎아 지연을 줄이면 은닉이 는다(하네스 측정: 상한 1 → 0.5F에서
+/// 지연 −0.36ms / 은닉 +0.20%p) — 은닉이 늘지 않는 지연 절감이 없어 동작을 그대로 둔다.
+#[test]
+fn late_budget_on_tail_line_is_bounded_and_buys_concealment() {
+    for frame in [120usize, 240] {
+        let f_ms = frame as f64 / 48.0;
+        for seed in [7u64, 11, 23] {
+            let run = |late_budget_off: bool| simulate(Sim { frame, exp_jitter: true, jitter_ms: 3.0, loss: 0.005, late_budget_off, seconds: 60.0, seed, ..Default::default() });
+            let (on, off) = (run(false), run(true));
+            let cost = (mean_buffer(&on.trace, 10.0, 60.0) - mean_buffer(&off.trace, 10.0, 60.0)) as f64;
+            println!(
+                "F {f_ms}ms 시드 {seed}: 예산 끔 은닉 {:.2}% → 켬 {:.2}%, 지연 대가 {cost:+.2}ms, tail_extra {:.2}ms",
+                off.conceal_after_5s, on.conceal_after_5s, on.tail_extra_ms
+            );
+            assert_eq!(off.tail_extra_ms, 0.0);
+            // 끝 시점 값은 내려와 0일 수 있다(늦은 도착 비율을 따라 오르내린다) — 실행 중에 썼는지는 조정 횟수로 본다.
+            assert!(on.stats.tail_adjusts > 0 && on.tail_extra_ms <= f_ms + 1e-9, "F {frame} 시드 {seed}: 조정 {}회, tail_extra {:.2}ms", on.stats.tail_adjusts, on.tail_extra_ms);
+            assert!(on.stats.tail_ms as f64 <= f_ms + 1e-3, "F {frame} 시드 {seed}: 목표에 든 예산 {:.2}ms", on.stats.tail_ms);
+            assert!(cost > 0.0 && cost <= f_ms, "F {frame} 시드 {seed}: 지연 대가 {cost:.2}ms");
+            assert!(on.conceal_after_5s < off.conceal_after_5s, "F {frame} 시드 {seed}: 은닉 {:.2}% → {:.2}%", off.conceal_after_5s, on.conceal_after_5s);
+        }
+    }
+}
+
 /// P2-16c: 5블록(올림과 같은 수) 동안 늦은 도착이 하나도 없으면 `tail_extra`를 절반씩(격자 올림) 내린다 — 지터가 좋아진 뒤
 /// 예산이 10블록마다 0.25ms씩 1분 넘게 남던 것. 늦은 도착이 조금이라도 있으면 전처럼 느린 내림(10블록)이다.
 #[test]
