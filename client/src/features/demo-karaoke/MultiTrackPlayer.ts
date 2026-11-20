@@ -310,7 +310,7 @@ export class MultiTrackPlayer {
           track.source.stop()
           track.source.disconnect()
           track.source.dispose()
-        } catch (e) {
+        } catch {
           // Already stopped
         }
         track.source = null
