@@ -3,6 +3,8 @@
 실시간 합주 앱의 프런트(React 18 + Vite, 데스크톱은 Tauri WebView, 웹은 Vercel) 목표 구조와 규칙.
 목표는 **바뀌는 이유가 같은 코드는 한곳에, 의존은 한 방향으로** — 기능을 고치거나 지울 때 그 기능 폴더만 보면 되게 한다.
 
+**대상 브라우저**(빌드 하한, `client/vite/browserTargets.ts`): `es2020, edge88, firefox78, chrome87, safari14` — vite 5 기본값을 vite 8에서도 명시해 유지한다(웹 관람은 링크로 들어오므로 구형 iPhone 포함). JS·CSS(`cssTarget`) 모두 이 값이고, 빌드된 CSS에 미디어 쿼리 범위 문법(`width<=`)이 없는지 `e2e/bundle-budget`이 검사한다. 하한을 올리면(예: vite 8 기본 safari16.4) 첫 화면 JS gzip 약 −2.9 kB지만 iOS 16.4 미만에서 미디어 쿼리가 무시된다 — 올릴지는 사용자 결정.
+
 - 구조 **결정**의 기준은 [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md)(D0·D3). 이 문서는 그 결정의 프런트 상세이며, 다르면 ADR이 맞고 이 문서를 고친다.
 - 엔진(Rust) 계약은 [overhaul/native-engine-design.md](overhaul/native-engine-design.md). 이 문서는 그 위의 TS 계층만 다룬다.
 - 규칙은 ESLint로 강제한다(6절). 문서와 lint가 다르면 lint가 맞고 문서를 고친다.
@@ -56,7 +58,7 @@ client/src/
 │  │  ├─ components/        화면 조각(패널·모달)
 │  │  └─ hooks/             화면 전용 훅(입장/퇴장·방장 동작·설정 폼 등)
 │  ├─ rooms/                방 카탈로그: 목록·만들기·내 방 관리, 방 모델·서버 상태(조회/수정/삭제), 입장 규칙(비밀번호·코드·초대 링크)
-│  ├─ auth/                 로그인 세션(AuthProvider·useAuth·useRequireAuth)·로그인 화면, 사용자 프로필 데이터(profiles 테이블 query)
+│  ├─ auth/                 로그인 세션(AuthProvider·useAuth·useRequireAuth)·로그인 화면, 사용자 프로필 데이터(profiles 테이블 query·프로필 사진 URL `profilePhotoOf`)
 │  ├─ settings/             오디오 장치 설정(AudioSettingsProvider)·지연/에코 측정·진단 내보내기·개발 서버 대상·앱 업데이트 알림·설정 화면
 │  ├─ payment/              요금제·결제(Toss)·구독 상태(PremiumProvider·usePremium)·플랜 안내
 │  ├─ profile/              프로필 화면
@@ -91,7 +93,7 @@ client/src/
 
 `room`과 `rooms`를 나눈 이유: 방 **카탈로그**(DB의 rooms 행을 만들고 고치는 일)와 방 **안의 실시간 세션**(WS·엔진·WebRTC)은 바뀌는 이유와 속도가 전혀 다르다. 세션 쪽이 카탈로그를 쓰고(방 상세 조회, 정원 표시), 반대 방향은 없다.
 
-`auth`가 프로필 데이터(profiles 테이블)를 갖는 이유: 회원가입이 프로필 행을 만들고, 설정(오디오 설정 저장)·합주실(방장 닉네임)·프로필 화면이 모두 그 행을 읽는다. 프로필 **화면**만 `profile`에 둔다. 데이터까지 `profile`에 두면 auth ↔ profile 순환이 생긴다(프로필 화면은 로그인 가드를 쓴다).
+`auth`가 프로필 데이터(profiles 테이블)를 갖는 이유: 회원가입이 프로필 행을 만들고, 설정(오디오 설정 저장)·합주실(방장 닉네임)·프로필 화면이 모두 그 행을 읽는다. 프로필 **화면**만 `profile`에 둔다. 첫 화면(내비게이션)이 쓰는 프로필 사진 URL도 `auth`에 둔다 — 첫 화면이 지연 라우트 기능(`profile`)의 index.ts를 정적으로 import하면 Vite 8(Rolldown)은 그 화면 전체를 첫 묶음에 싣는다(P3-20b, `e2e/bundle-budget`이 검사). 데이터까지 `profile`에 두면 auth ↔ profile 순환이 생긴다(프로필 화면은 로그인 가드를 쓴다).
 
 ## 3. 상태 관리 원칙
 

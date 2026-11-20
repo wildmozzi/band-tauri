@@ -43,8 +43,8 @@ npm run dev:tauri          # 서버 + 앱을 함께 띄운다. 첫 빌드는 10~
 
 > ⚠️ **개발 모드의 로컬 서버는 운영 DB(운영 Supabase)를 쓴다.** 개발용 DB가 아직 없다(P3-11, 미룸). 그래서:
 > - 테스트 계정·`[TEST]` 방·채팅이 **운영 DB에 생긴다.** 끝나면 방을 지운다.
-> - 전역 유지보수(모든 방 참가자 수 0 초기화, 결제 재조정·주문 정리·업로드/음원분리 파일 삭제 같은 정기 작업)는 #243부터 로컬 서버가 하지 않는다. 서버 터미널에 `[MAINT] … 건너뜀` 줄이 보여야 한다. 대신 `[MAINT] 전역 유지보수 실행`이나 `[DB] All room participants reset to 0`이 보이면(#243 이전 코드, `RUN_MAINTENANCE_JOBS=true`) 운영의 모든 방 참가자 수가 0이 되고 정리 작업이 운영 서버와 겹쳐 돈다 — 바로 끈다.
-> - 입장·퇴장 때 그 방의 참가자 수는 로컬 서버가 센 값으로 덮어쓴다. 테스트는 `[TEST]` 방에서만 한다.
+> - 로컬 서버는 운영 DB의 주 서버가 아니라서(#243) 전역 유지보수(모든 방 참가자 수 0 초기화, 결제 재조정·구독 만료·주문 정리·업로드/음원분리 파일 삭제 같은 정기 작업)와 입장·퇴장 때의 참가자 수 갱신을 하지 않는다. 그래서 테스트하는 동안 방 목록의 인원은 **0으로 보인다**(정상).
+> - 서버 터미널에 `[DB] Supabase client initialized - participant sync disabled (not the primary server)`와 `[MAINT] 전역 유지보수(참가자 수 초기화·갱신, 정리·구독·주문 주기 작업) 건너뜀: …` 줄이 보여야 한다. 대신 `[MAINT] 전역 유지보수 실행 (…)`·`participant sync enabled`·`[DB] All room participants reset to 0`이 보이면(#243 이전 코드, 또는 `server\.env`의 `RUN_MAINTENANCE_JOBS=true|1`) 운영의 모든 방 참가자 수가 0이 되고 정리 작업이 운영 서버와 겹쳐 돈다 — 바로 끈다. `RUN_MAINTENANCE_JOBS`(`true|false|1|0`)는 로컬에서 켜지 않는다.
 > - 2026-11-20부터 운영 서버가 같은 DB를 실제로 쓰고 있다. **누군가 운영에서 합주·관람 중이면 `npm run dev:tauri`를 켜지 않는다.**
 > - 자세한 내용은 [TEST-SESSION.md](TEST-SESSION.md) 0절.
 > - 서버를 띄우지 않을 PC(C의 PC B 등)는 `server\.env` 없이 `npm run tauri:dev`로 앱만 띄운다(TEST-SESSION 2.3).
