@@ -88,12 +88,25 @@ describe('resolveRunConfig (P2-27)', () => {
     expect(r.noDevices).toEqual([])
   })
 
-  it('버퍼가 범위 밖이면 기본값(128), 범위 안이면 장치가 바뀌어도 그대로', () => {
-    const r = resolveRunConfig({ ...saved, bufferSize: 4096 }, STUDIO, NO_ASIO)
-    expect(r.config.bufferSize).toBe(128)
-    expect(r.notice).toContain('버퍼 크기는 기본값 128로 시작했습니다.')
-    expect(resolveRunConfig({ ...saved, bufferSize: 100.5 }, STUDIO, NO_ASIO).config.bufferSize).toBe(128)
+  it('버퍼는 고치지 않는다(범위 밖 값은 시작 전 검증이 막는다 — #251 리뷰 Low-4)', () => {
+    const big = { ...saved, bufferSize: 4096 }
+    expect(resolveRunConfig(big, STUDIO, NO_ASIO).config).toBe(big)
     expect(resolveRunConfig({ ...saved, bufferSize: 32 }, LAPTOP, NO_ASIO).config.bufferSize).toBe(32)
+  })
+
+  it('저장값이 "기본 장치"인데 지금 기본 입력 장치의 채널이 모자라면 입력 채널을 맞춘다(엔진이 거부하지 않게 — #251 리뷰 Low-4)', () => {
+    // 원래 PC에서는 Windows 기본 장치가 4채널 인터페이스였고 Ch3·Ch4를 골랐다 → 인터페이스를 뽑으니 기본 장치가 1채널 내장 마이크
+    const cfg = { ...saved, inputDevice: null, outputDevice: null }
+    const r = resolveRunConfig(cfg, LAPTOP, NO_ASIO)
+    expect(r.config).toMatchObject({ inputDevice: null, inputChannels: [0, 0] })
+    expect(r.fallbacks).toEqual([{ kind: 'inputChannels', from: [2, 3], to: [0, 0] }])
+    expect(r.notice).toContain('입력 채널은 Ch1·Ch1로 맞춥니다.')
+    // 엔진 거부 조건(장치 채널 수 ≤ 고른 채널 번호)에 걸리지 않는다
+    expect(r.config.inputChannels.every((c) => c < runInputDevice(r.config, LAPTOP)!.channels)).toBe(true)
+    // 고른 장치가 있고 채널이 맞으면 그대로(같은 객체)
+    expect(resolveRunConfig({ ...cfg, inputChannels: [0, 0] }, LAPTOP, NO_ASIO).fallbacks).toEqual([])
+    // 장치 목록을 모르면 손대지 않는다
+    expect(resolveRunConfig(cfg, null, NO_ASIO).config).toBe(cfg)
   })
 
   it('장치가 하나도 없으면 noDevices로 알린다(시작 전 원인 문구)', () => {
@@ -113,6 +126,15 @@ describe('보조 함수', () => {
     expect(needsDeviceRecheck({ ...saved, inputDevice: null, outputDevice: null }, LAPTOP)).toBe(false)
     expect(needsDeviceRecheck({ ...saved, inputDevice: null, outputDevice: null }, [])).toBe(true)
     expect(needsDeviceRecheck(saved, null)).toBe(false)
+  })
+
+  it('needsDeviceRecheck: 드라이버 폴백을 먼저 적용한다 — ASIO 저장 + ASIO 없는 빌드는 WASAPI 장치가 있으면 다시 받지 않는다(#251 리뷰 Low-2)', () => {
+    const asio: EngineConfig = { ...saved, inputDriver: 'asio', outputDriver: 'asio', inputDevice: 'asio::X', outputDevice: 'asio::X' }
+    expect(needsDeviceRecheck(asio, LAPTOP, NO_ASIO)).toBe(false)
+    // 대신할 드라이버의 장치도 없으면 다시 받는다
+    expect(needsDeviceRecheck(asio, [], NO_ASIO)).toBe(true)
+    // 지원 목록을 모르면(옛 엔진) 저장된 드라이버로 본다
+    expect(needsDeviceRecheck(asio, LAPTOP, null)).toBe(true)
   })
 
   it('runInputDevice: 고른 장치, 없으면 그 드라이버의 기본 장치', () => {

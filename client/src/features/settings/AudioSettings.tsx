@@ -275,7 +275,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           >
             <option value="">기본 장치</option>
             {missingDevices.input && (
-              <option value={missingDevices.input}>{deviceNameFromId(missingDevices.input)} (이 PC에서 찾을 수 없음 — 기본 장치 사용)</option>
+              <option value={missingDevices.input}>(이 PC에 없음) {deviceNameFromId(missingDevices.input)} — 기본 장치 사용</option>
             )}
             {inputDevices.map((d) => (
               <option key={d.id} value={d.id}>
@@ -309,7 +309,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           >
             <option value="">기본 장치</option>
             {missingDevices.output && (
-              <option value={missingDevices.output}>{deviceNameFromId(missingDevices.output)} (이 PC에서 찾을 수 없음 — 기본 장치 사용)</option>
+              <option value={missingDevices.output}>(이 PC에 없음) {deviceNameFromId(missingDevices.output)} — 기본 장치 사용</option>
             )}
             {outputDevices.map((d) => (
               <option key={d.id} value={d.id}>

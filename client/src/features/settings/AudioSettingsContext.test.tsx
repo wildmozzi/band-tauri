@@ -24,13 +24,18 @@ const native = vi.hoisted(() => ({
   devices: [] as DeviceInfo[],
   supported: null as DriverKind[] | null,
   testStarts: [] as EngineConfig[],
+  /** engine_list_devices 호출 수(정상 경로에 추가 IPC가 없는지) */
+  listCalls: 0,
 }))
 vi.mock('../../native/engineApi', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../native/engineApi')>()
   return {
     ...orig,
     isNativeApp: () => native.on,
-    engineListDevices: async () => native.devices,
+    engineListDevices: async () => {
+      native.listCalls += 1
+      return native.devices
+    },
     engineSupportedDrivers: async () => native.supported,
     engineTestStart: async (c: EngineConfig) => {
       native.testStarts.push(c)
@@ -194,9 +199,9 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
     expect(run!.issues).toEqual([])
     expect(run!.config).toMatchObject({ inputDevice: null, outputDevice: null, inputChannels: [0, 0], bufferSize: 256 })
     expect(run!.notice).toContain('기본 장치로 시작했습니다')
-    // 같은 폴백은 한 번만 알린다
+    // 몇 번 알릴지는 부르는 쪽(합주실: 입장마다, 테스트 모니터: 앱 실행마다)이 정한다 — 여기서는 매번 돌려준다(#251 리뷰 Low-5)
     await act(async () => { run = await result.current.prepareRunConfig() })
-    expect(run!.notice).toBeNull()
+    expect(run!.notice).toContain('기본 장치로 시작했습니다')
 
     // 테스트 모니터도 고친 사본으로 시작
     await act(async () => { await result.current.startTest() })
@@ -230,14 +235,59 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
     expect(result.current.config.inputDriver).toBe('asio')
     await waitFor(() => expect(result.current.fallbackNotice).toContain('WASAPI 공유 기본 장치로 시작합니다'))
 
+    // 장치 select는 "기본 장치"가 아니라 저장된 ASIO 장치를 "(이 PC에 없음)"으로 보인다(#251 리뷰 Low-3)
+    expect(result.current.missingDevices).toEqual({ input: 'asio::X', output: 'asio::X' })
+
+    // 드라이버 폴백을 먼저 적용해 판단하므로 시작할 때마다 장치 목록을 다시 받지 않는다(#251 리뷰 Low-2)
+    const before = native.listCalls
     let run: Prepared | null = null
     await act(async () => { run = await result.current.prepareRunConfig() })
     expect(run!.config).toMatchObject({ inputDriver: 'wasapiShared', outputDriver: 'wasapiShared', inputDevice: null, outputDevice: null })
+    expect(native.listCalls).toBe(before)
 
     act(() => { result.current.updateConfig({ jitterMaxMs: 60 }) })
     await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
     const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: EngineConfig } }
     expect(payload.audio_settings.engine).toMatchObject({ inputDriver: 'asio', outputDriver: 'asio', inputDevice: 'asio::X' })
+  })
+
+  it('정상 경로(저장된 장치가 모두 있음): 저장값 객체 그대로, 장치 목록 추가 조회 없음', async () => {
+    native.on = true
+    native.devices = [...LAPTOP, { ...wasapi('wasapi::Focusrite USB', true, 4), isDefault: false }, { ...wasapi('wasapi::Focusrite USB', false), isDefault: false }]
+    native.supported = ['wasapiExclusive', 'wasapiShared']
+    localStorage.setItem('band_engine_config_v2', JSON.stringify(SAVED))
+    auth.user = null
+    const { result } = setup()
+    await waitFor(() => expect(result.current.devices).toHaveLength(4))
+    await waitFor(() => expect(result.current.supportedDrivers).not.toBeNull())
+    await act(async () => {})
+    expect(result.current.missingDevices).toEqual({ input: null, output: null })
+    const before = native.listCalls
+    let run: Prepared | null = null
+    await act(async () => { run = await result.current.prepareRunConfig() })
+    expect(run!.config).toBe(result.current.config)
+    expect(run!.notice).toBeNull()
+    expect(run!.issues).toEqual([])
+    expect(native.listCalls).toBe(before)
+  })
+
+  it('저장값이 "기본 장치"인데 지금 기본 입력 장치의 채널이 모자라도 시작한다 — 입력 채널을 맞추고 저장값은 그대로(#251 리뷰 Low-4)', async () => {
+    native.on = true
+    native.devices = LAPTOP
+    native.supported = ['wasapiExclusive', 'wasapiShared']
+    localStorage.setItem('band_engine_config_v2', JSON.stringify({ version: 2, engine: { ...SAVED.engine, inputDevice: null, outputDevice: null } }))
+    auth.user = null
+    const { result } = setup()
+    await waitFor(() => expect(result.current.devices).toHaveLength(2))
+    await act(async () => {})
+    // 저장값 검증으로는 막히지만(설정 화면 표시) 엔진 시작은 이번 실행 설정으로 검증한다
+    expect(result.current.issues[0].message).toContain('입력 장치는 1채널까지만 지원합니다')
+    await act(async () => { await result.current.startTest() })
+    expect(result.current.testError).toBeNull()
+    expect(native.testStarts[native.testStarts.length - 1]).toMatchObject({ inputDevice: null, inputChannels: [0, 0] })
+    expect(result.current.fallbackNotice).toContain('입력 채널은 Ch1·Ch1로 맞춥니다.')
+    expect(result.current.config.inputChannels).toEqual([2, 3])
+    await act(async () => { await result.current.stopTest() })
   })
 
   it('입력 장치가 하나도 없으면 시작하지 않고 원인을 말한다', async () => {

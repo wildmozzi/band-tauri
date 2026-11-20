@@ -46,14 +46,6 @@ import { loadDeviceThreadPolicy, saveDeviceThreadPolicy } from './deviceLocalSet
 /** 폴백 판단은 데스크톱 앱에서만 쓴다 — 웹 첫 화면 묶음에 싣지 않는다(bundle-budget e2e) */
 const loadDeviceFallback = () => import('../../native/deviceFallback')
 
-interface RunPreview {
-  /** 설정 화면용 시작 전 안내(저장값은 그대로). 없으면 null */
-  notice: string | null
-  /** 저장된 장치 id가 지금 장치 목록에 없는 방향 */
-  missing: { input: string | null; output: string | null }
-}
-const NO_PREVIEW: RunPreview = { notice: null, missing: { input: null, output: null } }
-
 const STORAGE_KEY = 'band_engine_config_v2'
 const SAVE_DEBOUNCE_MS = 600
 const TEST_POLL_MS = 100
@@ -62,7 +54,10 @@ const TEST_POLL_MS = 100
 export interface PreparedRun {
   /** 엔진에 넘길 설정(저장값에 폴백을 적용한 사본) */
   config: EngineConfig
-  /** 폴백 알림. 같은 내용을 이 앱 실행에서 이미 알렸으면 null(한 번만 알린다) */
+  /**
+   * 폴백 알림(없으면 null). 몇 번 보일지는 부르는 쪽이 정한다 — 합주실은 입장(세션)마다 한 번,
+   * 테스트 모니터는 앱 실행마다 한 번(#251 리뷰 Low-5: 둘이 같은 "한 번"을 나눠 쓰지 않는다)
+   */
   notice: string | null
   /** 시작을 막는 문제(첫 항목을 보인다). 빈 배열이면 시작 가능 */
   issues: ConfigIssue[]
@@ -264,25 +259,22 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   // 예전(P2-7)에는 여기서 config(저장값)를 지원 드라이버로 바꿔 다음 편집 때 계정에 저장됐다 — 다른 PC의 ASIO 설정을 지웠다.
   // 이제는 저장값을 두고 안내만 한다(설정 화면은 시작 전 안내, 엔진 시작 때는 prepareRunConfig가 고친 사본을 넘긴다).
   const knownDevices = devicesKnown ? devices : null
-  const [runPreview, setRunPreview] = useState<RunPreview>(NO_PREVIEW)
+  const [previewNotice, setPreviewNotice] = useState<string | null>(null)
   useEffect(() => {
     if (!isNativeMode) return
     let cancelled = false
-    void loadDeviceFallback().then((m) => {
-      if (cancelled) return
-      const run = m.resolveRunConfig(config, knownDevices, supportedDrivers)
-      const missing = (dir: 'input' | 'output') => {
-        const f = run.fallbacks.find((x) => x.kind === 'device' && x.dir === dir)
-        return f && f.kind === 'device' ? f.savedId : null
-      }
-      setRunPreview({ notice: m.fallbackNotice(run.fallbacks, 'future'), missing: { input: missing('input'), output: missing('output') } })
-    })
+    loadDeviceFallback().then(
+      (m) => {
+        if (cancelled) return
+        const run = m.resolveRunConfig(config, knownDevices, supportedDrivers)
+        setPreviewNotice(m.fallbackNotice(run.fallbacks, 'future'))
+      },
+      (err: unknown) => console.warn('[AudioSettings] 장치 폴백 모듈을 불러오지 못했습니다:', err),
+    )
     return () => {
       cancelled = true
     }
   }, [isNativeMode, config, knownDevices, supportedDrivers])
-  const previewNotice = runPreview.notice
-  const missingDevices = runPreview.missing
 
   const inputDevices = useMemo(
     () => devices.filter((d) => d.isInput && d.driver === config.inputDriver),
@@ -292,6 +284,13 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     () => devices.filter((d) => !d.isInput && d.driver === config.outputDriver),
     [devices, config.outputDriver],
   )
+  // 저장된 장치 id가 지금(저장된 드라이버의) 장치 목록에 없는 방향 — 설정 화면이 "(이 PC에 없음) 이름" 선택지로 그대로 보인다.
+  // 드라이버를 이 배포본에서 쓸 수 없는 경우(ASIO 저장 + ASIO 없는 빌드)도 포함한다(#251 리뷰 Low-3). 목록을 모르면 null
+  const missingDevices = useMemo(() => {
+    if (!devicesKnown) return { input: null, output: null }
+    const miss = (id: string | null, list: DeviceInfo[]) => (id && !list.some((d) => d.id === id) ? id : null)
+    return { input: miss(config.inputDevice, inputDevices), output: miss(config.outputDevice, outputDevices) }
+  }, [devicesKnown, config.inputDevice, config.outputDevice, inputDevices, outputDevices])
   const selectedInputDevice = useMemo(() => {
     if (config.inputDevice) return inputDevices.find((d) => d.id === config.inputDevice) ?? null
     return inputDevices.find((d) => d.isDefault) ?? null
@@ -303,15 +302,26 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   // --- 엔진 시작 직전: 이번 실행 설정 (P2-27) ---
   const devicesRef = useRef<DeviceInfo[] | null>(knownDevices)
   devicesRef.current = knownDevices
-  /** 이 앱 실행에서 이미 알린 폴백 문구(같은 폴백은 한 번만 알린다) */
-  const shownNoticesRef = useRef(new Set<string>())
+  const selectedInputDeviceRef = useRef(selectedInputDevice)
+  selectedInputDeviceRef.current = selectedInputDevice
   const prepareRunConfig = useCallback(async (): Promise<PreparedRun> => {
-    const { needsDeviceRecheck, noDeviceMessage, resolveRunConfig, runInputDevice } = await loadDeviceFallback()
     const saved = configRef.current
+    let fallback: typeof import('../../native/deviceFallback')
+    try {
+      fallback = await loadDeviceFallback()
+    } catch (err) {
+      // 폴백 모듈을 못 불러와도(청크 로드 실패 등) 시작은 막지 않는다 — 저장된 설정 그대로(폴백 전 동작, #251 리뷰 Low-1)
+      console.warn('[AudioSettings] 장치 폴백 모듈을 불러오지 못해 저장된 설정 그대로 시작합니다:', err)
+      const issues = validateEngineConfig(saved, selectedInputDeviceRef.current)
+      if (issues.length === 0) setEngineThreadPolicy(saved.threadPolicy ?? null)
+      return { config: saved, notice: null, issues }
+    }
+    const { needsDeviceRecheck, noDeviceMessage, resolveRunConfig, runInputDevice } = fallback
     const supported = supportedPromiseRef.current ? await supportedPromiseRef.current : null
     let list = devicesRef.current
-    // 저장된 장치가 목록에 없으면 시작 전에 한 번 새로 받아 본다(앱을 켠 뒤 인터페이스를 꽂은 경우). 있으면 바로 시작
-    if (list && needsDeviceRecheck(saved, list)) {
+    // 저장된 장치가 목록에 없으면 시작 전에 한 번 새로 받아 본다(앱을 켠 뒤 인터페이스를 꽂은 경우). 있으면 바로 시작.
+    // 드라이버 폴백을 먼저 적용해 판단하므로 ASIO 저장 + ASIO 없는 빌드라도 매번 다시 받지 않는다(#251 리뷰 Low-2)
+    if (list && needsDeviceRecheck(saved, list, supported)) {
       try {
         list = usableDevices(await engineListDevices())
         setDevices(list)
@@ -323,13 +333,8 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     const issues = validateEngineConfig(run.config, runInputDevice(run.config, list))
     const noDevice = noDeviceMessage(run.noDevices, run.config)
     if (noDevice) issues.unshift({ field: run.noDevices[0] === 'input' ? 'inputDevice' : 'outputDevice', message: noDevice })
-    let notice = run.notice
-    if (notice && issues.length === 0) {
-      if (shownNoticesRef.current.has(notice)) notice = null
-      else shownNoticesRef.current.add(notice)
-    }
     if (issues.length === 0) setEngineThreadPolicy(run.config.threadPolicy ?? null)
-    return { config: run.config, notice: issues.length === 0 ? notice : null, issues }
+    return { config: run.config, notice: issues.length === 0 ? run.notice : null, issues }
   }, [])
 
   // --- 테스트 모니터 ---
@@ -338,6 +343,8 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const testRunConfigRef = useRef<EngineConfig | null>(null)
   /** 테스트 모니터를 이번 실행에서 폴백으로 시작했을 때 알림(설정 화면에 보인다) */
   const [testNotice, setTestNotice] = useState<string | null>(null)
+  /** 테스트 모니터에서 이미 알린 폴백 문구(앱 실행마다 한 번) */
+  const shownTestNoticesRef = useRef(new Set<string>())
   if (!testControlRef.current) {
     testControlRef.current = new TestMonitorControl({
       start: async () => {
@@ -369,11 +376,8 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       setTestError('합주 중에는 테스트할 수 없습니다. 연주를 멈춘 뒤 다시 시도하세요.')
       return
     }
-    const problems = validateEngineConfig(config, selectedInputDevice)
-    if (problems.length > 0) {
-      setTestError(problems[0].message)
-      return
-    }
+    // 시작 전 검증은 이번 실행 설정(prepareRunConfig가 폴백 적용 뒤 다시 검증)으로 한다 — 저장값 검증을 먼저 하면
+    // 폴백으로 풀릴 문제(예: 기본 입력 장치가 바뀌어 채널이 모자람)에서 막힌다(#251 리뷰 Low-4)
     const run = await prepareRunConfig()
     if (run.issues.length > 0) {
       setTestError(run.issues[0].message)
@@ -384,11 +388,15 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     try {
       await testControl.start()
       setIsTesting(testControl.isActive)
-      if (run.notice) setTestNotice(run.notice)
+      // 테스트 모니터 알림은 앱 실행마다 한 번(합주실 띠와 따로 센다 — #251 리뷰 Low-5)
+      if (run.notice && !shownTestNoticesRef.current.has(run.notice)) {
+        shownTestNoticesRef.current.add(run.notice)
+        setTestNotice(run.notice)
+      }
     } catch (err) {
       setTestError(engineErrorMessage(err))
     }
-  }, [isNativeMode, engineInUse, config, selectedInputDevice, testControl, prepareRunConfig, setTestNotice])
+  }, [isNativeMode, engineInUse, testControl, prepareRunConfig, setTestNotice])
 
   useEffect(() => {
     if (!isTesting) return

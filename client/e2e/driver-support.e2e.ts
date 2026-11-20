@@ -3,7 +3,7 @@
  * "저장된 장치가 없는 PC"를 흉내 낸다.
  * - 저장된 ASIO 설정은 **그대로 두고**(다른 PC·ASIO 빌드에서 쓰던 값) 이번 실행만 WASAPI 공유 기본 장치로 시작한다고 안내한다.
  *   ASIO 선택지는 비활성 + 이유(P2-7). 예전에는 저장값을 WASAPI 독점으로 덮어썼다(P2-27에서 제거).
- * - 저장된 장치 id가 목록에 없으면 선택지에 "(이 PC에서 찾을 수 없음 — 기본 장치 사용)"으로 남기고 안내한다. 저장값은 그대로.
+ * - 저장된 장치 id가 목록에 없으면(드라이버를 쓸 수 없는 경우 포함) 선택지에 "(이 PC에 없음) 이름 — 기본 장치 사용"으로 남기고 안내한다. 저장값은 그대로.
  * 옛 엔진(engine_supported_drivers 응답 없음)이면 예전처럼 모두 고를 수 있다.
  */
 import type { DeviceInfo, DriverKind, EngineConfig } from '../src/native/engineApi'
@@ -12,7 +12,8 @@ import { installFakeTauri } from './mocks/tauri'
 import { expect, test } from './test'
 
 const STORAGE_KEY = 'band_engine_config_v2'
-const asioConfig: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, inputDriver: 'asio', outputDriver: 'asio' }
+const ASIO_DEV = 'asio::Focusrite USB ASIO'
+const asioConfig: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, inputDriver: 'asio', outputDriver: 'asio', inputDevice: ASIO_DEV, outputDevice: ASIO_DEV }
 
 async function seedSettings(page: import('@playwright/test').Page, engine: EngineConfig) {
   // 새로고침(reload)에도 다시 심지 않도록 처음 한 번만
@@ -50,12 +51,18 @@ test('ASIO 없는 배포본: 저장된 ASIO는 그대로 두고 WASAPI 공유 �
   await expect(input.locator('option[value="asio"]')).toBeDisabled()
   await expect(input.locator('option[value="wasapiShared"]')).toBeEnabled()
   await expect(page.getByTestId('driver-unsupported').first()).toHaveText('이 배포본에는 ASIO가 포함되어 있지 않습니다 — WASAPI 독점 모드를 쓰세요')
+  // 저장된 ASIO 장치도 "기본 장치"로 보이지 않고 이름 그대로 보인다(#251 리뷰 Low-3)
+  for (const id of ['#input-device', '#output-device']) {
+    await expect(page.locator(id)).toHaveValue(ASIO_DEV)
+    await expect(page.locator(id).locator('option:checked')).toHaveText('(이 PC에 없음) Focusrite USB ASIO — 기본 장치 사용')
+  }
 
   // 저장된 설정은 바뀌지 않는다(새로 고쳐도 ASIO)
   expect((await storedEngine(page)).inputDriver).toBe('asio')
   await page.reload()
   await expect(page.locator('#input-driver')).toHaveValue('asio')
-  expect(await storedEngine(page)).toMatchObject({ inputDriver: 'asio', outputDriver: 'asio' })
+  expect(await storedEngine(page)).toMatchObject({ inputDriver: 'asio', outputDriver: 'asio', inputDevice: ASIO_DEV, outputDevice: ASIO_DEV })
+  await expect(page.locator('#input-device')).toHaveValue(ASIO_DEV)
 })
 
 test('저장된 장치가 이 PC에 없음: 선택지에 남기고 기본 장치로 시작한다고 안내, 저장값은 그대로', async ({ page }) => {
@@ -76,7 +83,7 @@ test('저장된 장치가 이 PC에 없음: 선택지에 남기고 기본 장치
   )
   const input = page.locator('#input-device')
   await expect(input).toHaveValue(savedIn)
-  await expect(input.locator(`option[value="${savedIn}"]`)).toHaveText('Focusrite USB Input (이 PC에서 찾을 수 없음 — 기본 장치 사용)')
+  await expect(input.locator(`option[value="${savedIn}"]`)).toHaveText('(이 PC에 없음) Focusrite USB Input — 기본 장치 사용')
   await expect(page.locator('#output-device')).toHaveValue(savedOut)
   expect(await storedEngine(page)).toMatchObject({ inputDevice: savedIn, outputDevice: savedOut })
 
@@ -89,7 +96,7 @@ test('저장된 장치가 이 PC에 없음: 선택지에 남기고 기본 장치
 
 test('옛 엔진(지원 목록 없음): 모든 드라이버를 그대로 고를 수 있다', async ({ page }) => {
   await installFakeTauri(page, { engine_list_devices: [] })
-  await seedSettings(page, asioConfig)
+  await seedSettings(page, { ...asioConfig, inputDevice: null, outputDevice: null })
   await page.goto('/settings/audio')
 
   const input = page.locator('#input-driver')

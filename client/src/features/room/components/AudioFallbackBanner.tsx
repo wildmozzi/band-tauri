@@ -4,7 +4,7 @@ import './ReconnectBanner.css'
 
 /**
  * 저장된 오디오 장치(또는 드라이버)가 이 PC에 없어 이번 연주를 기본 장치로 시작했다는 알림 띠(P2-27).
- * 같은 폴백은 앱 실행마다 한 번만 뜬다. 오디오 설정을 열거나 닫을 수 있다. 저장된 설정은 바뀌지 않았다.
+ * 같은 폴백은 합주실 입장마다 한 번 뜬다. 오디오 설정을 열거나 닫을 수 있다. 저장된 설정은 바뀌지 않았다.
  */
 export function AudioFallbackBanner() {
   const { notice, dismiss } = useAudioFallbackNotice()

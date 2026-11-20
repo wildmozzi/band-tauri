@@ -10,7 +10,7 @@
  * 저장된 값은 사용자가 설정 화면에서 직접 바꿀 때만 바뀐다.
  */
 import type { DeviceInfo, DriverKind, EngineConfig } from './engineApi'
-import { BUFFER_MAX, BUFFER_MIN, DEFAULT_ENGINE_CONFIG, DRIVER_OPTIONS, normalizeInputChannels } from './engineConfig'
+import { DRIVER_OPTIONS, normalizeInputChannels } from './engineConfig'
 
 
 /** 지원 안 하는 드라이버를 대신할 순서: 기본값(공유) → 독점 → ASIO */
@@ -35,7 +35,6 @@ function driverLabel(d: DriverKind): string {
 export type RunFallback =
   | { kind: 'driver'; dir: 'input' | 'output'; from: DriverKind; to: DriverKind }
   | { kind: 'device'; dir: 'input' | 'output'; savedId: string }
-  | { kind: 'bufferSize'; from: number; to: number }
   | { kind: 'inputChannels'; from: number[]; to: number[] }
 
 export interface RunConfig {
@@ -63,13 +62,28 @@ export function runInputDevice(config: EngineConfig, devices: readonly DeviceInf
   return config.inputDevice ? (list.find((d) => d.id === config.inputDevice) ?? null) : (list.find((d) => d.isDefault) ?? null)
 }
 
+/** 이 배포본에서 그 방향에 실제로 쓸 드라이버(지원하지 않으면 대신할 드라이버, 대신할 것도 없으면 그대로) */
+function runDriver(driver: DriverKind, supported: readonly DriverKind[] | null): DriverKind {
+  if (isSupported(supported, driver)) return driver
+  return DRIVER_FALLBACK_ORDER.find((d) => isSupported(supported, d)) ?? driver
+}
+
 /**
- * 저장된 장치·드라이버가 지금 목록에 없는지(엔진 시작 전에 목록을 새로 받아 볼지 판단).
+ * 엔진 시작 전에 장치 목록을 새로 받아 볼지: 저장된 장치가 지금(캐시된) 목록에 없거나, 실행할 드라이버의 장치가 하나도 없을 때만.
+ * 드라이버 폴백을 먼저 적용해 판단한다 — ASIO가 저장돼 있고 이 배포본에 ASIO가 없으면 어차피 WASAPI 공유 기본 장치로
+ * 시작하므로, ASIO 장치가 0개라는 이유로 시작할 때마다 목록을 다시 받지 않는다(#251 리뷰 Low-2).
  * 목록을 모르면(null) false.
  */
-export function needsDeviceRecheck(config: EngineConfig, devices: readonly DeviceInfo[] | null): boolean {
+export function needsDeviceRecheck(
+  config: EngineConfig,
+  devices: readonly DeviceInfo[] | null,
+  supported: readonly DriverKind[] | null = null,
+): boolean {
   if (!devices) return false
-  const missing = (input: boolean, driver: DriverKind, id: string | null) => {
+  const missing = (input: boolean, savedDriver: DriverKind, savedId: string | null) => {
+    const driver = runDriver(savedDriver, supported)
+    // 다른 드라이버로 넘어가면 저장된 장치 id는 쓰지 않는다(그 드라이버의 기본 장치)
+    const id = driver === savedDriver ? savedId : null
     const list = devicesOf(devices, input, driver)
     return list.length === 0 || (id !== null && !list.some((d) => d.id === id))
   }
@@ -81,9 +95,11 @@ export function needsDeviceRecheck(config: EngineConfig, devices: readonly Devic
  * - 드라이버를 이 배포본이 지원하지 않으면(예: ASIO 설정인데 ASIO 없는 빌드) 지원 드라이버(WASAPI 공유 우선)로, 장치는 기본 장치로.
  *   `supported`가 null이면(옛 엔진·아직 모름) 드라이버는 그대로.
  * - 저장된 장치 id가 그 드라이버의 장치 목록에 없으면 기본 장치(null)로. `devices`가 null이면(목록 조회 실패·아직 모름) 그대로.
- * - 입력 장치가 바뀌었으면 입력 채널을 새 장치 채널 수에 맞춘다(예: 4채널 인터페이스의 Ch3 → 내장 마이크 Ch1).
- * - 버퍼가 범위(32..1024 정수) 밖이면 기본값. 엔진에는 요청값이고 장치가 지원하는 가장 가까운 값으로 열리므로(설계 4절)
- *   범위 안의 값은 장치가 바뀌어도 그대로 둔다(장치 목록이 버퍼 범위를 알려 주지 않는다).
+ * - 입력 장치가 바뀌었거나, 실행할 입력 장치의 채널 수가 고른 입력 채널보다 적으면 입력 채널을 그 장치에 맞춘다
+ *   (예: 4채널 인터페이스의 Ch3 → 내장 마이크 Ch1. 저장값이 "기본 장치"인데 Windows 기본 장치였던 4채널 인터페이스를 뽑은 경우 포함).
+ *   엔진은 장치 채널 수가 고른 채널 번호 이하이면 시작을 거부한다(engine/device/cpal.rs "입력 장치 채널 수(…)가 선택한 입력 채널…").
+ * - 버퍼는 고치지 않는다. 범위 밖 값은 시작 전 검증(validateEngineConfig)이 막고, 범위 안의 값은 엔진에 요청값이며
+ *   장치가 지원하는 가장 가까운 값으로 열린다(설계 4절, #251 리뷰 Low-4).
  */
 export function resolveRunConfig(
   saved: EngineConfig,
@@ -92,12 +108,12 @@ export function resolveRunConfig(
 ): RunConfig {
   const fallbacks: RunFallback[] = []
   const next: EngineConfig = { ...saved }
-  const alt = DRIVER_FALLBACK_ORDER.find((d) => isSupported(supported, d)) ?? null
 
   for (const dir of ['input', 'output'] as const) {
     const driverKey = dir === 'input' ? 'inputDriver' : 'outputDriver'
     const deviceKey = dir === 'input' ? 'inputDevice' : 'outputDevice'
-    if (alt && !isSupported(supported, next[driverKey])) {
+    const alt = runDriver(next[driverKey], supported)
+    if (alt !== next[driverKey]) {
       fallbacks.push({ kind: 'driver', dir, from: next[driverKey], to: alt })
       next[driverKey] = alt
       // 다른 드라이버의 장치 id는 쓸 수 없다 → 그 드라이버의 기본 장치
@@ -112,18 +128,14 @@ export function resolveRunConfig(
   }
 
   const inputChanged = fallbacks.some((f) => (f.kind === 'driver' || f.kind === 'device') && f.dir === 'input')
-  if (inputChanged) {
-    const dev = runInputDevice(next, devices)
+  const dev = runInputDevice(next, devices)
+  const exceeds = dev !== null && next.inputChannels.some((c) => c >= dev.channels)
+  if (inputChanged || exceeds) {
     const fixed = normalizeInputChannels(next.channels, next.inputChannels, dev?.channels)
     if (fixed.length !== next.inputChannels.length || fixed.some((c, i) => c !== next.inputChannels[i])) {
       fallbacks.push({ kind: 'inputChannels', from: [...next.inputChannels], to: [...fixed] })
       next.inputChannels = fixed
     }
-  }
-
-  if (!Number.isInteger(next.bufferSize) || next.bufferSize < BUFFER_MIN || next.bufferSize > BUFFER_MAX) {
-    fallbacks.push({ kind: 'bufferSize', from: next.bufferSize, to: DEFAULT_ENGINE_CONFIG.bufferSize })
-    next.bufferSize = DEFAULT_ENGINE_CONFIG.bufferSize
   }
 
   const noDevices: ('input' | 'output')[] = []
@@ -156,8 +168,6 @@ export function fallbackNotice(fallbacks: readonly RunFallback[], tense: 'past' 
   }
   const ch = fallbacks.find((f): f is Extract<RunFallback, { kind: 'inputChannels' }> => f.kind === 'inputChannels')
   if (ch) parts.push(`입력 채널은 ${ch.to.map((c) => `Ch${c + 1}`).join('·')}로 맞춥니다.`)
-  const buf = fallbacks.find((f): f is Extract<RunFallback, { kind: 'bufferSize' }> => f.kind === 'bufferSize')
-  if (buf) parts.push(`버퍼 크기는 기본값 ${buf.to}로 ${start}.`)
   if (parts.length === 0) return null
   return `${parts.join(' ')} 저장된 설정은 그대로 둡니다(원래 장치에서는 그대로 동작).`
 }
