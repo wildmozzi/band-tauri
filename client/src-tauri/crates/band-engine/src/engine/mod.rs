@@ -48,6 +48,11 @@ use worker::{Worker, WorkerParams, WorkerStats};
 // 반환 큐가 차지 않는 근거(`band_dsp::peer_media::MEDIA_RET_CAPACITY`): 명령 큐를 채운 제거 + 그 호출의 하나 + 정지 때 표에 남은 피어.
 const _: () = assert!(band_dsp::peer_media::MEDIA_RET_CAPACITY >= band_dsp::peer_media::MEDIA_CMD_CAPACITY + crate::net::MAX_PEERS + 2);
 
+// 믹스 탭 스레드가 구독 전에 쌓인 것을 ringbuf `Consumer::clear`로 버린다(`subscribe_mix`의 탭 스레드, 링은 `Engine::tap_cons`).
+// ringbuf 0.4.8의 `skip`/`clear`는 원소 `Drop`이 panic하면 double free가 난다(RUSTSEC-2026-0293, 0.5.2+에서 수정) — 원소에 Drop
+// 글루가 없어야 그 경로가 닿지 않는다. 링 선언과 이 단언이 같은 별칭(`rt::TapSample`)을 쓴다(docs/overhaul/deps-audit-2026-11-18.md 6번).
+const _: () = assert!(!core::mem::needs_drop::<rt::TapSample>());
+
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
 pub(crate) type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
 
@@ -57,7 +62,7 @@ pub(crate) const MIX_CHUNK_FRAMES: usize = 960;
 struct TapThread {
     stop: Arc<AtomicBool>,
     /// 끝나면 탭 링 소비자를 돌려준다(다음 구독에서 다시 씀).
-    handle: JoinHandle<HeapCons<f32>>,
+    handle: JoinHandle<HeapCons<rt::TapSample>>,
 }
 
 pub struct Engine {
@@ -74,7 +79,7 @@ pub struct Engine {
     /// 정지한 Net의 마지막 연결 이벤트(P1-18, 정지 때 `aborted`까지 포함). `stop` 뒤 `conn_events`가 이것을 준다.
     ended_conn: Vec<crate::net::connlog::ConnEvent>,
     /// 출력 콜백이 장치 레이트로 채우는 믹스 탭 링의 소비자. 구독 중에는 탭 스레드가 가진다.
-    tap_cons: Mutex<Option<HeapCons<f32>>>,
+    tap_cons: Mutex<Option<HeapCons<rt::TapSample>>>,
     tap_thread: Option<TapThread>,
     /// 지연 측정(P1-1): RT 끝점 제어와 측정 스레드 쪽 링 끝점(측정 중에는 비어 있음).
     measure_sh: Arc<rt::MeasureShared>,

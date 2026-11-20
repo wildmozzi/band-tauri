@@ -206,6 +206,8 @@ pub(super) fn alloc_rings(rate: u32, prefault: bool) -> Rings {
 }
 
 /// 링 전체를 기본값으로 한 바퀴 채우고 바로 버린다(모든 페이지를 건드림). 끝나면 링은 다시 비어 있다.
+/// `T: Copy` 바운드가 가드다: ringbuf 0.4.8의 `skip`은 원소 `Drop`이 panic하면 double free가 나는데(RUSTSEC-2026-0293),
+/// `Copy` 타입은 `Drop`을 가질 수 없다 — 이 바운드를 풀지 말 것(docs/overhaul/deps-audit-2026-11-18.md 6번).
 fn touch_all<T: Copy + Default>(p: &mut HeapProd<T>, c: &mut HeapCons<T>) {
     let fill = [T::default(); 1024];
     let mut left = p.capacity().get();
