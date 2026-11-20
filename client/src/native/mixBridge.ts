@@ -225,6 +225,19 @@ export class MixSourceReleasedError extends Error {
   }
 }
 
+/**
+ * 엔진 믹스 구독 실패. 원래 오류는 `original`에 보존하고 메시지에도 넣는다.
+ * 표준 Error cause(ES2022)는 지원 하한 브라우저(safari14·firefox78)에 없어 쓰지 않는다.
+ */
+export class MixSubscribeError extends Error {
+  readonly original: unknown
+  constructor(original: unknown) {
+    super(`믹스 구독 실패: ${engineErrorMessage(original)}`)
+    this.name = 'MixSubscribeError'
+    this.original = original
+  }
+}
+
 export class MixSource {
   private graph: MixGraph | null = null
   private subscribed = false
@@ -296,7 +309,7 @@ export class MixSource {
     } catch (err) {
       if (this.graph === graph) this.graph = null
       await graph.close()
-      throw new Error(`믹스 구독 실패: ${engineErrorMessage(err)}`)
+      throw new MixSubscribeError(err)
     }
     if (epoch !== this.epoch || this.refs === 0) {
       await this.close()

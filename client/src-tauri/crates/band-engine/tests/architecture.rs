@@ -99,6 +99,9 @@ const NODES: &[(&str, u8)] = &[
     ("diag", 5),
     ("diag::timeline", 5),
     ("diag::export", 5),
+    // 진단 zip → 결과표 도구(GOAL-COVERAGE 후보 ②·③, `test-support` 뒤). `diag::export`의 시각 형식을 쓴다 — 노드가 없으면 `diag`로
+    // 묶여 `diag ↔ diag::export` 순환으로 읽힌다(실제 간선은 report → export 한 방향).
+    ("diag::report", 5),
     // 크레이트 뿌리(`lib.rs` — 모듈 선언뿐). ⑩-1까지는 앱 뿌리(`crate`, 계층 6)였다. 어댑터(6)는 앱 크레이트의 `APP_NODES`.
     ("band_engine", 5),
     // 7 테스트 표면(`cfg(any(test, feature = "test-support"))`, ⑨a). 모든 계층을 다시 내보낸다. 제품 노드는 위 계층을 못 쓰므로
