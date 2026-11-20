@@ -11,6 +11,9 @@
     "dev:client": "cd client && npm run dev",
     "dev:tauri": "npm-run-all -p dev:server tauri:dev",
     "tauri:dev": "cd client && npm run tauri:dev",
+    "dev:tauri:asio": "npm-run-all -p dev:server tauri:dev:asio",
+    "tauri:dev:asio": "cd client && npm run tauri:dev:asio",
+    "tauri:build:asio": "cd client && npm run tauri:build:asio",
     "install:all": "npm --prefix server i && npm --prefix client i"
   },
   "devDependencies": {
