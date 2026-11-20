@@ -36,7 +36,7 @@
 
 | 지표 | ① 자동 검증 | ② 최근 측정값·출처 | ③ 상태 | ④ 빈틈 → 닫는 방법 |
 |---|---|---|---|---|
-| 웹 브라우저로 합주 관람(소리 듣기, 재연결) | `client/e2e/web-viewer.e2e.ts`(협상·내려짐·서버 재시작·방 종료·390px, P2-18 #189) — **chromium만** · `C/features/room/state/useViewerAudio.test.tsx`·`viewerHold.test.ts`·`anonResume.test.ts` · `S/test/ws-resume-anon.test.ts` | 운영 웹에서 익명 관람 입장 화면 확인(P3-21, 2026-11-20). 실제 연주 소리를 웹에서 들은 기록 없음 | 자동 시험만(실장비 미확인) | ① 실제 연주자 앱 ↔ Vercel 웹 청취, iOS Safari — [사람] E(P2-18e). ② WebKit e2e — 자동(후보 ⑨). ③ 회사망·대칭 NAT 관람은 TURN이 없어 실패할 수 있음(P2-18d 미룸) |
+| 웹 브라우저로 합주 관람(소리 듣기, 재연결) | `client/e2e/web-viewer.e2e.ts`(협상·내려짐·서버 재시작·방 종료·390px, P2-18 #189) — **chromium + WebKit**(CI Linux, P3-24 #244) · `client/e2e/mobile-layout.e2e.ts`(390/360/768/1024 넘침·터치 44px) · `C/features/room/state/useViewerAudio.test.tsx`·`viewerHold.test.ts`·`anonResume.test.ts` · `S/test/ws-resume-anon.test.ts` | 운영 웹에서 익명 관람 입장 화면 확인(P3-21, 2026-11-20). 실제 연주 소리를 웹에서 들은 기록 없음 | 자동 시험만(실장비 미확인) | ① 실제 연주자 앱 ↔ Vercel 웹 청취, iOS Safari — [사람] E(P2-18e). ② WebKit e2e — 자동 완료(P3-24 #244, 사파리 엔진 호환·레이아웃만. 자동재생·오디오 잠금 해제는 여전히 [사람] E). ③ 회사망·대칭 NAT 관람은 TURN이 없어 실패할 수 있음(P2-18d 미룸) |
 
 ## 1. 지연
 
@@ -90,7 +90,7 @@
 
 | 기준 | 자동 | 실장비/실회선 |
 |---|---|---|
-| 0 웹 관람 | e2e(chromium) | 화면만 확인, 청취 없음 |
+| 0 웹 관람 | e2e(chromium + WebKit, 좁은 화면) | 화면만 확인, 청취 없음 |
 | 1-1 로컬 처리 지연 | 계산·가짜 장치 충족 | WASAPI 독점 est 7.50ms만, 루프백·ASIO 없음 |
 | 1-2 입→귀 | 도구 시험만 | **없음** |
 | 1-3 지터 버퍼 지연 | 충족(안정 회선 피어 전부, 시드 40개. 꼬리 지터 피어는 1절 대상 밖 — 상한·2절 판정) | 없음 |
@@ -122,7 +122,7 @@
 | ⑥ | TEST-SESSION.md 최신화: `git switch overhaul` → `develop`, 0절 "운영 서버는 overhaul 이전 버전"(2026-11-20 컷오버로 사실과 다름), 화면에 생긴 값의 Console 단계 정리, ⑤ 반영 | **신규 후보**(문서) | S | 사람 확인 C·D 전체 |
 | ⑦ | ~~하네스 GOAL 1절 판정에서 꼬리 지터 피어 제외(P1-6d 결정의 남은 일) + 꼬리 지터 회선 tail_extra 한도 정리~~ — 완료(P2-16d PR): 회선 분류로 판정 정리, tail_extra는 측정 결과 지연↔은닉 트레이드오프뿐이라 동작 유지 | P1-6d, P2-16d | S | 1-3 |
 | ⑧ | `est_latency_budget_table`에 cpal WASAPI 공유 폴백(10ms 주기) 행 추가 — GOAL "공유 ≤ 30ms"를 실제 폴백 경로로도 판정 | **신규 후보** | XS | 1-1 |
-| ⑨ | Playwright WebKit 프로젝트로 웹 관람 e2e 일부 실행(지금 chromium만). iOS Safari 실기기를 대신하지는 못하지만 WebKit 고유 오류(오디오 잠금 해제 흐름, 레이아웃)는 먼저 잡는다 | **신규 후보**(P2-18e 보조) | M | 한 문장 목표의 "웹 관람" |
+| ⑨ | Playwright WebKit 프로젝트로 웹 관람 e2e 일부 실행(지금 chromium만). iOS Safari 실기기를 대신하지는 못하지만 WebKit 고유 오류(오디오 잠금 해제 흐름, 레이아웃)는 먼저 잡는다 | **완료**(P3-24 #244 — 관람 경로 스펙 8개 WebKit, iOS Safari 실기기는 [사람] E) | M | 한 문장 목표의 "웹 관람" |
 | ⑩ | ASIO `kAsioResetRequest`·버퍼 변경 처리 코드(장치 없이 가능한 부분까지) — 확인은 장치 필요 | P1-11 | M | 1-1, 4(ASIO) |
 
 자동으로 닫을 수 **없는** 것(사람·결정 필요): 실장비 xrun 30분, 실회선 입→귀·연결 성공률, 청감, 6인 실장비, 운영 릴레이 배포(비용), FEC 문구(P2-17b 결정), 코드 서명·ASIO 계약. 절차는 [HUMAN-CHECKS.md](HUMAN-CHECKS.md).

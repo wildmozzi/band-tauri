@@ -185,3 +185,17 @@
     width: 100%;
   }
 }
+
+/* 터치 대상 44px (P3-24): 방 코드 입장·장르 필터 */
+@media (max-width: 768px) {
+  .room-code-join input,
+  .room-code-join button,
+  .room-filters .filter-chip {
+    min-height: 44px;
+  }
+
+  /* 380px 미만에서 입력칸 최소 폭(200px)과 버튼이 한 줄에 들어가도록 입력칸이 줄어들 수 있게 */
+  .room-code-join input {
+    min-width: 0;
+  }
+}

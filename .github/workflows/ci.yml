@@ -581,6 +581,8 @@ jobs:
     # 전부 브라우저 안에서 가로챈다(client/e2e/mocks). 운영 DB에 접속하지 않고 비밀값도 쓰지 않는다.
     # 가짜 엔드포인트로 따로 빌드한 앱(client/e2e/vite.config.ts)을 vite preview로 띄운다. 실패 시 trace·스크린샷을 올린다.
     # 시각 회귀는 ubuntu에서 *-linux.png 스냅샷과 비교한다(client/e2e/__screenshots__, 경로 규칙은 playwright.config.ts).
+    # 관람 경로 스펙은 webkit(사파리 엔진)으로도 돌린다(P3-24, 대상 스펙은 playwright.config.ts의 webkit 프로젝트).
+    # 잡 이름은 필수 체크 이름이라 바꾸지 않는다.
     name: Web E2E (Playwright, chromium)
     needs: changes
     if: needs.changes.outputs.client == 'true' || needs.changes.outputs.server == 'true'
@@ -615,12 +617,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ steps.pw.outputs.version }}
+          key: playwright-chromium-webkit-${{ runner.os }}-${{ steps.pw.outputs.version }}
       # 브라우저 바이너리는 Playwright CDN에서 받는다(apt 무관). OS 의존 패키지는 아래에서 따로 설치한다.
-      - name: Install chromium
+      - name: Install chromium + webkit
         if: steps.pw-cache.outputs.cache-hit != 'true'
         timeout-minutes: 10
-        run: npx playwright install chromium
+        run: npx playwright install chromium webkit
       # OS 의존 패키지(P3-0e): 우분투 apt 미러 장애(azure.archive.ubuntu.com DNS 실패)로 install-deps가 멈추면 E2E가
       # 전부 막혔다. 실패를 허용하면(#73) 한국어 폰트(fonts-wqy-zenhei — install-deps가 까는 유일한 한글 글꼴)가 빠져
       # 시각 회귀가 두부 글자로 실패한다. 그래서 install-deps가 실제로 받은 .deb를 캐시해 두고 dpkg로 오프라인 설치한다.
@@ -633,7 +635,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/pw-osdeps
-          key: pw-osdeps-${{ steps.pw.outputs.image }}-${{ steps.pw.outputs.version }}-v1
+          # v2: webkit 의존 패키지를 더했다(P3-24) — v1 캐시에는 없어 한 번 apt 경로로 다시 채운다
+          key: pw-osdeps-${{ steps.pw.outputs.image }}-${{ steps.pw.outputs.version }}-v2
       - name: Install OS deps (캐시, 오프라인)
         id: deps-offline
         if: steps.deps-cache.outputs.cache-hit == 'true'
@@ -673,7 +676,7 @@ jobs:
               http://azure.archive.ubuntu.com/ubuntu/ 3 | sudo tee /etc/apt/apt-mirrors.txt
           fi
           sudo rm -f /var/cache/apt/archives/*.deb
-          npx playwright install-deps chromium
+          npx playwright install-deps chromium webkit
           dir="$HOME/.cache/pw-osdeps"
           rm -rf "$dir" && mkdir -p "$dir"
           cp /var/cache/apt/archives/*.deb "$dir"/ 2>/dev/null || true
