@@ -1,7 +1,7 @@
 // node --test scripts/
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decideReport, decideStale, FAIL_TITLE, STALE_TITLE } from './nightly-issue.mjs'
+import { decideReport, decideStale, FAIL_TITLE, handleError, parseArgs, STALE_TITLE } from './nightly-issue.mjs'
 
 const runUrl = 'https://github.com/o/r/actions/runs/1'
 const ok = { 'long-sim': 'success', soak: 'success' }
@@ -56,4 +56,48 @@ test('stale: 기준 안이면 아무것도 안 하고, 넘으면 연다, 이미 
   assert.equal(r.actions[0].title, STALE_TITLE)
   assert.match(r.actions[0].body, /41시간째/)
   assert.deepEqual(decideStale({ lastRun: old, now, maxAgeHours: 36, openIssues: [{ number: 3, title: STALE_TITLE }], workflowUrl: 'w' }).actions, [])
+})
+
+test('report 성공: 이 스크립트가 여는 두 제목만 닫는다(사람이 연 nightly 이슈는 그대로, #241 L1)', () => {
+  const a = decideReport({ results: ok, runUrl, openIssues: [{ number: 5, title: '야간 리포트 추세 추적(사람)' }, { number: 7, title: FAIL_TITLE }] })
+  assert.deepEqual(a.map((x) => [x.kind, x.number]), [['close', 7]])
+})
+
+test('stale: 기록 0건이면 --since부터 잰다(#241 M2)', () => {
+  const since = '2026-11-20T01:55:11Z'
+  const base = { lastRun: null, since, maxAgeHours: 36, openIssues: [], workflowUrl: 'w' }
+  assert.deepEqual(decideStale({ ...base, now: new Date('2026-11-21T12:00:00Z') }).actions, [])
+  const r = decideStale({ ...base, now: new Date('2026-11-22T00:00:00Z') })
+  assert.equal(r.actions.length, 1)
+  assert.equal(r.actions[0].title, STALE_TITLE)
+  assert.match(r.actions[0].body, /한 번도 없다/)
+  assert.deepEqual(decideStale({ ...base, now: new Date('2026-11-22T00:00:00Z'), openIssues: [{ number: 3, title: STALE_TITLE }] }).actions, [])
+})
+
+test('인자 검증: --max-age-hours·--since 값이 없거나 잘못되면 오류(#241 L2)', () => {
+  assert.equal(parseArgs(['stale', '--max-age-hours', '12', '--dry-run']).maxAgeHours, 12)
+  assert.equal(parseArgs(['stale', '--since', '2026-11-20T01:55:11Z']).since, '2026-11-20T01:55:11Z')
+  for (const argv of [
+    ['stale', '--max-age-hours', '--dry-run'],
+    ['stale', '--max-age-hours'],
+    ['stale', '--max-age-hours', 'abc'],
+    ['stale', '--max-age-hours', '0'],
+    ['stale', '--since', 'not-a-date'],
+    ['report', '--long-sim', 'success'],
+    ['other'],
+  ]) {
+    assert.throws(() => parseArgs(argv), (e) => e.usage === true, argv.join(' '))
+  }
+})
+
+test('오류 처리: stale API 오류는 경고·exit 0, report는 실패·step summary, 인자 오류는 실패(#241 M1·L5)', () => {
+  const api = new Error('GET /issues → 503 upstream')
+  const s = handleError('stale', api)
+  assert.equal(s.exitCode, 0)
+  assert.match(s.lines[0], /^::warning::/)
+  const r = handleError('report', api)
+  assert.equal(r.exitCode, 1)
+  assert.match(r.lines[0], /^::error::/)
+  assert.match(r.summary, /야간 알림 실패.*503/)
+  assert.equal(handleError('stale', new Error('x'), { usage: true }).exitCode, 1)
 })

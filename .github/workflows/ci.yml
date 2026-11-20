@@ -411,7 +411,8 @@ jobs:
 
   nightly-report:
     # 야간 알림(GOAL-COVERAGE ①): schedule 실행에서 long-sim·soak 중 하나라도 success가 아니면(실패·취소·시간 초과) `nightly` 라벨
-    # 이슈를 연다(같은 제목이 열려 있으면 댓글만). 둘 다 성공하면 열린 nightly 이슈에 "복구됨" 댓글을 달고 닫는다. 판단·API 호출은
+    # 이슈를 연다(같은 제목이 열려 있으면 댓글만). 둘 다 성공하면 그 스크립트가 여는 두 제목의 열린 이슈에 "복구됨" 댓글을 달고 닫는다.
+    # API 오류로 알림을 못 하면 이 잡이 실패로 남고 step summary에 사유를 적는다. 판단·API 호출은
     # scripts/nightly-issue.mjs(시험: scripts/nightly-issue.test.mjs). 비밀값 없이 github.token만, 쓰기 권한은 이 잡의 issues뿐.
     # 체크아웃은 기본 ref(schedule이면 main) — 이 스크립트도 워크플로와 같은 main 것을 쓴다. 수치 요약은 long-sim·soak 잡의 Job summary.
     name: Nightly report (이슈 알림)
@@ -445,12 +446,14 @@ jobs:
   nightly-watch:
     # 야간이 "돌지 않는" 경우 알림: schedule이 아예 안 뜨면(main에서 빠짐, 워크플로 비활성 — 공개 리포는 60일 무활동이면 자동 비활성)
     # 야간 실행 안의 잡으로는 알 수 없으므로 develop push(자주 일어남)마다 마지막 schedule 실행 시각을 본다. 36시간을 넘으면
-    # "돌지 않음" 이슈를 연다(이미 열려 있으면 아무것도 안 한다). schedule 기록이 아직 하나도 없으면 이슈 없이 로그만 — main 반영 직후 오경보 방지.
+    # "돌지 않음" 이슈를 연다(이미 열려 있으면 아무것도 안 한다). schedule 기록이 하나도 없으면 --since(main 반영 시각)부터 잰다.
     # 호스팅 러너 10초 남짓. push(develop)에서만 돌아 외부 포크 PR에는 쓰기 토큰이 가지 않는다.
+    # 부가 감시라 develop push 실행의 결론을 바꾸지 않는다: API 오류는 스크립트가 경고 후 exit 0, 그 밖(체크아웃 실패 등)은 continue-on-error.
     name: Nightly watch (야간 실행 누락 감시)
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    continue-on-error: true
     permissions:
       contents: read
       actions: read
@@ -462,7 +465,8 @@ jobs:
           sparse-checkout: scripts
       - name: 마지막 schedule 실행 확인
         timeout-minutes: 2
-        run: node scripts/nightly-issue.mjs stale --max-age-hours 36
+        # --since: main에 schedule이 처음 들어간 시각(51875f2, #231 병합 2026-11-20 10:55 KST). 기록이 0건이어도 그로부터 36시간이 지나면 이슈.
+        run: node scripts/nightly-issue.mjs stale --max-age-hours 36 --since 2026-11-20T01:55:11Z
         env:
           GITHUB_TOKEN: ${{ github.token }}
 

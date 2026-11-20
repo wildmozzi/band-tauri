@@ -3,15 +3,17 @@
 //
 //   node scripts/nightly-issue.mjs report --long-sim <result> --soak <result> [--dry-run]
 //     야간(schedule) 실행 끝에 돈다. 둘 중 하나라도 success가 아니면(failure·cancelled·skipped, 시간 초과 포함)
-//     FAIL_TITLE 이슈를 열거나(열린 같은 제목 이슈가 있으면 댓글만) 둘 다 success면 열린 nightly 이슈에 "복구됨" 댓글 후 닫는다.
-//   node scripts/nightly-issue.mjs stale [--max-age-hours 36] [--dry-run]
+//     FAIL_TITLE 이슈를 열거나(열린 같은 제목 이슈가 있으면 댓글만) 둘 다 success면 이 스크립트가 여는 두 제목의 열린 이슈에
+//     "복구됨" 댓글 후 닫는다. API 오류면 잡 실패 + step summary에 남긴다.
+//   node scripts/nightly-issue.mjs stale [--max-age-hours 36] [--since <ISO>] [--dry-run]
 //     develop push마다 돈다. 마지막 schedule 실행이 너무 오래됐으면 STALE_TITLE 이슈를 연다(이미 열려 있으면 아무것도 안 한다).
-//     schedule 실행이 한 번도 없으면 이슈를 열지 않고 알림만 출력한다(main에 schedule이 처음 들어간 직후 오경보 방지).
+//     schedule 실행이 한 번도 없으면 --since(schedule이 main에 들어간 시각)부터 잰다. API 오류는 경고만 하고 exit 0.
 //
 // 환경: GITHUB_TOKEN(워크플로의 github.token — 비밀값 추가 없음), GITHUB_REPOSITORY(owner/repo), 선택 GITHUB_RUN_ID·GITHUB_SERVER_URL.
 // --dry-run은 읽기 API만 부르고 쓰기(이슈 생성·댓글·닫기·라벨)는 하지 않고 출력만 한다. 로컬: GITHUB_TOKEN=$(gh auth token).
 // 판단(decideReport·decideStale)은 순수 함수라 scripts/nightly-issue.test.mjs가 API 없이 시험한다.
 
+import { appendFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 export const LABEL = 'nightly'
@@ -41,7 +43,8 @@ export function decideReport({ results, runUrl, openIssues, gapHours = null }) {
     const existing = findByTitle(openIssues, FAIL_TITLE)
     actions.push(existing ? { kind: 'comment', number: existing.number, body } : { kind: 'create', title: FAIL_TITLE, body })
   } else {
-    for (const i of openIssues) {
+    // 이 스크립트가 여는 두 제목만 닫는다 — 사람이 같은 라벨로 연 추적 이슈는 건드리지 않는다(#241 리뷰 L1).
+    for (const i of openIssues.filter((x) => x.title === FAIL_TITLE || x.title === STALE_TITLE)) {
       actions.push({ kind: 'close', number: i.number, body: `복구됨: 야간 실행이 모두 성공했다.\n\n${table}\n\n실행: ${runUrl}${gapNote}` })
     }
   }
@@ -55,13 +58,23 @@ export function decideReport({ results, runUrl, openIssues, gapHours = null }) {
 
 /**
  * 마지막 schedule 실행 시각 → 할 일 목록.
- * @param {{ lastRun: {createdAt:string, url:string, conclusion:string|null}|null, now: Date, maxAgeHours: number, openIssues: {number:number,title:string}[], workflowUrl: string }} p
+ * 기록이 하나도 없으면 `since`(schedule이 main에 들어간 시각)부터 잰다 — 0건이 이어져도 영원히 조용하지 않게(#241 리뷰 M2).
+ * since도 없으면 이슈를 열지 않는다.
+ * @param {{ lastRun: {createdAt:string, url:string, conclusion:string|null}|null, since?: string|null, now: Date, maxAgeHours: number, openIssues: {number:number,title:string}[], workflowUrl: string }} p
  * @returns {{ actions: object[], note: string }}
  */
-export function decideStale({ lastRun, now, maxAgeHours, openIssues, workflowUrl }) {
-  if (!lastRun) return { actions: [], note: 'schedule 실행 기록이 아직 없다(main 반영 직후면 정상) — 이슈는 열지 않는다.' }
-  const ageHours = (now.getTime() - new Date(lastRun.createdAt).getTime()) / 3_600_000
-  const note = `마지막 schedule 실행: ${lastRun.createdAt} (${ageHours.toFixed(1)}시간 전, ${lastRun.conclusion ?? '진행 중'}) ${lastRun.url}`
+export function decideStale({ lastRun, since = null, now, maxAgeHours, openIssues, workflowUrl }) {
+  let ageHours
+  let note
+  if (lastRun) {
+    ageHours = (now.getTime() - new Date(lastRun.createdAt).getTime()) / 3_600_000
+    note = `마지막 schedule 실행: ${lastRun.createdAt} (${ageHours.toFixed(1)}시간 전, ${lastRun.conclusion ?? '진행 중'}) ${lastRun.url}`
+  } else if (since) {
+    ageHours = (now.getTime() - new Date(since).getTime()) / 3_600_000
+    note = `schedule 실행 기록이 한 번도 없다(기준 시각 ${since}부터 ${ageHours.toFixed(1)}시간)`
+  } else {
+    return { actions: [], note: 'schedule 실행 기록이 아직 없고 기준 시각(--since)도 없다 — 이슈는 열지 않는다.' }
+  }
   if (ageHours <= maxAgeHours) return { actions: [], note }
   if (findByTitle(openIssues, STALE_TITLE)) return { actions: [], note: `${note} — 이미 열린 이슈가 있다.` }
   const body = `야간 schedule 실행이 ${ageHours.toFixed(0)}시간째 없다(기준 ${maxAgeHours}시간). ${note}\n\n` +
@@ -70,19 +83,36 @@ export function decideStale({ lastRun, now, maxAgeHours, openIssues, workflowUrl
   return { actions: [{ kind: 'create', title: STALE_TITLE, body }], note }
 }
 
-function parseArgs(argv) {
+function usageError(msg) {
+  const e = new Error(msg)
+  e.usage = true
+  return e
+}
+
+export function parseArgs(argv) {
   const [mode, ...rest] = argv
-  const opts = { mode, dryRun: false, results: {}, maxAgeHours: 36 }
+  const opts = { mode, dryRun: false, results: {}, maxAgeHours: 36, since: null }
+  // 값을 받는 인자: 값이 없거나 다른 플래그(--…)면 오류 — `--max-age-hours --dry-run`이 dry-run을 삼키지 않게(#241 리뷰 L2).
+  const value = (i, name) => {
+    const v = rest[i]
+    if (v === undefined || v.startsWith('--')) throw usageError(`${name}에 값이 필요하다`)
+    return v
+  }
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]
     if (a === '--dry-run') opts.dryRun = true
-    else if (a === '--long-sim') opts.results['long-sim'] = rest[++i]
-    else if (a === '--soak') opts.results.soak = rest[++i]
-    else if (a === '--max-age-hours') opts.maxAgeHours = Number(rest[++i])
-    else throw new Error(`알 수 없는 인자: ${a}`)
+    else if (a === '--long-sim') opts.results['long-sim'] = value(++i, a)
+    else if (a === '--soak') opts.results.soak = value(++i, a)
+    else if (a === '--max-age-hours') {
+      opts.maxAgeHours = Number(value(++i, a))
+      if (!Number.isFinite(opts.maxAgeHours) || opts.maxAgeHours <= 0) throw usageError(`--max-age-hours는 양수여야 한다: ${rest[i]}`)
+    } else if (a === '--since') {
+      opts.since = value(++i, a)
+      if (Number.isNaN(new Date(opts.since).getTime())) throw usageError(`--since는 ISO 시각이어야 한다: ${opts.since}`)
+    } else throw usageError(`알 수 없는 인자: ${a}`)
   }
-  if (mode !== 'report' && mode !== 'stale') throw new Error('사용법: nightly-issue.mjs report --long-sim <r> --soak <r> | stale [--max-age-hours N] [--dry-run]')
-  if (mode === 'report' && (!opts.results['long-sim'] || !opts.results.soak)) throw new Error('report에는 --long-sim·--soak 결과가 필요하다')
+  if (mode !== 'report' && mode !== 'stale') throw usageError('사용법: nightly-issue.mjs report --long-sim <r> --soak <r> | stale [--max-age-hours N] [--since ISO] [--dry-run]')
+  if (mode === 'report' && (!opts.results['long-sim'] || !opts.results.soak)) throw usageError('report에는 --long-sim·--soak 결과가 필요하다')
   return opts
 }
 
@@ -151,7 +181,7 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2))
   const token = process.env.GITHUB_TOKEN
   const repo = process.env.GITHUB_REPOSITORY
-  if (!token || !repo) throw new Error('GITHUB_TOKEN·GITHUB_REPOSITORY가 필요하다')
+  if (!token || !repo) throw usageError('GITHUB_TOKEN·GITHUB_REPOSITORY가 필요하다')
   const server = process.env.GITHUB_SERVER_URL || 'https://github.com'
   const api = makeApi({ token, repo, dryRun: opts.dryRun })
   const openIssues = await api.openIssues()
@@ -169,6 +199,7 @@ async function main() {
     const runs = await api.scheduleRuns()
     const r = decideStale({
       lastRun: runs[0] ?? null,
+      since: opts.since,
       now: new Date(),
       maxAgeHours: opts.maxAgeHours,
       openIssues,
@@ -181,9 +212,29 @@ async function main() {
   for (const a of actions) await api.apply(a)
 }
 
+/**
+ * 실행 중 오류의 처리(#241 리뷰 M1·L5). 인자 오류는 어느 모드든 실패(exit 1).
+ * stale(감시, 부가 기능): API 오류(5xx·rate limit·네트워크)는 경고 주석만 남기고 exit 0 — develop push 실행을 빨갛게 만들지 않는다.
+ * report(야간 알림): 잡을 실패로 표시(exit 1)하고 step summary에도 남긴다 — 이슈를 못 열어도 실행 요약에서 보이게.
+ * @returns {{ exitCode: number, lines: string[], summary: string|null }}
+ */
+export function handleError(mode, err, { usage = false } = {}) {
+  const msg = String(err?.message ?? err).replace(/\r?\n/g, ' ')
+  if (usage || mode !== 'stale') {
+    return {
+      exitCode: 1,
+      lines: [`::error::nightly-issue ${mode ?? ''} 실패: ${msg}`],
+      summary: mode === 'report' ? `\n> **야간 알림 실패**: 이슈를 열거나 닫지 못했다 — ${msg}\n> 이 실행의 long-sim·soak 결과는 위 표를 보라.\n` : null,
+    }
+  }
+  return { exitCode: 0, lines: [`::warning::야간 실행 감시를 건너뛴다(API 오류): ${msg}`], summary: null }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
-    console.error(e.message)
-    process.exit(1)
+    const r = handleError(process.argv[2], e, { usage: e.usage === true })
+    for (const l of r.lines) console.log(l)
+    if (r.summary && process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, r.summary)
+    process.exit(r.exitCode)
   })
 }
