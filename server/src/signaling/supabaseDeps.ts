@@ -3,7 +3,7 @@ import { createRoomRepository } from '../repositories/roomRepository'
 import { roomDeps } from './roomDeps'
 import type { WsDeps } from './types'
 
-export function supabaseDeps(supabase: SupabaseClient | null): WsDeps {
+export function supabaseDeps(supabase: SupabaseClient | null, opts: { writeParticipantCounts?: boolean } = {}): WsDeps {
   return {
     hasBackend: !!supabase,
     verifyToken: async (token) => {
@@ -16,6 +16,6 @@ export function supabaseDeps(supabase: SupabaseClient | null): WsDeps {
         return null
       }
     },
-    ...roomDeps(supabase ? createRoomRepository(supabase) : null),
+    ...roomDeps(supabase ? createRoomRepository(supabase) : null, opts),
   }
 }
