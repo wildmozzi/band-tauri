@@ -242,7 +242,7 @@ export interface PeerStats {
 export interface LossShapeStats {
   /** 현재 수신 패킷 프레임(ms). 연속 길이(패킷) × 이 값 ≈ ms */
   frameMs: number
-  /** 끝내 안 온 seq의 연속 길이 히스토그램(버킷 1, 2, 3–4, 5–8, 9–16, 17+ 패킷 — engineDiagFormat LOSS_RUN_BUCKETS). 최근 256패킷 안의 손실은 아직 확정 전이라 없다 */
+  /** 끝내 안 온 seq의 연속 길이 히스토그램(버킷 1, 2, 3–4, 5–8, 9–16, 17+ 패킷 — peerDiagFormat LOSS_RUN_BUCKETS). 최근 256패킷 안의 손실은 아직 확정 전이라 없다 */
   lossRuns: number[]
   /** lossRuns 17+ 버킷 연속들의 패킷 수 합(긴 버스트 손실 수를 정확히). 옛 엔진에는 없다 */
   lossLongPkts?: number
