@@ -9,6 +9,7 @@
 // 리다이렉트는 따라가지 않는다(설정된 주소가 직접 응답하는지 본다).
 // 종료 코드: 0 전부 통과, 1 실패가 하나라도 있음, 2 인자 오류.
 // 판정은 아래 순수 함수(judge*)가 하고, 단위 시험은 smoke-prod.test.mjs(가짜 응답)다. CI에서는 실제 주소로 돌리지 않는다.
+import { realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 
 export const DEFAULT_WEB = 'https://indigomuse.art'
@@ -16,11 +17,13 @@ export const DEFAULT_SERVER = 'https://band-server.fly.dev'
 /** 허용되면 안 되는 임의 오리진 (.invalid는 존재할 수 없는 TLD, RFC 2606) */
 export const FOREIGN_ORIGIN = 'https://example.invalid'
 
-/** 공개 응답에 나오면 안 되는 개인정보·비밀 필드 이름(소문자 비교) */
+/**
+ * 공개 응답에 나오면 안 되는 개인정보·비밀 필드 — 키 이름에 이 조각이 들어 있으면 걸린다
+ * (소문자, `_`·`-` 제거 뒤 부분 일치: user_email, accessToken, birthDate, paymentKey 등)
+ */
 export const SENSITIVE_KEYS = [
-  'email', 'phone', 'phone_number', 'phonenumber', 'birth_date', 'birthdate', 'gender', 'name_real',
-  'password', 'password_hash', 'passwordhash', 'token', 'access_token', 'accesstoken', 'refresh_token',
-  'refreshtoken', 'secret', 'service_key', 'servicekey', 'api_key', 'apikey', 'payment_key', 'paymentkey',
+  'email', 'phone', 'birth', 'gender', 'password', 'passwd', 'token', 'secret',
+  'servicekey', 'apikey', 'paymentkey', 'billingkey', 'cardnumber', 'ssn',
 ]
 
 /** 인증 없이 GET하면 401이어야 하는 경로 (router.use(requireAuth) 뒤 또는 핸들러 안에서 401) */
@@ -33,15 +36,10 @@ export const AUTH_REQUIRED_GETS = [
   '/api/music/file/smoke-nonexistent.pdf',
 ]
 
-/** 쓰기 API: 임의 오리진의 프리플라이트에 허용 헤더가 나오면 안 된다 (요청 자체는 OPTIONS만) */
-export const WRITE_ENDPOINTS = [
-  { path: '/api/rooms', method: 'POST' },
-  { path: '/api/posts', method: 'POST' },
-  { path: '/api/payment/orders', method: 'POST' },
-  { path: '/api/storage/post-images/upload-url', method: 'POST' },
-  { path: '/api/storage/avatars/upload-url', method: 'POST' },
-  { path: '/api/music/upload-score', method: 'POST' },
-]
+/**
+ * 쓰기 API 프리플라이트는 경로마다 돌지 않는다: 서버 cors()가 전역(app.ts)이라 경로와 무관하게 같은 답이 나온다.
+ * 3번의 "전역 CORS 프리플라이트 POST /api/rooms" 한 항목이 쓰기 API 전체를 대표한다.
+ */
 
 // ---------- 판정 (순수 함수) ----------
 // res 형태: { status: number, headers: { [소문자 이름]: string }, body?: string }
@@ -79,9 +77,11 @@ export function judgeCorsAllowed(res, origin) {
   return fail(`ACAO ${acao === undefined ? '없음' : JSON.stringify(acao)} (${origin} 기대 — fly secrets CORS_ORIGINS 확인)`)
 }
 
-/** 임의 오리진: ACAO가 없어야 한다('*'나 그 오리진이면 실패). 상태 코드는 상관없다(204/200이어도 브라우저가 막는다) */
+/** 임의 오리진: 정상 응답(2xx/3xx)에 ACAO가 없어야 한다('*'나 그 오리진이면 실패). 204/200이어도 ACAO가 없으면 브라우저가 막는다 */
 export function judgeCorsRejected(res, origin) {
   const acao = h(res, 'access-control-allow-origin')
+  // 4xx/5xx는 서버가 거부를 판정한 게 아니라(죽었거나 경로가 없거나 프록시 오류) 헤더가 없을 뿐 — 거부로 읽지 않는다
+  if (res.status >= 400) return fail(`status ${statusText(res)} — 판정 불가(정상 응답이 아님)`)
   if (acao === undefined || acao === '') return pass('ACAO 없음')
   return fail(`ACAO ${JSON.stringify(acao)} — ${origin}이 허용됨`)
 }
@@ -130,7 +130,8 @@ export function findSensitiveKeys(value, keys = SENSITIVE_KEYS, path = '$') {
   } else if (value && typeof value === 'object') {
     for (const [k, v] of Object.entries(value)) {
       const p = `${path}.${k}`
-      if (keys.includes(k.toLowerCase())) found.push(p)
+      const norm = k.toLowerCase().replace(/[_-]/g, '')
+      if (keys.some(key => norm.includes(key))) found.push(p)
       found.push(...findSensitiveKeys(v, keys, p))
     }
   }
@@ -158,7 +159,8 @@ export function judgePlans(res) {
 }
 
 export function judgeAuthRequired(res) {
-  if (res.status === 401 || res.status === 403) return pass(String(res.status))
+  // 403은 통과시키지 않는다: 이 경로들은 서버가 401만 주므로 403은 프록시·WAF 응답일 수 있다
+  if (res.status === 401) return pass('401')
   if (res.status >= 200 && res.status < 300) return fail(`${res.status} — 인증 없이 열려 있음`)
   return fail(`status ${statusText(res)} (401 기대)`)
 }
@@ -166,7 +168,7 @@ export function judgeAuthRequired(res) {
 // ---------- 실행 ----------
 
 export function parseArgs(argv, env = process.env) {
-  const out = { web: env.SMOKE_WEB_URL || DEFAULT_WEB, server: env.SMOKE_SERVER_URL || DEFAULT_SERVER, timeoutMs: 15000 }
+  const out = { web: env.SMOKE_WEB_URL || DEFAULT_WEB, server: env.SMOKE_SERVER_URL || DEFAULT_SERVER, timeoutMs: 10000, deadlineMs: 90000 }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     const next = () => {
@@ -177,6 +179,7 @@ export function parseArgs(argv, env = process.env) {
     if (a === '--web') out.web = next()
     else if (a === '--server') out.server = next()
     else if (a === '--timeout') out.timeoutMs = Number(next())
+    else if (a === '--deadline') out.deadlineMs = Number(next())
     else if (a === '-h' || a === '--help') out.help = true
     else throw new Error(`알 수 없는 인자: ${a}`)
   }
@@ -187,6 +190,7 @@ export function parseArgs(argv, env = process.env) {
     out[k] = u.origin
   }
   if (!(out.timeoutMs > 0)) throw new Error('--timeout은 양수(ms)')
+  if (!(out.deadlineMs > 0)) throw new Error('--deadline은 양수(ms)')
   return out
 }
 
@@ -203,16 +207,20 @@ function preflightHeaders(origin, method = 'GET') {
   return { Origin: origin, 'Access-Control-Request-Method': method, 'Access-Control-Request-Headers': 'authorization,content-type' }
 }
 
-export async function runSmoke({ web, server, timeoutMs }, log = console.log) {
+export async function runSmoke({ web, server, timeoutMs, deadlineMs = 90000 }, log = console.log, now = Date.now) {
   const results = []
+  const endAt = now() + deadlineMs
+  // 요청 하나의 상한 = min(--timeout, 전체 남은 시간). 전체 상한(--deadline)을 넘기면 남은 항목은 요청 없이 실패
+  const budget = () => Math.min(timeoutMs, endAt - now())
   const check = async (name, fn) => {
     let r
-    try { r = await fn() } catch (e) { r = fail(`요청 실패: ${e?.cause?.code ?? e?.name ?? ''} ${e?.message ?? e}`.trim()) }
+    if (budget() <= 0) r = fail(`전체 시간 상한(${deadlineMs}ms) 초과 — 요청하지 않음`)
+    else try { r = await fn() } catch (e) { r = fail(`요청 실패: ${e?.cause?.code ?? e?.name ?? ''} ${e?.message ?? e}`.trim()) }
     results.push({ name, ...r })
     log(`${r.ok ? 'PASS' : 'FAIL'}  ${name} — ${r.detail}`)
   }
-  const get = (url, headers) => request(url, { headers, timeoutMs })
-  const options = (url, headers) => request(url, { method: 'OPTIONS', headers, timeoutMs, readBody: false })
+  const get = (url, headers) => request(url, { headers, timeoutMs: budget() })
+  const options = (url, headers) => request(url, { method: 'OPTIONS', headers, timeoutMs: budget(), readBody: false })
 
   log(`웹 ${web} · 서버 ${server}\n`)
 
@@ -226,7 +234,7 @@ export async function runSmoke({ web, server, timeoutMs }, log = console.log) {
     judgeCorsAllowed(await options(`${server}/api/rooms`, preflightHeaders(web, 'POST')), web))
   await check(`CORS GET /health Origin=${FOREIGN_ORIGIN} 거부`, async () =>
     judgeCorsRejected(await get(`${server}/health`, { Origin: FOREIGN_ORIGIN }), FOREIGN_ORIGIN))
-  await check(`CORS 프리플라이트 /api/rooms Origin=${FOREIGN_ORIGIN} 거부`, async () =>
+  await check(`전역 CORS 프리플라이트 POST /api/rooms Origin=${FOREIGN_ORIGIN} 거부 (쓰기 API 대표)`, async () =>
     judgeCorsRejected(await options(`${server}/api/rooms`, preflightHeaders(FOREIGN_ORIGIN, 'POST')), FOREIGN_ORIGIN))
 
   // 4. 웹
@@ -242,7 +250,7 @@ export async function runSmoke({ web, server, timeoutMs }, log = console.log) {
   await check('웹 엔트리 JS', async () => {
     const src = findEntryScript(html)
     if (!src) return fail(html == null ? '/ 를 못 읽어 건너뜀' : 'HTML에서 /assets/*.js 스크립트를 못 찾음')
-    const r = judgeAsset(await request(`${web}${src}`, { timeoutMs, readBody: false }))
+    const r = judgeAsset(await request(`${web}${src}`, { timeoutMs: budget(), readBody: false }))
     return { ...r, detail: `${src} ${r.detail}` }
   })
   await check('웹 없는 /assets/x.js', async () => judgeMissingAsset(await get(`${web}/assets/smoke-nonexistent-x.js`)))
@@ -254,22 +262,29 @@ export async function runSmoke({ web, server, timeoutMs }, log = console.log) {
   for (const p of AUTH_REQUIRED_GETS) {
     await check(`서버 GET ${p} 인증 필요`, async () => judgeAuthRequired(await get(`${server}${p}`)))
   }
-  for (const { path, method } of WRITE_ENDPOINTS) {
-    await check(`서버 ${method} ${path} 프리플라이트 Origin=${FOREIGN_ORIGIN} 거부`, async () =>
-      judgeCorsRejected(await options(`${server}${path}`, preflightHeaders(FOREIGN_ORIGIN, method)), FOREIGN_ORIGIN))
-  }
 
+  // 점검이 하나도 안 돌았으면 통과가 아니다
+  if (results.length === 0) results.push({ name: '점검 실행', ok: false, detail: '점검 0개' })
   const failed = results.filter(r => !r.ok)
   log(`\n${results.length - failed.length}/${results.length} 통과${failed.length ? ` — 실패 ${failed.length}` : ''}`)
   return { results, failed: failed.length }
 }
 
 const HELP = `운영 스모크 점검 (읽기 전용: GET/HEAD/OPTIONS, 토큰 없음)
-  npm run smoke:prod -- [--web <url>] [--server <url>] [--timeout <ms>]
+  npm run smoke:prod -- [--web <url>] [--server <url>] [--timeout <ms>] [--deadline <ms>]
   환경변수: SMOKE_WEB_URL, SMOKE_SERVER_URL (기본 ${DEFAULT_WEB}, ${DEFAULT_SERVER})
+  기본: 요청당 10초, 전체 90초
   종료 코드: 0 통과, 1 실패 있음, 2 인자 오류`
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+/** 직접 실행인가: 정션·심볼릭 링크 경로로 실행해도 import.meta.url은 실제 경로이므로 argv[1]을 realpath로 맞춰 비교한다 */
+export function isMainModule(moduleUrl, argv1) {
+  if (!argv1) return false
+  let p = argv1
+  try { p = realpathSync(argv1) } catch { /* 없는 경로면 그대로 비교 */ }
+  return moduleUrl === pathToFileURL(p).href
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
   let args
   try {
     args = parseArgs(process.argv.slice(2))
