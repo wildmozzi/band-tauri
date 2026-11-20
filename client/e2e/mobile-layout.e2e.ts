@@ -9,7 +9,8 @@
  * 같은 페이지에서 뷰포트만 바꿔 가며 본다(화면마다 새로 띄우지 않아 빠르다).
  */
 import type { Locator, Page } from '@playwright/test'
-import { ALICE, GUITAR_POST, REMOTE_PERFORMER, ROCK_ROOM } from './fixtures'
+import { ALICE, BOB, GUITAR_POST, REMOTE_PERFORMER, ROCK_ROOM } from './fixtures'
+import { installFakeTauri } from './mocks/tauri'
 import { expect, test } from './test'
 
 const PHONES = [
@@ -104,6 +105,30 @@ test.describe('좁은 화면: 관람 화면', () => {
     })
   })
 
+  test('긴 닉네임(띄어쓰기 없음)·긴 방 제목이어도 넘치지 않고 채팅 전송·헤더 버튼이 화면 안 (#244 리뷰 M-1)', async ({ page, mock }) => {
+    const longTitle = '금요일밤에모여서하드록커버위주로놀다가새벽까지이어지는아주긴합주실제목입니다'
+    const room = mock.supabase.db.table('rooms').find(r => r.id === ROCK_ROOM.id)!
+    room.title = longTitle
+    await mock.loginAs(ALICE) // 방장: 헤더 버튼 3개 + 채팅 입력
+    mock.signaling.setRoom(ROCK_ROOM.id, {
+      participants: [
+        { ...REMOTE_PERFORMER, nickname: '띄어쓰기없이아주아주길게지은연주자닉네임입니다하하하' },
+        { oderId: 'peer-long-2', nickname: 'Bassist_With_A_Very_Long_Name_NoSpaces', instrument: 'bass', isPerforming: true },
+      ],
+    })
+    await page.setViewportSize(PHONES[0])
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    await expect(page.getByRole('heading', { level: 1, name: longTitle })).toBeVisible()
+    await expect(page.locator('.performers-panel')).toContainText('Bassist_With')
+    await eachViewport(page, NARROW, async vp => {
+      expect(await horizontalOverflow(page), '가로 넘침(px)').toBeLessThanOrEqual(0)
+      // 채팅은 세로로 아래에 있다 — 가로로 화면 안인지만 본다
+      const send = (await page.locator('.chat-panel .chat-send-btn').boundingBox())!
+      expect(send.x + send.width, '전송 버튼 오른쪽').toBeLessThanOrEqual(vp.width)
+      for (const btn of await page.locator('.live-header .header-btn').all()) await expect(btn).toBeInViewport({ ratio: 1 })
+    })
+  })
+
   test('방 정보 모달이 화면 안에 들어오고 닫기 버튼이 44px 이상', async ({ page, mock }) => {
     mock.signaling.setRoom(ROCK_ROOM.id, { participants: [REMOTE_PERFORMER] })
     await page.setViewportSize(PHONES[1])
@@ -165,5 +190,35 @@ test.describe('좁은 화면: 합주실 목록', () => {
     // 태블릿부터는 상단 고정 유지
     await page.setViewportSize({ width: 768, height: 1024 })
     await expect(page.locator('nav.top-nav')).toHaveCSS('position', 'sticky')
+  })
+})
+
+test.describe('데스크톱 앱(연주자) 화면은 그대로 (#244 리뷰 M-2)', () => {
+  // 앱 창 최소 폭이 800이라 769~1024px 규칙만 앱에 닿는다. 웹 관람의 3칸(채팅 표시)은 앱 연주자 믹서를 좁히면 안 된다
+  test('800·900·1024px에서 연주자 | 믹서 2칸, 채팅 숨김 — develop과 같은 배치', async ({ page, mock }) => {
+    await installFakeTauri(page, {
+      engine_start: { ssrc: 1234, key: 'e2e-key', candidates: [{ kind: 'lan', addr: '192.168.0.10:50000' }] },
+      engine_stats: { running: true, sampleRate: 48000, deviceBuffer: 128, inputLevel: 0, outputLevel: 0, xruns: 0, estLatencyMs: 8, devicePeriodMs: 2.7, peers: [] },
+    })
+    mock.signaling.setRoom(ROCK_ROOM.id, { participants: [{ ...REMOTE_PERFORMER, isHost: false }] })
+    await mock.loginAs(BOB)
+    await page.setViewportSize({ width: 1024, height: 768 })
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
+    await page.getByRole('button', { name: /연주 참여하기/ }).click()
+    await page.locator('.instrument-select-modal .instrument-option:not(.disabled)').first().click()
+    await expect.poll(() => mock.signaling.messages('start-performing').length).toBe(1)
+    await expect(page.locator('.live-room')).not.toHaveClass(/web-room/)
+    for (const width of [800, 900, 1024]) {
+      await test.step(`${width}px`, async () => {
+        await page.setViewportSize({ width, height: 700 })
+        await expect(page.locator('.chat-panel')).toBeHidden()
+        const cols = await page.locator('.live-body').evaluate(el => getComputedStyle(el).gridTemplateColumns.split(' ').length)
+        expect(cols, '칸 수').toBe(2)
+        // 믹서 = 창 폭 − 연주자 칸 200 − 칸 사이 1px (develop: 800→599, 900→699, 1024→823)
+        const mixer = (await page.locator('.live-body > .mixer-panel').boundingBox())!
+        expect(Math.round(mixer.width)).toBe(width - 201)
+      })
+    }
   })
 })

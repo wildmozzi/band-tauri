@@ -140,8 +140,17 @@
   background: var(--accent-strong);
 }
 
-/* 769~1024px(태블릿 가로·좁은 창)에서도 채팅을 숨기지 않는다 — 예전에는 display:none이라 관람자가 채팅을 볼 수도 쓸 수도 없었다 (P3-24).
-   이 폭의 3칸 배치는 RoomDetail.css(.live-body) */
+@media (max-width: 1024px) {
+
+  .chat-panel {
+    display: none;
+  }
+
+  /* 웹 관람 화면은 769~1024px에서도 채팅을 보인다(3칸 배치는 RoomDetail.css .web-room, P3-24). 데스크톱 앱은 그대로 숨김 */
+  .web-room .chat-panel {
+    display: flex;
+  }
+}
 
 @media (max-width: 768px) {
 

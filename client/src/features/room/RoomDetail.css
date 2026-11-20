@@ -574,16 +574,25 @@
   }
 }
 
-/* 769~1024px: 연주자 | 믹서 | 채팅 3칸 (채팅을 숨기던 것 고침, P3-24). 768px 이하는 아래에서 1칸으로 쌓는다 */
 @media (max-width: 1024px) {
   .live-body {
+    grid-template-columns: 200px 1fr;
+  }
+}
+
+/* 웹 관람 화면 769~1024px: 연주자 | 믹서 | 채팅 3칸 — 예전에는 채팅을 숨겨 태블릿 관람자가 채팅을 볼 수도 쓸 수도 없었다 (P3-24).
+   데스크톱 앱(연주자 믹서가 넓어야 함, 창 최소 폭 800)은 위 2칸 그대로 — .web-room은 웹에서만 붙는다(RoomDetail.tsx) */
+@media (min-width: 769px) and (max-width: 1024px) {
+  .web-room .live-body {
     grid-template-columns: 200px minmax(0, 1fr) 240px;
   }
 }
 
 @media (max-width: 768px) {
   .live-body {
-    grid-template-columns: 1fr;
+    /* minmax(0, 1fr): 1fr(=minmax(auto, 1fr))이면 줄바꿈 없는 긴 닉네임(.performer-name nowrap)의 최소 폭만큼 칸이 늘어나
+       폰 화면이 388~579px로 넘쳤다(#244 리뷰 M-1). 0까지 줄어들게 해 닉네임은 말줄임으로 */
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto 1fr auto;
   }
 }
