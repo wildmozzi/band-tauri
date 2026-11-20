@@ -574,9 +574,10 @@
   }
 }
 
+/* 769~1024px: 연주자 | 믹서 | 채팅 3칸 (채팅을 숨기던 것 고침, P3-24). 768px 이하는 아래에서 1칸으로 쌓는다 */
 @media (max-width: 1024px) {
   .live-body {
-    grid-template-columns: 200px 1fr;
+    grid-template-columns: 200px minmax(0, 1fr) 240px;
   }
 }
 
@@ -727,5 +728,12 @@
   .live-room .performers-list {
     flex: none;
     max-height: 320px;
+  }
+}
+
+/* 터치 대상 44px (P3-24): 관람 화면의 녹음 버튼 */
+@media (max-width: 768px) {
+  .live-room .recording-btn {
+    min-height: 44px;
   }
 }

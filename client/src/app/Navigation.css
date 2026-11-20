@@ -139,7 +139,7 @@
     display: flex;
     order: 3;
     width: 100%;
-    gap: 20px;
+    gap: 12px;
     overflow-x: auto;
     scrollbar-width: none;
     padding: 4px 2px 6px;
@@ -147,10 +147,37 @@
 
   .top-nav .nav-links a {
     white-space: nowrap;
+    /* 터치 대상 44px 높이 (P3-24) */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 44px;
+    /* 줄어들면 360px에서 'Mix Lab커뮤니티노래방'처럼 글자가 겹친다 — 줄이지 말고 가로 스크롤 */
+    flex-shrink: 0;
+  }
+
+  /* 가로 스크롤 메뉴의 오른쪽 끝을 흐리게 해 뒤에 메뉴가 더 있음을 보인다(360px에서 '노래방'이 반쯤 잘려 보이던 것, P3-24) */
+  .top-nav .nav-links {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+    padding-right: 24px;
   }
 
   .top-nav .nav-actions {
     gap: 10px;
+    /* 좁은 폭에서 브랜드 다음 줄로 넘어가도 오른쪽에 붙어 있게 */
+    margin-left: auto;
+  }
+
+  .top-nav .nav-cta,
+  .top-nav .nav-settings,
+  .top-nav .profile-icon-link {
+    min-height: 44px;
+    min-width: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .top-nav .user-menu {
@@ -161,5 +188,14 @@
 
   .top-nav .user-email {
     display: none;
+  }
+}
+
+/* 폰(≤480px): 내비가 두세 줄(브랜드 / 로그인 메뉴 / 메뉴)이 되어 상단 고정이면 화면의 1/4 이상을 계속 가린다 (P3-24).
+   폰에서는 고정하지 않고 본문과 함께 스크롤한다(합주실 한 화면 맞춤 --app-nav-height는 769px 이상에서만 쓴다) */
+@media (max-width: 480px) {
+  /* App.css의 같은 .top-nav(sticky)와 로드 순서에 상관없이 이기게 태그를 붙인다 */
+  nav.top-nav {
+    position: static;
   }
 }
