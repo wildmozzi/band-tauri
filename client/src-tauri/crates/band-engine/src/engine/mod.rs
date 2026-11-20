@@ -48,6 +48,11 @@ use worker::{Worker, WorkerParams, WorkerStats};
 // 반환 큐가 차지 않는 근거(`band_dsp::peer_media::MEDIA_RET_CAPACITY`): 명령 큐를 채운 제거 + 그 호출의 하나 + 정지 때 표에 남은 피어.
 const _: () = assert!(band_dsp::peer_media::MEDIA_RET_CAPACITY >= band_dsp::peer_media::MEDIA_CMD_CAPACITY + crate::net::MAX_PEERS + 2);
 
+// 믹스 탭 스레드가 구독 전에 쌓인 것을 ringbuf `Consumer::clear`로 버린다(`Engine::tap_cons`). ringbuf 0.4.8의 `skip`/`clear`는
+// 원소 `Drop`이 panic하면 double free가 난다(RUSTSEC-2026-0293, 0.5.2+에서 수정) — 원소에 Drop 글루가 없어야 그 경로가 닿지
+// 않는다. 탭 링 원소 타입을 바꾸면 이 단언의 타입도 같이 바꾼다(docs/overhaul/deps-audit-2026-11-18.md 6번).
+const _: () = assert!(!core::mem::needs_drop::<<HeapCons<f32> as ringbuf::traits::Observer>::Item>());
+
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
 pub(crate) type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
 

@@ -66,6 +66,8 @@ opt-level = 3
 opt-level = 3
 
 [profile.release]
+# abort는 ringbuf 0.4.8 RUSTSEC-2026-0293(원소 Drop이 panic해 unwind할 때의 double free)이 "해당 없음"인 근거의 하나다 —
+# unwind로 바꾸려면 docs/overhaul/deps-audit-2026-11-18.md 6번의 재검토 조건을 먼저 본다.
 panic = "abort"
 codegen-units = 1
 lto = true

@@ -299,6 +299,12 @@ pub struct OutputFeed {
     pub tap: HeapCons<f32>,
 }
 
+// 출력 콜백이 해제된 슬롯의 소스 링을 ringbuf `Consumer::clear`로 비운다(`pull_source`의 SLOT_DRAIN). ringbuf 0.4.8의
+// `skip`/`clear`는 원소 `Drop`이 panic하면 double free가 난다(RUSTSEC-2026-0293, 0.5.2+에서 수정) — 원소에 Drop 글루가 없어야
+// 그 경로가 닿지 않는다(콜백에서 원소 Drop을 돌리지 않는다는 RT 규칙이기도 하다). 소스 링 원소 타입(`OutputRt::cons`)을 바꾸면
+// 이 단언의 타입도 같이 바꾼다 — 깨지면 `clear`를 쓰지 않거나 ringbuf를 올린다(docs/overhaul/deps-audit-2026-11-18.md 6번).
+const _: () = assert!(!core::mem::needs_drop::<<HeapCons<f32> as Observer>::Item>());
+
 /// 출력 콜백 상태. 소스 링들에서 꺼내 섞고 장치 채널로 기록한다(콜백 구동 믹스).
 pub struct OutputRt {
     cons: Vec<HeapCons<f32>>,
