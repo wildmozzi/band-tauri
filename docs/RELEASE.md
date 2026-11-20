@@ -176,6 +176,7 @@ fly secrets set OPS_TOKEN=$t -a band-server --stage   # --stage: 지금 재시�
    PowerShell 기록에 남기 싫으면 PowerShell 7에서 `$env:OPS_TOKEN = Read-Host -MaskInput` 으로 넣는다.
 5. [ ] 0이면 **바로**(몇 분 안에) `main` 병합·push. 시간이 지났으면 4를 다시 한다
 6. [ ] GitHub Actions "Deploy Server to Fly.io" 성공 확인, `GET /health` 200, `npm run ops:active`가 다시 응답하는지(배포 직후 0)
+6-1. [ ] **배포 뒤 `npm run smoke:prod`**(리포 루트, 종료 코드 0이어야 함) — 읽기 전용(GET/HEAD/OPTIONS, 토큰 없음) 운영 점검: `/health`, `/api/ops/activity` 비공개(401), CORS(웹 오리진 허용·임의 오리진 거부), 웹 HTML·깊은 경로 no-cache·엔트리 JS immutable·없는 자산 404, 공개 `/api/payment/plans` 형태·민감 필드 없음, 인증 필요 경로 401·쓰기 API 프리플라이트 거부. 주소는 `--web`/`--server` 또는 `SMOKE_WEB_URL`/`SMOKE_SERVER_URL`(기본 indigomuse.art, band-server.fly.dev). 웹(Vercel)만 배포했을 때도 돌린다. 외부 의존이라 CI에서는 판정 단위 시험(`scripts/smoke-prod.test.mjs`)만 돈다
 7. [ ] (선택) 데스크톱 앱으로 방 하나 만들어 입장·연주 시작까지 확인
 
 ### 확인 경로가 없을 때 (이 기능이 운영에 배포되기 전, OPS_TOKEN 미설정)
