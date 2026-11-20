@@ -97,12 +97,27 @@ const REACT_COMPILER_LEGACY_FILES = {
   // 렌더 중 Math.random·Date.now 호출. 값 생성 시점을 state 초기화·effect로 옮기는 수정이 필요
   'react-hooks/purity': ['src/features/demo-recording/Recording.tsx', 'src/features/payment/PaymentSuccess.tsx'],
   // state로 든 SVG 요소의 style을 effect에서 직접 바꾼다. ref로 옮기는 수정이 필요
-  'react-hooks/immutability': ['src/features/demo-karaoke/ScoreDisplay.tsx'],
+  'react-hooks/immutability': [
+    'src/features/demo-karaoke/ScoreDisplay.tsx',
+    // 시험 하네스 컴포넌트가 렌더 중 바깥 변수(훅 결과 보관용)에 대입한다. 하네스를 ref·콜백으로 바꾸는 수정이 필요
+    'src/features/room/state/RoomProvider.test.tsx',
+  ],
+  // 시험 하네스 컴포넌트가 훅 결과를 모듈 변수에 담아 단언한다(렌더되는 앱 코드는 아님). 새 시험 파일에는 error로 걸린다
+  'react-hooks/globals': [
+    'src/features/auth/Auth.test.tsx',
+    'src/features/auth/AuthContext.test.tsx',
+    'src/features/room/reconnectUx.test.tsx',
+    'src/features/room/state/RoomProvider.test.tsx',
+    'src/features/room/state/reconnect.test.tsx',
+  ],
 }
 
 export default defineConfig([
-  // dist·node_modules 밖 client의 TS/TSX 전부가 대상(예전 `eslint . --ext ts,tsx`와 같은 범위)
-  globalIgnores(['dist', 'src-tauri']),
+  // 예전 `eslint . --ext ts,tsx`(eslintrc)와 같은 범위. flat config의 기본 무시는 node_modules·.git뿐이라 옛 암묵 무시를 직접 적는다
+  // - `**/.*`: eslintrc는 점 파일·점 폴더를 기본으로 무시했다(e2e/.dist 번들·.results·.report, src-tauri/.cargo 등)
+  // - `**/dist`: 옛 ignorePatterns 'dist'(gitignore식이라 모든 깊이). dist-ssr·coverage도 산출물 — 이제 .js도 검사 대상이라 함께 뺀다
+  // - `src-tauri`: Rust 크레이트·Tauri 생성물(gen)·빌드 산출물. TS/JS 소스가 없다
+  globalIgnores(['**/.*', '**/dist', '**/dist-ssr', '**/coverage', 'src-tauri']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [js.configs.recommended, tseslint.configs.recommended, reactHooks.configs.flat.recommended],
@@ -128,14 +143,6 @@ export default defineConfig([
       // 서식 규칙이라 폐기 예정(@stylistic로 이전)이지만 eslint 10에도 남아 있어 v8과 같게 유지한다
       'no-extra-semi': 'error',
       'no-mixed-spaces-and-tabs': 'error',
-    },
-  },
-  {
-    // 시험 하네스 컴포넌트가 훅 결과를 바깥 변수에 담아 단언하는 패턴(렌더되는 앱 코드가 아님)
-    files: ['**/*.test.{ts,tsx}'],
-    rules: {
-      'react-hooks/globals': 'off',
-      'react-hooks/immutability': 'off',
     },
   },
   ...Object.entries(REACT_COMPILER_LEGACY_FILES).map(([rule, files]) => ({
