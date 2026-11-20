@@ -44,7 +44,7 @@ export function useRoomHostActions(opts: {
 
       leaveRoom()
       navigate('/rooms')
-      // 화면을 떠난 뒤 상세 캐시 제거 (마운트 중에 지우면 지운 방을 다시 조회한다)
+      // 상세 캐시 제거 — 이 화면이 내려간 뒤에 지운다 (마운트 중에 지우면 지운 방을 다시 조회한다)
       forgetRoomDetail(qc, roomId)
     } catch (err) {
       console.error('Failed to delete room:', err)

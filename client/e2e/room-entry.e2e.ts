@@ -62,6 +62,23 @@ test.describe('비밀번호 방 입장', () => {
     await expect(page.getByRole('button', { name: '⚙️ 방 설정' })).toBeVisible()
     await expect(page.locator('.room-password-card')).toHaveCount(0)
   })
+
+  test('방장이 방을 삭제하면 목록으로 가고, 지운 방을 다시 조회하지 않는다', async ({ page, mock }) => {
+    const db = mock.supabase.db
+    const detailReads = () => db.log.filter(l => l.table === 'rpc/get_room').length
+    await mock.loginAs(BOB) // JAZZ_ROOM의 방장
+    await page.goto(`/rooms/${JAZZ_ROOM.id}`)
+    await expect(page.getByRole('heading', { level: 1, name: JAZZ_ROOM.title })).toBeVisible()
+    const readsBefore = detailReads()
+
+    page.once('dialog', dialog => void dialog.accept())
+    await page.getByRole('button', { name: 'ℹ️ 정보' }).click()
+    await page.getByRole('button', { name: '🗑️ 합주실 삭제' }).click()
+    await expect(page).toHaveURL(/\/rooms$/)
+    expect(db.table('rooms').some(r => r.id === JAZZ_ROOM.id)).toBe(false)
+    await page.waitForTimeout(300)
+    expect(detailReads()).toBe(readsBefore)
+  })
 })
 
 test.describe('정원 초과 (P3-12b)', () => {
