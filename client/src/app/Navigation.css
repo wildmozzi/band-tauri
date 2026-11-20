@@ -165,7 +165,9 @@
 
   .top-nav .nav-cta,
   .top-nav .nav-settings,
-  .top-nav .profile-icon-link {
+  .top-nav .profile-icon-link,
+  /* 요금제 배지: 링크(눌리는 영역)만 키우고 알약 모양(.plan-badge-compact)은 그대로 */
+  .top-nav .plan-status-compact {
     min-height: 44px;
     min-width: 44px;
     display: inline-flex;

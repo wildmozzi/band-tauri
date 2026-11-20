@@ -1,6 +1,7 @@
 import type { PostFormState } from './usePostForm'
 import { PostImagePicker } from './PostImagePicker'
 import { POST_INSTRUMENTS } from './postLogic'
+import './communityTouch.css'
 
 interface PostFormProps {
   form: PostFormState
@@ -30,6 +31,7 @@ export function PostForm({
   return (
     <div style={{ maxWidth: '900px', margin: '0 auto', padding: 'var(--space-6)' }}>
       <button
+        className="community-touch"
         onClick={onCancel}
         style={{
           background: 'transparent',
@@ -88,6 +90,7 @@ export function PostForm({
             <div style={{ display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
               {POST_INSTRUMENTS.map((instrument) => (
                 <button
+                  className="community-touch"
                   key={instrument.id}
                   type="button"
                   onClick={() => form.setSelectedInstrument(instrument.id)}
@@ -148,6 +151,7 @@ export function PostForm({
             </label>
             <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-3)' }}>
               <input
+                className="community-touch"
                 type="text"
                 value={form.tagInput}
                 onChange={(e) => form.setTagInput(e.target.value)}
@@ -164,6 +168,7 @@ export function PostForm({
                 }}
               />
               <button
+                className="community-touch"
                 type="button"
                 onClick={form.handleAddTag}
                 style={{
@@ -201,6 +206,8 @@ export function PostForm({
                     #{tag}
                     <button
                       type="button"
+                      className="community-tag-remove"
+                      aria-label={`태그 ${tag} 빼기`}
                       onClick={() => form.handleRemoveTag(tag)}
                       style={{
                         background: 'none',
@@ -231,6 +238,7 @@ export function PostForm({
               </span>
             )}
             <button
+              className="community-touch"
               type="button"
               onClick={onCancel}
               style={{
@@ -247,6 +255,7 @@ export function PostForm({
               취소
             </button>
             <button
+              className="community-touch"
               type="submit"
               disabled={submitting}
               style={{

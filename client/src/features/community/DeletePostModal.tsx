@@ -41,6 +41,7 @@ export function DeletePostModal({ deleting, onCancel, onConfirm }: DeletePostMod
         </p>
         <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end' }}>
           <button
+            className="community-touch"
             onClick={onCancel}
             style={{
               padding: '10px var(--space-5)',
@@ -56,6 +57,7 @@ export function DeletePostModal({ deleting, onCancel, onConfirm }: DeletePostMod
             취소
           </button>
           <button
+            className="community-touch"
             onClick={onConfirm}
             disabled={deleting}
             style={{

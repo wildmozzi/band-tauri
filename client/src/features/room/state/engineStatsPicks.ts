@@ -17,3 +17,27 @@ export const pickMetronomeSync = (stats: EngineStats | null) => {
 
 /** 녹음 컨트롤: 녹음 통계(녹음하지 않으면 null — 이때는 틱마다 다시 그리지 않는다) */
 export const pickRecordStats = (stats: EngineStats | null): RecordStats | null => stats?.recording ?? null
+
+/**
+ * 메트로놈 동기 진단 줄(TEST-SESSION 3.5절 5번): 시계 왕복·기울기, 늦은·뺀·옮긴 클릭(+ 툴팁의 엔진 시작 시각 차 clockOffsetMs).
+ * 메트로놈이 꺼졌거나 통계가 없으면 running=false라 틱마다 다시 그리지 않는다. 값은 표시 자릿수로 반올림해 같은 표시면 다시 그리지 않는다.
+ */
+export const pickMetronomeDiag = (stats: EngineStats | null) => {
+  const m = stats?.metronome
+  const round = (v: number | null | undefined, step: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v / step) * step : null)
+  if (!m?.running) return { running: false as const }
+  return {
+    running: true as const,
+    synced: m.synced,
+    refPeer: m.refPeerId != null,
+    refClockUnsupported: m.refClockUnsupported ?? false,
+    clockRttMs: round(m.clockRttMs, 0.1),
+    clockOffsetMs: round(m.clockOffsetMs, 0.01),
+    driftPpm: round(m.driftPpm, 0.1),
+    lateClicks: m.lateClicks ?? null,
+    skippedClicks: m.skippedClicks ?? null,
+    shiftedClicks: m.shiftedClicks ?? null,
+  }
+}
+
+export type MetronomeDiag = ReturnType<typeof pickMetronomeDiag>
