@@ -91,11 +91,15 @@ pub(crate) struct PeerSample {
     pub(crate) rtt_ms: Option<f32>,
     pub(crate) jitter_ms: f32,
     pub(crate) buffer_ms: f32,
+    /// 지터 버퍼 목표 깊이(ms, `PeerStats.targetMs`) — GOAL 1-4 "목표 ±3ms" 판정용(#246).
+    pub(crate) target_ms: f32,
     pub(crate) playout_ms: f32,
     pub(crate) loss_pct: f32,
     /// 누적 값(차분은 분석 때 계산)
     pub(crate) late: u64,
     pub(crate) concealed: u64,
+    /// 재생한 프레임 수(정상 + 은닉) — 은닉 비율 `concealed / produced`의 분모(#246). 연결 중·무수신 리셋 시간은 들지 않는다.
+    pub(crate) produced: u64,
     pub(crate) level: f32,
     pub(crate) echo_active: bool,
     pub(crate) peer_echoing: bool,
@@ -227,10 +231,12 @@ impl Sample {
                     rtt_ms: p.rtt_ms,
                     jitter_ms: p.jitter_ms,
                     buffer_ms: p.buffer_ms,
+                    target_ms: p.target_ms,
                     playout_ms: p.playout_ms,
                     loss_pct: p.loss_pct,
                     late: p.late,
                     concealed: p.concealed,
+                    produced: p.produced,
                     level: p.level,
                     echo_active: p.echo_active,
                     peer_echoing: p.peer_echoing,
@@ -361,6 +367,7 @@ pub(super) mod tests {
             loss_pct: 0.5,
             late: 1,
             concealed: 7,
+            produced: 1400,
             level: 0.2,
             playout_ms: 15.0,
             echo_requested: false,
@@ -400,6 +407,7 @@ pub(super) mod tests {
         let line = serde_json::to_string(&s).unwrap();
         assert!(!line.contains("203.0.113.45"));
         assert!(line.contains("\"bufferMs\":12.0"));
+        assert!(line.contains("\"targetMs\":10.0") && line.contains("\"produced\":1400"), "{line}");
         assert!(line.contains("\"path\":\"relay\""));
         assert!(line.contains("\"txCodec\":\"opus\"") && line.contains("\"txCodecAuto\":true"), "{line}");
         assert!(line.contains("\"autoOpus\":true"), "{line}");

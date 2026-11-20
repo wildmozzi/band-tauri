@@ -57,6 +57,10 @@ pub struct PeerStats {
     pub loss_pct: f32,
     pub late: u64,
     pub concealed: u64,
+    /// 재생한 패킷 프레임 수(정상 디코드 + 은닉, 누적 — 지터 `JitterStats.produced`). 은닉 비율의 분모(`concealed / produced`)로
+    /// 진단 타임라인에만 싣는다(Tauri `PeerStats` JSON에는 없다 — 설계 4절 계약 그대로).
+    #[serde(skip)]
+    pub(crate) produced: u64,
     pub level: f32,
     /// 실제 재생 지연(ms): 벽시계로 잰 버퍼 지연 + 출력 링 + 장치 출력 버퍼. 장치 클럭 추정과 독립적이라
     /// `bufferMs`와 차이가 벌어지면 숨은 지연 누적을 뜻한다(PR #5 H-1). 재생 전에는 0.
@@ -334,6 +338,7 @@ impl Engine {
                             loss_pct: js.loss_pct,
                             late: js.late,
                             concealed: js.concealed,
+                            produced: js.produced,
                             level: media.mix.level.load(),
                             // 벽시계로 잰 버퍼 지연(소스 링 포함) + 장치 출력 버퍼: 클럭 추정과 독립적인 실제 재생 지연
                             playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + out_ms } else { 0.0 },
@@ -478,6 +483,7 @@ mod tests {
                 loss_pct: 0.0,
                 late: 0,
                 concealed: 0,
+                produced: 0,
                 level: 0.0,
                 playout_ms: 0.0,
                 echo_requested: true,

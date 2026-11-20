@@ -133,18 +133,29 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
     }
     let _ = writeln!(
         out,
-        "| 피어 | 경로(연결 샘플) | RTT 중앙 | bufferMs 중앙 / p95 / 최대 | 목표 중앙 | ±3ms 밖 1분+ 구간 (최장, 밖 %) | 은닉 % (FEC / PLC / PCM · 언더런) | 손실 % (lossShape · 엔진 평균) | 연결 / 첫 소리 |\n|---|---|---|---|---|---|---|---|---|"
+        "| 피어 | 경로(연결 샘플) | RTT 중앙 | bufferMs 중앙 / p95 / 최대 | 목표 중앙 | ±3ms 밖 1분+ 구간 (최장, 밖 %, 기록, 틈) | 은닉 % ÷ 재생 프레임 (FEC / PLC / PCM · 언더런) | 손실 % (복구 후 lossShape · 엔진 평균) | 연결 / 첫 소리 |\n|---|---|---|---|---|---|---|---|---|"
     );
     for p in peers {
         let paths = if p.paths.is_empty() { none() } else { p.paths.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ") };
-        let band = p.band.as_ref().map(|b| format!("{} ({:.0}s, {:.1}%)", b.over_limit, b.longest_s, b.outside_pct)).unwrap_or_else(|| "없음(targetMs 미기록)".into());
+        let band = p
+            .band
+            .as_ref()
+            .map(|b| format!("{} ({:.0}s, {:.1}%, 기록 {}, 틈 {})", b.over_limit, b.longest_s, b.outside_pct, fmt_s(b.covered_s), b.gaps))
+            .unwrap_or_else(|| "없음(targetMs 미기록)".into());
         let conceal = p
             .conceal
             .as_ref()
-            .map(|c| format!("{:.2}% ({} / {} / {} · {})", c.pct, pct(c.fec_pct), pct(c.plc_pct), pct(c.pcm_pct), pct(c.underrun_pct)))
+            .map(|c| match c.pct {
+                Some(v) => format!("{v:.2}% ({} / {} / {} · {})", pct(c.fec_pct), pct(c.plc_pct), pct(c.pcm_pct), pct(c.underrun_pct)),
+                None => format!("분모 없음(은닉 {}프레임, produced 미기록)", c.concealed),
+            })
             .unwrap_or_else(none);
         let loss = format!("{} · {}", pct(p.conceal.as_ref().and_then(|c| c.loss_pct)), pct(p.loss_pct_engine_mean));
         let list = |v: &[f64]| if v.is_empty() { none() } else { v.iter().map(|x| format!("{x:.0}")).collect::<Vec<_>>().join(", ") + "ms" };
+        let mut first_audio = list(&p.first_audio_ms);
+        if p.no_audio_entries > 0 {
+            let _ = write!(first_audio, " · 소리 못 받음 {}", p.no_audio_entries);
+        }
         let entries = if p.entries > 1 { format!(" (항목 {})", p.entries) } else { String::new() };
         let _ = writeln!(
             out,
@@ -154,7 +165,7 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
             dist(&p.buffer_ms),
             ms(p.target_ms.as_ref().map(|d| d.median)),
             list(&p.connect_ms),
-            list(&p.first_audio_ms),
+            first_audio,
         );
     }
     let _ = writeln!(out);
@@ -215,7 +226,19 @@ fn conn_agg(out: &mut String, a: &ConnAgg) {
         a.sessions_with_relay,
         a.sessions
     );
-    let _ = writeln!(out, "- 성공률 분모에는 중단(결과 전 퇴장·엔진 정지)이 든다(`net::connlog` — 빼면 위로 치우친다). recover·switch는 시도가 아니다.\n");
+    let _ = writeln!(out, "- 성공률 분모에는 중단(결과 전 퇴장·엔진 정지)이 든다(`net::connlog` — 빼면 위로 치우친다). recover·switch는 시도가 아니다.");
+    let _ = writeln!(
+        out,
+        "- 시도는 기록 기준이다: 한 합주의 두 사람 zip을 함께 주면 같은 연결이 양쪽에서 한 번씩 세어진다. 98% 문턱은 실제 시도 하한 {}회(시간이 겹치는 다른 zip 세션은 큰 쪽만)로 가른다.",
+        a.attempts_lower
+    );
+    if a.unknown_results > 0 {
+        let _ = writeln!(out, "- 결과를 모르는 시도 {}회(새 형식)는 위 수에서 뺐다.", a.unknown_results);
+    }
+    if !a.duplicate_files.is_empty() {
+        let _ = writeln!(out, "- 같은 zip이 두 번 들어와 집계에서 뺐다: {}", a.duplicate_files.join(", "));
+    }
+    let _ = writeln!(out);
 }
 
 /// 보고서 → Markdown.
@@ -225,6 +248,9 @@ pub(crate) fn markdown(r: &Report) -> String {
     let _ = writeln!(out, "# 진단 보고서 — zip {}개, 세션 {n_sessions}개\n", r.files.len());
     for f in &r.files {
         let _ = writeln!(out, "## {}\n", f.source);
+        if let Some(d) = &f.duplicate_of {
+            let _ = writeln!(out, "- 주의: {d}와 타임라인이 똑같다(같은 zip) — 연결 집계에서 뺐다.");
+        }
         if f.bad_lines > 0 {
             let _ = writeln!(out, "- 주의: JSON이 아닌 타임라인 줄 {}개를 건너뛰었다.", f.bad_lines);
         }
