@@ -13,7 +13,7 @@ GOAL 1절 지연 지표를 **숫자로** 확인하는 절차다. 도구는 두 �
 
 - Scarlett Solo 4th Gen, USB-C 케이블, Focusrite 드라이버(ASIO 포함)와 **Focusrite Control 2**
 - 루프백 케이블 1개: 6.35mm(1/4") 잭 ↔ 6.35mm 잭(TRS 또는 TS)
-- ASIO를 쓰려면 `asio` 피처로 빌드한 앱(`npm run dev:tauri` 전에 `CPAL_ASIO_DIR`, 또는 ASIO 포함 릴리스 빌드)
+- ASIO를 쓰려면 `asio` 피처로 빌드한 앱(루트에서 `npm run dev:tauri:asio` — SDK 폴더는 `CPAL_ASIO_DIR`로 지정, 또는 `npm run tauri:build:asio`로 만든 설치본)
 
 Solo 4세대 단자: 앞면 **입력 1**(XLR 마이크), **입력 2**(6.35mm 악기/라인), 헤드폰. 뒷면 **Line Output L/R**(6.35mm TRS), USB-C.
 
