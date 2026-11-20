@@ -44,7 +44,7 @@
 |---|---|---|---|---|
 | **로컬 처리 지연** `estLatencyMs` (ASIO 128/2.5ms ≤ 8ms, WASAPI 독점 ≤ 15ms, 공유 ≤ 30ms) | `E/tests/loopback.rs` `est_latency_budget_table`(결정적, 가짜 장치로 ASIO 128·WASAPI 독점 144/96·IAudioClient3 공유 128 행을 목표와 비교) · `impulse_latency_matches_estimate`, `link_end_to_end_latency_128_2_5ms`(realtime) · `E/tests/measure.rs` `loopback_known_delay_within_half_ms`(realtime, 루프백 측정 도구 자체의 정확도) | ASIO 128/2.5 est **7.83ms**(계산), WASAPI 독점 실장치 est **7.50ms** — P1-0(#11). WASAPI 공유 실측 기록 없음 | 자동 시험만(실장비 미확인). ASIO는 실장치로 연 적이 없다 | ① 하드웨어 루프백으로 숨은 지연(보정값) 측정 — [사람] B(P1-1a·P1-11). ② cpal 공유 폴백(10ms 주기)은 표에 행이 없다 → `est_latency_budget_table`에 cpal 공유 행 추가(자동, XS, 신규 후보 ⑧) |
 | **입→귀 총 지연** (같은 도시 ≤ 25ms, 원거리 ≤ 40ms) | `E/tests/measure.rs` `echo_round_trip_reflects_proxy_delay`(realtime, 지연 프록시로 에코 왕복 검증)·`echo_flow_consent_measure_auto_stop`(기본 시험, 동의·자동 정지 흐름) · `C/features/room/earLatency.test.ts`, `client/e2e/ear-latency.e2e.ts`(화면 추정식) | 실회선 값 없음. 화면 추정식만 완료(P2-8 #112, P2-8b #149) | 자동 시험만(실장비 미확인) | 실제 두 PC 에코 측정 — [사람] C(P1-7, 같은 LAN)·D(P1-8, 원거리). 화면 추정값과 에코값 ±5ms 대조(P2-8)도 같은 세션에서 |
-| **지터 버퍼 추가 지연** (안정 회선 중앙값 ≤ 1프레임 + p95 지터) | `E/tests/sim/long.rs` `long_sim_6peers_5min`(PR마다)·`long_sim_6peers_60min`(야간)의 GOAL 1절 판정(`goal_delay_limit` 첫·마지막 창) · 지터 단위 시험 `band_dsp::jitter::tests`(`client/src-tauri/crates/band-dsp/src/jitter/mod.rs`) · `E/tests/sim/chaos.rs` 11개(`chaos_reorder_storm` … `chaos_stale_replays`) | 60분 하네스 GOAL 전 항목 PASS(P1-6c #65, P2-17g #209 뒤 재확인) · soak 버퍼 p50/p99 6.2/8.3ms(기본)·4.5/5.5ms(초저지연) — P1-14(#110, run 43186650655) | 자동 충족(시뮬레이션·가짜 장치). 예외: 5분 하네스(PR마다)의 꼬리 지터 피어 #1 마지막 창만 Known 래칫(`KNOWN_1` short 12.17ms), 60분은 PASS | ① P1-6d 결정(꼬리 지터 = 안정 회선 아님)의 남은 일: 하네스 1절 판정에서 꼬리 지터 피어 제외 — 자동(P1-6d, P2-16d). ② 실회선 유선 LAN에서 `bufferMs` 기록 — [사람] C |
+| **지터 버퍼 추가 지연** (안정 회선 중앙값 ≤ 1프레임 + p95 지터) | `E/tests/sim/long.rs` `long_sim_6peers_5min`(PR마다)·`long_sim_6peers_60min`(야간)의 GOAL 1절 판정(`goal_delay_limit` 첫·마지막 창 — 안정 회선 피어 #0·#2·#3·#4·#5에 건다. 분류는 `LineClass` 한 곳: 지터 분포가 유계면 안정, 꼬리 긴 분포(지수·파레토)면 꼬리 지터) · 꼬리 지터 피어 #1은 1절 대상 밖(P1-6d)이라 대신 상한 판정(`TailDelay`·`TailDelayLast`: 늦은 패킷 예산을 뺀 bufferMs ≤ 1F + p95 지터, `TailCap`: 예산 ≤ 1F, 예산을 뺀 누적 ≤ 1ms)과 2절 은닉·언더런 · 시드 안정성 `long_sim_judgement_is_seed_stable`(PR마다, 시드 변형 3개)·`long_sim_seed_sweep_5min`/`_60min`(수동) · 지터 단위 시험 `band_dsp::jitter::tests`(`client/src-tauri/crates/band-dsp/src/jitter/mod.rs`) · `E/tests/sim/chaos.rs` 11개(`chaos_reorder_storm` … `chaos_stale_replays`) | 60분 하네스 GOAL 전 항목 PASS(P1-6c #65, P2-17g #209 뒤 재확인) · soak 버퍼 p50/p99 6.2/8.3ms(기본)·4.5/5.5ms(초저지연) — P1-14(#110, run 43186650655) | 자동 충족(시뮬레이션·가짜 장치). Known 래칫 예외 없음(P2-16d: 꼬리 지터 피어 #1은 P1-6d 결정대로 1절 대상 밖 — 상한·2절 판정으로 바꿈). 5분 시드 변형 40개 전부 PASS: 안정 회선 1절 여유 최소 +0.02ms(#3, 2.5ms 프레임·지터 5ms), 꼬리 지터 #1은 예산을 뺀 여유 ≥ +1.65ms·은닉 ≤ 1.16%(이전 규칙이면 40개 중 19개 FAIL) | 실회선 유선 LAN에서 `bufferMs` 기록 — [사람] C |
 | **지연 누적** (60분 동안 `bufferMs`가 목표 ±3ms 밖으로 1분 이상 머물지 않음, ±200ppm) | `E/tests/sim/long.rs`: `BAND_MS = 3.0`·`BAND_MAX_S = 60.0`(`band_ok`), `accum_ok`(처음·끝 차 ≤ 1ms), 피어 드리프트 −200~+200ppm · `E/src/engine/worker/tests.rs` `device_clock_recovers_*` · 실제 시계: `soak.rs`(드리프트는 가짜 장치 시계 차) | 60분 하네스 띠 밖 0.0%/0.2%(P1-6a #58), 이후 PASS 유지 | 자동 충족(시뮬레이션) | 실제 장치 시계 차(USB 인터페이스 ↔ 내장)에서 60분 — 자동 불가, [사람] C의 "60분 합주"에서 진단 zip `timeline.jsonl` 확인 |
 
 ## 2. 안정성
@@ -93,7 +93,7 @@
 | 0 웹 관람 | e2e(chromium) | 화면만 확인, 청취 없음 |
 | 1-1 로컬 처리 지연 | 계산·가짜 장치 충족 | WASAPI 독점 est 7.50ms만, 루프백·ASIO 없음 |
 | 1-2 입→귀 | 도구 시험만 | **없음** |
-| 1-3 지터 버퍼 지연 | 충족(꼬리 지터 피어 Known) | 없음 |
+| 1-3 지터 버퍼 지연 | 충족(안정 회선 피어 전부, 시드 40개. 꼬리 지터 피어는 1절 대상 밖 — 상한·2절 판정) | 없음 |
 | 1-4 지연 누적 | 충족 | 없음 |
 | 2-1 손실 1% 은닉 | 수치 충족, FEC 문구는 사실과 다름 | 청감 없음 |
 | 2-2 xrun 30분 | 판정 안 함 | **없음** |
@@ -120,7 +120,7 @@
 | ④ | "연주 시작→첫 소리" 값을 진단 zip에 남기기 | P1-20 후속 | S | 3-3 |
 | ⑤ | 개발자 도구 없이 사람 확인이 되게: `relay.state`·`relay.rttMs`·`sendQueue.p99Ms`·`txCodec`을 진단 줄 툴팁 또는 진단 zip 요약에 노출(TEST-SESSION 3.2·4.2가 지금 Console 명령을 요구) | **신규 후보** | S | 3-2 (사람 측정 속도) |
 | ⑥ | TEST-SESSION.md 최신화: `git switch overhaul` → `develop`, 0절 "운영 서버는 overhaul 이전 버전"(2026-11-20 컷오버로 사실과 다름), 화면에 생긴 값의 Console 단계 정리, ⑤ 반영 | **신규 후보**(문서) | S | 사람 확인 C·D 전체 |
-| ⑦ | 하네스 GOAL 1절 판정에서 꼬리 지터 피어 제외(P1-6d 결정의 남은 일) + 꼬리 지터 회선 tail_extra 한도 정리 | P1-6d, P2-16d | S | 1-3 |
+| ⑦ | ~~하네스 GOAL 1절 판정에서 꼬리 지터 피어 제외(P1-6d 결정의 남은 일) + 꼬리 지터 회선 tail_extra 한도 정리~~ — 완료(P2-16d PR): 회선 분류로 판정 정리, tail_extra는 측정 결과 지연↔은닉 트레이드오프뿐이라 동작 유지 | P1-6d, P2-16d | S | 1-3 |
 | ⑧ | `est_latency_budget_table`에 cpal WASAPI 공유 폴백(10ms 주기) 행 추가 — GOAL "공유 ≤ 30ms"를 실제 폴백 경로로도 판정 | **신규 후보** | XS | 1-1 |
 | ⑨ | Playwright WebKit 프로젝트로 웹 관람 e2e 일부 실행(지금 chromium만). iOS Safari 실기기를 대신하지는 못하지만 WebKit 고유 오류(오디오 잠금 해제 흐름, 레이아웃)는 먼저 잡는다 | **신규 후보**(P2-18e 보조) | M | 한 문장 목표의 "웹 관람" |
 | ⑩ | ASIO `kAsioResetRequest`·버퍼 변경 처리 코드(장치 없이 가능한 부분까지) — 확인은 장치 필요 | P1-11 | M | 1-1, 4(ASIO) |
