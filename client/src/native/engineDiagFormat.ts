@@ -92,7 +92,7 @@ export function relayWarn(r: RelayStats | null | undefined): boolean {
 
 export function relayTitle(r: RelayStats): string {
   return [
-    `릴레이 상태: ${r.state} (binding 등록 중 · bound 등록됨 · unreachable 응답 없음 · rejected 거절 · expired 토큰 만료)`,
+    `릴레이 상태: ${r.state} (binding 등록 중 · bound 등록됨 · unreachable 응답 없음 · rejected 거절됨 · expired 토큰 만료)`,
     `릴레이 주소: ${r.addr}`,
     `엔진 ↔ 릴레이 RTT: ${r.rttMs != null ? `${r.rttMs.toFixed(1)}ms` : '-'}`,
     `릴레이로 보내는 양: ${Math.round(r.txKbps)}kbps${r.overBudget ? ' — 상한의 90% 초과(릴레이가 패킷을 버리기 시작)' : ''}`,
@@ -119,13 +119,25 @@ export function sendQueueTitle(q: SendQueueStats): string {
   ].join('\n')
 }
 
-/** 이 피어에게 보내는 내 소리의 코덱·프레임: "내 송신: Opus · 5ms", 자동 전환이면 "(자동 전환)". 아직 안 보냈으면 "내 송신: 아직 없음", 옛 엔진(필드 없음)이면 null */
-export function formatTxCodec(ps: Pick<PeerStats, 'txCodec' | 'txCodecAuto'>, txFrameMs?: number | null): string | null {
+/** 자동 코덱 전환 이유(P1-4e) 문구. 모르는 값·없음이면 null */
+export function txCodecReasonText(reason: PeerStats['txCodecReason']): string | null {
+  if (reason === 'lossFeedback') return '상대 회선 손실 — 끊김 보정'
+  if (reason === 'relayLoad') return '서버 경유 대역 절약'
+  return null
+}
+
+/**
+ * 이 피어에게 보내는 내 소리의 코덱·프레임: "내 송신: Opus · 5ms", 자동 전환이면 "(자동 전환)" — 이유를 알면 "(자동 전환: 이유)"로
+ * 한 줄에 합친다(#250 L3). 아직 안 보냈으면 "내 송신: 아직 없음", 옛 엔진(필드 없음)이면 null
+ */
+export function formatTxCodec(ps: Pick<PeerStats, 'txCodec' | 'txCodecAuto' | 'txCodecReason'>, txFrameMs?: number | null): string | null {
   if (ps.txCodec === undefined) return null
   if (ps.txCodec === null) return '내 송신: 아직 없음'
   const codec = ps.txCodec === 'opus' ? 'Opus' : 'PCM16'
   const frame = txFrameMs ? ` · ${txFrameMs}ms` : ''
-  return `내 송신: ${codec}${frame}${ps.txCodecAuto ? ' (자동 전환)' : ''}`
+  const reason = txCodecReasonText(ps.txCodecReason)
+  const auto = ps.txCodecAuto ? (reason ? ` (자동 전환: ${reason})` : ' (자동 전환)') : ''
+  return `내 송신: ${codec}${frame}${auto}`
 }
 
 /** 손실 모양 연속 길이 버킷(패킷, P2-17h) */

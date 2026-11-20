@@ -332,7 +332,8 @@ pub(crate) struct PeerReport {
     pub(crate) first_audio_ms: Vec<f64>,
     /// 입장 후 첫 소리(ms, 항목마다 `entryLeadMs + firstAudioMs`, format 3) — GOAL 3-3 정의 구간
     pub(crate) entry_first_audio_ms: Vec<f64>,
-    /// 첫 소리는 있는데 `entryLeadMs`가 없는 항목 수(옛 클라이언트·옛 형식) — 3-3 충족을 막는다
+    /// 첫 소리는 있는데 `entryLeadMs`가 없는 항목 수 — format 3이면 뒤에 들어온 연주자·다시 추가한 피어(참고값), 그 전 형식이면
+    /// 입장 구간을 모르는 항목(3-3 충족을 막는다). 집계(`aggregate_conn`)가 zip 형식으로 가른다
     pub(crate) no_lead_entries: usize,
     /// 내가 이 피어에게 보낸 코덱(연결 샘플 수, `opus`·`pcm16`, 자동 전환이면 `opus(자동: 이유)`)
     pub(crate) tx_codec: BTreeMap<String, usize>,
@@ -348,6 +349,9 @@ pub(crate) struct PeerReport {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnRow {
     pub(crate) at_s: f64,
+    /// 이벤트 시각(유닉스 ms) — 같은 사람이 두 번 내보낸 zip의 같은 기록을 한 번만 세는 데 쓴다(#250 H1)
+    #[serde(skip)]
+    pub(crate) t: u64,
     pub(crate) peer: String,
     pub(crate) phase: String,
     pub(crate) result: String,
@@ -397,6 +401,11 @@ pub(crate) struct SessionReport {
     /// 내보낼 때 아직 연결 중(`connecting`·`reconnecting`)이던 시도 수 — 결과 이벤트가 아직 없다(#246 L2'). 세션이 끝난 기록이면
     /// 0(엔진 정지가 남은 시도를 `aborted`로 남긴다)
     pub(crate) pending: usize,
+    /// 그 미완 시도의 피어 가명(`pending`과 같은 수) — 3-1 쌍 집계용
+    #[serde(skip)]
+    pub(crate) pending_peers: Vec<String>,
+    /// 내보낸 쪽 자신의 가명(`selfPeer`, format 3 — 상대 zip의 피어 가명과 같은 값). 없으면 None
+    pub(crate) self_peer: Option<String>,
     pub(crate) goal: Vec<GoalRow>,
 }
 
@@ -431,8 +440,9 @@ pub(crate) struct ConnPathRow {
 }
 
 /// 연결 성공률 집계(후보 ③). 시도 = `connect` + `reconnect`(설계상 시도 하나에 결과 하나). `recover`·`switch`는 시도가 아니다.
-/// 시도 수는 **기록 기준**이다: 한 합주의 두 사람 zip을 함께 주면 같은 연결이 양쪽에서 한 번씩 세어진다(가명이 서로 달라 짝을 맞출
-/// 수 없다). 그래서 98% 문턱은 `attempts_lower`(시간이 겹치는 다른 zip 세션들은 그중 시도가 가장 많은 zip 것만 센 하한)로 가른다.
+/// 시도 수는 **기록 기준**이다: 한 합주의 두 사람 zip을 함께 주면 같은 연결이 양쪽에서 한 번씩 세어진다. 그래서 98% 문턱은
+/// `attempts_lower`(시간이 겹치는 기록은 그중 시도가 가장 많은 사람 것만 센 하한)로 가른다. 같은 사람(`selfPeer`)이 같은 세션을 여러 번
+/// 내보낸 zip은 한 기록으로 합친다(연결 기록은 시각·피어·단계·결과로 중복 제거, #250 H1).
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnAgg {
@@ -464,15 +474,23 @@ pub(crate) struct ConnAgg {
     pub(crate) sessions_with_relay: usize,
     /// 첫 소리(ms, 피어 항목마다 `firstAudioMs`)
     pub(crate) first_audio_ms: Vec<f64>,
-    /// 입장 후 첫 소리(ms, `entryLeadMs + firstAudioMs`)와 그 값이 없는(첫 소리만 있는) 항목 수
+    /// 입장 후 첫 소리(ms, `entryLeadMs + firstAudioMs`)
     pub(crate) entry_first_audio_ms: Vec<f64>,
+    /// 첫 소리는 있는데 입장 값이 없는 항목 — 옛 형식(format 3 미만: 입장 구간을 모른다, 3-3 충족을 막는다)
     pub(crate) no_lead_entries: usize,
+    /// 첫 소리는 있는데 입장 값이 없는 항목 — format 3(뒤에 들어온 연주자·다시 추가한 피어: 기준이 "피어 추가"라 참고값이다.
+    /// 그 사람의 입장은 그 사람의 zip에 있다, #250 M1)
+    pub(crate) late_entries: usize,
     /// 세션 수: NAT 매핑 추정별(`없음` = format 3 이전)
     pub(crate) nat_sessions: BTreeMap<String, usize>,
-    /// 콘형 쌍으로 확인된 무리(시간이 겹치는 세션들 — 참가자 모두의 zip이 있고 모두 independent·open) 수와 그 안의 시도(양쪽 합):
-    /// 직접(lan/public) · 직접 아님(relay/failed) · 결과 모름(aborted/미완)
-    pub(crate) cone_groups: usize,
+    /// 내보낸 사람 수(`selfPeer`가 다른 zip — 같은 PC가 여러 번 내보낸 zip은 한 사람, format 3)
+    pub(crate) endpoints: usize,
+    /// 짝이 확인된 쌍(시간이 겹치는 기록에서 서로를 피어로 본 두 사람의 zip이 모두 있음) 수와 그중 둘 다 independent·open인 쌍 수
+    pub(crate) pairs: usize,
+    pub(crate) cone_pairs: usize,
+    /// 콘형 쌍의 실제 시도 수 하한(쌍마다 두 사람 쪽 기록 중 많은 쪽 — 같은 연결이 양쪽에 한 번씩 남는다)
     pub(crate) cone_attempts: usize,
+    /// 콘형 쌍의 기록(양쪽 합): 직접(lan/public) · 직접 아님(relay/failed) · 결과 모름(aborted/미완/새 형식)
     pub(crate) cone_direct: usize,
     pub(crate) cone_nondirect: usize,
     pub(crate) cone_unresolved: usize,
@@ -981,6 +999,7 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
         for c in v.get("conn").and_then(Value::as_array).into_iter().flatten() {
             let t = u64_at(c, "t").unwrap_or_else(|| t_of(v));
             conn.push(ConnRow {
+                t,
                 at_s: t.saturating_sub(start_t.unwrap_or(t)) as f64 / 1000.0,
                 peer: str_at(c, "peer").unwrap_or("?").into(),
                 phase: str_at(c, "phase").unwrap_or("?").into(),
@@ -991,13 +1010,18 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
     }
 
     // 미완 시도: 세션 마지막 줄이 실행 중(내보낼 때 아직 합주 중)이면 그 줄에서 연결 중인 피어마다 결과 없는 시도가 하나 있다.
-    let pending = lines
+    let pending_peers: Vec<String> = lines
         .last()
         .filter(|v| running(v))
         .and_then(|v| v.get("peers"))
         .and_then(Value::as_array)
-        .map(|ps| ps.iter().filter(|p| matches!(str_at(p, "state"), Some("connecting" | "reconnecting"))).count())
-        .unwrap_or(0);
+        .map(|ps| {
+            ps.iter()
+                .filter(|p| matches!(str_at(p, "state"), Some("connecting" | "reconnecting")))
+                .map(|p| str_at(p, "peer").or_else(|| str_at(p, "peerId")).unwrap_or("?").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
 
     let est: Vec<f64> = run.iter().filter_map(|v| f64_at(v, "estLatencyMs")).filter(|x| *x > 0.0).collect();
     // NAT 추정(바뀐 줄에만 — 세션의 마지막 값), 릴레이 상태·RTT, 송신 큐 p99(바뀐 줄에만 — 앞 값을 이어 쓴다).
@@ -1046,7 +1070,9 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
         stream_errors: last_run.and_then(|v| u64_at(v, "streamErrors")),
         peers,
         conn,
-        pending,
+        pending: pending_peers.len(),
+        pending_peers,
+        self_peer: lines.iter().rev().find_map(|v| str_at(v, "selfPeer")).map(str::to_string),
         goal: Vec::new(),
     };
     s.goal = session_goal(&s, interval_ms);
@@ -1289,89 +1315,183 @@ fn session_goal(s: &SessionReport, interval_ms: u64) -> Vec<GoalRow> {
     out
 }
 
-/// 여러 zip의 `conn`과 첫 소리 → 연결 성공률 집계(후보 ③). `duplicate_of`가 있는 zip(같은 zip을 두 번 줌)은 뺀다.
-pub(crate) fn aggregate_conn(files: &[FileReport]) -> ConnAgg {
-    const RESULTS: [&str; 5] = ["lan", "public", "relay", "failed", "aborted"];
-    // (결과, 단계) → (시도 수, 소요 ms들)
-    let mut by: BTreeMap<(usize, bool), (usize, Vec<f64>)> = BTreeMap::new();
-    let (mut n_sessions, mut with_relay, mut recover, mut switch, mut unknown_results) = (0, 0, 0, 0, 0);
-    let (mut no_audio_entries, mut no_audio_short, mut pending) = (0, 0, 0);
-    let mut first_audio_ms = Vec::new();
-    let (mut entry_first_audio_ms, mut no_lead_entries) = (Vec::new(), 0);
-    let mut nat_sessions: BTreeMap<String, usize> = BTreeMap::new();
-    // 시도 하한용: (zip 순번, 세션 시간 범위, 그 세션 시도 수)
-    let mut spans: Vec<(usize, (u64, u64), usize)> = Vec::new();
-    // 3-1 콘형 쌍용: spans와 같은 순서로 (NAT 매핑, 피어 수, [직접, 직접 아님, 결과 모름])
-    let mut cone_info: Vec<(Option<String>, usize, [usize; 3])> = Vec::new();
-    let mut duplicate_files = Vec::new();
-    for (fi, f) in files.iter().enumerate() {
-        if f.duplicate_of.is_some() {
-            duplicate_files.push(f.source.clone());
-            continue;
-        }
+/// 집계 단위: 한 사람의 한 엔진 세션. 같은 사람(`selfPeer`)이 같은 세션(번호 같고 시간이 겹침)을 여러 번 내보낸 zip은 하나로 합친다 —
+/// 피어 표·미완·NAT은 가장 늦게 끝난 기록(뒤에 내보낸 zip이 앞 것을 담는다)을, 연결 기록은 모두 합쳐 시각·피어·단계·결과로 중복을
+/// 뺀다(링이 넘쳐 앞 zip에만 남은 줄도 잃지 않게). `selfPeer`가 없는 세션(format 3 이전)은 각자 한 단위다.
+struct Unit<'a> {
+    who: Option<&'a str>,
+    /// 사람 열쇠(같은 `selfPeer`는 같은 값, 없으면 zip마다 다른 값) — 시도 하한에서 "가장 많은 사람"을 고를 때 쓴다
+    key: usize,
+    session: u64,
+    span: (u64, u64),
+    /// 대표 기록(가장 늦게 끝난 세션)
+    rep: &'a SessionReport,
+    /// 대표 기록의 zip이 format 3 이상인가(3-3: 입장 값이 없는 항목을 참고값으로 볼지)
+    format3: bool,
+    conn: Vec<&'a ConnRow>,
+}
+
+impl Unit<'_> {
+    /// 이 기록이 피어로 본 가명(피어 표·연결 기록·미완)
+    fn saw(&self, peer: &str) -> bool {
+        self.rep.peers.iter().any(|p| p.peer == peer) || self.conn.iter().any(|c| c.peer == peer) || self.rep.pending_peers.iter().any(|p| p == peer)
+    }
+}
+
+fn units_of(files: &[FileReport]) -> Vec<Unit<'_>> {
+    let mut units: Vec<Unit> = Vec::new();
+    // 사람 열쇠: `selfPeer`가 있으면 가명마다 하나(zip 수 뒤의 번호), 없으면 zip 순번
+    let mut keys: BTreeMap<&str, usize> = BTreeMap::new();
+    for (file_key, f) in files.iter().enumerate().filter(|(_, f)| f.duplicate_of.is_none()) {
+        let format3 = f.format.is_some_and(|x| x >= 3);
         for s in &f.sessions {
-            n_sessions += 1;
-            let mut relay_here = false;
-            let mut attempts_here = 0;
-            let mut kinds = [0usize; 3];
-            for c in &s.conn {
-                relay_here |= c.result == "relay";
-                match c.phase.as_str() {
-                    "connect" | "reconnect" => {
-                        // 알 수 없는 결과(새 형식)는 성공·실패로 추측하지 않는다 — 따로 세고 3-2를 가르지 않는다.
-                        let Some(r) = RESULTS.iter().position(|r| *r == c.result) else {
-                            unknown_results += 1;
-                            continue;
-                        };
-                        let e = by.entry((r, c.phase == "reconnect")).or_default();
-                        e.0 += 1;
-                        e.1.extend(c.ms);
-                        attempts_here += 1;
-                        // RESULTS 순서: lan, public → 직접 / relay, failed → 직접 아님 / aborted → 결과 모름
-                        kinds[match r {
-                            0 | 1 => 0,
-                            2 | 3 => 1,
-                            _ => 2,
-                        }] += 1;
+            let span = s.span_ms.unwrap_or((0, 0));
+            let who = s.self_peer.as_deref();
+            let same = who.and_then(|w| {
+                units.iter().position(|u| u.who == Some(w) && u.session == s.session && u.span.0 <= span.1 && span.0 <= u.span.1)
+            });
+            match same {
+                Some(i) => {
+                    let u = &mut units[i];
+                    for c in &s.conn {
+                        if !u.conn.iter().any(|x| (x.t, &x.peer, &x.phase, &x.result) == (c.t, &c.peer, &c.phase, &c.result)) {
+                            u.conn.push(c);
+                        }
                     }
-                    "recover" => recover += 1,
-                    "switch" => switch += 1,
-                    _ => {}
+                    if span.1 > u.span.1 {
+                        u.rep = s;
+                        u.format3 = format3;
+                    }
+                    u.span = (u.span.0.min(span.0), u.span.1.max(span.1));
+                }
+                None => {
+                    let key = match who {
+                        Some(w) => {
+                            let n = files.len() + keys.len();
+                            *keys.entry(w).or_insert(n)
+                        }
+                        None => file_key,
+                    };
+                    units.push(Unit { who, key, session: s.session, span, rep: s, format3, conn: s.conn.iter().collect() });
                 }
             }
-            with_relay += usize::from(relay_here);
-            pending += s.pending;
-            attempts_here += s.pending;
-            kinds[2] += s.pending;
-            *nat_sessions.entry(s.nat.clone().unwrap_or_else(|| "없음".into())).or_default() += 1;
-            for p in &s.peers {
-                first_audio_ms.extend(&p.first_audio_ms);
-                entry_first_audio_ms.extend(&p.entry_first_audio_ms);
+        }
+    }
+    units
+}
+
+const RESULTS: [&str; 5] = ["lan", "public", "relay", "failed", "aborted"];
+
+/// 연결 시도 결과 → [직접(lan/public), 직접 아님(relay/failed), 결과 모름(aborted)] 칸. 표에 없는 결과(새 형식)는 None
+fn kind_of(result: &str) -> Option<usize> {
+    RESULTS.iter().position(|r| *r == result).map(|r| match r {
+        0 | 1 => 0,
+        2 | 3 => 1,
+        _ => 2,
+    })
+}
+
+/// 여러 zip의 `conn`과 첫 소리 → 연결 성공률 집계(후보 ③). `duplicate_of`가 있는 zip(같은 zip을 두 번 줌)은 빼고, 같은 사람이 같은
+/// 세션을 여러 번 내보낸 zip은 합친다(`units_of`).
+pub(crate) fn aggregate_conn(files: &[FileReport]) -> ConnAgg {
+    let units = units_of(files);
+    // (결과, 단계) → (시도 수, 소요 ms들)
+    let mut by: BTreeMap<(usize, bool), (usize, Vec<f64>)> = BTreeMap::new();
+    let (mut with_relay, mut recover, mut switch, mut unknown_results) = (0, 0, 0, 0);
+    let (mut no_audio_entries, mut no_audio_short, mut pending) = (0, 0, 0);
+    let mut first_audio_ms = Vec::new();
+    let (mut entry_first_audio_ms, mut no_lead_entries, mut late_entries) = (Vec::new(), 0, 0);
+    let mut nat_sessions: BTreeMap<String, usize> = BTreeMap::new();
+    // 시도 하한용: (사람 열쇠, 세션 시간 범위, 그 세션 시도 수)
+    let mut spans: Vec<(usize, (u64, u64), usize)> = Vec::new();
+    let duplicate_files = files.iter().filter(|f| f.duplicate_of.is_some()).map(|f| f.source.clone()).collect();
+    for u in &units {
+        let s = u.rep;
+        let mut relay_here = false;
+        let mut attempts_here = 0;
+        for c in &u.conn {
+            relay_here |= c.result == "relay";
+            match c.phase.as_str() {
+                "connect" | "reconnect" => {
+                    // 알 수 없는 결과(새 형식)는 성공·실패로 추측하지 않는다 — 따로 세고 3-2를 가르지 않는다.
+                    let Some(r) = RESULTS.iter().position(|r| *r == c.result) else {
+                        unknown_results += 1;
+                        continue;
+                    };
+                    let e = by.entry((r, c.phase == "reconnect")).or_default();
+                    e.0 += 1;
+                    e.1.extend(c.ms);
+                    attempts_here += 1;
+                }
+                "recover" => recover += 1,
+                "switch" => switch += 1,
+                _ => {}
+            }
+        }
+        with_relay += usize::from(relay_here);
+        pending += s.pending;
+        attempts_here += s.pending;
+        *nat_sessions.entry(s.nat.clone().unwrap_or_else(|| "없음".into())).or_default() += 1;
+        for p in &s.peers {
+            first_audio_ms.extend(&p.first_audio_ms);
+            entry_first_audio_ms.extend(&p.entry_first_audio_ms);
+            if u.format3 {
+                late_entries += p.no_lead_entries;
+            } else {
                 no_lead_entries += p.no_lead_entries;
-                no_audio_entries += p.no_audio_entries;
-                no_audio_short += p.no_audio_short;
             }
-            spans.push((fi, s.span_ms.unwrap_or((0, 0)), attempts_here));
-            cone_info.push((s.nat.clone(), s.peers.len(), kinds));
+            no_audio_entries += p.no_audio_entries;
+            no_audio_short += p.no_audio_short;
+        }
+        spans.push((u.key, u.span, attempts_here));
+    }
+
+    // 콘형 쌍(3-1): 시간이 겹치는 기록 무리마다, 서로 다른 두 사람(`selfPeer`) A·B에 대해 A의 기록이 B를 피어로 보고 B의 기록도 A를
+    // 피어로 볼 때 그 쌍의 짝이 확인된다(같은 PC가 두 번 내보낸 zip은 한 사람이라 쌍이 되지 않는다, #250 H1). 쌍을 이루는 기록이 모두
+    // independent·open이면 콘형 쌍이고, 그 쌍의 시도는 A 쪽(B에게)·B 쪽(A에게) 기록이다 — 같은 연결이 양쪽에 남으므로 실제 시도 수는
+    // 많은 쪽을 하한으로 쓴다(#250 M2). 무리 안의 다른 사람(zip이 없는 상대)과의 시도는 넣지 않는다.
+    let (mut pairs, mut cone_pairs, mut cone_attempts, mut cone) = (0, 0, 0, [0usize; 3]);
+    for g in overlap_groups(&units.iter().map(|u| u.span).collect::<Vec<_>>()) {
+        let mut who: Vec<&str> = g.iter().filter_map(|&i| units[i].who).collect();
+        who.sort_unstable();
+        who.dedup();
+        for (ai, a) in who.iter().enumerate() {
+            for b in &who[ai + 1..] {
+                let side = |me: &str, other: &str| -> Vec<&Unit> { g.iter().map(|&i| &units[i]).filter(|u| u.who == Some(me) && u.saw(other)).collect() };
+                let (ua, ub) = (side(a, b), side(b, a));
+                if ua.is_empty() || ub.is_empty() {
+                    continue;
+                }
+                pairs += 1;
+                if !ua.iter().chain(&ub).all(|u| matches!(u.rep.nat.as_deref(), Some("independent" | "open"))) {
+                    continue;
+                }
+                let count = |us: &[&Unit], other: &str| {
+                    let mut k = [0usize; 3];
+                    for u in us {
+                        for c in u.conn.iter().filter(|c| c.peer == other && matches!(c.phase.as_str(), "connect" | "reconnect")) {
+                            // 새 형식의 모르는 결과도 결과 모름으로(충족을 막는 쪽)
+                            k[kind_of(&c.result).unwrap_or(2)] += 1;
+                        }
+                        k[2] += u.rep.pending_peers.iter().filter(|p| *p == other).count();
+                    }
+                    k
+                };
+                let (ka, kb) = (count(&ua, b), count(&ub, a));
+                cone_pairs += 1;
+                cone_attempts += ka.iter().sum::<usize>().max(kb.iter().sum());
+                for i in 0..3 {
+                    cone[i] += ka[i] + kb[i];
+                }
+            }
         }
     }
-    // 콘형 쌍(3-1): 시간이 겹치는 세션 무리마다, 참가자 모두의 zip이 있고(zip 수 = 가장 많이 본 피어 수 + 1) 모두 매핑 독립·NAT 없음이면
-    // 그 무리의 시도는 콘형 쌍끼리의 시도다. 피어 가명은 zip마다 달라 짝을 맞출 수 없으므로 수로만 확인한다(같은 시간에 다른 방에서
-    // 따로 합주한 기록을 함께 주면 틀릴 수 있다 — 한 합주의 zip만 함께 준다).
-    let (mut cone_groups, mut cone) = (0, [0usize; 3]);
-    for g in overlap_groups(&spans.iter().map(|x| x.1).collect::<Vec<_>>()) {
-        let mut files: Vec<usize> = g.iter().map(|&i| spans[i].0).collect();
-        files.sort_unstable();
-        files.dedup();
-        let max_peers = g.iter().map(|&i| cone_info[i].1).max().unwrap_or(0);
-        let all_cone = g.iter().all(|&i| matches!(cone_info[i].0.as_deref(), Some("independent" | "open")));
-        if files.len() >= 2 && max_peers + 1 == files.len() && all_cone {
-            cone_groups += 1;
-            for &i in &g {
-                cone.iter_mut().zip(cone_info[i].2).for_each(|(a, b)| *a += b);
-            }
-        }
-    }
+    let endpoints = {
+        let mut w: Vec<&str> = units.iter().filter_map(|u| u.who).collect();
+        w.sort_unstable();
+        w.dedup();
+        w.len()
+    };
     let rows: Vec<ConnPathRow> = RESULTS
         .iter()
         .enumerate()
@@ -1389,7 +1509,7 @@ pub(crate) fn aggregate_conn(files: &[FileReport]) -> ConnAgg {
     let attempts = direct + relay + failed + aborted + pending;
     let pct = |k: usize| (attempts > 0).then(|| k as f64 * 100.0 / attempts as f64);
     ConnAgg {
-        sessions: n_sessions,
+        sessions: units.len(),
         attempts,
         attempts_lower: attempts_lower_bound(&spans),
         unknown_results,
@@ -1408,9 +1528,12 @@ pub(crate) fn aggregate_conn(files: &[FileReport]) -> ConnAgg {
         first_audio_ms,
         entry_first_audio_ms,
         no_lead_entries,
+        late_entries,
         nat_sessions,
-        cone_groups,
-        cone_attempts: cone.iter().sum(),
+        endpoints,
+        pairs,
+        cone_pairs,
+        cone_attempts,
         cone_direct: cone[0],
         cone_nondirect: cone[1],
         cone_unresolved: cone[2],
@@ -1441,17 +1564,17 @@ fn overlap_groups(spans: &[(u64, u64)]) -> Vec<Vec<usize>> {
     out
 }
 
-/// 실제 시도 수의 하한: 시간이 겹치는 세션들을 한 무리로 묶고(같은 합주를 여러 사람이 내보냈을 수 있다), 무리마다 zip별 시도 합 중
-/// 가장 큰 것만 센다. 같은 zip의 세션은 시간이 겹치지 않으므로 겹침 없는 세션은 그대로 더해진다.
+/// 실제 시도 수의 하한: 시간이 겹치는 기록들을 한 무리로 묶고(같은 합주를 여러 사람이 내보냈을 수 있다), 무리마다 사람별 시도 합 중
+/// 가장 큰 것만 센다. 같은 사람의 세션은 시간이 겹치지 않으므로 겹침 없는 세션은 그대로 더해진다.
 fn attempts_lower_bound(spans: &[(usize, (u64, u64), usize)]) -> usize {
     overlap_groups(&spans.iter().map(|x| x.1).collect::<Vec<_>>())
         .into_iter()
         .map(|g| {
-            let mut per_file: BTreeMap<usize, usize> = BTreeMap::new();
+            let mut per_who: BTreeMap<usize, usize> = BTreeMap::new();
             for i in g {
-                *per_file.entry(spans[i].0).or_default() += spans[i].2;
+                *per_who.entry(spans[i].0).or_default() += spans[i].2;
             }
-            per_file.values().copied().max().unwrap_or(0)
+            per_who.values().copied().max().unwrap_or(0)
         })
         .sum()
 }
@@ -1465,8 +1588,10 @@ fn conn_goal(a: &ConnAgg) -> Vec<GoalRow> {
     // 콘형 쌍: 같은 시간대 세션 무리에서 참가자 모두의 zip이 있고 모두 STUN 매핑 독립(콘형)·NAT 없음일 때만(format 3, `aggregate_conn`).
     let nats = a.nat_sessions.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · ");
     let cone_measured = format!(
-        "콘형 쌍 무리 {} · 그 안 시도 {}: 직접 {} · 릴레이/실패 {} · 중단/미완 {} (전체 직접 {}/{} = {}) · 세션별 NAT {nats}",
-        a.cone_groups,
+        "내보낸 사람 {} · 짝 확인된 쌍 {} · 콘형 쌍 {} · 그 쌍의 실제 시도 하한 {}회(양쪽 기록: 직접 {} · 릴레이/실패 {} · 중단/미완 {}) (전체 직접 {}/{} = {}) · 세션별 NAT {nats}",
+        a.endpoints,
+        a.pairs,
+        a.cone_pairs,
         a.cone_attempts,
         a.cone_direct,
         a.cone_nondirect,
@@ -1480,19 +1605,43 @@ fn conn_goal(a: &ConnAgg) -> Vec<GoalRow> {
         out.push(row("3-1", "직접 연결 성공률", t31, "없음".into(), Unknown, Some("conn 기록 없음(P1-18 이전이거나 연결 시도 없음)".into())));
     } else if a.cone_nondirect > 0 {
         out.push(row("3-1", "직접 연결 성공률", t31, cone_measured, NotMet, Some(format!("콘형 쌍인데 직접으로 못 붙은 시도가 있음 — 원인은 연결 기록 표에서. {cone_note}"))));
-    } else if a.cone_attempts == 0 {
+    } else if a.cone_pairs == 0 {
         let why = if a.nat_sessions.keys().all(|k| k == "없음") {
             "NAT 추정이 진단에 없음(format 3 이전) — 기록표의 회선 정보로 판단".to_string()
+        } else if a.endpoints == 0 {
+            "내보낸 사람 가명(selfPeer)이 진단에 없음 — zip끼리 짝을 맞출 수 없다".to_string()
+        } else if a.endpoints == 1 {
+            "한 사람의 zip만 있음(같은 PC가 여러 번 내보낸 zip은 한 사람) — 상대 NAT을 모른다. 참가자 모두의 zip이 필요".to_string()
         } else {
-            "콘형 쌍으로 확인된 세션 무리 없음 — 같은 합주의 참가자 모두의 zip이 있고 모두 independent·open이어야 한다".to_string()
+            "콘형 쌍 없음 — 같은 시간에 서로를 피어로 본 두 사람의 zip이 모두 있고 둘 다 independent·open이어야 한다(참가자 모두의 zip)".to_string()
         };
         out.push(row("3-1", "직접 연결 성공률", t31, cone_measured, Unknown, Some(why)));
     } else if a.cone_unresolved > 0 {
         out.push(row("3-1", "직접 연결 성공률", t31, cone_measured, Unknown, Some(format!("콘형 쌍 시도 중 결과 없는 것(중단·미완) {}회 — 가를 수 없음", a.cone_unresolved))));
-    } else if a.cone_attempts < goal::MIN_CONE_ATTEMPTS {
-        out.push(row("3-1", "직접 연결 성공률", t31, cone_measured, Unknown, Some(format!("콘형 쌍 시도 {}회 < {}회(양쪽 zip에서 하나씩)", a.cone_attempts, goal::MIN_CONE_ATTEMPTS))));
+    } else if a.cone_pairs < goal::MIN_CONE_PAIRS || a.cone_attempts < goal::MIN_CONE_ATTEMPTS {
+        out.push(row(
+            "3-1",
+            "직접 연결 성공률",
+            t31,
+            cone_measured,
+            Unknown,
+            Some(format!(
+                "콘형 쌍 {}개 · 실제 시도 하한 {}회 — 충족은 쌍 {}개 이상·시도 {}회 이상(TEST-SESSION 반복 횟수)에서만",
+                a.cone_pairs,
+                a.cone_attempts,
+                goal::MIN_CONE_PAIRS,
+                goal::MIN_CONE_ATTEMPTS
+            )),
+        ));
     } else {
-        out.push(row("3-1", "직접 연결 성공률", t31, cone_measured, Met, Some(format!("{cone_note}. 같은 공유기 LAN 우선은 경로 표(lan)로 확인"))));
+        out.push(row(
+            "3-1",
+            "직접 연결 성공률",
+            t31,
+            cone_measured,
+            Met,
+            Some(format!("콘형 쌍 {}개 · 실제 시도 하한 {}회 기준. {cone_note}. 같은 공유기 LAN 우선은 경로 표(lan)로 확인", a.cone_pairs, a.cone_attempts)),
+        ));
     }
     let t32 = format!("릴레이 폴백 포함 연결 성공률 ≥ {}%", goal::CONNECT_PCT);
     let measured = format!(
@@ -1526,18 +1675,21 @@ fn conn_goal(a: &ConnAgg) -> Vec<GoalRow> {
     };
     out.push(row("3-2", "연결 성공률(폴백 포함)", t32, measured, v32.0, v32.1));
 
-    // 3-3 첫 소리: GOAL 구간은 "입장 후"다. format 3부터 클라이언트가 입장 → 피어 추가(`entryLeadMs`)를 알려 줘 `entryLeadMs +
-    // firstAudioMs`가 그 구간이다. 모든 항목에 그 값이 있고 모두 3초 이내일 때만 충족이다. 없는 항목이 있으면 `firstAudioMs`(피어 추가부터 —
-    // 입장보다 짧다)로는 3초를 넘었거나 소리를 끝내 못 받았을 때만 미달이고 그 밖은 판정 불가다(#246 H2).
+    // 3-3 첫 소리: GOAL 구간은 "입장 후"다. format 3부터 클라이언트가 내 입장 → 피어 추가(`entryLeadMs`)를 알려 줘 `entryLeadMs +
+    // firstAudioMs`가 그 구간이다 — 내가 시작할 때 이미 있던 연주자에만 있다. 뒤에 들어온 연주자·다시 추가한 피어는 기준이 "피어 추가"라
+    // 그 사람의 입장(상대가 누른 순간 → 장치 열기·STUN)을 담지 못한다 — 그 항목은 참고값(`late_entries`)이고 충족 근거가 아니다(#250 M1).
+    // 충족은 입장 값이 있는 항목이 하나 이상이고 모두 3초 이내일 때만. 옛 형식(입장 값 자체가 없음)이 섞이면 판정 불가. `firstAudioMs`
+    // (피어 추가부터 — 입장보다 짧다)만으로도 3초를 넘었거나 소리를 끝내 못 받았으면 미달이다(#246 H2).
     let t33 = format!("입장 후 {}초 이내 소리", goal::FIRST_AUDIO_MS / 1000.0);
     let over = a.first_audio_ms.iter().filter(|&&x| x > goal::FIRST_AUDIO_MS).count();
     let over_entry = a.entry_first_audio_ms.iter().filter(|&&x| x > goal::FIRST_AUDIO_MS).count();
     let dist = Dist::of(&a.first_audio_ms);
     let entry_dist = Dist::of(&a.entry_first_audio_ms);
     let measured = format!(
-        "입장 후 {}개{} · 3초 초과 {over_entry} · 입장 값 없음 {} | 피어 추가 후 {}개{} · 3초 초과 {over} | 소리 못 받음(3초+) {} · 짧게 머물고 소리 없음 {}",
+        "입장 후 {}개{} · 3초 초과 {over_entry} · 뒤에 온 연주자(참고) {} · 입장 값 없음(옛 형식) {} | 피어 추가 후 {}개{} · 3초 초과 {over} | 소리 못 받음(3초+) {} · 짧게 머물고 소리 없음 {}",
         a.entry_first_audio_ms.len(),
         entry_dist.map(|d| format!(" · 중앙 {:.0}ms · 최대 {:.0}ms", d.median, d.max)).unwrap_or_default(),
+        a.late_entries,
         a.no_lead_entries,
         a.first_audio_ms.len(),
         dist.map(|d| format!(" · 중앙 {:.0}ms · 최대 {:.0}ms", d.median, d.max)).unwrap_or_default(),
@@ -1560,9 +1712,23 @@ fn conn_goal(a: &ConnAgg) -> Vec<GoalRow> {
             Unknown,
             Some(format!("입장 → 피어 추가(entryLeadMs)가 없는 항목 {}개(옛 앱·형식) — {span}, 3초 이내인지는 기록표 체감값으로", a.no_lead_entries)),
         ));
+    } else if a.entry_first_audio_ms.is_empty() {
+        out.push(row(
+            "3-3",
+            "첫 소리",
+            t33,
+            measured,
+            Unknown,
+            Some(format!("입장 값이 있는 항목 없음 — 뒤에 온 연주자 항목 {}개는 피어 추가 기준(참고값). 그 사람의 입장은 그 사람의 zip으로", a.late_entries)),
+        ));
     } else {
         let short = if a.no_audio_short > 0 { format!(" · 3초 전에 나가 소리 없는 항목 {}개는 가를 수 없어 뺐다", a.no_audio_short) } else { String::new() };
-        out.push(row("3-3", "첫 소리", t33, measured, Met, Some(format!("모든 항목의 입장 후 첫 소리가 3초 이내{short}"))));
+        let late = if a.late_entries > 0 {
+            format!(" · 뒤에 온 연주자 항목 {}개는 피어 추가 기준이라 참고값(그 사람의 입장은 그 사람의 zip으로)", a.late_entries)
+        } else {
+            String::new()
+        };
+        out.push(row("3-3", "첫 소리", t33, measured, Met, Some(format!("입장 값이 있는 항목의 입장 후 첫 소리가 모두 3초 이내{late}{short}"))));
     }
     out
 }

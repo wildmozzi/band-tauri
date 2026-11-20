@@ -87,6 +87,7 @@ describe('engineDiagFormat', () => {
     expect(formatTxCodec({ txCodec: 'pcm16', txCodecAuto: false }, 2.5)).toBe('내 송신: PCM16 · 2.5ms')
     expect(formatTxCodec({ txCodec: 'opus', txCodecAuto: true }, 5)).toBe('내 송신: Opus · 5ms (자동 전환)')
     expect(formatTxCodec({ txCodec: 'opus' })).toBe('내 송신: Opus')
+    expect(formatTxCodec({ txCodec: 'opus', txCodecAuto: true, txCodecReason: 'relayLoad' }, 2.5)).toBe('내 송신: Opus · 2.5ms (자동 전환: 서버 경유 대역 절약)')
   })
 })
 

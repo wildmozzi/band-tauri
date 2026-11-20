@@ -46,7 +46,7 @@ fn sample_diag(session: u64, events: Vec<ConnEvent>) -> Diagnostics {
         };
         let conn_events = if i == 0 { events.clone() } else { Vec::new() };
         let config = band_dsp::config::EngineConfig { frame_ms: 5.0, jitter_min_ms: Some(0.0), jitter_max_ms: Some(80.0), ..Default::default() };
-        d.record(T0 + i * 1000, Some(EngineSnapshot { stats, config, network: true, session, conn_events, nat: None }));
+        d.record(T0 + i * 1000, Some(EngineSnapshot { stats, config, network: true, session, conn_events, nat: None, self_peer: Some(format!("me-{session}")) }));
     }
     d.record(T0 + 120_000, None);
     d
@@ -110,7 +110,7 @@ fn report_reads_real_export() {
     assert_eq!(p.first_audio_ms, vec![180.5]);
     assert_eq!(p.loss_shape.len(), 1);
     assert_eq!(p.loss_shape[0].loss_runs[0], 59);
-    assert_eq!(s.conn, vec![ConnRow { at_s: 0.0, peer: p.peer.clone(), phase: "connect".into(), result: "lan".into(), ms: Some(120.0) }]);
+    assert_eq!(s.conn, vec![ConnRow { t: T0 - 200, at_s: 0.0, peer: p.peer.clone(), phase: "connect".into(), result: "lan".into(), ms: Some(120.0) }]);
 
     let v = |id: &str| goal_of(&s.goal, id).iter().map(|r| r.verdict).collect::<Vec<_>>();
     assert_eq!(v("1-1"), vec![Verdict::Met]); // 독점 7.5 ≤ 15
@@ -873,19 +873,20 @@ fn rebuffer_session(gap: u64, rebuf_s: f64) -> String {
     text
 }
 
-/// 리버퍼 카운터가 있는 zip(format 3)은 소리 없는 시간을 실측으로 센다: 카운터가 0이면 기대치 추정의 무음(예: 장치 클록·기록 누락)은
-/// 상한에 넣지 않아 충족, 카운터가 13초를 세면 그 13초를 끝 오차 없이 전부 상한에 넣어 판정 불가(2-1 보수성 유지). 같은 입력이라도
-/// format 3 이전이면(카운터 없음) 기존 추정을 쓴다.
+/// 리버퍼 카운터가 있는 zip(format 3)도 소리 없는 시간은 구간마다 실측과 기대치 추정 중 **큰 쪽**이다(#250 H2): 카운터가 0인데
+/// produced가 13초 멈췄다면(워커·출력 스트림 정지 — 카운터가 못 보는 실제 무음) 추정 13초(− 첫 구간 끝 오차 0.5초)가 상한에 들어가
+/// 판정 불가. 카운터가 13초를 세면 끝 오차 없이 전부. 같은 입력이라도 format 3 이전이면(카운터 없음) 추정만 쓴다.
 #[test]
 fn rebuffer_counter_replaces_silence_estimate() {
-    // 추정으로는 13초 무음이지만 엔진은 리버퍼가 없다고 셌다(키 없음 = 0)
+    // 리뷰 재현 ②: 추정으로는 13초 무음, 엔진 리버퍼는 0(키 없음) → 예전에는 충족이었다
     let r = report_v3("c0.zip", &rebuffer_session(13, 0.0));
     let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
-    assert!(c.silent_measured && c.silent_s == Some(0.0) && c.rebuffers == Some(0), "{c:?}");
-    assert!((c.silent_est_s.unwrap() - 13.0).abs() < 1e-9, "추정값은 참고로 남긴다: {c:?}");
-    assert_eq!(c.pct_hi, c.pct);
-    assert_eq!(verdict_21(&r).verdict, Verdict::Met, "{:?}", verdict_21(&r));
-    assert!(markdown(&r).contains("0.0s(0.0%) 실측(재버퍼 0회, 기대치 추정 13.0s)"), "{}", markdown(&r));
+    assert!(c.silent_measured && c.silent_counter_s == Some(0.0) && c.rebuffers == Some(0), "{c:?}");
+    assert!((c.silent_s.unwrap() - 13.0).abs() < 1e-9 && (c.silent_hi_s.unwrap() - 12.5).abs() < 1e-9, "큰 쪽(추정): {c:?}");
+    assert!((c.silent_est_s.unwrap() - 13.0).abs() < 1e-9, "{c:?}");
+    assert!(c.pct_hi.unwrap() > goal::CONCEAL_MAX_PCT, "{c:?}");
+    assert_eq!(verdict_21(&r).verdict, Verdict::Unknown, "{:?}", verdict_21(&r));
+    assert!(markdown(&r).contains("13.0s(2.2%)(리버퍼 실측 0.0s · 재버퍼 0회 · 기대치 추정 13.0s — 구간마다 큰 쪽)"), "{}", markdown(&r));
 
     // 엔진이 13초를 셌다 → 상한 = (1643 + 2600) / (117400 + 2600) — 끝 오차(0.5s)를 빼지 않는다
     let r = report_v3("c13.zip", &rebuffer_session(13, 13.0));
@@ -906,6 +907,53 @@ fn rebuffer_counter_replaces_silence_estimate() {
     let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
     assert!(!c.silent_measured && c.rebuffers.is_none() && (c.silent_s.unwrap() - 13.0).abs() < 1e-9, "{c:?}");
     assert_eq!(verdict_21(&r).verdict, Verdict::Unknown);
+
+    // 무음이 없는 정상 세션은 실측이 있어도 충족 그대로(상한 = 하한)
+    let r = report_v3("ok.zip", &rebuffer_session(0, 0.0));
+    let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+    assert_eq!((c.silent_s, c.silent_hi_s, c.pct_hi), (Some(0.0), Some(0.0), c.pct), "{c:?}");
+    assert_eq!(verdict_21(&r).verdict, Verdict::Met, "{:?}", verdict_21(&r));
+}
+
+/// #250 H2 재현 ①(처음 채우기): format 3, 600초 `connected`, 처음 `fill`초 produced 0(연결됐지만 소리 미도착 — 리버퍼 카운터는
+/// 처음 채우기를 세지 않는다) 뒤 재생, 은닉 1.40%·손실 1.10%, 리버퍼 키 없음. 예전에는 실측 0만 써서 충족이었다 — 추정(20s − 끝 오차)이
+/// 상한에 들어가 판정 불가여야 한다. 카운터가 추정보다 크면(장치 클록이 빨라 추정이 무음을 가림) 카운터를 쓴다.
+#[test]
+fn first_fill_silence_is_not_hidden_by_counter() {
+    let session = |fill: u64, rebuf_ms: Option<f64>| {
+        let mut text = String::new();
+        let mut played = 0u64;
+        for i in 0..=600u64 {
+            if i > fill {
+                played += 1;
+            }
+            let produced = 200 * played;
+            let mut p = serde_json::json!({
+                "peer": "id-f", "state": "connected", "path": "lan", "bufferMs": 10.0, "jitterMs": 1.0, "targetMs": 10.0,
+                "concealed": 1400 * produced / 100_000, "produced": produced, "rxDupDropped": 0,
+                "lossShape": shape_json(5.0, 1100 * produced / 100_000, 0),
+            });
+            if let Some(ms) = rebuf_ms.filter(|_| i >= 300) {
+                p["rebuffers"] = serde_json::json!(1);
+                p["rebufferMs"] = serde_json::json!(ms);
+            }
+            text += &line(i, 1, "wasapiExclusive", vec![p]);
+        }
+        report_v3("fill.zip", &text)
+    };
+    let r = session(20, None);
+    let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+    assert!(c.silent_measured && c.silent_counter_s == Some(0.0), "{c:?}");
+    assert!((c.silent_s.unwrap() - 20.0).abs() < 1e-9 && (c.silent_hi_s.unwrap() - 19.5).abs() < 1e-9, "{c:?}");
+    assert!(c.pct_hi.unwrap() > goal::CONCEAL_MAX_PCT, "{c:?}");
+    assert_eq!(verdict_21(&r).verdict, Verdict::Unknown, "{:?}", verdict_21(&r));
+
+    // 처음 채우기 없음 + 카운터가 3초를 셌는데 produced는 멈추지 않음(장치 클록이 빨라 추정이 0) → 카운터 3초가 상한에 든다
+    let r = session(0, Some(3000.0));
+    let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+    assert!(c.silent_est_s == Some(0.0) && (c.silent_hi_s.unwrap() - 3.0).abs() < 1e-9, "{c:?}");
+    assert!(c.pct_hi.unwrap() > goal::CONCEAL_MAX_PCT, "{c:?}");
+    assert_eq!(verdict_21(&r).verdict, Verdict::Unknown, "{:?}", verdict_21(&r));
 }
 
 /// 입장 후 첫 소리(3-3): `entryLeadMs + firstAudioMs`. 모든 항목에 있고 3초 이내면 충족, 하나라도 넘으면 미달, 입장 값이 없는 항목이
@@ -936,10 +984,27 @@ fn first_audio_from_entry() {
     // 입장부터 3초 넘음(피어 추가 후로는 0.6초)
     let r = run(&|_| vec![peer("id-a", Some(2500.0), Some(600.0))], 30);
     assert_eq!(goal_of(&r.goal, "3-3")[0].verdict, Verdict::NotMet);
-    // 입장 값 없는 항목(옛 앱)이 섞이면 판정 불가
+    // format 3에서 입장 값 없는 항목 = 뒤에 들어온 연주자(기준이 피어 추가) → 참고값으로 빼고, 입장 값 있는 항목으로 충족(#250 M1)
     let r = run(&|_| vec![peer("id-a", Some(900.0), Some(600.0)), peer("id-b", None, Some(400.0))], 30);
     let g = goal_of(&r.goal, "3-3")[0];
-    assert_eq!((g.verdict, r.conn.no_lead_entries), (Verdict::Unknown, 1), "{g:?}");
+    assert_eq!((g.verdict, r.conn.late_entries, r.conn.no_lead_entries), (Verdict::Met, 1, 0), "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("뒤에 온 연주자 항목 1개는 피어 추가 기준이라 참고값"), "{g:?}");
+    // 뒤에 온 연주자 항목만(내가 혼자 시작해 상대가 모두 뒤에 옴): 입장 구간을 담은 항목이 없다 → 판정 불가(예전: entryLeadMs 0이라 충족)
+    let r = run(&|_| vec![peer("id-b", None, Some(400.0)), peer("id-c", None, Some(300.0))], 30);
+    let g = goal_of(&r.goal, "3-3")[0];
+    assert_eq!((g.verdict, r.conn.late_entries), (Verdict::Unknown, 2), "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("입장 값이 있는 항목 없음"), "{g:?}");
+    // 뒤에 온 연주자라도 피어 추가 후만으로 3초를 넘으면 미달
+    let r = run(&|_| vec![peer("id-a", Some(900.0), Some(600.0)), peer("id-b", None, Some(3200.0))], 30);
+    assert_eq!(goal_of(&r.goal, "3-3")[0].verdict, Verdict::NotMet);
+    // 옛 형식(format 표시 없음)에서 입장 값이 없는 항목이 섞이면 판정 불가
+    let mut t = String::new();
+    for i in 0..30 {
+        t += &line(i, 1, "wasapiExclusive", vec![peer("id-a", Some(900.0), Some(600.0)), peer("id-b", None, Some(400.0))]);
+    }
+    let r = report_of("old.zip", &t);
+    let g = goal_of(&r.goal, "3-3")[0];
+    assert_eq!((g.verdict, r.conn.no_lead_entries, r.conn.late_entries), (Verdict::Unknown, 1, 0), "{g:?}");
     // 2초 머물고 소리 없음: 입장 값 1.5초를 더하면 3초 넘게 소리가 없었다 → 미달
     let r = run(&|i| if i < 2 { vec![peer("id-c", Some(1500.0), None)] } else { vec![] }, 10);
     assert_eq!((r.conn.no_audio_entries, goal_of(&r.goal, "3-3")[0].verdict), (1, Verdict::NotMet));
@@ -948,54 +1013,172 @@ fn first_audio_from_entry() {
     assert_eq!((r.conn.no_audio_entries, r.conn.no_audio_short), (0, 1));
 }
 
-/// 한 사람 zip: `nat` 매핑, 피어 1명, 연결 기록 `results`. 세션 번호로 zip을 구분한다(시각은 같다 = 한 합주).
-fn nat_zip(name: &str, session: u64, nat: Option<&str>, results: &[&str]) -> Diag {
+/// 한 사람 zip(format 3): 내 가명 `me`(None이면 `selfPeer` 없음 — 이 PR 이전 엔진), `nat` 매핑, 본 피어 `peers`, 연결 기록
+/// `conns`(피어, 결과 — 1초 간격 시각), 줄 수 `lines`(같은 세션을 다른 때 내보낸 zip은 줄 수만 다르다). 시각은 모두 T0부터 = 한 합주.
+fn pzip(name: &str, me: Option<&str>, nat: Option<&str>, peers: &[&str], conns: &[(&str, &str)], lines: u64) -> Diag {
     let mut text = String::new();
-    for i in 0..20u64 {
-        let mut v = serde_json::json!({"t": T0 + i * 1000, "running": true, "network": true, "session": session, "backend": "wasapiExclusive",
-            "peers": [{"peer": format!("id-{session}"), "state": "connected", "path": "lan"}]});
+    for i in 0..lines {
+        let ps: Vec<_> = peers.iter().map(|p| serde_json::json!({"peer": p, "state": "connected", "path": "public"})).collect();
+        let mut v = serde_json::json!({"t": T0 + i * 1000, "running": true, "network": true, "session": 1, "backend": "wasapiExclusive", "peers": ps});
         if i == 0 {
             if let Some(m) = nat {
                 v["nat"] = serde_json::json!({"mapping": m, "responses": 2});
             }
-            v["conn"] = serde_json::Value::Array(
-                results.iter().map(|r| serde_json::json!({"t": T0, "peer": format!("id-{session}"), "phase": "connect", "result": r, "ms": 120})).collect(),
-            );
+            if let Some(me) = me {
+                v["selfPeer"] = serde_json::json!(me);
+            }
+        }
+        let cs: Vec<_> = conns
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| *k as u64 == i)
+            .map(|(k, (p, r))| serde_json::json!({"t": T0 + k as u64 * 1000, "peer": p, "phase": if k == 0 { "connect" } else { "reconnect" }, "result": r, "ms": 120}))
+            .collect();
+        if !cs.is_empty() {
+            v["conn"] = serde_json::Value::Array(cs);
         }
         text += &(v.to_string() + "\n");
     }
     read_zip_bytes(name, zip_of(&[("meta.json", r#"{"format":3}"#), ("timeline.jsonl", &text)])).unwrap()
 }
 
-/// 3-1: 같은 합주의 양쪽 zip이 모두 콘형(매핑 독립)·NAT 없음이면 그 시도는 콘형 쌍 시도다 — 모두 직접이면 충족, 릴레이·실패가 있으면
-/// 미달. 한쪽만 있거나, 한쪽이 대칭형·모름이거나, NAT 추정이 없는 옛 zip이면 판정 불가.
+/// A·B 두 사람이 서로에게 `n`번 연결한 기록(결과 `ra`·`rb`).
+fn pair(nat_a: &str, nat_b: &str, ra: &str, rb: &str, n: usize) -> Vec<Diag> {
+    vec![
+        pzip("a.zip", Some("id-aaaa"), Some(nat_a), &["id-bbbb"], &vec![("id-bbbb", ra); n], 20),
+        pzip("b.zip", Some("id-bbbb"), Some(nat_b), &["id-aaaa"], &vec![("id-aaaa", rb); n], 20),
+    ]
+}
+
+fn g31(zips: Vec<Diag>) -> (GoalRow, Report) {
+    let r = report(&zips);
+    (goal_of(&r.goal, "3-1")[0].clone(), r)
+}
+
+/// 3-1: 서로를 피어로 본 두 사람(`selfPeer`)의 zip이 모두 있고 둘 다 콘형(매핑 독립)·NAT 없음이면 그 쌍의 시도는 콘형 쌍 시도다 —
+/// 실제 시도 하한(양쪽 중 많은 쪽)이 3회 이상이고 모두 직접이면 충족, 릴레이·실패가 있으면 미달. 한쪽만 있거나, 한쪽이 대칭형·모름
+/// 이거나, NAT 추정이 없는 옛 zip이거나, 시도가 적으면 판정 불가.
 #[test]
 fn direct_rate_judged_on_cone_pairs() {
-    let g31 = |zips: Vec<Diag>| {
-        let r = report(&zips);
-        (goal_of(&r.goal, "3-1")[0].clone(), r)
-    };
-    let (g, r) = g31(vec![nat_zip("a.zip", 1, Some("independent"), &["lan"]), nat_zip("b.zip", 2, Some("open"), &["public"])]);
+    let (g, r) = g31(pair("independent", "open", "public", "public", 3));
     assert_eq!(g.verdict, Verdict::Met, "{g:?}");
-    assert_eq!((r.conn.cone_groups, r.conn.cone_attempts, r.conn.cone_direct), (1, 2, 2));
+    assert_eq!((r.conn.endpoints, r.conn.pairs, r.conn.cone_pairs, r.conn.cone_attempts, r.conn.cone_direct), (2, 1, 1, 3, 6));
+    assert!(g.note.as_deref().unwrap().contains("콘형 쌍 1개 · 실제 시도 하한 3회 기준"), "{g:?}");
     assert!(markdown(&r).contains("independent — 매핑 독립(콘형), STUN 응답 2"), "{}", markdown(&r));
 
-    let (g, _) = g31(vec![nat_zip("a.zip", 1, Some("independent"), &["relay"]), nat_zip("b.zip", 2, Some("independent"), &["relay"])]);
+    // #250 M2: 연결 한 번(양쪽에 1건씩 = 기록 2)은 "100%"의 근거가 아니다
+    let (g, r) = g31(pair("independent", "independent", "lan", "lan", 1));
+    assert_eq!((g.verdict, r.conn.cone_attempts), (Verdict::Unknown, 1), "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("시도 3회 이상"), "{g:?}");
+
+    let (g, _) = g31(pair("independent", "independent", "relay", "relay", 1));
     assert_eq!(g.verdict, Verdict::NotMet, "{g:?}");
-    // 한쪽이 대칭형 → 콘형 쌍이 아니다
-    let (g, r) = g31(vec![nat_zip("a.zip", 1, Some("independent"), &["relay"]), nat_zip("b.zip", 2, Some("dependent"), &["relay"])]);
-    assert_eq!((g.verdict, r.conn.cone_groups), (Verdict::Unknown, 0), "{g:?}");
+    // 한쪽이 대칭형 → 짝은 맞지만 콘형 쌍이 아니다
+    let (g, r) = g31(pair("independent", "dependent", "relay", "relay", 3));
+    assert_eq!((g.verdict, r.conn.pairs, r.conn.cone_pairs), (Verdict::Unknown, 1, 0), "{g:?}");
     // 한쪽 zip만 → 상대 NAT을 모른다
-    let (g, _) = g31(vec![nat_zip("a.zip", 1, Some("independent"), &["lan"])]);
+    let (g, _) = g31(vec![pzip("a.zip", Some("id-aaaa"), Some("independent"), &["id-bbbb"], &[("id-bbbb", "lan"); 3], 20)]);
     assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
-    assert!(g.note.as_deref().unwrap().contains("참가자 모두의 zip"), "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("한 사람의 zip만"), "{g:?}");
     // 중단(결과 모름)이 섞이면 판정 불가
-    let (g, _) = g31(vec![nat_zip("a.zip", 1, Some("independent"), &["lan"]), nat_zip("b.zip", 2, Some("independent"), &["aborted"])]);
-    assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
+    let mut zips = pair("independent", "independent", "lan", "lan", 3);
+    zips[1] = pzip("b.zip", Some("id-bbbb"), Some("independent"), &["id-aaaa"], &[("id-aaaa", "lan"), ("id-aaaa", "lan"), ("id-aaaa", "aborted")], 20);
+    assert_eq!(g31(zips).0.verdict, Verdict::Unknown);
     // 옛 zip(nat 없음)
-    let (g, _) = g31(vec![nat_zip("a.zip", 1, None, &["lan"]), nat_zip("b.zip", 2, None, &["lan"])]);
+    let (g, _) = g31(vec![
+        pzip("a.zip", None, None, &["id-bbbb"], &[("id-bbbb", "lan"); 3], 20),
+        pzip("b.zip", None, None, &["id-aaaa"], &[("id-aaaa", "lan"); 3], 20),
+    ]);
     assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
     assert!(g.note.as_deref().unwrap().contains("format 3 이전"), "{g:?}");
+    // NAT은 있는데 selfPeer가 없는 zip(이 PR 이전 엔진) → 짝을 맞출 수 없다
+    let (g, _) = g31(vec![
+        pzip("a.zip", None, Some("independent"), &["id-bbbb"], &[("id-bbbb", "lan"); 3], 20),
+        pzip("b.zip", None, Some("independent"), &["id-aaaa"], &[("id-aaaa", "lan"); 3], 20),
+    ]);
+    assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("selfPeer"), "{g:?}");
+    // 같은 시간 다른 방(서로를 피어로 보지 않음) → 짝이 아니다
+    let (g, r) = g31(vec![
+        pzip("a.zip", Some("id-aaaa"), Some("independent"), &["id-cccc"], &[("id-cccc", "lan"); 3], 20),
+        pzip("b.zip", Some("id-bbbb"), Some("independent"), &["id-dddd"], &[("id-dddd", "lan"); 3], 20),
+    ]);
+    assert_eq!((g.verdict, r.conn.endpoints, r.conn.pairs), (Verdict::Unknown, 2, 0), "{g:?}");
+}
+
+/// #250 H1 재현: 같은 PC가 같은 세션을 두 번(20줄·25줄) 내보낸 zip 둘 — 예전에는 "zip 수 = 피어 수 + 1"로 콘형 무리가 되어 한 번의
+/// 연결이 두 번 세어져 충족이었다. 같은 `selfPeer`라 한 사람이고, 연결 기록은 한 번만 센다.
+#[test]
+fn same_pc_exported_twice_is_one_person() {
+    let a20 = pzip("a1.zip", Some("id-aaaa"), Some("independent"), &["id-bbbb"], &[("id-bbbb", "public")], 20);
+    let a25 = pzip("a2.zip", Some("id-aaaa"), Some("independent"), &["id-bbbb"], &[("id-bbbb", "public")], 25);
+    let (g, r) = g31(vec![a20, a25]);
+    assert_eq!(r.files[1].duplicate_of, None, "글자 그대로 같은 zip은 아니다");
+    assert_eq!((g.verdict, r.conn.endpoints, r.conn.pairs, r.conn.cone_pairs), (Verdict::Unknown, 1, 0, 0), "{g:?}");
+    assert_eq!((r.conn.attempts, r.conn.attempts_lower, r.conn.sessions), (1, 1, 1), "한 연결은 한 번");
+
+    // 3회 연결 기록을 두 번 내보내도 "6회"가 되지 않는다(3-1 문턱 3회를 중복으로 넘기지 않는다)
+    let three = [("id-bbbb", "public"); 3];
+    let (g, r) = g31(vec![
+        pzip("a1.zip", Some("id-aaaa"), Some("independent"), &["id-bbbb"], &three, 20),
+        pzip("a2.zip", Some("id-aaaa"), Some("independent"), &["id-bbbb"], &three, 25),
+    ]);
+    assert_eq!((g.verdict, r.conn.attempts), (Verdict::Unknown, 3), "{g:?}");
+
+    // A가 두 번 + B가 한 번 → 쌍 하나, 시도 하한은 부풀지 않는다(1회 → 판정 불가)
+    let (g, r) = g31(vec![
+        pzip("a1.zip", Some("id-aaaa"), Some("independent"), &["id-bbbb"], &[("id-bbbb", "public")], 20),
+        pzip("a2.zip", Some("id-aaaa"), Some("independent"), &["id-bbbb"], &[("id-bbbb", "public")], 25),
+        pzip("b.zip", Some("id-bbbb"), Some("independent"), &["id-aaaa"], &[("id-aaaa", "public")], 20),
+    ]);
+    assert_eq!((g.verdict, r.conn.pairs, r.conn.cone_attempts, r.conn.cone_direct), (Verdict::Unknown, 1, 1, 2), "{g:?}");
+}
+
+/// 같은 세션을 연결 중일 때 한 번, 연결된 뒤 한 번 내보내면: 앞 zip의 미완(결과 없음)은 뒤 zip(더 늦게 끝남)의 결과로 바뀐다 —
+/// 미완이 남아 분모를 부풀리거나 3-1을 막지 않는다.
+#[test]
+fn later_export_supersedes_pending() {
+    let mut early = String::new();
+    let mut late = String::new();
+    for i in 0..30u64 {
+        let state = if i < 10 { "connecting" } else { "connected" };
+        let mut v = serde_json::json!({"t": T0 + i * 1000, "running": true, "network": true, "session": 1, "backend": "wasapiExclusive",
+            "peers": [{"peer": "id-bbbb", "state": state}]});
+        if i == 0 {
+            v["selfPeer"] = serde_json::json!("id-aaaa");
+            v["nat"] = serde_json::json!({"mapping": "independent", "responses": 2});
+        }
+        if i == 10 {
+            v["conn"] = serde_json::json!([{"t": T0 + 10_000, "peer": "id-bbbb", "phase": "connect", "result": "public", "ms": 9000}]);
+        }
+        if i < 5 {
+            early += &(v.to_string() + "\n");
+        }
+        late += &(v.to_string() + "\n");
+    }
+    let zip = |name: &str, text: &str| read_zip_bytes(name, zip_of(&[("meta.json", r#"{"format":3}"#), ("timeline.jsonl", text)])).unwrap();
+    let r = report(&[zip("early.zip", &early), zip("late.zip", &late)]);
+    assert_eq!((r.conn.pending, r.conn.attempts, r.conn.success), (0, 1, 1), "{:?}", r.conn);
+    // 앞 zip만 주면 미완 1
+    let r = report(&[zip("early.zip", &early)]);
+    assert_eq!((r.conn.pending, r.conn.attempts), (1, 1));
+}
+
+/// 쌍마다 따로 본다: A가 zip이 없는 C에게 릴레이로 붙은 시도는 A–B 콘형 쌍에 들지 않는다(C의 NAT을 모른다). A–B가 모두 직접이면 충족.
+#[test]
+fn cone_pair_ignores_peers_without_zip() {
+    let a = pzip(
+        "a.zip",
+        Some("id-aaaa"),
+        Some("independent"),
+        &["id-bbbb", "id-cccc"],
+        &[("id-bbbb", "public"), ("id-bbbb", "public"), ("id-bbbb", "public"), ("id-cccc", "relay")],
+        20,
+    );
+    let b = pzip("b.zip", Some("id-bbbb"), Some("independent"), &["id-aaaa", "id-cccc"], &[("id-aaaa", "public"); 3], 20);
+    let (g, r) = g31(vec![a, b]);
+    assert_eq!((g.verdict, r.conn.cone_pairs, r.conn.cone_attempts, r.conn.cone_nondirect), (Verdict::Met, 1, 3, 0), "{g:?}");
+    assert_eq!(r.conn.relay, 1, "전체 집계에는 남는다");
 }
 
 /// 송신 큐 p99는 바뀐 줄에만 있다 — 실행 샘플마다 앞 값을 이어 써 분포를 낸다. 요약 표에 릴레이·NAT·송신 큐가 나온다.

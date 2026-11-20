@@ -1532,22 +1532,26 @@ fn est_latency_budget_table() {
         out_buf: usize,
         frame_ms: f32,
         goal_ms: Option<f32>,
+        /// 목표를 넘는 것으로 알려진 값(래칫 — 이 값을 넘으면 깨진다). 목표 칸에 "초과 — 래칫 N"으로 적는다
+        known_over_ms: Option<f32>,
     }
     let rows = [
-        Row { label: "ASIO 128 / 2.5ms", rate: 48_000, in_buf: 128, out_buf: 128, frame_ms: 2.5, goal_ms: Some(8.0) },
-        Row { label: "ASIO 128 / 5ms", rate: 48_000, in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: None },
-        Row { label: "WASAPI 독점 최소 3ms(144) / 2.5ms", rate: 48_000, in_buf: 144, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0) },
-        Row { label: "WASAPI 독점 최소 3ms(144) / 5ms", rate: 48_000, in_buf: 144, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0) },
-        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 2.5ms", rate: 48_000, in_buf: 96, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0) },
-        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 5ms", rate: 48_000, in_buf: 96, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0) },
-        Row { label: "IAudioClient3 공유 2.67ms(128) / 5ms", rate: 48_000, in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: Some(30.0) },
-        Row { label: "(참고) 독점 기본 주기 10ms(480) / 5ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 5.0, goal_ms: None },
-        Row { label: "cpal WASAPI 공유 폴백 10ms(480) / 2.5ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 2.5, goal_ms: Some(30.0) },
-        Row { label: "cpal WASAPI 공유 폴백 10ms(480) / 5ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 5.0, goal_ms: Some(30.0) },
-        Row { label: "cpal WASAPI 공유 폴백 10ms(480) / 10ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 10.0, goal_ms: Some(30.0) },
-        Row { label: "cpal WASAPI 공유 폴백 44.1k 10ms(441) / 2.5ms", rate: 44_100, in_buf: 441, out_buf: 441, frame_ms: 2.5, goal_ms: Some(30.0) },
-        Row { label: "cpal WASAPI 공유 폴백 44.1k 10ms(441) / 5ms", rate: 44_100, in_buf: 441, out_buf: 441, frame_ms: 5.0, goal_ms: Some(30.0) },
-        Row { label: "(참고) cpal WASAPI 공유 폴백 44.1k 10ms(441) / 10ms", rate: 44_100, in_buf: 441, out_buf: 441, frame_ms: 10.0, goal_ms: None },
+        Row { label: "ASIO 128 / 2.5ms", rate: 48_000, in_buf: 128, out_buf: 128, frame_ms: 2.5, goal_ms: Some(8.0), known_over_ms: None },
+        Row { label: "ASIO 128 / 5ms", rate: 48_000, in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: None, known_over_ms: None },
+        Row { label: "WASAPI 독점 최소 3ms(144) / 2.5ms", rate: 48_000, in_buf: 144, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0), known_over_ms: None },
+        Row { label: "WASAPI 독점 최소 3ms(144) / 5ms", rate: 48_000, in_buf: 144, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0), known_over_ms: None },
+        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 2.5ms", rate: 48_000, in_buf: 96, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0), known_over_ms: None },
+        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 5ms", rate: 48_000, in_buf: 96, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0), known_over_ms: None },
+        Row { label: "IAudioClient3 공유 2.67ms(128) / 5ms", rate: 48_000, in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "(참고) 독점 기본 주기 10ms(480) / 5ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 5.0, goal_ms: None, known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 10ms(480) / 2.5ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 2.5, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 10ms(480) / 5ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 5.0, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 10ms(480) / 10ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 10.0, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 44.1k 10ms(441) / 2.5ms", rate: 44_100, in_buf: 441, out_buf: 441, frame_ms: 2.5, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 44.1k 10ms(441) / 5ms", rate: 44_100, in_buf: 441, out_buf: 441, frame_ms: 5.0, goal_ms: Some(30.0), known_over_ms: None },
+        // 알려진 초과(#250 L4): 공유 ≤ 30ms를 넘는다(10 + 10 + 10 + 리샘플러 2.75). 임계값을 완화하지 않고 [결정] 전까지 지금 값을
+        // 넘지 않는다는 래칫만 건다 — 더 나빠지면 깨지고, 결정 뒤 이 행을 목표 행으로 옮기거나 지운다.
+        Row { label: "(참고·알려진 초과) cpal WASAPI 공유 폴백 44.1k 10ms(441) / 10ms", rate: 44_100, in_buf: 441, out_buf: 441, frame_ms: 10.0, goal_ms: None, known_over_ms: Some(32.75) },
     ];
     println!("| 설정 | 입력 | 프레임 | 출력 링 | 출력 | estLatencyMs | 목표 |");
     println!("|---|---|---|---|---|---|---|");
@@ -1571,12 +1575,19 @@ fn est_latency_budget_table() {
             r.frame_ms,
             s.est_latency_ms,
             if rs > 0.0 { format!(", 리샘플러 {rs:.2}") } else { String::new() },
-            r.goal_ms.map(|g| format!("≤ {g}")).unwrap_or_else(|| "—".into())
+            match (r.goal_ms, r.known_over_ms) {
+                (Some(g), _) => format!("≤ {g}"),
+                (None, Some(k)) => format!("공유 ≤ 30 초과(알려짐) — 래칫 ≤ {k}"),
+                (None, None) => "—".into(),
+            }
         );
         assert!((s.est_latency_ms - calc).abs() < 0.05, "{}: 실측 콜백 크기 기반 est {:.2} ≠ 계산 {calc:.2}", r.label, s.est_latency_ms);
         assert!((s.device_period_ms - o).abs() < 0.05, "{}: devicePeriodMs {}", r.label, s.device_period_ms);
         if let Some(g) = r.goal_ms {
             assert!(s.est_latency_ms <= g, "{}: estLatencyMs {:.2} > {g}", r.label, s.est_latency_ms);
+        }
+        if let Some(k) = r.known_over_ms {
+            assert!(s.est_latency_ms <= k + 0.05, "{}: 알려진 초과 행이 더 나빠짐 — estLatencyMs {:.2} > 래칫 {k}", r.label, s.est_latency_ms);
         }
     }
 }

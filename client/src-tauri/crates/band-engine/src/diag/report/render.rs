@@ -181,7 +181,7 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
         let tx = if p.tx_codec.is_empty() { none() } else { p.tx_codec.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ") };
         let mut entry_audio = list(&p.entry_first_audio_ms);
         if p.no_lead_entries > 0 {
-            let _ = write!(entry_audio, " · 입장 값 없음 {}", p.no_lead_entries);
+            let _ = write!(entry_audio, " · 입장 값 없음 {}(뒤에 온 연주자·재추가 또는 옛 형식)", p.no_lead_entries);
         }
         let _ = writeln!(
             out,
@@ -268,7 +268,7 @@ fn conn_agg(out: &mut String, a: &ConnAgg) {
     }
     let _ = writeln!(
         out,
-        "- 시도는 기록 기준이다: 한 합주의 두 사람 zip을 함께 주면 같은 연결이 양쪽에서 한 번씩 세어진다. 98% 문턱은 실제 시도 하한 {}회(시간이 겹치는 다른 zip 세션은 큰 쪽만)로 가른다.",
+        "- 시도는 기록 기준이다: 한 합주의 두 사람 zip을 함께 주면 같은 연결이 양쪽에서 한 번씩 세어진다. 98% 문턱은 실제 시도 하한 {}회(시간이 겹치는 다른 사람 기록은 큰 쪽만, 같은 사람이 여러 번 내보낸 같은 세션은 합침)로 가른다.",
         a.attempts_lower
     );
     if a.unknown_results > 0 {
@@ -280,9 +280,11 @@ fn conn_agg(out: &mut String, a: &ConnAgg) {
     let nats = a.nat_sessions.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · ");
     let _ = writeln!(
         out,
-        "- NAT 추정(세션 수): {} · 콘형 쌍 무리 {}(시도 {}: 직접 {} · 릴레이/실패 {} · 중단/미완 {}). 콘형 쌍 = 같은 시간대 세션 무리에 참가자 모두의 zip이 있고 모두 independent·open.",
+        "- NAT 추정(세션 수): {} · 내보낸 사람 {} · 짝 확인된 쌍 {} · 콘형 쌍 {}(실제 시도 하한 {}회 · 양쪽 기록: 직접 {} · 릴레이/실패 {} · 중단/미완 {}). 짝 = 같은 시간에 서로를 피어로 본 두 사람의 zip(selfPeer로 맞춤, 같은 PC가 여러 번 내보낸 zip은 한 사람), 콘형 쌍 = 그 둘이 모두 independent·open.",
         if nats.is_empty() { none() } else { nats },
-        a.cone_groups,
+        a.endpoints,
+        a.pairs,
+        a.cone_pairs,
         a.cone_attempts,
         a.cone_direct,
         a.cone_nondirect,

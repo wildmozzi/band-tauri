@@ -550,7 +550,8 @@ mod tests {
             // P1-21 2단계: README에 threadPolicy 설명(의도한 변경 — 정지 상태 입력이라 timeline.jsonl 해시는 그대로)
             // 진단 값 노출(format 3): README에 rebuffers·entryLeadMs·sendQueueP99Ms·nat 설명, meta.format 2 → 3(의도한 변경 —
             // 정지 상태 입력이라 새 키가 없어 engine.json·timeline.jsonl 해시는 그대로)
-            ("README.txt", "4f223d805027189502196e683729dcc470d5529124c8e25f665ec1045daac223"),
+            // #250 리뷰: README에 selfPeer 설명·entryLeadMs 범위(시작 때 있던 연주자만)·logs/ 줄 맞춤(의도한 변경 — 해시는 README만)
+            ("README.txt", "e1d1e54c61a0c8bbb7eb09e5d203e3f6f4790bfff7e2705f53021235d95d085e"),
             ("meta.json", "8ca5f2597b978ae5133a12ba0f4ebe2bb1dbb0401e669c0621b65b87c6d325c5"),
             // P2-17e: engine.json의 config에 resampleQuality(null), stats에 resampler(null)가 생김(의도한 변경)
             // P1-21 2단계: engine.json의 config에 threadPolicy(null)가 생김(의도한 변경)

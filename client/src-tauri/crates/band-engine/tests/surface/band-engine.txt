@@ -328,6 +328,7 @@ engine/report.rs	field	resampler
 engine/report.rs	field	rtt_ms
 engine/report.rs	field	running
 engine/report.rs	field	sample_rate
+engine/report.rs	field	self_peer
 engine/report.rs	field	send_queue
 engine/report.rs	field	session
 engine/report.rs	field	sites
@@ -348,6 +349,7 @@ engine/report.rs	method	feed_stats
 engine/report.rs	method	local_path_stats
 engine/report.rs	method	nat_probe
 engine/report.rs	method	peer_jitter_stats
+engine/report.rs	method	self_peer_id
 engine/report.rs	method	stats
 engine/report.rs	method	take_send_path_diag
 engine/report.rs	method	take_worker_timing
