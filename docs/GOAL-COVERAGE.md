@@ -3,7 +3,8 @@
 [GOAL.md](GOAL.md)의 기준마다 **지금 무엇으로 검증되고 있고 무엇이 비어 있는지**를 적은 표다. 코디네이터가 다음 작업을 고를 때 근거로 쓴다.
 사람이 해야 하는 확인은 [HUMAN-CHECKS.md](HUMAN-CHECKS.md)에 모았다.
 
-- 기준 시점: `origin/develop` `dfd58bd`(2026-11-20). 시험 이름·경로는 이 커밋의 코드에서 직접 찾았다.
+- 기준 시점: `origin/develop` `dfd58bd`(2026-11-20). 시험 이름·경로는 이 커밋의 코드에서 직접 찾았다. 날짜는 한국 시간(KST)이다.
+- 범위: GOAL 한 문장 목표의 웹 관람과 1~4절. 5절(품질 게이트)은 모든 PR의 CI 조건이라 이 표에서 다루지 않는다.
 - 수치는 PR 본문을 다시 재지 않고 [BACKLOG.md](BACKLOG.md) 완료 기록에서 옮겼다(출처 칸에 ID·PR 번호).
 - 경로 약어: `E/` = `client/src-tauri/crates/band-engine/`, `C/` = `client/src/`, `S/` = `server/`.
 
@@ -20,24 +21,30 @@
 
 | 잡 | 언제 | 무엇 |
 |---|---|---|
-| `rust` (Windows) | 모든 PR(엔진 경로 변경 시) | clippy 5구성 + `cargo test`(결정적 시험, `tests/sim`의 5분 하네스 `long_sim_6peers_5min` 포함) |
+| `rust` (Windows) | 모든 PR(엔진 경로 변경 시) | clippy 4구성 + `backend-wasapi` 단독 컴파일 검사 + `cargo test`(결정적 시험, `tests/sim`의 5분 하네스 `long_sim_6peers_5min` 포함) |
 | `realtime` (Windows) | PR | `#[ignore = "realtime: …"]` 시험을 직렬로, 3회까지 재시도(벽시계 의존) |
 | `rust-linux`, `loom`, `relay` | PR | 비Windows 구성, SeqCell 메모리 순서, 릴레이 서버 |
 | `long-sim` | **야간 schedule** 또는 수동(`long_sim`) | `long_sim_6peers_60min` 6피어 60분 가상 시간 |
 | `soak` | **야간 schedule** 또는 수동(`soak`) | `soak_balanced`·`soak_ultra_low` 6엔진 실제 시계 60분 × 2 |
 | `client`, `e2e`, `server` | PR | vitest·lint·build, Playwright(chromium만), node:test |
 
-**주의 — 야간 잡이 아직 한 번도 schedule로 돈 기록이 없다.** `gh run list --workflow ci.yml --event schedule` 결과가 비어 있다(2026-11-20 조회). schedule은 `main`의 워크플로로만 돌고 `main` 병합(#231)은 2026-11-20이다. 마지막 60분 실행은 수동 실행 `43979178598`(develop, 2026-11-16, 성공)이다. 그래서 아래 "자동 충족" 중 60분 기준은 **매일 돌고 있는 것이 아니라 마지막 수동 실행 기준**이다.
+**주의 — 야간 잡이 아직 한 번도 schedule로 돈 기록이 없다.** `gh run list --workflow ci.yml --event schedule` 결과가 비어 있다(2026-11-20 조회). schedule은 `main`의 워크플로로만 돌고 `main` 병합(#231)은 2026-11-20이다. 마지막 60분 실행은 수동 실행 `43979178598`(develop, 2026-11-17 08:25 KST = 11-16 23:25 UTC 시작, 성공)이다. 그래서 아래 "자동 충족" 중 60분 기준은 **매일 돌고 있는 것이 아니라 마지막 수동 실행 기준**이다.
 
 ---
+
+## 0. 웹 관람 (한 문장 목표 "웹 사용자는 그 합주를 관람한다")
+
+| 지표 | ① 자동 검증 | ② 최근 측정값·출처 | ③ 상태 | ④ 빈틈 → 닫는 방법 |
+|---|---|---|---|---|
+| 웹 브라우저로 합주 관람(소리 듣기, 재연결) | `client/e2e/web-viewer.e2e.ts`(협상·내려짐·서버 재시작·방 종료·390px, P2-18 #189) — **chromium만** · `C/features/room/state/useViewerAudio.test.tsx`·`viewerHold.test.ts`·`anonResume.test.ts` · `S/test/ws-resume-anon.test.ts` | 운영 웹에서 익명 관람 입장 화면 확인(P3-21, 2026-11-20). 실제 연주 소리를 웹에서 들은 기록 없음 | 자동 시험만(실장비 미확인) | ① 실제 연주자 앱 ↔ Vercel 웹 청취, iOS Safari — [사람] E(P2-18e). ② WebKit e2e — 자동(후보 ⑨). ③ 회사망·대칭 NAT 관람은 TURN이 없어 실패할 수 있음(P2-18d 미룸) |
 
 ## 1. 지연
 
 | 지표 (목표) | ① 자동 검증 | ② 최근 측정값·출처 | ③ 상태 | ④ 빈틈 → 닫는 방법 |
 |---|---|---|---|---|
-| **로컬 처리 지연** `estLatencyMs` (ASIO 128/2.5ms ≤ 8ms, WASAPI 독점 ≤ 15ms, 공유 ≤ 30ms) | `E/tests/loopback.rs` `est_latency_budget_table`(결정적, 가짜 장치로 ASIO 128·WASAPI 독점 144/96·IAudioClient3 공유 128 행을 목표와 비교) · `impulse_latency_matches_estimate`, `link_end_to_end_latency_128_2_5ms`(realtime) · `E/tests/measure.rs` `loopback_known_delay_within_half_ms`(루프백 측정 도구 자체의 정확도) | ASIO 128/2.5 est **7.83ms**(계산), WASAPI 독점 실장치 est **7.50ms** — P1-0(#11). WASAPI 공유 실측 기록 없음 | 자동 시험만(실장비 미확인). ASIO는 실장치로 연 적이 없다 | ① 하드웨어 루프백으로 숨은 지연(보정값) 측정 — [사람] B(P1-1a·P1-11). ② cpal 공유 폴백(10ms 주기)은 표에 행이 없다 → `est_latency_budget_table`에 cpal 공유 행 추가(자동, XS, 신규 후보 ⑧) |
-| **입→귀 총 지연** (같은 도시 ≤ 25ms, 원거리 ≤ 40ms) | `E/tests/measure.rs` `echo_round_trip_reflects_proxy_delay`·`echo_flow_consent_measure_auto_stop`(realtime, 지연 프록시로 에코 왕복 검증) · `C/features/room/earLatency.test.ts`, `client/e2e/ear-latency.e2e.ts`(화면 추정식) | 실회선 값 없음. 화면 추정식만 완료(P2-8 #112, P2-8b #149) | 자동 시험만(실장비 미확인) | 실제 두 PC 에코 측정 — [사람] C(P1-7, 같은 LAN)·D(P1-8, 원거리). 화면 추정값과 에코값 ±5ms 대조(P2-8)도 같은 세션에서 |
-| **지터 버퍼 추가 지연** (안정 회선 중앙값 ≤ 1프레임 + p95 지터) | `E/tests/sim/long.rs` `long_sim_6peers_5min`(PR마다)·`long_sim_6peers_60min`(야간)의 GOAL 1절 판정(`goal_delay_limit` 첫·마지막 창) · 지터 단위 시험 `engine::jitter::tests::*` · `E/tests/sim/chaos.rs` 9종 | 60분 하네스 GOAL 전 항목 PASS(P1-6c #65, P2-17g #209 뒤 재확인) · soak 버퍼 p50/p99 6.2/8.3ms(기본)·4.5/5.5ms(초저지연) — P1-14(#110, run 43186650655) | 자동 충족(시뮬레이션·가짜 장치). 예외: 꼬리 지터 피어 #1은 Known 래칫으로 남음 | ① P1-6d 결정(꼬리 지터 = 안정 회선 아님)의 남은 일: 하네스 1절 판정에서 꼬리 지터 피어 제외 — 자동(P1-6d, P2-16d). ② 실회선 유선 LAN에서 `bufferMs` 기록 — [사람] C |
+| **로컬 처리 지연** `estLatencyMs` (ASIO 128/2.5ms ≤ 8ms, WASAPI 독점 ≤ 15ms, 공유 ≤ 30ms) | `E/tests/loopback.rs` `est_latency_budget_table`(결정적, 가짜 장치로 ASIO 128·WASAPI 독점 144/96·IAudioClient3 공유 128 행을 목표와 비교) · `impulse_latency_matches_estimate`, `link_end_to_end_latency_128_2_5ms`(realtime) · `E/tests/measure.rs` `loopback_known_delay_within_half_ms`(realtime, 루프백 측정 도구 자체의 정확도) | ASIO 128/2.5 est **7.83ms**(계산), WASAPI 독점 실장치 est **7.50ms** — P1-0(#11). WASAPI 공유 실측 기록 없음 | 자동 시험만(실장비 미확인). ASIO는 실장치로 연 적이 없다 | ① 하드웨어 루프백으로 숨은 지연(보정값) 측정 — [사람] B(P1-1a·P1-11). ② cpal 공유 폴백(10ms 주기)은 표에 행이 없다 → `est_latency_budget_table`에 cpal 공유 행 추가(자동, XS, 신규 후보 ⑧) |
+| **입→귀 총 지연** (같은 도시 ≤ 25ms, 원거리 ≤ 40ms) | `E/tests/measure.rs` `echo_round_trip_reflects_proxy_delay`(realtime, 지연 프록시로 에코 왕복 검증)·`echo_flow_consent_measure_auto_stop`(기본 시험, 동의·자동 정지 흐름) · `C/features/room/earLatency.test.ts`, `client/e2e/ear-latency.e2e.ts`(화면 추정식) | 실회선 값 없음. 화면 추정식만 완료(P2-8 #112, P2-8b #149) | 자동 시험만(실장비 미확인) | 실제 두 PC 에코 측정 — [사람] C(P1-7, 같은 LAN)·D(P1-8, 원거리). 화면 추정값과 에코값 ±5ms 대조(P2-8)도 같은 세션에서 |
+| **지터 버퍼 추가 지연** (안정 회선 중앙값 ≤ 1프레임 + p95 지터) | `E/tests/sim/long.rs` `long_sim_6peers_5min`(PR마다)·`long_sim_6peers_60min`(야간)의 GOAL 1절 판정(`goal_delay_limit` 첫·마지막 창) · 지터 단위 시험 `band_dsp::jitter::tests`(`client/src-tauri/crates/band-dsp/src/jitter/mod.rs`) · `E/tests/sim/chaos.rs` 11개(`chaos_reorder_storm` … `chaos_stale_replays`) | 60분 하네스 GOAL 전 항목 PASS(P1-6c #65, P2-17g #209 뒤 재확인) · soak 버퍼 p50/p99 6.2/8.3ms(기본)·4.5/5.5ms(초저지연) — P1-14(#110, run 43186650655) | 자동 충족(시뮬레이션·가짜 장치). 예외: 5분 하네스(PR마다)의 꼬리 지터 피어 #1 마지막 창만 Known 래칫(`KNOWN_1` short 12.17ms), 60분은 PASS | ① P1-6d 결정(꼬리 지터 = 안정 회선 아님)의 남은 일: 하네스 1절 판정에서 꼬리 지터 피어 제외 — 자동(P1-6d, P2-16d). ② 실회선 유선 LAN에서 `bufferMs` 기록 — [사람] C |
 | **지연 누적** (60분 동안 `bufferMs`가 목표 ±3ms 밖으로 1분 이상 머물지 않음, ±200ppm) | `E/tests/sim/long.rs`: `BAND_MS = 3.0`·`BAND_MAX_S = 60.0`(`band_ok`), `accum_ok`(처음·끝 차 ≤ 1ms), 피어 드리프트 −200~+200ppm · `E/src/engine/worker/tests.rs` `device_clock_recovers_*` · 실제 시계: `soak.rs`(드리프트는 가짜 장치 시계 차) | 60분 하네스 띠 밖 0.0%/0.2%(P1-6a #58), 이후 PASS 유지 | 자동 충족(시뮬레이션) | 실제 장치 시계 차(USB 인터페이스 ↔ 내장)에서 60분 — 자동 불가, [사람] C의 "60분 합주"에서 진단 zip `timeline.jsonl` 확인 |
 
 ## 2. 안정성
@@ -47,14 +54,14 @@
 | **손실 1% 은닉** (≤ 1.5%, 청감상 끊김 없음, Opus PLC/FEC) | `E/tests/sim/long.rs` 피어 #0(무작위 손실 1%, `LossRule::Goal`) · `E/tests/sim/loss_codec.rs` `loss_feedback_sim`·`loss_feedback_sim_music` · `E/tests/loopback.rs` `loopback_loss5_jitter20_drift`(realtime) · `E/tests/loss_feedback.rs` | 손실 1% 은닉 **0.98%**(P1-6a #58), 꼬리 지터 피어 포함 60분 PASS(P1-6b #63) | 수치는 자동 충족(시뮬레이션). **청감은 미확인** | ① "Opus FEC"는 실제로 동작하지 않는다(CELT 전용 모드라 FEC = PLC, P2-17b) — GOAL 문구 정정 또는 RED류 중복 전송은 [결정], P2-17h 실회선 측정 뒤. ② 손실 회선 청취 — [사람] D(P1-4e, P2-17). ③ 실회선 손실 모양 수집 — [사람] C/D 진단 zip → `E/examples/loss_shape_estimate.rs` |
 | **권장 설정 xrun** (WASAPI 독점, 30분 0회) | 실시간 경로 정적 검사 `E/tests/architecture.rs`(RT 할당·락·syscall 금지) · `E/tests/rt_alloc.rs` · `soak.rs`가 xrun을 **세지만 판정에서 제외**(공유 VM 기상 지연, P1-14 #123) · 하네스 6피어 60분 xrun 0(실측 기상 모델, P2-17g #209) | soak xrun 40(기본)·73(초저지연), 6엔진 합·GitHub VM — 판정 제외 | **측정 수단은 있으나(진단 줄 `xrun N`) 실장비 30분 기록 없음** | 자동으로는 닫을 수 없다(실제 장치 콜백이 필요). [사람] A(내장 장치 WASAPI 독점 30분)·B(USB 인터페이스) — P1-0, P1-14 |
 | **6인 풀메시** (60분, CPU ≤ 15%(4코어), 재연결 없음) | `E/tests/soak.rs` `soak_balanced`·`soak_ultra_low`(야간, 판정: 이탈 0·패닉 0·CPU ≤ 15%·은닉 ≤ 0.1%·5초 창 ≤ 2%·RSS) · `E/tests/cpu_profile.rs` `six_peer_full_mesh_cpu`(수동 측정 도구) · `E/tests/sim/long.rs` 6피어 | 이탈 0·CPU 1명 몫 **3.06%**(기본)/2.38%(초저지연) — P1-14(#110); 6인 최악 Opus 2.5ms **3.92%** — P1-10(#54); 모든 피어 개별 Opus 최악 5.05% — P1-4f(#69) | 자동 충족(가짜 장치·한 PC·127.0.0.1). **야간 실행 기록 없음**(위 주의) | ① 야간 잡이 실제로 도는지 확인 — 자동(신규 후보 ①). ② 실장비 6명 — 사람 6명이 필요해 당장 어렵다. 2인 값(P1-10 [사람] C)으로 대신 기록하고 6인은 팀이 모일 때 |
-| **일시적 단절** (WS 30초 안 재연결 시 오디오 끊김 없음, UDP 5초 단절 뒤 자동 복구) | WS: `C/features/room/state/reconnectPolicy.test.ts`·`reconnect.test.tsx`·`reconnectUx.test.tsx`, `client/e2e/reconnect.e2e.ts`, `S/test/ws-resume-live.test.ts`·`ws-session.test.ts`·`ws-ping.test.ts`·`ws-resume-anon.test.ts` · UDP: `E/tests/sim/long.rs` 피어 #3·#5 5초 단절(`RECOVER_MAX_S = 5.0`, `recover_ok`), `E/src/net/peer/mod.rs` `state_machine_timeouts`·`falls_back_to_relay_when_direct_goes_quiet`, `E/tests/relay.rs` `direct_blocked_after_connect_demotes_to_relay` | 25초 실패 뒤 재개 시 engine_stop 0회(P1-15 #84), 옛 연결 재개(P1-16 #107), 60분 하네스 복구 PASS | 자동 충족(가짜 소켓·시뮬레이션) | 실네트워크에서 Wi-Fi 5초·20초·40초 끊기 — [사람] C(P1-15, P1-16). 서버 재배포는 세션을 버린다(운영 규칙으로 막음, P1-17①) |
+| **일시적 단절** (WS 30초 안 재연결 시 오디오 끊김 없음, UDP 5초 단절 뒤 자동 복구) | WS: `C/features/room/state/reconnectPolicy.test.ts`·`state/reconnect.test.tsx`·`C/features/room/reconnectUx.test.tsx`, `client/e2e/reconnect.e2e.ts`, `S/test/ws-resume-live.test.ts`·`ws-session.test.ts`·`ws-ping.test.ts`·`ws-resume-anon.test.ts` · UDP: `E/tests/sim/long.rs` 피어 #3·#5 5초 단절(`RECOVER_MAX_S = 5.0`, `recover_ok`), `E/src/net/peer/mod.rs` `state_machine_timeouts`·`falls_back_to_relay_when_direct_goes_quiet`, `E/tests/relay.rs` `direct_blocked_after_connect_demotes_to_relay` | 25초 실패 뒤 재개 시 engine_stop 0회(P1-15 #84), 옛 연결 재개(P1-16 #107), 60분 하네스 복구 PASS | 자동 충족(가짜 소켓·시뮬레이션) | 실네트워크에서 Wi-Fi 5초·20초·40초 끊기 — [사람] C(P1-15, P1-16). 서버 재배포는 세션을 버린다(운영 규칙으로 막음, P1-17①) |
 
 ## 3. 연결성
 
 | 지표 (목표) | ① 자동 검증 | ② 최근 측정값·출처 | ③ 상태 | ④ 빈틈 → 닫는 방법 |
 |---|---|---|---|---|
 | **직접 연결 성공률** (콘형 NAT 쌍 100%, 같은 공유기 LAN 우선) | `E/tests/relay.rs` `port_restricted_cone_pair_connects_direct_and_logs_result`(NAT 흉내 프록시) · `E/src/net/peer/mod.rs` `lan_preferred_over_public` · `E/tests/stun.rs` · 연결 결과 기록 `E/src/net/connlog.rs`(진단 타임라인 `conn`) | 성공률 숫자 없음 — P1-18(#145)이 기록 수단만 만듦 | 자동 시험만(실장비 미확인). **성공률을 재는 집계 도구 없음** | ① 진단 zip의 `conn` 기록을 모아 성공률 표를 만드는 스크립트 — 자동(신규 후보 ③). ② 실제 공유기 쌍 — [사람] C(LAN)·D(다른 집) |
-| **직접 실패 시 UDP 릴레이 폴백** (지연 증가 UI 표시, 대칭형/LTE 포함 ≥ 98%) | `E/tests/relay.rs` `symmetric_nat_falls_back_to_relay_and_logs_result`, `direct_blocked_connects_via_relay_then_promotes_to_direct`(realtime), `relay_restart_reregisters_and_audio_resumes`, `pcm16_relay_budget_switches_to_opus_and_back`(realtime) · `relay/` 크레이트 시험(CI `relay` 잡) · UI: `C/native/relayLogic.ts` `RELAY_PATH_HINT`, `C/features/room/roomDetailModel.ts:101`, `MixerChannels.tsx:176` | 직접 차단→릴레이 첫 소리 1.56~1.61초(P1-20 #120) | 자동 시험만. **운영 릴레이 배포는 백로그상 보류**(P1-4: fly 전용 IPv4 유료 [사람]). 이 감사에서 fly 상태는 조회하지 않았다 | ① 운영 릴레이 배포는 비용 결정 — [사람] F. ② 그 전까지는 PC A 로컬 릴레이로 확인 — [사람] D(P1-4d). ③ 릴레이 상태(`relay.state`)가 화면에 없어 개발자 도구가 필요 → 진단 줄 노출(자동, 신규 후보 ⑤) |
+| **직접 실패 시 UDP 릴레이 폴백** (지연 증가 UI 표시, 대칭형/LTE 포함 ≥ 98%) | `E/tests/relay.rs` `symmetric_nat_falls_back_to_relay_and_logs_result`, `direct_blocked_connects_via_relay_then_promotes_to_direct`(realtime), `relay_restart_reregisters_and_audio_resumes`(realtime), `pcm16_relay_budget_switches_to_opus_and_back`(realtime) · `relay/` 크레이트 시험(CI `relay` 잡) · UI: `C/native/relayLogic.ts` `RELAY_PATH_HINT`, `C/features/room/roomDetailModel.ts:101`, `MixerChannels.tsx:176` | 직접 차단→릴레이 첫 소리 1.56~1.61초(P1-20 #120) | 자동 시험만. **운영 릴레이 배포는 백로그상 보류**(P1-4: fly 전용 IPv4 유료 [사람]). 이 감사에서 fly 상태는 조회하지 않았다 | ① 운영 릴레이 배포는 비용 결정 — [사람] F. ② 그 전까지는 PC A 로컬 릴레이로 확인 — [사람] D(P1-4d). ③ 릴레이 상태(`relay.state`)가 화면에 없어 개발자 도구가 필요 → 진단 줄 노출(자동, 신규 후보 ⑤) |
 | **연결 소요 시간** (입장 후 3초 안 소리) | `E/tests/loopback.rs` `first_audio_local_direct_within_1s`(realtime), `first_audio_and_connect_ms_reported` · `E/tests/relay.rs` `direct_blocked_connects_via_relay_then_promotes_to_direct`(`firstAudioMs ≤ 3000` 단언) · `C/native/firstAudio.test.ts` | 로컬 직접 **29ms**, 직접 차단→릴레이 **1.56~1.61초**(P1-20 #120) | 자동 충족(127.0.0.1). 실회선 미확인 | ① "연주 시작→첫 소리" 값을 진단 zip에 남기기 — 자동(P1-20 후속). ② 두 회선 PC 직접·릴레이 각 3회 — [사람] D(P1-20) |
 
 ## 4. 사용성 (기능별 코드 근거)
@@ -83,6 +90,7 @@
 
 | 기준 | 자동 | 실장비/실회선 |
 |---|---|---|
+| 0 웹 관람 | e2e(chromium) | 화면만 확인, 청취 없음 |
 | 1-1 로컬 처리 지연 | 계산·가짜 장치 충족 | WASAPI 독점 est 7.50ms만, 루프백·ASIO 없음 |
 | 1-2 입→귀 | 도구 시험만 | **없음** |
 | 1-3 지터 버퍼 지연 | 충족(꼬리 지터 피어 Known) | 없음 |
@@ -96,7 +104,7 @@
 | 3-3 3초 첫 소리 | 충족(로컬) | 없음 |
 | 4 사용성 | ASIO 부분·코드 서명 미구현, 나머지 있음 | 대부분 실화면 미확인, 웹 화면은 P3-21에서 확인 |
 
-**결론:** 자동 쪽은 GOAL 1~3절 대부분이 시뮬레이션·가짜 장치로 판정되고 있다. 가장 큰 빈틈은 **실장비·실회선 수치가 하나도 없다**는 것(입→귀, xrun 30분, 연결 성공률)이고, 이는 자동으로 닫을 수 없다. 자동으로 할 수 있는 일은 (1) 야간 판정이 실제로 매일 돌게 하기, (2) 사람 측정을 빠르고 틀림없게 만드는 도구(진단 zip → 결과표), (3) 남은 하네스 판정 정리다.
+**결론:** 자동 쪽은 GOAL 1~3절 대부분이 시뮬레이션·가짜 장치로 판정되고 있다. 가장 큰 빈틈은 **실장비·실회선 수치가 (1-1의 WASAPI 독점 est 7.50ms 하나를 빼면) 하나도 없다**는 것(입→귀, xrun 30분, 연결 성공률)이고, 이는 자동으로 닫을 수 없다. 자동으로 할 수 있는 일은 (1) 야간 판정이 실제로 매일 돌게 하기, (2) 사람 측정을 빠르고 틀림없게 만드는 도구(진단 zip → 결과표), (3) 남은 하네스 판정 정리다.
 
 ---
 
