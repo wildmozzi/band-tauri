@@ -104,7 +104,7 @@ export function initializeWebSocket(
   options: WsOptions = {},
 ): WebSocketServer {
   const env = options.env ?? process.env
-  const baseDeps: WsDeps = { ...supabaseDeps(supabase), ...options.deps }
+  const baseDeps: WsDeps = { ...supabaseDeps(supabase, { writeParticipantCounts: options.writeParticipantCounts ?? true }), ...options.deps }
   // 같은 토큰의 getUser 반복·동시 호출을 한 번으로 (서버 보안 점검: auth 증폭 방지)
   const deps: WsDeps = baseDeps
   const tokenVerifier = cachedTokenVerifier(deps.verifyToken)
