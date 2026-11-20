@@ -280,7 +280,7 @@ fn conn_agg(out: &mut String, a: &ConnAgg) {
     let nats = a.nat_sessions.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · ");
     let _ = writeln!(
         out,
-        "- NAT 추정(세션 수): {} · 내보낸 사람 {} · 짝 확인된 쌍 {} · 콘형 쌍 {}(실제 시도 하한 {}회 · 양쪽 기록: 직접 {} · 릴레이/실패 {} · 중단/미완 {}). 짝 = 같은 시간에 서로를 피어로 본 두 사람의 zip(selfPeer로 맞춤, 같은 PC가 여러 번 내보낸 zip은 한 사람), 콘형 쌍 = 그 둘이 모두 independent·open.",
+        "- NAT 추정(세션 수): {} · 내보낸 사람 {} · 짝 확인된 쌍 {} · 콘형 쌍 {}(쌍들 합 실제 시도 하한 {}회 · 양쪽 기록: 직접 {} · 릴레이/실패 {} · 중단/미완 {}). 짝 = 같은 시간에 서로를 피어로 본 두 사람의 zip(selfPeer로 맞춤, 같은 PC가 여러 번 내보낸 zip은 한 사람), 콘형 쌍 = 그 둘이 모두 independent·open.",
         if nats.is_empty() { none() } else { nats },
         a.endpoints,
         a.pairs,

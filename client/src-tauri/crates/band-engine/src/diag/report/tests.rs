@@ -975,7 +975,7 @@ fn first_audio_from_entry() {
         report_v3("e.zip", &t)
     };
     let r = run(&|_| vec![peer("id-a", Some(900.0), Some(600.0)), peer("id-b", Some(0.0), Some(400.0))], 30);
-    assert_eq!(r.conn.entry_first_audio_ms, vec![1500.0, 400.0]);
+    assert_eq!(r.conn.entry_first_audio_ms, vec![400.0, 1500.0], "정렬해 둔다");
     let g = goal_of(&r.goal, "3-3")[0];
     assert_eq!(g.verdict, Verdict::Met, "{g:?}");
     assert!(g.measured.contains("입장 후 2개 · 중앙 950ms · 최대 1500ms"), "{g:?}");
@@ -1063,13 +1063,13 @@ fn direct_rate_judged_on_cone_pairs() {
     let (g, r) = g31(pair("independent", "open", "public", "public", 3));
     assert_eq!(g.verdict, Verdict::Met, "{g:?}");
     assert_eq!((r.conn.endpoints, r.conn.pairs, r.conn.cone_pairs, r.conn.cone_attempts, r.conn.cone_direct), (2, 1, 1, 3, 6));
-    assert!(g.note.as_deref().unwrap().contains("콘형 쌍 1개 · 실제 시도 하한 3회 기준"), "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("콘형 쌍 1개 · 쌍들 합 실제 시도 하한 3회 기준"), "{g:?}");
     assert!(markdown(&r).contains("independent — 매핑 독립(콘형), STUN 응답 2"), "{}", markdown(&r));
 
     // #250 M2: 연결 한 번(양쪽에 1건씩 = 기록 2)은 "100%"의 근거가 아니다
     let (g, r) = g31(pair("independent", "independent", "lan", "lan", 1));
     assert_eq!((g.verdict, r.conn.cone_attempts), (Verdict::Unknown, 1), "{g:?}");
-    assert!(g.note.as_deref().unwrap().contains("시도 3회 이상"), "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("쌍들 합 시도 3회 이상"), "{g:?}");
 
     let (g, _) = g31(pair("independent", "independent", "relay", "relay", 1));
     assert_eq!(g.verdict, Verdict::NotMet, "{g:?}");
@@ -1205,4 +1205,126 @@ fn send_queue_carries_forward_and_summary_shows_values() {
     assert!(md.contains("| 송신 큐 p99 중앙 / p95 / 최대 (ms) | 0.10 / 0.90 / 0.90 |"), "{md}");
     assert!(md.contains("상태 binding → bound · RTT 중앙 / p95 / 최대 30.00 / 30.00 / 30.00"), "{md}");
     assert!(md.contains("| NAT 추정(STUN) | 없음(format 3 이전) |"), "{md}");
+}
+
+/// 한 사람 기록(format 3 타임라인 글): 세션 `session`, 초 `from..to`(T0 기준), 본 피어 `peers`(`connecting_until`초 전까지 연결 중),
+/// 첫 줄에 `selfPeer`·`nat`, 연결 기록 `conns`(초, 피어, 단계, 결과).
+#[allow(clippy::too_many_arguments)]
+fn tl(me: Option<&str>, nat: Option<&str>, session: u64, from: u64, to: u64, peers: &[&str], connecting_until: u64, conns: &[(u64, &str, &str, &str)]) -> String {
+    let mut text = String::new();
+    for i in from..to {
+        let state = if i < connecting_until { "connecting" } else { "connected" };
+        let ps: Vec<_> = peers.iter().map(|p| serde_json::json!({"peer": p, "state": state, "path": "public"})).collect();
+        let mut v = serde_json::json!({"t": T0 + i * 1000, "running": true, "network": true, "session": session, "backend": "wasapiExclusive", "peers": ps});
+        if i == from {
+            if let Some(m) = nat {
+                v["nat"] = serde_json::json!({"mapping": m, "responses": 2});
+            }
+            if let Some(me) = me {
+                v["selfPeer"] = serde_json::json!(me);
+            }
+        }
+        let cs: Vec<_> = conns
+            .iter()
+            .filter(|c| c.0 == i)
+            .map(|(s, p, ph, r)| serde_json::json!({"t": T0 + s * 1000, "peer": p, "phase": ph, "result": r, "ms": 120}))
+            .collect();
+        if !cs.is_empty() {
+            v["conn"] = serde_json::Value::Array(cs);
+        }
+        text += &(v.to_string() + "\n");
+    }
+    text
+}
+
+fn zip_v3(name: &str, text: &str) -> Diag {
+    read_zip_bytes(name, zip_of(&[("meta.json", r#"{"format":3}"#), ("timeline.jsonl", text)])).unwrap()
+}
+
+/// 모든 순열(힙 알고리즘)
+fn permutations(n: usize) -> Vec<Vec<usize>> {
+    fn go(k: usize, a: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if k <= 1 {
+            out.push(a.clone());
+            return;
+        }
+        for i in 0..k {
+            go(k - 1, a, out);
+            let j = if k % 2 == 0 { i } else { 0 };
+            a.swap(j, k - 1);
+        }
+    }
+    let mut out = Vec::new();
+    go(n, &mut (0..n).collect(), &mut out);
+    out
+}
+
+/// 순서와 무관해야 하는 값: 연결 집계 전체(같은 zip 두 번은 어느 쪽이 "중복"인지만 다르므로 뺌), 3절 판정, zip별 세션 요약·판정
+/// (zip 이름 순으로).
+fn order_free_view(r: &Report) -> String {
+    let mut conn = r.conn.clone();
+    conn.duplicate_files.clear();
+    let mut files: Vec<String> = r.files.iter().map(|f| format!("{} {:?}", f.source, f.sessions.iter().map(|s| (s.session, s.span_ms, &s.goal)).collect::<Vec<_>>())).collect();
+    files.sort();
+    format!("{conn:?}\n{:?}\n{files:?}", r.goal)
+}
+
+/// 넣는 순서를 모두 바꿔 봐도 같은 보고서인지 — 첫 순서의 결과를 돌려준다.
+fn assert_order_free(zips: &[(&str, String)]) -> Report {
+    let first = report(&zips.iter().map(|(n, t)| zip_v3(n, t)).collect::<Vec<_>>());
+    let want = order_free_view(&first);
+    for p in permutations(zips.len()) {
+        let r = report(&p.iter().map(|&i| zip_v3(zips[i].0, &zips[i].1)).collect::<Vec<_>>());
+        assert_eq!(order_free_view(&r), want, "순서 {:?}", p.iter().map(|&i| zips[i].0).collect::<Vec<_>>());
+    }
+    first
+}
+
+/// #250 H1' 재현: A가 한 세션을 세 번 내보냄 — a1 [0, 20)초(연결 기록 없음), a2 [0, 50), a3 [40, 60)(링이 넘쳐 앞이 잘린 늦은 내보내기).
+/// a2·a3 모두 45·46초에 B와의 연결 기록이 있다. 예전에는 [a1, a3, a2, b] 차례로 주면 a3이 따로 단위가 되어 그 두 기록이 두 번
+/// 세어져 실제 2회가 4회로 부풀고 3-1이 충족이었다. 이제 어떤 순서로 줘도 A는 한 단위([0, 60)), 실제 시도 하한 2회 → 판정 불가.
+#[test]
+fn merging_same_person_exports_ignores_input_order() {
+    let (a, b) = ("id-aaaa", "id-bbbb");
+    let ind = Some("independent");
+    let a_conn = [(45, b, "connect", "public"), (46, b, "reconnect", "public")];
+    let zips = [
+        ("a1.zip", tl(Some(a), ind, 1, 0, 20, &[b], 0, &[])),
+        ("a2.zip", tl(Some(a), ind, 1, 0, 50, &[b], 0, &a_conn)),
+        ("a3.zip", tl(Some(a), ind, 1, 40, 60, &[b], 0, &a_conn)),
+        ("b.zip", tl(Some(b), ind, 1, 0, 60, &[a], 0, &[(45, a, "connect", "public"), (46, a, "reconnect", "public")])),
+    ];
+    // 리뷰의 차례 그대로
+    let r = report(&[0, 2, 1, 3].map(|i| zip_v3(zips[i].0, &zips[i].1)));
+    let g = goal_of(&r.goal, "3-1")[0];
+    assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
+    assert_eq!((r.conn.sessions, r.conn.attempts, r.conn.attempts_lower, r.conn.cone_pairs, r.conn.cone_attempts, r.conn.cone_direct), (2, 4, 2, 1, 2, 4));
+    // 24가지 순서 모두 같은 결과
+    let r = assert_order_free(&zips);
+    assert_eq!((r.conn.sessions, r.conn.attempts_lower, r.conn.cone_attempts), (2, 2, 2));
+}
+
+/// 순열 불변성(3-1·3-2·3-3·세션 요약·2-1): 같은 사람의 겹치는 내보내기 사슬(앞 것은 연결 중 = 미완, 뒤 것이 결과로 대체), 상대 한 명,
+/// `selfPeer` 없는 옛 기록, 같은 zip을 이름만 바꿔 두 번 — 이 5개를 어떤 순서로 줘도 집계·판정이 같다. 한 zip 안에 같은 시각의 같은
+/// 기록이 둘이면(같은 ms에 두 번) 둘로 센다(여러 zip에 걸친 같은 줄만 한 번).
+#[test]
+fn aggregates_are_permutation_invariant() {
+    let (c, d) = ("id-cccc", "id-dddd");
+    let ind = Some("independent");
+    let late_conn = [(110, d, "connect", "public"), (120, d, "reconnect", "public"), (120, d, "reconnect", "public")];
+    let legacy = tl(None, None, 2, 200, 230, &["id-eeee"], 0, &[(201, "id-eeee", "connect", "lan")]);
+    let zips = [
+        ("c-early.zip", tl(Some(c), ind, 1, 100, 105, &[d], 110, &[])),
+        ("c-mid.zip", tl(Some(c), ind, 1, 103, 115, &[d], 110, &late_conn[..1])),
+        ("c-late.zip", tl(Some(c), ind, 1, 112, 130, &[d], 0, &late_conn)),
+        ("d.zip", tl(Some(d), ind, 1, 100, 130, &[c], 110, &[(110, c, "connect", "relay"), (120, c, "reconnect", "public")])),
+        ("old.zip", legacy.clone()),
+        ("old-copy.zip", legacy),
+    ];
+    let r = assert_order_free(&zips);
+    // C는 사슬 early–mid–late가 한 단위: 미완은 대체되고(0), 110초 기록은 mid·late에 걸쳐 한 번, 120초 두 줄은 late 안에서 둘
+    assert_eq!((r.conn.sessions, r.conn.pending, r.conn.endpoints, r.conn.pairs, r.conn.cone_pairs), (3, 0, 2, 1, 1), "{:?}", r.conn);
+    assert_eq!((r.conn.attempts, r.conn.success, r.conn.relay, r.conn.attempts_lower), (3 + 2 + 1, 6, 1, 3 + 1), "{:?}", r.conn);
+    assert_eq!(goal_of(&r.goal, "3-1")[0].verdict, Verdict::NotMet, "콘형 쌍인데 릴레이 기록");
+    assert_eq!(r.conn.duplicate_files.len(), 1);
 }

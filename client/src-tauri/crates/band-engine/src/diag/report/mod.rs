@@ -81,8 +81,8 @@ pub(crate) mod goal {
     /// 있어 98% 아래일 때만 "미달"이다.
     pub(crate) const MIN_ATTEMPTS_98: usize = 50;
     /// 도구 규칙(GOAL에 없음, #250 M2): 3-1 "콘형 NAT 쌍 직접 100%"를 충족으로 가르는 최소 표본. 짝이 확인된 콘형 쌍이
-    /// `MIN_CONE_PAIRS` 이상이고, 그 안의 **실제 시도 수 하한**(무리마다 엔드포인트별 시도 수 중 큰 쪽 — 같은 연결이 양쪽 zip에 한 번씩
-    /// 남으므로 합하지 않는다)이 `MIN_CONE_ATTEMPTS` 이상이어야 한다. 3회는 TEST-SESSION의 반복 횟수(다른 네트워크 연결 3회, P1-20
+    /// `MIN_CONE_PAIRS` 이상이고, **쌍들의 실제 시도 하한 합**(쌍마다 두 사람 쪽 기록 중 큰 쪽 — 같은 연결이 양쪽 zip에 한 번씩 남으므로
+    /// 양쪽을 합하지 않는다 — 을 쌍끼리 더한 값. 쌍마다 3회가 아니다: 4인 합주에서 6쌍이 한 번씩이면 6)이 `MIN_CONE_ATTEMPTS` 이상이어야 한다. 3회는 TEST-SESSION의 반복 횟수(다른 네트워크 연결 3회, P1-20
     /// 행)와 같다 — 한 번의 연결로 "100%"를 내지 않는다. 그보다 적으면 판정 불가(직접이 아닌 시도가 있으면 수와 상관없이 미달).
     pub(crate) const MIN_CONE_PAIRS: usize = 1;
     pub(crate) const MIN_CONE_ATTEMPTS: usize = 3;
@@ -488,7 +488,7 @@ pub(crate) struct ConnAgg {
     /// 짝이 확인된 쌍(시간이 겹치는 기록에서 서로를 피어로 본 두 사람의 zip이 모두 있음) 수와 그중 둘 다 independent·open인 쌍 수
     pub(crate) pairs: usize,
     pub(crate) cone_pairs: usize,
-    /// 콘형 쌍의 실제 시도 수 하한(쌍마다 두 사람 쪽 기록 중 많은 쪽 — 같은 연결이 양쪽에 한 번씩 남는다)
+    /// 콘형 쌍들의 실제 시도 하한 합(쌍마다 두 사람 쪽 기록 중 많은 쪽 — 같은 연결이 양쪽에 한 번씩 남는다 — 을 쌍끼리 더함)
     pub(crate) cone_attempts: usize,
     /// 콘형 쌍의 기록(양쪽 합): 직접(lan/public) · 직접 아님(relay/failed) · 결과 모름(aborted/미완/새 형식)
     pub(crate) cone_direct: usize,
@@ -1315,7 +1315,8 @@ fn session_goal(s: &SessionReport, interval_ms: u64) -> Vec<GoalRow> {
     out
 }
 
-/// 집계 단위: 한 사람의 한 엔진 세션. 같은 사람(`selfPeer`)이 같은 세션(번호 같고 시간이 겹침)을 여러 번 내보낸 zip은 하나로 합친다 —
+/// 집계 단위: 한 사람의 한 엔진 세션. 같은 사람(`selfPeer`)이 같은 세션(번호 같고 시간이 겹침 — 겹침이 사슬로 이어지는 것까지)을 여러 번
+/// 내보낸 zip은 넣은 순서와 상관없이 하나로 합친다 —
 /// 피어 표·미완·NAT은 가장 늦게 끝난 기록(뒤에 내보낸 zip이 앞 것을 담는다)을, 연결 기록은 모두 합쳐 시각·피어·단계·결과로 중복을
 /// 뺀다(링이 넘쳐 앞 zip에만 남은 줄도 잃지 않게). `selfPeer`가 없는 세션(format 3 이전)은 각자 한 단위다.
 struct Unit<'a> {
@@ -1338,45 +1339,75 @@ impl Unit<'_> {
     }
 }
 
+/// 연결 기록 한 줄의 동일성 열쇠(시각·피어·단계·결과) — 같은 사람이 여러 번 내보낸 zip에서 같은 기록을 알아본다
+fn conn_key(c: &ConnRow) -> (u64, &str, &str, &str) {
+    (c.t, c.peer.as_str(), c.phase.as_str(), c.result.as_str())
+}
+
+/// 대표 기록 우선순위: 늦게 끝난 것 → 길게(일찍 시작한) 것 → 기록이 많은 것 → zip 이름. 입력 순서와 무관하게 하나로 정해진다.
+fn rep_rank<'a>(x: &(&'a FileReport, &'a SessionReport, (u64, u64))) -> (u64, std::cmp::Reverse<u64>, usize, usize, &'a str) {
+    let (f, s, span) = x;
+    (span.1, std::cmp::Reverse(span.0), s.conn.len(), s.peers.len(), f.source.as_str())
+}
+
+/// 세션들 → 집계 단위. **입력 순서와 무관하다**(#250 H1'): 같은 사람·같은 세션 번호의 기록을 먼저 모두 모아 시간 범위가 겹치는
+/// 것끼리(사슬로 이어지는 것까지) 한 단위로 묶고, 연결 기록은 열쇠마다 "한 zip 안에서 가장 많이 나온 수"만 남긴다 — 여러 zip에 같은
+/// 줄이 있어도 한 번, 한 zip 안에 같은 열쇠가 둘이면 둘. 단위 순서도 (사람, 세션, 시작, 대표 zip 이름)로 정렬한다.
 fn units_of(files: &[FileReport]) -> Vec<Unit<'_>> {
+    // 사람 열쇠: `selfPeer`가 있으면 가명마다 하나(가명 순서 — zip 수 뒤의 번호), 없으면 zip 순번. 값은 같고 다름만 쓴다.
+    let mut names: Vec<&str> = files.iter().filter(|f| f.duplicate_of.is_none()).flat_map(|f| f.sessions.iter().filter_map(|s| s.self_peer.as_deref())).collect();
+    names.sort_unstable();
+    names.dedup();
+    let key_of = |w: &str| files.len() + names.binary_search(&w).unwrap_or(0);
+
     let mut units: Vec<Unit> = Vec::new();
-    // 사람 열쇠: `selfPeer`가 있으면 가명마다 하나(zip 수 뒤의 번호), 없으면 zip 순번
-    let mut keys: BTreeMap<&str, usize> = BTreeMap::new();
+    // (사람, 세션 번호) → 그 기록들
+    let mut by_who: BTreeMap<(&str, u64), Vec<(&FileReport, &SessionReport, (u64, u64))>> = BTreeMap::new();
     for (file_key, f) in files.iter().enumerate().filter(|(_, f)| f.duplicate_of.is_none()) {
         let format3 = f.format.is_some_and(|x| x >= 3);
         for s in &f.sessions {
             let span = s.span_ms.unwrap_or((0, 0));
-            let who = s.self_peer.as_deref();
-            let same = who.and_then(|w| {
-                units.iter().position(|u| u.who == Some(w) && u.session == s.session && u.span.0 <= span.1 && span.0 <= u.span.1)
-            });
-            match same {
-                Some(i) => {
-                    let u = &mut units[i];
-                    for c in &s.conn {
-                        if !u.conn.iter().any(|x| (x.t, &x.peer, &x.phase, &x.result) == (c.t, &c.peer, &c.phase, &c.result)) {
-                            u.conn.push(c);
-                        }
-                    }
-                    if span.1 > u.span.1 {
-                        u.rep = s;
-                        u.format3 = format3;
-                    }
-                    u.span = (u.span.0.min(span.0), u.span.1.max(span.1));
-                }
-                None => {
-                    let key = match who {
-                        Some(w) => {
-                            let n = files.len() + keys.len();
-                            *keys.entry(w).or_insert(n)
-                        }
-                        None => file_key,
-                    };
-                    units.push(Unit { who, key, session: s.session, span, rep: s, format3, conn: s.conn.iter().collect() });
-                }
+            match s.self_peer.as_deref() {
+                Some(w) => by_who.entry((w, s.session)).or_default().push((f, s, span)),
+                None => units.push(Unit { who: None, key: file_key, session: s.session, span, rep: s, format3, conn: s.conn.iter().collect() }),
             }
         }
     }
+    for ((who, session), mut recs) in by_who {
+        recs.sort_by(|x, y| x.2.cmp(&y.2).then_with(|| rep_rank(x).cmp(&rep_rank(y))));
+        // 시작 순으로 훑어 겹치는 것끼리 한 무리(시작 순 정렬이라 사슬 A–B–C도 한 무리가 된다)
+        let mut groups: Vec<(u64, Vec<(&FileReport, &SessionReport, (u64, u64))>)> = Vec::new();
+        for r in recs {
+            match groups.last_mut() {
+                Some((end, g)) if r.2 .0 <= *end => {
+                    *end = (*end).max(r.2 .1);
+                    g.push(r);
+                }
+                _ => groups.push((r.2 .1, vec![r])),
+            }
+        }
+        for (_, g) in groups {
+            let span = (g.iter().map(|r| r.2 .0).min().unwrap_or(0), g.iter().map(|r| r.2 .1).max().unwrap_or(0));
+            let &(rf, rep, _) = g.iter().max_by(|x, y| rep_rank(x).cmp(&rep_rank(y))).expect("무리는 비지 않는다");
+            // 열쇠마다 한 zip 안의 최대 개수만큼 남긴다(여러 zip에 걸친 같은 줄은 한 번)
+            let mut most: BTreeMap<(u64, &str, &str, &str), Vec<&ConnRow>> = BTreeMap::new();
+            for (_, s, _) in &g {
+                let mut here: BTreeMap<(u64, &str, &str, &str), Vec<&ConnRow>> = BTreeMap::new();
+                for c in &s.conn {
+                    here.entry(conn_key(c)).or_default().push(c);
+                }
+                for (k, v) in here {
+                    let e = most.entry(k).or_default();
+                    if v.len() > e.len() {
+                        *e = v;
+                    }
+                }
+            }
+            let conn = most.into_values().flatten().collect();
+            units.push(Unit { who: Some(who), key: key_of(who), session, span, rep, format3: rf.format.is_some_and(|x| x >= 3), conn });
+        }
+    }
+    units.sort_by(|a, b| (a.who, a.session, a.span, a.key).cmp(&(b.who, b.session, b.span, b.key)));
     units
 }
 
@@ -1445,6 +1476,9 @@ pub(crate) fn aggregate_conn(files: &[FileReport]) -> ConnAgg {
         }
         spans.push((u.key, u.span, attempts_here));
     }
+    // 값 목록은 정렬해 둔다 — 넣은 zip 순서가 집계 값에 묻어나지 않게(#250 H1')
+    first_audio_ms.sort_by(f64::total_cmp);
+    entry_first_audio_ms.sort_by(f64::total_cmp);
 
     // 콘형 쌍(3-1): 시간이 겹치는 기록 무리마다, 서로 다른 두 사람(`selfPeer`) A·B에 대해 A의 기록이 B를 피어로 보고 B의 기록도 A를
     // 피어로 볼 때 그 쌍의 짝이 확인된다(같은 PC가 두 번 내보낸 zip은 한 사람이라 쌍이 되지 않는다, #250 H1). 쌍을 이루는 기록이 모두
@@ -1588,7 +1622,7 @@ fn conn_goal(a: &ConnAgg) -> Vec<GoalRow> {
     // 콘형 쌍: 같은 시간대 세션 무리에서 참가자 모두의 zip이 있고 모두 STUN 매핑 독립(콘형)·NAT 없음일 때만(format 3, `aggregate_conn`).
     let nats = a.nat_sessions.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · ");
     let cone_measured = format!(
-        "내보낸 사람 {} · 짝 확인된 쌍 {} · 콘형 쌍 {} · 그 쌍의 실제 시도 하한 {}회(양쪽 기록: 직접 {} · 릴레이/실패 {} · 중단/미완 {}) (전체 직접 {}/{} = {}) · 세션별 NAT {nats}",
+        "내보낸 사람 {} · 짝 확인된 쌍 {} · 콘형 쌍 {} · 쌍들 합 실제 시도 하한 {}회(양쪽 기록: 직접 {} · 릴레이/실패 {} · 중단/미완 {}) (전체 직접 {}/{} = {}) · 세션별 NAT {nats}",
         a.endpoints,
         a.pairs,
         a.cone_pairs,
@@ -1626,7 +1660,7 @@ fn conn_goal(a: &ConnAgg) -> Vec<GoalRow> {
             cone_measured,
             Unknown,
             Some(format!(
-                "콘형 쌍 {}개 · 실제 시도 하한 {}회 — 충족은 쌍 {}개 이상·시도 {}회 이상(TEST-SESSION 반복 횟수)에서만",
+                "콘형 쌍 {}개 · 쌍들 합 실제 시도 하한 {}회 — 충족은 쌍 {}개 이상·쌍들 합 시도 {}회 이상(TEST-SESSION 반복 횟수)에서만",
                 a.cone_pairs,
                 a.cone_attempts,
                 goal::MIN_CONE_PAIRS,
@@ -1640,7 +1674,7 @@ fn conn_goal(a: &ConnAgg) -> Vec<GoalRow> {
             t31,
             cone_measured,
             Met,
-            Some(format!("콘형 쌍 {}개 · 실제 시도 하한 {}회 기준. {cone_note}. 같은 공유기 LAN 우선은 경로 표(lan)로 확인", a.cone_pairs, a.cone_attempts)),
+            Some(format!("콘형 쌍 {}개 · 쌍들 합 실제 시도 하한 {}회 기준. {cone_note}. 같은 공유기 LAN 우선은 경로 표(lan)로 확인", a.cone_pairs, a.cone_attempts)),
         ));
     }
     let t32 = format!("릴레이 폴백 포함 연결 성공률 ≥ {}%", goal::CONNECT_PCT);
