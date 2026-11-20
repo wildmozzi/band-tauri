@@ -88,6 +88,18 @@ test('지연 라우트 화면은 첫 화면 JS에 없고 제 묶음에만 있다
   }
 })
 
+/**
+ * 브라우저 지원 하한(vite/browserTargets.ts, P3-20b 리뷰 M-1): 미디어 쿼리 범위 문법 `(width<=768px)`은 Safari/iOS 16.4·Chrome 104
+ * 미만에서 블록 전체가 무시된다. CSS 변환 대상(cssTarget)이 빠지거나 올라가면 Lightning CSS가 `max-width`를 범위 문법으로 바꾼다.
+ */
+test('빌드된 CSS의 미디어 쿼리에 범위 문법이 없다', () => {
+  const css = readdirSync(dist + 'assets').filter(f => f.endsWith('.css')).map(f => read('assets/' + f)).join('\n')
+  const preludes = [...css.matchAll(/@media([^{]*)\{/g)].map(m => m[1])
+  expect(preludes.some(p => p.includes('max-width')), '양성 대조: max-width 미디어 쿼리가 있어야 함').toBe(true)
+  const ranged = preludes.filter(p => /[<>]/.test(p))
+  expect(ranged, `범위 문법 미디어 쿼리 ${ranged.length}개`).toEqual([])
+})
+
 test('데스크톱 전용 엔진 런타임은 첫 화면 JS에 없고 nativeRuntime 묶음에만 있다', () => {
   const firstLoad = firstLoadScripts().map(read).join('\n')
   const runtimeChunks = readdirSync(dist + 'assets').filter(f => /^nativeRuntime-.*\.js$/.test(f))

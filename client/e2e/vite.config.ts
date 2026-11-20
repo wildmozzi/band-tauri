@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { E2E_VITE_ENV } from './env'
 import { E2E_PORT_ENV, parsePort } from './port'
 import { SUPABASE_SLIM_ALIAS } from '../vite/supabaseSlim'
+import { BROWSER_TARGET } from '../vite/browserTargets'
 
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url))
 
@@ -36,6 +37,8 @@ export default defineConfig(({ isPreview }) => ({
   resolve: { alias: SUPABASE_SLIM_ALIAS }, // 앱 빌드와 같은 supabase-js 축소(vite/supabaseSlim.ts)
   envDir: here('./no-env'),
   build: {
+    target: BROWSER_TARGET, // 앱 빌드와 같은 브라우저 하한(vite/browserTargets.ts)
+    cssTarget: BROWSER_TARGET,
     outDir: here('./.dist'),
     emptyOutDir: true,
     sourcemap: true,

@@ -3,6 +3,8 @@
 실시간 합주 앱의 프런트(React 18 + Vite, 데스크톱은 Tauri WebView, 웹은 Vercel) 목표 구조와 규칙.
 목표는 **바뀌는 이유가 같은 코드는 한곳에, 의존은 한 방향으로** — 기능을 고치거나 지울 때 그 기능 폴더만 보면 되게 한다.
 
+**대상 브라우저**(빌드 하한, `client/vite/browserTargets.ts`): `es2020, edge88, firefox78, chrome87, safari14` — vite 5 기본값을 vite 8에서도 명시해 유지한다(웹 관람은 링크로 들어오므로 구형 iPhone 포함). JS·CSS(`cssTarget`) 모두 이 값이고, 빌드된 CSS에 미디어 쿼리 범위 문법(`width<=`)이 없는지 `e2e/bundle-budget`이 검사한다. 하한을 올리면(예: vite 8 기본 safari16.4) 첫 화면 JS gzip 약 −2.9 kB지만 iOS 16.4 미만에서 미디어 쿼리가 무시된다 — 올릴지는 사용자 결정.
+
 - 구조 **결정**의 기준은 [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md)(D0·D3). 이 문서는 그 결정의 프런트 상세이며, 다르면 ADR이 맞고 이 문서를 고친다.
 - 엔진(Rust) 계약은 [overhaul/native-engine-design.md](overhaul/native-engine-design.md). 이 문서는 그 위의 TS 계층만 다룬다.
 - 규칙은 ESLint로 강제한다(6절). 문서와 lint가 다르면 lint가 맞고 문서를 고친다.

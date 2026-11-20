@@ -14,7 +14,7 @@ const auth = vi.hoisted(() => ({
 }))
 const avatar = vi.hoisted(() => ({ upload: vi.fn<(f: File) => Promise<string>>(async () => 'https://api.example/api/storage/avatars/u1/1-x.webp') }))
 vi.mock('./avatarApi', async (orig) => ({ ...(await orig<typeof import('./avatarApi')>()), uploadAvatar: avatar.upload }))
-vi.mock('../auth', () => ({
+vi.mock('../auth', async importOriginal => ({
   useProfileNicknameQuery: (userId: string | undefined, enabled: boolean) => {
     auth.nicknameQuery(userId, enabled)
     return { data: enabled ? auth.profileNickname : undefined }
@@ -22,11 +22,8 @@ vi.mock('../auth', () => ({
   useSaveProfileMutation: () => ({ isPending: false, mutateAsync: auth.saveProfile }),
   useUpdateUserMetadataMutation: () => ({ mutate: auth.syncMetadata, mutateAsync: auth.updateMetadata }),
   profileApi: { refreshSession: auth.refreshSession },
-  // 순수 함수(auth/profilePhoto.test가 검증) — 여기서는 app_metadata의 문자열 URL만 넘긴다
-  profilePhotoOf: (u: { app_metadata?: Record<string, unknown> } | null | undefined) => {
-    const url = u?.app_metadata?.profile_photo_url
-    return typeof url === 'string' ? url : ''
-  },
+  // 순수 함수는 실제 구현 그대로(auth/profilePhoto.test가 검증)
+  profilePhotoOf: (await importOriginal<typeof import('../auth')>()).profilePhotoOf,
 }))
 vi.mock('../../shared/lib/supabaseClient', () => ({ isSupabaseConfigured: () => true }))
 
