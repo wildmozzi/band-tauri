@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use super::{fmt_s, silent_text, ConnAgg, Dist, FileReport, GoalRow, PeerReport, Report, SessionReport};
+use super::{fmt_s, pct_range, silent_text, ConnAgg, Dist, FileReport, GoalRow, PeerReport, Report, SessionReport};
 
 fn none() -> String {
     "없음".into()
@@ -133,7 +133,7 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
     }
     let _ = writeln!(
         out,
-        "| 피어 | 경로(연결 샘플) | RTT 중앙 | bufferMs 중앙 / p95 / 최대 | 목표 중앙 | ±3ms 밖 1분+ 구간 (최장, 밖 %, 기록, 틈) | 은닉 % ÷ 재생 프레임 (FEC / PLC / PCM · 언더런) | 소리 없는 시간(연결 중 무수신·리버퍼) | 손실 % (복구 후 lossShape · 엔진 평균) | 연결 / 첫 소리 |\n|---|---|---|---|---|---|---|---|---|---|"
+        "| 피어 | 경로(연결 샘플) | RTT 중앙 | bufferMs 중앙 / p95 / 최대 | 목표 중앙 | ±3ms 밖 1분+ 구간 (최장, 밖 %, 기록, 틈) | 은닉 % 하한–상한(상한 = 소리 없는 시간을 은닉으로 봄) ÷ 재생 프레임 (FEC / PLC / PCM · 언더런) | 소리 없는 시간(연결 중 무수신·리버퍼) | 손실 % (복구 후 lossShape 하한–상한 · 엔진 평균) | 연결 / 첫 소리 |\n|---|---|---|---|---|---|---|---|---|---|"
     );
     for p in peers {
         let paths = if p.paths.is_empty() { none() } else { p.paths.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ") };
@@ -146,12 +146,12 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
             .conceal
             .as_ref()
             .map(|c| match c.pct {
-                Some(v) => format!("{v:.2}% ({} / {} / {} · {})", pct(c.fec_pct), pct(c.plc_pct), pct(c.pcm_pct), pct(c.underrun_pct)),
+                Some(_) => format!("{} ({} / {} / {} · {})", pct_range(c.pct, c.pct_hi), pct(c.fec_pct), pct(c.plc_pct), pct(c.pcm_pct), pct(c.underrun_pct)),
                 None => format!("분모 없음(은닉 {}프레임, produced 미기록)", c.concealed),
             })
             .unwrap_or_else(none);
         let silent = p.conceal.as_ref().map(silent_text).unwrap_or_else(none);
-        let loss = format!("{} · {}", pct(p.conceal.as_ref().and_then(|c| c.loss_pct)), pct(p.loss_pct_engine_mean));
+        let loss = format!("{} · {}", p.conceal.as_ref().map(|c| pct_range(c.loss_pct, c.loss_pct_hi)).unwrap_or_else(none), pct(p.loss_pct_engine_mean));
         let list = |v: &[f64]| if v.is_empty() { none() } else { v.iter().map(|x| format!("{x:.0}")).collect::<Vec<_>>().join(", ") + "ms" };
         let mut first_audio = list(&p.first_audio_ms);
         if p.no_audio_entries > 0 {

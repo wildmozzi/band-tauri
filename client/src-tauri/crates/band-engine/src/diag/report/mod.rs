@@ -56,15 +56,17 @@ pub(crate) mod goal {
     pub(crate) const FIRST_AUDIO_MS: f64 = 3000.0;
     /// 도구 규칙(GOAL에 없음): 은닉·지터 버퍼 판정에 필요한 최소 연결 시간(s). 이보다 짧으면 판정 불가.
     pub(crate) const MIN_JUDGE_S: f64 = 60.0;
-    /// 도구 규칙(GOAL에 없음, #246 H1'): 연결 중 재생이 멈춘 시간(기대 재생 − `produced` × F)의 허용 비율. 연결 표본 사이 시간을
-    /// 실제 기록 시각(`t`) 차이로 더하므로 1초 표본 간격의 흔들림은 합에서 상쇄된다. 남는 것은 장치 클록과 시스템 시계의 차(보통
-    /// 0.01–0.1%)와 장치 주기 단위로 재생하는 반올림(쌍마다 수 ms, 합에서 상쇄)뿐이라, 2%면 정상 세션이 떨어지지 않으면서 무수신
-    /// 리셋 몇 번(한 번에 수 초)은 잡힌다.
-    pub(crate) const SILENT_TOL_RATIO: f64 = 0.02;
-    /// 도구 규칙(GOAL에 없음, #246 H1'): 연결 구간(이어진 `connected` 표본 묶음)마다 더 봐주는 시간(s) — 시작 경계. 막 연결된 첫
-    /// 표본 뒤에는 지터 버퍼를 채우는 동안(목표 깊이 수십 ms + 첫 패킷 대기) 재생이 아직 없고, 표본 시각과 통계 스냅숏 시각도 조금
-    /// 어긋난다. 끝 경계는 다음 표본이 연결이 아니면 그 쌍을 세지 않으므로 생기지 않는다.
-    pub(crate) const SILENT_TOL_PER_RUN_S: f64 = 1.0;
+    /// 도구 규칙(GOAL에 없음, #246 H1''): 연결 구간(이어진 `connected` 표본 묶음)마다 "소리 없는 시간"에서 측정 오차로 빼 주는
+    /// 시간(s). 2-1 상한(소리 없는 시간을 모두 은닉으로 본 값)에 넣는 무음은 구간마다 `max(0, 구간 무음 − 이 값)`이다.
+    /// - 구간 안에서는 기록 시각 차이와 `produced` 차분이 이어 더해진다(망원 합). 그래서 1초 표본 간격의 흔들림과 장치 주기 반올림은
+    ///   상쇄되고 구간 양 끝만 남는다: 첫 연결 표본 뒤 지터 버퍼를 채우는 동안(목표 깊이 수십 ms + 첫 패킷 대기, 수백 ms 이하)과
+    ///   양 끝 표본의 기록 시각 ↔ 통계 스냅숏 시각 어긋남(수십 ms). 둘 다 무음을 늘리는 쪽이고 0.5s 안이다.
+    /// - 기대 시간에 비례하는 허용치는 두지 않는다. 예전 허용치(기대 시간의 2% + 구간마다 1s)는 GOAL 한도 1.5%보다 커서, 그 아래
+    ///   무음이 통째로 빠지고 충족이 났다(#246 3차 리뷰 H1'').
+    /// - 장치 클록과 시스템 시계의 차(보통 0.01% 안팎, 넓게 잡아 0.1%)는 빼 주지 않는다. 장치가 느리면 가짜 무음이 상한에 그대로
+    ///   들어가 충족을 어렵게 만드는 쪽이다. 장치가 빠르면 같은 구간의 진짜 무음을 그만큼 가린다(은닉 상한이 최대 약 0.1%p 낮게
+    ///   나옴). 구간마다 따로 0 아래를 자르므로(`PeerAcc::close_run`) 그 몫이 다른 구간의 무음까지 지우지는 않는다(#246 L2'').
+    pub(crate) const SILENT_EDGE_S: f64 = 0.5;
     /// 도구 규칙(GOAL에 없음): 성공률 98%를 "충족"으로 가르려면 시도 50회 이상(1회 실패 = 2%p). 그보다 적으면 실패가
     /// 있어 98% 아래일 때만 "미달"이다.
     pub(crate) const MIN_ATTEMPTS_98: usize = 50;
@@ -223,14 +225,16 @@ pub(crate) struct Conceal {
     pub(crate) connected_s: f64,
     /// 이어진 연결 표본 쌍 사이 시간의 합(s, 기록 시각 `t` 차이) — 재생을 기대하는 시간
     pub(crate) playing_span_s: f64,
-    /// 소리 없는 시간(s): 기대 재생 시간 − 재생 프레임 × F(같은 연결 표본 쌍에서). 200ms 넘는 무수신 뒤 지터 버퍼가 리셋되면 패킷이
-    /// 다시 와 채울 때까지 `produced`도 `concealed`도 늘지 않는다(`playout.rs` `STARVE_RESET_MS`, 피어는 계속 `connected`). 그
-    /// 시간은 은닉 %에 안 보이므로 따로 센다(#246 H1'). 쌍 하나라도 `produced`·상대 프레임 길이가 없으면 None
+    /// 소리 없는 시간(s): 기대 재생 시간 − 재생 프레임 × F(연결 구간마다 계산하고 음수 구간은 0, #246 L2''). 200ms 넘는 무수신 뒤
+    /// 지터 버퍼가 리셋되면 패킷이 다시 와 채울 때까지 `produced`도 `concealed`도 늘지 않는다(`playout.rs` `STARVE_RESET_MS`, 피어는
+    /// 계속 `connected`). 그 시간은 은닉 %에 안 보이므로 따로 센다(#246 H1'). 쌍 하나라도 `produced`·상대 프레임 길이가 없으면 None
     pub(crate) silent_s: Option<f64>,
-    /// 소리 없는 시간 허용치(s, `SILENT_TOL_RATIO` × 기대 시간 + 연결 구간 수 × `SILENT_TOL_PER_RUN_S`). 넘으면 2-1 판정 불가
-    pub(crate) silent_tol_s: f64,
-    /// 은닉 ÷ 재생 프레임(%). `produced`가 없거나 0이면 None
+    /// 2-1 상한에 넣은 소리 없는 시간(s): 구간마다 `max(0, 무음 − SILENT_EDGE_S)`의 합
+    pub(crate) silent_hi_s: Option<f64>,
+    /// 은닉 하한(%): 은닉 ÷ 재생 프레임 — 소리 없는 시간은 은닉이 아니라고 본 값. `produced`가 없거나 0이면 None
     pub(crate) pct: Option<f64>,
+    /// 은닉 상한(%): (은닉 + 무음 프레임) ÷ (재생 + 무음 프레임), 무음 프레임 = `silent_hi_s` ÷ F. 소리 없는 시간을 모르면 None
+    pub(crate) pct_hi: Option<f64>,
     /// 방식별(lossShape·produced 없으면 None)
     pub(crate) fec_pct: Option<f64>,
     pub(crate) plc_pct: Option<f64>,
@@ -239,6 +243,9 @@ pub(crate) struct Conceal {
     /// 복구 후 손실(lossShape 추정 손실 ÷ 지나간 seq 수 = 재생 − 언더런 은닉). 사본·재전송으로 메운 손실은 빠지므로 실제 회선
     /// 손실 이하다. lossShape·produced 없으면 None
     pub(crate) loss_pct: Option<f64>,
+    /// 복구 후 손실 상한(%): (손실 + 무음 프레임) ÷ (지나간 seq + 무음 프레임). 무음 동안의 패킷은 리셋 때문에 손실에 잡히지 않는데,
+    /// 그때 회선이 끊겼을 수 있다. 그래서 하한만 보고 "손실 1% 이하 회선"이라 할 수 없다(#246 H1'' 점검). 소리 없는 시간을 모르면 None
+    pub(crate) loss_pct_hi: Option<f64>,
     /// 재전송 창에서 버린 사본·재전송(`rxDupDropped` 차분). 0이 아니면 사본이 손실을 메웠을 수 있다 — 회선 손실 > 복구 후 손실
     pub(crate) dup_dropped: Option<u64>,
 }
@@ -552,13 +559,29 @@ struct PeerAcc {
     band: Vec<(u64, bool)>,
     /// 직전 표본 (t, 연결?, produced) — 소리 없는 시간 계산용
     prev: Option<(u64, bool, Option<u64>)>,
-    /// 이어진 연결 표본 쌍: 시간 합(ms), 재생 프레임 × F 합(ms), 연결 구간 수, 지금 구간 안인지
+    /// 이어진 연결 표본 쌍 사이 시간 합(ms) — 재생을 기대한 시간
     play_span_ms: f64,
-    play_got_ms: f64,
-    play_runs: usize,
-    in_run: bool,
+    /// 지금 연결 구간: (기대 시간 ms, 재생 프레임 × F ms, 마지막 F)
+    run: Option<(f64, f64, f64)>,
+    /// 닫힌 구간들: 소리 없는 시간 합(ms, 구간마다 음수는 0), 상한에 넣는 무음(ms·프레임, 구간마다 − `SILENT_EDGE_S`)
+    silent_ms: f64,
+    silent_hi_ms: f64,
+    silent_hi_frames: f64,
     /// 쌍에 produced나 상대 프레임 길이가 없었다 — 소리 없는 시간을 모른다
     play_unknown: bool,
+}
+
+impl PeerAcc {
+    /// 연결 구간을 닫는다. 구간마다 따로 0 아래를 자르므로, 한 구간의 음수(장치 클록이 빠름)가 다른 구간의 진짜 무음을 지우지 않는다(#246 L2'').
+    fn close_run(&mut self) {
+        if let Some((span, got, f)) = self.run.take() {
+            let silent = (span - got).max(0.0);
+            let hi = (silent - goal::SILENT_EDGE_S * 1000.0).max(0.0);
+            self.silent_ms += silent;
+            self.silent_hi_ms += hi;
+            self.silent_hi_frames += hi / f;
+        }
+    }
 }
 
 /// `t`가 늘어나는 (t, 밖?) 표본 → ±3ms 밖 구간(GOAL 1-4). 1초 표본 하나가 1초다.
@@ -704,17 +727,15 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
                     let f = frame.or_else(|| acc.entries.last().and_then(|e| e.frame_ms));
                     match (pp, produced, f) {
                         (Some(a), Some(b), Some(f)) => {
-                            acc.play_span_ms += t.saturating_sub(pt) as f64;
-                            acc.play_got_ms += b.saturating_sub(a) as f64 * f;
+                            let span = t.saturating_sub(pt) as f64;
+                            acc.play_span_ms += span;
+                            let r = acc.run.get_or_insert((0.0, 0.0, f));
+                            *r = (r.0 + span, r.1 + b.saturating_sub(a) as f64 * f, f);
                         }
                         _ => acc.play_unknown = true,
                     }
-                    if !acc.in_run {
-                        acc.play_runs += 1;
-                        acc.in_run = true;
-                    }
                 }
-                _ => acc.in_run = false,
+                _ => acc.close_run(),
             }
             acc.prev = Some((t, connected, produced));
             let buffer = f64_at(p, "bufferMs");
@@ -744,7 +765,8 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
     let shapes = shape::from_lines(&line_vals);
     let peers: Vec<PeerReport> = peers
         .into_iter()
-        .map(|(name, a)| {
+        .map(|(name, mut a)| {
+            a.close_run();
             // 은닉·손실: 항목마다 누적 차분을 더한다. 분모는 재생 프레임(produced) — 하나라도 없으면 비율을 내지 않는다.
             let mut concealed = 0u64;
             let mut produced: Option<u64> = Some(0);
@@ -775,20 +797,27 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
                 let prod = produced.map(|p| p as f64);
                 // 손실 분모 = 지나간 seq 수: 언더런 은닉은 seq를 소비하지 않는다.
                 let seqs = |d: &LossShapeStats| prod.map(|p| p - d.conceal_underrun as f64);
-                let playing_span_s = a.play_span_ms / 1000.0;
+                // 상한에 넣는 무음(구간별 무음 − 끝 오차). 연결 쌍이 하나도 없으면 무음 0이라 F가 없어도 된다.
+                let silent_hi = (!a.play_unknown).then_some((a.silent_hi_ms, a.silent_hi_frames));
+                let hi = |n: f64, den: Option<f64>| match (den, silent_hi) {
+                    (Some(d), Some((_, sf))) if d + sf > 0.0 && d > 0.0 => Some((n + sf) * 100.0 / (d + sf)),
+                    _ => None,
+                };
                 Conceal {
                     produced,
                     concealed,
                     connected_s: a.connected as f64 * interval_ms as f64 / 1000.0,
-                    playing_span_s,
-                    silent_s: (!a.play_unknown).then(|| ((a.play_span_ms - a.play_got_ms) / 1000.0).max(0.0)),
-                    silent_tol_s: goal::SILENT_TOL_RATIO * playing_span_s + a.play_runs as f64 * goal::SILENT_TOL_PER_RUN_S,
+                    playing_span_s: a.play_span_ms / 1000.0,
+                    silent_s: (!a.play_unknown).then_some(a.silent_ms / 1000.0),
+                    silent_hi_s: silent_hi.map(|(ms, _)| ms / 1000.0),
                     pct: of(concealed as f64, prod),
+                    pct_hi: hi(concealed as f64, prod),
                     fec_pct: delta.and_then(|d| of(d.conceal_fec as f64, prod)),
                     plc_pct: delta.and_then(|d| of(d.conceal_plc as f64, prod)),
                     pcm_pct: delta.and_then(|d| of(d.conceal_pcm as f64, prod)),
                     underrun_pct: delta.and_then(|d| of(d.conceal_underrun as f64, prod)),
                     loss_pct: delta.and_then(|d| of(d.estimate().lost, seqs(&d))),
+                    loss_pct_hi: delta.and_then(|d| hi(d.estimate().lost, seqs(&d))),
                     dup_dropped: dup,
                 }
             });
@@ -884,6 +913,15 @@ fn fmt_s(s: f64) -> String {
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
 
+/// (하한, 상한) % 표기: 같으면 하나, 다르면 "하한–상한%", 상한을 모르면 하한만(2-1 행과 피어 표가 같이 쓴다).
+pub(crate) fn pct_range(lo: Option<f64>, hi: Option<f64>) -> String {
+    match (lo, hi) {
+        (Some(lo), Some(hi)) if hi - lo >= 0.005 => format!("{lo:.2}–{hi:.2}%"),
+        (Some(lo), _) => format!("{lo:.2}%"),
+        (None, _) => "없음".into(),
+    }
+}
+
 /// 소리 없는 시간 표기(2-1 행과 피어 표가 같이 쓴다).
 pub(crate) fn silent_text(c: &Conceal) -> String {
     match c.silent_s {
@@ -898,22 +936,40 @@ pub(crate) fn silent_text(c: &Conceal) -> String {
 /// - 손실이 조건 이하 + 은닉이 한도 밖 → 미달. 단 사본이 손실을 메웠으면(`dup_dropped` > 0, 또는 모름) 회선 손실이 1%보다 컸을 수
 ///   있어 가를 수 없다.
 /// - 그 밖(손실이 적은 회선에서 한도 안, 손실이 큰 회선에서 한도 밖)은 조건이 달라 가를 수 없다.
-fn conceal_verdict(conceal_pct: f64, loss_pct: f64, dup_dropped: Option<u64>) -> (Verdict, Option<String>) {
-    let cond = goal::CONCEAL_LOSS_COND_PCT;
-    let ok = conceal_pct <= goal::CONCEAL_MAX_PCT;
-    match (loss_pct >= cond, loss_pct <= cond, ok) {
-        (true, _, true) => (Verdict::Met, Some("수치만 — 청감은 [사람]".into())),
-        (_, true, false) if dup_dropped == Some(0) => (Verdict::NotMet, None),
-        (_, true, false) => (
-            Verdict::Unknown,
-            Some(format!(
-                "복구 후 손실 {loss_pct:.2}% ≤ {cond}%지만 사본·재전송 {} — 회선 손실이 더 컸을 수 있어 가를 수 없음",
-                dup_dropped.map(|d| format!("{d}개를 버림")).unwrap_or_else(|| "기록 없음".into())
-            )),
-        ),
-        (_, _, true) => (Verdict::Unknown, Some(format!("복구 후 손실 {loss_pct:.2}% < 조건 {cond}% — 손실 1% 회선이 아니라 가를 수 없음(참고값)"))),
-        _ => (Verdict::Unknown, Some(format!("복구 후 손실 {loss_pct:.2}% > 조건 {cond}% — 조건보다 나쁜 회선이라 가를 수 없음"))),
+///
+/// 은닉과 손실은 (하한, 상한) 구간으로 받는다(#246 H1''). 하한은 소리 없는 시간을 빼고 본 값, 상한은 그 시간을 모두 은닉·손실로 본
+/// 값이다. 충족은 가장 나쁜 쪽(은닉 상한, 손실 하한)으로도 성립할 때만, 미달은 가장 좋은 쪽(은닉 하한, 손실 상한)으로도 성립할 때만
+/// 낸다. 그 사이는 판정 불가다. `silent`는 비고용 (소리 없는 시간, 상한에 넣은 시간) s다.
+fn conceal_verdict(conceal: (f64, f64), loss: (f64, f64), dup_dropped: Option<u64>, silent: (f64, f64)) -> (Verdict, Option<String>) {
+    let (cond, max) = (goal::CONCEAL_LOSS_COND_PCT, goal::CONCEAL_MAX_PCT);
+    let range = |(lo, hi): (f64, f64)| if hi > lo { format!("{lo:.2}–{hi:.2}%") } else { format!("{lo:.2}%") };
+    let silent_note = || format!("소리 없는 시간 {:.1}s(상한에 {:.1}s를 은닉·손실로 넣음)", silent.0, silent.1);
+    if loss.0 >= cond && conceal.1 <= max {
+        return (Verdict::Met, Some("수치만 — 청감은 [사람]".into()));
     }
+    if loss.1 <= cond && conceal.0 > max {
+        return match dup_dropped {
+            Some(0) => (Verdict::NotMet, None),
+            d => (
+                Verdict::Unknown,
+                Some(format!(
+                    "복구 후 손실 {} ≤ {cond}%지만 사본·재전송 {} — 회선 손실이 더 컸을 수 있어 가를 수 없음",
+                    range(loss),
+                    d.map(|d| format!("{d}개를 버림")).unwrap_or_else(|| "기록 없음".into())
+                )),
+            ),
+        };
+    }
+    let note = if conceal.0 <= max && max < conceal.1 {
+        format!("은닉 하한 {:.2}% ≤ {max}% < 상한 {:.2}% — {}, 그 시간이 은닉이었는지 몰라 가를 수 없음", conceal.0, conceal.1, silent_note())
+    } else if loss.0 < cond && cond < loss.1 {
+        format!("복구 후 손실 {}가 조건 {cond}%에 걸침 — {}, 무음 동안 회선이 끊겼는지 몰라 가를 수 없음", range(loss), silent_note())
+    } else if conceal.1 <= max {
+        format!("복구 후 손실 {} < 조건 {cond}% — 손실 1% 회선이 아니라 가를 수 없음(참고값)", range(loss))
+    } else {
+        format!("복구 후 손실 {} > 조건 {cond}% — 조건보다 나쁜 회선이라 가를 수 없음", range(loss))
+    };
+    (Verdict::Unknown, Some(note))
 }
 
 /// 세션 GOAL 판정(1·2절). 원칙: 데이터가 모자라거나 측정 구간이 GOAL 정의와 다르면 판정 불가, 충족은 근거가 완전할 때만.
@@ -1010,33 +1066,25 @@ fn session_goal(s: &SessionReport, interval_ms: u64) -> Vec<GoalRow> {
         match &p.conceal {
             None => out.push(row("2-1", &name21, t21, "없음".into(), Unknown, Some("피어 항목 없음".into()))),
             Some(c) => {
-                let pct = |v: Option<f64>| v.map(|v| format!("{v:.2}%")).unwrap_or_else(|| "없음".into());
                 let measured = format!(
                     "은닉 {} ({}/{}프레임) · 복구 후 손실 {} · 연결 {} · 소리 없는 시간 {}",
-                    pct(c.pct),
+                    pct_range(c.pct, c.pct_hi),
                     c.concealed,
                     c.produced.map(|n| n.to_string()).unwrap_or_else(|| "?".into()),
-                    pct(c.loss_pct),
+                    pct_range(c.loss_pct, c.loss_pct_hi),
                     fmt_s(c.connected_s),
                     silent_text(c)
                 );
                 let v = if c.connected_s < goal::MIN_JUDGE_S {
                     (Unknown, Some(format!("연결 {} < {}s", fmt_s(c.connected_s), goal::MIN_JUDGE_S)))
                 } else {
-                    match (c.pct, c.loss_pct, c.silent_s) {
-                        (None, _, _) => (Unknown, Some("재생 프레임 수(produced) 없음(#246 이전 형식) — 은닉 비율의 분모를 몰라 판정 불가".into())),
-                        (_, None, _) => (Unknown, Some("lossShape 없음(P2-17h 이전) — 회선 손실을 몰라 조건 확인 불가".into())),
-                        (_, _, None) => (Unknown, Some("상대 프레임 길이(lossShape·remoteFrameMs) 없음 — 재생이 멈춘 시간을 확인할 수 없어 판정 불가".into())),
-                        // 무수신 리셋 뒤 무음은 은닉에도 분모에도 들지 않는다 — 끊김이 잦은 회선이 은닉 %로는 좋아 보인다(#246 H1').
-                        (_, _, Some(silent)) if silent > c.silent_tol_s => (
-                            Unknown,
-                            Some(format!(
-                                "무수신·리버퍼 구간 약 {silent:.0}s(연결 중 재생 기대 시간의 {:.1}%, 허용 {:.0}s) — 그 시간은 은닉에도 재생 프레임에도 들지 않아 은닉 %로 가를 수 없음",
-                                silent * 100.0 / c.playing_span_s.max(1e-9),
-                                c.silent_tol_s
-                            )),
-                        ),
-                        (Some(cp), Some(l), Some(_)) => conceal_verdict(cp, l, c.dup_dropped),
+                    // 무수신 리셋 뒤 무음은 은닉에도 분모에도 들지 않는다 — 끊김이 잦은 회선이 은닉 %로는 좋아 보인다(#246 H1'). 그래서
+                    // 무음을 은닉·손실로 넣은 상한과 뺀 하한의 구간으로 가른다(#246 H1'').
+                    match (c.pct.zip(c.pct_hi), c.loss_pct.zip(c.loss_pct_hi), c.silent_s.zip(c.silent_hi_s)) {
+                        _ if c.pct.is_none() => (Unknown, Some("재생 프레임 수(produced) 없음(#246 이전 형식) — 은닉 비율의 분모를 몰라 판정 불가".into())),
+                        _ if c.loss_pct.is_none() => (Unknown, Some("lossShape 없음(P2-17h 이전) — 회선 손실을 몰라 조건 확인 불가".into())),
+                        (Some(cp), Some(l), Some(sil)) => conceal_verdict(cp, l, c.dup_dropped, sil),
+                        _ => (Unknown, Some("상대 프레임 길이(lossShape·remoteFrameMs) 없음 — 재생이 멈춘 시간을 확인할 수 없어 판정 불가".into())),
                     }
                 };
                 out.push(row("2-1", &name21, t21, measured, v.0, v.1));

@@ -266,15 +266,26 @@ fn matched_strings_follow_engine_enums() {
 #[test]
 fn conceal_rule_needs_the_loss_condition() {
     let z = Some(0);
-    assert_eq!(conceal_verdict(1.2, 1.0, z).0, Verdict::Met);
-    assert_eq!(conceal_verdict(1.4, 2.0, Some(30)).0, Verdict::Met); // 복구 후 손실 ≥ 1%면 회선 손실도 ≥ 1%
-    assert_eq!(conceal_verdict(1.6, 1.0, z).0, Verdict::NotMet);
-    assert_eq!(conceal_verdict(2.0, 0.1, z).0, Verdict::NotMet);
-    assert_eq!(conceal_verdict(0.1, 0.0, z).0, Verdict::Unknown);
-    assert_eq!(conceal_verdict(3.0, 2.5, z).0, Verdict::Unknown);
+    assert_eq!(conceal_verdict((1.2, 1.2), (1.0, 1.0), z, (0.0, 0.0)).0, Verdict::Met);
+    assert_eq!(conceal_verdict((1.4, 1.4), (2.0, 2.0), Some(30), (0.0, 0.0)).0, Verdict::Met); // 복구 후 손실 ≥ 1%면 회선 손실도 ≥ 1%
+    assert_eq!(conceal_verdict((1.6, 1.6), (1.0, 1.0), z, (0.0, 0.0)).0, Verdict::NotMet);
+    assert_eq!(conceal_verdict((2.0, 2.0), (0.1, 0.1), z, (0.0, 0.0)).0, Verdict::NotMet);
+    assert_eq!(conceal_verdict((0.1, 0.1), (0.0, 0.0), z, (0.0, 0.0)).0, Verdict::Unknown);
+    assert_eq!(conceal_verdict((3.0, 3.0), (2.5, 2.5), z, (0.0, 0.0)).0, Verdict::Unknown);
     // 사본·재전송이 손실을 메웠거나(버린 사본 > 0) 기록이 없으면 회선 손실이 1%보다 컸을 수 있다 → 미달이라 할 수 없다
-    assert_eq!(conceal_verdict(2.0, 0.5, Some(12)).0, Verdict::Unknown);
-    assert_eq!(conceal_verdict(2.0, 0.5, None).0, Verdict::Unknown);
+    assert_eq!(conceal_verdict((2.0, 2.0), (0.5, 0.5), Some(12), (0.0, 0.0)).0, Verdict::Unknown);
+    assert_eq!(conceal_verdict((2.0, 2.0), (0.5, 0.5), None, (0.0, 0.0)).0, Verdict::Unknown);
+    // 구간(#246 H1''): 충족은 은닉 상한·손실 하한으로, 미달은 은닉 하한·손실 상한으로도 성립할 때만
+    let s = (13.0, 12.5);
+    let v = conceal_verdict((1.40, 3.55), (1.10, 3.27), z, s);
+    assert_eq!(v.0, Verdict::Unknown);
+    assert!(v.1.as_deref().unwrap().contains("은닉 하한 1.40% ≤ 1.5% < 상한 3.55%") && v.1.as_deref().unwrap().contains("소리 없는 시간 13.0s"), "{v:?}");
+    assert_eq!(conceal_verdict((1.40, 1.49), (1.10, 1.20), z, s).0, Verdict::Met);
+    assert_eq!(conceal_verdict((1.40, 1.40), (0.98, 1.20), z, s).0, Verdict::Unknown); // 손실이 조건에 걸침
+    assert_eq!(conceal_verdict((2.0, 2.4), (0.3, 0.65), z, s).0, Verdict::NotMet); // L1'': 무음은 미달을 덮지 않는다
+    let v = conceal_verdict((2.0, 17.0), (0.5, 16.0), z, s); // 무음 동안 회선이 끊겼으면 손실 1% 회선이 아니다
+    assert_eq!(v.0, Verdict::Unknown);
+    assert!(v.1.as_deref().unwrap().contains("조건 1%에 걸침"), "{v:?}");
 }
 
 // ---- #246 리뷰: "충족"으로 잘못 떨어지던 입력들 ----
@@ -502,8 +513,8 @@ fn line_ms(t_ms: u64, peers: Vec<serde_json::Value>) -> String {
 }
 
 /// H1' 반례(zip E1): 600초 내내 `connected`·LAN·F 5ms(기대 재생 120000프레임)인데, 10초짜리 무수신 리셋 10번으로 produced는
-/// 100000(100초 무음). 은닉 1400·복구 후 손실 1100 → 1.40%·1.10%라 예전엔 충족. 소리 없는 시간 100초가 허용치(2% + 1s)를 넘어
-/// 판정 불가, 그 시간을 따로 보여 준다.
+/// 100000(100초 무음). 은닉 1400·복구 후 손실 1100 → 1.40%·1.10%라 예전엔 충족. 소리 없는 시간 100초를 은닉으로 본 상한이
+/// 17.76%라 판정 불가(#246 H1''), 그 시간을 따로 보여 준다.
 #[test]
 fn silent_resets_make_conceal_unknown() {
     let mut text = String::new();
@@ -528,10 +539,13 @@ fn silent_resets_make_conceal_unknown() {
     assert!((c.pct.unwrap() - 1.40).abs() < 1e-9 && (c.loss_pct.unwrap() - 1.10).abs() < 1e-9, "{c:?}");
     assert_eq!(c.playing_span_s, 600.0);
     assert!((c.silent_s.unwrap() - 100.0).abs() < 1e-9, "{c:?}");
-    assert!((c.silent_tol_s - 13.0).abs() < 1e-9, "{c:?}");
+    // 한 구간이라 끝 오차 0.5s만 빼고 99.5s(19900프레임)를 상한에 넣는다
+    assert!((c.silent_hi_s.unwrap() - 99.5).abs() < 1e-9, "{c:?}");
+    assert!((c.pct_hi.unwrap() - 21_300.0 * 100.0 / 119_900.0).abs() < 1e-9, "{c:?}");
     let g = goal_of(&s.goal, "2-1")[0];
     assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
-    assert!(g.note.as_deref().unwrap().contains("무수신·리버퍼 구간 약 100s"), "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("은닉 하한 1.40% ≤ 1.5% < 상한 17.76%"), "{g:?}");
+    assert!(g.measured.contains("은닉 1.40–17.76%"), "{g:?}");
     assert!(g.measured.contains("소리 없는 시간 100.0s(16.7%)"), "{g:?}");
     // 표에도 따로 보인다
     let md = markdown(&r);
@@ -569,7 +583,8 @@ fn steady_session_is_not_flagged_silent() {
     let c = s.peers[0].conceal.as_ref().unwrap();
     let silent = c.silent_s.unwrap();
     assert!(silent > 0.2 && silent < 1.0, "{c:?}");
-    assert!(silent < c.silent_tol_s, "{c:?}");
+    // 끝 오차(0.5s) 안팎이라 상한이 하한과 거의 같다
+    assert!(c.pct_hi.unwrap() - c.pct.unwrap() < 0.05, "{c:?}");
     let g = goal_of(&s.goal, "2-1")[0];
     assert_eq!(g.verdict, Verdict::Met, "{g:?}");
 }
@@ -617,4 +632,97 @@ fn pending_attempts_stay_in_the_denominator() {
     assert_eq!(goal_of(&mk(99, 0, 1, false).goal, "3-2")[0].verdict, Verdict::Met);
     // 세션이 끝난 기록: 연결 중으로 남은 피어는 엔진 정지가 aborted로 남긴다 — 미완으로 세지 않는다
     assert_eq!(mk(97, 0, 3, true).conn.pending, 0);
+}
+
+// ---- #246 3차 리뷰: H1''·L1''·L2'' ----
+
+/// `total`초 내내 `connected`·LAN·F 5ms. 100초 뒤 `silent`초 동안 무수신(produced·은닉 그대로). 은닉·복구 후 손실은 재생
+/// 프레임의 `conceal`/`loss` × 0.001%.
+fn silent_session(total: u64, silent: u64, conceal: u64, loss: u64) -> Report {
+    let mut text = String::new();
+    let mut played = 0u64;
+    for i in 0..=total {
+        if i > 0 && !(i > 100 && i <= 100 + silent) {
+            played += 1;
+        }
+        let produced = 200 * played;
+        let p = serde_json::json!({
+            "peer": "id-h", "state": "connected", "path": "lan", "bufferMs": 10.0, "jitterMs": 1.0, "targetMs": 10.0,
+            "concealed": conceal * produced / 100_000, "produced": produced, "rxDupDropped": 0,
+            "lossShape": shape_json(5.0, loss * produced / 100_000, 0),
+        });
+        text += &line(i, 1, "wasapiExclusive", vec![p]);
+    }
+    report_of("h.zip", &text)
+}
+
+fn verdict_21(r: &Report) -> &GoalRow {
+    goal_of(&r.files[0].sessions[0].goal, "2-1")[0]
+}
+
+/// H1'' 재현(3차 리뷰 표): 허용치(2% + 1s) 아래의 무음이 통째로 빠져 충족이 나던 입력. 무음을 은닉으로 본 상한이 1.5%를 넘으면
+/// 판정 불가다. 무음이 없으면 상한 = 하한이라 충족이 그대로다.
+#[test]
+fn silence_below_old_tolerance_is_not_met() {
+    for (total, silent, conceal) in [(600, 13, 1400), (600, 13, 1480), (600, 13, 0), (3600, 73, 1400)] {
+        let r = silent_session(total, silent, conceal, 1100);
+        let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+        assert!((c.silent_s.unwrap() - silent as f64).abs() < 1e-9, "{c:?}");
+        assert!(c.pct_hi.unwrap() > goal::CONCEAL_MAX_PCT, "{c:?}");
+        let g = verdict_21(&r);
+        assert_eq!(g.verdict, Verdict::Unknown, "{total}s 중 {silent}s, 은닉 {conceal}: {g:?}");
+        if conceal > 0 {
+            assert!(g.note.as_deref().unwrap().contains("< 상한") && g.note.as_deref().unwrap().contains(&format!("소리 없는 시간 {silent}.0s")), "{g:?}");
+        }
+    }
+    // 600s 중 13s 무음, 은닉 1.40%: 상한 = (1643 + 2500) / (117400 + 2500)
+    let r = silent_session(600, 13, 1400, 1100);
+    let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+    assert!((c.pct_hi.unwrap() - 4143.0 * 100.0 / 119_900.0).abs() < 1e-9, "{c:?}");
+    assert!(markdown(&r).contains("1.40–3.46%"), "{}", markdown(&r));
+
+    // 무음 0 → 상한 = 하한, 충족 유지
+    let r = silent_session(600, 0, 1400, 1100);
+    let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+    assert_eq!((c.silent_s, c.silent_hi_s, c.pct_hi), (Some(0.0), Some(0.0), c.pct));
+    assert_eq!(verdict_21(&r).verdict, Verdict::Met, "{:?}", verdict_21(&r));
+}
+
+/// L1'': 은닉 하한만으로 미달이고 무음을 손실로 넣어도 손실 1% 이하 회선이면 미달(무음이 확정 미달을 판정 불가로 덮지 않는다).
+/// 무음이 길어 손실 상한이 1%를 넘으면(무음 동안 회선이 끊겼을 수 있음) 손실 1% 회선인지 몰라 판정 불가.
+#[test]
+fn silence_does_not_hide_a_clear_miss() {
+    let r = silent_session(600, 2, 2000, 300);
+    let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+    assert!(c.loss_pct_hi.unwrap() < 1.0, "{c:?}");
+    assert_eq!(verdict_21(&r).verdict, Verdict::NotMet, "{:?}", verdict_21(&r));
+
+    let r = silent_session(600, 100, 2000, 500);
+    let g = verdict_21(&r);
+    assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
+    assert!(g.note.as_deref().unwrap().contains("조건 1%에 걸침"), "{g:?}");
+}
+
+/// L2'': 장치 클록이 빠른 구간의 음수(재생 > 기대)가 다른 구간의 진짜 무음을 상쇄하지 않는다 — 구간마다 0 아래를 자른다.
+#[test]
+fn fast_clock_run_does_not_cancel_silence_elsewhere() {
+    let mut text = String::new();
+    let mut produced = 0u64;
+    for i in 0..=500u64 {
+        let state = if i == 201 { "reconnecting" } else { "connected" };
+        if i > 0 && i <= 200 {
+            produced += 201; // 구간 A: 장치가 0.5% 빠름(기대 200s, 재생 201s)
+        } else if i > 202 && !(300..310).contains(&i) {
+            produced += 200; // 구간 B: 10s 무음
+        }
+        let p = serde_json::json!({
+            "peer": "id-l", "state": state, "path": "lan", "bufferMs": 10.0, "jitterMs": 1.0, "targetMs": 10.0,
+            "concealed": 0, "produced": produced, "rxDupDropped": 0, "lossShape": shape_json(5.0, 0, 0),
+        });
+        text += &line(i, 1, "wasapiExclusive", vec![p]);
+    }
+    let r = report_of("l2.zip", &text);
+    let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+    assert!((c.silent_s.unwrap() - 10.0).abs() < 1e-9, "{c:?}");
+    assert!((c.silent_hi_s.unwrap() - 9.5).abs() < 1e-9, "{c:?}");
 }
