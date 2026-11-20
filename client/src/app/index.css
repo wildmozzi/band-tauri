@@ -49,19 +49,6 @@ button:hover {
   min-height: 100vh;
 }
 
-/* Premium Badge Styles */
-.premium-badge {
-  display: inline-block;
-  background: var(--gradient-brand);
-  color: var(--neutral-950);
-  font-size: 0.75rem;
-  font-weight: 600;
-  padding: 0.25rem 0.5rem;
-  border-radius: var(--radius-md);
-  margin-left: 0.5rem;
-  vertical-align: middle;
-}
-
 /* Disabled premium controls */
 input:disabled,
 select:disabled {
@@ -162,50 +149,6 @@ select:disabled {
 
 
 
-/* Feature Restrictions */
-.feature-locked {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 400px;
-  text-align: center;
-  padding: 2rem;
-}
-
-.lock-icon {
-  font-size: 4rem;
-  margin-bottom: 1rem;
-  opacity: 0.7;
-}
-
-.feature-restriction {
-  background: rgba(255, 193, 7, 0.1);
-  border: 1px solid rgba(255, 193, 7, 0.3);
-  border-radius: var(--radius-sm);
-  padding: 0.75rem;
-  margin-top: 0.5rem;
-  font-size: 0.875rem;
-  color: var(--amber-400);
-}
-
-.feature-info {
-  background: rgba(59, 130, 246, 0.1);
-  border: 1px solid rgba(59, 130, 246, 0.3);
-  border-radius: var(--radius-sm);
-  padding: 0.75rem;
-  margin-top: 0.5rem;
-  font-size: 0.875rem;
-  color: var(--blue-400);
-}
-
-.plan-limit-info {
-  font-size: 0.75rem;
-  color: var(--neutral-400);
-  font-weight: normal;
-  margin-left: 0.5rem;
-}
-
 /* Disabled States */
 .toggle-option.disabled {
   opacity: 0.6;
@@ -220,15 +163,6 @@ select:disabled {
 
 .preset-btn.locked .preset-content {
   filter: blur(1px);
-}
-
-.lock-overlay {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  font-size: 1.5rem;
-  opacity: 0.8;
 }
 
 .cloud-save-btn.disabled,
@@ -279,10 +213,6 @@ select:disabled {
     flex-direction: column;
     align-items: flex-start;
     gap: 0.75rem;
-  }
-
-  .plan-buttons {
-    flex-wrap: wrap;
   }
 
   .user-menu {
