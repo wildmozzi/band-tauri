@@ -605,8 +605,8 @@ sys/cpu.rs	fn	cycle_pct
 sys/cpu.rs	fn	process_cycles
 sys/cpu.rs	fn	tsc_now
 sys/mod.rs	mod	time
+sys/placement.rs	fn	describe_cores
 sys/placement.rs	fn	pin_process
-sys/placement.rs	fn	set_high_qos
 sys/prio.rs	field	audio
 sys/prio.rs	field	net_recv
 sys/prio.rs	field	timer_1ms

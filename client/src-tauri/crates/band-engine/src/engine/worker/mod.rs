@@ -102,6 +102,8 @@ pub struct WorkerStats {
     pub(crate) media_peers: AtomicU64,
     /// 워커 스레드의 코어 배치 표본(P1-21): 반복마다(수면 제외 본문 시작) 지금 코어 종류를 센다.
     pub(crate) placement: crate::sys::placement::PlacementCounts,
+    /// 워커 스레드에 적용한 정책(P1-21 2단계, 시작 때 한 번 적는다).
+    pub(crate) thread_policy: crate::sys::placement::PolicySlot,
     /// 워커 반복 본문 시간(수면 제외)과 반복 시작 간격 분포(엔진 ③c 측정, 진단 전용 — 측정 시험이 비운다).
     pub(crate) iter_body: crate::net::txlat::SendLatency,
     pub(crate) iter_period: crate::net::txlat::SendLatency,
@@ -332,7 +334,7 @@ impl Worker {
         let _prio = crate::sys::prio::promote_engine_thread(&self.ctx.stats.thread_prio);
         // 코어 표는 루프 앞에서(할당 있음) — 반복 안의 표본은 할당하지 않는다(엔진 ⑧ 후속).
         crate::sys::placement::init();
-        crate::sys::placement::apply_thread_qos();
+        crate::sys::placement::apply_thread_policy(&self.ctx.stats.thread_policy);
         log::info!("워커 시작: frame {} ch {}", self.ctx.cfg.frame_samples(), self.ctx.cfg.channels);
         let mut last_start = Instant::now();
         // 할당 계수(시험 구성만, 엔진 ⑧ 후속): 반복 하나 전체(수면 제외)를 이 스레드의 계수 구간으로 감싼다. 계수는 스레드별이라

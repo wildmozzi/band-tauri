@@ -189,6 +189,12 @@ pub struct Sample {
     /// 시작부터 누적이다(`session_placement`). 비Windows는 줄에 넣지 않는다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) core_placement: Option<crate::sys::placement::PlacementWindow>,
+    /// 워커·수신 스레드에 적용한 코어 배치 정책과 결과(P1-21 2단계, `EngineStats.threadPolicy`). 스레드 시작 때 한 번 정해지는
+    /// 값이라 기록기는 **같은 세션에서 값이 바뀐 줄에만** 넣는다(세션 첫 줄, 그리고 첫 샘플이 적용 전(`pending`)이었으면 그다음 줄).
+    /// 링이 넘쳐 그 줄을 버리면 같은 세션의 다음 줄로 옮긴다(`fold_dropped`). 내보내기 `lastStats`에는 늘 들어간다
+    /// (`session_policy`). 비Windows는 줄에 넣지 않는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thread_policy: Option<crate::sys::placement::ThreadPolicyStats>,
     /// 직전 샘플 뒤로 생긴 연결 이벤트(P1-18). 없으면 줄에 넣지 않는다(기존 줄 형식 그대로).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) conn: Vec<ConnSample>,
@@ -256,6 +262,7 @@ impl Sample {
                 auto_opus: r.auto_opus,
             }),
             core_placement: s.core_placement.as_ref().map(crate::sys::placement::PlacementWindow::cumulative),
+            thread_policy: s.thread_policy,
             conn: Vec::new(),
         }
     }
@@ -275,6 +282,10 @@ impl Sample {
         if let (Some(d), Some(n)) = (dropped.core_placement, next.core_placement.as_mut()) {
             *n = n.plus(&d);
         }
+        // 스레드 정책은 값이 바뀐 줄에만 있다: 버리는 줄의 값을 다음 줄이 물려받는다(다음 줄에 새 값이 있으면 그것이 최신).
+        if next.thread_policy.is_none() {
+            next.thread_policy = dropped.thread_policy;
+        }
     }
 }
 
@@ -291,6 +302,11 @@ pub(crate) fn session_placement(tl: &Timeline, session: u64) -> Option<crate::sy
         };
     }
     acc
+}
+
+/// 타임라인에서 세션 `session`의 스레드 정책(P1-21 2단계): 그 세션에서 마지막으로 기록된 값. 없으면 None.
+pub(crate) fn session_policy(tl: &Timeline, session: u64) -> Option<crate::sys::placement::ThreadPolicyStats> {
+    tl.iter().filter(|s| s.session == session).filter_map(|s| s.thread_policy).last()
 }
 
 /// 엔진 통계 타임라인.

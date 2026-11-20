@@ -160,6 +160,8 @@ pub struct EngineStats {
     pub recording: Option<super::record::RecordStats>,
     /// 하이브리드 CPU 코어 배치(P1-21): 워커·수신 스레드가 P/E/LP-E 코어에서 돈 표본 비율(시작부터 누적). 비Windows는 null.
     pub(crate) core_placement: Option<crate::sys::placement::CorePlacementStats>,
+    /// 워커·수신 스레드에 적용한 코어 배치 정책과 결과(P1-21 2단계: HighQoS, P 코어 CPU set). 비Windows·정지 상태는 null.
+    pub(crate) thread_policy: Option<crate::sys::placement::ThreadPolicyStats>,
 }
 
 impl EngineStats {
@@ -191,6 +193,7 @@ impl EngineStats {
             cpu: Default::default(),
             recording: None,
             core_placement: None,
+            thread_policy: None,
         }
     }
 }
@@ -393,6 +396,10 @@ impl Engine {
             core_placement: ws.placement.stats().map(|worker| crate::sys::placement::CorePlacementStats {
                 worker,
                 net_recv: self.net.as_ref().and_then(|n| n.shared().recv_placement.stats()),
+            }),
+            thread_policy: ws.thread_policy.stats().map(|worker| crate::sys::placement::ThreadPolicyStats {
+                worker,
+                net_recv: self.net.as_ref().and_then(|n| n.shared().recv_policy.stats()),
             }),
         }
     }

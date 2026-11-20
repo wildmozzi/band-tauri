@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   bufferFrameHint,
+  THREAD_POLICY_OPTIONS,
   formatTestDevice,
   formatTestLatency,
   formatTestResampler,
@@ -131,5 +132,17 @@ describe('P2-17e: 리샘플러 품질 안내', () => {
     expect(formatTestResampler(undefined)).toBe('없음 (48kHz)')
     expect(formatTestResampler({ quality: 'highQuality', inDelayMs: 1.44, outDelayMs: 1.32 })).toBe('고음질 · +2.8ms')
     expect(formatTestResampler({ quality: 'lowLatency', inDelayMs: 0.08, outDelayMs: 0 })).toBe('저지연 · +0.1ms')
+  })
+})
+
+describe('스레드 정책 토글 설명(P1-21 2단계)', () => {
+  it('두 항목 모두 효과·주의가 한 줄씩 있고, P 코어 항목은 넘어가지 못하는 위험을 적는다', () => {
+    expect(THREAD_POLICY_OPTIONS.map((o) => o.key)).toEqual(['highQos', 'preferPCores'])
+    for (const o of THREAD_POLICY_OPTIONS) {
+      expect(o.effect.startsWith('효과:')).toBe(true)
+      expect(o.caution.startsWith('주의:')).toBe(true)
+    }
+    expect(THREAD_POLICY_OPTIONS[1].caution).toContain('넘어가지 못해')
+    expect(THREAD_POLICY_OPTIONS[1].label).not.toContain('선호')
   })
 })
