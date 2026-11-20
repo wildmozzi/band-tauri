@@ -1522,47 +1522,72 @@ fn est_latency_budget_table() {
     // GOAL 1절 estLatencyMs = 입력 장치 버퍼 + 프레임 + 출력 링 + 출력 장치 버퍼. 콜백 구동 믹스에는 출력 링이 없다.
     // 장치 주기는 가짜 장치로 흉내 낸다: ASIO 128, WASAPI 독점 최소 주기(이 PC 실측: 입력 96 = 2.0ms, 출력 144 = 3.0ms;
     // 일반적인 3ms = 144), IAudioClient3 저지연 공유(최소 주기 128 = 2.67ms 가정), 독점 기본 주기 10ms(참고).
+    // cpal WASAPI 공유 폴백(`cpalWasapi`, 자체 백엔드를 못 열었을 때): 공유 엔진 기본 주기 10ms 콜백(48k 480, 44.1k 441) — GOAL 1-1
+    // "공유 ≤ 30ms"를 폴백 경로로도 가른다(GOAL-COVERAGE 후보 ⑧). 장치가 48kHz가 아니면 리샘플러 필터 지연(P2-17e, 프레임 2.5ms가 아니면
+    // 고음질)이 est에 더해진다 — 계산값에 `resampler` 지연을 넣어 비교한다.
     struct Row {
         label: &'static str,
+        rate: u32,
         in_buf: usize,
         out_buf: usize,
         frame_ms: f32,
         goal_ms: Option<f32>,
+        /// 목표를 넘는 것으로 알려진 값(래칫 — 이 값을 넘으면 깨진다). 목표 칸에 "초과 — 래칫 N"으로 적는다
+        known_over_ms: Option<f32>,
     }
     let rows = [
-        Row { label: "ASIO 128 / 2.5ms", in_buf: 128, out_buf: 128, frame_ms: 2.5, goal_ms: Some(8.0) },
-        Row { label: "ASIO 128 / 5ms", in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: None },
-        Row { label: "WASAPI 독점 최소 3ms(144) / 2.5ms", in_buf: 144, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0) },
-        Row { label: "WASAPI 독점 최소 3ms(144) / 5ms", in_buf: 144, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0) },
-        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 2.5ms", in_buf: 96, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0) },
-        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 5ms", in_buf: 96, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0) },
-        Row { label: "IAudioClient3 공유 2.67ms(128) / 5ms", in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: Some(30.0) },
-        Row { label: "(참고) 독점 기본 주기 10ms(480) / 5ms", in_buf: 480, out_buf: 480, frame_ms: 5.0, goal_ms: None },
+        Row { label: "ASIO 128 / 2.5ms", rate: 48_000, in_buf: 128, out_buf: 128, frame_ms: 2.5, goal_ms: Some(8.0), known_over_ms: None },
+        Row { label: "ASIO 128 / 5ms", rate: 48_000, in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: None, known_over_ms: None },
+        Row { label: "WASAPI 독점 최소 3ms(144) / 2.5ms", rate: 48_000, in_buf: 144, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0), known_over_ms: None },
+        Row { label: "WASAPI 독점 최소 3ms(144) / 5ms", rate: 48_000, in_buf: 144, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0), known_over_ms: None },
+        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 2.5ms", rate: 48_000, in_buf: 96, out_buf: 144, frame_ms: 2.5, goal_ms: Some(15.0), known_over_ms: None },
+        Row { label: "WASAPI 독점 이 PC(in 96 / out 144) / 5ms", rate: 48_000, in_buf: 96, out_buf: 144, frame_ms: 5.0, goal_ms: Some(15.0), known_over_ms: None },
+        Row { label: "IAudioClient3 공유 2.67ms(128) / 5ms", rate: 48_000, in_buf: 128, out_buf: 128, frame_ms: 5.0, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "(참고) 독점 기본 주기 10ms(480) / 5ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 5.0, goal_ms: None, known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 10ms(480) / 2.5ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 2.5, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 10ms(480) / 5ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 5.0, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 10ms(480) / 10ms", rate: 48_000, in_buf: 480, out_buf: 480, frame_ms: 10.0, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 44.1k 10ms(441) / 2.5ms", rate: 44_100, in_buf: 441, out_buf: 441, frame_ms: 2.5, goal_ms: Some(30.0), known_over_ms: None },
+        Row { label: "cpal WASAPI 공유 폴백 44.1k 10ms(441) / 5ms", rate: 44_100, in_buf: 441, out_buf: 441, frame_ms: 5.0, goal_ms: Some(30.0), known_over_ms: None },
+        // 알려진 초과(#250 L4): 공유 ≤ 30ms를 넘는다(10 + 10 + 10 + 리샘플러 2.75). 임계값을 완화하지 않고 [결정] 전까지 지금 값을
+        // 넘지 않는다는 래칫만 건다 — 더 나빠지면 깨지고, 결정 뒤 이 행을 목표 행으로 옮기거나 지운다.
+        Row { label: "(참고·알려진 초과) cpal WASAPI 공유 폴백 44.1k 10ms(441) / 10ms", rate: 44_100, in_buf: 441, out_buf: 441, frame_ms: 10.0, goal_ms: None, known_over_ms: Some(32.75) },
     ];
     println!("| 설정 | 입력 | 프레임 | 출력 링 | 출력 | estLatencyMs | 목표 |");
     println!("|---|---|---|---|---|---|---|");
     for r in rows {
-        let mut backend = FakeBackend::silence(48_000);
+        let mut backend = FakeBackend::silence(r.rate);
         backend.in_buffer = Some(r.in_buf);
         backend.out_buffer = Some(r.out_buf);
         let mut e = Engine::start(config(r.in_buf as u32, r.frame_ms), Arc::new(backend), Arc::new(MixControls::default()), None).unwrap();
-        let (i, o) = (r.in_buf as f32 / 48.0, r.out_buf as f32 / 48.0);
-        let calc = i + r.frame_ms + o;
+        let per_ms = r.rate as f32 / 1000.0;
+        let (i, o) = (r.in_buf as f32 / per_ms, r.out_buf as f32 / per_ms);
+        // 리샘플러 필터 지연(48k 장치면 없음)
+        let rs = e.stats().resampler.map_or(0.0, |x| x.in_delay_ms + x.out_delay_ms);
+        let calc = i + r.frame_ms + o + rs;
         // 실측 콜백 크기가 잡힐 때까지(고정 sleep 대신). 끝내 안 맞으면 아래 단언이 값을 보여 준다.
         wait_until(HANG, || (e.stats().est_latency_ms - calc).abs() < 0.05);
         let s = e.stats();
         e.stop();
         println!(
-            "| {} | {i:.2} | {:.2} | 0 | {o:.2} | **{:.2}** (계산 {calc:.2}) | {} |",
+            "| {} | {i:.2} | {:.2} | 0 | {o:.2} | **{:.2}** (계산 {calc:.2}{}) | {} |",
             r.label,
             r.frame_ms,
             s.est_latency_ms,
-            r.goal_ms.map(|g| format!("≤ {g}")).unwrap_or_else(|| "—".into())
+            if rs > 0.0 { format!(", 리샘플러 {rs:.2}") } else { String::new() },
+            match (r.goal_ms, r.known_over_ms) {
+                (Some(g), _) => format!("≤ {g}"),
+                (None, Some(k)) => format!("공유 ≤ 30 초과(알려짐) — 래칫 ≤ {k}"),
+                (None, None) => "—".into(),
+            }
         );
         assert!((s.est_latency_ms - calc).abs() < 0.05, "{}: 실측 콜백 크기 기반 est {:.2} ≠ 계산 {calc:.2}", r.label, s.est_latency_ms);
         assert!((s.device_period_ms - o).abs() < 0.05, "{}: devicePeriodMs {}", r.label, s.device_period_ms);
         if let Some(g) = r.goal_ms {
             assert!(s.est_latency_ms <= g, "{}: estLatencyMs {:.2} > {g}", r.label, s.est_latency_ms);
+        }
+        if let Some(k) = r.known_over_ms {
+            assert!(s.est_latency_ms <= k + 0.05, "{}: 알려진 초과 행이 더 나빠짐 — estLatencyMs {:.2} > 래칫 {k}", r.label, s.est_latency_ms);
         }
     }
 }

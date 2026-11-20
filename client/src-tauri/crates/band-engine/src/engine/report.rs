@@ -61,6 +61,15 @@ pub struct PeerStats {
     /// 진단 타임라인에만 싣는다(Tauri `PeerStats` JSON에는 없다 — 설계 4절 계약 그대로).
     #[serde(skip)]
     pub(crate) produced: u64,
+    /// 무수신 재버퍼 횟수(누적, 지터 `JitterStats.rebuffers`)와 재생하던 스트림이 끊겨 다시 채우느라 소리가 없던 시간(ms, 누적 —
+    /// `MediaStats.stall_us`). 진단 타임라인 전용(결과표 2-1의 "소리 없는 시간" 실측) — Tauri JSON에는 없다.
+    #[serde(skip)]
+    pub(crate) rebuffers: u64,
+    #[serde(skip)]
+    pub(crate) rebuffer_ms: f32,
+    /// 입장 → `engine_add_peer` 호출(ms, 클라이언트가 `entryLeadMs`로 알려 준 값). 진단 타임라인 전용(결과표 3-3) — Tauri JSON에는 없다.
+    #[serde(skip)]
+    pub(crate) entry_lead_ms: Option<f32>,
     pub level: f32,
     /// 실제 재생 지연(ms): 벽시계로 잰 버퍼 지연 + 출력 링 + 장치 출력 버퍼. 장치 클럭 추정과 독립적이라
     /// `bufferMs`와 차이가 벌어지면 숨은 지연 누적을 뜻한다(PR #5 H-1). 재생 전에는 0.
@@ -125,6 +134,9 @@ pub struct EngineStats {
     pub output_level: f32,
     pub xruns: u64,
     pub est_latency_ms: f32,
+    /// 내 소리의 송신 프레임(ms, 설정 `frameMs` — 2.5 | 5 | 10). 모든 피어에게 같은 프레임으로 보낸다(코덱은 피어별 `txCodec`).
+    /// 정지 상태면 0.
+    pub(crate) tx_frame_ms: f32,
     /// 모니터 경로(내 입력 → 내 출력) 지연(ms), 첫 샘플 기준.
     pub monitor_latency_ms: f32,
     /// 오디오 스트림 에러 누적 횟수(장치 분리 등, 리뷰 M9).
@@ -178,6 +190,7 @@ impl EngineStats {
             output_level: 0.0,
             xruns: 0,
             est_latency_ms: 0.0,
+            tx_frame_ms: 0.0,
             monitor_latency_ms: 0.0,
             stream_errors: 0,
             device_lost: false,
@@ -213,6 +226,11 @@ pub struct EngineSnapshot {
     pub session: u64,
     /// 최근 연결 이벤트(P1-18, `Engine::conn_events`). 진단이 `seq`로 이미 기록한 것을 거른다.
     pub conn_events: Vec<crate::net::connlog::ConnEvent>,
+    /// 시작 때 STUN으로 정한 NAT 매핑 추정(결과표 3-1). 네트워크 없는 엔진이면 None.
+    pub nat: Option<crate::net::NatProbe>,
+    /// 내 peerId(엔진 시작 때 받은 값). 진단은 가명(`diag::mask::pseudonymize` — 상대 zip의 피어 가명과 같은 값)으로만 남겨
+    /// 결과표가 "누가 내보낸 zip인지"로 zip을 묶고 짝을 맞춘다(3-1, #250 H1). 네트워크 없는 엔진이면 None.
+    pub self_peer: Option<String>,
 }
 
 /// 정지한 엔진의 마지막 연결 이벤트(P1-18, #145 M-1). 정지 때 생긴 `aborted`는 엔진이 사라진 뒤라 스냅샷으로는
@@ -242,6 +260,16 @@ impl Engine {
     /// 네트워크 없는 엔진이면 빈 목록.
     pub fn conn_events(&self) -> Vec<crate::net::connlog::ConnEvent> {
         self.net.as_ref().map_or_else(|| self.ended_conn.clone(), |n| n.conn_events())
+    }
+
+    /// 시작 때 STUN으로 정한 NAT 매핑 추정(진단 3-1). 네트워크 없는 엔진·정지 뒤면 None.
+    pub fn nat_probe(&self) -> Option<crate::net::NatProbe> {
+        self.net.as_ref().map(|n| n.nat_probe())
+    }
+
+    /// 엔진 시작 때 받은 내 peerId(진단이 가명으로만 기록 — 결과표 3-1의 zip 짝 맞추기). 네트워크 없는 엔진이면 None.
+    pub fn self_peer_id(&self) -> Option<String> {
+        self.net.as_ref().map(|n| n.local_peer_id().to_string())
     }
 
     pub fn stats(&self) -> EngineStats {
@@ -342,6 +370,9 @@ impl Engine {
                             late: js.late,
                             concealed: js.concealed,
                             produced: js.produced,
+                            rebuffers: js.rebuffers,
+                            rebuffer_ms: (ms.stall_us as f64 / 1000.0) as f32,
+                            entry_lead_ms: media.entry_lead_ms(),
                             level: media.mix.level.load(),
                             // 벽시계로 잰 버퍼 지연(소스 링 포함) + 장치 출력 버퍼: 클럭 추정과 독립적인 실제 재생 지연
                             playout_ms: if js.wall_buffer_ms > 0.0 { js.wall_buffer_ms + out_ms } else { 0.0 },
@@ -374,6 +405,7 @@ impl Engine {
             output_level: c.output_level.load(),
             xruns: c.xruns.load(Ordering::Relaxed),
             est_latency_ms: est,
+            tx_frame_ms: frame_ms,
             monitor_latency_ms: monitor,
             stream_errors,
             device_lost,
@@ -491,6 +523,9 @@ mod tests {
                 late: 0,
                 concealed: 0,
                 produced: 0,
+                rebuffers: 2,
+                rebuffer_ms: 450.0,
+                entry_lead_ms: Some(812.0),
                 level: 0.0,
                 playout_ms: 0.0,
                 echo_requested: true,
@@ -527,6 +562,9 @@ mod tests {
         assert!(j.contains("\"relay\":null") && j.contains("\"qos\":null") && j.contains("\"sendQueue\":null"), "{j}");
         assert_eq!(serde_json::to_string(&PathKind::Relay).unwrap(), "\"relay\"");
         assert!(j.contains("\"cpu\":{\"workerPct\":null"), "{j}");
+        // 진단 전용 값은 Tauri JSON에 없다(계약 그대로)
+        assert!(!j.contains("rebuffer") && !j.contains("entryLead") && !j.contains("produced"), "{j}");
+        assert!(j.contains("\"txFrameMs\":0.0"), "{j}");
         assert!(j.contains("\"devicePeriodMs\":0.0") && j.contains("\"backend\":\"\"") && j.contains("\"inputDiscontinuities\":0") && j.contains("\"streamFailed\":false"), "{j}");
     }
 }

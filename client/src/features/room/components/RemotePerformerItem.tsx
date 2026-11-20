@@ -69,7 +69,7 @@ export function RemotePerformerItem({
           </span>
           <span className="performer-instrument">{instInfo.name}</span>
           {stateInfo && (
-            <span className={`peer-state-badge ${stateInfo.className}`} title={ps ? peerStatsTitle(ps) : undefined}>
+            <span className={`peer-state-badge ${stateInfo.className}`} title={ps ? peerStatsTitle(ps, engineStats?.txFrameMs) : undefined}>
               {stateInfo.label}
               {ps?.path && <> · {pathLabel(ps.path)}</>}
             </span>
@@ -78,7 +78,7 @@ export function RemotePerformerItem({
         </div>
         {/* 네트워크 상태 (연주 중일 때만: 엔진 통계) */}
         {ps && ear && state !== 'failed' && (
-          <div className="performer-latency" title={[...earLatencyTitleLines(ear), peerStatsTitle(ps)].join('\n')}>
+          <div className="performer-latency" title={[...earLatencyTitleLines(ear), peerStatsTitle(ps, engineStats?.txFrameMs)].join('\n')}>
             <span className={`latency-value ear-latency ${earLatencyLevel(ear.totalMs) ?? 'unknown'}`} data-testid="ear-latency">
               {formatEarLatency(ear)}
             </span>

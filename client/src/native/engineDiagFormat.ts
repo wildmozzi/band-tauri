@@ -1,8 +1,9 @@
 /**
- * 합주실 진단 줄(P1-12b): 스레드 우선순위·QoS 마킹·오디오 백엔드.
+ * 합주실 내 채널 진단 줄(P1-12b): 스레드 우선순위·QoS 마킹·오디오 백엔드·송신 큐·릴레이. EngineDiagLines(performerUi 지연 묶음)만
+ * 값으로 import한다 — 첫 화면 모듈이 import하면 웹 첫 묶음에 다시 실린다(#250, nativeSplit.test). 피어 툴팁 진단은 peerDiagFormat.
  * 실장비 테스트에서 개발자 도구 `engine_stats` 없이 화면에서 읽도록 한다. CPU 줄은 P1-10(roomDetailModel.formatCpu).
  */
-import type { LossShapeStats, QosStats, ThreadPriority, ThreadPriorityStats } from './engineApi'
+import type { QosStats, RelayState, RelayStats, SendQueueStats, ThreadPriority, ThreadPriorityStats } from './engineApi'
 
 export const THREAD_PRIORITY_LABEL: Record<ThreadPriority, string> = {
   unmanaged: '백엔드',
@@ -69,44 +70,52 @@ export function formatBackend(backend: string | null | undefined): string | null
   return backend ? `백엔드 ${backend}` : null
 }
 
-/** 손실 모양 연속 길이 버킷(패킷, P2-17h) */
-export const LOSS_RUN_BUCKETS = ['1', '2', '3–4', '5–8', '9–16', '17+'] as const
-/** 도착 여유 버킷(ms, P2-17h) */
-export const ARRIVAL_MARGIN_BUCKETS = ['<0', '0–0.5', '0.5–1', '1–2', '2–2.5', '2.5–3', '3–5', '5–7.5', '7.5–10', '≥10'] as const
-/** 도착 여유 버킷의 아래 경계(ms). 첫 버킷(<0)은 경계 없음 */
-const MARGIN_LOWER = [-Infinity, 0, 0.5, 1, 2, 2.5, 3, 5, 7.5, 10]
-
-const pct = (n: number, total: number) => (total > 0 ? `${((n * 100) / total).toFixed(1)}%` : '-')
-
-/** 여유가 `ms` 이상인 수(경계가 버킷 경계와 맞을 때만, 아니면 null) */
-function marginAtLeast(m: number[], ms: number): number | null {
-  const i = MARGIN_LOWER.findIndex((e) => Math.abs(e - ms) < 1e-3)
-  return i < 0 ? null : m.slice(i).reduce((a, b) => a + b, 0)
+/** 릴레이 등록 상태 문구(relay-design.md). 진단 줄은 원래 값(`bound` 등)과 함께 보인다 — TEST-SESSION이 원래 값으로 적는다 */
+export const RELAY_STATE_LABEL: Record<RelayState, string> = {
+  binding: '등록 중',
+  bound: '등록됨',
+  unreachable: '응답 없음',
+  rejected: '거절됨',
+  expired: '토큰 만료',
 }
 
-/**
- * 손실 모양 진단 줄(P2-17h, 피어 통계 툴팁): 손실·마감 놓침 연속 길이 표, 도착 여유(늦음 / 1프레임·2프레임 이상 비율), 은닉 방식.
- * 도착 여유는 직접 잰 "은닉 마감 − 도착"이고, ≥ 1F 비율이 "1프레임 늦게 보낸 복사본/FEC가 마감 안에 드는 비율"이다. 프레임이
- * 버킷 경계(2.5·5·10ms)가 아니면(128샘플 2.67ms 등) 그 비율은 셀 수 없다고 적는다. 옛 엔진(필드 없음)이면 빈 배열
- */
-export function lossShapeLines(sh: LossShapeStats | null | undefined): string[] {
-  if (!sh) return []
-  const runs = (r: number[], longPkts?: number) =>
-    LOSS_RUN_BUCKETS.map((b, i) => `${b}:${r[i] ?? 0}${i === LOSS_RUN_BUCKETS.length - 1 && longPkts ? `(${longPkts}패킷)` : ''}`).join(' ')
-  const m = sh.arrivalMargin
-  const total = m.reduce((a, b) => a + b, 0)
-  const f = sh.frameMs
-  const margin = [`늦음 ${pct(m[0] ?? 0, total)}`]
-  for (const [k, label] of [[1, '1F'], [2, '2F']] as const) {
-    const ms = Number((f * k).toFixed(2))
-    const n = marginAtLeast(m, f * k)
-    if (n !== null) margin.push(`≥${label}(${ms}ms) ${pct(n, total)}`)
-    else if (k === 1) margin.push(`≥1F(${ms}ms) 버킷 경계 아님`)
-  }
+/** "릴레이 bound(등록됨) · RTT 21ms". 릴레이를 설정하지 않았으면 null */
+export function formatRelay(r: RelayStats | null | undefined): string | null {
+  if (!r) return null
+  const rtt = r.rttMs != null ? ` · RTT ${Math.round(r.rttMs)}ms` : ''
+  return `릴레이 ${r.state}(${RELAY_STATE_LABEL[r.state] ?? r.state})${rtt}`
+}
+
+/** 릴레이가 등록되지 않았거나(응답 없음·거절·만료) 대역 상한에 닿으면 경고 색 */
+export function relayWarn(r: RelayStats | null | undefined): boolean {
+  return !!r && (r.state === 'unreachable' || r.state === 'rejected' || r.state === 'expired' || r.overBudget)
+}
+
+export function relayTitle(r: RelayStats): string {
   return [
-    `손실 연속(패킷): ${runs(sh.lossRuns, sh.lossLongPkts)}`,
-    `마감 놓침 연속(패킷): ${runs(sh.lateRuns)}`,
-    `도착 여유(마감−도착, ${total}개): ${margin.join(' · ')}`,
-    `은닉 방식: FEC ${sh.concealFec} · PLC ${sh.concealPlc} · PCM ${sh.concealPcm} (언더런 ${sh.concealUnderrun})`,
-  ]
+    `릴레이 상태: ${r.state} (binding 등록 중 · bound 등록됨 · unreachable 응답 없음 · rejected 거절됨 · expired 토큰 만료)`,
+    `릴레이 주소: ${r.addr}`,
+    `엔진 ↔ 릴레이 RTT: ${r.rttMs != null ? `${r.rttMs.toFixed(1)}ms` : '-'}`,
+    `릴레이로 보내는 양: ${Math.round(r.txKbps)}kbps${r.overBudget ? ' — 상한의 90% 초과(릴레이가 패킷을 버리기 시작)' : ''}`,
+    `대역 절약 Opus 자동 전환(relay.autoOpus): ${r.autoOpus ? '켜짐' : '꺼짐'}`,
+  ].join('\n')
+}
+
+/** "송신 큐 p99 0.12ms". 네트워크 미시작·창에 송신이 없으면 null */
+export function formatSendQueue(q: SendQueueStats | null | undefined): string | null {
+  if (!q || q.packets <= 0) return null
+  return `송신 큐 p99 ${q.p99Ms.toFixed(2)}ms`
+}
+
+/** 송신 큐 p99가 1ms 이상이면 경고 색(정상은 1ms 미만) */
+export function sendQueueWarn(q: SendQueueStats | null | undefined): boolean {
+  return !!q && q.packets > 0 && q.p99Ms >= 1
+}
+
+export function sendQueueTitle(q: SendQueueStats): string {
+  return [
+    '송신 큐 지연: 프레임 생성 → 피어별 전송 완료, 직전 2초 창(1ms 미만이면 정상)',
+    `p50 / p99 / 최대: ${q.p50Ms.toFixed(2)} / ${q.p99Ms.toFixed(2)} / ${q.maxMs.toFixed(2)}ms`,
+    `잰 패킷: ${q.packets}개`,
+  ].join('\n')
 }

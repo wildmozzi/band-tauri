@@ -296,6 +296,12 @@ impl Engine {
 
     /// 피어 추가(같은 peerId면 교체). 미디어 상태(지터 버퍼 할당)는 여기, 커맨드 스레드에서 만든다(설계 1.4절).
     pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor) -> Result<(), String> {
+        self.add_peer_with_entry(peer_id, desc, None)
+    }
+
+    /// `add_peer` + 입장 → 이 호출까지(ms, 클라이언트가 아는 값 — 설계 4절 `engine_add_peer`의 `entryLeadMs`). 진단 타임라인에만
+    /// 남아 결과표가 GOAL 3-3 "입장 후 첫 소리"를 `entryLeadMs + firstAudioMs`로 가른다. 엔진 동작에는 쓰지 않는다.
+    pub fn add_peer_with_entry(&self, peer_id: String, desc: &LocalDescriptor, entry_lead_ms: Option<f32>) -> Result<(), String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
         self.media_port.reclaim();
         let key = PeerKey::from_raw(self.next_key.fetch_add(1, Ordering::Relaxed));
@@ -310,6 +316,7 @@ impl Engine {
         // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB, 공급 리샘플러)는 여기, 락 밖에서 할당한다. 워커는 추가·제거·재시작 어디서도 할당·해제하지 않는다(재시작은 제자리 초기화, 디코더는 여기서 미리 만든 Opus 모노·스테레오 풀과 주고받는다 — 코덱이 바뀌어도 새로 만들지 않음, ③c `tests/rt_alloc.rs`; 해제는 반환 큐를 거쳐 제어 평면에서).
         let (tx, rx) = media_link(key);
         let (media, worker_side) = PeerMedia::new(key, peer_id.clone(), desc.ssrc, added_us, settings, rx, self.info.out_rate, self.cfg.resample_quality())?;
+        media.set_entry_lead_ms(entry_lead_ms);
         // 등록부 락 안에서 믹스 설정 복사 → net 교체 → 등록부 교체: 겹친 set_peer_gain은 옛 것에 쓰여 복사로 넘어가거나
         // 새 것에 쓰인다(설계 7.3절). 복사는 net에 넣기 전에 해서 워커가 새 항목을 기본 게인으로 보는 순간이 없다.
         let mut reg = self.media.lock();

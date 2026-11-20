@@ -207,6 +207,7 @@ engine/metronome/sched.rs	struct	MetronomeCtl
 engine/metronome/sched.rs	struct	MetronomeRt
 engine/metronome/sched.rs	struct	OutClock
 engine/mod.rs	method	add_peer
+engine/mod.rs	method	add_peer_with_entry
 engine/mod.rs	method	config
 engine/mod.rs	method	controls
 engine/mod.rs	method	descriptor
@@ -304,6 +305,7 @@ engine/report.rs	field	loss_shape
 engine/report.rs	field	max_corr_cents
 engine/report.rs	field	metronome
 engine/report.rs	field	monitor_latency_ms
+engine/report.rs	field	nat
 engine/report.rs	field	network
 engine/report.rs	field	out_delay_ms
 engine/report.rs	field	output_level
@@ -326,6 +328,7 @@ engine/report.rs	field	resampler
 engine/report.rs	field	rtt_ms
 engine/report.rs	field	running
 engine/report.rs	field	sample_rate
+engine/report.rs	field	self_peer
 engine/report.rs	field	send_queue
 engine/report.rs	field	session
 engine/report.rs	field	sites
@@ -344,7 +347,9 @@ engine/report.rs	field	xruns
 engine/report.rs	method	conn_events
 engine/report.rs	method	feed_stats
 engine/report.rs	method	local_path_stats
+engine/report.rs	method	nat_probe
 engine/report.rs	method	peer_jitter_stats
+engine/report.rs	method	self_peer_id
 engine/report.rs	method	stats
 engine/report.rs	method	take_send_path_diag
 engine/report.rs	method	take_worker_timing
@@ -563,6 +568,7 @@ net/mod.rs	struct	NetShared
 net/mod.rs	struct	PeerTableCopy
 net/mod.rs	struct	RelaySetting
 net/mod.rs	struct	SendPathDiag
+net/mod.rs	use	NatProbe
 net/peer/descriptor.rs	enum	CandidateKind
 net/peer/descriptor.rs	field	addr
 net/peer/descriptor.rs	field	candidates
@@ -594,6 +600,7 @@ net/send.rs	method	send_audio
 net/send.rs	method	send_audio_timed
 net/send.rs	struct	AutoPayload
 net/stun.rs	fn	query_many
+net/stun.rs	struct	NatProbe
 net/txlat.rs	field	contended
 net/txlat.rs	field	max_ms
 net/txlat.rs	field	max_us
