@@ -137,10 +137,17 @@ pub async fn engine_test_stop(state: State<'_, EngineState>) -> Result<(), Strin
     .await
 }
 
+/// 피어 추가(설계 4절). `entry_lead_ms`(선택): 입장(연주 시작, 또는 뒤에 들어온 연주자의 입장) → 이 호출까지(ms) — 진단
+/// 타임라인에만 남는다(GOAL 3-3 판정 근거). 옛 클라이언트는 보내지 않는다.
 #[tauri::command]
-pub async fn engine_add_peer(state: State<'_, EngineState>, peer_id: String, descriptor: LocalDescriptor) -> Result<(), String> {
+pub async fn engine_add_peer(
+    state: State<'_, EngineState>,
+    peer_id: String,
+    descriptor: LocalDescriptor,
+    entry_lead_ms: Option<f32>,
+) -> Result<(), String> {
     let m = state.0.clone();
-    blocking(move || m.with_engine(|e| e.add_peer(peer_id, &descriptor))).await
+    blocking(move || m.with_engine(|e| e.add_peer_with_entry(peer_id, &descriptor, entry_lead_ms))).await
 }
 
 /// 릴레이 설정(설계 4절). 서버의 `relay-token { token, addr }`을 받을 때마다(최초·갱신) 부른다. `null`이면 해제.

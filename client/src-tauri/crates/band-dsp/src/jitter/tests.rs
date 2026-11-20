@@ -382,6 +382,44 @@ fn late_packets_discarded() {
     assert_eq!(jb.stats().late, before + 1);
 }
 
+/// 리버퍼 무음 시간(진단, `stalled`): 처음 채우는 동안은 아니고, 재생하던 스트림이 무수신으로 재버퍼되면 다시 재생할 때까지
+/// 참이다. 지터 재시작(에코 측정)도 재생 중이었으면 참으로 시작한다.
+#[test]
+fn stalled_marks_rebuffer_until_playing_again_not_first_fill() {
+    let mut jb = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    let mut tx = Sender::new(CodecKind::Pcm16, 240, 10, 0);
+    let mut out = vec![0f32; 480];
+    let mut t = 0u64;
+    assert!(!jb.stalled(), "처음(패킷 전)");
+    let mut feed = |jb: &mut JitterBuffer, t: &mut u64, n: usize| {
+        for _ in 0..n {
+            let (h, p) = tx.next();
+            jb.insert(&h, &p, *t);
+            assert!(!jb.stalled() || !jb.is_playing());
+            jb.pop(&mut out);
+            jb.end_burst(*t, *t, 0.0);
+            *t += 5000;
+        }
+    };
+    let mut out2 = vec![0f32; 480];
+    feed(&mut jb, &mut t, 30);
+    assert!(jb.is_playing() && !jb.stalled(), "처음 채우기 뒤 재생 — 무음 아님");
+    while jb.stats().rebuffers == 0 {
+        jb.pop(&mut out2);
+        jb.end_burst(t, t, 0.0);
+        t += 5000;
+        assert!(t < 2_000_000, "재버퍼링이 일어나지 않았다");
+    }
+    assert!(jb.stalled(), "재버퍼 뒤 다시 채우는 중");
+    feed(&mut jb, &mut t, 30);
+    assert!(jb.is_playing() && !jb.stalled(), "다시 재생하면 지운다");
+    jb.restart();
+    assert!(jb.stalled(), "재생 중 재시작 → 다시 채울 때까지 무음");
+    let mut fresh = JitterBuffer::new(JitterSettings { min_ms: 0.0, max_ms: 80.0, profile: 0.5 });
+    fresh.restart();
+    assert!(!fresh.stalled(), "재생한 적 없는 재시작은 처음 채우기");
+}
+
 /// #185 리뷰 L3: 재버퍼(언더런 200ms) 뒤 버퍼링 중에 직전에 재생한 패킷의 사본이 오면, 전에는 되감기 한도(back_limit) 안이라
 /// 시작점을 그 seq로 되감아 이미 재생한 소리를 다시 재생했다. 사본은 버리고 시작점·통계를 그대로 둔다.
 #[test]

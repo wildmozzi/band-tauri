@@ -437,6 +437,7 @@ impl EngineManager {
             network: e.has_network(),
             session: s.generation,
             conn_events: e.conn_events(),
+            nat: e.nat_probe(),
         })
     }
 

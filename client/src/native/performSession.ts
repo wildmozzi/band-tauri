@@ -26,7 +26,7 @@ import {
   type MetronomeView,
 } from './metronomeLogic'
 import { parseRelayToken, relayNeedsNewToken, relayRefreshDelayMs } from './relayLogic'
-import { newFirstAudioTrack, noteAddPeer, notePeerLeft, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
+import { entryLeadMs, newFirstAudioTrack, noteAddPeer, notePeerLeft, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
 import {
   performErrorFromCode,
@@ -56,7 +56,8 @@ export {
 export interface EngineBackend {
   start(config: EngineConfig, peerId: string): Promise<LocalDescriptor>
   stop(): Promise<unknown>
-  addPeer(peerId: string, descriptor: LocalDescriptor): Promise<unknown>
+  /** `entryLeadMs`: 입장 → 이 호출(ms, 진단 전용 — `engineAddPeer`) */
+  addPeer(peerId: string, descriptor: LocalDescriptor, entryLeadMs?: number | null): Promise<unknown>
   /** 릴레이 설정/토큰 갱신 (engine_set_relay) */
   setRelay(relay: RelayConfig | null): Promise<unknown>
   removePeer(peerId: string): Promise<unknown>
@@ -808,9 +809,15 @@ export class PerformSession {
   private addPeer(peerId: string, descriptor: LocalDescriptor) {
     const gen = this.gen
     this.enqueue(() => {
-      // 엔진 firstAudioMs의 기준(engine_add_peer 호출 시각). 큐에서 실제로 부르는 순간에 잰다
-      if (gen === this.gen && this.firstAudio) this.firstAudio = noteAddPeer(this.firstAudio, peerId, this.now())
-      return this.engine.addPeer(peerId, descriptor)
+      // 엔진 firstAudioMs의 기준(engine_add_peer 호출 시각). 큐에서 실제로 부르는 순간에 잰다.
+      // 입장 → 이 호출(entryLeadMs)도 같은 순간으로 엔진에 넘겨 진단 결과표가 "입장 후 첫 소리"를 가른다(GOAL 3-3)
+      let lead: number | null = null
+      if (gen === this.gen && this.firstAudio) {
+        const now = this.now()
+        this.firstAudio = noteAddPeer(this.firstAudio, peerId, now)
+        lead = entryLeadMs(this.firstAudio, peerId, now)
+      }
+      return this.engine.addPeer(peerId, descriptor, lead)
     })
       .then(() => {
         if (gen !== this.gen) return

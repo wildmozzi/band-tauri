@@ -40,6 +40,17 @@ export function noteAddPeer(t: FirstAudioTrack, peerId: string, now: number): Fi
 }
 
 /**
+ * 입장 → 지금 engine_add_peer 호출까지(ms, 엔진 진단 `entryLeadMs` — 결과표가 GOAL 3-3을 entryLeadMs + firstAudioMs로 가른다).
+ * `noteAddPeer` 뒤에 같은 `now`로 부른다. 기준은 화면의 "첫 소리"와 같다(시작 때 있던 연주자 = 연주 시작, 뒤에 들어온 연주자 = 그 입장).
+ * 이미 들린 피어를 다시 추가하면(상대 재시작 등) 엔진이 첫 소리를 새로 재므로 그 추가를 입장으로 보고 0이다. 기준이 없으면 null
+ */
+export function entryLeadMs(t: FirstAudioTrack, peerId: string, now: number): number | null {
+  if (t.heard.has(peerId)) return 0
+  const base = t.base.get(peerId)
+  return base === undefined ? null : Math.max(0, now - base)
+}
+
+/**
  * 연주자가 방을 떠났다(participant-left·native-leave). 아직 들리지 않은 연주자의 기준을 지워, 다시 들어오면
  * 그 재입장부터 잰다(#120 L-5). 이미 들린 값은 고정이다. 바뀐 게 없으면 같은 객체를 돌려준다.
  */

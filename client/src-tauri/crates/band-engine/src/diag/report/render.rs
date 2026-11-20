@@ -97,6 +97,26 @@ fn session_summary(out: &mut String, f: &FileReport, s: &SessionReport) {
         }
     }
     let _ = writeln!(out, "| 처리 지연 est 중앙 / p95 / 최대 (ms) | {} |", dist(&s.est_latency_ms));
+    let _ = writeln!(out, "| 송신 큐 p99 중앙 / p95 / 최대 (ms) | {} |", dist(&s.send_queue_p99_ms));
+    let nat = match (&s.nat, s.nat_responses) {
+        (Some(m), r) => {
+            let label = match m.as_str() {
+                "independent" => "매핑 독립(콘형)",
+                "dependent" => "매핑 목적지별(대칭형)",
+                "open" => "NAT 없음",
+                _ => "모름",
+            };
+            format!("{m} — {label}, STUN 응답 {}", opt(&r))
+        }
+        (None, _) => "없음(format 3 이전)".into(),
+    };
+    let _ = writeln!(out, "| NAT 추정(STUN) | {nat} |");
+    let relay = if s.relay_states.is_empty() {
+        "안 씀".to_string()
+    } else {
+        format!("상태 {} · RTT 중앙 / p95 / 최대 {}", s.relay_states.join(" → "), dist(&s.relay_rtt_ms))
+    };
+    let _ = writeln!(out, "| 릴레이(relay.state · rttMs) | {relay} |");
     let cp = match &s.core_placement {
         None => none(),
         Some(p) => {
@@ -133,7 +153,7 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
     }
     let _ = writeln!(
         out,
-        "| 피어 | 경로(연결 샘플) | RTT 중앙 | bufferMs 중앙 / p95 / 최대 | 목표 중앙 | ±3ms 밖 1분+ 구간 (최장, 밖 %, 기록, 틈) | 은닉 % 하한–상한(상한 = 소리 없는 시간을 은닉으로 봄) ÷ 재생 프레임 (FEC / PLC / PCM · 언더런) | 소리 없는 시간(연결 중 무수신·리버퍼) | 손실 % (복구 후 lossShape 하한–상한 · 엔진 평균) | 연결 / 첫 소리 |\n|---|---|---|---|---|---|---|---|---|---|"
+        "| 피어 | 경로(연결 샘플) | 내 송신 코덱(연결 샘플) | RTT 중앙 | bufferMs 중앙 / p95 / 최대 | 목표 중앙 | ±3ms 밖 1분+ 구간 (최장, 밖 %, 기록, 틈) | 은닉 % 하한–상한(상한 = 소리 없는 시간을 은닉으로 봄) ÷ 재생 프레임 (FEC / PLC / PCM · 언더런) | 소리 없는 시간(연결 중 무수신·리버퍼) | 손실 % (복구 후 lossShape 하한–상한 · 엔진 평균) | 연결 / 첫 소리(피어 추가 후) / 입장 후 첫 소리 |\n|---|---|---|---|---|---|---|---|---|---|---|"
     );
     for p in peers {
         let paths = if p.paths.is_empty() { none() } else { p.paths.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ") };
@@ -158,15 +178,22 @@ fn peer_table(out: &mut String, peers: &[PeerReport]) {
             let _ = write!(first_audio, " · 소리 못 받음 {}", p.no_audio_entries);
         }
         let entries = if p.entries > 1 { format!(" (항목 {})", p.entries) } else { String::new() };
+        let tx = if p.tx_codec.is_empty() { none() } else { p.tx_codec.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", ") };
+        let mut entry_audio = list(&p.entry_first_audio_ms);
+        if p.no_lead_entries > 0 {
+            let _ = write!(entry_audio, " · 입장 값 없음 {}", p.no_lead_entries);
+        }
         let _ = writeln!(
             out,
-            "| {}{entries} | {paths} | {} | {} | {} | {band} | {conceal} | {silent} | {loss} | {} / {} |",
+            "| {}{entries} | {paths} | {} | {} | {} | {} | {band} | {conceal} | {silent} | {loss} | {} / {} / {} |",
             p.peer,
+            cell(&tx),
             ms(p.rtt_ms.as_ref().map(|d| d.median)),
             dist(&p.buffer_ms),
             ms(p.target_ms.as_ref().map(|d| d.median)),
             list(&p.connect_ms),
             first_audio,
+            entry_audio,
         );
     }
     let _ = writeln!(out);
@@ -250,6 +277,17 @@ fn conn_agg(out: &mut String, a: &ConnAgg) {
     if !a.duplicate_files.is_empty() {
         let _ = writeln!(out, "- 같은 zip이 두 번 들어와 집계에서 뺐다: {}", a.duplicate_files.join(", "));
     }
+    let nats = a.nat_sessions.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · ");
+    let _ = writeln!(
+        out,
+        "- NAT 추정(세션 수): {} · 콘형 쌍 무리 {}(시도 {}: 직접 {} · 릴레이/실패 {} · 중단/미완 {}). 콘형 쌍 = 같은 시간대 세션 무리에 참가자 모두의 zip이 있고 모두 independent·open.",
+        if nats.is_empty() { none() } else { nats },
+        a.cone_groups,
+        a.cone_attempts,
+        a.cone_direct,
+        a.cone_nondirect,
+        a.cone_unresolved
+    );
     let _ = writeln!(out);
 }
 

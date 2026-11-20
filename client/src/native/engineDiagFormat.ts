@@ -2,7 +2,7 @@
  * 합주실 진단 줄(P1-12b): 스레드 우선순위·QoS 마킹·오디오 백엔드.
  * 실장비 테스트에서 개발자 도구 `engine_stats` 없이 화면에서 읽도록 한다. CPU 줄은 P1-10(roomDetailModel.formatCpu).
  */
-import type { LossShapeStats, QosStats, ThreadPriority, ThreadPriorityStats } from './engineApi'
+import type { LossShapeStats, PeerStats, QosStats, RelayState, RelayStats, SendQueueStats, ThreadPriority, ThreadPriorityStats } from './engineApi'
 
 export const THREAD_PRIORITY_LABEL: Record<ThreadPriority, string> = {
   unmanaged: '백엔드',
@@ -67,6 +67,65 @@ export function qosTitle(q: QosStats): string {
 /** 백엔드 이름(입·출력이 다르면 "입력/출력"). 빈 문자열·없음이면 null */
 export function formatBackend(backend: string | null | undefined): string | null {
   return backend ? `백엔드 ${backend}` : null
+}
+
+/** 릴레이 등록 상태 문구(relay-design.md). 진단 줄은 원래 값(`bound` 등)과 함께 보인다 — TEST-SESSION이 원래 값으로 적는다 */
+export const RELAY_STATE_LABEL: Record<RelayState, string> = {
+  binding: '등록 중',
+  bound: '등록됨',
+  unreachable: '응답 없음',
+  rejected: '거절됨',
+  expired: '토큰 만료',
+}
+
+/** "릴레이 bound(등록됨) · RTT 21ms". 릴레이를 설정하지 않았으면 null */
+export function formatRelay(r: RelayStats | null | undefined): string | null {
+  if (!r) return null
+  const rtt = r.rttMs != null ? ` · RTT ${Math.round(r.rttMs)}ms` : ''
+  return `릴레이 ${r.state}(${RELAY_STATE_LABEL[r.state] ?? r.state})${rtt}`
+}
+
+/** 릴레이가 등록되지 않았거나(응답 없음·거절·만료) 대역 상한에 닿으면 경고 색 */
+export function relayWarn(r: RelayStats | null | undefined): boolean {
+  return !!r && (r.state === 'unreachable' || r.state === 'rejected' || r.state === 'expired' || r.overBudget)
+}
+
+export function relayTitle(r: RelayStats): string {
+  return [
+    `릴레이 상태: ${r.state} (binding 등록 중 · bound 등록됨 · unreachable 응답 없음 · rejected 거절 · expired 토큰 만료)`,
+    `릴레이 주소: ${r.addr}`,
+    `엔진 ↔ 릴레이 RTT: ${r.rttMs != null ? `${r.rttMs.toFixed(1)}ms` : '-'}`,
+    `릴레이로 보내는 양: ${Math.round(r.txKbps)}kbps${r.overBudget ? ' — 상한의 90% 초과(릴레이가 패킷을 버리기 시작)' : ''}`,
+    `대역 절약 Opus 자동 전환(relay.autoOpus): ${r.autoOpus ? '켜짐' : '꺼짐'}`,
+  ].join('\n')
+}
+
+/** "송신 큐 p99 0.12ms". 네트워크 미시작·창에 송신이 없으면 null */
+export function formatSendQueue(q: SendQueueStats | null | undefined): string | null {
+  if (!q || q.packets <= 0) return null
+  return `송신 큐 p99 ${q.p99Ms.toFixed(2)}ms`
+}
+
+/** 송신 큐 p99가 1ms 이상이면 경고 색(정상은 1ms 미만) */
+export function sendQueueWarn(q: SendQueueStats | null | undefined): boolean {
+  return !!q && q.packets > 0 && q.p99Ms >= 1
+}
+
+export function sendQueueTitle(q: SendQueueStats): string {
+  return [
+    '송신 큐 지연: 프레임 생성 → 피어별 전송 완료, 직전 2초 창(1ms 미만이면 정상)',
+    `p50 / p99 / 최대: ${q.p50Ms.toFixed(2)} / ${q.p99Ms.toFixed(2)} / ${q.maxMs.toFixed(2)}ms`,
+    `잰 패킷: ${q.packets}개`,
+  ].join('\n')
+}
+
+/** 이 피어에게 보내는 내 소리의 코덱·프레임: "내 송신: Opus · 5ms", 자동 전환이면 "(자동 전환)". 아직 안 보냈으면 "내 송신: 아직 없음", 옛 엔진(필드 없음)이면 null */
+export function formatTxCodec(ps: Pick<PeerStats, 'txCodec' | 'txCodecAuto'>, txFrameMs?: number | null): string | null {
+  if (ps.txCodec === undefined) return null
+  if (ps.txCodec === null) return '내 송신: 아직 없음'
+  const codec = ps.txCodec === 'opus' ? 'Opus' : 'PCM16'
+  const frame = txFrameMs ? ` · ${txFrameMs}ms` : ''
+  return `내 송신: ${codec}${frame}${ps.txCodecAuto ? ' (자동 전환)' : ''}`
 }
 
 /** 손실 모양 연속 길이 버킷(패킷, P2-17h) */

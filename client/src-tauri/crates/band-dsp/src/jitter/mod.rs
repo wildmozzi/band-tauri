@@ -141,6 +141,9 @@ pub struct JitterBuffer {
     next_seq: u32,
     has_stream: bool,
     highest: u32,
+    /// 재생하던 스트림이 끊겨(무수신 재버퍼·스트림 리셋·지터 재시작) 다시 채우는 중이다 — `Buffering`인 동안 소리가 없다.
+    /// 처음 채우는 동안(첫 패킷 대기)은 아니다. 재생이 시작되면 지운다. 진단 "리버퍼 무음 시간"(`stalled()`)용.
+    stalled: bool,
 
     /// 디코드된 스테레오 인터리브 샘플 FIFO.
     fifo: VecDeque<f32>,
@@ -250,6 +253,7 @@ impl JitterBuffer {
             next_seq: 0,
             has_stream: false,
             highest: 0,
+            stalled: false,
             fifo: b.fifo,
             fifo_end_ts: 0,
             start_fade_done: playout::START_FADE,
@@ -306,10 +310,13 @@ impl JitterBuffer {
     pub fn restart(&mut self) {
         self.shape.flush(&mut self.stats.shape);
         let stats = self.stats;
+        // 재생하던(또는 다시 채우던) 스트림을 버리면 다시 채울 때까지 소리가 없다 — 리버퍼 무음 시간에 든다.
+        let stalled = self.state == State::Playing || self.stalled;
         // 버퍼를 꺼내 처음 상태로 되돌려 다시 쓴다(엔진 ③c — 워커에서 적용되므로 할당·해제 0, `tests/rt_alloc.rs`).
         let buffers = Buffers::reclaim(self);
         *self = Self::from_buffers(self.settings, buffers);
         self.stats = stats;
+        self.stalled = stalled;
     }
 
     fn reset_stream(&mut self) {
@@ -319,6 +326,7 @@ impl JitterBuffer {
         for s in &mut self.slots {
             s.valid = false;
         }
+        self.stalled |= self.has_stream;
         self.state = State::Buffering;
         self.has_stream = false;
         self.fifo.clear();
@@ -482,5 +490,11 @@ impl JitterBuffer {
 
     pub fn is_playing(&self) -> bool {
         self.state == State::Playing
+    }
+
+    /// 재생하던 스트림이 끊겨 다시 채우는 중이다(소리 없음 — 처음 채우기는 아님). 워커가 이 시간을 재 진단에 남긴다
+    /// (`PeerMedia::note_stall`, 리버퍼 무음 시간).
+    pub fn stalled(&self) -> bool {
+        self.state == State::Buffering && self.stalled
     }
 }

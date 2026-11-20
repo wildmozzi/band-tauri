@@ -86,7 +86,10 @@ class FakeEngine implements EngineBackend {
       return null
     })
   }
-  addPeer(peerId: string) {
+  /** 피어별 마지막 entryLeadMs(진단 3-3) */
+  entryLeads = new Map<string, number | null | undefined>()
+  addPeer(peerId: string, _descriptor?: LocalDescriptor, entryLeadMs?: number | null) {
+    this.entryLeads.set(peerId, entryLeadMs)
     return this.track(`add:${peerId}`, async () => {
       if (this.addPeerFailures > 0) {
         this.addPeerFailures--
@@ -390,6 +393,8 @@ describe('PerformSession 피어/엔진 상태', () => {
     engine.peerStats = [ps('B', 350), ps('C', 200)]
     await session.pollStats()
     expect(session.getState().firstAudio).toEqual({ firstMs: 200, lastMs: 750, heard: 2, total: 2 })
+    // 진단(GOAL 3-3): 입장 → add_peer를 엔진에 넘긴다 — B는 연주 시작부터 400ms, C는 자기 입장에 바로 추가돼 0
+    expect(Object.fromEntries(engine.entryLeads)).toEqual({ B: 400, C: 0 })
     await session.stop()
     expect(session.getState().firstAudio).toBeNull()
   })

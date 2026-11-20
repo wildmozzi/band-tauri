@@ -1131,7 +1131,7 @@ fn first_connect(e: &Engine) -> Option<(ConnOutcome, u32)> {
 /// 진단 타임라인(diag zip의 `timeline.jsonl`)에 연결 결과가 남는지: 엔진 스냅샷을 진단 기록에 두 번 넣고 JSONL을 본다.
 fn diag_jsonl(e: &Engine) -> String {
     let d = Diagnostics::new(10);
-    let snap = |e: &Engine| EngineSnapshot { stats: e.stats(), config: e.config().clone(), network: true, session: 1, conn_events: e.conn_events() };
+    let snap = |e: &Engine| EngineSnapshot { stats: e.stats(), config: e.config().clone(), network: true, session: 1, conn_events: e.conn_events(), nat: e.nat_probe() };
     d.record(1, Some(snap(e)));
     d.record(2, Some(snap(e)));
     d.with_timeline(|tl, _, _| to_jsonl(tl))

@@ -370,6 +370,8 @@ export interface EngineStats {
   xruns: number
   /** 로컬 처리 지연(GOAL 1절 정의: 입력 버퍼+프레임+출력 링+출력 버퍼). 콜백 구동 믹스라 출력 링은 0 */
   estLatencyMs: number
+  /** 내 소리의 송신 프레임(ms, 설정 frameMs — 모든 피어에게 같다. 코덱은 피어별 txCodec). 정지 상태면 0, 옛 엔진이면 없음 */
+  txFrameMs?: number
   /** 모니터 경로(내 입력 → 내 출력) 지연 */
   monitorLatencyMs?: number
   /** 오디오 스트림 에러 누적(비치명 포함) */
@@ -666,8 +668,12 @@ export function engineTestStop(): Promise<null> {
   return invoke<null>('engine_test_stop')
 }
 
-export function engineAddPeer(peerId: string, descriptor: LocalDescriptor): Promise<null> {
-  return invoke<null>('engine_add_peer', { peerId, descriptor })
+/**
+ * 피어 추가. `entryLeadMs`(선택): 입장(내 연주 시작, 또는 뒤에 들어온 연주자의 입장) → 이 호출까지(ms). 엔진은 진단 타임라인에만
+ * 남긴다(결과표 GOAL 3-3 "입장 후 3초 이내 소리" = entryLeadMs + firstAudioMs). 옛 엔진은 모르는 인자를 무시한다.
+ */
+export function engineAddPeer(peerId: string, descriptor: LocalDescriptor, entryLeadMs?: number | null): Promise<null> {
+  return invoke<null>('engine_add_peer', { peerId, descriptor, entryLeadMs: entryLeadMs ?? null })
 }
 
 /**

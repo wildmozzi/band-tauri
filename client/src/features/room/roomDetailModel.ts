@@ -1,6 +1,6 @@
 // 합주실 상세(RoomDetail) 화면의 타입·상수·순수 함수.
 import type { CpuStats, PeerState, PeerStats } from '../../native/engineApi'
-import { lossShapeLines } from '../../native/engineDiagFormat'
+import { formatTxCodec, lossShapeLines } from '../../native/engineDiagFormat'
 import { RELAY_PATH_HINT, pathLabel } from '../../native/relayLogic'
 import type { DetailRoom, InstrumentSlot } from '../rooms'
 export type { DetailRoom, InstrumentSlot }
@@ -95,10 +95,13 @@ export function peerCodecLines(ps: PeerStats): string[] {
   return lines
 }
 
-export function peerStatsTitle(ps: PeerStats): string {
+/** 피어 통계 툴팁. `txFrameMs`(EngineStats.txFrameMs)가 있으면 내 송신 코덱 줄에 프레임을 붙인다 */
+export function peerStatsTitle(ps: PeerStats, txFrameMs?: number | null): string {
+  const tx = formatTxCodec(ps, txFrameMs)
   return [
     `상태: ${PEER_STATE_INFO[ps.state]?.label ?? ps.state}`,
     `경로: ${pathLabel(ps.path) ?? '-'}${ps.path === 'relay' ? ` (${RELAY_PATH_HINT})` : ''}`,
+    ...(tx ? [tx] : []),
     `RTT: ${formatMs(ps.rttMs)}`,
     `지터: ${formatMs(ps.jitterMs, 1)}`,
     `버퍼: ${formatMs(ps.bufferMs)}`,

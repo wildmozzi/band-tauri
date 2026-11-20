@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { PeerStats } from './engineApi'
 import {
+  entryLeadMs,
   firstAudioOverGoal,
   formatFirstAudio,
   newFirstAudioTrack,
@@ -14,6 +15,22 @@ const peer = (peerId: string, firstAudioMs: number | null | undefined): PeerStat
   ({ peerId, state: 'connected', path: 'lan', firstAudioMs }) as PeerStats
 
 describe('firstAudio (P1-20)', () => {
+  it('진단 entryLeadMs: 입장 → 이 add_peer — 시작 때 있던 연주자는 연주 시작부터, 뒤에 온 연주자는 0, 이미 들린 피어의 재추가도 0', () => {
+    let t = newFirstAudioTrack(1000, ['B'])
+    t = noteAddPeer(t, 'B', 1400)
+    expect(entryLeadMs(t, 'B', 1400)).toBe(400)
+    t = noteAddPeer(t, 'C', 5000)
+    expect(entryLeadMs(t, 'C', 5000)).toBe(0)
+    // 들리기 전 재추가: 기준(입장)은 그대로
+    t = noteAddPeer(t, 'B', 2400)
+    expect(entryLeadMs(t, 'B', 2400)).toBe(1400)
+    // 들린 뒤 재추가: 엔진이 첫 소리를 새로 재므로 그 추가가 입장
+    t = noteStats(t, [peer('B', 100)])
+    t = noteAddPeer(t, 'B', 90_000)
+    expect(entryLeadMs(t, 'B', 90_000)).toBe(0)
+    expect(entryLeadMs(t, 'Z', 1)).toBeNull()
+  })
+
   it('시작 때 있던 연주자는 연주 시작부터: 서버 왕복(시작 → add_peer) + 엔진 firstAudioMs', () => {
     let t = newFirstAudioTrack(1000, ['A', 'B'])
     t = noteAddPeer(t, 'A', 1300)

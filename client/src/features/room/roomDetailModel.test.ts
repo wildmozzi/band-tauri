@@ -82,6 +82,12 @@ describe('roomDetailModel', () => {
     expect(peerCodecLines(stats())).toEqual([])
   })
 
+  it('peerStatsTitle: 내 송신 코덱·프레임(txFrameMs), 옛 엔진(txCodec 없음)이면 줄 없음', () => {
+    const lines = peerStatsTitle(stats({ txCodec: 'pcm16', txCodecAuto: false }), 2.5).split('\n')
+    expect(lines[2]).toBe('내 송신: PCM16 · 2.5ms')
+    expect(peerStatsTitle(stats()).split('\n').some((l) => l.startsWith('내 송신: PCM16') || l.startsWith('내 송신: Opus ·'))).toBe(false)
+  })
+
   it('remotePeerStatus: 연주 중이면 엔진 상태(통계 없으면 연결 중), 관람이면 배지 없이 활성', () => {
     expect(remotePeerStatus(true, undefined)).toMatchObject({ state: 'connecting', isActive: false })
     expect(remotePeerStatus(true, stats())).toMatchObject({ state: 'connected', isActive: true, stateInfo: { className: 'connected' } })
