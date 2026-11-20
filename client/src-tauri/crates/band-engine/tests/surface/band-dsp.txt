@@ -31,6 +31,7 @@ config.rs	field	buffer_size
 config.rs	field	channels
 config.rs	field	codec
 config.rs	field	frame_ms
+config.rs	field	high_qos
 config.rs	field	input_channels
 config.rs	field	input_device
 config.rs	field	input_driver
@@ -40,7 +41,9 @@ config.rs	field	jitter_profile
 config.rs	field	opus_bitrate
 config.rs	field	output_device
 config.rs	field	output_driver
+config.rs	field	prefer_p_cores
 config.rs	field	resample_quality
+config.rs	field	thread_policy
 config.rs	field	udp_port
 config.rs	fn	frame_code_from_samples
 config.rs	fn	frame_samples_from_code
@@ -53,6 +56,7 @@ config.rs	method	resample_quality
 config.rs	method	supported
 config.rs	method	validate
 config.rs	struct	EngineConfig
+config.rs	struct	ThreadPolicyConfig
 histo.rs	const	BUCKETS
 histo.rs	fn	bucket_lower
 histo.rs	fn	bucket_of

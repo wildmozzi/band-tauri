@@ -228,6 +228,11 @@ fn lan_addresses() -> Vec<Ipv4Addr> {
 
 impl Net {
     pub fn start(local_peer_id: String, opts: &NetOptions) -> Result<Net, String> {
+        Self::start_with_policy(local_peer_id, opts, Default::default())
+    }
+
+    /// `start` + 수신 스레드에 걸 코어 배치 정책(P1-21 2단계, 기본은 둘 다 꺼짐 — 엔진이 설정·환경변수에서 정해 넘긴다).
+    pub(crate) fn start_with_policy(local_peer_id: String, opts: &NetOptions, thread_policy: crate::sys::placement::PolicyChoice) -> Result<Net, String> {
         if local_peer_id.is_empty() || local_peer_id.len() > peer::MAX_PEER_ID_BYTES {
             return Err("peerId는 1..64바이트여야 합니다".into());
         }
@@ -292,7 +297,7 @@ impl Net {
             conn_log: Mutex::new(connlog::ConnLog::default()),
             recv_prio: Default::default(),
             recv_placement: Default::default(),
-            recv_policy: Default::default(),
+            recv_policy: crate::sys::placement::PolicySlot::requested(thread_policy),
             input_buffer_us: std::sync::OnceLock::new(),
         });
 

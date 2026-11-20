@@ -112,7 +112,7 @@ pub mod sys {
         pub use crate::sys::prio::{promote_current_thread, promote_engine_thread, set_engine_promotion, set_engine_promotion_parts};
     }
     pub mod placement {
-        pub use crate::sys::placement::{describe_cores, pin_process, set_thread_policy};
+        pub use crate::sys::placement::{describe_cores, pin_process};
     }
 }
 

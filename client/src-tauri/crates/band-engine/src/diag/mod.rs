@@ -219,14 +219,14 @@ mod tests {
             s
         };
         let d = Diagnostics::new(16);
-        d.record(1_000, Some(snap(5, PolicyResult::Off))); // 첫 샘플(적용 전)
+        d.record(1_000, Some(snap(5, PolicyResult::Pending))); // 첫 샘플(적용 전)
         d.record(2_000, Some(snap(5, PolicyResult::Applied))); // 적용 뒤
         d.record(3_000, Some(snap(5, PolicyResult::Applied)));
         d.record(4_000, Some(snap(6, PolicyResult::Applied))); // 새 세션
         d.record(5_000, Some(snap(6, PolicyResult::Applied)));
         d.with_timeline(|tl, _, _| {
             let got: Vec<_> = tl.iter().map(|s| s.thread_policy).collect();
-            assert_eq!(got, vec![Some(pol(PolicyResult::Off)), Some(pol(PolicyResult::Applied)), None, Some(pol(PolicyResult::Applied)), None]);
+            assert_eq!(got, vec![Some(pol(PolicyResult::Pending)), Some(pol(PolicyResult::Applied)), None, Some(pol(PolicyResult::Applied)), None]);
             assert_eq!(timeline::session_policy(tl, 5), Some(pol(PolicyResult::Applied)));
             assert_eq!(timeline::session_policy(tl, 6), Some(pol(PolicyResult::Applied)));
             assert_eq!(timeline::session_policy(tl, 7), None);

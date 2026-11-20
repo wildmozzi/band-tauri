@@ -275,3 +275,23 @@ describe('P2-17e: 리샘플러 품질', () => {
     expect(migrateLegacySettings({ driver: 'ASIO' }).resampleQuality).toBe('auto')
   })
 })
+
+describe('엔진 스레드 코어 배치 정책(P1-21 2단계, 실험 옵션)', () => {
+  it('기본은 둘 다 꺼짐이고, 옛 설정(필드 없음)·이상한 값도 꺼짐', () => {
+    expect(DEFAULT_ENGINE_CONFIG.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    const old: Partial<EngineConfig> = { ...DEFAULT_ENGINE_CONFIG }
+    delete old.threadPolicy
+    expect(parseStoredSettings({ version: 2, engine: old }).config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    for (const bad of [null, 'both', 1, { highQos: 'yes', preferPCores: 1 }]) {
+      expect(parseStoredSettings({ version: 2, engine: { ...old, threadPolicy: bad } }).config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    }
+    expect(migrateLegacySettings({ driver: 'ASIO' }).threadPolicy).toEqual({ highQos: false, preferPCores: false })
+  })
+  it('켠 값은 저장·복원되고 프리셋을 바꿔도 유지된다', () => {
+    const on = { highQos: true, preferPCores: false }
+    const stored = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: on } }).config
+    expect(stored.threadPolicy).toEqual(on)
+    expect(applyPreset(stored, 'ultraLow').threadPolicy).toEqual(on)
+    expect(parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: { preferPCores: true } } }).config.threadPolicy).toEqual({ highQos: false, preferPCores: true })
+  })
+})

@@ -42,6 +42,7 @@ import {
   payloadAllowed,
   peerLabel,
   resampleQualityHint,
+  THREAD_POLICY_OPTIONS,
   withLeftInputChannel,
   withRightInputChannel,
   type PayloadPatch,
@@ -475,6 +476,32 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           <span>ms</span>
         </div>
         <p className="setting-hint">네트워크가 불안정하면 최대값을 올리고, 지연을 줄이려면 내리세요.</p>
+      </section>
+
+      {/* 고급: 엔진 스레드 코어 배치 정책(P1-21 2단계, 실험적 — 기본 꺼짐) */}
+      <section className="settings-section" data-testid="thread-policy-section">
+        <h3>고급 <span className="experimental-badge">실험적</span></h3>
+        <p className="setting-hint">
+          Windows 전용이고 기본은 꺼짐입니다. 바꾼 뒤 연주(또는 테스트 모니터)를 다시 시작해야 적용됩니다.
+        </p>
+        {THREAD_POLICY_OPTIONS.map((o) => {
+          const policy = config.threadPolicy ?? { highQos: false, preferPCores: false }
+          return (
+            <div key={o.key}>
+              <div className="settings-row">
+                <label htmlFor={`thread-policy-${o.key}`}>{o.label}</label>
+                <input
+                  id={`thread-policy-${o.key}`}
+                  type="checkbox"
+                  checked={policy[o.key]}
+                  onChange={(e) => updateConfig({ threadPolicy: { ...policy, [o.key]: e.target.checked } })}
+                />
+              </div>
+              <p className="setting-hint">{o.effect}</p>
+              <p className="setting-hint">{o.caution}</p>
+            </div>
+          )
+        })}
       </section>
 
       {/* 테스트 모니터 */}

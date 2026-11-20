@@ -7,12 +7,12 @@
 //
 // 사용:
 //   node scripts/cpu-compare.mjs run --exe before=<cpu_profile.exe> --exe after=<cpu_profile.exe> \
-//        --pin pe --rounds 10 --cooldown 20 --out runs.csv [--set m2] [--high-qos]
+//        --pin pe --rounds 10 --cooldown 20 --out runs.csv [--set m2]
 //   node scripts/cpu-compare.mjs stats --in runs.csv --before before --after after [--set m2]
 //   node scripts/cpu-compare.mjs placement --in runs.csv [--set m1] [--lpe-threshold 10]
 //
-// 스레드 정책 비교(P1-21 2단계): 실행파일 하나를 조건만 바꿔 교차로 돌린다 — `--exe 이름=경로@정책`(정책 = off | qos | pcores |
-// qos+pcores → `BAND_THREAD_POLICY`). 예: --exe off=x.exe@off --exe qos=x.exe@qos --exe pcores=x.exe@pcores --exe both=x.exe@qos+pcores
+// 스레드 정책 비교(P1-21 2단계): 실행파일 하나를 조건만 바꿔 교차로 돌린다 — `--exe 이름=경로@정책`(정책 = off | highqos | pcores |
+// both → `BAND_THREAD_POLICY`, 없으면 off, `@default`면 엔진 기본값). 예: --exe off=x.exe@off --exe qos=x.exe@highqos --exe pcores=x.exe@pcores --exe both=x.exe@both
 //   node scripts/cpu-compare.mjs summary --in runs.csv [--set s] [--metric a,b]   # 조건×구성별 n·평균·표준편차·중앙값
 //
 // 실행파일은 `cd client/src-tauri && cargo test --release -p band-engine --test cpu_profile --no-run`이 찍는 경로를
@@ -178,8 +178,7 @@ function args(argv) {
   const o = { exe: [] }
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i].replace(/^--/, '')
-    if (k === 'high-qos') o.highQos = true
-    else if (k === 'exe') o.exe.push(argv[++i])
+    if (k === 'exe') o.exe.push(argv[++i])
     else o[k.replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i]
   }
   return o
@@ -205,9 +204,11 @@ function cmdRun(o) {
   for (let r = 0; r < rounds; r++) {
     for (const e of roundOrder(exes, r)) {
       const started = new Date().toISOString()
-      const env = { ...process.env, BAND_CPU_PIN: pin, BAND_HIGH_QOS: o.highQos ? '1' : '0' }
-      if (e.policy) env.BAND_THREAD_POLICY = e.policy
-      else delete env.BAND_THREAD_POLICY
+      // `@정책`이 없으면 스레드 정책을 **끔으로 고정**한다(#245 리뷰 L4): 커밋 전·후 비교에 실행파일마다 다를 수 있는 엔진
+      // 기본값·셸에 남은 환경변수가 섞이지 않게. 엔진 기본값 그대로 재려면 `@default`.
+      const env = { ...process.env, BAND_CPU_PIN: pin }
+      if (e.policy === 'default') delete env.BAND_THREAD_POLICY
+      else env.BAND_THREAD_POLICY = e.policy ?? 'off'
       const res = spawnSync(e.path, ['six_peer_full_mesh_cpu', '--ignored', '--exact', '--nocapture', '--test-threads=1'], { env, encoding: 'utf8', maxBuffer: 64 << 20 })
       const rows = parseProfileOutput(res.stdout ?? '')
       if (res.status !== 0 || rows.length === 0) throw new Error(`${e.name} 라운드 ${r} 실패(코드 ${res.status}): ${(res.stderr ?? '').slice(-2000)}`)

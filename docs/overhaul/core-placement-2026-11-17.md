@@ -66,7 +66,7 @@ Opus 2.5ms 배치(워커 P% / 수신 P%):
 
 ## 4. 후속(백로그 후보)
 
-> 2번·3번은 2026-11-20에 교차 n = 11로 쟀다: [core-placement-2026-11-20.md](core-placement-2026-11-20.md). HighQoS + P 코어 선호를 기본 켬으로 바꿨고, 3절의 `set_high_qos`·`BAND_HIGH_QOS`는 `set_thread_policy`·`BAND_THREAD_POLICY`로 바뀌었다.
+> 2번·3번은 2026-11-20에 교차 n = 11로 쟀다: [core-placement-2026-11-20.md](core-placement-2026-11-20.md). 두 정책을 **옵션(기본 끔)**으로 넣었고 기본값을 켤지는 사용자 결정으로 남겼다. 3절의 `set_high_qos`·`BAND_HIGH_QOS`는 없어졌다 — 엔진 설정 `EngineConfig.threadPolicy`와 환경변수 `BAND_THREAD_POLICY`(`off` | `highqos` | `pcores` | `both`)를 쓴다.
 
 1. [사람] 하이브리드 노트북에서 실제 앱으로 10분 연주한 뒤, 진단 내보내기의 `corePlacement`(워커·수신 P/E/LP-E)와 `cpu.workerPct`를 함께 본다. 배터리와 AC 전원을 각각 본다.
 2. HighQoS 옵션 효과: 코어 고정 없음 교차 n ≥ 10. 효과가 보이면 기본값 변경을 제안한다(사용자 결정).

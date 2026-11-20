@@ -190,7 +190,7 @@ pub struct Sample {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) core_placement: Option<crate::sys::placement::PlacementWindow>,
     /// 워커·수신 스레드에 적용한 코어 배치 정책과 결과(P1-21 2단계, `EngineStats.threadPolicy`). 스레드 시작 때 한 번 정해지는
-    /// 값이라 기록기는 **같은 세션에서 값이 바뀐 줄에만** 넣는다(세션 첫 줄, 그리고 첫 샘플이 적용 전이었으면 그다음 줄).
+    /// 값이라 기록기는 **같은 세션에서 값이 바뀐 줄에만** 넣는다(세션 첫 줄, 그리고 첫 샘플이 적용 전(`pending`)이었으면 그다음 줄).
     /// 링이 넘쳐 그 줄을 버리면 같은 세션의 다음 줄로 옮긴다(`fold_dropped`). 내보내기 `lastStats`에는 늘 들어간다
     /// (`session_policy`). 비Windows는 줄에 넣지 않는다.
     #[serde(skip_serializing_if = "Option::is_none")]

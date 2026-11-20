@@ -19,7 +19,7 @@ use band_dsp::codec::Encoder;
 use band_dsp::config::{CodecKind, EngineConfig};
 use band_engine::testing::engine::cpuprof::CpuStats;
 use band_engine::testing::sys::cpu::{cycle_pct, process_cycles, tsc_now};
-use band_engine::testing::sys::placement::{describe_cores, pin_process, set_thread_policy};
+use band_engine::testing::sys::placement::{describe_cores, pin_process};
 use band_engine::testing::engine::device::fake::FakeBackend;
 use band_dsp::mixer::MixControls;
 use band_dsp::relay_codec::CodecReason;
@@ -193,21 +193,13 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
 #[test]
 #[ignore = "측정 도구: cargo test --release --test cpu_profile -- --ignored --nocapture"]
 fn six_peer_full_mesh_cpu() {
-    // P1-21 2단계 비교: `BAND_THREAD_POLICY` = off | qos(EcoQoS 끄기) | pcores(P 코어 CPU set 선호) | qos+pcores.
-    // 비우면 엔진 기본값 그대로(`default`). 옛 `BAND_HIGH_QOS=1`은 qos와 같다.
+    // P1-21 2단계 비교: 엔진이 환경변수 `BAND_THREAD_POLICY` = off | highqos | pcores | both를 직접 읽는다(제품 빌드와 같은
+    // 경로, 옛 이름 qos·qos+pcores도 받음). 비우면 엔진 설정 기본값(둘 다 꺼짐)이라 `default`로 적는다. 실제 적용 결과는
+    // 아래 `배치 |` 줄 끝에 찍힌다.
     let policy = match std::env::var("BAND_THREAD_POLICY").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
-        "" if std::env::var("BAND_HIGH_QOS").is_ok_and(|v| v == "1") => "qos".to_string(),
         "" => "default".to_string(),
         p => p.to_string(),
     };
-    match policy.as_str() {
-        "default" => {}
-        "off" => set_thread_policy(false, false),
-        "qos" => set_thread_policy(true, false),
-        "pcores" => set_thread_policy(false, true),
-        "qos+pcores" => set_thread_policy(true, true),
-        p => panic!("BAND_THREAD_POLICY: off | qos | pcores | qos+pcores (받은 값 {p})"),
-    }
     println!("스레드 정책: {policy}");
     println!("코어 구성: {}", describe_cores());
     // P1-21b(ADR D6): `BAND_CPU_PIN=pe`면 프로세스를 LP-E를 뺀 P+E 코어에 고정한다(전·후 비교 측정용 — 반복당 비용만 본다).
