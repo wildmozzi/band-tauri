@@ -66,6 +66,28 @@ test('연주자 전용 UI는 첫 화면 JS에 없고 지연 묶음에만 있다'
   }
 })
 
+/**
+ * 지연 라우트 화면(routes.tsx의 lazyScreen)의 고유 문자열 — 첫 화면 JS에 없고 제 묶음에만 있어야 한다(P3-20b).
+ * 첫 화면 코드가 그 기능의 공개 API(index.ts)를 정적으로 import하면 Vite 8(Rolldown)은 화면 전체를 첫 묶음에 싣는다
+ * (Rollup은 쓰이는 모듈만 남겼다 — 내비게이션의 profilePhotoOf가 그 경우였다).
+ */
+const LAZY_SCREEN_MARKERS: [chunk: RegExp, marker: string][] = [
+  [/^profile-.*\.js$/, '프로필 설정'],
+  [/^community-.*\.js$/, '새 게시물 작성'],
+  [/^demo-recording-.*\.js$/, '개인 레코딩 스튜디오'],
+]
+
+test('지연 라우트 화면은 첫 화면 JS에 없고 제 묶음에만 있다', () => {
+  const firstLoad = firstLoadScripts().map(read).join('\n')
+  const assets = readdirSync(dist + 'assets')
+  for (const [chunk, marker] of LAZY_SCREEN_MARKERS) {
+    const files = assets.filter(f => chunk.test(f))
+    expect(files, `${chunk} 묶음`).toHaveLength(1)
+    expect(read('assets/' + files[0]).includes(marker), `양성 대조: ${marker}가 ${files[0]}에 있어야 함`).toBe(true)
+    expect(firstLoad.includes(marker), `${marker}가 첫 화면 JS에 실림`).toBe(false)
+  }
+})
+
 test('데스크톱 전용 엔진 런타임은 첫 화면 JS에 없고 nativeRuntime 묶음에만 있다', () => {
   const firstLoad = firstLoadScripts().map(read).join('\n')
   const runtimeChunks = readdirSync(dist + 'assets').filter(f => /^nativeRuntime-.*\.js$/.test(f))
