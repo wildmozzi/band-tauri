@@ -1,16 +1,25 @@
 # 웹 E2E (Playwright)
 
-웹(비 Tauri) 화면을 실제 브라우저(chromium)로 검사한다. **운영 Supabase 프로젝트는 하나뿐이라 E2E는 어떤 실제 백엔드에도 닿지 않는다.**
+웹(비 Tauri) 화면을 실제 브라우저(chromium)로 검사한다. 관람 경로 스펙은 WebKit(사파리 엔진)으로도 돌린다(P3-24, 대상은 `playwright.config.ts`의 `webkit` 프로젝트). **운영 Supabase 프로젝트는 하나뿐이라 E2E는 어떤 실제 백엔드에도 닿지 않는다.**
 
 ```sh
 cd client
-npx playwright install chromium   # 처음 한 번
+npx playwright install chromium webkit   # 처음 한 번 (Linux는 의존 패키지도: npx playwright install-deps chromium webkit)
 npm run e2e                       # e2e:build(e2e/vite.config.ts, 포트 무관) → 빈 포트 선택 → vite preview → 테스트
 E2E_PORT=47173 npm run e2e        # 포트 지정 (bash. PowerShell은 $env:E2E_PORT='47173')
 npm run e2e -- --ui               # 디버깅
 npm run e2e:build && npx playwright test e2e/auth-guard.e2e.ts   # playwright 직접 실행은 빌드가 먼저 있어야 한다(없으면 바로 실패, 오래된 빌드 주의)
 npm run e2e:typecheck
 ```
+
+## WebKit (사파리 엔진, P3-24)
+- `npx playwright test --project=webkit` — 관람 경로 스펙만(web-viewer·mobile-layout·rooms·room-entry·reconnect·web-followup·community·home-auth).
+- **Windows용 Playwright WebKit에는 WebRTC가 없다**(RTCPeerConnection 미정의). 그래서 로컬(Windows)에서는 web-viewer의 협상 테스트가 이유와 함께 건너뛰어지고, CI(Linux) WebKit에서 실제로 돈다.
+- 나머지 스펙을 WebKit에서 돌리지 않는 이유: 시각 회귀 기준 이미지는 chromium 것뿐, 데스크톱 앱 mock(Tauri)·결제는 관람과 무관, 모달 포커스 테스트는 WebKit이 클릭으로 버튼에 포커스를 주지 않는 동작 차이(사파리도 같다), 노래방(데모)은 Tone.js가 Playwright WebKit에서 `param must be an AudioParam`로 실패(실기기 확인 전).
+- 실제 iOS Safari의 자동재생·오디오 잠금 해제·실 네트워크는 대신하지 못한다 — docs/HUMAN-CHECKS.md E [사람].
+
+## 좁은 화면 (P3-24)
+`mobile-layout.e2e.ts`: 390×844·360×800·768×1024·1024×768에서 가로 넘침(scrollWidth ≤ clientWidth), 관람 핵심 버튼 터치 대상 44px(768px 이하), 모달이 화면 안, 1024px 채팅 표시를 본다.
 
 ## 격리 방식
 - `vite.config.ts`: 앱을 `env.ts`의 가짜 주소(`*.e2e.test`)로 따로 빌드한다. `envDir`를 빈 폴더로 돌려 개발자 `client/.env`를 읽지 않는다.

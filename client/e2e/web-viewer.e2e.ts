@@ -22,6 +22,10 @@ declare global {
 
 /** 페이지 안에 연주자 흉내 PC를 만들고 오디오 트랙 하나짜리 offer를 돌려준다 */
 async function performerOffer(page: Page): Promise<{ type: 'offer'; sdp: string }> {
+  // Playwright의 Windows용 WebKit 빌드에는 WebRTC가 없다(RTCPeerConnection 미정의). 브라우저 호환 문제가 아니라 테스트 환경 한계라
+  // 협상이 필요한 테스트만 건너뛴다 — Linux(CI)의 WebKit·실제 Safari에는 있다 (P3-24)
+  const hasWebRtc = await page.evaluate(() => typeof RTCPeerConnection !== 'undefined')
+  test.skip(!hasWebRtc, '이 WebKit 빌드(Windows)에는 WebRTC가 없음 — CI(Linux) WebKit에서 검사')
   return page.evaluate(async () => {
     window.__e2ePerf?.close()
     const pc = new RTCPeerConnection()
@@ -86,6 +90,7 @@ const liveBadge = (page: Page) => page.locator('.live-badge')
  */
 async function trackViewerCloses(page: Page) {
   await page.addInitScript(() => {
+    if (typeof RTCPeerConnection === 'undefined') return // WebRTC 없는 WebKit 빌드 — 협상 단계에서 건너뛴다
     const w = window as unknown as { __e2eViewerCloses: number; __e2ePerf?: RTCPeerConnection }
     w.__e2eViewerCloses = 0
     const close = RTCPeerConnection.prototype.close

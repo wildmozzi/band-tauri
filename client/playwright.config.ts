@@ -38,7 +38,28 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     video: 'off',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    /*
+     * 사파리 엔진(P3-24): 관람자는 iPhone(=WebKit)일 가능성이 높다. 관람 경로 스펙만 돌린다 — 익명 입장·관람 화면·
+     * 가짜 방송 신호(WebRTC) 수신·재연결·좁은 화면. 나머지(데스크톱 앱 mock·결제·노래방 데모·시각 회귀 기준 이미지)는 chromium만.
+     * 실제 iOS Safari의 자동재생·오디오 잠금 해제는 여기서 보지 못한다 — docs/HUMAN-CHECKS.md [사람]
+     */
+    {
+      name: 'webkit',
+      use: { ...devices['Desktop Safari'] },
+      testMatch: [
+        '**/web-viewer.e2e.ts',
+        '**/mobile-layout.e2e.ts',
+        '**/web-followup.e2e.ts',
+        '**/rooms.e2e.ts',
+        '**/room-entry.e2e.ts',
+        '**/reconnect.e2e.ts',
+        '**/community.e2e.ts',
+        '**/home-auth.e2e.ts',
+      ],
+    },
+  ],
   webServer: {
     // 미리보기만 띄운다(빌드는 위 주석). 포트를 고른 직후 바인딩하므로 틈은 vite preview 기동 시간뿐
     command: 'npx vite preview --config e2e/vite.config.ts',

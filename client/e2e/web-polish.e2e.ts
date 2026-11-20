@@ -141,11 +141,13 @@ for (const viewport of [{ width: 1280, height: 720 }, { width: 1366, height: 600
   })
 }
 
-test('합주실: 1024px 이하(채팅 칸 숨김) 2열 배치도 화면 안에 맞는다 (⑨)', async ({ page }) => {
+// 769~1024px는 예전에 채팅 칸을 숨긴 2열이었다 — 태블릿 관람자가 채팅을 볼 수도 쓸 수도 없어 3열로 바꿨다 (P3-24)
+test('합주실: 769~1024px 3열(연주자|믹서|채팅) 배치도 화면 안에 맞고 채팅 입력이 보인다 (⑨, P3-24)', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 700 })
   await page.goto(`/rooms/${ROCK_ROOM.id}`)
   await expect(page.getByRole('heading', { level: 1, name: ROCK_ROOM.title })).toBeVisible()
-  await expect(page.locator('.chat-panel')).toBeHidden()
+  await expect(page.locator('.chat-panel .chat-login-link')).toBeInViewport({ ratio: 1 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0)
   const overflow = await page.evaluate(() => document.querySelector('.live-room')!.getBoundingClientRect().bottom - window.innerHeight)
   expect(overflow).toBeLessThanOrEqual(1)
 })
