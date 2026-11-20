@@ -12,10 +12,10 @@
 | P0-2 | 엔진 코드 리뷰 + 지적사항 수정 | Critical/High 0 | 완료(#5: 버퍼 30/30ms·은닉 4.08%·연속성 100%, 언더런 누적 상한 +4.7ms) |
 | P0-3 | 프론트 리뷰 지적사항 수정 + 세션 재개 시 descriptor 재전송 | 리뷰 Critical/High 0, vitest 통과 | 완료(0e62340: vitest 100, server 66) |
 | P0-4 | CI 워크플로(Windows Rust + Node) 녹색 | overhaul에서 CI 통과 | 완료(Client/Server/Relay/Rust 4잡, lint 필수) |
-| P0-5 | **[확인]** git 히스토리에서 비밀값 제거 + 전 브랜치 force push | 사용자 승인 후 실행, 협업자 재clone 안내 | 취소(사용자 결정 2026-11-10: DB 비밀번호 교체 완료, 리포 개인 계정 비공개 이전 → force push 위험 대비 실익 낮음) |
+| P0-5 | **[확인]** git 히스토리에서 비밀값 제거 + 전 브랜치 force push | 사용자 승인 후 실행, 협업자 재clone 안내 | 취소(사용자 결정 2026-11-10: DB 비밀번호 교체 완료, 리포 개인 계정 비공개 이전 → force push 위험 대비 실익 낮음) — **재확인 필요(2026-11-20)**: wildmozzi/band-tauri가 실제로는 공개 상태(사용자는 비공개로 알고 있었음). 히스토리에 옛 DB 접속 문자열(비밀번호 포함)·옛 anon JWT·토스 test_sk 키가 있음(service_role·live 키·액세스 토큰은 없음). 비공개로 바꾸면 Actions 무료 시간 한도·업데이터/설치본 다운로드(비공개 릴리스는 인증 필요)에 영향 — 사용자 결정 대기 |
 | P0-6 | overhaul → develop 반영, 이후 PR 기반 개발 전환 | develop = overhaul | 완료(2026-11-12 — develop을 overhaul로 fast-forward(fd9c1df), 이후 PR 대상은 develop; 원격 브랜치 정리: 병합·닫힌 PR 브랜치 75개 삭제, 남음 main·develop·overhaul·woong(PR 없는 8/21 NAT hole punching 커밋 1개 보존)) |
 | P0-7 | **[사람]** 노출 키 교체: Supabase service_role/anon/DB 비밀번호, 토스 시크릿, band 리포의 .env/.mcp.json 키 | 사용자 완료 보고 | 사람 확인 |
-| P0-8 | **[사람]** fly secrets(SUPABASE_URL, SUPABASE_SERVICE_KEY, TOSS_PAYMENTS_SECRET_KEY, CORS_ORIGINS=https://indigomuse.art) 설정 + indigomuse.art Vercel 프로젝트를 **wildmozzi/band-tauri**(Root=client, Git 연동)로 재연결 → 전환 후 band-web을 Vercel에서 분리·비공개/아카이브 | 운영 전환 체크리스트(P3-5a와 동시) | 대부분 완료(2026-11-20: fly secrets PUBLIC_API_URL·CORS_ORIGINS·OPS_TOKEN 설정, Vercel band-client가 wildmozzi/band-tauri main 배포) — 남은 것 **[사람]**: 옛 band-web 리포·Vercel 연결 정리 여부 확인 |
+| P0-8 | **[사람]** fly secrets(SUPABASE_URL, SUPABASE_SERVICE_KEY, TOSS_PAYMENTS_SECRET_KEY, CORS_ORIGINS=https://indigomuse.art) 설정 + indigomuse.art Vercel 프로젝트를 **wildmozzi/band-tauri**(Root=client, Git 연동)로 재연결 → 전환 후 band-web을 Vercel에서 분리·비공개/아카이브 | 운영 전환 체크리스트(P3-5a와 동시) | 완료(2026-11-20: fly secrets 설정, Vercel band-client가 wildmozzi/band-tauri main 배포, 옛 리포 wildmozzi/band-web·wildmozzi/Band 비공개+아카이브 — band-web에 남은 Vercel 연결 없음) |
 
 ## P1 — 실시간 품질 (GOAL 1~3)
 
@@ -44,7 +44,7 @@
 | P1-8 | **[사람]** 실네트워크 검증: 다른 집 2곳 이상, LTE 핫스팟 1곳(릴레이) | 연결 성공/지연/끊김 기록 | 대기 (P1-4) |
 | P1-9 | ASIO 빌드 경로: CI에서 ASIO SDK 주입(시크릿/캐시) 빌드 + 피처 플래그 배포본 | **[사람]** SDK 제공 후 CI 녹색 | **로컬 ASIO 빌드 성공**(SDK 2.3.4, clippy/test 통과). CI 주입은 SDK 재배포 금지 조항 검토 후 보류 |
 | P1-11 | **ASIO 1급 지원**: 실제 Focusrite Scarlett Solo 4세대(ASIO)에서 스트림 열기·버퍼 협상(32/64/128)·ASIOGetLatencies 반영·kAsioResetRequest 처리·채널 선택, 필요 시 cpal 대신 자체 ASIO 백엔드 | 실장치 측정 로그, estLatency·종단 지연 | 대기 (**[사람]** 장치 연결) |
-| P1-12 | **[사람]** Steinberg ASIO SDK 라이선스 계약서 체결(비공개 상용 배포 전 필수, SDK 2.3.4 이중 라이선스) | 계약 완료 | 대기 |
+| P1-12 | **[사람]** Steinberg ASIO SDK 라이선스 계약서 체결(비공개 상용 배포 전 필수, SDK 2.3.4 이중 라이선스) | 계약 완료 | 대기 — ASIO 포함 설치본을 공개 배포하기 전까지 미룸(사용자 2026-11-20) |
 | P1-10 | CPU/할당 프로파일링: 6피어 믹스 시 워커 CPU, RT 콜백 실행시간 히스토그램 통계 노출 | 통계 UI + 수치 | 완료(PR #54, 2026-11-11 — 6인 풀메시 최악 Opus 2.5ms 3.92%(4코어 기준, GOAL ≤15%), 콜백 p99 16~19µs; **[사람]** 실장비 6인 진단 줄·작업 관리자 CPU; 후속: 진단 타임라인 cpu, rt_alloc 범위 확대, 측정 창 xrun 원인) |
 
 ## P2 — 제품 완성도 (GOAL 4)
@@ -52,7 +52,7 @@
 | ID | 항목 | 완료 조건 | 상태 |
 |---|---|---|---|
 | P2-1 | 설치 파일 + Tauri updater(서명 키, 업데이트 서버/GitHub Releases) | 릴리스 워크플로로 설치본 생성, 업데이트 동작 | 완료(#4, 설치본 ~3MB; **[사람]** 서명 시크릿 등록·첫 릴리스 검증) |
-| P2-2 | **[사람]** 코드 서명 인증서 구매/등록(스마트 앱 컨트롤·SmartScreen 대응) | 서명된 설치본 | 대기 |
+| P2-2 | **[사람]** 코드 서명 인증서 구매/등록(스마트 앱 컨트롤·SmartScreen 대응) | 서명된 설치본 | 대기 — 공개 배포 전까지 미룸(사용자 2026-11-20) |
 | P2-3 | 공유 메트로놈(방장 기준, 각자 지연 보정한 클릭) | 2피어 시뮬레이션에서 클릭 정렬 오차 ≤ 2ms | 완료(PR #34 엔진·#36 UI·시그널링, 2026-11-11; **[사람]** 실장비 2대 클릭 시각 차 측정·청취) |
 | P2-3a | 메트로놈 후속: 출력 지연 미보고 장치는 루프백 offsetMs로 보정(#34 M2(a)), refClockUnsupported 처리(L4)·L6, 방장 이양 시 메트로놈 인계(#36 L1), 클릭 볼륨 영속(L5) | 테스트 | 완료(PR #53 화면·서버, #57 엔진 — 출력 지연 미보고 장치 루프백 보정, 2026-11-11; 후속: UI 장치별 offset 저장·안내, **[사람]** 비대칭 실측) |
 | P2-3c | 메트로놈 보정 UI(#57 후속): outputLatencySource·값 표시, 미보고 장치 루프백 측정 안내·링크, 측정 결과 엔진 적용·장치별 재적용 확인, TEST-SESSION.md 3.5절 | e2e | 완료(PR #70, 2026-11-11; **[사람]** TEST-SESSION 3.5-8 실장비 확인; 후속: refClockUnsupported 안내 문구) |
@@ -181,14 +181,14 @@
 | P3-12d | 웹 재점검 후속(#41): import 안 되는 사문화 페이지 CSS 7개(~2,600줄) 삭제, 합주실 상세 모바일 연주자 패널 잘림, 대비 토큰·word-break keep-all, 결제 완료/실패 직접 진입 문구, 방 만들기 토글 3개 label 연결 | e2e·시각 회귀 | 완료(PR #45, 2026-11-11) |
 | P3-9 | (메모) 작업자 3명 이상으로 늘릴 때 빌드 환경: 현재는 워크트리 공유 target(`.cargo-target`, 디스크 10~15GB, 동시 빌드는 잠금 대기). 확장 시 sccache(RUSTC_WRAPPER) + 워크트리별 target + 작업 종료 시 target 자동 삭제를 함께 적용 | 확장 결정 시 | 완료(2026-11-17 사용자 승인 — 워크트리별 target-dir(band-tauri-wt/<이름>, 워크트리 루트 .cargo/config.toml), Rust 작업자 동시 3명, 워크트리 삭제 때 폴더 삭제; CLAUDE.md 디스크 규칙 갱신) |
 | P3-10 | **저장소 추상화 + R2 이전 준비**(Supabase 무료 Storage 1GB·Egress 5GB 한도 대응): 서버에 S3 호환 저장소 어댑터(Supabase Storage / Cloudflare R2 / Garage를 env로 선택), 업로드·다운로드는 서명 URL, 게시글 이미지도 서버 발급 서명 URL로 업로드(클라이언트 직접 업로드 제거), 스템 정리·삭제 경로 전환, 기존 파일 이전 스크립트(드라이런 기본) | env 전환만으로 저장소 교체, 테스트(로컬 S3 대역 MinIO 또는 mock) | 완료(#21; 운영 전환은 P3-10a~c) |
-| P3-10a | **[사람]** Cloudflare R2 버킷 + 버킷 한정 API 토큰 생성, 버킷 CORS(GET/PUT, content-type) 설정, fly secrets 등록(STORAGE_DRIVER=s3, S3_ENDPOINT/S3_REGION/S3_BUCKET/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY, PUBLIC_API_URL) — 운영 전환 시 | 등록 완료 | 대기 (P3-10 후) |
+| P3-10a | **[사람]** Cloudflare R2 버킷 + 버킷 한정 API 토큰 생성, 버킷 CORS(GET/PUT, content-type) 설정, fly secrets 등록(STORAGE_DRIVER=s3, S3_ENDPOINT/S3_REGION/S3_BUCKET/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY, PUBLIC_API_URL) — 운영 전환 시 | 등록 완료 | 대기 (P3-10 후) — 저장 용량·전송량이 부담될 때까지 미룸(사용자 2026-11-20) |
 | P3-10b | **[사람]** 서버를 s3로 전환한 뒤 `npm run migrate:storage` 드라이런 → `--apply` → 앱에서 스템·이미지 확인 → `--delete-source`. **(필수)** supabase 드라이버로 운영하는 동안 post-images·audio-stems 버킷 file_size_limit 5MB·allowed_mime_types 설정(PR #21 리뷰), 새 클라이언트 배포 후 post-images INSERT 정책 제거 · 고아 이미지 정리는 드라이런 로그 확인 후 POST_IMAGE_ORPHAN_CLEANUP=1 · 원본 삭제(--delete-source) 전 post-images INSERT 정책 제거 또는 예전 클라이언트 강제 업데이트 | 이전 완료 | 대기 (P3-10a 후) |
 | P3-10c | **[사람]** 실제 Cloudflare R2(및 원하면 Garage) 버킷으로 업로드·서명 GET/PUT·CORS·이전 스크립트 드라이런 호환 확인 | 실서비스 호환 확인 | 대기 (P3-10a 후) |
 | P3-10d | 게시글 이미지 검증 완전 강제: 게시글 쓰기를 서버 API로 이전하거나 posts.images가 검증 완료 키만 담도록 DB 트리거(새 마이그레이션 파일만, 운영 실행은 [확인]) — PR #21 M3 잔여 | 테스트 | 완료(PR #25, 2026-11-11) — 운영 반영은 P3-10e |
 | P3-10g | PR #23·#25 후속(Low): max_participants DB CHECK(2~20) 새 마이그레이션, 다중 서버 인스턴스에서 정원 일관성, 정원 선택지 범위 결정, PUBLIC_API_URL 필수화, 이메일 표시명 노출 정리, 사용자별 글쓰기 상한, 업로드 검증 기록 방식 정리, getApiUrl 공용화 | 테스트 | 완료(PR #35, 2026-11-11; **[사람]** main 배포 전 `fly secrets set PUBLIC_API_URL=...`, 운영 013 실행(기존 CHECK 사전 확인)) |
 | P3-10e | **[확인]** 운영 DB에 `012` 실행(게시글 직접 쓰기 차단 RLS) — 순서: 서버 배포 → 새 클라이언트 배포·구버전 소멸 → README 012 절. P3-10b의 post-images INSERT 정책 제거와 함께 해야 이미지 검증이 완전 | 실행 후 확인 쿼리 | 완료(2026-11-20 — 012 운영 실행 + post-images INSERT 정책 제거, posts 쓰기 정책 0, P3-21) |
 | P3-10f | [버그] /community/create·/community/edit/:id 직접 진입 시 /auth로 튕김(P3-12 ⑩ 결제 리다이렉트와 같은 계열) + e2e 고정 포트 47173 때문에 여러 워크트리 동시 e2e가 간헐 실패 → 포트를 워크트리별로 할당(빈 포트 탐색 + strictPort) | e2e | 완료(PR #27, 2026-11-11) |
-| P3-11 | **개발용 DB 분리**: 운영과 별도 Supabase 프로젝트를 개발·E2E·CI용으로 사용 — 마이그레이션 001~최신을 순서대로 적용하는 스크립트(`npm run db:migrate`, 대상 DATABASE_URL 확인 프롬프트·운영 URL 차단 가드), 시드 데이터, client/server .env 개발/운영 분리 가이드, **E2E를 dev DB로 실행하는 모드(mock E2E는 RLS를 검증하지 못함 — PR #19 리뷰 M2)** | dev 프로젝트에 전체 마이그레이션 적용·시드·앱 동작 | 대기 (**[사람]** 개발용 Supabase 프로젝트 생성 후) |
+| P3-11 | **개발용 DB 분리**: 운영과 별도 Supabase 프로젝트를 개발·E2E·CI용으로 사용 — 마이그레이션 001~최신을 순서대로 적용하는 스크립트(`npm run db:migrate`, 대상 DATABASE_URL 확인 프롬프트·운영 URL 차단 가드), 시드 데이터, client/server .env 개발/운영 분리 가이드, **E2E를 dev DB로 실행하는 모드(mock E2E는 RLS를 검증하지 못함 — PR #19 리뷰 M2)** | dev 프로젝트에 전체 마이그레이션 적용·시드·앱 동작 | 대기 (**[사람]** 개발용 Supabase 프로젝트 생성 후) — 실사용자 생길 때까지 미룸(사용자 2026-11-20) |
 
 ## 완료 기록
 
