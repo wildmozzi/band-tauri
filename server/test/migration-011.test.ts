@@ -301,6 +301,22 @@ describe('migration 011: RLS regression', () => {
     }
   })
 
+  it('profiles: signup createProfile (INSERT … ON CONFLICT (id) DO NOTHING) skips a trigger-made row and creates a missing one', async () => {
+    // client profileApi.createProfile = PostgREST upsert(onConflict: 'id', ignoreDuplicates) — 운영은 handle_new_user가 행을 먼저 만든다
+    const upsert = `INSERT INTO public.profiles (id, email, nickname) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`
+    // 이미 있는 행(트리거가 만든 것): 오류(예전 409 = 23505) 없이 건너뛰고 내용은 그대로
+    const before = (await db.query('SELECT email, nickname FROM public.profiles WHERE id = $1', [HOST])).rows[0]
+    await as('authenticated', HOST, upsert, [HOST, 'changed@example.com', 'changed'])
+    assert.deepEqual((await db.query('SELECT email, nickname FROM public.profiles WHERE id = $1', [HOST])).rows[0], before)
+    // 트리거 없는 환경: 행이 없으면 만든다
+    const NEW_USER = '33333333-3333-4333-8333-333333333333'
+    await as('authenticated', NEW_USER, upsert, [NEW_USER, 'new@example.com', 'newbie'])
+    assert.equal((await db.query('SELECT nickname FROM public.profiles WHERE id = $1', [NEW_USER])).rows[0]?.nickname, 'newbie')
+    await db.query('DELETE FROM public.profiles WHERE id = $1', [NEW_USER])
+    // 남의 id로는 못 만든다(profiles_insert_own)
+    await assert.rejects(as('authenticated', OTHER, upsert, [NEW_USER, 'x@example.com', 'x']), /row-level security/)
+  })
+
   it('profiles: the app queries run as anon/authenticated after 011 (comment author embed, host nickname, own settings)', async () => {
     const cols = [...appProfileColumns()].join(', ')
     for (const [role, sub] of [['anon', null], ['authenticated', OTHER]] as const) {

@@ -10,8 +10,8 @@
  * 무효화 규칙
  *   글 작성      → 목록·인기 태그 무효화
  *   글 수정      → 응답값으로 그 글의 상세(모든 userId, liked_by_user 유지)를 덮어쓰고 목록·인기 태그 무효화
- *   글 삭제      → 목록·인기 태그 무효화. 상세·댓글 캐시는 화면을 떠난 뒤 forgetPost로 제거
- *                  (상세가 마운트된 채로 지우면 지운 글을 다시 조회한다)
+ *   글 삭제      → 목록·인기 태그 무효화. 상세·댓글 캐시는 forgetPost로, 상세 화면이 내려간 뒤 제거
+ *                  (상세가 마운트된 채로 지우면 지운 글을 다시 조회해 406 — removeQueriesWhenUnobserved)
  *   좋아요 토글  → 누르는 즉시 낙관적으로 ±1(누른 사용자의 좋아요 여부를 캐시에서 알 때), 응답의 실제 개수로
  *                  목록·상세 캐시를 덮는다(재조회 없음). 실패하면 자기 낙관적 변경만 되돌린다.
  *                  서버 요청은 scope로 직렬화되고, 같은 글에 뒤 요청이 대기 중이면 앞 응답은 캐시를 덮지 않는다(연타).
@@ -30,6 +30,7 @@ import {
   type UpdatePostData,
 } from './communityApi'
 import { uploadPostImage as uploadImageViaServer } from './storageApi'
+import { removeQueriesWhenUnobserved } from '../../shared/lib/removeQueriesWhenUnobserved'
 import {
   addReplyToTree,
   countDeletedComments,
@@ -175,10 +176,10 @@ export function useDeletePostMutation() {
   })
 }
 
-/** 삭제한 글의 상세·댓글 캐시 제거. 상세 화면을 떠난 뒤(navigate 뒤)에 부른다 */
+/** 삭제한 글의 상세·댓글 캐시 제거. 보고 있는 화면(상세)이 있으면 그 화면이 내려간 뒤에 지운다 */
 export function forgetPost(qc: QueryClient, postId: string) {
-  qc.removeQueries({ queryKey: communityKeys.postAll(postId) })
-  qc.removeQueries({ queryKey: communityKeys.comments(postId) })
+  removeQueriesWhenUnobserved(qc, communityKeys.postAll(postId))
+  removeQueriesWhenUnobserved(qc, communityKeys.comments(postId))
 }
 
 /** userId 키 캐시에 기록된 그 사용자의 좋아요 여부. 캐시에 없으면 undefined */
