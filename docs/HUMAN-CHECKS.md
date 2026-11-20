@@ -43,12 +43,13 @@ npm run dev:tauri          # 서버 + 앱을 함께 띄운다. 첫 빌드는 10~
 
 > ⚠️ **개발 모드의 로컬 서버는 운영 DB(운영 Supabase)를 쓴다.** 개발용 DB가 아직 없다(P3-11, 미룸). 그래서:
 > - 테스트 계정·`[TEST]` 방·채팅이 **운영 DB에 생긴다.** 끝나면 방을 지운다.
-> - 로컬 서버가 켜질 때 **운영의 모든 방 참가자 수를 0으로 초기화한다**(`server/src/index.ts`의 `resetAllParticipantCounts()`, 로그 `[DB] All room participants reset to 0`). 정리 작업(`scheduleCleanup`·구독·결제 주문 작업)도 운영 DB를 대상으로 돈다.
+> - 전역 유지보수(모든 방 참가자 수 0 초기화, 결제 재조정·주문 정리·업로드/음원분리 파일 삭제 같은 정기 작업)는 #243부터 로컬 서버가 하지 않는다. 서버 터미널에 `[MAINT] … 건너뜀` 줄이 보여야 한다. 대신 `[MAINT] 전역 유지보수 실행`이나 `[DB] All room participants reset to 0`이 보이면(#243 이전 코드, `RUN_MAINTENANCE_JOBS=true`) 운영의 모든 방 참가자 수가 0이 되고 정리 작업이 운영 서버와 겹쳐 돈다 — 바로 끈다.
+> - 입장·퇴장 때 그 방의 참가자 수는 로컬 서버가 센 값으로 덮어쓴다. 테스트는 `[TEST]` 방에서만 한다.
 > - 2026-11-20부터 운영 서버가 같은 DB를 실제로 쓰고 있다. **누군가 운영에서 합주·관람 중이면 `npm run dev:tauri`를 켜지 않는다.**
-> - 자세한 내용은 [TEST-SESSION.md](TEST-SESSION.md) 0절. 로컬 실행 때 이 초기화를 건너뛰게 고치는 일은 별도 PR에서 할 예정이다.
+> - 자세한 내용은 [TEST-SESSION.md](TEST-SESSION.md) 0절.
 > - 서버를 띄우지 않을 PC(C의 PC B 등)는 `server\.env` 없이 `npm run tauri:dev`로 앱만 띄운다(TEST-SESSION 2.3).
 
-- [TEST-SESSION.md](TEST-SESSION.md)는 2026-11-11에 쓴 가이드라 `git switch overhaul`이라고 적혀 있다. **`develop`으로 바꿔 읽는다.** 0절의 "운영 서버는 overhaul 이전 버전" 설명도 지금은 사실과 다르다(2026-11-20 운영 반영). 테스트는 지금도 PC A의 로컬 서버로 한다.
+- [TEST-SESSION.md](TEST-SESSION.md)는 2026-11-20 `develop` 기준으로 고쳐졌다(#242: 브랜치 `develop`, 컷오버 뒤 서버 상태, 화면 문구). 테스트는 지금도 PC A의 로컬 서버로 한다.
 - 소리 확인에는 **유선 헤드폰**을 쓴다(스피커를 쓰면 상대 소리가 마이크로 다시 들어간다).
 - 측정 결과는 측정 창의 **결과 복사** 또는 **텍스트로 저장**으로 남긴다. "백로그 기록:" 줄을 그대로 보내면 된다([MEASURE.md](MEASURE.md) 6절).
 
