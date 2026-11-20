@@ -125,6 +125,15 @@ test.describe('커뮤니티', () => {
     expect(rows[1].author_id).toBe(BOB.id)
     // comments_count는 DB 트리거(migration 010)가 집계한다
     expect(mock.supabase.db.table('posts').find(p => p.id === GUITAR_POST.id)?.comments_count).toBe(2)
+
+    // 답글도 개수에 든다 — 목록 카드·DB comments_count와 같은 기준(최상위만 세면 2로 남는다)
+    const first = comments.filter({ hasText: BOB_COMMENT.content }).first()
+    await first.getByRole('button', { name: '답글', exact: true }).click()
+    await page.getByPlaceholder('답글을 입력하세요...').fill('감사합니다')
+    await page.getByRole('button', { name: '답글 작성' }).click()
+    await expect(comments).toHaveCount(3)
+    await expect(page.getByRole('heading', { name: '댓글 3개' })).toBeVisible()
+    expect(mock.supabase.db.table('posts').find(p => p.id === GUITAR_POST.id)?.comments_count).toBe(3)
   })
 })
 
