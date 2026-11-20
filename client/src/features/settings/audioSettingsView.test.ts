@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   bufferFrameHint,
   THREAD_POLICY_OPTIONS,
+  isWindowsUserAgent,
+  threadPolicyStatus,
   formatTestDevice,
   formatTestLatency,
   formatTestResampler,
@@ -144,5 +146,54 @@ describe('스레드 정책 토글 설명(P1-21 2단계)', () => {
     }
     expect(THREAD_POLICY_OPTIONS[1].caution).toContain('넘어가지 못해')
     expect(THREAD_POLICY_OPTIONS[1].label).not.toContain('선호')
+  })
+})
+
+describe('스레드 정책 적용 결과 한 줄(#245 재리뷰 L2)', () => {
+  const tp = (worker: [string, string], netRecv: [string, string] | null = null) => ({
+    stats: {
+      threadPolicy: {
+        worker: { highQos: worker[0], pCores: worker[1] },
+        netRecv: netRecv ? { highQos: netRecv[0], pCores: netRecv[1] } : null,
+      } as never,
+    },
+  })
+  it('엔진이 꺼져 있으면: 끈 옵션은 표시 없음, 켠 옵션은 "엔진을 시작하면", 비Windows면 적용 안 됨', () => {
+    expect(threadPolicyStatus('highQos', false, true, null)).toBeNull()
+    expect(threadPolicyStatus('highQos', true, true, null)?.text).toContain('엔진을 시작하면')
+    expect(threadPolicyStatus('highQos', true, null, null)?.text).toContain('엔진을 시작하면')
+    const mac = threadPolicyStatus('preferPCores', true, false, null)
+    expect(mac).toEqual({ text: '이 PC에서는 적용되지 않음: Windows 전용입니다.', tone: 'warn' })
+  })
+  it('엔진 실행 중: 결과가 없으면 비Windows, 첫 응답 전이면 확인 중', () => {
+    expect(threadPolicyStatus('preferPCores', true, true, { stats: { threadPolicy: null } })?.text).toContain('Windows 전용')
+    expect(threadPolicyStatus('preferPCores', false, true, { stats: { threadPolicy: null } })).toBeNull()
+    expect(threadPolicyStatus('preferPCores', true, true, { stats: null })?.tone).toBe('info')
+  })
+  it('applied / skipped / failed / pending을 구분한다', () => {
+    expect(threadPolicyStatus('preferPCores', true, true, tp(['off', 'applied'], ['off', 'applied']))).toEqual({
+      text: '적용됨 — 엔진 스레드가 고성능 코어 집합 안에서만 돕니다.',
+      tone: 'ok',
+    })
+    expect(threadPolicyStatus('highQos', true, true, tp(['applied', 'off']))?.tone).toBe('ok')
+    const skipped = threadPolicyStatus('preferPCores', true, true, tp(['off', 'skipped'], ['off', 'skipped']))
+    expect(skipped?.tone).toBe('warn')
+    expect(skipped?.text).toContain('고성능 코어가 4개 미만')
+    expect(threadPolicyStatus('highQos', true, true, tp(['failed', 'off']))?.text).toMatch(/^이 PC에서는 적용되지 않음: .*실패/)
+    expect(threadPolicyStatus('highQos', true, true, tp(['applied', 'off'], ['failed', 'off']))?.text).toContain('일부 엔진 스레드에만')
+    expect(threadPolicyStatus('highQos', true, true, tp(['pending', 'off']))?.text).toContain('적용하는 중')
+  })
+  it('실행 중 결과가 토글과 다르면 다시 시작 안내', () => {
+    expect(threadPolicyStatus('preferPCores', true, true, tp(['off', 'off']))?.text).toContain('다시 시작하면 적용')
+    expect(threadPolicyStatus('preferPCores', false, true, tp(['off', 'applied']))?.text).toContain('다시 시작하면 꺼집니다')
+    expect(threadPolicyStatus('preferPCores', false, true, tp(['off', 'off']))).toBeNull()
+  })
+  it('UA로 Windows 판정', () => {
+    expect(isWindowsUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130')).toBe(true)
+    expect(isWindowsUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15')).toBe(false)
+    expect(isWindowsUserAgent(undefined)).toBeNull()
+  })
+  it('P 코어 라벨은 "묶어 두기"(계약 이름 preferPCores와 달리 선호가 아님)', () => {
+    expect(THREAD_POLICY_OPTIONS[1].label).toContain('묶어 두기')
   })
 })

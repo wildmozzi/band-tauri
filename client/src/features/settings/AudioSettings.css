@@ -990,3 +990,16 @@
 .exclusive-switch-btn {
   margin-top: 8px;
 }
+
+/* 스레드 정책 적용 결과 한 줄(#245 재리뷰 L2) */
+.thread-policy-status {
+  margin-top: 4px;
+}
+
+.thread-policy-status.ok {
+  color: var(--success);
+}
+
+.thread-policy-status.warn {
+  color: var(--warning);
+}

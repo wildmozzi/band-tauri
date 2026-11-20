@@ -83,6 +83,7 @@
   - 조정은 마지막 조정 뒤의 블록만 본다(창 지연으로 계속 오르는 과조정 방지). 5블록 평균이 예산을 넘으면 `μ·ln(평균/예산)`만큼 올린다(μ = RFC 3550 지터, 지수 꼬리에서 평균과 같음; 0.25 ~ 1ms). 10블록 평균이 예산의 0.6배 아래면 그 절반 걸음으로 내린다. 상한 1프레임(지연 증가 ≤ 1프레임).
   - 빠른 내림(P2-16c): 올림과 같은 5블록 동안 늦은 도착이 하나도 없으면 예산을 전혀 쓰지 않은 것이므로 `tail_extra`를 절반씩(격자 올림, 한 걸음 ≤ 1ms) 내린다. 늦은 도착이 조금이라도 있으면 위의 느린 내림(10블록, 꼬리 척도 μ 걸음) 그대로다. 지터가 좋아진 뒤(파레토 3ms → 균등 0.5ms) 예산 2.25ms가 10블록마다 0.25ms씩 1분 넘게 남아 30초 뒤에도 기준 +1.3ms(6.61 vs 5.27ms)였던 것이 바뀐 지 25초 안에 0이 된다(`chaos_jitter_distribution_switch`). 맞교환: 비운 뒤 다시 나빠지면 예산을 다시 쌓는 동안 은닉이 조금 는다 — 좋아짐 → 다시 파레토(50~90s, 3시드) 2.106 → 2.141%(처음 10초 2.923 → 3.032%), 파레토↔균등 20초마다 1.043 → 1.096%이고, 지연은 0.2ms 줄었다(`chaos_jitter_improve_then_worsen_tradeoff`). 정상 회선(지수 2ms·파레토 3ms 고정)은 같고, 지수 1ms·손실 1%는 1.261 → 1.277%다.
   - 균등 지터(분위수 너머 꼬리가 없음)에서는 늦은 도착이 없어 0에 머문다. 지연 대가는 꼬리 긴 회선에서만 낸다.
+  - **GOAL 1절과의 관계**(P1-6d 결정·P2-16d 측정): 꼬리 긴 지터 회선은 GOAL 1절 "지터 버퍼 추가 지연"(안정 회선 = 유선 LAN)의 대상이 아니고 끊김(2절)을 우선한다. 그 회선에서 `tail`은 목표를 1절 한도(1F + p95 지터) 위로 올릴 수 있다(지수 2ms·5ms 프레임: 한도 11.7ms 안팎에 bufferMs 10.8~12.4ms — 시드마다 한도 양쪽). 예산 규칙을 깎아 지연을 줄이면 은닉이 그만큼 는다 — 장시간 하네스 #1(5분, 시드 변형 10개 평균, 기준 bufferMs 12.34ms·은닉 1.104%): 상한 1F → 0.75F −0.12ms / +0.076%p, 0.5F −0.36ms / +0.195%p, 0.25F −1.16ms / +0.448%p(은닉 1.55% — 2절 초과), 예산 없음 −1.67ms / +0.884%p, 내림 문턱 0.6 → 0.8 −0.19ms / +0.048%p, 내림 창 10 → 5블록 −0.33ms / +0.077%p, 올림 걸음 절반 −0.20ms / +0.025%p. 은닉이 늘지 않는 지연 절감은 없어 규칙을 그대로 둔다. 하네스는 꼬리 지터 피어를 1절 판정에서 빼고 "예산을 뺀 bufferMs ≤ 1F + p95 지터, 예산 ≤ 1F, 예산을 뺀 지연이 쌓이지 않음"과 2절을 건다(`tests/sim/long.rs` `LineClass`). 이 셋은 예산을 지연에서 빼므로 예산 자체가 커지는 회귀(내림이 고장 나 1F에 붙으면 마지막 창 bufferMs +2.7ms)를 보지 못한다. 그래서 **회귀 방지 래칫**을 더 건다 — GOAL 기준이 아니라 지금 규칙이 내는 값의 관측 분포(5분 40시드·60분 10시드)에 여유를 둔 한도다: 기본 조건 구간 예산 중앙값 ≤ 0.65F(관측 0.30~0.50F), 지터 계단이 풀린 뒤 그 이하로 내려오기까지 ≤ 60초(관측 5~35초), 예산을 포함한 첫·마지막 창 bufferMs ≤ 1절 한도 + 1.25ms(관측 최대 +0.69ms), 시드 스윕의 예산 수준 시드 평균 ≤ 0.48F(관측 5시드 평균 0.38~0.42F). 예산 규칙을 의도해서 바꾸면 시드 스윕으로 분포를 다시 재고 한도를 같은 PR에서 고친다(`long.rs` `TAIL_LEVEL_MAX_F`). 안정 회선에서 예산이 아무것도 바꾸지 않는다는 것은 `jitter::tests::late_budget_does_not_touch_bounded_jitter_lines`가 고정한다.
 - **최종 목표** = `j + lead + 삽입 진입 문턱 + pad + tail`, 상·하한 `jitter_max_ms`·`jitter_min_ms`(0 = 없음).
   - `lead`: 워커가 알린 은닉 판단 요구 깊이(`set_consumer_lead` = 마감 여유 1.5ms + 2·피어 여유, 1.1절, P1-13). 전부 더한다(이전: `max(0, lead − 3·frame/4)` — 프레임 양자화 여분을 빼던 방식).
   - 삽입 진입 문턱 `clamp(frame/8, 0.25ms, 1ms)`: 깊이는 드리프트로 이 문턱만큼 목표 밑에 머물 수 있으므로 더해 둔다. 그래서 깊이 ≥ `j + lead`가 항상 지켜진다(PR #16 M2).
@@ -416,6 +417,9 @@ interface EngineConfig {
   threadPolicy?: ThreadPolicyConfig   // 기본 둘 다 false(없어도 같다). 1.1절 "스레드 코어 배치 정책" — 실험 옵션, 엔진 재시작 때 적용
 }
 interface ThreadPolicyConfig { highQos: boolean; preferPCores: boolean }
+// preferPCores: 이름과 달리 "선호"가 아니라 P 코어 CPU set에 묶어 둔다(1.1절). 저장값·계약 호환으로 이름은 그대로 두고 UI 라벨은 "고성능 코어에만 묶어 두기"(#245 재리뷰 L5).
+// 저장(클라이언트): threadPolicy는 CPU 구성에 따른 기기별 값이라 계정(profiles.audio_settings)에 올리지 않고 그 PC의 localStorage(band_thread_policy_v1)에만 둔다 —
+// 서버에 옛 값이 있어도 읽지 않고 다음 저장 때 빠진다(#245 재리뷰 L4). 오디오 설정 화면은 EngineStats.threadPolicy를 토글 옆에 한 줄로 보인다.
 type ResampleQuality = 'auto' | 'lowLatency' | 'highQuality'
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }
 type PeerState = 'connecting' | 'connected' | 'reconnecting' | 'failed'
