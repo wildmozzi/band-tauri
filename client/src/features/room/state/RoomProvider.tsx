@@ -103,6 +103,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const roomPasswordRef = useRef<string | null>(null)
   /** 재연결 후 보낸 rejoin의 응답(room-state 또는 입장 거부)을 기다리는 중 (PR #23 M3) */
   const rejoiningRef = useRef(false)
+  /** 이 합주실 입장(세션)에서 이미 띄운 폴백 알림 — 입장·퇴장 때 비운다. 테스트 모니터와는 따로 센다(#251 리뷰 Low-5) */
+  const shownFallbackNoticesRef = useRef(new Set<string>())
   /** 재개 직후 room-state 하나에서만 내 연주 상태를 서버와 맞춘다 */
   const verifySelfRef = useRef(false)
   /** password-busy 자동 재시도 */
@@ -278,6 +280,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       sendMsg({ type: 'leave' })
       roomPasswordRef.current = null
       joinOnReadyRef.current = 'none'
+      shownFallbackNoticesRef.current.clear()
       clearBusyRetry()
       // 방 id를 먼저 비워야 시작 중인 엔진이 완료 시 "퇴장함"을 보고 스스로 내려간다 (H2)
       store.patch('connection', { currentRoomId: null, joinError: null, roomJoined: false })
@@ -323,15 +326,18 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         return false
       }
       const settings = audioSettingsRef.current
-      if (settings.issues.length > 0) {
-        setLocalError(`오디오 설정 오류: ${settings.issues[0].message}`)
+      // 저장된 장치·드라이버가 이 PC에 없으면 이번 실행만 기본 장치로(P2-27). 저장된 설정은 바꾸지 않는다.
+      // 시작 전 검증은 이번 실행 설정으로 한다(prepareRunConfig가 폴백 적용 뒤 검증 — 저장값 검증을 먼저 하면 폴백으로 풀릴 문제에서 막힌다, #251 리뷰 Low-4)
+      const run = await settings.prepareRunConfig()
+      if (run.issues.length > 0) {
+        setLocalError(`오디오 설정 오류: ${run.issues[0].message}`)
         return false
       }
       // 테스트 모니터가 시작 중이어도 끝난 뒤 정지된다 (L8)
       await settings.stopTest()
       const ok = await s.start({
         instrument,
-        config: settings.config,
+        config: run.config,
         nickname: conn().nickname,
         isHost: conn().isRoomHost,
       })
@@ -339,6 +345,11 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         // 연주자는 관람 수신을 하지 않는다
         d().viewer.closeAll()
         reduceRequests({ type: 'started' })
+        // 같은 폴백은 합주실 입장마다 한 번 알린다(연주를 멈췄다 다시 시작하면 다시 띄우지 않는다) — 알릴 것이 없으면 지난 알림도 지운다
+        const shown = shownFallbackNoticesRef.current
+        const notice = run.notice && !shown.has(run.notice) ? run.notice : null
+        if (notice) shown.add(notice)
+        store.patch('local', { audioFallbackNotice: notice })
       }
       return ok
     }
@@ -359,6 +370,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         }
         roomPasswordRef.current = password || null
         rejoiningRef.current = false
+        // 새 입장 = 새 세션: 폴백 알림을 다시 띄운다
+        shownFallbackNoticesRef.current.clear()
         // 이 연결에서 직접 join을 보낸다 (ready 전이면 큐에 넣었다가 보낸다)
         joinOnReadyRef.current = 'none'
         clearBusyRetry()

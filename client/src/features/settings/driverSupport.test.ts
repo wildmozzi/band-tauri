@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import type { DriverKind } from '../../native/engineApi'
 import { DEFAULT_ENGINE_CONFIG } from '../../native/engineConfig'
 import {
-  coerceToSupportedDrivers,
   driverChoices,
   EXCLUSIVE_CAUTION_TEXT,
   EXCLUSIVE_RECOMMEND_TEXT,
@@ -36,30 +35,10 @@ describe('driverSupport', () => {
     expect(fallbackDriver([])).toBeNull()
   })
 
-  it('저장된 ASIO 설정은 독점으로 되돌리고 장치를 비운다', () => {
-    const cfg = { ...DEFAULT_ENGINE_CONFIG, inputDriver: 'asio' as const, outputDriver: 'asio' as const, inputDevice: 'asio::X', outputDevice: 'asio::X' }
-    const r = coerceToSupportedDrivers(cfg, NO_ASIO)
-    expect(r.config).toMatchObject({ inputDriver: 'wasapiExclusive', outputDriver: 'wasapiExclusive', inputDevice: null, outputDevice: null })
-    expect(r.notice).toContain('ASIO')
-    expect(r.notice).toContain('WASAPI 독점 모드로 바꿨습니다')
+  it('ASIO만 있는 배포본: 독점 대신 ASIO를 권한다', () => {
     expect(unsupportedDriverReason(['asio'], 'wasapiExclusive')).toBe('이 배포본에는 WASAPI 독점이 포함되어 있지 않습니다 — ASIO 모드를 쓰세요')
   })
-
-  it('한쪽만 지원 안 하면 그쪽만 바꾼다', () => {
-    const cfg = { ...DEFAULT_ENGINE_CONFIG, inputDriver: 'asio' as const, inputDevice: 'asio::X', outputDevice: 'wasapi::Y' }
-    const r = coerceToSupportedDrivers(cfg, NO_ASIO)
-    expect(r.config.inputDriver).toBe('wasapiExclusive')
-    expect(r.config.inputDevice).toBeNull()
-    expect(r.config.outputDriver).toBe('wasapiShared')
-    expect(r.config.outputDevice).toBe('wasapi::Y')
-  })
-
-  it('지원하거나 목록을 모르면 그대로(같은 객체)', () => {
-    const cfg = { ...DEFAULT_ENGINE_CONFIG, inputDriver: 'asio' as const }
-    expect(coerceToSupportedDrivers(cfg, null)).toEqual({ config: cfg, notice: null })
-    expect(coerceToSupportedDrivers(cfg, ALL).config).toBe(cfg)
-    expect(coerceToSupportedDrivers(cfg, []).config).toBe(cfg)
-  })
+  // 저장된 드라이버를 쓸 수 없을 때의 실행 폴백은 native/deviceFallback.test.ts(P2-27) — 저장값은 바꾸지 않는다
 })
 
 describe('exclusiveModeHint (P1-19)', () => {
