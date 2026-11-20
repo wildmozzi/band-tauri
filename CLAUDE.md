@@ -1,7 +1,7 @@
 # band-tauri — 작업 규칙
 
 실시간 합주 앱. 데스크톱(Tauri 2 + Rust 엔진)은 연주, 웹(Vercel)은 관람. 서버는 Express + ws(fly.io), DB/인증/스토리지는 Supabase.
-목표와 우선순위: [docs/GOAL.md](docs/GOAL.md), 할 일: [docs/BACKLOG.md](docs/BACKLOG.md), 엔진 계약: [docs/overhaul/native-engine-design.md](docs/overhaul/native-engine-design.md).
+목표와 우선순위: [docs/GOAL.md](docs/GOAL.md)(기준별 검증 현황 [GOAL-COVERAGE](docs/GOAL-COVERAGE.md), 사람 확인 절차 [HUMAN-CHECKS](docs/HUMAN-CHECKS.md)), 할 일: [docs/BACKLOG.md](docs/BACKLOG.md), 엔진 계약: [docs/overhaul/native-engine-design.md](docs/overhaul/native-engine-design.md).
 
 ## 구조
 - `client/src-tauri/crates/band-engine/src/engine/*` 오디오 엔진(RT 콜백 `rt.rs`, 워커, 장치, 녹음, 메트로놈), `net/*` UDP/암호화/피어/STUN, `manager.rs`·`diag/*`·`sys/*`. 통합 테스트·예제는 `crates/band-engine/{tests, examples}`. 장치 백엔드는 피처 뒤(`backend-cpal`·`backend-wasapi`, 기본 켬)

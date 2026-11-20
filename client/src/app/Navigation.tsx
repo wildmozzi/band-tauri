@@ -1,10 +1,9 @@
 import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { LATENCY_MEASURE_SECTION_ID, OPEN_LATENCY_MEASURE_EVENT } from '../native/loopbackOffsetStore'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../features/auth'
+import { profilePhotoOf, useAuth } from '../features/auth'
 import { AudioSettings } from '../features/settings'
 import { PlanStatus } from '../features/payment'
-import { profilePhotoOf } from '../features/profile'
 import { SERVICE_NAME } from '../shared/lib/brand'
 import './Navigation.css'
 

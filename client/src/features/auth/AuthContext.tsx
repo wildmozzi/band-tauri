@@ -45,8 +45,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // 알림은 로그인 화면에서만 보이는데, 로그인되면 그 화면을 곧바로 떠난다. 그래서 "로그인됨" 알림은
       // 켜지 않고, 로그인 상태가 바뀌면(다른 탭에서의 로그인·로그아웃 포함) 이전 상태에서 켜진 알림을 지운다
       // — 안 지우면 나중에 로그아웃 상태의 로그인 화면에 옛 문구가 남는다.
-      // 이 탭의 signOut()이 켜는 "로그아웃되었습니다."는 이 이벤트 뒤에 켜지므로 남는다.
-      const hasSession = session !== null
+      // 이 탭의 signOut()이 켜는 "로그아웃되었습니다."는 이 이벤트 뒤에 켜지므로 남는다
+      // (다음에 로그인 화면에서 한 번 보이고, 그 화면을 떠날 때 Auth가 지운다).
+      const hasSession = session != null
       if (hadSession.current !== null && hadSession.current !== hasSession) setAlert(null)
       hadSession.current = hasSession
     })

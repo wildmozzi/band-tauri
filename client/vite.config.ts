@@ -6,6 +6,7 @@ import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { bandServerProxy } from './vite/bandServerProxy'
 import { SUPABASE_SLIM_ALIAS } from './vite/supabaseSlim'
+import { BROWSER_TARGET } from './vite/browserTargets'
 
 // 개발 서버 HTTPS
 // - client/certs/{key,cert}.pem 이 있으면 그 인증서를 사용 (mkcert 권장, README 참고)
@@ -25,6 +26,8 @@ export default defineConfig({
   plugins,
   // supabase-js의 storage·functions를 빈 구현으로(첫 묶음 축소, vite/supabaseSlim.ts). 테스트(vitest)도 같은 별칭
   resolve: { alias: SUPABASE_SLIM_ALIAS },
+  // 브라우저 지원 하한(vite 5 기본값과 같게, vite/browserTargets.ts). CSS도 같은 하한으로 변환
+  build: { target: BROWSER_TARGET, cssTarget: BROWSER_TARGET },
   // vitest는 node_modules를 변환 없이 불러와 위 별칭이 supabase-js 안쪽 import에 안 걸린다 — supabase-js만 변환해 번들과 같게
   test: { server: { deps: { inline: ['@supabase/supabase-js'] } } },
   server: {

@@ -135,6 +135,29 @@ test.describe('커뮤니티', () => {
     await expect(page.getByRole('heading', { name: '댓글 3개' })).toBeVisible()
     expect(mock.supabase.db.table('posts').find(p => p.id === GUITAR_POST.id)?.comments_count).toBe(3)
   })
+
+  test('글 삭제: 목록으로 돌아가고, 지운 글을 다시 조회하지 않는다(406 없음)', async ({ page, mock }) => {
+    const db = mock.supabase.db
+    const detailReads = () =>
+      db.log.filter(l => l.method === 'GET' && l.table === 'posts' && decodeURIComponent(l.url).includes(`id=eq.${GUITAR_POST.id}`)).length
+
+    await mock.loginAs(ALICE)
+    await page.goto('/community')
+    await page.getByText(GUITAR_POST.title).click()
+    await expect(page.getByRole('heading', { level: 1, name: GUITAR_POST.title })).toBeVisible()
+    const readsBefore = detailReads()
+
+    await page.getByRole('button', { name: '삭제', exact: true }).click()
+    await expect(page.getByRole('heading', { name: '게시물 삭제' })).toBeVisible()
+    await page.getByRole('button', { name: '삭제', exact: true }).last().click()
+    await expect(page).toHaveURL(/\/community$/)
+    await expect(page.getByText(DRUM_POST.title)).toBeVisible()
+    await expect(page.getByText(GUITAR_POST.title)).toHaveCount(0)
+    expect(db.table('posts').some(p => p.id === GUITAR_POST.id)).toBe(false)
+    // 목록이 다 그려진 뒤에도 지운 글 상세(posts?id=eq.…) 재조회가 없다 (운영에서 406 1회)
+    await page.waitForTimeout(300)
+    expect(detailReads()).toBe(readsBefore)
+  })
 })
 
 test.describe('커뮤니티 글쓰기 (P3-10d: 서버 API)', () => {
