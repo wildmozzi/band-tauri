@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useRoomPerform, useRoomMetronome, useRoomEngineStats } from '../state/roomHooks'
-import { pickMetronomeSync } from '../state/engineStatsPicks'
+import { pickMetronomeDiag, pickMetronomeSync } from '../state/engineStatsPicks'
+import { metronomeSyncView } from './metronomeSyncView'
 import {
   DEFAULT_METRONOME_BEATS,
   DEFAULT_METRONOME_BPM,
@@ -138,6 +139,8 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
         />
       </div>
 
+      <MetronomeSyncLine />
+
       {latency && (
         <p className="metronome-hint metronome-latency" data-testid="metronome-latency" data-source={latency.source ?? 'none'}>
           {latency.text}
@@ -156,5 +159,19 @@ export function MetronomePanel({ isHost }: { isHost: boolean }) {
         </p>
       )}
     </section>
+  )
+}
+
+/**
+ * 메트로놈 동기 진단 줄(TEST-SESSION 3.5절 5번): 시계 RTT·오프셋, 늦은 클릭·뺀 박. 마우스를 올리면 엔진 필드 이름과 기울기·옮긴 클릭.
+ * 값이 통계 틱마다 바뀌므로 패널 전체가 아니라 이 줄만 다시 그린다.
+ */
+function MetronomeSyncLine() {
+  const view = metronomeSyncView(useRoomEngineStats(pickMetronomeDiag))
+  if (!view) return null
+  return (
+    <p className={`metronome-hint metronome-sync${view.warn ? ' warn' : ''}`} data-testid="metronome-sync" title={view.title}>
+      {view.text}
+    </p>
   )
 }
