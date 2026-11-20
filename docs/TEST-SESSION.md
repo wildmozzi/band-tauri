@@ -515,4 +515,6 @@ PC B만 다른 네트워크로 옮긴다. PC B를 휴대폰 **LTE 핫스팟**에
 - (있으면) 메트로놈 녹음 파일, 녹음 세션 폴더의 `session.json`(WAV는 크니 필요할 때만)
 - 이 기록표
 
+**zip을 받은 뒤(코디네이터) — 결과표 뽑기**: 받은 진단 zip들을 한 폴더에 두고 `cd clientsrc-tauri` → `cargo run -p band-engine --example diag_report -- <zip> [<zip> ...]`. zip마다 세션 요약(앱 버전·시각·길이·백엔드·드라이버·프리셋·프레임·코어 배치·xrun 증가 시점), 피어별 표(bufferMs 중앙/p95/최대, 은닉 %(방식별), 손실 %, 손실 모양, 경로, RTT, 연결·첫 소리 ms), 연결 기록, GOAL 1·2절 판정표를 내고, 끝에 모든 zip을 합친 연결 성공률 집계(경로별 시도·성공·실패·중단·중앙 소요 ms)와 3절 판정을 Markdown으로 낸다(`--json`이면 같은 값을 JSON으로). 판정은 충족 / 미달 / 판정 불가(데이터 없음·세션이 기준보다 짧음 — 비고에 이유)다. 청감과 회선 종류(유선/Wi-Fi, NAT)는 진단에 없으니 이 기록표 값으로 채운다. GOAL 1-4(±3ms 1분)는 타임라인에 목표 버퍼(`targetMs`)가 아직 기록되지 않아 늘 판정 불가로 나온다. 기준값은 `crates/band-engine/src/diag/report/mod.rs`의 `goal` 한 곳(GOAL.md 절 번호 주석).
+
 보낸 결과는 코디네이터가 BACKLOG의 해당 항목에 옮긴다. 테스트하는 사람은 BACKLOG 파일을 직접 고치지 않는다.

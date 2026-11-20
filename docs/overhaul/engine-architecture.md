@@ -176,7 +176,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | 2 | `engine::{rt, device, wasapi, record, metronome}`, `engine::{wav, flac}`(⑩-0에서 1 → 2: 파일 I/O), `engine::record::{rt_ring, marks, sidecar, writer}`(⑥-1), `engine::metronome::{click, sched}`(⑥-3), `engine::wasapi::{enumerate, stream, probe}`(⑥-5) |
 | 3 | `net`, `net::{peer, relay, stun, qos}`, `net::peer::descriptor`(⑥-7), `net::txlat`(⑩-0에서 1 → 3: `Mutex`·`Instant::now`) |
 | 4 | `engine::{worker, measure}`, `engine::measure::{loopback, echo}`(⑥-4) |
-| 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `engine::media_port`(⑩-0, 미디어 명령 큐의 제어 평면 쪽 끝 — ⑩-0~⑩-3에는 하네스가 써서 4, 하네스가 `tests/sim`으로 나간 뒤 ⑨b-2에서 5), `manager`, `settings`, `diag`, `diag::{timeline, export}`, `band-engine` 뿌리 `lib.rs`(모듈 선언뿐, ⑩-2) |
+| 5 | `engine`(`Engine`), `engine::{cpuprof, report}`, `engine::media_port`(⑩-0, 미디어 명령 큐의 제어 평면 쪽 끝 — ⑩-0~⑩-3에는 하네스가 써서 4, 하네스가 `tests/sim`으로 나간 뒤 ⑨b-2에서 5), `manager`, `settings`, `diag`, `diag::{timeline, export}`, `diag::report`(진단 zip → 결과표 도구, `test-support` 뒤 — GOAL-COVERAGE 후보 ②·③), `band-engine` 뿌리 `lib.rs`(모듈 선언뿐, ⑩-2) |
 | 6 | 앱 크레이트 `band`(⑩-2, 노드 표 `APP_NODES`): `band_lib::commands`, `band_lib`(`lib.rs`), `band_lib::main`(`main.rs`) — 엔진·dsp 크레이트에는 계층 6이 없다 |
 | 7 | 테스트 표면 `testing`(`cfg(any(test, feature = "test-support"))`, ⑨a-1) — 모든 계층의 항목을 **항목 단위로**(⑨b-2) 다시 내보낸다. 맨 위라 제품 노드는 쓸 수 없다(7절) |
 
@@ -260,6 +260,7 @@ RT 경로 = `engine/rt.rs`의 `process` 함수들, 그것을 부르는 cpal·ASI
 | `net/{mod, send, recv_loop, control_loop}.rs` | UDP 소켓·`Net` 수명·피어 표·에코/피어 조회 API·시계 페이로드(`mod`), 봉인·제어 패킷·Audio 팬아웃·에코 반사(`send`), 수신 스레드·패킷 처리(`recv_loop`), 제어 스레드(`control_loop`). `impl NetShared`를 네 파일에 나눠 쓰므로 노드는 `net` 하나 | 네트워크 |
 | `net/{crypto, peer, stun, relay, qos, txlat}.rs`, `crates/band-dsp/src/{clock, packet}.rs` | 암호, 피어 테이블·홀펀칭, STUN, 릴레이, DSCP, 송신 큐 지연(칸 함수는 `band_dsp::histo`) / 시계 오프셋, 패킷 | 각 프로토콜 |
 | `diag/{mod, timeline, mask, export}.rs` | 진단 기록 스레드, 링 버퍼, 마스킹, zip | 진단 |
+| `diag/report/{mod, render, shape}.rs` | 진단 zip → 결과표·GOAL 판정·연결 성공률(`test-support` 뒤, `examples/diag_report.rs`·`loss_shape_estimate.rs`가 `testing::diag::report`로 쓴다) | 진단 도구 |
 
 워커 하위 모듈(단계) 사이 공유 상태는 **명시적으로** 넘긴다(②b, [engine-stage2b-design.md](engine-stage2b-design.md) 2.2절): 읽기 전용 문맥(설정·장치 정보·카운터·컨트롤·소스 뱅크·통계·epoch·stop)은 조정자만 갖는 `WorkerCtx`이고, **조정자가 거기서 쓰는 값만 꺼내 단계 메서드의 인자로 준다**(단계는 `&WorkerCtx`를 받지 않는다). `WorkerParams`는 `Worker::new`의 입력일 뿐이다 — 소유권이 넘어가는 끝(`in_cons`·`prods`·`media_port`)이 섞여 있어 단계에 그대로 줄 수 없다. `net`은 쓰는 단계만 생성 때 받아 갖는다. 단계 사이 값은 반환값·인자(`FeedTiming`, 48k 블록·프레임, `PeerRound.deadline_us`, 입력 쪽 대기량). 전역 상태는 없다.
 

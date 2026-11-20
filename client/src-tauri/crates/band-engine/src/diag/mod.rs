@@ -6,6 +6,9 @@
 
 pub mod export;
 pub(crate) mod mask;
+/// 진단 zip → 결과표 도구(`examples/diag_report.rs`, GOAL-COVERAGE 후보 ②·③). 예제·시험 빌드에서만 들어간다.
+#[cfg(any(test, feature = "test-support"))]
+pub mod report;
 pub(crate) mod timeline;
 
 use std::sync::atomic::{AtomicBool, Ordering};

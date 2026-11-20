@@ -126,6 +126,13 @@ pub mod diag {
     pub mod timeline {
         pub use crate::diag::timeline::to_jsonl;
     }
+    /// 진단 zip → 결과표(`examples/diag_report.rs`)와 손실 모양 누적(`examples/loss_shape_estimate.rs`).
+    pub mod report {
+        pub use crate::diag::report::run;
+        pub mod shape {
+            pub use crate::diag::report::shape::{fkey, from_engine_json, from_timeline, totals, Shapes};
+        }
+    }
 }
 
 /// 앱 경계(`crate::manager`)에서 테스트가 쓰는 것.

@@ -131,7 +131,7 @@ ASIO가 들어간 앱 실행: `$env:CPAL_ASIO_DIR = 'C:\경로\asiosdk_2.3.4'` �
 | 추가: (선택) 정원 초과 | 세 번째 계정이 있으면 정원 2명 방에 재입장 → 거부·엔진 꺼짐 | 결과 | P3-12b |
 | 추가: 기본 흐름 | 위 3.1~3.5를 마치면 입장·연주·메트로놈은 확인된다. 끝에 PC B가 방을 나가면 PC A 화면에서 사라지는지만 더 본다 | 결과 | S-0 |
 
-결과는 TEST-SESSION **8절 결과 기록표**에 적어 진단 zip들과 함께 보낸다. 못 한 칸은 "못 함 — 사유"로 적는다.
+결과는 TEST-SESSION **8절 결과 기록표**에 적어 진단 zip들과 함께 보낸다. 못 한 칸은 "못 함 — 사유"로 적는다. 받은 zip의 수치는 코디네이터가 `diag_report` 도구로 뽑는다(D 절 끝 단락).
 
 ---
 
@@ -154,6 +154,8 @@ ASIO가 들어간 앱 실행: `$env:CPAL_ASIO_DIR = 'C:\경로\asiosdk_2.3.4'` �
 | 4.5 정리 | 두 PC 진단 zip(`A-LTE`, `B-LTE`), 포트 포워드·포트 프록시 삭제, `[TEST]` 방 삭제 | zip 2개 | P2-17h |
 
 손실 모양 분석(선택, 개발자): 받은 zip으로 `cd client\src-tauri` → `cargo run -p band-engine --example loss_shape_estimate -- <zip 경로>` → P2-17b(FEC 문구) 결정 근거.
+
+**zip을 받은 뒤(코디네이터, C·D 공통) — 결과표 뽑기**: 받은 진단 zip들을 한 폴더에 두고 `cd clientsrc-tauri` → `cargo run -p band-engine --example diag_report -- <zip> [<zip> ...]`. zip마다 세션 요약(앱 버전·시각·길이·백엔드·드라이버·프리셋·프레임·코어 배치·xrun 증가 시점), 피어별 표(bufferMs 중앙/p95/최대, 은닉 %(방식별), 손실 %, 손실 모양, 경로, RTT, 연결·첫 소리 ms), 연결 기록, GOAL 1·2절 판정표를 내고, 끝에 모든 zip을 합친 연결 성공률 집계(경로별 시도·성공·실패·중단·중앙 소요 ms)와 3절 판정을 Markdown으로 낸다(`--json`이면 같은 값을 JSON으로). 판정은 충족 / 미달 / 판정 불가(데이터 없음·세션이 기준보다 짧음 — 비고에 이유)다. 청감과 회선 종류(유선/Wi-Fi, NAT)는 진단에 없으니 TEST-SESSION 8절 기록표 값으로 채운다. GOAL 1-4(±3ms 1분)는 타임라인에 목표 버퍼(`targetMs`)가 아직 기록되지 않아 늘 판정 불가로 나온다. 기준값은 `crates/band-engine/src/diag/report/mod.rs`의 `goal` 한 곳(GOAL.md 절 번호 주석).
 
 ---
 
