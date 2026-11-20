@@ -377,6 +377,8 @@ export interface EngineStats {
   threadPriority?: ThreadPriorityStats
   /** 하이브리드 CPU 코어 배치(P1-21): 워커·수신 스레드가 P/E/LP-E 코어에서 돈 비율(시작부터 누적). 비Windows·옛 엔진은 null/없음 */
   corePlacement?: CorePlacementStats | null
+  /** 워커·수신 스레드에 적용한 코어 배치 정책과 결과(P1-21 2단계). 비Windows·정지 상태·옛 엔진은 null/없음 */
+  threadPolicy?: ThreadPolicyStats | null
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
@@ -553,6 +555,24 @@ export interface CorePlacementStats {
   worker: ThreadPlacement
   /** 네트워크 없이 시작한 엔진은 null */
   netRecv: ThreadPlacement | null
+}
+
+/**
+ * 스레드 정책 한 항목의 적용 결과(설계 문서 4절 `threadPolicy`): `off` 옵션 꺼짐 · `applied` OS 호출 성공 ·
+ * `failed` 실패(무시하고 기본 스케줄링) · `skipped` P 코어 선호만 — 걸 집합이 없어 걸지 않음(하이브리드 아님, P 논리 프로세서 4개 미만).
+ */
+export type ThreadPolicyResult = 'off' | 'applied' | 'failed' | 'skipped'
+
+/** 스레드 하나에 시작 때 한 번 건 정책: HighQoS(EcoQoS 끄기)와 P 코어 CPU set 선호 */
+export interface ThreadPolicy {
+  highQos: ThreadPolicyResult
+  pCores: ThreadPolicyResult
+}
+
+export interface ThreadPolicyStats {
+  worker: ThreadPolicy
+  /** 네트워크 없이 시작한 엔진은 null */
+  netRecv: ThreadPolicy | null
 }
 
 // ============================================================================

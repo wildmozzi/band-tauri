@@ -260,3 +260,35 @@ fn core_placement_is_reported_for_worker_and_recv() {
         assert!(s.core_placement.is_none());
     }
 }
+
+/// 스레드 정책(P1-21 2단계): 옵션을 켜고 시작한 엔진은 워커·수신 스레드의 적용 결과를 `EngineStats.threadPolicy`로 낸다.
+/// 비Windows는 null. 전역 옵션은 시험 안에서 되돌린다(그 사이 다른 시험이 시작한 엔진에 걸려도 무해).
+#[test]
+fn thread_policy_is_reported_for_worker_and_recv() {
+    use crate::sys::placement::{set_thread_policy, PolicyResult, DEFAULT_HIGH_QOS, DEFAULT_P_CORES};
+    set_thread_policy(true, true);
+    let a = start("pa", CodecKind::Opus);
+    let b = start("pb", CodecKind::Opus);
+    a.add_peer("pb".into(), &desc_of(&b)).unwrap();
+    b.add_peer("pa".into(), &desc_of(&a)).unwrap();
+    wait_until(|| connected(&a, 1) && connected(&b, 1));
+    set_thread_policy(DEFAULT_HIGH_QOS, DEFAULT_P_CORES);
+    run_iters(&[&a], 50);
+    let s = a.stats();
+    if cfg!(windows) {
+        let tp = s.thread_policy.expect("Windows는 스레드 정책을 보고한다");
+        let r = tp.net_recv.expect("네트워크 엔진은 수신 스레드 정책이 있다");
+        for t in [tp.worker, r] {
+            assert_eq!(t.high_qos, PolicyResult::Applied, "{tp:?}");
+            assert!(matches!(t.p_cores, PolicyResult::Applied | PolicyResult::Skipped), "{tp:?}");
+        }
+        let j = serde_json::to_string(&s).unwrap();
+        assert!(j.contains("\"threadPolicy\":{\"worker\":{\"highQos\":\"applied\",\"pCores\":"), "{j}");
+        // 정책을 걸어도 소리는 흐른다(워커 반복·수신 표본이 계속 는다)
+        let n0 = a.stats().core_placement.unwrap().worker.samples;
+        run_iters(&[&a], 50);
+        assert!(a.stats().core_placement.unwrap().worker.samples >= n0 + 50);
+    } else {
+        assert!(s.thread_policy.is_none());
+    }
+}

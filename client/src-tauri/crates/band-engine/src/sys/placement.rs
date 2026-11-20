@@ -12,8 +12,17 @@
 //! 아님) 모두 P다. 단 LP-E는 **P와 LLC를 함께 쓰는 E 클러스터가 있거나, P와 따로 쓰는 섬이 둘 이상일 때만** 나온다 — 비P 코어가
 //! P와 다른 LLC 섬 하나에만 있는 구성(예: Lunar Lake 4P + 4LP-E, P/E가 CCX로 갈린 AMD Zen5/Zen5c)은 그 섬을 E로 센다.
 //! LLC·효율 등급만으로는 "저전력 섬"과 "따로 떨어진 E 클러스터"를 가를 수 없어서다(#191 리뷰 L3).
+//!
+//! 스레드 정책(P1-21 2단계): 워커·수신 스레드가 시작할 때 한 번(`apply_thread_policy`, 루프 앞) 아래 둘을 옵션에 따라 건다.
+//! - HighQoS: `SetThreadInformation(ThreadPowerThrottling)`으로 실행 속도 전원 조절(EcoQoS)을 끈다.
+//! - P 코어 선호: `SetThreadSelectedCpuSets`로 효율 등급이 가장 높은 코어 집합을 고른다(하드 affinity가 아닌 CPU set).
+//!   하이브리드가 아니거나 P 논리 프로세서가 4개 미만이면 걸지 않는다(`skipped`).
+//!
+//! 둘 다 **기본 켬**이다 — 교차 n = 11(AC) 측정에서 둘을 함께 걸면 6구성 모두 워커 CPU −18~−28%, 반복 본문 p99 −22~−40%
+//! (95% 구간이 0 밖)였다: `docs/overhaul/core-placement-2026-11-20.md`. 실패는 무시하고 결과만
+//! `EngineStats.threadPolicy`에 남긴다. RT 콜백 스레드에는 걸지 않는다.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use serde::Serialize;
@@ -29,6 +38,8 @@ pub(crate) enum CoreKind {
 /// `GetSystemCpuSetInformation` 한 항목에서 쓰는 값(시험이 OS 없이 만들 수 있게 따로 둔다).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CpuSetEntry {
+    /// CPU set ID(`SetThreadSelectedCpuSets`에 넘기는 값).
+    pub(crate) id: u32,
     pub(crate) group: u16,
     pub(crate) number: u8,
     pub(crate) efficiency_class: u8,
@@ -95,17 +106,126 @@ impl CoreMap {
     }
 }
 
-static CORE_MAP: OnceLock<Option<CoreMap>> = OnceLock::new();
+/// 엔진 시작 때 한 번 만드는 표: 코어 종류 표(없으면 None)와 P 코어 CPU set ID(하이브리드가 아니면 빈 목록).
+struct Tables {
+    map: Option<CoreMap>,
+    p_set_ids: Vec<u32>,
+}
 
-/// 2단계 실험 옵션(P1-21): 워커·수신 스레드의 EcoQoS(전원 조절)를 끈다(`ThreadPowerThrottling`, 실행 속도 조절 해제 = HighQoS).
-/// **기본 꺼짐** — 기본값 변경은 실장비 근거를 본 뒤 결정한다(이 PR은 보고만). 엔진 시작 전에 정한다(스레드 시작 때 적용).
-static HIGH_QOS: AtomicBool = AtomicBool::new(false);
+static TABLES: OnceLock<Tables> = OnceLock::new();
 
-/// 워커·수신 스레드 HighQoS(EcoQoS 끄기) 옵션. 다음에 시작하는 엔진부터 적용된다. 측정 도구(`tests/cpu_profile.rs`)가 켜서 비교한다.
-/// 아직 앱 설정·커맨드에 연결하지 않은 실험 옵션이라 측정 빌드(`test-support`)에만 있다 — 제품 빌드에서는 늘 꺼져 있다.
+/// P 코어 선호를 거는 최소 P 논리 프로세서 수. 엔진 스레드(워커·수신)와 RT 콜백·다른 앱이 P 코어를 나눠 쓰므로, P가 너무 적은
+/// 기계(예: 2P + 8E)에서는 좁은 집합에 묶는 쪽이 오히려 밀릴 수 있어 걸지 않는다. 측정 기계(225H)는 4다.
+pub(crate) const MIN_P_LOGICAL: usize = 4;
+
+/// 효율 등급(`EfficiencyClass`)이 가장 높은 코어들의 CPU set ID(입력 순서). E·LP-E는 등급이 낮아 빠진다. 빈 목록이면 정책을
+/// 걸지 않는다(`skipped`): 등급이 하나뿐이거나(하이브리드 아님 — 고를 것이 없다) P 논리 프로세서가 `MIN_P_LOGICAL`개 미만일 때.
+pub(crate) fn performance_set_ids(cpus: &[CpuSetEntry]) -> Vec<u32> {
+    let (Some(top), Some(low)) = (cpus.iter().map(|c| c.efficiency_class).max(), cpus.iter().map(|c| c.efficiency_class).min()) else {
+        return Vec::new();
+    };
+    if top == low {
+        return Vec::new();
+    }
+    let ids: Vec<u32> = cpus.iter().filter(|c| c.efficiency_class == top).map(|c| c.id).collect();
+    if ids.len() < MIN_P_LOGICAL {
+        return Vec::new();
+    }
+    ids
+}
+
+/// 스레드 정책 옵션(P1-21 2단계)의 기본값: 둘 다 켬. 판정 근거: `docs/overhaul/core-placement-2026-11-20.md`(HighQoS 단독은
+/// 효과가 작고 2구성에서 흔들림 안, P 코어 단독은 가장 무거운 구성에서 xrun이 튄 실행이 있었고, 둘을 함께 걸면 6구성 모두 뚜렷).
+pub(crate) const DEFAULT_HIGH_QOS: bool = true;
+pub(crate) const DEFAULT_P_CORES: bool = true;
+
+/// 엔진 시작 전에 정한다(스레드 시작 때 한 번 적용).
+static HIGH_QOS: AtomicBool = AtomicBool::new(DEFAULT_HIGH_QOS);
+static P_CORES: AtomicBool = AtomicBool::new(DEFAULT_P_CORES);
+
+/// 워커·수신 스레드 정책 옵션: `high_qos` = EcoQoS 끄기, `p_cores` = P 코어 CPU set 선호. 다음에 시작하는 엔진부터 적용된다.
+/// 측정 도구(`tests/cpu_profile.rs`, `BAND_THREAD_POLICY`)가 켜서 비교한다. 앱 설정·커맨드에 연결하지 않은 옵션이라
+/// 측정 빌드(`test-support`)에만 있다 — 제품 빌드에서는 늘 기본값이다.
 #[cfg(any(test, feature = "test-support"))]
-pub fn set_high_qos(enabled: bool) {
-    HIGH_QOS.store(enabled, Ordering::Relaxed);
+pub fn set_thread_policy(high_qos: bool, p_cores: bool) {
+    HIGH_QOS.store(high_qos, Ordering::Relaxed);
+    P_CORES.store(p_cores, Ordering::Relaxed);
+}
+
+/// 정책 한 항목의 적용 결과(`EngineStats.threadPolicy.*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PolicyResult {
+    /// 옵션이 꺼져 있다 또는 스레드가 아직 적용 전이다.
+    Off,
+    /// OS 호출 성공.
+    Applied,
+    /// OS 호출 실패(무시하고 기본 스케줄링으로 돈다).
+    Failed,
+    /// P 코어 선호만: 걸 집합이 없어 걸지 않았다(하이브리드 아님·표 없음·P 논리 프로세서 4개 미만).
+    Skipped,
+}
+
+impl PolicyResult {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Applied,
+            2 => Self::Failed,
+            3 => Self::Skipped,
+            _ => Self::Off,
+        }
+    }
+}
+
+/// 스레드 하나에 적용한 정책(`EngineStats.threadPolicy.worker` / `.netRecv`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadPolicy {
+    pub(crate) high_qos: PolicyResult,
+    pub(crate) p_cores: PolicyResult,
+}
+
+/// `EngineStats.threadPolicy`: 워커와 네트워크 수신 스레드(네트워크 없이 시작했으면 None).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadPolicyStats {
+    pub(crate) worker: ThreadPolicy,
+    pub(crate) net_recv: Option<ThreadPolicy>,
+}
+
+/// 스레드 하나의 정책 적용 결과(원자값, 작성자는 그 스레드 하나 — 시작 때 한 번).
+#[derive(Debug, Default)]
+pub(crate) struct PolicySlot {
+    high_qos: AtomicU8,
+    p_cores: AtomicU8,
+}
+
+impl PolicySlot {
+    fn store(&self, p: ThreadPolicy) {
+        self.high_qos.store(p.high_qos as u8, Ordering::Relaxed);
+        self.p_cores.store(p.p_cores as u8, Ordering::Relaxed);
+    }
+
+    /// 보고값. 비Windows는 None(정책이 Windows 전용).
+    pub(crate) fn stats(&self) -> Option<ThreadPolicy> {
+        cfg!(windows).then(|| ThreadPolicy {
+            high_qos: PolicyResult::from_u8(self.high_qos.load(Ordering::Relaxed)),
+            p_cores: PolicyResult::from_u8(self.p_cores.load(Ordering::Relaxed)),
+        })
+    }
+}
+
+/// 옵션과 P 코어 목록으로 정책을 적용하고 결과를 낸다(OS 호출은 인자 — 시험이 실패 경로를 넣는다).
+fn apply_with(high_qos: bool, p_cores: bool, p_ids: &[u32], disable_throttling: impl FnOnce() -> bool, select_sets: impl FnOnce(&[u32]) -> bool) -> ThreadPolicy {
+    let done = |ok: bool| if ok { PolicyResult::Applied } else { PolicyResult::Failed };
+    ThreadPolicy {
+        high_qos: if high_qos { done(disable_throttling()) } else { PolicyResult::Off },
+        p_cores: match (p_cores, p_ids.is_empty()) {
+            (false, _) => PolicyResult::Off,
+            (true, true) => PolicyResult::Skipped,
+            (true, false) => done(select_sets(p_ids)),
+        },
+    }
 }
 
 /// LP-E를 뺀 논리 프로세서(P+E)의 친화성 마스크(그룹 0). 그룹이 둘 이상이거나 표가 비면 None.
@@ -132,38 +252,65 @@ pub fn pin_process(mask: Option<u64>) -> Result<u64, String> {
     Ok(mask)
 }
 
-/// 지금 스레드에 HighQoS 옵션을 적용한다(옵션이 꺼져 있으면 아무것도 안 함). 스레드 시작 때 한 번, 루프 앞에서. 반환: 적용했는가.
-pub(crate) fn apply_thread_qos() -> bool {
-    if !HIGH_QOS.load(Ordering::Relaxed) {
-        return false;
+/// 지금 스레드에 정책 옵션을 적용하고 결과를 `slot`에 적는다(옵션이 꺼져 있으면 OS 호출 없음). 스레드 시작 때 한 번, 루프
+/// 앞에서(시스템콜·로그 있음 — RT 콜백에서 부르지 않는다). 실패해도 스레드는 그대로 돈다.
+pub(crate) fn apply_thread_policy(slot: &PolicySlot) {
+    init();
+    // 정책은 Windows 전용이다 — 다른 OS에서는 걸지도, 실패로 적지도 않는다(보고는 null).
+    if !cfg!(windows) {
+        return;
     }
-    let ok = os::disable_power_throttling();
-    if !ok {
-        log::warn!("스레드 EcoQoS 끄기 실패(HighQoS 옵션)");
+    let ids = TABLES.get().map(|t| t.p_set_ids.as_slice()).unwrap_or(&[]);
+    let p = apply_with(HIGH_QOS.load(Ordering::Relaxed), P_CORES.load(Ordering::Relaxed), ids, os::disable_power_throttling, os::select_cpu_sets);
+    if p.high_qos == PolicyResult::Failed || p.p_cores == PolicyResult::Failed {
+        log::warn!("스레드 정책 적용 실패(무시): {p:?}");
     }
-    ok
+    slot.store(p);
 }
 
 /// 코어 표를 만든다(처음 한 번, 이후는 아무것도 안 함). 엔진 시작·워커/수신 스레드가 루프 **앞**에서 부른다 — 표본 함수는
 /// 표가 없으면 세지 않을 뿐 만들지 않는다(반복 안 할당 0, 엔진 ⑧ 후속).
 pub(crate) fn init() {
-    CORE_MAP.get_or_init(|| {
-        let map = CoreMap::from_entries(&os::cpu_sets());
+    TABLES.get_or_init(|| {
+        let cpus = os::cpu_sets();
+        let map = CoreMap::from_entries(&cpus);
+        let p_set_ids = performance_set_ids(&cpus);
         if let Some(m) = &map {
             let count = |k| m.kinds.iter().filter(|x| **x == Some(k)).count();
             log::info!(
-                "코어 표: P {} · E {} · LP-E {}",
+                "코어 표: P {} · E {} · LP-E {} (P 코어 CPU set {}개)",
                 count(CoreKind::Performance),
                 count(CoreKind::Efficiency),
-                count(CoreKind::LowPowerEfficiency)
+                count(CoreKind::LowPowerEfficiency),
+                p_set_ids.len()
             );
         }
-        map
+        Tables { map, p_set_ids }
     });
 }
 
 fn map() -> Option<&'static CoreMap> {
-    CORE_MAP.get().and_then(|m| m.as_ref())
+    TABLES.get().and_then(|t| t.map.as_ref())
+}
+
+/// 이 기계의 코어 구성 한 줄(측정 도구 출력용): 종류별 논리 프로세서 수와 P 코어 CPU set 수.
+#[cfg(any(test, feature = "test-support"))]
+pub fn describe_cores() -> String {
+    let cpus = os::cpu_sets();
+    let kinds = classify(&cpus);
+    let count = |k| kinds.iter().filter(|x| **x == k).count();
+    let mut classes: Vec<u8> = cpus.iter().map(|c| c.efficiency_class).collect();
+    classes.sort_unstable();
+    classes.dedup();
+    format!(
+        "논리 {} = P {} · E {} · LP-E {} (효율 등급 {:?}, P 코어 CPU set {}개)",
+        cpus.len(),
+        count(CoreKind::Performance),
+        count(CoreKind::Efficiency),
+        count(CoreKind::LowPowerEfficiency),
+        classes,
+        performance_set_ids(&cpus).len()
+    )
 }
 
 /// 스레드 하나의 코어 종류별 표본 수(원자값, 작성자는 그 스레드 하나).
@@ -304,7 +451,7 @@ mod os {
                 let info = unsafe { p.read_unaligned() };
                 if info.Type == CpuSetInformation {
                     let c = unsafe { info.Anonymous.CpuSet };
-                    out.push(CpuSetEntry { group: c.Group, number: c.LogicalProcessorIndex, efficiency_class: c.EfficiencyClass, llc: c.LastLevelCacheIndex });
+                    out.push(CpuSetEntry { id: c.Id, group: c.Group, number: c.LogicalProcessorIndex, efficiency_class: c.EfficiencyClass, llc: c.LastLevelCacheIndex });
                 }
             }
             off += size;
@@ -319,6 +466,13 @@ mod os {
         let st = THREAD_POWER_THROTTLING_STATE { Version: THREAD_POWER_THROTTLING_CURRENT_VERSION, ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED, StateMask: 0 };
         // SAFETY: 현재 스레드 의사 핸들과 크기가 맞는 입력 구조체.
         unsafe { SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, std::ptr::addr_of!(st).cast(), std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32) != 0 }
+    }
+
+    /// 지금 스레드가 고른 CPU set을 `ids`로 정한다(하드 affinity 아님). 성공하면 true.
+    pub(super) fn select_cpu_sets(ids: &[u32]) -> bool {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadSelectedCpuSets};
+        // SAFETY: 현재 스레드 의사 핸들과 `ids.len()`개의 유효한 u32 배열.
+        unsafe { SetThreadSelectedCpuSets(GetCurrentThread(), ids.as_ptr(), ids.len() as u32) != 0 }
     }
 
     /// 프로세스 친화성 마스크(측정 도구용 코어 고정).
@@ -355,6 +509,10 @@ mod os {
         false
     }
 
+    pub(super) fn select_cpu_sets(_ids: &[u32]) -> bool {
+        false
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn set_process_affinity(_mask: u64) -> Result<(), String> {
         Err("코어 고정은 Windows만 지원한다(taskset 등을 쓸 것)".into())
@@ -371,7 +529,7 @@ mod tests {
     use super::*;
 
     fn e(number: u8, class: u8, llc: u8) -> CpuSetEntry {
-        CpuSetEntry { group: 0, number, efficiency_class: class, llc }
+        CpuSetEntry { id: 0x100 + number as u32, group: 0, number, efficiency_class: class, llc }
     }
 
     /// Intel Core Ultra 5 225H(측정 기계, `cpu-quiet-2026-11-17.md` 1절): P = LP 0·1·10·11(등급 1), E = LP 2~9(LLC 공유), LP-E = 12·13(별도 LLC).
@@ -403,6 +561,77 @@ mod tests {
         let mut two_groups = sym.clone();
         two_groups[7].group = 1;
         assert_eq!(mask_without_lpe(&two_groups), None, "그룹 둘 이상은 마스크로 고정 불가");
+    }
+
+    /// P 코어 선호 집합(P1-21 2단계): 효율 등급이 가장 높은 코어의 CPU set ID만. 하이브리드가 아니면 빈 목록.
+    #[test]
+    fn performance_set_is_top_efficiency_class_only() {
+        // 225H: P = LP 0·1·10·11 → ID 0x100·0x101·0x10A·0x10B. E(2~9)·LP-E(12·13)는 빠진다.
+        assert_eq!(performance_set_ids(&core_ultra_225h()), vec![0x100, 0x101, 0x10A, 0x10B]);
+        // 대칭 CPU·빈 표: 고를 것이 없다
+        let sym: Vec<_> = (0..8u8).map(|n| e(n, 0, 0)).collect();
+        assert!(performance_set_ids(&sym).is_empty());
+        assert!(performance_set_ids(&[]).is_empty());
+        // 등급이 셋(0·1·2)이면 가장 높은 것만
+        let three: Vec<_> = (0..12u8).map(|n| e(n, n / 4, 0)).collect();
+        assert_eq!(performance_set_ids(&three), vec![0x108, 0x109, 0x10A, 0x10B]);
+        // P 논리 프로세서가 4개 미만(2P + 8E)이면 걸지 않는다
+        let two_p: Vec<_> = (0..10u8).map(|n| e(n, u8::from(n < 2), 0)).collect();
+        assert!(performance_set_ids(&two_p).is_empty());
+        let four_p: Vec<_> = (0..12u8).map(|n| e(n, u8::from(n < MIN_P_LOGICAL as u8), 0)).collect();
+        assert_eq!(performance_set_ids(&four_p).len(), MIN_P_LOGICAL);
+        // 프로세서 그룹이 달라도 ID는 시스템 전체 값이라 그대로 고른다
+        let mut groups = core_ultra_225h();
+        groups[10].group = 1;
+        assert_eq!(performance_set_ids(&groups).len(), 4);
+    }
+
+    /// 정책 적용 결과: 꺼짐이면 OS 호출 없음, 하이브리드가 아니면 P 코어 선호는 걸지 않음, 실패는 `failed`로만 남는다.
+    #[test]
+    fn policy_results_cover_off_applied_failed_skipped() {
+        use PolicyResult::*;
+        let never = || -> bool { panic!("꺼진 옵션은 OS를 부르지 않는다") };
+        let never_set = |_: &[u32]| -> bool { panic!("꺼졌거나 하이브리드가 아니면 CPU set을 부르지 않는다") };
+        assert_eq!(apply_with(false, false, &[1, 2], never, never_set), ThreadPolicy { high_qos: Off, p_cores: Off });
+        assert_eq!(apply_with(true, true, &[], || true, never_set), ThreadPolicy { high_qos: Applied, p_cores: Skipped });
+        let mut got = Vec::new();
+        let p = apply_with(false, true, &[7, 9], never, |ids| {
+            got = ids.to_vec();
+            true
+        });
+        assert_eq!((p, got), (ThreadPolicy { high_qos: Off, p_cores: Applied }, vec![7, 9]));
+        assert_eq!(apply_with(true, true, &[7], || false, |_| false), ThreadPolicy { high_qos: Failed, p_cores: Failed });
+
+        // 슬롯 왕복과 계약 JSON
+        let slot = PolicySlot::default();
+        slot.store(ThreadPolicy { high_qos: Applied, p_cores: Skipped });
+        if cfg!(windows) {
+            let s = slot.stats().unwrap();
+            assert_eq!(s, ThreadPolicy { high_qos: Applied, p_cores: Skipped });
+            assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"highQos":"applied","pCores":"skipped"}"#);
+            assert_eq!(PolicySlot::default().stats().unwrap(), ThreadPolicy { high_qos: Off, p_cores: Off });
+        } else {
+            assert!(slot.stats().is_none());
+        }
+    }
+
+    /// 실제 OS(Windows): 새 스레드에 두 정책을 걸면 HighQoS는 성공하고, P 코어 선호는 걸 집합이 있으면 성공·없으면 `skipped`다.
+    /// 시험 전용 스레드에서만 건다(스레드가 끝나면 사라진다).
+    #[test]
+    fn os_policy_applies_on_this_thread() {
+        std::thread::spawn(|| {
+            init();
+            let ids = &TABLES.get().unwrap().p_set_ids;
+            let p = apply_with(true, true, ids, os::disable_power_throttling, os::select_cpu_sets);
+            if cfg!(windows) {
+                assert_eq!(p.high_qos, PolicyResult::Applied);
+                assert_eq!(p.p_cores, if ids.is_empty() { PolicyResult::Skipped } else { PolicyResult::Applied });
+            } else {
+                assert_eq!(p, ThreadPolicy { high_qos: PolicyResult::Failed, p_cores: PolicyResult::Skipped });
+            }
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

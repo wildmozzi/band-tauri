@@ -19,7 +19,7 @@ use band_dsp::codec::Encoder;
 use band_dsp::config::{CodecKind, EngineConfig};
 use band_engine::testing::engine::cpuprof::CpuStats;
 use band_engine::testing::sys::cpu::{cycle_pct, process_cycles, tsc_now};
-use band_engine::testing::sys::placement::{pin_process, set_high_qos};
+use band_engine::testing::sys::placement::{describe_cores, pin_process, set_thread_policy};
 use band_engine::testing::engine::device::fake::FakeBackend;
 use band_dsp::mixer::MixControls;
 use band_dsp::relay_codec::CodecReason;
@@ -72,6 +72,8 @@ struct Row {
     body: [f32; 5],
     /// 측정 창 동안 6엔진 합 코어 배치(P1-21): [워커, 수신] × [P, E, LP-E] 표본 수. 비Windows는 None.
     placement: Option<[[f64; 3]; 2]>,
+    /// 엔진 0이 보고한 스레드 정책 적용 결과(`EngineStats.threadPolicy` JSON, P1-21 2단계). 비Windows는 빈 문자열.
+    policy_applied: String,
 }
 
 /// `EngineStats.corePlacement`(누적)에서 [워커, 수신] × [P, E, LP-E] 표본 수. 계약 JSON으로 읽는다(공개 표면을 늘리지 않음).
@@ -173,6 +175,7 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
                 avg(wts.iter().map(|w| w.period.p50_ms * 1000.0).collect()),
             ]
         },
+        policy_applied: serde_json::to_value(&stats[0]).ok().and_then(|v| v.get("threadPolicy").filter(|p| !p.is_null()).map(|p| p.to_string())).unwrap_or_default(),
         placement: sum_placement(&stats).zip(pl0).map(|(a, b)| {
             let mut d = [[0.0; 3]; 2];
             for ((x, a), b) in d.iter_mut().flatten().zip(a.iter().flatten()).zip(b.iter().flatten()) {
@@ -190,10 +193,23 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
 #[test]
 #[ignore = "측정 도구: cargo test --release --test cpu_profile -- --ignored --nocapture"]
 fn six_peer_full_mesh_cpu() {
-    // P1-21 2단계 비교: `BAND_HIGH_QOS=1`이면 워커·수신 스레드의 EcoQoS를 끈다(기본 꺼짐).
-    let high_qos = std::env::var("BAND_HIGH_QOS").is_ok_and(|v| v == "1");
-    set_high_qos(high_qos);
-    println!("HighQoS(EcoQoS 끔): {high_qos}");
+    // P1-21 2단계 비교: `BAND_THREAD_POLICY` = off | qos(EcoQoS 끄기) | pcores(P 코어 CPU set 선호) | qos+pcores.
+    // 비우면 엔진 기본값 그대로(`default`). 옛 `BAND_HIGH_QOS=1`은 qos와 같다.
+    let policy = match std::env::var("BAND_THREAD_POLICY").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+        "" if std::env::var("BAND_HIGH_QOS").is_ok_and(|v| v == "1") => "qos".to_string(),
+        "" => "default".to_string(),
+        p => p.to_string(),
+    };
+    match policy.as_str() {
+        "default" => {}
+        "off" => set_thread_policy(false, false),
+        "qos" => set_thread_policy(true, false),
+        "pcores" => set_thread_policy(false, true),
+        "qos+pcores" => set_thread_policy(true, true),
+        p => panic!("BAND_THREAD_POLICY: off | qos | pcores | qos+pcores (받은 값 {p})"),
+    }
+    println!("스레드 정책: {policy}");
+    println!("코어 구성: {}", describe_cores());
     // P1-21b(ADR D6): `BAND_CPU_PIN=pe`면 프로세스를 LP-E를 뺀 P+E 코어에 고정한다(전·후 비교 측정용 — 반복당 비용만 본다).
     // `0x…`이면 그 마스크(그룹 0). 비우거나 `none`이면 고정 없음(배치 확률 쪽 회귀를 보는 반복 측정용). 엔진 시작 전에 정한다.
     let pin = match std::env::var("BAND_CPU_PIN").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
@@ -295,20 +311,21 @@ fn six_peer_full_mesh_cpu() {
                 let f = |x: f64| if n > 0.0 { (x * 100.0 / n).max(0.0) } else { 0.0 };
                 format!("P {:.1} / E {:.1} / LP-E {:.1} (n {:.0})", f(t[0]), f(t[1]), f(t[2]), n)
             };
-            println!("배치 | {} | 워커 {} | 수신 {}", r.label, pct(p[0]), pct(p[1]));
+            println!("배치 | {} | 워커 {} | 수신 {} | 정책 {}", r.label, pct(p[0]), pct(p[1]), r.policy_applied);
         }
     }
     // 기계가 읽는 줄(P1-21b, ADR D6): `scripts/cpu-compare.mjs`가 실행마다 모아 전·후 쌍별 차를 낸다. 열 이름은 `CSVHEAD|`.
     // 워커 LP-E 비율은 고정 없는 반복에서 "느린 코어에 놓인 실행"을 가르는 데 쓴다(비Windows는 빈 값).
-    println!("CSVHEAD|config|pin|high_qos|opus_ref_us|worker_pct_e0|worker_pct_avg6|worker_pct_max6|cb_load_avg_pct|cb_p50_us_e0|cb_p99_us_e0|cb_p99_us_max6|per_node_pct|iter_body_p50_us_avg6|iter_body_p99_us_avg6|iter_body_max_us_max6|iters_avg6|iter_period_p50_us_avg6|worker_lpe_pct|netrecv_lpe_pct|xruns");
+    // 워커·수신 P 비율과 최대 은닉은 스레드 정책 비교(P1-21 2단계)에 쓴다.
+    println!("CSVHEAD|config|pin|policy|opus_ref_us|worker_pct_e0|worker_pct_avg6|worker_pct_max6|cb_load_avg_pct|cb_p50_us_e0|cb_p99_us_e0|cb_p99_us_max6|per_node_pct|iter_body_p50_us_avg6|iter_body_p99_us_avg6|iter_body_max_us_max6|iters_avg6|iter_period_p50_us_avg6|worker_lpe_pct|netrecv_lpe_pct|worker_p_pct|netrecv_p_pct|conceal_max_pct|xruns");
     for r in &rows {
-        let lpe = |t: [f64; 3]| {
+        let share = |t: [f64; 3], i: usize| {
             let n: f64 = t.iter().sum();
-            if n > 0.0 { format!("{:.1}", (t[2] * 100.0 / n).max(0.0)) } else { String::new() }
+            if n > 0.0 { format!("{:.1}", (t[i] * 100.0 / n).max(0.0)) } else { String::new() }
         };
-        let (wl, nl) = r.placement.map(|p| (lpe(p[0]), lpe(p[1]))).unwrap_or_default();
+        let (wl, nl, wp, np) = r.placement.map(|p| (share(p[0], 2), share(p[1], 2), share(p[0], 0), share(p[1], 0))).unwrap_or_default();
         println!(
-            "CSV|{}|{pin}|{high_qos}|{opus_ref_us:.1}|{:.3}|{:.3}|{:.3}|{:.4}|{:.1}|{:.1}|{:.1}|{:.3}|{:.1}|{:.1}|{:.1}|{:.0}|{:.1}|{wl}|{nl}|{}",
+            "CSV|{}|{pin}|{policy}|{opus_ref_us:.1}|{:.3}|{:.3}|{:.3}|{:.4}|{:.1}|{:.1}|{:.1}|{:.3}|{:.1}|{:.1}|{:.1}|{:.0}|{:.1}|{wl}|{nl}|{wp}|{np}|{:.3}|{}",
             r.label,
             r.me.worker_pct.unwrap_or(f32::NAN),
             r.worker_avg,
@@ -323,6 +340,7 @@ fn six_peer_full_mesh_cpu() {
             r.body[2],
             r.body[3],
             r.body[4],
+            r.conceal_max,
             r.xruns
         );
     }

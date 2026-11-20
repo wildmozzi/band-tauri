@@ -11,6 +11,10 @@
 //   node scripts/cpu-compare.mjs stats --in runs.csv --before before --after after [--set m2]
 //   node scripts/cpu-compare.mjs placement --in runs.csv [--set m1] [--lpe-threshold 10]
 //
+// 스레드 정책 비교(P1-21 2단계): 실행파일 하나를 조건만 바꿔 교차로 돌린다 — `--exe 이름=경로@정책`(정책 = off | qos | pcores |
+// qos+pcores → `BAND_THREAD_POLICY`). 예: --exe off=x.exe@off --exe qos=x.exe@qos --exe pcores=x.exe@pcores --exe both=x.exe@qos+pcores
+//   node scripts/cpu-compare.mjs summary --in runs.csv [--set s] [--metric a,b]   # 조건×구성별 n·평균·표준편차·중앙값
+//
 // 실행파일은 `cd client/src-tauri && cargo test --release -p band-engine --test cpu_profile --no-run`이 찍는 경로를
 // 커밋별 이름으로 복사해 둔다(빌드가 측정과 겹치지 않게). 순서는 짝수 라운드 정순·홀수 라운드 역순(시간 치우침 상쇄).
 import { spawnSync } from 'node:child_process'
@@ -40,6 +44,26 @@ export function roundOrder(names, r) {
 const T975 = [NaN, 12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.16, 2.145, 2.131, 2.12, 2.11, 2.101, 2.093, 2.086, 2.08, 2.074, 2.069, 2.064, 2.06, 2.056, 2.052, 2.048, 2.045, 2.042]
 export function t975(df) {
   return df <= 30 ? T975[df] : 1.96 + 2.4 / df
+}
+
+export function median(v) {
+  const s = [...v].sort((a, b) => a - b)
+  const m = s.length >> 1
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
+}
+
+/** 조건(exe)×구성별 지표 요약: [{ exe, config, n, mean, sd, median }] (입력 순서). 숫자가 아닌 칸은 뺀다. */
+export function summarize(rows, metric, set) {
+  const by = new Map()
+  for (const r of rows) {
+    if (set && r.set !== set) continue
+    const v = Number(r[metric])
+    if (r[metric] === '' || r[metric] === undefined || !Number.isFinite(v)) continue
+    const k = `${r.exe}\u0000${r.config}`
+    if (!by.has(k)) by.set(k, { exe: r.exe, config: r.config, v: [] })
+    by.get(k).v.push(v)
+  }
+  return [...by.values()].map(({ exe, config, v }) => ({ exe, config, n: v.length, mean: mean(v), sd: v.length > 1 ? sd(v) : NaN, median: median(v) }))
 }
 
 export function mean(v) {
@@ -166,7 +190,9 @@ const fmt = (x, d = 2) => (x >= 0 ? '+' : '') + x.toFixed(d)
 function cmdRun(o) {
   const exes = o.exe.map((s) => {
     const i = s.indexOf('=')
-    return { name: s.slice(0, i), path: s.slice(i + 1) }
+    // `경로@정책`: 같은 실행파일을 스레드 정책만 바꿔 돌린다(정책 이름에는 경로 구분자가 없다).
+    const m = /^(.*)@([a-z+]+)$/.exec(s.slice(i + 1))
+    return { name: s.slice(0, i), path: m ? m[1] : s.slice(i + 1), policy: m ? m[2] : null }
   })
   if (exes.length < 2) throw new Error('--exe 이름=경로 를 둘 이상')
   const rounds = Number(o.rounds ?? 10)
@@ -180,6 +206,8 @@ function cmdRun(o) {
     for (const e of roundOrder(exes, r)) {
       const started = new Date().toISOString()
       const env = { ...process.env, BAND_CPU_PIN: pin, BAND_HIGH_QOS: o.highQos ? '1' : '0' }
+      if (e.policy) env.BAND_THREAD_POLICY = e.policy
+      else delete env.BAND_THREAD_POLICY
       const res = spawnSync(e.path, ['six_peer_full_mesh_cpu', '--ignored', '--exact', '--nocapture', '--test-threads=1'], { env, encoding: 'utf8', maxBuffer: 64 << 20 })
       const rows = parseProfileOutput(res.stdout ?? '')
       if (res.status !== 0 || rows.length === 0) throw new Error(`${e.name} 라운드 ${r} 실패(코드 ${res.status}): ${(res.stderr ?? '').slice(-2000)}`)
@@ -216,6 +244,26 @@ function cmdStats(o) {
       console.log(
         `| ${p.config} | ${p.n} | ${mean(p.before).toFixed(2)} (${sd(p.before).toFixed(2)}) | ${mean(p.after).toFixed(2)} (${sd(p.after).toFixed(2)}) | ${fmt(mean(p.diffs))}% | ${fmt(ti[0])} ~ ${fmt(ti[1])} | ${fmt(bi[0])} ~ ${fmt(bi[1])} | ${verdict(ti, limit)} |`,
       )
+    }
+  }
+}
+
+function cmdSummary(o) {
+  const rows = readRuns(o.in)
+  const metrics = (o.metric ?? 'worker_pct_avg6,iter_body_p50_us_avg6,iter_body_p99_us_avg6,worker_p_pct,netrecv_p_pct,worker_lpe_pct,conceal_max_pct,xruns').split(',')
+  for (const metric of metrics) {
+    const sum = summarize(rows, metric, o.set)
+    if (!sum.length) continue
+    const exes = [...new Set(sum.map((x) => x.exe))]
+    console.log(`\n### ${metric}${o.set ? ` (set ${o.set})` : ''} — 평균 ± 표준편차 (중앙값), n\n`)
+    console.log(`| 구성 | ${exes.join(' | ')} |`)
+    console.log(`|---|${exes.map(() => '---').join('|')}|`)
+    for (const config of [...new Set(sum.map((x) => x.config))]) {
+      const cell = (exe) => {
+        const x = sum.find((y) => y.exe === exe && y.config === config)
+        return x ? `${x.mean.toFixed(2)} ± ${x.sd.toFixed(2)} (${x.median.toFixed(2)}), ${x.n}` : '—'
+      }
+      console.log(`| ${config} | ${exes.map(cell).join(' | ')} |`)
     }
   }
 }
@@ -272,8 +320,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   if (cmd === 'run') cmdRun(o)
   else if (cmd === 'stats') cmdStats(o)
   else if (cmd === 'placement') cmdPlacement(o)
+  else if (cmd === 'summary') cmdSummary(o)
   else {
-    console.error('사용: node scripts/cpu-compare.mjs run|stats|placement … (파일 머리 주석 참고)')
+    console.error('사용: node scripts/cpu-compare.mjs run|stats|placement|summary … (파일 머리 주석 참고)')
     process.exit(2)
   }
 }

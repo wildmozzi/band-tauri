@@ -66,6 +66,8 @@ Opus 2.5ms 배치(워커 P% / 수신 P%):
 
 ## 4. 후속(백로그 후보)
 
+> 2번·3번은 2026-11-20에 교차 n = 11로 쟀다: [core-placement-2026-11-20.md](core-placement-2026-11-20.md). HighQoS + P 코어 선호를 기본 켬으로 바꿨고, 3절의 `set_high_qos`·`BAND_HIGH_QOS`는 `set_thread_policy`·`BAND_THREAD_POLICY`로 바뀌었다.
+
 1. [사람] 하이브리드 노트북에서 실제 앱으로 10분 연주한 뒤, 진단 내보내기의 `corePlacement`(워커·수신 P/E/LP-E)와 `cpu.workerPct`를 함께 본다. 배터리와 AC 전원을 각각 본다.
 2. HighQoS 옵션 효과: 코어 고정 없음 교차 n ≥ 10. 효과가 보이면 기본값 변경을 제안한다(사용자 결정).
 3. (낮음) P 코어 선호 CPU set(`SetThreadSelectedCpuSets`로 P만)은 P 코어가 4개뿐인 기계에서 다른 앱과 경쟁하므로, 위 두 근거를 본 뒤에 검토한다.
