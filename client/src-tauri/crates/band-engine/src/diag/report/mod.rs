@@ -1344,8 +1344,11 @@ fn conn_key(c: &ConnRow) -> (u64, &str, &str, &str) {
     (c.t, c.peer.as_str(), c.phase.as_str(), c.result.as_str())
 }
 
+/// 한 사람의 세션 기록 하나: (zip, 세션, 시간 범위 ms)
+type Rec<'a> = (&'a FileReport, &'a SessionReport, (u64, u64));
+
 /// 대표 기록 우선순위: 늦게 끝난 것 → 길게(일찍 시작한) 것 → 기록이 많은 것 → zip 이름. 입력 순서와 무관하게 하나로 정해진다.
-fn rep_rank<'a>(x: &(&'a FileReport, &'a SessionReport, (u64, u64))) -> (u64, std::cmp::Reverse<u64>, usize, usize, &'a str) {
+fn rep_rank<'a>(x: &Rec<'a>) -> (u64, std::cmp::Reverse<u64>, usize, usize, &'a str) {
     let (f, s, span) = x;
     (span.1, std::cmp::Reverse(span.0), s.conn.len(), s.peers.len(), f.source.as_str())
 }
@@ -1362,7 +1365,7 @@ fn units_of(files: &[FileReport]) -> Vec<Unit<'_>> {
 
     let mut units: Vec<Unit> = Vec::new();
     // (사람, 세션 번호) → 그 기록들
-    let mut by_who: BTreeMap<(&str, u64), Vec<(&FileReport, &SessionReport, (u64, u64))>> = BTreeMap::new();
+    let mut by_who: BTreeMap<(&str, u64), Vec<Rec>> = BTreeMap::new();
     for (file_key, f) in files.iter().enumerate().filter(|(_, f)| f.duplicate_of.is_none()) {
         let format3 = f.format.is_some_and(|x| x >= 3);
         for s in &f.sessions {
@@ -1376,7 +1379,7 @@ fn units_of(files: &[FileReport]) -> Vec<Unit<'_>> {
     for ((who, session), mut recs) in by_who {
         recs.sort_by(|x, y| x.2.cmp(&y.2).then_with(|| rep_rank(x).cmp(&rep_rank(y))));
         // 시작 순으로 훑어 겹치는 것끼리 한 무리(시작 순 정렬이라 사슬 A–B–C도 한 무리가 된다)
-        let mut groups: Vec<(u64, Vec<(&FileReport, &SessionReport, (u64, u64))>)> = Vec::new();
+        let mut groups: Vec<(u64, Vec<Rec>)> = Vec::new();
         for r in recs {
             match groups.last_mut() {
                 Some((end, g)) if r.2 .0 <= *end => {

@@ -1250,7 +1250,7 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
         }
         for i in 0..k {
             go(k - 1, a, out);
-            let j = if k % 2 == 0 { i } else { 0 };
+            let j = if k.is_multiple_of(2) { i } else { 0 };
             a.swap(j, k - 1);
         }
     }
