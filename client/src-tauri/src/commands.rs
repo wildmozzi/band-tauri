@@ -137,7 +137,7 @@ pub async fn engine_test_stop(state: State<'_, EngineState>) -> Result<(), Strin
     .await
 }
 
-/// 피어 추가(설계 4절). `entry_lead_ms`(선택): 입장(연주 시작, 또는 뒤에 들어온 연주자의 입장) → 이 호출까지(ms) — 진단
+/// 피어 추가(설계 4절). `entry_lead_ms`(선택): 내 입장(연주 시작) → 이 호출까지(ms) — 내가 시작할 때 이미 있던 연주자에만 온다(그 밖은 None). 진단
 /// 타임라인에만 남는다(GOAL 3-3 판정 근거). 옛 클라이언트는 보내지 않는다.
 #[tauri::command]
 pub async fn engine_add_peer(

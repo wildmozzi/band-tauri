@@ -41,13 +41,16 @@ export function noteAddPeer(t: FirstAudioTrack, peerId: string, now: number): Fi
 
 /**
  * 입장 → 지금 engine_add_peer 호출까지(ms, 엔진 진단 `entryLeadMs` — 결과표가 GOAL 3-3을 entryLeadMs + firstAudioMs로 가른다).
- * `noteAddPeer` 뒤에 같은 `now`로 부른다. 기준은 화면의 "첫 소리"와 같다(시작 때 있던 연주자 = 연주 시작, 뒤에 들어온 연주자 = 그 입장).
- * 이미 들린 피어를 다시 추가하면(상대 재시작 등) 엔진이 첫 소리를 새로 재므로 그 추가를 입장으로 보고 0이다. 기준이 없으면 null
+ * `noteAddPeer` 뒤에 같은 `now`로 부른다. GOAL 3-3의 "입장 후"는 **들어온 사람이** 이미 있던 연주자를 듣기까지라, 값은 내가 연주를
+ * 시작할 때 이미 있던 연주자(`startPeers`)에만 있다: 연주 시작 → 이 호출(#250 M1).
+ * - 뒤에 들어온 연주자: 상대의 입장(클릭 → 장치 열기·STUN)은 내 쪽에 보이지 않는다 — 그 사람의 입장은 그 사람의 zip이 잰다. null
+ * - 이미 들린 피어를 다시 추가(상대 재시작 등): 입장이 아니다. null
+ * - 들리기 전에 떠났다 다시 들어온 연주자(`notePeerLeft`로 `startPeers`에서 빠짐): 뒤에 온 연주자와 같다. null
+ * null은 엔진에 "모름"으로 간다(계약상 Option — 0과 다르다). 화면의 "첫 소리"(`base`)는 그대로다.
  */
 export function entryLeadMs(t: FirstAudioTrack, peerId: string, now: number): number | null {
-  if (t.heard.has(peerId)) return 0
-  const base = t.base.get(peerId)
-  return base === undefined ? null : Math.max(0, now - base)
+  if (t.heard.has(peerId) || !t.startPeers.has(peerId)) return null
+  return Math.max(0, now - t.startAt)
 }
 
 /**

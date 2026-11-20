@@ -17,7 +17,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use super::mask::mask_text;
-use super::timeline::{session_nat, session_placement, session_policy, session_send_queue, to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
+use super::timeline::{session_nat, session_placement, session_policy, session_self, session_send_queue, to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
 use super::Diagnostics;
 use band_dsp::config::EngineConfig;
 use crate::engine::device::DeviceInfo;
@@ -49,11 +49,14 @@ timeline.jsonl  1초 간격 엔진 통계(최근 최대 60분): 백엔드·장�
                 (highQos = 전원 조절 끄기, pCores = 고성능 코어 집합에 두기; pending/off/applied/failed/skipped).
                 값이 바뀐 줄(세션 첫 줄)에만 있고, engine.json lastStats에는 늘 있습니다.
                 rebuffers·rebufferMs(피어별 누적)는 상대 소리가 끊겨 지터 버퍼를 다시 채운 횟수와 그동안 소리가
-                없던 시간(ms)입니다. 0이면 줄에 없습니다. entryLeadMs는 입장(연주 시작 또는 그 연주자의 입장)에서
-                엔진에 피어를 추가하기까지(ms)이고 entryLeadMs + firstAudioMs가 \"입장 후 첫 소리\"입니다.
+                없던 시간(ms)입니다. 0이면 줄에 없습니다. entryLeadMs는 내 입장(연주 시작)에서 엔진에 그 피어를
+                추가하기까지(ms)이고 entryLeadMs + firstAudioMs가 \"입장 후 첫 소리\"입니다. 내가 들어올 때 이미 있던
+                연주자에만 있습니다(뒤에 들어온 연주자·다시 추가한 피어는 없음 — 그 사람의 입장은 그 사람의 zip에).
                 sendQueueP99Ms(송신 큐 지연 p99, ms)와 nat(STUN으로 추정한 NAT 매핑: open/independent/dependent/
                 unknown — independent가 콘형, dependent가 대칭형)은 값이 바뀐 줄에만 있습니다.
-logs/          최근 앱 로그(마스킹됨)
+                selfPeer는 내보낸 사람 자신의 가명(id-xxxxxxxx)입니다. 다른 연주자 zip의 peer 값과 같은 가명이라
+                결과표가 같은 합주의 zip끼리 짝을 맞춥니다. 값이 바뀐 줄(세션 첫 줄)에만 있습니다.
+logs/           최근 앱 로그(마스킹됨)
 
 넣지 않거나 가린 것
 - 로그인 토큰·릴레이 토큰·암호화 키·JWT: 넣지 않음 / 로그에서 <jwt>, <redacted>로 가림
@@ -228,6 +231,7 @@ pub fn build(
             s.thread_policy = session_policy(tl, s.session);
             // NAT 추정·송신 큐 p99도 값이 바뀐 줄에만 있다(format 3) — 그 세션의 마지막 값을 채운다.
             s.nat = session_nat(tl, s.session);
+            s.self_peer = session_self(tl, s.session);
             s.send_queue_p99_ms = s.send_queue_p99_ms.or_else(|| session_send_queue(tl, s.session));
             s
         });
@@ -244,7 +248,11 @@ pub fn build(
     let engine = EngineInfo {
         active: current.is_some(),
         last_stats: match &current {
-            Some(c) => Some(Sample { nat: c.nat, ..Sample::from_stats(now_ms, c.network, c.session, &c.stats) }),
+            Some(c) => Some(Sample {
+                nat: c.nat,
+                self_peer: c.self_peer.as_deref().map(super::mask::pseudonymize),
+                ..Sample::from_stats(now_ms, c.network, c.session, &c.stats)
+            }),
             None => last_sample,
         },
         config: current.map(|c| c.config).or(last_config),
@@ -518,7 +526,7 @@ mod tests {
         let d = Diagnostics::new(10);
         let mut stats = EngineStats::stopped();
         stats.running = true;
-        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 3, conn_events: vec![], nat: None }));
+        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 3, conn_events: vec![], nat: None, self_peer: None }));
         d.record(2_000, None);
         let dir = std::env::temp_dir().join(format!("band-diag-golden-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -563,7 +571,7 @@ mod tests {
         let mut stats = EngineStats::stopped();
         stats.running = true;
         let cfg = EngineConfig { buffer_size: 256, ..EngineConfig::default() };
-        let cur = EngineSnapshot { stats, config: cfg, network: false, session: 8, conn_events: vec![], nat: None };
+        let cur = EngineSnapshot { stats, config: cfg, network: false, session: 8, conn_events: vec![], nat: None, self_peer: None };
         let app = AppInfo { name: "Band".into(), version: "0.1.0".into() };
         let bytes = build(Some(cur), Err("열거 실패".into()), &d, app, None, 5_000).unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -590,7 +598,7 @@ mod tests {
             let mut stats = EngineStats::stopped();
             stats.running = true;
             stats.core_placement = Some(CorePlacementStats { worker: ThreadPlacement::from_counts(w[0], w[1], w[2]), net_recv: Some(ThreadPlacement::from_counts(w[0], 0, 0)) });
-            EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 4, conn_events: vec![], nat: None }
+            EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 4, conn_events: vec![], nat: None, self_peer: None }
         };
         let d = Diagnostics::new(10);
         d.record(1_000, Some(at([100, 0, 0])));
@@ -625,7 +633,7 @@ mod tests {
         old.remote_frame_ms = None;
         old.remote_input_buffer_ms = None;
         stats.peers.push(old);
-        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 1, conn_events: vec![], nat: None }));
+        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 1, conn_events: vec![], nat: None, self_peer: None }));
         let app = AppInfo { name: "Band".into(), version: "0.1.0".into() };
         let bytes = build(None, Ok(Vec::new()), &d, app, None, 2_000).unwrap();
         let mut z = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();

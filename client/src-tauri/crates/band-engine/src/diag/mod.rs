@@ -20,6 +20,7 @@ use parking_lot::{Condvar, Mutex};
 use band_dsp::config::EngineConfig;
 use crate::engine::report::{EndedConn, EngineSnapshot};
 use crate::net::connlog::ConnEvent;
+use mask::pseudonymize;
 use timeline::{ConnSample, Sample, Timeline, DEFAULT_CAPACITY, SAMPLE_INTERVAL_MS};
 
 struct Inner {
@@ -42,6 +43,8 @@ struct Inner {
     /// 마지막으로 타임라인에 적은 NAT 추정·송신 큐 p99(세션, 값) — 같은 값이면 줄에 다시 넣지 않는다(format 3).
     last_nat: Option<(u64, crate::net::NatProbe)>,
     last_send_queue: Option<(u64, f32)>,
+    /// 마지막으로 타임라인에 적은 내 가명(세션, 값) — 같은 값이면 줄에 다시 넣지 않는다(format 3, #250 H1).
+    last_self: Option<(u64, String)>,
 }
 
 /// 기억하는 세션 수(`conn_seen`).
@@ -103,6 +106,7 @@ impl Diagnostics {
                 last_policy: None,
                 last_nat: None,
                 last_send_queue: None,
+                last_self: None,
             }),
             busy: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -145,6 +149,15 @@ impl Diagnostics {
                     Some(q) => g.last_send_queue = Some((s.session, q)),
                     None => {}
                 }
+                // 내 가명(#250 H1)도 값이 바뀐 줄에만 — 진단에는 가명만 남는다(원래 peerId는 줄에 없다).
+                sample.self_peer = match s.self_peer.as_deref().map(pseudonymize) {
+                    Some(me) if g.last_self.as_ref() == Some(&(s.session, me.clone())) => None,
+                    Some(me) => {
+                        g.last_self = Some((s.session, me.clone()));
+                        Some(me)
+                    }
+                    None => None,
+                };
                 // 세션마다(엔진 재시작 = 새 Net) seq가 1부터 다시 센다
                 let fresh = g.take_new_conn(s.session, &s.conn_events);
                 sample.conn = std::mem::take(&mut g.pending_conn);
@@ -226,7 +239,7 @@ mod tests {
     fn snap(running: bool) -> EngineSnapshot {
         let mut stats = EngineStats::stopped();
         stats.running = running;
-        EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 7, conn_events: vec![], nat: None }
+        EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 7, conn_events: vec![], nat: None, self_peer: None }
     }
 
     /// 스레드 정책(P1-21 2단계): 타임라인에는 세션에서 값이 바뀐 줄에만 들어가고, 세션이 바뀌면 다시 들어간다.

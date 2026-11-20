@@ -217,6 +217,11 @@ pub struct Sample {
     /// (세션 첫 줄) 넣는다. 링이 넘쳐 그 줄을 버리면 같은 세션의 다음 줄로 옮긴다(`fold_dropped`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) nat: Option<crate::net::NatProbe>,
+    /// 내보낸 쪽 자신의 가명(`pseudonymize(내 peerId)` — 상대 zip의 `peers[].peer`와 같은 값, meta.format 3). 결과표 3-1이 zip을
+    /// "내보낸 사람"으로 묶고(같은 PC가 두 번 내보낸 zip은 한 사람) 참가자 모두의 zip이 있는지 짝을 맞춘다(#250 H1). 새 개인정보가
+    /// 아니다 — 같은 가명이 상대의 zip에 이미 피어 id로 들어간다. NAT처럼 같은 세션에서 **값이 바뀐 줄에만** 넣는다.
+    #[serde(rename = "selfPeer", skip_serializing_if = "Option::is_none")]
+    pub(crate) self_peer: Option<String>,
     /// 직전 샘플 뒤로 생긴 연결 이벤트(P1-18). 없으면 줄에 넣지 않는다(기존 줄 형식 그대로).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) conn: Vec<ConnSample>,
@@ -292,6 +297,7 @@ impl Sample {
             thread_policy: s.thread_policy,
             send_queue_p99_ms: s.send_queue.filter(|q| q.packets > 0).map(|q| (q.p99_ms * 100.0).round() / 100.0),
             nat: None,
+            self_peer: None,
             conn: Vec::new(),
         }
     }
@@ -322,6 +328,9 @@ impl Sample {
         if next.send_queue_p99_ms.is_none() {
             next.send_queue_p99_ms = dropped.send_queue_p99_ms;
         }
+        if next.self_peer.is_none() {
+            next.self_peer = dropped.self_peer;
+        }
     }
 }
 
@@ -348,6 +357,11 @@ pub(crate) fn session_policy(tl: &Timeline, session: u64) -> Option<crate::sys::
 /// 세션 `session`에서 마지막으로 기록된 NAT 추정·송신 큐 p99(값이 바뀐 줄에만 있는 값 — 내보내기 `lastStats`를 채운다).
 pub(crate) fn session_nat(tl: &Timeline, session: u64) -> Option<crate::net::NatProbe> {
     tl.iter().filter(|s| s.session == session).filter_map(|s| s.nat).last()
+}
+
+/// 세션 `session`에서 마지막으로 기록된 내 가명(`selfPeer`, 값이 바뀐 줄에만 있다 — 내보내기 `lastStats`를 채운다).
+pub(crate) fn session_self(tl: &Timeline, session: u64) -> Option<String> {
+    tl.iter().filter(|s| s.session == session).filter_map(|s| s.self_peer.clone()).last()
 }
 
 pub(crate) fn session_send_queue(tl: &Timeline, session: u64) -> Option<f32> {

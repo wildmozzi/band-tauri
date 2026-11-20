@@ -251,11 +251,11 @@ impl Net {
         }
         // 두 서버에 동시에 질의(전체 1.5초 상한)
         let servers: Vec<String> = opts.stun_servers.iter().take(2).cloned().collect();
-        let stun_found = stun::query_many(&socket, &servers, Duration::from_millis(1500), opts.cancel.as_deref());
+        let stun_found = stun::query_many_from(&socket, &servers, Duration::from_millis(1500), opts.cancel.as_deref());
         // NAT 매핑 추정(진단 3-1): 두 서버가 본 공인 주소가 같은지. 이미 받은 응답만 쓴다(추가 질의 없음).
-        let nat = stun::classify_nat(port, &lan_addresses(), &stun_found.iter().map(|(_, a)| *a).collect::<Vec<_>>());
+        let nat = stun::classify_nat(port, &lan_addresses(), &stun_found.iter().map(|(_, s, a)| (*s, *a)).collect::<Vec<_>>());
         log::info!("NAT 매핑 추정: {:?} (STUN 응답 {}개)", nat.mapping, nat.responses);
-        for (server, a) in stun_found {
+        for (server, _, a) in stun_found {
             let s = a.to_string();
             log::info!("STUN {server}: 공인 주소 {s}");
             if !candidates.iter().any(|c| c.addr == s) {
@@ -498,6 +498,11 @@ impl Net {
     /// 시작 때 STUN 결과로 정한 NAT 매핑 추정(진단 기록용, 결과표 3-1).
     pub(crate) fn nat_probe(&self) -> stun::NatProbe {
         self.shared.nat
+    }
+
+    /// 시작 때 받은 내 peerId(진단 기록용 — 진단은 가명으로만 남긴다).
+    pub(crate) fn local_peer_id(&self) -> &str {
+        &self.shared.local_peer_id
     }
 
     /// 직전 창의 송신 큐 지연(`EngineStats.sendQueue`).

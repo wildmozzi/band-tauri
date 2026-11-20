@@ -393,8 +393,8 @@ describe('PerformSession 피어/엔진 상태', () => {
     engine.peerStats = [ps('B', 350), ps('C', 200)]
     await session.pollStats()
     expect(session.getState().firstAudio).toEqual({ firstMs: 200, lastMs: 750, heard: 2, total: 2 })
-    // 진단(GOAL 3-3): 입장 → add_peer를 엔진에 넘긴다 — B는 연주 시작부터 400ms, C는 자기 입장에 바로 추가돼 0
-    expect(Object.fromEntries(engine.entryLeads)).toEqual({ B: 400, C: 0 })
+    // 진단(GOAL 3-3): 입장 → add_peer를 엔진에 넘긴다 — B는 연주 시작부터 400ms. 뒤에 온 C는 내 쪽에서 입장 구간을 모르므로 null(#250 M1)
+    expect(Object.fromEntries(engine.entryLeads)).toEqual({ B: 400, C: null })
     await session.stop()
     expect(session.getState().firstAudio).toBeNull()
   })

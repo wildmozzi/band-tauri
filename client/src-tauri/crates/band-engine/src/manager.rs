@@ -438,6 +438,7 @@ impl EngineManager {
             session: s.generation,
             conn_events: e.conn_events(),
             nat: e.nat_probe(),
+            self_peer: e.self_peer_id(),
         })
     }
 

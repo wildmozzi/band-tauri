@@ -7,9 +7,10 @@
 //! 이름이 달라지면 시험 `report_reads_real_export`(실제 `diag::export::build`로 만든 zip을 읽는다)가 깨진다. 설정은 `EngineConfig`,
 //! 손실 모양은 `LossShapeStats` 타입으로 그대로 역직렬화한다.
 //!
-//! meta.format 3(진단 값 노출)부터 읽는 것: 피어 `rebuffers`·`rebufferMs`(리버퍼 실측 — 2-1 "소리 없는 시간"을 기대치 추정 대신
-//! 이 값으로), `entryLeadMs`(입장 → 피어 추가 — 3-3을 `entryLeadMs + firstAudioMs`로), 줄의 `nat`(STUN 매핑 추정 — 3-1 콘형 쌍),
-//! `sendQueueP99Ms`·`relay`·`txCodec`(요약 표). format 3 미만이면 이 값들이 없다고 보고 예전 방식(추정·판정 불가)을 그대로 쓴다.
+//! meta.format 3(진단 값 노출)부터 읽는 것: 피어 `rebuffers`·`rebufferMs`(리버퍼 실측 — 2-1 "소리 없는 시간"은 이 값과 기대치
+//! 비교 추정 중 **큰 쪽**, #250 H2), `entryLeadMs`(내 입장 → 피어 추가 — 시작 때 있던 연주자에만 있다. 3-3을 `entryLeadMs +
+//! firstAudioMs`로, 없는 항목은 참고값, #250 M1), 줄의 `nat`(STUN 매핑 추정)·`selfPeer`(내보낸 쪽 가명 — 3-1 콘형 쌍의 짝 맞추기,
+//! #250 H1), `sendQueueP99Ms`·`relay`·`txCodec`(요약 표). format 3 미만이면 이 값들이 없다고 보고 예전 방식(추정·판정 불가)을 쓴다.
 //!
 //! 판정은 [`goal`]의 기준값(GOAL.md 절 번호 주석)과 나란히 놓고 충족/미달/판정 불가로 적는다. 데이터가 없거나, 세션이 기준보다
 //! 짧거나, 측정 구간·분모가 GOAL 정의와 다르면 "판정 불가"와 이유를 적는다 — 충족은 근거가 완전할 때만 쓴다(#246 리뷰: 은닉 %의
@@ -79,9 +80,12 @@ pub(crate) mod goal {
     /// 도구 규칙(GOAL에 없음): 성공률 98%를 "충족"으로 가르려면 시도 50회 이상(1회 실패 = 2%p). 그보다 적으면 실패가
     /// 있어 98% 아래일 때만 "미달"이다.
     pub(crate) const MIN_ATTEMPTS_98: usize = 50;
-    /// 도구 규칙(GOAL에 없음): 3-1 "콘형 NAT 쌍 직접 100%"를 충족으로 가르는 최소 시도 수(콘형으로 확인된 무리의 connect + reconnect,
-    /// 양쪽 zip 합). 양쪽에서 하나씩은 있어야 한다.
-    pub(crate) const MIN_CONE_ATTEMPTS: usize = 2;
+    /// 도구 규칙(GOAL에 없음, #250 M2): 3-1 "콘형 NAT 쌍 직접 100%"를 충족으로 가르는 최소 표본. 짝이 확인된 콘형 쌍이
+    /// `MIN_CONE_PAIRS` 이상이고, 그 안의 **실제 시도 수 하한**(무리마다 엔드포인트별 시도 수 중 큰 쪽 — 같은 연결이 양쪽 zip에 한 번씩
+    /// 남으므로 합하지 않는다)이 `MIN_CONE_ATTEMPTS` 이상이어야 한다. 3회는 TEST-SESSION의 반복 횟수(다른 네트워크 연결 3회, P1-20
+    /// 행)와 같다 — 한 번의 연결로 "100%"를 내지 않는다. 그보다 적으면 판정 불가(직접이 아닌 시도가 있으면 수와 상관없이 미달).
+    pub(crate) const MIN_CONE_PAIRS: usize = 1;
+    pub(crate) const MIN_CONE_ATTEMPTS: usize = 3;
 }
 
 /// 판정.
@@ -241,14 +245,18 @@ pub(crate) struct Conceal {
     /// 지터 버퍼가 리셋되면 패킷이 다시 와 채울 때까지 `produced`도 `concealed`도 늘지 않는다(`playout.rs` `STARVE_RESET_MS`, 피어는
     /// 계속 `connected`). 그 시간은 은닉 %에 안 보이므로 따로 센다(#246 H1'). 쌍 하나라도 `produced`·상대 프레임 길이가 없으면 None
     pub(crate) silent_s: Option<f64>,
-    /// `silent_s`가 엔진 리버퍼 실측(`rebufferMs` 차분, format 3)이다. 모든 연결 구간에 카운터가 있을 때만 참 — 그때는 끝 오차를 빼지
-    /// 않고(카운터는 처음 채우는 시간을 세지 않는다) 실측 전부를 상한에 넣는다. 거짓이면 기대치 비교 추정이다.
+    /// 모든 연결 구간에 엔진 리버퍼 실측(`rebufferMs` 차분, format 3)이 있다. 참이어도 `silent_s`는 구간마다 실측과 기대치 추정 중
+    /// **큰 쪽**이다(#250 H2): 실측은 처음 채우기(연결됐지만 소리 미도착)·리버퍼로 세지 않는 정지(워커·출력 스트림 정지)·카운터
+    /// 리셋을 못 보고, 추정은 장치 클록이 빠를 때 진짜 무음을 조금 가린다 — 보수적인 쪽을 쓴다.
     pub(crate) silent_measured: bool,
-    /// 기대치 비교로 추정한 소리 없는 시간(s, 참고 — 실측과 크게 다르면 장치 클록 차·기록 누락을 의심). 모르면 None
+    /// 리버퍼 실측 합(s, 모든 구간에 카운터가 있을 때만). 없으면 None
+    pub(crate) silent_counter_s: Option<f64>,
+    /// 기대치 비교로 추정한 소리 없는 시간(s, 구간마다 0 아래를 자른 합). 모르면 None
     pub(crate) silent_est_s: Option<f64>,
     /// 무수신 재버퍼 횟수(`rebuffers` 차분 합, format 3). 없으면 None
     pub(crate) rebuffers: Option<u64>,
-    /// 2-1 상한에 넣은 소리 없는 시간(s): 첫 구간 `max(0, 무음 − SILENT_EDGE_S)` + 뒤 구간 무음 전부(#246 H1''')
+    /// 2-1 상한에 넣은 소리 없는 시간(s): 구간마다 `max(실측, 추정 − 끝 오차)` — 끝 오차(`SILENT_EDGE_S`)는 첫 구간의 추정에서만
+    /// 뺀다(#246 H1''', #250 H2). 실측이 없는 구간(format 3 미만)은 추정만
     pub(crate) silent_hi_s: Option<f64>,
     /// 연결 구간 수(재생 기록이 있는 이어진 `connected` 표본 쌍 묶음). 2 이상이면 재연결·재입장이 있었다(#246 L3)
     pub(crate) runs: usize,
@@ -615,8 +623,9 @@ struct PeerAcc {
     play_span_ms: f64,
     /// 지금 연결 구간: (기대 시간 ms, 재생 프레임 × F ms, 마지막 F, 리버퍼 실측 ms — 쌍 하나라도 카운터가 없으면 None)
     run: Option<(f64, f64, f64, Option<f64>)>,
-    /// 닫힌 구간 중 리버퍼 실측을 쓴 수, 기대치 추정 무음 합(ms, 참고)
+    /// 닫힌 구간 중 리버퍼 실측이 있는 수와 그 합(ms), 기대치 추정 무음 합(ms)
     measured_runs: usize,
+    silent_counter_ms: f64,
     silent_est_ms: f64,
     /// 연결 샘플의 내 송신 코덱
     tx_codec: BTreeMap<String, usize>,
@@ -633,21 +642,23 @@ struct PeerAcc {
 impl PeerAcc {
     /// 연결 구간을 닫는다. 구간마다 따로 0 아래를 자르므로, 한 구간의 음수(장치 클록이 빠름)가 다른 구간의 진짜 무음을 지우지 않는다(#246 L2'').
     /// 끝 오차(`SILENT_EDGE_S`)는 첫 구간에서만 뺀다 — 빼는 총량이 구간 수에 비례하지 않게(#246 H1''').
-    /// 리버퍼 실측(format 3)이 있으면 그것을 무음으로 쓴다: 카운터는 재생하던 스트림이 끊겨 다시 채운 시간만 세고 처음 채우기는
-    /// 세지 않으므로 끝 오차를 빼지 않고 전부 상한에 넣는다(2-1 보수성 유지). 기대치 추정은 참고로 따로 남긴다.
+    /// 리버퍼 실측(format 3)이 있으면 구간마다 실측과 추정 중 **큰 쪽**을 쓴다(#250 H2). 실측만 쓰면 카운터가 못 보는 무음 — 처음
+    /// 채우기(연결됐지만 소리 미도착), 리버퍼로 세지 않는 정지(워커·출력 스트림 정지/재시작: 지터는 `Playing`인데 pop이 안 됨),
+    /// 카운터 리셋 — 이 상한에서 통째로 빠져 충족이 났다. 실측은 끝 오차 없이 전부, 추정은 첫 구간에서만 끝 오차를 뺀 값으로 견준다.
+    /// 장치 클록 차로 생기는 추정 오차(±200ppm이면 60분에 0.72초)는 장치가 느리면 충족을 어렵게 하는 쪽이고, 빠르면 실측이 받친다.
     fn close_run(&mut self) {
         if let Some((span, got, f, counter)) = self.run.take() {
             let est = (span - got).max(0.0);
             self.silent_est_ms += est;
+            let edge = if self.runs == 0 { goal::SILENT_EDGE_S * 1000.0 } else { 0.0 };
+            let est_hi = (est - edge).max(0.0);
             let (silent, hi) = match counter {
                 Some(c) => {
                     self.measured_runs += 1;
-                    (c, c)
+                    self.silent_counter_ms += c;
+                    (c.max(est), c.max(est_hi))
                 }
-                None => {
-                    let edge = if self.runs == 0 { goal::SILENT_EDGE_S * 1000.0 } else { 0.0 };
-                    (est, (est - edge).max(0.0))
-                }
+                None => (est, est_hi),
             };
             self.runs += 1;
             self.silent_ms += silent;
@@ -911,6 +922,7 @@ fn analyze_session(session: u64, lines: &[&Value], cfg: Option<ConfigSummary>, i
                     playing_span_s: a.play_span_ms / 1000.0,
                     silent_s: (!a.play_unknown).then_some(a.silent_ms / 1000.0),
                     silent_measured: a.runs > 0 && a.measured_runs == a.runs,
+                    silent_counter_s: (a.runs > 0 && a.measured_runs == a.runs).then_some(a.silent_counter_ms / 1000.0),
                     silent_est_s: (!a.play_unknown).then_some(a.silent_est_ms / 1000.0),
                     rebuffers,
                     silent_hi_s: silent_hi.map(|(ms, _)| ms / 1000.0),
@@ -1055,18 +1067,20 @@ pub(crate) fn pct_range(lo: Option<f64>, hi: Option<f64>) -> String {
     }
 }
 
-/// 소리 없는 시간 표기(2-1 행과 피어 표가 같이 쓴다). 리버퍼 실측(format 3)이면 "실측"과 재버퍼 횟수·추정값을 붙인다.
+/// 소리 없는 시간 표기(2-1 행과 피어 표가 같이 쓴다). 리버퍼 실측(format 3)이 있으면 실측·추정을 나란히 적는다 — 쓰는 값은 구간마다
+/// 큰 쪽이다(#250 H2).
 pub(crate) fn silent_text(c: &Conceal) -> String {
     let base = match c.silent_s {
         Some(s) if c.playing_span_s > 0.0 => format!("{s:.1}s({:.1}%)", s * 100.0 / c.playing_span_s),
         Some(s) => format!("{s:.1}s"),
         None => return "모름(produced·상대 프레임 미기록)".into(),
     };
-    if c.silent_measured {
-        let est = c.silent_est_s.map(|e| format!(", 기대치 추정 {e:.1}s")).unwrap_or_default();
-        format!("{base} 실측(재버퍼 {}회{est})", c.rebuffers.unwrap_or(0))
-    } else {
-        base
+    match (c.silent_measured, c.silent_counter_s) {
+        (true, Some(m)) => {
+            let est = c.silent_est_s.map(|e| format!(" · 기대치 추정 {e:.1}s")).unwrap_or_default();
+            format!("{base}(리버퍼 실측 {m:.1}s · 재버퍼 {}회{est} — 구간마다 큰 쪽)", c.rebuffers.unwrap_or(0))
+        }
+        _ => base,
     }
 }
 
@@ -1083,7 +1097,7 @@ fn conceal_verdict(conceal: (f64, f64), loss: (f64, f64), dup_dropped: Option<u6
     let (cond, max) = (goal::CONCEAL_LOSS_COND_PCT, goal::CONCEAL_MAX_PCT);
     let range = |(lo, hi): (f64, f64)| if hi > lo { format!("{lo:.2}–{hi:.2}%") } else { format!("{lo:.2}%") };
     let silent_note = || format!("소리 없는 시간 {:.1}s(상한에 {:.1}s를 은닉·손실로 넣음)", silent.0, silent.1);
-    // 리버퍼 실측(format 3)이면 상한에 넣은 시간 = 실측 전부다(끝 오차를 빼지 않는다) — 판정 규칙은 같다.
+    // 리버퍼 실측(format 3)이 있어도 상한에 넣는 시간은 구간마다 실측과 추정 중 큰 쪽이다(#250 H2) — 판정 규칙은 같다.
     if loss.0 >= cond && conceal.1 <= max {
         return (Verdict::Met, Some("수치만 — 청감은 [사람]".into()));
     }

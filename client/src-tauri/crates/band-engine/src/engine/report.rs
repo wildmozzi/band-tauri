@@ -228,6 +228,9 @@ pub struct EngineSnapshot {
     pub conn_events: Vec<crate::net::connlog::ConnEvent>,
     /// 시작 때 STUN으로 정한 NAT 매핑 추정(결과표 3-1). 네트워크 없는 엔진이면 None.
     pub nat: Option<crate::net::NatProbe>,
+    /// 내 peerId(엔진 시작 때 받은 값). 진단은 가명(`diag::mask::pseudonymize` — 상대 zip의 피어 가명과 같은 값)으로만 남겨
+    /// 결과표가 "누가 내보낸 zip인지"로 zip을 묶고 짝을 맞춘다(3-1, #250 H1). 네트워크 없는 엔진이면 None.
+    pub self_peer: Option<String>,
 }
 
 /// 정지한 엔진의 마지막 연결 이벤트(P1-18, #145 M-1). 정지 때 생긴 `aborted`는 엔진이 사라진 뒤라 스냅샷으로는
@@ -262,6 +265,11 @@ impl Engine {
     /// 시작 때 STUN으로 정한 NAT 매핑 추정(진단 3-1). 네트워크 없는 엔진·정지 뒤면 None.
     pub fn nat_probe(&self) -> Option<crate::net::NatProbe> {
         self.net.as_ref().map(|n| n.nat_probe())
+    }
+
+    /// 엔진 시작 때 받은 내 peerId(진단이 가명으로만 기록 — 결과표 3-1의 zip 짝 맞추기). 네트워크 없는 엔진이면 None.
+    pub fn self_peer_id(&self) -> Option<String> {
+        self.net.as_ref().map(|n| n.local_peer_id().to_string())
     }
 
     pub fn stats(&self) -> EngineStats {

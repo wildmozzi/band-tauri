@@ -669,8 +669,9 @@ export function engineTestStop(): Promise<null> {
 }
 
 /**
- * 피어 추가. `entryLeadMs`(선택): 입장(내 연주 시작, 또는 뒤에 들어온 연주자의 입장) → 이 호출까지(ms). 엔진은 진단 타임라인에만
- * 남긴다(결과표 GOAL 3-3 "입장 후 3초 이내 소리" = entryLeadMs + firstAudioMs). 옛 엔진은 모르는 인자를 무시한다.
+ * 피어 추가. `entryLeadMs`(선택): 내 입장(연주 시작) → 이 호출까지(ms) — 내가 시작할 때 이미 있던 연주자에만 주고, 뒤에 온 연주자·재추가는
+ * null(모름, 0과 다르다). 엔진은 진단 타임라인에만 남긴다(결과표 GOAL 3-3 "입장 후 3초 이내 소리" = entryLeadMs + firstAudioMs). 이 호출은 엔진
+ * `blocking` 큐에 들어가기 전에 재므로, 큐 대기(보통 수 ms)는 합에 없다(#250 L5). 옛 엔진은 모르는 인자를 무시한다.
  */
 export function engineAddPeer(peerId: string, descriptor: LocalDescriptor, entryLeadMs?: number | null): Promise<null> {
   return invoke<null>('engine_add_peer', { peerId, descriptor, entryLeadMs: entryLeadMs ?? null })

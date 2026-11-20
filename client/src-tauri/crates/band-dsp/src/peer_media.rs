@@ -206,9 +206,9 @@ impl PeerMediaShared {
         Self { key, peer_id, ssrc, mix: PeerMixCtl::default(), stats: MediaStatsCell::default(), restart_req: AtomicU32::new(0), added_us, entry_lead: AtomicU64::new(0) }
     }
 
-    /// 입장(클라이언트 기준: 연주 시작, 또는 뒤에 들어온 연주자의 입장) → 이 `add_peer` 호출까지(ms). 음수·NaN·None은 모름.
+    /// 내 입장(클라이언트 기준: 연주 시작) → 이 `add_peer` 호출까지(ms). 음수·NaN·None은 모름(뒤에 온 연주자·재추가는 클라이언트가 None).
     pub fn set_entry_lead_ms(&self, ms: Option<f32>) {
-        let v = ms.filter(|m| m.is_finite() && *m >= 0.0).map_or(0, |m| (m as f64 * 1000.0).round() as u64 + 1);
+        let v = ms.filter(|m| m.is_finite() && *m >= 0.0).map_or(0, |m| ((m as f64 * 1000.0).round() as u64).saturating_add(1));
         self.entry_lead.store(v, Ordering::Relaxed);
     }
 
@@ -614,6 +614,9 @@ mod tests {
         assert_eq!(pm.shared.entry_lead_ms(), Some(1234.5));
         pm.shared.set_entry_lead_ms(Some(0.0));
         assert_eq!(pm.shared.entry_lead_ms(), Some(0.0));
+        // 아주 큰 유한값: `as u64`가 포화해도 +1이 넘치지 않는다(#250 L1 — debug panic 없음)
+        pm.shared.set_entry_lead_ms(Some(f32::MAX));
+        assert!(pm.shared.entry_lead_ms().is_some_and(|v| v > 1e9));
         for bad in [Some(-1.0), Some(f32::NAN), Some(f32::INFINITY), None] {
             pm.shared.set_entry_lead_ms(bad);
             assert_eq!(pm.shared.entry_lead_ms(), None, "{bad:?}");
