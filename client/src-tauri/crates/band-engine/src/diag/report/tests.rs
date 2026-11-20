@@ -724,5 +724,89 @@ fn fast_clock_run_does_not_cancel_silence_elsewhere() {
     let r = report_of("l2.zip", &text);
     let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
     assert!((c.silent_s.unwrap() - 10.0).abs() < 1e-9, "{c:?}");
-    assert!((c.silent_hi_s.unwrap() - 9.5).abs() < 1e-9, "{c:?}");
+    // 끝 오차는 첫 구간(A)에서만 뺀다 — 재연결 뒤 구간 B의 무음은 전부 상한에 든다(#246 H1''')
+    assert!((c.silent_hi_s.unwrap() - 10.0).abs() < 1e-9, "{c:?}");
+    assert_eq!(c.runs, 2);
+}
+
+// ---- #246 4차 리뷰: H1''' ----
+
+/// `total`초, `period`초마다 `reconnecting` 표본 하나(`i % period == 0`), 구간마다 첫 쌍에서 `silent_ms` 무음(1초 쌍에 재생
+/// 1000 − silent_ms ms). F 5ms, 은닉 1.40%·복구 후 손실 1.10%(재생 프레임 기준), LAN, 사본 0.
+fn reconnecting_session(total: u64, period: u64, silent_ms: u64) -> Report {
+    let mut text = String::new();
+    let mut produced = 0u64;
+    for i in 0..=total {
+        let connected = i % period != 0;
+        if connected && i % period == 2 {
+            produced += (1000 - silent_ms) / 5;
+        } else if connected && i % period > 2 {
+            produced += 200;
+        }
+        let p = serde_json::json!({
+            "peer": "id-r", "state": if connected { "connected" } else { "reconnecting" }, "path": "lan",
+            "bufferMs": 10.0, "jitterMs": 1.0, "targetMs": 10.0,
+            "concealed": 1400 * produced / 100_000, "produced": produced, "rxDupDropped": 0,
+            "lossShape": shape_json(5.0, 1100 * produced / 100_000, 0),
+        });
+        text += &line(i, 1, "wasapiExclusive", vec![p]);
+    }
+    report_of("r.zip", &text)
+}
+
+/// H1''' 재현(4차 리뷰 표): 끝 오차 0.5s를 구간마다 빼면 재연결이 잦을 때 무음이 "구간 수 × 0.5s"까지 상한에서 빠져 충족이 났다.
+/// 빼는 총량은 구간 수와 상관없이 `SILENT_EDGE_S` 이하여야 한다.
+#[test]
+fn frequent_reconnects_do_not_erase_silence() {
+    // 600s, 3s마다 재연결(구간 200개), 구간마다 0.5s 무음 → 기대 재생 200s 중 100s 무음
+    let r = reconnecting_session(600, 3, 500);
+    let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+    assert_eq!(c.runs, 200, "{c:?}");
+    assert!((c.playing_span_s - 200.0).abs() < 1e-9 && (c.silent_s.unwrap() - 100.0).abs() < 1e-9, "{c:?}");
+    assert!((c.silent_s.unwrap() - c.silent_hi_s.unwrap() - goal::SILENT_EDGE_S).abs() < 1e-9, "{c:?}");
+    let g = verdict_21(&r);
+    assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
+    let note = g.note.as_deref().unwrap();
+    assert!(note.contains("< 상한") && note.contains("연결 구간 200개(재연결·재입장 199회)"), "{g:?}");
+
+    // 600s, 12s마다 재연결(구간 50개), 구간마다 0.5s 무음 → 25s(5%) 무음
+    let r = reconnecting_session(600, 12, 500);
+    let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+    assert_eq!(c.runs, 50, "{c:?}");
+    assert!((c.silent_s.unwrap() - 25.0).abs() < 1e-9 && (c.silent_hi_s.unwrap() - 24.5).abs() < 1e-9, "{c:?}");
+    assert_ne!(verdict_21(&r).verdict, Verdict::Met, "{:?}", verdict_21(&r));
+
+    // 빼는 총량 ≤ 고정 상수: 구간 수를 늘려도 (무음 − 상한에 넣은 무음)은 SILENT_EDGE_S를 넘지 않는다
+    for period in [3, 5, 12, 60] {
+        let r = reconnecting_session(600, period, 500);
+        let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+        assert!(c.silent_s.unwrap() - c.silent_hi_s.unwrap() <= goal::SILENT_EDGE_S + 1e-9, "{period}: {c:?}");
+    }
+}
+
+/// 정상 세션: 3600s에 재연결 1회(재연결 뒤 리버퍼 0.5s 무음, 또는 무음 없음)면 은닉 1.40%가 충족을 유지한다.
+#[test]
+fn one_reconnect_session_stays_met() {
+    for silent_ms in [0, 500] {
+        let r = reconnecting_session(3600, 1800, silent_ms);
+        let c = r.files[0].sessions[0].peers[0].conceal.as_ref().unwrap();
+        assert_eq!(c.runs, 2, "{c:?}");
+        assert!(c.pct_hi.unwrap() <= goal::CONCEAL_MAX_PCT, "{c:?}");
+        let g = verdict_21(&r);
+        assert_eq!(g.verdict, Verdict::Met, "{silent_ms}: {g:?}");
+        assert!(g.note.as_deref().unwrap().contains("연결 구간 2개(재연결·재입장 1회)"), "{g:?}");
+    }
+    // 재연결 없는 세션은 구간 수를 비고에 적지 않는다
+    let g = verdict_21(&silent_session(600, 0, 1400, 1100)).clone();
+    assert_eq!(g.note.as_deref(), Some("수치만 — 청감은 [사람]"), "{g:?}");
+}
+
+/// L2: 은닉이 문턱에 걸치고 손실도 조건 아래면 비고에 손실 쪽도 적는다.
+#[test]
+fn straddling_note_mentions_low_loss() {
+    let r = silent_session(600, 13, 1400, 500);
+    let g = verdict_21(&r);
+    assert_eq!(g.verdict, Verdict::Unknown, "{g:?}");
+    let note = g.note.as_deref().unwrap();
+    assert!(note.contains("< 상한") && note.contains("도 조건 1%"), "{g:?}");
 }
