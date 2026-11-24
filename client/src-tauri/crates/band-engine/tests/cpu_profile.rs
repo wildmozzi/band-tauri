@@ -194,7 +194,7 @@ fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
 #[ignore = "측정 도구: cargo test --release --test cpu_profile -- --ignored --nocapture"]
 fn six_peer_full_mesh_cpu() {
     // P1-21 2단계 비교: 엔진이 환경변수 `BAND_THREAD_POLICY` = off | highqos | pcores | both를 직접 읽는다(제품 빌드와 같은
-    // 경로, 옛 이름 qos·qos+pcores도 받음). 비우면 엔진 설정 기본값(둘 다 꺼짐)이라 `default`로 적는다. 실제 적용 결과는
+    // 경로, 옛 이름 qos·qos+pcores도 받음). 비우면 엔진 설정 기본값(HighQoS 켬, P 코어 끔)이라 `default`로 적는다. 실제 적용 결과는
     // 아래 `배치 |` 줄 끝에 찍힌다.
     let policy = match std::env::var("BAND_THREAD_POLICY").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
         "" => "default".to_string(),
