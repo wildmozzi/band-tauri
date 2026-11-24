@@ -90,7 +90,7 @@ export interface EngineConfig {
   udpPort?: number
   /** 리샘플러 품질(P2-17e). 없으면 auto */
   resampleQuality?: ResampleQuality
-  /** 엔진 스레드 코어 배치 정책(P1-21 2단계, 실험적). 없으면 둘 다 꺼짐 */
+  /** 엔진 스레드 코어 배치 정책(P1-21). 없으면 기본값 — HighQoS 켬·P 코어 정책 끔(위 `ThreadPolicyConfig`) */
   threadPolicy?: ThreadPolicyConfig
 }
 

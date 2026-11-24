@@ -44,17 +44,23 @@ pub(crate) const SEVERE_XRUNS: u32 = 8;
 pub(crate) const SEVERE_STALLS: u32 = 40;
 /// 나쁜 창이 연속 이만큼이면 푼다(한 번 튄 것으로는 풀지 않는다).
 pub(crate) const RELEASE_AFTER_BAD: u32 = 2;
-/// 푼 뒤 다시 묶기까지 최소로 기다리는 창 수(처음). 다시 묶자마자 또 풀리면 두 배씩 늘어 `HOLD_MAX`까지 간다.
+/// 푼 뒤 다시 묶기까지 최소로 기다리는 창 수(처음). 풀림이 `REPEAT_WINDOWS` 안에 되풀이되면 두 배씩 늘어 `HOLD_MAX`까지 간다.
 pub(crate) const HOLD_MIN: u32 = 10;
 pub(crate) const HOLD_MAX: u32 = 320;
 /// 다시 묶으려면 푼 상태에서 좋은 창이 연속 이만큼.
 pub(crate) const REBIND_GOOD: u32 = 5;
 /// 다시 묶으려면 P 코어 바쁨이 이 % 미만(추정값이 있을 때만 본다 — 없으면 기다린 시간과 좋은 창만으로 정한다).
 pub(crate) const REBIND_BUSY_BELOW_PCT: u8 = 60;
-/// (다시) 묶고 이 창 수 안에 또 풀리면 "묶은 것이 원인"으로 보고 기다림을 두 배로 한다.
-pub(crate) const PROBE_WINDOWS: u32 = 15;
-/// 묶은 채 이 창 수를 버티면 기다림을 `HOLD_MIN`으로 되돌린다.
-pub(crate) const STABLE_WINDOWS: u32 = 60;
+/// 직전 풀림에서 이 창 수(10분) 안에 또 풀리면 "되풀이되는 풀림"으로 보고 기다림을 두 배로 한다. 이 창 수 동안 풀림이 없으면
+/// 다음 풀림의 기다림은 `HOLD_MIN`부터다.
+///
+/// 묶은 뒤 **언제** 풀리든(묶자마자든 30초 뒤든) 같은 규칙이라, 경합이 계속되는 환경에서 풀고 묶기를 되풀이하는 횟수에는 묶여
+/// 버틴 시간과 상관없이 시간당 상한이 있다(#258 리뷰 M1 — 옛 규칙은 "묶은 지 15창 안"만 실패로 세고 "60창 버팀"에 되돌려,
+/// 16..59창에 풀리는 환경에서는 기다림이 늘지 않아 약 30초마다 풀고 묶었다). `HOLD_MAX`(320) < `REPEAT_WINDOWS`(600)라
+/// 기다림이 최대에 이른 뒤에도 다시 묶은 지 280창 안에 풀리면 최대에 머문다.
+pub(crate) const REPEAT_WINDOWS: u32 = 600;
+/// 엔진 시작 직후 이 창 수는 판단하지 않는다(장치 예열·피어 연결의 xrun을 고정 탓으로 세지 않게 — #258 리뷰 L3).
+pub(crate) const WARMUP_WINDOWS: u32 = 3;
 
 /// 1초 창 하나의 관측.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -100,9 +106,9 @@ pub(crate) enum Verdict {
 
 /// 조건부 고정 상태 기계. 묶인 상태로 시작한다.
 ///
+/// - **시작 직후** `WARMUP_WINDOWS`창은 보지 않는다(묶인 채 유지, 어떤 연속에도 넣지 않는다).
 /// - **묶인 상태**: 심한 창 하나 또는 나쁜 창 연속 `RELEASE_AFTER_BAD`개 → 푼다. 푼 뒤 최소 `backoff`창은 다시 묶지 않는다.
-///   (다시) 묶고 `PROBE_WINDOWS`창 안에 풀렸으면 다음 기다림을 두 배로(`HOLD_MAX`까지), `STABLE_WINDOWS`창을 버텼으면
-///   기다림을 `HOLD_MIN`으로 되돌린다.
+///   직전 풀림에서 `REPEAT_WINDOWS`창 안에 또 풀렸으면 기다림을 두 배로(`HOLD_MAX`까지), 아니면(첫 풀림 포함) `HOLD_MIN`.
 /// - **풀린 상태**: 기다림이 끝났고, 좋은 창이 연속 `REBIND_GOOD`개이고, P 코어 바쁨 추정이 있으면 `REBIND_BUSY_BELOW_PCT` 미만일
 ///   때 → 다시 묶는다. 풀린 상태의 나쁜 창은 고정 탓이 아니므로 좋은 창 연속만 끊는다.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,15 +118,19 @@ pub(crate) struct Decider {
     good_run: u32,
     /// 풀린 상태에서 다시 묶기까지 남은 창 수.
     hold: u32,
-    /// 다음에 풀릴 때 기다릴 창 수.
+    /// 직전 풀림의 기다림(창 수). 다음 풀림은 이 값의 두 배 또는 `HOLD_MIN`.
     backoff: u32,
-    /// (다시) 묶은 뒤 지난 창 수.
-    since_pin: u32,
+    /// 아직 보지 않을 시작 창 수.
+    warmup: u32,
+    /// 판단한 창 수(예열 뒤부터). 풀림 사이 간격을 잰다.
+    now: u32,
+    /// 마지막으로 푼 창(`now` 기준). 아직 푼 적 없으면 None.
+    last_release: Option<u32>,
 }
 
 impl Default for Decider {
     fn default() -> Self {
-        Self { pinned: true, bad_run: 0, good_run: 0, hold: 0, backoff: HOLD_MIN, since_pin: 0 }
+        Self { pinned: true, bad_run: 0, good_run: 0, hold: 0, backoff: HOLD_MIN, warmup: WARMUP_WINDOWS, now: 0, last_release: None }
     }
 }
 
@@ -131,25 +141,26 @@ impl Decider {
     }
 
     pub(crate) fn step(&mut self, w: Window) -> Verdict {
+        if self.warmup > 0 {
+            self.warmup -= 1;
+            return Verdict::Keep;
+        }
+        self.now = self.now.saturating_add(1);
         let h = health(&w);
         if self.pinned {
-            self.since_pin = self.since_pin.saturating_add(1);
             match h {
                 Health::Good => self.bad_run = 0,
                 Health::Bad | Health::Severe => self.bad_run += 1,
             }
             if h == Health::Severe || self.bad_run >= RELEASE_AFTER_BAD {
+                let repeat = self.last_release.is_some_and(|t| self.now - t < REPEAT_WINDOWS);
+                self.backoff = if repeat { (self.backoff * 2).min(HOLD_MAX) } else { HOLD_MIN };
+                self.last_release = Some(self.now);
                 self.pinned = false;
                 self.hold = self.backoff;
-                if self.since_pin <= PROBE_WINDOWS {
-                    self.backoff = (self.backoff * 2).min(HOLD_MAX);
-                }
                 self.bad_run = 0;
                 self.good_run = 0;
                 return Verdict::Release;
-            }
-            if self.since_pin >= STABLE_WINDOWS {
-                self.backoff = HOLD_MIN;
             }
             Verdict::Keep
         } else {
@@ -158,7 +169,6 @@ impl Decider {
             let calm = w.p_busy_pct.is_none_or(|b| b < REBIND_BUSY_BELOW_PCT);
             if self.hold == 0 && self.good_run >= REBIND_GOOD && calm {
                 self.pinned = true;
-                self.since_pin = 0;
                 self.bad_run = 0;
                 return Verdict::Rebind;
             }
@@ -287,8 +297,16 @@ mod tests {
     const BAD: Window = Window { xruns: BAD_XRUNS, stalls: 0, p_busy_pct: None };
     const SEVERE: Window = Window { xruns: SEVERE_XRUNS, stalls: 0, p_busy_pct: None };
 
+
     fn run(d: &mut Decider, w: Window, n: u32) -> Vec<Verdict> {
         (0..n).map(|_| d.step(w)).collect()
+    }
+
+    /// 예열(`WARMUP_WINDOWS`)이 끝난 판단기.
+    fn started() -> Decider {
+        let mut d = Decider::default();
+        run(&mut d, GOOD, WARMUP_WINDOWS);
+        d
     }
 
     /// 다시 묶일 때까지 좋은 창을 넣고 걸린 창 수를 돌려준다.
@@ -299,6 +317,28 @@ mod tests {
             }
         }
         panic!("다시 묶이지 않음: {d:?}");
+    }
+
+    /// 경합이 계속되는 환경 흉내: 묶이면 `pinned_for`창 동안 버티다가(마지막 2창이 나쁜 창 → 풀림) 풀리면 좋은 창만 온다.
+    /// `windows`창 동안의 풀림 시각(예열 포함 창 번호)을 돌려준다.
+    fn release_times(pinned_for: u32, windows: u32) -> Vec<u32> {
+        assert!(pinned_for >= RELEASE_AFTER_BAD);
+        let mut d = Decider::default();
+        let mut pinned_age = 0;
+        let mut out = Vec::new();
+        for t in 0..windows {
+            let w = if d.pinned() {
+                pinned_age += 1;
+                if pinned_age > pinned_for - RELEASE_AFTER_BAD { BAD } else { GOOD }
+            } else {
+                pinned_age = 0;
+                GOOD
+            };
+            if d.step(w) == Verdict::Release {
+                out.push(t);
+            }
+        }
+        out
     }
 
     #[test]
@@ -325,10 +365,26 @@ mod tests {
         assert!(d.pinned());
     }
 
+    /// 시작 직후 `WARMUP_WINDOWS`창은 아무리 나빠도 보지 않는다(장치 예열·피어 연결의 xrun). 그 다음 창부터 판단한다.
+    #[test]
+    fn warmup_windows_are_ignored() {
+        let mut d = Decider::default();
+        assert!(run(&mut d, SEVERE, WARMUP_WINDOWS).iter().all(|v| *v == Verdict::Keep));
+        assert!(d.pinned());
+        // 예열 중 나쁜 창은 연속에도 들어가지 않는다: 예열 뒤 나쁜 창 하나로는 풀지 않는다
+        let mut d = Decider::default();
+        run(&mut d, BAD, WARMUP_WINDOWS);
+        assert_eq!(d.step(BAD), Verdict::Keep);
+        assert_eq!(d.step(BAD), Verdict::Release);
+        let mut d = Decider::default();
+        run(&mut d, GOOD, WARMUP_WINDOWS);
+        assert_eq!(d.step(SEVERE), Verdict::Release);
+    }
+
     /// 한 번 튄 나쁜 창으로는 풀지 않는다. 연속 둘이면 푼다. 심한 창은 하나로 푼다.
     #[test]
     fn releases_after_consecutive_bad_or_one_severe() {
-        let mut d = Decider::default();
+        let mut d = started();
         for _ in 0..20 {
             assert_eq!(d.step(BAD), Verdict::Keep);
             assert_eq!(d.step(GOOD), Verdict::Keep, "좋은 창이 연속을 끊는다");
@@ -337,21 +393,20 @@ mod tests {
         assert_eq!(d.step(BAD), Verdict::Release);
         assert!(!d.pinned());
 
-        let mut d = Decider::default();
+        let mut d = started();
         assert_eq!(d.step(SEVERE), Verdict::Release);
     }
 
     /// 푼 뒤: 기다림(`HOLD_MIN`)이 끝나고 좋은 창이 이어져야 다시 묶는다. 나쁜 창은 좋은 창 연속을 끊는다.
     #[test]
     fn rebinds_after_hold_and_good_run() {
-        let mut d = Decider::default();
-        run(&mut d, GOOD, STABLE_WINDOWS); // 처음 묶은 뒤 충분히 지남 → 기다림은 최소값
+        let mut d = started();
         assert_eq!(d.step(SEVERE), Verdict::Release);
         assert_eq!(windows_until_rebind(&mut d, GOOD), HOLD_MIN);
         assert!(d.pinned());
 
-        // 기다림이 끝날 무렵 나쁜 창이 오면 거기서부터 좋은 창을 다시 센다
-        run(&mut d, GOOD, STABLE_WINDOWS);
+        // 기다림이 끝날 무렵 나쁜 창이 오면 거기서부터 좋은 창을 다시 센다(직전 풀림이 오래전이라 기다림은 다시 최소)
+        run(&mut d, GOOD, REPEAT_WINDOWS);
         assert_eq!(d.step(SEVERE), Verdict::Release);
         assert!(run(&mut d, GOOD, HOLD_MIN - 1).iter().all(|v| *v == Verdict::Keep));
         assert_eq!(d.step(BAD), Verdict::Keep);
@@ -363,57 +418,72 @@ mod tests {
     fn rebind_waits_for_p_cores_to_calm_down() {
         let busy = Window { p_busy_pct: Some(REBIND_BUSY_BELOW_PCT), ..GOOD };
         let calm = Window { p_busy_pct: Some(REBIND_BUSY_BELOW_PCT - 1), ..GOOD };
-        let mut d = Decider::default();
+        let mut d = started();
         assert_eq!(d.step(SEVERE), Verdict::Release);
         assert!(run(&mut d, busy, 500).iter().all(|v| *v == Verdict::Keep));
         assert!(!d.pinned());
         assert_eq!(d.step(calm), Verdict::Rebind);
     }
 
-    /// 다시 묶자마자 또 풀리면 기다림이 두 배씩 늘고(`HOLD_MAX`까지), 묶은 채 오래 버티면 최소값으로 돌아간다 — 계속 나쁜 환경에서
-    /// 풀고 묶기를 되풀이하는 횟수가 줄어든다.
+    /// 풀림이 `REPEAT_WINDOWS` 안에 되풀이되면 기다림이 두 배씩 늘고(`HOLD_MAX`까지), 그동안 풀림이 없으면 최소값으로 돌아간다.
     #[test]
-    fn hold_backs_off_when_rebinding_keeps_failing() {
-        let mut d = Decider::default();
-        run(&mut d, GOOD, STABLE_WINDOWS);
+    fn hold_backs_off_when_releases_repeat() {
+        let mut d = started();
+        run(&mut d, GOOD, 60);
         let mut holds = Vec::new();
         for _ in 0..8 {
             assert_eq!(d.step(SEVERE), Verdict::Release);
             holds.push(windows_until_rebind(&mut d, GOOD));
         }
-        // 첫 풀림은 오래 버틴 뒤라 최소, 그 뒤는 묶자마자 풀려 두 배씩
-        assert_eq!(holds, [10, 10, 20, 40, 80, 160, 320, 320]);
-        // 오래 버티면 되돌아간다
-        run(&mut d, GOOD, STABLE_WINDOWS);
+        // 첫 풀림은 최소, 그 뒤는 직전 풀림이 10분 안이라 두 배씩
+        assert_eq!(holds, [10, 20, 40, 80, 160, 320, 320, 320]);
+        // 직전 풀림에서 `REPEAT_WINDOWS - 1`창째 풀리면 아직 되풀이다(최대 유지)
+        run(&mut d, GOOD, REPEAT_WINDOWS - HOLD_MAX - 2);
+        assert_eq!(d.step(SEVERE), Verdict::Release);
+        assert_eq!(windows_until_rebind(&mut d, GOOD), HOLD_MAX);
+        // `REPEAT_WINDOWS` 동안 풀림이 없으면 되돌아간다
+        run(&mut d, GOOD, REPEAT_WINDOWS - HOLD_MAX - 1);
         assert_eq!(d.step(SEVERE), Verdict::Release);
         assert_eq!(windows_until_rebind(&mut d, GOOD), HOLD_MIN);
     }
 
-    /// 시작 직후(처음 묶은 지 `PROBE_WINDOWS` 안)에 풀리면 그것도 "묶은 것이 원인"으로 보고 다음 기다림을 늘린다.
+    /// 시작 직후에 풀린 것도 첫 풀림이다(최소 기다림). 곧 또 풀리면 두 배.
     #[test]
-    fn early_release_after_start_counts_as_failed_pin() {
-        let mut d = Decider::default();
+    fn early_release_after_start_then_repeat_doubles() {
+        let mut d = started();
         assert_eq!(d.step(SEVERE), Verdict::Release);
         assert_eq!(windows_until_rebind(&mut d, GOOD), HOLD_MIN);
         assert_eq!(d.step(SEVERE), Verdict::Release);
         assert_eq!(windows_until_rebind(&mut d, GOOD), HOLD_MIN * 2);
     }
 
-    /// 계속 나쁜 환경(묶으면 곧 나빠짐)에서 1시간 동안 풀고 묶는 횟수의 상한: 기다림이 320창까지 늘어 한 시간에 16번
-    /// (처음 6번이 약 11분 안, 그 뒤는 약 5분 24초마다 한 번 — 묶여 있는 시간은 매번 2초).
+    /// 계속 나쁜 환경(묶으면 곧 나빠짐)에서 1시간 동안 풀고 묶는 횟수: 기다림이 320창까지 늘어 한 시간에 16번
+    /// (처음 6번이 약 11분 안, 그 뒤는 약 5분 22초마다 한 번 — 묶여 있는 시간은 매번 2초).
     #[test]
     fn flapping_is_bounded_in_hostile_environment() {
-        let mut d = Decider::default();
-        let mut releases = 0;
-        for _ in 0..3_600 {
-            // 묶여 있으면 나쁜 창, 풀려 있으면 좋은 창(= 고정이 원인인 환경)
-            let w = if d.pinned() { BAD } else { GOOD };
-            if d.step(w) == Verdict::Release {
-                releases += 1;
-            }
-        }
-        assert_eq!(releases, 16);
+        assert_eq!(release_times(RELEASE_AFTER_BAD, 3_600).len(), 16);
     }
+
+    /// #258 리뷰 M1 재현: 묶은 뒤 20창(16..59창 사이)에 풀리는 환경 — 옛 규칙은 기다림이 10창에 머물러 약 30초마다(시간당 약
+    /// 120번) 풀고 묶었다. 지금은 기다림이 두 배씩 늘어, 다 늘어난 뒤에는 풀림 사이가 `HOLD_MAX` 이상이다.
+    #[test]
+    fn release_mid_probe_gap_still_backs_off() {
+        let t = release_times(20, 3_600);
+        let gaps: Vec<u32> = t.windows(2).map(|w| w[1] - w[0]).collect();
+        assert_eq!(&gaps[..5], [30, 40, 60, 100, 180], "기다림 10·20·40·80·160 + 묶인 20창");
+        assert!(gaps[5..].iter().all(|g| *g == HOLD_MAX + 20), "{gaps:?}");
+        assert!(t.len() <= 16, "시간당 {}번", t.len());
+    }
+
+    /// 묶은 뒤 **언제** 풀리든(2창 ~ 10분 넘어) 1시간 동안의 풀림은 16번 이하다 — 시간당 상한이 버틴 시간에 기대지 않는다.
+    #[test]
+    fn flapping_bound_holds_for_any_pinned_duration() {
+        for pinned_for in RELEASE_AFTER_BAD..=(REPEAT_WINDOWS + 100) {
+            let n = release_times(pinned_for, 3_600).len();
+            assert!(n <= 16, "묶인 채 {pinned_for}창 버티는 환경에서 시간당 {n}번");
+        }
+    }
+
 
     #[test]
     fn collector_rolls_once_per_window_and_counts_stalls() {

@@ -1,6 +1,7 @@
 //! 6엔진 풀메시 CPU 측정의 본체 — 시험 `tests/cpu_profile.rs`(P1-10·P1-21b)와 예제 `examples/policy_matrix.rs`(P1-21 3단계 ②
 //! 정책 × 환경 교차 측정)가 `#[path]`로 함께 쓴다. 한 프로세스에 가짜 장치(사인 입력) 엔진 6개를 띄워 127.0.0.1 풀메시로
-//! 잇고 측정 창 동안의 워커 CPU·반복 본문 시간·xrun·은닉·코어 배치를 낸다. 수치 판정은 없다.
+//! 잇고 측정 창 동안의 워커 CPU·반복 본문 시간·xrun·은닉·코어 배치를 낸다(엔진 수는 `run_n`으로 바꾼다 — `policy_matrix --engines`).
+//! 수치 판정은 없다.
 #![allow(dead_code)] // 쓰는 쪽마다 쓰는 항목이 다르다
 
 use std::net::SocketAddr;
@@ -56,10 +57,10 @@ pub struct Row {
     pub per_node_pct: f32,
     pub conceal_max: f32,
     pub xruns: u64,
-    /// 측정 창 워커 반복 본문(`iter_body`, 수면 제외) p50·p99(6엔진 평균, µs)·최대(6엔진 최대, µs)·반복 수(6엔진 평균),
+    /// 측정 창 워커 반복 본문(`iter_body`, 수면 제외) p50·p99(엔진 평균, µs)·최대(엔진 최대, µs)·반복 수(엔진 평균),
     /// 반복 간격 p50(µs). ADR D6 비교 측정의 보조 지표(P1-21b — `cpu-quiet-2026-11-17.md` 측정 패치를 정식으로).
     pub body: [f32; 5],
-    /// 측정 창 동안 6엔진 합 코어 배치(P1-21): [워커, 수신] × [P, E, LP-E] 표본 수. 비Windows는 None.
+    /// 측정 창 동안 엔진 합 코어 배치(P1-21): [워커, 수신] × [P, E, LP-E] 표본 수. 비Windows는 None.
     pub placement: Option<[[f64; 3]; 2]>,
     /// 엔진 0이 보고한 스레드 정책 적용 결과(`EngineStats.threadPolicy` JSON, P1-21 2단계). 비Windows는 빈 문자열.
     pub policy_applied: String,
@@ -89,8 +90,15 @@ pub fn sum_placement(stats: &[band_engine::testing::engine::report::EngineStats]
 
 /// 구성 하나를 잰다: 엔진 6개를 띄워 풀메시로 잇고, `warmup` 예열 뒤 `measure` 창을 잰다(끝나면 엔진을 멈춘다).
 pub fn run(codec: CodecKind, frame_ms: f32, force_auto: bool, warmup: Duration, measure: Duration) -> Row {
+    run_n(PEERS, codec, frame_ms, force_auto, warmup, measure)
+}
+
+/// `run`과 같되 엔진 수를 정한다(2 이상). 2면 1:1 루프백 — 한 프로세스의 엔진 스레드가 워커·수신 2개씩이라, 엔진 1개만 도는
+/// 제품에 가깝다(6엔진은 스레드 12개가 P 코어를 두고 스스로 다툰다 — #258 리뷰 M2). 평균·합은 이 엔진 수 기준이다.
+pub fn run_n(n: usize, codec: CodecKind, frame_ms: f32, force_auto: bool, warmup: Duration, measure: Duration) -> Row {
+    assert!(n >= 2, "엔진은 2개 이상(풀메시)");
     let cfg = EngineConfig { buffer_size: 128, frame_ms, codec, channels: 1, input_channels: vec![0], ..Default::default() };
-    let engines: Vec<Engine> = (0..PEERS)
+    let engines: Vec<Engine> = (0..n)
         .map(|i| {
             Engine::start(cfg.clone(), Arc::new(sine_backend(220.0 * (i + 1) as f64)), Arc::new(MixControls::default()), Some((format!("p{i}"), test_net())))
                 .unwrap()
@@ -106,7 +114,7 @@ pub fn run(codec: CodecKind, frame_ms: f32, force_auto: bool, warmup: Duration, 
     let t0 = Instant::now();
     while !engines.iter().all(|e| {
         let s = e.stats();
-        s.peers.len() == PEERS - 1 && s.peers.iter().all(|p| p.state == PeerStateKind::Connected)
+        s.peers.len() == n - 1 && s.peers.iter().all(|p| p.state == PeerStateKind::Connected)
     }) {
         assert!(t0.elapsed() < Duration::from_secs(30), "풀메시 연결 실패");
         std::thread::sleep(Duration::from_millis(50));
@@ -145,13 +153,13 @@ pub fn run(codec: CodecKind, frame_ms: f32, force_auto: bool, warmup: Duration, 
     }
     let workers: Vec<f32> = cpus.iter().map(|c| c.worker_pct.unwrap_or(f32::NAN)).collect();
     let row = Row {
-        label: if force_auto { format!("{codec:?} {frame_ms}ms + 5피어 Opus 개별 인코딩(손실 피드백 강제)") } else { format!("{codec:?} {frame_ms}ms") },
+        label: if force_auto { format!("{codec:?} {frame_ms}ms + {}피어 Opus 개별 인코딩(손실 피드백 강제)", n - 1) } else { format!("{codec:?} {frame_ms}ms") },
         me: cpus[0],
-        worker_avg: workers.iter().sum::<f32>() / PEERS as f32,
+        worker_avg: workers.iter().sum::<f32>() / n as f32,
         worker_max: workers.iter().cloned().fold(0.0, f32::max),
-        load_avg: cpus.iter().map(|c| c.callback_load_pct).sum::<f32>() / PEERS as f32,
+        load_avg: cpus.iter().map(|c| c.callback_load_pct).sum::<f32>() / n as f32,
         p99_max: cpus.iter().map(|c| c.callback_p99_us).fold(0.0, f32::max),
-        per_node_pct: cycle_pct(p1, p0, k1, k0).unwrap_or(f32::NAN) / PEERS as f32,
+        per_node_pct: cycle_pct(p1, p0, k1, k0).unwrap_or(f32::NAN) / n as f32,
         conceal_max: stats.iter().flat_map(|s| s.peers.iter().map(|p| p.conceal_pct)).fold(0.0, f32::max),
         // 측정 창 안의 xrun만(연결·예열 구간 제외, 리뷰 L1)
         xruns: stats.iter().map(|s| s.xruns).sum::<u64>().saturating_sub(x0),

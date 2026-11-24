@@ -432,7 +432,8 @@ impl PolicySlot {
     }
 
     /// 조건부 고정의 판단기(워커가 루프 앞에서 한 번 만든다 — `apply_thread_policy` 뒤). 그 정책이 아니거나 이 스레드의 처음
-    /// 묶기가 되지 않았으면(`skipped`·`failed`) None.
+    /// 묶기가 되지 않았으면(`skipped`·`failed`) None. 판단기는 워커에만 있으므로, 워커는 묶이지 못하고 수신 스레드만 묶인 경우
+    /// 수신 스레드는 판단 없이 계속 묶여 있다(두 스레드가 같은 코어 표를 써서 실제로는 둘 다 되거나 둘 다 안 된다 — #258 리뷰 L4).
     pub(crate) fn adaptive_driver(&self, now: std::time::Instant, xruns_total: u64) -> Option<AdaptiveDriver> {
         let shared = self.adaptive.clone()?;
         (self.pin_state.load(Ordering::Relaxed) == PIN_PINNED).then(|| AdaptiveDriver {
@@ -1296,7 +1297,7 @@ mod tests {
     /// 조건부 고정의 판단기(워커 쪽): 반복마다 올린 관측이 1초 창마다 판단으로 이어져 공유 상태가 바뀐다.
     #[test]
     fn adaptive_driver_publishes_release_then_rebind() {
-        use super::super::pin_adapt::{HOLD_MIN, SEVERE_XRUNS, SLOW_BODY, WINDOW};
+        use super::super::pin_adapt::{HOLD_MIN, SEVERE_XRUNS, SLOW_BODY, WARMUP_WINDOWS, WINDOW};
         use std::time::Duration;
         let req = PolicyRequest::for_engine(PolicyChoice { high_qos: false, p_cores: PCoreMode::Adaptive });
         let slot = PolicySlot::requested(&req);
@@ -1306,21 +1307,21 @@ mod tests {
         // 시험은 P 코어 바쁨 추정을 쓰지 않는다(실제 기계 상태에 좌우되지 않게)
         d.busy = PBusy::new(&[]);
         let quiet = Duration::from_micros(50);
-        // 좋은 창 3개: 그대로 묶여 있다
-        for w in 1..=3u32 {
+        // 시작 예열 창(판단하지 않음): 그대로 묶여 있다
+        for w in 1..=WARMUP_WINDOWS {
             d.note_wake(quiet);
             d.tick(quiet, t0 + WINDOW * w, 1_000);
         }
         assert_eq!(slot.adaptive_stats().unwrap(), AdaptiveStats { released: false, releases: 0, rebinds: 0, p_busy_pct: None });
         // xrun이 한 창에 몰리면 바로 푼다
-        d.tick(quiet, t0 + WINDOW * 4, 1_000 + u64::from(SEVERE_XRUNS));
+        d.tick(quiet, t0 + WINDOW * (WARMUP_WINDOWS + 1), 1_000 + u64::from(SEVERE_XRUNS));
         assert_eq!(slot.adaptive_stats().unwrap().releases, 1);
         assert!(slot.adaptive_stats().unwrap().released);
         // 창 사이의 호출은 판단하지 않는다(멈칫만 쌓인다)
-        d.tick(SLOW_BODY, t0 + WINDOW * 4 + WINDOW / 2, 1_000 + u64::from(SEVERE_XRUNS));
+        d.tick(SLOW_BODY, t0 + WINDOW * (WARMUP_WINDOWS + 1) + WINDOW / 2, 1_000 + u64::from(SEVERE_XRUNS));
         assert!(slot.adaptive_stats().unwrap().released);
-        // 기다림이 끝날 때까지 좋은 창 → 다시 묶는다(시작 직후 풀려 기다림은 HOLD_MIN, 중간의 멈칫 하나는 나쁜 창이 아니다)
-        for w in 5..(5 + HOLD_MIN) {
+        // 기다림이 끝날 때까지 좋은 창 → 다시 묶는다(첫 풀림이라 기다림은 HOLD_MIN, 중간의 멈칫 하나는 나쁜 창이 아니다)
+        for w in (WARMUP_WINDOWS + 2)..(WARMUP_WINDOWS + 2 + HOLD_MIN) {
             d.tick(quiet, t0 + WINDOW * w, 1_000 + u64::from(SEVERE_XRUNS));
         }
         assert_eq!(slot.adaptive_stats().unwrap(), AdaptiveStats { released: false, releases: 1, rebinds: 1, p_busy_pct: None });
@@ -1330,7 +1331,7 @@ mod tests {
     /// 풀기/묶기 — 은 **할당하지 않는다**(워커 반복 규칙). 실제 OS 호출로 풀기 → 다시 묶기를 지나가며 센다.
     #[test]
     fn adaptive_path_does_not_allocate() {
-        use super::super::pin_adapt::{HOLD_MIN, SEVERE_XRUNS, WINDOW};
+        use super::super::pin_adapt::{HOLD_MIN, SEVERE_XRUNS, WARMUP_WINDOWS, WINDOW};
         std::thread::spawn(|| {
             init();
             let slot = PolicySlot::requested(&PolicyRequest::for_engine(PolicyChoice { high_qos: false, p_cores: PCoreMode::Adaptive }));
@@ -1341,8 +1342,8 @@ mod tests {
             let quiet = std::time::Duration::from_micros(50);
             let ((), allocs) = crate::sys::alloc::counted(|| {
                 let mut xruns = 0u64;
-                for w in 1..(HOLD_MIN + 8) {
-                    if w == 2 {
+                for w in 1..(WARMUP_WINDOWS + HOLD_MIN + 8) {
+                    if w == WARMUP_WINDOWS + 2 {
                         xruns += u64::from(SEVERE_XRUNS); // 이 창에서 푼다
                     }
                     for step in 0..4u32 {

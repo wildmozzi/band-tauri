@@ -388,7 +388,7 @@ function sanitizeEngineConfig(raw: Record<string, unknown>): EngineConfig {
     jitterProfile: clampJitterProfile(raw.jitterProfile),
     // 옛 설정(필드 없음)·모르는 값은 auto(P2-17e)
     resampleQuality: RESAMPLE_QUALITIES.includes(raw.resampleQuality as ResampleQuality) ? (raw.resampleQuality as ResampleQuality) : 'auto',
-    // 옛 설정(필드 없음)·이상한 값은 둘 다 꺼짐(P1-21 2단계 — 실험 옵션은 명시적으로 true일 때만 켠다)
+    // 옛 설정(필드 없음)·이상한 값은 기본값(HighQoS 켬·P 코어 정책 끔 — P1-21 3단계 ①, `normalizeThreadPolicy`)
     threadPolicy: normalizeThreadPolicy(raw.threadPolicy),
   }
   if (isValidOpusBitrate(raw.opusBitrate)) config.opusBitrate = raw.opusBitrate
