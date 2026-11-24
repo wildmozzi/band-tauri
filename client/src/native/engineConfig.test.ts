@@ -14,9 +14,12 @@ import {
   normalizeInputChannels,
   parseStoredSettings,
   resolveResampleQuality,
+  accountDeviceSettings,
+  pickDeviceSettings,
   toAccountStored,
   toStored,
   withDeviceLocal,
+  withDeviceSettings,
   validateEngineConfig,
 } from './engineConfig'
 import type { DeviceInfo, EngineConfig } from './engineApi'
@@ -301,11 +304,11 @@ describe('엔진 스레드 코어 배치 정책(P1-21 2단계, 실험 옵션)', 
 describe('스레드 정책은 기기별 — 계정 저장 형식에서 뺀다(#245 재리뷰 L4)', () => {
   const on = { highQos: true, preferPCores: true }
   it('계정 형식에는 threadPolicy가 없고 나머지는 그대로', () => {
-    const cfg: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, bufferSize: 256, threadPolicy: on }
+    const cfg: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, codec: 'pcm16', threadPolicy: on }
     const stored = toAccountStored(cfg)
     expect(stored.version).toBe(2)
     expect('threadPolicy' in stored.engine).toBe(false)
-    expect(stored.engine.bufferSize).toBe(256)
+    expect(stored.engine.codec).toBe('pcm16')
     expect(cfg.threadPolicy).toEqual(on) // 원본은 건드리지 않음
     // 다시 읽으면 끔(새 PC에서 로그인한 것과 같다)
     expect(parseStoredSettings(stored).config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
@@ -314,5 +317,49 @@ describe('스레드 정책은 기기별 — 계정 저장 형식에서 뺀다(#2
     const fromServer = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: on } }).config
     expect(withDeviceLocal(fromServer, { highQos: false, preferPCores: false }).threadPolicy).toEqual({ highQos: false, preferPCores: false })
     expect(withDeviceLocal({ ...DEFAULT_ENGINE_CONFIG }, { highQos: false, preferPCores: true }).threadPolicy).toEqual({ highQos: false, preferPCores: true })
+  })
+})
+
+describe('장치 쪽 값은 PC별 — 계정 저장 형식에서 뺀다(P2-27 후속)', () => {
+  const pc: EngineConfig = {
+    ...DEFAULT_ENGINE_CONFIG,
+    inputDriver: 'asio',
+    outputDriver: 'asio',
+    inputDevice: 'asio::Focusrite USB ASIO',
+    outputDevice: 'asio::Focusrite USB ASIO',
+    inputChannels: [2, 3],
+    channels: 2,
+    bufferSize: 64,
+    codec: 'pcm16',
+    frameMs: 2.5,
+    jitterMaxMs: 40,
+  }
+  it('계정 형식에는 드라이버·장치·입력 채널·버퍼가 없고 코덱·프레임·모노/스테레오·지터는 남는다', () => {
+    const stored = toAccountStored(pc)
+    for (const k of ['inputDriver', 'outputDriver', 'inputDevice', 'outputDevice', 'inputChannels', 'bufferSize']) {
+      expect(k in stored.engine).toBe(false)
+    }
+    expect(stored.engine).toMatchObject({ codec: 'pcm16', frameMs: 2.5, channels: 2, jitterMaxMs: 40 })
+    expect(pc.inputDevice).toBe('asio::Focusrite USB ASIO') // 원본은 건드리지 않음
+    // 옛 앱이 읽어도(빠진 필드 = 기본값) 깨지지 않는다
+    expect(parseStoredSettings(stored).config).toMatchObject({ inputDevice: null, inputDriver: 'wasapiShared', bufferSize: 128, codec: 'pcm16' })
+  })
+  it('계정 값의 장치 필드는 무시하고 이 PC의 값을 덮는다', () => {
+    const fromServer = parseStoredSettings({ version: 2, engine: { ...pc, inputDevice: 'wasapi::다른 PC 마이크', bufferSize: 512 } }).config
+    const here = { ...pickDeviceSettings(DEFAULT_ENGINE_CONFIG), inputDevice: 'wasapi::이 PC 마이크', inputChannels: [1] as [number] }
+    const merged = withDeviceSettings(fromServer, here)
+    expect(merged).toMatchObject({ inputDevice: 'wasapi::이 PC 마이크', inputDriver: 'wasapiShared', bufferSize: 128, codec: 'pcm16', frameMs: 2.5 })
+    // 계정이 스테레오면 입력 채널 개수를 맞춘다(둘째 채널 채움)
+    expect(merged.inputChannels).toEqual([1, 2])
+    expect(withDeviceSettings({ ...fromServer, channels: 1 }, pickDeviceSettings(pc)).inputChannels).toEqual([2])
+  })
+  it('계정 값에 옛 장치 필드가 있을 때만 이행용 값을 돌려준다', () => {
+    expect(accountDeviceSettings({ version: 2, engine: pc })).toEqual(pickDeviceSettings(pc))
+    expect(accountDeviceSettings({ version: 2, engine: { inputDevice: 'wasapi::x' } })?.inputDevice).toBe('wasapi::x')
+    expect(accountDeviceSettings(toAccountStored(pc))).toBeNull()
+    expect(accountDeviceSettings(null)).toBeNull()
+    expect(accountDeviceSettings({})).toBeNull()
+    // 구형 형식(변환 대상)도 장치 값을 가져온다
+    expect(accountDeviceSettings({ input_device: 'Mic', buffer_size: 256 })).not.toBeNull()
   })
 })

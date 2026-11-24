@@ -7,11 +7,12 @@
  * 옛 엔진(engine_supported_drivers 응답 없음)이면 예전처럼 모두 고를 수 있다.
  */
 import type { DeviceInfo, DriverKind, EngineConfig } from '../src/native/engineApi'
-import { DEFAULT_ENGINE_CONFIG, STORED_SETTINGS_VERSION } from '../src/native/engineConfig'
+import { DEFAULT_ENGINE_CONFIG } from '../src/native/engineConfig'
 import { installFakeTauri } from './mocks/tauri'
 import { expect, test } from './test'
 
-const STORAGE_KEY = 'band_engine_config_v2'
+/** 장치 쪽 값(드라이버·장치·입력 채널·버퍼)은 이 PC에만 저장한다(P2-27 후속) */
+const STORAGE_KEY = 'band_device_settings_v1'
 const ASIO_DEV = 'asio::Focusrite USB ASIO'
 const asioConfig: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, inputDriver: 'asio', outputDriver: 'asio', inputDevice: ASIO_DEV, outputDevice: ASIO_DEV }
 
@@ -24,12 +25,12 @@ async function seedSettings(page: import('@playwright/test').Page, engine: Engin
         sessionStorage.setItem('__e2eSeeded', '1')
       }
     },
-    [STORAGE_KEY, JSON.stringify({ version: STORED_SETTINGS_VERSION, engine })] as [string, string],
+    [STORAGE_KEY, JSON.stringify(engine)] as [string, string],
   )
 }
 
 function storedEngine(page: import('@playwright/test').Page): Promise<EngineConfig> {
-  return page.evaluate((key) => (JSON.parse(localStorage.getItem(key) ?? 'null') as { engine: EngineConfig }).engine, STORAGE_KEY)
+  return page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? 'null') as EngineConfig, STORAGE_KEY)
 }
 
 function device(over: Partial<DeviceInfo> & Pick<DeviceInfo, 'id' | 'name' | 'isInput'>): DeviceInfo {

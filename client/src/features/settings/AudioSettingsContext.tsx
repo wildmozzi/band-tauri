@@ -1,7 +1,10 @@
 /**
  * 네이티브 엔진 오디오 설정 (EngineConfig) 상태.
  * - 저장: profiles.audio_settings = { version: 2, engine: EngineConfig } (+ localStorage 캐시)
- * - 기기별 값(스레드 정책 `threadPolicy`)은 계정에 올리지 않고 이 PC에만 둔다(deviceLocalSettings, #245 재리뷰 L4).
+ * - 기기별 값은 계정에 올리지 않고 이 PC에만 둔다(deviceLocalSettings): 스레드 정책 `threadPolicy`(#245 재리뷰 L4),
+ *   장치 쪽 값 — 드라이버·장치 id·입력 채널·버퍼 크기(P2-27 후속, 사용자 결정 2026-11-21). 코덱·프레임·모노/스테레오·지터는 계정.
+ *   장치 쪽 값은 이 PC에 저장값이 없을 때만 한 번 계정(이 변경 전에 저장된 옛 장치 값)에서 초기값을 가져오고, 그 뒤로는
+ *   계정 값으로 덮어쓰지 않는다. 같은 PC에서 계정을 바꿔 로그인해도 장치 설정은 그대로다(PC의 것).
  * - 구형 형식(lib/tauri.ts 시절)은 읽을 때 감지해서 새 형식으로 변환하고 다시 저장한다.
  * - 웹(비Tauri)에서는 장치 조회/테스트를 하지 않는다(연주는 앱 전용).
  * - 저장된 장치·드라이버가 이 PC에 없으면 엔진 시작 직전(`prepareRunConfig`)에 이번 실행만 기본 장치로 넘어간다(P2-27).
@@ -32,8 +35,12 @@ import {
   matchPreset,
   normalizeInputChannels,
   parseStoredSettings,
+  accountDeviceSettings,
+  pickDeviceSettings,
   toAccountStored,
   withDeviceLocal,
+  withDeviceSettings,
+  type DeviceSettings,
   validateEngineConfig,
   type ConfigIssue,
   type EnginePresetId,
@@ -41,7 +48,13 @@ import {
 import { SettingsSaveGate, TestMonitorControl } from '../../native/settingsSync'
 import { reapplyLoopbackOffsetInBackground } from '../../native/loopbackOffsetStore'
 import type { RunConfig } from '../../native/deviceFallback'
-import { loadDeviceThreadPolicy, saveDeviceThreadPolicy } from './deviceLocalSettings'
+import {
+  hasDeviceSettings,
+  loadDeviceSettings,
+  loadDeviceThreadPolicy,
+  saveDeviceSettings,
+  saveDeviceThreadPolicy,
+} from './deviceLocalSettings'
 
 /** 폴백 판단은 데스크톱 앱에서만 쓴다 — 웹 첫 화면 묶음에 싣지 않는다(bundle-budget e2e) */
 const loadDeviceFallback = () => import('../../native/deviceFallback')
@@ -109,15 +122,26 @@ interface AudioSettingsContextType {
 
 const AudioSettingsContext = createContext<AudioSettingsContextType | null>(null)
 
-/** 로컬 캐시(계정 설정 사본) + 이 기기의 값. 옛 캐시에 들어 있던 `threadPolicy`는 쓰지 않는다(deviceLocalSettings 참고) */
+/**
+ * 로컬 캐시(계정 설정 사본) + 이 기기의 값. 옛 캐시에 들어 있던 `threadPolicy`는 쓰지 않는다(deviceLocalSettings 참고).
+ * 이 PC에 장치 저장값이 아직 없으면(이 변경 전 설정) 옛 캐시에 남은 장치 값을 계정을 읽기 전까지 임시로 쓴다 —
+ * 이 PC에서 마지막으로 쓰던 값이다. 저장은 계정을 읽을 때(이행) 또는 사용자가 바꿀 때 한다.
+ */
 function loadLocal(): EngineConfig {
   let config: EngineConfig = { ...DEFAULT_ENGINE_CONFIG }
+  let cachedDevice: DeviceSettings | null = null
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) config = parseStoredSettings(JSON.parse(raw)).config
+    if (raw) {
+      const obj: unknown = JSON.parse(raw)
+      config = parseStoredSettings(obj).config
+      cachedDevice = accountDeviceSettings(obj)
+    }
   } catch {
     // 저장소 접근 불가/손상
   }
+  const device = loadDeviceSettings() ?? cachedDevice
+  if (device) config = withDeviceSettings(config, device)
   return withDeviceLocal(config, loadDeviceThreadPolicy())
 }
 
@@ -132,6 +156,7 @@ function saveLocal(config: EngineConfig) {
   } catch {
     // 무시
   }
+  saveDeviceSettings(config)
   saveDeviceThreadPolicy(config.threadPolicy)
 }
 
@@ -178,8 +203,15 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       try {
         if (storedData) {
           const parsed = parseStoredSettings(storedData)
+          // 장치 쪽 값은 이 PC의 것을 쓴다. 이 PC에 저장값이 없을 때만(이 변경 전 설정·새 PC) 계정에 남은 옛 장치 값을
+          // 한 번 초기값으로 가져온다 — 그 장치가 이 PC에 없으면 엔진 시작 때 이번 실행만 기본 장치로 넘어간다(P2-27).
+          // 계정에 장치 값이 없으면 지금 값(옛 캐시 또는 기본값)을 그대로 이 PC 값으로 저장한다(saveLocal).
+          const device = loadDeviceSettings() ?? accountDeviceSettings(storedData) ?? pickDeviceSettings(configRef.current)
           // 계정 값에 옛 threadPolicy가 있어도 쓰지 않고 이 기기의 값을 유지한다(#245 재리뷰 L4)
-          const next = withDeviceLocal(parsed.config, configRef.current.threadPolicy ?? loadDeviceThreadPolicy())
+          const next = withDeviceLocal(
+            withDeviceSettings(parsed.config, device),
+            configRef.current.threadPolicy ?? loadDeviceThreadPolicy(),
+          )
           setConfig(next)
           saveLocal(next)
           if (parsed.migrated) {
@@ -188,6 +220,9 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
             await profileApi.saveAudioSettings(userId, toAccountStored(parsed.config) as unknown as Json).catch(() => {})
             console.log('[AudioSettings] 구형 오디오 설정을 새 형식으로 변환했습니다')
           }
+        } else if (!hasDeviceSettings()) {
+          // 계정에 설정이 없다(새 계정) → 지금 장치 값을 이 PC 값으로 굳힌다(이후 다른 계정의 옛 장치 값으로 바뀌지 않게)
+          saveDeviceSettings(configRef.current)
         }
         // 취소된 로드(StrictMode 이중 effect, 사용자 전환)는 loaded로 표시하지 않는다 → 다음 effect가 다시 적용
         if (!cancelled) gate.markLoaded(userId)
