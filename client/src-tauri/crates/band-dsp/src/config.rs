@@ -64,17 +64,29 @@ pub enum ResampleQuality {
     HighQuality,
 }
 
-/// 엔진 스레드(워커·네트워크 수신) 코어 배치 정책(P1-21 2단계, Windows). 둘 다 **실험 옵션, 기본 꺼짐** — 엔진 시작 때 한 번
-/// 적용되므로 바꾸면 엔진을 다시 시작해야 한다. 환경변수 `BAND_THREAD_POLICY`가 있으면 그것이 이긴다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// 엔진 스레드(워커·네트워크 수신) 코어 배치 정책(P1-21, Windows). 엔진 시작 때 한 번 적용되므로 바꾸면 엔진을 다시
+/// 시작해야 한다. 환경변수 `BAND_THREAD_POLICY`가 있으면 그것이 이긴다.
+/// 기본값(P1-21 3단계, 사용자 결정 2026-11-21): **`high_qos` 켬, `prefer_p_cores` 끔** — 필드가 없는 JSON도, `Default`도,
+/// `EngineConfig.thread_policy`가 없을 때도 같다. 끄려면 `highQos: false`를 명시한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadPolicyConfig {
-    /// 실행 속도 전원 조절(EcoQoS)을 끈다. 스케줄러는 여전히 코어를 자유롭게 고른다.
-    #[serde(default)]
+    /// 실행 속도 전원 조절(EcoQoS)을 끈다. 스케줄러는 여전히 코어를 자유롭게 고른다. **기본 켬**.
+    #[serde(default = "default_high_qos")]
     pub high_qos: bool,
-    /// 고성능(P) 코어 CPU set에 둔다 — 스레드는 그 집합 안에 머문다(P 코어가 바빠도 다른 코어로 넘어가지 않는다).
+    /// 고성능(P) 코어 CPU set에 둔다 — 스레드는 그 집합 안에 머문다(P 코어가 바빠도 다른 코어로 넘어가지 않는다). 실험 옵션, 기본 끔.
     #[serde(default)]
     pub prefer_p_cores: bool,
+}
+
+fn default_high_qos() -> bool {
+    true
+}
+
+impl Default for ThreadPolicyConfig {
+    fn default() -> Self {
+        Self { high_qos: default_high_qos(), prefer_p_cores: false }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,7 +115,7 @@ pub struct EngineConfig {
     /// 리샘플러 품질(P2-17e). 없으면 `Auto`(프리셋을 따름).
     #[serde(default)]
     pub resample_quality: Option<ResampleQuality>,
-    /// 엔진 스레드 코어 배치 정책(P1-21 2단계). 없으면 둘 다 꺼짐.
+    /// 엔진 스레드 코어 배치 정책(P1-21). 없으면 기본값(`ThreadPolicyConfig::default()` — HighQoS 켬, P 코어 끔).
     #[serde(default)]
     pub thread_policy: Option<ThreadPolicyConfig>,
 }

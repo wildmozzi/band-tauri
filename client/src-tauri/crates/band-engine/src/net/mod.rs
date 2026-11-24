@@ -234,7 +234,7 @@ impl Net {
         Self::start_with_policy(local_peer_id, opts, Default::default())
     }
 
-    /// `start` + 수신 스레드에 걸 코어 배치 정책(P1-21 2단계, 기본은 둘 다 꺼짐 — 엔진이 설정·환경변수에서 정해 넘긴다).
+    /// `start` + 수신 스레드에 걸 코어 배치 정책(P1-21 — 엔진이 설정·환경변수에서 정해 넘긴다. 엔진 없이 여는 `start`는 정책 없음).
     pub(crate) fn start_with_policy(local_peer_id: String, opts: &NetOptions, thread_policy: crate::sys::placement::PolicyChoice) -> Result<Net, String> {
         if local_peer_id.is_empty() || local_peer_id.len() > peer::MAX_PEER_ID_BYTES {
             return Err("peerId는 1..64바이트여야 합니다".into());

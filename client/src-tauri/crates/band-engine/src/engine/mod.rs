@@ -127,10 +127,12 @@ impl Engine {
     ) -> Result<Engine, String> {
         let cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
         cfg.validate()?;
-        // 워커·수신 스레드 코어 배치 정책(P1-21 2단계): 설정(기본 둘 다 꺼짐) + 환경변수 `BAND_THREAD_POLICY`. 스레드를 만들기 전에 정한다.
-        let thread_policy = crate::sys::placement::policy_for_engine(
-            cfg.thread_policy.map(|t| crate::sys::placement::PolicyChoice { high_qos: t.high_qos, p_cores: t.prefer_p_cores }).unwrap_or_default(),
-        );
+        // 워커·수신 스레드 코어 배치 정책(P1-21): 설정(없으면 기본 — HighQoS 켬, P 코어 끔) + 환경변수 `BAND_THREAD_POLICY`.
+        // 스레드를 만들기 전에 정한다.
+        let thread_policy = {
+            let t = cfg.thread_policy.unwrap_or_default();
+            crate::sys::placement::policy_for_engine(crate::sys::placement::PolicyChoice { high_qos: t.high_qos, p_cores: t.prefer_p_cores })
+        };
         // 시작이 중간에 실패하면 drop으로 놓인다(Engine으로 옮긴 뒤에는 stop이 놓는다).
         let timer = prio::TimerResolution::acquire();
         let counters = Arc::new(AudioCounters::default());

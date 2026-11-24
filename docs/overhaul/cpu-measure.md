@@ -61,7 +61,7 @@ node scripts/cpu-compare.mjs placement --in cpu-runs.csv --set unpinned [--lpe-t
 
 ## 3. 스레드 정책 비교 — 같은 실행파일, 조건만 바꿔 교차 (P1-21 2단계)
 
-엔진이 환경변수 `BAND_THREAD_POLICY` = `off` | `highqos`(EcoQoS 끄기) | `pcores`(P 코어 CPU set — 스레드가 그 집합 안에 머문다) | `both`를 직접 읽는다(제품 빌드와 같은 경로. 유효한 값이면 엔진 설정보다 우선하고, 비우면 설정 기본값 = 둘 다 끔). `cpu-compare.mjs`의 `--exe 이름=경로@정책`이 그 값을 넘긴다.
+엔진이 환경변수 `BAND_THREAD_POLICY` = `off` | `highqos`(EcoQoS 끄기) | `pcores`(P 코어 CPU set — 스레드가 그 집합 안에 머문다) | `both`를 직접 읽는다(제품 빌드와 같은 경로. 유효한 값이면 엔진 설정보다 우선하고, 비우면 설정 기본값 = **HighQoS 켬 · P 코어 끔**(P1-21 3단계부터. 그 전 실행파일은 둘 다 끔). 값은 정확히 그 조합이라 `off`는 HighQoS도 끄고 `pcores`는 HighQoS 없이 P 코어만 건다). `cpu-compare.mjs`의 `--exe 이름=경로@정책`이 그 값을 넘긴다.
 
 ```sh
 X=cpu_profile-<커밋>.exe
@@ -73,7 +73,7 @@ node scripts/cpu-compare.mjs stats --in policy-runs.csv --before off --after bot
 
 - 조건이 넷이어도 순서는 같다(짝수 라운드 정순, 홀수 라운드 역순). 코어 고정은 하지 않는다(`--pin none`) — 정책이 바꾸는 것이 배치라서다.
 - `CSV|` 줄의 `policy`(옛 `high_qos` 자리 — 넘긴 환경변수 값, 비우면 `default`), `worker_p_pct`·`netrecv_p_pct`(측정 창에서 P 코어에 깨어난 비율), `conceal_max_pct` 열을 쓴다. 실행 출력의 `배치 |` 줄 끝에 엔진이 보고한 적용 결과(`threadPolicy`)가 찍힌다.
-- **커밋 전·후 비교(1·2절)에는 정책이 섞이지 않게 한다**(#245 리뷰 L4): `cpu-compare.mjs`는 `@정책`이 없는 `--exe`에 `BAND_THREAD_POLICY=off`를 넘긴다(셸에 남은 값·실행파일마다 다른 기본값을 막는다. 엔진 기본값 그대로 재려면 `@default`). 옛 `BAND_HIGH_QOS`·`--high-qos`는 없어졌다. `BAND_THREAD_POLICY`를 읽지 않는 옛 실행파일(#245 전)은 늘 정책 없음이다. 단 #245의 첫 커밋(`cc3ff01`)만은 기본값이 켬이고 환경변수 이름이 `qos`·`qos+pcores`였다 — 비교 대상으로 쓰지 않는다.
+- **커밋 전·후 비교(1·2절)에는 정책이 섞이지 않게 한다**(#245 리뷰 L4): `cpu-compare.mjs`는 `@정책`이 없는 `--exe`에 `BAND_THREAD_POLICY=off`를 넘긴다(셸에 남은 값·실행파일마다 다른 기본값을 막는다. 엔진 기본값 그대로 재려면 `@default` — **단 기본값이 P1-21 3단계에서 "둘 다 끔" → "HighQoS 켬"으로 바뀌었으므로, 그 변경을 사이에 둔 두 실행파일을 `@default`로 비교하면 정책 차이가 섞인다**. 제품 기본 조건에서의 전·후를 보려면 양쪽에 `@highqos`를 준다). 옛 `BAND_HIGH_QOS`·`--high-qos`는 없어졌다. `BAND_THREAD_POLICY`를 읽지 않는 옛 실행파일(#245 전)은 늘 정책 없음이다. 단 #245의 첫 커밋(`cc3ff01`)만은 기본값이 켬이고 환경변수 이름이 `qos`·`qos+pcores`였다 — 비교 대상으로 쓰지 않는다.
 - **전원을 기록한다.** 측정 도중 AC ↔ 배터리가 바뀌면 그 라운드부터 구간을 나누고, 구간별로 따로 판정한다(2026-11-20 측정은 라운드 0이 배터리·전환에 걸려 빼고 AC에서 2라운드를 더 쟀다).
 - xrun처럼 드문 꼬리는 평균이 아니라 **실행별 원값과 "xrun이 난 실행 수"**로 적는다(#245 리뷰 M2).
 - 결과: [core-placement-2026-11-20.md](core-placement-2026-11-20.md).

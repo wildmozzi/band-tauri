@@ -137,7 +137,11 @@ describe('P2-17e: 리샘플러 품질 안내', () => {
   })
 })
 
-describe('스레드 정책 토글 설명(P1-21 2단계)', () => {
+describe('스레드 정책 토글 설명(P1-21)', () => {
+  it('절전 끄기는 기본 켬(실험적 표시 없음), P 코어 묶기만 실험적', () => {
+    expect(THREAD_POLICY_OPTIONS.map((o) => o.experimental)).toEqual([false, true])
+    expect(THREAD_POLICY_OPTIONS[0].effect).toContain('기본으로 켜져')
+  })
   it('두 항목 모두 효과·주의가 한 줄씩 있고, P 코어 항목은 넘어가지 못하는 위험을 적는다', () => {
     expect(THREAD_POLICY_OPTIONS.map((o) => o.key)).toEqual(['highQos', 'preferPCores'])
     for (const o of THREAD_POLICY_OPTIONS) {
@@ -162,6 +166,11 @@ describe('스레드 정책 적용 결과 한 줄(#245 재리뷰 L2)', () => {
     expect(threadPolicyStatus('highQos', false, true, null)).toBeNull()
     expect(threadPolicyStatus('highQos', true, true, null)?.text).toContain('엔진을 시작하면')
     expect(threadPolicyStatus('highQos', true, null, null)?.text).toContain('엔진을 시작하면')
+    // 기본 켬인 절전 끄기가 적용되지 않는 PC는 경고가 아니라 안내
+    expect(threadPolicyStatus('highQos', true, false, null)).toEqual({ text: '이 PC에서는 적용되지 않음: Windows 전용입니다.', tone: 'info' })
+    expect(threadPolicyStatus('highQos', true, true, { stats: { threadPolicy: null } })?.tone).toBe('info')
+    expect(threadPolicyStatus('highQos', true, true, tp(['failed', 'off'], ['failed', 'off']))?.tone).toBe('info')
+    expect(threadPolicyStatus('highQos', true, true, tp(['applied', 'off'], ['failed', 'off']))?.tone).toBe('warn')
     const mac = threadPolicyStatus('preferPCores', true, false, null)
     expect(mac).toEqual({ text: '이 PC에서는 적용되지 않음: Windows 전용입니다.', tone: 'warn' })
   })

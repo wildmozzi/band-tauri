@@ -22,10 +22,13 @@
 //!   부하(DAW 등 다른 MMCSS "Pro Audio" 스레드)가 채우면 정책이 없을 때보다 밀릴 수 있다 — 그 상황은 재지 않았다.
 //!   하이브리드가 아니거나 물리 P 코어가 4개 미만이면 걸지 않는다(`skipped`).
 //!
-//! 둘 다 **기본 꺼짐**인 실험 옵션이다. 켜는 길은 둘: 엔진 설정 `EngineConfig.threadPolicy`(오디오 설정 "실험적" 토글)와
-//! 환경변수 `BAND_THREAD_POLICY` = `off` | `highqos` | `pcores` | `both`(있으면 설정보다 우선 — 제품 빌드에서도 읽는다).
-//! 측정과 기본값을 바꾸지 않은 이유: `docs/overhaul/core-placement-2026-11-20.md`. 실패는 무시하고 결과만
-//! `EngineStats.threadPolicy`에 남긴다. RT 콜백 스레드에는 걸지 않는다.
+//! 기본값(P1-21 3단계, 사용자 결정 2026-11-21): **HighQoS는 켬, P 코어 CPU set은 끔**(실험 옵션). 바꾸는 길은 둘: 엔진 설정
+//! `EngineConfig.threadPolicy`(오디오 설정 토글 — 없으면 기본값)와 환경변수 `BAND_THREAD_POLICY` = `off` | `highqos` |
+//! `pcores` | `both`(있으면 설정보다 우선 — 제품 빌드에서도 읽는다. 값은 **정확히 그 조합**이다: `off`는 기본 켬인 HighQoS도
+//! 끄고, `pcores`는 HighQoS 없이 P 코어만 건다). 측정: `docs/overhaul/core-placement-2026-11-20.md`.
+//! 걸 수 없는 환경에서는 **조용히 끔과 같게** 돈다: 비Windows는 OS 호출을 하지 않고 보고는 null, Windows에서 호출이 실패하면
+//! (`ThreadPowerThrottling`을 모르는 Windows 10 1709 이전 등) 무시하고 기본 스케줄링으로 돌며 결과 `failed`만
+//! `EngineStats.threadPolicy`(진단 내보내기 포함)에 남긴다 — 로그는 프로세스당 한 번. RT 콜백 스레드에는 걸지 않는다.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
@@ -148,7 +151,9 @@ pub(crate) fn performance_set_ids(cpus: &[CpuSetEntry]) -> Vec<u32> {
     usable.iter().map(|c| c.id).collect()
 }
 
-/// 엔진 하나가 워커·수신 스레드에 걸 정책(P1-21 2단계). 기본은 둘 다 꺼짐 — 이때 스레드는 OS 호출 없이 이 PR 전과 똑같이 돈다.
+/// 엔진 하나가 워커·수신 스레드에 걸 정책(P1-21). 이 타입의 `Default`는 **정책 없음**(둘 다 꺼짐 — 스레드는 OS 호출 없이
+/// 돈다)이고, 엔진 없이 따로 여는 `Net::start`(시험·프로브)가 쓴다. **엔진의 기본값은 여기가 아니라
+/// `ThreadPolicyConfig::default()`**(HighQoS 켬, P 코어 끔)다 — `Engine::start`가 설정에서 이 타입으로 옮긴다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct PolicyChoice {
     pub(crate) high_qos: bool,
@@ -159,7 +164,8 @@ pub(crate) struct PolicyChoice {
 pub(crate) const POLICY_ENV: &str = "BAND_THREAD_POLICY";
 
 /// `BAND_THREAD_POLICY` 값 → 정책. `off` | `highqos` | `pcores` | `both`(대소문자·앞뒤 공백 무시). 측정 도구가 쓰던
-/// `qos`·`qos+pcores`도 받는다. 모르는 값·빈 값은 None(설정을 따른다).
+/// `qos`·`qos+pcores`도 받는다. 모르는 값·빈 값은 None(설정을 따른다 — 설정도 없으면 엔진 기본값).
+/// 값은 정확히 그 조합이다(기본값에 더하는 것이 아니다): `off` = HighQoS도 끔, `pcores` = P 코어만(HighQoS 끔).
 pub(crate) fn parse_policy(v: &str) -> Option<PolicyChoice> {
     let (high_qos, p_cores) = match v.trim().to_ascii_lowercase().as_str() {
         "off" => (false, false),
@@ -171,8 +177,8 @@ pub(crate) fn parse_policy(v: &str) -> Option<PolicyChoice> {
     Some(PolicyChoice { high_qos, p_cores })
 }
 
-/// 엔진 설정(`EngineConfig.threadPolicy`)과 환경변수로 정책을 정한다: 환경변수가 유효하면 그것이 이기고, 아니면 설정,
-/// 설정도 없으면 둘 다 꺼짐. 엔진 시작(제어 평면)에서 한 번 부른다.
+/// 엔진 설정(`EngineConfig.threadPolicy`, 없으면 호출자가 기본값을 넣는다)과 환경변수로 정책을 정한다: 환경변수가 유효하면
+/// 그것이 이기고, 아니면 설정. 엔진 시작(제어 평면)에서 한 번 부른다.
 pub(crate) fn resolve_policy(config: PolicyChoice, env: Option<&str>) -> PolicyChoice {
     env.and_then(parse_policy).unwrap_or(config)
 }
@@ -195,7 +201,7 @@ pub(crate) fn policy_for_engine(config: PolicyChoice) -> PolicyChoice {
 pub(crate) enum PolicyResult {
     /// 스레드가 아직 정책을 적용하기 전이다(시작 직후 잠깐).
     Pending,
-    /// 옵션이 꺼져 있다(기본). OS 호출을 하지 않았다.
+    /// 옵션이 꺼져 있다(P 코어의 기본, HighQoS는 사용자가 껐을 때). OS 호출을 하지 않았다.
     Off,
     /// OS 호출 성공.
     Applied,
@@ -304,8 +310,8 @@ pub fn pin_process(mask: Option<u64>) -> Result<u64, String> {
 }
 
 /// 지금 스레드에 `slot`이 요청한 정책을 적용하고 결과를 `slot`에 적는다. 스레드 시작 때 한 번, 루프 앞에서(시스템콜·로그
-/// 있음 — RT 콜백에서 부르지 않는다). 둘 다 꺼져 있으면(기본) OS 호출이 없다 — 스레드는 이 정책이 없던 때와 똑같이 돈다.
-/// 실패해도 스레드는 그대로 돈다(스레드당 한 번 경고 로그).
+/// 있음 — RT 콜백에서 부르지 않는다). 둘 다 꺼져 있으면 OS 호출이 없다 — 스레드는 이 정책이 없던 때와 똑같이 돈다.
+/// 실패해도 스레드는 그대로 돈다(결과 `failed`만 남는다).
 pub(crate) fn apply_thread_policy(slot: &PolicySlot) {
     init();
     // 정책은 Windows 전용이다 — 다른 OS에서는 걸지도, 실패로 적지도 않는다(보고는 null).
@@ -313,9 +319,17 @@ pub(crate) fn apply_thread_policy(slot: &PolicySlot) {
         return;
     }
     let ids = TABLES.get().map(|t| t.p_set_ids.as_slice()).unwrap_or(&[]);
-    let p = apply_with(slot.choice(), ids, os::disable_power_throttling, os::select_cpu_sets);
-    if p.high_qos == PolicyResult::Failed || p.p_cores == PolicyResult::Failed {
-        log::warn!("스레드 정책 적용 실패(무시): {p:?}");
+    apply_to_slot(slot, ids, os::disable_power_throttling, os::select_cpu_sets);
+}
+
+/// `apply_thread_policy`의 본체(OS 호출은 인자 — 시험이 실패 경로를 넣는다). 실패는 여기서 삼킨다: 패닉·오류 반환 없이
+/// 결과만 슬롯에 적고, 로그는 **프로세스당 한 번**만 남긴다 — HighQoS가 기본 켬이라 API가 없는 Windows에서는 엔진을 시작할
+/// 때마다 스레드 둘이 실패하는데, 그때마다 경고를 쌓지 않는다.
+fn apply_to_slot(slot: &PolicySlot, p_ids: &[u32], disable_throttling: impl FnOnce() -> bool, select_sets: impl FnOnce(&[u32]) -> bool) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    let p = apply_with(slot.choice(), p_ids, disable_throttling, select_sets);
+    if (p.high_qos == PolicyResult::Failed || p.p_cores == PolicyResult::Failed) && !LOGGED.swap(true, Ordering::Relaxed) {
+        log::warn!("스레드 정책을 걸 수 없어 기본 스케줄링으로 돈다(무시, 이후 같은 실패는 로그 생략): {p:?}");
     }
     slot.store(p);
 }
@@ -720,8 +734,11 @@ mod tests {
         for bad in ["", "on", "1", "default", "p"] {
             assert_eq!(parse_policy(bad), None, "{bad}");
         }
-        // 기본(설정 없음·환경변수 없음)은 둘 다 꺼짐
+        // 환경변수가 없으면 설정 그대로(엔진은 설정이 없을 때 기본값 = HighQoS 켬을 넣어 부른다 — engine::tests)
         assert_eq!(resolve_policy(PolicyChoice::default(), None), c(false, false));
+        // 값은 정확히 그 조합이다: 기본 켬인 HighQoS도 `off`·`pcores`로 꺼진다
+        assert_eq!(resolve_policy(c(true, false), Some("off")), c(false, false));
+        assert_eq!(resolve_policy(c(true, false), Some("pcores")), c(false, true));
         assert_eq!(resolve_policy(c(true, false), None), c(true, false));
         assert_eq!(resolve_policy(c(true, true), Some("off")), c(false, false), "환경변수로 끈다");
         assert_eq!(resolve_policy(c(false, false), Some("both")), c(true, true), "환경변수로 켠다");
@@ -762,7 +779,36 @@ mod tests {
         }
     }
 
-    /// 기본 슬롯(둘 다 꺼짐)으로 실제 적용 함수를 부르면 결과는 `off`·`off`다(OS 호출 없이 — 위 시험이 호출 없음을 고정한다).
+    /// 걸 수 없는 Windows(API 미지원 — OS 호출 실패)에서 기본 정책(HighQoS 켬): 스레드는 그대로 돌고(패닉·오류 없음) 결과만
+    /// `failed`로 남는다. P 코어는 꺼져 있어 부르지 않는다. 두 번째 스레드(수신)도 같다.
+    #[test]
+    fn default_policy_falls_back_quietly_when_os_call_fails() {
+        use PolicyResult::*;
+        let default = PolicyChoice { high_qos: true, p_cores: false };
+        for _ in 0..2 {
+            let slot = PolicySlot::requested(default);
+            apply_to_slot(&slot, &[1, 2, 3, 4], || false, |_| panic!("꺼진 P 코어는 부르지 않는다"));
+            if cfg!(windows) {
+                let s = slot.stats().unwrap();
+                assert_eq!(s, ThreadPolicy { high_qos: Failed, p_cores: Off });
+                assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"highQos":"failed","pCores":"off"}"#);
+            } else {
+                assert!(slot.stats().is_none(), "비Windows는 보고가 null이다");
+            }
+        }
+    }
+
+    /// 비Windows: 실제 적용 함수는 OS를 부르지 않고(기본 정책이어도) 결과를 적지도 않는다. 보고는 null — 조용히 끔과 같다.
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_applies_nothing_and_reports_null() {
+        let slot = PolicySlot::requested(PolicyChoice { high_qos: true, p_cores: true });
+        apply_thread_policy(&slot);
+        assert!(slot.stats().is_none());
+        assert_eq!(slot.high_qos.load(Ordering::Relaxed), PolicyResult::Pending as u8, "결과를 적지도 않는다");
+    }
+
+    /// 정책 없는 슬롯(둘 다 꺼짐)으로 실제 적용 함수를 부르면 결과는 `off`·`off`다(OS 호출 없이 — 위 시험이 호출 없음을 고정한다).
     #[test]
     fn default_slot_applies_nothing() {
         std::thread::spawn(|| {

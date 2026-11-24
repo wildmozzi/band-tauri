@@ -45,8 +45,9 @@ timeline.jsonl  1초 간격 엔진 통계(최근 최대 60분): 백엔드·장�
                 corePlacement(Windows)는 워커·수신 스레드가 깨어날 때 P/E/LP-E 코어 중 어디에 있었는지 센
                 [P, E, LP-E] 표본 수입니다. 줄마다 직전 줄 뒤로 센 구간 값이고(실행 시간이 아니라 깨어난 횟수),
                 세션의 줄을 모두 더하면 시작부터의 누적입니다. engine.json lastStats의 corePlacement는 누적입니다.
-                threadPolicy(Windows)는 워커·수신 스레드에 시작 때 건 코어 배치 정책(실험 옵션, 기본 꺼짐)의 결과입니다
-                (highQos = 전원 조절 끄기, pCores = 고성능 코어 집합에 두기; pending/off/applied/failed/skipped).
+                threadPolicy(Windows)는 워커·수신 스레드에 시작 때 건 코어 배치 정책의 결과입니다
+                (highQos = 전원 조절 끄기(기본 켬), pCores = 고성능 코어 집합에 두기(실험 옵션, 기본 꺼짐);
+                pending/off/applied/failed/skipped — failed는 이 Windows에서 걸지 못해 기본 스케줄링으로 돈 것).
                 값이 바뀐 줄(세션 첫 줄)에만 있고, engine.json lastStats에는 늘 있습니다.
                 rebuffers·rebufferMs(피어별 누적)는 상대 소리가 끊겨 지터 버퍼를 다시 채운 횟수와 그동안 소리가
                 없던 시간(ms)입니다. 0이면 줄에 없습니다. entryLeadMs는 내 입장(연주 시작)에서 엔진에 그 피어를
@@ -551,7 +552,8 @@ mod tests {
             // 진단 값 노출(format 3): README에 rebuffers·entryLeadMs·sendQueueP99Ms·nat 설명, meta.format 2 → 3(의도한 변경 —
             // 정지 상태 입력이라 새 키가 없어 engine.json·timeline.jsonl 해시는 그대로)
             // #250 리뷰: README에 selfPeer 설명·entryLeadMs 범위(시작 때 있던 연주자만)·logs/ 줄 맞춤(의도한 변경 — 해시는 README만)
-            ("README.txt", "e1d1e54c61a0c8bbb7eb09e5d203e3f6f4790bfff7e2705f53021235d95d085e"),
+            // P1-21 3단계: README의 threadPolicy 설명(HighQoS 기본 켬·failed 뜻 — 의도한 변경, 해시는 README만)
+            ("README.txt", "e8dd8371585bbf37f2cb6f8d4e403106e1f0556adeb0d10c17a6bbd2b9a15e91"),
             ("meta.json", "8ca5f2597b978ae5133a12ba0f4ebe2bb1dbb0401e669c0621b65b87c6d325c5"),
             // P2-17e: engine.json의 config에 resampleQuality(null), stats에 resampler(null)가 생김(의도한 변경)
             // P1-21 2단계: engine.json의 config에 threadPolicy(null)가 생김(의도한 변경)
