@@ -9,9 +9,15 @@
  * 같은 페이지에서 뷰포트만 바꿔 가며 본다(화면마다 새로 띄우지 않아 빠르다).
  */
 import type { Locator, Page } from '@playwright/test'
-import { ALICE, BOB, GUITAR_POST, REMOTE_PERFORMER, ROCK_ROOM } from './fixtures'
+import { ALICE, BOB, BOB_COMMENT, GUITAR_POST, REMOTE_PERFORMER, ROCK_ROOM } from './fixtures'
 import { installFakeTauri } from './mocks/tauri'
 import { expect, test } from './test'
+
+/** 1×1 PNG (글 작성 이미지 미리보기) */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+)
 
 const PHONES = [
   { width: 390, height: 844 },
@@ -190,6 +196,127 @@ test.describe('좁은 화면: 합주실 목록', () => {
     // 태블릿부터는 상단 고정 유지
     await page.setViewportSize({ width: 768, height: 1024 })
     await expect(page.locator('nav.top-nav')).toHaveCSS('position', 'sticky')
+  })
+})
+
+/**
+ * 본문(main) 안에서 지금 보이는 눌리는 요소 전부가 44px 이상인지 (P3-24 후속). 화면을 통째로 보므로 새 버튼이 작게 들어와도 걸린다.
+ * 눌리는 요소: button·a·select·textarea·input·[role=button]·컨트롤을 감싼 label, 그리고 커서가 손가락(cursor: pointer)인 요소(클릭 가능한 span 칩 등, #253 리뷰 L-2).
+ * 입력 칸 위 제목 label(컨트롤을 감싸지 않음)은 누를 대상이 아니라 뺀다 — 칸 자체를 본다.
+ * 눌리는 요소 안의 요소(버튼 안 아이콘 span 등)는 바깥 요소 하나로 센다.
+ * 제외: 음량 슬라이더(MixerPanel이 의도해 32px 높이), 숨긴 파일 입력, 카드 전체를 덮는 제목 링크와 그 안(stretched link — 카드 높이로 따로 본다).
+ * "지금 보이는 것"만 보므로 상태에 따라 나오는 요소(태그·이미지 × 버튼, 확인 줄)는 그 상태를 만든 뒤 따로 부른다.
+ */
+async function mainTargets(page: Page): Promise<Locator> {
+  await page.evaluate(() => {
+    for (const el of Array.from(document.querySelectorAll('[data-e2e-touch]'))) el.removeAttribute('data-e2e-touch')
+    const main = document.querySelector('main.app-content')
+    if (!main) return
+    // 카드 컨테이너는 대상도 덮개도 아니다(카드 높이는 따로 보고, 카드 위 칩은 각자 센다)
+    const transparent = (el: Element) => el.matches('.community-post-card')
+    const isTarget = (el: Element) =>
+      !transparent(el) &&
+      (el.matches('button, a, select, textarea, input, [role="button"]') ||
+        // label은 컨트롤을 감쌀 때만(누르면 토글되는 것). 입력 칸 위 제목 label은 칸 자체를 본다
+        (el.matches('label') && el.querySelector('input, select, textarea') != null) ||
+        pointerHere(el))
+    // 손가락 커서를 이 요소가 직접 정했는지(부모에게서 물려받은 것은 아님 — 카드 안 글자 등)
+    function pointerHere(el: Element) {
+      if (getComputedStyle(el).cursor !== 'pointer') return false
+      if ((el as HTMLElement).style?.cursor === 'pointer') return true
+      return !el.parentElement || getComputedStyle(el.parentElement).cursor !== 'pointer'
+    }
+    const excluded = (el: Element) => el.matches('input[type="range"], input[type="file"], .community-post-link')
+    for (const el of Array.from(main.querySelectorAll('*'))) {
+      if (!isTarget(el) || excluded(el)) continue
+      let covered = false
+      for (let p = el.parentElement; p && p !== main; p = p.parentElement) {
+        if (isTarget(p)) {
+          covered = true
+          break
+        }
+      }
+      if (!covered) el.setAttribute('data-e2e-touch', '')
+    }
+  })
+  return page.locator('main.app-content [data-e2e-touch]')
+}
+
+test.describe('좁은 화면: 커뮤니티 터치 대상 44px (P3-24 후속)', () => {
+  test('목록: 글 작성·악기 탭·필터 해제, 게시물 카드(제목 링크가 덮는 영역)', async ({ page }) => {
+    await page.setViewportSize(PHONES[0])
+    await page.goto('/community')
+    await expect(page.getByRole('link', { name: GUITAR_POST.title }).first()).toBeVisible()
+    await eachViewport(page, NARROW, async () => {
+      await expectTouchTargets(await mainTargets(page), '커뮤니티 목록')
+      await expectTouchTargets(page.locator('.community-post-card'), '게시물 카드')
+    })
+    // 태그 칩(클릭 가능한 span)을 누르면 나오는 '필터 해제'
+    await page.locator('.community-post-actions').getByText('#톤').first().click()
+    await expect(page.getByRole('button', { name: /필터 해제/ })).toBeVisible()
+    await eachViewport(page, NARROW, async () => expectTouchTargets(await mainTargets(page), '태그 필터 중'))
+  })
+
+  test('게시물(작성자): 목록으로·수정·삭제·댓글 작성·답글 폼, 삭제 확인 모달', async ({ page, mock }) => {
+    await mock.loginAs(ALICE) // GUITAR_POST 작성자
+    await page.setViewportSize(PHONES[0])
+    await page.goto(`/community/${GUITAR_POST.id}`)
+    await expect(page.getByRole('heading', { level: 1, name: GUITAR_POST.title })).toBeVisible()
+    await expect(page.getByText(BOB_COMMENT.content)).toBeVisible()
+    await page.getByRole('button', { name: '답글', exact: true }).click()
+    await expect(page.getByRole('button', { name: '답글 작성' })).toBeVisible()
+    await eachViewport(page, NARROW, async () => expectTouchTargets(await mainTargets(page), '게시물·답글 폼'))
+    await page.getByRole('button', { name: '삭제', exact: true }).first().click()
+    await expect(page.getByText(/삭제하시겠습니까|삭제할까요/).first()).toBeVisible()
+    await eachViewport(page, NARROW, async () => expectTouchTargets(await mainTargets(page), '게시물 삭제 확인'))
+  })
+
+  test('댓글(작성자): 수정·삭제, 수정 폼의 저장·취소, 삭제 확인', async ({ page, mock }) => {
+    await mock.loginAs(BOB) // BOB_COMMENT 작성자
+    await page.setViewportSize(PHONES[0])
+    await page.goto(`/community/${GUITAR_POST.id}`)
+    const comment = page.getByText(BOB_COMMENT.content)
+    await expect(comment).toBeVisible()
+    await eachViewport(page, NARROW, async () => expectTouchTargets(await mainTargets(page), '댓글'))
+    await page.getByRole('button', { name: '수정', exact: true }).click()
+    await expect(page.locator('main.app-content textarea').filter({ hasText: BOB_COMMENT.content })).toBeVisible()
+    await eachViewport(page, NARROW, async () => expectTouchTargets(await mainTargets(page), '댓글 수정 폼'))
+    await page.getByRole('button', { name: '취소', exact: true }).click()
+    await page.getByRole('button', { name: '삭제', exact: true }).click()
+    await expect(page.getByRole('button', { name: '취소', exact: true })).toBeVisible()
+    await eachViewport(page, NARROW, async () => expectTouchTargets(await mainTargets(page), '댓글 삭제 확인'))
+  })
+
+  test('글 작성: 취소·악기·태그 입력·추가·이미지 추가·게시하기, 요금제 배지', async ({ page, mock }) => {
+    await mock.loginAs(ALICE)
+    await page.setViewportSize(PHONES[0])
+    await page.goto('/community/create')
+    await expect(page.getByRole('heading', { level: 1, name: '새 게시물 작성' })).toBeVisible()
+    await eachViewport(page, NARROW, async () => {
+      await expectTouchTargets(await mainTargets(page), '글 작성')
+      await expectTouchTargets(page.locator('.top-nav .plan-status-compact'), '요금제 배지')
+    })
+    // 태그·이미지를 넣은 뒤에만 나오는 × 버튼(원래 24px, #253 리뷰 L-2)
+    await page.getByPlaceholder('태그 입력 후 추가 버튼 클릭').fill('톤')
+    await page.getByRole('button', { name: '추가', exact: true }).click()
+    await page.locator('input[type="file"]').setInputFiles({ name: 'a.png', mimeType: 'image/png', buffer: PNG_1X1 })
+    await expect(page.getByRole('button', { name: '태그 톤 빼기' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '이미지 빼기' })).toBeVisible()
+    await eachViewport(page, NARROW, async () => expectTouchTargets(await mainTargets(page), '글 작성(태그·이미지 넣은 뒤)'))
+  })
+})
+
+test.describe('좁은 화면: 방장 관람자로 내리기 44px (P3-24 후속)', () => {
+  test('내리기 버튼과 확인 줄(내리기·취소)', async ({ page, mock }) => {
+    mock.signaling.setRoom(ROCK_ROOM.id, { participants: [{ ...REMOTE_PERFORMER, isHost: false }] })
+    await mock.loginAs(ALICE) // ROCK_ROOM의 방장
+    await page.setViewportSize(PHONES[0])
+    await page.goto(`/rooms/${ROCK_ROOM.id}`)
+    const card = page.locator('.performer-item-wrapper').filter({ hasText: REMOTE_PERFORMER.nickname })
+    await expect(card.getByRole('button', { name: '관람자로 내리기' })).toBeVisible()
+    await eachViewport(page, NARROW, () => expectTouchTargets(card.locator('.performer-demote-btn'), '관람자로 내리기'))
+    await card.getByRole('button', { name: '관람자로 내리기' }).click()
+    await eachViewport(page, NARROW, () => expectTouchTargets(card.locator('.performer-demote-confirm button'), '내리기 확인'))
   })
 })
 

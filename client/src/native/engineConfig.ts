@@ -254,15 +254,75 @@ export function toStored(config: EngineConfig): StoredAudioSettings {
 }
 
 /**
- * 계정(profiles.audio_settings)과 그 로컬 캐시에 쓰는 형식: 기기별 필드(`threadPolicy`)를 뺀다.
- * 스레드 정책은 이 PC의 CPU 구성에 따른 값이라 다른 PC로 따라가면 안 된다(#245 재리뷰 L4) —
- * 기기 로컬(`features/settings/deviceLocalSettings`)에만 저장한다. 서버에 옛 값이 있어도 읽을 때 무시하고
- * (`withDeviceLocal`), 다음 저장 때 이 형식으로 덮어써 사라진다.
+ * 이 PC에만 저장하는 장치 쪽 필드(P2-27 후속, 사용자 결정 2026-11-21): 드라이버·장치 id·입력 채널·버퍼 크기.
+ * 장치 id는 PC마다 다르고(다른 PC에 로그인하면 없는 장치가 따라왔다), 버퍼는 그 장치·드라이버가 감당하는 값이라
+ * 계정으로 따라가면 안 된다. 코덱·프레임·모노/스테레오(`channels`)·지터·리샘플러는 계정에 남는다 —
+ * `channels`는 코덱·프레임과 함께 패킷 크기(1200B 상한)와 프리셋을 정하는 전송 형식이다. 입력 채널(`inputChannels`)은
+ * 개수를 계정의 `channels`에 맞춰 합친다(`withDeviceSettings`).
  */
-export function toAccountStored(config: EngineConfig): StoredAudioSettings {
-  const engine: EngineConfig = { ...config }
+export const DEVICE_LOCAL_KEYS = ['inputDriver', 'outputDriver', 'inputDevice', 'outputDevice', 'inputChannels', 'bufferSize'] as const
+export type DeviceLocalKey = (typeof DEVICE_LOCAL_KEYS)[number]
+export type DeviceSettings = Pick<EngineConfig, DeviceLocalKey>
+
+/** 계정(profiles.audio_settings)과 그 로컬 캐시에 쓰는 설정: 장치 쪽 필드와 스레드 정책을 뺀 나머지 */
+export type AccountEngineSettings = Omit<EngineConfig, DeviceLocalKey | 'threadPolicy'>
+export interface AccountStoredAudioSettings {
+  version: typeof STORED_SETTINGS_VERSION
+  engine: AccountEngineSettings
+}
+
+/**
+ * 계정(profiles.audio_settings)과 그 로컬 캐시에 쓰는 형식: 기기별 필드(장치 쪽 필드, `threadPolicy`)를 뺀다.
+ * 스레드 정책은 이 PC의 CPU 구성에 따른 값이라 다른 PC로 따라가면 안 되고(#245 재리뷰 L4),
+ * 장치 쪽 필드도 같다(P2-27 후속). 둘 다 기기 로컬(`features/settings/deviceLocalSettings`)에만 저장한다.
+ * 서버에 옛 값이 있어도 읽을 때 쓰지 않고(이 PC에 저장값이 없을 때 한 번 초기값으로 가져오는 것만 예외 —
+ * `accountDeviceSettings`), 다음 저장 때 이 형식으로 덮어써 사라진다. 읽는 쪽(`parseStoredSettings`)은 빠진 필드를
+ * 기본값으로 채우므로 옛 앱도 이 형식을 읽는다.
+ */
+export function toAccountStored(config: EngineConfig): AccountStoredAudioSettings {
+  const engine: Partial<EngineConfig> = { ...config }
   delete engine.threadPolicy
-  return { version: STORED_SETTINGS_VERSION, engine }
+  for (const k of DEVICE_LOCAL_KEYS) delete engine[k]
+  return { version: STORED_SETTINGS_VERSION, engine: engine as AccountEngineSettings }
+}
+
+/** 설정에서 장치 쪽 필드만 뽑는다(사본) */
+export function pickDeviceSettings(config: EngineConfig): DeviceSettings {
+  return {
+    inputDriver: config.inputDriver,
+    outputDriver: config.outputDriver,
+    inputDevice: config.inputDevice,
+    outputDevice: config.outputDevice,
+    inputChannels: [...config.inputChannels] as EngineConfig['inputChannels'],
+    bufferSize: config.bufferSize,
+  }
+}
+
+/**
+ * 계정에서 읽은 설정에 이 PC의 장치 쪽 값을 덮는다. 계정 쪽 장치 필드는 쓰지 않는다.
+ * 입력 채널 개수는 계정의 `channels`(모노/스테레오)에 맞춘다 — 다른 PC에서 스테레오로 바꿨으면 둘째 채널을 채운다.
+ */
+export function withDeviceSettings(config: EngineConfig, device: DeviceSettings): EngineConfig {
+  return {
+    ...config,
+    ...device,
+    inputChannels: normalizeInputChannels(config.channels, device.inputChannels),
+  }
+}
+
+/**
+ * 계정 값에 장치 쪽 필드가 들어 있으면(이 변경 전에 저장된 계정) 그 값을, 없으면 null.
+ * 이 PC에 장치 저장값이 아직 없을 때 한 번만 초기값으로 쓴다(이행) — 그 장치가 이 PC에 없으면 시작 때 폴백(P2-27)이 처리한다.
+ */
+export function accountDeviceSettings(raw: unknown): DeviceSettings | null {
+  if (!isRecord(raw)) return null
+  const parsed = parseStoredSettings(raw)
+  if (parsed.migrated) return pickDeviceSettings(parsed.config)
+  const engine = raw.engine
+  if (raw.version === STORED_SETTINGS_VERSION && isRecord(engine) && DEVICE_LOCAL_KEYS.some((k) => k in engine)) {
+    return pickDeviceSettings(parsed.config)
+  }
+  return null
 }
 
 /** 계정에서 읽은 설정에 이 기기의 값(스레드 정책)을 덮는다. 계정 쪽 `threadPolicy`는 쓰지 않는다 */

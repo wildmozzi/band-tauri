@@ -1,0 +1,69 @@
+/*
+ * 터치 대상 44px (P3-24 후속): 커뮤니티의 버튼·입력은 모양을 인라인 style로 정한다(패딩·글자 크기).
+ * 인라인 style은 최소 크기를 정하지 않으므로 좁은 화면에서만 클래스로 최소 크기를 더한다 — 769px 이상은 그대로.
+ */
+@media (max-width: 768px) {
+  .community-touch {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* 클릭 가능한 span 칩(좋아요·태그·트렌딩 태그, #253 리뷰 L-2): 줄 높이로 키워 글자가 가운데 오게 한다.
+     34px + 위아래 패딩 4px + 테두리 1px = 44px(트렌딩 칩은 패딩 6px이라 48px) */
+  .community-chip-touch {
+    min-width: 44px;
+    min-height: 44px;
+    line-height: 34px;
+    text-align: center;
+  }
+
+  /* 글쓰기 태그 칩의 ×: 칩 안에서 눌리는 영역만 44px, 음수 여백으로 칩이 그만큼 커지지 않게 */
+  .community-tag-remove {
+    min-width: 44px;
+    min-height: 44px;
+    margin: -8px -10px -8px -4px;
+  }
+}
+
+/* 글쓰기 이미지 미리보기의 ×: 겉 버튼(눌리는 영역) + 안의 24px 원(보이는 모양). 넓은 화면에서는 예전 인라인 style과 같은 24px */
+.post-thumb-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-round);
+  background: none;
+  color: var(--white);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.post-thumb-remove-dot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-round);
+  background: var(--black-a70);
+}
+
+@media (max-width: 768px) {
+  /* 겉 버튼만 썸네일 모서리에서 44px로, 원은 예전 자리(위·오른쪽 4px) 그대로 */
+  .post-thumb-remove {
+    top: 0;
+    right: 0;
+    align-items: flex-start;
+    justify-content: flex-end;
+    width: 44px;
+    height: 44px;
+    padding: 4px 4px 0 0;
+    border-radius: 0;
+  }
+}

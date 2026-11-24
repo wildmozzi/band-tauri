@@ -5,6 +5,7 @@ import { FEED_INSTRUMENTS, excerpt, instrumentIcon } from './communityFeed'
 import { useCommunityFeed } from './useCommunityFeed'
 import './communityFeed.css'
 import './communityList.css'
+import './communityTouch.css'
 
 /**
  * 글 상세 링크 (P3-12 ⑤). 카드 전체를 덮는 링크(::after)라 카드 어디를 눌러도 이동하고,
@@ -112,6 +113,7 @@ export function Community() {
                       >
                         {post.tags.length > 0 && post.tags.map((tag, idx) => (
                           <span
+                            className="community-chip-touch"
                             key={idx}
                             onClick={() => handleTagClick(tag)}
                             style={{
@@ -130,6 +132,7 @@ export function Community() {
                           </span>
                         ))}
                         <span
+                          className="community-chip-touch"
                           style={{
                             padding: 'var(--space-1) var(--space-3)',
                             background: post.liked_by_user ? 'var(--pink-400-a25)' : 'var(--pink-400-a15)',
@@ -156,6 +159,7 @@ export function Community() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 'var(--space-4)' }}>
               <h2 style={{ fontSize: '20px', fontWeight: '600', margin: 0 }}>🎵 세션별 게시판</h2>
               <button
+                className="community-touch"
                 onClick={() => navigate('/community/create')}
                 style={{
                   background: 'linear-gradient(135deg, var(--accent), var(--violet-300))',
@@ -185,6 +189,7 @@ export function Community() {
             <div style={{ display: 'flex', gap: 'var(--space-2)', marginBottom: 'var(--space-5)', flexWrap: 'wrap' }}>
               {FEED_INSTRUMENTS.map((instrument) => (
                 <button
+                  className="community-touch"
                   key={instrument.id}
                   onClick={() => setSelectedInstrument(instrument.id)}
                   style={{
@@ -230,6 +235,7 @@ export function Community() {
                   <span style={{ color: 'var(--violet-300)', fontWeight: '600' }}>#{selectedTag}</span>
                 </span>
                 <button
+                  className="community-touch"
                   onClick={() => setSelectedTag(null)}
                   style={{
                     background: 'transparent',
@@ -306,6 +312,7 @@ export function Community() {
                           className="community-post-actions"
                         >
                           <span
+                            className="community-chip-touch"
                             style={{
                               padding: 'var(--space-1) 10px',
                               background: post.liked_by_user ? 'var(--pink-400-a25)' : 'var(--pink-400-a15)',
@@ -334,6 +341,7 @@ export function Community() {
                         >
                           {post.tags.map((tag, idx) => (
                             <span
+                              className="community-chip-touch"
                               key={idx}
                               onClick={() => handleTagClick(tag)}
                               style={{
@@ -382,6 +390,7 @@ export function Community() {
               ) : (
                 trendingTags.map(({ tag, count }) => (
                   <span
+                    className="community-chip-touch"
                     key={tag}
                     onClick={() => handleTagClick(tag)}
                     style={{
