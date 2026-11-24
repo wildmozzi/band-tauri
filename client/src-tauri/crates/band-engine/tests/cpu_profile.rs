@@ -11,184 +11,24 @@
 //! 전·후 비교(ADR D6, P1-21b): `BAND_CPU_PIN=pe`(LP-E를 뺀 P+E에 고정 — 반복당 비용) / 비움(고정 없음 — 배치 확률)으로 돌리고,
 //! 구성마다 찍는 `CSV|` 줄(열 이름 `CSVHEAD|`)을 `scripts/cpu-compare.mjs`가 모아 통계를 낸다. 방법: `docs/overhaul/cpu-measure.md`.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use band_dsp::codec::Encoder;
 use band_dsp::config::{CodecKind, EngineConfig};
-use band_engine::testing::engine::cpuprof::CpuStats;
-use band_engine::testing::sys::cpu::{cycle_pct, process_cycles, tsc_now};
-use band_engine::testing::sys::placement::{describe_cores, pin_process};
-use band_engine::testing::engine::device::fake::FakeBackend;
 use band_dsp::mixer::MixControls;
-use band_dsp::relay_codec::CodecReason;
 use band_dsp::types::PeerStateKind;
 use band_engine::testing::engine::Engine;
-use band_engine::testing::net::peer::{Candidate, CandidateKind, LocalDescriptor};
-use band_engine::testing::net::NetOptions;
+use band_engine::testing::sys::placement::{describe_cores, pin_process};
 
-const PEERS: usize = 6;
+// 측정 본체(엔진 6개 풀메시·측정 창·`Row`)는 예제 `policy_matrix`와 함께 쓴다.
+#[path = "support/mesh_cpu.rs"]
+mod mesh_cpu;
+use mesh_cpu::{addr, run, sine_backend, test_net, with_candidate, Row, PEERS};
+
+/// 구성마다 예열 3초 + 측정 창 12초(`cpu-measure.md` — 2026-11-17·11-20 측정과 같은 값).
+const WARMUP: Duration = Duration::from_secs(3);
 const MEASURE: Duration = Duration::from_secs(12);
-
-fn test_net() -> NetOptions {
-    NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None }
-}
-
-fn sine_backend(hz: f64) -> FakeBackend {
-    let mut b = FakeBackend::new(
-        48_000,
-        Arc::new(move |start: u64, ch: usize, buf: &mut [f32]| {
-            for (i, frame) in buf.chunks_exact_mut(ch).enumerate() {
-                let t = (start + i as u64) as f64 / 48_000.0;
-                frame.fill((t * hz * 2.0 * std::f64::consts::PI).sin() as f32 * 0.3);
-            }
-        }),
-    );
-    b.record_output = false;
-    b
-}
-
-fn addr(e: &Engine) -> SocketAddr {
-    format!("127.0.0.1:{}", e.local_port().unwrap()).parse().unwrap()
-}
-
-fn with_candidate(d: &LocalDescriptor, a: SocketAddr) -> LocalDescriptor {
-    LocalDescriptor { candidates: vec![Candidate { kind: CandidateKind::Lan, addr: a.to_string() }], ..d.clone() }
-}
-
-struct Row {
-    label: String,
-    me: CpuStats,
-    worker_avg: f32,
-    worker_max: f32,
-    load_avg: f32,
-    p99_max: f32,
-    per_node_pct: f32,
-    conceal_max: f32,
-    xruns: u64,
-    /// 측정 창(12초) 워커 반복 본문(`iter_body`, 수면 제외) p50·p99(6엔진 평균, µs)·최대(6엔진 최대, µs)·반복 수(6엔진 평균),
-    /// 반복 간격 p50(µs). ADR D6 비교 측정의 보조 지표(P1-21b — `cpu-quiet-2026-11-17.md` 측정 패치를 정식으로).
-    body: [f32; 5],
-    /// 측정 창 동안 6엔진 합 코어 배치(P1-21): [워커, 수신] × [P, E, LP-E] 표본 수. 비Windows는 None.
-    placement: Option<[[f64; 3]; 2]>,
-    /// 엔진 0이 보고한 스레드 정책 적용 결과(`EngineStats.threadPolicy` JSON, P1-21 2단계). 비Windows는 빈 문자열.
-    policy_applied: String,
-}
-
-/// `EngineStats.corePlacement`(누적)에서 [워커, 수신] × [P, E, LP-E] 표본 수. 계약 JSON으로 읽는다(공개 표면을 늘리지 않음).
-fn placement_counts(s: &band_engine::testing::engine::report::EngineStats) -> Option<[[f64; 3]; 2]> {
-    let v = serde_json::to_value(s).ok()?;
-    let cp = v.get("corePlacement")?;
-    let one = |t: &serde_json::Value| -> [f64; 3] {
-        let n = t.get("samples").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        ["pPct", "ePct", "lpEPct"].map(|k| n * t.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0) / 100.0)
-    };
-    Some([one(cp.get("worker")?), cp.get("netRecv").map(one).unwrap_or([0.0; 3])])
-}
-
-fn sum_placement(stats: &[band_engine::testing::engine::report::EngineStats]) -> Option<[[f64; 3]; 2]> {
-    let mut acc = [[0.0; 3]; 2];
-    for s in stats {
-        let p = placement_counts(s)?;
-        for (a, b) in acc.iter_mut().flatten().zip(p.iter().flatten()) {
-            *a += b;
-        }
-    }
-    Some(acc)
-}
-
-fn run(codec: CodecKind, frame_ms: f32, force_auto: bool) -> Row {
-    let cfg = EngineConfig { buffer_size: 128, frame_ms, codec, channels: 1, input_channels: vec![0], ..Default::default() };
-    let engines: Vec<Engine> = (0..PEERS)
-        .map(|i| {
-            Engine::start(cfg.clone(), Arc::new(sine_backend(220.0 * (i + 1) as f64)), Arc::new(MixControls::default()), Some((format!("p{i}"), test_net())))
-                .unwrap()
-        })
-        .collect();
-    for (i, e) in engines.iter().enumerate() {
-        for (j, o) in engines.iter().enumerate() {
-            if i != j {
-                e.add_peer(format!("p{j}"), &with_candidate(o.descriptor().unwrap(), addr(o))).unwrap();
-            }
-        }
-    }
-    let t0 = Instant::now();
-    while !engines.iter().all(|e| {
-        let s = e.stats();
-        s.peers.len() == PEERS - 1 && s.peers.iter().all(|p| p.state == PeerStateKind::Connected)
-    }) {
-        assert!(t0.elapsed() < Duration::from_secs(30), "풀메시 연결 실패");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    if force_auto {
-        // P1-4f M1: PCM16 설정에서 손실 피드백이 모든 피어에게 켜진 최악 조건(엔진마다 프레임당 Opus 인코딩 5회)
-        for e in &engines {
-            e.force_auto_opus(true).unwrap();
-        }
-    }
-    // 예열(지터 버퍼 수렴) 후 창을 한 번 회전해 기준을 맞춘다
-    std::thread::sleep(Duration::from_secs(3));
-    if force_auto {
-        for (i, e) in engines.iter().enumerate() {
-            for p in e.stats().peers {
-                assert_eq!(p.tx_codec_reason, Some(CodecReason::LossFeedback), "엔진 {i} → {}: 강제 전환이 안 됨", p.peer_id);
-                assert_eq!(p.tx_codec, Some(CodecKind::Opus));
-            }
-        }
-    }
-    // 창 회전과 xrun 기준(연결·예열 구간 제외)
-    let x0: u64 = engines.iter().map(|e| e.stats().xruns).sum();
-    let pl0 = sum_placement(&engines.iter().map(|e| e.stats()).collect::<Vec<_>>());
-    for e in &engines {
-        let _ = e.take_worker_timing();
-    }
-    let (p0, k0) = (process_cycles(), tsc_now());
-    std::thread::sleep(MEASURE);
-    let stats: Vec<_> = engines.iter().map(|e| e.stats()).collect();
-    let (p1, k1) = (process_cycles(), tsc_now());
-    let wts: Vec<_> = engines.iter().map(|e| e.take_worker_timing()).collect();
-    let cpus: Vec<CpuStats> = stats.iter().map(|s| s.cpu).collect();
-    for c in &cpus {
-        assert!(c.window_ms >= MEASURE.as_millis() as f32 * 0.9, "창 회전: {c:?}");
-        assert!(c.callbacks > 0, "{c:?}");
-    }
-    let workers: Vec<f32> = cpus.iter().map(|c| c.worker_pct.unwrap_or(f32::NAN)).collect();
-    let row = Row {
-        label: if force_auto { format!("{codec:?} {frame_ms}ms + 5피어 Opus 개별 인코딩(손실 피드백 강제)") } else { format!("{codec:?} {frame_ms}ms") },
-        me: cpus[0],
-        worker_avg: workers.iter().sum::<f32>() / PEERS as f32,
-        worker_max: workers.iter().cloned().fold(0.0, f32::max),
-        load_avg: cpus.iter().map(|c| c.callback_load_pct).sum::<f32>() / PEERS as f32,
-        p99_max: cpus.iter().map(|c| c.callback_p99_us).fold(0.0, f32::max),
-        per_node_pct: cycle_pct(p1, p0, k1, k0).unwrap_or(f32::NAN) / PEERS as f32,
-        conceal_max: stats.iter().flat_map(|s| s.peers.iter().map(|p| p.conceal_pct)).fold(0.0, f32::max),
-        // 측정 창 안의 xrun만(연결·예열 구간 제외, 리뷰 L1)
-        xruns: stats.iter().map(|s| s.xruns).sum::<u64>().saturating_sub(x0),
-        body: {
-            let avg = |v: Vec<f32>| v.iter().sum::<f32>() / v.len() as f32;
-            [
-                avg(wts.iter().map(|w| w.body.p50_ms * 1000.0).collect()),
-                avg(wts.iter().map(|w| w.body.p99_ms * 1000.0).collect()),
-                wts.iter().map(|w| w.body.max_ms * 1000.0).fold(0.0, f32::max),
-                avg(wts.iter().map(|w| w.body.packets as f32).collect()),
-                avg(wts.iter().map(|w| w.period.p50_ms * 1000.0).collect()),
-            ]
-        },
-        policy_applied: serde_json::to_value(&stats[0]).ok().and_then(|v| v.get("threadPolicy").filter(|p| !p.is_null()).map(|p| p.to_string())).unwrap_or_default(),
-        placement: sum_placement(&stats).zip(pl0).map(|(a, b)| {
-            let mut d = [[0.0; 3]; 2];
-            for ((x, a), b) in d.iter_mut().flatten().zip(a.iter().flatten()).zip(b.iter().flatten()) {
-                *x = a - b;
-            }
-            d
-        }),
-    };
-    for mut e in engines {
-        e.stop();
-    }
-    row
-}
 
 #[test]
 #[ignore = "측정 도구: cargo test --release --test cpu_profile -- --ignored --nocapture"]
@@ -271,7 +111,7 @@ fn six_peer_full_mesh_cpu() {
         (CodecKind::Pcm16, 5.0, true),
     ]
         .into_iter()
-        .map(|(c, f, force)| run(c, f, force))
+        .map(|(c, f, force)| run(c, f, force, WARMUP, MEASURE))
         .collect();
     println!();
     println!("| 구성(128샘플 버퍼, 모노) | 워커 CPU 내 엔진 / 평균 / 최대 (%, 1코어) | 콜백 사용률 평균 (%) | 콜백 p50 / p99 / 최대 (µs, 내 엔진) | p99/주기 (%) | 6피어 최악 p99 (µs) | 연주자 1명 몫 프로세스 CPU (%, 1코어 → 4코어 기준) | 최대 은닉 (%) | xrun(측정 창, 6엔진 합) |");

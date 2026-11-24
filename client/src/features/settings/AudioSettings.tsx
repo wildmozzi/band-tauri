@@ -4,7 +4,7 @@
  */
 import { useEffect } from 'react'
 import { useAudioSettings } from './AudioSettingsContext'
-import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs, type PeerStats, type ResampleQuality } from '../../native/engineApi'
+import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs, type PCoreMode, type PeerStats, type ResampleQuality } from '../../native/engineApi'
 import {
   BUFFER_OPTIONS,
   DRIVER_OPTIONS,
@@ -18,7 +18,9 @@ import {
   estimatePayloadBytes,
   formatPeerJitter,
   jitterProfileLabel,
+  pCoreModeOf,
   resolveResampleQuality,
+  withPCoreMode,
   type EnginePresetId,
   DEFAULT_THREAD_POLICY,
 } from '../../native/engineConfig'
@@ -46,6 +48,7 @@ import {
   isWindowsUserAgent,
   resampleQualityHint,
   threadPolicyStatus,
+  P_CORE_MODE_OPTIONS,
   THREAD_POLICY_OPTIONS,
   withLeftInputChannel,
   withRightInputChannel,
@@ -499,7 +502,7 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
         <p className="setting-hint">네트워크가 불안정하면 최대값을 올리고, 지연을 줄이려면 내리세요.</p>
       </section>
 
-      {/* 고급: 엔진 스레드 코어 배치 정책(P1-21 — 절전 끄기는 기본 켬, P 코어 묶기는 실험적·기본 꺼짐) */}
+      {/* 고급: 엔진 스레드 코어 배치 정책(P1-21 — 절전 끄기는 기본 켬 토글, P 코어 정책은 실험적·기본 끔인 선택 상자) */}
       <section className="settings-section" data-testid="thread-policy-section">
         <h3>고급</h3>
         <p className="setting-hint">
@@ -511,9 +514,14 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           const id = `thread-policy-${o.key}`
           // 엔진이 돌고 있으면 그 엔진의 결과(테스트 모니터 또는 합주), 아니면 null
           const live = isTesting || engineInUse ? { stats: (isTesting ? testStats : liveStats) ?? null } : null
+          // P 코어 정책은 선택 상자(끔·고정·선호·조건부 고정), 절전 끄기는 토글
+          const isMode = o.key === 'preferPCores'
+          const mode = pCoreModeOf(policy)
+          const startedMode = live && engineThreadPolicy ? pCoreModeOf(engineThreadPolicy) : null
+          const enabled = isMode ? mode !== 'off' : policy.highQos
           // 돌고 있는 엔진을 시작할 때 넘긴 값 — 환경변수 BAND_THREAD_POLICY가 덮었는지 판단(#249 리뷰 Low-1)
-          const startedWith = live && engineThreadPolicy ? engineThreadPolicy[o.key] : null
-          const status = threadPolicyStatus(o.key, policy[o.key], IS_WINDOWS, live, startedWith)
+          const startedWith = live && engineThreadPolicy ? (isMode ? startedMode !== 'off' : engineThreadPolicy.highQos) : null
+          const status = threadPolicyStatus(o.key, enabled, IS_WINDOWS, live, startedWith, isMode ? { want: mode, started: startedMode } : null)
           return (
             <div key={o.key}>
               <div className="settings-row">
@@ -521,13 +529,26 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
                   {o.label}
                   {o.experimental && <span className="experimental-badge">실험적</span>}
                 </label>
-                <input
-                  id={id}
-                  type="checkbox"
-                  checked={policy[o.key]}
-                  aria-describedby={`${id}-status ${id}-effect ${id}-caution`}
-                  onChange={(e) => updateConfig({ threadPolicy: { ...policy, [o.key]: e.target.checked } })}
-                />
+                {isMode ? (
+                  <select
+                    id={id}
+                    value={mode}
+                    aria-describedby={`${id}-status ${id}-mode ${id}-effect ${id}-caution`}
+                    onChange={(e) => updateConfig({ threadPolicy: withPCoreMode(policy, e.target.value as PCoreMode) })}
+                  >
+                    {P_CORE_MODE_OPTIONS.map((m) => (
+                      <option key={m.id} value={m.id}>{m.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    id={id}
+                    type="checkbox"
+                    checked={policy.highQos}
+                    aria-describedby={`${id}-status ${id}-effect ${id}-caution`}
+                    onChange={(e) => updateConfig({ threadPolicy: { ...policy, highQos: e.target.checked } })}
+                  />
+                )}
               </div>
               <p
                 id={`${id}-status`}
@@ -537,6 +558,11 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
               >
                 {status?.text ?? ''}
               </p>
+              {isMode && (
+                <p id={`${id}-mode`} className="setting-hint" data-testid={`${id}-mode`}>
+                  {P_CORE_MODE_OPTIONS.find((m) => m.id === mode)?.desc}
+                </p>
+              )}
               <p id={`${id}-effect`} className="setting-hint">{o.effect}</p>
               <p id={`${id}-caution`} className="setting-hint">{o.caution}</p>
             </div>

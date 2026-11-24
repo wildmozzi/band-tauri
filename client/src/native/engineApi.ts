@@ -41,17 +41,33 @@ export type ResampleQuality = 'auto' | 'lowLatency' | 'highQuality'
  * 엔진 스레드(워커·네트워크 수신) 코어 배치 정책(P1-21, Windows 전용). 기본값: **`highQos` 켬, `preferPCores` 끔**
  * (P1-21 3단계 — 엔진도 필드·설정이 없으면 같은 기본값이다).
  * 엔진 시작 때 한 번 적용되므로 바꾸면 엔진을 다시 시작해야 한다. 환경변수 `BAND_THREAD_POLICY`
- * (`off` | `highqos` | `pcores` | `both` — 정확히 그 조합)가 있으면 이 설정보다 우선한다. 적용 결과는 `EngineStats.threadPolicy`.
+ * (`+`로 잇는 낱말 `highqos` · `pin`(=`pcores`) | `prefer` | `adaptive`, 또는 `off` · `both` — 정확히 그 조합)가 있으면 이 설정보다
+ * 우선한다. 적용 결과는 `EngineStats.threadPolicy`.
  */
 export interface ThreadPolicyConfig {
   /** 실행 속도 전원 조절(EcoQoS)을 끈다. 스케줄러는 여전히 코어를 자유롭게 고른다. 기본 켬 — 걸 수 없는 PC에서는 조용히 꺼진 것과 같다 */
   highQos: boolean
   /**
    * (실험 옵션, 기본 끔) 고성능(P) 코어 CPU set에 둔다. "선호"가 아니다 — 스레드는 그 집합 안에 머물러, P 코어가 바빠도 다른 코어로 넘어가지 않는다.
-   * 하이브리드 CPU가 아니거나 물리 P 코어가 4개 미만이면 적용되지 않는다(`skipped`)
+   * 하이브리드 CPU가 아니거나 물리 P 코어가 4개 미만이면 적용되지 않는다(`skipped`).
+   * 옛 필드(2단계): `pCoreMode`가 없을 때만 본다 — `true` = `'pin'`. `pCoreMode`가 있으면 그것이 이긴다.
    */
   preferPCores: boolean
+  /**
+   * (실험 옵션) P 코어 정책(P1-21 3단계 ②). 없으면 `preferPCores`를 따른다. 클라이언트는 `'prefer'`·`'adaptive'`일 때만
+   * 이 칸을 적고(그때 `preferPCores`는 false), 끔·고정은 옛 모양(`preferPCores`)으로 둔다 — `pCoreModeOf`/`withPCoreMode`로 읽고 쓴다.
+   */
+  pCoreMode?: PCoreMode | null
 }
+
+/**
+ * 엔진 스레드를 고성능(P) 코어에 두는 방식(설계 문서 1.1절 "P 코어 정책"):
+ * - `off`: 걸지 않는다(Windows가 고른다).
+ * - `pin`: 고정 — P 코어 CPU set에 묶는다. P 코어가 바빠도 다른 코어로 넘어가지 않는다.
+ * - `prefer`: 선호 힌트 — P 코어 하나를 선호 프로세서로 알린다. 스케줄러가 다른 코어로 옮길 수 있다.
+ * - `adaptive`: 조건부 고정 — `pin`처럼 묶되 끊김·기상 지연이 늘면 풀고 안정되면 다시 묶는다.
+ */
+export type PCoreMode = 'off' | 'pin' | 'prefer' | 'adaptive'
 
 export interface EngineConfig {
   inputDriver: DriverKind
@@ -74,7 +90,7 @@ export interface EngineConfig {
   udpPort?: number
   /** 리샘플러 품질(P2-17e). 없으면 auto */
   resampleQuality?: ResampleQuality
-  /** 엔진 스레드 코어 배치 정책(P1-21 2단계, 실험적). 없으면 둘 다 꺼짐 */
+  /** 엔진 스레드 코어 배치 정책(P1-21). 없으면 기본값 — HighQoS 켬·P 코어 정책 끔(위 `ThreadPolicyConfig`) */
   threadPolicy?: ThreadPolicyConfig
 }
 
@@ -580,11 +596,12 @@ export interface CorePlacementStats {
 /**
  * 스레드 정책 한 항목의 적용 결과(설계 문서 4절 `threadPolicy`): `pending` 스레드가 아직 적용 전(시작 직후 잠깐) ·
  * `off` 옵션 꺼짐 · `applied` OS 호출 성공 · `failed` 실패(무시하고 기본 스케줄링) ·
- * `skipped` P 코어 CPU set만 — 걸 집합이 없어 걸지 않음(하이브리드 아님, 물리 P 코어 4개 미만).
+ * `skipped` P 코어 정책만 — 걸 코어가 없어 걸지 않음(하이브리드 아님, 물리 P 코어 4개 미만) ·
+ * `released` 조건부 고정만 — 지금은 풀려 있다(끊김·지연이 늘어 풀었고 안정되면 다시 `applied`).
  */
-export type ThreadPolicyResult = 'pending' | 'off' | 'applied' | 'failed' | 'skipped'
+export type ThreadPolicyResult = 'pending' | 'off' | 'applied' | 'failed' | 'skipped' | 'released'
 
-/** 스레드 하나에 시작 때 한 번 건 정책: HighQoS(EcoQoS 끄기)와 P 코어 CPU set(그 집합 안에 머묾) */
+/** 스레드 하나에 건 정책의 결과: HighQoS(EcoQoS 끄기)와 P 코어 정책(방식은 `ThreadPolicyStats.pCoreMode`) */
 export interface ThreadPolicy {
   highQos: ThreadPolicyResult
   pCores: ThreadPolicyResult
@@ -594,6 +611,20 @@ export interface ThreadPolicyStats {
   worker: ThreadPolicy
   /** 네트워크 없이 시작한 엔진은 null */
   netRecv: ThreadPolicy | null
+  /** 이 엔진이 고른 P 코어 정책(설정 또는 환경변수). 옛 엔진은 없다 */
+  pCoreMode?: PCoreMode
+  /** 조건부 고정(`adaptive`)의 상태. 다른 정책은 null */
+  adaptive?: AdaptivePinStats | null
+}
+
+/** 조건부 고정의 지금 상태와 누적 횟수(엔진 시작부터) */
+export interface AdaptivePinStats {
+  /** 지금 풀려 있다 */
+  released: boolean
+  releases: number
+  rebinds: number
+  /** 마지막 1초 창의 P 코어 바쁨 추정(%). 못 재면 null */
+  pBusyPct: number | null
 }
 
 // ============================================================================

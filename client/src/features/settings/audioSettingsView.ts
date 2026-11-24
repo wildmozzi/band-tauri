@@ -1,7 +1,7 @@
 /**
  * 오디오 설정 화면(AudioSettings.tsx)의 표시·입력 계산 — UI와 분리한 순수 함수 (P3-2 ③-4, vitest로 검증).
  */
-import type { CodecKind, EngineConfig, EngineStats, FrameMs, PeerStats, ThreadPolicyResult } from '../../native/engineApi'
+import type { CodecKind, EngineConfig, EngineStats, FrameMs, PCoreMode, PeerStats, ThreadPolicyResult } from '../../native/engineApi'
 import { isPayloadAllowed } from '../../native/engineConfig'
 
 /** 레벨(0~1) → 미터 폭 %(0~100으로 자름) */
@@ -89,8 +89,9 @@ function opensAt48k(rates: readonly number[] | undefined): boolean | null {
 
 /**
  * 엔진 스레드 코어 배치 정책 토글(P1-21, 오디오 설정 "고급"). 설명은 효과 한 줄 + 주의 한 줄.
- * 절전 끄기(HighQoS)는 **기본 켬**(P1-21 3단계, 사용자 결정 2026-11-21)이고, P 코어 묶기는 실험 옵션(기본 끔, `experimental`)이다.
- * 근거·한계: docs/overhaul/core-placement-2026-11-20.md
+ * 절전 끄기(HighQoS)는 **기본 켬**(P1-21 3단계, 사용자 결정 2026-11-21) 토글이고, P 코어 정책은 실험 옵션(기본 끔, `experimental`)인
+ * 선택 상자다 — 선택지와 방식별 설명은 아래 `P_CORE_MODE_OPTIONS`, 여기 `effect`·`caution`은 공통 안내.
+ * 근거·한계: docs/overhaul/core-placement-2026-11-20.md, core-placement-2026-11-24.md
  */
 export const THREAD_POLICY_OPTIONS = [
   {
@@ -101,16 +102,39 @@ export const THREAD_POLICY_OPTIONS = [
     caution: '주의: 전력 소모와 발열이 조금 늘 수 있습니다(배터리 사용 시간은 측정하지 않았습니다). 배터리를 아끼려면 끌 수 있습니다.',
   },
   {
-    // 계약 필드 이름은 `preferPCores`지만 실제 동작은 "선호"가 아니라 P 코어 집합에 묶어 두기다(#245 재리뷰 L5).
-    // 저장값·엔진 계약 호환을 위해 이름은 그대로 두고 라벨·설명으로 실제 동작을 말한다.
+    // 키 이름은 옛 계약 필드(`preferPCores` = 고정)에서 왔다. 지금은 P 코어 정책(끔·고정·선호·조건부 고정) 전체를 가리키는
+    // 선택 상자이고, 값은 `pCoreModeOf`/`withPCoreMode`로 읽고 쓴다(끔·고정은 옛 저장 모양 그대로 — #245 재리뷰 L5).
     key: 'preferPCores',
-    label: '엔진 스레드를 고성능 코어에만 묶어 두기',
+    label: '엔진 스레드를 고성능 코어에 두기',
     experimental: true,
-    effect: '효과: 엔진 스레드가 고성능(P) 코어에서만 돕니다(측정 기계에서 엔진 CPU가 약 20% 줄었습니다).',
+    effect: '효과: 엔진 스레드가 고성능(P) 코어에서 돌면 처리 여유가 늡니다(고정 방식은 측정 기계에서 엔진 CPU가 약 20% 줄었습니다).',
     caution:
-      '주의: 그 코어들이 다른 오디오 프로그램(DAW 등)으로 바쁘면 다른 코어로 넘어가지 못해 끊김이 늘 수 있습니다. 하이브리드 CPU가 아니거나 고성능 코어가 4개 미만이면 적용되지 않습니다.',
+      '주의: 방식마다 다릅니다(아래 설명). 고정은 그 코어들이 바쁘면 다른 코어로 넘어가지 못해 끊김이 늘 수 있습니다. 하이브리드 CPU가 아니거나 고성능 코어가 4개 미만이면 어느 방식도 적용되지 않습니다.',
   },
 ] as const
+
+/**
+ * P 코어 정책 선택지(오디오 설정 "고급", 실험 옵션 — P1-21 3단계 ②). 근거·한계: docs/overhaul/core-placement-2026-11-24.md.
+ * 기본값은 교차 측정 뒤에 정한다 — 지금은 끔.
+ */
+export const P_CORE_MODE_OPTIONS: { id: PCoreMode; label: string; desc: string }[] = [
+  { id: 'off', label: '끔 (Windows가 고름)', desc: 'Windows가 엔진 스레드를 둘 코어를 고릅니다(기본).' },
+  {
+    id: 'pin',
+    label: '고정 — 고성능 코어에만 묶어 두기',
+    desc: '엔진 스레드가 고성능(P) 코어에서만 돕니다. 주의: 그 코어들이 다른 오디오 프로그램(DAW 등)으로 바쁘면 다른 코어로 넘어가지 못해 끊김이 늘 수 있습니다.',
+  },
+  {
+    id: 'prefer',
+    label: '선호 — 고성능 코어를 먼저 쓰도록 알리기',
+    desc: 'Windows에 선호 코어를 알려 줄 뿐입니다. 그 코어가 바쁘면 다른 코어로 옮겨집니다(효과가 작을 수 있습니다).',
+  },
+  {
+    id: 'adaptive',
+    label: '조건부 고정 — 묶어 두되 끊김이 늘면 풀기',
+    desc: '고정처럼 묶어 두고, 끊김이나 처리 지연이 늘면 자동으로 풀었다가 안정되면 다시 묶습니다.',
+  },
+]
 
 export type ThreadPolicyOptionKey = (typeof THREAD_POLICY_OPTIONS)[number]['key']
 
@@ -128,6 +152,8 @@ export interface ThreadPolicyStatus {
  * 엔진은 시작 때 한 번 정책을 걸므로, 실행 중 결과가 토글과 다르면 "다시 시작하면" 안내를 보인다.
  * 단 시작할 때 넘긴 값과 실행 결과가 다르면 환경변수 `BAND_THREAD_POLICY`가 설정을 덮은 것이다(엔진 resolve_policy:
  * 유효한 환경변수가 설정보다 우선) — 다시 시작해도 그대로이므로 그렇게 알린다(#249 리뷰 Low-1).
+ * - `modes`(P 코어 정책만): `want` = 지금 설정의 방식, `started` = 돌고 있는 엔진을 시작할 때 넘긴 방식(모르면 null).
+ *   엔진이 실제로 건 방식(`threadPolicy.pCoreMode`)과 견줘 "다시 시작하면 바뀝니다"·환경변수 안내를 낸다.
  * 꺼 둔 옵션이고 엔진도 꺼진 상태는 null(표시 없음).
  * 절전 끄기(`highQos`)는 기본 켬이라, 걸 수 없는 PC(비Windows·API가 없는 Windows)에서는 사용자가 고르지 않았는데도 "적용되지
  * 않음"이 보인다 — 경고(`warn`)가 아니라 안내(`info`)로 낸다(엔진도 조용히 기본 스케줄링으로 돈다).
@@ -138,6 +164,7 @@ export function threadPolicyStatus(
   windows: boolean | null,
   live: { stats: Pick<EngineStats, 'threadPolicy'> | null } | null,
   startedWith: boolean | null = null,
+  modes: { want: PCoreMode; started: PCoreMode | null } | null = null,
 ): ThreadPolicyStatus | null {
   const NOT_HERE = '이 PC에서는 적용되지 않음: '
   // 기본 켬인 항목이 적용되지 않는 것은 경고가 아니다
@@ -158,10 +185,22 @@ export function threadPolicyStatus(
   if (tp.netRecv) results.push(tp.netRecv[field])
   const has = (r: ThreadPolicyResult) => results.includes(r)
   if (has('pending')) return { text: '적용하는 중입니다.', tone: 'info' }
-  // 엔진이 이 항목을 걸려고 했는지(적용·실패·건너뜀). 시작 때 넘긴 값과 다르면 환경변수가 덮었다
+  // 조건부 고정이 풀어 둔 상태도 "걸려 있는" 것으로 본다(엔진이 관리 중)
+  const active = has('applied') || has('released')
+  // 엔진이 이 항목을 걸려고 했는지(적용·실패·건너뜀·풀림). 시작 때 넘긴 값과 다르면 환경변수가 덮었다
   const attempted = !results.every((r) => r === 'off')
-  if (startedWith !== null && attempted !== startedWith) {
-    const now = attempted ? (has('applied') ? '켜져 있습니다' : '켜려 했지만 적용되지 않았습니다') : '꺼져 있습니다'
+  // 엔진이 실제로 건 P 코어 방식(옛 엔진은 모른다 → 고정)
+  const running: PCoreMode | null = key === 'preferPCores' && attempted ? (tp.pCoreMode ?? 'pin') : null
+  const modeLabel = (m: PCoreMode) => ({ off: '끔', pin: '고정', prefer: '선호', adaptive: '조건부 고정' })[m]
+  const overriddenMode = running !== null && modes?.started != null && modes.started !== 'off' && running !== modes.started
+  if ((startedWith !== null && attempted !== startedWith) || overriddenMode) {
+    const now = overriddenMode
+      ? `"${modeLabel(running)}" 방식으로 걸려 있습니다`
+      : attempted
+        ? active
+          ? '켜져 있습니다'
+          : '켜려 했지만 적용되지 않았습니다'
+        : '꺼져 있습니다'
     return {
       text: `환경변수 BAND_THREAD_POLICY가 이 설정보다 우선합니다 — 지금 엔진에는 ${now}. 다시 시작해도 환경변수를 지우기 전에는 이 토글이 적용되지 않습니다.`,
       tone: 'warn',
@@ -174,7 +213,14 @@ export function threadPolicyStatus(
   }
   if (!enabled) {
     // 실제로 걸린 스레드가 없으면(건너뜀·실패만) 꺼진 것과 같다 — "켜져 있습니다"라고 하지 않는다(#249 리뷰 N1)
-    return has('applied') ? { text: '지금 엔진에는 켜져 있습니다 — 다시 시작하면 꺼집니다.', tone: 'info' } : null
+    return active ? { text: '지금 엔진에는 켜져 있습니다 — 다시 시작하면 꺼집니다.', tone: 'info' } : null
+  }
+  if (running !== null && modes && modes.want !== 'off' && running !== modes.want) {
+    // 실행 중에 방식만 바꿨다(고정 ↔ 선호 ↔ 조건부 고정)
+    return {
+      text: `지금 엔진에는 "${modeLabel(running)}" 방식으로 걸려 있습니다 — 연주(또는 테스트 모니터)를 다시 시작하면 "${modeLabel(modes.want)}"(으)로 바뀝니다.`,
+      tone: 'info',
+    }
   }
   if (has('skipped')) {
     return { text: `${NOT_HERE}하이브리드 CPU가 아니거나 쓸 수 있는 고성능 코어가 4개 미만입니다.`, tone: 'warn' }
@@ -183,9 +229,19 @@ export function threadPolicyStatus(
     const partial = has('applied') ? '일부 엔진 스레드에만 적용됨: ' : NOT_HERE
     return { text: `${partial}Windows 설정 호출이 실패해 기본 스케줄링으로 돕니다.`, tone: has('applied') ? 'warn' : notHereTone }
   }
-  return key === 'highQos'
-    ? { text: '적용됨 — 엔진 스레드의 전원 조절(EcoQoS)이 꺼져 있습니다.', tone: 'ok' }
-    : { text: '적용됨 — 엔진 스레드가 고성능 코어 집합 안에서만 돕니다.', tone: 'ok' }
+  if (key === 'highQos') return { text: '적용됨 — 엔진 스레드의 전원 조절(EcoQoS)이 꺼져 있습니다.', tone: 'ok' }
+  if (has('released')) {
+    const a = tp.adaptive
+    const count = a ? ` (이번 연주에서 ${a.releases}번 풀고 ${a.rebinds}번 다시 묶음)` : ''
+    return { text: `지금은 풀려 있습니다 — 끊김이나 처리 지연이 늘어 고성능 코어 묶기를 잠시 풀었습니다. 안정되면 다시 묶습니다${count}.`, tone: 'info' }
+  }
+  if (running === 'prefer') return { text: '적용됨 — 고성능 코어를 선호 코어로 알렸습니다(바쁘면 Windows가 다른 코어로 옮깁니다).', tone: 'ok' }
+  if (running === 'adaptive') {
+    const a = tp.adaptive
+    const count = a && a.releases > 0 ? ` 이번 연주에서 ${a.releases}번 풀었다가 다시 묶었습니다.` : ''
+    return { text: `적용됨 — 엔진 스레드를 고성능 코어 집합에 묶어 두었습니다(끊김이 늘면 자동으로 풉니다).${count}`, tone: 'ok' }
+  }
+  return { text: '적용됨 — 엔진 스레드가 고성능 코어 집합 안에서만 돕니다.', tone: 'ok' }
 }
 
 /** 이 PC가 Windows인지(WebView2의 UA에 "Windows"가 들어 있다). 알 수 없으면 null */

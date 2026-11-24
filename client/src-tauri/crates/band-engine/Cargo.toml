@@ -104,3 +104,8 @@ required-features = ["backend-cpal", "backend-wasapi"]
 [[example]]
 name = "loss_shape_estimate"
 test = true
+
+# 스레드 정책 × 환경(조용함/경합) 교차 측정(P1-21 3단계 ②). 가짜 장치만 쓴다 — `cargo test`가 인자·요약·표 단위 시험도 돌린다.
+[[example]]
+name = "policy_matrix"
+test = true

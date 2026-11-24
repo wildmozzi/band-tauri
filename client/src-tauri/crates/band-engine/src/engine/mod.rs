@@ -129,9 +129,19 @@ impl Engine {
         cfg.validate()?;
         // 워커·수신 스레드 코어 배치 정책(P1-21): 설정(없으면 기본 — HighQoS 켬, P 코어 끔) + 환경변수 `BAND_THREAD_POLICY`.
         // 스레드를 만들기 전에 정한다.
+        // P 코어 정책(3단계 ②)은 끔·고정·선호 힌트·조건부 고정 중 하나 — 조건부 고정이면 워커·수신 스레드가 함께 보는 공유 상태를
+        // 여기서 하나 만든다(`PolicyRequest`).
         let thread_policy = {
+            use crate::sys::placement::{policy_for_engine, PCoreMode as Mode, PolicyChoice, PolicyRequest};
+            use band_dsp::config::PCoreMode as Cfg;
             let t = cfg.thread_policy.unwrap_or_default();
-            crate::sys::placement::policy_for_engine(crate::sys::placement::PolicyChoice { high_qos: t.high_qos, p_cores: t.prefer_p_cores })
+            let p_cores = match t.p_core_mode() {
+                Cfg::Off => Mode::Off,
+                Cfg::Pin => Mode::Pin,
+                Cfg::Prefer => Mode::Prefer,
+                Cfg::Adaptive => Mode::Adaptive,
+            };
+            PolicyRequest::for_engine(policy_for_engine(PolicyChoice { high_qos: t.high_qos, p_cores }))
         };
         // 시작이 중간에 실패하면 drop으로 놓인다(Engine으로 옮긴 뒤에는 stop이 놓는다).
         let timer = prio::TimerResolution::acquire();
@@ -196,7 +206,7 @@ impl Engine {
             info,
             counters: counters.clone(),
             controls: controls.clone(),
-            worker_stats: Arc::new(WorkerStats { thread_policy: crate::sys::placement::PolicySlot::requested(thread_policy), ..Default::default() }),
+            worker_stats: Arc::new(WorkerStats { thread_policy: crate::sys::placement::PolicySlot::requested(&thread_policy), ..Default::default() }),
             worker_stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             audio_stop,
@@ -236,7 +246,7 @@ impl Engine {
             if opts.cancel.is_none() {
                 opts.cancel = cancel.clone();
             }
-            let net = Net::start_with_policy(peer_id, &opts, thread_policy)?; // 실패 시 engine drop이 오디오 정리
+            let net = Net::start_with_policy(peer_id, &opts, &thread_policy)?; // 실패 시 engine drop이 오디오 정리
             // 내 입력 장치 버퍼를 Ping에 싣는다(P2-8b): 상대의 입→귀 추정용. 실측 콜백 크기(아직 없으면 요청값) —
             // `EngineStats.estLatencyMs`의 입력 몫과 같은 값이다. 제어 스레드가 원자값만 읽는다.
             let (c, rate, req) = (counters.clone(), info.in_rate.max(1), info.buffer_frames);

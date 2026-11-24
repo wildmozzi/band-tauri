@@ -437,6 +437,8 @@ impl Engine {
             thread_policy: ws.thread_policy.stats().map(|worker| crate::sys::placement::ThreadPolicyStats {
                 worker,
                 net_recv: self.net.as_ref().and_then(|n| n.shared().recv_policy.stats()),
+                p_core_mode: ws.thread_policy.p_core_mode(),
+                adaptive: ws.thread_policy.adaptive_stats(),
             }),
         }
     }

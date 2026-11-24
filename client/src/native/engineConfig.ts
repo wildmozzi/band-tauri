@@ -9,6 +9,7 @@ import {
   type DriverKind,
   type EngineConfig,
   type FrameMs,
+  type PCoreMode,
   type PeerStats,
   type ResampleQuality,
   type ThreadPolicyConfig,
@@ -387,7 +388,7 @@ function sanitizeEngineConfig(raw: Record<string, unknown>): EngineConfig {
     jitterProfile: clampJitterProfile(raw.jitterProfile),
     // 옛 설정(필드 없음)·모르는 값은 auto(P2-17e)
     resampleQuality: RESAMPLE_QUALITIES.includes(raw.resampleQuality as ResampleQuality) ? (raw.resampleQuality as ResampleQuality) : 'auto',
-    // 옛 설정(필드 없음)·이상한 값은 둘 다 꺼짐(P1-21 2단계 — 실험 옵션은 명시적으로 true일 때만 켠다)
+    // 옛 설정(필드 없음)·이상한 값은 기본값(HighQoS 켬·P 코어 정책 끔 — P1-21 3단계 ①, `normalizeThreadPolicy`)
     threadPolicy: normalizeThreadPolicy(raw.threadPolicy),
   }
   if (isValidOpusBitrate(raw.opusBitrate)) config.opusBitrate = raw.opusBitrate
@@ -397,14 +398,36 @@ function sanitizeEngineConfig(raw: Record<string, unknown>): EngineConfig {
 
 /**
  * 저장된 `threadPolicy`를 정규화한다. 없거나 이상한 값은 기본값(`DEFAULT_THREAD_POLICY`)이다:
- * `highQos`는 기본 켬이라 **정확히 `false`일 때만 끔**(사용자가 명시적으로 끈 값), `preferPCores`는 정확히 `true`일 때만 켬.
+ * `highQos`는 기본 켬이라 **정확히 `false`일 때만 끔**(사용자가 명시적으로 끈 값). P 코어 정책은 `pCoreMode`가 아는 값이면
+ * 그것, 아니면 옛 필드 `preferPCores`(정확히 `true`일 때만 고정) — 결과는 `withPCoreMode`의 모양(끔·고정은 옛 모양 그대로라
+ * 2단계 저장값과 같고, 선호·조건부 고정만 `pCoreMode`가 붙는다).
  */
 export function normalizeThreadPolicy(raw: unknown): ThreadPolicyConfig {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
-  return {
-    highQos: typeof r.highQos === 'boolean' ? r.highQos : DEFAULT_THREAD_POLICY.highQos,
-    preferPCores: r.preferPCores === true,
-  }
+  const mode: PCoreMode = isPCoreMode(r.pCoreMode) ? r.pCoreMode : r.preferPCores === true ? 'pin' : 'off'
+  return withPCoreMode({ highQos: typeof r.highQos === 'boolean' ? r.highQos : DEFAULT_THREAD_POLICY.highQos, preferPCores: false }, mode)
+}
+
+/** P 코어 정책 값(선택지의 라벨·설명은 설정 화면 쪽 `P_CORE_MODE_OPTIONS` — features/settings/audioSettingsView. 첫 화면 묶음에 문구를 싣지 않는다) */
+const P_CORE_MODES: readonly PCoreMode[] = ['off', 'pin', 'prefer', 'adaptive']
+
+function isPCoreMode(v: unknown): v is PCoreMode {
+  return typeof v === 'string' && (P_CORE_MODES as readonly string[]).includes(v)
+}
+
+/** 설정의 P 코어 정책: `pCoreMode`가 있으면 그것, 없으면 옛 필드 `preferPCores`(true = 고정). 엔진의 `p_core_mode()`와 같다 */
+export function pCoreModeOf(policy: ThreadPolicyConfig | undefined): PCoreMode {
+  if (isPCoreMode(policy?.pCoreMode)) return policy.pCoreMode
+  return policy?.preferPCores === true ? 'pin' : 'off'
+}
+
+/**
+ * P 코어 정책을 바꾼 설정. 끔·고정은 옛 모양(`preferPCores`만 — `pCoreMode` 없음)으로 적어 2단계 저장값과 같고,
+ * 선호·조건부 고정은 `pCoreMode`를 적고 `preferPCores`를 false로 둔다.
+ */
+export function withPCoreMode(policy: ThreadPolicyConfig, mode: PCoreMode): ThreadPolicyConfig {
+  const base = { highQos: policy.highQos, preferPCores: mode === 'pin' }
+  return mode === 'prefer' || mode === 'adaptive' ? { ...base, pCoreMode: mode } : base
 }
 
 function clampJitter(v: number): number {

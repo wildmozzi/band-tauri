@@ -26,6 +26,7 @@ config.rs	const	MAX_SOURCES
 config.rs	const	TAG_BYTES
 config.rs	enum	CodecKind
 config.rs	enum	DriverKind
+config.rs	enum	PCoreMode
 config.rs	enum	ResampleQuality
 config.rs	field	buffer_size
 config.rs	field	channels
@@ -41,6 +42,7 @@ config.rs	field	jitter_profile
 config.rs	field	opus_bitrate
 config.rs	field	output_device
 config.rs	field	output_driver
+config.rs	field	p_core_mode
 config.rs	field	prefer_p_cores
 config.rs	field	resample_quality
 config.rs	field	thread_policy
@@ -52,6 +54,7 @@ config.rs	method	jitter_max_ms
 config.rs	method	jitter_min_ms
 config.rs	method	jitter_profile
 config.rs	method	opus_bitrate
+config.rs	method	p_core_mode
 config.rs	method	resample_quality
 config.rs	method	supported
 config.rs	method	validate
