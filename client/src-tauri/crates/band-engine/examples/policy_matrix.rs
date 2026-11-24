@@ -6,6 +6,10 @@
 //! 최대 은닉률, 코어 배치(`corePlacement` — 워커·수신 스레드가 P/E/LP-E에서 깨어난 비율), 조건부 고정의 풀기·다시 묶기 횟수,
 //! 그리고 라운드마다 "정책 − 끔" 쌍별 차(중앙값·개선된 라운드 수).
 //!
+//! 예열·안정화(#258 재리뷰 M1): 구성마다 엔진을 새로 띄우므로 조건부 고정은 매번 묶인 채 시작해 "풀기 전 감지 구간"을 겪는다.
+//! 그래서 풀메시 연결 뒤 `--warmup-s`(기본 10초 — 모든 정책에 같다)는 집계에서 빼고, 그 구간의 xrun(`settleXruns`)과 조건부
+//! 고정의 엔진 전체 상태(`adaptiveAll` — 창 시작·끝, 창 안에서 처음 푼 엔진 수)를 따로 낸다.
+//!
 //! 엔진 수(#258 리뷰 M2): 6엔진은 한 프로세스에서 엔진 스레드 12개(워커 6 + 수신 6)가 P 코어(225H는 4개)를 두고 **스스로 다툰다**
 //! — 제품(엔진 1개 = 스레드 2개)과 다르다. 그래서 2엔진(1:1 루프백, 스레드 4개 — 제품에 가까운 모양)을 같은 라운드 안에서 함께
 //! 잰다(`--engines`). 어느 쪽이든 정책 간 순위는 참고이고, 제품 판정은 [사람] 실제 앱(엔진 1개) 비교로 확정한다.
@@ -23,9 +27,9 @@
 //!
 //! ```text
 //! cd client/src-tauri
-//! cargo run --release -p band-engine --example policy_matrix                                   # 본측정 전체: 6구성 × 엔진 6·2, 10라운드(약 6시간 40분)
-//! cargo run --release -p band-engine --example policy_matrix -- --preset reduced               # 본측정 축소: 3구성 × 엔진 6, 10라운드(약 1시간 48분)
-//! cargo run --release -p band-engine --example policy_matrix -- --preset reduced --engines 2    # 축소의 제품에 가까운 짝(엔진 2, 약 1시간 48분)
+//! cargo run --release -p band-engine --example policy_matrix                                   # 본측정 전체: 6구성 × 엔진 6·2, 10라운드(약 8시간 31분 — 예열·안정화 10초 + 창 20초)
+//! cargo run --release -p band-engine --example policy_matrix -- --preset reduced               # 본측정 축소: 3구성 × 엔진 6, 10라운드(약 2시간 16분)
+//! cargo run --release -p band-engine --example policy_matrix -- --preset reduced --engines 2    # 축소의 제품에 가까운 짝(엔진 2, 약 2시간 16분)
 //! cargo run --release -p band-engine --example policy_matrix -- --dry-run [...]                # 계획·예상 소요 시간만
 //! cargo run --release -p band-engine --example policy_matrix -- --rounds 1 --window-s 3 --warmup-s 1 --cooldown-s 1 --recover-s 2 --configs opus2.5 --no-probe   # 연기 시험
 //! ```
@@ -84,7 +88,8 @@ const HELP: &str = "\
   --rounds N         라운드 수(기본 10). 라운드 하나 = 환경 × 엔진 수 × 정책 실행 한 바퀴
   --minutes M        총 소요 시간(분)에 맞춰 라운드 수를 정한다(--rounds 대신. 최소 1라운드)
   --window-s S       구성마다 측정 창(초, 기본 20 — 조건부 고정의 판단 창이 1초·기다림이 10초부터라 2단계의 12초보다 길게 잡는다)
-  --warmup-s S       구성마다 예열(초, 기본 3)
+  --warmup-s S       구성마다 예열·안정화(초, 기본 10 — 모든 정책에 같다. 이 구간의 xrun은 집계에서 빼고 따로 낸다.
+                     조건부 고정의 감지 구간(예열 3창 + 나쁜 창 2개 ≈ 엔진 시작 뒤 5초~)이 측정 창 밖으로 빠지게 길게 잡는다)
   --cooldown-s S     실행 사이 쉬는 시간(초, 기본 5)
   --recover-s S      경합 실행 바로 뒤의 조용함 실행 앞에서 쉬는 시간(초, 기본 60 — 열·터보 예산 이월을 줄인다)
   --seed N           묶음 안 순서를 섞는 시드(기본: 시작 시각. 결과에 남는다 — 같은 시드면 같은 순서)
@@ -128,7 +133,7 @@ impl Default for Opts {
             rounds: 10,
             minutes: None,
             window_s: 20.0,
-            warmup_s: 3.0,
+            warmup_s: 10.0,
             cooldown_s: 5.0,
             recover_s: 60.0,
             seed: None,
@@ -393,7 +398,7 @@ fn main() {
 /// 환경변수 `BAND_THREAD_POLICY`(부모가 정함)로 구성들을 차례로 재고 구성마다 `ROW|{json}` 한 줄을 낸다.
 fn child_measure(mut a: Args) -> Result<(), String> {
     let configs = a.list("--configs", &CONFIGS.map(|c| c.0))?.ok_or("--configs 필요")?;
-    let warmup = Duration::from_secs_f64(a.num("--warmup-s")?.unwrap_or(3.0));
+    let warmup = Duration::from_secs_f64(a.num("--warmup-s")?.unwrap_or(10.0));
     let window = Duration::from_secs_f64(a.num("--window-s")?.unwrap_or(12.0));
     let engines: usize = a.num("--engines")?.unwrap_or(mesh_cpu::PEERS);
     a.done()?;
@@ -414,8 +419,19 @@ fn child_measure(mut a: Args) -> Result<(), String> {
             "perNodePct": r.per_node_pct,
             "concealMaxPct": r.conceal_max,
             "xruns": r.xruns,
+            "settleXruns": r.settle_xruns,
             "placement": r.placement,
             "threadPolicy": policy,
+            "adaptiveAll": r.adaptive.map(|a| json!({
+                "engines": a.engines,
+                "releasedAtStart": a.released_at_start,
+                "releasedAtEnd": a.released_at_end,
+                "settleReleases": a.settle_releases,
+                "windowReleases": a.window_releases,
+                "windowRebinds": a.window_rebinds,
+                "firstReleaseInWindow": a.first_release_in_window,
+                "firstReleaseS": a.first_release_s_median,
+            })),
         });
         println!("ROW|{row}");
         std::io::stdout().flush().ok();
@@ -810,15 +826,23 @@ fn metric(row: &Value, name: &str) -> Option<f64> {
         let n: f64 = v.iter().sum();
         (v.len() == 3 && n > 0.0).then(|| (v[kind] * 100.0 / n).max(0.0))
     };
+    // 엔진 0의 상태(옛 기록 호환·P 코어 바쁨)와 엔진 전체의 상태(#258 재리뷰 L2 — `adaptiveAll`)
     let adaptive = |key: &str| row.get("threadPolicy")?.get("adaptive")?.get(key).cloned();
+    let all = |key: &str| row.get("adaptiveAll")?.get(key)?.as_f64();
+    let engines_pct = |key: &str| Some(all(key)? * 100.0 / all("engines").filter(|n| *n > 0.0)?);
     match name {
         "workerPPct" => share(0, 0),
         "workerEPct" => share(0, 1),
         "workerLpEPct" => share(0, 2),
         "recvPPct" => share(1, 0),
-        "releases" => adaptive("releases")?.as_f64(),
-        "rebinds" => adaptive("rebinds")?.as_f64(),
-        "endedReleased" => adaptive("released")?.as_bool().map(|b| if b { 100.0 } else { 0.0 }),
+        // 푼 횟수는 엔진 합(예열 + 측정 창). `adaptiveAll`이 없는 옛 기록은 엔진 0의 누적
+        "releases" => all("settleReleases").zip(all("windowReleases")).map(|(a, b)| a + b).or_else(|| adaptive("releases")?.as_f64()),
+        "windowReleases" => all("windowReleases"),
+        "windowRebinds" => all("windowRebinds").or_else(|| adaptive("rebinds")?.as_f64()),
+        "firstReleaseInWindow" => all("firstReleaseInWindow"),
+        "firstReleaseS" => all("firstReleaseS"),
+        "releasedAtStart" => engines_pct("releasedAtStart"),
+        "endedReleased" => engines_pct("releasedAtEnd").or_else(|| adaptive("released")?.as_bool().map(|b| if b { 100.0 } else { 0.0 })),
         "pBusyPct" => adaptive("pBusyPct")?.as_f64(),
         _ => row.get(name).and_then(Value::as_f64).filter(|x| x.is_finite()),
     }
@@ -838,8 +862,9 @@ fn stats(xs: &[f64]) -> Value {
     json!({ "n": xs.len(), "mean": mean, "sd": sd, "median": median })
 }
 
-const METRICS: [&str; 14] = [
-    "workerPct", "bodyP50Us", "bodyP99Us", "bodyMaxUs", "xruns", "concealMaxPct", "workerPPct", "workerEPct", "workerLpEPct", "recvPPct", "releases", "rebinds", "endedReleased", "pBusyPct",
+const METRICS: [&str; 19] = [
+    "workerPct", "bodyP50Us", "bodyP99Us", "bodyMaxUs", "xruns", "settleXruns", "concealMaxPct", "workerPPct", "workerEPct", "workerLpEPct", "recvPPct", "releases",
+    "windowReleases", "windowRebinds", "firstReleaseInWindow", "firstReleaseS", "releasedAtStart", "endedReleased", "pBusyPct",
 ];
 
 /// 쌍별 차를 내는 지표(낮을수록 좋다): (지표, 표 제목, 자릿수).
@@ -953,6 +978,11 @@ fn render_md(o: &Opts, meta: &Value, probes: &[Value], runs: &[Value], summary: 
     if rounds < 5 {
         let _ = writeln!(md, "- **표본이 적다(라운드 {rounds})** — 도구가 도는지 보는 용도다. 차이를 말할 수 없다");
     }
+    let _ = writeln!(
+        md,
+        "- 예열·안정화 {}s(풀메시 연결 뒤 ~ 측정 창 시작)는 **모든 정책에 같고 집계에서 뺀다** — 그 구간의 xrun은 \"예열·안정화 구간 xrun\" 표로 따로 낸다. 구성마다 엔진을 새로 띄우므로 조건부 고정은 매번 묶인 채 시작해 감지 구간(예열 3창 + 나쁜 창 2개)을 겪는데, 이것이 측정 창에 들어가면 엔진 시작마다의 비용이 창마다 잡혀 구조적으로 불리하다(#258 재리뷰 M1). 감지가 창 안까지 늦어진 엔진 수는 조건부 고정 표의 \"창 안에서 처음 푼 엔진\"에 남는다",
+        o.warmup_s
+    );
     let _ = writeln!(md, "\n값은 평균 ± 표준편차 (중앙값), 표본 하나면 값 하나. 엔진 평균(xrun은 엔진 합, 최대 은닉은 엔진 최대). 묶음은 \"환경 · 엔진 수\"다.\n");
 
     if !probes.is_empty() {
@@ -965,11 +995,12 @@ fn render_md(o: &Opts, meta: &Value, probes: &[Value], runs: &[Value], summary: 
         let _ = writeln!(md, "\n고정(`pin`)이면 P 100%에 쓴 코어 수 ≈ P 코어 수, soft면 스레드가 E로 넘쳐 쓴 코어 수 ≈ 스레드 수다.\n");
     }
 
-    let tables: [(&str, &str, usize); 8] = [
+    let tables: [(&str, &str, usize); 9] = [
         ("workerPct", "워커 CPU (%, 1코어)", 2),
         ("bodyP50Us", "워커 반복 본문 `iter_body` p50 (µs)", 1),
         ("bodyP99Us", "워커 반복 본문 `iter_body` p99 (µs)", 0),
         ("xruns", "xrun (측정 창, 엔진 합)", 1),
+        ("settleXruns", "예열·안정화 구간 xrun (집계 제외, 엔진 합 — 조건부 고정은 감지 구간 포함)", 1),
         ("concealMaxPct", "최대 은닉률 (%)", 2),
         ("workerPPct", "코어 배치 — 워커가 P 코어에서 깨어난 비율 (%)", 1),
         ("workerLpEPct", "코어 배치 — 워커가 LP-E 코어에서 깨어난 비율 (%)", 1),
@@ -1002,17 +1033,25 @@ fn render_md(o: &Opts, meta: &Value, probes: &[Value], runs: &[Value], summary: 
                 }
                 let _ = writeln!(md);
             }
-            let _ = writeln!(md, "음수가 끔보다 낫다(낮다). 같은 라운드끼리 비교해 느린 드리프트가 빠진다 — 10라운드에서 9/10 이상이 한쪽이면 부호 검정 p < 0.05(양측 0.021).\n");
+            let _ = writeln!(md, "음수가 끔보다 낫다(낮다). 같은 라운드끼리 비교해 느린 드리프트가 빠진다 — 10라운드에서 9/10 이상이 한쪽이면 부호 검정 p < 0.05(양측 0.021).");
+            let _ = writeln!(md, "**다중 비교 주의**(#258 재리뷰 L3): 이 기준은 칸 하나에 대한 것이다. 표 전체(정책 × 구성 × 엔진 수 × 환경 × 지표 — 전체 실행이면 216칸)에서는 차이가 전혀 없어도 몇 칸은 우연히 넘는다. 판정은 미리 정한 칸(설계 문서 `core-placement-2026-11-24.md` 6절)과, 같은 정책이 구성 여럿에서 같은 방향일 때만 쓴다.\n");
         }
         if o.policies.iter().any(|p| p == "adaptive") {
-            let _ = writeln!(md, "### 조건부 고정(3안) — 측정 창이 끝났을 때의 상태(엔진 0)\n");
-            let _ = writeln!(md, "| 구성 | 푼 횟수 | 다시 묶은 횟수 | 풀린 채 끝난 실행 (%) | 마지막 창의 P 코어 바쁨 (%) |");
-            let _ = writeln!(md, "|---|---|---|---|---|");
+            let _ = writeln!(md, "### 조건부 고정(3안) — 엔진 전체의 풀기·다시 묶기\n");
+            let _ = writeln!(md, "| 구성 | 푼 횟수 (엔진 합, 예열 포함) | 첫 풀림 (엔진 시작 뒤 초, 예열 안) | 창 시작에 풀려 있던 엔진 (%) | 창 안에서 처음 푼 엔진 (수) | 창 안에서 푼 횟수 | 창 안에서 다시 묶은 횟수 | 창 끝에 풀려 있던 엔진 (%) | 마지막 창의 P 코어 바쁨 (%, 엔진 0) |");
+            let _ = writeln!(md, "|---|---|---|---|---|---|---|---|---|");
             for config in &o.configs {
                 let c = &summary[key][config]["adaptive"];
-                let _ = writeln!(md, "| {config} | {} | {} | {} | {} |", cell_text(c, "releases", 1), cell_text(c, "rebinds", 1), cell_text(c, "endedReleased", 0), cell_text(c, "pBusyPct", 0));
+                let cells: Vec<String> = [("releases", 1), ("firstReleaseS", 1), ("releasedAtStart", 0), ("firstReleaseInWindow", 1), ("windowReleases", 1), ("windowRebinds", 1), ("endedReleased", 0), ("pBusyPct", 0)]
+                    .iter()
+                    .map(|(m, d)| cell_text(c, m, *d))
+                    .collect();
+                let _ = writeln!(md, "| {config} | {} |", cells.join(" | "));
             }
-            let _ = writeln!(md, "\n횟수는 예열을 포함한 엔진 시작부터의 누적이다. P 코어 바쁨에는 자기 엔진 스레드도 들어간다(엔진 수가 많을수록 높다).\n");
+            let _ = writeln!(
+                md,
+                "\n\"창 안에서 처음 푼 엔진\"이 0이면 감지 구간이 모두 예열 안에서 끝나 측정 창은 풀린 뒤(또는 묶인 채 조용한) 정상 상태만 잰 것이다. 0이 아닌 칸은 그만큼 감지 구간의 xrun이 창에 섞였다 — 끔과의 xrun 차가 이 수 × 감지 구간 xrun(예열 표)으로 설명되는지 본다. P 코어 바쁨에는 자기 엔진 스레드도 들어간다(엔진 수가 많을수록 높다).\n"
+            );
         }
     }
 
@@ -1098,7 +1137,7 @@ mod tests {
     /// 라운드마다 경합 → 조용함 회복 대기(쉬는 시간 대신). `--minutes`는 그 시간에 들어가는 라운드 수(최소 1).
     #[test]
     fn time_budget_sets_rounds() {
-        let o = parse_opts(args("--window-s 30 --engines 6")).unwrap();
+        let o = parse_opts(args("--window-s 30 --warmup-s 3 --engines 6")).unwrap();
         // 6 × (3 + 30 + 0.5) + 2 + 5 = 208초, × 8 = 1664초
         assert!((run_seconds(&o) - 208.0).abs() < 1e-9);
         assert!((round_seconds(&o) - 1664.0).abs() < 1e-9);
@@ -1112,13 +1151,16 @@ mod tests {
         assert_eq!(planned_rounds(&Opts { minutes: Some(400.0), ..o.clone() }), 14);
         assert_eq!(recover_count(&Opts { envs: vec!["contended".into()], ..o }, 10), 0, "한 환경만이면 넘어갈 일이 없다");
         // 본측정 전체(기본값): 6구성 × 23.5 + 7 = 148초, × 환경 2 × 엔진 2 × 정책 4 = 2368초 → 10라운드 + 회복 275초 ≈ 6시간 39분
+        // 예열·안정화 기본 10초(#258 재리뷰 M1): 6구성 × 30.5 + 7 = 190초, × 환경 2 × 엔진 2 × 정책 4 = 3040초 → 10라운드 + 회복
+        // 275초 ≈ 8시간 31분
         let d = Opts::default();
-        assert!((total_seconds(&d, 10) - 23_955.0).abs() < 1e-9);
-        assert_eq!(fmt_hm(total_seconds(&d, 10)), "6시간 39분");
-        // 본측정 축소(--preset reduced, 리뷰 L2): 3구성 × 23.5 + 7 = 77.5초 × 8 = 620초 → 10라운드 + 275초 ≈ 1시간 47분(+ 프로브 14초)
+        assert_eq!(d.warmup_s, 10.0);
+        assert!((total_seconds(&d, 10) - 30_675.0).abs() < 1e-9);
+        assert_eq!(fmt_hm(total_seconds(&d, 10)), "8시간 31분");
+        // 본측정 축소(--preset reduced, 리뷰 L2): 3구성 × 30.5 + 7 = 98.5초 × 8 = 788초 → 10라운드 + 275초 ≈ 2시간 15분(+ 프로브 14초)
         let r = parse_opts(args("--preset reduced")).unwrap();
-        assert!((total_seconds(&r, 10) - 6_475.0).abs() < 1e-9);
-        assert_eq!(fmt_hm(total_seconds(&r, 10)), "1시간 47분");
+        assert!((total_seconds(&r, 10) - 8_155.0).abs() < 1e-9);
+        assert_eq!(fmt_hm(total_seconds(&r, 10)), "2시간 15분");
     }
 
     /// 순서(#258 리뷰 M3): 짝수 라운드는 조용함 묶음 → 경합 묶음, 홀수 라운드는 반대. 라운드마다 모든 조합이 한 번씩이고 (환경 ×
@@ -1226,7 +1268,10 @@ mod tests {
             "| pcm5 | 5.50 | — |",
             "### 끔 대비 쌍별 차 — 워커 CPU (%)",
             "| opus2.5 | -2.00 (1/1 나음, 0/1 나쁨) |",
-            "### 조건부 고정(3안) — 측정 창이 끝났을 때의 상태",
+            "### 조건부 고정(3안) — 엔진 전체의 풀기·다시 묶기",
+            "### 예열·안정화 구간 xrun (집계 제외",
+            "**모든 정책에 같고 집계에서 뺀다**",
+            "**다중 비교 주의**",
             "## 3. xrun 원값",
             "| 조용함 · 엔진 6 | opus2.5 | 1/2 (0 3) | 0/1 (0) |",
             "## 4. 경합 부하가 실제로 건 부하",
@@ -1238,6 +1283,41 @@ mod tests {
         ] {
             assert!(md.contains(want), "없음: {want}\n{md}");
         }
+    }
+
+    /// 조건부 고정의 엔진 전체 상태(#258 재리뷰 M1·L2): 창 시작·끝의 엔진별 값을 모으고, 표 지표는 `adaptiveAll`을 먼저 쓴다.
+    #[test]
+    fn adaptive_aggregate_splits_settle_and_window() {
+        // 엔진 4개: ① 예열 안에서 풀려 창 내내 풀림 ② 창 안에서 처음 풂(감지 구간이 창에 들어감) ③ 예열에서 풀고 창 안에서 다시 묶음
+        // ④ 처음 묶기가 되지 않음(상태 없음 — 빠진다)
+        let start = [Some((true, 1, 0)), Some((false, 0, 0)), Some((true, 1, 0)), None];
+        let end = [Some((true, 1, 0)), Some((true, 1, 0)), Some((false, 1, 1)), None];
+        let a = mesh_cpu::aggregate_adaptive(&start, &end, &[Some(5.0), None, Some(6.0), None]).unwrap();
+        assert_eq!(
+            a,
+            mesh_cpu::AdaptiveAgg {
+                engines: 3,
+                released_at_start: 2,
+                released_at_end: 2,
+                settle_releases: 2,
+                window_releases: 1,
+                window_rebinds: 1,
+                first_release_in_window: 1,
+                first_release_s_median: Some(5.5),
+            }
+        );
+        assert_eq!(mesh_cpu::aggregate_adaptive(&[None, None], &[None, None], &[None, None]), None, "조건부 고정이 아니면 없다");
+
+        let mut r = row("pcm5", 5.0, 3, 50.0, Some((1, true)));
+        r["settleXruns"] = json!(7);
+        r["adaptiveAll"] = json!({ "engines": 3, "releasedAtStart": 2, "releasedAtEnd": 2, "settleReleases": 2, "windowReleases": 1, "windowRebinds": 1, "firstReleaseInWindow": 1, "firstReleaseS": 5.5 });
+        let got: Vec<Option<f64>> =
+            ["settleXruns", "releases", "windowReleases", "windowRebinds", "firstReleaseInWindow", "firstReleaseS", "releasedAtStart", "endedReleased", "pBusyPct"].iter().map(|m| metric(&r, m)).collect();
+        let pct = 200.0 / 3.0;
+        assert_eq!(got, [Some(7.0), Some(3.0), Some(1.0), Some(1.0), Some(1.0), Some(5.5), Some(pct), Some(pct), Some(95.0)]);
+        // 옛 기록(`adaptiveAll` 없음)은 엔진 0의 값으로 읽는다
+        let old = row("pcm5", 5.0, 3, 50.0, Some((1, true)));
+        assert_eq!((metric(&old, "releases"), metric(&old, "endedReleased"), metric(&old, "windowReleases")), (Some(1.0), Some(100.0), None));
     }
 
     /// 엔진 수는 묶음을 나눈다. 엔진 수가 없는 옛 기록(`runs.jsonl`)은 6엔진으로 읽는다.
