@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// RoomProvider 조립 확인: 선택 구독(리렌더 범위), 디스패처 → 스토어, 합주실 입장 중 앱 업데이트 보류(appUpdater.setInRoom)
+// RoomProvider 조립 확인: 선택 구독(리렌더 범위), 디스패처 → 스토어, 합주실 입장 중 앱 업데이트 보류(setUpdaterInRoom)
 import { act, cleanup, render } from '@testing-library/react'
 import { Profiler, useContext } from 'react'
 import { MemoryRouter } from 'react-router-dom'
@@ -54,7 +54,7 @@ vi.mock('../../settings', () => {
     },
   }
 })
-vi.mock('../../../native/updater', () => ({ appUpdater: { setInRoom: h.setInRoom } }))
+vi.mock('../../../native/updaterGate', () => ({ setUpdaterInRoom: h.setInRoom }))
 vi.mock('../../../native/useNativeSession', () => ({
   // 실제 훅처럼 세션 상태는 돌려주지 않는다(Provider는 스토어 미러에서 읽는다)
   useNativeSession: () => ({ session: h.session as unknown as PerformSession }),

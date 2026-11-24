@@ -23,6 +23,16 @@ const RUNTIME_ONLY: Record<string, string[]> = {
   // 루프백 보정값 저장소: 지연 묶음(엔진 런타임·연주자 UI·오디오 설정 화면)만 쓴다. 첫 화면 코드(Navigation)는 이벤트 이름을
   // audioSettingsEvents에서 받고, AudioSettingsContext는 동적 import한다
   loopbackOffsetStore: ['native/nativeRuntime.ts', 'features/room/components/MetronomePanel.tsx', 'features/settings/LatencyMeasurePanel.tsx'],
+  // 앱 업데이트 본체(+ @tauri-apps/plugin-updater): 데스크톱 지연 묶음(배너·설정 화면)만. 첫 화면 코드는 native/updaterGate를 쓴다(#266)
+  updater: [
+    'features/settings/UpdateNotice.tsx',
+    'features/settings/UpdateSettingsSection.tsx',
+    'features/settings/UpdateInstallButton.tsx',
+  ],
+  // 배너는 UpdateNoticeGate가 동적 import만 한다(#266)
+  UpdateNotice: [],
+  // 진단 내보내기: 공개 API(index.ts)는 preloadable로 동적 import, 설정 화면(지연 묶음)만 직접 import(#266)
+  DiagnosticsExport: ['features/settings/AudioSettings.tsx'],
 }
 
 function sourceFiles(dir: string): string[] {

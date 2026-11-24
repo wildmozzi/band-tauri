@@ -116,9 +116,17 @@ test('빌드된 CSS의 미디어 쿼리에 범위 문법이 없다', () => {
 
 /**
  * 첫 화면 JS 어디에도 없어야 하는 데스크톱 전용 모듈의 고유 문자열(어느 지연 묶음에 실리는지는 묶음 나누기에 맡긴다):
- * 루프백 보정값 저장소(loopbackOffsetStore — 저장 키 접두사·표시 문구), #263 리뷰 M-1
+ * 루프백 보정값 저장소(loopbackOffsetStore — 저장 키 접두사·표시 문구), #263 리뷰 M-1.
+ * 앱 업데이트 본체(native/updater·@tauri-apps/plugin-updater — 배너는 UpdateNoticeGate가 데스크톱에서만 지연 로드)와
+ * 진단 내보내기 버튼(features/settings 공개 API가 데스크톱에서만 지연 로드), perf/lazy-updater
  */
-const DESKTOP_ONLY_MARKERS = ['band.loopbackOffset.', '출력 지연 보정: 없음']
+const DESKTOP_ONLY_MARKERS = [
+  'band.loopbackOffset.',
+  '출력 지연 보정: 없음',
+  'plugin:updater|check',
+  '업데이트 다운로드 실패',
+  '진단 내보내기',
+]
 
 test('데스크톱 전용 보조 모듈은 첫 화면 JS에 없다', () => {
   const firstLoad = firstLoadScripts().map(read).join('\n')
