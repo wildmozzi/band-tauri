@@ -18,7 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # 액션은 커밋(태그 1.6)으로, flyctl은 버전으로 고정한다(P3-28): flyctl 버전에 따라 원격 빌더·.dockerignore 처리가
+      # 바뀌어 같은 커밋이 다르게 배포될 수 있다. 갱신: github.com/superfly/flyctl/releases 의 최신 정식 릴리스(프리릴리스 제외)로
+      # version을 올리고, 액션 태그가 새로 나오면 그 커밋 SHA로 바꾼다.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
+        with:
+          version: 0.5.16
 
       # 운영(NODE_ENV=production) 서버는 PUBLIC_API_URL이 없으면 시작 시 종료한다(server/src/index.ts, P3-10g).
       # fly.toml에 health check가 없어 배포가 성공으로 끝나도 머신이 재시작을 반복할 수 있으므로, 배포 전에 막는다.
