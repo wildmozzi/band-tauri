@@ -178,7 +178,7 @@ type Prepared = Awaited<ReturnType<ReturnType<typeof useAudioSettings>['prepareR
 describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기본 장치, 저장값은 그대로', () => {
   const SAVED = { version: 2, engine: { bufferSize: 256, inputDevice: 'wasapi::Focusrite USB', outputDevice: 'wasapi::Focusrite USB', channels: 2, inputChannels: [2, 3] } }
 
-  it('계정에서 받은 장치 id가 없으면 엔진에는 기본 장치로 넘기고, config·계정·로컬 캐시에는 원래 id를 둔다', async () => {
+  it('계정에서 받은(이행) 장치 id가 없으면 엔진에는 기본 장치로 넘기고, config·이 PC 저장값에는 원래 id를 둔다', async () => {
     native.on = true
     native.devices = LAPTOP
     native.supported = ['wasapiExclusive', 'wasapiShared']
@@ -209,21 +209,23 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
     expect(native.testStarts[native.testStarts.length - 1]).toMatchObject({ inputDevice: null, outputDevice: null })
     await act(async () => { await result.current.stopTest() })
 
-    // 폴백은 저장하지 않는다: DB 쓰기 없음, 로컬 캐시·상태는 원래 장치
+    // 폴백은 저장하지 않는다: DB 쓰기 없음, 이 PC 저장값·상태는 원래 장치(계정에서 한 번 가져온 값 — P2-27 후속 이행)
     await act(() => new Promise((r) => setTimeout(r, 800)))
     expect(updates()).toHaveLength(0)
-    const cache = JSON.parse(localStorage.getItem('band_engine_config_v2')!) as { engine: EngineConfig }
-    expect(cache.engine.inputDevice).toBe('wasapi::Focusrite USB')
+    const local = JSON.parse(localStorage.getItem('band_device_settings_v1')!) as EngineConfig
+    expect(local).toMatchObject({ inputDevice: 'wasapi::Focusrite USB', inputChannels: [2, 3], bufferSize: 256 })
     expect(result.current.config.inputChannels).toEqual([2, 3])
 
-    // 사용자가 다른 값을 바꿔 저장해도 장치는 원래 값으로 올라간다(원래 PC에서 그대로 동작)
+    // 사용자가 다른 값을 바꿔 저장해도 장치 쪽 값은 계정에 올리지 않는다(PC별) — 이 PC 저장값은 원래 장치 그대로
     act(() => { result.current.updateConfig({ jitterMaxMs: 60 }) })
     await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
-    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: EngineConfig } }
-    expect(payload.audio_settings.engine).toMatchObject({ inputDevice: 'wasapi::Focusrite USB', outputDevice: 'wasapi::Focusrite USB', inputChannels: [2, 3], jitterMaxMs: 60 })
+    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: Record<string, unknown> } }
+    expect(payload.audio_settings.engine.jitterMaxMs).toBe(60)
+    for (const k of ['inputDevice', 'outputDevice', 'inputDriver', 'outputDriver', 'inputChannels', 'bufferSize']) expect(k in payload.audio_settings.engine).toBe(false)
+    expect(JSON.parse(localStorage.getItem('band_device_settings_v1')!)).toMatchObject({ inputDevice: 'wasapi::Focusrite USB', outputDevice: 'wasapi::Focusrite USB' })
   })
 
-  it('이 배포본에 없는 드라이버(ASIO)도 저장값은 두고 이번 실행만 WASAPI 공유로 — 다음 편집 때 ASIO가 지워지지 않는다', async () => {
+  it('이 배포본에 없는 드라이버(ASIO)도 저장값은 두고 이번 실행만 WASAPI 공유로 — 다음 편집 때 이 PC의 ASIO가 지워지지 않는다', async () => {
     native.on = true
     native.devices = LAPTOP
     native.supported = ['wasapiExclusive', 'wasapiShared']
@@ -247,8 +249,8 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
 
     act(() => { result.current.updateConfig({ jitterMaxMs: 60 }) })
     await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
-    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: EngineConfig } }
-    expect(payload.audio_settings.engine).toMatchObject({ inputDriver: 'asio', outputDriver: 'asio', inputDevice: 'asio::X' })
+    expect(JSON.parse(localStorage.getItem('band_device_settings_v1')!)).toMatchObject({ inputDriver: 'asio', outputDriver: 'asio', inputDevice: 'asio::X' })
+    expect(result.current.config).toMatchObject({ inputDriver: 'asio', inputDevice: 'asio::X' })
   })
 
   it('정상 경로(저장된 장치가 모두 있음): 저장값 객체 그대로, 장치 목록 추가 조회 없음', async () => {
@@ -329,9 +331,10 @@ describe('기기별 스레드 정책: 계정 전환·저장소 예외(#249 리�
     expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
 
     auth.user = { id: 'u2' }
-    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 512, threadPolicy: { highQos: false, preferPCores: true } } } } })
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 512, jitterMaxMs: 120, threadPolicy: { highQos: false, preferPCores: true } } } } })
     rerender()
-    await waitFor(() => expect(result.current.config.bufferSize).toBe(512))
+    await waitFor(() => expect(result.current.config.jitterMaxMs).toBe(120))
+    expect(result.current.config.bufferSize).toBe(256) // 버퍼는 이 PC의 값(P2-27 후속)
     await act(async () => {})
     expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
 
@@ -351,5 +354,143 @@ describe('기기별 스레드 정책: 계정 전환·저장소 예외(#249 리�
     expect(result.current.config.bufferSize).toBe(128)
     act(() => { result.current.updateConfig({ threadPolicy: { highQos: true, preferPCores: false } }) })
     expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
+  })
+})
+
+describe('장치 설정은 PC별 저장(P2-27 후속): 저장 분리·이행·덮어쓰지 않음', () => {
+  const DEVICE_KEY = 'band_device_settings_v1'
+  const HERE = { inputDriver: 'wasapiExclusive', outputDriver: 'wasapiExclusive', inputDevice: 'wasapi::이 PC 마이크', outputDevice: 'wasapi::이 PC 스피커', inputChannels: [1], bufferSize: 64 }
+  const OTHER_PC_ACCOUNT = {
+    version: 2,
+    engine: { inputDriver: 'asio', outputDriver: 'asio', inputDevice: 'asio::다른 PC', outputDevice: 'asio::다른 PC', inputChannels: [4], bufferSize: 512, codec: 'pcm16', frameMs: 2.5, jitterMaxMs: 40 },
+  }
+  const localDevice = () => JSON.parse(localStorage.getItem(DEVICE_KEY) ?? 'null') as Record<string, unknown> | null
+  const DEVICE_FIELDS = ['inputDevice', 'outputDevice', 'inputDriver', 'outputDriver', 'inputChannels', 'bufferSize']
+
+  it('이 PC에 저장값이 있으면 계정의 장치 값이 있어도 이 PC 값을 쓰고, 코덱·프레임·지터는 계정 값을 쓴다', async () => {
+    localStorage.setItem(DEVICE_KEY, JSON.stringify(HERE))
+    sb.mock!.setResult('profiles', { data: { audio_settings: OTHER_PC_ACCOUNT } })
+    const { result } = setup()
+    await waitFor(() => expect(result.current.config.codec).toBe('pcm16'))
+    await act(async () => {})
+    expect(result.current.config).toMatchObject({ ...HERE, frameMs: 2.5, jitterMaxMs: 40 })
+    expect(localDevice()).toMatchObject(HERE)
+    expect(updates()).toHaveLength(0)
+  })
+
+  it('저장값 없는 새 PC: 계정의 옛 장치 값을 한 번 초기값으로 가져와 이 PC에 저장하고, 이후엔 계정 값으로 덮어쓰지 않는다', async () => {
+    sb.mock!.setResult('profiles', { data: { audio_settings: OTHER_PC_ACCOUNT } })
+    const first = setup()
+    await waitFor(() => expect(first.result.current.config.inputDevice).toBe('asio::다른 PC'))
+    await act(async () => {})
+    expect(localDevice()).toMatchObject({ inputDriver: 'asio', inputDevice: 'asio::다른 PC', bufferSize: 512 })
+
+    // 이 PC에서 장치를 바꾼다 → 이 PC에만 저장, 계정에는 장치 필드가 올라가지 않는다
+    act(() => { first.result.current.updateConfig({ inputDriver: 'wasapiShared', inputDevice: 'wasapi::이 PC 마이크', bufferSize: 128 }) })
+    await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
+    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: Record<string, unknown> } }
+    for (const k of DEVICE_FIELDS) expect(k in payload.audio_settings.engine).toBe(false)
+    expect(payload.audio_settings.engine).toMatchObject({ codec: 'pcm16', frameMs: 2.5 })
+    expect(localDevice()).toMatchObject({ inputDriver: 'wasapiShared', inputDevice: 'wasapi::이 PC 마이크', bufferSize: 128 })
+    cleanup()
+    sb.mock!.reset()
+
+    // 앱을 다시 켜도(계정에 옛 장치 값이 그대로 남아 있어도) 이 PC 값
+    sb.mock!.setResult('profiles', { data: { audio_settings: OTHER_PC_ACCOUNT } })
+    const second = setup()
+    await waitFor(() => expect(sb.mock!.calls).toHaveLength(1))
+    await act(async () => {})
+    expect(second.result.current.config).toMatchObject({ inputDriver: 'wasapiShared', inputDevice: 'wasapi::이 PC 마이크', bufferSize: 128, codec: 'pcm16' })
+  })
+
+  it('계정에 장치 값도 없는 새 PC: 기본 장치로 시작하고 그 값을 이 PC 값으로 굳힌다', async () => {
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { codec: 'pcm16' } } } })
+    const { result } = setup()
+    await waitFor(() => expect(result.current.config.codec).toBe('pcm16'))
+    await act(async () => {})
+    expect(result.current.config).toMatchObject({ inputDevice: null, outputDevice: null, inputDriver: 'wasapiShared', bufferSize: 128 })
+    expect(localDevice()).toMatchObject({ inputDevice: null, inputDriver: 'wasapiShared', bufferSize: 128 })
+  })
+
+  it('계정 설정이 아예 없는(새 계정) 경우에도 지금 장치 값을 이 PC 값으로 굳힌다', async () => {
+    sb.mock!.setResult('profiles', { data: { audio_settings: null } })
+    setup()
+    await waitFor(() => expect(sb.mock!.calls).toHaveLength(1))
+    await waitFor(() => expect(localDevice()).toMatchObject({ inputDevice: null, bufferSize: 128 }))
+  })
+
+  it('같은 PC에서 계정을 바꿔 로그인해도 장치 설정은 그대로(PC의 것), 새 계정의 코덱·지터만 적용', async () => {
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { ...HERE, jitterMaxMs: 60 } } } })
+    const { result, rerender } = setup()
+    await waitFor(() => expect(result.current.config.inputDevice).toBe('wasapi::이 PC 마이크'))
+    await act(async () => {})
+
+    auth.user = { id: 'u2' }
+    sb.mock!.setResult('profiles', { data: { audio_settings: OTHER_PC_ACCOUNT } })
+    rerender()
+    await waitFor(() => expect(result.current.config.codec).toBe('pcm16'))
+    await act(async () => {})
+    expect(result.current.config).toMatchObject({ ...HERE, jitterMaxMs: 40, frameMs: 2.5 })
+    expect(localDevice()).toMatchObject(HERE)
+  })
+
+  it('이행: 이 PC의 옛 캐시(이 PC 장치)와 계정(다른 PC 장치)이 다르면 캐시가 이긴다 — 업데이트 직후 다른 PC 장치로 바뀌지 않는다(#256 리뷰 M1)', async () => {
+    // 옛 앱: 이 PC 캐시 = 이 PC에서 마지막으로 고른 장치, 계정 = 다른 PC에서 마지막으로 저장한 장치
+    localStorage.setItem('band_engine_config_v2', JSON.stringify({ version: 2, engine: { ...HERE, codec: 'opus', jitterMaxMs: 80 } }))
+    sb.mock!.setResult('profiles', { data: { audio_settings: OTHER_PC_ACCOUNT } })
+    const { result } = setup()
+    expect(result.current.config).toMatchObject(HERE) // 계정을 읽기 전
+    await waitFor(() => expect(result.current.config.codec).toBe('pcm16'))
+    await act(async () => {})
+    // 계정을 읽은 뒤에도 장치 쪽은 이 PC 캐시 값, 나머지는 계정 값
+    expect(result.current.config).toMatchObject({ ...HERE, frameMs: 2.5, jitterMaxMs: 40 })
+    expect(localDevice()).toMatchObject(HERE)
+    const cache = JSON.parse(localStorage.getItem('band_engine_config_v2')!) as { engine: Record<string, unknown> }
+    for (const k of DEVICE_FIELDS) expect(k in cache.engine).toBe(false)
+    cleanup()
+    sb.mock!.reset()
+
+    // 다시 켜도(캐시에서 장치 필드가 빠진 뒤) 이 PC 저장값 그대로
+    sb.mock!.setResult('profiles', { data: { audio_settings: OTHER_PC_ACCOUNT } })
+    const second = setup()
+    await waitFor(() => expect(second.result.current.config.codec).toBe('pcm16'))
+    await act(async () => {})
+    expect(second.result.current.config).toMatchObject(HERE)
+  })
+
+  it('장치 저장값 읽기가 던지면(사생활 모드 등) 죽지 않고, 캐시도 못 읽으니 계정의 옛 장치 값을 이번 실행에 쓴다(#256 리뷰 L3)', async () => {
+    const realGet = Storage.prototype.getItem
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(function (this: Storage, key: string) {
+      if (key === DEVICE_KEY || key === 'band_engine_config_v2') throw new Error('denied')
+      return realGet.call(this, key)
+    })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('denied') })
+    sb.mock!.setResult('profiles', { data: { audio_settings: OTHER_PC_ACCOUNT } })
+    const { result } = setup()
+    await waitFor(() => expect(result.current.config.codec).toBe('pcm16'))
+    await act(async () => {})
+    expect(result.current.config).toMatchObject({ inputDriver: 'asio', inputDevice: 'asio::다른 PC', bufferSize: 512, jitterMaxMs: 40 })
+    // 편집도 동작하고 계정에는 장치 필드가 올라가지 않는다
+    act(() => { result.current.updateConfig({ inputDevice: 'wasapi::이 PC 마이크', inputDriver: 'wasapiShared' }) })
+    await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
+    const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: Record<string, unknown> } }
+    for (const k of DEVICE_FIELDS) expect(k in payload.audio_settings.engine).toBe(false)
+    expect(result.current.config).toMatchObject({ inputDriver: 'wasapiShared', inputDevice: 'wasapi::이 PC 마이크' })
+  })
+
+  it('옛 로컬 캐시(장치 값 포함)만 있고 계정을 못 읽으면 그 값을 임시로 쓰고, 사용자가 바꾸면 이 PC에 저장한다', async () => {
+    localStorage.setItem('band_engine_config_v2', JSON.stringify({ version: 2, engine: { ...HERE, codec: 'pcm16' } }))
+    auth.user = null
+    const { result } = setup()
+    await act(async () => {})
+    expect(result.current.config).toMatchObject({ ...HERE, codec: 'pcm16' })
+    expect(localDevice()).toBeNull()
+
+    act(() => { result.current.updateConfig({ jitterMaxMs: 70 }) })
+    await act(async () => {})
+    expect(localDevice()).toMatchObject(HERE)
+    const cache = JSON.parse(localStorage.getItem('band_engine_config_v2')!) as { engine: Record<string, unknown> }
+    expect('inputDevice' in cache.engine).toBe(false)
+    expect(cache.engine).toMatchObject({ codec: 'pcm16', jitterMaxMs: 70 })
   })
 })
