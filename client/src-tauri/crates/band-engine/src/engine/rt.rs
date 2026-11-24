@@ -139,10 +139,14 @@ pub struct MeasureOut {
     scratch: Box<[f32]>,
 }
 
+/// 측정 녹음 링(입력 콜백 → 측정 스레드)의 원소. 측정 스레드가 이 링을 ringbuf `Consumer::clear`로 비우므로 Drop 글루가 없어야
+/// 한다 — 단언과 근거는 `measure/loopback.rs` 머리.
+pub(crate) type CaptureSample = f32;
+
 /// 측정 스레드 쪽 끝점: 자극 생산자, 녹음 소비자.
 pub struct MeasureEnds {
     pub stim: HeapProd<f32>,
-    pub capture: HeapCons<f32>,
+    pub capture: HeapCons<CaptureSample>,
 }
 
 /// 측정 경로 생성(링은 여기서 미리 할당).
@@ -294,17 +298,28 @@ pub struct SourceBank {
 
 /// 워커 쪽 출력 끝점: 소스 링 생산자들과 믹스 탭 링 소비자.
 pub struct OutputFeed {
-    pub prods: Vec<HeapProd<f32>>,
+    pub prods: Vec<HeapProd<SourceSample>>,
     pub bank: Arc<SourceBank>,
-    pub tap: HeapCons<f32>,
+    pub tap: HeapCons<TapSample>,
 }
+
+/// 소스 링(워커 → 출력 콜백)의 원소. 링 선언(`OutputFeed::prods`·`OutputRt::cons`)과 아래 단언이 같은 별칭을 쓴다.
+pub(crate) type SourceSample = f32;
+/// 믹스 탭 링(출력 콜백 → 탭 스레드)의 원소. 탭 스레드가 이 링을 `clear`로 비운다 — 단언은 `engine/mod.rs`.
+pub(crate) type TapSample = f32;
+
+// 출력 콜백이 해제된 슬롯의 소스 링을 ringbuf `Consumer::clear`로 비운다(`OutputRt::mix_source`의 SLOT_DRAIN). ringbuf 0.4.8의
+// `skip`/`clear`는 원소 `Drop`이 panic하면 double free가 난다(RUSTSEC-2026-0293, 0.5.2+에서 수정) — 원소에 Drop 글루가 없어야
+// 그 경로가 닿지 않는다(콜백에서 원소 Drop을 돌리지 않는다는 RT 규칙이기도 하다). 깨지면 `clear`를 쓰지 않거나 ringbuf를
+// 올린다(docs/overhaul/deps-audit-2026-11-18.md 6번).
+const _: () = assert!(!core::mem::needs_drop::<SourceSample>());
 
 /// 출력 콜백 상태. 소스 링들에서 꺼내 섞고 장치 채널로 기록한다(콜백 구동 믹스).
 pub struct OutputRt {
-    cons: Vec<HeapCons<f32>>,
+    cons: Vec<HeapCons<SourceSample>>,
     bank: Arc<SourceBank>,
     controls: Arc<MixControls>,
-    tap: HeapProd<f32>,
+    tap: HeapProd<TapSample>,
     counters: Arc<AudioCounters>,
     scratch: Box<[f32]>,
     bus: Box<[f32]>,

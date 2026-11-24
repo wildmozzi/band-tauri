@@ -77,9 +77,19 @@ describe('roomDetailModel', () => {
   it('peerStatsTitle: 상대 수신 손실과 자동 전환 이유(P1-4e), 옛 엔진이면 줄 없음', () => {
     const lines = peerStatsTitle(stats({ remoteLossPct: 2.46, remoteConcealPct: 2.5, txCodec: 'opus', txCodecAuto: true, txCodecReason: 'lossFeedback' })).split('\n')
     expect(lines).toContain('상대 수신 손실: 2.5% · 은닉 2.5%')
-    expect(lines[lines.length - 1]).toBe('내 송신: Opus 자동 전환 (상대 회선 손실 — 끊김 보정)')
+    // 전환 이유는 "내 송신" 줄 하나에 합친다(#250 L3 — 줄이 둘이 되지 않는다)
+    expect(lines).toContain('내 송신: Opus (자동 전환: 상대 회선 손실 — 끊김 보정)')
+    expect(lines.filter((l) => l.startsWith('내 송신:'))).toHaveLength(1)
+    // txCodec이 없는 엔진(전환 이유만 있음)은 따로 한 줄
     expect(peerCodecLines(stats({ txCodecReason: 'relayLoad', remoteLossPct: null }))).toEqual(['내 송신: Opus 자동 전환 (서버 경유 대역 절약)'])
+    expect(peerCodecLines(stats({ txCodec: 'opus', txCodecAuto: true, txCodecReason: 'relayLoad', remoteLossPct: null }))).toEqual([])
     expect(peerCodecLines(stats())).toEqual([])
+  })
+
+  it('peerStatsTitle: 내 송신 코덱·프레임(txFrameMs), 옛 엔진(txCodec 없음)이면 줄 없음', () => {
+    const lines = peerStatsTitle(stats({ txCodec: 'pcm16', txCodecAuto: false }), 2.5).split('\n')
+    expect(lines[2]).toBe('내 송신: PCM16 · 2.5ms')
+    expect(peerStatsTitle(stats()).split('\n').some((l) => l.startsWith('내 송신: PCM16') || l.startsWith('내 송신: Opus ·'))).toBe(false)
   })
 
   it('remotePeerStatus: 연주 중이면 엔진 상태(통계 없으면 연결 중), 관람이면 배지 없이 활성', () => {

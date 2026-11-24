@@ -41,4 +41,19 @@ describe('엔진 런타임은 지연 묶음에만', () => {
     }
     expect(offenders).toEqual([])
   })
+
+  // 내 채널 진단 줄 문구(#250): EngineDiagLines는 performerUi 지연 묶음이다. 첫 화면 모듈(roomDetailModel 등)이
+  // engineDiagFormat을 값으로 import하면 공유 모듈이 되어 릴레이·송신 큐 문구가 웹 첫 묶음에 다시 실린다(피어 툴팁은 peerDiagFormat)
+  it('engineDiagFormat을 값으로 정적 import하는 곳은 EngineDiagLines뿐', () => {
+    const offenders: string[] = []
+    for (const file of sourceFiles(SRC)) {
+      const rel = relative(SRC, file).replace(/\\/g, '/')
+      const text = readFileSync(file, 'utf8')
+      for (const m of text.matchAll(/^(import|export)\s+(?!type\b)(?:[^;'"]*?from\s+)?['"]([^'"]+)['"]/gms)) {
+        const name = m[2].split('/').pop()!.replace(/\.(ts|tsx|js|mjs)$/, '')
+        if (name === 'engineDiagFormat' && rel !== 'features/room/components/EngineDiagLines.tsx') offenders.push(`${rel} → ${m[2]}`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
 })

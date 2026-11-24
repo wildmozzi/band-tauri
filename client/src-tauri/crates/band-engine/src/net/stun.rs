@@ -1,7 +1,7 @@
 //! STUN Binding (RFC 5389) — 기존 `network.rs`의 `query_stun` 파서를 이식하고
 //! 트랜잭션 ID 검증과 비STUN 패킷 무시를 추가했다.
 
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
 pub(crate) const DEFAULT_STUN_SERVERS: [&str; 2] = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"];
@@ -62,12 +62,25 @@ pub(crate) fn parse_response(buf: &[u8], txn_id: &[u8; 12]) -> Option<SocketAddr
 
 /// 여러 STUN 서버에 동시에 질의한다(리뷰 L7). 응답은 트랜잭션 ID와 출발지(서버 주소)를
 /// 모두 확인한다. 전체 대기는 `timeout` 한 번이다. 수신 스레드 시작 전에만 호출한다.
+/// 제품 경로는 `query_many_from`을 쓰므로 시험(`testing::net::stun`)에서만 노출한다.
+#[cfg(any(test, feature = "test-support"))]
 pub fn query_many(
     socket: &UdpSocket,
     servers: &[String],
     timeout: Duration,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Vec<(String, SocketAddr)> {
+    query_many_from(socket, servers, timeout, cancel).into_iter().map(|(name, _, a)| (name, a)).collect()
+}
+
+/// `query_many`와 같고, 응답한 서버의 해석된 주소도 돌려준다: (서버 이름, 서버 주소, 공인 주소). NAT 매핑 추정(`classify_nat`)이
+/// "IP가 다른 두 서버"인지 확인하는 데 쓴다(#250 L2).
+pub(crate) fn query_many_from(
+    socket: &UdpSocket,
+    servers: &[String],
+    timeout: Duration,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Vec<(String, SocketAddr, SocketAddr)> {
     let started = Instant::now();
     let deadline = started + timeout;
     // DNS 해석도 서버별 스레드로 동시에, 전체 timeout 안에서만 기다린다(PR #5 L-5: 오프라인에서
@@ -119,9 +132,9 @@ pub fn query_many(
         }
         if let Ok((n, src)) = socket.recv_from(&mut buf) {
             if let Some(i) = pending.iter().position(|(_, addr, txn)| *addr == src && parse_response(&buf[..n], txn).is_some()) {
-                let (name, _, txn) = pending.swap_remove(i);
+                let (name, server, txn) = pending.swap_remove(i);
                 if let Some(a) = parse_response(&buf[..n], &txn) {
-                    found.push((name, a));
+                    found.push((name, server, a));
                 }
             }
         }
@@ -129,9 +142,79 @@ pub fn query_many(
     found
 }
 
+/// STUN 결과로 아는 NAT 매핑 동작(RFC 4787 4.1절 — 진단 결과표 3-1 "콘형 NAT 쌍" 판정용). 같은 소켓으로 IP가 다른 두 서버에 물어
+/// 받은 공인 주소가 같으면 목적지와 무관한 매핑(콘형: 완전·제한·포트 제한 콘), 다르면 목적지마다 다른 매핑(대칭형)이다.
+/// 필터링(제한 여부)은 이 방법으로 알 수 없다 — 홀펀칭은 필터링과 무관하게 콘형끼리 성립하므로 3-1 판정에는 매핑으로 충분하다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum NatMapping {
+    /// NAT 없음: 받은 공인 주소가 이 PC의 LAN 주소·포트와 같다.
+    Open,
+    /// 두 서버가 같은 공인 주소를 봤다(콘형).
+    Independent,
+    /// 두 서버가 다른 공인 주소를 봤다(대칭형).
+    Dependent,
+    /// 응답이 둘 미만(오프라인·서버 차단)이라 가를 수 없다.
+    Unknown,
+}
+
+/// 엔진 시작 때 한 번 정하는 NAT 추정(재연결 중 망이 바뀌어도 다시 재지 않는다).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NatProbe {
+    pub(crate) mapping: NatMapping,
+    /// 응답한 STUN 서버 수(0..=2).
+    pub(crate) responses: u8,
+}
+
+/// `query_many_from` 결과(서버 주소, 공인 주소) → 매핑 추정. `lan` = 이 PC의 LAN IPv4, `port` = 바인드한 로컬 포트.
+/// 매핑 독립·의존은 **IP가 다른** 두 서버의 응답으로만 가른다(RFC 4787 4.1절의 시험 방법). 응답한 서버들의 IP가 같으면(설정이
+/// 같은 서버를 두 이름으로 가리키거나 둘이 같은 IP로 풀림) 주소 의존 매핑 NAT도 같은 공인 주소를 보이므로 `Unknown`이다(#250 L2).
+pub(crate) fn classify_nat(port: u16, lan: &[std::net::Ipv4Addr], found: &[(SocketAddr, SocketAddr)]) -> NatProbe {
+    let responses = found.len().min(u8::MAX as usize) as u8;
+    let mapped: Vec<SocketAddr> = found.iter().map(|(_, a)| *a).collect();
+    let server_ips_differ = found.iter().any(|(s, _)| s.ip() != found[0].0.ip());
+    let open = mapped.iter().any(|a| a.port() == port && matches!(a.ip(), IpAddr::V4(ip) if lan.contains(&ip)));
+    let mapping = if open {
+        NatMapping::Open
+    } else if mapped.len() < 2 || !server_ips_differ {
+        NatMapping::Unknown
+    } else if mapped.iter().all(|a| *a == mapped[0]) {
+        NatMapping::Independent
+    } else {
+        NatMapping::Dependent
+    };
+    NatProbe { mapping, responses }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NAT 매핑 추정(진단 3-1): 같은 주소 둘 = 콘형, 다른 주소 = 대칭형(포트만 달라도), 하나 이하 = 모름, LAN 주소·포트 그대로 = NAT 없음.
+    #[test]
+    fn classify_nat_mapping() {
+        use std::net::Ipv4Addr;
+        let lan = [Ipv4Addr::new(192, 168, 0, 10)];
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        // 서버 주소는 IP가 서로 다른 둘(응답 순서대로)
+        let servers = [a("198.18.0.1:3478"), a("198.18.0.2:19302")];
+        let c = |m: &[SocketAddr]| classify_nat(40000, &lan, &servers.iter().copied().zip(m.iter().copied()).collect::<Vec<_>>());
+        assert_eq!(c(&[]), NatProbe { mapping: NatMapping::Unknown, responses: 0 });
+        assert_eq!(c(&[a("203.0.113.7:40000")]).mapping, NatMapping::Unknown);
+        assert_eq!(c(&[a("203.0.113.7:51000"), a("203.0.113.7:51000")]), NatProbe { mapping: NatMapping::Independent, responses: 2 });
+        assert_eq!(c(&[a("203.0.113.7:51000"), a("203.0.113.7:51001")]).mapping, NatMapping::Dependent);
+        assert_eq!(c(&[a("203.0.113.7:51000"), a("198.51.100.2:51000")]).mapping, NatMapping::Dependent);
+        assert_eq!(c(&[a("192.168.0.10:40000")]).mapping, NatMapping::Open, "응답 하나라도 NAT 없음은 안다");
+        assert_eq!(c(&[a("192.168.0.10:40001"), a("192.168.0.10:40001")]).mapping, NatMapping::Independent, "포트가 바뀌면 NAT이 있다");
+        assert_eq!(serde_json::to_string(&c(&[])).unwrap(), r#"{"mapping":"unknown","responses":0}"#);
+        // 두 서버가 같은 IP(포트만 다름)면 주소 의존 매핑 NAT도 같은 공인 주소를 보인다 — 콘형으로 가르지 않는다(#250 L2)
+        let same_ip = [(a("198.18.0.1:3478"), a("203.0.113.7:51000")), (a("198.18.0.1:19302"), a("203.0.113.7:51000"))];
+        assert_eq!(classify_nat(40000, &lan, &same_ip), NatProbe { mapping: NatMapping::Unknown, responses: 2 });
+        // NAT 없음은 서버 IP와 무관하게 안다
+        let open_same = [(a("198.18.0.1:3478"), a("192.168.0.10:40000")), (a("198.18.0.1:19302"), a("192.168.0.10:40000"))];
+        assert_eq!(classify_nat(40000, &lan, &open_same).mapping, NatMapping::Open);
+    }
 
     #[test]
     fn parses_xor_mapped_address() {

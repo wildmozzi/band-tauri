@@ -75,6 +75,7 @@ jitter/mod.rs	method	mark_counters
 jitter/mod.rs	method	new
 jitter/mod.rs	method	restart
 jitter/mod.rs	method	set_deadline_clock
+jitter/mod.rs	method	stalled
 jitter/mod.rs	method	tuning
 jitter/mod.rs	struct	JitterBuffer
 jitter/mod.rs	use	DeadlineClock
@@ -231,9 +232,11 @@ peer_media.rs	field	mix
 peer_media.rs	field	peer_id
 peer_media.rs	field	playing
 peer_media.rs	field	ssrc
+peer_media.rs	field	stall_us
 peer_media.rs	fn	media_rings
 peer_media.rs	method	current
 peer_media.rs	method	drain
+peer_media.rs	method	entry_lead_ms
 peer_media.rs	method	first_audio_ms
 peer_media.rs	method	give_back
 peer_media.rs	method	has_feed_resampler
@@ -243,11 +246,13 @@ peer_media.rs	method	jitter
 peer_media.rs	method	new
 peer_media.rs	method	next_cmd
 peer_media.rs	method	note_audio
+peer_media.rs	method	note_stall
 peer_media.rs	method	profile
 peer_media.rs	method	publish
 peer_media.rs	method	put_feed_resampler
 peer_media.rs	method	request_restart
 peer_media.rs	method	rx_dropped
+peer_media.rs	method	set_entry_lead_ms
 peer_media.rs	method	set_profile
 peer_media.rs	method	shared
 peer_media.rs	method	stats

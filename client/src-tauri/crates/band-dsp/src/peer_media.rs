@@ -9,7 +9,7 @@
 //! - 공급 리샘플러(48k → 장치 레이트, 엔진 ⑧ 후속)도 `PeerMedia`가 싣고 간다: 제어 평면에서 만들고, 워커가 슬롯을 배정할 때
 //!   꺼내 쓰고, 제거·정지 때 되실어 반환 큐로 돌려보낸다. 워커는 피어 추가·제거에서 할당도 해제도 하지 않는다.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use ringbuf::traits::{Consumer, Producer, Split};
@@ -30,6 +30,9 @@ pub struct MediaStats {
     pub js: JitterStats,
     /// 이 피어의 실제(은닉이 아닌) 오디오가 처음 재생 링에 들어간 시각(엔진 epoch µs, P1-20). 0 = 아직.
     pub(crate) first_audio_us: u64,
+    /// 재생하던 스트림이 끊겨 다시 채우느라 소리가 없던 시간(µs, 누적 — `JitterBuffer::stalled`, 이 항목 동안). 무수신 재버퍼
+    /// (`JitterStats.rebuffers`)·스트림 리셋·지터 재시작 뒤 다시 재생할 때까지다. 처음 채우는 시간(첫 소리 전)은 들지 않는다.
+    pub stall_us: u64,
 }
 
 impl MediaStats {
@@ -39,9 +42,9 @@ impl MediaStats {
     }
 }
 
-/// `MediaStats`의 원자값 칸 수: `JitterStats` 스칼라 24필드 + playing + first_audio_us + 손실 모양(`SHAPE_WORDS`).
+/// `MediaStats`의 원자값 칸 수: `JitterStats` 스칼라 24필드 + playing + first_audio_us + stall_us + 손실 모양(`SHAPE_WORDS`).
 /// 필드가 늘면 `unpack`의 구조체 식이 컴파일되지 않으므로 `pack`·`unpack`을 함께 고친다.
-const BASE_WORDS: usize = 26;
+const BASE_WORDS: usize = 27;
 /// `LossShapeStats`: frame_ms + 연속 길이 두 벌 + 17+ 패킷 합 + 도착 여유 + 은닉 방식 4.
 const SHAPE_WORDS: usize = 1 + 2 * RUN_BUCKETS + 1 + MARGIN_BUCKETS + 4;
 const STAT_WORDS: usize = BASE_WORDS + SHAPE_WORDS;
@@ -104,6 +107,7 @@ fn pack_base(s: &MediaStats) -> [u64; BASE_WORDS] {
         j.tail_resets,
         j.min_transit as u64,
         s.first_audio_us,
+        s.stall_us,
     ]
 }
 
@@ -139,6 +143,7 @@ fn unpack(w: &[u64; STAT_WORDS]) -> MediaStats {
             shape: unpack_shape(&w[BASE_WORDS..]),
         },
         first_audio_us: w[25],
+        stall_us: w[26],
     }
 }
 
@@ -190,12 +195,29 @@ pub struct PeerMediaShared {
     restart_req: AtomicU32,
     /// `add_peer` 시각(엔진 epoch µs, 불변). `firstAudioMs`의 기준(P1-20).
     pub added_us: u64,
+    /// 입장 → `add_peer` 호출(µs + 1, 0 = 모름): 클라이언트가 `engine_add_peer`의 `entryLeadMs`로 알려 준 값(진단 3-3 "입장 후 첫 소리").
+    /// 추가 직후 한 번 쓴다(`set_entry_lead_ms`).
+    entry_lead: AtomicU64,
 }
 
 impl PeerMediaShared {
     /// `PeerMedia::new`만 부른다(짝 하나로만 생긴다 — seqlock 단일 작성자의 타입 보장, #118 리뷰 L-3).
     fn new(key: PeerKey, peer_id: String, ssrc: u32, added_us: u64) -> Self {
-        Self { key, peer_id, ssrc, mix: PeerMixCtl::default(), stats: MediaStatsCell::default(), restart_req: AtomicU32::new(0), added_us }
+        Self { key, peer_id, ssrc, mix: PeerMixCtl::default(), stats: MediaStatsCell::default(), restart_req: AtomicU32::new(0), added_us, entry_lead: AtomicU64::new(0) }
+    }
+
+    /// 내 입장(클라이언트 기준: 연주 시작) → 이 `add_peer` 호출까지(ms). 음수·NaN·None은 모름(뒤에 온 연주자·재추가는 클라이언트가 None).
+    pub fn set_entry_lead_ms(&self, ms: Option<f32>) {
+        let v = ms.filter(|m| m.is_finite() && *m >= 0.0).map_or(0, |m| ((m as f64 * 1000.0).round() as u64).saturating_add(1));
+        self.entry_lead.store(v, Ordering::Relaxed);
+    }
+
+    /// `set_entry_lead_ms`로 받은 값(ms). 없으면 None.
+    pub fn entry_lead_ms(&self) -> Option<f32> {
+        match self.entry_lead.load(Ordering::Relaxed) {
+            0 => None,
+            v => Some(((v - 1) as f64 / 1000.0) as f32),
+        }
     }
 
     /// 교체(같은 peerId 재추가) 때 옛 상태의 믹스 설정(gain·muted·pan)을 이어받는다.
@@ -227,6 +249,9 @@ pub struct PeerMedia {
     profile_applied: u32,
     /// 첫 실제 오디오를 재생 링에 넣은 시각(엔진 epoch µs, 0 = 아직). 이 항목의 수명 동안 한 번만 정한다(P1-20).
     first_audio_us: u64,
+    /// 리버퍼 무음 누적(µs)과, 직전 반복에 지터 버퍼가 `stalled`였으면 그 반복 시각(`note_stall`).
+    stall_us: u64,
+    stall_prev_us: Option<u64>,
     /// 공급 리샘플러(48k → 장치 출력 레이트, 스테레오). 제어 평면에서 만들어 싣고 온다. 워커가 소스 슬롯을 배정하면 꺼내
     /// `PeerFeed`가 쥐고(None), 제거·정지 때 되실어 보낸다 — 할당·해제는 둘 다 제어 평면이다(엔진 ⑧ 후속).
     feed_rs: Option<StreamResampler>,
@@ -251,7 +276,7 @@ impl PeerMedia {
         let feed_rs = Some(StreamResampler::new(INTERNAL_RATE, out_rate, 2, quality)?);
         let shared = Arc::new(PeerMediaShared::new(key, peer_id, ssrc, added_us));
         let restart_seen = shared.restart_req.load(Ordering::Acquire);
-        let me = Box::new(Self { shared: shared.clone(), rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits(), first_audio_us: 0, feed_rs });
+        let me = Box::new(Self { shared: shared.clone(), rx, jitter: JitterBuffer::new(settings), restart_seen, profile_applied: settings.profile.to_bits(), first_audio_us: 0, stall_us: 0, stall_prev_us: None, feed_rs });
         Ok((shared, me))
     }
 
@@ -301,12 +326,24 @@ impl PeerMedia {
         }
     }
 
+    /// 워커 반복 맨 앞(그 피어의 `ingest` 전, 반복 시각 `now_us`): 직전 반복이 끝났을 때 지터 버퍼가 끊겨 다시 채우는 중
+    /// (`JitterBuffer::stalled`)이었으면 그 사이 시간을 리버퍼 무음에 더한다. 원자값·할당 없음(워커 전용, RT 콜백 아님).
+    /// 재는 단위가 워커 반복 간격이라 끝 오차는 반복 하나(≈ 1ms) 안이다.
+    pub fn note_stall(&mut self, now_us: u64) {
+        if let Some(prev) = self.stall_prev_us.take() {
+            self.stall_us += now_us.saturating_sub(prev);
+        }
+        if self.jitter.stalled() {
+            self.stall_prev_us = Some(now_us);
+        }
+    }
+
     /// 워커 반복의 뒷부분(`service` 직후): 통계 스냅샷과 손실 보고를 발행한다. `&mut self`라 쓰는 쪽이 이 항목의
     /// 단독 소유자(워커) 하나임이 타입으로 보장된다 — seqlock의 단일 작성자 조건(#116 L-1).
     pub fn publish(&mut self) {
         let js = self.jitter.stats();
         let playing = self.jitter.is_playing();
-        self.shared.stats.write(&MediaStats { playing, js, first_audio_us: self.first_audio_us });
+        self.shared.stats.write(&MediaStats { playing, js, first_audio_us: self.first_audio_us, stall_us: self.stall_us });
         self.rx.set_loss_report(playing.then_some((js.loss_pct, js.conceal_pct)));
     }
 
@@ -462,7 +499,7 @@ mod tests {
                 conceal_underrun: 23,
             },
         };
-        MediaStats { playing: n % 2 == 1, js, first_audio_us: n * 11 }
+        MediaStats { playing: n % 2 == 1, js, first_audio_us: n * 11, stall_us: n * 13 + 1 }
     }
 
     #[test]
@@ -568,6 +605,24 @@ mod tests {
     }
 
     /// 재시작 요청은 세대가 바뀐 반복에 한 번만 적용되고, 여러 요청은 한 번으로 합쳐진다.
+    /// 입장 → add_peer(진단 3-3): 받은 값만 돌려주고, 음수·NaN·None은 "모름"이다. 0ms(재입장·이미 들린 뒤 재추가)도 값이다.
+    #[test]
+    fn entry_lead_roundtrip_and_unknown() {
+        let (pm, _tx) = media(4, 0.5);
+        assert_eq!(pm.shared.entry_lead_ms(), None);
+        pm.shared.set_entry_lead_ms(Some(1234.5));
+        assert_eq!(pm.shared.entry_lead_ms(), Some(1234.5));
+        pm.shared.set_entry_lead_ms(Some(0.0));
+        assert_eq!(pm.shared.entry_lead_ms(), Some(0.0));
+        // 아주 큰 유한값: `as u64`가 포화해도 +1이 넘치지 않는다(#250 L1 — debug panic 없음)
+        pm.shared.set_entry_lead_ms(Some(f32::MAX));
+        assert!(pm.shared.entry_lead_ms().is_some_and(|v| v > 1e9));
+        for bad in [Some(-1.0), Some(f32::NAN), Some(f32::INFINITY), None] {
+            pm.shared.set_entry_lead_ms(bad);
+            assert_eq!(pm.shared.entry_lead_ms(), None, "{bad:?}");
+        }
+    }
+
     #[test]
     fn ingest_applies_restart_once_per_generation() {
         let (mut pm, _tx) = media(1, 0.5);
@@ -595,6 +650,63 @@ mod tests {
         pm.note_audio(9_000_000);
         pm.publish();
         assert_eq!(s.stats().first_audio_ms(s.added_us), Some(250.5));
+    }
+
+    /// 리버퍼 무음 시간(진단): 지터 버퍼가 끊겨 다시 채우는 동안의 반복 간격만 쌓이고, 다시 재생하면 멈춘다. 처음 채우기는 안 센다.
+    #[test]
+    fn note_stall_accumulates_only_while_rebuffering() {
+        use crate::packet::{Header, PacketType};
+        let (mut pm, _tx) = media(9, 0.5);
+        let fcode = crate::config::frame_code_from_samples(240).unwrap();
+        let h = |seq: u32| Header { ptype: PacketType::Audio, ssrc: 9, seq, timestamp: seq * 240, flags: 0, frame_code: fcode };
+        let pcm = [0u8; 480];
+        let mut out = vec![0f32; 480];
+        let mut t = 0u64;
+        let mut seq = 0u32;
+        // 처음 채우기 → 재생
+        while !pm.jitter.is_playing() || seq < 30 {
+            pm.note_stall(t);
+            pm.jitter.insert(&h(seq), &pcm, t);
+            pm.jitter.pop(&mut out);
+            pm.jitter.end_burst(t, t, 0.0);
+            seq += 1;
+            t += 5_000;
+            assert!(seq < 200);
+        }
+        pm.publish();
+        assert_eq!(pm.shared.stats().stall_us, 0, "처음 채우는 시간은 무음으로 세지 않는다");
+        // 무수신 → 재버퍼
+        while !pm.jitter.stalled() {
+            pm.note_stall(t);
+            pm.jitter.pop(&mut out);
+            pm.jitter.end_burst(t, t, 0.0);
+            t += 5_000;
+            assert!(t < 3_000_000, "재버퍼링이 일어나지 않았다");
+        }
+        pm.note_stall(t); // 끊긴 뒤 첫 반복: 여기부터 센다
+        pm.note_stall(t + 7_000);
+        pm.note_stall(t + 10_000);
+        pm.publish();
+        assert_eq!(pm.shared.stats().stall_us, 10_000);
+        assert!(pm.jitter.stats().rebuffers >= 1);
+        // 다시 받아 재생하면 멈춘다
+        t += 10_000;
+        while !pm.jitter.is_playing() {
+            pm.note_stall(t);
+            pm.jitter.insert(&h(seq), &pcm, t);
+            pm.jitter.pop(&mut out);
+            pm.jitter.end_burst(t, t, 0.0);
+            seq += 1;
+            t += 5_000;
+            assert!(t < 6_000_000, "다시 재생하지 않았다");
+        }
+        pm.note_stall(t);
+        let after = { pm.publish(); pm.shared.stats().stall_us };
+        assert!(after > 10_000, "다시 채우는 동안도 무음: {after}");
+        pm.note_stall(t + 50_000);
+        pm.note_stall(t + 90_000);
+        pm.publish();
+        assert_eq!(pm.shared.stats().stall_us, after, "재생 중에는 늘지 않는다");
     }
 
     /// 프로필 ↔ 추가 경합(#115 리뷰 L4): 옛 프로필로 만든 피어도 워커의 다음 반복에서 지금 프로필로 맞춰진다.
