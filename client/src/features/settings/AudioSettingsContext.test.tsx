@@ -26,6 +26,15 @@ const native = vi.hoisted(() => ({
   testStarts: [] as EngineConfig[],
   /** engine_list_devices 호출 수(정상 경로에 추가 IPC가 없는지) */
   listCalls: 0,
+  /** engine_stats가 돌려줄 값(테스트 모니터 폴링) */
+  stats: null as { deviceReset?: boolean } | null,
+  /** engine_test_start를 이 횟수만큼 실패시킨다 */
+  testStartFailures: 0,
+  testStops: 0,
+  /** 테스트 모니터 리셋 재시작의 대기·안내 시간·반복 상한(시험이 빠르고 결정적으로 돌게 줄인다) */
+  resetDelays: [20, 20, 20],
+  resetNoticeMs: 8000,
+  resetMax: 8,
 }))
 vi.mock('../../native/engineApi', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../native/engineApi')>()
@@ -39,15 +48,41 @@ vi.mock('../../native/engineApi', async (importOriginal) => {
     engineSupportedDrivers: async () => native.supported,
     engineTestStart: async (c: EngineConfig) => {
       native.testStarts.push(c)
+      if (native.testStartFailures > 0) {
+        native.testStartFailures -= 1
+        throw new Error('ASIO 장치를 찾을 수 없습니다')
+      }
+      native.stats = null // 새 엔진은 리셋 요청이 없는 상태로 시작한다
       return null
     },
-    engineTestStop: async () => null,
-    engineStats: async () => null,
+    engineTestStop: async () => {
+      native.testStops += 1
+      return null
+    },
+    engineStats: async () => native.stats,
   }
 })
 vi.mock('../../native/loopbackOffsetStore', () => ({ reapplyLoopbackOffsetInBackground: () => {} }))
+vi.mock('../../native/testMonitorReset', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../../native/testMonitorReset')>()
+  return {
+    ...orig,
+    get TEST_RESET_RETRY_DELAYS_MS() {
+      return native.resetDelays
+    },
+    get TEST_RESET_NOTICE_MS() {
+      return native.resetNoticeMs
+    },
+    TestResetLimiter: class extends orig.TestResetLimiter {
+      constructor() {
+        super(native.resetMax)
+      }
+    },
+  }
+})
 
 import { AudioSettingsProvider, useAudioSettings } from './AudioSettingsContext'
+import { TEST_RESET_FAILED_MESSAGE, TEST_RESET_REPEAT_MESSAGE, TEST_RESET_RESTARTED_MESSAGE, TEST_RESET_RESTARTING_MESSAGE } from '../../native/testMonitorReset'
 
 function setup() {
   const { wrapper: QueryWrapper, client } = createQueryWrapper()
@@ -76,6 +111,12 @@ afterEach(() => {
   native.devices = []
   native.supported = null
   native.testStarts = []
+  native.stats = null
+  native.testStartFailures = 0
+  native.testStops = 0
+  native.resetDelays = [20, 20, 20]
+  native.resetNoticeMs = 8000
+  native.resetMax = 8
 })
 
 describe('AudioSettingsContext + profiles.audio_settings', () => {
@@ -319,6 +360,136 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
     await act(async () => { run = await result.current.prepareRunConfig() })
     expect(run!.notice).toBeNull()
     expect(run!.config).toMatchObject({ inputDevice: 'wasapi::Focusrite USB', inputChannels: [2, 3] })
+  })
+
+  describe('테스트 모니터의 드라이버 리셋 요청(#261 재리뷰 L4)', () => {
+  it('deviceReset이면 같은 설정으로 다시 열고 알린다 — 첫 시도가 실패해도 같은 장치로 다시 시도한다', async () => {
+    native.on = true
+    native.devices = LAPTOP
+    native.supported = ['wasapiExclusive', 'wasapiShared']
+    localStorage.setItem('band_engine_config_v2', JSON.stringify({ version: 2, engine: { ...SAVED.engine, inputDevice: null, outputDevice: null, channels: 1, inputChannels: [0] } }))
+    auth.user = null
+    const { result } = setup()
+    await waitFor(() => expect(result.current.devices).toHaveLength(2))
+    await act(async () => { await result.current.startTest() })
+    expect(result.current.isTesting).toBe(true)
+    const first = native.testStarts[native.testStarts.length - 1]
+    const startsBefore = native.testStarts.length
+    native.testStartFailures = 1
+    native.resetDelays = [300, 300] // "다시 시작하는 중"이 폴링(50ms)에 잡힐 만큼 길게
+    native.stats = { deviceReset: true }
+    await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTING_MESSAGE))
+    await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTED_MESSAGE), { timeout: 4000 })
+    // 정지 1번, 시작 2번(실패 1 + 성공 1) — 둘 다 처음과 같은 설정
+    expect(native.testStops).toBe(1)
+    expect(native.testStarts.slice(startsBefore)).toEqual([first, first])
+    expect(result.current.isTesting).toBe(true)
+    expect(result.current.testError).toBeNull()
+    await act(async () => { await result.current.stopTest() })
+  })
+
+  /** 기본 장치로 테스트 모니터를 켠 데스크톱 앱 */
+  async function startedTest() {
+    native.on = true
+    native.devices = LAPTOP
+    native.supported = ['wasapiExclusive', 'wasapiShared']
+    localStorage.setItem('band_engine_config_v2', JSON.stringify({ version: 2, engine: { ...SAVED.engine, inputDevice: null, outputDevice: null, channels: 1, inputChannels: [0] } }))
+    auth.user = null
+    const view = setup()
+    await waitFor(() => expect(view.result.current.devices).toHaveLength(2))
+    await act(async () => { await view.result.current.startTest() })
+    expect(view.result.current.isTesting).toBe(true)
+    return view
+  }
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+  it('다시 여는 중에 테스트를 끄면 안내가 지워지고, 다시 켜도 옛 리셋 안내가 보이지 않는다 (#263 리뷰 L-1)', async () => {
+    native.resetDelays = [100_000] // 다시 여는 대기에서 멈춰 있게
+    const { result } = await startedTest()
+    const startsBefore = native.testStarts.length
+    native.stats = { deviceReset: true }
+    await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTING_MESSAGE))
+    await act(async () => { await result.current.stopTest() })
+    expect(result.current.isTesting).toBe(false)
+    expect(result.current.fallbackNotice).toBeNull()
+    native.stats = null
+    await act(async () => { await result.current.startTest() })
+    expect(result.current.isTesting).toBe(true)
+    expect(native.testStarts).toHaveLength(startsBefore + 1) // 사용자가 다시 켠 한 번뿐(옛 재시작은 그만뒀다)
+    await act(async () => { await sleep(250) }) // 통계 폴링 두 번 이상
+    expect(result.current.fallbackNotice).toBeNull()
+    await act(async () => { await result.current.stopTest() })
+  })
+
+  it('"다시 시작했습니다" 안내는 잠시 뒤 사라지고, 그 전에 테스트를 껐다 켜도 남지 않는다 (#263 리뷰 L-1)', async () => {
+    native.resetNoticeMs = 500 // 폴링(50ms)에 잡힐 만큼은 길게
+    const { result } = await startedTest()
+    native.stats = { deviceReset: true }
+    await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTED_MESSAGE))
+    await waitFor(() => expect(result.current.fallbackNotice).toBeNull())
+    expect(result.current.isTesting).toBe(true)
+    // 안내가 떠 있을 때 껐다 켜는 경우
+    native.resetNoticeMs = 100_000
+    native.stats = { deviceReset: true }
+    await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTED_MESSAGE))
+    await act(async () => { await result.current.stopTest() })
+    await act(async () => { await result.current.startTest() })
+    expect(result.current.isTesting).toBe(true)
+    expect(result.current.fallbackNotice).toBeNull()
+    await act(async () => { await result.current.stopTest() })
+  })
+
+  it('다시 여는 중에 설정을 바꾸면 테스트가 멈추고 옛 설정으로 다시 켜지지 않는다 (#263 리뷰 L-2)', async () => {
+    native.resetDelays = [100_000] // 다시 여는 대기에서 멈춰 있게
+    const { result } = await startedTest()
+    const startsBefore = native.testStarts.length
+    native.stats = { deviceReset: true }
+    await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTING_MESSAGE))
+    await waitFor(() => expect(native.testStops).toBe(1)) // 다시 열려고 닫았다 — 이제 대기 중(isActive·isStarting 모두 false)
+    act(() => { expect(result.current.updateConfig({ bufferSize: 256 })).toBe(true) })
+    await waitFor(() => expect(result.current.isTesting).toBe(false))
+    expect(result.current.fallbackNotice).toBeNull()
+    await act(async () => { await sleep(250) }) // 통계 폴링이 더 돌아도
+    expect(native.testStarts).toHaveLength(startsBefore) // 다시 켜지 않았다
+    expect(result.current.isTesting).toBe(false)
+    expect(result.current.testError).toBeNull()
+  })
+
+  it('리셋 요청이 상한을 넘게 이어지면 다시 열지 않고 테스트를 멈춘다 (#263 리뷰 L-3)', async () => {
+    native.resetMax = 2
+    native.resetDelays = [5]
+    const { result } = await startedTest()
+    const startsBefore = native.testStarts.length
+    for (let i = 1; i <= 2; i++) {
+      native.stats = { deviceReset: true }
+      await waitFor(() => expect(native.testStarts).toHaveLength(startsBefore + i))
+      await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTED_MESSAGE))
+    }
+    native.stats = { deviceReset: true } // 세 번째 — 상한(2번) 초과
+    await waitFor(() => expect(result.current.testError).toBe(TEST_RESET_REPEAT_MESSAGE))
+    expect(result.current.isTesting).toBe(false)
+    expect(result.current.fallbackNotice).toBeNull()
+    await act(async () => { await sleep(150) })
+    expect(native.testStarts).toHaveLength(startsBefore + 2) // 더 열지 않았다
+    // 다시 켜면 새로 센다
+    native.stats = null
+    await act(async () => { await result.current.startTest() })
+    expect(result.current.isTesting).toBe(true)
+    expect(result.current.testError).toBeNull()
+    native.stats = { deviceReset: true }
+    await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTED_MESSAGE))
+    await act(async () => { await result.current.stopTest() })
+  })
+
+  it('다시 열기가 모두 실패하면 안내를 지우고 실패 문구로 멈춘다', async () => {
+    native.resetDelays = [5, 5]
+    const { result } = await startedTest()
+    native.testStartFailures = 2
+    native.stats = { deviceReset: true }
+    await waitFor(() => expect(result.current.testError).toBe(TEST_RESET_FAILED_MESSAGE))
+    expect(result.current.isTesting).toBe(false)
+    expect(result.current.fallbackNotice).toBeNull()
+  })
   })
 })
 

@@ -95,6 +95,8 @@ pub(super) struct DeviceWatch {
     last_captured_at: Duration,
     reported_errors: u32,
     reset: ResetWatch,
+    /// 로그로 남긴 "유예로 세지 않은 리셋 요청" 수(`AudioCounters::device_reset_ignored`).
+    reported_ignored_resets: u32,
 }
 
 impl DeviceWatch {
@@ -148,6 +150,15 @@ impl DeviceWatch {
         }
         if self.reset.observe(counters.device_reset_requests.load(Ordering::Relaxed), now) {
             stats.device_reset.store(true, Ordering::Relaxed);
+        }
+        // 유예로 버린 리셋 요청(#261 재리뷰 L3): 다시 열지는 않지만 흔적을 남긴다 — 버린 요청이 사실은 사용자의 변경이었다면
+        // 드라이버 설정이 엔진과 어긋난 채 돌 수 있고, 그때 진단 로그에서 원인을 가를 단서가 이 줄이다.
+        let ignored = counters.device_reset_ignored.load(Ordering::Relaxed);
+        if ignored != self.reported_ignored_resets {
+            log::warn!(
+                "드라이버 리셋 요청 누적 {ignored}회를 세지 않았습니다(장치를 연 직후 유예 — 시작 직후 거짓 요청·엔진의 샘플레이트 변경에 대한 응답으로 봄)"
+            );
+            self.reported_ignored_resets = ignored;
         }
         let errs = counters.stream_errors.load(Ordering::Relaxed);
         if errs != self.reported_errors {
@@ -315,5 +326,18 @@ mod tests {
         assert_eq!(w.reported_errors, 3);
         w.check_at(&c, &s, Duration::from_millis(1));
         assert_eq!(w.reported_errors, 3);
+    }
+
+    /// 유예로 세지 않은 리셋 요청(#261 재리뷰 L3)은 다시 열기를 부르지 않고, 값이 바뀔 때 한 번 흔적(로그)만 남긴다.
+    #[test]
+    fn ignored_reset_requests_are_reported_but_do_not_reopen() {
+        let (c, s) = (AudioCounters::default(), WorkerStats::default());
+        let mut w = DeviceWatch::new();
+        c.device_reset_ignored.store(2, Ordering::Relaxed);
+        for t in 0..300 {
+            w.check_at(&c, &s, Duration::from_millis(t * 10));
+        }
+        assert_eq!(w.reported_ignored_resets, 2);
+        assert!(!s.device_reset.load(Ordering::Relaxed), "버린 요청은 deviceReset을 켜지 않는다");
     }
 }

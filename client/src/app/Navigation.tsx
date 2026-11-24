@@ -1,6 +1,5 @@
 import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { LATENCY_MEASURE_SECTION_ID, OPEN_LATENCY_MEASURE_EVENT } from '../native/loopbackOffsetStore'
-import { OPEN_AUDIO_SETTINGS_EVENT } from '../native/audioSettingsEvents'
+import { LATENCY_MEASURE_SECTION_ID, OPEN_AUDIO_SETTINGS_EVENT, OPEN_LATENCY_MEASURE_EVENT } from '../native/audioSettingsEvents'
 import { Link, useNavigate } from 'react-router-dom'
 import { profilePhotoOf, useAuth } from '../features/auth'
 import { AudioSettings } from '../features/settings'

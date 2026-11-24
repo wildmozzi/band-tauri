@@ -11,6 +11,8 @@ import {
   DEVICE_RESET_RECOVERED_MESSAGE,
   DEVICE_RESET_RECOVERING_MESSAGE,
   DEVICE_RESET_REPEAT_MESSAGE,
+  DEVICE_RESET_FAILED_MESSAGE,
+  deviceResetFailedMessage,
   KEY_CONFLICT_MESSAGE,
   KEY_CONFLICT_REPEAT_MESSAGE,
   PerformSession,
@@ -144,7 +146,7 @@ function setup(opts: { others?: string[]; opts?: PerformSessionOptions } = {}) {
     getSelfId: () => env.selfId,
     getRoomId: () => env.roomId,
     getOtherPerformers: () => env.others,
-  }, { retryDelaysMs: [5, 5, 5], reconnectTimeoutMs: 30, deadStatsThreshold: 2, relayRetryMs: 20, now: () => clock.now, deviceRecoveryDelaysMs: [5, 5], deviceNoticeMs: 200, ...opts.opts })
+  }, { retryDelaysMs: [5, 5, 5], reconnectTimeoutMs: 30, deadStatsThreshold: 2, relayRetryMs: 20, now: () => clock.now, deviceRecoveryDelaysMs: [5, 5], deviceResetRetryDelaysMs: [5, 5, 5], deviceNoticeMs: 200, ...opts.opts })
   const start = (config: EngineConfig = DEFAULT_ENGINE_CONFIG) => session.start({ instrument: 'guitar', config, nickname: 'n', isHost: false })
   const types = () => sent.map((m) => m.type + ('to' in m ? `>${m.to}` : ''))
   return { engine, sent, env, session, start, types, clock }
@@ -498,6 +500,146 @@ describe('PerformSession 피어/엔진 상태', () => {
     await driverReset(session, engine)
     await vi.waitFor(() => expect(session.getState().phase).toBe('idle'))
     expect(session.getState().error).toBe(DEVICE_RESET_REPEAT_MESSAGE)
+  })
+
+  const CHOSEN = { ...DEFAULT_ENGINE_CONFIG, inputDriver: 'asio' as const, outputDriver: 'asio' as const, inputDevice: 'asio:Focusrite USB ASIO', outputDevice: 'asio:Focusrite USB ASIO' }
+
+  it('드라이버 리셋 재시작: 드라이버가 잠깐 열리지 않아도 같은 장치로 다시 시도해 성공한다 — 기본 장치로 넘어가지 않는다 (#261 재리뷰 M1)', async () => {
+    const { session, start, engine, types, sent } = setup()
+    await start(CHOSEN)
+    const sentBefore = sent.length
+    engine.startFailures = 2 // 리셋 직후 두 번은 드라이버가 아직 재설정 중
+    const errors: (string | null)[] = []
+    session.subscribe((st) => errors.push(st.error))
+    await driverReset(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    // 시작 1 + 실패 2 + 성공 1 — 모두 쓰던 장치 그대로
+    expect(engine.startConfigs).toHaveLength(4)
+    for (const c of engine.startConfigs) expect(c).toEqual(CHOSEN)
+    expect(session.getState()).toMatchObject({ error: null, deviceNotice: DEVICE_RESET_RECOVERED_MESSAGE })
+    expect(errors.every((e) => e === null)).toBe(true) // 실패한 시도는 오류로 보이지 않는다
+    expect(types().slice(sentBefore)).toEqual(['start-performing', 'native-descriptor']) // 서버에 연주 중단을 알리지 않았다
+  })
+
+  it('드라이버 리셋 재시작이 모두 실패하면 다른 장치로 바꾸지 않고 정지·안내한다 — 다음 시작·재시작도 쓰던 장치 (#261 재리뷰 M1)', async () => {
+    const { session, start, engine, types } = setup()
+    await start(CHOSEN)
+    engine.startFailures = 3 // 시도 상한(3번)까지 전부 실패
+    await driverReset(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('idle'))
+    expect(session.getState().error).toBe(deviceResetFailedMessage('device not found'))
+    expect(session.getState().error).toContain(DEVICE_RESET_FAILED_MESSAGE)
+    expect(session.getState().deviceNotice ?? null).toBeNull()
+    expect(types().slice(-2)).toEqual(['native-leave', 'stop-performing'])
+    // 기본 장치(null)로 연 시도가 하나도 없다: 시작 1 + 시도 3, 그 뒤로 더 시도하지 않는다
+    await sleep(30)
+    expect(engine.startConfigs).toHaveLength(4)
+    for (const c of engine.startConfigs) expect(c).toEqual(CHOSEN)
+    // lastStart가 그대로다: 사용자가 같은 설정으로 다시 시작한 뒤의 장치 분실 재시작 첫 시도도 쓰던 장치로 연다
+    expect(await start(CHOSEN)).toBe(true)
+    await loseDevice(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    expect(last(engine.startConfigs)).toEqual(CHOSEN)
+  })
+
+  describe('재시도 대기 중의 정지(#263 리뷰 L-4) — 가짜 타이머로 순서를 고정한다', () => {
+    const OTHER = { ...CHOSEN, bufferSize: 256 }
+
+    it('재시도 대기 중 stop(): 그 뒤로 엔진을 다시 열지 않는다', async () => {
+      vi.useFakeTimers()
+      try {
+        const { session, start, engine, types } = setup({ opts: { deviceResetRetryDelaysMs: [50, 50, 50] } })
+        await start(CHOSEN)
+        await driverReset(session, engine)
+        await vi.advanceTimersByTimeAsync(10) // 재시작 앞 정지가 끝나고 첫 대기(50ms) 안
+        expect(session.getState().phase).toBe('restarting')
+        await session.stop()
+        expect(session.getState()).toMatchObject({ phase: 'idle', error: null })
+        expect(session.getState().deviceNotice ?? null).toBeNull()
+        await vi.advanceTimersByTimeAsync(1000) // 남은 대기가 모두 지나도
+        expect(engine.startConfigs).toHaveLength(1)
+        expect(session.getState().phase).toBe('idle')
+        expect(types().slice(-2)).toEqual(['native-leave', 'stop-performing']) // 재시작 중 정지는 서버에도 알린다
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('대기 중 정지 → 다른 설정으로 다시 시작 → 새 리셋: 깨어난 옛 반복문이 옛 설정으로 끼어들지 않는다', async () => {
+      vi.useFakeTimers()
+      try {
+        const { session, start, engine } = setup({ opts: { deviceResetRetryDelaysMs: [50, 50, 50] } })
+        await start(CHOSEN)
+        await driverReset(session, engine) // 옛 반복문: t=0에 첫 대기(50ms) 시작
+        await vi.advanceTimersByTimeAsync(10)
+        await session.stop()
+        expect(await start(OTHER)).toBe(true) // 사용자가 설정을 바꿔 다시 시작
+        await driverReset(session, engine) // 새 반복문: t=10에 첫 대기 시작(t=60에 깬다) — recoveringDevice가 다시 true
+        expect(session.getState().phase).toBe('restarting')
+        expect(engine.startConfigs).toEqual([CHOSEN, OTHER])
+
+        await vi.advanceTimersByTimeAsync(45) // t=55: 옛 반복문만 깼다 — 제 세대가 아니라 그만둔다
+        expect(engine.startConfigs).toEqual([CHOSEN, OTHER])
+        expect(session.getState().phase).toBe('restarting') // 새 재시작은 그대로 진행 중
+
+        await vi.advanceTimersByTimeAsync(10) // t=65: 새 반복문이 새 설정으로 한 번 연다
+        expect(engine.startConfigs).toEqual([CHOSEN, OTHER, OTHER])
+        expect(session.getState()).toMatchObject({ phase: 'running', error: null, deviceNotice: DEVICE_RESET_RECOVERED_MESSAGE })
+
+        await vi.advanceTimersByTimeAsync(1000) // 옛 반복문의 남은 시도가 뒤늦게 나오지 않는다
+        expect(engine.startConfigs).toEqual([CHOSEN, OTHER, OTHER])
+        expect(session.getState().phase).toBe('running')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
+  it('드라이버 리셋 재시작 시도 수·간격은 장치 분실과 따로다(기본 5번·대기 합 8초) (#261 재리뷰 M1)', async () => {
+    const { session, start, engine } = setup({ opts: { deviceResetRetryDelaysMs: [1, 1, 1, 1, 1], deviceRecoveryDelaysMs: [1] } })
+    await start(CHOSEN)
+    engine.startFailures = 4
+    await driverReset(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    expect(engine.startConfigs).toHaveLength(6) // 장치 분실 사다리(1번)가 아니라 리셋 사다리(5번)
+    for (const c of engine.startConfigs) expect(c).toEqual(CHOSEN)
+  })
+
+  it('리셋과 장치 분실이 겹칠 때: 리셋 재시작 중 장치가 사라져도 기본 장치로 넘어가지 않고, 그 뒤의 진짜 장치 분실은 기존 폴백을 탄다 (#261 재리뷰 M1)', async () => {
+    const { session, start, engine, clock } = setup()
+    await start(CHOSEN)
+    // ① deviceLost와 deviceReset이 함께 온다(엔진 계약) → 리셋 사다리. 장치가 실제로 사라져 전부 실패
+    engine.startFail = 'ASIO 장치를 찾을 수 없습니다'
+    await driverReset(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('idle'))
+    expect(session.getState().error).toBe(deviceResetFailedMessage('ASIO 장치를 찾을 수 없습니다'))
+    expect(engine.startConfigs.every((c) => c.inputDevice === CHOSEN.inputDevice && c.outputDevice === CHOSEN.outputDevice)).toBe(true)
+    // ② 다시 시작한 뒤 리셋 재시작 성공 → 이어서 진짜 장치 분실: 같은 장치 1번 실패 뒤 기본 장치(#208 동작 유지)
+    engine.startFail = null
+    expect(await start(CHOSEN)).toBe(true)
+    clock.now += 1000
+    await driverReset(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    expect(last(engine.startConfigs)).toEqual(CHOSEN)
+    engine.startFailures = 1
+    clock.now += 1000
+    await loseDevice(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    expect(last(engine.startConfigs)).toMatchObject({ inputDevice: null, outputDevice: null })
+    expect(session.getState().deviceNotice).toBe(DEVICE_RECOVERED_DEFAULT_MESSAGE)
+  })
+
+  it('장치 분실 재시작 중에 본 deviceReset은 그 재시작이 끝난 뒤 리셋 사다리로 처리된다(같은 장치만) (#261 재리뷰 M1)', async () => {
+    const { session, start, engine } = setup()
+    await start(CHOSEN)
+    await loseDevice(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    const before = engine.startConfigs.length
+    engine.startFailures = 2
+    await driverReset(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    expect(engine.startConfigs.slice(before)).toHaveLength(3)
+    for (const c of engine.startConfigs.slice(before)) expect(c).toEqual(CHOSEN)
   })
 
   it('deviceLost가 한 번 보이고 곧 풀리면(콜백 순간 정지) 재시작하지 않는다 (#208 리뷰 L-1)', async () => {

@@ -26,10 +26,21 @@ const PERFORMER_UI_MARKERS: [chunk: RegExp, marker: string][] = [
   // 내 채널 진단 줄 문구(engineDiagFormat — 송신 큐·릴레이, #250): EngineDiagLines와 함께 지연 묶음에만
   [/^performerUi-.*\.js$/, '송신 큐 p99'],
   [/^performerUi-.*\.js$/, '토큰 만료'],
+  // 설정 화면 테스트 모니터의 드라이버 리셋 문구(testMonitorReset — AudioSettingsContext가 동적 import, #263 리뷰 M-1)
+  [/^testMonitorReset-.*\.js$/, '테스트를 다시 시작했습니다'],
 ]
 
 /** 런타임 묶음 모듈의 고유 문자열(mixBridge 워클릿 이름, sessionLogic 액션, performSession 문구·신호) */
-const RUNTIME_MARKERS = ['mix-ring-processor', 'rejectPeer', 'addPeerFailed', 'relay-token-request', '시그널링 서버 연결이 끊겨 연주를 중단했습니다']
+const RUNTIME_MARKERS = [
+  'mix-ring-processor',
+  'rejectPeer',
+  'addPeerFailed',
+  'relay-token-request',
+  '시그널링 서버 연결이 끊겨 연주를 중단했습니다',
+  // 데스크톱 연주 중에만 나오는 문구(performMessages — 키 충돌, 장치 분실·드라이버 리셋 재시작 결과, #263 리뷰 M-1)
+  '엔진 키 충돌이 반복',
+  '쓰던 장치를 다시 열지 못해 연주를 중단',
+]
 
 const dist = fileURLToPath(new URL('./.dist/', import.meta.url))
 const read = (rel: string) => readFileSync(dist + rel, 'utf8')
@@ -101,6 +112,21 @@ test('빌드된 CSS의 미디어 쿼리에 범위 문법이 없다', () => {
   expect(preludes.some(p => p.includes('max-width')), '양성 대조: max-width 미디어 쿼리가 있어야 함').toBe(true)
   const ranged = preludes.filter(p => /[<>]/.test(p))
   expect(ranged, `범위 문법 미디어 쿼리 ${ranged.length}개`).toEqual([])
+})
+
+/**
+ * 첫 화면 JS 어디에도 없어야 하는 데스크톱 전용 모듈의 고유 문자열(어느 지연 묶음에 실리는지는 묶음 나누기에 맡긴다):
+ * 루프백 보정값 저장소(loopbackOffsetStore — 저장 키 접두사·표시 문구), #263 리뷰 M-1
+ */
+const DESKTOP_ONLY_MARKERS = ['band.loopbackOffset.', '출력 지연 보정: 없음']
+
+test('데스크톱 전용 보조 모듈은 첫 화면 JS에 없다', () => {
+  const firstLoad = firstLoadScripts().map(read).join('\n')
+  const all = readdirSync(dist + 'assets').filter(f => f.endsWith('.js')).map(f => read('assets/' + f)).join('\n')
+  for (const marker of DESKTOP_ONLY_MARKERS) {
+    expect(all.includes(marker), `양성 대조: ${marker}가 어느 묶음엔가 있어야 함`).toBe(true)
+    expect(firstLoad.includes(marker), `${marker}가 첫 화면 JS에 실림`).toBe(false)
+  }
 })
 
 test('데스크톱 전용 엔진 런타임은 첫 화면 JS에 없고 nativeRuntime 묶음에만 있다', () => {

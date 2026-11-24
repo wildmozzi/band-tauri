@@ -46,7 +46,6 @@ import {
   type EnginePresetId,
 } from '../../native/engineConfig'
 import { SettingsSaveGate, TestMonitorControl } from '../../native/settingsSync'
-import { reapplyLoopbackOffsetInBackground } from '../../native/loopbackOffsetStore'
 import type { RunConfig } from '../../native/deviceFallback'
 import {
   hasDeviceSettings,
@@ -58,6 +57,10 @@ import {
 
 /** 폴백 판단은 데스크톱 앱에서만 쓴다 — 웹 첫 화면 묶음에 싣지 않는다(bundle-budget e2e) */
 const loadDeviceFallback = () => import('../../native/deviceFallback')
+/** 루프백 보정값 저장소도 데스크톱 전용(테스트 모니터를 켤 때만 쓴다) — 데스크톱 앱은 엔진 런타임 묶음과 함께 이미 받아 둔 모듈이다 */
+const loadLoopbackOffsetStore = () => import('../../native/loopbackOffsetStore')
+/** 테스트 모니터의 드라이버 리셋 문구·대기·반복 상한도 데스크톱 전용 — 리셋 요청을 볼 때 받는다(#263 리뷰 M-1) */
+const loadTestMonitorReset = () => import('../../native/testMonitorReset')
 
 const STORAGE_KEY = 'band_engine_config_v2'
 const SAVE_DEBOUNCE_MS = 600
@@ -395,14 +398,36 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const [testNotice, setTestNotice] = useState<string | null>(null)
   /** 테스트 모니터에서 이미 알린 폴백 문구(앱 실행마다 한 번) */
   const shownTestNoticesRef = useRef(new Set<string>())
+  /**
+   * 드라이버 리셋으로 다시 여는 중·다시 열었음 안내. 폴백 알림(testNotice)과 따로 둔다 — 리셋 안내가 폴백 알림을 덮어써 지우지 않고,
+   * 테스트를 끄거나 다시 켜면 지운다("다시 시작했습니다"는 잠시 뒤에도 지운다) (#263 리뷰 L-1)
+   */
+  const [testResetNotice, setTestResetNotice] = useState<string | null>(null)
+  const testResetNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 이번 테스트의 리셋 재시작 반복 상한(테스트를 켤 때마다 새로 센다, #263 리뷰 L-3) */
+  const testResetLimiterRef = useRef<{ allow(now: number): boolean } | null>(null)
+  const showTestResetNotice = useCallback((notice: string | null, clearAfterMs?: number) => {
+    if (testResetNoticeTimerRef.current) clearTimeout(testResetNoticeTimerRef.current)
+    testResetNoticeTimerRef.current = null
+    setTestResetNotice(notice)
+    if (notice && clearAfterMs !== undefined) {
+      testResetNoticeTimerRef.current = setTimeout(() => {
+        testResetNoticeTimerRef.current = null
+        setTestResetNotice(null)
+      }, clearAfterMs)
+    }
+  }, [])
+  useEffect(() => () => {
+    if (testResetNoticeTimerRef.current) clearTimeout(testResetNoticeTimerRef.current)
+  }, [])
   if (!testControlRef.current) {
     testControlRef.current = new TestMonitorControl({
       start: async () => {
         // startTest가 prepareRunConfig로 고친 이번 실행 설정(저장값이 아님)
         const cfg = testRunConfigRef.current ?? configRef.current
         await engineTestStart(cfg)
-        // 앱 재시작 뒤에도 같은 장치 구성이면 메트로놈 출력 지연 보정값을 다시 넣는다(P2-3c)
-        reapplyLoopbackOffsetInBackground(cfg)
+        // 앱 재시작 뒤에도 같은 장치 구성이면 메트로놈 출력 지연 보정값을 다시 넣는다(P2-3c). 기다리지 않는다(시작 흐름을 늦추지 않게)
+        void loadLoopbackOffsetStore().then((m) => m.reapplyLoopbackOffsetInBackground(cfg), () => {})
         return null
       },
       stop: () => engineTestStop(),
@@ -413,15 +438,16 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const stopTest = useCallback(async () => {
     setIsTesting(false)
     setTestStats(null)
+    showTestResetNotice(null)
     try {
       await testControl.stop()
     } catch (err) {
       console.warn('[AudioSettings] 테스트 정지 실패:', engineErrorMessage(err))
     }
-  }, [testControl])
+  }, [testControl, showTestResetNotice])
 
   const startTest = useCallback(async () => {
-    if (!isNativeMode || testControl.isActive || testControl.isStarting) return
+    if (!isNativeMode || testControl.isActive || testControl.isStarting || testControl.isRestarting) return
     if (engineInUse) {
       setTestError('합주 중에는 테스트할 수 없습니다. 연주를 멈춘 뒤 다시 시도하세요.')
       return
@@ -434,6 +460,8 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       return
     }
     setTestError(null)
+    showTestResetNotice(null)
+    testResetLimiterRef.current = null
     testRunConfigRef.current = run.config
     try {
       await testControl.start()
@@ -446,7 +474,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       setTestError(engineErrorMessage(err))
     }
-  }, [isNativeMode, engineInUse, testControl, prepareRunConfig, setTestNotice])
+  }, [isNativeMode, engineInUse, testControl, prepareRunConfig, setTestNotice, showTestResetNotice])
 
   useEffect(() => {
     if (!isTesting) return
@@ -458,7 +486,34 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       inFlight = true
       try {
         const s = await engineStats()
-        if (!cancelled) setTestStats(s)
+        if (cancelled) return
+        // 드라이버 리셋 요청(ASIO 제어판에서 버퍼 크기 변경 등, 엔진 deviceReset): 버퍼를 맞춰 보는 가장 흔한 자리가 이 테스트
+        // 모니터다 — 합주와 같은 규칙으로 같은 장치만 다시 연다(#261 재리뷰 L4). 다시 여는 동안은 옛 통계를 그대로 둔다
+        if (s?.deviceReset) {
+          if (testControl.isRestarting) return
+          // 문구·대기·상한은 지연 묶음(웹 첫 화면에 싣지 않는다). 못 받으면 다음 주기에 다시 온다(엔진은 deviceReset을 계속 보고한다)
+          const reset = await loadTestMonitorReset()
+          if (cancelled || testControl.isRestarting) return
+          // 끝없이 다시 열지 않는다: 짧은 시간에 너무 자주 오면 멈추고 알린다(#263 리뷰 L-3)
+          const limiter = (testResetLimiterRef.current ??= new reset.TestResetLimiter())
+          if (!limiter.allow(Date.now())) {
+            await stopTest()
+            setTestError(reset.TEST_RESET_REPEAT_MESSAGE)
+            return
+          }
+          showTestResetNotice(reset.TEST_RESET_RESTARTING_MESSAGE)
+          const r = await testControl.restart(reset.TEST_RESET_RETRY_DELAYS_MS)
+          if (r === 'restarted') showTestResetNotice(reset.TEST_RESET_RESTARTED_MESSAGE, reset.TEST_RESET_NOTICE_MS)
+          else if (r === 'failed') {
+            showTestResetNotice(null)
+            setIsTesting(false)
+            setTestStats(null)
+            setTestError(reset.TEST_RESET_FAILED_MESSAGE)
+          }
+          // 'cancelled'(다시 여는 사이 테스트를 끔·설정 변경·합주 시작): 그 정지(stopTest)가 안내를 이미 지웠다(#263 리뷰 L-1)
+          return
+        }
+        setTestStats(s)
       } catch {
         // 무시
       } finally {
@@ -469,7 +524,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       cancelled = true
       clearInterval(timer)
     }
-  }, [isTesting])
+  }, [isTesting, testControl, stopTest, showTestResetNotice])
 
   // 합주 엔진이 시작되면 테스트 중지
   useEffect(() => {
@@ -481,8 +536,9 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     localDirtyRef.current = true
     gateRef.current.markEdited()
     setConfig(next)
-    // 테스트 중 설정이 바뀌면 이전 설정의 테스트는 의미가 없으므로 중지
-    if (testControl.isActive || testControl.isStarting) void stopTest()
+    // 테스트 중 설정이 바뀌면 이전 설정의 테스트는 의미가 없으므로 중지. 드라이버 리셋으로 다시 여는 대기 중에도(둘 다 false인 창)
+    // 멈춘다 — 안 그러면 옛 설정으로 다시 켜진다(#263 리뷰 L-2)
+    if (testControl.isActive || testControl.isStarting || testControl.isRestarting) void stopTest()
   }, [stopTest, testControl])
 
   const updateConfig = useCallback((patch: Partial<EngineConfig>): boolean => {
@@ -530,7 +586,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     isSaving,
     migrated,
     supportedDrivers,
-    fallbackNotice: testNotice && isTesting ? testNotice : previewNotice,
+    fallbackNotice: (isTesting ? (testResetNotice ?? testNotice) : null) ?? previewNotice,
     missingDevices,
     prepareRunConfig,
     engineThreadPolicy,
