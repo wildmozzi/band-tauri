@@ -63,6 +63,7 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
           {isAuthor && (
             <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button
+                className="community-touch"
                 onClick={onEdit}
                 style={{
                   padding: '6px var(--space-3)',
@@ -78,6 +79,7 @@ export function PostArticle({ post, isAuthor, onEdit, onDelete, onLike }: PostAr
                 수정
               </button>
               <button
+                className="community-touch"
                 onClick={onDelete}
                 style={{
                   padding: '6px var(--space-3)',
