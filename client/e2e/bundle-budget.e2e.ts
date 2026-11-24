@@ -23,6 +23,9 @@ const PERFORMER_UI_MARKERS: [chunk: RegExp, marker: string][] = [
   [/^performerUi-.*\.js$/, 'recording-folder'],
   [/^performerUi-.*\.js$/, 'engine-local-stats'],
   [/^EchoMeasure-.*\.js$/, 'echo-measure-btn'],
+  // 내 채널 진단 줄 문구(engineDiagFormat — 송신 큐·릴레이, #250): EngineDiagLines와 함께 지연 묶음에만
+  [/^performerUi-.*\.js$/, '송신 큐 p99'],
+  [/^performerUi-.*\.js$/, '토큰 만료'],
 ]
 
 /** 런타임 묶음 모듈의 고유 문자열(mixBridge 워클릿 이름, sessionLogic 액션, performSession 문구·신호) */

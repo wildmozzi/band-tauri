@@ -169,7 +169,7 @@ export function PeerMixerChannel({
         {state === 'failed' ? (
           <span className="peer-failed-hint">{peerPathHint(state, ps?.path, engineStats?.relay, relayError)}</span>
         ) : ps ? (
-          <span className="latency-text engine-peer-stats" title={peerStatsTitle(ps)}>
+          <span className="latency-text engine-peer-stats" title={peerStatsTitle(ps, engineStats?.txFrameMs)}>
             RTT {formatMs(ps.rttMs)} · 지터 {formatMs(ps.jitterMs, 1)} · 버퍼 {formatMs(ps.bufferMs)} · 손실 {ps.lossPct.toFixed(1)}%
             {' · '}{pathLabel(ps.path) ?? '경로 탐색 중'}
             {ps.path === 'relay' && (

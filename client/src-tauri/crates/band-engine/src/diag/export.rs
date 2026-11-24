@@ -17,7 +17,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use super::mask::mask_text;
-use super::timeline::{session_placement, session_policy, to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
+use super::timeline::{session_nat, session_placement, session_policy, session_self, session_send_queue, to_jsonl, Sample, Timeline, SAMPLE_INTERVAL_MS};
 use super::Diagnostics;
 use band_dsp::config::EngineConfig;
 use crate::engine::device::DeviceInfo;
@@ -28,7 +28,9 @@ pub(crate) const LOG_BUDGET_BYTES: usize = 2 * 1024 * 1024;
 
 /// `meta.json`의 `format`. 1 → 2(P1-21a): 타임라인 `corePlacement`가 비율 객체(#191)에서 구간 표본 수 `[P, E, LP-E]`(#203)로
 /// 바뀌었고, `engine.json` `lastStats.corePlacement`는 늘 세션 시작부터 누적이다.
-pub(crate) const FORMAT: u32 = 2;
+/// 2 → 3(진단 값 노출): 피어 `rebuffers`·`rebufferMs`(0이면 키 없음 — 3부터 키 없음 = 0), `entryLeadMs`, 줄의 `sendQueueP99Ms`·`nat`
+/// (값이 바뀐 줄에만)이 생겼다. 결과표는 3 미만이면 리버퍼 실측이 없다고 보고 기존 추정을 쓴다.
+pub(crate) const FORMAT: u32 = 3;
 
 pub(crate) const README_TEXT: &str = "Band 진단 자료 (P2-5)
 
@@ -46,6 +48,14 @@ timeline.jsonl  1초 간격 엔진 통계(최근 최대 60분): 백엔드·장�
                 threadPolicy(Windows)는 워커·수신 스레드에 시작 때 건 코어 배치 정책(실험 옵션, 기본 꺼짐)의 결과입니다
                 (highQos = 전원 조절 끄기, pCores = 고성능 코어 집합에 두기; pending/off/applied/failed/skipped).
                 값이 바뀐 줄(세션 첫 줄)에만 있고, engine.json lastStats에는 늘 있습니다.
+                rebuffers·rebufferMs(피어별 누적)는 상대 소리가 끊겨 지터 버퍼를 다시 채운 횟수와 그동안 소리가
+                없던 시간(ms)입니다. 0이면 줄에 없습니다. entryLeadMs는 내 입장(연주 시작)에서 엔진에 그 피어를
+                추가하기까지(ms)이고 entryLeadMs + firstAudioMs가 \"입장 후 첫 소리\"입니다. 내가 들어올 때 이미 있던
+                연주자에만 있습니다(뒤에 들어온 연주자·다시 추가한 피어는 없음 — 그 사람의 입장은 그 사람의 zip에).
+                sendQueueP99Ms(송신 큐 지연 p99, ms)와 nat(STUN으로 추정한 NAT 매핑: open/independent/dependent/
+                unknown — independent가 콘형, dependent가 대칭형)은 값이 바뀐 줄에만 있습니다.
+                selfPeer는 내보낸 사람 자신의 가명(id-xxxxxxxx)입니다. 다른 연주자 zip의 peer 값과 같은 가명이라
+                결과표가 같은 합주의 zip끼리 짝을 맞춥니다. 값이 바뀐 줄(세션 첫 줄)에만 있습니다.
 logs/           최근 앱 로그(마스킹됨)
 
 넣지 않거나 가린 것
@@ -219,6 +229,10 @@ pub fn build(
             s.core_placement = session_placement(tl, s.session);
             // 스레드 정책은 값이 바뀐 줄에만 있다 — 마지막 샘플에는 그 세션의 값을 채운다(P1-21 2단계).
             s.thread_policy = session_policy(tl, s.session);
+            // NAT 추정·송신 큐 p99도 값이 바뀐 줄에만 있다(format 3) — 그 세션의 마지막 값을 채운다.
+            s.nat = session_nat(tl, s.session);
+            s.self_peer = session_self(tl, s.session);
+            s.send_queue_p99_ms = s.send_queue_p99_ms.or_else(|| session_send_queue(tl, s.session));
             s
         });
         (TimelineInfo::of(tl), to_jsonl(tl), last, last_config.cloned())
@@ -234,7 +248,11 @@ pub fn build(
     let engine = EngineInfo {
         active: current.is_some(),
         last_stats: match &current {
-            Some(c) => Some(Sample::from_stats(now_ms, c.network, c.session, &c.stats)),
+            Some(c) => Some(Sample {
+                nat: c.nat,
+                self_peer: c.self_peer.as_deref().map(super::mask::pseudonymize),
+                ..Sample::from_stats(now_ms, c.network, c.session, &c.stats)
+            }),
             None => last_sample,
         },
         config: current.map(|c| c.config).or(last_config),
@@ -508,7 +526,7 @@ mod tests {
         let d = Diagnostics::new(10);
         let mut stats = EngineStats::stopped();
         stats.running = true;
-        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 3, conn_events: vec![] }));
+        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 3, conn_events: vec![], nat: None, self_peer: None }));
         d.record(2_000, None);
         let dir = std::env::temp_dir().join(format!("band-diag-golden-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -530,8 +548,11 @@ mod tests {
             // P1-21a: README에 corePlacement 설명, meta.format 1 → 2(의도한 변경 — engine.json·timeline.jsonl 해시는 그대로)
             // P2-17h: README에 lossShape 설명 한 줄(의도한 변경 — 피어가 없는 입력이라 engine.json·timeline.jsonl 해시는 그대로)
             // P1-21 2단계: README에 threadPolicy 설명(의도한 변경 — 정지 상태 입력이라 timeline.jsonl 해시는 그대로)
-            ("README.txt", "04110be1a45d916123fb515445c7b49da26e256a3aef8e8c9818cb335519734e"),
-            ("meta.json", "867d233d696502bd59c5633c283b652e9262fafe3ea585ca3bbc247a158a6aee"),
+            // 진단 값 노출(format 3): README에 rebuffers·entryLeadMs·sendQueueP99Ms·nat 설명, meta.format 2 → 3(의도한 변경 —
+            // 정지 상태 입력이라 새 키가 없어 engine.json·timeline.jsonl 해시는 그대로)
+            // #250 리뷰: README에 selfPeer 설명·entryLeadMs 범위(시작 때 있던 연주자만)·logs/ 줄 맞춤(의도한 변경 — 해시는 README만)
+            ("README.txt", "e1d1e54c61a0c8bbb7eb09e5d203e3f6f4790bfff7e2705f53021235d95d085e"),
+            ("meta.json", "8ca5f2597b978ae5133a12ba0f4ebe2bb1dbb0401e669c0621b65b87c6d325c5"),
             // P2-17e: engine.json의 config에 resampleQuality(null), stats에 resampler(null)가 생김(의도한 변경)
             // P1-21 2단계: engine.json의 config에 threadPolicy(null)가 생김(의도한 변경)
             ("engine.json", "6f4c1882c00322211eedf58bc3b14dc627b1be94dd6fe9b8e77336bdd4378994"),
@@ -551,7 +572,7 @@ mod tests {
         let mut stats = EngineStats::stopped();
         stats.running = true;
         let cfg = EngineConfig { buffer_size: 256, ..EngineConfig::default() };
-        let cur = EngineSnapshot { stats, config: cfg, network: false, session: 8, conn_events: vec![] };
+        let cur = EngineSnapshot { stats, config: cfg, network: false, session: 8, conn_events: vec![], nat: None, self_peer: None };
         let app = AppInfo { name: "Band".into(), version: "0.1.0".into() };
         let bytes = build(Some(cur), Err("열거 실패".into()), &d, app, None, 5_000).unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -569,7 +590,7 @@ mod tests {
     }
 
     /// 엔진이 막 사라지고 정지 표시 전(최대 1초)에 내보내면 마지막 샘플이 실행 중 샘플이다. 그래도 `lastStats.corePlacement`는
-    /// 구간 값이 아니라 세션 시작부터 누적이다(#203 리뷰 L2). 정지 표시가 마지막이어도 직전 세션 누적이 들어간다. meta.format 2.
+    /// 구간 값이 아니라 세션 시작부터 누적이다(#203 리뷰 L2). 정지 표시가 마지막이어도 직전 세션 누적이 들어간다. meta.format 3.
     #[test]
     fn last_stats_core_placement_is_cumulative_after_engine_gone() {
         use crate::engine::report::EngineStats;
@@ -578,7 +599,7 @@ mod tests {
             let mut stats = EngineStats::stopped();
             stats.running = true;
             stats.core_placement = Some(CorePlacementStats { worker: ThreadPlacement::from_counts(w[0], w[1], w[2]), net_recv: Some(ThreadPlacement::from_counts(w[0], 0, 0)) });
-            EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 4, conn_events: vec![] }
+            EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 4, conn_events: vec![], nat: None, self_peer: None }
         };
         let d = Diagnostics::new(10);
         d.record(1_000, Some(at([100, 0, 0])));
@@ -595,7 +616,7 @@ mod tests {
         // 정지 표시 전: 마지막 줄은 구간 값 [50, 30, 20]이지만 lastStats는 누적
         let (cp, format) = last(&d);
         assert_eq!(cp, serde_json::json!({"worker": [150, 30, 20], "netRecv": [150, 0, 0]}));
-        assert_eq!(format, 2);
+        assert_eq!(format, 3);
         // 정지 표시 뒤
         d.record(3_000, None);
         assert_eq!(last(&d).0, serde_json::json!({"worker": [150, 30, 20], "netRecv": [150, 0, 0]}));
@@ -613,7 +634,7 @@ mod tests {
         old.remote_frame_ms = None;
         old.remote_input_buffer_ms = None;
         stats.peers.push(old);
-        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 1, conn_events: vec![] }));
+        d.record(1_000, Some(EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 1, conn_events: vec![], nat: None, self_peer: None }));
         let app = AppInfo { name: "Band".into(), version: "0.1.0".into() };
         let bytes = build(None, Ok(Vec::new()), &d, app, None, 2_000).unwrap();
         let mut z = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();

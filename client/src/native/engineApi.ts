@@ -242,7 +242,7 @@ export interface PeerStats {
 export interface LossShapeStats {
   /** 현재 수신 패킷 프레임(ms). 연속 길이(패킷) × 이 값 ≈ ms */
   frameMs: number
-  /** 끝내 안 온 seq의 연속 길이 히스토그램(버킷 1, 2, 3–4, 5–8, 9–16, 17+ 패킷 — engineDiagFormat LOSS_RUN_BUCKETS). 최근 256패킷 안의 손실은 아직 확정 전이라 없다 */
+  /** 끝내 안 온 seq의 연속 길이 히스토그램(버킷 1, 2, 3–4, 5–8, 9–16, 17+ 패킷 — peerDiagFormat LOSS_RUN_BUCKETS). 최근 256패킷 안의 손실은 아직 확정 전이라 없다 */
   lossRuns: number[]
   /** lossRuns 17+ 버킷 연속들의 패킷 수 합(긴 버스트 손실 수를 정확히). 옛 엔진에는 없다 */
   lossLongPkts?: number
@@ -370,6 +370,8 @@ export interface EngineStats {
   xruns: number
   /** 로컬 처리 지연(GOAL 1절 정의: 입력 버퍼+프레임+출력 링+출력 버퍼). 콜백 구동 믹스라 출력 링은 0 */
   estLatencyMs: number
+  /** 내 소리의 송신 프레임(ms, 설정 frameMs — 모든 피어에게 같다. 코덱은 피어별 txCodec). 정지 상태면 0, 옛 엔진이면 없음 */
+  txFrameMs?: number
   /** 모니터 경로(내 입력 → 내 출력) 지연 */
   monitorLatencyMs?: number
   /** 오디오 스트림 에러 누적(비치명 포함) */
@@ -666,8 +668,13 @@ export function engineTestStop(): Promise<null> {
   return invoke<null>('engine_test_stop')
 }
 
-export function engineAddPeer(peerId: string, descriptor: LocalDescriptor): Promise<null> {
-  return invoke<null>('engine_add_peer', { peerId, descriptor })
+/**
+ * 피어 추가. `entryLeadMs`(선택): 내 입장(연주 시작) → 이 호출까지(ms) — 내가 시작할 때 이미 있던 연주자에만 주고, 뒤에 온 연주자·재추가는
+ * null(모름, 0과 다르다). 엔진은 진단 타임라인에만 남긴다(결과표 GOAL 3-3 "입장 후 3초 이내 소리" = entryLeadMs + firstAudioMs). 이 호출은 엔진
+ * `blocking` 큐에 들어가기 전에 재므로, 큐 대기(보통 수 ms)는 합에 없다(#250 L5). 옛 엔진은 모르는 인자를 무시한다.
+ */
+export function engineAddPeer(peerId: string, descriptor: LocalDescriptor, entryLeadMs?: number | null): Promise<null> {
+  return invoke<null>('engine_add_peer', { peerId, descriptor, entryLeadMs: entryLeadMs ?? null })
 }
 
 /**

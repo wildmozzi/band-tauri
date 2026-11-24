@@ -1131,7 +1131,7 @@ fn first_connect(e: &Engine) -> Option<(ConnOutcome, u32)> {
 /// 진단 타임라인(diag zip의 `timeline.jsonl`)에 연결 결과가 남는지: 엔진 스냅샷을 진단 기록에 두 번 넣고 JSONL을 본다.
 fn diag_jsonl(e: &Engine) -> String {
     let d = Diagnostics::new(10);
-    let snap = |e: &Engine| EngineSnapshot { stats: e.stats(), config: e.config().clone(), network: true, session: 1, conn_events: e.conn_events() };
+    let snap = |e: &Engine| EngineSnapshot { stats: e.stats(), config: e.config().clone(), network: true, session: 1, conn_events: e.conn_events(), nat: e.nat_probe(), self_peer: e.self_peer_id() };
     d.record(1, Some(snap(e)));
     d.record(2, Some(snap(e)));
     d.with_timeline(|tl, _, _| to_jsonl(tl))
@@ -1178,6 +1178,20 @@ fn port_restricted_cone_pair_connects_direct_and_logs_result() {
         assert!(jsonl.contains(r#""phase":"connect","result":"public""#), "{name} 진단 타임라인에 연결 결과 없음: {jsonl}");
         assert_eq!(jsonl.matches(r#""phase":"connect""#).count(), 1, "같은 이벤트는 한 번만 기록");
     }
+    // #250 L1': 결과표 3-1은 "A의 selfPeer == B zip의 피어 가명"으로 zip 짝을 맞춘다 — 실제 엔진 경로에서 그 동일성을 확인한다.
+    let lines = |e: &Engine| -> Vec<serde_json::Value> { diag_jsonl(e).lines().map(|l| serde_json::from_str(l).unwrap()).collect() };
+    let (la, lb) = (lines(&p.a), lines(&p.b));
+    let self_of = |ls: &[serde_json::Value]| ls.iter().find_map(|v| v["selfPeer"].as_str().map(str::to_string)).expect("selfPeer 없음");
+    let seen_by = |ls: &[serde_json::Value], key: &str| -> Vec<String> {
+        ls.iter().flat_map(|v| v[key].as_array().cloned().unwrap_or_default()).filter_map(|x| x["peer"].as_str().map(str::to_string)).collect()
+    };
+    for (me, mine, other) in [("A", &la, &lb), ("B", &lb, &la)] {
+        let s = self_of(mine);
+        assert!(s.starts_with("id-") && !s.contains("alice") && !s.contains("bob"), "{me} selfPeer는 가명: {s}");
+        assert!(seen_by(other, "peers").iter().all(|x| *x == s) && !seen_by(other, "peers").is_empty(), "{me} selfPeer {s} ≠ 상대 피어 표 {:?}", seen_by(other, "peers"));
+        assert!(seen_by(other, "conn").iter().all(|x| *x == s) && !seen_by(other, "conn").is_empty(), "{me} selfPeer {s} ≠ 상대 연결 기록 {:?}", seen_by(other, "conn"));
+    }
+    assert_ne!(self_of(&la), self_of(&lb));
     println!(
         "콘↔콘: A {:?} B {:?}, NAT 필터 폐기 A {} B {}",
         first_connect(&p.a),

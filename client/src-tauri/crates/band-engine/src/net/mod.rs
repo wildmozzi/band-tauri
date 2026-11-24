@@ -6,6 +6,7 @@ pub mod peer;
 pub(crate) mod qos;
 pub(crate) mod relay;
 pub(crate) mod stun;
+pub use stun::NatProbe;
 pub(crate) mod txlat;
 mod control_loop;
 mod recv_loop;
@@ -157,6 +158,8 @@ pub struct NetShared {
     qos_stats: Mutex<qos::QosStats>,
     /// 피어별 연결 시도 → 결과(P1-18). 제어 스레드가 쓰고 진단 스냅샷이 읽는다.
     conn_log: Mutex<connlog::ConnLog>,
+    /// 시작 때 STUN 결과로 정한 NAT 매핑 추정(불변, 진단 3-1).
+    nat: stun::NatProbe,
     /// 내 입력 장치 버퍼(µs, 0 = 모름)를 읽는 함수(P2-8b). 엔진이 시작 때 한 번 정하고, 제어 스레드가 Ping마다 불러
     /// 입력 버퍼 블록에 싣는다. 없으면(엔진 없는 시험·도구) 블록을 싣지 않는다.
     input_buffer_us: std::sync::OnceLock<InputBufferFn>,
@@ -248,7 +251,11 @@ impl Net {
         }
         // 두 서버에 동시에 질의(전체 1.5초 상한)
         let servers: Vec<String> = opts.stun_servers.iter().take(2).cloned().collect();
-        for (server, a) in stun::query_many(&socket, &servers, Duration::from_millis(1500), opts.cancel.as_deref()) {
+        let stun_found = stun::query_many_from(&socket, &servers, Duration::from_millis(1500), opts.cancel.as_deref());
+        // NAT 매핑 추정(진단 3-1): 두 서버가 본 공인 주소가 같은지. 이미 받은 응답만 쓴다(추가 질의 없음).
+        let nat = stun::classify_nat(port, &lan_addresses(), &stun_found.iter().map(|(_, s, a)| (*s, *a)).collect::<Vec<_>>());
+        log::info!("NAT 매핑 추정: {:?} (STUN 응답 {}개)", nat.mapping, nat.responses);
+        for (server, _, a) in stun_found {
             let s = a.to_string();
             log::info!("STUN {server}: 공인 주소 {s}");
             if !candidates.iter().any(|c| c.addr == s) {
@@ -295,6 +302,7 @@ impl Net {
             send_latency: txlat::SendLatency::new(),
             qos_stats: Mutex::new(qos::QosStats::default()),
             conn_log: Mutex::new(connlog::ConnLog::default()),
+            nat,
             recv_prio: Default::default(),
             recv_placement: Default::default(),
             recv_policy: crate::sys::placement::PolicySlot::requested(thread_policy),
@@ -485,6 +493,16 @@ impl Net {
     /// 최근 연결 이벤트(P1-18, 오래된 것부터, 최대 `connlog::LOG_CAPACITY`개). 진단 기록용.
     pub(crate) fn conn_events(&self) -> Vec<connlog::ConnEvent> {
         self.shared.conn_log.lock().events()
+    }
+
+    /// 시작 때 STUN 결과로 정한 NAT 매핑 추정(진단 기록용, 결과표 3-1).
+    pub(crate) fn nat_probe(&self) -> stun::NatProbe {
+        self.shared.nat
+    }
+
+    /// 시작 때 받은 내 peerId(진단 기록용 — 진단은 가명으로만 남긴다).
+    pub(crate) fn local_peer_id(&self) -> &str {
+        &self.shared.local_peer_id
     }
 
     /// 직전 창의 송신 큐 지연(`EngineStats.sendQueue`).
