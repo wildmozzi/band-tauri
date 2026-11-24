@@ -93,6 +93,8 @@ client/src/
 
 `room`과 `rooms`를 나눈 이유: 방 **카탈로그**(DB의 rooms 행을 만들고 고치는 일)와 방 **안의 실시간 세션**(WS·엔진·WebRTC)은 바뀌는 이유와 속도가 전혀 다르다. 세션 쪽이 카탈로그를 쓰고(방 상세 조회, 정원 표시), 반대 방향은 없다.
 
+오디오 설정 저장 위치(`settings/AudioSettingsContext`·`deviceLocalSettings`): 계정(`profiles.audio_settings`, 로컬 캐시 `band_engine_config_v2`)에는 코덱·프레임·모노/스테레오·지터·리샘플러만 올린다. PC마다 다른 값 — 드라이버·장치 id·입력 채널·장치 버퍼(`DEVICE_LOCAL_KEYS`, `band_device_settings_v1`, P2-27 후속)와 스레드 정책(`band_thread_policy_v1`, #249) — 은 그 PC의 localStorage에만 두고 계정 값으로 덮어쓰지 않는다. 같은 PC에서 계정을 바꿔 로그인해도 장치 설정은 그대로다. 이 PC에 장치 저장값이 없을 때만(이 변경 전 설정·새 PC) 한 번 초기값을 정한다 — 옛 로컬 캐시의 장치 값(이 PC에서 마지막으로 쓴 값)이 먼저, 캐시도 없으면(새로 설치) 계정에 남은 옛 장치 값을 가져오고, 그 장치가 이 PC에 없으면 엔진 시작 때 이번 실행만 기본 장치로 넘어간다(`native/deviceFallback`, #251). 설정 화면은 입력 섹션 위에 "이 PC에만 저장" 한 줄을 보인다.
+
 `auth`가 프로필 데이터(profiles 테이블)를 갖는 이유: 회원가입이 프로필 행을 만들고, 설정(오디오 설정 저장)·합주실(방장 닉네임)·프로필 화면이 모두 그 행을 읽는다. 프로필 **화면**만 `profile`에 둔다. 첫 화면(내비게이션)이 쓰는 프로필 사진 URL도 `auth`에 둔다 — 첫 화면이 지연 라우트 기능(`profile`)의 index.ts를 정적으로 import하면 Vite 8(Rolldown)은 그 화면 전체를 첫 묶음에 싣는다(P3-20b, `e2e/bundle-budget`이 검사). 데이터까지 `profile`에 두면 auth ↔ profile 순환이 생긴다(프로필 화면은 로그인 가드를 쓴다).
 
 ## 3. 상태 관리 원칙

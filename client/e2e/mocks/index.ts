@@ -47,9 +47,10 @@ export async function installMocks(context: BrowserContext): Promise<MockBackend
   const violations: Violations = []
   const appHost = new URL(E2E_BASE_URL).host
 
-  // 1) guard (가장 먼저 = 가장 나중에 평가)
+  // 1) guard (가장 먼저 = 가장 나중에 평가). blob:·data:는 페이지 안 자료라 밖으로 나가지 않는다 — WebKit은 blob: 요청도 route에 넘기고
+  //    호스트가 비어 있어 외부로 오인했다(이미지 미리보기, #253)
   await context.route(
-    url => url.host !== appHost && !MOCKED_HOSTS.has(url.host),
+    url => url.protocol !== 'blob:' && url.protocol !== 'data:' && url.host !== appHost && !MOCKED_HOSTS.has(url.host),
     route => {
       violations.push(`외부 요청 차단: ${route.request().method()} ${route.request().url()}`)
       return route.abort('blockedbyclient')

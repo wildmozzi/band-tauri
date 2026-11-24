@@ -254,7 +254,10 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
         </div>
       )}
 
-      {/* 드라이버 + 장치 */}
+      {/* 드라이버 + 장치. 장치 쪽 값은 PC마다 달라 이 PC에만 저장한다(P2-27 후속) — 고급(스레드 정책) 표기와 같은 말로 */}
+      <p className="setting-hint" data-testid="device-local-note">
+        드라이버·장치·입력 채널·장치 버퍼는 PC마다 달라 계정으로 다른 PC에 따라가지 않고 이 PC에만 저장됩니다(코덱·프레임·모노/스테레오·지터 버퍼는 계정에 저장). 그래서 프리셋 표시는 PC마다 다를 수 있습니다.
+      </p>
       <section className="settings-section">
         <h3>입력</h3>
         <div className="settings-row">

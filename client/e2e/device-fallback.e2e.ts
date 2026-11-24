@@ -4,12 +4,13 @@
  * 실제 엔진은 돌지 않는다(가짜 Tauri). 실제 인터페이스를 뽑고 시작하는 확인은 [사람] 항목.
  */
 import type { DeviceInfo, EngineConfig, EngineStats } from '../src/native/engineApi'
-import { DEFAULT_ENGINE_CONFIG, STORED_SETTINGS_VERSION } from '../src/native/engineConfig'
+import { DEFAULT_ENGINE_CONFIG } from '../src/native/engineConfig'
 import { BOB, ROCK_ROOM } from './fixtures'
 import { installFakeTauri, tauriCallArgs } from './mocks/tauri'
 import { expect, test } from './test'
 
-const STORAGE_KEY = 'band_engine_config_v2'
+/** 장치 쪽 값(드라이버·장치·입력 채널·버퍼)은 이 PC에만 저장한다(P2-27 후속) */
+const STORAGE_KEY = 'band_device_settings_v1'
 const SAVED_IN = 'wasapi::Focusrite USB Input'
 const SAVED_OUT = 'wasapi::Focusrite USB Output'
 
@@ -25,7 +26,7 @@ test('저장된 장치가 없는 PC에서 연주 시작: 이번 실행만 기본
   const saved: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, inputDriver: 'wasapiShared', outputDriver: 'wasapiShared', inputDevice: SAVED_IN, outputDevice: SAVED_OUT }
   await page.addInitScript(
     ([key, stored]: [string, string]) => localStorage.setItem(key, stored),
-    [STORAGE_KEY, JSON.stringify({ version: STORED_SETTINGS_VERSION, engine: saved })] as [string, string],
+    [STORAGE_KEY, JSON.stringify(saved)] as [string, string],
   )
   await installFakeTauri(page, {
     engine_supported_drivers: ['wasapiExclusive', 'wasapiShared'],
@@ -50,8 +51,8 @@ test('저장된 장치가 없는 PC에서 연주 시작: 이번 실행만 기본
   await expect(banner).toContainText("저장된 장치 'Focusrite USB Input', 'Focusrite USB Output'를 찾을 수 없어 기본 장치로 시작했습니다.")
   await expect(banner).toContainText('저장된 설정은 그대로 둡니다')
 
-  // 저장된 설정(로컬 캐시)은 그대로
-  const stored = await page.evaluate((key) => (JSON.parse(localStorage.getItem(key) ?? 'null') as { engine: EngineConfig }).engine, STORAGE_KEY)
+  // 저장된 설정(이 PC의 장치 설정)은 그대로
+  const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? 'null') as EngineConfig, STORAGE_KEY)
   expect(stored).toMatchObject({ inputDevice: SAVED_IN, outputDevice: SAVED_OUT })
 
   // 닫으면 사라진다
@@ -82,7 +83,7 @@ test('테스트 모니터를 먼저 켜도 합주실 띠가 뜬다 — 테스트
   const saved: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, inputDriver: 'wasapiShared', outputDriver: 'wasapiShared', inputDevice: SAVED_IN, outputDevice: SAVED_OUT }
   await page.addInitScript(
     ([key, stored]: [string, string]) => localStorage.setItem(key, stored),
-    [STORAGE_KEY, JSON.stringify({ version: STORED_SETTINGS_VERSION, engine: saved })] as [string, string],
+    [STORAGE_KEY, JSON.stringify(saved)] as [string, string],
   )
   await installFakeTauri(page, {
     engine_supported_drivers: ['wasapiExclusive', 'wasapiShared'],

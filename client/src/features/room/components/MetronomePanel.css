@@ -118,3 +118,12 @@
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* 메트로놈 동기 진단 줄(TEST-SESSION 3.5절 5번): 숫자가 바뀌어도 폭이 흔들리지 않게 */
+.metronome-sync {
+  font-variant-numeric: tabular-nums;
+}
+
+.metronome-sync.warn {
+  color: var(--warning);
+}
