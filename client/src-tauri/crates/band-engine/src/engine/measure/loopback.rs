@@ -11,8 +11,13 @@ use serde::Serialize;
 
 use super::analysis::{analyze_loopback, chirp, ms, summarize, verdict_of, LoopbackRun, MeasureVerdict, CANCELLED, MAX_LOOPBACK_MS};
 use crate::engine::device::StreamInfo;
-use crate::engine::rt::{MeasureEnds, MeasureShared};
+use crate::engine::rt::{CaptureSample, MeasureEnds, MeasureShared};
 use band_dsp::stats::AudioCounters;
+
+// 측정 스레드가 녹음 링(`MeasureEnds::capture`)을 ringbuf `Consumer::clear`로 비운다(`run`·`run_inner`). ringbuf 0.4.8의
+// `skip`/`clear`는 원소 `Drop`이 panic하면 double free가 난다(RUSTSEC-2026-0293, 0.5.2+에서 수정) — 원소에 Drop 글루가 없어야
+// 그 경로가 닿지 않는다. 링 선언과 이 단언이 같은 별칭을 쓴다(docs/overhaul/deps-audit-2026-11-18.md 6번).
+const _: () = assert!(!core::mem::needs_drop::<CaptureSample>());
 
 /// 측정 스레드 대기 중 카운터·벽시계를 읽어 카운터 원점(`벽시계 − 프레임/레이트`의 최솟값)을 잡는다.
 /// 카운터를 먼저 읽고 시각을 나중에 읽는다(관찰된 카운터 값보다 이른 시각을 쓰지 않게).
