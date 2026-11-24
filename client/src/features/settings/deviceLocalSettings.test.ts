@@ -39,6 +39,17 @@ describe('기기별 스레드 정책 저장(#245 재리뷰 L4, 기본값 P1-21 3
     localStorage.setItem(LEGACY_THREAD_POLICY_STORAGE_KEY, '{')
     expect(loadDeviceThreadPolicy()).toEqual(DEFAULT)
   })
+  it('P 코어 정책(선호·조건부 고정)도 이 PC에 저장·복원된다. 2단계 저장값(preferPCores)은 고정으로 읽힌다', () => {
+    saveDeviceThreadPolicy({ highQos: true, preferPCores: false, pCoreMode: 'adaptive' })
+    expect(JSON.parse(localStorage.getItem(THREAD_POLICY_STORAGE_KEY)!)).toEqual({ highQos: true, preferPCores: false, pCoreMode: 'adaptive' })
+    expect(loadDeviceThreadPolicy()).toEqual({ highQos: true, preferPCores: false, pCoreMode: 'adaptive' })
+    localStorage.setItem(THREAD_POLICY_STORAGE_KEY, JSON.stringify({ highQos: true, preferPCores: true }))
+    expect(loadDeviceThreadPolicy()).toEqual({ highQos: true, preferPCores: true })
+    // 옛 키(v1)의 고정도 옮긴다
+    localStorage.clear()
+    localStorage.setItem(LEGACY_THREAD_POLICY_STORAGE_KEY, JSON.stringify({ highQos: false, preferPCores: true }))
+    expect(loadDeviceThreadPolicy()).toEqual({ highQos: true, preferPCores: true })
+  })
   it('새 키(v2)가 있으면 옛 키는 보지 않는다 — v2에서 끈 값은 사용자가 끈 것', () => {
     localStorage.setItem(LEGACY_THREAD_POLICY_STORAGE_KEY, JSON.stringify({ highQos: true, preferPCores: true }))
     saveDeviceThreadPolicy({ highQos: false, preferPCores: false })

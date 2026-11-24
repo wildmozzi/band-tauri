@@ -6,7 +6,9 @@ pub(crate) mod alloc;
 pub(crate) mod cpu;
 // 파일 바꿔 넣기(임시 파일 + sync + rename): 설정·진단 내보내기.
 pub(crate) mod fs;
-// 하이브리드 CPU 코어 배치 기록(P1-21).
+// 조건부 고정(P 코어 정책 3안)의 판단 — 순수 상태 기계와 원자값(P1-21 3단계 ②). OS 호출은 `placement`가 한다.
+pub(crate) mod pin_adapt;
+// 하이브리드 CPU 코어 배치 기록·스레드 정책(P1-21).
 pub(crate) mod placement;
 pub(crate) mod prio;
 pub mod time;

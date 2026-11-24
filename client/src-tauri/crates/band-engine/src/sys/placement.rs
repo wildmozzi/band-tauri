@@ -22,18 +22,31 @@
 //!   부하(DAW 등 다른 MMCSS "Pro Audio" 스레드)가 채우면 정책이 없을 때보다 밀릴 수 있다 — 그 상황은 재지 않았다.
 //!   하이브리드가 아니거나 물리 P 코어가 4개 미만이면 걸지 않는다(`skipped`).
 //!
-//! 기본값(P1-21 3단계, 사용자 결정 2026-11-21): **HighQoS는 켬, P 코어 CPU set은 끔**(실험 옵션). 바꾸는 길은 둘: 엔진 설정
-//! `EngineConfig.threadPolicy`(오디오 설정 토글 — 없으면 기본값)와 환경변수 `BAND_THREAD_POLICY` = `off` | `highqos` |
-//! `pcores` | `both`(있으면 설정보다 우선 — 제품 빌드에서도 읽는다. 값은 **정확히 그 조합**이다: `off`는 기본 켬인 HighQoS도
-//! 끄고, `pcores`는 HighQoS 없이 P 코어만 건다). 측정: `docs/overhaul/core-placement-2026-11-20.md`.
+//! P 코어 정책은 넷 중 하나다(`PCoreMode`, P1-21 3단계 ② — "고정" 대신 "우선 배치"가 되는 방식을 옵션으로 넣어 교차 측정한다):
+//! - `Off`: 걸지 않는다(기본).
+//! - `Pin`(고정): 위 P 코어 CPU set. 2단계의 방식.
+//! - `Prefer`(선호 힌트, 2안): `SetThreadIdealProcessorEx`로 P 코어 하나를 선호 프로세서로 알린다. 문서상 "스케줄러에 주는
+//!   힌트"이고 보장이 아니다 — 스레드는 다른 코어로 옮겨질 수 있다. CPU set은 걸지 않는다(문서는 CPU set을 "soft"라고 하지만 이
+//!   OS에서 실제로는 집합 안에 머문다 — 위 확인). 스레드마다 다른 P 코어를 돌아가며 고른다(`next_ideal`).
+//! - `Adaptive`(조건부 고정, 3안): `Pin`처럼 묶고, 끊김·기상 지연이 늘면 풀고(`SetThreadSelectedCpuSets(NULL, 0)`) 안정되면
+//!   다시 묶는다. 판단은 워커가 반복 끝에서(`pin_adapt` — 순수 상태 기계), 적용은 각 스레드가 자기 자신에게
+//!   (`PolicySlot::sync_adaptive`) 한다. RT 콜백 스레드는 대상이 아니다.
+//!
+//! 기본값(P1-21 3단계, 사용자 결정 2026-11-21): **HighQoS는 켬, P 코어 정책은 끔**(실험 옵션). 바꾸는 길은 둘: 엔진 설정
+//! `EngineConfig.threadPolicy`(오디오 설정 — 없으면 기본값)와 환경변수 `BAND_THREAD_POLICY`(있으면 설정보다 우선 — 제품
+//! 빌드에서도 읽는다). 환경변수 값은 `+`로 잇는 낱말이다: `highqos`, 그리고 P 코어 정책 `pin`(옛 이름 `pcores`) | `prefer` |
+//! `adaptive` 중 하나 — 예: `highqos+prefer`. `off`는 전부 끔, `both`는 `highqos+pin`. 값은 **정확히 그 조합**이다: `off`는
+//! 기본 켬인 HighQoS도 끄고, `pin`은 HighQoS 없이 P 코어만 건다. 측정: `docs/overhaul/core-placement-2026-11-20.md`.
 //! 걸 수 없는 환경에서는 **조용히 끔과 같게** 돈다: 비Windows는 OS 호출을 하지 않고 보고는 null, Windows에서 호출이 실패하면
 //! (`ThreadPowerThrottling`을 모르는 Windows 10 1709 이전 등) 무시하고 기본 스케줄링으로 돌며 결과 `failed`만
 //! `EngineStats.threadPolicy`(진단 내보내기 포함)에 남긴다 — 로그는 프로세스당 한 번. RT 콜백 스레드에는 걸지 않는다.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
+
+use super::pin_adapt::{AdaptivePin, AdaptiveStats, Collector, Decider};
 
 /// 코어 종류.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,10 +131,12 @@ impl CoreMap {
     }
 }
 
-/// 엔진 시작 때 한 번 만드는 표: 코어 종류 표(없으면 None)와 P 코어 CPU set ID(하이브리드가 아니면 빈 목록).
+/// 엔진 시작 때 한 번 만드는 표: 코어 종류 표(없으면 None), P 코어 CPU set ID(하이브리드가 아니면 빈 목록), 그리고 같은
+/// P 코어들의 논리 프로세서 (그룹, 번호)(선호 힌트가 돌아가며 고르는 순서 — `performance_procs`).
 struct Tables {
     map: Option<CoreMap>,
     p_set_ids: Vec<u32>,
+    p_procs: Vec<(u16, u8)>,
 }
 
 static TABLES: OnceLock<Tables> = OnceLock::new();
@@ -135,6 +150,11 @@ pub(crate) const MIN_P_CORES: usize = 4;
 /// 독점한 집합도 뺀다. 빈 목록이면 정책을 걸지 않는다(`skipped`): 등급이 하나뿐이거나(하이브리드 아님 — 고를 것이 없다) 고를 수
 /// 있는 물리 P 코어가 `MIN_P_CORES`개 미만일 때. 주차(`Parked`) 여부는 보지 않는다 — 코어 주차는 실행 중에 바뀌는 값이다.
 pub(crate) fn performance_set_ids(cpus: &[CpuSetEntry]) -> Vec<u32> {
+    performance_entries(cpus).iter().map(|c| c.id).collect()
+}
+
+/// `performance_set_ids`와 같은 코어들(같은 조건 — 빈 목록이면 P 코어 정책은 `skipped`).
+fn performance_entries(cpus: &[CpuSetEntry]) -> Vec<&CpuSetEntry> {
     let (Some(top), Some(low)) = (cpus.iter().map(|c| c.efficiency_class).max(), cpus.iter().map(|c| c.efficiency_class).min()) else {
         return Vec::new();
     };
@@ -148,7 +168,25 @@ pub(crate) fn performance_set_ids(cpus: &[CpuSetEntry]) -> Vec<u32> {
     if cores.len() < MIN_P_CORES {
         return Vec::new();
     }
-    usable.iter().map(|c| c.id).collect()
+    usable
+}
+
+/// 선호 힌트(2안)가 돌아가며 고를 P 코어 논리 프로세서 (그룹, 번호). `performance_set_ids`와 같은 코어이고, 순서는 **물리 코어마다
+/// 하나씩 먼저**(하이퍼스레딩 형제는 뒤로) — 엔진 스레드 둘(워커·수신)이 같은 물리 코어의 형제에 몰리지 않게.
+pub(crate) fn performance_procs(cpus: &[CpuSetEntry]) -> Vec<(u16, u8)> {
+    let usable = performance_entries(cpus);
+    let mut seen: Vec<(u16, u8)> = Vec::new();
+    let (mut first, mut siblings) = (Vec::new(), Vec::new());
+    for c in usable {
+        if seen.contains(&(c.group, c.core)) {
+            siblings.push((c.group, c.number));
+        } else {
+            seen.push((c.group, c.core));
+            first.push((c.group, c.number));
+        }
+    }
+    first.extend(siblings);
+    first
 }
 
 /// 엔진 하나가 워커·수신 스레드에 걸 정책(P1-21). 이 타입의 `Default`는 **정책 없음**(둘 다 꺼짐 — 스레드는 OS 호출 없이
@@ -157,24 +195,69 @@ pub(crate) fn performance_set_ids(cpus: &[CpuSetEntry]) -> Vec<u32> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct PolicyChoice {
     pub(crate) high_qos: bool,
-    pub(crate) p_cores: bool,
+    pub(crate) p_cores: PCoreMode,
+}
+
+/// P 코어 정책(파일 머리 주석). 설정(`band_dsp::config::PCoreMode`)과 같은 값이고 `EngineStats.threadPolicy.pCoreMode`로 나간다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PCoreMode {
+    #[default]
+    Off,
+    Pin,
+    Prefer,
+    Adaptive,
+}
+
+impl PCoreMode {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Pin,
+            2 => Self::Prefer,
+            3 => Self::Adaptive,
+            _ => Self::Off,
+        }
+    }
 }
 
 /// 환경변수 `BAND_THREAD_POLICY` 이름(제품 빌드에서도 읽는다 — 설정 화면 없이 켜고 끄는 수단, PR #245 리뷰 H2).
 pub(crate) const POLICY_ENV: &str = "BAND_THREAD_POLICY";
 
-/// `BAND_THREAD_POLICY` 값 → 정책. `off` | `highqos` | `pcores` | `both`(대소문자·앞뒤 공백 무시). 측정 도구가 쓰던
-/// `qos`·`qos+pcores`도 받는다. 모르는 값·빈 값은 None(설정을 따른다 — 설정도 없으면 엔진 기본값).
-/// 값은 정확히 그 조합이다(기본값에 더하는 것이 아니다): `off` = HighQoS도 끔, `pcores` = P 코어만(HighQoS 끔).
+/// `BAND_THREAD_POLICY` 값 → 정책(대소문자·공백 무시). `+`로 이은 낱말:
+/// - `highqos`(옛 이름 `qos`) — HighQoS.
+/// - P 코어 정책 하나: `pin`(옛 이름 `pcores`) | `prefer` | `adaptive`.
+/// - `off`(혼자만) — 전부 끔. `both`(혼자만) — `highqos+pin`.
+///
+/// 그래서 2단계의 값 `off` | `highqos` | `pcores` | `both`(와 측정 도구의 `qos`·`qos+pcores`)는 뜻이 그대로다. 모르는 낱말·빈 값·
+/// P 코어 정책 둘 이상·`off`/`both`를 다른 낱말과 이은 값은 None(설정을 따른다 — 설정도 없으면 엔진 기본값).
+/// 값은 정확히 그 조합이다(기본값에 더하는 것이 아니다): `off` = HighQoS도 끔, `prefer` = 선호 힌트만(HighQoS 끔).
 pub(crate) fn parse_policy(v: &str) -> Option<PolicyChoice> {
-    let (high_qos, p_cores) = match v.trim().to_ascii_lowercase().as_str() {
-        "off" => (false, false),
-        "highqos" | "qos" => (true, false),
-        "pcores" => (false, true),
-        "both" | "qos+pcores" | "highqos+pcores" => (true, true),
-        _ => return None,
-    };
-    Some(PolicyChoice { high_qos, p_cores })
+    let v = v.trim().to_ascii_lowercase();
+    match v.as_str() {
+        "off" => return Some(PolicyChoice::default()),
+        "both" => return Some(PolicyChoice { high_qos: true, p_cores: PCoreMode::Pin }),
+        "" => return None,
+        _ => {}
+    }
+    let mut c = PolicyChoice::default();
+    let mut mode: Option<PCoreMode> = None;
+    for word in v.split('+') {
+        let m = match word.trim() {
+            "highqos" | "qos" if !c.high_qos => {
+                c.high_qos = true;
+                continue;
+            }
+            "pin" | "pcores" => PCoreMode::Pin,
+            "prefer" => PCoreMode::Prefer,
+            "adaptive" => PCoreMode::Adaptive,
+            _ => return None,
+        };
+        if mode.replace(m).is_some() {
+            return None;
+        }
+    }
+    c.p_cores = mode.unwrap_or_default();
+    Some(c)
 }
 
 /// 엔진 설정(`EngineConfig.threadPolicy`, 없으면 호출자가 기본값을 넣는다)과 환경변수로 정책을 정한다: 환경변수가 유효하면
@@ -188,7 +271,9 @@ pub(crate) fn policy_for_engine(config: PolicyChoice) -> PolicyChoice {
     let env = std::env::var(POLICY_ENV).ok();
     let p = resolve_policy(config, env.as_deref());
     match env.as_deref() {
-        Some(v) if parse_policy(v).is_none() && !v.trim().is_empty() => log::warn!("{POLICY_ENV}={v}: 모르는 값이라 설정을 따른다(off | highqos | pcores | both)"),
+        Some(v) if parse_policy(v).is_none() && !v.trim().is_empty() => {
+            log::warn!("{POLICY_ENV}={v}: 모르는 값이라 설정을 따른다(off | highqos | pin | prefer | adaptive | highqos+pin(=both) | highqos+prefer | highqos+adaptive)")
+        }
         Some(v) if p != config => log::info!("{POLICY_ENV}={v}: 엔진 설정의 스레드 정책을 덮어쓴다 → {p:?}"),
         _ => {}
     }
@@ -207,8 +292,10 @@ pub(crate) enum PolicyResult {
     Applied,
     /// OS 호출 실패(무시하고 기본 스케줄링으로 돈다).
     Failed,
-    /// P 코어 CPU set만: 걸 집합이 없어 걸지 않았다(하이브리드 아님·표 없음·물리 P 코어 4개 미만).
+    /// P 코어 정책만: 걸 코어가 없어 걸지 않았다(하이브리드 아님·표 없음·물리 P 코어 4개 미만).
     Skipped,
+    /// 조건부 고정(3안)만: 지금은 풀려 있다(끊김·기상 지연이 늘어 풀었고, 안정되면 다시 `applied`가 된다).
+    Released,
 }
 
 impl PolicyResult {
@@ -218,6 +305,7 @@ impl PolicyResult {
             2 => Self::Applied,
             3 => Self::Failed,
             4 => Self::Skipped,
+            5 => Self::Released,
             _ => Self::Pending,
         }
     }
@@ -231,36 +319,128 @@ pub(crate) struct ThreadPolicy {
     pub(crate) p_cores: PolicyResult,
 }
 
-/// `EngineStats.threadPolicy`: 워커와 네트워크 수신 스레드(네트워크 없이 시작했으면 None).
+/// `EngineStats.threadPolicy`: 워커와 네트워크 수신 스레드(네트워크 없이 시작했으면 None)의 적용 결과, 이 엔진이 고른 P 코어
+/// 정책, 조건부 고정이면 그 상태(아니면 None).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadPolicyStats {
     pub(crate) worker: ThreadPolicy,
     pub(crate) net_recv: Option<ThreadPolicy>,
+    pub(crate) p_core_mode: PCoreMode,
+    pub(crate) adaptive: Option<AdaptiveStats>,
 }
 
-/// 스레드 하나의 정책: 엔진이 스레드를 만들기 전에 정한 요청(`requested`)과, 그 스레드가 시작 때 한 번 적는 적용 결과(원자값).
+impl ThreadPolicyStats {
+    /// "상태가 바뀌었는가"를 견줄 때 쓰는 값: 창마다 흔들리는 P 코어 바쁨 추정(`adaptive.pBusyPct`)을 뺀다. 진단 타임라인은
+    /// 이 값이 바뀐 줄에만 `threadPolicy`를 넣는다 — 조건부 고정이어도 풀거나 묶은 때에만 줄이 늘게.
+    pub(crate) fn state_key(&self) -> Self {
+        Self { adaptive: self.adaptive.map(|a| AdaptiveStats { p_busy_pct: None, ..a }), ..*self }
+    }
+}
+
+/// 엔진 하나의 정책 요청: 고른 정책과, 조건부 고정이면 워커·수신 스레드가 함께 보는 공유 상태. 엔진이 스레드를 만들기 전에
+/// 한 번 만들어(`for_engine`) 워커 슬롯과 수신 슬롯에 같은 것을 넘긴다. `Default`는 정책 없음.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PolicyRequest {
+    pub(crate) choice: PolicyChoice,
+    adaptive: Option<Arc<AdaptivePin>>,
+}
+
+impl PolicyRequest {
+    pub(crate) fn for_engine(choice: PolicyChoice) -> Self {
+        Self { choice, adaptive: (choice.p_cores == PCoreMode::Adaptive).then(Arc::default) }
+    }
+}
+
+/// 조건부 고정에서 이 스레드의 지금 상태(`PolicySlot.pin_state`).
+const PIN_NOT_LIVE: u8 = 0;
+const PIN_PINNED: u8 = 1;
+const PIN_RELEASED: u8 = 2;
+
+/// 스레드 하나의 정책: 엔진이 스레드를 만들기 전에 정한 요청(`requested`)과, 그 스레드가 적는 적용 결과(원자값).
 #[derive(Debug, Default)]
 pub(crate) struct PolicySlot {
     want_high_qos: AtomicBool,
-    want_p_cores: AtomicBool,
+    want_p_cores: AtomicU8,
     high_qos: AtomicU8,
     p_cores: AtomicU8,
+    /// 조건부 고정의 공유 상태(그 정책일 때만 Some).
+    adaptive: Option<Arc<AdaptivePin>>,
+    /// 조건부 고정에서 이 스레드가 지금 묶여 있는지. 처음 묶기가 성공했을 때만 살아난다(`PIN_NOT_LIVE`면 `sync_adaptive`는
+    /// 아무것도 하지 않는다 — 걸 코어가 없거나 실패한 스레드를 풀고 묶지 않는다).
+    pin_state: AtomicU8,
 }
 
 impl PolicySlot {
     /// 이 정책을 걸 슬롯(스레드를 만들기 전에). `Default`는 둘 다 꺼짐이다.
-    pub(crate) fn requested(choice: PolicyChoice) -> Self {
-        Self { want_high_qos: AtomicBool::new(choice.high_qos), want_p_cores: AtomicBool::new(choice.p_cores), ..Default::default() }
+    pub(crate) fn requested(req: &PolicyRequest) -> Self {
+        Self {
+            want_high_qos: AtomicBool::new(req.choice.high_qos),
+            want_p_cores: AtomicU8::new(req.choice.p_cores as u8),
+            adaptive: req.adaptive.clone(),
+            ..Default::default()
+        }
     }
 
     fn choice(&self) -> PolicyChoice {
-        PolicyChoice { high_qos: self.want_high_qos.load(Ordering::Relaxed), p_cores: self.want_p_cores.load(Ordering::Relaxed) }
+        PolicyChoice { high_qos: self.want_high_qos.load(Ordering::Relaxed), p_cores: PCoreMode::from_u8(self.want_p_cores.load(Ordering::Relaxed)) }
+    }
+
+    /// 이 슬롯이 요청받은 P 코어 정책(`EngineStats.threadPolicy.pCoreMode`).
+    pub(crate) fn p_core_mode(&self) -> PCoreMode {
+        self.choice().p_cores
+    }
+
+    /// 조건부 고정의 상태(그 정책이 아니면 None).
+    pub(crate) fn adaptive_stats(&self) -> Option<AdaptiveStats> {
+        self.adaptive.as_ref().map(|a| a.stats())
     }
 
     fn store(&self, p: ThreadPolicy) {
         self.high_qos.store(p.high_qos as u8, Ordering::Relaxed);
         self.p_cores.store(p.p_cores as u8, Ordering::Relaxed);
+        if self.adaptive.is_some() && p.p_cores == PolicyResult::Applied {
+            self.pin_state.store(PIN_PINNED, Ordering::Relaxed);
+        }
+    }
+
+    /// 조건부 고정(3안): 판단(`AdaptivePin`)이 바라는 상태와 이 스레드의 상태가 다르면 맞춘다. **자기 스레드에서** 부른다 —
+    /// 워커는 반복마다, 수신 스레드는 패킷마다. 평소 비용은 분기 하나(다른 정책) 또는 원자값 읽기 둘(조건부 고정)이고, OS 호출은
+    /// 상태가 바뀌는 순간에만 한 번 한다(할당·락·로그 없음). RT 콜백에서는 부르지 않는다.
+    #[inline]
+    pub(crate) fn sync_adaptive(&self) {
+        let Some(a) = &self.adaptive else { return };
+        let state = self.pin_state.load(Ordering::Relaxed);
+        if state == PIN_NOT_LIVE || (state == PIN_PINNED) == a.want_pinned() {
+            return;
+        }
+        let ids = TABLES.get().map(|t| t.p_set_ids.as_slice()).unwrap_or(&[]);
+        self.resync(a.want_pinned(), ids, os::select_cpu_sets, os::clear_cpu_sets);
+    }
+
+    /// `sync_adaptive`의 느린 길(OS 호출은 인자 — 시험이 넣는다). 실패해도 상태는 바란 쪽으로 넘긴다(반복마다 다시 부르지 않게).
+    /// 결과만 `failed`로 남는다.
+    #[cold]
+    fn resync(&self, want_pinned: bool, p_ids: &[u32], select_sets: impl FnOnce(&[u32]) -> bool, clear_sets: impl FnOnce() -> bool) {
+        let result = match (want_pinned, if want_pinned { select_sets(p_ids) } else { clear_sets() }) {
+            (_, false) => PolicyResult::Failed,
+            (true, true) => PolicyResult::Applied,
+            (false, true) => PolicyResult::Released,
+        };
+        self.pin_state.store(if want_pinned { PIN_PINNED } else { PIN_RELEASED }, Ordering::Relaxed);
+        self.p_cores.store(result as u8, Ordering::Relaxed);
+    }
+
+    /// 조건부 고정의 판단기(워커가 루프 앞에서 한 번 만든다 — `apply_thread_policy` 뒤). 그 정책이 아니거나 이 스레드의 처음
+    /// 묶기가 되지 않았으면(`skipped`·`failed`) None.
+    pub(crate) fn adaptive_driver(&self, now: std::time::Instant, xruns_total: u64) -> Option<AdaptiveDriver> {
+        let shared = self.adaptive.clone()?;
+        (self.pin_state.load(Ordering::Relaxed) == PIN_PINNED).then(|| AdaptiveDriver {
+            shared,
+            decider: Decider::default(),
+            window: Collector::new(now, xruns_total),
+            busy: PBusy::new(TABLES.get().map(|t| t.p_procs.as_slice()).unwrap_or(&[])),
+        })
     }
 
     /// 보고값. 비Windows는 None(정책이 Windows 전용).
@@ -272,15 +452,127 @@ impl PolicySlot {
     }
 }
 
-/// 정책과 P 코어 목록으로 적용하고 결과를 낸다(OS 호출은 인자 — 시험이 실패 경로를 넣는다). 꺼진 항목은 OS를 부르지 않는다.
-fn apply_with(choice: PolicyChoice, p_ids: &[u32], disable_throttling: impl FnOnce() -> bool, select_sets: impl FnOnce(&[u32]) -> bool) -> ThreadPolicy {
+/// 조건부 고정의 판단기: 워커가 반복마다 관측을 올리고(`note_*`), 1초 창이 차면 판단해 공유 상태에 적는다(`tick`).
+/// 워커 스레드만 만지는 지역 값이다(반복 안 할당 없음 — 버퍼는 만들 때 잡는다).
+#[derive(Debug)]
+pub(crate) struct AdaptiveDriver {
+    shared: Arc<AdaptivePin>,
+    decider: Decider,
+    window: Collector,
+    busy: PBusy,
+}
+
+impl AdaptiveDriver {
+    /// 수면에서 깬 뒤: 요청보다 늦게 깬 양.
+    #[inline]
+    pub(crate) fn note_wake(&mut self, overshoot: std::time::Duration) {
+        self.window.note_wake(overshoot);
+    }
+
+    /// 반복 본문 하나가 끝난 뒤: 본문 시간과 지금 시각, RT 콜백이 올린 누적 xrun(원자값을 읽은 값). 창이 찼으면 판단한다
+    /// (그때만 P 코어 바쁨 추정 — 시스템콜 하나).
+    #[inline]
+    pub(crate) fn tick(&mut self, body: std::time::Duration, now: std::time::Instant, xruns_total: u64) {
+        self.window.note_body(body);
+        let busy = &mut self.busy;
+        if let Some(w) = self.window.roll(now, xruns_total, || busy.sample()) {
+            let v = self.decider.step(w);
+            self.shared.publish(v, w.p_busy_pct);
+        }
+    }
+}
+
+/// P 코어 포화 추정(조건부 고정의 신호 ③): P 코어 논리 프로세서들의 **유휴 스레드 사이클**(`QueryIdleProcessorCycleTimeEx`)
+/// 증분을 TSC 증분으로 나눠 "바쁜 비율"을 낸다(P 코어 평균, %). 창마다 한 번(1초) 워커가 부른다 — 시스템콜 하나, 할당 없음
+/// (버퍼는 `new`에서 잡는다). x86_64 Windows이고 P 코어가 모두 프로세서 그룹 하나에 있을 때만 값을 낸다(아니면 None — 그때
+/// 판단은 xrun·멈칫과 기다림만으로 한다).
+#[derive(Debug)]
+pub(crate) struct PBusy {
+    /// P 코어 논리 프로세서 번호(그룹 `group` 안).
+    numbers: Vec<u8>,
+    group: u16,
+    /// 그룹의 프로세서별 유휴 사이클(지금·직전). 길이 = 그룹의 논리 프로세서 수.
+    cur: Vec<u64>,
+    prev: Vec<u64>,
+    prev_tsc: Option<u64>,
+}
+
+impl PBusy {
+    pub(crate) fn new(p_procs: &[(u16, u8)]) -> Self {
+        let group = p_procs.first().map_or(0, |p| p.0);
+        let one_group = !p_procs.is_empty() && p_procs.iter().all(|p| p.0 == group);
+        let len = if one_group { os::idle_cycles_len(group) } else { 0 };
+        let numbers: Vec<u8> = if len > 0 { p_procs.iter().map(|p| p.1).filter(|&n| (n as usize) < len).collect() } else { Vec::new() };
+        let mut s = Self { numbers, group, cur: vec![0; len], prev: vec![0; len], prev_tsc: None };
+        // 기준점(첫 창은 여기부터 잰다)
+        s.sample();
+        s
+    }
+
+    /// 직전 호출 뒤 구간의 P 코어 바쁨(%). 처음 호출·못 읽음·지원 안 함은 None.
+    pub(crate) fn sample(&mut self) -> Option<u8> {
+        if self.numbers.is_empty() {
+            return None;
+        }
+        let tsc = super::cpu::tsc_now()?;
+        if !os::idle_cycles(self.group, &mut self.cur) {
+            return None;
+        }
+        let out = self.prev_tsc.and_then(|t0| p_busy_pct(&self.cur, &self.prev, &self.numbers, tsc.checked_sub(t0)?));
+        std::mem::swap(&mut self.cur, &mut self.prev);
+        self.prev_tsc = Some(tsc);
+        out
+    }
+}
+
+/// 유휴 사이클 증분 → P 코어 평균 바쁨(%). `tsc_delta`가 0이면 None. 유휴 증분이 TSC 증분을 넘으면(읽는 시점 차이) 0%로 자른다.
+fn p_busy_pct(cur: &[u64], prev: &[u64], numbers: &[u8], tsc_delta: u64) -> Option<u8> {
+    if tsc_delta == 0 || numbers.is_empty() {
+        return None;
+    }
+    let idle: f64 = numbers
+        .iter()
+        .map(|&n| {
+            let d = cur[n as usize].saturating_sub(prev[n as usize]);
+            (d as f64 / tsc_delta as f64).min(1.0)
+        })
+        .sum();
+    Some(((1.0 - idle / numbers.len() as f64) * 100.0).round().clamp(0.0, 100.0) as u8)
+}
+
+/// 선호 힌트(2안)가 다음에 고를 P 코어 논리 프로세서: 목록을 돌아가며 하나씩(프로세스 전체 카운터 — 한 프로세스의 엔진 스레드들이
+/// 서로 다른 P 코어를 선호하게).
+fn next_ideal(p_procs: &[(u16, u8)]) -> Option<(u16, u8)> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    (!p_procs.is_empty()).then(|| p_procs[NEXT.fetch_add(1, Ordering::Relaxed) % p_procs.len()])
+}
+
+/// 적용에 쓰는 OS 호출 묶음(시험이 실패 경로·호출 여부를 넣는다).
+struct OsCalls<Q, S, I> {
+    disable_throttling: Q,
+    select_sets: S,
+    set_ideal: I,
+}
+
+/// 정책과 P 코어 목록으로 적용하고 결과를 낸다. 꺼진 항목은 OS를 부르지 않는다.
+/// P 코어 정책: 고정·조건부 고정은 CPU set(`p_ids`), 선호 힌트는 선호 프로세서 하나(`ideal`). 걸 코어가 없으면 `skipped`.
+fn apply_with<Q, S, I>(choice: PolicyChoice, p_ids: &[u32], ideal: Option<(u16, u8)>, os: OsCalls<Q, S, I>) -> ThreadPolicy
+where
+    Q: FnOnce() -> bool,
+    S: FnOnce(&[u32]) -> bool,
+    I: FnOnce(u16, u8) -> bool,
+{
     let done = |ok: bool| if ok { PolicyResult::Applied } else { PolicyResult::Failed };
     ThreadPolicy {
-        high_qos: if choice.high_qos { done(disable_throttling()) } else { PolicyResult::Off },
-        p_cores: match (choice.p_cores, p_ids.is_empty()) {
-            (false, _) => PolicyResult::Off,
-            (true, true) => PolicyResult::Skipped,
-            (true, false) => done(select_sets(p_ids)),
+        high_qos: if choice.high_qos { done((os.disable_throttling)()) } else { PolicyResult::Off },
+        p_cores: match choice.p_cores {
+            PCoreMode::Off => PolicyResult::Off,
+            PCoreMode::Pin | PCoreMode::Adaptive if p_ids.is_empty() => PolicyResult::Skipped,
+            PCoreMode::Pin | PCoreMode::Adaptive => done((os.select_sets)(p_ids)),
+            PCoreMode::Prefer => match ideal {
+                None => PolicyResult::Skipped,
+                Some((group, number)) => done((os.set_ideal)(group, number)),
+            },
         },
     }
 }
@@ -318,16 +610,22 @@ pub(crate) fn apply_thread_policy(slot: &PolicySlot) {
     if !cfg!(windows) {
         return;
     }
-    let ids = TABLES.get().map(|t| t.p_set_ids.as_slice()).unwrap_or(&[]);
-    apply_to_slot(slot, ids, os::disable_power_throttling, os::select_cpu_sets);
+    let (ids, procs) = TABLES.get().map(|t| (t.p_set_ids.as_slice(), t.p_procs.as_slice())).unwrap_or((&[], &[]));
+    let ideal = if slot.p_core_mode() == PCoreMode::Prefer { next_ideal(procs) } else { None };
+    apply_to_slot(slot, ids, ideal, OsCalls { disable_throttling: os::disable_power_throttling, select_sets: os::select_cpu_sets, set_ideal: os::set_ideal_processor });
 }
 
 /// `apply_thread_policy`의 본체(OS 호출은 인자 — 시험이 실패 경로를 넣는다). 실패는 여기서 삼킨다: 패닉·오류 반환 없이
 /// 결과만 슬롯에 적고, 로그는 **프로세스당 한 번**만 남긴다 — HighQoS가 기본 켬이라 API가 없는 Windows에서는 엔진을 시작할
 /// 때마다 스레드 둘이 실패하는데, 그때마다 경고를 쌓지 않는다.
-fn apply_to_slot(slot: &PolicySlot, p_ids: &[u32], disable_throttling: impl FnOnce() -> bool, select_sets: impl FnOnce(&[u32]) -> bool) {
+fn apply_to_slot<Q, S, I>(slot: &PolicySlot, p_ids: &[u32], ideal: Option<(u16, u8)>, os: OsCalls<Q, S, I>)
+where
+    Q: FnOnce() -> bool,
+    S: FnOnce(&[u32]) -> bool,
+    I: FnOnce(u16, u8) -> bool,
+{
     static LOGGED: AtomicBool = AtomicBool::new(false);
-    let p = apply_with(slot.choice(), p_ids, disable_throttling, select_sets);
+    let p = apply_with(slot.choice(), p_ids, ideal, os);
     if (p.high_qos == PolicyResult::Failed || p.p_cores == PolicyResult::Failed) && !LOGGED.swap(true, Ordering::Relaxed) {
         log::warn!("스레드 정책을 걸 수 없어 기본 스케줄링으로 돈다(무시, 이후 같은 실패는 로그 생략): {p:?}");
     }
@@ -341,6 +639,7 @@ pub(crate) fn init() {
         let cpus = os::cpu_sets();
         let map = CoreMap::from_entries(&cpus);
         let p_set_ids = performance_set_ids(&cpus);
+        let p_procs = performance_procs(&cpus);
         if let Some(m) = &map {
             let count = |k| m.kinds.iter().filter(|x| **x == Some(k)).count();
             log::info!(
@@ -351,12 +650,42 @@ pub(crate) fn init() {
                 p_set_ids.len()
             );
         }
-        Tables { map, p_set_ids }
+        Tables { map, p_set_ids, p_procs }
     });
 }
 
 fn map() -> Option<&'static CoreMap> {
     TABLES.get().and_then(|t| t.map.as_ref())
+}
+
+/// 측정 도구용(`examples/policy_matrix.rs`의 부하 생성기·soft 확인 프로브): 지금 스레드에 `BAND_THREAD_POLICY` 문법의 정책을
+/// 엔진 스레드와 같은 경로로 건다. 돌려주는 값은 적용 결과 JSON(`{"highQos":…,"pCores":…}`, 비Windows는 `null`).
+/// 조건부 고정(`adaptive`)은 여기서는 처음 묶기까지만 한다(판단기는 엔진 워커에만 있다).
+#[cfg(any(test, feature = "test-support"))]
+pub fn apply_policy_to_current_thread(policy: &str) -> Result<String, String> {
+    let choice = parse_policy(policy).ok_or_else(|| format!("모르는 정책 값: {policy}"))?;
+    let slot = PolicySlot::requested(&PolicyRequest::for_engine(choice));
+    apply_thread_policy(&slot);
+    serde_json::to_string(&slot.stats()).map_err(|e| e.to_string())
+}
+
+/// 측정 도구용: 지금 스레드가 도는 코어 종류 — 0 = P, 1 = E, 2 = LP-E. 표가 없거나(비Windows) 모르는 코어면 None.
+#[cfg(any(test, feature = "test-support"))]
+pub fn current_core_kind() -> Option<usize> {
+    init();
+    let (group, number) = os::current_processor()?;
+    map()?.kind(group, number).map(|k| match k {
+        CoreKind::Performance => 0,
+        CoreKind::Efficiency => 1,
+        CoreKind::LowPowerEfficiency => 2,
+    })
+}
+
+/// 측정 도구용: P 코어 정책이 고르는 논리 프로세서 수(0이면 이 기계에서 P 코어 정책은 `skipped`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn p_core_count() -> usize {
+    init();
+    TABLES.get().map_or(0, |t| t.p_set_ids.len())
 }
 
 /// 이 기계의 코어 구성 한 줄(측정 도구 출력용): 종류별 논리 프로세서 수와 P 코어 CPU set 수(0이면 P 코어 CPU set 정책은 `skipped`).
@@ -551,6 +880,41 @@ mod os {
         unsafe { SetThreadSelectedCpuSets(GetCurrentThread(), ids.as_ptr(), ids.len() as u32) != 0 }
     }
 
+    /// 지금 스레드가 고른 CPU set을 지운다(프로세스 기본값 — 이 앱은 걸지 않으므로 "제한 없음" — 으로 돌아간다). 문서:
+    /// "If this is NULL, the API clears out any assignment, reverting to process default assignment if one is set." 성공하면 true.
+    pub(super) fn clear_cpu_sets() -> bool {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadSelectedCpuSets};
+        // SAFETY: 현재 스레드 의사 핸들, 목록 NULL·개수 0(문서가 정한 "지우기" 인자).
+        unsafe { SetThreadSelectedCpuSets(GetCurrentThread(), std::ptr::null(), 0) != 0 }
+    }
+
+    /// 지금 스레드의 선호 프로세서(ideal processor)를 정한다. 문서: "provides a hint to the scheduler about the preferred
+    /// processor for a thread. The scheduler runs the thread on the thread's ideal processor when possible." — 힌트이고 보장이 아니다.
+    /// 스레드의 주 그룹도 그 프로세서의 그룹이 된다. 성공하면 true.
+    pub(super) fn set_ideal_processor(group: u16, number: u8) -> bool {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadIdealProcessorEx};
+        let n = PROCESSOR_NUMBER { Group: group, Number: number, Reserved: 0 };
+        // SAFETY: 현재 스레드 의사 핸들과 유효한 입력 구조체. 이전 값은 받지 않는다(NULL 허용).
+        unsafe { SetThreadIdealProcessorEx(GetCurrentThread(), &n, std::ptr::null_mut()) != 0 }
+    }
+
+    /// 프로세서 그룹 `group`의 논리 프로세서 수(= 유휴 사이클 배열 길이). 못 읽으면 0.
+    pub(super) fn idle_cycles_len(group: u16) -> usize {
+        use windows_sys::Win32::System::WindowsProgramming::QueryIdleProcessorCycleTimeEx;
+        let mut bytes = 0u32;
+        // SAFETY: 길이만 묻는 호출(버퍼 NULL, 길이 0) — 필요한 바이트 수가 `bytes`에 온다.
+        unsafe { QueryIdleProcessorCycleTimeEx(group, &mut bytes, std::ptr::null_mut()) };
+        bytes as usize / std::mem::size_of::<u64>()
+    }
+
+    /// 그룹의 프로세서별 유휴 스레드 누적 사이클을 `out`에 채운다(길이 = `idle_cycles_len`). 할당 없음. 성공하면 true.
+    pub(super) fn idle_cycles(group: u16, out: &mut [u64]) -> bool {
+        use windows_sys::Win32::System::WindowsProgramming::QueryIdleProcessorCycleTimeEx;
+        let mut bytes = std::mem::size_of_val(out) as u32;
+        // SAFETY: `out`은 `bytes` 바이트의 쓸 수 있는 u64 배열이다.
+        unsafe { QueryIdleProcessorCycleTimeEx(group, &mut bytes, out.as_mut_ptr()) != 0 }
+    }
+
     /// 프로세스 친화성 마스크(측정 도구용 코어 고정).
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn set_process_affinity(mask: u64) -> Result<(), String> {
@@ -586,6 +950,22 @@ mod os {
     }
 
     pub(super) fn select_cpu_sets(_ids: &[u32]) -> bool {
+        false
+    }
+
+    pub(super) fn clear_cpu_sets() -> bool {
+        false
+    }
+
+    pub(super) fn set_ideal_processor(_group: u16, _number: u8) -> bool {
+        false
+    }
+
+    pub(super) fn idle_cycles_len(_group: u16) -> usize {
+        0
+    }
+
+    pub(super) fn idle_cycles(_group: u16, _out: &mut [u64]) -> bool {
         false
     }
 
@@ -720,53 +1100,106 @@ mod tests {
         assert!(performance_set_ids(&one_group).is_empty(), "한 그룹이면 코어 0·1 둘뿐");
     }
 
-    /// 환경변수 값과 우선순위(PR #245 리뷰 H2): 유효한 환경변수 > 엔진 설정 > 꺼짐.
+    /// 선호 힌트가 고르는 순서: 물리 코어마다 하나씩 먼저, 하이퍼스레딩 형제는 뒤. 조건은 CPU set과 같다(하이브리드·물리 P 4개 이상).
+    #[test]
+    fn performance_procs_spread_over_physical_cores_first() {
+        assert_eq!(performance_procs(&core_ultra_225h()), vec![(0, 0), (0, 1), (0, 10), (0, 11)]);
+        // 4P8T + 8E: 논리 0·1 = 코어 0, 2·3 = 코어 1, …
+        let mut ht: Vec<_> = (0..16u8).map(|n| e(n, u8::from(n < 8), 0)).collect();
+        for c in ht.iter_mut() {
+            c.core = if c.number < 8 { c.number / 2 } else { c.number - 4 };
+        }
+        assert_eq!(performance_procs(&ht), vec![(0, 0), (0, 2), (0, 4), (0, 6), (0, 1), (0, 3), (0, 5), (0, 7)]);
+        let sym: Vec<_> = (0..8u8).map(|n| e(n, 0, 0)).collect();
+        assert!(performance_procs(&sym).is_empty(), "하이브리드 아님");
+        let two_p: Vec<_> = (0..10u8).map(|n| e(n, u8::from(n < 2), 0)).collect();
+        assert!(performance_procs(&two_p).is_empty(), "물리 P 코어 2개");
+        // 돌아가며 고른다: 연속 두 번은 서로 다른 프로세서(목록이 둘 이상일 때), 빈 목록은 None
+        let procs = performance_procs(&core_ultra_225h());
+        let (x, y) = (next_ideal(&procs).unwrap(), next_ideal(&procs).unwrap());
+        assert!(procs.contains(&x) && procs.contains(&y) && x != y);
+        assert_eq!(next_ideal(&[]), None);
+    }
+
+    /// 환경변수 값과 우선순위(PR #245 리뷰 H2): 유효한 환경변수 > 엔진 설정 > 꺼짐. 3단계 ②: P 코어 정책 낱말.
     #[test]
     fn policy_env_parses_and_overrides_config() {
+        use PCoreMode::*;
         let c = |high_qos, p_cores| PolicyChoice { high_qos, p_cores };
-        assert_eq!(parse_policy("off"), Some(c(false, false)));
-        assert_eq!(parse_policy(" HighQoS "), Some(c(true, false)));
-        assert_eq!(parse_policy("pcores"), Some(c(false, true)));
-        assert_eq!(parse_policy("both"), Some(c(true, true)));
+        // 2단계의 값은 뜻이 그대로다
+        assert_eq!(parse_policy("off"), Some(c(false, Off)));
+        assert_eq!(parse_policy(" HighQoS "), Some(c(true, Off)));
+        assert_eq!(parse_policy("pcores"), Some(c(false, Pin)));
+        assert_eq!(parse_policy("both"), Some(c(true, Pin)));
         // 측정 도구의 옛 이름
-        assert_eq!(parse_policy("qos"), Some(c(true, false)));
-        assert_eq!(parse_policy("qos+pcores"), Some(c(true, true)));
-        for bad in ["", "on", "1", "default", "p"] {
+        assert_eq!(parse_policy("qos"), Some(c(true, Off)));
+        assert_eq!(parse_policy("qos+pcores"), Some(c(true, Pin)));
+        assert_eq!(parse_policy("highqos+pcores"), Some(c(true, Pin)));
+        // 3단계: P 코어 정책 낱말(순서·공백·대소문자 무관)
+        assert_eq!(parse_policy("pin"), Some(c(false, Pin)));
+        assert_eq!(parse_policy("prefer"), Some(c(false, Prefer)));
+        assert_eq!(parse_policy("adaptive"), Some(c(false, Adaptive)));
+        assert_eq!(parse_policy("highqos+pin"), Some(c(true, Pin)));
+        assert_eq!(parse_policy("HighQoS + Prefer"), Some(c(true, Prefer)));
+        assert_eq!(parse_policy("adaptive+highqos"), Some(c(true, Adaptive)));
+        for bad in ["", "on", "1", "default", "p", "pin+prefer", "highqos+highqos", "off+pin", "both+prefer", "highqos+", "+", "highqos+soft"] {
             assert_eq!(parse_policy(bad), None, "{bad}");
         }
         // 환경변수가 없으면 설정 그대로(엔진은 설정이 없을 때 기본값 = HighQoS 켬을 넣어 부른다 — engine::tests)
-        assert_eq!(resolve_policy(PolicyChoice::default(), None), c(false, false));
-        // 값은 정확히 그 조합이다: 기본 켬인 HighQoS도 `off`·`pcores`로 꺼진다
-        assert_eq!(resolve_policy(c(true, false), Some("off")), c(false, false));
-        assert_eq!(resolve_policy(c(true, false), Some("pcores")), c(false, true));
-        assert_eq!(resolve_policy(c(true, false), None), c(true, false));
-        assert_eq!(resolve_policy(c(true, true), Some("off")), c(false, false), "환경변수로 끈다");
-        assert_eq!(resolve_policy(c(false, false), Some("both")), c(true, true), "환경변수로 켠다");
-        assert_eq!(resolve_policy(c(true, false), Some("이상한 값")), c(true, false), "모르는 값은 설정을 따른다");
+        assert_eq!(resolve_policy(PolicyChoice::default(), None), c(false, Off));
+        // 값은 정확히 그 조합이다: 기본 켬인 HighQoS도 `off`·`pcores`·`prefer`로 꺼진다
+        assert_eq!(resolve_policy(c(true, Off), Some("off")), c(false, Off));
+        assert_eq!(resolve_policy(c(true, Off), Some("pcores")), c(false, Pin));
+        assert_eq!(resolve_policy(c(true, Off), Some("prefer")), c(false, Prefer));
+        assert_eq!(resolve_policy(c(true, Off), None), c(true, Off));
+        assert_eq!(resolve_policy(c(true, Adaptive), Some("off")), c(false, Off), "환경변수로 끈다");
+        assert_eq!(resolve_policy(c(false, Off), Some("both")), c(true, Pin), "환경변수로 켠다");
+        assert_eq!(resolve_policy(c(true, Prefer), Some("이상한 값")), c(true, Prefer), "모르는 값은 설정을 따른다");
+    }
+
+    fn never_qos() -> bool {
+        panic!("꺼진 옵션은 OS를 부르지 않는다")
+    }
+    fn never_set(_: &[u32]) -> bool {
+        panic!("CPU set을 부르면 안 되는 경우다")
+    }
+    fn never_ideal(_: u16, _: u8) -> bool {
+        panic!("선호 프로세서를 부르면 안 되는 경우다")
     }
 
     /// 정책 적용 결과: 꺼짐이면 OS 호출 없음, 걸 집합이 없으면 P 코어 CPU set은 걸지 않음, 실패는 `failed`로만 남는다.
     #[test]
     fn policy_results_cover_off_applied_failed_skipped() {
+        use PCoreMode::{Adaptive, Pin};
         use PolicyResult::*;
         let c = |high_qos, p_cores| PolicyChoice { high_qos, p_cores };
-        let never = || -> bool { panic!("꺼진 옵션은 OS를 부르지 않는다") };
-        let never_set = |_: &[u32]| -> bool { panic!("꺼졌거나 걸 집합이 없으면 CPU set을 부르지 않는다") };
-        // 기본(둘 다 꺼짐): OS 호출이 하나도 없다 — 이 PR 전과 같은 경로
-        assert_eq!(apply_with(PolicyChoice::default(), &[1, 2], never, never_set), ThreadPolicy { high_qos: Off, p_cores: Off });
-        assert_eq!(apply_with(c(true, true), &[], || true, never_set), ThreadPolicy { high_qos: Applied, p_cores: Skipped });
-        let mut got = Vec::new();
-        let p = apply_with(c(false, true), &[7, 9], never, |ids| {
-            got = ids.to_vec();
-            true
-        });
-        assert_eq!((p, got), (ThreadPolicy { high_qos: Off, p_cores: Applied }, vec![7, 9]));
-        assert_eq!(apply_with(c(true, true), &[7], || false, |_| false), ThreadPolicy { high_qos: Failed, p_cores: Failed });
+        // 정책 없음(둘 다 꺼짐): OS 호출이 하나도 없다 — 정책이 없던 때와 같은 경로
+        let none = OsCalls { disable_throttling: never_qos, select_sets: never_set, set_ideal: never_ideal };
+        assert_eq!(apply_with(PolicyChoice::default(), &[1, 2], Some((0, 0)), none), ThreadPolicy { high_qos: Off, p_cores: Off });
+        // 고정·조건부 고정: 걸 집합이 없으면 건너뜀, 있으면 CPU set(선호 프로세서는 부르지 않는다)
+        for mode in [Pin, Adaptive] {
+            let os = OsCalls { disable_throttling: || true, select_sets: never_set, set_ideal: never_ideal };
+            assert_eq!(apply_with(c(true, mode), &[], Some((0, 0)), os), ThreadPolicy { high_qos: Applied, p_cores: Skipped });
+            let mut got = Vec::new();
+            let os = OsCalls {
+                disable_throttling: never_qos,
+                select_sets: |ids: &[u32]| {
+                    got = ids.to_vec();
+                    true
+                },
+                set_ideal: never_ideal,
+            };
+            let p = apply_with(c(false, mode), &[7, 9], None, os);
+            assert_eq!((p, got), (ThreadPolicy { high_qos: Off, p_cores: Applied }, vec![7, 9]));
+            let os = OsCalls { disable_throttling: || false, select_sets: |_: &[u32]| false, set_ideal: never_ideal };
+            assert_eq!(apply_with(c(true, mode), &[7], None, os), ThreadPolicy { high_qos: Failed, p_cores: Failed });
+        }
 
         // 슬롯: 적용 전은 pending, 요청은 만들 때 정해진다. 계약 JSON
-        let slot = PolicySlot::requested(c(true, false));
-        assert_eq!(slot.choice(), c(true, false));
+        let slot = PolicySlot::requested(&PolicyRequest::for_engine(c(true, PCoreMode::Off)));
+        assert_eq!(slot.choice(), c(true, PCoreMode::Off));
         assert_eq!(PolicySlot::default().choice(), PolicyChoice::default());
+        assert_eq!((slot.p_core_mode(), slot.adaptive_stats()), (PCoreMode::Off, None));
         if cfg!(windows) {
             assert_eq!(slot.stats().unwrap(), ThreadPolicy { high_qos: Pending, p_cores: Pending });
             slot.store(ThreadPolicy { high_qos: Applied, p_cores: Skipped });
@@ -774,8 +1207,198 @@ mod tests {
             assert_eq!(s, ThreadPolicy { high_qos: Applied, p_cores: Skipped });
             assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"highQos":"applied","pCores":"skipped"}"#);
             assert_eq!(serde_json::to_string(&Pending).unwrap(), r#""pending""#);
+            assert_eq!(serde_json::to_string(&Released).unwrap(), r#""released""#);
         } else {
             assert!(slot.stats().is_none());
+        }
+        assert_eq!(serde_json::to_string(&[PCoreMode::Off, Pin, PCoreMode::Prefer, Adaptive]).unwrap(), r#"["off","pin","prefer","adaptive"]"#);
+    }
+
+    /// 선호 힌트(2안): CPU set은 부르지 않고 선호 프로세서 하나만 정한다. 걸 코어가 없으면 건너뜀, 실패는 `failed`.
+    #[test]
+    fn prefer_sets_ideal_processor_only() {
+        use PolicyResult::*;
+        let prefer = PolicyChoice { high_qos: false, p_cores: PCoreMode::Prefer };
+        let mut got = None;
+        let os = OsCalls {
+            disable_throttling: never_qos,
+            select_sets: never_set,
+            set_ideal: |g, n| {
+                got = Some((g, n));
+                true
+            },
+        };
+        assert_eq!(apply_with(prefer, &[7, 9], Some((0, 10)), os), ThreadPolicy { high_qos: Off, p_cores: Applied });
+        assert_eq!(got, Some((0, 10)));
+        let os = OsCalls { disable_throttling: never_qos, select_sets: never_set, set_ideal: never_ideal };
+        assert_eq!(apply_with(prefer, &[7, 9], None, os).p_cores, Skipped);
+        let os = OsCalls { disable_throttling: never_qos, select_sets: never_set, set_ideal: |_, _| false };
+        assert_eq!(apply_with(prefer, &[], Some((0, 1)), os).p_cores, Failed);
+        // 조건부 고정이 아닌 슬롯은 풀고 묶는 길이 없다
+        let slot = PolicySlot::requested(&PolicyRequest::for_engine(prefer));
+        slot.store(ThreadPolicy { high_qos: Off, p_cores: Applied });
+        assert!(slot.adaptive_driver(std::time::Instant::now(), 0).is_none());
+        slot.sync_adaptive();
+        assert_eq!(slot.pin_state.load(Ordering::Relaxed), PIN_NOT_LIVE);
+    }
+
+    /// 조건부 고정(3안)의 적용: 처음에는 고정과 같이 묶고, 판단이 바뀌면 그 스레드가 자기에게 풀기/다시 묶기를 한 번 부른다.
+    #[test]
+    fn adaptive_slot_releases_and_rebinds_on_verdict() {
+        use super::super::pin_adapt::Verdict;
+        use PolicyResult::*;
+        let req = PolicyRequest::for_engine(PolicyChoice { high_qos: false, p_cores: PCoreMode::Adaptive });
+        let (worker, recv) = (PolicySlot::requested(&req), PolicySlot::requested(&req));
+        let shared = req.adaptive.clone().expect("조건부 고정은 공유 상태가 있다");
+        for slot in [&worker, &recv] {
+            apply_to_slot(slot, &[7, 9], None, OsCalls { disable_throttling: never_qos, select_sets: |_: &[u32]| true, set_ideal: never_ideal });
+            assert_eq!(slot.pin_state.load(Ordering::Relaxed), PIN_PINNED);
+            assert_eq!(PolicyResult::from_u8(slot.p_cores.load(Ordering::Relaxed)), Applied);
+        }
+        assert_eq!(worker.adaptive_stats().map(|a| a.released), Some(false));
+        // 풀기: 지우기만 부른다. 두 슬롯이 같은 판단을 본다
+        shared.publish(Verdict::Release, None);
+        for slot in [&worker, &recv] {
+            slot.resync(shared.want_pinned(), &[7, 9], never_set, || true);
+            assert_eq!(slot.pin_state.load(Ordering::Relaxed), PIN_RELEASED);
+            assert_eq!(PolicyResult::from_u8(slot.p_cores.load(Ordering::Relaxed)), Released);
+        }
+        assert_eq!(recv.adaptive_stats().map(|a| (a.released, a.releases)), Some((true, 1)));
+        // 다시 묶기: 같은 집합으로 CPU set을 부른다
+        shared.publish(Verdict::Rebind, None);
+        let mut got = Vec::new();
+        worker.resync(
+            shared.want_pinned(),
+            &[7, 9],
+            |ids| {
+                got = ids.to_vec();
+                true
+            },
+            || panic!("묶을 때는 지우지 않는다"),
+        );
+        assert_eq!((got, worker.pin_state.load(Ordering::Relaxed)), (vec![7, 9], PIN_PINNED));
+        assert_eq!(PolicyResult::from_u8(worker.p_cores.load(Ordering::Relaxed)), Applied);
+        // OS 호출이 실패해도 상태는 넘어가고(반복마다 다시 부르지 않게) 결과만 failed
+        shared.publish(Verdict::Release, None);
+        worker.resync(shared.want_pinned(), &[7, 9], never_set, || false);
+        assert_eq!(worker.pin_state.load(Ordering::Relaxed), PIN_RELEASED);
+        assert_eq!(PolicyResult::from_u8(worker.p_cores.load(Ordering::Relaxed)), Failed);
+
+        // 처음 묶기가 되지 않은 스레드(걸 코어 없음)는 살아나지 않는다: 판단기도 없고, 판단이 바뀌어도 OS를 부르지 않는다
+        let skipped = PolicySlot::requested(&req);
+        apply_to_slot(&skipped, &[], None, OsCalls { disable_throttling: never_qos, select_sets: never_set, set_ideal: never_ideal });
+        assert_eq!(skipped.pin_state.load(Ordering::Relaxed), PIN_NOT_LIVE);
+        assert!(skipped.adaptive_driver(std::time::Instant::now(), 0).is_none());
+        skipped.sync_adaptive();
+        assert_eq!(PolicyResult::from_u8(skipped.p_cores.load(Ordering::Relaxed)), Skipped);
+    }
+
+    /// 조건부 고정의 판단기(워커 쪽): 반복마다 올린 관측이 1초 창마다 판단으로 이어져 공유 상태가 바뀐다.
+    #[test]
+    fn adaptive_driver_publishes_release_then_rebind() {
+        use super::super::pin_adapt::{HOLD_MIN, SEVERE_XRUNS, SLOW_BODY, WINDOW};
+        use std::time::Duration;
+        let req = PolicyRequest::for_engine(PolicyChoice { high_qos: false, p_cores: PCoreMode::Adaptive });
+        let slot = PolicySlot::requested(&req);
+        slot.store(ThreadPolicy { high_qos: PolicyResult::Off, p_cores: PolicyResult::Applied });
+        let t0 = std::time::Instant::now();
+        let mut d = slot.adaptive_driver(t0, 1_000).expect("묶인 조건부 고정 슬롯은 판단기가 있다");
+        // 시험은 P 코어 바쁨 추정을 쓰지 않는다(실제 기계 상태에 좌우되지 않게)
+        d.busy = PBusy::new(&[]);
+        let quiet = Duration::from_micros(50);
+        // 좋은 창 3개: 그대로 묶여 있다
+        for w in 1..=3u32 {
+            d.note_wake(quiet);
+            d.tick(quiet, t0 + WINDOW * w, 1_000);
+        }
+        assert_eq!(slot.adaptive_stats().unwrap(), AdaptiveStats { released: false, releases: 0, rebinds: 0, p_busy_pct: None });
+        // xrun이 한 창에 몰리면 바로 푼다
+        d.tick(quiet, t0 + WINDOW * 4, 1_000 + u64::from(SEVERE_XRUNS));
+        assert_eq!(slot.adaptive_stats().unwrap().releases, 1);
+        assert!(slot.adaptive_stats().unwrap().released);
+        // 창 사이의 호출은 판단하지 않는다(멈칫만 쌓인다)
+        d.tick(SLOW_BODY, t0 + WINDOW * 4 + WINDOW / 2, 1_000 + u64::from(SEVERE_XRUNS));
+        assert!(slot.adaptive_stats().unwrap().released);
+        // 기다림이 끝날 때까지 좋은 창 → 다시 묶는다(시작 직후 풀려 기다림은 HOLD_MIN, 중간의 멈칫 하나는 나쁜 창이 아니다)
+        for w in 5..(5 + HOLD_MIN) {
+            d.tick(quiet, t0 + WINDOW * w, 1_000 + u64::from(SEVERE_XRUNS));
+        }
+        assert_eq!(slot.adaptive_stats().unwrap(), AdaptiveStats { released: false, releases: 1, rebinds: 1, p_busy_pct: None });
+    }
+
+    /// 조건부 고정이 워커 반복에 더하는 길 — 관측 올리기·창 판단(P 코어 바쁨 추정의 시스템콜 포함)·판단 공유·자기 스레드에
+    /// 풀기/묶기 — 은 **할당하지 않는다**(워커 반복 규칙). 실제 OS 호출로 풀기 → 다시 묶기를 지나가며 센다.
+    #[test]
+    fn adaptive_path_does_not_allocate() {
+        use super::super::pin_adapt::{HOLD_MIN, SEVERE_XRUNS, WINDOW};
+        std::thread::spawn(|| {
+            init();
+            let slot = PolicySlot::requested(&PolicyRequest::for_engine(PolicyChoice { high_qos: false, p_cores: PCoreMode::Adaptive }));
+            apply_thread_policy(&slot);
+            let t0 = std::time::Instant::now();
+            // 걸 코어가 없는 기계·비Windows는 판단기가 없다 — 그때도 맞추기 호출은 할당 없이 지나간다
+            let mut driver = slot.adaptive_driver(t0, 0);
+            let quiet = std::time::Duration::from_micros(50);
+            let ((), allocs) = crate::sys::alloc::counted(|| {
+                let mut xruns = 0u64;
+                for w in 1..(HOLD_MIN + 8) {
+                    if w == 2 {
+                        xruns += u64::from(SEVERE_XRUNS); // 이 창에서 푼다
+                    }
+                    for step in 0..4u32 {
+                        if let Some(d) = driver.as_mut() {
+                            d.note_wake(quiet);
+                            d.tick(quiet, t0 + WINDOW * w + quiet * step, xruns);
+                        }
+                        slot.sync_adaptive();
+                    }
+                }
+            });
+            assert_eq!(allocs, 0, "조건부 고정 경로가 할당했다");
+            if driver.is_some() {
+                let a = slot.adaptive_stats().unwrap();
+                assert_eq!((a.releases, a.rebinds, a.released), (1, 1, false), "{a:?}");
+                assert_eq!(slot.stats().unwrap().p_cores, PolicyResult::Applied);
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// P 코어 바쁨 추정의 계산: P 코어들의 유휴 사이클 증분 / TSC 증분의 평균을 100에서 뺀다.
+    #[test]
+    fn p_busy_is_one_minus_mean_idle_share() {
+        let prev = [0u64, 0, 0, 0];
+        // P = 번호 0·1. 0은 완전 유휴(1000/1000), 1은 절반 → 평균 유휴 75% → 바쁨 25%. 번호 2·3(E)은 보지 않는다
+        assert_eq!(p_busy_pct(&[1000, 500, 0, 0], &prev, &[0, 1], 1000), Some(25));
+        assert_eq!(p_busy_pct(&[0, 0, 1000, 1000], &prev, &[0, 1], 1000), Some(100));
+        assert_eq!(p_busy_pct(&[1000, 1000, 0, 0], &prev, &[0, 1], 1000), Some(0));
+        // 유휴 증분이 TSC 증분을 넘으면(읽는 시점 차이) 0%에서 멈춘다. 카운터가 줄어도 음수가 되지 않는다
+        assert_eq!(p_busy_pct(&[1200, 1100, 0, 0], &prev, &[0, 1], 1000), Some(0));
+        assert_eq!(p_busy_pct(&prev, &[5, 5, 5, 5], &[0, 1], 1000), Some(100));
+        assert_eq!(p_busy_pct(&[1, 1, 1, 1], &prev, &[0, 1], 0), None);
+        assert_eq!(p_busy_pct(&[1, 1, 1, 1], &prev, &[], 1000), None);
+        // 표가 없거나 그룹이 둘이면 재지 않는다
+        assert_eq!(PBusy::new(&[]).sample(), None);
+        assert_eq!(PBusy::new(&[(0, 0), (1, 0)]).sample(), None);
+    }
+
+    /// 실제 OS: P 코어 바쁨을 읽는다(x86_64 Windows — 값은 기계 상태에 달려 범위만 본다). 이 스레드가 P 코어 하나를 다 쓰는 동안은
+    /// 0%일 수 없다. 다른 플랫폼은 None.
+    #[test]
+    fn os_p_busy_reads_idle_cycles() {
+        init();
+        let procs = TABLES.get().unwrap().p_procs.clone();
+        let mut b = PBusy::new(&procs);
+        let t = std::time::Instant::now();
+        while t.elapsed() < std::time::Duration::from_millis(60) {
+            std::hint::spin_loop();
+        }
+        let got = b.sample();
+        if cfg!(all(windows, target_arch = "x86_64")) && !procs.is_empty() {
+            assert!(got.is_some_and(|v| v <= 100), "{got:?}");
+        } else {
+            assert_eq!(got, None);
         }
     }
 
@@ -784,10 +1407,10 @@ mod tests {
     #[test]
     fn default_policy_falls_back_quietly_when_os_call_fails() {
         use PolicyResult::*;
-        let default = PolicyChoice { high_qos: true, p_cores: false };
+        let default = PolicyRequest::for_engine(PolicyChoice { high_qos: true, p_cores: PCoreMode::Off });
         for _ in 0..2 {
-            let slot = PolicySlot::requested(default);
-            apply_to_slot(&slot, &[1, 2, 3, 4], || false, |_| panic!("꺼진 P 코어는 부르지 않는다"));
+            let slot = PolicySlot::requested(&default);
+            apply_to_slot(&slot, &[1, 2, 3, 4], Some((0, 0)), OsCalls { disable_throttling: || false, select_sets: never_set, set_ideal: never_ideal });
             if cfg!(windows) {
                 let s = slot.stats().unwrap();
                 assert_eq!(s, ThreadPolicy { high_qos: Failed, p_cores: Off });
@@ -798,14 +1421,19 @@ mod tests {
         }
     }
 
-    /// 비Windows: 실제 적용 함수는 OS를 부르지 않고(기본 정책이어도) 결과를 적지도 않는다. 보고는 null — 조용히 끔과 같다.
+    /// 비Windows: 실제 적용 함수는 OS를 부르지 않고(어떤 정책이어도) 결과를 적지도 않는다. 보고는 null — 조용히 끔과 같다.
+    /// 조건부 고정도 살아나지 않는다(판단기 없음).
     #[cfg(not(windows))]
     #[test]
     fn non_windows_applies_nothing_and_reports_null() {
-        let slot = PolicySlot::requested(PolicyChoice { high_qos: true, p_cores: true });
-        apply_thread_policy(&slot);
-        assert!(slot.stats().is_none());
-        assert_eq!(slot.high_qos.load(Ordering::Relaxed), PolicyResult::Pending as u8, "결과를 적지도 않는다");
+        for mode in [PCoreMode::Pin, PCoreMode::Prefer, PCoreMode::Adaptive] {
+            let slot = PolicySlot::requested(&PolicyRequest::for_engine(PolicyChoice { high_qos: true, p_cores: mode }));
+            apply_thread_policy(&slot);
+            assert!(slot.stats().is_none());
+            assert_eq!(slot.high_qos.load(Ordering::Relaxed), PolicyResult::Pending as u8, "결과를 적지도 않는다");
+            assert!(slot.adaptive_driver(std::time::Instant::now(), 0).is_none());
+            slot.sync_adaptive();
+        }
     }
 
     /// 정책 없는 슬롯(둘 다 꺼짐)으로 실제 적용 함수를 부르면 결과는 `off`·`off`다(OS 호출 없이 — 위 시험이 호출 없음을 고정한다).
@@ -814,6 +1442,7 @@ mod tests {
         std::thread::spawn(|| {
             let slot = PolicySlot::default();
             apply_thread_policy(&slot);
+            slot.sync_adaptive();
             if cfg!(windows) {
                 assert_eq!(slot.stats().unwrap(), ThreadPolicy { high_qos: PolicyResult::Off, p_cores: PolicyResult::Off });
             } else {
@@ -824,23 +1453,38 @@ mod tests {
         .unwrap();
     }
 
-    /// 실제 OS(Windows): 새 스레드에 두 정책을 걸면 HighQoS는 성공하고, P 코어 CPU set은 걸 집합이 있으면 성공·없으면 `skipped`다.
-    /// 시험 전용 스레드에서만 건다(스레드가 끝나면 사라진다).
+    /// 실제 OS(Windows): 새 스레드에 정책을 걸면 HighQoS는 성공하고, P 코어 정책(고정·선호 힌트·조건부 고정)은 걸 코어가 있으면
+    /// 성공·없으면 `skipped`다. 조건부 고정은 풀기 → 다시 묶기도 실제 호출로 지나간다. 시험 전용 스레드에서만 건다(스레드가 끝나면
+    /// 사라진다).
     #[test]
     fn os_policy_applies_on_this_thread() {
-        std::thread::spawn(|| {
-            init();
-            let ids = &TABLES.get().unwrap().p_set_ids;
-            let p = apply_with(PolicyChoice { high_qos: true, p_cores: true }, ids, os::disable_power_throttling, os::select_cpu_sets);
-            if cfg!(windows) {
-                assert_eq!(p.high_qos, PolicyResult::Applied);
-                assert_eq!(p.p_cores, if ids.is_empty() { PolicyResult::Skipped } else { PolicyResult::Applied });
-            } else {
-                assert_eq!(p, ThreadPolicy { high_qos: PolicyResult::Failed, p_cores: PolicyResult::Skipped });
-            }
-        })
-        .join()
-        .unwrap();
+        for mode in [PCoreMode::Pin, PCoreMode::Prefer, PCoreMode::Adaptive] {
+            std::thread::spawn(move || {
+                use super::super::pin_adapt::Verdict;
+                init();
+                let has_p = !TABLES.get().unwrap().p_set_ids.is_empty();
+                let req = PolicyRequest::for_engine(PolicyChoice { high_qos: true, p_cores: mode });
+                let slot = PolicySlot::requested(&req);
+                apply_thread_policy(&slot);
+                // 비Windows는 보고가 없다(걸지 않는다)
+                let Some(p) = slot.stats() else { return };
+                assert_eq!(p.high_qos, PolicyResult::Applied, "{mode:?}");
+                assert_eq!(p.p_cores, if has_p { PolicyResult::Applied } else { PolicyResult::Skipped }, "{mode:?}");
+                if mode == PCoreMode::Adaptive && has_p {
+                    let shared = req.adaptive.clone().unwrap();
+                    shared.publish(Verdict::Release, None);
+                    slot.sync_adaptive();
+                    assert_eq!(slot.stats().unwrap().p_cores, PolicyResult::Released);
+                    slot.sync_adaptive();
+                    assert_eq!(slot.stats().unwrap().p_cores, PolicyResult::Released, "바뀌지 않았으면 그대로");
+                    shared.publish(Verdict::Rebind, None);
+                    slot.sync_adaptive();
+                    assert_eq!(slot.stats().unwrap().p_cores, PolicyResult::Applied);
+                }
+            })
+            .join()
+            .unwrap();
+        }
     }
 
     #[test]

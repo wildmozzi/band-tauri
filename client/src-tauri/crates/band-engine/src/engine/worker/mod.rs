@@ -102,7 +102,7 @@ pub struct WorkerStats {
     pub(crate) media_peers: AtomicU64,
     /// 워커 스레드의 코어 배치 표본(P1-21): 반복마다(수면 제외 본문 시작) 지금 코어 종류를 센다.
     pub(crate) placement: crate::sys::placement::PlacementCounts,
-    /// 워커 스레드에 적용한 정책(P1-21 2단계, 시작 때 한 번 적는다).
+    /// 워커 스레드에 적용한 정책(P1-21 — 시작 때 한 번 적고, 조건부 고정이면 풀고 묶을 때마다 워커가 고쳐 적는다).
     pub(crate) thread_policy: crate::sys::placement::PolicySlot,
     /// 워커 반복 본문 시간(수면 제외)과 반복 시작 간격 분포(엔진 ③c 측정, 진단 전용 — 측정 시험이 비운다).
     pub(crate) iter_body: crate::net::txlat::SendLatency,
@@ -337,11 +337,16 @@ impl Worker {
         crate::sys::placement::apply_thread_policy(&self.ctx.stats.thread_policy);
         log::info!("워커 시작: frame {} ch {}", self.ctx.cfg.frame_samples(), self.ctx.cfg.channels);
         let mut last_start = Instant::now();
+        // 조건부 고정(P 코어 정책 3안)의 판단기: 그 정책이고 이 스레드가 실제로 묶였을 때만 있다(다른 정책은 None — 아래 갈래가
+        // 모두 건너뛴다). 버퍼는 여기서 잡는다(반복 안 할당 없음). 판단은 이 워커가 반복 끝에서 하고(RT 콜백 밖), 읽는 신호는
+        // RT 콜백이 올리는 xrun 카운터(원자값)와 이 스레드가 잰 기상 지연·본문 시간, 창마다 한 번의 P 코어 바쁨 추정이다.
+        let mut adaptive = self.ctx.stats.thread_policy.adaptive_driver(last_start, self.ctx.counters.xruns.load(Ordering::Relaxed));
         // 할당 계수(시험 구성만, 엔진 ⑧ 후속): 반복 하나 전체(수면 제외)를 이 스레드의 계수 구간으로 감싼다. 계수는 스레드별이라
         // 다른 스레드(제어 평면·net·RT)의 할당은 섞이지 않는다. `stats`는 루프 밖에서 한 번 복제한다.
         #[cfg(any(test, feature = "test-support"))]
         let stats = self.ctx.stats.clone();
         while !self.ctx.stop.load(Ordering::Relaxed) {
+            let body_at = adaptive.as_ref().map(|_| Instant::now());
             #[cfg(any(test, feature = "test-support"))]
             let deadline = {
                 let (deadline, n) = crate::sys::alloc::counted(|| self.iterate(&mut last_start));
@@ -351,6 +356,12 @@ impl Worker {
             };
             #[cfg(not(any(test, feature = "test-support")))]
             let deadline = self.iterate(&mut last_start);
+            if let (Some(a), Some(at)) = (adaptive.as_mut(), body_at) {
+                let now = Instant::now();
+                a.tick(now - at, now, self.ctx.counters.xruns.load(Ordering::Relaxed));
+            }
+            // 판단이 바뀌었으면 이 스레드에 풀기/묶기를 한 번 부른다(다른 정책이면 분기 하나).
+            self.ctx.stats.thread_policy.sync_adaptive();
             // 은닉 마감이 가까우면 짧게 자고, 아주 가까우면 자지 않고 마감까지 돈다(P2-17g, `Nap::pick`): 수면 overshoot 꼬리가
             // 다음 콜백을 넘지 않게. 돌기는 최대 `FINE_POLL`이다.
             let pick = Nap::pick(self.ctx.wall_us(), deadline);
@@ -367,7 +378,11 @@ impl Worker {
             };
             let slept_at = Instant::now();
             std::thread::sleep(nap);
-            self.ctx.stats.sleep_over.record(slept_at.elapsed().saturating_sub(nap));
+            let over = slept_at.elapsed().saturating_sub(nap);
+            self.ctx.stats.sleep_over.record(over);
+            if let Some(a) = adaptive.as_mut() {
+                a.note_wake(over);
+            }
         }
         let c = &self.ctx;
         self.peers.close(&c.bank);

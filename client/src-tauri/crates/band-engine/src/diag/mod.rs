@@ -129,10 +129,12 @@ impl Diagnostics {
                     }
                 }
                 g.last_placement = cum.map(|c| (s.session, c));
-                // 스레드 정책은 값이 바뀐 줄에만(세션 첫 줄 포함) 넣는다 — 스레드 시작 때 한 번 정해지는 값이다.
+                // 스레드 정책은 상태가 바뀐 줄에만(세션 첫 줄 포함) 넣는다 — 스레드 시작 때 한 번 정해지고, 조건부 고정(P 코어 정책
+                // 3안)만 풀거나 다시 묶을 때 바뀐다. 창마다 흔들리는 P 코어 바쁨 추정은 견주지 않는다(`state_key`) — 그 값은
+                // 상태가 바뀐 줄에 그때의 값으로만 남는다.
                 match sample.thread_policy {
-                    Some(p) if g.last_policy == Some((s.session, p)) => sample.thread_policy = None,
-                    Some(p) => g.last_policy = Some((s.session, p)),
+                    Some(p) if g.last_policy == Some((s.session, p.state_key())) => sample.thread_policy = None,
+                    Some(p) => g.last_policy = Some((s.session, p.state_key())),
                     None => {}
                 }
                 // NAT 추정(세션 동안 그대로)·송신 큐 p99(2초 창)도 값이 바뀐 줄에만 넣는다(format 3, 60분 zip 크기).
@@ -245,8 +247,8 @@ mod tests {
     /// 스레드 정책(P1-21 2단계): 타임라인에는 세션에서 값이 바뀐 줄에만 들어가고, 세션이 바뀌면 다시 들어간다.
     #[test]
     fn thread_policy_is_recorded_only_when_it_changes() {
-        use crate::sys::placement::{PolicyResult, ThreadPolicy, ThreadPolicyStats};
-        let pol = |q| ThreadPolicyStats { worker: ThreadPolicy { high_qos: q, p_cores: PolicyResult::Off }, net_recv: None };
+        use crate::sys::placement::{PCoreMode, PolicyResult, ThreadPolicy, ThreadPolicyStats};
+        let pol = |q| ThreadPolicyStats { worker: ThreadPolicy { high_qos: q, p_cores: PolicyResult::Off }, net_recv: None, p_core_mode: PCoreMode::Off, adaptive: None };
         let snap = |session: u64, q| {
             let mut s = super::tests::snap(true);
             s.session = session;
@@ -267,9 +269,39 @@ mod tests {
             assert_eq!(timeline::session_policy(tl, 7), None);
             // 줄 형식: 값이 없는 줄에는 키가 없다
             let lines: Vec<String> = timeline::to_jsonl(tl).lines().map(str::to_string).collect();
-            assert!(lines[1].contains("\"threadPolicy\":{\"worker\":{\"highQos\":\"applied\",\"pCores\":\"off\"},\"netRecv\":null}"), "{}", lines[1]);
+            assert!(lines[1].contains("\"threadPolicy\":{\"worker\":{\"highQos\":\"applied\",\"pCores\":\"off\"},\"netRecv\":null,\"pCoreMode\":\"off\",\"adaptive\":null}"), "{}", lines[1]);
             assert!(!lines[2].contains("threadPolicy"), "{}", lines[2]);
         });
+        // 조건부 고정(P 코어 정책 3안): 풀거나 다시 묶은 줄에만 들어간다. P 코어 바쁨 추정만 바뀐 줄은 넣지 않는다
+        {
+            use crate::sys::pin_adapt::AdaptiveStats;
+            let ad = |p_cores, released, releases, busy| ThreadPolicyStats {
+                worker: ThreadPolicy { high_qos: PolicyResult::Applied, p_cores },
+                net_recv: None,
+                p_core_mode: PCoreMode::Adaptive,
+                adaptive: Some(AdaptiveStats { released, releases, rebinds: 0, p_busy_pct: busy }),
+            };
+            let d = Diagnostics::new(16);
+            let steps = [
+                ad(PolicyResult::Applied, false, 0, Some(10)),
+                ad(PolicyResult::Applied, false, 0, Some(35)), // 바쁨만 바뀜
+                ad(PolicyResult::Applied, false, 0, None),     // 바쁨만 바뀜
+                ad(PolicyResult::Released, true, 1, Some(97)), // 풀림
+                ad(PolicyResult::Released, true, 1, Some(40)), // 바쁨만 바뀜
+            ];
+            for (i, st) in steps.iter().enumerate() {
+                let mut s = super::tests::snap(true);
+                s.session = 3;
+                s.stats.thread_policy = Some(*st);
+                d.record(1_000 * (i as u64 + 1), Some(s));
+            }
+            d.with_timeline(|tl, _, _| {
+                let got: Vec<_> = tl.iter().map(|s| s.thread_policy).collect();
+                assert_eq!(got, vec![Some(steps[0]), None, None, Some(steps[3]), None]);
+                let lines: Vec<String> = timeline::to_jsonl(tl).lines().map(str::to_string).collect();
+                assert!(lines[3].contains("\"pCores\":\"released\"") && lines[3].contains("\"adaptive\":{\"released\":true,\"releases\":1,\"rebinds\":0,\"pBusyPct\":97}"), "{}", lines[3]);
+            });
+        }
         // 링이 넘쳐 값이 있는 줄을 버리면 같은 세션의 다음 줄이 물려받는다
         let mut dropped = timeline::Sample::from_stats(1, true, 9, &snap(9, PolicyResult::Applied).stats);
         dropped.thread_policy = Some(pol(PolicyResult::Applied));

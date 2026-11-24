@@ -150,6 +150,7 @@ describe('스레드 정책 토글 설명(P1-21)', () => {
     }
     expect(THREAD_POLICY_OPTIONS[1].caution).toContain('넘어가지 못해')
     expect(THREAD_POLICY_OPTIONS[1].label).not.toContain('선호')
+    expect(THREAD_POLICY_OPTIONS[1].caution).toContain('어느 방식도 적용되지 않습니다')
   })
 })
 
@@ -221,12 +222,73 @@ describe('스레드 정책 적용 결과 한 줄(#245 재리뷰 L2)', () => {
     // 확인 중(pending)은 판단하지 않는다
     expect(threadPolicyStatus('highQos', true, true, tp(['pending', 'off']), false)?.text).toContain('적용하는 중')
   })
+  describe('P 코어 정책 방식(끔·고정·선호·조건부 고정, P1-21 3단계 ②)', () => {
+    const live = (pCores: [string, string], pCoreMode: string | undefined, adaptive: unknown = null) => ({
+      stats: {
+        threadPolicy: {
+          worker: { highQos: 'applied', pCores: pCores[0] },
+          netRecv: { highQos: 'applied', pCores: pCores[1] },
+          pCoreMode,
+          adaptive,
+        } as never,
+      },
+    })
+    const st = (l: ReturnType<typeof live>, want: 'off' | 'pin' | 'prefer' | 'adaptive', started: 'off' | 'pin' | 'prefer' | 'adaptive' | null = want) =>
+      threadPolicyStatus('preferPCores', want !== 'off', true, l, started === null ? null : started !== 'off', { want, started })
+
+    it('방식마다 적용 문구가 다르다. 옛 엔진(pCoreMode 없음)은 고정으로 읽는다', () => {
+      expect(st(live(['applied', 'applied'], 'pin'), 'pin')).toEqual({ text: '적용됨 — 엔진 스레드가 고성능 코어 집합 안에서만 돕니다.', tone: 'ok' })
+      expect(st(live(['applied', 'applied'], undefined), 'pin')?.text).toContain('집합 안에서만')
+      const prefer = st(live(['applied', 'applied'], 'prefer'), 'prefer')
+      expect(prefer?.tone).toBe('ok')
+      expect(prefer?.text).toContain('선호 코어로 알렸습니다')
+      const adaptive = st(live(['applied', 'applied'], 'adaptive', { released: false, releases: 0, rebinds: 0, pBusyPct: 20 }), 'adaptive')
+      expect(adaptive?.tone).toBe('ok')
+      expect(adaptive?.text).toContain('끊김이 늘면 자동으로 풉니다')
+      expect(adaptive?.text).not.toContain('번 풀었다가')
+      expect(st(live(['applied', 'applied'], 'adaptive', { released: false, releases: 2, rebinds: 2, pBusyPct: null }), 'adaptive')?.text).toContain('2번 풀었다가')
+    })
+    it('조건부 고정이 풀어 둔 상태는 경고가 아니라 안내 — 횟수를 함께 보인다', () => {
+      const s = st(live(['released', 'released'], 'adaptive', { released: true, releases: 3, rebinds: 2, pBusyPct: 97 }), 'adaptive')
+      expect(s?.tone).toBe('info')
+      expect(s?.text).toContain('지금은 풀려 있습니다')
+      expect(s?.text).toContain('3번 풀고 2번 다시 묶음')
+      // 한 스레드만 먼저 풀린 순간도 같다
+      expect(st(live(['released', 'applied'], 'adaptive', { released: true, releases: 1, rebinds: 0, pBusyPct: null }), 'adaptive')?.text).toContain('지금은 풀려 있습니다')
+      // 방식을 끈 뒤에도 실행 중 엔진에는 걸려 있다
+      expect(st(live(['released', 'released'], 'adaptive'), 'off', 'adaptive')?.text).toContain('다시 시작하면 꺼집니다')
+    })
+    it('실행 중에 방식만 바꾸면 다시 시작 안내', () => {
+      const s = st(live(['applied', 'applied'], 'pin'), 'prefer', 'pin')
+      expect(s?.tone).toBe('info')
+      expect(s?.text).toBe('지금 엔진에는 "고정" 방식으로 걸려 있습니다 — 연주(또는 테스트 모니터)를 다시 시작하면 "선호"(으)로 바뀝니다.')
+      expect(st(live(['off', 'off'], 'off'), 'adaptive', 'off')?.text).toContain('다시 시작하면 적용')
+    })
+    it('시작 때 넘긴 방식과 엔진이 건 방식이 다르면 환경변수가 덮은 것', () => {
+      const s = st(live(['applied', 'applied'], 'pin'), 'adaptive', 'adaptive')
+      expect(s?.tone).toBe('warn')
+      expect(s?.text).toContain('환경변수 BAND_THREAD_POLICY')
+      expect(s?.text).toContain('"고정" 방식으로 걸려 있습니다')
+      // 끈 채 시작했는데 걸려 있음(기존 규칙)
+      expect(st(live(['applied', 'applied'], 'prefer'), 'off', 'off')?.text).toContain('환경변수')
+      // 시작 값을 모르면(null) 환경변수라고 단정하지 않는다
+      expect(st(live(['applied', 'applied'], 'pin'), 'pin', null)?.tone).toBe('ok')
+    })
+    it('걸 코어가 없으면 어느 방식이든 "적용되지 않음"', () => {
+      for (const m of ['pin', 'prefer', 'adaptive'] as const) {
+        const s = st(live(['skipped', 'skipped'], m), m)
+        expect(s?.tone).toBe('warn')
+        expect(s?.text).toContain('고성능 코어가 4개 미만')
+      }
+    })
+  })
+
   it('UA로 Windows 판정', () => {
     expect(isWindowsUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130')).toBe(true)
     expect(isWindowsUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15')).toBe(false)
     expect(isWindowsUserAgent(undefined)).toBeNull()
   })
-  it('P 코어 라벨은 "묶어 두기"(계약 이름 preferPCores와 달리 선호가 아님)', () => {
-    expect(THREAD_POLICY_OPTIONS[1].label).toContain('묶어 두기')
+  it('P 코어 항목 라벨은 방식을 가리지 않는 말("두기") — 방식 이름은 선택지(P_CORE_MODE_OPTIONS)가 말한다', () => {
+    expect(THREAD_POLICY_OPTIONS[1].label).toBe('엔진 스레드를 고성능 코어에 두기')
   })
 })

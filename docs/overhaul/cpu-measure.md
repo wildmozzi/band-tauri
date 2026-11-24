@@ -78,6 +78,26 @@ node scripts/cpu-compare.mjs stats --in policy-runs.csv --before off --after bot
 - xrun처럼 드문 꼬리는 평균이 아니라 **실행별 원값과 "xrun이 난 실행 수"**로 적는다(#245 리뷰 M2).
 - 결과: [core-placement-2026-11-20.md](core-placement-2026-11-20.md).
 
+## 4. P 코어 정책 4종 × 환경 2종 — `policy_matrix` (P1-21 3단계 ②)
+
+P 코어 "우선 배치"의 기본값을 정하는 측정이다. 3절의 `cpu-compare.mjs` 대신 **한 명령**으로 전체가 돈다(정책 넷이 모두 HighQoS 켬이고, 경합 부하 프로세스를 도구가 직접 띄우고 내린다).
+
+```sh
+cd client/src-tauri
+cargo run --release -p band-engine --example policy_matrix -- --dry-run     # 계획과 예상 소요 시간만
+cargo run --release -p band-engine --example policy_matrix                  # 본측정: 10라운드 × 환경 2 × 정책 4 × 구성 6, 창 20초 — 약 3시간 17분
+cargo run --release -p band-engine --example policy_matrix -- --minutes 90  # 시간에 맞춰 라운드 수를 정한다(90분 → 4라운드)
+```
+
+- 정책: `off`(끔 = `BAND_THREAD_POLICY=highqos`) · `pin`(고정 = `highqos+pin`) · `prefer`(선호 힌트, 2안 = `highqos+prefer`) · `adaptive`(조건부 고정, 3안 = `highqos+adaptive`).
+- 환경: `quiet`(조용함) · `contended`(경합). 경합은 **다른 프로세스**(같은 실행파일의 부하 모드)가 P 코어 논리 프로세서 수만큼 바쁜 스레드를 띄운다 — 스레드마다 P 코어 CPU set에 묶이고 엔진 스레드와 같은 MMCSS "Pro Audio"로 등록한다(`--hog-prio mmcss`, 기본. `normal`이면 2단계 5절과 같은 보통 우선순위). `--hog-threads`·`--hog-duty`로 세기를 바꾼다. 부하 프로세스는 부모가 죽어도 실행 하나 길이 + 60초 뒤 스스로 끝난다.
+- 순서: 짝수 라운드는 환경·정책 정순, 홀수 라운드는 통째로 역순. 실행 하나 = 새 프로세스에서 구성마다 (예열 + 측정 창).
+- 먼저 **프로브**가 선호 힌트의 강제성을 본다: 보통 우선순위 바쁜 스레드를 P 코어 수의 2배만큼 띄워 `off`·`prefer`·`pin`을 걸고, P에 머문 비율과 프로세스가 쓴 코어 수를 잰다(고정이면 P 100%·코어 ≈ P 수, soft면 E로 넘쳐 코어 ≈ 스레드 수).
+- 결과: `--out` 폴더(기본 `policy-matrix-<UTC 시각>`)의 `results.md`(환경별 표: 워커 CPU, `iter_body` p50/p99, xrun, 최대 은닉, 워커·수신 P 비율, 워커 LP-E 비율, 조건부 고정의 풀기·다시 묶기 횟수, xrun 원값, 부하가 실제로 쓴 코어 수) · `results.json`(요약 + 실행별 원값) · `runs.jsonl`(실행이 끝날 때마다 한 줄 — 중간에 멈춰도 남는다).
+- 측정 창 기본값이 20초인 이유: 조건부 고정은 1초 창으로 판단하고 푼 뒤 최소 10초를 기다린다 — 2단계의 12초 창으로는 풀린 뒤의 동작이 창에 들어오지 않는다. 그래도 구성마다 엔진을 새로 시작하므로 "오래 버틴 뒤의 동작"(기다림이 늘어나는 이력)은 이 도구로 보지 못한다(판단 로직 단위 시험과 Soak의 몫).
+- **주의**: 경합 환경은 실시간 우선순위 스레드로 P 코어를 채운다 — 도는 동안 같은 PC의 다른 일이 느려지고, 다른 작업이 돌면 수치가 오염된다. **조용한 시간에, AC 전원으로** 돌린다(전원 상태는 라운드마다 `results.md` 머리에 기록된다 — 도중에 바뀌었으면 그 라운드부터 따로 본다).
+- 표본 통계(평균 ± 표준편차, 중앙값)만 낸다. 쌍별 차·구간이 필요하면 `results.json`의 `runs[].rows`를 같은 라운드끼리 짝지어 계산한다.
+
 ## 기록
 
 PR에는 다음을 적는다.

@@ -133,7 +133,7 @@ pub struct NetShared {
     pub recv_prio: band_dsp::prio_slot::PrioSlot,
     /// 수신 스레드의 코어 배치 표본(P1-21): 수신 루프가 깨어날 때마다 센다.
     pub(crate) recv_placement: crate::sys::placement::PlacementCounts,
-    /// 수신 스레드에 적용한 정책(P1-21 2단계, 시작 때 한 번 적는다).
+    /// 수신 스레드에 적용한 정책(P1-21 — 시작 때 한 번 적고, 조건부 고정이면 풀고 묶을 때마다 수신 스레드가 고쳐 적는다).
     pub(crate) recv_policy: crate::sys::placement::PolicySlot,
     allow_loopback: bool,
     /// UDP 릴레이 클라이언트(P1-4b). 토큰을 받기 전에는 None.
@@ -231,11 +231,11 @@ fn lan_addresses() -> Vec<Ipv4Addr> {
 
 impl Net {
     pub fn start(local_peer_id: String, opts: &NetOptions) -> Result<Net, String> {
-        Self::start_with_policy(local_peer_id, opts, Default::default())
+        Self::start_with_policy(local_peer_id, opts, &Default::default())
     }
 
     /// `start` + 수신 스레드에 걸 코어 배치 정책(P1-21 — 엔진이 설정·환경변수에서 정해 넘긴다. 엔진 없이 여는 `start`는 정책 없음).
-    pub(crate) fn start_with_policy(local_peer_id: String, opts: &NetOptions, thread_policy: crate::sys::placement::PolicyChoice) -> Result<Net, String> {
+    pub(crate) fn start_with_policy(local_peer_id: String, opts: &NetOptions, thread_policy: &crate::sys::placement::PolicyRequest) -> Result<Net, String> {
         if local_peer_id.is_empty() || local_peer_id.len() > peer::MAX_PEER_ID_BYTES {
             return Err("peerId는 1..64바이트여야 합니다".into());
         }

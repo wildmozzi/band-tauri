@@ -12,3 +12,6 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# 측정 도구 결과 폴더(cargo run --example policy_matrix — 기본 이름)
+/policy-matrix-*/

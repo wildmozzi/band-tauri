@@ -150,6 +150,12 @@ impl AudioThreadGuard {
     pub(crate) fn status(&self) -> ThreadPriority {
         self.status
     }
+
+    /// 측정 도구용: MMCSS "Pro Audio" 등록이 됐는가(엔진 스레드와 같은 우선순위인지 — 부하 생성기가 보고한다).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_mmcss(&self) -> bool {
+        self.status == ThreadPriority::Mmcss
+    }
 }
 
 /// 현재 스레드를 오디오 처리용으로 설정한다(FTZ/DAZ + Windows MMCSS). 결과를 로그에 남긴다.

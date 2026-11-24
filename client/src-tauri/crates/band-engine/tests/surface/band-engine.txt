@@ -620,7 +620,10 @@ sys/cpu.rs	fn	cycle_pct
 sys/cpu.rs	fn	process_cycles
 sys/cpu.rs	fn	tsc_now
 sys/mod.rs	mod	time
+sys/placement.rs	fn	apply_policy_to_current_thread
+sys/placement.rs	fn	current_core_kind
 sys/placement.rs	fn	describe_cores
+sys/placement.rs	fn	p_core_count
 sys/placement.rs	fn	pin_process
 sys/prio.rs	field	audio
 sys/prio.rs	field	net_recv
@@ -630,6 +633,7 @@ sys/prio.rs	fn	promote_current_thread
 sys/prio.rs	fn	promote_engine_thread
 sys/prio.rs	fn	set_engine_promotion
 sys/prio.rs	fn	set_engine_promotion_parts
+sys/prio.rs	method	is_mmcss
 sys/prio.rs	struct	AudioThreadGuard
 sys/prio.rs	struct	ThreadPriorityStats
 sys/time.rs	fn	unix_ms

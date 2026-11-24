@@ -228,7 +228,7 @@ fn doc_fields(doc: &str, name: &str) -> Option<Vec<String>> {
 }
 
 /// 계약 타입 (Rust 구조체, TS interface) 짝. `MarkerTrack`은 TS에서 인라인 타입이라 따로 본다.
-const CONTRACT_PAIRS: [(&str, &str); 33] = [
+const CONTRACT_PAIRS: [(&str, &str); 34] = [
     ("EngineStats", "EngineStats"),
     ("LossShapeStats", "LossShapeStats"),
     ("ResamplerStats", "ResamplerStats"),
@@ -243,6 +243,7 @@ const CONTRACT_PAIRS: [(&str, &str); 33] = [
     ("ThreadPolicy", "ThreadPolicy"),
     ("ThreadPolicyConfig", "ThreadPolicyConfig"),
     ("ThreadPolicyStats", "ThreadPolicyStats"),
+    ("AdaptiveStats", "AdaptivePinStats"),
     ("DeviceInfo", "DeviceInfo"),
     ("EngineConfig", "EngineConfig"),
     ("Candidate", "Candidate"),

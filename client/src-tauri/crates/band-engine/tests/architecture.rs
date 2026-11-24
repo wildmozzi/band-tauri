@@ -36,6 +36,7 @@ const NODES: &[(&str, u8)] = &[
     ("sys", 0),
     ("sys::prio", 0),
     ("sys::cpu", 0),
+    ("sys::pin_adapt", 0),
     ("sys::placement", 0),
     ("sys::time", 0),
     // 1 알고리즘·상태(스레드·소켓 없음). 이 크레이트에 남은 것 — `band-dsp`가 쓰지 않는 순수 노드와 OS 난수·정규식을 쓰는 노드.

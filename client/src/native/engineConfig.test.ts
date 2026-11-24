@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_ENGINE_CONFIG,
   DEFAULT_THREAD_POLICY,
+  P_CORE_MODE_OPTIONS,
   normalizeThreadPolicy,
+  pCoreModeOf,
+  withPCoreMode,
   ENGINE_PRESETS,
   JITTER_PROFILE_DEFAULT,
   applyPreset,
@@ -312,6 +315,48 @@ describe('엔진 스레드 코어 배치 정책(P1-21 — 절전 끄기 기본 �
     expect(applyPreset(stored, 'ultraLow').threadPolicy).toEqual(on)
     // 항목이 빠지면 그 항목만 기본값(절전 끄기 켬)
     expect(parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: { preferPCores: true } } }).config.threadPolicy).toEqual({ highQos: true, preferPCores: true })
+  })
+})
+
+describe('P 코어 정책(P1-21 3단계 ② — 끔·고정·선호·조건부 고정)', () => {
+  it('선택지는 넷이고 고정만 "묶어 두기", 선호는 옮겨질 수 있음을 말한다', () => {
+    expect(P_CORE_MODE_OPTIONS.map((o) => o.id)).toEqual(['off', 'pin', 'prefer', 'adaptive'])
+    const by = Object.fromEntries(P_CORE_MODE_OPTIONS.map((o) => [o.id, o]))
+    expect(by.pin.label).toContain('묶어 두기')
+    expect(by.pin.desc).toContain('넘어가지 못해')
+    expect(by.prefer.desc).toContain('옮겨집니다')
+    expect(by.adaptive.desc).toContain('풀었다가')
+  })
+  it('끔·고정은 옛 저장 모양 그대로(pCoreMode 없음), 선호·조건부 고정만 pCoreMode를 적는다', () => {
+    const base = { highQos: true, preferPCores: false }
+    expect(withPCoreMode(base, 'off')).toEqual({ highQos: true, preferPCores: false })
+    expect(withPCoreMode(base, 'pin')).toEqual({ highQos: true, preferPCores: true })
+    expect(withPCoreMode(base, 'prefer')).toEqual({ highQos: true, preferPCores: false, pCoreMode: 'prefer' })
+    expect(withPCoreMode({ highQos: false, preferPCores: true }, 'adaptive')).toEqual({ highQos: false, preferPCores: false, pCoreMode: 'adaptive' })
+    expect('pCoreMode' in withPCoreMode({ ...base, pCoreMode: 'prefer' }, 'pin')).toBe(false)
+    for (const m of ['off', 'pin', 'prefer', 'adaptive'] as const) {
+      expect(pCoreModeOf(withPCoreMode(base, m))).toBe(m)
+    }
+  })
+  it('읽기: pCoreMode가 있으면 그것, 없으면 옛 preferPCores(true = 고정) — 엔진과 같은 규칙', () => {
+    expect(pCoreModeOf(undefined)).toBe('off')
+    expect(pCoreModeOf({ highQos: true, preferPCores: true })).toBe('pin')
+    expect(pCoreModeOf({ highQos: true, preferPCores: true, pCoreMode: 'off' })).toBe('off')
+    expect(pCoreModeOf({ highQos: true, preferPCores: false, pCoreMode: null })).toBe('off')
+    expect(pCoreModeOf({ highQos: true, preferPCores: true, pCoreMode: 'soft' as never })).toBe('pin')
+  })
+  it('정규화: 2단계 저장값(preferPCores)은 그대로, 새 값은 보존, 이상한 pCoreMode는 옛 필드를 따른다', () => {
+    expect(normalizeThreadPolicy({ highQos: true, preferPCores: true })).toEqual({ highQos: true, preferPCores: true })
+    expect(normalizeThreadPolicy({ highQos: false, preferPCores: false, pCoreMode: 'adaptive' })).toEqual({ highQos: false, preferPCores: false, pCoreMode: 'adaptive' })
+    expect(normalizeThreadPolicy({ pCoreMode: 'prefer', preferPCores: true })).toEqual({ highQos: true, preferPCores: false, pCoreMode: 'prefer' })
+    expect(normalizeThreadPolicy({ pCoreMode: 'pin' })).toEqual({ highQos: true, preferPCores: true })
+    expect(normalizeThreadPolicy({ pCoreMode: 'off', preferPCores: true })).toEqual({ highQos: true, preferPCores: false })
+    expect(normalizeThreadPolicy({ pCoreMode: 'soft', preferPCores: true })).toEqual({ highQos: true, preferPCores: true })
+    expect(normalizeThreadPolicy({ pCoreMode: 3 })).toEqual({ highQos: true, preferPCores: false })
+    // 설정 전체를 거쳐도 남고, 프리셋을 바꿔도 유지된다
+    const stored = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: { highQos: true, preferPCores: false, pCoreMode: 'adaptive' } } }).config
+    expect(pCoreModeOf(stored.threadPolicy)).toBe('adaptive')
+    expect(pCoreModeOf(applyPreset(stored, 'ultraLow').threadPolicy)).toBe('adaptive')
   })
 })
 
