@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   MixBroadcaster,
   MixSource,
@@ -9,7 +9,20 @@ import {
   type PeerConnectionLike,
 } from './mixBridge'
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+/**
+ * 가짜 타이머로 시간을 ms만큼 흘린다(P3-29). 실제 sleep은 부하에 따라 타이머가 몰려 돌고, setTimeout(단조 시계)과
+ * Date.now()(벽시계)가 1ms 어긋나 시간 판정 시험이 가끔 실패했다. 가짜 타이머는 둘을 같은 시계로 움직인다.
+ */
+const advance = (ms: number) => vi.advanceTimersByTimeAsync(ms)
+/** 타이머를 쓰는 describe 안에서 부른다 */
+function useFakeClock() {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+}
 const flush = async () => {
   for (let i = 0; i < 10; i++) await Promise.resolve()
 }
@@ -232,6 +245,8 @@ function broadcaster(opts: { timeout?: number } = {}) {
 }
 
 describe('MixBroadcaster', () => {
+  useFakeClock()
+
   it('관람자마다 sendonly offer를 보내고 목록에서 빠지면 닫는다', async () => {
     const { b, sent } = broadcaster()
     await b.start(['v1', 'v2'])
@@ -246,7 +261,7 @@ describe('MixBroadcaster', () => {
     const { b, sent } = broadcaster({ timeout: 20 })
     await b.start(['v1'])
     await flush()
-    await sleep(40)
+    await advance(40)
     expect(FakePc.all[0].closed).toBe(true)
     expect(b.hasPeer('v1')).toBe(false)
     b.syncViewers(['v1'])
@@ -275,7 +290,7 @@ describe('MixBroadcaster', () => {
     await b.start(['v1'])
     await flush()
     FakePc.all[0].connect()
-    await sleep(40)
+    await advance(40)
     expect(FakePc.all[0].closed).toBe(false)
   })
 
@@ -309,6 +324,8 @@ describe('MixBroadcaster', () => {
 })
 
 describe('MixBroadcaster 중계 속도 제한 대응(서버 부하 발굴)', () => {
+  useFakeClock()
+
   function paced() {
     FakePc.all = []
     const deps = new FakeGraphDeps()
@@ -336,9 +353,9 @@ describe('MixBroadcaster 중계 속도 제한 대응(서버 부하 발굴)', () 
     FakePc.all[0].onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'c1' }) } })
     FakePc.all[0].onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'c2' }) } })
     expect(sent.filter((m) => m.type === 'ice-candidate')).toHaveLength(0)
-    await sleep(15)
+    await advance(15)
     expect(sent.filter((m) => m.type === 'ice-candidate')).toHaveLength(1)
-    await sleep(60)
+    await advance(60)
     expect(sent.filter((m) => m.type === 'ice-candidate')).toHaveLength(2)
     // 1회 재offer: v2만(옛 PC는 닫힘)
     const offers = sent.filter((m) => m.type === 'offer').map((m) => m.to)
@@ -357,13 +374,15 @@ describe('MixBroadcaster 중계 속도 제한 대응(서버 부하 발굴)', () 
     b.onRelayRateLimited()
     FakePc.all[0].onicecandidate?.({ candidate: { toJSON: () => ({ candidate: 'c2' }) } })
     b.stop()
-    await sleep(60)
+    await advance(60)
     expect(sent.filter((m) => m.type === 'ice-candidate')).toHaveLength(1)
     expect(sent.filter((m) => m.type === 'offer')).toHaveLength(1)
   })
 })
 
 describe('MixBroadcaster 재offer 대상(#215 리뷰 M2)', () => {
+  useFakeClock()
+
   function make(intervalMs: number) {
     FakePc.all = []
     const deps = new FakeGraphDeps()
@@ -385,10 +404,25 @@ describe('MixBroadcaster 재offer 대상(#215 리뷰 M2)', () => {
     b.onRelayRateLimited() // 늦춰 보내기 시작
     b.syncViewers(['v1', 'v2'])
     await flush()
-    await sleep(60) // 재offer 시점 지남: 둘 다 줄에 있음(offerSentAt 없음)
+    await advance(60) // 재offer 시점 지남: 둘 다 줄에 있음(offerSentAt 없음)
     expect(FakePc.all).toHaveLength(2)
     expect(FakePc.all.some((pc) => pc.closed)).toBe(false)
     expect(sent.filter((m) => m.type === 'offer')).toHaveLength(0)
+    b.stop()
+  })
+
+  it('알림 직전에 보낸 offer는 타이머가 Date.now() 기준 1ms 일찍 돌아도 재offer 대상이다(P3-29)', async () => {
+    const { b, sent } = make(5)
+    await b.start(['v1'])
+    await flush()
+    b.onRelayRateLimited() // offer를 보낸 같은 ms에 알림
+    // 실제 환경: setTimeout(단조 시계)이 돌 때 Date.now()(벽시계)로는 relayReofferDelayMs보다 1ms 덜 지난 것으로 보일 수 있다
+    vi.setSystemTime(Date.now() - 1)
+    await advance(30)
+    await flush()
+    await advance(10) // 재offer가 늦춰 보내기 줄을 거쳐 나간다
+    expect(sent.filter((m) => m.type === 'offer').map((m) => m.to)).toEqual(['v1', 'v1'])
+    expect(FakePc.all[0].closed).toBe(true)
     b.stop()
   })
 
@@ -396,14 +430,14 @@ describe('MixBroadcaster 재offer 대상(#215 리뷰 M2)', () => {
     const { b, sent } = make(5)
     await b.start(['v1'])
     await flush()
-    await sleep(40) // offer를 보낸 지 relayReofferDelayMs가 지남
+    await advance(40) // offer를 보낸 지 relayReofferDelayMs가 지남
     b.onRelayRateLimited()
-    await sleep(60)
+    await advance(60)
     await flush()
     expect(sent.filter((m) => m.type === 'offer')).toHaveLength(2) // 처음 + 재offer 1회
     for (let i = 0; i < 3; i++) {
       b.onRelayRateLimited() // 같은 창 안
-      await sleep(40)
+      await advance(40)
     }
     await flush()
     expect(sent.filter((m) => m.type === 'offer')).toHaveLength(2)
