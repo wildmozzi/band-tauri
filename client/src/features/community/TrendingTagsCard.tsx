@@ -25,6 +25,7 @@ export function TrendingTagsCard({ tags, loadError = false, onTagClick }: Trendi
         ) : (
           tags.map(({ tag, count }) => (
             <span
+              className="community-chip-touch"
               key={tag}
               onClick={onTagClick}
               style={{

@@ -7,6 +7,7 @@ import { PostArticle } from './PostArticle'
 import { TrendingTagsCard } from './TrendingTagsCard'
 import { usePostDetail } from './usePostDetail'
 import './communityFeed.css'
+import './communityTouch.css'
 
 export function PostDetail() {
   const { postId } = useParams<{ postId: string }>()
@@ -69,6 +70,7 @@ export function PostDetail() {
     <div style={{ maxWidth: '1400px', margin: '0 auto', padding: 'var(--space-6)' }}>
       {/* 뒤로가기 버튼 */}
       <button
+        className="community-touch"
         onClick={() => navigate('/community')}
         style={{
           background: 'transparent',
