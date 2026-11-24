@@ -26,6 +26,11 @@ const native = vi.hoisted(() => ({
   testStarts: [] as EngineConfig[],
   /** engine_list_devices 호출 수(정상 경로에 추가 IPC가 없는지) */
   listCalls: 0,
+  /** engine_stats가 돌려줄 값(테스트 모니터 폴링) */
+  stats: null as { deviceReset?: boolean } | null,
+  /** engine_test_start를 이 횟수만큼 실패시킨다 */
+  testStartFailures: 0,
+  testStops: 0,
 }))
 vi.mock('../../native/engineApi', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../native/engineApi')>()
@@ -39,15 +44,24 @@ vi.mock('../../native/engineApi', async (importOriginal) => {
     engineSupportedDrivers: async () => native.supported,
     engineTestStart: async (c: EngineConfig) => {
       native.testStarts.push(c)
+      if (native.testStartFailures > 0) {
+        native.testStartFailures -= 1
+        throw new Error('ASIO 장치를 찾을 수 없습니다')
+      }
+      native.stats = null // 새 엔진은 리셋 요청이 없는 상태로 시작한다
       return null
     },
-    engineTestStop: async () => null,
-    engineStats: async () => null,
+    engineTestStop: async () => {
+      native.testStops += 1
+      return null
+    },
+    engineStats: async () => native.stats,
   }
 })
 vi.mock('../../native/loopbackOffsetStore', () => ({ reapplyLoopbackOffsetInBackground: () => {} }))
 
 import { AudioSettingsProvider, useAudioSettings } from './AudioSettingsContext'
+import { TEST_RESET_RESTARTED_MESSAGE, TEST_RESET_RESTARTING_MESSAGE } from '../../native/performSignals'
 
 function setup() {
   const { wrapper: QueryWrapper, client } = createQueryWrapper()
@@ -76,6 +90,9 @@ afterEach(() => {
   native.devices = []
   native.supported = null
   native.testStarts = []
+  native.stats = null
+  native.testStartFailures = 0
+  native.testStops = 0
 })
 
 describe('AudioSettingsContext + profiles.audio_settings', () => {
@@ -319,6 +336,32 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
     await act(async () => { run = await result.current.prepareRunConfig() })
     expect(run!.notice).toBeNull()
     expect(run!.config).toMatchObject({ inputDevice: 'wasapi::Focusrite USB', inputChannels: [2, 3] })
+  })
+
+  describe('테스트 모니터의 드라이버 리셋 요청(#261 재리뷰 L4)', () => {
+  it('deviceReset이면 같은 설정으로 다시 열고 알린다 — 첫 시도가 실패해도 같은 장치로 다시 시도한다', async () => {
+    native.on = true
+    native.devices = LAPTOP
+    native.supported = ['wasapiExclusive', 'wasapiShared']
+    localStorage.setItem('band_engine_config_v2', JSON.stringify({ version: 2, engine: { ...SAVED.engine, inputDevice: null, outputDevice: null, channels: 1, inputChannels: [0] } }))
+    auth.user = null
+    const { result } = setup()
+    await waitFor(() => expect(result.current.devices).toHaveLength(2))
+    await act(async () => { await result.current.startTest() })
+    expect(result.current.isTesting).toBe(true)
+    const first = native.testStarts[native.testStarts.length - 1]
+    const startsBefore = native.testStarts.length
+    native.testStartFailures = 1
+    native.stats = { deviceReset: true }
+    await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTING_MESSAGE))
+    await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTED_MESSAGE), { timeout: 4000 })
+    // 정지 1번, 시작 2번(실패 1 + 성공 1) — 둘 다 처음과 같은 설정
+    expect(native.testStops).toBe(1)
+    expect(native.testStarts.slice(startsBefore)).toEqual([first, first])
+    expect(result.current.isTesting).toBe(true)
+    expect(result.current.testError).toBeNull()
+    await act(async () => { await result.current.stopTest() })
+  })
   })
 })
 

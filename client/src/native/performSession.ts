@@ -41,6 +41,8 @@ import {
   DEVICE_RESET_RECOVERING_MESSAGE,
   DEVICE_RESET_RECOVERED_MESSAGE,
   DEVICE_RESET_REPEAT_MESSAGE,
+  DEVICE_RESET_FAILED_MESSAGE,
+  DEVICE_RESET_RETRY_DELAYS_MS,
 } from './performSignals'
 // 연주 신호 해석·안내 문구는 웹 첫 묶음에도 실리는 가벼운 모듈에 있다(웹 관람 묶음 분리). 기존 import 경로를 위해 다시 내보낸다
 export {
@@ -57,6 +59,7 @@ export {
   DEVICE_RESET_RECOVERING_MESSAGE,
   DEVICE_RESET_RECOVERED_MESSAGE,
   DEVICE_RESET_REPEAT_MESSAGE,
+  DEVICE_RESET_FAILED_MESSAGE,
 } from './performSignals'
 
 export interface EngineBackend {
@@ -141,6 +144,11 @@ export interface PerformSessionOptions {
    */
   deviceResetWindowMs?: number
   deviceResetMaxRecoveries?: number
+  /**
+   * 드라이버 리셋 재시작의 시도 전 대기(ms). 시도 횟수 = 길이, 모두 **같은 장치**로 연다(기본 5회: 0.5·1·1.5·2·3초 = 대기 합 8초).
+   * 드라이버는 제어판 변경 직후 스스로 재설정하느라 잠깐 열리지 않을 수 있다 — 장치 분실과 달리 기본 장치로 넘어가지 않는다(#261 재리뷰 M1)
+   */
+  deviceResetRetryDelaysMs?: number[]
   /** 재시작 성공 안내를 보여 줄 시간(ms) */
   deviceNoticeMs?: number
 }
@@ -153,6 +161,11 @@ export function withDefaultDevices(config: EngineConfig): EngineConfig {
     outputDevice: null,
     inputChannels: config.channels === 2 ? [0, 1] : [0],
   }
+}
+
+/** 리셋 재시작이 모두 실패했을 때 안내: 고정 문구 + (있으면) 마지막 엔진 시작 실패 사유 */
+export function deviceResetFailedMessage(lastError: string | null): string {
+  return lastError ? `${DEVICE_RESET_FAILED_MESSAGE} (${lastError})` : DEVICE_RESET_FAILED_MESSAGE
 }
 
 /** 이 시간 안에 key-conflict가 또 오면 재시작 반복 대신 정지 */
@@ -206,6 +219,9 @@ export class PerformSession {
   private readonly deviceLostMaxRecoveries: number
   private readonly deviceResetWindowMs: number
   private readonly deviceResetMaxRecoveries: number
+  private readonly deviceResetRetryDelays: number[]
+  /** 장치 재시작 중 마지막 엔진 시작 실패 사유(리셋 재시작이 전부 실패했을 때 안내에 붙인다) */
+  private lastRecoveryError: string | null = null
   private readonly deviceNoticeMs: number
 
   constructor(private readonly engine: EngineBackend, private readonly env: SessionEnv, opts: PerformSessionOptions = {}) {
@@ -219,6 +235,7 @@ export class PerformSession {
     this.deviceLostMaxRecoveries = opts.deviceLostMaxRecoveries ?? 3
     this.deviceResetWindowMs = opts.deviceResetWindowMs ?? 60_000
     this.deviceResetMaxRecoveries = opts.deviceResetMaxRecoveries ?? 8
+    this.deviceResetRetryDelays = opts.deviceResetRetryDelaysMs ?? DEVICE_RESET_RETRY_DELAYS_MS
     this.deviceNoticeMs = opts.deviceNoticeMs ?? 8000
   }
 
@@ -289,8 +306,10 @@ export class PerformSession {
       } catch (err) {
         if (gen === this.gen) {
           // 장치 분실 재시작의 시도 실패는 오류로 보이지 않는다 — 다음 시도(기본 장치)를 하거나 전부 실패하면 안내한다 (#208 리뷰 L-4)
-          if (this.recoveringDevice) this.setState({ phase: 'restarting' })
-          else {
+          if (this.recoveringDevice) {
+            this.lastRecoveryError = errorText(err)
+            this.setState({ phase: 'restarting' })
+          } else {
             if (!userInitiated) this.restartFailedUnannounced = true
             this.setState({ phase: 'idle', instrument: null, sessionId: null, error: `오디오 엔진 시작 실패: ${errorText(err)}` })
           }
@@ -732,37 +751,45 @@ export class PerformSession {
   /**
    * 장치 분실 자동 재시작. 서버 세션·연주자 상태는 그대로 두고(stop-performing을 보내지 않음) 엔진만 다시 연다 — 같은 clientId라
    * 다른 연주자는 새 descriptor로 다시 붙고, 관람 방송은 엔진이 다시 뜨면 방송 담당이 다시 offer한다.
-   * 1) 같은 설정으로 다시 시도, 2) 장치를 지정했으면 마지막 시도는 기본 장치로(쓰던 장치가 사라졌을 수 있다), 3) 모두 실패하면 정지·안내.
-   * 짧은 시간에 반복되면(장치가 계속 흔들림) 재시작하지 않고 정지한다.
-   * reason 'reset': 드라이버 리셋 요청(ASIO 제어판 버퍼 크기 변경 등, 엔진 deviceReset) — 같은 길, 안내 문구만 다르다. 반복 상한은
-   * 장치 분실과 따로 더 넉넉하게 센다(기본 60초에 8번, #261 리뷰 M1): 버퍼를 몇 번 맞춰 보는 것으로는 끊기지 않고,
-   * 드라이버가 리셋을 끝없이 보내면 거기서 정지한다(무한 재시작 방지).
+   * 짧은 시간에 반복되면(장치가 계속 흔들림) 재시작하지 않고 정지한다. 사유에 따라 다시 여는 사다리가 다르다:
+   * - 'lost'(장치 분실): 1) 같은 설정으로 다시 시도, 2) 장치를 지정했으면 마지막 시도는 기본 장치로(쓰던 장치가 사라졌을 수 있다),
+   *   3) 모두 실패하면 정지·안내. 반복 상한 60초에 3번.
+   * - 'reset'(드라이버 리셋 요청 — ASIO 제어판 버퍼 크기 변경 등, 엔진 deviceReset): 장치는 그대로 있고 드라이버가 재설정하느라
+   *   잠깐 열리지 않을 뿐이다. **같은 장치로만** 간격을 늘려 가며 여러 번 시도하고(deviceResetRetryDelays), 모두 실패해도 기본 장치로
+   *   넘어가지 않는다 — ASIO의 "기본 장치"는 목록의 첫 드라이버(ASIO4ALL 등)라 조용히 다른 드라이버로 바뀌고 lastStart가 그것으로
+   *   굳었다(#261 재리뷰 M1). 실패하면 DEVICE_RESET_FAILED_MESSAGE로 정지하고 lastStart(쓰던 장치 설정)는 그대로 둔다.
+   *   반복 상한은 장치 분실과 따로 더 넉넉하게 센다(기본 60초에 8번, #261 리뷰 M1).
+   * 저장된 장치가 이 PC에 없어 시작할 때 기본 장치로 여는 폴백(#251, prepareRunConfig)은 이 경로와 무관하다(연주 시작 전 판단).
    */
   private async recoverFromDeviceLoss(reason: 'lost' | 'reset' = 'lost'): Promise<void> {
     const last = this.lastStart
     if (this.recoveringDevice || !last || this.state.phase !== 'running') return
+    const isReset = reason === 'reset'
     const now = this.now()
-    const [windowMs, max] = reason === 'reset' ? [this.deviceResetWindowMs, this.deviceResetMaxRecoveries] : [this.deviceLostWindowMs, this.deviceLostMaxRecoveries]
-    const times = (reason === 'reset' ? this.deviceResetTimes : this.deviceLostTimes).filter((t) => now - t < windowMs)
+    const [windowMs, max] = isReset ? [this.deviceResetWindowMs, this.deviceResetMaxRecoveries] : [this.deviceLostWindowMs, this.deviceLostMaxRecoveries]
+    const times = (isReset ? this.deviceResetTimes : this.deviceLostTimes).filter((t) => now - t < windowMs)
     times.push(now)
-    if (reason === 'reset') this.deviceResetTimes = times
+    if (isReset) this.deviceResetTimes = times
     else this.deviceLostTimes = times
     if (times.length > max) {
-      await this.stop({ notify: true, error: reason === 'reset' ? DEVICE_RESET_REPEAT_MESSAGE : DEVICE_LOST_REPEAT_MESSAGE })
+      await this.stop({ notify: true, error: isReset ? DEVICE_RESET_REPEAT_MESSAGE : DEVICE_LOST_REPEAT_MESSAGE })
       return
     }
 
     this.recoveringDevice = true
-    this.setDeviceNotice(reason === 'reset' ? DEVICE_RESET_RECOVERING_MESSAGE : DEVICE_RECOVERING_MESSAGE)
-    // 참고(#208 리뷰 L-5): 기본 장치로 대체해 성공하면 lastStart가 기본 장치 설정이 된다 — 이후 재시작(ssrc/clientId)도
-    // 지금 실제로 쓰는 장치로 연다(사라진 장치를 다시 고르지 않음). 사용자가 다시 시작하면 그때 설정을 쓴다
+    this.lastRecoveryError = null
+    this.setDeviceNotice(isReset ? DEVICE_RESET_RECOVERING_MESSAGE : DEVICE_RECOVERING_MESSAGE)
+    // 참고(#208 리뷰 L-5): 장치 분실에서 기본 장치로 대체해 성공하면 lastStart가 기본 장치 설정이 된다 — 이후 재시작(ssrc/clientId)도
+    // 지금 실제로 쓰는 장치로 연다(사라진 장치를 다시 고르지 않음). 사용자가 다시 시작하면 그때 설정을 쓴다.
+    // 리셋 재시작은 늘 `last` 그대로 열므로 lastStart가 바뀌지 않는다
+    const delays = isReset ? this.deviceResetRetryDelays : this.deviceRecoveryDelays
     const hasExplicitDevice = last.config.inputDevice !== null || last.config.outputDevice !== null
     let retriedForNewId = false
-    for (let i = 0; i < this.deviceRecoveryDelays.length; i++) {
-      const useDefault = hasExplicitDevice && i === this.deviceRecoveryDelays.length - 1
+    for (let i = 0; i < delays.length; i++) {
+      const useDefault = !isReset && hasExplicitDevice && i === delays.length - 1
       const opts: StartOptions = useDefault ? { ...last, config: withDefaultDevices(last.config) } : last
       if (this.getState().phase === 'running') await this.stopForRestart() // getState: 위 guard의 좁힘을 피해 await 뒤 실제 값
-      await new Promise((r) => setTimeout(r, this.deviceRecoveryDelays[i]))
+      await new Promise((r) => setTimeout(r, delays[i]))
       if (!this.recoveringDevice) return // 그 사이 사용자가 멈추거나 나갔다
       const idBefore = this.env.getSelfId()
       const ok = await this.restartWith(opts)
@@ -775,10 +802,11 @@ export class PerformSession {
       }
       if (ok) {
         this.recoveringDevice = false
-        const recovered = reason === 'reset' ? DEVICE_RESET_RECOVERED_MESSAGE : DEVICE_RECOVERED_MESSAGE
+        const recovered = isReset ? DEVICE_RESET_RECOVERED_MESSAGE : DEVICE_RECOVERED_MESSAGE
         this.setDeviceNotice(useDefault ? DEVICE_RECOVERED_DEFAULT_MESSAGE : recovered, this.deviceNoticeMs)
         return
       }
+      if (isReset) console.warn(`[Native] 드라이버 리셋 재시작 ${i + 1}/${delays.length}번째 시도 실패: ${this.lastRecoveryError ?? '알 수 없음'}`)
     }
     // 모두 실패: 서버에 연주 중단을 알린다(재시작 앞 정지는 알리지 않았다)
     this.recoveringDevice = false
@@ -786,7 +814,9 @@ export class PerformSession {
     this.setDeviceNotice(null)
     this.env.send({ type: 'native-leave' })
     this.env.send({ type: 'stop-performing' })
-    this.setState({ phase: 'idle', instrument: null, sessionId: null, error: DEVICE_LOST_FAILED_MESSAGE })
+    // 리셋: 다른 장치로 바꾸지 않았다는 것과 마지막 실패 사유를 알린다. lastStart는 쓰던 장치 그대로다
+    const error = isReset ? deviceResetFailedMessage(this.lastRecoveryError) : DEVICE_LOST_FAILED_MESSAGE
+    this.setState({ phase: 'idle', instrument: null, sessionId: null, error })
   }
 
   private setDeviceNotice(notice: string | null, clearAfterMs?: number) {

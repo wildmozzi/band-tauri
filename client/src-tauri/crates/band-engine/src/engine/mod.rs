@@ -435,8 +435,10 @@ impl Engine {
     }
 
     /// 숨은 지연 보정값이 유효한 장치 구성 키(설계 1.4절). 숨은 지연(실측 − 콜백 크기)에 영향을 주는 값을 모두 넣는다:
-    /// 드라이버·실제 백엔드(자체 WASAPI/cpal 폴백)·실제로 연 장치(기본 장치면 그때 고른 장치)·요청 버퍼 크기·in/out 레이트.
+    /// 드라이버·실제 백엔드(자체 WASAPI/cpal 폴백)·실제로 연 장치(기본 장치면 그때 고른 장치)·버퍼 크기·in/out 레이트.
     /// 버퍼를 바꾸면 엔드포인트 버퍼·드라이버 여유가 달라질 수 있어 다시 재야 한다(PR #57 M1).
+    /// 버퍼는 백엔드가 알려 준 열린 크기(`StreamInfo.buffer_frames`)다: 대개 요청값과 같지만, ASIO 드라이버가 한 크기만 받으면
+    /// (제어판에서 버퍼를 바꾼 Focusrite) 그 크기라 옛 버퍼에서 잰 값이 리셋 재시작 뒤 다시 들어가지 않는다(#261 재리뷰 L1).
     pub(crate) fn device_key(&self) -> String {
         let (c, i) = (&self.cfg, &self.info);
         format!(
@@ -447,7 +449,7 @@ impl Engine {
             i.out_backend,
             i.in_device_tag,
             i.out_device_tag,
-            c.buffer_size,
+            i.buffer_frames,
             i.in_rate,
             i.out_rate
         )

@@ -46,6 +46,7 @@ import {
   type EnginePresetId,
 } from '../../native/engineConfig'
 import { SettingsSaveGate, TestMonitorControl } from '../../native/settingsSync'
+import { DEVICE_RESET_RETRY_DELAYS_MS, TEST_RESET_FAILED_MESSAGE, TEST_RESET_RESTARTED_MESSAGE, TEST_RESET_RESTARTING_MESSAGE } from '../../native/performSignals'
 import { reapplyLoopbackOffsetInBackground } from '../../native/loopbackOffsetStore'
 import type { RunConfig } from '../../native/deviceFallback'
 import {
@@ -421,7 +422,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   }, [testControl])
 
   const startTest = useCallback(async () => {
-    if (!isNativeMode || testControl.isActive || testControl.isStarting) return
+    if (!isNativeMode || testControl.isActive || testControl.isStarting || testControl.isRestarting) return
     if (engineInUse) {
       setTestError('합주 중에는 테스트할 수 없습니다. 연주를 멈춘 뒤 다시 시도하세요.')
       return
@@ -458,7 +459,23 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       inFlight = true
       try {
         const s = await engineStats()
-        if (!cancelled) setTestStats(s)
+        if (cancelled) return
+        // 드라이버 리셋 요청(ASIO 제어판에서 버퍼 크기 변경 등, 엔진 deviceReset): 버퍼를 맞춰 보는 가장 흔한 자리가 이 테스트
+        // 모니터다 — 합주와 같은 규칙으로 같은 장치만 다시 연다(#261 재리뷰 L4). 다시 여는 동안은 옛 통계를 그대로 둔다
+        if (s?.deviceReset) {
+          if (testControl.isRestarting) return
+          setTestNotice(TEST_RESET_RESTARTING_MESSAGE)
+          const r = await testControl.restart(DEVICE_RESET_RETRY_DELAYS_MS)
+          if (r === 'restarted') setTestNotice(TEST_RESET_RESTARTED_MESSAGE)
+          else if (r === 'failed') {
+            setTestNotice(null)
+            setIsTesting(false)
+            setTestStats(null)
+            setTestError(TEST_RESET_FAILED_MESSAGE)
+          }
+          return
+        }
+        setTestStats(s)
       } catch {
         // 무시
       } finally {
@@ -469,7 +486,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       cancelled = true
       clearInterval(timer)
     }
-  }, [isTesting])
+  }, [isTesting, testControl])
 
   // 합주 엔진이 시작되면 테스트 중지
   useEffect(() => {

@@ -117,7 +117,7 @@ export function browserOffsetStorage(): OffsetStorage | null {
 /** 엔진 커맨드 주입(테스트용) */
 export interface LoopbackOffsetDeps {
   listDevices: () => Promise<DeviceInfo[]>
-  stats: () => Promise<Pick<EngineStats, 'backend' | 'sampleRate'>>
+  stats: () => Promise<Pick<EngineStats, 'backend' | 'sampleRate'> & Partial<Pick<EngineStats, 'deviceBuffer'>>>
   setOffset: (offsetMs: number | null) => Promise<unknown>
   storage: OffsetStorage | null
 }
@@ -136,13 +136,23 @@ async function listOrNull(deps: LoopbackOffsetDeps, config: EngineConfig): Promi
   }
 }
 
+/**
+ * 키에 넣는 버퍼 크기(#261 재리뷰 L1). 보통은 설정값이다. 출력이 ASIO면 엔진이 보고하는 출력 버퍼(`deviceBuffer`)를 쓴다 —
+ * ASIO 드라이버가 한 크기만 받으면(제어판에서 버퍼를 바꾼 Focusrite) 설정값과 다른 크기로 열리므로, 설정값을 키로 쓰면 옛 버퍼에서
+ * 잰 보정값이 리셋 재시작 뒤 다시 들어갔다. ASIO 출력의 `deviceBuffer`는 콜백 전이든 뒤든 열린 크기와 같다(엔진 `StreamInfo.buffer_frames`).
+ * 다른 드라이버는 `deviceBuffer`가 장치 주기라 시작 직후(요청값)와 그 뒤(실측)가 달라 키로 쓰지 않는다
+ */
+export function keyBufferSize(config: Pick<EngineConfig, 'outputDriver' | 'bufferSize'>, deviceBuffer: number | undefined): number {
+  return config.outputDriver === 'asio' && deviceBuffer && deviceBuffer > 0 ? deviceBuffer : config.bufferSize
+}
+
 /** 지금 실행 중인 엔진의 장치 구성 키. 백엔드를 모르면(정지·옛 엔진) null */
 export async function currentDeviceKey(config: EngineConfig, deps: LoopbackOffsetDeps): Promise<string | null> {
   // 저장·재적용 모두 engine_stats 값으로 키를 만든다(같은 출처라 어긋나지 않게)
-  const { backend, sampleRate } = await deps.stats()
+  const { backend, sampleRate, deviceBuffer } = await deps.stats()
   if (!backend || !sampleRate) return null
   const ids = resolveDeviceIds(config, await listOrNull(deps, config))
-  return loopbackDeviceKey({ inputDriver: config.inputDriver, outputDriver: config.outputDriver, ...ids, bufferSize: config.bufferSize, backend, sampleRate })
+  return loopbackDeviceKey({ inputDriver: config.inputDriver, outputDriver: config.outputDriver, ...ids, bufferSize: keyBufferSize(config, deviceBuffer), backend, sampleRate })
 }
 
 /** 루프백 측정 결과 저장(ok + 범위 안일 때만). 저장한 키를 돌려준다 */

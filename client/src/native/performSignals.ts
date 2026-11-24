@@ -42,6 +42,18 @@ export const DEVICE_LOST_REPEAT_MESSAGE = '오디오 장치가 계속 바뀌어 
 export const DEVICE_RESET_RECOVERING_MESSAGE = '오디오 드라이버 설정이 바뀌어(버퍼 크기 등) 엔진을 다시 시작하는 중입니다… 샘플레이트는 48 kHz로 다시 맞춥니다.'
 export const DEVICE_RESET_RECOVERED_MESSAGE = '오디오 드라이버 설정이 바뀌어 다시 시작했습니다. 합주는 계속됩니다(샘플레이트는 48 kHz 유지).'
 export const DEVICE_RESET_REPEAT_MESSAGE = '오디오 드라이버 설정이 짧은 시간에 너무 여러 번 바뀌어 연주를 중단했습니다. 설정을 마친 뒤 다시 시작해주세요.'
+/**
+ * 리셋 재시작이 같은 장치로 여러 번 시도해도 열리지 않았다(#261 재리뷰 M1). 장치 분실과 달리 기본 장치(ASIO에서는 목록의 첫 드라이버)로
+ * 넘어가지 않고 멈춘다 — 쓰던 장치 설정은 그대로라 다시 시작하면 같은 장치로 연다
+ */
+export const DEVICE_RESET_FAILED_MESSAGE =
+  '오디오 드라이버 설정이 바뀐 뒤 쓰던 장치를 다시 열지 못해 연주를 중단했습니다(다른 장치로 바꾸지 않았습니다). 드라이버 제어판 설정이 끝난 뒤 연주를 다시 시작해주세요.'
+/** 설정 화면의 테스트 모니터가 드라이버 리셋 요청을 받았을 때(#261 재리뷰 L4) — 합주와 같은 규칙으로 같은 장치만 다시 연다 */
+export const TEST_RESET_RESTARTING_MESSAGE = '오디오 드라이버 설정이 바뀌어(버퍼 크기 등) 테스트를 다시 시작하는 중입니다… 샘플레이트는 48 kHz로 다시 맞춥니다.'
+export const TEST_RESET_RESTARTED_MESSAGE = '오디오 드라이버 설정이 바뀌어 테스트를 다시 시작했습니다(샘플레이트는 48 kHz 유지).'
+export const TEST_RESET_FAILED_MESSAGE = '오디오 드라이버 설정이 바뀐 뒤 장치를 다시 열지 못해 테스트를 멈췄습니다. 드라이버 제어판 설정이 끝난 뒤 다시 시도하세요.'
+/** 테스트 모니터 리셋 재시작의 시도 전 대기(ms) — 합주의 리셋 재시작 기본값과 같다(performSession deviceResetRetryDelaysMs) */
+export const DEVICE_RESET_RETRY_DELAYS_MS = [500, 1000, 1500, 2000, 3000]
 /** 다시 시작하는 중 안내인지(띠 모양 구분) */
 export function isDeviceRecoveringNotice(notice: string): boolean {
   return notice === DEVICE_RECOVERING_MESSAGE || notice === DEVICE_RESET_RECOVERING_MESSAGE

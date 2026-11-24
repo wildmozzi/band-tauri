@@ -48,6 +48,9 @@ export class SettingsSaveGate {
 export class TestMonitorControl {
   private active = false
   private pending: Promise<void> | null = null
+  private restarting = false
+  /** 바깥(사용자·합주 시작)에서 stop할 때마다 오른다 — 진행 중인 restart가 그 뒤로 다시 켜지 않게 */
+  private stopGen = 0
 
   constructor(private readonly api: { start(): Promise<unknown>; stop(): Promise<unknown> }) {}
 
@@ -57,6 +60,11 @@ export class TestMonitorControl {
 
   get isStarting(): boolean {
     return this.pending !== null
+  }
+
+  /** 드라이버 리셋으로 다시 여는 중(restart) */
+  get isRestarting(): boolean {
+    return this.restarting
   }
 
   async start(): Promise<void> {
@@ -72,9 +80,43 @@ export class TestMonitorControl {
   }
 
   async stop(): Promise<void> {
+    this.stopGen++
+    await this.stopInner()
+  }
+
+  private async stopInner(): Promise<void> {
     if (this.pending) await this.pending.catch(() => {})
     if (!this.active) return
     this.active = false
     await this.api.stop()
+  }
+
+  /**
+   * 드라이버 리셋 요청(엔진 `deviceReset`) 뒤 테스트 모니터를 같은 설정으로 다시 연다(#261 재리뷰 L4). 합주의 리셋 재시작과 같은 규칙:
+   * 드라이버가 재설정하느라 잠깐 열리지 않을 수 있어 대기(delaysMs)를 두고 여러 번 시도하고, 다른 장치로 바꾸지 않는다.
+   * 그사이 바깥에서 stop하면(사용자가 끔, 합주 시작) 그만둔다. 다시 켜졌으면 'restarted', 전부 실패면 'failed', 그만뒀으면 'cancelled'.
+   */
+  async restart(delaysMs: number[], sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))): Promise<'restarted' | 'failed' | 'cancelled'> {
+    if (!this.active || this.restarting) return 'cancelled'
+    this.restarting = true
+    const gen = this.stopGen
+    try {
+      await this.stopInner().catch(() => {})
+      for (const d of delaysMs) {
+        await sleep(d)
+        if (gen !== this.stopGen) return 'cancelled'
+        try {
+          await this.start()
+        } catch {
+          continue // 드라이버가 아직 재설정 중 — 다음 시도
+        }
+        // 시작하는 사이 바깥 stop이 왔으면 그 stop이 시작이 끝난 뒤 끈다(L8)
+        if (gen !== this.stopGen) return 'cancelled'
+        if (this.active) return 'restarted'
+      }
+      return gen !== this.stopGen ? 'cancelled' : 'failed'
+    } finally {
+      this.restarting = false
+    }
   }
 }

@@ -64,6 +64,9 @@ pub struct AudioCounters {
     /// 드라이버가 보낸 리셋 요청 누적 횟수(ASIO `kAsioResetRequest` — 제어판에서 버퍼 크기·샘플레이트 변경, 장치 재설정).
     /// 드라이버 메시지 스레드가 원자 덧셈만 한다. 재시작 판단(디바운스)은 워커의 `ResetWatch`가 한다(설계 문서 1.1절).
     pub device_reset_requests: AtomicU32,
+    /// 리셋 요청이지만 장치를 연 직후 유예 안이라 세지 않은 횟수(시작 직후 거짓 요청, 엔진의 샘플레이트 변경에 대한 응답 —
+    /// `engine/device/cpal.rs` `reset_verdict`). 드라이버 메시지 스레드가 원자 덧셈만 하고 워커가 로그로 남긴다.
+    pub device_reset_ignored: AtomicU32,
     /// 일시 오류가 반복되어 스트림을 재시작한 횟수(자체 WASAPI).
     pub stream_restarts: AtomicU32,
     /// 캡처 패킷의 DATA_DISCONTINUITY(장치가 데이터를 버림 = 입력 오버런, `xruns`에도 더함). 시작 직후 첫 패킷 제외.

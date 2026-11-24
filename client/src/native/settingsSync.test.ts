@@ -82,6 +82,68 @@ describe('TestMonitorControl (L8)', () => {
     expect(calls).toEqual([])
   })
 
+  describe('restart — 드라이버 리셋 뒤 다시 열기 (#261 재리뷰 L4)', () => {
+    const noSleep = async () => {}
+
+    it('드라이버가 잠깐 열리지 않아도 여러 번 시도해 다시 켠다', async () => {
+      const calls: string[] = []
+      let failures = 0
+      const ctl = new TestMonitorControl({
+        start: async () => {
+          calls.push('start')
+          if (failures > 0) {
+            failures--
+            throw new Error('ASIO 장치를 찾을 수 없습니다')
+          }
+        },
+        stop: async () => { calls.push('stop') },
+      })
+      await ctl.start()
+      failures = 2
+      const slept: number[] = []
+      expect(await ctl.restart([1, 2, 3, 4], async (ms) => { slept.push(ms) })).toBe('restarted')
+      expect(calls).toEqual(['start', 'stop', 'start', 'start', 'start'])
+      expect(slept).toEqual([1, 2, 3])
+      expect(ctl.isActive).toBe(true)
+      expect(ctl.isRestarting).toBe(false)
+    })
+
+    it('전부 실패하면 failed이고 꺼진 상태로 남는다', async () => {
+      let fail = false
+      const ctl = new TestMonitorControl({ start: async () => { if (fail) throw new Error('x') }, stop: async () => {} })
+      await ctl.start()
+      fail = true
+      expect(await ctl.restart([1, 1, 1], noSleep)).toBe('failed')
+      expect(ctl.isActive).toBe(false)
+    })
+
+    it('다시 여는 사이 바깥에서 stop하면 그만둔다(다시 켜지 않는다)', async () => {
+      const calls: string[] = []
+      const ctl = new TestMonitorControl({ start: async () => { calls.push('start') }, stop: async () => { calls.push('stop') } })
+      await ctl.start()
+      const r = ctl.restart([1, 1], async () => { await ctl.stop() })
+      expect(await r).toBe('cancelled')
+      expect(calls).toEqual(['start', 'stop'])
+      expect(ctl.isActive).toBe(false)
+    })
+
+    it('켜져 있지 않거나 이미 다시 여는 중이면 아무것도 하지 않는다', async () => {
+      const calls: string[] = []
+      const ctl = new TestMonitorControl({ start: async () => { calls.push('start') }, stop: async () => { calls.push('stop') } })
+      expect(await ctl.restart([1], noSleep)).toBe('cancelled')
+      await ctl.start()
+      let release!: () => void
+      const first = ctl.restart([1], () => new Promise<void>((r) => { release = r }))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(ctl.isRestarting).toBe(true)
+      expect(await ctl.restart([1], noSleep)).toBe('cancelled')
+      release()
+      expect(await first).toBe('restarted')
+      expect(calls).toEqual(['start', 'stop', 'start'])
+    })
+  })
+
   it('중복 start는 한 번만', async () => {
     let n = 0
     const ctl = new TestMonitorControl({ start: async () => { n++ }, stop: async () => {} })
