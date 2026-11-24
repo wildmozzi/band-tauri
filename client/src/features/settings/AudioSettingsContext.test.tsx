@@ -376,6 +376,7 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
     const first = native.testStarts[native.testStarts.length - 1]
     const startsBefore = native.testStarts.length
     native.testStartFailures = 1
+    native.resetDelays = [300, 300] // "다시 시작하는 중"이 폴링(50ms)에 잡힐 만큼 길게
     native.stats = { deviceReset: true }
     await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTING_MESSAGE))
     await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTED_MESSAGE), { timeout: 4000 })
@@ -421,7 +422,7 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
   })
 
   it('"다시 시작했습니다" 안내는 잠시 뒤 사라지고, 그 전에 테스트를 껐다 켜도 남지 않는다 (#263 리뷰 L-1)', async () => {
-    native.resetNoticeMs = 150
+    native.resetNoticeMs = 500 // 폴링(50ms)에 잡힐 만큼은 길게
     const { result } = await startedTest()
     native.stats = { deviceReset: true }
     await waitFor(() => expect(result.current.fallbackNotice).toBe(TEST_RESET_RESTARTED_MESSAGE))
@@ -439,7 +440,7 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
   })
 
   it('다시 여는 중에 설정을 바꾸면 테스트가 멈추고 옛 설정으로 다시 켜지지 않는다 (#263 리뷰 L-2)', async () => {
-    native.resetDelays = [150, 150]
+    native.resetDelays = [100_000] // 다시 여는 대기에서 멈춰 있게
     const { result } = await startedTest()
     const startsBefore = native.testStarts.length
     native.stats = { deviceReset: true }
@@ -448,7 +449,7 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
     act(() => { expect(result.current.updateConfig({ bufferSize: 256 })).toBe(true) })
     await waitFor(() => expect(result.current.isTesting).toBe(false))
     expect(result.current.fallbackNotice).toBeNull()
-    await act(async () => { await sleep(450) }) // 남은 대기(150 + 150)가 모두 지나도
+    await act(async () => { await sleep(250) }) // 통계 폴링이 더 돌아도
     expect(native.testStarts).toHaveLength(startsBefore) // 다시 켜지 않았다
     expect(result.current.isTesting).toBe(false)
     expect(result.current.testError).toBeNull()
