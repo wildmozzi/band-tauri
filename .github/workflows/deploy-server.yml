@@ -6,9 +6,14 @@ on:
       - main
     paths:
       - 'server/**'
+  # 수동 배포(P3-26 리뷰 M1): lock만 바뀐 server 의존 보안 패치처럼 server/** 변경 없이 배포해야 할 때
+  # Actions → "Deploy Server to Fly.io" → Run workflow(브랜치 main). 실행 전 연주 인원 0 확인(RELEASE.md 4절).
+  workflow_dispatch:
 
 jobs:
   deploy:
+    # 운영 배포는 main만. 다른 브랜치를 골라 수동 실행하면 잡이 건너뛰어진다(배포하지 않음).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +45,7 @@ jobs:
       # 앱 설정은 server/fly.toml, Dockerfile은 server/Dockerfile, 컨텍스트 파일은 루트 .dockerignore(허용 목록)가 정한다.
       # 트리거는 server/**만 본다 — 루트 lock만 바뀐 커밋(client 의존 갱신 등)으로 서버가 재시작(세션 끊김)하지 않게.
       # lock만 바뀐 server 의존 갱신은 다음 server 변경 배포 때 반영된다(그때도 lock 그대로 설치되므로 재현 가능).
+      # 급하면(보안 패치) workflow_dispatch로 main에서 수동 실행한다. 루트 .dockerignore·이 워크플로만 바뀐 커밋도 자동 배포되지 않는다.
       - run: flyctl deploy . --config server/fly.toml --dockerfile server/Dockerfile --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

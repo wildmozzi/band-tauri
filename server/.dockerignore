@@ -1,0 +1,5 @@
+# 이 디렉터리는 빌드 컨텍스트가 아니다 — 리포 루트에서 빌드한다(P3-26):
+#   flyctl deploy . --config server/fly.toml --dockerfile server/Dockerfile --remote-only
+# server/ 안에서 실수로 `fly deploy`해도 server/.env(실제 비밀값)·node_modules가 원격 빌더로 올라가지 않게 전부 막는다.
+# (그 경우 COPY 단계에서 실패한다 — 의도된 실패.) 루트 컨텍스트 빌드는 하위 디렉터리의 .dockerignore를 읽지 않으므로 정상 경로에 영향 없음.
+*

@@ -126,6 +126,8 @@ ASIO 포함 설치본은 같은 env에서 `npm run tauri:build:asio`(= `tauri bu
 
 이미지는 리포 루트를 컨텍스트로 빌드해 루트 `package-lock.json`으로 `npm ci`한다(P3-26 — 의존 버전 고정, 명령은 워크플로·`server/fly.toml` 주석).
 루트 lock만 바뀐 커밋은 배포를 일으키지 않는다(server 의존만 lock에서 바뀌었다면 다음 server 변경 배포 때 반영).
+루트 `.dockerignore`·`deploy-server.yml`만 바뀐 커밋도 마찬가지다. **server 의존 보안 갱신을 lock으로만 고쳤다면** lock 병합 뒤 연주 인원 0을 확인하고
+Actions → "Deploy Server to Fly.io" → Run workflow(브랜치 `main`)로 수동 배포한다. main이 아닌 브랜치로 실행하면 잡이 건너뛰어져 배포되지 않는다.
 
 ### 규칙
 - **연주자가 1명이라도 있으면 `main`에 server 변경을 병합·push하지 않는다.** 배포 시점 = `main` push 시점이다.
