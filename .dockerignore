@@ -1,0 +1,10 @@
+# 루트 컨텍스트 Docker 빌드(server/Dockerfile, P3-26)용 허용 목록.
+# 모두 빼고 server 이미지에 필요한 것만 넣는다 — 비밀값(.env)·node_modules·client 소스·Rust target이 컨텍스트에 들어가지 않게.
+# relay/는 relay/를 컨텍스트로 빌드하므로 relay/.dockerignore를 쓴다(이 파일과 무관).
+*
+!package.json
+!package-lock.json
+!server/package.json
+!server/tsconfig.json
+!server/src
+server/src/**/*.test.ts

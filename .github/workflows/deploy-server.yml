@@ -6,14 +6,24 @@ on:
       - main
     paths:
       - 'server/**'
+  # 수동 배포(P3-26 리뷰 M1): lock만 바뀐 server 의존 보안 패치처럼 server/** 변경 없이 배포해야 할 때
+  # Actions → "Deploy Server to Fly.io" → Run workflow(브랜치 main). 실행 전 연주 인원 0 확인(RELEASE.md 4절).
+  workflow_dispatch:
 
 jobs:
   deploy:
+    # 운영 배포는 main만. 다른 브랜치를 골라 수동 실행하면 잡이 건너뛰어진다(배포하지 않음).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      # 액션은 커밋(태그 1.6)으로, flyctl은 버전으로 고정한다(P3-28): flyctl 버전에 따라 원격 빌더·.dockerignore 처리가
+      # 바뀌어 같은 커밋이 다르게 배포될 수 있다. 갱신: github.com/superfly/flyctl/releases 의 최신 정식 릴리스(프리릴리스 제외)로
+      # version을 올리고, 액션 태그가 새로 나오면 그 커밋 SHA로 바꾼다.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
+        with:
+          version: 0.5.16
 
       # 운영(NODE_ENV=production) 서버는 PUBLIC_API_URL이 없으면 시작 시 종료한다(server/src/index.ts, P3-10g).
       # fly.toml에 health check가 없어 배포가 성공으로 끝나도 머신이 재시작을 반복할 수 있으므로, 배포 전에 막는다.
@@ -36,7 +46,11 @@ jobs:
           echo "::error title=PUBLIC_API_URL 없음::fly 앱에 PUBLIC_API_URL이 없습니다. 이대로 배포하면 운영 서버가 시작 직후 종료(크래시 루프)합니다. 먼저 'fly secrets set PUBLIC_API_URL=https://<서버 공개 주소> -a <앱 이름>'을 실행한 뒤 이 워크플로를 다시 실행하세요 (docs/overhaul/storage.md)."
           exit 1
 
-      - run: flyctl deploy --remote-only
-        working-directory: ./server
+      # 빌드 컨텍스트는 리포 루트(P3-26): 루트 package-lock.json으로 `npm ci`해 의존 버전을 고정한다.
+      # 앱 설정은 server/fly.toml, Dockerfile은 server/Dockerfile, 컨텍스트 파일은 루트 .dockerignore(허용 목록)가 정한다.
+      # 트리거는 server/**만 본다 — 루트 lock만 바뀐 커밋(client 의존 갱신 등)으로 서버가 재시작(세션 끊김)하지 않게.
+      # lock만 바뀐 server 의존 갱신은 다음 server 변경 배포 때 반영된다(그때도 lock 그대로 설치되므로 재현 가능).
+      # 급하면(보안 패치) workflow_dispatch로 main에서 수동 실행한다. 루트 .dockerignore·이 워크플로만 바뀐 커밋도 자동 배포되지 않는다.
+      - run: flyctl deploy . --config server/fly.toml --dockerfile server/Dockerfile --remote-only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
