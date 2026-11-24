@@ -16,6 +16,13 @@ const RUNTIME_ONLY: Record<string, string[]> = {
   performSession: ['native/nativeRuntime.ts'],
   mixBridge: ['native/nativeRuntime.ts'],
   sessionLogic: ['native/performSession.ts'],
+  // 데스크톱 연주 중에만 나오는 문구(#263 리뷰 M-1) — 첫 화면 모듈이 값으로 import하면 웹 첫 묶음에 다시 실린다
+  performMessages: ['native/performSession.ts'],
+  // 테스트 모니터 리셋 문구·상한: AudioSettingsContext가 동적 import만 한다
+  testMonitorReset: [],
+  // 루프백 보정값 저장소: 지연 묶음(엔진 런타임·연주자 UI·오디오 설정 화면)만 쓴다. 첫 화면 코드(Navigation)는 이벤트 이름을
+  // audioSettingsEvents에서 받고, AudioSettingsContext는 동적 import한다
+  loopbackOffsetStore: ['native/nativeRuntime.ts', 'features/room/components/MetronomePanel.tsx', 'features/settings/LatencyMeasurePanel.tsx'],
 }
 
 function sourceFiles(dir: string): string[] {

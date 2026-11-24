@@ -542,6 +542,59 @@ describe('PerformSession 피어/엔진 상태', () => {
     expect(last(engine.startConfigs)).toEqual(CHOSEN)
   })
 
+  describe('재시도 대기 중의 정지(#263 리뷰 L-4) — 가짜 타이머로 순서를 고정한다', () => {
+    const OTHER = { ...CHOSEN, bufferSize: 256 }
+
+    it('재시도 대기 중 stop(): 그 뒤로 엔진을 다시 열지 않는다', async () => {
+      vi.useFakeTimers()
+      try {
+        const { session, start, engine, types } = setup({ opts: { deviceResetRetryDelaysMs: [50, 50, 50] } })
+        await start(CHOSEN)
+        await driverReset(session, engine)
+        await vi.advanceTimersByTimeAsync(10) // 재시작 앞 정지가 끝나고 첫 대기(50ms) 안
+        expect(session.getState().phase).toBe('restarting')
+        await session.stop()
+        expect(session.getState()).toMatchObject({ phase: 'idle', error: null })
+        expect(session.getState().deviceNotice ?? null).toBeNull()
+        await vi.advanceTimersByTimeAsync(1000) // 남은 대기가 모두 지나도
+        expect(engine.startConfigs).toHaveLength(1)
+        expect(session.getState().phase).toBe('idle')
+        expect(types().slice(-2)).toEqual(['native-leave', 'stop-performing']) // 재시작 중 정지는 서버에도 알린다
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('대기 중 정지 → 다른 설정으로 다시 시작 → 새 리셋: 깨어난 옛 반복문이 옛 설정으로 끼어들지 않는다', async () => {
+      vi.useFakeTimers()
+      try {
+        const { session, start, engine } = setup({ opts: { deviceResetRetryDelaysMs: [50, 50, 50] } })
+        await start(CHOSEN)
+        await driverReset(session, engine) // 옛 반복문: t=0에 첫 대기(50ms) 시작
+        await vi.advanceTimersByTimeAsync(10)
+        await session.stop()
+        expect(await start(OTHER)).toBe(true) // 사용자가 설정을 바꿔 다시 시작
+        await driverReset(session, engine) // 새 반복문: t=10에 첫 대기 시작(t=60에 깬다) — recoveringDevice가 다시 true
+        expect(session.getState().phase).toBe('restarting')
+        expect(engine.startConfigs).toEqual([CHOSEN, OTHER])
+
+        await vi.advanceTimersByTimeAsync(45) // t=55: 옛 반복문만 깼다 — 제 세대가 아니라 그만둔다
+        expect(engine.startConfigs).toEqual([CHOSEN, OTHER])
+        expect(session.getState().phase).toBe('restarting') // 새 재시작은 그대로 진행 중
+
+        await vi.advanceTimersByTimeAsync(10) // t=65: 새 반복문이 새 설정으로 한 번 연다
+        expect(engine.startConfigs).toEqual([CHOSEN, OTHER, OTHER])
+        expect(session.getState()).toMatchObject({ phase: 'running', error: null, deviceNotice: DEVICE_RESET_RECOVERED_MESSAGE })
+
+        await vi.advanceTimersByTimeAsync(1000) // 옛 반복문의 남은 시도가 뒤늦게 나오지 않는다
+        expect(engine.startConfigs).toEqual([CHOSEN, OTHER, OTHER])
+        expect(session.getState().phase).toBe('running')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
   it('드라이버 리셋 재시작 시도 수·간격은 장치 분실과 따로다(기본 5번·대기 합 8초) (#261 재리뷰 M1)', async () => {
     const { session, start, engine } = setup({ opts: { deviceResetRetryDelaysMs: [1, 1, 1, 1, 1], deviceRecoveryDelaysMs: [1] } })
     await start(CHOSEN)

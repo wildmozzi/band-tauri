@@ -28,39 +28,33 @@ import {
 import { parseRelayToken, relayNeedsNewToken, relayRefreshDelayMs } from './relayLogic'
 import { entryLeadMs, newFirstAudioTrack, noteAddPeer, notePeerLeft, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
+import { performErrorFromCode, DESCRIPTOR_INVALID_MESSAGE, DEVICE_RECOVERING_MESSAGE, DEVICE_RESET_RECOVERING_MESSAGE } from './performSignals'
 import {
-  performErrorFromCode,
   KEY_CONFLICT_MESSAGE,
   KEY_CONFLICT_REPEAT_MESSAGE,
-  DESCRIPTOR_INVALID_MESSAGE,
-  DEVICE_RECOVERING_MESSAGE,
   DEVICE_RECOVERED_MESSAGE,
   DEVICE_RECOVERED_DEFAULT_MESSAGE,
   DEVICE_LOST_FAILED_MESSAGE,
   DEVICE_LOST_REPEAT_MESSAGE,
-  DEVICE_RESET_RECOVERING_MESSAGE,
   DEVICE_RESET_RECOVERED_MESSAGE,
   DEVICE_RESET_REPEAT_MESSAGE,
   DEVICE_RESET_FAILED_MESSAGE,
   DEVICE_RESET_RETRY_DELAYS_MS,
-} from './performSignals'
-// 연주 신호 해석·안내 문구는 웹 첫 묶음에도 실리는 가벼운 모듈에 있다(웹 관람 묶음 분리). 기존 import 경로를 위해 다시 내보낸다
+} from './performMessages'
+// 웹에서도 쓰는 신호 해석·문구는 첫 묶음의 가벼운 모듈(performSignals)에, 데스크톱 연주 중에만 나오는 문구는 이 묶음의
+// performMessages에 있다(웹 관람 묶음 분리, #263 리뷰 M-1). 기존 import 경로를 위해 다시 내보낸다
+export { performErrorFromCode, isEngineDescriptorErrorCode, DESCRIPTOR_INVALID_MESSAGE, DEVICE_RECOVERING_MESSAGE, DEVICE_RESET_RECOVERING_MESSAGE } from './performSignals'
 export {
-  performErrorFromCode,
-  isEngineDescriptorErrorCode,
   KEY_CONFLICT_MESSAGE,
   KEY_CONFLICT_REPEAT_MESSAGE,
-  DESCRIPTOR_INVALID_MESSAGE,
-  DEVICE_RECOVERING_MESSAGE,
   DEVICE_RECOVERED_MESSAGE,
   DEVICE_RECOVERED_DEFAULT_MESSAGE,
   DEVICE_LOST_FAILED_MESSAGE,
   DEVICE_LOST_REPEAT_MESSAGE,
-  DEVICE_RESET_RECOVERING_MESSAGE,
   DEVICE_RESET_RECOVERED_MESSAGE,
   DEVICE_RESET_REPEAT_MESSAGE,
   DEVICE_RESET_FAILED_MESSAGE,
-} from './performSignals'
+} from './performMessages'
 
 export interface EngineBackend {
   start(config: EngineConfig, peerId: string): Promise<LocalDescriptor>
@@ -205,6 +199,11 @@ export class PerformSession {
   private firstAudio: FirstAudioTrack | null = null
   /** 장치 분실 자동 재시작 중. 바깥(사용자·퇴장)에서 stop하면 false가 되어 재시작을 그만둔다 */
   private recoveringDevice = false
+  /**
+   * 장치 재시작(recoverFromDeviceLoss) 세대. 재시작을 시작할 때와 바깥 정지(사용자·퇴장) 때 오른다 — 대기 중이던 옛 반복문이
+   * 깨어났을 때 그사이 정지 → 다시 시작 → 새 재시작이 있었으면(recoveringDevice가 다시 true) 제 것이 아님을 안다(#263 리뷰 L-4)
+   */
+  private recoveryEpoch = 0
   /** deviceLost를 연속으로 본 폴링 수(디바운스) */
   private deviceLostPolls = 0
   /** 최근 장치 분실 시각들(반복 판정) */
@@ -361,6 +360,7 @@ export class PerformSession {
   async stop(opts: { notify?: boolean; error?: string | null; forRestart?: boolean } = {}): Promise<void> {
     const { notify = true, error = null, forRestart = false } = opts
     if (!forRestart) {
+      this.recoveryEpoch++ // 대기 중인 재시작 반복문은 깨어나서 그만둔다 — 그 뒤 새 재시작이 시작돼 있어도(#263 리뷰 L-4)
       if (this.recoveringDevice) {
         this.recoveringDevice = false
         this.setDeviceNotice(null)
@@ -777,6 +777,9 @@ export class PerformSession {
     }
 
     this.recoveringDevice = true
+    const epoch = ++this.recoveryEpoch
+    // 바깥 정지(사용자·퇴장)가 있었으면 이 반복문은 끝이다 — 그 뒤 다시 시작해 새 재시작이 돌고 있어도 끼어들지 않는다(#263 리뷰 L-4)
+    const cancelled = () => epoch !== this.recoveryEpoch || !this.recoveringDevice
     this.lastRecoveryError = null
     this.setDeviceNotice(isReset ? DEVICE_RESET_RECOVERING_MESSAGE : DEVICE_RECOVERING_MESSAGE)
     // 참고(#208 리뷰 L-5): 장치 분실에서 기본 장치로 대체해 성공하면 lastStart가 기본 장치 설정이 된다 — 이후 재시작(ssrc/clientId)도
@@ -790,10 +793,10 @@ export class PerformSession {
       const opts: StartOptions = useDefault ? { ...last, config: withDefaultDevices(last.config) } : last
       if (this.getState().phase === 'running') await this.stopForRestart() // getState: 위 guard의 좁힘을 피해 await 뒤 실제 값
       await new Promise((r) => setTimeout(r, delays[i]))
-      if (!this.recoveringDevice) return // 그 사이 사용자가 멈추거나 나갔다
+      if (cancelled()) return // 그 사이 사용자가 멈추거나 나갔다
       const idBefore = this.env.getSelfId()
       const ok = await this.restartWith(opts)
-      if (!this.recoveringDevice) return
+      if (cancelled()) return
       // 시도 중에 clientId가 바뀌어(재연결) 버려진 시도는 세지 않고 같은 시도를 한 번 더 한다(새 id로)
       if (!ok && this.env.getSelfId() !== idBefore && !retriedForNewId) {
         retriedForNewId = true

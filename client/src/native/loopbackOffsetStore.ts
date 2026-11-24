@@ -139,7 +139,9 @@ async function listOrNull(deps: LoopbackOffsetDeps, config: EngineConfig): Promi
 /**
  * 키에 넣는 버퍼 크기(#261 재리뷰 L1). 보통은 설정값이다. 출력이 ASIO면 엔진이 보고하는 출력 버퍼(`deviceBuffer`)를 쓴다 —
  * ASIO 드라이버가 한 크기만 받으면(제어판에서 버퍼를 바꾼 Focusrite) 설정값과 다른 크기로 열리므로, 설정값을 키로 쓰면 옛 버퍼에서
- * 잰 보정값이 리셋 재시작 뒤 다시 들어갔다. ASIO 출력의 `deviceBuffer`는 콜백 전이든 뒤든 열린 크기와 같다(엔진 `StreamInfo.buffer_frames`).
+ * 잰 보정값이 리셋 재시작 뒤 다시 들어갔다. ASIO 출력의 `deviceBuffer`는 드라이버가 한 크기만 받거나(min = max) 요청이 드라이버 범위 안이면 콜백 전이든 뒤든 열린 크기와 같다
+ * (엔진 `StreamInfo.buffer_frames`). 범위가 넓은데(min < max) 요청이 그 밖이면 첫 출력 콜백 전에는 요청값, 뒤에는 실측이라 시작 직후의
+ * 재적용 키와 측정 뒤 저장 키가 갈릴 수 있다 — 그때는 "보정 없음"이 될 뿐 틀린 값이 들어가지는 않는다(#263 리뷰 L-5).
  * 다른 드라이버는 `deviceBuffer`가 장치 주기라 시작 직후(요청값)와 그 뒤(실측)가 달라 키로 쓰지 않는다
  */
 export function keyBufferSize(config: Pick<EngineConfig, 'outputDriver' | 'bufferSize'>, deviceBuffer: number | undefined): number {
@@ -224,6 +226,6 @@ export function outputLatencyView(m: Pick<MetronomeStats, 'outputLatencyMs' | 'o
   return { source: null, text: '출력 지연 보정: 없음', needsMeasure: true }
 }
 
-/** 메트로놈 패널 → 오디오 설정 모달의 지연 측정 절을 연다(Navigation이 듣는다) */
-export const OPEN_LATENCY_MEASURE_EVENT = 'band:open-latency-measure'
-export const LATENCY_MEASURE_SECTION_ID = 'latency-measure'
+// 지연 측정 절을 여는 이벤트 이름은 첫 화면 묶음(Navigation)도 쓰므로 가벼운 모듈에 있다 — 이 모듈(데스크톱 전용)을 첫 화면 코드가
+// 값으로 정적 import하면 통째로 웹 첫 묶음에 실린다(#263 리뷰 M-1, nativeSplit.test)
+export { OPEN_LATENCY_MEASURE_EVENT, LATENCY_MEASURE_SECTION_ID } from './audioSettingsEvents'
