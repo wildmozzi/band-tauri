@@ -194,6 +194,8 @@ pub struct Sample {
     pub(crate) input_discontinuities: u64,
     pub(crate) input_silent_packets: u64,
     pub(crate) device_lost: bool,
+    /// 드라이버 리셋 요청으로 장치를 다시 열어야 함(P1-11). 켜지면 `device_lost`도 켜져 있다.
+    pub(crate) device_reset: bool,
     pub(crate) stream_failed: bool,
     pub(crate) peers: Vec<PeerSample>,
     pub(crate) relay: Option<RelaySample>,
@@ -249,6 +251,7 @@ impl Sample {
             input_discontinuities: s.input_discontinuities,
             input_silent_packets: s.input_silent_packets,
             device_lost: s.device_lost,
+            device_reset: s.device_reset,
             stream_failed: s.stream_failed,
             peers: s
                 .peers

@@ -61,6 +61,9 @@ pub struct AudioCounters {
     pub device_lost: AtomicBool,
     /// 스트림이 복구되지 않는 오류로 멈췄다(치명 HRESULT, 재시작을 반복해도 실패). 장치는 남아 있을 수 있다.
     pub stream_failed: AtomicBool,
+    /// 드라이버가 보낸 리셋 요청 누적 횟수(ASIO `kAsioResetRequest` — 제어판에서 버퍼 크기·샘플레이트 변경, 장치 재설정).
+    /// 드라이버 메시지 스레드가 원자 덧셈만 한다. 재시작 판단(디바운스)은 워커의 `ResetWatch`가 한다(설계 문서 1.1절).
+    pub device_reset_requests: AtomicU32,
     /// 일시 오류가 반복되어 스트림을 재시작한 횟수(자체 WASAPI).
     pub stream_restarts: AtomicU32,
     /// 캡처 패킷의 DATA_DISCONTINUITY(장치가 데이터를 버림 = 입력 오버런, `xruns`에도 더함). 시작 직후 첫 패킷 제외.

@@ -8,12 +8,16 @@ import {
   DEVICE_RECOVERED_DEFAULT_MESSAGE,
   DEVICE_RECOVERED_MESSAGE,
   DEVICE_RECOVERING_MESSAGE,
+  DEVICE_RESET_RECOVERED_MESSAGE,
+  DEVICE_RESET_RECOVERING_MESSAGE,
+  DEVICE_RESET_REPEAT_MESSAGE,
   KEY_CONFLICT_MESSAGE,
   KEY_CONFLICT_REPEAT_MESSAGE,
   PerformSession,
   isEngineDescriptorErrorCode,
   performErrorFromCode,
   type EngineBackend,
+  type PerformSessionOptions,
   type SignalOut,
 } from './performSession'
 
@@ -44,6 +48,7 @@ class FakeEngine implements EngineBackend {
   startFailures = 0
   startConfigs: EngineConfig[] = []
   deviceLost = false
+  deviceReset = false
   streamFailed = false
   addPeerFailures = 0
   running = false
@@ -124,12 +129,12 @@ class FakeEngine implements EngineBackend {
   stats() {
     return this.track('stats', async () => {
       if (this.holdStats) await new Promise<void>((r) => { this.releaseStats = r })
-      return { ...stats(this.statsRunning), relay: this.relayStats, peers: this.peerStats, deviceLost: this.deviceLost, streamFailed: this.streamFailed }
+      return { ...stats(this.statsRunning), relay: this.relayStats, peers: this.peerStats, deviceLost: this.deviceLost, deviceReset: this.deviceReset, streamFailed: this.streamFailed }
     })
   }
 }
 
-function setup(opts: { others?: string[] } = {}) {
+function setup(opts: { others?: string[]; opts?: PerformSessionOptions } = {}) {
   const engine = new FakeEngine()
   const clock = { now: 0 }
   const sent: SignalOut[] = []
@@ -139,7 +144,7 @@ function setup(opts: { others?: string[] } = {}) {
     getSelfId: () => env.selfId,
     getRoomId: () => env.roomId,
     getOtherPerformers: () => env.others,
-  }, { retryDelaysMs: [5, 5, 5], reconnectTimeoutMs: 30, deadStatsThreshold: 2, relayRetryMs: 20, now: () => clock.now, deviceRecoveryDelaysMs: [5, 5], deviceNoticeMs: 200 })
+  }, { retryDelaysMs: [5, 5, 5], reconnectTimeoutMs: 30, deadStatsThreshold: 2, relayRetryMs: 20, now: () => clock.now, deviceRecoveryDelaysMs: [5, 5], deviceNoticeMs: 200, ...opts.opts })
   const start = (config: EngineConfig = DEFAULT_ENGINE_CONFIG) => session.start({ instrument: 'guitar', config, nickname: 'n', isHost: false })
   const types = () => sent.map((m) => m.type + ('to' in m ? `>${m.to}` : ''))
   return { engine, sent, env, session, start, types, clock }
@@ -430,6 +435,69 @@ describe('PerformSession 피어/엔진 상태', () => {
     expect(after).toEqual(['start-performing', 'native-descriptor'])
     // 성공 안내는 잠시 뒤 사라진다
     await vi.waitFor(() => expect(session.getState().deviceNotice).toBeNull())
+  })
+
+  /** 엔진이 드라이버 리셋 요청을 디바운스해 deviceReset(+deviceLost)을 보고한다(P1-11). 풀리지 않는 값이라 한 번의 통계로 재시작한다 */
+  async function driverReset(session: PerformSession, engine: FakeEngine) {
+    engine.statsRunning = false
+    engine.deviceLost = true
+    engine.deviceReset = true
+    engine.running = false
+    await session.pollStats()
+    engine.statsRunning = true
+    engine.deviceLost = false
+    engine.deviceReset = false
+  }
+
+  it('드라이버 리셋 요청(deviceReset): 첫 통계에서 엔진만 다시 열고 "드라이버 설정이 바뀌어" 안내 — 서버에 연주 중단을 알리지 않는다 (P1-11)', async () => {
+    const { session, start, engine, types, sent } = setup({ others: ['B'] })
+    await start()
+    const sentBefore = sent.length
+    await driverReset(session, engine)
+    expect(session.getState()).toMatchObject({ phase: 'restarting', instrument: 'guitar', deviceNotice: DEVICE_RESET_RECOVERING_MESSAGE })
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    expect(session.getState()).toMatchObject({ error: null, deviceNotice: DEVICE_RESET_RECOVERED_MESSAGE })
+    expect(engine.startConfigs[1]).toEqual(DEFAULT_ENGINE_CONFIG)
+    const after = types().slice(sentBefore)
+    expect(after).toEqual(['start-performing', 'native-descriptor'])
+    await vi.waitFor(() => expect(session.getState().deviceNotice).toBeNull())
+  })
+
+  it('드라이버 리셋 재시작은 장치 분실과 따로, 더 넉넉한 상한(60초에 8번)으로 센다 — 넘으면 정지(무한 재시작 방지, #261 리뷰 M1)', async () => {
+    const { session, start, engine, clock } = setup()
+    await start()
+    // 장치 분실 3번(그 상한 끝까지) 뒤에도 리셋은 따로 센다 — 버퍼를 여러 번 맞춰 보는 것으로 끊기지 않는다
+    for (let i = 0; i < 3; i++) {
+      clock.now += 1000
+      await loseDevice(session, engine)
+      await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    }
+    for (let i = 0; i < 8; i++) {
+      clock.now += 1000
+      await driverReset(session, engine)
+      await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    }
+    expect(session.getState().error).toBeNull()
+    clock.now += 1000
+    await driverReset(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('idle'))
+    expect(session.getState().error).toBe(DEVICE_RESET_REPEAT_MESSAGE)
+    expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(1 + 3 + 8)
+  })
+
+  it('드라이버 리셋 상한은 60초 창이다 — 오래된 리셋은 빠진다 (#261 리뷰 M1)', async () => {
+    const { session, start, engine, clock } = setup({ opts: { deviceResetMaxRecoveries: 2 } })
+    await start()
+    for (const dt of [1000, 1000, 61_000, 1000]) {
+      clock.now += dt
+      await driverReset(session, engine)
+      await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    }
+    expect(session.getState().error).toBeNull()
+    clock.now += 1000
+    await driverReset(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('idle'))
+    expect(session.getState().error).toBe(DEVICE_RESET_REPEAT_MESSAGE)
   })
 
   it('deviceLost가 한 번 보이고 곧 풀리면(콜백 순간 정지) 재시작하지 않는다 (#208 리뷰 L-1)', async () => {

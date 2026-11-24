@@ -143,6 +143,10 @@ pub struct EngineStats {
     pub stream_errors: u32,
     /// 장치를 잃었다(콜백 1초 정지, 또는 백엔드의 분리·기본 장치 변경 통지). 이때 `running`은 false.
     pub device_lost: bool,
+    /// 드라이버가 리셋을 요청했다(ASIO `kAsioResetRequest`: 제어판에서 버퍼 크기·샘플레이트 변경 등, P1-11). 디바운스한 뒤
+    /// 켜지고 이 엔진이 끝날 때까지 켜져 있다. 켜지면 `device_lost`도 켜진다(프론트의 "엔진만 다시 시작" 경로 재사용) —
+    /// 이 값은 원인 구분(안내 문구, 디바운스 생략)용이다.
+    pub device_reset: bool,
     /// 스트림이 복구되지 않는 오류로 멈췄다(재시작 반복 실패, 치명 오류). 이때 `running`은 false.
     pub stream_failed: bool,
     /// 일시 오류 반복으로 스트림을 재시작한 횟수(자체 WASAPI).
@@ -194,6 +198,7 @@ impl EngineStats {
             monitor_latency_ms: 0.0,
             stream_errors: 0,
             device_lost: false,
+            device_reset: false,
             stream_failed: false,
             stream_restarts: 0,
             input_discontinuities: 0,
@@ -296,7 +301,8 @@ impl Engine {
         // 모니터 경로(내 소리 → 내 귀): 입력 버퍼 + 로컬 FIFO·로컬 소스 링 점유량 시간평균 + 출력 버퍼(임펄스 실측으로 검증).
         let monitor = in_ms + rs_in_ms + ws.monitor_occupancy_us.load(Ordering::Relaxed) as f32 / 1000.0 + rs_out_ms + out_ms;
         let stream_errors = c.stream_errors.load(Ordering::Relaxed);
-        let device_lost = ws.device_stalled.load(Ordering::Relaxed) || c.device_lost.load(Ordering::Relaxed);
+        let device_reset = ws.device_reset.load(Ordering::Relaxed);
+        let device_lost = ws.device_stalled.load(Ordering::Relaxed) || c.device_lost.load(Ordering::Relaxed) || device_reset;
         let stream_failed = c.stream_failed.load(Ordering::Relaxed);
         let period_frames = match self.info.out_period_frames {
             0 => out_buf,
@@ -409,6 +415,7 @@ impl Engine {
             monitor_latency_ms: monitor,
             stream_errors,
             device_lost,
+            device_reset,
             stream_failed,
             stream_restarts: c.stream_restarts.load(Ordering::Relaxed),
             input_discontinuities: c.input_discontinuities.load(Ordering::Relaxed),

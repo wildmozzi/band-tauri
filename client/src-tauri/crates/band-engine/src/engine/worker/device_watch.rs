@@ -1,6 +1,7 @@
 //! 장치 감시 단계(엔진 ②b): 입·출력 콜백이 멈췄는지 보고, 스트림 에러 누적을 로그로 남긴다.
+//! 드라이버 리셋 요청(ASIO `kAsioResetRequest`, P1-11)을 디바운스해 "장치를 다시 열어야 함"으로 바꾼다(`ResetWatch`).
 //!
-//! 바뀌는 이유: 장치 분실 판정 규칙. 모르는 것: net, 코덱, 소스 링.
+//! 바뀌는 이유: 장치 분실 판정 규칙. 모르는 것: net, 코덱, 소스 링, 어느 백엔드가 리셋 요청을 세는지.
 
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -20,6 +21,68 @@ const FIRST_CALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// 방향(진단·로그용).
 const DIRS: [&str; 2] = ["출력", "입력"];
 
+/// 리셋 요청이 이 시간 동안 더 오지 않으면 다시 열기를 요청한다. 드라이버는 제어판 변경 한 번에 리셋 요청을 몇 번
+/// 연달아 보내기도 한다(버퍼 크기 → 레이턴시 → 리셋) — 하나로 합쳐 한 번만 다시 연다.
+pub(super) const RESET_QUIET: Duration = Duration::from_millis(300);
+/// 요청이 끊이지 않고 와도 첫 요청 뒤 이 시간이 지나면 다시 연다(조용해지기를 무한정 기다리지 않음).
+pub(super) const RESET_MAX_WAIT: Duration = Duration::from_millis(1_500);
+
+/// 리셋 요청 디바운스 상태.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResetState {
+    /// 요청 없음.
+    #[default]
+    Idle,
+    /// 요청을 받고 조용해지기를 기다린다: (첫 요청을 본 시각, 마지막 요청을 본 시각, 합친 요청 수).
+    Pending { first_at: Duration, last_at: Duration, merged: u32 },
+    /// 다시 열기를 요청했다(끝 상태). 이 엔진에서는 더 요청하지 않는다 — 다시 열면 새 엔진이 새 감시로 시작한다.
+    /// 그래서 엔진 하나는 리셋 요청이 아무리 와도 다시 열기를 한 번만 부르고, 엔진을 거듭 다시 여는 반복의 상한은
+    /// 프론트의 리셋 재시작 한도(장치 분실과 따로 60초에 8번, `performSession.recoverFromDeviceLoss`)가 정한다.
+    Requested,
+}
+
+/// 드라이버 리셋 요청 디바운스(순수 로직, 장치·피처 무관 — 설계 문서 1.1절 "드라이버 리셋 요청").
+/// 입력은 백엔드가 세는 단조 증가 카운터(`AudioCounters::device_reset_requests`)와 지금 시각뿐이다.
+#[derive(Debug, Default)]
+pub(super) struct ResetWatch {
+    /// 마지막으로 본 카운터 값.
+    seen: u32,
+    state: ResetState,
+}
+
+impl ResetWatch {
+    /// 반복마다. 이번 호출에서 `Requested`로 넘어가면 true(한 번만).
+    pub(super) fn observe(&mut self, requests: u32, now: Duration) -> bool {
+        let new = requests.wrapping_sub(self.seen);
+        self.seen = requests;
+        self.state = match self.state {
+            ResetState::Requested => return false,
+            ResetState::Idle if new == 0 => ResetState::Idle,
+            ResetState::Idle => ResetState::Pending { first_at: now, last_at: now, merged: new },
+            ResetState::Pending { first_at, last_at, merged } => {
+                let (last_at, merged) = if new > 0 { (now, merged.saturating_add(new)) } else { (last_at, merged) };
+                let quiet = now.saturating_sub(last_at) >= RESET_QUIET;
+                let waited_out = now.saturating_sub(first_at) >= RESET_MAX_WAIT;
+                if quiet || waited_out {
+                    log::warn!(
+                        "드라이버 리셋 요청 {merged}회(첫 요청 뒤 {:.0}ms) → 장치를 다시 엽니다(deviceReset)",
+                        now.saturating_sub(first_at).as_secs_f64() * 1e3
+                    );
+                    self.state = ResetState::Requested;
+                    return true;
+                }
+                ResetState::Pending { first_at, last_at, merged }
+            }
+        };
+        false
+    }
+
+    #[cfg(test)]
+    pub(super) fn state(&self) -> ResetState {
+        self.state
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct DeviceWatch {
     /// 첫 `check_at` 시각(아직 안 불렸으면 None). 콜백이 한 번도 안 돈 방향의 기준 시각이다.
@@ -31,6 +94,7 @@ pub(super) struct DeviceWatch {
     last_captured: u64,
     last_captured_at: Duration,
     reported_errors: u32,
+    reset: ResetWatch,
 }
 
 impl DeviceWatch {
@@ -81,6 +145,9 @@ impl DeviceWatch {
                 log::info!("오디오 장치 콜백 재개");
             }
             stats.device_stalled.store(stalled, Ordering::Relaxed);
+        }
+        if self.reset.observe(counters.device_reset_requests.load(Ordering::Relaxed), now) {
+            stats.device_reset.store(true, Ordering::Relaxed);
         }
         let errs = counters.stream_errors.load(Ordering::Relaxed);
         if errs != self.reported_errors {
@@ -160,6 +227,83 @@ mod tests {
         assert!(!stalled(&s2));
         w2.check_at(&c2, &s2, ms(5_001));
         assert!(stalled(&s2));
+    }
+
+    /// 리셋 요청 하나: 조용한 시간(`RESET_QUIET`)이 지나야 한 번만 다시 열기를 요청하고, 그 뒤로는 끝 상태(P1-11).
+    #[test]
+    fn single_reset_request_is_debounced_then_latched() {
+        let ms = Duration::from_millis;
+        let mut r = ResetWatch::default();
+        assert!(!r.observe(0, ms(0)));
+        assert_eq!(r.state(), ResetState::Idle);
+        assert!(!r.observe(1, ms(100)), "요청을 본 반복에서는 바로 다시 열지 않는다");
+        assert_eq!(r.state(), ResetState::Pending { first_at: ms(100), last_at: ms(100), merged: 1 });
+        assert!(!r.observe(1, ms(399)), "조용한 시간 300ms 전");
+        assert!(r.observe(1, ms(400)), "조용한 시간이 지나면 한 번");
+        assert_eq!(r.state(), ResetState::Requested);
+        // 끝 상태: 이 엔진에서는 더 요청하지 않는다(새 요청이 와도)
+        assert!(!r.observe(1, ms(500)));
+        assert!(!r.observe(5, ms(600)));
+        assert!(!r.observe(5, ms(10_000)));
+        assert_eq!(r.state(), ResetState::Requested);
+    }
+
+    /// 드라이버가 연달아 보내는 요청(버퍼 크기 → 레이턴시 → 리셋)은 합쳐 한 번. 요청이 끊이지 않으면 `RESET_MAX_WAIT`에서 끊는다.
+    #[test]
+    fn burst_of_reset_requests_merges_and_max_wait_bounds_it() {
+        let ms = Duration::from_millis;
+        // 50ms 간격 4번 → 마지막 요청 뒤 300ms에 한 번
+        let mut r = ResetWatch::default();
+        let mut fired = Vec::new();
+        for (t, n) in [(0, 1), (50, 2), (100, 3), (150, 4), (200, 4), (449, 4), (450, 4), (460, 4)] {
+            if r.observe(n, ms(t)) {
+                fired.push(t);
+            }
+        }
+        assert_eq!(fired, vec![450], "연속 요청 4번 → 마지막 요청(150ms) 뒤 300ms에 한 번");
+        // 200ms마다 끝없이 요청 → 첫 요청 뒤 1.5초에 끊는다(조용해지기를 무한정 기다리지 않음)
+        let mut r = ResetWatch::default();
+        let mut fired = Vec::new();
+        for i in 0..20u32 {
+            if r.observe(i + 1, ms(1_000 + 200 * i as u64)) {
+                fired.push(200 * i as u64);
+            }
+        }
+        assert_eq!(fired, vec![1_600], "첫 요청 뒤 1.5초가 처음 넘는 반복(1.6초)에서 한 번");
+        // 한 반복 사이에 여러 번 온 요청(카운터가 한 번에 3 증가)도 하나의 대기로 합친다
+        let mut r = ResetWatch::default();
+        assert!(!r.observe(3, ms(0)));
+        assert_eq!(r.state(), ResetState::Pending { first_at: ms(0), last_at: ms(0), merged: 3 });
+        // 카운터 넘침(u32 감김)도 새 요청으로 센다
+        let mut r = ResetWatch { seen: u32::MAX, state: ResetState::Idle };
+        assert!(!r.observe(0, ms(0)));
+        assert_eq!(r.state(), ResetState::Pending { first_at: ms(0), last_at: ms(0), merged: 1 });
+    }
+
+    /// `DeviceWatch`가 카운터를 읽어 `device_reset`을 켠다. 콜백이 계속 돌아도(드라이버가 옛 설정으로 계속 부름) 켠다.
+    #[test]
+    fn device_watch_sets_device_reset_flag() {
+        let (c, s) = (AudioCounters::default(), WorkerStats::default());
+        let mut w = DeviceWatch::new();
+        let ms = Duration::from_millis;
+        let reset = |s: &WorkerStats| s.device_reset.load(Ordering::Relaxed);
+        let mut t = 0;
+        let mut step = |w: &mut DeviceWatch, c: &AudioCounters, until: u64| {
+            while t < until {
+                t += 10;
+                c.out_played_frames.fetch_add(480, Ordering::Relaxed);
+                c.in_captured_frames.fetch_add(480, Ordering::Relaxed);
+                w.check_at(c, &s, ms(t));
+            }
+        };
+        step(&mut w, &c, 1_000);
+        assert!(!reset(&s));
+        c.device_reset_requests.fetch_add(1, Ordering::Relaxed);
+        step(&mut w, &c, 1_200);
+        assert!(!reset(&s), "디바운스 중");
+        step(&mut w, &c, 1_400);
+        assert!(reset(&s), "조용한 시간 뒤 deviceReset");
+        assert!(!s.device_stalled.load(Ordering::Relaxed), "콜백은 계속 돈다 — 멈춤과는 따로다");
     }
 
     #[test]

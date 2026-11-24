@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use band_dsp::config::{DriverKind, EngineConfig, INTERNAL_RATE};
 use crate::engine::rt::{InputRt, OutputRt};
@@ -31,10 +32,15 @@ struct Streams {
     _input: cpal::Stream,
     _output: cpal::Stream,
     asio: bool,
+    /// 드라이버 리셋 요청 감시를 거두는 함수(ASIO만, `asio_reset_hook`). 스트림보다 먼저 거둔다.
+    unhook: Option<Box<dyn FnOnce()>>,
 }
 
 impl Drop for Streams {
     fn drop(&mut self) {
+        if let Some(unhook) = self.unhook.take() {
+            unhook();
+        }
         if self.asio {
             ASIO_IN_USE.store(false, Ordering::SeqCst);
         }
@@ -81,6 +87,58 @@ fn asio_latencies() -> Option<(u32, u32)> {
 
 #[cfg(not(all(feature = "asio", target_os = "windows", target_arch = "x86_64")))]
 fn asio_latencies() -> Option<(u32, u32)> {
+    None
+}
+
+/// ASIO SDK `asio.h`의 `kAsioResetRequest` 선택자 값(`kAsioSelectorSupported = 1`, `kAsioEngineVersion`, `kAsioResetRequest`).
+const K_ASIO_RESET_REQUEST: i64 = 3;
+
+/// 우리가 열면서 드라이버 샘플레이트를 바꿨을 때(cpal이 `set_sample_rate`를 부름), 훅을 건 뒤 이 시간 안에 오는 리셋 요청은
+/// 그 변경에 대한 드라이버의 응답으로 보고 세지 않는다(#261 리뷰 M2). 드라이버에 따라 `ASIOSetSampleRate`가 리셋 요청을
+/// 비동기로 보내 play 뒤에 도착하는데, 그 변경은 이미 새 버퍼로 반영했으므로 다시 열 필요가 없다 — 세면 재시작이 한 번 더 났다.
+const SELF_RATE_RESET_GRACE: Duration = Duration::from_secs(2);
+
+/// 메시지 콜백 한 번을 리셋 요청으로 셀지(순수 함수 — SDK 없이 시험한다, `asio_reset_hook`).
+/// `since_hook` = 훅을 건 뒤 지난 시간, `rate_set_by_us` = 이번 열기에서 드라이버 레이트를 우리가 바꿨는지.
+#[cfg_attr(not(feature = "asio"), allow(dead_code))]
+fn counts_as_reset(selector: i64, since_hook: Duration, rate_set_by_us: bool) -> bool {
+    selector == K_ASIO_RESET_REQUEST && !(rate_set_by_us && since_hook < SELF_RATE_RESET_GRACE)
+}
+
+/// 드라이버 리셋 요청(`kAsioResetRequest`)을 `AudioCounters::device_reset_requests`로 센다(P1-11, 설계 문서 1.1절).
+///
+/// cpal 0.15.3은 이 요청을 버린다: asio-sys 0.2.6의 `asio_message`가 리셋 요청을 등록된 메시지 콜백
+/// (`Driver::add_message_callback`)에 넘기지만 cpal ASIO 백엔드는 콜백을 등록하지 않고, 에러 콜백도 쓰지 않는다
+/// (`host/asio/stream.rs`의 `_error_callback`). 그래서 cpal이 이미 연 드라이버 핸들(`cpal::platform::AsioDevice::driver`,
+/// pub)에 우리 콜백을 직접 건다 — 패치·포크 없이. asio-sys의 메시지 콜백 목록은 프로세스 전역이고 드라이버는 하나다.
+/// 콜백을 부르는 스레드는 ASIO 규약이 정하지 않는다: 대개 드라이버의 메시지 스레드지만 드라이버에 따라 오디오(bufferSwitch)
+/// 스레드일 수 있다. 그래서 우리 콜백은 비교·`Instant` 읽기(QPC, 락·할당 없음)·원자 덧셈만 한다(판단·재시작은 워커의
+/// `ResetWatch`와 프론트). asio-sys `asio_message`는 요청마다 콜백 목록 락과 `Vec` 할당을 한 번 한다 — 리셋 1회당 한 번이고
+/// 곧 다시 열 것이라 실해는 없다(#261 리뷰 L1).
+/// 스트림을 `play`한 뒤에 건다 — 일부 USB ASIO 드라이버가 시작 중에 보내는 가짜 리셋 요청을 세지 않는다(cpal 0.18도 같은 이유로
+/// 시작 중 요청을 무시한다). 우리가 레이트를 바꾼 열기면 그 응답도 거른다(`counts_as_reset`). 돌려준 함수를 부르면 콜백을 거둔다.
+#[cfg(feature = "asio")]
+fn asio_reset_hook(dev: &cpal::Device, counters: &Arc<AudioCounters>, rate_set_by_us: bool) -> Option<Box<dyn FnOnce()>> {
+    match dev.as_inner() {
+        cpal::platform::DeviceInner::Asio(d) => {
+            let c = counters.clone();
+            let hooked_at = std::time::Instant::now();
+            // asio-sys 0.2.6은 리셋 요청에만 메시지 콜백을 부르지만, 다른 판이 다른 선택자를 넘겨도 리셋만 센다.
+            let id = d.driver.add_message_callback(move |selector| {
+                if counts_as_reset(selector as i64, hooked_at.elapsed(), rate_set_by_us) {
+                    c.device_reset_requests.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            let driver = d.driver.clone();
+            let unhook: Box<dyn FnOnce()> = Box::new(move || driver.remove_message_callback(id));
+            Some(unhook)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "asio"))]
+fn asio_reset_hook(_dev: &cpal::Device, _counters: &Arc<AudioCounters>, _rate_set_by_us: bool) -> Option<Box<dyn FnOnce()>> {
     None
 }
 
@@ -237,7 +295,7 @@ impl AudioBackend for CpalBackend {
             SampleFormat::U16 => build_in::<u16>(&in_dev, &in_sel.config, input, in_ch, c_in),
             f => Err(format!("지원하지 않는 입력 샘플 포맷: {f:?}")),
         }?;
-        let c_out = counters;
+        let c_out = counters.clone();
         let output_stream = match out_sel.format {
             SampleFormat::F32 => build_out::<f32>(&out_dev, &out_sel.config, output, out_ch, c_out),
             SampleFormat::I16 => build_out::<i16>(&out_dev, &out_sel.config, output, out_ch, c_out),
@@ -250,6 +308,24 @@ impl AudioBackend for CpalBackend {
         if any_asio {
             ASIO_IN_USE.store(true, Ordering::SeqCst);
         }
+        // 드라이버 리셋 요청 감시(ASIO만): play 뒤에 건다(시작 중 가짜 요청 제외, `asio_reset_hook`)
+        // ASIO 드라이버 레이트를 우리가 바꿨는가 — 제어판에서 44.1k로 바꿔도 엔진은 48k로 다시 연다(설계 문서 1.1절, #261 리뷰 M2)
+        let asio_sel = match (cfg.input_driver, cfg.output_driver) {
+            (DriverKind::Asio, _) => Some(&in_sel),
+            (_, DriverKind::Asio) => Some(&out_sel),
+            _ => None,
+        };
+        let rate_set_by_us = asio_sel.is_some_and(|s| s.driver_rate != s.config.sample_rate.0);
+        if let Some(s) = asio_sel.filter(|_| rate_set_by_us) {
+            log::info!("ASIO 드라이버 샘플레이트 {}Hz → {}Hz로 맞춤(엔진 내부 레이트)", s.driver_rate, s.config.sample_rate.0);
+        }
+        let unhook = if cfg.input_driver == DriverKind::Asio {
+            asio_reset_hook(&in_dev, &counters, rate_set_by_us)
+        } else if cfg.output_driver == DriverKind::Asio {
+            asio_reset_hook(&out_dev, &counters, rate_set_by_us)
+        } else {
+            None
+        };
         // 드라이버 보고 지연: ASIO 듀플렉스만 알 수 있다(cpal WASAPI 공유는 알려 주지 않음).
         let reported = if duplex_asio { asio_latencies().unwrap_or((0, 0)) } else { (0, 0) };
         log::info!(
@@ -280,7 +356,7 @@ impl AudioBackend for CpalBackend {
             in_device_tag: device_tag(&in_dev.name().unwrap_or_default()),
             out_device_tag: device_tag(&out_dev.name().unwrap_or_default()),
         };
-        Ok((info, Box::new(Streams { _input: input_stream, _output: output_stream, asio: any_asio })))
+        Ok((info, Box::new(Streams { _input: input_stream, _output: output_stream, asio: any_asio, unhook })))
     }
 }
 
@@ -303,6 +379,8 @@ fn find_device(host: &cpal::Host, name: Option<&str>, input: bool) -> Option<cpa
 struct Selected {
     config: StreamConfig,
     format: SampleFormat,
+    /// 열기 전 드라이버(장치 기본 설정)의 레이트. ASIO에서 `config`와 다르면 cpal이 드라이버 레이트를 바꾼다.
+    driver_rate: u32,
 }
 
 fn select_config(
@@ -358,6 +436,7 @@ fn select_config(
     Ok(Selected {
         config: StreamConfig { channels, sample_rate: cpal::SampleRate(rate), buffer_size: buffer_request(&buf_support, buffer) },
         format,
+        driver_rate: def.sample_rate().0,
     })
 }
 
@@ -409,11 +488,10 @@ fn build_out<T: SizedSample + RtSample>(
     .map_err(|e| format!("출력 스트림 생성 실패: {e}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "asio")))]
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "asio"))]
     #[test]
     fn asio_unsupported_without_feature() {
         use super::CpalBackend;
@@ -435,5 +513,18 @@ mod tests {
         );
         let err = r.expect_err("ASIO는 실패해야 함");
         assert!(err.contains("ASIO"), "{err}");
+    }
+
+    /// 메시지 콜백 판정(#261 리뷰 M2·L3 — asio 피처 없이도 시험): 리셋 선택자만 세고, 우리가 레이트를 바꾼 열기에서는
+    /// 훅 뒤 2초 안의 요청(그 변경에 대한 드라이버 응답)을 거른다. 레이트를 바꾸지 않았으면 곧바로 센다.
+    #[test]
+    fn reset_selector_and_self_rate_change_grace() {
+        let ms = Duration::from_millis;
+        assert!(counts_as_reset(3, ms(0), false), "레이트를 바꾸지 않았으면 훅 직후 요청도 센다");
+        assert!(!counts_as_reset(1, ms(5_000), false), "kAsioSelectorSupported 등 다른 선택자는 세지 않는다");
+        assert!(!counts_as_reset(2, ms(5_000), false));
+        assert!(!counts_as_reset(3, ms(0), true), "우리가 레이트를 바꾼 직후 요청은 그 응답");
+        assert!(!counts_as_reset(3, ms(1_999), true));
+        assert!(counts_as_reset(3, ms(2_000), true), "유예 뒤에는 사용자 변경으로 센다");
     }
 }
