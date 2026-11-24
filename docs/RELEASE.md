@@ -124,6 +124,11 @@ ASIO 포함 설치본은 같은 env에서 `npm run tauri:build:asio`(= `tauri bu
 관람자는 다시 붙는다. 재개 유예(30초)는 프로세스가 살아 있을 때만 유효하다(docs/server-architecture.md 2.4절).
 그래서 **"합주 중 배포 금지"**를 운영 규칙으로 한다. 세션 저장소·clientId 재매핑(P1-17 ②③)은 실사용자가 생기면 다시 본다.
 
+이미지는 리포 루트를 컨텍스트로 빌드해 루트 `package-lock.json`으로 `npm ci`한다(P3-26 — 의존 버전 고정, 명령은 워크플로·`server/fly.toml` 주석).
+루트 lock만 바뀐 커밋은 배포를 일으키지 않는다(server 의존만 lock에서 바뀌었다면 다음 server 변경 배포 때 반영).
+루트 `.dockerignore`·`deploy-server.yml`만 바뀐 커밋도 마찬가지다. **server 의존 보안 갱신을 lock으로만 고쳤다면** lock 병합 뒤 연주 인원 0을 확인하고
+Actions → "Deploy Server to Fly.io" → Run workflow(브랜치 `main`)로 수동 배포한다. main이 아닌 브랜치로 실행하면 잡이 건너뛰어져 배포되지 않는다.
+
 ### 규칙
 - **연주자가 1명이라도 있으면 `main`에 server 변경을 병합·push하지 않는다.** 배포 시점 = `main` push 시점이다.
 - 확인할 수 없으면(스크립트 종료 코드 2) 배포하지 않는다. "모르면 하지 않는다".
