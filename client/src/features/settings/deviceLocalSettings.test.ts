@@ -51,6 +51,12 @@ describe('기기별 장치 설정 저장(P2-27 후속)', () => {
       localStorage.setItem(DEVICE_SETTINGS_STORAGE_KEY, bad)
       expect(loadDeviceSettings()).toBeNull()
     }
+    // 장치 필드가 하나도 없는 객체도 저장값 없음(이행 경로로) — #256 리뷰 L1
+    for (const empty of [{}, { codec: 'pcm16', foo: 1 }]) {
+      localStorage.setItem(DEVICE_SETTINGS_STORAGE_KEY, JSON.stringify(empty))
+      expect(loadDeviceSettings()).toBeNull()
+      expect(hasDeviceSettings()).toBe(false)
+    }
     localStorage.setItem(DEVICE_SETTINGS_STORAGE_KEY, JSON.stringify({ inputDriver: 'nope', bufferSize: 99999, inputChannels: [-1] }))
     expect(loadDeviceSettings()).toMatchObject({ inputDriver: 'wasapiShared', bufferSize: 1024, inputChannels: [0] })
   })

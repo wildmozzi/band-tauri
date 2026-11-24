@@ -421,7 +421,7 @@ interface ThreadPolicyConfig { highQos: boolean; preferPCores: boolean }
 // 저장(클라이언트): threadPolicy는 CPU 구성에 따른 기기별 값이라 계정(profiles.audio_settings)에 올리지 않고 그 PC의 localStorage(band_thread_policy_v1)에만 둔다 —
 // 서버에 옛 값이 있어도 읽지 않고 다음 저장 때 빠진다(#245 재리뷰 L4). 오디오 설정 화면은 EngineStats.threadPolicy를 토글 옆에 한 줄로 보인다.
 // 장치 쪽 필드(inputDriver·outputDriver·inputDevice·outputDevice·inputChannels·bufferSize)도 같은 방식으로 그 PC의 localStorage(band_device_settings_v1)에만
-// 둔다(P2-27 후속, 사용자 결정 2026-11-21). 코덱·frameMs·channels·지터·리샘플러는 계정. 이 PC에 저장값이 없을 때만 계정에 남은 옛 장치 값을 한 번 초기값으로 가져온다.
+// 둔다(P2-27 후속, 사용자 결정 2026-11-21). 코덱·frameMs·channels·지터·리샘플러는 계정. 이 PC에 저장값이 없을 때만 한 번 초기값을 정한다(옛 로컬 캐시의 장치 값 → 없으면 계정에 남은 옛 장치 값).
 // 엔진 커맨드 인자(EngineConfig 모양)는 그대로다 — 저장 위치만 나뉜다.
 type ResampleQuality = 'auto' | 'lowLatency' | 'highQuality'
 interface LocalDescriptor { ssrc: number; key: string; candidates: { kind: 'lan' | 'public'; addr: string }[] }

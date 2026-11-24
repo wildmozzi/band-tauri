@@ -124,25 +124,35 @@ const AudioSettingsContext = createContext<AudioSettingsContextType | null>(null
 
 /**
  * 로컬 캐시(계정 설정 사본) + 이 기기의 값. 옛 캐시에 들어 있던 `threadPolicy`는 쓰지 않는다(deviceLocalSettings 참고).
- * 이 PC에 장치 저장값이 아직 없으면(이 변경 전 설정) 옛 캐시에 남은 장치 값을 계정을 읽기 전까지 임시로 쓴다 —
- * 이 PC에서 마지막으로 쓰던 값이다. 저장은 계정을 읽을 때(이행) 또는 사용자가 바꿀 때 한다.
+ * 이 PC에 장치 저장값이 아직 없으면(이 변경 전 설정) 옛 캐시에 남은 장치 값을 쓴다 — 이 PC에서 마지막으로 쓰던 값이다.
+ * 저장은 계정을 읽을 때(이행 — 계정의 옛 장치 값보다 이 캐시 값이 먼저) 또는 사용자가 바꿀 때 한다.
  */
 function loadLocal(): EngineConfig {
   let config: EngineConfig = { ...DEFAULT_ENGINE_CONFIG }
-  let cachedDevice: DeviceSettings | null = null
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) {
-      const obj: unknown = JSON.parse(raw)
-      config = parseStoredSettings(obj).config
-      cachedDevice = accountDeviceSettings(obj)
-    }
+    if (raw) config = parseStoredSettings(JSON.parse(raw)).config
   } catch {
     // 저장소 접근 불가/손상
   }
-  const device = loadDeviceSettings() ?? cachedDevice
+  const device = loadDeviceSettings() ?? loadCachedDevice()
   if (device) config = withDeviceSettings(config, device)
   return withDeviceLocal(config, loadDeviceThreadPolicy())
+}
+
+/**
+ * 옛 로컬 캐시(`band_engine_config_v2`, 이 변경 전 형식)에 남은 장치 값. 없으면 null.
+ * 옛 앱은 이 PC에서 계정을 읽거나 편집할 때마다 캐시를 다시 썼으므로 이 PC에서 마지막으로 쓴 장치다 —
+ * 마지막으로 저장한 PC(다른 PC일 수 있다)의 값인 계정 쪽 옛 장치 값보다 이 PC에 맞을 가능성이 높다(#256 리뷰 M1).
+ * `saveLocal`이 한 번 돌면 캐시에서 장치 필드가 빠지지만, 그때는 이 PC 저장값이 함께 써져 그쪽이 먼저다.
+ */
+function loadCachedDevice(): DeviceSettings | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    return raw ? accountDeviceSettings(JSON.parse(raw)) : null
+  } catch {
+    return null
+  }
 }
 
 /** 이름 없는 장치는 쓰지 않는다 */
@@ -203,10 +213,15 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       try {
         if (storedData) {
           const parsed = parseStoredSettings(storedData)
-          // 장치 쪽 값은 이 PC의 것을 쓴다. 이 PC에 저장값이 없을 때만(이 변경 전 설정·새 PC) 계정에 남은 옛 장치 값을
-          // 한 번 초기값으로 가져온다 — 그 장치가 이 PC에 없으면 엔진 시작 때 이번 실행만 기본 장치로 넘어간다(P2-27).
-          // 계정에 장치 값이 없으면 지금 값(옛 캐시 또는 기본값)을 그대로 이 PC 값으로 저장한다(saveLocal).
-          const device = loadDeviceSettings() ?? accountDeviceSettings(storedData) ?? pickDeviceSettings(configRef.current)
+          // 장치 쪽 값은 이 PC의 것을 쓴다. 이 PC에 저장값이 없을 때만(이 변경 전 설정·새 PC) 한 번 초기값을 정한다:
+          // ① 옛 로컬 캐시의 장치 값(이 PC에서 마지막으로 쓴 값, #256 리뷰 M1) ② 캐시도 없으면(새로 설치한 PC) 계정에 남은
+          // 옛 장치 값 — 그 장치가 이 PC에 없으면 엔진 시작 때 이번 실행만 기본 장치로 넘어간다(P2-27) ③ 둘 다 없으면 지금 값.
+          // 정한 값은 saveLocal로 이 PC 값으로 굳는다.
+          const device =
+            loadDeviceSettings() ??
+            loadCachedDevice() ??
+            accountDeviceSettings(storedData) ??
+            pickDeviceSettings(configRef.current)
           // 계정 값에 옛 threadPolicy가 있어도 쓰지 않고 이 기기의 값을 유지한다(#245 재리뷰 L4)
           const next = withDeviceLocal(
             withDeviceSettings(parsed.config, device),

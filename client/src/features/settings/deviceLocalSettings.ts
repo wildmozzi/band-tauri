@@ -6,13 +6,14 @@
  *    이 키가 없으면(새 PC, 이 변경 전 설정) 둘 다 끔이다 — 옛 로컬 캐시(`band_engine_config_v2`)의 값은
  *    계정에서 내려받아 채워졌을 수 있어(다른 PC의 값) 옮기지 않는다.
  * 2) 장치 쪽 값(드라이버·장치 id·입력 채널·버퍼 크기, `DEVICE_LOCAL_KEYS` — P2-27 후속, 사용자 결정 2026-11-21).
- *    이 키가 없을 때만(이 변경 전 설정, 새 PC) 한 번 초기값을 가져온다 — 계정을 읽기 전에는 옛 로컬 캐시의 값으로 임시로 쓰고,
- *    계정을 읽으면 계정에 남은 옛 장치 값(없으면 지금 값)을 이 PC 값으로 저장한다(AudioSettingsContext). 그 뒤로는
+ *    이 키가 없을 때만(이 변경 전 설정, 새 PC) 한 번 초기값을 가져온다 — 옛 로컬 캐시의 장치 값(이 PC에서 마지막으로 쓴 값)이
+ *    있으면 그것을, 없으면(새로 설치한 PC) 계정에 남은 옛 장치 값(그것도 없으면 지금 값)을 계정을 읽을 때 이 PC 값으로 저장한다(AudioSettingsContext). 그 뒤로는
  *    계정 값으로 덮어쓰지 않는다 — 같은 PC에서 계정을 바꿔 로그인해도 장치 설정은 그대로다(PC의 것).
  */
 import type { EngineConfig, ThreadPolicyConfig } from '../../native/engineApi'
 import {
   DEFAULT_ENGINE_CONFIG,
+  DEVICE_LOCAL_KEYS,
   STORED_SETTINGS_VERSION,
   normalizeThreadPolicy,
   parseStoredSettings,
@@ -51,6 +52,8 @@ export function loadDeviceSettings(): DeviceSettings | null {
     if (!raw) return null
     const obj: unknown = JSON.parse(raw)
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null
+    // 장치 필드가 하나도 없으면(`{}` 등 손상) 저장값 없음으로 본다 → 이행 경로로 돌아간다(#256 리뷰 L1)
+    if (!DEVICE_LOCAL_KEYS.some((k) => k in obj)) return null
     const { inputChannels } = obj as { inputChannels?: unknown }
     // 입력 채널 개수는 계정의 channels에 맞춰 합치므로(withDeviceSettings) 여기서는 저장된 개수를 그대로 읽는다
     const channels = Array.isArray(inputChannels) && inputChannels.length > 1 ? 2 : 1
