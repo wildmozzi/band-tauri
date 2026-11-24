@@ -85,9 +85,9 @@ P 코어 "우선 배치"의 기본값을 정하는 측정이다. 3절의 `cpu-co
 ```sh
 cd client/src-tauri
 cargo run --release -p band-engine --example policy_matrix -- --dry-run     # 계획과 예상 소요 시간만
-cargo run --release -p band-engine --example policy_matrix                  # 본측정 전체: 10라운드 × 환경 2 × 엔진 6·2 × 정책 4 × 구성 6, 창 20초 — 약 6시간 40분
-cargo run --release -p band-engine --example policy_matrix -- --preset reduced                # 본측정 축소: 구성 3개(opus2.5·pcm5·pcm5+opus) × 엔진 6 — 약 1시간 48분
-cargo run --release -p band-engine --example policy_matrix -- --preset reduced --engines 2    # 축소의 제품에 가까운 짝(엔진 2) — 약 1시간 48분
+cargo run --release -p band-engine --example policy_matrix                  # 본측정 전체: 10라운드 × 환경 2 × 엔진 6·2 × 정책 4 × 구성 6, 예열 10초 + 창 20초 — 약 8시간 31분
+cargo run --release -p band-engine --example policy_matrix -- --preset reduced                # 본측정 축소: 구성 3개(opus2.5·pcm5·pcm5+opus) × 엔진 6 — 약 2시간 16분
+cargo run --release -p band-engine --example policy_matrix -- --preset reduced --engines 2    # 축소의 제품에 가까운 짝(엔진 2) — 약 2시간 16분
 cargo run --release -p band-engine --example policy_matrix -- --minutes 90  # 시간에 맞춰 라운드 수를 정한다(라운드를 줄이기보다 --preset reduced를 권한다)
 ```
 
@@ -98,8 +98,9 @@ cargo run --release -p band-engine --example policy_matrix -- --minutes 90  # �
 - 먼저 **프로브**가 선호 힌트의 강제성을 본다: 보통 우선순위 바쁜 스레드를 P 코어 수의 2배만큼 띄워 `off`·`prefer`·`pin`을 걸고, P에 머문 비율과 프로세스가 쓴 코어 수를 잰다(고정이면 P 100%·코어 ≈ P 수, soft면 E로 넘쳐 코어 ≈ 스레드 수).
 - 결과: `--out` 폴더(기본 `policy-matrix-<UTC 시각>`)의 `results.md`(묶음(환경 · 엔진 수)별 표: 워커 CPU, `iter_body` p50/p99, xrun, 최대 은닉, 워커·수신 P 비율, 워커 LP-E 비율, 조건부 고정의 풀기·다시 묶기 횟수, 끔 대비 쌍별 차, xrun 원값, 부하가 실제로 쓴 코어 수) · `results.json`(요약 + 실행별 원값) · `runs.jsonl`(실행이 끝날 때마다 한 줄 — 중간에 멈춰도 남는다).
 - 측정 창 기본값이 20초인 이유: 조건부 고정은 1초 창으로 판단하고 푼 뒤 최소 10초를 기다린다 — 2단계의 12초 창으로는 풀린 뒤의 동작이 창에 들어오지 않는다. 그래도 구성마다 엔진을 새로 시작하므로 "오래 버틴 뒤의 동작"(기다림이 늘어나는 이력)은 이 도구로 보지 못한다(판단 로직 단위 시험과 Soak의 몫).
+- **예열·안정화 구간은 집계에서 뺀다**(#258 재리뷰 M1): 구성마다 엔진을 새로 띄우므로 조건부 고정은 매번 묶인 채 시작해 "풀기 전 감지 구간"(판단 예열 3창 + 나쁜 창 2개 — 워커가 뜬 뒤 빨라야 4~5초)을 겪는다. 예열이 3초였을 때는 이 구간이 엔진마다 0~2창씩 측정 창에 들어가, 실제 합주에서는 세션에 한 번인 비용이 23초마다 잡혔다(경합 표에서 구조적으로 불리). 그래서 예열·안정화 기본값을 **10초**(`--warmup-s`, 풀메시 연결 뒤부터)로 늘리고 **모든 정책에 같은 규칙**을 쓴다 — 그 구간의 xrun은 `settleXruns`("예열·안정화 구간 xrun" 표)로 따로 내고, 측정 창 값(`xruns`·`iter_body`·CPU)에는 넣지 않는다. 조건부 고정은 엔진 전체의 상태를 창 시작·끝 두 시점에 모아(`adaptiveAll` — 엔진 0 하나가 아니라 전체, 리뷰 L2) "예열 안 첫 풀림 시각(250ms 간격으로 확인)", "창 시작에 풀려 있던 엔진 비율", "**창 안에서 처음 푼 엔진 수**"(감지가 늦어 창에 섞인 엔진 — 0이 아니면 그만큼 감지 구간의 xrun이 창에 들어 있다), "창 안에서 푼·다시 묶은 횟수"를 낸다. 예열 중 상태 확인은 측정 창 밖에서만 한다(창의 CPU 값에 섞이지 않게).
 - **주의**: 경합 환경은 실시간 우선순위 스레드로 P 코어를 채운다 — 도는 동안 같은 PC의 다른 일이 느려지고, 다른 작업이 돌면 수치가 오염된다. **조용한 시간에, AC 전원으로** 돌린다(전원 상태는 라운드마다 `results.md` 머리에 기록된다 — 도중에 바뀌었으면 그 라운드부터 따로 본다).
-- 표본 통계(평균 ± 표준편차, 중앙값)와 **끔 대비 쌍별 차**(라운드마다 정책 − 끔의 중앙값, 끔보다 나은/나쁜 라운드 수 — `iter_body` p99·워커 CPU·xrun)를 낸다(#258 리뷰 L1). 10라운드에서 9/10 이상이 한쪽이면 부호 검정 p < 0.05다. 구간이 필요하면 `results.json`의 `runs[].rows`로 계산한다.
+- 표본 통계(평균 ± 표준편차, 중앙값)와 **끔 대비 쌍별 차**(라운드마다 정책 − 끔의 중앙값, 끔보다 나은/나쁜 라운드 수 — `iter_body` p99·워커 CPU·xrun)를 낸다(#258 리뷰 L1). 10라운드에서 9/10 이상이 한쪽이면 부호 검정 p < 0.05다 — 단 칸 하나에 대한 기준이라 표 전체(전체 실행 216칸)에서는 차이가 없어도 몇 칸이 우연히 넘는다. 판정은 미리 정한 칸과, 같은 정책이 구성 여럿에서 같은 방향일 때만 쓴다(#258 재리뷰 L3, `core-placement-2026-11-24.md` 6절). 구간이 필요하면 `results.json`의 `runs[].rows`로 계산한다.
 - 시간이 모자랄 때(#258 리뷰 L2): 라운드를 줄이지 말고 구성을 줄인다(`--preset reduced`). 6라운드면 6/6 일치여도 p ≈ 0.031이고 한 라운드만 어긋나도 유의하지 않다.
 
 ## 기록

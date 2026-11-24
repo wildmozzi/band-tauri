@@ -64,6 +64,60 @@ pub struct Row {
     pub placement: Option<[[f64; 3]; 2]>,
     /// 엔진 0이 보고한 스레드 정책 적용 결과(`EngineStats.threadPolicy` JSON, P1-21 2단계). 비Windows는 빈 문자열.
     pub policy_applied: String,
+    /// 예열·안정화 구간(풀메시 연결 뒤 ~ 측정 창 시작)의 xrun(엔진 합). **집계(`xruns`)에서 뺀 값**이다 — 정책마다 같은 규칙.
+    /// 조건부 고정은 엔진 시작마다의 감지 구간(풀기 전 나쁜 창)이 여기 들어간다(#258 재리뷰 M1).
+    pub settle_xruns: u64,
+    /// 조건부 고정의 엔진 전체 상태(#258 재리뷰 M1·L2). 그 정책이 아니거나 비Windows면 None.
+    pub adaptive: Option<AdaptiveAgg>,
+}
+
+/// 조건부 고정(3안)의 엔진 전체 상태: 측정 창 시작·끝 두 시점의 엔진별 값을 모은 것.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AdaptiveAgg {
+    /// 조건부 고정 상태를 보고한 엔진 수(처음 묶기가 되지 않은 엔진은 빠진다).
+    pub engines: u32,
+    /// 측정 창 시작 시점에 풀려 있던 엔진 수 — 감지 구간이 예열 안에서 끝난 엔진.
+    pub released_at_start: u32,
+    /// 측정 창 끝 시점에 풀려 있던 엔진 수.
+    pub released_at_end: u32,
+    /// 예열 구간(엔진 시작 ~ 측정 창 시작)에 푼 횟수(엔진 합).
+    pub settle_releases: u32,
+    /// 측정 창 안에서 푼 횟수·다시 묶은 횟수(엔진 합). 0이 아니면 창 안에 감지 구간이나 다시 묶기가 들어 있다.
+    pub window_releases: u32,
+    pub window_rebinds: u32,
+    /// 처음 묶인 채로 측정 창에 들어가 창 안에서 처음 푼 엔진 수 — 감지 구간(풀기 전 나쁜 창)이 창 안에 들어간 엔진.
+    pub first_release_in_window: u32,
+    /// 엔진 시작부터 첫 풀림을 본 시각(초, 예열 중 250ms 간격으로 확인 — 예열 안에서 푼 엔진만)의 중앙값.
+    pub first_release_s_median: Option<f32>,
+}
+
+/// `EngineStats.threadPolicy.adaptive`의 (풀려 있음, 푼 횟수, 다시 묶은 횟수). 계약 JSON으로 읽는다.
+pub fn adaptive_state(s: &band_engine::testing::engine::report::EngineStats) -> Option<(bool, u32, u32)> {
+    let v = serde_json::to_value(s).ok()?;
+    let a = v.get("threadPolicy")?.get("adaptive")?;
+    Some((a.get("released")?.as_bool()?, a.get("releases")?.as_u64()? as u32, a.get("rebinds")?.as_u64()? as u32))
+}
+
+/// 측정 창 시작·끝의 엔진별 상태와 예열 중 본 첫 풀림 시각으로 `AdaptiveAgg`를 만든다. 상태가 하나도 없으면 None.
+pub fn aggregate_adaptive(start: &[Option<(bool, u32, u32)>], end: &[Option<(bool, u32, u32)>], first_release_s: &[Option<f32>]) -> Option<AdaptiveAgg> {
+    let mut a = AdaptiveAgg::default();
+    for (s, e) in start.iter().zip(end) {
+        let (Some((s_rel, s_n, s_rb)), Some((e_rel, e_n, e_rb))) = (s, e) else { continue };
+        a.engines += 1;
+        a.released_at_start += u32::from(*s_rel);
+        a.released_at_end += u32::from(*e_rel);
+        a.settle_releases += s_n;
+        a.window_releases += e_n.saturating_sub(*s_n);
+        a.window_rebinds += e_rb.saturating_sub(*s_rb);
+        a.first_release_in_window += u32::from(*s_n == 0 && *e_n > 0);
+    }
+    let mut firsts: Vec<f32> = first_release_s.iter().flatten().copied().collect();
+    firsts.sort_by(f32::total_cmp);
+    a.first_release_s_median = (!firsts.is_empty()).then(|| {
+        let k = firsts.len();
+        if k % 2 == 1 { firsts[k / 2] } else { (firsts[k / 2 - 1] + firsts[k / 2]) / 2.0 }
+    });
+    (a.engines > 0).then_some(a)
 }
 
 /// `EngineStats.corePlacement`(누적)에서 [워커, 수신] × [P, E, LP-E] 표본 수. 계약 JSON으로 읽는다(공개 표면을 늘리지 않음).
@@ -98,6 +152,7 @@ pub fn run(codec: CodecKind, frame_ms: f32, force_auto: bool, warmup: Duration, 
 pub fn run_n(n: usize, codec: CodecKind, frame_ms: f32, force_auto: bool, warmup: Duration, measure: Duration) -> Row {
     assert!(n >= 2, "엔진은 2개 이상(풀메시)");
     let cfg = EngineConfig { buffer_size: 128, frame_ms, codec, channels: 1, input_channels: vec![0], ..Default::default() };
+    let started = Instant::now();
     let engines: Vec<Engine> = (0..n)
         .map(|i| {
             Engine::start(cfg.clone(), Arc::new(sine_backend(220.0 * (i + 1) as f64)), Arc::new(MixControls::default()), Some((format!("p{i}"), test_net())))
@@ -125,8 +180,24 @@ pub fn run_n(n: usize, codec: CodecKind, frame_ms: f32, force_auto: bool, warmup
             e.force_auto_opus(true).unwrap();
         }
     }
-    // 예열(지터 버퍼 수렴) 후 창을 한 번 회전해 기준을 맞춘다
-    std::thread::sleep(warmup);
+    // 예열·안정화(지터 버퍼 수렴, 조건부 고정의 감지 구간) 후 창을 한 번 회전해 기준을 맞춘다. 예열 구간의 xrun은 집계에서
+    // 빼고 따로 낸다(정책마다 같은 규칙 — #258 재리뷰 M1). 예열 중에는 250ms마다 조건부 고정의 첫 풀림을 본다(측정 창 안에서는
+    // 보지 않는다 — 창의 CPU 값에 섞이지 않게).
+    let settle_x0: u64 = engines.iter().map(|e| e.stats().xruns).sum();
+    let mut first_release_s: Vec<Option<f32>> = vec![None; n];
+    let settle_end = Instant::now() + warmup;
+    loop {
+        for (slot, e) in first_release_s.iter_mut().zip(&engines) {
+            if slot.is_none() && adaptive_state(&e.stats()).is_some_and(|(_, releases, _)| releases > 0) {
+                *slot = Some(started.elapsed().as_secs_f32());
+            }
+        }
+        let left = settle_end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(250)));
+    }
     if force_auto {
         for (i, e) in engines.iter().enumerate() {
             for p in e.stats().peers {
@@ -136,8 +207,10 @@ pub fn run_n(n: usize, codec: CodecKind, frame_ms: f32, force_auto: bool, warmup
         }
     }
     // 창 회전과 xrun 기준(연결·예열 구간 제외)
-    let x0: u64 = engines.iter().map(|e| e.stats().xruns).sum();
-    let pl0 = sum_placement(&engines.iter().map(|e| e.stats()).collect::<Vec<_>>());
+    let stats0: Vec<_> = engines.iter().map(|e| e.stats()).collect();
+    let x0: u64 = stats0.iter().map(|s| s.xruns).sum();
+    let pl0 = sum_placement(&stats0);
+    let ad0: Vec<_> = stats0.iter().map(adaptive_state).collect();
     for e in &engines {
         let _ = e.take_worker_timing();
     }
@@ -173,6 +246,8 @@ pub fn run_n(n: usize, codec: CodecKind, frame_ms: f32, force_auto: bool, warmup
                 avg(wts.iter().map(|w| w.period.p50_ms * 1000.0).collect()),
             ]
         },
+        settle_xruns: x0.saturating_sub(settle_x0),
+        adaptive: aggregate_adaptive(&ad0, &stats.iter().map(adaptive_state).collect::<Vec<_>>(), &first_release_s),
         policy_applied: serde_json::to_value(&stats[0]).ok().and_then(|v| v.get("threadPolicy").filter(|p| !p.is_null()).map(|p| p.to_string())).unwrap_or_default(),
         placement: sum_placement(&stats).zip(pl0).map(|(a, b)| {
             let mut d = [[0.0; 3]; 2];

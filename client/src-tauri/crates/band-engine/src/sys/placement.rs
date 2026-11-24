@@ -441,6 +441,8 @@ impl PolicySlot {
             decider: Decider::default(),
             window: Collector::new(now, xruns_total),
             busy: PBusy::new(TABLES.get().map(|t| t.p_procs.as_slice()).unwrap_or(&[])),
+            #[cfg(test)]
+            fixed_busy: None,
         })
     }
 
@@ -461,6 +463,10 @@ pub(crate) struct AdaptiveDriver {
     decider: Decider,
     window: Collector,
     busy: PBusy,
+    /// 시험 전용: 판단에 넣을 P 코어 바쁨을 고정한다. OS 조회는 그대로 해서 할당·시스템콜 경로는 지나가되, 판단은 실제 기계
+    /// 상태에 좌우되지 않게 한다(#258 재리뷰 M2).
+    #[cfg(test)]
+    fixed_busy: Option<Option<u8>>,
 }
 
 impl AdaptiveDriver {
@@ -476,7 +482,17 @@ impl AdaptiveDriver {
     pub(crate) fn tick(&mut self, body: std::time::Duration, now: std::time::Instant, xruns_total: u64) {
         self.window.note_body(body);
         let busy = &mut self.busy;
-        if let Some(w) = self.window.roll(now, xruns_total, || busy.sample()) {
+        #[cfg(test)]
+        let fixed = self.fixed_busy;
+        let sample = || {
+            let got = busy.sample();
+            #[cfg(test)]
+            if let Some(f) = fixed {
+                return f;
+            }
+            got
+        };
+        if let Some(w) = self.window.roll(now, xruns_total, sample) {
             let v = self.decider.step(w);
             self.shared.publish(v, w.p_busy_pct);
         }
@@ -1328,7 +1344,9 @@ mod tests {
     }
 
     /// 조건부 고정이 워커 반복에 더하는 길 — 관측 올리기·창 판단(P 코어 바쁨 추정의 시스템콜 포함)·판단 공유·자기 스레드에
-    /// 풀기/묶기 — 은 **할당하지 않는다**(워커 반복 규칙). 실제 OS 호출로 풀기 → 다시 묶기를 지나가며 센다.
+    /// 풀기/묶기 — 은 **할당하지 않는다**(워커 반복 규칙). 실제 OS 호출로 풀기 → 다시 묶기를 지나가며 센다. P 코어 바쁨은
+    /// 실제로 조회하되(할당 계수 대상) 판단에 넣는 값은 낮게 고정한다 — 실제 P 코어가 바쁘면 다시 묶지 않아 가끔 실패했다
+    /// (#258 재리뷰 M2).
     #[test]
     fn adaptive_path_does_not_allocate() {
         use super::super::pin_adapt::{HOLD_MIN, SEVERE_XRUNS, WARMUP_WINDOWS, WINDOW};
@@ -1339,6 +1357,9 @@ mod tests {
             let t0 = std::time::Instant::now();
             // 걸 코어가 없는 기계·비Windows는 판단기가 없다 — 그때도 맞추기 호출은 할당 없이 지나간다
             let mut driver = slot.adaptive_driver(t0, 0);
+            if let Some(d) = driver.as_mut() {
+                d.fixed_busy = Some(Some(10));
+            }
             let quiet = std::time::Duration::from_micros(50);
             let ((), allocs) = crate::sys::alloc::counted(|| {
                 let mut xruns = 0u64;
