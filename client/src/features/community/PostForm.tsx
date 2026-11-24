@@ -64,6 +64,7 @@ export function PostForm({
               제목 *
             </label>
             <input
+              className="community-touch"
               type="text"
               value={form.title}
               onChange={(e) => form.setTitle(e.target.value)}
