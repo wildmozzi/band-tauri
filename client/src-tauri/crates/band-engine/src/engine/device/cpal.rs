@@ -31,10 +31,15 @@ struct Streams {
     _input: cpal::Stream,
     _output: cpal::Stream,
     asio: bool,
+    /// 드라이버 리셋 요청 감시를 거두는 함수(ASIO만, `asio_reset_hook`). 스트림보다 먼저 거둔다.
+    unhook: Option<Box<dyn FnOnce()>>,
 }
 
 impl Drop for Streams {
     fn drop(&mut self) {
+        if let Some(unhook) = self.unhook.take() {
+            unhook();
+        }
         if self.asio {
             ASIO_IN_USE.store(false, Ordering::SeqCst);
         }
@@ -81,6 +86,43 @@ fn asio_latencies() -> Option<(u32, u32)> {
 
 #[cfg(not(all(feature = "asio", target_os = "windows", target_arch = "x86_64")))]
 fn asio_latencies() -> Option<(u32, u32)> {
+    None
+}
+
+/// ASIO SDK `asio.h`의 `kAsioResetRequest` 선택자 값(`kAsioSelectorSupported = 1`, `kAsioEngineVersion`, `kAsioResetRequest`).
+#[cfg(feature = "asio")]
+const K_ASIO_RESET_REQUEST: i64 = 3;
+
+/// 드라이버 리셋 요청(`kAsioResetRequest`)을 `AudioCounters::device_reset_requests`로 센다(P1-11, 설계 문서 1.1절).
+///
+/// cpal 0.15.3은 이 요청을 버린다: asio-sys 0.2.6의 `asio_message`가 리셋 요청을 등록된 메시지 콜백
+/// (`Driver::add_message_callback`)에 넘기지만 cpal ASIO 백엔드는 콜백을 등록하지 않고, 에러 콜백도 쓰지 않는다
+/// (`host/asio/stream.rs`의 `_error_callback`). 그래서 cpal이 이미 연 드라이버 핸들(`cpal::platform::AsioDevice::driver`,
+/// pub)에 우리 콜백을 직접 건다 — 패치·포크 없이. asio-sys의 메시지 콜백 목록은 프로세스 전역이고 드라이버는 하나다.
+/// 콜백은 드라이버의 메시지 스레드에서 불리며 원자 덧셈 하나만 한다(판단·재시작은 워커의 `ResetWatch`와 프론트).
+/// 스트림을 `play`한 뒤에 건다 — 일부 USB ASIO 드라이버가 시작 중에 보내는 가짜 리셋 요청을 세지 않는다(cpal 0.18도 같은 이유로
+/// 시작 중 요청을 무시한다). 돌려준 함수를 부르면 콜백을 거둔다.
+#[cfg(feature = "asio")]
+fn asio_reset_hook(dev: &cpal::Device, counters: &Arc<AudioCounters>) -> Option<Box<dyn FnOnce()>> {
+    match dev.as_inner() {
+        cpal::platform::DeviceInner::Asio(d) => {
+            let c = counters.clone();
+            // asio-sys 0.2.6은 리셋 요청에만 메시지 콜백을 부르지만, 다른 판이 다른 선택자를 넘겨도 리셋만 센다.
+            let id = d.driver.add_message_callback(move |selector| {
+                if selector as i64 == K_ASIO_RESET_REQUEST {
+                    c.device_reset_requests.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            let driver = d.driver.clone();
+            let unhook: Box<dyn FnOnce()> = Box::new(move || driver.remove_message_callback(id));
+            Some(unhook)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "asio"))]
+fn asio_reset_hook(_dev: &cpal::Device, _counters: &Arc<AudioCounters>) -> Option<Box<dyn FnOnce()>> {
     None
 }
 
@@ -237,7 +279,7 @@ impl AudioBackend for CpalBackend {
             SampleFormat::U16 => build_in::<u16>(&in_dev, &in_sel.config, input, in_ch, c_in),
             f => Err(format!("지원하지 않는 입력 샘플 포맷: {f:?}")),
         }?;
-        let c_out = counters;
+        let c_out = counters.clone();
         let output_stream = match out_sel.format {
             SampleFormat::F32 => build_out::<f32>(&out_dev, &out_sel.config, output, out_ch, c_out),
             SampleFormat::I16 => build_out::<i16>(&out_dev, &out_sel.config, output, out_ch, c_out),
@@ -250,6 +292,14 @@ impl AudioBackend for CpalBackend {
         if any_asio {
             ASIO_IN_USE.store(true, Ordering::SeqCst);
         }
+        // 드라이버 리셋 요청 감시(ASIO만): play 뒤에 건다(시작 중 가짜 요청 제외, `asio_reset_hook`)
+        let unhook = if cfg.input_driver == DriverKind::Asio {
+            asio_reset_hook(&in_dev, &counters)
+        } else if cfg.output_driver == DriverKind::Asio {
+            asio_reset_hook(&out_dev, &counters)
+        } else {
+            None
+        };
         // 드라이버 보고 지연: ASIO 듀플렉스만 알 수 있다(cpal WASAPI 공유는 알려 주지 않음).
         let reported = if duplex_asio { asio_latencies().unwrap_or((0, 0)) } else { (0, 0) };
         log::info!(
@@ -280,7 +330,7 @@ impl AudioBackend for CpalBackend {
             in_device_tag: device_tag(&in_dev.name().unwrap_or_default()),
             out_device_tag: device_tag(&out_dev.name().unwrap_or_default()),
         };
-        Ok((info, Box::new(Streams { _input: input_stream, _output: output_stream, asio: any_asio })))
+        Ok((info, Box::new(Streams { _input: input_stream, _output: output_stream, asio: any_asio, unhook })))
     }
 }
 
@@ -409,11 +459,10 @@ fn build_out<T: SizedSample + RtSample>(
     .map_err(|e| format!("출력 스트림 생성 실패: {e}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "asio")))]
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "asio"))]
     #[test]
     fn asio_unsupported_without_feature() {
         use super::CpalBackend;

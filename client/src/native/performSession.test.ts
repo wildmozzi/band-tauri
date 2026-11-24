@@ -8,6 +8,8 @@ import {
   DEVICE_RECOVERED_DEFAULT_MESSAGE,
   DEVICE_RECOVERED_MESSAGE,
   DEVICE_RECOVERING_MESSAGE,
+  DEVICE_RESET_RECOVERED_MESSAGE,
+  DEVICE_RESET_RECOVERING_MESSAGE,
   KEY_CONFLICT_MESSAGE,
   KEY_CONFLICT_REPEAT_MESSAGE,
   PerformSession,
@@ -44,6 +46,7 @@ class FakeEngine implements EngineBackend {
   startFailures = 0
   startConfigs: EngineConfig[] = []
   deviceLost = false
+  deviceReset = false
   streamFailed = false
   addPeerFailures = 0
   running = false
@@ -124,7 +127,7 @@ class FakeEngine implements EngineBackend {
   stats() {
     return this.track('stats', async () => {
       if (this.holdStats) await new Promise<void>((r) => { this.releaseStats = r })
-      return { ...stats(this.statsRunning), relay: this.relayStats, peers: this.peerStats, deviceLost: this.deviceLost, streamFailed: this.streamFailed }
+      return { ...stats(this.statsRunning), relay: this.relayStats, peers: this.peerStats, deviceLost: this.deviceLost, deviceReset: this.deviceReset, streamFailed: this.streamFailed }
     })
   }
 }
@@ -430,6 +433,47 @@ describe('PerformSession 피어/엔진 상태', () => {
     expect(after).toEqual(['start-performing', 'native-descriptor'])
     // 성공 안내는 잠시 뒤 사라진다
     await vi.waitFor(() => expect(session.getState().deviceNotice).toBeNull())
+  })
+
+  /** 엔진이 드라이버 리셋 요청을 디바운스해 deviceReset(+deviceLost)을 보고한다(P1-11). 풀리지 않는 값이라 한 번의 통계로 재시작한다 */
+  async function driverReset(session: PerformSession, engine: FakeEngine) {
+    engine.statsRunning = false
+    engine.deviceLost = true
+    engine.deviceReset = true
+    engine.running = false
+    await session.pollStats()
+    engine.statsRunning = true
+    engine.deviceLost = false
+    engine.deviceReset = false
+  }
+
+  it('드라이버 리셋 요청(deviceReset): 첫 통계에서 엔진만 다시 열고 "드라이버 설정이 바뀌어" 안내 — 서버에 연주 중단을 알리지 않는다 (P1-11)', async () => {
+    const { session, start, engine, types, sent } = setup({ others: ['B'] })
+    await start()
+    const sentBefore = sent.length
+    await driverReset(session, engine)
+    expect(session.getState()).toMatchObject({ phase: 'restarting', instrument: 'guitar', deviceNotice: DEVICE_RESET_RECOVERING_MESSAGE })
+    await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    expect(session.getState()).toMatchObject({ error: null, deviceNotice: DEVICE_RESET_RECOVERED_MESSAGE })
+    expect(engine.startConfigs[1]).toEqual(DEFAULT_ENGINE_CONFIG)
+    const after = types().slice(sentBefore)
+    expect(after).toEqual(['start-performing', 'native-descriptor'])
+    await vi.waitFor(() => expect(session.getState().deviceNotice).toBeNull())
+  })
+
+  it('드라이버 리셋이 짧은 시간에 반복되면 장치 분실과 같은 상한으로 정지한다(무한 재시작 방지, P1-11)', async () => {
+    const { session, start, engine, clock } = setup()
+    await start()
+    for (let i = 0; i < 3; i++) {
+      clock.now += 1000
+      await driverReset(session, engine)
+      await vi.waitFor(() => expect(session.getState().phase).toBe('running'))
+    }
+    clock.now += 1000
+    await driverReset(session, engine)
+    await vi.waitFor(() => expect(session.getState().phase).toBe('idle'))
+    expect(session.getState().error).toBe(DEVICE_LOST_REPEAT_MESSAGE)
+    expect(engine.calls.filter((c) => c.startsWith('start:'))).toHaveLength(4)
   })
 
   it('deviceLost가 한 번 보이고 곧 풀리면(콜백 순간 정지) 재시작하지 않는다 (#208 리뷰 L-1)', async () => {

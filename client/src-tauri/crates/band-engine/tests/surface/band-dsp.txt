@@ -304,6 +304,7 @@ rt_timing.rs	struct	RtTiming
 rt_timing.rs	struct	RtWindow
 stats.rs	field	audio_thread
 stats.rs	field	device_lost
+stats.rs	field	device_reset_requests
 stats.rs	field	in_captured_frames
 stats.rs	field	in_cb_frames
 stats.rs	field	input_discontinuities

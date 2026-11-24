@@ -71,7 +71,7 @@
 | 기능 | 코드 근거 (UI · 커맨드/서버) | 자동 시험 | 상태 | ④ 빈틈 |
 |---|---|---|---|---|
 | 오디오 인터페이스 선택 — **WASAPI** | `C/features/settings/AudioSettings.tsx:245·278`(입력/출력 드라이버) · `engine_list_devices`, `engine_supported_drivers` | `driverSupport.test.ts`, `audioSettingsView.test.ts` | 있음 | 실화면은 [사람] A |
-| 오디오 인터페이스 선택 — **ASIO** | 같은 화면, `asio` 피처 빌드에서만 활성(`client/src-tauri/Cargo.toml:49`, 배포본은 "(이 배포본에 없음)" `AudioSettings.tsx:174`). **`kAsioResetRequest` 처리 코드 없음**(`crates` 전체 검색 0건) | 없음 — CI에 ASIO 빌드가 없다(SDK 재배포 조항 때문에 보류, P1-9). 로컬 `cargo check --features asio`만 기록(#234) | **부분 구현** — 배포본에 없음(P1-12 계약 전), 리셋 요청 처리 미구현(P1-11) | P1-11 장치 연결 작업 [사람] B, 배포는 P1-12 [사람] F |
+| 오디오 인터페이스 선택 — **ASIO** | 같은 화면, `asio` 피처 빌드에서만 활성(`client/src-tauri/Cargo.toml:49`, 배포본은 "(이 배포본에 없음)" `AudioSettings.tsx:174`). `kAsioResetRequest`는 asio-sys 메시지 콜백으로 받아 엔진만 다시 연다(`engine/device/cpal.rs` `asio_reset_hook`, 디바운스 `worker/device_watch.rs` `ResetWatch`, P1-11) | `device_watch` 단위 시험(디바운스), `loopback.rs` `device_reset_request_restarts_engine_and_peer_audio_resumes`(가짜 장치 리셋 → 재시작 → 피어 소리 재개), `performSession.test.ts` 리셋 2건. CI에 ASIO 빌드가 없다(SDK 재배포 조항 때문에 보류, P1-9). 로컬 `cargo check --features asio`만 기록(#234) | **부분 구현** — 배포본에 없음(P1-12 계약 전), 리셋 요청 처리는 코드·가짜 장치 시험까지(실장치 [사람] B10, asio 피처 빌드 미확인 — 이 PC에 SDK 없음) | P1-11 장치 연결 작업 [사람] B, 배포는 P1-12 [사람] F |
 | 입력 채널 선택 | `AudioSettings.tsx:383–406`(모노 1개 / 스테레오 L·R) | `audioSettingsView.test.ts` | 있음 | — |
 | 버퍼/품질 프리셋 | `AudioSettings.tsx:202`(프리셋), `C/native/engineConfig.ts` `ENGINE_PRESETS`, 지터 `저지연 ↔ 안정`(`:420`, `engine_set_jitter_profile`) | `AudioSettingsContext.test.tsx`, `settingsSync.test.ts` | 있음 | — |
 | 입력 모니터 | 설정의 테스트 모니터 `AudioSettings.tsx:480`(`engine_test_start`), 합주 중 `C/features/room/components/MyPerformerItem.tsx:81–99`(모니터링 켜기·볼륨, `engine_set_monitor`) | `E/tests/loopback.rs` `test_mode_monitor_passthrough`, `monitor_matrix_no_gaps_with_large_device_buffers` | 있음 | — |
@@ -123,6 +123,6 @@
 | ⑦ | ~~하네스 GOAL 1절 판정에서 꼬리 지터 피어 제외(P1-6d 결정의 남은 일) + 꼬리 지터 회선 tail_extra 한도 정리~~ — 완료(P2-16d PR): 회선 분류로 판정 정리, tail_extra는 측정 결과 지연↔은닉 트레이드오프뿐이라 동작 유지 | P1-6d, P2-16d | S | 1-3 |
 | ⑧ | `est_latency_budget_table`에 cpal WASAPI 공유 폴백(10ms 주기) 행 추가 — GOAL "공유 ≤ 30ms"를 실제 폴백 경로로도 판정 | **완료**(#250 — 44.1k + 10ms 프레임 32.75ms 초과는 [결정]) | XS | 1-1 |
 | ⑨ | Playwright WebKit 프로젝트로 웹 관람 e2e 일부 실행(지금 chromium만). iOS Safari 실기기를 대신하지는 못하지만 WebKit 고유 오류(오디오 잠금 해제 흐름, 레이아웃)는 먼저 잡는다 | **완료**(P3-24 #244 — 관람 경로 스펙 8개 WebKit, iOS Safari 실기기는 [사람] E) | M | 한 문장 목표의 "웹 관람" |
-| ⑩ | ASIO `kAsioResetRequest`·버퍼 변경 처리 코드(장치 없이 가능한 부분까지) — 확인은 장치 필요 | P1-11 | M | 1-1, 4(ASIO) |
+| ⑩ | ASIO `kAsioResetRequest`·버퍼 변경 처리 코드(장치 없이 가능한 부분까지) — 확인은 장치 필요 | **완료**(이 PR — asio-sys 메시지 콜백 → 워커 디바운스 → `deviceReset` → 엔진만 다시 시작. 실장치 확인은 [사람] B10, `--features asio` 빌드는 SDK 있는 PC에서) | M | 1-1, 4(ASIO) |
 
 자동으로 닫을 수 **없는** 것(사람·결정 필요): 실장비 xrun 30분, 실회선 입→귀·연결 성공률, 청감, 6인 실장비, 운영 릴레이 배포(비용), FEC 문구(P2-17b 결정), 코드 서명·ASIO 계약. 절차는 [HUMAN-CHECKS.md](HUMAN-CHECKS.md).

@@ -378,6 +378,8 @@ export interface EngineStats {
   streamErrors?: number
   /** 장치를 잃음(콜백 1초 정지, 장치 분리·무효화, 기본 장치 변경). true면 running=false */
   deviceLost?: boolean
+  /** 드라이버가 리셋을 요청했다(ASIO kAsioResetRequest — 제어판에서 버퍼 크기·샘플레이트 변경 등, P1-11). 엔진이 디바운스한 뒤 켜고 엔진이 끝날 때까지 유지. true면 deviceLost도 true. 옛 엔진이면 없음 */
+  deviceReset?: boolean
   /** 스트림이 복구되지 않는 오류로 멈춤(치명 오류, 재시작 반복 실패). 장치는 남아 있을 수 있다. true면 running=false */
   streamFailed?: boolean
   /** 일시 오류 반복으로 자체 WASAPI 스트림을 재시작한 횟수 */

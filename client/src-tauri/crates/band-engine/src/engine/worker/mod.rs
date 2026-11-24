@@ -24,7 +24,7 @@
 //! - `local_path.rs`: 로컬 경로 단계(`LocalPath`: 모니터·탭 공급, 여유 적응, 점유 통계)
 //! - `local.rs`: 로컬 입력 FIFO(`LocalFifo`)
 //! - `metronome_stage.rs`: 메트로놈 단계(`MetronomeStage`: 박 예약 입력·상태 보고)
-//! - `device_watch.rs`: 장치 감시 단계(`DeviceWatch`)
+//! - `device_watch.rs`: 장치 감시 단계(`DeviceWatch`, 드라이버 리셋 요청 디바운스 `ResetWatch`)
 //! - `tests.rs`: 결정적 단위 시뮬레이션
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -96,6 +96,9 @@ pub struct WorkerStats {
     pub(crate) skipped_frames: AtomicU64,
     /// 입력 또는 출력 콜백이 1초 넘게 멈췄다(장치 분리 등). 다시 돌면 false.
     pub(crate) device_stalled: AtomicBool,
+    /// 드라이버 리셋 요청(ASIO `kAsioResetRequest`)을 디바운스한 결과 — 장치를 다시 열어야 한다(`device_watch::ResetWatch`).
+    /// 한 번 켜지면 이 엔진이 끝날 때까지 켜져 있다(다시 열어야만 새 드라이버 설정이 적용된다).
+    pub(crate) device_reset: AtomicBool,
     /// 워커 스레드 우선순위 설정 결과(P1-2).
     pub(crate) thread_prio: band_dsp::prio_slot::PrioSlot,
     /// 워커의 피어 미디어 표 길이(명령을 비운 직후, 엔진 ③). 진단·테스트: 표에 죽은 항목이 남는지 직접 본다.

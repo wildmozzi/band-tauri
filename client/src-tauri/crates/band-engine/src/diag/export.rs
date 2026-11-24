@@ -555,8 +555,9 @@ mod tests {
             ("meta.json", "8ca5f2597b978ae5133a12ba0f4ebe2bb1dbb0401e669c0621b65b87c6d325c5"),
             // P2-17e: engine.json의 config에 resampleQuality(null), stats에 resampler(null)가 생김(의도한 변경)
             // P1-21 2단계: engine.json의 config에 threadPolicy(null)가 생김(의도한 변경)
-            ("engine.json", "6f4c1882c00322211eedf58bc3b14dc627b1be94dd6fe9b8e77336bdd4378994"),
-            ("timeline.jsonl", "3439e58dad4fa31e0ad39d03171b9c5752e3ed097d82404a7ba3fee74224769a"),
+            // P1-11: engine.json stats와 timeline.jsonl 샘플에 deviceReset(false)이 생김(의도한 변경 — 드라이버 리셋 요청)
+            ("engine.json", "42b3b016dcabaab92e37935ea7eb47332520dad21562e429d245a43f7334a892"),
+            ("timeline.jsonl", "931381a43f6238a5c3536a92d1e3b5389231be33df4d4cac096e29455ff19725"),
             ("logs/Band.log", "6774d10d922e095e6e4dab8cd7dc9a152b767e4d69a2c4af13ffe7cc8359e982"),
         ];
         let got = golden_digest(bytes);

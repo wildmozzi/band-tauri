@@ -56,6 +56,7 @@ engine/device/fake.rs	field	out_rate
 engine/device/fake.rs	field	out_stall
 engine/device/fake.rs	field	record_output
 engine/device/fake.rs	field	reported_latency
+engine/device/fake.rs	field	reset_after
 engine/device/fake.rs	field	seed
 engine/device/fake.rs	field	sink
 engine/device/fake.rs	field	sink_origin
@@ -289,6 +290,7 @@ engine/report.rs	field	cpu
 engine/report.rs	field	device_buffer
 engine/report.rs	field	device_lost
 engine/report.rs	field	device_period_ms
+engine/report.rs	field	device_reset
 engine/report.rs	field	echo_active
 engine/report.rs	field	echo_requested
 engine/report.rs	field	est_latency_ms

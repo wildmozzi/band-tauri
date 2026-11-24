@@ -35,3 +35,10 @@ export const DEVICE_RECOVERED_MESSAGE = '오디오 장치가 바뀌어 엔진을
 export const DEVICE_RECOVERED_DEFAULT_MESSAGE = '쓰던 오디오 장치를 열 수 없어 기본 장치로 다시 시작했습니다. 오디오 설정을 확인하세요.'
 export const DEVICE_LOST_FAILED_MESSAGE = '오디오 장치를 다시 열지 못해 연주를 중단했습니다. 장치 연결과 오디오 설정을 확인한 뒤 다시 시작해주세요.'
 export const DEVICE_LOST_REPEAT_MESSAGE = '오디오 장치가 계속 바뀌어 연주를 중단했습니다. 장치 연결을 확인한 뒤 다시 시작해주세요.'
+/** 드라이버가 리셋을 요청했다(ASIO 제어판에서 버퍼 크기·샘플레이트 변경 등, 엔진 `deviceReset`, P1-11) — 장치 분실과 같은 길로 엔진만 다시 연다 */
+export const DEVICE_RESET_RECOVERING_MESSAGE = '오디오 드라이버 설정이 바뀌어(버퍼 크기·샘플레이트 등) 엔진을 다시 시작하는 중입니다…'
+export const DEVICE_RESET_RECOVERED_MESSAGE = '오디오 드라이버 설정이 바뀌어 다시 시작했습니다. 합주는 계속됩니다.'
+/** 다시 시작하는 중 안내인지(띠 모양 구분) */
+export function isDeviceRecoveringNotice(notice: string): boolean {
+  return notice === DEVICE_RECOVERING_MESSAGE || notice === DEVICE_RESET_RECOVERING_MESSAGE
+}

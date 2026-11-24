@@ -969,6 +969,48 @@ fn device_lost_is_reported() {
     assert!(j.contains("\"deviceLost\":true") && j.contains("\"running\":false"));
 }
 
+/// P1-11: 드라이버 리셋 요청(ASIO `kAsioResetRequest` 흉내, 연달아 3번) → 엔진이 한 번으로 합쳐 `deviceReset`·`deviceLost`를
+/// 보고(콜백은 계속 돌아도) → 프론트처럼 같은 peer id로 엔진만 다시 열고 상대와 descriptor를 다시 교환 → 다시 연결되고
+/// 상대 소리(사인)가 새 엔진 출력에 다시 나온다. 다시 연 엔진은 리셋 요청이 없으면 `deviceReset`이 꺼져 있다.
+#[test]
+fn device_reset_request_restarts_engine_and_peer_audio_resumes() {
+    let _g = RT_LOCK.lock();
+    let cfg = config(128, 5.0);
+    let mut reset_backend = FakeBackend::silence(48_000);
+    reset_backend.reset_after = Some((Duration::from_millis(300), 3));
+    let (a, mut b, _p, _sink_b) = connect_pair(cfg.clone(), sine_backend(), reset_backend, None);
+    assert!(wait_until(HANG, || b.stats().device_reset), "리셋 요청이 deviceReset으로 서지 않음");
+    let s = b.stats();
+    assert!(s.device_reset && s.device_lost && !s.running && !s.stream_failed, "{s:?}");
+    let j = serde_json::to_string(&s).unwrap();
+    assert!(j.contains("\"deviceReset\":true") && j.contains("\"deviceLost\":true"), "{j}");
+    // 장치만 다시 열면 된다: 네트워크(피어 연결)는 그대로 살아 있다
+    assert!(s.peers.iter().all(|p| p.state == PeerStateKind::Connected), "{:?}", s.peers);
+    // 리셋을 보낸 쪽은 A와 무관하다: A는 계속 정상
+    assert!(a.stats().running && !a.stats().device_reset);
+
+    // 프론트의 "엔진만 다시 시작"(performSession.recoverFromDeviceLoss)과 같은 순서: 정지 → 같은 설정·같은 id로 시작 → descriptor 재교환
+    b.stop();
+    let fresh = FakeBackend::silence(48_000);
+    let sink_b2 = fresh.sink.clone();
+    let b2 = Engine::start(cfg, Arc::new(fresh), Arc::new(MixControls::default()), Some(("bob".into(), test_net()))).unwrap();
+    a.remove_peer("bob").unwrap();
+    a.add_peer("bob".into(), &with_candidate(b2.descriptor().unwrap(), local_addr(&b2))).unwrap();
+    b2.add_peer("alice".into(), &with_candidate(a.descriptor().unwrap(), local_addr(&a))).unwrap();
+    assert!(wait_connected(&b2, HANG), "다시 연 엔진이 상대와 연결되지 않음");
+    assert!(wait_connected(&a, HANG), "상대가 다시 연 엔진과 연결되지 않음");
+    let mut rms = 0.0;
+    assert!(
+        wait_until(HANG, || {
+            rms = tail_rms_after(&sink_b2, 0, 2400).map_or(0.0, |(l, _)| l);
+            rms > 0.2
+        }),
+        "다시 연 엔진에서 상대 소리가 나오지 않음(rms {rms:.3}, 사인 0.354)"
+    );
+    let s2 = b2.stats();
+    assert!(s2.running && !s2.device_reset && !s2.device_lost, "{s2:?}");
+}
+
 #[test]
 fn worker_init_failure_fails_start() {
     let _g = RT_LOCK.lock();

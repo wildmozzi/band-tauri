@@ -105,6 +105,9 @@ pub struct FakeBackend {
     pub open_gate: Option<Arc<OpenGate>>,
     /// 이 시간 뒤 스트림 에러 1회 보고(장치 분리 흉내).
     pub error_after: Option<Duration>,
+    /// (시각, 횟수): 이 시간 뒤 드라이버 리셋 요청을 횟수만큼 연달아 보낸다(ASIO `kAsioResetRequest` 흉내, P1-11).
+    /// 콜백은 계속 돈다(실제 드라이버도 호스트가 다시 열 때까지 옛 설정으로 부르기도 한다).
+    pub reset_after: Option<(Duration, u32)>,
     pub(crate) source: Arc<SourceFn>,
     /// 출력 콜백이 기록한 샘플(인터리브, `channels`채널).
     pub sink: Arc<Mutex<Vec<f32>>>,
@@ -142,6 +145,7 @@ impl FakeBackend {
             open_delay: Duration::ZERO,
             open_gate: None,
             error_after: None,
+            reset_after: None,
             source,
             sink: Arc::new(Mutex::new(Vec::new())),
             record_output: true,
@@ -315,6 +319,9 @@ impl AudioBackend for FakeBackend {
         let spawn_out = std::thread::Builder::new().name("band-fake-out".into()).spawn(move || {
             let mut buf = vec![0f32; out_buf * ch];
             let mut errored = false;
+            // 리셋 요청은 열린 시각 기준(공유 원점 `t0`가 과거여도 열고 나서 `reset_after` 뒤)
+            let opened = Instant::now();
+            let mut reset_sent = false;
             let phase = Duration::from_micros(me.out_phase_us);
             let seed = me.seed.wrapping_add(17);
             let k0 = start_k(out_period, phase.as_secs_f64());
@@ -335,6 +342,13 @@ impl AudioBackend for FakeBackend {
                 output.process(&mut buf, ch);
                 if me.record_output {
                     me.sink.lock().extend_from_slice(&buf);
+                }
+                if let Some((_, n)) = me.reset_after.filter(|&(after, _)| !reset_sent && opened.elapsed() >= after) {
+                    reset_sent = true;
+                    // 드라이버가 연달아 보내는 요청 흉내: 한 번에 하나씩 n번(워커 디바운스가 합친다)
+                    for _ in 0..n {
+                        counters.device_reset_requests.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 if !errored && me.error_after.is_some_and(|d| t0.elapsed() >= d) {
                     errored = true;
