@@ -37,7 +37,7 @@ pub(super) enum ResetState {
     Pending { first_at: Duration, last_at: Duration, merged: u32 },
     /// 다시 열기를 요청했다(끝 상태). 이 엔진에서는 더 요청하지 않는다 — 다시 열면 새 엔진이 새 감시로 시작한다.
     /// 그래서 엔진 하나는 리셋 요청이 아무리 와도 다시 열기를 한 번만 부르고, 엔진을 거듭 다시 여는 반복의 상한은
-    /// 프론트의 장치 분실 한도(60초에 3번, `performSession.recoverFromDeviceLoss`)가 정한다.
+    /// 프론트의 리셋 재시작 한도(장치 분실과 따로 60초에 8번, `performSession.recoverFromDeviceLoss`)가 정한다.
     Requested,
 }
 
