@@ -136,12 +136,12 @@ describe('AudioSettingsContext + profiles.audio_settings', () => {
     expect(sb.mock!.client.from).not.toHaveBeenCalled()
   })
 
-  it('다른 PC에서 로그인: 서버에 옛 threadPolicy(켬)가 있어도 끔으로 시작하고, 다음 저장 때 서버에서 뺀다(#245 재리뷰 L4)', async () => {
-    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 256, threadPolicy: { highQos: true, preferPCores: true } } } } })
+  it('다른 PC에서 로그인: 서버에 옛 threadPolicy가 있어도 이 PC의 기본값(절전 끄기 켬·P 코어 끔)으로 시작하고, 다음 저장 때 서버에서 뺀다(#245 재리뷰 L4)', async () => {
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 256, threadPolicy: { highQos: false, preferPCores: true } } } } })
     const { result } = setup()
     await waitFor(() => expect(result.current.config.bufferSize).toBe(256))
     await act(async () => {})
-    expect(result.current.config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
 
     act(() => { result.current.updateConfig({ jitterMaxMs: 60 }) })
     await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
@@ -151,7 +151,7 @@ describe('AudioSettingsContext + profiles.audio_settings', () => {
   })
 
   it('이 PC에서 켠 값은 기기 로컬에만 저장되고 계정 로드 뒤에도 유지된다', async () => {
-    localStorage.setItem('band_thread_policy_v1', JSON.stringify({ highQos: false, preferPCores: true }))
+    localStorage.setItem('band_thread_policy_v2', JSON.stringify({ highQos: false, preferPCores: true }))
     sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 256 } } } })
     const { result } = setup()
     await waitFor(() => expect(result.current.config.bufferSize).toBe(256))
@@ -160,7 +160,7 @@ describe('AudioSettingsContext + profiles.audio_settings', () => {
 
     act(() => { result.current.updateConfig({ threadPolicy: { highQos: true, preferPCores: true } }) })
     await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
-    expect(JSON.parse(localStorage.getItem('band_thread_policy_v1')!)).toEqual({ highQos: true, preferPCores: true })
+    expect(JSON.parse(localStorage.getItem('band_thread_policy_v2')!)).toEqual({ highQos: true, preferPCores: true })
     const cache = JSON.parse(localStorage.getItem('band_engine_config_v2')!) as { engine: Record<string, unknown> }
     expect('threadPolicy' in cache.engine).toBe(false)
     const payload = argsOf(updates()[0], 'update')[0][0] as { audio_settings: { engine: Record<string, unknown> } }
@@ -322,18 +322,19 @@ describe('저장된 장치가 이 PC에 없을 때(P2-27): 이번 실행만 기�
 
 describe('기기별 스레드 정책: 계정 전환·저장소 예외(#249 리뷰 N2)', () => {
   it('같은 PC에서 계정을 바꿔도 이 기기의 값은 유지되고, 새 계정에도 올라가지 않는다', async () => {
-    localStorage.setItem('band_thread_policy_v1', JSON.stringify({ highQos: true, preferPCores: false }))
-    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 256, threadPolicy: { highQos: false, preferPCores: true } } } } })
+    // 이 PC에서 사용자가 절전 끄기를 명시적으로 끈 상태(기본값과 다른 값이라 유지 여부가 드러난다)
+    localStorage.setItem('band_thread_policy_v2', JSON.stringify({ highQos: false, preferPCores: false }))
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 256, threadPolicy: { highQos: true, preferPCores: true } } } } })
     const { result, rerender } = setup()
     await waitFor(() => expect(result.current.config.bufferSize).toBe(256))
-    expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
+    expect(result.current.config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
 
     auth.user = { id: 'u2' }
-    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 512, threadPolicy: { highQos: false, preferPCores: true } } } } })
+    sb.mock!.setResult('profiles', { data: { audio_settings: { version: 2, engine: { bufferSize: 512, threadPolicy: { highQos: true, preferPCores: true } } } } })
     rerender()
     await waitFor(() => expect(result.current.config.bufferSize).toBe(512))
     await act(async () => {})
-    expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
+    expect(result.current.config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
 
     act(() => { result.current.updateConfig({ jitterMaxMs: 60 }) })
     await waitFor(() => expect(updates()).toHaveLength(1), { timeout: 2000 })
@@ -342,14 +343,25 @@ describe('기기별 스레드 정책: 계정 전환·저장소 예외(#249 리�
     expect('threadPolicy' in payload.audio_settings.engine).toBe(false)
   })
 
-  it('localStorage 읽기·쓰기가 던져도 기본값(끔)으로 시작하고 설정 변경은 동작한다', async () => {
+  it('localStorage 읽기·쓰기가 던져도 기본값(절전 끄기 켬·P 코어 끔)으로 시작하고 설정 변경은 동작한다', async () => {
     auth.user = null
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('denied') })
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('denied') })
     const { result } = setup()
-    expect(result.current.config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
-    expect(result.current.config.bufferSize).toBe(128)
-    act(() => { result.current.updateConfig({ threadPolicy: { highQos: true, preferPCores: false } }) })
     expect(result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
+    expect(result.current.config.bufferSize).toBe(128)
+    act(() => { result.current.updateConfig({ threadPolicy: { highQos: false, preferPCores: false } }) })
+    expect(result.current.config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+  })
+
+  it('저장값이 없는 PC: 절전 끄기 켬으로 시작하고, 사용자가 끄면 이 PC에 끈 값이 남는다(P1-21 3단계)', async () => {
+    auth.user = null
+    const first = setup()
+    expect(first.result.current.config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
+    act(() => { first.result.current.updateConfig({ threadPolicy: { highQos: false, preferPCores: false } }) })
+    await waitFor(() => expect(JSON.parse(localStorage.getItem('band_thread_policy_v2') ?? 'null')).toEqual({ highQos: false, preferPCores: false }))
+    first.unmount()
+    // 앱을 다시 켠 것: 끈 값을 존중한다
+    expect(setup().result.current.config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
   })
 })

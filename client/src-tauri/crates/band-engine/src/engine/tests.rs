@@ -301,20 +301,54 @@ fn thread_policy_from_config_is_applied_and_reported() {
     }
 }
 
-/// 기본 설정(정책 필드 없음 — 옛 설정 포함)은 두 정책 모두 `off`다: 워커·수신 스레드는 OS 호출 없이 이 정책이 생기기 전과
-/// 같은 경로로 돈다(호출 없음 자체는 `sys::placement::tests::policy_results_cover_off_applied_failed_skipped`가 고정한다).
-/// 설정에 `{ highQos: false, preferPCores: false }`를 적어도 같다.
+/// 기본값(P1-21 3단계): 정책 필드가 없는 설정(옛 설정 포함)·`ThreadPolicyConfig::default()`·`highQos`가 빠진 JSON은 모두
+/// **HighQoS 켬, P 코어 끔**이다 — 워커·수신 스레드가 HighQoS `applied`, P 코어 `off`를 보고한다. 비Windows는 null.
 #[test]
-fn thread_policy_is_off_by_default() {
+fn thread_policy_default_is_high_qos_on_p_cores_off() {
     use crate::sys::placement::{PolicyResult, ThreadPolicy};
     use band_dsp::config::ThreadPolicyConfig;
     if std::env::var(crate::sys::placement::POLICY_ENV).is_ok() {
         return;
     }
     assert_eq!(EngineConfig::default().thread_policy, None);
-    let off = ThreadPolicy { high_qos: PolicyResult::Off, p_cores: PolicyResult::Off };
+    assert_eq!(ThreadPolicyConfig::default(), ThreadPolicyConfig { high_qos: true, prefer_p_cores: false });
+    // 계약 JSON: 필드가 빠지면 기본값, 명시한 false는 그대로
+    let parse = |j: &str| serde_json::from_str::<ThreadPolicyConfig>(j).unwrap();
+    assert_eq!(parse("{}"), ThreadPolicyConfig::default());
+    assert_eq!(parse(r#"{"preferPCores":true}"#), ThreadPolicyConfig { high_qos: true, prefer_p_cores: true });
+    assert_eq!(parse(r#"{"highQos":false}"#), ThreadPolicyConfig { high_qos: false, prefer_p_cores: false });
+    let want = ThreadPolicy { high_qos: PolicyResult::Applied, p_cores: PolicyResult::Off };
     let a = start("pa", CodecKind::Opus);
     let b = start_cfg("pb", EngineConfig { buffer_size: 128, thread_policy: Some(ThreadPolicyConfig::default()), ..Default::default() });
+    a.add_peer("pb".into(), &desc_of(&b)).unwrap();
+    b.add_peer("pa".into(), &desc_of(&a)).unwrap();
+    wait_until(|| connected(&a, 1) && connected(&b, 1));
+    run_iters(&[&a, &b], 50);
+    for e in [&a, &b] {
+        let s = e.stats();
+        if cfg!(windows) {
+            let tp = s.thread_policy.expect("Windows는 스레드 정책을 보고한다");
+            assert_eq!((tp.worker, tp.net_recv), (want, Some(want)));
+        } else {
+            assert!(s.thread_policy.is_none());
+        }
+    }
+}
+
+/// 사용자가 명시적으로 끈 설정(`{ highQos: false, preferPCores: false }`)은 존중한다: 두 정책 모두 `off` — 워커·수신 스레드는
+/// OS 호출 없이 이 정책이 생기기 전과 같은 경로로 돈다(호출 없음 자체는
+/// `sys::placement::tests::policy_results_cover_off_applied_failed_skipped`가 고정한다).
+#[test]
+fn thread_policy_explicit_off_is_respected() {
+    use crate::sys::placement::{PolicyResult, ThreadPolicy};
+    use band_dsp::config::ThreadPolicyConfig;
+    if std::env::var(crate::sys::placement::POLICY_ENV).is_ok() {
+        return;
+    }
+    let off = ThreadPolicy { high_qos: PolicyResult::Off, p_cores: PolicyResult::Off };
+    let cfg = || EngineConfig { buffer_size: 128, thread_policy: Some(ThreadPolicyConfig { high_qos: false, prefer_p_cores: false }), ..Default::default() };
+    let a = start_cfg("pa", cfg());
+    let b = start_cfg("pb", cfg());
     a.add_peer("pb".into(), &desc_of(&b)).unwrap();
     b.add_peer("pa".into(), &desc_of(&a)).unwrap();
     wait_until(|| connected(&a, 1) && connected(&b, 1));

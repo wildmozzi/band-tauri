@@ -35,6 +35,12 @@ export function isValidOpusBitrate(v: unknown): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= OPUS_BITRATE_MIN && v <= OPUS_BITRATE_MAX
 }
 
+/**
+ * 엔진 스레드 정책 기본값(P1-21 3단계, 사용자 결정 2026-11-21): 절전 끄기(HighQoS) 켬, P 코어 묶기 끔.
+ * 엔진(`ThreadPolicyConfig::default()`)과 같은 값이다. 저장값이 없는 PC·옛 설정이 이 값으로 시작한다.
+ */
+export const DEFAULT_THREAD_POLICY: Readonly<ThreadPolicyConfig> = Object.freeze({ highQos: true, preferPCores: false })
+
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   inputDriver: 'wasapiShared',
   outputDriver: 'wasapiShared',
@@ -49,7 +55,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   jitterMaxMs: 80,
   jitterProfile: JITTER_PROFILE_DEFAULT,
   resampleQuality: 'auto',
-  threadPolicy: { highQos: false, preferPCores: false },
+  threadPolicy: { ...DEFAULT_THREAD_POLICY },
 }
 
 /** 리샘플러 품질 선택지(P2-17e, 오디오 설정 "리샘플러 품질") */
@@ -249,7 +255,7 @@ export function toStored(config: EngineConfig): StoredAudioSettings {
 
 /**
  * 계정(profiles.audio_settings)과 그 로컬 캐시에 쓰는 형식: 기기별 필드(`threadPolicy`)를 뺀다.
- * 스레드 정책은 이 PC의 CPU 구성에 따른 실험 옵션이라 다른 PC로 따라가면 안 된다(#245 재리뷰 L4) —
+ * 스레드 정책은 이 PC의 CPU 구성에 따른 값이라 다른 PC로 따라가면 안 된다(#245 재리뷰 L4) —
  * 기기 로컬(`features/settings/deviceLocalSettings`)에만 저장한다. 서버에 옛 값이 있어도 읽을 때 무시하고
  * (`withDeviceLocal`), 다음 저장 때 이 형식으로 덮어써 사라진다.
  */
@@ -329,10 +335,16 @@ function sanitizeEngineConfig(raw: Record<string, unknown>): EngineConfig {
   return fixPayload(config)
 }
 
-/** 저장된 `threadPolicy`를 정규화한다: 각 항목이 정확히 `true`일 때만 켬 */
+/**
+ * 저장된 `threadPolicy`를 정규화한다. 없거나 이상한 값은 기본값(`DEFAULT_THREAD_POLICY`)이다:
+ * `highQos`는 기본 켬이라 **정확히 `false`일 때만 끔**(사용자가 명시적으로 끈 값), `preferPCores`는 정확히 `true`일 때만 켬.
+ */
 export function normalizeThreadPolicy(raw: unknown): ThreadPolicyConfig {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
-  return { highQos: r.highQos === true, preferPCores: r.preferPCores === true }
+  return {
+    highQos: typeof r.highQos === 'boolean' ? r.highQos : DEFAULT_THREAD_POLICY.highQos,
+    preferPCores: r.preferPCores === true,
+  }
 }
 
 function clampJitter(v: number): number {

@@ -20,6 +20,7 @@ import {
   jitterProfileLabel,
   resolveResampleQuality,
   type EnginePresetId,
+  DEFAULT_THREAD_POLICY,
 } from '../../native/engineConfig'
 import { driverChoices, exclusiveModeHint } from './driverSupport'
 import { deviceNameFromId } from '../../native/deviceFallback'
@@ -495,15 +496,15 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
         <p className="setting-hint">네트워크가 불안정하면 최대값을 올리고, 지연을 줄이려면 내리세요.</p>
       </section>
 
-      {/* 고급: 엔진 스레드 코어 배치 정책(P1-21 2단계, 실험적 — 기본 꺼짐) */}
+      {/* 고급: 엔진 스레드 코어 배치 정책(P1-21 — 절전 끄기는 기본 켬, P 코어 묶기는 실험적·기본 꺼짐) */}
       <section className="settings-section" data-testid="thread-policy-section">
-        <h3>고급 <span className="experimental-badge">실험적</span></h3>
+        <h3>고급</h3>
         <p className="setting-hint">
-          Windows 전용이고 기본은 꺼짐입니다. 바꾼 뒤 연주(또는 테스트 모니터)를 다시 시작해야 적용됩니다.
+          Windows 전용입니다. 바꾼 뒤 연주(또는 테스트 모니터)를 다시 시작해야 적용됩니다.
           CPU 구성에 따른 설정이라 계정으로 다른 PC에 따라가지 않고 이 PC에만 저장됩니다.
         </p>
         {THREAD_POLICY_OPTIONS.map((o) => {
-          const policy = config.threadPolicy ?? { highQos: false, preferPCores: false }
+          const policy = config.threadPolicy ?? DEFAULT_THREAD_POLICY
           const id = `thread-policy-${o.key}`
           // 엔진이 돌고 있으면 그 엔진의 결과(테스트 모니터 또는 합주), 아니면 null
           const live = isTesting || engineInUse ? { stats: (isTesting ? testStats : liveStats) ?? null } : null
@@ -513,7 +514,10 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           return (
             <div key={o.key}>
               <div className="settings-row">
-                <label htmlFor={id}>{o.label}</label>
+                <label htmlFor={id}>
+                  {o.label}
+                  {o.experimental && <span className="experimental-badge">실험적</span>}
+                </label>
                 <input
                   id={id}
                   type="checkbox"

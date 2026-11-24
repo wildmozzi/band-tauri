@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_ENGINE_CONFIG,
+  DEFAULT_THREAD_POLICY,
+  normalizeThreadPolicy,
   ENGINE_PRESETS,
   JITTER_PROFILE_DEFAULT,
   applyPreset,
@@ -278,23 +280,38 @@ describe('P2-17e: 리샘플러 품질', () => {
   })
 })
 
-describe('엔진 스레드 코어 배치 정책(P1-21 2단계, 실험 옵션)', () => {
-  it('기본은 둘 다 꺼짐이고, 옛 설정(필드 없음)·이상한 값도 꺼짐', () => {
-    expect(DEFAULT_ENGINE_CONFIG.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+describe('엔진 스레드 코어 배치 정책(P1-21 — 절전 끄기 기본 켬, P 코어 묶기는 실험 옵션)', () => {
+  const DEFAULT = { highQos: true, preferPCores: false }
+  it('기본은 절전 끄기 켬·P 코어 끔이고, 옛 설정(필드 없음)·이상한 값도 기본값', () => {
+    expect(DEFAULT_THREAD_POLICY).toEqual(DEFAULT)
+    expect(DEFAULT_ENGINE_CONFIG.threadPolicy).toEqual(DEFAULT)
     const old: Partial<EngineConfig> = { ...DEFAULT_ENGINE_CONFIG }
     delete old.threadPolicy
-    expect(parseStoredSettings({ version: 2, engine: old }).config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
-    for (const bad of [null, 'both', 1, { highQos: 'yes', preferPCores: 1 }]) {
-      expect(parseStoredSettings({ version: 2, engine: { ...old, threadPolicy: bad } }).config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    expect(parseStoredSettings({ version: 2, engine: old }).config.threadPolicy).toEqual(DEFAULT)
+    for (const bad of [null, 'both', 1, { highQos: 'yes', preferPCores: 1 }, { highQos: 0 }]) {
+      expect(parseStoredSettings({ version: 2, engine: { ...old, threadPolicy: bad } }).config.threadPolicy).toEqual(DEFAULT)
     }
-    expect(migrateLegacySettings({ driver: 'ASIO' }).threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    expect(migrateLegacySettings({ driver: 'ASIO' }).threadPolicy).toEqual(DEFAULT)
+  })
+  it('명시적으로 끈 절전 끄기(highQos: false)는 그대로 둔다', () => {
+    expect(normalizeThreadPolicy({ highQos: false })).toEqual({ highQos: false, preferPCores: false })
+    expect(normalizeThreadPolicy({ highQos: false, preferPCores: true })).toEqual({ highQos: false, preferPCores: true })
+    const off = { highQos: false, preferPCores: false }
+    const stored = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: off } }).config
+    expect(stored.threadPolicy).toEqual(off)
+    expect(applyPreset(stored, 'ultraLow').threadPolicy).toEqual(off)
+  })
+  it('기본값 객체를 설정끼리 공유하지 않는다(한 설정을 고쳐도 기본값이 변하지 않음)', () => {
+    expect(DEFAULT_ENGINE_CONFIG.threadPolicy).not.toBe(DEFAULT_THREAD_POLICY)
+    expect(Object.isFrozen(DEFAULT_THREAD_POLICY)).toBe(true)
   })
   it('켠 값은 저장·복원되고 프리셋을 바꿔도 유지된다', () => {
     const on = { highQos: true, preferPCores: false }
     const stored = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: on } }).config
     expect(stored.threadPolicy).toEqual(on)
     expect(applyPreset(stored, 'ultraLow').threadPolicy).toEqual(on)
-    expect(parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: { preferPCores: true } } }).config.threadPolicy).toEqual({ highQos: false, preferPCores: true })
+    // 항목이 빠지면 그 항목만 기본값(절전 끄기 켬)
+    expect(parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: { preferPCores: true } } }).config.threadPolicy).toEqual({ highQos: true, preferPCores: true })
   })
 })
 
@@ -307,8 +324,8 @@ describe('스레드 정책은 기기별 — 계정 저장 형식에서 뺀다(#2
     expect('threadPolicy' in stored.engine).toBe(false)
     expect(stored.engine.bufferSize).toBe(256)
     expect(cfg.threadPolicy).toEqual(on) // 원본은 건드리지 않음
-    // 다시 읽으면 끔(새 PC에서 로그인한 것과 같다)
-    expect(parseStoredSettings(stored).config.threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    // 다시 읽으면 기본값(새 PC에서 로그인한 것과 같다)
+    expect(parseStoredSettings(stored).config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
   })
   it('서버에 옛 값(켬)이 있어도 이 기기의 값이 이긴다', () => {
     const fromServer = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: on } }).config

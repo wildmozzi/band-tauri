@@ -88,21 +88,24 @@ function opensAt48k(rates: readonly number[] | undefined): boolean | null {
 }
 
 /**
- * 엔진 스레드 코어 배치 정책 토글(P1-21 2단계, 오디오 설정 "고급 (실험적)"). 설명은 효과 한 줄 + 주의 한 줄.
+ * 엔진 스레드 코어 배치 정책 토글(P1-21, 오디오 설정 "고급"). 설명은 효과 한 줄 + 주의 한 줄.
+ * 절전 끄기(HighQoS)는 **기본 켬**(P1-21 3단계, 사용자 결정 2026-11-21)이고, P 코어 묶기는 실험 옵션(기본 끔, `experimental`)이다.
  * 근거·한계: docs/overhaul/core-placement-2026-11-20.md
  */
 export const THREAD_POLICY_OPTIONS = [
   {
     key: 'highQos',
     label: '엔진 스레드 전원 조절 끄기',
-    effect: '효과: 엔진 스레드가 절전 쪽으로 밀리는 일을 줄여 처리 여유가 늘 수 있습니다.',
-    caution: '주의: 전력 소모와 발열이 늘 수 있습니다(배터리 사용 시간은 측정하지 않았습니다).',
+    experimental: false,
+    effect: '효과: 기본으로 켜져 있습니다. Windows가 엔진 스레드를 절전 쪽(느린 코어·낮은 속도)으로 미는 일을 줄여 처리 여유가 늡니다.',
+    caution: '주의: 전력 소모와 발열이 조금 늘 수 있습니다(배터리 사용 시간은 측정하지 않았습니다). 배터리를 아끼려면 끌 수 있습니다.',
   },
   {
     // 계약 필드 이름은 `preferPCores`지만 실제 동작은 "선호"가 아니라 P 코어 집합에 묶어 두기다(#245 재리뷰 L5).
     // 저장값·엔진 계약 호환을 위해 이름은 그대로 두고 라벨·설명으로 실제 동작을 말한다.
     key: 'preferPCores',
     label: '엔진 스레드를 고성능 코어에만 묶어 두기',
+    experimental: true,
     effect: '효과: 엔진 스레드가 고성능(P) 코어에서만 돕니다(측정 기계에서 엔진 CPU가 약 20% 줄었습니다).',
     caution:
       '주의: 그 코어들이 다른 오디오 프로그램(DAW 등)으로 바쁘면 다른 코어로 넘어가지 못해 끊김이 늘 수 있습니다. 하이브리드 CPU가 아니거나 고성능 코어가 4개 미만이면 적용되지 않습니다.',
@@ -125,7 +128,9 @@ export interface ThreadPolicyStatus {
  * 엔진은 시작 때 한 번 정책을 걸므로, 실행 중 결과가 토글과 다르면 "다시 시작하면" 안내를 보인다.
  * 단 시작할 때 넘긴 값과 실행 결과가 다르면 환경변수 `BAND_THREAD_POLICY`가 설정을 덮은 것이다(엔진 resolve_policy:
  * 유효한 환경변수가 설정보다 우선) — 다시 시작해도 그대로이므로 그렇게 알린다(#249 리뷰 Low-1).
- * 둘 다 꺼져 있고 엔진도 꺼진 정상 상태는 null(표시 없음).
+ * 꺼 둔 옵션이고 엔진도 꺼진 상태는 null(표시 없음).
+ * 절전 끄기(`highQos`)는 기본 켬이라, 걸 수 없는 PC(비Windows·API가 없는 Windows)에서는 사용자가 고르지 않았는데도 "적용되지
+ * 않음"이 보인다 — 경고(`warn`)가 아니라 안내(`info`)로 낸다(엔진도 조용히 기본 스케줄링으로 돈다).
  */
 export function threadPolicyStatus(
   key: ThreadPolicyOptionKey,
@@ -135,16 +140,18 @@ export function threadPolicyStatus(
   startedWith: boolean | null = null,
 ): ThreadPolicyStatus | null {
   const NOT_HERE = '이 PC에서는 적용되지 않음: '
+  // 기본 켬인 항목이 적용되지 않는 것은 경고가 아니다
+  const notHereTone = key === 'highQos' ? 'info' : 'warn'
   if (!live) {
     if (!enabled) return null
-    if (windows === false) return { text: `${NOT_HERE}Windows 전용입니다.`, tone: 'warn' }
+    if (windows === false) return { text: `${NOT_HERE}Windows 전용입니다.`, tone: notHereTone }
     return { text: '엔진을 시작하면 적용됩니다(연주 또는 테스트 모니터).', tone: 'info' }
   }
   if (!live.stats) return enabled ? { text: '적용 결과를 확인하는 중입니다.', tone: 'info' } : null
   const tp = live.stats.threadPolicy
   if (!tp) {
     // 실행 중인데 결과가 없음 = 비Windows(엔진이 정책을 다루지 않음)
-    return enabled ? { text: `${NOT_HERE}Windows 전용입니다.`, tone: 'warn' } : null
+    return enabled ? { text: `${NOT_HERE}Windows 전용입니다.`, tone: notHereTone } : null
   }
   const field = key === 'highQos' ? 'highQos' : 'pCores'
   const results: ThreadPolicyResult[] = [tp.worker[field]]
@@ -174,7 +181,7 @@ export function threadPolicyStatus(
   }
   if (has('failed')) {
     const partial = has('applied') ? '일부 엔진 스레드에만 적용됨: ' : NOT_HERE
-    return { text: `${partial}Windows 설정 호출이 실패해 기본 스케줄링으로 돕니다.`, tone: 'warn' }
+    return { text: `${partial}Windows 설정 호출이 실패해 기본 스케줄링으로 돕니다.`, tone: has('applied') ? 'warn' : notHereTone }
   }
   return key === 'highQos'
     ? { text: '적용됨 — 엔진 스레드의 전원 조절(EcoQoS)이 꺼져 있습니다.', tone: 'ok' }
