@@ -1,6 +1,6 @@
 // 합주실 상세(RoomDetail) 화면의 타입·상수·순수 함수.
 import type { CpuStats, PeerState, PeerStats } from '../../native/engineApi'
-import { lossShapeLines } from '../../native/engineDiagFormat'
+import { formatTxCodec, lossShapeLines, txCodecReasonText } from '../../native/peerDiagFormat'
 import { RELAY_PATH_HINT, pathLabel } from '../../native/relayLogic'
 import type { DetailRoom, InstrumentSlot } from '../rooms'
 export type { DetailRoom, InstrumentSlot }
@@ -83,22 +83,28 @@ export function cpuTitle(cpu: CpuStats): string {
   ].join('\n')
 }
 
-/** 상대가 보고한 내 소리의 수신 품질과 자동 코덱 전환(P1-4e). 옛 엔진(필드 없음)이면 빈 배열 */
+/**
+ * 상대가 보고한 내 소리의 수신 품질과 자동 코덱 전환(P1-4e). 옛 엔진(필드 없음)이면 빈 배열. 전환 이유는 엔진이 `txCodec`을 주면
+ * "내 송신" 줄(`formatTxCodec`)에 합쳐 나오므로 여기서는 `txCodec`이 없는 엔진에서만 따로 적는다(#250 L3 — "내 송신" 줄이 둘이 되지 않게)
+ */
 export function peerCodecLines(ps: PeerStats): string[] {
   const lines: string[] = []
   if (ps.remoteLossPct != null) {
     const conceal = ps.remoteConcealPct != null ? ` · 은닉 ${ps.remoteConcealPct.toFixed(1)}%` : ''
     lines.push(`상대 수신 손실: ${ps.remoteLossPct.toFixed(1)}%${conceal}`)
   }
-  if (ps.txCodecReason === 'lossFeedback') lines.push('내 송신: Opus 자동 전환 (상대 회선 손실 — 끊김 보정)')
-  else if (ps.txCodecReason === 'relayLoad') lines.push('내 송신: Opus 자동 전환 (서버 경유 대역 절약)')
+  const reason = ps.txCodec === undefined ? txCodecReasonText(ps.txCodecReason) : null
+  if (reason) lines.push(`내 송신: Opus 자동 전환 (${reason})`)
   return lines
 }
 
-export function peerStatsTitle(ps: PeerStats): string {
+/** 피어 통계 툴팁. `txFrameMs`(EngineStats.txFrameMs)가 있으면 내 송신 코덱 줄에 프레임을 붙인다 */
+export function peerStatsTitle(ps: PeerStats, txFrameMs?: number | null): string {
+  const tx = formatTxCodec(ps, txFrameMs)
   return [
     `상태: ${PEER_STATE_INFO[ps.state]?.label ?? ps.state}`,
     `경로: ${pathLabel(ps.path) ?? '-'}${ps.path === 'relay' ? ` (${RELAY_PATH_HINT})` : ''}`,
+    ...(tx ? [tx] : []),
     `RTT: ${formatMs(ps.rttMs)}`,
     `지터: ${formatMs(ps.jitterMs, 1)}`,
     `버퍼: ${formatMs(ps.bufferMs)}`,

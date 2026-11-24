@@ -31,7 +31,10 @@ fn sine() -> FakeBackend {
 }
 
 fn start(name: &str, codec: CodecKind) -> Engine {
-    let cfg = EngineConfig { buffer_size: 128, codec, ..Default::default() };
+    start_cfg(name, EngineConfig { buffer_size: 128, codec, ..Default::default() })
+}
+
+fn start_cfg(name: &str, cfg: EngineConfig) -> Engine {
     let net = NetOptions { port: 0, stun_servers: vec![], gather_lan: false, extra_candidates: vec![], allow_loopback_candidates: true, cancel: None };
     Engine::start(cfg, Arc::new(sine()), Arc::new(MixControls::default()), Some((name.into(), net))).unwrap()
 }
@@ -258,5 +261,126 @@ fn core_placement_is_reported_for_worker_and_recv() {
         assert!(j.contains("\"corePlacement\":{\"worker\":{\"samples\":") && j.contains("\"lpEPct\""), "{j}");
     } else {
         assert!(s.core_placement.is_none());
+    }
+}
+
+/// 스레드 정책(P1-21): 설정으로 고른 P 코어 정책(고정·선호 힌트·조건부 고정 — 옛 필드 `preferPCores`만 적은 설정은 고정)으로
+/// 시작한 엔진은 워커·수신 스레드의 적용 결과와 고른 정책을 `EngineStats.threadPolicy`로 낸다. 비Windows는 null.
+/// (환경변수 `BAND_THREAD_POLICY`가 걸린 채로 시험을 돌리면 그 값이 이긴다 — 시험 환경에서는 비워 둔다.)
+#[test]
+fn thread_policy_from_config_is_applied_and_reported() {
+    use crate::sys::placement::{PCoreMode as Mode, PolicyResult};
+    use band_dsp::config::{PCoreMode, ThreadPolicyConfig};
+    if std::env::var(crate::sys::placement::POLICY_ENV).is_ok() {
+        return;
+    }
+    let legacy_pin = ThreadPolicyConfig { high_qos: true, prefer_p_cores: true, p_core_mode: None };
+    let mode = |m| ThreadPolicyConfig { high_qos: true, prefer_p_cores: false, p_core_mode: Some(m) };
+    // 계약: 옛 필드만 있으면 고정, 새 필드가 있으면 그것이 이긴다(옛 필드가 true여도)
+    assert_eq!(legacy_pin.p_core_mode(), PCoreMode::Pin);
+    assert_eq!(ThreadPolicyConfig { prefer_p_cores: true, ..mode(PCoreMode::Off) }.p_core_mode(), PCoreMode::Off);
+    assert_eq!(serde_json::from_str::<ThreadPolicyConfig>(r#"{"pCoreMode":"adaptive"}"#).unwrap(), ThreadPolicyConfig { high_qos: true, prefer_p_cores: false, p_core_mode: Some(PCoreMode::Adaptive) });
+    assert!(serde_json::from_str::<ThreadPolicyConfig>(r#"{"pCoreMode":"soft"}"#).is_err(), "모르는 정책 이름은 설정 오류");
+    for (label, tp, want) in [
+        ("옛 preferPCores", legacy_pin, Mode::Pin),
+        ("pin", mode(PCoreMode::Pin), Mode::Pin),
+        ("prefer", mode(PCoreMode::Prefer), Mode::Prefer),
+        ("adaptive", mode(PCoreMode::Adaptive), Mode::Adaptive),
+    ] {
+        let on = |name: &str| start_cfg(name, EngineConfig { buffer_size: 128, thread_policy: Some(tp), ..Default::default() });
+        let a = on("pa");
+        let b = on("pb");
+        a.add_peer("pb".into(), &desc_of(&b)).unwrap();
+        b.add_peer("pa".into(), &desc_of(&a)).unwrap();
+        wait_until(|| connected(&a, 1) && connected(&b, 1));
+        run_iters(&[&a], 50);
+        let s = a.stats();
+        if cfg!(windows) {
+            let tp = s.thread_policy.expect("Windows는 스레드 정책을 보고한다");
+            let r = tp.net_recv.expect("네트워크 엔진은 수신 스레드 정책이 있다");
+            assert_eq!(tp.p_core_mode, want, "{label}");
+            for t in [tp.worker, r] {
+                assert_eq!(t.high_qos, PolicyResult::Applied, "{label}: {tp:?}");
+                // 조건부 고정은 시험 기계가 바쁘면 그사이 풀렸을 수 있다(released)
+                let ok = matches!(t.p_cores, PolicyResult::Applied | PolicyResult::Skipped) || (want == Mode::Adaptive && t.p_cores == PolicyResult::Released);
+                assert!(ok, "{label}: {tp:?}");
+            }
+            // 조건부 고정만 상태를 낸다
+            assert_eq!(tp.adaptive.is_some(), want == Mode::Adaptive, "{label}: {tp:?}");
+            let j = serde_json::to_string(&s).unwrap();
+            assert!(j.contains("\"threadPolicy\":{\"worker\":{\"highQos\":\"applied\",\"pCores\":"), "{j}");
+            assert!(j.contains(&format!("\"pCoreMode\":{}", serde_json::to_string(&want).unwrap())), "{j}");
+            // 정책을 걸어도 소리는 흐른다(워커 반복·수신 표본이 계속 는다)
+            let n0 = a.stats().core_placement.unwrap().worker.samples;
+            run_iters(&[&a], 50);
+            assert!(a.stats().core_placement.unwrap().worker.samples >= n0 + 50, "{label}");
+        } else {
+            assert!(s.thread_policy.is_none());
+        }
+    }
+}
+
+/// 기본값(P1-21 3단계): 정책 필드가 없는 설정(옛 설정 포함)·`ThreadPolicyConfig::default()`·`highQos`가 빠진 JSON은 모두
+/// **HighQoS 켬, P 코어 끔**이다 — 워커·수신 스레드가 HighQoS `applied`, P 코어 `off`를 보고한다. 비Windows는 null.
+#[test]
+fn thread_policy_default_is_high_qos_on_p_cores_off() {
+    use crate::sys::placement::{PolicyResult, ThreadPolicy};
+    use band_dsp::config::ThreadPolicyConfig;
+    if std::env::var(crate::sys::placement::POLICY_ENV).is_ok() {
+        return;
+    }
+    assert_eq!(EngineConfig::default().thread_policy, None);
+    assert_eq!(ThreadPolicyConfig::default(), ThreadPolicyConfig { high_qos: true, prefer_p_cores: false, p_core_mode: None });
+    assert_eq!(ThreadPolicyConfig::default().p_core_mode(), band_dsp::config::PCoreMode::Off);
+    // 계약 JSON: 필드가 빠지면 기본값, 명시한 false는 그대로
+    let parse = |j: &str| serde_json::from_str::<ThreadPolicyConfig>(j).unwrap();
+    assert_eq!(parse("{}"), ThreadPolicyConfig::default());
+    assert_eq!(parse(r#"{"preferPCores":true}"#), ThreadPolicyConfig { high_qos: true, prefer_p_cores: true, p_core_mode: None });
+    assert_eq!(parse(r#"{"highQos":false}"#), ThreadPolicyConfig { high_qos: false, prefer_p_cores: false, p_core_mode: None });
+    let want = ThreadPolicy { high_qos: PolicyResult::Applied, p_cores: PolicyResult::Off };
+    let a = start("pa", CodecKind::Opus);
+    let b = start_cfg("pb", EngineConfig { buffer_size: 128, thread_policy: Some(ThreadPolicyConfig::default()), ..Default::default() });
+    a.add_peer("pb".into(), &desc_of(&b)).unwrap();
+    b.add_peer("pa".into(), &desc_of(&a)).unwrap();
+    wait_until(|| connected(&a, 1) && connected(&b, 1));
+    run_iters(&[&a, &b], 50);
+    for e in [&a, &b] {
+        let s = e.stats();
+        if cfg!(windows) {
+            let tp = s.thread_policy.expect("Windows는 스레드 정책을 보고한다");
+            assert_eq!((tp.worker, tp.net_recv), (want, Some(want)));
+            assert_eq!((tp.p_core_mode, tp.adaptive), (crate::sys::placement::PCoreMode::Off, None));
+        } else {
+            assert!(s.thread_policy.is_none());
+        }
+    }
+}
+
+/// 사용자가 명시적으로 끈 설정(`{ highQos: false, preferPCores: false }`)은 존중한다: 두 정책 모두 `off` — 워커·수신 스레드는
+/// OS 호출 없이 이 정책이 생기기 전과 같은 경로로 돈다(호출 없음 자체는
+/// `sys::placement::tests::policy_results_cover_off_applied_failed_skipped`가 고정한다).
+#[test]
+fn thread_policy_explicit_off_is_respected() {
+    use crate::sys::placement::{PolicyResult, ThreadPolicy};
+    use band_dsp::config::ThreadPolicyConfig;
+    if std::env::var(crate::sys::placement::POLICY_ENV).is_ok() {
+        return;
+    }
+    let off = ThreadPolicy { high_qos: PolicyResult::Off, p_cores: PolicyResult::Off };
+    let cfg = || EngineConfig { buffer_size: 128, thread_policy: Some(ThreadPolicyConfig { high_qos: false, prefer_p_cores: false, p_core_mode: None }), ..Default::default() };
+    let a = start_cfg("pa", cfg());
+    let b = start_cfg("pb", cfg());
+    a.add_peer("pb".into(), &desc_of(&b)).unwrap();
+    b.add_peer("pa".into(), &desc_of(&a)).unwrap();
+    wait_until(|| connected(&a, 1) && connected(&b, 1));
+    run_iters(&[&a, &b], 50);
+    for e in [&a, &b] {
+        let s = e.stats();
+        if cfg!(windows) {
+            let tp = s.thread_policy.expect("Windows는 스레드 정책을 보고한다");
+            assert_eq!((tp.worker, tp.net_recv), (off, Some(off)));
+        } else {
+            assert!(s.thread_policy.is_none());
+        }
     }
 }

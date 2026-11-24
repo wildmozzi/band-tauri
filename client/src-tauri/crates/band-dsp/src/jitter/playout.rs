@@ -78,6 +78,7 @@ impl JitterBuffer {
         self.fifo_end_ts = self.ts_ext(slot.ts);
         self.fifo.clear();
         self.state = State::Playing;
+        self.stalled = false;
         self.depth.reset_mode();
         self.conceal.reset_run();
         self.debt_deadline = None;

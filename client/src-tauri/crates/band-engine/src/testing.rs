@@ -112,7 +112,7 @@ pub mod sys {
         pub use crate::sys::prio::{promote_current_thread, promote_engine_thread, set_engine_promotion, set_engine_promotion_parts};
     }
     pub mod placement {
-        pub use crate::sys::placement::{pin_process, set_high_qos};
+        pub use crate::sys::placement::{apply_policy_to_current_thread, current_core_kind, describe_cores, p_core_count, pin_process};
     }
 }
 
@@ -125,6 +125,13 @@ pub mod diag {
     }
     pub mod timeline {
         pub use crate::diag::timeline::to_jsonl;
+    }
+    /// 진단 zip → 결과표(`examples/diag_report.rs`)와 손실 모양 누적(`examples/loss_shape_estimate.rs`).
+    pub mod report {
+        pub use crate::diag::report::run;
+        pub mod shape {
+            pub use crate::diag::report::shape::{fkey, from_engine_json, from_timeline, totals, Shapes};
+        }
     }
 }
 

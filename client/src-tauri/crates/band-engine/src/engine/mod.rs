@@ -48,6 +48,11 @@ use worker::{Worker, WorkerParams, WorkerStats};
 // 반환 큐가 차지 않는 근거(`band_dsp::peer_media::MEDIA_RET_CAPACITY`): 명령 큐를 채운 제거 + 그 호출의 하나 + 정지 때 표에 남은 피어.
 const _: () = assert!(band_dsp::peer_media::MEDIA_RET_CAPACITY >= band_dsp::peer_media::MEDIA_CMD_CAPACITY + crate::net::MAX_PEERS + 2);
 
+// 믹스 탭 스레드가 구독 전에 쌓인 것을 ringbuf `Consumer::clear`로 버린다(`subscribe_mix`의 탭 스레드, 링은 `Engine::tap_cons`).
+// ringbuf 0.4.8의 `skip`/`clear`는 원소 `Drop`이 panic하면 double free가 난다(RUSTSEC-2026-0293, 0.5.2+에서 수정) — 원소에 Drop
+// 글루가 없어야 그 경로가 닿지 않는다. 링 선언과 이 단언이 같은 별칭(`rt::TapSample`)을 쓴다(docs/overhaul/deps-audit-2026-11-18.md 6번).
+const _: () = assert!(!core::mem::needs_drop::<rt::TapSample>());
+
 /// 믹스 청크 콜백: 20ms(960프레임) 48kHz 스테레오 f32 LE 인터리브 바이트.
 pub(crate) type MixCallback = Box<dyn FnMut(Vec<u8>) + Send>;
 
@@ -57,7 +62,7 @@ pub(crate) const MIX_CHUNK_FRAMES: usize = 960;
 struct TapThread {
     stop: Arc<AtomicBool>,
     /// 끝나면 탭 링 소비자를 돌려준다(다음 구독에서 다시 씀).
-    handle: JoinHandle<HeapCons<f32>>,
+    handle: JoinHandle<HeapCons<rt::TapSample>>,
 }
 
 pub struct Engine {
@@ -74,7 +79,7 @@ pub struct Engine {
     /// 정지한 Net의 마지막 연결 이벤트(P1-18, 정지 때 `aborted`까지 포함). `stop` 뒤 `conn_events`가 이것을 준다.
     ended_conn: Vec<crate::net::connlog::ConnEvent>,
     /// 출력 콜백이 장치 레이트로 채우는 믹스 탭 링의 소비자. 구독 중에는 탭 스레드가 가진다.
-    tap_cons: Mutex<Option<HeapCons<f32>>>,
+    tap_cons: Mutex<Option<HeapCons<rt::TapSample>>>,
     tap_thread: Option<TapThread>,
     /// 지연 측정(P1-1): RT 끝점 제어와 측정 스레드 쪽 링 끝점(측정 중에는 비어 있음).
     measure_sh: Arc<rt::MeasureShared>,
@@ -122,6 +127,22 @@ impl Engine {
     ) -> Result<Engine, String> {
         let cancelled = || cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst));
         cfg.validate()?;
+        // 워커·수신 스레드 코어 배치 정책(P1-21): 설정(없으면 기본 — HighQoS 켬, P 코어 끔) + 환경변수 `BAND_THREAD_POLICY`.
+        // 스레드를 만들기 전에 정한다.
+        // P 코어 정책(3단계 ②)은 끔·고정·선호 힌트·조건부 고정 중 하나 — 조건부 고정이면 워커·수신 스레드가 함께 보는 공유 상태를
+        // 여기서 하나 만든다(`PolicyRequest`).
+        let thread_policy = {
+            use crate::sys::placement::{policy_for_engine, PCoreMode as Mode, PolicyChoice, PolicyRequest};
+            use band_dsp::config::PCoreMode as Cfg;
+            let t = cfg.thread_policy.unwrap_or_default();
+            let p_cores = match t.p_core_mode() {
+                Cfg::Off => Mode::Off,
+                Cfg::Pin => Mode::Pin,
+                Cfg::Prefer => Mode::Prefer,
+                Cfg::Adaptive => Mode::Adaptive,
+            };
+            PolicyRequest::for_engine(policy_for_engine(PolicyChoice { high_qos: t.high_qos, p_cores }))
+        };
         // 시작이 중간에 실패하면 drop으로 놓인다(Engine으로 옮긴 뒤에는 stop이 놓는다).
         let timer = prio::TimerResolution::acquire();
         let counters = Arc::new(AudioCounters::default());
@@ -185,7 +206,7 @@ impl Engine {
             info,
             counters: counters.clone(),
             controls: controls.clone(),
-            worker_stats: Arc::new(WorkerStats::default()),
+            worker_stats: Arc::new(WorkerStats { thread_policy: crate::sys::placement::PolicySlot::requested(&thread_policy), ..Default::default() }),
             worker_stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             audio_stop,
@@ -225,7 +246,7 @@ impl Engine {
             if opts.cancel.is_none() {
                 opts.cancel = cancel.clone();
             }
-            let net = Net::start(peer_id, &opts)?; // 실패 시 engine drop이 오디오 정리
+            let net = Net::start_with_policy(peer_id, &opts, &thread_policy)?; // 실패 시 engine drop이 오디오 정리
             // 내 입력 장치 버퍼를 Ping에 싣는다(P2-8b): 상대의 입→귀 추정용. 실측 콜백 크기(아직 없으면 요청값) —
             // `EngineStats.estLatencyMs`의 입력 몫과 같은 값이다. 제어 스레드가 원자값만 읽는다.
             let (c, rate, req) = (counters.clone(), info.in_rate.max(1), info.buffer_frames);
@@ -292,6 +313,12 @@ impl Engine {
 
     /// 피어 추가(같은 peerId면 교체). 미디어 상태(지터 버퍼 할당)는 여기, 커맨드 스레드에서 만든다(설계 1.4절).
     pub fn add_peer(&self, peer_id: String, desc: &LocalDescriptor) -> Result<(), String> {
+        self.add_peer_with_entry(peer_id, desc, None)
+    }
+
+    /// `add_peer` + 입장 → 이 호출까지(ms, 클라이언트가 아는 값 — 설계 4절 `engine_add_peer`의 `entryLeadMs`). 진단 타임라인에만
+    /// 남아 결과표가 GOAL 3-3 "입장 후 첫 소리"를 `entryLeadMs + firstAudioMs`로 가른다. 엔진 동작에는 쓰지 않는다.
+    pub fn add_peer_with_entry(&self, peer_id: String, desc: &LocalDescriptor, entry_lead_ms: Option<f32>) -> Result<(), String> {
         let net = self.net.as_ref().ok_or("네트워크 없이 시작된 엔진입니다")?;
         self.media_port.reclaim();
         let key = PeerKey::from_raw(self.next_key.fetch_add(1, Ordering::Relaxed));
@@ -306,6 +333,7 @@ impl Engine {
         // 워커 쪽 상태(지터 버퍼 ≈ 1.19MB + 디코더, 수신 큐 ≈ 149KiB, 공급 리샘플러)는 여기, 락 밖에서 할당한다. 워커는 추가·제거·재시작 어디서도 할당·해제하지 않는다(재시작은 제자리 초기화, 디코더는 여기서 미리 만든 Opus 모노·스테레오 풀과 주고받는다 — 코덱이 바뀌어도 새로 만들지 않음, ③c `tests/rt_alloc.rs`; 해제는 반환 큐를 거쳐 제어 평면에서).
         let (tx, rx) = media_link(key);
         let (media, worker_side) = PeerMedia::new(key, peer_id.clone(), desc.ssrc, added_us, settings, rx, self.info.out_rate, self.cfg.resample_quality())?;
+        media.set_entry_lead_ms(entry_lead_ms);
         // 등록부 락 안에서 믹스 설정 복사 → net 교체 → 등록부 교체: 겹친 set_peer_gain은 옛 것에 쓰여 복사로 넘어가거나
         // 새 것에 쓰인다(설계 7.3절). 복사는 net에 넣기 전에 해서 워커가 새 항목을 기본 게인으로 보는 순간이 없다.
         let mut reg = self.media.lock();
@@ -407,8 +435,10 @@ impl Engine {
     }
 
     /// 숨은 지연 보정값이 유효한 장치 구성 키(설계 1.4절). 숨은 지연(실측 − 콜백 크기)에 영향을 주는 값을 모두 넣는다:
-    /// 드라이버·실제 백엔드(자체 WASAPI/cpal 폴백)·실제로 연 장치(기본 장치면 그때 고른 장치)·요청 버퍼 크기·in/out 레이트.
+    /// 드라이버·실제 백엔드(자체 WASAPI/cpal 폴백)·실제로 연 장치(기본 장치면 그때 고른 장치)·버퍼 크기·in/out 레이트.
     /// 버퍼를 바꾸면 엔드포인트 버퍼·드라이버 여유가 달라질 수 있어 다시 재야 한다(PR #57 M1).
+    /// 버퍼는 백엔드가 알려 준 열린 크기(`StreamInfo.buffer_frames`)다: 대개 요청값과 같지만, ASIO 드라이버가 한 크기만 받으면
+    /// (제어판에서 버퍼를 바꾼 Focusrite) 그 크기라 옛 버퍼에서 잰 값이 리셋 재시작 뒤 다시 들어가지 않는다(#261 재리뷰 L1).
     pub(crate) fn device_key(&self) -> String {
         let (c, i) = (&self.cfg, &self.info);
         format!(
@@ -419,7 +449,7 @@ impl Engine {
             i.out_backend,
             i.in_device_tag,
             i.out_device_tag,
-            c.buffer_size,
+            i.buffer_frames,
             i.in_rate,
             i.out_rate
         )

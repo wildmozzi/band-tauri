@@ -225,6 +225,19 @@ export class MixSourceReleasedError extends Error {
   }
 }
 
+/**
+ * 엔진 믹스 구독 실패. 원래 오류는 `original`에 보존하고 메시지에도 넣는다.
+ * 표준 Error cause(ES2022)는 지원 하한 브라우저(safari14·firefox78)에 없어 쓰지 않는다.
+ */
+export class MixSubscribeError extends Error {
+  readonly original: unknown
+  constructor(original: unknown) {
+    super(`믹스 구독 실패: ${engineErrorMessage(original)}`)
+    this.name = 'MixSubscribeError'
+    this.original = original
+  }
+}
+
 export class MixSource {
   private graph: MixGraph | null = null
   private subscribed = false
@@ -296,7 +309,7 @@ export class MixSource {
     } catch (err) {
       if (this.graph === graph) this.graph = null
       await graph.close()
-      throw new Error(`믹스 구독 실패: ${engineErrorMessage(err)}`)
+      throw new MixSubscribeError(err)
     }
     if (epoch !== this.epoch || this.refs === 0) {
       await this.close()
@@ -512,22 +525,25 @@ export class MixBroadcaster {
   /**
    * 서버가 이 연결의 관람 중계 메시지(offer·ice-candidate)를 속도 제한으로 버렸다(`error` `rate-limited`). 어느 메시지가 버려졌는지는
    * 모른다. 그래서 relayBackoffMs 동안 중계를 relayPacedIntervalMs 간격으로 늦춰 보낸다. 그리고 **늦춰 보내기 창마다 한 번**
-   * relayReofferDelayMs 뒤, offer를 **실제로 보낸 지** relayReofferDelayMs가 지났는데 answer가 없는 관람자(offer가 버려졌을 가능성)에게만
+   * relayReofferDelayMs 뒤, offer를 **알림 전에 실제로 보낸**(= 그 시점에 보낸 지 relayReofferDelayMs가 지난) answer 없는 관람자(offer가 버려졌을 가능성)에게만
    * offer를 다시 보낸다(#215 리뷰 M2: 줄에 남아 아직 나가지 않은 offer는 다시 만들지 않고, 창 안에서 알림이 거듭 와도 재offer를 반복하지
    * 않는다 — 옛 서버에서 진행이 멈추지 않게). 그 밖의 관람자는 연결 시간 초과(M3) 뒤 주기 sync가 다시 시도한다(시간 기반 진행).
    * 서버의 중계 버킷이 관람자 수에 비례하므로 새 서버에서는 정상이면 오지 않는다.
+   * 대상 판정은 타이머가 돈 시각의 `Date.now()`가 아니라 알림 시각과 비교한다(P3-29): setTimeout은 단조 시계라 `Date.now()`로 재면
+   * 1ms 일찍 도는 일이 있어, 알림 직전에 보낸 offer가 "아직 relayReofferDelayMs가 안 지났다"로 잘못 빠졌다.
    */
   onRelayRateLimited(): void {
     if (!this.active) return
-    const inWindow = Date.now() < this.pacedUntil
-    this.pacedUntil = Date.now() + this.relayBackoffMs
+    const noticeAt = Date.now()
+    const inWindow = noticeAt < this.pacedUntil
+    this.pacedUntil = noticeAt + this.relayBackoffMs
     if (inWindow || this.reofferTimer) return
     this.reofferTimer = setTimeout(() => {
       this.reofferTimer = null
       if (!this.active || !this.lease) return
-      const now = Date.now()
       for (const [id, peer] of [...this.peers]) {
-        if (peer.offerSentAt === null || now - peer.offerSentAt < this.relayReofferDelayMs) continue
+        // 알림 뒤에 보낸 offer는 늦춰 보내기 줄을 거쳐 나간 것이라 버려졌다고 볼 근거가 없다
+        if (peer.offerSentAt === null || peer.offerSentAt > noticeAt) continue
         if (peer.pc.remoteDescription || peer.pc.connectionState === 'connected') continue
         this.closePeer(id)
         void this.offerTo(id)

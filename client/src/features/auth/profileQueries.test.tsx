@@ -87,12 +87,19 @@ describe('profileApi (contexts에서 옮긴 profiles 접근)', () => {
     expect(argsOf(sb.mock!.calls[0], 'eq')).toEqual([['id', 'u1']])
   })
 
-  it('가입 프로필 생성: 오류는 던지지 않고 돌려준다', async () => {
+  it('가입 프로필 생성: 트리거가 만든 행이 있으면 건너뛴다(ON CONFLICT DO NOTHING), 오류는 던지지 않고 돌려준다', async () => {
     sb.mock!.setResult('profiles', { data: null })
     await expect(profileApi.createProfile({ id: 'u1', nickname: 'n' })).resolves.toBeNull()
-    expect(argsOf(sb.mock!.calls[0], 'insert')).toEqual([[{ id: 'u1', nickname: 'n' }]])
+    // 일반 insert가 아니라 id 충돌 시 무시하는 upsert — 이미 있는 행을 고치지(UPDATE) 않는다
+    expect(argsOf(sb.mock!.calls[0], 'insert')).toEqual([])
+    expect(argsOf(sb.mock!.calls[0], 'upsert')).toEqual([[{ id: 'u1', nickname: 'n' }, { onConflict: 'id', ignoreDuplicates: true }]])
 
-    sb.mock!.setResult('profiles', { error: { message: 'dup' } })
-    await expect(profileApi.createProfile({ id: 'u1' })).resolves.toEqual({ message: 'dup' })
+    sb.mock!.setResult('profiles', { error: { message: 'rls', code: '42501' } })
+    await expect(profileApi.createProfile({ id: 'u1' })).resolves.toEqual({ message: 'rls', code: '42501' })
+  })
+
+  it('가입 프로필 생성: 중복(23505)은 이미 있는 것으로 보고 정상(null)', async () => {
+    sb.mock!.setResult('profiles', { error: { message: 'duplicate key', code: '23505' } })
+    await expect(profileApi.createProfile({ id: 'u1' })).resolves.toBeNull()
   })
 })

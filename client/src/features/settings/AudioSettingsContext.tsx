@@ -1,8 +1,14 @@
 /**
  * 네이티브 엔진 오디오 설정 (EngineConfig) 상태.
  * - 저장: profiles.audio_settings = { version: 2, engine: EngineConfig } (+ localStorage 캐시)
+ * - 기기별 값은 계정에 올리지 않고 이 PC에만 둔다(deviceLocalSettings): 스레드 정책 `threadPolicy`(#245 재리뷰 L4),
+ *   장치 쪽 값 — 드라이버·장치 id·입력 채널·버퍼 크기(P2-27 후속, 사용자 결정 2026-11-21). 코덱·프레임·모노/스테레오·지터는 계정.
+ *   장치 쪽 값은 이 PC에 저장값이 없을 때만 한 번 계정(이 변경 전에 저장된 옛 장치 값)에서 초기값을 가져오고, 그 뒤로는
+ *   계정 값으로 덮어쓰지 않는다. 같은 PC에서 계정을 바꿔 로그인해도 장치 설정은 그대로다(PC의 것).
  * - 구형 형식(lib/tauri.ts 시절)은 읽을 때 감지해서 새 형식으로 변환하고 다시 저장한다.
  * - 웹(비Tauri)에서는 장치 조회/테스트를 하지 않는다(연주는 앱 전용).
+ * - 저장된 장치·드라이버가 이 PC에 없으면 엔진 시작 직전(`prepareRunConfig`)에 이번 실행만 기본 장치로 넘어간다(P2-27).
+ *   `config`(저장값)는 고치지 않는다 — 원래 PC로 돌아가면 그대로 동작해야 하고, 사용자가 직접 바꿀 때만 저장된다.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { Json } from '../../shared/lib/database.types'
@@ -20,6 +26,7 @@ import {
   type DriverKind,
   type EngineConfig,
   type EngineStats,
+  type ThreadPolicyConfig,
 } from '../../native/engineApi'
 import {
   DEFAULT_ENGINE_CONFIG,
@@ -28,18 +35,49 @@ import {
   matchPreset,
   normalizeInputChannels,
   parseStoredSettings,
-  toStored,
+  accountDeviceSettings,
+  pickDeviceSettings,
+  toAccountStored,
+  withDeviceLocal,
+  withDeviceSettings,
+  type DeviceSettings,
   validateEngineConfig,
   type ConfigIssue,
   type EnginePresetId,
 } from '../../native/engineConfig'
 import { SettingsSaveGate, TestMonitorControl } from '../../native/settingsSync'
-import { reapplyLoopbackOffsetInBackground } from '../../native/loopbackOffsetStore'
-import { coerceToSupportedDrivers } from './driverSupport'
+import type { RunConfig } from '../../native/deviceFallback'
+import {
+  hasDeviceSettings,
+  loadDeviceSettings,
+  loadDeviceThreadPolicy,
+  saveDeviceSettings,
+  saveDeviceThreadPolicy,
+} from './deviceLocalSettings'
+
+/** 폴백 판단은 데스크톱 앱에서만 쓴다 — 웹 첫 화면 묶음에 싣지 않는다(bundle-budget e2e) */
+const loadDeviceFallback = () => import('../../native/deviceFallback')
+/** 루프백 보정값 저장소도 데스크톱 전용(테스트 모니터를 켤 때만 쓴다) — 데스크톱 앱은 엔진 런타임 묶음과 함께 이미 받아 둔 모듈이다 */
+const loadLoopbackOffsetStore = () => import('../../native/loopbackOffsetStore')
+/** 테스트 모니터의 드라이버 리셋 문구·대기·반복 상한도 데스크톱 전용 — 리셋 요청을 볼 때 받는다(#263 리뷰 M-1) */
+const loadTestMonitorReset = () => import('../../native/testMonitorReset')
 
 const STORAGE_KEY = 'band_engine_config_v2'
 const SAVE_DEBOUNCE_MS = 600
 const TEST_POLL_MS = 100
+
+/** 엔진 시작 직전에 쓸 이번 실행 설정(P2-27) */
+export interface PreparedRun {
+  /** 엔진에 넘길 설정(저장값에 폴백을 적용한 사본) */
+  config: EngineConfig
+  /**
+   * 폴백 알림(없으면 null). 몇 번 보일지는 부르는 쪽이 정한다 — 합주실은 입장(세션)마다 한 번,
+   * 테스트 모니터는 앱 실행마다 한 번(#251 리뷰 Low-5: 둘이 같은 "한 번"을 나눠 쓰지 않는다)
+   */
+  notice: string | null
+  /** 시작을 막는 문제(첫 항목을 보인다). 빈 배열이면 시작 가능 */
+  issues: ConfigIssue[]
+}
 
 interface AudioSettingsContextType {
   isNativeMode: boolean
@@ -61,8 +99,17 @@ interface AudioSettingsContextType {
   migrated: boolean
   /** 이 빌드가 지원하는 드라이버. null = 엔진이 알려 주지 않음(옛 엔진, 모두 표시) — P2-7 */
   supportedDrivers: DriverKind[] | null
-  /** 저장된 드라이버를 지원 드라이버로 바꿨을 때 안내 문구 */
-  driverNotice: string | null
+  /** 저장된 드라이버·장치를 이 PC에서 쓸 수 없어 이번 실행은 기본 장치로 시작한다는 안내(저장값은 그대로). 없으면 null */
+  fallbackNotice: string | null
+  /** 저장된 장치 id가 지금 장치 목록에 없는 방향(설정 화면 선택지 표시용) */
+  missingDevices: { input: string | null; output: string | null }
+  /**
+   * 엔진 시작 직전에 부른다: 저장된 장치가 목록에 없으면 목록을 새로 받아 보고, 그래도 없으면 이번 실행만 기본 장치로.
+   * 저장값(`config`)·계정·로컬 캐시는 바꾸지 않는다.
+   */
+  prepareRunConfig: () => Promise<PreparedRun>
+  /** 지금(마지막으로) 시작한 엔진에 넘긴 스레드 정책 — 환경변수가 덮었는지 판단용(#249 리뷰 Low-1). 모르면 null */
+  engineThreadPolicy: ThreadPolicyConfig | null
 
   // 테스트 모니터 (engine_test_start/stop)
   isTesting: boolean
@@ -78,35 +125,67 @@ interface AudioSettingsContextType {
 
 const AudioSettingsContext = createContext<AudioSettingsContextType | null>(null)
 
-function loadLocal(): { config: EngineConfig; migrated: boolean } {
+/**
+ * 로컬 캐시(계정 설정 사본) + 이 기기의 값. 옛 캐시에 들어 있던 `threadPolicy`는 쓰지 않는다(deviceLocalSettings 참고).
+ * 이 PC에 장치 저장값이 아직 없으면(이 변경 전 설정) 옛 캐시에 남은 장치 값을 쓴다 — 이 PC에서 마지막으로 쓰던 값이다.
+ * 저장은 계정을 읽을 때(이행 — 계정의 옛 장치 값보다 이 캐시 값이 먼저) 또는 사용자가 바꿀 때 한다.
+ */
+function loadLocal(): EngineConfig {
+  let config: EngineConfig = { ...DEFAULT_ENGINE_CONFIG }
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return parseStoredSettings(JSON.parse(raw))
+    if (raw) config = parseStoredSettings(JSON.parse(raw)).config
   } catch {
     // 저장소 접근 불가/손상
   }
-  return { config: { ...DEFAULT_ENGINE_CONFIG }, migrated: false }
+  const device = loadDeviceSettings() ?? loadCachedDevice()
+  if (device) config = withDeviceSettings(config, device)
+  return withDeviceLocal(config, loadDeviceThreadPolicy())
+}
+
+/**
+ * 옛 로컬 캐시(`band_engine_config_v2`, 이 변경 전 형식)에 남은 장치 값. 없으면 null.
+ * 옛 앱은 이 PC에서 계정을 읽거나 편집할 때마다 캐시를 다시 썼으므로 이 PC에서 마지막으로 쓴 장치다 —
+ * 마지막으로 저장한 PC(다른 PC일 수 있다)의 값인 계정 쪽 옛 장치 값보다 이 PC에 맞을 가능성이 높다(#256 리뷰 M1).
+ * `saveLocal`이 한 번 돌면 캐시에서 장치 필드가 빠지지만, 그때는 이 PC 저장값이 함께 써져 그쪽이 먼저다.
+ */
+function loadCachedDevice(): DeviceSettings | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    return raw ? accountDeviceSettings(JSON.parse(raw)) : null
+  } catch {
+    return null
+  }
+}
+
+/** 이름 없는 장치는 쓰지 않는다 */
+function usableDevices(list: DeviceInfo[]): DeviceInfo[] {
+  return list.filter((d) => d.name && d.name.trim() !== '')
 }
 
 function saveLocal(config: EngineConfig) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toStored(config)))
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toAccountStored(config)))
   } catch {
     // 무시
   }
+  saveDeviceSettings(config)
+  saveDeviceThreadPolicy(config.threadPolicy)
 }
 
 export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   const [isNativeMode] = useState(isNativeApp)
   const [devices, setDevices] = useState<DeviceInfo[]>([])
-  const [config, setConfig] = useState<EngineConfig>(() => loadLocal().config)
+  /** 장치 목록을 한 번이라도 받았는지(못 받았으면 폴백 판단을 하지 않는다 — 엔진이 직접 찾게 둔다) */
+  const [devicesKnown, setDevicesKnown] = useState(false)
+  const [config, setConfig] = useState<EngineConfig>(loadLocal)
   const [isLoading, setIsLoading] = useState(isNativeMode)
   const [error, setError] = useState<string | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [migrated, setMigrated] = useState(false)
   const [supportedDrivers, setSupportedDrivers] = useState<DriverKind[] | null>(null)
-  const [driverNotice, setDriverNotice] = useState<string | null>(null)
+  const [engineThreadPolicy, setEngineThreadPolicy] = useState<ThreadPolicyConfig | null>(null)
   const [isTesting, setIsTesting] = useState(false)
   const [testStats, setTestStats] = useState<EngineStats | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
@@ -137,14 +216,31 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       try {
         if (storedData) {
           const parsed = parseStoredSettings(storedData)
-          setConfig(parsed.config)
-          saveLocal(parsed.config)
+          // 장치 쪽 값은 이 PC의 것을 쓴다. 이 PC에 저장값이 없을 때만(이 변경 전 설정·새 PC) 한 번 초기값을 정한다:
+          // ① 옛 로컬 캐시의 장치 값(이 PC에서 마지막으로 쓴 값, #256 리뷰 M1) ② 캐시도 없으면(새로 설치한 PC) 계정에 남은
+          // 옛 장치 값 — 그 장치가 이 PC에 없으면 엔진 시작 때 이번 실행만 기본 장치로 넘어간다(P2-27) ③ 둘 다 없으면 지금 값.
+          // 정한 값은 saveLocal로 이 PC 값으로 굳는다.
+          const device =
+            loadDeviceSettings() ??
+            loadCachedDevice() ??
+            accountDeviceSettings(storedData) ??
+            pickDeviceSettings(configRef.current)
+          // 계정 값에 옛 threadPolicy가 있어도 쓰지 않고 이 기기의 값을 유지한다(#245 재리뷰 L4)
+          const next = withDeviceLocal(
+            withDeviceSettings(parsed.config, device),
+            configRef.current.threadPolicy ?? loadDeviceThreadPolicy(),
+          )
+          setConfig(next)
+          saveLocal(next)
           if (parsed.migrated) {
             setMigrated(true)
             // 변환 저장 실패는 무시한다(다음 변경 때 다시 저장됨 — 기존 동작)
-            await profileApi.saveAudioSettings(userId, toStored(parsed.config) as unknown as Json).catch(() => {})
+            await profileApi.saveAudioSettings(userId, toAccountStored(parsed.config) as unknown as Json).catch(() => {})
             console.log('[AudioSettings] 구형 오디오 설정을 새 형식으로 변환했습니다')
           }
+        } else if (!hasDeviceSettings()) {
+          // 계정에 설정이 없다(새 계정) → 지금 장치 값을 이 PC 값으로 굳힌다(이후 다른 계정의 옛 장치 값으로 바뀌지 않게)
+          saveDeviceSettings(configRef.current)
         }
         // 취소된 로드(StrictMode 이중 effect, 사용자 전환)는 loaded로 표시하지 않는다 → 다음 effect가 다시 적용
         if (!cancelled) gate.markLoaded(userId)
@@ -167,7 +263,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       if (!gate.shouldSave(userId)) return
       setIsSaving(true)
       try {
-        await profileApi.saveAudioSettings(userId, toStored(config) as unknown as Json)
+        await profileApi.saveAudioSettings(userId, toAccountStored(config) as unknown as Json)
       } catch (err) {
         console.warn('[AudioSettings] DB 저장 실패:', err)
       } finally {
@@ -184,7 +280,8 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     setError(null)
     try {
       const list = await engineListDevices()
-      setDevices(list.filter((d) => d.name && d.name.trim() !== ''))
+      setDevices(usableDevices(list))
+      setDevicesKnown(true)
     } catch (err) {
       setError(engineErrorMessage(err))
     } finally {
@@ -197,10 +294,13 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   }, [refreshDevices])
 
   // --- 지원 드라이버 (P2-7): 빌드마다 고정이라 한 번만 묻는다 ---
+  // 엔진 시작 직전에 아직 응답 전이면 같은 요청을 기다린다(prepareRunConfig)
+  const supportedPromiseRef = useRef<Promise<DriverKind[] | null> | null>(null)
   useEffect(() => {
     if (!isNativeMode) return
     let cancelled = false
-    void engineSupportedDrivers().then((list) => {
+    supportedPromiseRef.current ??= engineSupportedDrivers()
+    void supportedPromiseRef.current.then((list) => {
       if (!cancelled) setSupportedDrivers(list)
     })
     return () => {
@@ -208,14 +308,26 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     }
   }, [isNativeMode])
 
-  // 저장된(로컬·DB) 설정이 지원 안 하는 드라이버면 지원 드라이버로 되돌리고 안내한다.
-  // 사용자 편집이 아니므로 DB에는 바로 쓰지 않는다(다른 배포본에서 쓰던 ASIO 선택을 지우지 않음) — 다음 편집 때 함께 저장된다.
+  // 저장된 드라이버를 이 배포본이 지원하지 않거나 저장된 장치가 이 PC에 없으면 이번 실행만 기본 장치로(P2-27).
+  // 예전(P2-7)에는 여기서 config(저장값)를 지원 드라이버로 바꿔 다음 편집 때 계정에 저장됐다 — 다른 PC의 ASIO 설정을 지웠다.
+  // 이제는 저장값을 두고 안내만 한다(설정 화면은 시작 전 안내, 엔진 시작 때는 prepareRunConfig가 고친 사본을 넘긴다).
+  const knownDevices = devicesKnown ? devices : null
+  const [previewNotice, setPreviewNotice] = useState<string | null>(null)
   useEffect(() => {
-    const r = coerceToSupportedDrivers(config, supportedDrivers)
-    if (r.notice === null) return
-    setConfig(r.config)
-    setDriverNotice(r.notice)
-  }, [config, supportedDrivers])
+    if (!isNativeMode) return
+    let cancelled = false
+    loadDeviceFallback().then(
+      (m) => {
+        if (cancelled) return
+        const run = m.resolveRunConfig(config, knownDevices, supportedDrivers)
+        setPreviewNotice(m.fallbackNotice(run.fallbacks, 'future'))
+      },
+      (err: unknown) => console.warn('[AudioSettings] 장치 폴백 모듈을 불러오지 못했습니다:', err),
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [isNativeMode, config, knownDevices, supportedDrivers])
 
   const inputDevices = useMemo(
     () => devices.filter((d) => d.isInput && d.driver === config.inputDriver),
@@ -225,6 +337,13 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     () => devices.filter((d) => !d.isInput && d.driver === config.outputDriver),
     [devices, config.outputDriver],
   )
+  // 저장된 장치 id가 지금(저장된 드라이버의) 장치 목록에 없는 방향 — 설정 화면이 "(이 PC에 없음) 이름" 선택지로 그대로 보인다.
+  // 드라이버를 이 배포본에서 쓸 수 없는 경우(ASIO 저장 + ASIO 없는 빌드)도 포함한다(#251 리뷰 Low-3). 목록을 모르면 null
+  const missingDevices = useMemo(() => {
+    if (!devicesKnown) return { input: null, output: null }
+    const miss = (id: string | null, list: DeviceInfo[]) => (id && !list.some((d) => d.id === id) ? id : null)
+    return { input: miss(config.inputDevice, inputDevices), output: miss(config.outputDevice, outputDevices) }
+  }, [devicesKnown, config.inputDevice, config.outputDevice, inputDevices, outputDevices])
   const selectedInputDevice = useMemo(() => {
     if (config.inputDevice) return inputDevices.find((d) => d.id === config.inputDevice) ?? null
     return inputDevices.find((d) => d.isDefault) ?? null
@@ -233,16 +352,82 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const issues = useMemo(() => validateEngineConfig(config, selectedInputDevice), [config, selectedInputDevice])
   const selectedPreset = useMemo(() => matchPreset(config), [config])
 
+  // --- 엔진 시작 직전: 이번 실행 설정 (P2-27) ---
+  const devicesRef = useRef<DeviceInfo[] | null>(knownDevices)
+  devicesRef.current = knownDevices
+  const selectedInputDeviceRef = useRef(selectedInputDevice)
+  selectedInputDeviceRef.current = selectedInputDevice
+  const prepareRunConfig = useCallback(async (): Promise<PreparedRun> => {
+    const saved = configRef.current
+    let fallback: typeof import('../../native/deviceFallback')
+    try {
+      fallback = await loadDeviceFallback()
+    } catch (err) {
+      // 폴백 모듈을 못 불러와도(청크 로드 실패 등) 시작은 막지 않는다 — 저장된 설정 그대로(폴백 전 동작, #251 리뷰 Low-1)
+      console.warn('[AudioSettings] 장치 폴백 모듈을 불러오지 못해 저장된 설정 그대로 시작합니다:', err)
+      const issues = validateEngineConfig(saved, selectedInputDeviceRef.current)
+      if (issues.length === 0) setEngineThreadPolicy(saved.threadPolicy ?? null)
+      return { config: saved, notice: null, issues }
+    }
+    const { needsDeviceRecheck, noDeviceMessage, resolveRunConfig, runInputDevice } = fallback
+    const supported = supportedPromiseRef.current ? await supportedPromiseRef.current : null
+    let list = devicesRef.current
+    // 저장된 장치가 목록에 없으면 시작 전에 한 번 새로 받아 본다(앱을 켠 뒤 인터페이스를 꽂은 경우). 있으면 바로 시작.
+    // 드라이버 폴백을 먼저 적용해 판단하므로 ASIO 저장 + ASIO 없는 빌드라도 매번 다시 받지 않는다(#251 리뷰 Low-2)
+    if (list && needsDeviceRecheck(saved, list, supported)) {
+      try {
+        list = usableDevices(await engineListDevices())
+        setDevices(list)
+      } catch {
+        // 목록을 다시 못 받으면 마지막 목록으로 판단한다
+      }
+    }
+    const run: RunConfig = resolveRunConfig(saved, list, supported)
+    const issues = validateEngineConfig(run.config, runInputDevice(run.config, list))
+    const noDevice = noDeviceMessage(run.noDevices, run.config)
+    if (noDevice) issues.unshift({ field: run.noDevices[0] === 'input' ? 'inputDevice' : 'outputDevice', message: noDevice })
+    if (issues.length === 0) setEngineThreadPolicy(run.config.threadPolicy ?? null)
+    return { config: run.config, notice: issues.length === 0 ? run.notice : null, issues }
+  }, [])
+
   // --- 테스트 모니터 ---
   // 시작 중에 stop이 와도 시작이 끝난 뒤 정지 (L8: 합주 엔진 시작과 겹치지 않게)
   const testControlRef = useRef<TestMonitorControl | null>(null)
+  const testRunConfigRef = useRef<EngineConfig | null>(null)
+  /** 테스트 모니터를 이번 실행에서 폴백으로 시작했을 때 알림(설정 화면에 보인다) */
+  const [testNotice, setTestNotice] = useState<string | null>(null)
+  /** 테스트 모니터에서 이미 알린 폴백 문구(앱 실행마다 한 번) */
+  const shownTestNoticesRef = useRef(new Set<string>())
+  /**
+   * 드라이버 리셋으로 다시 여는 중·다시 열었음 안내. 폴백 알림(testNotice)과 따로 둔다 — 리셋 안내가 폴백 알림을 덮어써 지우지 않고,
+   * 테스트를 끄거나 다시 켜면 지운다("다시 시작했습니다"는 잠시 뒤에도 지운다) (#263 리뷰 L-1)
+   */
+  const [testResetNotice, setTestResetNotice] = useState<string | null>(null)
+  const testResetNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 이번 테스트의 리셋 재시작 반복 상한(테스트를 켤 때마다 새로 센다, #263 리뷰 L-3) */
+  const testResetLimiterRef = useRef<{ allow(now: number): boolean } | null>(null)
+  const showTestResetNotice = useCallback((notice: string | null, clearAfterMs?: number) => {
+    if (testResetNoticeTimerRef.current) clearTimeout(testResetNoticeTimerRef.current)
+    testResetNoticeTimerRef.current = null
+    setTestResetNotice(notice)
+    if (notice && clearAfterMs !== undefined) {
+      testResetNoticeTimerRef.current = setTimeout(() => {
+        testResetNoticeTimerRef.current = null
+        setTestResetNotice(null)
+      }, clearAfterMs)
+    }
+  }, [])
+  useEffect(() => () => {
+    if (testResetNoticeTimerRef.current) clearTimeout(testResetNoticeTimerRef.current)
+  }, [])
   if (!testControlRef.current) {
     testControlRef.current = new TestMonitorControl({
       start: async () => {
-        const cfg = configRef.current
+        // startTest가 prepareRunConfig로 고친 이번 실행 설정(저장값이 아님)
+        const cfg = testRunConfigRef.current ?? configRef.current
         await engineTestStart(cfg)
-        // 앱 재시작 뒤에도 같은 장치 구성이면 메트로놈 출력 지연 보정값을 다시 넣는다(P2-3c)
-        reapplyLoopbackOffsetInBackground(cfg)
+        // 앱 재시작 뒤에도 같은 장치 구성이면 메트로놈 출력 지연 보정값을 다시 넣는다(P2-3c). 기다리지 않는다(시작 흐름을 늦추지 않게)
+        void loadLoopbackOffsetStore().then((m) => m.reapplyLoopbackOffsetInBackground(cfg), () => {})
         return null
       },
       stop: () => engineTestStop(),
@@ -253,32 +438,43 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
   const stopTest = useCallback(async () => {
     setIsTesting(false)
     setTestStats(null)
+    showTestResetNotice(null)
     try {
       await testControl.stop()
     } catch (err) {
       console.warn('[AudioSettings] 테스트 정지 실패:', engineErrorMessage(err))
     }
-  }, [testControl])
+  }, [testControl, showTestResetNotice])
 
   const startTest = useCallback(async () => {
-    if (!isNativeMode || testControl.isActive || testControl.isStarting) return
+    if (!isNativeMode || testControl.isActive || testControl.isStarting || testControl.isRestarting) return
     if (engineInUse) {
       setTestError('합주 중에는 테스트할 수 없습니다. 연주를 멈춘 뒤 다시 시도하세요.')
       return
     }
-    const problems = validateEngineConfig(config, selectedInputDevice)
-    if (problems.length > 0) {
-      setTestError(problems[0].message)
+    // 시작 전 검증은 이번 실행 설정(prepareRunConfig가 폴백 적용 뒤 다시 검증)으로 한다 — 저장값 검증을 먼저 하면
+    // 폴백으로 풀릴 문제(예: 기본 입력 장치가 바뀌어 채널이 모자람)에서 막힌다(#251 리뷰 Low-4)
+    const run = await prepareRunConfig()
+    if (run.issues.length > 0) {
+      setTestError(run.issues[0].message)
       return
     }
     setTestError(null)
+    showTestResetNotice(null)
+    testResetLimiterRef.current = null
+    testRunConfigRef.current = run.config
     try {
       await testControl.start()
       setIsTesting(testControl.isActive)
+      // 테스트 모니터 알림은 앱 실행마다 한 번(합주실 띠와 따로 센다 — #251 리뷰 Low-5)
+      if (run.notice && !shownTestNoticesRef.current.has(run.notice)) {
+        shownTestNoticesRef.current.add(run.notice)
+        setTestNotice(run.notice)
+      }
     } catch (err) {
       setTestError(engineErrorMessage(err))
     }
-  }, [isNativeMode, engineInUse, config, selectedInputDevice, testControl])
+  }, [isNativeMode, engineInUse, testControl, prepareRunConfig, setTestNotice, showTestResetNotice])
 
   useEffect(() => {
     if (!isTesting) return
@@ -290,7 +486,34 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       inFlight = true
       try {
         const s = await engineStats()
-        if (!cancelled) setTestStats(s)
+        if (cancelled) return
+        // 드라이버 리셋 요청(ASIO 제어판에서 버퍼 크기 변경 등, 엔진 deviceReset): 버퍼를 맞춰 보는 가장 흔한 자리가 이 테스트
+        // 모니터다 — 합주와 같은 규칙으로 같은 장치만 다시 연다(#261 재리뷰 L4). 다시 여는 동안은 옛 통계를 그대로 둔다
+        if (s?.deviceReset) {
+          if (testControl.isRestarting) return
+          // 문구·대기·상한은 지연 묶음(웹 첫 화면에 싣지 않는다). 못 받으면 다음 주기에 다시 온다(엔진은 deviceReset을 계속 보고한다)
+          const reset = await loadTestMonitorReset()
+          if (cancelled || testControl.isRestarting) return
+          // 끝없이 다시 열지 않는다: 짧은 시간에 너무 자주 오면 멈추고 알린다(#263 리뷰 L-3)
+          const limiter = (testResetLimiterRef.current ??= new reset.TestResetLimiter())
+          if (!limiter.allow(Date.now())) {
+            await stopTest()
+            setTestError(reset.TEST_RESET_REPEAT_MESSAGE)
+            return
+          }
+          showTestResetNotice(reset.TEST_RESET_RESTARTING_MESSAGE)
+          const r = await testControl.restart(reset.TEST_RESET_RETRY_DELAYS_MS)
+          if (r === 'restarted') showTestResetNotice(reset.TEST_RESET_RESTARTED_MESSAGE, reset.TEST_RESET_NOTICE_MS)
+          else if (r === 'failed') {
+            showTestResetNotice(null)
+            setIsTesting(false)
+            setTestStats(null)
+            setTestError(reset.TEST_RESET_FAILED_MESSAGE)
+          }
+          // 'cancelled'(다시 여는 사이 테스트를 끔·설정 변경·합주 시작): 그 정지(stopTest)가 안내를 이미 지웠다(#263 리뷰 L-1)
+          return
+        }
+        setTestStats(s)
       } catch {
         // 무시
       } finally {
@@ -301,7 +524,7 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
       cancelled = true
       clearInterval(timer)
     }
-  }, [isTesting])
+  }, [isTesting, testControl, stopTest, showTestResetNotice])
 
   // 합주 엔진이 시작되면 테스트 중지
   useEffect(() => {
@@ -313,8 +536,9 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     localDirtyRef.current = true
     gateRef.current.markEdited()
     setConfig(next)
-    // 테스트 중 설정이 바뀌면 이전 설정의 테스트는 의미가 없으므로 중지
-    if (testControl.isActive || testControl.isStarting) void stopTest()
+    // 테스트 중 설정이 바뀌면 이전 설정의 테스트는 의미가 없으므로 중지. 드라이버 리셋으로 다시 여는 대기 중에도(둘 다 false인 창)
+    // 멈춘다 — 안 그러면 옛 설정으로 다시 켜진다(#263 리뷰 L-2)
+    if (testControl.isActive || testControl.isStarting || testControl.isRestarting) void stopTest()
   }, [stopTest, testControl])
 
   const updateConfig = useCallback((patch: Partial<EngineConfig>): boolean => {
@@ -362,7 +586,10 @@ export function AudioSettingsProvider({ children }: { children: ReactNode }) {
     isSaving,
     migrated,
     supportedDrivers,
-    driverNotice,
+    fallbackNotice: (isTesting ? (testResetNotice ?? testNotice) : null) ?? previewNotice,
+    missingDevices,
+    prepareRunConfig,
+    engineThreadPolicy,
     isTesting,
     testStats,
     testError,

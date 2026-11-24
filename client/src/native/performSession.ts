@@ -26,37 +26,41 @@ import {
   type MetronomeView,
 } from './metronomeLogic'
 import { parseRelayToken, relayNeedsNewToken, relayRefreshDelayMs } from './relayLogic'
-import { newFirstAudioTrack, noteAddPeer, notePeerLeft, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
+import { entryLeadMs, newFirstAudioTrack, noteAddPeer, notePeerLeft, noteStats, summarizeFirstAudio, type FirstAudioSummary, type FirstAudioTrack } from './firstAudio'
 import { NativeSignalMachine, isValidDescriptor, type SessionAction } from './sessionLogic'
+import { performErrorFromCode, DESCRIPTOR_INVALID_MESSAGE, DEVICE_RECOVERING_MESSAGE, DEVICE_RESET_RECOVERING_MESSAGE } from './performSignals'
 import {
-  performErrorFromCode,
   KEY_CONFLICT_MESSAGE,
   KEY_CONFLICT_REPEAT_MESSAGE,
-  DESCRIPTOR_INVALID_MESSAGE,
-  DEVICE_RECOVERING_MESSAGE,
   DEVICE_RECOVERED_MESSAGE,
   DEVICE_RECOVERED_DEFAULT_MESSAGE,
   DEVICE_LOST_FAILED_MESSAGE,
   DEVICE_LOST_REPEAT_MESSAGE,
-} from './performSignals'
-// 연주 신호 해석·안내 문구는 웹 첫 묶음에도 실리는 가벼운 모듈에 있다(웹 관람 묶음 분리). 기존 import 경로를 위해 다시 내보낸다
+  DEVICE_RESET_RECOVERED_MESSAGE,
+  DEVICE_RESET_REPEAT_MESSAGE,
+  DEVICE_RESET_FAILED_MESSAGE,
+  DEVICE_RESET_RETRY_DELAYS_MS,
+} from './performMessages'
+// 웹에서도 쓰는 신호 해석·문구는 첫 묶음의 가벼운 모듈(performSignals)에, 데스크톱 연주 중에만 나오는 문구는 이 묶음의
+// performMessages에 있다(웹 관람 묶음 분리, #263 리뷰 M-1). 기존 import 경로를 위해 다시 내보낸다
+export { performErrorFromCode, isEngineDescriptorErrorCode, DESCRIPTOR_INVALID_MESSAGE, DEVICE_RECOVERING_MESSAGE, DEVICE_RESET_RECOVERING_MESSAGE } from './performSignals'
 export {
-  performErrorFromCode,
-  isEngineDescriptorErrorCode,
   KEY_CONFLICT_MESSAGE,
   KEY_CONFLICT_REPEAT_MESSAGE,
-  DESCRIPTOR_INVALID_MESSAGE,
-  DEVICE_RECOVERING_MESSAGE,
   DEVICE_RECOVERED_MESSAGE,
   DEVICE_RECOVERED_DEFAULT_MESSAGE,
   DEVICE_LOST_FAILED_MESSAGE,
   DEVICE_LOST_REPEAT_MESSAGE,
-} from './performSignals'
+  DEVICE_RESET_RECOVERED_MESSAGE,
+  DEVICE_RESET_REPEAT_MESSAGE,
+  DEVICE_RESET_FAILED_MESSAGE,
+} from './performMessages'
 
 export interface EngineBackend {
   start(config: EngineConfig, peerId: string): Promise<LocalDescriptor>
   stop(): Promise<unknown>
-  addPeer(peerId: string, descriptor: LocalDescriptor): Promise<unknown>
+  /** `entryLeadMs`: 입장 → 이 호출(ms, 진단 전용 — `engineAddPeer`) */
+  addPeer(peerId: string, descriptor: LocalDescriptor, entryLeadMs?: number | null): Promise<unknown>
   /** 릴레이 설정/토큰 갱신 (engine_set_relay) */
   setRelay(relay: RelayConfig | null): Promise<unknown>
   removePeer(peerId: string): Promise<unknown>
@@ -127,6 +131,18 @@ export interface PerformSessionOptions {
   /** 이 시간(ms) 안에 장치 분실이 deviceLostMaxRecoveries번을 넘으면 자동 재시작 대신 정지 (장치가 계속 흔들림) */
   deviceLostWindowMs?: number
   deviceLostMaxRecoveries?: number
+  /**
+   * 드라이버 리셋 요청(deviceReset) 재시작의 반복 상한 — 장치 분실과 따로 센다(#261 리뷰 M1). 리셋은 사용자가 제어판에서 일부러 하는
+   * 조작이라 버퍼를 몇 번 맞춰 보는 것만으로 끊기면 안 된다. 그래도 드라이버가 리셋을 끝없이 보내는 경우를 막으려고 상한은 둔다.
+   * 이 시간(ms) 안에 deviceResetMaxRecoveries번을 넘으면 정지
+   */
+  deviceResetWindowMs?: number
+  deviceResetMaxRecoveries?: number
+  /**
+   * 드라이버 리셋 재시작의 시도 전 대기(ms). 시도 횟수 = 길이, 모두 **같은 장치**로 연다(기본 5회: 0.5·1·1.5·2·3초 = 대기 합 8초).
+   * 드라이버는 제어판 변경 직후 스스로 재설정하느라 잠깐 열리지 않을 수 있다 — 장치 분실과 달리 기본 장치로 넘어가지 않는다(#261 재리뷰 M1)
+   */
+  deviceResetRetryDelaysMs?: number[]
   /** 재시작 성공 안내를 보여 줄 시간(ms) */
   deviceNoticeMs?: number
 }
@@ -139,6 +155,11 @@ export function withDefaultDevices(config: EngineConfig): EngineConfig {
     outputDevice: null,
     inputChannels: config.channels === 2 ? [0, 1] : [0],
   }
+}
+
+/** 리셋 재시작이 모두 실패했을 때 안내: 고정 문구 + (있으면) 마지막 엔진 시작 실패 사유 */
+export function deviceResetFailedMessage(lastError: string | null): string {
+  return lastError ? `${DEVICE_RESET_FAILED_MESSAGE} (${lastError})` : DEVICE_RESET_FAILED_MESSAGE
 }
 
 /** 이 시간 안에 key-conflict가 또 오면 재시작 반복 대신 정지 */
@@ -178,16 +199,28 @@ export class PerformSession {
   private firstAudio: FirstAudioTrack | null = null
   /** 장치 분실 자동 재시작 중. 바깥(사용자·퇴장)에서 stop하면 false가 되어 재시작을 그만둔다 */
   private recoveringDevice = false
+  /**
+   * 장치 재시작(recoverFromDeviceLoss) 세대. 재시작을 시작할 때와 바깥 정지(사용자·퇴장) 때 오른다 — 대기 중이던 옛 반복문이
+   * 깨어났을 때 그사이 정지 → 다시 시작 → 새 재시작이 있었으면(recoveringDevice가 다시 true) 제 것이 아님을 안다(#263 리뷰 L-4)
+   */
+  private recoveryEpoch = 0
   /** deviceLost를 연속으로 본 폴링 수(디바운스) */
   private deviceLostPolls = 0
   /** 최근 장치 분실 시각들(반복 판정) */
   private deviceLostTimes: number[] = []
+  /** 최근 드라이버 리셋 재시작 시각들(반복 판정, 장치 분실과 따로) */
+  private deviceResetTimes: number[] = []
   private deviceNoticeTimer: ReturnType<typeof setTimeout> | null = null
   /** 재시작 앞 정지에서 기억해 둔 방장 메트로놈(새 엔진에서 같은 BPM·박자로 다시 켠다) */
   private hostedMetronomeForRestart: { bpm: number; beatsPerBar: number } | null = null
   private readonly deviceRecoveryDelays: number[]
   private readonly deviceLostWindowMs: number
   private readonly deviceLostMaxRecoveries: number
+  private readonly deviceResetWindowMs: number
+  private readonly deviceResetMaxRecoveries: number
+  private readonly deviceResetRetryDelays: number[]
+  /** 장치 재시작 중 마지막 엔진 시작 실패 사유(리셋 재시작이 전부 실패했을 때 안내에 붙인다) */
+  private lastRecoveryError: string | null = null
   private readonly deviceNoticeMs: number
 
   constructor(private readonly engine: EngineBackend, private readonly env: SessionEnv, opts: PerformSessionOptions = {}) {
@@ -199,6 +232,9 @@ export class PerformSession {
     this.deviceRecoveryDelays = opts.deviceRecoveryDelaysMs ?? [500, 1500]
     this.deviceLostWindowMs = opts.deviceLostWindowMs ?? 60_000
     this.deviceLostMaxRecoveries = opts.deviceLostMaxRecoveries ?? 3
+    this.deviceResetWindowMs = opts.deviceResetWindowMs ?? 60_000
+    this.deviceResetMaxRecoveries = opts.deviceResetMaxRecoveries ?? 8
+    this.deviceResetRetryDelays = opts.deviceResetRetryDelaysMs ?? DEVICE_RESET_RETRY_DELAYS_MS
     this.deviceNoticeMs = opts.deviceNoticeMs ?? 8000
   }
 
@@ -269,8 +305,10 @@ export class PerformSession {
       } catch (err) {
         if (gen === this.gen) {
           // 장치 분실 재시작의 시도 실패는 오류로 보이지 않는다 — 다음 시도(기본 장치)를 하거나 전부 실패하면 안내한다 (#208 리뷰 L-4)
-          if (this.recoveringDevice) this.setState({ phase: 'restarting' })
-          else {
+          if (this.recoveringDevice) {
+            this.lastRecoveryError = errorText(err)
+            this.setState({ phase: 'restarting' })
+          } else {
             if (!userInitiated) this.restartFailedUnannounced = true
             this.setState({ phase: 'idle', instrument: null, sessionId: null, error: `오디오 엔진 시작 실패: ${errorText(err)}` })
           }
@@ -322,6 +360,7 @@ export class PerformSession {
   async stop(opts: { notify?: boolean; error?: string | null; forRestart?: boolean } = {}): Promise<void> {
     const { notify = true, error = null, forRestart = false } = opts
     if (!forRestart) {
+      this.recoveryEpoch++ // 대기 중인 재시작 반복문은 깨어나서 그만둔다 — 그 뒤 새 재시작이 시작돼 있어도(#263 리뷰 L-4)
       if (this.recoveringDevice) {
         this.recoveringDevice = false
         this.setDeviceNotice(null)
@@ -685,12 +724,13 @@ export class PerformSession {
       // 복구되지 않는 스트림 오류(streamFailed)와 원인 모를 정지는 아래처럼 정지한다 (#206 후보, 엔진 계약 native-engine-design.md deviceLost)
       // 한 번의 통계로는 재시작하지 않는다: 콜백이 잠깐(1초) 멈춘 것도 deviceLost로 보이고 곧 풀린다 —
       // 재시작은 피어 재연결·메트로놈 새 박 0·녹음 종료를 부르므로 deadStatsThreshold번 연속일 때만 (#208 리뷰 L-1)
+      // 드라이버 리셋 요청(deviceReset, P1-11)은 엔진이 이미 디바운스했고 풀리지 않는 값이라 첫 통계에서 바로 다시 연다
       if (stats.deviceLost && !stats.streamFailed && this.lastStart) {
         this.deadStats = 0
         this.deviceLostPolls++
-        if (this.deviceLostPolls >= this.deadStatsThreshold) {
+        if (stats.deviceReset || this.deviceLostPolls >= this.deadStatsThreshold) {
           this.deviceLostPolls = 0
-          void this.recoverFromDeviceLoss()
+          void this.recoverFromDeviceLoss(stats.deviceReset ? 'reset' : 'lost')
         }
         return
       }
@@ -711,35 +751,52 @@ export class PerformSession {
   /**
    * 장치 분실 자동 재시작. 서버 세션·연주자 상태는 그대로 두고(stop-performing을 보내지 않음) 엔진만 다시 연다 — 같은 clientId라
    * 다른 연주자는 새 descriptor로 다시 붙고, 관람 방송은 엔진이 다시 뜨면 방송 담당이 다시 offer한다.
-   * 1) 같은 설정으로 다시 시도, 2) 장치를 지정했으면 마지막 시도는 기본 장치로(쓰던 장치가 사라졌을 수 있다), 3) 모두 실패하면 정지·안내.
-   * 짧은 시간에 반복되면(장치가 계속 흔들림) 재시작하지 않고 정지한다.
+   * 짧은 시간에 반복되면(장치가 계속 흔들림) 재시작하지 않고 정지한다. 사유에 따라 다시 여는 사다리가 다르다:
+   * - 'lost'(장치 분실): 1) 같은 설정으로 다시 시도, 2) 장치를 지정했으면 마지막 시도는 기본 장치로(쓰던 장치가 사라졌을 수 있다),
+   *   3) 모두 실패하면 정지·안내. 반복 상한 60초에 3번.
+   * - 'reset'(드라이버 리셋 요청 — ASIO 제어판 버퍼 크기 변경 등, 엔진 deviceReset): 장치는 그대로 있고 드라이버가 재설정하느라
+   *   잠깐 열리지 않을 뿐이다. **같은 장치로만** 간격을 늘려 가며 여러 번 시도하고(deviceResetRetryDelays), 모두 실패해도 기본 장치로
+   *   넘어가지 않는다 — ASIO의 "기본 장치"는 목록의 첫 드라이버(ASIO4ALL 등)라 조용히 다른 드라이버로 바뀌고 lastStart가 그것으로
+   *   굳었다(#261 재리뷰 M1). 실패하면 DEVICE_RESET_FAILED_MESSAGE로 정지하고 lastStart(쓰던 장치 설정)는 그대로 둔다.
+   *   반복 상한은 장치 분실과 따로 더 넉넉하게 센다(기본 60초에 8번, #261 리뷰 M1).
+   * 저장된 장치가 이 PC에 없어 시작할 때 기본 장치로 여는 폴백(#251, prepareRunConfig)은 이 경로와 무관하다(연주 시작 전 판단).
    */
-  private async recoverFromDeviceLoss(): Promise<void> {
+  private async recoverFromDeviceLoss(reason: 'lost' | 'reset' = 'lost'): Promise<void> {
     const last = this.lastStart
     if (this.recoveringDevice || !last || this.state.phase !== 'running') return
+    const isReset = reason === 'reset'
     const now = this.now()
-    this.deviceLostTimes = this.deviceLostTimes.filter((t) => now - t < this.deviceLostWindowMs)
-    this.deviceLostTimes.push(now)
-    if (this.deviceLostTimes.length > this.deviceLostMaxRecoveries) {
-      await this.stop({ notify: true, error: DEVICE_LOST_REPEAT_MESSAGE })
+    const [windowMs, max] = isReset ? [this.deviceResetWindowMs, this.deviceResetMaxRecoveries] : [this.deviceLostWindowMs, this.deviceLostMaxRecoveries]
+    const times = (isReset ? this.deviceResetTimes : this.deviceLostTimes).filter((t) => now - t < windowMs)
+    times.push(now)
+    if (isReset) this.deviceResetTimes = times
+    else this.deviceLostTimes = times
+    if (times.length > max) {
+      await this.stop({ notify: true, error: isReset ? DEVICE_RESET_REPEAT_MESSAGE : DEVICE_LOST_REPEAT_MESSAGE })
       return
     }
 
     this.recoveringDevice = true
-    this.setDeviceNotice(DEVICE_RECOVERING_MESSAGE)
-    // 참고(#208 리뷰 L-5): 기본 장치로 대체해 성공하면 lastStart가 기본 장치 설정이 된다 — 이후 재시작(ssrc/clientId)도
-    // 지금 실제로 쓰는 장치로 연다(사라진 장치를 다시 고르지 않음). 사용자가 다시 시작하면 그때 설정을 쓴다
+    const epoch = ++this.recoveryEpoch
+    // 바깥 정지(사용자·퇴장)가 있었으면 이 반복문은 끝이다 — 그 뒤 다시 시작해 새 재시작이 돌고 있어도 끼어들지 않는다(#263 리뷰 L-4)
+    const cancelled = () => epoch !== this.recoveryEpoch || !this.recoveringDevice
+    this.lastRecoveryError = null
+    this.setDeviceNotice(isReset ? DEVICE_RESET_RECOVERING_MESSAGE : DEVICE_RECOVERING_MESSAGE)
+    // 참고(#208 리뷰 L-5): 장치 분실에서 기본 장치로 대체해 성공하면 lastStart가 기본 장치 설정이 된다 — 이후 재시작(ssrc/clientId)도
+    // 지금 실제로 쓰는 장치로 연다(사라진 장치를 다시 고르지 않음). 사용자가 다시 시작하면 그때 설정을 쓴다.
+    // 리셋 재시작은 늘 `last` 그대로 열므로 lastStart가 바뀌지 않는다
+    const delays = isReset ? this.deviceResetRetryDelays : this.deviceRecoveryDelays
     const hasExplicitDevice = last.config.inputDevice !== null || last.config.outputDevice !== null
     let retriedForNewId = false
-    for (let i = 0; i < this.deviceRecoveryDelays.length; i++) {
-      const useDefault = hasExplicitDevice && i === this.deviceRecoveryDelays.length - 1
+    for (let i = 0; i < delays.length; i++) {
+      const useDefault = !isReset && hasExplicitDevice && i === delays.length - 1
       const opts: StartOptions = useDefault ? { ...last, config: withDefaultDevices(last.config) } : last
       if (this.getState().phase === 'running') await this.stopForRestart() // getState: 위 guard의 좁힘을 피해 await 뒤 실제 값
-      await new Promise((r) => setTimeout(r, this.deviceRecoveryDelays[i]))
-      if (!this.recoveringDevice) return // 그 사이 사용자가 멈추거나 나갔다
+      await new Promise((r) => setTimeout(r, delays[i]))
+      if (cancelled()) return // 그 사이 사용자가 멈추거나 나갔다
       const idBefore = this.env.getSelfId()
       const ok = await this.restartWith(opts)
-      if (!this.recoveringDevice) return
+      if (cancelled()) return
       // 시도 중에 clientId가 바뀌어(재연결) 버려진 시도는 세지 않고 같은 시도를 한 번 더 한다(새 id로)
       if (!ok && this.env.getSelfId() !== idBefore && !retriedForNewId) {
         retriedForNewId = true
@@ -748,9 +805,11 @@ export class PerformSession {
       }
       if (ok) {
         this.recoveringDevice = false
-        this.setDeviceNotice(useDefault ? DEVICE_RECOVERED_DEFAULT_MESSAGE : DEVICE_RECOVERED_MESSAGE, this.deviceNoticeMs)
+        const recovered = isReset ? DEVICE_RESET_RECOVERED_MESSAGE : DEVICE_RECOVERED_MESSAGE
+        this.setDeviceNotice(useDefault ? DEVICE_RECOVERED_DEFAULT_MESSAGE : recovered, this.deviceNoticeMs)
         return
       }
+      if (isReset) console.warn(`[Native] 드라이버 리셋 재시작 ${i + 1}/${delays.length}번째 시도 실패: ${this.lastRecoveryError ?? '알 수 없음'}`)
     }
     // 모두 실패: 서버에 연주 중단을 알린다(재시작 앞 정지는 알리지 않았다)
     this.recoveringDevice = false
@@ -758,7 +817,9 @@ export class PerformSession {
     this.setDeviceNotice(null)
     this.env.send({ type: 'native-leave' })
     this.env.send({ type: 'stop-performing' })
-    this.setState({ phase: 'idle', instrument: null, sessionId: null, error: DEVICE_LOST_FAILED_MESSAGE })
+    // 리셋: 다른 장치로 바꾸지 않았다는 것과 마지막 실패 사유를 알린다. lastStart는 쓰던 장치 그대로다
+    const error = isReset ? deviceResetFailedMessage(this.lastRecoveryError) : DEVICE_LOST_FAILED_MESSAGE
+    this.setState({ phase: 'idle', instrument: null, sessionId: null, error })
   }
 
   private setDeviceNotice(notice: string | null, clearAfterMs?: number) {
@@ -808,9 +869,15 @@ export class PerformSession {
   private addPeer(peerId: string, descriptor: LocalDescriptor) {
     const gen = this.gen
     this.enqueue(() => {
-      // 엔진 firstAudioMs의 기준(engine_add_peer 호출 시각). 큐에서 실제로 부르는 순간에 잰다
-      if (gen === this.gen && this.firstAudio) this.firstAudio = noteAddPeer(this.firstAudio, peerId, this.now())
-      return this.engine.addPeer(peerId, descriptor)
+      // 엔진 firstAudioMs의 기준(engine_add_peer 호출 시각). 큐에서 실제로 부르는 순간에 잰다.
+      // 입장 → 이 호출(entryLeadMs)도 같은 순간으로 엔진에 넘겨 진단 결과표가 "입장 후 첫 소리"를 가른다(GOAL 3-3)
+      let lead: number | null = null
+      if (gen === this.gen && this.firstAudio) {
+        const now = this.now()
+        this.firstAudio = noteAddPeer(this.firstAudio, peerId, now)
+        lead = entryLeadMs(this.firstAudio, peerId, now)
+      }
+      return this.engine.addPeer(peerId, descriptor, lead)
     })
       .then(() => {
         if (gen !== this.gen) return

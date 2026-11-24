@@ -107,3 +107,12 @@
   border-color: var(--error);
   color: var(--white);
 }
+
+/* 터치 대상 44px (P3-24 후속): 관람자로 내리기·확인 줄 버튼. 좁은 화면(웹)에서만 — 데스크톱 앱 창은 800px 이상이라 그대로 */
+@media (max-width: 768px) {
+  .performer-demote-btn,
+  .performer-demote-confirm button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

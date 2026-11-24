@@ -2,6 +2,9 @@ app = 'band-server'
 primary_region = 'nrt'  # Tokyo (서울 없으면 가장 가까운 리전)
 
 [build]
+  # 빌드 컨텍스트는 리포 루트다(P3-26, 루트 package-lock.json으로 의존 고정). 배포는 루트에서:
+  #   flyctl deploy . --config server/fly.toml --dockerfile server/Dockerfile --remote-only
+  # server/에서 그냥 `fly deploy`하면 컨텍스트에 lock이 없어 Dockerfile COPY에서 실패한다(의도된 실패).
 
 [env]
   PORT = '8080'

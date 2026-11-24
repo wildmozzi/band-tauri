@@ -3,6 +3,7 @@ import type { DeviceInfo, EngineConfig, LoopbackReport } from './engineApi'
 import {
   clearLoopbackOffset,
   loadLoopbackOffset,
+  keyBufferSize,
   loopbackDeviceKey,
   outputLatencyView,
   reapplyLoopbackOffset,
@@ -112,6 +113,25 @@ describe('loopbackOffsetStore', () => {
     const fallback = deps({ storage: d.storage, stats: async () => ({ backend: 'wasapiShared3', sampleRate: 48000 }) })
     expect(await reapplyLoopbackOffset(config, fallback)).toBeNull()
     expect(d.setOffset).not.toHaveBeenCalled()
+  })
+
+  it('ASIO 출력: 키의 버퍼는 설정값이 아니라 엔진이 보고한 열린 크기 — 제어판에서 버퍼를 바꾸면 옛 값을 다시 넣지 않는다 (#261 재리뷰 L1)', async () => {
+    const asio = { ...config, inputDriver: 'asio' as const, outputDriver: 'asio' as const, inputDevice: 'asio:F', outputDevice: 'asio:F', bufferSize: 128 }
+    const at = (deviceBuffer: number, storage: OffsetStorage | null) => deps({ storage, stats: async () => ({ backend: 'cpalAsio', sampleRate: 48000, deviceBuffer }) })
+    const d = at(128, memStorage())
+    await rememberLoopbackOffset(asio, report('ok', 10), 't', d)
+    expect(await reapplyLoopbackOffset(asio, d)).toBe(10)
+    // 제어판에서 256으로 바꿔 리셋 재시작: 설정은 그대로 128이지만 드라이버는 256으로 열렸다
+    const changed = at(256, d.storage)
+    expect(await reapplyLoopbackOffset(asio, changed)).toBeNull()
+    expect(changed.setOffset).not.toHaveBeenCalled()
+    // 다시 128로 돌리면 그때 잰 값이 돌아온다
+    expect(await reapplyLoopbackOffset(asio, at(128, d.storage))).toBe(10)
+    expect(keyBufferSize(asio, 256)).toBe(256)
+    expect(keyBufferSize(asio, 0)).toBe(128)
+    expect(keyBufferSize(asio, undefined)).toBe(128)
+    // 다른 드라이버의 deviceBuffer는 장치 주기라 키에 쓰지 않는다
+    expect(keyBufferSize({ outputDriver: 'wasapiShared', bufferSize: 128 }, 480)).toBe(128)
   })
 
   it('엔진 오류(옛 엔진·정지 경합)는 조용히 무시', async () => {

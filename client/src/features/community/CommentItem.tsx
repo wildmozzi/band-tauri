@@ -84,6 +84,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
           {isAuthor && !isEditing && (
             <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button
+                className="community-touch"
                 onClick={() => setIsEditing(true)}
                 style={{
                   padding: 'var(--space-1) var(--space-2)',
@@ -98,6 +99,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
                 수정
               </button>
               <button
+                className="community-touch"
                 onClick={() => setShowDeleteConfirm(true)}
                 style={{
                   padding: 'var(--space-1) var(--space-2)',
@@ -137,6 +139,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
             />
             <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button
+                className="community-touch"
                 onClick={handleSubmitEdit}
                 disabled={!editContent.trim() || submitting}
                 style={{
@@ -153,6 +156,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
                 {submitting ? '저장 중...' : '저장'}
               </button>
               <button
+                className="community-touch"
                 onClick={() => {
                   setIsEditing(false)
                   setEditContent(comment.content)
@@ -180,6 +184,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
         {/* 답글 버튼 */}
         {!isEditing && user && depth < maxDepth && (
           <button
+            className="community-touch"
             onClick={() => setIsReplying(!isReplying)}
             style={{
               marginTop: '10px',
@@ -219,6 +224,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
               }}
             />
             <button
+              className="community-touch"
               onClick={handleSubmitReply}
               disabled={!replyContent.trim() || submitting}
               style={{
@@ -251,6 +257,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
             </p>
             <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
               <button
+                className="community-touch"
                 onClick={handleDelete}
                 disabled={submitting}
                 style={{
@@ -267,6 +274,7 @@ export function CommentItem({ comment, user, depth = 0, onReply, onEdit, onDelet
                 {submitting ? '삭제 중...' : '삭제'}
               </button>
               <button
+                className="community-touch"
                 onClick={() => setShowDeleteConfirm(false)}
                 style={{
                   padding: '6px var(--space-3)',

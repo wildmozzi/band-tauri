@@ -3,6 +3,8 @@
 실시간 합주 앱의 프런트(React 18 + Vite, 데스크톱은 Tauri WebView, 웹은 Vercel) 목표 구조와 규칙.
 목표는 **바뀌는 이유가 같은 코드는 한곳에, 의존은 한 방향으로** — 기능을 고치거나 지울 때 그 기능 폴더만 보면 되게 한다.
 
+**대상 브라우저**(빌드 하한, `client/vite/browserTargets.ts`): `es2020, edge88, firefox78, chrome87, safari14` — vite 5 기본값을 vite 8에서도 명시해 유지한다(웹 관람은 링크로 들어오므로 구형 iPhone 포함). JS·CSS(`cssTarget`) 모두 이 값이고, 빌드된 CSS에 미디어 쿼리 범위 문법(`width<=`)이 없는지 `e2e/bundle-budget`이 검사한다. 하한을 올리면(예: vite 8 기본 safari16.4) 첫 화면 JS gzip 약 −2.9 kB지만 iOS 16.4 미만에서 미디어 쿼리가 무시된다 — 올릴지는 사용자 결정.
+
 - 구조 **결정**의 기준은 [ARCHITECTURE-DECISIONS.md](ARCHITECTURE-DECISIONS.md)(D0·D3). 이 문서는 그 결정의 프런트 상세이며, 다르면 ADR이 맞고 이 문서를 고친다.
 - 엔진(Rust) 계약은 [overhaul/native-engine-design.md](overhaul/native-engine-design.md). 이 문서는 그 위의 TS 계층만 다룬다.
 - 규칙은 ESLint로 강제한다(6절). 문서와 lint가 다르면 lint가 맞고 문서를 고친다.
@@ -39,7 +41,7 @@
 
 왜 이 방향인가:
 - **native는 기능 아래에 있다.** 엔진 브릿지는 "합주실" 화면이 없어도 성립해야 하고(측정 도구·설정 화면·테스트에서도 쓴다), 엔진 계약이 바뀔 때 고칠 곳이 한 폴더로 모인다. 그래서 native는 React 없이 테스트 가능한 컨트롤러(클래스·순수 함수)를 중심에 두고, React 연결은 얇은 훅 하나(`useNativeSession`)로 끝낸다.
-- **데스크톱 전용 엔진 런타임은 지연 묶음(웹 관람 묶음 분리).** 연주 세션 본체(`performSession`·상태기계 `sessionLogic`)와 관람 방송(`mixBridge`)은 `native/nativeRuntime` 묶음에만 있고, `native/runtimeLoader`가 데스크톱 앱에서만 동적 import한다. 데스크톱 앱은 `main.tsx`에서 이 묶음을 받은 뒤 첫 그리기를 해 합주실이 처음부터 진짜 세션을 갖는다(연주 시작 경로·타이밍 불변). 웹은 받지 않고 시작한 적 없는 세션과 똑같이 동작하는 `idleSession`을 쓴다(같은지 `idleSession.test.ts`가 비교). 데스크톱에서 불러오기에 실패하면 엔진 없는 세션으로 시작하되 연주 시작 때 다시 불러와 성공하면 진짜 세션·방송으로 넘어간다(`DeferredPerformSession`), 다시 실패하면 앱 재시작 안내. 그래서 이 네 모듈은 그 묶음 밖에서 **값으로 정적 import하지 않는다**(`import type`은 괜찮다, `nativeSplit.test.ts`가 검사). 하위 의존까지 첫 화면 JS에 없는지와 첫 화면 JS gzip 상한은 e2e `bundle-budget.e2e.ts`가 빌드 산출물로 검사한다. 연주 중(데스크톱)에만 그리는 화면 조각(내 채널·공유 메트로놈·엔진 녹음·진단 줄 `features/room/components/performerUi`, 피어 에코 측정 `EchoMeasure`)도 같은 방식이다: `shared/lib/preloadable`로 JS만 지연 묶음에 두고 데스크톱 앱은 `main.tsx`에서 받아 둔 뒤 그린다(폴백 없이 바로 그림). 그 CSS는 cascade 순서를 지키려고 첫 묶음 예전 자리에서 그대로 import한다. 웹·데스크톱이 같이 쓰는 신호 해석·문구는 `performSignals`, 방송 담당 선정은 `broadcastLogic`에 둔다.
+- **데스크톱 전용 엔진 런타임은 지연 묶음(웹 관람 묶음 분리).** 연주 세션 본체(`performSession`·상태기계 `sessionLogic`)와 관람 방송(`mixBridge`)은 `native/nativeRuntime` 묶음에만 있고, `native/runtimeLoader`가 데스크톱 앱에서만 동적 import한다. 데스크톱 앱은 `main.tsx`에서 이 묶음을 받은 뒤 첫 그리기를 해 합주실이 처음부터 진짜 세션을 갖는다(연주 시작 경로·타이밍 불변). 웹은 받지 않고 시작한 적 없는 세션과 똑같이 동작하는 `idleSession`을 쓴다(같은지 `idleSession.test.ts`가 비교). 데스크톱에서 불러오기에 실패하면 엔진 없는 세션으로 시작하되 연주 시작 때 다시 불러와 성공하면 진짜 세션·방송으로 넘어간다(`DeferredPerformSession`), 다시 실패하면 앱 재시작 안내. 그래서 이 네 모듈은 그 묶음 밖에서 **값으로 정적 import하지 않는다**(`import type`은 괜찮다, `nativeSplit.test.ts`가 검사). 하위 의존까지 첫 화면 JS에 없는지와 첫 화면 JS gzip 상한은 e2e `bundle-budget.e2e.ts`가 빌드 산출물로 검사한다. 연주 중(데스크톱)에만 그리는 화면 조각(내 채널·공유 메트로놈·엔진 녹음·진단 줄 `features/room/components/performerUi`, 피어 에코 측정 `EchoMeasure`)도 같은 방식이다: `shared/lib/preloadable`로 JS만 지연 묶음에 두고 데스크톱 앱은 `main.tsx`에서 받아 둔 뒤 그린다(폴백 없이 바로 그림). 그 CSS는 cascade 순서를 지키려고 첫 묶음 예전 자리에서 그대로 import한다. 웹·데스크톱이 같이 쓰는 신호 해석·문구는 `performSignals`, 방송 담당 선정은 `broadcastLogic`에 둔다. `performSignals`는 웹 첫 묶음에 통째로 실리므로(다른 묶음이 쓰는 export는 지워지지 않는다) **웹에서도 필요한 것만** 둔다: 데스크톱 연주 중에만 나오는 문구(키 충돌, 장치 분실·드라이버 리셋 재시작 결과)는 `native/performMessages`(`performSession`만 import — nativeRuntime 묶음), 설정 화면 테스트 모니터의 리셋 문구·대기·반복 상한은 `native/testMonitorReset`(`AudioSettingsContext`가 리셋 요청을 볼 때 동적 import)에 둔다. 루프백 보정값 저장소 `native/loopbackOffsetStore`도 데스크톱 전용이라 지연 묶음만 값으로 import한다 — 첫 화면 코드(`Navigation`)가 쓰는 이벤트 이름은 `native/audioSettingsEvents`에 있고 `AudioSettingsContext`는 동적 import한다(상수 두 개 때문에 모듈 전체가 웹 첫 묶음에 실려 있었다). 모두 #263, `nativeSplit.test.ts`·e2e `bundle-budget`이 검사한다.
 - **shared는 맨 아래.** shared가 기능을 알면 "공용"이 아니다. 기능 하나만 쓰는 코드는 shared로 올리지 않는다(쓰는 곳이 둘이 된 뒤에 올린다).
 - **기능끼리는 공개 API(`index.ts`)로만.** 내부 파일 이름·구조를 바꿔도 다른 기능이 깨지지 않는다. 기능 간 의존은 **비순환**이어야 한다(순환이면 둘 중 하나의 책임이 잘못 나뉜 것).
 
@@ -56,7 +58,7 @@ client/src/
 │  │  ├─ components/        화면 조각(패널·모달)
 │  │  └─ hooks/             화면 전용 훅(입장/퇴장·방장 동작·설정 폼 등)
 │  ├─ rooms/                방 카탈로그: 목록·만들기·내 방 관리, 방 모델·서버 상태(조회/수정/삭제), 입장 규칙(비밀번호·코드·초대 링크)
-│  ├─ auth/                 로그인 세션(AuthProvider·useAuth·useRequireAuth)·로그인 화면, 사용자 프로필 데이터(profiles 테이블 query)
+│  ├─ auth/                 로그인 세션(AuthProvider·useAuth·useRequireAuth)·로그인 화면, 사용자 프로필 데이터(profiles 테이블 query·프로필 사진 URL `profilePhotoOf`)
 │  ├─ settings/             오디오 장치 설정(AudioSettingsProvider)·지연/에코 측정·진단 내보내기·개발 서버 대상·앱 업데이트 알림·설정 화면
 │  ├─ payment/              요금제·결제(Toss)·구독 상태(PremiumProvider·usePremium)·플랜 안내
 │  ├─ profile/              프로필 화면
@@ -91,7 +93,9 @@ client/src/
 
 `room`과 `rooms`를 나눈 이유: 방 **카탈로그**(DB의 rooms 행을 만들고 고치는 일)와 방 **안의 실시간 세션**(WS·엔진·WebRTC)은 바뀌는 이유와 속도가 전혀 다르다. 세션 쪽이 카탈로그를 쓰고(방 상세 조회, 정원 표시), 반대 방향은 없다.
 
-`auth`가 프로필 데이터(profiles 테이블)를 갖는 이유: 회원가입이 프로필 행을 만들고, 설정(오디오 설정 저장)·합주실(방장 닉네임)·프로필 화면이 모두 그 행을 읽는다. 프로필 **화면**만 `profile`에 둔다. 데이터까지 `profile`에 두면 auth ↔ profile 순환이 생긴다(프로필 화면은 로그인 가드를 쓴다).
+오디오 설정 저장 위치(`settings/AudioSettingsContext`·`deviceLocalSettings`): 계정(`profiles.audio_settings`, 로컬 캐시 `band_engine_config_v2`)에는 코덱·프레임·모노/스테레오·지터·리샘플러만 올린다. PC마다 다른 값 — 드라이버·장치 id·입력 채널·장치 버퍼(`DEVICE_LOCAL_KEYS`, `band_device_settings_v1`, P2-27 후속)와 스레드 정책(`band_thread_policy_v2` — HighQoS 기본이 켬으로 바뀌며(#257) 키를 올렸다. v2가 없으면 옛 v1(#249)을 한 번 읽되, v1의 `highQos: false`는 사용자가 고른 값과 옛 기본값을 가릴 수 없어 켬으로 옮긴다) — 은 그 PC의 localStorage에만 두고 계정 값으로 덮어쓰지 않는다. 같은 PC에서 계정을 바꿔 로그인해도 장치 설정은 그대로다. 이 PC에 장치 저장값이 없을 때만(이 변경 전 설정·새 PC) 한 번 초기값을 정한다 — 옛 로컬 캐시의 장치 값(이 PC에서 마지막으로 쓴 값)이 먼저, 캐시도 없으면(새로 설치) 계정에 남은 옛 장치 값을 가져오고, 그 장치가 이 PC에 없으면 엔진 시작 때 이번 실행만 기본 장치로 넘어간다(`native/deviceFallback`, #251). 설정 화면은 입력 섹션 위에 "이 PC에만 저장" 한 줄을 보인다.
+
+`auth`가 프로필 데이터(profiles 테이블)를 갖는 이유: 회원가입이 프로필 행을 만들고, 설정(오디오 설정 저장)·합주실(방장 닉네임)·프로필 화면이 모두 그 행을 읽는다. 프로필 **화면**만 `profile`에 둔다. 첫 화면(내비게이션)이 쓰는 프로필 사진 URL도 `auth`에 둔다 — 첫 화면이 지연 라우트 기능(`profile`)의 index.ts를 정적으로 import하면 Vite 8(Rolldown)은 그 화면 전체를 첫 묶음에 싣는다(P3-20b, `e2e/bundle-budget`이 검사). 데이터까지 `profile`에 두면 auth ↔ profile 순환이 생긴다(프로필 화면은 로그인 가드를 쓴다).
 
 ## 3. 상태 관리 원칙
 
@@ -174,7 +178,7 @@ client/src/
 
 ## 6. 경계 규칙과 강제
 
-`client/.eslintrc.cjs`의 `import/no-restricted-paths`(eslint-plugin-import)로 강제한다. `npm run lint`가 실패하면 CI가 막는다.
+`client/eslint.config.js`의 `import-x/no-restricted-paths`(eslint-plugin-import-x)로 강제한다. `npm run lint`가 실패하면 CI가 막는다.
 
 | 규칙 | 위반 예 |
 |---|---|
@@ -183,10 +187,10 @@ client/src/
 | ② shared → features·native·app 금지 | `shared/ui/…`에서 `../../features/auth` |
 | ③ native → features·app 금지 | `native/…`에서 `../features/room` |
 | ④ features → app 금지 | `features/home/…`에서 `../../app/routeTable` |
-| ⑤ 기능 간 순환 금지 — `import/no-cycle`(features·native·shared 안의 모든 import 순환) | rooms → room → rooms |
+| ⑤ 기능 간 순환 금지 — `import-x/no-cycle`(features·native·shared 안의 모든 import 순환) | rooms → room → rooms |
 
 - 기능 목록은 `src/features`의 폴더에서 lint 설정이 읽어 만든다(새 기능 폴더를 만들면 자동 적용).
-- 새 의존성 근거: `eslint-plugin-import`. ESLint 기본 `no-restricted-imports`는 import **문자열**만 보므로 상대 경로(`../../rooms/x`)로 같은 위치를 가리키는 경우를 일반적으로 막을 수 없다. 이 플러그인은 경로를 실제 파일로 해석해 "어느 폴더가 어느 폴더를 쓰는가"로 판정하고, 순환 검사(`no-cycle`)도 함께 준다. 별도 경로 별칭이나 커스텀 규칙 패키지가 필요 없다.
+- 새 의존성 근거: `eslint-plugin-import-x`(eslint 10을 지원하지 않는 `eslint-plugin-import`의 포크, 같은 규칙·옵션. P3-20b에서 교체). ESLint 기본 `no-restricted-imports`는 import **문자열**만 보므로 상대 경로(`../../rooms/x`)로 같은 위치를 가리키는 경우를 일반적으로 막을 수 없다. 이 플러그인은 경로를 실제 파일로 해석해 "어느 폴더가 어느 폴더를 쓰는가"로 판정하고, 순환 검사(`no-cycle`)도 함께 준다. 별도 경로 별칭이나 커스텀 규칙 패키지가 필요 없다.
 
 ## 7. 테스트 배치
 
@@ -207,7 +211,7 @@ client/src/
 | 항목 | 내용 |
 |---|---|
 | 전역 CSS 정리 | **완료(P3-2 ③-3)** — App.css: 한 화면 전용 규칙을 화면 폴더 CSS로(home/Home·auth/Auth·rooms/Rooms·RoomCard·CreateRoom·MyRoomsModal·demo-recording/Recording·demo-mixlab/MixLab·settings/audioSettingsPanel·AudioSettingsPage·community/communityFeed·profile/profileDetails·shared/ui/modal), App.css(4,252 → 2136줄)에는 앱 셸·공용·미사용 의심 규칙이 남는다. RoomDetail.css: 한 컴포넌트 전용 규칙을 `room/components/<컴포넌트>.css` 15개로, 컴포넌트 공용·미사용 의심 규칙은 RoomDetail.css(3,323 → 1581줄)에 남김. 같은 선택자 중복 합침, 분리로 순서가 바뀌어 결과가 달라지던 규칙은 문맥 클래스로 고정. 증거: 계산 스타일 스냅샷 diff 0, 데스크톱 전용 연주 UI는 마크업 조각 비교 도구(`client/e2e/tools/markup-styles.tool.ts`) |
-| 결제 CSS 로드 위치 | **완료(P3-2 ③-2)** — 화면 전용 규칙은 각 컴포넌트가 import(`Pricing.css`·`Payment.css`는 지연 청크). 결제 화면 밖에서도 매칭되거나 같은 특이성으로 순서에 기대던 규칙은 `payment/paymentGlobal.css`로 모아 App이 예전 자리에서 import(목록은 파일 머리말·PR #(③-2)). 지연 화면의 `profile/profileGlobal.css`·`demo-karaoke/karaokeGlobal.css`도 같은 방식(routes.tsx가 import, `.eslintrc.cjs` `APP_GLOBAL_CSS`). 전역 CSS 정리 때 소유 화면으로 옮긴다 |
+| 결제 CSS 로드 위치 | **완료(P3-2 ③-2)** — 화면 전용 규칙은 각 컴포넌트가 import(`Pricing.css`·`Payment.css`는 지연 청크). 결제 화면 밖에서도 매칭되거나 같은 특이성으로 순서에 기대던 규칙은 `payment/paymentGlobal.css`로 모아 App이 예전 자리에서 import(목록은 파일 머리말·PR #(③-2)). 지연 화면의 `profile/profileGlobal.css`·`demo-karaoke/karaokeGlobal.css`도 같은 방식(routes.tsx가 import, `eslint.config.js` `APP_GLOBAL_CSS`). 전역 CSS 정리 때 소유 화면으로 옮긴다 |
 | 데모 오디오 코드 | **지연 로딩(P3-2 ③-2)** — 데모 단계라 유지. Tone.js·악보(OSMD)는 `/karaoke` 진입 때만 내려받는다(메인 청크에서 빠짐) |
 | 지연 로딩 | **완료(P3-2 ③-2)** — `app/routes.tsx`: 데모 3종·커뮤니티·프로필, `payment/lazyScreens.ts`: 요금제·결제·결제 완료/실패. 합주 경로(홈·방 목록·방 만들기·합주실·설정)는 즉시 로드. 메인 JS 2,045.67 kB → 447.31 kB. 동작 불변은 계산 스타일 스냅샷(`client/e2e/tools`)으로 확인 |
 | 큰 컴포넌트 | `MusicRoom.tsx`(760줄), `ScoreDisplay.tsx`(600줄), `AudioSettings.tsx`(520줄), `Community.tsx`(470줄), `Profile.tsx`(430줄), `CreateRoom.tsx`(400줄) — 화면 로직을 훅·순수 함수로 |

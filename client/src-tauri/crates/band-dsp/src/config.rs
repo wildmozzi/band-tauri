@@ -64,6 +64,56 @@ pub enum ResampleQuality {
     HighQuality,
 }
 
+/// 엔진 스레드를 고성능(P) 코어에 두는 방식(P1-21 3단계 ②, 실험 옵션 — 기본 `Off`). 설계 문서 1.1절 "P 코어 정책".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PCoreMode {
+    /// 걸지 않는다(스케줄러가 고른다).
+    #[default]
+    Off,
+    /// 고정: P 코어 CPU set에 둔다 — 스레드는 그 집합 안에 머문다(P 코어가 바빠도 다른 코어로 넘어가지 않는다). 2단계의 방식.
+    Pin,
+    /// 선호 힌트(2안): P 코어 하나를 선호 프로세서(ideal processor)로 알린다. 스케줄러가 다른 코어로 옮길 수 있다.
+    Prefer,
+    /// 조건부 고정(3안): `Pin`처럼 묶되, 끊김(xrun)·기상 지연이 늘면 풀고 안정되면 다시 묶는다.
+    Adaptive,
+}
+
+/// 엔진 스레드(워커·네트워크 수신) 코어 배치 정책(P1-21, Windows). 엔진 시작 때 한 번 적용되므로 바꾸면 엔진을 다시
+/// 시작해야 한다. 환경변수 `BAND_THREAD_POLICY`가 있으면 그것이 이긴다.
+/// 기본값(P1-21 3단계, 사용자 결정 2026-11-21): **`high_qos` 켬, P 코어 정책 끔** — 필드가 없는 JSON도, `Default`도,
+/// `EngineConfig.thread_policy`가 없을 때도 같다. 끄려면 `highQos: false`를 명시한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadPolicyConfig {
+    /// 실행 속도 전원 조절(EcoQoS)을 끈다. 스케줄러는 여전히 코어를 자유롭게 고른다. **기본 켬**.
+    #[serde(default = "default_high_qos")]
+    pub high_qos: bool,
+    /// (옛 필드 — 2단계 저장값·계약 호환) `true`이고 `p_core_mode`가 없으면 `PCoreMode::Pin`이다. `p_core_mode`가 있으면 무시한다.
+    #[serde(default)]
+    pub prefer_p_cores: bool,
+    /// P 코어 정책(P1-21 3단계 ②). 없으면 `prefer_p_cores`를 따른다(`true` → `Pin`, 아니면 `Off`). 읽을 때는 `p_core_mode()`.
+    #[serde(default)]
+    pub p_core_mode: Option<PCoreMode>,
+}
+
+fn default_high_qos() -> bool {
+    true
+}
+
+impl Default for ThreadPolicyConfig {
+    fn default() -> Self {
+        Self { high_qos: default_high_qos(), prefer_p_cores: false, p_core_mode: None }
+    }
+}
+
+impl ThreadPolicyConfig {
+    /// 실제로 걸 P 코어 정책: `p_core_mode`가 있으면 그것, 없으면 옛 필드 `prefer_p_cores`(`true` = 고정).
+    pub fn p_core_mode(&self) -> PCoreMode {
+        self.p_core_mode.unwrap_or(if self.prefer_p_cores { PCoreMode::Pin } else { PCoreMode::Off })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineConfig {
@@ -90,6 +140,9 @@ pub struct EngineConfig {
     /// 리샘플러 품질(P2-17e). 없으면 `Auto`(프리셋을 따름).
     #[serde(default)]
     pub resample_quality: Option<ResampleQuality>,
+    /// 엔진 스레드 코어 배치 정책(P1-21). 없으면 기본값(`ThreadPolicyConfig::default()` — HighQoS 켬, P 코어 끔).
+    #[serde(default)]
+    pub thread_policy: Option<ThreadPolicyConfig>,
 }
 
 impl Default for EngineConfig {
@@ -110,6 +163,7 @@ impl Default for EngineConfig {
             jitter_profile: None,
             udp_port: None,
             resample_quality: None,
+            thread_policy: None,
         }
     }
 }

@@ -1,10 +1,9 @@
 import { Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { LATENCY_MEASURE_SECTION_ID, OPEN_LATENCY_MEASURE_EVENT } from '../native/loopbackOffsetStore'
+import { LATENCY_MEASURE_SECTION_ID, OPEN_AUDIO_SETTINGS_EVENT, OPEN_LATENCY_MEASURE_EVENT } from '../native/audioSettingsEvents'
 import { Link, useNavigate } from 'react-router-dom'
-import { useAuth } from '../features/auth'
+import { profilePhotoOf, useAuth } from '../features/auth'
 import { AudioSettings } from '../features/settings'
 import { PlanStatus } from '../features/payment'
-import { profilePhotoOf } from '../features/profile'
 import { SERVICE_NAME } from '../shared/lib/brand'
 import './Navigation.css'
 
@@ -42,7 +41,13 @@ export function Navigation() {
       requestAnimationFrame(scroll)
     }
     window.addEventListener(OPEN_LATENCY_MEASURE_EVENT, open)
-    return () => window.removeEventListener(OPEN_LATENCY_MEASURE_EVENT, open)
+    // 합주실 "저장된 장치를 찾을 수 없어 기본 장치로 시작" 알림의 "오디오 설정"(P2-27): 모달만 연다
+    const openSettings = () => setShowAudioSettings(true)
+    window.addEventListener(OPEN_AUDIO_SETTINGS_EVENT, openSettings)
+    return () => {
+      window.removeEventListener(OPEN_LATENCY_MEASURE_EVENT, open)
+      window.removeEventListener(OPEN_AUDIO_SETTINGS_EVENT, openSettings)
+    }
   }, [])
 
   const handleSignOut = async () => {

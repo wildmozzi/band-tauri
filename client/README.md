@@ -14,7 +14,7 @@ src/
 ```
 
 - 의존 방향: app → features → native → shared. 다른 기능은 `features/<x>/index.ts`(공개 API)로만 import한다.
-- `npm run lint`가 경계(`import/no-restricted-paths`)와 순환(`import/no-cycle`)을 검사한다.
+- `npm run lint`가 경계(`import-x/no-restricted-paths`)와 순환(`import-x/no-cycle`)을 검사한다.
 - 테스트는 대상 옆 `*.test.ts(x)`(vitest), E2E는 `e2e/`(Playwright, 시각 회귀 포함).
 
 ## 개발 서버 HTTPS 인증서

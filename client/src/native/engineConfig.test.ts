@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_ENGINE_CONFIG,
+  DEFAULT_THREAD_POLICY,
+  normalizeThreadPolicy,
+  pCoreModeOf,
+  withPCoreMode,
   ENGINE_PRESETS,
   JITTER_PROFILE_DEFAULT,
   applyPreset,
@@ -14,7 +18,12 @@ import {
   normalizeInputChannels,
   parseStoredSettings,
   resolveResampleQuality,
+  accountDeviceSettings,
+  pickDeviceSettings,
+  toAccountStored,
   toStored,
+  withDeviceLocal,
+  withDeviceSettings,
   validateEngineConfig,
 } from './engineConfig'
 import type { DeviceInfo, EngineConfig } from './engineApi'
@@ -273,5 +282,137 @@ describe('P2-17e: 리샘플러 품질', () => {
     expect(parseStoredSettings({ version: 2, engine: { ...old, resampleQuality: 'sinc512' } }).config.resampleQuality).toBe('auto')
     expect(parseStoredSettings({ version: 2, engine: { ...old, resampleQuality: 'lowLatency' } }).config.resampleQuality).toBe('lowLatency')
     expect(migrateLegacySettings({ driver: 'ASIO' }).resampleQuality).toBe('auto')
+  })
+})
+
+describe('엔진 스레드 코어 배치 정책(P1-21 — 절전 끄기 기본 켬, P 코어 묶기는 실험 옵션)', () => {
+  const DEFAULT = { highQos: true, preferPCores: false }
+  it('기본은 절전 끄기 켬·P 코어 끔이고, 옛 설정(필드 없음)·이상한 값도 기본값', () => {
+    expect(DEFAULT_THREAD_POLICY).toEqual(DEFAULT)
+    expect(DEFAULT_ENGINE_CONFIG.threadPolicy).toEqual(DEFAULT)
+    const old: Partial<EngineConfig> = { ...DEFAULT_ENGINE_CONFIG }
+    delete old.threadPolicy
+    expect(parseStoredSettings({ version: 2, engine: old }).config.threadPolicy).toEqual(DEFAULT)
+    for (const bad of [null, 'both', 1, { highQos: 'yes', preferPCores: 1 }, { highQos: 0 }]) {
+      expect(parseStoredSettings({ version: 2, engine: { ...old, threadPolicy: bad } }).config.threadPolicy).toEqual(DEFAULT)
+    }
+    expect(migrateLegacySettings({ driver: 'ASIO' }).threadPolicy).toEqual(DEFAULT)
+  })
+  it('명시적으로 끈 절전 끄기(highQos: false)는 그대로 둔다', () => {
+    expect(normalizeThreadPolicy({ highQos: false })).toEqual({ highQos: false, preferPCores: false })
+    expect(normalizeThreadPolicy({ highQos: false, preferPCores: true })).toEqual({ highQos: false, preferPCores: true })
+    const off = { highQos: false, preferPCores: false }
+    const stored = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: off } }).config
+    expect(stored.threadPolicy).toEqual(off)
+    expect(applyPreset(stored, 'ultraLow').threadPolicy).toEqual(off)
+  })
+  it('기본값 객체를 설정끼리 공유하지 않는다(한 설정을 고쳐도 기본값이 변하지 않음)', () => {
+    expect(DEFAULT_ENGINE_CONFIG.threadPolicy).not.toBe(DEFAULT_THREAD_POLICY)
+    expect(Object.isFrozen(DEFAULT_THREAD_POLICY)).toBe(true)
+  })
+  it('켠 값은 저장·복원되고 프리셋을 바꿔도 유지된다', () => {
+    const on = { highQos: true, preferPCores: false }
+    const stored = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: on } }).config
+    expect(stored.threadPolicy).toEqual(on)
+    expect(applyPreset(stored, 'ultraLow').threadPolicy).toEqual(on)
+    // 항목이 빠지면 그 항목만 기본값(절전 끄기 켬)
+    expect(parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: { preferPCores: true } } }).config.threadPolicy).toEqual({ highQos: true, preferPCores: true })
+  })
+})
+
+describe('P 코어 정책(P1-21 3단계 ② — 끔·고정·선호·조건부 고정)', () => {
+  it('끔·고정은 옛 저장 모양 그대로(pCoreMode 없음), 선호·조건부 고정만 pCoreMode를 적는다', () => {
+    const base = { highQos: true, preferPCores: false }
+    expect(withPCoreMode(base, 'off')).toEqual({ highQos: true, preferPCores: false })
+    expect(withPCoreMode(base, 'pin')).toEqual({ highQos: true, preferPCores: true })
+    expect(withPCoreMode(base, 'prefer')).toEqual({ highQos: true, preferPCores: false, pCoreMode: 'prefer' })
+    expect(withPCoreMode({ highQos: false, preferPCores: true }, 'adaptive')).toEqual({ highQos: false, preferPCores: false, pCoreMode: 'adaptive' })
+    expect('pCoreMode' in withPCoreMode({ ...base, pCoreMode: 'prefer' }, 'pin')).toBe(false)
+    for (const m of ['off', 'pin', 'prefer', 'adaptive'] as const) {
+      expect(pCoreModeOf(withPCoreMode(base, m))).toBe(m)
+    }
+  })
+  it('읽기: pCoreMode가 있으면 그것, 없으면 옛 preferPCores(true = 고정) — 엔진과 같은 규칙', () => {
+    expect(pCoreModeOf(undefined)).toBe('off')
+    expect(pCoreModeOf({ highQos: true, preferPCores: true })).toBe('pin')
+    expect(pCoreModeOf({ highQos: true, preferPCores: true, pCoreMode: 'off' })).toBe('off')
+    expect(pCoreModeOf({ highQos: true, preferPCores: false, pCoreMode: null })).toBe('off')
+    expect(pCoreModeOf({ highQos: true, preferPCores: true, pCoreMode: 'soft' as never })).toBe('pin')
+  })
+  it('정규화: 2단계 저장값(preferPCores)은 그대로, 새 값은 보존, 이상한 pCoreMode는 옛 필드를 따른다', () => {
+    expect(normalizeThreadPolicy({ highQos: true, preferPCores: true })).toEqual({ highQos: true, preferPCores: true })
+    expect(normalizeThreadPolicy({ highQos: false, preferPCores: false, pCoreMode: 'adaptive' })).toEqual({ highQos: false, preferPCores: false, pCoreMode: 'adaptive' })
+    expect(normalizeThreadPolicy({ pCoreMode: 'prefer', preferPCores: true })).toEqual({ highQos: true, preferPCores: false, pCoreMode: 'prefer' })
+    expect(normalizeThreadPolicy({ pCoreMode: 'pin' })).toEqual({ highQos: true, preferPCores: true })
+    expect(normalizeThreadPolicy({ pCoreMode: 'off', preferPCores: true })).toEqual({ highQos: true, preferPCores: false })
+    expect(normalizeThreadPolicy({ pCoreMode: 'soft', preferPCores: true })).toEqual({ highQos: true, preferPCores: true })
+    expect(normalizeThreadPolicy({ pCoreMode: 3 })).toEqual({ highQos: true, preferPCores: false })
+    // 설정 전체를 거쳐도 남고, 프리셋을 바꿔도 유지된다
+    const stored = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: { highQos: true, preferPCores: false, pCoreMode: 'adaptive' } } }).config
+    expect(pCoreModeOf(stored.threadPolicy)).toBe('adaptive')
+    expect(pCoreModeOf(applyPreset(stored, 'ultraLow').threadPolicy)).toBe('adaptive')
+  })
+})
+
+describe('스레드 정책은 기기별 — 계정 저장 형식에서 뺀다(#245 재리뷰 L4)', () => {
+  const on = { highQos: true, preferPCores: true }
+  it('계정 형식에는 threadPolicy가 없고 나머지는 그대로', () => {
+    const cfg: EngineConfig = { ...DEFAULT_ENGINE_CONFIG, codec: 'pcm16', threadPolicy: on }
+    const stored = toAccountStored(cfg)
+    expect(stored.version).toBe(2)
+    expect('threadPolicy' in stored.engine).toBe(false)
+    expect(stored.engine.codec).toBe('pcm16')
+    expect(cfg.threadPolicy).toEqual(on) // 원본은 건드리지 않음
+    // 다시 읽으면 기본값(새 PC에서 로그인한 것과 같다)
+    expect(parseStoredSettings(stored).config.threadPolicy).toEqual({ highQos: true, preferPCores: false })
+  })
+  it('서버에 옛 값(켬)이 있어도 이 기기의 값이 이긴다', () => {
+    const fromServer = parseStoredSettings({ version: 2, engine: { ...DEFAULT_ENGINE_CONFIG, threadPolicy: on } }).config
+    expect(withDeviceLocal(fromServer, { highQos: false, preferPCores: false }).threadPolicy).toEqual({ highQos: false, preferPCores: false })
+    expect(withDeviceLocal({ ...DEFAULT_ENGINE_CONFIG }, { highQos: false, preferPCores: true }).threadPolicy).toEqual({ highQos: false, preferPCores: true })
+  })
+})
+
+describe('장치 쪽 값은 PC별 — 계정 저장 형식에서 뺀다(P2-27 후속)', () => {
+  const pc: EngineConfig = {
+    ...DEFAULT_ENGINE_CONFIG,
+    inputDriver: 'asio',
+    outputDriver: 'asio',
+    inputDevice: 'asio::Focusrite USB ASIO',
+    outputDevice: 'asio::Focusrite USB ASIO',
+    inputChannels: [2, 3],
+    channels: 2,
+    bufferSize: 64,
+    codec: 'pcm16',
+    frameMs: 2.5,
+    jitterMaxMs: 40,
+  }
+  it('계정 형식에는 드라이버·장치·입력 채널·버퍼가 없고 코덱·프레임·모노/스테레오·지터는 남는다', () => {
+    const stored = toAccountStored(pc)
+    for (const k of ['inputDriver', 'outputDriver', 'inputDevice', 'outputDevice', 'inputChannels', 'bufferSize']) {
+      expect(k in stored.engine).toBe(false)
+    }
+    expect(stored.engine).toMatchObject({ codec: 'pcm16', frameMs: 2.5, channels: 2, jitterMaxMs: 40 })
+    expect(pc.inputDevice).toBe('asio::Focusrite USB ASIO') // 원본은 건드리지 않음
+    // 옛 앱이 읽어도(빠진 필드 = 기본값) 깨지지 않는다
+    expect(parseStoredSettings(stored).config).toMatchObject({ inputDevice: null, inputDriver: 'wasapiShared', bufferSize: 128, codec: 'pcm16' })
+  })
+  it('계정 값의 장치 필드는 무시하고 이 PC의 값을 덮는다', () => {
+    const fromServer = parseStoredSettings({ version: 2, engine: { ...pc, inputDevice: 'wasapi::다른 PC 마이크', bufferSize: 512 } }).config
+    const here = { ...pickDeviceSettings(DEFAULT_ENGINE_CONFIG), inputDevice: 'wasapi::이 PC 마이크', inputChannels: [1] as [number] }
+    const merged = withDeviceSettings(fromServer, here)
+    expect(merged).toMatchObject({ inputDevice: 'wasapi::이 PC 마이크', inputDriver: 'wasapiShared', bufferSize: 128, codec: 'pcm16', frameMs: 2.5 })
+    // 계정이 스테레오면 입력 채널 개수를 맞춘다(둘째 채널 채움)
+    expect(merged.inputChannels).toEqual([1, 2])
+    expect(withDeviceSettings({ ...fromServer, channels: 1 }, pickDeviceSettings(pc)).inputChannels).toEqual([2])
+  })
+  it('계정 값에 옛 장치 필드가 있을 때만 이행용 값을 돌려준다', () => {
+    expect(accountDeviceSettings({ version: 2, engine: pc })).toEqual(pickDeviceSettings(pc))
+    expect(accountDeviceSettings({ version: 2, engine: { inputDevice: 'wasapi::x' } })?.inputDevice).toBe('wasapi::x')
+    expect(accountDeviceSettings(toAccountStored(pc))).toBeNull()
+    expect(accountDeviceSettings(null)).toBeNull()
+    expect(accountDeviceSettings({})).toBeNull()
+    // 구형 형식(변환 대상)도 장치 값을 가져온다
+    expect(accountDeviceSettings({ input_device: 'Mic', buffer_size: 256 })).not.toBeNull()
   })
 })

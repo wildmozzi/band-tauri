@@ -18,16 +18,19 @@ export interface FakeTauriResponses {
 export async function installFakeTauri(page: Page, responses: FakeTauriResponses) {
   await page.addInitScript((canned: Record<string, unknown>) => {
     const calls: string[] = []
+    const callArgs: { cmd: string; args: unknown }[] = []
     const callbacks = new Map<number, (v: unknown) => void>()
     let nextId = 1
     const w = window as unknown as Record<string, unknown>
     w.__e2eTauriCalls = calls
+    w.__e2eTauriCallArgs = callArgs
     // 테스트가 실행 중에 응답을 바꿀 수 있게(setTauriResponse — 예: 엔진 통계를 장치 분실로)
     w.__e2eTauriResponses = canned
     w.isTauri = true
     w.__TAURI_INTERNALS__ = {
-      invoke: async (cmd: string) => {
+      invoke: async (cmd: string, args?: unknown) => {
         calls.push(cmd)
+        callArgs.push({ cmd, args: args === undefined ? undefined : structuredClone(args) })
         // 실제 엔진처럼: 새로 시작하면 통계가 정상으로(테스트가 __engineStatsAfterStart로 지정, 한 번만)
         if (cmd === 'engine_start' && Object.prototype.hasOwnProperty.call(canned, '__engineStatsAfterStart')) {
           canned.engine_stats = canned.__engineStatsAfterStart
@@ -58,4 +61,12 @@ export function setTauriResponse(page: Page, cmd: string, value: unknown): Promi
 /** 지금까지 앱이 부른 Tauri 커맨드 */
 export function tauriCalls(page: Page): Promise<string[]> {
   return page.evaluate(() => [...((window as unknown as { __e2eTauriCalls?: string[] }).__e2eTauriCalls ?? [])])
+}
+
+/** 앱이 그 커맨드에 넘긴 인자들(부른 순서) */
+export function tauriCallArgs(page: Page, cmd: string): Promise<unknown[]> {
+  return page.evaluate(
+    (c) => ((window as unknown as { __e2eTauriCallArgs?: { cmd: string; args: unknown }[] }).__e2eTauriCallArgs ?? []).filter((x) => x.cmd === c).map((x) => x.args),
+    cmd,
+  )
 }

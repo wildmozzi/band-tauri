@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { PeerStats } from './engineApi'
 import {
+  entryLeadMs,
   firstAudioOverGoal,
   formatFirstAudio,
   newFirstAudioTrack,
@@ -14,6 +15,27 @@ const peer = (peerId: string, firstAudioMs: number | null | undefined): PeerStat
   ({ peerId, state: 'connected', path: 'lan', firstAudioMs }) as PeerStats
 
 describe('firstAudio (P1-20)', () => {
+  it('진단 entryLeadMs: 연주 시작 때 있던 연주자만 값(시작 → 이 add_peer), 뒤에 온 연주자·들린 뒤 재추가·떠났다 온 연주자는 null(#250 M1)', () => {
+    let t = newFirstAudioTrack(1000, ['B', 'D'])
+    t = noteAddPeer(t, 'B', 1400)
+    expect(entryLeadMs(t, 'B', 1400)).toBe(400)
+    // 뒤에 온 연주자: 그 사람의 입장은 내 쪽에 보이지 않는다 — 0이 아니라 모름
+    t = noteAddPeer(t, 'C', 5000)
+    expect(entryLeadMs(t, 'C', 5000)).toBeNull()
+    // 들리기 전 재추가: 기준(연주 시작)은 그대로
+    t = noteAddPeer(t, 'B', 2400)
+    expect(entryLeadMs(t, 'B', 2400)).toBe(1400)
+    // 들린 뒤 재추가: 입장이 아니다
+    t = noteStats(t, [peer('B', 100)])
+    t = noteAddPeer(t, 'B', 90_000)
+    expect(entryLeadMs(t, 'B', 90_000)).toBeNull()
+    // 시작 때 있었지만 들리기 전에 떠났다 다시 온 연주자: 뒤에 온 연주자와 같다
+    t = notePeerLeft(t, 'D')
+    t = noteAddPeer(t, 'D', 7000)
+    expect(entryLeadMs(t, 'D', 7000)).toBeNull()
+    expect(entryLeadMs(t, 'Z', 1)).toBeNull()
+  })
+
   it('시작 때 있던 연주자는 연주 시작부터: 서버 왕복(시작 → add_peer) + 엔진 firstAudioMs', () => {
     let t = newFirstAudioTrack(1000, ['A', 'B'])
     t = noteAddPeer(t, 'A', 1300)

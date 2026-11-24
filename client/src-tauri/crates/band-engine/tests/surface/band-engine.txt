@@ -14,8 +14,16 @@ diag/mod.rs	method	shutdown
 diag/mod.rs	method	spawn_recorder
 diag/mod.rs	method	with_timeline
 diag/mod.rs	mod	export
+diag/mod.rs	mod	report
 diag/mod.rs	struct	Diagnostics
 diag/mod.rs	struct	ExportGuard
+diag/report/mod.rs	fn	run
+diag/report/mod.rs	mod	shape
+diag/report/shape.rs	fn	fkey
+diag/report/shape.rs	fn	from_engine_json
+diag/report/shape.rs	fn	from_timeline
+diag/report/shape.rs	fn	totals
+diag/report/shape.rs	type	Shapes
 diag/timeline.rs	fn	to_jsonl
 diag/timeline.rs	struct	Ring
 diag/timeline.rs	struct	Sample
@@ -48,6 +56,7 @@ engine/device/fake.rs	field	out_rate
 engine/device/fake.rs	field	out_stall
 engine/device/fake.rs	field	record_output
 engine/device/fake.rs	field	reported_latency
+engine/device/fake.rs	field	reset_after
 engine/device/fake.rs	field	seed
 engine/device/fake.rs	field	sink
 engine/device/fake.rs	field	sink_origin
@@ -199,6 +208,7 @@ engine/metronome/sched.rs	struct	MetronomeCtl
 engine/metronome/sched.rs	struct	MetronomeRt
 engine/metronome/sched.rs	struct	OutClock
 engine/mod.rs	method	add_peer
+engine/mod.rs	method	add_peer_with_entry
 engine/mod.rs	method	config
 engine/mod.rs	method	controls
 engine/mod.rs	method	descriptor
@@ -280,6 +290,7 @@ engine/report.rs	field	cpu
 engine/report.rs	field	device_buffer
 engine/report.rs	field	device_lost
 engine/report.rs	field	device_period_ms
+engine/report.rs	field	device_reset
 engine/report.rs	field	echo_active
 engine/report.rs	field	echo_requested
 engine/report.rs	field	est_latency_ms
@@ -296,6 +307,7 @@ engine/report.rs	field	loss_shape
 engine/report.rs	field	max_corr_cents
 engine/report.rs	field	metronome
 engine/report.rs	field	monitor_latency_ms
+engine/report.rs	field	nat
 engine/report.rs	field	network
 engine/report.rs	field	out_delay_ms
 engine/report.rs	field	output_level
@@ -318,6 +330,7 @@ engine/report.rs	field	resampler
 engine/report.rs	field	rtt_ms
 engine/report.rs	field	running
 engine/report.rs	field	sample_rate
+engine/report.rs	field	self_peer
 engine/report.rs	field	send_queue
 engine/report.rs	field	session
 engine/report.rs	field	sites
@@ -336,7 +349,9 @@ engine/report.rs	field	xruns
 engine/report.rs	method	conn_events
 engine/report.rs	method	feed_stats
 engine/report.rs	method	local_path_stats
+engine/report.rs	method	nat_probe
 engine/report.rs	method	peer_jitter_stats
+engine/report.rs	method	self_peer_id
 engine/report.rs	method	stats
 engine/report.rs	method	take_send_path_diag
 engine/report.rs	method	take_worker_timing
@@ -555,6 +570,7 @@ net/mod.rs	struct	NetShared
 net/mod.rs	struct	PeerTableCopy
 net/mod.rs	struct	RelaySetting
 net/mod.rs	struct	SendPathDiag
+net/mod.rs	use	NatProbe
 net/peer/descriptor.rs	enum	CandidateKind
 net/peer/descriptor.rs	field	addr
 net/peer/descriptor.rs	field	candidates
@@ -586,6 +602,7 @@ net/send.rs	method	send_audio
 net/send.rs	method	send_audio_timed
 net/send.rs	struct	AutoPayload
 net/stun.rs	fn	query_many
+net/stun.rs	struct	NatProbe
 net/txlat.rs	field	contended
 net/txlat.rs	field	max_ms
 net/txlat.rs	field	max_us
@@ -605,8 +622,11 @@ sys/cpu.rs	fn	cycle_pct
 sys/cpu.rs	fn	process_cycles
 sys/cpu.rs	fn	tsc_now
 sys/mod.rs	mod	time
+sys/placement.rs	fn	apply_policy_to_current_thread
+sys/placement.rs	fn	current_core_kind
+sys/placement.rs	fn	describe_cores
+sys/placement.rs	fn	p_core_count
 sys/placement.rs	fn	pin_process
-sys/placement.rs	fn	set_high_qos
 sys/prio.rs	field	audio
 sys/prio.rs	field	net_recv
 sys/prio.rs	field	timer_1ms
@@ -615,6 +635,7 @@ sys/prio.rs	fn	promote_current_thread
 sys/prio.rs	fn	promote_engine_thread
 sys/prio.rs	fn	set_engine_promotion
 sys/prio.rs	fn	set_engine_promotion_parts
+sys/prio.rs	method	is_mmcss
 sys/prio.rs	struct	AudioThreadGuard
 sys/prio.rs	struct	ThreadPriorityStats
 sys/time.rs	fn	unix_ms

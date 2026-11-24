@@ -66,6 +66,7 @@ export function CommentSection({ comments, loadError = false, onRetry, user, onA
               }}
             />
             <button
+              className="community-touch"
               onClick={handleAddComment}
               disabled={!newComment.trim() || submitting}
               style={{

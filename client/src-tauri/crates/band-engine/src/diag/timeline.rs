@@ -91,11 +91,21 @@ pub(crate) struct PeerSample {
     pub(crate) rtt_ms: Option<f32>,
     pub(crate) jitter_ms: f32,
     pub(crate) buffer_ms: f32,
+    /// 지터 버퍼 목표 깊이(ms, `PeerStats.targetMs`) — GOAL 1-4 "목표 ±3ms" 판정용(#246).
+    pub(crate) target_ms: f32,
     pub(crate) playout_ms: f32,
     pub(crate) loss_pct: f32,
     /// 누적 값(차분은 분석 때 계산)
     pub(crate) late: u64,
     pub(crate) concealed: u64,
+    /// 재생한 프레임 수(정상 + 은닉) — 은닉 비율 `concealed / produced`의 분모(#246). 연결 중·무수신 리셋 시간은 들지 않는다.
+    pub(crate) produced: u64,
+    /// 무수신 재버퍼 횟수와 끊겨 다시 채우느라 소리가 없던 시간(ms, 둘 다 누적 — `PeerStats.rebuffers`·`rebufferMs`, meta.format 3).
+    /// 0이면 줄에 넣지 않는다(format 3부터 키 없음 = 0). 결과표 2-1이 "소리 없는 시간"을 기대치 추정 대신 이 실측으로 센다.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub(crate) rebuffers: u64,
+    #[serde(skip_serializing_if = "is_zero_f32")]
+    pub(crate) rebuffer_ms: f32,
     pub(crate) level: f32,
     pub(crate) echo_active: bool,
     pub(crate) peer_echoing: bool,
@@ -108,6 +118,10 @@ pub(crate) struct PeerSample {
     /// 입장 → 연결·첫 소리(ms, P1-20). 한 번 정하면 그 피어 항목 동안 그대로다.
     pub(crate) connect_ms: Option<f32>,
     pub(crate) first_audio_ms: Option<f32>,
+    /// 입장 → `engine_add_peer` 호출(ms, 클라이언트가 알려 준 값, meta.format 3). 결과표 3-3이 `entryLeadMs + firstAudioMs`로
+    /// "입장 후 첫 소리"를 가른다. 모르면(옛 클라이언트) 줄에 넣지 않는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) entry_lead_ms: Option<f32>,
     /// 상대가 보내는 프레임(ms)과 상대가 Ping으로 보고한 입력 버퍼(ms, 65.535 = 보고 상한 이상) — 입→귀 추정 항(P2-8b).
     /// 옛 엔진·보고 전이면 null. 에코 측정 중(`peerEchoing`) `remoteFrameMs`는 되돌아오는 내 프레임일 수 있다.
     pub(crate) remote_frame_ms: Option<f32>,
@@ -180,6 +194,8 @@ pub struct Sample {
     pub(crate) input_discontinuities: u64,
     pub(crate) input_silent_packets: u64,
     pub(crate) device_lost: bool,
+    /// 드라이버 리셋 요청으로 장치를 다시 열어야 함(P1-11). 켜지면 `device_lost`도 켜져 있다.
+    pub(crate) device_reset: bool,
     pub(crate) stream_failed: bool,
     pub(crate) peers: Vec<PeerSample>,
     pub(crate) relay: Option<RelaySample>,
@@ -189,6 +205,25 @@ pub struct Sample {
     /// 시작부터 누적이다(`session_placement`). 비Windows는 줄에 넣지 않는다.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) core_placement: Option<crate::sys::placement::PlacementWindow>,
+    /// 워커·수신 스레드에 적용한 코어 배치 정책과 결과(P1-21 2단계, `EngineStats.threadPolicy`). 스레드 시작 때 한 번 정해지는
+    /// 값이라 기록기는 **같은 세션에서 값이 바뀐 줄에만** 넣는다(세션 첫 줄, 그리고 첫 샘플이 적용 전(`pending`)이었으면 그다음 줄).
+    /// 링이 넘쳐 그 줄을 버리면 같은 세션의 다음 줄로 옮긴다(`fold_dropped`). 내보내기 `lastStats`에는 늘 들어간다
+    /// (`session_policy`). 비Windows는 줄에 넣지 않는다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thread_policy: Option<crate::sys::placement::ThreadPolicyStats>,
+    /// 송신 큐 지연 p99(ms, 0.01ms 단위로 반올림, `EngineStats.sendQueue.p99Ms` — 직전 2초 창, meta.format 3). 송신이 있었던 창만.
+    /// 기록기는 **같은 세션에서 값이 바뀐 줄에만** 넣는다 — 키가 없는 줄은 직전 값 그대로다(결과표는 앞 값을 이어 쓴다).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) send_queue_p99_ms: Option<f32>,
+    /// 시작 때 STUN 결과로 정한 NAT 매핑 추정(`net::NatProbe`, meta.format 3, 결과표 3-1). 세션 동안 그대로라 **값이 바뀐 줄에만**
+    /// (세션 첫 줄) 넣는다. 링이 넘쳐 그 줄을 버리면 같은 세션의 다음 줄로 옮긴다(`fold_dropped`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) nat: Option<crate::net::NatProbe>,
+    /// 내보낸 쪽 자신의 가명(`pseudonymize(내 peerId)` — 상대 zip의 `peers[].peer`와 같은 값, meta.format 3). 결과표 3-1이 zip을
+    /// "내보낸 사람"으로 묶고(같은 PC가 두 번 내보낸 zip은 한 사람) 참가자 모두의 zip이 있는지 짝을 맞춘다(#250 H1). 새 개인정보가
+    /// 아니다 — 같은 가명이 상대의 zip에 이미 피어 id로 들어간다. NAT처럼 같은 세션에서 **값이 바뀐 줄에만** 넣는다.
+    #[serde(rename = "selfPeer", skip_serializing_if = "Option::is_none")]
+    pub(crate) self_peer: Option<String>,
     /// 직전 샘플 뒤로 생긴 연결 이벤트(P1-18). 없으면 줄에 넣지 않는다(기존 줄 형식 그대로).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) conn: Vec<ConnSample>,
@@ -216,6 +251,7 @@ impl Sample {
             input_discontinuities: s.input_discontinuities,
             input_silent_packets: s.input_silent_packets,
             device_lost: s.device_lost,
+            device_reset: s.device_reset,
             stream_failed: s.stream_failed,
             peers: s
                 .peers
@@ -227,10 +263,14 @@ impl Sample {
                     rtt_ms: p.rtt_ms,
                     jitter_ms: p.jitter_ms,
                     buffer_ms: p.buffer_ms,
+                    target_ms: p.target_ms,
                     playout_ms: p.playout_ms,
                     loss_pct: p.loss_pct,
                     late: p.late,
                     concealed: p.concealed,
+                    produced: p.produced,
+                    rebuffers: p.rebuffers,
+                    rebuffer_ms: (p.rebuffer_ms * 10.0).round() / 10.0,
                     level: p.level,
                     echo_active: p.echo_active,
                     peer_echoing: p.peer_echoing,
@@ -240,6 +280,7 @@ impl Sample {
                     remote_loss_pct: p.remote_loss_pct,
                     connect_ms: p.connect_ms,
                     first_audio_ms: p.first_audio_ms,
+                    entry_lead_ms: p.entry_lead_ms,
                     remote_frame_ms: p.remote_frame_ms,
                     remote_input_buffer_ms: p.remote_input_buffer_ms,
                     rx_dup_dropped: p.rx_dup_dropped,
@@ -256,6 +297,10 @@ impl Sample {
                 auto_opus: r.auto_opus,
             }),
             core_placement: s.core_placement.as_ref().map(crate::sys::placement::PlacementWindow::cumulative),
+            thread_policy: s.thread_policy,
+            send_queue_p99_ms: s.send_queue.filter(|q| q.packets > 0).map(|q| (q.p99_ms * 100.0).round() / 100.0),
+            nat: None,
+            self_peer: None,
             conn: Vec::new(),
         }
     }
@@ -275,6 +320,20 @@ impl Sample {
         if let (Some(d), Some(n)) = (dropped.core_placement, next.core_placement.as_mut()) {
             *n = n.plus(&d);
         }
+        // 스레드 정책은 값이 바뀐 줄에만 있다: 버리는 줄의 값을 다음 줄이 물려받는다(다음 줄에 새 값이 있으면 그것이 최신).
+        if next.thread_policy.is_none() {
+            next.thread_policy = dropped.thread_policy;
+        }
+        // NAT 추정·송신 큐 p99도 값이 바뀐 줄에만 있다(format 3) — 같은 규칙으로 물려받는다.
+        if next.nat.is_none() {
+            next.nat = dropped.nat;
+        }
+        if next.send_queue_p99_ms.is_none() {
+            next.send_queue_p99_ms = dropped.send_queue_p99_ms;
+        }
+        if next.self_peer.is_none() {
+            next.self_peer = dropped.self_peer;
+        }
     }
 }
 
@@ -291,6 +350,33 @@ pub(crate) fn session_placement(tl: &Timeline, session: u64) -> Option<crate::sy
         };
     }
     acc
+}
+
+/// 타임라인에서 세션 `session`의 스레드 정책(P1-21 2단계): 그 세션에서 마지막으로 기록된 값. 없으면 None.
+pub(crate) fn session_policy(tl: &Timeline, session: u64) -> Option<crate::sys::placement::ThreadPolicyStats> {
+    tl.iter().filter(|s| s.session == session).filter_map(|s| s.thread_policy).last()
+}
+
+/// 세션 `session`에서 마지막으로 기록된 NAT 추정·송신 큐 p99(값이 바뀐 줄에만 있는 값 — 내보내기 `lastStats`를 채운다).
+pub(crate) fn session_nat(tl: &Timeline, session: u64) -> Option<crate::net::NatProbe> {
+    tl.iter().filter(|s| s.session == session).filter_map(|s| s.nat).last()
+}
+
+/// 세션 `session`에서 마지막으로 기록된 내 가명(`selfPeer`, 값이 바뀐 줄에만 있다 — 내보내기 `lastStats`를 채운다).
+pub(crate) fn session_self(tl: &Timeline, session: u64) -> Option<String> {
+    tl.iter().filter(|s| s.session == session).filter_map(|s| s.self_peer.clone()).last()
+}
+
+pub(crate) fn session_send_queue(tl: &Timeline, session: u64) -> Option<f32> {
+    tl.iter().filter(|s| s.session == session && s.running).filter_map(|s| s.send_queue_p99_ms).last()
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
 }
 
 /// 엔진 통계 타임라인.
@@ -361,6 +447,10 @@ pub(super) mod tests {
             loss_pct: 0.5,
             late: 1,
             concealed: 7,
+            produced: 1400,
+            rebuffers: 2,
+            rebuffer_ms: 431.26,
+            entry_lead_ms: Some(812.0),
             level: 0.2,
             playout_ms: 15.0,
             echo_requested: false,
@@ -400,6 +490,7 @@ pub(super) mod tests {
         let line = serde_json::to_string(&s).unwrap();
         assert!(!line.contains("203.0.113.45"));
         assert!(line.contains("\"bufferMs\":12.0"));
+        assert!(line.contains("\"targetMs\":10.0") && line.contains("\"produced\":1400"), "{line}");
         assert!(line.contains("\"path\":\"relay\""));
         assert!(line.contains("\"txCodec\":\"opus\"") && line.contains("\"txCodecAuto\":true"), "{line}");
         assert!(line.contains("\"autoOpus\":true"), "{line}");
@@ -408,6 +499,28 @@ pub(super) mod tests {
         assert!(line.contains("\"rxDupDropped\":4") && line.contains("\"rxStaleDropped\":1"), "{line}");
         assert!(line.contains("\"lossShape\":{\"frameMs\":2.5,\"lossRuns\":[3,1,0,0,0,0],\"lossLongPkts\":0,\"lateRuns\":[0,0,0,0,0,0]"), "{line}");
         assert!(line.contains("\"concealFec\":2"), "{line}");
+        // format 3: 리버퍼 실측(0.1ms 반올림)·입장 → 추가
+        assert!(line.contains("\"rebuffers\":2,\"rebufferMs\":431.3"), "{line}");
+        assert!(line.contains("\"entryLeadMs\":812.0"), "{line}");
+    }
+
+    /// format 3 새 값은 0·모름이면 키가 없다(60분 zip 크기). 송신 큐는 송신이 있던 창만 0.01ms 단위로.
+    #[test]
+    fn new_keys_are_omitted_when_zero_or_unknown() {
+        let mut st = stats_with_peer();
+        st.peers[0].rebuffers = 0;
+        st.peers[0].rebuffer_ms = 0.0;
+        st.peers[0].entry_lead_ms = None;
+        let line = serde_json::to_string(&Sample::from_stats(1_000, true, 1, &st)).unwrap();
+        for k in ["rebuffers", "rebufferMs", "entryLeadMs", "sendQueueP99Ms", "\"nat\""] {
+            assert!(!line.contains(k), "{k}: {line}");
+        }
+        st.send_queue = Some(crate::net::txlat::SendQueueStats { p50_ms: 0.05, p99_ms: 0.1234, max_ms: 0.3, packets: 0 });
+        assert_eq!(Sample::from_stats(1_000, true, 1, &st).send_queue_p99_ms, None, "송신 없는 창");
+        st.send_queue = Some(crate::net::txlat::SendQueueStats { p50_ms: 0.05, p99_ms: 0.1234, max_ms: 0.3, packets: 400 });
+        let s = Sample::from_stats(1_000, true, 1, &st);
+        assert_eq!(s.send_queue_p99_ms, Some(0.12));
+        assert!(serde_json::to_string(&s).unwrap().contains("\"sendQueueP99Ms\":0.12"));
     }
 
     /// 옛 엔진(두 값 없음)이면 키는 남고 값이 null이다.

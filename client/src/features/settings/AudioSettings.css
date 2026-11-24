@@ -873,6 +873,19 @@
   line-height: 1.5;
 }
 
+/* 실험적 옵션 표시(고급 구역) */
+.experimental-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--accent);
+  vertical-align: middle;
+}
+
 /* Split Driver Options */
 .split-driver-options {
   display: grid;
@@ -976,4 +989,17 @@
 
 .exclusive-switch-btn {
   margin-top: 8px;
+}
+
+/* 스레드 정책 적용 결과 한 줄(#245 재리뷰 L2) */
+.thread-policy-status {
+  margin-top: 4px;
+}
+
+.thread-policy-status.ok {
+  color: var(--success);
+}
+
+.thread-policy-status.warn {
+  color: var(--warning);
 }

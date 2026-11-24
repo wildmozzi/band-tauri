@@ -1,35 +1,4 @@
 /* PendingRequestsModal.css — features/room/RoomDetail.css에서 옮긴 이 컴포넌트 전용 규칙 (P3-2 ③-3). 순서는 원래 RoomDetail.css 순서 그대로 */
-.change-request-actions .approve-btn.small,
-.change-request-actions .reject-btn.small {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-round);
-  border: none;
-  cursor: pointer;
-  font-size: 0.7rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-}
-
-.change-request-actions .approve-btn.small {
-  background: var(--green-400-a20);
-  color: var(--green-400);
-}
-
-.change-request-actions .approve-btn.small:hover {
-  background: var(--green-400-a40);
-}
-
-.change-request-actions .reject-btn.small {
-  background: var(--red-400-a20);
-  color: var(--red-400);
-}
-
-.change-request-actions .reject-btn.small:hover {
-  background: var(--red-400-a40);
-}
 
 /* 승인 요청 모달 */
 .pending-requests-modal .modal-content {

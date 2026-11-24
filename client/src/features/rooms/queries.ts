@@ -16,8 +16,8 @@
  *   방 상세 설정 저장(RoomDetail) → 위 '내 방 수정' + 비밀번호(서버 API)까지 성공한 뒤 patchRoomDetailCache로 상세 갱신
  *   참여자 수 새로고침 → 서버가 기록한 current_participants를 다시 읽어 상세 캐시 갱신 + 목록 무효화
  *                     (참여자 수는 서버(WebSocket 접속 수)만 쓴다. 클라이언트 UPDATE는 DB가 무시한다 — 011)
- *   방 상세에서 삭제 → 위 '내 방 삭제' + 화면을 떠난 뒤 forgetRoomDetail로 상세 캐시 제거
- *                     (상세가 마운트된 채로 지우면 지운 방을 다시 조회한다)
+ *   방 상세에서 삭제 → 위 '내 방 삭제' + forgetRoomDetail로, 상세 화면이 내려간 뒤 상세 캐시 제거
+ *                     (상세가 마운트된 채로 지우면 지운 방을 다시 조회한다 — removeQueriesWhenUnobserved)
  *   상세 조회 실패는 재시도하지 않는다(없는 방이면 바로 목록으로 — 기존 동작). 마운트마다 다시 확인(refetchOnMount: always)
  *   사용자 전환(features/auth) 때 상세·공개 목록은 사용자와 무관해 초기화하지 않는다
  */
@@ -25,6 +25,7 @@ import { useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import type { TablesUpdate } from '../../shared/lib/database.types'
 import { isSupabaseConfigured, supabase } from '../../shared/lib/supabaseClient'
+import { removeQueriesWhenUnobserved } from '../../shared/lib/removeQueriesWhenUnobserved'
 import { fetchRoomById } from './roomApi'
 import type { DbRoom, MyRoom } from './roomModel'
 import { normalizeDetailRoom, type DetailRoom } from './roomModel'
@@ -205,9 +206,9 @@ export function patchRoomDetailCache(qc: QueryClient, roomId: string, patch: Par
   qc.setQueryData<DetailRoom>(roomKeys.detail(roomId), prev => (prev ? { ...prev, ...patch } : prev))
 }
 
-/** 삭제한 방의 상세 캐시 제거. 상세 화면을 떠난 뒤(navigate 뒤)에 부른다 */
+/** 삭제한 방의 상세 캐시 제거. 보고 있는 화면(상세)이 있으면 그 화면이 내려간 뒤에 지운다 */
 export function forgetRoomDetail(qc: QueryClient, roomId: string) {
-  qc.removeQueries({ queryKey: roomKeys.detail(roomId) })
+  removeQueriesWhenUnobserved(qc, roomKeys.detail(roomId))
 }
 
 export function useSyncParticipantsMutation() {

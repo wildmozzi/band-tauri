@@ -109,7 +109,7 @@ export function Recording() {
       recorder.start()
       setRecordingError(null)
       setRecordingState('recording')
-    } catch (error) {
+    } catch {
       setRecordingError('마이크 권한이 필요합니다.')
     }
   }

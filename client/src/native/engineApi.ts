@@ -37,6 +37,38 @@ export type TxCodecReason = 'relayLoad' | 'lossFeedback'
  */
 export type ResampleQuality = 'auto' | 'lowLatency' | 'highQuality'
 
+/**
+ * 엔진 스레드(워커·네트워크 수신) 코어 배치 정책(P1-21, Windows 전용). 기본값: **`highQos` 켬, `preferPCores` 끔**
+ * (P1-21 3단계 — 엔진도 필드·설정이 없으면 같은 기본값이다).
+ * 엔진 시작 때 한 번 적용되므로 바꾸면 엔진을 다시 시작해야 한다. 환경변수 `BAND_THREAD_POLICY`
+ * (`+`로 잇는 낱말 `highqos` · `pin`(=`pcores`) | `prefer` | `adaptive`, 또는 `off` · `both` — 정확히 그 조합)가 있으면 이 설정보다
+ * 우선한다. 적용 결과는 `EngineStats.threadPolicy`.
+ */
+export interface ThreadPolicyConfig {
+  /** 실행 속도 전원 조절(EcoQoS)을 끈다. 스케줄러는 여전히 코어를 자유롭게 고른다. 기본 켬 — 걸 수 없는 PC에서는 조용히 꺼진 것과 같다 */
+  highQos: boolean
+  /**
+   * (실험 옵션, 기본 끔) 고성능(P) 코어 CPU set에 둔다. "선호"가 아니다 — 스레드는 그 집합 안에 머물러, P 코어가 바빠도 다른 코어로 넘어가지 않는다.
+   * 하이브리드 CPU가 아니거나 물리 P 코어가 4개 미만이면 적용되지 않는다(`skipped`).
+   * 옛 필드(2단계): `pCoreMode`가 없을 때만 본다 — `true` = `'pin'`. `pCoreMode`가 있으면 그것이 이긴다.
+   */
+  preferPCores: boolean
+  /**
+   * (실험 옵션) P 코어 정책(P1-21 3단계 ②). 없으면 `preferPCores`를 따른다. 클라이언트는 `'prefer'`·`'adaptive'`일 때만
+   * 이 칸을 적고(그때 `preferPCores`는 false), 끔·고정은 옛 모양(`preferPCores`)으로 둔다 — `pCoreModeOf`/`withPCoreMode`로 읽고 쓴다.
+   */
+  pCoreMode?: PCoreMode | null
+}
+
+/**
+ * 엔진 스레드를 고성능(P) 코어에 두는 방식(설계 문서 1.1절 "P 코어 정책"):
+ * - `off`: 걸지 않는다(Windows가 고른다).
+ * - `pin`: 고정 — P 코어 CPU set에 묶는다. P 코어가 바빠도 다른 코어로 넘어가지 않는다.
+ * - `prefer`: 선호 힌트 — P 코어 하나를 선호 프로세서로 알린다. 스케줄러가 다른 코어로 옮길 수 있다.
+ * - `adaptive`: 조건부 고정 — `pin`처럼 묶되 끊김·기상 지연이 늘면 풀고 안정되면 다시 묶는다.
+ */
+export type PCoreMode = 'off' | 'pin' | 'prefer' | 'adaptive'
+
 export interface EngineConfig {
   inputDriver: DriverKind
   outputDriver: DriverKind
@@ -58,6 +90,8 @@ export interface EngineConfig {
   udpPort?: number
   /** 리샘플러 품질(P2-17e). 없으면 auto */
   resampleQuality?: ResampleQuality
+  /** 엔진 스레드 코어 배치 정책(P1-21). 없으면 기본값 — HighQoS 켬·P 코어 정책 끔(위 `ThreadPolicyConfig`) */
+  threadPolicy?: ThreadPolicyConfig
 }
 
 export interface Candidate {
@@ -225,7 +259,7 @@ export interface PeerStats {
 export interface LossShapeStats {
   /** 현재 수신 패킷 프레임(ms). 연속 길이(패킷) × 이 값 ≈ ms */
   frameMs: number
-  /** 끝내 안 온 seq의 연속 길이 히스토그램(버킷 1, 2, 3–4, 5–8, 9–16, 17+ 패킷 — engineDiagFormat LOSS_RUN_BUCKETS). 최근 256패킷 안의 손실은 아직 확정 전이라 없다 */
+  /** 끝내 안 온 seq의 연속 길이 히스토그램(버킷 1, 2, 3–4, 5–8, 9–16, 17+ 패킷 — peerDiagFormat LOSS_RUN_BUCKETS). 최근 256패킷 안의 손실은 아직 확정 전이라 없다 */
   lossRuns: number[]
   /** lossRuns 17+ 버킷 연속들의 패킷 수 합(긴 버스트 손실 수를 정확히). 옛 엔진에는 없다 */
   lossLongPkts?: number
@@ -353,12 +387,16 @@ export interface EngineStats {
   xruns: number
   /** 로컬 처리 지연(GOAL 1절 정의: 입력 버퍼+프레임+출력 링+출력 버퍼). 콜백 구동 믹스라 출력 링은 0 */
   estLatencyMs: number
+  /** 내 소리의 송신 프레임(ms, 설정 frameMs — 모든 피어에게 같다. 코덱은 피어별 txCodec). 정지 상태면 0, 옛 엔진이면 없음 */
+  txFrameMs?: number
   /** 모니터 경로(내 입력 → 내 출력) 지연 */
   monitorLatencyMs?: number
   /** 오디오 스트림 에러 누적(비치명 포함) */
   streamErrors?: number
   /** 장치를 잃음(콜백 1초 정지, 장치 분리·무효화, 기본 장치 변경). true면 running=false */
   deviceLost?: boolean
+  /** 드라이버가 리셋을 요청했다(ASIO kAsioResetRequest — 제어판에서 버퍼 크기·샘플레이트 변경 등, P1-11). 엔진이 디바운스한 뒤 켜고 엔진이 끝날 때까지 유지. true면 deviceLost도 true. 옛 엔진이면 없음 */
+  deviceReset?: boolean
   /** 스트림이 복구되지 않는 오류로 멈춤(치명 오류, 재시작 반복 실패). 장치는 남아 있을 수 있다. true면 running=false */
   streamFailed?: boolean
   /** 일시 오류 반복으로 자체 WASAPI 스트림을 재시작한 횟수 */
@@ -377,6 +415,8 @@ export interface EngineStats {
   threadPriority?: ThreadPriorityStats
   /** 하이브리드 CPU 코어 배치(P1-21): 워커·수신 스레드가 P/E/LP-E 코어에서 돈 비율(시작부터 누적). 비Windows·옛 엔진은 null/없음 */
   corePlacement?: CorePlacementStats | null
+  /** 워커·수신 스레드에 적용한 코어 배치 정책과 결과(P1-21 2단계, 기본은 둘 다 off). 비Windows·정지 상태·옛 엔진은 null/없음 */
+  threadPolicy?: ThreadPolicyStats | null
   peers: PeerStats[]
   /** 릴레이 등록 상태. 릴레이를 설정하지 않았으면 null/undefined */
   relay?: RelayStats | null
@@ -555,6 +595,40 @@ export interface CorePlacementStats {
   netRecv: ThreadPlacement | null
 }
 
+/**
+ * 스레드 정책 한 항목의 적용 결과(설계 문서 4절 `threadPolicy`): `pending` 스레드가 아직 적용 전(시작 직후 잠깐) ·
+ * `off` 옵션 꺼짐 · `applied` OS 호출 성공 · `failed` 실패(무시하고 기본 스케줄링) ·
+ * `skipped` P 코어 정책만 — 걸 코어가 없어 걸지 않음(하이브리드 아님, 물리 P 코어 4개 미만) ·
+ * `released` 조건부 고정만 — 지금은 풀려 있다(끊김·지연이 늘어 풀었고 안정되면 다시 `applied`).
+ */
+export type ThreadPolicyResult = 'pending' | 'off' | 'applied' | 'failed' | 'skipped' | 'released'
+
+/** 스레드 하나에 건 정책의 결과: HighQoS(EcoQoS 끄기)와 P 코어 정책(방식은 `ThreadPolicyStats.pCoreMode`) */
+export interface ThreadPolicy {
+  highQos: ThreadPolicyResult
+  pCores: ThreadPolicyResult
+}
+
+export interface ThreadPolicyStats {
+  worker: ThreadPolicy
+  /** 네트워크 없이 시작한 엔진은 null */
+  netRecv: ThreadPolicy | null
+  /** 이 엔진이 고른 P 코어 정책(설정 또는 환경변수). 옛 엔진은 없다 */
+  pCoreMode?: PCoreMode
+  /** 조건부 고정(`adaptive`)의 상태. 다른 정책은 null */
+  adaptive?: AdaptivePinStats | null
+}
+
+/** 조건부 고정의 지금 상태와 누적 횟수(엔진 시작부터) */
+export interface AdaptivePinStats {
+  /** 지금 풀려 있다 */
+  released: boolean
+  releases: number
+  rebinds: number
+  /** 마지막 1초 창의 P 코어 바쁨 추정(%). 못 재면 null */
+  pBusyPct: number | null
+}
+
 // ============================================================================
 // 환경 감지
 // ============================================================================
@@ -628,8 +702,13 @@ export function engineTestStop(): Promise<null> {
   return invoke<null>('engine_test_stop')
 }
 
-export function engineAddPeer(peerId: string, descriptor: LocalDescriptor): Promise<null> {
-  return invoke<null>('engine_add_peer', { peerId, descriptor })
+/**
+ * 피어 추가. `entryLeadMs`(선택): 내 입장(연주 시작) → 이 호출까지(ms) — 내가 시작할 때 이미 있던 연주자에만 주고, 뒤에 온 연주자·재추가는
+ * null(모름, 0과 다르다). 엔진은 진단 타임라인에만 남긴다(결과표 GOAL 3-3 "입장 후 3초 이내 소리" = entryLeadMs + firstAudioMs). 이 호출은 엔진
+ * `blocking` 큐에 들어가기 전에 재므로, 큐 대기(보통 수 ms)는 합에 없다(#250 L5). 옛 엔진은 모르는 인자를 무시한다.
+ */
+export function engineAddPeer(peerId: string, descriptor: LocalDescriptor, entryLeadMs?: number | null): Promise<null> {
+  return invoke<null>('engine_add_peer', { peerId, descriptor, entryLeadMs: entryLeadMs ?? null })
 }
 
 /**

@@ -6,6 +6,9 @@
 
 pub mod export;
 pub(crate) mod mask;
+/// 진단 zip → 결과표 도구(`examples/diag_report.rs`, GOAL-COVERAGE 후보 ②·③). 예제·시험 빌드에서만 들어간다.
+#[cfg(any(test, feature = "test-support"))]
+pub mod report;
 pub(crate) mod timeline;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +20,7 @@ use parking_lot::{Condvar, Mutex};
 use band_dsp::config::EngineConfig;
 use crate::engine::report::{EndedConn, EngineSnapshot};
 use crate::net::connlog::ConnEvent;
+use mask::pseudonymize;
 use timeline::{ConnSample, Sample, Timeline, DEFAULT_CAPACITY, SAMPLE_INTERVAL_MS};
 
 struct Inner {
@@ -34,6 +38,13 @@ struct Inner {
     pending_conn: Vec<ConnSample>,
     /// 직전 샘플의 (세션, 코어 배치 누적 수) — 다음 샘플을 구간 값으로 만드는 기준(P1-21 후속).
     last_placement: Option<(u64, crate::sys::placement::PlacementWindow)>,
+    /// 마지막으로 타임라인에 적은 스레드 정책(세션, 값) — 같은 값이면 줄에 다시 넣지 않는다(P1-21 2단계).
+    last_policy: Option<(u64, crate::sys::placement::ThreadPolicyStats)>,
+    /// 마지막으로 타임라인에 적은 NAT 추정·송신 큐 p99(세션, 값) — 같은 값이면 줄에 다시 넣지 않는다(format 3).
+    last_nat: Option<(u64, crate::net::NatProbe)>,
+    last_send_queue: Option<(u64, f32)>,
+    /// 마지막으로 타임라인에 적은 내 가명(세션, 값) — 같은 값이면 줄에 다시 넣지 않는다(format 3, #250 H1).
+    last_self: Option<(u64, String)>,
 }
 
 /// 기억하는 세션 수(`conn_seen`).
@@ -92,6 +103,10 @@ impl Diagnostics {
                 conn_seen: Vec::new(),
                 pending_conn: Vec::new(),
                 last_placement: None,
+                last_policy: None,
+                last_nat: None,
+                last_send_queue: None,
+                last_self: None,
             }),
             busy: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -114,6 +129,37 @@ impl Diagnostics {
                     }
                 }
                 g.last_placement = cum.map(|c| (s.session, c));
+                // 스레드 정책은 상태가 바뀐 줄에만(세션 첫 줄 포함) 넣는다 — 스레드 시작 때 한 번 정해지고, 조건부 고정(P 코어 정책
+                // 3안)만 풀거나 다시 묶을 때 바뀐다. 창마다 흔들리는 P 코어 바쁨 추정은 견주지 않는다(`state_key`) — 그 값은
+                // 상태가 바뀐 줄에 그때의 값으로만 남는다.
+                match sample.thread_policy {
+                    Some(p) if g.last_policy == Some((s.session, p.state_key())) => sample.thread_policy = None,
+                    Some(p) => g.last_policy = Some((s.session, p.state_key())),
+                    None => {}
+                }
+                // NAT 추정(세션 동안 그대로)·송신 큐 p99(2초 창)도 값이 바뀐 줄에만 넣는다(format 3, 60분 zip 크기).
+                sample.nat = match s.nat {
+                    Some(n) if g.last_nat == Some((s.session, n)) => None,
+                    Some(n) => {
+                        g.last_nat = Some((s.session, n));
+                        Some(n)
+                    }
+                    None => None,
+                };
+                match sample.send_queue_p99_ms {
+                    Some(q) if g.last_send_queue == Some((s.session, q)) => sample.send_queue_p99_ms = None,
+                    Some(q) => g.last_send_queue = Some((s.session, q)),
+                    None => {}
+                }
+                // 내 가명(#250 H1)도 값이 바뀐 줄에만 — 진단에는 가명만 남는다(원래 peerId는 줄에 없다).
+                sample.self_peer = match s.self_peer.as_deref().map(pseudonymize) {
+                    Some(me) if g.last_self.as_ref() == Some(&(s.session, me.clone())) => None,
+                    Some(me) => {
+                        g.last_self = Some((s.session, me.clone()));
+                        Some(me)
+                    }
+                    None => None,
+                };
                 // 세션마다(엔진 재시작 = 새 Net) seq가 1부터 다시 센다
                 let fresh = g.take_new_conn(s.session, &s.conn_events);
                 sample.conn = std::mem::take(&mut g.pending_conn);
@@ -195,7 +241,120 @@ mod tests {
     fn snap(running: bool) -> EngineSnapshot {
         let mut stats = EngineStats::stopped();
         stats.running = running;
-        EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 7, conn_events: vec![] }
+        EngineSnapshot { stats, config: EngineConfig::default(), network: true, session: 7, conn_events: vec![], nat: None, self_peer: None }
+    }
+
+    /// 스레드 정책(P1-21 2단계): 타임라인에는 세션에서 값이 바뀐 줄에만 들어가고, 세션이 바뀌면 다시 들어간다.
+    #[test]
+    fn thread_policy_is_recorded_only_when_it_changes() {
+        use crate::sys::placement::{PCoreMode, PolicyResult, ThreadPolicy, ThreadPolicyStats};
+        let pol = |q| ThreadPolicyStats { worker: ThreadPolicy { high_qos: q, p_cores: PolicyResult::Off }, net_recv: None, p_core_mode: PCoreMode::Off, adaptive: None };
+        let snap = |session: u64, q| {
+            let mut s = super::tests::snap(true);
+            s.session = session;
+            s.stats.thread_policy = Some(pol(q));
+            s
+        };
+        let d = Diagnostics::new(16);
+        d.record(1_000, Some(snap(5, PolicyResult::Pending))); // 첫 샘플(적용 전)
+        d.record(2_000, Some(snap(5, PolicyResult::Applied))); // 적용 뒤
+        d.record(3_000, Some(snap(5, PolicyResult::Applied)));
+        d.record(4_000, Some(snap(6, PolicyResult::Applied))); // 새 세션
+        d.record(5_000, Some(snap(6, PolicyResult::Applied)));
+        d.with_timeline(|tl, _, _| {
+            let got: Vec<_> = tl.iter().map(|s| s.thread_policy).collect();
+            assert_eq!(got, vec![Some(pol(PolicyResult::Pending)), Some(pol(PolicyResult::Applied)), None, Some(pol(PolicyResult::Applied)), None]);
+            assert_eq!(timeline::session_policy(tl, 5), Some(pol(PolicyResult::Applied)));
+            assert_eq!(timeline::session_policy(tl, 6), Some(pol(PolicyResult::Applied)));
+            assert_eq!(timeline::session_policy(tl, 7), None);
+            // 줄 형식: 값이 없는 줄에는 키가 없다
+            let lines: Vec<String> = timeline::to_jsonl(tl).lines().map(str::to_string).collect();
+            assert!(lines[1].contains("\"threadPolicy\":{\"worker\":{\"highQos\":\"applied\",\"pCores\":\"off\"},\"netRecv\":null,\"pCoreMode\":\"off\",\"adaptive\":null}"), "{}", lines[1]);
+            assert!(!lines[2].contains("threadPolicy"), "{}", lines[2]);
+        });
+        // 조건부 고정(P 코어 정책 3안): 풀거나 다시 묶은 줄에만 들어간다. P 코어 바쁨 추정만 바뀐 줄은 넣지 않는다
+        {
+            use crate::sys::pin_adapt::AdaptiveStats;
+            let ad = |p_cores, released, releases, busy| ThreadPolicyStats {
+                worker: ThreadPolicy { high_qos: PolicyResult::Applied, p_cores },
+                net_recv: None,
+                p_core_mode: PCoreMode::Adaptive,
+                adaptive: Some(AdaptiveStats { released, releases, rebinds: 0, p_busy_pct: busy }),
+            };
+            let d = Diagnostics::new(16);
+            let steps = [
+                ad(PolicyResult::Applied, false, 0, Some(10)),
+                ad(PolicyResult::Applied, false, 0, Some(35)), // 바쁨만 바뀜
+                ad(PolicyResult::Applied, false, 0, None),     // 바쁨만 바뀜
+                ad(PolicyResult::Released, true, 1, Some(97)), // 풀림
+                ad(PolicyResult::Released, true, 1, Some(40)), // 바쁨만 바뀜
+            ];
+            for (i, st) in steps.iter().enumerate() {
+                let mut s = super::tests::snap(true);
+                s.session = 3;
+                s.stats.thread_policy = Some(*st);
+                d.record(1_000 * (i as u64 + 1), Some(s));
+            }
+            d.with_timeline(|tl, _, _| {
+                let got: Vec<_> = tl.iter().map(|s| s.thread_policy).collect();
+                assert_eq!(got, vec![Some(steps[0]), None, None, Some(steps[3]), None]);
+                let lines: Vec<String> = timeline::to_jsonl(tl).lines().map(str::to_string).collect();
+                assert!(lines[3].contains("\"pCores\":\"released\"") && lines[3].contains("\"adaptive\":{\"released\":true,\"releases\":1,\"rebinds\":0,\"pBusyPct\":97}"), "{}", lines[3]);
+            });
+        }
+        // 링이 넘쳐 값이 있는 줄을 버리면 같은 세션의 다음 줄이 물려받는다
+        let mut dropped = timeline::Sample::from_stats(1, true, 9, &snap(9, PolicyResult::Applied).stats);
+        dropped.thread_policy = Some(pol(PolicyResult::Applied));
+        let mut next = timeline::Sample::from_stats(2, true, 9, &super::tests::snap(true).stats);
+        timeline::Sample::fold_dropped(dropped.clone(), &mut next);
+        assert_eq!(next.thread_policy, Some(pol(PolicyResult::Applied)));
+        let mut other = timeline::Sample::from_stats(2, true, 10, &super::tests::snap(true).stats);
+        timeline::Sample::fold_dropped(dropped, &mut other);
+        assert_eq!(other.thread_policy, None, "다른 세션으로는 옮기지 않는다");
+    }
+
+    /// NAT 추정·송신 큐 p99(format 3)는 같은 세션에서 값이 바뀐 줄에만 들어가고, 세션이 바뀌면 다시 들어간다. 링이 넘쳐 값이 있는
+    /// 줄을 버리면 같은 세션의 다음 줄이 물려받는다.
+    #[test]
+    fn nat_and_send_queue_are_recorded_only_when_they_change() {
+        use crate::net::txlat::SendQueueStats;
+        use crate::net::stun::{NatMapping, NatProbe};
+        let nat = NatProbe { mapping: NatMapping::Independent, responses: 2 };
+        let at = |session: u64, p99: f32| {
+            let mut s = snap(true);
+            s.session = session;
+            s.nat = Some(nat);
+            s.stats.send_queue = Some(SendQueueStats { p50_ms: 0.01, p99_ms: p99, max_ms: 1.0, packets: 100 });
+            s
+        };
+        let d = Diagnostics::new(16);
+        d.record(1_000, Some(at(5, 0.12)));
+        d.record(2_000, Some(at(5, 0.121))); // 0.01 단위로 같은 값
+        d.record(3_000, Some(at(5, 0.25)));
+        d.record(4_000, Some(at(6, 0.25))); // 새 세션
+        d.with_timeline(|tl, _, _| {
+            let got: Vec<_> = tl.iter().map(|s| (s.nat.map(|n| n.mapping), s.send_queue_p99_ms)).collect();
+            assert_eq!(
+                got,
+                vec![
+                    (Some(NatMapping::Independent), Some(0.12)),
+                    (None, None),
+                    (None, Some(0.25)),
+                    (Some(NatMapping::Independent), Some(0.25)),
+                ]
+            );
+            assert_eq!(timeline::session_nat(tl, 5), Some(nat));
+            assert_eq!(timeline::session_send_queue(tl, 5), Some(0.25));
+            let lines: Vec<String> = timeline::to_jsonl(tl).lines().map(str::to_string).collect();
+            assert!(lines[0].contains(r#""nat":{"mapping":"independent","responses":2}"#), "{}", lines[0]);
+            assert!(!lines[1].contains("\"nat\"") && !lines[1].contains("sendQueueP99Ms"), "{}", lines[1]);
+        });
+        let mut dropped = timeline::Sample::from_stats(1, true, 9, &snap(true).stats);
+        dropped.nat = Some(nat);
+        dropped.send_queue_p99_ms = Some(0.5);
+        let mut next = timeline::Sample::from_stats(2, true, 9, &snap(true).stats);
+        timeline::Sample::fold_dropped(dropped, &mut next);
+        assert_eq!((next.nat, next.send_queue_p99_ms), (Some(nat), Some(0.5)));
     }
 
     /// 타임라인 `corePlacement`는 같은 세션의 직전 샘플 뒤로 센 구간 수다(#191 리뷰 L1). 세션 첫 샘플·재시작 첫 샘플은 시작부터,

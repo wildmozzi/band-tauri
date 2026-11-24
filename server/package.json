@@ -4,7 +4,7 @@
     "description": "",
     "main": "index.js",
     "scripts": {
-        "build": "node node_modules/typescript/bin/tsc -p .",
+        "build": "tsc -p .",
         "dev": "tsx src/index.ts",
         "start": "node dist/index.js",
         "migrate:stems": "tsx scripts/migrate-stems-to-opus.ts",
@@ -20,11 +20,6 @@
         "@aws-sdk/client-s3": "^3.1165.0",
         "@aws-sdk/s3-request-presigner": "^3.1165.0",
         "@supabase/supabase-js": "^2.86.0",
-        "@types/cors": "^2.8.19",
-        "@types/express": "^5.0.6",
-        "@types/multer": "^2.0.0",
-        "@types/node": "^24.5.2",
-        "@types/ws": "^8.18.1",
         "axios": "^1.7.9",
         "cors": "^2.8.5",
         "dotenv": "^17.2.3",
@@ -33,7 +28,6 @@
         "helmet": "^8.3.0",
         "multer": "^2.0.2",
         "node-cron": "^3.0.3",
-        "typescript": "^5.9.2",
         "uuid": "^13.0.0",
         "ws": "^8.18.3",
         "zod": "^4.6.7"
@@ -41,8 +35,14 @@
     "devDependencies": {
         "@electric-sql/pglite": "^0.5.16",
         "@smithy/signature-v4": "^5.7.5",
+        "@types/cors": "^2.8.19",
+        "@types/express": "^5.0.6",
+        "@types/multer": "^2.0.0",
+        "@types/node": "^24.5.2",
         "@types/node-cron": "^3.0.11",
+        "@types/ws": "^8.18.1",
         "ts-node": "^10.9.2",
-        "tsx": "^4.23.12"
+        "tsx": "^4.23.12",
+        "typescript": "^5.9.2"
     }
 }

@@ -14,6 +14,8 @@ export default defineConfig({
   testMatch: '**/*.tool.ts',
   outputDir: '../.results/style-snapshot',
   retries: 0,
+  // 덤프는 chromium 한 브라우저로(앱 설정의 webkit 프로젝트는 관람 스펙용, P3-24)
+  projects: (base.projects ?? []).filter(p => p.name === 'chromium'),
   reporter: [['list']],
   // 덤프는 화면마다 독립이라 병렬로 돌려도 된다(화면마다 새 브라우저 컨텍스트·새 가짜 DB)
   fullyParallel: true,

@@ -74,6 +74,8 @@ export interface RecordingSlice {
 export interface LocalSlice {
   /** 연주 시작·방송 실패 등 방 화면에 보여줄 안내 */
   localError: string | null
+  /** 저장된 장치가 이 PC에 없어 이번 연주를 기본 장치로 시작했다는 알림(P2-27). 닫거나 연주를 멈추면 null */
+  audioFallbackNotice: string | null
   isMonitoringEnabled: boolean
   monitorGain: number
   /** 내 클릭 볼륨·뮤트(내 귀에만) */
@@ -168,6 +170,7 @@ export function initialRoomState(over: Partial<RoomState> = {}): RoomState {
     recording: { isRecording: false, recordings: [], recordingDuration: 0 },
     local: {
       localError: null,
+      audioFallbackNotice: null,
       isMonitoringEnabled: false,
       monitorGain: 1,
       metronomeVolume: 1,

@@ -18,7 +18,7 @@ export function createSupabaseMock() {
       return { data: v?.data ?? null, error: v?.error ?? null, count: v?.count ?? null }
     }
     const b: Record<string, unknown> = {}
-    for (const m of ['select', 'eq', 'order', 'delete', 'update', 'insert', 'contains', 'gt', 'single', 'maybeSingle']) {
+    for (const m of ['select', 'eq', 'order', 'delete', 'update', 'insert', 'upsert', 'contains', 'gt', 'single', 'maybeSingle']) {
       b[m] = (...args: unknown[]) => {
         call.chain.push([m, args])
         return b

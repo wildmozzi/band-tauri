@@ -184,6 +184,9 @@ pub(super) fn recv_loop(s: &NetShared) {
             Ok((n, from)) => {
                 // 코어 배치 표본(P1-21): 패킷을 처리하려고 깨어난 순간의 코어. 시간 초과로 깬 반복은 세지 않는다.
                 s.recv_placement.sample();
+                // 조건부 고정(P 코어 정책 3안): 워커의 판단이 바뀌었으면 이 스레드가 자기에게 풀기/묶기를 한 번 부른다. 평소에는
+                // 분기 하나(다른 정책) 또는 원자값 읽기 둘이다. 패킷이 없으면(시간 초과로 깬 반복) 맞추지 않는다 — 할 일이 없는 스레드다.
+                s.recv_policy.sync_adaptive();
                 if n <= MAX_PACKET_BYTES {
                     s.handle_packet(&mut buf[..n], from);
                 }

@@ -69,6 +69,11 @@ pub struct AudioPacket {
     data: [u8; MAX_PAYLOAD_BYTES],
 }
 
+// `MediaRx::drain`이 ringbuf `Consumer::skip`으로 이 원소를 버린다. ringbuf 0.4.8의 `skip`/`clear`는 원소 `Drop`이 panic하면
+// double free가 난다(RUSTSEC-2026-0293, 0.5.2+에서 수정) — 원소에 Drop 글루가 없어야 그 경로가 닿지 않는다. 이 단언이 깨지면
+// (원소에 Box·Vec·Arc 등을 넣었다면) `skip`을 `try_pop` 루프로 바꾸거나 ringbuf를 올린다(docs/overhaul/deps-audit-2026-11-18.md 6번).
+const _: () = assert!(!core::mem::needs_drop::<AudioPacket>());
+
 impl AudioPacket {
     pub fn payload(&self) -> &[u8] {
         &self.data[..self.len as usize]

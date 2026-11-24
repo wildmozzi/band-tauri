@@ -16,6 +16,13 @@ const RUNTIME_ONLY: Record<string, string[]> = {
   performSession: ['native/nativeRuntime.ts'],
   mixBridge: ['native/nativeRuntime.ts'],
   sessionLogic: ['native/performSession.ts'],
+  // 데스크톱 연주 중에만 나오는 문구(#263 리뷰 M-1) — 첫 화면 모듈이 값으로 import하면 웹 첫 묶음에 다시 실린다
+  performMessages: ['native/performSession.ts'],
+  // 테스트 모니터 리셋 문구·상한: AudioSettingsContext가 동적 import만 한다
+  testMonitorReset: [],
+  // 루프백 보정값 저장소: 지연 묶음(엔진 런타임·연주자 UI·오디오 설정 화면)만 쓴다. 첫 화면 코드(Navigation)는 이벤트 이름을
+  // audioSettingsEvents에서 받고, AudioSettingsContext는 동적 import한다
+  loopbackOffsetStore: ['native/nativeRuntime.ts', 'features/room/components/MetronomePanel.tsx', 'features/settings/LatencyMeasurePanel.tsx'],
 }
 
 function sourceFiles(dir: string): string[] {
@@ -37,6 +44,21 @@ describe('엔진 런타임은 지연 묶음에만', () => {
         const name = m[2].split('/').pop()!.replace(/\.(ts|tsx|js|mjs)$/, '')
         const allowed = RUNTIME_ONLY[name]
         if (allowed && !allowed.includes(rel)) offenders.push(`${rel} → ${m[2]}`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  // 내 채널 진단 줄 문구(#250): EngineDiagLines는 performerUi 지연 묶음이다. 첫 화면 모듈(roomDetailModel 등)이
+  // engineDiagFormat을 값으로 import하면 공유 모듈이 되어 릴레이·송신 큐 문구가 웹 첫 묶음에 다시 실린다(피어 툴팁은 peerDiagFormat)
+  it('engineDiagFormat을 값으로 정적 import하는 곳은 EngineDiagLines뿐', () => {
+    const offenders: string[] = []
+    for (const file of sourceFiles(SRC)) {
+      const rel = relative(SRC, file).replace(/\\/g, '/')
+      const text = readFileSync(file, 'utf8')
+      for (const m of text.matchAll(/^(import|export)\s+(?!type\b)(?:[^;'"]*?from\s+)?['"]([^'"]+)['"]/gms)) {
+        const name = m[2].split('/').pop()!.replace(/\.(ts|tsx|js|mjs)$/, '')
+        if (name === 'engineDiagFormat' && rel !== 'features/room/components/EngineDiagLines.tsx') offenders.push(`${rel} → ${m[2]}`)
       }
     }
     expect(offenders).toEqual([])

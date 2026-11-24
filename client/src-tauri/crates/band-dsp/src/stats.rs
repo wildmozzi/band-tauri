@@ -61,6 +61,12 @@ pub struct AudioCounters {
     pub device_lost: AtomicBool,
     /// 스트림이 복구되지 않는 오류로 멈췄다(치명 HRESULT, 재시작을 반복해도 실패). 장치는 남아 있을 수 있다.
     pub stream_failed: AtomicBool,
+    /// 드라이버가 보낸 리셋 요청 누적 횟수(ASIO `kAsioResetRequest` — 제어판에서 버퍼 크기·샘플레이트 변경, 장치 재설정).
+    /// 드라이버 메시지 스레드가 원자 덧셈만 한다. 재시작 판단(디바운스)은 워커의 `ResetWatch`가 한다(설계 문서 1.1절).
+    pub device_reset_requests: AtomicU32,
+    /// 리셋 요청이지만 장치를 연 직후 유예 안이라 세지 않은 횟수(시작 직후 거짓 요청, 엔진의 샘플레이트 변경에 대한 응답 —
+    /// `engine/device/cpal.rs` `reset_verdict`). 드라이버 메시지 스레드가 원자 덧셈만 하고 워커가 로그로 남긴다.
+    pub device_reset_ignored: AtomicU32,
     /// 일시 오류가 반복되어 스트림을 재시작한 횟수(자체 WASAPI).
     pub stream_restarts: AtomicU32,
     /// 캡처 패킷의 DATA_DISCONTINUITY(장치가 데이터를 버림 = 입력 오버런, `xruns`에도 더함). 시작 직후 첫 패킷 제외.
@@ -216,11 +222,26 @@ mod tests {
         assert_eq!(c.try_read(), Some([0; 3]));
     }
 
-    /// 쉬지 않는 쓰는 스레드 하나 + 읽는 스레드 넷(`read` 둘, `try_read` 둘): 돌려받은 값은 언제나 한 벌이다.
-    /// 칸이 64개라 쓰기 한 번이 길어 찢길 틈이 넓다(`MediaStatsCell`의 27칸보다 거센 조건).
+    /// 쓰는 스레드 하나(폭주) + 읽는 스레드 넷(`read` 둘, `try_read` 둘): 돌려받은 값은 언제나 한 벌이다.
+    /// 칸이 64개라 쓰기 한 번이 길어 찢길 틈이 넓다(`MediaStatsCell`보다 거센 조건).
+    ///
+    /// 쓰는 쪽은 `BURST`번을 쉬지 않고 쓴 뒤 읽기 `GAP_READS`번 길이만큼만 쉰다(그 틈은 자기 칸을 읽어서 만든다 — 빌드
+    /// 프로필·CPU가 달라도 "읽기 몇 번이 들어갈 길이"가 유지된다). 틈이 없으면 `try_read`의 성공 여부가 스케줄러에만 달린다:
+    /// 짝수 버전 창(쓰기 사이)이 64칸 읽기보다 짧아, 쓰는 스레드가 선점될 때만 읽힌다. 예전 시험은 시도 2만 번(약 1ms —
+    /// 스케줄러 한 구간보다 짧다)으로 끝나서 그 사이 선점이 없으면 성공 0으로 실패했다(P2-28).
+    /// `try_read` 가지는 횟수가 아니라 **조건**으로 끝난다: 성공 `MIN_OK`번(값을 실제로 검사했다)과 실패 `MIN_BUSY`번(쓰기와
+    /// 실제로 겹쳤다 — 겹치지 않으면 찢길 기회도 없다)을 둘 다 채울 때까지 돈다. 시간 상한을 넘기면 단언이 실패한다.
     #[test]
     fn seq_cell_never_torn_under_write_storm() {
+        use std::time::{Duration, Instant};
         const N: usize = 64;
+        const BURST: u64 = 64;
+        const GAP_READS: usize = 8;
+        const MIN_TRIES: u64 = 20_000;
+        const MIN_OK: u64 = 200;
+        const MIN_BUSY: u64 = 200;
+        // 정상이면 수십 ms에 끝난다. 읽기가 전혀 안 되는 회귀에서 매달리지 않고 실패하게 하는 상한이다.
+        const LIMIT: Duration = Duration::from_secs(60);
         let c = Arc::new(SeqCell::<N>::default());
         let stop = Arc::new(AtomicBool::new(false));
         let start = Arc::new(std::sync::Barrier::new(2));
@@ -232,8 +253,10 @@ mod tests {
                 while !stop.load(Ordering::Relaxed) {
                     c.write(&frame::<N>(n));
                     n += 1;
-                    if n.is_multiple_of(256) {
-                        std::thread::yield_now();
+                    if n.is_multiple_of(BURST) {
+                        for _ in 0..GAP_READS {
+                            std::hint::black_box(c.try_read());
+                        }
                     }
                 }
                 n
@@ -241,34 +264,54 @@ mod tests {
         };
         // 쓰기가 실제로 겹치게: 읽기 시작 전에 쓰는 쪽이 돌고 있어야 한다(#141 리뷰 L-1).
         start.wait();
+        let deadline = Instant::now() + LIMIT;
         while c.try_read().is_none_or(|w| w[0] < 64) {
+            assert!(Instant::now() < deadline, "쓰는 쪽이 도는 동안 try_read가 한 번도 성공하지 못했다(시작 대기)");
             std::thread::yield_now();
         }
-        let readers: Vec<_> = (0..4u32)
-            .map(|k| {
-                let c = c.clone();
-                std::thread::spawn(move || {
-                    let (mut full, mut ok) = (0u64, 0u64);
-                    for _ in 0..20_000 {
-                        if k.is_multiple_of(2) {
-                            assert_whole(&c.read());
-                            full += 1;
-                        } else if let Some(w) = c.try_read() {
+        let spawn_try = || {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                let (mut tries, mut ok, mut busy) = (0u64, 0u64, 0u64);
+                while tries < MIN_TRIES || ok < MIN_OK || busy < MIN_BUSY {
+                    // 시각은 가끔만 본다(시계 호출이 읽기 사이 간격을 바꾸지 않게).
+                    if tries % 4096 == 4095 && Instant::now() >= deadline {
+                        break;
+                    }
+                    tries += 1;
+                    match c.try_read() {
+                        Some(w) => {
                             assert_whole(&w);
                             ok += 1;
                         }
+                        None => busy += 1,
                     }
-                    (full, ok)
-                })
+                }
+                (tries, ok, busy)
             })
-            .collect();
-        let (full, ok) = readers.into_iter().map(|r| r.join().unwrap()).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        };
+        let spawn_read = || {
+            let c = c.clone();
+            std::thread::spawn(move || {
+                for _ in 0..20_000 {
+                    assert_whole(&c.read());
+                }
+            })
+        };
+        // 스레드 순서는 예전과 같다(read, try_read, read, try_read).
+        let (r0, t0, r1, t1) = (spawn_read(), spawn_try(), spawn_read(), spawn_try());
+        // `try_read` 가지를 먼저 거둔다: 읽기가 전혀 안 되는 회귀에서는 `read()`가 끝나지 않으므로, 그것을 기다리기 전에
+        // 진행성 단언이 실패해야 한다(#141 리뷰 L-1의 "값을 실제로 검사했다"도 이 하한이 맡는다).
+        for (k, t) in [t0, t1].into_iter().enumerate() {
+            let (tries, ok, busy) = t.join().unwrap();
+            assert!(ok >= MIN_OK, "try_read가 {LIMIT:?} 안에 {MIN_OK}번 성공하지 못했다(가지 {k}: 시도 {tries}, 성공 {ok}, 발행 중 {busy})");
+            assert!(busy >= MIN_BUSY, "읽기가 쓰기와 겹치지 않았다 — 폭주가 아니다(가지 {k}: 시도 {tries}, 성공 {ok}, 발행 중 {busy})");
+        }
+        // `read()`는 언제나 한 벌을 돌려준다(검사는 스레드 안에서 하고, 실패하면 join이 panic을 옮긴다).
+        r0.join().unwrap();
+        r1.join().unwrap();
         stop.store(true, Ordering::Relaxed);
         assert!(writer.join().unwrap() > 64, "쓰기가 돌지 않았다");
-        assert_eq!(full, 40_000, "read()는 언제나 한 벌을 돌려준다");
-        // `try_read` 가지도 실제로 값을 검사했다(#141 리뷰 L-1). 성공 **비율**은 스케줄러에 달려 하한만 본다: 4만 번 가운데
-        // 한 번도 성공하지 못하려면 매번 발행과 겹쳐야 한다(쓰는 쪽은 256회마다 양보한다).
-        assert!(ok > 0, "try_read가 한 번도 성공하지 못했다");
         assert_whole(&c.try_read().expect("쓰기가 없을 때 try_read는 성공한다"));
     }
 

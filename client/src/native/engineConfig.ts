@@ -9,8 +9,10 @@ import {
   type DriverKind,
   type EngineConfig,
   type FrameMs,
+  type PCoreMode,
   type PeerStats,
   type ResampleQuality,
+  type ThreadPolicyConfig,
 } from './engineApi'
 
 export const DRIVER_OPTIONS: { id: DriverKind; label: string; desc: string }[] = [
@@ -34,6 +36,12 @@ export function isValidOpusBitrate(v: unknown): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= OPUS_BITRATE_MIN && v <= OPUS_BITRATE_MAX
 }
 
+/**
+ * 엔진 스레드 정책 기본값(P1-21 3단계, 사용자 결정 2026-11-21): 절전 끄기(HighQoS) 켬, P 코어 묶기 끔.
+ * 엔진(`ThreadPolicyConfig::default()`)과 같은 값이다. 저장값이 없는 PC·옛 설정이 이 값으로 시작한다.
+ */
+export const DEFAULT_THREAD_POLICY: Readonly<ThreadPolicyConfig> = Object.freeze({ highQos: true, preferPCores: false })
+
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   inputDriver: 'wasapiShared',
   outputDriver: 'wasapiShared',
@@ -48,6 +56,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
   jitterMaxMs: 80,
   jitterProfile: JITTER_PROFILE_DEFAULT,
   resampleQuality: 'auto',
+  threadPolicy: { ...DEFAULT_THREAD_POLICY },
 }
 
 /** 리샘플러 품질 선택지(P2-17e, 오디오 설정 "리샘플러 품질") */
@@ -245,6 +254,83 @@ export function toStored(config: EngineConfig): StoredAudioSettings {
   return { version: STORED_SETTINGS_VERSION, engine: config }
 }
 
+/**
+ * 이 PC에만 저장하는 장치 쪽 필드(P2-27 후속, 사용자 결정 2026-11-21): 드라이버·장치 id·입력 채널·버퍼 크기.
+ * 장치 id는 PC마다 다르고(다른 PC에 로그인하면 없는 장치가 따라왔다), 버퍼는 그 장치·드라이버가 감당하는 값이라
+ * 계정으로 따라가면 안 된다. 코덱·프레임·모노/스테레오(`channels`)·지터·리샘플러는 계정에 남는다 —
+ * `channels`는 코덱·프레임과 함께 패킷 크기(1200B 상한)와 프리셋을 정하는 전송 형식이다. 입력 채널(`inputChannels`)은
+ * 개수를 계정의 `channels`에 맞춰 합친다(`withDeviceSettings`).
+ */
+export const DEVICE_LOCAL_KEYS = ['inputDriver', 'outputDriver', 'inputDevice', 'outputDevice', 'inputChannels', 'bufferSize'] as const
+export type DeviceLocalKey = (typeof DEVICE_LOCAL_KEYS)[number]
+export type DeviceSettings = Pick<EngineConfig, DeviceLocalKey>
+
+/** 계정(profiles.audio_settings)과 그 로컬 캐시에 쓰는 설정: 장치 쪽 필드와 스레드 정책을 뺀 나머지 */
+export type AccountEngineSettings = Omit<EngineConfig, DeviceLocalKey | 'threadPolicy'>
+export interface AccountStoredAudioSettings {
+  version: typeof STORED_SETTINGS_VERSION
+  engine: AccountEngineSettings
+}
+
+/**
+ * 계정(profiles.audio_settings)과 그 로컬 캐시에 쓰는 형식: 기기별 필드(장치 쪽 필드, `threadPolicy`)를 뺀다.
+ * 스레드 정책은 이 PC의 CPU 구성에 따른 값이라 다른 PC로 따라가면 안 되고(#245 재리뷰 L4),
+ * 장치 쪽 필드도 같다(P2-27 후속). 둘 다 기기 로컬(`features/settings/deviceLocalSettings`)에만 저장한다.
+ * 서버에 옛 값이 있어도 읽을 때 쓰지 않고(이 PC에 저장값이 없을 때 한 번 초기값으로 가져오는 것만 예외 —
+ * `accountDeviceSettings`), 다음 저장 때 이 형식으로 덮어써 사라진다. 읽는 쪽(`parseStoredSettings`)은 빠진 필드를
+ * 기본값으로 채우므로 옛 앱도 이 형식을 읽는다.
+ */
+export function toAccountStored(config: EngineConfig): AccountStoredAudioSettings {
+  const engine: Partial<EngineConfig> = { ...config }
+  delete engine.threadPolicy
+  for (const k of DEVICE_LOCAL_KEYS) delete engine[k]
+  return { version: STORED_SETTINGS_VERSION, engine: engine as AccountEngineSettings }
+}
+
+/** 설정에서 장치 쪽 필드만 뽑는다(사본) */
+export function pickDeviceSettings(config: EngineConfig): DeviceSettings {
+  return {
+    inputDriver: config.inputDriver,
+    outputDriver: config.outputDriver,
+    inputDevice: config.inputDevice,
+    outputDevice: config.outputDevice,
+    inputChannels: [...config.inputChannels] as EngineConfig['inputChannels'],
+    bufferSize: config.bufferSize,
+  }
+}
+
+/**
+ * 계정에서 읽은 설정에 이 PC의 장치 쪽 값을 덮는다. 계정 쪽 장치 필드는 쓰지 않는다.
+ * 입력 채널 개수는 계정의 `channels`(모노/스테레오)에 맞춘다 — 다른 PC에서 스테레오로 바꿨으면 둘째 채널을 채운다.
+ */
+export function withDeviceSettings(config: EngineConfig, device: DeviceSettings): EngineConfig {
+  return {
+    ...config,
+    ...device,
+    inputChannels: normalizeInputChannels(config.channels, device.inputChannels),
+  }
+}
+
+/**
+ * 계정 값에 장치 쪽 필드가 들어 있으면(이 변경 전에 저장된 계정) 그 값을, 없으면 null.
+ * 이 PC에 장치 저장값이 아직 없을 때 한 번만 초기값으로 쓴다(이행) — 그 장치가 이 PC에 없으면 시작 때 폴백(P2-27)이 처리한다.
+ */
+export function accountDeviceSettings(raw: unknown): DeviceSettings | null {
+  if (!isRecord(raw)) return null
+  const parsed = parseStoredSettings(raw)
+  if (parsed.migrated) return pickDeviceSettings(parsed.config)
+  const engine = raw.engine
+  if (raw.version === STORED_SETTINGS_VERSION && isRecord(engine) && DEVICE_LOCAL_KEYS.some((k) => k in engine)) {
+    return pickDeviceSettings(parsed.config)
+  }
+  return null
+}
+
+/** 계정에서 읽은 설정에 이 기기의 값(스레드 정책)을 덮는다. 계정 쪽 `threadPolicy`는 쓰지 않는다 */
+export function withDeviceLocal(config: EngineConfig, threadPolicy: ThreadPolicyConfig): EngineConfig {
+  return { ...config, threadPolicy: normalizeThreadPolicy(threadPolicy) }
+}
+
 const DRIVERS: DriverKind[] = ['asio', 'wasapiShared', 'wasapiExclusive']
 const LEGACY_DRIVER_MAP: Record<string, DriverKind> = {
   Asio: 'asio',
@@ -302,10 +388,46 @@ function sanitizeEngineConfig(raw: Record<string, unknown>): EngineConfig {
     jitterProfile: clampJitterProfile(raw.jitterProfile),
     // 옛 설정(필드 없음)·모르는 값은 auto(P2-17e)
     resampleQuality: RESAMPLE_QUALITIES.includes(raw.resampleQuality as ResampleQuality) ? (raw.resampleQuality as ResampleQuality) : 'auto',
+    // 옛 설정(필드 없음)·이상한 값은 기본값(HighQoS 켬·P 코어 정책 끔 — P1-21 3단계 ①, `normalizeThreadPolicy`)
+    threadPolicy: normalizeThreadPolicy(raw.threadPolicy),
   }
   if (isValidOpusBitrate(raw.opusBitrate)) config.opusBitrate = raw.opusBitrate
   if (typeof raw.udpPort === 'number' && raw.udpPort > 0 && raw.udpPort < 65536) config.udpPort = raw.udpPort
   return fixPayload(config)
+}
+
+/**
+ * 저장된 `threadPolicy`를 정규화한다. 없거나 이상한 값은 기본값(`DEFAULT_THREAD_POLICY`)이다:
+ * `highQos`는 기본 켬이라 **정확히 `false`일 때만 끔**(사용자가 명시적으로 끈 값). P 코어 정책은 `pCoreMode`가 아는 값이면
+ * 그것, 아니면 옛 필드 `preferPCores`(정확히 `true`일 때만 고정) — 결과는 `withPCoreMode`의 모양(끔·고정은 옛 모양 그대로라
+ * 2단계 저장값과 같고, 선호·조건부 고정만 `pCoreMode`가 붙는다).
+ */
+export function normalizeThreadPolicy(raw: unknown): ThreadPolicyConfig {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+  const mode: PCoreMode = isPCoreMode(r.pCoreMode) ? r.pCoreMode : r.preferPCores === true ? 'pin' : 'off'
+  return withPCoreMode({ highQos: typeof r.highQos === 'boolean' ? r.highQos : DEFAULT_THREAD_POLICY.highQos, preferPCores: false }, mode)
+}
+
+/** P 코어 정책 값(선택지의 라벨·설명은 설정 화면 쪽 `P_CORE_MODE_OPTIONS` — features/settings/audioSettingsView. 첫 화면 묶음에 문구를 싣지 않는다) */
+const P_CORE_MODES: readonly PCoreMode[] = ['off', 'pin', 'prefer', 'adaptive']
+
+function isPCoreMode(v: unknown): v is PCoreMode {
+  return typeof v === 'string' && (P_CORE_MODES as readonly string[]).includes(v)
+}
+
+/** 설정의 P 코어 정책: `pCoreMode`가 있으면 그것, 없으면 옛 필드 `preferPCores`(true = 고정). 엔진의 `p_core_mode()`와 같다 */
+export function pCoreModeOf(policy: ThreadPolicyConfig | undefined): PCoreMode {
+  if (isPCoreMode(policy?.pCoreMode)) return policy.pCoreMode
+  return policy?.preferPCores === true ? 'pin' : 'off'
+}
+
+/**
+ * P 코어 정책을 바꾼 설정. 끔·고정은 옛 모양(`preferPCores`만 — `pCoreMode` 없음)으로 적어 2단계 저장값과 같고,
+ * 선호·조건부 고정은 `pCoreMode`를 적고 `preferPCores`를 false로 둔다.
+ */
+export function withPCoreMode(policy: ThreadPolicyConfig, mode: PCoreMode): ThreadPolicyConfig {
+  const base = { highQos: policy.highQos, preferPCores: mode === 'pin' }
+  return mode === 'prefer' || mode === 'adaptive' ? { ...base, pCoreMode: mode } : base
 }
 
 function clampJitter(v: number): number {

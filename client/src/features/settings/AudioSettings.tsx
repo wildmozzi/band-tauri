@@ -4,7 +4,7 @@
  */
 import { useEffect } from 'react'
 import { useAudioSettings } from './AudioSettingsContext'
-import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs, type ResampleQuality } from '../../native/engineApi'
+import { MAX_PAYLOAD_BYTES, type CodecKind, type DriverKind, type FrameMs, type PCoreMode, type PeerStats, type ResampleQuality } from '../../native/engineApi'
 import {
   BUFFER_OPTIONS,
   DRIVER_OPTIONS,
@@ -18,16 +18,20 @@ import {
   estimatePayloadBytes,
   formatPeerJitter,
   jitterProfileLabel,
+  pCoreModeOf,
   resolveResampleQuality,
+  withPCoreMode,
   type EnginePresetId,
+  DEFAULT_THREAD_POLICY,
 } from '../../native/engineConfig'
 import { driverChoices, exclusiveModeHint } from './driverSupport'
+import { deviceNameFromId } from '../../native/deviceFallback'
 import { LatencyMeasurePanel } from './LatencyMeasurePanel'
 import { DesktopDownloadButton } from '../../shared/ui/DesktopDownloadButton'
 import { Modal } from '../../shared/ui'
 import { DiagnosticsExport } from './DiagnosticsExport'
 import { DevServerSettingsSection } from './DevServerSettings'
-import { useLivePeerStats } from './hooks/useLivePeerStats'
+import { useLiveEngineStats } from './hooks/useLivePeerStats'
 import { useDebouncedJitterProfile } from './hooks/useDebouncedJitterProfile'
 import {
   bufferFrameHint,
@@ -41,7 +45,11 @@ import {
   parseJitterMs,
   payloadAllowed,
   peerLabel,
+  isWindowsUserAgent,
   resampleQualityHint,
+  threadPolicyStatus,
+  P_CORE_MODE_OPTIONS,
+  THREAD_POLICY_OPTIONS,
   withLeftInputChannel,
   withRightInputChannel,
   type PayloadPatch,
@@ -53,6 +61,10 @@ interface AudioSettingsProps {
   onClose?: () => void
   isModal?: boolean
 }
+
+const NO_PEERS: PeerStats[] = []
+/** 이 PC가 Windows인지(스레드 정책 결과 안내용). 앱 수명 동안 바뀌지 않는다 */
+const IS_WINDOWS = isWindowsUserAgent(typeof navigator === 'undefined' ? undefined : navigator.userAgent)
 
 function LevelMeter({ value, kind }: { value: number; kind: 'input' | 'output' }) {
   const pct = levelPercent(value)
@@ -80,7 +92,9 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     isSaving,
     migrated,
     supportedDrivers,
-    driverNotice,
+    fallbackNotice,
+    missingDevices,
+    engineThreadPolicy,
     isTesting,
     testStats,
     testError,
@@ -89,7 +103,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
     engineInUse,
   } = useAudioSettings()
 
-  const livePeers = useLivePeerStats(isNativeMode && engineInUse)
+  const liveStats = useLiveEngineStats(isNativeMode && engineInUse)
+  const livePeers = liveStats?.peers ?? NO_PEERS
   // 슬라이더 드래그 중에는 표시만 바꾸고, 엔진 적용(IPC)은 마지막 값으로 200ms 뒤 한 번만(PR #20 M3).
   const scheduleProfileApply = useDebouncedJitterProfile()
 
@@ -197,7 +212,8 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
         </div>
       )}
 
-      {driverNotice && <div className="settings-notice" data-testid="driver-notice">{driverNotice}</div>}
+      {/* 저장된 드라이버·장치를 이 PC에서 쓸 수 없음 → 이번 실행만 기본 장치(P2-27). 저장값은 그대로 */}
+      {fallbackNotice && <div className="settings-notice" data-testid="driver-notice" role="status">{fallbackNotice}</div>}
 
       {/* 프리셋 */}
       <section className="settings-section">
@@ -238,7 +254,10 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
         </div>
       )}
 
-      {/* 드라이버 + 장치 */}
+      {/* 드라이버 + 장치. 장치 쪽 값은 PC마다 달라 이 PC에만 저장한다(P2-27 후속) — 고급(스레드 정책) 표기와 같은 말로 */}
+      <p className="setting-hint" data-testid="device-local-note">
+        드라이버·장치·입력 채널·장치 버퍼는 PC마다 달라 계정으로 다른 PC에 따라가지 않고 이 PC에만 저장됩니다(코덱·프레임·모노/스테레오·지터 버퍼는 계정에 저장). 그래서 프리셋 표시는 PC마다 다를 수 있습니다.
+      </p>
       <section className="settings-section">
         <h3>입력</h3>
         <div className="settings-row">
@@ -262,6 +281,9 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             onChange={(e) => updateConfig({ inputDevice: e.target.value || null })}
           >
             <option value="">기본 장치</option>
+            {missingDevices.input && (
+              <option value={missingDevices.input}>(이 PC에 없음) {deviceNameFromId(missingDevices.input)} — 기본 장치 사용</option>
+            )}
             {inputDevices.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.name} ({d.channels}ch){d.isDefault ? ' · 기본' : ''}
@@ -293,6 +315,9 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
             onChange={(e) => updateConfig({ outputDevice: e.target.value || null })}
           >
             <option value="">기본 장치</option>
+            {missingDevices.output && (
+              <option value={missingDevices.output}>(이 PC에 없음) {deviceNameFromId(missingDevices.output)} — 기본 장치 사용</option>
+            )}
             {outputDevices.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.name}{d.isDefault ? ' · 기본' : ''}
@@ -475,6 +500,74 @@ export function AudioSettings({ onClose, isModal = false }: AudioSettingsProps) 
           <span>ms</span>
         </div>
         <p className="setting-hint">네트워크가 불안정하면 최대값을 올리고, 지연을 줄이려면 내리세요.</p>
+      </section>
+
+      {/* 고급: 엔진 스레드 코어 배치 정책(P1-21 — 절전 끄기는 기본 켬 토글, P 코어 정책은 실험적·기본 끔인 선택 상자) */}
+      <section className="settings-section" data-testid="thread-policy-section">
+        <h3>고급</h3>
+        <p className="setting-hint">
+          Windows 전용입니다. 바꾼 뒤 연주(또는 테스트 모니터)를 다시 시작해야 적용됩니다.
+          CPU 구성에 따른 설정이라 계정으로 다른 PC에 따라가지 않고 이 PC에만 저장됩니다.
+        </p>
+        {THREAD_POLICY_OPTIONS.map((o) => {
+          const policy = config.threadPolicy ?? DEFAULT_THREAD_POLICY
+          const id = `thread-policy-${o.key}`
+          // 엔진이 돌고 있으면 그 엔진의 결과(테스트 모니터 또는 합주), 아니면 null
+          const live = isTesting || engineInUse ? { stats: (isTesting ? testStats : liveStats) ?? null } : null
+          // P 코어 정책은 선택 상자(끔·고정·선호·조건부 고정), 절전 끄기는 토글
+          const isMode = o.key === 'preferPCores'
+          const mode = pCoreModeOf(policy)
+          const startedMode = live && engineThreadPolicy ? pCoreModeOf(engineThreadPolicy) : null
+          const enabled = isMode ? mode !== 'off' : policy.highQos
+          // 돌고 있는 엔진을 시작할 때 넘긴 값 — 환경변수 BAND_THREAD_POLICY가 덮었는지 판단(#249 리뷰 Low-1)
+          const startedWith = live && engineThreadPolicy ? (isMode ? startedMode !== 'off' : engineThreadPolicy.highQos) : null
+          const status = threadPolicyStatus(o.key, enabled, IS_WINDOWS, live, startedWith, isMode ? { want: mode, started: startedMode } : null)
+          return (
+            <div key={o.key}>
+              <div className="settings-row">
+                <label htmlFor={id}>
+                  {o.label}
+                  {o.experimental && <span className="experimental-badge">실험적</span>}
+                </label>
+                {isMode ? (
+                  <select
+                    id={id}
+                    value={mode}
+                    aria-describedby={`${id}-status ${id}-mode ${id}-effect ${id}-caution`}
+                    onChange={(e) => updateConfig({ threadPolicy: withPCoreMode(policy, e.target.value as PCoreMode) })}
+                  >
+                    {P_CORE_MODE_OPTIONS.map((m) => (
+                      <option key={m.id} value={m.id}>{m.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    id={id}
+                    type="checkbox"
+                    checked={policy.highQos}
+                    aria-describedby={`${id}-status ${id}-effect ${id}-caution`}
+                    onChange={(e) => updateConfig({ threadPolicy: { ...policy, highQos: e.target.checked } })}
+                  />
+                )}
+              </div>
+              <p
+                id={`${id}-status`}
+                className={`setting-hint thread-policy-status ${status?.tone ?? ''}`}
+                data-testid={`${id}-status`}
+                aria-live="polite"
+              >
+                {status?.text ?? ''}
+              </p>
+              {isMode && (
+                <p id={`${id}-mode`} className="setting-hint" data-testid={`${id}-mode`}>
+                  {P_CORE_MODE_OPTIONS.find((m) => m.id === mode)?.desc}
+                </p>
+              )}
+              <p id={`${id}-effect`} className="setting-hint">{o.effect}</p>
+              <p id={`${id}-caution`} className="setting-hint">{o.caution}</p>
+            </div>
+          )
+        })}
       </section>
 
       {/* 테스트 모니터 */}

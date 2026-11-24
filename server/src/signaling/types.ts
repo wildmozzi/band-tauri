@@ -144,6 +144,8 @@ export interface WsOptions {
   env?: Env
   /** 릴레이 제어 패킷(RelayRevoke) 송신 (테스트 주입용, 기본: RELAY_ADDR로 UDP — services/relayRevoke.ts) */
   relaySender?: (packet: Buffer) => void
+  /** rooms.current_participants 갱신 여부 (기본 true). 주 서버가 아니면 false — index.ts가 shouldRunMaintenance로 정한다 */
+  writeParticipantCounts?: boolean
 }
 
 /**

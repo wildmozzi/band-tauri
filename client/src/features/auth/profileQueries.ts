@@ -68,9 +68,19 @@ export const profileApi = {
     if (error) throw error
   },
 
-  /** 회원가입 직후 profiles 행 생성. 오류는 던지지 않고 돌려준다(가입은 완료로 처리 — 기존 동작) */
+  /**
+   * 회원가입 직후 profiles 행 생성. 오류는 던지지 않고 돌려준다(가입은 완료로 처리 — 기존 동작).
+   * 운영 DB는 auth.users 트리거(handle_new_user, 대시보드 관리 — 리포 마이그레이션 밖)가 행을 먼저 만든다.
+   * 그래서 이미 있으면 아무것도 하지 않는다(INSERT … ON CONFLICT (id) DO NOTHING — 예전 insert는 409 + 콘솔 오류).
+   * 트리거가 없는 환경(로컬 DB)에서는 이 요청이 행을 만든다. INSERT 정책(profiles_insert_own)만 쓰고
+   * UPDATE는 하지 않는다. 충돌 대상 id는 011이 SELECT를 준 공개 컬럼이다.
+   * 그래도 중복(23505)이 오면(예: 충돌 대상 밖의 고유 제약) 이미 있는 것으로 보고 정상 처리한다.
+   */
   async createProfile(row: TablesInsert<'profiles'>): Promise<unknown | null> {
-    const { error } = await requireClient().from('profiles').insert(row)
+    const { error } = await requireClient()
+      .from('profiles')
+      .upsert(row, { onConflict: 'id', ignoreDuplicates: true })
+    if (error && (error as { code?: unknown }).code === '23505') return null
     return error ?? null
   },
 
