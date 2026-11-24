@@ -25,12 +25,13 @@ export const EchoMeasure = echoMeasure.component('EchoMeasure')
 
 /**
  * 진단 내보내기 버튼(합주실 믹서 헤더)도 데스크톱 앱에서만 보인다 — 같은 방식으로 웹 첫 묶음에서 뺀다. 웹에서는 지연 묶음을 받지
- * 않도록 여기서 먼저 걸러 null을 그린다(DiagnosticsExport 자체도 웹이면 null). 설정 화면(AudioSettings)은 직접 import한다.
+ * 않도록 여기서 먼저 걸러 null을 그린다(DiagnosticsExport 자체도 웹이면 null). `available`을 주면 그 값을 따른다(시험에서 강제 표시 등).
+ * 설정 화면(AudioSettings)은 직접 import한다.
  */
 const diagnosticsExport = preloadableModule(() => import('./DiagnosticsExport'))
 const LazyDiagnosticsExport = diagnosticsExport.component('DiagnosticsExport')
 export function DiagnosticsExport(props: DiagnosticsExportProps) {
-  return isNativeApp() ? createElement(LazyDiagnosticsExport, props) : null
+  return (props.available ?? isNativeApp()) ? createElement(LazyDiagnosticsExport, props) : null
 }
 
 export async function preloadSettingsPerformerUi(): Promise<void> {

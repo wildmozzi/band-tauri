@@ -4,7 +4,19 @@ import { lazy, Suspense } from 'react'
 import { isUpdaterAvailable } from '../../native/updaterGate'
 import './UpdateNotice.css'
 
-const LazyUpdateNotice = lazy(() => import('./UpdateNotice').then(m => ({ default: m.UpdateNotice })))
+/**
+ * 배너는 조용한 기능이다 — 묶음을 불러오지 못하면(설치본 손상, 오래된 청크 해시, 플러그인 모듈 평가 예외) 아무것도 그리지 않는다.
+ * React.lazy 거절은 렌더 중 에러가 되어 루트까지 내려가 앱 전체가 흰 화면이 되므로 여기서 받아 낸다(#266 리뷰 M-1).
+ */
+const LazyUpdateNotice = lazy(() =>
+  import('./UpdateNotice').then(
+    m => ({ default: m.UpdateNotice }),
+    (err: unknown) => {
+      console.error('[UpdateNotice] 불러오기 실패:', err)
+      return { default: () => null }
+    },
+  ),
+)
 
 /** 앱 루트에 한 번 마운트. 데스크톱이면 배너 묶음을 받아 시작 시 1회 확인한다(UpdateNotice.tsx). */
 export function UpdateNotice() {
