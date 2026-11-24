@@ -217,4 +217,4 @@ client/src/
 | 큰 컴포넌트 | `MusicRoom.tsx`(760줄), `ScoreDisplay.tsx`(600줄), `AudioSettings.tsx`(520줄), `Community.tsx`(470줄), `Profile.tsx`(430줄), `CreateRoom.tsx`(400줄) — 화면 로직을 훅·순수 함수로 |
 | 쓰이지 않는 코드 | **완료(P3-2 ③-1)** — `features/profile/ProfileCard.tsx`(+css), `shared/ui/icon/*.png` 삭제 |
 | 공유 타입 중복 | **완료(P3-2 ③-1)** — `Room`·`RoomStatus`는 `rooms/roomModel.ts` 한 곳(`roomFilters.ts`는 import), `PaidPlan`은 `payment/planFeatures.ts` 한 곳(`paymentFlow.ts`는 import) |
-| 업데이트 알림 | **완료(P3-2 ③-1)** — `settings/UpdateNotice.tsx`(앱 루트 배너)·`UpdateSettingsSection.tsx`(설정 화면)로 분리, 공용 문구 `updateStatusText.ts`·버튼 `UpdateInstallButton.tsx` |
+| 업데이트 알림 | **완료(P3-2 ③-1)** — `settings/UpdateNotice.tsx`(앱 루트 배너)·`UpdateSettingsSection.tsx`(설정 화면)로 분리, 공용 문구 `updateStatusText.ts`·버튼 `UpdateInstallButton.tsx`. 배너와 업데이트 본체(`native/updater.ts`)는 데스크톱에서만 지연 로드(`UpdateNoticeGate.tsx`, 방 참여 여부는 `native/updaterGate.ts`가 보관) |

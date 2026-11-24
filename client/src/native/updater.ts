@@ -9,11 +9,14 @@
  *   받은 패키지는 그대로 두고 보류한다(TOCTOU 방지, PR #4 리뷰 M1).
  *
  * 플러그인 모듈은 import만으로 Tauri 전역을 건드리지 않으며, 모든 호출은 isNativeApp() 가드 뒤에 있다.
+ * 이 모듈은 첫 화면 JS에 싣지 않는다 — 데스크톱에서만 UpdateNotice·설정 화면 지연 청크가 끌어온다. 첫 화면용 입구
+ * (isUpdaterAvailable, 방 참여 여부)는 native/updaterGate.ts.
  */
 import { useSyncExternalStore } from 'react'
 import { check } from '@tauri-apps/plugin-updater'
 import { relaunch } from '@tauri-apps/plugin-process'
-import { engineErrorMessage, engineStats, isNativeApp } from './engineApi'
+import { engineErrorMessage, engineStats } from './engineApi'
+import { bindUpdaterInRoom } from './updaterGate'
 
 export type UpdateStatus =
   | { kind: 'idle' }
@@ -189,11 +192,10 @@ const tauriDeps: UpdaterDeps = {
 }
 
 export const appUpdater: Updater = createUpdater(tauriDeps)
+// 로드 전에 RoomProvider가 알린 방 참여 여부를 이어 받고, 이후 변경도 받는다(updaterGate)
+bindUpdaterInRoom((inRoom) => appUpdater.setInRoom(inRoom))
 
-/** 데스크톱 앱에서만 업데이트가 의미 있다 (웹 관람자는 항상 최신) */
-export function isUpdaterAvailable(): boolean {
-  return isNativeApp()
-}
+export { isUpdaterAvailable } from './updaterGate'
 
 export function useUpdateStatus(): UpdateStatus {
   return useSyncExternalStore(appUpdater.subscribe, appUpdater.getStatus, appUpdater.getStatus)

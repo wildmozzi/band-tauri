@@ -2,7 +2,8 @@
  * 데스크톱 자동 업데이트 UI (P2-1).
  * - UpdateNotice(이 파일): 앱 시작 시 조용히 확인하고, 새 버전이 있으면 하단 배너로 알린다. 앱 루트용.
  * - UpdateSettingsSection(UpdateSettingsSection.tsx): 설정 화면의 "업데이트 확인" 버튼과 상태.
- * 로직과 연주 중 보류 규칙은 native/updater.ts. 합주실 입장 여부는 RoomProvider가 appUpdater.setInRoom으로 알린다.
+ * 로직과 연주 중 보류 규칙은 native/updater.ts. 합주실 입장 여부는 RoomProvider가 setUpdaterInRoom(native/updaterGate)으로 알린다.
+ * 이 파일은 지연 청크다 — 앱 루트는 UpdateNoticeGate.tsx가 데스크톱에서만 불러온다.
  */
 import { useEffect } from 'react'
 import { appUpdater, isUpdaterAvailable, useUpdateStatus } from '../../native/updater'

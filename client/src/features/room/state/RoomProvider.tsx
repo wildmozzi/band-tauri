@@ -33,7 +33,7 @@ import {
   engineSetMonitor,
   isNativeApp,
 } from '../../../native/engineApi'
-import { appUpdater } from '../../../native/updater'
+import { setUpdaterInRoom } from '../../../native/updaterGate'
 import { appendChat, makeChatId } from './chatModel'
 import { initialPerformRequestState, performRequestReducer, rejectReasonPayload, type PerformRequestAction } from './performRequestState'
 import { RoomRuntimeContext, type RoomActions, type RoomRuntime } from './roomHooks'
@@ -254,9 +254,9 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     mixSource.invalidate()
   }, [running, stopRecording, mixSource])
 
-  // 방에 있는 동안(엔진 시작 전 대기 포함)은 앱 업데이트 설치를 보류한다 (native/updater)
+  // 방에 있는 동안(엔진 시작 전 대기 포함)은 앱 업데이트 설치를 보류한다 (native/updaterGate → updater)
   useEffect(() => {
-    appUpdater.setInRoom(view.currentRoomId !== null)
+    setUpdaterInRoom(view.currentRoomId !== null)
   }, [view.currentRoomId])
 
   // 명령과 부수효과가 쓰는 최신 의존성 (명령 객체는 한 번만 만든다)

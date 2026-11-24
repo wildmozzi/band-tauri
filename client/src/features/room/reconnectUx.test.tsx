@@ -46,7 +46,7 @@ vi.mock('../settings', async (importOriginal) => {
   const settings = { setEngineInUse: () => {}, issues: [], stopTest: async () => {}, config: {} }
   return { ...(await importOriginal<object>()), useAudioSettings: () => settings }
 })
-vi.mock('../../native/updater', () => ({ appUpdater: { setInRoom: () => {} } }))
+vi.mock('../../native/updaterGate', () => ({ setUpdaterInRoom: () => {} }))
 vi.mock('../../native/useNativeSession', () => ({
   useNativeSession: () => ({ session: h.session as unknown as PerformSession }),
 }))
