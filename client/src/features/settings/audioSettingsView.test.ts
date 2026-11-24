@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   bufferFrameHint,
+  P_CORE_MODE_OPTIONS,
   THREAD_POLICY_OPTIONS,
   isWindowsUserAgent,
   threadPolicyStatus,
@@ -287,6 +288,14 @@ describe('스레드 정책 적용 결과 한 줄(#245 재리뷰 L2)', () => {
     expect(isWindowsUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130')).toBe(true)
     expect(isWindowsUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15')).toBe(false)
     expect(isWindowsUserAgent(undefined)).toBeNull()
+  })
+  it('선택지는 넷이고 고정만 "묶어 두기", 선호는 옮겨질 수 있음을 말한다', () => {
+    expect(P_CORE_MODE_OPTIONS.map((o) => o.id)).toEqual(['off', 'pin', 'prefer', 'adaptive'])
+    const by = Object.fromEntries(P_CORE_MODE_OPTIONS.map((o) => [o.id, o]))
+    expect(by.pin.label).toContain('묶어 두기')
+    expect(by.pin.desc).toContain('넘어가지 못해')
+    expect(by.prefer.desc).toContain('옮겨집니다')
+    expect(by.adaptive.desc).toContain('풀었다가')
   })
   it('P 코어 항목 라벨은 방식을 가리지 않는 말("두기") — 방식 이름은 선택지(P_CORE_MODE_OPTIONS)가 말한다', () => {
     expect(THREAD_POLICY_OPTIONS[1].label).toBe('엔진 스레드를 고성능 코어에 두기')

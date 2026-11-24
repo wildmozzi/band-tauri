@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_ENGINE_CONFIG,
   DEFAULT_THREAD_POLICY,
-  P_CORE_MODE_OPTIONS,
   normalizeThreadPolicy,
   pCoreModeOf,
   withPCoreMode,
@@ -322,14 +321,6 @@ describe('엔진 스레드 코어 배치 정책(P1-21 — 절전 끄기 기본 �
 })
 
 describe('P 코어 정책(P1-21 3단계 ② — 끔·고정·선호·조건부 고정)', () => {
-  it('선택지는 넷이고 고정만 "묶어 두기", 선호는 옮겨질 수 있음을 말한다', () => {
-    expect(P_CORE_MODE_OPTIONS.map((o) => o.id)).toEqual(['off', 'pin', 'prefer', 'adaptive'])
-    const by = Object.fromEntries(P_CORE_MODE_OPTIONS.map((o) => [o.id, o]))
-    expect(by.pin.label).toContain('묶어 두기')
-    expect(by.pin.desc).toContain('넘어가지 못해')
-    expect(by.prefer.desc).toContain('옮겨집니다')
-    expect(by.adaptive.desc).toContain('풀었다가')
-  })
   it('끔·고정은 옛 저장 모양 그대로(pCoreMode 없음), 선호·조건부 고정만 pCoreMode를 적는다', () => {
     const base = { highQos: true, preferPCores: false }
     expect(withPCoreMode(base, 'off')).toEqual({ highQos: true, preferPCores: false })

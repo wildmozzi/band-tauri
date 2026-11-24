@@ -90,7 +90,7 @@ function opensAt48k(rates: readonly number[] | undefined): boolean | null {
 /**
  * 엔진 스레드 코어 배치 정책 토글(P1-21, 오디오 설정 "고급"). 설명은 효과 한 줄 + 주의 한 줄.
  * 절전 끄기(HighQoS)는 **기본 켬**(P1-21 3단계, 사용자 결정 2026-11-21) 토글이고, P 코어 정책은 실험 옵션(기본 끔, `experimental`)인
- * 선택 상자다 — 선택지와 방식별 설명은 `P_CORE_MODE_OPTIONS`(native/engineConfig), 여기 `effect`·`caution`은 공통 안내.
+ * 선택 상자다 — 선택지와 방식별 설명은 아래 `P_CORE_MODE_OPTIONS`, 여기 `effect`·`caution`은 공통 안내.
  * 근거·한계: docs/overhaul/core-placement-2026-11-20.md, core-placement-2026-11-24.md
  */
 export const THREAD_POLICY_OPTIONS = [
@@ -112,6 +112,29 @@ export const THREAD_POLICY_OPTIONS = [
       '주의: 방식마다 다릅니다(아래 설명). 고정은 그 코어들이 바쁘면 다른 코어로 넘어가지 못해 끊김이 늘 수 있습니다. 하이브리드 CPU가 아니거나 고성능 코어가 4개 미만이면 어느 방식도 적용되지 않습니다.',
   },
 ] as const
+
+/**
+ * P 코어 정책 선택지(오디오 설정 "고급", 실험 옵션 — P1-21 3단계 ②). 근거·한계: docs/overhaul/core-placement-2026-11-24.md.
+ * 기본값은 교차 측정 뒤에 정한다 — 지금은 끔.
+ */
+export const P_CORE_MODE_OPTIONS: { id: PCoreMode; label: string; desc: string }[] = [
+  { id: 'off', label: '끔 (Windows가 고름)', desc: 'Windows가 엔진 스레드를 둘 코어를 고릅니다(기본).' },
+  {
+    id: 'pin',
+    label: '고정 — 고성능 코어에만 묶어 두기',
+    desc: '엔진 스레드가 고성능(P) 코어에서만 돕니다. 주의: 그 코어들이 다른 오디오 프로그램(DAW 등)으로 바쁘면 다른 코어로 넘어가지 못해 끊김이 늘 수 있습니다.',
+  },
+  {
+    id: 'prefer',
+    label: '선호 — 고성능 코어를 먼저 쓰도록 알리기',
+    desc: 'Windows에 선호 코어를 알려 줄 뿐입니다. 그 코어가 바쁘면 다른 코어로 옮겨집니다(효과가 작을 수 있습니다).',
+  },
+  {
+    id: 'adaptive',
+    label: '조건부 고정 — 묶어 두되 끊김이 늘면 풀기',
+    desc: '고정처럼 묶어 두고, 끊김이나 처리 지연이 늘면 자동으로 풀었다가 안정되면 다시 묶습니다.',
+  },
+]
 
 export type ThreadPolicyOptionKey = (typeof THREAD_POLICY_OPTIONS)[number]['key']
 
