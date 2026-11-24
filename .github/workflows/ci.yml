@@ -71,6 +71,7 @@ jobs:
       loom: ${{ github.event_name != 'pull_request' || steps.f.outputs.loom == 'true' }}
       client: ${{ github.event_name != 'pull_request' || steps.f.outputs.client == 'true' }}
       server: ${{ github.event_name != 'pull_request' || steps.f.outputs.server == 'true' }}
+      server_docker: ${{ github.event_name != 'pull_request' || steps.f.outputs.server_docker == 'true' }}
     steps:
       # PR에서는 paths-filter가 API로 변경 파일 목록을 읽는다(체크아웃 불필요).
       - uses: dorny/paths-filter@v3
@@ -129,6 +130,16 @@ jobs:
               - 'docs/overhaul/relay-token-vectors.json'
               - 'package.json'
               - 'package-lock.json'
+              - '.github/workflows/ci.yml'
+            server_docker:
+              # 운영 이미지(server/Dockerfile, 루트 컨텍스트 — P3-26)에 들어가는 것: 컨텍스트 허용 목록(.dockerignore)이 넣는 파일 + 빌드 설정
+              - 'server/Dockerfile'
+              - 'server/package.json'
+              - 'server/tsconfig.json'
+              - 'server/src/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - '.dockerignore'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -803,3 +814,33 @@ jobs:
         working-directory: server
         env:
           STEM_TEST_REQUIRE_FFMPEG: "1"
+
+  server-docker:
+    # 운영 배포(deploy-server.yml)와 같은 컨텍스트·Dockerfile로 이미지를 빌드만 한다(push 없음, 비밀값 없음).
+    # lock과 server/package.json이 어긋나면 `npm ci`가 실패하고, Dockerfile·.dockerignore가 깨지면 COPY·tsc가 실패한다.
+    # 띄운 컨테이너의 /health까지 본다 — 가짜 env(실제 Supabase 접속 없음, 유지보수 작업 끔).
+    name: Server Docker image (build, push 없음)
+    needs: changes
+    if: needs.changes.outputs.server_docker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 5
+      - name: Docker build (루트 컨텍스트)
+        timeout-minutes: 12
+        run: docker build -f server/Dockerfile -t band-server:ci .
+      - name: Health check (가짜 env)
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          docker run -d --name band-server-ci -p 18080:8080 \
+            -e SUPABASE_URL=http://127.0.0.1:9 -e SUPABASE_SERVICE_KEY=ci-placeholder \
+            -e PUBLIC_API_URL=https://example.invalid -e RUN_MAINTENANCE_JOBS=false \
+            band-server:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/health; then echo; exit 0; fi
+            sleep 1
+          done
+          docker logs band-server-ci
+          exit 1
